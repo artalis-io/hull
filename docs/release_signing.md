@@ -22,7 +22,7 @@ Non-goals (deferred post-v0.1.0):
 |-----------|------|------------|
 | Network MITM on `api.github.com` / `objects.githubusercontent.com` | Substitute binary | HTTPS via embedded Mozilla CA bundle (D4) |
 | Compromised GitHub release publishing flow | Push a malicious binary tagged with a real release | **Release signature**. Attacker needs the offline release private key, not just the GitHub token |
-| Compromised GitHub account / Action secret leak | Sign a malicious binary with the legitimate key | **Out of scope for v0.1.0.** Mitigation = rotate key + invalidate old releases. Tracked in roadmap. |
+| Compromised GitHub account / Action secret leak | Sign a malicious binary with the legitimate key | **Real gap, documented, not yet hardware-hardened.** The key transits CI on every release; org compromise = ability to sign as gethull. Independent detection via Sigstore/Rekor + SLSA provenance + reproducible builds; hardening path (hardware token, multi-party) in [Release-key custody](#release-key-custody-current-posture-and-hardening-path). |
 | Tampered `hull.sha256` manifest | Get a benign-looking checksum that matches a malicious binary | Manifest is what's signed; attacker can't forge it without the key |
 | Tampered `hull.sha256.sig` | Replace signature with one over an attacker manifest | Signature is verified against the embedded `HL_RELEASE_PUBKEY_HEX`, not whatever's on disk |
 
@@ -66,6 +66,36 @@ hull.sha256.sig             ← Ed25519 signature over hull.sha256, hex-encoded 
 The release public key is embedded in the binary as `HL_RELEASE_PUBKEY_HEX`, same pattern as `HL_PLATFORM_PUBKEY_HEX`. Compile-time constant; rotation = new release with new embedded key + deprecate old.
 
 For v0.1.0, a placeholder all-zeros `HL_RELEASE_PUBKEY_HEX` ships in the source. The actual key is generated, the public half is committed (as a `0xNN, 0xNN, ...` literal) before the v0.1.0 tag, and the private half is stored in GitHub Actions secrets + offline backup before the v0.1.0 release.
+
+## Release-key custody: current posture and hardening path
+
+This section is deliberately blunt. It states what the release-signing key custody protects against today and what it does not. Procurement, compliance, and sovereign-deployment reviews ask about this in the first conversation, so it is documented rather than implied. (Roadmap item 0.3.3(a).)
+
+### Current posture
+
+The release private key lives in exactly two places: the GitHub Actions secret `HULL_RELEASE_KEY` and an offline backup. Signing happens **inside the release workflow** on a GitHub-hosted runner: the job reads the secret, runs `hull sign-release hull.sha256 --key`, and deletes the key file. Concretely:
+
+- **Compromise of the gethull GitHub organization equals the ability to sign arbitrary artifacts as gethull.** Anyone who can push to the workflow files, alter the release job, or exfiltrate the `HULL_RELEASE_KEY` secret can produce a `hull.sha256.sig` that verifies against the embedded `HL_RELEASE_PUBKEY_HEX`. The signature proves "signed by whoever holds the key," and today that holder is a CI runner, not a person at a hardware token.
+- **There is no HSM, no hardware token, no offline signing ceremony, and no multi-party signing.** It is a software key that transits a CI runner's memory on every release.
+- **The key is only as protected as the GitHub org's account security**: 2FA on maintainer accounts, secret scoping, branch protection on the workflow files, and GitHub's own encryption of secrets at rest.
+
+### What still holds even if the release key is misused
+
+The Ed25519 release signature is one of three independent layers. An attacker who signs a malicious release with a stolen key still faces:
+
+- **Sigstore + Rekor transparency log.** Every release is `cosign sign-blob`ed into the public append-only Rekor log. A signature not produced by the legitimate workflow's OIDC identity is visible, and backdated or out-of-band signing is detectable by anyone auditing the log.
+- **SLSA build provenance.** Each binary carries a signed attestation tying it to a specific commit + workflow run + runner image; `gh attestation verify` fails for an artifact the real pipeline did not produce.
+- **Reproducible builds on pinned runners.** The binary can be rebuilt from the tagged source (runners version-pinned, roadmap 0.3.1) and byte-compared, so a substituted binary that does not match the source is detectable.
+
+So the release key is a real single point of *trust*, but not a single point of *undetectable* failure: the transparency log + provenance + reproducibility give independent detection paths. That is the honest scorecard.
+
+### Hardening path (a progression, not all-or-nothing)
+
+1. **(a) Document the posture honestly** (this section). Costs nothing and materially improves the story: a reviewer would rather see the gap named than discover it.
+2. **(b) Move signing to a hardware token operated by a person.** The CI job prepares `hull.sha256` and uploads it as an artifact; a maintainer pulls it and signs with a YubiKey (OpenPGP / Ed25519) whose private key never leaves the device, then uploads `hull.sha256.sig`. The key stops transiting CI memory. Effort: days plus operational discipline.
+3. **(c) Multi-party signing for major releases.** A threshold scheme (e.g. two-of-three maintainers) so no single compromised person or machine can sign a release. Effort: weeks plus organizational process.
+
+Each step is independently shippable. (b) is the highest-leverage next move once the project has more than one trusted maintainer.
 
 ## New surfaces
 
