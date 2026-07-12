@@ -17,6 +17,14 @@ inputs:
       digest-pinned base image, which is already deterministic.
     required: false
     default: ""
+  user:
+    description: >
+      Container user. Default (empty) runs as root, fine when the job only
+      builds + uploads. Set to "host" to run as the runner's uid:gid so build
+      outputs are host-owned; required when later HOST steps write into build/
+      (e.g. the release Platform-sig E2E does keygen/sign into build/).
+    required: false
+    default: ""
 
 runs:
   using: composite
@@ -37,8 +45,17 @@ runs:
       # only ever sees the single-quoted 'eval "$HULL_RUN"'.
       env:
         HULL_RUN: ${{ inputs.run }}
+        HULL_USER: ${{ inputs.user }}
       run: |
+        user_args=()
+        if [ "$HULL_USER" = host ]; then
+          # Run as the runner user so build/ outputs are host-owned and later
+          # host steps can read/execute/write them. HOME is set because the
+          # uid has no /etc/passwd entry in the image.
+          user_args=(--user "$(id -u):$(id -g)" -e HOME=/tmp)
+        fi
         docker run --rm \
+          "${user_args[@]}" \
           -e HULL_RUN \
           -v "$PWD":/src -w /src \
           hull-build:pinned \
