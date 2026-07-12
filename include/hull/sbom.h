@@ -55,6 +55,10 @@ typedef struct {
      * components (the Lua / QuickJS script engines) that libhull excludes.
      * Consumed by the `hull sbom --subject=libhull` scope. */
     int in_libhull;
+    /* 1 if this component is only present when HTTP is compiled in (Keel +
+     * mbedTLS). The `pure-compute` build flavor (HL_ENABLE_HTTP=0) drops
+     * these; consumed by the `hull sbom --flavor=<flavor>` scope. */
+    int needs_http;
 } HlSbomEntry;
 
 /* Returns a pointer to the static entry table. Sets *count to its length.
@@ -67,6 +71,14 @@ const HlSbomEntry *hl_sbom_entries(size_t *count);
  * (the script runtimes) are omitted. Pass 0 to restore the default
  * whole-hull scope. Process-global, like hl_sbom_set_binary_path. */
 void hl_sbom_set_scope_libhull(int on);
+
+/* Scope the next hl_sbom_format() to a `hull build --flavor` target: report
+ * the dependency set that flavor's platform lib links. Today only
+ * "pure-compute" changes the set (drops the needs_http components — Keel +
+ * mbedTLS); "full" / "server-only" / "client-only" link the same vendored
+ * set. @p flavor is one of those four names, or NULL/"" to clear the scope.
+ * Returns 0 on success, -1 on an unknown flavor. Process-global. */
+int hl_sbom_set_scope_flavor(const char *flavor);
 
 /* Format the SBOM and write to `fp`. Returns 0 on success, -1 on error.
  * Errors are printed to stderr. */
