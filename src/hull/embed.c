@@ -183,7 +183,12 @@ static int embed_seal_base_dir(HlEmbed *e)
 
 int hl_embed_seal(HlEmbed *e, const char *db_path)
 {
-    if (!e || e->state == HL_EMBED_SEALED) return -1;
+    /* Single-shot: reject once sealed, AND once the arena has been created by
+     * any prior attempt. Without the arena_ready gate, a host that ignores a
+     * failed seal (return -1 is documented fatal) and retries would re-init an
+     * already-initialised arena in embed_seal_base_dir, leaking the first
+     * mmap. Fail closed instead. */
+    if (!e || e->state == HL_EMBED_SEALED || e->arena_ready) return -1;
 
     /* 1. Seal the per-call base_dir first (nothing irreversible yet). */
     if (embed_seal_base_dir(e) != 0) return -1;

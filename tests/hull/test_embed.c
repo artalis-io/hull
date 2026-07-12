@@ -155,6 +155,8 @@ UTEST(embed, sealed_base_dir_is_readonly)
         hl_embed_allow_read(e, ".");
         if (hl_embed_seal(e, NULL) != 0) _exit(42);   /* no kernel sandbox here */
         if (hl_embed_is_sealed(e) != 1) _exit(43);
+        /* Single-shot: a second seal must be rejected (fail closed). */
+        if (hl_embed_seal(e, NULL) != -1) _exit(45);
 
         const char *bd = hl_embed_base_dir(e);
         if (!bd) _exit(44);
