@@ -289,14 +289,18 @@ not implementation cost.
   SHA-pinned actions natively and will PR updates. **Effort:** one
   pass through `.github/workflows/*.yml`.
 
-- [ ] **0.3.7. Cosmo APE in the reproducibility matrix.** The
-  current `Reproducible build` job matrixes Linux + macOS only.
-  Cosmo is built and shipped (`hull-cosmo` is a release asset)
-  but its byte-reproducibility is untested. Either add Cosmo to
-  the matrix or explicitly document that Cosmo repro is out of
-  scope. **Effort:** medium. Cosmo's two-arch link adds
-  complexity; investigate whether `cosmocc` + `apelink` produce
-  deterministic output before committing.
+- [x] **0.3.7. Cosmo APE in the reproducibility matrix. ✅ Done.** The
+  `Reproducible build` job previously matrixed Linux + macOS only; the
+  shipped `hull-cosmo` release asset was untested. Now the
+  `reproducibility-cosmo` job builds `hull-cosmo` on two independent
+  runners (each doing exactly one `platform-cosmo` build, since a second
+  in one job corrupts the loader) and a `reproducibility-cosmo-compare`
+  job byte-compares them. **Result: byte-identical across runners**
+  (13,921,722-byte APE), so `cosmocc` + `apelink` are deterministic and
+  the "Cosmopolitan produces deterministic output" claim in
+  [security.md](security.md) is now CI-gated, not just asserted.
+  All three shipped artifact types (native, macOS, cosmo) are now
+  reproducibility-covered.
 
 - [x] **0.3.8. `hull verify-self` command. ✅ Shipped.** A running hull binary
   can be tampered with on disk. There's no built-in command to
