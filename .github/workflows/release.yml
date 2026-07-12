@@ -318,11 +318,8 @@ jobs:
       - name: Write VERSION file
         run: echo "${GITHUB_REF_NAME#v}" > VERSION
 
-      - name: Install cosmocc
-        run: |
-          COSMOCC_DIR=/opt/cosmo make fetch-cosmocc
-          echo "/opt/cosmo/bin" >> "$GITHUB_PATH"
-
+      # cosmocc is baked into the reproducible container (roadmap 0.3.1); the
+      # build steps below run inside it, so there is no host fetch.
       - name: Download cosmo platform archives
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
         with:
@@ -362,16 +359,22 @@ jobs:
           done
           [ "$fail" = 0 ] || exit 1
 
-      - name: Hardening summary (cosmocc — most ELF flags inapplicable)
-        run: make CC=cosmocc hardening
-
-      - name: Build hull (cosmo APE)
-        # No TRUST_PLATFORM_LIB needed for cosmo: the .a's at
-        # build/libhull_platform.{x86_64,aarch64}-cosmo.a have no
-        # build rule in the Makefile (they're produced by the
-        # .PHONY platform-cosmo target during native development).
-        # Make treats them as leaf inputs — won't rebuild.
-        run: make CC=cosmocc EMBED_PLATFORM=cosmo
+      # Build inside the snapshot-pinned reproducible container (roadmap 0.3.1).
+      # cosmocc is baked in. Hardening summary runs in the same container step so
+      # no host make touches the tree after the build. Default root (not
+      # user: host): the host-side smoke test only executes build/hull, which is
+      # world-executable, and no host step writes into build/ here (the cosmo
+      # Platform-sig E2E is skipped). This matches the proven reproducibility-cosmo
+      # CI job. No TRUST_PLATFORM_LIB needed for cosmo: the .a's at
+      # build/libhull_platform.{x86_64,aarch64}-cosmo.a have no build rule in the
+      # Makefile (produced by the .PHONY platform-cosmo target during native
+      # development), so make treats them as leaf inputs and will not rebuild.
+      - name: Build hull (cosmo APE, reproducible container)
+        uses: ./.github/actions/hull-build-container
+        with:
+          run: |
+            make CC=cosmocc hardening
+            make CC=cosmocc EMBED_PLATFORM=cosmo
 
       - name: Smoke-test version
         run: ./build/hull version
@@ -423,11 +426,13 @@ jobs:
       # Under the fat cosmocc driver, `make libhull` emits build/libhull.a
       # (x86_64) plus its build/.aarch64/libhull.a sibling. Publish them
       # arch-qualified, mirroring libhull_platform.{x86_64,aarch64}-cosmo.a.
-      - name: Build + rename cosmo libhull.a (dual-arch)
-        run: |
-          make libhull CC=cosmocc
-          cp build/libhull.a          libhull.x86_64-cosmo.a
-          cp build/.aarch64/libhull.a libhull.aarch64-cosmo.a
+      - name: Build + rename cosmo libhull.a (dual-arch, reproducible container)
+        uses: ./.github/actions/hull-build-container
+        with:
+          run: |
+            make libhull CC=cosmocc
+            cp build/libhull.a          libhull.x86_64-cosmo.a
+            cp build/.aarch64/libhull.a libhull.aarch64-cosmo.a
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
         with:
@@ -495,27 +500,42 @@ jobs:
           fi
           echo "✓ ${{ matrix.name }} .a SHA matches signed manifest: $actual"
 
-      - name: Build hull with embedded platform
-        # TRUST_PLATFORM_LIB=1 short-circuits $(PLATFORM_LIB)'s
-        # rebuild rule in the Makefile — make treats the downloaded
-        # .a as a pristine leaf input, never re-archives it from
-        # source. The downloaded .a's bytes are the ones
-        # sign-platform-manifest hashed, and they get embedded as-is.
-        # Without this, make sees PLATFORM_OBJS / CANARY_OBJ as
-        # newer than the .a and rebuilds it from scratch; the
-        # rebuilt bytes differ from the signed manifest entry on a
-        # different GH Actions VM (non-reproducible toolchain
-        # artifacts), breaking the gethull cross-check.
+      # Linux builds in the snapshot-pinned reproducible container (roadmap
+      # 0.3.1) so the shipped hull is byte-reproducible across time; user: host
+      # makes build/ host-owned for the Platform-sig E2E below (which does
+      # keygen/sign into build/ and runs the freshly built binary). Hardening
+      # summary + verification run in the same container step so no host make
+      # touches the tree after the reproducible build. macOS builds bare: no
+      # container touches the macos-15 Xcode runner.
+      #
+      # TRUST_PLATFORM_LIB=1 short-circuits $(PLATFORM_LIB)'s rebuild rule in the
+      # Makefile; make treats the downloaded .a as a pristine leaf input and
+      # never re-archives it from source. The downloaded .a's bytes are the ones
+      # sign-platform-manifest hashed, and they get embedded as-is. Without this,
+      # make sees PLATFORM_OBJS / CANARY_OBJ as newer than the .a and rebuilds it
+      # from scratch; the rebuilt bytes differ from the signed manifest entry on
+      # a different runner, breaking the gethull cross-check.
+      - name: Build hull + verify hardening (Linux, reproducible container)
+        if: runner.os == 'Linux'
+        uses: ./.github/actions/hull-build-container
+        with:
+          user: host
+          run: |
+            make EMBED_PLATFORM=1 TRUST_PLATFORM_LIB=1
+            make hardening
+            make check-hardening
+      - name: Build hull with embedded platform (macOS)
+        if: runner.os == 'macOS'
         run: make EMBED_PLATFORM=1 TRUST_PLATFORM_LIB=1
-
-      - name: Hardening summary (release)
+      - name: Hardening summary (macOS)
+        if: runner.os == 'macOS'
         run: make hardening
-
-      - name: Hardening verification (release)
-        # Verifies the just-built binary carries the expected
-        # compiler/linker hardening properties (PIE, RELRO+BIND_NOW,
-        # NX, canaries, CET/BTI). Required protections missing for
-        # this platform → non-zero exit; release fails.
+      - name: Hardening verification (macOS)
+        # Verifies the just-built binary carries the expected compiler/linker
+        # hardening properties (PIE, RELRO+BIND_NOW, NX, canaries, CET/BTI).
+        # Required protections missing for this platform cause a non-zero exit
+        # and the release fails.
+        if: runner.os == 'macOS'
         run: make check-hardening
 
       - name: Smoke-test version + platform
@@ -592,7 +612,16 @@ jobs:
       # Built from the same objects as the hull binary above; published so
       # hl_embed_* native hosts can fetch + verify a known-good archive.
       # Its SHA-256 goes into the release-signed hull.sha256 manifest.
-      - name: Build + rename libhull.a
+      - name: Build + rename libhull.a (Linux, reproducible container)
+        if: runner.os == 'Linux'
+        uses: ./.github/actions/hull-build-container
+        with:
+          user: host
+          run: |
+            make libhull
+            cp build/libhull.a libhull-${{ matrix.name }}.a
+      - name: Build + rename libhull.a (macOS)
+        if: runner.os == 'macOS'
         run: |
           make libhull
           cp build/libhull.a libhull-${{ matrix.name }}.a
