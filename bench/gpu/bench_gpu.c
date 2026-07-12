@@ -134,17 +134,17 @@ static void bench_native(uint32_t dims, uint32_t count, int iters,
      * static {64..65536} table in main(); worst case is 32 MB. No I/O,
      * WASM, or UDF path reaches this benchmark — it's standalone
      * `make bench-gpu`. Not linked into the hull binary. */
-    float *query = malloc(dims * 4);
-    float *candidates = malloc((size_t)count * dims * 4);
+    float *query = malloc((size_t)dims * 4);
+    float *candidates = malloc((size_t)count * (size_t)dims * 4);
     generate_vectors(query, candidates, dims, count);
 
     /* Pack input: [dims:u32] [count:u32] [query] [candidates] */
-    size_t in_len = 8 + (size_t)dims * 4 + (size_t)count * dims * 4;
+    size_t in_len = 8 + (size_t)dims * 4 + (size_t)count * (size_t)dims * 4;
     uint8_t *input = malloc(in_len);
     memcpy(input, &dims, 4);
     memcpy(input + 4, &count, 4);
-    memcpy(input + 8, query, dims * 4);
-    memcpy(input + 8 + dims * 4, candidates, (size_t)count * dims * 4);
+    memcpy(input + 8, query, (size_t)dims * 4);
+    memcpy(input + 8 + (size_t)dims * 4, candidates, (size_t)count * (size_t)dims * 4);
 
     size_t out_max = (size_t)count * 4;
     float *output = malloc(out_max);
