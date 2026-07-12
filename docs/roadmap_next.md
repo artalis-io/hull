@@ -228,19 +228,22 @@ not implementation cost.
   **Effort:** ~~low for runner-pin~~ (done); medium for Docker base; high
   for Nix flake.
 
-- [ ] **0.3.2. Bootstrap trust path.** The `curl ... | sh` install
-  is TOFU on top of TLS to `raw.githubusercontent.com` + GitHub
-  account integrity + `install.sh` content trust. A new user has
-  no out-of-band way to verify they got the real installer before
-  running it. Once installed, the chain is tight; getting there is
-  not. **Fix:** publish a detached PGP signature on `install.sh`
-  itself, or a Sigstore signature, with verification instructions
-  on gethull.dev. Chicken-and-egg: the verification path can't
-  require an existing hull. PGP via a well-known maintainer key
-  (or a Sigstore identity tied to gethull's GitHub) is the realistic
-  option. Document the "I don't trust GitHub: how do I verify
-  install.sh" path. **Effort:** medium. Mostly social-engineering
-  (key publication, KEYS file maintenance, docs) rather than code.
+- [x] **0.3.2. Bootstrap trust path. ✅ Done (minisign).** The
+  `curl ... | sh` install was TOFU on top of TLS + GitHub account
+  integrity + `install.sh` content trust, with no out-of-band way to
+  verify the installer before running it. Now `install.sh` is
+  minisign-signed and the signature + public key ship on gethull.dev
+  next to the installer (`install.sh.minisig`, `minisign.pub`; key ID
+  `595ED89D8DCEBD6A`, committed at the repo root and cross-checkable on
+  GitHub, a different origin than the S3 site). The landing page shows
+  both paths: the `curl | sh` trust path and an offline "verify the
+  installer first" path (`minisign -Vm install.sh -P <pubkey>`) that needs
+  no pre-installed hull. `deploy-site.yml` verify-guards the published
+  signature against the published installer, so a forgotten re-sign fails
+  the deploy. minisign was chosen over Sigstore for the bootstrap
+  (offline-verifiable, no extra online infra required). **Remaining:** the
+  installer signing key is currently a maintainer software key; moving it
+  to a YubiKey follows the same custody-hardening path as 0.3.3(b).
 
 - [ ] **0.3.3. Move release signing off GitHub Actions secrets.**
   **(a) done; (b)/(c) need hardware + org process.** The release
