@@ -2895,6 +2895,14 @@ ifndef COSMO
 endif
 endif
 
+# pgwire codec test: links the codec source directly. cap/pgwire.c is a
+# self-contained parser gated out of CAP_OBJS until HL_ENABLE_POSTGRES, so
+# the generic cap-test rule below (which relies on TEST_COMMON_LIBS) cannot
+# resolve its symbols. Explicit rule wins over the pattern rule.
+$(BUILDDIR)/test_pgwire: $(TESTDIR)/hull/cap/test_pgwire.c $(SRCDIR)/hull/cap/pgwire.c | $(BUILDDIR)
+	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ \
+		$(TESTDIR)/hull/cap/test_pgwire.c $(SRCDIR)/hull/cap/pgwire.c $(LDFLAGS)
+
 # Capability tests (tests/hull/cap/)
 $(BUILDDIR)/test_%: $(TESTDIR)/hull/cap/test_%.c $(TEST_COMMON_DEPS) | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< $(TEST_COMMON_LIBS) $(LDFLAGS)
@@ -3257,13 +3265,18 @@ fuzz/fuzz_path_normalize: fuzz/fuzz_path_normalize.c $(SRCDIR)/hull/utils/path_n
 fuzz/fuzz_mime_sniff: fuzz/fuzz_mime_sniff.c $(SRCDIR)/hull/cap/mime.c
 	$(CC) $(FUZZ_CFLAGS) -o $@ $^
 
-fuzz: fuzz/fuzz_sh_json fuzz/fuzz_path_normalize fuzz/fuzz_mime_sniff
+# PostgreSQL wire-protocol reader: the untrusted-server parser (§1 Phase 2).
+fuzz/fuzz_pgwire: fuzz/fuzz_pgwire.c $(SRCDIR)/hull/cap/pgwire.c
+	$(CC) $(FUZZ_CFLAGS) -o $@ $^
+
+fuzz: fuzz/fuzz_sh_json fuzz/fuzz_path_normalize fuzz/fuzz_mime_sniff fuzz/fuzz_pgwire
 
 # Time-boxed run over the seed corpora (what CI runs). FUZZ_TIME overrides.
 fuzz-run: fuzz
 	./fuzz/fuzz_sh_json fuzz/corpus_sh_json/ -max_total_time=$(FUZZ_TIME)
 	./fuzz/fuzz_path_normalize fuzz/corpus_path_normalize/ -max_total_time=$(FUZZ_TIME)
 	./fuzz/fuzz_mime_sniff fuzz/corpus_mime_sniff/ -max_total_time=$(FUZZ_TIME)
+	./fuzz/fuzz_pgwire fuzz/corpus_pgwire/ -max_total_time=$(FUZZ_TIME)
 
 # ── E2E tests ──────────────────────────────────────────────────────
 
@@ -3799,7 +3812,7 @@ docs-api-check:
 
 clean:
 	rm -rf $(BUILDDIR)
-	rm -f fuzz/fuzz_sh_json fuzz/fuzz_path_normalize fuzz/fuzz_mime_sniff
+	rm -f fuzz/fuzz_sh_json fuzz/fuzz_path_normalize fuzz/fuzz_mime_sniff fuzz/fuzz_pgwire
 	@$(MAKE) -s -C $(KEEL_DIR) clean 2>/dev/null || true
 
 # ── Header-dependency replay ────────────────────────────────────────
