@@ -333,6 +333,64 @@ int hl_manifest_extract_js(JSContext *ctx, HlManifest *out, HlAllocator *alloc)
     }
     JS_FreeValue(ctx, modules_val);
 
+    /* databases: { cache: "./cache.db", primary: { dsn_env: "DATABASE_URL" } }
+     * Keyed object: key = connection name, value = a literal DSN string or an
+     * object { dsn_env: "VAR" } (resolved from env at connection-open time).
+     * Mirror of the Lua parser. */
+    JSValue db_val = JS_GetPropertyStr(ctx, manifest, "databases");
+    if (JS_IsObject(db_val) && !JS_IsNull(db_val) && !JS_IsArray(ctx, db_val)) {
+        out->databases_declared = 1;
+        JSPropertyEnum *props = NULL;
+        uint32_t prop_count = 0;
+        if (JS_GetOwnPropertyNames(ctx, &props, &prop_count, db_val,
+                                    JS_GPN_STRING_MASK | JS_GPN_ENUM_ONLY) == 0) {
+            for (uint32_t i = 0; i < prop_count; i++) {
+                if (out->databases_count >= HL_MANIFEST_MAX_DATABASES) {
+                    log_warn("[manifest] databases exceeds "
+                             "HL_MANIFEST_MAX_DATABASES (%d), truncated",
+                             HL_MANIFEST_MAX_DATABASES);
+                    for (uint32_t j = i; j < prop_count; j++)
+                        JS_FreeAtom(ctx, props[j].atom);
+                    break;
+                }
+                const char *name = JS_AtomToCString(ctx, props[i].atom);
+                JSValue v_val = JS_GetProperty(ctx, db_val, props[i].atom);
+                const char *dsn_copy = NULL;
+                int is_env = 0;
+                if (JS_IsString(v_val)) {
+                    const char *s = JS_ToCString(ctx, v_val);
+                    if (s) { dsn_copy = hl_manifest_strdup(alloc, s);
+                             JS_FreeCString(ctx, s); }
+                } else if (JS_IsObject(v_val)) {
+                    JSValue e = JS_GetPropertyStr(ctx, v_val, "dsn_env");
+                    if (JS_IsString(e)) {
+                        const char *s = JS_ToCString(ctx, e);
+                        if (s) { dsn_copy = hl_manifest_strdup(alloc, s);
+                                 is_env = 1; JS_FreeCString(ctx, s); }
+                    }
+                    JS_FreeValue(ctx, e);
+                }
+                if (name && name[0] && dsn_copy && dsn_copy[0]) {
+                    const char *ncopy = hl_manifest_strdup(alloc, name);
+                    if (ncopy) {
+                        out->databases[out->databases_count].name       = ncopy;
+                        out->databases[out->databases_count].dsn        = dsn_copy;
+                        out->databases[out->databases_count].dsn_is_env = is_env;
+                        out->databases_count++;
+                    }
+                } else {
+                    log_warn("[manifest] databases.%s: expected a DSN string "
+                             "or { dsn_env: \"VAR\" }, ignored", name ? name : "?");
+                }
+                if (name) JS_FreeCString(ctx, name);
+                JS_FreeValue(ctx, v_val);
+                JS_FreeAtom(ctx, props[i].atom);
+            }
+            js_free(ctx, props);
+        }
+    }
+    JS_FreeValue(ctx, db_val);
+
     /* allowDynamicCode: true — opt-in to JIT / runtime codegen.
      * Rejected by hl_sandbox_apply unless --no-sandbox.
      * Also accept the snake_case form for parity with the Lua manifest. */
