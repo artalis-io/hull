@@ -3,7 +3,8 @@
 // Requires db, crypto, time, json globals (run via hull test harness).
 
 import { idempotency } from "hull:web:middleware:idempotency";
-import { db } from "hull:db";
+import { db as dbModule } from "hull:db";
+const db = dbModule.default();
 import { json } from "hull:json";
 
 let pass = 0;

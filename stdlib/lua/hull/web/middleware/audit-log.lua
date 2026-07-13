@@ -24,7 +24,7 @@
 --   audit_log.cleanup()                    -- delete events older than retain_days
 
 local crypto = require("hull.crypto")
-local db     = require("hull.db")
+local db     = require("hull.db").default()
 local time   = require("hull.time")
 local json   = require("hull.json")
 local log    = require("hull.log")

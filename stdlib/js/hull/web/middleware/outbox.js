@@ -18,7 +18,8 @@
  * @license AGPL-3.0-or-later
  */
 
-import { db } from "hull:db";
+import { db as dbModule } from "hull:db";
+const db = dbModule.default();
 import { httpClient } from "hull:http-client";
 import { time } from "hull:time";
 import { json } from "hull:json";

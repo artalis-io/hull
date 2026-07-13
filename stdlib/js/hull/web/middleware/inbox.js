@@ -14,7 +14,8 @@
  * @license AGPL-3.0-or-later
  */
 
-import { db } from "hull:db";
+import { db as dbModule } from "hull:db";
+const db = dbModule.default();
 import { time } from "hull:time";
 
 let inboxTtl = 604800; // default 7 days

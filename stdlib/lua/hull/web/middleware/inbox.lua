@@ -26,7 +26,7 @@
 --   end)
 --
 
-local db = require("hull.db")
+local db = require("hull.db").default()
 local time = require("hull.time")
 
 local inbox = {}

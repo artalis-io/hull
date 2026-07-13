@@ -1263,15 +1263,15 @@ static JSValue push_conn_object(JSContext *ctx, HlDbHandle *h)
     return obj;
 }
 
-/* db.default() → connection object for the "default" connection. */
+/* db.default() → connection object for the "default" connection. Returns an
+ * object even when no DB is configured; its methods error lazily on use, so
+ * importing a db-using module in a no-db context does not fail at load. */
 static JSValue js_db_default(JSContext *ctx, JSValueConst this_val,
                              int argc, JSValueConst *argv)
 {
     (void)this_val; (void)argc; (void)argv;
     HlJS *js = (HlJS *)JS_GetContextOpaque(ctx);
-    if (!js || !js->base.db_handle)
-        return JS_ThrowInternalError(ctx, "database not available");
-    return push_conn_object(ctx, js->base.db_handle);
+    return push_conn_object(ctx, js ? js->base.db_handle : NULL);
 }
 
 /* db.connect(name) → connection object for a manifest-declared database. */

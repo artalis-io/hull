@@ -22,7 +22,7 @@
 --   end)
 --   app.use("GET", "/*", health.middleware())
 
-local db = require("hull.db")
+local db = require("hull.db").default()
 local http_server = require("hull.http-server")
 local time = require("hull.time")
 

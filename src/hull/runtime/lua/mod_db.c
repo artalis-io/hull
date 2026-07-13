@@ -1141,13 +1141,14 @@ static int push_conn_object(lua_State *L, HlDbHandle *h)
     return 1;
 }
 
-/* db.default() → connection object for the "default" connection. */
+/* db.default() → connection object for the "default" connection. Returns an
+ * object even when no DB is configured; its methods error lazily on use, so
+ * requiring a db-using module in a no-db context does not fail at load (it
+ * matches require("hull.db")'s historical laziness). */
 static int lua_db_default(lua_State *L)
 {
     HlLua *lua = get_hl_lua(L);
-    if (!lua || !lua->base.db_handle)
-        return luaL_error(L, "database not available");
-    return push_conn_object(L, lua->base.db_handle);
+    return push_conn_object(L, lua ? lua->base.db_handle : NULL);
 }
 
 /* db.connect(name) → connection object for a manifest-declared database. */

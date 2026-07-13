@@ -15,8 +15,8 @@
  * @license AGPL-3.0-or-later
  */
 
-import { db } from "hull:db";
-
+import { db as dbModule } from "hull:db";
+const db = dbModule.default();
 /**
  * Create the four `_hull_*` RBAC tables. Idempotent.
  *

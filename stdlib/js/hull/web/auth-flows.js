@@ -21,7 +21,8 @@ import { pwned }     from "hull:web:pwned";
 import { auditLog }  from "hull:web:middleware:audit-log";
 import { log }       from "hull:log";
 import { ratelimit } from "hull:web:middleware:ratelimit";
-import { db }       from "hull:db";
+import { db as dbModule } from "hull:db";
+const db = dbModule.default();
 import { time }     from "hull:time";
 import { json }     from "hull:json";
 

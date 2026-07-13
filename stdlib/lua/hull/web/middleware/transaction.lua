@@ -22,7 +22,7 @@
 --       db.exec("UPDATE inventory ...",   { ... })
 --   end)
 
-local db = require("hull.db")
+local db = require("hull.db").default()
 
 local transaction = {}
 
