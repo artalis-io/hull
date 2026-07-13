@@ -356,6 +356,71 @@ UTEST(pg_query, server_error_then_ready)
     close(sv[0]);
 }
 
+/* ── Simple Query protocol (multi-statement scripts, migrations) ──── */
+
+UTEST(pg_exec_simple, multi_statement_ok)
+{
+    int sv[2];
+    ASSERT_EQ(0, socketpair(AF_UNIX, SOCK_STREAM, 0, sv));
+
+    /* Simple Query streams one CommandComplete per statement, then Ready. */
+    HlPgWriter s;
+    hl_pg_writer_init(&s);
+    size_t m;
+    m = hl_pg_msg_begin(&s, 'C'); hl_pg_put_cstr(&s, "CREATE TABLE"); hl_pg_msg_end(&s, m);
+    m = hl_pg_msg_begin(&s, 'C'); hl_pg_put_cstr(&s, "INSERT 0 1");   hl_pg_msg_end(&s, m);
+    m = hl_pg_msg_begin(&s, 'Z'); hl_pg_put_u8(&s, 'I');              hl_pg_msg_end(&s, m);
+    ASSERT_FALSE(s.err);
+    ASSERT_TRUE(write(sv[0], s.buf, s.len) == (ssize_t)s.len);
+    hl_pg_writer_free(&s);
+
+    HlPgConn conn;
+    memset(&conn, 0, sizeof conn);
+    conn.fd = sv[1];
+
+    ASSERT_EQ(0, hl_pg_exec_simple(&conn,
+        "CREATE TABLE t (id int); INSERT INTO t VALUES (1)"));
+
+    /* The client sent a Query ('Q') message carrying the whole script. */
+    uint8_t got[512];
+    ssize_t n = read(sv[0], got, sizeof got);
+    ASSERT_TRUE(n > 0);
+    ASSERT_EQ(got[0], (uint8_t)'Q');
+    ASSERT_TRUE(bytes_contain(got, (size_t)n, "INSERT INTO t VALUES (1)"));
+
+    hl_pg_conn_close(&conn);
+    close(sv[0]);
+}
+
+UTEST(pg_exec_simple, error_then_ready)
+{
+    int sv[2];
+    ASSERT_EQ(0, socketpair(AF_UNIX, SOCK_STREAM, 0, sv));
+
+    HlPgWriter s;
+    hl_pg_writer_init(&s);
+    size_t m;
+    m = hl_pg_msg_begin(&s, 'E');
+    hl_pg_put_u8(&s, 'M');
+    hl_pg_put_cstr(&s, "relation already exists");
+    hl_pg_put_u8(&s, 0);
+    hl_pg_msg_end(&s, m);
+    m = hl_pg_msg_begin(&s, 'Z'); hl_pg_put_u8(&s, 'E'); hl_pg_msg_end(&s, m);
+    ASSERT_FALSE(s.err);
+    ASSERT_TRUE(write(sv[0], s.buf, s.len) == (ssize_t)s.len);
+    hl_pg_writer_free(&s);
+
+    HlPgConn conn;
+    memset(&conn, 0, sizeof conn);
+    conn.fd = sv[1];
+
+    ASSERT_EQ(-1, hl_pg_exec_simple(&conn, "CREATE TABLE t (id int)"));
+    ASSERT_TRUE(strstr(conn.errmsg, "relation already exists") != NULL);
+
+    hl_pg_conn_close(&conn);
+    close(sv[0]);
+}
+
 /* ── TLS negotiation (SSLRequest / sslmode) ───────────────────────── */
 
 UTEST(pg_ssl, sslmode_parse)

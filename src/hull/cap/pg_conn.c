@@ -1231,3 +1231,66 @@ int hl_pg_query(HlPgConn *conn, const char *sql,
         }
     }
 }
+
+int hl_pg_exec_simple(HlPgConn *conn, const char *sql)
+{
+    if (!conn || conn->fd < 0) {
+        if (conn) set_err(conn->errmsg, sizeof conn->errmsg, "not connected");
+        return -1;
+    }
+    conn->errmsg[0] = '\0';
+
+    HlPgWriter w;
+    hl_pg_writer_init(&w);
+    size_t m = hl_pg_msg_begin(&w, HL_PG_F_QUERY);
+    hl_pg_put_cstr(&w, sql);
+    hl_pg_msg_end(&w, m);
+    int se = w.err || conn_send(conn, w.buf, w.len);
+    hl_pg_writer_free(&w);
+    if (se) {
+        if (!conn->errmsg[0])
+            set_err(conn->errmsg, sizeof conn->errmsg, "failed to send script");
+        return -1;
+    }
+
+    /* Simple Query returns a stream per statement; discard all results and
+     * read to ReadyForQuery. A single ErrorResponse anywhere fails the whole
+     * script (the server aborts the rest of the batch itself). */
+    int had_error = 0;
+    for (;;) {
+        HlPgFrame f;
+        if (conn_next_frame(conn, &f) != 0) return -1;
+
+        HlPgCursor c;
+        hl_pg_cursor_init(&c, &f);
+
+        switch (f.type) {
+        case HL_PG_B_ROW_DESC:
+        case HL_PG_B_DATA_ROW:
+        case HL_PG_B_CMD_COMPLETE:
+        case HL_PG_B_EMPTY_QUERY:
+        case HL_PG_B_PARAM_STATUS:
+        case HL_PG_B_NOTICE:
+            break;   /* results / notices discarded */
+        case HL_PG_B_ERROR: {
+            char msg[200] = {0};
+            for (;;) {
+                uint8_t ft = hl_pg_get_u8(&c);
+                if (hl_pg_cursor_err(&c) || ft == 0) break;
+                const char *v = hl_pg_get_cstr(&c);
+                if (!v) break;
+                if (ft == 'M') snprintf(msg, sizeof msg, "%s", v);
+            }
+            snprintf(conn->errmsg, sizeof conn->errmsg,
+                     "script failed: %s", msg[0] ? msg : "(no message)");
+            had_error = 1;
+            break;
+        }
+        case HL_PG_B_READY:
+            conn->tx_status = hl_pg_get_u8(&c);
+            return had_error ? -1 : 0;
+        default:
+            break;
+        }
+    }
+}

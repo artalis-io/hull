@@ -59,6 +59,16 @@ done
 [ "$ready" = 1 ] || { echo "FAIL: postgres did not become ready"; exit 1; }
 
 APPDIR=$(mktemp -d)
+# A multi-statement migration file: exercises the runner's script path
+# (PG simple Query protocol; the extended protocol rejects >1 statement
+# per Parse). Auto-runs at startup before app.lua loads.
+mkdir -p "$APPDIR/migrations"
+cat > "$APPDIR/migrations/001_init.sql" <<'SQL'
+CREATE TABLE mig_test (id INTEGER PRIMARY KEY, label TEXT NOT NULL);
+CREATE INDEX idx_mig_test_label ON mig_test (label);
+INSERT INTO mig_test (id, label) VALUES (1, 'alpha');
+INSERT INTO mig_test (id, label) VALUES (2, 'beta');
+SQL
 cat > "$APPDIR/app.lua" <<'LUA'
 app.manifest({ modules = {
     "hull/db@1", "hull/http-server@1", "hull/search@1",
@@ -81,6 +91,11 @@ app.get("/", function(req, res)
     local rows = db.query(
         "SELECT id, name, score, active FROM e2e WHERE score >= ? ORDER BY id", { 0 })
     res:json({ rows = rows, count = db.query("SELECT count(*) AS c FROM e2e")[1].c })
+end)
+-- migration ran at startup via the runner's script path (multi-statement).
+app.get("/migrated", function(req, res)
+    local rows = db.query("SELECT label FROM mig_test ORDER BY id")
+    res:json({ mig_rows = #rows, first = rows[1] and rows[1].label or nil })
 end)
 -- db.async: offloads the query to a worker thread (its own PG connection).
 app.get("/async", function(req, res)
@@ -123,6 +138,12 @@ echo "$RESP" | grep -q '"name":"bob"'              || { echo "::error bob missin
 echo "$RESP" | grep -q '"name":"carol"'            && { echo "::error carol should be filtered out"; fail=1; }
 echo "$RESP" | grep -q '"active":true'             || { echo "::error bool decode"; fail=1; }
 echo "$RESP" | grep -q '"score":10'                || { echo "::error int decode"; fail=1; }
+
+# migration runner on Postgres (multi-statement file via the script path)
+RESP_MIG=$(curl -fsS "http://127.0.0.1:${PORT}/migrated" || echo FAIL)
+echo "migrated response: $RESP_MIG"
+echo "$RESP_MIG" | grep -q '"mig_rows":2'          || { echo "::error migration rows"; fail=1; }
+echo "$RESP_MIG" | grep -q '"first":"alpha"'       || { echo "::error migration seed"; fail=1; }
 
 # db.async path (worker thread opens its own PG connection through the vtable)
 RESP_ASYNC=$(curl -fsS "http://127.0.0.1:${PORT}/async" || echo FAIL)

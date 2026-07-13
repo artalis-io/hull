@@ -296,6 +296,15 @@ static int pg_exec(HlDbHandle *h, const char *sql,
     return pg_query(h, sql, params, nparams, NULL, NULL, NULL);
 }
 
+/* Multi-statement script, no params, via the simple Query protocol. The
+ * extended protocol (pg_query) rejects more than one statement per Parse. */
+static int pg_exec_script(HlDbHandle *h, const char *sql)
+{
+    if (!h || !h->ctx) return -1;
+    HlDbPgCtx *s = h->ctx;
+    return hl_pg_exec_simple(&s->conn, sql);
+}
+
 static int pg_begin(HlDbHandle *h)    { return pg_exec(h, "BEGIN", NULL, 0); }
 static int pg_commit(HlDbHandle *h)   { return pg_exec(h, "COMMIT", NULL, 0); }
 static int pg_rollback(HlDbHandle *h) { return pg_exec(h, "ROLLBACK", NULL, 0); }
@@ -449,6 +458,7 @@ const HlDbBackend hl_db_backend_postgres = {
     .close                = pg_close,
     .query                = pg_query,
     .exec                 = pg_exec,
+    .exec_script          = pg_exec_script,
     .begin                = pg_begin,
     .commit               = pg_commit,
     .rollback             = pg_rollback,

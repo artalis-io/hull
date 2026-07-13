@@ -84,6 +84,21 @@ static int sqlite_exec(HlDbHandle *h, const char *sql,
     return hl_cap_db_exec(&s->cache, sql, params, nparams);
 }
 
+/* Multi-statement script, no params. sqlite3_exec compiles + runs every
+ * ;-separated statement in one call (unlike the single-statement stmt
+ * cache path). The specific error stays reachable via sqlite3_errmsg. */
+static int sqlite_exec_script(HlDbHandle *h, const char *sql)
+{
+    HlDbSqliteCtx *s = (HlDbSqliteCtx *)h->ctx;
+    char *err = NULL;
+    int rc = sqlite3_exec(s->db, sql, NULL, NULL, &err);
+    if (rc != SQLITE_OK) {
+        sqlite3_free(err);
+        return -1;
+    }
+    return 0;
+}
+
 static int sqlite_begin(HlDbHandle *h)
 {
     HlDbSqliteCtx *s = (HlDbSqliteCtx *)h->ctx;
@@ -317,6 +332,7 @@ const HlDbBackend hl_db_backend_sqlite = {
     .close                 = sqlite_close,
     .query                 = sqlite_query,
     .exec                  = sqlite_exec,
+    .exec_script           = sqlite_exec_script,
     .begin                 = sqlite_begin,
     .commit                = sqlite_commit,
     .rollback              = sqlite_rollback,

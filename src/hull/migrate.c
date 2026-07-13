@@ -15,33 +15,34 @@
 #include "hull/vfs.h"
 #include "hull/cap/db_backend.h"
 
-#include <sqlite3.h>
-
 #include <dirent.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #include "log.h"
 
 /* ── Tracking table ───────────────────────────────────────────────── */
 
+/* Portable across SQLite and Postgres: `name` is the primary key (the
+ * runner dedupes by name and orders by filename, so no surrogate id is
+ * needed), and `applied_at` is written explicitly by the runner instead of
+ * via a backend-specific DEFAULT. Existing SQLite databases created with
+ * the older id/AUTOINCREMENT schema keep working: CREATE IF NOT EXISTS is a
+ * no-op and the INSERT below names its columns. */
 static const char *CREATE_TABLE_SQL =
     "CREATE TABLE IF NOT EXISTS _hull_migrations ("
-    "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
-    "  name TEXT NOT NULL UNIQUE,"
-    "  applied_at TEXT NOT NULL DEFAULT (datetime('now'))"
+    "  name TEXT NOT NULL PRIMARY KEY,"
+    "  applied_at TEXT NOT NULL"
     ")";
 
-static int ensure_tracking_table(sqlite3 *db)
+static int ensure_tracking_table(HlDbHandle *h)
 {
-    char *err = NULL;
-    int rc = sqlite3_exec(db, CREATE_TABLE_SQL, NULL, NULL, &err);
-    if (rc != SQLITE_OK) {
+    if (hl_db_exec(h, CREATE_TABLE_SQL, NULL, 0) < 0) {
         log_error("[hull:migrate] cannot create tracking table: %s",
-                  err ? err : "unknown");
-        sqlite3_free(err);
+                  hl_db_errmsg(h));
         return -1;
     }
     return 0;
@@ -49,39 +50,52 @@ static int ensure_tracking_table(sqlite3 *db)
 
 /* ── Check if a migration has been applied ────────────────────────── */
 
-static int is_applied(sqlite3 *db, const char *name)
+static int migrate_found_cb(void *ctx, HlColumn *cols, int ncols)
 {
-    sqlite3_stmt *stmt = NULL;
-    int rc = sqlite3_prepare_v2(db,
-        "SELECT 1 FROM _hull_migrations WHERE name = ?", -1, &stmt, NULL);
-    if (rc != SQLITE_OK)
-        return 0;
+    (void)cols; (void)ncols;
+    *(int *)ctx = 1;
+    return 1;   /* one row is enough; stop the scan */
+}
 
-    sqlite3_bind_text(stmt, 1, name, -1, SQLITE_STATIC);
-    int found = (sqlite3_step(stmt) == SQLITE_ROW);
-    sqlite3_finalize(stmt);
+static int is_applied(HlDbHandle *h, const char *name)
+{
+    HlValue p = { .type = HL_TYPE_TEXT, .s = name, .len = strlen(name) };
+    int found = 0;
+    hl_db_query(h, "SELECT 1 FROM _hull_migrations WHERE name = ?",
+                &p, 1, migrate_found_cb, &found, NULL);
     return found;
 }
 
 /* ── Record a migration as applied ────────────────────────────────── */
 
-static int record_migration(sqlite3 *db, const char *name)
+/* ISO-8601 UTC, generated host-side so the stored value is identical on
+ * every backend (no datetime('now') / now() dialect split). */
+static void iso_now(char *buf, size_t len)
 {
-    sqlite3_stmt *stmt = NULL;
-    int rc = sqlite3_prepare_v2(db,
-        "INSERT INTO _hull_migrations (name) VALUES (?)", -1, &stmt, NULL);
-    if (rc != SQLITE_OK)
-        return -1;
+    time_t t = time(NULL);
+    struct tm tmv;
+    gmtime_r(&t, &tmv);
+    if (strftime(buf, len, "%Y-%m-%dT%H:%M:%SZ", &tmv) == 0 && len > 0)
+        buf[0] = '\0';
+}
 
-    sqlite3_bind_text(stmt, 1, name, -1, SQLITE_STATIC);
-    rc = sqlite3_step(stmt);
-    sqlite3_finalize(stmt);
-    return (rc == SQLITE_DONE) ? 0 : -1;
+static int record_migration(HlDbHandle *h, const char *name)
+{
+    char ts[32];
+    iso_now(ts, sizeof ts);
+    HlValue params[2] = {
+        { .type = HL_TYPE_TEXT, .s = name, .len = strlen(name) },
+        { .type = HL_TYPE_TEXT, .s = ts,   .len = strlen(ts) },
+    };
+    if (hl_db_exec(h, "INSERT INTO _hull_migrations (name, applied_at) "
+                      "VALUES (?, ?)", params, 2) < 0)
+        return -1;
+    return 0;
 }
 
 /* ── Execute a single migration ───────────────────────────────────── */
 
-static int execute_migration(sqlite3 *db, const char *name,
+static int execute_migration(HlDbHandle *h, const char *name,
                              const char *sql, size_t sql_len)
 {
     /* Skip empty migrations */
@@ -90,57 +104,42 @@ static int execute_migration(sqlite3 *db, const char *name,
         return 0;
     }
 
-    char *err = NULL;
-
-    /* BEGIN IMMEDIATE for exclusive write access */
-    int rc = sqlite3_exec(db, "BEGIN IMMEDIATE", NULL, NULL, &err);
-    if (rc != SQLITE_OK) {
+    if (hl_db_begin(h) != 0) {
         log_error("[hull:migrate] %s: cannot begin transaction: %s",
-                  name, err ? err : "unknown");
-        sqlite3_free(err);
+                  name, hl_db_errmsg(h));
         return -1;
     }
 
     /* Always copy to ensure NUL-termination (avoids OOB read if VFS
      * entry isn't NUL-terminated).  Migration SQL is small and runs
      * once at startup, so the copy cost is negligible. */
-    if (sql_len > SIZE_MAX / 2) {
-        sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
-        return -1;
-    }
+    if (sql_len > SIZE_MAX / 2) { hl_db_rollback(h); return -1; }
     char *sql_copy = malloc(sql_len + 1);
-    if (!sql_copy) {
-        sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
-        return -1;
-    }
+    if (!sql_copy) { hl_db_rollback(h); return -1; }
     memcpy(sql_copy, sql, sql_len);
     sql_copy[sql_len] = '\0';
 
-    /* Execute the migration SQL */
-    rc = sqlite3_exec(db, sql_copy, NULL, NULL, &err);
+    /* Migration files can bundle several ;-separated statements, so use the
+     * script path (sqlite3_exec / PG simple Query), not the single-statement
+     * exec. */
+    int rc = hl_db_exec_script(h, sql_copy);
     free(sql_copy);
-
-    if (rc != SQLITE_OK) {
-        log_error("[hull:migrate] %s: SQL error: %s", name, err ? err : "unknown");
-        sqlite3_free(err);
-        sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
+    if (rc < 0) {
+        log_error("[hull:migrate] %s: SQL error: %s", name, hl_db_errmsg(h));
+        hl_db_rollback(h);
         return -1;
     }
 
-    /* Record the migration */
-    if (record_migration(db, name) != 0) {
+    if (record_migration(h, name) != 0) {
         log_error("[hull:migrate] %s: failed to record migration", name);
-        sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
+        hl_db_rollback(h);
         return -1;
     }
 
-    /* Commit */
-    rc = sqlite3_exec(db, "COMMIT", NULL, NULL, &err);
-    if (rc != SQLITE_OK) {
+    if (hl_db_commit(h) != 0) {
         log_error("[hull:migrate] %s: commit failed: %s",
-                  name, err ? err : "unknown");
-        sqlite3_free(err);
-        sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
+                  name, hl_db_errmsg(h));
+        hl_db_rollback(h);
         return -1;
     }
 
@@ -310,18 +309,12 @@ static int discover_fs_migrations(const char *root_dir, MigrationList *ml)
 
 int hl_migrate_run(HlDbHandle *handle, const HlVfs *vfs)
 {
-    /*
-     * The _hull_migrations tracking table + ad-hoc SQL prepared
-     * statements below are currently SQLite-specific. Non-SQLite
-     * backends would supply their own migration mechanism.
-     */
-    sqlite3 *db = hl_db_sqlite_raw(handle);
-    if (!db) {
-        /* No SQLite handle: nothing to migrate (e.g. compute-only or
-         * future non-SQLite backend). Not an error. */
+    /* The tracking table + SQL all flow through the HlDbBackend vtable, so
+     * the runner works on any wired backend (SQLite file or Postgres). No
+     * backend at all (compute-only build / --no-db) means nothing to do. */
+    if (!handle || !handle->backend)
         return 0;
-    }
-    if (ensure_tracking_table(db) != 0)
+    if (ensure_tracking_table(handle) != 0)
         return HL_MIGRATE_ERR;
 
     /* Check for embedded migration entries via VFS prefix query */
@@ -332,10 +325,10 @@ int hl_migrate_run(HlDbHandle *handle, const HlVfs *vfs)
         int applied = 0;
         for (size_t i = 0; i < mig_count; i++) {
             const char *mig_name = first[i].name + 11; /* strip "migrations/" */
-            if (is_applied(db, mig_name))
+            if (is_applied(handle, mig_name))
                 continue;
 
-            int rc = execute_migration(db, mig_name,
+            int rc = execute_migration(handle, mig_name,
                                        (const char *)first[i].data, first[i].len);
             if (rc < 0)
                 return HL_MIGRATE_ERR;
@@ -358,10 +351,10 @@ int hl_migrate_run(HlDbHandle *handle, const HlVfs *vfs)
 
     int applied = 0;
     for (int i = 0; i < ml.count; i++) {
-        if (is_applied(db, ml.names[i]))
+        if (is_applied(handle, ml.names[i]))
             continue;
 
-        rc = execute_migration(db, ml.names[i],
+        rc = execute_migration(handle, ml.names[i],
                                ml.sqls[i], strlen(ml.sqls[i]));
         if (rc < 0) {
             migration_list_free(&ml);
@@ -376,17 +369,32 @@ int hl_migrate_run(HlDbHandle *handle, const HlVfs *vfs)
 
 /* ── Public API: query status ─────────────────────────────────────── */
 
+/* Probe one migration's applied state: sets applied=1 and copies the
+ * (length-tracked, possibly non-NUL-terminated) applied_at wire value. */
+typedef struct { int applied; char *applied_at; } StatusProbe;
+
+static int status_probe_cb(void *ctx, HlColumn *cols, int ncols)
+{
+    StatusProbe *p = (StatusProbe *)ctx;
+    p->applied = 1;
+    if (ncols > 0 && cols[0].value.type == HL_TYPE_TEXT && cols[0].value.s) {
+        size_t l = cols[0].value.len;
+        char *s = malloc(l + 1);
+        if (s) { memcpy(s, cols[0].value.s, l); s[l] = '\0'; p->applied_at = s; }
+    }
+    return 1;   /* one row is enough */
+}
+
 int hl_migrate_status(HlDbHandle *handle, const HlVfs *vfs,
                       HlMigrationStatus **out, int *out_count)
 {
-    sqlite3 *db = hl_db_sqlite_raw(handle);
-    if (!db) {
-        /* Non-SQLite or absent backend: report zero migrations. */
+    if (!handle || !handle->backend) {
+        /* Absent backend (compute-only / --no-db): report zero migrations. */
         if (out) *out = NULL;
         if (out_count) *out_count = 0;
         return 0;
     }
-    if (ensure_tracking_table(db) != 0)
+    if (ensure_tracking_table(handle) != 0)
         return -1;
 
     /* Check for embedded migration entries via VFS prefix query */
@@ -460,20 +468,15 @@ int hl_migrate_status(HlDbHandle *handle, const HlVfs *vfs,
     for (int i = 0; i < count; i++) {
         entries[i].name = names[i]; /* ownership transferred */
 
-        /* Check if applied and get timestamp */
-        sqlite3_stmt *stmt = NULL;
-        int rc = sqlite3_prepare_v2(db,
+        /* Check if applied and capture the timestamp, via the vtable. */
+        HlValue namep = { .type = HL_TYPE_TEXT,
+                          .s = names[i], .len = strlen(names[i]) };
+        StatusProbe probe = { 0, NULL };
+        hl_db_query(handle,
             "SELECT applied_at FROM _hull_migrations WHERE name = ?",
-            -1, &stmt, NULL);
-        if (rc == SQLITE_OK) {
-            sqlite3_bind_text(stmt, 1, names[i], -1, SQLITE_STATIC);
-            if (sqlite3_step(stmt) == SQLITE_ROW) {
-                entries[i].applied = 1;
-                const char *ts = (const char *)sqlite3_column_text(stmt, 0);
-                entries[i].applied_at = ts ? strdup(ts) : NULL;
-            }
-            sqlite3_finalize(stmt);
-        }
+            &namep, 1, status_probe_cb, &probe, NULL);
+        entries[i].applied = probe.applied;
+        entries[i].applied_at = probe.applied_at;
     }
 
     free(names); /* individual strings now owned by entries */
