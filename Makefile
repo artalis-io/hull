@@ -371,6 +371,29 @@ HL_ENABLE_HTTP_ANY := 1
 CFLAGS += -DHL_ENABLE_HTTP
 endif
 
+# ── Database backend flags (resolved early) ─────────────────────────
+# The granular SQLite / PostgreSQL flags are resolved here, ahead of the
+# Keel + mbedTLS sections below, because those link gates now extend to
+# PostgreSQL: its TLS transport (Phase 3b) and SCRAM auth (Phase 3a) need
+# Keel's KlTls and mbedTLS. The -D macros, SQLITE_OBJ gate, and the derived
+# HL_ENABLE_DB umbrella stay in the DB section further down. Back-compat:
+# HL_ENABLE_DB=0 pins both granular flags off.
+ifeq ($(HL_ENABLE_DB),0)
+HL_ENABLE_SQLITE   ?= 0
+HL_ENABLE_POSTGRES ?= 0
+endif
+HL_ENABLE_SQLITE   ?= 1
+HL_ENABLE_POSTGRES ?= 0
+
+# Keel (KlTls) + mbedTLS are linked when EITHER an HTTP half OR PostgreSQL
+# is enabled. HTTP still owns the -DHL_ENABLE_HTTP macro (above), so a
+# Postgres-only build links the TLS stack without activating HTTP code.
+ifeq ($(HL_ENABLE_HTTP_ANY)$(HL_ENABLE_POSTGRES),00)
+HL_LINK_TLS := 0
+else
+HL_LINK_TLS := 1
+endif
+
 # ── Keel (external library) ─────────────────────────────────────────
 
 # Keel is included as a git submodule in vendor/keel. Dropped from the
@@ -380,7 +403,7 @@ endif
 # that isn't referenced.
 KEEL_DIR   ?= $(VENDDIR)/keel
 KEEL_INC   := $(KEEL_DIR)/include
-ifeq ($(HL_ENABLE_HTTP_ANY),0)
+ifeq ($(HL_LINK_TLS),0)
 KEEL_LIB   :=
 else
 KEEL_LIB   := $(KEEL_DIR)/libkeel.a
@@ -434,7 +457,7 @@ endif
 
 MBEDTLS_DIR    := $(VENDDIR)/mbedtls
 MBEDTLS_SRCS   := $(wildcard $(MBEDTLS_DIR)/library/*.c)
-ifeq ($(HL_ENABLE_HTTP_ANY),0)
+ifeq ($(HL_LINK_TLS),0)
 MBEDTLS_OBJS   :=
 else
 MBEDTLS_OBJS   := $(patsubst $(MBEDTLS_DIR)/library/%.c,$(BUILDDIR)/mbed_%.o,$(MBEDTLS_SRCS))
@@ -463,13 +486,8 @@ $(BUILDDIR)/mbed_%.o: $(MBEDTLS_DIR)/library/%.c | $(BUILDDIR)
 # rbac, search).
 #
 # Back-compat: HL_ENABLE_DB=0 still works; it pins both granular flags off.
-
-ifeq ($(HL_ENABLE_DB),0)
-HL_ENABLE_SQLITE   ?= 0
-HL_ENABLE_POSTGRES ?= 0
-endif
-HL_ENABLE_SQLITE   ?= 1
-HL_ENABLE_POSTGRES ?= 0
+# HL_ENABLE_SQLITE / HL_ENABLE_POSTGRES are resolved earlier (near the
+# HL_LINK_TLS gate); here we just emit the -D macros and derive the umbrella.
 
 ifeq ($(HL_ENABLE_SQLITE),1)
 CFLAGS += -DHL_ENABLE_SQLITE
