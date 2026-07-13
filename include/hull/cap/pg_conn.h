@@ -74,4 +74,56 @@ int  hl_pg_conn_start(HlPgConn *conn, int fd, const HlPgDsn *dsn);
 /* Send Terminate (best effort) and release all resources. Idempotent. */
 void hl_pg_conn_close(HlPgConn *conn);
 
+/* ── Placeholder rewriting ────────────────────────────────────────── */
+
+/*
+ * Rewrite SQLite-style '?' placeholders to PostgreSQL $1, $2, ..., skipping
+ * any '?' inside single-quoted strings, double-quoted identifiers,
+ * dollar-quoted strings, and -- line / block comments. Writes a
+ * NUL-terminated result into out (size outsize) and sets *nparams to the
+ * placeholder count. Returns 0, or -1 if the result does not fit. Pure and
+ * bounded; safe to fuzz.
+ */
+int hl_pg_rewrite_sql(const char *sql, char *out, size_t outsize, int *nparams);
+
+/* ── Parameterized query execution (extended protocol) ────────────── */
+
+/* A text-format bind parameter; text == NULL means SQL NULL. */
+typedef struct HlPgParam {
+    const char *text;
+    int32_t     len;
+} HlPgParam;
+
+/* A result column descriptor from RowDescription. */
+typedef struct HlPgField {
+    const char *name;   /* valid only for the duration of the desc callback */
+    int32_t     oid;    /* PostgreSQL type OID */
+} HlPgField;
+
+/* RowDescription callback: fired once, before any rows. */
+typedef void (*HlPgDescCb)(void *ctx, const HlPgField *fields, int nfields);
+
+/*
+ * DataRow callback. values[i] is NULL for SQL NULL, otherwise a pointer to
+ * lengths[i] text-format bytes (not NUL-terminated). The pointers are valid
+ * only for the duration of the call; copy anything you need to retain.
+ * Return 0 to continue, non-zero to stop consuming rows.
+ */
+typedef int (*HlPgRowCb)(void *ctx, const char *const *values,
+                         const int32_t *lengths, int ncols);
+
+/*
+ * Run one parameterized statement over the extended protocol
+ * (Parse / Bind / Describe / Execute / Sync). @p sql uses '?' placeholders,
+ * rewritten internally; @p params are bound in text format, so SQL injection
+ * is impossible (values never touch the SQL text). desc_cb / row_cb may be
+ * NULL for statements with no result set. On CommandComplete the affected
+ * row count, when the tag carries one, is stored in *affected (may be NULL).
+ * Returns 0 on success, -1 on error with conn->errmsg set.
+ */
+int hl_pg_query(HlPgConn *conn, const char *sql,
+                const HlPgParam *params, int nparams,
+                HlPgDescCb desc_cb, HlPgRowCb row_cb, void *cb_ctx,
+                int64_t *affected);
+
 #endif /* HL_CAP_PG_CONN_H */

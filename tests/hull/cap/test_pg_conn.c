@@ -11,7 +11,9 @@
 
 #include "utest.h"
 #include "hull/cap/pg_conn.h"
+#include "hull/cap/pgwire.h"
 
+#include <stdint.h>
 #include <string.h>
 #include <unistd.h>
 #include <sys/socket.h>
@@ -168,6 +170,190 @@ UTEST(pg_conn, handshake_server_error)
     ASSERT_TRUE(strstr(conn.errmsg, "boom") != NULL);
 
     close(sv[0]);   /* sv[1] already closed by the failed handshake */
+}
+
+/* ── Placeholder rewriting ────────────────────────────────────────── */
+
+UTEST(pg_rewrite, placeholders_and_literals)
+{
+    char out[512];
+    int n;
+
+    ASSERT_EQ(0, hl_pg_rewrite_sql("a = ? AND b = ?", out, sizeof out, &n));
+    ASSERT_STREQ(out, "a = $1 AND b = $2");
+    ASSERT_EQ(n, 2);
+
+    ASSERT_EQ(0, hl_pg_rewrite_sql("SELECT '?' , ?", out, sizeof out, &n));
+    ASSERT_STREQ(out, "SELECT '?' , $1");
+    ASSERT_EQ(n, 1);
+
+    ASSERT_EQ(0, hl_pg_rewrite_sql("SELECT \"c?\" , ?", out, sizeof out, &n));
+    ASSERT_STREQ(out, "SELECT \"c?\" , $1");
+    ASSERT_EQ(n, 1);
+
+    ASSERT_EQ(0, hl_pg_rewrite_sql("SELECT 'a''?b', ?", out, sizeof out, &n));
+    ASSERT_STREQ(out, "SELECT 'a''?b', $1");
+    ASSERT_EQ(n, 1);
+
+    ASSERT_EQ(0, hl_pg_rewrite_sql("x -- ? c\n, ?", out, sizeof out, &n));
+    ASSERT_STREQ(out, "x -- ? c\n, $1");
+    ASSERT_EQ(n, 1);
+
+    ASSERT_EQ(0, hl_pg_rewrite_sql("x /* ? */ , ?", out, sizeof out, &n));
+    ASSERT_STREQ(out, "x /* ? */ , $1");
+    ASSERT_EQ(n, 1);
+
+    ASSERT_EQ(0, hl_pg_rewrite_sql("x $$ ? $$ , ?", out, sizeof out, &n));
+    ASSERT_STREQ(out, "x $$ ? $$ , $1");
+    ASSERT_EQ(n, 1);
+
+    ASSERT_EQ(0, hl_pg_rewrite_sql("x $tag$ ? $tag$, ?", out, sizeof out, &n));
+    ASSERT_STREQ(out, "x $tag$ ? $tag$, $1");
+    ASSERT_EQ(n, 1);
+
+    ASSERT_EQ(0, hl_pg_rewrite_sql("SELECT 1", out, sizeof out, &n));
+    ASSERT_STREQ(out, "SELECT 1");
+    ASSERT_EQ(n, 0);
+}
+
+UTEST(pg_rewrite, overflow_fails_closed)
+{
+    char small[4];
+    int n;
+    ASSERT_EQ(-1, hl_pg_rewrite_sql("SELECT ?", small, sizeof small, &n));
+}
+
+/* ── Query exchange over a socketpair ─────────────────────────────── */
+
+struct qcollect {
+    int  nrows;
+    char v[8][2][64];
+    int  isnull[8][2];
+    int  nfields;
+    char field0[32];
+    char field1[32];
+};
+
+static void q_desc(void *ctx, const HlPgField *f, int nf)
+{
+    struct qcollect *co = ctx;
+    co->nfields = nf;
+    if (nf > 0) snprintf(co->field0, sizeof co->field0, "%s", f[0].name);
+    if (nf > 1) snprintf(co->field1, sizeof co->field1, "%s", f[1].name);
+}
+
+static int q_row(void *ctx, const char *const *vals, const int32_t *lens, int nc)
+{
+    struct qcollect *co = ctx;
+    if (co->nrows >= 8) return 1;
+    int r = co->nrows++;
+    for (int i = 0; i < nc && i < 2; i++) {
+        if (!vals[i]) {
+            co->isnull[r][i] = 1;
+        } else {
+            int l = lens[i] < 63 ? lens[i] : 63;
+            memcpy(co->v[r][i], vals[i], (size_t)l);
+            co->v[r][i][l] = '\0';
+        }
+    }
+    return 0;
+}
+
+UTEST(pg_query, select_rows_and_affected)
+{
+    int sv[2];
+    ASSERT_EQ(0, socketpair(AF_UNIX, SOCK_STREAM, 0, sv));
+
+    HlPgWriter s;
+    hl_pg_writer_init(&s);
+    size_t m;
+    m = hl_pg_msg_begin(&s, '1'); hl_pg_msg_end(&s, m);   /* ParseComplete */
+    m = hl_pg_msg_begin(&s, '2'); hl_pg_msg_end(&s, m);   /* BindComplete  */
+    m = hl_pg_msg_begin(&s, 'T');                          /* RowDescription */
+    hl_pg_put_i16(&s, 2);
+    hl_pg_put_cstr(&s, "id");
+    hl_pg_put_i32(&s, 0); hl_pg_put_i16(&s, 0); hl_pg_put_i32(&s, 23);
+    hl_pg_put_i16(&s, 4); hl_pg_put_i32(&s, -1); hl_pg_put_i16(&s, 0);
+    hl_pg_put_cstr(&s, "name");
+    hl_pg_put_i32(&s, 0); hl_pg_put_i16(&s, 0); hl_pg_put_i32(&s, 25);
+    hl_pg_put_i16(&s, -1); hl_pg_put_i32(&s, -1); hl_pg_put_i16(&s, 0);
+    hl_pg_msg_end(&s, m);
+    m = hl_pg_msg_begin(&s, 'D');                          /* DataRow 1 */
+    hl_pg_put_i16(&s, 2);
+    hl_pg_put_i32(&s, 1); hl_pg_put_bytes(&s, "1", 1);
+    hl_pg_put_i32(&s, 5); hl_pg_put_bytes(&s, "alice", 5);
+    hl_pg_msg_end(&s, m);
+    m = hl_pg_msg_begin(&s, 'D');                          /* DataRow 2, NULL name */
+    hl_pg_put_i16(&s, 2);
+    hl_pg_put_i32(&s, 1); hl_pg_put_bytes(&s, "2", 1);
+    hl_pg_put_i32(&s, -1);
+    hl_pg_msg_end(&s, m);
+    m = hl_pg_msg_begin(&s, 'C'); hl_pg_put_cstr(&s, "SELECT 2"); hl_pg_msg_end(&s, m);
+    m = hl_pg_msg_begin(&s, 'Z'); hl_pg_put_u8(&s, 'I'); hl_pg_msg_end(&s, m);
+    ASSERT_FALSE(s.err);
+    ASSERT_TRUE(write(sv[0], s.buf, s.len) == (ssize_t)s.len);
+    hl_pg_writer_free(&s);
+
+    HlPgConn conn;
+    memset(&conn, 0, sizeof conn);
+    conn.fd = sv[1];
+
+    struct qcollect co;
+    memset(&co, 0, sizeof co);
+    HlPgParam p = { .text = "7", .len = 1 };
+    int64_t affected = -1;
+    ASSERT_EQ(0, hl_pg_query(&conn, "SELECT id, name FROM t WHERE id > ?",
+                             &p, 1, q_desc, q_row, &co, &affected));
+
+    ASSERT_EQ(co.nfields, 2);
+    ASSERT_STREQ(co.field0, "id");
+    ASSERT_STREQ(co.field1, "name");
+    ASSERT_EQ(co.nrows, 2);
+    ASSERT_STREQ(co.v[0][0], "1");
+    ASSERT_STREQ(co.v[0][1], "alice");
+    ASSERT_STREQ(co.v[1][0], "2");
+    ASSERT_EQ(co.isnull[1][1], 1);
+    ASSERT_EQ(affected, (int64_t)2);
+
+    /* The client sent the rewritten SQL (with $1) and the bound value. */
+    uint8_t got[512];
+    ssize_t n = read(sv[0], got, sizeof got);
+    ASSERT_TRUE(n > 0);
+    ASSERT_TRUE(bytes_contain(got, (size_t)n, "id > $1"));
+
+    hl_pg_conn_close(&conn);
+    close(sv[0]);
+}
+
+UTEST(pg_query, server_error_then_ready)
+{
+    int sv[2];
+    ASSERT_EQ(0, socketpair(AF_UNIX, SOCK_STREAM, 0, sv));
+
+    HlPgWriter s;
+    hl_pg_writer_init(&s);
+    size_t m;
+    m = hl_pg_msg_begin(&s, '1'); hl_pg_msg_end(&s, m);    /* ParseComplete */
+    m = hl_pg_msg_begin(&s, 'E');                           /* ErrorResponse */
+    hl_pg_put_u8(&s, 'M');
+    hl_pg_put_cstr(&s, "syntax error");
+    hl_pg_put_u8(&s, 0);                                    /* field terminator */
+    hl_pg_msg_end(&s, m);
+    m = hl_pg_msg_begin(&s, 'Z'); hl_pg_put_u8(&s, 'E'); hl_pg_msg_end(&s, m);
+    ASSERT_FALSE(s.err);
+    ASSERT_TRUE(write(sv[0], s.buf, s.len) == (ssize_t)s.len);
+    hl_pg_writer_free(&s);
+
+    HlPgConn conn;
+    memset(&conn, 0, sizeof conn);
+    conn.fd = sv[1];
+
+    HlPgParam p = { .text = "7", .len = 1 };
+    ASSERT_EQ(-1, hl_pg_query(&conn, "SELECT ?", &p, 1, NULL, NULL, NULL, NULL));
+    ASSERT_TRUE(strstr(conn.errmsg, "syntax error") != NULL);
+
+    hl_pg_conn_close(&conn);
+    close(sv[0]);
 }
 
 UTEST_MAIN()

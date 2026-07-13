@@ -13,9 +13,11 @@
 #include "hull/cap/pg_conn.h"
 #include "hull/cap/pgwire.h"
 
+#include <ctype.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <netdb.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -436,4 +438,333 @@ void hl_pg_conn_close(HlPgConn *conn)
         hl_pg_writer_free(&w);
     }
     conn_teardown(conn);
+}
+
+/* ── Placeholder rewriting ────────────────────────────────────────── */
+
+int hl_pg_rewrite_sql(const char *sql, char *out, size_t outsize, int *nparams)
+{
+    if (nparams) *nparams = 0;
+    if (!sql || !out || outsize == 0) return -1;
+
+    size_t o = 0;
+    int n = 0;
+    const char *p = sql;
+
+#define RW_PUT(ch) do { if (o + 1 >= outsize) return -1; out[o++] = (char)(ch); } while (0)
+
+    while (*p) {
+        char c = *p;
+
+        /* Single-quoted string or double-quoted identifier; doubled quote
+         * is an in-literal escape. A '?' inside is left untouched. */
+        if (c == '\'' || c == '"') {
+            char q = c;
+            RW_PUT(c);
+            p++;
+            while (*p) {
+                if (*p == q) {
+                    if (p[1] == q) { RW_PUT(q); RW_PUT(q); p += 2; continue; }
+                    RW_PUT(q); p++;
+                    break;
+                }
+                RW_PUT(*p);
+                p++;
+            }
+            continue;
+        }
+
+        /* Line comment. */
+        if (c == '-' && p[1] == '-') {
+            while (*p && *p != '\n') { RW_PUT(*p); p++; }
+            continue;
+        }
+
+        /* Block comment (PostgreSQL allows nesting). */
+        if (c == '/' && p[1] == '*') {
+            RW_PUT('/'); RW_PUT('*'); p += 2;
+            int depth = 1;
+            while (*p && depth > 0) {
+                if (p[0] == '/' && p[1] == '*') { RW_PUT('/'); RW_PUT('*'); p += 2; depth++; }
+                else if (p[0] == '*' && p[1] == '/') { RW_PUT('*'); RW_PUT('/'); p += 2; depth--; }
+                else { RW_PUT(*p); p++; }
+            }
+            continue;
+        }
+
+        /* Dollar-quoted string: $tag$ ... $tag$ (tag may be empty). */
+        if (c == '$') {
+            const char *q = p + 1;
+            while (*q && (isalnum((unsigned char)*q) || *q == '_')) q++;
+            if (*q == '$') {
+                size_t dl = (size_t)(q - p) + 1;   /* length of "$tag$" */
+                for (size_t i = 0; i < dl; i++) RW_PUT(p[i]);
+                const char *scan = p + dl;
+                while (*scan) {
+                    if (*scan == '$' && strncmp(scan, p, dl) == 0) {
+                        for (size_t i = 0; i < dl; i++) RW_PUT(scan[i]);
+                        scan += dl;
+                        break;
+                    }
+                    RW_PUT(*scan);
+                    scan++;
+                }
+                p = scan;   /* unterminated: body already emitted verbatim */
+                continue;
+            }
+            RW_PUT(c);
+            p++;
+            continue;
+        }
+
+        /* The placeholder. */
+        if (c == '?') {
+            char buf[16];
+            int len = snprintf(buf, sizeof buf, "$%d", ++n);
+            if (len < 0) return -1;
+            for (int i = 0; i < len; i++) RW_PUT(buf[i]);
+            p++;
+            continue;
+        }
+
+        RW_PUT(c);
+        p++;
+    }
+
+    if (o >= outsize) return -1;
+    out[o] = '\0';
+    if (nparams) *nparams = n;
+    return 0;
+
+#undef RW_PUT
+}
+
+/* ── Parameterized query execution ────────────────────────────────── */
+
+/* Row count from a CommandComplete tag ("INSERT 0 5", "UPDATE 3", ...):
+ * the last space-separated token when it is numeric, else -1. */
+static int64_t parse_affected(const char *tag)
+{
+    const char *last = strrchr(tag, ' ');
+    if (!last) return -1;
+    last++;
+    if (!*last) return -1;
+    int64_t v = 0;
+    for (const char *q = last; *q; q++) {
+        if (*q < '0' || *q > '9') return -1;
+        v = v * 10 + (*q - '0');
+    }
+    return v;
+}
+
+/* Column-count guard: PostgreSQL tops out at 1600 columns; cap generously. */
+#define PG_MAX_COLS 4096
+
+static int handle_row_desc(HlPgCursor *c, HlPgDescCb cb, void *ctx,
+                           HlPgConn *conn)
+{
+    int nf = (int)hl_pg_get_i16(c);
+    if (hl_pg_cursor_err(c) || nf < 0 || nf > PG_MAX_COLS) {
+        set_err(conn->errmsg, sizeof conn->errmsg, "malformed RowDescription");
+        return -1;
+    }
+    HlPgField *fields = nf ? calloc((size_t)nf, sizeof *fields) : NULL;
+    if (nf && !fields) { set_err(conn->errmsg, sizeof conn->errmsg, "out of memory");
+                         return -1; }
+    for (int i = 0; i < nf; i++) {
+        const char *name = hl_pg_get_cstr(c);
+        (void)hl_pg_get_i32(c);   /* table oid   */
+        (void)hl_pg_get_i16(c);   /* column attr */
+        int32_t oid = hl_pg_get_i32(c);
+        (void)hl_pg_get_i16(c);   /* type length */
+        (void)hl_pg_get_i32(c);   /* type modifier */
+        (void)hl_pg_get_i16(c);   /* format code */
+        fields[i].name = name;
+        fields[i].oid = oid;
+    }
+    if (hl_pg_cursor_err(c)) {
+        free(fields);
+        set_err(conn->errmsg, sizeof conn->errmsg, "malformed RowDescription");
+        return -1;
+    }
+    if (cb) cb(ctx, fields, nf);
+    free(fields);
+    return 0;
+}
+
+/* Returns 0 to continue, 1 if the callback asked to stop, -1 on error. */
+static int handle_data_row(HlPgCursor *c, HlPgRowCb cb, void *ctx,
+                           HlPgConn *conn)
+{
+    int nc = (int)hl_pg_get_i16(c);
+    if (hl_pg_cursor_err(c) || nc < 0 || nc > PG_MAX_COLS) {
+        set_err(conn->errmsg, sizeof conn->errmsg, "malformed DataRow");
+        return -1;
+    }
+    const char **vals = nc ? calloc((size_t)nc, sizeof *vals) : NULL;
+    int32_t *lens = nc ? calloc((size_t)nc, sizeof *lens) : NULL;
+    if (nc && (!vals || !lens)) {
+        free(vals); free(lens);
+        set_err(conn->errmsg, sizeof conn->errmsg, "out of memory");
+        return -1;
+    }
+    for (int i = 0; i < nc; i++) {
+        int32_t len = hl_pg_get_i32(c);
+        if (len < 0) {
+            vals[i] = NULL;
+            lens[i] = -1;
+        } else {
+            const uint8_t *b = hl_pg_get_bytes(c, (size_t)len);
+            vals[i] = (const char *)b;   /* NULL on underrun (cursor err) */
+            lens[i] = len;
+        }
+    }
+    if (hl_pg_cursor_err(c)) {
+        free(vals); free(lens);
+        set_err(conn->errmsg, sizeof conn->errmsg, "malformed DataRow");
+        return -1;
+    }
+    int r = cb ? cb(ctx, vals, lens, nc) : 0;
+    free(vals); free(lens);
+    return r ? 1 : 0;
+}
+
+int hl_pg_query(HlPgConn *conn, const char *sql,
+                const HlPgParam *params, int nparams,
+                HlPgDescCb desc_cb, HlPgRowCb row_cb, void *cb_ctx,
+                int64_t *affected)
+{
+    if (affected) *affected = -1;
+    if (!conn || conn->fd < 0) {
+        if (conn) set_err(conn->errmsg, sizeof conn->errmsg, "not connected");
+        return -1;
+    }
+    conn->errmsg[0] = '\0';
+    if (nparams < 0 || nparams > 65535) {
+        set_err(conn->errmsg, sizeof conn->errmsg, "invalid parameter count");
+        return -1;
+    }
+
+    /* Rewrite '?' -> '$n' into a buffer sized for the worst case. */
+    size_t rwcap = strlen(sql) + (size_t)nparams * 12 + 32;
+    char *rw = malloc(rwcap);
+    if (!rw) { set_err(conn->errmsg, sizeof conn->errmsg, "out of memory"); return -1; }
+    int found = 0;
+    if (hl_pg_rewrite_sql(sql, rw, rwcap, &found) != 0) {
+        free(rw);
+        set_err(conn->errmsg, sizeof conn->errmsg, "failed to rewrite SQL placeholders");
+        return -1;
+    }
+    if (found != nparams) {
+        snprintf(conn->errmsg, sizeof conn->errmsg,
+                 "parameter count mismatch: %d placeholders, %d values",
+                 found, nparams);
+        free(rw);
+        return -1;
+    }
+
+    /* Parse + Bind + Describe(portal) + Execute + Sync, one flush. */
+    HlPgWriter w;
+    hl_pg_writer_init(&w);
+
+    size_t m = hl_pg_msg_begin(&w, HL_PG_F_PARSE);
+    hl_pg_put_cstr(&w, "");            /* unnamed prepared statement */
+    hl_pg_put_cstr(&w, rw);            /* the rewritten query */
+    hl_pg_put_i16(&w, 0);              /* 0 parameter type oids: server infers */
+    hl_pg_msg_end(&w, m);
+
+    m = hl_pg_msg_begin(&w, HL_PG_F_BIND);
+    hl_pg_put_cstr(&w, "");            /* unnamed portal */
+    hl_pg_put_cstr(&w, "");            /* unnamed statement */
+    hl_pg_put_i16(&w, 0);             /* 0 parameter format codes: all text */
+    hl_pg_put_i16(&w, (int16_t)nparams);
+    for (int i = 0; i < nparams; i++) {
+        if (!params[i].text) {
+            hl_pg_put_i32(&w, -1);     /* SQL NULL */
+        } else {
+            int32_t len = params[i].len >= 0
+                        ? params[i].len : (int32_t)strlen(params[i].text);
+            hl_pg_put_i32(&w, len);
+            hl_pg_put_bytes(&w, params[i].text, (size_t)len);
+        }
+    }
+    hl_pg_put_i16(&w, 0);             /* 0 result format codes: all text */
+    hl_pg_msg_end(&w, m);
+
+    m = hl_pg_msg_begin(&w, HL_PG_F_DESCRIBE);
+    hl_pg_put_u8(&w, 'P');             /* describe the portal */
+    hl_pg_put_cstr(&w, "");
+    hl_pg_msg_end(&w, m);
+
+    m = hl_pg_msg_begin(&w, HL_PG_F_EXECUTE);
+    hl_pg_put_cstr(&w, "");
+    hl_pg_put_i32(&w, 0);              /* 0 = all rows */
+    hl_pg_msg_end(&w, m);
+
+    m = hl_pg_msg_begin(&w, HL_PG_F_SYNC);
+    hl_pg_msg_end(&w, m);
+
+    free(rw);
+    int se = w.err || conn_send(conn, w.buf, w.len);
+    hl_pg_writer_free(&w);
+    if (se) {
+        if (!conn->errmsg[0])
+            set_err(conn->errmsg, sizeof conn->errmsg, "failed to send query");
+        return -1;
+    }
+
+    /* Read the response stream until ReadyForQuery. */
+    int had_error = 0;
+    int stop_rows = 0;
+    for (;;) {
+        HlPgFrame f;
+        if (conn_next_frame(conn, &f) != 0) return -1;
+
+        HlPgCursor c;
+        hl_pg_cursor_init(&c, &f);
+
+        switch (f.type) {
+        case HL_PG_B_PARSE_COMPLETE:
+        case HL_PG_B_BIND_COMPLETE:
+        case HL_PG_B_NO_DATA:
+        case HL_PG_B_EMPTY_QUERY:
+        case HL_PG_B_PARAM_STATUS:
+        case HL_PG_B_NOTICE:
+            break;
+        case HL_PG_B_ROW_DESC:
+            if (handle_row_desc(&c, desc_cb, cb_ctx, conn) != 0) had_error = 1;
+            break;
+        case HL_PG_B_DATA_ROW:
+            if (!stop_rows) {
+                int r = handle_data_row(&c, row_cb, cb_ctx, conn);
+                if (r < 0) had_error = 1;
+                else if (r > 0) stop_rows = 1;
+            }
+            break;
+        case HL_PG_B_CMD_COMPLETE: {
+            const char *tag = hl_pg_get_cstr(&c);
+            if (tag && affected) *affected = parse_affected(tag);
+            break;
+        }
+        case HL_PG_B_ERROR: {
+            char msg[200] = {0};
+            for (;;) {
+                uint8_t ft = hl_pg_get_u8(&c);
+                if (hl_pg_cursor_err(&c) || ft == 0) break;
+                const char *v = hl_pg_get_cstr(&c);
+                if (!v) break;
+                if (ft == 'M') snprintf(msg, sizeof msg, "%s", v);
+            }
+            snprintf(conn->errmsg, sizeof conn->errmsg,
+                     "query failed: %s", msg[0] ? msg : "(no message)");
+            had_error = 1;
+            break;
+        }
+        case HL_PG_B_READY:
+            conn->tx_status = hl_pg_get_u8(&c);
+            return had_error ? -1 : 0;
+        default:
+            break;
+        }
+    }
 }
