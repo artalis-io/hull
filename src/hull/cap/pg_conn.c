@@ -1111,7 +1111,12 @@ int hl_pg_query(HlPgConn *conn, const char *sql,
         set_err(conn->errmsg, sizeof conn->errmsg, "failed to rewrite SQL placeholders");
         return -1;
     }
-    if (found != nparams) {
+    /* Match SQLite's leniency: a Lua/JS params array with trailing nils
+     * reports fewer values than there are placeholders (Lua's # stops at
+     * the first nil), and SQLite binds the unbound tail as NULL. Pad the
+     * missing trailing parameters here the same way. Only MORE values than
+     * placeholders is a real error (SQLite raises SQLITE_RANGE too). */
+    if (nparams > found) {
         snprintf(conn->errmsg, sizeof conn->errmsg,
                  "parameter count mismatch: %d placeholders, %d values",
                  found, nparams);
@@ -1133,9 +1138,11 @@ int hl_pg_query(HlPgConn *conn, const char *sql,
     hl_pg_put_cstr(&w, "");            /* unnamed portal */
     hl_pg_put_cstr(&w, "");            /* unnamed statement */
     hl_pg_put_i16(&w, 0);             /* 0 parameter format codes: all text */
-    hl_pg_put_i16(&w, (int16_t)nparams);
-    for (int i = 0; i < nparams; i++) {
-        if (!params[i].text) {
+    /* Bind `found` parameters to match $1..$found in the query; a missing
+     * trailing param (i >= nparams) binds as SQL NULL, mirroring SQLite. */
+    hl_pg_put_i16(&w, (int16_t)found);
+    for (int i = 0; i < found; i++) {
+        if (i >= nparams || !params[i].text) {
             hl_pg_put_i32(&w, -1);     /* SQL NULL */
         } else {
             int32_t len = params[i].len >= 0

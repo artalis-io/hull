@@ -27,6 +27,18 @@ import { db } from "hull:db";
 const IDENT_RE = /^[a-zA-Z_][a-zA-Z0-9_]*$/;
 const TABLE_PREFIX = "_hull_fts_";
 
+// FTS5 is a SQLite-only feature; there is no Postgres equivalent wired
+// here. Fail with a clear message rather than a cryptic SQL error when
+// the default connection is not SQLite. Same policy as db.udf.
+function requireSqlite() {
+    if (db.backendName !== "sqlite") {
+        throw new Error(
+            "hull/search requires the SQLite backend (FTS5); the current " +
+            "database connection is '" + db.backendName + "'. Full-text " +
+            "search is not available on this backend.");
+    }
+}
+
 /**
  * Validate an identifier (table name, column name).
  * Must match /^[a-zA-Z_][a-zA-Z0-9_]*$/ and must not start with _hull_.
@@ -59,6 +71,7 @@ function ftsTable(name) {
  * @throws If `name`/columns fail identifier validation.
  */
 function createIndex(name, columns, opts) {
+    requireSqlite();
     validateIdent(name, "index name");
 
     if (!Array.isArray(columns) || columns.length === 0)
@@ -115,6 +128,7 @@ function createIndex(name, columns, opts) {
  * @param {string} name
  */
 function dropIndex(name) {
+    requireSqlite();
     validateIdent(name, "index name");
     db.exec("DROP TABLE IF EXISTS " + ftsTable(name));
 }
@@ -128,6 +142,7 @@ function dropIndex(name) {
  * @throws If `id` is `null`/`undefined` or any field name fails validation.
  */
 function index(name, id, fields) {
+    requireSqlite();
     validateIdent(name, "index name");
 
     if (id === undefined || id === null)
@@ -173,6 +188,7 @@ function index(name, id, fields) {
  * @param {string|number} id
  */
 function remove(name, id) {
+    requireSqlite();
     validateIdent(name, "index name");
 
     if (id === undefined || id === null)
@@ -200,6 +216,7 @@ function remove(name, id) {
  * @returns {Array<{id:any, rank:number, snippet?:string, highlight?:string}>}
  */
 function query(name, q, opts) {
+    requireSqlite();
     validateIdent(name, "index name");
 
     if (typeof q !== "string" || q.length === 0)
@@ -285,6 +302,7 @@ function query(name, q, opts) {
  * @param {string} [opts.idColumn="id"]
  */
 function reindex(name, sourceTable, opts) {
+    requireSqlite();
     validateIdent(name, "index name");
     validateIdent(sourceTable, "source table name");
 

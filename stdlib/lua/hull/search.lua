@@ -22,6 +22,18 @@ local db = require("hull.db")
 
 local search = {}
 
+-- FTS5 is a SQLite-only feature; there is no Postgres equivalent wired
+-- here. Fail with a clear message rather than a cryptic "near VIRTUAL"
+-- (or information_schema) SQL error when the default connection is not
+-- SQLite. Same policy as db.udf.
+local function require_sqlite()
+    if db.backend_name ~= "sqlite" then
+        error("hull/search requires the SQLite backend (FTS5); the current "
+              .. "database connection is '" .. tostring(db.backend_name)
+              .. "'. Full-text search is not available on this backend.")
+    end
+end
+
 -- ── Helpers ───────────────────────────────────────────────────────────
 
 local FTS_PREFIX = "_hull_fts_"
@@ -80,6 +92,7 @@ end
 -- @tparam[opt] string opts.content_rowid  Rowid column for external content.
 -- @raise If `name`/columns fail identifier validation.
 function search.create_index(name, columns, opts)
+    require_sqlite()
     validate_identifier(name, "index name")
     validate_columns(columns)
     opts = opts or {}
@@ -142,6 +155,7 @@ end
 -- @function search.drop_index
 -- @tparam string name
 function search.drop_index(name)
+    require_sqlite()
     validate_identifier(name, "index name")
     db.exec("DROP TABLE IF EXISTS " .. fts_table(name))
 end
@@ -154,6 +168,7 @@ end
 -- @tparam table  fields  Map of column name → value (e.g. `{title=..., body=...}`).
 -- @raise If `id` is nil or any field name fails validation.
 function search.index(name, id, fields)
+    require_sqlite()
     validate_identifier(name, "index name")
     if id == nil then
         error("search.index: id must not be nil")
@@ -185,6 +200,7 @@ end
 -- @tparam string name
 -- @tparam string|number id
 function search.remove(name, id)
+    require_sqlite()
     validate_identifier(name, "index name")
     if id == nil then
         error("search.remove: id must not be nil")
@@ -211,6 +227,7 @@ end
 -- @tparam[opt="rank"] string opts.order  `"rank"` or `"rowid"`.
 -- @treturn {table,...}  Array of `{id, rank, snippet?, highlight?}` rows.
 function search.query(name, query, opts)
+    require_sqlite()
     validate_identifier(name, "index name")
     if type(query) ~= "string" or query == "" then
         error("search.query: query must be a non-empty string")
@@ -281,6 +298,7 @@ end
 --   body = "content" }`).
 -- @tparam[opt="id"] string opts.id_column  Source table's ID column.
 function search.reindex(name, source_table, opts)
+    require_sqlite()
     validate_identifier(name, "index name")
     validate_identifier(source_table, "source table")
     opts = opts or {}

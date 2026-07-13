@@ -406,8 +406,22 @@ static int pg_table_columns_row(void *ctx, HlColumn *cols, int ncols)
 {
     PgColsFwd *fwd = ctx;
     for (int i = 0; i < ncols; i++) {
-        if (cols[i].value.type == HL_TYPE_TEXT && cols[i].value.s)
-            fwd->cb(fwd->cb_ctx, cols[i].value.s);
+        if (cols[i].value.type != HL_TYPE_TEXT || !cols[i].value.s)
+            continue;
+        /* The text value borrows non-NUL-terminated wire bytes (the row
+         * decoder tracks length separately). HlDbColumnCallback takes a C
+         * string, so copy + terminate using the tracked length; otherwise
+         * the callback over-reads past the field into the next message. */
+        size_t len = cols[i].value.len;
+        char stackbuf[128];
+        char *name = (len < sizeof stackbuf) ? stackbuf : malloc(len + 1);
+        if (!name)
+            continue;
+        memcpy(name, cols[i].value.s, len);
+        name[len] = '\0';
+        fwd->cb(fwd->cb_ctx, name);
+        if (name != stackbuf)
+            free(name);
     }
     return 0;
 }
