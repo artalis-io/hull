@@ -356,6 +356,47 @@ UTEST(pg_query, server_error_then_ready)
     close(sv[0]);
 }
 
+/* ── TLS negotiation (SSLRequest / sslmode) ───────────────────────── */
+
+UTEST(pg_ssl, sslmode_parse)
+{
+    ASSERT_EQ(hl_pg_sslmode_parse(NULL), (int)HL_PG_SSLMODE_DISABLE);
+    ASSERT_EQ(hl_pg_sslmode_parse(""), (int)HL_PG_SSLMODE_DISABLE);
+    ASSERT_EQ(hl_pg_sslmode_parse("disable"), (int)HL_PG_SSLMODE_DISABLE);
+    ASSERT_EQ(hl_pg_sslmode_parse("prefer"), (int)HL_PG_SSLMODE_PREFER);
+    ASSERT_EQ(hl_pg_sslmode_parse("require"), (int)HL_PG_SSLMODE_REQUIRE);
+    ASSERT_EQ(hl_pg_sslmode_parse("verify-full"), (int)HL_PG_SSLMODE_VERIFY);
+    ASSERT_EQ(hl_pg_sslmode_parse("bogus"), -1);
+}
+
+static HlPgSslDecision negotiate_with(HlPgSslMode mode, int have_resp, char resp)
+{
+    int sv[2];
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, sv) != 0) return HL_PG_SSL_FAIL;
+    if (have_resp) { ssize_t w = write(sv[0], &resp, 1); (void)w; }
+    char e[128] = {0};
+    HlPgSslDecision d = hl_pg_ssl_negotiate(sv[1], mode, e, sizeof e);
+    close(sv[0]);
+    close(sv[1]);
+    return d;
+}
+
+UTEST(pg_ssl, negotiation_matrix)
+{
+    /* disable: no SSLRequest sent, immediate plaintext. */
+    ASSERT_EQ(negotiate_with(HL_PG_SSLMODE_DISABLE, 0, 0), HL_PG_SSL_PLAINTEXT);
+    /* prefer: 'S' uses TLS, 'N' falls back to plaintext. */
+    ASSERT_EQ(negotiate_with(HL_PG_SSLMODE_PREFER, 1, 'S'), HL_PG_SSL_USE_TLS);
+    ASSERT_EQ(negotiate_with(HL_PG_SSLMODE_PREFER, 1, 'N'), HL_PG_SSL_PLAINTEXT);
+    /* require: 'S' uses TLS, 'N' is a hard error. */
+    ASSERT_EQ(negotiate_with(HL_PG_SSLMODE_REQUIRE, 1, 'S'), HL_PG_SSL_USE_TLS);
+    ASSERT_EQ(negotiate_with(HL_PG_SSLMODE_REQUIRE, 1, 'N'), HL_PG_SSL_FAIL);
+    /* verify: 'N' is a hard error too. */
+    ASSERT_EQ(negotiate_with(HL_PG_SSLMODE_VERIFY, 1, 'N'), HL_PG_SSL_FAIL);
+    /* unexpected reply byte is an error. */
+    ASSERT_EQ(negotiate_with(HL_PG_SSLMODE_PREFER, 1, 'X'), HL_PG_SSL_FAIL);
+}
+
 /* ── SCRAM-SHA-256 ────────────────────────────────────────────────── */
 
 UTEST(pg_scram, base64_roundtrip)

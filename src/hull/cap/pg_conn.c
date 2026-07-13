@@ -609,6 +609,55 @@ int hl_pg_conn_start(HlPgConn *conn, int fd, const HlPgDsn *dsn)
     }
 }
 
+/* ── TLS negotiation (SSLRequest / sslmode) ───────────────────────── */
+
+int hl_pg_sslmode_parse(const char *s)
+{
+    if (!s || !s[0])                   return HL_PG_SSLMODE_DISABLE;  /* 3b.2 -> PREFER */
+    if (strcmp(s, "disable") == 0)     return HL_PG_SSLMODE_DISABLE;
+    if (strcmp(s, "prefer") == 0)      return HL_PG_SSLMODE_PREFER;
+    if (strcmp(s, "require") == 0)     return HL_PG_SSLMODE_REQUIRE;
+    if (strcmp(s, "verify-ca") == 0 ||
+        strcmp(s, "verify-full") == 0) return HL_PG_SSLMODE_VERIFY;
+    return -1;
+}
+
+HlPgSslDecision hl_pg_ssl_negotiate(int fd, HlPgSslMode mode,
+                                    char *errbuf, size_t errlen)
+{
+    if (mode == HL_PG_SSLMODE_DISABLE) return HL_PG_SSL_PLAINTEXT;
+
+    /* SSLRequest: length(8) then request code 80877103 (0x04d2162f). */
+    static const uint8_t req[8] = { 0, 0, 0, 8, 0x04, 0xd2, 0x16, 0x2f };
+    size_t sent = 0;
+    while (sent < sizeof req) {
+        ssize_t n;
+        do { n = send(fd, req + sent, sizeof req - sent, PG_SEND_FLAGS); }
+        while (n < 0 && errno == EINTR);
+        if (n <= 0) { set_err(errbuf, errlen, "failed to send SSLRequest");
+                      return HL_PG_SSL_FAIL; }
+        sent += (size_t)n;
+    }
+
+    uint8_t resp;
+    ssize_t n;
+    do { n = recv(fd, &resp, 1, 0); } while (n < 0 && errno == EINTR);
+    if (n <= 0) { set_err(errbuf, errlen, "no SSLRequest response from server");
+                  return HL_PG_SSL_FAIL; }
+
+    if (resp == 'S') return HL_PG_SSL_USE_TLS;
+    if (resp == 'N') {
+        if (mode >= HL_PG_SSLMODE_REQUIRE) {
+            set_err(errbuf, errlen,
+                    "server does not support TLS but sslmode requires it");
+            return HL_PG_SSL_FAIL;
+        }
+        return HL_PG_SSL_PLAINTEXT;
+    }
+    set_err(errbuf, errlen, "unexpected SSLRequest response from server");
+    return HL_PG_SSL_FAIL;
+}
+
 int hl_pg_conn_open(HlPgConn *conn, const HlPgDsn *dsn, int timeout_ms)
 {
     int fd = pg_connect(dsn->host, dsn->port, timeout_ms);
@@ -619,6 +668,40 @@ int hl_pg_conn_open(HlPgConn *conn, const HlPgDsn *dsn, int timeout_ms)
                  "cannot connect to %s:%s", dsn->host, dsn->port);
         return -1;
     }
+
+    int mode = hl_pg_sslmode_parse(dsn->sslmode);
+    if (mode < 0) {
+        memset(conn, 0, sizeof(*conn));
+        conn->fd = -1;
+        snprintf(conn->errmsg, sizeof conn->errmsg,
+                 "unknown sslmode: %s", dsn->sslmode);
+        close(fd);
+        return -1;
+    }
+    if (mode != HL_PG_SSLMODE_DISABLE) {
+        char e[128] = {0};
+        HlPgSslDecision d = hl_pg_ssl_negotiate(fd, (HlPgSslMode)mode, e, sizeof e);
+        if (d == HL_PG_SSL_FAIL) {
+            memset(conn, 0, sizeof(*conn));
+            conn->fd = -1;
+            snprintf(conn->errmsg, sizeof conn->errmsg, "%s", e);
+            close(fd);
+            return -1;
+        }
+        if (d == HL_PG_SSL_USE_TLS) {
+            /* Phase 3b.2 performs the mbedTLS handshake here (via the shared
+             * tls_client helper) and continues over TLS. */
+            memset(conn, 0, sizeof(*conn));
+            conn->fd = -1;
+            set_err(conn->errmsg, sizeof conn->errmsg,
+                    "TLS transport not yet implemented (Phase 3b.2); "
+                    "use sslmode=disable for now");
+            close(fd);
+            return -1;
+        }
+        /* PLAINTEXT: server declined TLS and sslmode permits fallback. */
+    }
+
     return hl_pg_conn_start(conn, fd, dsn);
 }
 
