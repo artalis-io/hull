@@ -29,6 +29,9 @@
 
 #include "hull/utils/alloc.h"
 #include "hull/app_context.h"
+#ifdef HL_ENABLE_DB
+#include "hull/cap/db_registry.h"
+#endif
 #include "hull/shared/async_backend.h"
 #include "hull/shared/log_lock.h"
 #include "hull/shared/thread_affinity.h"
@@ -1157,6 +1160,15 @@ static int hl_serve_wire_caps(HlServerState *s)
          * for strings (the arena owns them; destroyed at shutdown). */
         hl_manifest_free(&s->manifest);
         s->manifest = sealed;
+
+        /* Point the connection registry at the now-sealed databases map so
+         * db.connect("<name>") can resolve declared named connections. Until
+         * this runs only the seeded "default" resolves. The sealed manifest
+         * lives for the process, satisfying the registry's borrow. */
+#ifdef HL_ENABLE_DB
+        if (rt->db_registry)
+            hl_db_registry_set_manifest(rt->db_registry, &s->manifest);
+#endif
 
         /* CORS config — build it INSIDE the seal arena alongside the
          * manifest strings, BEFORE the mprotect.  Previously the

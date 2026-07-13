@@ -8,6 +8,7 @@
 #include "mod_buffer.h"
 #include "hull/cap/db.h"
 #include "hull/cap/db_backend.h"
+#include "hull/cap/db_registry.h"
 #include "hull/shared/async.h"
 #include "hull/net_backend.h"
 #include "hull/worker_db.h"
@@ -166,6 +167,19 @@ static int lua_is_stdlib_caller(lua_State *L)
     return ar.source && strncmp(ar.source, "hull.", 5) == 0;
 }
 
+/* Resolve the connection this call operates on: a handle bound as upvalue 1
+ * (a db.connect()/db.default() method), else the runtime default handle (the
+ * top-level db.* bridge). @p is_stdlib selects the internal-tables handle for
+ * the bridge path; the bound-handle path is already an explicit connection. */
+static HlDbHandle *db_call_handle(lua_State *L, int is_stdlib)
+{
+    if (lua_islightuserdata(L, lua_upvalueindex(1)))
+        return (HlDbHandle *)lua_touserdata(L, lua_upvalueindex(1));
+    HlLua *lua = get_hl_lua(L);
+    if (!lua) return NULL;
+    return is_stdlib ? lua->base.hull_db_handle : lua->base.db_handle;
+}
+
 /* db.query implementation */
 static int lua_db_query_impl(lua_State *L)
 {
@@ -176,7 +190,7 @@ static int lua_db_query_impl(lua_State *L)
     const char *sql = luaL_checkstring(L, 1);
 
     int is_stdlib = lua_is_stdlib_caller(L);
-    HlDbHandle *h = is_stdlib ? lua->base.hull_db_handle : lua->base.db_handle;
+    HlDbHandle *h = db_call_handle(L, is_stdlib);
 
     if (!is_stdlib && hl_cap_db_check_namespace(sql) != 0)
         return luaL_error(L, "access denied: _hull_* tables are reserved");
@@ -233,7 +247,7 @@ static int lua_db_exec_impl(lua_State *L)
     const char *sql = luaL_checkstring(L, 1);
 
     int is_stdlib = lua_is_stdlib_caller(L);
-    HlDbHandle *h = is_stdlib ? lua->base.hull_db_handle : lua->base.db_handle;
+    HlDbHandle *h = db_call_handle(L, is_stdlib);
 
     if (!is_stdlib && hl_cap_db_check_namespace(sql) != 0)
         return luaL_error(L, "access denied: _hull_* tables are reserved");
@@ -266,7 +280,8 @@ static int lua_db_last_id(lua_State *L)
     if (!lua || !lua->base.db_handle)
         return luaL_error(L, "database not available");
 
-    lua_pushinteger(L, (lua_Integer)hl_db_last_id(lua->base.db_handle));
+    lua_pushinteger(L, (lua_Integer)hl_db_last_id(
+        db_call_handle(L, lua_is_stdlib_caller(L))));
     return 1;
 }
 
@@ -279,7 +294,7 @@ static int lua_db_batch(lua_State *L)
 
     luaL_checktype(L, 1, LUA_TFUNCTION);
 
-    HlDbHandle *h = lua->base.db_handle;
+    HlDbHandle *h = db_call_handle(L, lua_is_stdlib_caller(L));
 
     if (hl_db_begin(h) != 0)
         return luaL_error(L, "BEGIN failed: %s", hl_db_errmsg(h));
@@ -423,7 +438,7 @@ static int lua_db_insert_if_absent(lua_State *L)
                           n_cols, n_vals);
 
     int is_stdlib = lua_is_stdlib_caller(L);
-    HlDbHandle *h = is_stdlib ? lua->base.hull_db_handle : lua->base.db_handle;
+    HlDbHandle *h = db_call_handle(L, is_stdlib);
 
     int rc = hl_db_insert_if_absent(h, table, conflict_cols, n_conflict,
                                      cols, vals, n_cols);
@@ -458,7 +473,7 @@ static int lua_db_upsert(lua_State *L)
                           n_cols, n_vals);
 
     int is_stdlib = lua_is_stdlib_caller(L);
-    HlDbHandle *h = is_stdlib ? lua->base.hull_db_handle : lua->base.db_handle;
+    HlDbHandle *h = db_call_handle(L, is_stdlib);
 
     int rc = hl_db_upsert(h, table, conflict_cols, n_conflict,
                            cols, vals, n_cols);
@@ -495,7 +510,7 @@ static int lua_db_table_columns(lua_State *L)
 
     const char *table = luaL_checkstring(L, 1);
     int is_stdlib = lua_is_stdlib_caller(L);
-    HlDbHandle *h = is_stdlib ? lua->base.hull_db_handle : lua->base.db_handle;
+    HlDbHandle *h = db_call_handle(L, is_stdlib);
 
     lua_newtable(L);  /* result */
     LuaColForwardCtx fwd = { L, 0 };
@@ -1094,9 +1109,76 @@ static const luaL_Reg db_udf_funcs[] = {
 
 /* ── Module opener ───────────────────────────────────────────────────── */
 
+/* ── Connection objects: db.connect(name) / db.default() ──────────── */
+
+/* The sync method surface bound onto a connection object. Each is the same
+ * C function the top-level bridge uses; db_call_handle picks the bound
+ * handle (upvalue 1) over the runtime default. async / udf stay on the
+ * top-level module for now (the worker layer is single-DSN). */
+static const luaL_Reg db_conn_methods[] = {
+    {"query",            lua_db_query},
+    {"exec",             lua_db_exec},
+    {"last_id",          lua_db_last_id},
+    {"batch",            lua_db_batch},
+    {"insert_if_absent", lua_db_insert_if_absent},
+    {"upsert",           lua_db_upsert},
+    {"table_columns",    lua_db_table_columns},
+    {NULL, NULL}
+};
+
+/* Push a fresh connection-object table whose methods carry @p h as upvalue 1. */
+static int push_conn_object(lua_State *L, HlDbHandle *h)
+{
+    lua_createtable(L, 0, 9);
+    for (const luaL_Reg *m = db_conn_methods; m->name; m++) {
+        lua_pushlightuserdata(L, h);
+        lua_pushcclosure(L, m->func, 1);
+        lua_setfield(L, -2, m->name);
+    }
+    const HlDbBackend *be = h ? h->backend : NULL;
+    lua_pushstring(L, be ? be->name : "none");
+    lua_setfield(L, -2, "backend_name");
+    lua_pushstring(L, (be && be->autoincrement_id_ddl)
+                       ? be->autoincrement_id_ddl : "INTEGER PRIMARY KEY");
+    lua_setfield(L, -2, "autoincrement_id_ddl");
+    return 1;
+}
+
+/* db.default() → connection object for the "default" connection. */
+static int lua_db_default(lua_State *L)
+{
+    HlLua *lua = get_hl_lua(L);
+    if (!lua || !lua->base.db_handle)
+        return luaL_error(L, "database not available");
+    return push_conn_object(L, lua->base.db_handle);
+}
+
+/* db.connect(name) → connection object for a manifest-declared database. */
+static int lua_db_connect(lua_State *L)
+{
+    const char *name = luaL_checkstring(L, 1);
+    HlLua *lua = get_hl_lua(L);
+    if (!lua)
+        return luaL_error(L, "no runtime");
+    if (!lua->base.db_registry)
+        return luaL_error(L, "no database registry available");
+    const char *err = NULL;
+    HlDbHandle *h = hl_db_registry_get(lua->base.db_registry, name, &err);
+    if (!h)
+        return luaL_error(L, "db.connect('%s'): %s", name,
+                          err ? err : "unknown database");
+    return push_conn_object(L, h);
+}
+
 int luaopen_hull_db(lua_State *L)
 {
     luaL_newlib(L, db_funcs);
+
+    /* Multi-backend acquisition: db.connect(name) / db.default(). */
+    lua_pushcfunction(L, lua_db_connect);
+    lua_setfield(L, -2, "connect");
+    lua_pushcfunction(L, lua_db_default);
+    lua_setfield(L, -2, "default");
 
     /* db.async sub-table */
     luaL_newlib(L, db_async_funcs);

@@ -30,6 +30,7 @@ typedef struct HlAppContextOpts HlAppContextOpts;
 typedef struct HlRuntimeBaseConfig {
     HlDbHandle               *db_handle;
     HlDbHandle               *hull_db_handle;
+    struct HlDbRegistry      *db_registry;   /* named connections; may be NULL */
     HlAllocator              *alloc;
     const HlVfs              *app_vfs;
     const HlVfs              *platform_vfs;

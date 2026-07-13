@@ -31,6 +31,7 @@ static int js_create(HlRuntime **out, const HlAppContextOpts *opts,
     if (base) {
         js->base.db_handle      = base->db_handle;
         js->base.hull_db_handle = base->hull_db_handle;
+        js->base.db_registry    = base->db_registry;
         js->base.alloc          = base->alloc;
         js->base.app_vfs        = base->app_vfs;
         js->base.platform_vfs   = base->platform_vfs;

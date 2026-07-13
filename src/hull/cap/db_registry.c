@@ -43,6 +43,11 @@ HlDbRegistry *hl_db_registry_create(const HlManifest *manifest,
     return r;
 }
 
+void hl_db_registry_set_manifest(HlDbRegistry *reg, const HlManifest *manifest)
+{
+    if (reg) reg->manifest = manifest;
+}
+
 int hl_db_registry_seed(HlDbRegistry *reg, const char *name,
                         const HlDbHandle *h)
 {
