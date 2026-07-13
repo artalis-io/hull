@@ -18,6 +18,12 @@
 #ifndef HL_PG_NO_SCRAM
 #include "hull/cap/crypto.h"
 #endif
+/* TLS transport (Phase 3b.2). The pure-parser fuzzers define HL_PG_NO_TLS to
+ * stay free of Keel; the real build and tests keep raw send/recv when no TLS
+ * session is attached. */
+#ifndef HL_PG_NO_TLS
+#include "hull/shared/tls_client.h"
+#endif
 
 #include <ctype.h>
 #include <errno.h>
@@ -247,13 +253,38 @@ static int pg_connect(const char *host, const char *port, int timeout_ms)
     return fd;
 }
 
+/* Transport helpers. Once the TLS handshake has attached a session
+ * (conn->tls != NULL) all bytes tunnel through it; otherwise raw socket
+ * send/recv. HL_PG_NO_TLS (fuzzers) drops the TLS branch entirely. */
+static ssize_t io_send(HlPgConn *conn, const uint8_t *buf, size_t len)
+{
+#ifndef HL_PG_NO_TLS
+    if (conn->tls)
+        return hl_tls_client_write(conn->fd, conn->tls, buf, len);
+#endif
+    ssize_t n;
+    do { n = send(conn->fd, buf, len, PG_SEND_FLAGS); }
+    while (n < 0 && errno == EINTR);
+    return n;
+}
+
+static ssize_t io_recv(HlPgConn *conn, uint8_t *buf, size_t len)
+{
+#ifndef HL_PG_NO_TLS
+    if (conn->tls)
+        return hl_tls_client_read(conn->fd, conn->tls, buf, len);
+#endif
+    ssize_t n;
+    do { n = recv(conn->fd, buf, len, 0); }
+    while (n < 0 && errno == EINTR);
+    return n;
+}
+
 static int conn_send(HlPgConn *conn, const uint8_t *buf, size_t len)
 {
     size_t sent = 0;
     while (sent < len) {
-        ssize_t n;
-        do { n = send(conn->fd, buf + sent, len - sent, PG_SEND_FLAGS); }
-        while (n < 0 && errno == EINTR);
+        ssize_t n = io_send(conn, buf + sent, len - sent);
         if (n <= 0) { set_err(conn->errmsg, sizeof conn->errmsg, "socket write failed");
                       return -1; }
         sent += (size_t)n;
@@ -296,10 +327,8 @@ static int conn_next_frame(HlPgConn *conn, HlPgFrame *f)
             conn->rbuf = nb;
             conn->rcap = ncap;
         }
-        ssize_t n;
-        do { n = recv(conn->fd, conn->rbuf + conn->rlen,
-                      conn->rcap - conn->rlen, 0); }
-        while (n < 0 && errno == EINTR);
+        ssize_t n = io_recv(conn, conn->rbuf + conn->rlen,
+                            conn->rcap - conn->rlen);
         if (n <= 0) {
             set_err(conn->errmsg, sizeof conn->errmsg,
                     "connection closed by server");
@@ -313,6 +342,9 @@ static int conn_next_frame(HlPgConn *conn, HlPgFrame *f)
 
 static void conn_teardown(HlPgConn *conn)
 {
+#ifndef HL_PG_NO_TLS
+    if (conn->tls) { hl_tls_client_free(conn->tls); conn->tls = NULL; }
+#endif
     if (conn->fd >= 0) { close(conn->fd); conn->fd = -1; }
     free(conn->rbuf);
     conn->rbuf = NULL;
@@ -488,10 +520,20 @@ static int scram_handle(HlPgConn *conn, PgScram *sc, const HlPgDsn *dsn,
 }
 #endif /* HL_PG_NO_SCRAM */
 
-int hl_pg_conn_start(HlPgConn *conn, int fd, const HlPgDsn *dsn)
+/* Run the startup + auth handshake on an already-connected fd. When @p tls is
+ * non-NULL the socket has already completed a TLS handshake and every byte
+ * tunnels through it; ownership of @p tls transfers to conn (freed by
+ * conn_teardown). */
+static int pg_start(HlPgConn *conn, int fd, const HlPgDsn *dsn,
+                    struct HlTlsClient *tls)
 {
     memset(conn, 0, sizeof(*conn));
     conn->fd = fd;
+#ifndef HL_PG_NO_TLS
+    conn->tls = tls;
+#else
+    (void)tls;
+#endif
 
 #ifdef SO_NOSIGPIPE
     int on = 1;
@@ -609,11 +651,16 @@ int hl_pg_conn_start(HlPgConn *conn, int fd, const HlPgDsn *dsn)
     }
 }
 
+int hl_pg_conn_start(HlPgConn *conn, int fd, const HlPgDsn *dsn)
+{
+    return pg_start(conn, fd, dsn, NULL);
+}
+
 /* ── TLS negotiation (SSLRequest / sslmode) ───────────────────────── */
 
 int hl_pg_sslmode_parse(const char *s)
 {
-    if (!s || !s[0])                   return HL_PG_SSLMODE_DISABLE;  /* 3b.2 -> PREFER */
+    if (!s || !s[0])                   return HL_PG_SSLMODE_PREFER;
     if (strcmp(s, "disable") == 0)     return HL_PG_SSLMODE_DISABLE;
     if (strcmp(s, "prefer") == 0)      return HL_PG_SSLMODE_PREFER;
     if (strcmp(s, "require") == 0)     return HL_PG_SSLMODE_REQUIRE;
@@ -689,15 +736,29 @@ int hl_pg_conn_open(HlPgConn *conn, const HlPgDsn *dsn, int timeout_ms)
             return -1;
         }
         if (d == HL_PG_SSL_USE_TLS) {
-            /* Phase 3b.2 performs the mbedTLS handshake here (via the shared
-             * tls_client helper) and continues over TLS. */
+#ifndef HL_PG_NO_TLS
+            /* verify-ca / verify-full check the chain + hostname against the
+             * embedded CA bundle; require / prefer take the session as-is. */
+            int verify = (mode == HL_PG_SSLMODE_VERIFY);
+            struct HlTlsClient *tls =
+                hl_tls_client_handshake(fd, dsn->host, verify, timeout_ms);
+            if (!tls) {
+                memset(conn, 0, sizeof(*conn));
+                conn->fd = -1;
+                snprintf(conn->errmsg, sizeof conn->errmsg,
+                         "TLS handshake with %s failed", dsn->host);
+                close(fd);
+                return -1;
+            }
+            return pg_start(conn, fd, dsn, tls);
+#else
             memset(conn, 0, sizeof(*conn));
             conn->fd = -1;
             set_err(conn->errmsg, sizeof conn->errmsg,
-                    "TLS transport not yet implemented (Phase 3b.2); "
-                    "use sslmode=disable for now");
+                    "TLS not available in this build");
             close(fd);
             return -1;
+#endif
         }
         /* PLAINTEXT: server declined TLS and sslmode permits fallback. */
     }
