@@ -74,6 +74,38 @@ int  hl_pg_conn_start(HlPgConn *conn, int fd, const HlPgDsn *dsn);
 /* Send Terminate (best effort) and release all resources. Idempotent. */
 void hl_pg_conn_close(HlPgConn *conn);
 
+/* ── TLS negotiation (SSLRequest / sslmode) ───────────────────────── */
+
+/* DSN sslmode policy. Phase 3b.1 implements the SSLRequest negotiation and
+ * the fallback decision; the mbedTLS handshake itself (for USE_TLS) lands in
+ * Phase 3b.2 together with linking Keel + mbedTLS under HL_ENABLE_POSTGRES. */
+typedef enum HlPgSslMode {
+    HL_PG_SSLMODE_DISABLE = 0,  /* never attempt TLS (no SSLRequest)        */
+    HL_PG_SSLMODE_PREFER  = 1,  /* try TLS, fall back to plaintext on 'N'   */
+    HL_PG_SSLMODE_REQUIRE = 2,  /* TLS required; 'N' is a hard error        */
+    HL_PG_SSLMODE_VERIFY  = 3,  /* require + verify the cert chain/hostname */
+} HlPgSslMode;
+
+typedef enum HlPgSslDecision {
+    HL_PG_SSL_PLAINTEXT = 0,    /* proceed without TLS                      */
+    HL_PG_SSL_USE_TLS   = 1,    /* server accepted; perform the handshake   */
+    HL_PG_SSL_FAIL      = -1,   /* negotiation failed (errbuf set)          */
+} HlPgSslDecision;
+
+/* Map a DSN sslmode string to the enum. Empty defaults to DISABLE for now
+ * (3b.2 will move the default to PREFER once the handshake exists). Returns
+ * -1 for an unknown mode. */
+int hl_pg_sslmode_parse(const char *s);
+
+/*
+ * Send an SSLRequest on @p fd and read the one-byte server reply, then apply
+ * the @p mode policy: DISABLE returns PLAINTEXT without sending anything; a
+ * server 'S' returns USE_TLS; a server 'N' returns PLAINTEXT under PREFER and
+ * FAIL under REQUIRE/VERIFY. Exposed for tests (socketpair-drivable).
+ */
+HlPgSslDecision hl_pg_ssl_negotiate(int fd, HlPgSslMode mode,
+                                    char *errbuf, size_t errlen);
+
 /* ── SCRAM-SHA-256 primitives (exposed for tests) ─────────────────── */
 
 /* Standard base64 (with '=' padding). Encode returns the encoded length and
