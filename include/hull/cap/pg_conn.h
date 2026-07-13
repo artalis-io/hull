@@ -74,6 +74,26 @@ int  hl_pg_conn_start(HlPgConn *conn, int fd, const HlPgDsn *dsn);
 /* Send Terminate (best effort) and release all resources. Idempotent. */
 void hl_pg_conn_close(HlPgConn *conn);
 
+/* ── SCRAM-SHA-256 primitives (exposed for tests) ─────────────────── */
+
+/* Standard base64 (with '=' padding). Encode returns the encoded length and
+ * NUL-terminates; both return -1 on overflow / malformed input. */
+int hl_pg_b64_encode(const uint8_t *in, size_t inlen, char *out, size_t outsize);
+int hl_pg_b64_decode(const char *in, size_t inlen,
+                     uint8_t *out, size_t outsize, size_t *outlen);
+
+/*
+ * Compute the SCRAM-SHA-256 ClientProof and ServerSignature (RFC 5802 /
+ * RFC 7677) from the password, salt, iteration count, and the full
+ * AuthMessage (client-first-bare "," server-first "," client-final-no-proof).
+ * Both outputs are 32 bytes. Reuses cap/crypto (PBKDF2 / HMAC-SHA256 /
+ * SHA-256). Returns 0 on success, -1 on internal failure.
+ */
+int hl_pg_scram_proof(const char *password, size_t pw_len,
+                      const uint8_t *salt, size_t salt_len, int iterations,
+                      const char *auth_msg, size_t auth_msg_len,
+                      uint8_t client_proof[32], uint8_t server_sig[32]);
+
 /* ── Placeholder rewriting ────────────────────────────────────────── */
 
 /*

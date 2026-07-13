@@ -5,9 +5,8 @@
 # and exercises the full path: postgres:// DSN -> backend selection -> connect
 # + startup handshake -> parameterized db.exec / db.query -> typed row decode.
 #
-# Phase 2 auth is plaintext trust / cleartext (TLS + SCRAM land in Phase 3),
-# so the container is started with POSTGRES_HOST_AUTH_METHOD=trust and the DSN
-# carries no password. Skips cleanly when Docker is unavailable.
+# Auth is SCRAM-SHA-256 (Phase 3, the postgres:16 default) over the plaintext
+# transport; TLS is a later phase. Skips cleanly when Docker is unavailable.
 #
 # SPDX-License-Identifier: AGPL-3.0-or-later
 set -eu
@@ -15,7 +14,7 @@ set -eu
 CONTAINER=hull-pg-e2e
 PGPORT=55432
 PORT=18091
-DSN="postgres://hull@127.0.0.1:${PGPORT}/hulldb"
+DSN="postgres://hull:s3cretpw@127.0.0.1:${PGPORT}/hulldb"
 
 cleanup() {
     [ -n "${SVR:-}" ] && kill "$SVR" 2>/dev/null || true
@@ -36,11 +35,11 @@ fi
 echo "=== building hull with HL_ENABLE_POSTGRES=1 ==="
 make HL_ENABLE_POSTGRES=1 >/dev/null
 
-echo "=== starting postgres (trust auth) ==="
+echo "=== starting postgres (scram-sha-256 auth) ==="
 docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
 docker run -d --name "$CONTAINER" \
     -e POSTGRES_USER=hull -e POSTGRES_DB=hulldb \
-    -e POSTGRES_HOST_AUTH_METHOD=trust \
+    -e POSTGRES_PASSWORD=s3cretpw \
     -p "${PGPORT}:5432" postgres:16-alpine >/dev/null
 
 echo "=== waiting for postgres ==="
