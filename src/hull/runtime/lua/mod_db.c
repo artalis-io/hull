@@ -1124,13 +1124,23 @@ static const luaL_Reg db_conn_methods[] = {
 };
 
 /* Push a fresh connection-object table whose methods carry @p h as upvalue 1. */
-static int push_conn_object(lua_State *L, HlDbHandle *h)
+static int push_conn_object(lua_State *L, HlDbHandle *h, int is_default)
 {
-    lua_createtable(L, 0, 9);
+    lua_createtable(L, 0, is_default ? 11 : 9);
     for (const luaL_Reg *m = db_conn_methods; m->name; m++) {
         lua_pushlightuserdata(L, h);
         lua_pushcclosure(L, m->func, 1);
         lua_setfield(L, -2, m->name);
+    }
+    /* async / udf dispatch to the per-thread worker + the SQLite raw handle,
+     * both of which are the DEFAULT connection. Only the default connection
+     * object carries them; named connections get the sync surface only until
+     * per-connection workers land. */
+    if (is_default) {
+        luaL_newlib(L, db_async_funcs);
+        lua_setfield(L, -2, "async");
+        luaL_newlib(L, db_udf_funcs);
+        lua_setfield(L, -2, "udf");
     }
     const HlDbBackend *be = h ? h->backend : NULL;
     lua_pushstring(L, be ? be->name : "none");
@@ -1148,7 +1158,7 @@ static int push_conn_object(lua_State *L, HlDbHandle *h)
 static int lua_db_default(lua_State *L)
 {
     HlLua *lua = get_hl_lua(L);
-    return push_conn_object(L, lua ? lua->base.db_handle : NULL);
+    return push_conn_object(L, lua ? lua->base.db_handle : NULL, 1);
 }
 
 /* db.connect(name) → connection object for a manifest-declared database. */
@@ -1165,7 +1175,7 @@ static int lua_db_connect(lua_State *L)
     if (!h)
         return luaL_error(L, "db.connect('%s'): %s", name,
                           err ? err : "unknown database");
-    return push_conn_object(L, h);
+    return push_conn_object(L, h, 0);
 }
 
 int luaopen_hull_db(lua_State *L)
