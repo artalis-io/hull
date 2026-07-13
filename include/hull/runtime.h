@@ -48,6 +48,7 @@ typedef struct HlVfs HlVfs;
 typedef struct HlWasmCache HlWasmCache;
 typedef struct HlGpuCtx HlGpuCtx;
 typedef struct HlDbHandle HlDbHandle;
+typedef struct HlDbRegistry HlDbRegistry;
 typedef struct HlWsRegistry HlWsRegistry;
 typedef struct KlServer KlServer;
 typedef struct HlRuntime HlRuntime;
@@ -144,8 +145,9 @@ typedef struct HlRuntimeVtable {
 
 struct HlRuntime {
     const HlRuntimeVtable *vt;
-    HlDbHandle   *db_handle;      /* app queries (via vtable) */
+    HlDbHandle   *db_handle;      /* app queries (via vtable); the "default" conn */
     HlDbHandle   *hull_db_handle; /* hull internal (_hull_* tables) */
+    HlDbRegistry *db_registry;    /* named connections (db.connect/default); may be NULL */
     HlAllocator  *alloc;
     HlFsConfig   *fs_cfg;
     HlEnvConfig  *env_cfg;

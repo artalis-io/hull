@@ -17,6 +17,7 @@
 #ifdef HL_ENABLE_DB
 #include "hull/cap/db.h"
 #include "hull/cap/db_backend.h"
+#include "hull/cap/db_registry.h"
 #include "hull/migrate.h"
 #include "hull/worker_db.h"
 #include <sqlite3.h>
@@ -55,6 +56,7 @@ struct HlAppContext {
     HlDbHandle     db_handle;     /* vtable-based DB handle */
     sqlite3       *db;            /* raw sqlite3* for migrate/agent (from handle) */
     int            db_open;       /* 1 = db was opened */
+    HlDbRegistry  *db_registry;   /* named connections; "default" seeded from db_handle */
 #endif
     HlVfs          app_vfs;
     HlVfs          platform_vfs;
@@ -181,6 +183,16 @@ int hl_app_context_init(HlAppContext **out, const HlAppContextOpts *opts)
         ctx->db_open = 1;
         /* NULL under a non-SQLite backend; raw-pointer consumers guard it. */
         ctx->db = hl_db_sqlite_raw(&ctx->db_handle);
+
+        /* Named-connection registry: created here with the default connection
+         * seeded so db.default() works immediately. The databases map isn't
+         * known until the app runs app.manifest(), so the serve path injects
+         * the sealed manifest later via hl_db_registry_set_manifest. Registry
+         * creation failure is non-fatal: db.default() still works off the
+         * seeded handle; only named db.connect() lookups would be unavailable. */
+        ctx->db_registry = hl_db_registry_create(NULL, opts->alloc);
+        if (ctx->db_registry)
+            hl_db_registry_seed(ctx->db_registry, "default", &ctx->db_handle);
     }
 #endif
 
@@ -218,6 +230,7 @@ int hl_app_context_init(HlAppContext **out, const HlAppContextOpts *opts)
     if (ctx->db_open) {
         base.db_handle      = &ctx->db_handle;
         base.hull_db_handle = &ctx->db_handle;
+        base.db_registry    = ctx->db_registry;
     }
 #endif
     base.alloc        = opts->alloc;
@@ -322,6 +335,12 @@ void hl_app_context_free(HlAppContext *ctx)
 #endif
 
 #ifdef HL_ENABLE_DB
+    /* Destroy the registry first: it may own lazily-opened named connections.
+     * The seeded "default" is not-owned, so this does NOT close db_handle. */
+    if (ctx->db_registry) {
+        hl_db_registry_destroy(ctx->db_registry);
+        ctx->db_registry = NULL;
+    }
     if (ctx->db_open) {
         ctx->db_handle.backend->close(&ctx->db_handle);
         ctx->db_handle.ctx = NULL;
