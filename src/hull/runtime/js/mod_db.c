@@ -563,6 +563,11 @@ static JSValue js_push_worker_db_result(JSContext *ctx, void *driver)
             case HL_TYPE_BLOB:
                 v = JS_NewStringLen(ctx, vals[col].s, vals[col].len);
                 break;
+            case HL_TYPE_BOOL:
+                /* Postgres bool columns arrive as HL_TYPE_BOOL (flag in .i);
+                 * SQLite never emits this type. */
+                v = JS_NewBool(ctx, vals[col].i != 0);
+                break;
             case HL_TYPE_NIL:
             default:
                 v = JS_NULL;

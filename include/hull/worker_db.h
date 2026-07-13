@@ -1,9 +1,12 @@
 /*
  * worker_db.h — Runtime-agnostic DB worker capability
  *
- * Manages per-worker SQLite connections (thread-local) and provides
+ * Manages per-worker database connections (thread-local) and provides
  * HlWorkerDbOp for offloading db.async.query/exec to the thread pool.
- * Zero Lua/JS knowledge — purely C + SQLite.
+ * Backend-agnostic: each worker thread opens its own connection through
+ * the HlDbBackend vtable (SQLite file or PostgreSQL DSN), so the async
+ * and per-thread-runtime paths work transparently on either backend.
+ * Zero Lua/JS knowledge: purely C.
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
@@ -13,6 +16,7 @@
 
 #include "hull/cap/types.h"
 #include "hull/cap/db.h"
+#include "hull/cap/db_backend.h"  /* HlDbHandle */
 #include "hull/limits/core.h"  /* HL_WORKER_ERR_SIZE */
 #include <stddef.h>
 #include <stdint.h>
@@ -27,33 +31,27 @@ typedef struct KlAsyncOp KlAsyncOp;
 /* ── Per-worker DB context (thread-local, lazy init) ───────────────── */
 
 typedef struct HlWorkerDb {
-    sqlite3      *db;
-    HlStmtCache   cache;
+    HlDbHandle handle;   /* vtable-opened, owned by this worker thread */
 } HlWorkerDb;
 
 /* Initialize the worker DB capability. Call once before workers spawn.
- * Stores db_path (must remain valid for process lifetime). */
-void hl_worker_db_init(const char *db_path);
+ * Stores the DSN (a SQLite file path or a postgres:// URL); must remain
+ * valid for the process lifetime. */
+void hl_worker_db_init(const char *dsn);
 
 /* Get current worker thread's DB connection (lazy open on first call).
  * Returns NULL on error. Thread-safe: each thread gets its own connection. */
 HlWorkerDb *hl_worker_db_get(void);
 
 /*
- * Shared "get worker DB + check namespace + prepare statement" helper
- * for runtime bindings. Both Lua and JS worker_db.c bindings used to
- * duplicate this 6-line dance at the top of every query/exec function;
- * folded into one place (roadmap item L / M9).
- *
- * Returns 0 on success: *out_db and *out_stmt are filled, caller is
- * responsible for sqlite3_finalize(*out_stmt).
- * Returns -1 on failure: *out_err points to a static or sqlite3_errmsg
- * string that's valid until the next sqlite3 call on *out_db.
+ * Shared "get worker DB + check internal-table namespace" helper for the
+ * per-thread runtime bindings (runtime/{lua,js}/worker_db.c). Returns the
+ * worker's backend handle on success, or NULL with *out_err set to a static
+ * message on failure (no connection, or the SQL touches a reserved _hull_*
+ * table). Callers then run the query/exec through the HlDbBackend vtable
+ * (hl_db_query / hl_db_exec) so the path is backend-agnostic.
  */
-int hl_worker_db_get_and_prepare(const char    *sql,
-                                 sqlite3      **out_db,
-                                 sqlite3_stmt **out_stmt,
-                                 const char   **out_err);
+HlDbHandle *hl_worker_db_handle_checked(const char *sql, const char **out_err);
 
 /* ── Materialized query result (deep-copied, worker-thread safe) ──── */
 

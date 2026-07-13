@@ -561,6 +561,11 @@ static void lua_push_worker_db_result(lua_State *L, void *driver)
             case HL_TYPE_BLOB:
                 lua_pushlstring(L, vals[col].s, vals[col].len);
                 break;
+            case HL_TYPE_BOOL:
+                /* Postgres bool columns arrive as HL_TYPE_BOOL (flag in .i);
+                 * SQLite never emits this type. */
+                lua_pushboolean(L, vals[col].i != 0);
+                break;
             case HL_TYPE_NIL:
             default:
                 lua_pushnil(L);

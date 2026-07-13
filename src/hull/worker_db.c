@@ -20,7 +20,6 @@
 #include <keel/thread_pool.h>
 #include <keel/async.h>
 
-#include <sqlite3.h>
 #include <pthread.h>
 #include <limits.h>
 #include <stdlib.h>
@@ -34,17 +33,14 @@
 
 static pthread_key_t  worker_db_key;
 static pthread_once_t worker_db_once = PTHREAD_ONCE_INIT;
-static const char    *worker_db_path;   /* set once, read-only after */
+static const char    *worker_db_dsn;   /* set once, read-only after */
 
 static void worker_db_destructor(void *ptr)
 {
     if (!ptr) return;
     HlWorkerDb *wdb = (HlWorkerDb *)ptr;
-    hl_stmt_cache_destroy(&wdb->cache);
-    if (wdb->db) {
-        hl_cap_db_shutdown(wdb->db);
-        sqlite3_close(wdb->db);
-    }
+    if (wdb->handle.backend)
+        wdb->handle.backend->close(&wdb->handle);
     free(wdb);
 }
 
@@ -53,15 +49,22 @@ static void worker_db_key_create(void)
     pthread_key_create(&worker_db_key, worker_db_destructor);
 }
 
-void hl_worker_db_init(const char *db_path)
+void hl_worker_db_init(const char *dsn)
 {
-    /* Resolve to absolute path so worker threads open the same path
-     * the sandbox registered (realpath resolves /var → /private/var on macOS) */
-    static char resolved[PATH_MAX];
-    if (realpath(db_path, resolved))
-        worker_db_path = resolved;
-    else
-        worker_db_path = db_path;
+    /* A SQLite file path is resolved to an absolute path so every worker
+     * thread opens the same path the sandbox registered (realpath maps
+     * /var → /private/var on macOS). A postgres:// DSN is not a filesystem
+     * path, so only realpath when the selected backend is SQLite. */
+    const HlDbBackend *be = hl_db_backend_select(dsn, NULL);
+    if (be && be == &hl_db_backend_sqlite) {
+        static char resolved[PATH_MAX];
+        if (realpath(dsn, resolved))
+            worker_db_dsn = resolved;
+        else
+            worker_db_dsn = dsn;
+    } else {
+        worker_db_dsn = dsn;
+    }
     pthread_once(&worker_db_once, worker_db_key_create);
 }
 
@@ -70,63 +73,50 @@ HlWorkerDb *hl_worker_db_get(void)
     HlWorkerDb *wdb = (HlWorkerDb *)pthread_getspecific(worker_db_key);
     if (wdb) return wdb;
 
-    if (!worker_db_path) return NULL;
+    if (!worker_db_dsn) return NULL;
+
+    const char *sel_err = NULL;
+    const HlDbBackend *be = hl_db_backend_select(worker_db_dsn, &sel_err);
+    if (!be) {
+        log_error("[hull:worker_db] backend select failed: %s",
+                  sel_err ? sel_err : "unknown");
+        return NULL;
+    }
 
     wdb = calloc(1, sizeof(HlWorkerDb));
     if (!wdb) return NULL;
 
-    int rc = sqlite3_open(worker_db_path, &wdb->db);
-    if (rc != SQLITE_OK) {
-        log_error("[hull:worker_db] sqlite3_open failed: rc=%d (%s) path=%s errno=%d",
-                  rc, sqlite3_errmsg(wdb->db), worker_db_path, errno);
-        sqlite3_close(wdb->db);
+    wdb->handle.backend = be;
+    if (be->open(&wdb->handle.ctx, worker_db_dsn, NULL) != 0) {
+        log_error("[hull:worker_db] %s open failed: dsn=%s errno=%d",
+                  be->name, worker_db_dsn, errno);
         free(wdb);
         return NULL;
     }
 
-    if (hl_cap_db_init(wdb->db) != 0) {
-        log_error("[hull:worker_db] hl_cap_db_init failed");
-        sqlite3_close(wdb->db);
-        free(wdb);
-        return NULL;
-    }
-
-    hl_stmt_cache_init(&wdb->cache, wdb->db, NULL);
     pthread_setspecific(worker_db_key, wdb);
     return wdb;
 }
 
-/* ── Shared "get + check + prepare" for runtime bindings ──────────── */
+/* ── Shared "get + namespace check" for the runtime bindings ──────── */
 
-int hl_worker_db_get_and_prepare(const char    *sql,
-                                 sqlite3      **out_db,
-                                 sqlite3_stmt **out_stmt,
-                                 const char   **out_err)
+HlDbHandle *hl_worker_db_handle_checked(const char *sql, const char **out_err)
 {
     static const char *e_no_db     = "database not available in worker";
     static const char *e_namespace = "access denied: _hull_* tables are reserved";
 
     HlWorkerDb *wdb = hl_worker_db_get();
-    if (!wdb || !wdb->db) {
+    if (!wdb || !wdb->handle.backend) {
         if (out_err) *out_err = e_no_db;
-        return -1;
+        return NULL;
     }
-    if (out_db) *out_db = wdb->db;
 
     if (hl_cap_db_check_namespace(sql) != 0) {
         if (out_err) *out_err = e_namespace;
-        return -1;
+        return NULL;
     }
 
-    sqlite3_stmt *stmt = NULL;
-    int rc = sqlite3_prepare_v2(wdb->db, sql, -1, &stmt, NULL);
-    if (rc != SQLITE_OK) {
-        if (out_err) *out_err = sqlite3_errmsg(wdb->db);
-        return -1;
-    }
-
-    if (out_stmt) *out_stmt = stmt;
-    return 0;
+    return &wdb->handle;
 }
 
 /* ── HlDbResult helpers ────────────────────────────────────────────── */
@@ -168,27 +158,34 @@ static int db_result_grow(HlDbResult *r)
     return 0;
 }
 
-/* Deep-copy a SQLite column value into an HlDbValue */
-static void materialize_column(sqlite3_stmt *stmt, int col, HlDbValue *out)
+/* Deep-copy one HlValue (a transient row cell from the backend) into the
+ * owned HlDbValue that crosses the worker->event-loop thread boundary. */
+static void materialize_value(const HlValue *in, HlDbValue *out)
 {
     memset(out, 0, sizeof(*out));
-    switch (sqlite3_column_type(stmt, col)) {
-    case SQLITE_INTEGER:
+    switch (in->type) {
+    case HL_TYPE_INT:
         out->type = HL_TYPE_INT;
-        out->i    = sqlite3_column_int64(stmt, col);
+        out->i    = in->i;
         break;
-    case SQLITE_FLOAT:
+    case HL_TYPE_DOUBLE:
         out->type = HL_TYPE_DOUBLE;
-        out->d    = sqlite3_column_double(stmt, col);
+        out->d    = in->d;
         break;
-    case SQLITE_TEXT: {
-        out->type = HL_TYPE_TEXT;
-        const char *text = (const char *)sqlite3_column_text(stmt, col);
-        size_t len = (size_t)sqlite3_column_bytes(stmt, col);
-        if (!text) { out->type = HL_TYPE_NIL; break; }
+    case HL_TYPE_BOOL:
+        /* HlDbValue has no bool field; carry the flag in `i` and let the
+         * per-runtime converter push it as a boolean on HL_TYPE_BOOL. */
+        out->type = HL_TYPE_BOOL;
+        out->i    = in->b ? 1 : 0;
+        break;
+    case HL_TYPE_TEXT:
+    case HL_TYPE_BLOB: {
+        if (!in->s) { out->type = HL_TYPE_NIL; break; }
+        out->type = in->type;
+        size_t len = in->len;
         out->s = malloc(len + 1);
         if (out->s) {
-            memcpy(out->s, text, len);
+            memcpy(out->s, in->s, len);
             out->s[len] = '\0';
             out->len = len;
         } else {
@@ -196,63 +193,42 @@ static void materialize_column(sqlite3_stmt *stmt, int col, HlDbValue *out)
         }
         break;
     }
-    case SQLITE_BLOB: {
-        out->type = HL_TYPE_BLOB;
-        const void *blob = sqlite3_column_blob(stmt, col);
-        size_t len = (size_t)sqlite3_column_bytes(stmt, col);
-        if (!blob) { out->type = HL_TYPE_NIL; break; }
-        out->s = malloc(len);
-        if (out->s) {
-            memcpy(out->s, blob, len);
-            out->len = len;
-        } else {
-            out->type = HL_TYPE_NIL;
-        }
-        break;
-    }
-    case SQLITE_NULL:
+    case HL_TYPE_NIL:
     default:
         out->type = HL_TYPE_NIL;
         break;
     }
 }
 
-/* ── Bind params (local copy of shared logic) ──────────────────────── */
+/* ── Materializing row callback (backend-agnostic) ─────────────────── */
 
-static int worker_bind_params(sqlite3_stmt *stmt, const HlValue *params, int n)
+typedef struct {
+    HlDbResult *r;
+    const char *err;   /* static message, set on failure */
+} MaterializeCtx;
+
+static int db_materialize_row_cb(void *ctx, HlColumn *cols, int ncols)
 {
-    for (int i = 0; i < n; i++) {
-        int rc;
-        int idx = i + 1;
-        switch (params[i].type) {
-        case HL_TYPE_NIL:
-            rc = sqlite3_bind_null(stmt, idx);
-            break;
-        case HL_TYPE_INT:
-            rc = sqlite3_bind_int64(stmt, idx, params[i].i);
-            break;
-        case HL_TYPE_DOUBLE:
-            rc = sqlite3_bind_double(stmt, idx, params[i].d);
-            break;
-        case HL_TYPE_TEXT:
-            if (params[i].len > (size_t)INT_MAX) return -1;
-            rc = sqlite3_bind_text(stmt, idx, params[i].s,
-                                   (int)params[i].len, SQLITE_TRANSIENT);
-            break;
-        case HL_TYPE_BLOB:
-            if (params[i].len > (size_t)INT_MAX) return -1;
-            rc = sqlite3_bind_blob(stmt, idx, params[i].s,
-                                   (int)params[i].len, SQLITE_TRANSIENT);
-            break;
-        case HL_TYPE_BOOL:
-            rc = sqlite3_bind_int(stmt, idx, params[i].b ? 1 : 0);
-            break;
-        default:
-            return -1;
+    MaterializeCtx *mc = (MaterializeCtx *)ctx;
+    HlDbResult *r = mc->r;
+
+    if (r->col_names == NULL) {   /* first row: capture the column names */
+        r->ncols = ncols;
+        r->col_names = calloc((size_t)ncols, sizeof(char *));
+        if (!r->col_names) { mc->err = "out of memory"; r->ncols = 0; return -1; }
+        for (int i = 0; i < ncols; i++) {
+            const char *name = cols[i].name;
+            r->col_names[i] = strdup(name ? name : "?");
+            if (!r->col_names[i]) { mc->err = "out of memory"; return -1; }
         }
-        if (rc != SQLITE_OK)
-            return -1;
     }
+
+    if (db_result_grow(r) != 0) { mc->err = "too many rows"; return -1; }
+
+    HlDbValue *row = &r->values[r->nrows * r->ncols];
+    for (int i = 0; i < r->ncols; i++)
+        materialize_value(&cols[i].value, &row[i]);
+    r->nrows++;
     return 0;
 }
 
@@ -268,87 +244,35 @@ static void db_work_fn(void *ud)
                  "failed to open worker DB connection");
         return;
     }
-
-    sqlite3_stmt *stmt = NULL;
-    int rc = sqlite3_prepare_v2(wdb->db, op->sql, -1, &stmt, NULL);
-    if (rc != SQLITE_OK) {
-        op->error = 1;
-        snprintf(op->error_msg, sizeof(op->error_msg),
-                 "prepare: %s", sqlite3_errmsg(wdb->db));
-        return;
-    }
-
-    if (op->nparams > 0 && worker_bind_params(stmt, op->params, op->nparams) != 0) {
-        op->error = 1;
-        snprintf(op->error_msg, sizeof(op->error_msg),
-                 "bind: %s", sqlite3_errmsg(wdb->db));
-        sqlite3_finalize(stmt);
-        return;
-    }
+    HlDbHandle *h = &wdb->handle;
 
     if (op->kind == HL_WORK_DB_EXEC) {
-        rc = sqlite3_step(stmt);
-        if (rc != SQLITE_DONE) {
+        int changes = hl_db_exec(h, op->sql, op->params, op->nparams);
+        if (changes < 0) {
             op->error = 1;
             snprintf(op->error_msg, sizeof(op->error_msg),
-                     "exec: %s", sqlite3_errmsg(wdb->db));
+                     "exec: %s", hl_db_errmsg(h));
         } else {
-            op->exec_changes = sqlite3_changes(wdb->db);
-            op->last_id = sqlite3_last_insert_rowid(wdb->db);
+            op->exec_changes = changes;
+            op->last_id = hl_db_last_id(h);
         }
-        sqlite3_finalize(stmt);
         return;
     }
 
-    /* HL_WORK_DB_QUERY — materialize all rows */
+    /* HL_WORK_DB_QUERY: materialize all rows through the vtable. */
     HlDbResult *r = &op->result;
     memset(r, 0, sizeof(*r));
-
-    int first = 1;
-    while ((rc = sqlite3_step(stmt)) == SQLITE_ROW) {
-        if (first) {
-            r->ncols = sqlite3_column_count(stmt);
-            r->col_names = calloc((size_t)r->ncols, sizeof(char *));
-            if (!r->col_names) {
-                op->error = 1;
-                snprintf(op->error_msg, sizeof(op->error_msg), "out of memory");
-                sqlite3_finalize(stmt);
-                return;
-            }
-            for (int i = 0; i < r->ncols; i++) {
-                const char *name = sqlite3_column_name(stmt, i);
-                r->col_names[i] = strdup(name ? name : "?");
-                if (!r->col_names[i]) {
-                    op->error = 1;
-                    snprintf(op->error_msg, sizeof(op->error_msg),
-                             "out of memory");
-                    sqlite3_finalize(stmt);
-                    return;
-                }
-            }
-            first = 0;
-        }
-
-        if (db_result_grow(r) != 0) {
-            op->error = 1;
-            snprintf(op->error_msg, sizeof(op->error_msg), "too many rows");
-            sqlite3_finalize(stmt);
-            return;
-        }
-
-        HlDbValue *row = &r->values[r->nrows * r->ncols];
-        for (int i = 0; i < r->ncols; i++)
-            materialize_column(stmt, i, &row[i]);
-        r->nrows++;
-    }
-
-    if (rc != SQLITE_DONE) {
+    MaterializeCtx mc = { .r = r, .err = NULL };
+    int rc = hl_db_query(h, op->sql, op->params, op->nparams,
+                         db_materialize_row_cb, &mc, NULL);
+    if (mc.err) {
+        op->error = 1;
+        snprintf(op->error_msg, sizeof(op->error_msg), "%s", mc.err);
+    } else if (rc < 0) {
         op->error = 1;
         snprintf(op->error_msg, sizeof(op->error_msg),
-                 "query: %s", sqlite3_errmsg(wdb->db));
+                 "query: %s", hl_db_errmsg(h));
     }
-
-    sqlite3_finalize(stmt);
 }
 
 static void db_done_fn(void *ud)

@@ -72,6 +72,12 @@ app.get("/", function(req, res)
         "SELECT id, name, score, active FROM e2e WHERE score >= ? ORDER BY id", { 0 })
     res:json({ rows = rows, count = db.query("SELECT count(*) AS c FROM e2e")[1].c })
 end)
+-- db.async: offloads the query to a worker thread (its own PG connection).
+app.get("/async", function(req, res)
+    local rows = db.async.query(
+        "SELECT id, name, active FROM e2e WHERE score >= ? ORDER BY id", { 0 })
+    res:json({ rows = rows })
+end)
 LUA
 
 echo "=== running app against postgres ==="
@@ -90,8 +96,16 @@ echo "$RESP" | grep -q '"name":"carol"'            && { echo "::error carol shou
 echo "$RESP" | grep -q '"active":true'             || { echo "::error bool decode"; fail=1; }
 echo "$RESP" | grep -q '"score":10'                || { echo "::error int decode"; fail=1; }
 
+# db.async path (worker thread opens its own PG connection through the vtable)
+RESP_ASYNC=$(curl -fsS "http://127.0.0.1:${PORT}/async" || echo FAIL)
+echo "async response: $RESP_ASYNC"
+echo "$RESP_ASYNC" | grep -q '"name":"alice"'      || { echo "::error async alice missing"; fail=1; }
+echo "$RESP_ASYNC" | grep -q '"name":"bob"'        || { echo "::error async bob missing"; fail=1; }
+echo "$RESP_ASYNC" | grep -q '"active":true'       || { echo "::error async bool decode"; fail=1; }
+echo "$RESP_ASYNC" | grep -q '"name":"carol"'      && { echo "::error async carol not filtered"; fail=1; }
+
 if [ "$fail" = 0 ]; then
-    echo "PASS: postgres backend end-to-end (select -> connect -> query -> typed decode)"
+    echo "PASS: postgres backend end-to-end (sync + db.async -> connect -> query -> typed decode)"
 else
     echo "--- server log ---"; cat "$APPDIR/serve.log"
     exit 1
