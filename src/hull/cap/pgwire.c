@@ -122,16 +122,48 @@ void hl_pg_msg_end(HlPgWriter *w, size_t marker)
     w->buf[marker + 3] = (uint8_t)(u);
 }
 
+/* ── Frontend message builders ────────────────────────────────────── */
+
+void hl_pg_build_startup(HlPgWriter *w, const char *user, const char *database)
+{
+    size_t m = hl_pg_msg_begin(w, 0);   /* startup has no type tag */
+    hl_pg_put_i32(w, 196608);           /* protocol version 3.0 */
+    hl_pg_put_cstr(w, "user");
+    hl_pg_put_cstr(w, user ? user : "");
+    if (database && *database) {
+        hl_pg_put_cstr(w, "database");
+        hl_pg_put_cstr(w, database);
+    }
+    hl_pg_put_u8(w, 0);                 /* terminating empty parameter name */
+    hl_pg_msg_end(w, m);
+}
+
+void hl_pg_build_password(HlPgWriter *w, const char *password)
+{
+    size_t m = hl_pg_msg_begin(w, HL_PG_F_PASSWORD);
+    hl_pg_put_cstr(w, password ? password : "");
+    hl_pg_msg_end(w, m);
+}
+
+void hl_pg_build_terminate(HlPgWriter *w)
+{
+    size_t m = hl_pg_msg_begin(w, HL_PG_F_TERMINATE);
+    hl_pg_msg_end(w, m);
+}
+
 /* ── Backend message reader (untrusted input) ─────────────────────── */
 
 HlPgResult hl_pg_frame_next(const uint8_t *buf, size_t avail,
                             HlPgFrame *out, size_t *consumed)
 {
     if (consumed) *consumed = 0;
-    if (!buf || !out) return HL_PG_ERR;
+    if (!out) return HL_PG_ERR;
 
-    /* A backend message is tag(1) + length(4, big-endian) + body. */
+    /* A backend message is tag(1) + length(4, big-endian) + body. Report an
+     * incomplete header before touching buf, so an empty (NULL, 0) buffer is
+     * NEED_MORE rather than a spurious error on the first read. */
     if (avail < 5) return HL_PG_NEED_MORE;
+    if (!buf) return HL_PG_ERR;   /* avail >= 5 with no buffer is a caller bug */
 
     uint8_t type = buf[0];
     uint32_t ulen = ((uint32_t)buf[1] << 24) | ((uint32_t)buf[2] << 16)

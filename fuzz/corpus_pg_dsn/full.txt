@@ -1,0 +1,1 @@
+postgres://alice:s3cret@db.example.com:6543/shop?sslmode=require

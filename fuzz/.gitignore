@@ -11,3 +11,4 @@ leak-*
 timeout-*
 oom-*
 *.profraw
+fuzz_pg_dsn
