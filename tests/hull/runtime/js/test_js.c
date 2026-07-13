@@ -148,7 +148,6 @@ static void init_js_with_caps(void)
     HlJSConfig cfg = HL_JS_CONFIG_DEFAULT;
     memset(&js, 0, sizeof(js));
     js.base.db_handle = &test_db_handle;
-    js.base.hull_db_handle = &test_db_handle;
     js.base.env_cfg = &env_cfg;
     js.base.platform_vfs = &platform_vfs;
     int rc = hl_js_init(&js, &cfg);

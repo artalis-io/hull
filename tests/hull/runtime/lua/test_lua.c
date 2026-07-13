@@ -129,7 +129,6 @@ static void init_lua_with_caps(void)
     HlLuaConfig cfg = HL_LUA_CONFIG_DEFAULT;
     memset(&lua_rt, 0, sizeof(lua_rt));
     lua_rt.base.db_handle = &test_db_handle;
-    lua_rt.base.hull_db_handle = &test_db_handle;
     lua_rt.base.env_cfg = &env_cfg;
     lua_rt.base.platform_vfs = &platform_vfs;
     int rc = hl_lua_init(&lua_rt, &cfg);

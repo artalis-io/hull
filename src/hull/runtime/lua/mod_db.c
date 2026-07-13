@@ -169,15 +169,15 @@ static int lua_is_stdlib_caller(lua_State *L)
 
 /* Resolve the connection this call operates on: a handle bound as upvalue 1
  * (a db.connect()/db.default() method), else the runtime default handle (the
- * top-level db.* bridge). @p is_stdlib selects the internal-tables handle for
- * the bridge path; the bound-handle path is already an explicit connection. */
-static HlDbHandle *db_call_handle(lua_State *L, int is_stdlib)
+ * top-level db.* bridge). Internal-table (_hull_*) access is gated by a
+ * caller check at each call site, not by a separate handle. */
+static HlDbHandle *db_call_handle(lua_State *L)
 {
     if (lua_islightuserdata(L, lua_upvalueindex(1)))
         return (HlDbHandle *)lua_touserdata(L, lua_upvalueindex(1));
     HlLua *lua = get_hl_lua(L);
     if (!lua) return NULL;
-    return is_stdlib ? lua->base.hull_db_handle : lua->base.db_handle;
+    return lua->base.db_handle;
 }
 
 /* db.query implementation */
@@ -190,7 +190,7 @@ static int lua_db_query_impl(lua_State *L)
     const char *sql = luaL_checkstring(L, 1);
 
     int is_stdlib = lua_is_stdlib_caller(L);
-    HlDbHandle *h = db_call_handle(L, is_stdlib);
+    HlDbHandle *h = db_call_handle(L);
 
     if (!is_stdlib && hl_cap_db_check_namespace(sql) != 0)
         return luaL_error(L, "access denied: _hull_* tables are reserved");
@@ -247,7 +247,7 @@ static int lua_db_exec_impl(lua_State *L)
     const char *sql = luaL_checkstring(L, 1);
 
     int is_stdlib = lua_is_stdlib_caller(L);
-    HlDbHandle *h = db_call_handle(L, is_stdlib);
+    HlDbHandle *h = db_call_handle(L);
 
     if (!is_stdlib && hl_cap_db_check_namespace(sql) != 0)
         return luaL_error(L, "access denied: _hull_* tables are reserved");
@@ -281,7 +281,7 @@ static int lua_db_last_id(lua_State *L)
         return luaL_error(L, "database not available");
 
     lua_pushinteger(L, (lua_Integer)hl_db_last_id(
-        db_call_handle(L, lua_is_stdlib_caller(L))));
+        db_call_handle(L)));
     return 1;
 }
 
@@ -294,7 +294,7 @@ static int lua_db_batch(lua_State *L)
 
     luaL_checktype(L, 1, LUA_TFUNCTION);
 
-    HlDbHandle *h = db_call_handle(L, lua_is_stdlib_caller(L));
+    HlDbHandle *h = db_call_handle(L);
 
     if (hl_db_begin(h) != 0)
         return luaL_error(L, "BEGIN failed: %s", hl_db_errmsg(h));
@@ -437,8 +437,7 @@ static int lua_db_insert_if_absent(lua_State *L)
         return luaL_error(L, "columns/values length mismatch (%d vs %d)",
                           n_cols, n_vals);
 
-    int is_stdlib = lua_is_stdlib_caller(L);
-    HlDbHandle *h = db_call_handle(L, is_stdlib);
+    HlDbHandle *h = db_call_handle(L);
 
     int rc = hl_db_insert_if_absent(h, table, conflict_cols, n_conflict,
                                      cols, vals, n_cols);
@@ -472,8 +471,7 @@ static int lua_db_upsert(lua_State *L)
         return luaL_error(L, "columns/values length mismatch (%d vs %d)",
                           n_cols, n_vals);
 
-    int is_stdlib = lua_is_stdlib_caller(L);
-    HlDbHandle *h = db_call_handle(L, is_stdlib);
+    HlDbHandle *h = db_call_handle(L);
 
     int rc = hl_db_upsert(h, table, conflict_cols, n_conflict,
                            cols, vals, n_cols);
@@ -509,8 +507,7 @@ static int lua_db_table_columns(lua_State *L)
         return luaL_error(L, "database not configured");
 
     const char *table = luaL_checkstring(L, 1);
-    int is_stdlib = lua_is_stdlib_caller(L);
-    HlDbHandle *h = db_call_handle(L, is_stdlib);
+    HlDbHandle *h = db_call_handle(L);
 
     lua_newtable(L);  /* result */
     LuaColForwardCtx fwd = { L, 0 };

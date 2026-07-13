@@ -33,7 +33,6 @@ static int lua_create(HlRuntime **out, const HlAppContextOpts *opts,
      * etc. during module registration. */
     if (base) {
         lua->base.db_handle      = base->db_handle;
-        lua->base.hull_db_handle = base->hull_db_handle;
         lua->base.db_registry    = base->db_registry;
         lua->base.alloc          = base->alloc;
         lua->base.app_vfs        = base->app_vfs;
