@@ -489,13 +489,11 @@ override HL_ENABLE_DB := 1
 CFLAGS += -DHL_ENABLE_DB
 endif
 
-# Phase 1 of the PostgreSQL epic ships the flag plumbing + DSN-based
-# backend selector only; the wire client (cap/pgwire.c + cap/db_postgres.c)
-# lands in Phase 2. Fail with a clear message instead of an
-# undefined-symbol link error if the backend is enabled before it exists.
-ifeq ($(HL_ENABLE_POSTGRES),1)
-$(error HL_ENABLE_POSTGRES is not implemented yet: the wire client lands in Phase 2 (docs/postgres_backend_design.md). Use HL_ENABLE_SQLITE for now.)
-endif
+# HL_ENABLE_POSTGRES=1 links the pure-C wire client (cap/pgwire.c +
+# cap/pg_conn.c + cap/db_postgres.c). Phase 2 is plaintext (trust /
+# cleartext auth); TLS + SCRAM (Phase 3) will additionally require mbedTLS,
+# which is only linked today when an HTTP half is on. See
+# docs/postgres_backend_design.md.
 
 # ── HTTP server / client — config flag reference ────────────────────
 #
@@ -2047,6 +2045,8 @@ BUILD_FINGERPRINT := \
   HTTP_SERVER=$(HL_ENABLE_HTTP_SERVER)|\
   HTTP_CLIENT=$(HL_ENABLE_HTTP_CLIENT)|\
   DB=$(HL_ENABLE_DB)|\
+  SQLITE=$(HL_ENABLE_SQLITE)|\
+  POSTGRES=$(HL_ENABLE_POSTGRES)|\
   WASM=$(HL_ENABLE_WASM)|\
   GPU=$(HL_ENABLE_GPU)|\
   TCC=$(HL_ENABLE_TCC)|\
@@ -2098,7 +2098,7 @@ $(shell test "$$(cat $(BUILD_CONFIG_FILE) 2>/dev/null)" = "$(BUILD_FINGERPRINT)"
 
 # ── Targets ─────────────────────────────────────────────────────────
 
-.PHONY: all clean test debug msan tsan fuzz fuzz-run e2e e2e-build e2e-http e2e-sandbox e2e-examples e2e-cli e2e-migrate e2e-templates e2e-agent e2e-context e2e-mcp e2e-agent-api e2e-compute e2e-compute-dev e2e-aot-cache e2e-cache e2e-cache-concurrent e2e-cache-cosmo e2e-tcc e2e-build-flavor e2e-install e2e-ca-bundle e2e-update e2e-tools e2e-multipart e2e-attachment e2e-blob e2e-hypermedia-photos-upload e2e-jwt-asym hull-test-examples self-build check analyze cppcheck bench bench-template bench-wasm bench-gpu bench-bytecode-cache wamrc coverage lint-lua lint-js lint platform platform-cosmo platform-server-only platform-client-only platform-pure-compute platform-cosmo-server-only platform-cosmo-client-only platform-cosmo-pure-compute hardening check-hardening
+.PHONY: all clean test debug msan tsan fuzz fuzz-run e2e e2e-build e2e-postgres e2e-http e2e-sandbox e2e-examples e2e-cli e2e-migrate e2e-templates e2e-agent e2e-context e2e-mcp e2e-agent-api e2e-compute e2e-compute-dev e2e-aot-cache e2e-cache e2e-cache-concurrent e2e-cache-cosmo e2e-tcc e2e-build-flavor e2e-install e2e-ca-bundle e2e-update e2e-tools e2e-multipart e2e-attachment e2e-blob e2e-hypermedia-photos-upload e2e-jwt-asym hull-test-examples self-build check analyze cppcheck bench bench-template bench-wasm bench-gpu bench-bytecode-cache wamrc coverage lint-lua lint-js lint platform platform-cosmo platform-server-only platform-client-only platform-pure-compute platform-cosmo-server-only platform-cosmo-client-only platform-cosmo-pure-compute hardening check-hardening
 
 all: $(BUILDDIR)/hull
 
@@ -3373,6 +3373,10 @@ e2e-cli: $(BUILDDIR)/hull
 
 e2e-migrate: $(BUILDDIR)/hull
 	sh tests/e2e_migrate.sh
+
+# PostgreSQL backend end-to-end (needs Docker; builds its own POSTGRES hull).
+e2e-postgres:
+	sh tests/e2e_postgres.sh
 
 e2e-templates: $(BUILDDIR)/hull
 	RUNTIME=$(RUNTIME) sh tests/e2e_templates.sh
