@@ -1319,10 +1319,12 @@ PLEDGE_OBJS ?=
 # up via the JS_RT_SRCS / LUA_RT_SRCS globs below).
 CAP_SRCS := $(filter-out $(SRCDIR)/hull/cap/tool.c $(SRCDIR)/hull/cap/test.c,$(wildcard $(SRCDIR)/hull/cap/*.c))
 ifeq ($(HL_ENABLE_DB),0)
-  # Umbrella off (no backend): drop the shared query surface + selector too.
+  # Umbrella off (no backend): drop the shared query surface + selector +
+  # the connection registry too.
   CAP_SRCS := $(filter-out \
       $(SRCDIR)/hull/cap/db.c \
-      $(SRCDIR)/hull/cap/db_select.c, \
+      $(SRCDIR)/hull/cap/db_select.c \
+      $(SRCDIR)/hull/cap/db_registry.c, \
       $(CAP_SRCS))
 endif
 ifneq ($(HL_ENABLE_SQLITE),1)

@@ -40,6 +40,7 @@ typedef struct HlAllocator HlAllocator;
 #define HL_MANIFEST_MAX_HOSTS  32
 #define HL_MANIFEST_MAX_CORS_ORIGINS 16
 #define HL_MANIFEST_MAX_MODULES 32
+#define HL_MANIFEST_MAX_DATABASES 16
 
 /* One declared module: `modules = { crypto = "1" }` → name="crypto", api_major=1.
  * Names are stored as the app wrote them (short alias or full canonical) —
@@ -48,6 +49,20 @@ typedef struct HlManifestModule {
     const char *name;       /* allocator-owned copy */
     uint8_t     api_major;  /* parsed from version string (e.g. "1" → 1) */
 } HlManifestModule;
+
+/* One declared database connection:
+ *   databases = { cache = "./cache.db", primary = { dsn_env = "DATABASE_URL" } }
+ * A literal string is the DSN as-is (SQLite file path or full URL). The
+ * table form { dsn_env = "VAR" } defers to an env var read at connection-open
+ * time, so Postgres credentials never sit in app source. `dsn` holds either
+ * the literal DSN or (when dsn_is_env) the env var name. Connections open
+ * lazily on first use; the one named "default" is what db.default() and the
+ * stdlib target. */
+typedef struct HlManifestDatabase {
+    const char *name;       /* allocator-owned copy */
+    const char *dsn;        /* literal DSN, or env var name when dsn_is_env */
+    int         dsn_is_env; /* 1 = dsn names an env var to resolve at open */
+} HlManifestDatabase;
 
 /* ── Manifest struct ───────────────────────────────────────────────── */
 
@@ -111,6 +126,14 @@ typedef struct HlManifest {
     HlManifestModule modules[HL_MANIFEST_MAX_MODULES];
     int              modules_count;
     int              modules_declared;
+
+    /* Declared named database connections (`databases = {...}`). Opened
+     * lazily by name through the connection registry; the entry named
+     * "default" is the stdlib / db.default() target. `databases_declared`
+     * distinguishes "no databases key" (0) from "databases = {}" (1). */
+    HlManifestDatabase databases[HL_MANIFEST_MAX_DATABASES];
+    int                databases_count;
+    int                databases_declared;
 
     /* W^X / no runtime dynamic code — opt-in escape hatches.
      * Both default to 0 (deny). Setting either to 1 in a manifest is

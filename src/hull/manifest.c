@@ -82,6 +82,10 @@ void hl_manifest_free(HlManifest *m)
     hl_manifest_str_free(a, &m->cors_headers);
     for (int i = 0; i < m->modules_count; i++)
         hl_manifest_str_free(a, &m->modules[i].name);
+    for (int i = 0; i < m->databases_count; i++) {
+        hl_manifest_str_free(a, &m->databases[i].name);
+        hl_manifest_str_free(a, &m->databases[i].dsn);
+    }
 
     memset(m, 0, sizeof(*m));
 }
@@ -149,6 +153,12 @@ int hl_manifest_seal(HlManifest *dst, const HlManifest *src, ShSealArena *arena)
     for (int i = 0; i < src->modules_count; i++)
         if (seal_str(arena, &dst->modules[i].name, src->modules[i].name) != 0)
             goto fail;
+    for (int i = 0; i < src->databases_count; i++) {
+        if (seal_str(arena, &dst->databases[i].name, src->databases[i].name) != 0)
+            goto fail;
+        if (seal_str(arena, &dst->databases[i].dsn, src->databases[i].dsn) != 0)
+            goto fail;
+    }
 
     return 0;
 

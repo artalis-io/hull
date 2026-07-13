@@ -302,6 +302,59 @@ int hl_manifest_extract_lua(lua_State *L, HlManifest *out, HlAllocator *alloc)
     }
     lua_pop(L, 1); /* pop modules */
 
+    /* databases = { cache = "./cache.db",
+     *               primary = { dsn_env = "DATABASE_URL" } }
+     * Keyed table: key = connection name, value = a literal DSN string or a
+     * table { dsn_env = "VAR" } (resolved from env at connection-open time).
+     * Opened lazily by name; the "default" entry is the stdlib target. */
+    lua_getfield(L, manifest_idx, "databases");
+    if (lua_istable(L, -1)) {
+        int db_idx = lua_gettop(L);
+        out->databases_declared = 1;
+        int truncated = 0;
+        lua_pushnil(L);
+        while (lua_next(L, db_idx) != 0) {
+            if (lua_type(L, -2) != LUA_TSTRING) { lua_pop(L, 1); continue; }
+            if (out->databases_count >= HL_MANIFEST_MAX_DATABASES) {
+                if (!truncated) {
+                    log_warn("[manifest] databases exceeds "
+                             "HL_MANIFEST_MAX_DATABASES (%d), truncated",
+                             HL_MANIFEST_MAX_DATABASES);
+                    truncated = 1;
+                }
+                lua_pop(L, 1);
+                continue;
+            }
+            const char *name = lua_tostring(L, -2);
+            const char *dsn_copy = NULL;
+            int is_env = 0;
+            if (lua_type(L, -1) == LUA_TSTRING) {
+                dsn_copy = hl_manifest_strdup(alloc, lua_tostring(L, -1));
+            } else if (lua_istable(L, -1)) {
+                lua_getfield(L, -1, "dsn_env");
+                if (lua_isstring(L, -1)) {
+                    dsn_copy = hl_manifest_strdup(alloc, lua_tostring(L, -1));
+                    is_env = 1;
+                }
+                lua_pop(L, 1);   /* pop dsn_env (copied above) */
+            }
+            if (name && name[0] && dsn_copy && dsn_copy[0]) {
+                const char *ncopy = hl_manifest_strdup(alloc, name);
+                if (ncopy) {
+                    out->databases[out->databases_count].name       = ncopy;
+                    out->databases[out->databases_count].dsn        = dsn_copy;
+                    out->databases[out->databases_count].dsn_is_env = is_env;
+                    out->databases_count++;
+                }
+            } else {
+                log_warn("[manifest] databases.%s: expected a DSN string or "
+                         "{ dsn_env = \"VAR\" }, ignored", name ? name : "?");
+            }
+            lua_pop(L, 1);   /* pop value, keep key for lua_next */
+        }
+    }
+    lua_pop(L, 1); /* pop databases */
+
     /* allow_dynamic_code = true — opt-in to JIT / runtime codegen.
      * Rejected by hl_sandbox_apply unless --no-sandbox. */
     lua_getfield(L, manifest_idx, "allow_dynamic_code");
