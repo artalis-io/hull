@@ -427,25 +427,41 @@ not implementation cost.
 **Priority:** Medium-High. First non-SQLite backend; validates the DB-vtable
 abstraction that already powers `HL_ENABLE_DB=0` compute-only builds.
 
-**Approach:**
+**Status:** design approved 2026-07-13, implementation not started. Full
+design in [postgres_backend_design.md](postgres_backend_design.md).
 
-- `HlDbBackend` implementation using libpq.
-- Connection string via `--db postgres://…` or per-handler config.
-- Statement caching via `PQprepare`.
-- Async queries via libpq's async protocol (not worker threads. Avoids the
-  extra hop and gives us pipelining).
-- Hull internals (`_hull_*` tables) **stay on embedded SQLite** so apps can
-  be ported incrementally; only application tables move to Postgres.
+**Approach (approved):**
 
-**Tasks:**
+- Optional + independent compile flags: `HL_ENABLE_SQLITE` (default 1) +
+  `HL_ENABLE_POSTGRES` (default 0), with `HL_ENABLE_DB` a derived umbrella
+  (`-D`-defined iff either is on). SQLite-only / Postgres-only / both /
+  neither all build. Mirrors the `HL_ENABLE_HTTP` server/client split.
+- **Pure-C, Hull-owned wire client** (`cap/pgwire.c` + `cap/db_postgres.c`),
+  NOT vendored libpq: no external dep, no OpenSSL-vs-mbedTLS conflict,
+  compiled under Hull's -Werror + sanitizer + fuzz regime. Auth
+  (SCRAM-SHA-256 + md5) reuses `cap/crypto`; TLS reuses mbedTLS + the
+  embedded CA bundle.
+- Backend selection by DSN scheme (`postgres://` picks PG, else SQLite) via
+  `hl_db_backend_select`; a DSN for an uncompiled backend fails closed.
+- **Worker-thread async** (not libpq's async protocol): blocking wire I/O on
+  the existing thread pool, byte-for-byte the same lifecycle as SQLite async.
+- `_hull_*` internal tables run on the SELECTED backend (via the vtable's
+  dialect helpers), so sessions / idempotency / outbox are shared across
+  instances. This supersedes the earlier "keep internals on SQLite" note,
+  which would have broken the multi-instance use case Postgres exists for.
+- v1 feature scope: core query / exec / txn + all `_hull_*` tables +
+  migrations work on Postgres. `db.udf` (SQLite `create_function`) and
+  `hull/search` (FTS5) stay SQLite-only and error clearly under Postgres;
+  native `tsvector` search is future work.
 
-- [ ] Vendor or dynamic-link libpq (choose: more deps but real prod use vs.
-      simpler distribution)
-- [ ] `src/hull/cap/db_postgres.c`. Backend vtable impl
-- [ ] Connection pooling (single connection vs. pool. Start with pool)
-- [ ] Parameter binding (Hull's `?` placeholder → Postgres `$1, $2…` rewrite)
-- [ ] Type mapping (HlValue ↔ Postgres OIDs)
-- [ ] Migration runner compatibility (Postgres dialect for `_hull_migrations`)
+**Tasks (phased; see design doc):**
+
+- [ ] Phase 1: flag split + `HL_ENABLE_DB` umbrella + `hl_db_backend_select` (no behavior change)
+- [ ] Phase 2: `cap/pgwire.c` + `cap/db_postgres.c` (plaintext + md5), unit + fuzz harness
+- [ ] Phase 3: TLS (mbedTLS + CA bundle + `sslmode`) + SCRAM-SHA-256
+- [ ] Phase 4: per-worker connections + `db.async.*` on Postgres
+- [ ] Phase 5: vtable-driven migration runner + `_hull_*` tables green on Postgres
+- [ ] Phase 6: CI (docker Postgres e2e + `test_db_backend` parity + `flavors` link check) + docs
 
 **Out of scope:** transactions across SQLite + Postgres (no XA / two-phase
 commit). Apps that mix both must accept eventual consistency.
