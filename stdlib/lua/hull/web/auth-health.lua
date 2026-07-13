@@ -47,12 +47,13 @@ local db = require("hull.db")
 
 local auth_health = {}
 
--- Helper: does a table exist?
+-- Helper: does a table exist? Uses the dialect-aware column probe
+-- (SQLite PRAGMA table_info / Postgres information_schema) so the
+-- health check works on either backend. An empty column set means
+-- the table is absent.
 local function table_exists(name)
-    local rows = db.query(
-        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
-        { name })
-    return rows and #rows > 0 or false
+    local cols = db.table_columns(name)
+    return cols and #cols > 0 or false
 end
 
 -- Helper: how many rows in a table (0 if table missing).

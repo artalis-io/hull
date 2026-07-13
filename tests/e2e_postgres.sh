@@ -60,8 +60,18 @@ done
 
 APPDIR=$(mktemp -d)
 cat > "$APPDIR/app.lua" <<'LUA'
-app.manifest({ modules = { "hull/db@1", "hull/http-server@1" } })
+app.manifest({ modules = {
+    "hull/db@1", "hull/http-server@1", "hull/search@1",
+    "hull/web/middleware/session@1", "hull/web/middleware/outbox@1",
+    "hull/web/auth-health@1",
+} })
 local db = require("hull.db")
+local session = require("hull.web.middleware.session")
+local outbox = require("hull.web.middleware.outbox")
+local auth_health = require("hull.web.auth-health")
+local search = require("hull.search")
+session.init()
+outbox.init()
 db.exec("DROP TABLE IF EXISTS e2e")
 db.exec("CREATE TABLE e2e (id BIGSERIAL PRIMARY KEY, name TEXT, score INT, active BOOL)")
 db.exec("INSERT INTO e2e (name, score, active) VALUES (?, ?, ?)", { "alice", 10, true })
@@ -77,6 +87,24 @@ app.get("/async", function(req, res)
     local rows = db.async.query(
         "SELECT id, name, active FROM e2e WHERE score >= ? ORDER BY id", { 0 })
     res:json({ rows = rows })
+end)
+-- stdlib on Postgres: session (dialect DDL + roundtrip), outbox
+-- (autoincrement_id_ddl + insert), auth-health (dialect table probe),
+-- and search's clear SQLite-only guard.
+app.get("/stdlib", function(req, res)
+    local sid = session.create({ user_id = "u1", role = "admin" })
+    local loaded = session.load(sid)
+    outbox.enqueue({ kind = "webhook", destination = "https://x.test", payload = "p" })
+    local stats = outbox.stats()
+    local health = auth_health.check()
+    local search_ok, search_err = pcall(function() return search.query("docs", "x") end)
+    res:json({
+        backend        = db.backend_name,
+        session_role   = loaded and loaded.role or nil,
+        outbox_pending = stats.pending,
+        sessions_ok    = health.sessions.ok,
+        search_guarded = (not search_ok) and (tostring(search_err):find("SQLite") ~= nil) or false,
+    })
 end)
 LUA
 
@@ -104,8 +132,17 @@ echo "$RESP_ASYNC" | grep -q '"name":"bob"'        || { echo "::error async bob 
 echo "$RESP_ASYNC" | grep -q '"active":true'       || { echo "::error async bool decode"; fail=1; }
 echo "$RESP_ASYNC" | grep -q '"name":"carol"'      && { echo "::error async carol not filtered"; fail=1; }
 
+# stdlib modules on Postgres (session / outbox / auth-health / search guard)
+RESP_STDLIB=$(curl -fsS "http://127.0.0.1:${PORT}/stdlib" || echo FAIL)
+echo "stdlib response: $RESP_STDLIB"
+echo "$RESP_STDLIB" | grep -q '"backend":"postgres"'    || { echo "::error backend not postgres"; fail=1; }
+echo "$RESP_STDLIB" | grep -q '"session_role":"admin"'  || { echo "::error session roundtrip"; fail=1; }
+echo "$RESP_STDLIB" | grep -q '"outbox_pending":1'      || { echo "::error outbox enqueue"; fail=1; }
+echo "$RESP_STDLIB" | grep -q '"sessions_ok":true'      || { echo "::error auth-health table probe"; fail=1; }
+echo "$RESP_STDLIB" | grep -q '"search_guarded":true'   || { echo "::error search SQLite-only guard"; fail=1; }
+
 if [ "$fail" = 0 ]; then
-    echo "PASS: postgres backend end-to-end (sync + db.async -> connect -> query -> typed decode)"
+    echo "PASS: postgres backend end-to-end (sync + db.async + stdlib -> typed decode)"
 else
     echo "--- server log ---"; cat "$APPDIR/serve.log"
     exit 1

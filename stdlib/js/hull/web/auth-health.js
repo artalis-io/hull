@@ -14,11 +14,12 @@ import { db }        from "hull:db";
 import { auditLog }  from "hull:web:middleware:audit-log";
 import { pwned }     from "hull:web:pwned";
 
+// Does a table exist? Uses the dialect-aware column probe (SQLite
+// PRAGMA table_info / Postgres information_schema) so the health check
+// works on either backend. An empty column set means the table is absent.
 function tableExists(name) {
-    const rows = db.query(
-        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
-        [name]);
-    return rows && rows.length > 0;
+    const cols = db.tableColumns(name);
+    return cols && cols.length > 0;
 }
 
 function rowCount(name) {
