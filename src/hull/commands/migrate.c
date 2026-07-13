@@ -45,8 +45,15 @@ static int cmd_run(const char *app_dir, const char *db_path)
 {
     /* Open via the backend vtable so the handle.ctx is the proper
      * HlDbSqliteCtx — required for hl_db_sqlite_raw / hl_migrate_run. */
-    HlDbHandle handle = { .backend = &hl_db_backend_sqlite, .ctx = NULL };
-    if (hl_db_backend_sqlite.open(&handle.ctx, db_path, NULL) != 0) {
+    const char *db_err = NULL;
+    const HlDbBackend *be = hl_db_backend_select(db_path, &db_err);
+    if (!be) {
+        fprintf(stderr, "hull migrate: %s\n",
+                db_err ? db_err : "no database backend");
+        return 1;
+    }
+    HlDbHandle handle = { .backend = be, .ctx = NULL };
+    if (be->open(&handle.ctx, db_path, NULL) != 0) {
         fprintf(stderr, "hull migrate: cannot open database %s\n", db_path);
         return 1;
     }
@@ -57,7 +64,7 @@ static int cmd_run(const char *app_dir, const char *db_path)
 
     int result = hl_migrate_run(&handle, &vfs);
 
-    hl_db_backend_sqlite.close(&handle);
+    be->close(&handle);
 
     if (result == HL_MIGRATE_ERR) {
         fprintf(stderr, "hull migrate: migration failed\n");
@@ -80,8 +87,15 @@ static int cmd_run(const char *app_dir, const char *db_path)
 static int cmd_status(const char *app_dir, const char *db_path)
 {
     /* Open via the backend vtable (same reason as cmd_run). */
-    HlDbHandle handle = { .backend = &hl_db_backend_sqlite, .ctx = NULL };
-    if (hl_db_backend_sqlite.open(&handle.ctx, db_path, NULL) != 0) {
+    const char *db_err = NULL;
+    const HlDbBackend *be = hl_db_backend_select(db_path, &db_err);
+    if (!be) {
+        fprintf(stderr, "hull migrate: %s\n",
+                db_err ? db_err : "no database backend");
+        return 1;
+    }
+    HlDbHandle handle = { .backend = be, .ctx = NULL };
+    if (be->open(&handle.ctx, db_path, NULL) != 0) {
         fprintf(stderr, "hull migrate: cannot open database %s\n", db_path);
         return 1;
     }
@@ -94,7 +108,7 @@ static int cmd_status(const char *app_dir, const char *db_path)
     int count = 0;
     int rc = hl_migrate_status(&handle, &vfs, &entries, &count);
 
-    hl_db_backend_sqlite.close(&handle);
+    be->close(&handle);
 
     if (rc != 0) {
         fprintf(stderr, "hull migrate: failed to query status\n");

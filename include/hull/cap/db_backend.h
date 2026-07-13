@@ -207,4 +207,21 @@ struct sqlite3;  /* forward decl for parameter type below */
 int  hl_db_sqlite_wrap(HlDbHandle *out, struct sqlite3 *db);
 void hl_db_sqlite_unwrap(HlDbHandle *h);
 
+/* ── PostgreSQL backend (optional; requires HL_ENABLE_POSTGRES) ────── */
+
+#ifdef HL_ENABLE_POSTGRES
+extern const HlDbBackend hl_db_backend_postgres;
+#endif
+
+/* ── Backend selection ────────────────────────────────────────────── */
+
+/*
+ * Choose a backend for @p dsn by scheme: a "postgres://" or
+ * "postgresql://" DSN selects the PostgreSQL backend, anything else (a
+ * file path, ":memory:", "file:") selects SQLite. Returns NULL and, if
+ * @p err is non-NULL, sets *err to a static message, when the DSN names a
+ * backend this binary was not compiled with. Never allocates.
+ */
+const HlDbBackend *hl_db_backend_select(const char *dsn, const char **err);
+
 #endif /* HL_CAP_DB_BACKEND_H */

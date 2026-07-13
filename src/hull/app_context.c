@@ -165,13 +165,21 @@ int hl_app_context_init(HlAppContext **out, const HlAppContextOpts *opts)
 #ifdef HL_ENABLE_DB
     if (!opts->no_db) {
         const char *db_path = opts->db_path ? opts->db_path : ":memory:";
-        ctx->db_handle.backend = &hl_db_backend_sqlite;
-        if (hl_db_backend_sqlite.open(&ctx->db_handle.ctx, db_path,
-                                       opts->alloc) != 0) {
+        const char *db_err = NULL;
+        const HlDbBackend *be = hl_db_backend_select(db_path, &db_err);
+        if (!be) {
+            fprintf(stderr, "hull: %s\n",
+                    db_err ? db_err : "no database backend");
+            free(ctx);
+            return -1;
+        }
+        ctx->db_handle.backend = be;
+        if (be->open(&ctx->db_handle.ctx, db_path, opts->alloc) != 0) {
             free(ctx);
             return -1;
         }
         ctx->db_open = 1;
+        /* NULL under a non-SQLite backend; raw-pointer consumers guard it. */
         ctx->db = hl_db_sqlite_raw(&ctx->db_handle);
     }
 #endif
