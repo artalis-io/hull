@@ -12,3 +12,4 @@ timeout-*
 oom-*
 *.profraw
 fuzz_pg_dsn
+fuzz_pg_rewrite
