@@ -179,4 +179,14 @@ int hl_pg_query(HlPgConn *conn, const char *sql,
                 HlPgDescCb desc_cb, HlPgRowCb row_cb, void *cb_ctx,
                 int64_t *affected);
 
+/*
+ * Execute a (possibly multi-statement) SQL script with no parameters via the
+ * simple Query protocol ('Q'). The extended protocol (hl_pg_query) rejects
+ * more than one statement per Parse, so migration files that bundle several
+ * statements need this path. Any result rows are discarded. Returns 0 on
+ * success, -1 on error with conn->errmsg set. Not for user input: values are
+ * not parameterized, so callers must only pass trusted SQL (migration files).
+ */
+int hl_pg_exec_simple(HlPgConn *conn, const char *sql);
+
 #endif /* HL_CAP_PG_CONN_H */

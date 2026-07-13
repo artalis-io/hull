@@ -55,6 +55,13 @@ typedef struct HlDbBackend {
                     HlRowCallback cb, void *cb_ctx, HlAllocator *alloc);
     int    (*exec)(HlDbHandle *h, const char *sql,
                    const HlValue *params, int nparams);
+    /* Execute a (possibly multi-statement) SQL script with no parameters.
+     * `exec` runs a single statement (SQLite stmt cache / PG extended
+     * protocol); multi-statement migration files need this. SQLite:
+     * sqlite3_exec. Postgres: the simple Query protocol. Results discarded.
+     * NULL = unsupported (caller must fall back or error). Trusted SQL only
+     * (no parameterization). */
+    int    (*exec_script)(HlDbHandle *h, const char *sql);
     int    (*begin)(HlDbHandle *h);
     int    (*commit)(HlDbHandle *h);
     int    (*rollback)(HlDbHandle *h);
@@ -108,6 +115,14 @@ static inline int hl_db_exec(HlDbHandle *h, const char *sql,
 {
     if (!h || !h->backend) return -1;
     return h->backend->exec(h, sql, params, nparams);
+}
+
+/* Returns -1 if the backend lacks exec_script (caller decides how to
+ * degrade); errors from the backend also return -1. */
+static inline int hl_db_exec_script(HlDbHandle *h, const char *sql)
+{
+    if (!h || !h->backend || !h->backend->exec_script) return -1;
+    return h->backend->exec_script(h, sql);
 }
 
 static inline int hl_db_begin(HlDbHandle *h)
