@@ -54,6 +54,7 @@ typedef struct HlPgConn {
     int32_t  backend_key;
     int      tx_status;   /* latest ReadyForQuery status: 'I' / 'T' / 'E' */
     char     errmsg[256];
+    struct HlTlsClient *tls;  /* non-NULL once the TLS handshake completes */
 } HlPgConn;
 
 /*

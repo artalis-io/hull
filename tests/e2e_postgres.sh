@@ -5,8 +5,10 @@
 # and exercises the full path: postgres:// DSN -> backend selection -> connect
 # + startup handshake -> parameterized db.exec / db.query -> typed row decode.
 #
-# Auth is SCRAM-SHA-256 (Phase 3, the postgres:16 default) over the plaintext
-# transport; TLS is a later phase. Skips cleanly when Docker is unavailable.
+# Auth is SCRAM-SHA-256 (Phase 3, the postgres:16 default). Two transports are
+# exercised: plaintext (sslmode=disable) and TLS (Phase 3b.2: SSLRequest ->
+# mbedTLS handshake -> SCRAM over TLS, asserted via pg_stat_ssl). Skips cleanly
+# when Docker (or, for the TLS phase, openssl) is unavailable.
 #
 # SPDX-License-Identifier: AGPL-3.0-or-later
 set -eu
@@ -14,7 +16,8 @@ set -eu
 CONTAINER=hull-pg-e2e
 PGPORT=55432
 PORT=18091
-DSN="postgres://hull:s3cretpw@127.0.0.1:${PGPORT}/hulldb"
+DSN="postgres://hull:s3cretpw@127.0.0.1:${PGPORT}/hulldb?sslmode=disable"
+DSN_TLS="postgres://hull:s3cretpw@127.0.0.1:${PGPORT}/hulldb?sslmode=require"
 
 cleanup() {
     [ -n "${SVR:-}" ] && kill "$SVR" 2>/dev/null || true
@@ -91,5 +94,70 @@ if [ "$fail" = 0 ]; then
     echo "PASS: postgres backend end-to-end (select -> connect -> query -> typed decode)"
 else
     echo "--- server log ---"; cat "$APPDIR/serve.log"
+    exit 1
+fi
+
+kill "$SVR" 2>/dev/null || true
+SVR=
+
+# ── TLS phase (Phase 3b.2) ────────────────────────────────────────────
+# Enable SSL on the running container with a self-signed cert, then connect
+# with sslmode=require and assert (via pg_stat_ssl) the session is encrypted.
+if ! command -v openssl >/dev/null 2>&1; then
+    echo "SKIP: openssl not available; TLS phase not run"
+    exit 0
+fi
+
+echo "=== enabling TLS on postgres (self-signed cert) ==="
+openssl req -new -x509 -days 1 -nodes -text \
+    -subj "/CN=127.0.0.1" \
+    -out "$APPDIR/server.crt" -keyout "$APPDIR/server.key" >/dev/null 2>&1
+
+docker cp "$APPDIR/server.crt" "$CONTAINER:/tmp/server.crt" >/dev/null
+docker cp "$APPDIR/server.key" "$CONTAINER:/tmp/server.key" >/dev/null
+# Postgres refuses a key readable by group/world or not owned by the db user;
+# stage the pair inside PGDATA (postgres-owned) with 600 on the key.
+docker exec -u root "$CONTAINER" sh -c '
+    cp /tmp/server.crt /tmp/server.key /var/lib/postgresql/data/ &&
+    chown postgres:postgres /var/lib/postgresql/data/server.crt /var/lib/postgresql/data/server.key &&
+    chmod 600 /var/lib/postgresql/data/server.key' >/dev/null
+
+# ssl is SIGHUP-reloadable: ALTER SYSTEM + pg_reload_conf(), no restart.
+docker exec -u postgres "$CONTAINER" psql -U hull -d hulldb -q \
+    -c "ALTER SYSTEM SET ssl = on;" \
+    -c "ALTER SYSTEM SET ssl_cert_file = 'server.crt';" \
+    -c "ALTER SYSTEM SET ssl_key_file = 'server.key';" \
+    -c "SELECT pg_reload_conf();" >/dev/null
+sleep 2
+
+APPDIR_TLS=$(mktemp -d)
+cat > "$APPDIR_TLS/app.lua" <<'LUA'
+app.manifest({ modules = { "hull/db@1", "hull/http-server@1" } })
+local db = require("hull.db")
+app.get("/", function(req, res)
+    -- pg_stat_ssl.ssl is true only when THIS backend connection is over TLS.
+    local r = db.query("SELECT ssl FROM pg_stat_ssl WHERE pid = pg_backend_pid()")
+    local n = db.query("SELECT count(*) AS c FROM e2e")
+    res:json({ ssl = r[1].ssl, count = n[1].c })
+end)
+LUA
+
+echo "=== running app over TLS (sslmode=require) ==="
+./build/hull -d "$DSN_TLS" --no-sandbox -p "$PORT" "$APPDIR_TLS/app.lua" >"$APPDIR_TLS/serve.log" 2>&1 &
+SVR=$!
+sleep 2
+
+RESP_TLS=$(curl -fsS "http://127.0.0.1:${PORT}/" || echo FAIL)
+echo "response: $RESP_TLS"
+
+tfail=0
+echo "$RESP_TLS" | grep -q '"ssl":true' || { echo "::error connection not over TLS"; tfail=1; }
+echo "$RESP_TLS" | grep -q '"count":3'  || { echo "::error query over TLS failed"; tfail=1; }
+
+if [ "$tfail" = 0 ]; then
+    echo "PASS: postgres TLS end-to-end (SSLRequest -> handshake -> SCRAM over TLS -> encrypted query)"
+    rm -rf "$APPDIR_TLS"
+else
+    echo "--- server log ---"; cat "$APPDIR_TLS/serve.log" 2>/dev/null || true
     exit 1
 fi
