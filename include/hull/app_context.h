@@ -57,7 +57,7 @@ typedef struct HlAppContextOpts {
     int           gpu_device;       /* -1 = default */
 
     /* Pure compute mode: 1 = skip database entirely.
-     * db_handle and hull_db_handle will be NULL, db global not registered. */
+     * db_handle / db_registry will be NULL, db global not registered. */
     int           no_db;
 
     /* Deferred loading: 1 = init runtime but don't load app.

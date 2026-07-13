@@ -229,7 +229,6 @@ int hl_app_context_init(HlAppContext **out, const HlAppContextOpts *opts)
 #ifdef HL_ENABLE_DB
     if (ctx->db_open) {
         base.db_handle      = &ctx->db_handle;
-        base.hull_db_handle = &ctx->db_handle;
         base.db_registry    = ctx->db_registry;
     }
 #endif

@@ -28,8 +28,7 @@ typedef struct HlAppContextOpts HlAppContextOpts;
  * stay zero on the runtime.
  */
 typedef struct HlRuntimeBaseConfig {
-    HlDbHandle               *db_handle;
-    HlDbHandle               *hull_db_handle;
+    HlDbHandle               *db_handle;     /* the "default" connection */
     struct HlDbRegistry      *db_registry;   /* named connections; may be NULL */
     HlAllocator              *alloc;
     const HlVfs              *app_vfs;

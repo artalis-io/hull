@@ -145,8 +145,10 @@ typedef struct HlRuntimeVtable {
 
 struct HlRuntime {
     const HlRuntimeVtable *vt;
-    HlDbHandle   *db_handle;      /* app queries (via vtable); the "default" conn */
-    HlDbHandle   *hull_db_handle; /* hull internal (_hull_* tables) */
+    HlDbHandle   *db_handle;      /* the "default" connection (fast-path pointer;
+                                   * also registry.get("default")). Internal-table
+                                   * access is gated by a caller check, not a
+                                   * separate handle. */
     HlDbRegistry *db_registry;    /* named connections (db.connect/default); may be NULL */
     HlAllocator  *alloc;
     HlFsConfig   *fs_cfg;

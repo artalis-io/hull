@@ -9,6 +9,7 @@
 #include "mod_buffer.h"
 #include "hull/cap/db.h"
 #include "hull/cap/db_backend.h"
+#include "hull/cap/db_registry.h"
 #include "hull/worker_db.h"
 #include "hull/shared/async.h"
 #include "hull/net_backend.h"
@@ -227,11 +228,38 @@ static int js_is_stdlib_caller(JSContext *ctx)
     return is_stdlib;
 }
 
+/* ── Connection objects: db.connect(name) / db.default() ──────────── */
+
+/* The connection handle is registry-owned, so the object's finalizer frees
+ * nothing; the opaque is just a borrowed HlDbHandle*. Non-forgeable: only C
+ * sets the opaque, so app JS cannot fabricate a connection over an arbitrary
+ * pointer (a plain object's JS_GetOpaque against this class id is NULL). */
+static JSClassID hull_db_conn_class_id;
+static void js_db_conn_finalizer(JSRuntime *rt, JSValue val)
+{
+    (void)rt; (void)val;   /* handle owned by the registry; nothing to free */
+}
+static JSClassDef js_db_conn_class = {
+    "HullDbConnection",
+    .finalizer = js_db_conn_finalizer,
+};
+
+/* Resolve the connection this call operates on: the bound handle when invoked
+ * as a connection-object method (this is a HullDbConnection), else the runtime
+ * default handle (the top-level db.* bridge). Internal-table access is gated
+ * by a caller check at each call site, not by a separate handle. */
+static HlDbHandle *js_call_handle(JSContext *ctx, JSValueConst this_val)
+{
+    HlDbHandle *bound = (HlDbHandle *)JS_GetOpaque(this_val, hull_db_conn_class_id);
+    if (bound) return bound;
+    HlJS *js = (HlJS *)JS_GetContextOpaque(ctx);
+    return js ? js->base.db_handle : NULL;
+}
+
 /* db.query implementation */
 static JSValue js_db_query_impl(JSContext *ctx, JSValueConst this_val,
                                 int argc, JSValueConst *argv)
 {
-    (void)this_val;
     HlJS *js = (HlJS *)JS_GetContextOpaque(ctx);
     if (!js || !js->base.db_handle)
         return JS_ThrowInternalError(ctx, "database not available");
@@ -244,7 +272,7 @@ static JSValue js_db_query_impl(JSContext *ctx, JSValueConst this_val,
         return JS_EXCEPTION;
 
     int is_stdlib = js_is_stdlib_caller(ctx);
-    HlDbHandle *h = is_stdlib ? js->base.hull_db_handle : js->base.db_handle;
+    HlDbHandle *h = js_call_handle(ctx, this_val);
 
     if (!is_stdlib && hl_cap_db_check_namespace(sql) != 0) {
         JS_FreeCString(ctx, sql);
@@ -299,7 +327,7 @@ static JSValue js_db_exec_impl(JSContext *ctx, JSValueConst this_val,
         return JS_EXCEPTION;
 
     int is_stdlib = js_is_stdlib_caller(ctx);
-    HlDbHandle *h = is_stdlib ? js->base.hull_db_handle : js->base.db_handle;
+    HlDbHandle *h = js_call_handle(ctx, this_val);
 
     if (!is_stdlib && hl_cap_db_check_namespace(sql) != 0) {
         JS_FreeCString(ctx, sql);
@@ -340,19 +368,18 @@ static JSValue js_db_exec(JSContext *ctx, JSValueConst this_val,
 static JSValue js_db_last_id(JSContext *ctx, JSValueConst this_val,
                               int argc, JSValueConst *argv)
 {
-    (void)this_val; (void)argc; (void)argv;
+    (void)argc; (void)argv;
     HlJS *js = (HlJS *)JS_GetContextOpaque(ctx);
     if (!js || !js->base.db_handle)
         return JS_ThrowInternalError(ctx, "database not available");
 
-    return JS_NewInt64(ctx, hl_db_last_id(js->base.db_handle));
+    return JS_NewInt64(ctx, hl_db_last_id(js_call_handle(ctx, this_val)));
 }
 
 /* db.batch(fn) — execute fn() inside a transaction (BEGIN IMMEDIATE..COMMIT) */
 static JSValue js_db_batch(JSContext *ctx, JSValueConst this_val,
                             int argc, JSValueConst *argv)
 {
-    (void)this_val;
     HlJS *js = (HlJS *)JS_GetContextOpaque(ctx);
     if (!js || !js->base.db_handle)
         return JS_ThrowInternalError(ctx, "database not available");
@@ -360,7 +387,7 @@ static JSValue js_db_batch(JSContext *ctx, JSValueConst this_val,
     if (argc < 1 || !JS_IsFunction(ctx, argv[0]))
         return JS_ThrowTypeError(ctx, "db.batch requires a function argument");
 
-    HlDbHandle *h = js->base.db_handle;
+    HlDbHandle *h = js_call_handle(ctx, this_val);
 
     if (hl_db_begin(h) != 0)
         return JS_ThrowInternalError(ctx, "BEGIN failed: %s",
@@ -387,8 +414,8 @@ static JSValue js_db_batch(JSContext *ctx, JSValueConst this_val,
 
 /* Shared body for db.insertIfAbsent / db.upsert — they differ only in
  * which vtable method they dispatch through. */
-static JSValue js_db_dialect_write(JSContext *ctx, int argc,
-                                    JSValueConst *argv, int is_upsert,
+static JSValue js_db_dialect_write(JSContext *ctx, JSValueConst this_val,
+                                    int argc, JSValueConst *argv, int is_upsert,
                                     const char *name)
 {
     HlJS *js = (HlJS *)JS_GetContextOpaque(ctx);
@@ -404,7 +431,7 @@ static JSValue js_db_dialect_write(JSContext *ctx, int argc,
         return JS_EXCEPTION;
 
     int is_stdlib = js_is_stdlib_caller(ctx);
-    HlDbHandle *h = is_stdlib ? js->base.hull_db_handle : js->base.db_handle;
+    HlDbHandle *h = js_call_handle(ctx, this_val);
 
     if (!is_stdlib && strncmp(table, "_hull_", 6) == 0) {
         JS_FreeCString(ctx, table);
@@ -458,15 +485,13 @@ static JSValue js_db_dialect_write(JSContext *ctx, int argc,
 static JSValue js_db_insert_if_absent(JSContext *ctx, JSValueConst this_val,
                                        int argc, JSValueConst *argv)
 {
-    (void)this_val;
-    return js_db_dialect_write(ctx, argc, argv, 0, "db.insertIfAbsent");
+    return js_db_dialect_write(ctx, this_val, argc, argv, 0, "db.insertIfAbsent");
 }
 
 static JSValue js_db_upsert(JSContext *ctx, JSValueConst this_val,
                              int argc, JSValueConst *argv)
 {
-    (void)this_val;
-    return js_db_dialect_write(ctx, argc, argv, 1, "db.upsert");
+    return js_db_dialect_write(ctx, this_val, argc, argv, 1, "db.upsert");
 }
 
 /* db.tableColumns(table) -> string[] */
@@ -500,7 +525,7 @@ static JSValue js_db_table_columns(JSContext *ctx, JSValueConst this_val,
         return JS_EXCEPTION;
 
     int is_stdlib = js_is_stdlib_caller(ctx);
-    HlDbHandle *h = is_stdlib ? js->base.hull_db_handle : js->base.db_handle;
+    HlDbHandle *h = js_call_handle(ctx, this_val);
 
     if (!is_stdlib && strncmp(table, "_hull_", 6) == 0) {
         JS_FreeCString(ctx, table);
@@ -1203,13 +1228,96 @@ static JSValue js_db_udf_unregister(JSContext *ctx, JSValueConst this_val,
 #endif
 }
 
+/* Build a connection object (HullDbConnection instance) carrying @p h as its
+ * opaque. The sync methods are the same C functions the top-level bridge uses;
+ * js_call_handle picks the bound handle over the runtime default. async / udf
+ * stay on the top-level module for now (the worker layer is single-DSN). */
+static JSValue push_conn_object(JSContext *ctx, HlDbHandle *h)
+{
+    JSValue obj = JS_NewObjectClass(ctx, (int)hull_db_conn_class_id);
+    if (JS_IsException(obj)) return obj;
+    JS_SetOpaque(obj, h);
+    JS_SetPropertyStr(ctx, obj, "query",
+                      JS_NewCFunction(ctx, js_db_query, "query", 2));
+    JS_SetPropertyStr(ctx, obj, "exec",
+                      JS_NewCFunction(ctx, js_db_exec, "exec", 2));
+    JS_SetPropertyStr(ctx, obj, "lastId",
+                      JS_NewCFunction(ctx, js_db_last_id, "lastId", 0));
+    JS_SetPropertyStr(ctx, obj, "batch",
+                      JS_NewCFunction(ctx, js_db_batch, "batch", 1));
+    JS_SetPropertyStr(ctx, obj, "insertIfAbsent",
+                      JS_NewCFunction(ctx, js_db_insert_if_absent,
+                                       "insertIfAbsent", 4));
+    JS_SetPropertyStr(ctx, obj, "upsert",
+                      JS_NewCFunction(ctx, js_db_upsert, "upsert", 4));
+    JS_SetPropertyStr(ctx, obj, "tableColumns",
+                      JS_NewCFunction(ctx, js_db_table_columns,
+                                       "tableColumns", 1));
+    const HlDbBackend *be = h ? h->backend : NULL;
+    JS_SetPropertyStr(ctx, obj, "backendName",
+                      JS_NewString(ctx, be ? be->name : "none"));
+    JS_SetPropertyStr(ctx, obj, "autoincrementIdDdl",
+                      JS_NewString(ctx, (be && be->autoincrement_id_ddl)
+                                        ? be->autoincrement_id_ddl
+                                        : "INTEGER PRIMARY KEY"));
+    return obj;
+}
+
+/* db.default() → connection object for the "default" connection. */
+static JSValue js_db_default(JSContext *ctx, JSValueConst this_val,
+                             int argc, JSValueConst *argv)
+{
+    (void)this_val; (void)argc; (void)argv;
+    HlJS *js = (HlJS *)JS_GetContextOpaque(ctx);
+    if (!js || !js->base.db_handle)
+        return JS_ThrowInternalError(ctx, "database not available");
+    return push_conn_object(ctx, js->base.db_handle);
+}
+
+/* db.connect(name) → connection object for a manifest-declared database. */
+static JSValue js_db_connect(JSContext *ctx, JSValueConst this_val,
+                             int argc, JSValueConst *argv)
+{
+    (void)this_val;
+    if (argc < 1)
+        return JS_ThrowTypeError(ctx, "db.connect requires (name)");
+    const char *name = JS_ToCString(ctx, argv[0]);
+    if (!name)
+        return JS_EXCEPTION;
+    HlJS *js = (HlJS *)JS_GetContextOpaque(ctx);
+    if (!js || !js->base.db_registry) {
+        JS_FreeCString(ctx, name);
+        return JS_ThrowInternalError(ctx, "no database registry available");
+    }
+    const char *err = NULL;
+    HlDbHandle *h = hl_db_registry_get(js->base.db_registry, name, &err);
+    if (!h) {
+        JSValue e = JS_ThrowInternalError(ctx, "db.connect('%s'): %s",
+                                          name, err ? err : "unknown database");
+        JS_FreeCString(ctx, name);
+        return e;
+    }
+    JS_FreeCString(ctx, name);
+    return push_conn_object(ctx, h);
+}
+
 /* ── Module init ─────────────────────────────────────────────────────── */
 
 static int js_db_module_init(JSContext *ctx, JSModuleDef *m)
 {
     if (hl_js_check_module_declared(ctx, "hull/db", "hull:db") != 0) return -1;
 
+    /* Register the connection-object class once (idempotent per runtime). */
+    if (hull_db_conn_class_id == 0) {
+        JS_NewClassID(&hull_db_conn_class_id);
+        JS_NewClass(JS_GetRuntime(ctx), hull_db_conn_class_id, &js_db_conn_class);
+    }
+
     JSValue db = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, db, "connect",
+                      JS_NewCFunction(ctx, js_db_connect, "connect", 1));
+    JS_SetPropertyStr(ctx, db, "default",
+                      JS_NewCFunction(ctx, js_db_default, "default", 0));
     JS_SetPropertyStr(ctx, db, "query",
                       JS_NewCFunction(ctx, js_db_query, "query", 2));
     JS_SetPropertyStr(ctx, db, "exec",
