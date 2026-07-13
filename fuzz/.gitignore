@@ -2,6 +2,7 @@
 fuzz_sh_json
 fuzz_path_normalize
 fuzz_mime_sniff
+fuzz_pgwire
 # Debug symbol bundles (macOS)
 *.dSYM/
 # libFuzzer artifacts
