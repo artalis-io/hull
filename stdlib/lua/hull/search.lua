@@ -18,7 +18,7 @@
 --       print(hit.id, hit.rank)
 --   end
 
-local db = require("hull.db")
+local db = require("hull.db").default()
 
 local search = {}
 

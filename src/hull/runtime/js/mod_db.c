@@ -1232,7 +1232,7 @@ static JSValue js_db_udf_unregister(JSContext *ctx, JSValueConst this_val,
  * opaque. The sync methods are the same C functions the top-level bridge uses;
  * js_call_handle picks the bound handle over the runtime default. async / udf
  * stay on the top-level module for now (the worker layer is single-DSN). */
-static JSValue push_conn_object(JSContext *ctx, HlDbHandle *h)
+static JSValue push_conn_object(JSContext *ctx, HlDbHandle *h, int is_default)
 {
     JSValue obj = JS_NewObjectClass(ctx, (int)hull_db_conn_class_id);
     if (JS_IsException(obj)) return obj;
@@ -1253,6 +1253,25 @@ static JSValue push_conn_object(JSContext *ctx, HlDbHandle *h)
     JS_SetPropertyStr(ctx, obj, "tableColumns",
                       JS_NewCFunction(ctx, js_db_table_columns,
                                        "tableColumns", 1));
+    /* async / udf dispatch to the per-thread worker + the SQLite raw handle,
+     * both of which are the DEFAULT connection. Only the default connection
+     * object carries them; named connections get the sync surface only until
+     * per-connection workers land. */
+    if (is_default) {
+        JSValue async_obj = JS_NewObject(ctx);
+        JS_SetPropertyStr(ctx, async_obj, "query",
+                          JS_NewCFunction(ctx, js_db_async_query, "query", 2));
+        JS_SetPropertyStr(ctx, async_obj, "exec",
+                          JS_NewCFunction(ctx, js_db_async_exec, "exec", 2));
+        JS_SetPropertyStr(ctx, obj, "async", async_obj);
+
+        JSValue udf_obj = JS_NewObject(ctx);
+        JS_SetPropertyStr(ctx, udf_obj, "register",
+                          JS_NewCFunction(ctx, js_db_udf_register, "register", 3));
+        JS_SetPropertyStr(ctx, udf_obj, "unregister",
+                          JS_NewCFunction(ctx, js_db_udf_unregister, "unregister", 1));
+        JS_SetPropertyStr(ctx, obj, "udf", udf_obj);
+    }
     const HlDbBackend *be = h ? h->backend : NULL;
     JS_SetPropertyStr(ctx, obj, "backendName",
                       JS_NewString(ctx, be ? be->name : "none"));
@@ -1271,7 +1290,7 @@ static JSValue js_db_default(JSContext *ctx, JSValueConst this_val,
 {
     (void)this_val; (void)argc; (void)argv;
     HlJS *js = (HlJS *)JS_GetContextOpaque(ctx);
-    return push_conn_object(ctx, js ? js->base.db_handle : NULL);
+    return push_conn_object(ctx, js ? js->base.db_handle : NULL, 1);
 }
 
 /* db.connect(name) → connection object for a manifest-declared database. */
@@ -1298,7 +1317,7 @@ static JSValue js_db_connect(JSContext *ctx, JSValueConst this_val,
         return e;
     }
     JS_FreeCString(ctx, name);
-    return push_conn_object(ctx, h);
+    return push_conn_object(ctx, h, 0);
 }
 
 /* ── Module init ─────────────────────────────────────────────────────── */

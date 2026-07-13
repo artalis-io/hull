@@ -22,8 +22,8 @@
  * }
  */
 
-import { db } from "hull:db";
-
+import { db as dbModule } from "hull:db";
+const db = dbModule.default();
 const IDENT_RE = /^[a-zA-Z_][a-zA-Z0-9_]*$/;
 const TABLE_PREFIX = "_hull_fts_";
 
