@@ -1317,9 +1317,10 @@ ifneq ($(HL_ENABLE_SQLITE),1)
       $(CAP_SRCS))
 endif
 ifneq ($(HL_ENABLE_POSTGRES),1)
-  # PostgreSQL wire backend (Phase 2+). No-op today (files not yet present).
+  # PostgreSQL wire backend: codec + connection + (Phase 2.4) the vtable.
   CAP_SRCS := $(filter-out \
       $(SRCDIR)/hull/cap/db_postgres.c \
+      $(SRCDIR)/hull/cap/pg_conn.c \
       $(SRCDIR)/hull/cap/pgwire.c, \
       $(CAP_SRCS))
 endif
@@ -2903,6 +2904,12 @@ $(BUILDDIR)/test_pgwire: $(TESTDIR)/hull/cap/test_pgwire.c $(SRCDIR)/hull/cap/pg
 	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ \
 		$(TESTDIR)/hull/cap/test_pgwire.c $(SRCDIR)/hull/cap/pgwire.c $(LDFLAGS)
 
+# pgwire connection / DSN / handshake test: same rationale as test_pgwire.
+# pg_conn.c + pgwire.c are gated out of CAP_OBJS until HL_ENABLE_POSTGRES.
+$(BUILDDIR)/test_pg_conn: $(TESTDIR)/hull/cap/test_pg_conn.c $(SRCDIR)/hull/cap/pg_conn.c $(SRCDIR)/hull/cap/pgwire.c | $(BUILDDIR)
+	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ \
+		$(TESTDIR)/hull/cap/test_pg_conn.c $(SRCDIR)/hull/cap/pg_conn.c $(SRCDIR)/hull/cap/pgwire.c $(LDFLAGS)
+
 # Capability tests (tests/hull/cap/)
 $(BUILDDIR)/test_%: $(TESTDIR)/hull/cap/test_%.c $(TEST_COMMON_DEPS) | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< $(TEST_COMMON_LIBS) $(LDFLAGS)
@@ -3269,7 +3276,11 @@ fuzz/fuzz_mime_sniff: fuzz/fuzz_mime_sniff.c $(SRCDIR)/hull/cap/mime.c
 fuzz/fuzz_pgwire: fuzz/fuzz_pgwire.c $(SRCDIR)/hull/cap/pgwire.c
 	$(CC) $(FUZZ_CFLAGS) -o $@ $^
 
-fuzz: fuzz/fuzz_sh_json fuzz/fuzz_path_normalize fuzz/fuzz_mime_sniff fuzz/fuzz_pgwire
+# PostgreSQL DSN parser: percent-decoding + bounded field splitting (§1 Phase 2).
+fuzz/fuzz_pg_dsn: fuzz/fuzz_pg_dsn.c $(SRCDIR)/hull/cap/pg_conn.c $(SRCDIR)/hull/cap/pgwire.c
+	$(CC) $(FUZZ_CFLAGS) -o $@ $^
+
+fuzz: fuzz/fuzz_sh_json fuzz/fuzz_path_normalize fuzz/fuzz_mime_sniff fuzz/fuzz_pgwire fuzz/fuzz_pg_dsn
 
 # Time-boxed run over the seed corpora (what CI runs). FUZZ_TIME overrides.
 fuzz-run: fuzz
@@ -3277,6 +3288,7 @@ fuzz-run: fuzz
 	./fuzz/fuzz_path_normalize fuzz/corpus_path_normalize/ -max_total_time=$(FUZZ_TIME)
 	./fuzz/fuzz_mime_sniff fuzz/corpus_mime_sniff/ -max_total_time=$(FUZZ_TIME)
 	./fuzz/fuzz_pgwire fuzz/corpus_pgwire/ -max_total_time=$(FUZZ_TIME)
+	./fuzz/fuzz_pg_dsn fuzz/corpus_pg_dsn/ -max_total_time=$(FUZZ_TIME)
 
 # ── E2E tests ──────────────────────────────────────────────────────
 
@@ -3812,7 +3824,7 @@ docs-api-check:
 
 clean:
 	rm -rf $(BUILDDIR)
-	rm -f fuzz/fuzz_sh_json fuzz/fuzz_path_normalize fuzz/fuzz_mime_sniff fuzz/fuzz_pgwire
+	rm -f fuzz/fuzz_sh_json fuzz/fuzz_path_normalize fuzz/fuzz_mime_sniff fuzz/fuzz_pgwire fuzz/fuzz_pg_dsn
 	@$(MAKE) -s -C $(KEEL_DIR) clean 2>/dev/null || true
 
 # ── Header-dependency replay ────────────────────────────────────────

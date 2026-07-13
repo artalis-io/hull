@@ -54,6 +54,16 @@ void hl_pg_put_cstr(HlPgWriter *w, const char *s);   /* includes the NUL */
 size_t hl_pg_msg_begin(HlPgWriter *w, uint8_t type);
 void   hl_pg_msg_end(HlPgWriter *w, size_t marker);
 
+/* ── Frontend message builders (complete messages) ────────────────── */
+
+/* StartupMessage: protocol 3.0 + the user (and database, if non-empty)
+ * parameters. No type tag (length-prefixed). */
+void hl_pg_build_startup(HlPgWriter *w, const char *user, const char *database);
+/* PasswordMessage ('p'): a cleartext or pre-hashed password string. */
+void hl_pg_build_password(HlPgWriter *w, const char *password);
+/* Terminate ('X'): graceful connection close. */
+void hl_pg_build_terminate(HlPgWriter *w);
+
 /* ── Backend message reader (UNTRUSTED INPUT) ─────────────────────── */
 
 /* One complete message frame. `body` points into the caller's buffer and
