@@ -89,7 +89,7 @@
 --     end)
 
 local crypto = require("hull.crypto")
-local db     = require("hull.db")
+local db     = require("hull.db").default()
 local time   = require("hull.time")
 local qrcode = require("hull.qrcode")
 

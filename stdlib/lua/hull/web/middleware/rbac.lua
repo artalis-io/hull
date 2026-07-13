@@ -18,7 +18,7 @@
 --   rbac.assign(user_id, "admin")
 --   app.use_post("*", "/admin/*", rbac.require_role("admin"))
 
-local db = require("hull.db")
+local db = require("hull.db").default()
 
 local rbac = {}
 

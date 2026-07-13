@@ -10,7 +10,8 @@
  * @license AGPL-3.0-or-later
  */
 
-import { db }        from "hull:db";
+import { db as dbModule } from "hull:db";
+const db = dbModule.default();
 import { auditLog }  from "hull:web:middleware:audit-log";
 import { pwned }     from "hull:web:pwned";
 

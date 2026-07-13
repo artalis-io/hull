@@ -3,8 +3,8 @@
 // Requires db globals (run via hull test harness).
 
 import { transaction } from "hull:web:middleware:transaction";
-import { db } from "hull:db";
-
+import { db as dbModule } from "hull:db";
+const db = dbModule.default();
 let pass = 0;
 let fail = 0;
 

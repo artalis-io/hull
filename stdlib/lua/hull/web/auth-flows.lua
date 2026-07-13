@@ -97,7 +97,7 @@
 
 local crypto    = require("hull.crypto")
 local envelope  = require("hull.crypto.envelope")
-local db        = require("hull.db")
+local db        = require("hull.db").default()
 local time      = require("hull.time")
 local json      = require("hull.json")
 local pwned     = require("hull.web.pwned")

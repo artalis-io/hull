@@ -4,8 +4,8 @@
 // Note: outbound HTTP calls will fail in test mode (no actual server).
 
 import { outbox } from "hull:web:middleware:outbox";
-import { db } from "hull:db";
-
+import { db as dbModule } from "hull:db";
+const db = dbModule.default();
 let pass = 0;
 let fail = 0;
 

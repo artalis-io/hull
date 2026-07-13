@@ -36,7 +36,7 @@
 --
 
 local json = require("hull.json")
-local db = require("hull.db")
+local db = require("hull.db").default()
 local http_client = require("hull.http-client")
 local time = require("hull.time")
 

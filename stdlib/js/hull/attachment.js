@@ -23,7 +23,8 @@
 
 import { blob } from "hull:blob";
 import { crypto } from "hull:crypto";
-import { db } from "hull:db";
+import { db as dbModule } from "hull:db";
+const db = dbModule.default();
 import { fs } from "hull:fs";
 import { mime as mimeMod } from "hull:mime";
 import { time } from "hull:time";
