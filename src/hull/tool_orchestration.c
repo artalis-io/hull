@@ -319,8 +319,15 @@ static int l_tool_migrate_status(lua_State *L)
     const char *app_dir = luaL_optstring(L, 1, ".");
     const char *db_path = luaL_optstring(L, 2, "data.db");
 
-    HlDbHandle handle = { .backend = &hl_db_backend_sqlite, .ctx = NULL };
-    if (hl_db_backend_sqlite.open(&handle.ctx, db_path, NULL) != 0) {
+    const char *db_err = NULL;
+    const HlDbBackend *be = hl_db_backend_select(db_path, &db_err);
+    if (!be) {
+        lua_pushnil(L);
+        lua_pushfstring(L, "%s", db_err ? db_err : "no database backend");
+        return 2;
+    }
+    HlDbHandle handle = { .backend = be, .ctx = NULL };
+    if (be->open(&handle.ctx, db_path, NULL) != 0) {
         lua_pushnil(L);
         lua_pushfstring(L, "cannot open database: %s", db_path);
         return 2;
@@ -332,7 +339,7 @@ static int l_tool_migrate_status(lua_State *L)
     HlMigrationStatus *entries = NULL;
     int count = 0;
     int rc = hl_migrate_status(&handle, &vfs, &entries, &count);
-    hl_db_backend_sqlite.close(&handle);
+    be->close(&handle);
 
     if (rc != 0) {
         lua_pushnil(L);

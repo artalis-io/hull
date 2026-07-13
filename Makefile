@@ -446,18 +446,55 @@ MBEDTLS_CFLAGS := -std=c11 -O2 -w \
 $(BUILDDIR)/mbed_%.o: $(MBEDTLS_DIR)/library/%.c | $(BUILDDIR)
 	$(CC) $(MBEDTLS_CFLAGS) -c -o $@ $<
 
-# ── SQLite (embedded relational DB) — config flag ──────────────────
-# On by default. Drop for pure-compute builds via:
-#   make HL_ENABLE_DB=0
-# When disabled, every `cap/db*.c`, `worker_db*`, `migrate*`, `mod_db.c`,
-# `agent/db.c`, and SQLite itself are excluded from the build. Apps must
-# avoid `db.*`, `migrate.*`, and any stdlib module that depends on
-# SQLite (session, ratelimit, idempotency, outbox, inbox, rbac, search).
+# ── Database backends (SQLite embedded / PostgreSQL wire): config ──
+# Two independent backends behind the HlDbBackend vtable, each with its
+# own flag, so a build can enable SQLite only (default), PostgreSQL only,
+# both, or neither:
+#   HL_ENABLE_SQLITE   (default 1): vendored SQLite amalgamation.
+#   HL_ENABLE_POSTGRES (default 0): pure-C PostgreSQL v3 wire client
+#                                   (roadmap §1; docs/postgres_backend_design.md).
+# HL_ENABLE_DB is the DERIVED umbrella ("any DB backend at all"),
+# -D-defined iff either granular flag is on. Every `#if defined(HL_ENABLE_DB)`
+# guard keeps meaning "a backend is present". Mirrors the HL_ENABLE_HTTP
+# server/client split above. When the umbrella is off, cap/db*.c,
+# worker_db*, migrate*, mod_db.c, agent/db.c, and SQLite itself are
+# excluded (pure-compute); apps must avoid db.*, migrate.*, and any stdlib
+# module that needs a DB (session, ratelimit, idempotency, outbox, inbox,
+# rbac, search).
+#
+# Back-compat: HL_ENABLE_DB=0 still works; it pins both granular flags off.
 
-HL_ENABLE_DB ?= 1
+ifeq ($(HL_ENABLE_DB),0)
+HL_ENABLE_SQLITE   ?= 0
+HL_ENABLE_POSTGRES ?= 0
+endif
+HL_ENABLE_SQLITE   ?= 1
+HL_ENABLE_POSTGRES ?= 0
 
-ifeq ($(HL_ENABLE_DB),1)
+ifeq ($(HL_ENABLE_SQLITE),1)
+CFLAGS += -DHL_ENABLE_SQLITE
+endif
+ifeq ($(HL_ENABLE_POSTGRES),1)
+CFLAGS += -DHL_ENABLE_POSTGRES
+endif
+
+# Derived umbrella. `override` forces the derived value even if a
+# contradictory HL_ENABLE_DB=1 was passed with both backends off (resolves
+# to a coherent "no backend" rather than a broken half-build). The
+# back-compat check above already read the caller's HL_ENABLE_DB=0 intent.
+ifeq ($(HL_ENABLE_SQLITE)$(HL_ENABLE_POSTGRES),00)
+override HL_ENABLE_DB := 0
+else
+override HL_ENABLE_DB := 1
 CFLAGS += -DHL_ENABLE_DB
+endif
+
+# Phase 1 of the PostgreSQL epic ships the flag plumbing + DSN-based
+# backend selector only; the wire client (cap/pgwire.c + cap/db_postgres.c)
+# lands in Phase 2. Fail with a clear message instead of an
+# undefined-symbol link error if the backend is enabled before it exists.
+ifeq ($(HL_ENABLE_POSTGRES),1)
+$(error HL_ENABLE_POSTGRES is not implemented yet: the wire client lands in Phase 2 (docs/postgres_backend_design.md). Use HL_ENABLE_SQLITE for now.)
 endif
 
 # ── HTTP server / client — config flag reference ────────────────────
@@ -511,10 +548,10 @@ endif
 # ── SQLite (vendored amalgamation) ─────────────────────────────────
 
 SQLITE_DIR    := $(VENDDIR)/sqlite
-ifeq ($(HL_ENABLE_DB),0)
-SQLITE_OBJ    :=
-else
+ifeq ($(HL_ENABLE_SQLITE),1)
 SQLITE_OBJ    := $(BUILDDIR)/sqlite3.o
+else
+SQLITE_OBJ    :=
 endif
 SQLITE_CFLAGS := -std=c11 -O2 -w -DSQLITE_THREADSAFE=1 -DSQLITE_ENABLE_FTS5
 
@@ -1266,11 +1303,24 @@ PLEDGE_OBJS ?=
 # up via the JS_RT_SRCS / LUA_RT_SRCS globs below).
 CAP_SRCS := $(filter-out $(SRCDIR)/hull/cap/tool.c $(SRCDIR)/hull/cap/test.c,$(wildcard $(SRCDIR)/hull/cap/*.c))
 ifeq ($(HL_ENABLE_DB),0)
-  # Drop SQLite-backed capability modules in pure-compute builds.
+  # Umbrella off (no backend): drop the shared query surface + selector too.
   CAP_SRCS := $(filter-out \
       $(SRCDIR)/hull/cap/db.c \
+      $(SRCDIR)/hull/cap/db_select.c, \
+      $(CAP_SRCS))
+endif
+ifneq ($(HL_ENABLE_SQLITE),1)
+  # SQLite backend + its UDF bridge are SQLite-only.
+  CAP_SRCS := $(filter-out \
       $(SRCDIR)/hull/cap/db_sqlite.c \
       $(SRCDIR)/hull/cap/db_udf.c, \
+      $(CAP_SRCS))
+endif
+ifneq ($(HL_ENABLE_POSTGRES),1)
+  # PostgreSQL wire backend (Phase 2+). No-op today (files not yet present).
+  CAP_SRCS := $(filter-out \
+      $(SRCDIR)/hull/cap/db_postgres.c \
+      $(SRCDIR)/hull/cap/pgwire.c, \
       $(CAP_SRCS))
 endif
 ifeq ($(HL_ENABLE_HTTP_CLIENT),0)
@@ -3112,6 +3162,12 @@ ifeq ($(HL_ENABLE_WASM),1)
 endif
 ifeq ($(HL_ENABLE_GPU),1)
   CFLAGS += -DHL_ENABLE_GPU -I$(VENDDIR)/wgpu
+endif
+ifeq ($(HL_ENABLE_SQLITE),1)
+  CFLAGS += -DHL_ENABLE_SQLITE
+endif
+ifeq ($(HL_ENABLE_POSTGRES),1)
+  CFLAGS += -DHL_ENABLE_POSTGRES
 endif
 ifeq ($(HL_ENABLE_DB),1)
   CFLAGS += -DHL_ENABLE_DB
