@@ -12,6 +12,12 @@
 
 #include "hull/cap/pg_conn.h"
 #include "hull/cap/pgwire.h"
+/* SCRAM pulls in cap/crypto (mbedTLS). The DSN / rewriter fuzz harnesses,
+ * which link this file for its pure functions, define HL_PG_NO_SCRAM to
+ * compile crypto-free. base64 below stays available either way. */
+#ifndef HL_PG_NO_SCRAM
+#include "hull/cap/crypto.h"
+#endif
 
 #include <ctype.h>
 #include <errno.h>
@@ -313,6 +319,175 @@ static void conn_teardown(HlPgConn *conn)
     conn->rcap = conn->rlen = conn->consumed = 0;
 }
 
+/* ── SCRAM-SHA-256 SASL exchange (RFC 5802 / RFC 7677) ────────────── */
+
+#ifndef HL_PG_NO_SCRAM
+typedef struct {
+    char    client_nonce[48];        /* base64 of 24 random bytes (32 chars) */
+    char    client_first_bare[128];  /* "n=,r=<nonce>" */
+    uint8_t server_sig[32];          /* expected ServerSignature */
+    int     have_server_sig;
+} PgScram;
+
+/* Handle one SASL AuthenticationRequest sub-message. Returns 0 to continue
+ * the handshake, -1 on failure (conn->errmsg set). */
+static int scram_handle(HlPgConn *conn, PgScram *sc, const HlPgDsn *dsn,
+                        int32_t sub, HlPgCursor *c)
+{
+    if (sub == HL_PG_AUTH_SASL) {
+        int have = 0;
+        for (;;) {
+            const char *m = hl_pg_get_cstr(c);
+            if (!m || m[0] == '\0') break;
+            if (strcmp(m, "SCRAM-SHA-256") == 0) have = 1;
+        }
+        if (!have) {
+            set_err(conn->errmsg, sizeof conn->errmsg,
+                    "server offers no supported SASL mechanism (need SCRAM-SHA-256)");
+            return -1;
+        }
+        uint8_t rnd[24];
+        if (hl_cap_crypto_random(rnd, sizeof rnd) != 0 ||
+            hl_pg_b64_encode(rnd, sizeof rnd,
+                             sc->client_nonce, sizeof sc->client_nonce) < 0) {
+            set_err(conn->errmsg, sizeof conn->errmsg, "SCRAM nonce generation failed");
+            return -1;
+        }
+        /* Empty SCRAM username: PostgreSQL uses the startup message's user. */
+        int n = snprintf(sc->client_first_bare, sizeof sc->client_first_bare,
+                         "n=,r=%s", sc->client_nonce);
+        char cfirst[192];
+        int cf = snprintf(cfirst, sizeof cfirst, "n,,%s", sc->client_first_bare);
+        if (n < 0 || (size_t)n >= sizeof sc->client_first_bare ||
+            cf < 0 || (size_t)cf >= sizeof cfirst) {
+            set_err(conn->errmsg, sizeof conn->errmsg, "SCRAM message too long");
+            return -1;
+        }
+        HlPgWriter w;
+        hl_pg_writer_init(&w);
+        size_t m = hl_pg_msg_begin(&w, HL_PG_F_PASSWORD);   /* 'p' */
+        hl_pg_put_cstr(&w, "SCRAM-SHA-256");
+        hl_pg_put_i32(&w, cf);
+        hl_pg_put_bytes(&w, cfirst, (size_t)cf);
+        hl_pg_msg_end(&w, m);
+        int se = w.err || conn_send(conn, w.buf, w.len);
+        hl_pg_writer_free(&w);
+        if (se) { set_err(conn->errmsg, sizeof conn->errmsg,
+                          "failed to send SASL initial response"); return -1; }
+        return 0;
+    }
+
+    if (sub == HL_PG_AUTH_SASL_CONTINUE) {
+        size_t rem = c->remaining;
+        const uint8_t *sfp = hl_pg_get_bytes(c, rem);
+        if (!sfp || rem == 0 || rem >= 512) {
+            set_err(conn->errmsg, sizeof conn->errmsg, "malformed SASL continue");
+            return -1;
+        }
+        char server_first[512];
+        memcpy(server_first, sfp, rem);
+        server_first[rem] = '\0';
+
+        char rnonce[160] = {0}, salt_b64[160] = {0};
+        int iters = 0;
+        for (const char *p = server_first; *p;) {
+            const char *comma = strchr(p, ',');
+            size_t flen = comma ? (size_t)(comma - p) : strlen(p);
+            if (flen >= 2 && p[1] == '=') {
+                const char *val = p + 2;
+                size_t vlen = flen - 2;
+                if (p[0] == 'r' && vlen < sizeof rnonce) {
+                    memcpy(rnonce, val, vlen); rnonce[vlen] = '\0';
+                } else if (p[0] == 's' && vlen < sizeof salt_b64) {
+                    memcpy(salt_b64, val, vlen); salt_b64[vlen] = '\0';
+                } else if (p[0] == 'i') {
+                    char ib[16];
+                    if (vlen < sizeof ib) { memcpy(ib, val, vlen); ib[vlen] = '\0'; iters = atoi(ib); }
+                }
+            }
+            if (!comma) break;
+            p = comma + 1;
+        }
+        if (!rnonce[0] || !salt_b64[0] || iters <= 0) {
+            set_err(conn->errmsg, sizeof conn->errmsg, "invalid SCRAM server-first");
+            return -1;
+        }
+        if (strncmp(rnonce, sc->client_nonce, strlen(sc->client_nonce)) != 0) {
+            set_err(conn->errmsg, sizeof conn->errmsg, "SCRAM nonce mismatch");
+            return -1;
+        }
+        uint8_t salt[128];
+        size_t salt_len = 0;
+        if (hl_pg_b64_decode(salt_b64, strlen(salt_b64), salt, sizeof salt, &salt_len) != 0) {
+            set_err(conn->errmsg, sizeof conn->errmsg, "bad SCRAM salt");
+            return -1;
+        }
+        char cfinal_bare[192];
+        int cfb = snprintf(cfinal_bare, sizeof cfinal_bare, "c=biws,r=%s", rnonce);
+        char authmsg[1200];
+        int am = snprintf(authmsg, sizeof authmsg, "%s,%s,%s",
+                          sc->client_first_bare, server_first, cfinal_bare);
+        if (cfb < 0 || (size_t)cfb >= sizeof cfinal_bare ||
+            am < 0 || (size_t)am >= sizeof authmsg) {
+            set_err(conn->errmsg, sizeof conn->errmsg, "SCRAM auth message too long");
+            return -1;
+        }
+        uint8_t proof[32];
+        if (hl_pg_scram_proof(dsn->password, strlen(dsn->password),
+                              salt, salt_len, iters, authmsg, (size_t)am,
+                              proof, sc->server_sig) != 0) {
+            set_err(conn->errmsg, sizeof conn->errmsg, "SCRAM proof computation failed");
+            return -1;
+        }
+        sc->have_server_sig = 1;
+
+        char proof_b64[64], cfinal[288];
+        if (hl_pg_b64_encode(proof, 32, proof_b64, sizeof proof_b64) < 0) return -1;
+        int cf = snprintf(cfinal, sizeof cfinal, "%s,p=%s", cfinal_bare, proof_b64);
+        if (cf < 0 || (size_t)cf >= sizeof cfinal) {
+            set_err(conn->errmsg, sizeof conn->errmsg, "SCRAM final too long");
+            return -1;
+        }
+        HlPgWriter w;
+        hl_pg_writer_init(&w);
+        size_t mm = hl_pg_msg_begin(&w, HL_PG_F_PASSWORD);
+        hl_pg_put_bytes(&w, cfinal, (size_t)cf);
+        hl_pg_msg_end(&w, mm);
+        int se = w.err || conn_send(conn, w.buf, w.len);
+        hl_pg_writer_free(&w);
+        if (se) { set_err(conn->errmsg, sizeof conn->errmsg,
+                          "failed to send SASL response"); return -1; }
+        return 0;
+    }
+
+    if (sub == HL_PG_AUTH_SASL_FINAL) {
+        size_t rem = c->remaining;
+        const uint8_t *sfp = hl_pg_get_bytes(c, rem);
+        if (!sfp || rem < 2 || sfp[0] != 'v' || sfp[1] != '=' || !sc->have_server_sig) {
+            set_err(conn->errmsg, sizeof conn->errmsg, "malformed SASL final");
+            return -1;
+        }
+        uint8_t got[32];
+        size_t gl = 0;
+        if (hl_pg_b64_decode((const char *)sfp + 2, rem - 2, got, sizeof got, &gl) != 0
+            || gl != 32) {
+            set_err(conn->errmsg, sizeof conn->errmsg, "bad SCRAM server signature");
+            return -1;
+        }
+        uint8_t diff = 0;
+        for (int i = 0; i < 32; i++) diff |= (uint8_t)(got[i] ^ sc->server_sig[i]);
+        if (diff) {
+            set_err(conn->errmsg, sizeof conn->errmsg, "SCRAM server signature mismatch");
+            return -1;
+        }
+        return 0;   /* server sends AuthenticationOk next */
+    }
+
+    set_err(conn->errmsg, sizeof conn->errmsg, "unsupported SASL sub-message");
+    return -1;
+}
+#endif /* HL_PG_NO_SCRAM */
+
 int hl_pg_conn_start(HlPgConn *conn, int fd, const HlPgDsn *dsn)
 {
     memset(conn, 0, sizeof(*conn));
@@ -337,6 +512,10 @@ int hl_pg_conn_start(HlPgConn *conn, int fd, const HlPgDsn *dsn)
 
     int authenticated = 0;
     int guard = 0;
+#ifndef HL_PG_NO_SCRAM
+    PgScram scram;
+    memset(&scram, 0, sizeof scram);
+#endif
     for (;;) {
         if (++guard > 1000) {
             set_err(conn->errmsg, sizeof conn->errmsg,
@@ -372,9 +551,25 @@ int hl_pg_conn_start(HlPgConn *conn, int fd, const HlPgDsn *dsn)
                                 "failed to send password");
                     conn_teardown(conn); return -1;
                 }
+            } else if (sub == HL_PG_AUTH_SASL ||
+                       sub == HL_PG_AUTH_SASL_CONTINUE ||
+                       sub == HL_PG_AUTH_SASL_FINAL) {
+#ifndef HL_PG_NO_SCRAM
+                if (scram_handle(conn, &scram, dsn, sub, &c) != 0) {
+                    conn_teardown(conn); return -1;
+                }
+#else
+                set_err(conn->errmsg, sizeof conn->errmsg,
+                        "SCRAM-SHA-256 not available in this build");
+                conn_teardown(conn); return -1;
+#endif
+            } else if (sub == HL_PG_AUTH_MD5) {
+                set_err(conn->errmsg, sizeof conn->errmsg,
+                        "md5 auth is not supported; use scram-sha-256 or trust");
+                conn_teardown(conn); return -1;
             } else {
                 snprintf(conn->errmsg, sizeof conn->errmsg,
-                         "auth method %d needs Phase 3 (TLS + md5/SCRAM)", sub);
+                         "unsupported auth method %d", sub);
                 conn_teardown(conn); return -1;
             }
             break;
@@ -439,6 +634,123 @@ void hl_pg_conn_close(HlPgConn *conn)
     }
     conn_teardown(conn);
 }
+
+/* ── Standard base64 + SCRAM-SHA-256 ──────────────────────────────── */
+
+static const char B64E[] =
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+int hl_pg_b64_encode(const uint8_t *in, size_t inlen, char *out, size_t outsize)
+{
+    size_t need = ((inlen + 2) / 3) * 4;
+    if (need + 1 > outsize) return -1;
+    size_t o = 0;
+    for (size_t i = 0; i < inlen; i += 3) {
+        int rem = (int)(inlen - i);
+        uint32_t n = (uint32_t)in[i] << 16;
+        if (rem > 1) n |= (uint32_t)in[i + 1] << 8;
+        if (rem > 2) n |= (uint32_t)in[i + 2];
+        out[o++] = B64E[(n >> 18) & 63];
+        out[o++] = B64E[(n >> 12) & 63];
+        out[o++] = rem > 1 ? B64E[(n >> 6) & 63] : '=';
+        out[o++] = rem > 2 ? B64E[n & 63] : '=';
+    }
+    out[o] = '\0';
+    return (int)o;
+}
+
+int hl_pg_b64_decode(const char *in, size_t inlen,
+                     uint8_t *out, size_t outsize, size_t *outlen)
+{
+    int rev[256];
+    for (int i = 0; i < 256; i++) rev[i] = -1;
+    for (int i = 0; i < 64; i++) rev[(unsigned char)B64E[i]] = i;
+
+    uint32_t acc = 0;
+    int bits = 0;
+    size_t o = 0;
+    for (size_t i = 0; i < inlen; i++) {
+        unsigned char c = (unsigned char)in[i];
+        if (c == '=') break;
+        int v = rev[c];
+        if (v < 0) return -1;   /* strict: reject any non-alphabet byte */
+        acc = (acc << 6) | (uint32_t)v;
+        bits += 6;
+        if (bits >= 8) {
+            bits -= 8;
+            if (o >= outsize) return -1;
+            out[o++] = (uint8_t)((acc >> bits) & 0xff);
+        }
+    }
+    if (outlen) *outlen = o;
+    return 0;
+}
+
+#ifndef HL_PG_NO_SCRAM
+/*
+ * PBKDF2-HMAC-SHA256 with dkLen = 32 (one output block). SCRAM uses the
+ * server-chosen iteration count (commonly 4096), which is below the
+ * password-hashing floor cap/crypto's hl_cap_crypto_pbkdf2 enforces, so this
+ * iterates HMAC here. It still goes through the cap HMAC primitive, so it
+ * inherits the backend + never calls mbedTLS directly.
+ */
+static int scram_pbkdf2(const char *pw, size_t pw_len,
+                        const uint8_t *salt, size_t salt_len, int iters,
+                        uint8_t out[32])
+{
+    if (iters < 1 || salt_len > 4096) return -1;
+    uint8_t *msg = malloc(salt_len + 4);
+    if (!msg) return -1;
+    memcpy(msg, salt, salt_len);
+    msg[salt_len + 0] = 0; msg[salt_len + 1] = 0;
+    msg[salt_len + 2] = 0; msg[salt_len + 3] = 1;   /* INT(1) */
+
+    uint8_t u[32], t[32];
+    int rc = hl_cap_crypto_hmac_sha256((const uint8_t *)pw, pw_len,
+                                       msg, salt_len + 4, u);
+    free(msg);
+    if (rc != 0) return -1;
+    memcpy(t, u, 32);
+
+    for (int i = 1; i < iters; i++) {
+        if (hl_cap_crypto_hmac_sha256((const uint8_t *)pw, pw_len, u, 32, u) != 0)
+            return -1;
+        for (int j = 0; j < 32; j++) t[j] = (uint8_t)(t[j] ^ u[j]);
+    }
+    memcpy(out, t, 32);
+    return 0;
+}
+
+int hl_pg_scram_proof(const char *password, size_t pw_len,
+                      const uint8_t *salt, size_t salt_len, int iterations,
+                      const char *auth_msg, size_t auth_msg_len,
+                      uint8_t client_proof[32], uint8_t server_sig[32])
+{
+    uint8_t salted[32], client_key[32], stored_key[32];
+    uint8_t client_sig[32], server_key[32];
+
+    if (scram_pbkdf2(password, pw_len, salt, salt_len, iterations, salted) != 0)
+        return -1;
+    if (hl_cap_crypto_hmac_sha256(salted, 32,
+            (const uint8_t *)"Client Key", 10, client_key) != 0) return -1;
+    if (hl_cap_crypto_sha256(client_key, 32, stored_key) != 0) return -1;
+    if (hl_cap_crypto_hmac_sha256(stored_key, 32,
+            (const uint8_t *)auth_msg, auth_msg_len, client_sig) != 0) return -1;
+    for (int i = 0; i < 32; i++)
+        client_proof[i] = (uint8_t)(client_key[i] ^ client_sig[i]);
+
+    if (hl_cap_crypto_hmac_sha256(salted, 32,
+            (const uint8_t *)"Server Key", 10, server_key) != 0) return -1;
+    if (hl_cap_crypto_hmac_sha256(server_key, 32,
+            (const uint8_t *)auth_msg, auth_msg_len, server_sig) != 0) return -1;
+
+    /* Scrub the derived secrets. */
+    pg_secure_zero(salted, sizeof salted);
+    pg_secure_zero(client_key, sizeof client_key);
+    pg_secure_zero(server_key, sizeof server_key);
+    return 0;
+}
+#endif /* HL_PG_NO_SCRAM */
 
 /* ── Placeholder rewriting ────────────────────────────────────────── */
 

@@ -2906,9 +2906,12 @@ $(BUILDDIR)/test_pgwire: $(TESTDIR)/hull/cap/test_pgwire.c $(SRCDIR)/hull/cap/pg
 
 # pgwire connection / DSN / handshake test: same rationale as test_pgwire.
 # pg_conn.c + pgwire.c are gated out of CAP_OBJS until HL_ENABLE_POSTGRES.
-$(BUILDDIR)/test_pg_conn: $(TESTDIR)/hull/cap/test_pg_conn.c $(SRCDIR)/hull/cap/pg_conn.c $(SRCDIR)/hull/cap/pgwire.c | $(BUILDDIR)
+PG_CRYPTO_OBJS := $(BUILDDIR)/cap_crypto.o $(BUILDDIR)/cap_crypto_hmac_mbedtls.o \
+                  $(BUILDDIR)/cap_crypto_asym_mbedtls.o $(MBEDTLS_OBJS) $(TWEETNACL_OBJ)
+$(BUILDDIR)/test_pg_conn: $(TESTDIR)/hull/cap/test_pg_conn.c $(SRCDIR)/hull/cap/pg_conn.c $(SRCDIR)/hull/cap/pgwire.c $(PG_CRYPTO_OBJS) | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ \
-		$(TESTDIR)/hull/cap/test_pg_conn.c $(SRCDIR)/hull/cap/pg_conn.c $(SRCDIR)/hull/cap/pgwire.c $(LDFLAGS)
+		$(TESTDIR)/hull/cap/test_pg_conn.c $(SRCDIR)/hull/cap/pg_conn.c $(SRCDIR)/hull/cap/pgwire.c \
+		$(PG_CRYPTO_OBJS) $(LDFLAGS)
 
 # Capability tests (tests/hull/cap/)
 $(BUILDDIR)/test_%: $(TESTDIR)/hull/cap/test_%.c $(TEST_COMMON_DEPS) | $(BUILDDIR)
@@ -3277,12 +3280,14 @@ fuzz/fuzz_pgwire: fuzz/fuzz_pgwire.c $(SRCDIR)/hull/cap/pgwire.c
 	$(CC) $(FUZZ_CFLAGS) -o $@ $^
 
 # PostgreSQL DSN parser: percent-decoding + bounded field splitting (§1 Phase 2).
+# HL_PG_NO_SCRAM keeps the pure-parser fuzzers free of the cap/crypto (mbedTLS)
+# dependency that SCRAM adds to pg_conn.c.
 fuzz/fuzz_pg_dsn: fuzz/fuzz_pg_dsn.c $(SRCDIR)/hull/cap/pg_conn.c $(SRCDIR)/hull/cap/pgwire.c
-	$(CC) $(FUZZ_CFLAGS) -o $@ $^
+	$(CC) $(FUZZ_CFLAGS) -DHL_PG_NO_SCRAM -o $@ $^
 
 # PostgreSQL placeholder rewriter: quote/comment-aware SQL scan (Phase 2).
 fuzz/fuzz_pg_rewrite: fuzz/fuzz_pg_rewrite.c $(SRCDIR)/hull/cap/pg_conn.c $(SRCDIR)/hull/cap/pgwire.c
-	$(CC) $(FUZZ_CFLAGS) -o $@ $^
+	$(CC) $(FUZZ_CFLAGS) -DHL_PG_NO_SCRAM -o $@ $^
 
 fuzz: fuzz/fuzz_sh_json fuzz/fuzz_path_normalize fuzz/fuzz_mime_sniff fuzz/fuzz_pgwire fuzz/fuzz_pg_dsn fuzz/fuzz_pg_rewrite
 
