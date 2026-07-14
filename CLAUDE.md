@@ -106,6 +106,12 @@ make                    # build hull binary (epoll on Linux, kqueue on macOS)
 make test               # build and run all unit tests
 make e2e                # end-to-end tests (all examples, both runtimes)
 make debug              # debug build with ASan + UBSan (recompiles from clean)
+                        #   `make debug && make test` runs the tests under ASan:
+                        #   debug records the sanitizer in build/.sanitizer.mk and a
+                        #   following bare `make test` inherits it (else the ASan-
+                        #   instrumented objects would fail to link the runtime).
+                        #   `make clean` clears it; `make DEBUG=1 test` is the
+                        #   equivalent single invocation CI uses.
 make msan               # MSan + UBSan (Linux clang only)
 make check              # full validation: clean + ASan + test + e2e
 make analyze            # Clang static analyzer (scan-build)
