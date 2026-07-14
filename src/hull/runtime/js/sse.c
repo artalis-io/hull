@@ -14,6 +14,7 @@
 #include "hull/shared/async.h"
 #include "hull/cap/db.h"
 #include "hull/cap/db_backend.h"
+#include "hull/cap/db_registry.h"
 
 #include "mod_buffer.h"
 
@@ -39,7 +40,7 @@ void hl_js_sse_handler(KlRequest *req, KlResponse *res,
     js->dispatch_depth++;
 
     /* Guard stale transactions */
-    hl_db_guard_stale_txn(js->base.db_handle);
+    hl_db_guard_stale_txn(hl_db_registry_default(js->base.db_registry));
 
     /* Reset scratch + instruction counter */
     sh_arena_reset(js->scratch);

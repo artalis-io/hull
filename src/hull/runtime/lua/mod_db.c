@@ -167,24 +167,31 @@ static int lua_is_stdlib_caller(lua_State *L)
     return ar.source && strncmp(ar.source, "hull.", 5) == 0;
 }
 
+/* The default connection, resolved from the registry (there is no separate
+ * default-handle field). NULL under --no-db. */
+static HlDbHandle *default_db(HlLua *lua)
+{
+    return lua ? hl_db_registry_default(lua->base.db_registry) : NULL;
+}
+
 /* Resolve the connection this call operates on: a handle bound as upvalue 1
- * (a db.connect()/db.default() method), else the runtime default handle (the
- * top-level db.* bridge). Internal-table (_hull_*) access is gated by a
- * caller check at each call site, not by a separate handle. */
+ * (a db.connect()/db.default() method), else the default connection.
+ * Internal-table (_hull_*) access is gated by a caller check at each call
+ * site, not by a separate handle. */
 static HlDbHandle *db_call_handle(lua_State *L)
 {
     if (lua_islightuserdata(L, lua_upvalueindex(1)))
         return (HlDbHandle *)lua_touserdata(L, lua_upvalueindex(1));
     HlLua *lua = get_hl_lua(L);
     if (!lua) return NULL;
-    return lua->base.db_handle;
+    return default_db(lua);
 }
 
 /* db.query implementation */
 static int lua_db_query_impl(lua_State *L)
 {
     HlLua *lua = get_hl_lua(L);
-    if (!lua || !lua->base.db_handle)
+    if (!lua || !default_db(lua))
         return luaL_error(L, "database not available");
 
     const char *sql = luaL_checkstring(L, 1);
@@ -241,7 +248,7 @@ static int lua_db_query_impl(lua_State *L)
 static int lua_db_exec_impl(lua_State *L)
 {
     HlLua *lua = get_hl_lua(L);
-    if (!lua || !lua->base.db_handle)
+    if (!lua || !default_db(lua))
         return luaL_error(L, "database not available");
 
     const char *sql = luaL_checkstring(L, 1);
@@ -277,7 +284,7 @@ static int lua_db_exec(lua_State *L) { return lua_db_exec_impl(L); }
 static int lua_db_last_id(lua_State *L)
 {
     HlLua *lua = get_hl_lua(L);
-    if (!lua || !lua->base.db_handle)
+    if (!lua || !default_db(lua))
         return luaL_error(L, "database not available");
 
     lua_pushinteger(L, (lua_Integer)hl_db_last_id(
@@ -289,7 +296,7 @@ static int lua_db_last_id(lua_State *L)
 static int lua_db_batch(lua_State *L)
 {
     HlLua *lua = get_hl_lua(L);
-    if (!lua || !lua->base.db_handle)
+    if (!lua || !default_db(lua))
         return luaL_error(L, "database not available");
 
     luaL_checktype(L, 1, LUA_TFUNCTION);
@@ -420,7 +427,7 @@ static HlValue *lua_values_from_array(lua_State *L, int idx, int *out_n,
 static int lua_db_insert_if_absent(lua_State *L)
 {
     HlLua *lua = get_hl_lua(L);
-    if (!lua || !lua->base.db_handle)
+    if (!lua || !default_db(lua))
         return luaL_error(L, "database not configured");
 
     const char *table = luaL_checkstring(L, 1);
@@ -455,7 +462,7 @@ static int lua_db_insert_if_absent(lua_State *L)
 static int lua_db_upsert(lua_State *L)
 {
     HlLua *lua = get_hl_lua(L);
-    if (!lua || !lua->base.db_handle)
+    if (!lua || !default_db(lua))
         return luaL_error(L, "database not configured");
 
     const char *table = luaL_checkstring(L, 1);
@@ -503,7 +510,7 @@ static void lua_db_table_columns_cb(void *cb_ctx, const char *col_name)
 static int lua_db_table_columns(lua_State *L)
 {
     HlLua *lua = get_hl_lua(L);
-    if (!lua || !lua->base.db_handle)
+    if (!lua || !default_db(lua))
         return luaL_error(L, "database not configured");
 
     const char *table = luaL_checkstring(L, 1);
@@ -941,7 +948,7 @@ static void lua_parse_udf_opts(lua_State *L, int opts_idx,
 static int lua_db_udf_register(lua_State *L)
 {
     HlLua *lua = get_hl_lua(L);
-    sqlite3 *raw_db = lua ? hl_db_sqlite_raw(lua->base.db_handle) : NULL;
+    sqlite3 *raw_db = lua ? hl_db_sqlite_raw(default_db(lua)) : NULL;
     if (!lua || !raw_db)
         return luaL_error(L, "database not available");
 
@@ -979,7 +986,7 @@ static int lua_db_udf_register(lua_State *L)
 
         const char *err_msg = NULL;
         int rc = hl_cap_db_udf_register_wasm(
-            lua->base.db_handle, lua->base.wasm_cache, &opts,
+            default_db(lua), lua->base.wasm_cache, &opts,
             lua->base.app_vfs, lua->app_dir,
             lua->base.alloc, &err_msg);
         if (rc != 0)
@@ -1066,18 +1073,18 @@ static int lua_db_udf_register(lua_State *L)
 static int lua_db_udf_unregister(lua_State *L)
 {
     HlLua *lua = get_hl_lua(L);
-    if (!lua || !lua->base.db_handle)
+    if (!lua || !default_db(lua))
         return luaL_error(L, "database not available");
 
     const char *sql_name = luaL_checkstring(L, 1);
 
 #ifdef HL_ENABLE_WASM
-    if (hl_cap_db_udf_unregister(lua->base.db_handle, sql_name) != 0)
+    if (hl_cap_db_udf_unregister(default_db(lua), sql_name) != 0)
         return luaL_error(L, "db.udf.unregister: failed");
 #else
     /* Fall back to direct sqlite3 call when WASM (and the UDF cap helper)
      * is compiled out — Lua/JS callback UDFs still work without WASM. */
-    sqlite3 *raw_db = hl_db_sqlite_raw(lua->base.db_handle);
+    sqlite3 *raw_db = hl_db_sqlite_raw(default_db(lua));
     if (!raw_db)
         return luaL_error(L, "database not available");
     int rc = sqlite3_create_function_v2(
@@ -1151,7 +1158,7 @@ static int push_conn_object(lua_State *L, HlDbHandle *h, int is_default)
 static int lua_db_default(lua_State *L)
 {
     HlLua *lua = get_hl_lua(L);
-    return push_conn_object(L, lua ? lua->base.db_handle : NULL, 1);
+    return push_conn_object(L, lua ? default_db(lua) : NULL, 1);
 }
 
 /* db.connect(name) → connection object for a manifest-declared database. */

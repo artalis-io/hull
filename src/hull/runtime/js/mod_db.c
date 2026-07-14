@@ -244,16 +244,23 @@ static JSClassDef js_db_conn_class = {
     .finalizer = js_db_conn_finalizer,
 };
 
+/* The default connection, resolved from the registry (there is no separate
+ * default-handle field). NULL under --no-db. */
+static HlDbHandle *default_db(HlJS *js)
+{
+    return js ? hl_db_registry_default(js->base.db_registry) : NULL;
+}
+
 /* Resolve the connection this call operates on: the bound handle when invoked
- * as a connection-object method (this is a HullDbConnection), else the runtime
- * default handle (the top-level db.* bridge). Internal-table access is gated
- * by a caller check at each call site, not by a separate handle. */
+ * as a connection-object method (this is a HullDbConnection), else the default
+ * connection. Internal-table access is gated by a caller check at each call
+ * site, not by a separate handle. */
 static HlDbHandle *js_call_handle(JSContext *ctx, JSValueConst this_val)
 {
     HlDbHandle *bound = (HlDbHandle *)JS_GetOpaque(this_val, hull_db_conn_class_id);
     if (bound) return bound;
     HlJS *js = (HlJS *)JS_GetContextOpaque(ctx);
-    return js ? js->base.db_handle : NULL;
+    return js ? default_db(js) : NULL;
 }
 
 /* db.query implementation */
@@ -261,7 +268,7 @@ static JSValue js_db_query_impl(JSContext *ctx, JSValueConst this_val,
                                 int argc, JSValueConst *argv)
 {
     HlJS *js = (HlJS *)JS_GetContextOpaque(ctx);
-    if (!js || !js->base.db_handle)
+    if (!js || !default_db(js))
         return JS_ThrowInternalError(ctx, "database not available");
 
     if (argc < 1)
@@ -316,7 +323,7 @@ static JSValue js_db_exec_impl(JSContext *ctx, JSValueConst this_val,
 {
     (void)this_val;
     HlJS *js = (HlJS *)JS_GetContextOpaque(ctx);
-    if (!js || !js->base.db_handle)
+    if (!js || !default_db(js))
         return JS_ThrowInternalError(ctx, "database not available");
 
     if (argc < 1)
@@ -370,7 +377,7 @@ static JSValue js_db_last_id(JSContext *ctx, JSValueConst this_val,
 {
     (void)argc; (void)argv;
     HlJS *js = (HlJS *)JS_GetContextOpaque(ctx);
-    if (!js || !js->base.db_handle)
+    if (!js || !default_db(js))
         return JS_ThrowInternalError(ctx, "database not available");
 
     return JS_NewInt64(ctx, hl_db_last_id(js_call_handle(ctx, this_val)));
@@ -381,7 +388,7 @@ static JSValue js_db_batch(JSContext *ctx, JSValueConst this_val,
                             int argc, JSValueConst *argv)
 {
     HlJS *js = (HlJS *)JS_GetContextOpaque(ctx);
-    if (!js || !js->base.db_handle)
+    if (!js || !default_db(js))
         return JS_ThrowInternalError(ctx, "database not available");
 
     if (argc < 1 || !JS_IsFunction(ctx, argv[0]))
@@ -419,7 +426,7 @@ static JSValue js_db_dialect_write(JSContext *ctx, JSValueConst this_val,
                                     const char *name)
 {
     HlJS *js = (HlJS *)JS_GetContextOpaque(ctx);
-    if (!js || !js->base.db_handle)
+    if (!js || !default_db(js))
         return JS_ThrowInternalError(ctx, "database not available");
 
     if (argc < 4)
@@ -514,7 +521,7 @@ static JSValue js_db_table_columns(JSContext *ctx, JSValueConst this_val,
 {
     (void)this_val;
     HlJS *js = (HlJS *)JS_GetContextOpaque(ctx);
-    if (!js || !js->base.db_handle)
+    if (!js || !default_db(js))
         return JS_ThrowInternalError(ctx, "database not available");
 
     if (argc < 1)
@@ -1034,7 +1041,7 @@ static JSValue js_db_udf_register(JSContext *ctx, JSValueConst this_val,
 {
     (void)this_val;
     HlJS *js = get_hl_js(ctx);
-    sqlite3 *raw_db = js ? hl_db_sqlite_raw(js->base.db_handle) : NULL;
+    sqlite3 *raw_db = js ? hl_db_sqlite_raw(default_db(js)) : NULL;
     if (!js || !raw_db)
         return JS_ThrowInternalError(ctx, "database not available");
 
@@ -1086,7 +1093,7 @@ static JSValue js_db_udf_register(JSContext *ctx, JSValueConst this_val,
 
         const char *err_msg = NULL;
         int rc = hl_cap_db_udf_register_wasm(
-            js->base.db_handle, js->base.wasm_cache, &udf_opts,
+            default_db(js), js->base.wasm_cache, &udf_opts,
             js->base.app_vfs, js->app_dir,
             js->base.alloc, &err_msg);
 
@@ -1192,7 +1199,7 @@ static JSValue js_db_udf_unregister(JSContext *ctx, JSValueConst this_val,
 {
     (void)this_val;
     HlJS *js = get_hl_js(ctx);
-    if (!js || !js->base.db_handle)
+    if (!js || !default_db(js))
         return JS_ThrowInternalError(ctx, "database not available");
 
     if (argc < 1)
@@ -1203,13 +1210,13 @@ static JSValue js_db_udf_unregister(JSContext *ctx, JSValueConst this_val,
         return JS_EXCEPTION;
 
 #ifdef HL_ENABLE_WASM
-    int rc_unreg = hl_cap_db_udf_unregister(js->base.db_handle, sql_name);
+    int rc_unreg = hl_cap_db_udf_unregister(default_db(js), sql_name);
     JS_FreeCString(ctx, sql_name);
     if (rc_unreg != 0)
         return JS_ThrowInternalError(ctx, "db.udf.unregister: failed");
     return JS_UNDEFINED;
 #else
-    sqlite3 *raw_db = hl_db_sqlite_raw(js->base.db_handle);
+    sqlite3 *raw_db = hl_db_sqlite_raw(default_db(js));
     if (!raw_db) {
         JS_FreeCString(ctx, sql_name);
         return JS_ThrowInternalError(ctx, "database not available");
@@ -1290,7 +1297,7 @@ static JSValue js_db_default(JSContext *ctx, JSValueConst this_val,
 {
     (void)this_val; (void)argc; (void)argv;
     HlJS *js = (HlJS *)JS_GetContextOpaque(ctx);
-    return push_conn_object(ctx, js ? js->base.db_handle : NULL, 1);
+    return push_conn_object(ctx, js ? default_db(js) : NULL, 1);
 }
 
 /* db.connect(name) → connection object for a manifest-declared database. */

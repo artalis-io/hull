@@ -75,7 +75,7 @@ app.manifest({ modules = {
     "hull/web/middleware/session@1", "hull/web/middleware/outbox@1",
     "hull/web/auth-health@1",
 } })
-local db = require("hull.db")
+local db = require("hull.db").default()
 local session = require("hull.web.middleware.session")
 local outbox = require("hull.web.middleware.outbox")
 local auth_health = require("hull.web.auth-health")
@@ -205,7 +205,7 @@ sleep 2
 APPDIR_TLS=$(mktemp -d)
 cat > "$APPDIR_TLS/app.lua" <<'LUA'
 app.manifest({ modules = { "hull/db@1", "hull/http-server@1" } })
-local db = require("hull.db")
+local db = require("hull.db").default()
 app.get("/", function(req, res)
     -- pg_stat_ssl.ssl is true only when THIS backend connection is over TLS.
     local r = db.query("SELECT ssl FROM pg_stat_ssl WHERE pid = pg_backend_pid()")

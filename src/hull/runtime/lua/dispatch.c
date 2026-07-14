@@ -14,6 +14,7 @@
 #include "hull/utils/alloc.h"
 #include "hull/cap/db.h"
 #include "hull/cap/db_backend.h"
+#include "hull/cap/db_registry.h"
 
 #include "lua.h"
 #include "lualib.h"
@@ -40,7 +41,7 @@ int hl_lua_dispatch(HlLua *lua, int handler_id,
     lua->dispatch_depth++;
 
     /* Guard: roll back any stale transaction left by a crashed handler */
-    hl_db_guard_stale_txn(lua->base.db_handle);
+    hl_db_guard_stale_txn(hl_db_registry_default(lua->base.db_registry));
 
     /* Re-arm instruction limit for this request */
     if (lua->max_instructions > 0)
@@ -179,7 +180,7 @@ int hl_lua_dispatch_middleware(HlLua *lua, int handler_id,
         return -1;
 
     /* Guard: roll back any stale transaction left by a crashed handler */
-    hl_db_guard_stale_txn(lua->base.db_handle);
+    hl_db_guard_stale_txn(hl_db_registry_default(lua->base.db_registry));
 
     /* Re-arm instruction limit for this middleware call */
     if (lua->max_instructions > 0)

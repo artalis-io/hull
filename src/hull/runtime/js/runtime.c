@@ -657,7 +657,7 @@ int hl_js_init(HlJS *js, const HlJSConfig *cfg)
      * Must happen before modules are registered since module init may
      * trigger worker VM creation. */
 #ifdef HL_ENABLE_DB
-    if (js->base.db_handle)
+    if (js->base.db_registry)
         hl_js_worker_db_init();
 #endif
 

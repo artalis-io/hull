@@ -27,7 +27,7 @@ int hl_js_register_modules(HlJS *js)
 
     /* Register hull:db module (only if database is available) */
 #ifdef HL_ENABLE_DB
-    if (js->base.db_handle) {
+    if (js->base.db_registry) {
         if (hl_js_init_db_module(js->ctx, js) != 0)
             return -1;
     }
