@@ -65,7 +65,11 @@ static void install_test_globals(lua_State *L)
         "}) do "
         "  local ok, mod = pcall(require, 'hull.' .. m) "
         "  if ok then _G[m] = mod end "
-        "end";
+        "end "
+        /* The db module now exposes only connect/default; the test snippets
+         * use db.query/exec/... directly, so expose the default connection as
+         * the `db` global (mirrors app code doing require('hull.db').default()). */
+        "if _G.db and _G.db.default then _G.db = _G.db.default() end";
     (void)luaL_dostring(L, PRELUDE);
 }
 

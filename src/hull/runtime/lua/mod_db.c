@@ -518,16 +518,9 @@ static int lua_db_table_columns(lua_State *L)
     return 1;
 }
 
-static const luaL_Reg db_funcs[] = {
-    {"query",            lua_db_query},
-    {"exec",             lua_db_exec},
-    {"last_id",          lua_db_last_id},
-    {"batch",            lua_db_batch},
-    {"insert_if_absent", lua_db_insert_if_absent},
-    {"upsert",           lua_db_upsert},
-    {"table_columns",    lua_db_table_columns},
-    {NULL, NULL}
-};
+/* The connection-object method table (db_conn_methods, defined near
+ * push_conn_object) carries these same functions; the top-level module no
+ * longer registers them, so there is no separate db_funcs array. */
 
 /* ── db.async.query / db.async.exec ─────────────────────────────────── */
 
@@ -1180,37 +1173,15 @@ static int lua_db_connect(lua_State *L)
 
 int luaopen_hull_db(lua_State *L)
 {
-    luaL_newlib(L, db_funcs);
-
-    /* Multi-backend acquisition: db.connect(name) / db.default(). */
+    /* The DB module exposes only connection acquisition: every query goes
+     * through a connection object from db.connect(name) or db.default(). The
+     * historical top-level db.query / exec / async / udf / backend_name / ...
+     * bridge is gone; those live on the connection object (db.default()). */
+    lua_createtable(L, 0, 2);
     lua_pushcfunction(L, lua_db_connect);
     lua_setfield(L, -2, "connect");
     lua_pushcfunction(L, lua_db_default);
     lua_setfield(L, -2, "default");
-
-    /* db.async sub-table */
-    luaL_newlib(L, db_async_funcs);
-    lua_setfield(L, -2, "async");
-
-    /* db.udf sub-table */
-    luaL_newlib(L, db_udf_funcs);
-    lua_setfield(L, -2, "udf");
-
-    /* Backend identity + dialect constants. Read from the
-     * HlDbBackend wired to this runtime so apps can branch on
-     * backend if they ever need to, and stdlib modules can pull
-     * the autoincrement DDL fragment when building CREATE TABLE
-     * statements. */
-    HlLua *lua = get_hl_lua(L);
-    const HlDbBackend *backend = (lua && lua->base.db_handle)
-        ? lua->base.db_handle->backend : NULL;
-    lua_pushstring(L, backend ? backend->name : "none");
-    lua_setfield(L, -2, "backend_name");
-    lua_pushstring(L, backend && backend->autoincrement_id_ddl
-                       ? backend->autoincrement_id_ddl
-                       : "INTEGER PRIMARY KEY");
-    lua_setfield(L, -2, "autoincrement_id_ddl");
-
     return 1;
 }
 
