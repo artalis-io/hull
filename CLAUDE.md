@@ -138,7 +138,9 @@ Hull's distribution is one binary; what's compiled into it is controlled by a sm
 | `HL_ENABLE_GPU` | 0 | (Off by default.) On enables wgpu-native (`gpu.*`) |
 | `HL_ENABLE_TCC` | 1 | Drop embedded TinyCC (`hull build --compiler=tcc` rejected) |
 | `HL_EMBED_CA_BUNDLE` | 1 | Drop Mozilla CA bundle (~200 KB, breaks HTTPS without system store) |
-| `HL_ENABLE_DB` | 1 | Drop SQLite + `db.*` + `migrate.*` + worker-DB connections + DB-backed stdlib (session, ratelimit, idempotency, outbox, inbox, rbac, search). ~1.4 MB smaller. See "Compute-only builds" below. |
+| `HL_ENABLE_SQLITE` | 1 | Drop the SQLite backend (`cap/db_sqlite.c`, `cap/db_udf.c`, vendored `sqlite3.c`). A SQLite file path or `:memory:` DSN then has no backend. |
+| `HL_ENABLE_POSTGRES` | 0 | (Off by default.) On enables the pure-C PostgreSQL wire backend (`cap/pgwire.c` + `cap/pg_conn.c` + `cap/db_postgres.c`; no libpq). A `postgres://` / `postgresql://` DSN selects it. Links the shared TLS client (`HL_LINK_TLS`) for SSL connections. See "PostgreSQL + multi-backend DB" below. |
+| `HL_ENABLE_DB` | 1 | **Umbrella, derived** from the two granular flags: defined iff `HL_ENABLE_SQLITE` or `HL_ENABLE_POSTGRES` is on. Off (both granular off) drops `db.*` + `migrate.*` + worker-DB + the connection registry + DB-backed stdlib (session, ratelimit, idempotency, outbox, inbox, rbac, search). ~1.4 MB smaller. See "Compute-only builds" below. |
 | `HL_ENABLE_HTTP_SERVER` | 1 | Drop the inbound HTTP server: serve.c (KlServer setup), routing, body reader, WebSocket server (cap/ws), middleware, SSE, in-process test harness (cap/test, test_runner), and `hull dev/test/agent/mcp` commands. Apps must use `app.main(fn)` and may not declare `hull/http-server`, `hull/web/ws-server`, `hull/web/ws-client`, `hull/web/sse`, or any `hull/web/middleware/*`. See "HTTP build flavors" below. |
 | `HL_ENABLE_HTTP_CLIENT` | 1 | Drop the outbound HTTP/HTTPS client: `http.fetch` (cap/http + cap/http_async), SMTP send (cap/smtp), and `hull update` (which uses Keel's HTTPS client). Apps may not declare `hull/http-client`, `hull/smtp`, or `hull/email`. |
 | `HL_ENABLE_HTTP` | 1 | **Back-compat alias.** Setting `HL_ENABLE_HTTP=0` pins both `HL_ENABLE_HTTP_SERVER` and `HL_ENABLE_HTTP_CLIENT` to 0. The macro stays defined when either granular flag is on, so existing source guards continue to mean "any HTTP at all". |
@@ -221,6 +223,95 @@ What still works:
 - `hull build`, `hull dev`, `hull test`, `hull agent` (minus the `db`/`migrate` subcommands)
 
 Binary size on arm64 Darwin: ~3.66 MB vs ~5.06 MB with DB (about 28% smaller).
+
+### PostgreSQL + multi-backend DB
+
+Hull's database layer is backend-agnostic behind the `HlDbBackend` vtable
+(`include/hull/cap/db_backend.h`). Two backends ship: embedded **SQLite**
+(default) and an optional pure-C **PostgreSQL** wire client (no libpq).
+Both are chosen per-connection by DSN scheme via `hl_db_backend_select`
+(`cap/db_select.c`): a `postgres://` / `postgresql://` URL selects Postgres,
+anything else (a file path, `:memory:`, `file:`) selects SQLite.
+
+**Handles-only API (no top-level `db.*`).** The `hull/db` module exposes only
+connection acquisition; every query goes through an explicit connection object:
+
+```lua
+local db = require("hull.db").default()   -- the default connection (-d / "default")
+db.query("SELECT ...", { ... })
+db.exec("INSERT ...", { ... })
+local cache = require("hull.db").connect("cache")  -- a named connection
+cache.query(...)
+```
+
+```javascript
+import { db as dbModule } from "hull:db";
+const db = dbModule.default();            // JS: acquire the default connection
+db.query("SELECT ...", [ ... ]);
+const cache = dbModule.connect("cache");
+```
+
+The connection object carries `query` / `exec` / `batch` / `last_id` (`lastId`)
+/ `insert_if_absent` (`insertIfAbsent`) / `upsert` / `table_columns`
+(`tableColumns`) / `backend_name` (`backendName`) / `autoincrement_id_ddl`
+(`autoincrementIdDdl`). `async` (`db.default().async.query/exec`) and `udf`
+live on the **default** connection only (the worker pool + UDF path are
+single-DSN today; named-connection async/udf is a tracked follow-up).
+
+**Named connections via the manifest.** Additional connections are declared in
+`manifest.databases`; the value is a literal DSN (a SQLite file path, no
+credentials) or `{ dsn_env = "VAR" }` (the DSN is read from an env var at
+connection-open time so Postgres credentials never sit in app source):
+
+```lua
+app.manifest({
+    modules = { "hull/db@1" },
+    databases = {
+        cache   = "./cache.db",                    -- SQLite file
+        primary = { dsn_env = "DATABASE_URL" },    -- postgres:// from $DATABASE_URL
+    },
+})
+```
+
+(The DB connection dials its host directly; `manifest.hosts` gates
+`http.fetch`, not database connections.)
+
+The connection named `"default"` is what `db.default()` and the stdlib target;
+when an app just uses `-d <DSN>` with no `databases` map, that becomes the
+`"default"` connection. Connections open **lazily** on first use and are cached
+by name (per process for the sync path; per worker thread for `db.async`).
+Architecturally the registry (`cap/db_registry.c`) owns every connection,
+including the default -- there is no distinguished default-handle field;
+consumers resolve it via `hl_db_registry_default`. `db.connect(name)` resolves
+after startup (the manifest is applied post-load), so call it from `app.main`
+or a handler, not at module top-level; `db.default()` works everywhere.
+
+**PostgreSQL specifics** (`HL_ENABLE_POSTGRES=1`):
+- **Auth:** SCRAM-SHA-256 (the postgres:16 default) and `trust` / cleartext.
+  MD5 is rejected. Reuses `cap/crypto` (SHA-256 / HMAC / PBKDF2).
+- **TLS:** `sslmode=disable|prefer|require|verify-ca|verify-full` in the DSN
+  (`?sslmode=...`), default `prefer`. `verify-full` checks the chain +
+  hostname against the embedded CA bundle via the shared `shared/tls_client.c`
+  helper (the same KlTls handshake SMTP uses). `HL_LINK_TLS` links Keel +
+  mbedTLS whenever an HTTP half OR Postgres is enabled.
+- **Types:** typed decode by OID (bool/int/float/text/bytea); `?` placeholders
+  are rewritten to `$n`; params bound in text format (SQL injection
+  impossible). A Lua/JS params array with trailing nils binds the tail as NULL,
+  matching SQLite.
+- **Migrations** run through the vtable; multi-statement migration files use
+  the Postgres simple-query protocol. The `_hull_migrations` tracking table is
+  dialect-portable (name PK, host-generated ISO-8601 `applied_at`).
+- **SQLite-only features under Postgres:** `db.udf` and `hull/search` (FTS5)
+  are SQLite-only and fail with a clear error on a Postgres connection.
+
+**Flag combinations.** `HL_ENABLE_SQLITE` (default 1) and `HL_ENABLE_POSTGRES`
+(default 0) are independent; `HL_ENABLE_DB` is the derived umbrella (on iff
+either is). `make HL_ENABLE_POSTGRES=1` builds both backends. (A SQLite-off,
+Postgres-only build is not yet link-clean -- `mod_db.c`'s udf code and a few
+`sqlite3_*` accessors are still unconditional; tracked follow-up.) CI covers
+the `sqlite + postgres` link flavor, the three pg fuzzers, and a full
+`e2e_postgres` job (real Postgres 16 in Docker: SCRAM + TLS + migrations +
+`db.async` + stdlib). Design + rationale: [docs/postgres_backend_design.md](docs/postgres_backend_design.md).
 
 ### Lua/JS orchestration overhead for compute-heavy workloads
 
