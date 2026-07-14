@@ -165,31 +165,44 @@ int hl_app_context_init(HlAppContext **out, const HlAppContextOpts *opts)
     /* Open database via vtable (skip in pure compute mode) */
 #ifdef HL_ENABLE_DB
     if (!opts->no_db) {
-        const char *db_path = opts->db_path ? opts->db_path : ":memory:";
+        const char *db_path = opts->db_path;
+#ifdef HL_ENABLE_SQLITE
+        /* SQLite in-memory default when no DSN is given. Only when SQLite is
+         * compiled: a postgres-only build has no SQLite to fall back to, so a
+         * missing DSN means "no default connection" (see below), not :memory:. */
+        if (!db_path) db_path = ":memory:";
+#endif
         /* The registry owns every connection, including the default (the -d
          * flag DSN). db.default(), migrations, and the per-request stale-txn
          * guards all resolve it via the registry; there is no separate default
          * handle. The databases map isn't known until app.manifest() runs, so
          * the serve path injects the sealed manifest later via
-         * hl_db_registry_set_manifest (named db.connect() then resolves too). */
+         * hl_db_registry_set_manifest (named db.connect() then resolves too).
+         * The registry is created even without a default DSN so named
+         * connections still resolve. */
         ctx->db_registry = hl_db_registry_create(NULL, db_path, opts->alloc);
         if (!ctx->db_registry) {
             fprintf(stderr, "hull: out of memory (db registry)\n");
             free(ctx);
             return -1;
         }
-        const char *derr = NULL;
-        HlDbHandle *def = hl_db_registry_get(ctx->db_registry, "default", &derr);
-        if (!def) {
-            fprintf(stderr, "hull: %s\n", derr ? derr : "cannot open database");
-            hl_db_registry_destroy(ctx->db_registry);
-            ctx->db_registry = NULL;
-            free(ctx);
-            return -1;
+        /* Open the default connection only when a default DSN exists. With none
+         * (postgres-only build, no -d), the app runs DB-less: db.default() is
+         * lazy and errors only on use, matching a compute-only build. */
+        if (db_path) {
+            const char *derr = NULL;
+            HlDbHandle *def = hl_db_registry_get(ctx->db_registry, "default", &derr);
+            if (!def) {
+                fprintf(stderr, "hull: %s\n", derr ? derr : "cannot open database");
+                hl_db_registry_destroy(ctx->db_registry);
+                ctx->db_registry = NULL;
+                free(ctx);
+                return -1;
+            }
+            ctx->db_open = 1;
+            /* NULL under a non-SQLite backend; raw-pointer consumers guard it. */
+            ctx->db = hl_db_sqlite_raw(def);
         }
-        ctx->db_open = 1;
-        /* NULL under a non-SQLite backend; raw-pointer consumers guard it. */
-        ctx->db = hl_db_sqlite_raw(def);
     }
 #endif
 

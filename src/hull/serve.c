@@ -357,10 +357,20 @@ typedef struct {
     int    app_argc;
 } HlServeConfig;
 
+/* No SQLite default path on a build without SQLite: a postgres-only binary with
+ * no -d runs DB-less (like a compute-only build) instead of failing to open a
+ * SQLite file it can't. An explicit postgres:// -d or manifest.databases still
+ * works; an explicit SQLite -d correctly errors at open. */
+#ifdef HL_ENABLE_SQLITE
+#define HL_DEFAULT_DB_PATH "data.db"
+#else
+#define HL_DEFAULT_DB_PATH NULL
+#endif
+
 #define HL_SERVE_CONFIG_DEFAULT { \
     .port = HL_DEFAULT_PORT, \
     .bind_addr = "127.0.0.1", \
-    .db_path = "data.db", \
+    .db_path = HL_DEFAULT_DB_PATH, \
     .gpu_device = -1, \
     .log_level = LOG_INFO, \
     .drain_timeout = HL_DEFAULT_DRAIN_TIMEOUT_MS, \
