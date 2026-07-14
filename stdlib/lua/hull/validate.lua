@@ -126,6 +126,10 @@ function validate.check(data, schema)
                 if value < rules.min then
                     err = custom_msg or "must be at least " .. rules.min
                 end
+            else
+                -- min/max only bound string length or numeric value; a boolean
+                -- or table would silently pass otherwise. Fail closed.
+                err = custom_msg or "must be a string or number"
             end
         end
 
@@ -141,6 +145,8 @@ function validate.check(data, schema)
                 if value > rules.max then
                     err = custom_msg or "must be at most " .. rules.max
                 end
+            else
+                err = custom_msg or "must be a string or number"
             end
         end
 
