@@ -533,6 +533,12 @@ jobs:
         timeout-minutes: 3
         run: ./fuzz/fuzz_mime_sniff fuzz/corpus_mime_sniff/ -max_total_time=60
 
+      - name: Fuzz host_match (60s)
+        # Host-allowlist matcher: glob + CIDR (inet_pton / bit compare) over
+        # attacker-influenced allowlist patterns and hosts (dynamic DB conns).
+        timeout-minutes: 3
+        run: ./fuzz/fuzz_host_match fuzz/corpus_host_match/ -max_total_time=60
+
       - name: Fuzz pgwire (60s)
         # PostgreSQL v3 wire-protocol reader over untrusted server bytes. The
         # bounds-checked framing / cursor is the trust boundary for a
