@@ -32,12 +32,30 @@ typedef struct HlTlsClient HlTlsClient;
 HlTlsClient *hl_tls_client_handshake(int fd, const char *host,
                                      int verify, int timeout_ms);
 
+/*
+ * Like hl_tls_client_handshake, but the KlTls session is created by a
+ * caller-provided config (@p tls_cfg is a `KlTlsConfig *`: a factory + a
+ * user-owned KlTlsCtx) instead of one built here from the CA bundle. Used by
+ * SMTP, which owns its TLS config (verify policy lives in the ctx the caller
+ * builds). The returned session does NOT own the ctx: hl_tls_client_free tears
+ * down only the KlTls, leaving the caller's KlTlsCtx intact. Runs the same
+ * blocking handshake loop. @p host is used for SNI. Returns NULL on failure.
+ */
+HlTlsClient *hl_tls_client_handshake_cfg(int fd, const char *host,
+                                         void *tls_cfg, int timeout_ms);
+
 /* Blocking plaintext read/write tunnelled through the TLS session. Return
  * bytes transferred (> 0), or <= 0 on error / close. */
 ssize_t hl_tls_client_read(int fd, HlTlsClient *c, void *buf, size_t len);
 ssize_t hl_tls_client_write(int fd, HlTlsClient *c, const void *buf, size_t len);
 
-/* Tear down the TLS session and its context. Idempotent; NULL-safe. */
+/* Send a TLS close_notify on @p fd (best-effort; NULL-safe). Call before
+ * hl_tls_client_free for a graceful shutdown, as SMTP does after QUIT. */
+void hl_tls_client_shutdown(int fd, HlTlsClient *c);
+
+/* Tear down the TLS session and its context. Idempotent; NULL-safe. The
+ * KlTlsCtx is destroyed only when this session owns it (the CA-bundle path);
+ * a session from hl_tls_client_handshake_cfg leaves the caller's ctx alone. */
 void hl_tls_client_free(HlTlsClient *c);
 
 #endif /* HL_SHARED_TLS_CLIENT_H */
