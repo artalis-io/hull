@@ -213,6 +213,29 @@ endif
 # --enable-deterministic-archives configured at distro level).
 export ZERO_AR_DATE := 1
 
+# ── Sanitizer-mode inheritance ──────────────────────────────────────
+# `make debug` / `make tsan` compile the objects under a sanitizer (each gets
+# an instrumentation module-ctor + calls to __asan_* / __tsan_*), then a
+# FOLLOW-UP `make test` in a SEPARATE invocation would relink them without the
+# matching runtime: undefined __asan_init / __asan_memcpy from sh_seal_arena.o
+# et al. Record the active sanitizer in a stamp so a later bare `make test`
+# inherits it and links the runtime, making the documented `make debug &&
+# make test` work. `make clean` drops the stamp (it lives under build/); with
+# the stamp absent a bare build is a normal release build. Auto-inherited ONLY
+# when no mode is given on the command line. An explicit `make DEBUG=1 test`
+# (what CI runs) is self-consistent and never consults the stamp.
+SANITIZER_STAMP := build/.sanitizer.mk
+ifeq ($(origin DEBUG),undefined)
+ifeq ($(origin TSAN),undefined)
+ifeq ($(origin MSAN),undefined)
+-include $(SANITIZER_STAMP)
+ifdef DEBUG
+$(info [make] inheriting DEBUG (ASan+UBSan) from a prior `make debug`; `make clean` for a release build)
+endif
+endif
+endif
+endif
+
 # Build mode
 ifdef DEBUG
 CFLAGS += -g -O0 -fsanitize=address,undefined -fno-omit-frame-pointer
@@ -2882,6 +2905,8 @@ $(BUILDDIR):
 debug:
 	$(MAKE) clean
 	$(MAKE) DEBUG=1 all
+	@echo 'DEBUG := 1' > $(SANITIZER_STAMP)
+	@echo "note: objects are ASan-instrumented; a bare 'make test' now inherits DEBUG."
 
 # ── Tests ───────────────────────────────────────────────────────────
 
