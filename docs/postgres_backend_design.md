@@ -1,6 +1,13 @@
 # PostgreSQL Backend Design (roadmap §1)
 
-Status: **design approved, implementation not started** (2026-07-13).
+Status: **shipped** (Phases 1-6 complete, 2026-07-14). The pure-C wire
+backend, SCRAM-SHA-256, TLS, `db.async` on Postgres, stdlib + migrations on
+Postgres, the handles-only multi-backend API (`db.connect` / `db.default`,
+`manifest.databases`), and CI (link flavor + pg fuzzers + a real-Postgres
+`e2e_postgres` job) are all landed. See the phase table at the end for the
+per-phase mapping and the two tracked follow-ups. The design below is the
+original plan, kept for rationale; where the shipped code differs it is
+noted.
 
 Hull ships an embedded SQLite backend behind the `HlDbBackend` vtable
 (`include/hull/cap/db_backend.h`). This document designs a second,
@@ -205,28 +212,51 @@ a SQLite-only fast path with a vtable fallback. Migration SQL authored
 by apps is their responsibility to keep dialect-portable; Hull's own
 `_hull_*` DDL uses the dialect helpers so it runs on both.
 
-## Phased implementation
+## Phased implementation (all shipped)
 
-Each phase is independently reviewable and mergeable.
+Each phase was independently reviewable and mergeable.
 
-1. **Flag split, no behavior change.** Introduce `HL_ENABLE_SQLITE` /
-   `HL_ENABLE_POSTGRES`, derive the `HL_ENABLE_DB` umbrella, add
-   `hl_db_backend_select` (Postgres branch returns "not built"), route
-   the three hardwired sites through it. Default build is byte-identical.
-2. **pgwire core + backend skeleton.** `cap/pgwire.c` (protocol framing,
-   simple query, extended query, type decode) and `cap/db_postgres.c`
-   (the vtable), behind `HL_ENABLE_POSTGRES`, plaintext + `md5` auth
-   first. Unit tests + fuzz harness for the parser.
-3. **TLS + SCRAM-SHA-256.** mbedTLS handshake, CA-bundle verification,
-   `sslmode`, SCRAM auth via `cap/crypto`.
-4. **Per-worker + async wiring.** Generalize `worker_db.c` off the
-   vtable; `db.async.*` on Postgres.
-5. **Migrations + stdlib on Postgres.** Vtable-driven migration runner;
-   `_hull_*` tables green on Postgres; the SQLite-only degradation
-   messages for `db.udf` / `hull/search`.
-6. **CI + docs.** A Postgres service in an e2e job (`docker` Postgres),
-   `test_db_backend` parity run against both backends, the `flavors`
-   link check, and user docs.
+1. **Flag split, no behavior change.** ✅ `HL_ENABLE_SQLITE` /
+   `HL_ENABLE_POSTGRES`, `HL_ENABLE_DB` umbrella, `hl_db_backend_select`.
+2. **pgwire core + backend skeleton.** ✅ `cap/pgwire.c` (framing / cursor,
+   fuzzed) + `cap/pg_conn.c` (DSN, connect, query) + `cap/db_postgres.c`
+   (the vtable). MD5 rejected; trust / cleartext / SCRAM below.
+3. **TLS + SCRAM-SHA-256.** ✅ 3a SCRAM via `cap/crypto`; 3b TLS via the
+   shared `shared/tls_client.c` helper (`sslmode`, CA-bundle verify).
+4. **Per-worker + async wiring.** ✅ `worker_db.c` generalized onto the
+   vtable (both the async thread-pool path and the per-thread runtime
+   bindings); `db.async.*` on Postgres.
+5a. **Migrations + stdlib on Postgres.** ✅ Vtable-driven migration runner
+   (5a.2, with the Postgres simple-query path for multi-statement files);
+   `_hull_*` stdlib green on Postgres (5a.1); SQLite-only guards for
+   `db.udf` / `hull/search`.
+5b. **Handles-only multi-backend API.** ✅ (Expanded from the original plan
+   on request.) Manifest `databases` map + lazy connection registry
+   (`cap/db_registry.c`); `db.connect` / `db.default` connection objects
+   (Lua + JS); stdlib + examples migrated; the top-level `db.*` bridge
+   removed and `HlRuntime.db_handle` deleted (registry-only).
+6. **CI + docs.** ✅ `e2e_postgres` job (real Postgres 16 in Docker:
+   SCRAM + TLS + migrations + `db.async` + stdlib), the `sqlite + postgres`
+   `flavors` link check, the three pg fuzzers in the fuzz lane, and this
+   doc + the CLAUDE.md "PostgreSQL + multi-backend DB" section.
+
+### Tracked follow-ups
+
+- **Postgres-only build (`HL_ENABLE_SQLITE=0 HL_ENABLE_POSTGRES=1`) is not
+  yet link-clean.** `mod_db.c`'s `db.udf` code and a few `hl_db_sqlite_*` /
+  raw `sqlite3_*` accessors are still referenced unconditionally, so the
+  SQLite-off flavor fails to link. Gating them on `HL_ENABLE_SQLITE` would
+  make the "any / neither backend" matrix fully real; the CI flavor lane
+  covers `sqlite + postgres` only for now.
+- **Named-connection `async` / `udf`.** The worker pool and the UDF path are
+  single-DSN (the `-d` / "default" connection), so `async` / `udf` live on
+  `db.default()` only. Per-name worker connections would let
+  `db.connect(name).async` target that connection.
+- **SMTP onto the shared `tls_client` helper.** `cap/smtp.c` still hand-rolls
+  its own KlTls handshake + read/write; retrofitting it onto
+  `shared/tls_client.c` (as Postgres uses) would delete the duplicate. It
+  needs the helper to accept a caller-provided `KlTlsConfig` (SMTP passes a
+  factory) in addition to building its own from the CA bundle.
 
 ## Testing
 
