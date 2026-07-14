@@ -5,7 +5,7 @@
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
 
-#ifdef HL_ENABLE_DB
+#ifdef HL_ENABLE_SQLITE
 
 #include "internal.h"
 #include "hull/app_context.h"
@@ -305,4 +305,4 @@ int hl_agent_migrate_status(const char *app_dir, const char *db_path,
  * directly in `agent/deploy.c` and doesn't need it. Triggered
  * -Wunused-function under the static-analysis CI job.) */
 
-#endif /* HL_ENABLE_DB */
+#endif /* HL_ENABLE_SQLITE */

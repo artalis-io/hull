@@ -55,7 +55,7 @@ static const char SCHEMA_ROUTES[] =
     "{\"type\":\"object\",\"properties\":{\"app_dir\":{\"type\":\"string\","
     "\"description\":\"Application directory (default: .)\"}}}";
 
-#ifdef HL_ENABLE_DB
+#ifdef HL_ENABLE_SQLITE
 static const char SCHEMA_DB_SCHEMA[] =
     "{\"type\":\"object\",\"properties\":{\"app_dir\":{\"type\":\"string\","
     "\"description\":\"Application directory (default: .)\"},"
@@ -98,7 +98,7 @@ static const char SCHEMA_CONTEXT[] =
     "\"description\":\"Detail level (default: compact)\"}},"
     "\"required\":[\"task\"]}";
 
-#ifdef HL_ENABLE_DB
+#ifdef HL_ENABLE_SQLITE
 static const char SCHEMA_MIGRATE[] =
     "{\"type\":\"object\",\"properties\":{\"app_dir\":{\"type\":\"string\","
     "\"description\":\"Application directory (default: .)\"},"
@@ -152,7 +152,7 @@ static const char SCHEMA_COMPUTE_CALL[] =
     "\"app_dir\":{\"type\":\"string\",\"description\":\"Application directory (default: .)\"}},"
     "\"required\":[\"module\",\"input_file\"]}";
 
-#ifdef HL_ENABLE_DB
+#ifdef HL_ENABLE_SQLITE
 static const char SCHEMA_SCHEMA_DIFF[] =
     "{\"type\":\"object\",\"properties\":{"
     "\"app_dir\":{\"type\":\"string\",\"description\":\"Application directory (default: .)\"},"
@@ -175,7 +175,7 @@ typedef struct {
 static const McpTool mcp_tools[] = {
     { "hull_routes",         "List registered routes and middleware",
                               SCHEMA_ROUTES },
-#ifdef HL_ENABLE_DB
+#ifdef HL_ENABLE_SQLITE
     { "hull_db_schema",      "Introspect database schema",
                               SCHEMA_DB_SCHEMA },
     { "hull_db_query",       "Run read-only SQL query",
@@ -191,7 +191,7 @@ static const McpTool mcp_tools[] = {
                               SCHEMA_TEST },
     { "hull_context",        "Get task-relevant documentation",
                               SCHEMA_CONTEXT },
-#ifdef HL_ENABLE_DB
+#ifdef HL_ENABLE_SQLITE
     { "hull_migrate_status", "Show migration status",
                               SCHEMA_MIGRATE },
 #endif
@@ -224,7 +224,7 @@ static const McpTool mcp_tools[] = {
                               SCHEMA_TEMPLATE },
     { "hull_compute_call",   "Invoke a WASM module against file input",
                               SCHEMA_COMPUTE_CALL },
-#ifdef HL_ENABLE_DB
+#ifdef HL_ENABLE_SQLITE
     { "hull_schema_diff",    "DB schema drift analysis (sqlite_master vs migrations)",
                               SCHEMA_SCHEMA_DIFF },
     { "hull_sql_named",      "Run a pre-defined query from app/queries.json",
@@ -418,7 +418,7 @@ static void handle_tools_call(FILE *fp, const ShJsonValue *id,
         else
             hl_agent_routes(dir, &agent_out);
 
-#ifdef HL_ENABLE_DB
+#ifdef HL_ENABLE_SQLITE
     } else if (strcmp(tool_name, "hull_db_schema") == 0) {
         const char *dir = sh_json_as_string(sh_json_get(args, "app_dir"), app_dir);
         const char *db = sh_json_as_string(sh_json_get(args, "db_path"), NULL);
@@ -465,7 +465,7 @@ static void handle_tools_call(FILE *fp, const ShJsonValue *id,
         const char *level = sh_json_as_string(sh_json_get(args, "level"), "compact");
         hl_agent_context(task, level, &agent_out);
 
-#ifdef HL_ENABLE_DB
+#ifdef HL_ENABLE_SQLITE
     } else if (strcmp(tool_name, "hull_migrate_status") == 0) {
         const char *dir = sh_json_as_string(sh_json_get(args, "app_dir"), app_dir);
         const char *db = sh_json_as_string(sh_json_get(args, "db_path"), NULL);
@@ -637,7 +637,7 @@ static void handle_tools_call(FILE *fp, const ShJsonValue *id,
             }
         }
 
-#ifdef HL_ENABLE_DB
+#ifdef HL_ENABLE_SQLITE
     } else if (strcmp(tool_name, "hull_schema_diff") == 0) {
         const char *dir = sh_json_as_string(sh_json_get(args, "app_dir"), app_dir);
         const char *db = sh_json_as_string(sh_json_get(args, "db_path"), NULL);

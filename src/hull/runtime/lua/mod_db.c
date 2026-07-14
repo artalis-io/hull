@@ -708,6 +708,9 @@ static const luaL_Reg db_async_funcs[] = {
 };
 
 /* ── db.udf — user-defined SQL functions ─────────────────────────────── */
+/* SQLite-only: UDFs register into the SQLite VM via sqlite3_create_function
+ * and marshal sqlite3_value/context. Compiled out of a Postgres-only build. */
+#ifdef HL_ENABLE_SQLITE
 
 /* Context for Lua scalar UDF trampoline */
 typedef struct {
@@ -1104,6 +1107,8 @@ static const luaL_Reg db_udf_funcs[] = {
     {NULL, NULL}
 };
 
+#endif /* HL_ENABLE_SQLITE (db.udf) */
+
 /* ── Module opener ───────────────────────────────────────────────────── */
 
 /* ── Connection objects: db.connect(name) / db.default() ──────────── */
@@ -1139,8 +1144,10 @@ static int push_conn_object(lua_State *L, HlDbHandle *h, int is_default)
     if (is_default) {
         luaL_newlib(L, db_async_funcs);
         lua_setfield(L, -2, "async");
+#ifdef HL_ENABLE_SQLITE
         luaL_newlib(L, db_udf_funcs);
         lua_setfield(L, -2, "udf");
+#endif
     }
     const HlDbBackend *be = h ? h->backend : NULL;
     lua_pushstring(L, be ? be->name : "none");

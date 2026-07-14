@@ -16,7 +16,7 @@
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
 
-#ifdef HL_ENABLE_DB
+#ifdef HL_ENABLE_SQLITE
 
 #include "internal.h"
 #include "limits.h"
@@ -294,4 +294,4 @@ int hl_agent_schema_diff(const char *app_dir, const char *db_path,
 #else /* !HL_ENABLE_DB */
 /* ISO C requires a translation unit to contain at least one declaration. */
 typedef int hl_agent_schema_diff_disabled;
-#endif /* HL_ENABLE_DB */
+#endif /* HL_ENABLE_SQLITE */

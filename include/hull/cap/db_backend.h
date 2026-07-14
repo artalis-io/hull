@@ -198,8 +198,12 @@ static inline int hl_db_table_columns(HlDbHandle *h, const char *table,
     return h->backend->table_columns(h, table, cb, cb_ctx);
 }
 
-/* ── SQLite backend ───────────────────────────────────────────────── */
+/* ── SQLite backend (optional; requires HL_ENABLE_SQLITE) ──────────── */
 
+struct sqlite3;         /* forward decl for the accessors below */
+struct HlStmtCache;
+
+#ifdef HL_ENABLE_SQLITE
 extern const HlDbBackend hl_db_backend_sqlite;
 
 /* Get raw sqlite3* from an HlDbHandle (NULL if not SQLite backend) */
@@ -218,9 +222,21 @@ struct HlStmtCache *hl_db_sqlite_cache(HlDbHandle *h);
  *
  * Returns 0 on success, -1 on allocation failure.
  */
-struct sqlite3;  /* forward decl for parameter type below */
 int  hl_db_sqlite_wrap(HlDbHandle *out, struct sqlite3 *db);
 void hl_db_sqlite_unwrap(HlDbHandle *h);
+#else
+/* Postgres-only / no-SQLite build: the SQLite backend and its raw accessors
+ * are not compiled. Callers that legitimately degrade for a non-SQLite handle
+ * (agent raw-sqlite paths, app_context stmt cache) get inline NULLs / a wrap
+ * that fails, so they stay compilable without per-site #ifdef. */
+static inline struct sqlite3 *hl_db_sqlite_raw(HlDbHandle *h)
+{ (void)h; return (struct sqlite3 *)0; }
+static inline struct HlStmtCache *hl_db_sqlite_cache(HlDbHandle *h)
+{ (void)h; return (struct HlStmtCache *)0; }
+static inline int hl_db_sqlite_wrap(HlDbHandle *out, struct sqlite3 *db)
+{ (void)out; (void)db; return -1; }
+static inline void hl_db_sqlite_unwrap(HlDbHandle *h) { (void)h; }
+#endif
 
 /* ── PostgreSQL backend (optional; requires HL_ENABLE_POSTGRES) ────── */
 

@@ -205,11 +205,16 @@ jobs:
           # PostgreSQL backend on top of SQLite: links the pure-C wire client
           # (cap/pgwire.c, cap/pg_conn.c, cap/db_postgres.c) + the shared TLS
           # client into the full binary. Guards the POSTGRES=1 link + the
-          # HL_LINK_TLS gating. (A SQLite-off postgres-only flavor is not yet
-          # link-clean: mod_db.c's udf code + several sqlite accessors still
-          # reference sqlite3_* unconditionally. Tracked as a follow-up.)
+          # HL_LINK_TLS gating.
           - name: sqlite + postgres
             flags: HL_ENABLE_POSTGRES=1
+          # Postgres-only: SQLite dropped entirely. Proves the SQLite-specific
+          # code (cap/db.c engine, db.udf bindings, agent DB introspection,
+          # the hl_db_sqlite_* accessors) is gated on HL_ENABLE_SQLITE and the
+          # backend selector / worker / migration runner have no residual hard
+          # dependency on the SQLite backend TU.
+          - name: postgres-only (no sqlite)
+            flags: HL_ENABLE_SQLITE=0 HL_ENABLE_POSTGRES=1
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
         with:
