@@ -971,10 +971,15 @@ function verifyWithKind(userId, code, req) {
         + "WHERE user_id = ? AND used_at IS NULL", [userId]);
     for (let i = 0; i < (rows || []).length; i++) {
         if (verifyRecoveryCode(code, rows[i].code_hash)) {
-            db.exec(
+            // Consume atomically: the `used_at IS NULL` filter + affected-row
+            // count is the single-use gate. Without it, two concurrent requests
+            // presenting the same code both pass the SELECT above and both
+            // succeed (double-spend). Losing the race -> deny.
+            const consumed = db.exec(
                 "UPDATE _hull_totp_recovery SET used_at = ? "
-                + "WHERE user_id = ? AND code_hash = ?",
+                + "WHERE user_id = ? AND code_hash = ? AND used_at IS NULL",
                 [time.now(), userId, rows[i].code_hash]);
+            if (consumed !== 1) return [false, null];
             clearFailedAttempts(userId);
             if (ip) clearFailedAttemptsIp(ip);
             // Same lazy rekey on the recovery-code path.
