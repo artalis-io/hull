@@ -6,7 +6,7 @@
 -- Graceful shutdown: Ctrl+C triggers drain mode (finishes in-flight
 -- requests within 5s). Second Ctrl+C stops immediately.
 
-local db = require("hull.db")
+local db = require("hull.db").default()
 local i18n = require("hull.i18n")
 local time = require("hull.time")
 

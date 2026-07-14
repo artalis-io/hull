@@ -7,7 +7,8 @@
 // requests within 5s). Second Ctrl+C stops immediately.
 
 import { app } from "hull:app";
-import { db } from "hull:db";
+import { db as dbModule } from "hull:db";
+const db = dbModule.default();
 import { i18n } from "hull:i18n";
 import { log } from "hull:log";
 import { time } from "hull:time";

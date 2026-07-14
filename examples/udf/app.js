@@ -4,8 +4,8 @@
 // Demonstrates scalar and aggregate UDFs registered from JS callbacks.
 
 import { app } from "hull:app";
-import { db } from "hull:db";
-
+import { db as dbModule } from "hull:db";
+const db = dbModule.default();
 app.manifest({
     modules: [
     "hull/http-server@1",

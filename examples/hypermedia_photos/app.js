@@ -4,7 +4,8 @@
 import { app }              from "hull:app";
 import { attachment }       from "hull:attachment";
 import { blob }             from "hull:blob";
-import { db }               from "hull:db";
+import { db as dbModule } from "hull:db";
+const db = dbModule.default();
 import { log }              from "hull:log";
 import { template }         from "hull:template";
 import { time }             from "hull:time";

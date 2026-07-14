@@ -12,7 +12,8 @@
 //   SMTP_TLS   — "true" for STARTTLS, "false" for plain (default: true)
 
 import { app } from "hull:app";
-import { db } from "hull:db";
+import { db as dbModule } from "hull:db";
+const db = dbModule.default();
 import { env } from "hull:env";
 import { smtp } from "hull:smtp";
 import { time } from "hull:time";

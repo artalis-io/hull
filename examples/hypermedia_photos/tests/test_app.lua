@@ -95,7 +95,7 @@ test("GET / paginates with ?page=N (default per_page=3 in this demo)", function(
     -- Seed enough entries with distinctively-named titles so substring
     -- matches don't false-positive (e.g. "entry-1" would also match
     -- "entry-10"). Use uuid-like markers.
-    local db = require("hull.db")
+    local db = require("hull.db").default()
     db.exec("DELETE FROM entries")  -- start clean for deterministic ordering
     for i = 1, 7 do
         db.exec("INSERT INTO entries (title, done) VALUES (?, 0)",
@@ -132,7 +132,7 @@ test("GET / paginates with ?page=N (default per_page=3 in this demo)", function(
 end)
 
 test("GET /search filters by title (HTMX fragment)", function()
-    local db = require("hull.db")
+    local db = require("hull.db").default()
     db.exec("DELETE FROM entries")
     db.exec("INSERT INTO entries (title, done) VALUES ('buy milk', 0)")
     db.exec("INSERT INTO entries (title, done) VALUES ('buy eggs', 0)")
@@ -163,7 +163,7 @@ end)
 
 test("inline edit: GET /entries/:id/edit returns form, PATCH saves + returns row", function()
     -- Seed one entry we can edit.
-    local db = require("hull.db")
+    local db = require("hull.db").default()
     db.exec("DELETE FROM entries")
     db.exec("INSERT INTO entries (title, done) VALUES ('original title', 0)")
     local id = db.query("SELECT id FROM entries LIMIT 1")[1].id
@@ -217,7 +217,7 @@ test("inline edit: GET /entries/:id/edit returns form, PATCH saves + returns row
 end)
 
 test("inline edit: PATCH with empty title re-renders edit form with error", function()
-    local db = require("hull.db")
+    local db = require("hull.db").default()
     db.exec("DELETE FROM entries")
     db.exec("INSERT INTO entries (title, done) VALUES ('keep me', 0)")
     local id = db.query("SELECT id FROM entries LIMIT 1")[1].id
@@ -249,7 +249,7 @@ test("inline edit: PATCH with empty title re-renders edit form with error", func
 end)
 
 test("idempotency: repeating POST with same Idempotency-Key writes once", function()
-    local db = require("hull.db")
+    local db = require("hull.db").default()
     db.exec("DELETE FROM entries")
 
     local home = test.get("/", { middleware = true })

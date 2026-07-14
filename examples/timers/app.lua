@@ -8,7 +8,7 @@
 -- Demonstrates app.every() and app.daily() — background timers
 -- that fire on the event loop thread with full async support.
 
-local db   = require("hull.db")
+local db   = require("hull.db").default()
 local time = require("hull.time")
 
 local log = require("hull.log")

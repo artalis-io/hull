@@ -11,7 +11,8 @@
 
 import { app } from "hull:app";
 import { crypto } from "hull:crypto";
-import { db } from "hull:db";
+import { db as dbModule } from "hull:db";
+const db = dbModule.default();
 import { env } from "hull:env";
 import { log } from "hull:log";
 import { time } from "hull:time";

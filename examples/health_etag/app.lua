@@ -2,7 +2,7 @@
 --
 -- Demonstrates hull.web.middleware.health and hull.web.middleware.etag
 
-local db     = require("hull.db")
+local db     = require("hull.db").default()
 local health = require("hull.web.middleware.health")
 local etag   = require("hull.web.middleware.etag")
 

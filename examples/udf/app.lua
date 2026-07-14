@@ -3,7 +3,7 @@
 -- Run: hull app.lua -p 3000
 -- Demonstrates scalar and aggregate UDFs registered from Lua callbacks.
 
-local db = require("hull.db")
+local db = require("hull.db").default()
 
 app.manifest({
     modules = {

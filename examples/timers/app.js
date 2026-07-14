@@ -9,7 +9,8 @@
 // that fire on the event loop thread with full async support.
 
 import { app } from "hull:app";
-import { db } from "hull:db";
+import { db as dbModule } from "hull:db";
+const db = dbModule.default();
 import { log } from "hull:log";
 import { time } from "hull:time";
 
