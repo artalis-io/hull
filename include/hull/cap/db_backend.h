@@ -36,7 +36,14 @@ typedef void (*HlDbColumnCallback)(void *cb_ctx, const char *col_name);
  * the dispatch site) so CFI no longer flags the polymorphic vtable
  * dispatch as a type mismatch.  See docs/security.md § 4c. */
 typedef struct HlDbBackend {
-    const char *name;   /* "sqlite", "none" */
+    const char *name;   /* "sqlite", "postgres", "none" */
+
+    /* NULL-terminated list of DSN schemes this backend claims, matched
+     * (case-insensitively) against the text before "://" in a DSN by
+     * hl_db_backend_select. e.g. {"postgres", "postgresql", NULL}. A NULL
+     * schemes pointer means the backend is not DSN-selectable (it is never
+     * matched, and scheme-less DSNs fall through to the SQLite default). */
+    const char *const *schemes;
 
     /* DDL fragment that declares an integer primary-key column
      * with auto-increment semantics. SQLite: "INTEGER PRIMARY
@@ -247,11 +254,14 @@ extern const HlDbBackend hl_db_backend_postgres;
 /* ── Backend selection ────────────────────────────────────────────── */
 
 /*
- * Choose a backend for @p dsn by scheme: a "postgres://" or
- * "postgresql://" DSN selects the PostgreSQL backend, anything else (a
- * file path, ":memory:", "file:") selects SQLite. Returns NULL and, if
- * @p err is non-NULL, sets *err to a static message, when the DSN names a
- * backend this binary was not compiled with. Never allocates.
+ * Choose a backend for @p dsn by its "<scheme>://" prefix, matched against each
+ * compiled backend's `schemes` list: "postgres://" / "postgresql://" -> PG,
+ * "sqlite://" -> SQLite. A scheme-less DSN (a bare path, ":memory:", or a
+ * single-colon "file:" URI) defaults to SQLite. Reserved-but-uncompiled schemes
+ * (e.g. "duckdb://", "mysql://", or "postgres://" without HL_ENABLE_POSTGRES)
+ * return NULL with a specific *err hint; an unrecognized scheme returns NULL
+ * with a generic hint. *err (when non-NULL) is always a static message; never
+ * allocates. Adding a backend needs no change here (see db_select.c BACKENDS[]).
  */
 const HlDbBackend *hl_db_backend_select(const char *dsn, const char **err);
 

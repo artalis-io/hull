@@ -2927,7 +2927,7 @@ endif
 # by the smaller runtime-isolated tests.
 ifeq ($(HL_ENABLE_DB),0)
   TEST_SRCS := $(filter-out \
-      %/test_db.c %/test_db_backend.c \
+      %/test_db.c %/test_db_backend.c %/test_db_select.c \
       %/test_js.c %/test_lua.c, \
       $(TEST_SRCS))
 endif

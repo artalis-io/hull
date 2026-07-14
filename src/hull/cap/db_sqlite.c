@@ -37,6 +37,13 @@ static int sqlite_open(void **ctx, const char *dsn, HlAllocator *alloc)
 
     s->alloc = alloc;
 
+    /* Strip an explicit "sqlite://" scheme: everything after it is the path
+     * or ":memory:". Bare paths, ":memory:", and "file:" URIs pass through
+     * unchanged (SQLite opens them directly). e.g. "sqlite:///var/db" ->
+     * "/var/db", "sqlite://:memory:" -> ":memory:". */
+    if (dsn && strncmp(dsn, "sqlite://", 9) == 0)
+        dsn += 9;
+
     int rc = sqlite3_open(dsn, &s->db);
     if (rc != SQLITE_OK) {
         if (s->db) sqlite3_close(s->db);
@@ -325,8 +332,12 @@ static int sqlite_table_columns(HlDbHandle *h, const char *table,
 
 /* ── Exported backend ─────────────────────────────────────────────── */
 
+/* SQLite also owns "file:" URIs; scheme-less paths + ":memory:" default to it. */
+static const char *const sqlite_schemes[] = { "sqlite", "file", NULL };
+
 const HlDbBackend hl_db_backend_sqlite = {
     .name                  = "sqlite",
+    .schemes               = sqlite_schemes,
     .autoincrement_id_ddl  = "INTEGER PRIMARY KEY AUTOINCREMENT",
     .open                  = sqlite_open,
     .close                 = sqlite_close,

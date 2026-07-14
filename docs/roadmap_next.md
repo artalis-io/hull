@@ -2529,16 +2529,25 @@ for the new backends:
   `:memory:` based, so a bare path (`./data.db`, `:memory:`) is ambiguous once
   DuckDB exists. MySQL and MariaDB additionally *share* the `mysql://` scheme.
 
+**Status:** ✅ **SHIPPED** 2026-07-14. Backend-declared schemes + `BACKENDS[]`
+registration point + reserved-scheme errors; explicit `sqlite://`; bare paths
+default to SQLite (chosen option: explicit scheme for DuckDB). Covered by
+`tests/hull/cap/test_db_select.c` (flag-aware, all flavors).
+
 **Tasks:**
-- [ ] Add a `schemes` field to `HlDbBackend` (e.g. `const char *const *schemes`)
-      so each backend declares the DSN scheme(s) it claims; `hl_db_backend_select`
-      iterates the compiled-in backends instead of an if-else chain.
-- [ ] Introduce **explicit `sqlite://` and `duckdb://` schemes** (keep bare
-      paths defaulting to SQLite for back-compat when SQLite is compiled;
-      disambiguate to DuckDB only via `duckdb://` or a `.duckdb` extension
-      heuristic). Document the precedence.
-- [ ] Decide MySQL vs MariaDB disambiguation: one wire backend claiming
-      `mysql://` + `mariadb://`, or a server-handshake capability probe.
+- [x] Add a `schemes` field to `HlDbBackend` (`const char *const *schemes`) so
+      each backend declares the DSN scheme(s) it claims; `hl_db_backend_select`
+      iterates the compiled-in `BACKENDS[]` instead of an if-else chain.
+- [x] Introduce **explicit `sqlite://`**; bare paths / `:memory:` / `file:`
+      default to SQLite (back-compat). `duckdb://` is a **reserved** scheme that
+      errors "not available in this build" until the backend lands (then it
+      matches a `BACKENDS[]` entry automatically). DuckDB is chosen only via
+      explicit `duckdb://` (the `.duckdb` extension heuristic was declined in
+      favor of always-explicit).
+- [x] MySQL/MariaDB disambiguation decided: **one wire backend claims both
+      `mysql://` and `mariadb://`** (both are reserved to the same "MySQL/MariaDB
+      backend" hint today); a server-handshake capability probe distinguishes
+      the two servers at connect time if ever needed.
 
 ### 2.2 Dynamic connections (`db.open(dsn)` + host-allowlist manifest opt-in)
 

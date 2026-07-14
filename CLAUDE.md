@@ -236,8 +236,15 @@ Hull's database layer is backend-agnostic behind the `HlDbBackend` vtable
 (`include/hull/cap/db_backend.h`). Two backends ship: embedded **SQLite**
 (default) and an optional pure-C **PostgreSQL** wire client (no libpq).
 Both are chosen per-connection by DSN scheme via `hl_db_backend_select`
-(`cap/db_select.c`): a `postgres://` / `postgresql://` URL selects Postgres,
-anything else (a file path, `:memory:`, `file:`) selects SQLite.
+(`cap/db_select.c`): each backend declares the `://` schemes it claims (SQLite:
+`sqlite`, `file`; Postgres: `postgres`, `postgresql`) and the selector matches
+the DSN's scheme against the compiled-in backends (`BACKENDS[]`, the sole
+registration point). A scheme-less DSN (a bare path, `:memory:`, or a
+single-colon `file:` URI) defaults to SQLite. A reserved-but-uncompiled scheme
+(`duckdb://`, `mysql://`, `mariadb://`, or `postgres://` without
+`HL_ENABLE_POSTGRES`) fails with a specific hint; an unknown scheme with a
+generic one. Adding a backend needs no change to the selector, just a
+`.schemes` declaration + one `BACKENDS[]` line.
 
 **Handles-only API (no top-level `db.*`).** The `hull/db` module exposes only
 connection acquisition; every query goes through an explicit connection object:

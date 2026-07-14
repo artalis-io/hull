@@ -451,8 +451,11 @@ static int pg_table_columns(HlDbHandle *h, const char *table,
 
 /* ── Vtable (const, lands in .rodata) ─────────────────────────────── */
 
+static const char *const pg_schemes[] = { "postgres", "postgresql", NULL };
+
 const HlDbBackend hl_db_backend_postgres = {
     .name                 = "postgres",
+    .schemes              = pg_schemes,
     .autoincrement_id_ddl = "BIGSERIAL PRIMARY KEY",
     .open                 = pg_open,
     .close                = pg_close,
