@@ -1208,10 +1208,15 @@ function totp.verify_with_kind(user_id, code, req)
         .. "WHERE user_id = ? AND used_at IS NULL", { user_id })
     for _, r in ipairs(rows or {}) do
         if verify_recovery_code(code, r.code_hash) then
-            db.exec(
+            -- Consume atomically: the `used_at IS NULL` filter + affected-row
+            -- count is the single-use gate. Without it, two concurrent requests
+            -- presenting the same code both pass the SELECT above and both
+            -- succeed (double-spend). Losing the race -> deny.
+            local consumed = db.exec(
                 "UPDATE _hull_totp_recovery SET used_at = ? "
-                .. "WHERE user_id = ? AND code_hash = ?",
+                .. "WHERE user_id = ? AND code_hash = ? AND used_at IS NULL",
                 { time.now(), user_id, r.code_hash })
+            if consumed ~= 1 then return false, nil end
             clear_failed_attempts(user_id)
             if ip then clear_failed_attempts_ip(ip) end
             -- Same lazy rekey on the recovery-code path — the
