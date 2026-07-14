@@ -262,11 +262,18 @@ Each phase was independently reviewable and mergeable.
   `db.connect(name).udf.register(...)` lands on it (SQLite only). Coverage:
   `tests/e2e_named_connections.sh` (SQLite, both runtimes) +
   `tests/e2e_postgres.sh` (a named PG connection with a SQLite default).
-- **SMTP onto the shared `tls_client` helper.** `cap/smtp.c` still hand-rolls
-  its own KlTls handshake + read/write; retrofitting it onto
-  `shared/tls_client.c` (as Postgres uses) would delete the duplicate. It
-  needs the helper to accept a caller-provided `KlTlsConfig` (SMTP passes a
-  factory) in addition to building its own from the CA bundle.
+- ~~SMTP onto the shared `tls_client` helper.~~ **Done.**
+  `cap/smtp.c` no longer hand-rolls the KlTls handshake loop or the read/write
+  tunnel. The shared helper grew `hl_tls_client_handshake_cfg(fd, host,
+  tls_cfg, timeout_ms)` (creates the KlTls from a caller-provided `KlTlsConfig`
+  factory instead of the CA bundle; the returned session does NOT own the
+  caller's `KlTlsCtx`) plus `hl_tls_client_shutdown` for SMTP's post-QUIT
+  close_notify. SMTP's `io_read`/`io_write` route TLS through
+  `hl_tls_client_read`/`_write` (plaintext branch unchanged for pre-STARTTLS),
+  and all protocol helpers thread `HlTlsClient *` instead of `KlTls *`. The
+  handshake poll-loop now has a single tested copy shared with PostgreSQL.
+  `test_smtp` (37) + `test_smtp_e2e` (8, real-socket STARTTLS + implicit TLS)
+  cover it.
 
 ## Testing
 

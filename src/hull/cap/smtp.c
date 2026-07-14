@@ -11,9 +11,9 @@
 #include "hull/cap/smtp.h"
 #include "hull/cap/audit.h"
 #include "hull/limits/core.h"
+#include "hull/shared/tls_client.h"
 
 #include <keel/allocator.h>
-#include <keel/tls.h>
 
 #include <errno.h>
 #include <fcntl.h>
@@ -108,19 +108,19 @@ int hl_smtp_check_host(const HlSmtpConfig *cfg, const char *host)
 
 /* ── I/O abstraction (plain or TLS) ──────────────────────────────── */
 
-static ssize_t io_write(int fd, KlTls *tls, const void *buf, size_t len)
+static ssize_t io_write(int fd, HlTlsClient *tls, const void *buf, size_t len)
 {
     if (tls)
-        return tls->write(tls, fd, buf, len);
+        return hl_tls_client_write(fd, tls, buf, len);
     ssize_t r;
     do { r = write(fd, buf, len); } while (r < 0 && errno == EINTR);
     return r;
 }
 
-static ssize_t io_read(int fd, KlTls *tls, void *buf, size_t len)
+static ssize_t io_read(int fd, HlTlsClient *tls, void *buf, size_t len)
 {
     if (tls)
-        return tls->read(tls, fd, buf, len);
+        return hl_tls_client_read(fd, tls, buf, len);
     ssize_t r;
     do { r = read(fd, buf, len); } while (r < 0 && errno == EINTR);
     return r;
@@ -199,61 +199,16 @@ static int smtp_connect(const char *host, int port, int timeout_ms)
     return fd;
 }
 
-/* ── TLS handshake ───────────────────────────────────────────────── */
-
-static KlTls *smtp_tls_handshake(int fd, KlTlsConfig *tls_cfg,
-                                 const char *host, int timeout_ms)
-{
-    if (!tls_cfg || !tls_cfg->factory)
-        return NULL;
-
-    KlAllocator alloc = kl_allocator_default();
-    KlTls *tls = tls_cfg->factory(tls_cfg->ctx, &alloc);
-    if (!tls)
-        return NULL;
-
-    /* Set SNI hostname */
-#ifdef KEEL_TLS_MBEDTLS_H
-    kl_tls_mbedtls_set_hostname(tls, host);
-#else
-    (void)host;
-#endif
-
-    int elapsed = 0;
-    int step = 100;
-
-    for (;;) {
-        KlTlsResult r = tls->handshake(tls, fd);
-        if (r == KL_TLS_OK)
-            return tls;
-        if (r == KL_TLS_ERROR) {
-            tls->destroy(tls);
-            return NULL;
-        }
-
-        short events = (r == KL_TLS_WANT_READ) ? POLLIN : POLLOUT;
-        struct pollfd pfd = { .fd = fd, .events = events };
-        int pr = poll(&pfd, 1, step);
-        if (pr < 0) {
-            tls->destroy(tls);
-            return NULL;
-        }
-
-        elapsed += step;
-        if (timeout_ms > 0 && elapsed >= timeout_ms) {
-            tls->destroy(tls);
-            return NULL;
-        }
-    }
-}
-
 /* ── SMTP protocol helpers ───────────────────────────────────────── */
+/* TLS handshake (STARTTLS / implicit) is delegated to the shared
+ * hl_tls_client_handshake_cfg helper (src/hull/shared/tls_client.c), which
+ * runs the same poll-based blocking loop PostgreSQL uses. */
 
 /**
  * Read an SMTP response line.  Reads until \r\n or buffer full.
  * Returns number of bytes read, or -1 on error/timeout.
  */
-static int smtp_read_line(int fd, KlTls *tls, char *buf, int size,
+static int smtp_read_line(int fd, HlTlsClient *tls, char *buf, int size,
                           int timeout_ms)
 {
     int pos = 0;
@@ -283,7 +238,7 @@ static int smtp_read_line(int fd, KlTls *tls, char *buf, int size,
  * Multi-line responses have "250-" continuation lines and end with "250 ".
  * Returns the 3-digit code, or -1 on error.
  */
-static int smtp_read_response(int fd, KlTls *tls, char *buf, int size,
+static int smtp_read_response(int fd, HlTlsClient *tls, char *buf, int size,
                               int timeout_ms)
 {
     int code = -1;
@@ -335,7 +290,7 @@ int hl_smtp_parse_response(const char *line, int len)
  * Send an SMTP command and read the response.
  * Returns the response code, or -1 on error.
  */
-static int smtp_send_command(int fd, KlTls *tls, const char *cmd,
+static int smtp_send_command(int fd, HlTlsClient *tls, const char *cmd,
                              int expected_code, int timeout_ms)
 {
     size_t len = strlen(cmd);
@@ -370,7 +325,7 @@ static int smtp_send_command(int fd, KlTls *tls, const char *cmd,
 /**
  * Send raw data without reading a response.
  */
-static int smtp_send_raw(int fd, KlTls *tls, const char *data, size_t len,
+static int smtp_send_raw(int fd, HlTlsClient *tls, const char *data, size_t len,
                          int timeout_ms)
 {
     size_t sent = 0;
@@ -547,7 +502,7 @@ int hl_cap_smtp_send(const HlSmtpConfig *cfg, const HlSmtpMessage *msg,
                                          : HL_SMTP_DEFAULT_TIMEOUT_MS;
 
     /* TLS config (for STARTTLS or implicit TLS) */
-    KlTlsConfig *tls_cfg = (KlTlsConfig *)cfg->tls;
+    void *tls_cfg = cfg->tls;   /* opaque KlTlsConfig *, passed to the helper */
 
     /* Connect to SMTP server */
     int fd = smtp_connect(msg->host, msg->port, timeout_ms);
@@ -557,7 +512,7 @@ int hl_cap_smtp_send(const HlSmtpConfig *cfg, const HlSmtpMessage *msg,
         return -1;
     }
 
-    KlTls *tls = NULL;
+    HlTlsClient *tls = NULL;
     int ret = -1;
     char resp[HL_SMTP_RECV_BUF_SIZE];
     char cmd[HL_SMTP_SEND_BUF_SIZE];
@@ -569,7 +524,7 @@ int hl_cap_smtp_send(const HlSmtpConfig *cfg, const HlSmtpMessage *msg,
             if (err_msg) *err_msg = "tls_config_missing";
             goto cleanup;
         }
-        tls = smtp_tls_handshake(fd, tls_cfg, msg->host, timeout_ms);
+        tls = hl_tls_client_handshake_cfg(fd, msg->host, tls_cfg, timeout_ms);
         if (!tls) {
             log_warn("smtp: implicit TLS handshake failed");
             if (err_msg) *err_msg = "tls_handshake_failed";
@@ -608,7 +563,7 @@ int hl_cap_smtp_send(const HlSmtpConfig *cfg, const HlSmtpMessage *msg,
             goto cleanup;
         }
 
-        tls = smtp_tls_handshake(fd, tls_cfg, msg->host, timeout_ms);
+        tls = hl_tls_client_handshake_cfg(fd, msg->host, tls_cfg, timeout_ms);
         if (!tls) {
             log_warn("smtp: STARTTLS handshake failed");
             if (err_msg) *err_msg = "tls_handshake_failed";
@@ -757,8 +712,8 @@ int hl_cap_smtp_send(const HlSmtpConfig *cfg, const HlSmtpMessage *msg,
 
 cleanup:
     if (tls) {
-        tls->shutdown(tls, fd);
-        tls->destroy(tls);
+        hl_tls_client_shutdown(fd, tls);   /* best-effort close_notify */
+        hl_tls_client_free(tls);
     }
     close(fd);
 
