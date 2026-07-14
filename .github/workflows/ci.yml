@@ -202,6 +202,14 @@ jobs:
           # silently regressed back onto an mbedTLS symbol.
           - name: pure-compute (no http at all)
             flags: HL_ENABLE_HTTP=0
+          # PostgreSQL backend on top of SQLite: links the pure-C wire client
+          # (cap/pgwire.c, cap/pg_conn.c, cap/db_postgres.c) + the shared TLS
+          # client into the full binary. Guards the POSTGRES=1 link + the
+          # HL_LINK_TLS gating. (A SQLite-off postgres-only flavor is not yet
+          # link-clean: mod_db.c's udf code + several sqlite accessors still
+          # reference sqlite3_* unconditionally. Tracked as a follow-up.)
+          - name: sqlite + postgres
+            flags: HL_ENABLE_POSTGRES=1
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
         with:
@@ -515,6 +523,46 @@ jobs:
         # upload bytes — an over-read past len is a crash / info-leak.
         timeout-minutes: 3
         run: ./fuzz/fuzz_mime_sniff fuzz/corpus_mime_sniff/ -max_total_time=60
+
+      - name: Fuzz pgwire (60s)
+        # PostgreSQL v3 wire-protocol reader over untrusted server bytes. The
+        # bounds-checked framing / cursor is the trust boundary for a
+        # malicious or MITM'd Postgres; an OOB read is an info-leak / crash.
+        timeout-minutes: 3
+        run: ./fuzz/fuzz_pgwire fuzz/corpus_pgwire/ -max_total_time=60
+
+      - name: Fuzz pg_dsn (60s)
+        # DSN parser: percent-decoding + bounded field splitting over a
+        # user-supplied connection string.
+        timeout-minutes: 3
+        run: ./fuzz/fuzz_pg_dsn fuzz/corpus_pg_dsn/ -max_total_time=60
+
+      - name: Fuzz pg_rewrite (60s)
+        # ?-to-$n placeholder rewriter: literal / comment / dollar-quote-aware
+        # SQL scan. A miscount or OOB write here corrupts the parameterized
+        # query the app sends.
+        timeout-minutes: 3
+        run: ./fuzz/fuzz_pg_rewrite fuzz/corpus_pg_rewrite/ -max_total_time=60
+
+  # End-to-end against a real PostgreSQL 16 (started in Docker by the script).
+  # Exercises the whole path the unit tests can't: DSN -> SCRAM-SHA-256 auth
+  # (plaintext + TLS via a self-signed cert) -> parameterized query + typed
+  # decode -> startup migrations (multi-statement, simple-query path) ->
+  # db.async on a worker connection -> the DB-backed stdlib (session / outbox
+  # / auth-health) on Postgres. The script self-builds with
+  # HL_ENABLE_POSTGRES=1 and skips cleanly if Docker is unavailable.
+  postgres:
+    name: PostgreSQL e2e
+    runs-on: ubuntu-24.04
+
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          submodules: true
+
+      - name: PostgreSQL end-to-end
+        timeout-minutes: 15
+        run: make e2e-postgres
 
   analyze:
     name: Static Analysis
