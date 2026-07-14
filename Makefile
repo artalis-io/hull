@@ -3327,7 +3327,11 @@ tsan:
 # libhull_platform.a link is needed. Keel already fuzzes the HTTP /
 # multipart / websocket / response parsers in its own tree; these cover
 # Hull's own untrusted-input parsers.
-FUZZ_CFLAGS := -std=c11 -g -O1 -fsanitize=fuzzer,address,undefined \
+# _DEFAULT_SOURCE matches the main build (see the Linux CFLAGS block): under
+# strict -std=c11, glibc hides getaddrinfo / struct addrinfo behind it, so the
+# pg_conn.c-linking fuzzers (fuzz_pg_dsn, fuzz_pg_rewrite) fail to compile on
+# Linux without it. Harmless on macOS.
+FUZZ_CFLAGS := -std=c11 -g -O1 -fsanitize=fuzzer,address,undefined -D_DEFAULT_SOURCE \
                -fno-omit-frame-pointer -Iinclude -I$(SH_JSON_DIR) -I$(SH_ARENA_DIR)
 FUZZ_TIME ?= 60
 
