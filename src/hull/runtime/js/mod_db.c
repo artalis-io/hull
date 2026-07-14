@@ -1332,58 +1332,15 @@ static int js_db_module_init(JSContext *ctx, JSModuleDef *m)
         JS_NewClass(JS_GetRuntime(ctx), hull_db_conn_class_id, &js_db_conn_class);
     }
 
+    /* The DB module exposes only connection acquisition: every query goes
+     * through a connection object from db.connect(name) or db.default(). The
+     * historical top-level db.query / exec / async / udf / backendName / ...
+     * bridge is gone; those live on the connection object (db.default()). */
     JSValue db = JS_NewObject(ctx);
     JS_SetPropertyStr(ctx, db, "connect",
                       JS_NewCFunction(ctx, js_db_connect, "connect", 1));
     JS_SetPropertyStr(ctx, db, "default",
                       JS_NewCFunction(ctx, js_db_default, "default", 0));
-    JS_SetPropertyStr(ctx, db, "query",
-                      JS_NewCFunction(ctx, js_db_query, "query", 2));
-    JS_SetPropertyStr(ctx, db, "exec",
-                      JS_NewCFunction(ctx, js_db_exec, "exec", 2));
-    JS_SetPropertyStr(ctx, db, "lastId",
-                      JS_NewCFunction(ctx, js_db_last_id, "lastId", 0));
-    JS_SetPropertyStr(ctx, db, "batch",
-                      JS_NewCFunction(ctx, js_db_batch, "batch", 1));
-
-    /* Dialect-aware helpers */
-    JS_SetPropertyStr(ctx, db, "insertIfAbsent",
-                      JS_NewCFunction(ctx, js_db_insert_if_absent,
-                                       "insertIfAbsent", 4));
-    JS_SetPropertyStr(ctx, db, "upsert",
-                      JS_NewCFunction(ctx, js_db_upsert, "upsert", 4));
-    JS_SetPropertyStr(ctx, db, "tableColumns",
-                      JS_NewCFunction(ctx, js_db_table_columns,
-                                       "tableColumns", 1));
-
-    /* Backend-introspection string fields */
-    HlJS *js = (HlJS *)JS_GetContextOpaque(ctx);
-    const char *backend_name = "none";
-    const char *autoinc_ddl  = "INTEGER PRIMARY KEY";
-    if (js && js->base.db_handle && js->base.db_handle->backend) {
-        backend_name = js->base.db_handle->backend->name;
-        if (js->base.db_handle->backend->autoincrement_id_ddl)
-            autoinc_ddl = js->base.db_handle->backend->autoincrement_id_ddl;
-    }
-    JS_SetPropertyStr(ctx, db, "backendName", JS_NewString(ctx, backend_name));
-    JS_SetPropertyStr(ctx, db, "autoincrementIdDdl",
-                      JS_NewString(ctx, autoinc_ddl));
-
-    /* db.async sub-object */
-    JSValue async_obj = JS_NewObject(ctx);
-    JS_SetPropertyStr(ctx, async_obj, "query",
-                      JS_NewCFunction(ctx, js_db_async_query, "query", 2));
-    JS_SetPropertyStr(ctx, async_obj, "exec",
-                      JS_NewCFunction(ctx, js_db_async_exec, "exec", 2));
-    JS_SetPropertyStr(ctx, db, "async", async_obj);
-
-    /* db.udf sub-object */
-    JSValue udf_obj = JS_NewObject(ctx);
-    JS_SetPropertyStr(ctx, udf_obj, "register",
-                      JS_NewCFunction(ctx, js_db_udf_register, "register", 3));
-    JS_SetPropertyStr(ctx, udf_obj, "unregister",
-                      JS_NewCFunction(ctx, js_db_udf_unregister, "unregister", 1));
-    JS_SetPropertyStr(ctx, db, "udf", udf_obj);
 
     JS_SetModuleExport(ctx, m, "db", db);
     return 0;

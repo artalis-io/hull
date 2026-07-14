@@ -59,7 +59,12 @@ static void install_test_js_globals(HlJS *jsp)
         "    const mod = await import('hull:' + n);\n"
         "    globalThis[n] = mod[n] || mod.default || mod;\n"
         "  } catch (_) { /* not available — skip */ }\n"
-        "}\n";
+        "}\n"
+        /* The db module now exposes only connect/default; the test snippets
+         * use db.query/exec/... directly, so expose the default connection as
+         * the `db` global (mirrors app code doing dbModule.default()). */
+        "if (globalThis.db && globalThis.db.default)"
+        " globalThis.db = globalThis.db.default();\n";
     JSValue v = JS_Eval(jsp->ctx, PRELUDE, strlen(PRELUDE), "<test-globals>",
                         JS_EVAL_TYPE_MODULE);
     JS_FreeValue(jsp->ctx, v);
@@ -1200,7 +1205,7 @@ UTEST(js_cap, db_exec_and_query)
     ASSERT_TRUE(js_initialized);
 
     const char *code =
-        "import { db } from 'hull:db';\n"
+        "import { db as dbMod } from 'hull:db';\nconst db = dbMod.default();\n"
         "db.exec('CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT)');\n"
         "db.exec('INSERT INTO t (name) VALUES (?)', ['alice']);\n"
         "const rows = db.query('SELECT name FROM t');\n"
@@ -1227,7 +1232,7 @@ UTEST(js_cap, db_last_id)
     ASSERT_TRUE(js_initialized);
 
     const char *code =
-        "import { db } from 'hull:db';\n"
+        "import { db as dbMod } from 'hull:db';\nconst db = dbMod.default();\n"
         "db.exec('CREATE TABLE t2 (id INTEGER PRIMARY KEY, v TEXT)');\n"
         "db.exec('INSERT INTO t2 (v) VALUES (?)', ['a']);\n"
         "const id1 = db.lastId();\n"
@@ -1254,7 +1259,7 @@ UTEST(js_cap, db_parameterized_query)
     ASSERT_TRUE(js_initialized);
 
     const char *code =
-        "import { db } from 'hull:db';\n"
+        "import { db as dbMod } from 'hull:db';\nconst db = dbMod.default();\n"
         "db.exec('CREATE TABLE t3 (id INTEGER PRIMARY KEY, val INTEGER)');\n"
         "db.exec('INSERT INTO t3 (val) VALUES (?)', [10]);\n"
         "db.exec('INSERT INTO t3 (val) VALUES (?)', [20]);\n"
@@ -1282,7 +1287,7 @@ UTEST(js_cap, db_not_available_without_config)
     ASSERT_TRUE(js_initialized);
 
     const char *code =
-        "import { db } from 'hull:db';\n"
+        "import { db as dbMod } from 'hull:db';\nconst db = dbMod.default();\n"
         "globalThis.__test_db_avail = 1;\n";
 
     JSValue val = JS_Eval(js.ctx, code, strlen(code), "<test>",
@@ -1310,7 +1315,7 @@ UTEST(js_cap, db_namespace_blocks_hull_tables)
     ASSERT_TRUE(js_initialized);
 
     const char *code =
-        "import { db } from 'hull:db';\n"
+        "import { db as dbMod } from 'hull:db';\nconst db = dbMod.default();\n"
         "try {\n"
         "  db.exec('CREATE TABLE _hull_test (id INT)');\n"
         "  globalThis.__test_ns_block = 0;\n"
@@ -1337,7 +1342,7 @@ UTEST(js_cap, db_namespace_blocks_hull_query)
     ASSERT_TRUE(js_initialized);
 
     const char *code =
-        "import { db } from 'hull:db';\n"
+        "import { db as dbMod } from 'hull:db';\nconst db = dbMod.default();\n"
         "try {\n"
         "  db.query('SELECT * FROM _hull_outbox');\n"
         "  globalThis.__test_ns_qblock = 0;\n"
@@ -1365,7 +1370,7 @@ UTEST(js_cap, db_namespace_no_internal_bypass)
 
     /* db._exec and db._query must not exist — no bypass possible */
     const char *code =
-        "import { db } from 'hull:db';\n"
+        "import { db as dbMod } from 'hull:db';\nconst db = dbMod.default();\n"
         "globalThis.__test_ns_nobypass = "
         "  (db._exec === undefined && db._query === undefined) ? 1 : 0;\n";
 
@@ -1388,7 +1393,7 @@ UTEST(js_cap, db_namespace_allows_normal_tables)
     ASSERT_TRUE(js_initialized);
 
     const char *code =
-        "import { db } from 'hull:db';\n"
+        "import { db as dbMod } from 'hull:db';\nconst db = dbMod.default();\n"
         "db.exec('CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)');\n"
         "db.exec('INSERT INTO users (name) VALUES (?)', ['alice']);\n"
         "const rows = db.query('SELECT name FROM users');\n"
