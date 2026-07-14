@@ -50,7 +50,7 @@ run_case() {
 # ── Lua ────────────────────────────────────────────────────────────────
 cat > "$TMPDIR/app.lua" << EOF
 local db = require("hull.db")
-app.manifest({ modules = { "hull/db@1" }, databases = { cache = "$TMPDIR/cache_lua.db" } })
+app.manifest({ modules = { "hull/db@1" }, databases = { named = { cache = "$TMPDIR/cache_lua.db" } } })
 app.main(function(ctx)
   local d = db.default()
   local c = db.connect("cache")
@@ -74,7 +74,7 @@ run_case lua Lua
 cat > "$TMPDIR/app.js" << EOF
 import { app } from "hull:app";
 import { db as dbMod } from "hull:db";
-app.manifest({ modules: ["hull/db@1"], databases: { cache: "$TMPDIR/cache_js.db" } });
+app.manifest({ modules: ["hull/db@1"], databases: { named: { cache: "$TMPDIR/cache_js.db" } } });
 app.main(async (ctx) => {
   const d = dbMod.default();
   const c = dbMod.connect("cache");

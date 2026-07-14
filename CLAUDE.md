@@ -277,17 +277,22 @@ which database via the registry's DSN for the bound handle
 time (udf is SQLite-only). Covered by `tests/e2e_named_connections.sh` (both
 runtimes) and the cross-backend variant in `tests/e2e_postgres.sh`.
 
-**Named connections via the manifest.** Additional connections are declared in
-`manifest.databases`; the value is a literal DSN (a SQLite file path, no
-credentials) or `{ dsn_env = "VAR" }` (the DSN is read from an env var at
-connection-open time so Postgres credentials never sit in app source):
+**Named connections via the manifest.** Additional connections are declared
+under `manifest.databases.named` (a name -> DSN map). A DSN value of exactly
+`"$VAR"` or `"${VAR}"` is an env reference resolved at connection-open time (so
+credentials never sit in app source); a value that merely CONTAINS a `$` (e.g.
+a password) is literal. `databases.dynamic` (roadmap §2.2, in progress) is the
+separate `db.open(dsn)` allowlist:
 
 ```lua
 app.manifest({
     modules = { "hull/db@1" },
     databases = {
-        cache   = "./cache.db",                    -- SQLite file
-        primary = { dsn_env = "DATABASE_URL" },    -- postgres:// from $DATABASE_URL
+        named = {
+            cache   = "./cache.db",       -- SQLite file (literal)
+            primary = "$DATABASE_URL",    -- postgres:// from $DATABASE_URL (env ref)
+        },
+        -- dynamic = { hosts = { "*.rds.amazonaws.com" }, schemes = { "postgres" } },
     },
 })
 ```

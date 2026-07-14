@@ -2559,29 +2559,72 @@ per-tenant DBs, a "connect to any Postgres" utility) can't be built. Unlike
 `http.fetch`, DB connections aren't gated by `manifest.hosts` at all — the sole
 gate is "which names the author enumerated."
 
-**The clean design mirrors HTTP's host allowlist:**
+**The clean design mirrors HTTP's host allowlist.** `databases` becomes a
+container with two single-shape sub-keys, `named` (name -> DSN) and `dynamic`
+(the open policy). Env references use bash-style `"$VAR"` / `"${VAR}"`
+(full-value only; a value that merely CONTAINS `$` is literal), replacing the
+old `{ dsn_env }` table form:
 
-- A manifest opt-in, e.g.
-  ```lua
-  databases = { dynamic = { hosts = { "*.rds.amazonaws.com", "10.0.0.0/8" }, schemes = { "postgres" } } }
-  ```
-- plus a runtime `db.open(dsn)` that validates the DSN's host+scheme against
-  that allowlist before connecting. Credentials ride in the app-provided DSN
-  (the app's responsibility), the reachable surface stays bounded.
-- Tradeoffs to decide: whether to allow `"*"` (any host — a real "connect
-  anywhere" tool, opt-in and loud), connection-count/lifetime caps for pooling,
-  and whether dynamic connections get `async`/`udf` (the worker pool is keyed by
-  DSN, so async already generalizes — §1's multi-DSN work makes it nearly free).
+```lua
+app.manifest({
+    databases = {
+        named = {
+            cache   = "./cache.db",       -- literal
+            primary = "$DATABASE_URL",    -- env ref (was { dsn_env = "..." })
+        },
+        dynamic = {                        -- db.open(dsn) allowlist (opt-in)
+            hosts   = { "*.rds.amazonaws.com", "10.0.0.0/8", "$EXTRA_HOST" },
+            schemes = { "postgres" },
+        },
+    },
+})
+```
+
+`db.open(dsn)` validates the DSN's scheme (in `schemes`) and, for a network
+backend, its host against `hosts`; for a file backend, its path against
+`manifest.fs` (so `db.open` never punches through the fs sandbox). Credentials
+ride in the app-provided DSN; the reachable surface stays bounded.
+
+**Design decisions (locked 2026-07-14):**
+- **Distinction is the security boundary.** Named = author-enumerated exact DBs
+  (safe default); `dynamic` = explicit opt-in to bounded-but-arbitrary DSNs.
+  Distinct KINDS (a destination value vs an access filter), unified under one
+  `databases` key as `named` / `dynamic` sub-keys. C model:
+  `HlManifestDatabase` is the parent (`{ HlManifestDbNamed named[]; int
+  named_count; int declared; HlManifestDbDynamic dynamic; }`).
+- **Env refs:** full-value `"$VAR"` / `"${VAR}"` (NAME = `[A-Za-z_]\w*`), the
+  WHOLE value; a value containing `$` (a password) stays literal. Resolved at
+  open / check time via `hl_manifest_env_ref` (header-only static inline).
+- **Host matching:** exact + glob (`*.suffix`, any-depth) + CIDR (v4/v6,
+  IP-literal hosts only; a hostname never matches a CIDR, so no DNS-rebinding).
+  `"*"` = any host (opt-in, loud). In `cap/host_match.c` (shared; http.fetch's
+  exact-only check can adopt it later, see §2.8).
+- **Lifetime:** caller-owned handle + `conn:close()` + GC finalizer (each
+  `db.open` = a fresh connection); a process-wide concurrent-dynamic cap
+  (default 16, no idle timeout — caller closes). Async still pools per-DSN via
+  the worker pool.
+- **Backends:** network (postgres/mysql) gated by `hosts`; file (sqlite/duckdb/
+  bare path) gated by `manifest.fs`.
+- **async** on dynamic handles: yes (worker pool is DSN-keyed). **udf:** follows
+  the backend (dynamic SQLite gets it; network backends have none).
+- **Clean break** from the §1 flat `databases = { name = dsn }` form (days old,
+  4 internal usages migrated; no back-compat shim).
 
 **Tasks:**
-- [ ] `manifest.databases.dynamic = { hosts = [...], schemes = [...] }` parsing
-      (both runtimes) + sealing.
-- [ ] `db.open(dsn)` runtime API: parse DSN, validate host (glob/CIDR) + scheme
-      against the dynamic allowlist, open through the registry (unnamed /
-      caller-owned handle), fail closed on a miss.
-- [ ] Connection-count + idle-lifetime caps so a dynamic-connection app can't
-      exhaust fds; document the pooling semantics.
-- [ ] Decide + wire `async` / `udf` availability on dynamic handles.
+- [x] Host matcher `hl_host_match` (glob + CIDR), `cap/host_match.c`. Unit test
+      `test_host_match.c` (8 cases) + libFuzzer `fuzz_host_match` (corpus + CI
+      step; 2M-iter ASan+UBSan random driver clean locally).
+- [x] Manifest model rework: `databases = { named, dynamic }` parsed both
+      runtimes; `HlManifestDatabase` parent + `HlManifestDbNamed` /
+      `HlManifestDbDynamic`; `"$VAR"` env refs (`hl_manifest_env_ref`) replacing
+      `dsn_env`; sealing + free. Registry resolves `$VAR` at open. Covered by
+      `test_db_registry` (env-ref cases) + functional check; flat usages migrated.
+- [ ] `db.open(dsn)` runtime API: DSN authority parse -> scheme + host/fs
+      validation -> caller-owned open through the backend selector; fail closed.
+- [ ] Owned connection-object variant (`close()` + GC) both runtimes; the
+      process-wide concurrent-dynamic cap.
+- [ ] async available on dynamic handles; udf follows backend. e2e (allow/deny
+      against the docker Postgres).
 
 ### 2.3 Split the abstract interface from concrete backends (+ generic native-handle accessor)
 
@@ -2646,6 +2689,31 @@ in migrations.
 - [ ] `hl_cap_db_check_namespace` (the `_hull_*` guard) lives in `db_select.c`,
       an odd home (it's not backend selection). Move to a `cap/db_common.c` or
       similar shared TU.
+
+### 2.8 Unify the outbound-resource allowlist model (`hosts` = named + dynamic)
+
+Surfaced while designing §2.2: `manifest.hosts` (http.fetch) is the *dynamic*
+model (any URL whose host is allowlisted) with no *named* concept, while
+`databases` now has both `named` and `dynamic`. The two outbound-resource
+capabilities should converge on one consistent "named + dynamic" shape, and
+http should adopt §2.2's richer matcher + env-ref conventions:
+
+- [ ] `hosts` gains glob + CIDR support by adopting `cap/host_match.c` (today
+      it's exact-only, `hl_http_check_host`). Extract the matcher to a shared
+      `utils/` at this point (it currently lives in `cap/host_match.c`).
+- [ ] `"$VAR"` / `"${VAR}"` env refs in `hosts` entries (and consider across all
+      manifest string allowlists) via `hl_manifest_env_ref`, matching
+      `databases.named`.
+- [ ] Consider a `named` HTTP-endpoint concept (author-declared base URLs, like
+      `databases.named`) so `http.fetch` can target a name with credentials /
+      base injected, parallel to `db.connect(name)`. Decide whether it's worth
+      the surface or whether http stays dynamic-only.
+- [ ] Same lens for SMTP (`hull/smtp`) and any future outbound capability: one
+      allowlist convention (`{ named, dynamic }` + `$VAR` + host_match) across
+      db / http / smtp instead of three bespoke shapes.
+
+**Out of scope:** a general "capabilities DSL" rewrite; this is convergence of
+the existing outbound allowlists onto one shape, not a new framework.
 
 ### Backend-onboarding checklist (what each new backend needs)
 

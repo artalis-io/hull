@@ -41,6 +41,8 @@ typedef struct HlAllocator HlAllocator;
 #define HL_MANIFEST_MAX_CORS_ORIGINS 16
 #define HL_MANIFEST_MAX_MODULES 32
 #define HL_MANIFEST_MAX_DATABASES 16
+#define HL_MANIFEST_MAX_DB_HOSTS   16
+#define HL_MANIFEST_MAX_DB_SCHEMES  8
 
 /* One declared module: `modules = { crypto = "1" }` → name="crypto", api_major=1.
  * Names are stored as the app wrote them (short alias or full canonical) —
@@ -50,18 +52,41 @@ typedef struct HlManifestModule {
     uint8_t     api_major;  /* parsed from version string (e.g. "1" → 1) */
 } HlManifestModule;
 
-/* One declared database connection:
- *   databases = { cache = "./cache.db", primary = { dsn_env = "DATABASE_URL" } }
- * A literal string is the DSN as-is (SQLite file path or full URL). The
- * table form { dsn_env = "VAR" } defers to an env var read at connection-open
- * time, so Postgres credentials never sit in app source. `dsn` holds either
- * the literal DSN or (when dsn_is_env) the env var name. Connections open
- * lazily on first use; the one named "default" is what db.default() and the
- * stdlib target. */
-typedef struct HlManifestDatabase {
+/* One declared named database connection:
+ *   databases = { named = { cache = "./cache.db", primary = "$DATABASE_URL" } }
+ * `dsn` is the value as written. A value of exactly "$NAME" or "${NAME}" is an
+ * env reference resolved at connection-open time (so credentials never sit in
+ * app source); anything else is a literal DSN (a value that merely CONTAINS a
+ * '$', e.g. a password, is left alone). Connections open lazily on first use;
+ * the one named "default" is what db.default() and the stdlib target. */
+typedef struct HlManifestDbNamed {
     const char *name;       /* allocator-owned copy */
-    const char *dsn;        /* literal DSN, or env var name when dsn_is_env */
-    int         dsn_is_env; /* 1 = dsn names an env var to resolve at open */
+    const char *dsn;        /* DSN as written; "$VAR"/"${VAR}" = env ref */
+} HlManifestDbNamed;
+
+/* Dynamic-open policy (`databases.dynamic = { hosts = {...}, schemes = {...} }`):
+ * the allowlist db.open(dsn) validates a runtime DSN against. `hosts` entries
+ * are host_match patterns (exact / "*.suffix" glob / CIDR), each possibly a
+ * "$VAR" env ref resolved at check time. `schemes` restricts which backends
+ * db.open may select. A network scheme is gated by `hosts`; a file scheme by
+ * manifest.fs. `declared` distinguishes "no dynamic key" from an empty one. */
+typedef struct HlManifestDbDynamic {
+    const char *hosts[HL_MANIFEST_MAX_DB_HOSTS];
+    int         host_count;
+    const char *schemes[HL_MANIFEST_MAX_DB_SCHEMES];
+    int         scheme_count;
+    int         declared;
+} HlManifestDbDynamic;
+
+/* The whole `databases = { named = {...}, dynamic = {...} }` config: the named
+ * connections (opened lazily by name; the "default" entry is the stdlib /
+ * db.default() target) plus the dynamic-open policy. `declared` distinguishes
+ * "no databases key" (0) from a present one (1). */
+typedef struct HlManifestDatabase {
+    HlManifestDbNamed   named[HL_MANIFEST_MAX_DATABASES];
+    int                 named_count;
+    int                 declared;
+    HlManifestDbDynamic dynamic;
 } HlManifestDatabase;
 
 /* ── Manifest struct ───────────────────────────────────────────────── */
@@ -127,13 +152,9 @@ typedef struct HlManifest {
     int              modules_count;
     int              modules_declared;
 
-    /* Declared named database connections (`databases = {...}`). Opened
-     * lazily by name through the connection registry; the entry named
-     * "default" is the stdlib / db.default() target. `databases_declared`
-     * distinguishes "no databases key" (0) from "databases = {}" (1). */
-    HlManifestDatabase databases[HL_MANIFEST_MAX_DATABASES];
-    int                databases_count;
-    int                databases_declared;
+    /* Database config: named connections + the dynamic-open policy
+     * (`databases = { named = {...}, dynamic = {...} }`). */
+    HlManifestDatabase databases;
 
     /* W^X / no runtime dynamic code — opt-in escape hatches.
      * Both default to 0 (deny). Setting either to 1 in a manifest is
@@ -220,5 +241,45 @@ typedef struct ShSealArena ShSealArena;
  * inputs, src not present). On -1 `dst` is zero-initialized.
  */
 int hl_manifest_seal(HlManifest *dst, const HlManifest *src, ShSealArena *arena);
+
+/*
+ * Full-value env reference: if @p s is exactly "$NAME" or "${NAME}" (with NAME
+ * matching [A-Za-z_][A-Za-z0-9_]*), copy NAME into @p out (bounded by @p outsz)
+ * and return 1. Otherwise return 0 (a literal value; a string that merely
+ * CONTAINS '$', e.g. a DSN password, is literal). NULL-safe (returns 0). Used
+ * for `databases.named` DSNs and `databases.dynamic` hosts (resolved at open /
+ * check time so secrets stay in the environment, not app source).
+ *
+ * A header-only `static inline`: a pure string parser with no dependencies, so
+ * consumers (db_registry, db.open) don't drag manifest.o into their link.
+ */
+static inline int hl_manifest_env_ref(const char *s, char *out, size_t outsz)
+{
+    if (!s || !out || outsz == 0 || s[0] != '$')
+        return 0;
+    const char *name = s + 1;
+    int braced = 0;
+    if (*name == '{') { braced = 1; name++; }
+
+    /* NAME = [A-Za-z_][A-Za-z0-9_]* */
+    const char *p = name;
+    if (!(*p == '_' || (*p >= 'A' && *p <= 'Z') || (*p >= 'a' && *p <= 'z')))
+        return 0;
+    while (*p == '_' || (*p >= 'A' && *p <= 'Z') || (*p >= 'a' && *p <= 'z') ||
+           (*p >= '0' && *p <= '9'))
+        p++;
+
+    /* The reference must be the WHOLE value: end (unbraced) or "}" then end. */
+    if (braced) { if (p[0] != '}' || p[1] != '\0') return 0; }
+    else        { if (p[0] != '\0') return 0; }
+
+    size_t nlen = (size_t)(p - name);
+    if (nlen == 0 || nlen >= outsz)
+        return 0;
+    for (size_t i = 0; i < nlen; i++)   /* manual copy: no <string.h> in the header */
+        out[i] = name[i];
+    out[nlen] = '\0';
+    return 1;
+}
 
 #endif /* HL_MANIFEST_H */

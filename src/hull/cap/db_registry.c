@@ -83,20 +83,21 @@ int hl_db_registry_seed(HlDbRegistry *reg, const char *name,
     return 0;
 }
 
-/* Look up the DSN for @p name: manifest databases first (resolving a
- * { dsn_env } entry from the environment), then any seeded fallback is
- * handled by the cache scan in _get. Returns NULL + *err on failure. */
+/* Look up the DSN for @p name: manifest databases first (resolving a "$VAR"
+ * env reference from the environment), then any seeded fallback is handled by
+ * the cache scan in _get. Returns NULL + *err on failure. */
 static const char *resolve_manifest_dsn(HlDbRegistry *reg, const char *name,
                                          const char **err)
 {
     if (!reg->manifest) return NULL;
-    for (int i = 0; i < reg->manifest->databases_count; i++) {
-        const HlManifestDatabase *d = &reg->manifest->databases[i];
+    for (int i = 0; i < reg->manifest->databases.named_count; i++) {
+        const HlManifestDbNamed *d = &reg->manifest->databases.named[i];
         if (strcmp(d->name, name) != 0) continue;
-        if (d->dsn_is_env) {
-            const char *v = getenv(d->dsn);
+        char var[128];
+        if (hl_manifest_env_ref(d->dsn, var, sizeof var)) {
+            const char *v = getenv(var);
             if (!v || !v[0]) {
-                *err = "database dsn_env variable is unset";
+                *err = "database DSN env var is unset";
                 return NULL;
             }
             return v;

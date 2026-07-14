@@ -43,10 +43,9 @@ UTEST(db_registry, seed_and_get_default)
 UTEST(db_registry, manifest_lazy_open_and_cache)
 {
     HlManifest m = {0};
-    m.databases[0].name = "cache";
-    m.databases[0].dsn = ":memory:";
-    m.databases[0].dsn_is_env = 0;
-    m.databases_count = 1;
+    m.databases.named[0].name = "cache";
+    m.databases.named[0].dsn = ":memory:";
+    m.databases.named_count = 1;
 
     HlDbRegistry *reg = hl_db_registry_create(&m, NULL, NULL);
     ASSERT_TRUE(reg != NULL);
@@ -65,16 +64,15 @@ UTEST(db_registry, manifest_lazy_open_and_cache)
     hl_db_registry_destroy(reg);           /* closes the owned "cache" conn */
 }
 
-/* A { dsn_env } entry reads the DSN from the environment at open time. */
+/* A "$VAR" entry reads the DSN from the environment at open time. */
 UTEST(db_registry, dsn_env_resolves)
 {
     setenv("HULL_TEST_DB_DSN", ":memory:", 1);
 
     HlManifest m = {0};
-    m.databases[0].name = "primary";
-    m.databases[0].dsn = "HULL_TEST_DB_DSN";   /* env var NAME */
-    m.databases[0].dsn_is_env = 1;
-    m.databases_count = 1;
+    m.databases.named[0].name = "primary";
+    m.databases.named[0].dsn = "$HULL_TEST_DB_DSN";   /* "$VAR" env ref */
+    m.databases.named_count = 1;
 
     HlDbRegistry *reg = hl_db_registry_create(&m, NULL, NULL);
     const char *err = NULL;
@@ -86,16 +84,15 @@ UTEST(db_registry, dsn_env_resolves)
     unsetenv("HULL_TEST_DB_DSN");
 }
 
-/* An unset dsn_env variable is a clear error, not a crash. */
+/* An unset "$VAR" env var is a clear error, not a crash. */
 UTEST(db_registry, dsn_env_unset_errors)
 {
     unsetenv("HULL_TEST_MISSING_DSN");
 
     HlManifest m = {0};
-    m.databases[0].name = "primary";
-    m.databases[0].dsn = "HULL_TEST_MISSING_DSN";
-    m.databases[0].dsn_is_env = 1;
-    m.databases_count = 1;
+    m.databases.named[0].name = "primary";
+    m.databases.named[0].dsn = "$HULL_TEST_MISSING_DSN";
+    m.databases.named_count = 1;
 
     HlDbRegistry *reg = hl_db_registry_create(&m, NULL, NULL);
     const char *err = NULL;
@@ -137,6 +134,26 @@ UTEST(db_registry, default_dsn_and_accessor)
     ASSERT_EQ(hl_db_registry_default(reg), h);
 
     hl_db_registry_destroy(reg);   /* owns + closes the default */
+}
+
+/* The "$VAR" env-reference parser (used to resolve named-connection DSNs). */
+UTEST(db_registry, env_ref_parsing)
+{
+    char v[128];
+    ASSERT_TRUE(hl_manifest_env_ref("$FOO", v, sizeof v));
+    ASSERT_STREQ(v, "FOO");
+    ASSERT_TRUE(hl_manifest_env_ref("${BAR_BAZ2}", v, sizeof v));
+    ASSERT_STREQ(v, "BAR_BAZ2");
+    /* Literals: a bare path, and a value that merely CONTAINS '$' (a password). */
+    ASSERT_FALSE(hl_manifest_env_ref("./cache.db", v, sizeof v));
+    ASSERT_FALSE(hl_manifest_env_ref("postgres://u:p$w@h/db", v, sizeof v));
+    /* Must be the WHOLE value; malformed forms are literal. */
+    ASSERT_FALSE(hl_manifest_env_ref("$FOO extra", v, sizeof v));
+    ASSERT_FALSE(hl_manifest_env_ref("${FOO", v, sizeof v));
+    ASSERT_FALSE(hl_manifest_env_ref("$1BAD", v, sizeof v));
+    ASSERT_FALSE(hl_manifest_env_ref("$$FOO", v, sizeof v));
+    ASSERT_FALSE(hl_manifest_env_ref("$", v, sizeof v));
+    ASSERT_FALSE(hl_manifest_env_ref(NULL, v, sizeof v));
 }
 
 UTEST_MAIN()

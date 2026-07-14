@@ -333,61 +333,75 @@ int hl_manifest_extract_js(JSContext *ctx, HlManifest *out, HlAllocator *alloc)
     }
     JS_FreeValue(ctx, modules_val);
 
-    /* databases: { cache: "./cache.db", primary: { dsn_env: "DATABASE_URL" } }
-     * Keyed object: key = connection name, value = a literal DSN string or an
-     * object { dsn_env: "VAR" } (resolved from env at connection-open time).
-     * Mirror of the Lua parser. */
+    /* databases: { named: { cache: "./cache.db", primary: "$DATABASE_URL" },
+     *              dynamic: { hosts: [...], schemes: [...] } }
+     * named: name -> DSN string (a "$VAR"/"${VAR}" value is an env ref resolved
+     *   at open; a value that merely contains '$' is literal).
+     * dynamic: the db.open(dsn) allowlist. Mirror of the Lua parser. */
     JSValue db_val = JS_GetPropertyStr(ctx, manifest, "databases");
     if (JS_IsObject(db_val) && !JS_IsNull(db_val) && !JS_IsArray(ctx, db_val)) {
-        out->databases_declared = 1;
-        JSPropertyEnum *props = NULL;
-        uint32_t prop_count = 0;
-        if (JS_GetOwnPropertyNames(ctx, &props, &prop_count, db_val,
-                                    JS_GPN_STRING_MASK | JS_GPN_ENUM_ONLY) == 0) {
-            for (uint32_t i = 0; i < prop_count; i++) {
-                if (out->databases_count >= HL_MANIFEST_MAX_DATABASES) {
-                    log_warn("[manifest] databases exceeds "
-                             "HL_MANIFEST_MAX_DATABASES (%d), truncated",
-                             HL_MANIFEST_MAX_DATABASES);
-                    for (uint32_t j = i; j < prop_count; j++)
-                        JS_FreeAtom(ctx, props[j].atom);
-                    break;
-                }
-                const char *name = JS_AtomToCString(ctx, props[i].atom);
-                JSValue v_val = JS_GetProperty(ctx, db_val, props[i].atom);
-                const char *dsn_copy = NULL;
-                int is_env = 0;
-                if (JS_IsString(v_val)) {
-                    const char *s = JS_ToCString(ctx, v_val);
-                    if (s) { dsn_copy = hl_manifest_strdup(alloc, s);
-                             JS_FreeCString(ctx, s); }
-                } else if (JS_IsObject(v_val)) {
-                    JSValue e = JS_GetPropertyStr(ctx, v_val, "dsn_env");
-                    if (JS_IsString(e)) {
-                        const char *s = JS_ToCString(ctx, e);
+        out->databases.declared = 1;
+
+        JSValue named = JS_GetPropertyStr(ctx, db_val, "named");
+        if (JS_IsObject(named) && !JS_IsNull(named) && !JS_IsArray(ctx, named)) {
+            JSPropertyEnum *props = NULL;
+            uint32_t prop_count = 0;
+            if (JS_GetOwnPropertyNames(ctx, &props, &prop_count, named,
+                                        JS_GPN_STRING_MASK | JS_GPN_ENUM_ONLY) == 0) {
+                for (uint32_t i = 0; i < prop_count; i++) {
+                    if (out->databases.named_count >= HL_MANIFEST_MAX_DATABASES) {
+                        log_warn("[manifest] databases.named exceeds "
+                                 "HL_MANIFEST_MAX_DATABASES (%d), truncated",
+                                 HL_MANIFEST_MAX_DATABASES);
+                        for (uint32_t j = i; j < prop_count; j++)
+                            JS_FreeAtom(ctx, props[j].atom);
+                        break;
+                    }
+                    const char *name = JS_AtomToCString(ctx, props[i].atom);
+                    JSValue v_val = JS_GetProperty(ctx, named, props[i].atom);
+                    const char *dsn_copy = NULL;
+                    if (JS_IsString(v_val)) {
+                        const char *s = JS_ToCString(ctx, v_val);
                         if (s) { dsn_copy = hl_manifest_strdup(alloc, s);
-                                 is_env = 1; JS_FreeCString(ctx, s); }
+                                 JS_FreeCString(ctx, s); }
                     }
-                    JS_FreeValue(ctx, e);
-                }
-                if (name && name[0] && dsn_copy && dsn_copy[0]) {
-                    const char *ncopy = hl_manifest_strdup(alloc, name);
-                    if (ncopy) {
-                        out->databases[out->databases_count].name       = ncopy;
-                        out->databases[out->databases_count].dsn        = dsn_copy;
-                        out->databases[out->databases_count].dsn_is_env = is_env;
-                        out->databases_count++;
+                    if (name && name[0] && dsn_copy && dsn_copy[0]) {
+                        const char *ncopy = hl_manifest_strdup(alloc, name);
+                        if (ncopy) {
+                            out->databases.named[out->databases.named_count].name = ncopy;
+                            out->databases.named[out->databases.named_count].dsn  = dsn_copy;
+                            out->databases.named_count++;
+                        }
+                    } else {
+                        log_warn("[manifest] databases.named.%s: expected a DSN "
+                                 "string, ignored", name ? name : "?");
                     }
-                } else {
-                    log_warn("[manifest] databases.%s: expected a DSN string "
-                             "or { dsn_env: \"VAR\" }, ignored", name ? name : "?");
+                    if (name) JS_FreeCString(ctx, name);
+                    JS_FreeValue(ctx, v_val);
+                    JS_FreeAtom(ctx, props[i].atom);
                 }
-                if (name) JS_FreeCString(ctx, name);
-                JS_FreeValue(ctx, v_val);
-                JS_FreeAtom(ctx, props[i].atom);
+                js_free(ctx, props);
             }
-            js_free(ctx, props);
         }
+        JS_FreeValue(ctx, named);
+
+        JSValue dyn = JS_GetPropertyStr(ctx, db_val, "dynamic");
+        if (JS_IsObject(dyn) && !JS_IsNull(dyn) && !JS_IsArray(ctx, dyn)) {
+            out->databases.dynamic.declared = 1;
+            out->databases.dynamic.host_count =
+                read_js_string_array(ctx, dyn, "hosts",
+                                     out->databases.dynamic.hosts,
+                                     HL_MANIFEST_MAX_DB_HOSTS, alloc);
+            out->databases.dynamic.scheme_count =
+                read_js_string_array(ctx, dyn, "schemes",
+                                     out->databases.dynamic.schemes,
+                                     HL_MANIFEST_MAX_DB_SCHEMES, alloc);
+        }
+        JS_FreeValue(ctx, dyn);
+
+        if (out->databases.named_count == 0 && !out->databases.dynamic.declared)
+            log_warn("[manifest] databases has no `named` or `dynamic` entry; "
+                     "named connections now go under databases.named = {...}");
     }
     JS_FreeValue(ctx, db_val);
 

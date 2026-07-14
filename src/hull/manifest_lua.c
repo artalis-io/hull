@@ -302,56 +302,72 @@ int hl_manifest_extract_lua(lua_State *L, HlManifest *out, HlAllocator *alloc)
     }
     lua_pop(L, 1); /* pop modules */
 
-    /* databases = { cache = "./cache.db",
-     *               primary = { dsn_env = "DATABASE_URL" } }
-     * Keyed table: key = connection name, value = a literal DSN string or a
-     * table { dsn_env = "VAR" } (resolved from env at connection-open time).
-     * Opened lazily by name; the "default" entry is the stdlib target. */
+    /* databases = { named = { cache = "./cache.db", primary = "$DATABASE_URL" },
+     *               dynamic = { hosts = {...}, schemes = {...} } }
+     * named: name -> DSN string (a "$VAR"/"${VAR}" value is an env ref resolved
+     *   at connection-open time; a value that merely contains '$' is literal).
+     * dynamic: the db.open(dsn) allowlist. Opened lazily; "default" is the
+     *   stdlib target. */
     lua_getfield(L, manifest_idx, "databases");
     if (lua_istable(L, -1)) {
         int db_idx = lua_gettop(L);
-        out->databases_declared = 1;
-        int truncated = 0;
-        lua_pushnil(L);
-        while (lua_next(L, db_idx) != 0) {
-            if (lua_type(L, -2) != LUA_TSTRING) { lua_pop(L, 1); continue; }
-            if (out->databases_count >= HL_MANIFEST_MAX_DATABASES) {
-                if (!truncated) {
-                    log_warn("[manifest] databases exceeds "
-                             "HL_MANIFEST_MAX_DATABASES (%d), truncated",
-                             HL_MANIFEST_MAX_DATABASES);
-                    truncated = 1;
+        out->databases.declared = 1;
+
+        lua_getfield(L, db_idx, "named");
+        if (lua_istable(L, -1)) {
+            int named_idx = lua_gettop(L);
+            int truncated = 0;
+            lua_pushnil(L);
+            while (lua_next(L, named_idx) != 0) {
+                if (lua_type(L, -2) != LUA_TSTRING ||
+                    lua_type(L, -1) != LUA_TSTRING) { lua_pop(L, 1); continue; }
+                if (out->databases.named_count >= HL_MANIFEST_MAX_DATABASES) {
+                    if (!truncated) {
+                        log_warn("[manifest] databases.named exceeds "
+                                 "HL_MANIFEST_MAX_DATABASES (%d), truncated",
+                                 HL_MANIFEST_MAX_DATABASES);
+                        truncated = 1;
+                    }
+                    lua_pop(L, 1);
+                    continue;
                 }
-                lua_pop(L, 1);
-                continue;
-            }
-            const char *name = lua_tostring(L, -2);
-            const char *dsn_copy = NULL;
-            int is_env = 0;
-            if (lua_type(L, -1) == LUA_TSTRING) {
-                dsn_copy = hl_manifest_strdup(alloc, lua_tostring(L, -1));
-            } else if (lua_istable(L, -1)) {
-                lua_getfield(L, -1, "dsn_env");
-                if (lua_isstring(L, -1)) {
-                    dsn_copy = hl_manifest_strdup(alloc, lua_tostring(L, -1));
-                    is_env = 1;
+                const char *name = lua_tostring(L, -2);
+                const char *dsn  = lua_tostring(L, -1);
+                if (name && name[0] && dsn && dsn[0]) {
+                    const char *ncopy = hl_manifest_strdup(alloc, name);
+                    const char *dcopy = hl_manifest_strdup(alloc, dsn);
+                    if (ncopy && dcopy) {
+                        out->databases.named[out->databases.named_count].name = ncopy;
+                        out->databases.named[out->databases.named_count].dsn  = dcopy;
+                        out->databases.named_count++;
+                    }
+                } else {
+                    log_warn("[manifest] databases.named.%s: expected a DSN "
+                             "string, ignored", name ? name : "?");
                 }
-                lua_pop(L, 1);   /* pop dsn_env (copied above) */
+                lua_pop(L, 1);   /* pop value, keep key for lua_next */
             }
-            if (name && name[0] && dsn_copy && dsn_copy[0]) {
-                const char *ncopy = hl_manifest_strdup(alloc, name);
-                if (ncopy) {
-                    out->databases[out->databases_count].name       = ncopy;
-                    out->databases[out->databases_count].dsn        = dsn_copy;
-                    out->databases[out->databases_count].dsn_is_env = is_env;
-                    out->databases_count++;
-                }
-            } else {
-                log_warn("[manifest] databases.%s: expected a DSN string or "
-                         "{ dsn_env = \"VAR\" }, ignored", name ? name : "?");
-            }
-            lua_pop(L, 1);   /* pop value, keep key for lua_next */
         }
+        lua_pop(L, 1); /* pop named */
+
+        lua_getfield(L, db_idx, "dynamic");
+        if (lua_istable(L, -1)) {
+            int dyn_idx = lua_gettop(L);
+            out->databases.dynamic.declared = 1;
+            out->databases.dynamic.host_count =
+                read_string_array(L, dyn_idx, "hosts",
+                                  out->databases.dynamic.hosts,
+                                  HL_MANIFEST_MAX_DB_HOSTS, alloc);
+            out->databases.dynamic.scheme_count =
+                read_string_array(L, dyn_idx, "schemes",
+                                  out->databases.dynamic.schemes,
+                                  HL_MANIFEST_MAX_DB_SCHEMES, alloc);
+        }
+        lua_pop(L, 1); /* pop dynamic */
+
+        if (out->databases.named_count == 0 && !out->databases.dynamic.declared)
+            log_warn("[manifest] databases has no `named` or `dynamic` entry; "
+                     "named connections now go under databases.named = {...}");
     }
     lua_pop(L, 1); /* pop databases */
 
