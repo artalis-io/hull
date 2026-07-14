@@ -182,11 +182,15 @@ static HlDbHandle *default_db(HlLua *lua)
  * stack via the method closures that hold it as an upvalue. */
 #define HL_LUA_DB_OWNED_MT "hull.db.owned"
 typedef struct {
-    HlDbHandle *h;   /* owned; NULL after close (idempotent) */
+    HlDbHandle *h;     /* owned; NULL after close (idempotent) */
+    char       *dsn;   /* owned; the validated DSN this opened from, for
+                        * conn.async (worker pool is DSN-keyed). Freed in __gc,
+                        * not close(), so a post-close async fails on the NULL
+                        * handle guard before the dsn is ever read. */
 } HlLuaOwnedConn;
 
 /* Release the handle exactly once; NULL-guarded so close() + __gc are safe in
- * either order. */
+ * either order. Does not touch dsn (see the struct comment). */
 static void owned_conn_release(HlLuaOwnedConn *o)
 {
     if (o && o->h) {
@@ -211,6 +215,26 @@ static HlDbHandle *db_call_handle(lua_State *L)
     HlLua *lua = get_hl_lua(L);
     if (!lua) return NULL;
     return default_db(lua);
+}
+
+/* Resolve the DSN this call's connection opened from, symmetric with
+ * db_call_handle: an owner box (db.open) carries its own validated DSN; a
+ * borrowed lightuserdata handle (db.connect/default) is matched in the
+ * registry. Used only by conn.async to tell the worker pool which database to
+ * open its per-thread connection against. NULL = unknown → the worker falls
+ * back to its default DSN. */
+static const char *db_call_dsn(lua_State *L)
+{
+    int uv = lua_upvalueindex(1);
+    HlLua *lua = get_hl_lua(L);
+    if (!lua) return NULL;
+    if (lua_islightuserdata(L, uv))
+        return hl_db_registry_dsn_for(lua->base.db_registry,
+                                      (HlDbHandle *)lua_touserdata(L, uv));
+    HlLuaOwnedConn *o = luaL_testudata(L, uv, HL_LUA_DB_OWNED_MT);
+    if (o)
+        return o->dsn;
+    return hl_db_registry_dsn_for(lua->base.db_registry, default_db(lua));
 }
 
 /* db.query implementation */
@@ -623,6 +647,11 @@ static int lua_db_async_common(lua_State *L, HlWorkerDbKind kind)
         return luaL_error(L, "db.async not available (no thread pool)");
     if (!lua->base.async_ctx)
         return luaL_error(L, "db.async requires an active event loop");
+    /* Require a live bound connection: a closed db.open() handle resolves to
+     * NULL here, so async-after-close fails closed instead of silently
+     * targeting the default database. */
+    if (!db_call_handle(L))
+        return luaL_error(L, "database not available");
 
     const char *sql = luaL_checkstring(L, 1);
 
@@ -673,8 +702,7 @@ static int lua_db_async_common(lua_State *L, HlWorkerDbKind kind)
      * registry never saw yields NULL, so the worker falls back to its default
      * connection. The worker opens its own per-thread connection per DSN. */
     {
-        const char *dsn = hl_db_registry_dsn_for(lua->base.db_registry,
-                                                 db_call_handle(L));
+        const char *dsn = db_call_dsn(L);
         if (dsn) {
             op->dsn = strdup(dsn);
             if (!op->dsn) {
@@ -1215,10 +1243,13 @@ static int push_conn_object(lua_State *L, HlDbHandle *h)
     return 1;
 }
 
-/* __gc for the owner box: release the handle if close() didn't. */
+/* __gc for the owner box: release the handle if close() didn't, then free the
+ * DSN (the box's final owner of it). */
 static int lua_owned_conn_gc(lua_State *L)
 {
-    owned_conn_release(luaL_testudata(L, 1, HL_LUA_DB_OWNED_MT));
+    HlLuaOwnedConn *o = luaL_testudata(L, 1, HL_LUA_DB_OWNED_MT);
+    owned_conn_release(o);
+    if (o) { free(o->dsn); o->dsn = NULL; }
     return 0;
 }
 
@@ -1231,18 +1262,27 @@ static int lua_owned_conn_close(lua_State *L)
     return 0;
 }
 
-/* Push a caller-owned connection object wrapping @p h (from hl_db_dynamic_open).
- * Unlike push_conn_object, this object owns its handle: it adds a close() method
- * and a __gc finalizer that both release it via hl_db_dynamic_close. Sync
- * methods only. async/udf on a dynamic connection are a tracked follow-up (the
- * worker pool is keyed off the registry DSN, which a dynamic handle is not in;
- * §2.2). */
-static int push_owned_conn_object(lua_State *L, HlDbHandle *h)
+/* Push a caller-owned connection object wrapping @p h (from hl_db_dynamic_open),
+ * opened from @p dsn. Unlike push_conn_object, this object owns its handle: it
+ * adds a close() method and a __gc finalizer that both release it via
+ * hl_db_dynamic_close. It carries sync methods + async (bound to the owner box,
+ * so conn.async targets @p dsn through the worker pool). udf is intentionally
+ * absent: worker-side udf re-registration is keyed off the registry a dynamic
+ * handle is not in (tracked follow-up, §2.2). */
+static int push_owned_conn_object(lua_State *L, HlDbHandle *h, const char *dsn)
 {
     HlLuaOwnedConn *o = lua_newuserdatauv(L, sizeof *o, 0);
     o->h = h;
+    o->dsn = NULL;
     luaL_setmetatable(L, HL_LUA_DB_OWNED_MT);   /* installs __gc */
     int owner = lua_gettop(L);
+    if (dsn) {
+        o->dsn = strdup(dsn);
+        /* On OOM the box (on the stack) is GC'd, whose __gc closes h + frees the
+         * NULL dsn, so no leak. */
+        if (!o->dsn)
+            return luaL_error(L, "db.open: out of memory");
+    }
 
     lua_createtable(L, 0, 10);
     for (const luaL_Reg *m = db_conn_methods; m->name; m++) {
@@ -1253,6 +1293,17 @@ static int push_owned_conn_object(lua_State *L, HlDbHandle *h)
     lua_pushvalue(L, owner);
     lua_pushcclosure(L, lua_owned_conn_close, 1);
     lua_setfield(L, -2, "close");
+
+    /* async bound to the owner box: conn.async resolves the same live handle +
+     * DSN as the sync methods (db_call_handle / db_call_dsn). No udf (see the
+     * function comment). */
+    lua_newtable(L);
+    for (const luaL_Reg *m = db_async_funcs; m->name; m++) {
+        lua_pushvalue(L, owner);
+        lua_pushcclosure(L, m->func, 1);
+        lua_setfield(L, -2, m->name);
+    }
+    lua_setfield(L, -2, "async");
 
     const HlDbBackend *be = h ? h->backend : NULL;
     lua_pushstring(L, be ? be->name : "none");
@@ -1285,7 +1336,7 @@ static int lua_db_open(lua_State *L)
     HlDbHandle *h = hl_db_dynamic_open(dsn, policy, lua->base.fs_cfg, &err);
     if (!h)
         return luaL_error(L, "%s", err ? err : "db.open: denied");
-    return push_owned_conn_object(L, h);
+    return push_owned_conn_object(L, h, dsn);
 }
 
 /* db.default() → connection object for the "default" connection. Returns an

@@ -2605,10 +2605,10 @@ ride in the app-provided DSN; the reachable surface stays bounded.
   the worker pool.
 - **Backends:** network (postgres/mysql) gated by `hosts`; file (sqlite/duckdb/
   bare path) gated by `manifest.fs`.
-- **async / udf** on dynamic handles: deferred to a follow-up (see Tasks). The
-  first cut is sync-only; the worker pool keys per-thread connections off the
-  registry DSN, which a dynamic handle is not in, so async needs the dynamic DSN
-  threaded through first.
+- **async** on dynamic handles: shipped (see Tasks). The connection object
+  reports its own DSN so `conn.async` targets the dynamic database; the worker
+  pool bounds its per-thread connection cache with an LRU. **udf** stays
+  deferred (worker-side re-registration is registry-keyed; thin intersection).
 - **Clean break** from the §1 flat `databases = { name = dsn }` form (days old,
   4 internal usages migrated; no back-compat shim).
 
@@ -2636,11 +2636,26 @@ ride in the app-provided DSN; the reachable surface stays bounded.
 - [x] e2e (allow/deny) both runtimes: `tests/e2e_dynamic_connections.sh`
       (SQLite, always runs) + a Postgres CIDR host allow / out-of-CIDR deny /
       scheme deny phase in `tests/e2e_postgres.sh` (docker).
-- [ ] **Follow-up:** `async` / `udf` on a dynamic handle. Scoped out of the
-      first cut: the worker pool keys per-thread connections off the registry
-      DSN (`hl_db_registry_dsn_for`), which a caller-owned dynamic handle is not
-      in, so `async` would silently target the default. Needs the dynamic DSN
-      threaded to the worker op (store it on the owner box). Sync-only until then.
+- [x] **`async` on a dynamic handle.** Three orthogonal pieces, each in one
+      concern: (1) `worker_db.c` gained a bounded LRU (`HL_WORKER_DB_MAX_CONNS`,
+      move-to-front on hit, evict tail on overflow) so churning many dynamic
+      DSNs never grows a thread's connection set without bound. Dynamic-agnostic;
+      the cache stays a cache. (2) The connection object reports its own DSN via
+      a `db_call_dsn` / `js_call_dsn` resolver symmetric with `db_call_handle`
+      (owner box carries the validated DSN; borrowed handle → registry
+      `dsn_for`); the async dispatch drops its registry-only lookup for this, so
+      there is no dynamic branch in the dispatch or the worker. (3) `.async`
+      attached to the owned connection object (Lua: subtable bound to the owner
+      box; JS: refcounted owner box shared by the parent + async sub-object).
+      `async`-after-close fails closed via a live-handle guard. Validated clean
+      under ASan (incl. a 50-distinct-DSN churn exercising eviction + the JS
+      refcount). Covered by the async cases in `tests/e2e_dynamic_connections.sh`
+      (both runtimes).
+- [ ] **`udf` on a dynamic handle (still deferred).** Worker-side udf
+      re-registration is keyed off the registry a dynamic handle is not in, and
+      the intersection (dynamic SQLite file + async + udf) is thin. `.udf` is
+      intentionally absent on dynamic connections (clear "not a function" error);
+      may stay permanently unsupported.
 
 ### 2.3 Split the abstract interface from concrete backends (+ generic native-handle accessor)
 

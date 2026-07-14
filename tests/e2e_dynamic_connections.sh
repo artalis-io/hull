@@ -15,6 +15,8 @@
 set -e
 
 HULL="${HULL:-build/hull}"
+# run_case cd's into the app dir, so the hull path must be absolute.
+case "$HULL" in /*) ;; *) HULL="$PWD/$HULL" ;; esac
 PASS=0
 FAIL=0
 
@@ -35,21 +37,30 @@ assert_line() {
     [ "$a_got" = "$a_want" ] && pass "$a_lbl" || fail "$a_lbl" "$a_got"
 }
 
+# Run from inside TMPDIR so the app dir is the sandbox base and a relative file
+# DSN ("shard.db") resolves consistently for both the sync connection and the
+# async worker thread (both cwd-relative in one process).
 run_case() {
     ext="$1"; label="$2"
-    out=$("$HULL" --no-sandbox "$TMPDIR/app.$ext" 2>&1 || true)
+    rm -f "$TMPDIR/shard.db"
+    out=$(cd "$TMPDIR" && "$HULL" --no-sandbox "app.$ext" 2>&1 || true)
     assert_line "$out" "open_backend"   "sqlite" "$label: allowed scheme opens"
     assert_line "$out" "query_x"        "42"     "$label: query on owned conn"
     assert_line "$out" "double_close"   "ok"     "$label: double close is idempotent"
     assert_line "$out" "use_after"      "denied" "$label: use-after-close fails closed"
     assert_line "$out" "deny_scheme"    "denied" "$label: scheme not in allowlist rejected"
     assert_line "$out" "deny_path"      "denied" "$label: out-of-sandbox file path rejected"
+    # async targets the SAME dynamic (file) DB the sync side wrote to, and fails
+    # closed after close().
+    assert_line "$out" "async_x"           "7"      "$label: async targets the dynamic DB"
+    assert_line "$out" "async_after_close" "denied" "$label: async-after-close fails closed"
 }
 
 # ── Lua ────────────────────────────────────────────────────────────────
 cat > "$TMPDIR/app.lua" << 'LUA'
 app.manifest({
     modules = { "hull/db@1" },
+    fs = { read = { "shard.db" }, write = { "shard.db" } },
     databases = { dynamic = { schemes = { "sqlite" } } },
 })
 local db = require("hull.db")
@@ -68,6 +79,15 @@ app.main(function()
     print("deny_scheme=" .. (ok_sc and "ok" or "denied"))
     local ok_pp = pcall(function() return db.open("/etc/hosts") end)
     print("deny_path=" .. (ok_pp and "ok" or "denied"))
+    -- async on a file-backed dynamic connection sees the sync-written row.
+    local f = db.open("shard.db")
+    f.exec("CREATE TABLE t(x INTEGER)")
+    f.exec("INSERT INTO t(x) VALUES (?)", { 7 })
+    local r = f.async.query("SELECT x FROM t")
+    print("async_x=" .. tostring(r[1] and r[1].x))
+    f.close()
+    local ok_a = pcall(function() f.async.query("SELECT 1") end)
+    print("async_after_close=" .. (ok_a and "ok" or "denied"))
     return 0
 end)
 LUA
@@ -79,9 +99,10 @@ import { app } from "hull:app";
 import { db as dbMod } from "hull:db";
 app.manifest({
     modules: ["hull/db@1"],
+    fs: { read: ["shard.db"], write: ["shard.db"] },
     databases: { dynamic: { schemes: ["sqlite"] } },
 });
-app.main(() => {
+app.main(async () => {
     const c = dbMod.open(":memory:");
     console.log("open_backend=" + c.backendName);
     c.exec("CREATE TABLE t(x INTEGER)");
@@ -96,6 +117,15 @@ app.main(() => {
     console.log("deny_scheme=" + sc);
     let pp = "ok"; try { dbMod.open("/etc/hosts"); } catch (e) { pp = "denied"; }
     console.log("deny_path=" + pp);
+    // async on a file-backed dynamic connection sees the sync-written row.
+    const f = dbMod.open("shard.db");
+    f.exec("CREATE TABLE t(x INTEGER)");
+    f.exec("INSERT INTO t(x) VALUES (?)", [7]);
+    const r = await f.async.query("SELECT x FROM t");
+    console.log("async_x=" + (r[0] && r[0].x));
+    f.close();
+    let aa = "ok"; try { await f.async.query("SELECT 1"); } catch (e) { aa = "denied"; }
+    console.log("async_after_close=" + aa);
     return 0;
 });
 JS

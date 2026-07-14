@@ -314,13 +314,21 @@ entries may be `"$VAR"` env refs. Both lists fail closed: no `dynamic` policy (o
 an empty one) rejects every `db.open`. A process-wide cap (16) bounds concurrent
 dynamic connections. Unlike `db.connect`, the app **owns** the returned handle:
 call `conn.close()` (`conn.close()` in JS) when done, or let GC finalize it
-(double-close and use-after-close are safe and fail closed). Dynamic connections
-are sync-only today (`query`/`exec`/`batch`/`insert_if_absent`/`upsert`/
-`table_columns`); `async`/`udf` on a dynamic handle are a tracked follow-up (the
-worker pool keys off the registry DSN, which a dynamic handle is not in).
-Enforcement lives in `cap/db_dynamic.c` + `cap/host_match.c`; covered by
-`tests/e2e_dynamic_connections.sh` (both runtimes, SQLite) and the Postgres
-CIDR allow/deny phase in `tests/e2e_postgres.sh`.
+(double-close and use-after-close are safe and fail closed). A dynamic handle
+carries the sync methods (`query`/`exec`/`batch`/`insert_if_absent`/`upsert`/
+`table_columns`) plus `async` (`conn.async.query/exec`): the connection object
+reports its own DSN (`db_call_dsn` / `js_call_dsn`, symmetric with the handle
+resolver) so `conn.async` targets the dynamic database through the worker pool,
+which bounds its per-thread connection cache with an LRU
+(`HL_WORKER_DB_MAX_CONNS`) so churning through many dynamic DSNs never grows
+unbounded. `async`-after-close fails closed (the live-handle guard). `udf` on a
+dynamic handle is intentionally absent (worker-side udf re-registration is keyed
+off the registry a dynamic handle is not in; tracked follow-up). Note the
+`db.async` + `:memory:` caveat above applies: for async use a file-backed
+dynamic DSN, not `:memory:`. Enforcement lives in `cap/db_dynamic.c` +
+`cap/host_match.c`; covered by `tests/e2e_dynamic_connections.sh` (both runtimes,
+SQLite, incl. async) and the Postgres CIDR allow/deny phase in
+`tests/e2e_postgres.sh`.
 
 The connection named `"default"` is what `db.default()` and the stdlib target;
 when an app just uses `-d <DSN>` with no `databases` map, that becomes the

@@ -32,10 +32,21 @@
 /* ── TLS for per-worker DB connections ─────────────────────────────── */
 
 /* Each worker thread caches one connection per distinct database DSN it has
- * been asked for, in a small singly-linked list keyed by the resolved DSN.
- * The common case is a single node (the default database); an app that runs
- * db.async against several named connections grows the list by one node each.
- * All thread-local, so no locking and no cross-thread connection sharing. */
+ * been asked for, in a small singly-linked list keyed by the resolved DSN,
+ * most-recently-used at the head. The common case is a single node (the
+ * default database); an app that runs db.async against several named
+ * connections grows the list by one node each. All thread-local, so no locking
+ * and no cross-thread connection sharing.
+ *
+ * The list is a bounded LRU: on a hit the node moves to the head, and a miss
+ * that would exceed HL_WORKER_DB_MAX_CONNS first closes + evicts the tail. This
+ * bounds a thread's connection set for an app that churns through many distinct
+ * dynamic DSNs (db.open per-tenant shards); the cache stays purely a cache and
+ * knows nothing about named vs dynamic. The cap is generous, so the small
+ * manifest-bounded named/default set (<= HL_DB_REGISTRY_MAX) never evicts in
+ * practice. Eviction between work items is safe: async ops are atomic (one
+ * query/exec each, no transaction spans pooled ops). */
+#define HL_WORKER_DB_MAX_CONNS 32
 typedef struct WorkerConnNode {
     char                  *dsn;   /* owned; resolved DSN this connection opened from */
     HlWorkerDb             wdb;   /* embedded backend handle */
@@ -123,9 +134,36 @@ HlWorkerDb *hl_worker_db_get_for(const char *dsn)
     const char *key = worker_db_resolve_key(dsn, be, keybuf);
 
     WorkerConnNode *head = (WorkerConnNode *)pthread_getspecific(worker_db_key);
-    for (WorkerConnNode *n = head; n; n = n->next)
-        if (n->dsn && strcmp(n->dsn, key) == 0 && n->wdb.handle.backend)
+
+    /* Cache hit: unlink + move to the head (mark MRU) so the tail stays the LRU
+     * eviction target. Count nodes on the way for the cap check below. */
+    WorkerConnNode *prev = NULL;
+    int count = 0;
+    for (WorkerConnNode *n = head; n; prev = n, n = n->next) {
+        count++;
+        if (n->dsn && strcmp(n->dsn, key) == 0 && n->wdb.handle.backend) {
+            if (prev) {
+                prev->next = n->next;
+                n->next = head;
+                head = n;
+                pthread_setspecific(worker_db_key, head);
+            }
             return &n->wdb;
+        }
+    }
+
+    /* Miss. Evict the LRU (tail) before opening if this thread is at the cap,
+     * so churning through many dynamic DSNs does not grow the set without
+     * bound. */
+    if (count >= HL_WORKER_DB_MAX_CONNS && head) {
+        WorkerConnNode *p = NULL, *t = head;
+        while (t->next) { p = t; t = t->next; }
+        if (p) p->next = NULL; else head = NULL;
+        if (t->wdb.handle.backend)
+            t->wdb.handle.backend->close(&t->wdb.handle);
+        free(t->dsn);
+        free(t);
+    }
 
     WorkerConnNode *node = calloc(1, sizeof(*node));
     if (!node) return NULL;

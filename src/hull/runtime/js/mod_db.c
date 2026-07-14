@@ -250,11 +250,20 @@ static JSClassDef js_db_conn_class = {
  * stays as the opaque so js_call_handle can tell "owned but closed" (box != NULL,
  * box->h == NULL, fail closed) apart from "not an owned object" (box == NULL,
  * fall through to the default). close() and the finalizer both release the
- * handle exactly once (NULL-guarded); the finalizer also frees the box.
- * Distinct class id from the borrowed connection so the finalizer only ever runs
- * on owned handles. */
+ * handle exactly once (NULL-guarded).
+ *
+ * The box is shared by the connection object AND its conn.async sub-object (both
+ * are this class), so it is refcounted: each object holds one ref, the finalizer
+ * decrements, and the last one out closes the handle + frees the box + dsn.
+ * Refcounting (rather than the borrowed connection's no-op finalizer) is needed
+ * because the box is malloc'd C state QuickJS does not GC-manage, and the
+ * sub-object may outlive the parent. box->dsn is the validated DSN, for
+ * conn.async to key the worker pool. Distinct class id from the borrowed
+ * connection so this finalizer only ever runs on owned handles. */
 typedef struct {
-    HlDbHandle *h;   /* owned; NULL after close (idempotent) */
+    HlDbHandle *h;        /* owned; NULL after close (idempotent) */
+    char       *dsn;      /* owned; validated DSN, for conn.async */
+    int         refcount; /* live objects sharing this box (conn + conn.async) */
 } HlJsOwnedConn;
 static JSClassID hull_db_owned_conn_class_id;
 static void js_db_owned_conn_finalizer(JSRuntime *rt, JSValue val)
@@ -263,7 +272,9 @@ static void js_db_owned_conn_finalizer(JSRuntime *rt, JSValue val)
     HlJsOwnedConn *box =
         (HlJsOwnedConn *)JS_GetOpaque(val, hull_db_owned_conn_class_id);
     if (!box) return;
+    if (--box->refcount > 0) return;   /* another sharer still alive */
     if (box->h) hl_db_dynamic_close(box->h);
+    free(box->dsn);
     free(box);
 }
 static JSClassDef js_db_owned_conn_class = {
@@ -294,6 +305,23 @@ static HlDbHandle *js_call_handle(JSContext *ctx, JSValueConst this_val)
     if (box) return box->h;
     HlJS *js = (HlJS *)JS_GetContextOpaque(ctx);
     return js ? default_db(js) : NULL;
+}
+
+/* Resolve the DSN this call's connection opened from, symmetric with
+ * js_call_handle: an owner box (db.open) carries its own validated DSN; a
+ * borrowed handle (db.connect/default) is matched in the registry. Used only by
+ * conn.async to tell the worker pool which database to open its per-thread
+ * connection against. NULL = unknown → the worker falls back to its default. */
+static const char *js_call_dsn(JSContext *ctx, JSValueConst this_val)
+{
+    HlJS *js = (HlJS *)JS_GetContextOpaque(ctx);
+    if (!js) return NULL;
+    HlDbHandle *bound = (HlDbHandle *)JS_GetOpaque(this_val, hull_db_conn_class_id);
+    if (bound) return hl_db_registry_dsn_for(js->base.db_registry, bound);
+    HlJsOwnedConn *box =
+        (HlJsOwnedConn *)JS_GetOpaque(this_val, hull_db_owned_conn_class_id);
+    if (box) return box->dsn;
+    return hl_db_registry_dsn_for(js->base.db_registry, default_db(js));
 }
 
 /* db.query implementation */
@@ -658,6 +686,11 @@ static JSValue js_db_async_common(JSContext *ctx, JSValueConst this_val,
     if (!js->base.async_ctx)
         return JS_ThrowInternalError(ctx,
             "db.async requires an active event loop");
+    /* Require a live bound connection: a closed db.open() handle resolves to
+     * NULL here, so async-after-close fails closed instead of silently
+     * targeting the default database. */
+    if (!js_call_handle(ctx, this_val))
+        return JS_ThrowInternalError(ctx, "database not available");
 
     if (argc < 1)
         return JS_ThrowTypeError(ctx, "db.async requires (sql, params?)");
@@ -715,13 +748,11 @@ static JSValue js_db_async_common(JSContext *ctx, JSValueConst this_val,
     js_free_hl_values(ctx, params, nparams);
 
     /* Target the database this async call is bound to: db.connect(name).async
-     * hits that named connection's DSN; db.default().async resolves to the
-     * default. this_val is the connection object (async is a HullDbConnection
-     * sharing the same handle), so js_call_handle recovers the bound handle. A
-     * seeded connection with no known DSN yields NULL → worker default. */
+     * hits that named connection's DSN; db.open(dsn).async its dynamic DSN;
+     * db.default().async resolves to the default. js_call_dsn recovers it from
+     * whichever carrier this_val is; NULL (unknown) yields the worker default. */
     {
-        const char *dsn = hl_db_registry_dsn_for(js->base.db_registry,
-                                                 js_call_handle(ctx, this_val));
+        const char *dsn = js_call_dsn(ctx, this_val);
         if (dsn) {
             op->dsn = strdup(dsn);
             if (!op->dsn) {
@@ -1375,12 +1406,27 @@ static JSValue js_db_owned_close(JSContext *ctx, JSValueConst this_val,
     return JS_UNDEFINED;
 }
 
-/* Build a caller-owned connection object wrapping @p h (from hl_db_dynamic_open).
- * Unlike push_conn_object, this object owns its handle: it adds a close() method
- * and a finalizer that both release it via hl_db_dynamic_close. Sync methods
- * only. async/udf on a dynamic connection are a tracked follow-up (the worker
- * pool is keyed off the registry DSN, which a dynamic handle is not in; §2.2). */
-static JSValue push_owned_conn_object(JSContext *ctx, HlDbHandle *h)
+/* A conn.async sub-object for an owned connection: itself a HullDbOwnedConnection
+ * sharing @p box (refcount++ on success), so js_call_handle / js_call_dsn resolve
+ * the same live handle + DSN as the parent's sync methods. */
+static JSValue new_owned_subobject(JSContext *ctx, HlJsOwnedConn *box)
+{
+    JSValue o = JS_NewObjectClass(ctx, (int)hull_db_owned_conn_class_id);
+    if (JS_IsException(o)) return o;   /* refcount untouched on failure */
+    box->refcount++;
+    JS_SetOpaque(o, box);
+    return o;
+}
+
+/* Build a caller-owned connection object wrapping @p h (from hl_db_dynamic_open),
+ * opened from @p dsn. Unlike push_conn_object, this object owns its handle: it
+ * adds a close() method and a finalizer that both release it via
+ * hl_db_dynamic_close. It carries sync methods + async (a sub-object sharing the
+ * refcounted owner box, so conn.async targets @p dsn through the worker pool).
+ * udf is intentionally absent: worker-side udf re-registration is keyed off the
+ * registry a dynamic handle is not in (tracked follow-up, §2.2). */
+static JSValue push_owned_conn_object(JSContext *ctx, HlDbHandle *h,
+                                      const char *dsn)
 {
     HlJsOwnedConn *box = malloc(sizeof *box);
     if (!box) {
@@ -1388,13 +1434,24 @@ static JSValue push_owned_conn_object(JSContext *ctx, HlDbHandle *h)
         return JS_ThrowOutOfMemory(ctx);
     }
     box->h = h;
+    box->refcount = 1;   /* the connection object created just below */
+    box->dsn = NULL;
+    if (dsn) {
+        box->dsn = strdup(dsn);
+        if (!box->dsn) {
+            free(box);
+            hl_db_dynamic_close(h);
+            return JS_ThrowOutOfMemory(ctx);
+        }
+    }
     JSValue obj = JS_NewObjectClass(ctx, (int)hull_db_owned_conn_class_id);
     if (JS_IsException(obj)) {
+        free(box->dsn);
         free(box);
         hl_db_dynamic_close(h);
         return obj;
     }
-    JS_SetOpaque(obj, box);   /* obj owns the box + handle from here (finalizer) */
+    JS_SetOpaque(obj, box);   /* obj holds ref 1; its finalizer decrements */
     JS_SetPropertyStr(ctx, obj, "query",
                       JS_NewCFunction(ctx, js_db_query, "query", 2));
     JS_SetPropertyStr(ctx, obj, "exec",
@@ -1413,6 +1470,18 @@ static JSValue push_owned_conn_object(JSContext *ctx, HlDbHandle *h)
                                        "tableColumns", 1));
     JS_SetPropertyStr(ctx, obj, "close",
                       JS_NewCFunction(ctx, js_db_owned_close, "close", 0));
+
+    /* async: shares the refcounted box; targets box->dsn via js_call_dsn. No
+     * udf (see the function comment). On failure, freeing obj runs its
+     * finalizer (refcount 1 -> 0), which closes the handle + frees the box. */
+    JSValue async_obj = new_owned_subobject(ctx, box);
+    if (JS_IsException(async_obj)) { JS_FreeValue(ctx, obj); return async_obj; }
+    JS_SetPropertyStr(ctx, async_obj, "query",
+                      JS_NewCFunction(ctx, js_db_async_query, "query", 2));
+    JS_SetPropertyStr(ctx, async_obj, "exec",
+                      JS_NewCFunction(ctx, js_db_async_exec, "exec", 2));
+    JS_SetPropertyStr(ctx, obj, "async", async_obj);
+
     const HlDbBackend *be = h ? h->backend : NULL;
     JS_SetPropertyStr(ctx, obj, "backendName",
                       JS_NewString(ctx, be ? be->name : "none"));
@@ -1445,10 +1514,13 @@ static JSValue js_db_open(JSContext *ctx, JSValueConst this_val,
         hl_db_registry_dynamic_policy(js->base.db_registry);
     const char *err = NULL;
     HlDbHandle *h = hl_db_dynamic_open(dsn, policy, js->base.fs_cfg, &err);
-    JS_FreeCString(ctx, dsn);
-    if (!h)
+    if (!h) {
+        JS_FreeCString(ctx, dsn);
         return JS_ThrowInternalError(ctx, "%s", err ? err : "db.open: denied");
-    return push_owned_conn_object(ctx, h);
+    }
+    JSValue obj = push_owned_conn_object(ctx, h, dsn);   /* strdups dsn */
+    JS_FreeCString(ctx, dsn);
+    return obj;
 }
 
 /* db.default() → connection object for the "default" connection. Returns an
