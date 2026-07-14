@@ -857,8 +857,13 @@ static int scram_pbkdf2(const char *pw, size_t pw_len,
     memcpy(t, u, 32);
 
     for (int i = 1; i < iters; i++) {
-        if (hl_cap_crypto_hmac_sha256((const uint8_t *)pw, pw_len, u, 32, u) != 0)
+        /* HMAC into a separate buffer, not in-place over the input `u`: the
+         * cap-layer HMAC backend is swappable (HL_HMAC_BACKEND), so don't
+         * assume it buffers the message before writing `out`. */
+        uint8_t next[32];
+        if (hl_cap_crypto_hmac_sha256((const uint8_t *)pw, pw_len, u, 32, next) != 0)
             return -1;
+        memcpy(u, next, 32);
         for (int j = 0; j < 32; j++) t[j] = (uint8_t)(t[j] ^ u[j]);
     }
     memcpy(out, t, 32);
@@ -1008,6 +1013,9 @@ static int64_t parse_affected(const char *tag)
     int64_t v = 0;
     for (const char *q = last; *q; q++) {
         if (*q < '0' || *q > '9') return -1;
+        /* Overflow guard: a hostile CommandComplete tag must not trigger
+         * signed-overflow UB (the count is only informational). */
+        if (v > (INT64_MAX - 9) / 10) return -1;
         v = v * 10 + (*q - '0');
     }
     return v;

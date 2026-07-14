@@ -92,6 +92,10 @@ function check(data, schema) {
             } else if (typeof value === "number") {
                 if (value < rules.min)
                     err = customMsg || "must be at least " + rules.min;
+            } else {
+                // min/max only bound string length or numeric value; a boolean
+                // or object would silently pass otherwise. Fail closed.
+                err = customMsg || "must be a string or number";
             }
         }
 
@@ -105,6 +109,8 @@ function check(data, schema) {
             } else if (typeof value === "number") {
                 if (value > rules.max)
                     err = customMsg || "must be at most " + rules.max;
+            } else {
+                err = customMsg || "must be a string or number";
             }
         }
 
