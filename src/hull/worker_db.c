@@ -31,17 +31,32 @@
 
 /* ── TLS for per-worker DB connections ─────────────────────────────── */
 
+/* Each worker thread caches one connection per distinct database DSN it has
+ * been asked for, in a small singly-linked list keyed by the resolved DSN.
+ * The common case is a single node (the default database); an app that runs
+ * db.async against several named connections grows the list by one node each.
+ * All thread-local, so no locking and no cross-thread connection sharing. */
+typedef struct WorkerConnNode {
+    char                  *dsn;   /* owned; resolved DSN this connection opened from */
+    HlWorkerDb             wdb;   /* embedded backend handle */
+    struct WorkerConnNode *next;
+} WorkerConnNode;
+
 static pthread_key_t  worker_db_key;
 static pthread_once_t worker_db_once = PTHREAD_ONCE_INIT;
-static const char    *worker_db_dsn;   /* set once, read-only after */
+static const char    *worker_db_dsn;   /* set once, read-only after: the default */
 
 static void worker_db_destructor(void *ptr)
 {
-    if (!ptr) return;
-    HlWorkerDb *wdb = (HlWorkerDb *)ptr;
-    if (wdb->handle.backend)
-        wdb->handle.backend->close(&wdb->handle);
-    free(wdb);
+    WorkerConnNode *n = (WorkerConnNode *)ptr;
+    while (n) {
+        WorkerConnNode *next = n->next;
+        if (n->wdb.handle.backend)
+            n->wdb.handle.backend->close(&n->wdb.handle);
+        free(n->dsn);
+        free(n);
+        n = next;
+    }
 }
 
 static void worker_db_key_create(void)
@@ -74,34 +89,66 @@ void hl_worker_db_init(const char *dsn)
     pthread_once(&worker_db_once, worker_db_key_create);
 }
 
-HlWorkerDb *hl_worker_db_get(void)
+/* Resolve @p dsn to the key this thread caches / opens against: a SQLite file
+ * path is realpath'd (so the worker's open hits the exact sandbox-allowed
+ * path); a postgres:// DSN passes through unchanged. @p out must be PATH_MAX. */
+static const char *worker_db_resolve_key(const char *dsn, const HlDbBackend *be,
+                                         char *out)
 {
-    HlWorkerDb *wdb = (HlWorkerDb *)pthread_getspecific(worker_db_key);
-    if (wdb) return wdb;
+    int is_sqlite = 0;
+#ifdef HL_ENABLE_SQLITE
+    is_sqlite = (be == &hl_db_backend_sqlite);
+#else
+    (void)be;
+#endif
+    if (is_sqlite && realpath(dsn, out))
+        return out;
+    return dsn;
+}
 
-    if (!worker_db_dsn) return NULL;
+HlWorkerDb *hl_worker_db_get_for(const char *dsn)
+{
+    if (!dsn) dsn = worker_db_dsn;
+    if (!dsn) return NULL;
 
     const char *sel_err = NULL;
-    const HlDbBackend *be = hl_db_backend_select(worker_db_dsn, &sel_err);
+    const HlDbBackend *be = hl_db_backend_select(dsn, &sel_err);
     if (!be) {
         log_error("[hull:worker_db] backend select failed: %s",
                   sel_err ? sel_err : "unknown");
         return NULL;
     }
 
-    wdb = calloc(1, sizeof(HlWorkerDb));
-    if (!wdb) return NULL;
+    char keybuf[PATH_MAX];
+    const char *key = worker_db_resolve_key(dsn, be, keybuf);
 
-    wdb->handle.backend = be;
-    if (be->open(&wdb->handle.ctx, worker_db_dsn, NULL) != 0) {
+    WorkerConnNode *head = (WorkerConnNode *)pthread_getspecific(worker_db_key);
+    for (WorkerConnNode *n = head; n; n = n->next)
+        if (n->dsn && strcmp(n->dsn, key) == 0 && n->wdb.handle.backend)
+            return &n->wdb;
+
+    WorkerConnNode *node = calloc(1, sizeof(*node));
+    if (!node) return NULL;
+    node->dsn = strdup(key);
+    if (!node->dsn) { free(node); return NULL; }
+
+    node->wdb.handle.backend = be;
+    if (be->open(&node->wdb.handle.ctx, key, NULL) != 0) {
         log_error("[hull:worker_db] %s open failed: dsn=%s errno=%d",
-                  be->name, worker_db_dsn, errno);
-        free(wdb);
+                  be->name, key, errno);
+        free(node->dsn);
+        free(node);
         return NULL;
     }
 
-    pthread_setspecific(worker_db_key, wdb);
-    return wdb;
+    node->next = head;
+    pthread_setspecific(worker_db_key, node);
+    return &node->wdb;
+}
+
+HlWorkerDb *hl_worker_db_get(void)
+{
+    return hl_worker_db_get_for(NULL);
 }
 
 /* ── Shared "get + namespace check" for the runtime bindings ──────── */
@@ -243,7 +290,7 @@ static int db_materialize_row_cb(void *ctx, HlColumn *cols, int ncols)
 static void db_work_fn(void *ud)
 {
     HlWorkerDbOp *op = (HlWorkerDbOp *)ud;
-    HlWorkerDb *wdb = hl_worker_db_get();
+    HlWorkerDb *wdb = hl_worker_db_get_for(op->dsn);
     if (!wdb) {
         op->error = 1;
         snprintf(op->error_msg, sizeof(op->error_msg),
@@ -361,6 +408,7 @@ void hl_worker_db_op_free(HlWorkerDbOp *op)
 {
     if (!op) return;
     free(op->sql);
+    free(op->dsn);
     if (op->params) {
         for (int i = 0; i < op->nparams; i++) {
             if ((op->params[i].type == HL_TYPE_TEXT ||

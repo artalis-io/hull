@@ -641,6 +641,24 @@ static int lua_db_async_common(lua_State *L, HlWorkerDbKind kind)
     }
     lua_free_hl_values(L, params, nparams);
 
+    /* Target the database this async call is bound to: db.connect(name).async
+     * hits that named connection's DSN; db.default().async (and the bare
+     * module async) resolve to the default. A seeded connection whose DSN the
+     * registry never saw yields NULL, so the worker falls back to its default
+     * connection. The worker opens its own per-thread connection per DSN. */
+    {
+        const char *dsn = hl_db_registry_dsn_for(lua->base.db_registry,
+                                                 db_call_handle(L));
+        if (dsn) {
+            op->dsn = strdup(dsn);
+            if (!op->dsn) {
+                hl_worker_db_op_free(op);
+                free(op);
+                return luaL_error(L, "db.async: out of memory");
+            }
+        }
+    }
+
     /* Create async ctx */
     HlAsyncCtx *ctx = hl_async_ctx_create(lua->server, lua->base.net_ctx, lua->base.alloc);
     if (!ctx) {
@@ -951,7 +969,8 @@ static void lua_parse_udf_opts(lua_State *L, int opts_idx,
 static int lua_db_udf_register(lua_State *L)
 {
     HlLua *lua = get_hl_lua(L);
-    sqlite3 *raw_db = lua ? hl_db_sqlite_raw(default_db(lua)) : NULL;
+    HlDbHandle *conn = db_call_handle(L);
+    sqlite3 *raw_db = hl_db_sqlite_raw(conn);
     if (!lua || !raw_db)
         return luaL_error(L, "database not available");
 
@@ -989,7 +1008,7 @@ static int lua_db_udf_register(lua_State *L)
 
         const char *err_msg = NULL;
         int rc = hl_cap_db_udf_register_wasm(
-            default_db(lua), lua->base.wasm_cache, &opts,
+            conn, lua->base.wasm_cache, &opts,
             lua->base.app_vfs, lua->app_dir,
             lua->base.alloc, &err_msg);
         if (rc != 0)
@@ -1076,18 +1095,19 @@ static int lua_db_udf_register(lua_State *L)
 static int lua_db_udf_unregister(lua_State *L)
 {
     HlLua *lua = get_hl_lua(L);
-    if (!lua || !default_db(lua))
+    HlDbHandle *conn = db_call_handle(L);
+    if (!lua || !conn)
         return luaL_error(L, "database not available");
 
     const char *sql_name = luaL_checkstring(L, 1);
 
 #ifdef HL_ENABLE_WASM
-    if (hl_cap_db_udf_unregister(default_db(lua), sql_name) != 0)
+    if (hl_cap_db_udf_unregister(conn, sql_name) != 0)
         return luaL_error(L, "db.udf.unregister: failed");
 #else
     /* Fall back to direct sqlite3 call when WASM (and the UDF cap helper)
      * is compiled out — Lua/JS callback UDFs still work without WASM. */
-    sqlite3 *raw_db = hl_db_sqlite_raw(default_db(lua));
+    sqlite3 *raw_db = hl_db_sqlite_raw(conn);
     if (!raw_db)
         return luaL_error(L, "database not available");
     int rc = sqlite3_create_function_v2(
@@ -1128,27 +1148,38 @@ static const luaL_Reg db_conn_methods[] = {
     {NULL, NULL}
 };
 
-/* Push a fresh connection-object table whose methods carry @p h as upvalue 1. */
-static int push_conn_object(lua_State *L, HlDbHandle *h, int is_default)
+/* Push a sub-table whose functions each carry @p h as upvalue 1, so a call on
+ * conn.async.* / conn.udf.* resolves the bound connection via db_call_handle
+ * exactly like the sync methods do. */
+static void push_bound_subtable(lua_State *L, const luaL_Reg *funcs,
+                                HlDbHandle *h, const char *field)
 {
-    lua_createtable(L, 0, is_default ? 11 : 9);
+    lua_newtable(L);
+    for (const luaL_Reg *m = funcs; m->name; m++) {
+        lua_pushlightuserdata(L, h);
+        lua_pushcclosure(L, m->func, 1);
+        lua_setfield(L, -2, m->name);
+    }
+    lua_setfield(L, -2, field);
+}
+
+/* Push a fresh connection-object table whose methods carry @p h as upvalue 1. */
+static int push_conn_object(lua_State *L, HlDbHandle *h)
+{
+    lua_createtable(L, 0, 11);
     for (const luaL_Reg *m = db_conn_methods; m->name; m++) {
         lua_pushlightuserdata(L, h);
         lua_pushcclosure(L, m->func, 1);
         lua_setfield(L, -2, m->name);
     }
-    /* async / udf dispatch to the per-thread worker + the SQLite raw handle,
-     * both of which are the DEFAULT connection. Only the default connection
-     * object carries them; named connections get the sync surface only until
-     * per-connection workers land. */
-    if (is_default) {
-        luaL_newlib(L, db_async_funcs);
-        lua_setfield(L, -2, "async");
+    /* async targets this connection's database via the worker pool's per-DSN
+     * connections; udf registers on this connection's SQLite handle (a udf on
+     * a non-SQLite connection errors at call time). Both carry the same bound
+     * handle as the sync methods, so a named connection is fully featured. */
+    push_bound_subtable(L, db_async_funcs, h, "async");
 #ifdef HL_ENABLE_SQLITE
-        luaL_newlib(L, db_udf_funcs);
-        lua_setfield(L, -2, "udf");
+    push_bound_subtable(L, db_udf_funcs, h, "udf");
 #endif
-    }
     const HlDbBackend *be = h ? h->backend : NULL;
     lua_pushstring(L, be ? be->name : "none");
     lua_setfield(L, -2, "backend_name");
@@ -1165,7 +1196,7 @@ static int push_conn_object(lua_State *L, HlDbHandle *h, int is_default)
 static int lua_db_default(lua_State *L)
 {
     HlLua *lua = get_hl_lua(L);
-    return push_conn_object(L, lua ? default_db(lua) : NULL, 1);
+    return push_conn_object(L, lua ? default_db(lua) : NULL);
 }
 
 /* db.connect(name) → connection object for a manifest-declared database. */
@@ -1182,7 +1213,7 @@ static int lua_db_connect(lua_State *L)
     if (!h)
         return luaL_error(L, "db.connect('%s'): %s", name,
                           err ? err : "unknown database");
-    return push_conn_object(L, h, 0);
+    return push_conn_object(L, h);
 }
 
 int luaopen_hull_db(lua_State *L)

@@ -21,6 +21,8 @@
 
 typedef struct {
     char       *name;    /* owned */
+    char       *dsn;     /* owned; the DSN this connection opened from, NULL
+                          * for a seeded/borrowed connection (dsn unknown) */
     HlDbHandle  handle;
     int         open;
     int         owned;   /* 1 = registry closes it; 0 = seeded/borrowed */
@@ -147,10 +149,19 @@ HlDbHandle *hl_db_registry_get(HlDbRegistry *reg, const char *name,
     memset(s, 0, sizeof *s);
     s->name = strdup(name);
     if (!s->name) { if (err) *err = "out of memory"; return NULL; }
+    s->dsn = strdup(dsn);
+    if (!s->dsn) {
+        free(s->name);
+        s->name = NULL;
+        if (err) *err = "out of memory";
+        return NULL;
+    }
     s->handle.backend = be;
     if (be->open(&s->handle.ctx, dsn, reg->alloc) != 0) {
         free(s->name);
         s->name = NULL;
+        free(s->dsn);
+        s->dsn = NULL;
         if (err) *err = "failed to open database connection";
         return NULL;
     }
@@ -158,6 +169,15 @@ HlDbHandle *hl_db_registry_get(HlDbRegistry *reg, const char *name,
     s->owned = 1;
     reg->nslots++;
     return &s->handle;
+}
+
+const char *hl_db_registry_dsn_for(HlDbRegistry *reg, const HlDbHandle *h)
+{
+    if (!reg || !h) return NULL;
+    for (int i = 0; i < reg->nslots; i++)
+        if (reg->slots[i].open && &reg->slots[i].handle == h)
+            return reg->slots[i].dsn;
+    return NULL;
 }
 
 void hl_db_registry_destroy(HlDbRegistry *reg)
@@ -168,6 +188,7 @@ void hl_db_registry_destroy(HlDbRegistry *reg)
         if (s->open && s->owned && s->handle.backend)
             s->handle.backend->close(&s->handle);
         free(s->name);
+        free(s->dsn);
     }
     free(reg->default_dsn);
     free(reg);

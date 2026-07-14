@@ -250,10 +250,18 @@ Each phase was independently reviewable and mergeable.
   sites) are gated on `HL_ENABLE_SQLITE`; the `hl_db_sqlite_*` accessors have
   inline no-op fallbacks; `hl_cap_db_check_namespace` moved to `db_select.c`.
   CI's `flavors` matrix covers `postgres-only`.
-- **Named-connection `async` / `udf`.** The worker pool and the UDF path are
-  single-DSN (the `-d` / "default" connection), so `async` / `udf` live on
-  `db.default()` only. Per-name worker connections would let
-  `db.connect(name).async` target that connection.
+- ~~Named-connection `async` / `udf`.~~ **Done.**
+  The worker pool is now multi-DSN: each worker thread caches one connection
+  per distinct database DSN (`hl_worker_db_get_for`, keyed by resolved DSN, a
+  per-thread singly-linked list). The connection object's `async` sub-object
+  threads its DSN into the op via `hl_db_registry_dsn_for(handle)`; `udf`
+  registers on the bound connection's handle. Both runtimes: the Lua async/udf
+  functions are closures carrying the handle, the JS `async`/`udf` sub-objects
+  are `HullDbConnection` instances sharing the handle opaque. So
+  `db.connect(name).async.query(...)` hits that database and
+  `db.connect(name).udf.register(...)` lands on it (SQLite only). Coverage:
+  `tests/e2e_named_connections.sh` (SQLite, both runtimes) +
+  `tests/e2e_postgres.sh` (a named PG connection with a SQLite default).
 - **SMTP onto the shared `tls_client` helper.** `cap/smtp.c` still hand-rolls
   its own KlTls handshake + read/write; retrofitting it onto
   `shared/tls_client.c` (as Postgres uses) would delete the duplicate. It

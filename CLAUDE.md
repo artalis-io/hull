@@ -254,9 +254,15 @@ const cache = dbModule.connect("cache");
 The connection object carries `query` / `exec` / `batch` / `last_id` (`lastId`)
 / `insert_if_absent` (`insertIfAbsent`) / `upsert` / `table_columns`
 (`tableColumns`) / `backend_name` (`backendName`) / `autoincrement_id_ddl`
-(`autoincrementIdDdl`). `async` (`db.default().async.query/exec`) and `udf`
-live on the **default** connection only (the worker pool + UDF path are
-single-DSN today; named-connection async/udf is a tracked follow-up).
+(`autoincrementIdDdl`), plus `async` (`.async.query/exec`) and `udf`
+(`.udf.register/unregister`). `async` and `udf` are **per-connection**:
+`db.connect("cache").async.query(...)` opens the worker pool's own per-thread
+connection to that database (the worker cache is keyed by DSN), and
+`db.udf.register` lands on the connection it is called on. The worker resolves
+which database via the registry's DSN for the bound handle
+(`hl_db_registry_dsn_for`); a `udf` on a non-SQLite connection errors at call
+time (udf is SQLite-only). Covered by `tests/e2e_named_connections.sh` (both
+runtimes) and the cross-backend variant in `tests/e2e_postgres.sh`.
 
 **Named connections via the manifest.** Additional connections are declared in
 `manifest.databases`; the value is a literal DSN (a SQLite file path, no

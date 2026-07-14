@@ -618,7 +618,6 @@ static JSValue js_db_async_common(JSContext *ctx, JSValueConst this_val,
                                    int argc, JSValueConst *argv,
                                    HlWorkerDbKind kind)
 {
-    (void)this_val;
     HlJS *js = (HlJS *)JS_GetContextOpaque(ctx);
     if (!js || !js->base.thread_pool)
         return JS_ThrowInternalError(ctx,
@@ -681,6 +680,24 @@ static JSValue js_db_async_common(JSContext *ctx, JSValueConst this_val,
         }
     }
     js_free_hl_values(ctx, params, nparams);
+
+    /* Target the database this async call is bound to: db.connect(name).async
+     * hits that named connection's DSN; db.default().async resolves to the
+     * default. this_val is the connection object (async is a HullDbConnection
+     * sharing the same handle), so js_call_handle recovers the bound handle. A
+     * seeded connection with no known DSN yields NULL → worker default. */
+    {
+        const char *dsn = hl_db_registry_dsn_for(js->base.db_registry,
+                                                 js_call_handle(ctx, this_val));
+        if (dsn) {
+            op->dsn = strdup(dsn);
+            if (!op->dsn) {
+                hl_worker_db_op_free(op);
+                free(op);
+                return JS_ThrowInternalError(ctx, "db.async: out of memory");
+            }
+        }
+    }
 
     /* Create async ctx */
     HlAsyncCtx *actx = hl_async_ctx_create(js->server, js->base.net_ctx, js->base.alloc);
@@ -1042,9 +1059,9 @@ static void js_parse_udf_opts(JSContext *ctx, JSValueConst opts,
 static JSValue js_db_udf_register(JSContext *ctx, JSValueConst this_val,
                                    int argc, JSValueConst *argv)
 {
-    (void)this_val;
     HlJS *js = get_hl_js(ctx);
-    sqlite3 *raw_db = js ? hl_db_sqlite_raw(default_db(js)) : NULL;
+    HlDbHandle *conn = js_call_handle(ctx, this_val);
+    sqlite3 *raw_db = hl_db_sqlite_raw(conn);
     if (!js || !raw_db)
         return JS_ThrowInternalError(ctx, "database not available");
 
@@ -1096,7 +1113,7 @@ static JSValue js_db_udf_register(JSContext *ctx, JSValueConst this_val,
 
         const char *err_msg = NULL;
         int rc = hl_cap_db_udf_register_wasm(
-            default_db(js), js->base.wasm_cache, &udf_opts,
+            conn, js->base.wasm_cache, &udf_opts,
             js->base.app_vfs, js->app_dir,
             js->base.alloc, &err_msg);
 
@@ -1200,9 +1217,9 @@ static JSValue js_db_udf_register(JSContext *ctx, JSValueConst this_val,
 static JSValue js_db_udf_unregister(JSContext *ctx, JSValueConst this_val,
                                      int argc, JSValueConst *argv)
 {
-    (void)this_val;
     HlJS *js = get_hl_js(ctx);
-    if (!js || !default_db(js))
+    HlDbHandle *conn = js_call_handle(ctx, this_val);
+    if (!js || !conn)
         return JS_ThrowInternalError(ctx, "database not available");
 
     if (argc < 1)
@@ -1213,13 +1230,13 @@ static JSValue js_db_udf_unregister(JSContext *ctx, JSValueConst this_val,
         return JS_EXCEPTION;
 
 #ifdef HL_ENABLE_WASM
-    int rc_unreg = hl_cap_db_udf_unregister(default_db(js), sql_name);
+    int rc_unreg = hl_cap_db_udf_unregister(conn, sql_name);
     JS_FreeCString(ctx, sql_name);
     if (rc_unreg != 0)
         return JS_ThrowInternalError(ctx, "db.udf.unregister: failed");
     return JS_UNDEFINED;
 #else
-    sqlite3 *raw_db = hl_db_sqlite_raw(default_db(js));
+    sqlite3 *raw_db = hl_db_sqlite_raw(conn);
     if (!raw_db) {
         JS_FreeCString(ctx, sql_name);
         return JS_ThrowInternalError(ctx, "database not available");
@@ -1240,11 +1257,25 @@ static JSValue js_db_udf_unregister(JSContext *ctx, JSValueConst this_val,
 
 #endif /* HL_ENABLE_SQLITE (db.udf) */
 
+/* A sub-object (conn.async / conn.udf) that is itself a HullDbConnection
+ * carrying the SAME handle @p h, so a call on conn.async.* / conn.udf.*
+ * recovers the bound handle via js_call_handle(this_val) exactly like the sync
+ * methods. The class finalizer is a no-op (the handle is registry-owned), so
+ * sharing the opaque across the object + its sub-objects is safe. */
+static JSValue new_bound_subobject(JSContext *ctx, HlDbHandle *h)
+{
+    JSValue o = JS_NewObjectClass(ctx, (int)hull_db_conn_class_id);
+    if (JS_IsException(o)) return o;
+    JS_SetOpaque(o, h);
+    return o;
+}
+
 /* Build a connection object (HullDbConnection instance) carrying @p h as its
  * opaque. The sync methods are the same C functions the top-level bridge uses;
- * js_call_handle picks the bound handle over the runtime default. async / udf
- * stay on the top-level module for now (the worker layer is single-DSN). */
-static JSValue push_conn_object(JSContext *ctx, HlDbHandle *h, int is_default)
+ * js_call_handle picks the bound handle over the runtime default. async targets
+ * this connection's database via the worker pool's per-DSN connections; udf
+ * registers on this connection (SQLite only). */
+static JSValue push_conn_object(JSContext *ctx, HlDbHandle *h)
 {
     JSValue obj = JS_NewObjectClass(ctx, (int)hull_db_conn_class_id);
     if (JS_IsException(obj)) return obj;
@@ -1265,27 +1296,27 @@ static JSValue push_conn_object(JSContext *ctx, HlDbHandle *h, int is_default)
     JS_SetPropertyStr(ctx, obj, "tableColumns",
                       JS_NewCFunction(ctx, js_db_table_columns,
                                        "tableColumns", 1));
-    /* async / udf dispatch to the per-thread worker + the SQLite raw handle,
-     * both of which are the DEFAULT connection. Only the default connection
-     * object carries them; named connections get the sync surface only until
-     * per-connection workers land. */
-    if (is_default) {
-        JSValue async_obj = JS_NewObject(ctx);
-        JS_SetPropertyStr(ctx, async_obj, "query",
-                          JS_NewCFunction(ctx, js_db_async_query, "query", 2));
-        JS_SetPropertyStr(ctx, async_obj, "exec",
-                          JS_NewCFunction(ctx, js_db_async_exec, "exec", 2));
-        JS_SetPropertyStr(ctx, obj, "async", async_obj);
+    /* async targets this connection's database via the worker pool's per-DSN
+     * connections; udf registers on this connection's SQLite handle (a udf on
+     * a non-SQLite connection errors at call time). Both sub-objects share the
+     * bound handle, so a named connection is fully featured. */
+    JSValue async_obj = new_bound_subobject(ctx, h);
+    if (JS_IsException(async_obj)) { JS_FreeValue(ctx, obj); return async_obj; }
+    JS_SetPropertyStr(ctx, async_obj, "query",
+                      JS_NewCFunction(ctx, js_db_async_query, "query", 2));
+    JS_SetPropertyStr(ctx, async_obj, "exec",
+                      JS_NewCFunction(ctx, js_db_async_exec, "exec", 2));
+    JS_SetPropertyStr(ctx, obj, "async", async_obj);
 
 #ifdef HL_ENABLE_SQLITE
-        JSValue udf_obj = JS_NewObject(ctx);
-        JS_SetPropertyStr(ctx, udf_obj, "register",
-                          JS_NewCFunction(ctx, js_db_udf_register, "register", 3));
-        JS_SetPropertyStr(ctx, udf_obj, "unregister",
-                          JS_NewCFunction(ctx, js_db_udf_unregister, "unregister", 1));
-        JS_SetPropertyStr(ctx, obj, "udf", udf_obj);
+    JSValue udf_obj = new_bound_subobject(ctx, h);
+    if (JS_IsException(udf_obj)) { JS_FreeValue(ctx, obj); return udf_obj; }
+    JS_SetPropertyStr(ctx, udf_obj, "register",
+                      JS_NewCFunction(ctx, js_db_udf_register, "register", 3));
+    JS_SetPropertyStr(ctx, udf_obj, "unregister",
+                      JS_NewCFunction(ctx, js_db_udf_unregister, "unregister", 1));
+    JS_SetPropertyStr(ctx, obj, "udf", udf_obj);
 #endif
-    }
     const HlDbBackend *be = h ? h->backend : NULL;
     JS_SetPropertyStr(ctx, obj, "backendName",
                       JS_NewString(ctx, be ? be->name : "none"));
@@ -1304,7 +1335,7 @@ static JSValue js_db_default(JSContext *ctx, JSValueConst this_val,
 {
     (void)this_val; (void)argc; (void)argv;
     HlJS *js = (HlJS *)JS_GetContextOpaque(ctx);
-    return push_conn_object(ctx, js ? default_db(js) : NULL, 1);
+    return push_conn_object(ctx, js ? default_db(js) : NULL);
 }
 
 /* db.connect(name) → connection object for a manifest-declared database. */
@@ -1331,7 +1362,7 @@ static JSValue js_db_connect(JSContext *ctx, JSValueConst this_val,
         return e;
     }
     JS_FreeCString(ctx, name);
-    return push_conn_object(ctx, h, 0);
+    return push_conn_object(ctx, h);
 }
 
 /* ── Module init ─────────────────────────────────────────────────────── */
