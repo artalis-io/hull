@@ -2500,6 +2500,160 @@ runs.
 
 ---
 
+## 2. Multi-backend DB hardening + dynamic connections
+
+**Priority:** Medium-High. Direct successor to §1. §1 proved the `HlDbBackend`
+vtable with a second backend (PostgreSQL); this section removes the
+SQLite/PG-shaped assumptions that still leak through the abstraction so
+**MySQL, MariaDB, and DuckDB can land as first-class citizens** with minimal
+surgery, and adds the runtime connection flexibility the current
+declare-every-DSN-upfront model lacks.
+
+**Status:** planned (surfaced by a post-§1 API review, 2026-07-14). No target.
+
+**Context.** The vtable is the right core, and the stdlib is already mostly
+dialect-agnostic (it goes through `insert_if_absent` / `upsert` /
+`table_columns` / `autoincrement_id_ddl`). But six seams still hard-code
+SQLite/PG shape, and the connection model is deliberately conservative in a way
+that blocks a whole class of apps. Each task below notes what the future
+backends need.
+
+### 2.1 Backend-declared scheme routing (+ explicit `sqlite://` / `duckdb://`)
+
+`hl_db_backend_select` (`cap/db_select.c`) is a hard-coded if-else:
+`postgres://` / `postgresql://` → PG, **everything else → SQLite**. Two problems
+for the new backends:
+
+- Every backend edits the same function; there is no registration point.
+- **The `else → SQLite` default collides with DuckDB** — both are file /
+  `:memory:` based, so a bare path (`./data.db`, `:memory:`) is ambiguous once
+  DuckDB exists. MySQL and MariaDB additionally *share* the `mysql://` scheme.
+
+**Tasks:**
+- [ ] Add a `schemes` field to `HlDbBackend` (e.g. `const char *const *schemes`)
+      so each backend declares the DSN scheme(s) it claims; `hl_db_backend_select`
+      iterates the compiled-in backends instead of an if-else chain.
+- [ ] Introduce **explicit `sqlite://` and `duckdb://` schemes** (keep bare
+      paths defaulting to SQLite for back-compat when SQLite is compiled;
+      disambiguate to DuckDB only via `duckdb://` or a `.duckdb` extension
+      heuristic). Document the precedence.
+- [ ] Decide MySQL vs MariaDB disambiguation: one wire backend claiming
+      `mysql://` + `mariadb://`, or a server-handshake capability probe.
+
+### 2.2 Dynamic connections (`db.open(dsn)` + host-allowlist manifest opt-in)
+
+Today the **only** ways to reach a DB are `db.default()` (the `-d` DSN) and
+`db.connect("name")` (a name resolved from `manifest.databases`). There is **no
+`db.open(dsn)` for a runtime-computed DSN**, so an app that connects to
+arbitrary SQL endpoints on the fly (DB admin tool, multi-tenant SaaS with
+per-tenant DBs, a "connect to any Postgres" utility) can't be built. Unlike
+`http.fetch`, DB connections aren't gated by `manifest.hosts` at all — the sole
+gate is "which names the author enumerated."
+
+**The clean design mirrors HTTP's host allowlist:**
+
+- A manifest opt-in, e.g.
+  ```lua
+  databases = { dynamic = { hosts = { "*.rds.amazonaws.com", "10.0.0.0/8" }, schemes = { "postgres" } } }
+  ```
+- plus a runtime `db.open(dsn)` that validates the DSN's host+scheme against
+  that allowlist before connecting. Credentials ride in the app-provided DSN
+  (the app's responsibility), the reachable surface stays bounded.
+- Tradeoffs to decide: whether to allow `"*"` (any host — a real "connect
+  anywhere" tool, opt-in and loud), connection-count/lifetime caps for pooling,
+  and whether dynamic connections get `async`/`udf` (the worker pool is keyed by
+  DSN, so async already generalizes — §1's multi-DSN work makes it nearly free).
+
+**Tasks:**
+- [ ] `manifest.databases.dynamic = { hosts = [...], schemes = [...] }` parsing
+      (both runtimes) + sealing.
+- [ ] `db.open(dsn)` runtime API: parse DSN, validate host (glob/CIDR) + scheme
+      against the dynamic allowlist, open through the registry (unnamed /
+      caller-owned handle), fail closed on a miss.
+- [ ] Connection-count + idle-lifetime caps so a dynamic-connection app can't
+      exhaust fds; document the pooling semantics.
+- [ ] Decide + wire `async` / `udf` availability on dynamic handles.
+
+### 2.3 Split the abstract interface from concrete backends (+ generic native-handle accessor)
+
+`include/hull/cap/db_backend.h` (the abstract vtable) also declares
+`hl_db_backend_sqlite` / `_postgres` **and** SQLite-specific escape hatches
+(`hl_db_sqlite_raw` / `_cache` / `_wrap` / `_unwrap`). Adding DuckDB/MySQL means
+more `#ifdef … extern const …` plus, for anything needing the native handle
+(udf, agent introspection), a new `hl_db_<x>_raw` per backend.
+
+**Tasks:**
+- [ ] Move backend `extern const` decls + registration out of the abstract
+      header (e.g. an internal `db_backends.h` / a registration array), leaving
+      `db_backend.h` as the pure interface.
+- [ ] Replace the per-backend raw accessors with a generic
+      `hl_db_backend_native_handle(h, &tag)` (returns `void*` + a backend tag)
+      so udf / agent-introspection paths don't grow a case per backend.
+
+### 2.4 Dialect surface: identifier quoting + capability flags
+
+The dialect helpers are one-off methods added as the stdlib needed them, and
+**identifier quoting is missing**: SQLite/PG/DuckDB quote with `"x"`, **MySQL
+uses `` `x` ``**. The stdlib currently relies on validated bare identifiers,
+which breaks for MySQL reserved words used as table/column names.
+
+**Tasks:**
+- [ ] Add `quote_identifier(name)` to the vtable (or a `identifier_quote` char +
+      shared quoting helper).
+- [ ] Consider a small capability/dialect struct (booleans/tokens for
+      `RETURNING` support, boolean literal form, `LIMIT`/`OFFSET` shape) rather
+      than growing one-off vtable methods per future need.
+
+### 2.5 `udf` capability gating / introspection
+
+`db.udf` is exposed on **every** connection object but is SQLite-only (errors at
+call time elsewhere). DuckDB has UDFs (different API); MySQL has none. "Method
+present but fails" is an orthogonality wart.
+
+**Tasks:**
+- [ ] Gate the `udf` sub-object on a backend capability flag (absent when the
+      backend has no UDF support), OR add `conn.supports("udf")` introspection so
+      it isn't a surprise-at-call-time. Decide which after the DuckDB UDF shape
+      is known.
+
+### 2.6 `autoincrement_id_ddl` app-facing reconsideration
+
+`autoincrement_id_ddl` leaks a raw dialect DDL fragment (`"INTEGER PRIMARY KEY"`
+/ `"BIGSERIAL PRIMARY KEY"`) into the app-facing connection object. Apps
+interpolating dialect DDL is a half-abstraction; portable schemas really belong
+in migrations.
+
+**Tasks:**
+- [ ] Decide whether `autoincrement_id_ddl` stays app-facing or becomes
+      stdlib/migration-internal only; if it stays, document it as an escape
+      hatch, not the recommended path.
+
+### 2.7 Structural cleanups
+
+- [ ] `cap/db.c` (SQLite stmt-cache engine) vs `cap/db_sqlite.c` (vtable
+      adapter) is a historical two-file split; `db_postgres.c` is self-contained
+      by contrast. Fold into one self-contained SQLite backend TU (do this while
+      touching §2.3 so the layering is consistent for MySQL/DuckDB).
+- [ ] `hl_cap_db_check_namespace` (the `_hull_*` guard) lives in `db_select.c`,
+      an odd home (it's not backend selection). Move to a `cap/db_common.c` or
+      similar shared TU.
+
+### Backend-onboarding checklist (what each new backend needs)
+
+A new backend after §2 should be: one self-contained `cap/db_<x>.c` implementing
+the vtable (incl. `quote_identifier`), a `schemes` declaration, native-handle
+tag if it has udf/introspection, DSN parse + `sslmode`/auth as applicable, and a
+CI flavor + e2e. **MySQL/MariaDB:** pure-C wire client (like pgwire) or vendored
+libmariadb; `mysql://`; backtick quoting; `AUTO_INCREMENT` + `LAST_INSERT_ID()`;
+`ON DUPLICATE KEY UPDATE` upsert; `caching_sha2_password` / `mysql_native_password`
+auth. **DuckDB:** embedded (vendored amalgamation, like SQLite); `duckdb://` /
+`.duckdb`; columnar, rich types (decode to text for v1); its own UDF C API.
+
+**Out of scope:** cross-backend transactions (no XA / two-phase commit, same as
+§1); a generic ORM / query builder (Hull stays SQL-first).
+
+---
+
 ## 2. `hull tools install`. Side-loaded optional tools  ✅ Shipped (v0.1.2)
 
 **Design:** [`tools_install.md`](tools_install.md). What landed:
