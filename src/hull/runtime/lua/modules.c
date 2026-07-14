@@ -65,7 +65,7 @@ int hl_lua_register_modules(HlLua *lua)
      * the gate in hl_lua_require enforces the resolved module set. */
 
 #ifdef HL_ENABLE_DB
-    if (lua->base.db_handle)
+    if (lua->base.db_registry)
         register_native_module(L, "hull.db", luaopen_hull_db);
 #endif
     register_native_module(L, "hull.time",   luaopen_hull_time);

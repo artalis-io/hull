@@ -29,10 +29,9 @@ static int lua_create(HlRuntime **out, const HlAppContextOpts *opts,
     if (!lua) return -1;
 
     /* Copy base config into rt->base BEFORE init: hl_lua_init reads
-     * db_handle (for worker_db wiring), alloc (custom Lua allocator),
+     * db_registry (for the db module), alloc (custom Lua allocator),
      * etc. during module registration. */
     if (base) {
-        lua->base.db_handle      = base->db_handle;
         lua->base.db_registry    = base->db_registry;
         lua->base.alloc          = base->alloc;
         lua->base.app_vfs        = base->app_vfs;

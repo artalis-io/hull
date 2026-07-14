@@ -14,6 +14,7 @@
 #include "hull/shared/async_backend.h"
 #include "hull/cap/db.h"
 #include "hull/cap/db_backend.h"
+#include "hull/cap/db_registry.h"
 
 #include "lua.h"
 #include "lualib.h"
@@ -105,7 +106,7 @@ void hl_lua_timer_trampoline(void *user_data)
 
     /* Reset scratch arena + guard stale txn */
     sh_arena_reset(lua->scratch);
-    hl_db_guard_stale_txn(lua->base.db_handle);
+    hl_db_guard_stale_txn(hl_db_registry_default(lua->base.db_registry));
 
     assert(lua->dispatch_depth == 0 && "timer fired during active dispatch");
     lua->dispatch_depth++;

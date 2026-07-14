@@ -23,7 +23,7 @@ UTEST(db_registry, seed_and_get_default)
     def.backend = &hl_db_backend_sqlite;
     ASSERT_EQ(0, hl_db_backend_sqlite.open(&def.ctx, ":memory:", NULL));
 
-    HlDbRegistry *reg = hl_db_registry_create(NULL, NULL);
+    HlDbRegistry *reg = hl_db_registry_create(NULL, NULL, NULL);
     ASSERT_TRUE(reg != NULL);
     ASSERT_EQ(0, hl_db_registry_seed(reg, "default", &def));
 
@@ -48,7 +48,7 @@ UTEST(db_registry, manifest_lazy_open_and_cache)
     m.databases[0].dsn_is_env = 0;
     m.databases_count = 1;
 
-    HlDbRegistry *reg = hl_db_registry_create(&m, NULL);
+    HlDbRegistry *reg = hl_db_registry_create(&m, NULL, NULL);
     ASSERT_TRUE(reg != NULL);
 
     const char *err = NULL;
@@ -76,7 +76,7 @@ UTEST(db_registry, dsn_env_resolves)
     m.databases[0].dsn_is_env = 1;
     m.databases_count = 1;
 
-    HlDbRegistry *reg = hl_db_registry_create(&m, NULL);
+    HlDbRegistry *reg = hl_db_registry_create(&m, NULL, NULL);
     const char *err = NULL;
     HlDbHandle *h = hl_db_registry_get(reg, "primary", &err);
     ASSERT_TRUE(h != NULL);
@@ -97,7 +97,7 @@ UTEST(db_registry, dsn_env_unset_errors)
     m.databases[0].dsn_is_env = 1;
     m.databases_count = 1;
 
-    HlDbRegistry *reg = hl_db_registry_create(&m, NULL);
+    HlDbRegistry *reg = hl_db_registry_create(&m, NULL, NULL);
     const char *err = NULL;
     HlDbHandle *h = hl_db_registry_get(reg, "primary", &err);
     ASSERT_TRUE(h == NULL);
@@ -111,12 +111,32 @@ UTEST(db_registry, dsn_env_unset_errors)
 UTEST(db_registry, unknown_name_errors)
 {
     HlManifest m = {0};   /* no databases */
-    HlDbRegistry *reg = hl_db_registry_create(&m, NULL);
+    HlDbRegistry *reg = hl_db_registry_create(&m, NULL, NULL);
     const char *err = NULL;
     HlDbHandle *h = hl_db_registry_get(reg, "nope", &err);
     ASSERT_TRUE(h == NULL);
     ASSERT_TRUE(err != NULL);
     hl_db_registry_destroy(reg);
+}
+
+/* "default" falls back to the create-time default_dsn (the -d flag), and the
+ * fast accessor returns the same open handle. */
+UTEST(db_registry, default_dsn_and_accessor)
+{
+    HlDbRegistry *reg = hl_db_registry_create(NULL, ":memory:", NULL);
+    ASSERT_TRUE(reg != NULL);
+    /* Before first get, the accessor sees nothing open. */
+    ASSERT_TRUE(hl_db_registry_default(reg) == NULL);
+
+    const char *err = NULL;
+    HlDbHandle *h = hl_db_registry_get(reg, "default", &err);
+    ASSERT_TRUE(h != NULL);
+    ASSERT_TRUE(err == NULL);
+    ASSERT_STREQ(h->backend->name, "sqlite");
+    /* The accessor now returns the cached default (same pointer). */
+    ASSERT_EQ(hl_db_registry_default(reg), h);
+
+    hl_db_registry_destroy(reg);   /* owns + closes the default */
 }
 
 UTEST_MAIN()

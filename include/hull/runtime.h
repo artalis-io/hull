@@ -145,11 +145,11 @@ typedef struct HlRuntimeVtable {
 
 struct HlRuntime {
     const HlRuntimeVtable *vt;
-    HlDbHandle   *db_handle;      /* the "default" connection (fast-path pointer;
-                                   * also registry.get("default")). Internal-table
-                                   * access is gated by a caller check, not a
-                                   * separate handle. */
-    HlDbRegistry *db_registry;    /* named connections (db.connect/default); may be NULL */
+    HlDbRegistry *db_registry;    /* owns all DB connections, incl. "default".
+                                   * Resolve the default via
+                                   * hl_db_registry_default(); there is no
+                                   * separate default-handle field. NULL under
+                                   * --no-db / pure-compute builds. */
     HlAllocator  *alloc;
     HlFsConfig   *fs_cfg;
     HlEnvConfig  *env_cfg;

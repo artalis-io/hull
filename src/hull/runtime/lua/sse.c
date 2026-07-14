@@ -12,6 +12,7 @@
 
 #include "hull/cap/db.h"
 #include "hull/cap/db_backend.h"
+#include "hull/cap/db_registry.h"
 
 #include "mod_buffer.h"
 
@@ -40,7 +41,7 @@ void hl_lua_sse_handler(KlRequest *req, KlResponse *res,
     lua->dispatch_depth++;
 
     /* Guard stale transactions */
-    hl_db_guard_stale_txn(lua->base.db_handle);
+    hl_db_guard_stale_txn(hl_db_registry_default(lua->base.db_registry));
 
     /* Re-arm instruction limit */
     if (lua->max_instructions > 0)

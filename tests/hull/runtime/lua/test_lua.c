@@ -26,6 +26,7 @@
 #include "hull/vfs.h"
 #include "hull/cap/db.h"
 #include "hull/cap/db_backend.h"
+#include "hull/cap/db_registry.h"
 #include "hull/cap/env.h"
 
 #include "lua.h"
@@ -111,6 +112,7 @@ static void free_lua_req_ctx(KlRequest *req)
 /* Init lua with database and env capabilities for testing */
 static sqlite3 *test_db = NULL;
 static HlDbHandle test_db_handle;
+static HlDbRegistry *test_db_registry;
 static const char *env_allowed[] = { "HULL_TEST_VAR", NULL };
 static HlEnvConfig env_cfg = { .allowed = env_allowed, .count = 1 };
 
@@ -120,6 +122,10 @@ static void init_lua_with_caps(void)
     hl_vfs_init(&platform_vfs, hl_stdlib_entries, NULL);
     if (lua_initialized)
         hl_lua_free(&lua_rt);
+    if (test_db_registry) {
+        hl_db_registry_destroy(test_db_registry);
+        test_db_registry = NULL;
+    }
     if (test_db_handle.ctx) {
         hl_db_backend_sqlite.close(&test_db_handle);
         test_db_handle.ctx = NULL;
@@ -130,9 +136,14 @@ static void init_lua_with_caps(void)
     if (hl_db_backend_sqlite.open(&test_db_handle.ctx, ":memory:", NULL) != 0)
         return;
     test_db = hl_db_sqlite_raw(&test_db_handle);
+    /* Wrap the test connection as the registry's "default" (seeded, so the
+     * registry does not own/close it; this harness does). */
+    test_db_registry = hl_db_registry_create(NULL, NULL, NULL);
+    if (test_db_registry)
+        hl_db_registry_seed(test_db_registry, "default", &test_db_handle);
     HlLuaConfig cfg = HL_LUA_CONFIG_DEFAULT;
     memset(&lua_rt, 0, sizeof(lua_rt));
-    lua_rt.base.db_handle = &test_db_handle;
+    lua_rt.base.db_registry = test_db_registry;
     lua_rt.base.env_cfg = &env_cfg;
     lua_rt.base.platform_vfs = &platform_vfs;
     int rc = hl_lua_init(&lua_rt, &cfg);
@@ -145,6 +156,10 @@ static void cleanup_lua_caps(void)
     if (lua_initialized) {
         hl_lua_free(&lua_rt);
         lua_initialized = 0;
+    }
+    if (test_db_registry) {
+        hl_db_registry_destroy(test_db_registry);
+        test_db_registry = NULL;
     }
     if (test_db_handle.ctx) {
         hl_db_backend_sqlite.close(&test_db_handle);

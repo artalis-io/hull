@@ -210,7 +210,7 @@ app.manifest({
     hosts = {"127.0.0.1"},
 })
 
-local db = require("hull.db")
+local db = require("hull.db").default()
 
 app.get("/", function(_req, res)
     local rows = db.query("SELECT name FROM users ORDER BY name")

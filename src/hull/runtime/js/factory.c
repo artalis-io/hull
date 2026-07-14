@@ -29,7 +29,6 @@ static int js_create(HlRuntime **out, const HlAppContextOpts *opts,
 
     /* Copy base config into rt->base BEFORE init (parallel to Lua side). */
     if (base) {
-        js->base.db_handle      = base->db_handle;
         js->base.db_registry    = base->db_registry;
         js->base.alloc          = base->alloc;
         js->base.app_vfs        = base->app_vfs;

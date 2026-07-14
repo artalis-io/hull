@@ -27,20 +27,38 @@ typedef struct {
 } RegSlot;
 
 struct HlDbRegistry {
-    const HlManifest *manifest;   /* borrowed */
-    HlAllocator      *alloc;      /* borrowed */
+    const HlManifest *manifest;    /* borrowed */
+    HlAllocator      *alloc;       /* borrowed */
+    char             *default_dsn; /* owned; the -d flag DSN for "default" */
     RegSlot           slots[HL_DB_REGISTRY_MAX];
     int               nslots;
 };
 
 HlDbRegistry *hl_db_registry_create(const HlManifest *manifest,
+                                    const char *default_dsn,
                                     HlAllocator *alloc)
 {
     HlDbRegistry *r = calloc(1, sizeof *r);
     if (!r) return NULL;
     r->manifest = manifest;
     r->alloc = alloc;
+    if (default_dsn && default_dsn[0]) {
+        r->default_dsn = strdup(default_dsn);
+        if (!r->default_dsn) { free(r); return NULL; }
+    }
     return r;
+}
+
+/* Fast accessor for the already-open "default" connection (opened at startup
+ * for migrations, so it is cached). Returns NULL if absent. No open, no error
+ * path: this is the per-request hot path used by the stale-txn guards. */
+HlDbHandle *hl_db_registry_default(HlDbRegistry *reg)
+{
+    if (!reg) return NULL;
+    for (int i = 0; i < reg->nslots; i++)
+        if (reg->slots[i].open && strcmp(reg->slots[i].name, "default") == 0)
+            return &reg->slots[i].handle;
+    return NULL;
 }
 
 void hl_db_registry_set_manifest(HlDbRegistry *reg, const HlManifest *manifest)
@@ -107,6 +125,11 @@ HlDbHandle *hl_db_registry_get(HlDbRegistry *reg, const char *name,
 
     const char *derr = NULL;
     const char *dsn = resolve_manifest_dsn(reg, name, &derr);
+    /* "default" falls back to the -d flag DSN when the manifest declares no
+     * entry for it (derr stays NULL for a plain miss; a set derr, e.g. an
+     * unset dsn_env, is a real error we must surface). */
+    if (!dsn && !derr && reg->default_dsn && strcmp(name, "default") == 0)
+        dsn = reg->default_dsn;
     if (!dsn) {
         if (err) *err = derr ? derr
                              : "unknown database name (not in manifest.databases)";
@@ -146,6 +169,7 @@ void hl_db_registry_destroy(HlDbRegistry *reg)
             s->handle.backend->close(&s->handle);
         free(s->name);
     }
+    free(reg->default_dsn);
     free(reg);
 }
 

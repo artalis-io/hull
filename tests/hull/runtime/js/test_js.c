@@ -27,6 +27,7 @@
 #include "hull/vfs.h"
 #include "hull/cap/db.h"
 #include "hull/cap/db_backend.h"
+#include "hull/cap/db_registry.h"
 #include "hull/cap/env.h"
 #include "quickjs.h"
 
@@ -131,6 +132,7 @@ static void free_req_ctx(KlRequest *req)
 /* Init JS with database and env capabilities for testing */
 static sqlite3 *test_db = NULL;
 static HlDbHandle test_db_handle;
+static HlDbRegistry *test_db_registry;
 static const char *env_allowed[] = { "HULL_TEST_VAR", NULL };
 static HlEnvConfig env_cfg = { .allowed = env_allowed, .count = 1 };
 
@@ -140,6 +142,10 @@ static void init_js_with_caps(void)
     hl_vfs_init(&platform_vfs, hl_stdlib_entries, NULL);
     if (js_initialized)
         hl_js_free(&js);
+    if (test_db_registry) {
+        hl_db_registry_destroy(test_db_registry);
+        test_db_registry = NULL;
+    }
     if (test_db_handle.ctx) {
         hl_db_backend_sqlite.close(&test_db_handle);
         test_db_handle.ctx = NULL;
@@ -150,9 +156,14 @@ static void init_js_with_caps(void)
     if (hl_db_backend_sqlite.open(&test_db_handle.ctx, ":memory:", NULL) != 0)
         return;
     test_db = hl_db_sqlite_raw(&test_db_handle);
+    /* Wrap the test connection as the registry's "default" (seeded, so the
+     * registry does not own/close it; this harness does). */
+    test_db_registry = hl_db_registry_create(NULL, NULL, NULL);
+    if (test_db_registry)
+        hl_db_registry_seed(test_db_registry, "default", &test_db_handle);
     HlJSConfig cfg = HL_JS_CONFIG_DEFAULT;
     memset(&js, 0, sizeof(js));
-    js.base.db_handle = &test_db_handle;
+    js.base.db_registry = test_db_registry;
     js.base.env_cfg = &env_cfg;
     js.base.platform_vfs = &platform_vfs;
     int rc = hl_js_init(&js, &cfg);
@@ -165,6 +176,10 @@ static void cleanup_js_caps(void)
     if (js_initialized) {
         hl_js_free(&js);
         js_initialized = 0;
+    }
+    if (test_db_registry) {
+        hl_db_registry_destroy(test_db_registry);
+        test_db_registry = NULL;
     }
     if (test_db_handle.ctx) {
         hl_db_backend_sqlite.close(&test_db_handle);

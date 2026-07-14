@@ -16,6 +16,7 @@
 #include "hull/utils/alloc.h"
 #include "hull/cap/db.h"
 #include "hull/cap/db_backend.h"
+#include "hull/cap/db_registry.h"
 
 #include <keel/keel.h>
 
@@ -46,7 +47,7 @@ int hl_js_dispatch(HlJS *js, int handler_id,
     js->dispatch_depth++;
 
     /* Guard: roll back any stale transaction left by a crashed handler */
-    hl_db_guard_stale_txn(js->base.db_handle);
+    hl_db_guard_stale_txn(hl_db_registry_default(js->base.db_registry));
 
     hl_js_reset_request(js);
 
@@ -174,7 +175,7 @@ int hl_js_dispatch_middleware(HlJS *js, int handler_id,
         return -1;
 
     /* Guard: roll back any stale transaction left by a crashed handler */
-    hl_db_guard_stale_txn(js->base.db_handle);
+    hl_db_guard_stale_txn(hl_db_registry_default(js->base.db_registry));
 
     hl_js_reset_request(js);
 

@@ -53,10 +53,9 @@ typedef struct HlJS HlJS;
 
 struct HlAppContext {
 #ifdef HL_ENABLE_DB
-    HlDbHandle     db_handle;     /* vtable-based DB handle */
-    sqlite3       *db;            /* raw sqlite3* for migrate/agent (from handle) */
+    sqlite3       *db;            /* raw sqlite3* for agent (from the default conn) */
     int            db_open;       /* 1 = db was opened */
-    HlDbRegistry  *db_registry;   /* named connections; "default" seeded from db_handle */
+    HlDbRegistry  *db_registry;   /* owns all connections, incl. the "default" */
 #endif
     HlVfs          app_vfs;
     HlVfs          platform_vfs;
@@ -167,32 +166,30 @@ int hl_app_context_init(HlAppContext **out, const HlAppContextOpts *opts)
 #ifdef HL_ENABLE_DB
     if (!opts->no_db) {
         const char *db_path = opts->db_path ? opts->db_path : ":memory:";
-        const char *db_err = NULL;
-        const HlDbBackend *be = hl_db_backend_select(db_path, &db_err);
-        if (!be) {
-            fprintf(stderr, "hull: %s\n",
-                    db_err ? db_err : "no database backend");
+        /* The registry owns every connection, including the default (the -d
+         * flag DSN). db.default(), migrations, and the per-request stale-txn
+         * guards all resolve it via the registry; there is no separate default
+         * handle. The databases map isn't known until app.manifest() runs, so
+         * the serve path injects the sealed manifest later via
+         * hl_db_registry_set_manifest (named db.connect() then resolves too). */
+        ctx->db_registry = hl_db_registry_create(NULL, db_path, opts->alloc);
+        if (!ctx->db_registry) {
+            fprintf(stderr, "hull: out of memory (db registry)\n");
             free(ctx);
             return -1;
         }
-        ctx->db_handle.backend = be;
-        if (be->open(&ctx->db_handle.ctx, db_path, opts->alloc) != 0) {
+        const char *derr = NULL;
+        HlDbHandle *def = hl_db_registry_get(ctx->db_registry, "default", &derr);
+        if (!def) {
+            fprintf(stderr, "hull: %s\n", derr ? derr : "cannot open database");
+            hl_db_registry_destroy(ctx->db_registry);
+            ctx->db_registry = NULL;
             free(ctx);
             return -1;
         }
         ctx->db_open = 1;
         /* NULL under a non-SQLite backend; raw-pointer consumers guard it. */
-        ctx->db = hl_db_sqlite_raw(&ctx->db_handle);
-
-        /* Named-connection registry: created here with the default connection
-         * seeded so db.default() works immediately. The databases map isn't
-         * known until the app runs app.manifest(), so the serve path injects
-         * the sealed manifest later via hl_db_registry_set_manifest. Registry
-         * creation failure is non-fatal: db.default() still works off the
-         * seeded handle; only named db.connect() lookups would be unavailable. */
-        ctx->db_registry = hl_db_registry_create(NULL, opts->alloc);
-        if (ctx->db_registry)
-            hl_db_registry_seed(ctx->db_registry, "default", &ctx->db_handle);
+        ctx->db = hl_db_sqlite_raw(def);
     }
 #endif
 
@@ -205,7 +202,8 @@ int hl_app_context_init(HlAppContext **out, const HlAppContextOpts *opts)
 #ifdef HL_ENABLE_DB
     /* Run migrations (fail on error to prevent starting with broken schema) */
     if (!opts->no_migrate && ctx->db_open) {
-        int migrated = hl_migrate_run(&ctx->db_handle, &ctx->app_vfs);
+        int migrated = hl_migrate_run(hl_db_registry_default(ctx->db_registry),
+                                      &ctx->app_vfs);
         if (migrated == HL_MIGRATE_ERR) {
             hl_app_context_free(ctx);
             return -1;
@@ -228,7 +226,6 @@ int hl_app_context_init(HlAppContext **out, const HlAppContextOpts *opts)
     HlRuntimeBaseConfig base = {0};
 #ifdef HL_ENABLE_DB
     if (ctx->db_open) {
-        base.db_handle      = &ctx->db_handle;
         base.db_registry    = ctx->db_registry;
     }
 #endif
@@ -334,16 +331,12 @@ void hl_app_context_free(HlAppContext *ctx)
 #endif
 
 #ifdef HL_ENABLE_DB
-    /* Destroy the registry first: it may own lazily-opened named connections.
-     * The seeded "default" is not-owned, so this does NOT close db_handle. */
+    /* The registry owns every connection, including the "default"; destroying
+     * it closes them all. ctx->db aliased the default's raw sqlite3*, so it
+     * dangles after this. */
     if (ctx->db_registry) {
         hl_db_registry_destroy(ctx->db_registry);
         ctx->db_registry = NULL;
-    }
-    if (ctx->db_open) {
-        ctx->db_handle.backend->close(&ctx->db_handle);
-        ctx->db_handle.ctx = NULL;
-        ctx->db = NULL;
     }
     ctx->db = NULL;
     ctx->db_open = 0;
@@ -370,8 +363,7 @@ struct sqlite3 *hl_app_context_db(HlAppContext *ctx)
 HlDbHandle *hl_app_context_db_handle(HlAppContext *ctx)
 {
 #ifdef HL_ENABLE_DB
-    if (!ctx || !ctx->db_handle.backend) return NULL;
-    return &ctx->db_handle;
+    return ctx ? hl_db_registry_default(ctx->db_registry) : NULL;
 #else
     (void)ctx;
     return NULL;
@@ -396,7 +388,8 @@ const HlVfs *hl_app_context_platform_vfs(HlAppContext *ctx)
 HlStmtCache *hl_app_context_stmt_cache(HlAppContext *ctx)
 {
 #ifdef HL_ENABLE_DB
-    return ctx ? hl_db_sqlite_cache(&ctx->db_handle) : NULL;
+    return ctx ? hl_db_sqlite_cache(hl_db_registry_default(ctx->db_registry))
+               : NULL;
 #else
     (void)ctx;
     return NULL;

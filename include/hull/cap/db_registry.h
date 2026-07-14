@@ -31,7 +31,25 @@ typedef struct HlDbRegistry HlDbRegistry;
  * (may be NULL for raw malloc). Returns NULL on allocation failure.
  */
 HlDbRegistry *hl_db_registry_create(const HlManifest *manifest,
+                                    const char *default_dsn,
                                     HlAllocator *alloc);
+
+/*
+ * Fast accessor for the already-open "default" connection (the -d flag DSN,
+ * opened at startup so it is cached). Returns NULL if absent (compute-only /
+ * --no-db). No open, no error path: this is the per-request hot path used by
+ * the stale-transaction guards.
+ *
+ * The per-request guard sites call this unconditionally, so a pure-compute
+ * build (no registry compiled in) gets an inline no-op instead of an
+ * undefined symbol.
+ */
+#ifdef HL_ENABLE_DB
+HlDbHandle *hl_db_registry_default(HlDbRegistry *reg);
+#else
+static inline HlDbHandle *hl_db_registry_default(HlDbRegistry *reg)
+{ (void)reg; return (HlDbHandle *)0; }
+#endif
 
 /*
  * Point the registry at the app's databases map. The manifest is only known

@@ -16,6 +16,7 @@
 #include "hull/utils/alloc.h"
 #include "hull/cap/db.h"
 #include "hull/cap/db_backend.h"
+#include "hull/cap/db_registry.h"
 
 #include <keel/keel.h>
 
@@ -107,7 +108,7 @@ void hl_js_timer_trampoline(void *user_data)
 
     /* Reset scratch arena + guard stale txn */
     sh_arena_reset(js->scratch);
-    hl_db_guard_stale_txn(js->base.db_handle);
+    hl_db_guard_stale_txn(hl_db_registry_default(js->base.db_registry));
 
     assert(js->dispatch_depth == 0 && "timer fired during active dispatch");
     js->dispatch_depth++;
