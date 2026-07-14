@@ -427,8 +427,12 @@ not implementation cost.
 **Priority:** Medium-High. First non-SQLite backend; validates the DB-vtable
 abstraction that already powers `HL_ENABLE_DB=0` compute-only builds.
 
-**Status:** design approved 2026-07-13, implementation not started. Full
-design in [postgres_backend_design.md](postgres_backend_design.md).
+**Status:** ✅ **SHIPPED** 2026-07-14 (merged to `main` via PR #63). All six
+phases plus the three tracked follow-ups (postgres-only link-clean,
+per-connection `async`/`udf`, SMTP retrofit onto the shared TLS client) are
+done and CI-green (real-Postgres e2e, three pg fuzzers, `sqlite + postgres` and
+`postgres-only` link flavors). Full design in
+[postgres_backend_design.md](postgres_backend_design.md).
 
 **Approach (approved):**
 
@@ -456,12 +460,16 @@ design in [postgres_backend_design.md](postgres_backend_design.md).
 
 **Tasks (phased; see design doc):**
 
-- [ ] Phase 1: flag split + `HL_ENABLE_DB` umbrella + `hl_db_backend_select` (no behavior change)
-- [ ] Phase 2: `cap/pgwire.c` + `cap/db_postgres.c` (plaintext + md5), unit + fuzz harness
-- [ ] Phase 3: TLS (mbedTLS + CA bundle + `sslmode`) + SCRAM-SHA-256
-- [ ] Phase 4: per-worker connections + `db.async.*` on Postgres
-- [ ] Phase 5: vtable-driven migration runner + `_hull_*` tables green on Postgres
-- [ ] Phase 6: CI (docker Postgres e2e + `test_db_backend` parity + `flavors` link check) + docs
+- [x] Phase 1: flag split + `HL_ENABLE_DB` umbrella + `hl_db_backend_select` (no behavior change)
+- [x] Phase 2: `cap/pgwire.c` + `cap/db_postgres.c` (plaintext + md5), unit + fuzz harness
+- [x] Phase 3: TLS (mbedTLS + CA bundle + `sslmode`) + SCRAM-SHA-256
+- [x] Phase 4: per-worker connections + `db.async.*` on Postgres
+- [x] Phase 5: vtable-driven migration runner + `_hull_*` tables green on Postgres
+- [x] Phase 6: CI (docker Postgres e2e + `test_db_backend` parity + `flavors` link check) + docs
+- [x] Follow-up: postgres-only (`HL_ENABLE_SQLITE=0`) link-clean + CI flavor
+- [x] Follow-up: per-connection `db.async` / `db.udf` (multi-DSN worker pool)
+- [x] Follow-up: SMTP retrofitted onto the shared `tls_client` handshake
+- [x] Follow-up: multi-backend handles-only API (`db.default()` / `db.connect(name)`, registry-owned connections; top-level `db.*` bridge removed)
 
 **Out of scope:** transactions across SQLite + Postgres (no XA / two-phase
 commit). Apps that mix both must accept eventual consistency.

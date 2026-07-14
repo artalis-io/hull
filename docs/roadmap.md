@@ -13,7 +13,7 @@
 ### Capabilities (C enforcement layer)
 - **Crypto:** SHA-256 (with SHA-NI runtime dispatch on Linux/Cosmo arm64 + x86_64), SHA-512, SHA-1, incremental SHA-256 hasher, HMAC-SHA256, HMAC-SHA512/256, HMAC-SHA1 (HOTP/TOTP), PBKDF2, base64url, random bytes, password hash/verify, Ed25519 (sign/verify/keypair), XSalsa20+Poly1305 secretbox, Curve25519 box, **asymmetric verify (RS256/384/512, PS256, ES256/384)** via mbedTLS, x509 → SPKI PEM extraction. HMAC backend behind a vtable (`HlHmacBackend`).
 - **Filesystem:** Sandboxed read/write/exists/delete/mmap with path traversal rejection, symlink escape prevention via realpath
-- **Database:** Query/exec with parameterized binding, batch transactions, statement cache, user-defined functions (Lua/JS/WASM). SQL dialect helpers behind `HlDbBackend` vtable (SQLite shipped; PostgreSQL backend planned).
+- **Database:** Query/exec with parameterized binding, batch transactions, statement cache, user-defined functions (Lua/JS/WASM). SQL dialect helpers behind `HlDbBackend` vtable (SQLite + PostgreSQL shipped; MySQL/MariaDB/DuckDB planned).
 - **Blob storage:** Content-addressed blob store (`hl_blob_store_*`). Per-blob hard-link layout (free dedup), streaming writers + readers. Powers `hull/attachment@1`, runtime bytecode + template caches, compute AOT cache, signed tools install. CLI: `hull cache list|prune|clear|verify`; per-app isolation via `HULL_CACHE_DIR`.
 - **MIME sniffer:** Magic-bytes + extension fallback (`cap/mime.c`).
 - **HTTP client:** Outbound HTTP/HTTPS with host allowlist enforcement (mbedTLS), connection pooling, redirect following, async
@@ -1119,7 +1119,7 @@ Outputs:
 | Compression (gzip) | **Done** | Keel-integrated response compression via miniz |
 | Connection pooling | **Done** | Outbound HTTP reuses TCP+TLS connections (32 pool, 4 per host, 60s idle) |
 | ETag support | **Done** | `hull.web.middleware.etag`. Compute + compare + 304 Not Modified |
-| PostgreSQL support | Planned | Behind same `db.query()`/`db.exec()` capability interface |
+| PostgreSQL support | Shipped | Pure-C wire client behind the `HlDbBackend` vtable; `postgres://` DSN selects it. Handles-only API (`db.default()` / `db.connect(name)`) |
 | Database encryption at rest | Planned | SQLite SEE or custom VFS |
 | HTTP/2 full support | [Plan](http2_plan.md) | Currently h2c upgrade only |
 | PDF document builder | Planned | Report generation |
