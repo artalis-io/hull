@@ -1229,15 +1229,21 @@ static int hl_serve_wire_caps(HlServerState *s)
                 sh_seal_arena_destroy(&s->seal_arena);
                 return -1;
             }
+            /* Aligned alloc + copy, NOT memdup: the set is a uint64_t bitset
+             * needing 8-byte alignment, but memdup bump-allocates byte-aligned
+             * (align=1). In this already-populated seal arena that lands the set
+             * at an arbitrary offset, so every get_bit/count would do a
+             * misaligned uint64_t load (UB; UBSan flags it on load). */
             HlResolvedModuleSet *resolved =
-                (HlResolvedModuleSet *)sh_seal_arena_memdup(
-                    &s->seal_arena, &s->module_set,
-                    sizeof(HlResolvedModuleSet));
+                sh_seal_arena_alloc(&s->seal_arena,
+                                    sizeof(HlResolvedModuleSet),
+                                    _Alignof(HlResolvedModuleSet));
             if (!resolved) {
                 log_error("[hull:c] seal arena alloc(module_set) failed");
                 sh_seal_arena_destroy(&s->seal_arena);
                 return -1;
             }
+            memcpy(resolved, &s->module_set, sizeof(HlResolvedModuleSet));
             rt->module_set = resolved;
         }
 
