@@ -10,6 +10,7 @@
 #include "hull/cap/db.h"
 #include "hull/cap/db_backend.h"
 #include "hull/cap/db_registry.h"
+#include "hull/cap/db_dynamic.h"
 #include "hull/worker_db.h"
 #include "hull/shared/async.h"
 #include "hull/net_backend.h"
@@ -244,6 +245,32 @@ static JSClassDef js_db_conn_class = {
     .finalizer = js_db_conn_finalizer,
 };
 
+/* A caller-owned (db.open) connection. Its opaque is a malloc'd owner box that
+ * this object owns; box->h is the connection, nulled by close(). The box itself
+ * stays as the opaque so js_call_handle can tell "owned but closed" (box != NULL,
+ * box->h == NULL, fail closed) apart from "not an owned object" (box == NULL,
+ * fall through to the default). close() and the finalizer both release the
+ * handle exactly once (NULL-guarded); the finalizer also frees the box.
+ * Distinct class id from the borrowed connection so the finalizer only ever runs
+ * on owned handles. */
+typedef struct {
+    HlDbHandle *h;   /* owned; NULL after close (idempotent) */
+} HlJsOwnedConn;
+static JSClassID hull_db_owned_conn_class_id;
+static void js_db_owned_conn_finalizer(JSRuntime *rt, JSValue val)
+{
+    (void)rt;
+    HlJsOwnedConn *box =
+        (HlJsOwnedConn *)JS_GetOpaque(val, hull_db_owned_conn_class_id);
+    if (!box) return;
+    if (box->h) hl_db_dynamic_close(box->h);
+    free(box);
+}
+static JSClassDef js_db_owned_conn_class = {
+    "HullDbOwnedConnection",
+    .finalizer = js_db_owned_conn_finalizer,
+};
+
 /* The default connection, resolved from the registry (there is no separate
  * default-handle field). NULL under --no-db. */
 static HlDbHandle *default_db(HlJS *js)
@@ -259,6 +286,12 @@ static HlDbHandle *js_call_handle(JSContext *ctx, JSValueConst this_val)
 {
     HlDbHandle *bound = (HlDbHandle *)JS_GetOpaque(this_val, hull_db_conn_class_id);
     if (bound) return bound;
+    /* A db.open() object carries an owner box; box->h is NULL once closed, so a
+     * post-close method call fails closed rather than silently hitting the
+     * default connection. A non-owned object has a NULL box and falls through. */
+    HlJsOwnedConn *box =
+        (HlJsOwnedConn *)JS_GetOpaque(this_val, hull_db_owned_conn_class_id);
+    if (box) return box->h;
     HlJS *js = (HlJS *)JS_GetContextOpaque(ctx);
     return js ? default_db(js) : NULL;
 }
@@ -268,7 +301,7 @@ static JSValue js_db_query_impl(JSContext *ctx, JSValueConst this_val,
                                 int argc, JSValueConst *argv)
 {
     HlJS *js = (HlJS *)JS_GetContextOpaque(ctx);
-    if (!js || !default_db(js))
+    if (!js || !js_call_handle(ctx, this_val))
         return JS_ThrowInternalError(ctx, "database not available");
 
     if (argc < 1)
@@ -323,7 +356,7 @@ static JSValue js_db_exec_impl(JSContext *ctx, JSValueConst this_val,
 {
     (void)this_val;
     HlJS *js = (HlJS *)JS_GetContextOpaque(ctx);
-    if (!js || !default_db(js))
+    if (!js || !js_call_handle(ctx, this_val))
         return JS_ThrowInternalError(ctx, "database not available");
 
     if (argc < 1)
@@ -377,7 +410,7 @@ static JSValue js_db_last_id(JSContext *ctx, JSValueConst this_val,
 {
     (void)argc; (void)argv;
     HlJS *js = (HlJS *)JS_GetContextOpaque(ctx);
-    if (!js || !default_db(js))
+    if (!js || !js_call_handle(ctx, this_val))
         return JS_ThrowInternalError(ctx, "database not available");
 
     return JS_NewInt64(ctx, hl_db_last_id(js_call_handle(ctx, this_val)));
@@ -388,7 +421,7 @@ static JSValue js_db_batch(JSContext *ctx, JSValueConst this_val,
                             int argc, JSValueConst *argv)
 {
     HlJS *js = (HlJS *)JS_GetContextOpaque(ctx);
-    if (!js || !default_db(js))
+    if (!js || !js_call_handle(ctx, this_val))
         return JS_ThrowInternalError(ctx, "database not available");
 
     if (argc < 1 || !JS_IsFunction(ctx, argv[0]))
@@ -426,7 +459,7 @@ static JSValue js_db_dialect_write(JSContext *ctx, JSValueConst this_val,
                                     const char *name)
 {
     HlJS *js = (HlJS *)JS_GetContextOpaque(ctx);
-    if (!js || !default_db(js))
+    if (!js || !js_call_handle(ctx, this_val))
         return JS_ThrowInternalError(ctx, "database not available");
 
     if (argc < 4)
@@ -521,7 +554,7 @@ static JSValue js_db_table_columns(JSContext *ctx, JSValueConst this_val,
 {
     (void)this_val;
     HlJS *js = (HlJS *)JS_GetContextOpaque(ctx);
-    if (!js || !default_db(js))
+    if (!js || !js_call_handle(ctx, this_val))
         return JS_ThrowInternalError(ctx, "database not available");
 
     if (argc < 1)
@@ -1327,6 +1360,97 @@ static JSValue push_conn_object(JSContext *ctx, HlDbHandle *h)
     return obj;
 }
 
+/* conn.close() → release a db.open() handle now (idempotent; the finalizer is
+ * the backstop). */
+static JSValue js_db_owned_close(JSContext *ctx, JSValueConst this_val,
+                                 int argc, JSValueConst *argv)
+{
+    (void)ctx; (void)argc; (void)argv;
+    HlJsOwnedConn *box =
+        (HlJsOwnedConn *)JS_GetOpaque(this_val, hull_db_owned_conn_class_id);
+    if (box && box->h) {
+        hl_db_dynamic_close(box->h);
+        box->h = NULL;
+    }
+    return JS_UNDEFINED;
+}
+
+/* Build a caller-owned connection object wrapping @p h (from hl_db_dynamic_open).
+ * Unlike push_conn_object, this object owns its handle: it adds a close() method
+ * and a finalizer that both release it via hl_db_dynamic_close. Sync methods
+ * only. async/udf on a dynamic connection are a tracked follow-up (the worker
+ * pool is keyed off the registry DSN, which a dynamic handle is not in; §2.2). */
+static JSValue push_owned_conn_object(JSContext *ctx, HlDbHandle *h)
+{
+    HlJsOwnedConn *box = malloc(sizeof *box);
+    if (!box) {
+        hl_db_dynamic_close(h);
+        return JS_ThrowOutOfMemory(ctx);
+    }
+    box->h = h;
+    JSValue obj = JS_NewObjectClass(ctx, (int)hull_db_owned_conn_class_id);
+    if (JS_IsException(obj)) {
+        free(box);
+        hl_db_dynamic_close(h);
+        return obj;
+    }
+    JS_SetOpaque(obj, box);   /* obj owns the box + handle from here (finalizer) */
+    JS_SetPropertyStr(ctx, obj, "query",
+                      JS_NewCFunction(ctx, js_db_query, "query", 2));
+    JS_SetPropertyStr(ctx, obj, "exec",
+                      JS_NewCFunction(ctx, js_db_exec, "exec", 2));
+    JS_SetPropertyStr(ctx, obj, "lastId",
+                      JS_NewCFunction(ctx, js_db_last_id, "lastId", 0));
+    JS_SetPropertyStr(ctx, obj, "batch",
+                      JS_NewCFunction(ctx, js_db_batch, "batch", 1));
+    JS_SetPropertyStr(ctx, obj, "insertIfAbsent",
+                      JS_NewCFunction(ctx, js_db_insert_if_absent,
+                                       "insertIfAbsent", 4));
+    JS_SetPropertyStr(ctx, obj, "upsert",
+                      JS_NewCFunction(ctx, js_db_upsert, "upsert", 4));
+    JS_SetPropertyStr(ctx, obj, "tableColumns",
+                      JS_NewCFunction(ctx, js_db_table_columns,
+                                       "tableColumns", 1));
+    JS_SetPropertyStr(ctx, obj, "close",
+                      JS_NewCFunction(ctx, js_db_owned_close, "close", 0));
+    const HlDbBackend *be = h ? h->backend : NULL;
+    JS_SetPropertyStr(ctx, obj, "backendName",
+                      JS_NewString(ctx, be ? be->name : "none"));
+    JS_SetPropertyStr(ctx, obj, "autoincrementIdDdl",
+                      JS_NewString(ctx, (be && be->autoincrement_id_ddl)
+                                        ? be->autoincrement_id_ddl
+                                        : "INTEGER PRIMARY KEY"));
+    return obj;
+}
+
+/* db.open(dsn) → caller-owned connection object for a runtime-computed DSN,
+ * validated against manifest.databases.dynamic (host/scheme allowlist, fs gate
+ * for file backends). The app owns the result: call conn.close(), or let GC
+ * finalize it. */
+static JSValue js_db_open(JSContext *ctx, JSValueConst this_val,
+                          int argc, JSValueConst *argv)
+{
+    (void)this_val;
+    if (argc < 1)
+        return JS_ThrowTypeError(ctx, "db.open requires (dsn)");
+    const char *dsn = JS_ToCString(ctx, argv[0]);
+    if (!dsn)
+        return JS_EXCEPTION;
+    HlJS *js = (HlJS *)JS_GetContextOpaque(ctx);
+    if (!js || !js->base.db_registry) {
+        JS_FreeCString(ctx, dsn);
+        return JS_ThrowInternalError(ctx, "no database registry available");
+    }
+    const HlManifestDbDynamic *policy =
+        hl_db_registry_dynamic_policy(js->base.db_registry);
+    const char *err = NULL;
+    HlDbHandle *h = hl_db_dynamic_open(dsn, policy, js->base.fs_cfg, &err);
+    JS_FreeCString(ctx, dsn);
+    if (!h)
+        return JS_ThrowInternalError(ctx, "%s", err ? err : "db.open: denied");
+    return push_owned_conn_object(ctx, h);
+}
+
 /* db.default() → connection object for the "default" connection. Returns an
  * object even when no DB is configured; its methods error lazily on use, so
  * importing a db-using module in a no-db context does not fail at load. */
@@ -1371,10 +1495,15 @@ static int js_db_module_init(JSContext *ctx, JSModuleDef *m)
 {
     if (hl_js_check_module_declared(ctx, "hull/db", "hull:db") != 0) return -1;
 
-    /* Register the connection-object class once (idempotent per runtime). */
+    /* Register the connection-object classes once (idempotent per runtime). */
     if (hull_db_conn_class_id == 0) {
         JS_NewClassID(&hull_db_conn_class_id);
         JS_NewClass(JS_GetRuntime(ctx), hull_db_conn_class_id, &js_db_conn_class);
+    }
+    if (hull_db_owned_conn_class_id == 0) {
+        JS_NewClassID(&hull_db_owned_conn_class_id);
+        JS_NewClass(JS_GetRuntime(ctx), hull_db_owned_conn_class_id,
+                    &js_db_owned_conn_class);
     }
 
     /* The DB module exposes only connection acquisition: every query goes
@@ -1386,6 +1515,8 @@ static int js_db_module_init(JSContext *ctx, JSModuleDef *m)
                       JS_NewCFunction(ctx, js_db_connect, "connect", 1));
     JS_SetPropertyStr(ctx, db, "default",
                       JS_NewCFunction(ctx, js_db_default, "default", 0));
+    JS_SetPropertyStr(ctx, db, "open",
+                      JS_NewCFunction(ctx, js_db_open, "open", 1));
 
     JS_SetModuleExport(ctx, m, "db", db);
     return 0;

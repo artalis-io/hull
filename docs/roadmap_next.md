@@ -2605,8 +2605,10 @@ ride in the app-provided DSN; the reachable surface stays bounded.
   the worker pool.
 - **Backends:** network (postgres/mysql) gated by `hosts`; file (sqlite/duckdb/
   bare path) gated by `manifest.fs`.
-- **async** on dynamic handles: yes (worker pool is DSN-keyed). **udf:** follows
-  the backend (dynamic SQLite gets it; network backends have none).
+- **async / udf** on dynamic handles: deferred to a follow-up (see Tasks). The
+  first cut is sync-only; the worker pool keys per-thread connections off the
+  registry DSN, which a dynamic handle is not in, so async needs the dynamic DSN
+  threaded through first.
 - **Clean break** from the §1 flat `databases = { name = dsn }` form (days old,
   4 internal usages migrated; no back-compat shim).
 
@@ -2619,12 +2621,26 @@ ride in the app-provided DSN; the reachable surface stays bounded.
       `HlManifestDbDynamic`; `"$VAR"` env refs (`hl_manifest_env_ref`) replacing
       `dsn_env`; sealing + free. Registry resolves `$VAR` at open. Covered by
       `test_db_registry` (env-ref cases) + functional check; flat usages migrated.
-- [ ] `db.open(dsn)` runtime API: DSN authority parse -> scheme + host/fs
+- [x] `db.open(dsn)` runtime API: DSN authority parse -> scheme + host/fs
       validation -> caller-owned open through the backend selector; fail closed.
-- [ ] Owned connection-object variant (`close()` + GC) both runtimes; the
-      process-wide concurrent-dynamic cap.
-- [ ] async available on dynamic handles; udf follows backend. e2e (allow/deny
-      against the docker Postgres).
+      `cap/db_dynamic.c` (`hl_db_dynamic_open` / `_close` / `_open_count`,
+      process-wide cap 16), `hl_db_registry_dynamic_policy`. Unit test
+      `test_db_dynamic.c` (5 default + a Postgres CIDR host-gate case).
+- [x] Owned connection-object variant (`close()` + GC) both runtimes. Lua: an
+      owner-box userdata with a `__gc` finalizer, bound as the method upvalue so
+      a closed handle nulls out and every method fails closed. JS: a distinct
+      `HullDbOwnedConnection` class id whose finalizer + `close()` release the
+      malloc'd owner box. Double-close + use-after-close idempotent. The
+      over-strict `default_db` method guard was replaced with the actual call
+      handle so named-only / dynamic-only apps and closed handles resolve right.
+- [x] e2e (allow/deny) both runtimes: `tests/e2e_dynamic_connections.sh`
+      (SQLite, always runs) + a Postgres CIDR host allow / out-of-CIDR deny /
+      scheme deny phase in `tests/e2e_postgres.sh` (docker).
+- [ ] **Follow-up:** `async` / `udf` on a dynamic handle. Scoped out of the
+      first cut: the worker pool keys per-thread connections off the registry
+      DSN (`hl_db_registry_dsn_for`), which a caller-owned dynamic handle is not
+      in, so `async` would silently target the default. Needs the dynamic DSN
+      threaded to the worker op (store it on the owner box). Sync-only until then.
 
 ### 2.3 Split the abstract interface from concrete backends (+ generic native-handle accessor)
 

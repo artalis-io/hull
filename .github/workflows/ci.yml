@@ -139,6 +139,10 @@ jobs:
         timeout-minutes: 2
         run: make e2e-named-connections
 
+      - name: Dynamic-connection (db.open) E2E tests
+        timeout-minutes: 2
+        run: make e2e-dynamic-connections
+
       - name: TCC E2E tests
         timeout-minutes: 3
         run: make e2e-tcc

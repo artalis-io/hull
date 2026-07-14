@@ -172,6 +172,43 @@ fi
 kill "$SVR" 2>/dev/null || true
 SVR=
 
+# ── db.open() dynamic connections against Postgres (roadmap §2.2) ──────
+# The manifest allowlists the postgres scheme and the 127.0.0.0/8 host CIDR.
+# A DSN inside the CIDR opens and queries; a host outside it, and a scheme not
+# in the allowlist, are rejected before any connect. Credentials ride in the
+# DSN passed as argv[1] so they never sit in the app source. CLI mode (app.main).
+echo "=== db.open dynamic allow/deny against postgres ==="
+APPDIR_DYN=$(mktemp -d)
+cat > "$APPDIR_DYN/app.lua" <<'LUA'
+app.manifest({
+    modules = { "hull/db@1" },
+    databases = { dynamic = { schemes = { "postgres" }, hosts = { "127.0.0.0/8" } } },
+})
+local db = require("hull.db")
+app.main(function(ctx)
+    local allow_dsn = ctx.args[1]
+    local ok_open, conn = pcall(function() return db.open(allow_dsn) end)
+    if ok_open then
+        print("allow_count=" .. tostring(conn.query("SELECT count(*) AS c FROM e2e")[1].c))
+        conn.close()
+    else
+        print("allow_count=ERR:" .. tostring(conn))
+    end
+    local ok_host = pcall(function() return db.open("postgres://u@10.9.9.9:5432/db") end)
+    print("deny_host=" .. (ok_host and "ok" or "denied"))
+    local ok_scheme = pcall(function() return db.open(":memory:") end)
+    print("deny_scheme=" .. (ok_scheme and "ok" or "denied"))
+    return 0
+end)
+LUA
+
+DYN_OUT=$(./build/hull --no-sandbox "$APPDIR_DYN/app.lua" -- "$DSN" 2>&1 || true)
+echo "$DYN_OUT" | grep -qE "allow_count=3" || { echo "::error db.open allowed host did not query"; echo "$DYN_OUT"; exit 1; }
+echo "$DYN_OUT" | grep -qE "deny_host=denied" || { echo "::error db.open out-of-CIDR host not rejected"; echo "$DYN_OUT"; exit 1; }
+echo "$DYN_OUT" | grep -qE "deny_scheme=denied" || { echo "::error db.open disallowed scheme not rejected"; echo "$DYN_OUT"; exit 1; }
+echo "PASS: db.open dynamic connections (CIDR host allow + out-of-CIDR deny + scheme deny)"
+rm -rf "$APPDIR_DYN"
+
 # ── TLS phase (Phase 3b.2) ────────────────────────────────────────────
 # Enable SSL on the running container with a self-signed cert, then connect
 # with sslmode=require and assert (via pg_stat_ssl) the session is encrypted.

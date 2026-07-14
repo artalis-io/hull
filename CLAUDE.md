@@ -255,6 +255,8 @@ db.query("SELECT ...", { ... })
 db.exec("INSERT ...", { ... })
 local cache = require("hull.db").connect("cache")  -- a named connection
 cache.query(...)
+local tmp = require("hull.db").open(dsn)   -- a caller-owned dynamic connection
+tmp.query(...); tmp.close()                -- app owns it: close() or let GC finalize
 ```
 
 ```javascript
@@ -262,6 +264,8 @@ import { db as dbModule } from "hull:db";
 const db = dbModule.default();            // JS: acquire the default connection
 db.query("SELECT ...", [ ... ]);
 const cache = dbModule.connect("cache");
+const tmp = dbModule.open(dsn);           // caller-owned dynamic connection
+tmp.query(...); tmp.close();
 ```
 
 The connection object carries `query` / `exec` / `batch` / `last_id` (`lastId`)
@@ -281,8 +285,7 @@ runtimes) and the cross-backend variant in `tests/e2e_postgres.sh`.
 under `manifest.databases.named` (a name -> DSN map). A DSN value of exactly
 `"$VAR"` or `"${VAR}"` is an env reference resolved at connection-open time (so
 credentials never sit in app source); a value that merely CONTAINS a `$` (e.g.
-a password) is literal. `databases.dynamic` (roadmap §2.2, in progress) is the
-separate `db.open(dsn)` allowlist:
+a password) is literal.
 
 ```lua
 app.manifest({
@@ -292,13 +295,32 @@ app.manifest({
             cache   = "./cache.db",       -- SQLite file (literal)
             primary = "$DATABASE_URL",    -- postgres:// from $DATABASE_URL (env ref)
         },
-        -- dynamic = { hosts = { "*.rds.amazonaws.com" }, schemes = { "postgres" } },
+        dynamic = { hosts = { "*.rds.amazonaws.com" }, schemes = { "postgres" } },
     },
 })
 ```
 
 (The DB connection dials its host directly; `manifest.hosts` gates
 `http.fetch`, not database connections.)
+
+**Dynamic connections (`db.open(dsn)`, roadmap §2.2).** For a DSN not known at
+manifest-authoring time (a per-tenant shard, a user-supplied endpoint),
+`db.open(dsn)` opens a **caller-owned** connection after validating the DSN
+against `manifest.databases.dynamic`: the scheme must be in `dynamic.schemes`,
+and a network backend's host must match `dynamic.hosts` (exact, `*`, `*.suffix`
+subdomain glob, or a CIDR; IP-literal hosts only, no DNS) while a file backend's
+path must pass the same fs-sandbox gate as `fs.read`. `hosts` / `schemes`
+entries may be `"$VAR"` env refs. Both lists fail closed: no `dynamic` policy (or
+an empty one) rejects every `db.open`. A process-wide cap (16) bounds concurrent
+dynamic connections. Unlike `db.connect`, the app **owns** the returned handle:
+call `conn.close()` (`conn.close()` in JS) when done, or let GC finalize it
+(double-close and use-after-close are safe and fail closed). Dynamic connections
+are sync-only today (`query`/`exec`/`batch`/`insert_if_absent`/`upsert`/
+`table_columns`); `async`/`udf` on a dynamic handle are a tracked follow-up (the
+worker pool keys off the registry DSN, which a dynamic handle is not in).
+Enforcement lives in `cap/db_dynamic.c` + `cap/host_match.c`; covered by
+`tests/e2e_dynamic_connections.sh` (both runtimes, SQLite) and the Postgres
+CIDR allow/deny phase in `tests/e2e_postgres.sh`.
 
 The connection named `"default"` is what `db.default()` and the stdlib target;
 when an app just uses `-d <DSN>` with no `databases` map, that becomes the

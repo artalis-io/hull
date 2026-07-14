@@ -9,6 +9,7 @@
 #include "hull/cap/db.h"
 #include "hull/cap/db_backend.h"
 #include "hull/cap/db_registry.h"
+#include "hull/cap/db_dynamic.h"
 #include "hull/shared/async.h"
 #include "hull/net_backend.h"
 #include "hull/worker_db.h"
@@ -174,14 +175,39 @@ static HlDbHandle *default_db(HlLua *lua)
     return lua ? hl_db_registry_default(lua->base.db_registry) : NULL;
 }
 
-/* Resolve the connection this call operates on: a handle bound as upvalue 1
- * (a db.connect()/db.default() method), else the default connection.
+/* Owner box for a caller-owned dynamic connection (db.open). A registry-backed
+ * connection object binds its borrowed handle directly as a lightuserdata
+ * upvalue; a db.open() object instead binds this box, so close()/__gc can null
+ * the pointer and every subsequent method fails closed. The box outlives the
+ * stack via the method closures that hold it as an upvalue. */
+#define HL_LUA_DB_OWNED_MT "hull.db.owned"
+typedef struct {
+    HlDbHandle *h;   /* owned; NULL after close (idempotent) */
+} HlLuaOwnedConn;
+
+/* Release the handle exactly once; NULL-guarded so close() + __gc are safe in
+ * either order. */
+static void owned_conn_release(HlLuaOwnedConn *o)
+{
+    if (o && o->h) {
+        hl_db_dynamic_close(o->h);
+        o->h = NULL;
+    }
+}
+
+/* Resolve the connection this call operates on: a borrowed handle bound as a
+ * lightuserdata upvalue (db.connect()/db.default()), an owner box bound the same
+ * way (db.open(), NULL once closed), else the default connection.
  * Internal-table (_hull_*) access is gated by a caller check at each call
  * site, not by a separate handle. */
 static HlDbHandle *db_call_handle(lua_State *L)
 {
-    if (lua_islightuserdata(L, lua_upvalueindex(1)))
-        return (HlDbHandle *)lua_touserdata(L, lua_upvalueindex(1));
+    int uv = lua_upvalueindex(1);
+    if (lua_islightuserdata(L, uv))
+        return (HlDbHandle *)lua_touserdata(L, uv);
+    HlLuaOwnedConn *o = luaL_testudata(L, uv, HL_LUA_DB_OWNED_MT);
+    if (o)
+        return o->h;   /* NULL after close() → methods error "not available" */
     HlLua *lua = get_hl_lua(L);
     if (!lua) return NULL;
     return default_db(lua);
@@ -191,7 +217,7 @@ static HlDbHandle *db_call_handle(lua_State *L)
 static int lua_db_query_impl(lua_State *L)
 {
     HlLua *lua = get_hl_lua(L);
-    if (!lua || !default_db(lua))
+    if (!lua || !db_call_handle(L))
         return luaL_error(L, "database not available");
 
     const char *sql = luaL_checkstring(L, 1);
@@ -248,7 +274,7 @@ static int lua_db_query_impl(lua_State *L)
 static int lua_db_exec_impl(lua_State *L)
 {
     HlLua *lua = get_hl_lua(L);
-    if (!lua || !default_db(lua))
+    if (!lua || !db_call_handle(L))
         return luaL_error(L, "database not available");
 
     const char *sql = luaL_checkstring(L, 1);
@@ -284,7 +310,7 @@ static int lua_db_exec(lua_State *L) { return lua_db_exec_impl(L); }
 static int lua_db_last_id(lua_State *L)
 {
     HlLua *lua = get_hl_lua(L);
-    if (!lua || !default_db(lua))
+    if (!lua || !db_call_handle(L))
         return luaL_error(L, "database not available");
 
     lua_pushinteger(L, (lua_Integer)hl_db_last_id(
@@ -296,7 +322,7 @@ static int lua_db_last_id(lua_State *L)
 static int lua_db_batch(lua_State *L)
 {
     HlLua *lua = get_hl_lua(L);
-    if (!lua || !default_db(lua))
+    if (!lua || !db_call_handle(L))
         return luaL_error(L, "database not available");
 
     luaL_checktype(L, 1, LUA_TFUNCTION);
@@ -427,7 +453,7 @@ static HlValue *lua_values_from_array(lua_State *L, int idx, int *out_n,
 static int lua_db_insert_if_absent(lua_State *L)
 {
     HlLua *lua = get_hl_lua(L);
-    if (!lua || !default_db(lua))
+    if (!lua || !db_call_handle(L))
         return luaL_error(L, "database not configured");
 
     const char *table = luaL_checkstring(L, 1);
@@ -462,7 +488,7 @@ static int lua_db_insert_if_absent(lua_State *L)
 static int lua_db_upsert(lua_State *L)
 {
     HlLua *lua = get_hl_lua(L);
-    if (!lua || !default_db(lua))
+    if (!lua || !db_call_handle(L))
         return luaL_error(L, "database not configured");
 
     const char *table = luaL_checkstring(L, 1);
@@ -510,7 +536,7 @@ static void lua_db_table_columns_cb(void *cb_ctx, const char *col_name)
 static int lua_db_table_columns(lua_State *L)
 {
     HlLua *lua = get_hl_lua(L);
-    if (!lua || !default_db(lua))
+    if (!lua || !db_call_handle(L))
         return luaL_error(L, "database not configured");
 
     const char *table = luaL_checkstring(L, 1);
@@ -1189,6 +1215,79 @@ static int push_conn_object(lua_State *L, HlDbHandle *h)
     return 1;
 }
 
+/* __gc for the owner box: release the handle if close() didn't. */
+static int lua_owned_conn_gc(lua_State *L)
+{
+    owned_conn_release(luaL_testudata(L, 1, HL_LUA_DB_OWNED_MT));
+    return 0;
+}
+
+/* conn.close() → release a db.open() handle now (idempotent; __gc is the
+ * backstop). The owner box rides as upvalue 1. */
+static int lua_owned_conn_close(lua_State *L)
+{
+    owned_conn_release(luaL_testudata(L, lua_upvalueindex(1),
+                                      HL_LUA_DB_OWNED_MT));
+    return 0;
+}
+
+/* Push a caller-owned connection object wrapping @p h (from hl_db_dynamic_open).
+ * Unlike push_conn_object, this object owns its handle: it adds a close() method
+ * and a __gc finalizer that both release it via hl_db_dynamic_close. Sync
+ * methods only. async/udf on a dynamic connection are a tracked follow-up (the
+ * worker pool is keyed off the registry DSN, which a dynamic handle is not in;
+ * §2.2). */
+static int push_owned_conn_object(lua_State *L, HlDbHandle *h)
+{
+    HlLuaOwnedConn *o = lua_newuserdatauv(L, sizeof *o, 0);
+    o->h = h;
+    luaL_setmetatable(L, HL_LUA_DB_OWNED_MT);   /* installs __gc */
+    int owner = lua_gettop(L);
+
+    lua_createtable(L, 0, 10);
+    for (const luaL_Reg *m = db_conn_methods; m->name; m++) {
+        lua_pushvalue(L, owner);
+        lua_pushcclosure(L, m->func, 1);
+        lua_setfield(L, -2, m->name);
+    }
+    lua_pushvalue(L, owner);
+    lua_pushcclosure(L, lua_owned_conn_close, 1);
+    lua_setfield(L, -2, "close");
+
+    const HlDbBackend *be = h ? h->backend : NULL;
+    lua_pushstring(L, be ? be->name : "none");
+    lua_setfield(L, -2, "backend_name");
+    lua_pushstring(L, (be && be->autoincrement_id_ddl)
+                       ? be->autoincrement_id_ddl : "INTEGER PRIMARY KEY");
+    lua_setfield(L, -2, "autoincrement_id_ddl");
+
+    /* Drop the owner box from under the returned table; the method closures
+     * keep it alive (and GC-reachable) as long as the table is. */
+    lua_remove(L, owner);
+    return 1;
+}
+
+/* db.open(dsn) → caller-owned connection object for a runtime-computed DSN,
+ * validated against manifest.databases.dynamic (host/scheme allowlist, fs gate
+ * for file backends). The app owns the result: call conn.close(), or let GC
+ * finalize it. */
+static int lua_db_open(lua_State *L)
+{
+    const char *dsn = luaL_checkstring(L, 1);
+    HlLua *lua = get_hl_lua(L);
+    if (!lua)
+        return luaL_error(L, "no runtime");
+    if (!lua->base.db_registry)
+        return luaL_error(L, "no database registry available");
+    const HlManifestDbDynamic *policy =
+        hl_db_registry_dynamic_policy(lua->base.db_registry);
+    const char *err = NULL;
+    HlDbHandle *h = hl_db_dynamic_open(dsn, policy, lua->base.fs_cfg, &err);
+    if (!h)
+        return luaL_error(L, "%s", err ? err : "db.open: denied");
+    return push_owned_conn_object(L, h);
+}
+
 /* db.default() → connection object for the "default" connection. Returns an
  * object even when no DB is configured; its methods error lazily on use, so
  * requiring a db-using module in a no-db context does not fail at load (it
@@ -1222,11 +1321,20 @@ int luaopen_hull_db(lua_State *L)
      * through a connection object from db.connect(name) or db.default(). The
      * historical top-level db.query / exec / async / udf / backend_name / ...
      * bridge is gone; those live on the connection object (db.default()). */
-    lua_createtable(L, 0, 2);
+    /* Metatable for caller-owned (db.open) connection handles: __gc releases
+     * the handle if close() didn't. Registered once per Lua state. */
+    luaL_newmetatable(L, HL_LUA_DB_OWNED_MT);
+    lua_pushcfunction(L, lua_owned_conn_gc);
+    lua_setfield(L, -2, "__gc");
+    lua_pop(L, 1);
+
+    lua_createtable(L, 0, 3);
     lua_pushcfunction(L, lua_db_connect);
     lua_setfield(L, -2, "connect");
     lua_pushcfunction(L, lua_db_default);
     lua_setfield(L, -2, "default");
+    lua_pushcfunction(L, lua_db_open);
+    lua_setfield(L, -2, "open");
     return 1;
 }
 
