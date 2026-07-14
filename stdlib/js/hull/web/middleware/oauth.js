@@ -124,6 +124,15 @@ const _state = {
     // rotate a key while reusing the same kid for emergency
     // revocation; without a TTL the stale PEM would verify forever.
     jwksTtl:        3600,
+    // redirect_uri origin resolution (see computeRedirectUri):
+    //   baseUrl set        -> use it verbatim (recommended).
+    //   trustProxy = true  -> honor X-Forwarded-Proto/Host (behind a trusted
+    //                         proxy that sets them).
+    //   otherwise (default)-> Host header + https; ignore forwarded headers so
+    //                         a directly-exposed app can't have the redirect_uri
+    //                         sent to the IdP poisoned via a spoofed header.
+    baseUrl:        null,
+    trustProxy:     false,
 };
 
 // ── Provider presets ───────────────────────────────────────────────
@@ -318,11 +327,25 @@ function jwksResolver(providerName) {
 // ── Route handlers ─────────────────────────────────────────────────
 
 function computeRedirectUri(req, providerName) {
-    const proto = req.headers["x-forwarded-proto"] || "http";
-    const host  = req.headers["x-forwarded-host"]
-                  || req.headers.host || "localhost";
-    return proto + "://" + host
-        + _state.callbackPath.replace("{provider}", providerName);
+    const path = _state.callbackPath.replace("{provider}", providerName);
+    if (_state.baseUrl) return _state.baseUrl + path;
+    let proto, host;
+    if (_state.trustProxy) {
+        proto = req.headers["x-forwarded-proto"] || "https";
+        // X-Forwarded-Host can be a chain ("a.com, lb.internal"); take the
+        // client-facing (first) hop.
+        const xfh = req.headers["x-forwarded-host"];
+        host = (xfh ? String(xfh).split(",")[0].trim() : "")
+               || req.headers.host || "localhost";
+    } else {
+        // Naked case: no baseUrl, no trusted proxy. The Host header is
+        // client-controllable, so the redirect_uri host is only as trustworthy
+        // as the deployment. Default proto http (dev-friendly); production
+        // should set baseUrl. The init warning surfaces this.
+        proto = "http";
+        host  = req.headers.host || "localhost";
+    }
+    return proto + "://" + host + path;
 }
 
 function handleLogin(req, res) {
@@ -546,6 +569,19 @@ function init(opts) {
     }
     _state.stateTtl    = opts.stateTtl    || _state.stateTtl;
     _state.jwksTtl     = opts.jwksTtl     || _state.jwksTtl;
+    // redirect_uri origin. Preferred: an explicit baseUrl ("https://app.com").
+    // Otherwise the origin is derived from the request; trustProxy gates
+    // whether the (spoofable) X-Forwarded-Proto/Host headers are honored.
+    if (opts.baseUrl != null) {
+        _state.baseUrl = String(opts.baseUrl).replace(/\/+$/, "");
+    }
+    _state.trustProxy = opts.trustProxy === true;
+    if (!_state.baseUrl && !_state.trustProxy) {
+        log.warn("oauth: neither baseUrl nor trustProxy set; the redirect_uri "
+            + "sent to the IdP is built from the client-controllable Host "
+            + "header. Set baseUrl: \"https://app.example.com\" in production "
+            + "(or trustProxy: true behind a proxy that sets X-Forwarded-Host).");
+    }
     if (opts.onLogin != null && typeof opts.findUser !== "function") {
         throw new Error("oauth.init: findUser(provider, claims) -> user is "
                         + "required when onLogin is set. See module docs.");

@@ -527,13 +527,15 @@ function originFor(req) {
     if (_state.trustedHosts) {
         for (let i = 0; i < _state.trustedHosts.length; i++) {
             if (bareHost === _state.trustedHosts[i]) {
-                const proto = headers["x-forwarded-proto"] || "https";
+                const proto = _state.trustProxy
+                    ? (headers["x-forwarded-proto"] || "https") : "https";
                 return proto + "://" + firstHost;
             }
         }
     }
     if (_state.trustRequestHost) {
-        const proto = headers["x-forwarded-proto"] || "http";
+        const proto = _state.trustProxy
+            ? (headers["x-forwarded-proto"] || "http") : "http";
         return proto + "://" + firstHost;
     }
     // Round-11 LOW-10: one-shot warn on first nil-return. See Lua
@@ -979,7 +981,7 @@ function registerRoutes(app) {
             window: rlOpts.window || 300,
             key:    rlOpts.key || ((req) => {
                 const xff = req.headers && req.headers["x-forwarded-for"];
-                if (xff) {
+                if (_state.trustProxy && xff) {
                     const first = xff.split(",")[0].trim();
                     if (first) return first;
                 }
@@ -1201,6 +1203,12 @@ function init(opts) {
     _state.publicOrigin   = opts.publicOrigin || null;
     _state.trustedHosts   = opts.trustedHosts || null;
     _state.trustRequestHost = opts.trustRequestHost === true;
+    // Honor X-Forwarded-Proto only behind a trusted proxy. Off by default so a
+    // spoofed header can't downgrade an emailed https link to http on a
+    // directly-exposed app; the per-branch scheme default (https for an
+    // allowlisted host, http for the trustRequestHost dev path) is used
+    // otherwise.
+    _state.trustProxy = opts.trustProxy === true;
     // Round-12 MEDIUM-1: reset the one-shot host-mismatch warn so a
     // hot-reload that fixes / changes the allowlist gets a fresh
     // diagnostic on the next bad host. See Lua sibling.

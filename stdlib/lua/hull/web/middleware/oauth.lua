@@ -117,6 +117,14 @@ local oauth = {}
 
 local _state = {
     state_secret_hex = nil,  -- secret bytes pre-encoded as hex (HMAC takes hex)
+    -- redirect_uri origin resolution (see compute_redirect_uri):
+    --   base_url set        -> use it verbatim (recommended).
+    --   trust_proxy = true  -> honor X-Forwarded-Proto/Host (trusted proxy).
+    --   otherwise (default) -> Host header + https; ignore forwarded headers so
+    --                          a directly-exposed app can't have the redirect_uri
+    --                          sent to the IdP poisoned via a spoofed header.
+    base_url         = nil,
+    trust_proxy      = false,
     state_cookie     = "_oauth_state",
     -- Cookie path scoping. Defaults to "/auth" so the state cookie
     -- isn't sent on every request (only those matching the auth
@@ -352,11 +360,25 @@ end
 -- ── Route handlers ─────────────────────────────────────────────────
 
 local function compute_redirect_uri(req, provider_name)
-    local proto = req.headers["x-forwarded-proto"] or "http"
-    local host  = req.headers["x-forwarded-host"]
-                  or req.headers.host or "localhost"
-    return proto .. "://" .. host
-        .. _state.callback_path:gsub("{provider}", provider_name)
+    local path = _state.callback_path:gsub("{provider}", provider_name)
+    if _state.base_url then return _state.base_url .. path end
+    local proto, host
+    if _state.trust_proxy then
+        proto = req.headers["x-forwarded-proto"] or "https"
+        -- X-Forwarded-Host can be a chain ("a.com, lb.internal"); take the
+        -- client-facing (first) hop.
+        local xfh = req.headers["x-forwarded-host"]
+        local first = xfh and xfh:match("^%s*([^,]+)")
+        host = (first and first:match("^%s*(.-)%s*$")) or req.headers.host or "localhost"
+    else
+        -- Naked case: no base_url, no trusted proxy. The Host header is
+        -- client-controllable, so the redirect_uri host is only as trustworthy
+        -- as the deployment. Default proto http (dev-friendly); production
+        -- should set base_url. The init warning surfaces this.
+        proto = "http"
+        host  = req.headers.host or "localhost"
+    end
+    return proto .. "://" .. host .. path
 end
 
 -- GET /auth/:provider/login
@@ -566,6 +588,19 @@ function oauth.init(opts)
               .. "one floor)")
     end
     _state.state_secret_hex = bytes_to_hex(opts.state_secret)
+    -- redirect_uri origin (see compute_redirect_uri): explicit base_url wins,
+    -- else trust_proxy gates the spoofable X-Forwarded-Proto/Host headers.
+    if opts.base_url ~= nil then
+        _state.base_url = tostring(opts.base_url):gsub("/+$", "")
+    end
+    _state.trust_proxy = opts.trust_proxy == true
+    if not _state.base_url and not _state.trust_proxy then
+        log.warn("oauth: neither base_url nor trust_proxy set; the "
+              .. "redirect_uri sent to the IdP is built from the client-"
+              .. "controllable Host header. Set base_url = "
+              .. "\"https://app.example.com\" in production (or trust_proxy = "
+              .. "true behind a proxy that sets X-Forwarded-Host).")
+    end
     _state.state_cookie = opts.state_cookie or _state.state_cookie
     _state.state_cookie_path =
         opts.state_cookie_path or _state.state_cookie_path

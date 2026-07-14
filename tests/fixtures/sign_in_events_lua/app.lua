@@ -24,10 +24,14 @@ local audit_log = require("hull.web.middleware.audit-log")
 local session   = require("hull.web.middleware.session")
 local cookie    = require("hull.web.cookie")
 
-session.init()
+-- This fixture simulates distinct clients via X-Forwarded-For (a behind-a-
+-- proxy topology), so it opts into trust_proxy so the recorded IP + device
+-- fingerprint reflect the forwarded client rather than the loopback peer.
+session.init({ trust_proxy = true })
 audit_log.init({
     retain_days = 365,
     fingerprint_salt = "sign-in-events-fixture-fingerprint-salt",
+    trust_proxy = true,
 })
 
 local users_by_email = {}
