@@ -56,7 +56,13 @@ void hl_worker_db_init(const char *dsn)
      * /var → /private/var on macOS). A postgres:// DSN is not a filesystem
      * path, so only realpath when the selected backend is SQLite. */
     const HlDbBackend *be = hl_db_backend_select(dsn, NULL);
-    if (be && be == &hl_db_backend_sqlite) {
+    int is_sqlite = 0;
+#ifdef HL_ENABLE_SQLITE
+    is_sqlite = (be == &hl_db_backend_sqlite);
+#else
+    (void)be;
+#endif
+    if (is_sqlite) {
         static char resolved[PATH_MAX];
         if (realpath(dsn, resolved))
             worker_db_dsn = resolved;

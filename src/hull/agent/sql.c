@@ -17,7 +17,7 @@
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
 
-#ifdef HL_ENABLE_DB
+#ifdef HL_ENABLE_SQLITE
 
 #include "internal.h"
 #include "limits.h"
@@ -212,4 +212,4 @@ int hl_agent_sql_named_ctx(HlAppContext *ctx, const char *query_name,
 #else /* !HL_ENABLE_DB */
 /* ISO C requires a translation unit to contain at least one declaration. */
 typedef int hl_agent_sql_disabled;
-#endif /* HL_ENABLE_DB */
+#endif /* HL_ENABLE_SQLITE */

@@ -35,7 +35,7 @@ static int agent_api_middleware(KlRequest *req, KlResponse *res, void *user_data
 
     if (strcmp(endpoint, "routes") == 0) {
         hl_agent_routes(ctx->app_dir, &out);
-#ifdef HL_ENABLE_DB
+#ifdef HL_ENABLE_SQLITE
     } else if (strcmp(endpoint, "schema") == 0) {
         hl_agent_db_schema(ctx->app_dir, ctx->db_path, &out);
 #endif
@@ -43,7 +43,7 @@ static int agent_api_middleware(KlRequest *req, KlResponse *res, void *user_data
         hl_agent_status(ctx->app_dir, 0, &out);
     } else if (strcmp(endpoint, "errors") == 0) {
         hl_agent_errors(ctx->app_dir, &out);
-#ifdef HL_ENABLE_DB
+#ifdef HL_ENABLE_SQLITE
     } else if (strcmp(endpoint, "migrate") == 0) {
         hl_agent_migrate_status(ctx->app_dir, ctx->db_path, &out);
 #endif

@@ -242,12 +242,14 @@ Each phase was independently reviewable and mergeable.
 
 ### Tracked follow-ups
 
-- **Postgres-only build (`HL_ENABLE_SQLITE=0 HL_ENABLE_POSTGRES=1`) is not
-  yet link-clean.** `mod_db.c`'s `db.udf` code and a few `hl_db_sqlite_*` /
-  raw `sqlite3_*` accessors are still referenced unconditionally, so the
-  SQLite-off flavor fails to link. Gating them on `HL_ENABLE_SQLITE` would
-  make the "any / neither backend" matrix fully real; the CI flavor lane
-  covers `sqlite + postgres` only for now.
+- ~~Postgres-only build not link-clean.~~ **Done.**
+  `HL_ENABLE_SQLITE=0 HL_ENABLE_POSTGRES=1` now links: the SQLite stmt-cache
+  engine (`cap/db.c`), the `db.udf` bindings in `mod_db.c`, and the SQLite-file
+  agent introspection (`agent/db.c` / `sql.c` / `schema_diff.c` +
+  `hl_agent_open_app_db`, and their `cmd_agent` / `mcp` / `agent_api` call
+  sites) are gated on `HL_ENABLE_SQLITE`; the `hl_db_sqlite_*` accessors have
+  inline no-op fallbacks; `hl_cap_db_check_namespace` moved to `db_select.c`.
+  CI's `flavors` matrix covers `postgres-only`.
 - **Named-connection `async` / `udf`.** The worker pool and the UDF path are
   single-DSN (the `-d` / "default" connection), so `async` / `udf` live on
   `db.default()` only. Per-name worker connections would let

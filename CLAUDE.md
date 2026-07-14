@@ -306,12 +306,14 @@ or a handler, not at module top-level; `db.default()` works everywhere.
 
 **Flag combinations.** `HL_ENABLE_SQLITE` (default 1) and `HL_ENABLE_POSTGRES`
 (default 0) are independent; `HL_ENABLE_DB` is the derived umbrella (on iff
-either is). `make HL_ENABLE_POSTGRES=1` builds both backends. (A SQLite-off,
-Postgres-only build is not yet link-clean -- `mod_db.c`'s udf code and a few
-`sqlite3_*` accessors are still unconditional; tracked follow-up.) CI covers
-the `sqlite + postgres` link flavor, the three pg fuzzers, and a full
-`e2e_postgres` job (real Postgres 16 in Docker: SCRAM + TLS + migrations +
-`db.async` + stdlib). Design + rationale: [docs/postgres_backend_design.md](docs/postgres_backend_design.md).
+either is). `make HL_ENABLE_POSTGRES=1` builds both backends;
+`make HL_ENABLE_SQLITE=0 HL_ENABLE_POSTGRES=1` builds a Postgres-only binary
+(SQLite dropped -- so `db.udf` and `hull/search` are absent, and the
+SQLite-file agent introspection `hull agent db|migrate|schema-diff|sql` is
+compiled out). CI covers the `sqlite + postgres` and `postgres-only` link
+flavors, the three pg fuzzers, and a full `e2e_postgres` job (real Postgres 16
+in Docker: SCRAM + TLS + migrations + `db.async` + stdlib). Design +
+rationale: [docs/postgres_backend_design.md](docs/postgres_backend_design.md).
 
 ### Lua/JS orchestration overhead for compute-heavy workloads
 

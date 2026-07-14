@@ -13,6 +13,7 @@
 #ifdef HL_ENABLE_DB
 
 #include "hull/cap/db_backend.h"
+#include "hull/cap/db.h"   /* HlDbError codes + check_namespace decl */
 #include <string.h>
 
 /* Case-sensitive prefix test. DSN schemes are lowercase by convention. */
@@ -48,6 +49,23 @@ const HlDbBackend *hl_db_backend_select(const char *dsn, const char **err)
                ":memory: DSN requires it";
     return NULL;
 #endif
+}
+
+/* ── Namespace protection ──────────────────────────────────────────── */
+
+/* Backend-agnostic string check (no SQL execution), so it lives with the
+ * selector rather than the SQLite engine (cap/db.c) and stays available in a
+ * Postgres-only build. Rejects any SQL touching a reserved `_hull_*` table. */
+int hl_cap_db_check_namespace(const char *sql)
+{
+    if (!sql)
+        return HL_DB_ERR_DENIED;
+    for (const char *p = sql; *p; p++) {
+        if ((*p == '_' || *p == 'H' || *p == 'h') &&
+            strncasecmp(p, "_hull_", 6) == 0)
+            return HL_DB_ERR_DENIED;
+    }
+    return HL_DB_OK;
 }
 
 #endif /* HL_ENABLE_DB */

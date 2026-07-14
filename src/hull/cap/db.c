@@ -411,18 +411,4 @@ void hl_cap_db_guard_stale_txn(sqlite3 *db)
     }
 }
 
-/* ── Namespace protection ──────────────────────────────────────────── */
-
-int hl_cap_db_check_namespace(const char *sql)
-{
-    if (!sql)
-        return HL_DB_ERR_DENIED;
-    for (const char *p = sql; *p; p++) {
-        if ((*p == '_' || *p == 'H' || *p == 'h') &&
-            strncasecmp(p, "_hull_", 6) == 0)
-            return HL_DB_ERR_DENIED;
-    }
-    return HL_DB_OK;
-}
-
 #endif /* HL_ENABLE_DB */

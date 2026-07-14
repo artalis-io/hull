@@ -765,6 +765,9 @@ static JSValue js_db_async_exec(JSContext *ctx, JSValueConst this_val,
 }
 
 /* ── db.udf — user-defined SQL functions (JS) ────────────────────────── */
+/* SQLite-only: UDFs register into the SQLite VM via sqlite3_create_function
+ * and marshal sqlite3_value/context. Compiled out of a Postgres-only build. */
+#ifdef HL_ENABLE_SQLITE
 
 /* Context for JS scalar UDF trampoline */
 typedef struct {
@@ -1235,6 +1238,8 @@ static JSValue js_db_udf_unregister(JSContext *ctx, JSValueConst this_val,
 #endif
 }
 
+#endif /* HL_ENABLE_SQLITE (db.udf) */
+
 /* Build a connection object (HullDbConnection instance) carrying @p h as its
  * opaque. The sync methods are the same C functions the top-level bridge uses;
  * js_call_handle picks the bound handle over the runtime default. async / udf
@@ -1272,12 +1277,14 @@ static JSValue push_conn_object(JSContext *ctx, HlDbHandle *h, int is_default)
                           JS_NewCFunction(ctx, js_db_async_exec, "exec", 2));
         JS_SetPropertyStr(ctx, obj, "async", async_obj);
 
+#ifdef HL_ENABLE_SQLITE
         JSValue udf_obj = JS_NewObject(ctx);
         JS_SetPropertyStr(ctx, udf_obj, "register",
                           JS_NewCFunction(ctx, js_db_udf_register, "register", 3));
         JS_SetPropertyStr(ctx, udf_obj, "unregister",
                           JS_NewCFunction(ctx, js_db_udf_unregister, "unregister", 1));
         JS_SetPropertyStr(ctx, obj, "udf", udf_obj);
+#endif
     }
     const HlDbBackend *be = h ? h->backend : NULL;
     JS_SetPropertyStr(ctx, obj, "backendName",
