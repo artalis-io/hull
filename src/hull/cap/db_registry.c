@@ -181,6 +181,12 @@ const char *hl_db_registry_dsn_for(HlDbRegistry *reg, const HlDbHandle *h)
     return NULL;
 }
 
+const HlManifestDbDynamic *hl_db_registry_dynamic_policy(HlDbRegistry *reg)
+{
+    if (!reg || !reg->manifest) return NULL;
+    return &reg->manifest->databases.dynamic;
+}
+
 void hl_db_registry_destroy(HlDbRegistry *reg)
 {
     if (!reg) return;

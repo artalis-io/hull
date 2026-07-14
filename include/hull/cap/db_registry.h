@@ -21,6 +21,7 @@
 #include "hull/cap/db_backend.h"
 
 typedef struct HlManifest  HlManifest;
+typedef struct HlManifestDbDynamic HlManifestDbDynamic;
 typedef struct HlAllocator HlAllocator;
 typedef struct HlDbRegistry HlDbRegistry;
 
@@ -90,10 +91,17 @@ HlDbHandle *hl_db_registry_get(HlDbRegistry *reg, const char *name,
  */
 #ifdef HL_ENABLE_DB
 const char *hl_db_registry_dsn_for(HlDbRegistry *reg, const HlDbHandle *h);
+
+/* The manifest's databases.dynamic policy (for db.open), or NULL if no manifest
+ * is set. Borrowed; valid until the sealed manifest is torn down. */
+const HlManifestDbDynamic *hl_db_registry_dynamic_policy(HlDbRegistry *reg);
 #else
 static inline const char *hl_db_registry_dsn_for(HlDbRegistry *reg,
                                                  const HlDbHandle *h)
 { (void)reg; (void)h; return (const char *)0; }
+static inline const HlManifestDbDynamic *
+hl_db_registry_dynamic_policy(HlDbRegistry *reg)
+{ (void)reg; return (const HlManifestDbDynamic *)0; }
 #endif
 
 /* Close every registry-owned connection and free the registry. Seeded
