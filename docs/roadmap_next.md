@@ -2731,6 +2731,39 @@ http should adopt §2.2's richer matcher + env-ref conventions:
 **Out of scope:** a general "capabilities DSL" rewrite; this is convergence of
 the existing outbound allowlists onto one shape, not a new framework.
 
+### 2.9 Opt-in `SQLITE_OPEN_URI` for shared-cache in-memory DBs
+
+Surfaced from the `db.async` + `:memory:` caveat (documented in CLAUDE.md): the
+worker pool opens a per-thread connection per DSN, and a bare `:memory:` DSN is
+connection-PRIVATE in SQLite, so async workers each get a fresh empty DB rather
+than the sync connection's data. The documented workaround is a file / tmpfs
+path (shared by path, WAL concurrency, no keeper). This item tracks the *other*
+option: a named shared-cache in-memory DB (`file:x?mode=memory&cache=shared`),
+which several connections can attach to as one database.
+
+It does not work today because `cap/db_sqlite.c` opens via plain `sqlite3_open`,
+which does not parse `file:` URIs (`SQLITE_USE_URI` unset, not `open_v2` with
+`SQLITE_OPEN_URI`). Enabling it is a deliberate, self-contained change,
+orthogonal to §2.2's async work (do NOT ride it in with that):
+
+- [ ] Switch SQLite open to `sqlite3_open_v2` with `SQLITE_OPEN_URI` (opt-in per
+      DSN, or a manifest flag) so `file:...?mode=memory&cache=shared` and other
+      URI DSNs are honored. Gate behind the fs sandbox: URI query params
+      (`?vfs=`, `?mode=rwc`, `?cache=`) broaden what a runtime-computed
+      `db.open(dsn)` can express, so the DSN + its params must pass the same
+      validation as a plain path (reject `vfs=`, constrain `mode=`).
+- [ ] Lifetime: a shared in-memory DB evaporates when the last connection
+      closes. Document / enforce that the registry default connection is the
+      keeper (held open for process life) so worker connections attaching to the
+      same name don't race it to zero.
+- [ ] Weigh shared-cache's coarse (table-level) locking + `SQLITE_LOCKED` retry
+      surface against just recommending a tmpfs file. May land as
+      "documented + gated" rather than "on by default".
+
+**Out of scope:** making bare `:memory:` magically shared (it is defined as
+connection-private; auto-rewriting it would surprise apps using it as a private
+scratch DB). This is an explicit named-URI opt-in only.
+
 ### Backend-onboarding checklist (what each new backend needs)
 
 A new backend after §2 should be: one self-contained `cap/db_<x>.c` implementing

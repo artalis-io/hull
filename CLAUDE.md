@@ -332,6 +332,19 @@ consumers resolve it via `hl_db_registry_default`. `db.connect(name)` resolves
 after startup (the manifest is applied post-load), so call it from `app.main`
 or a handler, not at module top-level; `db.default()` works everywhere.
 
+**`db.async` + `:memory:` (SQLite) caveat.** `db.async` runs on the worker
+pool, where each thread opens its OWN connection to the target DSN (keyed by
+DSN). A bare `:memory:` DSN is a connection-PRIVATE database in SQLite: every
+open is a fresh empty DB, so a worker's `:memory:` never sees the rows the
+sync (event-loop-thread) connection wrote. This is SQLite semantics, not a
+Hull bug. For state that async workers must see, use a **file** (a normal
+SQLite path, or a tmpfs path like `/dev/shm/app.db` on Linux for RAM-speed):
+every worker opens the same path, so they share one database, and WAL gives
+concurrent readers. Postgres is shared by nature. (A named shared-cache
+in-memory DB, `file:x?mode=memory&cache=shared`, would also share, but Hull
+opens via plain `sqlite3_open`, which does not parse `file:` URIs today; see
+roadmap §2.9.)
+
 **PostgreSQL specifics** (`HL_ENABLE_POSTGRES=1`):
 - **Auth:** SCRAM-SHA-256 (the postgres:16 default) and `trust` / cleartext.
   MD5 is rejected. Reuses `cap/crypto` (SHA-256 / HMAC / PBKDF2).
