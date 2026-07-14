@@ -80,6 +80,22 @@ int hl_db_registry_seed(HlDbRegistry *reg, const char *name,
 HlDbHandle *hl_db_registry_get(HlDbRegistry *reg, const char *name,
                                const char **err);
 
+/*
+ * Return the DSN a connection was opened from, matched by handle identity
+ * (the pointer returned by _get / _default). Used by db.async on a connection
+ * object to tell the worker pool WHICH database to open its per-thread
+ * connection against. Returns NULL for a seeded/borrowed connection whose DSN
+ * the registry never saw (the async path then falls back to the worker's
+ * default DSN). The returned string is registry-owned and valid until destroy.
+ */
+#ifdef HL_ENABLE_DB
+const char *hl_db_registry_dsn_for(HlDbRegistry *reg, const HlDbHandle *h);
+#else
+static inline const char *hl_db_registry_dsn_for(HlDbRegistry *reg,
+                                                 const HlDbHandle *h)
+{ (void)reg; (void)h; return (const char *)0; }
+#endif
+
 /* Close every registry-owned connection and free the registry. Seeded
  * (externally-owned) connections are left untouched. */
 void hl_db_registry_destroy(HlDbRegistry *reg);

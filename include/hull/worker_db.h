@@ -39,9 +39,20 @@ typedef struct HlWorkerDb {
  * valid for the process lifetime. */
 void hl_worker_db_init(const char *dsn);
 
-/* Get current worker thread's DB connection (lazy open on first call).
- * Returns NULL on error. Thread-safe: each thread gets its own connection. */
+/* Get current worker thread's DB connection to the DEFAULT database (lazy
+ * open on first call). Returns NULL on error. Thread-safe: each thread gets
+ * its own connection. Equivalent to hl_worker_db_get_for(NULL). */
 HlWorkerDb *hl_worker_db_get(void);
+
+/*
+ * Get this worker thread's connection to the database identified by @p dsn
+ * (lazy open on first call, cached per-thread per-DSN). @p dsn NULL selects
+ * the default database (the one passed to hl_worker_db_init). Lets db.async
+ * on a named connection object target its own database rather than always the
+ * default. Returns NULL on backend-select / open failure. Thread-safe: the
+ * cache is thread-local, so no locking and no cross-thread connection sharing.
+ */
+HlWorkerDb *hl_worker_db_get_for(const char *dsn);
 
 /*
  * Shared "get worker DB + check internal-table namespace" helper for the
@@ -85,6 +96,10 @@ typedef struct HlWorkerDbOp {
 
     /* Input (deep-copied, owned) */
     char          *sql;
+    char          *dsn;    /* owned; target database DSN, NULL = default. The
+                            * worker opens its per-thread connection against
+                            * this so db.async on a named connection hits the
+                            * right database. */
     HlValue       *params;
     int            nparams;
 
