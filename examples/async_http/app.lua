@@ -11,7 +11,7 @@
 -- and worker.dispatch() — all yield the coroutine and let the event
 -- loop serve other connections while waiting.
 
-local db = require("hull.db")
+local db = require("hull.db").default()
 local http_client = require("hull.http-client")
 local worker = require("hull.worker")
 

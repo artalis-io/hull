@@ -12,7 +12,8 @@
 import { app } from "hull:app";
 import { crypto } from "hull:crypto";
 import { csv } from "hull:csv";
-import { db } from "hull:db";
+import { db as dbModule } from "hull:db";
+const db = dbModule.default();
 import { httpClient } from "hull:http-client";
 import { i18n } from "hull:i18n";
 import { log } from "hull:log";

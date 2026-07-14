@@ -4,7 +4,7 @@
 -- Session-based auth API: register, login, logout, protected routes
 
 local crypto   = require("hull.crypto")
-local db       = require("hull.db")
+local db       = require("hull.db").default()
 local time     = require("hull.time")
 local validate = require("hull.validate")
 local session  = require("hull.web.middleware.session")

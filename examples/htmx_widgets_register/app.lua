@@ -2,7 +2,7 @@
 -- in one tiny CRUD app. Doubles as adoption reference AND the manual
 -- UX-test surface (see README.md for the click-through checklist).
 
-local db           = require("hull.db")
+local db           = require("hull.db").default()
 local form_parse   = require("hull.web.form")
 local template     = require("hull.template")
 local validate     = require("hull.validate")

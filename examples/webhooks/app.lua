@@ -10,7 +10,7 @@
 --   - Retry with exponential backoff via outbox.flush()
 
 local crypto      = require("hull.crypto")
-local db          = require("hull.db")
+local db          = require("hull.db").default()
 local env         = require("hull.env")
 local time        = require("hull.time")
 local validate    = require("hull.validate")

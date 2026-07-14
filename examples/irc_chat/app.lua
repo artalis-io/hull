@@ -28,7 +28,7 @@
 --   WS /ws — authenticated chat (see protocol below)
 
 local crypto   = require("hull.crypto")
-local db       = require("hull.db")
+local db       = require("hull.db").default()
 local time     = require("hull.time")
 local validate = require("hull.validate")
 local ws_server        = require("hull.web.ws-server")  -- broadcast, connections (server)

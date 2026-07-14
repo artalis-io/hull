@@ -11,7 +11,7 @@
 --   SMTP_FROM  — sender address (default: noreply@example.com)
 --   SMTP_TLS   — "true" for STARTTLS, "false" for plain (default: true)
 
-local db       = require("hull.db")
+local db       = require("hull.db").default()
 local env      = require("hull.env")
 local smtp     = require("hull.smtp")
 local time     = require("hull.time")

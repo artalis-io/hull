@@ -7,7 +7,7 @@
 --   GET  /mixed       — mixed: 1 INSERT + 1 SELECT (20 rows)
 --   GET  /health      — baseline (no DB)
 
-local db   = require("hull.db")
+local db   = require("hull.db").default()
 local time = require("hull.time")
 
 local log = require("hull.log")

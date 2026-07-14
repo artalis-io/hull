@@ -4,7 +4,7 @@
 -- Token-based auth API: register, login, protected routes using Bearer tokens
 
 local crypto   = require("hull.crypto")
-local db       = require("hull.db")
+local db       = require("hull.db").default()
 local env      = require("hull.env")
 local jwt      = require("hull.jwt")
 local time     = require("hull.time")

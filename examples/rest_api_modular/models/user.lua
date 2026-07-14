@@ -4,7 +4,7 @@
 -- stay focused on HTTP concerns. The returned table is the resource's
 -- public surface; route handlers shouldn't touch `db` directly.
 
-local db     = require("hull.db")
+local db     = require("hull.db").default()
 local crypto = require("hull.crypto")
 local time   = require("hull.time")
 

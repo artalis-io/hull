@@ -4,7 +4,7 @@
 -- Tasks API with session-based auth — each user only sees their own tasks
 
 local crypto   = require("hull.crypto")
-local db       = require("hull.db")
+local db       = require("hull.db").default()
 local time     = require("hull.time")
 local validate = require("hull.validate")
 local session  = require("hull.web.middleware.session")
