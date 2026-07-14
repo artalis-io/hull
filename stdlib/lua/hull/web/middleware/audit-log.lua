@@ -35,6 +35,11 @@ local _state = {
     retain_days       = 365,
     fingerprint_salt  = nil,  -- required at init time
     _initialized      = false,
+    -- When false (default), the recorded IP + device fingerprint use
+    -- req.remote_addr (the un-spoofable socket peer). Set trust_proxy = true
+    -- only behind a proxy that sets X-Forwarded-For, so a directly-exposed
+    -- client can't forge its IP to spoof a known device / evade alerts.
+    trust_proxy       = false,
 }
 
 --- Initialize the audit-log table. Call once at app startup
@@ -75,6 +80,7 @@ function audit_log.init(opts)
     if opts.retain_days ~= nil then
         _state.retain_days = opts.retain_days
     end
+    _state.trust_proxy = opts.trust_proxy == true
     db.exec(
         "CREATE TABLE IF NOT EXISTS _hull_audit_log ("
         .. "id          " .. db.autoincrement_id_ddl .. ", "
@@ -211,7 +217,7 @@ local function extract_ip(req)
     if not (req and req.headers) then return nil end
     local ip
     local xff = req.headers["x-forwarded-for"]
-    if xff then
+    if _state.trust_proxy and xff then
         local first = xff:match("^([^,]+)")
         if first then
             ip = first:gsub("^%s+", ""):gsub("%s+$", "")

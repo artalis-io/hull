@@ -21,10 +21,14 @@ app.manifest({
     ],
 });
 
-session.init();
+// This fixture simulates distinct clients via X-Forwarded-For (a behind-a-
+// proxy topology), so it opts into trustProxy so the recorded IP + device
+// fingerprint reflect the forwarded client rather than the loopback peer.
+session.init({ trustProxy: true });
 auditLog.init({
     retainDays: 365,
     fingerprintSalt: "sign-in-events-fixture-fingerprint-salt",
+    trustProxy: true,
 });
 
 const usersByEmail = {};

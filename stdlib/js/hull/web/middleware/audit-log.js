@@ -33,6 +33,11 @@ const _state = {
     cleanupScheduled: false,
     catchupDone: false,
     cleanupOptedOut: false,
+    // When false (default), the recorded IP + device fingerprint use
+    // req.remote_addr (the un-spoofable socket peer). Set trustProxy: true only
+    // behind a proxy that sets X-Forwarded-For, so a directly-exposed client
+    // can't forge its IP to spoof a known device / evade new-device alerts.
+    trustProxy: false,
 };
 
 function init(opts) {
@@ -50,6 +55,7 @@ function init(opts) {
     }
     _state.fingerprintSalt = opts.fingerprintSalt;
     if (opts.retainDays !== undefined) _state.retainDays = opts.retainDays;
+    if (opts.trustProxy !== undefined) _state.trustProxy = opts.trustProxy === true;
     db.exec(
         "CREATE TABLE IF NOT EXISTS _hull_audit_log ("
         + "id          " + db.autoincrementIdDdl + ", "
@@ -154,7 +160,7 @@ function extractIp(req) {
     if (!req || !req.headers) return null;
     let ip;
     const xff = req.headers["x-forwarded-for"];
-    if (xff) ip = (xff.split(",")[0] || xff).trim();
+    if (_state.trustProxy && xff) ip = (xff.split(",")[0] || xff).trim();
     else ip = req.remote_addr || null;
     // Round-9 MEDIUM-7: cap IP. See Lua sibling.
     if (typeof ip === "string" && ip.length > 64) {

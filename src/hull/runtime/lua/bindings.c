@@ -22,11 +22,15 @@
 #include <keel/request.h>
 #include <keel/response.h>
 #include <keel/router.h>
+#include <keel/connection.h>  /* KlConn.fd for the peer address */
 
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
 
 /* ── Response metatable name ────────────────────────────────────────── */
 
@@ -87,6 +91,28 @@ static size_t hl_query_decode_inplace(char *s, size_t len)
         }
     }
     return w;
+}
+
+/* Numeric client IP from the connection's peer address, "" on failure.
+ * Sibling copy in src/hull/runtime/js/bindings.c (hl_request_peer_ip_js).
+ * Best-effort: getpeername fails on an already-closed connection or the
+ * in-process test harness (no socket), in which case remote_addr is absent
+ * and stdlib callers fall back per their own policy (per-user, "_anon"). */
+static void request_peer_ip(KlRequest *req, char *buf, size_t buflen)
+{
+    buf[0] = '\0';
+    KlConn *conn = kl_request_conn(req);
+    if (!conn || conn->fd < 0) return;
+    struct sockaddr_storage ss;
+    socklen_t slen = sizeof ss;
+    if (getpeername(conn->fd, (struct sockaddr *)&ss, &slen) != 0) return;
+    if (ss.ss_family == AF_INET) {
+        struct sockaddr_in *s4 = (struct sockaddr_in *)&ss;
+        inet_ntop(AF_INET, &s4->sin_addr, buf, (socklen_t)buflen);
+    } else if (ss.ss_family == AF_INET6) {
+        struct sockaddr_in6 *s6 = (struct sockaddr_in6 *)&ss;
+        inet_ntop(AF_INET6, &s6->sin6_addr, buf, (socklen_t)buflen);
+    }
 }
 
 void hl_lua_make_request(lua_State *L, KlRequest *req)
@@ -187,6 +213,19 @@ void hl_lua_make_request(lua_State *L, KlRequest *req)
         }
     }
     lua_setfield(L, -2, "headers");
+
+    /* remote_addr: numeric peer IP from the socket, absent (nil) when
+     * unavailable. This is the un-spoofable client address; middleware that
+     * gates on IP (session, audit-log, totp) uses it as the trusted source and
+     * only consults X-Forwarded-For when the app opts into trust_proxy. */
+    {
+        char peer[INET6_ADDRSTRLEN];
+        request_peer_ip(req, peer, sizeof peer);
+        if (peer[0]) {
+            lua_pushstring(L, peer);
+            lua_setfield(L, -2, "remote_addr");
+        }
+    }
 
     /* body — extract from buffer reader if available. For streaming-
      * multipart routes the body_reader is the parkable wrapper (not a

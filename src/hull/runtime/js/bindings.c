@@ -23,10 +23,14 @@ _Static_assert(sizeof(JSValue) <= sizeof(((HlReqCtx *)0)->js_val_bytes),
 #include <keel/request.h>
 #include <keel/response.h>
 #include <keel/router.h>
+#include <keel/connection.h>  /* KlConn.fd for the peer address */
 
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
 
 /* ── Request object ─────────────────────────────────────────────────── */
 
@@ -105,6 +109,26 @@ static size_t hl_query_decode_inplace(char *s, size_t len)
         }
     }
     return w;
+}
+
+/* Numeric client IP from the connection's peer address, "" on failure.
+ * Sibling copy in src/hull/runtime/lua/bindings.c (request_peer_ip). See there
+ * for the rationale; best-effort, absent when unavailable. */
+static void hl_request_peer_ip_js(KlRequest *req, char *buf, size_t buflen)
+{
+    buf[0] = '\0';
+    KlConn *conn = kl_request_conn(req);
+    if (!conn || conn->fd < 0) return;
+    struct sockaddr_storage ss;
+    socklen_t slen = sizeof ss;
+    if (getpeername(conn->fd, (struct sockaddr *)&ss, &slen) != 0) return;
+    if (ss.ss_family == AF_INET) {
+        struct sockaddr_in *s4 = (struct sockaddr_in *)&ss;
+        inet_ntop(AF_INET, &s4->sin_addr, buf, (socklen_t)buflen);
+    } else if (ss.ss_family == AF_INET6) {
+        struct sockaddr_in6 *s6 = (struct sockaddr_in6 *)&ss;
+        inet_ntop(AF_INET6, &s6->sin6_addr, buf, (socklen_t)buflen);
+    }
 }
 
 JSValue hl_js_make_request(JSContext *ctx, KlRequest *req)
@@ -205,6 +229,16 @@ JSValue hl_js_make_request(JSContext *ctx, KlRequest *req)
         }
     }
     JS_SetPropertyStr(ctx, obj, "headers", headers_obj);
+
+    /* remote_addr: numeric peer IP from the socket, absent when unavailable.
+     * The un-spoofable client address; IP-gating middleware uses it as the
+     * trusted source and consults X-Forwarded-For only under trust_proxy. */
+    {
+        char peer[INET6_ADDRSTRLEN];
+        hl_request_peer_ip_js(req, peer, sizeof peer);
+        if (peer[0])
+            JS_SetPropertyStr(ctx, obj, "remote_addr", JS_NewString(ctx, peer));
+    }
 
     /* body — extract from buffer reader if available. Streaming-multipart
      * routes have a wrapper reader (not a KlBufReader), so body = null

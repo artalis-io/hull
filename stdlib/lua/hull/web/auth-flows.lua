@@ -148,6 +148,10 @@ local _state = {
     public_origin         = nil,
     trusted_hosts         = nil,
     trust_request_host    = false,
+    -- Honor X-Forwarded-Proto only behind a trusted proxy. Off by default so a
+    -- spoofed header can't downgrade an emailed https link to http on a
+    -- directly-exposed app; the per-branch scheme default is used otherwise.
+    trust_proxy           = false,
     enumeration_safe      = true,
     -- Magic-link to an unknown email: silently no-op by default
     -- (enumeration-safe; matches the rest of the unknown-email
@@ -564,7 +568,8 @@ local function origin_for(req)
                     raw_host = raw_host:sub(1, raw_comma - 1)
                 end
                 raw_host = raw_host:match("^%s*(.-)%s*$")
-                local proto = h["x-forwarded-proto"] or "https"
+                local proto = _state.trust_proxy
+                    and (h["x-forwarded-proto"] or "https") or "https"
                 return proto .. "://" .. raw_host
             end
         end
@@ -579,7 +584,8 @@ local function origin_for(req)
             raw_host = raw_host:sub(1, raw_comma - 1)
         end
         raw_host = raw_host:match("^%s*(.-)%s*$")
-        local proto = h["x-forwarded-proto"] or "http"
+        local proto = _state.trust_proxy
+            and (h["x-forwarded-proto"] or "http") or "http"
         return proto .. "://" .. raw_host
     end
     -- We get here only if a request lands with a host not in the
@@ -1353,7 +1359,7 @@ local function register_routes(app)
             -- trim whitespace. App-supplied opts.key still wins.
             key    = rl_opts.key or function(req)
                 local xff = req.headers and req.headers["x-forwarded-for"]
-                if xff and xff ~= "" then
+                if _state.trust_proxy and xff and xff ~= "" then
                     local comma = xff:find(",", 1, true)
                     local first = comma and xff:sub(1, comma - 1) or xff
                     local trimmed = first:match("^%s*(.-)%s*$")
@@ -1616,6 +1622,7 @@ function M.init(opts)
     _state.public_origin    = opts.public_origin
     _state.trusted_hosts    = opts.trusted_hosts
     _state.trust_request_host = opts.trust_request_host == true
+    _state.trust_proxy = opts.trust_proxy == true
     -- Round-12 MEDIUM-1: reset the one-shot host-mismatch warn so a
     -- hot-reload that fixes / changes the allowlist gets a fresh
     -- diagnostic on the next bad host. Without this, the warn fires

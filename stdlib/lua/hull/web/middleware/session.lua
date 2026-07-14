@@ -35,6 +35,11 @@ local _absolute_ttl = 86400
 local _initialized = false
 local _cleanup_catchup_done = false
 local _cleanup_scheduled = false
+-- When false (default), the recorded client IP is req.remote_addr (the
+-- un-spoofable socket peer). Set trust_proxy = true only behind a proxy that
+-- sets X-Forwarded-For, so a directly-exposed client can't forge its IP to
+-- evade the device-list / new-device audit trail.
+local _trust_proxy = false
 
 --- Initialize the sessions table.
 --
@@ -69,6 +74,7 @@ function session.init(opts)
     if opts.ttl ~= nil then
         _ttl = opts.ttl
     end
+    _trust_proxy = opts.trust_proxy == true
     -- absolute_ttl:
     --   * nil    → keep module default (24h).
     --   * false  → disabled (the canonical opt-out — apps that
@@ -199,7 +205,7 @@ function session.create(data, opts)
     if opts and opts.req then
         local h = opts.req.headers
         local xff = h and h["x-forwarded-for"]
-        if xff then
+        if _trust_proxy and xff then
             ip = (xff:match("^([^,]+)") or xff):gsub("^%s+", ""):gsub("%s+$", "")
         else
             ip = opts.req.remote_addr

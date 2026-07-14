@@ -31,6 +31,11 @@ let cleanupScheduled = false;
 // missing session.init() before authflows.init() throws at wire
 // time, not at first request.
 let initialized = false;
+// When false (default), the recorded client IP is req.remote_addr (the
+// un-spoofable socket peer). Set trustProxy: true only behind a proxy that
+// sets X-Forwarded-For, so a directly-exposed client can't forge its IP to
+// evade the device-list / new-device audit trail.
+let trustProxy = false;
 
 /**
  * Initialize the sessions table. Call once at startup.
@@ -57,6 +62,7 @@ function init(opts) {
     // (first with custom ttl, second with just absoluteTtl) lost
     // their ttl on JS. Now matches Lua semantics.
     if (o.ttl !== undefined) sessionTtl = o.ttl;
+    if (o.trustProxy !== undefined) trustProxy = o.trustProxy === true;
     if (o.absoluteTtl !== undefined) {
         if (o.absoluteTtl === false) {
             absoluteTtl = null;
@@ -167,7 +173,7 @@ function create(data, opts) {
     if (opts && opts.req) {
         const h = opts.req.headers || {};
         const xff = h["x-forwarded-for"];
-        if (xff) ip = (xff.split(",")[0] || xff).trim();
+        if (trustProxy && xff) ip = (xff.split(",")[0] || xff).trim();
         else ip = opts.req.remote_addr || null;
         ua = h["user-agent"] || null;
         // Real UAs top out around 500 chars; bots and scanners can
