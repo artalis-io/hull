@@ -570,6 +570,19 @@ jobs:
         timeout-minutes: 3
         run: ./fuzz/fuzz_pg_rewrite fuzz/corpus_pg_rewrite/ -max_total_time=60
 
+      - name: Fuzz mysqlwire (60s)
+        # MySQL/MariaDB wire reader over untrusted server bytes: bounds-checked
+        # framing + length-encoded int/string cursor is the trust boundary for a
+        # malicious or MITM'd MySQL. An OOB read is an info-leak / crash.
+        timeout-minutes: 3
+        run: ./fuzz/fuzz_mysqlwire fuzz/corpus_mysqlwire/ -max_total_time=60
+
+      - name: Fuzz mysql_dsn (60s)
+        # MySQL/MariaDB DSN parser: percent-decoding + bounded field splitting
+        # over a user-supplied connection string.
+        timeout-minutes: 3
+        run: ./fuzz/fuzz_mysql_dsn fuzz/corpus_mysql_dsn/ -max_total_time=60
+
   # End-to-end against a real PostgreSQL 16 (started in Docker by the script).
   # Exercises the whole path the unit tests can't: DSN -> SCRAM-SHA-256 auth
   # (plaintext + TLS via a self-signed cert) -> parameterized query + typed

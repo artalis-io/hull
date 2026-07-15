@@ -2861,10 +2861,14 @@ the shared `shared/tls_client.c`; hashes via `cap/crypto`.
       `mysql://` / `mariadb://` route to it; reserved-scheme hint gone when
       compiled. `test_db_select` routing case (both modes); CI `sqlite + mysql`
       and `mysql-only` link flavors; sqlite / mysql-only / DB=0 all build clean.
-- [ ] **1b - wire codec + DSN parser.** `cap/mysqlwire.c` (packet framing:
-      3-byte LE len + seq, length-encoded ints/strings, OK/ERR/EOF packets),
-      `mysql://` DSN parse (host/port/user/password/db + params), fuzzers +
-      unit tests. Pure functions, no socket.
+- [x] **1b - wire codec + DSN parser.** `cap/mysqlwire.{c,h}` (little-endian
+      writer/reader, 3-byte-len + seq framing, length-encoded ints/strings with
+      NULL-marker handling, bounds-checked cursor, OK/ERR packet parse, protocol
+      constants) + `cap/mysql_conn.{c,h}` (`mysql://`/`mariadb://` DSN parse:
+      percent-decode + bounded field split + scrub). `test_mysqlwire` (13 cases:
+      LE round-trips, lenenc boundaries, truncation/underrun/hostile-length,
+      OK/ERR parse, DSN valid/reject) + `fuzz_mysqlwire` + `fuzz_mysql_dsn`
+      (corpus + Makefile + CI). Pure functions, no socket.
 - [ ] **2 - handshake + native auth + text query.** Handshake v10 + capability
       negotiation, `mysql_native_password`, `COM_QUERY` + text result decode.
 - [ ] **3 - prepared statements.** `COM_STMT_PREPARE`/`EXECUTE`, binary param
