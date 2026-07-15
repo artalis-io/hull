@@ -215,6 +215,21 @@ typedef struct HlMyColumn {
 /* Parse a ColumnDefinition41 packet body. Returns 0 / -1 (malformed). */
 int hl_my_parse_column_def(const HlMyFrame *f, HlMyColumn *out);
 
+/* ── Prepared statements (COM_STMT_PREPARE response) ──────────────── */
+
+/* COM_STMT_PREPARE_OK: the statement handle plus the column / parameter counts
+ * needed to drive COM_STMT_EXECUTE and decode its binary rows. */
+typedef struct HlMyPrepareOk {
+    uint32_t statement_id;
+    uint16_t num_columns;
+    uint16_t num_params;
+    uint16_t warning_count;
+} HlMyPrepareOk;
+
+/* Parse a COM_STMT_PREPARE_OK packet body (first byte 0x00). Returns 0 / -1
+ * (malformed or a non-OK status byte). */
+int hl_my_parse_prepare_ok(const HlMyFrame *f, HlMyPrepareOk *out);
+
 /* Build a HandshakeResponse41 packet (client -> server) into @p w with sequence
  * @p seq. @p auth_resp is the plugin's auth response bytes (e.g. the 20-byte
  * native_password scramble, or empty). @p dbname / @p plugin are written only

@@ -414,6 +414,26 @@ int hl_my_parse_column_def(const HlMyFrame *f, HlMyColumn *out)
     return 0;
 }
 
+int hl_my_parse_prepare_ok(const HlMyFrame *f, HlMyPrepareOk *out)
+{
+    HlMyCursor c;
+    hl_my_cursor_init(&c, f);
+    if (hl_my_get_u8(&c) != HL_MY_PKT_OK) return -1;   /* status 0x00 */
+    uint32_t stmt = hl_my_get_u32(&c);
+    uint16_t ncol = hl_my_get_u16(&c);
+    uint16_t npar = hl_my_get_u16(&c);
+    (void)hl_my_get_u8(&c);                            /* reserved filler (0x00) */
+    if (hl_my_cursor_err(&c)) return -1;
+    uint16_t warn = hl_my_get_u16(&c);                 /* best-effort (may be absent) */
+    if (out) {
+        out->statement_id = stmt;
+        out->num_columns  = ncol;
+        out->num_params   = npar;
+        out->warning_count = warn;
+    }
+    return 0;
+}
+
 void hl_my_build_handshake_response(HlMyWriter *w, uint8_t seq,
                                     uint32_t client_caps, uint8_t charset,
                                     const char *user,

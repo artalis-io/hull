@@ -2897,8 +2897,17 @@ the shared `shared/tls_client.c`; hashes via `cap/crypto`.
       `upsert` / `table_columns` fail with a clear "needs prepared statements
       (Phase 3)" message; multi-statement `exec_script` (migrations) is Phase 4.
       `test_mysql_conn` gained a canned COM_QUERY result-set test.
-- [ ] **3 - prepared statements.** `COM_STMT_PREPARE`/`EXECUTE`, binary param
-      encode + binary row decode (the parameterized path).
+- [x] **3 - prepared statements.** `hl_my_conn_query_prepared` runs the binary
+      parameterized path: `COM_STMT_PREPARE`, drain the param/column def blocks,
+      `COM_STMT_EXECUTE` with a NULL bitmap + typed param block + binary-encoded
+      values, decode the binary result rows (2-bit-offset NULL bitmap, fixed-width
+      ints/floats, lenenc strings) via a typed row callback, then `COM_STMT_CLOSE`.
+      Hull binds INT to `LONGLONG`, DOUBLE to `DOUBLE`, TEXT to `VAR_STRING`, BLOB
+      to `BLOB`, nil to NULL. The `db_mysql.c` vtable routes any `nparams > 0`
+      query/exec here (values never touch the SQL text, so injection is
+      impossible); param-less calls stay on the text `COM_QUERY` path.
+      `test_mysql_conn` drives a canned PREPARE + EXECUTE (binary row) exchange;
+      the whole path is ASan/UBSan-clean.
 - [ ] **4 - dialect + migrations + types.** `INSERT IGNORE` / `ON DUPLICATE KEY
       UPDATE`, `LAST_INSERT_ID()`, `information_schema` columns, `exec_script`,
       full type coverage.

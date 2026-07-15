@@ -123,6 +123,55 @@ typedef int (*HlMyRowCb)(void *ctx, const char *const *values,
 int hl_my_conn_query(HlMyConn *conn, const char *sql,
                      HlMyDescCb desc_cb, HlMyRowCb row_cb, void *cb_ctx,
                      int64_t *affected);
+
+/* ── Prepared statements (binary protocol; parameterized) ─────────── */
+
+/* One bound parameter. @p type is the MySQL wire type (HL_MY_TYPE_*); Hull
+ * emits LONGLONG (integer), DOUBLE, VAR_STRING (text), BLOB, or NULL. String /
+ * blob values borrow @p v.s.ptr for the length of the call. */
+typedef struct HlMyParam {
+    uint8_t type;
+    int     is_null;              /* 1 = SQL NULL (type/value ignored) */
+    union {
+        int64_t i;               /* integer types */
+        double  d;               /* FLOAT / DOUBLE */
+        struct { const char *ptr; size_t len; } s;   /* string / blob */
+    } v;
+} HlMyParam;
+
+/* A decoded binary result value handed to the binary row callback. */
+typedef enum HlMyValKind {
+    HL_MY_VAL_NULL = 0,
+    HL_MY_VAL_INT,               /* signed integer types */
+    HL_MY_VAL_DOUBLE,            /* FLOAT / DOUBLE */
+    HL_MY_VAL_STR,               /* string / blob / decimal / date (borrowed) */
+} HlMyValKind;
+
+typedef struct HlMyVal {
+    HlMyValKind kind;
+    union {
+        int64_t i;
+        double  d;
+        struct { const char *ptr; size_t len; } s;   /* borrowed for the call */
+    } v;
+} HlMyVal;
+
+/* Binary row callback: @p vals is @p ncols decoded values, valid only for this
+ * call. Return non-zero to stop early (the connection still drains to EOF). */
+typedef int (*HlMyBinRowCb)(void *ctx, const HlMyVal *vals, int ncols);
+
+/*
+ * Prepare @p sql (COM_STMT_PREPARE), bind @p params (COM_STMT_EXECUTE, binary
+ * protocol), stream the binary result rows, and close the statement
+ * (COM_STMT_CLOSE). This is the parameterized path (no SQL injection: values
+ * never touch the SQL text). @p desc_cb / @p row_cb may be NULL for a
+ * no-result statement; on a plain OK the affected count is stored in *affected
+ * (may be NULL). Returns 0 / -1 with conn->errmsg set.
+ */
+int hl_my_conn_query_prepared(HlMyConn *conn, const char *sql,
+                              const HlMyParam *params, int nparams,
+                              HlMyDescCb desc_cb, HlMyBinRowCb row_cb,
+                              void *cb_ctx, int64_t *affected);
 #endif
 
 #endif /* HL_CAP_MYSQL_CONN_H */

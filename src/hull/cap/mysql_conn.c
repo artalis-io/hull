@@ -427,6 +427,9 @@ int hl_my_conn_open(HlMyConn *conn, const HlMyDsn *dsn, int timeout_ms)
 
 /* ── Queries (COM_QUERY text protocol) ────────────────────────────── */
 
+/* An EOF packet body is shorter than an OK/row body that also starts 0xFE. */
+#define HL_MY_EOF_MAX_LEN  9
+
 static void free_names(char **names, int n)
 {
     if (!names) return;
@@ -515,7 +518,7 @@ int hl_my_conn_query(HlMyConn *conn, const char *sql,
     int stop = 0;
     for (;;) {
         if (conn_next_frame(conn, &f) != 0) goto fail;
-        if (f.body_len > 0 && f.body[0] == HL_MY_PKT_EOF && f.body_len < 9)
+        if (f.body_len > 0 && f.body[0] == HL_MY_PKT_EOF && f.body_len < HL_MY_EOF_MAX_LEN)
             break;                              /* end of rows */
         if (f.body_len > 0 && f.body[0] == HL_MY_PKT_ERR) {
             HlMyErr e;
@@ -549,5 +552,256 @@ fail:
     free_names(names, ncols);
     free(fields); free(vals); free(lens);
     return -1;
+}
+
+/* ── Prepared statements (binary protocol) ────────────────────────── */
+
+/* COM_STMT_EXECUTE fixed fields + binary-row null-bitmap layout. */
+#define HL_MY_STMT_CURSOR_NONE       0x00  /* CURSOR_TYPE_NO_CURSOR */
+#define HL_MY_STMT_ITERATIONS        1u    /* always 1 for a single execute */
+#define HL_MY_STMT_NEW_PARAMS_BOUND  1     /* send the param type block this execute */
+#define HL_MY_STMT_ROW_NULL_OFFSET   2     /* binary result rows reserve 2 leading bits */
+
+/* Read @p n ColumnDefinition41 frames then the trailing EOF (skipped for n==0).
+ * Used to drain the metadata blocks in a COM_STMT_PREPARE_OK response. */
+static int drain_defs(HlMyConn *conn, int n)
+{
+    HlMyFrame f;
+    for (int i = 0; i < n; i++)
+        if (conn_next_frame(conn, &f) != 0) return -1;
+    if (n > 0 && conn_next_frame(conn, &f) != 0) return -1;   /* EOF */
+    return 0;
+}
+
+/* Decode one binary-protocol value at the cursor into @p out by column type. */
+static void decode_binary_value(HlMyCursor *rc, uint8_t type, HlMyVal *out)
+{
+    switch (type) {
+    case HL_MY_TYPE_TINY:
+        out->kind = HL_MY_VAL_INT; out->v.i = (int8_t)hl_my_get_u8(rc); return;
+    case HL_MY_TYPE_SHORT:
+        out->kind = HL_MY_VAL_INT; out->v.i = (int16_t)hl_my_get_u16(rc); return;
+    case HL_MY_TYPE_YEAR:
+        out->kind = HL_MY_VAL_INT; out->v.i = (uint16_t)hl_my_get_u16(rc); return;
+    case HL_MY_TYPE_LONG:
+    case HL_MY_TYPE_INT24:
+        out->kind = HL_MY_VAL_INT; out->v.i = (int32_t)hl_my_get_u32(rc); return;
+    case HL_MY_TYPE_LONGLONG:
+        out->kind = HL_MY_VAL_INT; out->v.i = (int64_t)hl_my_get_u64(rc); return;
+    case HL_MY_TYPE_FLOAT: {
+        uint32_t bits = hl_my_get_u32(rc);
+        float ff; memcpy(&ff, &bits, sizeof ff);
+        out->kind = HL_MY_VAL_DOUBLE; out->v.d = (double)ff; return;
+    }
+    case HL_MY_TYPE_DOUBLE: {
+        uint64_t bits = hl_my_get_u64(rc);
+        double dd; memcpy(&dd, &bits, sizeof dd);
+        out->kind = HL_MY_VAL_DOUBLE; out->v.d = dd; return;
+    }
+    default: {   /* string / blob / decimal / date / time: length-encoded bytes */
+        size_t l = 0;
+        const uint8_t *s = hl_my_get_lenenc_str(rc, &l);
+        out->kind = HL_MY_VAL_STR;
+        out->v.s.ptr = (const char *)s;
+        out->v.s.len = l;
+        return;
+    }
+    }
+}
+
+/* Serialize the bound parameters into a COM_STMT_EXECUTE packet body. */
+static int build_execute(HlMyWriter *w, uint32_t stmt_id,
+                         const HlMyParam *params, int nparams)
+{
+    hl_my_put_u8(w, HL_MY_COM_STMT_EXECUTE);
+    hl_my_put_u32(w, stmt_id);
+    hl_my_put_u8(w, HL_MY_STMT_CURSOR_NONE);
+    hl_my_put_u32(w, HL_MY_STMT_ITERATIONS);
+    if (nparams <= 0) return 0;
+
+    size_t nb = ((size_t)nparams + 7) / 8;
+    uint8_t *bitmap = calloc(nb, 1);
+    if (!bitmap) return -1;
+    for (int i = 0; i < nparams; i++)
+        if (params[i].is_null) bitmap[i >> 3] |= (uint8_t)(1u << (i & 7));
+    hl_my_put_bytes(w, bitmap, nb);
+    free(bitmap);
+
+    hl_my_put_u8(w, HL_MY_STMT_NEW_PARAMS_BOUND);
+    for (int i = 0; i < nparams; i++) {
+        hl_my_put_u8(w, params[i].is_null ? HL_MY_TYPE_NULL : params[i].type);
+        hl_my_put_u8(w, 0);                    /* signed (Hull binds signed) */
+    }
+    for (int i = 0; i < nparams; i++) {
+        if (params[i].is_null) continue;
+        switch (params[i].type) {
+        case HL_MY_TYPE_TINY:
+            hl_my_put_u8(w, (uint8_t)params[i].v.i); break;
+        case HL_MY_TYPE_LONGLONG:
+            hl_my_put_u64(w, (uint64_t)params[i].v.i); break;
+        case HL_MY_TYPE_DOUBLE: {
+            uint64_t bits; double dd = params[i].v.d;
+            memcpy(&bits, &dd, sizeof bits);
+            hl_my_put_u64(w, bits); break;
+        }
+        default:                               /* VAR_STRING / BLOB */
+            hl_my_put_lenenc_str(w, params[i].v.s.ptr, params[i].v.s.len);
+            break;
+        }
+    }
+    return 0;
+}
+
+int hl_my_conn_query_prepared(HlMyConn *conn, const char *sql,
+                              const HlMyParam *params, int nparams,
+                              HlMyDescCb desc_cb, HlMyBinRowCb row_cb,
+                              void *cb_ctx, int64_t *affected)
+{
+    if (affected) *affected = -1;
+
+    /* 1. COM_STMT_PREPARE (fresh command: sequence restarts at 0). */
+    HlMyWriter w; hl_my_writer_init(&w);
+    size_t m = hl_my_packet_begin(&w, 0);
+    hl_my_put_u8(&w, HL_MY_COM_STMT_PREPARE);
+    hl_my_put_bytes(&w, sql, strlen(sql));
+    hl_my_packet_end(&w, m);
+    int se = w.err || conn_send(conn, w.buf, w.len);
+    hl_my_writer_free(&w);
+    if (se) { conn_set_err(conn, "failed to send prepare"); return -1; }
+
+    HlMyFrame f;
+    if (conn_next_frame(conn, &f) != 0) return -1;
+    if (f.body_len > 0 && f.body[0] == HL_MY_PKT_ERR) {
+        HlMyErr e;
+        if (hl_my_parse_err(&f, 1, &e) == 0 && e.message_len)
+            snprintf(conn->errmsg, sizeof conn->errmsg, "prepare failed: %.*s",
+                     (int)e.message_len, e.message);
+        else conn_set_err(conn, "prepare failed");
+        return -1;
+    }
+    HlMyPrepareOk prep;
+    if (hl_my_parse_prepare_ok(&f, &prep) != 0) {
+        conn_set_err(conn, "malformed prepare response"); return -1;
+    }
+
+    /* The statement is live from here: every exit must close it. */
+    char       **names  = NULL;
+    HlMyField   *fields = NULL;
+    HlMyVal     *vals   = NULL;
+    int          ncols  = 0;
+    int          ret    = -1;
+
+    /* 2. Drain the PREPARE_OK parameter- and column-definition blocks; the
+     *    EXECUTE response re-sends the column metadata we decode against. */
+    if (drain_defs(conn, prep.num_params) != 0) goto close_stmt;
+    if (drain_defs(conn, prep.num_columns) != 0) goto close_stmt;
+
+    /* 3. COM_STMT_EXECUTE with the bound parameters. */
+    hl_my_writer_init(&w);
+    m = hl_my_packet_begin(&w, 0);
+    int be = build_execute(&w, prep.statement_id, params, nparams);
+    hl_my_packet_end(&w, m);
+    se = be || w.err || conn_send(conn, w.buf, w.len);
+    hl_my_writer_free(&w);
+    if (se) { conn_set_err(conn, "failed to send execute"); goto close_stmt; }
+
+    /* 4. EXECUTE response: OK (no result), ERR, or a binary result set. */
+    if (conn_next_frame(conn, &f) != 0) goto close_stmt;
+    if (f.body_len == 0) { conn_set_err(conn, "empty execute response"); goto close_stmt; }
+    uint8_t hdr = f.body[0];
+
+    if (hdr == HL_MY_PKT_OK) {
+        HlMyOk ok;
+        if (hl_my_parse_ok(&f, &ok) == 0) {
+            conn->last_insert_id = ok.last_insert_id;
+            if (affected) *affected = (int64_t)ok.affected_rows;
+        }
+        ret = 0;
+        goto close_stmt;
+    }
+    if (hdr == HL_MY_PKT_ERR) {
+        HlMyErr e;
+        if (hl_my_parse_err(&f, 1, &e) == 0 && e.message_len)
+            snprintf(conn->errmsg, sizeof conn->errmsg, "execute failed: %.*s",
+                     (int)e.message_len, e.message);
+        else conn_set_err(conn, "execute failed");
+        goto close_stmt;
+    }
+
+    /* Column count (lenenc), then the column definitions. */
+    HlMyCursor cc; hl_my_cursor_init(&cc, &f);
+    uint64_t ncols64 = hl_my_get_lenenc_int(&cc, NULL);
+    if (hl_my_cursor_err(&cc) || ncols64 == 0 || ncols64 > HL_MY_MAX_COLUMNS) {
+        conn_set_err(conn, "malformed column count"); goto close_stmt;
+    }
+    ncols = (int)ncols64;
+
+    names  = calloc((size_t)ncols, sizeof *names);
+    fields = calloc((size_t)ncols, sizeof *fields);
+    vals   = calloc((size_t)ncols, sizeof *vals);
+    if (!names || !fields || !vals) { conn_set_err(conn, "out of memory"); goto close_stmt; }
+
+    for (int i = 0; i < ncols; i++) {
+        if (conn_next_frame(conn, &f) != 0) goto close_stmt;
+        HlMyColumn col;
+        if (hl_my_parse_column_def(&f, &col) != 0) {
+            conn_set_err(conn, "malformed column definition"); goto close_stmt;
+        }
+        names[i] = malloc(col.name_len + 1);
+        if (!names[i]) { conn_set_err(conn, "out of memory"); goto close_stmt; }
+        memcpy(names[i], col.name, col.name_len);
+        names[i][col.name_len] = '\0';
+        fields[i].name = names[i];
+        fields[i].type = col.type;
+    }
+
+    if (conn_next_frame(conn, &f) != 0) goto close_stmt;   /* EOF after col defs */
+    if (desc_cb) desc_cb(cb_ctx, fields, ncols);
+
+    /* 5. Binary result rows until the terminating EOF. */
+    int stop = 0;
+    for (;;) {
+        if (conn_next_frame(conn, &f) != 0) goto close_stmt;
+        if (f.body_len > 0 && f.body[0] == HL_MY_PKT_EOF && f.body_len < HL_MY_EOF_MAX_LEN)
+            break;                                          /* end of rows */
+        if (f.body_len > 0 && f.body[0] == HL_MY_PKT_ERR) {
+            HlMyErr e;
+            if (hl_my_parse_err(&f, 1, &e) == 0 && e.message_len)
+                snprintf(conn->errmsg, sizeof conn->errmsg, "execute failed: %.*s",
+                         (int)e.message_len, e.message);
+            else conn_set_err(conn, "execute failed mid-result");
+            goto close_stmt;
+        }
+        HlMyCursor rc; hl_my_cursor_init(&rc, &f);
+        (void)hl_my_get_u8(&rc);                            /* row header 0x00 */
+        size_t nbm = ((size_t)ncols + 7 + HL_MY_STMT_ROW_NULL_OFFSET) / 8;
+        const uint8_t *bitmap = hl_my_get_bytes(&rc, nbm);
+        if (!bitmap) { conn_set_err(conn, "malformed binary row"); goto close_stmt; }
+        for (int i = 0; i < ncols; i++) {
+            int bit = i + HL_MY_STMT_ROW_NULL_OFFSET;
+            if (bitmap[bit >> 3] & (uint8_t)(1u << (bit & 7)))
+                vals[i].kind = HL_MY_VAL_NULL;
+            else
+                decode_binary_value(&rc, fields[i].type, &vals[i]);
+        }
+        if (hl_my_cursor_err(&rc)) { conn_set_err(conn, "malformed binary row"); goto close_stmt; }
+        if (row_cb && !stop && row_cb(cb_ctx, vals, ncols) != 0)
+            stop = 1;                                       /* keep draining to EOF */
+    }
+    ret = 0;
+
+close_stmt:
+    free_names(names, ncols);
+    free(fields);
+    free(vals);
+    /* COM_STMT_CLOSE (fresh command, no response). Best-effort. */
+    hl_my_writer_init(&w);
+    m = hl_my_packet_begin(&w, 0);
+    hl_my_put_u8(&w, HL_MY_COM_STMT_CLOSE);
+    hl_my_put_u32(&w, prep.statement_id);
+    hl_my_packet_end(&w, m);
+    if (!w.err) (void)conn_send(conn, w.buf, w.len);
+    hl_my_writer_free(&w);
+    return ret;
 }
 #endif

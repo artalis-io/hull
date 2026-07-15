@@ -6,10 +6,12 @@
  * One backend serves `mysql://` and `mariadb://` (shared protocol; MariaDB is a
  * MySQL fork).
  *
- * Phase 2c: connect + COM_QUERY text protocol. Parameterized queries + the
- * insert_if_absent / upsert / table_columns dialect helpers need the binary
- * prepared-statement protocol and fail with a clear message until Phase 3;
- * multi-statement exec_script (migrations) is Phase 4.
+ * Phase 3: connect, COM_QUERY text protocol (param-less), and parameterized
+ * query / exec via the binary prepared-statement protocol (COM_STMT_PREPARE /
+ * EXECUTE / CLOSE). The insert_if_absent / upsert dialect helpers need MySQL's
+ * INSERT IGNORE / ON DUPLICATE KEY syntax and the information_schema-backed
+ * table_columns; both, plus multi-statement exec_script (migrations), land in
+ * Phase 4.
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
@@ -104,6 +106,83 @@ static int adapter_row(void *ctx, const char *const *vals,
     return rc ? 1 : 0;
 }
 
+/* ── Adapter: prepared-statement binary rows -> HlRowCallback ──────── */
+
+typedef struct {
+    HlRowCallback user_cb;
+    void         *user_ctx;
+    char        **names;
+    int           nfields;
+} MyBinAdapter;
+
+static void bin_adapter_desc(void *ctx, const HlMyField *fields, int nf)
+{
+    MyBinAdapter *a = ctx;
+    a->nfields = nf;
+    if (nf <= 0) return;
+    a->names = calloc((size_t)nf, sizeof *a->names);
+    if (!a->names) { a->nfields = 0; return; }
+    for (int i = 0; i < nf; i++)
+        a->names[i] = strdup(fields[i].name ? fields[i].name : "");
+}
+
+static int bin_adapter_row(void *ctx, const HlMyVal *vals, int nc)
+{
+    MyBinAdapter *a = ctx;
+    if (!a->user_cb) return 0;
+    if (a->nfields > 0 && nc > a->nfields) nc = a->nfields;
+
+    HlColumn *cols = calloc((size_t)(nc > 0 ? nc : 1), sizeof *cols);
+    if (!cols) return 1;
+    for (int i = 0; i < nc; i++) {
+        cols[i].name = (a->names && a->names[i]) ? a->names[i] : "";
+        switch (vals[i].kind) {
+        case HL_MY_VAL_INT:
+            cols[i].value.type = HL_TYPE_INT;    cols[i].value.i = vals[i].v.i; break;
+        case HL_MY_VAL_DOUBLE:
+            cols[i].value.type = HL_TYPE_DOUBLE; cols[i].value.d = vals[i].v.d; break;
+        case HL_MY_VAL_STR:
+            cols[i].value.type = HL_TYPE_TEXT;
+            cols[i].value.s = vals[i].v.s.ptr;   cols[i].value.len = vals[i].v.s.len; break;
+        case HL_MY_VAL_NULL:
+        default:
+            cols[i].value.type = HL_TYPE_NIL; break;
+        }
+    }
+    int rc = a->user_cb(a->user_ctx, cols, nc);
+    free(cols);
+    return rc ? 1 : 0;
+}
+
+/* Convert Hull's HlValue params to wire-level HlMyParam. Strings/blobs borrow
+ * the HlValue bytes, so the returned array is valid only while @p params is. */
+static HlMyParam *encode_my_params(const HlValue *params, int n)
+{
+    if (n <= 0) return NULL;
+    HlMyParam *p = calloc((size_t)n, sizeof *p);
+    if (!p) return NULL;
+    for (int i = 0; i < n; i++) {
+        switch (params[i].type) {
+        case HL_TYPE_INT:
+            p[i].type = HL_MY_TYPE_LONGLONG;  p[i].v.i = params[i].i; break;
+        case HL_TYPE_BOOL:
+            p[i].type = HL_MY_TYPE_TINY;      p[i].v.i = params[i].b ? 1 : 0; break;
+        case HL_TYPE_DOUBLE:
+            p[i].type = HL_MY_TYPE_DOUBLE;    p[i].v.d = params[i].d; break;
+        case HL_TYPE_TEXT:
+            p[i].type = HL_MY_TYPE_VAR_STRING;
+            p[i].v.s.ptr = params[i].s;       p[i].v.s.len = params[i].len; break;
+        case HL_TYPE_BLOB:
+            p[i].type = HL_MY_TYPE_BLOB;
+            p[i].v.s.ptr = params[i].s;       p[i].v.s.len = params[i].len; break;
+        case HL_TYPE_NIL:
+        default:
+            p[i].is_null = 1; p[i].type = HL_MY_TYPE_NULL; break;
+        }
+    }
+    return p;
+}
+
 /* ── Vtable methods ───────────────────────────────────────────────── */
 
 static int mysql_open(void **out_ctx, const char *dsn, HlAllocator *alloc)
@@ -139,11 +218,27 @@ static int mysql_query(HlDbHandle *h, const char *sql,
     (void)params; (void)alloc;
     if (!h || !h->ctx) return -1;
     HlDbMyCtx *s = h->ctx;
+
+    /* Parameterized: bind through the binary prepared-statement protocol so the
+     * values never touch the SQL text (injection-safe). */
     if (nparams > 0) {
-        snprintf(s->conn.errmsg, sizeof s->conn.errmsg,
-                 "MySQL parameterized queries need prepared statements (Phase 3)");
-        return -1;
+        HlMyParam *pp = encode_my_params(params, nparams);
+        if (!pp) { snprintf(s->conn.errmsg, sizeof s->conn.errmsg, "out of memory"); return -1; }
+        MyBinAdapter ba;
+        memset(&ba, 0, sizeof ba);
+        ba.user_cb = cb;
+        ba.user_ctx = cb_ctx;
+        int rc = hl_my_conn_query_prepared(&s->conn, sql, pp, nparams,
+                                           cb ? bin_adapter_desc : NULL,
+                                           cb ? bin_adapter_row : NULL, &ba, NULL);
+        if (ba.names)
+            for (int i = 0; i < ba.nfields; i++) free(ba.names[i]);
+        free(ba.names);
+        free(pp);
+        return rc;
     }
+
+    /* No params: the simpler COM_QUERY text protocol. */
     MyAdapter a;
     memset(&a, 0, sizeof a);
     a.user_cb = cb;
@@ -161,15 +256,20 @@ static int mysql_query(HlDbHandle *h, const char *sql,
 static int mysql_exec(HlDbHandle *h, const char *sql,
                       const HlValue *params, int nparams)
 {
-    (void)params;
     if (!h || !h->ctx) return -1;
     HlDbMyCtx *s = h->ctx;
-    if (nparams > 0) {
-        snprintf(s->conn.errmsg, sizeof s->conn.errmsg,
-                 "MySQL parameterized exec needs prepared statements (Phase 3)");
-        return -1;
-    }
     int64_t affected = 0;
+
+    if (nparams > 0) {
+        HlMyParam *pp = encode_my_params(params, nparams);
+        if (!pp) { snprintf(s->conn.errmsg, sizeof s->conn.errmsg, "out of memory"); return -1; }
+        int rc = hl_my_conn_query_prepared(&s->conn, sql, pp, nparams,
+                                           NULL, NULL, NULL, &affected);
+        free(pp);
+        if (rc != 0) return -1;
+        return (int)(affected < 0 ? 0 : affected);
+    }
+
     if (hl_my_conn_query(&s->conn, sql, NULL, NULL, NULL, &affected) != 0)
         return -1;
     return (int)(affected < 0 ? 0 : affected);
@@ -209,8 +309,8 @@ static const char *mysql_errmsg(HlDbHandle *h)
     return s->conn.errmsg[0] ? s->conn.errmsg : "no error";
 }
 
-/* Dialect helpers below need bound parameters (prepared statements) or safe
- * identifier interpolation; both land in Phase 3. */
+/* Dialect helpers below need MySQL's INSERT IGNORE / ON DUPLICATE KEY syntax
+ * and information_schema introspection; they land in Phase 4. */
 static int mysql_insert_if_absent(HlDbHandle *h, const char *table,
                                   const char *const *conflict_cols,
                                   int n_conflict, const char *const *cols,
@@ -221,7 +321,7 @@ static int mysql_insert_if_absent(HlDbHandle *h, const char *table,
     if (h && h->ctx) {
         HlDbMyCtx *s = h->ctx;
         snprintf(s->conn.errmsg, sizeof s->conn.errmsg,
-                 "MySQL insert_if_absent needs prepared statements (Phase 3)");
+                 "MySQL insert_if_absent needs INSERT IGNORE dialect (Phase 4)");
     }
     return -1;
 }
@@ -236,7 +336,7 @@ static int mysql_upsert(HlDbHandle *h, const char *table,
     if (h && h->ctx) {
         HlDbMyCtx *s = h->ctx;
         snprintf(s->conn.errmsg, sizeof s->conn.errmsg,
-                 "MySQL upsert needs prepared statements (Phase 3)");
+                 "MySQL upsert needs ON DUPLICATE KEY dialect (Phase 4)");
     }
     return -1;
 }

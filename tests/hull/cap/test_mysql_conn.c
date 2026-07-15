@@ -155,6 +155,25 @@ static void put_eof(HlMyWriter *w, uint8_t seq)
     hl_my_packet_end(w, m);
 }
 
+static void put_col_def(HlMyWriter *w, uint8_t seq, const char *name, uint8_t type)
+{
+    size_t m = hl_my_packet_begin(w, seq);
+    hl_my_put_lenenc_str(w, "def", 3);
+    hl_my_put_lenenc_str(w, "", 0);
+    hl_my_put_lenenc_str(w, "", 0);
+    hl_my_put_lenenc_str(w, "", 0);
+    hl_my_put_lenenc_str(w, name, strlen(name));
+    hl_my_put_lenenc_str(w, name, strlen(name));
+    hl_my_put_lenenc_int(w, 0x0c);
+    hl_my_put_u16(w, 63);                              /* charset */
+    hl_my_put_u32(w, 11);                              /* column length */
+    hl_my_put_u8(w, type);
+    hl_my_put_u16(w, 0);                               /* flags */
+    hl_my_put_u8(w, 0);                                /* decimals */
+    hl_my_put_u16(w, 0);                               /* filler */
+    hl_my_packet_end(w, m);
+}
+
 UTEST(mysql_conn, com_query_result_set)
 {
     int sv[2];
@@ -204,6 +223,88 @@ UTEST(mysql_conn, com_query_result_set)
     ASSERT_EQ(got.rows, 1);
     ASSERT_STREQ(got.col0, "id");
     ASSERT_STREQ(got.first, "42");
+
+    hl_my_conn_close(&conn);
+    hl_my_writer_free(&s);
+    close(sv[0]);
+}
+
+/* ── Prepared statement (binary protocol) over a socketpair ───────── */
+
+typedef struct { int rows; int ncols; int64_t first_int; char col0[64]; } BCollect;
+
+static void bdesc(void *ctx, const HlMyField *fields, int nf)
+{
+    BCollect *g = ctx;
+    g->ncols = nf;
+    if (nf >= 1 && fields[0].name)
+        snprintf(g->col0, sizeof g->col0, "%s", fields[0].name);
+}
+
+static int brow(void *ctx, const HlMyVal *vals, int nc)
+{
+    BCollect *g = ctx;
+    g->rows++;
+    if (nc >= 1 && vals[0].kind == HL_MY_VAL_INT)
+        g->first_int = vals[0].v.i;
+    return 0;
+}
+
+UTEST(mysql_conn, prepared_statement)
+{
+    int sv[2];
+    ASSERT_EQ(0, socketpair(AF_UNIX, SOCK_STREAM, 0, sv));
+
+    HlMyWriter s; hl_my_writer_init(&s);
+    build_handshake(&s, 0);
+    build_ok(&s, 2);                                   /* auth OK */
+
+    /* COM_STMT_PREPARE_OK: stmt 1, 1 column, 1 param */
+    { size_t m = hl_my_packet_begin(&s, 1);
+      hl_my_put_u8(&s, HL_MY_PKT_OK);
+      hl_my_put_u32(&s, 1);                            /* statement_id */
+      hl_my_put_u16(&s, 1);                            /* num_columns */
+      hl_my_put_u16(&s, 1);                            /* num_params */
+      hl_my_put_u8(&s, 0);                             /* filler */
+      hl_my_put_u16(&s, 0);                            /* warnings */
+      hl_my_packet_end(&s, m); }
+    put_col_def(&s, 2, "?", HL_MY_TYPE_LONGLONG);      /* param def + EOF */
+    put_eof(&s, 3);
+    put_col_def(&s, 4, "id", HL_MY_TYPE_LONG);         /* column def + EOF */
+    put_eof(&s, 5);
+
+    /* COM_STMT_EXECUTE response: 1 column, one binary row (id = 42) */
+    { size_t m = hl_my_packet_begin(&s, 1);
+      hl_my_put_lenenc_int(&s, 1);
+      hl_my_packet_end(&s, m); }
+    put_col_def(&s, 2, "id", HL_MY_TYPE_LONG);
+    put_eof(&s, 3);
+    { size_t m = hl_my_packet_begin(&s, 4);
+      hl_my_put_u8(&s, 0x00);                          /* binary row header */
+      hl_my_put_u8(&s, 0x00);                          /* null bitmap (1 byte, none) */
+      hl_my_put_u32(&s, 42);                           /* LONG value, LE */
+      hl_my_packet_end(&s, m); }
+    put_eof(&s, 5);
+
+    ASSERT_TRUE(write(sv[0], s.buf, s.len) == (ssize_t)s.len);
+
+    HlMyDsn dsn; char err[128];
+    ASSERT_EQ(0, hl_my_dsn_parse("mysql://u:p@localhost/db", &dsn, err, sizeof err));
+    HlMyConn conn;
+    ASSERT_EQ(0, hl_my_conn_start(&conn, sv[1], &dsn));
+
+    HlMyParam p;
+    memset(&p, 0, sizeof p);
+    p.type = HL_MY_TYPE_LONGLONG;
+    p.v.i = 7;
+
+    BCollect got; memset(&got, 0, sizeof got);
+    ASSERT_EQ(0, hl_my_conn_query_prepared(&conn, "SELECT id WHERE x = ?",
+                                           &p, 1, bdesc, brow, &got, NULL));
+    ASSERT_EQ(got.ncols, 1);
+    ASSERT_EQ(got.rows, 1);
+    ASSERT_STREQ(got.col0, "id");
+    ASSERT_EQ((int)got.first_int, 42);
 
     hl_my_conn_close(&conn);
     hl_my_writer_free(&s);
