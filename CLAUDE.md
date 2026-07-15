@@ -146,7 +146,8 @@ Hull's distribution is one binary; what's compiled into it is controlled by a sm
 | `HL_EMBED_CA_BUNDLE` | 1 | Drop Mozilla CA bundle (~200 KB, breaks HTTPS without system store) |
 | `HL_ENABLE_SQLITE` | 1 | Drop the SQLite backend (`cap/db_sqlite.c`, `cap/db_udf.c`, vendored `sqlite3.c`). A SQLite file path or `:memory:` DSN then has no backend. |
 | `HL_ENABLE_POSTGRES` | 0 | (Off by default.) On enables the pure-C PostgreSQL wire backend (`cap/pgwire.c` + `cap/pg_conn.c` + `cap/db_postgres.c`; no libpq). A `postgres://` / `postgresql://` DSN selects it. Links the shared TLS client (`HL_LINK_TLS`) for SSL connections. See "PostgreSQL + multi-backend DB" below. |
-| `HL_ENABLE_DB` | 1 | **Umbrella, derived** from the two granular flags: defined iff `HL_ENABLE_SQLITE` or `HL_ENABLE_POSTGRES` is on. Off (both granular off) drops `db.*` + `migrate.*` + worker-DB + the connection registry + DB-backed stdlib (session, ratelimit, idempotency, outbox, inbox, rbac, search). ~1.4 MB smaller. See "Compute-only builds" below. |
+| `HL_ENABLE_MYSQL` | 0 | (Off by default.) On enables the pure-C MySQL / MariaDB wire backend (`cap/mysqlwire.c` + `cap/mysql_conn.c` + `cap/db_mysql.c`; no libmysql/libmariadb). A `mysql://` / `mariadb://` DSN selects it. Links the shared TLS client (`HL_LINK_TLS`). See "MySQL/MariaDB specifics" below. |
+| `HL_ENABLE_DB` | 1 | **Umbrella, derived** from the three granular flags: defined iff `HL_ENABLE_SQLITE`, `HL_ENABLE_POSTGRES`, or `HL_ENABLE_MYSQL` is on. Off (all granular off) drops `db.*` + `migrate.*` + worker-DB + the connection registry + DB-backed stdlib (session, ratelimit, idempotency, outbox, inbox, rbac, search). ~1.4 MB smaller. See "Compute-only builds" below. |
 | `HL_ENABLE_HTTP_SERVER` | 1 | Drop the inbound HTTP server: serve.c (KlServer setup), routing, body reader, WebSocket server (cap/ws), middleware, SSE, in-process test harness (cap/test, test_runner), and `hull dev/test/agent/mcp` commands. Apps must use `app.main(fn)` and may not declare `hull/http-server`, `hull/web/ws-server`, `hull/web/ws-client`, `hull/web/sse`, or any `hull/web/middleware/*`. See "HTTP build flavors" below. |
 | `HL_ENABLE_HTTP_CLIENT` | 1 | Drop the outbound HTTP/HTTPS client: `http.fetch` (cap/http + cap/http_async), SMTP send (cap/smtp), and `hull update` (which uses Keel's HTTPS client). Apps may not declare `hull/http-client`, `hull/smtp`, or `hull/email`. |
 | `HL_ENABLE_HTTP` | 1 | **Back-compat alias.** Setting `HL_ENABLE_HTTP=0` pins both `HL_ENABLE_HTTP_SERVER` and `HL_ENABLE_HTTP_CLIENT` to 0. The macro stays defined when either granular flag is on, so existing source guards continue to mean "any HTTP at all". |
@@ -233,18 +234,19 @@ Binary size on arm64 Darwin: ~3.66 MB vs ~5.06 MB with DB (about 28% smaller).
 ### PostgreSQL + multi-backend DB
 
 Hull's database layer is backend-agnostic behind the `HlDbBackend` vtable
-(`include/hull/cap/db_backend.h`). Two backends ship: embedded **SQLite**
-(default) and an optional pure-C **PostgreSQL** wire client (no libpq).
-Both are chosen per-connection by DSN scheme via `hl_db_backend_select`
+(`include/hull/cap/db_backend.h`). Three backends ship: embedded **SQLite**
+(default), an optional pure-C **PostgreSQL** wire client (no libpq), and an
+optional pure-C **MySQL / MariaDB** wire client (no libmysql/libmariadb).
+All are chosen per-connection by DSN scheme via `hl_db_backend_select`
 (`cap/db_select.c`): each backend declares the `://` schemes it claims (SQLite:
-`sqlite`, `file`; Postgres: `postgres`, `postgresql`) and the selector matches
-the DSN's scheme against the compiled-in backends (`BACKENDS[]`, the sole
-registration point). A scheme-less DSN (a bare path, `:memory:`, or a
-single-colon `file:` URI) defaults to SQLite. A reserved-but-uncompiled scheme
-(`duckdb://`, `mysql://`, `mariadb://`, or `postgres://` without
-`HL_ENABLE_POSTGRES`) fails with a specific hint; an unknown scheme with a
-generic one. Adding a backend needs no change to the selector, just a
-`.schemes` declaration + one `BACKENDS[]` line.
+`sqlite`, `file`; Postgres: `postgres`, `postgresql`; MySQL: `mysql`,
+`mariadb`) and the selector matches the DSN's scheme against the compiled-in
+backends (`BACKENDS[]`, the sole registration point). A scheme-less DSN (a bare
+path, `:memory:`, or a single-colon `file:` URI) defaults to SQLite. A
+reserved-but-uncompiled scheme (`duckdb://`, `mysql://` / `mariadb://` without
+`HL_ENABLE_MYSQL`, or `postgres://` without `HL_ENABLE_POSTGRES`) fails with a
+specific hint; an unknown scheme with a generic one. Adding a backend needs no
+change to the selector, just a `.schemes` declaration + one `BACKENDS[]` line.
 
 **Abstract interface vs concrete backends (§2.3).** `cap/db_backend.h` is the
 pure interface: the vtable, `HlDbHandle`, the inline `hl_db_*` wrappers, and
@@ -405,16 +407,67 @@ roadmap §2.9.)
 - **SQLite-only features under Postgres:** `db.udf` and `hull/search` (FTS5)
   are SQLite-only and fail with a clear error on a Postgres connection.
 
-**Flag combinations.** `HL_ENABLE_SQLITE` (default 1) and `HL_ENABLE_POSTGRES`
-(default 0) are independent; `HL_ENABLE_DB` is the derived umbrella (on iff
-either is). `make HL_ENABLE_POSTGRES=1` builds both backends;
-`make HL_ENABLE_SQLITE=0 HL_ENABLE_POSTGRES=1` builds a Postgres-only binary
-(SQLite dropped -- so `db.udf` and `hull/search` are absent, and the
-SQLite-file agent introspection `hull agent db|migrate|schema-diff|sql` is
-compiled out). CI covers the `sqlite + postgres` and `postgres-only` link
-flavors, the three pg fuzzers, and a full `e2e_postgres` job (real Postgres 16
-in Docker: SCRAM + TLS + migrations + `db.async` + stdlib). Design +
-rationale: [docs/postgres_backend_design.md](docs/postgres_backend_design.md).
+**MySQL/MariaDB specifics** (`HL_ENABLE_MYSQL=1`). One backend serves both
+`mysql://` and `mariadb://` (MariaDB is a MySQL fork on the same wire
+protocol). Codec (`cap/mysqlwire.c`) is little-endian, 3-byte-length +
+1-byte-sequence framed, with length-encoded ints/strings; all server-message
+parsing is bounds-checked over untrusted input (mirrors `cap/pgwire.c`).
+- **Auth:** `mysql_native_password` (SHA-1 challenge-response) and
+  `caching_sha2_password` (MySQL 8 default: SHA-256 fast path always;
+  full-auth sends the cleartext password over TLS; the plaintext RSA
+  public-key exchange is deferred with a "set `sslmode=require`" hint). The
+  server-named handshake plugin drives which is used, and AuthSwitchRequest
+  re-dispatches through the same path. `client_ed25519` (MariaDB) is not yet
+  supported and fails with a clear hint pointing at the two supported plugins
+  (it needs ed25519 group-ops TweetNaCl keeps private; tracked follow-up).
+  Reuses `cap/crypto` (SHA-1 / SHA-256).
+- **TLS:** `sslmode=disable|prefer|require|verify-ca|verify-full` (same names +
+  default `prefer` as Postgres). When TLS is wanted and the server advertises
+  `CLIENT_SSL`, the client sends an SSLRequest, runs the blocking handshake
+  over the shared `shared/tls_client.c` (embedded CA bundle; `verify-*` checks
+  chain + hostname), then sends the credentialed HandshakeResponse41 over TLS.
+  All post-handshake I/O tunnels through `KlTls`.
+- **Queries / types:** param-less statements use the text `COM_QUERY` protocol;
+  **parameterized** statements use the binary prepared-statement protocol
+  (`COM_STMT_PREPARE` / `EXECUTE` / `CLOSE`) so values never touch the SQL text
+  (injection impossible). Binary rows decode by column type to `HlValue`
+  (int / double / borrowed text; `DATE`/`DATETIME`/`TIMESTAMP`/`TIME` are
+  formatted to ISO-8601-ish strings). A Lua/JS params array with trailing nils
+  arrives short (Lua's `#` drops the tail), so `COM_STMT_EXECUTE` pads to the
+  statement's declared `num_params`, binding the tail NULL, matching
+  SQLite/Postgres.
+- **Dialect:** `insert_if_absent` builds `INSERT IGNORE`; `upsert` builds
+  `INSERT ... ON DUPLICATE KEY UPDATE c = VALUES(c)` (MariaDB / MySQL 5.7+);
+  `last_id` returns the OK packet's `last_insert_id`; `table_columns` queries
+  `information_schema.columns` scoped to `DATABASE()`; identifier quoting is
+  backtick (`` ` ``). MySQL 8 has no `CREATE INDEX ... IF NOT EXISTS`, so the
+  backend transparently rewrites it to a plain `CREATE INDEX` and treats a
+  duplicate-index error as success (the stdlib's idempotent index DDL works
+  unchanged). Multi-statement migration files run as one `COM_QUERY`
+  (`CLIENT_MULTI_STATEMENTS`), draining every result set.
+- **Portable stdlib DDL:** MySQL rejects a `TEXT`/`BLOB` primary key or index
+  without a prefix length, so every keyed / indexed / foreign-key text column
+  in the DB-backed stdlib (and the `_hull_migrations` tracking table) is
+  `VARCHAR(255)`, not `TEXT` (TEXT affinity on SQLite, varchar on Postgres,
+  indexable on MySQL); data-only columns stay `TEXT`.
+- **SQLite-only features under MySQL:** `db.udf` and `hull/search` (FTS5) are
+  SQLite-only and fail with a clear error on a MySQL connection (checking
+  `conn.udf ~= nil` is the capability probe).
+
+**Flag combinations.** `HL_ENABLE_SQLITE` (default 1), `HL_ENABLE_POSTGRES`
+(default 0), and `HL_ENABLE_MYSQL` (default 0) are independent; `HL_ENABLE_DB`
+is the derived umbrella (on iff any is). `make HL_ENABLE_POSTGRES=1` /
+`make HL_ENABLE_MYSQL=1` builds SQLite plus that backend;
+`make HL_ENABLE_SQLITE=0 HL_ENABLE_POSTGRES=1` (or `HL_ENABLE_MYSQL=1`) builds a
+single-backend binary (SQLite dropped -- so `db.udf` and `hull/search` are
+absent, and the SQLite-file agent introspection
+`hull agent db|migrate|schema-diff|sql` is compiled out). CI covers the
+`sqlite + postgres`, `postgres-only`, `sqlite + mysql`, and `mysql-only` link
+flavors, the pg + mysql fuzzers, and full `e2e_postgres` / `e2e_mysql` jobs
+(real Postgres 16 / MySQL 8 in Docker: auth + TLS + migrations + `db.async` +
+stdlib). Design + rationale:
+[docs/postgres_backend_design.md](docs/postgres_backend_design.md) and the
+`§2.10` MySQL epic in [docs/roadmap_next.md](docs/roadmap_next.md).
 
 ### Lua/JS orchestration overhead for compute-heavy workloads
 
@@ -2464,7 +2517,8 @@ make e2e                            # run all E2E tests (examples + build + sand
 | `test_db_registry` | 7 | Named-connection registry: lazy open, cache, `$VAR` env-ref DSN, seeded default |
 | `test_db_dynamic` | 5 | `db.open` validation: policy gate, scheme/host allowlist, fs gate, concurrent cap |
 | `test_pgwire` / `test_pg_conn` | 40+ | PostgreSQL v3 codec (framing/cursor) + DSN parse + handshake/SCRAM over a socketpair |
-| `test_mysqlwire` | 13 | MySQL/MariaDB codec (LE framing, lenenc, OK/ERR parse, untrusted-input safety) + DSN parse |
+| `test_mysqlwire` | 19 | MySQL/MariaDB codec (LE framing, lenenc, OK/ERR parse, untrusted-input safety, SSLRequest build, native + caching_sha2 scramble) + DSN parse |
+| `test_mysql_conn` | 10 | MySQL handshake/auth/query over a socketpair: native + caching_sha2 fast-auth, COM_QUERY + prepared (binary) result decode, DATETIME decode, trailing-nil param padding, multi-statement exec, ed25519-unsupported |
 | `test_host_match` | 7 | Host-allowlist matcher (exact / `*` / `*.suffix` glob / CIDR) shared by db/http/smtp |
 
 ~58 suites, ~1280 test cases total (this table is representative, not exhaustive).

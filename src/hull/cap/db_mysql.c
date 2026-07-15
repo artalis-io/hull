@@ -49,6 +49,12 @@ static const char *ci_strstr(const char *hay, const char *needle)
  * portable form, so on a MySQL connection rewrite it to a plain CREATE INDEX
  * and treat a later duplicate-index error as success. Sets *handled when the
  * statement was a CREATE INDEX ... IF NOT EXISTS. Returns 0 / -1.
+ *
+ * The `index` / `if not exists` match is a loose case-insensitive substring
+ * scan: acceptable because the ONLY callers are Hull's own stdlib index DDL
+ * (trusted, fixed strings), never app-supplied SQL. App queries never reach
+ * here as a CREATE INDEX IF NOT EXISTS, and parameter values are bound out of
+ * band, so this is not an injection surface.
  */
 static int mysql_create_index_shim(HlDbMyCtx *s, const char *sql, int *handled)
 {

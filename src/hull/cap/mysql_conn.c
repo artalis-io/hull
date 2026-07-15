@@ -804,15 +804,17 @@ static void decode_binary_value(HlMyCursor *rc, uint8_t type, HlMyVal *out)
         if (len >= 8)  { neg = hl_my_get_u8(rc); days = hl_my_get_u32(rc);
                          h = hl_my_get_u8(rc); mi = hl_my_get_u8(rc); se = hl_my_get_u8(rc); }
         if (len >= 12) { us = hl_my_get_u32(rc); }
-        int hours = (int)(days * 24) + h;
+        /* days is server-controlled (u32); compute in int64 so a hostile value
+         * cannot signed-overflow int (UBSan-visible on untrusted input). */
+        int64_t hours = (int64_t)days * 24 + h;
         if (len == 0)
             snprintf(out->tbuf, sizeof out->tbuf, "00:00:00");
         else if (us)
-            snprintf(out->tbuf, sizeof out->tbuf, "%s%02d:%02d:%02d.%06u",
-                     neg ? "-" : "", hours, mi, se, us);
+            snprintf(out->tbuf, sizeof out->tbuf, "%s%02lld:%02d:%02d.%06u",
+                     neg ? "-" : "", (long long)hours, mi, se, us);
         else
-            snprintf(out->tbuf, sizeof out->tbuf, "%s%02d:%02d:%02d",
-                     neg ? "-" : "", hours, mi, se);
+            snprintf(out->tbuf, sizeof out->tbuf, "%s%02lld:%02d:%02d",
+                     neg ? "-" : "", (long long)hours, mi, se);
         out->kind = HL_MY_VAL_STR;
         out->v.s.ptr = out->tbuf; out->v.s.len = strlen(out->tbuf);
         return;

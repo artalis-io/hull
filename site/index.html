@@ -404,7 +404,8 @@
           </h3>
           <p class="text-sm text-mute-400 leading-relaxed">
             Lua, JavaScript, and WASM execute under declared, kernel-enforced
-            capability boundaries. SQLite storage. Single static binary,
+            capability boundaries. SQLite storage, or PostgreSQL and
+            MySQL/MariaDB over pure-C wire clients. Single static binary,
             around five megabytes. Runs on every desktop OS from one file.
             No daemon, no service mesh, no installer.
           </p>
@@ -1186,11 +1187,11 @@ hull v0.6.0  &middot;  ca-bundle: embedded  &middot;  platform: embedded  &middo
           <!-- Compute & data -->
           <div class="border border-white/[0.08] rounded-md p-5 bg-white/[0.015]">
             <div class="text-[11px] uppercase tracking-widest text-mute-500 mb-2">Compute &amp; data</div>
-            <div class="text-sm text-paper-50 font-medium mb-2">WASM + WebGPU + SQLite</div>
+            <div class="text-sm text-paper-50 font-medium mb-2">WASM + WebGPU + multi-backend SQL</div>
             <ul class="text-xs text-mute-400 leading-relaxed space-y-1">
               <li><code class="text-paper-100 text-[0.7rem]">compute</code> (WAMR AOT) &middot; <code class="text-paper-100 text-[0.7rem]">gpu</code> (wgpu-native)</li>
-              <li><code class="text-paper-100 text-[0.7rem]">db</code> with parameterized binding (zero SQLi surface)</li>
-              <li><code class="text-paper-100 text-[0.7rem]">db.udf</code> Lua/JS/WASM user-defined functions</li>
+              <li><code class="text-paper-100 text-[0.7rem]">db</code> across SQLite, PostgreSQL, MySQL/MariaDB (pure-C wire clients, no libpq/libmysql)</li>
+              <li><code class="text-paper-100 text-[0.7rem]">db</code> parameterized binding (zero SQLi surface) &middot; <code class="text-paper-100 text-[0.7rem]">db.udf</code></li>
               <li><code class="text-paper-100 text-[0.7rem]">search</code> (SQLite FTS5) &middot; <code class="text-paper-100 text-[0.7rem]">image</code></li>
             </ul>
           </div>
