@@ -212,6 +212,25 @@ int hl_my_native_password_scramble(const char *password,
     return HL_MY_SCRAMBLE_LEN;
 }
 
+int hl_my_caching_sha2_scramble(const char *password,
+                                const uint8_t nonce[HL_MY_SCRAMBLE_LEN],
+                                uint8_t out[HL_MY_CACHING_SHA2_DIGEST_LEN])
+{
+    if (!password || !password[0])
+        return 0;   /* empty password -> zero-length auth response */
+
+    enum { D = HL_MY_CACHING_SHA2_DIGEST_LEN };
+    uint8_t d1[D], d2[D], d3[D];
+    uint8_t cat[D + HL_MY_SCRAMBLE_LEN];
+    if (hl_cap_crypto_sha256(password, strlen(password), d1) != 0) return -1;
+    if (hl_cap_crypto_sha256(d1, D, d2) != 0) return -1;
+    memcpy(cat, d2, D);
+    memcpy(cat + D, nonce, HL_MY_SCRAMBLE_LEN);
+    if (hl_cap_crypto_sha256(cat, sizeof cat, d3) != 0) return -1;
+    for (int i = 0; i < D; i++) out[i] = (uint8_t)(d1[i] ^ d3[i]);
+    return D;
+}
+
 /* ── Blocking transport ───────────────────────────────────────────── */
 
 static void conn_set_err(HlMyConn *conn, const char *msg)
@@ -371,6 +390,20 @@ static int my_sslmode_parse(const char *s)
     return -1;
 }
 
+/* Compute the auth response for @p plugin into @p out (>= 32 bytes). Returns
+ * the response length, 0 for an empty password, or -1 for an unsupported
+ * plugin. client_ed25519 (MariaDB) lands in Phase 5c. */
+static int compute_plugin_auth(const char *plugin, const char *password,
+                               const uint8_t nonce[HL_MY_SCRAMBLE_LEN],
+                               uint8_t out[HL_MY_CACHING_SHA2_DIGEST_LEN])
+{
+    if (strcmp(plugin, "mysql_native_password") == 0)
+        return hl_my_native_password_scramble(password, nonce, out);
+    if (strcmp(plugin, "caching_sha2_password") == 0)
+        return hl_my_caching_sha2_scramble(password, nonce, out);
+    return -1;
+}
+
 int hl_my_conn_start(HlMyConn *conn, int fd, const HlMyDsn *dsn)
 {
     memset(conn, 0, sizeof *conn);
@@ -440,22 +473,28 @@ int hl_my_conn_start(HlMyConn *conn, int fd, const HlMyDsn *dsn)
     }
     conn->capabilities = caps;
 
-    uint8_t auth[HL_MY_SCRAMBLE_LEN];
-    int authlen = hl_my_native_password_scramble(dsn->password, hs.scramble, auth);
-    if (authlen < 0) { conn_set_err(conn, "auth scramble failed");
-                       hl_my_conn_close(conn); return -1; }
+    /* The server names its default auth plugin in the handshake (MySQL 8:
+     * caching_sha2_password; older / MariaDB: mysql_native_password). */
+    const char *plugin = hs.auth_plugin[0] ? hs.auth_plugin : "mysql_native_password";
+    uint8_t auth[HL_MY_CACHING_SHA2_DIGEST_LEN];
+    int authlen = compute_plugin_auth(plugin, dsn->password, hs.scramble, auth);
+    if (authlen < 0) {
+        snprintf(conn->errmsg, sizeof conn->errmsg,
+                 "unsupported auth plugin '%s' (native / caching_sha2 only)", plugin);
+        hl_my_conn_close(conn); return -1;
+    }
 
     HlMyWriter w; hl_my_writer_init(&w);
     hl_my_build_handshake_response(
         &w, resp_seq, caps, charset, dsn->user,
-        auth, (size_t)authlen, dsn->dbname[0] ? dsn->dbname : NULL,
-        "mysql_native_password");
+        auth, (size_t)authlen, dsn->dbname[0] ? dsn->dbname : NULL, plugin);
     int se = w.err || conn_send(conn, w.buf, w.len);
     hl_my_writer_free(&w);
     if (se) { conn_set_err(conn, "failed to send handshake response");
               hl_my_conn_close(conn); return -1; }
 
-    /* Read the auth result: OK, ERR, or an AuthSwitchRequest (0xFE). */
+    /* Auth result: OK, ERR, an AuthSwitchRequest (0xFE), or an AuthMoreData
+     * (0x01) fast/full-auth exchange for caching_sha2_password. */
     for (;;) {
         if (conn_next_frame(conn, &f) != 0) { hl_my_conn_close(conn); return -1; }
         if (f.body_len == 0) continue;
@@ -475,25 +514,57 @@ int hl_my_conn_start(HlMyConn *conn, int fd, const HlMyDsn *dsn)
         if (hdr == HL_MY_PKT_EOF) {          /* 0xFE AuthSwitchRequest */
             HlMyCursor c; hl_my_cursor_init(&c, &f);
             (void)hl_my_get_u8(&c);          /* 0xFE */
-            const char *plugin = hl_my_get_cstr(&c);
+            const char *sw = hl_my_get_cstr(&c);
             size_t dlen = 0;
             const uint8_t *data = hl_my_get_eof_str(&c, &dlen);
-            if (plugin && strcmp(plugin, "mysql_native_password") == 0) {
-                uint8_t sc[HL_MY_SCRAMBLE_LEN];
-                memset(sc, 0, sizeof sc);
-                memcpy(sc, data, dlen >= HL_MY_SCRAMBLE_LEN
-                                 ? (size_t)HL_MY_SCRAMBLE_LEN : dlen);
-                uint8_t a2[HL_MY_SCRAMBLE_LEN];
-                int n2 = hl_my_native_password_scramble(dsn->password, sc, a2);
-                if (n2 < 0 || send_auth_data(conn, (uint8_t)(f.seq + 1), a2, n2) != 0) {
-                    conn_set_err(conn, "auth-switch response failed");
-                    hl_my_conn_close(conn); return -1;
-                }
-                continue;   /* read the next result (OK / ERR) */
+            if (!sw) { conn_set_err(conn, "malformed auth-switch request");
+                       hl_my_conn_close(conn); return -1; }
+            uint8_t nonce[HL_MY_SCRAMBLE_LEN];
+            memset(nonce, 0, sizeof nonce);
+            if (data)
+                memcpy(nonce, data, dlen >= HL_MY_SCRAMBLE_LEN
+                                    ? (size_t)HL_MY_SCRAMBLE_LEN : dlen);
+            int n2 = compute_plugin_auth(sw, dsn->password, nonce, auth);
+            if (n2 < 0) {
+                snprintf(conn->errmsg, sizeof conn->errmsg,
+                         "unsupported auth plugin '%s' (native / caching_sha2 only)", sw);
+                hl_my_conn_close(conn); return -1;
             }
-            snprintf(conn->errmsg, sizeof conn->errmsg,
-                     "unsupported auth plugin '%s' (native only until Phase 5)",
-                     plugin ? plugin : "?");
+            if (send_auth_data(conn, (uint8_t)(f.seq + 1), auth, n2) != 0) {
+                conn_set_err(conn, "auth-switch response failed");
+                hl_my_conn_close(conn); return -1;
+            }
+            continue;   /* read the next result (OK / ERR / AuthMoreData) */
+        }
+
+        if (hdr == HL_MY_AUTH_MORE_DATA) {   /* caching_sha2 fast / full auth */
+            if (f.body_len < 2) { conn_set_err(conn, "malformed auth data");
+                                  hl_my_conn_close(conn); return -1; }
+            uint8_t status = f.body[1];
+            if (status == HL_MY_CACHING_SHA2_FAST_SUCCESS)
+                continue;                    /* cache hit; an OK packet follows */
+            if (status == HL_MY_CACHING_SHA2_FULL_AUTH) {
+#ifndef HL_MY_NO_TLS
+                if (conn->tls) {
+                    /* Over TLS the password goes as cleartext, NUL-terminated.
+                     * dsn->password is already NUL-terminated, so send strlen+1
+                     * bytes directly (no plaintext copy on the heap). */
+                    size_t plen = strlen(dsn->password);
+                    if (send_auth_data(conn, (uint8_t)(f.seq + 1),
+                                       (const uint8_t *)dsn->password,
+                                       (int)(plen + 1)) != 0) {
+                        conn_set_err(conn, "failed to send password");
+                        hl_my_conn_close(conn); return -1;
+                    }
+                    continue;                /* read the OK / ERR result */
+                }
+#endif
+                conn_set_err(conn,
+                    "caching_sha2_password full auth needs TLS: set sslmode=require "
+                    "(RSA public-key exchange is not yet supported)");
+                hl_my_conn_close(conn); return -1;
+            }
+            conn_set_err(conn, "unexpected caching_sha2 auth data");
             hl_my_conn_close(conn); return -1;
         }
 

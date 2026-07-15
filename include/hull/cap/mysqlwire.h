@@ -172,6 +172,14 @@ int hl_my_parse_err(const HlMyFrame *f, int protocol_41, HlMyErr *out);
 #define HL_MY_PLUGIN_NAME_MAX     64        /* auth-plugin name field cap */
 #define HL_MY_MAX_COLUMNS         4096      /* sanity cap on a result-set width */
 
+/* caching_sha2_password (MySQL 8 default). The auth response is a 32-byte
+ * SHA-256 XOR digest; the server may then send an AuthMoreData packet whose
+ * first payload byte after the 0x01 header is a fast/full status. */
+#define HL_MY_CACHING_SHA2_DIGEST_LEN    32
+#define HL_MY_AUTH_MORE_DATA             0x01  /* AuthMoreData packet header */
+#define HL_MY_CACHING_SHA2_FAST_SUCCESS  0x03  /* cache hit; OK follows */
+#define HL_MY_CACHING_SHA2_FULL_AUTH     0x04  /* send the password (over TLS) */
+
 /* Parsed initial Handshake v10 packet the server sends first. */
 typedef struct HlMyHandshake {
     uint8_t  protocol;              /* must be 10 */

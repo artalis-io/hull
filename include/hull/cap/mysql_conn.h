@@ -60,6 +60,16 @@ int hl_my_native_password_scramble(const char *password,
                                    const uint8_t scramble[HL_MY_SCRAMBLE_LEN],
                                    uint8_t out[HL_MY_SCRAMBLE_LEN]);
 
+/*
+ * caching_sha2_password auth response (MySQL 8 default):
+ *   SHA256(pw) XOR SHA256( SHA256(SHA256(pw)) || nonce )
+ * Returns the response length written (0 for an empty password,
+ * HL_MY_CACHING_SHA2_DIGEST_LEN otherwise) or -1 on a crypto error.
+ */
+int hl_my_caching_sha2_scramble(const char *password,
+                                const uint8_t nonce[HL_MY_SCRAMBLE_LEN],
+                                uint8_t out[HL_MY_CACHING_SHA2_DIGEST_LEN]);
+
 /* ── Connection (socket + handshake; Phase 2b) ────────────────────── */
 
 #define HL_MY_ERRMSG_SIZE    256    /* connection error-message buffer */

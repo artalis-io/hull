@@ -2933,9 +2933,18 @@ the shared `shared/tls_client.c`; hashes via `cap/crypto`.
         `HL_PG_NO_TLS`. `mysql_native_password` now works over TLS. Codec gained
         `hl_my_build_ssl_request` (unit-tested); `HL_LINK_TLS` already links
         Keel + mbedTLS whenever MySQL is enabled.
-  - [ ] **5b - caching_sha2_password.** MySQL 8 default: fast path (cached
-        scramble) always; full-auth by sending the cleartext password over TLS;
-        plaintext-RSA full-auth deferred with a clear "use sslmode=require" hint.
+  - [x] **5b - caching_sha2_password.** MySQL 8 default. `hl_my_conn_start` now
+        dispatches on the server-named handshake plugin (native /
+        caching_sha2) via `compute_plugin_auth`, so the initial
+        HandshakeResponse41 carries the right 32-byte SHA-256 XOR digest
+        (`hl_my_caching_sha2_scramble`) and plugin name. The auth loop handles
+        the AuthMoreData (0x01) exchange: fast-auth success (0x03, cache hit,
+        OK follows) and full-auth (0x04) by sending the cleartext password over
+        TLS; without TLS it fails with a "set sslmode=require" hint (the
+        plaintext RSA public-key path is deferred). AuthSwitchRequest now
+        re-dispatches through the same helper (native or caching_sha2).
+        Unit-tested: the scramble formula + a caching_sha2 fast-auth socketpair
+        handshake asserting the client's response. ASan/UBSan-clean.
   - [ ] **5c - client_ed25519.** MariaDB: SHA-512(password)-derived ed25519
         keypair signing the server scramble (custom key derivation, not
         TweetNaCl's seed path).

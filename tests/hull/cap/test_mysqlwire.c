@@ -344,4 +344,25 @@ UTEST(mysql_auth, native_password_scramble)
     ASSERT_EQ(memcmp(out, exp, 20), 0);
 }
 
+UTEST(mysql_auth, caching_sha2_scramble)
+{
+    uint8_t nonce[20];
+    for (int i = 0; i < 20; i++) nonce[i] = (uint8_t)(i * 3 + 2);
+    uint8_t out[32];
+
+    /* Empty password -> zero-length response. */
+    ASSERT_EQ(hl_my_caching_sha2_scramble("", nonce, out), 0);
+
+    /* Non-empty -> 32 bytes = SHA256(pw) XOR SHA256(SHA256(SHA256(pw))||nonce). */
+    ASSERT_EQ(hl_my_caching_sha2_scramble("s3cret", nonce, out), 32);
+    uint8_t d1[32], d2[32], cat[52], d3[32], exp[32];
+    ASSERT_EQ(hl_cap_crypto_sha256("s3cret", 6, d1), 0);
+    ASSERT_EQ(hl_cap_crypto_sha256(d1, 32, d2), 0);
+    memcpy(cat, d2, 32);
+    memcpy(cat + 32, nonce, 20);
+    ASSERT_EQ(hl_cap_crypto_sha256(cat, 52, d3), 0);
+    for (int i = 0; i < 32; i++) exp[i] = (uint8_t)(d1[i] ^ d3[i]);
+    ASSERT_EQ(memcmp(out, exp, 32), 0);
+}
+
 UTEST_MAIN()

@@ -17,7 +17,7 @@
 
 /* ── Canned server packets ────────────────────────────────────────── */
 
-static void build_handshake(HlMyWriter *w, uint8_t seq)
+static void build_handshake_plugin(HlMyWriter *w, uint8_t seq, const char *plugin)
 {
     size_t m = hl_my_packet_begin(w, seq);
     hl_my_put_u8(w, 10);                       /* protocol v10 */
@@ -37,8 +37,13 @@ static void build_handshake(HlMyWriter *w, uint8_t seq)
     for (int i = 0; i < HL_MY_SCRAMBLE_LEN - HL_MY_SCRAMBLE_PART1; i++)
         hl_my_put_u8(w, (uint8_t)(i + 9));     /* auth data part 2 */
     hl_my_put_u8(w, 0);                        /* part-2 NUL */
-    hl_my_put_cstr(w, "mysql_native_password");
+    hl_my_put_cstr(w, plugin);
     hl_my_packet_end(w, m);
+}
+
+static void build_handshake(HlMyWriter *w, uint8_t seq)
+{
+    build_handshake_plugin(w, seq, "mysql_native_password");
 }
 
 static void build_ok(HlMyWriter *w, uint8_t seq)
@@ -120,6 +125,51 @@ UTEST(mysql_conn, handshake_auth_error)
 
     hl_my_writer_free(&hs); hl_my_writer_free(&er);
     close(sv[0]);   /* sv[1] already closed by the failed handshake */
+}
+
+/* caching_sha2_password fast path: server names the plugin, then sends an
+ * AuthMoreData(fast_success) followed by OK. Asserts the client selected
+ * caching_sha2 (32-byte auth response + plugin name in its response). */
+UTEST(mysql_conn, caching_sha2_fast_auth)
+{
+    int sv[2];
+    ASSERT_EQ(0, socketpair(AF_UNIX, SOCK_STREAM, 0, sv));
+
+    HlMyWriter s; hl_my_writer_init(&s);
+    build_handshake_plugin(&s, 0, "caching_sha2_password");
+    { size_t m = hl_my_packet_begin(&s, 2);
+      hl_my_put_u8(&s, HL_MY_AUTH_MORE_DATA);
+      hl_my_put_u8(&s, HL_MY_CACHING_SHA2_FAST_SUCCESS);
+      hl_my_packet_end(&s, m); }
+    build_ok(&s, 3);
+    ASSERT_TRUE(write(sv[0], s.buf, s.len) == (ssize_t)s.len);
+
+    HlMyDsn dsn; char err[128];
+    ASSERT_EQ(0, hl_my_dsn_parse("mysql://alice:pw@localhost/shop",
+                                 &dsn, err, sizeof err));
+    HlMyConn conn;
+    ASSERT_EQ(0, hl_my_conn_start(&conn, sv[1], &dsn));   /* authenticated */
+
+    /* Inspect the client's HandshakeResponse41: plugin + 32-byte auth resp. */
+    uint8_t got[512];
+    ssize_t n = read(sv[0], got, sizeof got);
+    ASSERT_TRUE(n > 4);
+    HlMyFrame f; size_t consumed = 0;
+    ASSERT_EQ(hl_my_frame_next(got, (size_t)n, &f, &consumed), HL_MY_OK);
+    HlMyCursor c; hl_my_cursor_init(&c, &f);
+    (void)hl_my_get_u32(&c);                          /* client caps */
+    (void)hl_my_get_u32(&c);                          /* max packet */
+    (void)hl_my_get_u8(&c);                           /* charset */
+    (void)hl_my_get_bytes(&c, HL_MY_HANDSHAKE_RESERVED);
+    ASSERT_STREQ(hl_my_get_cstr(&c), "alice");
+    ASSERT_EQ(hl_my_get_u8(&c), HL_MY_CACHING_SHA2_DIGEST_LEN);  /* 32-byte resp */
+    (void)hl_my_get_bytes(&c, HL_MY_CACHING_SHA2_DIGEST_LEN);
+    ASSERT_STREQ(hl_my_get_cstr(&c), "shop");                    /* database */
+    ASSERT_STREQ(hl_my_get_cstr(&c), "caching_sha2_password");   /* plugin */
+
+    hl_my_conn_close(&conn);
+    hl_my_writer_free(&s);
+    close(sv[0]);
 }
 
 /* ── COM_QUERY result set over a socketpair ───────────────────────── */
