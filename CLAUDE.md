@@ -2460,8 +2460,16 @@ make e2e                            # run all E2E tests (examples + build + sand
 | `test_cacert` | 6 | Embedded Mozilla CA bundle: presence, NUL-termination, mbedTLS parse |
 | `test_dispatch` | 4 | Command dispatch table, unknown-command handling |
 | `test_csp` | 7 | CSP preset registry: `htmx` preset expansion, literal passthrough, NULL passthrough, reverse name lookup |
+| `test_db_select` | 5 | DSN-scheme backend routing (sqlite / postgres / mysql / reserved / unknown) |
+| `test_db_registry` | 7 | Named-connection registry: lazy open, cache, `$VAR` env-ref DSN, seeded default |
+| `test_db_dynamic` | 5 | `db.open` validation: policy gate, scheme/host allowlist, fs gate, concurrent cap |
+| `test_pgwire` / `test_pg_conn` | 40+ | PostgreSQL v3 codec (framing/cursor) + DSN parse + handshake/SCRAM over a socketpair |
+| `test_mysqlwire` | 13 | MySQL/MariaDB codec (LE framing, lenenc, OK/ERR parse, untrusted-input safety) + DSN parse |
+| `test_host_match` | 7 | Host-allowlist matcher (exact / `*` / `*.suffix` glob / CIDR) shared by db/http/smtp |
 
-28 suites, ~625 test cases total.
+~58 suites, ~1280 test cases total (this table is representative, not exhaustive).
+Plus libFuzzer harnesses (sh_json, path_normalize, mime_sniff, host_match, pgwire,
+pg_dsn, pg_rewrite, mysqlwire, mysql_dsn) run 60s each in CI.
 
 \+ E2E suites (`e2e_build.sh`, `e2e_examples.sh`, `e2e_http.sh`, `e2e_sandbox.sh`, `e2e_tcc.sh`, `e2e_install.sh`, `e2e_ca_bundle.sh`, `e2e_update.sh`)
 

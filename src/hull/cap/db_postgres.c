@@ -342,9 +342,12 @@ static int build_and_run_insert(HlDbHandle *h, const char *verb_suffix,
                                 int do_update)
 {
     (void)verb_suffix;
-    /* Estimate a generous size and build INSERT ... ON CONFLICT ... */
+    /* Estimate a generous size and build INSERT ... ON CONFLICT ... Each column
+     * appears up to three times: the insert list, and (for DO UPDATE) both
+     * sides of `col = excluded.col`. Budget 3x + overhead so a long column name
+     * (e.g. "processed_at") cannot overflow the buffer and silently truncate. */
     size_t cap = 64 + strlen(table);
-    for (int i = 0; i < n_cols; i++) cap += strlen(cols[i]) + 24;
+    for (int i = 0; i < n_cols; i++) cap += strlen(cols[i]) * 3 + 40;
     for (int i = 0; i < n_conflict; i++) cap += strlen(conflict_cols[i]) + 4;
     char *sql = malloc(cap);
     if (!sql) return -1;
@@ -357,12 +360,13 @@ static int build_and_run_insert(HlDbHandle *h, const char *verb_suffix,
         if (i) ap(sql, cap, &off, ", ");
         ap(sql, cap, &off, cols[i]);
     }
+    /* Emit '?' placeholders, not '$n': pg_query runs every statement through
+     * the ?-to-$n rewriter, which also counts placeholders to validate the
+     * param count. Emitting $n directly leaves the rewriter seeing zero '?' and
+     * rejecting the bind as "0 placeholders, N values". */
     ap(sql, cap, &off, ") VALUES (");
-    for (int i = 0; i < n_cols; i++) {
-        char ph[16];
-        snprintf(ph, sizeof ph, "%s$%d", i ? ", " : "", i + 1);
-        ap(sql, cap, &off, ph);
-    }
+    for (int i = 0; i < n_cols; i++)
+        ap(sql, cap, &off, i ? ", ?" : "?");
     ap(sql, cap, &off, ") ON CONFLICT (");
     for (int i = 0; i < n_conflict; i++) {
         if (i) ap(sql, cap, &off, ", ");
@@ -381,7 +385,14 @@ static int build_and_run_insert(HlDbHandle *h, const char *verb_suffix,
         ap(sql, cap, &off, "NOTHING");
     }
 
-    if (off >= cap) { free(sql); return -1; }   /* estimate was too small */
+    if (off >= cap) {                            /* estimate was too small */
+        free(sql);
+        HlDbPgCtx *s = h ? h->ctx : NULL;
+        if (s)
+            snprintf(s->conn.errmsg, sizeof s->conn.errmsg,
+                     "insert/upsert SQL exceeded its estimated buffer");
+        return -1;
+    }
     sql[off] = '\0';
 
     int rc = pg_exec(h, sql, values, n_cols);

@@ -73,15 +73,24 @@ cat > "$APPDIR/app.lua" <<'LUA'
 app.manifest({ modules = {
     "hull/db@1", "hull/http-server@1", "hull/search@1",
     "hull/web/middleware/session@1", "hull/web/middleware/outbox@1",
+    "hull/web/middleware/inbox@1", "hull/web/middleware/rbac@1",
+    "hull/web/middleware/audit-log@1", "hull/web/middleware/transaction@1",
     "hull/web/auth-health@1",
 } })
 local db = require("hull.db").default()
 local session = require("hull.web.middleware.session")
 local outbox = require("hull.web.middleware.outbox")
+local inbox = require("hull.web.middleware.inbox")
+local rbac = require("hull.web.middleware.rbac")
+local audit_log = require("hull.web.middleware.audit-log")
+local transaction = require("hull.web.middleware.transaction")
 local auth_health = require("hull.web.auth-health")
 local search = require("hull.search")
 session.init()
 outbox.init()
+inbox.init()
+rbac.init()
+audit_log.init({ fingerprint_salt = "e2e-postgres-fingerprint-salt" })
 db.exec("DROP TABLE IF EXISTS e2e")
 db.exec("CREATE TABLE e2e (id BIGSERIAL PRIMARY KEY, name TEXT, score INT, active BOOL)")
 db.exec("INSERT INTO e2e (name, score, active) VALUES (?, ?, ?)", { "alice", 10, true })
@@ -119,6 +128,49 @@ app.get("/stdlib", function(req, res)
         outbox_pending = stats.pending,
         sessions_ok    = health.sessions.ok,
         search_guarded = (not search_ok) and (tostring(search_err):find("SQLite") ~= nil) or false,
+    })
+end)
+-- Backend-agnostic DB-backed stdlib on real Postgres: inbox dedup, rbac
+-- roles/permissions, audit-log record/list, transaction commit. Proves each
+-- module's CREATE TABLE + CRUD run on the PG dialect, not just SQLite.
+app.get("/stdlib2", function(req, res)
+    local inbox_new = inbox.check_and_mark("evt-1", "webhook")   -- false = new
+    local inbox_dup = inbox.check_and_mark("evt-1", "webhook")   -- true  = duplicate
+
+    rbac.define_role("editor", { "posts.write" })
+    rbac.assign("u1", "editor")
+    local can_write  = rbac.has_permission("u1", "posts.write")
+    local can_delete = rbac.has_permission("u1", "posts.delete")
+
+    audit_log.record("u1", "login", req, {})
+    local events = audit_log.list("u1", {})
+
+    -- own table so the shared `e2e` fixture's row count stays stable for the
+    -- later db.open phase.
+    db.exec("CREATE TABLE IF NOT EXISTS stdlib2_txn (id BIGINT)")
+    transaction.run(function()
+        db.exec("INSERT INTO stdlib2_txn (id) VALUES (?)", { 1 })
+    end)
+    local txn_count = db.query("SELECT count(*) AS c FROM stdlib2_txn")[1].c
+
+    -- db.insert_if_absent (sibling of upsert; same builder, long column name
+    -- exercises the buffer-estimate path): first insert wins, second ignored.
+    db.exec("CREATE TABLE IF NOT EXISTS stdlib2_ins (message_key TEXT PRIMARY KEY, val BIGINT)")
+    db.insert_if_absent("stdlib2_ins", { "message_key" },
+                        { "message_key", "val" }, { "k1", 10 })
+    db.insert_if_absent("stdlib2_ins", { "message_key" },
+                        { "message_key", "val" }, { "k1", 20 })
+    local ins_val = db.query(
+        "SELECT val FROM stdlib2_ins WHERE message_key = ?", { "k1" })[1].val
+
+    res:json({
+        insert_if_absent = ins_val,
+        inbox_new    = inbox_new,
+        inbox_dup    = inbox_dup,
+        rbac_write   = can_write,
+        rbac_delete  = can_delete,
+        audit_count  = #events,
+        txn_count    = txn_count,
     })
 end)
 LUA
@@ -161,6 +213,17 @@ echo "$RESP_STDLIB" | grep -q '"session_role":"admin"'  || { echo "::error sessi
 echo "$RESP_STDLIB" | grep -q '"outbox_pending":1'      || { echo "::error outbox enqueue"; fail=1; }
 echo "$RESP_STDLIB" | grep -q '"sessions_ok":true'      || { echo "::error auth-health table probe"; fail=1; }
 echo "$RESP_STDLIB" | grep -q '"search_guarded":true'   || { echo "::error search SQLite-only guard"; fail=1; }
+
+# backend-agnostic DB stdlib on Postgres: inbox / rbac / audit-log / transaction
+RESP_STDLIB2=$(curl -fsS "http://127.0.0.1:${PORT}/stdlib2" || echo FAIL)
+echo "stdlib2 response: $RESP_STDLIB2"
+echo "$RESP_STDLIB2" | grep -q '"inbox_new":false'   || { echo "::error inbox first-seen not new"; fail=1; }
+echo "$RESP_STDLIB2" | grep -q '"inbox_dup":true'    || { echo "::error inbox dedup"; fail=1; }
+echo "$RESP_STDLIB2" | grep -q '"rbac_write":true'   || { echo "::error rbac has_permission grant"; fail=1; }
+echo "$RESP_STDLIB2" | grep -q '"rbac_delete":false' || { echo "::error rbac has_permission deny"; fail=1; }
+echo "$RESP_STDLIB2" | grep -q '"audit_count":1'     || { echo "::error audit-log record/list"; fail=1; }
+echo "$RESP_STDLIB2" | grep -q '"txn_count":1'       || { echo "::error transaction commit"; fail=1; }
+echo "$RESP_STDLIB2" | grep -q '"insert_if_absent":10' || { echo "::error insert_if_absent (first-wins) on pg"; fail=1; }
 
 if [ "$fail" = 0 ]; then
     echo "PASS: postgres backend end-to-end (sync + db.async + stdlib -> typed decode)"
