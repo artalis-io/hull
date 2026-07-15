@@ -10,6 +10,7 @@
 
 #include "hull/cap/smtp.h"
 #include "hull/cap/audit.h"
+#include "hull/host_match.h"
 #include "hull/limits/core.h"
 #include "hull/shared/tls_client.h"
 
@@ -94,16 +95,9 @@ int hl_smtp_check_host(const HlSmtpConfig *cfg, const char *host)
 {
     if (!cfg || !host)
         return -1;
-
-    size_t host_len = strlen(host);
-    for (int i = 0; i < cfg->host_count; i++) {
-        const char *allowed = cfg->allowed_hosts[i];
-        size_t alen = strlen(allowed);
-        if (alen == host_len && strncasecmp(allowed, host, host_len) == 0)
-            return 0;
-    }
-
-    return -1;  /* not allowed */
+    /* Same manifest.hosts matcher as http.fetch: exact + glob + CIDR + $VAR. */
+    return hl_host_match_any_env(cfg->allowed_hosts, cfg->host_count, host)
+           ? 0 : -1;
 }
 
 /* ── I/O abstraction (plain or TLS) ──────────────────────────────── */

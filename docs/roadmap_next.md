@@ -2729,19 +2729,31 @@ model (any URL whose host is allowlisted) with no *named* concept, while
 capabilities should converge on one consistent "named + dynamic" shape, and
 http should adopt §2.2's richer matcher + env-ref conventions:
 
-- [ ] `hosts` gains glob + CIDR support by adopting `cap/host_match.c` (today
-      it's exact-only, `hl_http_check_host`). Extract the matcher to a shared
-      `utils/` at this point (it currently lives in `cap/host_match.c`).
-- [ ] `"$VAR"` / `"${VAR}"` env refs in `hosts` entries (and consider across all
-      manifest string allowlists) via `hl_manifest_env_ref`, matching
-      `databases.named`.
-- [ ] Consider a `named` HTTP-endpoint concept (author-declared base URLs, like
-      `databases.named`) so `http.fetch` can target a name with credentials /
-      base injected, parallel to `db.connect(name)`. Decide whether it's worth
-      the surface or whether http stays dynamic-only.
-- [ ] Same lens for SMTP (`hull/smtp`) and any future outbound capability: one
-      allowlist convention (`{ named, dynamic }` + `$VAR` + host_match) across
-      db / http / smtp instead of three bespoke shapes.
+- [x] `hosts` gains glob + CIDR + `$VAR` support by adopting the shared matcher.
+      `hl_http_check_host` + `hl_smtp_check_host` (byte-identical exact-match
+      dupes) both collapse onto `hl_host_match_any_env` / `_env_n`; `db.dynamic`'s
+      bespoke resolve-loop collapses onto it too. The matcher moved
+      `cap/host_match.c` -> `src/hull/utils/host_match.c` (rides in `CAP_OBJS` so
+      its link footprint tracks the cap layer that calls it). ws.connect is
+      covered for free (shares the http config). Tests: glob / CIDR / `$VAR`
+      wiring cases in `test_http` + `test_smtp`, matcher itself fuzzed.
+- [x] `"$VAR"` / `"${VAR}"` env refs in `hosts`, resolved at **match time** (so
+      it works for CLI apps too, which don't seal the manifest) via
+      `hl_manifest_env_ref`. Unset / empty var contributes no match (fail
+      closed). Same semantics as `databases.dynamic.hosts`.
+- [x] **Decided: http/smtp stay dynamic-only** (no `named` HTTP-endpoint
+      concept). An HTTP/SMTP call is stateless per-request; there is no
+      credential-bearing pooled resource to acquire by name like a DB connection,
+      so the `{named, dynamic}` *structure* stays where it earns its place (db).
+      The convergence is the matcher + `$VAR` + (already-flat) shape, not forcing
+      a named wrapper for symmetry.
+- [x] SMTP shares the same matcher (`hl_smtp_check_host` -> `hl_host_match_any_env`).
+      One allowlist convention (`$VAR` + host_match) now spans db / http / ws /
+      smtp.
+- [ ] **Follow-up (§2.7 cleanup):** relocate the generic `$VAR` parser
+      `hl_manifest_env_ref` from `manifest.h` to a neutral util header so
+      `utils/host_match.c` no longer includes `manifest.h` for it (the one
+      remaining domain include in that leaf util).
 
 **Out of scope:** a general "capabilities DSL" rewrite; this is convergence of
 the existing outbound allowlists onto one shape, not a new framework.

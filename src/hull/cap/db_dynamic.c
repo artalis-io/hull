@@ -83,21 +83,11 @@ static int dsn_host(const char *dsn, char *buf, size_t bufsz)
     return 1;
 }
 
-/* Match @p host against the policy's host patterns, resolving "$VAR" entries
- * from the environment. */
+/* Match @p host against the policy's host patterns (exact / glob / CIDR),
+ * resolving "$VAR" entries from the environment. Same matcher http/smtp use. */
 static int host_allowed(const HlManifestDbDynamic *policy, const char *host)
 {
-    char var[128];
-    for (int i = 0; i < policy->host_count; i++) {
-        const char *pat = policy->hosts[i];
-        if (hl_manifest_env_ref(pat, var, sizeof var)) {
-            const char *v = getenv(var);
-            if (v && v[0] && hl_host_match(v, host)) return 1;
-        } else if (hl_host_match(pat, host)) {
-            return 1;
-        }
-    }
-    return 0;
+    return hl_host_match_any_env(policy->hosts, policy->host_count, host);
 }
 
 HlDbHandle *hl_db_dynamic_open(const char *dsn,

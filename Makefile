@@ -1395,6 +1395,13 @@ ifeq ($(HL_ENABLE_TUI),0)
       $(CAP_SRCS))
 endif
 CAP_OBJS := $(patsubst $(SRCDIR)/hull/cap/%.c,$(BUILDDIR)/cap_%.o,$(CAP_SRCS))
+# host_match is a domain-free leaf util (src/hull/utils/host_match.c) shared by
+# the db / http / smtp host allowlists. Its link footprint is coextensive with
+# the cap layer that calls it, so it rides in CAP_OBJS (which also feeds
+# TEST_CAP_OBJS + every link list) rather than needing a per-list edit. Harmless
+# where unreferenced (flavors with no db and no http).
+HOST_MATCH_OBJ := $(BUILDDIR)/host_match.o
+CAP_OBJS += $(HOST_MATCH_OBJ)
 CAP_TOOL_OBJ := $(BUILDDIR)/cap_tool.o
 # cap/test.c is the in-process HTTP test harness — depends on KlRouter
 # and the rest of Keel's request/response machinery. Server-only.
@@ -2847,6 +2854,10 @@ $(SH_SEAL_ARENA_OBJ): $(KEEL_DIR)/vendor/sh_seal_arena/sh_seal_arena.c $(KEEL_DI
 $(CSP_OBJ): $(SRCDIR)/hull/utils/csp.c $(INCDIR)/hull/utils/csp.h | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
 
+# Host allowlist matcher (glob + CIDR), shared by db / http / smtp.
+$(HOST_MATCH_OBJ): $(SRCDIR)/hull/utils/host_match.c $(INCDIR)/hull/host_match.h | $(BUILDDIR)
+	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
+
 # QuickJS sources (relaxed warnings)
 $(BUILDDIR)/qjs_%.o: $(QJS_DIR)/%.c | $(BUILDDIR)
 	$(CC) $(QJS_CFLAGS) -I$(QJS_DIR) -c -o $@ $<
@@ -3346,7 +3357,7 @@ fuzz/fuzz_mime_sniff: fuzz/fuzz_mime_sniff.c $(SRCDIR)/hull/cap/mime.c
 
 # Host-allowlist matcher: glob + CIDR parsing over attacker-influenced patterns
 # and hosts (roadmap §2.2 dynamic DB connections).
-fuzz/fuzz_host_match: fuzz/fuzz_host_match.c $(SRCDIR)/hull/cap/host_match.c
+fuzz/fuzz_host_match: fuzz/fuzz_host_match.c $(SRCDIR)/hull/utils/host_match.c
 	$(CC) $(FUZZ_CFLAGS) -o $@ $^
 
 # PostgreSQL wire-protocol reader: the untrusted-server parser (§1 Phase 2).

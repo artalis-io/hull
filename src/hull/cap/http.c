@@ -9,6 +9,7 @@
 
 #include "hull/cap/http.h"
 #include "hull/cap/audit.h"
+#include "hull/host_match.h"
 
 #include <keel/allocator.h>
 #include <keel/client_pool.h>
@@ -28,15 +29,11 @@ int hl_http_check_host(const HlHttpConfig *cfg,
 {
     if (!cfg || !host)
         return -1;
-
-    for (int i = 0; i < cfg->count; i++) {
-        const char *allowed = cfg->allowed_hosts[i];
-        size_t alen = strlen(allowed);
-        if (alen == host_len && strncasecmp(allowed, host, host_len) == 0)
-            return 0;
-    }
-
-    return -1;  /* not allowed */
+    /* manifest.hosts patterns: exact (case-insensitive) + "*" + "*.suffix"
+     * glob + CIDR (IP-literal hosts only) + "$VAR" env refs. Shared with
+     * ws.connect (same cfg) and smtp.send (§2.8). */
+    return hl_host_match_any_env_n(cfg->allowed_hosts, cfg->count, host, host_len)
+           ? 0 : -1;
 }
 
 /* ── Public API ──────────────────────────────────────────────────── */
