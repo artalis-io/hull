@@ -15,6 +15,7 @@
 #include "hull/cap/db_backend.h"
 #include "hull/cap/db_sqlite.h"     /* hl_db_backend_sqlite (BACKENDS[]) */
 #include "hull/cap/db_postgres.h"   /* hl_db_backend_postgres (BACKENDS[]) */
+#include "hull/cap/db_mysql.h"      /* hl_db_backend_mysql (BACKENDS[]) */
 #include "hull/cap/db.h"   /* HlDbError codes + check_namespace decl */
 #include <ctype.h>
 #include <stddef.h>
@@ -48,6 +49,9 @@ static const HlDbBackend *const BACKENDS[] = {
 #endif
 #ifdef HL_ENABLE_POSTGRES
     &hl_db_backend_postgres,
+#endif
+#ifdef HL_ENABLE_MYSQL
+    &hl_db_backend_mysql,
 #endif
 };
 

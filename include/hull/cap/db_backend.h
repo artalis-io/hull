@@ -29,6 +29,7 @@ typedef enum {
     HL_DB_NATIVE_NONE = 0,
     HL_DB_NATIVE_SQLITE,
     HL_DB_NATIVE_POSTGRES,
+    HL_DB_NATIVE_MYSQL,
 } HlDbNativeTag;
 
 /* Callback used by `table_columns`: invoked once per column name

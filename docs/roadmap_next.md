@@ -2829,6 +2829,56 @@ orthogonal to §2.2's async work (do NOT ride it in with that):
 connection-private; auto-rewriting it would surprise apps using it as a private
 scratch DB). This is an explicit named-URI opt-in only.
 
+### 2.10 MySQL / MariaDB backend (the §2 payoff)
+
+A pure-C MySQL/MariaDB wire client (no libmysql/libmariadb), mirroring the PG
+backend (`cap/mysqlwire.c` codec + `cap/mysql_conn.c` connection + `cap/db_mysql.c`
+vtable adapter). One backend serves `mysql://` + `mariadb://` (shared protocol;
+MariaDB is a MySQL fork). This is the first real consumer of the §2 abstractions
+(`native_tag`, backtick `identifier_quote`, `supports_udf=0`, `schemes`) and,
+once landed, unlocks the two deferred cleanups (§2.7 db.c fold, §2.4 dialect
+capability struct). Gated by `HL_ENABLE_MYSQL` (default 0), links `HL_LINK_TLS`.
+
+**Key protocol difference from PG:** MySQL has no text-format parameter path, so
+parameterized queries go through the **binary prepared-statement** protocol
+(`COM_STMT_PREPARE` -> `COM_STMT_EXECUTE`, type-tagged binary params + binary row
+decode); multi-statement migration scripts use `COM_QUERY` (text, no params).
+Mirrors PG's simple-vs-extended split; the "SQL injection impossible" invariant
+holds (params never concatenated).
+
+**Auth (decided):** `mysql_native_password` (MariaDB default + legacy MySQL,
+SHA1 challenge-response) + `caching_sha2_password` (MySQL 8 default; full-auth
+sends cleartext over TLS rather than implementing the RSA-public-key path,
+fast-auth works cached) + MariaDB `client_ed25519` (reuses TweetNaCl). TLS via
+the shared `shared/tls_client.c`; hashes via `cap/crypto`.
+
+**Phases** (commit between, like the PG epic):
+- [x] **1a - skeleton + build wiring.** `HL_ENABLE_MYSQL` flag (Makefile: TLS
+      gate + umbrella + CFLAGS + source filter), `HL_DB_NATIVE_MYSQL` tag,
+      `cap/db_mysql.{c,h}` with the dialect wired (backtick quote,
+      `AUTO_INCREMENT` DDL, `supports_udf=0`) + typed stub methods (open fails
+      cleanly with a phase-1 message), registered in `db_select.c` `BACKENDS[]`.
+      `mysql://` / `mariadb://` route to it; reserved-scheme hint gone when
+      compiled. `test_db_select` routing case (both modes); CI `sqlite + mysql`
+      and `mysql-only` link flavors; sqlite / mysql-only / DB=0 all build clean.
+- [ ] **1b - wire codec + DSN parser.** `cap/mysqlwire.c` (packet framing:
+      3-byte LE len + seq, length-encoded ints/strings, OK/ERR/EOF packets),
+      `mysql://` DSN parse (host/port/user/password/db + params), fuzzers +
+      unit tests. Pure functions, no socket.
+- [ ] **2 - handshake + native auth + text query.** Handshake v10 + capability
+      negotiation, `mysql_native_password`, `COM_QUERY` + text result decode.
+- [ ] **3 - prepared statements.** `COM_STMT_PREPARE`/`EXECUTE`, binary param
+      encode + binary row decode (the parameterized path).
+- [ ] **4 - dialect + migrations + types.** `INSERT IGNORE` / `ON DUPLICATE KEY
+      UPDATE`, `LAST_INSERT_ID()`, `information_schema` columns, `exec_script`,
+      full type coverage.
+- [ ] **5 - TLS + caching_sha2 + ed25519.** SSLRequest + handshake over
+      `tls_client.c`; `caching_sha2_password` (fast + TLS full-auth);
+      `client_ed25519`.
+- [ ] **6 - stdlib + db.async + docker e2e + CI.** Real MySQL/MariaDB in Docker
+      (SCRAM-equivalent auth + TLS + migrations + `db.async` + stdlib), a full
+      `e2e_mysql.sh` job, fuzzers in CI.
+
 ### Backend-onboarding checklist (what each new backend needs)
 
 A new backend after §2 should be: one self-contained `cap/db_<x>.c` implementing

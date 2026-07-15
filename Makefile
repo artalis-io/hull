@@ -404,14 +404,17 @@ endif
 ifeq ($(HL_ENABLE_DB),0)
 HL_ENABLE_SQLITE   ?= 0
 HL_ENABLE_POSTGRES ?= 0
+HL_ENABLE_MYSQL    ?= 0
 endif
 HL_ENABLE_SQLITE   ?= 1
 HL_ENABLE_POSTGRES ?= 0
+HL_ENABLE_MYSQL    ?= 0
 
-# Keel (KlTls) + mbedTLS are linked when EITHER an HTTP half OR PostgreSQL
-# is enabled. HTTP still owns the -DHL_ENABLE_HTTP macro (above), so a
-# Postgres-only build links the TLS stack without activating HTTP code.
-ifeq ($(HL_ENABLE_HTTP_ANY)$(HL_ENABLE_POSTGRES),00)
+# Keel (KlTls) + mbedTLS are linked when an HTTP half OR PostgreSQL OR MySQL is
+# enabled (MySQL's caching_sha2_password full-auth + ed25519 need TLS + crypto).
+# HTTP still owns the -DHL_ENABLE_HTTP macro (above), so a DB-only build links
+# the TLS stack without activating HTTP code.
+ifeq ($(HL_ENABLE_HTTP_ANY)$(HL_ENABLE_POSTGRES)$(HL_ENABLE_MYSQL),000)
 HL_LINK_TLS := 0
 else
 HL_LINK_TLS := 1
@@ -518,12 +521,15 @@ endif
 ifeq ($(HL_ENABLE_POSTGRES),1)
 CFLAGS += -DHL_ENABLE_POSTGRES
 endif
+ifeq ($(HL_ENABLE_MYSQL),1)
+CFLAGS += -DHL_ENABLE_MYSQL
+endif
 
 # Derived umbrella. `override` forces the derived value even if a
-# contradictory HL_ENABLE_DB=1 was passed with both backends off (resolves
+# contradictory HL_ENABLE_DB=1 was passed with all backends off (resolves
 # to a coherent "no backend" rather than a broken half-build). The
 # back-compat check above already read the caller's HL_ENABLE_DB=0 intent.
-ifeq ($(HL_ENABLE_SQLITE)$(HL_ENABLE_POSTGRES),00)
+ifeq ($(HL_ENABLE_SQLITE)$(HL_ENABLE_POSTGRES)$(HL_ENABLE_MYSQL),000)
 override HL_ENABLE_DB := 0
 else
 override HL_ENABLE_DB := 1
@@ -1367,6 +1373,14 @@ ifneq ($(HL_ENABLE_POSTGRES),1)
       $(SRCDIR)/hull/cap/db_postgres.c \
       $(SRCDIR)/hull/cap/pg_conn.c \
       $(SRCDIR)/hull/cap/pgwire.c, \
+      $(CAP_SRCS))
+endif
+ifneq ($(HL_ENABLE_MYSQL),1)
+  # MySQL / MariaDB wire backend: codec + connection + vtable. Off by default.
+  CAP_SRCS := $(filter-out \
+      $(SRCDIR)/hull/cap/db_mysql.c \
+      $(SRCDIR)/hull/cap/mysql_conn.c \
+      $(SRCDIR)/hull/cap/mysqlwire.c, \
       $(CAP_SRCS))
 endif
 ifeq ($(HL_ENABLE_HTTP_CLIENT),0)

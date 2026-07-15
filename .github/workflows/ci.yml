@@ -223,6 +223,13 @@ jobs:
           # dependency on the SQLite backend TU.
           - name: postgres-only (no sqlite)
             flags: HL_ENABLE_SQLITE=0 HL_ENABLE_POSTGRES=1
+          # MySQL / MariaDB backend (Phase 1 skeleton): guards the HL_ENABLE_MYSQL
+          # link + HL_LINK_TLS gating + the selector registration so the backend
+          # keeps building as the wire protocol lands.
+          - name: sqlite + mysql
+            flags: HL_ENABLE_MYSQL=1
+          - name: mysql-only (no sqlite)
+            flags: HL_ENABLE_SQLITE=0 HL_ENABLE_MYSQL=1
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
         with:
