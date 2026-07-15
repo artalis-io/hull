@@ -53,3 +53,6 @@ tests/.playwright/
 # libhull Rust reference embedder (examples/embed_rust)
 examples/embed_rust/target/
 examples/embed_rust/Cargo.lock
+
+# Local planning / assessment scratch, not part of the repo.
+asset_inventory_assessment.md
