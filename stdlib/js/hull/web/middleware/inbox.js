@@ -20,6 +20,18 @@ import { time } from "hull:time";
 
 let inboxTtl = 604800; // default 7 days
 
+// `messageId` / `source` form the PK, both VARCHAR(255). Reject an over-length
+// id rather than let MySQL silently truncate it, which would collapse two
+// distinct messages sharing a 255-char prefix into one (dropping the second as
+// a false duplicate). Uniform across every backend.
+const MAX_ID_LEN = 255;
+function checkIdLen(messageId, source) {
+    if (messageId && messageId.length > MAX_ID_LEN)
+        throw new Error("inbox: messageId too long (max " + MAX_ID_LEN + ")");
+    if (source && source.length > MAX_ID_LEN)
+        throw new Error("inbox: source too long (max " + MAX_ID_LEN + ")");
+}
+
 /**
  * Initialize the `_hull_inbox_processed` SQLite table. Idempotent.
  *
@@ -58,6 +70,7 @@ function isDuplicate(messageId, source) {
     if (!messageId || messageId === "")
         return false;
     if (!source) source = "default";
+    checkIdLen(messageId, source);
 
     const now = time.now();
     const rows = db.query(
@@ -93,6 +106,7 @@ function markProcessed(messageId, source, opts) {
     if (!messageId || messageId === "")
         return;
     if (!source) source = "default";
+    checkIdLen(messageId, source);
     const o = opts || {};
 
     const now = time.now();

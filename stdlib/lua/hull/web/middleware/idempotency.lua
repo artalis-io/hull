@@ -115,6 +115,8 @@ local function header_value_safe(v)
     return v:find("[\r\n%z]") == nil
 end
 local _header_name = "idempotency-key"
+-- Matches the `key` column width (VARCHAR(255)); keys over this are rejected.
+local MAX_KEY_LEN = 255
 
 --- Initialize the `_hull_idempotency_keys` SQLite table.
 --
@@ -206,6 +208,14 @@ function idempotency.middleware(opts)
         local key = req.headers[header_name]
         if not key or key == "" then
             return 0  -- no key, proceed normally
+        end
+        -- The key is the PK's client-supplied half (VARCHAR(255)). Reject an
+        -- over-length key rather than let MySQL silently truncate it, which
+        -- would collide two distinct keys sharing a 255-char prefix and replay
+        -- the wrong cached response. Uniform across every backend.
+        if #key > MAX_KEY_LEN then
+            res:status(400):json({ error = "idempotency-key too long (max " .. MAX_KEY_LEN .. ")" })
+            return 1
         end
 
         local principal_id = get_principal(req)

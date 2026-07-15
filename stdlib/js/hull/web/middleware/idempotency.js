@@ -31,6 +31,8 @@ import { json } from "hull:json";
 
 let idemTtl = 86400;
 const HEADER_NAME = "idempotency-key";
+// Matches the `key` column width (VARCHAR(255)); keys over this are rejected.
+const MAX_KEY_LEN = 255;
 
 /* M-7 (Phase 5) + Phase 6 audit M-1: allowlist of headers safe to replay
  * or cache from a previous response. Excludes credential-bearing /
@@ -176,6 +178,15 @@ function middleware(opts) {
         const key = req.header(headerName);
         if (!key || key === "")
             return 0;
+        // The key is the PK's client-supplied half (VARCHAR(255)). Reject an
+        // over-length key rather than let MySQL silently truncate it, which
+        // would collide two distinct keys sharing a 255-char prefix and replay
+        // the wrong cached response. Uniform across every backend.
+        if (key.length > MAX_KEY_LEN) {
+            res.status(400);
+            res.json({ error: "idempotency-key too long (max " + MAX_KEY_LEN + ")" });
+            return 1;
+        }
 
         if (!req.ctx) req.ctx = {};
 
