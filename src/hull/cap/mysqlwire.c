@@ -456,3 +456,14 @@ void hl_my_build_handshake_response(HlMyWriter *w, uint8_t seq,
         hl_my_put_cstr(w, plugin);
     hl_my_packet_end(w, m);
 }
+
+void hl_my_build_ssl_request(HlMyWriter *w, uint8_t seq,
+                             uint32_t client_caps, uint8_t charset)
+{
+    size_t m = hl_my_packet_begin(w, seq);
+    hl_my_put_u32(w, client_caps);
+    hl_my_put_u32(w, HL_MY_MAX_PACKET);
+    hl_my_put_u8(w, charset);
+    for (int i = 0; i < HL_MY_HANDSHAKE_RESERVED; i++) hl_my_put_u8(w, 0);
+    hl_my_packet_end(w, m);
+}

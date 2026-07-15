@@ -247,6 +247,13 @@ void hl_my_build_handshake_response(HlMyWriter *w, uint8_t seq,
                                     const uint8_t *auth_resp, size_t auth_resp_len,
                                     const char *dbname, const char *plugin);
 
+/* Build an SSLRequest packet: the leading fixed fields of HandshakeResponse41
+ * (capability flags, max packet size, charset, 23 reserved bytes) with no
+ * username / auth. Sent plaintext with CLIENT_SSL set, immediately before the
+ * TLS handshake; the full HandshakeResponse41 then follows over TLS. */
+void hl_my_build_ssl_request(HlMyWriter *w, uint8_t seq,
+                             uint32_t client_caps, uint8_t charset);
+
 /* ── Protocol constants (subset Hull uses) ────────────────────────── */
 
 /* Client commands (first payload byte of a command packet). */

@@ -175,6 +175,15 @@ void hl_my_dsn_scrub(HlMyDsn *dsn)
 #ifndef HL_MY_NO_AUTH
 #include "hull/cap/crypto.h"
 #include "hull/cap/mysqlwire.h"
+/* TLS transport. The pure-parser fuzzers define HL_MY_NO_TLS (and the unit
+ * tests via the Makefile) to stay free of Keel; without it every byte still
+ * flows over the raw socket. */
+#ifndef HL_MY_NO_TLS
+#include "hull/shared/tls_client.h"
+#endif
+
+/* TLS handshake timeout (blocking), distinct from the TCP connect timeout. */
+#define HL_MY_TLS_TIMEOUT_MS 10000
 
 #include <sys/socket.h>
 #include <sys/select.h>
@@ -248,12 +257,29 @@ static int my_connect(const char *host, const char *port, int timeout_ms)
     return fd;
 }
 
+/* Raw byte I/O, tunnelled through TLS once conn->tls is attached. */
+static ssize_t conn_write_raw(HlMyConn *conn, const uint8_t *buf, size_t len)
+{
+#ifndef HL_MY_NO_TLS
+    if (conn->tls) return hl_tls_client_write(conn->fd, conn->tls, buf, len);
+#endif
+    return send(conn->fd, buf, len, 0);
+}
+
+static ssize_t conn_read_raw(HlMyConn *conn, uint8_t *buf, size_t len)
+{
+#ifndef HL_MY_NO_TLS
+    if (conn->tls) return hl_tls_client_read(conn->fd, conn->tls, buf, len);
+#endif
+    return recv(conn->fd, buf, len, 0);
+}
+
 static int conn_send(HlMyConn *conn, const uint8_t *buf, size_t len)
 {
     size_t sent = 0;
     while (sent < len) {
         ssize_t n;
-        do { n = send(conn->fd, buf + sent, len - sent, 0); }
+        do { n = conn_write_raw(conn, buf + sent, len - sent); }
         while (n < 0 && errno == EINTR);
         if (n <= 0) { conn_set_err(conn, "socket write failed"); return -1; }
         sent += (size_t)n;
@@ -288,7 +314,7 @@ static int conn_next_frame(HlMyConn *conn, HlMyFrame *f)
             conn->rbuf = nb; conn->rcap = ncap;
         }
         ssize_t n;
-        do { n = recv(conn->fd, conn->rbuf + conn->rlen, conn->rcap - conn->rlen, 0); }
+        do { n = conn_read_raw(conn, conn->rbuf + conn->rlen, conn->rcap - conn->rlen); }
         while (n < 0 && errno == EINTR);
         if (n <= 0) { conn_set_err(conn, "connection closed by server"); return -1; }
         conn->rlen += (size_t)n;
@@ -298,6 +324,13 @@ static int conn_next_frame(HlMyConn *conn, HlMyFrame *f)
 void hl_my_conn_close(HlMyConn *conn)
 {
     if (!conn) return;
+#ifndef HL_MY_NO_TLS
+    if (conn->tls) {
+        hl_tls_client_shutdown(conn->fd, conn->tls);
+        hl_tls_client_free(conn->tls);
+        conn->tls = NULL;
+    }
+#endif
     if (conn->fd >= 0) { close(conn->fd); conn->fd = -1; }
     free(conn->rbuf);
     conn->rbuf = NULL;
@@ -317,6 +350,25 @@ static int send_auth_data(HlMyConn *conn, uint8_t seq,
     int se = w.err || conn_send(conn, w.buf, w.len);
     hl_my_writer_free(&w);
     return se ? -1 : 0;
+}
+
+/* sslmode -> policy (mirrors cap/pg_conn.c's names for cross-backend parity). */
+enum {
+    HL_MY_SSL_DISABLE = 0,   /* never TLS */
+    HL_MY_SSL_PREFER,        /* TLS if the server offers it; else plaintext */
+    HL_MY_SSL_REQUIRE,       /* TLS mandatory, certificate not verified */
+    HL_MY_SSL_VERIFY,        /* TLS mandatory + chain/hostname verification */
+};
+
+static int my_sslmode_parse(const char *s)
+{
+    if (!s || !s[0]) return HL_MY_SSL_PREFER;   /* default */
+    if (strcmp(s, "disable") == 0)     return HL_MY_SSL_DISABLE;
+    if (strcmp(s, "prefer") == 0)      return HL_MY_SSL_PREFER;
+    if (strcmp(s, "require") == 0)     return HL_MY_SSL_REQUIRE;
+    if (strcmp(s, "verify-ca") == 0)   return HL_MY_SSL_VERIFY;
+    if (strcmp(s, "verify-full") == 0) return HL_MY_SSL_VERIFY;
+    return -1;
 }
 
 int hl_my_conn_start(HlMyConn *conn, int fd, const HlMyDsn *dsn)
@@ -347,6 +399,45 @@ int hl_my_conn_start(HlMyConn *conn, int fd, const HlMyDsn *dsn)
                   | HL_MY_CLIENT_PLUGIN_AUTH | HL_MY_CLIENT_TRANSACTIONS
                   | HL_MY_CLIENT_MULTI_STATEMENTS | HL_MY_CLIENT_MULTI_RESULTS;
     if (dsn->dbname[0]) caps |= HL_MY_CLIENT_CONNECT_WITH_DB;
+    uint8_t charset = hs.charset ? hs.charset : HL_MY_DEFAULT_CHARSET;
+
+    /* TLS negotiation (SSLRequest): consult sslmode, then upgrade before the
+     * credentialed HandshakeResponse41 goes on the wire. The response's
+     * sequence is one past the SSLRequest's when TLS is used. */
+    int sslmode = my_sslmode_parse(dsn->sslmode);
+    if (sslmode < 0) {
+        snprintf(conn->errmsg, sizeof conn->errmsg, "unknown sslmode: %s", dsn->sslmode);
+        hl_my_conn_close(conn); return -1;
+    }
+    int server_ssl = (hs.capabilities & HL_MY_CLIENT_SSL) != 0;
+    uint8_t resp_seq = (uint8_t)(f.seq + 1);
+
+    if (sslmode != HL_MY_SSL_DISABLE && server_ssl) {
+#ifndef HL_MY_NO_TLS
+        caps |= HL_MY_CLIENT_SSL;
+        HlMyWriter sw; hl_my_writer_init(&sw);
+        hl_my_build_ssl_request(&sw, (uint8_t)(f.seq + 1), caps, charset);
+        int sse = sw.err || conn_send(conn, sw.buf, sw.len);
+        hl_my_writer_free(&sw);
+        if (sse) { conn_set_err(conn, "failed to send SSLRequest");
+                   hl_my_conn_close(conn); return -1; }
+        int verify = (sslmode == HL_MY_SSL_VERIFY);
+        conn->tls = hl_tls_client_handshake(conn->fd, dsn->host, verify,
+                                            HL_MY_TLS_TIMEOUT_MS);
+        if (!conn->tls) {
+            snprintf(conn->errmsg, sizeof conn->errmsg,
+                     "TLS handshake with %s failed", dsn->host);
+            hl_my_conn_close(conn); return -1;
+        }
+        resp_seq = (uint8_t)(f.seq + 2);   /* response follows the SSLRequest */
+#else
+        conn_set_err(conn, "TLS not available in this build");
+        hl_my_conn_close(conn); return -1;
+#endif
+    } else if (sslmode >= HL_MY_SSL_REQUIRE) {
+        conn_set_err(conn, "server does not support TLS but sslmode requires it");
+        hl_my_conn_close(conn); return -1;
+    }
     conn->capabilities = caps;
 
     uint8_t auth[HL_MY_SCRAMBLE_LEN];
@@ -356,8 +447,7 @@ int hl_my_conn_start(HlMyConn *conn, int fd, const HlMyDsn *dsn)
 
     HlMyWriter w; hl_my_writer_init(&w);
     hl_my_build_handshake_response(
-        &w, (uint8_t)(f.seq + 1), caps,
-        hs.charset ? hs.charset : HL_MY_DEFAULT_CHARSET, dsn->user,
+        &w, resp_seq, caps, charset, dsn->user,
         auth, (size_t)authlen, dsn->dbname[0] ? dsn->dbname : NULL,
         "mysql_native_password");
     int se = w.err || conn_send(conn, w.buf, w.len);

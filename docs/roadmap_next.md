@@ -2921,9 +2921,24 @@ the shared `shared/tls_client.c`; hashes via `cap/crypto`.
       strings; text-protocol temporal values already decoded as strings.
       `test_mysql_conn` covers the DATETIME decode + single- and multi-result
       scripts; the whole path stays ASan/UBSan-clean.
-- [ ] **5 - TLS + caching_sha2 + ed25519.** SSLRequest + handshake over
-      `tls_client.c`; `caching_sha2_password` (fast + TLS full-auth);
-      `client_ed25519`.
+- [ ] **5 - TLS + caching_sha2 + ed25519.** Split into 5a/5b/5c (mirrors the
+      2a/2b/2c cadence) so each lands reviewable.
+  - [x] **5a - TLS transport.** SSLRequest + blocking handshake over the shared
+        `shared/tls_client.c` (embedded CA bundle), `sslmode=disable|prefer|
+        require|verify-ca|verify-full` (default `prefer`; `verify-*` checks the
+        chain + hostname). All connection I/O routes through `conn_write_raw` /
+        `conn_read_raw`, which tunnel via KlTls once `conn->tls` is attached. The
+        `HL_MY_NO_TLS` guard (fuzzers + unit tests, via `-DHL_MY_NO_TLS` in the
+        Makefile) keeps `mysql_conn.c` linkable without Keel, mirroring
+        `HL_PG_NO_TLS`. `mysql_native_password` now works over TLS. Codec gained
+        `hl_my_build_ssl_request` (unit-tested); `HL_LINK_TLS` already links
+        Keel + mbedTLS whenever MySQL is enabled.
+  - [ ] **5b - caching_sha2_password.** MySQL 8 default: fast path (cached
+        scramble) always; full-auth by sending the cleartext password over TLS;
+        plaintext-RSA full-auth deferred with a clear "use sslmode=require" hint.
+  - [ ] **5c - client_ed25519.** MariaDB: SHA-512(password)-derived ed25519
+        keypair signing the server scramble (custom key derivation, not
+        TweetNaCl's seed path).
 - [ ] **6 - stdlib + db.async + docker e2e + CI.** Real MySQL/MariaDB in Docker
       (SCRAM-equivalent auth + TLS + migrations + `db.async` + stdlib), a full
       `e2e_mysql.sh` job, fuzzers in CI.

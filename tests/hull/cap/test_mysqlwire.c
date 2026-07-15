@@ -299,6 +299,28 @@ UTEST(mysqlwire, build_handshake_response_roundtrip)
     hl_my_writer_free(&w);
 }
 
+UTEST(mysqlwire, build_ssl_request)
+{
+    HlMyWriter w; hl_my_writer_init(&w);
+    uint32_t caps = HL_MY_CLIENT_PROTOCOL_41 | HL_MY_CLIENT_SECURE_CONNECTION
+                  | HL_MY_CLIENT_SSL;
+    hl_my_build_ssl_request(&w, 1, caps, 45);
+    ASSERT_FALSE(w.err);
+
+    HlMyFrame f; size_t consumed = 0;
+    ASSERT_EQ(hl_my_frame_next(w.buf, w.len, &f, &consumed), HL_MY_OK);
+    ASSERT_EQ(f.seq, 1);
+    /* SSLRequest body is exactly caps(4) + max_packet(4) + charset(1) + 23. */
+    ASSERT_EQ(f.body_len, (uint32_t)(4 + 4 + 1 + 23));
+    HlMyCursor c; hl_my_cursor_init(&c, &f);
+    ASSERT_EQ(hl_my_get_u32(&c), caps);
+    (void)hl_my_get_u32(&c);                       /* max packet size */
+    ASSERT_EQ(hl_my_get_u8(&c), 45);
+    (void)hl_my_get_bytes(&c, 23);                 /* reserved */
+    ASSERT_FALSE(hl_my_cursor_err(&c));
+    hl_my_writer_free(&w);
+}
+
 /* ── mysql_native_password scramble (crypto) ──────────────────────── */
 
 UTEST(mysql_auth, native_password_scramble)
