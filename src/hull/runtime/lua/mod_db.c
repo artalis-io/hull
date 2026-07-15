@@ -1246,14 +1246,15 @@ static int push_conn_object(lua_State *L, HlDbHandle *h)
         lua_setfield(L, -2, m->name);
     }
     /* async targets this connection's database via the worker pool's per-DSN
-     * connections; udf registers on this connection's SQLite handle (a udf on
-     * a non-SQLite connection errors at call time). Both carry the same bound
-     * handle as the sync methods, so a named connection is fully featured. */
+     * connections. udf is attached only when the backend supports it (§2.5), so
+     * a Postgres connection has no `udf` sub-object at all rather than one that
+     * fails at call time. */
     push_bound_subtable(L, db_async_funcs, h, "async");
-#ifdef HL_ENABLE_SQLITE
-    push_bound_subtable(L, db_udf_funcs, h, "udf");
-#endif
     const HlDbBackend *be = h ? h->backend : NULL;
+#ifdef HL_ENABLE_SQLITE
+    if (be && be->supports_udf)
+        push_bound_subtable(L, db_udf_funcs, h, "udf");
+#endif
     lua_pushstring(L, be ? be->name : "none");
     lua_setfield(L, -2, "backend_name");
     lua_pushstring(L, (be && be->autoincrement_id_ddl)

@@ -242,44 +242,8 @@ typedef struct ShSealArena ShSealArena;
  */
 int hl_manifest_seal(HlManifest *dst, const HlManifest *src, ShSealArena *arena);
 
-/*
- * Full-value env reference: if @p s is exactly "$NAME" or "${NAME}" (with NAME
- * matching [A-Za-z_][A-Za-z0-9_]*), copy NAME into @p out (bounded by @p outsz)
- * and return 1. Otherwise return 0 (a literal value; a string that merely
- * CONTAINS '$', e.g. a DSN password, is literal). NULL-safe (returns 0). Used
- * for `databases.named` DSNs and `databases.dynamic` hosts (resolved at open /
- * check time so secrets stay in the environment, not app source).
- *
- * A header-only `static inline`: a pure string parser with no dependencies, so
- * consumers (db_registry, db.open) don't drag manifest.o into their link.
- */
-static inline int hl_manifest_env_ref(const char *s, char *out, size_t outsz)
-{
-    if (!s || !out || outsz == 0 || s[0] != '$')
-        return 0;
-    const char *name = s + 1;
-    int braced = 0;
-    if (*name == '{') { braced = 1; name++; }
-
-    /* NAME = [A-Za-z_][A-Za-z0-9_]* */
-    const char *p = name;
-    if (!(*p == '_' || (*p >= 'A' && *p <= 'Z') || (*p >= 'a' && *p <= 'z')))
-        return 0;
-    while (*p == '_' || (*p >= 'A' && *p <= 'Z') || (*p >= 'a' && *p <= 'z') ||
-           (*p >= '0' && *p <= '9'))
-        p++;
-
-    /* The reference must be the WHOLE value: end (unbraced) or "}" then end. */
-    if (braced) { if (p[0] != '}' || p[1] != '\0') return 0; }
-    else        { if (p[0] != '\0') return 0; }
-
-    size_t nlen = (size_t)(p - name);
-    if (nlen == 0 || nlen >= outsz)
-        return 0;
-    for (size_t i = 0; i < nlen; i++)   /* manual copy: no <string.h> in the header */
-        out[i] = name[i];
-    out[nlen] = '\0';
-    return 1;
-}
+/* The "$VAR" / "${VAR}" full-value env-reference parser moved to the neutral
+ * util header hull/utils/env_ref.h (hl_env_ref) so a domain-free leaf like
+ * utils/host_match.c can use it without including manifest.h (§2.7). */
 
 #endif /* HL_MANIFEST_H */

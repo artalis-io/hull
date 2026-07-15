@@ -2718,10 +2718,13 @@ call time elsewhere). DuckDB has UDFs (different API); MySQL has none. "Method
 present but fails" is an orthogonality wart.
 
 **Tasks:**
-- [ ] Gate the `udf` sub-object on a backend capability flag (absent when the
-      backend has no UDF support), OR add `conn.supports("udf")` introspection so
-      it isn't a surprise-at-call-time. Decide which after the DuckDB UDF shape
-      is known.
+- [x] Gate the `udf` sub-object on a backend capability flag
+      (`unsigned char supports_udf` on the vtable; SQLite 1, Postgres 0). The
+      connection object attaches `udf` only when the backend supports it, so a
+      Postgres connection has no `udf` sub-object at all (presence IS the
+      introspection: `conn.udf ~= nil` / `!!conn.udf`) rather than a method that
+      fails at call time. Verified on a real PG backend in `e2e_postgres.sh`
+      (`pg_has_udf=false`). A future DuckDB backend sets the flag.
 
 ### 2.6 `autoincrement_id_ddl` app-facing reconsideration
 
@@ -2731,19 +2734,30 @@ interpolating dialect DDL is a half-abstraction; portable schemas really belong
 in migrations.
 
 **Tasks:**
-- [ ] Decide whether `autoincrement_id_ddl` stays app-facing or becomes
-      stdlib/migration-internal only; if it stays, document it as an escape
-      hatch, not the recommended path.
+- [x] **Decided: stays app-facing, documented as an escape hatch.** Removing it
+      would break the stdlib's portable `CREATE TABLE` (audit-log, outbox), and a
+      thin escape hatch is cheaper than a new abstraction. CLAUDE.md now states
+      the recommended path is **migrations**, with `conn.autoincrement_id_ddl`
+      called out as the escape hatch, not the default.
 
 ### 2.7 Structural cleanups
 
-- [ ] `cap/db.c` (SQLite stmt-cache engine) vs `cap/db_sqlite.c` (vtable
-      adapter) is a historical two-file split; `db_postgres.c` is self-contained
-      by contrast. Fold into one self-contained SQLite backend TU (do this while
-      touching §2.3 so the layering is consistent for MySQL/DuckDB).
-- [ ] `hl_cap_db_check_namespace` (the `_hull_*` guard) lives in `db_select.c`,
-      an odd home (it's not backend selection). Move to a `cap/db_common.c` or
-      similar shared TU.
+- [ ] **Deferred:** `cap/db.c` (SQLite stmt-cache engine) vs `cap/db_sqlite.c`
+      (vtable adapter) is a two-file split; `db_postgres.c` is self-contained by
+      contrast. Folding into one TU is a ~400-line mechanical move with
+      organizational-only value, and the engine/adapter split is defensible
+      layering (not cruft). Best done when actually onboarding the next backend
+      (MySQL/DuckDB), so the "one self-contained TU per backend" pattern is
+      validated against a real second implementation rather than churned
+      speculatively. (Static names are already clash-free, so the fold stays
+      trivial whenever it's done.)
+- [x] `hl_cap_db_check_namespace` (the `_hull_*` guard) moved out of
+      `db_select.c` (it was never DSN selection) to a new backend-agnostic
+      `cap/db_common.c`.
+- [x] Relocated the `$VAR` env-ref parser out of `manifest.h` to a neutral
+      `include/hull/utils/env_ref.h` (`hl_manifest_env_ref` -> `hl_env_ref`), so
+      `utils/host_match.c` no longer includes `manifest.h` for it (the coupling
+      flagged in §2.8). Callers (`db_registry.c`, `host_match.c`, tests) updated.
 
 ### 2.8 Unify the outbound-resource allowlist model (`hosts` = named + dynamic)
 

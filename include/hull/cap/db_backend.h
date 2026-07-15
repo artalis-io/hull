@@ -71,6 +71,12 @@ typedef struct HlDbBackend {
     /* Backend identity (see HlDbNativeTag). Pairs with native_handle. */
     HlDbNativeTag native_tag;
 
+    /* Capability: this backend supports user-defined SQL functions (db.udf).
+     * SQLite: 1. Postgres: 0 (no in-process UDF). Gates whether the connection
+     * object exposes a `udf` sub-object at all, so "method present but fails at
+     * call time" doesn't happen. A future DuckDB backend would set it. */
+    unsigned char supports_udf;
+
     /* `open` is the one method that doesn't take an HlDbHandle*
      * because the handle is what `open` populates.  Output is
      * written to *out_ctx for the caller to wire into a handle. */

@@ -1352,8 +1352,9 @@ ifeq ($(HL_ENABLE_DB),0)
 endif
 ifneq ($(HL_ENABLE_SQLITE),1)
   # SQLite backend, its UDF bridge, and the SQLite stmt-cache / query engine
-  # (cap/db.c) are SQLite-only. hl_cap_db_check_namespace, the one
-  # backend-agnostic function that lived in cap/db.c, moved to db_select.c.
+  # (cap/db.c) are SQLite-only. The backend-agnostic bits (DSN selection in
+  # db_select.c, the _hull_* guard in db_common.c) stay compiled for a
+  # Postgres-only build.
   CAP_SRCS := $(filter-out \
       $(SRCDIR)/hull/cap/db.c \
       $(SRCDIR)/hull/cap/db_sqlite.c \

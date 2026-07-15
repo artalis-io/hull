@@ -350,6 +350,7 @@ const HlDbBackend hl_db_backend_sqlite = {
     .autoincrement_id_ddl  = "INTEGER PRIMARY KEY AUTOINCREMENT",
     .identifier_quote      = '"',
     .native_tag            = HL_DB_NATIVE_SQLITE,
+    .supports_udf          = 1,
     .open                  = sqlite_open,
     .close                 = sqlite_close,
     .query                 = sqlite_query,

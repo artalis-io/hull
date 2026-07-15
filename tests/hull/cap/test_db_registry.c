@@ -13,6 +13,7 @@
 #include "hull/cap/db_backend.h"
 #include "hull/cap/db_sqlite.h"
 #include "hull/manifest.h"
+#include "hull/utils/env_ref.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -141,20 +142,20 @@ UTEST(db_registry, default_dsn_and_accessor)
 UTEST(db_registry, env_ref_parsing)
 {
     char v[128];
-    ASSERT_TRUE(hl_manifest_env_ref("$FOO", v, sizeof v));
+    ASSERT_TRUE(hl_env_ref("$FOO", v, sizeof v));
     ASSERT_STREQ(v, "FOO");
-    ASSERT_TRUE(hl_manifest_env_ref("${BAR_BAZ2}", v, sizeof v));
+    ASSERT_TRUE(hl_env_ref("${BAR_BAZ2}", v, sizeof v));
     ASSERT_STREQ(v, "BAR_BAZ2");
     /* Literals: a bare path, and a value that merely CONTAINS '$' (a password). */
-    ASSERT_FALSE(hl_manifest_env_ref("./cache.db", v, sizeof v));
-    ASSERT_FALSE(hl_manifest_env_ref("postgres://u:p$w@h/db", v, sizeof v));
+    ASSERT_FALSE(hl_env_ref("./cache.db", v, sizeof v));
+    ASSERT_FALSE(hl_env_ref("postgres://u:p$w@h/db", v, sizeof v));
     /* Must be the WHOLE value; malformed forms are literal. */
-    ASSERT_FALSE(hl_manifest_env_ref("$FOO extra", v, sizeof v));
-    ASSERT_FALSE(hl_manifest_env_ref("${FOO", v, sizeof v));
-    ASSERT_FALSE(hl_manifest_env_ref("$1BAD", v, sizeof v));
-    ASSERT_FALSE(hl_manifest_env_ref("$$FOO", v, sizeof v));
-    ASSERT_FALSE(hl_manifest_env_ref("$", v, sizeof v));
-    ASSERT_FALSE(hl_manifest_env_ref(NULL, v, sizeof v));
+    ASSERT_FALSE(hl_env_ref("$FOO extra", v, sizeof v));
+    ASSERT_FALSE(hl_env_ref("${FOO", v, sizeof v));
+    ASSERT_FALSE(hl_env_ref("$1BAD", v, sizeof v));
+    ASSERT_FALSE(hl_env_ref("$$FOO", v, sizeof v));
+    ASSERT_FALSE(hl_env_ref("$", v, sizeof v));
+    ASSERT_FALSE(hl_env_ref(NULL, v, sizeof v));
 }
 
 UTEST_MAIN()

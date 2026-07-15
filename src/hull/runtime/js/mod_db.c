@@ -1397,16 +1397,20 @@ static JSValue push_conn_object(JSContext *ctx, HlDbHandle *h)
                       JS_NewCFunction(ctx, js_db_async_exec, "exec", 2));
     JS_SetPropertyStr(ctx, obj, "async", async_obj);
 
-#ifdef HL_ENABLE_SQLITE
-    JSValue udf_obj = new_bound_subobject(ctx, h);
-    if (JS_IsException(udf_obj)) { JS_FreeValue(ctx, obj); return udf_obj; }
-    JS_SetPropertyStr(ctx, udf_obj, "register",
-                      JS_NewCFunction(ctx, js_db_udf_register, "register", 3));
-    JS_SetPropertyStr(ctx, udf_obj, "unregister",
-                      JS_NewCFunction(ctx, js_db_udf_unregister, "unregister", 1));
-    JS_SetPropertyStr(ctx, obj, "udf", udf_obj);
-#endif
     const HlDbBackend *be = h ? h->backend : NULL;
+#ifdef HL_ENABLE_SQLITE
+    /* udf only when the backend supports it (§2.5): a Postgres connection gets
+     * no `udf` sub-object rather than one that fails at call time. */
+    if (be && be->supports_udf) {
+        JSValue udf_obj = new_bound_subobject(ctx, h);
+        if (JS_IsException(udf_obj)) { JS_FreeValue(ctx, obj); return udf_obj; }
+        JS_SetPropertyStr(ctx, udf_obj, "register",
+                          JS_NewCFunction(ctx, js_db_udf_register, "register", 3));
+        JS_SetPropertyStr(ctx, udf_obj, "unregister",
+                          JS_NewCFunction(ctx, js_db_udf_unregister, "unregister", 1));
+        JS_SetPropertyStr(ctx, obj, "udf", udf_obj);
+    }
+#endif
     JS_SetPropertyStr(ctx, obj, "backendName",
                       JS_NewString(ctx, be ? be->name : "none"));
     JS_SetPropertyStr(ctx, obj, "autoincrementIdDdl",

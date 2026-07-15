@@ -190,6 +190,9 @@ app.main(function(ctx)
     local ok_open, conn = pcall(function() return db.open(allow_dsn) end)
     if ok_open then
         print("allow_count=" .. tostring(conn.query("SELECT count(*) AS c FROM e2e")[1].c))
+        -- §2.5: udf is a SQLite-only capability, so a Postgres connection object
+        -- must NOT expose a `udf` sub-object at all.
+        print("pg_has_udf=" .. tostring(conn.udf ~= nil))
         conn.close()
     else
         print("allow_count=ERR:" .. tostring(conn))
@@ -206,6 +209,7 @@ DYN_OUT=$(./build/hull --no-sandbox "$APPDIR_DYN/app.lua" -- "$DSN" 2>&1 || true
 echo "$DYN_OUT" | grep -qE "allow_count=3" || { echo "::error db.open allowed host did not query"; echo "$DYN_OUT"; exit 1; }
 echo "$DYN_OUT" | grep -qE "deny_host=denied" || { echo "::error db.open out-of-CIDR host not rejected"; echo "$DYN_OUT"; exit 1; }
 echo "$DYN_OUT" | grep -qE "deny_scheme=denied" || { echo "::error db.open disallowed scheme not rejected"; echo "$DYN_OUT"; exit 1; }
+echo "$DYN_OUT" | grep -qE "pg_has_udf=false" || { echo "::error postgres connection exposes a udf sub-object (should be gated off)"; echo "$DYN_OUT"; exit 1; }
 echo "PASS: db.open dynamic connections (CIDR host allow + out-of-CIDR deny + scheme deny)"
 rm -rf "$APPDIR_DYN"
 

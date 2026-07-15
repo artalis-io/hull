@@ -12,6 +12,7 @@
 
 #include "hull/cap/db_registry.h"
 #include "hull/manifest.h"
+#include "hull/utils/env_ref.h"   /* hl_env_ref */
 
 #include <stdlib.h>
 #include <string.h>
@@ -94,7 +95,7 @@ static const char *resolve_manifest_dsn(HlDbRegistry *reg, const char *name,
         const HlManifestDbNamed *d = &reg->manifest->databases.named[i];
         if (strcmp(d->name, name) != 0) continue;
         char var[128];
-        if (hl_manifest_env_ref(d->dsn, var, sizeof var)) {
+        if (hl_env_ref(d->dsn, var, sizeof var)) {
             const char *v = getenv(var);
             if (!v || !v[0]) {
                 *err = "database DSN env var is unset";

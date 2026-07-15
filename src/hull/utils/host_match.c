@@ -1,16 +1,15 @@
 /*
  * host_match.c: host-allowlist pattern matching
  *
- * See host_match.h. Leaf util (exact/glob/CIDR matching). The one Hull
- * dependency is hl_manifest_env_ref (a header-only generic "$VAR" parser in
- * manifest.h) used by the *_env variants; relocating that parser to a neutral
- * util header would drop even this include (tracked as a §2.7 cleanup).
+ * See host_match.h. Self-contained leaf util (exact/glob/CIDR matching + the
+ * "$VAR" env-ref resolution used by the *_env variants). No Hull-domain
+ * dependency: hl_env_ref is a neutral header-only parser.
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
 
 #include "hull/host_match.h"
-#include "hull/manifest.h"   /* hl_manifest_env_ref (header-only inline) */
+#include "hull/utils/env_ref.h"   /* hl_env_ref (header-only inline) */
 
 #include <arpa/inet.h>
 #include <stdlib.h>
@@ -104,7 +103,7 @@ int hl_host_match_any_env(const char *const *patterns, int n, const char *host)
         const char *pat = patterns[i];
         /* "$VAR" / "${VAR}" resolves from the environment; anything else
          * (including a literal that merely contains '$') is matched as-is. */
-        if (hl_manifest_env_ref(pat, var, sizeof var)) {
+        if (hl_env_ref(pat, var, sizeof var)) {
             const char *v = getenv(var);
             if (v && v[0] && hl_host_match(v, host)) return 1;
         } else if (hl_host_match(pat, host)) {

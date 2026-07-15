@@ -271,6 +271,14 @@ stdlib uses it where an app-supplied identifier flows into multi-backend SQL
 the shared `insert_if_absent` / `upsert` helpers is deliberately NOT done: it
 would change Postgres case-folding semantics for existing apps.)
 
+`conn.udf` is present only on a backend that supports user-defined functions
+(§2.5): a SQLite connection has it, a Postgres connection does not (checking
+`conn.udf ~= nil` / `!!conn.udf` is the capability probe), so there is no
+"method present but fails at call time". `conn.autoincrement_id_ddl` (§2.6)
+stays exposed as an **escape hatch** for the stdlib's portable `CREATE TABLE`
+(audit-log, outbox); apps should express schema in **migrations**, not by
+interpolating this dialect DDL fragment.
+
 **Handles-only API (no top-level `db.*`).** The `hull/db` module exposes only
 connection acquisition; every query goes through an explicit connection object:
 
