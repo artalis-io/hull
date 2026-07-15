@@ -357,9 +357,9 @@ int hl_my_parse_handshake(const HlMyFrame *f, HlMyHandshake *out)
     copy_bounded(out->server_version, sizeof out->server_version, sv);
 
     out->conn_id = hl_my_get_u32(&c);
-    const uint8_t *ap1 = hl_my_get_bytes(&c, 8);   /* auth-plugin-data part 1 */
+    const uint8_t *ap1 = hl_my_get_bytes(&c, HL_MY_SCRAMBLE_PART1);
     if (!ap1) return -1;
-    memcpy(out->scramble, ap1, 8);
+    memcpy(out->scramble, ap1, HL_MY_SCRAMBLE_PART1);
     (void)hl_my_get_u8(&c);                         /* filler 0x00 */
 
     uint16_t cap_lower = hl_my_get_u16(&c);
@@ -369,19 +369,22 @@ int hl_my_parse_handshake(const HlMyFrame *f, HlMyHandshake *out)
     out->capabilities = (uint32_t)cap_lower | ((uint32_t)cap_upper << 16);
 
     uint8_t apdata_len = hl_my_get_u8(&c);          /* len of auth-plugin-data */
-    (void)hl_my_get_bytes(&c, 10);                  /* reserved */
+    (void)hl_my_get_bytes(&c, HL_MY_HANDSHAKE_FILLER);  /* reserved */
 
-    /* auth-plugin-data part 2 (>= 13 bytes; first 12 extend the scramble). */
+    /* auth-plugin-data part 2: the remaining scramble bytes (part2 = 12) plus a
+     * NUL, so at least (SCRAMBLE_LEN - part1 + 1) bytes on the wire. */
+    const int part2_max = HL_MY_SCRAMBLE_LEN - HL_MY_SCRAMBLE_PART1;   /* 12 */
     if (out->capabilities & HL_MY_CLIENT_SECURE_CONNECTION) {
-        int part2 = apdata_len > 8 ? (int)apdata_len - 8 : 13;
-        if (part2 < 13) part2 = 13;
+        int part2 = apdata_len > HL_MY_SCRAMBLE_PART1
+                  ? (int)apdata_len - HL_MY_SCRAMBLE_PART1 : part2_max + 1;
+        if (part2 < part2_max + 1) part2 = part2_max + 1;
         const uint8_t *ap2 = hl_my_get_bytes(&c, (size_t)part2);
         if (!ap2) return -1;
-        int copy2 = part2 > 12 ? 12 : part2;
-        memcpy(out->scramble + 8, ap2, (size_t)copy2);
-        out->scramble_len = 8 + copy2;
+        int copy2 = part2 > part2_max ? part2_max : part2;
+        memcpy(out->scramble + HL_MY_SCRAMBLE_PART1, ap2, (size_t)copy2);
+        out->scramble_len = HL_MY_SCRAMBLE_PART1 + copy2;
     } else {
-        out->scramble_len = 8;
+        out->scramble_len = HL_MY_SCRAMBLE_PART1;
     }
     if (c.err) return -1;   /* everything through the scramble must parse */
 
@@ -399,12 +402,12 @@ void hl_my_build_handshake_response(HlMyWriter *w, uint8_t seq,
                                     const uint8_t *auth_resp, size_t auth_resp_len,
                                     const char *dbname, const char *plugin)
 {
-    if (auth_resp_len > 255) auth_resp_len = 255;   /* SECURE_CONNECTION 1-byte len */
+    if (auth_resp_len > 0xFF) auth_resp_len = 0xFF; /* SECURE_CONNECTION 1-byte len */
     size_t m = hl_my_packet_begin(w, seq);
     hl_my_put_u32(w, client_caps);
-    hl_my_put_u32(w, 0x01000000);                   /* max packet size (16 MiB) */
+    hl_my_put_u32(w, HL_MY_MAX_PACKET);
     hl_my_put_u8(w, charset);
-    for (int i = 0; i < 23; i++) hl_my_put_u8(w, 0);/* reserved */
+    for (int i = 0; i < HL_MY_HANDSHAKE_RESERVED; i++) hl_my_put_u8(w, 0);
     hl_my_put_cstr(w, user ? user : "");
     hl_my_put_u8(w, (uint8_t)auth_resp_len);        /* length-prefixed auth resp */
     if (auth_resp && auth_resp_len)

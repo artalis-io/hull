@@ -158,17 +158,27 @@ int hl_my_parse_err(const HlMyFrame *f, int protocol_41, HlMyErr *out);
 
 /* ── Handshake (UNTRUSTED server input / client response) ──────────── */
 
+/* Protocol / buffer sizes (named so no bare literals leak into the code). */
+#define HL_MY_SCRAMBLE_LEN        20        /* native_password scramble bytes */
+#define HL_MY_SCRAMBLE_PART1      8         /* auth-plugin-data split in Handshake v10 */
+#define HL_MY_HANDSHAKE_FILLER    10        /* reserved bytes after capability flags */
+#define HL_MY_MAX_PACKET          0x01000000u /* client max packet size (16 MiB) */
+#define HL_MY_DEFAULT_CHARSET     45        /* utf8mb4_general_ci collation id */
+#define HL_MY_HANDSHAKE_RESERVED  23        /* reserved bytes in HandshakeResponse41 */
+#define HL_MY_SERVER_VERSION_MAX  64        /* server-version field cap */
+#define HL_MY_PLUGIN_NAME_MAX     64        /* auth-plugin name field cap */
+
 /* Parsed initial Handshake v10 packet the server sends first. */
 typedef struct HlMyHandshake {
     uint8_t  protocol;              /* must be 10 */
-    char     server_version[64];    /* truncated if longer */
+    char     server_version[HL_MY_SERVER_VERSION_MAX];   /* truncated if longer */
     uint32_t conn_id;
     uint32_t capabilities;          /* lower | (upper << 16) */
     uint8_t  charset;
     uint16_t status;
-    uint8_t  scramble[20];          /* auth-plugin-data (part1[8] + part2[12]) */
+    uint8_t  scramble[HL_MY_SCRAMBLE_LEN];  /* auth-plugin-data part1[8]+part2[12] */
     int      scramble_len;          /* bytes actually filled (usually 20) */
-    char     auth_plugin[64];       /* auth-plugin name, "" if not advertised */
+    char     auth_plugin[HL_MY_PLUGIN_NAME_MAX];  /* "" if not advertised */
 } HlMyHandshake;
 
 /* Parse a Handshake v10 packet body. Bounds-checked over untrusted input;

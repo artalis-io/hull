@@ -2877,10 +2877,20 @@ the shared `shared/tls_client.c`; hashes via `cap/crypto`.
       `HL_MY_NO_AUTH` so the parser fuzzers stay crypto-free) in `mysql_conn.c`.
       `test_mysqlwire` +4 cases (handshake parse + reject, response round-trip,
       scramble vs the spec formula); `fuzz_mysqlwire` now fuzzes the handshake.
-- [ ] **2b - socket connect + text query.** TCP connect, drive the handshake
-      over the wire (send response, read OK/ERR/AuthSwitch), `COM_QUERY` + text
-      result-set decode (column defs + rows -> HlValue). Socketpair test harness
-      like `test_pg_conn`.
+- [x] **2b - socket connect + handshake drive.** `HlMyConn` (fd + growable recv
+      buffer + seq), TCP connect (`my_connect`, non-blocking + select timeout,
+      mirroring pg), bounded `conn_next_frame` / `conn_send`, and
+      `hl_my_conn_start` driving the handshake over the wire: read Handshake v10,
+      native_password scramble, send HandshakeResponse41, read OK / ERR /
+      AuthSwitchRequest (switch-to-native handled; caching_sha2 / ed25519 error
+      until Phase 5). `test_mysql_conn` drives it over a socketpair (auth OK +
+      auth error). All bare buffer/protocol sizes are named constants
+      (`HL_MY_SCRAMBLE_LEN`, `HL_MY_ERRMSG_SIZE`, `HL_MY_DSN_*`, etc.).
+- [ ] **2c - COM_QUERY + text result decode.** Send `COM_QUERY`; decode the
+      response (column-count, ColumnDefinition41 packets, text-protocol rows with
+      0xFB NULL, terminating OK/EOF) into HlValue by column type; wire `mysql_query`
+      / `mysql_exec` / `mysql_close` + `native_handle` into the `db_mysql.c` vtable.
+      Extend `test_mysql_conn` with a canned result set.
 - [ ] **3 - prepared statements.** `COM_STMT_PREPARE`/`EXECUTE`, binary param
       encode + binary row decode (the parameterized path).
 - [ ] **4 - dialect + migrations + types.** `INSERT IGNORE` / `ON DUPLICATE KEY

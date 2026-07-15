@@ -171,23 +171,257 @@ void hl_my_dsn_scrub(HlMyDsn *dsn)
     for (size_t i = 0; i < sizeof dsn->password; i++) p[i] = 0;
 }
 
-/* ── Auth plugins (crypto) ────────────────────────────────────────── */
+/* ── Auth + connection (crypto + socket) ──────────────────────────── */
 #ifndef HL_MY_NO_AUTH
 #include "hull/cap/crypto.h"
+#include "hull/cap/mysqlwire.h"
+
+#include <sys/socket.h>
+#include <sys/select.h>
+#include <netdb.h>
+#include <unistd.h>
+#include <fcntl.h>
+#include <errno.h>
+#include <stdlib.h>
 
 int hl_my_native_password_scramble(const char *password,
-                                   const uint8_t scramble[20], uint8_t out[20])
+                                   const uint8_t scramble[HL_MY_SCRAMBLE_LEN],
+                                   uint8_t out[HL_MY_SCRAMBLE_LEN])
 {
     if (!password || !password[0])
         return 0;   /* empty password -> zero-length auth response */
 
-    uint8_t h1[20], h2[20], cat[40], h3[20];
+    uint8_t h1[HL_MY_SCRAMBLE_LEN], h2[HL_MY_SCRAMBLE_LEN];
+    uint8_t cat[HL_MY_SCRAMBLE_LEN * 2], h3[HL_MY_SCRAMBLE_LEN];
     if (hl_cap_crypto_sha1(password, strlen(password), h1) != 0) return -1;
-    if (hl_cap_crypto_sha1(h1, 20, h2) != 0) return -1;
-    memcpy(cat, scramble, 20);
-    memcpy(cat + 20, h2, 20);
-    if (hl_cap_crypto_sha1(cat, 40, h3) != 0) return -1;
-    for (int i = 0; i < 20; i++) out[i] = (uint8_t)(h1[i] ^ h3[i]);
-    return 20;
+    if (hl_cap_crypto_sha1(h1, HL_MY_SCRAMBLE_LEN, h2) != 0) return -1;
+    memcpy(cat, scramble, HL_MY_SCRAMBLE_LEN);
+    memcpy(cat + HL_MY_SCRAMBLE_LEN, h2, HL_MY_SCRAMBLE_LEN);
+    if (hl_cap_crypto_sha1(cat, sizeof cat, h3) != 0) return -1;
+    for (int i = 0; i < HL_MY_SCRAMBLE_LEN; i++)
+        out[i] = (uint8_t)(h1[i] ^ h3[i]);
+    return HL_MY_SCRAMBLE_LEN;
+}
+
+/* ── Blocking transport ───────────────────────────────────────────── */
+
+static void conn_set_err(HlMyConn *conn, const char *msg)
+{
+    if (conn) snprintf(conn->errmsg, sizeof conn->errmsg, "%s", msg);
+}
+
+/* TCP connect with a bounded wait (non-blocking connect + select), mirroring
+ * cap/pg_conn.c. Returns a blocking fd, or -1. */
+static int my_connect(const char *host, const char *port, int timeout_ms)
+{
+    struct addrinfo hints;
+    memset(&hints, 0, sizeof hints);
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
+
+    struct addrinfo *res = NULL;
+    if (getaddrinfo(host, port, &hints, &res) != 0 || !res) return -1;
+
+    int fd = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
+    if (fd < 0) { freeaddrinfo(res); return -1; }
+#ifdef SO_NOSIGPIPE
+    int on = 1;
+    setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &on, sizeof on);
+#endif
+    int flags = fcntl(fd, F_GETFL, 0);
+    fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+
+    int rc = connect(fd, res->ai_addr, res->ai_addrlen);
+    if (rc < 0 && errno == EINPROGRESS) {
+        fd_set wf; FD_ZERO(&wf); FD_SET(fd, &wf);
+        struct timeval tv = { timeout_ms / 1000, (timeout_ms % 1000) * 1000 };
+        rc = select(fd + 1, NULL, &wf, NULL, timeout_ms > 0 ? &tv : NULL);
+        if (rc > 0) {
+            int soerr = 0; socklen_t l = sizeof soerr;
+            getsockopt(fd, SOL_SOCKET, SO_ERROR, &soerr, &l);
+            rc = soerr == 0 ? 0 : -1;
+        } else rc = -1;
+    }
+    freeaddrinfo(res);
+    if (rc < 0) { close(fd); return -1; }
+    fcntl(fd, F_SETFL, flags);   /* restore blocking */
+    return fd;
+}
+
+static int conn_send(HlMyConn *conn, const uint8_t *buf, size_t len)
+{
+    size_t sent = 0;
+    while (sent < len) {
+        ssize_t n;
+        do { n = send(conn->fd, buf + sent, len - sent, 0); }
+        while (n < 0 && errno == EINTR);
+        if (n <= 0) { conn_set_err(conn, "socket write failed"); return -1; }
+        sent += (size_t)n;
+    }
+    return 0;
+}
+
+/* Read one packet. The returned body is valid until the next call, which
+ * compacts the previously-consumed bytes. Returns 0 / -1. */
+static int conn_next_frame(HlMyConn *conn, HlMyFrame *f)
+{
+    if (conn->consumed > 0) {
+        memmove(conn->rbuf, conn->rbuf + conn->consumed,
+                conn->rlen - conn->consumed);
+        conn->rlen -= conn->consumed;
+        conn->consumed = 0;
+    }
+    for (;;) {
+        size_t consumed = 0;
+        HlMyResult r = hl_my_frame_next(conn->rbuf, conn->rlen, f, &consumed);
+        if (r == HL_MY_OK) { conn->consumed = consumed; return 0; }
+        if (r == HL_MY_ERR) { conn_set_err(conn, "malformed message from server");
+                              return -1; }
+        /* NEED_MORE: grow if full (bounded by the 24-bit packet cap), then read. */
+        if (conn->rlen == conn->rcap) {
+            size_t ncap = conn->rcap ? conn->rcap * 2 : HL_MY_RECV_BUF_INIT;
+            if (ncap > (size_t)HL_MY_MAX_MSG + HL_MY_RECV_BUF_INIT) {
+                conn_set_err(conn, "server message exceeds limit"); return -1;
+            }
+            uint8_t *nb = realloc(conn->rbuf, ncap);
+            if (!nb) { conn_set_err(conn, "out of memory"); return -1; }
+            conn->rbuf = nb; conn->rcap = ncap;
+        }
+        ssize_t n;
+        do { n = recv(conn->fd, conn->rbuf + conn->rlen, conn->rcap - conn->rlen, 0); }
+        while (n < 0 && errno == EINTR);
+        if (n <= 0) { conn_set_err(conn, "connection closed by server"); return -1; }
+        conn->rlen += (size_t)n;
+    }
+}
+
+void hl_my_conn_close(HlMyConn *conn)
+{
+    if (!conn) return;
+    if (conn->fd >= 0) { close(conn->fd); conn->fd = -1; }
+    free(conn->rbuf);
+    conn->rbuf = NULL;
+    conn->rlen = conn->rcap = conn->consumed = 0;
+}
+
+/* ── Handshake ────────────────────────────────────────────────────── */
+
+/* Send a bare auth-data packet (the AuthSwitch / AuthMoreData continuation). */
+static int send_auth_data(HlMyConn *conn, uint8_t seq,
+                          const uint8_t *data, int len)
+{
+    HlMyWriter w; hl_my_writer_init(&w);
+    size_t m = hl_my_packet_begin(&w, seq);
+    if (data && len > 0) hl_my_put_bytes(&w, data, (size_t)len);
+    hl_my_packet_end(&w, m);
+    int se = w.err || conn_send(conn, w.buf, w.len);
+    hl_my_writer_free(&w);
+    return se ? -1 : 0;
+}
+
+int hl_my_conn_start(HlMyConn *conn, int fd, const HlMyDsn *dsn)
+{
+    memset(conn, 0, sizeof *conn);
+    conn->fd = fd;
+
+    HlMyFrame f;
+    if (conn_next_frame(conn, &f) != 0) { hl_my_conn_close(conn); return -1; }
+
+    /* A pre-handshake ERR (e.g. host not allowed) starts with 0xFF. */
+    if (f.body_len > 0 && f.body[0] == HL_MY_PKT_ERR) {
+        HlMyErr e;
+        if (hl_my_parse_err(&f, 0, &e) == 0 && e.message_len)
+            snprintf(conn->errmsg, sizeof conn->errmsg, "server: %.*s",
+                     (int)e.message_len, e.message);
+        else conn_set_err(conn, "server rejected connection");
+        hl_my_conn_close(conn); return -1;
+    }
+
+    HlMyHandshake hs;
+    if (hl_my_parse_handshake(&f, &hs) != 0) {
+        conn_set_err(conn, "malformed server handshake"); hl_my_conn_close(conn);
+        return -1;
+    }
+
+    uint32_t caps = HL_MY_CLIENT_PROTOCOL_41 | HL_MY_CLIENT_SECURE_CONNECTION
+                  | HL_MY_CLIENT_PLUGIN_AUTH | HL_MY_CLIENT_TRANSACTIONS
+                  | HL_MY_CLIENT_MULTI_RESULTS;
+    if (dsn->dbname[0]) caps |= HL_MY_CLIENT_CONNECT_WITH_DB;
+    conn->capabilities = caps;
+
+    uint8_t auth[HL_MY_SCRAMBLE_LEN];
+    int authlen = hl_my_native_password_scramble(dsn->password, hs.scramble, auth);
+    if (authlen < 0) { conn_set_err(conn, "auth scramble failed");
+                       hl_my_conn_close(conn); return -1; }
+
+    HlMyWriter w; hl_my_writer_init(&w);
+    hl_my_build_handshake_response(
+        &w, (uint8_t)(f.seq + 1), caps,
+        hs.charset ? hs.charset : HL_MY_DEFAULT_CHARSET, dsn->user,
+        auth, (size_t)authlen, dsn->dbname[0] ? dsn->dbname : NULL,
+        "mysql_native_password");
+    int se = w.err || conn_send(conn, w.buf, w.len);
+    hl_my_writer_free(&w);
+    if (se) { conn_set_err(conn, "failed to send handshake response");
+              hl_my_conn_close(conn); return -1; }
+
+    /* Read the auth result: OK, ERR, or an AuthSwitchRequest (0xFE). */
+    for (;;) {
+        if (conn_next_frame(conn, &f) != 0) { hl_my_conn_close(conn); return -1; }
+        if (f.body_len == 0) continue;
+        uint8_t hdr = f.body[0];
+
+        if (hdr == HL_MY_PKT_OK) return 0;   /* authenticated */
+
+        if (hdr == HL_MY_PKT_ERR) {
+            HlMyErr e;
+            if (hl_my_parse_err(&f, 1, &e) == 0 && e.message_len)
+                snprintf(conn->errmsg, sizeof conn->errmsg, "auth failed: %.*s",
+                         (int)e.message_len, e.message);
+            else conn_set_err(conn, "authentication failed");
+            hl_my_conn_close(conn); return -1;
+        }
+
+        if (hdr == HL_MY_PKT_EOF) {          /* 0xFE AuthSwitchRequest */
+            HlMyCursor c; hl_my_cursor_init(&c, &f);
+            (void)hl_my_get_u8(&c);          /* 0xFE */
+            const char *plugin = hl_my_get_cstr(&c);
+            size_t dlen = 0;
+            const uint8_t *data = hl_my_get_eof_str(&c, &dlen);
+            if (plugin && strcmp(plugin, "mysql_native_password") == 0) {
+                uint8_t sc[HL_MY_SCRAMBLE_LEN];
+                memset(sc, 0, sizeof sc);
+                memcpy(sc, data, dlen >= HL_MY_SCRAMBLE_LEN
+                                 ? (size_t)HL_MY_SCRAMBLE_LEN : dlen);
+                uint8_t a2[HL_MY_SCRAMBLE_LEN];
+                int n2 = hl_my_native_password_scramble(dsn->password, sc, a2);
+                if (n2 < 0 || send_auth_data(conn, (uint8_t)(f.seq + 1), a2, n2) != 0) {
+                    conn_set_err(conn, "auth-switch response failed");
+                    hl_my_conn_close(conn); return -1;
+                }
+                continue;   /* read the next result (OK / ERR) */
+            }
+            snprintf(conn->errmsg, sizeof conn->errmsg,
+                     "unsupported auth plugin '%s' (native only until Phase 5)",
+                     plugin ? plugin : "?");
+            hl_my_conn_close(conn); return -1;
+        }
+
+        conn_set_err(conn, "unexpected auth response from server");
+        hl_my_conn_close(conn); return -1;
+    }
+}
+
+int hl_my_conn_open(HlMyConn *conn, const HlMyDsn *dsn, int timeout_ms)
+{
+    int fd = my_connect(dsn->host, dsn->port, timeout_ms);
+    if (fd < 0) {
+        memset(conn, 0, sizeof *conn);
+        conn->fd = -1;
+        snprintf(conn->errmsg, sizeof conn->errmsg,
+                 "could not connect to %s:%s", dsn->host, dsn->port);
+        return -1;
+    }
+    return hl_my_conn_start(conn, fd, dsn);
 }
 #endif
