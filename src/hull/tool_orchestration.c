@@ -310,7 +310,6 @@ static int l_tool_agent_context(lua_State *L)
 #include "hull/vfs.h"
 
 extern const HlEntry hl_app_entries[];
-extern const HlDbBackend hl_db_backend_sqlite;
 
 /* ── tool.migrate_status(app_dir, db_path) — applied/pending list ── */
 

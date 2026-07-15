@@ -12,6 +12,7 @@
 #ifdef HL_ENABLE_SQLITE
 #include "hull/cap/db.h"
 #include "hull/cap/db_backend.h"
+#include "hull/cap/db_sqlite.h"   /* hl_db_sqlite_wrap/_unwrap */
 #include "hull/migrate.h"
 #include <sqlite3.h>
 #endif

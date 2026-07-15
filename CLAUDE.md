@@ -246,6 +246,31 @@ single-colon `file:` URI) defaults to SQLite. A reserved-but-uncompiled scheme
 generic one. Adding a backend needs no change to the selector, just a
 `.schemes` declaration + one `BACKENDS[]` line.
 
+**Abstract interface vs concrete backends (§2.3).** `cap/db_backend.h` is the
+pure interface: the vtable, `HlDbHandle`, the inline `hl_db_*` wrappers, and
+`hl_db_backend_select` — no concrete-backend symbol. Each backend's
+`extern const HlDbBackend` + backend-specific helpers live in its own header
+(`cap/db_sqlite.h`, `cap/db_postgres.h`), included only by the registry
+(`db_select.c`) and the few SQLite-aware consumers. Code that needs a backend's
+native connection handle (udf registration, agent introspection) goes through
+the generic `hl_db_backend_native_handle(h, &tag)` (tag is `HL_DB_NATIVE_SQLITE`
+/ `_POSTGRES` / `_NONE`) instead of a per-backend `hl_db_<x>_raw`; SQLite keeps a
+typed `hl_db_sqlite_raw` convenience in `db_sqlite.h` built on top of it.
+`hl_db_sqlite_wrap`/`_unwrap` (wrap an externally-opened `sqlite3*`) also live in
+`db_sqlite.h`. A new backend sets its `native_tag` + optional `native_handle`;
+consumers needing its handle add a tag case, not a header symbol.
+
+**Dialect surface — identifier quoting (§2.4).** The vtable carries a
+`char identifier_quote` (`"` for SQLite / Postgres / DuckDB, `` ` `` for MySQL);
+`hl_db_quote_ident(h, name, out, sz)` wraps a name in it, doubling any internal
+occurrence (reserved-word- and injection-safe). Exposed to app / stdlib code as
+`conn.quote_identifier(name)` (Lua) / `conn.quoteIdentifier(name)` (JS). The
+stdlib uses it where an app-supplied identifier flows into multi-backend SQL
+(e.g. `hull/web/auth-flows`'s `standard_users` table name), so a table named
+`order` / `user` works and a MySQL backend drops in unchanged. (Blanket-quoting
+the shared `insert_if_absent` / `upsert` helpers is deliberately NOT done: it
+would change Postgres case-folding semantics for existing apps.)
+
 **Handles-only API (no top-level `db.*`).** The `hull/db` module exposes only
 connection acquisition; every query goes through an explicit connection object:
 
@@ -270,7 +295,8 @@ tmp.query(...); tmp.close();
 
 The connection object carries `query` / `exec` / `batch` / `last_id` (`lastId`)
 / `insert_if_absent` (`insertIfAbsent`) / `upsert` / `table_columns`
-(`tableColumns`) / `backend_name` (`backendName`) / `autoincrement_id_ddl`
+(`tableColumns`) / `quote_identifier` (`quoteIdentifier`) / `backend_name`
+(`backendName`) / `autoincrement_id_ddl`
 (`autoincrementIdDdl`), plus `async` (`.async.query/exec`) and `udf`
 (`.udf.register/unregister`). `async` and `udf` are **per-connection**:
 `db.connect("cache").async.query(...)` opens the worker pool's own per-thread
@@ -2399,7 +2425,7 @@ make e2e                            # run all E2E tests (examples + build + sand
 | Suite | Tests | What it covers |
 |-------|------:|----------------|
 | `test_db` | 22 | SQLite query, exec, params, null, error handling |
-| `test_db_backend` | 22 | `HlDbBackend` vtable: open, query, exec, transactions |
+| `test_db_backend` | 31 | `HlDbBackend` vtable: open, query, exec, transactions, native-handle tag, identifier quoting |
 | `test_time` | 8 | Timestamps, date formatting, buffer bounds |
 | `test_env` | 7 | Allowlist enforcement, null safety |
 | `test_crypto` | 31 | SHA-256, random, PBKDF2, Ed25519, NaCl box/secretbox, null safety |

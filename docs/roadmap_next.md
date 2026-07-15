@@ -2666,12 +2666,21 @@ more `#ifdef … extern const …` plus, for anything needing the native handle
 (udf, agent introspection), a new `hl_db_<x>_raw` per backend.
 
 **Tasks:**
-- [ ] Move backend `extern const` decls + registration out of the abstract
-      header (e.g. an internal `db_backends.h` / a registration array), leaving
-      `db_backend.h` as the pure interface.
-- [ ] Replace the per-backend raw accessors with a generic
-      `hl_db_backend_native_handle(h, &tag)` (returns `void*` + a backend tag)
-      so udf / agent-introspection paths don't grow a case per backend.
+- [x] Backend `extern const` decls + backend-specific helpers moved to per-backend
+      headers (`cap/db_sqlite.h`, `cap/db_postgres.h`), included only by the
+      registry (`db_select.c`) + SQLite-aware consumers. `db_backend.h` is now the
+      pure interface (vtable + handle + inline wrappers + select). The build wires
+      them in via the existing `cap/*.c` glob; no per-list Makefile edits.
+- [x] Generic `hl_db_backend_native_handle(h, &tag)` (returns `void*` +
+      `HlDbNativeTag`) added to the vtable (`native_tag` + `native_handle`
+      method). The `hl_db_sqlite_raw` consumers (udf in `cap/db_udf.c` +
+      runtime mod_db, agent handle in `app_context.c`) go through it;
+      `worker_db.c`'s `be == &hl_db_backend_sqlite` symbol-compare became a
+      `native_tag` check (dropping its extern dep). `hl_db_sqlite_raw` survives as
+      a typed convenience in `db_sqlite.h` built on the generic accessor;
+      `hl_db_sqlite_cache` (still used by the agent stmt-cache path) + wrap/unwrap
+      stay SQLite-specific there. New `test_db_backend` cases cover the tag +
+      NULL/none fallback.
 
 ### 2.4 Dialect surface: identifier quoting + capability flags
 
@@ -2681,11 +2690,26 @@ uses `` `x` ``**. The stdlib currently relies on validated bare identifiers,
 which breaks for MySQL reserved words used as table/column names.
 
 **Tasks:**
-- [ ] Add `quote_identifier(name)` to the vtable (or a `identifier_quote` char +
-      shared quoting helper).
+- [x] `char identifier_quote` field on the vtable (`"` for SQLite/PG/DuckDB,
+      `` ` `` for MySQL) + a shared `hl_db_quote_ident(h, name, out, sz)` helper
+      (wraps + doubles the internal quote char; reserved-word- and
+      injection-safe). Exposed as `conn.quote_identifier` (Lua) /
+      `conn.quoteIdentifier` (JS). C unit test in `test_db_backend`; runtime
+      binding + reserved-word-table functional check pass both runtimes.
+- [x] **Stdlib retrofit:** `hull/web/auth-flows`'s `standard_users` adapter
+      (Lua + JS) quotes its app-supplied table name — the one genuine
+      multi-backend app-identifier consumer. (`hull/search` was NOT retrofitted:
+      it's SQLite-only and already validates identifiers strictly, so quoting is
+      redundant there.)
+- [ ] **Deferred — blanket-quote the shared `insert_if_absent` / `upsert` /
+      `table_columns` helpers.** Not done because always-quoting changes Postgres
+      **case-folding** semantics (`FROM Foo` folds to `foo` unquoted, preserves
+      `Foo` quoted) — a behavior change for existing apps. Revisit when a backend
+      that needs it (MySQL) lands, as an opt-in or with a migration note.
 - [ ] Consider a small capability/dialect struct (booleans/tokens for
-      `RETURNING` support, boolean literal form, `LIMIT`/`OFFSET` shape) rather
-      than growing one-off vtable methods per future need.
+      `RETURNING` support, boolean literal form, `LIMIT`/`OFFSET` shape). Still
+      deferred: no consumer branches on these until a second SQL dialect (MySQL /
+      DuckDB) actually needs them; adding fields nothing reads is premature.
 
 ### 2.5 `udf` capability gating / introspection
 

@@ -8,6 +8,7 @@
 #include "mod_buffer.h"
 #include "hull/cap/db.h"
 #include "hull/cap/db_backend.h"
+#include "hull/cap/db_sqlite.h"   /* hl_db_sqlite_raw (udf) */
 #include "hull/cap/db_registry.h"
 #include "hull/cap/db_dynamic.h"
 #include "hull/shared/async.h"
@@ -572,6 +573,23 @@ static int lua_db_table_columns(lua_State *L)
     if (rc < 0) {
         return luaL_error(L, "db.table_columns: %s", hl_db_errmsg(h));
     }
+    return 1;
+}
+
+/* db.quote_identifier(name) -> dialect-quoted identifier string.
+ *
+ * Wraps a table / column name in the backend's identifier-quote char (doubling
+ * any internal occurrence) so a reserved word or special char is safe. Lets a
+ * stdlib module interpolate an app-supplied identifier into SQL portably
+ * (SQLite / Postgres quote with '"', a future MySQL with '`'). */
+static int lua_db_quote_identifier(lua_State *L)
+{
+    const char *name = luaL_checkstring(L, 1);
+    char buf[512];
+    int n = hl_db_quote_ident(db_call_handle(L), name, buf, sizeof buf);
+    if (n < 0)
+        return luaL_error(L, "db.quote_identifier: name too long");
+    lua_pushlstring(L, buf, (size_t)n);
     return 1;
 }
 
@@ -1199,6 +1217,7 @@ static const luaL_Reg db_conn_methods[] = {
     {"insert_if_absent", lua_db_insert_if_absent},
     {"upsert",           lua_db_upsert},
     {"table_columns",    lua_db_table_columns},
+    {"quote_identifier", lua_db_quote_identifier},
     {NULL, NULL}
 };
 

@@ -14,6 +14,7 @@
 #ifdef HL_ENABLE_POSTGRES
 
 #include "hull/cap/db_backend.h"
+#include "hull/cap/db_postgres.h"
 #include "hull/cap/pg_conn.h"
 #include "hull/cap/types.h"
 #include "hull/utils/alloc.h"
@@ -457,6 +458,11 @@ const HlDbBackend hl_db_backend_postgres = {
     .name                 = "postgres",
     .schemes              = pg_schemes,
     .autoincrement_id_ddl = "BIGSERIAL PRIMARY KEY",
+    .identifier_quote     = '"',
+    .native_tag           = HL_DB_NATIVE_POSTGRES,
+    /* native_handle stays NULL: no consumer needs the raw PGconn yet (udf +
+     * agent introspection are SQLite-only). Add a pg_native_handle when one
+     * does; the tag already distinguishes the backend. */
     .open                 = pg_open,
     .close                = pg_close,
     .query                = pg_query,

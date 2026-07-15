@@ -27,6 +27,7 @@
 #include "hull/vfs.h"
 #include "hull/cap/db.h"
 #include "hull/cap/db_backend.h"
+#include "hull/cap/db_sqlite.h"
 #include "hull/cap/db_registry.h"
 #include "hull/cap/env.h"
 #include "quickjs.h"

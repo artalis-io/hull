@@ -1426,7 +1426,11 @@ end
 --                 set_password, set_email, set_email_verified.
 function M.standard_users(opts)
     opts = opts or {}
-    local tbl    = opts.table or "users"
+    -- Quote the app-supplied table name for the connection's dialect so a
+    -- reserved word (e.g. "user", "order") or a future MySQL backend (backtick)
+    -- is safe. The default connection is open by the time this runs, so its
+    -- backend dialect is known.
+    local tbl    = db.quote_identifier(opts.table or "users")
     local id_gen = opts.id_gen or function()
         return crypto.hex_encode(crypto.random(16))
     end

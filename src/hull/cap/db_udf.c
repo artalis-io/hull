@@ -12,6 +12,7 @@
 
 #include "hull/cap/db_udf.h"
 #include "hull/cap/db_backend.h"
+#include "hull/cap/db_sqlite.h"   /* hl_db_sqlite_raw (udf registers on sqlite3*) */
 #include "hull/cap/wasm.h"
 #include "hull/utils/alloc.h"
 #include "hull/vfs.h"

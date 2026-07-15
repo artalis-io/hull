@@ -13,6 +13,7 @@
 
 #include "hull/cap/types.h"
 #include <stdint.h>
+#include <stddef.h>
 
 /* Forward declarations */
 typedef struct HlAllocator HlAllocator;
@@ -20,6 +21,15 @@ typedef struct HlDbHandle HlDbHandle;
 typedef int (*HlRowCallback)(void *ctx, HlColumn *cols, int ncols);
 
 /* ── Backend vtable ───────────────────────────────────────────────── */
+
+/* Backend identity for consumers that need the native connection handle
+ * (udf registration, agent introspection) without depending on a concrete
+ * backend symbol. Pairs with the native_handle vtable method. */
+typedef enum {
+    HL_DB_NATIVE_NONE = 0,
+    HL_DB_NATIVE_SQLITE,
+    HL_DB_NATIVE_POSTGRES,
+} HlDbNativeTag;
 
 /* Callback used by `table_columns`: invoked once per column name
  * in whatever order the backend's catalog returns them. */
@@ -51,6 +61,15 @@ typedef struct HlDbBackend {
      * Used by stdlib modules in CREATE TABLE statements where
      * a surrogate id is needed (audit-log, outbox). */
     const char *autoincrement_id_ddl;
+
+    /* Identifier-quoting char for this dialect: '"' for SQLite / Postgres /
+     * DuckDB, '`' for MySQL. Used by hl_db_quote_ident to wrap a table /
+     * column name so a reserved word or special char is safe. 0 falls back
+     * to '"'. */
+    char identifier_quote;
+
+    /* Backend identity (see HlDbNativeTag). Pairs with native_handle. */
+    HlDbNativeTag native_tag;
 
     /* `open` is the one method that doesn't take an HlDbHandle*
      * because the handle is what `open` populates.  Output is
@@ -98,6 +117,11 @@ typedef struct HlDbBackend {
                      const HlValue *values, int n_cols);
     int    (*table_columns)(HlDbHandle *h, const char *table,
                             HlDbColumnCallback cb, void *cb_ctx);
+
+    /* Native connection handle (sqlite3* for SQLite, PGconn* for Postgres),
+     * or NULL. Consumers key off native_tag to know the concrete type; this
+     * replaces the per-backend hl_db_<x>_raw accessors. NULL = none exposed. */
+    void  *(*native_handle)(HlDbHandle *h);
 } HlDbBackend;
 
 struct HlDbHandle {
@@ -205,51 +229,47 @@ static inline int hl_db_table_columns(HlDbHandle *h, const char *table,
     return h->backend->table_columns(h, table, cb, cb_ctx);
 }
 
-/* ── SQLite backend (optional; requires HL_ENABLE_SQLITE) ──────────── */
+/* Native connection handle + its backend tag, for the few paths that need the
+ * concrete sqlite3* / PGconn* (udf registration, agent introspection). Keeps
+ * the abstract interface free of any concrete-backend symbol. *out_tag is set
+ * even when the return is NULL, so a caller can distinguish "not that backend"
+ * from "no handle". */
+static inline void *hl_db_backend_native_handle(HlDbHandle *h,
+                                                HlDbNativeTag *out_tag)
+{
+    if (out_tag)
+        *out_tag = (h && h->backend) ? h->backend->native_tag
+                                     : HL_DB_NATIVE_NONE;
+    if (!h || !h->backend || !h->backend->native_handle) return NULL;
+    return h->backend->native_handle(h);
+}
 
-struct sqlite3;         /* forward decl for the accessors below */
-struct HlStmtCache;
-
-#ifdef HL_ENABLE_SQLITE
-extern const HlDbBackend hl_db_backend_sqlite;
-
-/* Get raw sqlite3* from an HlDbHandle (NULL if not SQLite backend) */
-struct sqlite3 *hl_db_sqlite_raw(HlDbHandle *h);
-
-/* Get statement cache from a SQLite-backed HlDbHandle (NULL if not SQLite) */
-struct HlStmtCache *hl_db_sqlite_cache(HlDbHandle *h);
-
-/*
- * Wrap an externally-managed sqlite3* in an HlDbHandle for code paths that
- * still open SQLite directly (agent_lib, tests). The handle does NOT own
- * the underlying sqlite3* — caller stays responsible for sqlite3_close.
- *
- * Allocates a small adapter context (with its own statement cache pointing
- * at the borrowed sqlite3). Call hl_db_sqlite_unwrap(&handle) when done.
- *
- * Returns 0 on success, -1 on allocation failure.
- */
-int  hl_db_sqlite_wrap(HlDbHandle *out, struct sqlite3 *db);
-void hl_db_sqlite_unwrap(HlDbHandle *h);
-#else
-/* Postgres-only / no-SQLite build: the SQLite backend and its raw accessors
- * are not compiled. Callers that legitimately degrade for a non-SQLite handle
- * (agent raw-sqlite paths, app_context stmt cache) get inline NULLs / a wrap
- * that fails, so they stay compilable without per-site #ifdef. */
-static inline struct sqlite3 *hl_db_sqlite_raw(HlDbHandle *h)
-{ (void)h; return (struct sqlite3 *)0; }
-static inline struct HlStmtCache *hl_db_sqlite_cache(HlDbHandle *h)
-{ (void)h; return (struct HlStmtCache *)0; }
-static inline int hl_db_sqlite_wrap(HlDbHandle *out, struct sqlite3 *db)
-{ (void)out; (void)db; return -1; }
-static inline void hl_db_sqlite_unwrap(HlDbHandle *h) { (void)h; }
-#endif
-
-/* ── PostgreSQL backend (optional; requires HL_ENABLE_POSTGRES) ────── */
-
-#ifdef HL_ENABLE_POSTGRES
-extern const HlDbBackend hl_db_backend_postgres;
-#endif
+/* Quote @p name as a SQL identifier for @p h's dialect into @p out (capacity
+ * @p outsz), wrapping in the dialect's quote char and doubling any internal
+ * occurrence of it. Returns the byte length written (excluding the NUL), or -1
+ * if it would not fit. A NULL / none backend uses '"'. Defends the stdlib
+ * against reserved words + lets a MySQL backend (backtick) drop in unchanged. */
+static inline int hl_db_quote_ident(HlDbHandle *h, const char *name,
+                                    char *out, size_t outsz)
+{
+    if (!name || !out || outsz < 3) return -1;
+    char q = (h && h->backend && h->backend->identifier_quote)
+             ? h->backend->identifier_quote : '"';
+    size_t o = 0;
+    out[o++] = q;
+    for (const char *p = name; *p; p++) {
+        if (*p == q) {                       /* escape by doubling */
+            if (o + 1 >= outsz) return -1;
+            out[o++] = q;
+        }
+        if (o + 1 >= outsz) return -1;
+        out[o++] = *p;
+    }
+    if (o + 2 > outsz) return -1;            /* closing quote + NUL */
+    out[o++] = q;
+    out[o] = '\0';
+    return (int)o;
+}
 
 /* ── Backend selection ────────────────────────────────────────────── */
 

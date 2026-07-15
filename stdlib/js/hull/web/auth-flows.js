@@ -1035,7 +1035,10 @@ function registerRoutes(app) {
  */
 function standardUsers(opts) {
     opts = opts || {};
-    const tbl = opts.table || "users";
+    // Quote the app-supplied table name for the connection's dialect so a
+    // reserved word ("user", "order") or a future MySQL backend (backtick) is
+    // safe. The default connection's backend is known by the time this runs.
+    const tbl = db.quoteIdentifier(opts.table || "users");
     const idGen = opts.idGen || (() => crypto.hexEncode(crypto.random(16)));
 
     function row(r) {

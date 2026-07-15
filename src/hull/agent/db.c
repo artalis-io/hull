@@ -11,6 +11,7 @@
 #include "hull/app_context.h"
 #include "hull/cap/db.h"
 #include "hull/cap/db_backend.h"
+#include "hull/cap/db_sqlite.h"   /* hl_db_sqlite_wrap/_unwrap */
 #include "hull/cap/tool.h"
 #include "hull/migrate.h"
 #include "hull/vfs.h"

@@ -9,6 +9,7 @@
 #include "mod_buffer.h"
 #include "hull/cap/db.h"
 #include "hull/cap/db_backend.h"
+#include "hull/cap/db_sqlite.h"   /* hl_db_sqlite_raw (udf) */
 #include "hull/cap/db_registry.h"
 #include "hull/cap/db_dynamic.h"
 #include "hull/worker_db.h"
@@ -611,6 +612,27 @@ static JSValue js_db_table_columns(JSContext *ctx, JSValueConst this_val,
                                      hl_db_errmsg(h));
     }
     return cc.array;
+}
+
+/* db.quoteIdentifier(name) -> dialect-quoted identifier string. Wraps a table /
+ * column name in the backend's identifier-quote char (doubling any internal
+ * occurrence) so a reserved word or special char is safe when interpolated into
+ * SQL. Mirrors the Lua conn.quote_identifier. */
+static JSValue js_db_quote_identifier(JSContext *ctx, JSValueConst this_val,
+                                      int argc, JSValueConst *argv)
+{
+    if (argc < 1)
+        return JS_ThrowTypeError(ctx, "db.quoteIdentifier requires (name)");
+    const char *name = JS_ToCString(ctx, argv[0]);
+    if (!name)
+        return JS_EXCEPTION;
+    char buf[512];
+    int n = hl_db_quote_ident(js_call_handle(ctx, this_val), name,
+                              buf, sizeof buf);
+    JS_FreeCString(ctx, name);
+    if (n < 0)
+        return JS_ThrowInternalError(ctx, "db.quoteIdentifier: name too long");
+    return JS_NewStringLen(ctx, buf, (size_t)n);
 }
 
 /* ── db.async.query / db.async.exec ─────────────────────────────────── */
@@ -1360,6 +1382,9 @@ static JSValue push_conn_object(JSContext *ctx, HlDbHandle *h)
     JS_SetPropertyStr(ctx, obj, "tableColumns",
                       JS_NewCFunction(ctx, js_db_table_columns,
                                        "tableColumns", 1));
+    JS_SetPropertyStr(ctx, obj, "quoteIdentifier",
+                      JS_NewCFunction(ctx, js_db_quote_identifier,
+                                       "quoteIdentifier", 1));
     /* async targets this connection's database via the worker pool's per-DSN
      * connections; udf registers on this connection's SQLite handle (a udf on
      * a non-SQLite connection errors at call time). Both sub-objects share the
@@ -1468,6 +1493,9 @@ static JSValue push_owned_conn_object(JSContext *ctx, HlDbHandle *h,
     JS_SetPropertyStr(ctx, obj, "tableColumns",
                       JS_NewCFunction(ctx, js_db_table_columns,
                                        "tableColumns", 1));
+    JS_SetPropertyStr(ctx, obj, "quoteIdentifier",
+                      JS_NewCFunction(ctx, js_db_quote_identifier,
+                                       "quoteIdentifier", 1));
     JS_SetPropertyStr(ctx, obj, "close",
                       JS_NewCFunction(ctx, js_db_owned_close, "close", 0));
 

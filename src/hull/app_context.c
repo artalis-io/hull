@@ -17,6 +17,7 @@
 #ifdef HL_ENABLE_DB
 #include "hull/cap/db.h"
 #include "hull/cap/db_backend.h"
+#include "hull/cap/db_sqlite.h"   /* hl_db_sqlite_raw (agent handle) */
 #include "hull/cap/db_registry.h"
 #include "hull/migrate.h"
 #include "hull/worker_db.h"

@@ -11,6 +11,7 @@
 #ifdef HL_ENABLE_DB
 
 #include "hull/cap/db_backend.h"
+#include "hull/cap/db_sqlite.h"
 #include "hull/cap/db.h"
 #include "hull/utils/alloc.h"
 
@@ -335,10 +336,20 @@ static int sqlite_table_columns(HlDbHandle *h, const char *table,
 /* SQLite also owns "file:" URIs; scheme-less paths + ":memory:" default to it. */
 static const char *const sqlite_schemes[] = { "sqlite", "file", NULL };
 
+/* Native sqlite3* for the generic hl_db_backend_native_handle accessor. Only
+ * dispatched when h->backend is this backend, so no per-call backend check. */
+static void *sqlite_native_handle(HlDbHandle *h)
+{
+    HlDbSqliteCtx *s = (HlDbSqliteCtx *)h->ctx;
+    return s ? s->db : NULL;
+}
+
 const HlDbBackend hl_db_backend_sqlite = {
     .name                  = "sqlite",
     .schemes               = sqlite_schemes,
     .autoincrement_id_ddl  = "INTEGER PRIMARY KEY AUTOINCREMENT",
+    .identifier_quote      = '"',
+    .native_tag            = HL_DB_NATIVE_SQLITE,
     .open                  = sqlite_open,
     .close                 = sqlite_close,
     .query                 = sqlite_query,
@@ -353,17 +364,12 @@ const HlDbBackend hl_db_backend_sqlite = {
     .insert_if_absent      = sqlite_insert_if_absent,
     .upsert                = sqlite_upsert,
     .table_columns         = sqlite_table_columns,
+    .native_handle         = sqlite_native_handle,
 };
 
-/* ── Accessors ────────────────────────────────────────────────────── */
-
-sqlite3 *hl_db_sqlite_raw(HlDbHandle *h)
-{
-    if (!h || h->backend != &hl_db_backend_sqlite) return NULL;
-    HlDbSqliteCtx *s = (HlDbSqliteCtx *)h->ctx;
-    return s ? s->db : NULL;
-}
-
+/* Statement cache of a SQLite-backed handle (NULL if not SQLite). SQLite-
+ * specific (the cache is a sqlite prepared-statement adapter), so it lives in
+ * db_sqlite.h, not the abstract interface. */
 HlStmtCache *hl_db_sqlite_cache(HlDbHandle *h)
 {
     if (!h || h->backend != &hl_db_backend_sqlite) return NULL;

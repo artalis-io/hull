@@ -11,6 +11,7 @@
 #include "utest.h"
 #include "hull/cap/db_registry.h"
 #include "hull/cap/db_backend.h"
+#include "hull/cap/db_sqlite.h"
 #include "hull/manifest.h"
 
 #include <stdlib.h>

@@ -10,6 +10,7 @@
 #include "utest.h"
 #include "hull/cap/db.h"
 #include "hull/cap/db_backend.h"
+#include "hull/cap/db_sqlite.h"
 #ifdef HL_ENABLE_WASM
 #include "hull/cap/db_udf.h"
 #endif

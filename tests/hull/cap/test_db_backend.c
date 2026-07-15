@@ -9,6 +9,7 @@
 
 #include "utest.h"
 #include "hull/cap/db_backend.h"
+#include "hull/cap/db_sqlite.h"
 #include "hull/cap/db.h"
 #include "hull/cap/types.h"
 #include <sqlite3.h>
@@ -218,14 +219,17 @@ UTEST(db_backend, sqlite_raw_accessor)
     hl_db_backend_sqlite.close(&h);
 }
 
-UTEST(db_backend, sqlite_cache_accessor)
+UTEST(db_backend, native_handle_tag)
 {
     HlDbHandle h;
     h.backend = &hl_db_backend_sqlite;
     ASSERT_EQ(hl_db_backend_sqlite.open(&h.ctx, ":memory:", NULL), 0);
 
-    HlStmtCache *cache = hl_db_sqlite_cache(&h);
-    ASSERT_TRUE(cache != NULL);
+    HlDbNativeTag tag = HL_DB_NATIVE_NONE;
+    void *native = hl_db_backend_native_handle(&h, &tag);
+    ASSERT_EQ(tag, HL_DB_NATIVE_SQLITE);
+    ASSERT_TRUE(native != NULL);                 /* the sqlite3* */
+    ASSERT_TRUE(hl_db_sqlite_raw(&h) == native); /* typed convenience agrees */
 
     hl_db_backend_sqlite.close(&h);
 }
@@ -300,18 +304,46 @@ UTEST(db_backend, guard_stale_txn)
 
 UTEST(db_backend, sqlite_raw_returns_null_for_wrong_backend)
 {
-    /* hl_db_sqlite_raw should return NULL for a non-SQLite handle */
+    /* hl_db_sqlite_raw returns NULL for a non-SQLite (here NULL) handle, and
+     * the generic accessor reports HL_DB_NATIVE_NONE. */
     HlDbHandle h = { .backend = NULL, .ctx = NULL };
-    sqlite3 *raw = hl_db_sqlite_raw(&h);
-    ASSERT_TRUE(raw == NULL);
+    ASSERT_TRUE(hl_db_sqlite_raw(&h) == NULL);
 
-    HlStmtCache *cache = hl_db_sqlite_cache(&h);
-    ASSERT_TRUE(cache == NULL);
+    HlDbNativeTag tag = HL_DB_NATIVE_SQLITE;
+    ASSERT_TRUE(hl_db_backend_native_handle(&h, &tag) == NULL);
+    ASSERT_EQ(tag, HL_DB_NATIVE_NONE);
 }
 
 UTEST(db_backend, vtable_name)
 {
     ASSERT_STREQ(hl_db_backend_sqlite.name, "sqlite");
+}
+
+UTEST(db_backend, quote_identifier)
+{
+    HlDbHandle h = { .backend = &hl_db_backend_sqlite, .ctx = NULL };
+    char buf[64];
+
+    ASSERT_EQ(hl_db_quote_ident(&h, "users", buf, sizeof buf), 7);
+    ASSERT_STREQ(buf, "\"users\"");
+
+    /* an embedded quote is doubled (injection-safe) */
+    ASSERT_TRUE(hl_db_quote_ident(&h, "a\"b", buf, sizeof buf) > 0);
+    ASSERT_STREQ(buf, "\"a\"\"b\"");
+
+    /* a reserved word is quoted like any other name */
+    ASSERT_TRUE(hl_db_quote_ident(&h, "order", buf, sizeof buf) > 0);
+    ASSERT_STREQ(buf, "\"order\"");
+
+    /* NULL / none backend falls back to the double quote */
+    ASSERT_TRUE(hl_db_quote_ident(NULL, "x", buf, sizeof buf) > 0);
+    ASSERT_STREQ(buf, "\"x\"");
+
+    /* too-small buffer fails closed */
+    ASSERT_EQ(hl_db_quote_ident(&h, "users", buf, 3), -1);
+
+    /* the sqlite backend advertises the double-quote char */
+    ASSERT_EQ(hl_db_backend_sqlite.identifier_quote, '"');
 }
 
 UTEST(db_backend, close_null_ctx)
