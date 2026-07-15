@@ -32,8 +32,8 @@ function init(opts) {
 
     db.exec(
         "CREATE TABLE IF NOT EXISTS _hull_inbox_processed (" +
-        "  message_id   TEXT NOT NULL," +
-        "  source       TEXT NOT NULL," +
+        "  message_id   VARCHAR(255) NOT NULL," +
+        "  source       VARCHAR(255) NOT NULL," +
         "  processed_at INTEGER NOT NULL," +
         "  expires_at   INTEGER NOT NULL," +
         "  PRIMARY KEY (source, message_id)" +

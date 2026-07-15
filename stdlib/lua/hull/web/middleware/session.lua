@@ -110,7 +110,7 @@ function session.init(opts)
 
     db.exec([[
         CREATE TABLE IF NOT EXISTS _hull_sessions (
-            id TEXT PRIMARY KEY,
+            id VARCHAR(255) PRIMARY KEY,
             data TEXT NOT NULL,
             created_at INTEGER NOT NULL,
             last_accessed INTEGER NOT NULL,
@@ -132,7 +132,9 @@ function session.init(opts)
         existing[name] = true
     end
     if not existing.user_id then
-        db.exec("ALTER TABLE _hull_sessions ADD COLUMN user_id TEXT")
+        -- VARCHAR (not TEXT): this column is indexed below, and MySQL cannot
+        -- index a TEXT column without a prefix length.
+        db.exec("ALTER TABLE _hull_sessions ADD COLUMN user_id VARCHAR(255)")
     end
     if not existing.ip then
         db.exec("ALTER TABLE _hull_sessions ADD COLUMN ip TEXT")

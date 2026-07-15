@@ -44,11 +44,11 @@ function init(opts) {
         "  destination     TEXT NOT NULL," +
         "  payload         TEXT NOT NULL," +
         "  headers         TEXT," +
-        "  idempotency_key TEXT," +
+        "  idempotency_key VARCHAR(255)," +
         "  attempts        INTEGER NOT NULL DEFAULT 0," +
         "  max_attempts    INTEGER NOT NULL DEFAULT 5," +
         "  next_attempt_at INTEGER NOT NULL," +
-        "  state           TEXT NOT NULL DEFAULT 'pending'," +
+        "  state           VARCHAR(32) NOT NULL DEFAULT 'pending'," +
         "  created_at      INTEGER NOT NULL," +
         "  delivered_at    INTEGER," +
         "  last_error      TEXT" +

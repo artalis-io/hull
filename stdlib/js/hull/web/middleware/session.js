@@ -84,7 +84,7 @@ function init(opts) {
 
     db.exec(
         "CREATE TABLE IF NOT EXISTS _hull_sessions (" +
-        "  id TEXT PRIMARY KEY," +
+        "  id VARCHAR(255) PRIMARY KEY," +
         "  data TEXT NOT NULL," +
         "  created_at INTEGER NOT NULL," +
         "  last_accessed INTEGER NOT NULL," +
@@ -104,7 +104,7 @@ function init(opts) {
     const cols = db.tableColumns("_hull_sessions") || [];
     for (let i = 0; i < cols.length; i++) existing[cols[i]] = true;
     if (!existing.user_id)
-        db.exec("ALTER TABLE _hull_sessions ADD COLUMN user_id TEXT");
+        db.exec("ALTER TABLE _hull_sessions ADD COLUMN user_id VARCHAR(255)");
     if (!existing.ip)
         db.exec("ALTER TABLE _hull_sessions ADD COLUMN ip TEXT");
     if (!existing.user_agent)

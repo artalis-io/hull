@@ -60,8 +60,8 @@ function init(opts) {
 
     db.exec(
         "CREATE TABLE IF NOT EXISTS _hull_attachments (" +
-        "  id TEXT PRIMARY KEY," +
-        "  blob_id TEXT NOT NULL," +
+        "  id VARCHAR(255) PRIMARY KEY," +
+        "  blob_id VARCHAR(255) NOT NULL," +
         "  original_name TEXT NOT NULL," +
         "  mime TEXT NOT NULL," +
         "  declared_mime TEXT," +

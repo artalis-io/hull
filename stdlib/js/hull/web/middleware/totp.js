@@ -71,7 +71,7 @@ const _state = {
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS _hull_totp (
-    user_id        TEXT PRIMARY KEY,
+    user_id        VARCHAR(255) PRIMARY KEY,
     secret         BLOB NOT NULL,
     encrypted      INTEGER NOT NULL DEFAULT 0,
     confirmed      INTEGER NOT NULL DEFAULT 0,
@@ -83,14 +83,14 @@ CREATE TABLE IF NOT EXISTS _hull_totp (
 );
 
 CREATE TABLE IF NOT EXISTS _hull_totp_recovery (
-    user_id   TEXT NOT NULL,
-    code_hash TEXT NOT NULL,
+    user_id   VARCHAR(255) NOT NULL,
+    code_hash VARCHAR(255) NOT NULL,
     used_at   INTEGER,
     PRIMARY KEY (user_id, code_hash)
 );
 
 CREATE TABLE IF NOT EXISTS _hull_totp_pending (
-    user_id    TEXT PRIMARY KEY,
+    user_id    VARCHAR(255) PRIMARY KEY,
     secret     BLOB NOT NULL,
     encrypted  INTEGER NOT NULL DEFAULT 0,
     digits     INTEGER NOT NULL DEFAULT 6,
@@ -99,20 +99,20 @@ CREATE TABLE IF NOT EXISTS _hull_totp_pending (
 );
 
 CREATE TABLE IF NOT EXISTS _hull_totp_pending_recovery (
-    user_id   TEXT NOT NULL,
-    code_hash TEXT NOT NULL,
+    user_id   VARCHAR(255) NOT NULL,
+    code_hash VARCHAR(255) NOT NULL,
     PRIMARY KEY (user_id, code_hash)
 );
 
 CREATE TABLE IF NOT EXISTS _hull_totp_attempts (
-    user_id        TEXT PRIMARY KEY,
+    user_id        VARCHAR(255) PRIMARY KEY,
     failed_count   INTEGER NOT NULL DEFAULT 0,
     last_failed_at INTEGER,
     locked_until   INTEGER
 );
 
 CREATE TABLE IF NOT EXISTS _hull_totp_attempts_by_ip (
-    ip             TEXT PRIMARY KEY,
+    ip             VARCHAR(255) PRIMARY KEY,
     failed_count   INTEGER NOT NULL DEFAULT 0,
     last_failed_at INTEGER,
     locked_until   INTEGER

@@ -31,25 +31,28 @@ local rbac = {}
 function rbac.init(_opts)
     db.exec([[
         CREATE TABLE IF NOT EXISTS _hull_roles (
-            name TEXT PRIMARY KEY
+            name VARCHAR(255) PRIMARY KEY
         )
     ]])
     db.exec([[
         CREATE TABLE IF NOT EXISTS _hull_permissions (
-            name TEXT PRIMARY KEY
+            name VARCHAR(255) PRIMARY KEY
         )
     ]])
+    -- VARCHAR (not TEXT) on every keyed / FK column: MySQL forbids a TEXT
+    -- primary-key or index without a prefix length, and a foreign key must
+    -- match the referenced column's type (VARCHAR(255) name, above).
     db.exec([[
         CREATE TABLE IF NOT EXISTS _hull_role_permissions (
-            role TEXT NOT NULL REFERENCES _hull_roles(name) ON DELETE CASCADE,
-            permission TEXT NOT NULL REFERENCES _hull_permissions(name) ON DELETE CASCADE,
+            role VARCHAR(255) NOT NULL REFERENCES _hull_roles(name) ON DELETE CASCADE,
+            permission VARCHAR(255) NOT NULL REFERENCES _hull_permissions(name) ON DELETE CASCADE,
             PRIMARY KEY (role, permission)
         )
     ]])
     db.exec([[
         CREATE TABLE IF NOT EXISTS _hull_user_roles (
-            user_id TEXT NOT NULL,
-            role TEXT NOT NULL REFERENCES _hull_roles(name) ON DELETE CASCADE,
+            user_id VARCHAR(255) NOT NULL,
+            role VARCHAR(255) NOT NULL REFERENCES _hull_roles(name) ON DELETE CASCADE,
             PRIMARY KEY (user_id, role)
         )
     ]])

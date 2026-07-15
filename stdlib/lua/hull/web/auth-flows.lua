@@ -267,13 +267,13 @@ local _state = {
 
 local SCHEMA = [[
 CREATE TABLE IF NOT EXISTS _hull_auth_used_tokens (
-    token_hash  TEXT PRIMARY KEY,
+    token_hash  VARCHAR(255) PRIMARY KEY,
     used_at     INTEGER NOT NULL,
     expires_at  INTEGER NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS _hull_auth_pending_email_changes (
-    user_id     TEXT PRIMARY KEY,
+    user_id     VARCHAR(255) PRIMARY KEY,
     new_email   TEXT NOT NULL,
     token_hash  TEXT NOT NULL,
     created_at  INTEGER NOT NULL,
@@ -281,7 +281,7 @@ CREATE TABLE IF NOT EXISTS _hull_auth_pending_email_changes (
 );
 
 CREATE TABLE IF NOT EXISTS _hull_auth_login_attempts (
-    user_id        TEXT PRIMARY KEY,
+    user_id        VARCHAR(255) PRIMARY KEY,
     failed_count   INTEGER NOT NULL DEFAULT 0,
     last_failed_at INTEGER,
     locked_until   INTEGER

@@ -101,8 +101,8 @@ function init(opts) {
 
     db.exec(
         "CREATE TABLE IF NOT EXISTS _hull_idempotency_keys (" +
-        "  key            TEXT NOT NULL," +
-        "  principal_id   TEXT NOT NULL DEFAULT '__anon'," +
+        "  key            VARCHAR(255) NOT NULL," +
+        "  principal_id   VARCHAR(255) NOT NULL DEFAULT '__anon'," +
         "  fingerprint    TEXT NOT NULL," +
         "  endpoint       TEXT NOT NULL," +
         "  status         INTEGER," +

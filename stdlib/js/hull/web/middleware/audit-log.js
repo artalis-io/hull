@@ -59,12 +59,12 @@ function init(opts) {
     db.exec(
         "CREATE TABLE IF NOT EXISTS _hull_audit_log ("
         + "id          " + db.autoincrementIdDdl + ", "
-        + "user_id     TEXT    NOT NULL,"
+        + "user_id     VARCHAR(255) NOT NULL,"
         + "event_at    INTEGER NOT NULL,"
         + "kind        TEXT    NOT NULL,"
         + "ip          TEXT,"
         + "user_agent  TEXT,"
-        + "fingerprint TEXT,"
+        + "fingerprint VARCHAR(255),"
         + "session_id  TEXT,"
         + "metadata    TEXT)");
     db.exec(`CREATE INDEX IF NOT EXISTS _hull_audit_log_user_at

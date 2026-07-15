@@ -25,25 +25,25 @@ const db = dbModule.default();
 function init(opts) {
     db.exec(
         "CREATE TABLE IF NOT EXISTS _hull_roles (" +
-        "  name TEXT PRIMARY KEY" +
+        "  name VARCHAR(255) PRIMARY KEY" +
         ")"
     );
     db.exec(
         "CREATE TABLE IF NOT EXISTS _hull_permissions (" +
-        "  name TEXT PRIMARY KEY" +
+        "  name VARCHAR(255) PRIMARY KEY" +
         ")"
     );
     db.exec(
         "CREATE TABLE IF NOT EXISTS _hull_role_permissions (" +
-        "  role TEXT NOT NULL REFERENCES _hull_roles(name) ON DELETE CASCADE," +
-        "  permission TEXT NOT NULL REFERENCES _hull_permissions(name) ON DELETE CASCADE," +
+        "  role VARCHAR(255) NOT NULL REFERENCES _hull_roles(name) ON DELETE CASCADE," +
+        "  permission VARCHAR(255) NOT NULL REFERENCES _hull_permissions(name) ON DELETE CASCADE," +
         "  PRIMARY KEY (role, permission)" +
         ")"
     );
     db.exec(
         "CREATE TABLE IF NOT EXISTS _hull_user_roles (" +
-        "  user_id TEXT NOT NULL," +
-        "  role TEXT NOT NULL REFERENCES _hull_roles(name) ON DELETE CASCADE," +
+        "  user_id VARCHAR(255) NOT NULL," +
+        "  role VARCHAR(255) NOT NULL REFERENCES _hull_roles(name) ON DELETE CASCADE," +
         "  PRIMARY KEY (user_id, role)" +
         ")"
     );
