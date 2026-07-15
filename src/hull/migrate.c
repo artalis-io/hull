@@ -26,15 +26,19 @@
 
 /* ── Tracking table ───────────────────────────────────────────────── */
 
-/* Portable across SQLite and Postgres: `name` is the primary key (the
+/* Portable across SQLite, Postgres, and MySQL: `name` is the primary key (the
  * runner dedupes by name and orders by filename, so no surrogate id is
  * needed), and `applied_at` is written explicitly by the runner instead of
- * via a backend-specific DEFAULT. Existing SQLite databases created with
- * the older id/AUTOINCREMENT schema keep working: CREATE IF NOT EXISTS is a
+ * via a backend-specific DEFAULT. `name` is VARCHAR(255), not TEXT: MySQL
+ * cannot index a TEXT/BLOB primary key without a prefix length, and a
+ * migration name is a short filename. VARCHAR carries TEXT affinity on SQLite
+ * and is directly comparable to text on Postgres, so the `WHERE name = ?`
+ * lookup is unaffected. Existing databases created with the older id/
+ * AUTOINCREMENT (or TEXT-PK) schema keep working: CREATE IF NOT EXISTS is a
  * no-op and the INSERT below names its columns. */
 static const char *CREATE_TABLE_SQL =
     "CREATE TABLE IF NOT EXISTS _hull_migrations ("
-    "  name TEXT NOT NULL PRIMARY KEY,"
+    "  name VARCHAR(255) NOT NULL PRIMARY KEY,"
     "  applied_at TEXT NOT NULL"
     ")";
 

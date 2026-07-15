@@ -25,11 +25,56 @@
 
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>   /* strncasecmp */
 #include <stdio.h>
+#include <ctype.h>
 
 typedef struct HlDbMyCtx {
     HlMyConn conn;
 } HlDbMyCtx;
+
+/* Case-insensitive substring search (strcasestr is not standard C). */
+static const char *ci_strstr(const char *hay, const char *needle)
+{
+    size_t nl = strlen(needle);
+    if (nl == 0) return hay;
+    for (; *hay; hay++)
+        if (strncasecmp(hay, needle, nl) == 0) return hay;
+    return NULL;
+}
+
+/*
+ * MySQL 8 has no `CREATE INDEX ... IF NOT EXISTS` (MariaDB, SQLite, and
+ * Postgres all do). The DB-backed stdlib writes idempotent index DDL in that
+ * portable form, so on a MySQL connection rewrite it to a plain CREATE INDEX
+ * and treat a later duplicate-index error as success. Sets *handled when the
+ * statement was a CREATE INDEX ... IF NOT EXISTS. Returns 0 / -1.
+ */
+static int mysql_create_index_shim(HlDbMyCtx *s, const char *sql, int *handled)
+{
+    *handled = 0;
+    const char *p = sql;
+    while (isspace((unsigned char)*p)) p++;
+    if (strncasecmp(p, "create ", 7) != 0) return 0;
+    const char *idx = ci_strstr(p, "index");
+    const char *ine = ci_strstr(p, "if not exists");
+    if (!idx || !ine || idx > ine) return 0;   /* not CREATE INDEX IF NOT EXISTS */
+
+    *handled = 1;
+    size_t pre = (size_t)(ine - sql);
+    const char *rest = ine + strlen("if not exists");
+    while (*rest == ' ') rest++;
+    char *rw = malloc(pre + strlen(rest) + 1);
+    if (!rw) { snprintf(s->conn.errmsg, sizeof s->conn.errmsg, "out of memory"); return -1; }
+    memcpy(rw, sql, pre);
+    memcpy(rw + pre, rest, strlen(rest) + 1);
+
+    int rc = hl_my_conn_query(&s->conn, rw, NULL, NULL, NULL, NULL);
+    free(rw);
+    if (rc == 0) return 0;
+    if (ci_strstr(s->conn.errmsg, "Duplicate key name") != NULL) return 0;  /* already present */
+    return -1;
+}
 
 /* ── Text value -> HlValue by column type ─────────────────────────── */
 
@@ -259,6 +304,12 @@ static int mysql_exec(HlDbHandle *h, const char *sql,
     if (!h || !h->ctx) return -1;
     HlDbMyCtx *s = h->ctx;
     int64_t affected = 0;
+
+    if (nparams == 0) {
+        int handled = 0;
+        int shim = mysql_create_index_shim(s, sql, &handled);
+        if (handled) return shim == 0 ? 0 : -1;   /* DDL: 0 rows affected */
+    }
 
     if (nparams > 0) {
         HlMyParam *pp = encode_my_params(params, nparams);

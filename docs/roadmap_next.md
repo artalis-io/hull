@@ -2958,9 +2958,27 @@ the shared `shared/tls_client.c`; hashes via `cap/crypto`.
         mysql_native_password or caching_sha2_password" hint. MariaDB is fully
         reachable today via those two plugins. Full ed25519 (a vetted vendored
         implementation with MariaDB test vectors) is a tracked follow-up.
-- [ ] **6 - stdlib + db.async + docker e2e + CI.** Real MySQL/MariaDB in Docker
-      (SCRAM-equivalent auth + TLS + migrations + `db.async` + stdlib), a full
-      `e2e_mysql.sh` job, fuzzers in CI.
+- [x] **6 - stdlib + db.async + docker e2e + CI.** `tests/e2e_mysql.sh` stands up
+      a real MySQL 8 in Docker and proves the whole path end-to-end: `mysql://`
+      DSN -> backend select -> handshake -> parameterized `db.exec`/`db.query`
+      (binary prepared statements) -> typed decode; multi-statement migrations;
+      `db.async` on a worker connection; the DB-backed stdlib (session / inbox /
+      outbox / rbac / audit-log / transaction / insert_if_absent) on the MySQL
+      dialect; `db.open` dynamic allow/deny; and caching_sha2 full-auth over TLS
+      (cipher asserted). Wired as the `mysql` CI job (`make e2e-mysql`); the two
+      MySQL fuzzers already run 60s each in CI (added in Phase 1).
+      Three real bugs the e2e surfaced, all fixed: (1) the `_hull_migrations`
+      tracking table used a `TEXT` PK (MySQL rejects TEXT/BLOB keys without a
+      prefix length) -> `VARCHAR(255)`; (2) `COM_STMT_EXECUTE` emitted only the
+      caller-supplied params, but Lua drops trailing nils, so an 8-param INSERT
+      with trailing-nil `ip`/`ua` sent 6 -> malformed packet; now padded to the
+      statement's declared `num_params` (trailing slots bound NULL); (3) MySQL 8
+      has no `CREATE INDEX ... IF NOT EXISTS` -> a central backend shim rewrites
+      it to plain `CREATE INDEX` and treats a duplicate-index error as success.
+      Companion stdlib change: every DB-backed module's keyed / indexed / FK
+      columns moved `TEXT` -> `VARCHAR(255)` (data columns stay `TEXT`) across the
+      Lua and JS stdlib; verified non-regressing on SQLite (migrate / sign-in /
+      auth-flows / totp e2es all green).
 
 ### Backend-onboarding checklist (what each new backend needs)
 

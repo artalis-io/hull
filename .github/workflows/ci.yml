@@ -603,6 +603,25 @@ jobs:
         timeout-minutes: 15
         run: make e2e-postgres
 
+  # Real MySQL 8 in Docker: mysql:// DSN -> backend select -> handshake ->
+  # parameterized db.exec / db.query (binary prepared statements) -> typed
+  # decode; multi-statement migrations; db.async on a worker connection; the
+  # DB-backed stdlib (session / outbox / inbox / rbac / audit-log / transaction
+  # / insert_if_absent) on the MySQL dialect; and caching_sha2 full-auth over
+  # TLS. Self-builds with HL_ENABLE_MYSQL=1; skips cleanly without Docker.
+  mysql:
+    name: MySQL e2e
+    runs-on: ubuntu-24.04
+
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          submodules: true
+
+      - name: MySQL end-to-end
+        timeout-minutes: 15
+        run: make e2e-mysql
+
   analyze:
     name: Static Analysis
     runs-on: ubuntu-24.04

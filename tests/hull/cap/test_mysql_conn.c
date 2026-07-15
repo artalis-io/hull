@@ -454,6 +454,77 @@ UTEST(mysql_conn, prepared_datetime)
     close(sv[0]);
 }
 
+/* A params array shorter than the statement's parameter count (Lua drops
+ * trailing nils) must pad the tail as NULL in COM_STMT_EXECUTE. Decodes the
+ * client's execute packet and asserts the null bitmap + single bound value. */
+UTEST(mysql_conn, prepared_trailing_null_pad)
+{
+    int sv[2];
+    ASSERT_EQ(0, socketpair(AF_UNIX, SOCK_STREAM, 0, sv));
+
+    HlMyWriter s; hl_my_writer_init(&s);
+    build_handshake(&s, 0);
+    build_ok(&s, 2);
+    /* PREPARE_OK: stmt 1, 0 columns, 2 params */
+    { size_t m = hl_my_packet_begin(&s, 1);
+      hl_my_put_u8(&s, HL_MY_PKT_OK);
+      hl_my_put_u32(&s, 1);
+      hl_my_put_u16(&s, 0);                            /* num_columns */
+      hl_my_put_u16(&s, 2);                            /* num_params */
+      hl_my_put_u8(&s, 0);
+      hl_my_put_u16(&s, 0);
+      hl_my_packet_end(&s, m); }
+    put_col_def(&s, 2, "p1", HL_MY_TYPE_LONGLONG);     /* 2 param defs + EOF */
+    put_col_def(&s, 3, "p2", HL_MY_TYPE_LONGLONG);
+    put_eof(&s, 4);
+    build_ok(&s, 1);                                   /* execute response: OK */
+    ASSERT_TRUE(write(sv[0], s.buf, s.len) == (ssize_t)s.len);
+
+    HlMyDsn dsn; char err[128];
+    ASSERT_EQ(0, hl_my_dsn_parse("mysql://u:p@localhost/db", &dsn, err, sizeof err));
+    HlMyConn conn;
+    ASSERT_EQ(0, hl_my_conn_start(&conn, sv[1], &dsn));
+
+    /* Bind ONE param (42) for a two-param statement; slot 1 must become NULL. */
+    HlMyParam p;
+    memset(&p, 0, sizeof p);
+    p.type = HL_MY_TYPE_LONGLONG;
+    p.v.i = 42;
+    ASSERT_EQ(0, hl_my_conn_query_prepared(&conn, "INSERT ... VALUES (?, ?)",
+                                           &p, 1, NULL, NULL, NULL, NULL));
+
+    /* The client's traffic on sv[0] is
+     * [HandshakeResponse41][COM_STMT_PREPARE][COM_STMT_EXECUTE][CLOSE]; walk to
+     * the third frame (EXECUTE). */
+    uint8_t got[512];
+    ssize_t n = read(sv[0], got, sizeof got);
+    ASSERT_TRUE(n > 0);
+    HlMyFrame f; size_t consumed = 0, off = 0;
+    ASSERT_EQ(hl_my_frame_next(got, (size_t)n, &f, &consumed), HL_MY_OK);   /* handshake */
+    off += consumed;
+    ASSERT_EQ(hl_my_frame_next(got + off, (size_t)n - off, &f, &consumed), HL_MY_OK); /* PREPARE */
+    off += consumed;
+    ASSERT_EQ(hl_my_frame_next(got + off, (size_t)n - off, &f, &consumed), HL_MY_OK); /* EXECUTE */
+
+    HlMyCursor c; hl_my_cursor_init(&c, &f);
+    ASSERT_EQ(hl_my_get_u8(&c), HL_MY_COM_STMT_EXECUTE);
+    (void)hl_my_get_u32(&c);                           /* statement id */
+    (void)hl_my_get_u8(&c);                            /* flags */
+    (void)hl_my_get_u32(&c);                           /* iteration count */
+    ASSERT_EQ(hl_my_get_u8(&c), 0x02);                 /* null bitmap: slot 1 NULL */
+    ASSERT_EQ(hl_my_get_u8(&c), 1);                    /* new-params-bound */
+    ASSERT_EQ(hl_my_get_u8(&c), HL_MY_TYPE_LONGLONG);  /* param 0 type */
+    (void)hl_my_get_u8(&c);
+    ASSERT_EQ(hl_my_get_u8(&c), HL_MY_TYPE_NULL);      /* param 1 padded to NULL */
+    (void)hl_my_get_u8(&c);
+    ASSERT_EQ(hl_my_get_u64(&c), 42u);                 /* only the one value */
+    ASSERT_FALSE(hl_my_cursor_err(&c));
+
+    hl_my_conn_close(&conn);
+    hl_my_writer_free(&s);
+    close(sv[0]);
+}
+
 /* ── Multi-statement script (exec_multi) over a socketpair ────────── */
 
 static void put_ok_more(HlMyWriter *w, uint8_t seq, uint16_t status)

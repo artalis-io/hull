@@ -828,31 +828,38 @@ static void decode_binary_value(HlMyCursor *rc, uint8_t type, HlMyVal *out)
     }
 }
 
-/* Serialize the bound parameters into a COM_STMT_EXECUTE packet body. */
+/* Serialize the bound parameters into a COM_STMT_EXECUTE packet body. @p total
+ * is the statement's declared parameter count (from COM_STMT_PREPARE_OK); any
+ * slot at or beyond @p nparams is bound NULL. A Lua/JS params array with
+ * trailing nils arrives short (Lua's `#` drops the tail), so padding to @p total
+ * matches SQLite/Postgres "trailing nils bind as NULL" and keeps the execute
+ * packet consistent with the prepared statement (else: malformed packet). */
 static int build_execute(HlMyWriter *w, uint32_t stmt_id,
-                         const HlMyParam *params, int nparams)
+                         const HlMyParam *params, int nparams, int total)
 {
     hl_my_put_u8(w, HL_MY_COM_STMT_EXECUTE);
     hl_my_put_u32(w, stmt_id);
     hl_my_put_u8(w, HL_MY_STMT_CURSOR_NONE);
     hl_my_put_u32(w, HL_MY_STMT_ITERATIONS);
-    if (nparams <= 0) return 0;
+    if (total <= 0) return 0;
 
-    size_t nb = ((size_t)nparams + 7) / 8;
+#define HL_MY_SLOT_NULL(i) ((i) >= nparams || params[(i)].is_null)
+
+    size_t nb = ((size_t)total + 7) / 8;
     uint8_t *bitmap = calloc(nb, 1);
     if (!bitmap) return -1;
-    for (int i = 0; i < nparams; i++)
-        if (params[i].is_null) bitmap[i >> 3] |= (uint8_t)(1u << (i & 7));
+    for (int i = 0; i < total; i++)
+        if (HL_MY_SLOT_NULL(i)) bitmap[i >> 3] |= (uint8_t)(1u << (i & 7));
     hl_my_put_bytes(w, bitmap, nb);
     free(bitmap);
 
     hl_my_put_u8(w, HL_MY_STMT_NEW_PARAMS_BOUND);
-    for (int i = 0; i < nparams; i++) {
-        hl_my_put_u8(w, params[i].is_null ? HL_MY_TYPE_NULL : params[i].type);
+    for (int i = 0; i < total; i++) {
+        hl_my_put_u8(w, HL_MY_SLOT_NULL(i) ? HL_MY_TYPE_NULL : params[i].type);
         hl_my_put_u8(w, 0);                    /* signed (Hull binds signed) */
     }
-    for (int i = 0; i < nparams; i++) {
-        if (params[i].is_null) continue;
+    for (int i = 0; i < total; i++) {
+        if (HL_MY_SLOT_NULL(i)) continue;
         switch (params[i].type) {
         case HL_MY_TYPE_TINY:
             hl_my_put_u8(w, (uint8_t)params[i].v.i); break;
@@ -868,6 +875,7 @@ static int build_execute(HlMyWriter *w, uint32_t stmt_id,
             break;
         }
     }
+#undef HL_MY_SLOT_NULL
     return 0;
 }
 
@@ -918,7 +926,8 @@ int hl_my_conn_query_prepared(HlMyConn *conn, const char *sql,
     /* 3. COM_STMT_EXECUTE with the bound parameters. */
     hl_my_writer_init(&w);
     m = hl_my_packet_begin(&w, 0);
-    int be = build_execute(&w, prep.statement_id, params, nparams);
+    int be = build_execute(&w, prep.statement_id, params, nparams,
+                           (int)prep.num_params);
     hl_my_packet_end(&w, m);
     se = be || w.err || conn_send(conn, w.buf, w.len);
     hl_my_writer_free(&w);

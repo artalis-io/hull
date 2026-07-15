@@ -5,10 +5,11 @@
  * entries or filesystem, tracks applied migrations in _hull_migrations,
  * executes pending ones in filename order.
  *
- * Takes HlDbHandle * (not raw sqlite3 *). The SQLite-specific internal
- * table _hull_migrations is currently SQLite-only — non-SQLite backends
- * would supply their own migration mechanism. Reach-around to the raw
- * sqlite3 * is now confined to migrate.c.
+ * Takes HlDbHandle * (not raw sqlite3 *). The tracking table and all SQL flow
+ * through the HlDbBackend vtable, so the runner is backend-portable: the
+ * dialect-neutral _hull_migrations table (VARCHAR name PK, host-generated
+ * applied_at) and the pending/apply path work on SQLite, Postgres, and MySQL
+ * alike. Multi-statement migration files run through exec_script.
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
