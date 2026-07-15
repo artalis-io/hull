@@ -172,6 +172,33 @@ UTEST(mysql_conn, caching_sha2_fast_auth)
     close(sv[0]);
 }
 
+/* An AuthSwitchRequest to client_ed25519 (MariaDB) is rejected with a hint
+ * pointing at a supported plugin (ed25519 is deferred). */
+UTEST(mysql_conn, ed25519_unsupported)
+{
+    int sv[2];
+    ASSERT_EQ(0, socketpair(AF_UNIX, SOCK_STREAM, 0, sv));
+
+    HlMyWriter s; hl_my_writer_init(&s);
+    build_handshake(&s, 0);                            /* offers native */
+    /* AuthSwitchRequest: 0xFE, plugin name, 32-byte scramble */
+    { size_t m = hl_my_packet_begin(&s, 2);
+      hl_my_put_u8(&s, HL_MY_PKT_EOF);
+      hl_my_put_cstr(&s, "client_ed25519");
+      for (int i = 0; i < 32; i++) hl_my_put_u8(&s, (uint8_t)i);
+      hl_my_packet_end(&s, m); }
+    ASSERT_TRUE(write(sv[0], s.buf, s.len) == (ssize_t)s.len);
+
+    HlMyDsn dsn; char err[128];
+    ASSERT_EQ(0, hl_my_dsn_parse("mysql://u:p@localhost/db", &dsn, err, sizeof err));
+    HlMyConn conn;
+    ASSERT_EQ(-1, hl_my_conn_start(&conn, sv[1], &dsn));
+    ASSERT_TRUE(strstr(conn.errmsg, "ed25519") != NULL);
+
+    hl_my_writer_free(&s);
+    close(sv[0]);   /* sv[1] closed by the failed handshake */
+}
+
 /* ── COM_QUERY result set over a socketpair ───────────────────────── */
 
 typedef struct { int rows; int ncols; char first[64]; char col0[64]; } QCollect;

@@ -2945,9 +2945,19 @@ the shared `shared/tls_client.c`; hashes via `cap/crypto`.
         re-dispatches through the same helper (native or caching_sha2).
         Unit-tested: the scramble formula + a caching_sha2 fast-auth socketpair
         handshake asserting the client's response. ASan/UBSan-clean.
-  - [ ] **5c - client_ed25519.** MariaDB: SHA-512(password)-derived ed25519
-        keypair signing the server scramble (custom key derivation, not
-        TweetNaCl's seed path).
+  - [~] **5c - client_ed25519 (deferred).** MariaDB derives the ed25519 signing
+        scalar from `SHA512(password)` directly rather than the standard
+        seed->SHA512 path, so `hl_cap_crypto_ed25519_sign` / TweetNaCl
+        `crypto_sign` can't produce it for arbitrary-length passwords, and the
+        curve group-ops needed (`scalarbase` / `pack` / `sc_reduce` /
+        `sc_muladd`) are `static` in `vendor/tweetnacl` (which convention says
+        not to modify) and absent from mbedTLS. Rather than hand-roll or
+        re-vendor curve crypto in an auth path, 5c ships the plumbing only: the
+        plugin dispatcher rejects `client_ed25519` (initial or via
+        AuthSwitchRequest) with a clear "create the user with
+        mysql_native_password or caching_sha2_password" hint. MariaDB is fully
+        reachable today via those two plugins. Full ed25519 (a vetted vendored
+        implementation with MariaDB test vectors) is a tracked follow-up.
 - [ ] **6 - stdlib + db.async + docker e2e + CI.** Real MySQL/MariaDB in Docker
       (SCRAM-equivalent auth + TLS + migrations + `db.async` + stdlib), a full
       `e2e_mysql.sh` job, fuzzers in CI.

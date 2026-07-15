@@ -392,7 +392,7 @@ static int my_sslmode_parse(const char *s)
 
 /* Compute the auth response for @p plugin into @p out (>= 32 bytes). Returns
  * the response length, 0 for an empty password, or -1 for an unsupported
- * plugin. client_ed25519 (MariaDB) lands in Phase 5c. */
+ * plugin. */
 static int compute_plugin_auth(const char *plugin, const char *password,
                                const uint8_t nonce[HL_MY_SCRAMBLE_LEN],
                                uint8_t out[HL_MY_CACHING_SHA2_DIGEST_LEN])
@@ -402,6 +402,22 @@ static int compute_plugin_auth(const char *plugin, const char *password,
     if (strcmp(plugin, "caching_sha2_password") == 0)
         return hl_my_caching_sha2_scramble(password, nonce, out);
     return -1;
+}
+
+/* Set the error for a plugin compute_plugin_auth rejected. MariaDB's
+ * client_ed25519 derives its ed25519 scalar from SHA512(password) directly,
+ * which needs curve group-ops TweetNaCl keeps private; it is not yet supported,
+ * so point the operator at a plugin Hull does implement. */
+static void set_unsupported_plugin_err(HlMyConn *conn, const char *plugin)
+{
+    if (plugin && strcmp(plugin, "client_ed25519") == 0)
+        snprintf(conn->errmsg, sizeof conn->errmsg,
+                 "client_ed25519 auth is not supported yet; create the user with "
+                 "mysql_native_password or caching_sha2_password");
+    else
+        snprintf(conn->errmsg, sizeof conn->errmsg,
+                 "unsupported auth plugin '%s' (native / caching_sha2 only)",
+                 plugin ? plugin : "?");
 }
 
 int hl_my_conn_start(HlMyConn *conn, int fd, const HlMyDsn *dsn)
@@ -479,8 +495,7 @@ int hl_my_conn_start(HlMyConn *conn, int fd, const HlMyDsn *dsn)
     uint8_t auth[HL_MY_CACHING_SHA2_DIGEST_LEN];
     int authlen = compute_plugin_auth(plugin, dsn->password, hs.scramble, auth);
     if (authlen < 0) {
-        snprintf(conn->errmsg, sizeof conn->errmsg,
-                 "unsupported auth plugin '%s' (native / caching_sha2 only)", plugin);
+        set_unsupported_plugin_err(conn, plugin);
         hl_my_conn_close(conn); return -1;
     }
 
@@ -526,8 +541,7 @@ int hl_my_conn_start(HlMyConn *conn, int fd, const HlMyDsn *dsn)
                                     ? (size_t)HL_MY_SCRAMBLE_LEN : dlen);
             int n2 = compute_plugin_auth(sw, dsn->password, nonce, auth);
             if (n2 < 0) {
-                snprintf(conn->errmsg, sizeof conn->errmsg,
-                         "unsupported auth plugin '%s' (native / caching_sha2 only)", sw);
+                set_unsupported_plugin_err(conn, sw);
                 hl_my_conn_close(conn); return -1;
             }
             if (send_auth_data(conn, (uint8_t)(f.seq + 1), auth, n2) != 0) {
