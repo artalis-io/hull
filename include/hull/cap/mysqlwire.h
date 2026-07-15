@@ -135,6 +135,9 @@ int            hl_my_cursor_err(const HlMyCursor *c);
 #define HL_MY_PKT_ERR         0xFF
 #define HL_MY_PKT_LOCAL_INFILE 0xFB
 
+/* Server status flag: another result set follows this OK / EOF (multi-stmt). */
+#define HL_MY_SERVER_MORE_RESULTS 0x0008
+
 typedef struct HlMyOk {
     uint64_t affected_rows;
     uint64_t last_insert_id;
@@ -196,8 +199,12 @@ int hl_my_parse_handshake(const HlMyFrame *f, HlMyHandshake *out);
 #define HL_MY_TYPE_FLOAT       0x04
 #define HL_MY_TYPE_DOUBLE      0x05
 #define HL_MY_TYPE_NULL        0x06
+#define HL_MY_TYPE_TIMESTAMP   0x07
 #define HL_MY_TYPE_LONGLONG    0x08
 #define HL_MY_TYPE_INT24       0x09
+#define HL_MY_TYPE_DATE        0x0a
+#define HL_MY_TYPE_TIME        0x0b
+#define HL_MY_TYPE_DATETIME    0x0c
 #define HL_MY_TYPE_YEAR        0x0d
 #define HL_MY_TYPE_NEWDECIMAL  0xf6
 #define HL_MY_TYPE_BLOB        0xfc

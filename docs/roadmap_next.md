@@ -2908,9 +2908,19 @@ the shared `shared/tls_client.c`; hashes via `cap/crypto`.
       impossible); param-less calls stay on the text `COM_QUERY` path.
       `test_mysql_conn` drives a canned PREPARE + EXECUTE (binary row) exchange;
       the whole path is ASan/UBSan-clean.
-- [ ] **4 - dialect + migrations + types.** `INSERT IGNORE` / `ON DUPLICATE KEY
-      UPDATE`, `LAST_INSERT_ID()`, `information_schema` columns, `exec_script`,
-      full type coverage.
+- [x] **4 - dialect + migrations + types.** `insert_if_absent` builds
+      `INSERT IGNORE`, `upsert` builds `INSERT ... ON DUPLICATE KEY UPDATE
+      c = VALUES(c)` (MariaDB / MySQL 5.7+ compatible), both binding through the
+      prepared-statement path. `last_id` returns the OK packet's
+      `last_insert_id`. `table_columns` queries `information_schema.columns`
+      scoped to `DATABASE()`. `exec_script` runs multi-statement migrations as
+      one COM_QUERY (the handshake now advertises `CLIENT_MULTI_STATEMENTS`),
+      draining every result set via the `MORE_RESULTS` status flag and stopping
+      at the first error. Binary result decode gained the temporal types
+      (`DATE` / `DATETIME` / `TIMESTAMP` / `TIME`), formatted to ISO-8601-ish
+      strings; text-protocol temporal values already decoded as strings.
+      `test_mysql_conn` covers the DATETIME decode + single- and multi-result
+      scripts; the whole path stays ASan/UBSan-clean.
 - [ ] **5 - TLS + caching_sha2 + ed25519.** SSLRequest + handshake over
       `tls_client.c`; `caching_sha2_password` (fast + TLS full-auth);
       `client_ed25519`.

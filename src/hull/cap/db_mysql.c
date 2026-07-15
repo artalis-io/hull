@@ -277,11 +277,11 @@ static int mysql_exec(HlDbHandle *h, const char *sql,
 
 static int mysql_exec_script(HlDbHandle *h, const char *sql)
 {
-    /* Single statement only for now: without CLIENT_MULTI_STATEMENTS a
-     * multi-statement COM_QUERY errors. Multi-statement migrations are Phase 4. */
+    /* Migrations are multi-statement; the connection advertises
+     * CLIENT_MULTI_STATEMENTS so the whole script runs as one COM_QUERY. */
     if (!h || !h->ctx) return -1;
     HlDbMyCtx *s = h->ctx;
-    return hl_my_conn_query(&s->conn, sql, NULL, NULL, NULL, NULL);
+    return hl_my_conn_exec_multi(&s->conn, sql);
 }
 
 static int mysql_txn(HlDbHandle *h, const char *sql)
@@ -309,21 +309,78 @@ static const char *mysql_errmsg(HlDbHandle *h)
     return s->conn.errmsg[0] ? s->conn.errmsg : "no error";
 }
 
-/* Dialect helpers below need MySQL's INSERT IGNORE / ON DUPLICATE KEY syntax
- * and information_schema introspection; they land in Phase 4. */
+/* ── Dialect helpers ──────────────────────────────────────────────── */
+
+/* Append to a bounded buffer; latch overflow via *off >= cap (checked once). */
+static void ap(char *buf, size_t cap, size_t *off, const char *str)
+{
+    size_t n = strlen(str);
+    if (*off + n < cap) memcpy(buf + *off, str, n);
+    *off += n;
+}
+
+/*
+ * Build and run `INSERT [IGNORE] INTO t (cols) VALUES (?,...) [ON DUPLICATE KEY
+ * UPDATE c = VALUES(c), ...]`, binding @p values through the prepared-statement
+ * path. MySQL keys the conflict off any UNIQUE / PRIMARY index, so
+ * @p conflict_cols is unused (kept for the vtable signature parity).
+ */
+static int build_and_run_insert(HlDbHandle *h, const char *table,
+                                const char *const *cols,
+                                const HlValue *values, int n_cols, int do_update)
+{
+    /* Each column can appear up to three times (insert list + both sides of
+     * `c = VALUES(c)`); budget 3x + overhead so a long name never truncates. */
+    size_t cap = 64 + strlen(table);
+    for (int i = 0; i < n_cols; i++) cap += strlen(cols[i]) * 3 + 24;
+    char *sql = malloc(cap);
+    if (!sql) return -1;
+    size_t off = 0;
+
+    ap(sql, cap, &off, do_update ? "INSERT INTO " : "INSERT IGNORE INTO ");
+    ap(sql, cap, &off, table);
+    ap(sql, cap, &off, " (");
+    for (int i = 0; i < n_cols; i++) {
+        if (i) ap(sql, cap, &off, ", ");
+        ap(sql, cap, &off, cols[i]);
+    }
+    ap(sql, cap, &off, ") VALUES (");
+    for (int i = 0; i < n_cols; i++)
+        ap(sql, cap, &off, i ? ", ?" : "?");
+    ap(sql, cap, &off, ")");
+    if (do_update) {
+        ap(sql, cap, &off, " ON DUPLICATE KEY UPDATE ");
+        for (int i = 0; i < n_cols; i++) {
+            if (i) ap(sql, cap, &off, ", ");
+            ap(sql, cap, &off, cols[i]);
+            ap(sql, cap, &off, " = VALUES(");
+            ap(sql, cap, &off, cols[i]);
+            ap(sql, cap, &off, ")");
+        }
+    }
+
+    if (off >= cap) {                            /* estimate was too small */
+        free(sql);
+        HlDbMyCtx *s = h ? h->ctx : NULL;
+        if (s)
+            snprintf(s->conn.errmsg, sizeof s->conn.errmsg,
+                     "insert/upsert SQL exceeded its estimated buffer");
+        return -1;
+    }
+    sql[off] = '\0';
+
+    int rc = mysql_exec(h, sql, values, n_cols);
+    free(sql);
+    return rc;
+}
+
 static int mysql_insert_if_absent(HlDbHandle *h, const char *table,
                                   const char *const *conflict_cols,
                                   int n_conflict, const char *const *cols,
                                   const HlValue *values, int n_cols)
 {
-    (void)table; (void)conflict_cols; (void)n_conflict;
-    (void)cols; (void)values; (void)n_cols;
-    if (h && h->ctx) {
-        HlDbMyCtx *s = h->ctx;
-        snprintf(s->conn.errmsg, sizeof s->conn.errmsg,
-                 "MySQL insert_if_absent needs INSERT IGNORE dialect (Phase 4)");
-    }
-    return -1;
+    (void)conflict_cols; (void)n_conflict;
+    return build_and_run_insert(h, table, cols, values, n_cols, 0);
 }
 
 static int mysql_upsert(HlDbHandle *h, const char *table,
@@ -331,26 +388,51 @@ static int mysql_upsert(HlDbHandle *h, const char *table,
                         const char *const *cols,
                         const HlValue *values, int n_cols)
 {
-    (void)table; (void)conflict_cols; (void)n_conflict;
-    (void)cols; (void)values; (void)n_cols;
-    if (h && h->ctx) {
-        HlDbMyCtx *s = h->ctx;
-        snprintf(s->conn.errmsg, sizeof s->conn.errmsg,
-                 "MySQL upsert needs ON DUPLICATE KEY dialect (Phase 4)");
+    (void)conflict_cols; (void)n_conflict;
+    return build_and_run_insert(h, table, cols, values, n_cols, 1);
+}
+
+typedef struct {
+    HlDbColumnCallback cb;
+    void              *cb_ctx;
+} MyColsFwd;
+
+static int mysql_table_columns_row(void *ctx, HlColumn *cols, int ncols)
+{
+    MyColsFwd *fwd = ctx;
+    for (int i = 0; i < ncols; i++) {
+        if (cols[i].value.type != HL_TYPE_TEXT || !cols[i].value.s)
+            continue;
+        /* The text value borrows non-NUL-terminated wire bytes; copy + terminate
+         * with the tracked length before handing a C string to the callback. */
+        size_t len = cols[i].value.len;
+        char stackbuf[128];
+        char *name = (len < sizeof stackbuf) ? stackbuf : malloc(len + 1);
+        if (!name) continue;
+        memcpy(name, cols[i].value.s, len);
+        name[len] = '\0';
+        fwd->cb(fwd->cb_ctx, name);
+        if (name != stackbuf) free(name);
     }
-    return -1;
+    return 0;
 }
 
 static int mysql_table_columns(HlDbHandle *h, const char *table,
                                HlDbColumnCallback cb, void *cb_ctx)
 {
-    (void)table; (void)cb; (void)cb_ctx;
-    if (h && h->ctx) {
-        HlDbMyCtx *s = h->ctx;
-        snprintf(s->conn.errmsg, sizeof s->conn.errmsg,
-                 "MySQL table_columns not implemented yet (Phase 4)");
-    }
-    return -1;
+    MyColsFwd fwd = { cb, cb_ctx };
+    HlValue p;
+    memset(&p, 0, sizeof p);
+    p.type = HL_TYPE_TEXT;
+    p.s = table;
+    p.len = strlen(table);
+    /* Scope to the connection's own schema so a same-named table in another
+     * database doesn't leak columns. */
+    return mysql_query(h,
+        "SELECT column_name FROM information_schema.columns "
+        "WHERE table_name = ? AND table_schema = DATABASE() "
+        "ORDER BY ordinal_position",
+        &p, 1, mysql_table_columns_row, &fwd, NULL);
 }
 
 /* Both schemes route here; MariaDB shares the MySQL protocol. */

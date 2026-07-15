@@ -345,7 +345,7 @@ int hl_my_conn_start(HlMyConn *conn, int fd, const HlMyDsn *dsn)
 
     uint32_t caps = HL_MY_CLIENT_PROTOCOL_41 | HL_MY_CLIENT_SECURE_CONNECTION
                   | HL_MY_CLIENT_PLUGIN_AUTH | HL_MY_CLIENT_TRANSACTIONS
-                  | HL_MY_CLIENT_MULTI_RESULTS;
+                  | HL_MY_CLIENT_MULTI_STATEMENTS | HL_MY_CLIENT_MULTI_RESULTS;
     if (dsn->dbname[0]) caps |= HL_MY_CLIENT_CONNECT_WITH_DB;
     conn->capabilities = caps;
 
@@ -598,7 +598,51 @@ static void decode_binary_value(HlMyCursor *rc, uint8_t type, HlMyVal *out)
         double dd; memcpy(&dd, &bits, sizeof dd);
         out->kind = HL_MY_VAL_DOUBLE; out->v.d = dd; return;
     }
-    default: {   /* string / blob / decimal / date / time: length-encoded bytes */
+    case HL_MY_TYPE_DATE:
+    case HL_MY_TYPE_DATETIME:
+    case HL_MY_TYPE_TIMESTAMP: {
+        /* Binary temporal: 1 length byte, then 0/4/7/11 bytes of fields.
+         * Format to an ISO-8601-ish string into the value's backing buffer. */
+        uint8_t len = hl_my_get_u8(rc);
+        int y = 0, mo = 0, d = 0, h = 0, mi = 0, se = 0; uint32_t us = 0;
+        if (len >= 4)  { y = hl_my_get_u16(rc); mo = hl_my_get_u8(rc); d = hl_my_get_u8(rc); }
+        if (len >= 7)  { h = hl_my_get_u8(rc); mi = hl_my_get_u8(rc); se = hl_my_get_u8(rc); }
+        if (len >= 11) { us = hl_my_get_u32(rc); }
+        if (len == 0)
+            snprintf(out->tbuf, sizeof out->tbuf, "0000-00-00 00:00:00");
+        else if (len == 4)
+            snprintf(out->tbuf, sizeof out->tbuf, "%04d-%02d-%02d", y, mo, d);
+        else if (us)
+            snprintf(out->tbuf, sizeof out->tbuf,
+                     "%04d-%02d-%02d %02d:%02d:%02d.%06u", y, mo, d, h, mi, se, us);
+        else
+            snprintf(out->tbuf, sizeof out->tbuf,
+                     "%04d-%02d-%02d %02d:%02d:%02d", y, mo, d, h, mi, se);
+        out->kind = HL_MY_VAL_STR;
+        out->v.s.ptr = out->tbuf; out->v.s.len = strlen(out->tbuf);
+        return;
+    }
+    case HL_MY_TYPE_TIME: {
+        /* Binary TIME: 1 length byte, then 0/8/12 bytes. */
+        uint8_t len = hl_my_get_u8(rc);
+        int neg = 0, h = 0, mi = 0, se = 0; uint32_t days = 0, us = 0;
+        if (len >= 8)  { neg = hl_my_get_u8(rc); days = hl_my_get_u32(rc);
+                         h = hl_my_get_u8(rc); mi = hl_my_get_u8(rc); se = hl_my_get_u8(rc); }
+        if (len >= 12) { us = hl_my_get_u32(rc); }
+        int hours = (int)(days * 24) + h;
+        if (len == 0)
+            snprintf(out->tbuf, sizeof out->tbuf, "00:00:00");
+        else if (us)
+            snprintf(out->tbuf, sizeof out->tbuf, "%s%02d:%02d:%02d.%06u",
+                     neg ? "-" : "", hours, mi, se, us);
+        else
+            snprintf(out->tbuf, sizeof out->tbuf, "%s%02d:%02d:%02d",
+                     neg ? "-" : "", hours, mi, se);
+        out->kind = HL_MY_VAL_STR;
+        out->v.s.ptr = out->tbuf; out->v.s.len = strlen(out->tbuf);
+        return;
+    }
+    default: {   /* string / blob / decimal / enum / set / bit: length-encoded bytes */
         size_t l = 0;
         const uint8_t *s = hl_my_get_lenenc_str(rc, &l);
         out->kind = HL_MY_VAL_STR;
@@ -803,5 +847,87 @@ close_stmt:
     if (!w.err) (void)conn_send(conn, w.buf, w.len);
     hl_my_writer_free(&w);
     return ret;
+}
+
+/* ── Multi-statement scripts (migrations / DDL) ───────────────────── */
+
+/* Read one statement's complete response (OK or a full result set, rows
+ * discarded), reporting via *more whether another result set follows. */
+static int drain_one_result(HlMyConn *conn, int *more)
+{
+    *more = 0;
+    HlMyFrame f;
+    if (conn_next_frame(conn, &f) != 0) return -1;
+    if (f.body_len == 0) { conn_set_err(conn, "empty script response"); return -1; }
+    uint8_t hdr = f.body[0];
+
+    if (hdr == HL_MY_PKT_OK) {
+        HlMyOk ok;
+        if (hl_my_parse_ok(&f, &ok) == 0) {
+            conn->last_insert_id = ok.last_insert_id;
+            *more = (ok.status_flags & HL_MY_SERVER_MORE_RESULTS) != 0;
+        }
+        return 0;
+    }
+    if (hdr == HL_MY_PKT_ERR) {
+        HlMyErr e;
+        if (hl_my_parse_err(&f, 1, &e) == 0 && e.message_len)
+            snprintf(conn->errmsg, sizeof conn->errmsg, "script failed: %.*s",
+                     (int)e.message_len, e.message);
+        else conn_set_err(conn, "script failed");
+        return -1;
+    }
+    if (hdr == HL_MY_PKT_LOCAL_INFILE) {
+        conn_set_err(conn, "LOCAL INFILE responses are not supported"); return -1;
+    }
+
+    /* Result set: column count, then col defs + EOF, then rows to a final EOF
+     * whose status flags carry MORE_RESULTS. */
+    HlMyCursor cc; hl_my_cursor_init(&cc, &f);
+    uint64_t ncols = hl_my_get_lenenc_int(&cc, NULL);
+    if (hl_my_cursor_err(&cc) || ncols == 0 || ncols > HL_MY_MAX_COLUMNS) {
+        conn_set_err(conn, "malformed column count"); return -1;
+    }
+    for (uint64_t i = 0; i < ncols; i++)
+        if (conn_next_frame(conn, &f) != 0) return -1;   /* column defs */
+    if (conn_next_frame(conn, &f) != 0) return -1;       /* EOF after col defs */
+    for (;;) {
+        if (conn_next_frame(conn, &f) != 0) return -1;
+        if (f.body_len > 0 && f.body[0] == HL_MY_PKT_EOF && f.body_len < HL_MY_EOF_MAX_LEN) {
+            HlMyCursor ec; hl_my_cursor_init(&ec, &f);
+            (void)hl_my_get_u8(&ec);                     /* 0xFE */
+            (void)hl_my_get_u16(&ec);                    /* warnings */
+            uint16_t status = hl_my_get_u16(&ec);
+            *more = (status & HL_MY_SERVER_MORE_RESULTS) != 0;
+            return 0;
+        }
+        if (f.body_len > 0 && f.body[0] == HL_MY_PKT_ERR) {
+            HlMyErr e;
+            if (hl_my_parse_err(&f, 1, &e) == 0 && e.message_len)
+                snprintf(conn->errmsg, sizeof conn->errmsg, "script failed: %.*s",
+                         (int)e.message_len, e.message);
+            else conn_set_err(conn, "script failed mid-result");
+            return -1;
+        }
+        /* otherwise a data row: discarded */
+    }
+}
+
+int hl_my_conn_exec_multi(HlMyConn *conn, const char *sql)
+{
+    HlMyWriter w; hl_my_writer_init(&w);
+    size_t m = hl_my_packet_begin(&w, 0);
+    hl_my_put_u8(&w, HL_MY_COM_QUERY);
+    hl_my_put_bytes(&w, sql, strlen(sql));
+    hl_my_packet_end(&w, m);
+    int se = w.err || conn_send(conn, w.buf, w.len);
+    hl_my_writer_free(&w);
+    if (se) { conn_set_err(conn, "failed to send script"); return -1; }
+
+    int more = 1;
+    while (more) {
+        if (drain_one_result(conn, &more) != 0) return -1;
+    }
+    return 0;
 }
 #endif

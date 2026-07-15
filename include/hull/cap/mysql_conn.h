@@ -154,6 +154,9 @@ typedef struct HlMyVal {
         double  d;
         struct { const char *ptr; size_t len; } s;   /* borrowed for the call */
     } v;
+    /* Backing store for values formatted on the fly (binary temporal types),
+     * so v.s can point at a stable buffer for the callback's duration. */
+    char tbuf[40];
 } HlMyVal;
 
 /* Binary row callback: @p vals is @p ncols decoded values, valid only for this
@@ -172,6 +175,14 @@ int hl_my_conn_query_prepared(HlMyConn *conn, const char *sql,
                               const HlMyParam *params, int nparams,
                               HlMyDescCb desc_cb, HlMyBinRowCb row_cb,
                               void *cb_ctx, int64_t *affected);
+
+/*
+ * Run a possibly multi-statement script as one COM_QUERY (the connection
+ * advertises CLIENT_MULTI_STATEMENTS at handshake), draining every result set
+ * and stopping at the first error. Result rows are discarded: this is the
+ * migration / DDL path. Returns 0 / -1 with conn->errmsg set.
+ */
+int hl_my_conn_exec_multi(HlMyConn *conn, const char *sql);
 #endif
 
 #endif /* HL_CAP_MYSQL_CONN_H */

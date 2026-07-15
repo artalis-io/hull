@@ -231,7 +231,9 @@ UTEST(mysql_conn, com_query_result_set)
 
 /* ── Prepared statement (binary protocol) over a socketpair ───────── */
 
-typedef struct { int rows; int ncols; int64_t first_int; char col0[64]; } BCollect;
+typedef struct {
+    int rows; int ncols; int64_t first_int; char first_str[64]; char col0[64];
+} BCollect;
 
 static void bdesc(void *ctx, const HlMyField *fields, int nf)
 {
@@ -247,6 +249,12 @@ static int brow(void *ctx, const HlMyVal *vals, int nc)
     g->rows++;
     if (nc >= 1 && vals[0].kind == HL_MY_VAL_INT)
         g->first_int = vals[0].v.i;
+    if (nc >= 1 && vals[0].kind == HL_MY_VAL_STR) {
+        size_t n = vals[0].v.s.len < sizeof g->first_str - 1
+                   ? vals[0].v.s.len : sizeof g->first_str - 1;
+        memcpy(g->first_str, vals[0].v.s.ptr, n);
+        g->first_str[n] = '\0';
+    }
     return 0;
 }
 
@@ -305,6 +313,127 @@ UTEST(mysql_conn, prepared_statement)
     ASSERT_EQ(got.rows, 1);
     ASSERT_STREQ(got.col0, "id");
     ASSERT_EQ((int)got.first_int, 42);
+
+    hl_my_conn_close(&conn);
+    hl_my_writer_free(&s);
+    close(sv[0]);
+}
+
+/* Prepared SELECT returning a binary DATETIME, exercising temporal decode. */
+UTEST(mysql_conn, prepared_datetime)
+{
+    int sv[2];
+    ASSERT_EQ(0, socketpair(AF_UNIX, SOCK_STREAM, 0, sv));
+
+    HlMyWriter s; hl_my_writer_init(&s);
+    build_handshake(&s, 0);
+    build_ok(&s, 2);
+    /* PREPARE_OK: stmt 1, 1 column, 0 params */
+    { size_t m = hl_my_packet_begin(&s, 1);
+      hl_my_put_u8(&s, HL_MY_PKT_OK);
+      hl_my_put_u32(&s, 1);
+      hl_my_put_u16(&s, 1);                            /* num_columns */
+      hl_my_put_u16(&s, 0);                            /* num_params */
+      hl_my_put_u8(&s, 0);
+      hl_my_put_u16(&s, 0);
+      hl_my_packet_end(&s, m); }
+    put_col_def(&s, 2, "ts", HL_MY_TYPE_DATETIME);     /* column def + EOF */
+    put_eof(&s, 3);
+
+    /* EXECUTE response: 1 column, one binary row (2024-01-15 12:30:45) */
+    { size_t m = hl_my_packet_begin(&s, 1);
+      hl_my_put_lenenc_int(&s, 1);
+      hl_my_packet_end(&s, m); }
+    put_col_def(&s, 2, "ts", HL_MY_TYPE_DATETIME);
+    put_eof(&s, 3);
+    { size_t m = hl_my_packet_begin(&s, 4);
+      hl_my_put_u8(&s, 0x00);                          /* binary row header */
+      hl_my_put_u8(&s, 0x00);                          /* null bitmap */
+      hl_my_put_u8(&s, 7);                             /* temporal length */
+      hl_my_put_u16(&s, 2024);                         /* year */
+      hl_my_put_u8(&s, 1);                             /* month */
+      hl_my_put_u8(&s, 15);                            /* day */
+      hl_my_put_u8(&s, 12);                            /* hour */
+      hl_my_put_u8(&s, 30);                            /* minute */
+      hl_my_put_u8(&s, 45);                            /* second */
+      hl_my_packet_end(&s, m); }
+    put_eof(&s, 5);
+
+    ASSERT_TRUE(write(sv[0], s.buf, s.len) == (ssize_t)s.len);
+
+    HlMyDsn dsn; char err[128];
+    ASSERT_EQ(0, hl_my_dsn_parse("mysql://u:p@localhost/db", &dsn, err, sizeof err));
+    HlMyConn conn;
+    ASSERT_EQ(0, hl_my_conn_start(&conn, sv[1], &dsn));
+
+    BCollect got; memset(&got, 0, sizeof got);
+    ASSERT_EQ(0, hl_my_conn_query_prepared(&conn, "SELECT ts", NULL, 0,
+                                           bdesc, brow, &got, NULL));
+    ASSERT_EQ(got.rows, 1);
+    ASSERT_STREQ(got.first_str, "2024-01-15 12:30:45");
+
+    hl_my_conn_close(&conn);
+    hl_my_writer_free(&s);
+    close(sv[0]);
+}
+
+/* ── Multi-statement script (exec_multi) over a socketpair ────────── */
+
+static void put_ok_more(HlMyWriter *w, uint8_t seq, uint16_t status)
+{
+    size_t m = hl_my_packet_begin(w, seq);
+    hl_my_put_u8(w, HL_MY_PKT_OK);
+    hl_my_put_lenenc_int(w, 1);       /* affected rows */
+    hl_my_put_lenenc_int(w, 0);       /* last insert id */
+    hl_my_put_u16(w, status);         /* status flags */
+    hl_my_put_u16(w, 0);              /* warnings */
+    hl_my_packet_end(w, m);
+}
+
+UTEST(mysql_conn, exec_multi_statement)
+{
+    int sv[2];
+    ASSERT_EQ(0, socketpair(AF_UNIX, SOCK_STREAM, 0, sv));
+
+    HlMyWriter s; hl_my_writer_init(&s);
+    build_handshake(&s, 0);
+    build_ok(&s, 2);                                   /* auth OK */
+    /* Two statements: first OK carries MORE_RESULTS, second terminates. */
+    put_ok_more(&s, 1, HL_MY_SERVER_MORE_RESULTS);
+    put_ok_more(&s, 2, 0);
+    ASSERT_TRUE(write(sv[0], s.buf, s.len) == (ssize_t)s.len);
+
+    HlMyDsn dsn; char err[128];
+    ASSERT_EQ(0, hl_my_dsn_parse("mysql://u:p@localhost/db", &dsn, err, sizeof err));
+    HlMyConn conn;
+    ASSERT_EQ(0, hl_my_conn_start(&conn, sv[1], &dsn));
+
+    ASSERT_EQ(0, hl_my_conn_exec_multi(&conn,
+        "CREATE TABLE a (id INT); CREATE TABLE b (id INT)"));
+
+    hl_my_conn_close(&conn);
+    hl_my_writer_free(&s);
+    close(sv[0]);
+}
+
+/* A single-statement script must stop after one result (no MORE_RESULTS). */
+UTEST(mysql_conn, exec_multi_single)
+{
+    int sv[2];
+    ASSERT_EQ(0, socketpair(AF_UNIX, SOCK_STREAM, 0, sv));
+
+    HlMyWriter s; hl_my_writer_init(&s);
+    build_handshake(&s, 0);
+    build_ok(&s, 2);
+    put_ok_more(&s, 1, 0);
+    ASSERT_TRUE(write(sv[0], s.buf, s.len) == (ssize_t)s.len);
+
+    HlMyDsn dsn; char err[128];
+    ASSERT_EQ(0, hl_my_dsn_parse("mysql://u:p@localhost/db", &dsn, err, sizeof err));
+    HlMyConn conn;
+    ASSERT_EQ(0, hl_my_conn_start(&conn, sv[1], &dsn));
+
+    ASSERT_EQ(0, hl_my_conn_exec_multi(&conn, "CREATE TABLE a (id INT)"));
 
     hl_my_conn_close(&conn);
     hl_my_writer_free(&s);
