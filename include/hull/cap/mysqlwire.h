@@ -156,6 +156,35 @@ int hl_my_parse_ok(const HlMyFrame *f, HlMyOk *out);
  * the '#'+sqlstate block is present. Returns 0 / -1. */
 int hl_my_parse_err(const HlMyFrame *f, int protocol_41, HlMyErr *out);
 
+/* ── Handshake (UNTRUSTED server input / client response) ──────────── */
+
+/* Parsed initial Handshake v10 packet the server sends first. */
+typedef struct HlMyHandshake {
+    uint8_t  protocol;              /* must be 10 */
+    char     server_version[64];    /* truncated if longer */
+    uint32_t conn_id;
+    uint32_t capabilities;          /* lower | (upper << 16) */
+    uint8_t  charset;
+    uint16_t status;
+    uint8_t  scramble[20];          /* auth-plugin-data (part1[8] + part2[12]) */
+    int      scramble_len;          /* bytes actually filled (usually 20) */
+    char     auth_plugin[64];       /* auth-plugin name, "" if not advertised */
+} HlMyHandshake;
+
+/* Parse a Handshake v10 packet body. Bounds-checked over untrusted input;
+ * returns 0 / -1 (malformed or unsupported protocol version). */
+int hl_my_parse_handshake(const HlMyFrame *f, HlMyHandshake *out);
+
+/* Build a HandshakeResponse41 packet (client -> server) into @p w with sequence
+ * @p seq. @p auth_resp is the plugin's auth response bytes (e.g. the 20-byte
+ * native_password scramble, or empty). @p dbname / @p plugin are written only
+ * when the matching capability bit is set in @p client_caps. */
+void hl_my_build_handshake_response(HlMyWriter *w, uint8_t seq,
+                                    uint32_t client_caps, uint8_t charset,
+                                    const char *user,
+                                    const uint8_t *auth_resp, size_t auth_resp_len,
+                                    const char *dbname, const char *plugin);
+
 /* ── Protocol constants (subset Hull uses) ────────────────────────── */
 
 /* Client commands (first payload byte of a command packet). */

@@ -58,6 +58,7 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
         HlMyOk ok;   (void)hl_my_parse_ok(&f, &ok);
         HlMyErr e;   (void)hl_my_parse_err(&f, 1, &e);
         (void)hl_my_parse_err(&f, 0, &e);
+        HlMyHandshake hs;  (void)hl_my_parse_handshake(&f, &hs);
 
         if (consumed == 0) break;   /* no forward progress */
         off += consumed;

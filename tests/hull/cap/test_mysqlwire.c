@@ -8,6 +8,7 @@
 #include "utest.h"
 #include "hull/cap/mysqlwire.h"
 #include "hull/cap/mysql_conn.h"
+#include "hull/cap/crypto.h"
 #include <string.h>
 
 /* ── Writer / reader round-trips ──────────────────────────────────── */
@@ -220,6 +221,105 @@ UTEST(mysql_dsn, rejects)
     ASSERT_NE(hl_my_dsn_parse("mysql://u@h:99x/db", &d, err, sizeof err), 0);  /* non-numeric port */
     ASSERT_NE(hl_my_dsn_parse("mysql://u@/db", &d, err, sizeof err), 0);       /* empty host */
     ASSERT_NE(hl_my_dsn_parse(NULL, &d, err, sizeof err), 0);
+}
+
+/* ── Handshake parse + response build ─────────────────────────────── */
+
+UTEST(mysqlwire, parse_handshake_v10)
+{
+    HlMyWriter w; hl_my_writer_init(&w);
+    size_t m = hl_my_packet_begin(&w, 0);
+    hl_my_put_u8(&w, 10);                          /* protocol v10 */
+    hl_my_put_cstr(&w, "8.0.35");                  /* server version */
+    hl_my_put_u32(&w, 12345);                      /* connection id */
+    for (int i = 0; i < 8; i++) hl_my_put_u8(&w, (uint8_t)(i + 1));   /* ap1 */
+    hl_my_put_u8(&w, 0);                           /* filler */
+    uint32_t caps = HL_MY_CLIENT_SECURE_CONNECTION | HL_MY_CLIENT_PLUGIN_AUTH
+                  | HL_MY_CLIENT_PROTOCOL_41;
+    hl_my_put_u16(&w, (uint16_t)(caps & 0xFFFF));  /* cap lower */
+    hl_my_put_u8(&w, 45);                          /* charset */
+    hl_my_put_u16(&w, 2);                          /* status */
+    hl_my_put_u16(&w, (uint16_t)(caps >> 16));     /* cap upper */
+    hl_my_put_u8(&w, 21);                          /* auth-plugin-data len (8+13) */
+    for (int i = 0; i < 10; i++) hl_my_put_u8(&w, 0);                 /* reserved */
+    for (int i = 0; i < 12; i++) hl_my_put_u8(&w, (uint8_t)(i + 9));  /* ap2 */
+    hl_my_put_u8(&w, 0);                           /* ap2 NUL (13th) */
+    hl_my_put_cstr(&w, "mysql_native_password");   /* plugin name */
+    hl_my_packet_end(&w, m);
+    ASSERT_FALSE(w.err);
+
+    HlMyFrame f; size_t consumed = 0;
+    ASSERT_EQ(hl_my_frame_next(w.buf, w.len, &f, &consumed), HL_MY_OK);
+    HlMyHandshake hs;
+    ASSERT_EQ(hl_my_parse_handshake(&f, &hs), 0);
+    ASSERT_EQ(hs.protocol, 10);
+    ASSERT_STREQ(hs.server_version, "8.0.35");
+    ASSERT_EQ(hs.conn_id, 12345u);
+    ASSERT_EQ(hs.scramble_len, 20);
+    ASSERT_EQ(hs.scramble[0], 1);                  /* ap1[0] */
+    ASSERT_EQ(hs.scramble[8], 9);                  /* ap2[0] */
+    ASSERT_STREQ(hs.auth_plugin, "mysql_native_password");
+    ASSERT_TRUE((hs.capabilities & HL_MY_CLIENT_PLUGIN_AUTH) != 0);
+    hl_my_writer_free(&w);
+}
+
+UTEST(mysqlwire, parse_handshake_rejects_bad_protocol)
+{
+    uint8_t body[1] = { 9 };   /* protocol != 10 */
+    HlMyFrame f = { .seq = 0, .body = body, .body_len = 1 };
+    HlMyHandshake hs;
+    ASSERT_EQ(hl_my_parse_handshake(&f, &hs), -1);
+}
+
+UTEST(mysqlwire, build_handshake_response_roundtrip)
+{
+    HlMyWriter w; hl_my_writer_init(&w);
+    uint8_t auth[20]; for (int i = 0; i < 20; i++) auth[i] = (uint8_t)i;
+    uint32_t caps = HL_MY_CLIENT_PROTOCOL_41 | HL_MY_CLIENT_SECURE_CONNECTION
+                  | HL_MY_CLIENT_CONNECT_WITH_DB | HL_MY_CLIENT_PLUGIN_AUTH;
+    hl_my_build_handshake_response(&w, 1, caps, 45, "alice", auth, 20,
+                                   "shop", "mysql_native_password");
+    ASSERT_FALSE(w.err);
+
+    HlMyFrame f; size_t consumed = 0;
+    ASSERT_EQ(hl_my_frame_next(w.buf, w.len, &f, &consumed), HL_MY_OK);
+    ASSERT_EQ(f.seq, 1);
+    HlMyCursor c; hl_my_cursor_init(&c, &f);
+    ASSERT_EQ(hl_my_get_u32(&c), caps);
+    (void)hl_my_get_u32(&c);                       /* max packet size */
+    ASSERT_EQ(hl_my_get_u8(&c), 45);
+    (void)hl_my_get_bytes(&c, 23);                 /* reserved */
+    ASSERT_STREQ(hl_my_get_cstr(&c), "alice");
+    ASSERT_EQ(hl_my_get_u8(&c), 20);               /* auth-response length */
+    const uint8_t *a = hl_my_get_bytes(&c, 20);
+    ASSERT_EQ(a[5], 5);
+    ASSERT_STREQ(hl_my_get_cstr(&c), "shop");
+    ASSERT_STREQ(hl_my_get_cstr(&c), "mysql_native_password");
+    ASSERT_FALSE(hl_my_cursor_err(&c));
+    hl_my_writer_free(&w);
+}
+
+/* ── mysql_native_password scramble (crypto) ──────────────────────── */
+
+UTEST(mysql_auth, native_password_scramble)
+{
+    uint8_t scramble[20];
+    for (int i = 0; i < 20; i++) scramble[i] = (uint8_t)(i * 7 + 1);
+    uint8_t out[20];
+
+    /* Empty password -> zero-length response. */
+    ASSERT_EQ(hl_my_native_password_scramble("", scramble, out), 0);
+
+    /* Non-empty -> 20 bytes matching SHA1(pw) XOR SHA1(scramble||SHA1(SHA1(pw))). */
+    ASSERT_EQ(hl_my_native_password_scramble("s3cret", scramble, out), 20);
+    uint8_t h1[20], h2[20], cat[40], h3[20], exp[20];
+    ASSERT_EQ(hl_cap_crypto_sha1("s3cret", 6, h1), 0);
+    ASSERT_EQ(hl_cap_crypto_sha1(h1, 20, h2), 0);
+    memcpy(cat, scramble, 20);
+    memcpy(cat + 20, h2, 20);
+    ASSERT_EQ(hl_cap_crypto_sha1(cat, 40, h3), 0);
+    for (int i = 0; i < 20; i++) exp[i] = (uint8_t)(h1[i] ^ h3[i]);
+    ASSERT_EQ(memcmp(out, exp, 20), 0);
 }
 
 UTEST_MAIN()

@@ -2869,8 +2869,18 @@ the shared `shared/tls_client.c`; hashes via `cap/crypto`.
       LE round-trips, lenenc boundaries, truncation/underrun/hostile-length,
       OK/ERR parse, DSN valid/reject) + `fuzz_mysqlwire` + `fuzz_mysql_dsn`
       (corpus + Makefile + CI). Pure functions, no socket.
-- [ ] **2 - handshake + native auth + text query.** Handshake v10 + capability
-      negotiation, `mysql_native_password`, `COM_QUERY` + text result decode.
+- [x] **2a - auth handshake (socket-free core).** `hl_my_parse_handshake`
+      (Handshake v10: version, capabilities, 20-byte scramble, auth-plugin name;
+      bounds-checked) + `hl_my_build_handshake_response` (HandshakeResponse41),
+      both pure in `mysqlwire.c`; `hl_my_native_password_scramble`
+      (`SHA1(pw) XOR SHA1(scramble||SHA1(SHA1(pw)))` via `cap/crypto`, guarded by
+      `HL_MY_NO_AUTH` so the parser fuzzers stay crypto-free) in `mysql_conn.c`.
+      `test_mysqlwire` +4 cases (handshake parse + reject, response round-trip,
+      scramble vs the spec formula); `fuzz_mysqlwire` now fuzzes the handshake.
+- [ ] **2b - socket connect + text query.** TCP connect, drive the handshake
+      over the wire (send response, read OK/ERR/AuthSwitch), `COM_QUERY` + text
+      result-set decode (column defs + rows -> HlValue). Socketpair test harness
+      like `test_pg_conn`.
 - [ ] **3 - prepared statements.** `COM_STMT_PREPARE`/`EXECUTE`, binary param
       encode + binary row decode (the parameterized path).
 - [ ] **4 - dialect + migrations + types.** `INSERT IGNORE` / `ON DUPLICATE KEY

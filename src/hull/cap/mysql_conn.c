@@ -170,3 +170,24 @@ void hl_my_dsn_scrub(HlMyDsn *dsn)
     volatile char *p = (volatile char *)dsn->password;
     for (size_t i = 0; i < sizeof dsn->password; i++) p[i] = 0;
 }
+
+/* ── Auth plugins (crypto) ────────────────────────────────────────── */
+#ifndef HL_MY_NO_AUTH
+#include "hull/cap/crypto.h"
+
+int hl_my_native_password_scramble(const char *password,
+                                   const uint8_t scramble[20], uint8_t out[20])
+{
+    if (!password || !password[0])
+        return 0;   /* empty password -> zero-length auth response */
+
+    uint8_t h1[20], h2[20], cat[40], h3[20];
+    if (hl_cap_crypto_sha1(password, strlen(password), h1) != 0) return -1;
+    if (hl_cap_crypto_sha1(h1, 20, h2) != 0) return -1;
+    memcpy(cat, scramble, 20);
+    memcpy(cat + 20, h2, 20);
+    if (hl_cap_crypto_sha1(cat, 40, h3) != 0) return -1;
+    for (int i = 0; i < 20; i++) out[i] = (uint8_t)(h1[i] ^ h3[i]);
+    return 20;
+}
+#endif
