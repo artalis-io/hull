@@ -396,6 +396,24 @@ int hl_my_parse_handshake(const HlMyFrame *f, HlMyHandshake *out)
     return 0;
 }
 
+int hl_my_parse_column_def(const HlMyFrame *f, HlMyColumn *out)
+{
+    HlMyCursor c;
+    hl_my_cursor_init(&c, f);
+    /* catalog, schema, table, org_table, name, org_name (lenenc strings). */
+    for (int i = 0; i < 4; i++) (void)hl_my_get_lenenc_str(&c, NULL);
+    size_t nl = 0;
+    const uint8_t *name = hl_my_get_lenenc_str(&c, &nl);
+    (void)hl_my_get_lenenc_str(&c, NULL);          /* org_name */
+    (void)hl_my_get_lenenc_int(&c, NULL);          /* length of fixed fields (0x0c) */
+    (void)hl_my_get_u16(&c);                       /* charset */
+    (void)hl_my_get_u32(&c);                       /* column length */
+    uint8_t type = hl_my_get_u8(&c);
+    if (hl_my_cursor_err(&c)) return -1;
+    if (out) { out->name = (const char *)name; out->name_len = nl; out->type = type; }
+    return 0;
+}
+
 void hl_my_build_handshake_response(HlMyWriter *w, uint8_t seq,
                                     uint32_t client_caps, uint8_t charset,
                                     const char *user,

@@ -2886,11 +2886,17 @@ the shared `shared/tls_client.c`; hashes via `cap/crypto`.
       until Phase 5). `test_mysql_conn` drives it over a socketpair (auth OK +
       auth error). All bare buffer/protocol sizes are named constants
       (`HL_MY_SCRAMBLE_LEN`, `HL_MY_ERRMSG_SIZE`, `HL_MY_DSN_*`, etc.).
-- [ ] **2c - COM_QUERY + text result decode.** Send `COM_QUERY`; decode the
-      response (column-count, ColumnDefinition41 packets, text-protocol rows with
-      0xFB NULL, terminating OK/EOF) into HlValue by column type; wire `mysql_query`
-      / `mysql_exec` / `mysql_close` + `native_handle` into the `db_mysql.c` vtable.
-      Extend `test_mysql_conn` with a canned result set.
+- [x] **2c - COM_QUERY + text result decode.** `hl_my_conn_query` sends
+      `COM_QUERY` and decodes the response (column-count, ColumnDefinition41
+      packets, text-protocol rows with 0xFB NULL, terminating OK/EOF) via
+      desc/row callbacks; column names are copied out before the next frame
+      compaction. The `db_mysql.c` vtable is wired: `open`/`close`/`query`/`exec`/
+      `exec_script`/`begin`/`commit`/`rollback`/`last_id`/`errmsg` all route to
+      the connection; text values decode to HlValue by column type (INT / DOUBLE
+      / TEXT, NULL to nil). Parameterized query/exec + `insert_if_absent` /
+      `upsert` / `table_columns` fail with a clear "needs prepared statements
+      (Phase 3)" message; multi-statement `exec_script` (migrations) is Phase 4.
+      `test_mysql_conn` gained a canned COM_QUERY result-set test.
 - [ ] **3 - prepared statements.** `COM_STMT_PREPARE`/`EXECUTE`, binary param
       encode + binary row decode (the parameterized path).
 - [ ] **4 - dialect + migrations + types.** `INSERT IGNORE` / `ON DUPLICATE KEY

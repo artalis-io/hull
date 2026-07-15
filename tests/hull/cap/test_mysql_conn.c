@@ -122,4 +122,92 @@ UTEST(mysql_conn, handshake_auth_error)
     close(sv[0]);   /* sv[1] already closed by the failed handshake */
 }
 
+/* ── COM_QUERY result set over a socketpair ───────────────────────── */
+
+typedef struct { int rows; int ncols; char first[64]; char col0[64]; } QCollect;
+
+static void qdesc(void *ctx, const HlMyField *fields, int nf)
+{
+    QCollect *g = ctx;
+    g->ncols = nf;
+    if (nf >= 1 && fields[0].name)
+        snprintf(g->col0, sizeof g->col0, "%s", fields[0].name);
+}
+
+static int qrow(void *ctx, const char *const *vals, const size_t *lens, int nc)
+{
+    QCollect *g = ctx;
+    g->rows++;
+    if (nc >= 1 && vals[0]) {
+        size_t n = lens[0] < sizeof g->first - 1 ? lens[0] : sizeof g->first - 1;
+        memcpy(g->first, vals[0], n);
+        g->first[n] = '\0';
+    }
+    return 0;
+}
+
+static void put_eof(HlMyWriter *w, uint8_t seq)
+{
+    size_t m = hl_my_packet_begin(w, seq);
+    hl_my_put_u8(w, HL_MY_PKT_EOF);
+    hl_my_put_u16(w, 0);   /* warnings */
+    hl_my_put_u16(w, 0);   /* status */
+    hl_my_packet_end(w, m);
+}
+
+UTEST(mysql_conn, com_query_result_set)
+{
+    int sv[2];
+    ASSERT_EQ(0, socketpair(AF_UNIX, SOCK_STREAM, 0, sv));
+
+    HlMyWriter s; hl_my_writer_init(&s);
+    build_handshake(&s, 0);
+    build_ok(&s, 2);                                   /* auth OK */
+
+    /* column count = 1 */
+    { size_t m = hl_my_packet_begin(&s, 1);
+      hl_my_put_lenenc_int(&s, 1);
+      hl_my_packet_end(&s, m); }
+    /* ColumnDefinition41 for "id" (LONG) */
+    { size_t m = hl_my_packet_begin(&s, 2);
+      hl_my_put_lenenc_str(&s, "def", 3);
+      hl_my_put_lenenc_str(&s, "", 0);
+      hl_my_put_lenenc_str(&s, "", 0);
+      hl_my_put_lenenc_str(&s, "", 0);
+      hl_my_put_lenenc_str(&s, "id", 2);
+      hl_my_put_lenenc_str(&s, "id", 2);
+      hl_my_put_lenenc_int(&s, 0x0c);
+      hl_my_put_u16(&s, 63);                           /* charset */
+      hl_my_put_u32(&s, 11);                           /* column length */
+      hl_my_put_u8(&s, HL_MY_TYPE_LONG);
+      hl_my_put_u16(&s, 0);                            /* flags */
+      hl_my_put_u8(&s, 0);                             /* decimals */
+      hl_my_put_u16(&s, 0);                            /* filler */
+      hl_my_packet_end(&s, m); }
+    put_eof(&s, 3);                                    /* end of column defs */
+    /* one row: "42" */
+    { size_t m = hl_my_packet_begin(&s, 4);
+      hl_my_put_lenenc_str(&s, "42", 2);
+      hl_my_packet_end(&s, m); }
+    put_eof(&s, 5);                                    /* end of rows */
+
+    ASSERT_TRUE(write(sv[0], s.buf, s.len) == (ssize_t)s.len);
+
+    HlMyDsn dsn; char err[128];
+    ASSERT_EQ(0, hl_my_dsn_parse("mysql://u:p@localhost/db", &dsn, err, sizeof err));
+    HlMyConn conn;
+    ASSERT_EQ(0, hl_my_conn_start(&conn, sv[1], &dsn));
+
+    QCollect got; memset(&got, 0, sizeof got);
+    ASSERT_EQ(0, hl_my_conn_query(&conn, "SELECT id", qdesc, qrow, &got, NULL));
+    ASSERT_EQ(got.ncols, 1);
+    ASSERT_EQ(got.rows, 1);
+    ASSERT_STREQ(got.col0, "id");
+    ASSERT_STREQ(got.first, "42");
+
+    hl_my_conn_close(&conn);
+    hl_my_writer_free(&s);
+    close(sv[0]);
+}
+
 UTEST_MAIN()

@@ -167,6 +167,7 @@ int hl_my_parse_err(const HlMyFrame *f, int protocol_41, HlMyErr *out);
 #define HL_MY_HANDSHAKE_RESERVED  23        /* reserved bytes in HandshakeResponse41 */
 #define HL_MY_SERVER_VERSION_MAX  64        /* server-version field cap */
 #define HL_MY_PLUGIN_NAME_MAX     64        /* auth-plugin name field cap */
+#define HL_MY_MAX_COLUMNS         4096      /* sanity cap on a result-set width */
 
 /* Parsed initial Handshake v10 packet the server sends first. */
 typedef struct HlMyHandshake {
@@ -184,6 +185,35 @@ typedef struct HlMyHandshake {
 /* Parse a Handshake v10 packet body. Bounds-checked over untrusted input;
  * returns 0 / -1 (malformed or unsupported protocol version). */
 int hl_my_parse_handshake(const HlMyFrame *f, HlMyHandshake *out);
+
+/* ── Result-set column definitions (UNTRUSTED) ────────────────────── */
+
+/* Column type codes (MYSQL_TYPE_*), subset Hull maps to HlValue. */
+#define HL_MY_TYPE_DECIMAL     0x00
+#define HL_MY_TYPE_TINY        0x01
+#define HL_MY_TYPE_SHORT       0x02
+#define HL_MY_TYPE_LONG        0x03
+#define HL_MY_TYPE_FLOAT       0x04
+#define HL_MY_TYPE_DOUBLE      0x05
+#define HL_MY_TYPE_NULL        0x06
+#define HL_MY_TYPE_LONGLONG    0x08
+#define HL_MY_TYPE_INT24       0x09
+#define HL_MY_TYPE_YEAR        0x0d
+#define HL_MY_TYPE_NEWDECIMAL  0xf6
+#define HL_MY_TYPE_BLOB        0xfc
+#define HL_MY_TYPE_VAR_STRING  0xfd
+#define HL_MY_TYPE_STRING      0xfe
+
+/* A parsed ColumnDefinition41 (only the fields Hull uses). @p name points into
+ * the frame body (valid until the caller reads the next frame). */
+typedef struct HlMyColumn {
+    const char *name;
+    size_t      name_len;
+    uint8_t     type;       /* HL_MY_TYPE_* */
+} HlMyColumn;
+
+/* Parse a ColumnDefinition41 packet body. Returns 0 / -1 (malformed). */
+int hl_my_parse_column_def(const HlMyFrame *f, HlMyColumn *out);
 
 /* Build a HandshakeResponse41 packet (client -> server) into @p w with sequence
  * @p seq. @p auth_resp is the plugin's auth response bytes (e.g. the 20-byte

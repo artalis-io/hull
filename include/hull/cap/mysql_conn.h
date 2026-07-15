@@ -75,6 +75,7 @@ typedef struct HlMyConn {
     size_t   consumed;      /* bytes of the last-returned frame, compacted next */
     uint32_t capabilities;  /* client capability flags used at handshake */
     uint8_t  seq;           /* next packet sequence to send in a command */
+    uint64_t last_insert_id;/* from the most recent OK packet */
     char     errmsg[HL_MY_ERRMSG_SIZE];
 } HlMyConn;
 
@@ -94,6 +95,34 @@ int  hl_my_conn_open(HlMyConn *conn, const HlMyDsn *dsn, int timeout_ms);
 int  hl_my_conn_start(HlMyConn *conn, int fd, const HlMyDsn *dsn);
 
 void hl_my_conn_close(HlMyConn *conn);
+
+/* ── Queries (COM_QUERY text protocol; no params) ─────────────────── */
+
+/* A result column, passed to the description callback (fired once before rows).
+ * @p name is valid only for the duration of the callback. */
+typedef struct HlMyField {
+    const char *name;
+    uint8_t     type;   /* HL_MY_TYPE_* */
+} HlMyField;
+
+typedef void (*HlMyDescCb)(void *ctx, const HlMyField *fields, int nfields);
+
+/* Row callback. values[i] is NULL for SQL NULL, else lengths[i] text bytes (not
+ * NUL-terminated), valid only for this call. Return non-zero to stop early. */
+typedef int (*HlMyRowCb)(void *ctx, const char *const *values,
+                         const size_t *lengths, int ncols);
+
+/*
+ * Run one text-protocol query (COM_QUERY). The SQL is sent literally (no
+ * parameter binding), so callers must pass only trusted / already-safe SQL;
+ * parameterized queries use the binary prepared-statement protocol (Phase 3).
+ * desc_cb / row_cb may be NULL for a statement with no result set; on an OK
+ * response the affected row count is stored in *affected (may be NULL).
+ * Returns 0 / -1 with conn->errmsg set.
+ */
+int hl_my_conn_query(HlMyConn *conn, const char *sql,
+                     HlMyDescCb desc_cb, HlMyRowCb row_cb, void *cb_ctx,
+                     int64_t *affected);
 #endif
 
 #endif /* HL_CAP_MYSQL_CONN_H */

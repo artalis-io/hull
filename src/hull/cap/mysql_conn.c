@@ -424,4 +424,130 @@ int hl_my_conn_open(HlMyConn *conn, const HlMyDsn *dsn, int timeout_ms)
     }
     return hl_my_conn_start(conn, fd, dsn);
 }
+
+/* ── Queries (COM_QUERY text protocol) ────────────────────────────── */
+
+static void free_names(char **names, int n)
+{
+    if (!names) return;
+    for (int i = 0; i < n; i++) free(names[i]);
+    free(names);
+}
+
+int hl_my_conn_query(HlMyConn *conn, const char *sql,
+                     HlMyDescCb desc_cb, HlMyRowCb row_cb, void *cb_ctx,
+                     int64_t *affected)
+{
+    if (affected) *affected = -1;
+
+    /* COM_QUERY is a fresh command: the packet sequence restarts at 0. */
+    HlMyWriter w; hl_my_writer_init(&w);
+    size_t m = hl_my_packet_begin(&w, 0);
+    hl_my_put_u8(&w, HL_MY_COM_QUERY);
+    hl_my_put_bytes(&w, sql, strlen(sql));
+    hl_my_packet_end(&w, m);
+    int se = w.err || conn_send(conn, w.buf, w.len);
+    hl_my_writer_free(&w);
+    if (se) { conn_set_err(conn, "failed to send query"); return -1; }
+
+    HlMyFrame f;
+    if (conn_next_frame(conn, &f) != 0) return -1;
+    if (f.body_len == 0) { conn_set_err(conn, "empty query response"); return -1; }
+    uint8_t hdr = f.body[0];
+
+    if (hdr == HL_MY_PKT_OK) {                 /* no result set (DML / DDL) */
+        HlMyOk ok;
+        if (hl_my_parse_ok(&f, &ok) == 0) {
+            conn->last_insert_id = ok.last_insert_id;
+            if (affected) *affected = (int64_t)ok.affected_rows;
+        }
+        return 0;
+    }
+    if (hdr == HL_MY_PKT_ERR) {
+        HlMyErr e;
+        if (hl_my_parse_err(&f, 1, &e) == 0 && e.message_len)
+            snprintf(conn->errmsg, sizeof conn->errmsg, "query failed: %.*s",
+                     (int)e.message_len, e.message);
+        else conn_set_err(conn, "query failed");
+        return -1;
+    }
+    if (hdr == HL_MY_PKT_LOCAL_INFILE) {
+        conn_set_err(conn, "LOCAL INFILE responses are not supported");
+        return -1;
+    }
+
+    /* Result set: first packet is the column count (lenenc int). */
+    HlMyCursor cc; hl_my_cursor_init(&cc, &f);
+    uint64_t ncols64 = hl_my_get_lenenc_int(&cc, NULL);
+    if (hl_my_cursor_err(&cc) || ncols64 == 0 || ncols64 > HL_MY_MAX_COLUMNS) {
+        conn_set_err(conn, "malformed column count"); return -1;
+    }
+    int ncols = (int)ncols64;
+
+    /* Column names live in per-column frames that are invalidated as soon as we
+     * read the next frame, so copy them now. */
+    char       **names  = calloc((size_t)ncols, sizeof *names);
+    HlMyField   *fields = calloc((size_t)ncols, sizeof *fields);
+    const char **vals   = calloc((size_t)ncols, sizeof *vals);
+    size_t      *lens   = calloc((size_t)ncols, sizeof *lens);
+    if (!names || !fields || !vals || !lens) {
+        conn_set_err(conn, "out of memory"); goto fail;
+    }
+    for (int i = 0; i < ncols; i++) {
+        if (conn_next_frame(conn, &f) != 0) goto fail;
+        HlMyColumn col;
+        if (hl_my_parse_column_def(&f, &col) != 0) {
+            conn_set_err(conn, "malformed column definition"); goto fail;
+        }
+        names[i] = malloc(col.name_len + 1);
+        if (!names[i]) { conn_set_err(conn, "out of memory"); goto fail; }
+        memcpy(names[i], col.name, col.name_len);
+        names[i][col.name_len] = '\0';
+        fields[i].name = names[i];
+        fields[i].type = col.type;
+    }
+
+    /* No CLIENT_DEPRECATE_EOF was advertised, so an EOF terminates the column
+     * defs (and, below, the rows). */
+    if (conn_next_frame(conn, &f) != 0) goto fail;   /* intermediate EOF */
+    if (desc_cb) desc_cb(cb_ctx, fields, ncols);
+
+    int stop = 0;
+    for (;;) {
+        if (conn_next_frame(conn, &f) != 0) goto fail;
+        if (f.body_len > 0 && f.body[0] == HL_MY_PKT_EOF && f.body_len < 9)
+            break;                              /* end of rows */
+        if (f.body_len > 0 && f.body[0] == HL_MY_PKT_ERR) {
+            HlMyErr e;
+            if (hl_my_parse_err(&f, 1, &e) == 0 && e.message_len)
+                snprintf(conn->errmsg, sizeof conn->errmsg, "query failed: %.*s",
+                         (int)e.message_len, e.message);
+            else conn_set_err(conn, "query failed mid-result");
+            goto fail;
+        }
+        HlMyCursor rc; hl_my_cursor_init(&rc, &f);
+        for (int i = 0; i < ncols; i++) {
+            if (rc.remaining >= 1 && rc.p[0] == HL_MY_PKT_LOCAL_INFILE) {  /* 0xFB = NULL in a row */
+                (void)hl_my_get_u8(&rc);
+                vals[i] = NULL; lens[i] = 0;
+            } else {
+                size_t l = 0;
+                vals[i] = (const char *)hl_my_get_lenenc_str(&rc, &l);
+                lens[i] = l;
+            }
+        }
+        if (hl_my_cursor_err(&rc)) { conn_set_err(conn, "malformed result row"); goto fail; }
+        if (row_cb && !stop && row_cb(cb_ctx, vals, lens, ncols) != 0)
+            stop = 1;                           /* keep draining to EOF */
+    }
+
+    free_names(names, ncols);
+    free(fields); free(vals); free(lens);
+    return 0;
+
+fail:
+    free_names(names, ncols);
+    free(fields); free(vals); free(lens);
+    return -1;
+}
 #endif
