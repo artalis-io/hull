@@ -394,26 +394,11 @@ jobs:
           run: |
             make platform-cosmo
             make CC=cosmocc
-      # DIAGNOSTIC (temporary): sha256 every build intermediate so the compare
-      # job can localize whether the cross-runner divergence enters at compile
-      # (.o / .a differ) or only at apelink (all intermediates match, hull
-      # differs). Revert once root-caused.
-      - name: Manifest of build intermediates
-        run: |
-          set -eu
-          find build \( -name '*.o' -o -name '*.a' \) -type f | LC_ALL=C sort \
-            | xargs sha256sum > repro-manifest.txt
-          sha256sum build/hull >> repro-manifest.txt
-          echo "manifest lines: $(wc -l < repro-manifest.txt)"
-      - name: Upload hull-cosmo + diagnostics
+      - name: Upload hull-cosmo
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
         with:
           name: hull-cosmo-repro-${{ matrix.n }}
-          path: |
-            build/hull
-            repro-manifest.txt
-            build/libhull_platform.x86_64-cosmo.a
-            build/libhull_platform.aarch64-cosmo.a
+          path: build/hull
           if-no-files-found: error
 
   reproducibility-cosmo-compare:
@@ -427,25 +412,15 @@ jobs:
       - name: Byte-compare the two independent cosmo builds
         run: |
           set -eu
-          A=artifacts/hull-cosmo-repro-a/build/hull
-          B=artifacts/hull-cosmo-repro-b/build/hull
-          MA=artifacts/hull-cosmo-repro-a/repro-manifest.txt
-          MB=artifacts/hull-cosmo-repro-b/repro-manifest.txt
+          A=artifacts/hull-cosmo-repro-a/hull
+          B=artifacts/hull-cosmo-repro-b/hull
           ls -la "$A" "$B"
           if cmp -s "$A" "$B"; then
             echo "PASS: hull-cosmo is byte-identical across independent runners ($(wc -c < "$A") bytes)"
           else
             echo "::error::hull-cosmo differs between builds; the cosmo APE is not byte-reproducible"
             sha256sum "$A" "$B"
-            # DIAGNOSTIC (temporary): localize the divergence. If any .o / .a
-            # line differs, non-determinism enters at compile; if only build/hull
-            # differs, it is purely the apelink/APE step. Revert once root-caused.
-            echo "--- intermediate manifest diff (a vs b): differing files ---"
-            diff "$MA" "$MB" || true
-            echo "--- summary ---"
-            diff "$MA" "$MB" | grep -E '^[<>]' | awk '{print $3}' | sort -u \
-              | sed 's/^/  differs: /' || echo "  (only build/hull differs -> apelink stage)"
-            echo "--- first differing bytes (final APE) ---"
+            echo "--- first differing bytes ---"
             cmp -l "$A" "$B" | head -20 || true
             exit 1
           fi

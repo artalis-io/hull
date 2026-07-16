@@ -1897,9 +1897,14 @@ STDLIB_REGISTRY_O := $(BUILDDIR)/stdlib_registry.o
 
 $(STDLIB_REGISTRY_C): $(STDLIB_LUA_XXD_HDRS) $(STDLIB_JS_XXD_HDRS) $(CONTEXT_XXD_HDRS) $(STDLIB_STATIC_XXD_HDRS) $(STDLIB_TPL_XXD_HDRS) | $(BUILDDIR)
 	@echo "/* Auto-generated unified stdlib registry — do not edit */" > $@
-	@for hdr in $(STDLIB_LUA_XXD_HDRS) $(STDLIB_JS_XXD_HDRS) $(CONTEXT_XXD_HDRS) $(STDLIB_STATIC_XXD_HDRS) $(STDLIB_TPL_XXD_HDRS); do \
+	@# Sort the #include emission: the byte-array data is defined in whatever
+	@# order these headers are included, so an unsorted (filesystem-order) list
+	@# would place the embedded stdlib data non-deterministically in .rodata and
+	@# break cross-runner byte-reproducibility (the entry array below is already
+	@# LC_ALL=C sorted; this makes the DATA order deterministic too).
+	@( for hdr in $(STDLIB_LUA_XXD_HDRS) $(STDLIB_JS_XXD_HDRS) $(CONTEXT_XXD_HDRS) $(STDLIB_STATIC_XXD_HDRS) $(STDLIB_TPL_XXD_HDRS); do \
 		echo "#include \"$$(basename $$hdr)\""; \
-	done >> $@
+	done ) | LC_ALL=C sort >> $@
 	@echo "" >> $@
 	@echo "#include \"hull/entry.h\"" >> $@
 	@echo "const HlEntry hl_stdlib_entries[] = {" >> $@
@@ -2034,9 +2039,11 @@ APP_REGISTRY_O := $(BUILDDIR)/app_registry.o
 
 $(APP_REGISTRY_C): $(APP_ALL_XXD_HDRS) | $(BUILDDIR)
 	@echo "/* Auto-generated unified app registry — do not edit */" > $@
-	@for hdr in $(APP_ALL_XXD_HDRS); do \
+	@# Sort the #include emission so embedded app-file data lands in .rodata in a
+	@# deterministic order (same reproducibility rationale as stdlib_registry.c).
+	@( for hdr in $(APP_ALL_XXD_HDRS); do \
 		echo "#include \"$$(basename $$hdr)\""; \
-	done >> $@
+	done ) | LC_ALL=C sort >> $@
 	@echo "" >> $@
 	@echo "#include \"hull/entry.h\"" >> $@
 	@echo "const HlEntry hl_app_entries[] = {" >> $@
