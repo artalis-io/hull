@@ -755,23 +755,23 @@ jobs:
         with:
           submodules: true
 
-      # DuckDB's static libs embed a different mbedTLS than Hull's, so the
-      # thin-slice backend builds only where Hull links no mbedTLS
-      # (HL_ENABLE_HTTP=0, no Postgres/MySQL -> HL_LINK_TLS=0). Symbol
-      # isolation to lift this is a tracked follow-up. See
-      # docs/duckdb_backend_design.md.
-      - name: Fetch DuckDB static libs
+      # fetch-duckdb isolates DuckDB's bundled mbedTLS (objcopy --redefine-syms)
+      # so it coexists with Hull's own mbedTLS. This builds the FULL default
+      # flavor (HTTP + TLS + DuckDB) to prove the coexistence. See
+      # docs/duckdb_backend_design.md §3.4.
+      - name: Fetch DuckDB static libs (with mbedTLS symbol isolation)
         run: make fetch-duckdb
 
-      - name: Build with DuckDB (no-TLS flavor)
-        run: make HL_ENABLE_HTTP=0 HL_ENABLE_DUCKDB=1
+      - name: Build with DuckDB (full HTTP/TLS flavor)
+        run: make HL_ENABLE_DUCKDB=1
 
       - name: DuckDB unit tests
         timeout-minutes: 5
         run: |
-          make HL_ENABLE_HTTP=0 HL_ENABLE_DUCKDB=1 build/test_db_duckdb build/test_db_select
+          make HL_ENABLE_DUCKDB=1 build/test_db_duckdb build/test_db_select build/test_crypto
           ./build/test_db_duckdb
           ./build/test_db_select
+          ./build/test_crypto   # Hull's own mbedTLS must stay unaffected by the isolation
 
       - name: DuckDB app smoke (duckdb://:memory:)
         timeout-minutes: 2

@@ -1318,18 +1318,12 @@ ifeq ($(HL_ENABLE_DUCKDB),1)
   ifdef COSMO
     $(error DuckDB is not compatible with Cosmopolitan builds)
   endif
-  # libduckdb_static.a embeds its OWN copy of mbedTLS (a different version than
-  # Hull's vendored one), so linking it alongside Hull's mbedTLS is a
-  # duplicate-symbol error AND an unsafe version mix. Until DuckDB's bundled
-  # mbedTLS/miniz symbols are isolated (objcopy prefixing — a focused
-  # follow-up), the DuckDB backend is only available in builds that don't link
-  # Hull's mbedTLS: HL_ENABLE_HTTP=0 with no Postgres/MySQL (HL_LINK_TLS=0).
-  # See docs/duckdb_backend_design.md.
-  ifeq ($(HL_LINK_TLS),1)
-    $(error HL_ENABLE_DUCKDB=1 currently requires a build without the mbedTLS stack. \
-      Build with HL_ENABLE_HTTP=0 (and no HL_ENABLE_POSTGRES/HL_ENABLE_MYSQL). \
-      DuckDB + TLS coexistence needs symbol isolation, a tracked follow-up)
-  endif
+  # libduckdb_static.a embeds its OWN (different-version) mbedTLS, which would
+  # collide with Hull's. `make fetch-duckdb` isolates it by renaming DuckDB's
+  # bundled mbedtls_/psa_ symbols to a private hlduck_ prefix (objcopy
+  # --redefine-syms), so DuckDB and Hull's mbedTLS coexist in one binary and
+  # DuckDB works alongside the full HTTP/TLS stack. See
+  # docs/duckdb_backend_design.md §3.4.
   ifndef DUCKDB_LIB_DIR
     ifneq (,$(wildcard $(VENDDIR)/duckdb/libduckdb_static.a))
       DUCKDB_LIB_DIR := $(VENDDIR)/duckdb
@@ -1340,10 +1334,9 @@ ifeq ($(HL_ENABLE_DUCKDB),1)
   # Proven link set (v1.5.4): the core static lib + the five default extensions
   # + their generated loader (which references those five, so none can be
   # dropped) + the third-party dep archives. Deliberately OMITS
-  # libduckdb_mbedtls.a (it re-defines Hull's own mbedTLS symbols; the default
-  # extension set does not need it) and the benchmark-only tpch/tpcds
-  # extensions. See docs/duckdb_backend_design.md.
-  DUCKDB_LIBS := \
+  # libduckdb_mbedtls.a (unused by the default set) and the benchmark-only
+  # tpch/tpcds extensions. See docs/duckdb_backend_design.md.
+  DUCKDB_ARCHIVES := \
       $(DUCKDB_LIB_DIR)/libduckdb_static.a \
       $(DUCKDB_LIB_DIR)/libcore_functions_extension.a \
       $(DUCKDB_LIB_DIR)/libparquet_extension.a \
@@ -1362,11 +1355,14 @@ ifeq ($(HL_ENABLE_DUCKDB),1)
       $(DUCKDB_LIB_DIR)/libduckdb_skiplistlib.a \
       $(DUCKDB_LIB_DIR)/libduckdb_fmt.a \
       $(DUCKDB_LIB_DIR)/libduckdb_fsst.a
-  # DuckDB is C++; pull in the C++ runtime at final link.
+  # These archives reference each other circularly (the loader -> extensions ->
+  # core, and back). GNU ld resolves that only within a --start-group; macOS
+  # ld64 resolves regardless of order, so no group there. DuckDB is C++, so pull
+  # in the C++ runtime (+ libdl for its extension machinery on Linux).
   ifeq ($(UNAME_S),Darwin)
-    DUCKDB_LIBS += -lc++
+    DUCKDB_LIBS := $(DUCKDB_ARCHIVES) -lc++
   else
-    DUCKDB_LIBS += -lstdc++
+    DUCKDB_LIBS := -Wl,--start-group $(DUCKDB_ARCHIVES) -Wl,--end-group -lstdc++ -ldl
   endif
 else
   DUCKDB_LIBS :=
@@ -4009,6 +4005,24 @@ fetch-duckdb:
 		mkdir -p $(VENDDIR)/duckdb; \
 		unzip -o -j /tmp/$(DUCKDB_ZIP) -d $(VENDDIR)/duckdb/; \
 		rm -f /tmp/$(DUCKDB_ZIP); \
+		echo "Isolating DuckDB's bundled mbedTLS/psa symbols..."; \
+		OBJCOPY="$$(command -v objcopy || command -v llvm-objcopy || command -v gobjcopy || true)"; \
+		[ -z "$$OBJCOPY" ] && [ -x /opt/homebrew/opt/llvm/bin/llvm-objcopy ] && OBJCOPY=/opt/homebrew/opt/llvm/bin/llvm-objcopy; \
+		[ -z "$$OBJCOPY" ] && [ -x /usr/local/opt/llvm/bin/llvm-objcopy ] && OBJCOPY=/usr/local/opt/llvm/bin/llvm-objcopy; \
+		if [ -z "$$OBJCOPY" ]; then \
+			echo "ERROR: fetch-duckdb needs objcopy or llvm-objcopy to isolate DuckDB's bundled"; \
+			echo "mbedTLS (a different version than Hull's; they would collide at link)."; \
+			echo "Install: 'apt-get install binutils' (Linux) or 'brew install llvm' (macOS)."; \
+			exit 1; \
+		fi; \
+		LIB=$(VENDDIR)/duckdb/libduckdb_static.a; \
+		nm "$$LIB" 2>/dev/null | awk '{print $$NF}' | grep -E '^_?(mbedtls_|psa_)' | sort -u \
+			| awk '{print $$1" hlduck_"$$1}' > /tmp/hl_duckdb_syms.map; \
+		if [ -s /tmp/hl_duckdb_syms.map ]; then \
+			"$$OBJCOPY" --redefine-syms=/tmp/hl_duckdb_syms.map "$$LIB"; \
+			echo "isolated $$(wc -l < /tmp/hl_duckdb_syms.map | tr -d ' ') symbols (hlduck_ prefix)"; \
+		fi; \
+		rm -f /tmp/hl_duckdb_syms.map; \
 		echo "=== DuckDB $(DUCKDB_VERSION) installed to $(VENDDIR)/duckdb/ ==="; \
 		ls -lh $(VENDDIR)/duckdb/libduckdb_static.a; \
 	fi
