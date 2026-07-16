@@ -72,14 +72,32 @@ UTEST(db_select, mysql_scheme)
 #endif
 }
 
+/* "duckdb://" routes to the DuckDB backend when compiled, else a build-flag
+ * hint (reserved-scheme path, covered below). */
+UTEST(db_select, duckdb_scheme)
+{
+    const char *err = NULL;
+    const HlDbBackend *b = hl_db_backend_select("duckdb://:memory:", &err);
+#ifdef HL_ENABLE_DUCKDB
+    ASSERT_TRUE(b); ASSERT_STREQ(b->name, "duckdb"); ASSERT_FALSE(err);
+    ASSERT_EQ(b->dialect.identifier_quote, '"');
+    ASSERT_EQ((int)b->native_tag, (int)HL_DB_NATIVE_DUCKDB);
+#else
+    ASSERT_FALSE(b); ASSERT_TRUE(err); ASSERT_TRUE(strstr(err, "DuckDB") != NULL);
+#endif
+}
+
 /* Reserved schemes with no backend in this build: a specific hint, never a
- * backend. DuckDB has no backend yet; mysql/mariadb are reserved only when the
- * MySQL backend isn't compiled. */
+ * backend. mysql/mariadb are reserved only when the MySQL backend isn't
+ * compiled; duckdb only when the DuckDB backend isn't. */
 UTEST(db_select, reserved_schemes)
 {
     const char *err = NULL;
+#ifndef HL_ENABLE_DUCKDB
     ASSERT_FALSE(hl_db_backend_select("duckdb://x.duckdb", &err));
     ASSERT_TRUE(err); ASSERT_TRUE(strstr(err, "DuckDB") != NULL);
+    err = NULL;
+#endif
 #ifndef HL_ENABLE_MYSQL
     err = NULL;
     ASSERT_FALSE(hl_db_backend_select("mysql://u@h/db", &err));

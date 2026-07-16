@@ -405,10 +405,12 @@ ifeq ($(HL_ENABLE_DB),0)
 HL_ENABLE_SQLITE   ?= 0
 HL_ENABLE_POSTGRES ?= 0
 HL_ENABLE_MYSQL    ?= 0
+HL_ENABLE_DUCKDB   ?= 0
 endif
 HL_ENABLE_SQLITE   ?= 1
 HL_ENABLE_POSTGRES ?= 0
 HL_ENABLE_MYSQL    ?= 0
+HL_ENABLE_DUCKDB   ?= 0
 
 # Keel (KlTls) + mbedTLS are linked when an HTTP half OR PostgreSQL OR MySQL is
 # enabled (MySQL's caching_sha2_password full-auth + ed25519 need TLS + crypto).
@@ -524,12 +526,15 @@ endif
 ifeq ($(HL_ENABLE_MYSQL),1)
 CFLAGS += -DHL_ENABLE_MYSQL
 endif
+ifeq ($(HL_ENABLE_DUCKDB),1)
+CFLAGS += -DHL_ENABLE_DUCKDB -I$(VENDDIR)/duckdb
+endif
 
 # Derived umbrella. `override` forces the derived value even if a
 # contradictory HL_ENABLE_DB=1 was passed with all backends off (resolves
 # to a coherent "no backend" rather than a broken half-build). The
 # back-compat check above already read the caller's HL_ENABLE_DB=0 intent.
-ifeq ($(HL_ENABLE_SQLITE)$(HL_ENABLE_POSTGRES)$(HL_ENABLE_MYSQL),000)
+ifeq ($(HL_ENABLE_SQLITE)$(HL_ENABLE_POSTGRES)$(HL_ENABLE_MYSQL)$(HL_ENABLE_DUCKDB),0000)
 override HL_ENABLE_DB := 0
 else
 override HL_ENABLE_DB := 1
@@ -1297,6 +1302,76 @@ else
   WGPU_FRAMEWORKS :=
 endif
 
+# ── DuckDB (side-loaded, statically-linked OLAP backend) ────────────
+#
+# Enable with: make HL_ENABLE_DUCKDB=1
+#   - Auto-detects vendor/duckdb/libduckdb_static.a if present
+#   - Or specify: make HL_ENABLE_DUCKDB=1 DUCKDB_LIB_DIR=/path/to/libs
+#   - Fetch automatically: make fetch-duckdb && make HL_ENABLE_DUCKDB=1
+#
+# The -DHL_ENABLE_DUCKDB macro + -I are emitted in the DB section above; this
+# block resolves the archive set to link. DuckDB is a large C++ static library,
+# so this is an opt-in side variant (the default `hull` rejects duckdb:// with
+# the reserved-scheme hint). Not compatible with Cosmopolitan.
+
+ifeq ($(HL_ENABLE_DUCKDB),1)
+  ifdef COSMO
+    $(error DuckDB is not compatible with Cosmopolitan builds)
+  endif
+  # libduckdb_static.a embeds its OWN copy of mbedTLS (a different version than
+  # Hull's vendored one), so linking it alongside Hull's mbedTLS is a
+  # duplicate-symbol error AND an unsafe version mix. Until DuckDB's bundled
+  # mbedTLS/miniz symbols are isolated (objcopy prefixing — a focused
+  # follow-up), the DuckDB backend is only available in builds that don't link
+  # Hull's mbedTLS: HL_ENABLE_HTTP=0 with no Postgres/MySQL (HL_LINK_TLS=0).
+  # See docs/duckdb_backend_design.md.
+  ifeq ($(HL_LINK_TLS),1)
+    $(error HL_ENABLE_DUCKDB=1 currently requires a build without the mbedTLS stack. \
+      Build with HL_ENABLE_HTTP=0 (and no HL_ENABLE_POSTGRES/HL_ENABLE_MYSQL). \
+      DuckDB + TLS coexistence needs symbol isolation, a tracked follow-up)
+  endif
+  ifndef DUCKDB_LIB_DIR
+    ifneq (,$(wildcard $(VENDDIR)/duckdb/libduckdb_static.a))
+      DUCKDB_LIB_DIR := $(VENDDIR)/duckdb
+    else
+      $(error HL_ENABLE_DUCKDB=1 requires the DuckDB static libs. Run: make fetch-duckdb)
+    endif
+  endif
+  # Proven link set (v1.5.4): the core static lib + the five default extensions
+  # + their generated loader (which references those five, so none can be
+  # dropped) + the third-party dep archives. Deliberately OMITS
+  # libduckdb_mbedtls.a (it re-defines Hull's own mbedTLS symbols; the default
+  # extension set does not need it) and the benchmark-only tpch/tpcds
+  # extensions. See docs/duckdb_backend_design.md.
+  DUCKDB_LIBS := \
+      $(DUCKDB_LIB_DIR)/libduckdb_static.a \
+      $(DUCKDB_LIB_DIR)/libcore_functions_extension.a \
+      $(DUCKDB_LIB_DIR)/libparquet_extension.a \
+      $(DUCKDB_LIB_DIR)/libjson_extension.a \
+      $(DUCKDB_LIB_DIR)/libicu_extension.a \
+      $(DUCKDB_LIB_DIR)/libautocomplete_extension.a \
+      $(DUCKDB_LIB_DIR)/libduckdb_generated_extension_loader.a \
+      $(DUCKDB_LIB_DIR)/libduckdb_zstd.a \
+      $(DUCKDB_LIB_DIR)/libduckdb_miniz.a \
+      $(DUCKDB_LIB_DIR)/libduckdb_yyjson.a \
+      $(DUCKDB_LIB_DIR)/libduckdb_re2.a \
+      $(DUCKDB_LIB_DIR)/libduckdb_hyperloglog.a \
+      $(DUCKDB_LIB_DIR)/libduckdb_utf8proc.a \
+      $(DUCKDB_LIB_DIR)/libduckdb_fastpforlib.a \
+      $(DUCKDB_LIB_DIR)/libduckdb_pg_query.a \
+      $(DUCKDB_LIB_DIR)/libduckdb_skiplistlib.a \
+      $(DUCKDB_LIB_DIR)/libduckdb_fmt.a \
+      $(DUCKDB_LIB_DIR)/libduckdb_fsst.a
+  # DuckDB is C++; pull in the C++ runtime at final link.
+  ifeq ($(UNAME_S),Darwin)
+    DUCKDB_LIBS += -lc++
+  else
+    DUCKDB_LIBS += -lstdc++
+  endif
+else
+  DUCKDB_LIBS :=
+endif
+
 # ── jart/pledge polyfill (Linux-only: seccomp + landlock) ──────────
 #
 # Provides real pledge()/unveil() on native Linux.
@@ -1381,6 +1456,12 @@ ifneq ($(HL_ENABLE_MYSQL),1)
       $(SRCDIR)/hull/cap/db_mysql.c \
       $(SRCDIR)/hull/cap/mysql_conn.c \
       $(SRCDIR)/hull/cap/mysqlwire.c, \
+      $(CAP_SRCS))
+endif
+ifneq ($(HL_ENABLE_DUCKDB),1)
+  # DuckDB backend vtable (statically-linked libduckdb). Off by default.
+  CAP_SRCS := $(filter-out \
+      $(SRCDIR)/hull/cap/db_duckdb.c, \
       $(CAP_SRCS))
 endif
 ifeq ($(HL_ENABLE_HTTP_CLIENT),0)
@@ -2456,7 +2537,7 @@ endif
 # Hull binary
 $(BUILDDIR)/hull: $(CAP_OBJS) $(CAP_TOOL_OBJ) $(CAP_TEST_OBJ) $(CMD_OBJS) $(RT_OBJS) $(ALLOC_OBJ) $(ASYNC_OBJ) $(COMPRESS_OBJ) $(MINIZ_OBJ) $(WORKER_DB_OBJ) $(WORKER_WASM_OBJ) $(WORKER_GPU_OBJ) $(MANIFEST_OBJ) $(MODULE_OBJ) $(ASYNC_BACKEND_OBJS) $(NET_BACKEND_OBJS) $(SANDBOX_OBJ) $(SANDBOX_TOOL_OBJ) $(SIG_OBJ) $(RELEASE_OBJ) $(RELEASE_IO_OBJ) $(TOOLS_INSTALL_OBJ) $(PLATFORM_SIG_OBJ) $(EMBEDDED_PLATFORM_SIG_OBJ) $(TEST_RUNNER_OBJ) $(RUNTIME_FACTORY_OBJ) $(STATIC_OBJ) $(MIGRATE_OBJ) $(VFS_OBJ) $(PATH_NORM_OBJ) $(THREAD_AFFINITY_OBJ) $(CACHE_DIR_OBJ) $(BLOB_STORE_OBJ) $(CACHE_REGISTRY_OBJ) $(CACERT_OBJ) $(TLS_CLIENT_OBJ) $(CSP_OBJ) $(SH_SEAL_ARENA_OBJ) $(SBOM_OBJ) $(APP_CONTEXT_OBJ) $(AGENT_LIB_OBJ) $(AGENT_API_OBJ) $(TOOL_OBJ) $(BUILD_ASSET_OBJ) $(COMPILER_OBJ) $(COMPILER_TCC_OBJ) $(MAIN_OBJ) $(SERVE_OBJ) $(ENTRY_OBJ) $(APP_EXTRA_OBJS) $(STDLIB_REGISTRY_O) $(WAMR_OBJS) $(VEND_OBJS) $(MBEDTLS_OBJS) $(SQLITE_OBJ) $(LOG_OBJ) $(LOG_LOCK_OBJ) $(SH_ARENA_OBJ) $(SH_JSON_OBJ) $(TWEETNACL_OBJ) $(STB_OBJ) $(PLEDGE_OBJS) $(KEEL_LIB)
 	$(CC) $(LDFLAGS) -o $@ $(CAP_OBJS) $(CAP_TOOL_OBJ) $(CAP_TEST_OBJ) $(CMD_OBJS) $(RT_OBJS) $(ALLOC_OBJ) $(ASYNC_OBJ) $(COMPRESS_OBJ) $(MINIZ_OBJ) $(WORKER_DB_OBJ) $(WORKER_WASM_OBJ) $(WORKER_GPU_OBJ) $(MANIFEST_OBJ) $(MODULE_OBJ) $(ASYNC_BACKEND_OBJS) $(NET_BACKEND_OBJS) $(SANDBOX_OBJ) $(SANDBOX_TOOL_OBJ) $(SIG_OBJ) $(RELEASE_OBJ) $(RELEASE_IO_OBJ) $(TOOLS_INSTALL_OBJ) $(PLATFORM_SIG_OBJ) $(EMBEDDED_PLATFORM_SIG_OBJ) $(TEST_RUNNER_OBJ) $(RUNTIME_FACTORY_OBJ) $(STATIC_OBJ) $(MIGRATE_OBJ) $(VFS_OBJ) $(PATH_NORM_OBJ) $(THREAD_AFFINITY_OBJ) $(CACHE_DIR_OBJ) $(BLOB_STORE_OBJ) $(CACHE_REGISTRY_OBJ) $(CACERT_OBJ) $(TLS_CLIENT_OBJ) $(CSP_OBJ) $(SH_SEAL_ARENA_OBJ) $(SBOM_OBJ) $(APP_CONTEXT_OBJ) $(AGENT_LIB_OBJ) $(AGENT_API_OBJ) $(TOOL_OBJ) $(BUILD_ASSET_OBJ) $(COMPILER_OBJ) $(COMPILER_TCC_OBJ) $(MAIN_OBJ) $(SERVE_OBJ) $(ENTRY_OBJ) $(APP_EXTRA_OBJS) $(STDLIB_REGISTRY_O) $(WAMR_OBJS) $(VEND_OBJS) $(MBEDTLS_OBJS) \
-		$(SQLITE_OBJ) $(LOG_OBJ) $(LOG_LOCK_OBJ) $(SH_ARENA_OBJ) $(SH_JSON_OBJ) $(TWEETNACL_OBJ) $(STB_OBJ) $(PLEDGE_OBJS) $(KEEL_LIB) $(WGPU_LIB) $(WGPU_FRAMEWORKS) -lm -lpthread
+		$(SQLITE_OBJ) $(LOG_OBJ) $(LOG_LOCK_OBJ) $(SH_ARENA_OBJ) $(SH_JSON_OBJ) $(TWEETNACL_OBJ) $(STB_OBJ) $(PLEDGE_OBJS) $(KEEL_LIB) $(WGPU_LIB) $(WGPU_FRAMEWORKS) $(DUCKDB_LIBS) -lm -lpthread
 
 # ── libhull: no-runtime embedding library (Phase L-1/L-2) ────────────
 # The runtime-agnostic hardened core as a static archive, for a native
@@ -2977,7 +3058,7 @@ TEST_COMMON_DEPS := $(TEST_CAP_OBJS) $(ALLOC_OBJ) $(ASYNC_OBJ) $(ASYNC_BACKEND_O
 # copy resolves sh_seal_arena_* symbols first; Keel's copy stays in
 # libkeel.a but the linker doesn't pull it (its symbols are already
 # satisfied).  Required for MSan instrumentation visibility.
-TEST_COMMON_LIBS := $(TEST_CAP_OBJS) $(ALLOC_OBJ) $(ASYNC_OBJ) $(ASYNC_BACKEND_OBJS) $(NET_BACKEND_OBJS) $(COMPRESS_OBJ) $(MINIZ_OBJ) $(WORKER_DB_OBJ) $(WORKER_WASM_OBJ) $(WORKER_GPU_OBJ) $(VFS_OBJ) $(PATH_NORM_OBJ) $(THREAD_AFFINITY_OBJ) $(CACHE_DIR_OBJ) $(BLOB_STORE_OBJ) $(CACHE_REGISTRY_OBJ) $(CACERT_OBJ) $(TLS_CLIENT_OBJ) $(SH_SEAL_ARENA_OBJ) $(WAMR_OBJS) $(MBEDTLS_OBJS) $(KEEL_LIB) $(SQLITE_OBJ) $(LOG_OBJ) $(LOG_LOCK_OBJ) $(SH_ARENA_OBJ) $(SH_JSON_OBJ) $(TWEETNACL_OBJ) $(STB_OBJ) $(WGPU_LIB) $(WGPU_FRAMEWORKS) -lm -lpthread
+TEST_COMMON_LIBS := $(TEST_CAP_OBJS) $(ALLOC_OBJ) $(ASYNC_OBJ) $(ASYNC_BACKEND_OBJS) $(NET_BACKEND_OBJS) $(COMPRESS_OBJ) $(MINIZ_OBJ) $(WORKER_DB_OBJ) $(WORKER_WASM_OBJ) $(WORKER_GPU_OBJ) $(VFS_OBJ) $(PATH_NORM_OBJ) $(THREAD_AFFINITY_OBJ) $(CACHE_DIR_OBJ) $(BLOB_STORE_OBJ) $(CACHE_REGISTRY_OBJ) $(CACERT_OBJ) $(TLS_CLIENT_OBJ) $(SH_SEAL_ARENA_OBJ) $(WAMR_OBJS) $(MBEDTLS_OBJS) $(KEEL_LIB) $(SQLITE_OBJ) $(LOG_OBJ) $(LOG_LOCK_OBJ) $(SH_ARENA_OBJ) $(SH_JSON_OBJ) $(TWEETNACL_OBJ) $(STB_OBJ) $(WGPU_LIB) $(WGPU_FRAMEWORKS) $(DUCKDB_LIBS) -lm -lpthread
 # forkpty(3) is in libutil on glibc/musl Linux (used by
 # tests/hull/cap/test_tui_lifecycle.c). macOS / BSD ship it inside
 # libSystem so no extra flag is needed. Cosmopolitan does not provide
@@ -3855,7 +3936,24 @@ WGPU_ZIP := wgpu-$(WGPU_PLATFORM)-release.zip
 WGPU_URL := https://github.com/gfx-rs/wgpu-native/releases/download/$(WGPU_VERSION)/$(WGPU_ZIP)
 WGPU_EXPECTED_SHA := $(WGPU_SHA256_$(subst -,_,$(WGPU_PLATFORM)))
 
-.PHONY: fetch-wgpu fetch-cosmocc
+# DuckDB v1.5.4 — side-loaded static OLAP backend (make HL_ENABLE_DUCKDB=1).
+# Prebuilt per-platform static-libs zip (headers + libduckdb_static.a + deps +
+# default extensions). glibc Linux + macOS only; musl / windows / cosmo unsupported.
+DUCKDB_VERSION := v1.5.4
+DUCKDB_SHA256_osx_arm64    := 7d6d51110134c031e8a4944a8aa6514d68d462c479346a42f3e38bd7e4158c83
+DUCKDB_SHA256_osx_amd64    := f102a62959e3cc7f2147c3181e6b86be158f70183889bb7b40624a4c18d886f3
+DUCKDB_SHA256_linux_amd64  := 44edc1b55365624b4aa4a4f1d8087f75c4bfaceed4494b71059f54a8fa2f6e45
+DUCKDB_SHA256_linux_arm64  := 68133154f3f62f5b8704656ece5b67989a3089537e4944e0b372518843155e62
+
+# DuckDB uses osx/amd64/arm64 in its asset names (vs wgpu's macos/x86_64/aarch64).
+DUCKDB_OS := $(shell uname -s | tr A-Z a-z | sed 's/darwin/osx/')
+DUCKDB_ARCH := $(shell uname -m | sed 's/aarch64/arm64/;s/x86_64/amd64/')
+DUCKDB_PLATFORM := $(DUCKDB_OS)-$(DUCKDB_ARCH)
+DUCKDB_ZIP := static-libs-$(DUCKDB_PLATFORM).zip
+DUCKDB_URL := https://github.com/duckdb/duckdb/releases/download/$(DUCKDB_VERSION)/$(DUCKDB_ZIP)
+DUCKDB_EXPECTED_SHA := $(DUCKDB_SHA256_$(subst -,_,$(DUCKDB_PLATFORM)))
+
+.PHONY: fetch-wgpu fetch-duckdb fetch-cosmocc
 
 fetch-wgpu:
 	@if [ -f $(VENDDIR)/wgpu/libwgpu_native.a ]; then \
@@ -3885,6 +3983,34 @@ fetch-wgpu:
 		rm -f /tmp/$(WGPU_ZIP); \
 		echo "=== wgpu-native $(WGPU_VERSION) installed to $(VENDDIR)/wgpu/ ==="; \
 		ls -lh $(VENDDIR)/wgpu/libwgpu_native.a; \
+	fi
+
+fetch-duckdb:
+	@if [ -f $(VENDDIR)/duckdb/libduckdb_static.a ]; then \
+		echo "DuckDB static libs already present at $(VENDDIR)/duckdb/"; \
+	else \
+		echo "=== Fetching DuckDB $(DUCKDB_VERSION) for $(DUCKDB_PLATFORM) ==="; \
+		if [ -z "$(DUCKDB_EXPECTED_SHA)" ]; then \
+			echo "ERROR: unsupported platform $(DUCKDB_PLATFORM)"; \
+			echo "Supported: osx-arm64, osx-amd64, linux-amd64, linux-arm64 (glibc)"; \
+			exit 1; \
+		fi; \
+		curl -sL -o /tmp/$(DUCKDB_ZIP) "$(DUCKDB_URL)"; \
+		echo "Verifying SHA-256..."; \
+		ACTUAL=$$($(SHA256CMD) /tmp/$(DUCKDB_ZIP) | cut -d' ' -f1); \
+		if [ "$$ACTUAL" != "$(DUCKDB_EXPECTED_SHA)" ]; then \
+			echo "ERROR: SHA-256 mismatch!"; \
+			echo "  expected: $(DUCKDB_EXPECTED_SHA)"; \
+			echo "  actual:   $$ACTUAL"; \
+			rm -f /tmp/$(DUCKDB_ZIP); \
+			exit 1; \
+		fi; \
+		echo "SHA-256 OK"; \
+		mkdir -p $(VENDDIR)/duckdb; \
+		unzip -o -j /tmp/$(DUCKDB_ZIP) -d $(VENDDIR)/duckdb/; \
+		rm -f /tmp/$(DUCKDB_ZIP); \
+		echo "=== DuckDB $(DUCKDB_VERSION) installed to $(VENDDIR)/duckdb/ ==="; \
+		ls -lh $(VENDDIR)/duckdb/libduckdb_static.a; \
 	fi
 
 # Cosmopolitan cosmocc 4.0.2 — portable C compiler

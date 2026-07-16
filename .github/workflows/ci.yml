@@ -746,6 +746,55 @@ jobs:
         timeout-minutes: 2
         run: make e2e-compute HL_ENABLE_GPU=1
 
+  duckdb:
+    name: DuckDB backend (Linux)
+    runs-on: ubuntu-24.04
+
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          submodules: true
+
+      # DuckDB's static libs embed a different mbedTLS than Hull's, so the
+      # thin-slice backend builds only where Hull links no mbedTLS
+      # (HL_ENABLE_HTTP=0, no Postgres/MySQL -> HL_LINK_TLS=0). Symbol
+      # isolation to lift this is a tracked follow-up. See
+      # docs/duckdb_backend_design.md.
+      - name: Fetch DuckDB static libs
+        run: make fetch-duckdb
+
+      - name: Build with DuckDB (no-TLS flavor)
+        run: make HL_ENABLE_HTTP=0 HL_ENABLE_DUCKDB=1
+
+      - name: DuckDB unit tests
+        timeout-minutes: 5
+        run: |
+          make HL_ENABLE_HTTP=0 HL_ENABLE_DUCKDB=1 build/test_db_duckdb build/test_db_select
+          ./build/test_db_duckdb
+          ./build/test_db_select
+
+      - name: DuckDB app smoke (duckdb://:memory:)
+        timeout-minutes: 2
+        run: |
+          set -eu
+          mkdir -p /tmp/ddbsmoke
+          cat > /tmp/ddbsmoke/app.lua <<'EOF'
+          app.manifest({ modules = { "hull/db@1" } })
+          app.main(function(ctx)
+              local d = require("hull.db").default()
+              d.exec("CREATE TABLE t (id INTEGER, name VARCHAR)")
+              d.exec("INSERT INTO t VALUES (?, ?)", { 7, "alice" })
+              local rows = d.query("SELECT id, name FROM t")
+              assert(#rows == 1 and rows[1].id == 7 and rows[1].name == "alice", "row mismatch")
+              assert(d.backend_name == "duckdb", "backend mismatch")
+              local ok = pcall(function() d.query("SELECT * FROM read_csv('/etc/hosts')") end)
+              assert(not ok, "external file access was NOT blocked")
+              print("DUCKDB SMOKE OK")
+              return 0
+          end)
+          EOF
+          ./build/hull -d "duckdb://:memory:" /tmp/ddbsmoke/app.lua | grep -q "DUCKDB SMOKE OK"
+
   coverage:
     name: Code Coverage
     runs-on: ubuntu-24.04

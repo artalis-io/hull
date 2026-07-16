@@ -176,6 +176,32 @@ whether the variant installs alongside as a distinct `hull-duckdb` binary
 (preferred, so the lean default is never disturbed) or swaps the running binary
 in place like `hull update`.
 
+### 3.4 Link-time symbol collision with Hull's mbedTLS (discovered)
+
+DuckDB's prebuilt `libduckdb_static.a` **embeds its own copy of mbedTLS**
+(e.g. `cipher_wrap.cpp.o`), a *different version* than Hull's vendored mbedTLS
+(the linker reports a size mismatch on `mbedtls_cipher_supported`, 84 vs 52
+bytes). Linking both is therefore a duplicate-symbol error AND an unsafe
+version mix; omitting the separate `libduckdb_mbedtls.a` is not enough because
+the collision is inside the core archive. Hull links its own mbedTLS whenever
+`HL_LINK_TLS=1` (any HTTP half, or Postgres, or MySQL).
+
+Slice scope (v1a): the DuckDB backend is only built where Hull does **not**
+link mbedTLS — `HL_ENABLE_HTTP=0` with no Postgres/MySQL (`HL_LINK_TLS=0`), so
+DuckDB supplies the only mbedTLS in the binary. The Makefile enforces this with
+a clear `$(error ...)` when `HL_ENABLE_DUCKDB=1` meets `HL_LINK_TLS=1`. DuckDB
+also lazily overlaps Hull's vendored `miniz` (its `libduckdb_miniz.a` members
+are simply not pulled, so DuckDB currently uses Hull's `miniz`).
+
+Follow-up (v1b), to allow DuckDB **and** the TLS stack in one binary: isolate
+DuckDB's bundled third-party symbols so they cannot clash with Hull's. The
+standard fix is an `objcopy --redefine-syms` pass over the DuckDB archives in
+`fetch-duckdb`, prefixing every `mbedtls_*` / `psa_*` (and, for safety,
+`miniz`) symbol to a DuckDB-private namespace, so DuckDB's internal references
+stay consistent and Hull keeps its own. This needs `objcopy` / `llvm-objcopy`
+and cross-platform CI validation, hence a focused follow-up rather than part of
+the thin slice.
+
 ## 4. Why this stays orthogonal
 
 - One dialect home: DuckDB is a row in `HlDbDialect`; the query / schema builders
@@ -196,11 +222,21 @@ in place like `hull update`.
    CI-testable on its own. (This step first.)
 2. Query builder + schema builder on the descriptor (see the API review doc).
 3. DuckDB backend: `cap/db_duckdb.c`, the DuckDB dialect row, the security-config
-   mapping (3.2), and the side-load packaging (3.3).
+   mapping (3.2), and the side-load packaging (3.3). Landed as a **thin vertical
+   slice** first (open/query/exec/txn on :memory:/file, prepared-statement param
+   binding, columnar chunk decode, the full-lockdown security config, the dialect
+   row, `duckdb://` selection, unit tests), scoped to `HL_LINK_TLS=0` builds per
+   3.4. Deferred to follow-ups: the manifest-driven `fs.read`/`fs.write` ->
+   `allowed_directories` mode, the `insert_if_absent`/`upsert`/`table_columns`
+   dialect helpers, temporal / decimal / nested type decoding, the mbedTLS/miniz
+   symbol isolation (3.4) that lifts the `HL_LINK_TLS=0` restriction, and the
+   signed side-load packaging (3.3).
 4. OLAP optional vtable methods (columnar fetch, Appender) as a follow-on.
 
 ## 6. Open items
 
+- mbedTLS / miniz symbol isolation (3.4) to allow DuckDB + the TLS stack in one
+  binary and lift the `HL_LINK_TLS=0` slice restriction. (Next follow-up.)
 - DuckDB rich-type mapping (JSON-encode-on-read vs extending `HlValue`).
 - Side-load install UX (distinct `hull-duckdb` binary vs in-place swap).
 - MariaDB per-connection dialect refinement (2.3).

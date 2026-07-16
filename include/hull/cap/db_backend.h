@@ -30,6 +30,7 @@ typedef enum {
     HL_DB_NATIVE_SQLITE,
     HL_DB_NATIVE_POSTGRES,
     HL_DB_NATIVE_MYSQL,
+    HL_DB_NATIVE_DUCKDB,
 } HlDbNativeTag;
 
 /* Callback used by `table_columns`: invoked once per column name
