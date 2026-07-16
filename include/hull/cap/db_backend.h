@@ -36,6 +36,53 @@ typedef enum {
  * in whatever order the backend's catalog returns them. */
 typedef void (*HlDbColumnCallback)(void *cb_ctx, const char *col_name);
 
+/* Per-backend SQL dialect descriptor: the single source of dialect truth,
+ * consumed by hl_db_quote_ident, the connection object's `dialect` sub-table,
+ * and (in future) the query / schema builders. Every field is a compile-time
+ * constant per backend, so the whole HlDbBackend stays in .rodata. Only axes
+ * where backends actually differ AND a consumer needs them are modelled;
+ * LIMIT/OFFSET, boolean literals, and string concat are uniform (or arrive as
+ * bound params) across the current backends and are added when one diverges. */
+typedef struct HlDbDialect {
+    /* Identifier-quoting char: '"' for SQLite / Postgres / DuckDB, '`' for
+     * MySQL. hl_db_quote_ident wraps a name with it (doubling internals).
+     * 0 falls back to '"'. */
+    char identifier_quote;
+
+    /* Native parameter placeholder style: "?" (SQLite / MySQL / DuckDB) or
+     * "$n" (Postgres). The query builder emits '?' uniformly and the Postgres
+     * backend rewrites '?' -> '$n' in C, so this is exposed only so a raw-SQL
+     * author who bypasses the builder knows the native style. */
+    const char *placeholder;
+
+    /* Upsert grammar: "on_conflict" (SQLite / Postgres / DuckDB) or
+     * "on_duplicate_key" (MySQL). Consumed by the builder's upsert compile. */
+    const char *upsert_style;
+
+    /* Whether INSERT/UPDATE/DELETE ... RETURNING is supported. 0 => the
+     * builder's .returning() falls back to last_id (single-row only). MySQL 8
+     * is 0 (MariaDB is 1, but the shared backend is conservative). */
+    unsigned char supports_returning;
+
+    /* Whether CREATE INDEX ... IF NOT EXISTS is native. 0 = MySQL 8, where the
+     * backend transparently rewrites it and swallows the duplicate-index error,
+     * so the schema builder can still emit the portable form. */
+    unsigned char supports_index_if_not_exists;
+
+    /* Inline DDL fragment declaring an auto-increment integer primary-key
+     * column. SQLite: "INTEGER PRIMARY KEY AUTOINCREMENT". Postgres:
+     * "BIGSERIAL PRIMARY KEY". MySQL: "BIGINT AUTO_INCREMENT PRIMARY KEY".
+     * DuckDB references a sequence: "BIGINT DEFAULT nextval('%s') PRIMARY KEY".
+     * Used by stdlib CREATE TABLE (audit-log, outbox) and the schema builder. */
+    const char *identity_column;
+
+    /* printf-style companion template ("CREATE SEQUENCE %s") for engines whose
+     * identity needs a separate sequence (DuckDB); NULL where identity is
+     * inline. The schema builder generates one sequence name and threads it
+     * through both identity_sequence and identity_column. */
+    const char *identity_sequence;
+} HlDbDialect;
+
 /* Vtable methods take `HlDbHandle *h` instead of `void *ctx`.  The
  * concrete backend context lives in h->ctx and each method casts it
  * to its own concrete type at the top of the function (the cast is
@@ -56,18 +103,11 @@ typedef struct HlDbBackend {
      * matched, and scheme-less DSNs fall through to the SQLite default). */
     const char *const *schemes;
 
-    /* DDL fragment that declares an integer primary-key column
-     * with auto-increment semantics. SQLite: "INTEGER PRIMARY
-     * KEY AUTOINCREMENT". Postgres: "BIGSERIAL PRIMARY KEY".
-     * Used by stdlib modules in CREATE TABLE statements where
-     * a surrogate id is needed (audit-log, outbox). */
-    const char *autoincrement_id_ddl;
-
-    /* Identifier-quoting char for this dialect: '"' for SQLite / Postgres /
-     * DuckDB, '`' for MySQL. Used by hl_db_quote_ident to wrap a table /
-     * column name so a reserved word or special char is safe. 0 falls back
-     * to '"'. */
-    char identifier_quote;
+    /* SQL dialect descriptor: the single home for identifier quoting,
+     * placeholder style, upsert grammar, RETURNING support, and identity DDL.
+     * hl_db_quote_ident / hl_db_autoincrement_id_ddl read it, and the
+     * connection object exposes it as `conn.dialect`. See HlDbDialect. */
+    HlDbDialect dialect;
 
     /* Backend identity (see HlDbNativeTag). Pairs with native_handle. */
     HlDbNativeTag native_tag;
@@ -201,9 +241,9 @@ static inline void hl_db_guard_stale_txn(HlDbHandle *h)
 
 static inline const char *hl_db_autoincrement_id_ddl(HlDbHandle *h)
 {
-    if (!h || !h->backend || !h->backend->autoincrement_id_ddl)
+    if (!h || !h->backend || !h->backend->dialect.identity_column)
         return "INTEGER PRIMARY KEY";
-    return h->backend->autoincrement_id_ddl;
+    return h->backend->dialect.identity_column;
 }
 
 static inline int hl_db_insert_if_absent(HlDbHandle *h, const char *table,
@@ -260,8 +300,8 @@ static inline int hl_db_quote_ident(HlDbHandle *h, const char *name,
                                     char *out, size_t outsz)
 {
     if (!name || !out || outsz < 3) return -1;
-    char q = (h && h->backend && h->backend->identifier_quote)
-             ? h->backend->identifier_quote : '"';
+    char q = (h && h->backend && h->backend->dialect.identifier_quote)
+             ? h->backend->dialect.identifier_quote : '"';
     size_t o = 0;
     out[o++] = q;
     for (const char *p = name; *p; p++) {

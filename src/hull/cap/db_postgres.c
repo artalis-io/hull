@@ -468,8 +468,15 @@ static const char *const pg_schemes[] = { "postgres", "postgresql", NULL };
 const HlDbBackend hl_db_backend_postgres = {
     .name                 = "postgres",
     .schemes              = pg_schemes,
-    .autoincrement_id_ddl = "BIGSERIAL PRIMARY KEY",
-    .identifier_quote     = '"',
+    .dialect = {
+        .identifier_quote             = '"',
+        .placeholder                  = "$n",
+        .upsert_style                 = "on_conflict",
+        .supports_returning           = 1,
+        .supports_index_if_not_exists = 1,
+        .identity_column              = "BIGSERIAL PRIMARY KEY",
+        .identity_sequence            = NULL,
+    },
     .native_tag           = HL_DB_NATIVE_POSTGRES,
     /* native_handle stays NULL: no consumer needs the raw PGconn yet (udf +
      * agent introspection are SQLite-only). Add a pg_native_handle when one

@@ -64,7 +64,7 @@ UTEST(db_select, mysql_scheme)
     const HlDbBackend *b = hl_db_backend_select("mysql://u@h/db", &err);
 #ifdef HL_ENABLE_MYSQL
     ASSERT_TRUE(b); ASSERT_STREQ(b->name, "mysql"); ASSERT_FALSE(err);
-    ASSERT_EQ(b->identifier_quote, '`');   /* backtick dialect */
+    ASSERT_EQ(b->dialect.identifier_quote, '`');   /* backtick dialect */
     b = hl_db_backend_select("mariadb://u@h/db", &err);
     ASSERT_TRUE(b); ASSERT_STREQ(b->name, "mysql");
 #else

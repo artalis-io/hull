@@ -347,8 +347,15 @@ static void *sqlite_native_handle(HlDbHandle *h)
 const HlDbBackend hl_db_backend_sqlite = {
     .name                  = "sqlite",
     .schemes               = sqlite_schemes,
-    .autoincrement_id_ddl  = "INTEGER PRIMARY KEY AUTOINCREMENT",
-    .identifier_quote      = '"',
+    .dialect = {
+        .identifier_quote             = '"',
+        .placeholder                  = "?",
+        .upsert_style                 = "on_conflict",
+        .supports_returning           = 1,   /* SQLite >= 3.35 */
+        .supports_index_if_not_exists = 1,
+        .identity_column              = "INTEGER PRIMARY KEY AUTOINCREMENT",
+        .identity_sequence            = NULL,
+    },
     .native_tag            = HL_DB_NATIVE_SQLITE,
     .supports_udf          = 1,
     .open                  = sqlite_open,

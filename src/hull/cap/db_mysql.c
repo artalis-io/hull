@@ -498,8 +498,15 @@ static const char *const mysql_schemes[] = { "mysql", "mariadb", NULL };
 const HlDbBackend hl_db_backend_mysql = {
     .name                  = "mysql",
     .schemes               = mysql_schemes,
-    .autoincrement_id_ddl  = "BIGINT AUTO_INCREMENT PRIMARY KEY",
-    .identifier_quote      = '`',
+    .dialect = {
+        .identifier_quote             = '`',
+        .placeholder                  = "?",
+        .upsert_style                 = "on_duplicate_key",
+        .supports_returning           = 0,   /* MySQL 8; MariaDB is 1 (see design doc) */
+        .supports_index_if_not_exists = 0,   /* rewritten by the backend shim */
+        .identity_column              = "BIGINT AUTO_INCREMENT PRIMARY KEY",
+        .identity_sequence            = NULL,
+    },
     .native_tag            = HL_DB_NATIVE_MYSQL,
     .supports_udf          = 0,
     .open                  = mysql_open,

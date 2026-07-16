@@ -1361,6 +1361,36 @@ static JSValue new_bound_subobject(JSContext *ctx, HlDbHandle *h)
  * js_call_handle picks the bound handle over the runtime default. async targets
  * this connection's database via the worker pool's per-DSN connections; udf
  * registers on this connection (SQLite only). */
+
+/* Set obj.dialect: a read-only snapshot of the backend's SQL dialect descriptor
+ * (the single home for quoting / placeholder / upsert / RETURNING / identity
+ * DDL that the query & schema builders read). */
+static void js_set_dialect(JSContext *ctx, JSValue obj, const HlDbBackend *be)
+{
+    JSValue d = JS_NewObject(ctx);
+    char qs[2] = { (be && be->dialect.identifier_quote)
+                   ? be->dialect.identifier_quote : '"', '\0' };
+    JS_SetPropertyStr(ctx, d, "identifierQuote", JS_NewString(ctx, qs));
+    JS_SetPropertyStr(ctx, d, "placeholder",
+                      JS_NewString(ctx, (be && be->dialect.placeholder)
+                                        ? be->dialect.placeholder : "?"));
+    JS_SetPropertyStr(ctx, d, "upsertStyle",
+                      JS_NewString(ctx, (be && be->dialect.upsert_style)
+                                        ? be->dialect.upsert_style : "on_conflict"));
+    JS_SetPropertyStr(ctx, d, "supportsReturning",
+                      JS_NewBool(ctx, be && be->dialect.supports_returning));
+    JS_SetPropertyStr(ctx, d, "supportsIndexIfNotExists",
+                      JS_NewBool(ctx, be && be->dialect.supports_index_if_not_exists));
+    JS_SetPropertyStr(ctx, d, "identityColumn",
+                      JS_NewString(ctx, (be && be->dialect.identity_column)
+                                        ? be->dialect.identity_column
+                                        : "INTEGER PRIMARY KEY"));
+    if (be && be->dialect.identity_sequence)
+        JS_SetPropertyStr(ctx, d, "identitySequence",
+                          JS_NewString(ctx, be->dialect.identity_sequence));
+    JS_SetPropertyStr(ctx, obj, "dialect", d);
+}
+
 static JSValue push_conn_object(JSContext *ctx, HlDbHandle *h)
 {
     JSValue obj = JS_NewObjectClass(ctx, (int)hull_db_conn_class_id);
@@ -1414,9 +1444,10 @@ static JSValue push_conn_object(JSContext *ctx, HlDbHandle *h)
     JS_SetPropertyStr(ctx, obj, "backendName",
                       JS_NewString(ctx, be ? be->name : "none"));
     JS_SetPropertyStr(ctx, obj, "autoincrementIdDdl",
-                      JS_NewString(ctx, (be && be->autoincrement_id_ddl)
-                                        ? be->autoincrement_id_ddl
+                      JS_NewString(ctx, (be && be->dialect.identity_column)
+                                        ? be->dialect.identity_column
                                         : "INTEGER PRIMARY KEY"));
+    js_set_dialect(ctx, obj, be);
     return obj;
 }
 
@@ -1518,9 +1549,10 @@ static JSValue push_owned_conn_object(JSContext *ctx, HlDbHandle *h,
     JS_SetPropertyStr(ctx, obj, "backendName",
                       JS_NewString(ctx, be ? be->name : "none"));
     JS_SetPropertyStr(ctx, obj, "autoincrementIdDdl",
-                      JS_NewString(ctx, (be && be->autoincrement_id_ddl)
-                                        ? be->autoincrement_id_ddl
+                      JS_NewString(ctx, (be && be->dialect.identity_column)
+                                        ? be->dialect.identity_column
                                         : "INTEGER PRIMARY KEY"));
+    js_set_dialect(ctx, obj, be);
     return obj;
 }
 

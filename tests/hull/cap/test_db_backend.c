@@ -343,7 +343,7 @@ UTEST(db_backend, quote_identifier)
     ASSERT_EQ(hl_db_quote_ident(&h, "users", buf, 3), -1);
 
     /* the sqlite backend advertises the double-quote char */
-    ASSERT_EQ(hl_db_backend_sqlite.identifier_quote, '"');
+    ASSERT_EQ(hl_db_backend_sqlite.dialect.identifier_quote, '"');
 }
 
 UTEST(db_backend, close_null_ctx)
@@ -437,7 +437,7 @@ UTEST(db_backend, query_with_params)
 
 UTEST(db_backend, autoincrement_id_ddl_sqlite)
 {
-    ASSERT_STREQ(hl_db_backend_sqlite.autoincrement_id_ddl,
+    ASSERT_STREQ(hl_db_backend_sqlite.dialect.identity_column,
                   "INTEGER PRIMARY KEY AUTOINCREMENT");
 }
 
@@ -445,6 +445,20 @@ UTEST(db_backend, autoincrement_id_ddl_null_handle_safe)
 {
     HlDbHandle h = {0};
     ASSERT_STREQ(hl_db_autoincrement_id_ddl(&h), "INTEGER PRIMARY KEY");
+}
+
+/* The SQL dialect descriptor is the single home for dialect facts; assert the
+ * SQLite row (the other backends fill the same struct, checked in their e2e). */
+UTEST(db_backend, dialect_descriptor_sqlite)
+{
+    const HlDbDialect *d = &hl_db_backend_sqlite.dialect;
+    ASSERT_EQ(d->identifier_quote, '"');
+    ASSERT_STREQ(d->placeholder, "?");
+    ASSERT_STREQ(d->upsert_style, "on_conflict");
+    ASSERT_TRUE(d->supports_returning);              /* SQLite >= 3.35 */
+    ASSERT_TRUE(d->supports_index_if_not_exists);
+    ASSERT_STREQ(d->identity_column, "INTEGER PRIMARY KEY AUTOINCREMENT");
+    ASSERT_TRUE(d->identity_sequence == NULL);       /* identity is inline */
 }
 
 UTEST(db_backend, insert_if_absent_first_wins_dup_ignored)

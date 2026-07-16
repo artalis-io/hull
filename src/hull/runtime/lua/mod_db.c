@@ -1236,6 +1236,36 @@ static void push_bound_subtable(lua_State *L, const luaL_Reg *funcs,
     lua_setfield(L, -2, field);
 }
 
+/* Push (and set as the field "dialect" on the table at the top of the stack) a
+ * read-only snapshot of the backend's SQL dialect descriptor. The single home
+ * for identifier quoting, placeholder style, upsert grammar, RETURNING support,
+ * and identity DDL that the query / schema builders read. */
+static void push_dialect_table(lua_State *L, const HlDbBackend *be)
+{
+    lua_createtable(L, 0, 7);
+    char qs[2] = { (be && be->dialect.identifier_quote)
+                   ? be->dialect.identifier_quote : '"', '\0' };
+    lua_pushstring(L, qs);
+    lua_setfield(L, -2, "identifier_quote");
+    lua_pushstring(L, (be && be->dialect.placeholder) ? be->dialect.placeholder : "?");
+    lua_setfield(L, -2, "placeholder");
+    lua_pushstring(L, (be && be->dialect.upsert_style)
+                       ? be->dialect.upsert_style : "on_conflict");
+    lua_setfield(L, -2, "upsert_style");
+    lua_pushboolean(L, be && be->dialect.supports_returning);
+    lua_setfield(L, -2, "supports_returning");
+    lua_pushboolean(L, be && be->dialect.supports_index_if_not_exists);
+    lua_setfield(L, -2, "supports_index_if_not_exists");
+    lua_pushstring(L, (be && be->dialect.identity_column)
+                       ? be->dialect.identity_column : "INTEGER PRIMARY KEY");
+    lua_setfield(L, -2, "identity_column");
+    if (be && be->dialect.identity_sequence) {
+        lua_pushstring(L, be->dialect.identity_sequence);
+        lua_setfield(L, -2, "identity_sequence");
+    }
+    lua_setfield(L, -2, "dialect");
+}
+
 /* Push a fresh connection-object table whose methods carry @p h as upvalue 1. */
 static int push_conn_object(lua_State *L, HlDbHandle *h)
 {
@@ -1257,9 +1287,10 @@ static int push_conn_object(lua_State *L, HlDbHandle *h)
 #endif
     lua_pushstring(L, be ? be->name : "none");
     lua_setfield(L, -2, "backend_name");
-    lua_pushstring(L, (be && be->autoincrement_id_ddl)
-                       ? be->autoincrement_id_ddl : "INTEGER PRIMARY KEY");
+    lua_pushstring(L, (be && be->dialect.identity_column)
+                       ? be->dialect.identity_column : "INTEGER PRIMARY KEY");
     lua_setfield(L, -2, "autoincrement_id_ddl");
+    push_dialect_table(L, be);
     return 1;
 }
 
@@ -1328,9 +1359,10 @@ static int push_owned_conn_object(lua_State *L, HlDbHandle *h, const char *dsn)
     const HlDbBackend *be = h ? h->backend : NULL;
     lua_pushstring(L, be ? be->name : "none");
     lua_setfield(L, -2, "backend_name");
-    lua_pushstring(L, (be && be->autoincrement_id_ddl)
-                       ? be->autoincrement_id_ddl : "INTEGER PRIMARY KEY");
+    lua_pushstring(L, (be && be->dialect.identity_column)
+                       ? be->dialect.identity_column : "INTEGER PRIMARY KEY");
     lua_setfield(L, -2, "autoincrement_id_ddl");
+    push_dialect_table(L, be);
 
     /* Drop the owner box from under the returned table; the method closures
      * keep it alive (and GC-reachable) as long as the table is. */
