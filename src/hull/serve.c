@@ -88,6 +88,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>   /* strncasecmp (sandbox_db_path) */
 #include <stdarg.h>
 #include <sys/stat.h>
 #include <time.h>
@@ -1478,6 +1479,34 @@ static void hl_serve_undo_caps(HlServerState *s)
     }
 }
 
+/* Map a database DSN to the local filesystem path the kernel sandbox must gate,
+ * or NULL when there is no local file to gate: an in-memory database
+ * (":memory:") or a network backend (postgres:// / mysql:// / mariadb://).
+ * Without this the sandbox would treat the raw DSN string as a path and try to
+ * unveil e.g. "duckdb://:memory:", which fails (a harmless warning) or, for a
+ * scheme-qualified file DSN, gates the wrong directory. A scheme-less DSN (a
+ * bare path, ":memory:", or a "file:" URI) is returned unchanged so existing
+ * SQLite behavior is untouched. Returns a pointer into @p dsn. */
+static const char *sandbox_db_path(const char *dsn)
+{
+    if (!dsn) return NULL;
+    const char *sep = strstr(dsn, "://");
+    if (!sep) return dsn;   /* scheme-less: unchanged existing behavior */
+    size_t n = (size_t)(sep - dsn);
+    /* Network backends have no local file to sandbox. */
+    if ((n == 8  && strncasecmp(dsn, "postgres",   8)  == 0) ||
+        (n == 10 && strncasecmp(dsn, "postgresql", 10) == 0) ||
+        (n == 5  && strncasecmp(dsn, "mysql",      5)  == 0) ||
+        (n == 7  && strncasecmp(dsn, "mariadb",    7)  == 0))
+        return NULL;
+    /* File backends (sqlite:// / duckdb:// / file://): the target follows
+     * "://". An in-memory or empty target needs no file gating. */
+    const char *path = sep + 3;
+    if (*path == '\0' || strcmp(path, ":memory:") == 0)
+        return NULL;
+    return path;
+}
+
 /* Phase 2: apply the OS-level sandbox built from the resolved manifest. */
 static int hl_serve_apply_sandbox(HlServerState *s)
 {
@@ -1502,7 +1531,8 @@ static int hl_serve_apply_sandbox(HlServerState *s)
         }
 
         if (hl_sandbox_apply(&sandbox_policy, s->app_dir,
-                              s->cfg.no_db ? NULL : s->cfg.db_path, s->ca_bundle_path,
+                              s->cfg.no_db ? NULL : sandbox_db_path(s->cfg.db_path),
+                              s->ca_bundle_path,
                               s->cfg.tls_cert_path, s->cfg.tls_key_path) != 0) {
             log_error("[hull:c] sandbox enforcement failed");
             return -1;

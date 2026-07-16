@@ -239,16 +239,17 @@ regardless of order. The Makefile wraps the archive set in a group on Linux
 
 ## 6. Open items
 
-- **DuckDB under Hull's Linux sandbox.** The backend, unit tests, and the
-  app-level query path all work under the sandbox (`app.main` runs and returns
-  0), but running the DuckDB C++ engine under pledge/unveil yields a non-zero
-  process exit at teardown on Linux (macOS/seatbelt exits 0 cleanly). Also
-  cosmetic: the DB-path unveil logs a warning for a `duckdb://:memory:` DSN
-  because the sandbox treats the DSN string as a path (it should recognize the
-  scheme + `:memory:`, same as SQLite `:memory:`). Needs Linux iteration:
-  characterize which syscalls / paths DuckDB's thread pool + temp-dir logic
-  need, widen the pledge/unveil policy accordingly, and strip the `duckdb://`
-  scheme before the memory-DB check.
+- **DuckDB under Hull's Linux sandbox — resolved.** The Linux non-zero exit at
+  teardown was not a DuckDB-teardown bug: the sandbox was handed the raw DSN as
+  the DB path, so `duckdb://:memory:` was mangled (`strrchr('/')` lands inside
+  `://`), the unveil failed with a warning, and the resulting bogus fs gating
+  broke DuckDB's cleanup. `sandbox_db_path()` (src/hull/serve.c) now normalizes
+  a DSN before the sandbox gates it — a scheme-qualified in-memory or network
+  DSN gates nothing, a file DSN gates the real path — so the `:memory:` engine
+  runs and exits 0 under the full pledge/unveil sandbox (confirmed on Linux CI).
+  Remaining smaller item: a large DuckDB query that spills to a temp directory
+  needs that directory inside the sandbox's write set (fine for `:memory:` +
+  in-core work; revisit when wiring `fs.write` -> DuckDB `temp_directory`).
 - DuckDB rich-type mapping (JSON-encode-on-read vs extending `HlValue`).
 - Side-load install UX (distinct `hull-duckdb` binary vs in-place swap).
 - MariaDB per-connection dialect refinement (2.3).
