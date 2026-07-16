@@ -239,6 +239,16 @@ regardless of order. The Makefile wraps the archive set in a group on Linux
 
 ## 6. Open items
 
+- **DuckDB under Hull's Linux sandbox.** The backend, unit tests, and the
+  app-level query path all work under the sandbox (`app.main` runs and returns
+  0), but running the DuckDB C++ engine under pledge/unveil yields a non-zero
+  process exit at teardown on Linux (macOS/seatbelt exits 0 cleanly). Also
+  cosmetic: the DB-path unveil logs a warning for a `duckdb://:memory:` DSN
+  because the sandbox treats the DSN string as a path (it should recognize the
+  scheme + `:memory:`, same as SQLite `:memory:`). Needs Linux iteration:
+  characterize which syscalls / paths DuckDB's thread pool + temp-dir logic
+  need, widen the pledge/unveil policy accordingly, and strip the `duckdb://`
+  scheme before the memory-DB check.
 - DuckDB rich-type mapping (JSON-encode-on-read vs extending `HlValue`).
 - Side-load install UX (distinct `hull-duckdb` binary vs in-place swap).
 - MariaDB per-connection dialect refinement (2.3).
