@@ -802,6 +802,38 @@ jobs:
           cat /tmp/ddbsmoke/out.txt
           grep -q "DUCKDB SMOKE OK" /tmp/ddbsmoke/out.txt
 
+      - name: DuckDB mode B (fs.read -> allowed_directories, named connection)
+        timeout-minutes: 2
+        run: |
+          set -eu
+          # Mode B applies to a named (db.connect) / dynamic (db.open) connection,
+          # which opens after the manifest is known. Under the full pledge/unveil
+          # sandbox, DuckDB read_csv must be able to read a file WITHIN the
+          # declared fs.read directory (which is unveiled). Reads OUTSIDE it are
+          # blocked by the kernel unveil (EACCES); note that DuckDB aborts on a
+          # denied open rather than erroring, so the app must only read declared
+          # paths -- see docs/duckdb_backend_design.md §3.2. The default -d
+          # connection opens before the app loads and stays in mode A (smoke).
+          mkdir -p /tmp/ddbmodeb/data
+          printf 'id,name\n1,alice\n2,bob\n' > /tmp/ddbmodeb/data/test.csv
+          cat > /tmp/ddbmodeb/app.lua <<'EOF'
+          app.manifest({
+              modules = { "hull/db@1" },
+              fs = { read = { "data/*.csv" } },
+              databases = { named = { analytics = "duckdb://:memory:" } },
+          })
+          app.main(function(ctx)
+              local d = require("hull.db").connect("analytics")
+              local rows = d.query("SELECT id, name FROM read_csv('/tmp/ddbmodeb/data/test.csv')")
+              assert(rows and #rows == 2 and rows[1].name == "alice", "declared-dir read failed")
+              print("DUCKDB MODE B OK")
+              return 0
+          end)
+          EOF
+          ./build/hull /tmp/ddbmodeb/app.lua > /tmp/ddbmodeb/out.txt 2>&1
+          cat /tmp/ddbmodeb/out.txt
+          grep -q "DUCKDB MODE B OK" /tmp/ddbmodeb/out.txt
+
   coverage:
     name: Code Coverage
     runs-on: ubuntu-24.04

@@ -710,6 +710,19 @@ int hl_sandbox_apply(const HlSandboxPolicy *policy, const char *app_dir,
     /* /dev/urandom: needed by crypto.random and password hashing */
     unveil("/dev/urandom", "r");
 
+#ifdef HL_ENABLE_DUCKDB
+    /* DuckDB's C++ runtime reads these to detect CPU count, memory limits, and
+     * timezone data (its ICU extension). Without them a read_csv/read_parquet
+     * throws an internal NULL-deref and aborts (SIGABRT) under the sandbox.
+     * All read-only system-info paths. */
+    unveil("/etc/localtime",                    "r");
+    unveil("/sys/devices/system/cpu",           "r");
+    unveil("/sys/fs/cgroup",                    "r");   /* cgroup v2 memory.max */
+    unveil("/proc/self/cgroup",                 "r");
+    unveil("/proc/sys/vm/overcommit_memory",    "r");
+    unveil("/proc/meminfo",                     "r");
+#endif
+
     /* Manifest fs.read / fs.write paths: resolve relative to
      * app_dir (matching the capability layer) AND pre-mkdir so
      * unveil() can canonicalize. Without app_dir-relative

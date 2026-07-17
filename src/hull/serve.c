@@ -44,6 +44,7 @@
 #ifdef HL_ENABLE_DB
 #include "hull/worker_db.h"
 #include "hull/cap/db.h"
+#include "hull/cap/db_duckdb.h"   /* hl_db_duckdb_set_fs_policy (mode B) */
 #include "hull/migrate.h"
 #endif
 #include "hull/cap/audit.h"
@@ -1115,6 +1116,72 @@ static int hl_serve_load_app(HlServerState *s)
  * Split out of a 296-line monolith as roadmap item H.
  */
 
+#ifdef HL_ENABLE_DUCKDB
+/* Resolve the manifest's fs.read + fs.write patterns to absolute directories
+ * and install them as DuckDB's bounded file-access policy (design §3.2 mode B).
+ * Each entry's glob tail is stripped, the remainder resolved absolute against
+ * app_dir, then mapped to a directory (the path itself if it is one, else its
+ * parent). Duplicates are dropped. The array + strings are allocated in the
+ * (about-to-be-sealed) policy arena, so DuckDB reads RO memory that outlives
+ * the process. A no-op — leaving DuckDB in full lockdown (mode A) — when no fs
+ * paths are declared or the arena is exhausted (fail-closed). Must run before
+ * the arena is sealed and before any DuckDB connection opens. */
+static void hl_serve_install_duckdb_fs_policy(HlServerState *s)
+{
+    const HlManifest *m = &s->manifest;
+    int total = m->fs_read_count + m->fs_write_count;
+    if (total <= 0) return;
+
+    const char *uniq[2 * HL_MANIFEST_MAX_PATHS];
+    int nuniq = 0;
+
+    for (int idx = 0; idx < total; idx++) {
+        const char *e = (idx < m->fs_read_count)
+            ? m->fs_read[idx]
+            : m->fs_write[idx - m->fs_read_count];
+        if (!e || !e[0]) continue;
+
+        /* Strip a glob tail: truncate at the last '/' before the first '*'. */
+        char work[4096];
+        snprintf(work, sizeof work, "%s", e);
+        char *star = strchr(work, '*');
+        if (star) { while (star > work && *star != '/') star--; *star = '\0'; }
+
+        /* Resolve absolute against app_dir. */
+        char abs[4096];
+        if (work[0] == '/') snprintf(abs, sizeof abs, "%s", work);
+        else if (work[0])   snprintf(abs, sizeof abs, "%s/%s", s->app_dir, work);
+        else                snprintf(abs, sizeof abs, "%s", s->app_dir);
+
+        /* Map to a directory: the path itself if it is one, else its parent. */
+        struct stat st;
+        if (!(stat(abs, &st) == 0 && S_ISDIR(st.st_mode))) {
+            char *sl = strrchr(abs, '/');
+            if (sl && sl != abs) *sl = '\0';
+            else                 snprintf(abs, sizeof abs, "%s", s->app_dir);
+        }
+
+        int dup = 0;
+        for (int j = 0; j < nuniq; j++)
+            if (strcmp(uniq[j], abs) == 0) { dup = 1; break; }
+        if (dup) continue;
+        if (nuniq >= (int)(sizeof uniq / sizeof uniq[0])) break;
+
+        char *sealed = sh_seal_arena_strdup(&s->seal_arena, abs);
+        if (!sealed) return;   /* arena OOM -> fail closed (mode A) */
+        uniq[nuniq++] = sealed;
+    }
+
+    if (nuniq <= 0) return;
+    const char **arr = sh_seal_arena_alloc(&s->seal_arena,
+                                           (size_t)nuniq * sizeof(char *),
+                                           _Alignof(char *));
+    if (!arr) return;
+    for (int i = 0; i < nuniq; i++) arr[i] = uniq[i];
+    hl_db_duckdb_set_fs_policy(arr, nuniq);
+}
+#endif /* HL_ENABLE_DUCKDB */
+
 /* Phase 1: extract manifest + resolve module set + wire per-capability configs.
  *
  * Returns 0 on success, -1 if module resolution fails (unknown name,
@@ -1247,6 +1314,12 @@ static int hl_serve_wire_caps(HlServerState *s)
             memcpy(resolved, &s->module_set, sizeof(HlResolvedModuleSet));
             rt->module_set = resolved;
         }
+
+#ifdef HL_ENABLE_DUCKDB
+        /* Install DuckDB's bounded file-access policy from the sealed manifest's
+         * fs paths (mode B), into the arena, before it is mprotect-RO'd. */
+        hl_serve_install_duckdb_fs_policy(s);
+#endif
 
         if (sh_seal_arena_seal(&s->seal_arena) != 0) {
             log_error("[hull:c] seal arena mprotect failed");

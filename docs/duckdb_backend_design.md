@@ -128,7 +128,7 @@ The concern: DuckDB SQL can do its own file/network I/O (`read_parquet`,
 connection open and then lock it so app SQL cannot undo it.
 
 ```sql
--- always, on open:
+-- always, at config time (before open):
 SET autoinstall_known_extensions = false;
 SET autoload_known_extensions    = false;
 SET allow_unsigned_extensions    = false;
@@ -138,25 +138,87 @@ SET enable_external_access = false;      -- DB file + :memory: only
 
 -- (B) fs.read / fs.write declared  ->  bounded LOCAL access, still no network:
 SET enable_external_access = true;
-SET allowed_directories = ['<mapped fs.read/fs.write dirs>'];
-SET allowed_paths       = ['<mapped specific files>'];
-SET disabled_filesystems = 'HTTPFileSystem,S3FileSystem,...';
+SET allowed_directories = ['<absolute dirs from fs.read/fs.write>'];  -- post-connect
 
--- finally, in BOTH cases:
+-- finally, in BOTH cases (post-connect):
 SET lock_configuration = true;           -- app SQL can no longer re-enable anything
 ```
 
 - **`lock_configuration = true` is the keystone.** Without it a handler could
   run `SET enable_external_access = true` and escape; with it the posture is
   fixed for the connection's life.
-- **Network is off structurally in v1**: httpfs / S3 are never linked or loaded,
-  so there is no outbound path even before config.
-- **File access reuses `fs.read` / `fs.write`** (no new capability concept): the
-  only thing that widens DuckDB's file reach is the app's existing manifest fs
-  paths, mapped to `allowed_directories` / `allowed_paths`. A `read_parquet('/x')`
-  on an ungranted path fails closed exactly like `fs.read('/x')`. The DB *file*
-  itself (the DSN path) is already gated by the existing DB-path sandbox, same
-  as a SQLite file. DuckDB therefore introduces zero new capability surface.
+- **Network is off structurally**: httpfs / S3 are never linked or loaded, so
+  there is no outbound path even before config. (No `disabled_filesystems` SET
+  is needed — the filesystems simply do not exist in the binary.)
+- **File access reuses `fs.read` / `fs.write`** (no new capability concept):
+  serve.c resolves each declared fs path to its absolute containing directory
+  (glob tail stripped; the path itself if it is a directory, else its parent),
+  dedups, and installs the set as DuckDB's `allowed_directories`. A
+  `read_parquet('/x')` on an ungranted path fails closed exactly like
+  `fs.read('/x')`; the same fs paths are also unveiled/seatbelt'd, so the kernel
+  sandbox and DuckDB agree. The DB *file* itself (the DSN path) is gated by the
+  existing DB-path sandbox, same as a SQLite file. DuckDB introduces zero new
+  capability surface. (Directory granularity, not per-file `allowed_paths`, in
+  this pass: a declared file grants its containing directory.)
+
+**Implementation (status: done) — mode B is a named/dynamic-connection feature.**
+The policy is computed once at boot from the sealed manifest
+(`hl_serve_install_duckdb_fs_policy` in serve.c, into the sealed policy arena)
+and read by `duck_open` via `hl_db_duckdb_set_fs_policy`. A connection opened
+**after** the policy is installed picks up mode B; one opened **before** it gets
+mode A. In practice:
+
+- **Named (`db.connect`) and dynamic (`db.open`) connections** open lazily from
+  `app.main` / a handler — after the manifest is sealed and the policy is
+  installed — so they get **mode B**.
+- **The default `-d` connection** is opened during app-context init, *before*
+  the app (and thus the manifest) loads, so app top-level code (e.g.
+  `session.init()` creating tables) has a live DB. It therefore stays in
+  **locked-down mode A**: normal SQL works, but SQL-driven external file access
+  is off. For DuckDB file access, declare a named connection.
+
+This split keeps the default connection's lockdown a hard guarantee (locked at
+open, no unlocked window) and keeps top-level DB usage working, while giving
+OLAP apps mode B on the connection they load data through. Making the *default*
+connection mode B would require either opening it before the manifest is known
+(impossible) or an unlocked-until-finalized window during the app's own load (a
+capability weakening we chose not to take); a mid-load manifest hook is a
+possible future refinement.
+
+**Sandbox interaction (Linux).** DuckDB's C++ runtime reads a handful of
+read-only system-info paths to detect CPU count, memory limits, and timezone
+data (its ICU extension): `/dev/urandom`, `/etc/localtime`,
+`/sys/devices/system/cpu`, `/sys/fs/cgroup`, `/proc/self/cgroup`,
+`/proc/sys/vm/overcommit_memory`, `/proc/meminfo`. Under Hull's default-deny
+unveil these are blocked and DuckDB aborts (an internal NULL-deref) rather than
+degrading, so `sandbox.c` unveils them read-only in `HL_ENABLE_DUCKDB` builds
+(a CI strace under `--no-sandbox` enumerated the set; it is small and static).
+
+Even with those paths unveiled, DuckDB's memory/thread **auto-detection** hits
+some resource that still fails under the sandbox and aborts, so `duck_open` pins
+`memory_limit` (2 GB) and `threads` (4) at config time to skip auto-detection
+entirely. These are fixed, conservative defaults — a real limitation for large
+OLAP under the sandbox; a manifest option to tune them is tracked. With the
+unveils + pinned limits, a mode-B `read_csv` / `read_parquet` of a declared
+`fs.read` file works under the full sandbox.
+
+**The fs bound is enforced by the kernel unveil.** DuckDB may only open files
+under the unveiled `fs.read` / `fs.write` directories, so an undeclared
+`read_csv('/x')` is blocked at the syscall. DuckDB's `SET allowed_directories`
+is set post-connect as intended defense-in-depth, but it is runtime-SET-only
+(not accepted by `duckdb_set_config` at config time) and does **not** enforce on
+Linux (it does on macOS — a DuckDB platform quirk), so the kernel unveil is the
+authoritative bound.
+
+**Known limitation — apps must only read declared paths.** Because
+`allowed_directories` does not pre-empt the open on Linux, an undeclared read
+reaches the kernel, gets `EACCES`, and DuckDB **aborts the process** (NULL-deref
+on the denied open) instead of returning a catchable error. Security holds (no
+data leaks — the read is blocked), but a read of an undeclared path crashes the
+DuckDB process rather than erroring. App SQL must therefore reference only
+paths the manifest declares; a path derived from untrusted input is an app bug
+(and a crash, not a leak). Making an undeclared read a clean error would need
+`allowed_directories` to enforce on Linux (an upstream DuckDB fix) — tracked.
 
 ### 3.3 Packaging (side-loaded, on-demand)
 
@@ -230,9 +292,9 @@ regardless of order. The Makefile wraps the archive set in a group on Linux
    slice** first (open/query/exec/txn on :memory:/file, prepared-statement param
    binding, columnar chunk decode, the full-lockdown security config, the dialect
    row, `duckdb://` selection, unit tests). The mbedTLS symbol isolation (3.4)
-   that lets DuckDB coexist with the full HTTP/TLS stack landed as the
-   immediate follow-up. Still deferred: the manifest-driven
-   `fs.read`/`fs.write` -> `allowed_directories` mode, the
+   that lets DuckDB coexist with the full HTTP/TLS stack, and the
+   manifest-driven `fs.read`/`fs.write` -> `allowed_directories` mode B (3.2),
+   landed as follow-ups. Still deferred: the
    `insert_if_absent`/`upsert`/`table_columns` dialect helpers, temporal /
    decimal / nested type decoding, and the signed side-load packaging (3.3).
 4. OLAP optional vtable methods (columnar fetch, Appender) as a follow-on.

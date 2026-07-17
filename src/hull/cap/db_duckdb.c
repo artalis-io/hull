@@ -52,20 +52,67 @@ static void duck_set_err(HlDbDuckCtx *s, const char *msg)
     snprintf(s->errmsg, sizeof s->errmsg, "%s", msg ? msg : "duckdb error");
 }
 
-/* ── Security lockdown (core, manifest-independent) ────────────────────
+/* ── Manifest-driven file-access policy ────────────────────────────────
+ *
+ * The bounded-local-access mode (design §3.2 mode B): when the app declares
+ * fs.read / fs.write paths, DuckDB SQL (read_csv / read_parquet / COPY) may
+ * touch exactly those directories, nothing else. serve.c resolves the manifest
+ * fs paths to absolute directories (in the sealed policy arena) and hands them
+ * here once at boot, before any connection opens; duck_open reads the pointer.
+ * The array + strings are sealed (RO) memory owned by the caller for process
+ * life. When no fs paths are declared (or DuckDB isn't enabled) the policy is
+ * empty and duck_open applies full lockdown (mode A). */
+static const char *const *g_duck_allowed_dirs = NULL;
+static int                g_duck_allowed_ndirs = 0;
+
+void hl_db_duckdb_set_fs_policy(const char *const *dirs, int ndirs)
+{
+    g_duck_allowed_dirs  = (ndirs > 0) ? dirs : NULL;
+    g_duck_allowed_ndirs = (ndirs > 0 && dirs) ? ndirs : 0;
+}
+
+/* Build the DuckDB list literal ['d1','d2',...] for the declared policy (single
+ * quotes doubled), used for both the config-time allowed_directories option and
+ * the post-connect SET. Returns a malloc'd string, or NULL (empty policy/OOM). */
+static char *duck_alloc_dirs_list(void)
+{
+    if (g_duck_allowed_ndirs <= 0 || !g_duck_allowed_dirs) return NULL;
+    size_t cap = 8;
+    for (int i = 0; i < g_duck_allowed_ndirs; i++)
+        cap += (g_duck_allowed_dirs[i] ? strlen(g_duck_allowed_dirs[i]) : 0) * 2 + 8;
+    char *s = malloc(cap);
+    if (!s) return NULL;
+    size_t off = 0;
+    s[off++] = '[';
+    for (int i = 0; i < g_duck_allowed_ndirs; i++) {
+        const char *d = g_duck_allowed_dirs[i] ? g_duck_allowed_dirs[i] : "";
+        if (i > 0 && off < cap) s[off++] = ',';
+        if (off < cap) s[off++] = '\'';
+        for (const char *p = d; *p && off + 2 < cap; p++) {
+            if (*p == '\'') s[off++] = '\'';
+            s[off++] = *p;
+        }
+        if (off < cap) s[off++] = '\'';
+    }
+    if (off + 2 >= cap) { free(s); return NULL; }
+    s[off++] = ']';
+    s[off] = '\0';
+    return s;
+}
+
+/* ── Security lockdown ─────────────────────────────────────────────────
  *
  * DuckDB SQL can drive its own file/network I/O (read_csv, read_parquet,
  * COPY, httpfs), which would bypass Hull's capability model. Network is
  * already structurally absent (httpfs / S3 are not in the linked archive
- * set). Here we additionally forbid installing / loading extensions and
- * disable all external (local file) access, then LOCK the configuration so
- * app SQL cannot re-enable any of it. This is the SQLite-equivalent full
- * lockdown; the bounded-local-access mode (fs.read/fs.write ->
- * allowed_directories) is a follow-up that needs the manifest at open time.
+ * set). Here we forbid installing / loading extensions and gate external
+ * (local file) access: OFF entirely (mode A) when no fs paths are declared,
+ * or ON but bounded to allowed_directories (mode B, applied post-connect in
+ * duck_open) when they are. lock_configuration (in duck_open, after connect)
+ * then freezes it so app SQL cannot re-enable anything.
  *
- * Extension-install / access options are set at config time (before open);
- * lock_configuration is applied last, after connect, so the config-time sets
- * are not themselves rejected by the lock. */
+ * These options are set at config time (before open); lock_configuration is
+ * applied last so the config-time sets are not themselves rejected. */
 static int duck_apply_config_security(duckdb_config config)
 {
     /* Each returns DuckDBSuccess/Error; a rejected option name is fatal (the
@@ -76,11 +123,44 @@ static int duck_apply_config_security(duckdb_config config)
         return -1;
     if (duckdb_set_config(config, "allow_unsigned_extensions", "false") != DuckDBSuccess)
         return -1;
-    /* No fs.read/fs.write plumbing in this slice -> full lockdown: DB file +
-     * :memory: only, no SQL-driven external file access. */
-    if (duckdb_set_config(config, "enable_external_access", "false") != DuckDBSuccess)
+    /* Pin memory + threads so DuckDB does NOT auto-detect them by probing /sys
+     * and /proc. Even with those paths unveiled (see sandbox.c), auto-detection
+     * hits some resource that fails under the sandbox and DuckDB NULL-derefs
+     * (aborts) rather than degrading — pinning the values avoids that path
+     * entirely. Fixed, conservative defaults; a future manifest option can make
+     * them tunable (tracked in docs/duckdb_backend_design.md §3.2). */
+    if (duckdb_set_config(config, "memory_limit", "2GB") != DuckDBSuccess)
+        return -1;
+    if (duckdb_set_config(config, "threads", "4") != DuckDBSuccess)
+        return -1;
+    /* Mode B enables external access but bounds it to allowed_directories;
+     * mode A leaves it off (DB file + :memory: only). */
+    const char *ext = (g_duck_allowed_ndirs > 0) ? "true" : "false";
+    if (duckdb_set_config(config, "enable_external_access", ext) != DuckDBSuccess)
         return -1;
     return 0;
+}
+
+/* Emit `SET allowed_directories = ['d1','d2',...]` for the declared policy and
+ * run it on @p con (single quotes in a path are doubled). Returns 0, or -1 on
+ * allocation / execution failure (with *errmsg set via the caller). No-op
+ * returning 0 when the policy is empty. Called after connect, before the lock. */
+static int duck_apply_allowed_dirs(duckdb_connection con)
+{
+    if (g_duck_allowed_ndirs <= 0 || !g_duck_allowed_dirs) return 0;   /* mode A */
+    char *list = duck_alloc_dirs_list();
+    if (!list) return -1;
+    size_t cap = strlen(list) + 32;   /* "SET allowed_directories = " + NUL */
+    char *sql = malloc(cap);
+    if (!sql) { free(list); return -1; }
+    snprintf(sql, cap, "SET allowed_directories = %s", list);
+    free(list);
+
+    duckdb_result r;
+    int ok = (duckdb_query(con, sql, &r) == DuckDBSuccess);
+    duckdb_destroy_result(&r);
+    free(sql);
+    return ok ? 0 : -1;
 }
 
 /* ── Open / close ─────────────────────────────────────────────────── */
@@ -126,6 +206,16 @@ static int duck_open(void **out_ctx, const char *dsn, HlAllocator *alloc)
 
     if (duckdb_connect(s->db, &s->con) != DuckDBSuccess) {
         duck_set_err(s, "duckdb_connect failed");
+        duckdb_close(&s->db);
+        free(s);
+        return -1;
+    }
+
+    /* Mode B: bound external file access to the manifest-declared directories
+     * (before the lock, so it sticks). No-op under mode A. */
+    if (duck_apply_allowed_dirs(s->con) != 0) {
+        duck_set_err(s, "duckdb allowed_directories failed");
+        duckdb_disconnect(&s->con);
         duckdb_close(&s->db);
         free(s);
         return -1;
