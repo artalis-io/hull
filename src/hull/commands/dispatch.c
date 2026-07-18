@@ -43,6 +43,7 @@
 #include "hull/commands/update.h"
 #include "hull/commands/tools.h"
 #include "hull/commands/flavor.h"
+#include "hull/commands/feature.h"
 #endif
 #include "hull/commands/sign_release.h"
 #include "hull/commands/verify_release.h"
@@ -88,6 +89,7 @@ static const HlCommand commands[] = {
     { "update",         hl_cmd_update },
     { "tools",          hl_cmd_tools },
     { "flavor",         hl_cmd_flavor },   /* installs published build flavors ("platform" = build target, not this) */
+    { "feature",        hl_cmd_feature },  /* installs composable feature libs (e.g. duckdb) */
 #endif
     { "sign-release",   hl_cmd_sign_release },
     { "verify-release", hl_cmd_verify_release },

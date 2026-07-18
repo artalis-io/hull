@@ -793,6 +793,22 @@ jobs:
           echo "$OUT"
           echo "$OUT" | grep -q "FEATURE DUCKDB LINK OK"
 
+      - name: hull feature command smoke
+        timeout-minutes: 2
+        run: |
+          set -e
+          # Phase 3: the `hull feature` command (install/list/uninstall), which
+          # fetches libhull_feature-<name>-<arch>.a via the signed release chain.
+          # The live install needs a release that publishes the asset (Phase 5),
+          # so here we only exercise the offline surface: list + validation.
+          ./build/hull feature list | tee /tmp/feat_list.txt
+          grep -q duckdb /tmp/feat_list.txt
+          # unknown feature => error + non-zero exit
+          if ./build/hull feature install nonexistent 2>/tmp/feat_err.txt; then
+              echo "expected failure for unknown feature"; exit 1
+          fi
+          grep -q "unknown feature" /tmp/feat_err.txt
+
       - name: DuckDB app smoke (duckdb://:memory:)
         timeout-minutes: 2
         run: |
