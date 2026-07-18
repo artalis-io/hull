@@ -94,7 +94,7 @@ int hl_cmd_help(int argc, char **argv, const HlCommandEnv *env)
     section(f, "Self-management");
     row(f, "update",        "self-update hull from GitHub releases");
     row(f, "tools",         "install / list / uninstall side-loaded tools (e.g. wamrc)");
-    row(f, "platform",      "install / list per-flavor platform libs for hull build --flavor");
+    row(f, "flavor",        "install / list published build flavors for hull build --flavor");
     row(f, "cache",         "list / prune / clear runtime cache pool (HULL_CACHE_DIR)");
 #else
     section(f, "Self-management");

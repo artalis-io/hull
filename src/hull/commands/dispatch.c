@@ -87,7 +87,8 @@ static const HlCommand commands[] = {
 #ifdef HL_ENABLE_HTTP_CLIENT
     { "update",         hl_cmd_update },
     { "tools",          hl_cmd_tools },
-    { "platform",       hl_cmd_platform },
+    { "flavor",         hl_cmd_platform },   /* canonical: installs published build flavors */
+    { "platform",       hl_cmd_platform },   /* deprecated alias for "flavor" */
 #endif
     { "sign-release",   hl_cmd_sign_release },
     { "verify-release", hl_cmd_verify_release },

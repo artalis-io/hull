@@ -179,6 +179,18 @@ hull build -o myapp . --compiler=/path/to/cc  # explicit compiler path
 
 Cosmopolitan APE binaries run on Linux, macOS, Windows, FreeBSD, OpenBSD, and NetBSD from a single file. Hull builds multi-architecture platform archives (`make platform-cosmo`) so the resulting APE binary is a true fat binary for both x86_64 and aarch64.
 
+### Features, flavors, and tools
+
+Three layers describe what's inside a Hull binary and how you get capability you didn't compile yourself. They're distinct, and it's worth keeping them straight:
+
+- **Feature** — a compile-time knob (`HL_ENABLE_*`). Internal and build-time; you don't "install" a feature, it's either compiled in or not. The database connectors are one **family** of features: `sqlite`, `postgres`, `mysql`, and `duckdb` are each an `HlDbBackend` chosen by DSN scheme (`postgres://`, `duckdb://`, …) behind a single vtable — so Postgres and MySQL are *not* separate flavors, they're sibling connectors. GPU, the two HTTP halves, TUI, and TinyCC are features too.
+
+- **Flavor** — a **named, published, signed build**: a curated preset of features you *fetch instead of compiling*. Most flavors are **subtractive** slims of the default (`server-only`, `client-only`, `pure-compute` drop HTTP halves / TLS). A flavor can also be **additive**: `full-duckdb` is `full` *plus* the DuckDB connector — a sibling above `full`, not a slim of it. Additive flavors are opt-in by name (never `--flavor=auto`) and exist only when a feature is too big to compile from source conveniently: DuckDB's ~58 MB static lib is why `full-duckdb` is published, whereas the tiny pure-C `postgres`/`mysql` connectors stay build-from-source features. Install with `hull flavor install <flavor>`, build with `hull build --flavor=<flavor>`.
+
+- **Tool** — a separate companion **program** Hull shells out to, not part of Hull's own build (e.g. `wamrc`, the LLVM-based WASM AOT compiler). Install with `hull tools install <name>`; Hull spawns it when needed.
+
+The two install verbs mirror the split: **`hull tools install`** for foreign helper programs, **`hull flavor install`** for builds of Hull itself. (`hull platform install` is a deprecated alias of `hull flavor install`.)
+
 ### Build Flavors
 
 `hull build --flavor=<flavor>` builds a slimmer app binary by linking a matching per-flavor platform library instead of the full one. The flavor selects which HTTP halves are compiled in, and the app's manifest is validated against the target flavor at build time: an app that declares a module needing a dropped subsystem is rejected before it links.
@@ -191,10 +203,10 @@ Cosmopolitan APE binaries run on Linux, macOS, Windows, FreeBSD, OpenBSD, and Ne
 | `pure-compute` | none | Offline compute / signing binary. Drops mbedTLS + Keel; smallest binary |
 | `auto` | inferred | Picks the minimal flavor from the app's declared modules |
 
-You do not build the platform library from source. `hull platform install <flavor>` (and `hull platform list`) fetches the per-flavor libs for this hull's platform from the matching signed release, verifies the Ed25519 signature on `hull.sha256` and the SHA-256 of each lib, and caches them under `~/.hull/platform/`; `hull build --flavor` then picks up the cached lib automatically.
+You do not build the platform library from source. `hull flavor install <flavor>` (and `hull flavor list`) fetches the per-flavor libs for this hull's platform from the matching signed release, verifies the Ed25519 signature on `hull.sha256` and the SHA-256 of each lib, and caches them under `~/.hull/platform/`; `hull build --flavor` then picks up the cached lib automatically. (`hull platform install` / `list` remain as deprecated aliases.)
 
 ```bash
-hull platform install pure-compute        # fetch + verify + cache the platform lib
+hull flavor install pure-compute          # fetch + verify + cache the platform lib
 hull build --flavor=pure-compute -o mytool .
 hull build --flavor=auto -o myapp .        # infer the minimal flavor
 ```

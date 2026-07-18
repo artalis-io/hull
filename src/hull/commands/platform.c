@@ -265,7 +265,7 @@ static int cmd_list(void)
             if (access(p, R_OK) != 0) { cached = 0; break; }
         }
         fprintf(stdout, "  %-14s %s\n", all[i].name,
-                cached ? "installed" : "not installed (hull platform install)");
+                cached ? "installed" : "not installed (hull flavor install)");
     }
     return 0;
 }
@@ -283,14 +283,14 @@ int hl_cmd_platform(int argc, char **argv, const HlCommandEnv *env)
 
     if (sub && strcmp(sub, "install") == 0) {
         if (!flavor) {
-            fprintf(stderr, "usage: hull platform install <flavor> [--repo=ORG/NAME]\n");
+            fprintf(stderr, "usage: hull flavor install <flavor> [--repo=ORG/NAME]\n");
             return 1;
         }
         return cmd_install(flavor, repo);
     }
     if (sub && strcmp(sub, "list") == 0) return cmd_list();
 
-    fprintf(stderr, "usage: hull platform install <flavor> | hull platform list\n");
+    fprintf(stderr, "usage: hull flavor install <flavor> | hull flavor list\n");
     return sub ? 1 : 0;
 }
 
