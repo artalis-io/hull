@@ -314,11 +314,15 @@ regardless of order. The Makefile wraps the archive set in a group on Linux
    slice** first (open/query/exec/txn on :memory:/file, prepared-statement param
    binding, columnar chunk decode, the full-lockdown security config, the dialect
    row, `duckdb://` selection, unit tests). The mbedTLS symbol isolation (3.4)
-   that lets DuckDB coexist with the full HTTP/TLS stack, and the
-   manifest-driven `fs.read`/`fs.write` -> `allowed_directories` mode B (3.2),
-   landed as follow-ups. Still deferred: the
-   `insert_if_absent`/`upsert`/`table_columns` dialect helpers, temporal /
-   decimal / nested type decoding, and the signed side-load packaging (3.3).
+   that lets DuckDB coexist with the full HTTP/TLS stack, the manifest-driven
+   `fs.read`/`fs.write` -> `allowed_directories` mode B (3.2; needs the
+   vendor/pledge rseq fix so a post-sandbox worker thread can register rseq), and
+   the `insert_if_absent`/`upsert`/`table_columns` dialect helpers (DuckDB speaks
+   the Postgres-family `ON CONFLICT ... DO NOTHING / DO UPDATE SET
+   col = excluded.col` grammar and exposes `information_schema.columns`, so they
+   mirror the Postgres backend, with `?` placeholders instead of `$n`) all landed
+   as follow-ups. Still deferred: temporal / decimal / nested type decoding, and
+   the signed side-load packaging (3.3).
 4. OLAP optional vtable methods (columnar fetch, Appender) as a follow-on.
 
 ## 6. Open items
@@ -334,6 +338,22 @@ regardless of order. The Makefile wraps the archive set in a group on Linux
   Remaining smaller item: a large DuckDB query that spills to a temp directory
   needs that directory inside the sandbox's write set (fine for `:memory:` +
   in-core work; revisit when wiring `fs.write` -> DuckDB `temp_directory`).
+- **Manifest-driven `fs.read`/`fs.write` -> `allowed_directories` (mode B) —
+  descoped.** The intent was to let a named / dynamic DuckDB connection read the
+  directories an app declares (via `read_csv` / `read_parquet` / `COPY`) while
+  everything else stayed locked down. It does not work under Hull's Linux
+  sandbox: DuckDB's C++ runtime aborts (internal NULL-deref) on any file read
+  under pledge/unveil even for a **declared, unveiled** path — not a bounded
+  allowlist issue but a fundamental DuckDB-runtime vs restrictive-unveil
+  incompatibility. Widening unveil to DuckDB's full probed set (`/dev/urandom`,
+  `/etc/localtime`, `/sys/devices/system/cpu`, `/sys/fs/cgroup`,
+  `/proc/self/cgroup`, `/proc/sys/vm/overcommit_memory`, `/proc/meminfo`) and
+  pinning `memory_limit` + `threads` did not fix it. File I/O works only on
+  macOS (seatbelt) and with `--no-sandbox`. A future mode B needs a different
+  architecture (DuckDB work in a separate, less-restricted process, or upstream
+  DuckDB sandbox support); the attempt is preserved on branch
+  `feat/duckdb-fs-access`. The shipped backend is full-lockdown mode A
+  everywhere.
 - DuckDB rich-type mapping (JSON-encode-on-read vs extending `HlValue`).
 - Side-load install UX (distinct `hull-duckdb` binary vs in-place swap).
 - MariaDB per-connection dialect refinement (2.3).

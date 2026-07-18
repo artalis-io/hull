@@ -6,14 +6,14 @@
  * (injection-safe; values never touch the SQL text), and result values decode
  * from DuckDB's columnar data chunks into HlValue via the stable vector API.
  *
- * Covers open/query/exec/txn against :memory: or a file, the dialect row, and
- * two security modes: full lockdown (mode A, no external file access) and the
- * manifest-driven fs.read/fs.write -> allowed_directories mode (mode B). Mode B
- * needs the vendor/pledge rseq fix: a named connection opens post-sandbox and
- * spawns DuckDB's worker pool, whose threads must register rseq (see
- * docs/duckdb_backend_design.md §3.2). Deferred to follow-ups: the
- * insert_if_absent/upsert/table_columns dialect helpers, temporal / decimal /
- * nested type decoding, and the signed side-load packaging. db.udf and
+ * Covers open/query/exec/txn against :memory: or a file, the dialect row, the
+ * insert_if_absent/upsert/table_columns dialect helpers, and two security modes:
+ * full lockdown (mode A, no external file access) and the manifest-driven
+ * fs.read/fs.write -> allowed_directories mode (mode B). Mode B needs the
+ * vendor/pledge rseq fix: a named connection opens post-sandbox and spawns
+ * DuckDB's worker pool, whose threads must register rseq (see
+ * docs/duckdb_backend_design.md §3.2). Deferred to follow-ups: temporal /
+ * decimal / nested type decoding, and the signed side-load packaging. db.udf and
  * hull/search stay SQLite-only. See docs/duckdb_backend_design.md.
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
@@ -462,6 +462,141 @@ static const char *duck_errmsg(HlDbHandle *h)
     return s->errmsg[0] ? s->errmsg : "";
 }
 
+/* ── Dialect helpers ──────────────────────────────────────────────────
+ *
+ * DuckDB speaks the Postgres-family `ON CONFLICT (...) DO NOTHING / DO UPDATE
+ * SET col = excluded.col` grammar and exposes information_schema.columns, so
+ * these mirror the Postgres backend. The one simplification: DuckDB binds
+ * positional params with '?' (no $n rewrite), so placeholders are emitted
+ * literally and pass straight through duck_query's prepared-statement path. */
+
+/* Append to a bounded buffer; latch overflow via *off >= cap (checked once at
+ * the end, before NUL-terminating). */
+static void duck_ap(char *buf, size_t cap, size_t *off, const char *str)
+{
+    size_t n = strlen(str);
+    if (*off + n < cap) memcpy(buf + *off, str, n);
+    *off += n;
+}
+
+static int duck_build_and_run_insert(HlDbHandle *h, const char *table,
+                                     const char *const *conflict_cols,
+                                     int n_conflict, const char *const *cols,
+                                     const HlValue *values, int n_cols,
+                                     int do_update)
+{
+    /* Budget each column up to three times (insert list, and both sides of
+     * `col = excluded.col` for DO UPDATE) plus overhead, so a long column name
+     * cannot overflow the estimate and silently truncate. */
+    size_t cap = 64 + strlen(table);
+    for (int i = 0; i < n_cols; i++) cap += strlen(cols[i]) * 3 + 40;
+    for (int i = 0; i < n_conflict; i++) cap += strlen(conflict_cols[i]) + 4;
+    char *sql = malloc(cap);
+    if (!sql) return -1;
+    size_t off = 0;
+
+    duck_ap(sql, cap, &off, "INSERT INTO ");
+    duck_ap(sql, cap, &off, table);
+    duck_ap(sql, cap, &off, " (");
+    for (int i = 0; i < n_cols; i++) {
+        if (i) duck_ap(sql, cap, &off, ", ");
+        duck_ap(sql, cap, &off, cols[i]);
+    }
+    duck_ap(sql, cap, &off, ") VALUES (");
+    for (int i = 0; i < n_cols; i++)
+        duck_ap(sql, cap, &off, i ? ", ?" : "?");
+    duck_ap(sql, cap, &off, ") ON CONFLICT (");
+    for (int i = 0; i < n_conflict; i++) {
+        if (i) duck_ap(sql, cap, &off, ", ");
+        duck_ap(sql, cap, &off, conflict_cols[i]);
+    }
+    duck_ap(sql, cap, &off, ") DO ");
+    if (do_update) {
+        duck_ap(sql, cap, &off, "UPDATE SET ");
+        for (int i = 0; i < n_cols; i++) {
+            if (i) duck_ap(sql, cap, &off, ", ");
+            duck_ap(sql, cap, &off, cols[i]);
+            duck_ap(sql, cap, &off, " = excluded.");
+            duck_ap(sql, cap, &off, cols[i]);
+        }
+    } else {
+        duck_ap(sql, cap, &off, "NOTHING");
+    }
+
+    if (off >= cap) {                            /* estimate was too small */
+        free(sql);
+        duck_set_err(h ? h->ctx : NULL,
+                     "insert/upsert SQL exceeded its estimated buffer");
+        return -1;
+    }
+    sql[off] = '\0';
+
+    int rc = duck_exec(h, sql, values, n_cols);
+    free(sql);
+    return rc;
+}
+
+static int duck_insert_if_absent(HlDbHandle *h, const char *table,
+                                 const char *const *conflict_cols, int n_conflict,
+                                 const char *const *cols,
+                                 const HlValue *values, int n_cols)
+{
+    return duck_build_and_run_insert(h, table, conflict_cols, n_conflict,
+                                     cols, values, n_cols, 0);
+}
+
+static int duck_upsert(HlDbHandle *h, const char *table,
+                       const char *const *conflict_cols, int n_conflict,
+                       const char *const *cols,
+                       const HlValue *values, int n_cols)
+{
+    return duck_build_and_run_insert(h, table, conflict_cols, n_conflict,
+                                     cols, values, n_cols, 1);
+}
+
+typedef struct {
+    HlDbColumnCallback cb;
+    void              *cb_ctx;
+} DuckColsFwd;
+
+static int duck_table_columns_row(void *ctx, HlColumn *cols, int ncols)
+{
+    DuckColsFwd *fwd = ctx;
+    for (int i = 0; i < ncols; i++) {
+        if (cols[i].value.type != HL_TYPE_TEXT || !cols[i].value.s)
+            continue;
+        /* duck_decode borrows the chunk's VARCHAR bytes, which are NOT
+         * NUL-terminated (a 12-byte inline string fills the buffer with no
+         * terminator). HlDbColumnCallback takes a C string, so copy + terminate
+         * using the tracked length before handing it off. */
+        size_t len = cols[i].value.len;
+        char stackbuf[128];
+        char *name = (len < sizeof stackbuf) ? stackbuf : malloc(len + 1);
+        if (!name)
+            continue;
+        memcpy(name, cols[i].value.s, len);
+        name[len] = '\0';
+        fwd->cb(fwd->cb_ctx, name);
+        if (name != stackbuf)
+            free(name);
+    }
+    return 0;
+}
+
+static int duck_table_columns(HlDbHandle *h, const char *table,
+                              HlDbColumnCallback cb, void *cb_ctx)
+{
+    DuckColsFwd fwd = { cb, cb_ctx };
+    HlValue p;
+    p.type = HL_TYPE_TEXT;
+    p.s = table;
+    p.len = strlen(table);
+    return duck_query(h,
+        "SELECT column_name FROM information_schema.columns "
+        "WHERE table_name = ? ORDER BY ordinal_position",
+        &p, 1, duck_table_columns_row, &fwd, NULL);
+}
+
 /* ── Vtable (const, lands in .rodata) ─────────────────────────────── */
 
 static const char *const duck_schemes[] = { "duckdb", NULL };
@@ -491,11 +626,12 @@ const HlDbBackend hl_db_backend_duckdb = {
     .last_id              = duck_last_id,
     .errmsg               = duck_errmsg,
     .guard_stale_txn      = NULL,
-    /* Dialect helpers (insert_if_absent / upsert / table_columns) and a raw
-     * native_handle are deferred to the next slice; NULL here. */
-    .insert_if_absent     = NULL,
-    .upsert               = NULL,
-    .table_columns        = NULL,
+    .insert_if_absent     = duck_insert_if_absent,
+    .upsert               = duck_upsert,
+    .table_columns        = duck_table_columns,
+    /* Raw native_handle stays NULL: udf + agent introspection are SQLite-only,
+     * so no consumer needs the raw duckdb_connection yet. The native_tag
+     * already distinguishes the backend if one ever does. */
     .native_handle        = NULL,
 };
 

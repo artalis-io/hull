@@ -1,11 +1,12 @@
 /*
  * test_db_duckdb.c — DuckDB backend smoke tests (HL_ENABLE_DUCKDB only)
  *
- * Exercises the thin vertical slice: open :memory:, prepared-statement param
- * binding, columnar chunk decode to HlValue (int / text / double / bool / NULL),
- * the dialect descriptor, transactions, and the security lockdown (external file
- * access blocked + configuration locked). Self-gates to an empty program when
- * DuckDB is not compiled, so it is harmless in every other build flavor.
+ * Exercises open :memory:, prepared-statement param binding, columnar chunk
+ * decode to HlValue (int / text / double / bool / NULL), the dialect descriptor,
+ * transactions, the security lockdown (external file access blocked +
+ * configuration locked), and the dialect helpers (insert_if_absent / upsert /
+ * table_columns). Self-gates to an empty program when DuckDB is not compiled, so
+ * it is harmless in every other build flavor.
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
@@ -204,6 +205,100 @@ UTEST(db_duckdb, dialect_descriptor)
     ASSERT_EQ(b->supports_udf, 0);
     ASSERT_STREQ(b->schemes[0], "duckdb");
     ASSERT_TRUE(b->schemes[1] == NULL);
+}
+
+/* insert_if_absent: the first row lands; a second with the same conflict key is
+ * silently ignored (ON CONFLICT DO NOTHING), leaving the original value. */
+UTEST(db_duckdb, insert_if_absent)
+{
+    HlDbHandle h;
+    ASSERT_EQ(duck_open_mem(&h), 0);
+    ASSERT_EQ(hl_db_exec(&h,
+        "CREATE TABLE kv (k INTEGER PRIMARY KEY, v INTEGER)", NULL, 0), 0);
+
+    const char *conflict[] = { "k" };
+    const char *cols[]     = { "k", "v" };
+    HlValue first[2]  = { { .type = HL_TYPE_INT, .i = 1 }, { .type = HL_TYPE_INT, .i = 100 } };
+    HlValue second[2] = { { .type = HL_TYPE_INT, .i = 1 }, { .type = HL_TYPE_INT, .i = 200 } };
+
+    ASSERT_EQ(hl_db_insert_if_absent(&h, "kv", conflict, 1, cols, first, 2), 0);
+    ASSERT_EQ(hl_db_insert_if_absent(&h, "kv", conflict, 1, cols, second, 2), 0);
+
+    int64_t v = -1;
+    ASSERT_EQ(hl_db_query(&h, "SELECT v FROM kv WHERE k = 1",
+                          NULL, 0, count_cb, &v, NULL), 0);
+    ASSERT_EQ(v, 100);   /* the DO NOTHING kept the original */
+
+    int64_t n = -1;
+    ASSERT_EQ(hl_db_query(&h, "SELECT COUNT(*) FROM kv", NULL, 0, count_cb, &n, NULL), 0);
+    ASSERT_EQ(n, 1);
+
+    h.backend->close(&h);
+}
+
+/* upsert: the first row lands; a second with the same conflict key overwrites
+ * the non-key columns (ON CONFLICT DO UPDATE SET v = excluded.v). */
+UTEST(db_duckdb, upsert)
+{
+    HlDbHandle h;
+    ASSERT_EQ(duck_open_mem(&h), 0);
+    ASSERT_EQ(hl_db_exec(&h,
+        "CREATE TABLE kv (k INTEGER PRIMARY KEY, v INTEGER)", NULL, 0), 0);
+
+    const char *conflict[] = { "k" };
+    const char *cols[]     = { "k", "v" };
+    HlValue first[2]  = { { .type = HL_TYPE_INT, .i = 1 }, { .type = HL_TYPE_INT, .i = 100 } };
+    HlValue second[2] = { { .type = HL_TYPE_INT, .i = 1 }, { .type = HL_TYPE_INT, .i = 200 } };
+
+    ASSERT_EQ(hl_db_upsert(&h, "kv", conflict, 1, cols, first, 2), 0);
+    ASSERT_EQ(hl_db_upsert(&h, "kv", conflict, 1, cols, second, 2), 0);
+
+    int64_t v = -1;
+    ASSERT_EQ(hl_db_query(&h, "SELECT v FROM kv WHERE k = 1",
+                          NULL, 0, count_cb, &v, NULL), 0);
+    ASSERT_EQ(v, 200);   /* the DO UPDATE overwrote it */
+
+    int64_t n = -1;
+    ASSERT_EQ(hl_db_query(&h, "SELECT COUNT(*) FROM kv", NULL, 0, count_cb, &n, NULL), 0);
+    ASSERT_EQ(n, 1);
+
+    h.backend->close(&h);
+}
+
+typedef struct {
+    int  count;
+    char names[8][64];
+} ColNames;
+
+static void colname_cb(void *ctx, const char *name)
+{
+    ColNames *c = ctx;
+    if (c->count < 8) {
+        snprintf(c->names[c->count], sizeof c->names[0], "%s", name ? name : "");
+        c->count++;
+    }
+}
+
+/* table_columns walks information_schema.columns in ordinal order. Includes a
+ * column name at exactly the 12-byte inline threshold to exercise the copy +
+ * NUL-terminate path in duck_table_columns_row. */
+UTEST(db_duckdb, table_columns)
+{
+    HlDbHandle h;
+    ASSERT_EQ(duck_open_mem(&h), 0);
+    ASSERT_EQ(hl_db_exec(&h,
+        "CREATE TABLE cols (id INTEGER, twelve_bytes VARCHAR, note VARCHAR)",
+        NULL, 0), 0);
+
+    ColNames c;
+    memset(&c, 0, sizeof c);
+    ASSERT_EQ(hl_db_table_columns(&h, "cols", colname_cb, &c), 0);
+    ASSERT_EQ(c.count, 3);
+    ASSERT_STREQ(c.names[0], "id");
+    ASSERT_STREQ(c.names[1], "twelve_bytes");   /* exactly 12 bytes */
+    ASSERT_STREQ(c.names[2], "note");
+
+    h.backend->close(&h);
 }
 
 UTEST_MAIN()
