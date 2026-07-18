@@ -729,6 +729,24 @@ static int l_tool_platform_cache_dir(lua_State *L)
     return 1;
 }
 
+/* ── tool.feature_cache_dir() → "$HOME/.hull/feature" | nil ──
+ *
+ * Where `hull feature install` stores fetched per-feature libs
+ * (libhull_feature-<name>-<arch>.a). Returns the path (not guaranteed to exist)
+ * so `hull build` can look for a composed feature lib there; nil when HOME is
+ * unset. Re-verify a cache-sourced lib with tool.platform_verify(dir, asset),
+ * which is generic over the cache dir. */
+static int l_tool_feature_cache_dir(lua_State *L)
+{
+    const char *home = getenv("HOME");
+    if (!home || !*home) { lua_pushnil(L); return 1; }
+    char out[PATH_MAX];
+    int n = snprintf(out, sizeof(out), "%s/.hull/feature", home);
+    if (n <= 0 || (size_t)n >= (int)sizeof(out)) { lua_pushnil(L); return 1; }
+    lua_pushstring(L, out);
+    return 1;
+}
+
 /* ── tool.platform_verify(dir, asset) → boolean ──
  *
  * Offline re-verify of an installed platform lib against the signed manifest
@@ -1091,6 +1109,7 @@ static const luaL_Reg tool_funcs[] = {
     { "find_tool",                   l_tool_find_tool },
     { "hull_cache_dir",              l_tool_hull_cache_dir },
     { "platform_cache_dir",          l_tool_platform_cache_dir },
+    { "feature_cache_dir",           l_tool_feature_cache_dir },
     { "platform_verify",             l_tool_platform_verify },
     { "hull_cache_disabled",         l_tool_hull_cache_disabled },
     { "cache_kinds",                 l_tool_cache_kinds },

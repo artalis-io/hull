@@ -877,6 +877,23 @@ jobs:
           cat /tmp/ddbmodeb/out.txt
           grep -q "DUCKDB MODE B OK" /tmp/ddbmodeb/out.txt
 
+  # DuckDB as a composable FEATURE (not compiled into the base). A separate job
+  # with a fresh build tree: it builds a BASE hull (no DuckDB) + the feature
+  # archive, then `hull build --with=duckdb` an app and runs it. Must not share a
+  # tree with the HL_ENABLE_DUCKDB=1 job above (flag-flip object staleness).
+  duckdb-feature:
+    name: DuckDB feature build (Linux)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          submodules: true
+      - name: Fetch DuckDB static libs
+        run: make fetch-duckdb
+      - name: Compose the DuckDB feature into an app binary (e2e)
+        timeout-minutes: 15
+        run: sh tests/e2e_feature_duckdb.sh
+
   coverage:
     name: Code Coverage
     runs-on: ubuntu-24.04

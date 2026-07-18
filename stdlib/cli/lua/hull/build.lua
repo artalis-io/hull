@@ -74,6 +74,13 @@ local function parse_args()
             opts.flavor = arg[i]
         elseif a:sub(1, 9) == "--flavor=" then
             opts.flavor = a:sub(10)
+        elseif a == "--with" then
+            i = i + 1
+            opts.with = opts.with or {}
+            for f in tostring(arg[i]):gmatch("[^,]+") do opts.with[f] = true end
+        elseif a:sub(1, 7) == "--with=" then
+            opts.with = opts.with or {}
+            for f in a:sub(8):gmatch("[^,]+") do opts.with[f] = true end
         elseif a:sub(1, 1) ~= "-" then
             opts.app_dir = a
         end
@@ -1185,13 +1192,123 @@ int main(int argc, char **argv) { return hull_main(argc, argv); }
         tool.exit(1)
     end
 
+    -- ── Compose features (--with / inferred) ──
+    -- Link a feature lib (libhull_feature-<name>.a) plus a generated registry
+    -- that fills the base's WEAK hl_db_feature_backends hook with a STRONG
+    -- override, so db_select routes the feature's DSN scheme to its backend.
+    -- The registry .o is a direct object (displaces the weak default); the
+    -- self-contained feature archive resolves with no --start-group (phase 2).
+    -- Composable features (docs/features_and_flavors.md): a large optional
+    -- subsystem (e.g. DuckDB) linked in from a signed feature lib rather than
+    -- compiled into the base. Needed when declared with --with=<name>, or
+    -- inferred from the manifest (a literal duckdb:// connection). A scheme-less
+    -- / -d / "$VAR" DSN can't be seen at build time; use --with=duckdb for those.
+    local features_needed = {}
+    if opts.with then for f in pairs(opts.with) do features_needed[f] = true end end
+    do
+        local m = extract_app_manifest(opts.app_dir)
+        if m and type(m.databases) == "table" and type(m.databases.named) == "table" then
+            for _, v in pairs(m.databases.named) do
+                if type(v) == "string" and v:sub(1, 9) == "duckdb://" then
+                    features_needed["duckdb"] = true
+                end
+            end
+        end
+    end
+    local feature_objs = {}
+    local feature_libs = {}
+    if next(features_needed) then
+        local plat = tool.platform_name and tool.platform_name() or nil
+        local hull_dir = ""
+        if __hull_exe then hull_dir = __hull_exe:match("(.*/)") or "" end
+        for fname in pairs(features_needed) do
+            if fname ~= "duckdb" then
+                tool.stderr("hull build: --with=" .. fname .. ": unknown feature\n")
+                tool.rmdir(tmpdir); tool.exit(1)
+            end
+            if is_cosmo then
+                tool.stderr("hull build: the 'duckdb' feature is native-only "
+                            .. "(not available for cosmo builds)\n")
+                tool.rmdir(tmpdir); tool.exit(1)
+            end
+            -- Resolve libhull_feature-duckdb.a: local build dirs first (dev /
+            -- `make feature-duckdb`), then ~/.hull/feature (hull feature install).
+            local lib, from_cache = nil, false
+            for _, d in ipairs({ hull_dir, "build/", "../build/" }) do
+                if file_exists(d .. "libhull_feature-duckdb.a") then
+                    lib = d .. "libhull_feature-duckdb.a"; break
+                end
+            end
+            if not lib and plat and tool.feature_cache_dir then
+                local cache = tool.feature_cache_dir()
+                if cache then
+                    local asset = "libhull_feature-duckdb-" .. plat .. ".a"
+                    if file_exists(cache .. "/" .. asset) then
+                        -- Re-verify a cache-sourced lib against its signed
+                        -- manifest (embedded release pubkey) before linking.
+                        if tool.platform_verify and not tool.platform_verify(cache, asset) then
+                            tool.stderr("hull build: cached duckdb feature lib failed "
+                                .. "re-verification; run `hull feature install duckdb` again\n")
+                            tool.rmdir(tmpdir); tool.exit(1)
+                        end
+                        lib = cache .. "/" .. asset; from_cache = true
+                    end
+                end
+            end
+            if not lib then
+                tool.stderr("hull build: the 'duckdb' feature lib was not found "
+                            .. "(locally or in ~/.hull/feature)\n")
+                tool.stderr("hint: `hull feature install duckdb`, "
+                            .. "or build from source: `make feature-duckdb`\n")
+                tool.rmdir(tmpdir); tool.exit(1)
+            end
+            local dest = tmpdir .. "/libhull_feature-duckdb.a"
+            tool.copy(lib, dest)
+
+            -- Generate the strong hl_db_feature_backends registry. Self-contained
+            -- (only <stddef.h>); the lib defines hl_db_backend_duckdb.
+            write_file(tmpdir .. "/feature_registry.c", table.concat({
+                "/* Auto-generated by hull build — do not edit. */",
+                "#include <stddef.h>",
+                "typedef struct HlDbBackend HlDbBackend;",
+                "extern const HlDbBackend hl_db_backend_duckdb;",
+                "static const HlDbBackend *const HL_FEATURES[] = { &hl_db_backend_duckdb };",
+                "const HlDbBackend *const *hl_db_feature_backends(size_t *count) {",
+                "    if (count) *count = 1;",
+                "    return HL_FEATURES;",
+                "}",
+                "",
+            }, "\n"))
+            if not tool.compiler.compile(tmpdir .. "/feature_registry.c",
+                                         tmpdir .. "/feature_registry.o", nil) then
+                tool.stderr("hull build: compilation failed (feature_registry.c)\n")
+                tool.rmdir(tmpdir); tool.exit(1)
+            end
+
+            feature_objs[#feature_objs + 1] = tmpdir .. "/feature_registry.o"
+            feature_libs[#feature_libs + 1] = dest
+            -- DuckDB is C++; pull the C++ runtime (+ libdl on Linux).
+            if plat and plat:sub(1, 6) == "darwin" then
+                feature_libs[#feature_libs + 1] = "-lc++"
+            else
+                feature_libs[#feature_libs + 1] = "-lstdc++"
+                feature_libs[#feature_libs + 1] = "-ldl"
+            end
+            print("hull build: composed feature 'duckdb'"
+                  .. (from_cache and " (~/.hull/feature)" or " (local)"))
+        end
+    end
+
     -- Link
     print("hull build: linking...")
     local platform_a = tmpdir .. "/libhull_platform.a"
-    ok = tool.compiler.link(opts.output,
-                             {tmpdir .. "/app_main.o",
-                              tmpdir .. "/app_registry.o"},
-                             {platform_a, "-lm", "-lpthread"})
+    local link_objs = {tmpdir .. "/app_main.o", tmpdir .. "/app_registry.o"}
+    for _, o in ipairs(feature_objs) do link_objs[#link_objs + 1] = o end
+    local link_libs = {platform_a}
+    for _, l in ipairs(feature_libs) do link_libs[#link_libs + 1] = l end
+    link_libs[#link_libs + 1] = "-lm"
+    link_libs[#link_libs + 1] = "-lpthread"
+    ok = tool.compiler.link(opts.output, link_objs, link_libs)
     if not ok then
         tool.stderr("hull build: linking failed\n")
         tool.rmdir(tmpdir)
