@@ -261,7 +261,7 @@ smaller, produced by an unchanged full `hull`.
 2. Does `--flavor=auto` become the default, and when? (Behavior change.)
 3. ~~Cosmo: per-flavor × per-arch, worth it?~~ **Resolved: cosmo flavor libs
    are now published** (dual-arch `libhull_platform-<flavor>.{x86_64,aarch64}-cosmo.a`,
-   covered by the signed `hull.sha256`). `hull platform install <flavor>` on a
+   covered by the signed `hull.sha256`). `hull flavor install <flavor>` on a
    cosmo hull fetches + verifies the pair into `~/.hull/platform/`, and
    `hull build --flavor` lays them out in the `.aarch64/` apelink layout.
    `make platform-cosmo-<flavor>` still works for build-from-source. The

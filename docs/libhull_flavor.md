@@ -189,7 +189,7 @@ verify the exact archive it links:
 Their SHA-256s are lines in the release `hull.sha256` manifest, which is
 signed with the Ed25519 **release** key (and Sigstore + SLSA), exactly like
 the `hull` binaries and the per-flavor platform libs. This is the same
-trust chain [`hull platform install`](build_flavors.md) uses. To verify a
+trust chain [`hull flavor install`](build_flavors.md) uses. To verify a
 downloaded archive offline, cross-check its SHA-256 against the
 signature-verified manifest via `hl_release_io_verify_local_asset(dir,
 asset)` — it re-checks the manifest signature against the **embedded**

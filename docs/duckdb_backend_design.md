@@ -253,7 +253,7 @@ pointing at the install command.
 
 DuckDB ships as a signed release variant fetched on demand, reusing the exact
 Ed25519 release-signature trust chain that `hull update` / `hull tools install` /
-`hull platform install` already use (`hl_release_io_*`): download -> verify
+`hull flavor install` already use (`hl_release_io_*`): download -> verify
 signature + SHA-256 against the signed manifest -> install. No rebuild from
 source, no new key or verifier. Open sub-decision for implementation time:
 whether the variant installs alongside as a distinct `hull-duckdb` binary
