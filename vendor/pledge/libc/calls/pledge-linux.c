@@ -536,6 +536,11 @@ static const struct thatispacked SyscallName {
 
 static const uint16_t kPledgeDefault[] = {
     __NR_exit,  // thread return / exit()
+    // HULL PATCH: allow rseq unconditionally (see kPledgeStart). glibc registers
+    // rseq per-thread; a thread created after the sandbox is installed must be
+    // able to register it or glibc aborts ("rseq registration failed"). Benign
+    // restartable-sequences syscall; grants no fs/net/exec capability.
+    __NR_rseq,
 };
 
 // stdio contains all the benign system calls. openbsd makes the
@@ -1005,13 +1010,22 @@ static const struct sock_filter kPledgeStart[] = {
     BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_KILL_PROCESS),
     // each filter assumes ordinal is already loaded into accumulator
     BPF_STMT(BPF_LD | BPF_W | BPF_ABS, OFF(nr)),
+    // HULL PATCH: rseq is NOT ENOSYS-stubbed here (upstream stubbed it). glibc
+    // >= 2.35 registers rseq per-thread and treats a registration that returns
+    // ENOSYS *after* an earlier thread succeeded as FATAL ("rseq registration
+    // failed"). Hull's main thread registers rseq before the sandbox is applied,
+    // so a thread created AFTER the sandbox (e.g. DuckDB's worker pool opened
+    // from a request handler) would then get ENOSYS and abort the process.
+    // Dropping rseq from this list lets it flow through to the allow-list, where
+    // kPledgeDefault permits it (a benign restartable-sequences syscall with no
+    // fs/net/exec reach). The JGE offset below drops 5 -> 4 (one fewer skipped
+    // instruction). Re-apply this on any vendor/pledge update.
 #ifdef __NR_memfd_secret
     // forbid some system calls with ENOSYS (rather than EPERM)
-    BPF_JUMP(BPF_JMP | BPF_JGE | BPF_K, __NR_memfd_secret, 5, 0),
+    BPF_JUMP(BPF_JMP | BPF_JGE | BPF_K, __NR_memfd_secret, 4, 0),
 #else
-    BPF_JUMP(BPF_JMP | BPF_JGE | BPF_K, __NR_landlock_restrict_self + 1, 5, 0),
+    BPF_JUMP(BPF_JMP | BPF_JGE | BPF_K, __NR_landlock_restrict_self + 1, 4, 0),
 #endif
-    BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_rseq, 4, 0),
     BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_memfd_create, 3, 0),
     BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_openat2, 2, 0),
     BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_clone3, 1, 0),
