@@ -802,20 +802,25 @@ jobs:
           cat /tmp/ddbsmoke/out.txt
           grep -q "DUCKDB SMOKE OK" /tmp/ddbsmoke/out.txt
 
-      - name: DuckDB mode B syscall diagnostic (capture pledge SIGSYS)
-        timeout-minutes: 2
+      - name: DuckDB mode B rseq diagnostic (baseline vs rseq-disabled)
+        timeout-minutes: 3
         run: |
           set -u
-          # DIAGNOSTIC, not a gate. Mode B (read_csv within a declared, unveiled
-          # fs.read dir) aborts DuckDB under the Linux pledge/unveil sandbox. The
-          # root cause was never pinned to an exact syscall: strace fights pledge's
-          # seccomp filter (rseq registration failure), and the old gate ran under
-          # `set -e`, so the abort's non-zero exit killed the step BEFORE it could
-          # print the captured output. But jart's pledge installs a SIGSYS handler
-          # (vendor/pledge pledge-linux.c OnSigSys) that logs the exact denied
-          # syscall to stderr BEFORE the penalty fires, regardless of penalty mode.
-          # Capture that line to name the culprit and classify the fix cost.
-          # See docs/duckdb_backend_design.md §6.
+          # DIAGNOSTIC, not a gate. Run 1 of this probe already proved the mode-B
+          # abort is NOT file I/O: hull dies with "Fatal glibc error: rseq
+          # registration failed" at DuckDB's worker-pool spawn, BEFORE read_csv
+          # runs. Root cause: vendor/pledge stubs rseq (+ openat2/statx/clone3/
+          # memfd_create) to ENOSYS via SECCOMP_RET_ERRNO (a compat shim, no SIGSYS
+          # log). glibc 2.39 registers rseq on the main thread pre-sandbox; a worker
+          # thread created AFTER the sandbox seals gets ENOSYS and glibc treats the
+          # inconsistency as fatal. Mode A works only because the default -d
+          # connection opens in phase 6 (pre-sandbox). See §6.
+          #
+          # This run adds attempt 2 with GLIBC_TUNABLES=glibc.pthread.rseq=0, which
+          # disables glibc rseq usage process-wide so post-sandbox threads never
+          # register it. If attempt 2 gets past the abort we learn whether read_csv
+          # then WORKS (rseq was the only wall -> mode B viable with an rseq fix) or
+          # hits a FURTHER wall (the real file blocker, finally reached).
           mkdir -p /tmp/ddbmodeb/data
           printf 'id,name\n1,alice\n2,bob\n' > /tmp/ddbmodeb/data/test.csv
           cat > /tmp/ddbmodeb/app.lua <<'EOF'
@@ -832,29 +837,35 @@ jobs:
               return 0
           end)
           EOF
-          # Do NOT let the expected abort kill the step; capture stdout+stderr.
           set +e
-          ./build/hull /tmp/ddbmodeb/app.lua > /tmp/ddbmodeb/out.txt 2>&1
-          rc=$?
-          echo "=== hull exit code: $rc ==="
-          echo "=== full captured output ==="
-          cat /tmp/ddbmodeb/out.txt
-          echo "=== pledge / seccomp violation lines ==="
-          if grep -nE "error: (pledge|bad syscall)" /tmp/ddbmodeb/out.txt; then
-              echo "--> SECCOMP denial: the syscall named above is the culprit."
-              echo "    'error: pledge <promise> for X' => X lives in <promise>; add it to Hull's"
-              echo "        pledge set in sandbox.c (cheap, but widens the surface process-wide)."
-              echo "    'error: bad syscall (X ...)'     => X is in NO promise; only fixable by"
-              echo "        patching vendor/pledge's syscall tables (expensive; trusted core)."
-          elif grep -q "DUCKDB MODE B OK" /tmp/ddbmodeb/out.txt; then
-              echo "--> read_csv SUCCEEDED under the full sandbox (no denial)."
-              echo "    Mode B may be viable as-is on this runner; re-examine the descope."
+          echo "############ ATTEMPT 1: baseline (expected: rseq fatal) ############"
+          ./build/hull /tmp/ddbmodeb/app.lua > /tmp/ddbmodeb/out1.txt 2>&1
+          echo "=== attempt 1 exit: $? ==="
+          cat /tmp/ddbmodeb/out1.txt
+          echo ""
+          echo "############ ATTEMPT 2: GLIBC_TUNABLES=glibc.pthread.rseq=0 ############"
+          GLIBC_TUNABLES=glibc.pthread.rseq=0 ./build/hull /tmp/ddbmodeb/app.lua > /tmp/ddbmodeb/out2.txt 2>&1
+          echo "=== attempt 2 exit: $? ==="
+          cat /tmp/ddbmodeb/out2.txt
+          echo ""
+          echo "############ VERDICT ############"
+          if grep -q "DUCKDB MODE B OK" /tmp/ddbmodeb/out2.txt; then
+              echo "--> rseq WAS THE ONLY WALL. With rseq disabled, read_csv works under"
+              echo "    the full sandbox. Mode B is viable; real fix is either a launch-time"
+              echo "    GLIBC_TUNABLES=glibc.pthread.rseq=0 or allowing rseq in vendor/pledge"
+              echo "    (RET_ALLOW instead of the ENOSYS stub; matches upstream pledge's fix)."
+          elif grep -qi "rseq registration failed" /tmp/ddbmodeb/out2.txt; then
+              echo "--> rseq STILL fatal even with the tunable (unexpected); the tunable must"
+              echo "    be set at exec, before glibc init -- investigate whether the env"
+              echo "    reached the child, or disable rseq in vendor/pledge instead."
           else
-              echo "--> No pledge SIGSYS line and no success => likely a LANDLOCK path denial"
-              echo "    (EACCES, not a seccomp trap). Landlock does not fight ptrace, so a"
-              echo "    follow-up strace run would name the denied path; then unveil it. §6."
+              echo "--> Got PAST rseq, but read_csv still fails -- this is the REAL file"
+              echo "    blocker, finally reached. Inspect attempt-2 output above:"
+              echo "    'error: pledge/bad syscall' => a file syscall; a bare EACCES/abort"
+              echo "    with no pledge line => a Landlock path to unveil."
+              grep -nE "error: (pledge|bad syscall)|EACCES|Permission|unique_ptr|InternalException|Aborted" /tmp/ddbmodeb/out2.txt || true
           fi
-          # Diagnostic: report, never fail the job on the expected abort.
+          # Diagnostic: report, never fail the job.
           exit 0
 
   coverage:
