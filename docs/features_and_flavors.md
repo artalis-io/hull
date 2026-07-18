@@ -144,19 +144,45 @@ exactly like the missing-flavor-lib path today. A cache-sourced feature lib is
 re-verified against its signed manifest before linking (the same
 `hl_release_io_verify_local_asset` TOCTOU close as flavored builds).
 
-## 4. Runtime caveat: features compose into app *binaries*, not the lean runtime
+## 4. The dev loop: `hull dev` self-links a cached feature runtime
 
 A pre-built lean `hull` **cannot statically compose a feature at runtime** — no
-`dlopen`, no way to grow the linked set after the fact. So features are a
-**`hull build` (app-binary) mechanism**. For the dev loop, an app that uses a
-heavy feature is **build-then-run** (`hull build --with=…`, run the binary), not
-`hull dev` hot-reload.
+`dlopen`, no way to grow the linked set after the fact. So a feature has to be
+*linked in*. The good news is that `hull` already knows how:
+`libhull_platform.a` **is** the full runtime (Keel + Lua/JS + caps + sandbox —
+everything except `main`/commands), and `hull build` already links it to produce
+standalone binaries. "Get a runtime with the feature" is `hull build` aimed at
+the dev loop.
 
-This generalizes the decision already made for DuckDB (build-only; no runtime
-variant). If a specific feature's dev loop chafes enough, the escape hatch is to
-publish a small number of *loaded* runtime binaries for the most common combos —
-but that's an opt-in convenience, never the default, and it never tries to cover
-the combinatorial space.
+**The mechanism.** When `hull dev` (or `hull <app>` / `hull test`) sees the app
+needs a feature the running binary lacks, it: (1) fetches + verifies the signed
+`libhull_feature-<name>.a` (the §3.1 trust chain); (2) **links a dev-runtime
+binary** = embedded platform lib + feature lib + a dev `main` + the generated
+feature registry (§3.2); (3) **caches** it in `~/.hull/` keyed by *feature-set +
+hull version* (like the AOT / bytecode caches), so the link is paid once *ever*,
+not per session; (4) re-execs into it. From there the dev loop is normal:
+**app source hot-reloads in-process**, because the split falls along the
+change-frequency line — the **feature is C** (links once, never changes mid-
+session) and the **app is Lua/JS** (changes constantly, re-evals in-process).
+
+**This does not touch the `dlopen` ban.** Hull isn't loading code into a live
+process — it produces a *new statically-linked binary* and `execv`s. Static link
++ re-exec, W^X and CFI intact. It's exactly what `hull build` does, aimed at a
+dev runtime instead of a shipping artifact.
+
+**Caveats.** It needs a linker at dev time (embedded tcc or system cc) — the same
+requirement as `hull build`, so "feature dev" isn't zero-toolchain the way
+pure-Lua `hull dev` is today. The produced dev binary is a **local, ephemeral**
+artifact (developer-owned, like any `hull build` output); its *inputs* (platform
+lib + feature lib) are still release-signed + re-verified, so no trust hole
+opens.
+
+This scales to **any** feature combo with nothing extra published — strictly
+better than pre-publishing a handful of "loaded" runtime binaries (which would
+reintroduce the combinatorial matrix). It is a **later enhancement**, not part of
+a feature's v1: v1 ships **build-then-run** (`hull build --with=…`, run the
+binary), and the self-linking dev loop lands once the feature machinery exists
+(see §6, Phase 2).
 
 ## 5. Distribution is uniform; integration is not
 
@@ -209,6 +235,14 @@ flavor* to *the first feature*:
    `libhull_feature-duckdb-<arch>.a`. ~58 MB × 3 native archs.
 6. **Reserved-scheme hint** — `cap/db_select.c`'s `duckdb://` "not available"
    message points at `hull feature install duckdb`.
+
+Items 1–6 are **Phase 1** and ship the v1 story: build-then-run
+(`hull build --with=duckdb`, run the binary). **Phase 2 (later):** the
+self-linking dev loop from §4 — `hull dev` on a DuckDB app fetches the feature
+lib, links + caches a dev runtime keyed by feature-set + hull version, re-execs,
+and hot-reloads app source in-process. Phase 2 reuses everything in Phase 1 plus
+`hull build`'s linker, so it's a "dev-`main` + link + cache + re-exec" wrapper,
+not a new subsystem.
 
 What we explicitly **don't** do: publish a `full-duckdb` flavor, or a per-combo
 `<flavor>-duckdb` matrix. DuckDB composes onto any flavor base at build time.
