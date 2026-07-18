@@ -1200,21 +1200,13 @@ int main(int argc, char **argv) { return hull_main(argc, argv); }
     -- self-contained feature archive resolves with no --start-group (phase 2).
     -- Composable features (docs/features_and_flavors.md): a large optional
     -- subsystem (e.g. DuckDB) linked in from a signed feature lib rather than
-    -- compiled into the base. Needed when declared with --with=<name>, or
-    -- inferred from the manifest (a literal duckdb:// connection). A scheme-less
-    -- / -d / "$VAR" DSN can't be seen at build time; use --with=duckdb for those.
+    -- compiled into the base. Selected explicitly with --with=<name>.
+    -- (Manifest inference is deliberately NOT done here: extract_app_manifest
+    -- EXECUTES app.lua, and re-running it corrupts the sign flow. Inferring a
+    -- feature from a declared duckdb:// connection needs a side-effect-free
+    -- manifest read first; tracked as a follow-up.)
     local features_needed = {}
     if opts.with then for f in pairs(opts.with) do features_needed[f] = true end end
-    do
-        local m = extract_app_manifest(opts.app_dir)
-        if m and type(m.databases) == "table" and type(m.databases.named) == "table" then
-            for _, v in pairs(m.databases.named) do
-                if type(v) == "string" and v:sub(1, 9) == "duckdb://" then
-                    features_needed["duckdb"] = true
-                end
-            end
-        end
-    end
     local feature_objs = {}
     local feature_libs = {}
     if next(features_needed) then
