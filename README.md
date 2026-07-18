@@ -181,15 +181,17 @@ Cosmopolitan APE binaries run on Linux, macOS, Windows, FreeBSD, OpenBSD, and Ne
 
 ### Features, flavors, and tools
 
-Three layers describe what's inside a Hull binary and how you get capability you didn't compile yourself. They're distinct, and it's worth keeping them straight:
+At the mechanism level there's **one** kind of thing: a **feature** — a compile-time capability knob (`HL_ENABLE_*`). `HL_ENABLE_HTTP_SERVER`, `HL_ENABLE_DUCKDB`, `HL_ENABLE_WASM` are all the same kind of `-D` flag; **HTTP isn't special, it's just a feature that's on by default.** The database connectors (`sqlite`/`postgres`/`mysql`/`duckdb`) are one feature *family* behind `HlDbBackend`, chosen by DSN scheme — so Postgres and MySQL aren't separate flavors, they're sibling connectors. A **flavor is not a second primitive** — it's a *named preset* over features (`full` = all defaults on; `pure-compute` = HTTP off).
 
-- **Feature** — a compile-time knob (`HL_ENABLE_*`). Internal and build-time; you don't "install" a feature, it's either compiled in or not. The database connectors are one **family** of features: `sqlite`, `postgres`, `mysql`, and `duckdb` are each an `HlDbBackend` chosen by DSN scheme (`postgres://`, `duckdb://`, …) behind a single vtable — so Postgres and MySQL are *not* separate flavors, they're sibling connectors. GPU, the two HTTP halves, TUI, and TinyCC are features too.
+The distinction that earns its keep is **distribution**, not architecture, because the *shipping units* differ. Three ways to get capability without compiling from source:
 
-- **Flavor** — a **named, published, signed build**: a curated preset of features you *fetch instead of compiling*. Most flavors are **subtractive** slims of the default (`server-only`, `client-only`, `pure-compute` drop HTTP halves / TLS). A flavor can also be **additive**: `full-duckdb` is `full` *plus* the DuckDB connector — a sibling above `full`, not a slim of it. Additive flavors are opt-in by name (never `--flavor=auto`) and exist only when a feature is too big to compile from source conveniently: DuckDB's ~58 MB static lib is why `full-duckdb` is published, whereas the tiny pure-C `postgres`/`mysql` connectors stay build-from-source features. Install with `hull flavor install <flavor>`, build with `hull build --flavor=<flavor>`.
+- **Flavor** — a named preset shipped as a **base build** (`libhull_platform-<flavor>.a`). The flavors are a **subtractive** spectrum — `full` → `server-only` → `client-only` → `pure-compute`, each a slim of the default — small and enumerable, so they're pre-published. `hull flavor install <flavor>`, `hull build --flavor=<flavor>`. (It's `flavor`, not `platform`: in Hull *platform* is the build **target** — `darwin-arm64`, `linux-x86_64`, ….)
 
-- **Tool** — a separate companion **program** Hull shells out to, not part of Hull's own build (e.g. `wamrc`, the LLVM-based WASM AOT compiler). Install with `hull tools install <name>`; Hull spawns it when needed.
+- **Feature** — a large **additive** subsystem shipped as its **own bolt-on lib** (`libhull_feature-<name>.a`), composed onto a base at `hull build`. Additive features are orthogonal — N of them means 2^N combos — so they can't be enumerated as flavors; instead **M flavors + N features publish M+N libs but build any of M×N combos**. `hull feature install <name>`; the build links it when the app needs it. DuckDB (~58 MB) is the first feature; the tiny pure-C `postgres`/`mysql` connectors stay compiled into the base. *(Design: [docs/features_and_flavors.md](docs/features_and_flavors.md). Direction: collapse to one primitive — features — with flavors becoming named presets.)*
 
-The two install verbs mirror the split: **`hull tools install`** for foreign helper programs, **`hull flavor install`** for builds of Hull itself. (It's `flavor`, not `platform`: in Hull *platform* is the build **target** — `darwin-arm64`, `linux-x86_64`, `linux-aarch64`, `cosmo` — so the install verb matches `hull build --flavor` instead.)
+- **Tool** — a separate companion **program** Hull shells out to, not a build of Hull (e.g. `wamrc`, the LLVM-based WASM AOT compiler). `hull tools install <name>`; Hull spawns it when needed.
+
+Three install verbs, one signed trust chain (`hull.sha256` + Ed25519): `hull tools install` for foreign programs, `hull flavor install` for a base build, `hull feature install` for a bolt-on subsystem.
 
 ### Build Flavors
 

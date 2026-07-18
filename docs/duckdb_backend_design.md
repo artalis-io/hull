@@ -244,6 +244,15 @@ paths the manifest declares; a path derived from untrusted input is an app bug
 
 ### 3.3 Packaging (side-loaded, on-demand)
 
+> **Re-scoped (2026-07-18).** The "signed release variant / distinct
+> `hull-duckdb` binary" sketch below is superseded: DuckDB ships as the **first
+> composable feature** (`libhull_feature-duckdb.a`, `hull feature install
+> duckdb`, composed at `hull build`), not a `full-duckdb` flavor or a runtime
+> variant. Rationale (avoiding the 2^N flavor matrix for orthogonal large libs)
+> and the concrete plan are in
+> [features_and_flavors.md](features_and_flavors.md) §6. The size / static-link /
+> trust-chain facts below still hold.
+
 DuckDB's amalgamation is ~tens of MB versus Hull's ~5 MB. Dynamic linking is
 ruled out (Hull's hardening bans `dlopen` / lazy binding, and a
 `DT_NEEDED libduckdb.so` breaks the single-static-binary / reproducible / cosmo
