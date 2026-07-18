@@ -199,7 +199,7 @@ static int print_list_json(const char *platform)
 
 /* The verified-manifest fetch (download hull.sha256 + .sig, verify the
  * Ed25519 signature) is the shared trust chain in release_io.c, used by
- * both `hull tools install` and `hull platform install`:
+ * both `hull tools install` and `hull flavor install`:
  *   hl_release_io_fetch_verified_manifest(repo, tag, alloc, tls,
  *                                         "hull-tools", &manifest, &len). */
 

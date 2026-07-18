@@ -55,16 +55,16 @@ assert_contains() {
     fi
 }
 
-# hull platform install <flavor> — LIVE fetch + verify of the published
+# hull flavor install <flavor> — LIVE fetch + verify of the published
 # per-flavor platform lib(s). Native binaries pull one
 # libhull_platform-<flavor>-<arch>.a; cosmo binaries pull the dual-arch pair
 # libhull_platform-<flavor>.{x86_64,aarch64}-cosmo.a. Uses an isolated HOME so
 # a real ~/.hull/platform is never touched. Works for both flavors of binary.
 smoke_platform_install() {
     echo ""
-    echo "── hull platform install pure-compute (LIVE GitHub HTTPS download) ──"
+    echo "── hull flavor install pure-compute (LIVE GitHub HTTPS download) ──"
     PLAT_HOME=$(mktemp -d)
-    OUT=$(HOME="$PLAT_HOME" "$HULL" platform install pure-compute 2>&1)
+    OUT=$(HOME="$PLAT_HOME" "$HULL" flavor install pure-compute 2>&1)
     RC=$?
     echo "$OUT" | sed 's/^/    /'
     assert "exits 0"                         [ "$RC" -eq 0 ]
@@ -75,7 +75,7 @@ smoke_platform_install() {
     fi
     N=$(ls "$PLAT_HOME"/.hull/platform/libhull_platform-pure-compute*.a 2>/dev/null | wc -l | tr -d ' ')
     assert "flavor lib(s) landed in ~/.hull/platform (got $N)"  [ "$N" -ge 1 ]
-    OUT=$(HOME="$PLAT_HOME" "$HULL" platform list 2>&1)
+    OUT=$(HOME="$PLAT_HOME" "$HULL" flavor list 2>&1)
     assert_contains "list shows pure-compute installed"  "$OUT" "pure-compute"
     rm -rf "$PLAT_HOME"
 }
@@ -101,7 +101,7 @@ case "$VERSION" in
         assert_contains "registry lists wamrc"             "$OUT" "\"name\":\"wamrc\""
         assert_contains "wamrc not available on cosmo"     "$OUT" "\"available_for_platform\":false"
         # Cosmo DOES publish per-flavor platform libs (dual-arch), so the
-        # `hull platform install` path is exercised on cosmo binaries.
+        # `hull flavor install` path is exercised on cosmo binaries.
         smoke_platform_install
         echo ""
         echo "── Summary ──"

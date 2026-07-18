@@ -294,8 +294,8 @@ int hl_release_io_verify_local_asset(const char *dir, const char *asset)
     if ((size_t)snprintf(path, sizeof(path), "%s/hull.sha256", dir) >= sizeof(path))
         return -1;
     if (local_read_file(path, &manifest, &mlen) != 0) {
-        fprintf(stderr, "hull platform: no cached signed manifest in %s "
-                        "(run `hull platform install` again)\n", dir);
+        fprintf(stderr, "hull flavor: no cached signed manifest in %s "
+                        "(run `hull flavor install` again)\n", dir);
         return -1;
     }
 
@@ -306,8 +306,8 @@ int hl_release_io_verify_local_asset(const char *dir, const char *asset)
         if ((size_t)snprintf(path, sizeof(path), "%s/hull.sha256.sig", dir) >= sizeof(path))
             goto done;
         if (local_read_file(path, &sig, &slen) != 0) {
-            fprintf(stderr, "hull platform: cached manifest has no signature; "
-                            "run `hull platform install` again\n");
+            fprintf(stderr, "hull flavor: cached manifest has no signature; "
+                            "run `hull flavor install` again\n");
             goto done;
         }
         if (hl_release_verify_manifest_sig(manifest, mlen, sig, slen, NULL) != 0) {

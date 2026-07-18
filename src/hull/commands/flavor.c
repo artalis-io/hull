@@ -1,5 +1,5 @@
 /*
- * commands/platform.c - `hull platform install <flavor>` / `list`.
+ * commands/flavor.c - `hull flavor install <flavor>` / `list`.
  *
  * Fetch signed per-flavor platform libraries from the release matching this
  * hull's version into $HOME/.hull/platform/, so `hull build --flavor=<flavor>`
@@ -18,7 +18,7 @@
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
 
-#include "hull/commands/platform.h"
+#include "hull/commands/flavor.h"
 
 #ifdef HL_ENABLE_HTTP_CLIENT
 
@@ -270,7 +270,7 @@ static int cmd_list(void)
     return 0;
 }
 
-int hl_cmd_platform(int argc, char **argv, const HlCommandEnv *env)
+int hl_cmd_flavor(int argc, char **argv, const HlCommandEnv *env)
 {
     (void)env;
     const char *repo = HL_PLATFORM_DEFAULT_REPO;

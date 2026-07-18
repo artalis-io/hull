@@ -189,7 +189,7 @@ Three layers describe what's inside a Hull binary and how you get capability you
 
 - **Tool** — a separate companion **program** Hull shells out to, not part of Hull's own build (e.g. `wamrc`, the LLVM-based WASM AOT compiler). Install with `hull tools install <name>`; Hull spawns it when needed.
 
-The two install verbs mirror the split: **`hull tools install`** for foreign helper programs, **`hull flavor install`** for builds of Hull itself. (`hull platform install` is a deprecated alias of `hull flavor install`.)
+The two install verbs mirror the split: **`hull tools install`** for foreign helper programs, **`hull flavor install`** for builds of Hull itself. (It's `flavor`, not `platform`: in Hull *platform* is the build **target** — `darwin-arm64`, `linux-x86_64`, `linux-aarch64`, `cosmo` — so the install verb matches `hull build --flavor` instead.)
 
 ### Build Flavors
 
@@ -203,7 +203,7 @@ The two install verbs mirror the split: **`hull tools install`** for foreign hel
 | `pure-compute` | none | Offline compute / signing binary. Drops mbedTLS + Keel; smallest binary |
 | `auto` | inferred | Picks the minimal flavor from the app's declared modules |
 
-You do not build the platform library from source. `hull flavor install <flavor>` (and `hull flavor list`) fetches the per-flavor libs for this hull's platform from the matching signed release, verifies the Ed25519 signature on `hull.sha256` and the SHA-256 of each lib, and caches them under `~/.hull/platform/`; `hull build --flavor` then picks up the cached lib automatically. (`hull platform install` / `list` remain as deprecated aliases.)
+You do not build the platform library from source. `hull flavor install <flavor>` (and `hull flavor list`) fetches the per-flavor libs for this hull's platform from the matching signed release, verifies the Ed25519 signature on `hull.sha256` and the SHA-256 of each lib, and caches them under `~/.hull/platform/`; `hull build --flavor` then picks up the cached lib automatically.
 
 ```bash
 hull flavor install pure-compute          # fetch + verify + cache the platform lib

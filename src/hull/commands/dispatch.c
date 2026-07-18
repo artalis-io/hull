@@ -42,7 +42,7 @@
 #ifdef HL_ENABLE_HTTP_CLIENT
 #include "hull/commands/update.h"
 #include "hull/commands/tools.h"
-#include "hull/commands/platform.h"
+#include "hull/commands/flavor.h"
 #endif
 #include "hull/commands/sign_release.h"
 #include "hull/commands/verify_release.h"
@@ -87,8 +87,7 @@ static const HlCommand commands[] = {
 #ifdef HL_ENABLE_HTTP_CLIENT
     { "update",         hl_cmd_update },
     { "tools",          hl_cmd_tools },
-    { "flavor",         hl_cmd_platform },   /* canonical: installs published build flavors */
-    { "platform",       hl_cmd_platform },   /* deprecated alias for "flavor" */
+    { "flavor",         hl_cmd_flavor },   /* installs published build flavors ("platform" = build target, not this) */
 #endif
     { "sign-release",   hl_cmd_sign_release },
     { "verify-release", hl_cmd_verify_release },

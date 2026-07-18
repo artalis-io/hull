@@ -715,7 +715,7 @@ static int l_tool_hull_cache_dir(lua_State *L)
 
 /* ── tool.platform_cache_dir() → "$HOME/.hull/platform" | nil ──
  *
- * Where `hull platform install` stores fetched per-flavor platform libs.
+ * Where `hull flavor install` stores fetched per-flavor platform libs.
  * Returns the path (not guaranteed to exist) so `hull build --flavor` can
  * look for a cached lib there; nil when HOME is unset. */
 static int l_tool_platform_cache_dir(lua_State *L)
@@ -732,7 +732,7 @@ static int l_tool_platform_cache_dir(lua_State *L)
 /* ── tool.platform_verify(dir, asset) → boolean ──
  *
  * Offline re-verify of an installed platform lib against the signed manifest
- * `hull platform install` cached in `dir`, anchored on the EMBEDDED release
+ * `hull flavor install` cached in `dir`, anchored on the EMBEDDED release
  * pubkey (not the writable dir). `hull build --flavor` calls this before
  * linking a lib pulled from ~/.hull/platform, closing the install->build
  * TOCTOU. Returns true iff the lib matches its signed digest. */

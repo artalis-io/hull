@@ -896,7 +896,7 @@ int main(int argc, char **argv) { return hull_main(argc, argv); }
             -- Dual-arch: <asset>.x86_64-cosmo.a + <asset>.aarch64-cosmo.a,
             -- laid out the way cosmocc's apelink expects (.aarch64/ counterpart).
             -- Search local build dirs, then the ~/.hull/platform cache where
-            -- `hull platform install <flavor>` stores the fetched+verified pair
+            -- `hull flavor install <flavor>` stores the fetched+verified pair
             -- (as <asset>.x86_64-cosmo.a / <asset>.aarch64-cosmo.a).
             local search = { hull_dir, "build/", "../build/", "" }
             local cache = tool.platform_cache_dir and tool.platform_cache_dir()
@@ -915,7 +915,7 @@ int main(int argc, char **argv) { return hull_main(argc, argv); }
                 tool.stderr("hull build: --flavor=" .. opts.flavor .. ": "
                             .. flavor_asset .. ".{x86_64,aarch64}-cosmo.a not found"
                             .. " (locally or in ~/.hull/platform)\n")
-                tool.stderr("hint: `hull platform install " .. opts.flavor
+                tool.stderr("hint: `hull flavor install " .. opts.flavor
                             .. "`, or build from source: `make platform-cosmo-"
                             .. opts.flavor .. "`\n")
                 tool.rmdir(tmpdir)
@@ -929,7 +929,7 @@ int main(int argc, char **argv) { return hull_main(argc, argv); }
                     and tool.platform_verify(cache, flavor_asset .. ".aarch64-cosmo.a")) then
                     tool.stderr("hull build: --flavor=" .. opts.flavor
                         .. ": cached cosmo platform lib failed re-verification; "
-                        .. "run `hull platform install " .. opts.flavor .. "` again\n")
+                        .. "run `hull flavor install " .. opts.flavor .. "` again\n")
                     tool.rmdir(tmpdir)
                     tool.exit(1)
                 end
@@ -940,7 +940,7 @@ int main(int argc, char **argv) { return hull_main(argc, argv); }
         else
             local cand = {}
             for _, d in ipairs(dirs) do cand[#cand + 1] = d .. flavor_asset .. ".a" end
-            -- Cached lib from `hull platform install <flavor>`: stored
+            -- Cached lib from `hull flavor install <flavor>`: stored
             -- platform-qualified (<asset>-<platform>.a) in ~/.hull/platform.
             local cache = tool.platform_cache_dir and tool.platform_cache_dir()
             local cache_asset, cache_path
@@ -956,7 +956,7 @@ int main(int argc, char **argv) { return hull_main(argc, argv); }
             if not found then
                 tool.stderr("hull build: --flavor=" .. opts.flavor
                             .. ": platform lib not found (locally or in ~/.hull/platform)\n")
-                tool.stderr("hint: `hull platform install " .. opts.flavor
+                tool.stderr("hint: `hull flavor install " .. opts.flavor
                             .. "`, or build from source: `make platform-"
                             .. opts.flavor .. "`\n")
                 tool.rmdir(tmpdir)
@@ -968,7 +968,7 @@ int main(int argc, char **argv) { return hull_main(argc, argv); }
                 if not tool.platform_verify(cache, cache_asset) then
                     tool.stderr("hull build: --flavor=" .. opts.flavor
                         .. ": cached platform lib failed re-verification; "
-                        .. "run `hull platform install " .. opts.flavor .. "` again\n")
+                        .. "run `hull flavor install " .. opts.flavor .. "` again\n")
                     tool.rmdir(tmpdir)
                     tool.exit(1)
                 end
