@@ -185,22 +185,44 @@ connection mode B would require either opening it before the manifest is known
 capability weakening we chose not to take); a mid-load manifest hook is a
 possible future refinement.
 
-**Sandbox interaction (Linux).** DuckDB's C++ runtime reads a handful of
-read-only system-info paths to detect CPU count, memory limits, and timezone
-data (its ICU extension): `/dev/urandom`, `/etc/localtime`,
-`/sys/devices/system/cpu`, `/sys/fs/cgroup`, `/proc/self/cgroup`,
-`/proc/sys/vm/overcommit_memory`, `/proc/meminfo`. Under Hull's default-deny
-unveil these are blocked and DuckDB aborts (an internal NULL-deref) rather than
-degrading, so `sandbox.c` unveils them read-only in `HL_ENABLE_DUCKDB` builds
-(a CI strace under `--no-sandbox` enumerated the set; it is small and static).
+**Sandbox interaction (Linux) — the real blocker was `rseq`, in the pledge
+layer, not the unveil layer.** A mode-B named connection opens lazily from
+`app.main`, i.e. **after** the sandbox is sealed, and DuckDB spawns its worker
+pool there. glibc >= 2.35 registers `rseq` (restartable sequences) per thread;
+Hull's main thread registers it *before* the sandbox is applied, so it succeeds.
+But Hull's vendored `pledge` polyfill historically ENOSYS-stubbed `rseq` (via
+`SECCOMP_RET_ERRNO`, a compat shim shared with `openat2`/`statx`/`clone3`/
+`memfd_create`), and glibc treats a thread whose `rseq` registration returns
+`ENOSYS` *after* an earlier thread succeeded as **fatal**
+(`Fatal glibc error: rseq registration failed`). So the process aborted at
+worker-pool spawn, **before `read_csv` ran** — which for a long time was
+misread as a file-I/O / unveil incompatibility (there was no pledge SIGSYS log,
+because `SECCOMP_RET_ERRNO` does not trap). The fix is a one-syscall
+`vendor/pledge` patch: stop ENOSYS-stubbing `rseq` and add it to the always-
+allowed set (`kPledgeDefault`), so a post-sandbox thread registers it against
+the kernel like the main thread did. `rseq` is a benign performance syscall with
+no fs/net/exec reach; the patch also fixes the latent bug for *any* Hull app that
+first creates a thread after the sandbox seals. Verified on Linux CI: with the
+patch (and **no** `GLIBC_TUNABLES` workaround), a mode-B `read_csv` of a
+declared, unveiled `fs.read` file returns rows under the full pledge/unveil
+sandbox; that CI gate doubles as the regression test for the pledge patch.
 
-Even with those paths unveiled, DuckDB's memory/thread **auto-detection** hits
-some resource that still fails under the sandbox and aborts, so `duck_open` pins
-`memory_limit` (2 GB) and `threads` (4) at config time to skip auto-detection
-entirely. These are fixed, conservative defaults — a real limitation for large
-OLAP under the sandbox; a manifest option to tune them is tracked. With the
-unveils + pinned limits, a mode-B `read_csv` / `read_parquet` of a declared
-`fs.read` file works under the full sandbox.
+Mode A works without the patch only because the default `-d` connection opens in
+phase 6, *before* the sandbox, so its worker pool's `rseq` registration precedes
+the seccomp filter.
+
+Two belt-and-braces measures from the earlier (misdiagnosed) investigation are
+retained but flagged for review: `sandbox.c` unveils a small static set of
+read-only system-info paths (`/dev/urandom`, `/etc/localtime`,
+`/sys/devices/system/cpu`, `/sys/fs/cgroup`, `/proc/self/cgroup`,
+`/proc/sys/vm/overcommit_memory`, `/proc/meminfo`), and `duck_open` pins
+`memory_limit` (2 GB) + `threads` (4) to skip DuckDB's CPU/memory auto-detection.
+These were added while chasing the wrong cause; now that `rseq` is understood to
+be the actual blocker, a follow-up should test whether they can be dropped (the
+unveils are harmless read-only info paths; the pinned limits are otherwise a
+real ceiling for large OLAP, so a manifest option to tune them is tracked
+regardless). A large scan that spills to a temp dir still needs that dir in the
+sandbox's write set — separate from the read path proven here.
 
 **The fs bound is enforced by the kernel unveil.** DuckDB may only open files
 under the unveiled `fs.read` / `fs.write` directories, so an undeclared

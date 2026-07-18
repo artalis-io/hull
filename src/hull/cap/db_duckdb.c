@@ -6,11 +6,14 @@
  * (injection-safe; values never touch the SQL text), and result values decode
  * from DuckDB's columnar data chunks into HlValue via the stable vector API.
  *
- * This is the thin vertical slice (open/query/exec/txn against :memory: or a
- * file, a core-lockdown security config, and the dialect row). Deferred to
- * follow-ups: the manifest-driven fs.read/fs.write -> allowed_directories mode,
- * the insert_if_absent/upsert/table_columns dialect helpers, temporal / decimal
- * / nested type decoding, and the signed side-load packaging. db.udf and
+ * Covers open/query/exec/txn against :memory: or a file, the dialect row, and
+ * two security modes: full lockdown (mode A, no external file access) and the
+ * manifest-driven fs.read/fs.write -> allowed_directories mode (mode B). Mode B
+ * needs the vendor/pledge rseq fix: a named connection opens post-sandbox and
+ * spawns DuckDB's worker pool, whose threads must register rseq (see
+ * docs/duckdb_backend_design.md §3.2). Deferred to follow-ups: the
+ * insert_if_absent/upsert/table_columns dialect helpers, temporal / decimal /
+ * nested type decoding, and the signed side-load packaging. db.udf and
  * hull/search stay SQLite-only. See docs/duckdb_backend_design.md.
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
