@@ -773,6 +773,26 @@ jobs:
           ./build/test_db_select
           ./build/test_crypto   # Hull's own mbedTLS must stay unaffected by the isolation
 
+      - name: DuckDB feature archive (link-smoke, no --start-group)
+        timeout-minutes: 5
+        run: |
+          set -e
+          # Phase 2 of DuckDB-as-a-feature: `make feature-duckdb` bundles the
+          # backend + isolated DuckDB static libs into ONE archive. This proves,
+          # on Linux/ELF, that the combined archive is self-contained -- linking a
+          # harness against ONLY it, with NO -Wl,--start-group, must resolve every
+          # DuckDB symbol and run. (The base build still needs --start-group for
+          # the separate archives; combining removes that at the composing link.)
+          make feature-duckdb
+          test -f build/libhull_feature-duckdb.a
+          nm build/libhull_feature-duckdb.a | grep -qw hl_db_backend_duckdb
+          cc -std=c11 -DHL_ENABLE_DUCKDB -Ivendor/duckdb -Iinclude \
+             tests/feature_duckdb_link.c build/libhull_feature-duckdb.a \
+             -lstdc++ -ldl -lm -lpthread -o /tmp/feature_duckdb_link
+          OUT=$(/tmp/feature_duckdb_link)
+          echo "$OUT"
+          echo "$OUT" | grep -q "FEATURE DUCKDB LINK OK"
+
       - name: DuckDB app smoke (duckdb://:memory:)
         timeout-minutes: 2
         run: |
