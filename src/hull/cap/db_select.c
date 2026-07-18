@@ -81,6 +81,19 @@ static int scheme_in(const char *const *list, const char *scheme)
     return 0;
 }
 
+/* Weak default: a base build has no composed feature backends. A feature build
+ * (`hull build --with=<feature>`) links a generated STRONG override — a const
+ * table referencing each composed feature's backend — which the linker prefers
+ * over this. See db_backend.h + docs/features_and_flavors.md §3.2. Kept in this
+ * TU (which is always linked) so the symbol always resolves; the override, being
+ * a direct object rather than an archive member, displaces it. */
+__attribute__((weak))
+const HlDbBackend *const *hl_db_feature_backends(size_t *count)
+{
+    if (count) *count = 0;
+    return NULL;
+}
+
 const HlDbBackend *hl_db_backend_select(const char *dsn, const char **err)
 {
     if (err) *err = NULL;
@@ -89,10 +102,18 @@ const HlDbBackend *hl_db_backend_select(const char *dsn, const char **err)
     size_t slen = dsn_scheme(dsn, scheme, sizeof scheme);
 
     if (slen > 0) {
-        /* Explicit "<scheme>://": route to the backend that claims it. */
+        /* Explicit "<scheme>://": route to the backend that claims it. First the
+         * base backends compiled into this binary. */
         for (size_t i = 0; i < sizeof BACKENDS / sizeof BACKENDS[0]; i++)
             if (scheme_in(BACKENDS[i]->schemes, scheme))
                 return BACKENDS[i];
+        /* Then feature backends composed in at build time (empty in a base
+         * build; a generated registry fills this in a `--with=<feature>` build). */
+        size_t fcount = 0;
+        const HlDbBackend *const *feats = hl_db_feature_backends(&fcount);
+        for (size_t i = 0; i < fcount; i++)
+            if (feats && feats[i] && scheme_in(feats[i]->schemes, scheme))
+                return feats[i];
         /* A scheme Hull knows but this build lacks: specific hint. */
         for (size_t i = 0; i < sizeof RESERVED / sizeof RESERVED[0]; i++)
             if (strcmp(RESERVED[i].scheme, scheme) == 0) {

@@ -333,4 +333,18 @@ static inline int hl_db_quote_ident(HlDbHandle *h, const char *name,
  */
 const HlDbBackend *hl_db_backend_select(const char *dsn, const char **err);
 
+/*
+ * Feature backends: large, composable DB connectors (e.g. DuckDB) that are NOT
+ * compiled into the base but linked in at `hull build` time from a signed
+ * feature lib. Returns a table of `*count` backends the build composed in;
+ * hl_db_backend_select iterates it after the base BACKENDS[].
+ *
+ * The base ships a WEAK default returning an empty set (a base build has no
+ * feature backends). A feature build links a STRONG override — a generated
+ * const registry that references each composed feature's backend — which the
+ * linker prefers. The override MUST be a direct object (not an archive member)
+ * so it displaces the weak default. See docs/features_and_flavors.md §3.2.
+ */
+const HlDbBackend *const *hl_db_feature_backends(size_t *count);
+
 #endif /* HL_CAP_DB_BACKEND_H */

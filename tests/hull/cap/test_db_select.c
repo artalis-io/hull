@@ -116,4 +116,36 @@ UTEST(db_select, unknown_scheme)
     ASSERT_TRUE(err); ASSERT_TRUE(strstr(err, "unknown") != NULL);
 }
 
+/* Feature-composition hook: a STRONG override of the base's weak
+ * hl_db_feature_backends (this is exactly how a `hull build --with=<feature>`
+ * build injects a composed backend). The synthetic "featuretest" scheme is
+ * claimed by no base backend and is not reserved, so it exercises only the
+ * feature path. This strong definition displaces db_select.c's weak default for
+ * the whole test binary; it is inert for every other scheme, so the tests above
+ * are unaffected. */
+static const char *const feature_schemes[] = { "featuretest", NULL };
+static const HlDbBackend feature_backend = {
+    .name    = "featuretest",
+    .schemes = feature_schemes,
+};
+static const HlDbBackend *const FEATURE_TABLE[] = { &feature_backend };
+const HlDbBackend *const *hl_db_feature_backends(size_t *count)
+{
+    if (count) *count = 1;
+    return FEATURE_TABLE;
+}
+
+UTEST(db_select, feature_backend_composed)
+{
+    const char *err = NULL;
+    const HlDbBackend *b = hl_db_backend_select("featuretest://x", &err);
+    ASSERT_TRUE(b);
+    ASSERT_STREQ(b->name, "featuretest");
+    ASSERT_FALSE(err);
+    /* Base backends still win + a truly unknown scheme still errors. */
+    err = NULL;
+    ASSERT_FALSE(hl_db_backend_select("bogus://x", &err));
+    ASSERT_TRUE(err);
+}
+
 UTEST_MAIN()
