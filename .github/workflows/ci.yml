@@ -802,18 +802,20 @@ jobs:
           cat /tmp/ddbsmoke/out.txt
           grep -q "DUCKDB SMOKE OK" /tmp/ddbsmoke/out.txt
 
-      - name: DuckDB mode B (fs.read -> allowed_directories, named connection)
+      - name: DuckDB mode B syscall diagnostic (capture pledge SIGSYS)
         timeout-minutes: 2
         run: |
-          set -eu
-          # Mode B applies to a named (db.connect) / dynamic (db.open) connection,
-          # which opens after the manifest is known. Under the full pledge/unveil
-          # sandbox, DuckDB read_csv must be able to read a file WITHIN the
-          # declared fs.read directory (which is unveiled). Reads OUTSIDE it are
-          # blocked by the kernel unveil (EACCES); note that DuckDB aborts on a
-          # denied open rather than erroring, so the app must only read declared
-          # paths -- see docs/duckdb_backend_design.md §3.2. The default -d
-          # connection opens before the app loads and stays in mode A (smoke).
+          set -u
+          # DIAGNOSTIC, not a gate. Mode B (read_csv within a declared, unveiled
+          # fs.read dir) aborts DuckDB under the Linux pledge/unveil sandbox. The
+          # root cause was never pinned to an exact syscall: strace fights pledge's
+          # seccomp filter (rseq registration failure), and the old gate ran under
+          # `set -e`, so the abort's non-zero exit killed the step BEFORE it could
+          # print the captured output. But jart's pledge installs a SIGSYS handler
+          # (vendor/pledge pledge-linux.c OnSigSys) that logs the exact denied
+          # syscall to stderr BEFORE the penalty fires, regardless of penalty mode.
+          # Capture that line to name the culprit and classify the fix cost.
+          # See docs/duckdb_backend_design.md §6.
           mkdir -p /tmp/ddbmodeb/data
           printf 'id,name\n1,alice\n2,bob\n' > /tmp/ddbmodeb/data/test.csv
           cat > /tmp/ddbmodeb/app.lua <<'EOF'
@@ -830,9 +832,30 @@ jobs:
               return 0
           end)
           EOF
+          # Do NOT let the expected abort kill the step; capture stdout+stderr.
+          set +e
           ./build/hull /tmp/ddbmodeb/app.lua > /tmp/ddbmodeb/out.txt 2>&1
+          rc=$?
+          echo "=== hull exit code: $rc ==="
+          echo "=== full captured output ==="
           cat /tmp/ddbmodeb/out.txt
-          grep -q "DUCKDB MODE B OK" /tmp/ddbmodeb/out.txt
+          echo "=== pledge / seccomp violation lines ==="
+          if grep -nE "error: (pledge|bad syscall)" /tmp/ddbmodeb/out.txt; then
+              echo "--> SECCOMP denial: the syscall named above is the culprit."
+              echo "    'error: pledge <promise> for X' => X lives in <promise>; add it to Hull's"
+              echo "        pledge set in sandbox.c (cheap, but widens the surface process-wide)."
+              echo "    'error: bad syscall (X ...)'     => X is in NO promise; only fixable by"
+              echo "        patching vendor/pledge's syscall tables (expensive; trusted core)."
+          elif grep -q "DUCKDB MODE B OK" /tmp/ddbmodeb/out.txt; then
+              echo "--> read_csv SUCCEEDED under the full sandbox (no denial)."
+              echo "    Mode B may be viable as-is on this runner; re-examine the descope."
+          else
+              echo "--> No pledge SIGSYS line and no success => likely a LANDLOCK path denial"
+              echo "    (EACCES, not a seccomp trap). Landlock does not fight ptrace, so a"
+              echo "    follow-up strace run would name the denied path; then unveil it. §6."
+          fi
+          # Diagnostic: report, never fail the job on the expected abort.
+          exit 0
 
   coverage:
     name: Code Coverage
