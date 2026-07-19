@@ -62,13 +62,17 @@ static const HlDbBackend *const BACKENDS[] = {
 /* Schemes Hull recognizes but may not have compiled: a helpful, specific error
  * instead of a bare "unknown scheme". Reserving duckdb/mysql/mariadb keeps the
  * routing forward-compatible; each resolves to a real backend the moment one is
- * compiled in (it would then match a BACKENDS[] entry before reaching here). */
+ * compiled in (it would then match a BACKENDS[] entry before reaching here).
+ * DuckDB additionally resolves when composed as a build feature: the feature
+ * loop above (hl_db_feature_backends) matches duckdb:// before this table, so
+ * this hint fires only for a base app with neither the compile flag nor the
+ * feature, and points at the feature path. See docs/features_and_flavors.md. */
 static const struct { const char *scheme; const char *msg; } RESERVED[] = {
     { "postgres",   "postgres:// requires a build with HL_ENABLE_POSTGRES" },
     { "postgresql", "postgresql:// requires a build with HL_ENABLE_POSTGRES" },
     { "sqlite",     "sqlite:// requires a build with HL_ENABLE_SQLITE" },
     { "file",       "file: URIs require a build with HL_ENABLE_SQLITE" },
-    { "duckdb",     "the DuckDB backend (duckdb://) is not available in this build" },
+    { "duckdb",     "duckdb:// needs the DuckDB feature: run 'hull feature install duckdb', then build the app with 'hull build --with=duckdb'" },
     { "mysql",      "the MySQL/MariaDB backend (mysql://) is not available in this build" },
     { "mariadb",    "the MySQL/MariaDB backend (mariadb://) is not available in this build" },
 };

@@ -96,6 +96,9 @@ UTEST(db_select, reserved_schemes)
 #ifndef HL_ENABLE_DUCKDB
     ASSERT_FALSE(hl_db_backend_select("duckdb://x.duckdb", &err));
     ASSERT_TRUE(err); ASSERT_TRUE(strstr(err, "DuckDB") != NULL);
+    /* The hint points at the composable-feature path, not just a build flag. */
+    ASSERT_TRUE(strstr(err, "feature install") != NULL);
+    ASSERT_TRUE(strstr(err, "--with=duckdb") != NULL);
     err = NULL;
 #endif
 #ifndef HL_ENABLE_MYSQL
