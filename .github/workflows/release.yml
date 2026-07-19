@@ -698,10 +698,58 @@ jobs:
           name: ${{ matrix.artifact }}
           path: ${{ matrix.artifact }}
 
+  build-feature-native:
+    # Composable DuckDB feature archive (libhull_feature-duckdb-<arch>.a),
+    # shipped as a release asset and pulled by `hull feature install duckdb`
+    # -> `hull build --with=duckdb`. See docs/features_and_flavors.md.
+    #
+    # Built bare (not in the reproducible container): `make fetch-duckdb` needs
+    # network, and the archive is covered by the release signature only -- it is
+    # NOT part of the platform-sig cross-check -- so it need not be byte-
+    # reproducible across rebuilds. Its SHA-256 lands in the signed hull.sha256
+    # and `hull feature install` re-verifies the download against that.
+    #
+    # No cosmo feature: DuckDB is native-only (docs/features_and_flavors.md).
+    name: Build feature duckdb (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x86_64
+            os: ubuntu-24.04
+          - name: linux-aarch64
+            os: ubuntu-24.04-arm
+          - name: darwin-arm64
+            os: macos-15
+
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          submodules: true
+
+      - name: Write VERSION file
+        run: echo "${GITHUB_REF_NAME#v}" > VERSION
+
+      - name: Fetch DuckDB static libs (with mbedTLS symbol isolation)
+        run: make fetch-duckdb
+
+      - name: Build DuckDB feature archive
+        run: make feature-duckdb
+
+      - name: Rename artifact (arch-qualified)
+        run: mv build/libhull_feature-duckdb.a libhull_feature-duckdb-${{ matrix.name }}.a
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        with:
+          name: feature-duckdb-${{ matrix.name }}
+          path: libhull_feature-duckdb-${{ matrix.name }}.a
+
   release:
     name: Create Release
     runs-on: ubuntu-24.04
-    needs: [build-cosmo, build-native, build-wamrc, build-platform-cosmo-flavors]
+    needs: [build-cosmo, build-native, build-wamrc, build-platform-cosmo-flavors, build-feature-native]
     permissions:
       contents: write       # publish GitHub release + assets
       id-token: write       # SLSA: OIDC for Sigstore signing
@@ -742,6 +790,12 @@ jobs:
           mv artifacts/libhull-linux-aarch64/libhull-linux-aarch64.a  dist/
           mv artifacts/libhull-darwin-arm64/libhull-darwin-arm64.a    dist/
           mv artifacts/libhull-cosmo/*.a                              dist/
+          # Composable DuckDB feature archives (libhull_feature-duckdb-<arch>.a),
+          # native-only. Pulled by `hull feature install duckdb`. Added to the
+          # SHA-256 + publish steps below so they inherit the release signature.
+          mv artifacts/feature-duckdb-linux-x86_64/*.a   dist/
+          mv artifacts/feature-duckdb-linux-aarch64/*.a  dist/
+          mv artifacts/feature-duckdb-darwin-arm64/*.a   dist/
 
       - name: Make binaries executable
         run: chmod +x dist/*
@@ -826,6 +880,7 @@ jobs:
                     libhull_platform-*.a \
                     libhull-linux-x86_64.a libhull-linux-aarch64.a libhull-darwin-arm64.a \
                     libhull.x86_64-cosmo.a libhull.aarch64-cosmo.a \
+                    libhull_feature-duckdb-*.a \
                     > hull.sha256
           cat hull.sha256
 
@@ -925,6 +980,10 @@ jobs:
           # `hull platform install <flavor>` can fetch them. Covered by
           # hull.sha256 above, so they inherit the release signature.
           assets+=(dist/libhull_platform-*.a)
+          # Composable feature archives (libhull_feature-<name>-<arch>.a), so
+          # `hull feature install <name>` can fetch them. Also covered by
+          # hull.sha256, so they inherit the release signature.
+          assets+=(dist/libhull_feature-*.a)
           # libhull no-runtime embedding archives (native per-arch + dual-arch
           # cosmo) and the libhull-scoped SBOMs. Also covered by hull.sha256.
           assets+=(

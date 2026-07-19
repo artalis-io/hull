@@ -80,6 +80,25 @@ smoke_platform_install() {
     rm -rf "$PLAT_HOME"
 }
 
+# hull feature install <name> — LIVE fetch + verify of the published composable
+# feature archive (libhull_feature-<name>-<arch>.a). Native-only (DuckDB is not
+# built for cosmo). Uses an isolated HOME so a real ~/.hull/feature is untouched.
+smoke_feature_install() {
+    echo ""
+    echo "── hull feature install duckdb (LIVE GitHub HTTPS download) ──"
+    FEAT_HOME=$(mktemp -d)
+    OUT=$(HOME="$FEAT_HOME" "$HULL" feature install duckdb 2>&1)
+    RC=$?
+    echo "$OUT" | sed 's/^/    /'
+    assert "exits 0"                         [ "$RC" -eq 0 ]
+    assert_contains "SHA-256 verified"       "$OUT" "SHA-256 verified"
+    N=$(ls "$FEAT_HOME"/.hull/feature/libhull_feature-duckdb-*.a 2>/dev/null | wc -l | tr -d ' ')
+    assert "feature lib landed in ~/.hull/feature (got $N)"  [ "$N" -ge 1 ]
+    OUT=$(HOME="$FEAT_HOME" "$HULL" feature list 2>&1)
+    assert_contains "list shows duckdb installed"  "$OUT" "duckdb"
+    rm -rf "$FEAT_HOME"
+}
+
 if ! command -v "$HULL" >/dev/null 2>&1; then
     echo "release_smoke: '$HULL' not found on PATH — install hull first"
     exit 1
@@ -168,6 +187,9 @@ assert "file removed"                  [ ! -e "$WAMRC_PATH" ]
 
 # Per-flavor platform lib install (native single-arch lib).
 smoke_platform_install
+
+# Composable feature lib install (native-only; DuckDB is not built for cosmo).
+smoke_feature_install
 
 # ── Platform-sig E2E (post-§3.2: works on installed binaries) ──
 #
