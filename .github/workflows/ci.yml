@@ -1059,7 +1059,10 @@ jobs:
       - name: Install Zig 0.13.0
         run: |
           set -eu
-          curl -fsSL https://ziglang.org/download/0.13.0/zig-linux-x86_64-0.13.0.tar.xz \
+          # --retry-all-errors also retries a partial transfer (curl exit 18),
+          # the observed ziglang.org download flake.
+          curl -fsSL --retry 3 --retry-all-errors --retry-delay 2 \
+            https://ziglang.org/download/0.13.0/zig-linux-x86_64-0.13.0.tar.xz \
             -o /tmp/zig.tar.xz
           sudo mkdir -p /opt/zig
           sudo tar -xJf /tmp/zig.tar.xz -C /opt/zig --strip-components=1
