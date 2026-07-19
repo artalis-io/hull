@@ -3739,6 +3739,29 @@ UTEST(lua_stdlib, csv_encode_headers)
     cleanup_lua();
 }
 
+UTEST(lua_stdlib, csv_encode_sanitize_formulas)
+{
+    init_lua();
+    ASSERT_TRUE(lua_initialized);
+
+    /* Off by default: a formula cell is emitted verbatim. */
+    char *plain = eval_str("require('hull.csv').encode({{'=cmd|calc'}})");
+    ASSERT_NE(plain, NULL);
+    ASSERT_STREQ(plain, "=cmd|calc\n");
+    free(plain);
+
+    /* Opt-in: a leading = / @ (etc.) is prefixed with a ' so a spreadsheet
+     * treats it as text; a non-formula cell is untouched. */
+    char *safe = eval_str(
+        "require('hull.csv').encode({{'=cmd|calc'},{'@x'},{'ok'}}, "
+        "{ sanitize_formulas = true })");
+    ASSERT_NE(safe, NULL);
+    ASSERT_STREQ(safe, "'=cmd|calc\n'@x\nok\n");
+    free(safe);
+
+    cleanup_lua();
+}
+
 /* ── hull.search tests ───────────────────────────────────────────────── */
 
 UTEST(lua_stdlib, search_create_and_query)

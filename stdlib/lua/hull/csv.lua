@@ -225,6 +225,10 @@ end
 --   - `headers`   (boolean, default `false`)
 --   - `separator` (string, default `","`)
 --   - `quote`     (string, default `'"'`)
+--   - `sanitize_formulas` (boolean, default `false`) Prefix a `'` to any cell
+--     beginning with `= + - @` (or a leading tab/CR) to neutralize spreadsheet
+--     formula/DDE injection when the export is opened in Excel/Sheets. Off by
+--     default (it prepends a character to affected cells).
 --
 -- @treturn string  CSV text with LF line endings. Values containing the
 --   separator, quote, CR, or LF are auto-quoted; embedded quotes are
@@ -238,6 +242,11 @@ function csv.encode(rows, opts)
     local sep   = opts.separator or ","
     local quote = opts.quote or '"'
     local use_headers = opts.headers or false
+    -- Opt-in CSV formula-injection defense: prefix a "'" to any cell that
+    -- begins with = + - @ (or a leading tab/CR), so a spreadsheet app opening
+    -- the export treats it as text, not a formula/DDE. Off by default (changes
+    -- cell content). See the doc comment above csv.encode.
+    local sanitize = opts.sanitize_formulas or false
     local escaped_quote = quote .. quote
 
     -- Determine if a field value needs quoting
@@ -255,6 +264,13 @@ function csv.encode(rows, opts)
             return ""
         end
         val = tostring(val)
+        if sanitize and #val > 0 then
+            local c = val:sub(1, 1)
+            if c == "=" or c == "+" or c == "-" or c == "@"
+               or c == "\t" or c == "\r" then
+                val = "'" .. val
+            end
+        end
         if needs_quoting(val) then
             return quote .. val:gsub(quote, escaped_quote) .. quote
         end

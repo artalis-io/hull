@@ -376,6 +376,36 @@ UTEST(js_runtime, hull_time_module)
     cleanup_js();
 }
 
+UTEST(js_runtime, csv_encode_sanitize_formulas)
+{
+    init_js();
+
+    /* Import hull:csv and encode with/without the opt-in formula sanitizer. */
+    const char *code =
+        "import { csv } from 'hull:csv';\n"
+        "globalThis.__csv_plain = csv.encode([['=cmd|calc']]);\n"
+        "globalThis.__csv_safe = csv.encode("
+        "  [['=cmd|calc'],['@x'],['ok']], { sanitizeFormulas: true });\n"
+        "globalThis.__csv_alias = csv.encode([['=x']], { sanitize_formulas: true });\n";
+
+    JSValue val = JS_Eval(js.ctx, code, strlen(code), "<test>",
+                          JS_EVAL_TYPE_MODULE);
+    if (JS_IsException(val))
+        hl_js_dump_error(&js);
+    JS_FreeValue(js.ctx, val);
+    hl_js_run_jobs(&js);
+
+    /* Off by default: the formula cell is emitted verbatim. */
+    ASSERT_EQ(eval_int("globalThis.__csv_plain === '=cmd|calc\\n' ? 1 : 0"), 1);
+    /* Opt-in: leading = / @ prefixed with '; a non-formula cell untouched. */
+    ASSERT_EQ(eval_int(
+        "globalThis.__csv_safe === \"'=cmd|calc\\n'@x\\nok\\n\" ? 1 : 0"), 1);
+    /* snake_case alias (Lua parity) also enables it. */
+    ASSERT_EQ(eval_int("globalThis.__csv_alias === \"'=x\\n\" ? 1 : 0"), 1);
+
+    cleanup_js();
+}
+
 UTEST(js_runtime, hull_app_module)
 {
     init_js();

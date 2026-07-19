@@ -128,6 +128,11 @@ function parse(text, opts) {
  * @param {boolean} [opts.headers=false]
  * @param {string}  [opts.separator=","]
  * @param {string}  [opts.quote='"']
+ * @param {boolean} [opts.sanitizeFormulas=false]  Prefix a "'" to any cell
+ *   beginning with = + - @ (or a leading tab/CR) to neutralize spreadsheet
+ *   formula/DDE injection when the export is opened in Excel/Sheets. Off by
+ *   default (it prepends a character to affected cells). Lua-parity alias:
+ *   `sanitize_formulas`.
  * @returns {string}  CSV text (LF line endings).
  */
 function encode(rows, opts) {
@@ -136,6 +141,10 @@ function encode(rows, opts) {
     const sep = (opts && opts.separator) || ",";
     const quo = (opts && opts.quote) || '"';
     const useHeaders = !!(opts && opts.headers);
+    // Opt-in CSV formula-injection defense (Lua-parity alias: sanitize_formulas):
+    // prefix a "'" to any cell beginning with = + - @ (or a leading tab/CR) so a
+    // spreadsheet app treats it as text, not a formula/DDE. Off by default.
+    const sanitize = !!(opts && (opts.sanitizeFormulas ?? opts.sanitize_formulas));
     const doubledQuote = quo + quo;
 
     function needsQuoting(value) {
@@ -148,7 +157,13 @@ function encode(rows, opts) {
     }
 
     function quoteField(value) {
-        const s = String(value);
+        let s = String(value);
+        if (sanitize && s.length > 0) {
+            const c = s[0];
+            if (c === "=" || c === "+" || c === "-" || c === "@" ||
+                c === "\t" || c === "\r")
+                s = "'" + s;
+        }
         if (needsQuoting(s)) {
             const parts = [];
             for (let i = 0; i < s.length; i++) {
