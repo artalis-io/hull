@@ -50,11 +50,11 @@ if ! echo "$RUN_OUT" | grep -q "DUCKDB FEATURE APP OK"; then
     echo "--- app run failed; diagnostics ---"
     file "$APP/bin" 2>/dev/null || true
     command -v ldd >/dev/null 2>&1 && ldd "$APP/bin" 2>&1 | head || true
-    echo "--- retry with rseq registration disabled (GLIBC_TUNABLES) ---"
-    if GLIBC_TUNABLES=glibc.pthread.rseq=0 "$APP/bin" 2>&1 | grep -q "DUCKDB FEATURE APP OK"; then
-        echo "DIAG: app works with rseq disabled -> post-sandbox rseq is the blocker"
+    echo "--- retry with --no-sandbox (isolates sandbox vs link/static-init) ---"
+    if "$APP/bin" --no-sandbox 2>&1 | grep -q "DUCKDB FEATURE APP OK"; then
+        echo "DIAG: works with --no-sandbox -> a sandboxed syscall blocks DuckDB init"
     else
-        echo "DIAG: still fails with rseq disabled -> not (only) rseq"
+        echo "DIAG: still fails with --no-sandbox -> link/static-init, not sandbox"
     fi
     echo "FAIL: app did not run duckdb"; exit 1
 fi
