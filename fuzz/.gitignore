@@ -1,8 +1,13 @@
-# Built fuzz harnesses
+# Built fuzz harnesses (one per fuzz/fuzz_*.c; keep in sync with the Makefile)
 fuzz_sh_json
 fuzz_path_normalize
 fuzz_mime_sniff
+fuzz_host_match
 fuzz_pgwire
+fuzz_pg_dsn
+fuzz_pg_rewrite
+fuzz_mysqlwire
+fuzz_mysql_dsn
 # Debug symbol bundles (macOS)
 *.dSYM/
 # libFuzzer artifacts
@@ -11,5 +16,3 @@ leak-*
 timeout-*
 oom-*
 *.profraw
-fuzz_pg_dsn
-fuzz_pg_rewrite

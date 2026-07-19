@@ -3476,10 +3476,12 @@ tsan:
 	done
 
 # ── Fuzzing (libFuzzer + ASan/UBSan) ────────────────────────────────
-# Mirrors vendor/keel/fuzz. Requires clang with libFuzzer support.
+# Mirrors vendor/keel/fuzz. Requires clang with the libFuzzer runtime.
 #   Linux: make fuzz CC=clang
-#   macOS: make fuzz                 (Apple clang ships libFuzzer)
-#      or: make fuzz CC=/opt/homebrew/opt/llvm@18/bin/clang
+#   macOS: make fuzz CC=/opt/homebrew/opt/llvm/bin/clang   (brew install llvm)
+# NOTE: Apple's clang does NOT ship the libFuzzer runtime
+# (libclang_rt.fuzzer_osx.a), so `make fuzz` with the default cc fails on macOS
+# with "library '...fuzzer_osx.a' not found". Use a Homebrew LLVM clang there.
 # Each harness compiles its parser sources fresh under the fuzzer
 # instrumentation — these parsers are small and self-contained, so no
 # libhull_platform.a link is needed. Keel already fuzzes the HTTP /
