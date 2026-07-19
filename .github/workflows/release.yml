@@ -732,6 +732,15 @@ jobs:
       - name: Write VERSION file
         run: echo "${GITHUB_REF_NAME#v}" > VERSION
 
+      # fetch-duckdb isolates DuckDB's bundled mbedTLS/psa symbols via
+      # objcopy --redefine-syms. macOS runners ship no objcopy, and GNU gobjcopy
+      # handles Mach-O poorly, so install Homebrew LLVM: fetch-duckdb's Makefile
+      # rule finds /opt/homebrew/opt/llvm/bin/llvm-objcopy automatically. Linux
+      # runners already have objcopy. (Caught by the release dry-run.)
+      - name: Install llvm-objcopy (macOS)
+        if: runner.os == 'macOS'
+        run: brew install llvm
+
       - name: Fetch DuckDB static libs (with mbedTLS symbol isolation)
         run: make fetch-duckdb
 
