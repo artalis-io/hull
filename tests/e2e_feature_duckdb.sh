@@ -46,7 +46,18 @@ echo "$BUILD_OUT"
 echo "$BUILD_OUT" | grep -q "composed feature 'duckdb'" || { echo "FAIL: feature not composed"; exit 1; }
 RUN_OUT=$("$APP/bin" 2>&1) || true
 echo "$RUN_OUT"
-echo "$RUN_OUT" | grep -q "DUCKDB FEATURE APP OK" || { echo "FAIL: app did not run duckdb"; exit 1; }
+if ! echo "$RUN_OUT" | grep -q "DUCKDB FEATURE APP OK"; then
+    echo "--- app run failed; diagnostics ---"
+    file "$APP/bin" 2>/dev/null || true
+    command -v ldd >/dev/null 2>&1 && ldd "$APP/bin" 2>&1 | head || true
+    echo "--- retry with rseq registration disabled (GLIBC_TUNABLES) ---"
+    if GLIBC_TUNABLES=glibc.pthread.rseq=0 "$APP/bin" 2>&1 | grep -q "DUCKDB FEATURE APP OK"; then
+        echo "DIAG: app works with rseq disabled -> post-sandbox rseq is the blocker"
+    else
+        echo "DIAG: still fails with rseq disabled -> not (only) rseq"
+    fi
+    echo "FAIL: app did not run duckdb"; exit 1
+fi
 echo "ok  --with=duckdb composed + ran"
 
 echo "=== negative: a plain sqlite app must NOT compose duckdb ==="
