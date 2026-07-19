@@ -45,11 +45,19 @@ docker run -d --name "$CONTAINER" \
     -e POSTGRES_PASSWORD=s3cretpw \
     -p "${PGPORT}:5432" postgres:16-alpine >/dev/null
 
-echo "=== waiting for postgres ==="
+echo "=== waiting for postgres (real TCP + SCRAM connection, as the app connects) ==="
+# postgres:16 runs initdb on first start, briefly bringing PG up on a local
+# unix socket before restarting the real networked instance. A default
+# (unix-socket) `pg_isready` can pass on that transient init instance, so the
+# hull app's later TCP connect races the restart and is refused ("failed to open
+# database connection"). Gate on a REAL connection instead: TCP (-h 127.0.0.1) +
+# SCRAM auth + a query against the target db -- exactly what the app does --
+# mirroring the proven e2e_mysql.sh readiness check.
 ready=0
 i=0
-while [ "$i" -lt 30 ]; do
-    if docker exec "$CONTAINER" pg_isready -U hull -d hulldb >/dev/null 2>&1; then
+while [ "$i" -lt 60 ]; do
+    if docker exec -e PGPASSWORD=s3cretpw "$CONTAINER" \
+           psql -h 127.0.0.1 -U hull -d hulldb -tAc 'SELECT 1' >/dev/null 2>&1; then
         ready=1
         break
     fi
