@@ -1216,66 +1216,85 @@ int main(int argc, char **argv) { return hull_main(argc, argv); }
     end
 
     -- ── Compose features (--with / inferred) ──
-    -- Link a feature lib (libhull_feature-<name>.a) plus a generated registry
-    -- that fills the base's WEAK hl_db_feature_backends hook with a STRONG
-    -- override, so db_select routes the feature's DSN scheme to its backend.
-    -- The registry .o is a direct object (displaces the weak default); the
-    -- self-contained feature archive resolves with no --start-group (phase 2).
     -- Composable features (docs/features_and_flavors.md): a large optional
-    -- subsystem (e.g. DuckDB) linked in from a signed feature lib rather than
-    -- compiled into the base. Selected explicitly with --with=<name>.
-    -- (Manifest inference is deliberately NOT done here: extract_app_manifest
-    -- EXECUTES app.lua, and re-running it corrupts the sign flow. Inferring a
-    -- feature from a declared duckdb:// connection needs a side-effect-free
-    -- manifest read first; tracked as a follow-up.)
+    -- subsystem linked in from a signed feature archive rather than compiled
+    -- into the base. Each feature fills a base subsystem's WEAK hook with a
+    -- STRONG override -- a generated registry .o that displaces the weak default
+    -- -- so the base routes to the feature's backend at runtime. Selected with
+    -- --with=<name>. (Manifest inference is deliberately NOT done here:
+    -- extract_app_manifest EXECUTES app.lua and re-running it corrupts the sign
+    -- flow; a side-effect-free manifest read is a tracked follow-up.)
+    --
+    -- FEATURE_SPECS is the single source of truth for the codegen: per feature,
+    -- the backend symbol its archive exports, that backend's vtable type, the
+    -- base weak hook it fills, whether it is C++ (needs a system compiler + C++
+    -- runtime), and its extra link libs. Adding a feature is one row here + a
+    -- `make feature-<name>` archive + a release-pipeline entry -- and, for a NEW
+    -- subsystem kind, a weak hook in that (always-base-resident) cap layer.
+    local FEATURE_SPECS = {
+        duckdb = {
+            backend = "hl_db_backend_duckdb",
+            type    = "HlDbBackend",
+            hook    = "hl_db_feature_backends",
+            cxx     = true,
+            libs    = { darwin = { "-lc++" }, other = { "-lstdc++", "-ldl" } },
+        },
+        -- gpu (scoped, not yet buildable -- needs the gpu cap layer split into a
+        -- base-resident generic half + a weak hl_gpu_feature_backends hook, with
+        -- wgpu isolated into libhull_feature-gpu.a). The codegen below already
+        -- handles it; only the spec row + the base hook + the archive are absent:
+        -- gpu = {
+        --     backend = "hl_gpu_backend_wgpu", type = "HlGpuBackend",
+        --     hook = "hl_gpu_feature_backends", cxx = false,
+        --     libs = { darwin = { "-framework", "Metal", "-framework", "QuartzCore",
+        --                         "-framework", "CoreGraphics", "-framework", "Foundation" },
+        --              other  = { "-lvulkan" } },
+        -- },
+    }
     local features_needed = {}
     if opts.with then for f in pairs(opts.with) do features_needed[f] = true end end
     local feature_objs = {}
     local feature_libs = {}
     if next(features_needed) then
-        -- A composable feature archive is C++ (e.g. DuckDB). The embedded
-        -- TinyCC is C-only: it links no C++ runtime and does not run the
-        -- archive's static initializers, so a tcc-linked feature binary
-        -- crashes at first use on null engine globals. Require a system
-        -- C/C++ compiler.
-        if tool.compiler.name() == "tcc" then
-            tool.stderr("hull build: composable features (e.g. 'duckdb') are C++ "
-                        .. "and cannot be linked by the embedded TinyCC.\n")
-            tool.stderr("hint: build with a system compiler, e.g. "
-                        .. "`hull build --compiler=system --with=duckdb`\n")
-            tool.rmdir(tmpdir); tool.exit(1)
-        end
         local plat = tool.platform_name and tool.platform_name() or nil
         local hull_dir = ""
         if __hull_exe then hull_dir = __hull_exe:match("(.*/)") or "" end
+
+        -- Pass 1: validate + resolve each feature's archive, collect its link
+        -- libs, and group backends by the base hook they fill (one hook per
+        -- subsystem kind; multiple same-kind features share one hook + array).
+        local by_hook = {}       -- hook -> { type = <ctype>, backends = { sym... } }
+        local needs_cxx = false
         for fname in pairs(features_needed) do
-            if fname ~= "duckdb" then
+            local spec = FEATURE_SPECS[fname]
+            if not spec then
                 tool.stderr("hull build: --with=" .. fname .. ": unknown feature\n")
                 tool.rmdir(tmpdir); tool.exit(1)
             end
             if is_cosmo then
-                tool.stderr("hull build: the 'duckdb' feature is native-only "
+                tool.stderr("hull build: the '" .. fname .. "' feature is native-only "
                             .. "(not available for cosmo builds)\n")
                 tool.rmdir(tmpdir); tool.exit(1)
             end
-            -- Resolve libhull_feature-duckdb.a: local build dirs first (dev /
-            -- `make feature-duckdb`), then ~/.hull/feature (hull feature install).
+            if spec.cxx then needs_cxx = true end
+
+            -- Resolve libhull_feature-<name>.a: local build dirs first
+            -- (`make feature-<name>`), then ~/.hull/feature (`hull feature install`).
+            local libname = "libhull_feature-" .. fname .. ".a"
             local lib, from_cache = nil, false
             for _, d in ipairs({ hull_dir, "build/", "../build/" }) do
-                if file_exists(d .. "libhull_feature-duckdb.a") then
-                    lib = d .. "libhull_feature-duckdb.a"; break
-                end
+                if file_exists(d .. libname) then lib = d .. libname; break end
             end
             if not lib and plat and tool.feature_cache_dir then
                 local cache = tool.feature_cache_dir()
                 if cache then
-                    local asset = "libhull_feature-duckdb-" .. plat .. ".a"
+                    local asset = "libhull_feature-" .. fname .. "-" .. plat .. ".a"
                     if file_exists(cache .. "/" .. asset) then
                         -- Re-verify a cache-sourced lib against its signed
                         -- manifest (embedded release pubkey) before linking.
                         if tool.platform_verify and not tool.platform_verify(cache, asset) then
-                            tool.stderr("hull build: cached duckdb feature lib failed "
-                                .. "re-verification; run `hull feature install duckdb` again\n")
+                            tool.stderr("hull build: cached " .. fname .. " feature lib failed "
+                                .. "re-verification; run `hull feature install " .. fname .. "` again\n")
                             tool.rmdir(tmpdir); tool.exit(1)
                         end
                         lib = cache .. "/" .. asset; from_cache = true
@@ -1283,51 +1302,72 @@ int main(int argc, char **argv) { return hull_main(argc, argv); }
                 end
             end
             if not lib then
-                tool.stderr("hull build: the 'duckdb' feature lib was not found "
+                tool.stderr("hull build: the '" .. fname .. "' feature lib was not found "
                             .. "(locally or in ~/.hull/feature)\n")
-                tool.stderr("hint: `hull feature install duckdb`, "
-                            .. "or build from source: `make feature-duckdb`\n")
+                tool.stderr("hint: `hull feature install " .. fname .. "`, "
+                            .. "or build from source: `make feature-" .. fname .. "`\n")
                 tool.rmdir(tmpdir); tool.exit(1)
             end
-            local dest = tmpdir .. "/libhull_feature-duckdb.a"
+            local dest = tmpdir .. "/" .. libname
             tool.copy(lib, dest)
-
-            -- Generate the strong hl_db_feature_backends registry. Self-contained
-            -- (only <stddef.h>); the lib defines hl_db_backend_duckdb.
-            write_file(tmpdir .. "/feature_registry.c", table.concat({
-                "/* Auto-generated by hull build — do not edit. */",
-                -- No <stddef.h>: hull build compiles these generated files with a
-                -- bare include path (embedded tcc's system headers aren't wired
-                -- up here, as app_main.c/app_registry.c never include one). Get
-                -- size_t from the compiler builtin (tcc/gcc/clang), ABI-exact.
-                "typedef __SIZE_TYPE__ size_t;",
-                "typedef struct HlDbBackend HlDbBackend;",
-                "extern const HlDbBackend hl_db_backend_duckdb;",
-                "static const HlDbBackend *const HL_FEATURES[] = { &hl_db_backend_duckdb };",
-                "const HlDbBackend *const *hl_db_feature_backends(size_t *count) {",
-                "    if (count) *count = 1;",
-                "    return HL_FEATURES;",
-                "}",
-                "",
-            }, "\n"))
-            if not tool.compiler.compile(tmpdir .. "/feature_registry.c",
-                                         tmpdir .. "/feature_registry.o", nil) then
-                tool.stderr("hull build: compilation failed (feature_registry.c)\n")
-                tool.rmdir(tmpdir); tool.exit(1)
-            end
-
-            feature_objs[#feature_objs + 1] = tmpdir .. "/feature_registry.o"
             feature_libs[#feature_libs + 1] = dest
-            -- DuckDB is C++; pull the C++ runtime (+ libdl on Linux).
-            if plat and plat:sub(1, 6) == "darwin" then
-                feature_libs[#feature_libs + 1] = "-lc++"
-            else
-                feature_libs[#feature_libs + 1] = "-lstdc++"
-                feature_libs[#feature_libs + 1] = "-ldl"
-            end
-            print("hull build: composed feature 'duckdb'"
+
+            -- Per-feature link libs (C++ runtime / native frameworks / -lvulkan).
+            local platlibs = (plat and plat:sub(1, 6) == "darwin")
+                             and (spec.libs.darwin or {}) or (spec.libs.other or {})
+            for _, l in ipairs(platlibs) do feature_libs[#feature_libs + 1] = l end
+
+            -- Group this backend under its base hook (subsystem kind).
+            by_hook[spec.hook] = by_hook[spec.hook] or { type = spec.type, backends = {} }
+            local g = by_hook[spec.hook]
+            g.backends[#g.backends + 1] = spec.backend
+
+            print("hull build: composed feature '" .. fname .. "'"
                   .. (from_cache and " (~/.hull/feature)" or " (local)"))
         end
+
+        -- A C++ feature archive cannot be linked by the embedded TinyCC (it links
+        -- no C++ runtime and does not run the archive's static initializers, so a
+        -- tcc-linked binary crashes at first use). Require a system compiler.
+        if needs_cxx and tool.compiler.name() == "tcc" then
+            tool.stderr("hull build: a composable C++ feature cannot be linked by "
+                        .. "the embedded TinyCC.\n")
+            tool.stderr("hint: build with a system compiler, e.g. "
+                        .. "`hull build --compiler=system --with=<name>`\n")
+            tool.rmdir(tmpdir); tool.exit(1)
+        end
+
+        -- Generate ONE registry filling each base weak hook with the STRONG
+        -- override returning that kind's composed backends. Self-contained (no
+        -- <stddef.h>: these files compile with a bare include path; size_t comes
+        -- from the compiler builtin, ABI-exact under tcc/gcc/clang).
+        local reg = {
+            "/* Auto-generated by hull build — do not edit. */",
+            "typedef __SIZE_TYPE__ size_t;",
+        }
+        for hook, g in pairs(by_hook) do
+            reg[#reg + 1] = "typedef struct " .. g.type .. " " .. g.type .. ";"
+            local addrs = {}
+            for i, b in ipairs(g.backends) do
+                reg[#reg + 1] = "extern const " .. g.type .. " " .. b .. ";"
+                addrs[i] = "&" .. b
+            end
+            local arr = "HL_FEAT_" .. hook
+            reg[#reg + 1] = "static const " .. g.type .. " *const " .. arr
+                            .. "[] = { " .. table.concat(addrs, ", ") .. " };"
+            reg[#reg + 1] = "const " .. g.type .. " *const *" .. hook .. "(size_t *count) {"
+            reg[#reg + 1] = "    if (count) *count = " .. #g.backends .. ";"
+            reg[#reg + 1] = "    return " .. arr .. ";"
+            reg[#reg + 1] = "}"
+        end
+        reg[#reg + 1] = ""
+        write_file(tmpdir .. "/feature_registry.c", table.concat(reg, "\n"))
+        if not tool.compiler.compile(tmpdir .. "/feature_registry.c",
+                                     tmpdir .. "/feature_registry.o", nil) then
+            tool.stderr("hull build: compilation failed (feature_registry.c)\n")
+            tool.rmdir(tmpdir); tool.exit(1)
+        end
+        feature_objs[#feature_objs + 1] = tmpdir .. "/feature_registry.o"
     end
 
     -- Link
