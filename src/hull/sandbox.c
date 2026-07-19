@@ -18,6 +18,9 @@
 #include "hull/sandbox.h"
 #include "hull/shared/cache_dir.h"
 #include "log.h"
+#ifdef HL_ENABLE_DB
+#include "hull/cap/db_backend.h"   /* hl_db_feature_backends: detect a composed DuckDB feature */
+#endif
 
 #include <limits.h>
 #include <stdio.h>
@@ -710,18 +713,33 @@ int hl_sandbox_apply(const HlSandboxPolicy *policy, const char *app_dir,
     /* /dev/urandom: needed by crypto.random and password hashing */
     unveil("/dev/urandom", "r");
 
-#ifdef HL_ENABLE_DUCKDB
     /* DuckDB's C++ runtime reads these to detect CPU count, memory limits, and
-     * timezone data (its ICU extension). Without them a read_csv/read_parquet
-     * throws an internal NULL-deref and aborts (SIGABRT) under the sandbox.
-     * All read-only system-info paths. */
-    unveil("/etc/localtime",                    "r");
-    unveil("/sys/devices/system/cpu",           "r");
-    unveil("/sys/fs/cgroup",                    "r");   /* cgroup v2 memory.max */
-    unveil("/proc/self/cgroup",                 "r");
-    unveil("/proc/sys/vm/overcommit_memory",    "r");
-    unveil("/proc/meminfo",                     "r");
+     * timezone data (its ICU extension). Without them its :memory: engine (or a
+     * read_csv/read_parquet) throws an internal NULL-deref and aborts (SIGABRT)
+     * under the sandbox. All read-only system-info paths. DuckDB reaches here
+     * two ways: compiled into the base (HL_ENABLE_DUCKDB), OR composed as a
+     * build feature (`hull build --with=duckdb`) into an app whose base sandbox
+     * was built WITHOUT that flag. The feature case has no compile-time signal,
+     * so detect the linked backend at runtime via hl_db_feature_backends(). */
+    int duckdb_present = 0;
+#ifdef HL_ENABLE_DUCKDB
+    duckdb_present = 1;
 #endif
+#ifdef HL_ENABLE_DB
+    if (!duckdb_present) {
+        size_t feat_count = 0;
+        (void)hl_db_feature_backends(&feat_count);
+        duckdb_present = (feat_count > 0);
+    }
+#endif
+    if (duckdb_present) {
+        unveil("/etc/localtime",                    "r");
+        unveil("/sys/devices/system/cpu",           "r");
+        unveil("/sys/fs/cgroup",                    "r");   /* cgroup v2 memory.max */
+        unveil("/proc/self/cgroup",                 "r");
+        unveil("/proc/sys/vm/overcommit_memory",    "r");
+        unveil("/proc/meminfo",                     "r");
+    }
 
     /* Manifest fs.read / fs.write paths: resolve relative to
      * app_dir (matching the capability layer) AND pre-mkdir so
