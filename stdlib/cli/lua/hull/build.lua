@@ -1210,6 +1210,18 @@ int main(int argc, char **argv) { return hull_main(argc, argv); }
     local feature_objs = {}
     local feature_libs = {}
     if next(features_needed) then
+        -- A composable feature archive is C++ (e.g. DuckDB). The embedded
+        -- TinyCC is C-only: it links no C++ runtime and does not run the
+        -- archive's static initializers, so a tcc-linked feature binary
+        -- crashes at first use on null engine globals. Require a system
+        -- C/C++ compiler.
+        if tool.compiler.name() == "tcc" then
+            tool.stderr("hull build: composable features (e.g. 'duckdb') are C++ "
+                        .. "and cannot be linked by the embedded TinyCC.\n")
+            tool.stderr("hint: build with a system compiler, e.g. "
+                        .. "`hull build --compiler=system --with=duckdb`\n")
+            tool.rmdir(tmpdir); tool.exit(1)
+        end
         local plat = tool.platform_name and tool.platform_name() or nil
         local hull_dir = ""
         if __hull_exe then hull_dir = __hull_exe:match("(.*/)") or "" end

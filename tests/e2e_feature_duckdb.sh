@@ -40,8 +40,8 @@ app.main(function()
 end)
 LUA
 
-echo "=== hull build --with=duckdb ==="
-BUILD_OUT=$("$HULL" build --with=duckdb --no-verify-platform -o "$APP/bin" "$APP" 2>&1) || true
+echo "=== hull build --with=duckdb (system compiler: features are C++) ==="
+BUILD_OUT=$("$HULL" build --compiler=system --with=duckdb --no-verify-platform -o "$APP/bin" "$APP" 2>&1) || true
 echo "$BUILD_OUT"
 echo "$BUILD_OUT" | grep -q "composed feature 'duckdb'" || { echo "FAIL: feature not composed"; exit 1; }
 RUN_OUT=$("$APP/bin" 2>&1) || true
@@ -58,5 +58,12 @@ if echo "$PLAIN_OUT" | grep -q "composed feature"; then
 fi
 "$PLAIN/bin" 2>&1 | grep -q "PLAIN OK" || { echo "FAIL: plain app did not run"; exit 1; }
 echo "ok  plain app stayed DuckDB-free"
+
+echo "=== negative: tcc cannot link a C++ feature (must be rejected) ==="
+# On Linux the guard fires; on macOS tcc is unavailable -- either way, no binary.
+if "$HULL" build --compiler=tcc --with=duckdb --no-verify-platform -o "$APP/bin_tcc" "$APP" >/dev/null 2>&1; then
+    echo "FAIL: tcc produced a C++ feature binary (should be rejected)"; exit 1
+fi
+echo "ok  tcc + feature rejected"
 
 echo "PASS: DuckDB feature composed into an app binary; base stays clean"
