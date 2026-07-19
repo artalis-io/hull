@@ -32,7 +32,11 @@
 #ifndef HL_CAP_GPU_H
 #define HL_CAP_GPU_H
 
-#ifdef HL_ENABLE_GPU
+/* The GPU types + the generic cap API are ALWAYS declared: the generic dispatch
+ * layer (cap/gpu.c) and the composable-feature hook (cap/gpu_feature.c) are
+ * base-resident. Only the concrete wgpu backend symbol (at the bottom) is gated
+ * on a compiled-in HL_ENABLE_GPU build; a `hull build --with=gpu` feature
+ * supplies that backend instead. */
 
 #include "hull/limits/gpu.h"
 
@@ -354,8 +358,15 @@ int  hl_cap_gpu_texture_read(HlGpuCtx *ctx, int device, const char *name,
                               HlGpuTexFormat *out_format);
 void hl_cap_gpu_texture_destroy(HlGpuCtx *ctx, int device, const char *name);
 
-/* Backend selection (defined in gpu_wgpu.c) */
-extern const HlGpuBackend hl_gpu_backend_wgpu;
+/* Composable-feature hook: the base returns NO backend (weak default in
+ * cap/gpu_feature.c); a `hull build --with=gpu` build links a STRONG override
+ * returning the wgpu backend. Mirrors hl_db_feature_backends. */
+const HlGpuBackend *const *hl_gpu_feature_backends(size_t *count);
 
+#ifdef HL_ENABLE_GPU
+/* The wgpu backend vtable (defined in gpu_wgpu.c). Present only in a monolithic
+ * HL_ENABLE_GPU build or the gpu feature archive. */
+extern const HlGpuBackend hl_gpu_backend_wgpu;
 #endif /* HL_ENABLE_GPU */
+
 #endif /* HL_CAP_GPU_H */
