@@ -20,7 +20,9 @@ const SWEEP_INTERVAL = 100;
  * MAX_BUCKETS budget and starve each other. The store object holds the
  * bucket map plus its own count. */
 function makeStore() {
-    return { buckets: {}, count: 0 };
+    // Null-prototype map: a request-derived rate-limit key of "__proto__"
+    // must be an ordinary key, not the Object.prototype setter.
+    return { buckets: Object.create(null), count: 0 };
 }
 
 function sweepExpired(store, window, now) {

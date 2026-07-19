@@ -482,6 +482,7 @@ function codegen(ast) {
                 // Phase 6 audit L-5: cache the dot-path in a block-scoped
                 // local so genDotPath isn't called twice (also halves the
                 // generated-code size for the typical for loop).
+                validateIdent(node.var, "for loop variable");
                 const expr = genDotPath(node.expr, null, localsSet);
                 emit("{ const __it = " + expr + ";");
                 emit("for (const " + node.var + " of (Array.isArray(__it) ? __it : [])) {");
@@ -495,6 +496,8 @@ function codegen(ast) {
                 // M-9: only iterate non-null object values; avoid TypeError
                 // from Object.entries(null) / Object.entries(undefined).
                 // L-5: same single-eval pattern as the for loop above.
+                validateIdent(node.key, "for loop key");
+                validateIdent(node.val, "for loop value");
                 const expr2 = genDotPath(node.expr, null, localsSet);
                 emit("{ const __it = " + expr2 + ";");
                 emit("for (const [" + node.key + ", " + node.val + "] of Object.entries((__it && typeof __it === \"object\") ? __it : {})) {");

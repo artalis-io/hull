@@ -665,6 +665,7 @@ local function codegen(ast)
                 emit("end")
 
             elseif node.kind == "for" then
+                validate_ident(node.var, "for loop variable")
                 emit("for _, " .. node.var .. " in ipairs(" .. gen_dot_path(node.expr, nil, locals_set) .. " or {}) do")
                 locals_set[node.var] = (locals_set[node.var] or 0) + 1
                 indent = indent + 1
@@ -675,6 +676,8 @@ local function codegen(ast)
                 emit("end")
 
             elseif node.kind == "for_kv" then
+                validate_ident(node.key, "for loop key")
+                validate_ident(node.val, "for loop value")
                 emit("for " .. node.key .. ", " .. node.val .. " in pairs(" .. gen_dot_path(node.expr, nil, locals_set) .. " or {}) do")
                 locals_set[node.key] = (locals_set[node.key] or 0) + 1
                 locals_set[node.val] = (locals_set[node.val] or 0) + 1

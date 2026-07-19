@@ -564,7 +564,7 @@ local function cmd_test(name)
         "",
     }
     for _, fixture in ipairs(fixtures) do
-        local fname = fixture.name or "unnamed"
+        local fname = lua_escape(fixture.name or "unnamed")
         local input = fixture.input or ""
         local expect_status = fixture.expect_status or 0
         local escaped = lua_escape(input)

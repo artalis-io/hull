@@ -415,6 +415,7 @@ static JSValue js_hull_sleep(JSContext *ctx, JSValueConst this_val,
         actx->detached = 0;
 
         if (hl_net_op_suspend(js->base.net_ctx, (HlReqHandle *)conn, (HlSuspendOp *)&actx->op) < 0) {
+            actx->cont->cancel(actx->cont);   /* frees the (uninvoked) resolve/reject */
             actx->cont->destroy(actx->cont);
             hl_async_ctx_free(actx);
             JS_FreeValue(ctx, promise);
@@ -431,6 +432,7 @@ static JSValue js_hull_sleep(JSContext *ctx, JSValueConst this_val,
         uint64_t tid = be->timer_add(js->base.async_ctx, (uint64_t)ms,
                                       hl_detached_timer_fire, actx);
         if (tid == 0) {
+            actx->cont->cancel(actx->cont);   /* frees the (uninvoked) resolve/reject */
             actx->cont->destroy(actx->cont);
             hl_async_ctx_free(actx);
             JS_FreeValue(ctx, promise);

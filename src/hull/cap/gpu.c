@@ -94,8 +94,16 @@ int hl_cap_gpu_init(HlGpuCtx *ctx, const HlGpuBackend *backend)
     }
 
     /* Initialize per-device mutexes */
-    for (int i = 0; i < ctx->device_count; i++)
-        pthread_mutex_init(&ctx->devices[i].mutex, NULL);
+    for (int i = 0; i < ctx->device_count; i++) {
+        if (pthread_mutex_init(&ctx->devices[i].mutex, NULL) != 0) {
+            for (int j = 0; j < i; j++)
+                pthread_mutex_destroy(&ctx->devices[j].mutex);
+            backend->destroy(ctx);
+            ctx->backend_ctx = NULL;
+            ctx->device_count = 0;
+            return HL_GPU_ERR_NOT_AVAILABLE;
+        }
+    }
 
     if (ctx->device_count > 0)
         log_info("[hull:gpu] %s: %d device(s), default=%s",

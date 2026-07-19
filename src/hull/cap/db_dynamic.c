@@ -131,10 +131,15 @@ HlDbHandle *hl_db_dynamic_open(const char *dsn,
     }
 
     if (scheme_is_file(scheme)) {
-        /* File backend: the path (DSN minus a "sqlite://" prefix) must pass the
-         * fs sandbox. ":memory:" opens no file. */
+        /* File backend: reduce the DSN to a filesystem path by stripping the
+         * "<scheme>://" prefix (sqlite://, duckdb://, ...) so fs-sandbox
+         * validation sees the bare path. A scheme-less DSN passes through
+         * unchanged. ":memory:" (possibly after stripping) opens no file. */
         const char *path = dsn;
-        if (strncmp(path, "sqlite://", 9) == 0) path += 9;
+        if (scheme[0]) {
+            size_t slen = strlen(scheme);
+            if (strncmp(dsn + slen, "://", 3) == 0) path = dsn + slen + 3;
+        }
         if (strcmp(path, ":memory:") != 0) {
             if (!fs_cfg) {
                 if (err) *err = "db.open: a file DSN needs a filesystem-scoped app";

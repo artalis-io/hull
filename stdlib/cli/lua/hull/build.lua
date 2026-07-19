@@ -252,6 +252,19 @@ end
 
 -- ── Build steps ──────────────────────────────────────────────────────
 
+-- Escape a string for safe embedding in a C string literal. App file paths
+-- come from tool.find_files (raw on-disk names) and may contain ", \, or
+-- control bytes; without escaping a crafted filename could break out of the
+-- generated app_registry.c string literal. Belt-and-suspenders with the
+-- varname sanitizer below (which forces a valid C identifier).
+local function c_string_escape(s)
+    return (s:gsub('[%z\1-\31"\\]', function(ch)
+        if ch == '"' then return '\\"' end
+        if ch == '\\' then return '\\\\' end
+        return string.format('\\%03o', ch:byte())
+    end))
+end
+
 local function generate_app_registry(app_dir, files)
     local parts = {}
     local entries = {}
@@ -268,13 +281,15 @@ local function generate_app_registry(app_dir, files)
         end
 
         local rel = path:sub(#app_dir + 2) -- strip "dir/"
-        local varname = var_prefix .. rel:gsub("[/.]", "_")
+        -- Force a valid C identifier: map every non-alphanumeric byte to "_"
+        -- (a filename with a dash/space/quote would otherwise emit invalid C).
+        local varname = var_prefix .. rel:gsub("[^%w]", "_")
 
         parts[#parts + 1] = xxd_data(varname, data)
         parts[#parts + 1] = ""
 
         entries[#entries + 1] = string.format(
-            '    { "%s", %s, sizeof(%s) },', entry_name, varname, varname)
+            '    { "%s", %s, sizeof(%s) },', c_string_escape(entry_name), varname, varname)
     end
 
     -- Lua modules: "./path" (no .lua extension)
@@ -344,11 +359,11 @@ local function generate_app_registry(app_dir, files)
                 .. "the corrupt entry.",
                 item.path, item.entry_name))
         end
-        local varname = "aot_" .. item.entry_name:gsub("[/.]", "_")
+        local varname = "aot_" .. item.entry_name:gsub("[^%w]", "_")
         parts[#parts + 1] = xxd_data(varname, data)
         parts[#parts + 1] = ""
         entries[#entries + 1] = string.format(
-            '    { "%s", %s, sizeof(%s) },', item.entry_name, varname, varname)
+            '    { "%s", %s, sizeof(%s) },', c_string_escape(item.entry_name), varname, varname)
     end
 
     -- Sort entries by name for O(log n) binary search in HlVfs
@@ -405,16 +420,24 @@ local function extract_app_manifest(app_dir)
     return manifest
 end
 
-local function sign_app(app_dir, key_file, sign_ctx, files)
+-- On a signing failure, clean up the build tmpdir and remove the already-linked
+-- but unsigned output binary, so a failed `hull build --sign` never leaves an
+-- unsigned binary in place (nor a stray tmpdir). tmpdir/output are nil-safe.
+local function sign_fail(msg, tmpdir, output)
+    tool.stderr(msg)
+    if tmpdir then tool.rmdir(tmpdir) end
+    if output then tool.remove_file(output) end
+    tool.exit(1)
+end
+
+local function sign_app(app_dir, key_file, sign_ctx, files, tmpdir, output)
     local key_data = read_file(key_file)
     if not key_data then
-        tool.stderr("hull build: cannot read key file: " .. key_file .. "\n")
-        tool.exit(1)
+        sign_fail("hull build: cannot read key file: " .. key_file .. "\n", tmpdir, output)
     end
     local sk_hex = key_data:match("^(%x+)")
     if not sk_hex or #sk_hex ~= 128 then
-        tool.stderr("hull build: invalid key file format\n")
-        tool.exit(1)
+        sign_fail("hull build: invalid key file format\n", tmpdir, output)
     end
 
     -- Derive public key
@@ -1394,7 +1417,7 @@ int main(int argc, char **argv) { return hull_main(argc, argv); }
             migrations = migration_files,
             static = static_files,
             templates = html_files,
-        })
+        }, tmpdir, opts.output)
     end
 
     -- Cleanup
