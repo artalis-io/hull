@@ -1301,6 +1301,15 @@ int main(int argc, char **argv) { return hull_main(argc, argv); }
             else
                 feature_libs[#feature_libs + 1] = "-lstdc++"
                 feature_libs[#feature_libs + 1] = "-ldl"
+                -- Bind eagerly, matching the base hull's -Wl,-z,now: resolve
+                -- every PLT symbol at startup, BEFORE the sandbox seals.
+                -- Without it, the first post-sandbox call into the dynamically
+                -- linked C++ runtime (libstdc++ / libgcc_s) resolves lazily
+                -- under the sandbox, and a syscall the sandbox blocks aborts
+                -- DuckDB init. The base binds this way already; macOS binds at
+                -- load. (See the DuckDB feature e2e for the diagnosis.)
+                feature_libs[#feature_libs + 1] = "-Wl,-z,now"
+                feature_libs[#feature_libs + 1] = "-Wl,-z,relro"
             end
             print("hull build: composed feature 'duckdb'"
                   .. (from_cache and " (~/.hull/feature)" or " (local)"))

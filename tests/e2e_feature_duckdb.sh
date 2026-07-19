@@ -53,6 +53,12 @@ if ! echo "$RUN_OUT" | grep -q "DUCKDB FEATURE APP OK"; then
     echo "--- retry with --no-sandbox (isolates sandbox vs link/static-init) ---"
     if "$APP/bin" --no-sandbox 2>&1 | grep -q "DUCKDB FEATURE APP OK"; then
         echo "DIAG: works with --no-sandbox -> a sandboxed syscall blocks DuckDB init"
+        command -v strace >/dev/null 2>&1 || sudo apt-get install -y -q strace >/dev/null 2>&1 || true
+        if command -v strace >/dev/null 2>&1; then
+            echo "--- strace (sandboxed run): syscalls that returned an error ---"
+            strace -f -o /tmp/ddb_strace.txt "$APP/bin" >/dev/null 2>&1 || true
+            grep -aE "= -1 E" /tmp/ddb_strace.txt | tail -25 || true
+        fi
     else
         echo "DIAG: still fails with --no-sandbox -> link/static-init, not sandbox"
     fi
