@@ -37,6 +37,32 @@ if ! command -v curl >/dev/null 2>&1; then
     exit 0
 fi
 
+# Poll until the hull app server answers on $PORT, instead of a fixed `sleep`.
+# A loaded CI runner can take longer than a couple seconds to bind the port and
+# open the (lazy) first DB connection; the old fixed sleep raced and produced a
+# flaky `curl: (7) connection refused`. Waits up to ~30s, then bails with the
+# server log so a genuine startup failure is still diagnosable.
+wait_for_server() {
+    _log=$1
+    i=0
+    while [ "$i" -lt 60 ]; do
+        if curl -fsS "http://127.0.0.1:${PORT}/" >/dev/null 2>&1; then
+            return 0
+        fi
+        # Server process died? Fail fast rather than polling a dead pid.
+        if [ -n "${SVR:-}" ] && ! kill -0 "$SVR" 2>/dev/null; then
+            echo "FAIL: app server exited during startup"
+            [ -n "$_log" ] && { echo "--- server log ---"; cat "$_log" 2>/dev/null; }
+            return 1
+        fi
+        i=$((i + 1))
+        sleep 0.5
+    done
+    echo "FAIL: app server did not become ready on port ${PORT}"
+    [ -n "$_log" ] && { echo "--- server log ---"; cat "$_log" 2>/dev/null; }
+    return 1
+}
+
 echo "=== building hull with HL_ENABLE_MYSQL=1 ==="
 make HL_ENABLE_MYSQL=1 >/dev/null
 
@@ -186,7 +212,7 @@ LUA
 echo "=== running app against mysql (native auth, plaintext) ==="
 ./build/hull -d "$DSN" --no-sandbox -p "$PORT" "$APPDIR/app.lua" >"$APPDIR/serve.log" 2>&1 &
 SVR=$!
-sleep 2
+wait_for_server "$APPDIR/serve.log" || exit 1
 
 RESP=$(curl -fsS "http://127.0.0.1:${PORT}/" || echo FAIL)
 echo "response: $RESP"
@@ -304,7 +330,7 @@ LUA
 echo "=== running app over TLS (sslmode=require + caching_sha2 full auth) ==="
 ./build/hull -d "$DSN_TLS" --no-sandbox -p "$PORT" "$APPDIR_TLS/app.lua" >"$APPDIR_TLS/serve.log" 2>&1 &
 SVR=$!
-sleep 2
+wait_for_server "$APPDIR_TLS/serve.log" || exit 1
 
 RESP_TLS=$(curl -fsS "http://127.0.0.1:${PORT}/" || echo FAIL)
 echo "response: $RESP_TLS"
