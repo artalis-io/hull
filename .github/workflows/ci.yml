@@ -894,6 +894,28 @@ jobs:
         timeout-minutes: 15
         run: sh tests/e2e_feature_duckdb.sh
 
+  # GPU (wgpu-native) as a composable FEATURE. Own fresh build tree (the
+  # HL_ENABLE_GPU=1 flag flip via `make feature-gpu` cleans the base objects).
+  # Build-only: gpu.dispatch needs a physical device CI lacks, so the e2e app
+  # branches on gpu.available() and just confirms the composed binary links +
+  # boots. The composed binary links -lvulkan; libvulkan-dev provides the link
+  # library and pulls in the runtime loader (libvulkan1) so it boots with 0
+  # devices. See docs/features_and_flavors.md.
+  gpu-feature:
+    name: GPU feature build (Linux)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          submodules: true
+      - name: Install Vulkan loader + dev headers (compose links -lvulkan)
+        run: sudo apt-get update && sudo apt-get install -y libvulkan-dev
+      - name: Fetch wgpu-native static lib
+        run: make fetch-wgpu
+      - name: Compose the GPU feature into an app binary (e2e)
+        timeout-minutes: 15
+        run: sh tests/e2e_feature_gpu.sh
+
   coverage:
     name: Code Coverage
     runs-on: ubuntu-24.04
