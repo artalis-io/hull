@@ -915,9 +915,14 @@ static int parse_pipeline_stages(lua_State *L, int tbl_idx,
 
     for (int s = 0; s < stage_count; s++) {
         lua_rawgeti(L, tbl_idx, s + 1);
-        if (!lua_istable(L, -1)) { lua_pop(L, 1); continue; }
 
+        /* Zero-init every counted stage BEFORE the type check. A non-table
+         * entry takes the `continue` below, but the caller still iterates all
+         * stage_count entries; leaving this one uninitialized reads garbage
+         * (stages[s].shader) downstream. */
         memset(&stages[s], 0, sizeof(stages[s]));
+
+        if (!lua_istable(L, -1)) { lua_pop(L, 1); continue; }
 
         /* shader (required) */
         lua_getfield(L, -1, "shader");
