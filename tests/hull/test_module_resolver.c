@@ -429,6 +429,40 @@ UTEST(module_resolver, gpu_admitted_with_composed_feature_cap)
     ASSERT_EQ(rc, 0);
     ASSERT_EQ(err[0], '\0');
 }
+
+UTEST(module_resolver, optional_module_skipped_when_cap_absent)
+{
+    /* "hull/gpu@1?" on a non-GPU build: SKIP, don't error. Not admitted, but
+     * recorded optional-absent so require/import yields nil/null for fallback. */
+    HlManifest m;
+    clear_manifest(&m);
+    add_module(&m, "gpu", 1);
+    m.modules[m.modules_count - 1].optional = 1;
+
+    HlResolvedModuleSet s = {0};
+    char err[256] = {0};
+    int rc = hl_module_resolver_resolve(&m, &s, err, sizeof(err));
+    ASSERT_EQ(rc, 0);
+    ASSERT_EQ(err[0], '\0');
+
+    const HlModuleSpec *gpu = hl_module_registry_find_short("gpu");
+    ASSERT_FALSE(hl_module_set_contains_spec(&s, gpu));
+    ASSERT_TRUE(hl_module_set_optional_absent_spec(&s, gpu));
+}
+
+UTEST(module_resolver, non_optional_still_rejected_when_cap_absent)
+{
+    /* Regression guard: without the '?', the hard rejection stays. */
+    HlManifest m;
+    clear_manifest(&m);
+    add_module(&m, "gpu", 1);  /* optional defaults to 0 */
+
+    HlResolvedModuleSet s = {0};
+    char err[256] = {0};
+    int rc = hl_module_resolver_resolve(&m, &s, err, sizeof(err));
+    ASSERT_EQ(rc, -1);
+    ASSERT_NE(strstr(err, "HL_ENABLE_GPU"), NULL);
+}
 #endif
 
 UTEST(module_resolver, feature_cap_maps_gpu_only)

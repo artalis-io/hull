@@ -224,6 +224,11 @@ int hl_manifest_extract_lua(lua_State *L, HlManifest *out, HlAllocator *alloc)
                 lua_rawgeti(L, modules_idx, i);
                 if (lua_type(L, -1) == LUA_TSTRING) {
                     const char *spec = lua_tostring(L, -1);
+                    /* Trailing '?' marks the module optional (skip, not error,
+                     * when its build cap is absent). It sits after the major,
+                     * so the name length (before '@') is unaffected. */
+                    size_t speclen = strlen(spec);
+                    int optional = (speclen > 0 && spec[speclen - 1] == '?');
                     const char *at   = strchr(spec, '@');
                     if (!at || at == spec) {
                         log_warn("[manifest] modules[%lld] = %s — expected "
@@ -232,7 +237,9 @@ int hl_manifest_extract_lua(lua_State *L, HlManifest *out, HlAllocator *alloc)
                     } else {
                         char *end = NULL;
                         long v = strtol(at + 1, &end, 10);
-                        if (end == at + 1 || *end != '\0' ||
+                        int end_ok = (*end == '\0') ||
+                                     (optional && end[0] == '?' && end[1] == '\0');
+                        if (end == at + 1 || !end_ok ||
                             v < 1 || v > 255) {
                             log_warn("[manifest] modules[%lld] = %s — "
                                      "invalid major version, ignored",
@@ -245,6 +252,7 @@ int hl_manifest_extract_lua(lua_State *L, HlManifest *out, HlAllocator *alloc)
                                 namebuf[nlen] = '\0';
                                 out->modules[out->modules_count].name      = namebuf;
                                 out->modules[out->modules_count].api_major = (uint8_t)v;
+                                out->modules[out->modules_count].optional  = (uint8_t)optional;
                                 out->modules_count++;
                             }
                         }
@@ -271,6 +279,8 @@ int hl_manifest_extract_lua(lua_State *L, HlManifest *out, HlAllocator *alloc)
                     }
                     const char *alias = lua_tostring(L, -2);
                     const char *spec  = lua_tostring(L, -1);
+                    size_t speclen = strlen(spec);
+                    int optional = (speclen > 0 && spec[speclen - 1] == '?');
                     const char *at    = strchr(spec, '@');
                     if (!at || at == spec) {
                         log_warn("[manifest] modules.%s = %s — expected "
@@ -279,7 +289,9 @@ int hl_manifest_extract_lua(lua_State *L, HlManifest *out, HlAllocator *alloc)
                     } else {
                         char *end = NULL;
                         long v = strtol(at + 1, &end, 10);
-                        if (end == at + 1 || *end != '\0' ||
+                        int end_ok = (*end == '\0') ||
+                                     (optional && end[0] == '?' && end[1] == '\0');
+                        if (end == at + 1 || !end_ok ||
                             v < 1 || v > 255) {
                             log_warn("[manifest] modules.%s = %s — invalid "
                                      "major version, ignored", alias, spec);
@@ -291,6 +303,7 @@ int hl_manifest_extract_lua(lua_State *L, HlManifest *out, HlAllocator *alloc)
                                 namebuf[nlen] = '\0';
                                 out->modules[out->modules_count].name      = namebuf;
                                 out->modules[out->modules_count].api_major = (uint8_t)v;
+                                out->modules[out->modules_count].optional  = (uint8_t)optional;
                                 out->modules_count++;
                             }
                         }

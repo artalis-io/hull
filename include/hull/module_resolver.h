@@ -56,6 +56,11 @@ typedef struct HlManifest HlManifest;
  */
 typedef struct HlResolvedModuleSet {
     uint64_t bits[HL_MODULE_BITSET_WORDS];
+    /* Modules declared optional ("hull/gpu@1?") that were SKIPPED because a
+     * build cap is absent. Distinct from `bits` (admitted) and from "never
+     * declared" (in neither): the require/import gate consults this to return
+     * nil/null gracefully instead of erroring. Parallel-indexed to `bits`. */
+    uint64_t optional_absent[HL_MODULE_BITSET_WORDS];
 } HlResolvedModuleSet;
 
 /* ── Set operations ────────────────────────────────────────────────── */
@@ -74,6 +79,15 @@ bool hl_module_set_contains_name(const HlResolvedModuleSet *set,
 /* True iff a short or canonical name is in the set. */
 bool hl_module_set_contains_short(const HlResolvedModuleSet *set,
                                    const char *name);
+
+/* True iff `spec` was declared optional but skipped (build cap absent). NULL →
+ * false. The require/import gate uses this to yield nil/null instead of an error. */
+bool hl_module_set_optional_absent_spec(const HlResolvedModuleSet *set,
+                                         const HlModuleSpec *spec);
+
+/* Same, by canonical name. NULL → false. */
+bool hl_module_set_optional_absent_name(const HlResolvedModuleSet *set,
+                                         const char *canonical_name);
 
 /* Number of bits set. */
 int hl_module_set_count(const HlResolvedModuleSet *set);
@@ -114,6 +128,16 @@ uint32_t hl_module_build_caps(void);
  * "gpu" -> HL_MOD_CAP_GPU; "duckdb" -> 0, it rides on the always-present hull/db).
  */
 uint32_t hl_module_feature_cap(const char *name);
+
+/*
+ * True iff `spec` requires a build-time subsystem cap (DB/WASM/GPU/HTTP/TUI)
+ * that THIS binary lacks — compiled out and not composed as a feature. The JS
+ * loader uses it to tell a build-cap-optional top-level import (return a null
+ * stub, defer the decision to the resolver + import tracker) from a genuine
+ * unresolvable import (throw now): a module absent for OTHER reasons (e.g. a db
+ * runtime not configured) still errors at import.
+ */
+bool hl_module_needs_absent_build_cap(const HlModuleSpec *spec);
 
 /*
  * Resolve against an EXPLICIT build-cap set instead of this binary's

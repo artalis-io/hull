@@ -188,6 +188,37 @@ int hl_js_check_module_declared(JSContext *ctx,
     return 0;
 }
 
+/* Build-cap-optional module ("hull/gpu@1?") the build lacks: synthesize a stub
+ * whose single conventional export — the last ':' segment, which matches the
+ * native module's export name (hull:gpu -> `gpu`, hull:compute -> `compute`) —
+ * is null. So `import { gpu } from "hull:gpu"` binds null on a base binary and
+ * the real object on a GPU binary, letting the app branch on it. */
+static const char *hl_js_module_last_seg(const char *module_name)
+{
+    const char *seg = strrchr(module_name, ':');
+    return seg ? seg + 1 : module_name;
+}
+
+static int hl_js_optional_stub_init(JSContext *ctx, JSModuleDef *m)
+{
+    JSAtom nm = JS_GetModuleName(ctx, m);
+    const char *mn = JS_AtomToCString(ctx, nm);
+    JS_FreeAtom(ctx, nm);
+    if (mn) {
+        JS_SetModuleExport(ctx, m, hl_js_module_last_seg(mn), JS_NULL);
+        JS_FreeCString(ctx, mn);
+    }
+    return 0;
+}
+
+static JSModuleDef *hl_js_optional_stub(JSContext *ctx, const char *module_name)
+{
+    JSModuleDef *m = JS_NewCModule(ctx, module_name, hl_js_optional_stub_init);
+    if (!m) return NULL;
+    JS_AddModuleExport(ctx, m, hl_js_module_last_seg(module_name));
+    return m;
+}
+
 /*
  * Module loader. Handles:
  * 1. hull:* prefix → built-in modules (registered at init time)
@@ -218,6 +249,13 @@ static JSModuleDef *hl_js_module_loader(JSContext *ctx,
         if (spec) {
             if (js->base.module_set) {
                 if (!hl_module_set_contains_spec(js->base.module_set, spec)) {
+                    /* Optional module the build lacks ("hull/gpu@1?"): return a
+                     * null-export stub so `import { gpu } from "hull:gpu"` binds
+                     * null and the app can fall back, instead of throwing. */
+                    if (hl_module_set_optional_absent_spec(js->base.module_set,
+                                                           spec))
+                        return hl_js_optional_stub(ctx, module_name);
+
                     char deps_buf[128];
                     hl_module_registry_format_deps(spec, deps_buf, sizeof(deps_buf));
                     char deps_part[160] = {0};
@@ -255,6 +293,20 @@ static JSModuleDef *hl_js_module_loader(JSContext *ctx,
                 return m;
             }
         }
+        /* A registry-KNOWN hull:* module that needs a build-time cap this
+         * binary lacks (compiled out / not composed, e.g. hull:gpu on a
+         * non-GPU binary) and that reached here with no native reg + no VFS
+         * entry: at top-of-file import time the module_set isn't wired yet, so
+         * we can't tell if it was declared optional. Return a null-export stub
+         * and defer the decision — the resolver + import tracker run right after
+         * manifest extraction and still REJECT a non-optional or undeclared
+         * import, while an optional one ("hull/gpu@1?") resolves to null so the
+         * app can fall back. Scoped to build-cap-absent modules so a module
+         * missing for other reasons (unconfigured runtime) still throws here. */
+        if (spec && !js->base.module_set &&
+            hl_module_needs_absent_build_cap(spec))
+            return hl_js_optional_stub(ctx, module_name);
+
         /* "hull:something" that isn't a known native and isn't in the
          * VFS stdlib — almost always a typo. Probe the registry for a
          * near match and surface "did you mean?" if anything is close. */

@@ -412,6 +412,13 @@ static int hl_lua_require(lua_State *L)
         if (spec) {
             if (lua->base.module_set) {
                 if (!hl_module_set_contains_spec(lua->base.module_set, spec)) {
+                    /* Optional module the build lacks ("hull/gpu@1?"): return
+                     * nil so the app can fall back, instead of erroring. */
+                    if (hl_module_set_optional_absent_spec(lua->base.module_set,
+                                                           spec)) {
+                        lua_pushnil(L);
+                        return 1;
+                    }
                     char deps_buf[128];
                     hl_module_registry_format_deps(spec, deps_buf, sizeof(deps_buf));
                     char deps_part[160] = {0};

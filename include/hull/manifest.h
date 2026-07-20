@@ -50,6 +50,10 @@ typedef struct HlAllocator HlAllocator;
 typedef struct HlManifestModule {
     const char *name;       /* allocator-owned copy */
     uint8_t     api_major;  /* parsed from version string (e.g. "1" → 1) */
+    uint8_t     optional;   /* trailing '?' in the spec ("hull/gpu@1?"): if the
+                             * module needs a build cap this binary lacks, the
+                             * resolver SKIPS it (no error) and require/import
+                             * yields nil/null so the app can fall back. */
 } HlManifestModule;
 
 /* One declared named database connection:

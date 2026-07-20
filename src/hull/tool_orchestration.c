@@ -103,8 +103,14 @@ static int l_tool_modules_resolve(lua_State *L)
                 const char *spec = NULL;
                 size_t nlen = 0;
                 long v = 0;
+                int optional = 0;
                 if (is_spec) {
                     spec = val;
+                    /* Trailing '?' marks the module optional; it's after the
+                     * major so the name (before '@') is unaffected, and strtol
+                     * with a NULL end already stops at the '?'. */
+                    size_t sl = strlen(spec);
+                    optional = (sl > 0 && spec[sl - 1] == '?');
                     const char *at = strchr(spec, '@');
                     nlen = at ? (size_t)(at - spec) : strlen(spec);
                     v = at ? strtol(at + 1, NULL, 10) : 1;
@@ -121,6 +127,7 @@ static int l_tool_modules_resolve(lua_State *L)
                         owned_names[owned_count] = copy;
                         m.modules[m.modules_count].name = copy;
                         m.modules[m.modules_count].api_major = (uint8_t)v;
+                        m.modules[m.modules_count].optional = (uint8_t)optional;
                         m.modules_count++;
                         owned_count++;
                     }

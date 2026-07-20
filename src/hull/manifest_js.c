@@ -249,11 +249,17 @@ int hl_manifest_extract_js(JSContext *ctx, HlManifest *out, HlAllocator *alloc)
             if (JS_IsString(elem)) {
                 const char *spec = JS_ToCString(ctx, elem);
                 if (spec) {
+                    /* Trailing '?' marks the module optional (skip, not error,
+                     * when its build cap is absent); sits after the major. */
+                    size_t speclen = strlen(spec);
+                    int optional = (speclen > 0 && spec[speclen - 1] == '?');
                     const char *at = strchr(spec, '@');
                     if (at && at != spec) {
                         char *end = NULL;
                         long v = strtol(at + 1, &end, 10);
-                        if (end != at + 1 && *end == '\0' &&
+                        int end_ok = (*end == '\0') ||
+                                     (optional && end[0] == '?' && end[1] == '\0');
+                        if (end != at + 1 && end_ok &&
                             v >= 1 && v <= 255) {
                             size_t nlen = (size_t)(at - spec);
                             char *namebuf = hl_alloc_malloc(alloc, nlen + 1);
@@ -262,6 +268,7 @@ int hl_manifest_extract_js(JSContext *ctx, HlManifest *out, HlAllocator *alloc)
                                 namebuf[nlen] = '\0';
                                 out->modules[out->modules_count].name      = namebuf;
                                 out->modules[out->modules_count].api_major = (uint8_t)v;
+                                out->modules[out->modules_count].optional  = (uint8_t)optional;
                                 out->modules_count++;
                             }
                         } else {
@@ -297,6 +304,8 @@ int hl_manifest_extract_js(JSContext *ctx, HlManifest *out, HlAllocator *alloc)
                 if (alias && JS_IsString(v_val)) {
                     const char *spec = JS_ToCString(ctx, v_val);
                     if (spec) {
+                        size_t speclen = strlen(spec);
+                        int optional = (speclen > 0 && spec[speclen - 1] == '?');
                         const char *at = strchr(spec, '@');
                         if (!at || at == spec) {
                             log_warn("[manifest] modules.%s = %s — expected "
@@ -305,7 +314,9 @@ int hl_manifest_extract_js(JSContext *ctx, HlManifest *out, HlAllocator *alloc)
                         } else {
                             char *end = NULL;
                             long v = strtol(at + 1, &end, 10);
-                            if (end == at + 1 || *end != '\0' ||
+                            int end_ok = (*end == '\0') ||
+                                         (optional && end[0] == '?' && end[1] == '\0');
+                            if (end == at + 1 || !end_ok ||
                                 v < 1 || v > 255) {
                                 log_warn("[manifest] modules.%s = %s — invalid "
                                          "major version, ignored", alias, spec);
@@ -317,6 +328,7 @@ int hl_manifest_extract_js(JSContext *ctx, HlManifest *out, HlAllocator *alloc)
                                     namebuf[nlen] = '\0';
                                     out->modules[out->modules_count].name      = namebuf;
                                     out->modules[out->modules_count].api_major = (uint8_t)v;
+                                    out->modules[out->modules_count].optional  = (uint8_t)optional;
                                     out->modules_count++;
                                 }
                             }

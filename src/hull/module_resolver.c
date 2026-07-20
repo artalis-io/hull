@@ -42,6 +42,18 @@ static bool get_bit(const HlResolvedModuleSet *s, int i)
     return (s->bits[BIT_WORD(i)] & BIT_MASK(i)) != 0;
 }
 
+static void set_optional_absent_bit(HlResolvedModuleSet *s, int i)
+{
+    if (i < 0 || i >= (int)MAX_BITS) return;
+    s->optional_absent[BIT_WORD(i)] |= BIT_MASK(i);
+}
+
+static bool get_optional_absent_bit(const HlResolvedModuleSet *s, int i)
+{
+    if (!s || i < 0 || i >= (int)MAX_BITS) return false;
+    return (s->optional_absent[BIT_WORD(i)] & BIT_MASK(i)) != 0;
+}
+
 void hl_module_set_clear(HlResolvedModuleSet *s)
 {
     if (s) memset(s, 0, sizeof(*s));
@@ -68,6 +80,19 @@ bool hl_module_set_contains_short(const HlResolvedModuleSet *s,
                                    const char *name)
 {
     return hl_module_set_contains_spec(s, hl_module_registry_find_short(name));
+}
+
+bool hl_module_set_optional_absent_spec(const HlResolvedModuleSet *s,
+                                         const HlModuleSpec *spec)
+{
+    return get_optional_absent_bit(s, hl_module_registry_index(spec));
+}
+
+bool hl_module_set_optional_absent_name(const HlResolvedModuleSet *s,
+                                         const char *canonical_name)
+{
+    return get_optional_absent_bit(
+        s, hl_module_registry_index(hl_module_registry_find(canonical_name)));
 }
 
 int hl_module_set_count(const HlResolvedModuleSet *s)
@@ -148,6 +173,15 @@ uint32_t hl_module_feature_cap(const char *name)
     if (name && strcmp(name, "gpu") == 0)
         return HL_MOD_CAP_GPU;
     return 0;
+}
+
+bool hl_module_needs_absent_build_cap(const HlModuleSpec *spec)
+{
+    if (!spec) return false;
+    const uint32_t build_cap_mask = HL_MOD_CAP_DB | HL_MOD_CAP_WASM
+                                    | HL_MOD_CAP_GPU | HL_MOD_CAP_HTTP
+                                    | HL_MOD_CAP_TUI;
+    return (spec->required_caps & build_cap_mask & ~build_provided_caps()) != 0;
 }
 
 /* Human-readable name for a capability bit (for error messages). */
@@ -396,6 +430,14 @@ int hl_module_resolver_resolve_caps(const HlManifest *manifest,
             uint32_t bit = 1u << bi;
             if (!(need_build & bit)) continue;
             if (!(prov_build & bit)) {
+                /* Optional ("hull/gpu@1?"): the build lacks this cap, so SKIP
+                 * the module (record it absent) instead of failing the whole
+                 * resolve. require/import will yield nil/null for graceful
+                 * fallback. A non-optional module here is still a hard error. */
+                if (m->optional) {
+                    set_optional_absent_bit(out, idx);
+                    goto next_module;
+                }
                 ERR2("module '%s' requires %s, but it is disabled in "
                      "this hull build",
                      spec->name, cap_label(bit));
@@ -410,12 +452,17 @@ int hl_module_resolver_resolve_caps(const HlManifest *manifest,
          * resolve time so apps see the error before reaching cap
          * code. */
         if ((spec->required_caps & HL_MOD_CAP_TUI) && !manifest->tui) {
+            if (m->optional) {
+                set_optional_absent_bit(out, idx);
+                goto next_module;
+            }
             ERR1("module '%s' requires the 'tui' capability in the "
                  "manifest (add `tui = true`)", spec->name);
             return -1;
         }
 
         set_bit(out, idx);
+    next_module:;
     }
 
     /* Pass 2: auto-admit transitive deps of every admitted module.
@@ -520,7 +567,10 @@ int hl_import_tracker_validate(const HlRuntime *rt,
     const char *first_missing = NULL;
     for (int i = 0; i < rt->import_tracker_count; i++) {
         const char *name = rt->import_tracker_names[i];
-        if (!hl_module_set_contains_name(set, name)) {
+        /* Optional-absent counts as satisfied: a top-level import of an
+         * optional module the build lacks is allowed (it yields nil/null). */
+        if (!hl_module_set_contains_name(set, name) &&
+            !hl_module_set_optional_absent_name(set, name)) {
             if (!first_missing) first_missing = name;
             missing_count++;
         }
