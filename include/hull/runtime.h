@@ -206,9 +206,8 @@ struct HlRuntime {
         uint64_t max_output;
     } wasm_config;                     /* three-tier resolved limits (CLI > manifest > defaults) */
 #endif
-#ifdef HL_ENABLE_GPU
-    HlGpuCtx *gpu_ctx;                /* GPU compute context (NULL if disabled) */
-#endif
+    HlGpuCtx *gpu_ctx;                /* GPU compute context; NULL when no backend
+                                        * (base build without a composed gpu feature) */
     /* Phase gate for the `app.X` registration bindings (app.get / use /
      * use_post / ws / sse / every / daily).  Set to 1 by serve.c
      * (hl_serve_wire_routes) after the route registry has been flushed

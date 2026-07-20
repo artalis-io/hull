@@ -74,9 +74,7 @@
 #ifdef HL_ENABLE_WASM
 #include "hull/cap/wasm.h"
 #endif
-#ifdef HL_ENABLE_GPU
 #include "hull/cap/gpu.h"
-#endif
 
 #include <keel/cors.h>
 #include <keel/keel.h>
@@ -183,10 +181,10 @@ static void free_route_allocs(HlAllocator *a)
 static HlWasmCache wasm_cache;
 static int wasm_cache_ok = 0;
 #endif
-#ifdef HL_ENABLE_GPU
+/* Base-resident: the GPU context is populated from a composed feature
+ * backend (or a monolithic HL_ENABLE_GPU build); unavailable otherwise. */
 static HlGpuCtx gpu_ctx;
 static int gpu_ctx_ok = 0;
-#endif
 
 /* ── Runtime selection ──────────────────────────────────────────────── */
 
@@ -541,7 +539,6 @@ static int hl_parse_serve_args(int argc, char **argv, HlServeConfig *cfg)
                 return -1;
             }
             cfg->wasm_max_output = v;
-#ifdef HL_ENABLE_GPU
         } else if (strcmp(argv[i], "--gpu-device") == 0 && i + 1 < argc) {
             char *end;
             long v = strtol(argv[++i], &end, 10);
@@ -550,7 +547,6 @@ static int hl_parse_serve_args(int argc, char **argv, HlServeConfig *cfg)
                 return -1;
             }
             cfg->gpu_device = (int)v;
-#endif
         } else if (strcmp(argv[i], "-h") == 0) {
             usage(argv[0]);
             return 1; /* signal help shown, exit 0 */
@@ -979,19 +975,29 @@ static int hl_serve_init_app_context(HlServerState *s)
     }
 #endif
 
-#ifdef HL_ENABLE_GPU
-    /* Initialize GPU compute runtime (static cache persists across calls). */
+    /* Initialize GPU compute from the composable-feature hook: a
+     * `hull build --with=gpu` build links a STRONG override returning the wgpu
+     * backend; a monolithic HL_ENABLE_GPU build falls back to the compiled-in
+     * backend. No backend -> gpu.* stays unavailable (static cache persists). */
     if (!gpu_ctx_ok) {
-        if (hl_cap_gpu_init(&gpu_ctx, &hl_gpu_backend_wgpu) == HL_GPU_OK
+        const HlGpuBackend *gpu_be = NULL;
+        size_t gpu_nfeat = 0;
+        const HlGpuBackend *const *gpu_feats = hl_gpu_feature_backends(&gpu_nfeat);
+        if (gpu_nfeat > 0 && gpu_feats)
+            gpu_be = gpu_feats[0];
+#ifdef HL_ENABLE_GPU
+        if (!gpu_be)
+            gpu_be = &hl_gpu_backend_wgpu;
+#endif
+        if (gpu_be && hl_cap_gpu_init(&gpu_ctx, gpu_be) == HL_GPU_OK
             && hl_cap_gpu_available(&gpu_ctx)) {
             if (s->cfg.gpu_device >= 0 && s->cfg.gpu_device < gpu_ctx.device_count)
                 gpu_ctx.default_device = s->cfg.gpu_device;
             gpu_ctx_ok = 1;
-        } else {
+        } else if (gpu_be) {
             log_info("[hull:c] GPU compute unavailable — gpu.* disabled");
         }
     }
-#endif
 
     HlAppContextOpts app_opts = {
         .app_dir           = s->app_dir,
@@ -1011,10 +1017,8 @@ static int hl_serve_init_app_context(HlServerState *s)
 #ifdef HL_ENABLE_WASM
         .wasm_cache        = wasm_cache_ok ? &wasm_cache : NULL,
 #endif
-#ifdef HL_ENABLE_GPU
         .gpu_ctx           = gpu_ctx_ok ? &gpu_ctx : NULL,
         .gpu_device        = s->cfg.gpu_device,
-#endif
     };
 
     if (hl_app_context_init(&s->app, &app_opts) != 0) {
@@ -1398,8 +1402,7 @@ static int hl_serve_wire_caps(HlServerState *s)
     hl_resolve_wasm_config(rt, &s->manifest, &s->cfg);
 #endif
 
-#ifdef HL_ENABLE_GPU
-    /* GPU gating mirrors the WASM rule above. */
+    /* GPU gating mirrors the WASM rule above (runtime, on gpu_ctx_ok). */
     if (gpu_ctx_ok) {
         int admit;
         if (s->manifest.modules_declared)
@@ -1424,7 +1427,6 @@ static int hl_serve_wire_caps(HlServerState *s)
         log_info("[hull:c] gpu device restriction: %d of %d devices allowed",
                  s->manifest.gpu_device_count, gpu_ctx.device_count);
     }
-#endif
 
     /* Wire fs_cfg from manifest (if app declares fs.read OR fs.write
      * paths — both blob.* and fs.mmap need the cfg). */

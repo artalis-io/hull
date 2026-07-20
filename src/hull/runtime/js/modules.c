@@ -110,13 +110,12 @@ int hl_js_register_modules(HlJS *js)
     }
 #endif
 
-#ifdef HL_ENABLE_GPU
-    /* Register hull:gpu module (only if GPU context is available) */
+    /* hull:gpu registers only when a GPU backend is present (monolithic
+     * HL_ENABLE_GPU build or a composed --with=gpu feature). */
     if (js->base.gpu_ctx) {
         if (hl_js_init_gpu_module(js->ctx, js) != 0)
             return -1;
     }
-#endif
 
 #ifdef HL_ENABLE_TUI
     /* Register hull:tui module — gated at use time by the resolver

@@ -89,9 +89,7 @@ int hl_js_init_image_module(JSContext *ctx, HlJS *js);
 int hl_js_init_compute_module(JSContext *ctx, HlJS *js);
 #endif
 
-#ifdef HL_ENABLE_GPU
 int hl_js_init_gpu_module(JSContext *ctx, HlJS *js);
-#endif
 
 #ifdef HL_ENABLE_TUI
 int hl_js_init_tui_module(JSContext *ctx, HlJS *js);

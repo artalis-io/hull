@@ -8,7 +8,11 @@
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
 
-#ifdef HL_ENABLE_GPU
+/* Base-resident: the generic dispatch layer is always compiled (it drives any
+ * HlGpuBackend vtable and never touches a concrete backend). A base build with
+ * no backend simply has ctx->backend == NULL and reports GPU unavailable; a
+ * `hull build --with=gpu` feature (or an HL_ENABLE_GPU monolithic build)
+ * supplies the wgpu backend via hl_gpu_feature_backends() / serve.c. */
 
 #include "hull/cap/gpu.h"
 #include "hull/cap/audit.h"
@@ -689,8 +693,3 @@ int hl_cap_gpu_buffer_copy(HlGpuCtx *ctx, int device,
 
     return rc;
 }
-
-#else /* !HL_ENABLE_GPU */
-/* ISO C requires a translation unit to contain at least one declaration. */
-typedef int hl_cap_gpu_disabled;
-#endif /* HL_ENABLE_GPU */

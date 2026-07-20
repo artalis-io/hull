@@ -101,10 +101,10 @@ int hl_lua_register_modules(HlLua *lua)
         register_native_module(L, "hull.compute", luaopen_hull_compute);
 #endif
 
-#ifdef HL_ENABLE_GPU
+    /* hull.gpu registers only when a GPU backend is present (monolithic
+     * HL_ENABLE_GPU build or a composed --with=gpu feature). */
     if (lua->base.gpu_ctx)
         register_native_module(L, "hull.gpu", luaopen_hull_gpu);
-#endif
 
 #ifdef HL_ENABLE_TUI
     /* Native bridge — the user-facing module is the stdlib Lua file

@@ -77,9 +77,7 @@ struct HlWasmBuffer;
 void lua_push_wasm_buffer(lua_State *L, struct HlWasmBuffer *buf);
 #endif
 
-#ifdef HL_ENABLE_GPU
 int luaopen_hull_gpu(lua_State *L);
-#endif
 
 #ifdef HL_ENABLE_TUI
 int luaopen_hull_tui(lua_State *L);

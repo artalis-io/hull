@@ -4,7 +4,6 @@
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
 
-#ifdef HL_ENABLE_GPU
 
 #include "mod_buffer.h"
 #include "hull/cap/gpu.h"
@@ -1655,7 +1654,3 @@ int hl_js_init_gpu_module(JSContext *ctx, HlJS *js)
     JS_AddModuleExport(ctx, m, "gpu");
     return 0;
 }
-#else /* !HL_ENABLE_GPU */
-/* ISO C requires a translation unit to contain at least one declaration. */
-typedef int hl_js_mod_gpu_disabled;
-#endif /* HL_ENABLE_GPU */

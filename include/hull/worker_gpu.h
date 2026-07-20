@@ -10,7 +10,6 @@
 #ifndef HL_WORKER_GPU_H
 #define HL_WORKER_GPU_H
 
-#ifdef HL_ENABLE_GPU
 
 #include "hull/cap/gpu.h"
 #include "hull/limits/core.h"  /* HL_WORKER_ERR_SIZE (HL_GPU_NAME_MAX via cap/gpu.h) */
@@ -75,5 +74,4 @@ void hl_worker_gpu_op_free_all(void *ptr);
 /* KlAsyncOp on_cancel handler for gpu.async operations. */
 void hl_worker_gpu_async_cancel(KlAsyncOp *op, void *user_data);
 
-#endif /* HL_ENABLE_GPU */
 #endif /* HL_WORKER_GPU_H */

@@ -1301,7 +1301,7 @@ ifeq ($(HL_ENABLE_GPU),1)
   endif
   WORKER_GPU_OBJ := $(BUILDDIR)/worker_gpu.o
 else
-  WORKER_GPU_OBJ :=
+  WORKER_GPU_OBJ := $(BUILDDIR)/worker_gpu.o
   WGPU_LIB :=
   WGPU_FRAMEWORKS :=
 endif
@@ -2750,11 +2750,10 @@ $(WORKER_DB_OBJ): $(SRCDIR)/hull/worker_db.c | $(BUILDDIR)
 $(WORKER_WASM_OBJ): $(SRCDIR)/hull/worker_wasm.c | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) $(WAMR_CFLAGS) -c -o $@ $<
 
-# Worker GPU (runtime-agnostic GPU thread pool dispatch)
-ifeq ($(HL_ENABLE_GPU),1)
+# Worker GPU (runtime-agnostic GPU thread pool dispatch — base-resident,
+# like worker_db/worker_wasm; the wgpu backend itself stays feature/HL_ENABLE_GPU).
 $(WORKER_GPU_OBJ): $(SRCDIR)/hull/worker_gpu.c | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
-endif
 
 # Manifest — split into shared helpers + per-runtime extractors (item G).
 # Each per-runtime .c compiles to an empty TU when its runtime is disabled,

@@ -3,7 +3,6 @@
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
 
-#ifdef HL_ENABLE_GPU
 
 #include "mod_buffer.h"
 #include "hull/cap/gpu.h"
@@ -1364,7 +1363,3 @@ int luaopen_hull_gpu(lua_State *L)
     return 1;
 }
 
-#else /* !HL_ENABLE_GPU */
-/* ISO C requires a translation unit to contain at least one declaration. */
-typedef int hl_lua_mod_gpu_disabled;
-#endif /* HL_ENABLE_GPU */

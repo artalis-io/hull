@@ -9,7 +9,6 @@
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
 
-#ifdef HL_ENABLE_GPU
 
 #include "hull/worker_gpu.h"
 #include "hull/utils/alloc.h"
@@ -195,4 +194,3 @@ void hl_worker_gpu_async_cancel(KlAsyncOp *kl_op, void *user_data)
     }
 }
 
-#endif /* HL_ENABLE_GPU */
