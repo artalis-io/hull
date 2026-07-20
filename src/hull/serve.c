@@ -1285,7 +1285,8 @@ static int hl_serve_wire_caps(HlServerState *s)
         }
 
         /* Resolve the module set BEFORE sealing the arena.  The
-         * resolver writes its 16-byte bitset to s->module_set as a
+         * resolver writes its module set (admitted + optional-absent
+         * bitsets) to s->module_set as a
          * scratch buffer, then we memdup it into the arena so the
          * sealed copy is what the runtime consults on every
          * require/import.  This closes the "manifest declared ->
@@ -1766,10 +1767,13 @@ static void hl_serve_teardown_after_serve(HlServerState *s)
     if (wasm_cache_ok)
         hl_cap_wasm_destroy(&wasm_cache);
 #endif
-#ifdef HL_ENABLE_GPU
+    /* Base-resident, symmetric with the init above: a composed --with=gpu app
+     * binary links the base serve.c (no HL_ENABLE_GPU) but still sets
+     * gpu_ctx_ok via the feature hook, so the destroy must NOT be
+     * #ifdef-gated or the GPU context leaks on shutdown. hl_cap_gpu_destroy
+     * lives in base-resident gpu.c and is NULL-safe + idempotent. */
     if (gpu_ctx_ok)
         hl_cap_gpu_destroy(&gpu_ctx);
-#endif
     if (s->client_tls_ctx) {
         kl_tls_mbedtls_ctx_destroy(s->client_tls_ctx);
         s->client_tls_ctx = NULL;

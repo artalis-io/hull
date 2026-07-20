@@ -112,7 +112,10 @@ static int l_tool_modules_resolve(lua_State *L)
                     size_t sl = strlen(spec);
                     optional = (sl > 0 && spec[sl - 1] == '?');
                     const char *at = strchr(spec, '@');
-                    nlen = at ? (size_t)(at - spec) : strlen(spec);
+                    /* When there's no '@', strip a trailing '?' from the name so
+                     * "hull/gpu?" resolves to "hull/gpu" (matches manifest_lua.c). */
+                    nlen = at ? (size_t)(at - spec)
+                              : (optional ? sl - 1 : sl);
                     v = at ? strtol(at + 1, NULL, 10) : 1;
                 } else if (lua_type(L, -2) == LUA_TSTRING) {
                     spec = lua_tostring(L, -2);
