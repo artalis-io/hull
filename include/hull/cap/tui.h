@@ -281,6 +281,20 @@ int hl_cap_tui_enable_focus(HlTuiCtx *ctx, int on);
 /* Toggle Kitty keyboard protocol (richer modifier reporting). */
 int hl_cap_tui_enable_kitty_kbd(HlTuiCtx *ctx, int on);
 
+/* ── Composable-feature seam ────────────────────────────────────────
+ *
+ * TUI is a "subsystem feature": the whole cap layer + runtime bindings
+ * live in libhull_feature-tui.a rather than the base platform lib. The
+ * base ships only this weak presence hook (default 0, in cap/tui_feature.c);
+ * `hull build --with=tui` composes the feature, whose strong override
+ * returns 1. The resolver consults it (build_provided_caps) so a composed
+ * binary admits hull/tui at app load even though HL_ENABLE_TUI was never
+ * compiled into the base. A monolithic HL_ENABLE_TUI build reports TUI via
+ * the compile flag instead; a plain base returns 0 and hull/tui is rejected.
+ * (Parallels hl_gpu_feature_backends / hl_db_feature_backends.)
+ */
+int hl_tui_feature_present(void);
+
 #ifdef __cplusplus
 }
 #endif

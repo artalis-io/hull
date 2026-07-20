@@ -20,6 +20,7 @@
 #include "hull/manifest.h"
 #include "hull/runtime.h"  /* HlRuntime — import_tracker fields */
 #include "hull/cap/gpu.h"  /* hl_gpu_feature_backends — composed-feature GPU cap */
+#include "hull/cap/tui.h"  /* hl_tui_feature_present — composed-feature TUI cap */
 
 #include <stdio.h>
 #include <string.h>
@@ -157,6 +158,12 @@ static uint32_t build_provided_caps(void)
         if (hl_gpu_feature_backends(&nfeat) && nfeat > 0)
             caps |= HL_MOD_CAP_GPU;
     }
+    /* Same shape for the composed tui feature: its strong override of the
+     * base's weak hl_tui_feature_present (default 0) returns 1, so a
+     * `hull build --with=tui` binary admits hull/tui at app load. Plain base
+     * -> 0 (adds nothing); monolithic HL_ENABLE_TUI -> already set above. */
+    if (hl_tui_feature_present())
+        caps |= HL_MOD_CAP_TUI;
     return caps;
 }
 
