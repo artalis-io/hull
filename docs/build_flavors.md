@@ -10,6 +10,14 @@ doc proposes `hull build --flavor=<name>` so an app author can ship a
 pure-compute, server-only, client-only, or full binary regardless of which
 `hull` built it.
 
+> **Flavors are the subtractive axis; features are the orthogonal additive
+> axis.** A flavor slims the base (drops HTTP halves, mbedTLS, …); a
+> **feature** (`hull build --with=<name>`, e.g. `duckdb` / `gpu`) bolts a
+> large optional subsystem on. They compose, and `--flavor=auto` never drops
+> a feature. `hull feature install` mirrors `hull flavor install`'s
+> `hl_release_io_*` signed-fetch chain exactly. See
+> [features_and_flavors.md](features_and_flavors.md).
+
 ## 1. Motivation
 
 The four HTTP flavors (and the `HL_ENABLE_DB` / `HL_ENABLE_TUI` / ...

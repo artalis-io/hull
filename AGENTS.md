@@ -663,7 +663,7 @@ Every module except the intrinsic core must be listed in `manifest.modules`. The
 | `app` | `app` (intrinsic, gets methods via declarations) | `import { app } from "hull:app"` | _intrinsic_ | Bootstrap: `app.manifest` + `app.main` only. The rest is decorated by declared modules. |
 | `log` | `local log = require("hull.log")` | `import { log } from "hull:log"` | `"hull/log@1"` | Logging |
 | `json` | `local json = require("hull.json")` | `import { json } from "hull:json"` (or built-in `JSON`) | `"hull/json@1"` | Encode/decode |
-| `db` | `local db = require("hull.db")` | `import { db } from "hull:db"` | `"hull/db@1"` | SQLite queries (requires `HL_ENABLE_DB=1`) |
+| `db` | `local db = require("hull.db")` | `import { db } from "hull:db"` | `"hull/db@1"` | SQLite / Postgres / MySQL queries (requires `HL_ENABLE_DB=1`). A `duckdb://` DSN needs the **`duckdb` composable feature** (`hull feature install duckdb` → `hull build --with=duckdb`, native-only) |
 | `crypto` | `local crypto = require("hull.crypto")` | `import { crypto } from "hull:crypto"` | `"hull/crypto@1"` | Hashing, signing, random |
 | `time` | `local time = require("hull.time")` | `import { time } from "hull:time"` | `"hull/time@1"` | Timestamps |
 | `env` | `local env = require("hull.env")` | `import { env } from "hull:env"` | `"hull/env@1"` | Environment vars (also needs `env` allowlist) |
@@ -674,7 +674,7 @@ Every module except the intrinsic core must be listed in `manifest.modules`. The
 | `ws_client` | `local ws_client = require("hull.web.ws-client")` | `import { wsClient } from "hull:web:ws-client"` | `"hull/web/ws-client@1"` | Outbound WebSocket (`wsClient.connect`); needs `hosts` allowlist |
 | `sse` | (no module. `app.sse` decoration only) | (same) | `"hull/web/sse@1"` | Decorates `app.sse` for Server-Sent Events |
 | `timers` | (no module. `app.every` / `app.daily` decoration) | (same) | `"hull/timers@1"` | Decorates `app.every` and `app.daily` |
-| `gpu` | `require("hull.gpu")` | `import { gpu } from "hull:gpu"` | `"hull/gpu@1"` | GPU compute (requires `HL_ENABLE_GPU=1`, manifest `gpu = true`) |
+| `gpu` | `require("hull.gpu")` | `import { gpu } from "hull:gpu"` | `"hull/gpu@1"` (or `"hull/gpu@1?"` optional) | GPU compute. Manifest `gpu = true`. Ships as the **`gpu` composable feature** (`hull feature install gpu` → `hull build --with=gpu`, native-only) or `HL_ENABLE_GPU=1`. Use the `?` suffix + a `gpu.available()` check to fall back to CPU when absent |
 | `compute` | `require("hull.compute")` | `import { compute } from "hull:compute"` | `"hull/compute@1"` | WASM compute plugins |
 | `image` | `require("hull.image")` | `import { image } from "hull:image"` | `"hull/image@1"` | Image decode/encode |
 | `template` | `require("hull.template")` | `import { template } from "hull:template"` | `"hull/template@1"` | HTML templates |
@@ -931,6 +931,52 @@ hull build myapp/ --flavor=pure-compute   # now uses the cached lib
 `hull platform install` uses the same signed-release trust chain as
 `hull update` and `hull tools install` (no new keys). Reference:
 [docs/build_flavors.md](docs/build_flavors.md).
+
+### Composable features (`--with=`)
+
+Some large subsystems are **not** in the base binary — they're optional
+**features** you bolt on at build time. Where a flavor *slims* the base
+(subtractive), a feature *adds* a subsystem (additive), shipped as its own
+signed archive `libhull_feature-<name>.a`. Two features today, both
+**native-only (no cosmo)**:
+
+- **`duckdb`** - embedded DuckDB OLAP backend, reached via a `duckdb://` DSN on
+  `hull.db`.
+- **`gpu`** — wgpu-native GPU compute (`gpu.*`).
+
+```bash
+hull feature install gpu          # fetch + verify + cache to ~/.hull/feature/
+hull feature list                 # not installed / installed, per feature
+hull build myapp/ --with=gpu      # compose the feature into the app binary
+hull build myapp/ --with=duckdb --compiler=system   # duckdb is C++: needs system cc
+```
+
+`--flavor` and `--with` are orthogonal and compose. If an app declares
+`"hull/gpu@1"` or uses a `duckdb://` DSN but you build **without** the feature,
+the app is rejected (base build) — either compose the feature, or mark the
+module optional (below). Same signed trust chain as `hull flavor install`;
+`make feature-<name>` builds from source. Reference:
+[docs/features_and_flavors.md](docs/features_and_flavors.md).
+
+### Optional modules - graceful capability fallback
+
+Mark a build-cap module optional with a trailing `?`
+(`modules = { "hull/gpu@1?" }`). On a build that lacks the capability
+(compiled out, no `--with=` feature), the resolver skips it instead of failing
+app load, and `require`/`import` returns nil/null so the app can degrade:
+
+```lua
+local gpu = require("hull.gpu")           -- nil on a base binary
+if gpu and gpu.available() then use_gpu() else use_cpu() end
+```
+```javascript
+import { gpu } from "hull:gpu";            // null on a base binary
+if (gpu && gpu.available()) use_gpu(); else use_cpu();
+```
+
+A present optional module works exactly as a normal declaration. Use this when
+you want one app binary that exploits a feature when available (a
+`--with=gpu` build) but still runs on a base binary.
 
 ### Compute Modules (WASM)
 

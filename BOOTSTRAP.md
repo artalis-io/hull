@@ -126,7 +126,7 @@ before proceeding. Don't pick by vibe.
 | **REST / JSON API** | "API for clients to consume", mobile/SPA frontend, OpenAPI, no server-rendered UI | `hull init` (minimal server, then add JSON routes) | `examples/rest_api`, `examples/rest_api_modular`, `examples/jwt_api` |
 | **CLI tool** | Runs once, does a thing, exits. Pipelines / scripts / one-shot operations. Returns shell exit codes. | `hull init --cli` | `examples/hello_cli`, `examples/cli_modular` |
 | **TUI app** | Interactive terminal UI, "dashboard in the terminal", REPL, log tailer, picker. | `hull init` then add `hull/tui` bindings | `examples/tui_dashboard`, `examples/tui_chat`, `examples/tui_log_tailer`, `examples/tui_modular`, `examples/tui_picker`, `examples/tui_repl`. See `docs/cli_mode.md` for the `app.main` lifecycle TUI apps run on. |
-| **Compute / WASM service** | Pure data transformation, scoring, ML inference, no persistent state. Often run as a sidecar. | `hull init` + `compute/` modules; consider `make HL_ENABLE_DB=0` for compute-only builds | `examples/compute`, `examples/compute_gpu_chain`. See `docs/wamr_architecture.md` and CLAUDE.md § "WASM Compute Plugins". |
+| **Compute / WASM service** | Pure data transformation, scoring, ML inference, no persistent state. Often run as a sidecar. | `hull init` + `compute/` modules; consider `make HL_ENABLE_DB=0` for compute-only builds. GPU compute + DuckDB OLAP are opt-in composable features (`hull build --with=gpu\|duckdb`, native-only) - see `docs/features_and_flavors.md` | `examples/compute`, `examples/compute_gpu_chain`. See `docs/wamr_architecture.md` and CLAUDE.md § "WASM Compute Plugins". |
 | **Hybrid (app.main + serve loop)** | App needs startup migrations + a serve loop. App needs to run a one-shot then serve. | `hull init` (default) + register `app.main` alongside routes — both are supported simultaneously, see CLAUDE.md § "App Lifecycle" | Any of the above; the lifecycle page covers patterns. |
 
 After picking, run the chosen `hull init` invocation (still in the
@@ -519,6 +519,7 @@ content, etc.).
 | Writing your own password hashing | `crypto.hash_password()` / `crypto.verify_password()` (PBKDF2). |
 | Hard-coding admin emails in handler logic | Use RBAC (`hull/web/middleware/rbac@1`) and seed roles in a migration. |
 | Adding `node_modules/` or `vendor/` Lua deps | Hull's stdlib is the answer 95% of the time. If it isn't, flag a platform gap. |
+| Assuming `gpu.*` or a `duckdb://` DSN work everywhere | They're opt-in composable **features** (`hull build --with=gpu\|duckdb`, native-only). Compose the feature, or declare the module optional (`"hull/gpu@1?"`) and branch on `gpu.available()`. |
 | Bypassing the manifest because "it works" | The manifest is the contract. If you have to bypass it for the app to work, that's a platform gap, not a workaround. |
 | Skipping `hull test` because "I'll test later" | Each PLAN.md step should end with tests passing. No exceptions. |
 
@@ -686,9 +687,32 @@ all; smallest). `--flavor=auto` infers the minimal flavor from your
 declared modules. The build validates the manifest against the target
 flavor, so declaring a module that needs a dropped subsystem fails the
 build with a clear message (no silent runtime breakage). On a released
-hull, `hull platform install <flavor>` fetches the matching platform lib
+hull, `hull flavor install <flavor>` fetches the matching platform lib
 (signature + SHA verified) so `--flavor` works without building from
 source. See `docs/build_flavors.md`.
+
+**Composable features (`--with=`).** Some heavy subsystems are NOT in the
+base binary: they're opt-in **features** you compose at build time, the
+additive counterpart to the subtractive flavors above. Two ship today,
+both **native-only (no cosmo)**: **`gpu`** (wgpu-native GPU compute, the
+`gpu.*` API) and **`duckdb`** (embedded OLAP, a `duckdb://` DSN). Install
+the signed lib then compose it:
+
+```bash
+hull feature install gpu          # or: duckdb
+hull build myapp/ --with=gpu       # duckdb is C++: add --compiler=system
+```
+
+If your spec needs GPU compute or an OLAP/analytics store, treat it as a
+feature — do NOT assume `gpu.*` or `duckdb://` work on a plain base build.
+Either compose the feature, or declare the module optional (next) so the
+app degrades gracefully. See `docs/features_and_flavors.md`.
+
+**Optional modules - graceful fallback.** A trailing `?` on a manifest
+spec (`"hull/gpu@1?"`) makes the module optional: on a build without the
+capability, `require`/`import` returns nil/null instead of failing app
+load, so you can branch to a CPU path. Pattern:
+`local gpu = require("hull.gpu"); if gpu and gpu.available() then … else … end`.
 
 Or wrap in `hull deploy` for systemd + Dockerfile + fly.toml generation.
 

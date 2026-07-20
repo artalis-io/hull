@@ -658,7 +658,11 @@ hull v0.6.0  &middot;  ca-bundle: embedded  &middot;  platform: embedded  &middo
             Pure-function WASM via WAMR. No I/O imports,
             gas-metered. Parallel workloads dispatch to WebGPU
             shaders via wgpu-native (Vulkan, Metal, DX12) through the
-            same capability boundary.
+            same capability boundary. GPU compute and DuckDB OLAP
+            ship as opt-in composable features
+            (<code class="text-paper-100">hull build --with=gpu&hairsp;|&hairsp;duckdb</code>),
+            installed on demand under the same signed trust chain, so
+            they never bloat the lean base binary.
           </p>
         </div>
 

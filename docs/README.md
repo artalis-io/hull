@@ -47,6 +47,15 @@ specific signature, parameter list, or return value.
 | [`release_signing.md`](release_signing.md) | Three-layer signature system + the release-key flow (`HL_RELEASE_PUBKEY_HEX` embedding, GitHub Actions sign step, `hull update` verification). |
 | [`api_review.md`](api_review.md) | Pre-v0.1.0 public-surface review findings + pending decisions. |
 
+## Distribution & packaging
+
+| Doc | What it covers |
+|---|---|
+| [`features_and_flavors.md`](features_and_flavors.md) | The distribution model: **features** (additive `hull build --with=<name>` subsystems - DuckDB, GPU) vs **flavors** (subtractive base builds) vs **tools** (companion programs). `hull feature install`, the signed archive trust chain, the M+N vs M×N scaling argument. |
+| [`build_flavors.md`](build_flavors.md) | The subtractive flavor spectrum (`full` → `server-only` → `client-only` → `pure-compute`), `--flavor` / `--flavor=auto`, `hull flavor install`, the two signature layers. |
+| [`duckdb_backend_design.md`](duckdb_backend_design.md) | The DuckDB OLAP backend (first feature): vtable fit, mode A/B, the rseq/pledge fix, mbedTLS symbol isolation, dialect helpers. |
+| [`libhull_flavor.md`](libhull_flavor.md) | The no-runtime `libhull.a` embedding flavor for native embedders. |
+
 ## Audits (current)
 
 The three docs below are the current security posture (commit `fb730f0`).

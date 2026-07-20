@@ -1,11 +1,16 @@
 # Features, flavors, and tools — the distribution model
 
-Status: design. Introduces **features** as a third distribution concept alongside
-**flavors** and **tools**, so Hull can absorb multiple large, orthogonal optional
-libraries (DuckDB, and later things like raylib or an ML runtime) without a
-combinatorial explosion of published build artifacts. Re-scopes the DuckDB
-side-load (roadmap "DuckDB epic" #4) from a one-off `full-duckdb` flavor to
-**DuckDB as the first composable feature**.
+Status: **shipped.** Introduces **features** as a third distribution concept
+alongside **flavors** and **tools**, so Hull can absorb multiple large,
+orthogonal optional libraries without a combinatorial explosion of published
+build artifacts. Re-scopes the DuckDB side-load (roadmap "DuckDB epic" #4) from a
+one-off `full-duckdb` flavor to **DuckDB as the first composable feature**. Two
+features ship today: **`duckdb`** (embedded OLAP, `duckdb://`) and **`gpu`**
+(wgpu-native compute) - both native-only, installed with
+`hull feature install <name>` and composed with `hull build --with=<name>`. The
+command surface (`hull feature install / list / uninstall`), the `make
+feature-<name>` archive targets, the `--with=` build path, and the `?`
+optional-module fallback are all live.
 
 Companion docs: [build_flavors.md](build_flavors.md) (the subtractive flavor
 spectrum), [duckdb_backend_design.md](duckdb_backend_design.md) (the DuckDB
@@ -139,7 +144,7 @@ Which features a build needs is derived, not hand-listed, mirroring
 - `hull build --with=duckdb,raylib` is the explicit override / addition.
 
 The build **validates**: if a required feature's lib isn't installed (or built
-from source), the build fails with a `hull feature install <name>` hint —
+from source), the build fails with a `hull feature install <name>` hint -
 exactly like the missing-flavor-lib path today. A cache-sourced feature lib is
 re-verified against its signed manifest before linking (the same
 `hl_release_io_verify_local_asset` TOCTOU close as flavored builds).
@@ -194,6 +199,14 @@ because some may not fit at all:
   existing `HlDbBackend` vtable + DSN selection, pure compute, no new sandbox
   surface. (The one real interaction — glibc `rseq` on its worker pool under the
   pledge sandbox — is already solved; see [duckdb_backend_design.md §3.2](duckdb_backend_design.md).)
+- **GPU (wgpu-native)** - **shipped as the second feature.** Unlike raylib it's
+  *headless compute*, not windowing: it fits the existing `HlGpuBackend` vtable,
+  needs no new cap domain, and its sandbox surface (`/dev/dri` unveil on Linux,
+  `iokit-open` + `MTLCompilerService` on macOS) is gated on the manifest
+  `gpu = true` flag. The base ships the generic gpu dispatch layer + a weak
+  `hl_gpu_feature_backends` hook; `libhull_feature-gpu.a` fills the concrete wgpu
+  backend. No symbol isolation was needed (wgpu shares no symbols with Hull).
+  `hull feature install gpu` / `hull build --with=gpu`; native-only.
 - **raylib / a graphics lib** — a *new capability domain*: windowing, input, a GL
   context. Needs a new `graphics.*` cap, display/GPU sandbox access (`/dev/dri`),
   and it's a GUI model unlike Hull's headless server/CLI shape. The lib links;
@@ -215,7 +228,7 @@ The DuckDB backend itself is already merged (backend, mode A/B, rseq fix, dialec
 helpers). The remaining "packaging" item is re-scoped from *a `full-duckdb`
 flavor* to *the first feature*:
 
-1. **`libhull_feature-duckdb-<arch>.a`** — a `make feature-duckdb` target building
+1. **`libhull_feature-duckdb-<arch>.a`** - a `make feature-duckdb` target building
    the DuckDB objects (`cap/db_duckdb.o` + the isolated static libs from
    `make fetch-duckdb`) into a standalone feature archive. Native x86_64/aarch64
    + darwin-arm64; **no cosmo** (DuckDB isn't cosmo-compatible).
@@ -223,7 +236,7 @@ flavor* to *the first feature*:
    `BACKENDS[]` into a base table (SQLite always) that a build-time-generated
    registry extends with composed features. This is the reusable core; every
    later feature rides on it.
-3. **`hull feature install duckdb` / `list`** — a new `commands/feature.c` +
+3. **`hull feature install duckdb` / `list`** - a new `commands/feature.c` +
    registry, `~/.hull/feature/` signed store, reusing
    `hl_release_io_fetch_verified_manifest` (mirrors `commands/flavor.c` /
    `tools_install.c`). One `dispatch.c` line.
@@ -275,7 +288,7 @@ everything is "just a feature," the *artifacts* still differ by direction:
   a slimmer `libhull_platform-*.a`. You can enumerate these (the default set is
   small) and pre-publish them.
 - **Adding** a large feature (DuckDB) = a **bolt-on separate signed lib**
-  (`libhull_feature-*.a`) linked on demand — because the additive space is 2^N
+  (`libhull_feature-*.a`) linked on demand - because the additive space is 2^N
   and can't be enumerated.
 
 So the two words are really tracking the **shipping unit**, not the flag:

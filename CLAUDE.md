@@ -141,7 +141,8 @@ Hull's distribution is one binary; what's compiled into it is controlled by a sm
 | `HL_ENABLE_LUA` | 1 | Drop the Lua 5.4 runtime; QuickJS-only build |
 | `HL_ENABLE_JS` | 1 | Drop QuickJS; Lua-only build |
 | `HL_ENABLE_WASM` | 1 | Drop WAMR (`compute.*` unavailable, ~256 KB) |
-| `HL_ENABLE_GPU` | 0 | (Off by default.) On enables wgpu-native (`gpu.*`) |
+| `HL_ENABLE_GPU` | 0 | (Off by default.) On enables wgpu-native (`gpu.*`). Normally composed via the `gpu` **feature** (`hull build --with=gpu`) rather than set directly; see "Composable features" below. Native-only (no cosmo). |
+| `HL_ENABLE_DUCKDB` | 0 | (Off by default.) On enables the embedded DuckDB OLAP backend (`cap/db_duckdb.c` + fetched static libs via `make fetch-duckdb`). A `duckdb://` DSN selects it. Native-only (no cosmo). Normally composed via the `duckdb` **feature** (`hull build --with=duckdb`) rather than set directly; see "Composable features" below. |
 | `HL_ENABLE_TCC` | 1 | Drop embedded TinyCC (`hull build --compiler=tcc` rejected) |
 | `HL_EMBED_CA_BUNDLE` | 1 | Drop Mozilla CA bundle (~200 KB, breaks HTTPS without system store) |
 | `HL_ENABLE_SQLITE` | 1 | Drop the SQLite backend (`cap/db_sqlite.c`, `cap/db_udf.c`, vendored `sqlite3.c`). A SQLite file path or `:memory:` DSN then has no backend. |
@@ -181,6 +182,58 @@ The build flags above are compile-time properties of the `hull` binary. `hull bu
 The per-flavor platform lib is found (in order) in the local build dirs, then `~/.hull/platform/` (where `hull flavor install <flavor>` caches it, see below), then it errors with a fix-it hint. `make platform-<flavor>` (native) / `make platform-cosmo-<flavor>` (cosmo dual-arch) build it from source; cosmo lays the pair out in the `.aarch64/` apelink layout.
 
 **Two signature layers, and the flavor asymmetry.** Hull has (1) the **release signature** (Ed25519 release key over `hull.sha256`, plus Sigstore/cosign + SLSA) and (2) the inner **platform signature** (`embedded_platform_sig.h`, the platform-key layer of an app's `package.sig`) that a normal `hull build` cross-checks so its **embedded** platform lib is provably gethull.dev-built. The per-flavor libs are covered by the **release** signature (so `hull flavor install` verifies authenticity at fetch time), but they are **not** in the platform-sig, and `hull build --flavor` sets `verify_platform = false` (skips that cross-check). So the install-time release-signature verification is one anchor. **Build-time re-verify (closes the install-to-build TOCTOU):** `hull flavor install` also caches the signed manifest (`hull.sha256` + `.sig`) in `~/.hull/platform/`, and `hull build --flavor` re-verifies any cache-sourced lib before linking it, offline, via `hl_release_io_verify_local_asset` (exposed as `tool.platform_verify`): the manifest signature is re-checked against the **embedded** release pubkey (the trust anchor, baked into the binary, not the writable cache dir), then the lib's SHA-256 is matched to the signed manifest. A tampered cache lib, or a swapped/absent cached manifest, fails the build with a reinstall hint. A lib the developer built locally (`make platform-<flavor>`) is trusted as-is (not re-verified). Full design: [docs/build_flavors.md](docs/build_flavors.md).
+
+### Composable features (`hull build --with=<name>`)
+
+A **composable feature** is a large optional subsystem shipped as its **own**
+signed static archive `libhull_feature-<name>.a` and composed into an app at
+`hull build --with=<name>`. This is the **additive** axis, orthogonal to the
+**subtractive** flavor axis above: `--flavor` slims a base build, `--with`
+bolts a subsystem on. They compose (`M` flavors + `N` features publish `M+N`
+libs but build any of `M×N` combos). Design + rationale:
+[docs/features_and_flavors.md](docs/features_and_flavors.md).
+
+Two features ship today, both **native-only (no cosmo)**, published for all
+three native platforms (`linux-x86_64`, `linux-aarch64`, `darwin-arm64`):
+
+| Feature | What | Reached via |
+|---------|------|-------------|
+| `duckdb` | embedded DuckDB OLAP backend (~58 MB) | a `duckdb://` DSN on `hull/db` |
+| `gpu` | wgpu-native GPU compute | `gpu.*` (the base ships the generic dispatch layer; the feature fills the concrete wgpu backend) |
+
+**Install (end users):** `hull feature install <name>` / `hull feature list` /
+`hull feature uninstall <name>` fetch + Ed25519-verify + cache the signed lib to
+`~/.hull/feature/`, via the shared `hl_release_io_fetch_verified_manifest` — the
+**same trust chain** as `hull flavor install` / `hull tools install` /
+`hull update`, no new keys. The registry is the `FEATURES[]` table in
+`src/hull/commands/feature.c` (the single registration point: one row per
+feature + which native platforms publish it).
+
+**Build from source:** `make feature-duckdb` / `make feature-gpu`. Each
+re-invokes make with `HL_ENABLE_DUCKDB=1` / `HL_ENABLE_GPU=1` so the backend
+object + the vendored static lib are in scope, then `ar`s them into one
+self-contained `build/libhull_feature-<name>.a`. (The config-sentinel cleans
+`build/` on the flag flip, so a feature archive build wipes the base objects -
+build the base binary first if you need both.)
+
+**Compose:** `hull build --with=duckdb` (or `--with=gpu`) resolves the lib
+(local build dir → `~/.hull/feature/` → error with a `hull feature install`
+hint), re-verifies a cache-sourced lib against its signed manifest offline
+(closes the install-to-build TOCTOU, same as flavored builds), and generates a
+`feature_registry.c` filling the base's **weak** `hl_db_feature_backends` /
+`hl_gpu_feature_backends` hook with a **strong** override returning the composed
+backend. `FEATURE_SPECS` in `stdlib/cli/lua/hull/build.lua` is the codegen
+source of truth per feature (backend symbol, vtable type, hook name, C++ flag,
+and extra link libs that can't live in a `.a` — DuckDB's `-lstdc++`, GPU's
+`-lvulkan` / Metal frameworks). Selection can be **inferred** from the manifest
+(a `duckdb://` connection) or **forced** with `--with=`. A C++ feature (duckdb)
+can't be linked by the embedded TinyCC — use `--compiler=system`.
+
+Verified end to end by `tests/e2e_feature_duckdb.sh` and
+`tests/e2e_feature_gpu.sh` (each builds a base hull + the feature archive,
+composes an app with `--with=`, runs it, and asserts a plain app stays
+feature-free — the GPU one is build-only since `gpu.dispatch` needs a device
+CI lacks).
 
 ### Pure-compute builds (`HL_ENABLE_HTTP=0`)
 
@@ -806,7 +859,7 @@ for the C binding surface the tool VM exposes.
 Table-driven dispatcher in `src/hull/commands/dispatch.c`. 25 commands:
 
 ```
-hull keygen | build | verify | inspect | manifest | test | new | init | dev | eject | sign-platform | migrate | agent | mcp | check | compute | deploy | version | doctor | update | tools | cache | platform | sign-release | verify-release | help
+hull keygen | build | verify | inspect | manifest | test | new | init | dev | eject | sign-platform | migrate | agent | mcp | check | compute | deploy | version | doctor | update | tools | flavor | feature | cache | sign-release | verify-release | help
 Runtime flags: --audit (capability audit logging), --agent (sidecar files), --no-migrate, --no-sandbox, --no-ca-bundle, --ca-bundle PATH
 Global flags: --version / -v (equivalent to hull version), --help / -h (equivalent to hull help)
 ```
@@ -826,6 +879,8 @@ Each command is a separate `.c`/`.h` under `src/hull/commands/`. Adding a new co
 The live install path is intentionally not tested in CI (it would need the just-published release to exist before publishing). The post-release validation step is `tests/release_smoke.sh`: install hull, run `sh tests/release_smoke.sh`, watch `hull tools install wamrc` actually fetch the asset, verify SHA-256, exercise `wamrc --help`, and uninstall cleanly. It also exercises `hull flavor install pure-compute` (below) on both native and cosmo binaries. Run it manually after every `gh release create`.
 
 **`hull flavor install <flavor> [--repo=ORG/NAME]` / `flavor list`**. Fetch the per-flavor platform library (`libhull_platform-<flavor>.a`) for `hull build --flavor` so end users do not build it from source. Same trust chain as `hull tools install` / `hull update`, via the shared `hl_release_io_fetch_verified_manifest`: download `hull.sha256` + `.sig` from the release matching this hull's version, verify the Ed25519 release signature against the embedded `HL_RELEASE_PUBKEY_HEX`, then for each asset look up its SHA-256 in the verified manifest, download, constant-time-compare the hash, and atomic-write to `$HOME/.hull/platform/`. Native platforms fetch one `libhull_platform-<flavor>-<arch>.a`; cosmo fetches the dual-arch pair `libhull_platform-<flavor>.{x86_64,aarch64}-cosmo.a`. `flavor list` shows each flavor as `embedded` (full), `installed`, or `not installed`. `hull build --flavor` then finds the cached lib automatically (see "Build flavors" above). Pure C, HTTP-client-gated (`src/hull/commands/flavor.c`); the `~/.hull/platform/` store is a signed durable store like `~/.hull/tools/`, not a prunable cache. Full design: [docs/build_flavors.md](docs/build_flavors.md).
+
+**`hull feature install <name> [--repo=ORG/NAME]` / `feature list` / `feature uninstall <name>`**. Fetch the per-feature composable library (`libhull_feature-<name>-<arch>.a`) for `hull build --with=<name>` so end users do not build it from source. Same trust chain as `hull flavor install` (the shared `hl_release_io_fetch_verified_manifest`: verify the Ed25519 signature on `hull.sha256` against the embedded `HL_RELEASE_PUBKEY_HEX`, then per asset look up its SHA-256 in the verified manifest, download, constant-time-compare, atomic-write to `$HOME/.hull/feature/`). Two features today: `duckdb` + `gpu`, both native-only (features are static archives; cosmo is never published). `feature list` shows each as `not installed` / `installed` for this platform. Registry is the `FEATURES[]` table in `src/hull/commands/feature.c` (one row per feature). Pure C, HTTP-client-gated. See "Composable features" above and [docs/features_and_flavors.md](docs/features_and_flavors.md).
 
 **`hull cache list|prune|clear|verify`**. Inspect and manage the runtime cache pool (`$HOME/.hull/blobs/runtime/` by default — set `HULL_CACHE_DIR=/abs/path` to redirect for per-app isolation). Full reference: [docs/cache.md](docs/cache.md). Six registered kinds today: `lua-bytecode` (Lua source → bytecode), `js-bytecode` (QuickJS module bytecode), `compute-aot` (WASM AOT artifacts), `templates` (compiled Lua template render functions), `js-templates` (compiled JS template render functions), `tools` (signed side-loaded tool binaries; system store, not pruned by default). `list` enumerates every kind with entry count + total size + on-disk path; `--json` for machine output. `prune [--kind=K] [--max-size=N] [--max-age=N] [--strategy=lru|fifo] [--dry-run]` runs LRU/FIFO eviction over runtime caches; system stores are preserved unless `--kind=tools` is named. `--max-size` accepts `K`/`M`/`G` suffixes (binary, 1024-based; trailing `B` optional, so `100M` and `100MB` are equivalent); `--max-age` accepts `s`/`m`/`h`/`d`/`w`/`y` suffixes (bare numbers = seconds for back-compat). Bad units are rejected with an example. `clear --yes` wipes runtime caches entirely (iter + delete, not policy-based — so even sub-second-old files go). `verify [--kind=K] [--repair] [--json]` walks every entry and flags corruption: for CAS-mode kinds (`tools`) it recomputes `sha256(contents)` and compares to filename; for keyed-mode runtime caches it does a structural check (regular file, non-empty, readable). `--repair` unlinks corrupt entries — safe because the next compile/install repopulates from source. Exits non-zero on corruption unless `--repair` was able to fix it. Cache registry (`include/hull/cache_registry.h`) is the single source of truth for cache kinds, also consumed by `hull doctor` (Caches section), `hull inspect` (runtime-caches disclosure), and `hull cache verify` (CAS vs keyed mode dispatch via `is_cas` field). Adding a new cache kind = one entry in `REGISTRY[]` and the new consumer auto-shows up in list / prune / clear / verify / doctor / inspect.
 
@@ -1070,6 +1125,19 @@ local fetcher = require("hull.http-client")
 
 **Manifest syntax**: each entry is a canonical spec `"<vendor>/<name>@<major>"` in an array. First-party modules use `hull/`; future third-party would use `"acme/widgets@2"`. The manifest declares *what's in scope*; the require/import call site picks *what to call it locally*. The legacy keyed form (`crypto = "hull/crypto@1"`) is still parsed for back-compat but the array form is canonical.
 
+**Optional modules (`?` suffix) - graceful fallback**: a trailing `?` on a spec (`"hull/gpu@1?"`, `"hull/duckdb@1?"`) marks the module **optional**. When the build lacks the required capability (a compiled-out `HL_ENABLE_*` subsystem AND no matching composed `--with=` feature), the resolver **skips** it (records it in an `optional_absent` bitset) instead of failing app load, and the require/import returns a soft absent value: `require("hull.gpu")` returns `nil` (Lua) / `import { gpu } from "hull:gpu"` binds `null` via a synthesized stub module (JS). So an app can use a capability when present and fall back when not:
+
+```lua
+local gpu = require("hull.gpu")          -- nil on a base binary
+if gpu and gpu.available() then ... else cpu_path() end
+```
+```javascript
+import { gpu } from "hull:gpu";           // null on a base binary
+if (gpu && gpu.available()) { ... } else { cpuPath(); }
+```
+
+Only the **absent** case changes: a present optional module is gated exactly as a normal declaration (full resolver + per-call cap layer - zero new authority), and a **non-optional** spec for an absent capability stays a hard app-load error. Generalizes to every build-cap module (`db`/`wasm`/`gpu`/`http`/`tui`). Impl: `hl_module_set_optional_absent_*` + `hl_module_needs_absent_build_cap` in `module_resolver.c`; Lua nil path in `runtime/lua/mod_fs.c`; JS null-export stub in `runtime/js/runtime.c`.
+
 **Architecture (`include/hull/module_registry.h`, `include/hull/module_resolver.h`):**
 
 | Component | File | Purpose |
@@ -1089,7 +1157,7 @@ local fetcher = require("hull.http-client")
 | `module 'hull.X' is not declared in app.manifest. Add to modules: X = "1"...` | App requires a known module not in the modules table | Add to `modules` (the error includes the exact line, plus deps if any) |
 | `module 'hull/jwt@1' transitively requires 'hull/gpu', which needs HL_ENABLE_GPU but it is disabled in this hull build` | A declared module's auto-admitted dep needs a compile-time subsystem this binary doesn't have | Rebuild with the required `HL_ENABLE_*` flag, or remove the top-level module declaration |
 | `http.fetch: host 'api.example.com' not in manifest hosts allowlist` | Module is declared and loaded fine, but the per-call cap layer rejects the URL | Add the host to `manifest.hosts` (or use `fs.read = {...}` / `env = {...}` for the corresponding modules. Capability sections are checked at call time, not at module load) |
-| `module 'hull/gpu@1' requires HL_ENABLE_GPU (build-time)` | The build wasn't compiled with the subsystem | Rebuild hull with `make HL_ENABLE_GPU=1 …` or remove the module declaration |
+| `module 'hull/gpu@1' requires HL_ENABLE_GPU (build-time)` | The build wasn't compiled with the subsystem and no `gpu` feature was composed | Compose the feature: `hull build --with=gpu` (after `hull feature install gpu`), or rebuild hull with `make HL_ENABLE_GPU=1 …`, or mark the module optional with a `?` suffix (`"hull/gpu@1?"`) to fall back gracefully, or remove the declaration |
 | `module 'hull/http-client@1' requires HL_ENABLE_HTTP_CLIENT (build-time)` | App declares an outbound HTTP module (`hull/http`, `hull/smtp`, `hull/email`) on a build with `HL_ENABLE_HTTP_CLIENT=0` | Rebuild with `HL_ENABLE_HTTP_CLIENT=1` (the default) or remove the module declaration. |
 | `module 'hull/http-server@1' requires HL_ENABLE_HTTP_SERVER (build-time)` | App declares an inbound HTTP module (`hull/server`, `hull/ws`, `hull/web/sse`, any `hull/middleware/*`) on a build with `HL_ENABLE_HTTP_SERVER=0` | Rebuild with `HL_ENABLE_HTTP_SERVER=1` (the default) or remove the module declaration. See [docs/cli_mode.md](docs/cli_mode.md). |
 | `unknown module 'X' in app.manifest.modules` | Typo or non-existent module | Run `hull modules available` for the canonical list |

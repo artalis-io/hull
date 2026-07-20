@@ -187,7 +187,7 @@ The distinction that earns its keep is **distribution**, not architecture, becau
 
 - **Flavor** — a named preset shipped as a **base build** (`libhull_platform-<flavor>.a`). The flavors are a **subtractive** spectrum — `full` → `server-only` → `client-only` → `pure-compute`, each a slim of the default — small and enumerable, so they're pre-published. `hull flavor install <flavor>`, `hull build --flavor=<flavor>`. (It's `flavor`, not `platform`: in Hull *platform* is the build **target** — `darwin-arm64`, `linux-x86_64`, ….)
 
-- **Feature** — a large **additive** subsystem shipped as its **own bolt-on lib** (`libhull_feature-<name>.a`), composed onto a base at `hull build`. Additive features are orthogonal — N of them means 2^N combos — so they can't be enumerated as flavors; instead **M flavors + N features publish M+N libs but build any of M×N combos**. `hull feature install <name>`; the build links it when the app needs it. DuckDB (~58 MB) is the first feature; the tiny pure-C `postgres`/`mysql` connectors stay compiled into the base. *(Design: [docs/features_and_flavors.md](docs/features_and_flavors.md). Direction: collapse to one primitive — features — with flavors becoming named presets.)*
+- **Feature** - a large **additive** subsystem shipped as its **own bolt-on lib** (`libhull_feature-<name>.a`), composed onto a base at `hull build --with=<name>`. Additive features are orthogonal - N of them means 2^N combos - so they can't be enumerated as flavors; instead **M flavors + N features publish M+N libs but build any of M×N combos**. `hull feature install <name>`; the build links it when the app needs it. Two features ship today - **DuckDB** (~58 MB OLAP, `duckdb://`) and **GPU** (wgpu-native compute) - both native-only; the tiny pure-C `postgres`/`mysql` connectors stay compiled into the base. *(Design: [docs/features_and_flavors.md](docs/features_and_flavors.md). Direction: collapse to one primitive - features - with flavors becoming named presets.)*
 
 - **Tool** — a separate companion **program** Hull shells out to, not a build of Hull (e.g. `wamrc`, the LLVM-based WASM AOT compiler). `hull tools install <name>`; Hull spawns it when needed.
 
@@ -216,6 +216,24 @@ hull build --flavor=auto -o myapp .        # infer the minimal flavor
 Releases publish signed per-flavor platform libs for every target: native `libhull_platform-<flavor>-<arch>.a` (linux-x86_64, linux-aarch64, darwin-arm64) and cosmo dual-arch `libhull_platform-<flavor>.{x86_64,aarch64}-cosmo.a`, all covered by the Ed25519-signed `hull.sha256` (plus Sigstore/cosign signatures and SLSA provenance). See [docs/build_flavors.md](docs/build_flavors.md) for the full design.
 
 Each flavor also gets a signed SBOM (`libhull_platform-<flavor>.sbom.{json,cdx.json,spdx.json}`), generated with `hull sbom --flavor=<flavor>` — it reports the exact dependency set that flavor links (e.g. `pure-compute` omits Keel + mbedTLS). Run it locally against any hull binary to inspect a flavor's bill of materials without building it.
+
+### Composable features
+
+Where a flavor slims the base (subtractive), a **feature** bolts a large optional subsystem **on** (additive), via a separate signed archive `libhull_feature-<name>.a` composed at build time. `--flavor` and `--with` are orthogonal and compose. Two features ship today, both **native-only (no cosmo)**:
+
+| Feature | What | Reached via |
+|---------|------|-------------|
+| `duckdb` | embedded DuckDB OLAP backend (~58 MB) | a `duckdb://` DSN on `hull.db` |
+| `gpu` | wgpu-native GPU compute | `gpu.*` |
+
+```bash
+hull feature install duckdb               # fetch + verify + cache to ~/.hull/feature/
+hull feature list                         # not installed / installed, per feature
+hull build --with=duckdb -o myapp .        # compose the feature into the app binary
+hull build --with=gpu --compiler=system .  # gpu links -lvulkan / Metal frameworks
+```
+
+`hull feature install` shares the same Ed25519 `hull.sha256` trust chain as `hull flavor install`; `hull build --with=<name>` re-verifies a cached lib before linking and generates a small registry that fills the base's backend hook with the composed backend. Build from source with `make feature-duckdb` / `make feature-gpu`. Full design: [docs/features_and_flavors.md](docs/features_and_flavors.md).
 
 ### libhull: embed the hardened core (no runtime)
 
@@ -382,6 +400,13 @@ local cookie = require("hull.web.cookie")
 ```
 
 Each entry is a canonical spec `"<vendor>/<name>@<major>"`. The manifest declares *what's in scope*; the `require()` / `import` call site picks *what to call it locally*. First-party modules use `hull/`; future third-party packages would use the same form (`"acme/widgets@2"`).
+
+**Optional modules (`?` suffix).** A trailing `?` (`"hull/gpu@1?"`) marks a module optional: on a build that lacks its capability (a compiled-out subsystem with no matching `--with=` feature), the resolver skips it instead of failing app load, and `require` returns `nil` (Lua) / `import` binds `null` (JS) so the app can fall back. A present optional module is gated normally; a non-optional spec for an absent capability stays a hard error.
+
+```lua
+local gpu = require("hull.gpu")           -- nil on a base binary
+if gpu and gpu.available() then use_gpu() else use_cpu() end
+```
 
 **Failure modes** (all surface with the canonical spec + dep list + a pointer to `hull modules available`):
 
@@ -950,7 +975,7 @@ hull build myapp --target=x86_64   # cross-compile AOT for different arch
 
 ### GPU Compute
 
-GPU compute (optional, `HL_ENABLE_GPU=1`) uses wgpu-native for massively parallel workloads via WGSL compute shaders. Features:
+GPU compute uses wgpu-native for massively parallel workloads via WGSL compute shaders. It ships as the **`gpu` composable feature** - `hull feature install gpu` then `hull build --with=gpu` (native-only; see [Composable features](#composable-features) above) - or build hull from source with `make HL_ENABLE_GPU=1`. Declare `"hull/gpu@1"` in the manifest (`"hull/gpu@1?"` to fall back gracefully when no GPU is present). Features:
 
 - **Dispatch + Pipeline**. Single or multi-stage shader execution with shared named buffers
 - **Persistent buffers**. Keep data GPU-resident across requests (`gpu.buffer()`)

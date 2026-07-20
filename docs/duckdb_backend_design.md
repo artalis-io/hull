@@ -260,14 +260,19 @@ story). So DuckDB is statically linked when present, and the default `hull`
 stays lean and keeps rejecting `duckdb://` with the reserved-scheme hint -- now
 pointing at the install command.
 
-DuckDB ships as a signed release variant fetched on demand, reusing the exact
-Ed25519 release-signature trust chain that `hull update` / `hull tools install` /
+DuckDB ships as a signed **composable feature**, reusing the exact Ed25519
+release-signature trust chain that `hull update` / `hull tools install` /
 `hull flavor install` already use (`hl_release_io_*`): download -> verify
 signature + SHA-256 against the signed manifest -> install. No rebuild from
-source, no new key or verifier. Open sub-decision for implementation time:
-whether the variant installs alongside as a distinct `hull-duckdb` binary
-(preferred, so the lean default is never disturbed) or swaps the running binary
-in place like `hull update`.
+source, no new key or verifier.
+
+**Resolved** (the "distinct `hull-duckdb` binary vs in-place swap" sub-decision
+below is superseded): neither. DuckDB is **not a separate binary** — it's a
+per-feature static archive `libhull_feature-duckdb.a` that `hull feature install
+duckdb` fetches into `~/.hull/feature/`, and `hull build --with=duckdb` composes
+into the *app* binary at build time. The lean default `hull` is never disturbed;
+the app that opts in carries DuckDB. See
+[features_and_flavors.md](features_and_flavors.md) for the full model.
 
 ### 3.4 Link-time symbol collision with Hull's mbedTLS (resolved via isolation)
 
