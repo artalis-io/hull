@@ -1464,6 +1464,17 @@ ifneq ($(HL_ENABLE_DUCKDB),1)
       $(SRCDIR)/hull/cap/db_duckdb.c, \
       $(CAP_SRCS))
 endif
+ifneq ($(HL_ENABLE_GPU),1)
+  # wgpu-native backend vtable (defines hl_gpu_backend_wgpu). Off by default.
+  # Filtered out of the base entirely -- like db_duckdb.c -- NOT stub-compiled,
+  # so the composable gpu feature (make feature-gpu) can supply the real
+  # cap_gpu_wgpu.o without a base stub shadowing it at the compose link. The
+  # generic gpu dispatch layer (cap/gpu.c) stays base-resident; only this
+  # concrete backend is feature-gated.
+  CAP_SRCS := $(filter-out \
+      $(SRCDIR)/hull/cap/gpu_wgpu.c, \
+      $(CAP_SRCS))
+endif
 ifeq ($(HL_ENABLE_HTTP_CLIENT),0)
   # CLIENT-only capability sources — http.fetch sync + async + SMTP send.
   CAP_SRCS := $(filter-out \
@@ -2438,6 +2449,35 @@ $(BUILDDIR)/libhull_feature-duckdb.a: $(BUILDDIR)/cap_db_duckdb.o $(DUCKDB_ARCHI
 	@rm -f $@
 	$(AR) rcs $@ $(BUILDDIR)/cap_db_duckdb.o
 	@tmproot=$$(mktemp -d); n=0; for a in $(DUCKDB_ARCHIVES); do \
+		mkdir -p $$tmproot/$$n && ( cd $$tmproot/$$n && $(AR) x $(CURDIR)/$$a ) && \
+		$(AR) rcs $(CURDIR)/$@ $$tmproot/$$n/*.o && n=$$((n+1)); \
+	done; rm -rf $$tmproot
+	@echo "built $@ ($$(du -h $@ | cut -f1))"
+
+# ── GPU feature archive (composable feature: hull build --with=gpu) ──
+# libhull_feature-gpu.a bundles the wgpu backend object (cap_gpu_wgpu.o, which
+# defines hl_gpu_backend_wgpu) + the wgpu-native static lib into ONE archive,
+# mirroring feature-duckdb. Merging into a single archive keeps the
+# cap_gpu_wgpu.o <-> libwgpu_native.a refs intra-archive, so the composing link
+# needs no --start-group.
+#
+# Unlike DuckDB (whose libs embed a clashing second mbedTLS that must be renamed),
+# wgpu-native shares no symbols with Hull: the monolithic HL_ENABLE_GPU=1 build
+# links wgpu + mbedTLS + SQLite + Lua together cleanly, and `nm` shows wgpu
+# exports none of those names. So this archive is a straight bundle, no isolation.
+# The platform link libs (-framework Metal ... on macOS / -lvulkan on Linux)
+# cannot live inside a .a; they are recorded in build.lua's FEATURE_SPECS.gpu and
+# emitted at the composing link. Native only (wgpu is not cosmo-compatible).
+# `feature-gpu` re-invokes make with HL_ENABLE_GPU=1 so cap_gpu_wgpu.o (compiled
+# as the real backend, not the base stub) + WGPU_LIB are in scope.
+feature-gpu:
+	$(MAKE) $(BUILDDIR)/libhull_feature-gpu.a HL_ENABLE_GPU=1
+.PHONY: feature-gpu
+
+$(BUILDDIR)/libhull_feature-gpu.a: $(BUILDDIR)/cap_gpu_wgpu.o $(WGPU_LIB) | $(BUILDDIR)
+	@rm -f $@
+	$(AR) rcs $@ $(BUILDDIR)/cap_gpu_wgpu.o
+	@tmproot=$$(mktemp -d); n=0; for a in $(WGPU_LIB); do \
 		mkdir -p $$tmproot/$$n && ( cd $$tmproot/$$n && $(AR) x $(CURDIR)/$$a ) && \
 		$(AR) rcs $(CURDIR)/$@ $$tmproot/$$n/*.o && n=$$((n+1)); \
 	done; rm -rf $$tmproot
