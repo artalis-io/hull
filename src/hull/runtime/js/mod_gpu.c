@@ -26,11 +26,11 @@ static int js_parse_texture_descs(JSContext *ctx, JSValueConst arr,
 
 static HlGpuCtx *js_get_gpu_ctx(JSContext *ctx)
 {
-    JSValue global = JS_GetGlobalObject(ctx);
-    JSValue hull_opaque = JS_GetPropertyStr(ctx, global, "__hull_js");
-    HlJS *js = (HlJS *)JS_GetOpaque(hull_opaque, 1);
-    JS_FreeValue(ctx, hull_opaque);
-    JS_FreeValue(ctx, global);
+    /* HlJS is stashed as the context opaque (runtime.c: JS_SetContextOpaque),
+     * the same idiom every other JS cap module uses. The old code read a
+     * `__hull_js` global that is never set, so this always returned NULL and
+     * every gpu.* call failed (compile surfaced as a misleading "shader_error"). */
+    HlJS *js = (HlJS *)JS_GetContextOpaque(ctx);
     return js ? js->base.gpu_ctx : NULL;
 }
 
