@@ -844,7 +844,14 @@ async function handlePasswordResetConfirm(req, res) {
     // body: `(req, res, user) => session.destroyAll(user.id)`.
     emitEvent(result[0].sub, "password_reset_completed", req);
     if (_state.onPasswordReset) {
-        try { _state.onPasswordReset(req, res, user); } catch (_e) {}
+        // Log rather than fully swallow: the recommended body revokes all
+        // sessions (session.destroyAll), so a throw here means a suspected-
+        // compromise cleanup silently didn't run, so an operator must see it.
+        try {
+            _state.onPasswordReset(req, res, user);
+        } catch (e) {
+            log.warn("auth-flows: onPasswordReset threw: " + (e && e.message ? e.message : e));
+        }
     }
     gcExpired();
     res.json({ ok: true });

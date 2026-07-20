@@ -1189,7 +1189,13 @@ local function handle_password_reset_confirm(req, res)
     -- out via session.destroy_others instead.
     emit_event(env.sub, "password_reset_completed", req)
     if _state.on_password_reset then
-        pcall(_state.on_password_reset, req, res, user)
+        -- Log rather than fully swallow: the recommended body revokes all
+        -- sessions (session.destroy_all), so a throw here means a suspected-
+        -- compromise cleanup silently didn't run -- an operator must see it.
+        local ok, cb_err = pcall(_state.on_password_reset, req, res, user)
+        if not ok then
+            require("hull.log").warn("auth-flows: on_password_reset failed: " .. tostring(cb_err))
+        end
     end
     gc_expired()
     res:json({ ok = true })

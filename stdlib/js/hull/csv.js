@@ -102,7 +102,10 @@ function parse(text, opts) {
         const headers = rows[0];
         const result = [];
         for (let r = 1; r < rows.length; r++) {
-            const obj = {};
+            // Null-prototype: a header cell named "__proto__" / "constructor"
+            // is then an ordinary data key, not a prototype-chain write
+            // (parity with form.parse; matches Lua, which has no prototype).
+            const obj = Object.create(null);
             for (let c = 0; c < headers.length; c++) {
                 const key = headers[c];
                 if (typeof key !== "string" || key.length === 0) continue;

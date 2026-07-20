@@ -157,7 +157,12 @@ function middleware(opts) {
                 uptime,
             };
 
-            if (server && httpServer.stats) {
+            // Include server stats if available. Pre-fix used `server`
+            // (an undeclared identifier — a ReferenceError the moment
+            // httpServer.stats existed), so the docstring's promised stats
+            // block never reached /ready responses. Mirrors the Lua fix in
+            // health.lua.
+            if (httpServer && httpServer.stats) {
                 body.stats = httpServer.stats();
             }
 
