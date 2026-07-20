@@ -1234,12 +1234,18 @@ int main(int argc, char **argv) { return hull_main(argc, argv); }
     -- extract_app_manifest EXECUTES app.lua and re-running it corrupts the sign
     -- flow; a side-effect-free manifest read is a tracked follow-up.)
     --
-    -- FEATURE_SPECS is the single source of truth for the codegen: per feature,
-    -- the backend symbol its archive exports, that backend's vtable type, the
-    -- base weak hook it fills, whether it is C++ (needs a system compiler + C++
-    -- runtime), and its extra link libs. Adding a feature is one row here + a
-    -- `make feature-<name>` archive + a release-pipeline entry -- and, for a NEW
-    -- subsystem kind, a weak hook in that (always-base-resident) cap layer.
+    -- FEATURE_SPECS is the single source of truth per feature. A feature that
+    -- contributes a backend to a base hook that returns an ARRAY (so several
+    -- features could feed one hook) carries { backend, type, hook }: the compose
+    -- step generates one strong collector filling that hook. A feature whose
+    -- base hooks each have exactly one provider carries no backend/hook; instead
+    -- `whole_archive = true` tells the compose step to force-load its archive so
+    -- the strong overrides (spread across its object files, with no single
+    -- backend symbol to anchor on) all get pulled. `whole_archive` is a plain
+    -- per-feature LINK attribute, sibling to `cxx` -- not a second kind of
+    -- feature. Other fields: `cxx` (needs a system compiler + C++ runtime) and
+    -- `libs` (extra link libs). Adding a feature is one row here + a
+    -- `make feature-<name>` archive + a release-pipeline entry.
     local FEATURE_SPECS = {
         duckdb = {
             backend = "hl_db_backend_duckdb",
@@ -1258,6 +1264,17 @@ int main(int argc, char **argv) { return hull_main(argc, argv); }
             libs = { darwin = { "-framework", "Metal", "-framework", "QuartzCore",
                                 "-framework", "CoreGraphics", "-framework", "Foundation" },
                      other  = { "-lvulkan" } },
+        },
+        -- tui: the whole TUI subsystem (cap + both runtime bridges) in
+        -- libhull_feature-tui.a (`make feature-tui`). Its base hooks
+        -- (hl_tui_feature_present / register_lua / register_js) each have one
+        -- provider, and the strong overrides live across several object files
+        -- with no single backend symbol, so the archive is whole-archive-linked
+        -- (force_load) rather than pull-by-backend-symbol. Pure C, no extra libs
+        -- (POSIX termios).
+        tui = {
+            whole_archive = true, cxx = false,
+            libs = { darwin = {}, other = {} },
         },
     }
     local features_needed = {}
@@ -1319,17 +1336,34 @@ int main(int argc, char **argv) { return hull_main(argc, argv); }
             end
             local dest = tmpdir .. "/" .. libname
             tool.copy(lib, dest)
-            feature_libs[#feature_libs + 1] = dest
+            local is_darwin = plat and plat:sub(1, 6) == "darwin"
+
+            if spec.whole_archive then
+                -- Force-load the whole archive: its strong overrides of the
+                -- base weak hooks are spread across several object files with no
+                -- single backend symbol to anchor a selective pull. macOS uses
+                -- -force_load <lib>; the GNU ld / lld path uses the
+                -- --whole-archive ... --no-whole-archive bracket.
+                if is_darwin then
+                    feature_libs[#feature_libs + 1] = "-Wl,-force_load," .. dest
+                else
+                    feature_libs[#feature_libs + 1] = "-Wl,--whole-archive"
+                    feature_libs[#feature_libs + 1] = dest
+                    feature_libs[#feature_libs + 1] = "-Wl,--no-whole-archive"
+                end
+            else
+                -- Backend feature: linked plainly; the generated registry's
+                -- extern-&backend reference pulls the backend object.
+                feature_libs[#feature_libs + 1] = dest
+                by_hook[spec.hook] = by_hook[spec.hook] or { type = spec.type, backends = {} }
+                local g = by_hook[spec.hook]
+                g.backends[#g.backends + 1] = spec.backend
+            end
 
             -- Per-feature link libs (C++ runtime / native frameworks / -lvulkan).
-            local platlibs = (plat and plat:sub(1, 6) == "darwin")
-                             and (spec.libs.darwin or {}) or (spec.libs.other or {})
+            local platlibs = is_darwin and (spec.libs.darwin or {})
+                                        or  (spec.libs.other or {})
             for _, l in ipairs(platlibs) do feature_libs[#feature_libs + 1] = l end
-
-            -- Group this backend under its base hook (subsystem kind).
-            by_hook[spec.hook] = by_hook[spec.hook] or { type = spec.type, backends = {} }
-            local g = by_hook[spec.hook]
-            g.backends[#g.backends + 1] = spec.backend
 
             print("hull build: composed feature '" .. fname .. "'"
                   .. (from_cache and " (~/.hull/feature)" or " (local)"))
@@ -1346,37 +1380,42 @@ int main(int argc, char **argv) { return hull_main(argc, argv); }
             tool.rmdir(tmpdir); tool.exit(1)
         end
 
-        -- Generate ONE registry filling each base weak hook with the STRONG
-        -- override returning that kind's composed backends. Self-contained (no
-        -- <stddef.h>: these files compile with a bare include path; size_t comes
-        -- from the compiler builtin, ABI-exact under tcc/gcc/clang).
-        local reg = {
-            "/* Auto-generated by hull build — do not edit. */",
-            "typedef __SIZE_TYPE__ size_t;",
-        }
-        for hook, g in pairs(by_hook) do
-            reg[#reg + 1] = "typedef struct " .. g.type .. " " .. g.type .. ";"
-            local addrs = {}
-            for i, b in ipairs(g.backends) do
-                reg[#reg + 1] = "extern const " .. g.type .. " " .. b .. ";"
-                addrs[i] = "&" .. b
+        -- Generate ONE registry filling each aggregating base hook with the
+        -- STRONG override returning that kind's composed backends. Only backend
+        -- features populate `by_hook`; a compose of only whole_archive features
+        -- (e.g. --with=tui alone) needs no registry (its strong overrides come
+        -- straight from the force-loaded archive). Self-contained (no <stddef.h>:
+        -- these files compile with a bare include path; size_t comes from the
+        -- compiler builtin, ABI-exact under tcc/gcc/clang).
+        if next(by_hook) then
+            local reg = {
+                "/* Auto-generated by hull build — do not edit. */",
+                "typedef __SIZE_TYPE__ size_t;",
+            }
+            for hook, g in pairs(by_hook) do
+                reg[#reg + 1] = "typedef struct " .. g.type .. " " .. g.type .. ";"
+                local addrs = {}
+                for i, b in ipairs(g.backends) do
+                    reg[#reg + 1] = "extern const " .. g.type .. " " .. b .. ";"
+                    addrs[i] = "&" .. b
+                end
+                local arr = "HL_FEAT_" .. hook
+                reg[#reg + 1] = "static const " .. g.type .. " *const " .. arr
+                                .. "[] = { " .. table.concat(addrs, ", ") .. " };"
+                reg[#reg + 1] = "const " .. g.type .. " *const *" .. hook .. "(size_t *count) {"
+                reg[#reg + 1] = "    if (count) *count = " .. #g.backends .. ";"
+                reg[#reg + 1] = "    return " .. arr .. ";"
+                reg[#reg + 1] = "}"
             end
-            local arr = "HL_FEAT_" .. hook
-            reg[#reg + 1] = "static const " .. g.type .. " *const " .. arr
-                            .. "[] = { " .. table.concat(addrs, ", ") .. " };"
-            reg[#reg + 1] = "const " .. g.type .. " *const *" .. hook .. "(size_t *count) {"
-            reg[#reg + 1] = "    if (count) *count = " .. #g.backends .. ";"
-            reg[#reg + 1] = "    return " .. arr .. ";"
-            reg[#reg + 1] = "}"
+            reg[#reg + 1] = ""
+            write_file(tmpdir .. "/feature_registry.c", table.concat(reg, "\n"))
+            if not tool.compiler.compile(tmpdir .. "/feature_registry.c",
+                                         tmpdir .. "/feature_registry.o", nil) then
+                tool.stderr("hull build: compilation failed (feature_registry.c)\n")
+                tool.rmdir(tmpdir); tool.exit(1)
+            end
+            feature_objs[#feature_objs + 1] = tmpdir .. "/feature_registry.o"
         end
-        reg[#reg + 1] = ""
-        write_file(tmpdir .. "/feature_registry.c", table.concat(reg, "\n"))
-        if not tool.compiler.compile(tmpdir .. "/feature_registry.c",
-                                     tmpdir .. "/feature_registry.o", nil) then
-            tool.stderr("hull build: compilation failed (feature_registry.c)\n")
-            tool.rmdir(tmpdir); tool.exit(1)
-        end
-        feature_objs[#feature_objs + 1] = tmpdir .. "/feature_registry.o"
     end
 
     -- Link

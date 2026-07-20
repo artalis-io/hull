@@ -916,6 +916,21 @@ jobs:
         timeout-minutes: 15
         run: sh tests/e2e_feature_gpu.sh
 
+  # TUI as a composable FEATURE. Own fresh build tree. Builds a TUI-free base
+  # (EMBED_PLATFORM=1 HL_ENABLE_TUI=0) + the tui feature archive, then
+  # `hull build --with=tui` an app and boots it (asserts hull.tui registered).
+  # Pure C, no vendored lib and no extra link libs, so no install step.
+  tui-feature:
+    name: TUI feature build (Linux)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          submodules: true
+      - name: Compose the TUI feature into an app binary (e2e)
+        timeout-minutes: 15
+        run: sh tests/e2e_feature_tui.sh
+
   coverage:
     name: Code Coverage
     runs-on: ubuntu-24.04

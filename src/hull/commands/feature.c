@@ -59,6 +59,7 @@ typedef struct {
 static const HlFeatureSpec FEATURES[] = {
     { "duckdb", "DuckDB embedded OLAP SQL backend (duckdb://)", 1, 1, 1 },
     { "gpu",    "GPU compute via wgpu-native (Vulkan/Metal)",   1, 1, 1 },
+    { "tui",    "Terminal UI (hull.tui: full-screen, input, cell-diff)", 1, 1, 1 },
 };
 
 static const HlFeatureSpec *feature_find(const char *name)

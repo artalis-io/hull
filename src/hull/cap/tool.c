@@ -176,6 +176,15 @@ int hl_tool_validate_args(const char *const argv[])
                 "--no-entry", "--export=", "--export-all", "--allow-undefined",
                 "--initial-memory=", "--max-memory=", "--stack-first",
                 "--import-memory", "--export-memory", "--shared-memory",
+                /* Composable-feature whole-archive linking (`hull build
+                 * --with=<feature>` for a whole_archive feature like tui). These
+                 * only control WHICH members of an archive are pulled -- no
+                 * plugin load, no codegen, no code execution (contrast the
+                 * blocked -load / -Xlinker / @response). build.lua emits them
+                 * solely for the trusted FEATURE_SPECS feature archive, whose
+                 * path it controls; the build sandbox's unveil bounds the path. */
+                "-force_load,",       /* macOS ld64: -Wl,-force_load,<archive> */
+                "--whole-archive", "--no-whole-archive",  /* GNU ld / lld bracket */
                 NULL
             };
             const char *wl_arg = a + 4;

@@ -809,10 +809,51 @@ jobs:
           name: feature-gpu-${{ matrix.name }}
           path: libhull_feature-gpu-${{ matrix.name }}.a
 
+  build-feature-tui:
+    # Composable TUI feature archive (libhull_feature-tui-<arch>.a), pulled by
+    # `hull feature install tui` -> `hull build --with=tui`. TUI is a
+    # whole_archive feature (the compose force-loads it); pure C, no vendored lib
+    # and no extra link libs (POSIX termios), so this is the simplest feature
+    # job: no fetch, no toolchain install, no symbol isolation. `make
+    # feature-tui` re-invokes make with HL_ENABLE_TUI=1. Native-only; covered by
+    # the release signature only. See docs/features_and_flavors.md.
+    name: Build feature tui (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x86_64
+            os: ubuntu-24.04
+          - name: linux-aarch64
+            os: ubuntu-24.04-arm
+          - name: darwin-arm64
+            os: macos-15
+
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          submodules: true
+
+      - name: Write VERSION file
+        run: echo "${GITHUB_REF_NAME#v}" > VERSION
+
+      - name: Build TUI feature archive
+        run: make feature-tui
+
+      - name: Rename artifact (arch-qualified)
+        run: mv build/libhull_feature-tui.a libhull_feature-tui-${{ matrix.name }}.a
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        with:
+          name: feature-tui-${{ matrix.name }}
+          path: libhull_feature-tui-${{ matrix.name }}.a
+
   release:
     name: Create Release
     runs-on: ubuntu-24.04
-    needs: [build-cosmo, build-native, build-wamrc, build-platform-cosmo-flavors, build-feature-native, build-feature-gpu]
+    needs: [build-cosmo, build-native, build-wamrc, build-platform-cosmo-flavors, build-feature-native, build-feature-gpu, build-feature-tui]
     permissions:
       contents: write       # publish GitHub release + assets
       id-token: write       # SLSA: OIDC for Sigstore signing
@@ -865,6 +906,12 @@ jobs:
           mv artifacts/feature-gpu-linux-x86_64/*.a   dist/
           mv artifacts/feature-gpu-linux-aarch64/*.a  dist/
           mv artifacts/feature-gpu-darwin-arm64/*.a   dist/
+          # Composable TUI feature archives (libhull_feature-tui-<arch>.a),
+          # native-only. Pulled by `hull feature install tui`. Covered by the
+          # libhull_feature-*.a glob in the SHA-256 + publish steps below.
+          mv artifacts/feature-tui-linux-x86_64/*.a   dist/
+          mv artifacts/feature-tui-linux-aarch64/*.a  dist/
+          mv artifacts/feature-tui-darwin-arm64/*.a   dist/
 
       - name: Make binaries executable
         run: chmod +x dist/*

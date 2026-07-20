@@ -1493,12 +1493,18 @@ ifeq ($(HL_ENABLE_HTTP_SERVER),0)
       $(CAP_SRCS))
 endif
 ifeq ($(HL_ENABLE_TUI),0)
-  # Drop the TUI capability when disabled. cap/tui_width.c stays
-  # compiled regardless — it's a pure data-table lookup with no
-  # platform deps, useful elsewhere.
+  # Drop the TUI capability when disabled. cap/tui_width.c is dropped too: its
+  # symbols (hl_tui_cp_width / hl_tui_utf8_decode) are used ONLY by cap/tui.c +
+  # cap/tui_input.c, so it's dead weight in a TUI-free base and, crucially, must
+  # travel WITH the tui feature archive so a whole-archive compose resolves those
+  # references internally (GNU ld can't satisfy a force-loaded archive's refs from
+  # an already-processed base lib). It's bundled into libhull_feature-tui.a below.
+  # cap/tui_feature.c (the weak base hooks) is NOT dropped -- it stays
+  # base-resident so hl_tui_feature_present always resolves.
   CAP_SRCS := $(filter-out \
       $(SRCDIR)/hull/cap/tui.c \
-      $(SRCDIR)/hull/cap/tui_input.c, \
+      $(SRCDIR)/hull/cap/tui_input.c \
+      $(SRCDIR)/hull/cap/tui_width.c, \
       $(CAP_SRCS))
 endif
 CAP_OBJS := $(patsubst $(SRCDIR)/hull/cap/%.c,$(BUILDDIR)/cap_%.o,$(CAP_SRCS))
@@ -2501,25 +2507,29 @@ $(BUILDDIR)/libhull_feature-gpu.a: $(BUILDDIR)/cap_gpu_wgpu.o $(WGPU_LIB) | $(BU
 
 # ── TUI feature archive (composable feature: hull build --with=tui) ──
 # libhull_feature-tui.a bundles the whole TUI subsystem: the cap layer
-# (cap_tui.o + cap_tui_input.o) and both runtime bridges (lua_rt_mod_tui.o +
-# js_mod_tui.o). Those objects carry the STRONG overrides of the base's weak
-# feature hooks (hl_tui_feature_present in cap/tui.c; hl_tui_feature_register_lua
-# / _js in the mod_tui.c files), so composing the archive lights TUI up. Unlike
-# a backend feature (duckdb/gpu) there is no single entry symbol, so the compose
-# link must whole-archive / -force_load this lib to pull every member (wired in
-# build.lua's FEATURE_SPECS.tui, Phase 1.3). No vendored lib and no extra link
-# libs (TUI is pure POSIX termios). cap_tui_width.o (data table) and
-# cap_tui_feature.o (weak base hooks) intentionally stay in the base.
-# `feature-tui` re-invokes make with HL_ENABLE_TUI=1 so the subsystem objects
-# (filtered out of a base build) are in scope.
+# (cap_tui.o + cap_tui_input.o + cap_tui_width.o) and both runtime bridges
+# (lua_rt_mod_tui.o + js_mod_tui.o). Those objects carry the STRONG overrides of
+# the base's weak feature hooks (hl_tui_feature_present in cap/tui.c;
+# hl_tui_feature_register_lua / _js in the mod_tui.c files), so composing the
+# archive lights TUI up. Unlike a backend feature (duckdb/gpu) there is no single
+# entry symbol, so the compose link must whole-archive / -force_load this lib to
+# pull every member (wired in build.lua's FEATURE_SPECS.tui). The archive is
+# SELF-CONTAINED: cap_tui_width.o (used only by the tui trio) travels with it so
+# a GNU-ld whole-archive compose resolves its refs internally. No vendored lib
+# and no extra link libs (TUI is pure POSIX termios). cap_tui_feature.o (weak
+# base hooks) stays base-resident. `feature-tui` re-invokes make with
+# HL_ENABLE_TUI=1 so the subsystem objects (filtered out of a base build) are in
+# scope.
 feature-tui:
 	$(MAKE) $(BUILDDIR)/libhull_feature-tui.a HL_ENABLE_TUI=1
 .PHONY: feature-tui
 
 $(BUILDDIR)/libhull_feature-tui.a: $(BUILDDIR)/cap_tui.o $(BUILDDIR)/cap_tui_input.o \
+                                   $(BUILDDIR)/cap_tui_width.o \
                                    $(BUILDDIR)/lua_rt_mod_tui.o $(BUILDDIR)/js_mod_tui.o | $(BUILDDIR)
 	@rm -f $@
 	$(AR) rcs $@ $(BUILDDIR)/cap_tui.o $(BUILDDIR)/cap_tui_input.o \
+	            $(BUILDDIR)/cap_tui_width.o \
 	            $(BUILDDIR)/lua_rt_mod_tui.o $(BUILDDIR)/js_mod_tui.o
 	@echo "built $@ ($$(du -h $@ | cut -f1))"
 
