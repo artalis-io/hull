@@ -24,3 +24,19 @@ int hl_tui_feature_present(void)
 {
     return 0;
 }
+
+/* Weak no-op registration hooks: a base build registers no tui bridge. The
+ * feature archive's strong overrides do the real per-runtime registration. */
+__attribute__((weak))
+void hl_tui_feature_register_lua(void *lua_state)
+{
+    (void)lua_state;
+}
+
+__attribute__((weak))
+int hl_tui_feature_register_js(void *js_ctx, void *hl_js)
+{
+    (void)js_ctx;
+    (void)hl_js;
+    return 0;
+}

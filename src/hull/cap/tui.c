@@ -1082,3 +1082,14 @@ int hl_cap_tui_enable_kitty_kbd(HlTuiCtx *ctx, int on)
     ctx->kitty_kbd_on = !!on;
     return 0;
 }
+
+/* ── Composable-feature seam (strong overrides) ─────────────────────
+ * This TU compiles only when the TUI subsystem is present (a monolithic
+ * HL_ENABLE_TUI build, or bundled into libhull_feature-tui.a). Its very
+ * presence is the signal, so the strong hl_tui_feature_present overrides the
+ * base weak default (cap/tui_feature.c) and reports the tui cap to the resolver.
+ * The per-runtime register hooks are strong-overridden in the mod_tui.c files. */
+int hl_tui_feature_present(void)
+{
+    return 1;
+}

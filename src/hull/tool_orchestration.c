@@ -449,9 +449,11 @@ static int l_tool_modules_available(lua_State *L)
 /* All dev_* accessors consult hl_dev_state(), which is a no-op
  * (returns nil / safe defaults) when hull dev --tui isn't running.
  * That lets the stdlib's *_tui modules load cleanly in tests too.
- * hl_dev_state lives in the inbound-HTTP-server set (it backs `hull dev`),
- * so these bindings ship only when HL_ENABLE_HTTP_SERVER is on. */
-#ifdef HL_ENABLE_HTTP_SERVER
+ * The dev-state machinery (commands/dev.c) exists solely for `hull dev --tui`,
+ * so it — and these bindings — need BOTH the inbound-HTTP server (hull dev) and
+ * the TUI subsystem. On a TUI-off build (base composing TUI as a feature) they
+ * drop out together with the dev-state singleton. */
+#if defined(HL_ENABLE_HTTP_SERVER) && defined(HL_ENABLE_TUI)
 
 static int l_tool_dev_status(lua_State *L)
 {
@@ -523,7 +525,7 @@ static int l_tool_dev_reload(lua_State *L)
     return 1;
 }
 
-#endif /* HL_ENABLE_HTTP_SERVER */
+#endif /* HL_ENABLE_HTTP_SERVER && HL_ENABLE_TUI */
 
 /* ── Registration ──────────────────────────────────────────────────── */
 
@@ -547,7 +549,7 @@ void hl_lua_tool_register_orchestration(lua_State *L)
 #endif
         { "agent_context",          l_tool_agent_context },
         { "modules_available",      l_tool_modules_available },
-#ifdef HL_ENABLE_HTTP_SERVER
+#if defined(HL_ENABLE_HTTP_SERVER) && defined(HL_ENABLE_TUI)
         { "dev_status",             l_tool_dev_status },
         { "dev_drain",              l_tool_dev_drain },
         { "dev_recent_lines",       l_tool_dev_recent_lines },

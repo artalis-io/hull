@@ -295,6 +295,16 @@ int hl_cap_tui_enable_kitty_kbd(HlTuiCtx *ctx, int on);
  */
 int hl_tui_feature_present(void);
 
+/* Per-runtime registration hooks for the composed tui feature. The base ships
+ * weak no-ops (cap/tui_feature.c); libhull_feature-tui.a provides strong
+ * overrides that register the native tui bridge (hull._tui / hull:tui). These
+ * take runtime types (lua_State* / JSContext* + HlJS*), so the strong overrides
+ * live in the feature archive (compiled with full runtime includes), NOT in the
+ * generated feature registry. Declared here as void* to avoid pulling lua.h /
+ * quickjs.h into every consumer of tui.h; the impl casts back. */
+void hl_tui_feature_register_lua(void *lua_state);
+int  hl_tui_feature_register_js(void *js_ctx, void *hl_js);
+
 #ifdef __cplusplus
 }
 #endif

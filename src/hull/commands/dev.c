@@ -159,6 +159,14 @@ static const char *dev_detect_entry(void)
 }
 
 /* ── Dev state singleton (used by `hull dev --tui`) ──────────────── */
+/* The whole dev-state machinery exists solely for `hull dev --tui`: the
+ * singleton is only ever initialized by run_dev_tui, and its sole consumers are
+ * the tool.dev_* bindings that back the dev_tui Lua tool. So the entire block is
+ * TUI-only — the tool.dev_* bindings in tool_orchestration.c carry the matching
+ * HL_ENABLE_TUI gate. On a TUI-off build (including a base that composes TUI as
+ * a feature) it's all excluded, avoiding both unused-function (-Werror) and the
+ * "g_dev_state_inited always false" tautology (cppcheck). */
+#ifdef HL_ENABLE_TUI
 
 static HlDevState g_dev_state;
 static int        g_dev_state_inited = 0;
@@ -375,6 +383,8 @@ static int run_dev_tui(int argc, char **argv,
     g_dev_state_inited = 0;
     return rc;
 }
+
+#endif /* HL_ENABLE_TUI */
 
 /* ── Main ─────────────────────────────────────────────────────────── */
 

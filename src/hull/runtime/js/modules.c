@@ -10,6 +10,7 @@
 
 #include "mod_buffer.h"
 #include "internal.h"  /* hl_js_request_register, hl_js_sse_register_class */
+#include "hull/cap/tui.h"  /* hl_tui_feature_register_js (composed-feature seam) */
 
 /* ════════════════════════════════════════════════════════════════════
  * Module registry — called by hl_js_init() to register all
@@ -117,12 +118,13 @@ int hl_js_register_modules(HlJS *js)
             return -1;
     }
 
-#ifdef HL_ENABLE_TUI
-    /* Register hull:tui module — gated at use time by the resolver
-     * (requires HL_ENABLE_TUI + manifest.tui). */
-    if (hl_js_init_tui_module(js->ctx, js) != 0)
+    /* TUI native module — registered by the tui feature (monolithic
+     * HL_ENABLE_TUI or a composed --with=tui). Base ships a weak no-op; the
+     * feature's strong override calls hl_js_init_tui_module. Gated at use time
+     * by the resolver (requires the tui cap + manifest.tui). Unconditional so a
+     * composed binary picks it up without HL_ENABLE_TUI. */
+    if (hl_tui_feature_register_js(js->ctx, js) != 0)
         return -1;
-#endif
 
 #ifdef HL_ENABLE_HTTP_SERVER
     /* hull:web:ws-server + hull:web:ws-client (now in mod_ws_server.c +

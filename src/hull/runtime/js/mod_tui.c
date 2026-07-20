@@ -549,4 +549,13 @@ int hl_js_init_tui_module(JSContext *ctx, HlJS *js)
     return 0;
 }
 
+/* Strong override of the base weak hl_tui_feature_register_js
+ * (cap/tui_feature.c): register the hull:_tui native module. Called
+ * unconditionally from js/modules.c; in a base build with no tui feature the
+ * weak no-op runs. void* params keep JS types out of tui.h. */
+int hl_tui_feature_register_js(void *js_ctx, void *hl_js)
+{
+    return hl_js_init_tui_module((JSContext *)js_ctx, (HlJS *)hl_js);
+}
+
 #endif /* HL_ENABLE_TUI */

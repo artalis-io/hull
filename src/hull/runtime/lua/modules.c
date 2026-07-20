@@ -15,6 +15,7 @@
 
 #include "mod_buffer.h"
 #include "internal.h"  /* hl_lua_request_register, hl_lua_sse_register_mt */
+#include "hull/cap/tui.h"  /* hl_tui_feature_register_lua (composed-feature seam) */
 
 /* Register a native module so `require("hull.X")` finds it via the
  * _LOADED bridge in hl_lua_require, but do NOT set it as a global. */
@@ -106,13 +107,12 @@ int hl_lua_register_modules(HlLua *lua)
     if (lua->base.gpu_ctx)
         register_native_module(L, "hull.gpu", luaopen_hull_gpu);
 
-#ifdef HL_ENABLE_TUI
-    /* Native bridge — the user-facing module is the stdlib Lua file
-     * at stdlib/lua/hull/tui.lua, which `require`s the bridge below
-     * and layers tui.run / tui.list / tui.confirm on top. Underscore
-     * prefix keeps it out of the public module registry. */
-    register_native_module(L, "hull._tui", luaopen_hull_tui);
-#endif
+    /* TUI native bridge — registered by the tui feature (a monolithic
+     * HL_ENABLE_TUI build or a composed --with=tui). The base ships a weak
+     * no-op; the feature's strong override registers hull._tui (the underscore
+     * bridge that stdlib/lua/hull/tui.lua layers tui.run/list/confirm on top
+     * of). Unconditional so a composed binary picks it up without HL_ENABLE_TUI. */
+    hl_tui_feature_register_lua(L);
 
 #ifdef HL_ENABLE_HTTP_SERVER
     /* SSE stream metatable (used by app.sse handler dispatch). */

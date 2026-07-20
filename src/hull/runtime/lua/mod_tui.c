@@ -585,4 +585,15 @@ int luaopen_hull_tui(lua_State *L)
     return 1;
 }
 
+/* Strong override of the base weak hl_tui_feature_register_lua
+ * (cap/tui_feature.c): register the hull._tui native bridge. Called
+ * unconditionally from lua/modules.c; in a base build with no tui feature the
+ * weak no-op runs instead. void* param keeps lua types out of tui.h. */
+void hl_tui_feature_register_lua(void *lua_state)
+{
+    lua_State *L = (lua_State *)lua_state;
+    luaL_requiref(L, "hull._tui", luaopen_hull_tui, 0);
+    lua_pop(L, 1); /* drop the module value luaL_requiref left on the stack */
+}
+
 #endif /* HL_ENABLE_TUI */
