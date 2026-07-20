@@ -89,7 +89,7 @@ static const HlCommand commands[] = {
     { "update",         hl_cmd_update },
     { "tools",          hl_cmd_tools },
     { "flavor",         hl_cmd_flavor },   /* installs published build flavors ("platform" = build target, not this) */
-    { "feature",        hl_cmd_feature },  /* installs composable feature libs (e.g. duckdb) */
+    { "feature",        hl_cmd_feature },  /* installs composable feature libs (e.g. duckdb, gpu) */
 #endif
     { "sign-release",   hl_cmd_sign_release },
     { "verify-release", hl_cmd_verify_release },
