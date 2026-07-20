@@ -41,9 +41,7 @@ typedef struct HlJS HlJS;
 #ifdef HL_ENABLE_WASM
 #include "hull/cap/wasm.h"
 #endif
-#ifdef HL_ENABLE_GPU
-#include "hull/cap/gpu.h"
-#endif
+#include "hull/cap/gpu.h"  /* base-resident: gpu_ctx propagates for composed feature too */
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -253,9 +251,11 @@ int hl_app_context_init(HlAppContext **out, const HlAppContextOpts *opts)
     if (ctx->wasm_ok)
         base.wasm_cache = opts->wasm_cache ? opts->wasm_cache : &ctx->wasm_cache;
 #endif
-#ifdef HL_ENABLE_GPU
+    /* Base-resident: NULL without a backend (plain base), the live ctx with a
+     * monolithic HL_ENABLE_GPU build or a composed --with=gpu feature. The
+     * runtime registers hull.gpu only when this is non-NULL, so gpu stays
+     * unexposed when there's no GPU. */
     base.gpu_ctx = opts->gpu_ctx;
-#endif
 
     /* Init runtime via the factory — table-driven, single-path. */
     if (ctx->factory->create(&ctx->rt, opts, &base) != 0) {

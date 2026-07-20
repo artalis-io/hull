@@ -430,6 +430,15 @@ local function sign_fail(msg, tmpdir, output)
     tool.exit(1)
 end
 
+-- Composed features (--with) as a plain array, for tool.modules_resolve's 3rd
+-- arg: admits the build caps those features supply (e.g. gpu -> hull/gpu) so
+-- the base build-tool resolver accepts modules the feature fills in the app.
+local function with_feature_list(opts)
+    local t = {}
+    if opts.with then for f in pairs(opts.with) do t[#t + 1] = f end end
+    return t
+end
+
 local function sign_app(app_dir, key_file, sign_ctx, files, tmpdir, output)
     local key_data = read_file(key_file)
     if not key_data then
@@ -474,7 +483,7 @@ local function sign_app(app_dir, key_file, sign_ctx, files, tmpdir, output)
     -- this field, so tampering invalidates the package.
     local modules_resolved = nil
     if manifest then
-        local r = tool.modules_resolve(manifest, sign_ctx.flavor)
+        local r = tool.modules_resolve(manifest, sign_ctx.flavor, sign_ctx.features)
         if r.ok then
             modules_resolved = r.modules
         else
@@ -735,7 +744,7 @@ typedef struct {
         local picked = "full"
         local manifest = extract_app_manifest(opts.app_dir)
         if manifest then
-            local r = tool.modules_resolve(manifest)
+            local r = tool.modules_resolve(manifest, nil, with_feature_list(opts))
             if r.ok and r.auto and r.auto.name then
                 picked = r.auto.name
             end
@@ -761,7 +770,7 @@ typedef struct {
         flavor_asset = fr.asset
         local manifest = extract_app_manifest(opts.app_dir)
         if manifest then
-            local r = tool.modules_resolve(manifest, opts.flavor)
+            local r = tool.modules_resolve(manifest, opts.flavor, with_feature_list(opts))
             if not r.ok then
                 tool.stderr("hull build: --flavor=" .. opts.flavor .. ": "
                             .. tostring(r.error) .. "\n")
@@ -1239,17 +1248,17 @@ int main(int argc, char **argv) { return hull_main(argc, argv); }
             cxx     = true,
             libs    = { darwin = { "-lc++" }, other = { "-lstdc++", "-ldl" } },
         },
-        -- gpu (scoped, not yet buildable -- needs the gpu cap layer split into a
-        -- base-resident generic half + a weak hl_gpu_feature_backends hook, with
-        -- wgpu isolated into libhull_feature-gpu.a). The codegen below already
-        -- handles it; only the spec row + the base hook + the archive are absent:
-        -- gpu = {
-        --     backend = "hl_gpu_backend_wgpu", type = "HlGpuBackend",
-        --     hook = "hl_gpu_feature_backends", cxx = false,
-        --     libs = { darwin = { "-framework", "Metal", "-framework", "QuartzCore",
-        --                         "-framework", "CoreGraphics", "-framework", "Foundation" },
-        --              other  = { "-lvulkan" } },
-        -- },
+        -- gpu: wgpu-native backend, isolated in libhull_feature-gpu.a
+        -- (`make feature-gpu`). Base ships the generic gpu dispatch layer +
+        -- the weak hl_gpu_feature_backends hook; this fills it. C (no cxx). The
+        -- frameworks / -lvulkan can't live in the .a so they're emitted here.
+        gpu = {
+            backend = "hl_gpu_backend_wgpu", type = "HlGpuBackend",
+            hook = "hl_gpu_feature_backends", cxx = false,
+            libs = { darwin = { "-framework", "Metal", "-framework", "QuartzCore",
+                                "-framework", "CoreGraphics", "-framework", "Foundation" },
+                     other  = { "-lvulkan" } },
+        },
     }
     local features_needed = {}
     if opts.with then for f in pairs(opts.with) do features_needed[f] = true end end
@@ -1432,6 +1441,7 @@ int main(int argc, char **argv) { return hull_main(argc, argv); }
         local sign_ctx = {
             cc = cc,
             flavor = opts.flavor,
+            features = with_feature_list(opts),
             binary_hash = nil,
             trampoline_hash = crypto.sha256(app_main),
             platform_sig_path = platform_sig_path,

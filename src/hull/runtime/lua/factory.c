@@ -42,9 +42,10 @@ static int lua_create(HlRuntime **out, const HlAppContextOpts *opts,
 #ifdef HL_ENABLE_WASM
         lua->base.wasm_cache     = base->wasm_cache;
 #endif
-#ifdef HL_ENABLE_GPU
+        /* Base-resident: propagate the GPU context whether it came from a
+         * monolithic HL_ENABLE_GPU build or a composed --with=gpu feature.
+         * NULL (no backend) is the inert case. */
         lua->base.gpu_ctx        = base->gpu_ctx;
-#endif
     }
     /* opts->alloc is honoured separately if base->alloc isn't set. */
     if (!lua->base.alloc && opts->alloc) lua->base.alloc = opts->alloc;

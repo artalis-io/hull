@@ -3368,8 +3368,10 @@ $(BUILDDIR)/test_module_registry: $(TESTDIR)/hull/test_module_registry.c $(MODUL
 	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< $(MODULE_REGISTRY_OBJ)
 
 # Module resolver — needs the registry plus the manifest types
-$(BUILDDIR)/test_module_resolver: $(TESTDIR)/hull/test_module_resolver.c $(MODULE_OBJ) | $(BUILDDIR)
-	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< $(MODULE_OBJ)
+# cap_gpu_feature.o supplies the weak hl_gpu_feature_backends the resolver now
+# consults (composed-feature GPU cap). It's base-resident, so always available.
+$(BUILDDIR)/test_module_resolver: $(TESTDIR)/hull/test_module_resolver.c $(MODULE_OBJ) $(BUILDDIR)/cap_gpu_feature.o | $(BUILDDIR)
+	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< $(MODULE_OBJ) $(BUILDDIR)/cap_gpu_feature.o
 
 # CA bundle test — links against cacert.o and mbedTLS for parse verification
 $(BUILDDIR)/test_cacert: $(TESTDIR)/hull/test_cacert.c $(CACERT_OBJ) $(MBEDTLS_OBJS) | $(BUILDDIR)

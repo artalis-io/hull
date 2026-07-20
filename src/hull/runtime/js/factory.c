@@ -39,9 +39,9 @@ static int js_create(HlRuntime **out, const HlAppContextOpts *opts,
 #ifdef HL_ENABLE_WASM
         js->base.wasm_cache     = base->wasm_cache;
 #endif
-#ifdef HL_ENABLE_GPU
+        /* Base-resident: propagate the GPU context (monolithic or composed
+         * --with=gpu feature); NULL when no backend is present. */
         js->base.gpu_ctx        = base->gpu_ctx;
-#endif
     }
     if (!js->base.alloc && opts->alloc) js->base.alloc = opts->alloc;
 

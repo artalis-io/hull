@@ -150,6 +150,20 @@ static int l_tool_modules_resolve(lua_State *L)
         caps = hl_build_flavor_caps(f, caps);
     }
 
+    /* Optional arg 3: an array of composed feature names (hull build --with=X).
+     * Admit the build caps those features supply, so the base build-tool's
+     * resolver accepts modules the feature will fill into the produced app
+     * binary (e.g. --with=gpu admits hull/gpu even though this hull, and the
+     * base platform lib, were not compiled with HL_ENABLE_GPU). */
+    if (lua_gettop(L) >= 3 && lua_istable(L, 3)) {
+        lua_pushnil(L);
+        while (lua_next(L, 3) != 0) {
+            if (lua_isstring(L, -1))
+                caps |= hl_module_feature_cap(lua_tostring(L, -1));
+            lua_pop(L, 1);
+        }
+    }
+
     HlResolvedModuleSet set;
     char err[HL_MODULE_RESOLVER_ERR_MAX] = {0};
     int rc = hl_module_resolver_resolve_caps(&m, &set, caps, err, sizeof(err));

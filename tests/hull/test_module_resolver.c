@@ -410,7 +410,35 @@ UTEST(module_resolver, gpu_rejected_when_compiled_out)
     ASSERT_EQ(rc, -1);
     ASSERT_NE(strstr(err, "HL_ENABLE_GPU"), NULL);
 }
+
+UTEST(module_resolver, gpu_admitted_with_composed_feature_cap)
+{
+    /* `hull build --with=gpu` (and the resulting composed binary) supplies
+     * HL_MOD_CAP_GPU at runtime even though HL_ENABLE_GPU was never compiled.
+     * Resolving with that cap ORed in admits hull/gpu where the plain resolver
+     * (previous test) rejects it. This is the resolver half of the gpu feature. */
+    HlManifest m;
+    clear_manifest(&m);
+    m.gpu = 1;
+    add_module(&m, "gpu", 1);
+
+    HlResolvedModuleSet s = {0};
+    char err[256] = {0};
+    int rc = hl_module_resolver_resolve_caps(
+        &m, &s, hl_module_build_caps() | HL_MOD_CAP_GPU, err, sizeof(err));
+    ASSERT_EQ(rc, 0);
+    ASSERT_EQ(err[0], '\0');
+}
 #endif
+
+UTEST(module_resolver, feature_cap_maps_gpu_only)
+{
+    /* Only features carrying a module-gated capability map nonzero. */
+    ASSERT_EQ(hl_module_feature_cap("gpu"), (uint32_t)HL_MOD_CAP_GPU);
+    ASSERT_EQ(hl_module_feature_cap("duckdb"), (uint32_t)0);
+    ASSERT_EQ(hl_module_feature_cap("nope"), (uint32_t)0);
+    ASSERT_EQ(hl_module_feature_cap(NULL), (uint32_t)0);
+}
 
 #ifdef HL_ENABLE_TUI
 UTEST(module_resolver, tui_admitted_when_both_build_and_manifest_set)

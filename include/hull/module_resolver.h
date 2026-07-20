@@ -107,6 +107,15 @@ int hl_module_resolver_resolve(const HlManifest *manifest,
 uint32_t hl_module_build_caps(void);
 
 /*
+ * Build cap an optional composable feature provides (HL_MOD_CAP_* or 0).
+ * `hull build --with=<feature>` passes its composed features here so the base
+ * build-tool's resolver admits the modules the feature will supply. Only
+ * features that carry a module-gated capability map to a nonzero cap (today:
+ * "gpu" -> HL_MOD_CAP_GPU; "duckdb" -> 0, it rides on the always-present hull/db).
+ */
+uint32_t hl_module_feature_cap(const char *name);
+
+/*
  * Resolve against an EXPLICIT build-cap set instead of this binary's
  * compiled-in flags. Used by `hull build --flavor`, which must validate an
  * app's manifest against the TARGET flavor's caps (e.g. reject hull/web/

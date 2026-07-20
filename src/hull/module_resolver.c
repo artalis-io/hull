@@ -19,6 +19,7 @@
 #include "hull/module_resolver.h"
 #include "hull/manifest.h"
 #include "hull/runtime.h"  /* HlRuntime — import_tracker fields */
+#include "hull/cap/gpu.h"  /* hl_gpu_feature_backends — composed-feature GPU cap */
 
 #include <stdio.h>
 #include <string.h>
@@ -120,7 +121,33 @@ static uint32_t build_provided_caps(void)
 #ifdef HL_ENABLE_TUI
     caps |= HL_MOD_CAP_TUI;
 #endif
+    /* A composed gpu feature (`hull build --with=gpu`) fills the base's weak
+     * hl_gpu_feature_backends hook with a strong override returning the wgpu
+     * backend. Report GPU at runtime so THIS composed binary admits hull/gpu at
+     * app load even though HL_ENABLE_GPU was never compiled into the base. In a
+     * plain base the hook is the weak default (0) and this adds nothing; in a
+     * monolithic HL_ENABLE_GPU build the bit is already set above. */
+    {
+        size_t nfeat = 0;
+        if (hl_gpu_feature_backends(&nfeat) && nfeat > 0)
+            caps |= HL_MOD_CAP_GPU;
+    }
     return caps;
+}
+
+/*
+ * Map a composable-feature name to the build cap it provides, or 0 if the
+ * feature contributes no module-gated capability. Lets `hull build --with=<f>`
+ * tell the (base) build-tool resolver to admit modules the feature will supply,
+ * even though the build-tool itself wasn't compiled with that subsystem. Today
+ * only the gpu feature carries a module cap; duckdb rides on the always-present
+ * hull/db (a DSN scheme, no module gate) so it maps to 0.
+ */
+uint32_t hl_module_feature_cap(const char *name)
+{
+    if (name && strcmp(name, "gpu") == 0)
+        return HL_MOD_CAP_GPU;
+    return 0;
 }
 
 /* Human-readable name for a capability bit (for error messages). */
