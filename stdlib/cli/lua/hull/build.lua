@@ -390,7 +390,17 @@ end
 -- tool.extract_manifest_js and the JSON result is decoded into the same
 -- shape app.get_manifest() returns. Used by sign_app (to persist the
 -- resolved module set) and by main (to validate --flavor before building).
+-- Memoized per app_dir: running app.lua calls app.manifest(), which is guarded
+-- "can only be called once" per tool VM, so a SECOND extraction of the same app
+-- fails and returns nil. Several build phases need the manifest (feature
+-- inference, --flavor=auto, flavor validation, package.sig), so cache the first
+-- result and hand it back on subsequent calls without re-running the entry. The
+-- entry (nil-safe) is wrapped so a cached "no manifest" is distinct from
+-- "not yet extracted".
+local _manifest_cache = {}
 local function extract_app_manifest(app_dir)
+    local cached = _manifest_cache[app_dir]
+    if cached ~= nil then return cached.manifest end
     local manifest = nil
     local lua_entry = app_dir .. "/app.lua"
     local js_entry  = app_dir .. "/app.js"
@@ -417,6 +427,7 @@ local function extract_app_manifest(app_dir)
             end
         end
     end
+    _manifest_cache[app_dir] = { manifest = manifest }
     return manifest
 end
 
