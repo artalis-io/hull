@@ -67,21 +67,24 @@ HlCompiler *hl_compiler_system_new(const char *cc_path);
 
 #ifdef HL_ENABLE_TCC
 /*
- * Create the embedded tcc backend.
- * compile() uses tcc -c -nostdinc; link() delegates to system linker.
- * Returns NULL if tcc is not available or extraction fails.
+ * Create the tcc backend. tcc is resolved as an EXTERNAL tool (not embedded):
+ * hull_exe (may be NULL) seeds hl_tools_lookup_path's search — $HOME/.hull/tools
+ * → dirname(hull_exe) → $PATH. compile() uses tcc -c -nostdinc; link() delegates
+ * to the system linker. is_available()/compile() fail if no tcc is resolvable
+ * (hint: `hull tools install tcc`).
  */
-HlCompiler *hl_compiler_tcc_new(void);
+HlCompiler *hl_compiler_tcc_new(const char *hull_exe);
 #endif
 
 /*
  * Auto-select a compiler:
- *   "tcc"    → hl_compiler_tcc_new() [HL_ENABLE_TCC only]
+ *   "tcc"    → hl_compiler_tcc_new(hull_exe) [HL_ENABLE_TCC only]
  *   "system" → skip tcc, find first system compiler
  *   other    → hl_compiler_system_new(explicit_cc)
- *   NULL     → tcc if available, else cc/gcc/clang from PATH
+ *   NULL     → tcc if resolvable, else cc/gcc/clang from PATH
+ * hull_exe (may be NULL) is forwarded to the tcc backend for tool resolution.
  * Returns NULL if nothing is found.
  */
-HlCompiler *hl_compiler_select(const char *explicit_cc);
+HlCompiler *hl_compiler_select(const char *explicit_cc, const char *hull_exe);
 
 #endif /* HL_COMPILER_H */

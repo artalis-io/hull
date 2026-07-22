@@ -698,6 +698,49 @@ jobs:
           name: ${{ matrix.artifact }}
           path: ${{ matrix.artifact }}
 
+  build-tcc:
+    # Side-loaded `tcc` (TinyCC) shipped as a separate release asset and pulled
+    # by `hull tools install tcc` for `hull build --compiler=tcc`. Formerly
+    # embedded in the hull binary; now a tool (same trust chain as wamrc — each
+    # artifact is listed in the Ed25519-signed hull.sha256 manifest below).
+    #
+    # Linux only: tcc emits ELF, unusable on macOS (Mach-O) or cosmo (APE
+    # archives), which use the system compiler.
+    name: Build tcc (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x86_64
+            os: ubuntu-24.04
+            artifact: hull-tcc-linux-x86_64
+          - name: linux-aarch64
+            os: ubuntu-24.04-arm
+            artifact: hull-tcc-linux-aarch64
+
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          submodules: true
+
+      - name: Build tcc
+        run: |
+          make tcc
+          strip build/tcc 2>/dev/null || true
+
+      - name: Smoke-test tcc
+        run: ./build/tcc -v
+
+      - name: Rename artifact
+        run: cp build/tcc ${{ matrix.artifact }}
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.artifact }}
+
   build-feature-native:
     # Composable DuckDB feature archive (libhull_feature-duckdb-<arch>.a),
     # shipped as a release asset and pulled by `hull feature install duckdb`
@@ -853,7 +896,7 @@ jobs:
   release:
     name: Create Release
     runs-on: ubuntu-24.04
-    needs: [build-cosmo, build-native, build-wamrc, build-platform-cosmo-flavors, build-feature-native, build-feature-gpu, build-feature-tui]
+    needs: [build-cosmo, build-native, build-wamrc, build-tcc, build-platform-cosmo-flavors, build-feature-native, build-feature-gpu, build-feature-tui]
     permissions:
       contents: write       # publish GitHub release + assets
       id-token: write       # SLSA: OIDC for Sigstore signing
@@ -874,6 +917,8 @@ jobs:
           mv artifacts/hull-wamrc-linux-x86_64/hull-wamrc-linux-x86_64    dist/hull-wamrc-linux-x86_64
           mv artifacts/hull-wamrc-linux-aarch64/hull-wamrc-linux-aarch64  dist/hull-wamrc-linux-aarch64
           mv artifacts/hull-wamrc-darwin-arm64/hull-wamrc-darwin-arm64    dist/hull-wamrc-darwin-arm64
+          mv artifacts/hull-tcc-linux-x86_64/hull-tcc-linux-x86_64        dist/hull-tcc-linux-x86_64
+          mv artifacts/hull-tcc-linux-aarch64/hull-tcc-linux-aarch64      dist/hull-tcc-linux-aarch64
           # Per-flavor platform libs. Consumed by `hull platform install
           # <flavor>` -> `hull build --flavor`. Native files:
           # libhull_platform-<flavor>-<arch>.a; cosmo files (dual-arch):
@@ -989,6 +1034,7 @@ jobs:
         run: |
           sha256sum hull-cosmo hull-linux-x86_64 hull-linux-aarch64 hull-darwin-arm64 \
                     hull-wamrc-linux-x86_64 hull-wamrc-linux-aarch64 hull-wamrc-darwin-arm64 \
+                    hull-tcc-linux-x86_64 hull-tcc-linux-aarch64 \
                     hull.sbom.json hull.sbom.cdx.json hull.sbom.spdx.json \
                     libhull.sbom.json libhull.sbom.cdx.json libhull.sbom.spdx.json \
                     libhull_platform-*.sbom.* \
@@ -1065,6 +1111,8 @@ jobs:
             dist/hull-wamrc-linux-x86_64
             dist/hull-wamrc-linux-aarch64
             dist/hull-wamrc-darwin-arm64
+            dist/hull-tcc-linux-x86_64
+            dist/hull-tcc-linux-aarch64
             dist/hull.sha256
             dist/hull.sbom.json
             dist/hull.sbom.cdx.json
@@ -1084,6 +1132,8 @@ jobs:
             dist/hull-wamrc-linux-x86_64
             dist/hull-wamrc-linux-aarch64
             dist/hull-wamrc-darwin-arm64
+            dist/hull-tcc-linux-x86_64
+            dist/hull-tcc-linux-aarch64
             dist/hull.sha256
             dist/hull.sbom.json
             dist/hull.sbom.cdx.json

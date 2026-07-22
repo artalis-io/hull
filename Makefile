@@ -1054,11 +1054,17 @@ endif
 # Build tcc: make tcc  (builds build/tcc from vendor/tcc source)
 
 TCC_DIR         := vendor/tcc
-EMBEDDED_TCC_H  := $(BUILDDIR)/embedded_tcc.h
 COMPILER_OBJ    := $(BUILDDIR)/compiler.o
 COMPILER_TCC_OBJ :=
 
+# tcc emits ELF, so the backend is only useful on Linux. macOS (Mach-O) and
+# cosmo (APE archives) use the system compiler, so tcc is off there. On Linux
+# the backend is compiled in but tcc itself is NO LONGER EMBEDDED — it's a
+# side-loaded tool (`hull tools install tcc`), resolved at build time from
+# ~/.hull/tools → PATH. See compiler_tcc.c.
 ifdef COSMO
+  HL_ENABLE_TCC ?= 0
+else ifeq ($(UNAME_S),Darwin)
   HL_ENABLE_TCC ?= 0
 else
   HL_ENABLE_TCC ?= 1
@@ -1144,24 +1150,20 @@ CFLAGS += -DHL_ENABLE_TCC
 .PHONY: tcc
 tcc: $(BUILDDIR)/tcc
 
+# Build the tcc binary from vendored source. NOT embedded into hull anymore —
+# this target exists for local dev (a `make tcc` puts tcc on the build dir, which
+# hl_tools_lookup_path finds as a sibling of a locally-built hull) and for the
+# release `build-tcc` job that publishes it as the `hull-tcc-<platform>` asset.
 $(BUILDDIR)/tcc: $(TCC_DIR)/tcc.c | $(BUILDDIR)
 	cd $(TCC_DIR) && ./configure
 	$(MAKE) -C $(TCC_DIR) tcc
 	cp $(TCC_DIR)/tcc $(BUILDDIR)/tcc
 	chmod +x $(BUILDDIR)/tcc
 
-# xxd tcc binary → C header
-# Depends on $(BUILDDIR)/tcc so a clean build always embeds a real tcc
-# (instead of silently shipping a stub that breaks --compiler=tcc).
-$(EMBEDDED_TCC_H): $(BUILDDIR)/tcc | $(BUILDDIR)
-	xxd -i -n embedded_tcc $(BUILDDIR)/tcc > $@
-	$(XXD_CONST_SEAL) $@ && rm -f $@.bak
-	tcc_ver=$$($(BUILDDIR)/tcc --version 2>&1 | head -1); \
-		printf 'static const char hl_tcc_version_str[] = "%s";\n' "$$tcc_ver" >> $@
-
-# compiler_tcc.o depends on embedded_tcc.h
+# compiler_tcc.o — the tcc backend. Resolves tcc as an external tool at build
+# time (no embedded blob), so it has no generated-header dependency.
 COMPILER_TCC_OBJ := $(BUILDDIR)/compiler_tcc.o
-$(COMPILER_TCC_OBJ): $(SRCDIR)/hull/compiler_tcc.c $(EMBEDDED_TCC_H) | $(BUILDDIR)
+$(COMPILER_TCC_OBJ): $(SRCDIR)/hull/compiler_tcc.c | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
 
 endif
@@ -3091,13 +3093,9 @@ $(BUILDDIR)/tool.o: $(SRCDIR)/hull/tool.c | $(BUILDDIR)
 $(BUILDDIR)/tool_orchestration.o: $(SRCDIR)/hull/tool_orchestration.c | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
 
-# Build assets (embedded platform lib — stub unless HL_BUILD_EMBEDDED=1)
-# When TCC is enabled, also depends on embedded_tcc.h (generated before compilation)
-ifeq ($(HL_ENABLE_TCC),1)
-$(BUILD_ASSET_OBJ): $(SRCDIR)/hull/build_assets.c $(EMBEDDED_TCC_H) | $(BUILDDIR)
-else
+# Build assets (embedded platform lib — stub unless HL_BUILD_EMBEDDED=1).
+# tcc is no longer embedded, so there's no generated-header dependency.
 $(BUILD_ASSET_OBJ): $(SRCDIR)/hull/build_assets.c | $(BUILDDIR)
-endif
 	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
 
 # Build assets stub (no-op stubs for platform archive — satisfies cap_tool.o refs)
@@ -3987,10 +3985,6 @@ check:
 analyze:
 	$(MAKE) clean
 	$(MAKE) $(VEND_OBJS) $(MBEDTLS_OBJS) $(MINIZ_OBJ) $(SQLITE_OBJ) $(LOG_OBJ) $(LOG_LOCK_OBJ) $(SH_ARENA_OBJ) $(SH_JSON_OBJ) $(TWEETNACL_OBJ) $(STB_OBJ) $(PLEDGE_OBJS) $(WAMR_OBJS) $(KEEL_LIB)
-ifeq ($(HL_ENABLE_TCC),1)
-	# Pre-build tcc + embedded_tcc.h so vendor/tcc source isn't analyzed
-	$(MAKE) $(EMBEDDED_TCC_H)
-endif
 	scan-build --status-bugs -disable-checker alpha.unix.Stream $(MAKE) $(CAP_OBJS) $(CAP_TEST_OBJ) $(CMD_OBJS) $(RT_OBJS) $(MAIN_OBJ) $(BUILDDIR)/hull
 
 cppcheck:

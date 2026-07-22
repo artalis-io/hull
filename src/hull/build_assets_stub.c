@@ -42,12 +42,6 @@ int hl_build_get_entry_header(const char **data, size_t *len)
 }
 
 #ifdef HL_ENABLE_TCC
-int hl_build_extract_tcc(const char *dir)
-{
-    (void)dir;
-    return -1;
-}
-
 const char *hl_build_tcc_version_string(void)
 {
     return "tcc-not-embedded";

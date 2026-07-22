@@ -333,7 +333,7 @@ int hull_tool(const char *module, int argc, char **argv, const char *hull_exe)
     /* Select compiler backend and expose as tool.compiler.
      * If no explicit cc was given, use auto-detection (NULL) rather than
      * requiring the default (cosmocc) to be installed. */
-    HlCompiler *compiler = hl_compiler_select(cc_explicit);
+    HlCompiler *compiler = hl_compiler_select(cc_explicit, hull_exe);
     if (compiler)
         hl_lua_tool_expose_compiler(L, compiler);
 

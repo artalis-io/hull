@@ -20,12 +20,11 @@
 
 /* ── Helper: write data to a file ──────────────────────────────────── */
 
-/* write_blob is only called from the embedded-platform / embedded-tcc
- * extraction paths below. On the cosmocc `platform-cosmo` initial
- * build step (which compiles this translation unit before either
- * HL_BUILD_EMBEDDED* or HL_ENABLE_TCC is defined), the function is
- * defined-but-unused and -Werror=unused-function kills the build. */
-#if defined(HL_BUILD_EMBEDDED) || defined(HL_BUILD_EMBEDDED_MULTIARCH) || defined(HL_ENABLE_TCC)
+/* write_blob is only called from the embedded-platform extraction paths
+ * below (tcc is no longer embedded). On a non-embedded build the function is
+ * defined-but-unused and -Werror=unused-function kills the build, so gate it
+ * on the embedded-platform macros. */
+#if defined(HL_BUILD_EMBEDDED) || defined(HL_BUILD_EMBEDDED_MULTIARCH)
 static int write_blob(const char *path, const unsigned char *data, size_t len)
 {
     FILE *f = fopen(path, "wb");
@@ -141,30 +140,15 @@ int hl_build_get_entry_header(const char **data, size_t *len)
 #endif
 }
 
-/* ── Embedded tcc binary ────────────────────────────────────────── */
+/* ── tcc version ────────────────────────────────────────────────────
+ * tcc is no longer embedded — it's resolved as an external tool
+ * (`hull tools install tcc`, see compiler_tcc.c). The version reported here is
+ * the vendored tcc revision this hull was built against (for `hull doctor`),
+ * not a query of the resolved binary. */
 
 #ifdef HL_ENABLE_TCC
-#include "embedded_tcc.h"
-#include <sys/stat.h>
-
-int hl_build_extract_tcc(const char *dir)
-{
-    if (!dir) return -1;
-    /* If tcc was not embedded (stub build), len is 0 — report failure */
-    if (embedded_tcc_len == 0) return -1;
-    char path[1024];
-    int pn = snprintf(path, sizeof(path), "%s/tcc", dir);
-    if (pn < 0 || (size_t)pn >= sizeof(path))
-        return -1;
-    if (write_blob(path, embedded_tcc, embedded_tcc_len) != 0)
-        return -1;
-    if (chmod(path, 0755) != 0)
-        return -1;
-    return 0;
-}
-
 const char *hl_build_tcc_version_string(void)
 {
-    return hl_tcc_version_str;
+    return "TinyCC " HULL_VENDOR_TCC_VERSION;
 }
 #endif /* HL_ENABLE_TCC */

@@ -1,54 +1,47 @@
 #ifdef HL_ENABLE_TCC
 /*
- * compiler_tcc.c — Embedded TinyCC compile-only backend
+ * compiler_tcc.c — TinyCC compile-only backend (external tool)
  *
  * Compile step: tcc -c -nostdinc [-I include_dir] -o obj src
  * Link step: delegates to first available system linker (cc/gcc/clang/ld)
  *
- * The tcc binary is extracted from the embedded byte array on first use.
+ * tcc is NOT embedded in the hull binary — it's resolved as an external tool
+ * via hl_tools_lookup_path ($HOME/.hull/tools → dirname(hull) → PATH), installed
+ * with `hull tools install tcc` (or `make tcc` / a tcc on PATH). This keeps the
+ * hull binary ~400 KB leaner; the tool model matches wamrc.
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
 
 #include "hull/compiler.h"
 #include "hull/build_assets.h"
+#include "hull/tools_install.h"
 #include "hull/cap/tool.h"
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <limits.h>
-#include <sys/stat.h>
 #include <unistd.h>
 
 #define HL_COMPILER_MAX_ARGS 256
 
 typedef struct {
-    char tcc_path[PATH_MAX];
-    char tmp_dir[PATH_MAX];
-    int  extracted;
+    char        tcc_path[PATH_MAX];  /* resolved external tcc, valid iff found */
+    const char *hull_exe;            /* borrowed; seeds the sibling-of-hull lookup */
+    int         resolved;            /* 0 = not looked up yet */
+    int         found;               /* 1 = tcc_path holds an executable tcc */
 } TccCtx;
 
-static int tcc_ensure_extracted(TccCtx *ctx)
+/* Resolve (once, cached) the external tcc binary. 0 = found, -1 = no tcc. */
+static int tcc_resolve(TccCtx *ctx)
 {
-    if (ctx->extracted) return 0;
-
-    char tmpl[] = "/tmp/hull_tcc_XXXXXX";
-    char *dir = mkdtemp(tmpl);
-    if (!dir) return -1;
-    int dn = snprintf(ctx->tmp_dir, sizeof(ctx->tmp_dir), "%s", dir);
-    if (dn < 0 || (size_t)dn >= sizeof(ctx->tmp_dir))
-        return -1;
-
-    if (hl_build_extract_tcc(ctx->tmp_dir) != 0)
-        return -1;
-
-    int tn = snprintf(ctx->tcc_path, sizeof(ctx->tcc_path),
-                      "%s/tcc", ctx->tmp_dir);
-    if (tn < 0 || (size_t)tn >= sizeof(ctx->tcc_path))
-        return -1;
-    ctx->extracted = 1;
-    return 0;
+    if (ctx->resolved) return ctx->found ? 0 : -1;
+    ctx->resolved = 1;
+    ctx->found = (hl_tools_lookup_path("tcc", ctx->hull_exe,
+                                       ctx->tcc_path,
+                                       sizeof(ctx->tcc_path)) == 0);
+    return ctx->found ? 0 : -1;
 }
 
 static const char *tcc_name(HlCompiler *c) { (void)c; return "tcc"; }
@@ -62,7 +55,7 @@ static int tcc_is_available(HlCompiler *c)
     (void)ctx;
     return 0;
 #else
-    return tcc_ensure_extracted(ctx) == 0;
+    return tcc_resolve(ctx) == 0;
 #endif
 }
 
@@ -76,7 +69,12 @@ static int tcc_compile(HlCompiler *c, const char *src, const char *obj,
                        const char *include_dir)
 {
     TccCtx *ctx = (TccCtx *)c->ctx;
-    if (tcc_ensure_extracted(ctx) != 0) return -1;
+    if (tcc_resolve(ctx) != 0) {
+        fprintf(stderr, "hull build: no tcc found "
+                        "(install with `hull tools install tcc`, or put tcc "
+                        "on PATH)\n");
+        return -1;
+    }
 
     const char *argv[HL_COMPILER_MAX_ARGS];
     int n = 0;
@@ -111,9 +109,7 @@ static int tcc_link(HlCompiler *c, const char *output,
 
 static void tcc_destroy(HlCompiler *c)
 {
-    TccCtx *ctx = (TccCtx *)c->ctx;
-    /* Optionally clean up extracted tcc — leave for OS to clean /tmp */
-    (void)ctx;
+    /* tcc is an external binary — nothing to unlink; hull_exe is borrowed. */
     free(c->ctx);
 }
 
@@ -122,10 +118,11 @@ static const HlCompilerVtable tcc_vtable = {
     tcc_compile, tcc_link, tcc_destroy
 };
 
-HlCompiler *hl_compiler_tcc_new(void)
+HlCompiler *hl_compiler_tcc_new(const char *hull_exe)
 {
     TccCtx *ctx = (TccCtx *)calloc(1, sizeof(TccCtx));
     if (!ctx) return NULL;
+    ctx->hull_exe = hull_exe;  /* borrowed; used to seed hl_tools_lookup_path */
     HlCompiler *c = (HlCompiler *)malloc(sizeof(HlCompiler));
     if (!c) { free(ctx); return NULL; }
     c->vtable = &tcc_vtable;

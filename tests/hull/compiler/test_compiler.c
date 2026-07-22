@@ -132,7 +132,7 @@ UTEST(compiler, compile_and_link_hello)
         "int main(void) { puts(\"hello\"); return 0; }\n");
     ASSERT_EQ(w, 0);
 
-    HlCompiler *c = hl_compiler_select(NULL);
+    HlCompiler *c = hl_compiler_select(NULL, NULL);
     if (!c) {
         /* No compiler available — skip */
         rm_rf(tmpdir); free(tmpdir);
@@ -176,7 +176,7 @@ UTEST(compiler, compile_with_include_dir)
         "#include \"entry.h\"\n"
         "const HlEntry entries[] = { { 0, 0, 0 } };\n");
 
-    HlCompiler *c = hl_compiler_select(NULL);
+    HlCompiler *c = hl_compiler_select(NULL, NULL);
     if (!c) { rm_rf(tmpdir); free(tmpdir); return; }
 
     int rc = hl_compiler_compile(c, src, obj, tmpdir);
@@ -192,7 +192,7 @@ UTEST(compiler, compile_with_include_dir)
 
 UTEST(compiler, select_null_returns_compiler)
 {
-    HlCompiler *c = hl_compiler_select(NULL);
+    HlCompiler *c = hl_compiler_select(NULL, NULL);
     /* At least one compiler should be available in CI */
     ASSERT_NE(c, NULL);
     ASSERT_EQ(hl_compiler_is_available(c), 1);
@@ -201,7 +201,7 @@ UTEST(compiler, select_null_returns_compiler)
 
 UTEST(compiler, select_explicit_cc)
 {
-    HlCompiler *c = hl_compiler_select("cc");
+    HlCompiler *c = hl_compiler_select("cc", NULL);
     ASSERT_NE(c, NULL);
     ASSERT_STREQ(hl_compiler_name(c), "cc");
     hl_compiler_destroy(c);
@@ -209,13 +209,13 @@ UTEST(compiler, select_explicit_cc)
 
 UTEST(compiler, select_fake_returns_null)
 {
-    HlCompiler *c = hl_compiler_select("__nonexistent_xyz__");
+    HlCompiler *c = hl_compiler_select("__nonexistent_xyz__", NULL);
     ASSERT_EQ(c, NULL);
 }
 
 UTEST(compiler, select_system_forces_system)
 {
-    HlCompiler *c = hl_compiler_select("system");
+    HlCompiler *c = hl_compiler_select("system", NULL);
     /* system compilers should always be available in CI */
     ASSERT_NE(c, NULL);
     /* name should not be "tcc" */
@@ -268,7 +268,7 @@ UTEST(compiler, compile_app_registry_pattern)
         "    { 0, 0, 0 }\n"
         "};\n");
 
-    HlCompiler *c = hl_compiler_select(NULL);
+    HlCompiler *c = hl_compiler_select(NULL, NULL);
     if (!c) { rm_rf(tmpdir); free(tmpdir); return; }
 
     int rc = hl_compiler_compile(c, src, obj, tmpdir);
@@ -291,7 +291,7 @@ UTEST(compiler, compile_app_registry_pattern)
 
 UTEST(compiler, tcc_explicit_sentinel)
 {
-    HlCompiler *c = hl_compiler_select("tcc");
+    HlCompiler *c = hl_compiler_select("tcc", NULL);
     if (!c) {
         /* macOS: tcc_is_available returns 0 by design (Mach-O linker
          * incompatibility); cosmo: rejected when platforms embedded.
@@ -306,35 +306,44 @@ UTEST(compiler, tcc_explicit_sentinel)
 
 #if defined(__linux__) && !defined(__COSMOPOLITAN__)
 
-/* On Linux native (non-cosmo) builds with HL_ENABLE_TCC, the embedded
- * tcc binary MUST be functional and selected by default. Anything
- * else means the zero-dependency build path is broken. */
+/* tcc is no longer embedded — it's an external tool (`hull tools install tcc`,
+ * or a tcc on PATH). So it's no longer GUARANTEED present in a unit-test
+ * environment, and no longer the guaranteed default. These tests assert the
+ * new invariants: auto-selection always resolves *some* available compiler,
+ * and IF a tcc is resolvable the backend works. The guaranteed end-to-end
+ * "tcc actually compiles + links + runs" path is covered by e2e_tcc.sh, which
+ * provides a tcc. */
 
-UTEST(compiler, linux_tcc_is_default)
+UTEST(compiler, linux_default_compiler_resolves)
 {
-    HlCompiler *c = hl_compiler_select(NULL);
+    /* Auto-select must resolve an available compiler: an external tcc when one
+     * is installed (~/.hull/tools or PATH), else the system cc. tcc being the
+     * default is no longer guaranteed (it's not embedded). */
+    HlCompiler *c = hl_compiler_select(NULL, NULL);
     ASSERT_NE(c, NULL);
-    ASSERT_STREQ_MSG(hl_compiler_name(c), "tcc",
-        "tcc must be selected by default on Linux when "
-        "HL_ENABLE_TCC=1 and embedded_tcc_len > 0");
+    ASSERT_EQ(hl_compiler_is_available(c), 1);
     hl_compiler_destroy(c);
 }
 
 UTEST(compiler, linux_tcc_version_string)
 {
-    HlCompiler *c = hl_compiler_select("tcc");
-    ASSERT_NE(c, NULL);
+    HlCompiler *c = hl_compiler_select("tcc", NULL);
+    if (!c) return;  /* no external tcc installed — e2e_tcc.sh covers the real path */
     char *v = hl_compiler_version(c);
     ASSERT_NE(v, NULL);
-    /* version string should start with "tcc" — exact format:
-     * "tcc version 0.9.28rc 2026-MM-DD mob@<hash> (<arch> Linux)" */
-    ASSERT_STRNEQ("tcc", v, 3);
+    /* version string should start with "TinyCC"/"tcc" */
+    ASSERT_TRUE(strstr(v, "TinyCC") != NULL || strncmp(v, "tcc", 3) == 0);
     free(v);
     hl_compiler_destroy(c);
 }
 
 UTEST(compiler, linux_tcc_compile_and_link)
 {
+    /* Force the tcc backend; skip when no external tcc is resolvable. */
+    HlCompiler *c = hl_compiler_select("tcc", NULL);
+    if (!c) return;  /* no external tcc — e2e_tcc.sh exercises the guaranteed path */
+    ASSERT_STREQ(hl_compiler_name(c), "tcc");
+
     char *tmpdir = make_tmpdir();
     ASSERT_NE(tmpdir, NULL);
 
@@ -346,11 +355,6 @@ UTEST(compiler, linux_tcc_compile_and_link)
     write_file(src,
         "extern int puts(const char *);\n"
         "int main(void) { puts(\"tcc-linux-ok\"); return 0; }\n");
-
-    /* Force the tcc backend explicitly so we know that's what ran */
-    HlCompiler *c = hl_compiler_select("tcc");
-    ASSERT_NE_MSG(c, NULL, "tcc backend must be available on Linux");
-    ASSERT_STREQ(hl_compiler_name(c), "tcc");
 
     /* Compile via tcc → ELF .o */
     int rc = hl_compiler_compile(c, src, obj, NULL);

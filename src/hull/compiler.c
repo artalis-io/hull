@@ -143,19 +143,21 @@ HlCompiler *hl_compiler_system_new(const char *cc_path)
 
 /* ── Selection ──────────────────────────────────────────────────── */
 
-HlCompiler *hl_compiler_select(const char *explicit_cc)
+HlCompiler *hl_compiler_select(const char *explicit_cc, const char *hull_exe)
 {
     /* Explicit "tcc" sentinel → tcc backend */
     if (explicit_cc && strcmp(explicit_cc, "tcc") == 0) {
 #ifdef HL_ENABLE_TCC
-        HlCompiler *t = hl_compiler_tcc_new();
+        HlCompiler *t = hl_compiler_tcc_new(hull_exe);
         if (t && hl_compiler_is_available(t)) return t;
         if (t) hl_compiler_destroy(t);
-        fprintf(stderr, "hull: tcc requested but not available on this "
-                        "platform (cosmo APE archives or macOS Mach-O)\n");
+        fprintf(stderr, "hull: tcc requested but no tcc was found "
+                        "(install it with `hull tools install tcc`, or put "
+                        "tcc on PATH)\n");
 #else
-        fprintf(stderr, "hull: tcc not compiled into this build "
-                        "(rebuild with HL_ENABLE_TCC=1)\n");
+        fprintf(stderr, "hull: this build has no tcc backend "
+                        "(macOS/cosmo use the system compiler; "
+                        "rebuild with HL_ENABLE_TCC=1 on Linux)\n");
 #endif
         return NULL;
     }
@@ -173,10 +175,11 @@ HlCompiler *hl_compiler_select(const char *explicit_cc)
     }
 
 #ifdef HL_ENABLE_TCC
-    /* Auto: try embedded tcc first (if cosmo archives not present — checked
-     * inside tcc_new via build_assets) */
+    /* Auto: try an external tcc first (resolved from ~/.hull/tools → sibling of
+     * hull → PATH). Falls through to the system compiler when no tcc is
+     * installed, so auto-detect never hard-requires the tool. */
     if (!skip_tcc) {
-        HlCompiler *t = hl_compiler_tcc_new();
+        HlCompiler *t = hl_compiler_tcc_new(hull_exe);
         if (t && hl_compiler_is_available(t)) return t;
         if (t) hl_compiler_destroy(t);
     }

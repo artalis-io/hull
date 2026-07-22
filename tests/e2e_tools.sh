@@ -89,6 +89,7 @@ OUT=$("$HULL" tools list 2>&1)
 RC=$?
 assert "exits 0" [ "$RC" -eq 0 ]
 assert_contains "lists wamrc"            "$OUT" "wamrc"
+assert_contains "lists tcc"              "$OUT" "tcc"
 assert_contains "marks as available"     "$OUT" "[available]"
 
 echo ""
@@ -97,7 +98,8 @@ OUT=$("$HULL" tools list --json 2>&1)
 RC=$?
 assert "exits 0" [ "$RC" -eq 0 ]
 assert_contains "tools array"            "$OUT" "\"tools\":"
-assert_contains "wamrc entry"            "$OUT" "\"name\": \"wamrc\""
+assert_contains "wamrc entry"            "$OUT" "\"name\":\"wamrc\""
+assert_contains "tcc entry"              "$OUT" "\"name\":\"tcc\""
 assert_contains "installed flag"         "$OUT" "\"installed\":"
 assert_contains "available flag"         "$OUT" "\"available\":"
 
