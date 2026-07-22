@@ -747,6 +747,11 @@ typedef struct {
     -- monolithic HL_ENABLE_TUI build, or cosmo (where features are native-only
     -- and TUI is compiled in) -- since composing an archive would be wrong or
     -- unavailable there. An explicit --with=tui is a harmless superset.
+    --
+    -- Only a REQUIRED hull/tui is inferred. An optional "hull/tui@1?" opts into
+    -- graceful fallback (require returns nil when absent), so forcing a compose
+    -- -- which hard-errors if the feature isn't installed -- would break that
+    -- contract; it's left to the resolver's optional-absent path instead.
     if not (opts.with and opts.with.tui) then
         local base_caps = (tool.build_caps and tool.build_caps()) or {}
         if not base_caps.tui and not is_cosmo then
@@ -755,17 +760,27 @@ typedef struct {
             if m and type(m.modules) == "table" then
                 for _, v in pairs(m.modules) do
                     -- Value is the canonical spec in both the array
-                    -- (`{"hull/tui@1"}`) and keyed (`{tui="hull/tui@1"}`) forms;
-                    -- strip the "@major" and any trailing optional "?".
+                    -- (`{"hull/tui@1"}`) and keyed (`{tui="hull/tui@1"}`) forms.
+                    -- A trailing "?" marks it optional; strip "@major" and "?"
+                    -- for the name compare.
                     if type(v) == "string" then
-                        local name = v:gsub("@.*$", ""):gsub("%?$", "")
-                        if name == "hull/tui" then declares_tui = true break end
+                        local optional = v:match("%?%s*$") ~= nil
+                        local name = v:gsub("@.*$", ""):gsub("%?%s*$", "")
+                        if name == "hull/tui" and not optional then
+                            declares_tui = true
+                            break
+                        end
                     end
                 end
             end
             if declares_tui then
                 opts.with = opts.with or {}
                 opts.with.tui = true
+                -- Record that this feature was inferred (not hand-passed via
+                -- --with) so a missing archive later reports a manifest-framed
+                -- "not installed" error instead of a bare --with resolution miss.
+                opts.with_inferred = opts.with_inferred or {}
+                opts.with_inferred.tui = true
                 print("hull build: composing feature 'tui' (app declares hull/tui)")
             end
         end
@@ -1363,10 +1378,21 @@ int main(int argc, char **argv) { return hull_main(argc, argv); }
                 end
             end
             if not lib then
-                tool.stderr("hull build: the '" .. fname .. "' feature lib was not found "
-                            .. "(locally or in ~/.hull/feature)\n")
-                tool.stderr("hint: `hull feature install " .. fname .. "`, "
-                            .. "or build from source: `make feature-" .. fname .. "`\n")
+                if opts.with_inferred and opts.with_inferred[fname] then
+                    -- Auto-inferred from a manifest declaration (e.g. hull/tui):
+                    -- frame the error around what the app requires, not a --with
+                    -- flag the user never typed.
+                    tool.stderr("hull build: this app declares hull/" .. fname
+                                .. " but the '" .. fname .. "' feature is not installed\n")
+                    tool.stderr("hint: `hull feature install " .. fname .. "` "
+                                .. "(the app's manifest requires it), "
+                                .. "or build from source: `make feature-" .. fname .. "`\n")
+                else
+                    tool.stderr("hull build: the '" .. fname .. "' feature lib was not found "
+                                .. "(locally or in ~/.hull/feature)\n")
+                    tool.stderr("hint: `hull feature install " .. fname .. "`, "
+                                .. "or build from source: `make feature-" .. fname .. "`\n")
+                end
                 tool.rmdir(tmpdir); tool.exit(1)
             end
             local dest = tmpdir .. "/" .. libname

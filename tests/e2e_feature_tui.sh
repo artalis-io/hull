@@ -94,11 +94,29 @@ fi
 "$PLAIN/bin" 2>&1 | grep -q "PLAIN OK" || { echo "FAIL: plain app did not run"; exit 1; }
 echo "ok  plain app stayed TUI-free"
 
-# NOTE: the "base build (no --with=tui) rejects a tui app at load" case is
-# covered deterministically by the module_resolver unit tests
-# (tui_rejected_when_compiled_out). It is intentionally NOT re-asserted here: TUI
-# is on by default, so which platform `hull build` links for a bare rebuild is
-# build-state-dependent, making an e2e version of that assertion flaky (unlike
-# GPU, which is off by default so its base is reliably GPU-free).
+echo "=== not-installed: a required hull/tui with no feature archive errors clearly ==="
+# Auto-inference adds --with=tui for a declared hull/tui, but if the feature
+# archive is neither local nor installed, the build must fail with a
+# manifest-framed message (not a bare --with resolution miss) and produce no
+# broken binary. Isolate: stage the hull where no archive sits beside it, run
+# from an empty CWD (so the relative build/ + ../build/ search paths miss), and
+# point HOME at an empty dir (no ~/.hull/feature).
+STAGE=$(mktemp -d); FAKEHOME=$(mktemp -d); NOTINST=$(mktemp -d)
+trap 'rm -rf "$APP" "$PLAIN" "$STAGE" "$FAKEHOME" "$NOTINST" /tmp/hull_base_tui_e2e' EXIT
+cp "$HULL" "$STAGE/hull"
+cp "$APP/app.lua" "$NOTINST/app.lua"   # same required hull/tui app
+NI_OUT=$(cd "$STAGE" && HOME="$FAKEHOME" "$STAGE/hull" build --compiler=system \
+    --no-verify-platform -o "$NOTINST/bin" "$NOTINST" 2>&1) || true
+echo "$NI_OUT" | grep -q "declares hull/tui but the 'tui' feature is not installed" \
+    || { echo "$NI_OUT"; echo "FAIL: missing manifest-framed not-installed error"; exit 1; }
+echo "$NI_OUT" | grep -q "hull feature install tui" \
+    || { echo "FAIL: not-installed error lacks install hint"; exit 1; }
+test -x "$NOTINST/bin" && { echo "FAIL: produced a binary despite missing feature"; exit 1; }
+echo "ok  not-installed required hull/tui failed clearly, no broken binary"
+
+# NOTE: the "base build (no feature) rejects a tui app at load" case is covered
+# deterministically by the module_resolver unit tests
+# (tui_rejected_when_compiled_out). The not-installed build-time case above is
+# the buildable-but-unresolved variant.
 
 echo "PASS: TUI feature composed into an app binary; base stays TUI-free"
