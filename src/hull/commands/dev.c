@@ -163,10 +163,12 @@ static const char *dev_detect_entry(void)
  * singleton is only ever initialized by run_dev_tui, and its sole consumers are
  * the tool.dev_* bindings that back the dev_tui Lua tool. So the entire block is
  * TUI-only — the tool.dev_* bindings in tool_orchestration.c carry the matching
- * HL_ENABLE_TUI gate. On a TUI-off build (including a base that composes TUI as
- * a feature) it's all excluded, avoiding both unused-function (-Werror) and the
+ * HL_TUI_LINKED gate. HL_TUI_LINKED is set when the hull binary carries TUI
+ * symbols, i.e. a TUI-compiled base OR a TUI-free base that force-loads the
+ * feature archive (the default native toolchain). On a fully TUI-less build it's
+ * all excluded, avoiding both unused-function (-Werror) and the
  * "g_dev_state_inited always false" tautology (cppcheck). */
-#ifdef HL_ENABLE_TUI
+#ifdef HL_TUI_LINKED
 
 static HlDevState g_dev_state;
 static int        g_dev_state_inited = 0;
@@ -384,7 +386,7 @@ static int run_dev_tui(int argc, char **argv,
     return rc;
 }
 
-#endif /* HL_ENABLE_TUI */
+#endif /* HL_TUI_LINKED */
 
 /* ── Main ─────────────────────────────────────────────────────────── */
 
@@ -463,7 +465,7 @@ int hl_cmd_dev(int argc, char **argv, const HlCommandEnv *env)
 
     child_argv[ci] = NULL;
 
-#ifdef HL_ENABLE_TUI
+#ifdef HL_TUI_LINKED
     if (tui_mode) {
         int rc = run_dev_tui(argc, argv, hull_exe,
                               child_argv, ci, app_dir);

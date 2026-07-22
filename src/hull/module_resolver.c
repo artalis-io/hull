@@ -126,7 +126,14 @@ int hl_module_set_count(const HlResolvedModuleSet *s)
     do { if (errbuf && errlen) snprintf(errbuf, errlen, fmt, (a), (b), (c), (d)); } while (0)
 
 /* Capabilities the *build* provides (compile-time flags). */
-static uint32_t build_provided_caps(void)
+/* Compile-time build caps: the subsystems the BASE (this binary's platform
+ * lib) was compiled with. This is the build-TARGET cap set an app inherits by
+ * linking the platform lib. It deliberately EXCLUDES the runtime feature hooks
+ * (below), because those reflect what THIS binary composed/force-loaded for
+ * ITSELF -- e.g. the hull toolchain force-loads the tui feature for its own
+ * `--tui` commands, which an app it builds does NOT inherit. Composed features
+ * are layered on per-build via hl_module_feature_cap (--with=X). */
+static uint32_t build_compile_caps(void)
 {
     uint32_t caps = 0;
 #ifdef HL_ENABLE_DB
@@ -147,12 +154,21 @@ static uint32_t build_provided_caps(void)
 #ifdef HL_ENABLE_TUI
     caps |= HL_MOD_CAP_TUI;
 #endif
+    return caps;
+}
+
+/* Full runtime caps: the compile-time base PLUS what THIS binary composed at
+ * link (a weak feature hook overridden strong). Used by the APP's own
+ * load-time resolver so a `hull build --with=X` binary self-admits hull/X. NOT
+ * for build-targeting -- see build_compile_caps / hl_module_build_caps. */
+static uint32_t build_provided_caps(void)
+{
+    uint32_t caps = build_compile_caps();
     /* A composed gpu feature (`hull build --with=gpu`) fills the base's weak
      * hl_gpu_feature_backends hook with a strong override returning the wgpu
-     * backend. Report GPU at runtime so THIS composed binary admits hull/gpu at
-     * app load even though HL_ENABLE_GPU was never compiled into the base. In a
-     * plain base the hook is the weak default (0) and this adds nothing; in a
-     * monolithic HL_ENABLE_GPU build the bit is already set above. */
+     * backend. Report GPU so THIS composed binary admits hull/gpu at app load
+     * even though HL_ENABLE_GPU was never compiled into the base. Plain base ->
+     * weak 0 (adds nothing); monolithic HL_ENABLE_GPU -> already set above. */
     {
         size_t nfeat = 0;
         if (hl_gpu_feature_backends(&nfeat) && nfeat > 0)
@@ -172,13 +188,16 @@ static uint32_t build_provided_caps(void)
  * feature contributes no module-gated capability. Lets `hull build --with=<f>`
  * tell the (base) build-tool resolver to admit modules the feature will supply,
  * even though the build-tool itself wasn't compiled with that subsystem. Today
- * only the gpu feature carries a module cap; duckdb rides on the always-present
- * hull/db (a DSN scheme, no module gate) so it maps to 0.
+ * The gpu feature carries HL_MOD_CAP_GPU and the tui feature HL_MOD_CAP_TUI;
+ * duckdb rides on the always-present hull/db (a DSN scheme, no module gate) so
+ * it maps to 0.
  */
 uint32_t hl_module_feature_cap(const char *name)
 {
     if (name && strcmp(name, "gpu") == 0)
         return HL_MOD_CAP_GPU;
+    if (name && strcmp(name, "tui") == 0)
+        return HL_MOD_CAP_TUI;
     return 0;
 }
 
@@ -211,7 +230,12 @@ static const char *cap_label(uint32_t cap)
 
 uint32_t hl_module_build_caps(void)
 {
-    return build_provided_caps();
+    /* Build-TARGET caps: what an app inherits from the base platform lib
+     * (compile-time only). Composed features are layered on via
+     * hl_module_feature_cap(--with=X); the toolchain's own runtime force-loads
+     * (e.g. the tui feature backing `hull ... --tui`) must NOT leak into the
+     * apps it builds, so this uses build_compile_caps, not build_provided_caps. */
+    return build_compile_caps();
 }
 
 /* ── Build flavors ─────────────────────────────────────────────────────

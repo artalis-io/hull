@@ -173,7 +173,7 @@ int hl_cmd_migrate(int argc, char **argv, const HlCommandEnv *env)
 
     /* Status subcommand */
     if (subcmd && strcmp(subcmd, "status") == 0) {
-#ifdef HL_ENABLE_TUI
+#ifdef HL_TUI_LINKED
         if (tui) {
             if (!isatty(STDIN_FILENO) || !isatty(STDOUT_FILENO)) {
                 fprintf(stderr,

@@ -1064,18 +1064,77 @@ else
   HL_ENABLE_TCC ?= 1
 endif
 
-# ── HL_ENABLE_TUI — terminal UI capability ─────────────────────────
+# ── HL_ENABLE_TUI — terminal UI capability (composable feature) ────
 #
-# Off this flag drops cap/tui.c, cap/tui_input.c, cap/tui_width.c,
-# the runtime bindings, and the stdlib `hull/tui` module. Width-only
-# (cap_tui_width.c) is light enough to keep around for other uses,
-# but for simplicity the cap_tui_* trio is gated together.
+# TUI is a composable feature (like gpu / duckdb): the base is built
+# TUI-FREE so apps that never touch the terminal link a leaner platform
+# lib (cap/tui.c + tui_input.c + tui_width.c + the runtime bindings + the
+# stdlib `hull/tui` module all drop out). An app that declares `hull/tui`
+# composes it back in via `hull build --with=tui` (auto-inferred by
+# `--flavor=auto`), whole-archive-linking libhull_feature-tui.a.
 #
-# Default: on. Cosmo: on (POSIX termios + ANSI; no platform deps).
+# The hull TOOLCHAIN binary still needs TUI for its own `--tui` dogfood
+# commands (`hull doctor --tui`, `hull dev --tui`, ...). It gets them by
+# force-loading the same feature archive at link time (HL_TUI_TOOLCHAIN,
+# below) even though the base is TUI-free -- the exact mechanism an app
+# compose uses, applied to hull itself.
+#
+# Native default: off (lean apps; toolchain force-loads the archive).
+# Cosmo: on. A fat APE can't force-load a native feature archive, so TUI
+# is compiled in; cosmo apps link the full platform lib regardless.
+ifeq ($(COSMO),1)
 HL_ENABLE_TUI ?= 1
+else
+HL_ENABLE_TUI ?= 0
+endif
 
 ifeq ($(HL_ENABLE_TUI),1)
 CFLAGS += -DHL_ENABLE_TUI
+endif
+
+# HL_TUI_TOOLCHAIN — force-load libhull_feature-tui.a into the hull binary
+# so its --tui commands work on a TUI-free base. Only meaningful when the
+# base is TUI-free: a TUI-compiled base already carries the strong feature
+# hooks, and force-loading the archive too would double-define them. So it
+# defaults on only for a native TUI-off build, and is pinned off otherwise
+# (cosmo, or an explicit HL_ENABLE_TUI=1 native build).
+ifeq ($(HL_ENABLE_TUI),1)
+HL_TUI_TOOLCHAIN := 0
+else ifeq ($(COSMO),1)
+HL_TUI_TOOLCHAIN := 0
+else
+HL_TUI_TOOLCHAIN ?= 1
+endif
+
+# HL_TUI_LINKED — code-presence gate for the toolchain-only `--tui` command
+# handling (doctor/dev/agent/modules/migrate dispatchers + the tool.dev_*
+# bindings). Defined iff the hull binary will carry TUI symbols: either a
+# TUI-compiled base, or a TUI-free base that force-loads the feature archive.
+# Equivalent to hl_tui_feature_present() for the hull binary, but usable as a
+# compile-time gate (the runtime hook can't gate whether a function is emitted,
+# and an always-off branch trips unused-function -Werror / cppcheck). Only the
+# command TUs (toolchain-only, never in an app binary) read it, so applying it
+# globally is harmless.
+ifeq ($(HL_ENABLE_TUI),1)
+CFLAGS += -DHL_TUI_LINKED
+HULL_HAS_TUI := 1
+else ifeq ($(HL_TUI_TOOLCHAIN),1)
+CFLAGS += -DHL_TUI_LINKED
+HULL_HAS_TUI := 1
+else
+HULL_HAS_TUI := 0
+endif
+
+ifeq ($(HL_TUI_TOOLCHAIN),1)
+TUI_TOOLCHAIN_ARCHIVE := $(BUILDDIR)/libhull_feature-tui.a
+ifeq ($(UNAME_S),Darwin)
+TUI_TOOLCHAIN_LDFLAGS := -Wl,-force_load,$(BUILDDIR)/libhull_feature-tui.a
+else
+TUI_TOOLCHAIN_LDFLAGS := -Wl,--whole-archive $(BUILDDIR)/libhull_feature-tui.a -Wl,--no-whole-archive
+endif
+else
+TUI_TOOLCHAIN_ARCHIVE :=
+TUI_TOOLCHAIN_LDFLAGS :=
 endif
 
 ifeq ($(HL_ENABLE_TCC),1)
@@ -2248,6 +2307,8 @@ BUILD_FINGERPRINT := \
   WASM=$(HL_ENABLE_WASM)|\
   GPU=$(HL_ENABLE_GPU)|\
   TCC=$(HL_ENABLE_TCC)|\
+  TUI=$(HL_ENABLE_TUI)|\
+  TUI_TC=$(HL_TUI_TOOLCHAIN)|\
   CA=$(HL_EMBED_CA_BUNDLE)|\
   JS=$(HL_ENABLE_JS)|\
   LUA=$(HL_ENABLE_LUA)|\
@@ -2517,12 +2578,21 @@ $(BUILDDIR)/libhull_feature-gpu.a: $(BUILDDIR)/cap_gpu_wgpu.o $(WGPU_LIB) | $(BU
 # SELF-CONTAINED: cap_tui_width.o (used only by the tui trio) travels with it so
 # a GNU-ld whole-archive compose resolves its refs internally. No vendored lib
 # and no extra link libs (TUI is pure POSIX termios). cap_tui_feature.o (weak
-# base hooks) stays base-resident. `feature-tui` re-invokes make with
-# HL_ENABLE_TUI=1 so the subsystem objects (filtered out of a base build) are in
-# scope.
-feature-tui:
-	$(MAKE) $(BUILDDIR)/libhull_feature-tui.a HL_ENABLE_TUI=1
+# base hooks) stays base-resident.
+#
+# The five subsystem objects are filtered OUT of a TUI-free base build, so they
+# only ever exist to back this archive. The target-specific rule below compiles
+# them with -DHL_ENABLE_TUI regardless of the base HL_ENABLE_TUI setting -- tui.h
+# is ABI-independent of the flag (its feature hooks are unconditional void*
+# signatures), so a TUI-enabled cap_tui.o links cleanly into a TUI-free base.
+# This means the archive builds in-place with no sub-make / separate builddir:
+# `make` (TUI-off default) can produce both the lean base AND this archive in one
+# pass for the toolchain force_load (HL_TUI_TOOLCHAIN).
+feature-tui: $(BUILDDIR)/libhull_feature-tui.a
 .PHONY: feature-tui
+
+$(BUILDDIR)/cap_tui.o $(BUILDDIR)/cap_tui_input.o $(BUILDDIR)/cap_tui_width.o \
+$(BUILDDIR)/lua_rt_mod_tui.o $(BUILDDIR)/js_mod_tui.o: CFLAGS += -DHL_ENABLE_TUI
 
 $(BUILDDIR)/libhull_feature-tui.a: $(BUILDDIR)/cap_tui.o $(BUILDDIR)/cap_tui_input.o \
                                    $(BUILDDIR)/cap_tui_width.o \
@@ -2653,9 +2723,9 @@ $(BUILD_ASSET_OBJ): $(EMBEDDED_PLATFORM_H) $(EMBEDDED_TEMPLATES_H)
 endif
 
 # Hull binary
-$(BUILDDIR)/hull: $(CAP_OBJS) $(CAP_TOOL_OBJ) $(CAP_TEST_OBJ) $(CMD_OBJS) $(RT_OBJS) $(ALLOC_OBJ) $(ASYNC_OBJ) $(COMPRESS_OBJ) $(MINIZ_OBJ) $(WORKER_DB_OBJ) $(WORKER_WASM_OBJ) $(WORKER_GPU_OBJ) $(MANIFEST_OBJ) $(MODULE_OBJ) $(ASYNC_BACKEND_OBJS) $(NET_BACKEND_OBJS) $(SANDBOX_OBJ) $(SANDBOX_TOOL_OBJ) $(SIG_OBJ) $(RELEASE_OBJ) $(RELEASE_IO_OBJ) $(TOOLS_INSTALL_OBJ) $(PLATFORM_SIG_OBJ) $(EMBEDDED_PLATFORM_SIG_OBJ) $(TEST_RUNNER_OBJ) $(RUNTIME_FACTORY_OBJ) $(STATIC_OBJ) $(MIGRATE_OBJ) $(VFS_OBJ) $(PATH_NORM_OBJ) $(THREAD_AFFINITY_OBJ) $(CACHE_DIR_OBJ) $(BLOB_STORE_OBJ) $(CACHE_REGISTRY_OBJ) $(CACERT_OBJ) $(TLS_CLIENT_OBJ) $(CSP_OBJ) $(SH_SEAL_ARENA_OBJ) $(SBOM_OBJ) $(APP_CONTEXT_OBJ) $(AGENT_LIB_OBJ) $(AGENT_API_OBJ) $(TOOL_OBJ) $(BUILD_ASSET_OBJ) $(COMPILER_OBJ) $(COMPILER_TCC_OBJ) $(MAIN_OBJ) $(SERVE_OBJ) $(ENTRY_OBJ) $(APP_EXTRA_OBJS) $(STDLIB_REGISTRY_O) $(WAMR_OBJS) $(VEND_OBJS) $(MBEDTLS_OBJS) $(SQLITE_OBJ) $(LOG_OBJ) $(LOG_LOCK_OBJ) $(SH_ARENA_OBJ) $(SH_JSON_OBJ) $(TWEETNACL_OBJ) $(STB_OBJ) $(PLEDGE_OBJS) $(KEEL_LIB)
+$(BUILDDIR)/hull: $(CAP_OBJS) $(CAP_TOOL_OBJ) $(CAP_TEST_OBJ) $(CMD_OBJS) $(RT_OBJS) $(ALLOC_OBJ) $(ASYNC_OBJ) $(COMPRESS_OBJ) $(MINIZ_OBJ) $(WORKER_DB_OBJ) $(WORKER_WASM_OBJ) $(WORKER_GPU_OBJ) $(MANIFEST_OBJ) $(MODULE_OBJ) $(ASYNC_BACKEND_OBJS) $(NET_BACKEND_OBJS) $(SANDBOX_OBJ) $(SANDBOX_TOOL_OBJ) $(SIG_OBJ) $(RELEASE_OBJ) $(RELEASE_IO_OBJ) $(TOOLS_INSTALL_OBJ) $(PLATFORM_SIG_OBJ) $(EMBEDDED_PLATFORM_SIG_OBJ) $(TEST_RUNNER_OBJ) $(RUNTIME_FACTORY_OBJ) $(STATIC_OBJ) $(MIGRATE_OBJ) $(VFS_OBJ) $(PATH_NORM_OBJ) $(THREAD_AFFINITY_OBJ) $(CACHE_DIR_OBJ) $(BLOB_STORE_OBJ) $(CACHE_REGISTRY_OBJ) $(CACERT_OBJ) $(TLS_CLIENT_OBJ) $(CSP_OBJ) $(SH_SEAL_ARENA_OBJ) $(SBOM_OBJ) $(APP_CONTEXT_OBJ) $(AGENT_LIB_OBJ) $(AGENT_API_OBJ) $(TOOL_OBJ) $(BUILD_ASSET_OBJ) $(COMPILER_OBJ) $(COMPILER_TCC_OBJ) $(MAIN_OBJ) $(SERVE_OBJ) $(ENTRY_OBJ) $(APP_EXTRA_OBJS) $(STDLIB_REGISTRY_O) $(WAMR_OBJS) $(VEND_OBJS) $(MBEDTLS_OBJS) $(SQLITE_OBJ) $(LOG_OBJ) $(LOG_LOCK_OBJ) $(SH_ARENA_OBJ) $(SH_JSON_OBJ) $(TWEETNACL_OBJ) $(STB_OBJ) $(PLEDGE_OBJS) $(KEEL_LIB) $(TUI_TOOLCHAIN_ARCHIVE)
 	$(CC) $(LDFLAGS) -o $@ $(CAP_OBJS) $(CAP_TOOL_OBJ) $(CAP_TEST_OBJ) $(CMD_OBJS) $(RT_OBJS) $(ALLOC_OBJ) $(ASYNC_OBJ) $(COMPRESS_OBJ) $(MINIZ_OBJ) $(WORKER_DB_OBJ) $(WORKER_WASM_OBJ) $(WORKER_GPU_OBJ) $(MANIFEST_OBJ) $(MODULE_OBJ) $(ASYNC_BACKEND_OBJS) $(NET_BACKEND_OBJS) $(SANDBOX_OBJ) $(SANDBOX_TOOL_OBJ) $(SIG_OBJ) $(RELEASE_OBJ) $(RELEASE_IO_OBJ) $(TOOLS_INSTALL_OBJ) $(PLATFORM_SIG_OBJ) $(EMBEDDED_PLATFORM_SIG_OBJ) $(TEST_RUNNER_OBJ) $(RUNTIME_FACTORY_OBJ) $(STATIC_OBJ) $(MIGRATE_OBJ) $(VFS_OBJ) $(PATH_NORM_OBJ) $(THREAD_AFFINITY_OBJ) $(CACHE_DIR_OBJ) $(BLOB_STORE_OBJ) $(CACHE_REGISTRY_OBJ) $(CACERT_OBJ) $(TLS_CLIENT_OBJ) $(CSP_OBJ) $(SH_SEAL_ARENA_OBJ) $(SBOM_OBJ) $(APP_CONTEXT_OBJ) $(AGENT_LIB_OBJ) $(AGENT_API_OBJ) $(TOOL_OBJ) $(BUILD_ASSET_OBJ) $(COMPILER_OBJ) $(COMPILER_TCC_OBJ) $(MAIN_OBJ) $(SERVE_OBJ) $(ENTRY_OBJ) $(APP_EXTRA_OBJS) $(STDLIB_REGISTRY_O) $(WAMR_OBJS) $(VEND_OBJS) $(MBEDTLS_OBJS) \
-		$(SQLITE_OBJ) $(LOG_OBJ) $(LOG_LOCK_OBJ) $(SH_ARENA_OBJ) $(SH_JSON_OBJ) $(TWEETNACL_OBJ) $(STB_OBJ) $(PLEDGE_OBJS) $(KEEL_LIB) $(WGPU_LIB) $(WGPU_FRAMEWORKS) $(DUCKDB_LIBS) -lm -lpthread
+		$(SQLITE_OBJ) $(LOG_OBJ) $(LOG_LOCK_OBJ) $(SH_ARENA_OBJ) $(SH_JSON_OBJ) $(TWEETNACL_OBJ) $(STB_OBJ) $(PLEDGE_OBJS) $(KEEL_LIB) $(TUI_TOOLCHAIN_LDFLAGS) $(WGPU_LIB) $(WGPU_FRAMEWORKS) $(DUCKDB_LIBS) -lm -lpthread
 
 # ── libhull: no-runtime embedding library (Phase L-1/L-2) ────────────
 # The runtime-agnostic hardened core as a static archive, for a native
@@ -3228,6 +3298,23 @@ $(BUILDDIR)/test_mysql_conn: $(TESTDIR)/hull/cap/test_mysql_conn.c $(SRCDIR)/hul
 	$(CC) $(CFLAGS) -DHL_MY_NO_TLS $(INCLUDES) -I$(VENDDIR) -o $@ \
 		$(TESTDIR)/hull/cap/test_mysql_conn.c $(SRCDIR)/hull/cap/mysql_conn.c \
 		$(SRCDIR)/hull/cap/mysqlwire.c $(PG_CRYPTO_OBJS) $(LDFLAGS)
+
+# TUI cap-layer tests: cap/tui.c + tui_input.c + tui_width.c are filtered out of
+# CAP_OBJS on the default (TUI-free) base — they live only in the composable
+# feature archive. These tests call hl_cap_tui_* directly, so link the three TUI
+# objects explicitly (built TUI-enabled via their target-specific CFLAGS above).
+# A static-pattern rule wins over the generic cap-test pattern below. On a
+# monolithic HL_ENABLE_TUI=1 build the objects are ALREADY in TEST_COMMON_LIBS
+# (via CAP_OBJS), so the extra list is empty there — a doubled object on the
+# link line is a multiple-definition error under GNU ld.
+ifeq ($(HL_ENABLE_TUI),1)
+TUI_CAP_TEST_OBJS :=
+else
+TUI_CAP_TEST_OBJS := $(BUILDDIR)/cap_tui.o $(BUILDDIR)/cap_tui_input.o $(BUILDDIR)/cap_tui_width.o
+endif
+$(BUILDDIR)/test_tui_lifecycle $(BUILDDIR)/test_tui_parser $(BUILDDIR)/test_tui_width: \
+$(BUILDDIR)/test_%: $(TESTDIR)/hull/cap/test_%.c $(TUI_CAP_TEST_OBJS) $(TEST_COMMON_DEPS) | $(BUILDDIR)
+	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< $(TUI_CAP_TEST_OBJS) $(TEST_COMMON_LIBS) $(LDFLAGS)
 
 # Capability tests (tests/hull/cap/)
 $(BUILDDIR)/test_%: $(TESTDIR)/hull/cap/test_%.c $(TEST_COMMON_DEPS) | $(BUILDDIR)
@@ -3807,9 +3894,11 @@ e2e-tools: $(BUILDDIR)/hull
 #
 # The interactive part shells out to the e2e_tui_drive helper which
 # spawns the hull binary under a PTY and feeds it scripted input.
-# Built only when HL_ENABLE_TUI is on (no point otherwise).
+# Built whenever the hull binary carries TUI (HULL_HAS_TUI = a TUI-compiled
+# base OR a TUI-free base that force-loads the feature archive for its own
+# --tui commands); skipped only on a fully TUI-less build.
 
-ifeq ($(HL_ENABLE_TUI),1)
+ifeq ($(HULL_HAS_TUI),1)
 $(BUILDDIR)/e2e_tui_drive: $(TESTDIR)/e2e_tui_drive.c | $(BUILDDIR)
 	$(CC) -std=c11 -Wall -Wextra -O2 -o $@ $<
 E2E_TUI_DEPS := $(BUILDDIR)/hull $(BUILDDIR)/e2e_tui_drive

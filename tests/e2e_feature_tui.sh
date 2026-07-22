@@ -70,6 +70,20 @@ echo "$RUN_OUT" | grep -q "TUI FEATURE APP OK" || {
 }
 echo "ok  --with=tui composed + booted"
 
+echo "=== auto-compose: hull build (NO --with=tui) on a hull/tui app ==="
+# TUI migrated from a base-builtin to a composable feature, so a stock hull must
+# still build a hull/tui app transparently: build.lua infers --with=tui from the
+# manifest's hull/tui declaration (skipped only when the base already has TUI, ie
+# a monolithic HL_ENABLE_TUI build or cosmo). This is the primary UX; --with=tui
+# above is the explicit superset.
+AUTO_OUT=$("$HULL" build --compiler=system --no-verify-platform -o "$APP/bin_auto" "$APP" 2>&1) || true
+echo "$AUTO_OUT" | grep -q "composing feature 'tui'" \
+    || { echo "$AUTO_OUT"; echo "FAIL: did not infer tui from hull/tui declaration"; exit 1; }
+test -x "$APP/bin_auto" || { echo "FAIL: no auto-composed binary"; exit 1; }
+"$APP/bin_auto" 2>&1 | grep -q "TUI FEATURE APP OK" \
+    || { echo "FAIL: auto-composed tui binary did not boot"; exit 1; }
+echo "ok  auto-composed (no --with=tui) + booted"
+
 echo "=== negative: a plain app must NOT compose tui ==="
 printf 'app.manifest({modules={}})\napp.main(function() print("PLAIN OK") return 0 end)\n' \
     > "$PLAIN/app.lua"

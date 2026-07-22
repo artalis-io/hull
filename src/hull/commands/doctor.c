@@ -785,7 +785,7 @@ int hl_cmd_doctor(int argc, char **argv, const HlCommandEnv *env)
             tui = 1;
     }
 
-#ifdef HL_ENABLE_TUI
+#ifdef HL_TUI_LINKED
     if (tui) {
         /* Refuse cleanly when not attached to a real terminal — the
          * cap layer would otherwise error out mid-acquire and leave a

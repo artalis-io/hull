@@ -232,7 +232,7 @@ static int cmd_errors(int argc, char **argv, const HlCommandEnv *env)
             app_dir = argv[i];
     }
 
-#ifdef HL_ENABLE_TUI
+#ifdef HL_TUI_LINKED
     if (tui) {
         if (!isatty(STDIN_FILENO) || !isatty(STDOUT_FILENO)) {
             fprintf(stderr, "hull agent errors --tui: not attached to a "
@@ -309,7 +309,7 @@ static int cmd_context(int argc, char **argv, const HlCommandEnv *env)
         return output_result(&out, rc);
     }
 
-#ifdef HL_ENABLE_TUI
+#ifdef HL_TUI_LINKED
     if (interactive) {
         if (!isatty(STDIN_FILENO) || !isatty(STDOUT_FILENO)) {
             fprintf(stderr,

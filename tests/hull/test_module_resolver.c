@@ -465,13 +465,36 @@ UTEST(module_resolver, non_optional_still_rejected_when_cap_absent)
 }
 #endif
 
-UTEST(module_resolver, feature_cap_maps_gpu_only)
+UTEST(module_resolver, feature_cap_maps_module_gated_features)
 {
-    /* Only features carrying a module-gated capability map nonzero. */
+    /* Only features carrying a module-gated capability map nonzero: gpu -> GPU
+     * and tui -> TUI (both moved to composable features). duckdb rides on the
+     * always-present hull/db (a DSN scheme, no module gate) so it maps to 0. */
     ASSERT_EQ(hl_module_feature_cap("gpu"), (uint32_t)HL_MOD_CAP_GPU);
+    ASSERT_EQ(hl_module_feature_cap("tui"), (uint32_t)HL_MOD_CAP_TUI);
     ASSERT_EQ(hl_module_feature_cap("duckdb"), (uint32_t)0);
     ASSERT_EQ(hl_module_feature_cap("nope"), (uint32_t)0);
     ASSERT_EQ(hl_module_feature_cap(NULL), (uint32_t)0);
+}
+
+UTEST(module_resolver, tui_admitted_with_composed_feature_cap)
+{
+    /* The resolver half of the tui feature (mirror of the gpu case above): a
+     * `hull build --with=tui` (or auto-inferred) build supplies HL_MOD_CAP_TUI
+     * so the TARGET app admits hull/tui even though the base platform lib is
+     * TUI-free. hl_module_build_caps() is compile-time only (excludes the
+     * toolchain's own force-load), so ORing the feature cap is what admits it. */
+    HlManifest m;
+    clear_manifest(&m);
+    m.tui = 1;
+    add_module(&m, "tui", 1);
+
+    HlResolvedModuleSet s = {0};
+    char err[256] = {0};
+    int rc = hl_module_resolver_resolve_caps(
+        &m, &s, hl_module_build_caps() | HL_MOD_CAP_TUI, err, sizeof(err));
+    ASSERT_EQ(rc, 0);
+    ASSERT_EQ(err[0], '\0');
 }
 
 #ifdef HL_ENABLE_TUI

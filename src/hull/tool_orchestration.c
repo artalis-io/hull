@@ -453,7 +453,7 @@ static int l_tool_modules_available(lua_State *L)
  * so it — and these bindings — need BOTH the inbound-HTTP server (hull dev) and
  * the TUI subsystem. On a TUI-off build (base composing TUI as a feature) they
  * drop out together with the dev-state singleton. */
-#if defined(HL_ENABLE_HTTP_SERVER) && defined(HL_ENABLE_TUI)
+#if defined(HL_ENABLE_HTTP_SERVER) && defined(HL_TUI_LINKED)
 
 static int l_tool_dev_status(lua_State *L)
 {
@@ -525,7 +525,36 @@ static int l_tool_dev_reload(lua_State *L)
     return 1;
 }
 
-#endif /* HL_ENABLE_HTTP_SERVER && HL_ENABLE_TUI */
+#endif /* HL_ENABLE_HTTP_SERVER && HL_TUI_LINKED */
+
+/* ── tool.build_caps() → { db=true, wasm=true, tui=true, ... } ──────────
+ * The base platform lib's COMPILE-TIME build caps (hl_module_build_caps),
+ * as a name-keyed set. This is what an app inherits by linking the base;
+ * it excludes the toolchain's private runtime force-loads (e.g. the tui
+ * feature backing `hull ... --tui`). `hull build` uses it to decide whether
+ * a declared feature must be composed (--with=X) or is already built in:
+ * a stock native hull reports no `tui`, a monolithic HL_ENABLE_TUI or cosmo
+ * build reports `tui`. */
+static int l_tool_build_caps(lua_State *L)
+{
+    uint32_t caps = hl_module_build_caps();
+    struct { uint32_t bit; const char *name; } map[] = {
+        { HL_MOD_CAP_DB,          "db"          },
+        { HL_MOD_CAP_WASM,        "wasm"        },
+        { HL_MOD_CAP_GPU,         "gpu"         },
+        { HL_MOD_CAP_HTTP_CLIENT, "http_client" },
+        { HL_MOD_CAP_HTTP_SERVER, "http_server" },
+        { HL_MOD_CAP_TUI,         "tui"         },
+    };
+    lua_newtable(L);
+    for (size_t k = 0; k < sizeof map / sizeof map[0]; k++) {
+        if (caps & map[k].bit) {
+            lua_pushboolean(L, 1);
+            lua_setfield(L, -2, map[k].name);
+        }
+    }
+    return 1;
+}
 
 /* ── Registration ──────────────────────────────────────────────────── */
 
@@ -542,6 +571,7 @@ void hl_lua_tool_register_orchestration(lua_State *L)
 
     static const luaL_Reg orchestration_funcs[] = {
         { "modules_resolve",        l_tool_modules_resolve },
+        { "build_caps",             l_tool_build_caps },
         { "build_flavor",           l_tool_build_flavor },
         { "doctor_json",            l_tool_doctor_json },
 #ifdef HL_ENABLE_HTTP_SERVER
@@ -549,7 +579,7 @@ void hl_lua_tool_register_orchestration(lua_State *L)
 #endif
         { "agent_context",          l_tool_agent_context },
         { "modules_available",      l_tool_modules_available },
-#if defined(HL_ENABLE_HTTP_SERVER) && defined(HL_ENABLE_TUI)
+#if defined(HL_ENABLE_HTTP_SERVER) && defined(HL_TUI_LINKED)
         { "dev_status",             l_tool_dev_status },
         { "dev_drain",              l_tool_dev_drain },
         { "dev_recent_lines",       l_tool_dev_recent_lines },

@@ -736,6 +736,41 @@ typedef struct {
         is_cosmo = cc:find("cosmocc") ~= nil
     end
 
+    -- Auto-compose the tui feature when the app declares hull/tui. TUI migrated
+    -- from a base-builtin capability to a composable feature
+    -- (docs/features_and_flavors.md): the base platform lib is TUI-free so lean
+    -- apps stay lean, but an app that declares hull/tui must still build with a
+    -- STOCK hull without the user hand-passing --with=tui. So infer it here
+    -- (before flavor resolution, so --flavor=auto sees the composed cap). gpu /
+    -- duckdb are NOT inferred: they were always opt-in with no built-in past to
+    -- preserve. Skip when the base already provides tui as a build cap -- a
+    -- monolithic HL_ENABLE_TUI build, or cosmo (where features are native-only
+    -- and TUI is compiled in) -- since composing an archive would be wrong or
+    -- unavailable there. An explicit --with=tui is a harmless superset.
+    if not (opts.with and opts.with.tui) then
+        local base_caps = (tool.build_caps and tool.build_caps()) or {}
+        if not base_caps.tui and not is_cosmo then
+            local m = extract_app_manifest(opts.app_dir)
+            local declares_tui = false
+            if m and type(m.modules) == "table" then
+                for _, v in pairs(m.modules) do
+                    -- Value is the canonical spec in both the array
+                    -- (`{"hull/tui@1"}`) and keyed (`{tui="hull/tui@1"}`) forms;
+                    -- strip the "@major" and any trailing optional "?".
+                    if type(v) == "string" then
+                        local name = v:gsub("@.*$", ""):gsub("%?$", "")
+                        if name == "hull/tui" then declares_tui = true break end
+                    end
+                end
+            end
+            if declares_tui then
+                opts.with = opts.with or {}
+                opts.with.tui = true
+                print("hull build: composing feature 'tui' (app declares hull/tui)")
+            end
+        end
+    end
+
     -- --flavor=auto: infer the minimal flavor from the app's declared modules
     -- (resolve with full caps, then pick the smallest flavor that still
     -- satisfies them). Resolves to a concrete flavor name the block below

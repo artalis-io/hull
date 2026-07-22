@@ -118,7 +118,7 @@ static int cmd_available(int argc, char **argv, const HlCommandEnv *env)
     for (int i = 0; i < argc; i++) {
         if (strcmp(argv[i], "--tui") == 0) { tui = 1; break; }
     }
-#ifdef HL_ENABLE_TUI
+#ifdef HL_TUI_LINKED
     if (tui) {
         if (!isatty(STDIN_FILENO) || !isatty(STDOUT_FILENO)) {
             fprintf(stderr,
