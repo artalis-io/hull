@@ -3492,11 +3492,14 @@ $(BUILDDIR)/test_path_normalize: $(TESTDIR)/hull/test_path_normalize.c $(PATH_NO
 # test_async_backend covers whichever backend hl_async_backend() returns
 # (keel on HTTP=1, poll on HTTP=0). test_async_backend_poll always
 # pins the poll backend by name, so it runs on both build flavors.
-$(BUILDDIR)/test_async_backend: $(TESTDIR)/hull/test_async_backend.c $(ASYNC_BACKEND_OBJS) | $(BUILDDIR)
+# $(KEEL_LIB) is a real prerequisite (not just a recipe arg): without it a -j
+# build can start the link before vendor/keel/libkeel.a is built and fail with
+# "cannot find vendor/keel/libkeel.a".
+$(BUILDDIR)/test_async_backend: $(TESTDIR)/hull/test_async_backend.c $(ASYNC_BACKEND_OBJS) $(KEEL_LIB) | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< \
 		$(ASYNC_BACKEND_OBJS) $(KEEL_LIB) -lm -lpthread
 
-$(BUILDDIR)/test_async_backend_poll: $(TESTDIR)/hull/test_async_backend_poll.c $(ASYNC_BACKEND_OBJS) | $(BUILDDIR)
+$(BUILDDIR)/test_async_backend_poll: $(TESTDIR)/hull/test_async_backend_poll.c $(ASYNC_BACKEND_OBJS) $(KEEL_LIB) | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< \
 		$(ASYNC_BACKEND_OBJS) $(KEEL_LIB) -lm -lpthread
 
