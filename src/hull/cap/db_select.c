@@ -68,8 +68,8 @@ static const HlDbBackend *const BACKENDS[] = {
  * this hint fires only for a base app with neither the compile flag nor the
  * feature, and points at the feature path. See docs/features_and_flavors.md. */
 static const struct { const char *scheme; const char *msg; } RESERVED[] = {
-    { "postgres",   "postgres:// requires a build with HL_ENABLE_POSTGRES" },
-    { "postgresql", "postgresql:// requires a build with HL_ENABLE_POSTGRES" },
+    { "postgres",   "postgres:// needs the Postgres feature: run 'hull feature install postgres', then build the app with 'hull build --with=postgres'" },
+    { "postgresql", "postgresql:// needs the Postgres feature: run 'hull feature install postgres', then build the app with 'hull build --with=postgres'" },
     { "sqlite",     "sqlite:// requires a build with HL_ENABLE_SQLITE" },
     { "file",       "file: URIs require a build with HL_ENABLE_SQLITE" },
     { "duckdb",     "duckdb:// needs the DuckDB feature: run 'hull feature install duckdb', then build the app with 'hull build --with=duckdb'" },

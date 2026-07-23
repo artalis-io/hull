@@ -185,6 +185,11 @@ int hl_tool_validate_args(const char *const argv[])
                  * path it controls; the build sandbox's unveil bounds the path. */
                 "-force_load,",       /* macOS ld64: -Wl,-force_load,<archive> */
                 "--whole-archive", "--no-whole-archive",  /* GNU ld / lld bracket */
+                /* GNU ld archive-interdependency group, emitted by build.lua when
+                 * composing a DB wire feature (postgres/mysql) whose archive
+                 * references base symbols (tls_client) in the platform lib. Only
+                 * affects archive resolution order -- no code execution. */
+                "--start-group", "--end-group",
                 NULL
             };
             const char *wl_arg = a + 4;

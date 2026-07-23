@@ -1315,6 +1315,20 @@ int main(int argc, char **argv) { return hull_main(argc, argv); }
             cxx     = true,
             libs    = { darwin = { "-lc++" }, other = { "-lstdc++", "-ldl" } },
         },
+        -- postgres: pure-C PostgreSQL wire backend in libhull_feature-postgres.a
+        -- (`make feature-postgres`), filling the same hl_db_feature_backends hook
+        -- as duckdb. No vendored engine / no extra link libs. `base_group = true`
+        -- because the backend references base crypto (SCRAM) + tls_client
+        -- (sslmode) that a DB-only app doesn't otherwise pull, so the compose must
+        -- wrap the platform lib + this archive in --start-group for GNU ld.
+        postgres = {
+            backend    = "hl_db_backend_postgres",
+            type       = "HlDbBackend",
+            hook       = "hl_db_feature_backends",
+            cxx        = false,
+            base_group = true,
+            libs       = { darwin = {}, other = {} },
+        },
         -- gpu: wgpu-native backend, isolated in libhull_feature-gpu.a
         -- (`make feature-gpu`). Base ships the generic gpu dispatch layer +
         -- the weak hl_gpu_feature_backends hook; this fills it. C (no cxx). The
@@ -1342,6 +1356,11 @@ int main(int argc, char **argv) { return hull_main(argc, argv); }
     if opts.with then for f in pairs(opts.with) do features_needed[f] = true end end
     local feature_objs = {}
     local feature_libs = {}
+    -- A DB wire feature (postgres/mysql) references base symbols (crypto,
+    -- tls_client) that a DB-only app doesn't otherwise pull, so on GNU ld the
+    -- platform lib + feature archive must be wrapped in --start-group. Set by
+    -- any composed feature with `base_group = true`.
+    local needs_base_group = false
     if next(features_needed) then
         local plat = tool.platform_name and tool.platform_name() or nil
         local hull_dir = ""
@@ -1364,6 +1383,7 @@ int main(int argc, char **argv) { return hull_main(argc, argv); }
                 tool.rmdir(tmpdir); tool.exit(1)
             end
             if spec.cxx then needs_cxx = true end
+            if spec.base_group then needs_base_group = true end
 
             -- Resolve libhull_feature-<name>.a: local build dirs first
             -- (`make feature-<name>`), then ~/.hull/feature (`hull feature install`).
@@ -1495,8 +1515,19 @@ int main(int argc, char **argv) { return hull_main(argc, argv); }
     local platform_a = tmpdir .. "/libhull_platform.a"
     local link_objs = {tmpdir .. "/app_main.o", tmpdir .. "/app_registry.o"}
     for _, o in ipairs(feature_objs) do link_objs[#link_objs + 1] = o end
-    local link_libs = {platform_a}
+    -- A DB wire feature's archive references base symbols (tls_client, crypto)
+    -- resolved from the platform lib. On GNU ld's one-pass link a later archive
+    -- can't pull back into an earlier one, so wrap the platform lib + feature
+    -- archives in --start-group/--end-group (ld iterates to a fixed point).
+    -- GNU ld / lld only: macOS ld64 rescans archives natively AND rejects
+    -- --start-group ("unknown option"), so it's gated off for a darwin target.
+    local target_is_darwin = (tool.platform_name() or ""):sub(1, 6) == "darwin"
+    local group = needs_base_group and not target_is_darwin
+    local link_libs = {}
+    if group then link_libs[#link_libs + 1] = "-Wl,--start-group" end
+    link_libs[#link_libs + 1] = platform_a
     for _, l in ipairs(feature_libs) do link_libs[#link_libs + 1] = l end
+    if group then link_libs[#link_libs + 1] = "-Wl,--end-group" end
     link_libs[#link_libs + 1] = "-lm"
     link_libs[#link_libs + 1] = "-lpthread"
     ok = tool.compiler.link(opts.output, link_objs, link_libs)

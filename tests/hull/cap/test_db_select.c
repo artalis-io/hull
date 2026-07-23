@@ -40,8 +40,8 @@ UTEST(db_select, sqlite_and_scheme_less)
 #endif
 }
 
-/* "postgres://" / "postgresql://" route to Postgres when compiled, else give a
- * build-flag hint (not a generic "unknown scheme"). */
+/* "postgres://" / "postgresql://" route to Postgres when compiled, else point at
+ * the composable Postgres feature (not a generic "unknown scheme"). */
 UTEST(db_select, postgres_scheme)
 {
     const char *err = NULL;
@@ -52,7 +52,7 @@ UTEST(db_select, postgres_scheme)
     ASSERT_TRUE(b); ASSERT_STREQ(b->name, "postgres");
 #else
     ASSERT_FALSE(b); ASSERT_TRUE(err);
-    ASSERT_TRUE(strstr(err, "HL_ENABLE_POSTGRES") != NULL);
+    ASSERT_TRUE(strstr(err, "feature install postgres") != NULL);
 #endif
 }
 
