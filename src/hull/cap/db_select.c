@@ -73,8 +73,8 @@ static const struct { const char *scheme; const char *msg; } RESERVED[] = {
     { "sqlite",     "sqlite:// requires a build with HL_ENABLE_SQLITE" },
     { "file",       "file: URIs require a build with HL_ENABLE_SQLITE" },
     { "duckdb",     "duckdb:// needs the DuckDB feature: run 'hull feature install duckdb', then build the app with 'hull build --with=duckdb'" },
-    { "mysql",      "the MySQL/MariaDB backend (mysql://) is not available in this build" },
-    { "mariadb",    "the MySQL/MariaDB backend (mariadb://) is not available in this build" },
+    { "mysql",      "mysql:// needs the MySQL feature: run 'hull feature install mysql', then build the app with 'hull build --with=mysql'" },
+    { "mariadb",    "mariadb:// needs the MySQL feature: run 'hull feature install mysql', then build the app with 'hull build --with=mysql'" },
 };
 
 static int scheme_in(const char *const *list, const char *scheme)

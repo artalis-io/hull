@@ -932,10 +932,49 @@ jobs:
           name: feature-postgres-${{ matrix.name }}
           path: libhull_feature-postgres-${{ matrix.name }}.a
 
+  build-feature-mysql:
+    # Composable MySQL/MariaDB feature archive (libhull_feature-mysql-<arch>.a),
+    # pulled by `hull feature install mysql` -> `hull build --with=mysql`. One
+    # backend for mysql:// + mariadb://. Pure C (~4 KB wire client, no vendored
+    # engine), like postgres. `make feature-mysql` re-invokes make with
+    # HL_ENABLE_MYSQL=1. Native-only.
+    name: Build feature mysql (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x86_64
+            os: ubuntu-24.04
+          - name: linux-aarch64
+            os: ubuntu-24.04-arm
+          - name: darwin-arm64
+            os: macos-15
+
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          submodules: true
+
+      - name: Write VERSION file
+        run: echo "${GITHUB_REF_NAME#v}" > VERSION
+
+      - name: Build MySQL feature archive
+        run: make feature-mysql
+
+      - name: Rename artifact (arch-qualified)
+        run: mv build/libhull_feature-mysql.a libhull_feature-mysql-${{ matrix.name }}.a
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        with:
+          name: feature-mysql-${{ matrix.name }}
+          path: libhull_feature-mysql-${{ matrix.name }}.a
+
   release:
     name: Create Release
     runs-on: ubuntu-24.04
-    needs: [build-cosmo, build-native, build-wamrc, build-tcc, build-platform-cosmo-flavors, build-feature-native, build-feature-gpu, build-feature-tui, build-feature-postgres]
+    needs: [build-cosmo, build-native, build-wamrc, build-tcc, build-platform-cosmo-flavors, build-feature-native, build-feature-gpu, build-feature-tui, build-feature-postgres, build-feature-mysql]
     permissions:
       contents: write       # publish GitHub release + assets
       id-token: write       # SLSA: OIDC for Sigstore signing
@@ -1002,6 +1041,12 @@ jobs:
           mv artifacts/feature-postgres-linux-x86_64/*.a   dist/
           mv artifacts/feature-postgres-linux-aarch64/*.a  dist/
           mv artifacts/feature-postgres-darwin-arm64/*.a   dist/
+          # Composable MySQL/MariaDB feature archives (libhull_feature-mysql-<arch>.a),
+          # native-only. Pulled by `hull feature install mysql`. Covered by the
+          # libhull_feature-*.a glob in the SHA-256 + publish steps below.
+          mv artifacts/feature-mysql-linux-x86_64/*.a   dist/
+          mv artifacts/feature-mysql-linux-aarch64/*.a  dist/
+          mv artifacts/feature-mysql-darwin-arm64/*.a   dist/
 
       - name: Make binaries executable
         run: chmod +x dist/*

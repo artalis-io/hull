@@ -59,6 +59,7 @@ typedef struct {
 static const HlFeatureSpec FEATURES[] = {
     { "duckdb",   "DuckDB embedded OLAP SQL backend (duckdb://)", 1, 1, 1 },
     { "postgres", "PostgreSQL wire backend (postgres:// / postgresql://)", 1, 1, 1 },
+    { "mysql",    "MySQL / MariaDB wire backend (mysql:// / mariadb://)", 1, 1, 1 },
     { "gpu",      "GPU compute via wgpu-native (Vulkan/Metal)",   1, 1, 1 },
     { "tui",      "Terminal UI (hull.tui: full-screen, input, cell-diff)", 1, 1, 1 },
 };

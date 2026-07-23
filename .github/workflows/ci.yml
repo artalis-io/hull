@@ -942,6 +942,17 @@ jobs:
         timeout-minutes: 15
         run: sh tests/e2e_feature_postgres.sh
 
+  mysql-feature:
+    name: MySQL feature build (Linux)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          submodules: true
+      - name: Compose the MySQL feature into an app binary (e2e)
+        timeout-minutes: 15
+        run: sh tests/e2e_feature_mysql.sh
+
   coverage:
     name: Code Coverage
     runs-on: ubuntu-24.04

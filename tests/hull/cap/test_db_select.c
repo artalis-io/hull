@@ -56,8 +56,8 @@ UTEST(db_select, postgres_scheme)
 #endif
 }
 
-/* "mysql://" / "mariadb://" route to the MySQL backend when compiled, else a
- * build-flag hint. Both schemes share the one backend. */
+/* "mysql://" / "mariadb://" route to the MySQL backend when compiled, else point
+ * at the composable MySQL feature. Both schemes share the one backend. */
 UTEST(db_select, mysql_scheme)
 {
     const char *err = NULL;
@@ -68,7 +68,10 @@ UTEST(db_select, mysql_scheme)
     b = hl_db_backend_select("mariadb://u@h/db", &err);
     ASSERT_TRUE(b); ASSERT_STREQ(b->name, "mysql");
 #else
-    ASSERT_FALSE(b); ASSERT_TRUE(err); ASSERT_TRUE(strstr(err, "MySQL") != NULL);
+    ASSERT_FALSE(b); ASSERT_TRUE(err);
+    ASSERT_TRUE(strstr(err, "feature install mysql") != NULL);
+    b = hl_db_backend_select("mariadb://u@h/db", &err);
+    ASSERT_FALSE(b); ASSERT_TRUE(strstr(err, "feature install mysql") != NULL);
 #endif
 }
 

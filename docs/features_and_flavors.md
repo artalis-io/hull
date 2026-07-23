@@ -4,10 +4,11 @@ Status: **shipped.** Introduces **features** as a third distribution concept
 alongside **flavors** and **tools**, so Hull can absorb multiple large,
 orthogonal optional libraries without a combinatorial explosion of published
 build artifacts. Re-scopes the DuckDB side-load (roadmap "DuckDB epic" #4) from a
-one-off `full-duckdb` flavor to **DuckDB as the first composable feature**. Four
+one-off `full-duckdb` flavor to **DuckDB as the first composable feature**. Five
 features ship today: **`duckdb`** (embedded OLAP, `duckdb://`), **`postgres`**
-(pure-C PostgreSQL wire backend, `postgres://`), **`gpu`** (wgpu-native compute),
-and **`tui`** (terminal UI) - all native-only, installed with
+(pure-C PostgreSQL wire backend, `postgres://`), **`mysql`** (pure-C MySQL/MariaDB
+wire backend, `mysql://` / `mariadb://`), **`gpu`** (wgpu-native compute), and
+**`tui`** (terminal UI) - all native-only, installed with
 `hull feature install <name>` and composed with `hull build --with=<name>`. The
 command surface (`hull feature install / list / uninstall`), the `make
 feature-<name>` archive targets, the `--with=` build path, and the `?`

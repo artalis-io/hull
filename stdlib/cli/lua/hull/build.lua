@@ -1329,6 +1329,19 @@ int main(int argc, char **argv) { return hull_main(argc, argv); }
             base_group = true,
             libs       = { darwin = {}, other = {} },
         },
+        -- mysql: pure-C MySQL/MariaDB wire backend in libhull_feature-mysql.a
+        -- (`make feature-mysql`), one backend serving both mysql:// and
+        -- mariadb://. Identical shape to postgres — fills hl_db_feature_backends,
+        -- references base crypto (native/caching_sha2 auth) + tls_client
+        -- (sslmode), so base_group = true (--start-group at compose on GNU ld).
+        mysql = {
+            backend    = "hl_db_backend_mysql",
+            type       = "HlDbBackend",
+            hook       = "hl_db_feature_backends",
+            cxx        = false,
+            base_group = true,
+            libs       = { darwin = {}, other = {} },
+        },
         -- gpu: wgpu-native backend, isolated in libhull_feature-gpu.a
         -- (`make feature-gpu`). Base ships the generic gpu dispatch layer +
         -- the weak hl_gpu_feature_backends hook; this fills it. C (no cxx). The

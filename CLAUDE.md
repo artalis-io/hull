@@ -147,7 +147,7 @@ Hull's distribution is one binary; what's compiled into it is controlled by a sm
 | `HL_EMBED_CA_BUNDLE` | 1 | Drop Mozilla CA bundle (~200 KB, breaks HTTPS without system store) |
 | `HL_ENABLE_SQLITE` | 1 | Drop the SQLite backend (`cap/db_sqlite.c`, `cap/db_udf.c`, vendored `sqlite3.c`). A SQLite file path or `:memory:` DSN then has no backend. |
 | `HL_ENABLE_POSTGRES` | 0 | (Off by default.) On compiles the pure-C PostgreSQL wire backend (`cap/pgwire.c` + `cap/pg_conn.c` + `cap/db_postgres.c`; no libpq) into the base. A `postgres://` / `postgresql://` DSN selects it. Links the shared TLS client (`HL_LINK_TLS`) for SSL connections. Normally composed via the `postgres` **feature** (`hull build --with=postgres`) rather than set directly; the flag is the monolithic path and what `make feature-postgres` builds the archive with. See "Composable features" above and "PostgreSQL + multi-backend DB" below. |
-| `HL_ENABLE_MYSQL` | 0 | (Off by default.) On enables the pure-C MySQL / MariaDB wire backend (`cap/mysqlwire.c` + `cap/mysql_conn.c` + `cap/db_mysql.c`; no libmysql/libmariadb). A `mysql://` / `mariadb://` DSN selects it. Links the shared TLS client (`HL_LINK_TLS`). See "MySQL/MariaDB specifics" below. |
+| `HL_ENABLE_MYSQL` | 0 | (Off by default.) On compiles the pure-C MySQL / MariaDB wire backend (`cap/mysqlwire.c` + `cap/mysql_conn.c` + `cap/db_mysql.c`; no libmysql/libmariadb) into the base. A `mysql://` / `mariadb://` DSN selects it. Links the shared TLS client (`HL_LINK_TLS`). Normally composed via the `mysql` **feature** (`hull build --with=mysql`) rather than set directly; the flag is the monolithic path and what `make feature-mysql` builds the archive with. See "Composable features" above and "MySQL/MariaDB specifics" below. |
 | `HL_ENABLE_DB` | 1 | **Umbrella, derived** from the three granular flags: defined iff `HL_ENABLE_SQLITE`, `HL_ENABLE_POSTGRES`, or `HL_ENABLE_MYSQL` is on. Off (all granular off) drops `db.*` + `migrate.*` + worker-DB + the connection registry + DB-backed stdlib (session, ratelimit, idempotency, outbox, inbox, rbac, search). ~1.4 MB smaller. See "Compute-only builds" below. |
 | `HL_ENABLE_HTTP_SERVER` | 1 | Drop the inbound HTTP server: serve.c (KlServer setup), routing, body reader, WebSocket server (cap/ws), middleware, SSE, in-process test harness (cap/test, test_runner), and `hull dev/test/agent/mcp` commands. Apps must use `app.main(fn)` and may not declare `hull/http-server`, `hull/web/ws-server`, `hull/web/ws-client`, `hull/web/sse`, or any `hull/web/middleware/*`. See "HTTP build flavors" below. |
 | `HL_ENABLE_HTTP_CLIENT` | 1 | Drop the outbound HTTP/HTTPS client: `http.fetch` (cap/http + cap/http_async), SMTP send (cap/smtp), and `hull update` (which uses Keel's HTTPS client). Apps may not declare `hull/http-client`, `hull/smtp`, or `hull/email`. |
@@ -193,27 +193,32 @@ bolts a subsystem on. They compose (`M` flavors + `N` features publish `M+N`
 libs but build any of `M×N` combos). Design + rationale:
 [docs/features_and_flavors.md](docs/features_and_flavors.md).
 
-Four features ship today, all **native-only (no cosmo)**, published for all
+Five features ship today, all **native-only (no cosmo)**, published for all
 three native platforms (`linux-x86_64`, `linux-aarch64`, `darwin-arm64`):
 
 | Feature | What | Reached via |
 |---------|------|-------------|
 | `duckdb` | embedded DuckDB OLAP backend (~58 MB, C++) | a `duckdb://` DSN on `hull/db` |
 | `postgres` | pure-C PostgreSQL wire backend (~4 KB, no libpq) | a `postgres://` / `postgresql://` DSN on `hull/db` |
+| `mysql` | pure-C MySQL / MariaDB wire backend (~4 KB, no libmysql) | a `mysql://` / `mariadb://` DSN on `hull/db` |
 | `gpu` | wgpu-native GPU compute | `gpu.*` (the base ships the generic dispatch layer; the feature fills the concrete wgpu backend) |
 | `tui` | terminal UI subsystem (`hull.tui`) | `hull/tui` module (auto-inferred; force-loaded — see [docs/features_and_flavors.md](docs/features_and_flavors.md)) |
 
-`duckdb` and `postgres` are **backend features**: both fill the same weak
+`duckdb`, `postgres`, and `mysql` are **backend features**: all fill the same weak
 `hl_db_feature_backends` hook (DSN-scheme-selected via the `HlDbBackend` vtable),
-so `--with=duckdb --with=postgres` compose together into one generated collector.
-`postgres` is pure C (no vendored engine), so its archive is tiny; because its
-backend references base `tls_client` (sslmode) that a DB-only app doesn't
-otherwise pull, `hull build` wraps the platform lib + the pg archive in a GNU-ld
-`--start-group` at compose (Linux only; macOS ld64 rescans natively). Like
-DuckDB, the backend is reached by DSN and carries no module gate, so selection is
-**explicit `--with=postgres`** (DSNs are often `$VAR` env-refs, invisible at build
-time) rather than auto-inferred; a `postgres://` DSN on a plain base fails with a
-`hull feature install postgres` hint.
+so `--with=duckdb --with=postgres --with=mysql` compose together into one
+generated collector. `postgres` and `mysql` are pure C (no vendored engine), so
+their archives are tiny (~48 KB); because a wire backend references base
+`tls_client` (sslmode) + crypto (auth) that a DB-only app doesn't otherwise pull,
+`hull build` wraps the platform lib + the archive in a GNU-ld `--start-group` at
+compose (`base_group` in FEATURE_SPECS; Linux only — macOS ld64 rescans natively
+and rejects the flag). Like DuckDB, the backend is reached by DSN and carries no
+module gate, so selection is **explicit `--with=<name>`** (DSNs are often `$VAR`
+env-refs, invisible at build time) rather than auto-inferred; e.g. a `mysql://`
+DSN on a plain base fails with a `hull feature install mysql` hint. The kernel
+sandbox grants `network_outbound` for a declared network DB connection
+(`databases.named` net-DSN / env-ref, `databases.dynamic` net scheme, or a `-d`
+net DSN), so a sandboxed DB-only app can reach its database.
 
 **Install (end users):** `hull feature install <name>` / `hull feature list` /
 `hull feature uninstall <name>` fetch + Ed25519-verify + cache the signed lib to
@@ -894,7 +899,7 @@ The live install path is intentionally not tested in CI (it would need the just-
 
 **`hull flavor install <flavor> [--repo=ORG/NAME]` / `flavor list`**. Fetch the per-flavor platform library (`libhull_platform-<flavor>.a`) for `hull build --flavor` so end users do not build it from source. Same trust chain as `hull tools install` / `hull update`, via the shared `hl_release_io_fetch_verified_manifest`: download `hull.sha256` + `.sig` from the release matching this hull's version, verify the Ed25519 release signature against the embedded `HL_RELEASE_PUBKEY_HEX`, then for each asset look up its SHA-256 in the verified manifest, download, constant-time-compare the hash, and atomic-write to `$HOME/.hull/platform/`. Native platforms fetch one `libhull_platform-<flavor>-<arch>.a`; cosmo fetches the dual-arch pair `libhull_platform-<flavor>.{x86_64,aarch64}-cosmo.a`. `flavor list` shows each flavor as `embedded` (full), `installed`, or `not installed`. `hull build --flavor` then finds the cached lib automatically (see "Build flavors" above). Pure C, HTTP-client-gated (`src/hull/commands/flavor.c`); the `~/.hull/platform/` store is a signed durable store like `~/.hull/tools/`, not a prunable cache. Full design: [docs/build_flavors.md](docs/build_flavors.md).
 
-**`hull feature install <name> [--repo=ORG/NAME]` / `feature list` / `feature uninstall <name>`**. Fetch the per-feature composable library (`libhull_feature-<name>-<arch>.a`) for `hull build --with=<name>` so end users do not build it from source. Same trust chain as `hull flavor install` (the shared `hl_release_io_fetch_verified_manifest`: verify the Ed25519 signature on `hull.sha256` against the embedded `HL_RELEASE_PUBKEY_HEX`, then per asset look up its SHA-256 in the verified manifest, download, constant-time-compare, atomic-write to `$HOME/.hull/feature/`). Four features today: `duckdb`, `postgres`, `gpu`, `tui`, all native-only (features are static archives; cosmo is never published). `feature list` shows each as `not installed` / `installed` for this platform. Registry is the `FEATURES[]` table in `src/hull/commands/feature.c` (one row per feature). Pure C, HTTP-client-gated. See "Composable features" above and [docs/features_and_flavors.md](docs/features_and_flavors.md).
+**`hull feature install <name> [--repo=ORG/NAME]` / `feature list` / `feature uninstall <name>`**. Fetch the per-feature composable library (`libhull_feature-<name>-<arch>.a`) for `hull build --with=<name>` so end users do not build it from source. Same trust chain as `hull flavor install` (the shared `hl_release_io_fetch_verified_manifest`: verify the Ed25519 signature on `hull.sha256` against the embedded `HL_RELEASE_PUBKEY_HEX`, then per asset look up its SHA-256 in the verified manifest, download, constant-time-compare, atomic-write to `$HOME/.hull/feature/`). Five features today: `duckdb`, `postgres`, `mysql`, `gpu`, `tui`, all native-only (features are static archives; cosmo is never published). `feature list` shows each as `not installed` / `installed` for this platform. Registry is the `FEATURES[]` table in `src/hull/commands/feature.c` (one row per feature). Pure C, HTTP-client-gated. See "Composable features" above and [docs/features_and_flavors.md](docs/features_and_flavors.md).
 
 **`hull cache list|prune|clear|verify`**. Inspect and manage the runtime cache pool (`$HOME/.hull/blobs/runtime/` by default — set `HULL_CACHE_DIR=/abs/path` to redirect for per-app isolation). Full reference: [docs/cache.md](docs/cache.md). Six registered kinds today: `lua-bytecode` (Lua source → bytecode), `js-bytecode` (QuickJS module bytecode), `compute-aot` (WASM AOT artifacts), `templates` (compiled Lua template render functions), `js-templates` (compiled JS template render functions), `tools` (signed side-loaded tool binaries; system store, not pruned by default). `list` enumerates every kind with entry count + total size + on-disk path; `--json` for machine output. `prune [--kind=K] [--max-size=N] [--max-age=N] [--strategy=lru|fifo] [--dry-run]` runs LRU/FIFO eviction over runtime caches; system stores are preserved unless `--kind=tools` is named. `--max-size` accepts `K`/`M`/`G` suffixes (binary, 1024-based; trailing `B` optional, so `100M` and `100MB` are equivalent); `--max-age` accepts `s`/`m`/`h`/`d`/`w`/`y` suffixes (bare numbers = seconds for back-compat). Bad units are rejected with an example. `clear --yes` wipes runtime caches entirely (iter + delete, not policy-based — so even sub-second-old files go). `verify [--kind=K] [--repair] [--json]` walks every entry and flags corruption: for CAS-mode kinds (`tools`) it recomputes `sha256(contents)` and compares to filename; for keyed-mode runtime caches it does a structural check (regular file, non-empty, readable). `--repair` unlinks corrupt entries — safe because the next compile/install repopulates from source. Exits non-zero on corruption unless `--repair` was able to fix it. Cache registry (`include/hull/cache_registry.h`) is the single source of truth for cache kinds, also consumed by `hull doctor` (Caches section), `hull inspect` (runtime-caches disclosure), and `hull cache verify` (CAS vs keyed mode dispatch via `is_cas` field). Adding a new cache kind = one entry in `REGISTRY[]` and the new consumer auto-shows up in list / prune / clear / verify / doctor / inspect.
 
