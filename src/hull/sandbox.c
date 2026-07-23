@@ -26,6 +26,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>   /* strncasecmp (DSN scheme match) */
 #include <sys/stat.h>
 #include <sys/types.h>
 
@@ -958,10 +959,13 @@ static int sandbox_dsn_is_network(const char *dsn)
 {
     if (!dsn || !*dsn) return 0;
     if (dsn[0] == '$') return 1;                 /* env-ref: assume network */
-    return strncmp(dsn, "postgres://",   11) == 0
-        || strncmp(dsn, "postgresql://", 13) == 0
-        || strncmp(dsn, "mysql://",       8) == 0
-        || strncmp(dsn, "mariadb://",    10) == 0;
+    /* Case-insensitive to match the DSN backend selector (db_select.c) and
+     * serve.c's db_dsn_is_network — else an uppercase-scheme named DSN would
+     * be classified non-network and the app SIGKILLed on connect. */
+    return strncasecmp(dsn, "postgres://",   11) == 0
+        || strncasecmp(dsn, "postgresql://", 13) == 0
+        || strncasecmp(dsn, "mysql://",       8) == 0
+        || strncasecmp(dsn, "mariadb://",    10) == 0;
 }
 
 /* True if the manifest declares any database connection that may dial the

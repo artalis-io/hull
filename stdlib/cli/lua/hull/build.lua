@@ -1412,9 +1412,11 @@ int main(int argc, char **argv) { return hull_main(argc, argv); }
                     if file_exists(cache .. "/" .. asset) then
                         -- Re-verify a cache-sourced lib against its signed
                         -- manifest (embedded release pubkey) before linking.
-                        if tool.platform_verify and not tool.platform_verify(cache, asset) then
-                            tool.stderr("hull build: cached " .. fname .. " feature lib failed "
-                                .. "re-verification; run `hull feature install " .. fname .. "` again\n")
+                        -- Fail CLOSED: a missing platform_verify binding must
+                        -- abort a cache-sourced lib, not link it unverified.
+                        if not tool.platform_verify or not tool.platform_verify(cache, asset) then
+                            tool.stderr("hull build: cached " .. fname .. " feature lib could not "
+                                .. "be re-verified; run `hull feature install " .. fname .. "` again\n")
                             tool.rmdir(tmpdir); tool.exit(1)
                         end
                         lib = cache .. "/" .. asset; from_cache = true
