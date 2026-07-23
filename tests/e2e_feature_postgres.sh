@@ -69,7 +69,12 @@ echo "$BUILD_OUT" | grep -q "composed feature 'postgres'" || { echo "FAIL: featu
 test -x "$APP/bin" || { echo "FAIL: no composed binary produced"; exit 1; }
 
 echo "=== boot the composed binary (expect a connection error, not a feature error) ==="
-RUN_OUT=$("$APP/bin" 2>&1) || true
+# --no-sandbox: the probe attempts a real socket to an unreachable host. Under
+# the kernel sandbox that differs by platform — Linux pledge KILLS the process
+# for an un-granted inet socket (no graceful error to catch), macOS seatbelt
+# returns EPERM. We're testing feature composition, not the sandbox, so drop it
+# and let the connect fail gracefully (connection refused/timeout) everywhere.
+RUN_OUT=$("$APP/bin" --no-sandbox 2>&1) || true
 echo "$RUN_OUT" | grep -q "PG FEATURE APP OK" || {
     echo "$RUN_OUT"
     echo "FAIL: postgres backend not registered in the composed binary"; exit 1
