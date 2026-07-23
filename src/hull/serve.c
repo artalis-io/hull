@@ -1583,12 +1583,37 @@ static const char *sandbox_db_path(const char *dsn)
     return path;
 }
 
+/* True if the `-d` default DSN names a NETWORK backend (postgres/mysql/mariadb),
+ * or is a "$VAR" env-ref (opaque scheme -> possibly-network). A scheme-less bare
+ * path is SQLite (local). Used to grant network_outbound for `hull -d
+ * postgres://... app.lua` (the default DSN lives in cfg, not the manifest, so
+ * it isn't covered by hl_sandbox_policy_from_manifest). */
+static int db_dsn_is_network(const char *dsn)
+{
+    if (!dsn || !*dsn) return 0;
+    if (dsn[0] == '$') return 1;
+    const char *sep = strstr(dsn, "://");
+    if (!sep) return 0;   /* scheme-less bare path -> sqlite (local) */
+    size_t n = (size_t)(sep - dsn);
+    return (n == 8  && strncasecmp(dsn, "postgres",   8)  == 0)
+        || (n == 10 && strncasecmp(dsn, "postgresql", 10) == 0)
+        || (n == 5  && strncasecmp(dsn, "mysql",      5)  == 0)
+        || (n == 7  && strncasecmp(dsn, "mariadb",    7)  == 0);
+}
+
 /* Phase 2: apply the OS-level sandbox built from the resolved manifest. */
 static int hl_serve_apply_sandbox(HlServerState *s)
 {
     if (!s->cfg.no_sandbox) {
         HlSandboxPolicy sandbox_policy;
         hl_sandbox_policy_from_manifest(&sandbox_policy, &s->manifest);
+
+        /* The `-d` default DSN lives in cfg, not the manifest, so
+         * hl_sandbox_policy_from_manifest can't see it. A `-d postgres://...`
+         * (or `-d $DATABASE_URL`) app needs outbound network to reach its DB;
+         * grant it here so a DB-only app isn't SIGKILLed on connect. */
+        if (!s->cfg.no_db && db_dsn_is_network(s->cfg.db_path))
+            sandbox_policy.network_outbound = 1;
 
         /* CLI-mode apps (app.main registered) never accept inbound
          * connections — narrow the sandbox accordingly. The runtime

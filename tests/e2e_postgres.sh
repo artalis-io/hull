@@ -209,7 +209,7 @@ end)
 LUA
 
 echo "=== running app against postgres ==="
-./build/hull -d "$DSN" --no-sandbox -p "$PORT" "$APPDIR/app.lua" >"$APPDIR/serve.log" 2>&1 &
+./build/hull -d "$DSN" -p "$PORT" "$APPDIR/app.lua" >"$APPDIR/serve.log" 2>&1 &
 SVR=$!
 wait_for_server "$APPDIR/serve.log" || exit 1
 
@@ -301,7 +301,7 @@ app.main(function(ctx)
 end)
 LUA
 
-DYN_OUT=$(./build/hull --no-sandbox "$APPDIR_DYN/app.lua" -- "$DSN" 2>&1 || true)
+DYN_OUT=$(./build/hull "$APPDIR_DYN/app.lua" -- "$DSN" 2>&1 || true)
 echo "$DYN_OUT" | grep -qE "allow_count=3" || { echo "::error db.open allowed host did not query"; echo "$DYN_OUT"; exit 1; }
 echo "$DYN_OUT" | grep -qE "deny_host=denied" || { echo "::error db.open out-of-CIDR host not rejected"; echo "$DYN_OUT"; exit 1; }
 echo "$DYN_OUT" | grep -qE "deny_scheme=denied" || { echo "::error db.open disallowed scheme not rejected"; echo "$DYN_OUT"; exit 1; }
@@ -352,7 +352,7 @@ end)
 LUA
 
 echo "=== running app over TLS (sslmode=require) ==="
-./build/hull -d "$DSN_TLS" --no-sandbox -p "$PORT" "$APPDIR_TLS/app.lua" >"$APPDIR_TLS/serve.log" 2>&1 &
+./build/hull -d "$DSN_TLS" -p "$PORT" "$APPDIR_TLS/app.lua" >"$APPDIR_TLS/serve.log" 2>&1 &
 SVR=$!
 wait_for_server "$APPDIR_TLS/serve.log" || exit 1
 

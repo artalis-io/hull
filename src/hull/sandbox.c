@@ -949,6 +949,43 @@ int hl_sandbox_apply(const HlSandboxPolicy *policy, const char *app_dir,
 
 /* ── Policy builder ────────────────────────────────────────────────── */
 
+/* True if a DSN names a NETWORK database backend (dials out), vs a local
+ * sqlite/duckdb file. A "$VAR"/"${VAR}" env-ref has an unknown scheme at
+ * manifest time, so it's treated as possibly-network (the common
+ * `$DATABASE_URL` = postgres case must not be blocked). A scheme-less bare
+ * path is SQLite (local). */
+static int sandbox_dsn_is_network(const char *dsn)
+{
+    if (!dsn || !*dsn) return 0;
+    if (dsn[0] == '$') return 1;                 /* env-ref: assume network */
+    return strncmp(dsn, "postgres://",   11) == 0
+        || strncmp(dsn, "postgresql://", 13) == 0
+        || strncmp(dsn, "mysql://",       8) == 0
+        || strncmp(dsn, "mariadb://",    10) == 0;
+}
+
+/* True if the manifest declares any database connection that may dial the
+ * network: a named connection with a network (or env-ref) DSN, or a
+ * databases.dynamic policy admitting a network scheme. Grants network_outbound
+ * for a DB-only app that has no http `hosts` — without it the kernel sandbox
+ * blocks the connect (pledge SIGKILL on Linux). The `-d` default DSN is not in
+ * the manifest (it lives in cfg); serve.c ORs that in separately. */
+static int manifest_has_network_db(const HlManifest *m)
+{
+    if (!m) return 0;
+    for (int i = 0; i < m->databases.named_count; i++)
+        if (sandbox_dsn_is_network(m->databases.named[i].dsn)) return 1;
+    if (m->databases.dynamic.declared) {
+        for (int i = 0; i < m->databases.dynamic.scheme_count; i++) {
+            const char *s = m->databases.dynamic.schemes[i];
+            if (s && (strcmp(s, "postgres") == 0 || strcmp(s, "postgresql") == 0
+                   || strcmp(s, "mysql") == 0 || strcmp(s, "mariadb") == 0))
+                return 1;
+        }
+    }
+    return 0;
+}
+
 void hl_sandbox_policy_from_manifest(HlSandboxPolicy *policy,
                                      const HlManifest *manifest)
 {
@@ -972,9 +1009,13 @@ void hl_sandbox_policy_from_manifest(HlSandboxPolicy *policy,
     policy->fs_write        = manifest->fs_write;
     policy->fs_write_count  = manifest->fs_write_count;
 
-    /* Sandbox only needs the boolean "any outbound network?" decision.
-     * The actual host allowlist is enforced in cap/http.c. */
-    policy->network_outbound = (manifest->hosts_count > 0);
+    /* Sandbox only needs the boolean "any outbound network?" decision. The
+     * actual host allowlist is enforced in cap/http.c (http.fetch) and, for
+     * DB, by the backend + databases.dynamic policy. Granted for http `hosts`
+     * OR a declared network database connection, so a DB-only app can reach
+     * its database (previously blocked -> pledge SIGKILL on connect). */
+    policy->network_outbound = (manifest->hosts_count > 0)
+                             || manifest_has_network_db(manifest);
 
     /* Inbound: assume the app may serve (default-permissive). serve.c
      * narrows this to 0 right before applying the sandbox when the
