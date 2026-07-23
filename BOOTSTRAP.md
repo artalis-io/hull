@@ -708,6 +708,17 @@ feature — do NOT assume `gpu.*` or `duckdb://` work on a plain base build.
 Either compose the feature, or declare the module optional (next) so the
 app degrades gracefully. See `docs/features_and_flavors.md`.
 
+**Companion tools (`hull tools install`).** A couple of build helpers are
+separate signed programs, not part of the hull binary: **`wamrc`** (the
+LLVM WASM AOT compiler, for ~50x faster compute modules) and **`tcc`** (a
+zero-dependency C compiler backend for `hull build --compiler=tcc`, when
+the box has no system cc; Linux ELF only). `hull build` resolves them from
+`~/.hull/tools` → next to the hull binary → `$PATH`. tcc used to be
+embedded but is now side-loaded, so on a bare Linux box with no system
+compiler, install it first: `hull tools install tcc`. (Most dev machines
+have gcc/clang, so `hull build` just works with `--compiler=system` or the
+default auto-select.) See `docs/tools_install.md`.
+
 **Optional modules - graceful fallback.** A trailing `?` on a manifest
 spec (`"hull/gpu@1?"`) makes the module optional: on a build without the
 capability, `require`/`import` returns nil/null instead of failing app

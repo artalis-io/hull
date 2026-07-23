@@ -103,7 +103,7 @@ Hull ships 30+ subcommands for the full development lifecycle:
 | `hull init [dir] [--profile htmx]` | Initialize a hull project in-place (idempotent, like `git init`). `--profile htmx` scaffolds a full HTMX + Pico app (CSP nonce, CSRF, session, flash, pagination, search, inline edit) |
 | <code>hull dev &lt;app&gt; [--tui]</code> | Development server with hot reload. [`--tui`](#terminal-ui) streams the child's log into an alt-screen pane with substring filtering, file-watch auto-reload, and `r` for manual reload |
 | <code>hull build -o &lt;out&gt; &lt;dir&gt;</code> | Compile app into a standalone binary |
-| <code>hull build --compiler=tcc\|system\|&lt;path&gt;</code> | Select compiler backend (default: embedded tcc if available, else system cc) |
+| <code>hull build --compiler=tcc\|system\|&lt;path&gt;</code> | Select compiler backend (default: a resolvable `tcc` tool if installed, else system cc). `tcc` is side-loaded via `hull tools install tcc` |
 | <code>hull test &lt;dir&gt;</code> | In-process test runner (no TCP, memory SQLite) |
 | <code>hull deploy &lt;target&gt; [app_dir]</code> | [Generate deployment configs](#deployment). Dockerfile, systemd, fly.toml |
 | <code>hull agent &lt;subcommand&gt;</code> | [AI agent interface](#using-hull-with-ai-agents). Routes, schema, tests, requests as JSON |
@@ -125,7 +125,7 @@ Hull ships 30+ subcommands for the full development lifecycle:
 | `hull version [--json]` | Print version string (`--json` for machine-readable output) |
 | `hull doctor [--json\|--tui]` | Check environment: compiler, platform embed, module subsystems (DB/WASM/GPU), build readiness. [`--tui`](#terminal-ui) opens a live, color-coded interactive readiness pane with `r` to reprobe and `c` to copy JSON to the clipboard |
 | `hull update [--check] [--force] [--channel=beta]` | Self-update from GitHub releases (verifies SHA-256, atomic replace) |
-| `hull tools install <name>` / `list` / `uninstall <name>` | Side-load optional tools (first: `wamrc`) routed through signed `blob_store` from the same release as the running hull |
+| `hull tools install <name>` / `list` / `uninstall <name>` | Side-load optional tools (`wamrc`, `tcc`) routed through signed `blob_store` from the same release as the running hull |
 | `hull cache list \| prune \| clear \| verify` | Runtime cache management (Lua/JS bytecode, Lua/JS template, compute AOT, tools store). Per-app isolation via `HULL_CACHE_DIR` |
 | <code>hull &lt;app&gt; --max-instructions N</code> | Set per-request instruction limit (default: 100M) |
 | <code>hull &lt;app&gt; --audit</code> | Enable capability audit logging (JSON to stderr) |
@@ -164,16 +164,17 @@ Hull supports four compiler targets:
 
 | Compiler | Target | Binary Type | Notes |
 |----------|--------|-------------|-------|
-| Embedded TinyCC | Linux / macOS | ELF / Mach-O | Default; zero-dependency; compile-only (links via system ld) |
+| `tcc` (TinyCC) | Linux | ELF | Side-loaded tool (`hull tools install tcc`); compile-only (links via system ld) |
 | `gcc` / `clang` | Linux / macOS | ELF / Mach-O | `--compiler=system` or explicit path |
 | `cosmocc` | Any x86_64/aarch64 | APE (Actually Portable Executable) | Multi-arch fat binary |
 
-**Zero-dependency builds:** Distribution builds of Hull embed a copy of [TinyCC](https://github.com/TinyCC/tinycc) (mob branch, ~400 KB). When no system compiler is installed, `hull build` uses the embedded TinyCC for the compile step and falls back to the system linker (`ld`/`cc`) for linking. `hull doctor` reports whether TinyCC is embedded and whether a system compiler is available.
+**TinyCC as a side-loaded tool:** [TinyCC](https://github.com/TinyCC/tinycc) (mob branch, ~400 KB) is **not embedded** in the hull binary — it's a companion tool installed with `hull tools install tcc` (Linux only; tcc emits ELF, so it's not viable on macOS Mach-O or cosmo). `hull build` resolves it from `~/.hull/tools` → next to the hull binary → `$PATH`. When resolvable, `--compiler=tcc` (or auto-select) uses it for the compile step and delegates linking to the system linker (`ld`/`cc`). Most dev machines have gcc/clang, so builds work out of the box; a bare Linux box with no system compiler installs tcc first. `hull doctor` reports whether a `tcc` tool is resolvable and whether a system compiler is available.
 
 ```bash
-hull build -o myapp .                  # auto-select: embedded tcc → system cc → gcc/clang
-hull build -o myapp . --compiler=tcc   # force embedded tcc (compile) + system linker
-hull build -o myapp . --compiler=system  # force system cc (no tcc fallback)
+hull build -o myapp .                  # auto-select: resolvable tcc → system cc → gcc/clang
+hull tools install tcc                 # install the tcc backend (Linux, no system cc needed)
+hull build -o myapp . --compiler=tcc   # force tcc (compile) + system linker
+hull build -o myapp . --compiler=system  # force system cc (no tcc)
 hull build -o myapp . --compiler=/path/to/cc  # explicit compiler path
 ```
 
@@ -189,7 +190,7 @@ The distinction that earns its keep is **distribution**, not architecture, becau
 
 - **Feature** - a large **additive** subsystem shipped as its **own bolt-on lib** (`libhull_feature-<name>.a`), composed onto a base at `hull build --with=<name>`. Additive features are orthogonal - N of them means 2^N combos - so they can't be enumerated as flavors; instead **M flavors + N features publish M+N libs but build any of M×N combos**. `hull feature install <name>`; the build links it when the app needs it. Two features ship today - **DuckDB** (~58 MB OLAP, `duckdb://`) and **GPU** (wgpu-native compute) - both native-only; the tiny pure-C `postgres`/`mysql` connectors stay compiled into the base. *(Design: [docs/features_and_flavors.md](docs/features_and_flavors.md). Direction: collapse to one primitive - features - with flavors becoming named presets.)*
 
-- **Tool** — a separate companion **program** Hull shells out to, not a build of Hull (e.g. `wamrc`, the LLVM-based WASM AOT compiler). `hull tools install <name>`; Hull spawns it when needed.
+- **Tool** — a separate companion **program** Hull shells out to, not a build of Hull (e.g. `wamrc`, the LLVM-based WASM AOT compiler, or `tcc`, the C compiler backend for `hull build --compiler=tcc`). `hull tools install <name>`; Hull spawns it when needed.
 
 Three install verbs, one signed trust chain (`hull.sha256` + Ed25519): `hull tools install` for foreign programs, `hull flavor install` for a base build, `hull feature install` for a bolt-on subsystem.
 
