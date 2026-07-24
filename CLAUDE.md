@@ -254,6 +254,53 @@ composes an app with `--with=`, runs it, and asserts a plain app stays
 feature-free — the GPU one is build-only since `gpu.dispatch` needs a device
 CI lacks).
 
+### Extension taxonomy: feature vs flavor vs tool vs stdlib
+
+A new capability reaches an app through exactly one of four shipping units.
+Classifying it correctly is the difference between a signed static archive and
+twenty lines of Lua. The four, and the single question that separates each:
+
+| Unit | What it is | Ships as | Reached via | Axis |
+|------|-----------|----------|-------------|------|
+| **stdlib** | pure Lua/JS built on capabilities the base already has (no new C, no new authority) | always in the base VFS | `require("hull.X")` / `import "hull:X"` + `manifest.modules` | orchestration |
+| **feature** | a large optional C subsystem, off by default, adding a new vendored engine, wire backend, or authority | signed `libhull_feature-<name>-<arch>.a` | `hull build --with=<name>` (auto-inferred or forced) | **additive** |
+| **flavor** | a preset of the default base that turns subsystems OFF to slim it | `libhull_platform-<flavor>-<arch>.a` | `hull build --flavor=<name>` | **subtractive** |
+| **tool** | a separate companion **program** Hull spawns (never linked in) | `hull-<tool>-<platform>` binary | `hl_tool_spawn` at build time; `hull tools install` | is-it-Hull-or-a-program-Hull-runs |
+
+**Decision procedure** (ask in order; first yes wins):
+
+1. **Is it a separate program Hull executes, not code linked into the app?**
+   (a compiler, an AOT/optimizer pass, a codegen binary) → **tool**. Version-
+   coupled to the release, side-loaded, resolved via `hl_tools_lookup_path`.
+   Examples: `wamrc`, `tcc`.
+2. **Can it be built entirely on existing capabilities** (`http`/`crypto`/`fs`/
+   `db`/`compute`/…) **with no new C and no new authority?** → **stdlib module**.
+   If the answer is "it's just HTTP + a signing scheme" or "it's composition over
+   caps we already ship," it does NOT get a C archive. Example: an S3 /
+   object-storage client is `http.fetch` + SigV4 (`crypto`) → stdlib, never a
+   feature. Same for most webhook/integration clients.
+3. **Does it add a large optional C subsystem or a new authority, off by
+   default?** (a vendored engine, a pure-C wire protocol, a new hardware/OS
+   surface) → **feature**. It fills a base-resident **weak hook** with a
+   **strong override** from the composed archive; register one row in
+   `FEATURES[]` (`src/hull/commands/feature.c`) + one `FEATURE_SPECS` entry
+   (`stdlib/cli/lua/hull/build.lua`). Examples: `duckdb`, `postgres`, `mysql`,
+   `gpu`, `tui`.
+4. **Are you turning a default subsystem OFF to produce a smaller base?** →
+   **flavor** (preset). Examples: `server-only`, `client-only`, `pure-compute`.
+
+**The sharp rules.** New vendored C or new authority → **feature** (additive).
+Turning a default off → **flavor** (subtractive). A separate program → **tool**.
+Pure orchestration over existing caps → **stdlib** (and this is the most common
+misclassification: reach for stdlib before a feature). "On by default and you
+subtract" is a flavor; "off by default and you add" is a feature. HTTP itself is
+just a feature that happens to be on by default, which is why the flavor/feature
+line is a distribution fact (enumerable pre-published base vs. combinatorial
+bolt-on), not an architectural one. Full rationale in
+[docs/features_and_flavors.md](docs/features_and_flavors.md); near-term
+candidates classified against this table live in
+[docs/roadmap.md](docs/roadmap.md) ("Extension taxonomy and near-term targets").
+
 ### Pure-compute builds (`HL_ENABLE_HTTP=0`)
 
 `make HL_ENABLE_HTTP=0` turns **both** HTTP halves off (it's the back-compat alias that pins `HL_ENABLE_HTTP_SERVER=0` and `HL_ENABLE_HTTP_CLIENT=0`). This is the only flavor that drops **mbedTLS and Keel entirely**. Use it for an offline, network-free compute or signing binary: a WASM/GPU transform pipeline, a local data tool, an air-gapped batch job. Apps run via `app.main(fn)`.

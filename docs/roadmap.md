@@ -126,6 +126,39 @@
 
 ## Roadmap
 
+### Extension taxonomy and near-term targets
+
+Every new capability ships as one of four units. Pick the wrong one and you
+either bloat the base or build a signed archive where a Lua module would do.
+The full decision procedure lives in `CLAUDE.md` ("Extension taxonomy: feature
+vs flavor vs tool vs stdlib") and the rationale in
+[features_and_flavors.md](features_and_flavors.md); the short version:
+
+| Unit | Rule of thumb | Ships as | Examples |
+|------|---------------|----------|----------|
+| **stdlib** | pure Lua/JS over caps we already ship; no new C, no new authority | always in base | jwt, csrf, template, an S3/SigV4 client |
+| **feature** | large optional C subsystem / new authority, **off by default** (additive) | `libhull_feature-<name>.a`, `--with=` | duckdb, postgres, mysql, gpu, tui |
+| **flavor** | preset that turns default subsystems **off** to slim the base (subtractive) | `libhull_platform-<flavor>.a`, `--flavor=` | server-only, client-only, pure-compute |
+| **tool** | a companion **program** Hull spawns at build time (never linked) | `hull-<tool>-<platform>`, `hull tools install` | wamrc, tcc |
+
+**First yes wins:** separate program → tool; buildable on existing caps → stdlib;
+new vendored C / new authority off by default → feature; turning a default off →
+flavor.
+
+**Near-term candidates, classified:**
+
+| Candidate | Class | Status / rationale |
+|-----------|-------|--------------------|
+| **Redis / Valkey client** | **feature** | Highest-leverage gap: shared cache / session / rate-limit / pub-sub state across instances. Pure-C RESP3 wire client (the pg/mysql playbook: codec + shared `tls_client` + tiny archive), off by default, new authority. NOT a `HlDbBackend` (RESP is not SQL) - it opens the first non-SQL connection-feature seam (`hl_kv_feature_backend` + a `hull/kv` module). Full spec: [roadmap_next.md](roadmap_next.md) "Redis / Valkey connection feature." |
+| **wasm-opt (Binaryen)** | **tool** | Build-time WASM→WASM optimizer; heavy LLVM/C++, version-coupled - mirrors `wamrc` exactly. Value is narrower than wamrc (Hull already runs `clang -O2 -flto`, and AOT re-lowers through LLVM); real payoff is the interpreter-fallback path and non-clang toolchains (Rust / AssemblyScript / TinyGo). |
+| **Image codecs (stb_image)** | **flavor** knob | `cap/image.c` is *on by default* (web apps want avatars / thumbnails), so slimming it out is subtractive → a `HL_ENABLE_IMAGE=0` flavor knob, not a `--with=` feature. Featurizing an on-by-default subsystem inverts the ergonomics. |
+| **Object storage / S3, most integration clients** | **stdlib** | Buildable on `http.fetch` + `crypto` (SigV4). No C archive. The canonical "reach for stdlib before a feature" case. |
+
+**Deliberately kept core (never a feature):** the WASM *interpreter* (WAMR,
+~256 KB - the compute pillar; `db.udf` leans on it; its heavy half, the AOT
+*compiler* `wamrc`, is already correctly a tool), and `crypto` / SHA / HMAC (the
+trust substrate under signatures, sessions, JWT).
+
 ### Next. Distribution: hull.com Downloadable Tool
 
 The goal: a single downloadable Cosmopolitan APE binary that users install and immediately use to create, build, test, run, and deploy Hull applications. Zero dependencies.

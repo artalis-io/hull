@@ -4154,6 +4154,166 @@ Keel v2.6.2:
 
 ---
 
+## Redis / Valkey connection feature (`hull/kv`)
+
+**Status:** designed, no target. First composable feature after the DB-backend
+set (duckdb / postgres / mysql). Classified **feature** per the extension
+taxonomy (`CLAUDE.md`): a large-ish optional C subsystem, off by default, adding
+a new authority (an outbound cache/KV connection). See
+[roadmap.md](roadmap.md) "Extension taxonomy and near-term targets" and
+[features_and_flavors.md](features_and_flavors.md).
+
+### Why
+
+The most-requested "shared state across instances" story - caching,
+session/rate-limit backing, idempotency keys, ephemeral counters, pub/sub - has
+no first-party answer today beyond "a SQLite file or Postgres." Redis (and its
+BSD fork Valkey, wire-identical) is the default reach for that. A pure-C RESP3
+client closes the gap without a vendored engine, reusing the exact scaffolding
+the pg/mysql wire clients proved: a bounds-checked codec over untrusted input,
+TLS via the shared `shared/tls_client.c`, and the composable-feature machinery.
+
+### The one thing that makes it NOT a copy of postgres/mysql
+
+pg and mysql fill `hl_db_feature_backends` and return an `HlDbBackend` vtable
+because they are SQL and DSN-selected on `hull/db`. **Redis is not SQL.** RESP is
+a command protocol, not a query language, so it does not belong behind
+`HlDbBackend` and must not be reachable by a `db.query`. This feature therefore
+opens the **first non-SQL connection seam** and is the design template every
+future non-SQL connection backend (memcached, NATS, an S3-native protocol)
+reuses:
+
+- A new base-resident **weak hook** `hl_kv_feature_backend(size_t *count)` in a
+  new `cap/kv_feature.c`, mirroring `hl_db_feature_backends` but returning an
+  `HlKvBackend` vtable (`include/hull/cap/kv_backend.h`). The base ships the weak
+  default (returns empty); the composed feature archive provides the strong
+  override via a generated `feature_registry.c` entry (the existing `by_hook`
+  collector in `build.lua` already merges multiple hooks, so `--with=redis`
+  composes alongside `--with=postgres` etc. with no collector change).
+- A new **module** `hull/kv` (`require("hull.kv")` / `import { kv } from
+  "hull:kv"`), gated by the resolver like any other, with its own registry row.
+  Handles-only, mirroring `hull/db`: `kv.default()`, `kv.connect(name)`,
+  `kv.open(dsn)` (caller-owned, validated against a `kv.dynamic` policy).
+- A new **manifest section** `kv = { named = { ... }, dynamic = { ... } }`
+  (parallel to `databases`), so KV connections are declared and env-ref-resolved
+  (`"$REDIS_URL"`) the same way, and never conflated with SQL databases.
+
+### Surface (`HlKvBackend` + `hull/kv`)
+
+A deliberately small, Redis-shaped command surface on the connection object,
+not a generic "send any command" hole (that stays available but explicit):
+
+- Strings / counters: `get`, `set` (with `ex` / `px` / `nx` / `xx` opts), `del`,
+  `exists`, `incr`, `incrby`, `decr`, `expire`, `ttl`, `mget`, `mset`.
+- Hashes: `hget`, `hset`, `hdel`, `hgetall`.
+- Sets / lists (v1 minimal): `sadd`, `srem`, `smembers`, `lpush`, `rpush`,
+  `lrange`.
+- Generic escape hatch: `command(argv_table)` returns the decoded RESP3 reply,
+  for anything the typed surface doesn't cover (server-side `EVAL`, `SCAN`, etc.).
+- `async` (per-connection, worker-pool, keyed by DSN like `db.async`) and
+  `close` (dynamic handles). `pipeline(fn)` batches commands into one round trip.
+- RESP3 decodes to `HlValue`: integer, double, blob/simple string, boolean,
+  null, array → table, map → table. Errors surface as a Lua error / rejected JS
+  promise carrying the server's `-ERR` text.
+
+### DSN, auth, TLS
+
+- **DSN:** `redis://[user:pass@]host:port[/db]`; `rediss://` selects TLS. Path
+  segment is the logical DB index (`SELECT n` on connect). `?` query opts for
+  `connect_timeout` etc.
+- **Handshake:** `HELLO 3` to negotiate RESP3 (fall back to RESP2 framing if the
+  server rejects `HELLO`, since Valkey/Redis < 6 predates it - the codec supports
+  both; RESP3 map/bool/null are the only additions).
+- **Auth:** `AUTH <pass>` (legacy `requirepass`) and `AUTH <user> <pass>` (Redis
+  6+ ACL), sent inside `HELLO 3 AUTH ...` when possible. Redis auth is plaintext
+  on the wire (no SCRAM), so a password on a bare `redis://` (no TLS) logs a
+  one-time warning pointing at `rediss://`; credentials over `rediss://` ride the
+  TLS tunnel. Reuses nothing from `cap/crypto` beyond what TLS already needs.
+- **TLS:** `rediss://` runs the blocking handshake over the shared
+  `shared/tls_client.c` (embedded CA bundle; chain + hostname verified), then all
+  I/O tunnels through `KlTls` - identical to the pg/mysql `sslmode=verify-full`
+  path. Links `HL_LINK_TLS` (already pulled when any HTTP half or a wire DB
+  backend is on; the `base_group` note below covers the DB-only-app case).
+
+### Sandbox
+
+A declared KV network connection must grant `network_outbound`, exactly like a
+network DB. Extend the §2.10 / #102 sandbox seam:
+`sandbox.c::manifest_has_network_db` generalizes to also scan
+`manifest.kv.named` / `kv.dynamic` for a `redis://` / `rediss://` scheme (or a
+`"$VAR"` env-ref), and `serve.c::db_dsn_is_network` gains the two schemes for the
+`-d`-style default. Same outbound-only grant; same "Linux pledge SIGKILLs an
+un-granted socket, macOS seatbelt returns EPERM" test asymmetry (so the e2e runs
+under the real sandbox, never `--no-sandbox`). The scheme match is
+case-insensitive from day one (the audit lesson from #104).
+
+### Feature machinery (the mechanical part)
+
+- `Makefile`: `feature-redis` target ars `cap_kv.o` + `cap_redis_conn.o` +
+  `cap_respwire.o` (+ the generated backend registration) into
+  `build/libhull_feature-redis.a`. Pure C, tiny (~40-50 KB like pg/mysql, no
+  vendored engine).
+- `feature.c`: one `FEATURES[]` row (`redis`, native platforms it publishes for).
+- `build.lua`: one `FEATURE_SPECS.redis` entry - `backend =
+  "hl_kv_backend_redis"`, `hook = "hl_kv_feature_backend"`, `vtype =
+  "HlKvBackend"`, `cxx = false`, `base_group = true` (it references base
+  `tls_client` + the socket helpers a KV-only app doesn't otherwise pull, so the
+  Linux GNU-ld one-pass link needs the platform lib + archive wrapped in
+  `--start-group`, gated `not target_is_darwin` - the same trap pg/mysql hit).
+- Release + CI: `build-feature-redis` job (mirror `build-feature-postgres`),
+  `redis-feature` link-flavor CI job, `e2e_feature_redis.sh` (compose `--with=redis`,
+  boot an app pointed at an unreachable host under the real sandbox, assert a
+  connection error not a scheme rejection), and a full `e2e_redis.sh` (real
+  Redis + Valkey in Docker: `HELLO`/auth/TLS/ops/`async`/pipeline).
+- `hull feature install redis` / `feature list` / `uninstall` come for free from
+  the shared `hl_release_io_fetch_verified_manifest` trust chain - no new keys.
+
+### Phases
+
+1. **Codec + DSN + unit tests.** `cap/respwire.c` (RESP2/3 encode + decode,
+   CRLF-framed, type-prefixed, every server reply bounds-checked over untrusted
+   input like `pgwire`/`mysqlwire`), DSN parser. `test_respwire` (framing,
+   bulk/verbatim strings, maps, big-number, untrusted-input safety) +
+   `test_redis_conn` (`HELLO`/`AUTH`/`GET`/`SET`/error over a socketpair). A
+   fuzzer harness (`respwire`, `redis_dsn`) mirrors the pg/mysql ones.
+2. **Capability + module.** `cap/kv.c` (the typed surface + `command`), the
+   `HlKvBackend` vtable + weak `hl_kv_feature_backend`, `hull/kv` bindings in both
+   runtimes, the `kv.*` manifest section + registry (`cap/kv_registry.c`,
+   `kv_dynamic.c` reusing `host_match.c`). Sync path first.
+3. **Feature archive + compose + sandbox + e2e.** The Makefile/feature.c/build.lua
+   machinery above, the sandbox grant, `e2e_feature_redis.sh` + `e2e_redis.sh`.
+4. **`async` + pub/sub (phase 2, possibly its own epic).** `kv.async.*` on the
+   worker pool (keyed by DSN, LRU-bounded like worker DB). Pub/sub
+   (`SUBSCRIBE`/`PSUBSCRIBE`) needs a *streaming* seam closer to `ws`/`sse` than
+   to request/reply - a persistent connection pushing messages to a Lua/JS
+   callback on the event-loop thread - so it is deferred and scoped separately.
+
+### Tests
+
+`test_respwire`, `test_redis_conn` (socketpair), `test_kv_registry`,
+`test_kv_dynamic` (mirroring the db equivalents), fuzzers (`respwire`,
+`redis_dsn`), `e2e_feature_redis.sh` (compose + sandbox), `e2e_redis.sh` (real
+Redis 7 + Valkey 8 in Docker: auth + TLS + typed ops + `async` + pipeline),
+`e2e_sandbox` case for the `network_outbound` KV grant.
+
+### Non-goals (v1)
+
+Redis Cluster (slot routing / `MOVED`/`ASK` redirects) - single-endpoint only;
+Sentinel failover discovery; RESP3 push-type pub/sub (phase 2 seam above);
+server-side function libraries; a generic ORM-style abstraction over KV. The
+generic `command()` escape hatch covers anything the typed surface omits.
+
+### Onboarding note for the next non-SQL backend
+
+This epic establishes the reusable seam: a weak `hl_<x>_feature_backend` hook +
+its own `include/hull/cap/<x>_backend.h` vtable, a `hull/<x>` module + registry,
+a `manifest.<x>` connections section, and the sandbox `network_outbound`
+generalization. A future memcached/NATS backend is then the same "codec +
+`_conn` + vtable + feature row" shape pg/mysql/redis share, with **zero** change
+to the resolver, the compose collector, or the sandbox seam.
+
+---
+
 ## ✅ Done: pre-v0.1.0 release gate
 
 Five operational steps that gated the v0.1.0 tag. All executed
