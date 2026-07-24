@@ -475,8 +475,8 @@
               <span>shell</span>
               <span class="ml-auto text-[10px] text-mute-500">copy &amp; paste</span>
             </header>
-<pre><span class="tk-com"># Install (trusts TLS + our GitHub). install.sh verifies each</span>
-<span class="tk-com"># binary's SHA-256 against the manifest as it downloads.</span>
+<pre><span class="tk-com"># Install over TLS. install.sh is minisign-signed (verify it below);</span>
+<span class="tk-com"># it SHA-256-checks each binary against the manifest as it downloads.</span>
 $ curl -fsSL <span class="tk-str">https://gethull.dev/install.sh</span> | sh
 hull installed to ~/.local/bin/hull  (v0.7.0)
 
@@ -1197,7 +1197,7 @@ hull v0.7.0  &middot;  ca-bundle: embedded  &middot;  platform: embedded  &middo
             <div class="text-sm text-paper-50 font-medium mb-2">WASM + WebGPU + multi-backend SQL</div>
             <ul class="text-xs text-mute-400 leading-relaxed space-y-1">
               <li><code class="text-paper-100 text-[0.7rem]">compute</code> (WAMR AOT) &middot; <code class="text-paper-100 text-[0.7rem]">gpu</code> (wgpu-native)</li>
-              <li><code class="text-paper-100 text-[0.7rem]">db</code> across SQLite, PostgreSQL, MySQL/MariaDB (pure-C wire clients, no libpq/libmysql)</li>
+              <li><code class="text-paper-100 text-[0.7rem]">db</code> across SQLite, PostgreSQL, MySQL/MariaDB (pure-C wire clients, no libpq/libmysql), and embedded DuckDB (OLAP)</li>
               <li><code class="text-paper-100 text-[0.7rem]">db</code> parameterized binding (zero SQLi surface) &middot; <code class="text-paper-100 text-[0.7rem]">db.udf</code></li>
               <li><code class="text-paper-100 text-[0.7rem]">search</code> (SQLite FTS5) &middot; <code class="text-paper-100 text-[0.7rem]">image</code></li>
             </ul>
@@ -1632,7 +1632,7 @@ hull v0.7.0  &middot;  ca-bundle: embedded  &middot;  platform: embedded  &middo
               </li>
               <li class="flex gap-2">
                 <span class="text-accent mt-0.5">&check;</span>
-                <span><strong class="text-paper-100">Backend-agnostic database layer.</strong> The <code class="text-paper-100 text-[0.78rem]">db</code> capability runs on embedded SQLite (default), plus a pure-C PostgreSQL wire client (SCRAM-SHA-256, TLS, no libpq) and a pure-C MySQL / MariaDB wire client (<code class="text-paper-100 text-[0.78rem]">mysql_native_password</code> + <code class="text-paper-100 text-[0.78rem]">caching_sha2_password</code> over TLS, binary prepared statements, no libmysql) that compose in as opt-in features (<code class="text-paper-100 text-[0.78rem]">--with=postgres&hairsp;|&hairsp;mysql</code>). One <code class="text-paper-100 text-[0.78rem]">HlDbBackend</code> vtable, DSN-scheme selection; parameterized binding on every backend so SQL injection has no surface; the DB-backed stdlib (session, outbox, inbox, rbac, audit-log, idempotency) and migrations run dialect-portably. Real-server E2E in CI (Postgres&nbsp;16, MySQL&nbsp;8): auth + TLS + migrations + <code class="text-paper-100 text-[0.78rem]">db.async</code> + stdlib.</span>
+                <span><strong class="text-paper-100">Backend-agnostic database layer.</strong> The <code class="text-paper-100 text-[0.78rem]">db</code> capability runs on embedded SQLite (default), plus a pure-C PostgreSQL wire client (SCRAM-SHA-256, TLS, no libpq) and a pure-C MySQL / MariaDB wire client (<code class="text-paper-100 text-[0.78rem]">mysql_native_password</code> + <code class="text-paper-100 text-[0.78rem]">caching_sha2_password</code> over TLS, binary prepared statements, no libmysql), plus an embedded DuckDB OLAP / columnar-analytics backend, that compose in as opt-in features (<code class="text-paper-100 text-[0.78rem]">--with=postgres&hairsp;|&hairsp;mysql&hairsp;|&hairsp;duckdb</code>). One <code class="text-paper-100 text-[0.78rem]">HlDbBackend</code> vtable, DSN-scheme selection; parameterized binding on every backend so SQL injection has no surface; the DB-backed stdlib (session, outbox, inbox, rbac, audit-log, idempotency) and migrations run dialect-portably. Real-server E2E in CI (Postgres&nbsp;16, MySQL&nbsp;8): auth + TLS + migrations + <code class="text-paper-100 text-[0.78rem]">db.async</code> + stdlib.</span>
               </li>
             </ul>
           </div>
@@ -1659,10 +1659,6 @@ hull v0.7.0  &middot;  ca-bundle: embedded  &middot;  platform: embedded  &middo
               <li class="flex gap-2">
                 <span class="text-mute-500 mt-0.5">&ndash;</span>
                 <span><strong class="text-paper-100">Developer-pubkey distribution is out-of-band.</strong> You verify a developer&rsquo;s app against their pubkey, but the pubkey itself comes from their repo / website / personal page. The same TLS-trust problem most ecosystems have. No PKI yet.</span>
-              </li>
-              <li class="flex gap-2">
-                <span class="text-mute-500 mt-0.5">&ndash;</span>
-                <span><strong class="text-paper-100">install.sh bootstraps from one pinned key.</strong> The installer is minisign-signed, so you can verify the script itself offline before running it (no Hull needed); its embedded SHA-256 then checks each binary as it downloads, and Ed25519 enforcement takes over on the first <code class="text-paper-100 text-[0.78rem]">hull update</code>. The residual is ordinary key bootstrap: you pin the minisign pubkey from this repo the first time. The same trust-root problem every signed-update scheme has, narrowed to a single verifiable key.</span>
               </li>
             </ul>
           </div>
