@@ -8,10 +8,109 @@ release-artifact layout).
 
 ## [Unreleased]
 
-### Security / build flavors
+## [0.7.0] — 2026-07-24
 
+The composable-features release. Optional heavy subsystems (analytics,
+extra SQL backends, GPU, terminal UI) move OUT of the base binary and
+become **composable features** added at build time with `hull build
+--with=<name>` and installed by end users with `hull feature install
+<name>`. The base stays lean; you pay only for what you compose in.
+
+### Added
+
+- **Composable features (`hull build --with=<name>`).** A large optional
+  subsystem now ships as its own signed static archive
+  `libhull_feature-<name>-<arch>.a` and is composed into an app binary at
+  build time, orthogonal to the subtractive `--flavor` axis. Selection is
+  inferred from the app manifest (a `duckdb://` connection, a `hull/tui`
+  module) or forced with `--with=`. Five features ship, all native-only:
+  `duckdb`, `postgres`, `mysql`, `gpu`, `tui`. End-user tooling: `hull
+  feature install <name>` / `feature list` / `feature uninstall <name>`,
+  the same Ed25519-signed `hull.sha256` trust chain as `hull update` /
+  `hull flavor install` (no new keys). A cache-sourced feature lib is
+  re-verified against its signed manifest before linking (closes the
+  install-to-build TOCTOU). See `docs/features_and_flavors.md`.
+- **PostgreSQL backend** (feature `postgres`). Pure-C PostgreSQL wire
+  client, no libpq: SCRAM-SHA-256 auth, `sslmode=disable..verify-full`
+  TLS over the shared TLS client, typed decode by OID, `?`-to-`$n`
+  placeholder rewrite with params always bound, dialect-portable
+  migrations. Reached by a `postgres://` / `postgresql://` DSN on
+  `hull/db`. Real-Postgres-16 E2E in CI (auth + TLS + migrations +
+  `db.async` + stdlib).
+- **MySQL / MariaDB backend** (feature `mysql`). Pure-C MySQL/MariaDB wire
+  client, no libmysql/libmariadb: `mysql_native_password` +
+  `caching_sha2_password` auth, TLS, text `COM_QUERY` for param-less and
+  binary prepared statements for parameterized queries (no value ever
+  touches SQL text), backtick dialect, `INSERT ... ON DUPLICATE KEY
+  UPDATE` upsert. One backend serves both `mysql://` and `mariadb://`.
+  Real-MySQL-8 E2E in CI.
+- **DuckDB OLAP backend** (feature `duckdb`). Embedded columnar analytics
+  engine, reached by a `duckdb://` DSN. Composed with `hull build
+  --with=duckdb` (needs `--compiler=system`; a C++ engine can't link
+  under the embedded TinyCC).
+- **GPU compute** (feature `gpu`). The base ships the generic GPU dispatch
+  layer; the `gpu` feature fills the concrete wgpu-native backend, reached
+  by `gpu.*`. `hull build --with=gpu`.
+- **Terminal UI** (feature `tui`). The `hull.tui` subsystem moved out of
+  the native base (a TUI-free base links ~80-150 KB leaner); an app that
+  declares `hull/tui` composes it back automatically (auto-inferred, so a
+  plain `hull build` of a TUI app just works). The hull toolchain keeps
+  its own `--tui` commands by force-loading the feature archive.
+- **Optional module declarations (`"hull/gpu@1?"`).** A trailing `?` on a
+  manifest module spec marks it optional: when the build lacks the
+  capability and no matching feature is composed, the resolver skips it
+  and the require/import returns a soft-absent value (`nil` / `null`)
+  instead of failing app load, so an app can use a capability when present
+  and fall back when not.
+- **`crypto.constant_time_eq` / `crypto.constantTimeEq`** (Lua / JS): a
+  constant-time byte-string equality primitive compared in C. `hull/jwt`
+  (HS256) and `hull/web/middleware/csrf` now route their HMAC-signature
+  compare through it instead of an in-interpreter loop, matching
+  `hull/crypto/envelope` and removing interpreter-timing variance.
+  Functionally identical (both were already non-early-exit); a
+  defense-in-depth consistency change.
+
+### Changed
+
+- **TinyCC is no longer embedded in the binary; it is a side-loaded
+  tool.** `hull tools install tcc` (or a `tcc` on `PATH`); resolved at
+  build time via `hl_tools_lookup_path` (`~/.hull/tools` -> `dirname(hull)`
+  -> `$PATH`). The binary is ~404 KB lighter; macOS now defaults
+  `HL_ENABLE_TCC=0` (its ELF output was unusable there anyway). Same
+  signed trust chain as every other side-loaded tool.
+- **DSN-scheme backend routing.** `hl_db_backend_select` picks the backend
+  per connection by DSN scheme; each backend declares the schemes it
+  claims. A reserved-but-uncompiled scheme (`postgres://` / `mysql://` /
+  `duckdb://` on a base binary) now fails with a specific `hull feature
+  install <name>` hint instead of a generic error.
+- **`HlDbDialect` descriptor.** Dialect facts (identifier quoting,
+  placeholder style, upsert style, `RETURNING` support, autoincrement DDL)
+  consolidated into one backend-owned struct in `.rodata`, exposed to
+  app/stdlib code as `conn.dialect`. Groundwork for a future stdlib query
+  builder; `quote_identifier` / `autoincrement_id_ddl` stay as
+  descriptor-sourced back-compat aliases.
+
+### Security
+
+- **`network_outbound` sandbox grant for declared network databases.** The
+  kernel-sandbox outbound-socket grant was gated ONLY on the `http.fetch`
+  `hosts` allowlist, ignoring the databases config, so a sandboxed DB-only
+  app (a `postgres://` / `mysql://` connection, no `http.fetch`) was
+  pledge-SIGKILLed the moment it dialed its own database. Now also granted
+  for a declared network DB connection (manifest `databases.named` /
+  `databases.dynamic` net scheme or `$VAR` env-ref, or a `-d` net DSN).
+  Outbound-only (no bind/inbound). Linux CI now exercises the grant under
+  the real sandbox (the DB E2Es no longer use `--no-sandbox`).
+- **Post-feature C / Lua / JS audit hardening.** Case-insensitive DSN
+  scheme match in the sandbox (an uppercase-scheme named DSN was
+  under-granted -> connect-time self-DoS); fail-closed re-verification of a
+  cache-sourced feature lib (a missing verify binding must abort, not link
+  unverified); plus the earlier A-H cross-surface audit batch.
+- **CSV formula-injection sanitizer.** Opt-in on `csv.encode`: prefixes a
+  cell beginning with `= + - @` (and tab/CR) so a spreadsheet does not
+  execute exported data as a formula.
 - **Build-time re-verify of installed per-flavor platform libs (closes the
-  install-to-build TOCTOU).** `hull platform install` now caches the signed
+  install-to-build TOCTOU).** `hull flavor install` now caches the signed
   manifest (`hull.sha256` + `.sig`) in `~/.hull/platform/`, and `hull build
   --flavor` re-verifies any lib it pulls from that cache before linking, fully
   offline, via `hl_release_io_verify_local_asset` (`tool.platform_verify`): the
@@ -21,15 +120,28 @@ release-artifact layout).
   fails the build with a reinstall hint; a lib the developer built locally
   (`make platform-<flavor>`) is trusted as-is. Verified end-to-end against the
   v0.6.0 release (valid lib links, tampered lib rejected).
-- **`crypto.constant_time_eq` / `crypto.constantTimeEq`** (Lua / JS): a
-  constant-time byte-string equality primitive compared in C. `hull/jwt`
-  (HS256) and `hull/web/middleware/csrf` now route their HMAC-signature compare
-  through it instead of an in-interpreter loop, matching `hull/crypto/envelope`
-  and removing interpreter-timing variance. Functionally identical (both were
-  already non-early-exit); this is a defense-in-depth consistency change.
-- **Fix:** the JS `csrf` middleware's session-cookie fallback defaulted to
-  `"hull.sid"` instead of the session/auth middleware's `"hull_session"`, so
-  the fallback could never find the cookie. Aligned to `"hull_session"`.
+### Fixed
+
+- JS `csrf` middleware session-cookie fallback defaulted to `"hull.sid"`
+  instead of the session/auth middleware's `"hull_session"`, so the fallback
+  could never find the cookie. Aligned to `"hull_session"`.
+- GPU: destroy the GPU context on shutdown in composed `--with=gpu` builds
+  (leak on graceful exit); resolve `HlJS` via `JS_GetContextOpaque` rather
+  than a phantom global (JS GPU binding); zero-init a pipeline stage before
+  the non-table skip in the Lua path (uninitialized read).
+- `health.js` ReferenceError + Lua/JS stdlib parity hardening (audit
+  follow-ups).
+- DB E2E flakes: poll for real app-server / TCP+SCRAM readiness in the
+  Postgres and MySQL suites instead of a fixed sleep.
+
+### Docs
+
+- The **feature / flavor / tool / stdlib** extension taxonomy and its
+  classification decision-procedure (`CLAUDE.md`, `docs/roadmap.md`); a full
+  **Redis / Valkey** connection-feature spec (`docs/roadmap_next.md`, the
+  first non-SQL connection seam); composable-features + optional-module
+  documentation; the ORM-vs-query-builder scope note (`hull/query` compiler
+  in scope, generic ORM out).
 
 ## [0.6.0] — 2026-07-10
 
