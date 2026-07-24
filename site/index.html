@@ -226,7 +226,7 @@
         <span class="text-paper-100 font-semibold tracking-tight">Hull</span>
         <a href="https://github.com/artalis-io/hull/releases" class="chip ml-1.5 hidden sm:inline-flex hover:text-paper-50 transition" title="Release notes on GitHub">
           <span class="accent-dot"></span>
-          v0.6.0
+          v0.7.0
         </a>
       </a>
 
@@ -404,10 +404,11 @@
           </h3>
           <p class="text-sm text-mute-400 leading-relaxed">
             Lua, JavaScript, and WASM execute under declared, kernel-enforced
-            capability boundaries. SQLite storage, or PostgreSQL and
-            MySQL/MariaDB over pure-C wire clients. Single static binary,
-            around five megabytes. Runs on every desktop OS from one file.
-            No daemon, no service mesh, no installer.
+            capability boundaries. SQLite storage by default; PostgreSQL and
+            MySQL/MariaDB over pure-C wire clients compose in as opt-in
+            features. Single static binary, around five megabytes. Runs on
+            every desktop OS from one file. No daemon, no service mesh, no
+            installer.
           </p>
         </div>
 
@@ -477,7 +478,7 @@
 <pre><span class="tk-com"># Install (trusts TLS + our GitHub). install.sh verifies each</span>
 <span class="tk-com"># binary's SHA-256 against the manifest as it downloads.</span>
 $ curl -fsSL <span class="tk-str">https://gethull.dev/install.sh</span> | sh
-hull installed to ~/.local/bin/hull  (v0.6.0)
+hull installed to ~/.local/bin/hull  (v0.7.0)
 
 <span class="tk-com"># Don't trust gethull.dev? Verify the installer offline first</span>
 <span class="tk-com"># (minisign, no Hull needed). Cross-check the key below against</span>
@@ -495,7 +496,7 @@ $ hull verify-release hull.sha256 hull.sha256.sig
 <span class="tk-acc">ok</span>. Signature valid
 
 $ hull doctor
-hull v0.6.0  &middot;  ca-bundle: embedded  &middot;  platform: embedded  &middot;  cc: ok
+hull v0.7.0  &middot;  ca-bundle: embedded  &middot;  platform: embedded  &middot;  cc: ok
 </pre>
           </div>
           <p class="mt-3 text-[11px] text-mute-400 leading-relaxed">
@@ -658,11 +659,13 @@ hull v0.6.0  &middot;  ca-bundle: embedded  &middot;  platform: embedded  &middo
             Pure-function WASM via WAMR. No I/O imports,
             gas-metered. Parallel workloads dispatch to WebGPU
             shaders via wgpu-native (Vulkan, Metal, DX12) through the
-            same capability boundary. GPU compute and DuckDB OLAP
-            ship as opt-in composable features
-            (<code class="text-paper-100">hull build --with=gpu&hairsp;|&hairsp;duckdb</code>),
-            installed on demand under the same signed trust chain, so
-            they never bloat the lean base binary.
+            same capability boundary. The base binary stays lean:
+            heavier subsystems ship as opt-in composable features
+            (<code class="text-paper-100">hull build --with=duckdb&hairsp;|&hairsp;postgres&hairsp;|&hairsp;mysql&hairsp;|&hairsp;gpu&hairsp;|&hairsp;tui</code>)
+            for DuckDB OLAP, PostgreSQL, MySQL/MariaDB, GPU compute,
+            and the terminal UI. Each installs on demand
+            (<code class="text-paper-100">hull feature install &lt;name&gt;</code>)
+            under the same signed trust chain, so they never bloat the base.
           </p>
         </div>
 
@@ -1545,7 +1548,7 @@ hull v0.6.0  &middot;  ca-bundle: embedded  &middot;  platform: embedded  &middo
           <div class="bg-ink-900 p-6">
             <div class="flex items-center gap-2 mb-4">
               <i data-lucide="check-circle-2" class="w-4 h-4 text-accent"></i>
-              <span class="text-sm font-semibold text-paper-50">Shipped through v0.6.0</span>
+              <span class="text-sm font-semibold text-paper-50">Shipped through v0.7.0</span>
             </div>
             <ul class="space-y-3 text-sm text-mute-400 leading-relaxed">
               <li class="flex gap-2">
@@ -1629,7 +1632,7 @@ hull v0.6.0  &middot;  ca-bundle: embedded  &middot;  platform: embedded  &middo
               </li>
               <li class="flex gap-2">
                 <span class="text-accent mt-0.5">&check;</span>
-                <span><strong class="text-paper-100">Backend-agnostic database layer.</strong> The <code class="text-paper-100 text-[0.78rem]">db</code> capability runs on embedded SQLite (default), an optional pure-C PostgreSQL wire client (SCRAM-SHA-256, TLS, no libpq), and an optional pure-C MySQL / MariaDB wire client (<code class="text-paper-100 text-[0.78rem]">mysql_native_password</code> + <code class="text-paper-100 text-[0.78rem]">caching_sha2_password</code> over TLS, binary prepared statements, no libmysql). One <code class="text-paper-100 text-[0.78rem]">HlDbBackend</code> vtable, DSN-scheme selection; parameterized binding on every backend so SQL injection has no surface; the DB-backed stdlib (session, outbox, inbox, rbac, audit-log, idempotency) and migrations run dialect-portably. Real-server E2E in CI (Postgres&nbsp;16, MySQL&nbsp;8): auth + TLS + migrations + <code class="text-paper-100 text-[0.78rem]">db.async</code> + stdlib.</span>
+                <span><strong class="text-paper-100">Backend-agnostic database layer.</strong> The <code class="text-paper-100 text-[0.78rem]">db</code> capability runs on embedded SQLite (default), plus a pure-C PostgreSQL wire client (SCRAM-SHA-256, TLS, no libpq) and a pure-C MySQL / MariaDB wire client (<code class="text-paper-100 text-[0.78rem]">mysql_native_password</code> + <code class="text-paper-100 text-[0.78rem]">caching_sha2_password</code> over TLS, binary prepared statements, no libmysql) that compose in as opt-in features (<code class="text-paper-100 text-[0.78rem]">--with=postgres&hairsp;|&hairsp;mysql</code>). One <code class="text-paper-100 text-[0.78rem]">HlDbBackend</code> vtable, DSN-scheme selection; parameterized binding on every backend so SQL injection has no surface; the DB-backed stdlib (session, outbox, inbox, rbac, audit-log, idempotency) and migrations run dialect-portably. Real-server E2E in CI (Postgres&nbsp;16, MySQL&nbsp;8): auth + TLS + migrations + <code class="text-paper-100 text-[0.78rem]">db.async</code> + stdlib.</span>
               </li>
             </ul>
           </div>
@@ -1809,7 +1812,7 @@ $ hull agent routes my-tool
       </div>
 
       <p class="text-[11px] text-mute-400 leading-relaxed">
-        Hull is at <span class="text-paper-100">v0.6.0</span>. APIs and the manifest schema are pre-stable, so pin your version and read the
+        Hull is at <span class="text-paper-100">v0.7.0</span>. APIs and the manifest schema are pre-stable, so pin your version and read the
         <a href="https://github.com/artalis-io/hull/releases" class="link">changelog</a>
         before upgrading.
         Page last updated <time datetime="2026-07">July&nbsp;2026</time>.
