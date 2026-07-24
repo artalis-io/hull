@@ -2992,7 +2992,22 @@ auth. **DuckDB:** embedded (vendored amalgamation, like SQLite); `duckdb://` /
 `.duckdb`; columnar, rich types (decode to text for v1); its own UDF C API.
 
 **Out of scope:** cross-backend transactions (no XA / two-phase commit, same as
-§1); a generic ORM / query builder (Hull stays SQL-first).
+§1); a generic **ORM** (relations, lazy-loading, models-as-schema, an active-record
+object graph). Hull stays SQL-first.
+
+Note the ORM line is **not** a ban on a query *builder*. The designed, requested
+`hull/query` + `hull/query/schema` (a thin, **stdlib** compile-to-`(sql, params)`
+layer over `conn.query` + the `conn.dialect` descriptor - injection-safe by
+construction: values always bound, identifiers always quoted through the dialect)
+is explicitly in scope and its C keystone already shipped (the `HlDbDialect`
+descriptor, `conn.dialect`, commit `234c8dc`). The distinction that matters:
+- **In scope** - a dialect-backed query *compiler*: emits parameterized SQL,
+  resolves the DB-API-review findings (portable upsert / `RETURNING` / async
+  terminals / raw-fragment composition), fully offline-testable via a `to_sql()`
+  matrix across dialects, no new authority.
+- **Out of scope** - a generic *ORM*: an object graph with relations, identity
+  map, lazy loading, and schema-from-models. That is a different product and
+  fights Hull's SQL-first, migrations-express-schema stance.
 
 ---
 
