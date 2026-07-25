@@ -420,6 +420,48 @@ not implementation cost.
    are organisational/procedural changes more than code, and they
    determine whether the trust story survives serious scrutiny.
 
+### 0.4 Platform-sig over composed features (defense-in-depth gap)
+
+Surfaced by the composable-feature security evaluation (2026-07-25). `hull build
+--with=<feature>` sets `verify_platform = false` (`stdlib/cli/lua/hull/build.lua`)
+and the inner platform-sig (`embedded_platform_sig.h`, the platform-key layer of
+an app's `package.sig`) does **not** cover the composed feature archive.
+
+Authenticity is still anchored, so this is a defense-in-depth *completion*, not a
+current vulnerability: `hull feature install` verifies the Ed25519 release
+signature over `hull.sha256` at fetch time, and `hull build` re-verifies a
+cache-sourced feature lib against that signed manifest (against the EMBEDDED
+release pubkey, the in-binary trust anchor) before linking, closing the
+install->build TOCTOU. The trust ROOT is unchanged and a plain build's
+platform-sig is unaffected. What's missing is the SECOND signature layer over the
+feature path: the "provably gethull.dev-built" cross-check applies to the
+embedded platform lib, not to a composed feature.
+
+Follow-up: extend the platform-sig to cover composed feature archives so a
+composed binary carries the same two-layer guarantee as a plain
+embedded-platform build. Design open: a new `package.sig` layer over the
+composed set vs. a per-feature signature cross-checked at compose (like the
+platform layer). See docs/security.md "Two signature layers, and the flavor
+asymmetry."
+
+### 0.5 Composed-app SBOM must enumerate `--with` features
+
+Surfaced by the same evaluation, and confirmed in code: the compose path
+(`build.lua`) touches SBOM **zero** times, and `src/hull/sbom.c` is
+`#ifdef HL_ENABLE_*`-gated (compile-time) with only a partial `#ifdef
+HL_ENABLE_GPU` block. So a **composed** app (`hull build --with=duckdb`) links a
+large vendored engine (~58 MB C++, with its own CVE surface) that neither the
+compile-time gating nor the compose step names. A `--with=duckdb` binary's SBOM
+is silent about DuckDB: a supply-chain-transparency hole for the produced
+artifact (the base binary's SBOM is correct; the composed one is not).
+
+Follow-up: make the composed app's SBOM enumerate its `--with` features (name +
+version + vendored-component SHAs), wired through the compose codegen (the
+generated `feature_registry.c` / `FEATURE_SPECS` already carry feature identity)
+so a new feature is covered automatically. Add a test asserting a `--with=duckdb`
+build's SBOM lists DuckDB. This is the SBOM analog of the base's build-flag
+gating (0.1), extended to the additive axis.
+
 ---
 
 ## 1. PostgreSQL backend (HlDbBackend)
