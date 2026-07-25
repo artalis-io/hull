@@ -189,7 +189,7 @@ int hl_agent_capabilities_ctx(HlAppContext *ctx, ShJsonBuf *out)
 
     int is_lua = 0;
 #ifdef HL_ENABLE_LUA
-    if (rt->vt == &hl_lua_vtable) is_lua = 1;
+    if (rt->vt->kind == HL_RT_LUA) is_lua = 1;
 #endif
 
     /* Extract the declared manifest */

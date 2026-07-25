@@ -413,8 +413,9 @@ HlStmtCache *hl_app_context_stmt_cache(HlAppContext *ctx)
 int hl_app_context_is_lua(HlAppContext *ctx)
 {
     /* Identify via the factory pointer — avoids a stored is_lua flag.
-     * &hl_lua_vtable / &hl_js_vtable comparisons would also work but
-     * the factory pointer is the canonical source of truth post-K. */
+     * A `rt->vt->kind == HL_RT_LUA` check also works once rt is created; the
+     * factory pointer is the canonical source of truth post-K and is valid even
+     * before rt exists. */
 #ifdef HL_ENABLE_LUA
     extern const HlRuntimeFactory hl_lua_factory;
     return (ctx && ctx->factory == &hl_lua_factory) ? 1 : 0;

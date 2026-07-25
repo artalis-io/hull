@@ -254,13 +254,13 @@ int hl_agent_overview_ctx(HlAppContext *ctx, ShJsonBuf *out)
     HlManifest m = {0};
     int have_manifest = 0;
 #ifdef HL_ENABLE_LUA
-    if (rt && rt->vt == &hl_lua_vtable && rt->vt->extract_manifest) {
+    if (rt && rt->vt->kind == HL_RT_LUA && rt->vt->extract_manifest) {
         rt->vt->extract_manifest(rt, &m);
         have_manifest = 1;
     }
 #endif
 #ifdef HL_ENABLE_JS
-    if (rt && rt->vt == &hl_js_vtable && rt->vt->extract_manifest) {
+    if (rt && rt->vt->kind == HL_RT_JS && rt->vt->extract_manifest) {
         rt->vt->extract_manifest(rt, &m);
         have_manifest = 1;
     }

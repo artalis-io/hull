@@ -91,11 +91,11 @@ int hl_agent_modules_ctx(HlAppContext *ctx, ShJsonBuf *out)
 
     HlManifest m = {0};
 #ifdef HL_ENABLE_LUA
-    if (rt->vt == &hl_lua_vtable)
+    if (rt->vt->kind == HL_RT_LUA)
         rt->vt->extract_manifest(rt, &m);
 #endif
 #ifdef HL_ENABLE_JS
-    if (rt->vt == &hl_js_vtable)
+    if (rt->vt->kind == HL_RT_JS)
         rt->vt->extract_manifest(rt, &m);
 #endif
 

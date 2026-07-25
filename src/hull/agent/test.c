@@ -102,8 +102,8 @@ int hl_agent_test_ctx(HlAppContext *ctx, ShJsonBuf *out)
     HlRuntime *rt = hl_app_context_runtime(ctx);
     if (rt && rt->vt && rt->vt->name)
         sh_json_write_kv_string(&w, "runtime",
-            rt->vt == &hl_lua_vtable ? "lua" :
-            rt->vt == &hl_js_vtable  ? "js"  : rt->vt->name);
+            rt->vt->kind == HL_RT_LUA ? "lua" :
+            rt->vt->kind == HL_RT_JS  ? "js"  : rt->vt->name);
 
     sh_json_write_key(&w, "files");
     sh_json_write_array_start(&w);

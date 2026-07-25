@@ -1711,6 +1711,7 @@ const HlRuntimeVtable hl_js_vtable = {
     .run_test_file        = vt_js_run_test_file,
     .destroy              = vt_js_destroy,
     .name                 = "QuickJS",
+    .kind                 = HL_RT_JS,
     .test_file_pattern    = "test_*.js",
     .has_main             = vt_js_has_main,
     .has_server_handlers  = vt_js_has_server_handlers,

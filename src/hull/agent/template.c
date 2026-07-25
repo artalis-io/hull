@@ -172,14 +172,14 @@ int hl_agent_template_ctx(HlAppContext *ctx, const char *template_name,
     if (!rt || !rt->vt) return hl_agent_write_error(out, "no runtime");
 
 #ifdef HL_ENABLE_LUA
-    if (rt->vt == &hl_lua_vtable) {
+    if (rt->vt->kind == HL_RT_LUA) {
         HlLua *lua = hl_app_context_lua(ctx);
         if (!lua) return hl_agent_write_error(out, "no lua state");
         return render_lua(lua, template_name, data_json, out);
     }
 #endif
 #ifdef HL_ENABLE_JS
-    if (rt->vt == &hl_js_vtable) {
+    if (rt->vt->kind == HL_RT_JS) {
         HlJS *js = hl_app_context_js(ctx);
         if (!js) return hl_agent_write_error(out, "no js state");
         return render_js(js, template_name, data_json, out);

@@ -68,6 +68,17 @@ typedef void (*HlMiddlewareCb)(void *user,
                                const char *method, const char *pattern,
                                const char *phase);
 
+/*
+ * Runtime discriminator, carried in the vtable. Lets consumers branch on the
+ * concrete runtime (rt->vt->kind == HL_RT_LUA) WITHOUT taking the address of a
+ * concrete runtime symbol (&hl_lua_vtable), so base-lib code links cleanly
+ * against a build that composes only one runtime. See docs/runtime_feature_phase1.md.
+ */
+typedef enum {
+    HL_RT_LUA = 1,
+    HL_RT_JS  = 2,
+} HlRuntimeKind;
+
 typedef struct HlRuntimeVtable {
     int   (*init)(HlRuntime *rt, const void *config);
     int   (*load_app)(HlRuntime *rt, const char *filename);
@@ -102,6 +113,11 @@ typedef struct HlRuntimeVtable {
 
     void  (*destroy)(HlRuntime *rt);
     const char *name;
+
+    /* Runtime discriminator (HL_RT_LUA / HL_RT_JS). Consumers branch on this
+     * instead of `rt->vt == &hl_<rt>_vtable` so no base TU references a concrete
+     * runtime symbol (the precondition for a runtime-slim link). */
+    HlRuntimeKind kind;
 
     /* Glob pattern for test files in this runtime (e.g. "test_*.lua").
      * Used by the shared test runner — avoids switching on rt->vt->name

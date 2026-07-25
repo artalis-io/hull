@@ -182,13 +182,13 @@ int hl_agent_manifest_ctx(HlAppContext *ctx, ShJsonBuf *out)
     const char *runtime_name = NULL;
 
 #ifdef HL_ENABLE_LUA
-    if (rt->vt == &hl_lua_vtable) {
+    if (rt->vt->kind == HL_RT_LUA) {
         runtime_name = "lua";
         rc = rt->vt->extract_manifest(rt, &m);
     }
 #endif
 #ifdef HL_ENABLE_JS
-    if (rt->vt == &hl_js_vtable) {
+    if (rt->vt->kind == HL_RT_JS) {
         runtime_name = "js";
         rc = rt->vt->extract_manifest(rt, &m);
     }

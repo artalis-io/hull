@@ -36,10 +36,10 @@ int hl_agent_perf_ctx(HlAppContext *ctx, ShJsonBuf *out)
     if (rt && rt->vt) {
         const char *name = rt->vt->name ? rt->vt->name : "unknown";
 #ifdef HL_ENABLE_LUA
-        if (rt->vt == &hl_lua_vtable) name = "lua";
+        if (rt->vt->kind == HL_RT_LUA) name = "lua";
 #endif
 #ifdef HL_ENABLE_JS
-        if (rt->vt == &hl_js_vtable) name = "js";
+        if (rt->vt->kind == HL_RT_JS) name = "js";
 #endif
         sh_json_write_kv_string(&w, "runtime", name);
     }
