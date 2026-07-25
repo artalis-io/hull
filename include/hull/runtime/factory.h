@@ -93,4 +93,13 @@ const HlRuntimeFactory *hl_runtime_factory_for_filename(const char *filename);
  */
 const HlRuntimeFactory *const *hl_runtime_factories(size_t *count);
 
+/*
+ * Composable-feature hook: the runtime(s) composed into this build as a feature
+ * (`hull build --with=lua|js`). Base builds have none (weak default returns 0);
+ * a composed build links a strong override. The factory lookups above consult
+ * this after the compile-time base set. Mirrors hl_db_feature_backends /
+ * hl_gpu_feature_backends. See docs/runtime_feature_phase1.md.
+ */
+const HlRuntimeFactory *const *hl_runtime_feature_factories(size_t *count);
+
 #endif /* HL_RUNTIME_FACTORY_H */

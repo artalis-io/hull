@@ -41,6 +41,22 @@ const HlRuntimeFactory *const *hl_runtime_factories(size_t *count)
     return g_factories;
 }
 
+/*
+ * Weak default: a base build composes no runtime as a feature, so there are
+ * none. A `hull build --with=<runtime>` build links a STRONG override (the
+ * generated feature_registry.c) returning that runtime's factory. Same-TU weak
+ * default + collector, mirroring hl_db_feature_backends in cap/db_select.c. Always
+ * present (factory.c is linked wherever the registry is used) so the symbol
+ * resolves whether or not a runtime feature is composed. See
+ * docs/runtime_feature_phase1.md.
+ */
+__attribute__((weak))
+const HlRuntimeFactory *const *hl_runtime_feature_factories(size_t *count)
+{
+    if (count) *count = 0;
+    return NULL;
+}
+
 const HlRuntimeFactory *hl_runtime_factory_for_extension(const char *ext)
 {
     if (!ext) return NULL;
@@ -56,8 +72,19 @@ const HlRuntimeFactory *hl_runtime_factory_for_extension(const char *ext)
         return hl_runtime_factory_for_extension(buf);
     }
 
+    /* Compile-time base factories first. */
     for (size_t i = 0; i < g_factory_count; i++) {
         const HlRuntimeFactory *f = g_factories[i];
+        if (f && f->entry_extension && strcmp(f->entry_extension, ext) == 0)
+            return f;
+    }
+    /* Then any runtime composed as a feature (empty in a base build; a
+     * generated registry fills this under `--with=<runtime>`). Two immutable
+     * sources, no merged/mutable dispatch state. */
+    size_t fcount = 0;
+    const HlRuntimeFactory *const *feats = hl_runtime_feature_factories(&fcount);
+    for (size_t i = 0; i < fcount; i++) {
+        const HlRuntimeFactory *f = feats ? feats[i] : NULL;
         if (f && f->entry_extension && strcmp(f->entry_extension, ext) == 0)
             return f;
     }

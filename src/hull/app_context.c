@@ -94,6 +94,25 @@ static const char *detect_entry(const char *app_dir, const char *ext,
     return NULL;
 }
 
+/* Try each factory's extension against the app dir; on the first hit, set
+ * *out_factory and return the entry path (into entry_buf). NULL if none match. */
+static const char *discover_entry_in(const HlRuntimeFactory *const *facs,
+                                     size_t n, const char *app_dir,
+                                     char *entry_buf, size_t buf_size,
+                                     const HlRuntimeFactory **out_factory)
+{
+    for (size_t i = 0; i < n; i++) {
+        const HlRuntimeFactory *f = facs ? facs[i] : NULL;
+        if (!f || !f->entry_extension) continue;
+        /* extension is ".lua" / ".js" — strip leading dot for detect_entry */
+        const char *ext = f->entry_extension;
+        if (ext[0] == '.') ext++;
+        const char *e = detect_entry(app_dir, ext, entry_buf, buf_size);
+        if (e) { *out_factory = f; return e; }
+    }
+    return NULL;
+}
+
 /* ── Internal: determine runtime type from entry point ─────────────── */
 
 static int resolve_entry_and_runtime(HlAppContext *ctx,
@@ -104,21 +123,20 @@ static int resolve_entry_and_runtime(HlAppContext *ctx,
     const char *entry = opts->entry_point;
 
     if (!entry) {
-        /* Discover entry by trying each registered factory's extension
-         * in order. First match wins (Lua then JS today). */
-        size_t fcount = 0;
-        const HlRuntimeFactory *const *factories = hl_runtime_factories(&fcount);
-        for (size_t i = 0; i < fcount; i++) {
-            const HlRuntimeFactory *f = factories[i];
-            if (!f || !f->entry_extension) continue;
-            /* extension is ".lua" / ".js" — strip leading dot for detect_entry */
-            const char *ext = f->entry_extension;
-            if (ext[0] == '.') ext++;
-            entry = detect_entry(opts->app_dir, ext, entry_buf, buf_size);
-            if (entry) {
-                ctx->factory = f;
-                break;
-            }
+        /* Discover entry by trying each factory's extension in order: the
+         * compile-time base factories first, then any runtime composed as a
+         * feature. First match wins (Lua then JS in a default build). Two
+         * immutable sources, no merged/mutable array. */
+        size_t base_count = 0;
+        const HlRuntimeFactory *const *base = hl_runtime_factories(&base_count);
+        entry = discover_entry_in(base, base_count, opts->app_dir,
+                                  entry_buf, buf_size, &ctx->factory);
+        if (!entry) {
+            size_t feat_count = 0;
+            const HlRuntimeFactory *const *feats =
+                hl_runtime_feature_factories(&feat_count);
+            entry = discover_entry_in(feats, feat_count, opts->app_dir,
+                                      entry_buf, buf_size, &ctx->factory);
         }
     } else {
         /* Caller provided entry point — match factory by file extension. */
