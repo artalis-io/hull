@@ -4329,6 +4329,201 @@ to the resolver, the compose collector, or the sandbox seam.
 
 ---
 
+## Runtimes as composable features (runtime-less base + `lua` / `js`)
+
+**Status:** designed, no target. Drop the unused Lua/JS runtime from an app so a
+single-runtime app doesn't carry the other interpreter.
+
+**Supersedes** the earlier "publish `full-lua` / `full-js` per-flavor platform
+libs" sketch. Delivering the runtime slim as **composable features** (the
+DuckDB/GPU mechanism) rather than pre-built per-flavor libs is strictly better:
+features publish **M+N** and compose **M x N** at build time, so a runtime
+feature composes orthogonally with every HTTP flavor with **no cross-product
+publishing**. It is the GPU-backend pattern applied to the runtimes. See
+[features_and_flavors.md](features_and_flavors.md).
+
+### The idea
+
+Make the base platform lib **runtime-agnostic** (it already is: everything runs
+through `HlRuntimeVtable`) and ship **Lua** and **QuickJS** as two composable
+runtime features. Every app composes **exactly one**, auto-inferred from the
+entry extension. "Full / dual-runtime" is simply both composed; the distributed
+`hull` binary embeds both.
+
+Why this beats the flavor-lib approach:
+- **No matrix.** Two runtime archives (`lua`, `js`) x 3 native arches = 6
+  published archives, and they compose with ANY flavor (`client-only` +
+  `--with=js`, etc.). M+N, not M x N. The cross-product the flavor sketch fought
+  to contain never exists.
+- **Symmetric.** Slims *both* directions (QuickJS off a Lua app AND Lua off a JS
+  app), unlike a Lua-base-with-a-`js`-feature that can only drop JS.
+- **Bulletproof inference, unchanged.** The entry extension (`app.lua` / `app.js`)
+  is the single unambiguous signal for which runtime to compose.
+- **Reuses proven machinery.** The weak-hook / strong-override / signed-archive /
+  install-to-build re-verify seam already ships for the DB + GPU features.
+
+### The one way a runtime differs from DuckDB: exactly-one, so auto + embedded
+
+DuckDB is zero-or-more and installed on demand. A runtime is **mandatory
+exactly-one**, so the delivery differs in two deliberate ways:
+
+- **Auto-composed, not `hull feature install`.** `hull build app.lua` infers and
+  composes the `lua` runtime with no `--with` needed; the runtime-less base is
+  never a standalone app-runner (exactly like the GPU base ships only the generic
+  dispatch layer). Users never run `hull feature install lua`.
+- **Embedded in the distributed `hull`, not fetched.** The `hull` binary carries
+  the runtime-less base + BOTH runtime archives, so `hull dev/test` runs either
+  runtime and `hull build` can compose either into an app. The archives are ALSO
+  independently published + signed for source / custom builds, but the common
+  path never touches the network. A plain build (or `--flavor=auto`) composes
+  only the inferred runtime into the produced app binary: the slim.
+
+### Architecture (the seam)
+
+**The seam already exists.** `src/hull/runtime/factory.c` (architectural roadmap
+item K) is a **runtime factory registry**: each runtime publishes a
+`const HlRuntimeFactory hl_<rt>_factory` (`{ name, entry_extension, create,
+destroy, vtable }`, `include/hull/runtime/factory.h`), and `app_context.c`
+selects the runtime table-drivenly through `hl_runtime_factories()` /
+`hl_runtime_factory_for_filename()` - no `if (js) ... else (lua)` anywhere. Today
+that registry is a **static** `g_factories[]` gated by `#ifdef HL_ENABLE_LUA/JS`.
+So this epic makes that existing registry **composable**, mirroring
+`hl_db_feature_backends` / `hl_gpu_feature_backends` exactly. Three changes:
+
+**Change 1 - the weak hook** (new `src/hull/runtime/factory_feature.c`, a copy of
+`cap/gpu_feature.c`):
+
+```c
+__attribute__((weak))
+const HlRuntimeFactory *const *hl_runtime_feature_factories(size_t *count)
+{ if (count) *count = 0; return NULL; }   /* base build: no runtime feature */
+```
+
+A composed `--with=js` build links a **strong** override (the generated
+`feature_registry.c`) returning `{ &hl_js_factory }`. No new machinery:
+`build.lua`'s existing `by_hook` collector already generates this for db/gpu - add
+`lua`/`js` rows to `FEATURE_SPECS` (`hook = "hl_runtime_feature_factories"`, the
+symbol to register = `hl_<rt>_factory`, vtype `HlRuntimeFactory`).
+
+**Change 2 - `factory.c` becomes a collector** (base union features), the way
+`db_select.c` checks base `BACKENDS[]` then `hl_db_feature_backends()`. Runtime
+lookup *enumerates* (discover-by-extension) rather than scheme-selects, so both
+sources must be visible; iterate **two immutable sources** rather than caching a
+merged array, to keep **no mutable dispatch state** (the sealed-table / CFI
+invariant, security.md 4b):
+
+```c
+const HlRuntimeFactory *hl_runtime_factory_for_extension(const char *ext) {
+    for (size_t i = 0; i < g_base_count; i++)               /* compile-time base */
+        if (match(g_base[i], ext)) return g_base[i];
+    size_t fc = 0;                                          /* composed features */
+    const HlRuntimeFactory *const *f = hl_runtime_feature_factories(&fc);
+    for (size_t i = 0; i < fc; i++)
+        if (f && match(f[i], ext)) return f[i];
+    return NULL;
+}
+```
+The one enumerate caller (`app_context.c`'s discover-entry loop) iterates base
+then features directly - a small edit, no merged static.
+
+**Change 3 - the real blocker: remove the direct `&hl_<rt>_vtable` comparisons.**
+`agent/*.c` is in **`PLATFORM_OBJS`** (the app-facing platform lib) and does
+`rt->vt == &hl_lua_vtable` / `== &hl_js_vtable` in **17 sites across 9 files**
+(eval, modules, routes, overview, manifest, test, perf, template, capabilities).
+Each takes the *address of a concrete runtime symbol*, so a runtime-slim base
+that doesn't link `hl_js_vtable` fails to link (or survives only on fragile
+dead-object stripping). Decouple with a discriminator carried **in** the vtable:
+
+```c
+/* runtime.h */         typedef enum { HL_RT_LUA = 1, HL_RT_JS = 2 } HlRuntimeKind;
+/* HlRuntimeVtable += */ HlRuntimeKind kind;
+/* hl_lua_vtable = { …, .kind = HL_RT_LUA };  hl_js_vtable = { …, .kind = HL_RT_JS }; */
+```
+Then `rt->vt == &hl_lua_vtable` -> `rt->vt->kind == HL_RT_LUA` everywhere. Now
+**no base-lib code references a concrete runtime symbol** - the precondition for a
+slim link. (A `->name` string already exists, but an enum compare beats
+`strcmp`.)
+
+- **Each runtime feature archive** (`libhull_feature-lua-<arch>.a`, `-js-`) then
+  carries that runtime's impl (`src/hull/runtime/<rt>/*.c`), **its embedded stdlib
+  VFS entries** (see below), and its `hl_<rt>_factory` behind the strong hook.
+- **Compose codegen** fills the hook with whatever was composed: one runtime ->
+  single-runtime slim; both -> dual-runtime full. `main` / `serve` select by entry
+  extension from the composed set; an entry whose runtime wasn't composed is a
+  **build-time error** with a fix-it (auto-inference prevents it on the happy
+  path).
+
+### The main entanglement: the stdlib travels with its runtime
+
+Today both the Lua and JS stdlib module sets embed into the platform VFS, so a
+lua-only build would still carry the JS stdlib bytes. Under this design each
+runtime's stdlib (`stdlib/lua/**` vs `stdlib/js/**`, plus the per-runtime halves
+of the CLI tool plugins) embeds **into that runtime's feature archive**, so
+composing only `lua` pulls only the Lua stdlib. This is the bulk of the refactor:
+runtimes are more entangled than a GPU backend precisely because of module
+loading + the VFS, not the vtable (which is clean).
+
+### Orthogonality with flavors (the payoff, concretely)
+
+`--flavor` still slims the HTTP axis (server-only / client-only / pure-compute).
+The runtime feature composes on top: a `client-only` Lua CLI that calls an API =
+`client-only` base + `--with=lua` (auto) = BOTH the HTTP slim and the runtime
+slim, from **one** published base flavor + **one** published runtime archive. No
+`client-only-lua` lib is ever built. That orthogonality is the whole reason to
+prefer this over the flavor-lib sketch.
+
+### Phases
+
+1. **Make the factory registry composable, no behavior change.** The three
+   changes above: the weak `hl_runtime_feature_factories` hook, the `factory.c`
+   base-union-features collector, and the `HlRuntimeKind` decoupling of the 17
+   `== &hl_<rt>_vtable` sites in `agent/*.c`. Both runtimes stay compiled into the
+   base (`HL_ENABLE_LUA` + `JS`), the weak default returns empty, so the collector
+   yields `{lua, js}` and selection is **byte-identical** to today. Pure refactor,
+   de-risks the selection + symbol-decoupling path before any runtime moves to an
+   archive. Verify: `make test` + full e2e green, and `grep` proves zero
+   `== &hl_*_vtable` remain in the base.
+2. **JS as a feature on a Lua base** (the pragmatic milestone, the old "Option
+   B"). Extract the QuickJS runtime + JS stdlib into `libhull_feature-js.a`
+   behind the hook; base becomes Lua-only; `--with=js` (auto for `app.js`)
+   composes it. Assert a Lua-only app binary has zero QuickJS symbols. Ships a
+   real win (Lua apps drop QuickJS, the larger interpreter) on its own.
+3. **Lua as a feature -> runtime-less base** (reach the end state). Extract Lua +
+   Lua stdlib into `libhull_feature-lua.a`; the base carries no runtime; every
+   build auto-composes exactly one from the extension; "full" = both. The `hull`
+   binary embeds both archives.
+4. **Publish + wire.** `make feature-lua` / `feature-js`, release jobs (native
+   x3), the archives embedded in `hull` + independently signed / published,
+   `--flavor=auto` runtime inference, docs. `e2e_feature_runtime.sh`.
+
+### WASM follows the same model (separate epic)
+
+WAMR (~256 KB) is the same subtractive-via-feature story: an auto-dropped compute
+feature. Weaker and sequenced separately because it is **not** extension-
+inferable. Gate its drop on TWO signals (no `compute.*` / `hull/compute` module
+**and** no WASM-backed `db.udf`), or a UDF-only app loses the runtime it needs.
+
+### Tests
+
+Seam unit tests (selection routes through `hl_runtime_factories` /
+`hl_runtime_feature_factories`); a `grep`/build assertion that no base object
+references `&hl_lua_vtable` / `&hl_js_vtable` (the Change-3 invariant); `nm`
+symbol assertions (a lua-only app exports no `hl_js_*` / QuickJS symbols, and the
+JS symmetric case); a stdlib-travels test (a lua-only build's VFS has no `hull:*`
+JS module entries); `e2e_feature_runtime.sh` (compose each runtime, auto-infer
+from the extension, run); a rejection test (an `app.js` build with only `lua`
+composed fails with the fix-it).
+
+### Non-goals
+
+Dynamic / in-process runtime selection (still fixed by entry extension at build);
+cosmo runtime slims (the universal APE embeds both = full); a `hull feature
+install lua` UX path (runtimes are embedded + auto-composed, not
+install-on-demand). The seam would accommodate a future third runtime, but that
+is out of scope.
+
+---
+
 ## ✅ Done: pre-v0.1.0 release gate
 
 Five operational steps that gated the v0.1.0 tag. All executed
