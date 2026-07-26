@@ -23,9 +23,11 @@ extern "C" {
 
 /* Register the HTTP-dependent hull.* modules (http-client, http-server, smtp,
  * ws-server, ws-client) + the sse/multipart request metatables into the given
- * runtime. Weak no-op when no HTTP is composed. */
+ * runtime. Weak no-op when no HTTP is composed. The signatures mirror the tui
+ * seam: Lua registration can't fail (void), JS module init can (returns
+ * 0 / -1) and needs the HlJS for per-module base config. */
 void hl_lua_register_http_modules(void *lua_state);
-void hl_js_register_http_modules(void *js_ctx);
+int  hl_js_register_http_modules(void *js_ctx, void *hl_js);
 
 /* 1 iff an HTTP subsystem is composed (strong override present), else 0. */
 int hl_http_feature_present(void);

@@ -17,9 +17,11 @@ __attribute__((weak)) void hl_lua_register_http_modules(void *lua_state)
     (void)lua_state;
 }
 
-__attribute__((weak)) void hl_js_register_http_modules(void *js_ctx)
+__attribute__((weak)) int hl_js_register_http_modules(void *js_ctx, void *hl_js)
 {
     (void)js_ctx;
+    (void)hl_js;
+    return 0;
 }
 
 __attribute__((weak)) int hl_http_feature_present(void)

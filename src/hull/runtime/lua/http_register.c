@@ -50,9 +50,8 @@ void hl_lua_register_http_modules(void *lua_state)
 #endif
 }
 
-int hl_http_feature_present(void)
-{
-    return 1;
-}
+/* hl_http_feature_present()'s strong override is runtime-agnostic (not defined
+ * here, to avoid a duplicate symbol across the lua+js link). It lands with the
+ * Kind-B slice that first needs it; the base weak default (0) holds until then. */
 
 #endif /* HL_ENABLE_HTTP_SERVER || HL_ENABLE_HTTP_CLIENT */

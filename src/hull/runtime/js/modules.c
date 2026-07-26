@@ -11,6 +11,7 @@
 #include "mod_buffer.h"
 #include "internal.h"  /* hl_js_request_register, hl_js_sse_register_class */
 #include "hull/cap/tui.h"  /* hl_tui_feature_register_js (composed-feature seam) */
+#include "hull/http_feature.h"  /* hl_js_register_http_modules (HTTP-feature seam, #114) */
 
 /* ════════════════════════════════════════════════════════════════════
  * Module registry — called by hl_js_init() to register all
@@ -54,18 +55,10 @@ int hl_js_register_modules(HlJS *js)
     if (hl_js_init_log_module(js->ctx, js) != 0)
         return -1;
 
-#ifdef HL_ENABLE_HTTP_CLIENT
-    /* hull:http-client (http.fetch) — per-function checks enforce that
-     * http_cfg is set (wired from manifest after load_app). Renamed
-     * from hull:http for clarity (the server-side counterpart is
-     * hull:http-server, exposed via app.get/post/use etc.). */
-    if (hl_js_init_http_module(js->ctx, js) != 0)
-        return -1;
-
-    /* hull:smtp (outbound mail) — per-function checks enforce smtp_cfg. */
-    if (hl_js_init_smtp_module(js->ctx, js) != 0)
-        return -1;
-#endif
+    /* HTTP-dependent modules (http-client/server, smtp, ws-server/client, sse,
+     * multipart) register through the HTTP-feature seam (hl_js_register_http_modules,
+     * below) so this core registry no longer references them. See
+     * hull/http_feature.h (#114). */
 
     /* Register hull:_template — internal bridge for hull:template stdlib */
     if (hl_js_init_template_module(js->ctx, js) != 0)
@@ -76,14 +69,6 @@ int hl_js_register_modules(HlJS *js)
         if (hl_js_init_worker_module(js->ctx, js) != 0)
             return -1;
     }
-
-#ifdef HL_ENABLE_HTTP_SERVER
-    /* hull:http-server — server.stats() (server-side helpers). The
-     * registration verbs (get/post/use/router etc.) land directly on
-     * the `app` intrinsic via mod_app.c's install_app_http_server. */
-    if (hl_js_init_server_module(js->ctx, js) != 0)
-        return -1;
-#endif
 
     /* Register hull:fs module — always available; per-function checks
      * enforce that fs_cfg is set (wired from manifest after load_app). */
@@ -126,19 +111,14 @@ int hl_js_register_modules(HlJS *js)
     if (hl_tui_feature_register_js(js->ctx, js) != 0)
         return -1;
 
-#ifdef HL_ENABLE_HTTP_SERVER
-    /* hull:web:ws-server + hull:web:ws-client (now in mod_ws_server.c +
-     * mod_ws_client.c respectively), plus SSE class. */
-    hl_js_sse_register_class(js->ctx);
-    if (hl_js_init_ws_server_module(js->ctx, js) != 0)
+    /* HTTP-feature seam (#114): registers http-client/server, smtp,
+     * ws-server/client, the SSE class + the streaming-multipart request
+     * classes. Weak no-op in a base with no HTTP composed; the strong override
+     * (runtime/js/http_register.c) wins on a full base / composed http feature.
+     * Consolidated here from the former inline #ifdef HL_ENABLE_HTTP_* blocks -
+     * module registration is order-independent, so behavior is unchanged. */
+    if (hl_js_register_http_modules(js->ctx, js) != 0)
         return -1;
-    if (hl_js_init_ws_client_module(js->ctx, js) != 0)
-        return -1;
-
-    /* Streaming-multipart request classes (MultipartIter / MultipartPart /
-     * MultipartChunks). Only meaningful for server flavors. */
-    hl_js_request_register(js->ctx);
-#endif
 
     return 0;
 }
