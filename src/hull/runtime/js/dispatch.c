@@ -10,6 +10,7 @@
  */
 
 #include "internal.h"
+#include "hull/http_feature.h"  /* hl_js_http_error_response (HTTP-feature seam) */
 
 #include "hull/reqctx.h"
 #include "hull/shared/async.h"
@@ -158,9 +159,7 @@ void hl_js_keel_handler(KlRequest *req, KlResponse *res, void *user_data)
     HlJSRoute *route = (HlJSRoute *)user_data;
     int rc = hl_js_dispatch(route->js, route->handler_id, req, res);
     if (rc < 0) {
-        kl_response_status(res, 500);
-        kl_response_header(res, "Content-Type", "text/plain");
-        kl_response_body_borrow(res, "Internal Server Error", 21);
+        hl_js_http_error_response(res);
     }
     /* rc == 1: handler suspended — don't write response.
      * Keel checks conn->state == KL_CONN_SUSPENDED and returns. */
@@ -263,9 +262,7 @@ int hl_js_keel_middleware(KlRequest *req, KlResponse *res, void *user_data)
     int rc = hl_js_dispatch_middleware(ctx->js, ctx->handler_id, req, res);
     if (rc < 0) {
         /* Middleware error — short-circuit with 500 */
-        kl_response_status(res, 500);
-        kl_response_header(res, "Content-Type", "text/plain");
-        kl_response_body_borrow(res, "Internal Server Error", 21);
+        hl_js_http_error_response(res);
         return 1; /* short-circuit */
     }
     return rc;

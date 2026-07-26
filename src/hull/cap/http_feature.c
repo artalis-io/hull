@@ -28,3 +28,13 @@ __attribute__((weak)) int hl_http_feature_present(void)
 {
     return 0;
 }
+
+__attribute__((weak)) void hl_lua_http_error_response(struct KlResponse *res)
+{
+    (void)res;
+}
+
+__attribute__((weak)) void hl_js_http_error_response(struct KlResponse *res)
+{
+    (void)res;
+}

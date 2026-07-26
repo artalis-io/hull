@@ -12,6 +12,7 @@
 
 #include "hull/runtime/js.h"      /* HlJS, KlResponse, hl_js_make_response */
 #include "hull/utils/compress.h"  /* hl_maybe_compress */
+#include "hull/http_feature.h"    /* hl_js_http_error_response (seam strong) */
 #include "mod_buffer.h"           /* js_get_buffer + HlBufferView (res.bytes) */
 #include "quickjs.h"
 
@@ -312,4 +313,14 @@ JSValue hl_js_make_response(HlJS *js, KlResponse *res)
     JSValue obj = JS_NewObjectClass(js->ctx, (int)js->response_class_id);
     JS_SetOpaque(obj, res);
     return obj;
+}
+
+/* ── HTTP-feature seam: 500-error response ──────────────────────────── */
+/* Strong override for the JS runtime. Extracted from js/dispatch.c +
+ * js/async.c so those core objects hold no kl_response_* refs. */
+void hl_js_http_error_response(struct KlResponse *res)
+{
+    kl_response_status(res, 500);
+    kl_response_header(res, "Content-Type", "text/plain");
+    kl_response_body_borrow(res, "Internal Server Error", 21);
 }

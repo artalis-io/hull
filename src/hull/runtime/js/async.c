@@ -9,6 +9,7 @@
 
 #include "hull/runtime/js.h"
 #include "internal.h"
+#include "hull/http_feature.h"  /* hl_js_http_error_response (HTTP-feature seam) */
 #include "hull/shared/async.h"
 #include "hull/shared/async_backend.h"
 #include "hull/net_backend.h"
@@ -189,9 +190,7 @@ static void hl_js_async_resume(HlAsyncCont *self, void *driver)
 
 #ifdef HL_ENABLE_HTTP_SERVER
         if (conn) {
-            kl_response_status(&conn->res, 500);
-            kl_response_header(&conn->res, "Content-Type", "text/plain");
-            kl_response_body_borrow(&conn->res, "Internal Server Error", 21);
+            hl_js_http_error_response(&conn->res);
             conn->state = KL_CONN_SENDING;
         }
 #endif

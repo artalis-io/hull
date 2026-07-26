@@ -21,6 +21,16 @@
 extern "C" {
 #endif
 
+struct KlResponse;
+
+/* Write a 500 "Internal Server Error" (status + text/plain + body) to the
+ * response. Extracted from the core dispatch/async error paths so they hold no
+ * Keel-response refs; weak no-op when no HTTP is composed (that path is never
+ * reached without a request in flight). Per-runtime so each strong override
+ * rides its own runtime's http side. */
+void hl_lua_http_error_response(struct KlResponse *res);
+void hl_js_http_error_response(struct KlResponse *res);
+
 /* Register the HTTP-dependent hull.* modules (http-client, http-server, smtp,
  * ws-server, ws-client) + the sse/multipart request metatables into the given
  * runtime. Weak no-op when no HTTP is composed. The signatures mirror the tui

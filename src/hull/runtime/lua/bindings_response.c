@@ -11,6 +11,7 @@
 
 #include "hull/runtime/lua.h"     /* HlLua, KlResponse, hl_lua_make_response */
 #include "hull/utils/compress.h"  /* hl_maybe_compress */
+#include "hull/http_feature.h"    /* hl_lua_http_error_response (seam strong) */
 #include "internal.h"             /* get_hl_lua_from_L (shared with bindings.c) */
 
 #include "lua.h"
@@ -238,4 +239,14 @@ void hl_lua_make_response(lua_State *L, KlResponse *res)
     KlResponse **pp = (KlResponse **)lua_newuserdata(L, sizeof(KlResponse *));
     *pp = res;
     luaL_setmetatable(L, HL_RESPONSE_MT);
+}
+
+/* ── HTTP-feature seam: 500-error response ──────────────────────────── */
+/* Strong override for the Lua runtime. Extracted from lua/dispatch.c +
+ * lua/async.c so those core objects hold no kl_response_* refs. */
+void hl_lua_http_error_response(struct KlResponse *res)
+{
+    kl_response_status(res, 500);
+    kl_response_header(res, "Content-Type", "text/plain");
+    kl_response_body_borrow(res, "Internal Server Error", 21);
 }
