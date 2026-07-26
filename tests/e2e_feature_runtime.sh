@@ -96,4 +96,29 @@ serve_check_dir "$LUA_APP/app.lua" 8393 || { echo "FAIL: toolchain did not run t
 serve_check_dir "$JS_APP/app.js"  8394 || { echo "FAIL: toolchain did not run the js app"; exit 1; }
 echo "ok  toolchain runs lua AND js"
 
+echo "=== rejection: an app.js with no resolvable js runtime archive fails clearly ==="
+# The runtime is auto-inferred from the entry extension and composed from the
+# embedded copy (distributed hull) -> build/ -> ~/.hull/feature. Isolate so ALL
+# of those miss: stage this (non-embedded) hull where no runtime archive sits
+# beside it, run from that empty dir so the relative build/ + ../build/ search
+# paths miss, and point HOME at an empty dir (no ~/.hull/feature). Composing the
+# js runtime must then fail with a clear "js runtime feature lib was not found"
+# + `make feature-js` hint and produce NO broken binary.
+RJ_STAGE=$(mktemp -d); RJ_HOME=$(mktemp -d); RJ_APP=$(mktemp -d)
+trap 'rm -rf "$LUA_APP" "$JS_APP" "$RJ_STAGE" "$RJ_HOME" "$RJ_APP"' EXIT
+cp "$HULL" "$RJ_STAGE/hull"
+# Stage the platform lib beside it (so platform resolution succeeds) but NOT the
+# js runtime archive: the build must get past linking-the-base and fail
+# specifically on composing the js runtime.
+cp ./build/libhull_platform.a "$RJ_STAGE/libhull_platform.a"
+cp "$JS_APP/app.js" "$RJ_APP/app.js"
+RJ_OUT=$(cd "$RJ_STAGE" && HOME="$RJ_HOME" ./hull build --no-verify-platform \
+    -o "$RJ_APP/bin" "$RJ_APP" 2>&1) || true
+echo "$RJ_OUT" | grep -q "'js' runtime feature lib was not found" \
+    || { echo "$RJ_OUT"; echo "FAIL: expected the js-runtime-not-found error"; exit 1; }
+echo "$RJ_OUT" | grep -q "make feature-js" \
+    || { echo "$RJ_OUT"; echo "FAIL: rejection lacks the build-from-source hint"; exit 1; }
+[ ! -x "$RJ_APP/bin" ] || { echo "FAIL: produced a binary despite the missing js runtime"; exit 1; }
+echo "ok  app.js with no resolvable js runtime fails clearly, no binary"
+
 echo "PASS: runtime slim holds - a single-runtime app drops the other interpreter"
