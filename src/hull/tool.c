@@ -8,6 +8,7 @@
  */
 
 #include "hull/tool.h"
+#include "hull/stdlib_feature.h"
 #include "hull/compilers.h"
 #include "hull/module_registry.h"
 #include "hull/compiler.h"
@@ -190,11 +191,13 @@ int hull_tool(const char *module, int argc, char **argv, const char *hull_exe)
     HlLuaConfig cfg = HL_LUA_CONFIG_DEFAULT;
     cfg.sandbox = 0;
 
-    /* Init VFS instances for module loading */
-    extern const HlEntry hl_stdlib_entries[];
+    /* Init VFS instances for module loading. The platform VFS unions the base
+     * stdlib with each composed runtime's stdlib (tool mode is Lua-only, so it
+     * pulls the Lua feature entries when the runtime is composed as a feature). */
     extern const HlEntry hl_app_entries[];
     HlVfs platform_vfs, app_vfs;
-    hl_vfs_init(&platform_vfs, hl_stdlib_entries, NULL);
+    HlEntry *platform_vfs_owned = NULL;
+    hl_platform_vfs_init(&platform_vfs, &platform_vfs_owned);
     hl_vfs_init(&app_vfs, hl_app_entries, app_dir);
 
     HlLua lua;
@@ -205,6 +208,7 @@ int hull_tool(const char *module, int argc, char **argv, const char *hull_exe)
 
     if (hl_lua_init(&lua, &cfg) != 0) {
         fprintf(stderr, "hull: Lua init failed\n");
+        hl_platform_vfs_dispose(platform_vfs_owned);
         return 1;
     }
 
@@ -364,6 +368,7 @@ int hull_tool(const char *module, int argc, char **argv, const char *hull_exe)
     hl_lua_free(&lua);
     if (compiler)
         hl_compiler_destroy(compiler);
+    hl_platform_vfs_dispose(platform_vfs_owned);
     return (rc == LUA_OK) ? 0 : 1;
 }
 

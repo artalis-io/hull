@@ -24,6 +24,7 @@
 #include "hull/runtime/lua_template_cache.h"
 #include "hull/reqctx.h"
 #include "hull/vfs.h"
+#include "hull/stdlib_feature.h"
 #include "hull/cap/db.h"
 #include "hull/cap/db_backend.h"
 #include "hull/cap/db_sqlite.h"
@@ -51,6 +52,10 @@
 static HlLua lua_rt;
 static int lua_initialized = 0;
 static HlVfs platform_vfs;
+/* Merged baseUruntime stdlib array for platform_vfs; disposed before each
+ * re-init so priors don't accumulate. The live one stays reachable via this
+ * static (LSan-clean). */
+static HlEntry *platform_vfs_owned = NULL;
 
 /* Tests use lots of inline Lua snippets that reference modules as
  * globals (`db.exec(...)`, `crypto.sha256(...)`, ...). Phase 2b removes
@@ -77,8 +82,8 @@ static void install_test_globals(lua_State *L)
 
 static void init_lua(void)
 {
-    extern const HlEntry hl_stdlib_entries[];
-    hl_vfs_init(&platform_vfs, hl_stdlib_entries, NULL);
+    hl_platform_vfs_dispose(platform_vfs_owned);
+    hl_platform_vfs_init(&platform_vfs, &platform_vfs_owned);
     if (lua_initialized)
         hl_lua_free(&lua_rt);
     HlLuaConfig cfg = HL_LUA_CONFIG_DEFAULT;
@@ -119,8 +124,8 @@ static HlEnvConfig env_cfg = { .allowed = env_allowed, .count = 1 };
 
 static void init_lua_with_caps(void)
 {
-    extern const HlEntry hl_stdlib_entries[];
-    hl_vfs_init(&platform_vfs, hl_stdlib_entries, NULL);
+    hl_platform_vfs_dispose(platform_vfs_owned);
+    hl_platform_vfs_init(&platform_vfs, &platform_vfs_owned);
     if (lua_initialized)
         hl_lua_free(&lua_rt);
     if (test_db_registry) {
@@ -1184,8 +1189,8 @@ static void rm_rf(const char *dir)
 /* Init lua with app_dir set to a temp directory */
 static void init_lua_with_appdir(const char *app_dir)
 {
-    extern const HlEntry hl_stdlib_entries[];
-    hl_vfs_init(&platform_vfs, hl_stdlib_entries, NULL);
+    hl_platform_vfs_dispose(platform_vfs_owned);
+    hl_platform_vfs_init(&platform_vfs, &platform_vfs_owned);
     if (lua_initialized)
         hl_lua_free(&lua_rt);
     HlLuaConfig cfg = HL_LUA_CONFIG_DEFAULT;

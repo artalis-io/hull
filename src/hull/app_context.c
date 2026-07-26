@@ -12,6 +12,7 @@
 #include "hull/manifest.h"
 #include "hull/module_resolver.h"
 #include "hull/runtime/factory.h"
+#include "hull/stdlib_feature.h"
 #include "hull/vfs.h"
 
 #ifdef HL_ENABLE_DB
@@ -58,6 +59,7 @@ struct HlAppContext {
 #endif
     HlVfs          app_vfs;
     HlVfs          platform_vfs;
+    HlEntry       *platform_vfs_owned;  /* merged base+feature array to free, or NULL */
     HlRuntime     *rt;
 
     /* Resolved module set (opt-in via opts.gate_modules). Lives here so
@@ -223,11 +225,12 @@ int hl_app_context_init(HlAppContext **out, const HlAppContextOpts *opts)
     }
 #endif
 
-    /* Init VFS instances */
+    /* Init VFS instances. The platform VFS unions the runtime-agnostic base
+     * stdlib with each composed runtime's stdlib (via hl_stdlib_feature_entries);
+     * in a base build with no runtime feature it borrows the static base. */
     extern const HlEntry hl_app_entries[];
-    extern const HlEntry hl_stdlib_entries[];
     hl_vfs_init(&ctx->app_vfs, hl_app_entries, opts->app_dir);
-    hl_vfs_init(&ctx->platform_vfs, hl_stdlib_entries, NULL);
+    hl_platform_vfs_init(&ctx->platform_vfs, &ctx->platform_vfs_owned);
 
 #ifdef HL_ENABLE_DB
     /* Run migrations (fail on error to prevent starting with broken schema) */
@@ -377,6 +380,8 @@ void hl_app_context_free(HlAppContext *ctx)
     ctx->rt = NULL;
     ctx->rt_init = 0;
     ctx->app_loaded = 0;
+    hl_platform_vfs_dispose(ctx->platform_vfs_owned);
+    ctx->platform_vfs_owned = NULL;
     free(ctx);
 }
 
