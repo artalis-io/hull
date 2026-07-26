@@ -49,7 +49,7 @@ static HlVfs platform_vfs;
 /* Merged baseUruntime stdlib array for platform_vfs; disposed before each
  * re-init so priors don't accumulate. The live one stays reachable via this
  * static (LSan-clean). */
-static HlEntry *platform_vfs_owned = NULL;
+static void *platform_vfs_owned = NULL;
 
 /* Tests use lots of inline JS snippets that reference modules as
  * globals. Phase 2b removes globals from production — apps must
