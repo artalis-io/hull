@@ -43,12 +43,12 @@ const HlEntry *const *hl_stdlib_feature_entries(size_t *count);
  * always embedded). Free the returned owned array with #hl_platform_vfs_dispose.
  *
  * @param vfs       Storage to initialize.
- * @param out_owned Receives the heap-allocated merged array, or NULL when the
- *                  static base was borrowed (no runtime feature contributed).
+ * @param out_owned Receives an opaque handle (the sealed arena) to free, or NULL
+ *                  when the static base was borrowed (no runtime feature).
  */
-void hl_platform_vfs_init(HlVfs *vfs, HlEntry **out_owned);
+void hl_platform_vfs_init(HlVfs *vfs, void **out_owned);
 
-/** @brief Free an owned merged array from #hl_platform_vfs_init (NULL-safe). */
-void hl_platform_vfs_dispose(HlEntry *owned);
+/** @brief Free an opaque handle from #hl_platform_vfs_init (NULL-safe). */
+void hl_platform_vfs_dispose(void *owned);
 
 #endif /* HL_STDLIB_FEATURE_H */

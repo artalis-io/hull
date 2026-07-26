@@ -21,7 +21,7 @@ const HlEntry *const *hl_stdlib_feature_entries(size_t *count)
     return NULL;
 }
 
-void hl_platform_vfs_init(HlVfs *vfs, HlEntry **out_owned)
+void hl_platform_vfs_init(HlVfs *vfs, void **out_owned)
 {
     extern const HlEntry hl_stdlib_entries[];
     size_t fc = 0;
@@ -29,7 +29,7 @@ void hl_platform_vfs_init(HlVfs *vfs, HlEntry **out_owned)
     hl_vfs_init_composed(vfs, hl_stdlib_entries, feats, fc, NULL, out_owned);
 }
 
-void hl_platform_vfs_dispose(HlEntry *owned)
+void hl_platform_vfs_dispose(void *owned)
 {
-    free(owned);
+    hl_vfs_composed_free(owned);
 }

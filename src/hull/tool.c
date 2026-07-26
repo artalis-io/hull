@@ -196,7 +196,7 @@ int hull_tool(const char *module, int argc, char **argv, const char *hull_exe)
      * pulls the Lua feature entries when the runtime is composed as a feature). */
     extern const HlEntry hl_app_entries[];
     HlVfs platform_vfs, app_vfs;
-    HlEntry *platform_vfs_owned = NULL;
+    void    *platform_vfs_owned = NULL;
     hl_platform_vfs_init(&platform_vfs, &platform_vfs_owned);
     hl_vfs_init(&app_vfs, hl_app_entries, app_dir);
 

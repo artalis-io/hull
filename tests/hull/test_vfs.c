@@ -9,6 +9,10 @@
 
 #include <stdlib.h>
 #include <string.h>
+#include <stdint.h>
+#include <signal.h>
+#include <unistd.h>
+#include <sys/wait.h>
 
 /* ── Test data: sorted entry arrays ───────────────────────────────── */
 
@@ -267,21 +271,21 @@ static const HlEntry composed_js[] = {
 UTEST(vfs, composed_empty_features_borrows_base)
 {
     HlVfs vfs;
-    HlEntry *owned = (HlEntry *)0x1;  /* poison: must be set to NULL */
+    void *owned = (void *)0x1;  /* poison: must be set to NULL */
     hl_vfs_init_composed(&vfs, composed_base, NULL, 0, NULL, &owned);
 
     /* No feature entries -> borrow the static base, no allocation. */
     ASSERT_TRUE(owned == NULL);
     ASSERT_EQ(vfs.count, (size_t)3);
     ASSERT_TRUE(vfs.entries == composed_base);
-    free(owned);  /* NULL-safe */
+    hl_vfs_composed_free(owned);  /* NULL-safe */
 }
 
 UTEST(vfs, composed_merges_and_sorts)
 {
     const HlEntry *const feats[] = { composed_lua, composed_js };
     HlVfs vfs;
-    HlEntry *owned = NULL;
+    void *owned = NULL;
     hl_vfs_init_composed(&vfs, composed_base, feats, 2, NULL, &owned);
 
     /* 3 base + 2 lua + 2 js = 7, heap-merged (owned set). */
@@ -300,7 +304,35 @@ UTEST(vfs, composed_merges_and_sorts)
     for (size_t i = 1; i < vfs.count; i++)
         ASSERT_LT(strcmp(vfs.entries[i - 1].name, vfs.entries[i].name), 0);
 
-    free(owned);
+    hl_vfs_composed_free(owned);
+}
+
+/* Death test: the composed table is sealed READ-ONLY. Fork a child, write into
+ * the merged array, and assert the child dies by signal. Without this a no-op
+ * mprotect (or a dropped seal) would silently pass every other test. */
+UTEST(vfs, composed_array_is_sealed_readonly)
+{
+    const HlEntry *const feats[] = { composed_lua, composed_js };
+    HlVfs vfs;
+    void *owned = NULL;
+    hl_vfs_init_composed(&vfs, composed_base, feats, 2, NULL, &owned);
+    ASSERT_TRUE(owned != NULL);   /* the merged (sealed) path was taken */
+
+    pid_t pid = fork();
+    ASSERT_TRUE(pid >= 0);
+    if (pid == 0) {
+        /* Reset sanitizer SEGV/BUS handlers so we die by signal, not _exit(). */
+        signal(SIGSEGV, SIG_DFL);
+        signal(SIGBUS, SIG_DFL);
+        HlEntry *e = (HlEntry *)(uintptr_t)&vfs.entries[0];
+        e->len = 0xdeadu;         /* write into the RO mapping -> must fault */
+        _exit(0);                 /* reached only if NOT sealed */
+    }
+    int status = 0;
+    ASSERT_EQ(waitpid(pid, &status, 0), pid);
+    ASSERT_TRUE(WIFSIGNALED(status));   /* SIGSEGV / SIGBUS from the RO write */
+
+    hl_vfs_composed_free(owned);
 }
 
 UTEST_MAIN();

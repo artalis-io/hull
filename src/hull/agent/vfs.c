@@ -67,7 +67,7 @@ int hl_agent_vfs_ctx(HlAppContext *ctx, ShJsonBuf *out)
 
     /* stdlib = base U each composed runtime's stdlib (merged, sorted). */
     HlVfs stdlib_vfs;
-    HlEntry *stdlib_owned = NULL;
+    void    *stdlib_owned = NULL;
     hl_platform_vfs_init(&stdlib_vfs, &stdlib_owned);
     emit_entries(&w, stdlib_vfs.entries, NULL, "stdlib");
     hl_platform_vfs_dispose(stdlib_owned);
@@ -89,7 +89,7 @@ int hl_agent_vfs(const char *app_dir, ShJsonBuf *out)
 
     /* stdlib = base U each composed runtime's stdlib (merged, sorted). */
     HlVfs stdlib_vfs;
-    HlEntry *stdlib_owned = NULL;
+    void    *stdlib_owned = NULL;
     hl_platform_vfs_init(&stdlib_vfs, &stdlib_owned);
     emit_entries(&w, stdlib_vfs.entries, NULL, "stdlib");
     hl_platform_vfs_dispose(stdlib_owned);

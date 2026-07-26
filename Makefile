@@ -3671,8 +3671,8 @@ $(BUILDDIR)/test_static: $(TESTDIR)/hull/test_static.c $(STATIC_OBJ) $(TEST_COMM
 		$(STATIC_OBJ) $(TEST_COMMON_LIBS)
 
 # VFS test — standalone module, no runtime deps
-$(BUILDDIR)/test_vfs: $(TESTDIR)/hull/test_vfs.c $(VFS_OBJ) $(PATH_NORM_OBJ) $(THREAD_AFFINITY_OBJ) | $(BUILDDIR)
-	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< $(VFS_OBJ) $(PATH_NORM_OBJ) $(THREAD_AFFINITY_OBJ)
+$(BUILDDIR)/test_vfs: $(TESTDIR)/hull/test_vfs.c $(VFS_OBJ) $(PATH_NORM_OBJ) $(THREAD_AFFINITY_OBJ) $(SH_SEAL_ARENA_OBJ) | $(BUILDDIR)
+	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< $(VFS_OBJ) $(PATH_NORM_OBJ) $(THREAD_AFFINITY_OBJ) $(SH_SEAL_ARENA_OBJ)
 
 # SBOM test — exercises the data table + all four format functions +
 # embedded-blob SHA-256 cache. Links against sbom.o + cacert.o + mbedTLS;

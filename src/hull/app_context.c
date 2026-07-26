@@ -52,7 +52,7 @@ struct HlAppContext {
 #endif
     HlVfs          app_vfs;
     HlVfs          platform_vfs;
-    HlEntry       *platform_vfs_owned;  /* merged base+feature array to free, or NULL */
+    void          *platform_vfs_owned;  /* opaque sealed-arena handle to free, or NULL */
     HlRuntime     *rt;
 
     /* Resolved module set (opt-in via opts.gate_modules). Lives here so

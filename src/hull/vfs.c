@@ -9,7 +9,10 @@
 
 #include "hull/vfs.h"
 
+#include <sh_seal_arena.h>
+
 #include <assert.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -54,10 +57,11 @@ static size_t hl_entry_count(const HlEntry *a)
 
 void hl_vfs_init_composed(HlVfs *vfs, const HlEntry *base,
                           const HlEntry *const *feat_arrays, size_t feat_count,
-                          const char *root_dir, HlEntry **out_owned)
+                          const char *root_dir, void **out_owned)
 {
     assert(vfs);
     assert(base);
+    if (out_owned) *out_owned = NULL;
 
     /* Total feature entries across all composed runtime archives. */
     size_t nf = 0;
@@ -67,7 +71,6 @@ void hl_vfs_init_composed(HlVfs *vfs, const HlEntry *base,
     /* Fast path: nothing composed -> borrow the static base, no allocation.
      * This is the common base build and stays byte-identical to hl_vfs_init. */
     if (nf == 0) {
-        if (out_owned) *out_owned = NULL;
         hl_vfs_init(vfs, base, root_dir);
         return;
     }
@@ -75,11 +78,24 @@ void hl_vfs_init_composed(HlVfs *vfs, const HlEntry *base,
     size_t nb    = hl_entry_count(base);
     size_t total = nb + nf;
 
-    HlEntry *merged = malloc((total + 1) * sizeof(*merged));
+    /* Overflow guard on the byte size (total is bounded by embedded module
+     * counts, so this is defensive; degrade to base if it ever trips). */
+    if (total + 1 > SIZE_MAX / sizeof(HlEntry)) {
+        hl_vfs_init(vfs, base, root_dir);
+        return;
+    }
+    size_t bytes = (total + 1) * sizeof(HlEntry);
+
+    /* Build the merged table in a SEALED arena (RW while filling, mprotect RO
+     * after): this module-lookup table is boot-built + read on every module
+     * load, so it earns the same read-only protection as the manifest. */
+    ShSealArena *arena = malloc(sizeof(*arena));
+    HlEntry *merged = NULL;
+    if (arena && sh_seal_arena_init(arena, bytes, "platform_vfs") == 0)
+        merged = sh_seal_arena_alloc(arena, bytes, _Alignof(HlEntry));
     if (!merged) {
-        /* Degrade to the base set rather than crash; features are absent only
-         * under OOM (in the base build nf==0 already took the fast path). */
-        if (out_owned) *out_owned = NULL;
+        /* Degrade to the base set rather than crash (OOM / mmap failure). */
+        if (arena) { sh_seal_arena_destroy(arena); free(arena); }
         hl_vfs_init(vfs, base, root_dir);
         return;
     }
@@ -98,11 +114,23 @@ void hl_vfs_init_composed(HlVfs *vfs, const HlEntry *base,
 
     /* Sort by name in C strcmp order - the same total order the Makefile's
      * LC_ALL=C sort produces, so hl_vfs_init's sorted-order assert holds and
-     * binary search stays correct. */
+     * binary search stays correct. Sort BEFORE sealing (the seal makes it RO). */
     qsort(merged, total, sizeof(*merged), hl_entry_name_cmp);
 
-    if (out_owned) *out_owned = merged;
+    /* Seal RO. If mprotect ever fails the table is still valid (just unsealed) -
+     * strictly no worse than the pre-seal heap version; do not fail the build. */
+    (void)sh_seal_arena_seal(arena);
+
+    if (out_owned) *out_owned = arena;
     hl_vfs_init(vfs, merged, root_dir);
+}
+
+void hl_vfs_composed_free(void *owned)
+{
+    if (!owned) return;
+    ShSealArena *arena = (ShSealArena *)owned;
+    sh_seal_arena_destroy(arena);
+    free(arena);
 }
 
 const HlEntry *hl_vfs_find(const HlVfs *vfs, const char *name)
