@@ -1542,7 +1542,12 @@ int main(int argc, char **argv) { return hl_app_run(argc, argv); }
     do
         local app_rt = file_exists(opts.app_dir .. "/app.lua") and "lua"
                     or (file_exists(opts.app_dir .. "/app.js") and "js" or nil)
-        if app_rt then
+        -- Cosmo has a DUAL base (both runtimes + the toolchain registry embedded
+        -- in the fat APE); a cosmo app must NOT get an app_feature_registry (it
+        -- would duplicate the base's strong hooks) and does not compose a runtime
+        -- archive (features are native-only). Native has a runtime-less base and
+        -- composes exactly one runtime here.
+        if app_rt and not is_cosmo then
             local entries = "hl_stdlib_" .. app_rt .. "_entries"
             local factory = "hl_" .. app_rt .. "_factory"
             local reg = table.concat({
@@ -1585,8 +1590,16 @@ int main(int argc, char **argv) { return hl_app_run(argc, argv); }
             local rt_hull_dir = ""
             if __hull_exe then rt_hull_dir = __hull_exe:match("(.*/)") or "" end
             local rt_path
-            for _, d in ipairs({ rt_hull_dir, "build/", "../build/" }) do
-                if file_exists(d .. rt_lib) then rt_path = d .. rt_lib; break end
+            -- 1. Embedded in this hull (the distributed native path): extract it.
+            if tool.extract_feature_runtime and tool.extract_feature_runtime(tmpdir, app_rt)
+               and file_exists(tmpdir .. "/" .. rt_lib) then
+                rt_path = tmpdir .. "/" .. rt_lib
+            end
+            -- 2. Local build dirs (`make feature-<rt>`, source builds).
+            if not rt_path then
+                for _, d in ipairs({ rt_hull_dir, "build/", "../build/" }) do
+                    if file_exists(d .. rt_lib) then rt_path = d .. rt_lib; break end
+                end
             end
             if not rt_path and rt_plat and tool.feature_cache_dir then
                 local cache = tool.feature_cache_dir()
@@ -1610,7 +1623,7 @@ int main(int argc, char **argv) { return hl_app_run(argc, argv); }
                 tool.rmdir(tmpdir); tool.exit(1)
             end
             local rt_dest = tmpdir .. "/" .. rt_lib
-            tool.copy(rt_path, rt_dest)
+            if rt_path ~= rt_dest then tool.copy(rt_path, rt_dest) end  -- already there if extracted
             needs_base_group = true  -- runtime refs base symbols; GNU ld needs the group
             if rt_plat and rt_plat:sub(1, 6) == "darwin" then
                 feature_libs[#feature_libs + 1] = "-Wl,-force_load," .. rt_dest

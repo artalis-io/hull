@@ -2528,12 +2528,22 @@ check-hardening: $(BUILDDIR)/hull
 # in tool mode (hull build, hull verify), never from app runtime.
 # Cost: ~hundreds of bytes per app (the embedded manifest+sig, dead
 # weight at app runtime). Trade we accept for a clean symbol graph.
-# The base platform lib is RUNTIME-LESS: no interpreter, no per-runtime
-# stdlib/manifest. A produced app composes exactly one runtime archive
-# (libhull_feature-<rt>.a). The hull toolchain link below stays dual.
-PLATFORM_RT_OBJS      := $(RUNTIME_CACHE_COMMON_OBJ)  # runtime-agnostic; VMs dropped
-PLATFORM_MANIFEST_OBJ := $(BUILDDIR)/manifest.o       # runtime-agnostic; manifest_<rt> -> archives
-PLATFORM_OBJS := $(CAP_OBJS) $(CAP_TOOL_OBJ) $(CAP_TEST_OBJ) $(CMD_OBJS) $(PLATFORM_RT_OBJS) $(ALLOC_OBJ) $(ASYNC_OBJ) $(COMPRESS_OBJ) $(MINIZ_OBJ) $(WORKER_DB_OBJ) $(WORKER_WASM_OBJ) $(WORKER_GPU_OBJ) $(PLATFORM_MANIFEST_OBJ) $(MODULE_OBJ) $(ASYNC_BACKEND_OBJS) $(NET_BACKEND_OBJS) $(SANDBOX_OBJ) $(SANDBOX_TOOL_OBJ) $(SIG_OBJ) $(RELEASE_OBJ) $(RELEASE_IO_OBJ) $(TOOLS_INSTALL_OBJ) $(PLATFORM_SIG_OBJ) $(EMBEDDED_PLATFORM_SIG_OBJ) $(TEST_RUNNER_OBJ) $(RUNTIME_FACTORY_OBJ) $(STATIC_OBJ) $(MIGRATE_OBJ) $(VFS_OBJ) $(PATH_NORM_OBJ) $(THREAD_AFFINITY_OBJ) $(CACHE_DIR_OBJ) $(BLOB_STORE_OBJ) $(CACHE_REGISTRY_OBJ) $(CACERT_OBJ) $(TLS_CLIENT_OBJ) $(CSP_OBJ) $(SBOM_OBJ) $(STDLIB_FEATURE_OBJ) $(APP_CONTEXT_OBJ) $(APP_CONTEXT_RT_OBJ) $(AGENT_LIB_OBJ) $(AGENT_API_OBJ) $(MAIN_OBJ) $(SERVE_OBJ) $(APP_RUNNER_OBJ) $(TOOL_OBJ) $(BUILD_ASSET_STUB_OBJ) $(STDLIB_REGISTRY_O) $(WAMR_OBJS) $(MBEDTLS_OBJS) \
+# The NATIVE base platform lib is RUNTIME-LESS: no interpreter, no
+# per-runtime stdlib/manifest. A produced app composes exactly one runtime
+# archive (libhull_feature-<rt>.a). COSMO stays DUAL: features are
+# native-only static archives, so a fat-APE app cannot compose one - the
+# cosmo base embeds both runtimes (full, no slim). The hull toolchain link
+# (below) stays dual on every target.
+ifdef COSMO
+  PLATFORM_RT_OBJS       := $(RT_OBJS)
+  PLATFORM_MANIFEST_OBJ  := $(MANIFEST_OBJ)
+  PLATFORM_RUNTIME_EXTRA := $(STDLIB_RT_REGISTRY_OBJS) $(STDLIB_TOOLCHAIN_REGISTRY_O) $(RUNTIME_TOOLCHAIN_REGISTRY_O) $(VEND_OBJS)
+else
+  PLATFORM_RT_OBJS       := $(RUNTIME_CACHE_COMMON_OBJ)  # runtime-agnostic; VMs dropped
+  PLATFORM_MANIFEST_OBJ  := $(BUILDDIR)/manifest.o       # runtime-agnostic
+  PLATFORM_RUNTIME_EXTRA :=
+endif
+PLATFORM_OBJS := $(CAP_OBJS) $(CAP_TOOL_OBJ) $(CAP_TEST_OBJ) $(CMD_OBJS) $(PLATFORM_RT_OBJS) $(ALLOC_OBJ) $(ASYNC_OBJ) $(COMPRESS_OBJ) $(MINIZ_OBJ) $(WORKER_DB_OBJ) $(WORKER_WASM_OBJ) $(WORKER_GPU_OBJ) $(PLATFORM_MANIFEST_OBJ) $(MODULE_OBJ) $(ASYNC_BACKEND_OBJS) $(NET_BACKEND_OBJS) $(SANDBOX_OBJ) $(SANDBOX_TOOL_OBJ) $(SIG_OBJ) $(RELEASE_OBJ) $(RELEASE_IO_OBJ) $(TOOLS_INSTALL_OBJ) $(PLATFORM_SIG_OBJ) $(EMBEDDED_PLATFORM_SIG_OBJ) $(TEST_RUNNER_OBJ) $(RUNTIME_FACTORY_OBJ) $(STATIC_OBJ) $(MIGRATE_OBJ) $(VFS_OBJ) $(PATH_NORM_OBJ) $(THREAD_AFFINITY_OBJ) $(CACHE_DIR_OBJ) $(BLOB_STORE_OBJ) $(CACHE_REGISTRY_OBJ) $(CACERT_OBJ) $(TLS_CLIENT_OBJ) $(CSP_OBJ) $(SBOM_OBJ) $(STDLIB_FEATURE_OBJ) $(APP_CONTEXT_OBJ) $(APP_CONTEXT_RT_OBJ) $(AGENT_LIB_OBJ) $(AGENT_API_OBJ) $(MAIN_OBJ) $(SERVE_OBJ) $(APP_RUNNER_OBJ) $(TOOL_OBJ) $(BUILD_ASSET_STUB_OBJ) $(STDLIB_REGISTRY_O) $(PLATFORM_RUNTIME_EXTRA) $(WAMR_OBJS) $(MBEDTLS_OBJS) \
 	$(SQLITE_OBJ) $(LOG_OBJ) $(LOG_LOCK_OBJ) $(SH_ARENA_OBJ) $(SH_JSON_OBJ) $(TWEETNACL_OBJ) $(STB_OBJ) $(PLEDGE_OBJS) \
 	$(COMPILER_OBJ) $(COMPILER_TCC_OBJ)
 
@@ -2889,8 +2899,16 @@ $(EMBEDDED_TEMPLATES_H): templates/app_main.c templates/entry.h | $(BUILDDIR)
 	@xxd -i templates/app_main.c | sed 's/templates_app_main_c/hl_embedded_app_main_c/g' | $(XXD_CONST_PIPE) >> $@
 	@xxd -i templates/entry.h | sed 's/templates_entry_h/hl_embedded_entry_h/g' | $(XXD_CONST_PIPE) >> $@
 
-CFLAGS += -DHL_BUILD_EMBEDDED
-$(BUILD_ASSET_OBJ): $(EMBEDDED_PLATFORM_H) $(EMBEDDED_TEMPLATES_H)
+# Embed both runtime feature archives so the runtime-less native base composes
+# one at build time with no `hull feature install` (the runtime is mandatory).
+EMBEDDED_RUNTIME_H := $(BUILDDIR)/embedded_runtime.h
+$(EMBEDDED_RUNTIME_H): $(BUILDDIR)/libhull_feature-lua.a $(BUILDDIR)/libhull_feature-js.a | $(BUILDDIR)
+	@echo "/* Auto-generated - do not edit */" > $@
+	@xxd -i $(BUILDDIR)/libhull_feature-lua.a | sed 's/build_libhull_feature_lua_a/hl_embedded_feature_lua_a/g' | $(XXD_CONST_PIPE) >> $@
+	@xxd -i $(BUILDDIR)/libhull_feature-js.a  | sed 's/build_libhull_feature_js_a/hl_embedded_feature_js_a/g'   | $(XXD_CONST_PIPE) >> $@
+
+CFLAGS += -DHL_BUILD_EMBEDDED -DHL_BUILD_EMBEDDED_RUNTIME
+$(BUILD_ASSET_OBJ): $(EMBEDDED_PLATFORM_H) $(EMBEDDED_TEMPLATES_H) $(EMBEDDED_RUNTIME_H)
 endif
 
 # Hull binary
