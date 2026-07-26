@@ -2706,6 +2706,31 @@ $(BUILDDIR)/libhull_feature-tui.a: $(BUILDDIR)/cap_tui.o $(BUILDDIR)/cap_tui_inp
 	            $(BUILDDIR)/lua_rt_mod_tui.o $(BUILDDIR)/js_mod_tui.o
 	@echo "built $@ ($$(du -h $@ | cut -f1))"
 
+# libhull_feature-lua.a / -js.a: a runtime as a composable feature archive.
+# Bundles the runtime objects, its vendored VM, its manifest extractor, and its
+# stdlib VFS array (hl_stdlib_<rt>_entries). The tui bridge (mod_tui) is excluded
+# - it belongs to libhull_feature-tui.a. Phase 3c builds these additively (base
+# still dual, objects already compiled); Phase 3b flips the base runtime-less and
+# force-loads them into hull. Whole-archive at compose (no single anchor symbol).
+FEATURE_LUA_OBJS := $(filter-out $(BUILDDIR)/lua_rt_mod_tui.o,$(LUA_RT_OBJS)) \
+                    $(LUA_OBJS) $(BUILDDIR)/manifest_lua.o $(STDLIB_LUA_REGISTRY_O)
+FEATURE_JS_OBJS  := $(filter-out $(BUILDDIR)/js_mod_tui.o,$(JS_RT_OBJS)) \
+                    $(QJS_OBJS) $(BUILDDIR)/manifest_js.o $(STDLIB_JS_REGISTRY_O)
+
+feature-lua: $(BUILDDIR)/libhull_feature-lua.a
+.PHONY: feature-lua
+$(BUILDDIR)/libhull_feature-lua.a: $(FEATURE_LUA_OBJS) | $(BUILDDIR)
+	@rm -f $@
+	$(AR) rcs $@ $(FEATURE_LUA_OBJS)
+	@echo "built $@ ($$(du -h $@ | cut -f1))"
+
+feature-js: $(BUILDDIR)/libhull_feature-js.a
+.PHONY: feature-js
+$(BUILDDIR)/libhull_feature-js.a: $(FEATURE_JS_OBJS) | $(BUILDDIR)
+	@rm -f $@
+	$(AR) rcs $@ $(FEATURE_JS_OBJS)
+	@echo "built $@ ($$(du -h $@ | cut -f1))"
+
 # Multi-arch cosmo platform: build x86_64 and aarch64 archives
 COSMO_STAGE := .cosmo_staging
 

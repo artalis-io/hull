@@ -114,11 +114,27 @@ Base default flips to **both runtimes off** for the platform-lib compile
 `stdlib_toolchain_registry`. Those move to the archives and the toolchain
 registry respectively.
 
-## Change 3c - the archives
+## Change 3c - the archives (DONE, additive, base still dual)
 
 `make feature-lua` / `feature-js`, mirroring `feature-tui` (whole-archive; a
 runtime has no single anchor symbol so the compose must whole-archive /
-`-force_load` it):
+`-force_load` it). Built additively while the base is still dual: the objects
+already exist from the normal build, so `make feature-lua feature-js` just `ar`s
+them; the base build and `make test` are unaffected (verified: 60/60, default
+build unchanged). The tui bridge (`lua_rt_mod_tui.o` / `js_mod_tui.o`) is
+`filter-out`-excluded - it belongs to `libhull_feature-tui.a`.
+
+`nm` verification (the archive-boundary proof before the base flip):
+- lua archive (1.8M) defines `hl_lua_factory`, `hl_lua_vtable`,
+  `hl_stdlib_lua_entries`, `hl_manifest_extract_lua`, 697 Lua-VM symbols, and
+  **0** JS / QuickJS symbols.
+- js archive (2.2M) defines the symmetric set + 172 QuickJS symbols and **0** Lua
+  symbols.
+- **Neither** archive defines `hl_stdlib_feature_entries` /
+  `hl_runtime_feature_factories` - those stay weak-in-base, filled by the
+  generated toolchain/app registry (3d / 3e).
+
+The as-built rule (via `FEATURE_LUA_OBJS` / `FEATURE_JS_OBJS`):
 
 ```makefile
 $(BUILDDIR)/libhull_feature-lua.a: $(LUA_RT_OBJS) $(LUA_OBJS) $(BUILDDIR)/manifest_lua.o \
