@@ -893,6 +893,71 @@ jobs:
           name: feature-tui-${{ matrix.name }}
           path: libhull_feature-tui-${{ matrix.name }}.a
 
+  build-feature-lua:
+    # Lua 5.4 runtime as a composable feature archive (libhull_feature-lua-<arch>.a).
+    # Unlike the installable features, runtimes are mandatory-exactly-one, so both
+    # runtime archives are ALSO embedded in the distributed hull and auto-composed
+    # from the entry extension (a fresh `hull build app.lua` needs no install).
+    # This job publishes the signed archive for provenance + source builds of a
+    # runtime-less hull. Native-only. See docs/runtime_feature_publishing.md.
+    name: Build feature lua (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x86_64
+            os: ubuntu-24.04
+          - name: linux-aarch64
+            os: ubuntu-24.04-arm
+          - name: darwin-arm64
+            os: macos-15
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          submodules: true
+      - name: Write VERSION file
+        run: echo "${GITHUB_REF_NAME#v}" > VERSION
+      - name: Build Lua runtime feature archive
+        run: make feature-lua
+      - name: Rename artifact (arch-qualified)
+        run: mv build/libhull_feature-lua.a libhull_feature-lua-${{ matrix.name }}.a
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        with:
+          name: feature-lua-${{ matrix.name }}
+          path: libhull_feature-lua-${{ matrix.name }}.a
+
+  build-feature-js:
+    # QuickJS runtime as a composable feature archive (libhull_feature-js-<arch>.a).
+    # Same embedded + auto-composed model as build-feature-lua; published for
+    # provenance + source builds. Native-only. See docs/runtime_feature_publishing.md.
+    name: Build feature js (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x86_64
+            os: ubuntu-24.04
+          - name: linux-aarch64
+            os: ubuntu-24.04-arm
+          - name: darwin-arm64
+            os: macos-15
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          submodules: true
+      - name: Write VERSION file
+        run: echo "${GITHUB_REF_NAME#v}" > VERSION
+      - name: Build JS runtime feature archive
+        run: make feature-js
+      - name: Rename artifact (arch-qualified)
+        run: mv build/libhull_feature-js.a libhull_feature-js-${{ matrix.name }}.a
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        with:
+          name: feature-js-${{ matrix.name }}
+          path: libhull_feature-js-${{ matrix.name }}.a
+
   build-feature-postgres:
     # Composable PostgreSQL feature archive (libhull_feature-postgres-<arch>.a),
     # pulled by `hull feature install postgres` -> `hull build --with=postgres`.
@@ -974,7 +1039,7 @@ jobs:
   release:
     name: Create Release
     runs-on: ubuntu-24.04
-    needs: [build-cosmo, build-native, build-wamrc, build-tcc, build-platform-cosmo-flavors, build-feature-native, build-feature-gpu, build-feature-tui, build-feature-postgres, build-feature-mysql]
+    needs: [build-cosmo, build-native, build-wamrc, build-tcc, build-platform-cosmo-flavors, build-feature-native, build-feature-gpu, build-feature-tui, build-feature-postgres, build-feature-mysql, build-feature-lua, build-feature-js]
     permissions:
       contents: write       # publish GitHub release + assets
       id-token: write       # SLSA: OIDC for Sigstore signing
@@ -1035,6 +1100,15 @@ jobs:
           mv artifacts/feature-tui-linux-x86_64/*.a   dist/
           mv artifacts/feature-tui-linux-aarch64/*.a  dist/
           mv artifacts/feature-tui-darwin-arm64/*.a   dist/
+          # Composable runtime feature archives (libhull_feature-{lua,js}-<arch>.a),
+          # native-only. Embedded in hull + auto-composed; published for provenance
+          # + source builds. Covered by the libhull_feature-*.a glob below.
+          mv artifacts/feature-lua-linux-x86_64/*.a   dist/
+          mv artifacts/feature-lua-linux-aarch64/*.a  dist/
+          mv artifacts/feature-lua-darwin-arm64/*.a   dist/
+          mv artifacts/feature-js-linux-x86_64/*.a    dist/
+          mv artifacts/feature-js-linux-aarch64/*.a   dist/
+          mv artifacts/feature-js-darwin-arm64/*.a    dist/
           # Composable PostgreSQL feature archives (libhull_feature-postgres-<arch>.a),
           # native-only. Pulled by `hull feature install postgres`. Covered by the
           # libhull_feature-*.a glob in the SHA-256 + publish steps below.
