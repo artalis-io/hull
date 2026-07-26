@@ -148,6 +148,40 @@ $(BUILDDIR)/libhull_feature-js.a:  $(JS_RT_OBJS)  $(QJS_OBJS) $(BUILDDIR)/manife
 Each runtime object compiled with `-DHL_ENABLE_<RT>` (per-object CFLAGS, like the
 tui feature objects get `-DHL_ENABLE_TUI`).
 
+## As shipped: the slim without force-load or a physical partition (DONE)
+
+The realized 3b/3d/3e is **simpler** than the force-load design below. Because
+`build.lua` links `libhull_platform.a` as a plain archive, the produced app
+**dead-strips** any member it does not reference. So the slim needed only:
+
+1. **Empty `g_factories`** + hook-driven resolution (committed): the base
+   references no concrete runtime symbol; the app's generated registry names its
+   one factory + stdlib; `hull`'s generated registry names both.
+2. **Weak-DEFINITION stubs** for the handful of toolchain-only symbols that
+   *app-linked base objects* reference but never reach at runtime, placed in
+   **`app_runner.o`** (which the `hull` toolchain does not link -- it uses
+   `hull_main`, not `hl_app_run`). The three edges found by `nm`:
+   `hl_lua_tool_register` + `hl_lua_tool_register_orchestration`
+   (`lua_rt_runtime.c`'s tool-mode branch -> `mod_tool.o` -> the JS manifest
+   extractor -> QuickJS) and `hl_agent_api_register` (`serve.c` under `--agent`
+   -> `agent_api.o` -> the agent bodies -> both VMs). With the app resolving
+   these to no-ops, `mod_tool.o` / `agent_api.o` are never pulled, so the tool
+   VM, agent, and **the other interpreter** all dead-strip. `hull` links the
+   real strong definitions directly (weak defs are portable, unlike the weak
+   *references* that Mach-O does not honor -- verified).
+
+**Result (measured):** a `hull build app.lua` binary has **0** QuickJS symbols
+(4.9 MB -> 4.3 MB); a `hull build app.js` binary has **0** Lua-VM symbols; both
+serve 200; the `hull` toolchain runs both runtimes; `make test` 60/60.
+
+No `HL_LUA/JS_TOOLCHAIN` force-load, no `TOOLCHAIN_ONLY_OBJS` object move, and no
+CFLAGS refactor were needed -- the archive dead-strip + weak stubs subsume them.
+The `feature-lua/js` archives (3c) remain for the published-feature / cosmo /
+custom path. If a future app-linked base object gains a new reference into
+toolchain-only code, add a matching weak stub in `app_runner.c`.
+
+The original force-load design is kept below for context.
+
 ## Change 3d - the `hull` toolchain force-loads both
 
 Mirror `HL_TUI_TOOLCHAIN` (Makefile ~1101-1143 + the `hull` link line): add
