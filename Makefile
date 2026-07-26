@@ -2083,18 +2083,28 @@ STDLIB_JS_REGISTRY_C := $(BUILDDIR)/stdlib_js_registry.c
 STDLIB_JS_REGISTRY_O := $(BUILDDIR)/stdlib_js_registry.o
 STDLIB_TOOLCHAIN_REGISTRY_C := $(BUILDDIR)/stdlib_toolchain_registry.c
 STDLIB_TOOLCHAIN_REGISTRY_O := $(BUILDDIR)/stdlib_toolchain_registry.o
+RUNTIME_TOOLCHAIN_REGISTRY_C := $(BUILDDIR)/runtime_toolchain_registry.c
+RUNTIME_TOOLCHAIN_REGISTRY_O := $(BUILDDIR)/runtime_toolchain_registry.o
 
 # Which per-runtime stdlib arrays this base compiles in, and the symbols the
-# toolchain registry exposes through the feature hook (default = both).
+# toolchain registry exposes through the two feature hooks (default = both):
+# STDLIB_FEATURE_SYMS -> hl_stdlib_feature_entries (the runtime's stdlib VFS
+# array), RUNTIME_FACTORY_SYMS -> hl_runtime_feature_factories (its factory
+# descriptor). The base g_factories is empty, so the toolchain registry is what
+# makes `hull` resolve both runtimes; a produced app gets the same two hooks
+# (for its one runtime) from build.lua's generated registry instead.
 ifeq ($(RUNTIME),js)
   STDLIB_RT_REGISTRY_OBJS := $(STDLIB_JS_REGISTRY_O)
   STDLIB_FEATURE_SYMS     := hl_stdlib_js_entries
+  RUNTIME_FACTORY_SYMS    := hl_js_factory
 else ifeq ($(RUNTIME),lua)
   STDLIB_RT_REGISTRY_OBJS := $(STDLIB_LUA_REGISTRY_O)
   STDLIB_FEATURE_SYMS     := hl_stdlib_lua_entries
+  RUNTIME_FACTORY_SYMS    := hl_lua_factory
 else
   STDLIB_RT_REGISTRY_OBJS := $(STDLIB_LUA_REGISTRY_O) $(STDLIB_JS_REGISTRY_O)
   STDLIB_FEATURE_SYMS     := hl_stdlib_lua_entries hl_stdlib_js_entries
+  RUNTIME_FACTORY_SYMS    := hl_lua_factory hl_js_factory
 endif
 
 $(STDLIB_REGISTRY_C): $(CONTEXT_XXD_HDRS) $(STDLIB_STATIC_XXD_HDRS) $(STDLIB_TPL_XXD_HDRS) | $(BUILDDIR)
@@ -2155,11 +2165,14 @@ $(STDLIB_JS_REGISTRY_C): $(STDLIB_JS_XXD_HDRS) | $(BUILDDIR)
 	@echo "    { 0, 0, 0 }" >> $@
 	@echo "};" >> $@
 
-# Toolchain stdlib feature registry: a STRONG hl_stdlib_feature_entries()
-# returning the runtime arrays compiled into this base. A composed app instead
-# gets the strong override from build.lua's generated feature registry.
-$(STDLIB_TOOLCHAIN_REGISTRY_C): | $(BUILDDIR)
-	@echo "/* Auto-generated stdlib feature registry - do not edit */" > $@
+# Toolchain STDLIB registry: STRONG hl_stdlib_feature_entries() over the runtime
+# stdlib arrays compiled into this base. Linked into hull AND the test binaries
+# (which build a platform VFS but init runtimes directly). Both stdlib arrays
+# are always present where this links, so it references only HlEntry symbols.
+# Depends on Makefile: emitted from $(STDLIB_FEATURE_SYMS) (and the recipe),
+# which live here, not in a tracked source file - else the .c never regenerates.
+$(STDLIB_TOOLCHAIN_REGISTRY_C): Makefile | $(BUILDDIR)
+	@echo "/* Auto-generated toolchain stdlib registry - do not edit */" > $@
 	@echo "#include <stddef.h>" >> $@
 	@echo "#include \"hull/entry.h\"" >> $@
 	@for s in $(STDLIB_FEATURE_SYMS); do echo "extern const HlEntry $$s[];" >> $@; done
@@ -2171,6 +2184,24 @@ $(STDLIB_TOOLCHAIN_REGISTRY_C): | $(BUILDDIR)
 	@echo "    return HL_STDLIB_FEATS;" >> $@
 	@echo "}" >> $@
 
+# Toolchain RUNTIME-FACTORY registry: STRONG hl_runtime_feature_factories() over
+# the factory descriptors. This references hl_<rt>_factory, so it links ONLY into
+# `hull` (which has every runtime). A JS-only test binary must NOT link it (it
+# has no hl_lua_factory) - and doesn't need it, since tests init runtimes
+# directly. A produced app gets its own one-runtime version from build.lua.
+$(RUNTIME_TOOLCHAIN_REGISTRY_C): Makefile | $(BUILDDIR)
+	@echo "/* Auto-generated toolchain runtime-factory registry - do not edit */" > $@
+	@echo "#include <stddef.h>" >> $@
+	@echo "typedef struct HlRuntimeFactory HlRuntimeFactory;" >> $@
+	@for s in $(RUNTIME_FACTORY_SYMS); do echo "extern const HlRuntimeFactory $$s;" >> $@; done
+	@echo "static const HlRuntimeFactory *const HL_RT_FEATS[] = {" >> $@
+	@for s in $(RUNTIME_FACTORY_SYMS); do echo "    &$$s," >> $@; done
+	@echo "};" >> $@
+	@echo "const HlRuntimeFactory *const *hl_runtime_feature_factories(size_t *count) {" >> $@
+	@echo "    if (count) *count = sizeof(HL_RT_FEATS)/sizeof(HL_RT_FEATS[0]);" >> $@
+	@echo "    return HL_RT_FEATS;" >> $@
+	@echo "}" >> $@
+
 $(STDLIB_REGISTRY_O): $(STDLIB_REGISTRY_C) | $(BUILDDIR)
 	$(CC) -std=c11 -O2 -w -I$(INCDIR) -I$(BUILDDIR) -c -o $@ $<
 $(STDLIB_LUA_REGISTRY_O): $(STDLIB_LUA_REGISTRY_C) | $(BUILDDIR)
@@ -2178,6 +2209,8 @@ $(STDLIB_LUA_REGISTRY_O): $(STDLIB_LUA_REGISTRY_C) | $(BUILDDIR)
 $(STDLIB_JS_REGISTRY_O): $(STDLIB_JS_REGISTRY_C) | $(BUILDDIR)
 	$(CC) -std=c11 -O2 -w -I$(INCDIR) -I$(BUILDDIR) -c -o $@ $<
 $(STDLIB_TOOLCHAIN_REGISTRY_O): $(STDLIB_TOOLCHAIN_REGISTRY_C) | $(BUILDDIR)
+	$(CC) -std=c11 -O2 -w -I$(INCDIR) -I$(BUILDDIR) -c -o $@ $<
+$(RUNTIME_TOOLCHAIN_REGISTRY_O): $(RUNTIME_TOOLCHAIN_REGISTRY_C) | $(BUILDDIR)
 	$(CC) -std=c11 -O2 -w -I$(INCDIR) -I$(BUILDDIR) -c -o $@ $<
 
 # ── App code embedding (xxd) ─────────────────────────────────────────
@@ -2852,8 +2885,8 @@ $(BUILD_ASSET_OBJ): $(EMBEDDED_PLATFORM_H) $(EMBEDDED_TEMPLATES_H)
 endif
 
 # Hull binary
-$(BUILDDIR)/hull: $(CAP_OBJS) $(CAP_TOOL_OBJ) $(CAP_TEST_OBJ) $(CMD_OBJS) $(RT_OBJS) $(ALLOC_OBJ) $(ASYNC_OBJ) $(COMPRESS_OBJ) $(MINIZ_OBJ) $(WORKER_DB_OBJ) $(WORKER_WASM_OBJ) $(WORKER_GPU_OBJ) $(MANIFEST_OBJ) $(MODULE_OBJ) $(ASYNC_BACKEND_OBJS) $(NET_BACKEND_OBJS) $(SANDBOX_OBJ) $(SANDBOX_TOOL_OBJ) $(SIG_OBJ) $(RELEASE_OBJ) $(RELEASE_IO_OBJ) $(TOOLS_INSTALL_OBJ) $(PLATFORM_SIG_OBJ) $(EMBEDDED_PLATFORM_SIG_OBJ) $(TEST_RUNNER_OBJ) $(RUNTIME_FACTORY_OBJ) $(STATIC_OBJ) $(MIGRATE_OBJ) $(VFS_OBJ) $(PATH_NORM_OBJ) $(THREAD_AFFINITY_OBJ) $(CACHE_DIR_OBJ) $(BLOB_STORE_OBJ) $(CACHE_REGISTRY_OBJ) $(CACERT_OBJ) $(TLS_CLIENT_OBJ) $(CSP_OBJ) $(SH_SEAL_ARENA_OBJ) $(SBOM_OBJ) $(STDLIB_FEATURE_OBJ) $(APP_CONTEXT_OBJ) $(APP_CONTEXT_RT_OBJ) $(AGENT_LIB_OBJ) $(AGENT_API_OBJ) $(TOOL_OBJ) $(BUILD_ASSET_OBJ) $(COMPILER_OBJ) $(COMPILER_TCC_OBJ) $(MAIN_OBJ) $(SERVE_OBJ) $(ENTRY_OBJ) $(APP_EXTRA_OBJS) $(STDLIB_REGISTRY_O) $(STDLIB_RT_REGISTRY_OBJS) $(STDLIB_TOOLCHAIN_REGISTRY_O) $(WAMR_OBJS) $(VEND_OBJS) $(MBEDTLS_OBJS) $(SQLITE_OBJ) $(LOG_OBJ) $(LOG_LOCK_OBJ) $(SH_ARENA_OBJ) $(SH_JSON_OBJ) $(TWEETNACL_OBJ) $(STB_OBJ) $(PLEDGE_OBJS) $(KEEL_LIB) $(TUI_TOOLCHAIN_ARCHIVE)
-	$(CC) $(LDFLAGS) -o $@ $(CAP_OBJS) $(CAP_TOOL_OBJ) $(CAP_TEST_OBJ) $(CMD_OBJS) $(RT_OBJS) $(ALLOC_OBJ) $(ASYNC_OBJ) $(COMPRESS_OBJ) $(MINIZ_OBJ) $(WORKER_DB_OBJ) $(WORKER_WASM_OBJ) $(WORKER_GPU_OBJ) $(MANIFEST_OBJ) $(MODULE_OBJ) $(ASYNC_BACKEND_OBJS) $(NET_BACKEND_OBJS) $(SANDBOX_OBJ) $(SANDBOX_TOOL_OBJ) $(SIG_OBJ) $(RELEASE_OBJ) $(RELEASE_IO_OBJ) $(TOOLS_INSTALL_OBJ) $(PLATFORM_SIG_OBJ) $(EMBEDDED_PLATFORM_SIG_OBJ) $(TEST_RUNNER_OBJ) $(RUNTIME_FACTORY_OBJ) $(STATIC_OBJ) $(MIGRATE_OBJ) $(VFS_OBJ) $(PATH_NORM_OBJ) $(THREAD_AFFINITY_OBJ) $(CACHE_DIR_OBJ) $(BLOB_STORE_OBJ) $(CACHE_REGISTRY_OBJ) $(CACERT_OBJ) $(TLS_CLIENT_OBJ) $(CSP_OBJ) $(SH_SEAL_ARENA_OBJ) $(SBOM_OBJ) $(STDLIB_FEATURE_OBJ) $(APP_CONTEXT_OBJ) $(APP_CONTEXT_RT_OBJ) $(AGENT_LIB_OBJ) $(AGENT_API_OBJ) $(TOOL_OBJ) $(BUILD_ASSET_OBJ) $(COMPILER_OBJ) $(COMPILER_TCC_OBJ) $(MAIN_OBJ) $(SERVE_OBJ) $(ENTRY_OBJ) $(APP_EXTRA_OBJS) $(STDLIB_REGISTRY_O) $(STDLIB_RT_REGISTRY_OBJS) $(STDLIB_TOOLCHAIN_REGISTRY_O) $(WAMR_OBJS) $(VEND_OBJS) $(MBEDTLS_OBJS) \
+$(BUILDDIR)/hull: $(CAP_OBJS) $(CAP_TOOL_OBJ) $(CAP_TEST_OBJ) $(CMD_OBJS) $(RT_OBJS) $(ALLOC_OBJ) $(ASYNC_OBJ) $(COMPRESS_OBJ) $(MINIZ_OBJ) $(WORKER_DB_OBJ) $(WORKER_WASM_OBJ) $(WORKER_GPU_OBJ) $(MANIFEST_OBJ) $(MODULE_OBJ) $(ASYNC_BACKEND_OBJS) $(NET_BACKEND_OBJS) $(SANDBOX_OBJ) $(SANDBOX_TOOL_OBJ) $(SIG_OBJ) $(RELEASE_OBJ) $(RELEASE_IO_OBJ) $(TOOLS_INSTALL_OBJ) $(PLATFORM_SIG_OBJ) $(EMBEDDED_PLATFORM_SIG_OBJ) $(TEST_RUNNER_OBJ) $(RUNTIME_FACTORY_OBJ) $(STATIC_OBJ) $(MIGRATE_OBJ) $(VFS_OBJ) $(PATH_NORM_OBJ) $(THREAD_AFFINITY_OBJ) $(CACHE_DIR_OBJ) $(BLOB_STORE_OBJ) $(CACHE_REGISTRY_OBJ) $(CACERT_OBJ) $(TLS_CLIENT_OBJ) $(CSP_OBJ) $(SH_SEAL_ARENA_OBJ) $(SBOM_OBJ) $(STDLIB_FEATURE_OBJ) $(APP_CONTEXT_OBJ) $(APP_CONTEXT_RT_OBJ) $(AGENT_LIB_OBJ) $(AGENT_API_OBJ) $(TOOL_OBJ) $(BUILD_ASSET_OBJ) $(COMPILER_OBJ) $(COMPILER_TCC_OBJ) $(MAIN_OBJ) $(SERVE_OBJ) $(ENTRY_OBJ) $(APP_EXTRA_OBJS) $(STDLIB_REGISTRY_O) $(STDLIB_RT_REGISTRY_OBJS) $(STDLIB_TOOLCHAIN_REGISTRY_O) $(RUNTIME_TOOLCHAIN_REGISTRY_O) $(WAMR_OBJS) $(VEND_OBJS) $(MBEDTLS_OBJS) $(SQLITE_OBJ) $(LOG_OBJ) $(LOG_LOCK_OBJ) $(SH_ARENA_OBJ) $(SH_JSON_OBJ) $(TWEETNACL_OBJ) $(STB_OBJ) $(PLEDGE_OBJS) $(KEEL_LIB) $(TUI_TOOLCHAIN_ARCHIVE)
+	$(CC) $(LDFLAGS) -o $@ $(CAP_OBJS) $(CAP_TOOL_OBJ) $(CAP_TEST_OBJ) $(CMD_OBJS) $(RT_OBJS) $(ALLOC_OBJ) $(ASYNC_OBJ) $(COMPRESS_OBJ) $(MINIZ_OBJ) $(WORKER_DB_OBJ) $(WORKER_WASM_OBJ) $(WORKER_GPU_OBJ) $(MANIFEST_OBJ) $(MODULE_OBJ) $(ASYNC_BACKEND_OBJS) $(NET_BACKEND_OBJS) $(SANDBOX_OBJ) $(SANDBOX_TOOL_OBJ) $(SIG_OBJ) $(RELEASE_OBJ) $(RELEASE_IO_OBJ) $(TOOLS_INSTALL_OBJ) $(PLATFORM_SIG_OBJ) $(EMBEDDED_PLATFORM_SIG_OBJ) $(TEST_RUNNER_OBJ) $(RUNTIME_FACTORY_OBJ) $(STATIC_OBJ) $(MIGRATE_OBJ) $(VFS_OBJ) $(PATH_NORM_OBJ) $(THREAD_AFFINITY_OBJ) $(CACHE_DIR_OBJ) $(BLOB_STORE_OBJ) $(CACHE_REGISTRY_OBJ) $(CACERT_OBJ) $(TLS_CLIENT_OBJ) $(CSP_OBJ) $(SH_SEAL_ARENA_OBJ) $(SBOM_OBJ) $(STDLIB_FEATURE_OBJ) $(APP_CONTEXT_OBJ) $(APP_CONTEXT_RT_OBJ) $(AGENT_LIB_OBJ) $(AGENT_API_OBJ) $(TOOL_OBJ) $(BUILD_ASSET_OBJ) $(COMPILER_OBJ) $(COMPILER_TCC_OBJ) $(MAIN_OBJ) $(SERVE_OBJ) $(ENTRY_OBJ) $(APP_EXTRA_OBJS) $(STDLIB_REGISTRY_O) $(STDLIB_RT_REGISTRY_OBJS) $(STDLIB_TOOLCHAIN_REGISTRY_O) $(RUNTIME_TOOLCHAIN_REGISTRY_O) $(WAMR_OBJS) $(VEND_OBJS) $(MBEDTLS_OBJS) \
 		$(SQLITE_OBJ) $(LOG_OBJ) $(LOG_LOCK_OBJ) $(SH_ARENA_OBJ) $(SH_JSON_OBJ) $(TWEETNACL_OBJ) $(STB_OBJ) $(PLEDGE_OBJS) $(KEEL_LIB) $(TUI_TOOLCHAIN_LDFLAGS) $(WGPU_LIB) $(WGPU_FRAMEWORKS) $(DUCKDB_LIBS) -lm -lpthread
 
 # ── libhull: no-runtime embedding library (Phase L-1/L-2) ────────────

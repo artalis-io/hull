@@ -14,26 +14,16 @@
 #include <stddef.h>
 #include <string.h>
 
-#ifdef HL_ENABLE_LUA
-extern const HlRuntimeFactory hl_lua_factory;
-#endif
-#ifdef HL_ENABLE_JS
-extern const HlRuntimeFactory hl_js_factory;
-#endif
-
-/* Compile-time array, built from whichever runtimes are enabled. */
-static const HlRuntimeFactory *const g_factories[] = {
-#ifdef HL_ENABLE_LUA
-    &hl_lua_factory,
-#endif
-#ifdef HL_ENABLE_JS
-    &hl_js_factory,
-#endif
-    NULL,
-};
-
-static const size_t g_factory_count =
-    (sizeof(g_factories) / sizeof(g_factories[0])) - 1;  /* exclude sentinel */
+/* The base runtime registry is intentionally EMPTY. A runtime-less base
+ * resolves every runtime through the composable hl_runtime_feature_factories()
+ * hook: filled by a produced app's generated feature registry (its one runtime)
+ * or the hull toolchain registry (both). Keeping this array empty is what lets
+ * the base reference NO concrete runtime symbol (hl_lua_factory /
+ * hl_js_factory), so a slim single-runtime app links only its runtime and the
+ * other interpreter dead-strips. The runtime factory descriptors travel with
+ * their runtime (runtime/<rt>/factory.c), reached only via the hook. */
+static const HlRuntimeFactory *const g_factories[] = { NULL };
+static const size_t g_factory_count = 0;
 
 const HlRuntimeFactory *const *hl_runtime_factories(size_t *count)
 {
