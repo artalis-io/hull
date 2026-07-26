@@ -48,20 +48,33 @@
 /* The composable-feature registry: name + which native platforms publish it.
  * Features are native-only (no cosmo). Adding a feature = one row here plus a
  * matching `make feature-<name>` target + release-pipeline coverage. */
+/* INSTALLABLE features are off by default and fetched on demand (duckdb/gpu/...).
+ * EMBEDDED features (the lua/js runtimes) are already in the distributed hull and
+ * auto-composed from the app entry extension; a runtime is mandatory-exactly-one,
+ * so it is never `hull feature install`ed. Both kinds publish a signed archive
+ * (the runtime archives for provenance + source builds of a runtime-less hull). */
+typedef enum {
+    HL_FEATURE_INSTALLABLE = 0,
+    HL_FEATURE_EMBEDDED,
+} HlFeatureKind;
+
 typedef struct {
-    const char *name;
-    const char *description;
+    const char   *name;
+    const char   *description;
+    HlFeatureKind kind;
     int has_linux_x86_64;
     int has_linux_aarch64;
     int has_darwin_arm64;
 } HlFeatureSpec;
 
 static const HlFeatureSpec FEATURES[] = {
-    { "duckdb",   "DuckDB embedded OLAP SQL backend (duckdb://)", 1, 1, 1 },
-    { "postgres", "PostgreSQL wire backend (postgres:// / postgresql://)", 1, 1, 1 },
-    { "mysql",    "MySQL / MariaDB wire backend (mysql:// / mariadb://)", 1, 1, 1 },
-    { "gpu",      "GPU compute via wgpu-native (Vulkan/Metal)",   1, 1, 1 },
-    { "tui",      "Terminal UI (hull.tui: full-screen, input, cell-diff)", 1, 1, 1 },
+    { "duckdb",   "DuckDB embedded OLAP SQL backend (duckdb://)", HL_FEATURE_INSTALLABLE, 1, 1, 1 },
+    { "postgres", "PostgreSQL wire backend (postgres:// / postgresql://)", HL_FEATURE_INSTALLABLE, 1, 1, 1 },
+    { "mysql",    "MySQL / MariaDB wire backend (mysql:// / mariadb://)", HL_FEATURE_INSTALLABLE, 1, 1, 1 },
+    { "gpu",      "GPU compute via wgpu-native (Vulkan/Metal)",   HL_FEATURE_INSTALLABLE, 1, 1, 1 },
+    { "tui",      "Terminal UI (hull.tui: full-screen, input, cell-diff)", HL_FEATURE_INSTALLABLE, 1, 1, 1 },
+    { "lua",      "Lua 5.4 runtime (embedded; auto-composed for app.lua)", HL_FEATURE_EMBEDDED, 1, 1, 1 },
+    { "js",       "QuickJS runtime (embedded; auto-composed for app.js)",  HL_FEATURE_EMBEDDED, 1, 1, 1 },
 };
 
 static const HlFeatureSpec *feature_find(const char *name)
@@ -200,6 +213,16 @@ static int cmd_install(const char *name, const char *repo)
         return 1;
     }
 
+    if (f->kind == HL_FEATURE_EMBEDDED) {
+        fprintf(stdout,
+            "hull feature: %s is a runtime - it is embedded in hull and "
+            "auto-composed\nfrom the app entry extension (app.%s). There is "
+            "nothing to install; a\nslim single-runtime app is produced "
+            "automatically by `hull build`.\n",
+            f->name, f->name);
+        return 0;
+    }
+
     const char *plat = hl_release_io_platform();
     if (!feature_published_for(f, plat)) {
         fprintf(stderr, "hull feature: '%s' is not available for %s "
@@ -271,7 +294,9 @@ static int cmd_list(void)
     for (size_t i = 0; i < sizeof FEATURES / sizeof FEATURES[0]; i++) {
         const HlFeatureSpec *f = &FEATURES[i];
         const char *status;
-        if (!feature_published_for(f, plat)) {
+        if (f->kind == HL_FEATURE_EMBEDDED) {
+            status = "embedded (auto-composed)";
+        } else if (!feature_published_for(f, plat)) {
             status = "not available on this platform";
         } else {
             char asset[160], p[PATH_MAX];
@@ -291,6 +316,11 @@ static int cmd_uninstall(const char *name)
     if (!f) {
         fprintf(stderr, "hull feature: unknown feature '%s'\n", name);
         return 1;
+    }
+    if (f->kind == HL_FEATURE_EMBEDDED) {
+        fprintf(stdout, "hull feature: %s is a runtime, embedded in hull; "
+                        "nothing to uninstall\n", f->name);
+        return 0;
     }
     char cache_dir[PATH_MAX];
     if (feature_cache_dir(cache_dir, sizeof(cache_dir)) != 0) return 1;

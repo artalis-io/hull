@@ -55,6 +55,44 @@ typedef struct HlVfs {
 void hl_vfs_init(HlVfs *vfs, const HlEntry *entries, const char *root_dir);
 
 /**
+ * @brief Initialize a VFS over a compile-time base array unioned with zero or
+ *        more feature arrays, merged into one sorted array.
+ *
+ * The runtime-agnostic base stdlib entries live in the platform lib; each
+ * composed runtime feature contributes its own sentinel-terminated
+ * `HlEntry[]` (its stdlib modules). This concatenates the base with every
+ * feature array, sorts by name (C `strcmp`), and initializes @p vfs over the
+ * result. The merged array is heap-allocated and returned via @p out_owned for
+ * the caller to `free` at teardown; it is written once and never mutated, so it
+ * respects the sealed/no-mutable-dispatch invariant.
+ *
+ * Fast path: when no feature array contributes any entry (the common base
+ * build), no allocation happens - @p vfs borrows the static @p base directly
+ * and `*out_owned` is set to NULL. `free(NULL)` at teardown is then a no-op.
+ *
+ * The merged array is placed in a sealed (mmap RW -> mprotect RO) arena, not
+ * plain heap: this module-lookup table is boot-built and read on every module
+ * load, so it gets the same read-only protection as the manifest (security.md
+ * 4b) - a stray write faults instead of silently repointing a module to other
+ * bytes. @p out_owned receives an opaque handle (the arena) to free with
+ * #hl_vfs_composed_free, or NULL when the static base was borrowed.
+ *
+ * @param vfs         Storage to initialize.
+ * @param base        Sentinel-terminated base array (must be non-NULL).
+ * @param feat_arrays Array of `feat_count` sentinel-terminated arrays, or NULL.
+ * @param feat_count  Number of feature arrays.
+ * @param root_dir    Filesystem root for dev-mode fallback, or NULL.
+ * @param out_owned   Receives an opaque handle to free at teardown, or NULL when
+ *                    the static base was borrowed. May be NULL to discard.
+ */
+void hl_vfs_init_composed(HlVfs *vfs, const HlEntry *base,
+                          const HlEntry *const *feat_arrays, size_t feat_count,
+                          const char *root_dir, void **out_owned);
+
+/** @brief Free an opaque handle from #hl_vfs_init_composed (NULL-safe). */
+void hl_vfs_composed_free(void *owned);
+
+/**
  * @brief Exact lookup by name (binary search, O(log n)).
  * @return Pointer to the matching entry, or NULL if not found.
  */

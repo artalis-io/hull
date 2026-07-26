@@ -17,6 +17,9 @@
 #include "embedded_platform.h"
 #include "embedded_templates.h"
 #endif
+#ifdef HL_BUILD_EMBEDDED_RUNTIME
+#include "embedded_runtime.h"   /* hl_embedded_feature_{lua,js}_a[] */
+#endif
 
 /* ── Helper: write data to a file ──────────────────────────────────── */
 
@@ -24,7 +27,8 @@
  * below (tcc is no longer embedded). On a non-embedded build the function is
  * defined-but-unused and -Werror=unused-function kills the build, so gate it
  * on the embedded-platform macros. */
-#if defined(HL_BUILD_EMBEDDED) || defined(HL_BUILD_EMBEDDED_MULTIARCH)
+#if defined(HL_BUILD_EMBEDDED) || defined(HL_BUILD_EMBEDDED_MULTIARCH) \
+    || defined(HL_BUILD_EMBEDDED_RUNTIME)
 static int write_blob(const char *path, const unsigned char *data, size_t len)
 {
     FILE *f = fopen(path, "wb");
@@ -108,6 +112,31 @@ int hl_build_extract_platform(const char *dir)
     (void)dir;
     fprintf(stderr, "hull build: platform library not embedded in this build\n");
     fprintf(stderr, "hint: rebuild hull with `make platform && make EMBED_PLATFORM=1`\n");
+    return -1;
+#endif
+}
+
+int hl_build_extract_feature_runtime(const char *dir, const char *rt)
+{
+#ifdef HL_BUILD_EMBEDDED_RUNTIME
+    if (!dir || !rt)
+        return -1;
+    const unsigned char *data = NULL;
+    unsigned int len = 0;
+    if (strcmp(rt, "lua") == 0) {
+        data = hl_embedded_feature_lua_a; len = hl_embedded_feature_lua_a_len;
+    } else if (strcmp(rt, "js") == 0) {
+        data = hl_embedded_feature_js_a;  len = hl_embedded_feature_js_a_len;
+    } else {
+        return -1;
+    }
+    char path[1024];
+    int n = snprintf(path, sizeof(path), "%s/libhull_feature-%s.a", dir, rt);
+    if (n < 0 || (size_t)n >= sizeof(path))
+        return -1;
+    return write_blob(path, data, len);
+#else
+    (void)dir; (void)rt;
     return -1;
 #endif
 }

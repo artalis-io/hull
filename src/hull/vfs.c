@@ -9,8 +9,12 @@
 
 #include "hull/vfs.h"
 
+#include <sh_seal_arena.h>
+
 #include <assert.h>
+#include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 void hl_vfs_init(HlVfs *vfs, const HlEntry *entries, const char *root_dir)
@@ -34,6 +38,99 @@ void hl_vfs_init(HlVfs *vfs, const HlEntry *entries, const char *root_dir)
                "HlVfs entries must be sorted by name");
     }
 #endif
+}
+
+static int hl_entry_name_cmp(const void *a, const void *b)
+{
+    const HlEntry *ea = (const HlEntry *)a;
+    const HlEntry *eb = (const HlEntry *)b;
+    return strcmp(ea->name, eb->name);
+}
+
+static size_t hl_entry_count(const HlEntry *a)
+{
+    size_t n = 0;
+    while (a && a[n].name)
+        n++;
+    return n;
+}
+
+void hl_vfs_init_composed(HlVfs *vfs, const HlEntry *base,
+                          const HlEntry *const *feat_arrays, size_t feat_count,
+                          const char *root_dir, void **out_owned)
+{
+    assert(vfs);
+    assert(base);
+    if (out_owned) *out_owned = NULL;
+
+    /* Total feature entries across all composed runtime archives. */
+    size_t nf = 0;
+    for (size_t i = 0; i < feat_count; i++)
+        nf += hl_entry_count(feat_arrays ? feat_arrays[i] : NULL);
+
+    /* Fast path: nothing composed -> borrow the static base, no allocation.
+     * This is the common base build and stays byte-identical to hl_vfs_init. */
+    if (nf == 0) {
+        hl_vfs_init(vfs, base, root_dir);
+        return;
+    }
+
+    size_t nb    = hl_entry_count(base);
+    size_t total = nb + nf;
+
+    /* Overflow guard on the byte size (total is bounded by embedded module
+     * counts, so this is defensive; degrade to base if it ever trips). */
+    if (total + 1 > SIZE_MAX / sizeof(HlEntry)) {
+        hl_vfs_init(vfs, base, root_dir);
+        return;
+    }
+    size_t bytes = (total + 1) * sizeof(HlEntry);
+
+    /* Build the merged table in a SEALED arena (RW while filling, mprotect RO
+     * after): this module-lookup table is boot-built + read on every module
+     * load, so it earns the same read-only protection as the manifest. */
+    ShSealArena *arena = malloc(sizeof(*arena));
+    HlEntry *merged = NULL;
+    if (arena && sh_seal_arena_init(arena, bytes, "platform_vfs") == 0)
+        merged = sh_seal_arena_alloc(arena, bytes, _Alignof(HlEntry));
+    if (!merged) {
+        /* Degrade to the base set rather than crash (OOM / mmap failure). */
+        if (arena) { sh_seal_arena_destroy(arena); free(arena); }
+        hl_vfs_init(vfs, base, root_dir);
+        return;
+    }
+
+    size_t k = 0;
+    for (size_t i = 0; i < nb; i++)
+        merged[k++] = base[i];
+    for (size_t i = 0; i < feat_count; i++) {
+        const HlEntry *a = feat_arrays ? feat_arrays[i] : NULL;
+        for (size_t j = 0; a && a[j].name; j++)
+            merged[k++] = a[j];
+    }
+    merged[k].name = NULL;
+    merged[k].data = NULL;
+    merged[k].len  = 0;
+
+    /* Sort by name in C strcmp order - the same total order the Makefile's
+     * LC_ALL=C sort produces, so hl_vfs_init's sorted-order assert holds and
+     * binary search stays correct. Sort BEFORE sealing (the seal makes it RO). */
+    qsort(merged, total, sizeof(*merged), hl_entry_name_cmp);
+
+    /* Seal RO. If mprotect ever fails the table is still valid (just unsealed) -
+     * strictly no worse than the pre-seal heap version; do not fail the build. */
+    (void)sh_seal_arena_seal(arena);
+
+    if (out_owned) *out_owned = arena;
+    hl_vfs_init(vfs, merged, root_dir);
+}
+
+void hl_vfs_composed_free(void *owned)
+{
+    if (!owned) return;
+    ShSealArena *arena = (ShSealArena *)owned;
+    sh_seal_arena_destroy(arena);
+    free(arena);
 }
 
 const HlEntry *hl_vfs_find(const HlVfs *vfs, const char *name)

@@ -92,16 +92,38 @@ static int tcc_link(HlCompiler *c, const char *output,
                     const char **objs, const char **libs)
 {
     (void)c;
+
+    /* tcc emits `.eh_frame` unwind info whose FDEs GNU ld rejects when it
+     * builds `.eh_frame_hdr` ("`.eh_frame_hdr refers to overlapping FDEs` ->
+     * final link failed: bad value"). It only bites once a tcc object with
+     * several functions is in the link (e.g. the generated
+     * app_feature_registry.o that composes the runtime). The glue tcc compiles
+     * is exception-free C, so the header is dead weight; disable it. Appended
+     * LAST so it overrides the driver's implicit `--eh-frame-hdr` (ld honours
+     * the final occurrence). */
+    size_t nlibs = 0;
+    while (libs && libs[nlibs]) nlibs++;
+    const char **libs2 = malloc((nlibs + 2) * sizeof(*libs2));
+    if (!libs2) {
+        fprintf(stderr, "hull build: tcc: out of memory building link args\n");
+        return -1;
+    }
+    for (size_t i = 0; i < nlibs; i++) libs2[i] = libs[i];
+    libs2[nlibs]     = "-Wl,--no-eh-frame-hdr";
+    libs2[nlibs + 1] = NULL;
+
     /* Delegate to the first available system linker */
     static const char *linkers[] = { "cc", "gcc", "clang", NULL };
     for (const char **p = linkers; *p; p++) {
         HlCompiler *sys = hl_compiler_system_new(*p);
         if (!sys) continue;
         if (!hl_compiler_is_available(sys)) { hl_compiler_destroy(sys); continue; }
-        int rc = hl_compiler_link(sys, output, objs, libs);
+        int rc = hl_compiler_link(sys, output, objs, libs2);
         hl_compiler_destroy(sys);
+        free(libs2);
         return rc;
     }
+    free(libs2);
     fprintf(stderr, "hull build: tcc: no system linker found in PATH "
                     "(install gcc or cc for the link step)\n");
     return -1;

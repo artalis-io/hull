@@ -12,6 +12,7 @@
 #include "hull/app_context.h"
 #include "hull/entry.h"
 #include "hull/vfs.h"
+#include "hull/stdlib_feature.h"
 
 #include <sh_json.h>
 #include <stdlib.h>
@@ -60,11 +61,16 @@ int hl_agent_vfs_ctx(HlAppContext *ctx, ShJsonBuf *out)
     sh_json_write_object_start(&w);
 
     extern const HlEntry hl_app_entries[];
-    extern const HlEntry hl_stdlib_entries[];
 
     sh_json_write_kv_string(&w, "app_dir", hl_app_context_app_dir(ctx));
     emit_entries(&w, hl_app_entries, hl_app_context_app_dir(ctx), "app");
-    emit_entries(&w, hl_stdlib_entries, NULL, "stdlib");
+
+    /* stdlib = base U each composed runtime's stdlib (merged, sorted). */
+    HlVfs stdlib_vfs;
+    void    *stdlib_owned = NULL;
+    hl_platform_vfs_init(&stdlib_vfs, &stdlib_owned);
+    emit_entries(&w, stdlib_vfs.entries, NULL, "stdlib");
+    hl_platform_vfs_dispose(stdlib_owned);
 
     sh_json_write_object_end(&w);
     return 0;
@@ -77,11 +83,16 @@ int hl_agent_vfs(const char *app_dir, ShJsonBuf *out)
     sh_json_write_object_start(&w);
 
     extern const HlEntry hl_app_entries[];
-    extern const HlEntry hl_stdlib_entries[];
 
     sh_json_write_kv_string(&w, "app_dir", app_dir ? app_dir : ".");
     emit_entries(&w, hl_app_entries, app_dir, "app");
-    emit_entries(&w, hl_stdlib_entries, NULL, "stdlib");
+
+    /* stdlib = base U each composed runtime's stdlib (merged, sorted). */
+    HlVfs stdlib_vfs;
+    void    *stdlib_owned = NULL;
+    hl_platform_vfs_init(&stdlib_vfs, &stdlib_owned);
+    emit_entries(&w, stdlib_vfs.entries, NULL, "stdlib");
+    hl_platform_vfs_dispose(stdlib_owned);
 
     sh_json_write_object_end(&w);
     return 0;

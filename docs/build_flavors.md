@@ -42,14 +42,15 @@ it.
 platform library:
 
 - `app_main.c` is a **thin trampoline**. Its entire body is
-  `return hull_main(argc, argv);`. It does not change per flavor.
+  `return hl_app_run(argc, argv);` (the slim app-runner entry: it runs
+  THIS app, it is not the hull CLI). It does not change per flavor.
 - `app_registry.c` is the embedded asset table (modules, templates,
   static, migrations, compute, shaders). Also flavor-agnostic.
 
 Everything that differs between flavors (serve loop vs `app.main`, whether
 mbedTLS/Keel are present, which `hl_cap_*` are compiled) lives **inside
 `libhull_platform.a`**. serve-vs-CLI dispatch is resolved inside
-`hull_main`.
+`hl_app_run`.
 
 > Consequence: `hull build --flavor=X` reduces to "link against the
 > flavor-X platform library instead of the default embedded one." No

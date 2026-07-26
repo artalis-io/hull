@@ -25,6 +25,7 @@
 #include "hull/reqctx.h"
 #include "hull/manifest.h"
 #include "hull/vfs.h"
+#include "hull/stdlib_feature.h"
 #include "hull/cap/db.h"
 #include "hull/cap/db_backend.h"
 #include "hull/cap/db_sqlite.h"
@@ -45,6 +46,10 @@
 static HlJS js;
 static int js_initialized = 0;
 static HlVfs platform_vfs;
+/* Merged baseUruntime stdlib array for platform_vfs; disposed before each
+ * re-init so priors don't accumulate. The live one stays reachable via this
+ * static (LSan-clean). */
+static void *platform_vfs_owned = NULL;
 
 /* Tests use lots of inline JS snippets that reference modules as
  * globals. Phase 2b removes globals from production — apps must
@@ -77,8 +82,8 @@ static void init_js(void)
 {
     if (js_initialized)
         hl_js_free(&js);
-    extern const HlEntry hl_stdlib_entries[];
-    hl_vfs_init(&platform_vfs, hl_stdlib_entries, NULL);
+    hl_platform_vfs_dispose(platform_vfs_owned);
+    hl_platform_vfs_init(&platform_vfs, &platform_vfs_owned);
     HlJSConfig cfg = HL_JS_CONFIG_DEFAULT;
     memset(&js, 0, sizeof(js));
     js.base.platform_vfs = &platform_vfs;
@@ -97,8 +102,8 @@ static void init_js_bare(void)
 {
     if (js_initialized)
         hl_js_free(&js);
-    extern const HlEntry hl_stdlib_entries[];
-    hl_vfs_init(&platform_vfs, hl_stdlib_entries, NULL);
+    hl_platform_vfs_dispose(platform_vfs_owned);
+    hl_platform_vfs_init(&platform_vfs, &platform_vfs_owned);
     HlJSConfig cfg = HL_JS_CONFIG_DEFAULT;
     memset(&js, 0, sizeof(js));
     js.base.platform_vfs = &platform_vfs;
@@ -139,8 +144,8 @@ static HlEnvConfig env_cfg = { .allowed = env_allowed, .count = 1 };
 
 static void init_js_with_caps(void)
 {
-    extern const HlEntry hl_stdlib_entries[];
-    hl_vfs_init(&platform_vfs, hl_stdlib_entries, NULL);
+    hl_platform_vfs_dispose(platform_vfs_owned);
+    hl_platform_vfs_init(&platform_vfs, &platform_vfs_owned);
     if (js_initialized)
         hl_js_free(&js);
     if (test_db_registry) {

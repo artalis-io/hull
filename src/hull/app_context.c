@@ -12,6 +12,7 @@
 #include "hull/manifest.h"
 #include "hull/module_resolver.h"
 #include "hull/runtime/factory.h"
+#include "hull/stdlib_feature.h"
 #include "hull/vfs.h"
 
 #ifdef HL_ENABLE_DB
@@ -24,20 +25,13 @@
 #include <sqlite3.h>
 #endif
 
-/* app_context is meant to stay runtime-agnostic — it dispatches
- * through the HlRuntimeFactory vtable and never touches Lua/JS
- * internals directly. The hl_app_context_lua / _js accessors below
- * return typed pointers (HlLua * / HlJS *), but a cast to a typed
- * pointer only needs a forward declaration of the type, not the full
- * struct shape. Pulling in hull/runtime/lua.h or hull/runtime/js.h
- * here would surface the full HlLua / HlJS struct layout to a layer
- * that has no business inspecting it. */
-#ifdef HL_ENABLE_LUA
-typedef struct HlLua HlLua;
-#endif
-#ifdef HL_ENABLE_JS
-typedef struct HlJS HlJS;
-#endif
+/* app_context stays runtime-agnostic: it dispatches through the
+ * HlRuntimeFactory vtable and never references a concrete runtime symbol
+ * (hl_lua_factory / hl_js_factory). The runtime-typed accessors
+ * (hl_app_context_is_lua / _lua / _js) live in the toolchain-only TU
+ * app_context_runtime.c so a slim single-runtime app never pulls the
+ * other runtime's factory symbol. This TU exposes only the agnostic
+ * hl_app_context_factory() getter they build on. */
 #ifdef HL_ENABLE_WASM
 #include "hull/cap/wasm.h"
 #endif
@@ -58,6 +52,7 @@ struct HlAppContext {
 #endif
     HlVfs          app_vfs;
     HlVfs          platform_vfs;
+    void          *platform_vfs_owned;  /* opaque sealed-arena handle to free, or NULL */
     HlRuntime     *rt;
 
     /* Resolved module set (opt-in via opts.gate_modules). Lives here so
@@ -94,6 +89,25 @@ static const char *detect_entry(const char *app_dir, const char *ext,
     return NULL;
 }
 
+/* Try each factory's extension against the app dir; on the first hit, set
+ * *out_factory and return the entry path (into entry_buf). NULL if none match. */
+static const char *discover_entry_in(const HlRuntimeFactory *const *facs,
+                                     size_t n, const char *app_dir,
+                                     char *entry_buf, size_t buf_size,
+                                     const HlRuntimeFactory **out_factory)
+{
+    for (size_t i = 0; i < n; i++) {
+        const HlRuntimeFactory *f = facs ? facs[i] : NULL;
+        if (!f || !f->entry_extension) continue;
+        /* extension is ".lua" / ".js" — strip leading dot for detect_entry */
+        const char *ext = f->entry_extension;
+        if (ext[0] == '.') ext++;
+        const char *e = detect_entry(app_dir, ext, entry_buf, buf_size);
+        if (e) { *out_factory = f; return e; }
+    }
+    return NULL;
+}
+
 /* ── Internal: determine runtime type from entry point ─────────────── */
 
 static int resolve_entry_and_runtime(HlAppContext *ctx,
@@ -104,21 +118,20 @@ static int resolve_entry_and_runtime(HlAppContext *ctx,
     const char *entry = opts->entry_point;
 
     if (!entry) {
-        /* Discover entry by trying each registered factory's extension
-         * in order. First match wins (Lua then JS today). */
-        size_t fcount = 0;
-        const HlRuntimeFactory *const *factories = hl_runtime_factories(&fcount);
-        for (size_t i = 0; i < fcount; i++) {
-            const HlRuntimeFactory *f = factories[i];
-            if (!f || !f->entry_extension) continue;
-            /* extension is ".lua" / ".js" — strip leading dot for detect_entry */
-            const char *ext = f->entry_extension;
-            if (ext[0] == '.') ext++;
-            entry = detect_entry(opts->app_dir, ext, entry_buf, buf_size);
-            if (entry) {
-                ctx->factory = f;
-                break;
-            }
+        /* Discover entry by trying each factory's extension in order: the
+         * compile-time base factories first, then any runtime composed as a
+         * feature. First match wins (Lua then JS in a default build). Two
+         * immutable sources, no merged/mutable array. */
+        size_t base_count = 0;
+        const HlRuntimeFactory *const *base = hl_runtime_factories(&base_count);
+        entry = discover_entry_in(base, base_count, opts->app_dir,
+                                  entry_buf, buf_size, &ctx->factory);
+        if (!entry) {
+            size_t feat_count = 0;
+            const HlRuntimeFactory *const *feats =
+                hl_runtime_feature_factories(&feat_count);
+            entry = discover_entry_in(feats, feat_count, opts->app_dir,
+                                      entry_buf, buf_size, &ctx->factory);
         }
     } else {
         /* Caller provided entry point — match factory by file extension. */
@@ -205,11 +218,12 @@ int hl_app_context_init(HlAppContext **out, const HlAppContextOpts *opts)
     }
 #endif
 
-    /* Init VFS instances */
+    /* Init VFS instances. The platform VFS unions the runtime-agnostic base
+     * stdlib with each composed runtime's stdlib (via hl_stdlib_feature_entries);
+     * in a base build with no runtime feature it borrows the static base. */
     extern const HlEntry hl_app_entries[];
-    extern const HlEntry hl_stdlib_entries[];
     hl_vfs_init(&ctx->app_vfs, hl_app_entries, opts->app_dir);
-    hl_vfs_init(&ctx->platform_vfs, hl_stdlib_entries, NULL);
+    hl_platform_vfs_init(&ctx->platform_vfs, &ctx->platform_vfs_owned);
 
 #ifdef HL_ENABLE_DB
     /* Run migrations (fail on error to prevent starting with broken schema) */
@@ -359,6 +373,8 @@ void hl_app_context_free(HlAppContext *ctx)
     ctx->rt = NULL;
     ctx->rt_init = 0;
     ctx->app_loaded = 0;
+    hl_platform_vfs_dispose(ctx->platform_vfs_owned);
+    ctx->platform_vfs_owned = NULL;
     free(ctx);
 }
 
@@ -410,40 +426,16 @@ HlStmtCache *hl_app_context_stmt_cache(HlAppContext *ctx)
 #endif
 }
 
-int hl_app_context_is_lua(HlAppContext *ctx)
-{
-    /* Identify via the factory pointer — avoids a stored is_lua flag.
-     * A `rt->vt->kind == HL_RT_LUA` check also works once rt is created; the
-     * factory pointer is the canonical source of truth post-K and is valid even
-     * before rt exists. */
-#ifdef HL_ENABLE_LUA
-    extern const HlRuntimeFactory hl_lua_factory;
-    return (ctx && ctx->factory == &hl_lua_factory) ? 1 : 0;
-#else
-    (void)ctx;
-    return 0;
-#endif
-}
-
 const char *hl_app_context_app_dir(HlAppContext *ctx)
 {
     return ctx ? ctx->app_vfs.root_dir : NULL;
 }
 
-#ifdef HL_ENABLE_LUA
-HlLua *hl_app_context_lua(HlAppContext *ctx)
+/* Agnostic accessor: the runtime factory the context resolved (or NULL before
+ * resolution). Lets the toolchain-only runtime-typed accessors
+ * (app_context_runtime.c) compare against hl_<rt>_factory without this
+ * base TU referencing any concrete runtime symbol. */
+const HlRuntimeFactory *hl_app_context_factory(HlAppContext *ctx)
 {
-    extern const HlRuntimeFactory hl_lua_factory;
-    if (!ctx || ctx->factory != &hl_lua_factory) return NULL;
-    return (HlLua *)ctx->rt;   /* base is the first field of HlLua */
+    return ctx ? ctx->factory : NULL;
 }
-#endif
-
-#ifdef HL_ENABLE_JS
-HlJS *hl_app_context_js(HlAppContext *ctx)
-{
-    extern const HlRuntimeFactory hl_js_factory;
-    if (!ctx || ctx->factory != &hl_js_factory) return NULL;
-    return (HlJS *)ctx->rt;
-}
-#endif

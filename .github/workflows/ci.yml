@@ -79,6 +79,10 @@ jobs:
         timeout-minutes: 3
         run: make e2e-multipart
 
+      - name: Runtime slim E2E test (single-runtime app drops the other interpreter)
+        timeout-minutes: 3
+        run: make e2e-feature-runtime
+
       - name: Attachment E2E tests
         timeout-minutes: 2
         run: make e2e-attachment

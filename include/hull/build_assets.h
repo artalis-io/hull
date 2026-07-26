@@ -31,6 +31,14 @@ typedef struct {
 int hl_build_extract_platform(const char *dir);
 
 /*
+ * Extract an embedded runtime feature archive to `dir/libhull_feature-<rt>.a`
+ * (rt = "lua" | "js"). The distributed hull embeds both so a native runtime-less
+ * base can compose one at build time with no `hull feature install`. Returns 0
+ * on success, -1 if not embedded / unknown rt / write error.
+ */
+int hl_build_extract_feature_runtime(const char *dir, const char *rt);
+
+/*
  * Get the list of embedded platform archives (multi-arch builds).
  * Sets *out to the sentinel-terminated array.
  * Returns the count (excluding sentinel), or 0 if not multi-arch.
