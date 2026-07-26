@@ -96,6 +96,22 @@ smoke_feature_install() {
     assert "feature lib landed in ~/.hull/feature (got $N)"  [ "$N" -ge 1 ]
     OUT=$(HOME="$FEAT_HOME" "$HULL" feature list 2>&1)
     assert_contains "list shows duckdb installed"  "$OUT" "duckdb"
+
+    # Runtime features (lua/js) are a distinct kind: mandatory-exactly-one, so
+    # they're EMBEDDED in the distributed hull + auto-composed from the entry
+    # extension. `feature list` reports them as embedded and `feature install
+    # <rt>` is a no-op redirect (nothing to fetch). Validates the runtime-feature
+    # surface shipped in #113 on a real published binary.
+    echo ""
+    echo "── runtime feature surface (lua/js embedded + auto-composed) ──"
+    OUT=$(HOME="$FEAT_HOME" "$HULL" feature list 2>&1)
+    echo "$OUT" | sed 's/^/    /'
+    assert_contains "list shows lua runtime"       "$OUT" "lua"
+    assert_contains "list shows js runtime"        "$OUT" "js"
+    assert_contains "runtimes marked embedded"     "$OUT" "embedded"
+    OUT=$(HOME="$FEAT_HOME" "$HULL" feature install lua 2>&1); RC=$?
+    assert "feature install lua exits 0 (embedded no-op)"  [ "$RC" -eq 0 ]
+    assert_contains "install lua reports embedded" "$OUT" "embedded"
     rm -rf "$FEAT_HOME"
 }
 

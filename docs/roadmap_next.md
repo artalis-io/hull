@@ -4373,8 +4373,21 @@ to the resolver, the compose collector, or the sandbox seam.
 
 ## Runtimes as composable features (runtime-less base + `lua` / `js`)
 
-**Status:** designed, no target. Drop the unused Lua/JS runtime from an app so a
-single-runtime app doesn't carry the other interpreter.
+**Status:** ✅ SHIPPED (PR #113, merged 2026-07-26). Phases 1-4 all landed: the
+native base is runtime-less and a produced app composes exactly one runtime
+archive (auto-inferred from the entry extension); `hull` embeds both archives;
+the release pipeline builds + signs + publishes `libhull_feature-{lua,js}` per
+arch (dry-run-validated end to end). A single-runtime app no longer carries the
+other interpreter.
+
+**Known interim gap → tracked in issue #114 (HTTP as a composable feature).**
+The M+N-composes-M×N claim below holds for the **full** flavor but NOT for
+**reduced** flavors: the runtime archive is compiled full-config, so its web
+bindings reference HTTP caps + Keel that a reduced flavor (server-only /
+client-only / pure-compute) drops. `hull build --flavor=<reduced>` and the
+composed-runtime `--with=tui` path therefore **fail closed** (clear message
+pointing at #114) until HTTP becomes a composable feature with a weak seam that
+lets a reduced flavor omit those bindings.
 
 **Supersedes** the earlier "publish `full-lua` / `full-js` per-flavor platform
 libs" sketch. Delivering the runtime slim as **composable features** (the
@@ -4514,7 +4527,17 @@ slim, from **one** published base flavor + **one** published runtime archive. No
 `client-only-lua` lib is ever built. That orthogonality is the whole reason to
 prefer this over the flavor-lib sketch.
 
-### Phases
+### Phases (all ✅ shipped in #113)
+
+- [x] Phase 1: composable factory registry (weak hook + collector + `HlRuntimeKind` decoupling), no behavior change.
+- [x] Phase 2: JS as a feature on a Lua base (`libhull_feature-js.a`, `--with=js` auto for `app.js`).
+- [x] Phase 3: Lua as a feature -> runtime-less base; `hull` embeds both archives.
+- [x] Phase 4: publish + wire (`make feature-{lua,js}`, release jobs x3 arches, embed + sign + publish, `--flavor=auto` runtime inference, `e2e_feature_runtime.sh`). Release pipeline dry-run-validated 2026-07-26.
+
+Follow-on (not part of #113): reduced-flavor × runtime and tui × runtime fail
+closed pending issue #114 (HTTP as a composable feature) — see Status above.
+
+Original phase detail:
 
 1. **Make the factory registry composable, no behavior change.** The three
    changes above: the weak `hl_runtime_feature_factories` hook, the `factory.c`
