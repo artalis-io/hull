@@ -2755,6 +2755,28 @@ $(BUILDDIR)/libhull_feature-tui.a: $(BUILDDIR)/cap_tui.o $(BUILDDIR)/cap_tui_inp
 	            $(BUILDDIR)/lua_rt_mod_tui.o $(BUILDDIR)/js_mod_tui.o
 	@echo "built $@ ($$(du -h $@ | cut -f1))"
 
+# libhull_feature-http.a: the runtime-agnostic HTTP CORE as a composable feature
+# archive (issue #114, Phase B). Bundles the HTTP capability objects - client
+# (cap/http + async), server WebSocket registry (cap/ws), SMTP (cap/smtp), and
+# the request body reader (cap/body). These are runtime-agnostic C, reached by
+# both runtimes through the cap layer. Phase A already routed the runtime core
+# through the hl_*_http_* seam, so this archive holds the strong seam overrides
+# that live cap-side (hl_http_ws_registry_free in cap/ws.o). This step is
+# ADDITIVE (base still compiles HTTP in); a later step makes the base
+# HTTP-core-less and composes this. The per-runtime web BINDINGS (routes, sse,
+# ws, bindings_response, http_register, mod_http_*/ws_*/sse/smtp/request) are a
+# separate per-runtime archive (Phase C). Keel is linked separately (the app
+# still pulls libkeel.a), not bundled here.
+FEATURE_HTTP_OBJS := $(BUILDDIR)/cap_http.o $(BUILDDIR)/cap_http_async.o \
+                     $(BUILDDIR)/cap_ws.o $(BUILDDIR)/cap_smtp.o $(BUILDDIR)/cap_body.o
+
+feature-http: $(BUILDDIR)/libhull_feature-http.a
+.PHONY: feature-http
+$(BUILDDIR)/libhull_feature-http.a: $(FEATURE_HTTP_OBJS) | $(BUILDDIR)
+	@rm -f $@
+	$(AR) rcs $@ $(FEATURE_HTTP_OBJS)
+	@echo "built $@ ($$(du -h $@ | cut -f1))"
+
 # libhull_feature-lua.a / -js.a: a runtime as a composable feature archive.
 # Bundles the runtime objects, its vendored VM, its manifest extractor, and its
 # stdlib VFS array (hl_stdlib_<rt>_entries). The tui bridge (mod_tui) is excluded
