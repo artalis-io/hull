@@ -1616,7 +1616,8 @@ ifeq ($(HL_ENABLE_HTTP_SERVER),0)
       $(SRCDIR)/hull/runtime/js/ws.c \
       $(SRCDIR)/hull/runtime/js/timers.c \
       $(SRCDIR)/hull/runtime/js/mod_request.c \
-      $(SRCDIR)/hull/runtime/js/bindings.c, \
+      $(SRCDIR)/hull/runtime/js/bindings.c \
+      $(SRCDIR)/hull/runtime/js/bindings_response.c, \
       $(JS_RT_SRCS))
 endif
 ifeq ($(HL_ENABLE_TUI),0)
@@ -1656,7 +1657,8 @@ ifeq ($(HL_ENABLE_HTTP_SERVER),0)
       $(SRCDIR)/hull/runtime/lua/ws.c \
       $(SRCDIR)/hull/runtime/lua/timers.c \
       $(SRCDIR)/hull/runtime/lua/mod_request.c \
-      $(SRCDIR)/hull/runtime/lua/bindings.c, \
+      $(SRCDIR)/hull/runtime/lua/bindings.c \
+      $(SRCDIR)/hull/runtime/lua/bindings_response.c, \
       $(LUA_RT_SRCS))
 endif
 ifeq ($(HL_ENABLE_TUI),0)
@@ -2821,6 +2823,11 @@ $(BUILDDIR)/libhull_feature-js.a: $(FEATURE_JS_OBJS) | $(BUILDDIR)
 # Building them alongside hull makes `make && hull build` work with no extra
 # step (and gives every e2e that shells out to `hull build` its runtime). Cosmo
 # has a dual base and needs none; a single-runtime build gets only its half.
+#
+# The native base is also HTTP-core-less (issue #114), so `hull build` composes
+# libhull_feature-http.a for every full-flavor app; build it here too so a plain
+# `make && hull build` resolves it from build/ with no extra step. Cosmo keeps
+# HTTP in the base and composes no http feature.
 ifndef COSMO
 ifeq ($(RUNTIME),js)
   RUNTIME_FEATURE_LIBS := $(BUILDDIR)/libhull_feature-js.a
@@ -2829,6 +2836,7 @@ else ifeq ($(RUNTIME),lua)
 else
   RUNTIME_FEATURE_LIBS := $(BUILDDIR)/libhull_feature-lua.a $(BUILDDIR)/libhull_feature-js.a
 endif
+  RUNTIME_FEATURE_LIBS += $(BUILDDIR)/libhull_feature-http.a
 else
   RUNTIME_FEATURE_LIBS :=
 endif
