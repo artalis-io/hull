@@ -6,6 +6,7 @@
 
 #include "hull/cap/ws.h"
 #include "hull/utils/alloc.h"
+#include "hull/http_feature.h"  /* hl_http_ws_registry_free (seam strong override) */
 
 #include <keel/websocket_server.h>
 
@@ -203,4 +204,13 @@ size_t hl_ws_connections(HlWsRegistry *reg, const char *path)
 
     HlWsEndpoint *ep = find_endpoint(reg, path);
     return ep ? ep->conn_count : 0;
+}
+
+/* ── HTTP-feature seam: strong override ─────────────────────────────── */
+/* Compiled only in an HTTP-server base (cap/ws.c is dropped when
+ * HL_ENABLE_HTTP_SERVER=0), so a no-server base keeps the weak no-op. Lets the
+ * runtime teardown free the ws registry without a direct hl_ws_* ref. */
+void hl_http_ws_registry_free(void *ws_registry)
+{
+    hl_ws_registry_free((HlWsRegistry *)ws_registry);
 }

@@ -31,6 +31,12 @@ struct KlResponse;
 void hl_lua_http_error_response(struct KlResponse *res);
 void hl_js_http_error_response(struct KlResponse *res);
 
+/* Free the WebSocket registry (runtime teardown). Extracted from the runtime
+ * teardown paths so lua/js runtime.o hold no hl_ws_* refs; weak no-op when no
+ * HTTP server is composed (a CLI build never creates a registry). Runtime-
+ * agnostic (the registry is a shared base field). */
+void hl_http_ws_registry_free(void *ws_registry);
+
 /* Register the HTTP-dependent hull.* modules (http-client, http-server, smtp,
  * ws-server, ws-client) + the sse/multipart request metatables into the given
  * runtime. Weak no-op when no HTTP is composed. The signatures mirror the tui

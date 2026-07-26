@@ -17,6 +17,7 @@
 
 #include "hull/runtime/js_bytecode_cache.h"
 #include "hull/utils/alloc.h"
+#include "hull/http_feature.h"  /* hl_http_ws_registry_free (HTTP-feature seam) */
 #include "hull/shared/async_backend.h"
 #include "hull/limits/runtime.h"
 #include "hull/manifest.h"
@@ -987,7 +988,7 @@ void hl_js_free(HlJS *js)
     /* Free WebSocket registry — HTTP-only; CLI builds never create one. */
 #ifdef HL_ENABLE_HTTP_SERVER
     if (js->base.ws_registry) {
-        hl_ws_registry_free(js->base.ws_registry);
+        hl_http_ws_registry_free(js->base.ws_registry);
         hl_alloc_free(js->base.alloc, js->base.ws_registry,
                       sizeof(HlWsRegistry));
         js->base.ws_registry = NULL;

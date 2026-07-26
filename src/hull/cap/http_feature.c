@@ -38,3 +38,8 @@ __attribute__((weak)) void hl_js_http_error_response(struct KlResponse *res)
 {
     (void)res;
 }
+
+__attribute__((weak)) void hl_http_ws_registry_free(void *ws_registry)
+{
+    (void)ws_registry;
+}

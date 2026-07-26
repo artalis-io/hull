@@ -15,6 +15,7 @@
 #include "internal.h"
 
 #include "hull/utils/alloc.h"
+#include "hull/http_feature.h"  /* hl_http_ws_registry_free (HTTP-feature seam) */
 #include "hull/shared/async_backend.h"
 #include "hull/manifest.h"
 #include "hull/cap/tool.h"
@@ -395,7 +396,7 @@ void hl_lua_free(HlLua *lua)
     /* Free WebSocket registry — HTTP-only; CLI builds never create one. */
 #ifdef HL_ENABLE_HTTP_SERVER
     if (lua->base.ws_registry) {
-        hl_ws_registry_free(lua->base.ws_registry);
+        hl_http_ws_registry_free(lua->base.ws_registry);
         hl_alloc_free(lua->base.alloc, lua->base.ws_registry,
                       sizeof(HlWsRegistry));
         lua->base.ws_registry = NULL;
