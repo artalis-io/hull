@@ -323,3 +323,12 @@ presets as the only user-facing vocabulary. Steps 2–3 are a later cleanup; ste
   static dependency.
 - A `hull doctor` / `hull feature list` view that shows, for the current app,
   which features it needs and whether each is installed.
+- **Reduced-flavor × runtime (and tui × runtime) — tracked in #114.** Since the
+  runtime-featurify epic (#113) the native base is runtime-less and a produced
+  app composes one full-config runtime archive. That archive's web bindings
+  reference HTTP caps + Keel a **reduced** flavor drops, so a runtime does NOT
+  yet compose orthogonally onto server-only/client-only/pure-compute (it fails
+  closed). The fix is **HTTP as a composable feature** with a weak seam so a
+  reduced flavor omits the web bindings — the same per-runtime-bridge seam that
+  also re-enables `--with=tui`. Until then the M+N-composes-M×N property holds
+  only for the full flavor.

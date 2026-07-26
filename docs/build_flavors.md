@@ -18,6 +18,16 @@ pure-compute, server-only, client-only, or full binary regardless of which
 > `hl_release_io_*` signed-fetch chain exactly. See
 > [features_and_flavors.md](features_and_flavors.md).
 
+> **⚠ Interim limitation (since #113, the runtime-featurify epic).** The native
+> base is now runtime-less and a produced app composes exactly one runtime
+> archive. That runtime archive is compiled full-config, so its web-module
+> bindings reference HTTP caps + Keel that a **reduced** flavor drops. Until
+> **issue #114 (HTTP as a composable feature)** lands, `hull build
+> --flavor=server-only|client-only|pure-compute` on a Lua/JS app **fails closed**
+> with a clear message (the full-config runtime can't link against a subtractive
+> base). `--flavor=full` (the default) is unaffected. The `--with=tui` feature is
+> deferred the same way for the same reason.
+
 ## 1. Motivation
 
 The four HTTP flavors (and the `HL_ENABLE_DB` / `HL_ENABLE_TUI` / ...
