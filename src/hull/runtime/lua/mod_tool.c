@@ -488,6 +488,17 @@ static int l_tool_extract_feature_http(lua_State *L)
     return 1;
 }
 
+/* ── tool.extract_feature_http_rt(dir, rt) → bool ──────────────────── */
+
+static int l_tool_extract_feature_http_rt(lua_State *L)
+{
+    const char *dir = luaL_checkstring(L, 1);
+    const char *rt  = luaL_checkstring(L, 2);
+    int rc = hl_build_extract_feature_http_rt(dir, rt);
+    lua_pushboolean(L, rc == 0);
+    return 1;
+}
+
 /* ── tool.extract_platform_cosmo(dir) → bool ───────────────────────── */
 /*
  * Extract both arch-specific archives and set up the .aarch64/ directory
@@ -1159,6 +1170,7 @@ static const luaL_Reg tool_funcs[] = {
     { "extract_platform",       l_tool_extract_platform },
     { "extract_feature_runtime", l_tool_extract_feature_runtime },
     { "extract_feature_http",   l_tool_extract_feature_http },
+    { "extract_feature_http_rt", l_tool_extract_feature_http_rt },
     { "extract_platform_cosmo", l_tool_extract_platform_cosmo },
     { "platform_archs",         l_tool_platform_archs },
     /* Orchestration entries (modules_resolve, doctor_json, agent_*,

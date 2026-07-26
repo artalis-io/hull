@@ -126,3 +126,91 @@ Changing app-facing HTTP APIs (`app.get`, `http.fetch`, ws/sse) — they stay
 identical. Cosmo (dual base, HTTP compiled in). Retiring the `HL_ENABLE_HTTP_*`
 flags — they remain the base's compile-time switch; the feature is the
 *distribution* unit layered on top.
+
+---
+
+## Phase C — implementation design (measured)
+
+Phase B landed: the base is HTTP-core-less (`libhull_platform.a` carries 0 http
+caps; `libhull_feature-http.a` carries them) and every full-flavor app composes
+the http core. But the per-runtime **web bindings** (routes, dispatch, the
+`res:*` helpers, ws/sse/http-client/smtp module bindings) still ride the
+*runtime* feature archive, so a genuinely HTTP-free app (a CLI / pure-compute
+`app.main`) still links them (and, transitively, Keel). Phase C splits them out.
+
+### Archive split (per runtime `rt ∈ {lua, js}`)
+
+- `libhull_feature-<rt>.a` — **pure runtime**: VM + core bindings (`mod_app`,
+  `mod_fs`, `mod_db`, `mod_crypto`, `mod_compute`, `mod_gpu`, `mod_time`,
+  `mod_env`, `mod_log`, `mod_image`, `mod_blob`, `mod_buffer`, `mod_mime`,
+  `mod_template`, `mod_worker`, `worker_db`, `async`, `bytecode_cache`,
+  `template_cache`, `factory`, `modules`, `runtime`) + manifest + stdlib
+  registry. ~23-24 objects.
+- `libhull_feature-http-<rt>.a` (**new**) — **web bindings**: exactly the set
+  the existing `HL_ENABLE_HTTP_SERVER=0` + `HL_ENABLE_HTTP_CLIENT=0` source
+  filters already enumerate — `routes`, `dispatch`, `bindings`,
+  `bindings_response`, `http_register`, `sse`, `ws`, `timers`, `mod_request`,
+  `mod_test`, `mod_http_client`, `mod_http_server`, `mod_ws_server`,
+  `mod_ws_client`, `mod_sse`, `mod_smtp`. 16 objects.
+
+Reusing the filter list is deliberate: it is the already-tested definition of
+"what is HTTP" per runtime.
+
+### The coupling to cut (nm-measured, not guessed)
+
+Partitioning the runtime objects into {pure} and {web} and diffing undefined vs
+defined Hull symbols shows the pure set references the web set at exactly these
+edges (Lua; JS is symmetric + one extra):
+
+| pure object | web symbol(s) referenced | already a seam? |
+|---|---|---|
+| `modules.o` | `hl_lua_register_http_modules` | yes (Phase A) |
+| `async.o` | `hl_lua_http_error_response` | yes (Phase A) |
+| `async.o` | `hl_lua_timer_reschedule` | **cut** |
+| `runtime.o` | `hl_lua_wire_routes`, `hl_lua_wire_routes_server` | **cut** |
+| `runtime.o` | `hl_lua_test_register`, `_run`, `_clear` (`+ _free` on JS) | **cut** |
+
+**Base → web edges: zero** (the base reaches HTTP only via the runtime vtable
++ the Phase-A seam). So the whole Phase C coupling surface is 6 edges (Lua) /
+7 (JS), each with exactly one caller (`runtime.o` or `async.o`) and its
+definition in one web object (`routes.c` / `mod_test.c` / `timers.c`).
+
+### Cutting the edges: weak real-signature stubs (low churn)
+
+Each edge is a link-time reference in the *pure* archive to a symbol *defined*
+in the *web* archive. Rather than change call sites or move wrapper bodies
+(invasive), provide **weak no-op defaults** with the real signatures in a
+per-runtime base TU (`runtime/{lua,js}/http_weakstub.c`, compiled into
+`libhull_platform.a`), and **whole-archive** the web-bindings archive at compose
+so its strong definitions override. Precedent: `serve.c` (base) already includes
+`runtime/lua.h`, so a base TU with these prototypes is not a new dependency.
+
+- HTTP app: pure + web (whole-archived) + http-core composed → strong defs win.
+- HTTP-free app: pure only → weak no-ops satisfy the link; the code paths that
+  would call them (serve / test / timer-fire) are never reached.
+
+`runtime.c`, `async.c`, `routes.c`, `mod_test.c`, `timers.c` stay **unchanged**;
+the split is purely an archive-partition + weak-default question. This is the
+same weak-symbol mechanism as the existing `cap/http_feature.c` seam, just with
+real signatures (the base can see the prototypes) instead of `void*`.
+
+### Compose, embed, make (mirror Phase B)
+
+- Makefile: define `FEATURE_HTTP_<RT>_OBJS` (the 16 web objects), drop them from
+  `FEATURE_<RT>_OBJS` (pure), add `libhull_feature-http-<rt>.a` targets, embed
+  them (extend `embedded_http.h`) and add to `RUNTIME_FEATURE_LIBS` so `make`
+  builds them. Add the two `http_weakstub.o` to the base `PLATFORM_OBJS`.
+- `build.lua` / `feature_compose.lua` / `eject.lua`: resolve + whole-archive
+  `libhull_feature-http-<rt>.a` (embedded-first ladder) next to the http core.
+
+### Two sub-steps
+
+- **C1** — the split + weak stubs, composing the web archive **always** (like
+  Phase B composes the http core always). Pure refactor, behavior-identical.
+  Extra check: an HTTP-free app composing *only* the pure runtime links via the
+  weak stubs.
+- **C2** — gate the http-core + web-bindings compose on the app actually
+  declaring HTTP (any `hull/http-*`, `hull/web/*`, ws/sse/smtp/email module),
+  so a genuinely HTTP-free app skips web + http-core + Keel. This is the
+  behavior change that delivers the size/authority win; it also unblocks Phase D
+  (reduced-flavor × runtime, tui × runtime).

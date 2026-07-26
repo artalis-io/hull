@@ -47,6 +47,14 @@ int hl_build_extract_feature_runtime(const char *dir, const char *rt);
 int hl_build_extract_feature_http(const char *dir);
 
 /*
+ * Extract the embedded per-runtime web-bindings feature archive to
+ * `dir/libhull_feature-http-<rt>.a` (rt = "lua" | "js"; issue #114, Phase C).
+ * Composed alongside the http core when an app needs HTTP. Returns 0 on
+ * success, -1 if not embedded / unknown rt / write error.
+ */
+int hl_build_extract_feature_http_rt(const char *dir, const char *rt);
+
+/*
  * Get the list of embedded platform archives (multi-arch builds).
  * Sets *out to the sentinel-terminated array.
  * Returns the count (excluding sentinel), or 0 if not multi-arch.

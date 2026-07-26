@@ -1625,6 +1625,34 @@ int main(int argc, char **argv) { return hl_app_run(argc, argv); }
                 feature_libs[#feature_libs + 1] = f
             end
             print("hull build: composed HTTP feature")
+
+            -- Phase C: the per-runtime web bindings (routes/dispatch/res:*/ws/sse/
+            -- http-client/smtp) live in libhull_feature-http-<rt>.a, not the pure
+            -- runtime archive. Whole-archive it too (its strong defs override the
+            -- base http_weakstub no-ops; it references the http core caps + Keel,
+            -- all inside the --start-group).
+            local httprt_lib = "libhull_feature-http-" .. app_rt .. ".a"
+            local httprt_path, httprt_from = fcompose.resolve_http_rt_lib(app_rt, tmpdir,
+                                             { hull_dir = rt_hull_dir, plat = rt_plat })
+            if not httprt_path then
+                if httprt_from == "cache-verify-failed" then
+                    tool.stderr("hull build: cached web-bindings lib (" .. httprt_lib
+                        .. ") could not be re-verified\n")
+                else
+                    tool.stderr("hull build: the web-bindings feature lib "
+                        .. "(" .. httprt_lib .. ") was not found "
+                        .. "(normally embedded in hull)\n")
+                    tool.stderr("hint: build it from source with `make feature-http-"
+                        .. app_rt .. "`\n")
+                end
+                tool.rmdir(tmpdir); tool.exit(1)
+            end
+            local httprt_dest = tmpdir .. "/" .. httprt_lib
+            if httprt_path ~= httprt_dest then tool.copy(httprt_path, httprt_dest) end
+            for _, f in ipairs(fcompose.whole_archive_flags(httprt_dest, is_darwin)) do
+                feature_libs[#feature_libs + 1] = f
+            end
+            print("hull build: composed web bindings '" .. app_rt .. "'")
         end
     end
 

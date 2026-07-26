@@ -100,6 +100,13 @@ clean:
         waf = waf .. " " .. table.concat(
             rt.fcompose.whole_archive_flags("platform/libhull_feature-http.a", rt.darwin), " ")
     end
+    -- Phase C: the runtime's web bindings archive (whole-archived, overrides the
+    -- base http_weakstub no-ops).
+    if rt.httprt_path then
+        waf = waf .. " " .. table.concat(
+            rt.fcompose.whole_archive_flags(
+                "platform/libhull_feature-http-" .. rt.name .. ".a", rt.darwin), " ")
+    end
     local link_libs
     if rt.darwin then
         link_libs = "platform/libhull_platform.a " .. waf
@@ -356,10 +363,25 @@ local function main()
                 end
                 tool.exit(1)
             end
+            -- Phase C: the runtime's web bindings live in a separate archive too.
+            local httprt_path, httprt_from = fcompose.resolve_http_rt_lib(app_rt, extracted_dir,
+                                             { hull_dir = hull_dir, plat = plat })
+            if not httprt_path then
+                if httprt_from == "cache-verify-failed" then
+                    tool.stderr("hull eject: cached web-bindings lib could not be re-verified\n")
+                else
+                    tool.stderr("hull eject: the web-bindings feature lib "
+                        .. "(libhull_feature-http-" .. app_rt .. ".a) was not found\n")
+                    tool.stderr("hint: build from source with `make feature-http-"
+                        .. app_rt .. "`\n")
+                end
+                tool.exit(1)
+            end
             rt_compose = {
                 name = app_rt,
                 path = rt_path,
                 http_path = http_path,
+                httprt_path = httprt_path,
                 darwin = (plat and plat:sub(1, 6) == "darwin") or false,
                 fcompose = fcompose,
             }
@@ -401,6 +423,10 @@ local function main()
         if rt_compose.http_path then
             tool.copy(rt_compose.http_path,
                       dir .. "/platform/libhull_feature-http.a")
+        end
+        if rt_compose.httprt_path then
+            tool.copy(rt_compose.httprt_path,
+                      dir .. "/platform/libhull_feature-http-" .. rt_compose.name .. ".a")
         end
     end
 
