@@ -3916,6 +3916,13 @@ e2e-build:
 e2e-http: $(BUILDDIR)/hull
 	RUNTIME=$(RUNTIME) sh tests/e2e_http.sh
 
+# Runtime slim invariant: a produced single-runtime app drops the other
+# interpreter (0 QuickJS in a lua app, 0 Lua VM in a js app). Locks the
+# runtime-feature win against regression.
+.PHONY: e2e-feature-runtime
+e2e-feature-runtime: $(BUILDDIR)/hull
+	sh tests/e2e_feature_runtime.sh
+
 e2e-multipart: $(BUILDDIR)/hull
 	RUNTIME=$(RUNTIME) sh tests/e2e_multipart.sh
 
