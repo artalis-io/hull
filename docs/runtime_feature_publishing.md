@@ -305,3 +305,35 @@ unchanged and must stay green; add an assertion that `libhull_platform.a` itself
 has zero VM symbols (the base is genuinely runtime-less), which the dead-strip
 build would fail and the runtime-less build passes - the objective proof the
 pivot landed.
+
+## Source-tree builds: `make` builds the runtime archives
+
+A distributed `hull` embeds both runtime archives, so `hull build` extracts the
+inferred one with no extra step. A **source build** has no embedded copy, so
+`hull build` (and `hull eject`) resolve the archive from `build/` (then
+`~/.hull/feature/`). To make `make && hull build` work out of the box, a native
+`make` builds `RUNTIME_FEATURE_LIBS` (`libhull_feature-lua.a` +
+`libhull_feature-js.a`, or the single half for a `RUNTIME=lua|js` build)
+**alongside `hull`** - they are an order-only prerequisite of the `hull` target,
+so every `make`/`make e2e-*` that produces `hull` also lays the archives in
+`build/`. Cosmo has a dual base and builds none. This closes the gap where a
+plain `make` produced a `hull` that could not `hull build` until a separate
+`make feature-lua feature-js`.
+
+**Compose logic is shared.** The archive-resolution ladder (embedded-extract ->
+`build/` -> signed cache, fail-closed re-verify), the whole-archive/`-force_load`
+link fragment, and the per-app `app_feature_registry` codegen live in
+`stdlib/cli/lua/hull/feature_compose.lua`, used by both `hull build` and
+`hull eject`, so the produced-app and ejected-app paths cannot drift.
+
+## `hull eject` composes the runtime (native)
+
+`hull eject` on a native `hull` produces a runtime-less `libhull_platform.a`, so
+it must also bundle the app's one runtime archive + a generated
+`app_feature_registry.c` and whole-archive-link them in the standalone Makefile
+(GNU-ld `--start-group` around the base; `-force_load` on macOS). The output
+binary is named after the app (never `app`, which would collide with the `app/`
+source directory and make would treat the up-to-date dir as the target). The
+ejected trampoline calls `hl_app_run` (the slim app-runner), matching
+`hull build`. Cosmo eject keeps the dual base and skips runtime composition.
+Covered by `tests/e2e_build.sh` step 17 (build + run the ejected native app).

@@ -644,6 +644,41 @@ check_file_exists "ejected app.lua exists" "$WORKDIR/ejected/app/app.lua"
 "$HULL" eject "$WORKDIR/myapp" -o "$WORKDIR/ejected" >/dev/null 2>&1; RC=$?
 check_exit "hull eject existing dir fails" 1 $RC
 
+# An ejected NATIVE project must actually build AND run. Regression guard for
+# the runtime-as-feature epic: the native base is runtime-less, so eject must
+# also compose the runtime feature archive + a generated app_feature_registry,
+# and name the output binary so it does not collide with the app/ source dir
+# (else `make` treats the up-to-date directory as the target and never links).
+# The cosmo dual base embeds both runtimes and skips this; guard on BUILD_CC.
+case "$BUILD_CC" in
+  *cosmocc*) : ;;  # cosmo eject is self-sufficient (dual base); skip the smoke
+  *)
+    mkdir -p "$WORKDIR/ejectcli"
+    cat > "$WORKDIR/ejectcli/app.lua" << 'EJEOF'
+local json = require("hull.json")
+app.manifest({ name = "ejectcli", version = "0.0.1", modules = { "hull/json@1" } })
+app.main(function(ctx)
+    ctx.stdout:write("ejected-run-ok:" .. json.encode({ ok = true }) .. "\n")
+    return 0
+end)
+EJEOF
+    "$HULL" eject "$WORKDIR/ejectcli" -o "$WORKDIR/ejected_cli" >/dev/null 2>&1; RC=$?
+    check_exit "hull eject (cli app) exits 0" 0 $RC
+    check_file_exists "ejected app_feature_registry.c" "$WORKDIR/ejected_cli/src/app_feature_registry.c"
+    check_file_exists "ejected runtime feature lib"    "$WORKDIR/ejected_cli/platform/libhull_feature-lua.a"
+    # The produced app must be an app-runner (hl_app_run), not the hull CLI.
+    check_contains "ejected app_main uses hl_app_run" "$(cat "$WORKDIR/ejected_cli/src/app_main.c")" "hl_app_run"
+    if make -C "$WORKDIR/ejected_cli" >/dev/null 2>&1; then
+        pass "ejected project builds"
+    else
+        fail "ejected project builds"
+    fi
+    check_file_executable "ejected binary exists" "$WORKDIR/ejected_cli/ejectcli"
+    RUN_OUT=$("$WORKDIR/ejected_cli/ejectcli" 2>/dev/null)
+    check_contains "ejected binary runs its app" "$RUN_OUT" "ejected-run-ok"
+    ;;
+esac
+
 # ── Step 18: JS-runtime roundtrip (manifest extract → inspect) ──────
 #
 # Regression guard for two bugs we just fixed:

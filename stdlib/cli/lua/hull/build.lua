@@ -11,6 +11,7 @@
 --
 
 local json = require("hull.json")
+local fcompose = require("hull.feature_compose")
 
 -- ── Argument parsing ─────────────────────────────────────────────────
 
@@ -1400,33 +1401,19 @@ int main(int argc, char **argv) { return hl_app_run(argc, argv); }
             if spec.cxx then needs_cxx = true end
             if spec.base_group then needs_base_group = true end
 
-            -- Resolve libhull_feature-<name>.a: local build dirs first
-            -- (`make feature-<name>`), then ~/.hull/feature (`hull feature install`).
+            -- Resolve libhull_feature-<name>.a via the shared ladder: local
+            -- build dirs (`make feature-<name>`), then the signed feature cache
+            -- (`hull feature install`, re-verified fail-closed against the
+            -- embedded release pubkey).
             local libname = "libhull_feature-" .. fname .. ".a"
-            local lib, from_cache = nil, false
-            for _, d in ipairs({ hull_dir, "build/", "../build/" }) do
-                if file_exists(d .. libname) then lib = d .. libname; break end
-            end
-            if not lib and plat and tool.feature_cache_dir then
-                local cache = tool.feature_cache_dir()
-                if cache then
-                    local asset = "libhull_feature-" .. fname .. "-" .. plat .. ".a"
-                    if file_exists(cache .. "/" .. asset) then
-                        -- Re-verify a cache-sourced lib against its signed
-                        -- manifest (embedded release pubkey) before linking.
-                        -- Fail CLOSED: a missing platform_verify binding must
-                        -- abort a cache-sourced lib, not link it unverified.
-                        if not tool.platform_verify or not tool.platform_verify(cache, asset) then
-                            tool.stderr("hull build: cached " .. fname .. " feature lib could not "
-                                .. "be re-verified; run `hull feature install " .. fname .. "` again\n")
-                            tool.rmdir(tmpdir); tool.exit(1)
-                        end
-                        lib = cache .. "/" .. asset; from_cache = true
-                    end
-                end
-            end
+            local asset = plat and ("libhull_feature-" .. fname .. "-" .. plat .. ".a") or nil
+            local lib, from = fcompose.resolve_lib(libname, asset,
+                                                   { hull_dir = hull_dir, plat = plat })
             if not lib then
-                if opts.with_inferred and opts.with_inferred[fname] then
+                if from == "cache-verify-failed" then
+                    tool.stderr("hull build: cached " .. fname .. " feature lib could not "
+                        .. "be re-verified; run `hull feature install " .. fname .. "` again\n")
+                elseif opts.with_inferred and opts.with_inferred[fname] then
                     -- Auto-inferred from a manifest declaration (e.g. hull/tui):
                     -- frame the error around what the app requires, not a --with
                     -- flag the user never typed.
@@ -1443,6 +1430,7 @@ int main(int argc, char **argv) { return hl_app_run(argc, argv); }
                 end
                 tool.rmdir(tmpdir); tool.exit(1)
             end
+            local from_cache = (from == "cache")
             local dest = tmpdir .. "/" .. libname
             tool.copy(lib, dest)
             local is_darwin = plat and plat:sub(1, 6) == "darwin"
@@ -1450,15 +1438,9 @@ int main(int argc, char **argv) { return hl_app_run(argc, argv); }
             if spec.whole_archive then
                 -- Force-load the whole archive: its strong overrides of the
                 -- base weak hooks are spread across several object files with no
-                -- single backend symbol to anchor a selective pull. macOS uses
-                -- -force_load <lib>; the GNU ld / lld path uses the
-                -- --whole-archive ... --no-whole-archive bracket.
-                if is_darwin then
-                    feature_libs[#feature_libs + 1] = "-Wl,-force_load," .. dest
-                else
-                    feature_libs[#feature_libs + 1] = "-Wl,--whole-archive"
-                    feature_libs[#feature_libs + 1] = dest
-                    feature_libs[#feature_libs + 1] = "-Wl,--no-whole-archive"
+                -- single backend symbol to anchor a selective pull.
+                for _, f in ipairs(fcompose.whole_archive_flags(dest, is_darwin)) do
+                    feature_libs[#feature_libs + 1] = f
                 end
             else
                 -- Backend feature: linked plainly; the generated registry's
@@ -1528,48 +1510,22 @@ int main(int argc, char **argv) { return hl_app_run(argc, argv); }
     end
 
     -- Every produced app needs STRONG hl_stdlib_feature_entries() +
-    -- hl_runtime_feature_factories() for its one runtime. The base defaults are
-    -- weak and, resolved from libhull_platform.a (an archive), win first: the app
-    -- would get an empty stdlib (require "hull.json" fails) AND no runtime (the
-    -- base g_factories is empty, so runtimes come only from this hook). Generate
-    -- both as a DIRECT object returning this app's runtime factory + stdlib array
-    -- (hl_<rt>_factory / hl_stdlib_<rt>_entries). Because the app references only
-    -- its own runtime's symbols, the OTHER interpreter (VM + stdlib) is never
-    -- pulled from the archive and dead-strips -> the slim. Self-contained: the
-    -- structs are only address-taken here, never dereferenced, so
-    -- layout-compatible local decls suffice (same convention as the by_hook
-    -- feature_registry codegen).
+    -- hl_runtime_feature_factories() for its one runtime (see
+    -- fcompose.gen_app_registry_c for the full why). The base defaults are weak
+    -- and win first from the archive, leaving the app with an empty stdlib and
+    -- no runtime; this generated object overrides both. The registry codegen +
+    -- the archive-resolution ladder + the whole-archive link fragment are shared
+    -- with `hull eject` via hull.feature_compose so the two paths cannot drift.
     do
-        local app_rt = file_exists(opts.app_dir .. "/app.lua") and "lua"
-                    or (file_exists(opts.app_dir .. "/app.js") and "js" or nil)
+        local app_rt = fcompose.detect_app_rt(opts.app_dir)
         -- Cosmo has a DUAL base (both runtimes + the toolchain registry embedded
         -- in the fat APE); a cosmo app must NOT get an app_feature_registry (it
         -- would duplicate the base's strong hooks) and does not compose a runtime
         -- archive (features are native-only). Native has a runtime-less base and
         -- composes exactly one runtime here.
         if app_rt and not is_cosmo then
-            local entries = "hl_stdlib_" .. app_rt .. "_entries"
-            local factory = "hl_" .. app_rt .. "_factory"
-            local reg = table.concat({
-                "/* Auto-generated by hull build - do not edit. */",
-                "typedef __SIZE_TYPE__ size_t;",
-                "typedef struct { const char *n; const unsigned char *d; unsigned int l; } HlEntry;",
-                "extern const HlEntry " .. entries .. "[];",
-                "static const HlEntry *const HL_STDLIB_FEATS[] = { " .. entries .. " };",
-                "const HlEntry *const *hl_stdlib_feature_entries(size_t *count) {",
-                "    if (count) *count = 1;",
-                "    return HL_STDLIB_FEATS;",
-                "}",
-                "typedef struct HlRuntimeFactory HlRuntimeFactory;",
-                "extern const HlRuntimeFactory " .. factory .. ";",
-                "static const HlRuntimeFactory *const HL_RT_FEATS[] = { &" .. factory .. " };",
-                "const HlRuntimeFactory *const *hl_runtime_feature_factories(size_t *count) {",
-                "    if (count) *count = 1;",
-                "    return HL_RT_FEATS;",
-                "}",
-                "",
-            }, "\n")
-            write_file(tmpdir .. "/app_feature_registry.c", reg)
+            write_file(tmpdir .. "/app_feature_registry.c",
+                       fcompose.gen_app_registry_c(app_rt))
             if not tool.compiler.compile(tmpdir .. "/app_feature_registry.c",
                                          tmpdir .. "/app_feature_registry.o", nil) then
                 tool.stderr("hull build: compilation failed (app_feature_registry.c)\n")
@@ -1579,58 +1535,36 @@ int main(int argc, char **argv) { return hl_app_run(argc, argv); }
 
             -- Compose the runtime. The base platform lib is RUNTIME-LESS, so the
             -- app must link exactly one runtime archive (libhull_feature-<rt>.a)
-            -- to be runnable. Auto-inferred from the entry extension here (a
-            -- future --with can force it). Whole-archive so the entire runtime +
-            -- its embedded stdlib + vendored VM are pulled (like the tui
-            -- feature), not merely what the registry's factory reference reaches.
-            -- The runtime references base symbols (crypto/vfs/...) resolved from
-            -- the platform lib, so the GNU-ld link must --start-group them.
+            -- to be runnable. Auto-inferred from the entry extension. Whole-
+            -- archive so the entire runtime + its embedded stdlib + vendored VM
+            -- are pulled (like the tui feature), not merely what the registry's
+            -- factory reference reaches. The runtime references base symbols
+            -- (crypto/vfs/...) resolved from the platform lib, so the GNU-ld link
+            -- must --start-group them.
             local rt_lib  = "libhull_feature-" .. app_rt .. ".a"
             local rt_plat = tool.platform_name and tool.platform_name() or nil
             local rt_hull_dir = ""
             if __hull_exe then rt_hull_dir = __hull_exe:match("(.*/)") or "" end
-            local rt_path
-            -- 1. Embedded in this hull (the distributed native path): extract it.
-            if tool.extract_feature_runtime and tool.extract_feature_runtime(tmpdir, app_rt)
-               and file_exists(tmpdir .. "/" .. rt_lib) then
-                rt_path = tmpdir .. "/" .. rt_lib
-            end
-            -- 2. Local build dirs (`make feature-<rt>`, source builds).
+            local rt_path, rt_from = fcompose.resolve_runtime_lib(app_rt, tmpdir,
+                                     { hull_dir = rt_hull_dir, plat = rt_plat })
             if not rt_path then
-                for _, d in ipairs({ rt_hull_dir, "build/", "../build/" }) do
-                    if file_exists(d .. rt_lib) then rt_path = d .. rt_lib; break end
+                if rt_from == "cache-verify-failed" then
+                    tool.stderr("hull build: cached " .. app_rt
+                        .. " runtime lib could not be re-verified\n")
+                else
+                    tool.stderr("hull build: the '" .. app_rt .. "' runtime feature lib "
+                        .. "was not found (the runtime is normally embedded in hull)\n")
+                    tool.stderr("hint: build it from source with `make feature-"
+                        .. app_rt .. "`\n")
                 end
-            end
-            if not rt_path and rt_plat and tool.feature_cache_dir then
-                local cache = tool.feature_cache_dir()
-                if cache then
-                    local asset = "libhull_feature-" .. app_rt .. "-" .. rt_plat .. ".a"
-                    if file_exists(cache .. "/" .. asset) then
-                        if not tool.platform_verify or not tool.platform_verify(cache, asset) then
-                            tool.stderr("hull build: cached " .. app_rt
-                                .. " runtime lib could not be re-verified\n")
-                            tool.rmdir(tmpdir); tool.exit(1)
-                        end
-                        rt_path = cache .. "/" .. asset
-                    end
-                end
-            end
-            if not rt_path then
-                tool.stderr("hull build: the '" .. app_rt .. "' runtime feature lib "
-                    .. "was not found (the runtime is normally embedded in hull)\n")
-                tool.stderr("hint: build it from source with `make feature-"
-                    .. app_rt .. "`\n")
                 tool.rmdir(tmpdir); tool.exit(1)
             end
             local rt_dest = tmpdir .. "/" .. rt_lib
             if rt_path ~= rt_dest then tool.copy(rt_path, rt_dest) end  -- already there if extracted
             needs_base_group = true  -- runtime refs base symbols; GNU ld needs the group
-            if rt_plat and rt_plat:sub(1, 6) == "darwin" then
-                feature_libs[#feature_libs + 1] = "-Wl,-force_load," .. rt_dest
-            else
-                feature_libs[#feature_libs + 1] = "-Wl,--whole-archive"
-                feature_libs[#feature_libs + 1] = rt_dest
-                feature_libs[#feature_libs + 1] = "-Wl,--no-whole-archive"
+            local is_darwin = rt_plat and rt_plat:sub(1, 6) == "darwin"
+            for _, f in ipairs(fcompose.whole_archive_flags(rt_dest, is_darwin)) do
+                feature_libs[#feature_libs + 1] = f
             end
             print("hull build: composed runtime '" .. app_rt .. "'")
         end

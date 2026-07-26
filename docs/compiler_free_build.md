@@ -7,7 +7,7 @@ compiles two C files per app — `app_main.c` (a fixed trampoline) and
 `app_registry.c` (pure data) — then links them against
 `libhull_platform.a`. Neither actually needs a compiler:
 
-- `app_main.c` is app-invariant (`main()` → `hull_main()`), so it is
+- `app_main.c` is app-invariant (`main()` → `hl_app_run()`), so it is
   **pre-compiled once per (format, arch)** and bundled in the `hull`
   binary.
 - `app_registry.c` is a `const HlEntry[]` array of file bytes + names,
@@ -139,7 +139,7 @@ Three genuine per-format differences to get right:
 
 1. **Symbol naming.** Mach-O prefixes C symbols with `_`
    (`_hl_app_entries`, and the bundled `app_main.o` references
-   `_hull_main`/`_main`); ELF and Win64-COFF use the bare name.
+   `_hl_app_run`/`_main`); ELF and Win64-COFF use the bare name.
 2. **Addend location.** ELF carries the addend in the relocation
    (`r_addend`); Mach-O and COFF store it **in-place** in the field
    being relocated. The planner therefore also writes the target offset
@@ -166,8 +166,8 @@ wants).
 `app_main.c` is invariant:
 
 ```c
-extern int hull_main(int argc, char **argv);
-int main(int argc, char **argv) { return hull_main(argc, argv); }
+extern int hl_app_run(int argc, char **argv);
+int main(int argc, char **argv) { return hl_app_run(argc, argv); }
 ```
 
 It contains **code** (a call), so it is compiled once at **Hull release
@@ -185,7 +185,7 @@ extracts to the tmp dir. Provenance: built by Hull CI, covered by the
 release signature.
 
 > Optional future purification: the trampoline is a one-instruction
-> tail-call (`jmp/b hull_main`), so it could be **emitted** too (a tiny
+> tail-call (`jmp/b hl_app_run`), so it could be **emitted** too (a tiny
 > code-object backend), removing the pre-built blobs. Bundling is the
 > pragmatic v1 — trivial, robust, no hand-written codegen.
 
