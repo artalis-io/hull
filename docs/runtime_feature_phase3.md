@@ -64,23 +64,33 @@ where both archives resolve their concrete-VM references).
   is empty and runtimes are resolved *only* through `hl_runtime_feature_factories()`
   - filled by the composed app's generated registry, or the toolchain registry.
 
-## Change 3a - the two code relocations (do first, still dual base)
+## Change 3a - relocate the runtime accessors (DONE, still dual base)
 
-Land these while the base is still dual so they are behavior-preserving and
-independently testable:
+Land while the base is still dual so it is behavior-preserving and independently
+testable.
 
-1. **Relocate the runtime accessors.** Move `hl_app_context_lua()` /
-   `hl_app_context_js()` (and the `HlLua`/`HlJS` forward-decls they need) out of
-   `app_context.c` into a new **toolchain-only** TU (e.g.
-   `app_context_runtime.c`), compiled with both macros. Only `agent/*` calls
-   them. After this, `app_context.o` references no concrete runtime symbol.
-2. **Ungate `serve.c` entry auto-detection.** `auto_detect_entry()` currently
-   `#ifdef`s the `"app.js"` / `"app.lua"` probes on `HL_ENABLE_JS/LUA`. Rewrite it
-   to iterate the factory registry's `entry_extension`s (base + feature) - the
-   same table-driven discovery `app_context.c::resolve_entry_and_runtime` already
-   uses - so a macro-less base still detects whichever runtime is composed.
+**Relocate the runtime accessors.** Moved `hl_app_context_is_lua()` /
+`hl_app_context_lua()` / `hl_app_context_js()` (and the `HlLua`/`HlJS`
+forward-decls they need) out of `app_context.c` into a new **toolchain-only** TU
+`app_context_runtime.c`, compiled with both macros. `app_context.c` now exposes
+only an agnostic `hl_app_context_factory()` getter the accessors build on (so the
+new TU never needs the opaque `HlAppContext` layout). Only `agent/*` (toolchain)
+calls the accessors. After this, `app_context.o` references **no** concrete
+runtime symbol (`nm` confirms: it exports only `hl_app_context_factory`; the three
+accessors live in `app_context_runtime.o`). `make test` 60/60 green,
+`hull agent overview`/`eval` work.
 
-Verify: `make test` + e2e byte-identical; `nm` shows the accessors moved TUs.
+`app_context_runtime.o` is wired beside `app_context.o` in the link lists for
+now; Change 3b moves it into `TOOLCHAIN_ONLY_OBJS` (out of the produced-app lib).
+
+**`serve.c` entry auto-detection moved to Change 3b.** `auto_detect_entry()`
+`#ifdef`s the `"app.js"` / `"app.lua"` probes on `HL_ENABLE_JS/LUA` and is
+entangled with the runtime-validation block (`#ifndef HL_ENABLE_JS/LUA` at
+serve.c ~807) that rejects an uncompiled runtime. It also probes **JS-first**
+while `app_context.c::resolve_entry_and_runtime` discovers **Lua-first** - a
+pre-existing order inconsistency in the both-entries-present case. So a
+"byte-identical" factory-driven rewrite is not clean in isolation; do it in 3b
+together with the validation rework, against the actual macro-less base.
 
 ## Change 3b - `HULL_CORE_OBJS` + the bucket split in the Makefile
 
@@ -172,7 +182,9 @@ three native arches; embedded + auto-composed, not install-on-demand).
 
 ## Phasing (each step keeps a green, dual `hull`)
 
-1. **3a** - the two relocations, base still dual. Byte-identical. (Small, safe.)
+1. **3a** - the accessor relocation, base still dual. Byte-identical. (Done.)
+   The `serve.c` entry-detection + runtime-validation rework rides with 3b (it is
+   only exercised once the base is macro-less).
 2. **3c** - build the archives; base still dual; assert the archives contain the
    expected symbols (`nm`). No behavior change yet.
 3. **3b + 3d** - flip the base runtime-less + force-load both archives + toolchain

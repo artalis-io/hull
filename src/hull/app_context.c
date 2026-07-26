@@ -25,20 +25,13 @@
 #include <sqlite3.h>
 #endif
 
-/* app_context is meant to stay runtime-agnostic — it dispatches
- * through the HlRuntimeFactory vtable and never touches Lua/JS
- * internals directly. The hl_app_context_lua / _js accessors below
- * return typed pointers (HlLua * / HlJS *), but a cast to a typed
- * pointer only needs a forward declaration of the type, not the full
- * struct shape. Pulling in hull/runtime/lua.h or hull/runtime/js.h
- * here would surface the full HlLua / HlJS struct layout to a layer
- * that has no business inspecting it. */
-#ifdef HL_ENABLE_LUA
-typedef struct HlLua HlLua;
-#endif
-#ifdef HL_ENABLE_JS
-typedef struct HlJS HlJS;
-#endif
+/* app_context stays runtime-agnostic: it dispatches through the
+ * HlRuntimeFactory vtable and never references a concrete runtime symbol
+ * (hl_lua_factory / hl_js_factory). The runtime-typed accessors
+ * (hl_app_context_is_lua / _lua / _js) live in the toolchain-only TU
+ * app_context_runtime.c so a slim single-runtime app never pulls the
+ * other runtime's factory symbol. This TU exposes only the agnostic
+ * hl_app_context_factory() getter they build on. */
 #ifdef HL_ENABLE_WASM
 #include "hull/cap/wasm.h"
 #endif
@@ -433,40 +426,16 @@ HlStmtCache *hl_app_context_stmt_cache(HlAppContext *ctx)
 #endif
 }
 
-int hl_app_context_is_lua(HlAppContext *ctx)
-{
-    /* Identify via the factory pointer — avoids a stored is_lua flag.
-     * A `rt->vt->kind == HL_RT_LUA` check also works once rt is created; the
-     * factory pointer is the canonical source of truth post-K and is valid even
-     * before rt exists. */
-#ifdef HL_ENABLE_LUA
-    extern const HlRuntimeFactory hl_lua_factory;
-    return (ctx && ctx->factory == &hl_lua_factory) ? 1 : 0;
-#else
-    (void)ctx;
-    return 0;
-#endif
-}
-
 const char *hl_app_context_app_dir(HlAppContext *ctx)
 {
     return ctx ? ctx->app_vfs.root_dir : NULL;
 }
 
-#ifdef HL_ENABLE_LUA
-HlLua *hl_app_context_lua(HlAppContext *ctx)
+/* Agnostic accessor: the runtime factory the context resolved (or NULL before
+ * resolution). Lets the toolchain-only runtime-typed accessors
+ * (app_context_runtime.c) compare against hl_<rt>_factory without this
+ * base TU referencing any concrete runtime symbol. */
+const HlRuntimeFactory *hl_app_context_factory(HlAppContext *ctx)
 {
-    extern const HlRuntimeFactory hl_lua_factory;
-    if (!ctx || ctx->factory != &hl_lua_factory) return NULL;
-    return (HlLua *)ctx->rt;   /* base is the first field of HlLua */
+    return ctx ? ctx->factory : NULL;
 }
-#endif
-
-#ifdef HL_ENABLE_JS
-HlJS *hl_app_context_js(HlAppContext *ctx)
-{
-    extern const HlRuntimeFactory hl_js_factory;
-    if (!ctx || ctx->factory != &hl_js_factory) return NULL;
-    return (HlJS *)ctx->rt;
-}
-#endif

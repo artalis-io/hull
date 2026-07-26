@@ -25,6 +25,7 @@
 /* Forward declarations */
 typedef struct HlAllocator HlAllocator;
 typedef struct HlRuntime HlRuntime;
+typedef struct HlRuntimeFactory HlRuntimeFactory;
 typedef struct HlVfs HlVfs;
 typedef struct HlStmtCache HlStmtCache;
 typedef struct HlWasmCache HlWasmCache;
@@ -128,6 +129,9 @@ const HlVfs  *hl_app_context_platform_vfs(HlAppContext *ctx);
 HlStmtCache  *hl_app_context_stmt_cache(HlAppContext *ctx);
 int           hl_app_context_is_lua(HlAppContext *ctx);
 const char   *hl_app_context_app_dir(HlAppContext *ctx);
+/* The resolved runtime factory (NULL before resolution). Agnostic; the
+ * runtime-typed accessors below build on it. */
+const HlRuntimeFactory *hl_app_context_factory(HlAppContext *ctx);
 
 #ifdef HL_ENABLE_LUA
 struct HlLua;
