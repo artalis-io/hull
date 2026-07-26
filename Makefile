@@ -4146,22 +4146,29 @@ hull-test-examples: $(BUILDDIR)/hull
 		if echo "$$output" | grep -qE "[0-9]+ failed"; then exit 1; fi; \
 	done
 
-# ── Self-build (hull → hull2 → hull3 chain) ─────────────────────────
+# ── Self-build (hull builds a runnable app binary) ──────────────────
+#
+# A produced binary is a slim app-runner (hl_app_run -> hull_serve), NOT the
+# hull CLI: it runs its own embedded app and has no subcommand dispatcher. So
+# the old "hull2 keygen / hull2 builds hull3" chain no longer applies (hull2 is
+# just the built app). This target instead proves the build pipeline end to
+# end: `hull build` an app.main fixture, then RUN it and require exit 0 - i.e.
+# the composed single-runtime binary actually boots (this is what catches an
+# "app context init failed" at runtime). Byte-level determinism is covered by
+# the separate reproducibility target below.
 
-self-build: $(BUILDDIR)/hull platform
-	@echo "=== Self-build: hull -> hull2 -> hull3 ==="
+self-build: $(BUILDDIR)/hull platform $(RUNTIME_FEATURE_LIBS)
+	@echo "=== Self-build: hull builds a runnable app binary ==="
 	@# --no-verify-platform: this hull is built without EMBED_PLATFORM=1
 	@# (the dev/CI default) so it has no embedded signed manifest and
 	@# can't satisfy the v0.1.3 platform-sig cross-check. Self-build is
 	@# verifying the build pipeline itself, not the trust chain.
 	@TMPDIR=$$(mktemp -d) && \
-	$(BUILDDIR)/hull build --no-verify-platform -o "$$TMPDIR/hull2" tests/fixtures/null_app && \
-	"$$TMPDIR/hull2" keygen "$$TMPDIR/key" && test -f "$$TMPDIR/key.pub" && \
-	"$$TMPDIR/hull2" build --no-verify-platform -o "$$TMPDIR/hull3" tests/fixtures/null_app && \
-	"$$TMPDIR/hull3" keygen "$$TMPDIR/key2" && test -f "$$TMPDIR/key2.pub" && \
-	echo "PASS: self-build chain verified (hull -> hull2 -> hull3)" && \
+	$(BUILDDIR)/hull build --no-verify-platform -o "$$TMPDIR/app" tests/fixtures/selfbuild_app && \
+	"$$TMPDIR/app" && \
+	echo "PASS: hull build produced a runnable app-runner (exit 0)" && \
 	rm -rf "$$TMPDIR" || \
-	(echo "FAIL: self-build chain" && rm -rf "$$TMPDIR" && exit 1)
+	(echo "FAIL: self-build" && rm -rf "$$TMPDIR" && exit 1)
 
 # ── Reproducibility check (byte-identical builds) ───────────────────
 # Tests the MANIFESTO claim "same source + same hull version = same binary"
