@@ -104,6 +104,16 @@ else
     exit 1
 fi
 
+# The base platform lib is runtime-less; a produced app composes one runtime
+# archive, so hull build needs them in build/ (build.lua resolves them there).
+if make feature-lua feature-js >/dev/null 2>&1; then
+    pass "make feature-lua feature-js (runtime archives)"
+else
+    fail "make feature-lua feature-js (runtime archives)"
+    echo "FATAL: cannot compose a runtime without the archives"
+    exit 1
+fi
+
 if make EMBED_PLATFORM=1 >/dev/null 2>&1; then
     pass "make EMBED_PLATFORM=1 (hull binary)"
 else

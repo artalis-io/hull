@@ -1571,6 +1571,55 @@ int main(int argc, char **argv) { return hl_app_run(argc, argv); }
                 tool.rmdir(tmpdir); tool.exit(1)
             end
             feature_objs[#feature_objs + 1] = tmpdir .. "/app_feature_registry.o"
+
+            -- Compose the runtime. The base platform lib is RUNTIME-LESS, so the
+            -- app must link exactly one runtime archive (libhull_feature-<rt>.a)
+            -- to be runnable. Auto-inferred from the entry extension here (a
+            -- future --with can force it). Whole-archive so the entire runtime +
+            -- its embedded stdlib + vendored VM are pulled (like the tui
+            -- feature), not merely what the registry's factory reference reaches.
+            -- The runtime references base symbols (crypto/vfs/...) resolved from
+            -- the platform lib, so the GNU-ld link must --start-group them.
+            local rt_lib  = "libhull_feature-" .. app_rt .. ".a"
+            local rt_plat = tool.platform_name and tool.platform_name() or nil
+            local rt_hull_dir = ""
+            if __hull_exe then rt_hull_dir = __hull_exe:match("(.*/)") or "" end
+            local rt_path
+            for _, d in ipairs({ rt_hull_dir, "build/", "../build/" }) do
+                if file_exists(d .. rt_lib) then rt_path = d .. rt_lib; break end
+            end
+            if not rt_path and rt_plat and tool.feature_cache_dir then
+                local cache = tool.feature_cache_dir()
+                if cache then
+                    local asset = "libhull_feature-" .. app_rt .. "-" .. rt_plat .. ".a"
+                    if file_exists(cache .. "/" .. asset) then
+                        if not tool.platform_verify or not tool.platform_verify(cache, asset) then
+                            tool.stderr("hull build: cached " .. app_rt
+                                .. " runtime lib could not be re-verified\n")
+                            tool.rmdir(tmpdir); tool.exit(1)
+                        end
+                        rt_path = cache .. "/" .. asset
+                    end
+                end
+            end
+            if not rt_path then
+                tool.stderr("hull build: the '" .. app_rt .. "' runtime feature lib "
+                    .. "was not found (the runtime is normally embedded in hull)\n")
+                tool.stderr("hint: build it from source with `make feature-"
+                    .. app_rt .. "`\n")
+                tool.rmdir(tmpdir); tool.exit(1)
+            end
+            local rt_dest = tmpdir .. "/" .. rt_lib
+            tool.copy(rt_path, rt_dest)
+            needs_base_group = true  -- runtime refs base symbols; GNU ld needs the group
+            if rt_plat and rt_plat:sub(1, 6) == "darwin" then
+                feature_libs[#feature_libs + 1] = "-Wl,-force_load," .. rt_dest
+            else
+                feature_libs[#feature_libs + 1] = "-Wl,--whole-archive"
+                feature_libs[#feature_libs + 1] = rt_dest
+                feature_libs[#feature_libs + 1] = "-Wl,--no-whole-archive"
+            end
+            print("hull build: composed runtime '" .. app_rt .. "'")
         end
     end
 

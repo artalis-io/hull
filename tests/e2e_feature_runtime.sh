@@ -14,13 +14,29 @@ cd "$(dirname "$0")/.."
 
 HULL=./build/hull
 
-echo "=== build hull + the app-build platform lib ==="
+echo "=== build hull + the runtime-less platform lib + both runtime archives ==="
 make >/dev/null
 make platform >/dev/null
+# The base is runtime-less: a produced app composes exactly one runtime archive,
+# so hull build needs them present (in build/, found by build.lua). The
+# distributed hull embeds them instead.
+make feature-lua feature-js >/dev/null
 
-# nm is portable but symbol names differ by object format: Mach-O prefixes an
-# underscore (_JS_NewRuntime), ELF does not (JS_NewRuntime). Match both.
-count_syms() { nm "$1" 2>/dev/null | grep -cE " [A-Za-z] _?$2" || true; }
+# Count DEFINED symbols matching $2. nm is portable but names differ by object
+# format: Mach-O prefixes an underscore (_JS_NewRuntime), ELF does not. The type
+# column is one letter; exclude 'U'/'u' (undefined references) - a runtime-less
+# archive legitimately has undefined refs to a runtime it does not carry, which
+# resolve only when a runtime is composed. We assert the base does not DEFINE a
+# VM, not that it never mentions one.
+count_syms() { nm "$1" 2>/dev/null | grep -cE " [A-TV-Za-tv-z] _?$2" || true; }
+
+echo "=== the base platform lib itself is RUNTIME-LESS (0 VM symbols) ==="
+base_qjs=$(count_syms build/libhull_platform.a "JS_NewRuntime")
+base_lua=$(count_syms build/libhull_platform.a "lua_newstate")
+echo "libhull_platform.a: QuickJS=$base_qjs Lua-VM=$base_lua"
+[ "$base_qjs" -eq 0 ] && [ "$base_lua" -eq 0 ] || {
+    echo "FAIL: base platform lib is not runtime-less"; exit 1; }
+echo "ok  base platform lib carries no interpreter"
 
 LUA_APP=$(mktemp -d); JS_APP=$(mktemp -d)
 trap 'rm -rf "$LUA_APP" "$JS_APP"' EXIT
