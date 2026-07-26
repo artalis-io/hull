@@ -142,6 +142,10 @@ int hl_lua_track_route(HlLua *lua, void *route);
 int hl_lua_track_alloc(HlLua *lua, void ***arr, size_t *count,
                        size_t *cap, void *ptr);
 
+/* Retrieve the HlLua owner from the Lua registry (__hull_lua). Defined in
+ * bindings.c; shared with bindings_response.c (the res:* helpers). */
+HlLua *get_hl_lua_from_L(lua_State *L);
+
 /* ── Defined in mod_request.c, called from bindings.c + modules.c. */
 struct KlBodyReader;
 /* Register HlMpIter / HlMpPart / HlMpChunks metatables (once per VM). */
