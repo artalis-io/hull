@@ -24,4 +24,16 @@
  */
 int hull_serve(int argc, char **argv);
 
+/**
+ * @brief Slim produced-app entry point.
+ *
+ * A built app links this instead of `hull_main`: it runs the app via
+ * `hull_serve` and pulls none of the `hull` dev CLI (dispatch, subcommands,
+ * agent introspection). That keeps a produced single-runtime app from dragging
+ * in the command table -> agent -> both runtimes, which is what lets it stay
+ * slim (one runtime, zero of the other interpreter). The `hull` toolchain still
+ * uses `hull_main` (full dispatch).
+ */
+int hl_app_run(int argc, char **argv);
+
 #endif /* HL_SERVE_H */
