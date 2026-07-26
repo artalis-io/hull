@@ -214,3 +214,22 @@ real signatures (the base can see the prototypes) instead of `void*`.
   so a genuinely HTTP-free app skips web + http-core + Keel. This is the
   behavior change that delivers the size/authority win; it also unblocks Phase D
   (reduced-flavor × runtime, tui × runtime).
+
+### C2 gating — a measured caveat (found during C1)
+
+C2 gates the http-core + web-bindings compose on the resolved manifest's HTTP
+caps (`hl_module_set_required_caps & HL_MOD_CAP_HTTP`). The signal is reliable:
+`app.get`/`app.post`/… are **module-conditional decorations** — they are `nil`
+unless the app declares `hull/http-server` (verified: an undeclared `app.get`
+fails app load with "attempt to call a nil value (field 'get')"), so an app that
+serves HTTP always declares an HTTP module.
+
+But gating the *feature compose* alone does not fully strip HTTP from an
+HTTP-free binary: **Keel is bundled inside `libhull_platform.a`** (the base), and
+`serve.o` (also in the base, on a full/HTTP_SERVER=1 build) references
+`kl_server_*`, so the linker still pulls Keel + mbedTLS into an HTTP-free app.
+Fully dropping Keel/mbedTLS from a genuinely HTTP-free binary additionally
+requires decoupling `serve.o` from Keel (a base→Keel Kind-B edge) — the same
+work that unblocks the reduced-flavor × runtime compose. So C2 (skip the http
+core + web bindings) and that serve/Keel decoupling belong together, tracked
+into Phase D, rather than C2 being a quick gate on top of C1.
