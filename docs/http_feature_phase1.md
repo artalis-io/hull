@@ -88,12 +88,30 @@ void hl_js_register_http_modules(JSContext *ctx);   /* … */
   reduced-flavor × runtime and tui e2e (`e2e_build_flavor.sh` step 3,
   `e2e_feature_tui.sh` — currently asserting the #114 fail-closed message).
 
-## Open questions
+## Kind-B decoupling: CLEAN SPLIT (decided)
 
-- **Kind-B decoupling shape.** Weak-reference the `kl_*` symbols in the core
-  objects (link as 0 on a no-HTTP base, never called), or split the HTTP-touching
-  functions out of the core objects into feature-side files? Weak refs are less
-  churn; a clean split is more honest. Phase A should pick one and hold it.
+Rather than weak-reference the `kl_*` symbols, Phase A physically extracts the
+HTTP-touching functions so the core-runtime objects hold **zero** HTTP
+references. The grep shows the refs are cohesive, so the split is bounded:
+
+- `runtime.c` (1 ref, `hl_ws_registry_free` teardown) → guard behind
+  `hl_http_feature_present()`.
+- `async.c` (3) + `dispatch.c` (6) — the identical 500-error `kl_response_*`
+  blocks → one shared `hl_{lua,js}_http_error_response()` helper that lives on
+  the HTTP side of the seam.
+- `bindings.c` (17, the `res:status/header/json/html/redirect/...` response
+  helpers) — the bulk → extract the `res:*` binding group into
+  `bindings_response.c`; their registration goes through
+  `hl_{lua,js}_register_http_modules` (a no-HTTP base registers no `res:*`,
+  which is correct — an app with no request handlers never has a `res`).
+- `routes.c` / `mod_app.c` / `mod_request.c` (route + ws wiring) — already
+  serve-only; grouped on the HTTP side.
+
+In Phase A these extracted files still compile into the base (byte-identical
+behavior); Phase C relocates them into the per-runtime HTTP binding unit. The
+JS side mirrors the Lua split file-for-file.
+
+## Open questions
 - **HTTP-core: one feature or per-runtime?** The caps + Keel are
   runtime-agnostic (one `http` feature). The web *bindings* are per-runtime. So
   the composed unit is likely `http-core` (agnostic) + `http-<rt>` (bindings),
