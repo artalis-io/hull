@@ -16,6 +16,7 @@
 #include "mod_buffer.h"
 #include "internal.h"  /* hl_lua_request_register, hl_lua_sse_register_mt */
 #include "hull/cap/tui.h"  /* hl_tui_feature_register_lua (composed-feature seam) */
+#include "hull/http_feature.h"  /* hl_lua_register_http_modules (HTTP-feature seam, #114) */
 
 /* Register a native module so `require("hull.X")` finds it via the
  * _LOADED bridge in hl_lua_require, but do NOT set it as a global. */
@@ -72,18 +73,10 @@ int hl_lua_register_modules(HlLua *lua)
     register_native_module(L, "hull.time",   luaopen_hull_time);
     register_native_module(L, "hull.env",    luaopen_hull_env);
     register_native_module(L, "hull.crypto", luaopen_hull_crypto);
-#ifdef HL_ENABLE_HTTP_CLIENT
-    register_native_module(L, "hull.http-client", luaopen_hull_http);
-    register_native_module(L, "hull.smtp",        luaopen_hull_smtp);
-#endif
-#ifdef HL_ENABLE_HTTP_SERVER
-    /* hull.http-server provides server stats (stats()) — registration
-     * verbs land directly on the app intrinsic via install_app_http_server. */
-    register_native_module(L, "hull.http-server", luaopen_hull_server);
-    /* WebSocket split: ws-server (broadcast/connections) vs ws-client (connect). */
-    register_native_module(L, "hull.web.ws-server", luaopen_hull_ws_server);
-    register_native_module(L, "hull.web.ws-client", luaopen_hull_ws_client);
-#endif
+    /* HTTP-dependent modules (http-client/server, smtp, ws-server/client) +
+     * the sse/multipart metatables register through the HTTP-feature seam
+     * (hl_lua_register_http_modules, below) so this core registry no longer
+     * references the web-module openers. See hull/http_feature.h (#114). */
     register_native_module(L, "hull.fs",     luaopen_hull_fs);
     register_native_module(L, "hull.blob",   luaopen_hull_blob);
     register_native_module(L, "hull.mime",   luaopen_hull_mime);
@@ -114,15 +107,13 @@ int hl_lua_register_modules(HlLua *lua)
      * of). Unconditional so a composed binary picks it up without HL_ENABLE_TUI. */
     hl_tui_feature_register_lua(L);
 
-#ifdef HL_ENABLE_HTTP_SERVER
-    /* SSE stream metatable (used by app.sse handler dispatch). */
-    hl_lua_sse_register_mt(L);
-
-    /* Streaming-multipart request bindings (req:multipart() / Part / Chunks
-     * metatables). Only meaningful for server flavors — CLI builds don't
-     * have routes to register. */
-    hl_lua_request_register(L);
-#endif
+    /* HTTP-feature seam (#114): registers http-client/server, smtp,
+     * ws-server/client + the sse/multipart metatables. Weak no-op in a base
+     * with no HTTP composed; the strong override (runtime/lua/http_register.c)
+     * wins on a full base / composed http feature. Consolidated here from the
+     * former inline #ifdef HL_ENABLE_HTTP_* blocks - module registration into
+     * _LOADED is order-independent, so behavior is unchanged. */
+    hl_lua_register_http_modules(L);
 
     return 0;
 }
