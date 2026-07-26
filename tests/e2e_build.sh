@@ -12,9 +12,9 @@
 #   8. Built app serves HTTP correctly
 #   9. Tampered file detected by verify
 #  10. Multi-file app builds and serves correctly
-#  11. Built binary has subcommand support (keygen, manifest, etc.)
+#  11. Built binary is a slim app-runner (runs its app; no hull subcommands)
 #  12. Error cases
-#  13. Self-build chain (hull → hull2 → hull3)
+#  13. A produced binary is an app-runner, not a hull (self-build = make self-build)
 #
 # Usage: sh tests/e2e_build.sh
 #        make e2e-build
@@ -402,19 +402,21 @@ check_exit "multi-file verify passes" 0 $RC
 INSPECT_OUT=$("$HULL" inspect "$WORKDIR/multiapp" 2>&1); RC=$?
 check_contains "multi-file inspect shows files" "$INSPECT_OUT" "app.lua"
 
-# ── Step 11: Built binary subcommands ─────────────────────────────────
+# ── Step 11: Built binary is a slim app-runner ────────────────────────
 
 echo ""
-echo "=== Step 11: Built binary subcommands ==="
+echo "=== Step 11: Built binary is a slim app-runner ==="
 
-# The built binary should support hull subcommands since it links hull_main
-"$WORKDIR/multiapp/multiapp" keygen "$WORKDIR/app_key" >/dev/null 2>&1; RC=$?
-check_exit "built app keygen exits 0" 0 $RC
-check_file_exists "built app keygen creates pubkey" "$WORKDIR/app_key.pub"
-
-MANIFEST_OUT=$("$WORKDIR/multiapp/multiapp" manifest "$WORKDIR/multiapp" 2>&1); RC=$?
-check_exit "built app manifest exits 0" 0 $RC
-check_contains "built app manifest has env" "$MANIFEST_OUT" "APP_NAME"
+# A produced binary links the slim hl_app_run entry (hull_serve), NOT the full
+# hull CLI dispatch, so it RUNS its app and does not answer hull subcommands
+# (keygen / manifest / etc.). Confirm the app-runner contract: keygen must not
+# produce a keypair (the binary treats "keygen" as an app arg, not a command).
+"$WORKDIR/multiapp/multiapp" keygen "$WORKDIR/app_key" >/dev/null 2>&1 || true
+if [ -f "$WORKDIR/app_key.pub" ]; then
+    fail "built binary must NOT expose the keygen subcommand (app-runner only)"
+else
+    pass "built binary is a slim app-runner (no hull subcommands)"
+fi
 
 # ── Step 12: Error cases ─────────────────────────────────────────────
 
@@ -444,45 +446,30 @@ check_exit "manifest without app.lua fails" 1 $RC
 BUILD_OUT=$("$HULL" build --no-verify-platform --compiler "$BUILD_CC" --sign "/nonexistent/key.key" "$WORKDIR/myapp" 2>&1); RC=$?
 check_exit "build with bad key fails" 1 $RC
 
-# ── Step 13: Self-build chain (hull → hull2 → hull3) ─────────────────
+# ── Step 13: A produced binary is an app-runner, not a hull ──────────
 
 echo ""
-echo "=== Step 13: Self-build chain ==="
+echo "=== Step 13: produced binary is an app-runner ==="
 
-# Create a minimal app for self-build test
+# The reproducible hull -> hull2 -> hull3 self-build is `make self-build` (full
+# hull binaries), not `hull build`. `hull build` produces a slim APP-RUNNER: it
+# runs the app, does not itself build binaries, and does not answer hull
+# subcommands. Confirm a produced binary builds, is executable, and is not a hull.
 mkdir -p "$WORKDIR/nullapp"
 cat > "$WORKDIR/nullapp/app.lua" << 'APPEOF'
 app.get("/", function(req, res) res:json({status = "ok"}) end)
 APPEOF
 
-# hull → hull2
-BUILD_OUT=$("$HULL" build --no-verify-platform --compiler "$BUILD_CC" -o "$WORKDIR/hull2" "$WORKDIR/nullapp" 2>&1); RC=$?
-check_exit "self-build hull→hull2 exits 0" 0 $RC
-check_file_executable "hull2 exists and executable" "$WORKDIR/hull2"
+BUILD_OUT=$("$HULL" build --no-verify-platform --compiler "$BUILD_CC" -o "$WORKDIR/nullbin" "$WORKDIR/nullapp" 2>&1); RC=$?
+check_exit "build a second app exits 0" 0 $RC
+check_file_executable "produced binary exists and executable" "$WORKDIR/nullbin"
 
-# hull2 keygen (verify subcommands work)
-if [ -x "$WORKDIR/hull2" ]; then
-    "$WORKDIR/hull2" keygen "$WORKDIR/sb_key" >/dev/null 2>&1; RC=$?
-    check_exit "hull2 keygen exits 0" 0 $RC
-    check_file_exists "hull2 keygen creates pubkey" "$WORKDIR/sb_key.pub"
+# It is an app-runner, not a hull: keygen must not produce a keypair.
+"$WORKDIR/nullbin" keygen "$WORKDIR/nb_key" >/dev/null 2>&1 || true
+if [ -f "$WORKDIR/nb_key.pub" ]; then
+    fail "produced binary must not expose hull subcommands (app-runner only)"
 else
-    fail "hull2 not executable — skipping chain"
-fi
-
-# hull2 → hull3: use original hull to build hull3 from nullapp
-# (hull2 is a built app — it has platform stubs, not embedded assets,
-# so it cannot build new binaries itself. Only the original hull can.)
-BUILD_OUT=$("$HULL" build --no-verify-platform --compiler "$BUILD_CC" -o "$WORKDIR/hull3" "$WORKDIR/nullapp" 2>&1); RC=$?
-check_exit "hull→hull3 exits 0" 0 $RC
-check_file_executable "hull3 exists and executable" "$WORKDIR/hull3"
-
-# hull3 keygen (verify the chain)
-if [ -x "$WORKDIR/hull3" ]; then
-    "$WORKDIR/hull3" keygen "$WORKDIR/sb_key2" >/dev/null 2>&1; RC=$?
-    check_exit "hull3 keygen exits 0" 0 $RC
-    check_file_exists "hull3 keygen creates pubkey" "$WORKDIR/sb_key2.pub"
-else
-    fail "hull3 not executable — skipping chain verification"
+    pass "produced binary is an app-runner (no hull subcommands)"
 fi
 
 # ── Step 14: --verify-sig (runtime signature verification) ─────────
