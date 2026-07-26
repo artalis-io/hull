@@ -20,6 +20,9 @@
 #ifdef HL_BUILD_EMBEDDED_RUNTIME
 #include "embedded_runtime.h"   /* hl_embedded_feature_{lua,js}_a[] */
 #endif
+#ifdef HL_BUILD_EMBEDDED_HTTP
+#include "embedded_http.h"      /* hl_embedded_feature_http_a[] */
+#endif
 
 /* ── Helper: write data to a file ──────────────────────────────────── */
 
@@ -28,7 +31,7 @@
  * defined-but-unused and -Werror=unused-function kills the build, so gate it
  * on the embedded-platform macros. */
 #if defined(HL_BUILD_EMBEDDED) || defined(HL_BUILD_EMBEDDED_MULTIARCH) \
-    || defined(HL_BUILD_EMBEDDED_RUNTIME)
+    || defined(HL_BUILD_EMBEDDED_RUNTIME) || defined(HL_BUILD_EMBEDDED_HTTP)
 static int write_blob(const char *path, const unsigned char *data, size_t len)
 {
     FILE *f = fopen(path, "wb");
@@ -137,6 +140,23 @@ int hl_build_extract_feature_runtime(const char *dir, const char *rt)
     return write_blob(path, data, len);
 #else
     (void)dir; (void)rt;
+    return -1;
+#endif
+}
+
+int hl_build_extract_feature_http(const char *dir)
+{
+#ifdef HL_BUILD_EMBEDDED_HTTP
+    if (!dir)
+        return -1;
+    char path[1024];
+    int n = snprintf(path, sizeof(path), "%s/libhull_feature-http.a", dir);
+    if (n < 0 || (size_t)n >= sizeof(path))
+        return -1;
+    return write_blob(path, hl_embedded_feature_http_a,
+                      hl_embedded_feature_http_a_len);
+#else
+    (void)dir;
     return -1;
 #endif
 }

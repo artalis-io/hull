@@ -39,6 +39,14 @@ int hl_build_extract_platform(const char *dir);
 int hl_build_extract_feature_runtime(const char *dir, const char *rt);
 
 /*
+ * Extract the embedded HTTP core feature archive to `dir/libhull_feature-http.a`
+ * (issue #114). The default distributed native hull embeds it so a full-flavor
+ * app composes HTTP back with no `hull feature install`. Returns 0 on success,
+ * -1 if not embedded / write error.
+ */
+int hl_build_extract_feature_http(const char *dir);
+
+/*
  * Get the list of embedded platform archives (multi-arch builds).
  * Sets *out to the sentinel-terminated array.
  * Returns the count (excluding sentinel), or 0 if not multi-arch.

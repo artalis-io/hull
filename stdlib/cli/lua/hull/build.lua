@@ -1596,6 +1596,35 @@ int main(int argc, char **argv) { return hl_app_run(argc, argv); }
                 feature_libs[#feature_libs + 1] = f
             end
             print("hull build: composed runtime '" .. app_rt .. "'")
+
+            -- Compose the HTTP feature (issue #114, Phase B). The native base is
+            -- HTTP-CORE-LESS: serve.c + the runtime's web-module bindings
+            -- reference the http/ws/smtp/body caps, which now live in
+            -- libhull_feature-http.a. Whole-archive it inside the --start-group
+            -- (the caps reference Keel + base symbols, and the runtime's web
+            -- bindings reference the caps). Composed for every full-flavor native
+            -- app for now; a reduced flavor fails closed earlier, and skipping it
+            -- for a genuinely HTTP-free app is a later refinement.
+            local http_lib = "libhull_feature-http.a"
+            local http_path, http_from = fcompose.resolve_http_lib(tmpdir,
+                                         { hull_dir = rt_hull_dir, plat = rt_plat })
+            if not http_path then
+                if http_from == "cache-verify-failed" then
+                    tool.stderr("hull build: cached HTTP feature lib could not be re-verified\n")
+                else
+                    tool.stderr("hull build: the HTTP feature lib "
+                        .. "(libhull_feature-http.a) was not found "
+                        .. "(normally embedded in hull)\n")
+                    tool.stderr("hint: build it from source with `make feature-http`\n")
+                end
+                tool.rmdir(tmpdir); tool.exit(1)
+            end
+            local http_dest = tmpdir .. "/" .. http_lib
+            if http_path ~= http_dest then tool.copy(http_path, http_dest) end
+            for _, f in ipairs(fcompose.whole_archive_flags(http_dest, is_darwin)) do
+                feature_libs[#feature_libs + 1] = f
+            end
+            print("hull build: composed HTTP feature")
         end
     end
 

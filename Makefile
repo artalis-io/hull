@@ -2534,16 +2534,25 @@ check-hardening: $(BUILDDIR)/hull
 # native-only static archives, so a fat-APE app cannot compose one - the
 # cosmo base embeds both runtimes (full, no slim). The hull toolchain link
 # (below) stays dual on every target.
+# The runtime-agnostic HTTP core caps (cap/http + async, ws, smtp, body). Defined
+# here (before PLATFORM_OBJS) so the native app base can filter them out - they
+# move into libhull_feature-http.a (issue #114, Phase B) and are composed back at
+# `hull build`. The feature-http archive target below reuses this list.
+FEATURE_HTTP_OBJS := $(BUILDDIR)/cap_http.o $(BUILDDIR)/cap_http_async.o \
+                     $(BUILDDIR)/cap_ws.o $(BUILDDIR)/cap_smtp.o $(BUILDDIR)/cap_body.o
 ifdef COSMO
   PLATFORM_RT_OBJS       := $(RT_OBJS)
   PLATFORM_MANIFEST_OBJ  := $(MANIFEST_OBJ)
   PLATFORM_RUNTIME_EXTRA := $(STDLIB_RT_REGISTRY_OBJS) $(STDLIB_TOOLCHAIN_REGISTRY_O) $(RUNTIME_TOOLCHAIN_REGISTRY_O) $(VEND_OBJS)
+  PLATFORM_CAP_OBJS      := $(CAP_OBJS)                 # cosmo stays full (features native-only)
 else
   PLATFORM_RT_OBJS       := $(RUNTIME_CACHE_COMMON_OBJ)  # runtime-agnostic; VMs dropped
   PLATFORM_MANIFEST_OBJ  := $(BUILDDIR)/manifest.o       # runtime-agnostic
   PLATFORM_RUNTIME_EXTRA :=
+  # HTTP core caps move to libhull_feature-http.a; the app composes it back.
+  PLATFORM_CAP_OBJS      := $(filter-out $(FEATURE_HTTP_OBJS),$(CAP_OBJS))
 endif
-PLATFORM_OBJS := $(CAP_OBJS) $(CAP_TOOL_OBJ) $(CAP_TEST_OBJ) $(CMD_OBJS) $(PLATFORM_RT_OBJS) $(ALLOC_OBJ) $(ASYNC_OBJ) $(COMPRESS_OBJ) $(MINIZ_OBJ) $(WORKER_DB_OBJ) $(WORKER_WASM_OBJ) $(WORKER_GPU_OBJ) $(PLATFORM_MANIFEST_OBJ) $(MODULE_OBJ) $(ASYNC_BACKEND_OBJS) $(NET_BACKEND_OBJS) $(SANDBOX_OBJ) $(SANDBOX_TOOL_OBJ) $(SIG_OBJ) $(RELEASE_OBJ) $(RELEASE_IO_OBJ) $(TOOLS_INSTALL_OBJ) $(PLATFORM_SIG_OBJ) $(EMBEDDED_PLATFORM_SIG_OBJ) $(TEST_RUNNER_OBJ) $(RUNTIME_FACTORY_OBJ) $(STATIC_OBJ) $(MIGRATE_OBJ) $(VFS_OBJ) $(PATH_NORM_OBJ) $(THREAD_AFFINITY_OBJ) $(CACHE_DIR_OBJ) $(BLOB_STORE_OBJ) $(CACHE_REGISTRY_OBJ) $(CACERT_OBJ) $(TLS_CLIENT_OBJ) $(CSP_OBJ) $(SBOM_OBJ) $(STDLIB_FEATURE_OBJ) $(APP_CONTEXT_OBJ) $(APP_CONTEXT_RT_OBJ) $(AGENT_LIB_OBJ) $(AGENT_API_OBJ) $(MAIN_OBJ) $(SERVE_OBJ) $(APP_RUNNER_OBJ) $(TOOL_OBJ) $(BUILD_ASSET_STUB_OBJ) $(STDLIB_REGISTRY_O) $(PLATFORM_RUNTIME_EXTRA) $(WAMR_OBJS) $(MBEDTLS_OBJS) \
+PLATFORM_OBJS := $(PLATFORM_CAP_OBJS) $(CAP_TOOL_OBJ) $(CAP_TEST_OBJ) $(CMD_OBJS) $(PLATFORM_RT_OBJS) $(ALLOC_OBJ) $(ASYNC_OBJ) $(COMPRESS_OBJ) $(MINIZ_OBJ) $(WORKER_DB_OBJ) $(WORKER_WASM_OBJ) $(WORKER_GPU_OBJ) $(PLATFORM_MANIFEST_OBJ) $(MODULE_OBJ) $(ASYNC_BACKEND_OBJS) $(NET_BACKEND_OBJS) $(SANDBOX_OBJ) $(SANDBOX_TOOL_OBJ) $(SIG_OBJ) $(RELEASE_OBJ) $(RELEASE_IO_OBJ) $(TOOLS_INSTALL_OBJ) $(PLATFORM_SIG_OBJ) $(EMBEDDED_PLATFORM_SIG_OBJ) $(TEST_RUNNER_OBJ) $(RUNTIME_FACTORY_OBJ) $(STATIC_OBJ) $(MIGRATE_OBJ) $(VFS_OBJ) $(PATH_NORM_OBJ) $(THREAD_AFFINITY_OBJ) $(CACHE_DIR_OBJ) $(BLOB_STORE_OBJ) $(CACHE_REGISTRY_OBJ) $(CACERT_OBJ) $(TLS_CLIENT_OBJ) $(CSP_OBJ) $(SBOM_OBJ) $(STDLIB_FEATURE_OBJ) $(APP_CONTEXT_OBJ) $(APP_CONTEXT_RT_OBJ) $(AGENT_LIB_OBJ) $(AGENT_API_OBJ) $(MAIN_OBJ) $(SERVE_OBJ) $(APP_RUNNER_OBJ) $(TOOL_OBJ) $(BUILD_ASSET_STUB_OBJ) $(STDLIB_REGISTRY_O) $(PLATFORM_RUNTIME_EXTRA) $(WAMR_OBJS) $(MBEDTLS_OBJS) \
 	$(SQLITE_OBJ) $(LOG_OBJ) $(LOG_LOCK_OBJ) $(SH_ARENA_OBJ) $(SH_JSON_OBJ) $(TWEETNACL_OBJ) $(STB_OBJ) $(PLEDGE_OBJS) \
 	$(COMPILER_OBJ) $(COMPILER_TCC_OBJ)
 
@@ -2767,8 +2776,8 @@ $(BUILDDIR)/libhull_feature-tui.a: $(BUILDDIR)/cap_tui.o $(BUILDDIR)/cap_tui_inp
 # ws, bindings_response, http_register, mod_http_*/ws_*/sse/smtp/request) are a
 # separate per-runtime archive (Phase C). Keel is linked separately (the app
 # still pulls libkeel.a), not bundled here.
-FEATURE_HTTP_OBJS := $(BUILDDIR)/cap_http.o $(BUILDDIR)/cap_http_async.o \
-                     $(BUILDDIR)/cap_ws.o $(BUILDDIR)/cap_smtp.o $(BUILDDIR)/cap_body.o
+# (FEATURE_HTTP_OBJS is defined earlier, above PLATFORM_OBJS, so the native app
+# base filters these caps out; the archive below and the base share one list.)
 
 feature-http: $(BUILDDIR)/libhull_feature-http.a
 .PHONY: feature-http
@@ -2947,8 +2956,17 @@ $(EMBEDDED_RUNTIME_H): $(BUILDDIR)/libhull_feature-lua.a $(BUILDDIR)/libhull_fea
 	@xxd -i $(BUILDDIR)/libhull_feature-lua.a | sed 's/build_libhull_feature_lua_a/hl_embedded_feature_lua_a/g' | $(XXD_CONST_PIPE) >> $@
 	@xxd -i $(BUILDDIR)/libhull_feature-js.a  | sed 's/build_libhull_feature_js_a/hl_embedded_feature_js_a/g'   | $(XXD_CONST_PIPE) >> $@
 
-CFLAGS += -DHL_BUILD_EMBEDDED -DHL_BUILD_EMBEDDED_RUNTIME
-$(BUILD_ASSET_OBJ): $(EMBEDDED_PLATFORM_H) $(EMBEDDED_TEMPLATES_H) $(EMBEDDED_RUNTIME_H)
+# Embed the HTTP core feature archive too (issue #114). The native base is
+# HTTP-core-less; the default distributed hull composes this back for every
+# full-flavor app with no `hull feature install`. (Cosmo keeps HTTP in the base,
+# so this native single-arch embed path is the only one that needs it.)
+EMBEDDED_HTTP_H := $(BUILDDIR)/embedded_http.h
+$(EMBEDDED_HTTP_H): $(BUILDDIR)/libhull_feature-http.a | $(BUILDDIR)
+	@echo "/* Auto-generated - do not edit */" > $@
+	@xxd -i $(BUILDDIR)/libhull_feature-http.a | sed 's/build_libhull_feature_http_a/hl_embedded_feature_http_a/g' | $(XXD_CONST_PIPE) >> $@
+
+CFLAGS += -DHL_BUILD_EMBEDDED -DHL_BUILD_EMBEDDED_RUNTIME -DHL_BUILD_EMBEDDED_HTTP
+$(BUILD_ASSET_OBJ): $(EMBEDDED_PLATFORM_H) $(EMBEDDED_TEMPLATES_H) $(EMBEDDED_RUNTIME_H) $(EMBEDDED_HTTP_H)
 endif
 
 # Hull binary
