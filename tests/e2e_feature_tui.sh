@@ -54,69 +54,41 @@ app.main(function()
 end)
 LUA
 
-echo "=== hull build --with=tui ==="
+# ── tui composition is DEFERRED to issue #114 (HTTP as a composable feature) ──
+#
+# The runtime-featurify epic makes the native base runtime-less. The tui feature
+# archive whole-archives BOTH runtime bridges (lua_rt_mod_tui.o + js_mod_tui.o);
+# composed into a single-runtime app, the wrong-runtime bridge's refs are
+# undefined at link. So `hull build --with=tui` (and the auto-inferred path) fail
+# CLOSED with a pointer to https://github.com/artalis-io/hull/issues/114, whose
+# per-runtime-bridge seam is what makes tui composition link again. The archive
+# itself still builds (asserted above). Restore the compose + boot + auto-infer +
+# not-installed assertions when #114 lands.
+
+echo "=== --with=tui fails closed (deferred to #114) ==="
 BUILD_OUT=$("$HULL" build --compiler=system --with=tui --no-verify-platform -o "$APP/bin" "$APP" 2>&1) || true
-echo "$BUILD_OUT"
-echo "$BUILD_OUT" | grep -q "composed feature 'tui'" || { echo "FAIL: feature not composed"; exit 1; }
-test -x "$APP/bin" || { echo "FAIL: no composed binary produced"; exit 1; }
+echo "$BUILD_OUT" | grep -q "isn't supported yet with the composed-runtime model" \
+    || { echo "$BUILD_OUT"; echo "FAIL: --with=tui should fail closed until #114"; exit 1; }
+echo "$BUILD_OUT" | grep -q "issues/114" \
+    || { echo "FAIL: tui-deferred error lacks the #114 pointer"; exit 1; }
+test -x "$APP/bin" && { echo "FAIL: produced a binary despite the deferred guard"; exit 1; }
+echo "ok  --with=tui fails closed with the #114 pointer"
 
-echo "=== boot the composed binary ==="
-RUN_OUT=$("$APP/bin" 2>&1) || true
-echo "$RUN_OUT"
-echo "$RUN_OUT" | grep -q "TUI FEATURE APP OK" || {
-    echo "--- boot failed; diagnostics ---"
-    file "$APP/bin" 2>/dev/null || true
-    echo "FAIL: composed tui binary did not boot"; exit 1
-}
-echo "ok  --with=tui composed + booted"
-
-echo "=== auto-compose: hull build (NO --with=tui) on a hull/tui app ==="
-# TUI migrated from a base-builtin to a composable feature, so a stock hull must
-# still build a hull/tui app transparently: build.lua infers --with=tui from the
-# manifest's hull/tui declaration (skipped only when the base already has TUI, ie
-# a monolithic HL_ENABLE_TUI build or cosmo). This is the primary UX; --with=tui
-# above is the explicit superset.
+echo "=== auto-inferred tui (hull/tui app, no --with) also fails closed ==="
 AUTO_OUT=$("$HULL" build --compiler=system --no-verify-platform -o "$APP/bin_auto" "$APP" 2>&1) || true
-echo "$AUTO_OUT" | grep -q "composing feature 'tui'" \
-    || { echo "$AUTO_OUT"; echo "FAIL: did not infer tui from hull/tui declaration"; exit 1; }
-test -x "$APP/bin_auto" || { echo "FAIL: no auto-composed binary"; exit 1; }
-"$APP/bin_auto" 2>&1 | grep -q "TUI FEATURE APP OK" \
-    || { echo "FAIL: auto-composed tui binary did not boot"; exit 1; }
-echo "ok  auto-composed (no --with=tui) + booted"
+echo "$AUTO_OUT" | grep -q "isn't supported yet with the composed-runtime model" \
+    || { echo "$AUTO_OUT"; echo "FAIL: auto-inferred tui should fail closed until #114"; exit 1; }
+test -x "$APP/bin_auto" && { echo "FAIL: produced an auto binary despite the deferred guard"; exit 1; }
+echo "ok  auto-inferred tui fails closed"
 
-echo "=== negative: a plain app must NOT compose tui ==="
+echo "=== negative: a plain (non-tui) app still builds + runs ==="
 printf 'app.manifest({modules={}})\napp.main(function() print("PLAIN OK") return 0 end)\n' \
     > "$PLAIN/app.lua"
 PLAIN_OUT=$("$HULL" build --no-verify-platform -o "$PLAIN/bin" "$PLAIN" 2>&1) || true
 if echo "$PLAIN_OUT" | grep -q "composed feature"; then
     echo "$PLAIN_OUT"; echo "FAIL: composed a feature for a plain app"; exit 1
 fi
-"$PLAIN/bin" 2>&1 | grep -q "PLAIN OK" || { echo "FAIL: plain app did not run"; exit 1; }
-echo "ok  plain app stayed TUI-free"
+"$PLAIN/bin" 2>&1 | grep -q "PLAIN OK" || { echo "$PLAIN_OUT"; echo "FAIL: plain app did not run"; exit 1; }
+echo "ok  plain app builds + runs (tui-free)"
 
-echo "=== not-installed: a required hull/tui with no feature archive errors clearly ==="
-# Auto-inference adds --with=tui for a declared hull/tui, but if the feature
-# archive is neither local nor installed, the build must fail with a
-# manifest-framed message (not a bare --with resolution miss) and produce no
-# broken binary. Isolate: stage the hull where no archive sits beside it, run
-# from an empty CWD (so the relative build/ + ../build/ search paths miss), and
-# point HOME at an empty dir (no ~/.hull/feature).
-STAGE=$(mktemp -d); FAKEHOME=$(mktemp -d); NOTINST=$(mktemp -d)
-trap 'rm -rf "$APP" "$PLAIN" "$STAGE" "$FAKEHOME" "$NOTINST" /tmp/hull_base_tui_e2e' EXIT
-cp "$HULL" "$STAGE/hull"
-cp "$APP/app.lua" "$NOTINST/app.lua"   # same required hull/tui app
-NI_OUT=$(cd "$STAGE" && HOME="$FAKEHOME" "$STAGE/hull" build --compiler=system \
-    --no-verify-platform -o "$NOTINST/bin" "$NOTINST" 2>&1) || true
-echo "$NI_OUT" | grep -q "declares hull/tui but the 'tui' feature is not installed" \
-    || { echo "$NI_OUT"; echo "FAIL: missing manifest-framed not-installed error"; exit 1; }
-echo "$NI_OUT" | grep -q "hull feature install tui" \
-    || { echo "FAIL: not-installed error lacks install hint"; exit 1; }
-test -x "$NOTINST/bin" && { echo "FAIL: produced a binary despite missing feature"; exit 1; }
-echo "ok  not-installed required hull/tui failed clearly, no broken binary"
-
-# NOTE: the "base build (no feature) rejects a tui app at load" case is covered
-# deterministically by the module_resolver unit tests
-# (tui_rejected_when_compiled_out). The not-installed build-time case above is
-# the buildable-but-unresolved variant.
-
-echo "PASS: TUI feature composed into an app binary; base stays TUI-free"
+echo "PASS: TUI feature archive builds; composition deferred to #114"

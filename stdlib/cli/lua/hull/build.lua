@@ -1398,6 +1398,20 @@ int main(int argc, char **argv) { return hl_app_run(argc, argv); }
                             .. "(not available for cosmo builds)\n")
                 tool.rmdir(tmpdir); tool.exit(1)
             end
+            -- tui bundles BOTH runtime bridges (lua_rt_mod_tui.o + js_mod_tui.o)
+            -- in one whole-archived feature; composed into a single-runtime app on
+            -- the runtime-less native base, the wrong-runtime bridge's refs are
+            -- undefined at link. The HTTP-as-a-feature seam (per-runtime bridge
+            -- composition) is what fixes it; fail closed with a clear message until
+            -- then. See https://github.com/artalis-io/hull/issues/114.
+            if fname == "tui" then
+                tool.stderr("hull build: the 'tui' feature isn't supported yet with the "
+                    .. "composed-runtime model (a tui app cannot link on the runtime-less "
+                    .. "native base).\n")
+                tool.stderr("hint: tracked in https://github.com/artalis-io/hull/issues/114 "
+                    .. "(HTTP as a composable feature).\n")
+                tool.rmdir(tmpdir); tool.exit(1)
+            end
             if spec.cxx then needs_cxx = true end
             if spec.base_group then needs_base_group = true end
 
@@ -1524,6 +1538,21 @@ int main(int argc, char **argv) { return hl_app_run(argc, argv); }
         -- archive (features are native-only). Native has a runtime-less base and
         -- composes exactly one runtime here.
         if app_rt and not is_cosmo then
+            -- Reduced flavors (server-only/client-only/pure-compute) drop
+            -- subsystems (HTTP caps + Keel) that the full-config runtime archive's
+            -- web-module bindings reference, so composing a runtime onto a reduced
+            -- base fails to link (~52 undefined symbols). The HTTP-as-a-feature
+            -- seam (issue #114) is what lets a reduced flavor omit those bindings;
+            -- fail closed with a clear message until then.
+            if opts.flavor and opts.flavor ~= "full" then
+                tool.stderr("hull build: --flavor=" .. opts.flavor .. " isn't supported "
+                    .. "yet with the composed-runtime model (a reduced flavor drops "
+                    .. "subsystems the runtime's bindings reference).\n")
+                tool.stderr("hint: use the default (full) flavor for now; tracked in "
+                    .. "https://github.com/artalis-io/hull/issues/114 "
+                    .. "(HTTP as a composable feature).\n")
+                tool.rmdir(tmpdir); tool.exit(1)
+            end
             write_file(tmpdir .. "/app_feature_registry.c",
                        fcompose.gen_app_registry_c(app_rt))
             if not tool.compiler.compile(tmpdir .. "/app_feature_registry.c",

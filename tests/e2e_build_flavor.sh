@@ -53,34 +53,31 @@ fi
 echo "$out" | grep -q "HL_ENABLE_HTTP_SERVER" || fail "expected HTTP_SERVER rejection: $out"
 pass "forbidden module (hull/http-server) rejected at build time"
 
-# ── 3. valid pure-compute app builds, runs, returns app.main exit ──────
-"$HULL" build --flavor=pure-compute "$WORK/pc" -o "$WORK/pc/app" >/dev/null 2>&1 \
-    || fail "valid pure-compute build failed"
-[ -x "$WORK/pc/app" ] || fail "pure-compute binary not produced"
-set +e
-"$WORK/pc/app" >/dev/null 2>&1
-rc=$?
-set -e
-[ "$rc" -eq 7 ] || fail "expected app.main exit 7, got $rc"
-pass "pure-compute app builds, runs, returns exit 7"
-
-# ── 4. no mbedTLS hashing symbols in the pure-compute binary ───────────
-if command -v nm >/dev/null 2>&1; then
-    n=$(nm "$WORK/pc/app" 2>/dev/null | grep -cE 'mbedtls_sha|mbedtls_md_hmac' || true)
-    [ "$n" -eq 0 ] || fail "pure-compute binary has $n mbedTLS hashing symbols"
-    pass "zero mbedTLS hashing symbols"
+# ── 3. reduced-flavor x runtime is deferred (fails closed, issue #114) ──
+#
+# The runtime-featurify epic makes the native base runtime-less; the full-config
+# runtime archive's web bindings reference subsystems a reduced flavor drops, so
+# composing a runtime onto a reduced-flavor base cannot link yet. `hull build`
+# fails CLOSED with a clear pointer to the HTTP-as-a-feature epic rather than
+# emitting a raw linker error. Re-enable the build+run assertions (exit 7, zero
+# mbedTLS hashing symbols) when https://github.com/artalis-io/hull/issues/114
+# lands. The flavor VALIDATION (parts 1-2) and auto-SELECTION (below) still work.
+if out=$("$HULL" build --flavor=pure-compute "$WORK/pc" -o "$WORK/pc/app" 2>&1); then
+    fail "reduced-flavor x runtime should fail closed until #114"
 fi
+echo "$out" | grep -q "isn't supported yet with the composed-runtime model" \
+    || fail "expected the deferred-flavor message: $out"
+echo "$out" | grep -q "issues/114" || fail "expected the #114 tracking pointer: $out"
+pass "reduced-flavor x runtime fails closed with the #114 pointer"
 
-# ── 5. --flavor=auto infers the minimal flavor from the manifest ───────
-out=$("$HULL" build --flavor=auto "$WORK/pc" -o "$WORK/pc/auto" 2>&1) \
-    || fail "auto build failed: $out"
+# ── 4. --flavor=auto still infers the minimal flavor from the manifest ──
+# Selection logic is independent of the compose gap: auto still picks
+# pure-compute for an app.main app; the build then fails closed as in part 3.
+out=$("$HULL" build --flavor=auto "$WORK/pc" -o "$WORK/pc/auto" 2>&1) || true
 echo "$out" | grep -q "auto selected 'pure-compute'" \
     || fail "auto should select pure-compute for an app.main app: $out"
-set +e
-"$WORK/pc/auto" >/dev/null 2>&1
-rc=$?
-set -e
-[ "$rc" -eq 7 ] || fail "auto pure-compute binary should exit 7, got $rc"
-pass "--flavor=auto -> pure-compute for an app.main app"
+echo "$out" | grep -q "isn't supported yet with the composed-runtime model" \
+    || fail "auto pure-compute build should fail closed until #114: $out"
+pass "--flavor=auto -> pure-compute selection (build deferred per #114)"
 
 echo "PASS: e2e_build_flavor"
