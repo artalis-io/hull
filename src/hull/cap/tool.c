@@ -190,6 +190,12 @@ int hl_tool_validate_args(const char *const argv[])
                  * references base symbols (tls_client) in the platform lib. Only
                  * affects archive resolution order -- no code execution. */
                 "--start-group", "--end-group",
+                /* Suppress the .eh_frame_hdr, emitted by the tcc backend's
+                 * delegated link (compiler_tcc.c): tcc's .eh_frame FDEs make GNU
+                 * ld fail building the header once the composed runtime archive
+                 * is whole-archived. Only drops an unwind-index section from an
+                 * exception-free C link -- no code execution. */
+                "--no-eh-frame-hdr",
                 NULL
             };
             const char *wl_arg = a + 4;
