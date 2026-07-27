@@ -83,6 +83,17 @@ static int l_tool_modules_resolve(lua_State *L)
     }
     lua_pop(L, 1);
 
+    /* tui / gpu boolean gates: the resolver rejects hull/tui (resp. hull/gpu)
+     * unless the manifest sets tui = true (resp. gpu = true), so a resolve that
+     * omits these mis-reports a tui/gpu app as unresolvable. Copy them through
+     * (matches the tui/gpu manifest gate in module_resolver.c). */
+    lua_getfield(L, 1, "tui");
+    m.tui = lua_toboolean(L, -1);
+    lua_pop(L, 1);
+    lua_getfield(L, 1, "gpu");
+    m.gpu = lua_toboolean(L, -1);
+    lua_pop(L, 1);
+
     /* modules — copy names so the resolver sees stable pointers. */
     char *owned_names[HL_MANIFEST_MAX_MODULES] = {0};
     int owned_count = 0;
