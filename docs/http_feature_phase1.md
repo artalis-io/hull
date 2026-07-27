@@ -233,3 +233,34 @@ requires decoupling `serve.o` from Keel (a base→Keel Kind-B edge) — the same
 work that unblocks the reduced-flavor × runtime compose. So C2 (skip the http
 core + web bindings) and that serve/Keel decoupling belong together, tracked
 into Phase D, rather than C2 being a quick gate on top of C1.
+
+### server-only / client-only x runtime — deliberately NOT split (decision)
+
+These two flavors stay fail-closed under the composed-runtime model, and that is
+a decision, not a gap. Splitting `libhull_feature-http.a` (and the per-runtime
+web bindings, and `http_register.c`) into server and client halves to support
+them is a large refactor that is not worth it:
+
+- **No size win.** server-only and client-only are both ~6.5 MB - the same as
+  full - because Keel + mbedTLS stay linked for either half (CLAUDE.md flavor
+  table). Only pure-compute (~5.8 MB) drops them, and pure-compute x runtime
+  already works (Phase D slice 1). So the split would buy only an *authority*
+  property ("this binary provably cannot make outbound calls" / "has no
+  listener"), not a smaller binary.
+- **The benefit is undercut by serve.o.** `serve.o` is base-resident and
+  references `kl_server_*`, so a client-only app still pulls Keel's server side
+  unless serve.o is *also* decoupled from Keel - a second large refactor on top
+  of the caps/bindings split.
+- **The taxonomy has flavors retiring into presets over the feature** (a flavor
+  "is a preset over" the feature; features_and_flavors.md). Investing in a
+  server/client split of the HTTP feature to prop up two subtractive flavors
+  runs against that direction.
+
+If a future need makes it worthwhile, the taxonomy-aligned shape is NOT to keep
+server-only/client-only as flavors but to split HTTP into two composable
+sub-features (`http-server` / `http-client`) selected by the app's declared
+modules (`needs_http` -> `needs_http_server` / `needs_http_client`), so a CLI
+tool that only does `http.fetch` composes just the client half. That also needs
+the serve.o/Keel decoupling to pay off. Tracked as a standalone follow-up; the
+core #114 goal (reduced-flavor x runtime via pure-compute, tui x runtime,
+HTTP-free apps drop the HTTP surface) is met without it.
