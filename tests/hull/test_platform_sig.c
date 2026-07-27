@@ -277,4 +277,53 @@ UTEST(extract_for_arch, no_prefix_collision) {
     ASSERT_EQ(hl_platform_sig_extract_for_arch(manifest, mlen, "linux-x86", hex), -1);
 }
 
+/* ── multi-asset manifest (issue #114 composed-feature signing) ─────── */
+
+/* The name column now also carries asset names (with a `.<arch>.a` suffix, i.e.
+ * dots), not just bare arches. Build a manifest mixing both, sign, verify, and
+ * extract every entry by its exact name. */
+UTEST(platform_sig, multi_asset_roundtrip) {
+    HlPlatformArchHash e[] = {
+        { "linux-x86_64",                          HASH_LX86 },  /* platform lib, bare arch */
+        { "libhull_feature-lua.linux-x86_64.a",    HASH_LARM },  /* embedded runtime archive */
+        { "libhull_feature-http.linux-x86_64.a",   HASH_DARM },
+        { "libhull_feature-http-lua.linux-x86_64.a", HASH_CX86 },
+        { "libhull_feature-tui-lua.linux-x86_64.a",  HASH_CARM },
+    };
+    char manifest[1024];
+    size_t mlen = 0;
+    ASSERT_EQ(hl_platform_sig_build_manifest(e, 5, manifest, sizeof(manifest), &mlen), 0);
+
+    uint8_t pk[32], sk[64];
+    ASSERT_EQ(hl_cap_crypto_ed25519_keypair(pk, sk), 0);
+    char sig_hex[129];
+    ASSERT_EQ(hl_platform_sig_sign(manifest, mlen, sk, sig_hex, sizeof(sig_hex)), 0);
+    ASSERT_EQ(hl_platform_sig_verify(manifest, mlen, sig_hex, 128, pk), 0);
+
+    /* Every entry - bare arch and dotted asset alike - is retrievable by name. */
+    char hex[65];
+    ASSERT_EQ(hl_platform_sig_extract_for_arch(manifest, mlen, "linux-x86_64", hex), 0);
+    ASSERT_STREQ(hex, HASH_LX86);
+    ASSERT_EQ(hl_platform_sig_extract_for_arch(manifest, mlen,
+              "libhull_feature-http-lua.linux-x86_64.a", hex), 0);
+    ASSERT_STREQ(hex, HASH_CX86);
+    /* A partial name must not collide with the full asset entry. */
+    ASSERT_EQ(hl_platform_sig_extract_for_arch(manifest, mlen,
+              "libhull_feature-http", hex), -1);
+}
+
+/* A dotted asset name is accepted by build_manifest (regression for the
+ * name-validation relaxation); a name with whitespace or a slash is not. */
+UTEST(platform_sig, accepts_dotted_asset_name) {
+    HlPlatformArchHash ok[] = {{ "libhull_feature-tui-js.darwin-arm64.a", HASH_DARM }};
+    char buf[256];
+    size_t n = 0;
+    ASSERT_EQ(hl_platform_sig_build_manifest(ok, 1, buf, sizeof(buf), &n), 0);
+
+    HlPlatformArchHash bad_space[] = {{ "libhull feature.a", HASH_DARM }};
+    ASSERT_EQ(hl_platform_sig_build_manifest(bad_space, 1, buf, sizeof(buf), &n), -1);
+    HlPlatformArchHash bad_slash[] = {{ "lib/hull.a", HASH_DARM }};
+    ASSERT_EQ(hl_platform_sig_build_manifest(bad_slash, 1, buf, sizeof(buf), &n), -1);
+}
+
 UTEST_MAIN()
