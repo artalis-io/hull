@@ -1956,6 +1956,13 @@ ENTRY_OBJ      := $(BUILDDIR)/entry.o
 # HTTP_SERVER is off (the whole body is guarded).
 HTTP_WEAKSTUB_OBJ := $(BUILDDIR)/http_weakstub.o
 
+# WASM-as-a-feature seam (docs/wasm_feature.md, Phase 0). Weak, fail-closed
+# defaults for the eleven runtime-agnostic wasm cap symbols base objects
+# (db_udf / mod_buffer / mod_image / mod_gpu / app_context / serve) reference, so
+# a future compute-less base still links. Additive + dormant today: the strong
+# cap_wasm* defs win while WAMR is still compiled in (the base flip is Phase 1).
+WASM_WEAKSTUB_OBJ := $(BUILDDIR)/wasm_weakstub.o
+
 # ── Stdlib embedding (xxd) ──────────────────────────────────────────
 #
 # Two Lua source trees feed the embedded stdlib registry:
@@ -2576,7 +2583,7 @@ else
   # HTTP core caps move to libhull_feature-http.a; the app composes it back.
   PLATFORM_CAP_OBJS      := $(filter-out $(FEATURE_HTTP_OBJS),$(CAP_OBJS))
 endif
-PLATFORM_OBJS := $(PLATFORM_CAP_OBJS) $(CAP_TOOL_OBJ) $(CAP_TEST_OBJ) $(CMD_OBJS) $(PLATFORM_RT_OBJS) $(ALLOC_OBJ) $(ASYNC_OBJ) $(COMPRESS_OBJ) $(MINIZ_OBJ) $(WORKER_DB_OBJ) $(WORKER_WASM_OBJ) $(WORKER_GPU_OBJ) $(PLATFORM_MANIFEST_OBJ) $(MODULE_OBJ) $(ASYNC_BACKEND_OBJS) $(NET_BACKEND_OBJS) $(SANDBOX_OBJ) $(SANDBOX_TOOL_OBJ) $(SIG_OBJ) $(RELEASE_OBJ) $(RELEASE_IO_OBJ) $(TOOLS_INSTALL_OBJ) $(PLATFORM_SIG_OBJ) $(EMBEDDED_PLATFORM_SIG_OBJ) $(TEST_RUNNER_OBJ) $(RUNTIME_FACTORY_OBJ) $(STATIC_OBJ) $(MIGRATE_OBJ) $(VFS_OBJ) $(PATH_NORM_OBJ) $(THREAD_AFFINITY_OBJ) $(CACHE_DIR_OBJ) $(BLOB_STORE_OBJ) $(CACHE_REGISTRY_OBJ) $(CACERT_OBJ) $(TLS_CLIENT_OBJ) $(CSP_OBJ) $(SBOM_OBJ) $(STDLIB_FEATURE_OBJ) $(APP_CONTEXT_OBJ) $(APP_CONTEXT_RT_OBJ) $(AGENT_LIB_OBJ) $(AGENT_API_OBJ) $(MAIN_OBJ) $(SERVE_OBJ) $(APP_RUNNER_OBJ) $(HTTP_WEAKSTUB_OBJ) $(TOOL_OBJ) $(BUILD_ASSET_STUB_OBJ) $(STDLIB_REGISTRY_O) $(PLATFORM_RUNTIME_EXTRA) $(WAMR_OBJS) $(MBEDTLS_OBJS) \
+PLATFORM_OBJS := $(PLATFORM_CAP_OBJS) $(CAP_TOOL_OBJ) $(CAP_TEST_OBJ) $(CMD_OBJS) $(PLATFORM_RT_OBJS) $(ALLOC_OBJ) $(ASYNC_OBJ) $(COMPRESS_OBJ) $(MINIZ_OBJ) $(WORKER_DB_OBJ) $(WORKER_WASM_OBJ) $(WORKER_GPU_OBJ) $(PLATFORM_MANIFEST_OBJ) $(MODULE_OBJ) $(ASYNC_BACKEND_OBJS) $(NET_BACKEND_OBJS) $(SANDBOX_OBJ) $(SANDBOX_TOOL_OBJ) $(SIG_OBJ) $(RELEASE_OBJ) $(RELEASE_IO_OBJ) $(TOOLS_INSTALL_OBJ) $(PLATFORM_SIG_OBJ) $(EMBEDDED_PLATFORM_SIG_OBJ) $(TEST_RUNNER_OBJ) $(RUNTIME_FACTORY_OBJ) $(STATIC_OBJ) $(MIGRATE_OBJ) $(VFS_OBJ) $(PATH_NORM_OBJ) $(THREAD_AFFINITY_OBJ) $(CACHE_DIR_OBJ) $(BLOB_STORE_OBJ) $(CACHE_REGISTRY_OBJ) $(CACERT_OBJ) $(TLS_CLIENT_OBJ) $(CSP_OBJ) $(SBOM_OBJ) $(STDLIB_FEATURE_OBJ) $(APP_CONTEXT_OBJ) $(APP_CONTEXT_RT_OBJ) $(AGENT_LIB_OBJ) $(AGENT_API_OBJ) $(MAIN_OBJ) $(SERVE_OBJ) $(APP_RUNNER_OBJ) $(HTTP_WEAKSTUB_OBJ) $(WASM_WEAKSTUB_OBJ) $(TOOL_OBJ) $(BUILD_ASSET_STUB_OBJ) $(STDLIB_REGISTRY_O) $(PLATFORM_RUNTIME_EXTRA) $(WAMR_OBJS) $(MBEDTLS_OBJS) \
 	$(SQLITE_OBJ) $(LOG_OBJ) $(LOG_LOCK_OBJ) $(SH_ARENA_OBJ) $(SH_JSON_OBJ) $(TWEETNACL_OBJ) $(STB_OBJ) $(PLEDGE_OBJS) \
 	$(COMPILER_OBJ) $(COMPILER_TCC_OBJ)
 
@@ -3495,6 +3502,9 @@ $(APP_RUNNER_OBJ): $(SRCDIR)/hull/app_runner.c | $(BUILDDIR)
 
 # Weak no-op defaults for the per-runtime web bindings (issue #114, Phase C).
 $(HTTP_WEAKSTUB_OBJ): $(SRCDIR)/hull/http_weakstub.c | $(BUILDDIR)
+	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
+
+$(WASM_WEAKSTUB_OBJ): $(SRCDIR)/hull/wasm_weakstub.c | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
 
 # Serve-cli (CLI counterpart, used when HL_ENABLE_HTTP_SERVER=0)
