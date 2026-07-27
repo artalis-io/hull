@@ -439,10 +439,14 @@ embedded platform lib, not to a composed feature.
 
 Follow-up: extend the platform-sig to cover composed feature archives so a
 composed binary carries the same two-layer guarantee as a plain
-embedded-platform build. Design open: a new `package.sig` layer over the
-composed set vs. a per-feature signature cross-checked at compose (like the
-platform layer). See docs/security.md "Two signature layers, and the flavor
-asymmetry."
+embedded-platform build. **Designed** in
+[composed_feature_signing.md](composed_feature_signing.md) (2026-07-27): a
+`package.sig.gethull.composed` block attests EVERY composed archive (embedded
+runtime/http/web/tui bridges via an extended platform-key manifest; external
+`--with`/`--flavor` libs via the release-key `hull.sha256`), fatally re-verified
+under `--verify-sig`. Reuses the existing sig codec + verify machinery + trust
+roots (no new key). Not yet implemented. See also docs/security.md "Two
+signature layers, and the flavor asymmetry."
 
 ### 0.5 Composed-app SBOM must enumerate `--with` features
 
