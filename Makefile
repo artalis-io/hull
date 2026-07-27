@@ -2880,6 +2880,22 @@ $(BUILDDIR)/libhull_feature-http-js.a: $(FEATURE_HTTP_JS_OBJS) | $(BUILDDIR)
 	$(AR) rcs $@ $(FEATURE_HTTP_JS_OBJS)
 	@echo "built $@ ($$(du -h $@ | cut -f1))"
 
+# Rebuild every feature archive when the Makefile changes. The archives are
+# `ar rcs` over an object LIST (FEATURE_*_OBJS / the tui trio), and those lists
+# live here in the Makefile. `ar rcs` (with the recipe's `rm`) refreshes an
+# archive only when the recipe RUNS, which make triggers only when a member .o
+# is newer than the archive - NOT when the list itself changes (a member moved
+# between archives, or a source added to a filter, without touching any .o). A
+# stale member would then linger and surface as a `duplicate symbol` at compose.
+# The lists change only via a Makefile edit, so depending on the Makefile forces
+# the (cheap) rebuild exactly then. CI clean-builds are unaffected.
+FEATURE_ARCHIVES := $(BUILDDIR)/libhull_feature-lua.a $(BUILDDIR)/libhull_feature-js.a \
+                    $(BUILDDIR)/libhull_feature-http.a \
+                    $(BUILDDIR)/libhull_feature-http-lua.a $(BUILDDIR)/libhull_feature-http-js.a \
+                    $(BUILDDIR)/libhull_feature-tui.a \
+                    $(BUILDDIR)/libhull_feature-tui-lua.a $(BUILDDIR)/libhull_feature-tui-js.a
+$(FEATURE_ARCHIVES): Makefile
+
 # Runtime feature archives a native `hull build` needs to compose a runnable
 # app. The native base is runtime-less, so `hull build` resolves the runtime
 # from build/libhull_feature-<rt>.a (or an embedded copy, or ~/.hull/feature).
