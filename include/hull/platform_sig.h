@@ -152,4 +152,36 @@ int hl_platform_pubkey_is_placeholder(void);
 int hl_platform_sig_extract_for_arch(const char *manifest, size_t manifest_len,
                                      const char *arch, char hex_out[65]);
 
+/**
+ * @brief Verify a composed-attestation set against one signing domain
+ *        (issue #114, docs/composed_feature_signing.md).
+ *
+ * A composed app's `package.sig.gethull.composed.<domain>` carries a signed
+ * manifest plus the list of `{name, sha256}` archives that were composed from
+ * that domain. This attests all of them at once:
+ *   1. `sig_hex` is a valid signature over `manifest` under `pubkey`, AND
+ *   2. every `assets[i]`'s hash appears in `manifest` under `assets[i].arch`
+ *      (the name column: a bare arch for the platform lib, an asset name for a
+ *      composed archive).
+ *
+ * @param manifest     Signed manifest bytes (sha256sum-style lines).
+ * @param manifest_len Length of @p manifest.
+ * @param sig_hex      128 hex chars (+ optional trailing whitespace).
+ * @param sig_hex_len  Length of @p sig_hex.
+ * @param pubkey       32-byte Ed25519 public key for this domain (platform key
+ *                     for embedded archives, release key for installed ones);
+ *                     NULL uses the embedded `HL_PLATFORM_PUBKEY_HEX`.
+ * @param assets       `{name, sha256_hex}` entries to attest (reuses
+ *                     `HlPlatformArchHash`: `.arch` is the name, `.hash_hex` the
+ *                     expected 64-char lowercase hash). May be NULL iff n == 0.
+ * @param n_assets     Number of entries. 0 (with a valid signature) returns 0.
+ * @return 0 iff the signature is valid AND every asset is present and matches;
+ *         -1 on any signature failure, missing asset, or hash mismatch.
+ */
+int hl_platform_sig_verify_composed(const char *manifest, size_t manifest_len,
+                                    const char *sig_hex, size_t sig_hex_len,
+                                    const uint8_t pubkey[32],
+                                    const HlPlatformArchHash *assets,
+                                    size_t n_assets);
+
 #endif /* HL_PLATFORM_SIG_H */

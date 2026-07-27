@@ -326,4 +326,78 @@ UTEST(platform_sig, accepts_dotted_asset_name) {
     ASSERT_EQ(hl_platform_sig_build_manifest(bad_slash, 1, buf, sizeof(buf), &n), -1);
 }
 
+/* ── verify_composed: the composed-attestation security core (issue #114) ── */
+
+/* Helper: build + sign a manifest over `e[0..n)`, returning the signed bytes,
+ * the signature, and the keypair. Returns 0 on success (utest ASSERT macros
+ * only work inside a UTEST body, so the callers assert on this return). */
+static int sign_manifest(const HlPlatformArchHash *e, size_t n,
+                         char *manifest, size_t manifest_cap, size_t *mlen,
+                         char sig_hex[129], uint8_t pk[32], uint8_t sk[64]) {
+    if (hl_platform_sig_build_manifest(e, n, manifest, manifest_cap, mlen) != 0) return -1;
+    if (hl_cap_crypto_ed25519_keypair(pk, sk) != 0) return -1;
+    if (hl_platform_sig_sign(manifest, *mlen, sk, sig_hex, 129) != 0) return -1;
+    return 0;
+}
+
+UTEST(verify_composed, valid_full_set) {
+    HlPlatformArchHash e[] = {
+        { "linux-x86_64",                        HASH_LX86 },
+        { "libhull_feature-lua.linux-x86_64.a",  HASH_LARM },
+        { "libhull_feature-http.linux-x86_64.a", HASH_DARM },
+    };
+    char manifest[1024]; size_t mlen; char sig[129]; uint8_t pk[32], sk[64];
+    ASSERT_EQ(sign_manifest(e, 3, manifest, sizeof(manifest), &mlen, sig, pk, sk), 0);
+    /* Attest all three - signature valid + every hash present. */
+    ASSERT_EQ(hl_platform_sig_verify_composed(manifest, mlen, sig, 128, pk, e, 3), 0);
+    /* A subset of the composed set is also fine. */
+    ASSERT_EQ(hl_platform_sig_verify_composed(manifest, mlen, sig, 128, pk, e, 1), 0);
+    /* Zero assets with a valid signature: nothing to attest, passes. */
+    ASSERT_EQ(hl_platform_sig_verify_composed(manifest, mlen, sig, 128, pk, NULL, 0), 0);
+}
+
+UTEST(verify_composed, rejects_asset_not_in_manifest) {
+    HlPlatformArchHash e[] = {{ "libhull_feature-lua.linux-x86_64.a", HASH_LARM }};
+    char manifest[1024]; size_t mlen; char sig[129]; uint8_t pk[32], sk[64];
+    ASSERT_EQ(sign_manifest(e, 1, manifest, sizeof(manifest), &mlen, sig, pk, sk), 0);
+    /* An archive that was composed but is NOT in the signed manifest: reject. */
+    HlPlatformArchHash rogue[] = {{ "libhull_feature-evil.linux-x86_64.a", HASH_DARM }};
+    ASSERT_EQ(hl_platform_sig_verify_composed(manifest, mlen, sig, 128, pk, rogue, 1), -1);
+}
+
+UTEST(verify_composed, rejects_hash_mismatch) {
+    HlPlatformArchHash e[] = {{ "libhull_feature-http.linux-x86_64.a", HASH_DARM }};
+    char manifest[1024]; size_t mlen; char sig[129]; uint8_t pk[32], sk[64];
+    ASSERT_EQ(sign_manifest(e, 1, manifest, sizeof(manifest), &mlen, sig, pk, sk), 0);
+    /* Same name, but the recorded hash differs from the signed one: reject
+     * (a swapped/tampered archive linked under a legit name). */
+    HlPlatformArchHash swapped[] = {{ "libhull_feature-http.linux-x86_64.a", HASH_LX86 }};
+    ASSERT_EQ(hl_platform_sig_verify_composed(manifest, mlen, sig, 128, pk, swapped, 1), -1);
+}
+
+UTEST(verify_composed, rejects_tampered_manifest_or_sig) {
+    HlPlatformArchHash e[] = {{ "libhull_feature-lua.linux-x86_64.a", HASH_LARM }};
+    char manifest[1024]; size_t mlen; char sig[129]; uint8_t pk[32], sk[64];
+    ASSERT_EQ(sign_manifest(e, 1, manifest, sizeof(manifest), &mlen, sig, pk, sk), 0);
+    /* Tampered signature: the whole domain fails before any hash check. */
+    char bad_sig[129];
+    memcpy(bad_sig, sig, 129);
+    bad_sig[0] = (bad_sig[0] == '0') ? '1' : '0';
+    ASSERT_EQ(hl_platform_sig_verify_composed(manifest, mlen, bad_sig, 128, pk, e, 1), -1);
+    /* Wrong key. */
+    uint8_t other_pk[32], other_sk[64];
+    hl_cap_crypto_ed25519_keypair(other_pk, other_sk);
+    ASSERT_EQ(hl_platform_sig_verify_composed(manifest, mlen, sig, 128, other_pk, e, 1), -1);
+}
+
+UTEST(verify_composed, null_args_safe) {
+    HlPlatformArchHash e[] = {{ "linux-x86_64", HASH_LX86 }};
+    char manifest[256]; size_t mlen; char sig[129]; uint8_t pk[32], sk[64];
+    ASSERT_EQ(sign_manifest(e, 1, manifest, sizeof(manifest), &mlen, sig, pk, sk), 0);
+    ASSERT_EQ(hl_platform_sig_verify_composed(NULL, 0, sig, 128, pk, e, 1), -1);
+    ASSERT_EQ(hl_platform_sig_verify_composed(manifest, mlen, NULL, 128, pk, e, 1), -1);
+    /* n_assets > 0 with NULL assets. */
+    ASSERT_EQ(hl_platform_sig_verify_composed(manifest, mlen, sig, 128, pk, NULL, 1), -1);
+}
+
 UTEST_MAIN()

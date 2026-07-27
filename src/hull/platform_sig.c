@@ -197,3 +197,36 @@ int hl_platform_sig_extract_for_arch(const char *manifest, size_t manifest_len,
      * Reuse the existing parser. */
     return hl_release_io_find_checksum(manifest, manifest_len, arch, hex_out);
 }
+
+/* ── Composed-attestation verify (issue #114) ────────────────────── */
+
+int hl_platform_sig_verify_composed(const char *manifest, size_t manifest_len,
+                                    const char *sig_hex, size_t sig_hex_len,
+                                    const uint8_t pubkey[32],
+                                    const HlPlatformArchHash *assets,
+                                    size_t n_assets)
+{
+    if (!manifest || !sig_hex) return -1;
+    if (n_assets > 0 && !assets) return -1;
+
+    /* 1. The manifest must be authentically signed for this domain. Do this
+     *    first: an unsigned/forged manifest makes every hash lookup worthless. */
+    if (hl_platform_sig_verify(manifest, manifest_len, sig_hex, sig_hex_len,
+                               pubkey) != 0)
+        return -1;
+
+    /* 2. Every composed archive's recorded hash must appear in the signed
+     *    manifest under its name. A missing name or a hash mismatch means the
+     *    app was built composing an archive gethull did not sign. */
+    for (size_t i = 0; i < n_assets; i++) {
+        if (!assets[i].arch || !assets[i].hash_hex) return -1;
+        char hex[65];
+        if (hl_platform_sig_extract_for_arch(manifest, manifest_len,
+                                             assets[i].arch, hex) != 0)
+            return -1;
+        /* Hashes are public; a plain fixed-length compare is fine (no secret
+         * material, so no timing channel worth defending). */
+        if (strncmp(hex, assets[i].hash_hex, 64) != 0) return -1;
+    }
+    return 0;
+}
