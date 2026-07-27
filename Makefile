@@ -1132,11 +1132,20 @@ HULL_HAS_TUI := 0
 endif
 
 ifeq ($(HL_TUI_TOOLCHAIN),1)
-TUI_TOOLCHAIN_ARCHIVE := $(BUILDDIR)/libhull_feature-tui.a
+# The cap core lives in libhull_feature-tui.a; the per-runtime bridges are now
+# separate archives (issue #114, Phase D). hull links both runtime VMs, so
+# force-load all three (cap core + both bridges) for its own --tui commands.
+TUI_TOOLCHAIN_ARCHIVE := $(BUILDDIR)/libhull_feature-tui.a \
+                         $(BUILDDIR)/libhull_feature-tui-lua.a \
+                         $(BUILDDIR)/libhull_feature-tui-js.a
 ifeq ($(UNAME_S),Darwin)
-TUI_TOOLCHAIN_LDFLAGS := -Wl,-force_load,$(BUILDDIR)/libhull_feature-tui.a
+TUI_TOOLCHAIN_LDFLAGS := -Wl,-force_load,$(BUILDDIR)/libhull_feature-tui.a \
+                         -Wl,-force_load,$(BUILDDIR)/libhull_feature-tui-lua.a \
+                         -Wl,-force_load,$(BUILDDIR)/libhull_feature-tui-js.a
 else
-TUI_TOOLCHAIN_LDFLAGS := -Wl,--whole-archive $(BUILDDIR)/libhull_feature-tui.a -Wl,--no-whole-archive
+TUI_TOOLCHAIN_LDFLAGS := -Wl,--whole-archive $(BUILDDIR)/libhull_feature-tui.a \
+                         $(BUILDDIR)/libhull_feature-tui-lua.a \
+                         $(BUILDDIR)/libhull_feature-tui-js.a -Wl,--no-whole-archive
 endif
 else
 TUI_TOOLCHAIN_ARCHIVE :=
@@ -2763,13 +2772,36 @@ feature-tui: $(BUILDDIR)/libhull_feature-tui.a
 $(BUILDDIR)/cap_tui.o $(BUILDDIR)/cap_tui_input.o $(BUILDDIR)/cap_tui_width.o \
 $(BUILDDIR)/lua_rt_mod_tui.o $(BUILDDIR)/js_mod_tui.o: CFLAGS += -DHL_ENABLE_TUI
 
+# libhull_feature-tui.a is the runtime-AGNOSTIC cap core only (issue #114,
+# Phase D). The per-runtime bridges (lua_rt_mod_tui.o / js_mod_tui.o) whole-
+# archive would pull BOTH runtimes' bridges, and the non-composed runtime's
+# bridge references runtime symbols the runtime-less base lacks -> undefined at
+# link. So each bridge is its own archive (libhull_feature-tui-<rt>.a), and a
+# `--with=tui` app whole-archives the cap core + ONLY its runtime's bridge. The
+# cap core stays the single INSTALLABLE asset (FEATURES[]/release unchanged); the
+# tiny bridges are embedded in hull and composed from there (like the web
+# bindings), so `hull feature install tui` still fetches one archive.
 $(BUILDDIR)/libhull_feature-tui.a: $(BUILDDIR)/cap_tui.o $(BUILDDIR)/cap_tui_input.o \
-                                   $(BUILDDIR)/cap_tui_width.o \
-                                   $(BUILDDIR)/lua_rt_mod_tui.o $(BUILDDIR)/js_mod_tui.o | $(BUILDDIR)
+                                   $(BUILDDIR)/cap_tui_width.o | $(BUILDDIR)
 	@rm -f $@
 	$(AR) rcs $@ $(BUILDDIR)/cap_tui.o $(BUILDDIR)/cap_tui_input.o \
-	            $(BUILDDIR)/cap_tui_width.o \
-	            $(BUILDDIR)/lua_rt_mod_tui.o $(BUILDDIR)/js_mod_tui.o
+	            $(BUILDDIR)/cap_tui_width.o
+	@echo "built $@ ($$(du -h $@ | cut -f1))"
+
+# Per-runtime tui bridge archives (issue #114, Phase D). Tiny (one object each);
+# embedded in hull + composed for the app's runtime alongside the cap core.
+feature-tui-lua: $(BUILDDIR)/libhull_feature-tui-lua.a
+.PHONY: feature-tui-lua
+$(BUILDDIR)/libhull_feature-tui-lua.a: $(BUILDDIR)/lua_rt_mod_tui.o | $(BUILDDIR)
+	@rm -f $@
+	$(AR) rcs $@ $(BUILDDIR)/lua_rt_mod_tui.o
+	@echo "built $@ ($$(du -h $@ | cut -f1))"
+
+feature-tui-js: $(BUILDDIR)/libhull_feature-tui-js.a
+.PHONY: feature-tui-js
+$(BUILDDIR)/libhull_feature-tui-js.a: $(BUILDDIR)/js_mod_tui.o | $(BUILDDIR)
+	@rm -f $@
+	$(AR) rcs $@ $(BUILDDIR)/js_mod_tui.o
 	@echo "built $@ ($$(du -h $@ | cut -f1))"
 
 # libhull_feature-http.a: the runtime-agnostic HTTP CORE as a composable feature
@@ -3012,8 +3044,18 @@ $(EMBEDDED_HTTP_H): $(BUILDDIR)/libhull_feature-http.a $(BUILDDIR)/libhull_featu
 	@xxd -i $(BUILDDIR)/libhull_feature-http-lua.a | sed 's/build_libhull_feature_http_lua_a/hl_embedded_feature_http_lua_a/g' | $(XXD_CONST_PIPE) >> $@
 	@xxd -i $(BUILDDIR)/libhull_feature-http-js.a  | sed 's/build_libhull_feature_http_js_a/hl_embedded_feature_http_js_a/g'   | $(XXD_CONST_PIPE) >> $@
 
-CFLAGS += -DHL_BUILD_EMBEDDED -DHL_BUILD_EMBEDDED_RUNTIME -DHL_BUILD_EMBEDDED_HTTP
-$(BUILD_ASSET_OBJ): $(EMBEDDED_PLATFORM_H) $(EMBEDDED_TEMPLATES_H) $(EMBEDDED_RUNTIME_H) $(EMBEDDED_HTTP_H)
+# Embed the per-runtime tui bridges too (issue #114, Phase D). The tui cap core
+# stays the single installable feature asset; a full-flavor `--with=tui` app
+# composes the cap core (installed/local) + its runtime's bridge (embedded here),
+# so `hull feature install tui` still fetches one archive.
+EMBEDDED_TUI_H := $(BUILDDIR)/embedded_tui.h
+$(EMBEDDED_TUI_H): $(BUILDDIR)/libhull_feature-tui-lua.a $(BUILDDIR)/libhull_feature-tui-js.a | $(BUILDDIR)
+	@echo "/* Auto-generated - do not edit */" > $@
+	@xxd -i $(BUILDDIR)/libhull_feature-tui-lua.a | sed 's/build_libhull_feature_tui_lua_a/hl_embedded_feature_tui_lua_a/g' | $(XXD_CONST_PIPE) >> $@
+	@xxd -i $(BUILDDIR)/libhull_feature-tui-js.a  | sed 's/build_libhull_feature_tui_js_a/hl_embedded_feature_tui_js_a/g'   | $(XXD_CONST_PIPE) >> $@
+
+CFLAGS += -DHL_BUILD_EMBEDDED -DHL_BUILD_EMBEDDED_RUNTIME -DHL_BUILD_EMBEDDED_HTTP -DHL_BUILD_EMBEDDED_TUI
+$(BUILD_ASSET_OBJ): $(EMBEDDED_PLATFORM_H) $(EMBEDDED_TEMPLATES_H) $(EMBEDDED_RUNTIME_H) $(EMBEDDED_HTTP_H) $(EMBEDDED_TUI_H)
 endif
 
 # Hull binary

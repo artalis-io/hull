@@ -54,32 +54,31 @@ app.main(function()
 end)
 LUA
 
-# ── tui composition is DEFERRED to issue #114 (HTTP as a composable feature) ──
+# ── tui x composed-runtime composes, links, and runs (issue #114, Phase D) ──
 #
-# The runtime-featurify epic makes the native base runtime-less. The tui feature
-# archive whole-archives BOTH runtime bridges (lua_rt_mod_tui.o + js_mod_tui.o);
-# composed into a single-runtime app, the wrong-runtime bridge's refs are
-# undefined at link. So `hull build --with=tui` (and the auto-inferred path) fail
-# CLOSED with a pointer to https://github.com/artalis-io/hull/issues/114, whose
-# per-runtime-bridge seam is what makes tui composition link again. The archive
-# itself still builds (asserted above). Restore the compose + boot + auto-infer +
-# not-installed assertions when #114 lands.
+# The native base is runtime-less. The tui feature is split per-runtime: the cap
+# core (libhull_feature-tui.a) is runtime-agnostic, and each runtime bridge lives
+# in its own archive (libhull_feature-tui-<rt>.a, embedded in hull). `hull build
+# --with=tui` whole-archives the cap core + ONLY the app's runtime bridge, so the
+# wrong-runtime bridge is never pulled onto a single-runtime base. The composed
+# app admits hull/tui, registers the native bridge, and runs.
+echo "=== --with=tui composes + runs ==="
+BUILD_OUT=$("$HULL" build --compiler=system --with=tui --no-verify-platform -o "$APP/bin" "$APP" 2>&1) \
+    || { echo "$BUILD_OUT"; echo "FAIL: --with=tui should build"; exit 1; }
+echo "$BUILD_OUT" | grep -q "composed tui bridge" \
+    || { echo "$BUILD_OUT"; echo "FAIL: expected a composed per-runtime tui bridge"; exit 1; }
+test -x "$APP/bin" || { echo "$BUILD_OUT"; echo "FAIL: --with=tui produced no binary"; exit 1; }
+"$APP/bin" 2>&1 | grep -q "TUI FEATURE APP OK" \
+    || { echo "FAIL: tui app did not register hull.tui / run"; exit 1; }
+echo "ok  --with=tui composes the per-runtime bridge, builds, and runs"
 
-echo "=== --with=tui fails closed (deferred to #114) ==="
-BUILD_OUT=$("$HULL" build --compiler=system --with=tui --no-verify-platform -o "$APP/bin" "$APP" 2>&1) || true
-echo "$BUILD_OUT" | grep -q "isn't supported yet with the composed-runtime model" \
-    || { echo "$BUILD_OUT"; echo "FAIL: --with=tui should fail closed until #114"; exit 1; }
-echo "$BUILD_OUT" | grep -q "issues/114" \
-    || { echo "FAIL: tui-deferred error lacks the #114 pointer"; exit 1; }
-test -x "$APP/bin" && { echo "FAIL: produced a binary despite the deferred guard"; exit 1; }
-echo "ok  --with=tui fails closed with the #114 pointer"
-
-echo "=== auto-inferred tui (hull/tui app, no --with) also fails closed ==="
-AUTO_OUT=$("$HULL" build --compiler=system --no-verify-platform -o "$APP/bin_auto" "$APP" 2>&1) || true
-echo "$AUTO_OUT" | grep -q "isn't supported yet with the composed-runtime model" \
-    || { echo "$AUTO_OUT"; echo "FAIL: auto-inferred tui should fail closed until #114"; exit 1; }
-test -x "$APP/bin_auto" && { echo "FAIL: produced an auto binary despite the deferred guard"; exit 1; }
-echo "ok  auto-inferred tui fails closed"
+echo "=== auto-inferred tui (hull/tui app, no --with) also composes + runs ==="
+AUTO_OUT=$("$HULL" build --compiler=system --no-verify-platform -o "$APP/bin_auto" "$APP" 2>&1) \
+    || { echo "$AUTO_OUT"; echo "FAIL: auto-inferred tui should build"; exit 1; }
+test -x "$APP/bin_auto" || { echo "$AUTO_OUT"; echo "FAIL: auto-inferred tui produced no binary"; exit 1; }
+"$APP/bin_auto" 2>&1 | grep -q "TUI FEATURE APP OK" \
+    || { echo "FAIL: auto-inferred tui app did not run"; exit 1; }
+echo "ok  auto-inferred tui composes + runs"
 
 echo "=== negative: a plain (non-tui) app still builds + runs ==="
 printf 'app.manifest({modules={}})\napp.main(function() print("PLAIN OK") return 0 end)\n' \
@@ -91,4 +90,4 @@ fi
 "$PLAIN/bin" 2>&1 | grep -q "PLAIN OK" || { echo "$PLAIN_OUT"; echo "FAIL: plain app did not run"; exit 1; }
 echo "ok  plain app builds + runs (tui-free)"
 
-echo "PASS: TUI feature archive builds; composition deferred to #114"
+echo "PASS: TUI feature composes per-runtime, builds, and runs"

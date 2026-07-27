@@ -1398,20 +1398,6 @@ int main(int argc, char **argv) { return hl_app_run(argc, argv); }
                             .. "(not available for cosmo builds)\n")
                 tool.rmdir(tmpdir); tool.exit(1)
             end
-            -- tui bundles BOTH runtime bridges (lua_rt_mod_tui.o + js_mod_tui.o)
-            -- in one whole-archived feature; composed into a single-runtime app on
-            -- the runtime-less native base, the wrong-runtime bridge's refs are
-            -- undefined at link. The HTTP-as-a-feature seam (per-runtime bridge
-            -- composition) is what fixes it; fail closed with a clear message until
-            -- then. See https://github.com/artalis-io/hull/issues/114.
-            if fname == "tui" then
-                tool.stderr("hull build: the 'tui' feature isn't supported yet with the "
-                    .. "composed-runtime model (a tui app cannot link on the runtime-less "
-                    .. "native base).\n")
-                tool.stderr("hint: tracked in https://github.com/artalis-io/hull/issues/114 "
-                    .. "(HTTP as a composable feature).\n")
-                tool.rmdir(tmpdir); tool.exit(1)
-            end
             if spec.cxx then needs_cxx = true end
             if spec.base_group then needs_base_group = true end
 
@@ -1455,6 +1441,33 @@ int main(int argc, char **argv) { return hl_app_run(argc, argv); }
                 -- single backend symbol to anchor a selective pull.
                 for _, f in ipairs(fcompose.whole_archive_flags(dest, is_darwin)) do
                     feature_libs[#feature_libs + 1] = f
+                end
+                -- tui (issue #114, Phase D): the cap core above is runtime-agnostic;
+                -- the per-runtime bridge (register_lua/_js strong override) lives in
+                -- its own archive so the WRONG runtime's bridge is never pulled onto
+                -- a single-runtime base. Compose the APP's runtime bridge too
+                -- (embedded in hull, resolved embedded-first). Its refs to the
+                -- runtime resolve because the runtime archive is composed alongside.
+                if fname == "tui" and not is_cosmo then
+                    local app_rt = fcompose.detect_app_rt(opts.app_dir)
+                    if app_rt then
+                        local tb, tfrom = fcompose.resolve_tui_rt_lib(app_rt, tmpdir,
+                                          { hull_dir = hull_dir, plat = plat })
+                        if not tb then
+                            tool.stderr("hull build: the tui bridge for '" .. app_rt
+                                .. "' (libhull_feature-tui-" .. app_rt .. ".a) was not found "
+                                .. (tfrom == "cache-verify-failed"
+                                    and "(cache re-verify failed)\n"
+                                    or  "(normally embedded in hull)\n"))
+                            tool.rmdir(tmpdir); tool.exit(1)
+                        end
+                        local tdest = tmpdir .. "/libhull_feature-tui-" .. app_rt .. ".a"
+                        if tb ~= tdest then tool.copy(tb, tdest) end
+                        for _, f in ipairs(fcompose.whole_archive_flags(tdest, is_darwin)) do
+                            feature_libs[#feature_libs + 1] = f
+                        end
+                        print("hull build: composed tui bridge '" .. app_rt .. "'")
+                    end
                 end
             else
                 -- Backend feature: linked plainly; the generated registry's

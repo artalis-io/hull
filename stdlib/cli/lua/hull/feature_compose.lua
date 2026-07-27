@@ -210,4 +210,26 @@ function M.resolve_http_rt_lib(rt, tmpdir, ctx)
     return M.resolve_lib(libname, asset, ctx)
 end
 
+--- Resolve the per-runtime tui bridge (libhull_feature-tui-<rt>.a), embedded
+--- first (issue #114, Phase D).
+--
+-- The tui cap core stays the single installable feature asset; the tiny
+-- per-runtime bridge is embedded in hull and composed alongside the cap core
+-- for the app's runtime, so `hull feature install tui` still fetches one lib.
+--
+-- @param rt "lua" | "js"
+-- @param tmpdir string  Scratch dir the embedded archive is extracted into.
+-- @param ctx table      { hull_dir = string, plat = string|nil }.
+-- @return string, string   (path, "embedded"|"local"|"cache") on success.
+-- @return nil, string      (nil, "cache-verify-failed"|"not-found") on failure.
+function M.resolve_tui_rt_lib(rt, tmpdir, ctx)
+    local libname = "libhull_feature-tui-" .. rt .. ".a"
+    if tool.extract_feature_tui_rt and tool.extract_feature_tui_rt(tmpdir, rt)
+       and file_exists(tmpdir .. "/" .. libname) then
+        return tmpdir .. "/" .. libname, "embedded"
+    end
+    local asset = ctx.plat and ("libhull_feature-tui-" .. rt .. "-" .. ctx.plat .. ".a") or nil
+    return M.resolve_lib(libname, asset, ctx)
+end
+
 return M

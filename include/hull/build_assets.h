@@ -55,6 +55,13 @@ int hl_build_extract_feature_http(const char *dir);
 int hl_build_extract_feature_http_rt(const char *dir, const char *rt);
 
 /*
+ * Extract the embedded per-runtime tui bridge to `dir/libhull_feature-tui-<rt>.a`
+ * (rt = "lua" | "js"; issue #114, Phase D). Composed alongside the tui cap core
+ * when `--with=tui`. Returns 0 on success, -1 if not embedded / unknown rt.
+ */
+int hl_build_extract_feature_tui_rt(const char *dir, const char *rt);
+
+/*
  * Get the list of embedded platform archives (multi-arch builds).
  * Sets *out to the sentinel-terminated array.
  * Returns the count (excluding sentinel), or 0 if not multi-arch.
