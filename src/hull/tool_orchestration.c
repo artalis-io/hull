@@ -209,11 +209,19 @@ static int l_tool_modules_resolve(lua_State *L)
     }
     lua_setfield(L, -2, "modules");
 
+    /* needs_http = does the resolved set require any HTTP subsystem (server or
+     * client)? Drives `hull build`'s decision to compose the http core + the
+     * per-runtime web bindings (issue #114, Phase C2). Reliable because the
+     * route/ws/sse decorations (app.get/…) only exist when an HTTP module is
+     * declared, so a serving app always trips an HTTP cap here. */
+    uint32_t req_caps = hl_module_set_required_caps(&set);
+    lua_pushboolean(L, (req_caps & HL_MOD_CAP_HTTP) ? 1 : 0);
+    lua_setfield(L, -2, "needs_http");
+
     /* auto = the minimal build flavor that still satisfies this app's
      * declared modules (drives `hull build --flavor=auto`). Computed from
      * the resolved set's aggregate required-caps. */
-    const HlBuildFlavor *autf =
-        hl_build_flavor_auto(hl_module_set_required_caps(&set));
+    const HlBuildFlavor *autf = hl_build_flavor_auto(req_caps);
     if (autf) {
         lua_newtable(L);
         lua_pushstring(L, autf->name);

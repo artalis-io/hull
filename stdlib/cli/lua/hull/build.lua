@@ -1553,6 +1553,24 @@ int main(int argc, char **argv) { return hl_app_run(argc, argv); }
                     .. "(HTTP as a composable feature).\n")
                 tool.rmdir(tmpdir); tool.exit(1)
             end
+
+            -- Does this app need HTTP? (issue #114, Phase C2.) The route/ws/sse
+            -- decorations (app.get/…) only exist when an HTTP module is declared,
+            -- so a serving app always trips an HTTP cap in the resolver. When it
+            -- needs none (a pure app.main CLI / compute tool) skip composing the
+            -- http core + the per-runtime web bindings: the pure runtime's few
+            -- web-symbol refs are then satisfied by the base http_weakstub no-ops.
+            -- Fail safe: if resolution is unavailable, compose HTTP (never
+            -- under-compose and silently break serving).
+            local needs_http = true
+            do
+                local mf = extract_app_manifest(opts.app_dir)
+                if mf then
+                    local r = tool.modules_resolve(mf, opts.flavor, with_feature_list(opts))
+                    if r.ok and r.needs_http ~= nil then needs_http = r.needs_http end
+                end
+            end
+
             write_file(tmpdir .. "/app_feature_registry.c",
                        fcompose.gen_app_registry_c(app_rt))
             if not tool.compiler.compile(tmpdir .. "/app_feature_registry.c",
@@ -1597,6 +1615,7 @@ int main(int argc, char **argv) { return hl_app_run(argc, argv); }
             end
             print("hull build: composed runtime '" .. app_rt .. "'")
 
+            if needs_http then
             -- Compose the HTTP feature (issue #114, Phase B). The native base is
             -- HTTP-CORE-LESS: serve.c + the runtime's web-module bindings
             -- reference the http/ws/smtp/body caps, which now live in
@@ -1653,6 +1672,10 @@ int main(int argc, char **argv) { return hl_app_run(argc, argv); }
                 feature_libs[#feature_libs + 1] = f
             end
             print("hull build: composed web bindings '" .. app_rt .. "'")
+            else
+                print("hull build: HTTP-free app (app.main, no HTTP modules) - "
+                    .. "skipped http core + web bindings")
+            end
         end
     end
 
