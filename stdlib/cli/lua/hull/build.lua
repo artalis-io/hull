@@ -1412,10 +1412,14 @@ int main(int argc, char **argv) { return hl_app_run(argc, argv); }
     -- must match that manifest's name column. See docs/composed_feature_signing.md.
     local composed_assets = {}
     local function record_composed(name, path, domain)
-        local data = read_file(path)
-        if data then
+        -- Stream-hash the archive in C (tool.sha256_file) rather than
+        -- read_file + crypto.sha256: a --with feature archive can be huge
+        -- (~127 MB DuckDB, the wgpu GPU lib) and slurping it into a Lua
+        -- string blows the tool VM's 64 MB sandbox allocator.
+        local sha = tool.sha256_file(path)
+        if sha then
             composed_assets[#composed_assets + 1] =
-                { name = name, sha256 = crypto.sha256(data), domain = domain }
+                { name = name, sha256 = sha, domain = domain }
         end
     end
     -- A DB wire feature (postgres/mysql) references base symbols (crypto,
