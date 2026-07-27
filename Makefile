@@ -2777,6 +2777,30 @@ feature-tui: $(BUILDDIR)/libhull_feature-tui.a
 $(BUILDDIR)/cap_tui.o $(BUILDDIR)/cap_tui_input.o $(BUILDDIR)/cap_tui_width.o \
 $(BUILDDIR)/lua_rt_mod_tui.o $(BUILDDIR)/js_mod_tui.o: CFLAGS += -DHL_ENABLE_TUI
 
+# TRUST_FEATURE_LIBS=1 (release stage 3, issue #114): the embedded runtime /
+# HTTP-core / web-bindings / tui-bridge feature archives were downloaded from
+# build-platform-native — the EXACT bytes sign-platform-manifest hashed into the
+# signed platform manifest. Embed them as-is so the runtime composed-feature
+# check (signature.c §5c) matches the embedded manifest. AR_FEATURE_LIB's trust
+# branch only asserts presence; it never re-archives, so the signed bytes survive
+# into hull even if source objects recompile (harmless — they're never used).
+# Local devs / normal `make` leave it unset and build the archives from source.
+# NOTE: applies ONLY to the seven archives EMBEDDED in a native hull. The tui CORE
+# (libhull_feature-tui.a) and the --with backend features are release-domain
+# (hull.sha256), not covered here.
+ifeq ($(TRUST_FEATURE_LIBS),1)
+define AR_FEATURE_LIB
+	@test -f $@ || (echo "ERROR: TRUST_FEATURE_LIBS=1 but $@ is missing"; exit 1)
+	@echo "$@: trusting pre-built artifact (TRUST_FEATURE_LIBS=1)"
+endef
+else
+define AR_FEATURE_LIB
+	@rm -f $@
+	$(AR) rcs $@ $(1)
+	@echo "built $@ ($$(du -h $@ | cut -f1))"
+endef
+endif
+
 # libhull_feature-tui.a is the runtime-AGNOSTIC cap core only (issue #114,
 # Phase D). The per-runtime bridges (lua_rt_mod_tui.o / js_mod_tui.o) whole-
 # archive would pull BOTH runtimes' bridges, and the non-composed runtime's
@@ -2798,16 +2822,12 @@ $(BUILDDIR)/libhull_feature-tui.a: $(BUILDDIR)/cap_tui.o $(BUILDDIR)/cap_tui_inp
 feature-tui-lua: $(BUILDDIR)/libhull_feature-tui-lua.a
 .PHONY: feature-tui-lua
 $(BUILDDIR)/libhull_feature-tui-lua.a: $(BUILDDIR)/lua_rt_mod_tui.o | $(BUILDDIR)
-	@rm -f $@
-	$(AR) rcs $@ $(BUILDDIR)/lua_rt_mod_tui.o
-	@echo "built $@ ($$(du -h $@ | cut -f1))"
+	$(call AR_FEATURE_LIB,$(BUILDDIR)/lua_rt_mod_tui.o)
 
 feature-tui-js: $(BUILDDIR)/libhull_feature-tui-js.a
 .PHONY: feature-tui-js
 $(BUILDDIR)/libhull_feature-tui-js.a: $(BUILDDIR)/js_mod_tui.o | $(BUILDDIR)
-	@rm -f $@
-	$(AR) rcs $@ $(BUILDDIR)/js_mod_tui.o
-	@echo "built $@ ($$(du -h $@ | cut -f1))"
+	$(call AR_FEATURE_LIB,$(BUILDDIR)/js_mod_tui.o)
 
 # libhull_feature-http.a: the runtime-agnostic HTTP CORE as a composable feature
 # archive (issue #114, Phase B). Bundles the HTTP capability objects - client
@@ -2827,9 +2847,7 @@ $(BUILDDIR)/libhull_feature-tui-js.a: $(BUILDDIR)/js_mod_tui.o | $(BUILDDIR)
 feature-http: $(BUILDDIR)/libhull_feature-http.a
 .PHONY: feature-http
 $(BUILDDIR)/libhull_feature-http.a: $(FEATURE_HTTP_OBJS) | $(BUILDDIR)
-	@rm -f $@
-	$(AR) rcs $@ $(FEATURE_HTTP_OBJS)
-	@echo "built $@ ($$(du -h $@ | cut -f1))"
+	$(call AR_FEATURE_LIB,$(FEATURE_HTTP_OBJS))
 
 # libhull_feature-lua.a / -js.a: a runtime as a composable feature archive.
 # Bundles the runtime objects, its vendored VM, its manifest extractor, and its
@@ -2861,31 +2879,23 @@ FEATURE_JS_OBJS  := $(filter-out $(BUILDDIR)/js_mod_tui.o $(FEATURE_HTTP_JS_OBJS
 feature-lua: $(BUILDDIR)/libhull_feature-lua.a
 .PHONY: feature-lua
 $(BUILDDIR)/libhull_feature-lua.a: $(FEATURE_LUA_OBJS) | $(BUILDDIR)
-	@rm -f $@
-	$(AR) rcs $@ $(FEATURE_LUA_OBJS)
-	@echo "built $@ ($$(du -h $@ | cut -f1))"
+	$(call AR_FEATURE_LIB,$(FEATURE_LUA_OBJS))
 
 feature-js: $(BUILDDIR)/libhull_feature-js.a
 .PHONY: feature-js
 $(BUILDDIR)/libhull_feature-js.a: $(FEATURE_JS_OBJS) | $(BUILDDIR)
-	@rm -f $@
-	$(AR) rcs $@ $(FEATURE_JS_OBJS)
-	@echo "built $@ ($$(du -h $@ | cut -f1))"
+	$(call AR_FEATURE_LIB,$(FEATURE_JS_OBJS))
 
 # Per-runtime web-bindings feature archives (issue #114, Phase C).
 feature-http-lua: $(BUILDDIR)/libhull_feature-http-lua.a
 .PHONY: feature-http-lua
 $(BUILDDIR)/libhull_feature-http-lua.a: $(FEATURE_HTTP_LUA_OBJS) | $(BUILDDIR)
-	@rm -f $@
-	$(AR) rcs $@ $(FEATURE_HTTP_LUA_OBJS)
-	@echo "built $@ ($$(du -h $@ | cut -f1))"
+	$(call AR_FEATURE_LIB,$(FEATURE_HTTP_LUA_OBJS))
 
 feature-http-js: $(BUILDDIR)/libhull_feature-http-js.a
 .PHONY: feature-http-js
 $(BUILDDIR)/libhull_feature-http-js.a: $(FEATURE_HTTP_JS_OBJS) | $(BUILDDIR)
-	@rm -f $@
-	$(AR) rcs $@ $(FEATURE_HTTP_JS_OBJS)
-	@echo "built $@ ($$(du -h $@ | cut -f1))"
+	$(call AR_FEATURE_LIB,$(FEATURE_HTTP_JS_OBJS))
 
 # Rebuild every feature archive when the Makefile changes. The archives are
 # `ar rcs` over an object LIST (FEATURE_*_OBJS / the tui trio), and those lists

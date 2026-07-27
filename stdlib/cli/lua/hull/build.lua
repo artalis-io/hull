@@ -536,6 +536,37 @@ local function sign_app(app_dir, key_file, sign_ctx, files, tmpdir, output)
             signature = sign_ctx.platform_sig_blob.signature,
             arch_hashes = sign_ctx.platform_arch_hashes or {},
         }
+
+        -- Composed-feature attestation (issue #114, docs/composed_feature_signing.md).
+        -- Every archive composed into this app above is recorded here so runtime
+        -- --verify-sig can prove each one is a genuine gethull.dev artefact, not just
+        -- the base platform lib. Two trust domains:
+        --   platform_domain: archives that ship INSIDE hull (runtime / http core /
+        --     web bindings / tui bridge). Re-attested by the SAME platform-key
+        --     manifest that covers the base lib, so the runtime cross-checks each
+        --     recorded hash against gethull.manifest under HL_PLATFORM_PUBKEY_HEX.
+        --   release_domain: externally-installed --with/--flavor libs, whose trust
+        --     anchor is the release-key hull.sha256 (already re-verified at compose).
+        --     Recorded for provenance; covered by the developer app-signature.
+        local plat_assets, rel_assets = {}, {}
+        for _, a in ipairs(sign_ctx.composed_assets or {}) do
+            local entry = { name = a.name, sha256 = a.sha256 }
+            if a.domain == "release" then
+                rel_assets[#rel_assets + 1] = entry
+            else
+                plat_assets[#plat_assets + 1] = entry
+            end
+        end
+        if #plat_assets > 0 or #rel_assets > 0 then
+            platform.gethull.composed = {
+                platform_domain = {
+                    manifest  = sign_ctx.platform_sig_blob.manifest,
+                    signature = sign_ctx.platform_sig_blob.signature,
+                    assets    = plat_assets,
+                },
+                release_domain = { assets = rel_assets },
+            }
+        end
     end
 
     -- Capture compiler version
@@ -1372,6 +1403,21 @@ int main(int argc, char **argv) { return hl_app_run(argc, argv); }
     if opts.with then for f in pairs(opts.with) do features_needed[f] = true end end
     local feature_objs = {}
     local feature_libs = {}
+    -- Composed-feature signature attestation (issue #114). Each composed archive
+    -- is recorded as { name, sha256, domain } so sign_app can write the
+    -- package.sig.gethull.composed block. `domain = "platform"` = an archive that
+    -- ships INSIDE hull (runtime / http / web bindings / tui bridge), attested by
+    -- the platform-key manifest; `domain = "release"` = an externally-installed
+    -- --with / --flavor lib, attested by the release-key hull.sha256. The `name`
+    -- must match that manifest's name column. See docs/composed_feature_signing.md.
+    local composed_assets = {}
+    local function record_composed(name, path, domain)
+        local data = read_file(path)
+        if data then
+            composed_assets[#composed_assets + 1] =
+                { name = name, sha256 = crypto.sha256(data), domain = domain }
+        end
+    end
     -- A DB wire feature (postgres/mysql) references base symbols (crypto,
     -- tls_client) that a DB-only app doesn't otherwise pull, so on GNU ld the
     -- platform lib + feature archive must be wrapped in --start-group. Set by
@@ -1433,6 +1479,9 @@ int main(int argc, char **argv) { return hl_app_run(argc, argv); }
             local from_cache = (from == "cache")
             local dest = tmpdir .. "/" .. libname
             tool.copy(lib, dest)
+            -- Externally-installed feature: attested by the release-key
+            -- hull.sha256 under its release asset name (libhull_feature-<n>-<arch>.a).
+            record_composed(asset or libname, dest, "release")
             local is_darwin = plat and plat:sub(1, 6) == "darwin"
 
             if spec.whole_archive then
@@ -1463,6 +1512,9 @@ int main(int argc, char **argv) { return hl_app_run(argc, argv); }
                         end
                         local tdest = tmpdir .. "/libhull_feature-tui-" .. app_rt .. ".a"
                         if tb ~= tdest then tool.copy(tb, tdest) end
+                        -- The per-runtime tui bridge ships INSIDE hull -> platform domain.
+                        record_composed("libhull_feature-tui-" .. app_rt .. "."
+                                        .. (plat or "") .. ".a", tdest, "platform")
                         for _, f in ipairs(fcompose.whole_archive_flags(tdest, is_darwin)) do
                             feature_libs[#feature_libs + 1] = f
                         end
@@ -1613,6 +1665,9 @@ int main(int argc, char **argv) { return hl_app_run(argc, argv); }
             end
             local rt_dest = tmpdir .. "/" .. rt_lib
             if rt_path ~= rt_dest then tool.copy(rt_path, rt_dest) end  -- already there if extracted
+            -- The runtime archive ships INSIDE hull -> platform domain.
+            record_composed("libhull_feature-" .. app_rt .. "."
+                            .. (rt_plat or "") .. ".a", rt_dest, "platform")
             needs_base_group = true  -- runtime refs base symbols; GNU ld needs the group
             local is_darwin = rt_plat and rt_plat:sub(1, 6) == "darwin"
             for _, f in ipairs(fcompose.whole_archive_flags(rt_dest, is_darwin)) do
@@ -1645,6 +1700,9 @@ int main(int argc, char **argv) { return hl_app_run(argc, argv); }
             end
             local http_dest = tmpdir .. "/" .. http_lib
             if http_path ~= http_dest then tool.copy(http_path, http_dest) end
+            -- The HTTP core archive ships INSIDE hull -> platform domain.
+            record_composed("libhull_feature-http." .. (rt_plat or "") .. ".a",
+                            http_dest, "platform")
             for _, f in ipairs(fcompose.whole_archive_flags(http_dest, is_darwin)) do
                 feature_libs[#feature_libs + 1] = f
             end
@@ -1673,6 +1731,9 @@ int main(int argc, char **argv) { return hl_app_run(argc, argv); }
             end
             local httprt_dest = tmpdir .. "/" .. httprt_lib
             if httprt_path ~= httprt_dest then tool.copy(httprt_path, httprt_dest) end
+            -- The per-runtime web bindings ship INSIDE hull -> platform domain.
+            record_composed("libhull_feature-http-" .. app_rt .. "."
+                            .. (rt_plat or "") .. ".a", httprt_dest, "platform")
             for _, f in ipairs(fcompose.whole_archive_flags(httprt_dest, is_darwin)) do
                 feature_libs[#feature_libs + 1] = f
             end
@@ -1768,6 +1829,10 @@ int main(int argc, char **argv) { return hl_app_run(argc, argv); }
             -- the cross-check actually ran.
             platform_sig_blob   = platform_sig_blob,
             platform_arch_hashes = platform_arch_hashes,
+            -- Composed-feature attestations (issue #114): every archive
+            -- whole-archived / linked into this app above, tagged by domain.
+            -- sign_app groups these into package.sig.gethull.composed.
+            composed_assets = composed_assets,
         }
 
         -- Compute binary_hash (SHA256 of the linked output binary)

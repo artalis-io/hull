@@ -1,9 +1,31 @@
 # Platform-sig over composed features — design
 
-**Status:** design (not implemented). Closes roadmap
+**Status:** implemented (native builds). Closes roadmap
 [roadmap_next.md §0.4](roadmap_next.md). Extends the inner platform-signature
 layer so a composed app's `package.sig` attests **every** archive linked into
 it, not just `libhull_platform.a`.
+
+Landed:
+- **Codec + verify core.** `hl_platform_sig_verify_composed`
+  (`src/hull/platform_sig.c`) verifies a domain's signed manifest, then confirms
+  each recorded `{name, sha256}` is present under that name. Unit tests in
+  `tests/hull/test_platform_sig.c`.
+- **Compose recording.** `hull build` records every composed archive into
+  `package.sig.gethull.composed` (`platform_domain` = embedded runtime / HTTP
+  core / web bindings / tui bridge, platform key; `release_domain` = `--with`
+  backend features, release key) — `stdlib/cli/lua/hull/build.lua`.
+- **Runtime enforcement.** `--verify-sig` §5c (`src/hull/signature.c`) verifies
+  the `platform_domain` block against the embedded `HL_PLATFORM_PUBKEY_HEX`,
+  fatally. Presence-gated (absent on pre-#114 apps and cosmo).
+- **Release pipeline.** `release.yml` signs the embedded feature-archive hashes
+  into the platform manifest; stage 3 embeds the signed bytes as-is
+  (`TRUST_FEATURE_LIBS=1`). Native only (cosmo composes nothing).
+- **End to end.** `tests/e2e_composed_sig.sh` (a throwaway test-key chain) proves
+  the composed block is recorded, a valid app verifies (5b base + 5c composed),
+  and a tampered composed hash is fatal at runtime.
+
+Not yet validated: the multi-runner release artifact flow (needs a pre-release
+tag dry-run; the local harness stands in with a single-arch test key).
 
 ## The gap
 
@@ -143,18 +165,33 @@ developer's outer signature also seals the composed attestation against tamper.
 
 ## Runtime (`--verify-sig`)
 
-Extend the existing platform-sig check (`src/hull/serve.c`, run before sandbox
-phase 2). For each domain in `gethull.composed`:
+Extend the existing platform-sig check (`src/hull/signature.c` §5c, run before
+sandbox phase 2, right after the base platform-sig §5b). For the
+**`platform_domain`**:
 
-1. Verify `manifest`'s `signature` against the embedded pubkey for that domain
-   (`HL_PLATFORM_PUBKEY_HEX` / `HL_RELEASE_PUBKEY_HEX`).
+1. Verify `manifest`'s `signature` against the embedded `HL_PLATFORM_PUBKEY_HEX`
+   (same manifest §5b already verified for the base lib).
 2. For each `assets[]` entry, confirm its `sha256` appears in that verified
-   `manifest`.
+   `manifest` under its `name` (`hl_platform_sig_verify_composed`).
 
 **Any failure is fatal**: log a `[sig]` error and exit non-zero before serving,
 identical to the platform-layer posture. `--no-verify-platform` still bypasses
 the whole gethull layer (dev builds, forks). Pre-v0.1.0 all-zero placeholder
-pubkeys skip verification with the existing one-time warning.
+pubkeys skip verification with the existing one-time warning. The check is
+**presence-gated**: absent on pre-#114 apps and on cosmo (no composed archives),
+where §5b alone anchors trust; when present, it is enforced.
+
+**`release_domain` is recorded, not runtime-re-anchored (by design, this cut).**
+The `--with` backend features already carry a release-key trust chain that
+brackets the composed hash on both sides: `hull feature install` verifies the lib
+against the signed `hull.sha256` at fetch, and `hull build --with` re-verifies a
+cache-sourced lib against that same manifest at compose (closing the
+install-to-build TOCTOU). The hash recorded in `release_domain` is then sealed by
+the developer app-signature (it's inside the signed payload). Re-verifying it at
+runtime would require embedding a release manifest of feature hashes into every
+hull binary; since the install+compose+app-sig anchors already cover it, that is
+a deferred follow-up rather than a gap. The block is emitted so the provenance is
+auditable and app-sig-sealed today.
 
 Note the guarantee is an **attestation**, not a re-hash: the runtime can't re-hash
 archives already linked into its own image, exactly as the platform layer works
