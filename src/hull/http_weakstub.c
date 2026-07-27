@@ -30,7 +30,12 @@
 
 #include <stdio.h>
 
-#ifdef HL_ENABLE_HTTP_SERVER
+/* Present in EVERY native base (not gated on HL_ENABLE_HTTP_SERVER): a reduced
+ * flavor (client-only / pure-compute) drops the web bindings but a composed
+ * runtime still references these symbols, so the base must carry the weak
+ * defaults for the reduced-flavor x runtime compose to link (issue #114,
+ * Phase D). Harmless in a full base (the composed web archive's strong defs
+ * win) and in cosmo (its in-base strong defs win). */
 
 #ifdef HL_ENABLE_LUA
 #include "hull/runtime/lua.h"    /* HlLua, KlServer, KlRouter, lua_State + wire protos */
@@ -119,5 +124,3 @@ __attribute__((weak)) void hl_js_test_run(JSContext *ctx, int *total, int *passe
     (void)out; (void)results; (void)max_results;
 }
 #endif /* HL_ENABLE_JS */
-
-#endif /* HL_ENABLE_HTTP_SERVER */

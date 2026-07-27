@@ -1538,19 +1538,21 @@ int main(int argc, char **argv) { return hl_app_run(argc, argv); }
         -- archive (features are native-only). Native has a runtime-less base and
         -- composes exactly one runtime here.
         if app_rt and not is_cosmo then
-            -- Reduced flavors (server-only/client-only/pure-compute) drop
-            -- subsystems (HTTP caps + Keel) that the full-config runtime archive's
-            -- web-module bindings reference, so composing a runtime onto a reduced
-            -- base fails to link (~52 undefined symbols). The HTTP-as-a-feature
-            -- seam (issue #114) is what lets a reduced flavor omit those bindings;
-            -- fail closed with a clear message until then.
-            if opts.flavor and opts.flavor ~= "full" then
+            -- Reduced-flavor x composed-runtime (issue #114, Phase D).
+            -- pure-compute is fully supported: it has no HTTP at all, so the app
+            -- declares no HTTP module (needs_http is false below), and only the
+            -- pure runtime is composed onto the Keel-free base; the runtime's few
+            -- web-symbol references resolve to the base http_weakstub no-ops.
+            -- server-only / client-only remain fail-closed: the HTTP feature is
+            -- still monolithic (all http caps in one libhull_feature-http.a), so
+            -- the server/client split can't be expressed against it yet.
+            if opts.flavor and opts.flavor ~= "full" and opts.flavor ~= "pure-compute" then
                 tool.stderr("hull build: --flavor=" .. opts.flavor .. " isn't supported "
-                    .. "yet with the composed-runtime model (a reduced flavor drops "
-                    .. "subsystems the runtime's bindings reference).\n")
-                tool.stderr("hint: use the default (full) flavor for now; tracked in "
-                    .. "https://github.com/artalis-io/hull/issues/114 "
-                    .. "(HTTP as a composable feature).\n")
+                    .. "yet with the composed-runtime model (the HTTP feature is "
+                    .. "monolithic, so the server/client split can't be expressed).\n")
+                tool.stderr("hint: use --flavor=full or --flavor=pure-compute; the "
+                    .. "server-only/client-only split is tracked in "
+                    .. "https://github.com/artalis-io/hull/issues/114.\n")
                 tool.rmdir(tmpdir); tool.exit(1)
             end
 

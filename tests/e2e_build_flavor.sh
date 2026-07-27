@@ -53,31 +53,35 @@ fi
 echo "$out" | grep -q "HL_ENABLE_HTTP_SERVER" || fail "expected HTTP_SERVER rejection: $out"
 pass "forbidden module (hull/http-server) rejected at build time"
 
-# ── 3. reduced-flavor x runtime is deferred (fails closed, issue #114) ──
+# ── 3. pure-compute x runtime composes, links, and runs (issue #114, Phase D) ──
 #
-# The runtime-featurify epic makes the native base runtime-less; the full-config
-# runtime archive's web bindings reference subsystems a reduced flavor drops, so
-# composing a runtime onto a reduced-flavor base cannot link yet. `hull build`
-# fails CLOSED with a clear pointer to the HTTP-as-a-feature epic rather than
-# emitting a raw linker error. Re-enable the build+run assertions (exit 7, zero
-# mbedTLS hashing symbols) when https://github.com/artalis-io/hull/issues/114
-# lands. The flavor VALIDATION (parts 1-2) and auto-SELECTION (below) still work.
-if out=$("$HULL" build --flavor=pure-compute "$WORK/pc" -o "$WORK/pc/app" 2>&1); then
-    fail "reduced-flavor x runtime should fail closed until #114"
+# The native base is runtime-less AND HTTP-core-less; a pure-compute app declares
+# no HTTP module, so `hull build --flavor=pure-compute` composes only the pure
+# runtime onto the Keel-free base (the runtime's few web-symbol references
+# resolve to the base http_weakstub no-ops). The produced binary runs and carries
+# no Keel / mbedTLS / http surface.
+if ! out=$("$HULL" build --flavor=pure-compute "$WORK/pc" -o "$WORK/pc/app" 2>&1); then
+    fail "pure-compute x runtime should build: $out"
 fi
-echo "$out" | grep -q "isn't supported yet with the composed-runtime model" \
-    || fail "expected the deferred-flavor message: $out"
-echo "$out" | grep -q "issues/114" || fail "expected the #114 tracking pointer: $out"
-pass "reduced-flavor x runtime fails closed with the #114 pointer"
+echo "$out" | grep -q "composed runtime" || fail "expected a composed runtime: $out"
+echo "$out" | grep -q "HTTP-free app" || fail "expected the HTTP-free skip message: $out"
+rc=0; "$WORK/pc/app" >/dev/null 2>&1 || rc=$?
+[ "$rc" = 7 ] || fail "pure-compute app should exit 7, got $rc"
+# The Keel-free payoff: no mbedTLS TLS symbols and no HTTP cap in the binary.
+if command -v nm >/dev/null 2>&1; then
+    n=$(nm "$WORK/pc/app" 2>/dev/null | grep -cE ' T _?mbedtls_ssl' || true)
+    [ "$n" = 0 ] || fail "pure-compute binary should carry no mbedTLS TLS symbols (got $n)"
+    n=$(nm "$WORK/pc/app" 2>/dev/null | grep -cE ' T _?hl_cap_http_request' || true)
+    [ "$n" = 0 ] || fail "pure-compute binary should carry no HTTP cap (got $n)"
+fi
+pass "pure-compute x runtime builds, runs (exit 7), and drops Keel/mbedTLS/http"
 
-# ── 4. --flavor=auto still infers the minimal flavor from the manifest ──
-# Selection logic is independent of the compose gap: auto still picks
-# pure-compute for an app.main app; the build then fails closed as in part 3.
-out=$("$HULL" build --flavor=auto "$WORK/pc" -o "$WORK/pc/auto" 2>&1) || true
+# ── 4. --flavor=auto infers pure-compute for an app.main app and builds it ──
+out=$("$HULL" build --flavor=auto "$WORK/pc" -o "$WORK/pc/auto" 2>&1) || fail "auto build failed: $out"
 echo "$out" | grep -q "auto selected 'pure-compute'" \
     || fail "auto should select pure-compute for an app.main app: $out"
-echo "$out" | grep -q "isn't supported yet with the composed-runtime model" \
-    || fail "auto pure-compute build should fail closed until #114: $out"
-pass "--flavor=auto -> pure-compute selection (build deferred per #114)"
+rc=0; "$WORK/pc/auto" >/dev/null 2>&1 || rc=$?
+[ "$rc" = 7 ] || fail "auto-selected pure-compute app should exit 7, got $rc"
+pass "--flavor=auto -> pure-compute selection builds + runs"
 
 echo "PASS: e2e_build_flavor"
