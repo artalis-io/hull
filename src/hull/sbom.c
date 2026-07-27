@@ -144,8 +144,6 @@ void hl_sbom_set_scope_libhull(int on) { g_sbom_libhull = on ? 1 : 0; }
 typedef enum {
     SBOM_FLAVOR_NONE = 0,
     SBOM_FLAVOR_FULL,
-    SBOM_FLAVOR_SERVER_ONLY,
-    SBOM_FLAVOR_CLIENT_ONLY,
     SBOM_FLAVOR_PURE_COMPUTE,
 } SbomFlavor;
 
@@ -161,8 +159,6 @@ int hl_sbom_set_scope_flavor(const char *flavor)
     }
     static const struct { const char *name; SbomFlavor f; } tbl[] = {
         { "full",         SBOM_FLAVOR_FULL },
-        { "server-only",  SBOM_FLAVOR_SERVER_ONLY },
-        { "client-only",  SBOM_FLAVOR_CLIENT_ONLY },
         { "pure-compute", SBOM_FLAVOR_PURE_COMPUTE },
     };
     for (size_t i = 0; i < sizeof(tbl) / sizeof(tbl[0]); i++) {

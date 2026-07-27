@@ -53,9 +53,9 @@ distinction is the whole point of this document.
 ## 2. Why flavors don't scale to additive libraries
 
 A flavor is a **named, published, signed build**. That works for the HTTP
-spectrum because it's a *subtractive lattice*: `full ⊃ server-only ⊃
-pure-compute`. It's small and finite — a handful of points, each a slim of the
-default. You can pre-build, sign, and store all of them.
+axis because it's a *subtractive lattice*: `full ⊃ pure-compute`. It's small and
+finite — a handful of points, each a slim of the default. You can pre-build,
+sign, and store all of them.
 
 Large optional libraries are the opposite: **additive and orthogonal.** DuckDB
 (~58 MB), a headless browser, a graphics lib, an ML runtime — any *subset* could
@@ -327,7 +327,7 @@ presets as the only user-facing vocabulary. Steps 2–3 are a later cleanup; ste
   runtime-featurify epic (#113) the native base is runtime-less and a produced
   app composes one full-config runtime archive. That archive's web bindings
   reference HTTP caps + Keel a **reduced** flavor drops, so a runtime does NOT
-  yet compose orthogonally onto server-only/client-only/pure-compute (it fails
+  yet compose orthogonally onto pure-compute (it fails
   closed). The fix is **HTTP as a composable feature** with a weak seam so a
   reduced flavor omits the web bindings — the same per-runtime-bridge seam that
   also re-enables `--with=tui`. Until then the M+N-composes-M×N property holds

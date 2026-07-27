@@ -245,10 +245,8 @@ uint32_t hl_module_build_caps(void)
  * for the resolver target-caps, the platform-lib lookup, and listing.
  * Note: HL_MOD_CAP_HTTP == HTTP_CLIENT | HTTP_SERVER (the alias). */
 static const HlBuildFlavor BUILD_FLAVORS[] = {
-    { "full",         0,                      "libhull_platform" },
-    { "server-only",  HL_MOD_CAP_HTTP_CLIENT, "libhull_platform-server-only" },
-    { "client-only",  HL_MOD_CAP_HTTP_SERVER, "libhull_platform-client-only" },
-    { "pure-compute", HL_MOD_CAP_HTTP,        "libhull_platform-pure-compute" },
+    { "full",         0,               "libhull_platform" },
+    { "pure-compute", HL_MOD_CAP_HTTP, "libhull_platform-pure-compute" },
 };
 
 const HlBuildFlavor *hl_build_flavor_find(const char *name)

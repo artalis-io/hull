@@ -70,7 +70,7 @@ jobs:
         uses: ./.github/actions/hull-build-container
         with:
           run: |
-            for f in server-only client-only pure-compute; do
+            for f in pure-compute; do
               make "platform-$f"
               mv "build/libhull_platform-$f.a" \
                  "build/libhull_platform-$f-${{ matrix.name }}.a"
@@ -78,7 +78,7 @@ jobs:
       - name: Build platform flavors (macOS)
         if: runner.os == 'macOS'
         run: |
-          for f in server-only client-only pure-compute; do
+          for f in pure-compute; do
             make "platform-$f"
             mv "build/libhull_platform-$f.a" \
                "build/libhull_platform-$f-${{ matrix.name }}.a"
@@ -133,7 +133,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        flavor: [server-only, client-only, pure-compute]
+        flavor: [pure-compute]
 
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
@@ -1071,8 +1071,6 @@ jobs:
           mv artifacts/platform-flavors-linux-x86_64/*.a  dist/
           mv artifacts/platform-flavors-linux-aarch64/*.a dist/
           mv artifacts/platform-flavors-darwin-arm64/*.a  dist/
-          mv artifacts/platform-cosmo-flavor-server-only/*.a   dist/
-          mv artifacts/platform-cosmo-flavor-client-only/*.a   dist/
           mv artifacts/platform-cosmo-flavor-pure-compute/*.a  dist/
           # libhull: the no-runtime embedding archive (libhull L-4). Native
           # per-arch (libhull-<arch>.a) + dual-arch cosmo
@@ -1148,7 +1146,7 @@ jobs:
           # pure-compute differs (drops Keel + mbedTLS); the others equal the
           # full hull SBOM minus the binary hash, published for symmetry so a
           # `hull platform install <flavor>` consumer has its own bill.
-          for f in server-only client-only pure-compute; do
+          for f in pure-compute; do
             ./hull-linux-x86_64 sbom --flavor="$f" --format=json      > "libhull_platform-$f.sbom.json"
             ./hull-linux-x86_64 sbom --flavor="$f" --format=cyclonedx > "libhull_platform-$f.sbom.cdx.json"
             ./hull-linux-x86_64 sbom --flavor="$f" --format=spdx      > "libhull_platform-$f.sbom.spdx.json"

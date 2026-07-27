@@ -1551,23 +1551,13 @@ int main(int argc, char **argv) { return hl_app_run(argc, argv); }
         -- archive (features are native-only). Native has a runtime-less base and
         -- composes exactly one runtime here.
         if app_rt and not is_cosmo then
-            -- Reduced-flavor x composed-runtime (issue #114, Phase D).
-            -- pure-compute is fully supported: it has no HTTP at all, so the app
-            -- declares no HTTP module (needs_http is false below), and only the
-            -- pure runtime is composed onto the Keel-free base; the runtime's few
-            -- web-symbol references resolve to the base http_weakstub no-ops.
-            -- server-only / client-only remain fail-closed: the HTTP feature is
-            -- still monolithic (all http caps in one libhull_feature-http.a), so
-            -- the server/client split can't be expressed against it yet.
-            if opts.flavor and opts.flavor ~= "full" and opts.flavor ~= "pure-compute" then
-                tool.stderr("hull build: --flavor=" .. opts.flavor .. " isn't supported "
-                    .. "yet with the composed-runtime model (the HTTP feature is "
-                    .. "monolithic, so the server/client split can't be expressed).\n")
-                tool.stderr("hint: use --flavor=full or --flavor=pure-compute; the "
-                    .. "server-only/client-only split is tracked in "
-                    .. "https://github.com/artalis-io/hull/issues/114.\n")
-                tool.rmdir(tmpdir); tool.exit(1)
-            end
+            -- Reduced-flavor x composed-runtime (issue #114, Phase D). The only
+            -- flavors are `full` (HTTP on) and `pure-compute` (HTTP off), both
+            -- fully supported here: a pure-compute app declares no HTTP module,
+            -- so needs_http (below) is false and only the pure runtime is
+            -- composed onto the Keel-free base (the runtime's few web-symbol
+            -- references resolve to the base http_weakstub no-ops). An unknown
+            -- flavor is already rejected upstream at flavor validation.
 
             -- Does this app need HTTP? (issue #114, Phase C2.) The route/ws/sse
             -- decorations (app.get/…) only exist when an HTTP module is declared,

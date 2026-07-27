@@ -2475,7 +2475,7 @@ $(shell test "$$(cat $(BUILD_CONFIG_FILE) 2>/dev/null)" = "$(BUILD_FINGERPRINT)"
 
 # ── Targets ─────────────────────────────────────────────────────────
 
-.PHONY: all clean test debug msan tsan fuzz fuzz-run e2e e2e-build e2e-postgres e2e-mysql e2e-http e2e-sandbox e2e-examples e2e-cli e2e-migrate e2e-templates e2e-agent e2e-context e2e-mcp e2e-agent-api e2e-compute e2e-compute-dev e2e-aot-cache e2e-cache e2e-cache-concurrent e2e-cache-cosmo e2e-named-connections e2e-dynamic-connections e2e-tcc e2e-build-flavor e2e-install e2e-ca-bundle e2e-update e2e-tools e2e-multipart e2e-attachment e2e-blob e2e-hypermedia-photos-upload e2e-jwt-asym hull-test-examples self-build check analyze cppcheck bench bench-template bench-wasm bench-gpu bench-bytecode-cache wamrc coverage lint-lua lint-js lint platform platform-cosmo platform-server-only platform-client-only platform-pure-compute platform-cosmo-server-only platform-cosmo-client-only platform-cosmo-pure-compute hardening check-hardening
+.PHONY: all clean test debug msan tsan fuzz fuzz-run e2e e2e-build e2e-postgres e2e-mysql e2e-http e2e-sandbox e2e-examples e2e-cli e2e-migrate e2e-templates e2e-agent e2e-context e2e-mcp e2e-agent-api e2e-compute e2e-compute-dev e2e-aot-cache e2e-cache e2e-cache-concurrent e2e-cache-cosmo e2e-named-connections e2e-dynamic-connections e2e-tcc e2e-build-flavor e2e-install e2e-ca-bundle e2e-update e2e-tools e2e-multipart e2e-attachment e2e-blob e2e-hypermedia-photos-upload e2e-jwt-asym hull-test-examples self-build check analyze cppcheck bench bench-template bench-wasm bench-gpu bench-bytecode-cache wamrc coverage lint-lua lint-js lint platform platform-cosmo platform-pure-compute platform-cosmo-pure-compute hardening check-hardening
 
 all: $(BUILDDIR)/hull
 
@@ -2642,11 +2642,9 @@ platform: $(PLATFORM_LIB)
 # to avoid clobbering the default build or build/hull. `hull build
 # --flavor=<flavor>` discovers the result in $(BUILDDIR)/. See
 # docs/build_flavors.md.
-PLATFORM_FLAVOR_FLAGS_server-only  := HL_ENABLE_HTTP_CLIENT=0
-PLATFORM_FLAVOR_FLAGS_client-only  := HL_ENABLE_HTTP_SERVER=0
 PLATFORM_FLAVOR_FLAGS_pure-compute := HL_ENABLE_HTTP=0
 
-platform-server-only platform-client-only platform-pure-compute: platform-%:
+platform-pure-compute: platform-%:
 	$(MAKE) platform BUILDDIR=$(BUILDDIR)/flavor-$* $(PLATFORM_FLAVOR_FLAGS_$*)
 	cp $(BUILDDIR)/flavor-$*/libhull_platform.a $(BUILDDIR)/libhull_platform-$*.a
 	@echo "built $(BUILDDIR)/libhull_platform-$*.a"
@@ -2937,7 +2935,7 @@ platform-cosmo:
 # platform-cosmo it `make clean`s between arches (cosmo needs a per-arch keel),
 # so it clobbers build/ -- build with an INSTALLED cosmo hull as the builder,
 # or copy the result aside before rebuilding the hull.
-platform-cosmo-server-only platform-cosmo-client-only platform-cosmo-pure-compute: platform-cosmo-%:
+platform-cosmo-pure-compute: platform-cosmo-%:
 	@rm -rf $(COSMO_STAGE) && mkdir -p $(COSMO_STAGE)
 	@echo "=== Building x86_64-cosmo platform ($* flavor) ==="
 	$(MAKE) clean

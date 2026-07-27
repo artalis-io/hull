@@ -10,7 +10,7 @@ for the runtimes.
 Since #113 the native base is runtime-less and a produced app composes exactly
 one **full-config** runtime archive. That archive's web-module bindings
 reference HTTP caps + Keel, so composing a runtime onto a **reduced** flavor
-(server-only / client-only / pure-compute) can't link — `hull build
+(pure-compute) can't link — `hull build
 --flavor=<reduced>` and the composed-runtime `--with=tui` path currently **fail
 closed** (guards in `build.lua`, pointing here). Making HTTP a composable
 feature with a weak seam lets a reduced flavor **omit** the web bindings, so the
@@ -234,33 +234,35 @@ work that unblocks the reduced-flavor × runtime compose. So C2 (skip the http
 core + web bindings) and that serve/Keel decoupling belong together, tracked
 into Phase D, rather than C2 being a quick gate on top of C1.
 
-### server-only / client-only x runtime — deliberately NOT split (decision)
+### The HTTP flavor axis is binary: full vs pure-compute (decision)
 
-These two flavors stay fail-closed under the composed-runtime model, and that is
-a decision, not a gap. Splitting `libhull_feature-http.a` (and the per-runtime
-web bindings, and `http_register.c`) into server and client halves to support
-them is a large refactor that is not worth it:
+The former `server-only` / `client-only` flavors were **removed** (not merely
+deferred). The `hull build --flavor` HTTP axis is now exactly two presets:
+`full` and `pure-compute`. Removing them was the right call:
 
-- **No size win.** server-only and client-only are both ~6.5 MB - the same as
-  full - because Keel + mbedTLS stay linked for either half (CLAUDE.md flavor
-  table). Only pure-compute (~5.8 MB) drops them, and pure-compute x runtime
-  already works (Phase D slice 1). So the split would buy only an *authority*
-  property ("this binary provably cannot make outbound calls" / "has no
-  listener"), not a smaller binary.
-- **The benefit is undercut by serve.o.** `serve.o` is base-resident and
-  references `kl_server_*`, so a client-only app still pulls Keel's server side
+- **No size win.** server-only and client-only were both ~6.5 MB - the same as
+  full - because Keel + mbedTLS stay linked whenever either HTTP half is on
+  (CLAUDE.md flavor table). Only pure-compute (~5.8 MB) drops them, and
+  pure-compute x runtime already works (Phase D slice 1). So the two removed
+  flavors bought only an *authority* property ("this binary provably cannot make
+  outbound calls" / "has no listener"), not a smaller binary.
+- **The benefit was undercut by serve.o.** `serve.o` is base-resident and
+  references `kl_server_*`, so a client-only app still pulled Keel's server side
   unless serve.o is *also* decoupled from Keel - a second large refactor on top
   of the caps/bindings split.
 - **The taxonomy has flavors retiring into presets over the feature** (a flavor
-  "is a preset over" the feature; features_and_flavors.md). Investing in a
-  server/client split of the HTTP feature to prop up two subtractive flavors
-  runs against that direction.
+  "is a preset over" the feature; features_and_flavors.md). Propping up two
+  subtractive flavors with a server/client split of the HTTP feature ran against
+  that direction.
 
-If a future need makes it worthwhile, the taxonomy-aligned shape is NOT to keep
-server-only/client-only as flavors but to split HTTP into two composable
-sub-features (`http-server` / `http-client`) selected by the app's declared
-modules (`needs_http` -> `needs_http_server` / `needs_http_client`), so a CLI
-tool that only does `http.fetch` composes just the client half. That also needs
-the serve.o/Keel decoupling to pay off. Tracked as a standalone follow-up; the
-core #114 goal (reduced-flavor x runtime via pure-compute, tui x runtime,
-HTTP-free apps drop the HTTP surface) is met without it.
+The internal compile-time flags `HL_ENABLE_HTTP_SERVER` / `HL_ENABLE_HTTP_CLIENT`
+still exist (they drive the per-runtime web-archive split), but they are no
+longer exposed as shippable flavor presets. If per-half HTTP is ever wanted, the
+taxonomy-aligned shape is NOT to reintroduce server-only/client-only as flavors
+but to split HTTP into two composable sub-features (`http-server` /
+`http-client`) selected by the app's declared modules (`needs_http` ->
+`needs_http_server` / `needs_http_client`), so a CLI tool that only does
+`http.fetch` composes just the client half. That also needs the serve.o/Keel
+decoupling to pay off. Tracked as a standalone follow-up; the core #114 goal
+(reduced-flavor x runtime via pure-compute, tui x runtime, HTTP-free apps drop
+the HTTP surface) is met without it.

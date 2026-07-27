@@ -680,9 +680,8 @@ hull build .                                    # produces ./app binary
 ```
 
 **Build flavors.** `hull build --flavor=<flavor>` produces a narrower,
-smaller binary matched to what the app needs: `full` (server + client
-HTTP, default), `server-only` (no outbound HTTP client), `client-only`
-(no inbound server; a CLI that calls APIs), `pure-compute` (no HTTP at
+smaller binary matched to what the app needs: `full` (HTTP on: server +
+client, default) or `pure-compute` (no HTTP at
 all; smallest). `--flavor=auto` infers the minimal flavor from your
 declared modules. The build validates the manifest against the target
 flavor, so declaring a module that needs a dropped subsystem fails the

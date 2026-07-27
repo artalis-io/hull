@@ -73,11 +73,10 @@ const HlSbomEntry *hl_sbom_entries(size_t *count);
 void hl_sbom_set_scope_libhull(int on);
 
 /* Scope the next hl_sbom_format() to a `hull build --flavor` target: report
- * the dependency set that flavor's platform lib links. Today only
- * "pure-compute" changes the set (drops the needs_http components — Keel +
- * mbedTLS); "full" / "server-only" / "client-only" link the same vendored
- * set. @p flavor is one of those four names, or NULL/"" to clear the scope.
- * Returns 0 on success, -1 on an unknown flavor. Process-global. */
+ * the dependency set that flavor's platform lib links. "pure-compute" drops the
+ * needs_http components (Keel + mbedTLS); "full" links the full vendored set.
+ * @p flavor is one of those two names, or NULL/"" to clear the scope. Returns 0
+ * on success, -1 on an unknown flavor. Process-global. */
 int hl_sbom_set_scope_flavor(const char *flavor);
 
 /* Format the SBOM and write to `fp`. Returns 0 on success, -1 on error.

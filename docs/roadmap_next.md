@@ -26,7 +26,7 @@ For completed historical roadmaps see [`archive/roadmaps/`](archive/roadmaps/).
 - ✅ **v0.2.0 batch (§1.3 + §1.5.a)**. Hypermedia profile + web stdlib namespace reorganization. `hull init --profile htmx` scaffolds a complete HTMX + Pico app (CSP nonce, CSRF, session, flash, pagination, search-with-debounce, inline edit, loading indicator, form re-population, idempotency). 20 strictly-web stdlib modules moved under `hull/web/*` with fix-it migration hints. See [`../CHANGELOG.md#020`](../CHANGELOG.md).
 - ✅ **v0.3.0 batch (§1.5.b + §1.5.f, items 1–5 + first-party audit-log)**. Production-grade auth stack: `hull/web/auth-flows@1` (registration / verify / login / password-reset / magic-link / email-change / optional TOTP), `hull/web/middleware/totp@1` (RFC 6238 with dual-row enrollment + multi-key rotation + per-user + per-IP lockout), `hull/web/middleware/oauth@1` (OIDC Authorization Code + PKCE; Google + Microsoft Entra presets), `hull/web/middleware/audit-log@1` (append-only with per-device fingerprint + `cleanup_status` tri-state), `hull/web/auth-health@1` (probe + `hull agent auth-status`), `hull/web/pwned@1` (HIBP k-anonymity + 80KB embedded blocklist), `hull/qrcode@1`. Plus streaming multipart upload (`req:multipart()` / `req.multipart()`), `hull/attachment@1` + `hull/blob@1` + `hull/mime@1`, asymmetric crypto (RS256/384/512, PS256, ES256/384), SHA-NI runtime dispatch. **13 iterative security-audit rounds** converged in round 13 (zero findings, three independent reviewers). 132 commits since v0.2.0. See [`../CHANGELOG.md#030`](../CHANGELOG.md).
 - ✅ **v0.4.0 batch (2026-06-17)**. HTMX widget tier complete (8 widgets: toast, confirm, form, search, inline-edit, sort, pagination, table) with browser-driven Playwright E2E coverage. Three production-affecting `hull build` + sandbox fixes (a standalone binary silently broke any app declaring `manifest.fs.write`; `static/vendor/*` assets weren't embedded). See [`../CHANGELOG.md#040`](../CHANGELOG.md).
-- ✅ **v0.5.0 batch (2026-07-10, §5 + §6 native)**. Build-flavor epic (native half). All four HTTP flavors (full / server-only / client-only / pure-compute) link clean and are CI-covered; `hull build --flavor` + `--flavor=auto` (infers the minimal flavor from declared modules, validates the manifest against the target flavor at build time); signed per-flavor native platform libs + `hull flavor install <flavor>` / `flavor list`; build-time platform-lib re-verify closing the install->build TOCTOU. See [`../CHANGELOG.md#050`](../CHANGELOG.md).
+- ✅ **v0.5.0 batch (2026-07-10, §5 + §6 native)**. Build-flavor epic (native half). All four HTTP flavors (full / server-only / client-only / pure-compute) link clean and are CI-covered (server-only/client-only later removed, #114; the HTTP axis is now full vs pure-compute); `hull build --flavor` + `--flavor=auto` (infers the minimal flavor from declared modules, validates the manifest against the target flavor at build time); signed per-flavor native platform libs + `hull flavor install <flavor>` / `flavor list`; build-time platform-lib re-verify closing the install->build TOCTOU. See [`../CHANGELOG.md#050`](../CHANGELOG.md).
 - ✅ **v0.6.0 batch (2026-07-10, §6 cosmo)**. Signed published cosmo per-flavor platform libs (dual-arch), each built on its own fresh runner to avoid the second-cosmo-build loader corruption, + cosmo `hull flavor install`. See [`../CHANGELOG.md#060`](../CHANGELOG.md).
 - ✅ **libhull no-runtime embedding flavor (L-1..L-5, post-v0.6.0, on main)**. `make libhull` -> `libhull.a`, the runtime-free hardened core (no Lua/JS) that a native C/Rust/Zig host links to drive the two-phase sandbox + capability layer + WASM/GPU + signed-artifact machinery via the stable `<hull/embed.h>` ABI. L-1 archive + `sandbox_tool.c` split; L-2 versioned `hl_embed_*` ABI; L-3 sealed per-call `base_dir` (RO `sh_seal_arena`) + fail-closed seal + fork/SIGSEGV death test; L-4 release-signed archive (native + dual-arch cosmo) + scoped SBOM (`hull sbom --subject=libhull`); L-5 Rust + Zig reference embedders (`examples/embed_{c,rust,zig}`) with CI jobs. Follow-ups: c-audit single-shot-seal fix, SBOM `keel`/`mbedtls` gated on `HL_ENABLE_HTTP`, `hull sbom --flavor=<flavor>` + per-flavor release SBOMs, `tool_orchestration.o` purge-list fix, and the CI runner-pin ([§0.3.1](#03-trust-chain-hardening-post-v015-gap-analysis) runner-pin step). Design + use-cases + trust boundary: [`libhull_flavor.md`](libhull_flavor.md); [`roadmap.md`](roadmap.md) row 8.
 
@@ -4383,8 +4383,8 @@ other interpreter.
 **Known interim gap → tracked in issue #114 (HTTP as a composable feature).**
 The M+N-composes-M×N claim below holds for the **full** flavor but NOT for
 **reduced** flavors: the runtime archive is compiled full-config, so its web
-bindings reference HTTP caps + Keel that a reduced flavor (server-only /
-client-only / pure-compute) drops. `hull build --flavor=<reduced>` and the
+bindings reference HTTP caps + Keel that a reduced flavor (pure-compute)
+drops. `hull build --flavor=<reduced>` and the
 composed-runtime `--with=tui` path therefore **fail closed** (clear message
 pointing at #114) until HTTP becomes a composable feature with a weak seam that
 lets a reduced flavor omit those bindings.
@@ -4407,7 +4407,7 @@ entry extension. "Full / dual-runtime" is simply both composed; the distributed
 
 Why this beats the flavor-lib approach:
 - **No matrix.** Two runtime archives (`lua`, `js`) x 3 native arches = 6
-  published archives, and they compose with ANY flavor (`client-only` +
+  published archives, and they compose with ANY flavor (`pure-compute` +
   `--with=js`, etc.). M+N, not M x N. The cross-product the flavor sketch fought
   to contain never exists.
 - **Symmetric.** Slims *both* directions (QuickJS off a Lua app AND Lua off a JS
@@ -4520,12 +4520,12 @@ loading + the VFS, not the vtable (which is clean).
 
 ### Orthogonality with flavors (the payoff, concretely)
 
-`--flavor` still slims the HTTP axis (server-only / client-only / pure-compute).
-The runtime feature composes on top: a `client-only` Lua CLI that calls an API =
-`client-only` base + `--with=lua` (auto) = BOTH the HTTP slim and the runtime
-slim, from **one** published base flavor + **one** published runtime archive. No
-`client-only-lua` lib is ever built. That orthogonality is the whole reason to
-prefer this over the flavor-lib sketch.
+`--flavor` still slims the HTTP axis (full / pure-compute).
+The runtime feature composes on top: a `pure-compute` Lua CLI (an offline
+transform tool) = `pure-compute` base + `--with=lua` (auto) = BOTH the HTTP slim
+and the runtime slim, from **one** published base flavor + **one** published
+runtime archive. No `pure-compute-lua` lib is ever built. That orthogonality is
+the whole reason to prefer this over the flavor-lib sketch.
 
 ### Phases (all ✅ shipped in #113)
 

@@ -156,18 +156,18 @@ Hull's distribution is one binary; what's compiled into it is controlled by a sm
 
 Combine flags freely: `make HL_ENABLE_DB=0 HL_ENABLE_WASM=1 HL_ENABLE_TCC=0` yields a pure compute runtime with Lua/JS orchestration but no database or build-toolchain.
 
-### HTTP build flavors
+### HTTP build flags
 
-The two HTTP flags are independent. Each combination produces a useful binary (arm64 Darwin sizes for the default `make` invocation, i.e. DB + WASM + TUI + TCC all on):
+The two HTTP flags (`HL_ENABLE_HTTP_SERVER` / `HL_ENABLE_HTTP_CLIENT`) are independent **internal knobs**. They drive the per-runtime web-archive split; they are NOT exposed as shippable `--flavor` presets (the shipped HTTP axis is binary: `full` vs `pure-compute` — see "Build flavors for apps" below). Each combination still produces a useful binary at the `make` level (arm64 Darwin sizes for the default invocation, i.e. DB + WASM + TUI + TCC all on):
 
-| Flavor | Server | Client | Binary | Use case |
+| Config | Server | Client | Binary | Notes |
 |---|---|---|---|---|
-| Default | 1 | 1 | ~6.5 MB | Full HTTP. Web apps that serve requests and call out to APIs. |
-| Server-only | 1 | 0 | ~6.5 MB | Apps that handle inbound HTTP but are forbidden from making outgoing HTTP calls (compliance, network isolation). Keel + mbedTLS stay linked. |
-| **Client-only** | 0 | 1 | ~6.5 MB | CLI tools that call APIs over HTTPS. No HTTP listener; `http.fetch("https://...")` works from `app.main(fn)`. Keel + mbedTLS stay linked. |
-| Pure compute | 0 | 0 | ~5.8 MB | Compute / CLI binary with no HTTP, no Keel, no mbedTLS. See "Pure-compute builds" below. |
+| Default (full) | 1 | 1 | ~6.5 MB | Full HTTP. Web apps that serve requests and call out to APIs. This is the shipped `full` flavor. |
+| Server flag only | 1 | 0 | ~6.5 MB | Internal knob. Keel + mbedTLS stay linked (no size win), so this is not a shippable flavor. |
+| Client flag only | 0 | 1 | ~6.5 MB | Internal knob. Keel + mbedTLS stay linked (no size win), so this is not a shippable flavor. |
+| Pure compute | 0 | 0 | ~5.8 MB | Compute / CLI binary with no HTTP, no Keel, no mbedTLS. This is the shipped `pure-compute` flavor. See "Pure-compute builds" below. |
 
-All four flavors are link-validated on every push by the `flavors` matrix in `.github/workflows/ci.yml` (each builds, runs `hull version`, and runs an `app.main` exit-code smoke).
+The `full` (both on) and `pure-compute` (both off) configs are link-validated on every push by the `flavors` matrix in `.github/workflows/ci.yml` (each builds, runs `hull version`, and runs an `app.main` exit-code smoke).
 
 **Linker dependencies.** Keel's `libkeel.a` and mbedTLS are linked whenever either HTTP flag is on (Keel ships both halves; the linker dead-strips the unused side). The compile-time `-DHL_ENABLE_HTTP` macro is defined in that same case, so existing source guards continue to work. `HL_ENABLE_HTTP_SERVER` / `HL_ENABLE_HTTP_CLIENT` are only used where the distinction matters. When **both** halves are off, mbedTLS is dropped entirely; see "Pure-compute builds" for how Hull's own hashing stays available without it.
 
@@ -177,7 +177,7 @@ All four flavors are link-validated on every push by the `flavors` matrix in `.g
 
 The build flags above are compile-time properties of the `hull` binary. `hull build --flavor` makes the flavor a property of the **app binary you produce** instead: a full `hull` can build a narrower app.
 
-`hull build --flavor=full|server-only|client-only|pure-compute [app_dir]` links the app against the matching per-flavor platform library instead of the embedded (full) one. The flavors mirror the HTTP halves: `full` (server+client), `server-only` (no outbound HTTP client), `client-only` (no inbound HTTP server; CLI tools that call APIs), `pure-compute` (no HTTP at all; drops mbedTLS + Keel; smallest). `--flavor=auto` infers the minimal flavor from the app's declared modules (via `hl_build_flavor_auto`, which picks the flavor clearing the most caps the app doesn't need). The build **validates the app manifest against the TARGET flavor's caps**: a declared module that needs a dropped subsystem (e.g. `hull/http-server` under `client-only`) is rejected at build time with a clear message, so a flavor choice never silently breaks at runtime. Registry + resolver live in `src/hull/module_resolver.c` (`BUILD_FLAVORS[]`, `hl_module_resolver_resolve_caps`, `hl_build_flavor_auto`); the tool-side redirect is in `stdlib/cli/lua/hull/build.lua`.
+`hull build --flavor=full|pure-compute [app_dir]` links the app against the matching per-flavor platform library instead of the embedded (full) one. The HTTP axis is binary: `full` (HTTP on: server + client + Keel + mbedTLS) and `pure-compute` (no HTTP at all; drops mbedTLS + Keel; smallest). (The former `server-only` / `client-only` flavors were removed in #114: they were size-neutral vs `full` because Keel + mbedTLS stay linked whenever either HTTP half is on.) `--flavor=auto` infers the minimal flavor from the app's declared modules (via `hl_build_flavor_auto`, which picks the flavor clearing the most caps the app doesn't need). The build **validates the app manifest against the TARGET flavor's caps**: a declared module that needs a dropped subsystem (e.g. `hull/http-server` under `pure-compute`) is rejected at build time with a clear message, so a flavor choice never silently breaks at runtime. Registry + resolver live in `src/hull/module_resolver.c` (`BUILD_FLAVORS[]`, `hl_module_resolver_resolve_caps`, `hl_build_flavor_auto`); the tool-side redirect is in `stdlib/cli/lua/hull/build.lua`.
 
 The per-flavor platform lib is found (in order) in the local build dirs, then `~/.hull/platform/` (where `hull flavor install <flavor>` caches it, see below), then it errors with a fix-it hint. `make platform-<flavor>` (native) / `make platform-cosmo-<flavor>` (cosmo dual-arch) build it from source; cosmo lays the pair out in the `.aarch64/` apelink layout.
 
@@ -287,7 +287,7 @@ twenty lines of Lua. The four, and the single question that separates each:
    (`stdlib/cli/lua/hull/build.lua`). Examples: `duckdb`, `postgres`, `mysql`,
    `gpu`, `tui`.
 4. **Are you turning a default subsystem OFF to produce a smaller base?** →
-   **flavor** (preset). Examples: `server-only`, `client-only`, `pure-compute`.
+   **flavor** (preset). Example: `pure-compute`.
 
 **The sharp rules.** New vendored C or new authority → **feature** (additive).
 Turning a default off → **flavor** (subtractive). A separate program → **tool**.
@@ -305,7 +305,7 @@ candidates classified against this table live in
 
 `make HL_ENABLE_HTTP=0` turns **both** HTTP halves off (it's the back-compat alias that pins `HL_ENABLE_HTTP_SERVER=0` and `HL_ENABLE_HTTP_CLIENT=0`). This is the only flavor that drops **mbedTLS and Keel entirely**. Use it for an offline, network-free compute or signing binary: a WASM/GPU transform pipeline, a local data tool, an air-gapped batch job. Apps run via `app.main(fn)`.
 
-What's removed (on top of the server-only / client-only drops):
+What's removed:
 - `vendor/mbedtls/**` (the whole TLS stack) and Keel's `libkeel.a`
 - Outbound `http.fetch` (cap/http + cap/http_async), SMTP (cap/smtp), `hull update`
 - The inbound HTTP server, routing, middleware, WebSocket, SSE, and the in-process test harness

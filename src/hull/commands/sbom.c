@@ -23,7 +23,7 @@ static void usage(FILE *fp)
 {
     fprintf(fp,
         "Usage: hull sbom [--format=<format>] [--subject=<hull|libhull>]\n"
-        "                 [--flavor=<full|server-only|client-only|pure-compute>]\n"
+        "                 [--flavor=<full|pure-compute>]\n"
         "\n"
         "Print the Software Bill of Materials for this hull binary.\n"
         "\n"
@@ -33,8 +33,8 @@ static void usage(FILE *fp)
         "              Lua/QuickJS runtimes; keeps the linked core + Keel.\n"
         "\n"
         "Flavor (report a `hull build --flavor` platform lib's deps):\n"
-        "  full / server-only / client-only   Same vendored set as the binary.\n"
-        "  pure-compute                       Drops Keel + mbedTLS (no HTTP).\n"
+        "  full           Same vendored set as the binary.\n"
+        "  pure-compute   Drops Keel + mbedTLS (no HTTP).\n"
         "\n"
         "Formats:\n"
         "  human       Default. Pretty table mirroring LICENSING.md style.\n"
@@ -93,7 +93,7 @@ int hl_cmd_sbom(int argc, char **argv, const HlCommandEnv *env)
             }
             continue;
         }
-        /* --flavor=<full|server-only|client-only|pure-compute>: report the
+        /* --flavor=<full|pure-compute>: report the
          * dependency set that flavor's platform lib links (the SBOM analogue
          * of `hull build --flavor`). Self-contained like --subject above. */
         if (strcmp(argv[i], "--flavor") == 0 ||
@@ -106,13 +106,13 @@ int hl_cmd_sbom(int argc, char **argv, const HlCommandEnv *env)
             }
             if (!fl) {
                 fprintf(stderr, "hull sbom: --flavor requires a value "
-                        "(full|server-only|client-only|pure-compute)\n");
+                        "(full|pure-compute)\n");
                 usage(stderr);
                 return 1;
             }
             if (hl_sbom_set_scope_flavor(fl) != 0) {
                 fprintf(stderr, "hull sbom: unknown flavor '%s' "
-                        "(expected full|server-only|client-only|pure-compute)\n",
+                        "(expected full|pure-compute)\n",
                         fl);
                 usage(stderr);
                 return 1;

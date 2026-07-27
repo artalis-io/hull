@@ -906,9 +906,7 @@ hull inspect myapp/
 app doesn't use. Smaller binary, smaller attack surface. Pass `--flavor`:
 
 ```bash
-hull build myapp/ --flavor=full          # server + client HTTP (default)
-hull build myapp/ --flavor=server-only   # inbound HTTP, no outbound client
-hull build myapp/ --flavor=client-only   # no inbound server; CLI tools calling APIs
+hull build myapp/ --flavor=full          # HTTP on: server + client (default)
 hull build myapp/ --flavor=pure-compute  # no HTTP at all; drops mbedTLS + Keel; smallest
 hull build myapp/ --flavor=auto          # infer the minimal flavor from declared modules
 ```
