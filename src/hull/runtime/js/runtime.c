@@ -308,6 +308,15 @@ static JSModuleDef *hl_js_module_loader(JSContext *ctx,
             hl_module_needs_absent_build_cap(spec))
             return hl_js_optional_stub(ctx, module_name);
 
+        /* Manifest-extraction leniency (issue #114): a transient runtime reading
+         * only app.manifest() can't resolve a feature-module stdlib file that
+         * rides the composed feature (e.g. hull:tui, whose stdlib .js is not in
+         * the base VFS). Stub it so the top-level runs and the manifest is
+         * captured. Never set on a real app load, so undeclared imports there
+         * still throw below. */
+        if (js->manifest_extract_lenient)
+            return hl_js_optional_stub(ctx, module_name);
+
         /* "hull:something" that isn't a known native and isn't in the
          * VFS stdlib — almost always a typo. Probe the registry for a
          * near match and surface "did you mean?" if anything is close. */
