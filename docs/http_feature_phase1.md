@@ -266,3 +266,90 @@ but to split HTTP into two composable sub-features (`http-server` /
 decoupling to pay off. Tracked as a standalone follow-up; the core #114 goal
 (reduced-flavor x runtime via pure-compute, tui x runtime, HTTP-free apps drop
 the HTTP surface) is met without it.
+
+---
+
+## serve.o / Keel decoupling — design + effort assessment (not implemented)
+
+**Goal.** Today a genuinely HTTP-free app (a stock-`hull` `app.main` CLI with no
+HTTP modules) still links Keel + mbedTLS, because `serve.o` is base-resident and
+references them. The Keel-free path exists (`--flavor=pure-compute`), but it
+requires choosing a flavor. This design would make the Keel-free binary the
+*automatic* outcome for any HTTP-free app on the default `hull` (no flavor).
+
+### The coupling (measured)
+
+`serve.o` (2108 lines, compiled with `HL_ENABLE_HTTP_SERVER=1`) references **20
+Keel symbols** in 6 groups, spread across 12 functions of the serve lifecycle:
+
+- **server**: `kl_server_init/free/freeze/run/use` (the listener + event loop)
+- **CORS**: `kl_cors_init/add_origin/middleware`
+- **conn pool**: `kl_cpool_init/free`
+- **compression**: `kl_compress_miniz_*` / `kl_decompress_miniz_*`
+- **TLS client (mbedTLS)**: `kl_tls_mbedtls_*` (outbound HTTPS for http.fetch /
+  smtp / update - the HTTP-*client* half)
+- `kl_strerror`
+
+An HTTP-free `app.main` app never *calls* `kl_server_run`, but `serve.o`
+*references* it, so the linker pulls Keel (and mbedTLS via the TLS client) to
+resolve the symbols. The whole tie is reference-level, not call-level.
+
+There is already a Keel-free precedent: **`serve_cli.c`** (352 lines, the
+`HL_ENABLE_HTTP_SERVER=0` variant) is the app.main runner with **0 Keel refs**
+(under `HTTP=0`) - arg parse, manifest wire, sandbox, async infra + thread pool,
+`app.main`, exit. It is the template for the decoupled base runner.
+
+### Design
+
+Mirror the existing HTTP-feature seam, applied to the serve loop:
+
+1. **Base carries a Keel-free runner** (generalize `serve_cli.c`): arg parse,
+   manifest extraction, `wire_caps` MINUS the Keel bits, `apply_sandbox`,
+   `load_app`, `run_main`, `cleanup`. References no `kl_*`.
+2. **The server lifecycle moves into the http feature** behind a seam
+   `hl_http_serve(HlServerState *s)` (weak no-op in base -> "no server", strong
+   override in `libhull_feature-http.a`): `init_server`, `wire_routes` + CORS,
+   `run` (`kl_server_run`), the server-side teardown, conn pool, compression.
+3. **The TLS client** (`kl_tls_mbedtls_*`, CA-bundle + outbound HTTPS) moves
+   behind the same seam (it is the http-client half); an HTTP-free app then pulls
+   neither the server nor the client Keel/mbedTLS.
+4. **The base runner dispatches**: after `app.main` (or when no main is
+   registered), if routes are registered AND the http feature is composed, call
+   `hl_http_serve(s)`; else exit. `HlServerState` moves to a shared header both
+   sides see.
+
+Net effect: an HTTP-free app links the Keel-free base runner only -> Keel +
+mbedTLS dead-strip (~0.7 MB, the pure-compute delta) with no `--flavor`.
+
+### Effort + risk
+
+**Moderate-to-large, and higher-risk than Phase B.** Phase B extracted leaf
+*cap* objects; this extracts the **orchestration core**, which is entangled with
+two delicate subsystems:
+
+- **Teardown ordering.** `hl_serve_teardown_*` / `hl_serve_cleanup` free TLS
+  contexts, WASM/GPU caches, the app context, and the sealed arena in a
+  documented, fork+SIGSEGV-tested order (the sealed arena MUST be destroyed
+  last, after every aliasing consumer). Splitting cap-wiring (base) from
+  server-teardown (feature) means that ordering now straddles the base/feature
+  boundary - the highest-risk part.
+- **`wire_caps` is interleaved.** It wires client TLS, CORS (server), and the
+  conn pool together and seals the manifest; cleanly separating the client/server
+  Keel wiring from the Keel-free cap wiring, while preserving the seal + sandbox
+  sequence, is intricate.
+- **Sandbox integration.** The CA-bundle / TLS-client setup feeds the sandbox
+  policy; moving it behind the seam must keep the phase-1/phase-2 sandbox
+  sequence intact.
+
+Rough size: comparable to Phase B + C1 combined (~a multi-day focused effort),
+dominated not by line count but by getting the teardown/seal/sandbox ordering
+provably correct (needs the death-test coverage extended across the new seam).
+
+### Recommendation
+
+**Defer.** The value is ergonomic (auto Keel-free for HTTP-free apps vs the
+one-flag `--flavor=pure-compute` that already delivers the identical binary), and
+the risk concentrates in the most safety-sensitive code (seal/sandbox/teardown).
+Do it only if "HTTP-free apps on stock hull should be Keel-free by default"
+becomes a stated goal; until then `--flavor=pure-compute` is the supported path
+and the ~0.7 MB is a deliberate default-ergonomics tradeoff.
