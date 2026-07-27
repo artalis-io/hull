@@ -288,6 +288,13 @@ CFLAGS += -DHULL_VENDOR_KEEL_VERSION=\"$(HULL_VENDOR_KEEL_VERSION)\"
 CFLAGS += -DHULL_VENDOR_WAMR_VERSION=\"$(HULL_VENDOR_WAMR_VERSION)\"
 CFLAGS += -DHULL_VENDOR_TCC_VERSION=\"$(HULL_VENDOR_TCC_VERSION)\"
 
+# Escape hatch to append flags from the command line, e.g.
+#   make EXTRA_CFLAGS='-DHL_PLATFORM_PUBKEY_HEX="<hex>"'
+# Both pubkey macros are #ifndef-guarded (release.h / signature.h), so this is
+# how the composed-signature test harness pins a TEST platform key without
+# editing a committed header. Empty by default; no effect on a normal build.
+CFLAGS += $(EXTRA_CFLAGS)
+
 .DEFAULT_GOAL := all
 
 # ── Directories ──────────────────────────────────────────────────────
@@ -4250,6 +4257,14 @@ e2e-tcc: $(BUILDDIR)/hull $(BUILDDIR)/libhull_platform.a
 # `hull build --flavor` MVP. Builds the pure-compute platform lib itself.
 e2e-build-flavor: $(BUILDDIR)/hull
 	sh tests/e2e_build_flavor.sh
+
+# Composed-feature signature e2e (issue #114). Rebuilds the platform lib + hull
+# TWICE with a test key, so it is slow (~minutes) and NOT part of the default
+# e2e sweep - run it explicitly. It is the only local coverage of the gethull
+# platform-sig layer (dev builds otherwise use the all-zeros placeholder).
+e2e-composed-sig: $(BUILDDIR)/hull
+	sh tests/e2e_composed_sig.sh
+.PHONY: e2e-composed-sig
 
 e2e-install:
 	sh tests/e2e_install.sh
