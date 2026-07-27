@@ -84,9 +84,12 @@ strong overrides whole-archived from the feature lib).
 - `worker_wasm.o` (the async compute worker)
 - `WAMR_OBJS` (the vendored WAMR archive, the ~256 KB)
 
-**Stays in the base, gains a weak seam** (`include/hull/wasm_feature.h`,
-weak no-ops in `cap/wasm_feature.c`, real-signature weak stubs in a base TU
-`src/hull/wasm_weakstub.c` for the symbols base objects reference):
+**Stays in the base, gains a weak seam.** Unlike the GPU/TUI features (which use
+a `hl_*_feature_backends` hook indirection), the spike showed WASM needs **only
+real-signature weak stubs** for the existing `hl_cap_wasm_*` / `hl_wasm_buffer_*`
+symbols that base objects call directly — a single base TU `src/hull/wasm_weakstub.c`
+(the exact `http_weakstub.c` pattern), no new `wasm_feature.h` hook header. The
+composed `libhull_feature-wasm.a` whole-archives its strong definitions over them:
 
 - **`cap/db_udf.c`** (base DB layer) references `hl_cap_wasm_instance_*`. On a
   WASM-free base those resolve to weak stubs that fail closed:
@@ -94,19 +97,48 @@ weak no-ops in `cap/wasm_feature.c`, real-signature weak stubs in a base TU
   works — that path never calls WASM; `db.udf.register(name, "module")`
   (WASM-backed) returns a clear "WASM feature not composed" error. This is the
   central seam: the DB layer stays whole, only the wasm-backed branch degrades.
-- **`compute.*` runtime bindings.** Two options, decide in Phase 0:
-  - **(a) weak-seam in place (simpler).** `mod_compute.o` stays in the runtime
-    archive and calls `hl_cap_wasm_*` through the seam; on a WASM-free base
-    `compute.available()` → false and every `compute.call/async/instance/segment/
-    stream/buffer` returns "not_available". No new per-runtime archive.
-  - **(b) per-runtime bridge (parallels HTTP-C).** `mod_compute.o` moves into
-    `libhull_feature-wasm-<rt>.a`, composed with the core when `needs_wasm`. The
-    pure runtime keeps weak stubs for the few `mod_compute` symbols `modules.o`
-    references. Cleaner symbol separation, one more archive per runtime.
-  Recommendation: **(a)** — the `compute.*` binding surface is small and the
-  buffer-protocol coupling (`WasmBuffer`) makes a clean per-runtime extraction
-  fiddlier than it was for the web bindings. Prove with an `nm` assertion that a
-  compute-free app has zero `wasm_*`/WAMR symbols regardless.
+- **`compute.*` runtime bindings → decision: (b) per-runtime bridge.** The
+  Phase-0 spike (`nm` symbol map, below) resolved the (a)/(b) fork in favor of
+  **(b)**: `mod_compute.o` moves into `libhull_feature-wasm-<rt>.a`, composed
+  with the core when `needs_wasm`. The spike showed the extraction is clean —
+  `mod_compute.o` defines only two globals (`luaopen_hull_compute`,
+  `lua_push_wasm_buffer`), so the base needs just two per-runtime weak stubs, and
+  the (a)-vs-(b) *difference* is only those two symbols (the real seam — the
+  cap-symbol weak stubs — is identical either way). (b) gets the honest win: a
+  compute-free app's runtime archive is genuinely `mod_compute`-free (zero
+  WasmBuffer/compute binding code), which makes the "no `wasm_*` symbols" `nm`
+  assertion trivially true rather than a claim about dead-but-linked code.
+
+### Phase 0 spike findings (symbol map)
+
+The seam is entirely **weak stubs for existing cap symbols** (like
+`http_weakstub.c`), not a new hook indirection — base objects call
+`hl_cap_wasm_*` / `hl_wasm_buffer_*` directly. Two symbol tiers:
+
+**Tier 1 — the core cap-seam (11 symbols, identical for (a) and (b)).** Base
+objects that STAY reference these; `wasm_weakstub.c` provides weak no-ops that
+the composed `libhull_feature-wasm.a` overrides:
+
+| Symbol(s) | Referenced by (stays in base) | Degrades to |
+|---|---|---|
+| `hl_cap_wasm_init` / `_destroy` | `app_context.o`, `serve.o` (cache lifecycle) | no-op init, `available()` false |
+| `hl_cap_wasm_load` / `_instance_create` / `_call` / `_destroy` | `cap_db_udf.o` (WASM-backed UDF) | wasm-backed `db.udf` errors closed; **function UDFs unaffected** |
+| `hl_wasm_buffer_data` / `_len` | `mod_buffer` (unified buffer protocol) | `WasmBuffer` type absent; other buffer types unaffected |
+| `hl_wasm_buffer_borrow` / `_release` | `mod_image` (`image.from_buffer` borrow) | can't borrow a `WasmBuffer` (none exist) |
+| `hl_wasm_buffer_create_adopted` | `mod_gpu` (GPU result → `WasmBuffer`) | GPU returns string/`ArrayBuffer`, not a `WasmBuffer` |
+
+**Tier 2 — the two (b)-specific per-runtime stubs.** Because `mod_compute.o`
+leaves the runtime archive under (b):
+
+| Symbol | Referenced by (stays) | Weak stub degrades to |
+|---|---|---|
+| `luaopen_hull_compute` (+ js) | `modules.o` (module registry) | the resolver already returns nil for an absent optional cap; the stub just satisfies the link (exact `http_weakstub` pattern) |
+| `lua_push_wasm_buffer` (+ js) | `mod_gpu.o` (GPU chaining a result as a `WasmBuffer`) | can't push a `WasmBuffer` without WAMR — the correct degradation |
+
+Note `lua_push_wasm_buffer` + the `WasmBuffer` userdata belong **with** the wasm
+feature (they wrap WAMR-backed memory), so keeping them in `mod_compute.o`/the
+bridge and weak-stubbing the GPU reference is semantically right — a WASM-free
+base genuinely cannot produce a `WasmBuffer`. No relocation needed.
 - **`compute.buffer` / `WasmBuffer`.** On a WASM-free base, `compute.buffer(...)`
   fails ("WASM feature not composed"); a `WasmBuffer` cannot be created, so the
   unified buffer protocol's other producers (`fs.mmap` → `MappedBuffer`,
@@ -143,10 +175,12 @@ attests it automatically.
 
 ## Phase plan
 
-- **Phase 0 — seam (additive, no base-flip).** Add `wasm_feature.h` +
-  `cap/wasm_feature.c` weak defaults + `wasm_weakstub.c`; route `cap/db_udf.c`
-  and `mod_compute` through the seam. Base still compiles WAMR in. Prove the seam
-  with the existing `test_wasm` / `test_wasm_buffer` unchanged. Decide (a) vs (b).
+- **Phase 0 — spike (done) + seam (additive, no base-flip).** ✅ Spike done: the
+  `nm` symbol map resolved (a)/(b) → **(b)** and enumerated the exact seam surface
+  (11 core cap stubs + 2 per-runtime stubs, tables above). Remaining Phase-0 work:
+  add `src/hull/wasm_weakstub.c` with those weak stubs (base still compiles WAMR
+  in, so the strong defs win and behavior is identical), and confirm `test_wasm` /
+  `test_wasm_buffer` are unchanged. No `wasm_feature.h` hook header needed.
 - **Phase 1 — base-flip + embed.** Drop `WAMR_OBJS` + wasm caps + `worker_wasm`
   from `PLATFORM_OBJS` into `libhull_feature-wasm.a`; embed it; base is
   compute-less. `make` composes it always (behavior-identical), then gate on
