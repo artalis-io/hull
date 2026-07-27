@@ -254,6 +254,57 @@ composes an app with `--with=`, runs it, and asserts a plain app stays
 feature-free — the GPU one is build-only since `gpu.dispatch` needs a device
 CI lacks).
 
+### Composable runtime + HTTP base (the mandatory, auto-composed axis)
+
+`--with=` features above are the **optional, additive** axis. There is a second,
+**mandatory** composition axis that a plain `hull build` drives automatically:
+the native base platform library is **runtime-less AND HTTP-core-less**, and the
+produced app composes back exactly what it uses. Unlike a `--with=` feature, you
+never install or flag these — they are **embedded in the distributed `hull`** and
+auto-composed. (Issues #113 runtime, #114 HTTP; cosmo is exempt — a fat APE
+can't force-load native feature archives, so its base keeps both runtimes + HTTP
+compiled in.)
+
+What the native base **drops** and what composes it back at `hull build`:
+
+| Dropped from the base | Where it lives | Composed back |
+|---|---|---|
+| both interpreters (Lua VM, QuickJS) | `libhull_feature-{lua,js}.a` | exactly one, auto-inferred from the entry extension (`app.lua` → lua, `app.js` → js). Mandatory: an app must have a runtime to run. |
+| the HTTP core caps (`cap/http` + async, `ws`, `smtp`, `body`) | `libhull_feature-http.a` | only when the app needs HTTP |
+| the per-runtime web bindings (routes, dispatch, `res:*` helpers, `mod_http_*`/`mod_ws_*`/`sse`/`mod_smtp`, the in-process test harness, timers) | `libhull_feature-http-<rt>.a` | with the http core, only when the app needs HTTP |
+| the per-runtime tui bridge | `libhull_feature-tui-<rt>.a` (the tui cap core stays the installable `--with=tui` asset) | with `--with=tui`, only the app's runtime's bridge |
+
+**The seam.** Each dropped piece leaves a **weak no-op default** in the base that
+a **strong override** in the composed archive replaces (mirrors the gpu/tui
+feature hooks). The HTTP seam is `include/hull/http_feature.h` (weak defaults in
+`cap/http_feature.c`); a base TU `src/hull/http_weakstub.c` carries weak
+real-signature stubs so the pure runtime's few references to the web bindings
+link even when HTTP is not composed. The archives are whole-archived at compose
+(no single anchor symbol), inside a GNU-ld `--start-group` (native) / `-force_load`
+(ld64) with the platform lib + Keel, since the caps reference base symbols + Keel
+and the web bindings reference the caps.
+
+**"Needs HTTP" is resolved, not guessed.** `hull build` composes the http core +
+web bindings only when the resolved manifest trips an HTTP cap
+(`hl_module_set_required_caps & HL_MOD_CAP_HTTP`, exposed as `needs_http` from
+`tool.modules_resolve`). This is reliable because `app.get`/`app.post`/`app.ws`
+/… are module-conditional decorations — nil unless the app declares
+`hull/http-server`. A genuine `app.main` CLI / compute app with no HTTP module
+links only the pure runtime; on a `--flavor=pure-compute` base it also drops Keel
++ mbedTLS (~785 KB smaller than a full-flavor CLI). The base defines **zero** HTTP
+caps (verifiable: `nm libhull_platform.a | grep hl_cap_http_request` → empty).
+
+**Where it's wired.** The archives + embed live in the Makefile (`FEATURE_*_OBJS`,
+`libhull_feature-*.a`, `embedded_{runtime,http,tui}.h`, `RUNTIME_FEATURE_LIBS`);
+the compose + embedded-first resolve ladder is shared by `hull build` and
+`hull eject` via `stdlib/cli/lua/hull/feature_compose.lua`
+(`resolve_runtime_lib` / `resolve_http_lib` / `resolve_http_rt_lib` /
+`resolve_tui_rt_lib`) + `build_assets.c` (`hl_build_extract_feature_*`). Design:
+[docs/http_feature_phase1.md](docs/http_feature_phase1.md). Covered by
+`tests/e2e_feature_runtime.sh` (runtime slim, both runtimes),
+`tests/e2e_build_flavor.sh` (pure-compute × runtime, symbol-level Keel/http drop),
+and `tests/e2e_feature_tui.sh` (tui × runtime, both runtimes).
+
 ### Extension taxonomy: feature vs flavor vs tool vs stdlib
 
 A new capability reaches an app through exactly one of four shipping units.

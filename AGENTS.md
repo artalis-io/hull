@@ -51,6 +51,8 @@ GPU compute shaders (optional, `HL_ENABLE_GPU=1`) provide massively parallel dat
 
 Both WASM and GPU compute accept the same input types via the unified buffer protocol: strings, `MappedBuffer` (from `fs.mmap()`), and `WasmBuffer` (from `compute.call({buffer=true})`). This enables zero-copy data flow between disk, WASM, and GPU without Lua/JS string intermediaries. Declare `gpu: true` and/or `compute: true` in manifest.
 
+**The produced binary is tailored to the app.** The native base library is runtime-less and HTTP-core-less; `hull build` composes back only what the app uses — exactly one interpreter (Lua or JS, inferred from the entry file), and the HTTP layer (routes, `res:*`, ws/sse, outbound `http.fetch`, Keel) only when the manifest declares an HTTP module (`hull/http-server`, `hull/http-client`, ws/sse/smtp/email). An `app.main` CLI or compute tool with no HTTP module links neither the web bindings nor the HTTP caps; built with `--flavor=pure-compute` it also drops Keel + mbedTLS (~785 KB smaller). This is automatic — nothing to install or flag (the Lua/JS runtimes and the HTTP layer are embedded in `hull` and auto-composed; only large optional subsystems like gpu/duckdb/tui are `hull build --with=<name>`). Cosmo (the fat APE) keeps both runtimes + HTTP in-base.
+
 Each app is a single file (`app.lua` or `app.js`) with optional:
 - `migrations/*.sql`. Database schema (auto-run on startup)
 - `templates/*.html`. Server-side templates
