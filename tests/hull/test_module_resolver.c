@@ -614,13 +614,13 @@ UTEST(build_flavor, registry_lookup)
     /* HL_MOD_CAP_HTTP == HTTP_CLIENT | HTTP_SERVER. */
     ASSERT_EQ((int)po->clear_caps, (int)HL_MOD_CAP_HTTP);
 
-    ASSERT_EQ((int)hl_build_flavor_find("server-only")->clear_caps,
-              (int)HL_MOD_CAP_HTTP_CLIENT);
-    ASSERT_EQ((int)hl_build_flavor_find("client-only")->clear_caps,
-              (int)HL_MOD_CAP_HTTP_SERVER);
+    /* server-only / client-only were removed (issue #114): the HTTP flavor axis
+     * is now binary (full vs pure-compute). */
+    ASSERT_TRUE(hl_build_flavor_find("server-only") == NULL);
+    ASSERT_TRUE(hl_build_flavor_find("client-only") == NULL);
 
     const HlBuildFlavor *all = NULL;
-    ASSERT_GE(hl_build_flavor_all(&all), 4);
+    ASSERT_EQ(hl_build_flavor_all(&all), 2);
     ASSERT_TRUE(all != NULL);
 }
 
@@ -655,7 +655,7 @@ UTEST(build_flavor, pure_compute_rejects_http_server)
     ASSERT_TRUE(strstr(err, "HTTP_SERVER") != NULL);
 }
 
-UTEST(build_flavor, server_only_rejects_http_client)
+UTEST(build_flavor, pure_compute_rejects_http_client)
 {
     HlManifest m;
     clear_manifest(&m);
@@ -667,8 +667,9 @@ UTEST(build_flavor, server_only_rejects_http_client)
     uint32_t full = hl_module_build_caps();
     ASSERT_EQ(hl_module_resolver_resolve_caps(&m, &s, full, err, sizeof(err)), 0);
 
-    uint32_t so = hl_build_flavor_caps(hl_build_flavor_find("server-only"), full);
-    ASSERT_EQ(hl_module_resolver_resolve_caps(&m, &s, so, err, sizeof(err)), -1);
+    /* pure-compute clears both HTTP halves, so it trips the HTTP_CLIENT gate. */
+    uint32_t pc = hl_build_flavor_caps(hl_build_flavor_find("pure-compute"), full);
+    ASSERT_EQ(hl_module_resolver_resolve_caps(&m, &s, pc, err, sizeof(err)), -1);
     ASSERT_TRUE(strstr(err, "HTTP_CLIENT") != NULL);
 }
 
@@ -678,8 +679,9 @@ UTEST(build_flavor, auto_picks_minimal)
     ASSERT_STREQ(hl_build_flavor_auto(0)->name, "pure-compute");
     /* A non-HTTP cap (DB) doesn't constrain the flavor (all keep DB). */
     ASSERT_STREQ(hl_build_flavor_auto(HL_MOD_CAP_DB)->name, "pure-compute");
-    ASSERT_STREQ(hl_build_flavor_auto(HL_MOD_CAP_HTTP_SERVER)->name, "server-only");
-    ASSERT_STREQ(hl_build_flavor_auto(HL_MOD_CAP_HTTP_CLIENT)->name, "client-only");
+    /* Any HTTP need -> full (the only flavor that keeps HTTP now). */
+    ASSERT_STREQ(hl_build_flavor_auto(HL_MOD_CAP_HTTP_SERVER)->name, "full");
+    ASSERT_STREQ(hl_build_flavor_auto(HL_MOD_CAP_HTTP_CLIENT)->name, "full");
     ASSERT_STREQ(hl_build_flavor_auto(HL_MOD_CAP_HTTP)->name, "full");
 }
 
@@ -695,8 +697,8 @@ UTEST(build_flavor, auto_from_resolved_manifest)
                                                  err, sizeof(err)));
     uint32_t req = hl_module_set_required_caps(&s);
     ASSERT_TRUE((req & HL_MOD_CAP_HTTP_SERVER) != 0);
-    /* An app needing the HTTP server but not the client -> server-only. */
-    ASSERT_STREQ(hl_build_flavor_auto(req)->name, "server-only");
+    /* An app needing HTTP -> full (the only HTTP-capable flavor now). */
+    ASSERT_STREQ(hl_build_flavor_auto(req)->name, "full");
 }
 
 UTEST_MAIN();

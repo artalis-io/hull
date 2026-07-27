@@ -60,6 +60,12 @@ int hl_manifest_extract_js_from_file(const char *path,
         return -1;
     }
 
+    /* Only reading app.manifest(): tolerate an unresolvable `hull:*` import (a
+     * feature-module stdlib file that rides the composed feature, e.g. hull:tui)
+     * so extraction succeeds instead of failing and forcing callers onto their
+     * fail-safe path (issue #114). */
+    js->manifest_extract_lenient = 1;
+
     if (hl_js_load_app(js, path) != 0) {
         hl_js_free(js);
         free(js);

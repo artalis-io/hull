@@ -83,6 +83,17 @@ static int l_tool_modules_resolve(lua_State *L)
     }
     lua_pop(L, 1);
 
+    /* tui / gpu boolean gates: the resolver rejects hull/tui (resp. hull/gpu)
+     * unless the manifest sets tui = true (resp. gpu = true), so a resolve that
+     * omits these mis-reports a tui/gpu app as unresolvable. Copy them through
+     * (matches the tui/gpu manifest gate in module_resolver.c). */
+    lua_getfield(L, 1, "tui");
+    m.tui = lua_toboolean(L, -1);
+    lua_pop(L, 1);
+    lua_getfield(L, 1, "gpu");
+    m.gpu = lua_toboolean(L, -1);
+    lua_pop(L, 1);
+
     /* modules — copy names so the resolver sees stable pointers. */
     char *owned_names[HL_MANIFEST_MAX_MODULES] = {0};
     int owned_count = 0;
@@ -209,11 +220,19 @@ static int l_tool_modules_resolve(lua_State *L)
     }
     lua_setfield(L, -2, "modules");
 
+    /* needs_http = does the resolved set require any HTTP subsystem (server or
+     * client)? Drives `hull build`'s decision to compose the http core + the
+     * per-runtime web bindings (issue #114, Phase C2). Reliable because the
+     * route/ws/sse decorations (app.get/…) only exist when an HTTP module is
+     * declared, so a serving app always trips an HTTP cap here. */
+    uint32_t req_caps = hl_module_set_required_caps(&set);
+    lua_pushboolean(L, (req_caps & HL_MOD_CAP_HTTP) ? 1 : 0);
+    lua_setfield(L, -2, "needs_http");
+
     /* auto = the minimal build flavor that still satisfies this app's
      * declared modules (drives `hull build --flavor=auto`). Computed from
      * the resolved set's aggregate required-caps. */
-    const HlBuildFlavor *autf =
-        hl_build_flavor_auto(hl_module_set_required_caps(&set));
+    const HlBuildFlavor *autf = hl_build_flavor_auto(req_caps);
     if (autf) {
         lua_newtable(L);
         lua_pushstring(L, autf->name);

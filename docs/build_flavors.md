@@ -7,8 +7,18 @@ binary you ship**, not of the `hull` toolchain that builds it. Today every
 app `hull build` produces inherits whatever `HL_ENABLE_*` flags the `hull`
 binary itself was compiled with (full HTTP, in the released binaries). This
 doc proposes `hull build --flavor=<name>` so an app author can ship a
-pure-compute, server-only, client-only, or full binary regardless of which
-`hull` built it.
+pure-compute or full binary regardless of which `hull` built it.
+
+> **The HTTP axis is binary: `full` vs `pure-compute`.** The earlier
+> `server-only` / `client-only` flavors were **removed** (issue #114): they
+> were size-neutral vs `full` (Keel + mbedTLS stay linked whenever either HTTP
+> half is on) and the taxonomy has flavors retiring into presets over features.
+> The granular compile-time flags `HL_ENABLE_HTTP_SERVER` /
+> `HL_ENABLE_HTTP_CLIENT` still exist as internal knobs (they power the
+> per-runtime web-archive split), but they are not exposed as shippable
+> `--flavor` presets. If per-half HTTP is ever wanted as a product, the
+> taxonomy-aligned path is `http-server` / `http-client` sub-features, not
+> flavors.
 
 > **Flavors are the subtractive axis; features are the orthogonal additive
 > axis.** A flavor slims the base (drops HTTP halves, mbedTLS, …); a
@@ -23,23 +33,21 @@ pure-compute, server-only, client-only, or full binary regardless of which
 > archive. That runtime archive is compiled full-config, so its web-module
 > bindings reference HTTP caps + Keel that a **reduced** flavor drops. Until
 > **issue #114 (HTTP as a composable feature)** lands, `hull build
-> --flavor=server-only|client-only|pure-compute` on a Lua/JS app **fails closed**
+> --flavor=pure-compute` on a Lua/JS app **fails closed**
 > with a clear message (the full-config runtime can't link against a subtractive
 > base). `--flavor=full` (the default) is unaffected. The `--with=tui` feature is
 > deferred the same way for the same reason.
 
 ## 1. Motivation
 
-The four HTTP flavors (and the `HL_ENABLE_DB` / `HL_ENABLE_TUI` / ...
-toggles) already exist and are CI-validated (see [CLAUDE.md "HTTP build
-flavors"](../CLAUDE.md)). But they are only reachable by recompiling Hull
+The HTTP toggle (and the `HL_ENABLE_DB` / `HL_ENABLE_TUI` / ...
+toggles) already exists and is CI-validated (see [CLAUDE.md "HTTP build
+flavors"](../CLAUDE.md)). But it is only reachable by recompiling Hull
 from source with `make HL_ENABLE_HTTP=0`. The end user who installed a
 released `hull` cannot produce a flavored app.
 
 That is backwards. The flavor describes what the **app** needs:
 
-- a CLI tool that calls an API → client-only (no inbound listener)
-- a compliance web app forbidden from outbound calls → server-only
 - an offline transform / signing tool → pure-compute (no TLS at all)
 - a full web app → full
 
@@ -71,8 +79,6 @@ mbedTLS/Keel are present, which `hl_cap_*` are compiled) lives **inside
 ```
 hull build myapp                         # default flavor (today's behavior)
 hull build --flavor=pure-compute myapp   # explicit flavor
-hull build --flavor=server-only myapp
-hull build --flavor=client-only myapp
 hull build --flavor=auto myapp           # infer minimal flavor from manifest
 ```
 
@@ -81,8 +87,6 @@ hull build --flavor=auto myapp           # infer minimal flavor from manifest
 | Flavor | Flags | Drops | App must use |
 |---|---|---|---|
 | `full` (default) | all on | nothing | anything |
-| `server-only` | `HL_ENABLE_HTTP_CLIENT=0` | outbound `http.fetch`, SMTP, `hull update` | no `hull/http-client` / `hull/smtp` / `hull/email` |
-| `client-only` | `HL_ENABLE_HTTP_SERVER=0` | inbound server, routing, ws, sse, middleware | `app.main`; no `hull/http-server` / `hull/web/*` |
 | `pure-compute` | `HL_ENABLE_HTTP=0` | both HTTP halves + Keel + mbedTLS | `app.main`; no HTTP/web modules |
 
 Orthogonal toggles (`HL_ENABLE_DB`, `HL_ENABLE_TUI`, `HL_ENABLE_WASM`,
@@ -170,8 +174,6 @@ typedef struct {
 
 static const HlBuildFlavor FLAVORS[] = {
   { "full",         CAP_ALL,                                       "libhull_platform" },
-  { "server-only",  CAP_ALL & ~CAP_HTTP_CLIENT,                    "libhull_platform-server-only" },
-  { "client-only",  CAP_ALL & ~CAP_HTTP_SERVER,                    "libhull_platform-client-only" },
   { "pure-compute", CAP_ALL & ~(CAP_HTTP_SERVER | CAP_HTTP_CLIENT), "libhull_platform-pure-compute" },
 };
 ```

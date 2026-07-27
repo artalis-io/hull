@@ -536,6 +536,37 @@ local function sign_app(app_dir, key_file, sign_ctx, files, tmpdir, output)
             signature = sign_ctx.platform_sig_blob.signature,
             arch_hashes = sign_ctx.platform_arch_hashes or {},
         }
+
+        -- Composed-feature attestation (issue #114, docs/composed_feature_signing.md).
+        -- Every archive composed into this app above is recorded here so runtime
+        -- --verify-sig can prove each one is a genuine gethull.dev artefact, not just
+        -- the base platform lib. Two trust domains:
+        --   platform_domain: archives that ship INSIDE hull (runtime / http core /
+        --     web bindings / tui bridge). Re-attested by the SAME platform-key
+        --     manifest that covers the base lib, so the runtime cross-checks each
+        --     recorded hash against gethull.manifest under HL_PLATFORM_PUBKEY_HEX.
+        --   release_domain: externally-installed --with/--flavor libs, whose trust
+        --     anchor is the release-key hull.sha256 (already re-verified at compose).
+        --     Recorded for provenance; covered by the developer app-signature.
+        local plat_assets, rel_assets = {}, {}
+        for _, a in ipairs(sign_ctx.composed_assets or {}) do
+            local entry = { name = a.name, sha256 = a.sha256 }
+            if a.domain == "release" then
+                rel_assets[#rel_assets + 1] = entry
+            else
+                plat_assets[#plat_assets + 1] = entry
+            end
+        end
+        if #plat_assets > 0 or #rel_assets > 0 then
+            platform.gethull.composed = {
+                platform_domain = {
+                    manifest  = sign_ctx.platform_sig_blob.manifest,
+                    signature = sign_ctx.platform_sig_blob.signature,
+                    assets    = plat_assets,
+                },
+                release_domain = { assets = rel_assets },
+            }
+        end
     end
 
     -- Capture compiler version
@@ -1372,6 +1403,40 @@ int main(int argc, char **argv) { return hl_app_run(argc, argv); }
     if opts.with then for f in pairs(opts.with) do features_needed[f] = true end end
     local feature_objs = {}
     local feature_libs = {}
+    -- Composed-feature signature attestation (issue #114). Each composed archive
+    -- is recorded as { name, sha256, domain } so sign_app can write the
+    -- package.sig.gethull.composed block. `domain = "platform"` = an archive that
+    -- ships INSIDE hull (runtime / http / web bindings / tui bridge), attested by
+    -- the platform-key manifest; `domain = "release"` = an externally-installed
+    -- --with / --flavor lib, attested by the release-key hull.sha256. The `name`
+    -- must match that manifest's name column. See docs/composed_feature_signing.md.
+    local composed_assets = {}
+    local function record_composed(name, path, domain)
+        -- Only a --sign build writes the attestation; a plain `hull build`
+        -- discards composed_assets, so skip the (up to ~127 MB) hash entirely.
+        if not opts.sign then return end
+        -- Fail CLOSED. A malformed name would record an asset the runtime §5c
+        -- can never find in the signed manifest (a signed app that refuses to
+        -- boot), and an unhashable archive would silently drop out of the
+        -- attestation. Both are build-integrity failures, not to be papered over.
+        if type(name) ~= "string" or name == "" or name:find("..", 1, true) then
+            tool.stderr("hull build: internal error: malformed composed-asset "
+                        .. "name '" .. tostring(name) .. "'\n")
+            tool.rmdir(tmpdir); tool.exit(1)
+        end
+        -- Stream-hash the archive in C (tool.sha256_file) rather than
+        -- read_file + crypto.sha256: a --with feature archive can be huge
+        -- (~127 MB DuckDB, the wgpu GPU lib) and slurping it into a Lua
+        -- string blows the tool VM's 64 MB sandbox allocator.
+        local sha = tool.sha256_file(path)
+        if not sha then
+            tool.stderr("hull build: cannot hash composed archive '" .. path
+                        .. "' for signing (" .. name .. ")\n")
+            tool.rmdir(tmpdir); tool.exit(1)
+        end
+        composed_assets[#composed_assets + 1] =
+            { name = name, sha256 = sha, domain = domain }
+    end
     -- A DB wire feature (postgres/mysql) references base symbols (crypto,
     -- tls_client) that a DB-only app doesn't otherwise pull, so on GNU ld the
     -- platform lib + feature archive must be wrapped in --start-group. Set by
@@ -1396,20 +1461,6 @@ int main(int argc, char **argv) { return hl_app_run(argc, argv); }
             if is_cosmo then
                 tool.stderr("hull build: the '" .. fname .. "' feature is native-only "
                             .. "(not available for cosmo builds)\n")
-                tool.rmdir(tmpdir); tool.exit(1)
-            end
-            -- tui bundles BOTH runtime bridges (lua_rt_mod_tui.o + js_mod_tui.o)
-            -- in one whole-archived feature; composed into a single-runtime app on
-            -- the runtime-less native base, the wrong-runtime bridge's refs are
-            -- undefined at link. The HTTP-as-a-feature seam (per-runtime bridge
-            -- composition) is what fixes it; fail closed with a clear message until
-            -- then. See https://github.com/artalis-io/hull/issues/114.
-            if fname == "tui" then
-                tool.stderr("hull build: the 'tui' feature isn't supported yet with the "
-                    .. "composed-runtime model (a tui app cannot link on the runtime-less "
-                    .. "native base).\n")
-                tool.stderr("hint: tracked in https://github.com/artalis-io/hull/issues/114 "
-                    .. "(HTTP as a composable feature).\n")
                 tool.rmdir(tmpdir); tool.exit(1)
             end
             if spec.cxx then needs_cxx = true end
@@ -1447,6 +1498,9 @@ int main(int argc, char **argv) { return hl_app_run(argc, argv); }
             local from_cache = (from == "cache")
             local dest = tmpdir .. "/" .. libname
             tool.copy(lib, dest)
+            -- Externally-installed feature: attested by the release-key
+            -- hull.sha256 under its release asset name (libhull_feature-<n>-<arch>.a).
+            record_composed(asset or libname, dest, "release")
             local is_darwin = plat and plat:sub(1, 6) == "darwin"
 
             if spec.whole_archive then
@@ -1455,6 +1509,36 @@ int main(int argc, char **argv) { return hl_app_run(argc, argv); }
                 -- single backend symbol to anchor a selective pull.
                 for _, f in ipairs(fcompose.whole_archive_flags(dest, is_darwin)) do
                     feature_libs[#feature_libs + 1] = f
+                end
+                -- tui (issue #114, Phase D): the cap core above is runtime-agnostic;
+                -- the per-runtime bridge (register_lua/_js strong override) lives in
+                -- its own archive so the WRONG runtime's bridge is never pulled onto
+                -- a single-runtime base. Compose the APP's runtime bridge too
+                -- (embedded in hull, resolved embedded-first). Its refs to the
+                -- runtime resolve because the runtime archive is composed alongside.
+                if fname == "tui" and not is_cosmo then
+                    local app_rt = fcompose.detect_app_rt(opts.app_dir)
+                    if app_rt then
+                        local tb, tfrom = fcompose.resolve_tui_rt_lib(app_rt, tmpdir,
+                                          { hull_dir = hull_dir, plat = plat })
+                        if not tb then
+                            tool.stderr("hull build: the tui bridge for '" .. app_rt
+                                .. "' (libhull_feature-tui-" .. app_rt .. ".a) was not found "
+                                .. (tfrom == "cache-verify-failed"
+                                    and "(cache re-verify failed)\n"
+                                    or  "(normally embedded in hull)\n"))
+                            tool.rmdir(tmpdir); tool.exit(1)
+                        end
+                        local tdest = tmpdir .. "/libhull_feature-tui-" .. app_rt .. ".a"
+                        if tb ~= tdest then tool.copy(tb, tdest) end
+                        -- The per-runtime tui bridge ships INSIDE hull -> platform domain.
+                        record_composed("libhull_feature-tui-" .. app_rt .. "."
+                                        .. (plat or "") .. ".a", tdest, "platform")
+                        for _, f in ipairs(fcompose.whole_archive_flags(tdest, is_darwin)) do
+                            feature_libs[#feature_libs + 1] = f
+                        end
+                        print("hull build: composed tui bridge '" .. app_rt .. "'")
+                    end
                 end
             else
                 -- Backend feature: linked plainly; the generated registry's
@@ -1538,21 +1622,31 @@ int main(int argc, char **argv) { return hl_app_run(argc, argv); }
         -- archive (features are native-only). Native has a runtime-less base and
         -- composes exactly one runtime here.
         if app_rt and not is_cosmo then
-            -- Reduced flavors (server-only/client-only/pure-compute) drop
-            -- subsystems (HTTP caps + Keel) that the full-config runtime archive's
-            -- web-module bindings reference, so composing a runtime onto a reduced
-            -- base fails to link (~52 undefined symbols). The HTTP-as-a-feature
-            -- seam (issue #114) is what lets a reduced flavor omit those bindings;
-            -- fail closed with a clear message until then.
-            if opts.flavor and opts.flavor ~= "full" then
-                tool.stderr("hull build: --flavor=" .. opts.flavor .. " isn't supported "
-                    .. "yet with the composed-runtime model (a reduced flavor drops "
-                    .. "subsystems the runtime's bindings reference).\n")
-                tool.stderr("hint: use the default (full) flavor for now; tracked in "
-                    .. "https://github.com/artalis-io/hull/issues/114 "
-                    .. "(HTTP as a composable feature).\n")
-                tool.rmdir(tmpdir); tool.exit(1)
+            -- Reduced-flavor x composed-runtime (issue #114, Phase D). The only
+            -- flavors are `full` (HTTP on) and `pure-compute` (HTTP off), both
+            -- fully supported here: a pure-compute app declares no HTTP module,
+            -- so needs_http (below) is false and only the pure runtime is
+            -- composed onto the Keel-free base (the runtime's few web-symbol
+            -- references resolve to the base http_weakstub no-ops). An unknown
+            -- flavor is already rejected upstream at flavor validation.
+
+            -- Does this app need HTTP? (issue #114, Phase C2.) The route/ws/sse
+            -- decorations (app.get/…) only exist when an HTTP module is declared,
+            -- so a serving app always trips an HTTP cap in the resolver. When it
+            -- needs none (a pure app.main CLI / compute tool) skip composing the
+            -- http core + the per-runtime web bindings: the pure runtime's few
+            -- web-symbol refs are then satisfied by the base http_weakstub no-ops.
+            -- Fail safe: if resolution is unavailable, compose HTTP (never
+            -- under-compose and silently break serving).
+            local needs_http = true
+            do
+                local mf = extract_app_manifest(opts.app_dir)
+                if mf then
+                    local r = tool.modules_resolve(mf, opts.flavor, with_feature_list(opts))
+                    if r.ok and r.needs_http ~= nil then needs_http = r.needs_http end
+                end
             end
+
             write_file(tmpdir .. "/app_feature_registry.c",
                        fcompose.gen_app_registry_c(app_rt))
             if not tool.compiler.compile(tmpdir .. "/app_feature_registry.c",
@@ -1590,12 +1684,83 @@ int main(int argc, char **argv) { return hl_app_run(argc, argv); }
             end
             local rt_dest = tmpdir .. "/" .. rt_lib
             if rt_path ~= rt_dest then tool.copy(rt_path, rt_dest) end  -- already there if extracted
+            -- The runtime archive ships INSIDE hull -> platform domain.
+            record_composed("libhull_feature-" .. app_rt .. "."
+                            .. (rt_plat or "") .. ".a", rt_dest, "platform")
             needs_base_group = true  -- runtime refs base symbols; GNU ld needs the group
             local is_darwin = rt_plat and rt_plat:sub(1, 6) == "darwin"
             for _, f in ipairs(fcompose.whole_archive_flags(rt_dest, is_darwin)) do
                 feature_libs[#feature_libs + 1] = f
             end
             print("hull build: composed runtime '" .. app_rt .. "'")
+
+            if needs_http then
+            -- Compose the HTTP feature (issue #114, Phase B). The native base is
+            -- HTTP-CORE-LESS: serve.c + the runtime's web-module bindings
+            -- reference the http/ws/smtp/body caps, which now live in
+            -- libhull_feature-http.a. Whole-archive it inside the --start-group
+            -- (the caps reference Keel + base symbols, and the runtime's web
+            -- bindings reference the caps). Composed for every full-flavor native
+            -- app for now; a reduced flavor fails closed earlier, and skipping it
+            -- for a genuinely HTTP-free app is a later refinement.
+            local http_lib = "libhull_feature-http.a"
+            local http_path, http_from = fcompose.resolve_http_lib(tmpdir,
+                                         { hull_dir = rt_hull_dir, plat = rt_plat })
+            if not http_path then
+                if http_from == "cache-verify-failed" then
+                    tool.stderr("hull build: cached HTTP feature lib could not be re-verified\n")
+                else
+                    tool.stderr("hull build: the HTTP feature lib "
+                        .. "(libhull_feature-http.a) was not found "
+                        .. "(normally embedded in hull)\n")
+                    tool.stderr("hint: build it from source with `make feature-http`\n")
+                end
+                tool.rmdir(tmpdir); tool.exit(1)
+            end
+            local http_dest = tmpdir .. "/" .. http_lib
+            if http_path ~= http_dest then tool.copy(http_path, http_dest) end
+            -- The HTTP core archive ships INSIDE hull -> platform domain.
+            record_composed("libhull_feature-http." .. (rt_plat or "") .. ".a",
+                            http_dest, "platform")
+            for _, f in ipairs(fcompose.whole_archive_flags(http_dest, is_darwin)) do
+                feature_libs[#feature_libs + 1] = f
+            end
+            print("hull build: composed HTTP feature")
+
+            -- Phase C: the per-runtime web bindings (routes/dispatch/res:*/ws/sse/
+            -- http-client/smtp) live in libhull_feature-http-<rt>.a, not the pure
+            -- runtime archive. Whole-archive it too (its strong defs override the
+            -- base http_weakstub no-ops; it references the http core caps + Keel,
+            -- all inside the --start-group).
+            local httprt_lib = "libhull_feature-http-" .. app_rt .. ".a"
+            local httprt_path, httprt_from = fcompose.resolve_http_rt_lib(app_rt, tmpdir,
+                                             { hull_dir = rt_hull_dir, plat = rt_plat })
+            if not httprt_path then
+                if httprt_from == "cache-verify-failed" then
+                    tool.stderr("hull build: cached web-bindings lib (" .. httprt_lib
+                        .. ") could not be re-verified\n")
+                else
+                    tool.stderr("hull build: the web-bindings feature lib "
+                        .. "(" .. httprt_lib .. ") was not found "
+                        .. "(normally embedded in hull)\n")
+                    tool.stderr("hint: build it from source with `make feature-http-"
+                        .. app_rt .. "`\n")
+                end
+                tool.rmdir(tmpdir); tool.exit(1)
+            end
+            local httprt_dest = tmpdir .. "/" .. httprt_lib
+            if httprt_path ~= httprt_dest then tool.copy(httprt_path, httprt_dest) end
+            -- The per-runtime web bindings ship INSIDE hull -> platform domain.
+            record_composed("libhull_feature-http-" .. app_rt .. "."
+                            .. (rt_plat or "") .. ".a", httprt_dest, "platform")
+            for _, f in ipairs(fcompose.whole_archive_flags(httprt_dest, is_darwin)) do
+                feature_libs[#feature_libs + 1] = f
+            end
+            print("hull build: composed web bindings '" .. app_rt .. "'")
+            else
+                print("hull build: HTTP-free app (app.main, no HTTP modules) - "
+                    .. "skipped http core + web bindings")
+            end
         end
     end
 
@@ -1683,6 +1848,10 @@ int main(int argc, char **argv) { return hl_app_run(argc, argv); }
             -- the cross-check actually ran.
             platform_sig_blob   = platform_sig_blob,
             platform_arch_hashes = platform_arch_hashes,
+            -- Composed-feature attestations (issue #114): every archive
+            -- whole-archived / linked into this app above, tagged by domain.
+            -- sign_app groups these into package.sig.gethull.composed.
+            composed_assets = composed_assets,
         }
 
         -- Compute binary_hash (SHA256 of the linked output binary)

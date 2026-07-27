@@ -742,6 +742,78 @@ int hl_verify_startup(const char *pubkey_path, const char *entry_point,
                 hl_sig_free(&sig);
                 return -1;
             }
+
+            /* 5c. Composed-feature attestation (issue #114).
+             *
+             * Beyond the base platform lib, a native app whole-archives the
+             * runtime + (optional) HTTP core + web bindings + tui bridge. Each
+             * such archive was recorded under
+             * package.sig.gethull.composed.platform_domain as {name, sha256},
+             * alongside the SAME platform-key manifest verified in 5b. Prove
+             * every recorded hash is present in that signed manifest — so a
+             * swapped composed archive can't ride a genuine base attestation.
+             *
+             * Presence-gated: the block is absent on pre-#114 apps and on cosmo
+             * (fat binary, no composed archives), where 5b alone anchors trust.
+             * When present, any failure is fatal. The block itself is inside the
+             * developer-signed payload (step 6), so it can't be stripped without
+             * breaking the app signature. */
+            if (sig.platform.gethull_value) {
+                ShJsonValue *composed =
+                    sh_json_get(sig.platform.gethull_value, "composed");
+                ShJsonValue *pd = composed
+                    ? sh_json_get(composed, "platform_domain") : NULL;
+                if (pd && sh_json_type(pd) == SH_JSON_OBJECT) {
+                    const char *pman = sh_json_as_string(
+                        sh_json_get(pd, "manifest"), NULL);
+                    const char *psig = sh_json_as_string(
+                        sh_json_get(pd, "signature"), NULL);
+                    ShJsonValue *arr = sh_json_get(pd, "assets");
+                    size_t n = arr ? sh_json_array_len(arr) : 0;
+                    if (!pman || !psig) {
+                        log_error("[sig] composed platform_domain missing "
+                                  "manifest/signature");
+                        hl_sig_free(&sig);
+                        return -1;
+                    }
+                    HlPlatformArchHash *assets = NULL;
+                    if (n > 0) {
+                        if (n > SIZE_MAX / sizeof(*assets)) {
+                            hl_sig_free(&sig);
+                            return -1;
+                        }
+                        assets = calloc(n, sizeof(*assets));
+                        if (!assets) {
+                            hl_sig_free(&sig);
+                            return -1;
+                        }
+                        for (size_t i = 0; i < n; i++) {
+                            ShJsonValue *e = sh_json_array_get(arr, i);
+                            assets[i].arch = sh_json_as_string(
+                                sh_json_get(e, "name"), NULL);
+                            assets[i].hash_hex = sh_json_as_string(
+                                sh_json_get(e, "sha256"), NULL);
+                            if (!assets[i].arch || !assets[i].hash_hex) {
+                                log_error("[sig] composed asset %zu missing "
+                                          "name/sha256", i);
+                                free(assets);
+                                hl_sig_free(&sig);
+                                return -1;
+                            }
+                        }
+                    }
+                    int crc = hl_platform_sig_verify_composed(
+                        pman, strlen(pman), psig, strlen(psig),
+                        embedded_pk, assets, n);
+                    free(assets);
+                    if (crc != 0) {
+                        log_error("[sig] composed-feature attestation "
+                                  "verification failed");
+                        hl_sig_free(&sig);
+                        return -1;
+                    }
+                }
+            }
         }
     }
 

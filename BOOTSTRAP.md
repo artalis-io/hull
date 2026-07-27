@@ -134,6 +134,22 @@ empty app repo). It creates the right `app.lua` / `app.js`, `tests/`,
 `migrations/` (where relevant), and `.gitignore` without
 overwriting any existing files.
 
+The archetype also determines how lean the built binary is, for free:
+`hull build` produces a binary tailored to the app. The base is
+runtime-less and HTTP-core-less, so the build composes back only what
+the app uses — exactly one interpreter (Lua or JS, from the entry
+file), and the HTTP layer (routes, `res:*`, ws/sse, outbound
+`http.fetch`, Keel) only when the manifest declares an HTTP module. A
+CLI / compute archetype (`app.main`, no HTTP module) links neither the
+web bindings nor the HTTP caps; add `--flavor=pure-compute` and it also
+drops Keel + mbedTLS (~785 KB smaller). This is automatic — the runtimes
+and the HTTP layer ride inside `hull` and auto-compose; only large
+optional subsystems (gpu / duckdb / tui) are `hull build --with=<name>`.
+Composition is signature-aware: `hull build --sign` attests every archive
+it composes (runtime, HTTP core, tui bridge, any `--with` feature) inside
+`package.sig`, and `--verify-sig` proves the app was built from genuine
+gethull.dev artefacts. You don't manage this — it just happens.
+
 If the spec describes multiple shapes (e.g. an HTMX admin UI **plus**
 a CLI for batch import), pick the PRIMARY one for `hull init` and
 note the secondary shape as a "Phase 3 add-on" in your eventual
@@ -680,9 +696,8 @@ hull build .                                    # produces ./app binary
 ```
 
 **Build flavors.** `hull build --flavor=<flavor>` produces a narrower,
-smaller binary matched to what the app needs: `full` (server + client
-HTTP, default), `server-only` (no outbound HTTP client), `client-only`
-(no inbound server; a CLI that calls APIs), `pure-compute` (no HTTP at
+smaller binary matched to what the app needs: `full` (HTTP on: server +
+client, default) or `pure-compute` (no HTTP at
 all; smallest). `--flavor=auto` infers the minimal flavor from your
 declared modules. The build validates the manifest against the target
 flavor, so declaring a module that needs a dropped subsystem fails the

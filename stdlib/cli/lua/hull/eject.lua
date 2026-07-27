@@ -93,6 +93,20 @@ clean:
     -- cosmocc would reject its object format).
     local rt_lib = "platform/libhull_feature-" .. rt.name .. ".a"
     local waf = table.concat(rt.fcompose.whole_archive_flags(rt_lib, rt.darwin), " ")
+    -- HTTP core feature (issue #114): whole-archive it alongside the runtime so
+    -- the web bindings' http/ws/smtp/body cap refs resolve. Inside the same
+    -- --start-group (the caps reference base symbols + Keel from the platform lib).
+    if rt.http_path then
+        waf = waf .. " " .. table.concat(
+            rt.fcompose.whole_archive_flags("platform/libhull_feature-http.a", rt.darwin), " ")
+    end
+    -- Phase C: the runtime's web bindings archive (whole-archived, overrides the
+    -- base http_weakstub no-ops).
+    if rt.httprt_path then
+        waf = waf .. " " .. table.concat(
+            rt.fcompose.whole_archive_flags(
+                "platform/libhull_feature-http-" .. rt.name .. ".a", rt.darwin), " ")
+    end
     local link_libs
     if rt.darwin then
         link_libs = "platform/libhull_platform.a " .. waf
@@ -332,9 +346,42 @@ local function main()
                 end
                 tool.exit(1)
             end
+            -- The native base is also HTTP-core-less (issue #114): the runtime's
+            -- web bindings reference the http/ws/smtp/body caps that now live in
+            -- libhull_feature-http.a. Compose it back too, mirroring `hull build`.
+            local http_path, http_from = fcompose.resolve_http_lib(extracted_dir,
+                                         { hull_dir = hull_dir, plat = plat })
+            if not http_path then
+                if http_from == "cache-verify-failed" then
+                    tool.stderr("hull eject: cached HTTP feature lib could not be re-verified\n")
+                else
+                    tool.stderr("hull eject: the HTTP feature lib "
+                        .. "(libhull_feature-http.a) was not found "
+                        .. "(normally embedded in a release hull)\n")
+                    tool.stderr("hint: `hull feature install http` is not applicable; build "
+                        .. "from source with `make feature-http`\n")
+                end
+                tool.exit(1)
+            end
+            -- Phase C: the runtime's web bindings live in a separate archive too.
+            local httprt_path, httprt_from = fcompose.resolve_http_rt_lib(app_rt, extracted_dir,
+                                             { hull_dir = hull_dir, plat = plat })
+            if not httprt_path then
+                if httprt_from == "cache-verify-failed" then
+                    tool.stderr("hull eject: cached web-bindings lib could not be re-verified\n")
+                else
+                    tool.stderr("hull eject: the web-bindings feature lib "
+                        .. "(libhull_feature-http-" .. app_rt .. ".a) was not found\n")
+                    tool.stderr("hint: build from source with `make feature-http-"
+                        .. app_rt .. "`\n")
+                end
+                tool.exit(1)
+            end
             rt_compose = {
                 name = app_rt,
                 path = rt_path,
+                http_path = http_path,
+                httprt_path = httprt_path,
                 darwin = (plat and plat:sub(1, 6) == "darwin") or false,
                 fcompose = fcompose,
             }
@@ -373,6 +420,14 @@ local function main()
                    fcompose.gen_app_registry_c(rt_compose.name))
         tool.copy(rt_compose.path,
                   dir .. "/platform/libhull_feature-" .. rt_compose.name .. ".a")
+        if rt_compose.http_path then
+            tool.copy(rt_compose.http_path,
+                      dir .. "/platform/libhull_feature-http.a")
+        end
+        if rt_compose.httprt_path then
+            tool.copy(rt_compose.httprt_path,
+                      dir .. "/platform/libhull_feature-http-" .. rt_compose.name .. ".a")
+        end
     end
 
     -- Copy platform library (multi-arch: x86_64 + .aarch64/ layout for cosmocc)

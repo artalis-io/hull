@@ -421,15 +421,15 @@ UTEST(sbom, pure_compute_flavor_drops_http_deps)
     ASSERT_EQ_MSG(strstr(pc, "\"mbedtls\""), NULL, "pure-compute drops mbedTLS");
     ASSERT_EQ_MSG(strstr(pc, "\"keel\""), NULL, "pure-compute drops Keel");
 
-    /* full / server-only keep the HTTP deps (same vendored set as the binary). */
-    hl_sbom_set_scope_flavor("server-only");
-    char *so = format_to_string(HL_SBOM_JSON);
-    ASSERT_NE(so, NULL);
-    ASSERT_NE_MSG(strstr(so, "mbedtls"), NULL, "server-only keeps mbedTLS");
-    ASSERT_LT(sbom_count(pc, "\"name\""), sbom_count(so, "\"name\""));
+    /* full keeps the HTTP deps (same vendored set as the binary). */
+    hl_sbom_set_scope_flavor("full");
+    char *fl = format_to_string(HL_SBOM_JSON);
+    ASSERT_NE(fl, NULL);
+    ASSERT_NE_MSG(strstr(fl, "mbedtls"), NULL, "full keeps mbedTLS");
+    ASSERT_LT(sbom_count(pc, "\"name\""), sbom_count(fl, "\"name\""));
 
     free(pc);
-    free(so);
+    free(fl);
     hl_sbom_set_scope_flavor(NULL);
 }
 

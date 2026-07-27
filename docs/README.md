@@ -52,7 +52,7 @@ specific signature, parameter list, or return value.
 | Doc | What it covers |
 |---|---|
 | [`features_and_flavors.md`](features_and_flavors.md) | The distribution model: **features** (additive `hull build --with=<name>` subsystems - DuckDB, GPU) vs **flavors** (subtractive base builds) vs **tools** (companion programs). `hull feature install`, the signed archive trust chain, the M+N vs M×N scaling argument. |
-| [`build_flavors.md`](build_flavors.md) | The subtractive flavor spectrum (`full` → `server-only` → `client-only` → `pure-compute`), `--flavor` / `--flavor=auto`, `hull flavor install`, the two signature layers. |
+| [`build_flavors.md`](build_flavors.md) | The subtractive flavor set (`full` → `pure-compute`), `--flavor` / `--flavor=auto`, `hull flavor install`, the two signature layers. |
 | [`duckdb_backend_design.md`](duckdb_backend_design.md) | The DuckDB OLAP backend (first feature): vtable fit, mode A/B, the rseq/pledge fix, mbedTLS symbol isolation, dialect helpers. |
 | [`libhull_flavor.md`](libhull_flavor.md) | The no-runtime `libhull.a` embedding flavor for native embedders. |
 

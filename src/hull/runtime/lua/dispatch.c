@@ -9,6 +9,7 @@
  */
 
 #include "internal.h"
+#include "hull/http_feature.h"  /* hl_lua_http_error_response (HTTP-feature seam) */
 
 #include "hull/reqctx.h"
 #include "hull/utils/alloc.h"
@@ -164,9 +165,7 @@ void hl_lua_keel_handler(KlRequest *req, KlResponse *res, void *user_data)
     int rc = hl_lua_dispatch(route->lua, route->handler_id, req, res);
     if (rc < 0) {
         /* Error — write 500 response */
-        kl_response_status(res, 500);
-        kl_response_header(res, "Content-Type", "text/plain");
-        kl_response_body_borrow(res, "Internal Server Error", 21);
+        hl_lua_http_error_response(res);
     }
     /* rc == 1 → handler suspended, conn_process checks SUSPENDED state */
 }
@@ -277,9 +276,7 @@ int hl_lua_keel_middleware(KlRequest *req, KlResponse *res, void *user_data)
     int rc = hl_lua_dispatch_middleware(ctx->lua, ctx->handler_id, req, res);
     if (rc < 0) {
         /* Middleware error — short-circuit with 500 */
-        kl_response_status(res, 500);
-        kl_response_header(res, "Content-Type", "text/plain");
-        kl_response_body_borrow(res, "Internal Server Error", 21);
+        hl_lua_http_error_response(res);
         return 1; /* short-circuit */
     }
     return rc;

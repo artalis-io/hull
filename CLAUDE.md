@@ -156,18 +156,18 @@ Hull's distribution is one binary; what's compiled into it is controlled by a sm
 
 Combine flags freely: `make HL_ENABLE_DB=0 HL_ENABLE_WASM=1 HL_ENABLE_TCC=0` yields a pure compute runtime with Lua/JS orchestration but no database or build-toolchain.
 
-### HTTP build flavors
+### HTTP build flags
 
-The two HTTP flags are independent. Each combination produces a useful binary (arm64 Darwin sizes for the default `make` invocation, i.e. DB + WASM + TUI + TCC all on):
+The two HTTP flags (`HL_ENABLE_HTTP_SERVER` / `HL_ENABLE_HTTP_CLIENT`) are independent **internal knobs**. They drive the per-runtime web-archive split; they are NOT exposed as shippable `--flavor` presets (the shipped HTTP axis is binary: `full` vs `pure-compute` — see "Build flavors for apps" below). Each combination still produces a useful binary at the `make` level (arm64 Darwin sizes for the default invocation, i.e. DB + WASM + TUI + TCC all on):
 
-| Flavor | Server | Client | Binary | Use case |
+| Config | Server | Client | Binary | Notes |
 |---|---|---|---|---|
-| Default | 1 | 1 | ~6.5 MB | Full HTTP. Web apps that serve requests and call out to APIs. |
-| Server-only | 1 | 0 | ~6.5 MB | Apps that handle inbound HTTP but are forbidden from making outgoing HTTP calls (compliance, network isolation). Keel + mbedTLS stay linked. |
-| **Client-only** | 0 | 1 | ~6.5 MB | CLI tools that call APIs over HTTPS. No HTTP listener; `http.fetch("https://...")` works from `app.main(fn)`. Keel + mbedTLS stay linked. |
-| Pure compute | 0 | 0 | ~5.8 MB | Compute / CLI binary with no HTTP, no Keel, no mbedTLS. See "Pure-compute builds" below. |
+| Default (full) | 1 | 1 | ~6.5 MB | Full HTTP. Web apps that serve requests and call out to APIs. This is the shipped `full` flavor. |
+| Server flag only | 1 | 0 | ~6.5 MB | Internal knob. Keel + mbedTLS stay linked (no size win), so this is not a shippable flavor. |
+| Client flag only | 0 | 1 | ~6.5 MB | Internal knob. Keel + mbedTLS stay linked (no size win), so this is not a shippable flavor. |
+| Pure compute | 0 | 0 | ~5.8 MB | Compute / CLI binary with no HTTP, no Keel, no mbedTLS. This is the shipped `pure-compute` flavor. See "Pure-compute builds" below. |
 
-All four flavors are link-validated on every push by the `flavors` matrix in `.github/workflows/ci.yml` (each builds, runs `hull version`, and runs an `app.main` exit-code smoke).
+The `full` (both on) and `pure-compute` (both off) configs are link-validated on every push by the `flavors` matrix in `.github/workflows/ci.yml` (each builds, runs `hull version`, and runs an `app.main` exit-code smoke).
 
 **Linker dependencies.** Keel's `libkeel.a` and mbedTLS are linked whenever either HTTP flag is on (Keel ships both halves; the linker dead-strips the unused side). The compile-time `-DHL_ENABLE_HTTP` macro is defined in that same case, so existing source guards continue to work. `HL_ENABLE_HTTP_SERVER` / `HL_ENABLE_HTTP_CLIENT` are only used where the distinction matters. When **both** halves are off, mbedTLS is dropped entirely; see "Pure-compute builds" for how Hull's own hashing stays available without it.
 
@@ -177,7 +177,7 @@ All four flavors are link-validated on every push by the `flavors` matrix in `.g
 
 The build flags above are compile-time properties of the `hull` binary. `hull build --flavor` makes the flavor a property of the **app binary you produce** instead: a full `hull` can build a narrower app.
 
-`hull build --flavor=full|server-only|client-only|pure-compute [app_dir]` links the app against the matching per-flavor platform library instead of the embedded (full) one. The flavors mirror the HTTP halves: `full` (server+client), `server-only` (no outbound HTTP client), `client-only` (no inbound HTTP server; CLI tools that call APIs), `pure-compute` (no HTTP at all; drops mbedTLS + Keel; smallest). `--flavor=auto` infers the minimal flavor from the app's declared modules (via `hl_build_flavor_auto`, which picks the flavor clearing the most caps the app doesn't need). The build **validates the app manifest against the TARGET flavor's caps**: a declared module that needs a dropped subsystem (e.g. `hull/http-server` under `client-only`) is rejected at build time with a clear message, so a flavor choice never silently breaks at runtime. Registry + resolver live in `src/hull/module_resolver.c` (`BUILD_FLAVORS[]`, `hl_module_resolver_resolve_caps`, `hl_build_flavor_auto`); the tool-side redirect is in `stdlib/cli/lua/hull/build.lua`.
+`hull build --flavor=full|pure-compute [app_dir]` links the app against the matching per-flavor platform library instead of the embedded (full) one. The HTTP axis is binary: `full` (HTTP on: server + client + Keel + mbedTLS) and `pure-compute` (no HTTP at all; drops mbedTLS + Keel; smallest). (The former `server-only` / `client-only` flavors were removed in #114: they were size-neutral vs `full` because Keel + mbedTLS stay linked whenever either HTTP half is on.) `--flavor=auto` infers the minimal flavor from the app's declared modules (via `hl_build_flavor_auto`, which picks the flavor clearing the most caps the app doesn't need). The build **validates the app manifest against the TARGET flavor's caps**: a declared module that needs a dropped subsystem (e.g. `hull/http-server` under `pure-compute`) is rejected at build time with a clear message, so a flavor choice never silently breaks at runtime. Registry + resolver live in `src/hull/module_resolver.c` (`BUILD_FLAVORS[]`, `hl_module_resolver_resolve_caps`, `hl_build_flavor_auto`); the tool-side redirect is in `stdlib/cli/lua/hull/build.lua`.
 
 The per-flavor platform lib is found (in order) in the local build dirs, then `~/.hull/platform/` (where `hull flavor install <flavor>` caches it, see below), then it errors with a fix-it hint. `make platform-<flavor>` (native) / `make platform-cosmo-<flavor>` (cosmo dual-arch) build it from source; cosmo lays the pair out in the `.aarch64/` apelink layout.
 
@@ -254,6 +254,57 @@ composes an app with `--with=`, runs it, and asserts a plain app stays
 feature-free — the GPU one is build-only since `gpu.dispatch` needs a device
 CI lacks).
 
+### Composable runtime + HTTP base (the mandatory, auto-composed axis)
+
+`--with=` features above are the **optional, additive** axis. There is a second,
+**mandatory** composition axis that a plain `hull build` drives automatically:
+the native base platform library is **runtime-less AND HTTP-core-less**, and the
+produced app composes back exactly what it uses. Unlike a `--with=` feature, you
+never install or flag these — they are **embedded in the distributed `hull`** and
+auto-composed. (Issues #113 runtime, #114 HTTP; cosmo is exempt — a fat APE
+can't force-load native feature archives, so its base keeps both runtimes + HTTP
+compiled in.)
+
+What the native base **drops** and what composes it back at `hull build`:
+
+| Dropped from the base | Where it lives | Composed back |
+|---|---|---|
+| both interpreters (Lua VM, QuickJS) | `libhull_feature-{lua,js}.a` | exactly one, auto-inferred from the entry extension (`app.lua` → lua, `app.js` → js). Mandatory: an app must have a runtime to run. |
+| the HTTP core caps (`cap/http` + async, `ws`, `smtp`, `body`) | `libhull_feature-http.a` | only when the app needs HTTP |
+| the per-runtime web bindings (routes, dispatch, `res:*` helpers, `mod_http_*`/`mod_ws_*`/`sse`/`mod_smtp`, the in-process test harness, timers) | `libhull_feature-http-<rt>.a` | with the http core, only when the app needs HTTP |
+| the per-runtime tui bridge | `libhull_feature-tui-<rt>.a` (the tui cap core stays the installable `--with=tui` asset) | with `--with=tui`, only the app's runtime's bridge |
+
+**The seam.** Each dropped piece leaves a **weak no-op default** in the base that
+a **strong override** in the composed archive replaces (mirrors the gpu/tui
+feature hooks). The HTTP seam is `include/hull/http_feature.h` (weak defaults in
+`cap/http_feature.c`); a base TU `src/hull/http_weakstub.c` carries weak
+real-signature stubs so the pure runtime's few references to the web bindings
+link even when HTTP is not composed. The archives are whole-archived at compose
+(no single anchor symbol), inside a GNU-ld `--start-group` (native) / `-force_load`
+(ld64) with the platform lib + Keel, since the caps reference base symbols + Keel
+and the web bindings reference the caps.
+
+**"Needs HTTP" is resolved, not guessed.** `hull build` composes the http core +
+web bindings only when the resolved manifest trips an HTTP cap
+(`hl_module_set_required_caps & HL_MOD_CAP_HTTP`, exposed as `needs_http` from
+`tool.modules_resolve`). This is reliable because `app.get`/`app.post`/`app.ws`
+/… are module-conditional decorations — nil unless the app declares
+`hull/http-server`. A genuine `app.main` CLI / compute app with no HTTP module
+links only the pure runtime; on a `--flavor=pure-compute` base it also drops Keel
++ mbedTLS (~785 KB smaller than a full-flavor CLI). The base defines **zero** HTTP
+caps (verifiable: `nm libhull_platform.a | grep hl_cap_http_request` → empty).
+
+**Where it's wired.** The archives + embed live in the Makefile (`FEATURE_*_OBJS`,
+`libhull_feature-*.a`, `embedded_{runtime,http,tui}.h`, `RUNTIME_FEATURE_LIBS`);
+the compose + embedded-first resolve ladder is shared by `hull build` and
+`hull eject` via `stdlib/cli/lua/hull/feature_compose.lua`
+(`resolve_runtime_lib` / `resolve_http_lib` / `resolve_http_rt_lib` /
+`resolve_tui_rt_lib`) + `build_assets.c` (`hl_build_extract_feature_*`). Design:
+[docs/http_feature_phase1.md](docs/http_feature_phase1.md). Covered by
+`tests/e2e_feature_runtime.sh` (runtime slim, both runtimes),
+`tests/e2e_build_flavor.sh` (pure-compute × runtime, symbol-level Keel/http drop),
+and `tests/e2e_feature_tui.sh` (tui × runtime, both runtimes).
+
 ### Extension taxonomy: feature vs flavor vs tool vs stdlib
 
 A new capability reaches an app through exactly one of four shipping units.
@@ -287,7 +338,7 @@ twenty lines of Lua. The four, and the single question that separates each:
    (`stdlib/cli/lua/hull/build.lua`). Examples: `duckdb`, `postgres`, `mysql`,
    `gpu`, `tui`.
 4. **Are you turning a default subsystem OFF to produce a smaller base?** →
-   **flavor** (preset). Examples: `server-only`, `client-only`, `pure-compute`.
+   **flavor** (preset). Example: `pure-compute`.
 
 **The sharp rules.** New vendored C or new authority → **feature** (additive).
 Turning a default off → **flavor** (subtractive). A separate program → **tool**.
@@ -305,7 +356,7 @@ candidates classified against this table live in
 
 `make HL_ENABLE_HTTP=0` turns **both** HTTP halves off (it's the back-compat alias that pins `HL_ENABLE_HTTP_SERVER=0` and `HL_ENABLE_HTTP_CLIENT=0`). This is the only flavor that drops **mbedTLS and Keel entirely**. Use it for an offline, network-free compute or signing binary: a WASM/GPU transform pipeline, a local data tool, an air-gapped batch job. Apps run via `app.main(fn)`.
 
-What's removed (on top of the server-only / client-only drops):
+What's removed:
 - `vendor/mbedtls/**` (the whole TLS stack) and Keel's `libkeel.a`
 - Outbound `http.fetch` (cap/http + cap/http_async), SMTP (cap/smtp), `hull update`
 - The inbound HTTP server, routing, middleware, WebSocket, SSE, and the in-process test harness
@@ -1247,6 +1298,8 @@ Three independent Ed25519 layers:
 - **Platform layer (inner, in `package.sig`):** Signed by gethull.dev key. Proves platform library is authentic.
 - **App layer (outer, in `package.sig`):** Signed by developer key. Proves app hasn't been tampered with.
 - **Release layer (`hull.sha256.sig`):** Signed by Hull release key. Proves the `hull` binary you just downloaded via `hull update` matches the SHA-256 manifest signed by the release authority. Embedded pubkey: `HL_RELEASE_PUBKEY_HEX` in `include/hull/release.h`.
+
+**Composed-feature attestation (`package.sig.gethull.composed`).** Since #114 the native base is composed (runtime + optional HTTP + tui bridge whole-archived at `hull build`), so the platform layer above, which only covers `libhull_platform.a`, is no longer the whole trusted surface. `hull build` records **every** archive it composes into `package.sig.gethull.composed`, in two trust domains: `platform_domain` (the archives EMBEDDED in hull: runtime `lua`/`js`, HTTP core, per-runtime web bindings, tui bridge) attested by the **platform** key, and `release_domain` (`--with` backend features: duckdb/postgres/mysql/gpu) attested by the **release** key. Each entry is `{name, sha256}` keyed by the composed asset name `libhull_feature-<stem>.<arch>.a`. At runtime, `--verify-sig` (`src/hull/signature.c` §5c, right after the base §5b) verifies the `platform_domain` block against the embedded `HL_PLATFORM_PUBKEY_HEX` via `hl_platform_sig_verify_composed` and **refuses to boot** on any tamper — presence-gated (absent on pre-#114 apps and on cosmo, where §5b alone anchors trust). `release_domain` is recorded + app-sig-sealed for provenance; its trust is already anchored at `hull feature install` (release-key fetch) and at `hull build --with` (compose re-verify), so it is not runtime-re-anchored. The whole block sits inside the developer-signed payload, so it cannot be stripped without breaking the app signature. Release wiring: `release.yml` signs the seven embedded archive hashes into the platform manifest and stage 3 embeds those exact bytes (`TRUST_FEATURE_LIBS=1`, mirroring `TRUST_PLATFORM_LIB`). Big composed archives (~127 MB DuckDB, wgpu) are hashed with the streaming C binding `tool.sha256_file` so the tool VM's 64 MB Lua allocator never sees them. Full design: [docs/composed_feature_signing.md](docs/composed_feature_signing.md); covered by `tests/e2e_composed_sig.sh` (a throwaway test-key chain, since the shipped `HL_PLATFORM_PUBKEY_HEX` is still the placeholder that skips the whole layer).
 
 See [docs/security.md](docs/security.md) for the full attack model and [docs/release_signing.md](docs/release_signing.md) for the release-signing design.
 

@@ -17,6 +17,7 @@
 
 #include "hull/runtime/js_bytecode_cache.h"
 #include "hull/utils/alloc.h"
+#include "hull/http_feature.h"  /* hl_http_ws_registry_free (HTTP-feature seam) */
 #include "hull/shared/async_backend.h"
 #include "hull/limits/runtime.h"
 #include "hull/manifest.h"
@@ -305,6 +306,15 @@ static JSModuleDef *hl_js_module_loader(JSContext *ctx,
          * missing for other reasons (unconfigured runtime) still throws here. */
         if (spec && !js->base.module_set &&
             hl_module_needs_absent_build_cap(spec))
+            return hl_js_optional_stub(ctx, module_name);
+
+        /* Manifest-extraction leniency (issue #114): a transient runtime reading
+         * only app.manifest() can't resolve a feature-module stdlib file that
+         * rides the composed feature (e.g. hull:tui, whose stdlib .js is not in
+         * the base VFS). Stub it so the top-level runs and the manifest is
+         * captured. Never set on a real app load, so undeclared imports there
+         * still throw below. */
+        if (js->manifest_extract_lenient)
             return hl_js_optional_stub(ctx, module_name);
 
         /* "hull:something" that isn't a known native and isn't in the
@@ -987,7 +997,7 @@ void hl_js_free(HlJS *js)
     /* Free WebSocket registry — HTTP-only; CLI builds never create one. */
 #ifdef HL_ENABLE_HTTP_SERVER
     if (js->base.ws_registry) {
-        hl_ws_registry_free(js->base.ws_registry);
+        hl_http_ws_registry_free(js->base.ws_registry);
         hl_alloc_free(js->base.alloc, js->base.ws_registry,
                       sizeof(HlWsRegistry));
         js->base.ws_registry = NULL;

@@ -162,4 +162,74 @@ function M.resolve_runtime_lib(rt, tmpdir, ctx)
     return M.resolve_lib(libname, asset, ctx)
 end
 
+--- Resolve the HTTP core feature archive, trying the embedded-in-hull copy first.
+--
+-- Mirrors resolve_runtime_lib for issue #114: the default distributed native
+-- hull embeds libhull_feature-http.a, so a full-flavor app composes it back
+-- with no `hull feature install`. Extracted copy lands in
+-- `tmpdir/libhull_feature-http.a`.
+--
+-- @param tmpdir string  Scratch dir the embedded archive is extracted into.
+-- @param ctx table      { hull_dir = string, plat = string|nil }.
+-- @return string, string   (path, "embedded"|"local"|"cache") on success.
+-- @return nil, string      (nil, "cache-verify-failed"|"not-found") on failure.
+function M.resolve_http_lib(tmpdir, ctx)
+    local libname = "libhull_feature-http.a"
+    -- 1. Embedded in this hull (the distributed native path): extract it.
+    if tool.extract_feature_http and tool.extract_feature_http(tmpdir)
+       and file_exists(tmpdir .. "/" .. libname) then
+        return tmpdir .. "/" .. libname, "embedded"
+    end
+    -- 2/3. Local build dirs, then the signed feature cache.
+    local asset = ctx.plat and ("libhull_feature-http-" .. ctx.plat .. ".a") or nil
+    return M.resolve_lib(libname, asset, ctx)
+end
+
+--- Resolve the per-runtime web-bindings archive (libhull_feature-http-<rt>.a),
+--- trying the embedded-in-hull copy first (issue #114, Phase C).
+--
+-- The web bindings (routes/dispatch/res:*/ws/sse/http-client/smtp) live in
+-- their own per-runtime archive so an HTTP-free app links only the pure runtime.
+-- Composed alongside the http core when an app needs HTTP. Extracted copy lands
+-- in `tmpdir/libhull_feature-http-<rt>.a`.
+--
+-- @param rt "lua" | "js"
+-- @param tmpdir string  Scratch dir the embedded archive is extracted into.
+-- @param ctx table      { hull_dir = string, plat = string|nil }.
+-- @return string, string   (path, "embedded"|"local"|"cache") on success.
+-- @return nil, string      (nil, "cache-verify-failed"|"not-found") on failure.
+function M.resolve_http_rt_lib(rt, tmpdir, ctx)
+    local libname = "libhull_feature-http-" .. rt .. ".a"
+    -- 1. Embedded in this hull (the distributed native path): extract it.
+    if tool.extract_feature_http_rt and tool.extract_feature_http_rt(tmpdir, rt)
+       and file_exists(tmpdir .. "/" .. libname) then
+        return tmpdir .. "/" .. libname, "embedded"
+    end
+    -- 2/3. Local build dirs, then the signed feature cache.
+    local asset = ctx.plat and ("libhull_feature-http-" .. rt .. "-" .. ctx.plat .. ".a") or nil
+    return M.resolve_lib(libname, asset, ctx)
+end
+
+--- Resolve the per-runtime tui bridge (libhull_feature-tui-<rt>.a), embedded
+--- first (issue #114, Phase D).
+--
+-- The tui cap core stays the single installable feature asset; the tiny
+-- per-runtime bridge is embedded in hull and composed alongside the cap core
+-- for the app's runtime, so `hull feature install tui` still fetches one lib.
+--
+-- @param rt "lua" | "js"
+-- @param tmpdir string  Scratch dir the embedded archive is extracted into.
+-- @param ctx table      { hull_dir = string, plat = string|nil }.
+-- @return string, string   (path, "embedded"|"local"|"cache") on success.
+-- @return nil, string      (nil, "cache-verify-failed"|"not-found") on failure.
+function M.resolve_tui_rt_lib(rt, tmpdir, ctx)
+    local libname = "libhull_feature-tui-" .. rt .. ".a"
+    if tool.extract_feature_tui_rt and tool.extract_feature_tui_rt(tmpdir, rt)
+       and file_exists(tmpdir .. "/" .. libname) then
+        return tmpdir .. "/" .. libname, "embedded"
+    end
+    local asset = ctx.plat and ("libhull_feature-tui-" .. rt .. "-" .. ctx.plat .. ".a") or nil
+    return M.resolve_lib(libname, asset, ctx)
+end
+
 return M

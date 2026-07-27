@@ -16,15 +16,16 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* Compile-time cap on registered arches. Today's release matrix has
- * 5 (linux-x86_64, linux-aarch64, darwin-arm64, cosmo-x86_64,
- * cosmo-aarch64). 16 is a generous ceiling that keeps the qsort and
- * the duplicate-check both O(n²) without ever mattering. */
-#define HL_PLATFORM_SIG_MAX_ARCHES 16
+/* Compile-time cap on manifest entries. The name column is either a bare arch
+ * (the platform lib: 5 today) OR an asset name (issue #114: the embedded feature
+ * archives - runtime/http/web/tui bridges - one per {archive, arch}). Budget for
+ * ~8 archives x 5 arches plus headroom; 64 keeps the qsort + duplicate-check
+ * O(n²) without ever mattering. */
+#define HL_PLATFORM_SIG_MAX_ARCHES 64
 
-/* Arch names are stable identifiers; the longest registered today is
- * "cosmo-aarch64" (13 chars). Cap at 32 to leave headroom. */
-#define HL_PLATFORM_SIG_MAX_ARCH_NAME 32
+/* Name column: a bare arch ("cosmo-aarch64", 13 chars) OR an asset name
+ * ("libhull_feature-http-lua.linux-x86_64.a", ~40). Cap at 64 for headroom. */
+#define HL_PLATFORM_SIG_MAX_ARCH_NAME 64
 
 /* ── Validation helpers ──────────────────────────────────────────── */
 
@@ -44,7 +45,12 @@ static int is_valid_hash_hex(const char *s)
  * `[A-Za-z0-9_-]+`, length-bounded. Same character class as
  * tool names and asset names — keeps the manifest format
  * round-trippable without quoting. */
-static int is_valid_arch(const char *s)
+/* True iff @s is a valid name-column value: a bare arch name OR an asset name
+ * (issue #114). Allows [A-Za-z0-9._-] so asset names with a `.<arch>.a` suffix
+ * (e.g. "libhull_feature-lua.linux-x86_64.a") pass, while still excluding
+ * whitespace (which would break the two-space-delimited manifest line) and
+ * path/control chars. Bounded by HL_PLATFORM_SIG_MAX_ARCH_NAME. */
+static int is_valid_name(const char *s)
 {
     if (!s || !*s) return 0;
     size_t n = 0;
@@ -54,7 +60,7 @@ static int is_valid_arch(const char *s)
         if (!((c >= 'a' && c <= 'z') ||
               (c >= 'A' && c <= 'Z') ||
               (c >= '0' && c <= '9') ||
-              c == '_' || c == '-'))
+              c == '_' || c == '-' || c == '.'))
             return 0;
     }
     return 1;
@@ -79,7 +85,7 @@ int hl_platform_sig_build_manifest(const HlPlatformArchHash *entries, size_t n,
 
     /* Validate every entry before doing any work. */
     for (size_t i = 0; i < n; i++) {
-        if (!is_valid_arch(entries[i].arch))     return -1;
+        if (!is_valid_name(entries[i].arch))     return -1;
         if (!is_valid_hash_hex(entries[i].hash_hex)) return -1;
     }
 
@@ -190,4 +196,37 @@ int hl_platform_sig_extract_for_arch(const char *manifest, size_t manifest_len,
      * checksum-manifest format (sha256sum-style: "<hex>  <name>\n").
      * Reuse the existing parser. */
     return hl_release_io_find_checksum(manifest, manifest_len, arch, hex_out);
+}
+
+/* ── Composed-attestation verify (issue #114) ────────────────────── */
+
+int hl_platform_sig_verify_composed(const char *manifest, size_t manifest_len,
+                                    const char *sig_hex, size_t sig_hex_len,
+                                    const uint8_t pubkey[32],
+                                    const HlPlatformArchHash *assets,
+                                    size_t n_assets)
+{
+    if (!manifest || !sig_hex) return -1;
+    if (n_assets > 0 && !assets) return -1;
+
+    /* 1. The manifest must be authentically signed for this domain. Do this
+     *    first: an unsigned/forged manifest makes every hash lookup worthless. */
+    if (hl_platform_sig_verify(manifest, manifest_len, sig_hex, sig_hex_len,
+                               pubkey) != 0)
+        return -1;
+
+    /* 2. Every composed archive's recorded hash must appear in the signed
+     *    manifest under its name. A missing name or a hash mismatch means the
+     *    app was built composing an archive gethull did not sign. */
+    for (size_t i = 0; i < n_assets; i++) {
+        if (!assets[i].arch || !assets[i].hash_hex) return -1;
+        char hex[65];
+        if (hl_platform_sig_extract_for_arch(manifest, manifest_len,
+                                             assets[i].arch, hex) != 0)
+            return -1;
+        /* Hashes are public; a plain fixed-length compare is fine (no secret
+         * material, so no timing channel worth defending). */
+        if (strncmp(hex, assets[i].hash_hex, 64) != 0) return -1;
+    }
+    return 0;
 }

@@ -63,7 +63,7 @@ make HL_ENABLE_HTTP_SERVER=0 EMBED_PLATFORM=1
 # then hull build . inherits the smaller platform
 ```
 
-For client-only CLIs (call APIs, no listener), pure compute tools,
+For CLIs that call APIs (no listener), pure compute tools,
 etc., see `docs/cli_mode.md`.
 
 ## Reading stdin

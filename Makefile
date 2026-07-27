@@ -288,6 +288,13 @@ CFLAGS += -DHULL_VENDOR_KEEL_VERSION=\"$(HULL_VENDOR_KEEL_VERSION)\"
 CFLAGS += -DHULL_VENDOR_WAMR_VERSION=\"$(HULL_VENDOR_WAMR_VERSION)\"
 CFLAGS += -DHULL_VENDOR_TCC_VERSION=\"$(HULL_VENDOR_TCC_VERSION)\"
 
+# Escape hatch to append flags from the command line, e.g.
+#   make EXTRA_CFLAGS='-DHL_PLATFORM_PUBKEY_HEX="<hex>"'
+# Both pubkey macros are #ifndef-guarded (release.h / signature.h), so this is
+# how the composed-signature test harness pins a TEST platform key without
+# editing a committed header. Empty by default; no effect on a normal build.
+CFLAGS += $(EXTRA_CFLAGS)
+
 .DEFAULT_GOAL := all
 
 # ── Directories ──────────────────────────────────────────────────────
@@ -1132,11 +1139,20 @@ HULL_HAS_TUI := 0
 endif
 
 ifeq ($(HL_TUI_TOOLCHAIN),1)
-TUI_TOOLCHAIN_ARCHIVE := $(BUILDDIR)/libhull_feature-tui.a
+# The cap core lives in libhull_feature-tui.a; the per-runtime bridges are now
+# separate archives (issue #114, Phase D). hull links both runtime VMs, so
+# force-load all three (cap core + both bridges) for its own --tui commands.
+TUI_TOOLCHAIN_ARCHIVE := $(BUILDDIR)/libhull_feature-tui.a \
+                         $(BUILDDIR)/libhull_feature-tui-lua.a \
+                         $(BUILDDIR)/libhull_feature-tui-js.a
 ifeq ($(UNAME_S),Darwin)
-TUI_TOOLCHAIN_LDFLAGS := -Wl,-force_load,$(BUILDDIR)/libhull_feature-tui.a
+TUI_TOOLCHAIN_LDFLAGS := -Wl,-force_load,$(BUILDDIR)/libhull_feature-tui.a \
+                         -Wl,-force_load,$(BUILDDIR)/libhull_feature-tui-lua.a \
+                         -Wl,-force_load,$(BUILDDIR)/libhull_feature-tui-js.a
 else
-TUI_TOOLCHAIN_LDFLAGS := -Wl,--whole-archive $(BUILDDIR)/libhull_feature-tui.a -Wl,--no-whole-archive
+TUI_TOOLCHAIN_LDFLAGS := -Wl,--whole-archive $(BUILDDIR)/libhull_feature-tui.a \
+                         $(BUILDDIR)/libhull_feature-tui-lua.a \
+                         $(BUILDDIR)/libhull_feature-tui-js.a -Wl,--no-whole-archive
 endif
 else
 TUI_TOOLCHAIN_ARCHIVE :=
@@ -1616,7 +1632,8 @@ ifeq ($(HL_ENABLE_HTTP_SERVER),0)
       $(SRCDIR)/hull/runtime/js/ws.c \
       $(SRCDIR)/hull/runtime/js/timers.c \
       $(SRCDIR)/hull/runtime/js/mod_request.c \
-      $(SRCDIR)/hull/runtime/js/bindings.c, \
+      $(SRCDIR)/hull/runtime/js/bindings.c \
+      $(SRCDIR)/hull/runtime/js/bindings_response.c, \
       $(JS_RT_SRCS))
 endif
 ifeq ($(HL_ENABLE_TUI),0)
@@ -1656,7 +1673,8 @@ ifeq ($(HL_ENABLE_HTTP_SERVER),0)
       $(SRCDIR)/hull/runtime/lua/ws.c \
       $(SRCDIR)/hull/runtime/lua/timers.c \
       $(SRCDIR)/hull/runtime/lua/mod_request.c \
-      $(SRCDIR)/hull/runtime/lua/bindings.c, \
+      $(SRCDIR)/hull/runtime/lua/bindings.c \
+      $(SRCDIR)/hull/runtime/lua/bindings_response.c, \
       $(LUA_RT_SRCS))
 endif
 ifeq ($(HL_ENABLE_TUI),0)
@@ -1931,6 +1949,12 @@ endif
 MAIN_OBJ       := $(BUILDDIR)/main.o
 APP_RUNNER_OBJ := $(BUILDDIR)/app_runner.o
 ENTRY_OBJ      := $(BUILDDIR)/entry.o
+# Weak no-op defaults for the per-runtime web bindings (issue #114, Phase C).
+# The web bindings live in libhull_feature-http-<rt>.a; the runtime-less base
+# carries these weak stubs so an HTTP-free composed app links (the strong defs
+# override when the web archive is whole-archived). Compiles to an empty TU when
+# HTTP_SERVER is off (the whole body is guarded).
+HTTP_WEAKSTUB_OBJ := $(BUILDDIR)/http_weakstub.o
 
 # ── Stdlib embedding (xxd) ──────────────────────────────────────────
 #
@@ -2458,7 +2482,7 @@ $(shell test "$$(cat $(BUILD_CONFIG_FILE) 2>/dev/null)" = "$(BUILD_FINGERPRINT)"
 
 # ── Targets ─────────────────────────────────────────────────────────
 
-.PHONY: all clean test debug msan tsan fuzz fuzz-run e2e e2e-build e2e-postgres e2e-mysql e2e-http e2e-sandbox e2e-examples e2e-cli e2e-migrate e2e-templates e2e-agent e2e-context e2e-mcp e2e-agent-api e2e-compute e2e-compute-dev e2e-aot-cache e2e-cache e2e-cache-concurrent e2e-cache-cosmo e2e-named-connections e2e-dynamic-connections e2e-tcc e2e-build-flavor e2e-install e2e-ca-bundle e2e-update e2e-tools e2e-multipart e2e-attachment e2e-blob e2e-hypermedia-photos-upload e2e-jwt-asym hull-test-examples self-build check analyze cppcheck bench bench-template bench-wasm bench-gpu bench-bytecode-cache wamrc coverage lint-lua lint-js lint platform platform-cosmo platform-server-only platform-client-only platform-pure-compute platform-cosmo-server-only platform-cosmo-client-only platform-cosmo-pure-compute hardening check-hardening
+.PHONY: all clean test debug msan tsan fuzz fuzz-run e2e e2e-build e2e-postgres e2e-mysql e2e-http e2e-sandbox e2e-examples e2e-cli e2e-migrate e2e-templates e2e-agent e2e-context e2e-mcp e2e-agent-api e2e-compute e2e-compute-dev e2e-aot-cache e2e-cache e2e-cache-concurrent e2e-cache-cosmo e2e-named-connections e2e-dynamic-connections e2e-tcc e2e-build-flavor e2e-install e2e-ca-bundle e2e-update e2e-tools e2e-multipart e2e-attachment e2e-blob e2e-hypermedia-photos-upload e2e-jwt-asym hull-test-examples self-build check analyze cppcheck bench bench-template bench-wasm bench-gpu bench-bytecode-cache wamrc coverage lint-lua lint-js lint platform platform-cosmo platform-pure-compute platform-cosmo-pure-compute hardening check-hardening
 
 all: $(BUILDDIR)/hull
 
@@ -2534,16 +2558,25 @@ check-hardening: $(BUILDDIR)/hull
 # native-only static archives, so a fat-APE app cannot compose one - the
 # cosmo base embeds both runtimes (full, no slim). The hull toolchain link
 # (below) stays dual on every target.
+# The runtime-agnostic HTTP core caps (cap/http + async, ws, smtp, body). Defined
+# here (before PLATFORM_OBJS) so the native app base can filter them out - they
+# move into libhull_feature-http.a (issue #114, Phase B) and are composed back at
+# `hull build`. The feature-http archive target below reuses this list.
+FEATURE_HTTP_OBJS := $(BUILDDIR)/cap_http.o $(BUILDDIR)/cap_http_async.o \
+                     $(BUILDDIR)/cap_ws.o $(BUILDDIR)/cap_smtp.o $(BUILDDIR)/cap_body.o
 ifdef COSMO
   PLATFORM_RT_OBJS       := $(RT_OBJS)
   PLATFORM_MANIFEST_OBJ  := $(MANIFEST_OBJ)
   PLATFORM_RUNTIME_EXTRA := $(STDLIB_RT_REGISTRY_OBJS) $(STDLIB_TOOLCHAIN_REGISTRY_O) $(RUNTIME_TOOLCHAIN_REGISTRY_O) $(VEND_OBJS)
+  PLATFORM_CAP_OBJS      := $(CAP_OBJS)                 # cosmo stays full (features native-only)
 else
   PLATFORM_RT_OBJS       := $(RUNTIME_CACHE_COMMON_OBJ)  # runtime-agnostic; VMs dropped
   PLATFORM_MANIFEST_OBJ  := $(BUILDDIR)/manifest.o       # runtime-agnostic
   PLATFORM_RUNTIME_EXTRA :=
+  # HTTP core caps move to libhull_feature-http.a; the app composes it back.
+  PLATFORM_CAP_OBJS      := $(filter-out $(FEATURE_HTTP_OBJS),$(CAP_OBJS))
 endif
-PLATFORM_OBJS := $(CAP_OBJS) $(CAP_TOOL_OBJ) $(CAP_TEST_OBJ) $(CMD_OBJS) $(PLATFORM_RT_OBJS) $(ALLOC_OBJ) $(ASYNC_OBJ) $(COMPRESS_OBJ) $(MINIZ_OBJ) $(WORKER_DB_OBJ) $(WORKER_WASM_OBJ) $(WORKER_GPU_OBJ) $(PLATFORM_MANIFEST_OBJ) $(MODULE_OBJ) $(ASYNC_BACKEND_OBJS) $(NET_BACKEND_OBJS) $(SANDBOX_OBJ) $(SANDBOX_TOOL_OBJ) $(SIG_OBJ) $(RELEASE_OBJ) $(RELEASE_IO_OBJ) $(TOOLS_INSTALL_OBJ) $(PLATFORM_SIG_OBJ) $(EMBEDDED_PLATFORM_SIG_OBJ) $(TEST_RUNNER_OBJ) $(RUNTIME_FACTORY_OBJ) $(STATIC_OBJ) $(MIGRATE_OBJ) $(VFS_OBJ) $(PATH_NORM_OBJ) $(THREAD_AFFINITY_OBJ) $(CACHE_DIR_OBJ) $(BLOB_STORE_OBJ) $(CACHE_REGISTRY_OBJ) $(CACERT_OBJ) $(TLS_CLIENT_OBJ) $(CSP_OBJ) $(SBOM_OBJ) $(STDLIB_FEATURE_OBJ) $(APP_CONTEXT_OBJ) $(APP_CONTEXT_RT_OBJ) $(AGENT_LIB_OBJ) $(AGENT_API_OBJ) $(MAIN_OBJ) $(SERVE_OBJ) $(APP_RUNNER_OBJ) $(TOOL_OBJ) $(BUILD_ASSET_STUB_OBJ) $(STDLIB_REGISTRY_O) $(PLATFORM_RUNTIME_EXTRA) $(WAMR_OBJS) $(MBEDTLS_OBJS) \
+PLATFORM_OBJS := $(PLATFORM_CAP_OBJS) $(CAP_TOOL_OBJ) $(CAP_TEST_OBJ) $(CMD_OBJS) $(PLATFORM_RT_OBJS) $(ALLOC_OBJ) $(ASYNC_OBJ) $(COMPRESS_OBJ) $(MINIZ_OBJ) $(WORKER_DB_OBJ) $(WORKER_WASM_OBJ) $(WORKER_GPU_OBJ) $(PLATFORM_MANIFEST_OBJ) $(MODULE_OBJ) $(ASYNC_BACKEND_OBJS) $(NET_BACKEND_OBJS) $(SANDBOX_OBJ) $(SANDBOX_TOOL_OBJ) $(SIG_OBJ) $(RELEASE_OBJ) $(RELEASE_IO_OBJ) $(TOOLS_INSTALL_OBJ) $(PLATFORM_SIG_OBJ) $(EMBEDDED_PLATFORM_SIG_OBJ) $(TEST_RUNNER_OBJ) $(RUNTIME_FACTORY_OBJ) $(STATIC_OBJ) $(MIGRATE_OBJ) $(VFS_OBJ) $(PATH_NORM_OBJ) $(THREAD_AFFINITY_OBJ) $(CACHE_DIR_OBJ) $(BLOB_STORE_OBJ) $(CACHE_REGISTRY_OBJ) $(CACERT_OBJ) $(TLS_CLIENT_OBJ) $(CSP_OBJ) $(SBOM_OBJ) $(STDLIB_FEATURE_OBJ) $(APP_CONTEXT_OBJ) $(APP_CONTEXT_RT_OBJ) $(AGENT_LIB_OBJ) $(AGENT_API_OBJ) $(MAIN_OBJ) $(SERVE_OBJ) $(APP_RUNNER_OBJ) $(HTTP_WEAKSTUB_OBJ) $(TOOL_OBJ) $(BUILD_ASSET_STUB_OBJ) $(STDLIB_REGISTRY_O) $(PLATFORM_RUNTIME_EXTRA) $(WAMR_OBJS) $(MBEDTLS_OBJS) \
 	$(SQLITE_OBJ) $(LOG_OBJ) $(LOG_LOCK_OBJ) $(SH_ARENA_OBJ) $(SH_JSON_OBJ) $(TWEETNACL_OBJ) $(STB_OBJ) $(PLEDGE_OBJS) \
 	$(COMPILER_OBJ) $(COMPILER_TCC_OBJ)
 
@@ -2616,11 +2649,9 @@ platform: $(PLATFORM_LIB)
 # to avoid clobbering the default build or build/hull. `hull build
 # --flavor=<flavor>` discovers the result in $(BUILDDIR)/. See
 # docs/build_flavors.md.
-PLATFORM_FLAVOR_FLAGS_server-only  := HL_ENABLE_HTTP_CLIENT=0
-PLATFORM_FLAVOR_FLAGS_client-only  := HL_ENABLE_HTTP_SERVER=0
 PLATFORM_FLAVOR_FLAGS_pure-compute := HL_ENABLE_HTTP=0
 
-platform-server-only platform-client-only platform-pure-compute: platform-%:
+platform-pure-compute: platform-%:
 	$(MAKE) platform BUILDDIR=$(BUILDDIR)/flavor-$* $(PLATFORM_FLAVOR_FLAGS_$*)
 	cp $(BUILDDIR)/flavor-$*/libhull_platform.a $(BUILDDIR)/libhull_platform-$*.a
 	@echo "built $(BUILDDIR)/libhull_platform-$*.a"
@@ -2746,14 +2777,77 @@ feature-tui: $(BUILDDIR)/libhull_feature-tui.a
 $(BUILDDIR)/cap_tui.o $(BUILDDIR)/cap_tui_input.o $(BUILDDIR)/cap_tui_width.o \
 $(BUILDDIR)/lua_rt_mod_tui.o $(BUILDDIR)/js_mod_tui.o: CFLAGS += -DHL_ENABLE_TUI
 
+# TRUST_FEATURE_LIBS=1 (release stage 3, issue #114): the embedded runtime /
+# HTTP-core / web-bindings / tui-bridge feature archives were downloaded from
+# build-platform-native — the EXACT bytes sign-platform-manifest hashed into the
+# signed platform manifest. Embed them as-is so the runtime composed-feature
+# check (signature.c §5c) matches the embedded manifest. AR_FEATURE_LIB's trust
+# branch only asserts presence; it never re-archives, so the signed bytes survive
+# into hull even if source objects recompile (harmless — they're never used).
+# Local devs / normal `make` leave it unset and build the archives from source.
+# NOTE: applies ONLY to the seven archives EMBEDDED in a native hull. The tui CORE
+# (libhull_feature-tui.a) and the --with backend features are release-domain
+# (hull.sha256), not covered here.
+ifeq ($(TRUST_FEATURE_LIBS),1)
+define AR_FEATURE_LIB
+	@test -f $@ || (echo "ERROR: TRUST_FEATURE_LIBS=1 but $@ is missing"; exit 1)
+	@echo "$@: trusting pre-built artifact (TRUST_FEATURE_LIBS=1)"
+endef
+else
+define AR_FEATURE_LIB
+	@rm -f $@
+	$(AR) rcs $@ $(1)
+	@echo "built $@ ($$(du -h $@ | cut -f1))"
+endef
+endif
+
+# libhull_feature-tui.a is the runtime-AGNOSTIC cap core only (issue #114,
+# Phase D). The per-runtime bridges (lua_rt_mod_tui.o / js_mod_tui.o) whole-
+# archive would pull BOTH runtimes' bridges, and the non-composed runtime's
+# bridge references runtime symbols the runtime-less base lacks -> undefined at
+# link. So each bridge is its own archive (libhull_feature-tui-<rt>.a), and a
+# `--with=tui` app whole-archives the cap core + ONLY its runtime's bridge. The
+# cap core stays the single INSTALLABLE asset (FEATURES[]/release unchanged); the
+# tiny bridges are embedded in hull and composed from there (like the web
+# bindings), so `hull feature install tui` still fetches one archive.
 $(BUILDDIR)/libhull_feature-tui.a: $(BUILDDIR)/cap_tui.o $(BUILDDIR)/cap_tui_input.o \
-                                   $(BUILDDIR)/cap_tui_width.o \
-                                   $(BUILDDIR)/lua_rt_mod_tui.o $(BUILDDIR)/js_mod_tui.o | $(BUILDDIR)
+                                   $(BUILDDIR)/cap_tui_width.o | $(BUILDDIR)
 	@rm -f $@
 	$(AR) rcs $@ $(BUILDDIR)/cap_tui.o $(BUILDDIR)/cap_tui_input.o \
-	            $(BUILDDIR)/cap_tui_width.o \
-	            $(BUILDDIR)/lua_rt_mod_tui.o $(BUILDDIR)/js_mod_tui.o
+	            $(BUILDDIR)/cap_tui_width.o
 	@echo "built $@ ($$(du -h $@ | cut -f1))"
+
+# Per-runtime tui bridge archives (issue #114, Phase D). Tiny (one object each);
+# embedded in hull + composed for the app's runtime alongside the cap core.
+feature-tui-lua: $(BUILDDIR)/libhull_feature-tui-lua.a
+.PHONY: feature-tui-lua
+$(BUILDDIR)/libhull_feature-tui-lua.a: $(BUILDDIR)/lua_rt_mod_tui.o | $(BUILDDIR)
+	$(call AR_FEATURE_LIB,$(BUILDDIR)/lua_rt_mod_tui.o)
+
+feature-tui-js: $(BUILDDIR)/libhull_feature-tui-js.a
+.PHONY: feature-tui-js
+$(BUILDDIR)/libhull_feature-tui-js.a: $(BUILDDIR)/js_mod_tui.o | $(BUILDDIR)
+	$(call AR_FEATURE_LIB,$(BUILDDIR)/js_mod_tui.o)
+
+# libhull_feature-http.a: the runtime-agnostic HTTP CORE as a composable feature
+# archive (issue #114, Phase B). Bundles the HTTP capability objects - client
+# (cap/http + async), server WebSocket registry (cap/ws), SMTP (cap/smtp), and
+# the request body reader (cap/body). These are runtime-agnostic C, reached by
+# both runtimes through the cap layer. Phase A already routed the runtime core
+# through the hl_*_http_* seam, so this archive holds the strong seam overrides
+# that live cap-side (hl_http_ws_registry_free in cap/ws.o). This step is
+# ADDITIVE (base still compiles HTTP in); a later step makes the base
+# HTTP-core-less and composes this. The per-runtime web BINDINGS (routes, sse,
+# ws, bindings_response, http_register, mod_http_*/ws_*/sse/smtp/request) are a
+# separate per-runtime archive (Phase C). Keel is linked separately (the app
+# still pulls libkeel.a), not bundled here.
+# (FEATURE_HTTP_OBJS is defined earlier, above PLATFORM_OBJS, so the native app
+# base filters these caps out; the archive below and the base share one list.)
+
+feature-http: $(BUILDDIR)/libhull_feature-http.a
+.PHONY: feature-http
+$(BUILDDIR)/libhull_feature-http.a: $(FEATURE_HTTP_OBJS) | $(BUILDDIR)
+	$(call AR_FEATURE_LIB,$(FEATURE_HTTP_OBJS))
 
 # libhull_feature-lua.a / -js.a: a runtime as a composable feature archive.
 # Bundles the runtime objects, its vendored VM, its manifest extractor, and its
@@ -2765,24 +2859,59 @@ $(BUILDDIR)/libhull_feature-tui.a: $(BUILDDIR)/cap_tui.o $(BUILDDIR)/cap_tui_inp
 # (lua_rt_mod_tool.o: tool.extract_manifest_js etc., toolchain-only; whole-
 # archiving the runtime must not force-load them - they pull the JS manifest
 # extractor the runtime-less base no longer carries). hull links them directly.
-FEATURE_LUA_OBJS := $(filter-out $(BUILDDIR)/lua_rt_mod_tui.o $(BUILDDIR)/lua_rt_mod_tool.o,$(LUA_RT_OBJS)) \
+# Per-runtime web bindings (issue #114, Phase C). This is the same set the
+# HL_ENABLE_HTTP_SERVER=0 + HL_ENABLE_HTTP_CLIENT=0 source filters enumerate -
+# the tested definition of "what is HTTP" per runtime. They move OUT of the pure
+# runtime archive into libhull_feature-http-<rt>.a, composed only when an app
+# needs HTTP; the pure runtime references a few of their symbols and the base
+# http_weakstub.o satisfies that link when the web archive is not composed.
+FEATURE_HTTP_RT_NAMES := mod_ws_server mod_ws_client mod_http_server mod_sse \
+    mod_test routes dispatch sse ws timers mod_request bindings bindings_response \
+    http_register mod_http_client mod_smtp
+FEATURE_HTTP_LUA_OBJS := $(addprefix $(BUILDDIR)/lua_rt_,$(addsuffix .o,$(FEATURE_HTTP_RT_NAMES)))
+FEATURE_HTTP_JS_OBJS  := $(addprefix $(BUILDDIR)/js_,$(addsuffix .o,$(FEATURE_HTTP_RT_NAMES)))
+
+FEATURE_LUA_OBJS := $(filter-out $(BUILDDIR)/lua_rt_mod_tui.o $(BUILDDIR)/lua_rt_mod_tool.o $(FEATURE_HTTP_LUA_OBJS),$(LUA_RT_OBJS)) \
                     $(LUA_OBJS) $(BUILDDIR)/manifest_lua.o $(STDLIB_LUA_REGISTRY_O)
-FEATURE_JS_OBJS  := $(filter-out $(BUILDDIR)/js_mod_tui.o,$(JS_RT_OBJS)) \
+FEATURE_JS_OBJS  := $(filter-out $(BUILDDIR)/js_mod_tui.o $(FEATURE_HTTP_JS_OBJS),$(JS_RT_OBJS)) \
                     $(QJS_OBJS) $(BUILDDIR)/manifest_js.o $(STDLIB_JS_REGISTRY_O)
 
 feature-lua: $(BUILDDIR)/libhull_feature-lua.a
 .PHONY: feature-lua
 $(BUILDDIR)/libhull_feature-lua.a: $(FEATURE_LUA_OBJS) | $(BUILDDIR)
-	@rm -f $@
-	$(AR) rcs $@ $(FEATURE_LUA_OBJS)
-	@echo "built $@ ($$(du -h $@ | cut -f1))"
+	$(call AR_FEATURE_LIB,$(FEATURE_LUA_OBJS))
 
 feature-js: $(BUILDDIR)/libhull_feature-js.a
 .PHONY: feature-js
 $(BUILDDIR)/libhull_feature-js.a: $(FEATURE_JS_OBJS) | $(BUILDDIR)
-	@rm -f $@
-	$(AR) rcs $@ $(FEATURE_JS_OBJS)
-	@echo "built $@ ($$(du -h $@ | cut -f1))"
+	$(call AR_FEATURE_LIB,$(FEATURE_JS_OBJS))
+
+# Per-runtime web-bindings feature archives (issue #114, Phase C).
+feature-http-lua: $(BUILDDIR)/libhull_feature-http-lua.a
+.PHONY: feature-http-lua
+$(BUILDDIR)/libhull_feature-http-lua.a: $(FEATURE_HTTP_LUA_OBJS) | $(BUILDDIR)
+	$(call AR_FEATURE_LIB,$(FEATURE_HTTP_LUA_OBJS))
+
+feature-http-js: $(BUILDDIR)/libhull_feature-http-js.a
+.PHONY: feature-http-js
+$(BUILDDIR)/libhull_feature-http-js.a: $(FEATURE_HTTP_JS_OBJS) | $(BUILDDIR)
+	$(call AR_FEATURE_LIB,$(FEATURE_HTTP_JS_OBJS))
+
+# Rebuild every feature archive when the Makefile changes. The archives are
+# `ar rcs` over an object LIST (FEATURE_*_OBJS / the tui trio), and those lists
+# live here in the Makefile. `ar rcs` (with the recipe's `rm`) refreshes an
+# archive only when the recipe RUNS, which make triggers only when a member .o
+# is newer than the archive - NOT when the list itself changes (a member moved
+# between archives, or a source added to a filter, without touching any .o). A
+# stale member would then linger and surface as a `duplicate symbol` at compose.
+# The lists change only via a Makefile edit, so depending on the Makefile forces
+# the (cheap) rebuild exactly then. CI clean-builds are unaffected.
+FEATURE_ARCHIVES := $(BUILDDIR)/libhull_feature-lua.a $(BUILDDIR)/libhull_feature-js.a \
+                    $(BUILDDIR)/libhull_feature-http.a \
+                    $(BUILDDIR)/libhull_feature-http-lua.a $(BUILDDIR)/libhull_feature-http-js.a \
+                    $(BUILDDIR)/libhull_feature-tui.a \
+                    $(BUILDDIR)/libhull_feature-tui-lua.a $(BUILDDIR)/libhull_feature-tui-js.a
+$(FEATURE_ARCHIVES): Makefile
 
 # Runtime feature archives a native `hull build` needs to compose a runnable
 # app. The native base is runtime-less, so `hull build` resolves the runtime
@@ -2790,14 +2919,21 @@ $(BUILDDIR)/libhull_feature-js.a: $(FEATURE_JS_OBJS) | $(BUILDDIR)
 # Building them alongside hull makes `make && hull build` work with no extra
 # step (and gives every e2e that shells out to `hull build` its runtime). Cosmo
 # has a dual base and needs none; a single-runtime build gets only its half.
+#
+# The native base is also HTTP-core-less (issue #114), so `hull build` composes
+# libhull_feature-http.a for every full-flavor app; build it here too so a plain
+# `make && hull build` resolves it from build/ with no extra step. Cosmo keeps
+# HTTP in the base and composes no http feature.
 ifndef COSMO
 ifeq ($(RUNTIME),js)
-  RUNTIME_FEATURE_LIBS := $(BUILDDIR)/libhull_feature-js.a
+  RUNTIME_FEATURE_LIBS := $(BUILDDIR)/libhull_feature-js.a $(BUILDDIR)/libhull_feature-http-js.a
 else ifeq ($(RUNTIME),lua)
-  RUNTIME_FEATURE_LIBS := $(BUILDDIR)/libhull_feature-lua.a
+  RUNTIME_FEATURE_LIBS := $(BUILDDIR)/libhull_feature-lua.a $(BUILDDIR)/libhull_feature-http-lua.a
 else
-  RUNTIME_FEATURE_LIBS := $(BUILDDIR)/libhull_feature-lua.a $(BUILDDIR)/libhull_feature-js.a
+  RUNTIME_FEATURE_LIBS := $(BUILDDIR)/libhull_feature-lua.a $(BUILDDIR)/libhull_feature-http-lua.a \
+                          $(BUILDDIR)/libhull_feature-js.a $(BUILDDIR)/libhull_feature-http-js.a
 endif
+  RUNTIME_FEATURE_LIBS += $(BUILDDIR)/libhull_feature-http.a
 else
   RUNTIME_FEATURE_LIBS :=
 endif
@@ -2832,7 +2968,7 @@ platform-cosmo:
 # platform-cosmo it `make clean`s between arches (cosmo needs a per-arch keel),
 # so it clobbers build/ -- build with an INSTALLED cosmo hull as the builder,
 # or copy the result aside before rebuilding the hull.
-platform-cosmo-server-only platform-cosmo-client-only platform-cosmo-pure-compute: platform-cosmo-%:
+platform-cosmo-pure-compute: platform-cosmo-%:
 	@rm -rf $(COSMO_STAGE) && mkdir -p $(COSMO_STAGE)
 	@echo "=== Building x86_64-cosmo platform ($* flavor) ==="
 	$(MAKE) clean
@@ -2925,8 +3061,32 @@ $(EMBEDDED_RUNTIME_H): $(BUILDDIR)/libhull_feature-lua.a $(BUILDDIR)/libhull_fea
 	@xxd -i $(BUILDDIR)/libhull_feature-lua.a | sed 's/build_libhull_feature_lua_a/hl_embedded_feature_lua_a/g' | $(XXD_CONST_PIPE) >> $@
 	@xxd -i $(BUILDDIR)/libhull_feature-js.a  | sed 's/build_libhull_feature_js_a/hl_embedded_feature_js_a/g'   | $(XXD_CONST_PIPE) >> $@
 
-CFLAGS += -DHL_BUILD_EMBEDDED -DHL_BUILD_EMBEDDED_RUNTIME
-$(BUILD_ASSET_OBJ): $(EMBEDDED_PLATFORM_H) $(EMBEDDED_TEMPLATES_H) $(EMBEDDED_RUNTIME_H)
+# Embed the HTTP core feature archive too (issue #114). The native base is
+# HTTP-core-less; the default distributed hull composes this back for every
+# full-flavor app with no `hull feature install`. (Cosmo keeps HTTP in the base,
+# so this native single-arch embed path is the only one that needs it.)
+#
+# The per-runtime web bindings (Phase C) are embedded here too, so a full-flavor
+# app composes the http core + its runtime's web bindings with no install.
+EMBEDDED_HTTP_H := $(BUILDDIR)/embedded_http.h
+$(EMBEDDED_HTTP_H): $(BUILDDIR)/libhull_feature-http.a $(BUILDDIR)/libhull_feature-http-lua.a $(BUILDDIR)/libhull_feature-http-js.a | $(BUILDDIR)
+	@echo "/* Auto-generated - do not edit */" > $@
+	@xxd -i $(BUILDDIR)/libhull_feature-http.a     | sed 's/build_libhull_feature_http_a/hl_embedded_feature_http_a/g'         | $(XXD_CONST_PIPE) >> $@
+	@xxd -i $(BUILDDIR)/libhull_feature-http-lua.a | sed 's/build_libhull_feature_http_lua_a/hl_embedded_feature_http_lua_a/g' | $(XXD_CONST_PIPE) >> $@
+	@xxd -i $(BUILDDIR)/libhull_feature-http-js.a  | sed 's/build_libhull_feature_http_js_a/hl_embedded_feature_http_js_a/g'   | $(XXD_CONST_PIPE) >> $@
+
+# Embed the per-runtime tui bridges too (issue #114, Phase D). The tui cap core
+# stays the single installable feature asset; a full-flavor `--with=tui` app
+# composes the cap core (installed/local) + its runtime's bridge (embedded here),
+# so `hull feature install tui` still fetches one archive.
+EMBEDDED_TUI_H := $(BUILDDIR)/embedded_tui.h
+$(EMBEDDED_TUI_H): $(BUILDDIR)/libhull_feature-tui-lua.a $(BUILDDIR)/libhull_feature-tui-js.a | $(BUILDDIR)
+	@echo "/* Auto-generated - do not edit */" > $@
+	@xxd -i $(BUILDDIR)/libhull_feature-tui-lua.a | sed 's/build_libhull_feature_tui_lua_a/hl_embedded_feature_tui_lua_a/g' | $(XXD_CONST_PIPE) >> $@
+	@xxd -i $(BUILDDIR)/libhull_feature-tui-js.a  | sed 's/build_libhull_feature_tui_js_a/hl_embedded_feature_tui_js_a/g'   | $(XXD_CONST_PIPE) >> $@
+
+CFLAGS += -DHL_BUILD_EMBEDDED -DHL_BUILD_EMBEDDED_RUNTIME -DHL_BUILD_EMBEDDED_HTTP -DHL_BUILD_EMBEDDED_TUI
+$(BUILD_ASSET_OBJ): $(EMBEDDED_PLATFORM_H) $(EMBEDDED_TEMPLATES_H) $(EMBEDDED_RUNTIME_H) $(EMBEDDED_HTTP_H) $(EMBEDDED_TUI_H)
 endif
 
 # Hull binary
@@ -3331,6 +3491,10 @@ $(BUILDDIR)/serve.o: $(SRCDIR)/hull/serve.c | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
 # Slim produced-app entry (hl_app_run -> hull_serve); no hull CLI dispatch.
 $(APP_RUNNER_OBJ): $(SRCDIR)/hull/app_runner.c | $(BUILDDIR)
+	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
+
+# Weak no-op defaults for the per-runtime web bindings (issue #114, Phase C).
+$(HTTP_WEAKSTUB_OBJ): $(SRCDIR)/hull/http_weakstub.c | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
 
 # Serve-cli (CLI counterpart, used when HL_ENABLE_HTTP_SERVER=0)
@@ -4103,6 +4267,14 @@ e2e-tcc: $(BUILDDIR)/hull $(BUILDDIR)/libhull_platform.a
 # `hull build --flavor` MVP. Builds the pure-compute platform lib itself.
 e2e-build-flavor: $(BUILDDIR)/hull
 	sh tests/e2e_build_flavor.sh
+
+# Composed-feature signature e2e (issue #114). Rebuilds the platform lib + hull
+# TWICE with a test key, so it is slow (~minutes) and NOT part of the default
+# e2e sweep - run it explicitly. It is the only local coverage of the gethull
+# platform-sig layer (dev builds otherwise use the all-zeros placeholder).
+e2e-composed-sig: $(BUILDDIR)/hull
+	sh tests/e2e_composed_sig.sh
+.PHONY: e2e-composed-sig
 
 e2e-install:
 	sh tests/e2e_install.sh

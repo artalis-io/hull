@@ -189,11 +189,12 @@ jobs:
   #      path into LC_UUID; same-path isolates the question we
   #      actually care about: link output stability for fixed
   #      inputs. See Makefile comment on the target.)
-  # Build the documented HL_ENABLE_* flavor combinations and smoke-test each.
-  # The default `build` job only covers the all-on flavor; without this, a
-  # reference to a feature-gated symbol from an always-compiled TU (e.g. a
-  # tool binding calling an HTTP-server-only hl_agent_*/hl_dev_state_*) would
-  # only break the flavor link, which nothing else exercises.
+  # Build the documented HL_ENABLE_* build combinations and smoke-test each.
+  # The default `build` job only covers the all-on build; without this, a
+  # reference to a feature-gated symbol from an always-compiled TU would only
+  # break under a narrower flag set, which nothing else exercises. (server-only
+  # / client-only were removed as products in #114; the HTTP axis is now full vs
+  # pure-compute, and pure-compute exercises both HTTP halves off at once.)
   flavors:
     name: Build flavor (${{ matrix.name }})
     runs-on: ubuntu-24.04
@@ -201,10 +202,6 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - name: client-only / CLI (no http server)
-            flags: HL_ENABLE_HTTP_SERVER=0
-          - name: server-only (no http client)
-            flags: HL_ENABLE_HTTP_CLIENT=0
           - name: compute-only (no db)
             flags: HL_ENABLE_DB=0
           # pure-compute: both HTTP halves off, so mbedTLS is dropped entirely.

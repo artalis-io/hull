@@ -88,6 +88,14 @@ typedef struct HlJS {
     uint32_t        response_class_id;
     int             response_class_registered;
 
+    /* Manifest-extraction leniency (issue #114): a transient runtime that only
+     * reads app.manifest() sets this so an unresolvable `hull:*` import (a
+     * feature-module stdlib file that rides the composed feature, e.g. hull:tui)
+     * resolves to a null-export stub instead of throwing. The app top-level runs,
+     * app.manifest() is captured, and handlers registered-but-not-run don't touch
+     * the stub. Off for a real app load, which must reject undeclared imports. */
+    int             manifest_extract_lenient;
+
     /* Tracked route allocations (freed in hl_js_free) */
     void          **routes;
     size_t          route_count;

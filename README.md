@@ -186,7 +186,7 @@ At the mechanism level there's **one** kind of thing: a **feature** — a compil
 
 The distinction that earns its keep is **distribution**, not architecture, because the *shipping units* differ. Three ways to get capability without compiling from source:
 
-- **Flavor** — a named preset shipped as a **base build** (`libhull_platform-<flavor>.a`). The flavors are a **subtractive** spectrum — `full` → `server-only` → `client-only` → `pure-compute`, each a slim of the default — small and enumerable, so they're pre-published. `hull flavor install <flavor>`, `hull build --flavor=<flavor>`. (It's `flavor`, not `platform`: in Hull *platform* is the build **target** — `darwin-arm64`, `linux-x86_64`, ….)
+- **Flavor** — a named preset shipped as a **base build** (`libhull_platform-<flavor>.a`). The flavors are a **subtractive** set — `full` → `pure-compute`, a slim of the default — small and enumerable, so they're pre-published. `hull flavor install <flavor>`, `hull build --flavor=<flavor>`. (It's `flavor`, not `platform`: in Hull *platform* is the build **target** — `darwin-arm64`, `linux-x86_64`, ….)
 
 - **Feature** - a large **additive** subsystem shipped as its **own bolt-on lib** (`libhull_feature-<name>.a`), composed onto a base at `hull build --with=<name>`. Additive features are orthogonal - N of them means 2^N combos - so they can't be enumerated as flavors; instead **M flavors + N features publish M+N libs but build any of M×N combos**. `hull feature install <name>`; the build links it when the app needs it. Two features ship today - **DuckDB** (~58 MB OLAP, `duckdb://`) and **GPU** (wgpu-native compute) - both native-only; the tiny pure-C `postgres`/`mysql` connectors stay compiled into the base. *(Design: [docs/features_and_flavors.md](docs/features_and_flavors.md). Direction: collapse to one primitive - features - with flavors becoming named presets.)*
 
@@ -196,13 +196,11 @@ Three install verbs, one signed trust chain (`hull.sha256` + Ed25519): `hull too
 
 ### Build Flavors
 
-`hull build --flavor=<flavor>` builds a slimmer app binary by linking a matching per-flavor platform library instead of the full one. The flavor selects which HTTP halves are compiled in, and the app's manifest is validated against the target flavor at build time: an app that declares a module needing a dropped subsystem is rejected before it links.
+`hull build --flavor=<flavor>` builds a slimmer app binary by linking a matching per-flavor platform library instead of the full one. The flavor selects whether HTTP is compiled in, and the app's manifest is validated against the target flavor at build time: an app that declares a module needing a dropped subsystem is rejected before it links.
 
 | Flavor | HTTP | Use case |
 |--------|------|----------|
 | `full` | server + client | Web apps that serve requests and call out to APIs (default) |
-| `server-only` | inbound only | Apps forbidden from making outbound HTTP calls |
-| `client-only` | outbound only | CLI tools that call APIs over HTTPS, no listener |
 | `pure-compute` | none | Offline compute / signing binary. Drops mbedTLS + Keel; smallest binary |
 | `auto` | inferred | Picks the minimal flavor from the app's declared modules |
 

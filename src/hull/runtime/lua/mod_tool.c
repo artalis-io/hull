@@ -31,6 +31,7 @@
 #include "hull/embedded_platform_sig.h"
 #include "hull/platform_sig.h"
 #include "hull/release_io.h"
+#include "hull/cap/crypto.h"
 #include "hull/signature.h"  /* HL_PLATFORM_PUBKEY_HEX */
 #include "hull/manifest_extract_file.h"  /* extract_manifest_js helper */
 
@@ -474,6 +475,38 @@ static int l_tool_extract_feature_runtime(lua_State *L)
     const char *dir = luaL_checkstring(L, 1);
     const char *rt  = luaL_checkstring(L, 2);
     int rc = hl_build_extract_feature_runtime(dir, rt);
+    lua_pushboolean(L, rc == 0);
+    return 1;
+}
+
+/* ── tool.extract_feature_http(dir) → bool ─────────────────────────── */
+
+static int l_tool_extract_feature_http(lua_State *L)
+{
+    const char *dir = luaL_checkstring(L, 1);
+    int rc = hl_build_extract_feature_http(dir);
+    lua_pushboolean(L, rc == 0);
+    return 1;
+}
+
+/* ── tool.extract_feature_http_rt(dir, rt) → bool ──────────────────── */
+
+static int l_tool_extract_feature_http_rt(lua_State *L)
+{
+    const char *dir = luaL_checkstring(L, 1);
+    const char *rt  = luaL_checkstring(L, 2);
+    int rc = hl_build_extract_feature_http_rt(dir, rt);
+    lua_pushboolean(L, rc == 0);
+    return 1;
+}
+
+/* ── tool.extract_feature_tui_rt(dir, rt) → bool ───────────────────── */
+
+static int l_tool_extract_feature_tui_rt(lua_State *L)
+{
+    const char *dir = luaL_checkstring(L, 1);
+    const char *rt  = luaL_checkstring(L, 2);
+    int rc = hl_build_extract_feature_tui_rt(dir, rt);
     lua_pushboolean(L, rc == 0);
     return 1;
 }
@@ -1113,8 +1146,55 @@ static int l_tool_platform_pubkey(lua_State *L)
     return 1;
 }
 
+/* ── tool.sha256_file(path) → hex_string | nil, err ───────────────
+ *
+ * SHA-256 a file by STREAMING it through the incremental crypto API.
+ * Hashing a large archive (e.g. the ~127 MB DuckDB feature lib, or the
+ * wgpu GPU lib) must never materialize the file as a Lua string: that
+ * would blow the tool VM's 64 MB sandbox allocator ("not enough
+ * memory"). build.lua uses this to record composed feature archives in
+ * package.sig.gethull.composed (issue #114). Only the 64-char hex
+ * result crosses into Lua.
+ */
+static int l_tool_sha256_file(lua_State *L)
+{
+    const char *path = luaL_checkstring(L, 1);
+    FILE *f = fopen(path, "rb");
+    if (!f) {
+        lua_pushnil(L);
+        lua_pushstring(L, "cannot open file");
+        return 2;
+    }
+    HlSha256Ctx ctx;
+    hl_cap_crypto_sha256_init(&ctx);
+    unsigned char buf[16384];   /* modest stack chunk; hashing is I/O-bound */
+    size_t n;
+    int err = 0;
+    while ((n = fread(buf, 1, sizeof(buf), f)) > 0) {
+        if (hl_cap_crypto_sha256_update(&ctx, buf, n) != 0) { err = 1; break; }
+    }
+    if (!err && ferror(f)) err = 1;
+    fclose(f);
+    uint8_t digest[32];
+    if (err || hl_cap_crypto_sha256_final(&ctx, digest) != 0) {
+        lua_pushnil(L);
+        lua_pushstring(L, "hash failed");
+        return 2;
+    }
+    static const char hexd[] = "0123456789abcdef";
+    char hex[65];
+    for (int i = 0; i < 32; i++) {
+        hex[i * 2]     = hexd[digest[i] >> 4];
+        hex[i * 2 + 1] = hexd[digest[i] & 0x0f];
+    }
+    hex[64] = '\0';
+    lua_pushstring(L, hex);
+    return 1;
+}
+
 static const luaL_Reg tool_funcs[] = {
     { "spawn",                       l_tool_spawn },
+    { "sha256_file",                 l_tool_sha256_file },
     { "spawn_read",                  l_tool_spawn_read },
     { "find_files",                  l_tool_find_files },
     { "find_tool",                   l_tool_find_tool },
@@ -1148,6 +1228,9 @@ static const luaL_Reg tool_funcs[] = {
     { "extract_manifest_js",    l_tool_extract_manifest_js },
     { "extract_platform",       l_tool_extract_platform },
     { "extract_feature_runtime", l_tool_extract_feature_runtime },
+    { "extract_feature_http",   l_tool_extract_feature_http },
+    { "extract_feature_http_rt", l_tool_extract_feature_http_rt },
+    { "extract_feature_tui_rt", l_tool_extract_feature_tui_rt },
     { "extract_platform_cosmo", l_tool_extract_platform_cosmo },
     { "platform_archs",         l_tool_platform_archs },
     /* Orchestration entries (modules_resolve, doctor_json, agent_*,
