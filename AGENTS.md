@@ -958,6 +958,15 @@ module optional (below). Same signed trust chain as `hull flavor install`;
 `make feature-<name>` builds from source. Reference:
 [docs/features_and_flavors.md](docs/features_and_flavors.md).
 
+**Signed builds attest every composed archive.** A `hull build --sign` records
+each archive it composes (the runtime, HTTP core, tui bridge, and any `--with`
+feature) into `package.sig.gethull.composed`, so `--verify-sig` proves the app is
+built from genuine gethull.dev artefacts — not just the base platform lib. This is
+automatic; you don't manage it. (On a release-built hull with a real platform key,
+a mismatched composed archive makes `--verify-sig` refuse to boot; today's builds
+carry the placeholder pubkey, which skips the check.) Design:
+[docs/composed_feature_signing.md](docs/composed_feature_signing.md).
+
 ### Optional modules - graceful capability fallback
 
 Mark a build-cap module optional with a trailing `?`

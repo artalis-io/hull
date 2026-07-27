@@ -1412,15 +1412,30 @@ int main(int argc, char **argv) { return hl_app_run(argc, argv); }
     -- must match that manifest's name column. See docs/composed_feature_signing.md.
     local composed_assets = {}
     local function record_composed(name, path, domain)
+        -- Only a --sign build writes the attestation; a plain `hull build`
+        -- discards composed_assets, so skip the (up to ~127 MB) hash entirely.
+        if not opts.sign then return end
+        -- Fail CLOSED. A malformed name would record an asset the runtime §5c
+        -- can never find in the signed manifest (a signed app that refuses to
+        -- boot), and an unhashable archive would silently drop out of the
+        -- attestation. Both are build-integrity failures, not to be papered over.
+        if type(name) ~= "string" or name == "" or name:find("..", 1, true) then
+            tool.stderr("hull build: internal error: malformed composed-asset "
+                        .. "name '" .. tostring(name) .. "'\n")
+            tool.rmdir(tmpdir); tool.exit(1)
+        end
         -- Stream-hash the archive in C (tool.sha256_file) rather than
         -- read_file + crypto.sha256: a --with feature archive can be huge
         -- (~127 MB DuckDB, the wgpu GPU lib) and slurping it into a Lua
         -- string blows the tool VM's 64 MB sandbox allocator.
         local sha = tool.sha256_file(path)
-        if sha then
-            composed_assets[#composed_assets + 1] =
-                { name = name, sha256 = sha, domain = domain }
+        if not sha then
+            tool.stderr("hull build: cannot hash composed archive '" .. path
+                        .. "' for signing (" .. name .. ")\n")
+            tool.rmdir(tmpdir); tool.exit(1)
         end
+        composed_assets[#composed_assets + 1] =
+            { name = name, sha256 = sha, domain = domain }
     end
     -- A DB wire feature (postgres/mysql) references base symbols (crypto,
     -- tls_client) that a DB-only app doesn't otherwise pull, so on GNU ld the

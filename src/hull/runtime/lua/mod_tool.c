@@ -1167,7 +1167,7 @@ static int l_tool_sha256_file(lua_State *L)
     }
     HlSha256Ctx ctx;
     hl_cap_crypto_sha256_init(&ctx);
-    unsigned char buf[65536];
+    unsigned char buf[16384];   /* modest stack chunk; hashing is I/O-bound */
     size_t n;
     int err = 0;
     while ((n = fread(buf, 1, sizeof(buf), f)) > 0) {

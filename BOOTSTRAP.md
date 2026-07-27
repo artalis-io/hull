@@ -145,6 +145,10 @@ web bindings nor the HTTP caps; add `--flavor=pure-compute` and it also
 drops Keel + mbedTLS (~785 KB smaller). This is automatic — the runtimes
 and the HTTP layer ride inside `hull` and auto-compose; only large
 optional subsystems (gpu / duckdb / tui) are `hull build --with=<name>`.
+Composition is signature-aware: `hull build --sign` attests every archive
+it composes (runtime, HTTP core, tui bridge, any `--with` feature) inside
+`package.sig`, and `--verify-sig` proves the app was built from genuine
+gethull.dev artefacts. You don't manage this — it just happens.
 
 If the spec describes multiple shapes (e.g. an HTMX admin UI **plus**
 a CLI for batch import), pick the PRIMARY one for `hull init` and
