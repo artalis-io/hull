@@ -123,4 +123,9 @@ __attribute__((weak)) void hl_js_test_run(JSContext *ctx, int *total, int *passe
     (void)ctx; (void)total; (void)passed; (void)failed;
     (void)out; (void)results; (void)max_results;
 }
+
+__attribute__((weak)) void hl_js_timer_reschedule(struct HlJSTimer *t)
+{
+    (void)t;
+}
 #endif /* HL_ENABLE_JS */

@@ -37,8 +37,9 @@ nm build/libhull_feature-tui.a 2>/dev/null | grep -qE '[ _]hl_tui_feature_presen
 
 HULL=/tmp/hull_base_tui_e2e
 APP=$(mktemp -d)
+JSAPP=$(mktemp -d)
 PLAIN=$(mktemp -d)
-trap 'rm -rf "$APP" "$PLAIN" /tmp/hull_base_tui_e2e' EXIT
+trap 'rm -rf "$APP" "$JSAPP" "$PLAIN" /tmp/hull_base_tui_e2e' EXIT
 
 cat > "$APP/app.lua" <<'LUA'
 app.manifest({ tui = true, modules = { "hull/tui@1" } })
@@ -79,6 +80,42 @@ test -x "$APP/bin_auto" || { echo "$AUTO_OUT"; echo "FAIL: auto-inferred tui pro
 "$APP/bin_auto" 2>&1 | grep -q "TUI FEATURE APP OK" \
     || { echo "FAIL: auto-inferred tui app did not run"; exit 1; }
 echo "ok  auto-inferred tui composes + runs"
+
+# ── the JS runtime composes its OWN tui bridge (not the lua one) and, being a
+# ── pure app.main tui app, correctly SKIPS the http core + web bindings ──────
+#
+# Guards two things the Lua path can't: (1) `--with=tui` pulls libhull_feature-
+# tui-js.a (the js bridge), never the lua bridge, onto the js-only base; and (2)
+# issue #114's JS manifest-extraction leniency — a JS app that imports a feature
+# module (hull:tui, whose stdlib .js rides the composed feature) must still have
+# its manifest read, so needs_http is false and the build skips http, instead of
+# the extraction failing and the fail-safe over-composing Keel + the http stack.
+cat > "$JSAPP/app.js" <<'JS'
+import { app } from "hull:app";
+import { tui } from "hull:tui";
+app.manifest({ tui: true, modules: ["hull/tui@1"] });
+app.main((ctx) => {
+    if (typeof tui.run !== "function") { ctx.stderr.write("tui.run missing\n"); return 2; }
+    ctx.stdout.write("TUI FEATURE APP OK\n");
+    return 0;
+});
+JS
+
+echo "=== --with=tui (JS): composes the js bridge + skips http ==="
+JS_OUT=$("$HULL" build --compiler=system --with=tui --no-verify-platform -o "$JSAPP/bin" "$JSAPP" 2>&1) \
+    || { echo "$JS_OUT"; echo "FAIL: JS --with=tui should build"; exit 1; }
+echo "$JS_OUT" | grep -q "composed tui bridge 'js'" \
+    || { echo "$JS_OUT"; echo "FAIL: expected the JS per-runtime tui bridge"; exit 1; }
+# Regression guard for the JS manifest-extraction over-compose (#114): a pure
+# tui app.main app declares no HTTP module, so the build must skip the http core.
+echo "$JS_OUT" | grep -q "HTTP-free app" \
+    || { echo "$JS_OUT"; echo "FAIL: JS tui app should skip http (needs_http over-compose regression)"; exit 1; }
+echo "$JS_OUT" | grep -q "composed HTTP feature" \
+    && { echo "$JS_OUT"; echo "FAIL: JS tui app composed http it does not need"; exit 1; }
+test -x "$JSAPP/bin" || { echo "$JS_OUT"; echo "FAIL: JS --with=tui produced no binary"; exit 1; }
+"$JSAPP/bin" 2>&1 | grep -q "TUI FEATURE APP OK" \
+    || { echo "FAIL: JS tui app did not register hull.tui / run"; exit 1; }
+echo "ok  JS --with=tui composes the js bridge, skips http, builds, and runs"
 
 echo "=== negative: a plain (non-tui) app still builds + runs ==="
 printf 'app.manifest({modules={}})\napp.main(function() print("PLAIN OK") return 0 end)\n' \
