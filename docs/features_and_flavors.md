@@ -323,12 +323,11 @@ presets as the only user-facing vocabulary. Steps 2–3 are a later cleanup; ste
   static dependency.
 - A `hull doctor` / `hull feature list` view that shows, for the current app,
   which features it needs and whether each is installed.
-- **Reduced-flavor × runtime (and tui × runtime) — tracked in #114.** Since the
-  runtime-featurify epic (#113) the native base is runtime-less and a produced
-  app composes one full-config runtime archive. That archive's web bindings
-  reference HTTP caps + Keel a **reduced** flavor drops, so a runtime does NOT
-  yet compose orthogonally onto pure-compute (it fails
-  closed). The fix is **HTTP as a composable feature** with a weak seam so a
-  reduced flavor omits the web bindings — the same per-runtime-bridge seam that
-  also re-enables `--with=tui`. Until then the M+N-composes-M×N property holds
-  only for the full flavor.
+- **Reduced-flavor × runtime (and tui × runtime) — ✓ shipped (#114 + #118).**
+  Since the runtime-featurify epic (#113) the native base is runtime-less; #114
+  (HTTP as a composable feature) then split the runtime's web bindings behind a
+  weak seam and #118 did the same for WASM. A **reduced** flavor now omits the
+  web bindings + WAMR, so a runtime composes orthogonally onto pure-compute
+  (`--flavor=pure-compute` × runtime, `--with=tui` × runtime). The
+  M+N-composes-M×N property now holds across every flavor, not just full;
+  `tests/e2e_build_flavor.sh` proves pure-compute × runtime and × wasm.

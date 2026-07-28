@@ -4384,14 +4384,13 @@ the release pipeline builds + signs + publishes `libhull_feature-{lua,js}` per
 arch (dry-run-validated end to end). A single-runtime app no longer carries the
 other interpreter.
 
-**Known interim gap → tracked in issue #114 (HTTP as a composable feature).**
-The M+N-composes-M×N claim below holds for the **full** flavor but NOT for
-**reduced** flavors: the runtime archive is compiled full-config, so its web
-bindings reference HTTP caps + Keel that a reduced flavor (pure-compute)
-drops. `hull build --flavor=<reduced>` and the
-composed-runtime `--with=tui` path therefore **fail closed** (clear message
-pointing at #114) until HTTP becomes a composable feature with a weak seam that
-lets a reduced flavor omit those bindings.
+**Interim gap → ✓ closed by #114 (HTTP as a composable feature) + #118 (WASM).**
+The M+N-composes-M×N claim below now holds for **reduced** flavors too: #114
+split the runtime's web bindings behind a weak HTTP seam and #118 did the same
+for WASM, so a reduced flavor (pure-compute) omits those bindings + WAMR and a
+runtime composes onto it. `hull build --flavor=pure-compute` and the
+composed-runtime `--with=tui` path both work; `tests/e2e_build_flavor.sh` proves
+pure-compute × runtime and pure-compute × wasm.
 
 **Supersedes** the earlier "publish `full-lua` / `full-js` per-flavor platform
 libs" sketch. Delivering the runtime slim as **composable features** (the
@@ -4538,8 +4537,9 @@ the whole reason to prefer this over the flavor-lib sketch.
 - [x] Phase 3: Lua as a feature -> runtime-less base; `hull` embeds both archives.
 - [x] Phase 4: publish + wire (`make feature-{lua,js}`, release jobs x3 arches, embed + sign + publish, `--flavor=auto` runtime inference, `e2e_feature_runtime.sh`). Release pipeline dry-run-validated 2026-07-26.
 
-Follow-on (not part of #113): reduced-flavor × runtime and tui × runtime fail
-closed pending issue #114 (HTTP as a composable feature) — see Status above.
+Follow-on (not part of #113): reduced-flavor × runtime and tui × runtime — ✓
+shipped via #114 (HTTP as a composable feature) + #118 (WASM); both compose onto
+pure-compute now. See Status above.
 
 Original phase detail:
 

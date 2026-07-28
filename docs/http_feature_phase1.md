@@ -1,6 +1,6 @@
 # HTTP as a composable feature — Phase 1 (the seam)
 
-**Status:** design + Phase A. Tracks **issue #114**.
+**Status:** ✅ shipped (**issue #114**). The base is HTTP-core-less + web-bindings-split; a runtime composes onto any flavor. This doc is the original design; kept for the seam rationale.
 **Prereq:** the runtime-featurify epic (#113, shipped) — runtime-less base +
 compose-one-runtime. This epic is its sibling: it does for HTTP what #113 did
 for the runtimes.
