@@ -1639,11 +1639,19 @@ int main(int argc, char **argv) { return hl_app_run(argc, argv); }
             -- Fail safe: if resolution is unavailable, compose HTTP (never
             -- under-compose and silently break serving).
             local needs_http = true
+            -- needs_wasm two-signal gate (docs/wasm_feature.md, Phase 2):
+            --   S2 = the app ships compute/*.wasm (catches a WASM-backed db.udf
+            --        that declares no compute module — invisible to the resolver);
+            --   S1 = a declared WASM cap (hull/compute), from modules_resolve.
+            -- Compose the wasm feature iff either fires; a genuinely compute-free
+            -- app then links zero WAMR (~256 KB smaller).
+            local needs_wasm = (#compute_files > 0)
             do
                 local mf = extract_app_manifest(opts.app_dir)
                 if mf then
                     local r = tool.modules_resolve(mf, opts.flavor, with_feature_list(opts))
                     if r.ok and r.needs_http ~= nil then needs_http = r.needs_http end
+                    if r.ok and r.needs_wasm then needs_wasm = true end
                 end
             end
 
@@ -1694,12 +1702,13 @@ int main(int argc, char **argv) { return hl_app_run(argc, argv); }
             end
             print("hull build: composed runtime '" .. app_rt .. "'")
 
-            -- Compose the WASM feature (docs/wasm_feature.md, Phase 1). The native
+            -- Compose the WASM feature (docs/wasm_feature.md, Phase 2). The native
             -- base is compute-less: the wasm caps + WAMR live in
             -- libhull_feature-wasm.a and the compute.* binding (mod_compute) in
-            -- libhull_feature-wasm-<rt>.a. Phase 1 composes both for EVERY app
-            -- (behavior-identical to the pre-flip base; the needs_wasm two-signal
-            -- gate is Phase 2). Whole-archive both inside the --start-group.
+            -- libhull_feature-wasm-<rt>.a. Composed only when needs_wasm (S1 or S2,
+            -- above); a genuinely compute-free app links zero WAMR. Whole-archive
+            -- both inside the --start-group.
+            if needs_wasm then
             local wasm_lib = "libhull_feature-wasm.a"
             local wasm_path, wasm_from = fcompose.resolve_wasm_lib(tmpdir,
                                          { hull_dir = rt_hull_dir, plat = rt_plat })
@@ -1737,6 +1746,10 @@ int main(int argc, char **argv) { return hl_app_run(argc, argv); }
                 feature_libs[#feature_libs + 1] = f
             end
             print("hull build: composed WASM feature + compute bridge '" .. app_rt .. "'")
+            else
+                print("hull build: compute-free app (no hull/compute, no "
+                    .. "compute/*.wasm) - skipped the WASM feature (~256 KB smaller)")
+            end
 
             if needs_http then
             -- Compose the HTTP feature (issue #114, Phase B). The native base is

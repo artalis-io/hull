@@ -27,11 +27,13 @@
  * additive and dormant while WAMR is still compiled into the base (Phase 0):
  * the strong cap definitions win, so behavior is byte-identical.
  *
- * The two per-RUNTIME references the spike also found (luaopen_hull_compute from
- * modules.o, lua_push_wasm_buffer from mod_gpu.o, + the JS twins) are deferred
- * to Phase 1: they only need stubbing once mod_compute actually moves into the
- * per-runtime bridge, and their degraded semantics (require("hull.compute") ->
- * nil) are part of the resolver integration there, not this cap seam.
+ * The two per-RUNTIME references the spike found (luaopen_hull_compute from
+ * modules.o, lua_push_wasm_buffer from mod_gpu.o, + the JS init twin) are the
+ * per-runtime section below: needed once the needs_wasm gate (Phase 2) can skip
+ * composing the compute bridge, so a compute-free app's pure runtime still links.
+ * Neither weak body is ever REACHED on a compute-free app — modules.c gates the
+ * compute-module register on wasm_cache (NULL without the feature) — they only
+ * satisfy the link.
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
@@ -128,3 +130,38 @@ HlWasmBuffer *hl_wasm_buffer_create_adopted(void *data, size_t len,
     (void)data; (void)len; (void)alloc;
     return NULL;
 }
+
+/* ── Per-runtime compute-binding refs (Phase 2) ──────────────────────────
+ * The pure runtime archive references these from modules.o (the compute module
+ * register) and mod_gpu.o (a GPU result pushed as a WasmBuffer). When the wasm
+ * bridge is composed its strong defs win; when it is NOT (needs_wasm false),
+ * these weak no-ops satisfy the link. Real prototypes via the runtime headers,
+ * mirroring http_weakstub.c. */
+
+#ifdef HL_ENABLE_LUA
+#include "hull/runtime/lua.h"   /* lua_State (type only) */
+
+__attribute__((weak)) int luaopen_hull_compute(lua_State *L)
+{
+    (void)L;
+    return 0;   /* not registered without wasm_cache; only satisfies the link */
+}
+
+/* Pure no-op — never REACHED without the feature (a WasmBuffer can't exist, so
+ * mod_gpu never pushes one), so it deliberately calls no Lua-VM function: this
+ * TU is also linked into a JS-only app, where lua_pushnil() would be undefined. */
+__attribute__((weak)) void lua_push_wasm_buffer(lua_State *L, struct HlWasmBuffer *buf)
+{
+    (void)L; (void)buf;
+}
+#endif /* HL_ENABLE_LUA */
+
+#ifdef HL_ENABLE_JS
+#include "hull/runtime/js.h"    /* HlJS, JSContext */
+
+__attribute__((weak)) int hl_js_init_compute_module(JSContext *ctx, HlJS *js)
+{
+    (void)ctx; (void)js;
+    return -1;
+}
+#endif /* HL_ENABLE_JS */
