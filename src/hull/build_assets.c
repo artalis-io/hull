@@ -26,6 +26,9 @@
 #ifdef HL_BUILD_EMBEDDED_TUI
 #include "embedded_tui.h"       /* hl_embedded_feature_tui_{lua,js}_a[] */
 #endif
+#ifdef HL_BUILD_EMBEDDED_WASM
+#include "embedded_wasm.h"      /* hl_embedded_feature_wasm{,_lua,_js}_a[] */
+#endif
 
 /* ── Helper: write data to a file ──────────────────────────────────── */
 
@@ -35,7 +38,7 @@
  * on the embedded-platform macros. */
 #if defined(HL_BUILD_EMBEDDED) || defined(HL_BUILD_EMBEDDED_MULTIARCH) \
     || defined(HL_BUILD_EMBEDDED_RUNTIME) || defined(HL_BUILD_EMBEDDED_HTTP) \
-    || defined(HL_BUILD_EMBEDDED_TUI)
+    || defined(HL_BUILD_EMBEDDED_TUI) || defined(HL_BUILD_EMBEDDED_WASM)
 static int write_blob(const char *path, const unsigned char *data, size_t len)
 {
     FILE *f = fopen(path, "wb");
@@ -206,6 +209,48 @@ int hl_build_extract_feature_tui_rt(const char *dir, const char *rt)
     }
     char path[1024];
     int n = snprintf(path, sizeof(path), "%s/libhull_feature-tui-%s.a", dir, rt);
+    if (n < 0 || (size_t)n >= sizeof(path))
+        return -1;
+    return write_blob(path, data, len);
+#else
+    (void)dir; (void)rt;
+    return -1;
+#endif
+}
+
+int hl_build_extract_feature_wasm(const char *dir)
+{
+#ifdef HL_BUILD_EMBEDDED_WASM
+    if (!dir)
+        return -1;
+    char path[1024];
+    int n = snprintf(path, sizeof(path), "%s/libhull_feature-wasm.a", dir);
+    if (n < 0 || (size_t)n >= sizeof(path))
+        return -1;
+    return write_blob(path, hl_embedded_feature_wasm_a,
+                      hl_embedded_feature_wasm_a_len);
+#else
+    (void)dir;
+    return -1;
+#endif
+}
+
+int hl_build_extract_feature_wasm_rt(const char *dir, const char *rt)
+{
+#ifdef HL_BUILD_EMBEDDED_WASM
+    if (!dir || !rt)
+        return -1;
+    const unsigned char *data = NULL;
+    unsigned int len = 0;
+    if (strcmp(rt, "lua") == 0) {
+        data = hl_embedded_feature_wasm_lua_a; len = hl_embedded_feature_wasm_lua_a_len;
+    } else if (strcmp(rt, "js") == 0) {
+        data = hl_embedded_feature_wasm_js_a;  len = hl_embedded_feature_wasm_js_a_len;
+    } else {
+        return -1;
+    }
+    char path[1024];
+    int n = snprintf(path, sizeof(path), "%s/libhull_feature-wasm-%s.a", dir, rt);
     if (n < 0 || (size_t)n >= sizeof(path))
         return -1;
     return write_blob(path, data, len);

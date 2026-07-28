@@ -2588,10 +2588,12 @@ else
   PLATFORM_RT_OBJS       := $(RUNTIME_CACHE_COMMON_OBJ)  # runtime-agnostic; VMs dropped
   PLATFORM_MANIFEST_OBJ  := $(BUILDDIR)/manifest.o       # runtime-agnostic
   PLATFORM_RUNTIME_EXTRA :=
-  # HTTP core caps move to libhull_feature-http.a; the app composes it back.
-  PLATFORM_CAP_OBJS      := $(filter-out $(FEATURE_HTTP_OBJS),$(CAP_OBJS))
+  # HTTP core caps move to libhull_feature-http.a; the wasm caps move to
+  # libhull_feature-wasm.a (docs/wasm_feature.md, Phase 1). Both compose back at
+  # `hull build`; the base keeps the weak stubs (http_weakstub / wasm_weakstub).
+  PLATFORM_CAP_OBJS      := $(filter-out $(FEATURE_HTTP_OBJS) $(FEATURE_WASM_OBJS),$(CAP_OBJS))
 endif
-PLATFORM_OBJS := $(PLATFORM_CAP_OBJS) $(CAP_TOOL_OBJ) $(CAP_TEST_OBJ) $(CMD_OBJS) $(PLATFORM_RT_OBJS) $(ALLOC_OBJ) $(ASYNC_OBJ) $(COMPRESS_OBJ) $(MINIZ_OBJ) $(WORKER_DB_OBJ) $(WORKER_WASM_OBJ) $(WORKER_GPU_OBJ) $(PLATFORM_MANIFEST_OBJ) $(MODULE_OBJ) $(ASYNC_BACKEND_OBJS) $(NET_BACKEND_OBJS) $(SANDBOX_OBJ) $(SANDBOX_TOOL_OBJ) $(SIG_OBJ) $(RELEASE_OBJ) $(RELEASE_IO_OBJ) $(TOOLS_INSTALL_OBJ) $(PLATFORM_SIG_OBJ) $(EMBEDDED_PLATFORM_SIG_OBJ) $(TEST_RUNNER_OBJ) $(RUNTIME_FACTORY_OBJ) $(STATIC_OBJ) $(MIGRATE_OBJ) $(VFS_OBJ) $(PATH_NORM_OBJ) $(THREAD_AFFINITY_OBJ) $(CACHE_DIR_OBJ) $(BLOB_STORE_OBJ) $(CACHE_REGISTRY_OBJ) $(CACERT_OBJ) $(TLS_CLIENT_OBJ) $(CSP_OBJ) $(SBOM_OBJ) $(STDLIB_FEATURE_OBJ) $(APP_CONTEXT_OBJ) $(APP_CONTEXT_RT_OBJ) $(AGENT_LIB_OBJ) $(AGENT_API_OBJ) $(MAIN_OBJ) $(SERVE_OBJ) $(APP_RUNNER_OBJ) $(HTTP_WEAKSTUB_OBJ) $(WASM_WEAKSTUB_OBJ) $(TOOL_OBJ) $(BUILD_ASSET_STUB_OBJ) $(STDLIB_REGISTRY_O) $(PLATFORM_RUNTIME_EXTRA) $(WAMR_OBJS) $(MBEDTLS_OBJS) \
+PLATFORM_OBJS := $(PLATFORM_CAP_OBJS) $(CAP_TOOL_OBJ) $(CAP_TEST_OBJ) $(CMD_OBJS) $(PLATFORM_RT_OBJS) $(ALLOC_OBJ) $(ASYNC_OBJ) $(COMPRESS_OBJ) $(MINIZ_OBJ) $(WORKER_DB_OBJ) $(WORKER_GPU_OBJ) $(PLATFORM_MANIFEST_OBJ) $(MODULE_OBJ) $(ASYNC_BACKEND_OBJS) $(NET_BACKEND_OBJS) $(SANDBOX_OBJ) $(SANDBOX_TOOL_OBJ) $(SIG_OBJ) $(RELEASE_OBJ) $(RELEASE_IO_OBJ) $(TOOLS_INSTALL_OBJ) $(PLATFORM_SIG_OBJ) $(EMBEDDED_PLATFORM_SIG_OBJ) $(TEST_RUNNER_OBJ) $(RUNTIME_FACTORY_OBJ) $(STATIC_OBJ) $(MIGRATE_OBJ) $(VFS_OBJ) $(PATH_NORM_OBJ) $(THREAD_AFFINITY_OBJ) $(CACHE_DIR_OBJ) $(BLOB_STORE_OBJ) $(CACHE_REGISTRY_OBJ) $(CACERT_OBJ) $(TLS_CLIENT_OBJ) $(CSP_OBJ) $(SBOM_OBJ) $(STDLIB_FEATURE_OBJ) $(APP_CONTEXT_OBJ) $(APP_CONTEXT_RT_OBJ) $(AGENT_LIB_OBJ) $(AGENT_API_OBJ) $(MAIN_OBJ) $(SERVE_OBJ) $(APP_RUNNER_OBJ) $(HTTP_WEAKSTUB_OBJ) $(WASM_WEAKSTUB_OBJ) $(TOOL_OBJ) $(BUILD_ASSET_STUB_OBJ) $(STDLIB_REGISTRY_O) $(PLATFORM_RUNTIME_EXTRA) $(MBEDTLS_OBJS) \
 	$(SQLITE_OBJ) $(LOG_OBJ) $(LOG_LOCK_OBJ) $(SH_ARENA_OBJ) $(SH_JSON_OBJ) $(TWEETNACL_OBJ) $(STB_OBJ) $(PLEDGE_OBJS) \
 	$(COMPILER_OBJ) $(COMPILER_TCC_OBJ)
 
@@ -2909,9 +2911,9 @@ FEATURE_HTTP_RT_NAMES := mod_ws_server mod_ws_client mod_http_server mod_sse \
 FEATURE_HTTP_LUA_OBJS := $(addprefix $(BUILDDIR)/lua_rt_,$(addsuffix .o,$(FEATURE_HTTP_RT_NAMES)))
 FEATURE_HTTP_JS_OBJS  := $(addprefix $(BUILDDIR)/js_,$(addsuffix .o,$(FEATURE_HTTP_RT_NAMES)))
 
-FEATURE_LUA_OBJS := $(filter-out $(BUILDDIR)/lua_rt_mod_tui.o $(BUILDDIR)/lua_rt_mod_tool.o $(FEATURE_HTTP_LUA_OBJS),$(LUA_RT_OBJS)) \
+FEATURE_LUA_OBJS := $(filter-out $(BUILDDIR)/lua_rt_mod_tui.o $(BUILDDIR)/lua_rt_mod_tool.o $(BUILDDIR)/lua_rt_mod_compute.o $(FEATURE_HTTP_LUA_OBJS),$(LUA_RT_OBJS)) \
                     $(LUA_OBJS) $(BUILDDIR)/manifest_lua.o $(STDLIB_LUA_REGISTRY_O)
-FEATURE_JS_OBJS  := $(filter-out $(BUILDDIR)/js_mod_tui.o $(FEATURE_HTTP_JS_OBJS),$(JS_RT_OBJS)) \
+FEATURE_JS_OBJS  := $(filter-out $(BUILDDIR)/js_mod_tui.o $(BUILDDIR)/js_mod_compute.o $(FEATURE_HTTP_JS_OBJS),$(JS_RT_OBJS)) \
                     $(QJS_OBJS) $(BUILDDIR)/manifest_js.o $(STDLIB_JS_REGISTRY_O)
 
 feature-lua: $(BUILDDIR)/libhull_feature-lua.a
@@ -2948,8 +2950,14 @@ FEATURE_ARCHIVES := $(BUILDDIR)/libhull_feature-lua.a $(BUILDDIR)/libhull_featur
                     $(BUILDDIR)/libhull_feature-http.a \
                     $(BUILDDIR)/libhull_feature-http-lua.a $(BUILDDIR)/libhull_feature-http-js.a \
                     $(BUILDDIR)/libhull_feature-tui.a \
-                    $(BUILDDIR)/libhull_feature-tui-lua.a $(BUILDDIR)/libhull_feature-tui-js.a
+                    $(BUILDDIR)/libhull_feature-tui-lua.a $(BUILDDIR)/libhull_feature-tui-js.a \
+                    $(BUILDDIR)/libhull_feature-wasm.a \
+                    $(BUILDDIR)/libhull_feature-wasm-lua.a $(BUILDDIR)/libhull_feature-wasm-js.a
 $(FEATURE_ARCHIVES): Makefile
+# The base platform lib is built from an object LIST (PLATFORM_OBJS); a Phase-1
+# change to that list (wasm caps + WAMR removed) must retrigger the ar, which an
+# mtime check alone misses (docs/wasm_feature.md). Same guard as the features.
+$(PLATFORM_LIB): Makefile
 
 # Runtime feature archives a native `hull build` needs to compose a runnable
 # app. The native base is runtime-less, so `hull build` resolves the runtime
@@ -2964,14 +2972,20 @@ $(FEATURE_ARCHIVES): Makefile
 # HTTP in the base and composes no http feature.
 ifndef COSMO
 ifeq ($(RUNTIME),js)
-  RUNTIME_FEATURE_LIBS := $(BUILDDIR)/libhull_feature-js.a $(BUILDDIR)/libhull_feature-http-js.a
+  RUNTIME_FEATURE_LIBS := $(BUILDDIR)/libhull_feature-js.a $(BUILDDIR)/libhull_feature-http-js.a \
+                          $(BUILDDIR)/libhull_feature-wasm-js.a
 else ifeq ($(RUNTIME),lua)
-  RUNTIME_FEATURE_LIBS := $(BUILDDIR)/libhull_feature-lua.a $(BUILDDIR)/libhull_feature-http-lua.a
+  RUNTIME_FEATURE_LIBS := $(BUILDDIR)/libhull_feature-lua.a $(BUILDDIR)/libhull_feature-http-lua.a \
+                          $(BUILDDIR)/libhull_feature-wasm-lua.a
 else
   RUNTIME_FEATURE_LIBS := $(BUILDDIR)/libhull_feature-lua.a $(BUILDDIR)/libhull_feature-http-lua.a \
-                          $(BUILDDIR)/libhull_feature-js.a $(BUILDDIR)/libhull_feature-http-js.a
+                          $(BUILDDIR)/libhull_feature-wasm-lua.a \
+                          $(BUILDDIR)/libhull_feature-js.a $(BUILDDIR)/libhull_feature-http-js.a \
+                          $(BUILDDIR)/libhull_feature-wasm-js.a
 endif
-  RUNTIME_FEATURE_LIBS += $(BUILDDIR)/libhull_feature-http.a
+  # HTTP + WASM core feature archives (runtime-agnostic), composed for every
+  # full-flavor app (docs/wasm_feature.md, Phase 1 composes wasm always).
+  RUNTIME_FEATURE_LIBS += $(BUILDDIR)/libhull_feature-http.a $(BUILDDIR)/libhull_feature-wasm.a
 else
   RUNTIME_FEATURE_LIBS :=
 endif
@@ -3123,8 +3137,18 @@ $(EMBEDDED_TUI_H): $(BUILDDIR)/libhull_feature-tui-lua.a $(BUILDDIR)/libhull_fea
 	@xxd -i $(BUILDDIR)/libhull_feature-tui-lua.a | sed 's/build_libhull_feature_tui_lua_a/hl_embedded_feature_tui_lua_a/g' | $(XXD_CONST_PIPE) >> $@
 	@xxd -i $(BUILDDIR)/libhull_feature-tui-js.a  | sed 's/build_libhull_feature_tui_js_a/hl_embedded_feature_tui_js_a/g'   | $(XXD_CONST_PIPE) >> $@
 
-CFLAGS += -DHL_BUILD_EMBEDDED -DHL_BUILD_EMBEDDED_RUNTIME -DHL_BUILD_EMBEDDED_HTTP -DHL_BUILD_EMBEDDED_TUI
-$(BUILD_ASSET_OBJ): $(EMBEDDED_PLATFORM_H) $(EMBEDDED_TEMPLATES_H) $(EMBEDDED_RUNTIME_H) $(EMBEDDED_HTTP_H) $(EMBEDDED_TUI_H)
+# Embed the WASM feature archives too (docs/wasm_feature.md, Phase 1). The native
+# base is compute-less; the default distributed hull composes the wasm core + the
+# app's runtime compute bridge back for every full-flavor app with no install.
+EMBEDDED_WASM_H := $(BUILDDIR)/embedded_wasm.h
+$(EMBEDDED_WASM_H): $(BUILDDIR)/libhull_feature-wasm.a $(BUILDDIR)/libhull_feature-wasm-lua.a $(BUILDDIR)/libhull_feature-wasm-js.a | $(BUILDDIR)
+	@echo "/* Auto-generated - do not edit */" > $@
+	@xxd -i $(BUILDDIR)/libhull_feature-wasm.a     | sed 's/build_libhull_feature_wasm_a/hl_embedded_feature_wasm_a/g'         | $(XXD_CONST_PIPE) >> $@
+	@xxd -i $(BUILDDIR)/libhull_feature-wasm-lua.a | sed 's/build_libhull_feature_wasm_lua_a/hl_embedded_feature_wasm_lua_a/g' | $(XXD_CONST_PIPE) >> $@
+	@xxd -i $(BUILDDIR)/libhull_feature-wasm-js.a  | sed 's/build_libhull_feature_wasm_js_a/hl_embedded_feature_wasm_js_a/g'   | $(XXD_CONST_PIPE) >> $@
+
+CFLAGS += -DHL_BUILD_EMBEDDED -DHL_BUILD_EMBEDDED_RUNTIME -DHL_BUILD_EMBEDDED_HTTP -DHL_BUILD_EMBEDDED_TUI -DHL_BUILD_EMBEDDED_WASM
+$(BUILD_ASSET_OBJ): $(EMBEDDED_PLATFORM_H) $(EMBEDDED_TEMPLATES_H) $(EMBEDDED_RUNTIME_H) $(EMBEDDED_HTTP_H) $(EMBEDDED_TUI_H) $(EMBEDDED_WASM_H)
 endif
 
 # Hull binary

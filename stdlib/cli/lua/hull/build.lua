@@ -1694,6 +1694,50 @@ int main(int argc, char **argv) { return hl_app_run(argc, argv); }
             end
             print("hull build: composed runtime '" .. app_rt .. "'")
 
+            -- Compose the WASM feature (docs/wasm_feature.md, Phase 1). The native
+            -- base is compute-less: the wasm caps + WAMR live in
+            -- libhull_feature-wasm.a and the compute.* binding (mod_compute) in
+            -- libhull_feature-wasm-<rt>.a. Phase 1 composes both for EVERY app
+            -- (behavior-identical to the pre-flip base; the needs_wasm two-signal
+            -- gate is Phase 2). Whole-archive both inside the --start-group.
+            local wasm_lib = "libhull_feature-wasm.a"
+            local wasm_path, wasm_from = fcompose.resolve_wasm_lib(tmpdir,
+                                         { hull_dir = rt_hull_dir, plat = rt_plat })
+            if not wasm_path then
+                tool.stderr("hull build: the WASM feature lib (libhull_feature-wasm.a) "
+                    .. "was not found "
+                    .. (wasm_from == "cache-verify-failed"
+                        and "(cache re-verify failed)\n" or "(normally embedded in hull)\n"))
+                tool.stderr("hint: build it from source with `make feature-wasm`\n")
+                tool.rmdir(tmpdir); tool.exit(1)
+            end
+            local wasm_dest = tmpdir .. "/" .. wasm_lib
+            if wasm_path ~= wasm_dest then tool.copy(wasm_path, wasm_dest) end
+            record_composed("libhull_feature-wasm." .. (rt_plat or "") .. ".a",
+                            wasm_dest, "platform")
+            for _, f in ipairs(fcompose.whole_archive_flags(wasm_dest, is_darwin)) do
+                feature_libs[#feature_libs + 1] = f
+            end
+
+            local wasmrt_lib = "libhull_feature-wasm-" .. app_rt .. ".a"
+            local wasmrt_path, wasmrt_from = fcompose.resolve_wasm_rt_lib(app_rt, tmpdir,
+                                             { hull_dir = rt_hull_dir, plat = rt_plat })
+            if not wasmrt_path then
+                tool.stderr("hull build: the compute-bindings feature lib (" .. wasmrt_lib
+                    .. ") was not found "
+                    .. (wasmrt_from == "cache-verify-failed"
+                        and "(cache re-verify failed)\n" or "(normally embedded in hull)\n"))
+                tool.rmdir(tmpdir); tool.exit(1)
+            end
+            local wasmrt_dest = tmpdir .. "/" .. wasmrt_lib
+            if wasmrt_path ~= wasmrt_dest then tool.copy(wasmrt_path, wasmrt_dest) end
+            record_composed("libhull_feature-wasm-" .. app_rt .. "."
+                            .. (rt_plat or "") .. ".a", wasmrt_dest, "platform")
+            for _, f in ipairs(fcompose.whole_archive_flags(wasmrt_dest, is_darwin)) do
+                feature_libs[#feature_libs + 1] = f
+            end
+            print("hull build: composed WASM feature + compute bridge '" .. app_rt .. "'")
+
             if needs_http then
             -- Compose the HTTP feature (issue #114, Phase B). The native base is
             -- HTTP-CORE-LESS: serve.c + the runtime's web-module bindings
