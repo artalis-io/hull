@@ -355,6 +355,16 @@ int hull_tool(const char *module, int argc, char **argv, const char *hull_exe)
         lua_setglobal(L, "__hull_exe");
     }
 
+    /* Record which module the tool VM is DISPATCHING (the entry command), so a
+     * command script can tell "I was invoked as `hull <cmd>`" from "I was
+     * require()'d as a dependency". Without this, an app that legitimately does
+     * require("hull.compute") during manifest extraction pulls in the CLI
+     * compute.lua command, whose bottom-of-file main() then self-executes
+     * against the *build* argv (`hull compute: unknown command '.'`). Command
+     * scripts guard their trailing main() with `__hull_tool_entry == "hull.X"`. */
+    lua_pushstring(L, module);
+    lua_setglobal(L, "__hull_tool_entry");
+
     /* Load and run the stdlib module */
     char code[256];
     snprintf(code, sizeof(code), "require('%s')", module);
