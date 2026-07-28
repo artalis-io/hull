@@ -677,10 +677,9 @@ local function main()
     end
 end
 
--- Only self-dispatch when invoked AS the `hull compute` command. When an app
--- legitimately require("hull.compute")s during manifest extraction in the tool
--- VM, this module is pulled in as a dependency and must NOT run main() against
--- the surrounding command's argv (see __hull_tool_entry in src/hull/tool.c).
-if __hull_tool_entry == "hull.compute" then
-    main()
-end
+-- The tool dispatcher (src/hull/tool.c) invokes the returned main() only when
+-- this module is the entry command it was asked to run. A module that is
+-- require()'d as a dependency (e.g. by an app during manifest extraction in
+-- the tool VM) hands its main() back but is never called, so it can't run
+-- against the wrong argv.
+return main
