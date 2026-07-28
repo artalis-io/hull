@@ -94,7 +94,7 @@ echo "-- signing the extended manifest with the test key --"
 MAN="$WORK/manifest.txt"
 {
     $SHA build/libhull_platform.a | awk -v a="$ARCH" '{print $1"  "a}'
-    for f in lua js http http-lua http-js tui-lua tui-js; do
+    for f in lua js http http-lua http-js tui-lua tui-js wasm wasm-lua wasm-js; do
         A="build/libhull_feature-$f.a"
         [ -f "$A" ] || continue
         $SHA "$A" | awk -v n="libhull_feature-$f.$ARCH.a" '{print $1"  "n}'

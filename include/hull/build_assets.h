@@ -62,6 +62,15 @@ int hl_build_extract_feature_http_rt(const char *dir, const char *rt);
 int hl_build_extract_feature_tui_rt(const char *dir, const char *rt);
 
 /*
+ * Extract the embedded WASM core (`dir/libhull_feature-wasm.a`) and per-runtime
+ * compute bridge (`dir/libhull_feature-wasm-<rt>.a`, rt = "lua" | "js"), composed
+ * for every full-flavor app (docs/wasm_feature.md, Phase 1). Return 0 on success,
+ * -1 if not embedded / unknown rt.
+ */
+int hl_build_extract_feature_wasm(const char *dir);
+int hl_build_extract_feature_wasm_rt(const char *dir, const char *rt);
+
+/*
  * Get the list of embedded platform archives (multi-arch builds).
  * Sets *out to the sentinel-terminated array.
  * Returns the count (excluding sentinel), or 0 if not multi-arch.

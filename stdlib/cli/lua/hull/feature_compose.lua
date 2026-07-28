@@ -232,4 +232,31 @@ function M.resolve_tui_rt_lib(rt, tmpdir, ctx)
     return M.resolve_lib(libname, asset, ctx)
 end
 
+--- Resolve the WASM core feature archive (libhull_feature-wasm.a), embedded
+--- first (docs/wasm_feature.md, Phase 1). Mirrors resolve_http_lib: the native
+--- base is compute-less and the default hull embeds the wasm core, so a
+--- full-flavor app composes it back with no `hull feature install`.
+function M.resolve_wasm_lib(tmpdir, ctx)
+    local libname = "libhull_feature-wasm.a"
+    if tool.extract_feature_wasm and tool.extract_feature_wasm(tmpdir)
+       and file_exists(tmpdir .. "/" .. libname) then
+        return tmpdir .. "/" .. libname, "embedded"
+    end
+    local asset = ctx.plat and ("libhull_feature-wasm-" .. ctx.plat .. ".a") or nil
+    return M.resolve_lib(libname, asset, ctx)
+end
+
+--- Resolve the per-runtime compute bridge (libhull_feature-wasm-<rt>.a),
+--- embedded first. Holds mod_compute (the compute.* binding); composed alongside
+--- the wasm core for the app's runtime, like the http web bindings.
+function M.resolve_wasm_rt_lib(rt, tmpdir, ctx)
+    local libname = "libhull_feature-wasm-" .. rt .. ".a"
+    if tool.extract_feature_wasm_rt and tool.extract_feature_wasm_rt(tmpdir, rt)
+       and file_exists(tmpdir .. "/" .. libname) then
+        return tmpdir .. "/" .. libname, "embedded"
+    end
+    local asset = ctx.plat and ("libhull_feature-wasm-" .. rt .. "-" .. ctx.plat .. ".a") or nil
+    return M.resolve_lib(libname, asset, ctx)
+end
+
 return M

@@ -229,6 +229,15 @@ static int l_tool_modules_resolve(lua_State *L)
     lua_pushboolean(L, (req_caps & HL_MOD_CAP_HTTP) ? 1 : 0);
     lua_setfield(L, -2, "needs_http");
 
+    /* needs_wasm (S1 of the two-signal gate, docs/wasm_feature.md, Phase 2) =
+     * does the resolved set declare a WASM cap (hull/compute)? Drives `hull
+     * build`'s decision to compose the wasm core + the per-runtime compute
+     * bridge. This is only S1: an app that runs a WASM-backed db.udf carries no
+     * module declaration, so build.lua ORs this with S2 (the app ships
+     * compute/*.wasm) before deciding. */
+    lua_pushboolean(L, (req_caps & HL_MOD_CAP_WASM) ? 1 : 0);
+    lua_setfield(L, -2, "needs_wasm");
+
     /* auto = the minimal build flavor that still satisfies this app's
      * declared modules (drives `hull build --flavor=auto`). Computed from
      * the resolved set's aggregate required-caps. */

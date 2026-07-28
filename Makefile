@@ -1956,6 +1956,13 @@ ENTRY_OBJ      := $(BUILDDIR)/entry.o
 # HTTP_SERVER is off (the whole body is guarded).
 HTTP_WEAKSTUB_OBJ := $(BUILDDIR)/http_weakstub.o
 
+# WASM-as-a-feature seam (docs/wasm_feature.md, Phase 0). Weak, fail-closed
+# defaults for the eleven runtime-agnostic wasm cap symbols base objects
+# (db_udf / mod_buffer / mod_image / mod_gpu / app_context / serve) reference, so
+# a future compute-less base still links. Additive + dormant today: the strong
+# cap_wasm* defs win while WAMR is still compiled in (the base flip is Phase 1).
+WASM_WEAKSTUB_OBJ := $(BUILDDIR)/wasm_weakstub.o
+
 # ── Stdlib embedding (xxd) ──────────────────────────────────────────
 #
 # Two Lua source trees feed the embedded stdlib registry:
@@ -2564,6 +2571,14 @@ check-hardening: $(BUILDDIR)/hull
 # `hull build`. The feature-http archive target below reuses this list.
 FEATURE_HTTP_OBJS := $(BUILDDIR)/cap_http.o $(BUILDDIR)/cap_http_async.o \
                      $(BUILDDIR)/cap_ws.o $(BUILDDIR)/cap_smtp.o $(BUILDDIR)/cap_body.o
+
+# WASM as a composable feature (docs/wasm_feature.md, Phase 1). The runtime-
+# AGNOSTIC wasm caps move into libhull_feature-wasm.a (with worker_wasm + the
+# vendored WAMR objects) and compose back at `hull build`; the per-runtime
+# compute BINDING (mod_compute) moves into libhull_feature-wasm-<rt>.a. The base
+# keeps the wasm_weakstub.c weak defaults (Phase 0) so a compute-less app links.
+FEATURE_WASM_OBJS := $(BUILDDIR)/cap_wasm.o $(BUILDDIR)/cap_wasm_buffer.o \
+                     $(BUILDDIR)/cap_wasm_data.o $(BUILDDIR)/cap_wasm_stream.o
 ifdef COSMO
   PLATFORM_RT_OBJS       := $(RT_OBJS)
   PLATFORM_MANIFEST_OBJ  := $(MANIFEST_OBJ)
@@ -2573,10 +2588,12 @@ else
   PLATFORM_RT_OBJS       := $(RUNTIME_CACHE_COMMON_OBJ)  # runtime-agnostic; VMs dropped
   PLATFORM_MANIFEST_OBJ  := $(BUILDDIR)/manifest.o       # runtime-agnostic
   PLATFORM_RUNTIME_EXTRA :=
-  # HTTP core caps move to libhull_feature-http.a; the app composes it back.
-  PLATFORM_CAP_OBJS      := $(filter-out $(FEATURE_HTTP_OBJS),$(CAP_OBJS))
+  # HTTP core caps move to libhull_feature-http.a; the wasm caps move to
+  # libhull_feature-wasm.a (docs/wasm_feature.md, Phase 1). Both compose back at
+  # `hull build`; the base keeps the weak stubs (http_weakstub / wasm_weakstub).
+  PLATFORM_CAP_OBJS      := $(filter-out $(FEATURE_HTTP_OBJS) $(FEATURE_WASM_OBJS),$(CAP_OBJS))
 endif
-PLATFORM_OBJS := $(PLATFORM_CAP_OBJS) $(CAP_TOOL_OBJ) $(CAP_TEST_OBJ) $(CMD_OBJS) $(PLATFORM_RT_OBJS) $(ALLOC_OBJ) $(ASYNC_OBJ) $(COMPRESS_OBJ) $(MINIZ_OBJ) $(WORKER_DB_OBJ) $(WORKER_WASM_OBJ) $(WORKER_GPU_OBJ) $(PLATFORM_MANIFEST_OBJ) $(MODULE_OBJ) $(ASYNC_BACKEND_OBJS) $(NET_BACKEND_OBJS) $(SANDBOX_OBJ) $(SANDBOX_TOOL_OBJ) $(SIG_OBJ) $(RELEASE_OBJ) $(RELEASE_IO_OBJ) $(TOOLS_INSTALL_OBJ) $(PLATFORM_SIG_OBJ) $(EMBEDDED_PLATFORM_SIG_OBJ) $(TEST_RUNNER_OBJ) $(RUNTIME_FACTORY_OBJ) $(STATIC_OBJ) $(MIGRATE_OBJ) $(VFS_OBJ) $(PATH_NORM_OBJ) $(THREAD_AFFINITY_OBJ) $(CACHE_DIR_OBJ) $(BLOB_STORE_OBJ) $(CACHE_REGISTRY_OBJ) $(CACERT_OBJ) $(TLS_CLIENT_OBJ) $(CSP_OBJ) $(SBOM_OBJ) $(STDLIB_FEATURE_OBJ) $(APP_CONTEXT_OBJ) $(APP_CONTEXT_RT_OBJ) $(AGENT_LIB_OBJ) $(AGENT_API_OBJ) $(MAIN_OBJ) $(SERVE_OBJ) $(APP_RUNNER_OBJ) $(HTTP_WEAKSTUB_OBJ) $(TOOL_OBJ) $(BUILD_ASSET_STUB_OBJ) $(STDLIB_REGISTRY_O) $(PLATFORM_RUNTIME_EXTRA) $(WAMR_OBJS) $(MBEDTLS_OBJS) \
+PLATFORM_OBJS := $(PLATFORM_CAP_OBJS) $(CAP_TOOL_OBJ) $(CAP_TEST_OBJ) $(CMD_OBJS) $(PLATFORM_RT_OBJS) $(ALLOC_OBJ) $(ASYNC_OBJ) $(COMPRESS_OBJ) $(MINIZ_OBJ) $(WORKER_DB_OBJ) $(WORKER_GPU_OBJ) $(PLATFORM_MANIFEST_OBJ) $(MODULE_OBJ) $(ASYNC_BACKEND_OBJS) $(NET_BACKEND_OBJS) $(SANDBOX_OBJ) $(SANDBOX_TOOL_OBJ) $(SIG_OBJ) $(RELEASE_OBJ) $(RELEASE_IO_OBJ) $(TOOLS_INSTALL_OBJ) $(PLATFORM_SIG_OBJ) $(EMBEDDED_PLATFORM_SIG_OBJ) $(TEST_RUNNER_OBJ) $(RUNTIME_FACTORY_OBJ) $(STATIC_OBJ) $(MIGRATE_OBJ) $(VFS_OBJ) $(PATH_NORM_OBJ) $(THREAD_AFFINITY_OBJ) $(CACHE_DIR_OBJ) $(BLOB_STORE_OBJ) $(CACHE_REGISTRY_OBJ) $(CACERT_OBJ) $(TLS_CLIENT_OBJ) $(CSP_OBJ) $(SBOM_OBJ) $(STDLIB_FEATURE_OBJ) $(APP_CONTEXT_OBJ) $(APP_CONTEXT_RT_OBJ) $(AGENT_LIB_OBJ) $(AGENT_API_OBJ) $(MAIN_OBJ) $(SERVE_OBJ) $(APP_RUNNER_OBJ) $(HTTP_WEAKSTUB_OBJ) $(WASM_WEAKSTUB_OBJ) $(TOOL_OBJ) $(BUILD_ASSET_STUB_OBJ) $(STDLIB_REGISTRY_O) $(PLATFORM_RUNTIME_EXTRA) $(MBEDTLS_OBJS) \
 	$(SQLITE_OBJ) $(LOG_OBJ) $(LOG_LOCK_OBJ) $(SH_ARENA_OBJ) $(SH_JSON_OBJ) $(TWEETNACL_OBJ) $(STB_OBJ) $(PLEDGE_OBJS) \
 	$(COMPILER_OBJ) $(COMPILER_TCC_OBJ)
 
@@ -2849,6 +2866,29 @@ feature-http: $(BUILDDIR)/libhull_feature-http.a
 $(BUILDDIR)/libhull_feature-http.a: $(FEATURE_HTTP_OBJS) | $(BUILDDIR)
 	$(call AR_FEATURE_LIB,$(FEATURE_HTTP_OBJS))
 
+# libhull_feature-wasm.a: the runtime-agnostic WASM CORE (docs/wasm_feature.md,
+# Phase 1). Bundles the wasm caps + worker_wasm + the vendored WAMR objects
+# (the ~256 KB that leaves the base). Composed back at `hull build` and embedded
+# in hull (embedded_wasm.h). The per-runtime compute binding (mod_compute) is a
+# separate archive below, like the http web bindings.
+FEATURE_WASM_CORE := $(FEATURE_WASM_OBJS) $(WORKER_WASM_OBJ) $(WAMR_OBJS)
+feature-wasm: $(BUILDDIR)/libhull_feature-wasm.a
+.PHONY: feature-wasm
+$(BUILDDIR)/libhull_feature-wasm.a: $(FEATURE_WASM_CORE) | $(BUILDDIR)
+	$(call AR_FEATURE_LIB,$(FEATURE_WASM_CORE))
+
+# Per-runtime compute-binding bridges (mod_compute). Tiny (one object each);
+# embedded in hull + composed for the app's runtime alongside the wasm core.
+feature-wasm-lua: $(BUILDDIR)/libhull_feature-wasm-lua.a
+.PHONY: feature-wasm-lua
+$(BUILDDIR)/libhull_feature-wasm-lua.a: $(BUILDDIR)/lua_rt_mod_compute.o | $(BUILDDIR)
+	$(call AR_FEATURE_LIB,$(BUILDDIR)/lua_rt_mod_compute.o)
+
+feature-wasm-js: $(BUILDDIR)/libhull_feature-wasm-js.a
+.PHONY: feature-wasm-js
+$(BUILDDIR)/libhull_feature-wasm-js.a: $(BUILDDIR)/js_mod_compute.o | $(BUILDDIR)
+	$(call AR_FEATURE_LIB,$(BUILDDIR)/js_mod_compute.o)
+
 # libhull_feature-lua.a / -js.a: a runtime as a composable feature archive.
 # Bundles the runtime objects, its vendored VM, its manifest extractor, and its
 # stdlib VFS array (hl_stdlib_<rt>_entries). The tui bridge (mod_tui) is excluded
@@ -2871,9 +2911,9 @@ FEATURE_HTTP_RT_NAMES := mod_ws_server mod_ws_client mod_http_server mod_sse \
 FEATURE_HTTP_LUA_OBJS := $(addprefix $(BUILDDIR)/lua_rt_,$(addsuffix .o,$(FEATURE_HTTP_RT_NAMES)))
 FEATURE_HTTP_JS_OBJS  := $(addprefix $(BUILDDIR)/js_,$(addsuffix .o,$(FEATURE_HTTP_RT_NAMES)))
 
-FEATURE_LUA_OBJS := $(filter-out $(BUILDDIR)/lua_rt_mod_tui.o $(BUILDDIR)/lua_rt_mod_tool.o $(FEATURE_HTTP_LUA_OBJS),$(LUA_RT_OBJS)) \
+FEATURE_LUA_OBJS := $(filter-out $(BUILDDIR)/lua_rt_mod_tui.o $(BUILDDIR)/lua_rt_mod_tool.o $(BUILDDIR)/lua_rt_mod_compute.o $(FEATURE_HTTP_LUA_OBJS),$(LUA_RT_OBJS)) \
                     $(LUA_OBJS) $(BUILDDIR)/manifest_lua.o $(STDLIB_LUA_REGISTRY_O)
-FEATURE_JS_OBJS  := $(filter-out $(BUILDDIR)/js_mod_tui.o $(FEATURE_HTTP_JS_OBJS),$(JS_RT_OBJS)) \
+FEATURE_JS_OBJS  := $(filter-out $(BUILDDIR)/js_mod_tui.o $(BUILDDIR)/js_mod_compute.o $(FEATURE_HTTP_JS_OBJS),$(JS_RT_OBJS)) \
                     $(QJS_OBJS) $(BUILDDIR)/manifest_js.o $(STDLIB_JS_REGISTRY_O)
 
 feature-lua: $(BUILDDIR)/libhull_feature-lua.a
@@ -2910,8 +2950,14 @@ FEATURE_ARCHIVES := $(BUILDDIR)/libhull_feature-lua.a $(BUILDDIR)/libhull_featur
                     $(BUILDDIR)/libhull_feature-http.a \
                     $(BUILDDIR)/libhull_feature-http-lua.a $(BUILDDIR)/libhull_feature-http-js.a \
                     $(BUILDDIR)/libhull_feature-tui.a \
-                    $(BUILDDIR)/libhull_feature-tui-lua.a $(BUILDDIR)/libhull_feature-tui-js.a
+                    $(BUILDDIR)/libhull_feature-tui-lua.a $(BUILDDIR)/libhull_feature-tui-js.a \
+                    $(BUILDDIR)/libhull_feature-wasm.a \
+                    $(BUILDDIR)/libhull_feature-wasm-lua.a $(BUILDDIR)/libhull_feature-wasm-js.a
 $(FEATURE_ARCHIVES): Makefile
+# The base platform lib is built from an object LIST (PLATFORM_OBJS); a Phase-1
+# change to that list (wasm caps + WAMR removed) must retrigger the ar, which an
+# mtime check alone misses (docs/wasm_feature.md). Same guard as the features.
+$(PLATFORM_LIB): Makefile
 
 # Runtime feature archives a native `hull build` needs to compose a runnable
 # app. The native base is runtime-less, so `hull build` resolves the runtime
@@ -2926,14 +2972,20 @@ $(FEATURE_ARCHIVES): Makefile
 # HTTP in the base and composes no http feature.
 ifndef COSMO
 ifeq ($(RUNTIME),js)
-  RUNTIME_FEATURE_LIBS := $(BUILDDIR)/libhull_feature-js.a $(BUILDDIR)/libhull_feature-http-js.a
+  RUNTIME_FEATURE_LIBS := $(BUILDDIR)/libhull_feature-js.a $(BUILDDIR)/libhull_feature-http-js.a \
+                          $(BUILDDIR)/libhull_feature-wasm-js.a
 else ifeq ($(RUNTIME),lua)
-  RUNTIME_FEATURE_LIBS := $(BUILDDIR)/libhull_feature-lua.a $(BUILDDIR)/libhull_feature-http-lua.a
+  RUNTIME_FEATURE_LIBS := $(BUILDDIR)/libhull_feature-lua.a $(BUILDDIR)/libhull_feature-http-lua.a \
+                          $(BUILDDIR)/libhull_feature-wasm-lua.a
 else
   RUNTIME_FEATURE_LIBS := $(BUILDDIR)/libhull_feature-lua.a $(BUILDDIR)/libhull_feature-http-lua.a \
-                          $(BUILDDIR)/libhull_feature-js.a $(BUILDDIR)/libhull_feature-http-js.a
+                          $(BUILDDIR)/libhull_feature-wasm-lua.a \
+                          $(BUILDDIR)/libhull_feature-js.a $(BUILDDIR)/libhull_feature-http-js.a \
+                          $(BUILDDIR)/libhull_feature-wasm-js.a
 endif
-  RUNTIME_FEATURE_LIBS += $(BUILDDIR)/libhull_feature-http.a
+  # HTTP + WASM core feature archives (runtime-agnostic), composed for every
+  # full-flavor app (docs/wasm_feature.md, Phase 1 composes wasm always).
+  RUNTIME_FEATURE_LIBS += $(BUILDDIR)/libhull_feature-http.a $(BUILDDIR)/libhull_feature-wasm.a
 else
   RUNTIME_FEATURE_LIBS :=
 endif
@@ -3085,8 +3137,18 @@ $(EMBEDDED_TUI_H): $(BUILDDIR)/libhull_feature-tui-lua.a $(BUILDDIR)/libhull_fea
 	@xxd -i $(BUILDDIR)/libhull_feature-tui-lua.a | sed 's/build_libhull_feature_tui_lua_a/hl_embedded_feature_tui_lua_a/g' | $(XXD_CONST_PIPE) >> $@
 	@xxd -i $(BUILDDIR)/libhull_feature-tui-js.a  | sed 's/build_libhull_feature_tui_js_a/hl_embedded_feature_tui_js_a/g'   | $(XXD_CONST_PIPE) >> $@
 
-CFLAGS += -DHL_BUILD_EMBEDDED -DHL_BUILD_EMBEDDED_RUNTIME -DHL_BUILD_EMBEDDED_HTTP -DHL_BUILD_EMBEDDED_TUI
-$(BUILD_ASSET_OBJ): $(EMBEDDED_PLATFORM_H) $(EMBEDDED_TEMPLATES_H) $(EMBEDDED_RUNTIME_H) $(EMBEDDED_HTTP_H) $(EMBEDDED_TUI_H)
+# Embed the WASM feature archives too (docs/wasm_feature.md, Phase 1). The native
+# base is compute-less; the default distributed hull composes the wasm core + the
+# app's runtime compute bridge back for every full-flavor app with no install.
+EMBEDDED_WASM_H := $(BUILDDIR)/embedded_wasm.h
+$(EMBEDDED_WASM_H): $(BUILDDIR)/libhull_feature-wasm.a $(BUILDDIR)/libhull_feature-wasm-lua.a $(BUILDDIR)/libhull_feature-wasm-js.a | $(BUILDDIR)
+	@echo "/* Auto-generated - do not edit */" > $@
+	@xxd -i $(BUILDDIR)/libhull_feature-wasm.a     | sed 's/build_libhull_feature_wasm_a/hl_embedded_feature_wasm_a/g'         | $(XXD_CONST_PIPE) >> $@
+	@xxd -i $(BUILDDIR)/libhull_feature-wasm-lua.a | sed 's/build_libhull_feature_wasm_lua_a/hl_embedded_feature_wasm_lua_a/g' | $(XXD_CONST_PIPE) >> $@
+	@xxd -i $(BUILDDIR)/libhull_feature-wasm-js.a  | sed 's/build_libhull_feature_wasm_js_a/hl_embedded_feature_wasm_js_a/g'   | $(XXD_CONST_PIPE) >> $@
+
+CFLAGS += -DHL_BUILD_EMBEDDED -DHL_BUILD_EMBEDDED_RUNTIME -DHL_BUILD_EMBEDDED_HTTP -DHL_BUILD_EMBEDDED_TUI -DHL_BUILD_EMBEDDED_WASM
+$(BUILD_ASSET_OBJ): $(EMBEDDED_PLATFORM_H) $(EMBEDDED_TEMPLATES_H) $(EMBEDDED_RUNTIME_H) $(EMBEDDED_HTTP_H) $(EMBEDDED_TUI_H) $(EMBEDDED_WASM_H)
 endif
 
 # Hull binary
@@ -3495,6 +3557,9 @@ $(APP_RUNNER_OBJ): $(SRCDIR)/hull/app_runner.c | $(BUILDDIR)
 
 # Weak no-op defaults for the per-runtime web bindings (issue #114, Phase C).
 $(HTTP_WEAKSTUB_OBJ): $(SRCDIR)/hull/http_weakstub.c | $(BUILDDIR)
+	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
+
+$(WASM_WEAKSTUB_OBJ): $(SRCDIR)/hull/wasm_weakstub.c | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
 
 # Serve-cli (CLI counterpart, used when HL_ENABLE_HTTP_SERVER=0)
@@ -4131,6 +4196,10 @@ e2e-http: $(BUILDDIR)/hull
 .PHONY: e2e-feature-runtime
 e2e-feature-runtime: $(BUILDDIR)/hull
 	sh tests/e2e_feature_runtime.sh
+
+.PHONY: e2e-feature-wasm
+e2e-feature-wasm: $(BUILDDIR)/hull
+	sh tests/e2e_feature_wasm.sh
 
 e2e-multipart: $(BUILDDIR)/hull
 	RUNTIME=$(RUNTIME) sh tests/e2e_multipart.sh

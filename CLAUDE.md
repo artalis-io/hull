@@ -140,7 +140,7 @@ Hull's distribution is one binary; what's compiled into it is controlled by a sm
 |------|---------|-----------------|
 | `HL_ENABLE_LUA` | 1 | Drop the Lua 5.4 runtime; QuickJS-only build |
 | `HL_ENABLE_JS` | 1 | Drop QuickJS; Lua-only build |
-| `HL_ENABLE_WASM` | 1 | Drop WAMR (`compute.*` unavailable, ~256 KB) |
+| `HL_ENABLE_WASM` | 1 | Compile-time drop of WAMR (`compute.*` unavailable, ~256 KB): base + no wasm archive. Orthogonal to the auto-composed axis — with the default `=1`, the native base is still **compute-less** and composes WASM only for apps that need it (see "Composable runtime + HTTP base"). Cosmo keeps WASM in-base. |
 | `HL_ENABLE_GPU` | 0 | (Off by default.) On enables wgpu-native (`gpu.*`). Normally composed via the `gpu` **feature** (`hull build --with=gpu`) rather than set directly; see "Composable features" below. Native-only (no cosmo). |
 | `HL_ENABLE_DUCKDB` | 0 | (Off by default.) On enables the embedded DuckDB OLAP backend (`cap/db_duckdb.c` + fetched static libs via `make fetch-duckdb`). A `duckdb://` DSN selects it. Native-only (no cosmo). Normally composed via the `duckdb` **feature** (`hull build --with=duckdb`) rather than set directly; see "Composable features" below. |
 | `HL_ENABLE_TCC` | 1 Linux / 0 macOS+cosmo | Compile the tcc backend for `hull build --compiler=tcc`. tcc is **not embedded** (~400 KB lighter binary) — it's a side-loaded tool (`hull tools install tcc`), resolved at build time from `~/.hull/tools` → `dirname(hull)` → `$PATH`. Off on macOS (Mach-O) / cosmo (APE archives), where tcc's ELF output is unusable and the system compiler is used instead. |
@@ -258,12 +258,12 @@ CI lacks).
 
 `--with=` features above are the **optional, additive** axis. There is a second,
 **mandatory** composition axis that a plain `hull build` drives automatically:
-the native base platform library is **runtime-less AND HTTP-core-less**, and the
-produced app composes back exactly what it uses. Unlike a `--with=` feature, you
-never install or flag these — they are **embedded in the distributed `hull`** and
-auto-composed. (Issues #113 runtime, #114 HTTP; cosmo is exempt — a fat APE
-can't force-load native feature archives, so its base keeps both runtimes + HTTP
-compiled in.)
+the native base platform library is **runtime-less AND HTTP-core-less AND
+compute-less**, and the produced app composes back exactly what it uses. Unlike a
+`--with=` feature, you never install or flag these — they are **embedded in the
+distributed `hull`** and auto-composed. (Issues #113 runtime, #114 HTTP, #118
+WASM; cosmo is exempt — a fat APE can't force-load native feature archives, so its
+base keeps both runtimes + HTTP + WASM compiled in.)
 
 What the native base **drops** and what composes it back at `hull build`:
 
@@ -272,6 +272,8 @@ What the native base **drops** and what composes it back at `hull build`:
 | both interpreters (Lua VM, QuickJS) | `libhull_feature-{lua,js}.a` | exactly one, auto-inferred from the entry extension (`app.lua` → lua, `app.js` → js). Mandatory: an app must have a runtime to run. |
 | the HTTP core caps (`cap/http` + async, `ws`, `smtp`, `body`) | `libhull_feature-http.a` | only when the app needs HTTP |
 | the per-runtime web bindings (routes, dispatch, `res:*` helpers, `mod_http_*`/`mod_ws_*`/`sse`/`mod_smtp`, the in-process test harness, timers) | `libhull_feature-http-<rt>.a` | with the http core, only when the app needs HTTP |
+| the WASM caps + WAMR (`cap/wasm*`, `worker_wasm`, ~256 KB of vendored WAMR) | `libhull_feature-wasm.a` | only when the app needs compute (the `needs_wasm` gate below) |
+| the per-runtime compute binding (`mod_compute` — `compute.*` + the `WasmBuffer` userdata) | `libhull_feature-wasm-<rt>.a` | with the wasm core, only when the app needs compute |
 | the per-runtime tui bridge | `libhull_feature-tui-<rt>.a` (the tui cap core stays the installable `--with=tui` asset) | with `--with=tui`, only the app's runtime's bridge |
 
 **The seam.** Each dropped piece leaves a **weak no-op default** in the base that
@@ -279,10 +281,15 @@ a **strong override** in the composed archive replaces (mirrors the gpu/tui
 feature hooks). The HTTP seam is `include/hull/http_feature.h` (weak defaults in
 `cap/http_feature.c`); a base TU `src/hull/http_weakstub.c` carries weak
 real-signature stubs so the pure runtime's few references to the web bindings
-link even when HTTP is not composed. The archives are whole-archived at compose
-(no single anchor symbol), inside a GNU-ld `--start-group` (native) / `-force_load`
-(ld64) with the platform lib + Keel, since the caps reference base symbols + Keel
-and the web bindings reference the caps.
+link even when HTTP is not composed. The WASM seam is weak-stubs-only (no hook
+header): `src/hull/wasm_weakstub.c` carries weak `hl_cap_wasm_*` / `hl_wasm_buffer_*`
+defaults (referenced by `db_udf` / `mod_buffer` / `mod_image` / `mod_gpu` /
+`app_context` / `serve`) plus the per-runtime compute-binding stubs — so a WASM-free
+app links; a function `db.udf` still works while a WASM-backed one fails closed.
+The archives are whole-archived at compose (no single anchor symbol), inside a
+GNU-ld `--start-group` (native) / `-force_load` (ld64) with the platform lib + Keel,
+since the caps reference base symbols + Keel and the web/compute bindings reference
+the caps.
 
 **"Needs HTTP" is resolved, not guessed.** `hull build` composes the http core +
 web bindings only when the resolved manifest trips an HTTP cap
@@ -294,16 +301,31 @@ links only the pure runtime; on a `--flavor=pure-compute` base it also drops Kee
 + mbedTLS (~785 KB smaller than a full-flavor CLI). The base defines **zero** HTTP
 caps (verifiable: `nm libhull_platform.a | grep hl_cap_http_request` → empty).
 
+**"Needs WASM" is a two-signal gate** (docs/wasm_feature.md). WASM is harder than
+HTTP because it is not cleanly module-inferable: `db.udf` can be WASM-backed
+(`cap/db_udf.c` calls `hl_cap_wasm_instance_*`) without any module declaration. So
+`hull build` composes the wasm core + compute bridge iff **S1 or S2**: `S1` = a
+declared WASM cap (`hull/compute`, `req_caps & HL_MOD_CAP_WASM`, exposed as
+`needs_wasm` from `tool.modules_resolve`, mirrors `needs_http`); `S2` = the app
+ships `compute/*.wasm` (catches the WASM-backed `db.udf`). A genuinely compute-free
+app links **zero** WAMR (~256 KB smaller; verifiable: `nm app | grep
+wasm_runtime_full_init` → empty). The base defines zero wasm caps (`nm
+libhull_platform.a | grep hl_cap_wasm_init` → only the weak stub).
+
 **Where it's wired.** The archives + embed live in the Makefile (`FEATURE_*_OBJS`,
-`libhull_feature-*.a`, `embedded_{runtime,http,tui}.h`, `RUNTIME_FEATURE_LIBS`);
+`libhull_feature-*.a`, `embedded_{runtime,http,tui,wasm}.h`, `RUNTIME_FEATURE_LIBS`);
 the compose + embedded-first resolve ladder is shared by `hull build` and
 `hull eject` via `stdlib/cli/lua/hull/feature_compose.lua`
 (`resolve_runtime_lib` / `resolve_http_lib` / `resolve_http_rt_lib` /
-`resolve_tui_rt_lib`) + `build_assets.c` (`hl_build_extract_feature_*`). Design:
-[docs/http_feature_phase1.md](docs/http_feature_phase1.md). Covered by
+`resolve_tui_rt_lib` / `resolve_wasm_lib` / `resolve_wasm_rt_lib`) +
+`build_assets.c` (`hl_build_extract_feature_*`). Design:
+[docs/http_feature_phase1.md](docs/http_feature_phase1.md),
+[docs/wasm_feature.md](docs/wasm_feature.md). Covered by
 `tests/e2e_feature_runtime.sh` (runtime slim, both runtimes),
 `tests/e2e_build_flavor.sh` (pure-compute × runtime, symbol-level Keel/http drop),
-and `tests/e2e_feature_tui.sh` (tui × runtime, both runtimes).
+`tests/e2e_feature_tui.sh` (tui × runtime, both runtimes), and
+`tests/e2e_feature_wasm.sh` (compute-free drops WAMR + the needs_wasm gate + a
+composed `compute.call`, both runtimes).
 
 ### Extension taxonomy: feature vs flavor vs tool vs stdlib
 

@@ -74,11 +74,13 @@ jobs:
           run: >
             make feature-lua feature-js feature-http feature-http-lua
             feature-http-js feature-tui-lua feature-tui-js
+            feature-wasm feature-wasm-lua feature-wasm-js
       - name: Build embedded feature archives (macOS)
         if: runner.os == 'macOS'
         run: >
           make feature-lua feature-js feature-http feature-http-lua
           feature-http-js feature-tui-lua feature-tui-js
+          feature-wasm feature-wasm-lua feature-wasm-js
       - name: Upload embedded feature archives
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
         with:
@@ -91,6 +93,9 @@ jobs:
             build/libhull_feature-http-js.a
             build/libhull_feature-tui-lua.a
             build/libhull_feature-tui-js.a
+            build/libhull_feature-wasm.a
+            build/libhull_feature-wasm-lua.a
+            build/libhull_feature-wasm-js.a
 
       # Per-flavor platform libs for `hull build --flavor` + `hull platform
       # install`. Each native platform-<flavor> target builds into its own obj
@@ -276,7 +281,7 @@ jobs:
             # build.lua records in package.sig.gethull.composed and that the
             # runtime §5c looks up: "libhull_feature-<stem>.<arch>.a".
             for arch in linux-x86_64 linux-aarch64 darwin-arm64; do
-              for stem in lua js http http-lua http-js tui-lua tui-js; do
+              for stem in lua js http http-lua http-js tui-lua tui-js wasm wasm-lua wasm-js; do
                 f="platforms/platform-features-$arch/libhull_feature-$stem.a"
                 sha256sum "$f" \
                   | awk -v n="libhull_feature-$stem.$arch.a" '{print $1"  "n}'
@@ -556,7 +561,7 @@ jobs:
           # bytes MUST match the signed-manifest entry keyed by the composed asset
           # name (libhull_feature-<stem>.<arch>.a), or the runtime §5c check on
           # every app this hull builds would fail.
-          for stem in lua js http http-lua http-js tui-lua tui-js; do
+          for stem in lua js http http-lua http-js tui-lua tui-js wasm wasm-lua wasm-js; do
             fa="build/libhull_feature-$stem.a"
             name="libhull_feature-$stem.${{ matrix.name }}.a"
             fact=$(sha256sum "$fa" | awk '{print $1}')
