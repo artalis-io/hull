@@ -584,6 +584,7 @@ static JSValue js_gpu_texture(JSContext *ctx, JSValueConst this_val,
     const char *str_data = NULL;
     int str_needs_free = 0;
 
+#ifdef HL_ENABLE_IMAGE
     /* Check if arg 1 is an HlImage object */
     HlImage *img = JS_GetOpaque(argv[1], js_image_class_id);
     if (img) {
@@ -592,7 +593,9 @@ static JSValue js_gpu_texture(JSContext *ctx, JSValueConst this_val,
         format = (HlGpuTexFormat)img->format;
         pixels = img->pixels;
         pixel_len = img->pixel_len;
-    } else {
+    } else
+#endif
+    {
         /* Get data from buffer protocol */
         HlBufferView bv;
         if (js_get_buffer(ctx, argv[1], &bv, &str_data, &str_needs_free)) {
@@ -600,7 +603,11 @@ static JSValue js_gpu_texture(JSContext *ctx, JSValueConst this_val,
             pixel_len = bv.len;
         } else {
             JS_FreeCString(ctx, name);
-            return JS_ThrowTypeError(ctx, "gpu.texture: data must be HlImage, ArrayBuffer, or string");
+            return JS_ThrowTypeError(ctx, "gpu.texture: data must be "
+#ifdef HL_ENABLE_IMAGE
+                                     "HlImage, "
+#endif
+                                     "ArrayBuffer, or string");
         }
     }
 
@@ -671,6 +678,7 @@ static JSValue js_gpu_texture(JSContext *ctx, JSValueConst this_val,
 
 /* ── gpu.textureRead(name, opts?) → HlImage ──────────────────────── */
 
+#ifdef HL_ENABLE_IMAGE
 static JSValue js_gpu_texture_read(JSContext *ctx, JSValueConst this_val,
                                     int argc, JSValueConst *argv)
 {
@@ -712,6 +720,7 @@ static JSValue js_gpu_texture_read(JSContext *ctx, JSValueConst this_val,
     JS_SetOpaque(obj, img);
     return obj;
 }
+#endif /* HL_ENABLE_IMAGE */
 
 /* ── JS texture desc parsing helper ──────────────────────────────── */
 
@@ -1630,8 +1639,10 @@ static int js_gpu_module_init(JSContext *ctx, JSModuleDef *m)
                       JS_NewCFunction(ctx, js_gpu_buffer_copy, "bufferCopy", 3));
     JS_SetPropertyStr(ctx, gpu, "texture",
                       JS_NewCFunction(ctx, js_gpu_texture, "texture", 3));
+#ifdef HL_ENABLE_IMAGE
     JS_SetPropertyStr(ctx, gpu, "textureRead",
                       JS_NewCFunction(ctx, js_gpu_texture_read, "textureRead", 1));
+#endif
 
     /* gpu.async sub-object */
     JSValue async_obj = JS_NewObject(ctx);

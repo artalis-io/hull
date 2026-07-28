@@ -647,14 +647,35 @@ TWEETNACL_DIR    := $(VENDDIR)/tweetnacl
 TWEETNACL_OBJ    := $(BUILDDIR)/tweetnacl.o
 TWEETNACL_CFLAGS := -std=c11 -O2 -w
 
+# ── HL_ENABLE_IMAGE (image codecs, on by default) ─────────────────────
+# The image decode/encode subsystem: cap/image.c + cap/image_stb.c + the
+# per-runtime mod_image bindings + vendored stb_image. On by default (web apps
+# want avatars / thumbnails), so slimming it out is SUBTRACTIVE -- a flavor knob
+# like HL_ENABLE_DB, not a `--with=` feature. `make HL_ENABLE_IMAGE=0` drops the
+# codec subsystem and stb entirely for a compute / CLI / signing binary that
+# never touches images; `hull/image` then needs an optional `"hull/image@1?"`
+# declaration to resolve on such a build (a non-optional decl is a hard error,
+# the HL_ENABLE_DB/GPU pattern). stb_image is image's ONLY consumer, so it goes
+# too. See CLAUDE.md "Image-less builds".
+HL_ENABLE_IMAGE ?= 1
+ifeq ($(HL_ENABLE_IMAGE),1)
+CFLAGS += -DHL_ENABLE_IMAGE
+endif
+
 # ── stb_image (image decode/encode) ──────────────────────────────────
 
 STB_DIR     := $(VENDDIR)/stb
-STB_OBJ     := $(BUILDDIR)/stb_impl.o
 STB_CFLAGS  := -std=c11 -O2 -w
+
+ifeq ($(HL_ENABLE_IMAGE),1)
+STB_OBJ     := $(BUILDDIR)/stb_impl.o
 
 $(STB_OBJ): $(STB_DIR)/stb_impl.c | $(BUILDDIR)
 	$(CC) $(STB_CFLAGS) -I$(STB_DIR) -c -o $@ $<
+else
+# Image codecs disabled: no stb object linked (image's sole consumer).
+STB_OBJ     :=
+endif
 
 # ── Unicode tables (TUI cell-width lookup) ──────────────────────────
 #
@@ -1499,6 +1520,15 @@ PLEDGE_OBJS ?=
 # Runtime-layer test bindings live in runtime/{lua,js}/mod_test.c (picked
 # up via the JS_RT_SRCS / LUA_RT_SRCS globs below).
 CAP_SRCS := $(filter-out $(SRCDIR)/hull/cap/tool.c $(SRCDIR)/hull/cap/test.c,$(wildcard $(SRCDIR)/hull/cap/*.c))
+ifeq ($(HL_ENABLE_IMAGE),0)
+  # Image codecs off: drop the codec vtable + stb backend (stb obj already
+  # emptied above). The per-runtime mod_image bindings are dropped from the
+  # runtime sources below.
+  CAP_SRCS := $(filter-out \
+      $(SRCDIR)/hull/cap/image.c \
+      $(SRCDIR)/hull/cap/image_stb.c, \
+      $(CAP_SRCS))
+endif
 ifeq ($(HL_ENABLE_DB),0)
   # Umbrella off (no backend): drop the shared query surface + selector +
   # the connection registry too.
@@ -1603,6 +1633,9 @@ endif
 
 # JS runtime sources
 JS_RT_SRCS := $(wildcard $(SRCDIR)/hull/runtime/js/*.c)
+ifeq ($(HL_ENABLE_IMAGE),0)
+  JS_RT_SRCS := $(filter-out $(SRCDIR)/hull/runtime/js/mod_image.c,$(JS_RT_SRCS))
+endif
 ifeq ($(HL_ENABLE_DB),0)
   JS_RT_SRCS := $(filter-out \
       $(SRCDIR)/hull/runtime/js/mod_db.c \
@@ -1648,6 +1681,9 @@ JS_RT_OBJS := $(patsubst $(SRCDIR)/hull/runtime/js/%.c,$(BUILDDIR)/js_%.o,$(JS_R
 
 # Lua runtime sources
 LUA_RT_SRCS := $(wildcard $(SRCDIR)/hull/runtime/lua/*.c)
+ifeq ($(HL_ENABLE_IMAGE),0)
+  LUA_RT_SRCS := $(filter-out $(SRCDIR)/hull/runtime/lua/mod_image.c,$(LUA_RT_SRCS))
+endif
 ifeq ($(HL_ENABLE_DB),0)
   LUA_RT_SRCS := $(filter-out \
       $(SRCDIR)/hull/runtime/lua/mod_db.c \
@@ -2441,6 +2477,7 @@ BUILD_FINGERPRINT := \
   TCC=$(HL_ENABLE_TCC)|\
   TUI=$(HL_ENABLE_TUI)|\
   TUI_TC=$(HL_TUI_TOOLCHAIN)|\
+  IMAGE=$(HL_ENABLE_IMAGE)|\
   CA=$(HL_EMBED_CA_BUNDLE)|\
   JS=$(HL_ENABLE_JS)|\
   LUA=$(HL_ENABLE_LUA)|\
@@ -3675,6 +3712,12 @@ ifeq ($(HL_ENABLE_DB),0)
       %/test_db.c %/test_db_backend.c %/test_db_select.c %/test_db_dynamic.c \
       %/test_js.c %/test_lua.c, \
       $(TEST_SRCS))
+endif
+
+# Drop the image codec test when the image subsystem is compiled out; it
+# exercises hl_cap_image_* / stb directly and would fail to link.
+ifeq ($(HL_ENABLE_IMAGE),0)
+  TEST_SRCS := $(filter-out %/test_image.c,$(TEST_SRCS))
 endif
 
 # Flatten test paths to build/ binaries: tests/hull/cap/test_body.c → build/test_body
