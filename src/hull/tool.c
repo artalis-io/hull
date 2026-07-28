@@ -355,20 +355,25 @@ int hull_tool(const char *module, int argc, char **argv, const char *hull_exe)
         lua_setglobal(L, "__hull_exe");
     }
 
-    /* Record which module the tool VM is DISPATCHING (the entry command), so a
-     * command script can tell "I was invoked as `hull <cmd>`" from "I was
-     * require()'d as a dependency". Without this, an app that legitimately does
-     * require("hull.compute") during manifest extraction pulls in the CLI
-     * compute.lua command, whose bottom-of-file main() then self-executes
-     * against the *build* argv (`hull compute: unknown command '.'`). Command
-     * scripts guard their trailing main() with `__hull_tool_entry == "hull.X"`. */
-    lua_pushstring(L, module);
-    lua_setglobal(L, "__hull_tool_entry");
-
-    /* Load and run the stdlib module */
+    /* Load the command module and run its entry. Each command script RETURNS
+     * its main() function; the dispatcher invokes it here rather than letting
+     * the script self-run at load time. This is the mechanism that keeps a
+     * command's main() from firing when the module is merely require()'d as a
+     * dependency: an app that legitimately does require("hull.compute") during
+     * manifest extraction pulls in the CLI compute.lua and gets its main
+     * function back, but only THIS dispatcher ever calls it. (Previously the
+     * script self-dispatched at the bottom of the file, so such a require ran
+     * main() against the *build* argv: `hull compute: unknown command '.'`.) */
     char code[256];
-    snprintf(code, sizeof(code), "require('%s')", module);
-    int rc = luaL_dostring(L, code);
+    snprintf(code, sizeof(code), "return require('%s')", module);
+    int rc = luaL_dostring(L, code);   /* leaves the module's return on the stack */
+    if (rc == LUA_OK) {
+        if (lua_isfunction(L, -1)) {
+            rc = lua_pcall(L, 0, 0, 0);   /* run main(); errors propagate below */
+        } else {
+            lua_pop(L, 1);                /* module returned no entry; nothing to run */
+        }
+    }
     if (rc != LUA_OK) {
         const char *err = lua_tostring(L, -1);
         fprintf(stderr, "hull %s: %s\n", module, err ? err : "unknown error");

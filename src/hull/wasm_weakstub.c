@@ -28,10 +28,11 @@
  * the strong cap definitions win, so behavior is byte-identical.
  *
  * The two per-RUNTIME references the spike found (luaopen_hull_compute from
- * modules.o, lua_push_wasm_buffer from mod_gpu.o, + the JS init twin) are the
- * per-runtime section below: needed once the needs_wasm gate (Phase 2) can skip
- * composing the compute bridge, so a compute-free app's pure runtime still links.
- * Neither weak body is ever REACHED on a compute-free app — modules.c gates the
+ * modules.o, lua_push_wasm_buffer from mod_gpu.o, + the JS init twin) do NOT
+ * live here: they are per-runtime and live in the pure runtime archives
+ * (src/hull/runtime/{lua,js}/wasm_stub.c), so lua_push_wasm_buffer can push a
+ * balanced nil and the Lua stub stays out of a JS-only app's link. Neither weak
+ * body is ever REACHED on a compute-free app — modules.c gates the
  * compute-module register on wasm_cache (NULL without the feature) — they only
  * satisfy the link.
  *
@@ -134,37 +135,8 @@ HlWasmBuffer *hl_wasm_buffer_create_adopted(void *data, size_t len,
     return NULL;
 }
 
-/* ── Per-runtime compute-binding refs (Phase 2) ──────────────────────────
- * The pure runtime archive references these from modules.o (the compute module
- * register) and mod_gpu.o (a GPU result pushed as a WasmBuffer). When the wasm
- * bridge is composed its strong defs win; when it is NOT (needs_wasm false),
- * these weak no-ops satisfy the link. Real prototypes via the runtime headers,
- * mirroring http_weakstub.c. */
-
-#ifdef HL_ENABLE_LUA
-#include "hull/runtime/lua.h"   /* lua_State (type only) */
-
-__attribute__((weak)) int luaopen_hull_compute(lua_State *L)
-{
-    (void)L;
-    return 0;   /* not registered without wasm_cache; only satisfies the link */
-}
-
-/* Pure no-op — never REACHED without the feature (a WasmBuffer can't exist, so
- * mod_gpu never pushes one), so it deliberately calls no Lua-VM function: this
- * TU is also linked into a JS-only app, where lua_pushnil() would be undefined. */
-__attribute__((weak)) void lua_push_wasm_buffer(lua_State *L, struct HlWasmBuffer *buf)
-{
-    (void)L; (void)buf;
-}
-#endif /* HL_ENABLE_LUA */
-
-#ifdef HL_ENABLE_JS
-#include "hull/runtime/js.h"    /* HlJS, JSContext */
-
-__attribute__((weak)) int hl_js_init_compute_module(JSContext *ctx, HlJS *js)
-{
-    (void)ctx; (void)js;
-    return -1;
-}
-#endif /* HL_ENABLE_JS */
+/* The two per-RUNTIME compute-binding refs (luaopen_hull_compute /
+ * lua_push_wasm_buffer + the JS init) live in the PURE RUNTIME archives, not
+ * here: src/hull/runtime/{lua,js}/wasm_stub.c. Placing them where the VM is
+ * linked lets lua_push_wasm_buffer push a balanced nil, and keeps the Lua stub
+ * out of a JS-only app's link (this base TU is shared by both). */
