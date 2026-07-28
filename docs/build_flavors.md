@@ -28,15 +28,14 @@ pure-compute or full binary regardless of which `hull` built it.
 > `hl_release_io_*` signed-fetch chain exactly. See
 > [features_and_flavors.md](features_and_flavors.md).
 
-> **⚠ Interim limitation (since #113, the runtime-featurify epic).** The native
-> base is now runtime-less and a produced app composes exactly one runtime
-> archive. That runtime archive is compiled full-config, so its web-module
-> bindings reference HTTP caps + Keel that a **reduced** flavor drops. Until
-> **issue #114 (HTTP as a composable feature)** lands, `hull build
-> --flavor=pure-compute` on a Lua/JS app **fails closed**
-> with a clear message (the full-config runtime can't link against a subtractive
-> base). `--flavor=full` (the default) is unaffected. The `--with=tui` feature is
-> deferred the same way for the same reason.
+> **✓ Resolved (#114 HTTP-as-a-feature + #118 WASM-as-a-feature).** The native
+> base is runtime-less, HTTP-core-less, and compute-less; a produced app composes
+> exactly the runtime + (optional) HTTP core + (optional) WASM it uses. Because
+> the runtime's web-module bindings now sit behind the HTTP feature's weak seam,
+> `hull build --flavor=pure-compute` on a Lua/JS app composes cleanly (the reduced
+> base simply omits the web bindings) and drops Keel + mbedTLS. `--with=tui`
+> composes on any flavor the same way. Covered by `tests/e2e_build_flavor.sh`
+> (pure-compute × runtime, and pure-compute × wasm).
 
 ## 1. Motivation
 
