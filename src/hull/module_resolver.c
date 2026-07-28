@@ -154,6 +154,9 @@ static uint32_t build_compile_caps(void)
 #ifdef HL_ENABLE_TUI
     caps |= HL_MOD_CAP_TUI;
 #endif
+#ifdef HL_ENABLE_IMAGE
+    caps |= HL_MOD_CAP_IMAGE;
+#endif
     return caps;
 }
 
@@ -206,7 +209,7 @@ bool hl_module_needs_absent_build_cap(const HlModuleSpec *spec)
     if (!spec) return false;
     const uint32_t build_cap_mask = HL_MOD_CAP_DB | HL_MOD_CAP_WASM
                                     | HL_MOD_CAP_GPU | HL_MOD_CAP_HTTP
-                                    | HL_MOD_CAP_TUI;
+                                    | HL_MOD_CAP_TUI | HL_MOD_CAP_IMAGE;
     return (spec->required_caps & build_cap_mask & ~build_provided_caps()) != 0;
 }
 
@@ -224,6 +227,7 @@ static const char *cap_label(uint32_t cap)
     case HL_MOD_CAP_HTTP_SERVER: return "HL_ENABLE_HTTP_SERVER (build-time)";
     case HL_MOD_CAP_HTTP:        return "HL_ENABLE_HTTP (build-time)";
     case HL_MOD_CAP_TUI:         return "HL_ENABLE_TUI (build-time)";
+    case HL_MOD_CAP_IMAGE:       return "HL_ENABLE_IMAGE (build-time)";
     default:                     return "unknown";
     }
 }
@@ -344,7 +348,7 @@ int hl_module_resolver_resolve_caps(const HlManifest *manifest,
     const uint32_t prov_build    = build_caps;
     const uint32_t build_cap_mask = HL_MOD_CAP_DB | HL_MOD_CAP_WASM
                                     | HL_MOD_CAP_GPU | HL_MOD_CAP_HTTP
-                                    | HL_MOD_CAP_TUI;
+                                    | HL_MOD_CAP_TUI | HL_MOD_CAP_IMAGE;
 
     /* Pass 1: look up each declared module + admit it. Detect unknown
      * names, version mismatches, duplicates, missing capabilities. */

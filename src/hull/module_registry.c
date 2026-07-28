@@ -164,7 +164,7 @@ static const HlModuleSpec REGISTRY[] = {
     {
         .name = "hull/image",
         .api_major = 1, .intrinsic = 0, .pure = 0,
-        .required_caps = 0, .deps = {0},
+        .required_caps = HL_MOD_CAP_IMAGE, .deps = {0},
     },
     {
         .name = "hull/inspect",

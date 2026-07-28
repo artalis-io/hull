@@ -84,9 +84,11 @@ int hl_js_register_modules(HlJS *js)
     if (hl_js_init_mime_module(js->ctx, js) != 0)
         return -1;
 
-    /* Register hull:image module — always available */
+#ifdef HL_ENABLE_IMAGE
+    /* Register hull:image module (dropped on a HL_ENABLE_IMAGE=0 build). */
     if (hl_js_init_image_module(js->ctx, js) != 0)
         return -1;
+#endif
 
 #ifdef HL_ENABLE_WASM
     /* Register hull:compute module (only if WASM runtime is available) */

@@ -457,6 +457,7 @@ static int l_tool_modules_available(lua_State *L)
             { HL_MOD_CAP_HTTP_CLIENT, "http_client" },
             { HL_MOD_CAP_HTTP_SERVER, "http_server" },
             { HL_MOD_CAP_TUI,         "tui"         },
+            { HL_MOD_CAP_IMAGE,       "image"       },
         };
         for (size_t k = 0; k < sizeof map / sizeof map[0]; k++) {
             if (need & map[k].bit) {

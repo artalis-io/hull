@@ -235,6 +235,11 @@ jobs:
             flags: HL_ENABLE_MYSQL=1
           - name: mysql-only (no sqlite)
             flags: HL_ENABLE_SQLITE=0 HL_ENABLE_MYSQL=1
+          # image-less: drops cap/image + stb (image's sole consumer). Guards
+          # the HL_ENABLE_IMAGE=0 link (mod_image/mod_gpu image paths gated) and
+          # that stb is fully unlinked.
+          - name: image-less (no image codecs)
+            flags: HL_ENABLE_IMAGE=0
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
         with:

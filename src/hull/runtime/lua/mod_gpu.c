@@ -467,10 +467,12 @@ static HlGpuTexFormat lua_parse_tex_format(const char *s)
     return HL_GPU_TEX_RGBA8;
 }
 
+#ifdef HL_ENABLE_IMAGE
 static HlGpuTexFormat image_format_to_gpu(HlImageFormat fmt)
 {
     return (HlGpuTexFormat)fmt;  /* safe: enum values match */
 }
+#endif
 
 /* ── gpu.texture(name, data_or_nil, opts?) ────────────────────────── */
 
@@ -497,6 +499,7 @@ static int l_gpu_texture(lua_State *L)
     const void *pixels = NULL;
     size_t pixel_len = 0;
 
+#ifdef HL_ENABLE_IMAGE
     /* Check if arg 2 is an HlImage userdata */
     HlImage **imgp = (HlImage **)luaL_testudata(L, 2, HL_IMAGE_MT);
     if (imgp && *imgp) {
@@ -506,11 +509,17 @@ static int l_gpu_texture(lua_State *L)
         format = image_format_to_gpu(img->format);
         pixels = img->pixels;
         pixel_len = img->pixel_len;
-    } else {
+    } else
+#endif
+    {
         /* Buffer data: require opts with width, height, format */
         HlBufferView bv;
         if (!lua_get_buffer(L, 2, &bv))
-            return luaL_error(L, "gpu.texture: data must be HlImage, string, or buffer");
+            return luaL_error(L, "gpu.texture: data must be "
+#ifdef HL_ENABLE_IMAGE
+                              "HlImage, "
+#endif
+                              "string, or buffer");
         pixels = bv.data;
         pixel_len = bv.len;
     }
@@ -581,6 +590,7 @@ static int l_gpu_texture(lua_State *L)
 
 /* ── gpu.texture_read(name, opts?) → HlImage ─────────────────────── */
 
+#ifdef HL_ENABLE_IMAGE
 static int l_gpu_texture_read(lua_State *L)
 {
     HlGpuCtx *ctx = lua_get_gpu_ctx(L);
@@ -619,6 +629,7 @@ static int l_gpu_texture_read(lua_State *L)
     lua_setmetatable(L, -2);
     return 1;
 }
+#endif /* HL_ENABLE_IMAGE */
 
 /* ── Texture desc parsing helper (used by dispatch + pipeline) ────── */
 
@@ -657,6 +668,7 @@ static int lua_parse_texture_descs(lua_State *L, int tbl_idx,
             lua_pop(L, 1);
 
             /* data: pixel bytes or HlImage */
+#ifdef HL_ENABLE_IMAGE
             lua_getfield(L, -1, "image");
             HlImage **imgp2 = (HlImage **)luaL_testudata(L, -1, HL_IMAGE_MT);
             if (imgp2 && *imgp2) {
@@ -668,6 +680,7 @@ static int lua_parse_texture_descs(lua_State *L, int tbl_idx,
                 descs[i].format = image_format_to_gpu(img->format);
             }
             lua_pop(L, 1);
+#endif
 
             if (!descs[i].data) {
                 lua_getfield(L, -1, "data");
@@ -1350,7 +1363,9 @@ static const luaL_Reg gpu_funcs[] = {
     {"buffer_read",   l_gpu_buffer_read},
     {"buffer_copy",   l_gpu_buffer_copy},
     {"texture",       l_gpu_texture},
+#ifdef HL_ENABLE_IMAGE
     {"texture_read",  l_gpu_texture_read},
+#endif
     {NULL, NULL}
 };
 

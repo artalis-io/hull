@@ -146,6 +146,7 @@ Hull's distribution is one binary; what's compiled into it is controlled by a sm
 | `HL_ENABLE_TCC` | 1 Linux / 0 macOS+cosmo | Compile the tcc backend for `hull build --compiler=tcc`. tcc is **not embedded** (~400 KB lighter binary) — it's a side-loaded tool (`hull tools install tcc`), resolved at build time from `~/.hull/tools` → `dirname(hull)` → `$PATH`. Off on macOS (Mach-O) / cosmo (APE archives), where tcc's ELF output is unusable and the system compiler is used instead. |
 | `HL_EMBED_CA_BUNDLE` | 1 | Drop Mozilla CA bundle (~200 KB, breaks HTTPS without system store) |
 | `HL_ENABLE_SQLITE` | 1 | Drop the SQLite backend (`cap/db_sqlite.c`, `cap/db_udf.c`, vendored `sqlite3.c`). A SQLite file path or `:memory:` DSN then has no backend. |
+| `HL_ENABLE_IMAGE` | 1 | Drop the image codec subsystem (`cap/image.c`, `cap/image_stb.c`, per-runtime `mod_image`, and vendored `stb_image` — image's **sole** consumer, ~146 KB). Subtractive knob like `HL_ENABLE_DB` (on by default: web apps want avatars/thumbnails). `hull/image` then fails module resolution unless declared optional (`"hull/image@1?"` → `require` returns nil). The GPU texture paths that take/return an `HlImage` (`gpu.texture(img)`, `gpu.texture_read`/`textureRead`) are gated out too, so a `GPU=1 IMAGE=0` build keeps raw-byte textures but not the image bridge. See "Image-less builds" below. |
 | `HL_ENABLE_POSTGRES` | 0 | (Off by default.) On compiles the pure-C PostgreSQL wire backend (`cap/pgwire.c` + `cap/pg_conn.c` + `cap/db_postgres.c`; no libpq) into the base. A `postgres://` / `postgresql://` DSN selects it. Links the shared TLS client (`HL_LINK_TLS`) for SSL connections. Normally composed via the `postgres` **feature** (`hull build --with=postgres`) rather than set directly; the flag is the monolithic path and what `make feature-postgres` builds the archive with. See "Composable features" above and "PostgreSQL + multi-backend DB" below. |
 | `HL_ENABLE_MYSQL` | 0 | (Off by default.) On compiles the pure-C MySQL / MariaDB wire backend (`cap/mysqlwire.c` + `cap/mysql_conn.c` + `cap/db_mysql.c`; no libmysql/libmariadb) into the base. A `mysql://` / `mariadb://` DSN selects it. Links the shared TLS client (`HL_LINK_TLS`). Normally composed via the `mysql` **feature** (`hull build --with=mysql`) rather than set directly; the flag is the monolithic path and what `make feature-mysql` builds the archive with. See "Composable features" above and "MySQL/MariaDB specifics" below. |
 | `HL_ENABLE_DB` | 1 | **Umbrella, derived** from the three granular flags: defined iff `HL_ENABLE_SQLITE`, `HL_ENABLE_POSTGRES`, or `HL_ENABLE_MYSQL` is on. Off (all granular off) drops `db.*` + `migrate.*` + worker-DB + the connection registry + DB-backed stdlib (session, ratelimit, idempotency, outbox, inbox, rbac, search). ~1.4 MB smaller. See "Compute-only builds" below. |
@@ -422,6 +423,39 @@ What still works:
 - `hull build`, `hull dev`, `hull test`, `hull agent` (minus the `db`/`migrate` subcommands)
 
 Binary size on arm64 Darwin: ~3.66 MB vs ~5.06 MB with DB (about 28% smaller).
+
+### Image-less builds (`HL_ENABLE_IMAGE=0`)
+
+`make HL_ENABLE_IMAGE=0` produces a hull binary without the image codec
+subsystem. Use for a compute / CLI / signing binary that never decodes or
+encodes images (a WASM/GPU transform pipeline, an air-gapped batch job, a data
+tool). Image is **on by default** (web apps want avatars / thumbnails), so this
+is a subtractive flavor knob like `HL_ENABLE_DB=0` — a make-level switch, not a
+`hull build --with=` feature and not exposed as a `--flavor` preset.
+
+What's removed:
+- `src/hull/cap/image.c`, `cap/image_stb.c` (the codec vtable + stb backend)
+- `runtime/{lua,js}/mod_image.c` (the `image` module bindings)
+- `vendor/stb/stb_impl.c` (stb_image + stb_image_write — image is its **only**
+  consumer, so it drops entirely; ~146 KB smaller on arm64 Darwin)
+
+What's unavailable to app code:
+- The `hull/image` module (`image.new/decode/encode/from_buffer`, the `HlImage`
+  userdata). A non-optional `"hull/image@1"` declaration is a hard app-load
+  error (`requires HL_ENABLE_IMAGE (build-time)`); declare it optional
+  (`"hull/image@1?"`) to have `require("hull.image")` return nil / `import`
+  bind null and fall back gracefully.
+- On a `HL_ENABLE_GPU=1 HL_ENABLE_IMAGE=0` build only the **image bridge** of the
+  GPU texture API drops: `gpu.texture(img)` no longer accepts an `HlImage` (raw
+  bytes + `{width,height,format}` still work) and `gpu.texture_read` /
+  `textureRead` (which return an `HlImage`) are compiled out. `gpu.buffer_read`
+  and the rest of `gpu.*` are unaffected.
+
+What still works: everything else — Lua/JS runtimes, `db.*`, `http.*`,
+`compute.*`, `gpu.*` (buffers/dispatch/pipeline), `crypto.*`, `fs.*`, templates,
+CSV, i18n, `hull build/dev/test/agent`. The image-less link is CI-covered by the
+`flavors` matrix (`HL_ENABLE_IMAGE=0`); combine with `HL_ENABLE_DB=0` /
+`HL_ENABLE_HTTP=0` for a minimal compute runtime.
 
 ### PostgreSQL + multi-backend DB
 

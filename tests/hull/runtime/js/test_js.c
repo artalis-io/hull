@@ -3988,6 +3988,7 @@ UTEST(js_runtime, import_gated_declared_native_module_succeeds)
     cleanup_js();
 }
 
+#ifdef HL_ENABLE_IMAGE
 UTEST(js_runtime, import_image_is_a_real_hull_module)
 {
     /* Phase 2c: image is no longer a global on globalThis — it must be
@@ -4015,6 +4016,7 @@ UTEST(js_runtime, import_image_is_a_real_hull_module)
     js.base.module_set = NULL;
     cleanup_js();
 }
+#endif /* HL_ENABLE_IMAGE */
 
 /* ── Async test-runner regression coverage ──────────────────────────
  *

@@ -47,6 +47,7 @@ static const struct {
     { HL_MOD_CAP_HTTP_CLIENT, "build:http-client" },
     { HL_MOD_CAP_HTTP_SERVER, "build:http-server" },
     { HL_MOD_CAP_TUI,         "build:tui"        },
+    { HL_MOD_CAP_IMAGE,       "build:image"      },
     { 0, NULL }
 };
 
