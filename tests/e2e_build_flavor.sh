@@ -76,6 +76,32 @@ if command -v nm >/dev/null 2>&1; then
 fi
 pass "pure-compute x runtime builds, runs (exit 7), and drops Keel/mbedTLS/http"
 
+# ── 3b. pure-compute x wasm feature (reduced flavor x additive feature) ────────
+# A compute app on the Keel-free base: the wasm caps reference only base symbols
+# present in the pure-compute lib (no Keel), so the wasm feature composes
+# independently of the HTTP axis (issue #118). The binary carries WAMR but still
+# no Keel / mbedTLS, and compute.call executes.
+if [ ! -f "$ROOT/build/libhull_feature-wasm.a" ]; then
+    make -C "$ROOT" feature-wasm feature-wasm-lua >/dev/null 2>&1 || true
+fi
+mkdir -p "$WORK/pcw/compute"
+cp "$ROOT/examples/compute/compute/echo.wasm" "$WORK/pcw/compute/"
+printf 'local compute = require("hull.compute")\napp.manifest({ compute = true, modules = { "hull/compute@1" } })\napp.main(function()\n  if not compute.available() then return 9 end\n  return compute.call("echo", "ping") == "ping" and 0 or 7\nend)\n' > "$WORK/pcw/app.lua"
+if ! out=$("$HULL" build --no-verify-platform --flavor=pure-compute "$WORK/pcw" -o "$WORK/pcw/app" 2>&1); then
+    fail "pure-compute x wasm should build: $out"
+fi
+set +e; "$WORK/pcw/app" >/dev/null 2>&1; rc=$?; set -e
+[ "$rc" = 0 ] || fail "pure-compute compute app: compute.call should run (exit 0), got $rc"
+if command -v nm >/dev/null 2>&1; then
+    w=$(nm "$WORK/pcw/app" 2>/dev/null | grep -cE ' [A-TV-Za-tv-z] _?wasm_runtime_full_init' || true)
+    [ "$w" -ge 1 ] || fail "pure-compute compute app should carry WAMR (got $w)"
+    n=$(nm "$WORK/pcw/app" 2>/dev/null | grep -cE ' T _?kl_server_' || true)
+    [ "$n" = 0 ] || fail "pure-compute compute app should carry no Keel (got $n)"
+    n=$(nm "$WORK/pcw/app" 2>/dev/null | grep -cE ' T _?mbedtls_ssl' || true)
+    [ "$n" = 0 ] || fail "pure-compute compute app should carry no mbedTLS (got $n)"
+fi
+pass "pure-compute x wasm: composes WAMR + runs compute.call, still drops Keel/mbedTLS"
+
 # ── 4. --flavor=auto infers pure-compute for an app.main app and builds it ──
 out=$("$HULL" build --flavor=auto "$WORK/pc" -o "$WORK/pc/auto" 2>&1) || fail "auto build failed: $out"
 echo "$out" | grep -q "auto selected 'pure-compute'" \

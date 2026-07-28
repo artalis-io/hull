@@ -207,9 +207,16 @@ typedef struct HlWasmInstance {
 
 /* ── API ───────────────────────────────────────────────────────────── */
 
+/* hl_cap_wasm_init return codes. 0 = ok; a NEGATIVE value is a genuine WAMR
+ * init failure (worth warning about); the POSITIVE HL_CAP_WASM_ABSENT is
+ * returned by the base weak stub when the WASM feature was not composed
+ * (a compute-free app) — an expected, quiet state, not a failure. */
+#define HL_CAP_WASM_ABSENT 1
+
 /**
  * Initialize WAMR runtime and module cache.
- * Returns 0 on success, -1 on failure.
+ * Returns 0 on success, <0 on real failure, HL_CAP_WASM_ABSENT (>0) when the
+ * WASM feature is not composed.
  */
 int hl_cap_wasm_init(HlWasmCache *cache);
 

@@ -353,4 +353,11 @@ local function main()
     print("hull verify: OK — all checks passed")
 end
 
-main()
+-- Only self-dispatch when invoked AS the `hull verify` command. When this
+-- module is require()'d as a dependency (e.g. an app that require()s the
+-- matching stdlib module during manifest extraction in the tool VM), its
+-- main() must NOT run against the surrounding command's argv
+-- (see __hull_tool_entry in src/hull/tool.c).
+if __hull_tool_entry == "hull.verify" then
+    main()
+end

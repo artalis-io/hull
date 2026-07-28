@@ -48,7 +48,10 @@
 __attribute__((weak)) int hl_cap_wasm_init(HlWasmCache *cache)
 {
     (void)cache;
-    return -1;   /* no runtime -> init "fails"; available() stays false */
+    /* Positive sentinel: the feature is NOT COMPOSED (compute-free app), an
+     * expected/quiet state — distinct from a genuine WAMR init failure (<0), so
+     * serve.c doesn't log a misleading "WAMR init failed" on every such app. */
+    return HL_CAP_WASM_ABSENT;
 }
 
 __attribute__((weak)) void hl_cap_wasm_destroy(HlWasmCache *cache)

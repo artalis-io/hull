@@ -968,10 +968,12 @@ static int hl_serve_init_app_context(HlServerState *s)
      * Wired to context via opts so module registration in init() can see it.
      * If the manifest later declares compute: false, we NULL it out. */
     if (!wasm_cache_ok) {
-        if (hl_cap_wasm_init(&wasm_cache) == 0)
+        int wrc = hl_cap_wasm_init(&wasm_cache);
+        if (wrc == 0)
             wasm_cache_ok = 1;
-        else
+        else if (wrc < 0)
             log_warn("[hull:c] WAMR init failed — compute.call() unavailable");
+        /* wrc > 0 (HL_CAP_WASM_ABSENT): WASM feature not composed — quiet. */
     }
 #endif
 

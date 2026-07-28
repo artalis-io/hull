@@ -1931,4 +1931,11 @@ int main(int argc, char **argv) { return hl_app_run(argc, argv); }
     tool.rmdir(tmpdir)
 end
 
-main()
+-- Only self-dispatch when invoked AS the `hull build` command. When this
+-- module is require()'d as a dependency (e.g. an app that require()s the
+-- matching stdlib module during manifest extraction in the tool VM), its
+-- main() must NOT run against the surrounding command's argv
+-- (see __hull_tool_entry in src/hull/tool.c).
+if __hull_tool_entry == "hull.build" then
+    main()
+end

@@ -92,4 +92,11 @@ local function main()
     end
 end
 
-main()
+-- Only self-dispatch when invoked AS the `hull modules` command. When this
+-- module is require()'d as a dependency (e.g. an app that require()s the
+-- matching stdlib module during manifest extraction in the tool VM), its
+-- main() must NOT run against the surrounding command's argv
+-- (see __hull_tool_entry in src/hull/tool.c).
+if __hull_tool_entry == "hull.modules" then
+    main()
+end
