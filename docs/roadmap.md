@@ -156,10 +156,16 @@ flavor.
 | **`hull/query` builder + `hull/query/schema`** | **stdlib** | Designed + requested; the C keystone already shipped (`HlDbDialect` descriptor + `conn.dialect`, commit `234c8dc`). A thin, injection-safe compile-to-`(sql, params)` layer over `conn.query` (values bound, identifiers dialect-quoted), NOT an ORM. Resolves 5 DB-API-review findings (portable upsert / `RETURNING` / async terminals / raw composition / dialect leakage). Cheaper than any feature (no C, no release pipeline; offline `to_sql()` matrix tests). See [roadmap_next.md](roadmap_next.md) "Out of scope" note under the backend-onboarding checklist. |
 | **Object storage / S3, most integration clients** | **stdlib** | Buildable on `http.fetch` + `crypto` (SigV4). No C archive. The canonical "reach for stdlib before a feature" case. |
 
-**Deliberately kept core (never a feature):** the WASM *interpreter* (WAMR,
-~256 KB - the compute pillar; `db.udf` leans on it; its heavy half, the AOT
-*compiler* `wamrc`, is already correctly a tool), and `crypto` / SHA / HMAC (the
-trust substrate under signatures, sessions, JWT).
+**WASM featurified (#118, docs/wasm_feature.md).** The WASM *interpreter* (WAMR,
+~256 KB) was the last "kept core" candidate; it is now an embedded, auto-composed
+feature (like the runtimes / HTTP core) — the native base is compute-less and a
+compute-free app links zero WAMR. It stays *embedded + auto-composed*, not
+`hull feature install`, because compute is a pillar and the `db.udf` coupling
+needs the two-signal `needs_wasm` gate rather than a manual `--with`. Its heavy
+half, the AOT *compiler* `wamrc`, remains correctly a tool.
+
+**Deliberately kept core (never a feature):** `crypto` / SHA / HMAC (the trust
+substrate under signatures, sessions, JWT), and the default SQLite backend.
 
 ### Next. Distribution: hull.com Downloadable Tool
 

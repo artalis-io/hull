@@ -4197,6 +4197,10 @@ e2e-http: $(BUILDDIR)/hull
 e2e-feature-runtime: $(BUILDDIR)/hull
 	sh tests/e2e_feature_runtime.sh
 
+.PHONY: e2e-feature-wasm
+e2e-feature-wasm: $(BUILDDIR)/hull
+	sh tests/e2e_feature_wasm.sh
+
 e2e-multipart: $(BUILDDIR)/hull
 	RUNTIME=$(RUNTIME) sh tests/e2e_multipart.sh
 

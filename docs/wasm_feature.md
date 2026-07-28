@@ -1,10 +1,11 @@
 # WASM as a composable feature — design
 
-**Status:** design (not implemented). The last large vendored engine still
-compiled into the base by default. Finishes the base-subtraction axis begun by
-#113 (runtimes) and #114 (HTTP core). Sequenced as its **own epic** after a
-release cut, because it is materially harder than the runtime/HTTP splits (see
-"Why this is harder" below).
+**Status:** implemented (native builds), PR #118. Finishes the base-subtraction
+axis begun by #113 (runtimes) and #114 (HTTP core) — the last large vendored
+engine (WAMR, ~256 KB) moves out of the base. Phases 0-4 landed; the native base
+is compute-less and a produced compute-free app links zero WAMR. Cosmo keeps WASM
+in-base. The "why this is harder than #113/#114" analysis below held up: the
+`db.udf` seam and the two-signal `needs_wasm` gate were the crux.
 
 Related: [docs/http_feature_phase1.md](http_feature_phase1.md) (the seam +
 whole-archive pattern this reuses), [docs/features_and_flavors.md](features_and_flavors.md)

@@ -83,6 +83,10 @@ jobs:
         timeout-minutes: 3
         run: make e2e-feature-runtime
 
+      - name: WASM feature E2E test (compute-free app drops WAMR; needs_wasm gate)
+        timeout-minutes: 4
+        run: make e2e-feature-wasm
+
       - name: Attachment E2E tests
         timeout-minutes: 2
         run: make e2e-attachment
