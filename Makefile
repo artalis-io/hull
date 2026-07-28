@@ -2571,6 +2571,14 @@ check-hardening: $(BUILDDIR)/hull
 # `hull build`. The feature-http archive target below reuses this list.
 FEATURE_HTTP_OBJS := $(BUILDDIR)/cap_http.o $(BUILDDIR)/cap_http_async.o \
                      $(BUILDDIR)/cap_ws.o $(BUILDDIR)/cap_smtp.o $(BUILDDIR)/cap_body.o
+
+# WASM as a composable feature (docs/wasm_feature.md, Phase 1). The runtime-
+# AGNOSTIC wasm caps move into libhull_feature-wasm.a (with worker_wasm + the
+# vendored WAMR objects) and compose back at `hull build`; the per-runtime
+# compute BINDING (mod_compute) moves into libhull_feature-wasm-<rt>.a. The base
+# keeps the wasm_weakstub.c weak defaults (Phase 0) so a compute-less app links.
+FEATURE_WASM_OBJS := $(BUILDDIR)/cap_wasm.o $(BUILDDIR)/cap_wasm_buffer.o \
+                     $(BUILDDIR)/cap_wasm_data.o $(BUILDDIR)/cap_wasm_stream.o
 ifdef COSMO
   PLATFORM_RT_OBJS       := $(RT_OBJS)
   PLATFORM_MANIFEST_OBJ  := $(MANIFEST_OBJ)
@@ -2855,6 +2863,29 @@ feature-http: $(BUILDDIR)/libhull_feature-http.a
 .PHONY: feature-http
 $(BUILDDIR)/libhull_feature-http.a: $(FEATURE_HTTP_OBJS) | $(BUILDDIR)
 	$(call AR_FEATURE_LIB,$(FEATURE_HTTP_OBJS))
+
+# libhull_feature-wasm.a: the runtime-agnostic WASM CORE (docs/wasm_feature.md,
+# Phase 1). Bundles the wasm caps + worker_wasm + the vendored WAMR objects
+# (the ~256 KB that leaves the base). Composed back at `hull build` and embedded
+# in hull (embedded_wasm.h). The per-runtime compute binding (mod_compute) is a
+# separate archive below, like the http web bindings.
+FEATURE_WASM_CORE := $(FEATURE_WASM_OBJS) $(WORKER_WASM_OBJ) $(WAMR_OBJS)
+feature-wasm: $(BUILDDIR)/libhull_feature-wasm.a
+.PHONY: feature-wasm
+$(BUILDDIR)/libhull_feature-wasm.a: $(FEATURE_WASM_CORE) | $(BUILDDIR)
+	$(call AR_FEATURE_LIB,$(FEATURE_WASM_CORE))
+
+# Per-runtime compute-binding bridges (mod_compute). Tiny (one object each);
+# embedded in hull + composed for the app's runtime alongside the wasm core.
+feature-wasm-lua: $(BUILDDIR)/libhull_feature-wasm-lua.a
+.PHONY: feature-wasm-lua
+$(BUILDDIR)/libhull_feature-wasm-lua.a: $(BUILDDIR)/lua_rt_mod_compute.o | $(BUILDDIR)
+	$(call AR_FEATURE_LIB,$(BUILDDIR)/lua_rt_mod_compute.o)
+
+feature-wasm-js: $(BUILDDIR)/libhull_feature-wasm-js.a
+.PHONY: feature-wasm-js
+$(BUILDDIR)/libhull_feature-wasm-js.a: $(BUILDDIR)/js_mod_compute.o | $(BUILDDIR)
+	$(call AR_FEATURE_LIB,$(BUILDDIR)/js_mod_compute.o)
 
 # libhull_feature-lua.a / -js.a: a runtime as a composable feature archive.
 # Bundles the runtime objects, its vendored VM, its manifest extractor, and its
