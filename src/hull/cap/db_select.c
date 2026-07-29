@@ -85,6 +85,29 @@ static int scheme_in(const char *const *list, const char *scheme)
     return 0;
 }
 
+/* The scheme a scheme-less DSN (a bare path, ":memory:", a "file:" URI) routes
+ * to. This is the DEFAULT backend. Today the base SQLite backend claims it; once
+ * SQLite becomes a composable feature (docs/sqlite_feature.md) it fills the same
+ * slot via hl_db_feature_backends, so resolving the default by scheme keeps this
+ * correct without the selector naming hl_db_backend_sqlite directly. */
+#define HL_DB_DEFAULT_SCHEME "sqlite"
+
+/* Resolve the backend claiming @p scheme among the base backends compiled into
+ * this binary, then any feature backends composed in at build time. NULL if
+ * none. Shared by the explicit-scheme path and the scheme-less default. */
+static const HlDbBackend *backend_for_scheme(const char *scheme)
+{
+    for (size_t i = 0; i < sizeof BACKENDS / sizeof BACKENDS[0]; i++)
+        if (scheme_in(BACKENDS[i]->schemes, scheme))
+            return BACKENDS[i];
+    size_t fcount = 0;
+    const HlDbBackend *const *feats = hl_db_feature_backends(&fcount);
+    for (size_t i = 0; i < fcount; i++)
+        if (feats && feats[i] && scheme_in(feats[i]->schemes, scheme))
+            return feats[i];
+    return NULL;
+}
+
 /* Weak default: a base build has no composed feature backends. A feature build
  * (`hull build --with=<feature>`) links a generated STRONG override — a const
  * table referencing each composed feature's backend — which the linker prefers
@@ -106,18 +129,10 @@ const HlDbBackend *hl_db_backend_select(const char *dsn, const char **err)
     size_t slen = dsn_scheme(dsn, scheme, sizeof scheme);
 
     if (slen > 0) {
-        /* Explicit "<scheme>://": route to the backend that claims it. First the
-         * base backends compiled into this binary. */
-        for (size_t i = 0; i < sizeof BACKENDS / sizeof BACKENDS[0]; i++)
-            if (scheme_in(BACKENDS[i]->schemes, scheme))
-                return BACKENDS[i];
-        /* Then feature backends composed in at build time (empty in a base
-         * build; a generated registry fills this in a `--with=<feature>` build). */
-        size_t fcount = 0;
-        const HlDbBackend *const *feats = hl_db_feature_backends(&fcount);
-        for (size_t i = 0; i < fcount; i++)
-            if (feats && feats[i] && scheme_in(feats[i]->schemes, scheme))
-                return feats[i];
+        /* Explicit "<scheme>://": route to the backend that claims it (base
+         * backends first, then feature backends composed at build time). */
+        const HlDbBackend *be = backend_for_scheme(scheme);
+        if (be) return be;
         /* A scheme Hull knows but this build lacks: specific hint. */
         for (size_t i = 0; i < sizeof RESERVED / sizeof RESERVED[0]; i++)
             if (strcmp(RESERVED[i].scheme, scheme) == 0) {
@@ -130,15 +145,16 @@ const HlDbBackend *hl_db_backend_select(const char *dsn, const char **err)
         return NULL;
     }
 
-    /* No scheme: a bare path, ":memory:", or an sqlite "file:" URI -> SQLite. */
-#ifdef HL_ENABLE_SQLITE
-    return &hl_db_backend_sqlite;
-#else
+    /* No scheme: a bare path, ":memory:", or an sqlite "file:" URI -> the
+     * default backend, resolved by scheme rather than by a hardcoded symbol so
+     * this stays correct when SQLite moves behind hl_db_feature_backends. Today
+     * the base SQLite backend claims HL_DB_DEFAULT_SCHEME. */
+    const HlDbBackend *def = backend_for_scheme(HL_DB_DEFAULT_SCHEME);
+    if (def) return def;
     if (err)
-        *err = "this hull has no SQLite backend for a scheme-less DSN; use an "
-               "explicit scheme (e.g. postgres:// or duckdb://)";
+        *err = "this hull has no default (SQLite) backend for a scheme-less "
+               "DSN; use an explicit scheme (e.g. postgres:// or duckdb://)";
     return NULL;
-#endif
 }
 
 /* hl_cap_db_check_namespace (the backend-agnostic _hull_* guard) moved to
