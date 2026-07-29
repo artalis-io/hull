@@ -1,7 +1,8 @@
 # SQLite as a composable feature — design
 
-**Status:** proposed. Tracks the capstone of the base-subtraction axis
-(runtime #113 → HTTP #114 → WASM #118 → **DB backend**).
+**Status:** Phase A + B shipped (#123–#127) — the architecture is proven end to
+end. Phase C/D (auto-compose gate + embed-as-default) remain. Tracks the capstone
+of the base-subtraction axis (runtime #113 → HTTP #114 → WASM #118 → **DB backend**).
 **Prereq:** the DB-backend vtable (`HlDbBackend`, `cap/db_backend.h`) already
 exists and is proven by the `postgres` / `mysql` / `duckdb` features. This epic
 does for the *default* backend what those did for the optional ones — with the
@@ -113,10 +114,21 @@ SQLite-only, so this is honest — they light up exactly when SQLite is present.
   (scheme-less / `:memory:` / `file:` / bare path — i.e. not an explicit
   `postgres://` / `mysql://` / `duckdb://` default).
 - **S3** — a genuine app that uses `db` with the default (SQLite) DSN.
-- **Toolchain force-load.** `hull test` (always `:memory:`) and the SQLite agent
-  commands need SQLite regardless of the target app, so the `hull` **toolchain**
-  force-loads `libhull_feature-sqlite.a` at its own link — exactly the
-  `HL_TUI_TOOLCHAIN` pattern that keeps `--tui` commands on a TUI-free base.
+- **The `hull` binary keeps SQLite in-base — it is NOT toolchain-force-loaded.**
+  `hull test` (always `:memory:`) and the SQLite agent commands need SQLite for
+  every app, and the `hull` toolchain is a build tool where a ~2 MB engine is not
+  worth removing. So `hull` stays SQLite-full; only **produced app binaries** get
+  the SQLite-less base + composed archive. This is the decision the doc's model
+  section already implied ("the `hull` binary keeps SQLite … produced app
+  binaries drop it") and it sidesteps the `HL_TUI_TOOLCHAIN`-style force-load.
+
+  > A Phase B.4 spike DID wire a `HL_SQLITE_TOOLCHAIN` force-load (mirroring
+  > `HL_TUI_TOOLCHAIN`): the SQLite-less `hull` linked, and the direct sqlite
+  > path (`hull agent db`) worked, but the in-process `hull test` harness failed
+  > to resolve `require("hull.db")` (the serving runtime's `LUA_LOADED_TABLE`
+  > lacked the module despite registration). Since keeping SQLite in the `hull`
+  > binary is the cleaner end-state anyway, that path was abandoned rather than
+  > debugged. Preserved as a local WIP for reference.
 
 A genuinely SQLite-free produced app (explicit non-SQLite default, no
 `hull/search` / `db.udf`, no SQLite migrations) links **zero** `sqlite3.*`
@@ -147,18 +159,23 @@ WASM). `HL_ENABLE_SQLITE` stays the compile switch; the feature is the
   The de-risking refactor (like #113 Phase 1 / #118 Phase 0). Verify: full
   `make test` + e2e green; a `grep`/`nm` assertion that the default resolver no
   longer *directly* names `hl_db_backend_sqlite`.
-- **Phase B — extract `libhull_feature-sqlite.a`.** Move `sqlite3.c` +
-  `cap/db_sqlite.c` + `cap/db_udf.c` + the SQLite agent TUs out of the base into
-  the archive; base becomes SQLite-less (`nm libhull_platform.a | grep
-  sqlite3_open` → only the weak stub). The archive fills
-  `hl_db_feature_backends` + the agent hooks.
-- **Phase C — the `needs_sqlite` gate + toolchain force-load.** `hull build`
-  composes the archive iff S1/S2/S3; the `hull` toolchain force-loads it for
-  `hull test` / agent commands. A SQLite-free app links zero `sqlite3.*`.
-- **Phase D — embed + publish + auto-compose.** Embed the archive in `hull`
-  (like `embedded_wasm.h`), wire the compose ladder in `feature_compose.lua`,
-  add the composed-feature signing entry (platform domain, like the runtime
-  archives). Cosmo keeps SQLite in-base.
+- **Phase B — extract `libhull_feature-sqlite.a` + prove the compose.**
+  ✅ SHIPPED (#126 B.1+B.2, #127 B.3). B.1 built the archive (`make
+  feature-sqlite`); B.2 added `HL_SQLITE_FEATURE=1` — a SQLite-less DB-core base
+  (`nm libhull_platform.a | grep sqlite3_open` → 0, DB core intact) via the
+  umbrella decouple; B.3 wired the `sqlite` `FEATURE_SPECS` entry + split
+  `agent/helpers.c` so `hull build --with=sqlite` composes the SQLite-less base +
+  archive into an app whose `db.query` runs through the composed backend
+  (`tests/e2e_feature_sqlite.sh`). The architecture is PROVEN end to end.
+- **Phase C — the `needs_sqlite` auto-compose gate.** `hull build` composes the
+  archive iff S1/S2/S3 with **no** `--with=sqlite` (today the compose is explicit,
+  like a `--with` feature). No toolchain force-load — the `hull` binary keeps
+  SQLite in-base (see the gate section above); only produced apps go SQLite-less.
+- **Phase D — embed + publish.** Embed the SQLite-less base + the archive in the
+  distributed `hull` so a stock install produces SQLite-dropping apps, add the
+  composed-feature signing entry (platform domain, like the runtime archives),
+  and make the SQLite-less base the default app-build target. Cosmo keeps SQLite
+  in-base (fat APE can't force-load a native archive).
 
 ## Testing
 
@@ -168,7 +185,8 @@ WASM). `HL_ENABLE_SQLITE` stays the compile switch; the feature is the
 - The existing `test_db*`, `e2e_named_connections`, `e2e_postgres`,
   `e2e_mysql`, and the auth-flows suites must stay green throughout (they prove
   the vtable path is untouched).
-- `hull test` on a plain app must keep working end to end (toolchain force-load).
+- `hull test` on a plain app keeps working because the `hull` binary keeps
+  SQLite in-base (no toolchain force-load); only produced apps go SQLite-less.
 
 ## Non-goals
 
