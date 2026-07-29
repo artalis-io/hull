@@ -354,33 +354,50 @@ function lockoutRemaining(userIdStr) {
 
 function bumpFailedLogin(userIdStr) {
     const now = time.now();
-    // Round-9 HIGH-2: reset failed_count to 1 when the previous
-    // lockout window has expired but gc_expired hasn't pruned the
-    // row yet. See the Lua sibling for the threat model — pre-fix
-    // the user got 1 attempt per 15min for the next 24h, not 5.
-    db.exec(
-        "INSERT INTO _hull_auth_login_attempts "
-        + "(user_id, failed_count, last_failed_at, locked_until) "
-        + "VALUES (?, 1, ?, NULL) "
-        + "ON CONFLICT(user_id) DO UPDATE SET "
+    // Portable conditional upsert. The original used INSERT ... ON CONFLICT
+    // DO UPDATE, which MySQL spells differently (ON DUPLICATE KEY UPDATE), so
+    // do it in two portable steps that hold on every backend: an atomic
+    // CASE-based UPDATE (standard SQL), then an INSERT only when no row matched
+    // (first failure). No explicit transaction, so it composes safely even if
+    // the login handler already runs inside one.
+    //
+    // The CASE mirrors the original (Round-9 HIGH-2): reset failed_count to 1
+    // when a prior lockout window has expired but gc_expired hasn't pruned the
+    // row yet, so a stale count doesn't trip a fresh lockout on the next bad
+    // attempt (pre-fix the user got 1 attempt per 15min for the next 24h, not
+    // 5); else increment and lock at the threshold.
+    const updateSql =
+        "UPDATE _hull_auth_login_attempts SET "
         + "  failed_count = CASE "
-        + "    WHEN locked_until IS NOT NULL AND locked_until < ? "
-        + "      THEN 1 "
+        + "    WHEN locked_until IS NOT NULL AND locked_until < ? THEN 1 "
         + "    ELSE failed_count + 1 "
         + "  END, "
         + "  last_failed_at = ?, "
         + "  locked_until = CASE "
-        + "    WHEN locked_until IS NOT NULL AND locked_until < ? "
-        + "      THEN NULL "
-        + "    WHEN failed_count + 1 >= ? "
-        + "      THEN ? + ? "
+        + "    WHEN locked_until IS NOT NULL AND locked_until < ? THEN NULL "
+        + "    WHEN failed_count + 1 >= ? THEN ? + ? "
         + "    ELSE NULL "
-        + "  END",
-        [userIdStr, now,
-         now,                // failed_count CASE: window-expired check
-         now,                // last_failed_at
-         now,                // locked_until CASE: window-expired check
-         _state.maxFailedLogins, now, _state.lockoutDuration]);
+        + "  END "
+        + "WHERE user_id = ?";
+    const updateArgs = [
+        now,                // failed_count CASE: window-expired check
+        now,                // last_failed_at
+        now,                // locked_until CASE: window-expired check
+        _state.maxFailedLogins, now, _state.lockoutDuration,
+        userIdStr];
+    if (db.exec(updateSql, updateArgs) > 0) return;
+    // No existing row: first failure for this user. INSERT; if a concurrent
+    // request won the insert race (duplicate PK), fall back to the atomic
+    // UPDATE so the increment still lands.
+    try {
+        db.exec(
+            "INSERT INTO _hull_auth_login_attempts "
+            + "(user_id, failed_count, last_failed_at, locked_until) "
+            + "VALUES (?, 1, ?, NULL)",
+            [userIdStr, now]);
+    } catch (e) {
+        db.exec(updateSql, updateArgs);
+    }
 }
 
 function clearFailedLogins(userIdStr) {

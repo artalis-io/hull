@@ -669,41 +669,60 @@ end
 
 local function bump_failed_login(user_id)
     local now = time.now()
-    -- UPSERT: increment counter, set last_failed_at, set
-    -- locked_until if threshold tripped. SQLite's
-    -- INSERT ... ON CONFLICT supports this cleanly.
+    -- Portable conditional upsert. The original used INSERT ... ON CONFLICT
+    -- DO UPDATE, which MySQL spells differently (ON DUPLICATE KEY UPDATE), so
+    -- do it in two portable steps that hold on every backend: an atomic
+    -- CASE-based UPDATE (standard SQL), then an INSERT only when no row
+    -- matched (first failure). No explicit transaction, so it composes safely
+    -- even if the login handler already runs inside one.
     --
-    -- Round-9 HIGH-2: when the previous lockout window has expired
-    -- (locked_until IS NOT NULL AND < now) but the row hasn't been
-    -- gc'd yet (gc_expired needs last_failed_at < now-86400), the
-    -- stale failed_count = max-from-prior-cycle would push the
-    -- expression `failed_count + 1 >= max` straight into a fresh
-    -- lockout on the user's NEXT bad attempt. Net pre-fix: one
-    -- attempt per 15-min window for the next 24h, not five. Reset to
-    -- 1 when the prior window has elapsed.
-    db.exec(
-        "INSERT INTO _hull_auth_login_attempts "
-        .. "(user_id, failed_count, last_failed_at, locked_until) "
-        .. "VALUES (?, 1, ?, NULL) "
-        .. "ON CONFLICT(user_id) DO UPDATE SET "
+    -- The CASE logic mirrors the original (Round-9 HIGH-2): when the previous
+    -- lockout window has expired (locked_until IS NOT NULL AND < now) but the
+    -- row hasn't been gc'd yet (gc_expired needs last_failed_at < now-86400),
+    -- the stale failed_count = max-from-prior-cycle would push
+    -- `failed_count + 1 >= max` straight into a fresh lockout on the next bad
+    -- attempt (pre-fix: one attempt per 15-min window for the next 24h, not
+    -- five). Reset to 1 when the prior window has elapsed; else increment and
+    -- lock once failed_count+1 reaches the threshold.
+    local update_sql =
+        "UPDATE _hull_auth_login_attempts SET "
         .. "  failed_count = CASE "
-        .. "    WHEN locked_until IS NOT NULL AND locked_until < ? "
-        .. "      THEN 1 "
+        .. "    WHEN locked_until IS NOT NULL AND locked_until < ? THEN 1 "
         .. "    ELSE failed_count + 1 "
         .. "  END, "
         .. "  last_failed_at = ?, "
         .. "  locked_until = CASE "
-        .. "    WHEN locked_until IS NOT NULL AND locked_until < ? "
-        .. "      THEN NULL "
-        .. "    WHEN failed_count + 1 >= ? "
-        .. "      THEN ? + ? "
+        .. "    WHEN locked_until IS NOT NULL AND locked_until < ? THEN NULL "
+        .. "    WHEN failed_count + 1 >= ? THEN ? + ? "
         .. "    ELSE NULL "
-        .. "  END",
-        { user_id, now,
-          now,           -- failed_count CASE: window-expired check
-          now,           -- last_failed_at
-          now,           -- locked_until CASE: window-expired check
-          _state.max_failed_logins, now, _state.lockout_duration })
+        .. "  END "
+        .. "WHERE user_id = ?"
+    local update_args = {
+        now,           -- failed_count CASE: window-expired check
+        now,           -- last_failed_at
+        now,           -- locked_until CASE: window-expired check
+        _state.max_failed_logins, now, _state.lockout_duration,
+        user_id }
+    if db.exec(update_sql, update_args) > 0 then return end
+    -- No existing row: first failure for this user. INSERT; if a concurrent
+    -- request won the insert race (duplicate PK), fall back to the atomic
+    -- UPDATE so the increment still lands.
+    --
+    -- The exec is wrapped in a CLOSURE, not pcall(db.exec, ...): the _hull_*
+    -- namespace guard bypasses stdlib by inspecting db.exec's immediate Lua
+    -- caller's chunk source for a "hull." prefix (lua_is_stdlib_caller). A bare
+    -- pcall(db.exec, ...) puts pcall -- a C frame -- at that level, so the
+    -- guard would deny this write to the reserved _hull_auth_login_attempts.
+    local ok = pcall(function()
+        db.exec(
+            "INSERT INTO _hull_auth_login_attempts "
+            .. "(user_id, failed_count, last_failed_at, locked_until) "
+            .. "VALUES (?, 1, ?, NULL)",
+            { user_id, now })
+    end)
+    if not ok then
+        db.exec(update_sql, update_args)
+    end
 end
 
 local function clear_failed_logins(user_id)
