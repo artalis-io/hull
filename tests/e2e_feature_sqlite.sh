@@ -56,25 +56,27 @@ W=$(mktemp -d)
 mkdir -p "$W/app"
 printf 'local db = require("hull.db").default()\napp.manifest({ modules = { "hull/db@1" } })\napp.main(function()\n  db.exec("CREATE TABLE t(x INTEGER)")\n  db.exec("INSERT INTO t VALUES(42)")\n  local r = db.query("SELECT x FROM t")\n  return (r[1] and r[1].x == 42) and 0 or 3\nend)\n' > "$W/app/app.lua"
 
-"$HULL" build --with=sqlite --no-verify-platform "$W/app" -o "$W/app/bin" >/dev/null 2>&1 \
-    || fail "hull build --with=sqlite (compose onto the SQLite-less base)"
-
+# Phase C: AUTO-INFERENCE — no --with=sqlite. `hull build` sees the app uses db
+# (needs_sqlite) + the base lacks SQLite, and composes libhull_feature-sqlite.a
+# on its own.
+out=$("$HULL" build --no-verify-platform "$W/app" -o "$W/app/bin" 2>&1) \
+    || fail "hull build (auto-infer sqlite onto the SQLite-less base): $out"
+echo "$out" | grep -qi "composing feature 'sqlite'" \
+    || fail "expected auto-inference to compose sqlite (no --with), got: $out"
 if command -v nm >/dev/null 2>&1; then
     w=$(nm "$W/app/bin" 2>/dev/null | grep -cE ' [Tt] _?sqlite3_open$' || true)
-    [ "$w" -ge 1 ] || fail "composed app has no SQLite (should come from the archive)"
+    [ "$w" -ge 1 ] || fail "auto-composed app has no SQLite (should come from the archive)"
 fi
 rc=0; "$W/app/bin" -d ":memory:" >/dev/null 2>&1 || rc=$?
-[ "$rc" = 0 ] || fail "composed db app: db.query should return 42 (exit 0), got $rc"
-echo "ok  hull build --with=sqlite: SQLite-less base + archive -> db.query runs (exit 0)"
+[ "$rc" = 0 ] || fail "auto-composed db app: db.query should return 42 (exit 0), got $rc"
+echo "ok  auto-inference: plain hull build on a SQLite-less base composes sqlite + db.query runs"
 
-# 5. A plain app on the SAME SQLite-less base without --with=sqlite fails closed
-#    (no default backend for its :memory: DSN) — proves the base really has none.
-mkdir -p "$W/plain"
-printf 'local db = require("hull.db").default()\napp.manifest({ modules = { "hull/db@1" } })\napp.main(function()\n  local ok = pcall(function() db.exec("CREATE TABLE t(x)") end)\n  return ok and 5 or 0\nend)\n' > "$W/plain/app.lua"
-if "$HULL" build --no-verify-platform "$W/plain" -o "$W/plain/bin" >/dev/null 2>&1; then
-    rc=0; "$W/plain/bin" -d ":memory:" >/dev/null 2>&1 || rc=$?
-    [ "$rc" = 0 ] || fail "uncomposed app on a SQLite-less base should fail closed on db use (exit 0 from pcall-guard), got $rc"
-    echo "ok  uncomposed app on the SQLite-less base has no backend (db use fails closed)"
-fi
+# NOTE — the db-free-app-drops-SQLite payoff is NOT yet reachable: the embedded
+# per-runtime runtime archive (libhull_feature-<rt>.a) bundles mod_db's SQLite
+# UDF bindings (referencing sqlite3_value_* etc.), so a whole-archived runtime
+# drags SQLite refs into EVERY app on a SQLite-less base -- a db-free app then
+# fails to link without the composed engine. Dropping SQLite from db-free apps
+# needs a per-runtime mod_db-udf bridge split (the sqlite-<rt> bridge, mirroring
+# wasm-<rt> / tui-<rt>). Tracked as the next Phase C step; see docs/sqlite_feature.md.
 
-echo "PASS: e2e_feature_sqlite (SQLite-less base + libhull_feature-sqlite.a composes + runs)"
+echo "PASS: e2e_feature_sqlite (SQLite-less base; needs_sqlite auto-composes for db apps)"

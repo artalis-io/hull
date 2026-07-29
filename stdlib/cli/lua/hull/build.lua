@@ -1416,6 +1416,42 @@ int main(int argc, char **argv) { return hl_app_run(argc, argv); }
             libs = { darwin = {}, other = {} },
         },
     }
+    -- SQLite auto-compose (docs/sqlite_feature.md, Phase C). SQLite is Hull's
+    -- DEFAULT backend, so a DB-using app auto-composes libhull_feature-sqlite.a
+    -- -- but ONLY when the target base is SQLite-less. A stock base carries the
+    -- SQLite backend in-lib; composing it there would double-define the backend,
+    -- so we gate on the base NOT already providing hl_db_backend_sqlite. Net:
+    -- a no-op on a stock (SQLite-full) base -> byte-identical; on a
+    -- HL_SQLITE_FEATURE=1 base a DB app composes SQLite and a DB-free app drops
+    -- it. Inferred (not a hand-typed --with=sqlite), like hull/tui.
+    if not (opts.with and opts.with.sqlite) then
+        local mf = extract_app_manifest(opts.app_dir)
+        local needs_sqlite = false
+        if mf then
+            local r = tool.modules_resolve(mf, opts.flavor, with_feature_list(opts))
+            if r.ok and r.needs_sqlite then needs_sqlite = true end
+        end
+        if needs_sqlite then
+            -- Probe the resolved base: a stock base defines hl_db_backend_sqlite,
+            -- a SQLite-less (HL_SQLITE_FEATURE=1) base does not. nm may be absent
+            -- (or the base unreadable); default to "has sqlite" so we never
+            -- wrongly compose onto a SQLite-full base.
+            local base_has_sqlite = true
+            local nm_out = tool.spawn_read({ "nm", platform_lib })
+            if nm_out and not nm_out:find("hl_db_backend_sqlite") then
+                base_has_sqlite = false
+            end
+            if not base_has_sqlite then
+                opts.with = opts.with or {}
+                opts.with.sqlite = true
+                opts.with_inferred = opts.with_inferred or {}
+                opts.with_inferred.sqlite = true
+                print("hull build: composing feature 'sqlite' "
+                      .. "(SQLite-less base + app uses db)")
+            end
+        end
+    end
+
     local features_needed = {}
     if opts.with then for f in pairs(opts.with) do features_needed[f] = true end end
     local feature_objs = {}

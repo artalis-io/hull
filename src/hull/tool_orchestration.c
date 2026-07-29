@@ -238,6 +238,17 @@ static int l_tool_modules_resolve(lua_State *L)
     lua_pushboolean(L, (req_caps & HL_MOD_CAP_WASM) ? 1 : 0);
     lua_setfield(L, -2, "needs_wasm");
 
+    /* needs_sqlite (SQLite as a composable feature, docs/sqlite_feature.md,
+     * Phase C) = does the resolved set use a DB (HL_MOD_CAP_DB)? SQLite is the
+     * DEFAULT backend, so any DB-using app MIGHT need it. build.lua only acts on
+     * this when the target base is actually SQLite-less (else the in-base backend
+     * already serves), so composing is a no-op on a SQLite-full base and a
+     * safe over-approximation (a postgres-only app on a SQLite-less base gets an
+     * unused ~2 MB until the DSN-scheme refinement lands). hull/search + a
+     * WASM-backed db.udf both imply DB, so this cap covers them. */
+    lua_pushboolean(L, (req_caps & HL_MOD_CAP_DB) ? 1 : 0);
+    lua_setfield(L, -2, "needs_sqlite");
+
     /* auto = the minimal build flavor that still satisfies this app's
      * declared modules (drives `hull build --flavor=auto`). Computed from
      * the resolved set's aggregate required-caps. */

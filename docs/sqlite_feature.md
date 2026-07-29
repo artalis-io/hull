@@ -167,10 +167,22 @@ WASM). `HL_ENABLE_SQLITE` stays the compile switch; the feature is the
   `agent/helpers.c` so `hull build --with=sqlite` composes the SQLite-less base +
   archive into an app whose `db.query` runs through the composed backend
   (`tests/e2e_feature_sqlite.sh`). The architecture is PROVEN end to end.
-- **Phase C — the `needs_sqlite` auto-compose gate.** `hull build` composes the
-  archive iff S1/S2/S3 with **no** `--with=sqlite` (today the compose is explicit,
-  like a `--with` feature). No toolchain force-load — the `hull` binary keeps
-  SQLite in-base (see the gate section above); only produced apps go SQLite-less.
+- **Phase C — the `needs_sqlite` auto-compose gate.** ✅ SHIPPED (the gate).
+  `tool.modules_resolve` exposes `needs_sqlite` (= the app uses `HL_MOD_CAP_DB`,
+  mirroring `needs_wasm`); `hull build` auto-infers `--with=sqlite` when
+  `needs_sqlite` **and** the resolved base lacks the SQLite backend (probed with
+  `nm`, so it's a no-op on a stock SQLite-full base and only fires on a
+  `HL_SQLITE_FEATURE=1` base). A db app on a SQLite-less base composes SQLite and
+  runs with no explicit `--with` (`tests/e2e_feature_sqlite.sh`). No toolchain
+  force-load — the `hull` binary keeps SQLite in-base.
+  - **REMAINING (Phase C.2) — the per-runtime `mod_db`-udf bridge split.** The
+    embedded runtime archive (`libhull_feature-<rt>.a`) bundles `mod_db`'s SQLite
+    UDF bindings (`sqlite3_value_*`), so a whole-archived runtime drags SQLite
+    refs into EVERY app on a SQLite-less base — a **db-free** app then can't link
+    without the composed engine, so it can't yet DROP SQLite (the size payoff).
+    Split the UDF bindings out of `mod_db.o` into a `sqlite-<rt>` bridge that
+    ships in the SQLite feature archive (mirrors the wasm-`<rt>` / tui-`<rt>`
+    bridges); then a db-free app on a SQLite-less base links zero `sqlite3.*`.
 - **Phase D — embed + publish.** Embed the SQLite-less base + the archive in the
   distributed `hull` so a stock install produces SQLite-dropping apps, add the
   composed-feature signing entry (platform domain, like the runtime archives),
