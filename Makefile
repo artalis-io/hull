@@ -2992,10 +2992,16 @@ $(BUILDDIR)/libhull_feature-wasm-js.a: $(BUILDDIR)/js_mod_compute.o | $(BUILDDIR
 # Per-runtime SQLite UDF bridges (mod_db_udf). Tiny (one object each); the sole
 # per-runtime sqlite3_* consumer, split out of mod_db so the runtime archive is
 # SQLite-free (Phase C.2b, docs/sqlite_feature.md). Embedded in hull + composed
-# for the app's runtime whenever the app uses a udf-capable DB. Forced
+# for the app's runtime whenever the app uses a udf-capable DB. Force
 # -DHL_ENABLE_SQLITE so the bridge carries the bindings even on a SQLite-less
-# base (HL_SQLITE_FEATURE=1), resolving sqlite3_* from the composed engine.
+# feature base (HL_SQLITE_FEATURE=1), resolving sqlite3_* from the composed
+# engine -- but ONLY when SQLite is reachable. A genuine no-SQLite build
+# (postgres/mysql-only: HL_ENABLE_SQLITE=0 and no feature) compiles the bridge
+# EMPTY (guarded out), so it carries no unresolvable sqlite3_* refs into the hull
+# binary (mod_db_udf.o is in RT_OBJS) or the archive.
+ifneq ($(filter 1,$(HL_ENABLE_SQLITE) $(HL_SQLITE_FEATURE)),)
 $(BUILDDIR)/lua_rt_mod_db_udf.o $(BUILDDIR)/js_mod_db_udf.o: CFLAGS += -DHL_ENABLE_SQLITE
+endif
 
 feature-sqlite-lua: $(BUILDDIR)/libhull_feature-sqlite-lua.a
 .PHONY: feature-sqlite-lua
