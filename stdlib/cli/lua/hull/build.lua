@@ -1342,6 +1342,23 @@ int main(int argc, char **argv) { return hl_app_run(argc, argv); }
     -- `libs` (extra link libs). Adding a feature is one row here + a
     -- `make feature-<name>` archive + a release-pipeline entry.
     local FEATURE_SPECS = {
+        -- sqlite: the vendored SQLite engine + backend + UDF + agent
+        -- introspection in libhull_feature-sqlite.a (`make feature-sqlite`),
+        -- filling the same hl_db_feature_backends hook. Unlike the others,
+        -- SQLite is Hull's DEFAULT backend composed onto a SQLite-less DB-core
+        -- base (built HL_SQLITE_FEATURE=1); docs/sqlite_feature.md, Phase B.
+        -- `base_group = true` because the archive references base symbols
+        -- (db_registry, the _hull_* guard, agent write_error, vfs, migrate) and
+        -- the base's generated override references the archive's backend, so the
+        -- compose wraps platform lib + archive in --start-group for GNU ld.
+        sqlite = {
+            backend    = "hl_db_backend_sqlite",
+            type       = "HlDbBackend",
+            hook       = "hl_db_feature_backends",
+            cxx        = false,
+            base_group = true,
+            libs       = { darwin = {}, other = {} },
+        },
         duckdb = {
             backend = "hl_db_backend_duckdb",
             type    = "HlDbBackend",
