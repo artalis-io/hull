@@ -423,6 +423,18 @@ HL_ENABLE_POSTGRES ?= 0
 HL_ENABLE_MYSQL    ?= 0
 HL_ENABLE_DUCKDB   ?= 0
 
+# HL_SQLITE_FEATURE=1 builds a SQLite-as-a-composable-feature base
+# (docs/sqlite_feature.md, Phase B): SQLite leaves the base object set (composed
+# back from libhull_feature-sqlite.a) but the DB CORE stays on. It forces
+# HL_ENABLE_SQLITE off here; the umbrella below keeps HL_ENABLE_DB on so the
+# vtable + selector + generic db.* caps + weak hl_db_feature_backends remain,
+# with zero compiled backend. Orthogonal to the postgres/mysql flags (those may
+# still be composed alongside). Native only; the default (0) is unchanged.
+HL_SQLITE_FEATURE  ?= 0
+ifeq ($(HL_SQLITE_FEATURE),1)
+override HL_ENABLE_SQLITE := 0
+endif
+
 # Keel (KlTls) + mbedTLS are linked when an HTTP half OR PostgreSQL OR MySQL is
 # enabled (MySQL's caching_sha2_password full-auth + ed25519 need TLS + crypto).
 # HTTP still owns the -DHL_ENABLE_HTTP macro (above), so a DB-only build links
@@ -545,8 +557,20 @@ endif
 # contradictory HL_ENABLE_DB=1 was passed with all backends off (resolves
 # to a coherent "no backend" rather than a broken half-build). The
 # back-compat check above already read the caller's HL_ENABLE_DB=0 intent.
+#
+# Exception: HL_SQLITE_FEATURE=1 is exactly the "DB core, backend composed" case
+# (docs/sqlite_feature.md, Phase B). No backend is compiled into the base, but
+# the umbrella stays ON so the vtable + selector + generic db.* caps + the weak
+# hl_db_feature_backends hook remain; the backend arrives from the composed
+# libhull_feature-sqlite.a. This is NOT the broken half-build the override guards
+# against -- it is the composable base.
 ifeq ($(HL_ENABLE_SQLITE)$(HL_ENABLE_POSTGRES)$(HL_ENABLE_MYSQL)$(HL_ENABLE_DUCKDB),0000)
+ifeq ($(HL_SQLITE_FEATURE),1)
+override HL_ENABLE_DB := 1
+CFLAGS += -DHL_ENABLE_DB
+else
 override HL_ENABLE_DB := 0
+endif
 else
 override HL_ENABLE_DB := 1
 CFLAGS += -DHL_ENABLE_DB
