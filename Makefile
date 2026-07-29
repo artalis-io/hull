@@ -423,6 +423,18 @@ HL_ENABLE_POSTGRES ?= 0
 HL_ENABLE_MYSQL    ?= 0
 HL_ENABLE_DUCKDB   ?= 0
 
+# HL_SQLITE_FEATURE=1 builds a SQLite-as-a-composable-feature base
+# (docs/sqlite_feature.md, Phase B): SQLite leaves the base object set (composed
+# back from libhull_feature-sqlite.a) but the DB CORE stays on. It forces
+# HL_ENABLE_SQLITE off here; the umbrella below keeps HL_ENABLE_DB on so the
+# vtable + selector + generic db.* caps + weak hl_db_feature_backends remain,
+# with zero compiled backend. Orthogonal to the postgres/mysql flags (those may
+# still be composed alongside). Native only; the default (0) is unchanged.
+HL_SQLITE_FEATURE  ?= 0
+ifeq ($(HL_SQLITE_FEATURE),1)
+override HL_ENABLE_SQLITE := 0
+endif
+
 # Keel (KlTls) + mbedTLS are linked when an HTTP half OR PostgreSQL OR MySQL is
 # enabled (MySQL's caching_sha2_password full-auth + ed25519 need TLS + crypto).
 # HTTP still owns the -DHL_ENABLE_HTTP macro (above), so a DB-only build links
@@ -545,8 +557,20 @@ endif
 # contradictory HL_ENABLE_DB=1 was passed with all backends off (resolves
 # to a coherent "no backend" rather than a broken half-build). The
 # back-compat check above already read the caller's HL_ENABLE_DB=0 intent.
+#
+# Exception: HL_SQLITE_FEATURE=1 is exactly the "DB core, backend composed" case
+# (docs/sqlite_feature.md, Phase B). No backend is compiled into the base, but
+# the umbrella stays ON so the vtable + selector + generic db.* caps + the weak
+# hl_db_feature_backends hook remain; the backend arrives from the composed
+# libhull_feature-sqlite.a. This is NOT the broken half-build the override guards
+# against -- it is the composable base.
 ifeq ($(HL_ENABLE_SQLITE)$(HL_ENABLE_POSTGRES)$(HL_ENABLE_MYSQL)$(HL_ENABLE_DUCKDB),0000)
+ifeq ($(HL_SQLITE_FEATURE),1)
+override HL_ENABLE_DB := 1
+CFLAGS += -DHL_ENABLE_DB
+else
 override HL_ENABLE_DB := 0
+endif
 else
 override HL_ENABLE_DB := 1
 CFLAGS += -DHL_ENABLE_DB
@@ -2772,6 +2796,29 @@ feature-mysql:
 $(BUILDDIR)/libhull_feature-mysql.a: $(BUILDDIR)/cap_db_mysql.o $(BUILDDIR)/cap_mysql_conn.o $(BUILDDIR)/cap_mysqlwire.o | $(BUILDDIR)
 	@rm -f $@
 	$(AR) rcs $@ $(BUILDDIR)/cap_db_mysql.o $(BUILDDIR)/cap_mysql_conn.o $(BUILDDIR)/cap_mysqlwire.o
+	@echo "built $@ ($$(du -h $@ | cut -f1))"
+
+# ── SQLite feature archive (SQLite as a composable feature, Phase B) ──
+# docs/sqlite_feature.md. Bundles the vendored SQLite engine + the SQLite
+# backend + UDF bridge + the SQLite-only agent introspection into ONE archive
+# so the base can become SQLite-less (Phase B.2) and compose it back (Phase
+# B.3). Unlike postgres/mysql (installable, off-by-default, filtered out of the
+# base), SQLite is still in the default base today, so this target just packages
+# the same objects into the archive as the additive first step; the base-flip +
+# auto-compose land in later Phase B increments. The strong hl_db_feature_backends
+# override is generated at compose (merges with any --with backends), not baked
+# into the archive. agent/db.c references hl_agent_open_app_db + hl_agent_write_error
+# from the base today; Phase B.2 splits agent/helpers.c so the opener moves here.
+FEATURE_SQLITE_OBJS := $(SQLITE_OBJ) $(BUILDDIR)/cap_db_sqlite.o \
+                       $(BUILDDIR)/cap_db_udf.o $(BUILDDIR)/agent_db.o \
+                       $(BUILDDIR)/agent_sql.o $(BUILDDIR)/agent_schema_diff.o
+feature-sqlite:
+	$(MAKE) $(BUILDDIR)/libhull_feature-sqlite.a HL_ENABLE_SQLITE=1
+.PHONY: feature-sqlite
+
+$(BUILDDIR)/libhull_feature-sqlite.a: $(FEATURE_SQLITE_OBJS) | $(BUILDDIR)
+	@rm -f $@
+	$(AR) rcs $@ $(FEATURE_SQLITE_OBJS)
 	@echo "built $@ ($$(du -h $@ | cut -f1))"
 
 # ── GPU feature archive (composable feature: hull build --with=gpu) ──

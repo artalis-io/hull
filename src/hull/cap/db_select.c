@@ -57,6 +57,14 @@ static const HlDbBackend *const BACKENDS[] = {
 #ifdef HL_ENABLE_DUCKDB
     &hl_db_backend_duckdb,
 #endif
+#if !defined(HL_ENABLE_SQLITE) && !defined(HL_ENABLE_POSTGRES) && \
+    !defined(HL_ENABLE_MYSQL) && !defined(HL_ENABLE_DUCKDB)
+    /* No backend compiled into the base (HL_SQLITE_FEATURE: SQLite composed as a
+     * feature, docs/sqlite_feature.md). A lone NULL keeps the array non-empty
+     * for ISO C (no zero-length array under -Wpedantic); backend_for_scheme
+     * skips NULL entries and the real backend arrives via hl_db_feature_backends. */
+    NULL,
+#endif
 };
 
 /* Schemes Hull recognizes but may not have compiled: a helpful, specific error
@@ -98,7 +106,7 @@ static int scheme_in(const char *const *list, const char *scheme)
 static const HlDbBackend *backend_for_scheme(const char *scheme)
 {
     for (size_t i = 0; i < sizeof BACKENDS / sizeof BACKENDS[0]; i++)
-        if (scheme_in(BACKENDS[i]->schemes, scheme))
+        if (BACKENDS[i] && scheme_in(BACKENDS[i]->schemes, scheme))
             return BACKENDS[i];
     size_t fcount = 0;
     const HlDbBackend *const *feats = hl_db_feature_backends(&fcount);
