@@ -1980,6 +1980,18 @@ AGENT_LIB_SRCS := $(wildcard $(SRCDIR)/hull/agent/*.c)
 ifeq ($(HL_ENABLE_DB),0)
   AGENT_LIB_SRCS := $(filter-out $(SRCDIR)/hull/agent/db.c,$(AGENT_LIB_SRCS))
 endif
+ifneq ($(HL_ENABLE_SQLITE),1)
+  # SQLite-only agent introspection (raw sqlite3 API): drop from the base and
+  # ship in libhull_feature-sqlite.a (docs/sqlite_feature.md, Phase B). The base
+  # keeps agent/db_stub.c's weak entry points (A.2). Covers the postgres/mysql
+  # base builds too, where these compiled to empty TUs before.
+  AGENT_LIB_SRCS := $(filter-out \
+      $(SRCDIR)/hull/agent/db.c \
+      $(SRCDIR)/hull/agent/sql.c \
+      $(SRCDIR)/hull/agent/schema_diff.c \
+      $(SRCDIR)/hull/agent/db_open.c, \
+      $(AGENT_LIB_SRCS))
+endif
 ifeq ($(HL_ENABLE_HTTP_SERVER),0)
   # agent/test.c calls hl_test_runner_run + the in-process HTTP harness;
   # agent/request.c, agent/eval.c, agent/perf.c, agent/endpoint.c also
@@ -2809,9 +2821,11 @@ $(BUILDDIR)/libhull_feature-mysql.a: $(BUILDDIR)/cap_db_mysql.o $(BUILDDIR)/cap_
 # override is generated at compose (merges with any --with backends), not baked
 # into the archive. agent/db.c references hl_agent_open_app_db + hl_agent_write_error
 # from the base today; Phase B.2 splits agent/helpers.c so the opener moves here.
-FEATURE_SQLITE_OBJS := $(SQLITE_OBJ) $(BUILDDIR)/cap_db_sqlite.o \
+FEATURE_SQLITE_OBJS := $(SQLITE_OBJ) $(BUILDDIR)/cap_db.o \
+                       $(BUILDDIR)/cap_db_sqlite.o \
                        $(BUILDDIR)/cap_db_udf.o $(BUILDDIR)/agent_db.o \
-                       $(BUILDDIR)/agent_sql.o $(BUILDDIR)/agent_schema_diff.o
+                       $(BUILDDIR)/agent_sql.o $(BUILDDIR)/agent_schema_diff.o \
+                       $(BUILDDIR)/agent_db_open.o
 feature-sqlite:
 	$(MAKE) $(BUILDDIR)/libhull_feature-sqlite.a HL_ENABLE_SQLITE=1
 .PHONY: feature-sqlite
@@ -4290,6 +4304,10 @@ e2e-feature-runtime: $(BUILDDIR)/hull
 .PHONY: e2e-feature-wasm
 e2e-feature-wasm: $(BUILDDIR)/hull
 	sh tests/e2e_feature_wasm.sh
+
+.PHONY: e2e-feature-sqlite
+e2e-feature-sqlite: $(BUILDDIR)/hull
+	sh tests/e2e_feature_sqlite.sh
 
 e2e-multipart: $(BUILDDIR)/hull
 	RUNTIME=$(RUNTIME) sh tests/e2e_multipart.sh
