@@ -259,4 +259,18 @@ function M.resolve_wasm_rt_lib(rt, tmpdir, ctx)
     return M.resolve_lib(libname, asset, ctx)
 end
 
+--- Resolve the per-runtime SQLite UDF bridge (libhull_feature-sqlite-<rt>.a),
+--- embedded first. Holds mod_db_udf (the db.udf bindings); composed for the
+--- app's runtime whenever the app uses a udf-capable DB, so the runtime archive
+--- itself stays SQLite-free (Phase C.2b).
+function M.resolve_sqlite_rt_lib(rt, tmpdir, ctx)
+    local libname = "libhull_feature-sqlite-" .. rt .. ".a"
+    if tool.extract_feature_sqlite_rt and tool.extract_feature_sqlite_rt(tmpdir, rt)
+       and file_exists(tmpdir .. "/" .. libname) then
+        return tmpdir .. "/" .. libname, "embedded"
+    end
+    local asset = ctx.plat and ("libhull_feature-sqlite-" .. rt .. "-" .. ctx.plat .. ".a") or nil
+    return M.resolve_lib(libname, asset, ctx)
+end
+
 return M
