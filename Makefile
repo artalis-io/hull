@@ -1663,6 +1663,7 @@ endif
 ifeq ($(HL_ENABLE_DB),0)
   JS_RT_SRCS := $(filter-out \
       $(SRCDIR)/hull/runtime/js/mod_db.c \
+      $(SRCDIR)/hull/runtime/js/mod_db_udf.c \
       $(SRCDIR)/hull/runtime/js/worker_db.c, \
       $(JS_RT_SRCS))
 endif
@@ -1711,6 +1712,7 @@ endif
 ifeq ($(HL_ENABLE_DB),0)
   LUA_RT_SRCS := $(filter-out \
       $(SRCDIR)/hull/runtime/lua/mod_db.c \
+      $(SRCDIR)/hull/runtime/lua/mod_db_udf.c \
       $(SRCDIR)/hull/runtime/lua/worker_db.c, \
       $(LUA_RT_SRCS))
 endif
