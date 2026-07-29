@@ -2774,6 +2774,29 @@ $(BUILDDIR)/libhull_feature-mysql.a: $(BUILDDIR)/cap_db_mysql.o $(BUILDDIR)/cap_
 	$(AR) rcs $@ $(BUILDDIR)/cap_db_mysql.o $(BUILDDIR)/cap_mysql_conn.o $(BUILDDIR)/cap_mysqlwire.o
 	@echo "built $@ ($$(du -h $@ | cut -f1))"
 
+# ── SQLite feature archive (SQLite as a composable feature, Phase B) ──
+# docs/sqlite_feature.md. Bundles the vendored SQLite engine + the SQLite
+# backend + UDF bridge + the SQLite-only agent introspection into ONE archive
+# so the base can become SQLite-less (Phase B.2) and compose it back (Phase
+# B.3). Unlike postgres/mysql (installable, off-by-default, filtered out of the
+# base), SQLite is still in the default base today, so this target just packages
+# the same objects into the archive as the additive first step; the base-flip +
+# auto-compose land in later Phase B increments. The strong hl_db_feature_backends
+# override is generated at compose (merges with any --with backends), not baked
+# into the archive. agent/db.c references hl_agent_open_app_db + hl_agent_write_error
+# from the base today; Phase B.2 splits agent/helpers.c so the opener moves here.
+FEATURE_SQLITE_OBJS := $(SQLITE_OBJ) $(BUILDDIR)/cap_db_sqlite.o \
+                       $(BUILDDIR)/cap_db_udf.o $(BUILDDIR)/agent_db.o \
+                       $(BUILDDIR)/agent_sql.o $(BUILDDIR)/agent_schema_diff.o
+feature-sqlite:
+	$(MAKE) $(BUILDDIR)/libhull_feature-sqlite.a HL_ENABLE_SQLITE=1
+.PHONY: feature-sqlite
+
+$(BUILDDIR)/libhull_feature-sqlite.a: $(FEATURE_SQLITE_OBJS) | $(BUILDDIR)
+	@rm -f $@
+	$(AR) rcs $@ $(FEATURE_SQLITE_OBJS)
+	@echo "built $@ ($$(du -h $@ | cut -f1))"
+
 # ── GPU feature archive (composable feature: hull build --with=gpu) ──
 # libhull_feature-gpu.a bundles the wgpu backend object (cap_gpu_wgpu.o, which
 # defines hl_gpu_backend_wgpu) + the wgpu-native static lib into ONE archive,
