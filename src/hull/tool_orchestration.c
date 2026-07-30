@@ -249,6 +249,14 @@ static int l_tool_modules_resolve(lua_State *L)
     lua_pushboolean(L, (req_caps & HL_MOD_CAP_DB) ? 1 : 0);
     lua_setfield(L, -2, "needs_sqlite");
 
+    /* needs_image (image as a composable feature, docs/image_feature.md) = does
+     * the resolved set declare the image cap (hull/image)? Drives `hull build`'s
+     * decision to compose the image codec core + the per-runtime image bridge.
+     * Cleanly module-inferable (unlike wasm): the only reachable HlImage producer
+     * is the image module itself, so a declared hull/image is the whole gate. */
+    lua_pushboolean(L, (req_caps & HL_MOD_CAP_IMAGE) ? 1 : 0);
+    lua_setfield(L, -2, "needs_image");
+
     /* auto = the minimal build flavor that still satisfies this app's
      * declared modules (drives `hull build --flavor=auto`). Computed from
      * the resolved set's aggregate required-caps. */

@@ -87,6 +87,10 @@ jobs:
         timeout-minutes: 4
         run: make e2e-feature-wasm
 
+      - name: Image feature E2E test (image-free app drops stb; needs_image gate)
+        timeout-minutes: 4
+        run: make e2e-feature-image
+
       - name: Attachment E2E tests
         timeout-minutes: 2
         run: make e2e-attachment

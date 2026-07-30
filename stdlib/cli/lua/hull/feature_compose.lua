@@ -289,4 +289,32 @@ function M.resolve_sqlite_rt_lib(rt, tmpdir, ctx)
     return M.resolve_lib(libname, asset, ctx)
 end
 
+--- Resolve the image CODEC core archive (libhull_feature-image.a: the codec
+--- vtable + stb backend + vendored stb), embedded first (docs/image_feature.md).
+--- The native base is image-less and the default hull embeds the image core, so
+--- an app declaring hull/image composes it back with no `hull feature install`.
+--- Mirrors resolve_wasm_lib.
+function M.resolve_image_lib(tmpdir, ctx)
+    local libname = "libhull_feature-image.a"
+    if tool.extract_feature_image and tool.extract_feature_image(tmpdir)
+       and file_exists(tmpdir .. "/" .. libname) then
+        return tmpdir .. "/" .. libname, "embedded"
+    end
+    local asset = ctx.plat and ("libhull_feature-image-" .. ctx.plat .. ".a") or nil
+    return M.resolve_lib(libname, asset, ctx)
+end
+
+--- Resolve the per-runtime image bridge (libhull_feature-image-<rt>.a), embedded
+--- first. Holds mod_image (the image.* binding); composed alongside the image
+--- core for the app's runtime, like the wasm compute bridge.
+function M.resolve_image_rt_lib(rt, tmpdir, ctx)
+    local libname = "libhull_feature-image-" .. rt .. ".a"
+    if tool.extract_feature_image_rt and tool.extract_feature_image_rt(tmpdir, rt)
+       and file_exists(tmpdir .. "/" .. libname) then
+        return tmpdir .. "/" .. libname, "embedded"
+    end
+    local asset = ctx.plat and ("libhull_feature-image-" .. rt .. "-" .. ctx.plat .. ".a") or nil
+    return M.resolve_lib(libname, asset, ctx)
+end
+
 return M

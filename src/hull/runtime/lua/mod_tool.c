@@ -547,6 +547,25 @@ static int l_tool_extract_feature_sqlite(lua_State *L)
     return 1;
 }
 
+/* ── tool.extract_feature_image(dir) / _image_rt(dir, rt) → bool ────── */
+
+static int l_tool_extract_feature_image(lua_State *L)
+{
+    const char *dir = luaL_checkstring(L, 1);
+    int rc = hl_build_extract_feature_image(dir);
+    lua_pushboolean(L, rc == 0);
+    return 1;
+}
+
+static int l_tool_extract_feature_image_rt(lua_State *L)
+{
+    const char *dir = luaL_checkstring(L, 1);
+    const char *rt  = luaL_checkstring(L, 2);
+    int rc = hl_build_extract_feature_image_rt(dir, rt);
+    lua_pushboolean(L, rc == 0);
+    return 1;
+}
+
 /* ── tool.extract_platform_cosmo(dir) → bool ───────────────────────── */
 /*
  * Extract both arch-specific archives and set up the .aarch64/ directory
@@ -1271,6 +1290,8 @@ static const luaL_Reg tool_funcs[] = {
     { "extract_feature_wasm_rt", l_tool_extract_feature_wasm_rt },
     { "extract_feature_sqlite_rt", l_tool_extract_feature_sqlite_rt },
     { "extract_feature_sqlite", l_tool_extract_feature_sqlite },
+    { "extract_feature_image",  l_tool_extract_feature_image },
+    { "extract_feature_image_rt", l_tool_extract_feature_image_rt },
     { "extract_platform_cosmo", l_tool_extract_platform_cosmo },
     { "platform_archs",         l_tool_platform_archs },
     /* Orchestration entries (modules_resolve, doctor_json, agent_*,
