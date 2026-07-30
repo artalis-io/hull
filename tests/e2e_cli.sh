@@ -61,14 +61,20 @@ run_hello_cli "lua" "lua"
 run_hello_cli "js"  "js"
 
 # run_udf_teardown <runtime> <ext>
-# Regression: a db.udf-registering app.main app must exit CLEANLY (0) after the
-# runtime is torn down. The udf holds a runtime-side closure (JS JS_DupValue /
-# Lua registry ref) freed by sqlite3_close's xDestroy; if the DB is closed AFTER
-# the runtime is freed, QuickJS's JS_FreeRuntime aborts (SIGABRT -> 134) on the
-# leaked closure. See app_context.c hl_app_context_free (DB closed before runtime).
+# Two db.udf regressions in one app.main run:
+#  (a) teardown ordering: the udf holds a runtime-side closure (JS JS_DupValue /
+#      Lua registry ref) freed by sqlite3_close's xDestroy. If the DB is closed
+#      AFTER the runtime is freed, QuickJS's JS_FreeRuntime aborts (SIGABRT->134)
+#      on the leaked closure. See app_context.c hl_app_context_free (DB closed
+#      before the runtime).
+#  (b) failed-register double-free: sqlite3_create_function_v2 invokes the udf's
+#      xDestroy ITSELF on failure (e.g. a >255-byte name), so the register paths
+#      must NOT free the ctx again. A regression double-frees + double-unrefs
+#      (heap corruption / QuickJS refcount corruption -> crash, esp. under ASan).
+# Either regression flips the clean exit (0) to a non-zero/abort.
 run_udf_teardown() {
     runtime="$1"; ext="$2"
-    echo "--- db.udf teardown (${runtime}) ---"
+    echo "--- db.udf teardown + failed-register (${runtime}) ---"
     d=$(mktemp -d)
     if [ "$ext" = "lua" ]; then
         cat > "${d}/app.lua" <<'LUA'
@@ -76,6 +82,12 @@ local db = require("hull.db").default()
 app.manifest({ modules = { "hull/db@1" } })
 app.main(function()
   db.udf.register("hull_double", function(x) return x * 2 end, { deterministic = true })
+  -- (b) a >255-byte name makes sqlite3_create_function_v2 fail; the error must be
+  -- raised cleanly (SQLite already ran xDestroy) with no double-free.
+  local ok = pcall(function()
+    db.udf.register("hull_" .. string.rep("x", 400), function(x) return x end)
+  end)
+  if ok then return 5 end
   local r = db.query("SELECT hull_double(21) AS v")
   return (r[1] and r[1].v == 42) and 0 or 3
 end)
@@ -88,6 +100,9 @@ app.manifest({ modules: ["hull/db@1"] });
 app.main(() => {
   const db = dbmod.default();
   db.udf.register("hull_double", (x) => x * 2, { deterministic: true });
+  let threw = false;
+  try { db.udf.register("hull_" + "x".repeat(400), (x) => x); } catch (e) { threw = true; }
+  if (!threw) return 5;
   const r = db.query("SELECT hull_double(21) AS v");
   return (r[0] && r[0].v === 42) ? 0 : 3;
 });
@@ -95,8 +110,9 @@ JS
     fi
     "${HULL_BIN}" "${d}/app.${ext}" -d ":memory:" >/dev/null 2>&1
     rc=$?
-    # 0 = udf ran + clean teardown; 134 = the JS_FreeRuntime leak abort (regression).
-    expect_eq "${runtime} db.udf app.main clean exit (no teardown abort)" "0" "${rc}"
+    # 0 = udf ran + failed-register handled + clean teardown; non-zero/134/139 = a
+    # teardown-leak abort or a failed-register double-free (regression).
+    expect_eq "${runtime} db.udf clean exit (teardown + failed-register safe)" "0" "${rc}"
     rm -rf "${d}"
 }
 

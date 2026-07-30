@@ -347,11 +347,13 @@ static int lua_db_udf_register(lua_State *L)
             raw_db, sql_name, nargs, encoding, udf_ctx,
             lua_scalar_udf_func, NULL, NULL,
             lua_scalar_udf_destroy);
-        if (rc != SQLITE_OK) {
-            lua_scalar_udf_destroy(udf_ctx);
+        if (rc != SQLITE_OK)
+            /* SQLite invokes the xDestroy (lua_scalar_udf_destroy) ITSELF when
+             * create_function_v2 fails (the destructor runs when its nRef stays
+             * 0), freeing udf_ctx and dropping its Lua ref. Do NOT free again
+             * here -- that double-frees udf_ctx + double-unrefs the closure. */
             return luaL_error(L, "db.udf.register: %s",
                               sqlite3_errmsg(raw_db));
-        }
     } else if (lua_istable(L, 2)) {
         /* ── Lua aggregate UDF (table with step + finalize) ──── */
         lua_getfield(L, 2, "step");
@@ -387,11 +389,11 @@ static int lua_db_udf_register(lua_State *L)
             raw_db, sql_name, nargs, encoding, udf_ctx,
             NULL, lua_agg_step_func, lua_agg_finalize_func,
             lua_agg_udf_destroy);
-        if (rc != SQLITE_OK) {
-            lua_agg_udf_destroy(udf_ctx);
+        if (rc != SQLITE_OK)
+            /* SQLite already invoked the xDestroy (lua_agg_udf_destroy) on
+             * failure -- do NOT free again (double-free + double-unref). */
             return luaL_error(L, "db.udf.register: %s",
                               sqlite3_errmsg(raw_db));
-        }
     } else {
         return luaL_error(L,
             "db.udf.register: impl must be a function, table, or string");
