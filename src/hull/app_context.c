@@ -348,19 +348,19 @@ void hl_app_context_free(HlAppContext *ctx)
 {
     if (!ctx) return;
 
-    if (ctx->rt_init && ctx->factory && ctx->factory->destroy) {
-        ctx->factory->destroy(ctx->rt);
-        ctx->rt = NULL;
-    }
-
-#ifdef HL_ENABLE_WASM
-    if (ctx->wasm_ok && !ctx->wasm_external)
-        hl_cap_wasm_destroy(&ctx->wasm_cache);
-#endif
-
 #ifdef HL_ENABLE_DB
-    /* The registry owns every connection, including the "default"; destroying
-     * it closes them all. ctx->db aliased the default's raw sqlite3*, so it
+    /* Close the DB BEFORE destroying the runtime. The registry owns every
+     * connection, including the "default"; destroying it runs sqlite3_close,
+     * which fires each registered udf's xDestroy callback. Those callbacks free
+     * the runtime-side closure the udf holds (a JS JS_DupValue ref / a Lua
+     * registry ref), and they can only do so while the runtime is still alive.
+     * Destroying the runtime first would trip QuickJS's JS_FreeRuntime
+     * gc_obj_list-empty assertion on the still-referenced udf closure (and
+     * silently leak the equivalent Lua ref). Connection-object finalizers run
+     * later during the runtime destroy are safe against this ordering: a
+     * borrowed conn's finalizer is a no-op (the registry owned the handle), and
+     * an owned (db.open) conn's finalizer closes only its own handle, which was
+     * never in the registry. ctx->db aliased the default's raw sqlite3*, so it
      * dangles after this. */
     if (ctx->db_registry) {
         hl_db_registry_destroy(ctx->db_registry);
@@ -368,6 +368,19 @@ void hl_app_context_free(HlAppContext *ctx)
     }
     ctx->db = NULL;
     ctx->db_open = 0;
+#endif
+
+    if (ctx->rt_init && ctx->factory && ctx->factory->destroy) {
+        ctx->factory->destroy(ctx->rt);
+        ctx->rt = NULL;
+    }
+
+    /* WASM cache AFTER the runtime destroy: the runtime's GC finalizers
+     * (WasmBuffer WASM-kind, WasmInstance) dereference WAMR, so it must outlive
+     * them. */
+#ifdef HL_ENABLE_WASM
+    if (ctx->wasm_ok && !ctx->wasm_external)
+        hl_cap_wasm_destroy(&ctx->wasm_cache);
 #endif
 
     ctx->rt = NULL;
