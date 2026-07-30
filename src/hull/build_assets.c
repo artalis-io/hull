@@ -29,6 +29,9 @@
 #ifdef HL_BUILD_EMBEDDED_WASM
 #include "embedded_wasm.h"      /* hl_embedded_feature_wasm{,_lua,_js}_a[] */
 #endif
+#ifdef HL_BUILD_EMBEDDED_SQLITE_RT
+#include "embedded_sqlite_rt.h" /* hl_embedded_feature_sqlite_{lua,js}_a[] */
+#endif
 
 /* ── Helper: write data to a file ──────────────────────────────────── */
 
@@ -251,6 +254,31 @@ int hl_build_extract_feature_wasm_rt(const char *dir, const char *rt)
     }
     char path[1024];
     int n = snprintf(path, sizeof(path), "%s/libhull_feature-wasm-%s.a", dir, rt);
+    if (n < 0 || (size_t)n >= sizeof(path))
+        return -1;
+    return write_blob(path, data, len);
+#else
+    (void)dir; (void)rt;
+    return -1;
+#endif
+}
+
+int hl_build_extract_feature_sqlite_rt(const char *dir, const char *rt)
+{
+#ifdef HL_BUILD_EMBEDDED_SQLITE_RT
+    if (!dir || !rt)
+        return -1;
+    const unsigned char *data = NULL;
+    unsigned int len = 0;
+    if (strcmp(rt, "lua") == 0) {
+        data = hl_embedded_feature_sqlite_lua_a; len = hl_embedded_feature_sqlite_lua_a_len;
+    } else if (strcmp(rt, "js") == 0) {
+        data = hl_embedded_feature_sqlite_js_a;  len = hl_embedded_feature_sqlite_js_a_len;
+    } else {
+        return -1;
+    }
+    char path[1024];
+    int n = snprintf(path, sizeof(path), "%s/libhull_feature-sqlite-%s.a", dir, rt);
     if (n < 0 || (size_t)n >= sizeof(path))
         return -1;
     return write_blob(path, data, len);

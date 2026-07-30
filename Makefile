@@ -1663,6 +1663,7 @@ endif
 ifeq ($(HL_ENABLE_DB),0)
   JS_RT_SRCS := $(filter-out \
       $(SRCDIR)/hull/runtime/js/mod_db.c \
+      $(SRCDIR)/hull/runtime/js/mod_db_udf.c \
       $(SRCDIR)/hull/runtime/js/worker_db.c, \
       $(JS_RT_SRCS))
 endif
@@ -1711,6 +1712,7 @@ endif
 ifeq ($(HL_ENABLE_DB),0)
   LUA_RT_SRCS := $(filter-out \
       $(SRCDIR)/hull/runtime/lua/mod_db.c \
+      $(SRCDIR)/hull/runtime/lua/mod_db_udf.c \
       $(SRCDIR)/hull/runtime/lua/worker_db.c, \
       $(LUA_RT_SRCS))
 endif
@@ -2987,6 +2989,30 @@ feature-wasm-js: $(BUILDDIR)/libhull_feature-wasm-js.a
 $(BUILDDIR)/libhull_feature-wasm-js.a: $(BUILDDIR)/js_mod_compute.o | $(BUILDDIR)
 	$(call AR_FEATURE_LIB,$(BUILDDIR)/js_mod_compute.o)
 
+# Per-runtime SQLite UDF bridges (mod_db_udf). Tiny (one object each); the sole
+# per-runtime sqlite3_* consumer, split out of mod_db so the runtime archive is
+# SQLite-free (Phase C.2b, docs/sqlite_feature.md). Embedded in hull + composed
+# for the app's runtime whenever the app uses a udf-capable DB. Force
+# -DHL_ENABLE_SQLITE so the bridge carries the bindings even on a SQLite-less
+# feature base (HL_SQLITE_FEATURE=1), resolving sqlite3_* from the composed
+# engine -- but ONLY when SQLite is reachable. A genuine no-SQLite build
+# (postgres/mysql-only: HL_ENABLE_SQLITE=0 and no feature) compiles the bridge
+# EMPTY (guarded out), so it carries no unresolvable sqlite3_* refs into the hull
+# binary (mod_db_udf.o is in RT_OBJS) or the archive.
+ifneq ($(filter 1,$(HL_ENABLE_SQLITE) $(HL_SQLITE_FEATURE)),)
+$(BUILDDIR)/lua_rt_mod_db_udf.o $(BUILDDIR)/js_mod_db_udf.o: CFLAGS += -DHL_ENABLE_SQLITE
+endif
+
+feature-sqlite-lua: $(BUILDDIR)/libhull_feature-sqlite-lua.a
+.PHONY: feature-sqlite-lua
+$(BUILDDIR)/libhull_feature-sqlite-lua.a: $(BUILDDIR)/lua_rt_mod_db_udf.o | $(BUILDDIR)
+	$(call AR_FEATURE_LIB,$(BUILDDIR)/lua_rt_mod_db_udf.o)
+
+feature-sqlite-js: $(BUILDDIR)/libhull_feature-sqlite-js.a
+.PHONY: feature-sqlite-js
+$(BUILDDIR)/libhull_feature-sqlite-js.a: $(BUILDDIR)/js_mod_db_udf.o | $(BUILDDIR)
+	$(call AR_FEATURE_LIB,$(BUILDDIR)/js_mod_db_udf.o)
+
 # libhull_feature-lua.a / -js.a: a runtime as a composable feature archive.
 # Bundles the runtime objects, its vendored VM, its manifest extractor, and its
 # stdlib VFS array (hl_stdlib_<rt>_entries). The tui bridge (mod_tui) is excluded
@@ -3009,9 +3035,9 @@ FEATURE_HTTP_RT_NAMES := mod_ws_server mod_ws_client mod_http_server mod_sse \
 FEATURE_HTTP_LUA_OBJS := $(addprefix $(BUILDDIR)/lua_rt_,$(addsuffix .o,$(FEATURE_HTTP_RT_NAMES)))
 FEATURE_HTTP_JS_OBJS  := $(addprefix $(BUILDDIR)/js_,$(addsuffix .o,$(FEATURE_HTTP_RT_NAMES)))
 
-FEATURE_LUA_OBJS := $(filter-out $(BUILDDIR)/lua_rt_mod_tui.o $(BUILDDIR)/lua_rt_mod_tool.o $(BUILDDIR)/lua_rt_mod_compute.o $(FEATURE_HTTP_LUA_OBJS),$(LUA_RT_OBJS)) \
+FEATURE_LUA_OBJS := $(filter-out $(BUILDDIR)/lua_rt_mod_tui.o $(BUILDDIR)/lua_rt_mod_tool.o $(BUILDDIR)/lua_rt_mod_compute.o $(BUILDDIR)/lua_rt_mod_db_udf.o $(FEATURE_HTTP_LUA_OBJS),$(LUA_RT_OBJS)) \
                     $(LUA_OBJS) $(BUILDDIR)/manifest_lua.o $(STDLIB_LUA_REGISTRY_O)
-FEATURE_JS_OBJS  := $(filter-out $(BUILDDIR)/js_mod_tui.o $(BUILDDIR)/js_mod_compute.o $(FEATURE_HTTP_JS_OBJS),$(JS_RT_OBJS)) \
+FEATURE_JS_OBJS  := $(filter-out $(BUILDDIR)/js_mod_tui.o $(BUILDDIR)/js_mod_compute.o $(BUILDDIR)/js_mod_db_udf.o $(FEATURE_HTTP_JS_OBJS),$(JS_RT_OBJS)) \
                     $(QJS_OBJS) $(BUILDDIR)/manifest_js.o $(STDLIB_JS_REGISTRY_O)
 
 feature-lua: $(BUILDDIR)/libhull_feature-lua.a
@@ -3050,7 +3076,8 @@ FEATURE_ARCHIVES := $(BUILDDIR)/libhull_feature-lua.a $(BUILDDIR)/libhull_featur
                     $(BUILDDIR)/libhull_feature-tui.a \
                     $(BUILDDIR)/libhull_feature-tui-lua.a $(BUILDDIR)/libhull_feature-tui-js.a \
                     $(BUILDDIR)/libhull_feature-wasm.a \
-                    $(BUILDDIR)/libhull_feature-wasm-lua.a $(BUILDDIR)/libhull_feature-wasm-js.a
+                    $(BUILDDIR)/libhull_feature-wasm-lua.a $(BUILDDIR)/libhull_feature-wasm-js.a \
+                    $(BUILDDIR)/libhull_feature-sqlite-lua.a $(BUILDDIR)/libhull_feature-sqlite-js.a
 $(FEATURE_ARCHIVES): Makefile
 # The base platform lib is built from an object LIST (PLATFORM_OBJS); a Phase-1
 # change to that list (wasm caps + WAMR removed) must retrigger the ar, which an
@@ -3071,15 +3098,15 @@ $(PLATFORM_LIB): Makefile
 ifndef COSMO
 ifeq ($(RUNTIME),js)
   RUNTIME_FEATURE_LIBS := $(BUILDDIR)/libhull_feature-js.a $(BUILDDIR)/libhull_feature-http-js.a \
-                          $(BUILDDIR)/libhull_feature-wasm-js.a
+                          $(BUILDDIR)/libhull_feature-wasm-js.a $(BUILDDIR)/libhull_feature-sqlite-js.a
 else ifeq ($(RUNTIME),lua)
   RUNTIME_FEATURE_LIBS := $(BUILDDIR)/libhull_feature-lua.a $(BUILDDIR)/libhull_feature-http-lua.a \
-                          $(BUILDDIR)/libhull_feature-wasm-lua.a
+                          $(BUILDDIR)/libhull_feature-wasm-lua.a $(BUILDDIR)/libhull_feature-sqlite-lua.a
 else
   RUNTIME_FEATURE_LIBS := $(BUILDDIR)/libhull_feature-lua.a $(BUILDDIR)/libhull_feature-http-lua.a \
-                          $(BUILDDIR)/libhull_feature-wasm-lua.a \
+                          $(BUILDDIR)/libhull_feature-wasm-lua.a $(BUILDDIR)/libhull_feature-sqlite-lua.a \
                           $(BUILDDIR)/libhull_feature-js.a $(BUILDDIR)/libhull_feature-http-js.a \
-                          $(BUILDDIR)/libhull_feature-wasm-js.a
+                          $(BUILDDIR)/libhull_feature-wasm-js.a $(BUILDDIR)/libhull_feature-sqlite-js.a
 endif
   # HTTP + WASM core feature archives (runtime-agnostic), composed for every
   # full-flavor app (docs/wasm_feature.md, Phase 1 composes wasm always).
@@ -3245,8 +3272,17 @@ $(EMBEDDED_WASM_H): $(BUILDDIR)/libhull_feature-wasm.a $(BUILDDIR)/libhull_featu
 	@xxd -i $(BUILDDIR)/libhull_feature-wasm-lua.a | sed 's/build_libhull_feature_wasm_lua_a/hl_embedded_feature_wasm_lua_a/g' | $(XXD_CONST_PIPE) >> $@
 	@xxd -i $(BUILDDIR)/libhull_feature-wasm-js.a  | sed 's/build_libhull_feature_wasm_js_a/hl_embedded_feature_wasm_js_a/g'   | $(XXD_CONST_PIPE) >> $@
 
-CFLAGS += -DHL_BUILD_EMBEDDED -DHL_BUILD_EMBEDDED_RUNTIME -DHL_BUILD_EMBEDDED_HTTP -DHL_BUILD_EMBEDDED_TUI -DHL_BUILD_EMBEDDED_WASM
-$(BUILD_ASSET_OBJ): $(EMBEDDED_PLATFORM_H) $(EMBEDDED_TEMPLATES_H) $(EMBEDDED_RUNTIME_H) $(EMBEDDED_HTTP_H) $(EMBEDDED_TUI_H) $(EMBEDDED_WASM_H)
+# Embed the per-runtime SQLite UDF bridges too (Phase C.2b). The runtime archive
+# is SQLite-free; the default distributed hull composes the app's runtime bridge
+# back whenever the app uses a udf-capable DB, with no install.
+EMBEDDED_SQLITE_RT_H := $(BUILDDIR)/embedded_sqlite_rt.h
+$(EMBEDDED_SQLITE_RT_H): $(BUILDDIR)/libhull_feature-sqlite-lua.a $(BUILDDIR)/libhull_feature-sqlite-js.a | $(BUILDDIR)
+	@echo "/* Auto-generated - do not edit */" > $@
+	@xxd -i $(BUILDDIR)/libhull_feature-sqlite-lua.a | sed 's/build_libhull_feature_sqlite_lua_a/hl_embedded_feature_sqlite_lua_a/g' | $(XXD_CONST_PIPE) >> $@
+	@xxd -i $(BUILDDIR)/libhull_feature-sqlite-js.a  | sed 's/build_libhull_feature_sqlite_js_a/hl_embedded_feature_sqlite_js_a/g'   | $(XXD_CONST_PIPE) >> $@
+
+CFLAGS += -DHL_BUILD_EMBEDDED -DHL_BUILD_EMBEDDED_RUNTIME -DHL_BUILD_EMBEDDED_HTTP -DHL_BUILD_EMBEDDED_TUI -DHL_BUILD_EMBEDDED_WASM -DHL_BUILD_EMBEDDED_SQLITE_RT
+$(BUILD_ASSET_OBJ): $(EMBEDDED_PLATFORM_H) $(EMBEDDED_TEMPLATES_H) $(EMBEDDED_RUNTIME_H) $(EMBEDDED_HTTP_H) $(EMBEDDED_TUI_H) $(EMBEDDED_WASM_H) $(EMBEDDED_SQLITE_RT_H)
 endif
 
 # Hull binary

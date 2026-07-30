@@ -1,8 +1,10 @@
 # SQLite as a composable feature — design
 
-**Status:** Phase A + B shipped (#123–#127) — the architecture is proven end to
-end. Phase C/D (auto-compose gate + embed-as-default) remain. Tracks the capstone
-of the base-subtraction axis (runtime #113 → HTTP #114 → WASM #118 → **DB backend**).
+**Status:** Phase A + B + C shipped (#123–#129) and Phase C.2 (the per-runtime
+`mod_db`-udf bridge split) shipped — the runtime archives are now SQLite-free and
+a db-free app on a SQLite-less base drops SQLite entirely. Phase D
+(embed-as-default) remains. Tracks the capstone of the base-subtraction axis
+(runtime #113 → HTTP #114 → WASM #118 → **DB backend**).
 **Prereq:** the DB-backend vtable (`HlDbBackend`, `cap/db_backend.h`) already
 exists and is proven by the `postgres` / `mysql` / `duckdb` features. This epic
 does for the *default* backend what those did for the optional ones — with the
@@ -175,14 +177,32 @@ WASM). `HL_ENABLE_SQLITE` stays the compile switch; the feature is the
   `HL_SQLITE_FEATURE=1` base). A db app on a SQLite-less base composes SQLite and
   runs with no explicit `--with` (`tests/e2e_feature_sqlite.sh`). No toolchain
   force-load — the `hull` binary keeps SQLite in-base.
-  - **REMAINING (Phase C.2) — the per-runtime `mod_db`-udf bridge split.** The
-    embedded runtime archive (`libhull_feature-<rt>.a`) bundles `mod_db`'s SQLite
-    UDF bindings (`sqlite3_value_*`), so a whole-archived runtime drags SQLite
-    refs into EVERY app on a SQLite-less base — a **db-free** app then can't link
-    without the composed engine, so it can't yet DROP SQLite (the size payoff).
-    Split the UDF bindings out of `mod_db.o` into a `sqlite-<rt>` bridge that
-    ships in the SQLite feature archive (mirrors the wasm-`<rt>` / tui-`<rt>`
-    bridges); then a db-free app on a SQLite-less base links zero `sqlite3.*`.
+  - **Phase C.2 — the per-runtime `mod_db`-udf bridge split.** ✅ SHIPPED.
+    `mod_db`'s SQLite UDF bindings (`sqlite3_value_*` etc., the sole per-runtime
+    `sqlite3_*` consumer) used to sit inline in `mod_db.c`, so the embedded
+    runtime archive `libhull_feature-<rt>.a` carried 17 undefined `sqlite3_*`
+    refs and a whole-archived runtime dragged them into EVERY app — a db-free
+    app on a SQLite-less base could not drop SQLite (the size payoff).
+    - **C.2a (refactor):** the udf region moved into a per-runtime bridge TU
+      `runtime/{lua,js}/mod_db_udf.c` behind a weak `hl_{lua,js}_db_attach_udf`
+      seam. `mod_db.c` calls the weak no-op; the bridge provides the strong
+      override. `mod_db.o` now carries **zero** `sqlite3_*` refs (nm-verified,
+      both runtimes). The JS bridge reuses `js_call_handle` /
+      `new_bound_subobject` via a new internal header `runtime/js/mod_db.h`.
+    - **C.2b (packaging):** the bridge ships as its own embedded, auto-composed
+      archive `libhull_feature-sqlite-<rt>.a` (mirrors wasm-`<rt>`), filtered
+      out of the runtime archive. `hull build` composes it whenever the app uses
+      a udf-capable DB (`needs_sqlite`, reusing the Phase C signal). The runtime
+      archives `libhull_feature-{lua,js}.a` are now **SQLite-free** (0 refs).
+    - **Payoff, proven:** on a `HL_SQLITE_FEATURE=1` base, a db-free app composes
+      neither the engine nor the udf bridge and links **zero** `sqlite3_*`
+      (`nm app | grep sqlite3_open` → empty); a udf app composes the bridge and
+      `db.udf` runs; a db app composes the engine and `db.query` runs. Covered by
+      `tests/e2e_feature_sqlite.sh`.
+    - **Known-orthogonal:** a JS `app.main` + `db.udf` + clean-exit path trips a
+      pre-existing `JS_FreeRuntime` GC-leak assertion (reproduces on pre-C.2
+      `main`; the DB isn't closed before the runtime is freed). Tracked
+      separately; unrelated to the bridge split.
 - **Phase D — embed + publish.** Embed the SQLite-less base + the archive in the
   distributed `hull` so a stock install produces SQLite-dropping apps, add the
   composed-feature signing entry (platform domain, like the runtime archives),

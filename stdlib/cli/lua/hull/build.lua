@@ -1699,12 +1699,19 @@ int main(int argc, char **argv) { return hl_app_run(argc, argv); }
             -- Compose the wasm feature iff either fires; a genuinely compute-free
             -- app then links zero WAMR (~256 KB smaller).
             local needs_wasm = (#compute_files > 0)
+            -- needs_sqlite (Phase C.2b): the app uses a udf-capable DB, so compose
+            -- the per-runtime SQLite UDF bridge (mod_db_udf), which the base runtime
+            -- archive no longer carries. SQLite is guaranteed reachable here (in the
+            -- base, or composed as the engine feature by the Phase C block above),
+            -- so the bridge's sqlite3_* references always resolve.
+            local needs_sqlite = false
             do
                 local mf = extract_app_manifest(opts.app_dir)
                 if mf then
                     local r = tool.modules_resolve(mf, opts.flavor, with_feature_list(opts))
                     if r.ok and r.needs_http ~= nil then needs_http = r.needs_http end
                     if r.ok and r.needs_wasm then needs_wasm = true end
+                    if r.ok and r.needs_sqlite then needs_sqlite = true end
                 end
             end
 
@@ -1802,6 +1809,32 @@ int main(int argc, char **argv) { return hl_app_run(argc, argv); }
             else
                 print("hull build: compute-free app (no hull/compute, no "
                     .. "compute/*.wasm) - skipped the WASM feature (~256 KB smaller)")
+            end
+
+            -- Compose the per-runtime SQLite UDF bridge (Phase C.2b). The runtime
+            -- archive is SQLite-free; the db.udf bindings (mod_db_udf, the sole
+            -- per-runtime sqlite3_* consumer) live in libhull_feature-sqlite-<rt>.a
+            -- and compose only when the app uses a udf-capable DB. A db-free app
+            -- composes neither this nor the engine, so it links zero SQLite.
+            if needs_sqlite then
+            local sqrt_lib = "libhull_feature-sqlite-" .. app_rt .. ".a"
+            local sqrt_path, sqrt_from = fcompose.resolve_sqlite_rt_lib(app_rt, tmpdir,
+                                         { hull_dir = rt_hull_dir, plat = rt_plat })
+            if not sqrt_path then
+                tool.stderr("hull build: the SQLite udf-bridge feature lib (" .. sqrt_lib
+                    .. ") was not found "
+                    .. (sqrt_from == "cache-verify-failed"
+                        and "(cache re-verify failed)\n" or "(normally embedded in hull)\n"))
+                tool.rmdir(tmpdir); tool.exit(1)
+            end
+            local sqrt_dest = tmpdir .. "/" .. sqrt_lib
+            if sqrt_path ~= sqrt_dest then tool.copy(sqrt_path, sqrt_dest) end
+            record_composed("libhull_feature-sqlite-" .. app_rt .. "."
+                            .. (rt_plat or "") .. ".a", sqrt_dest, "platform")
+            for _, f in ipairs(fcompose.whole_archive_flags(sqrt_dest, is_darwin)) do
+                feature_libs[#feature_libs + 1] = f
+            end
+            print("hull build: composed SQLite udf bridge '" .. app_rt .. "'")
             end
 
             if needs_http then

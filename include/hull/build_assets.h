@@ -69,6 +69,7 @@ int hl_build_extract_feature_tui_rt(const char *dir, const char *rt);
  */
 int hl_build_extract_feature_wasm(const char *dir);
 int hl_build_extract_feature_wasm_rt(const char *dir, const char *rt);
+int hl_build_extract_feature_sqlite_rt(const char *dir, const char *rt);
 
 /*
  * Get the list of embedded platform archives (multi-arch builds).

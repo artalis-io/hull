@@ -71,12 +71,33 @@ rc=0; "$W/app/bin" -d ":memory:" >/dev/null 2>&1 || rc=$?
 [ "$rc" = 0 ] || fail "auto-composed db app: db.query should return 42 (exit 0), got $rc"
 echo "ok  auto-inference: plain hull build on a SQLite-less base composes sqlite + db.query runs"
 
-# NOTE — the db-free-app-drops-SQLite payoff is NOT yet reachable: the embedded
-# per-runtime runtime archive (libhull_feature-<rt>.a) bundles mod_db's SQLite
-# UDF bindings (referencing sqlite3_value_* etc.), so a whole-archived runtime
-# drags SQLite refs into EVERY app on a SQLite-less base -- a db-free app then
-# fails to link without the composed engine. Dropping SQLite from db-free apps
-# needs a per-runtime mod_db-udf bridge split (the sqlite-<rt> bridge, mirroring
-# wasm-<rt> / tui-<rt>). Tracked as the next Phase C step; see docs/sqlite_feature.md.
+# 5. Phase C.2b — the per-runtime SQLite UDF bridge (libhull_feature-sqlite-<rt>.a).
+# A udf-using app composes both the engine and the udf bridge; db.udf runs.
+mkdir -p "$W/udf"
+printf 'local db = require("hull.db").default()\napp.manifest({ modules = { "hull/db@1" } })\napp.main(function()\n  db.udf.register("hull_double", function(x) return x * 2 end, { deterministic = true })\n  local r = db.query("SELECT hull_double(21) AS v")\n  return (r[1] and r[1].v == 42) and 0 or 3\nend)\n' > "$W/udf/app.lua"
+out=$("$HULL" build --no-verify-platform "$W/udf" -o "$W/udf/bin" 2>&1) \
+    || fail "hull build (udf app on SQLite-less base): $out"
+echo "$out" | grep -qi "composed SQLite udf bridge" \
+    || fail "expected the udf bridge to compose, got: $out"
+rc=0; "$W/udf/bin" -d ":memory:" >/dev/null 2>&1 || rc=$?
+[ "$rc" = 0 ] || fail "composed udf app: db.udf should return 42 (exit 0), got $rc"
+echo "ok  udf bridge: composed on the SQLite-less base + db.udf runs"
 
-echo "PASS: e2e_feature_sqlite (SQLite-less base; needs_sqlite auto-composes for db apps)"
+# 6. THE PAYOFF (Phase C.2b) — a db-free app on the SQLite-less base composes
+# neither the engine nor the udf bridge, and the runtime archive is now
+# SQLite-free, so the produced binary links with ZERO sqlite3_* symbols.
+mkdir -p "$W/plain"
+printf 'app.main(function() return 0 end)\n' > "$W/plain/app.lua"
+out=$("$HULL" build --no-verify-platform "$W/plain" -o "$W/plain/bin" 2>&1) \
+    || fail "hull build (db-free app on the SQLite-less base should link clean): $out"
+echo "$out" | grep -qi "sqlite" \
+    && fail "db-free app should compose no SQLite feature, got: $out" || true
+if command -v nm >/dev/null 2>&1; then
+    n=$(nm "$W/plain/bin" 2>/dev/null | grep -cE ' [Tt] _?sqlite3_open$' || true)
+    [ "$n" = 0 ] || fail "db-free app still carries SQLite ($n sqlite3_open) — the C.2b drop regressed"
+fi
+rc=0; "$W/plain/bin" >/dev/null 2>&1 || rc=$?
+[ "$rc" = 0 ] || fail "db-free app should run (exit 0), got $rc"
+echo "ok  PAYOFF: db-free app on a SQLite-less base drops SQLite entirely (0 sqlite3_open)"
+
+echo "PASS: e2e_feature_sqlite (SQLite-less base; udf bridge composes; db-free drops SQLite)"
