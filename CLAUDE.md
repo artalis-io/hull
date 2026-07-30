@@ -146,7 +146,7 @@ Hull's distribution is one binary; what's compiled into it is controlled by a sm
 | `HL_ENABLE_TCC` | 1 Linux / 0 macOS+cosmo | Compile the tcc backend for `hull build --compiler=tcc`. tcc is **not embedded** (~400 KB lighter binary) — it's a side-loaded tool (`hull tools install tcc`), resolved at build time from `~/.hull/tools` → `dirname(hull)` → `$PATH`. Off on macOS (Mach-O) / cosmo (APE archives), where tcc's ELF output is unusable and the system compiler is used instead. |
 | `HL_EMBED_CA_BUNDLE` | 1 | Drop Mozilla CA bundle (~200 KB, breaks HTTPS without system store) |
 | `HL_ENABLE_SQLITE` | 1 | Drop the SQLite backend (`cap/db_sqlite.c`, `cap/db_udf.c`, vendored `sqlite3.c`). A SQLite file path or `:memory:` DSN then has no backend. |
-| `HL_ENABLE_IMAGE` | 1 | Drop the image codec subsystem (`cap/image.c`, `cap/image_stb.c`, per-runtime `mod_image`, and vendored `stb_image` — image's **sole** consumer, ~146 KB). Subtractive knob like `HL_ENABLE_DB` (on by default: web apps want avatars/thumbnails). `hull/image` then fails module resolution unless declared optional (`"hull/image@1?"` → `require` returns nil). The GPU texture paths that take/return an `HlImage` (`gpu.texture(img)`, `gpu.texture_read`/`textureRead`) are gated out too, so a `GPU=1 IMAGE=0` build keeps raw-byte textures but not the image bridge. See "Image-less builds" below. |
+| `HL_ENABLE_IMAGE` | 1 | Drop the image codec subsystem (`cap/image.c`, `cap/image_stb.c`, per-runtime `mod_image`, and vendored `stb_image` — image's **sole** consumer, ~146 KB). **Two-mode knob:** at the default `=1` the base is IMAGE-LESS and auto-composes the image feature (`libhull_feature-image.a` + `-image-<rt>.a`, embedded in hull) back for apps that declare `hull/image` (the `needs_image` gate; see "Composable runtime + HTTP base"). `=0` is the subtractive path — drops image entirely (no feature to compose, like `HL_ENABLE_DB=0`). `hull/image` then fails module resolution unless declared optional (`"hull/image@1?"` → `require` returns nil). The GPU texture paths that take/return an `HlImage` (`gpu.texture(img)`, `gpu.texture_read`/`textureRead`) stay `#ifdef HL_ENABLE_IMAGE`-gated, so a `GPU=1 IMAGE=0` build keeps raw-byte textures but not the image bridge. See "Image-less builds" below and [docs/image_feature.md](docs/image_feature.md). |
 | `HL_ENABLE_POSTGRES` | 0 | (Off by default.) On compiles the pure-C PostgreSQL wire backend (`cap/pgwire.c` + `cap/pg_conn.c` + `cap/db_postgres.c`; no libpq) into the base. A `postgres://` / `postgresql://` DSN selects it. Links the shared TLS client (`HL_LINK_TLS`) for SSL connections. Normally composed via the `postgres` **feature** (`hull build --with=postgres`) rather than set directly; the flag is the monolithic path and what `make feature-postgres` builds the archive with. See "Composable features" above and "PostgreSQL + multi-backend DB" below. |
 | `HL_ENABLE_MYSQL` | 0 | (Off by default.) On compiles the pure-C MySQL / MariaDB wire backend (`cap/mysqlwire.c` + `cap/mysql_conn.c` + `cap/db_mysql.c`; no libmysql/libmariadb) into the base. A `mysql://` / `mariadb://` DSN selects it. Links the shared TLS client (`HL_LINK_TLS`). Normally composed via the `mysql` **feature** (`hull build --with=mysql`) rather than set directly; the flag is the monolithic path and what `make feature-mysql` builds the archive with. See "Composable features" above and "MySQL/MariaDB specifics" below. |
 | `HL_ENABLE_DB` | 1 | **Umbrella, derived** from the three granular flags: defined iff `HL_ENABLE_SQLITE`, `HL_ENABLE_POSTGRES`, or `HL_ENABLE_MYSQL` is on. Off (all granular off) drops `db.*` + `migrate.*` + worker-DB + the connection registry + DB-backed stdlib (session, ratelimit, idempotency, outbox, inbox, rbac, search). ~1.4 MB smaller. See "Compute-only builds" below. |
@@ -276,6 +276,8 @@ What the native base **drops** and what composes it back at `hull build`:
 | the WASM caps + WAMR (`cap/wasm*`, `worker_wasm`, ~256 KB of vendored WAMR) | `libhull_feature-wasm.a` | only when the app needs compute (the `needs_wasm` gate below) |
 | the per-runtime compute binding (`mod_compute` — `compute.*` + the `WasmBuffer` userdata) | `libhull_feature-wasm-<rt>.a` | with the wasm core, only when the app needs compute |
 | the per-runtime tui bridge | `libhull_feature-tui-<rt>.a` (the tui cap core stays the installable `--with=tui` asset) | with `--with=tui`, only the app's runtime's bridge |
+| the image codec caps + vendored stb (`cap/image`, `cap/image_stb`, `stb_impl`, ~146 KB) | `libhull_feature-image.a` | only when the app declares `hull/image` (the `needs_image` gate below) |
+| the per-runtime image binding (`mod_image` — `image.*` + the `HlImage` userdata) | `libhull_feature-image-<rt>.a` | with the image core, only when the app declares `hull/image` |
 
 **The seam.** Each dropped piece leaves a **weak no-op default** in the base that
 a **strong override** in the composed archive replaces (mirrors the gpu/tui
@@ -287,10 +289,28 @@ header): `src/hull/wasm_weakstub.c` carries weak `hl_cap_wasm_*` / `hl_wasm_buff
 defaults (referenced by `db_udf` / `mod_buffer` / `mod_image` / `mod_gpu` /
 `app_context` / `serve`) plus the per-runtime compute-binding stubs — so a WASM-free
 app links; a function `db.udf` still works while a WASM-backed one fails closed.
+The IMAGE seam is weak-stubs-only too: `src/hull/image_weakstub.c` carries weak
+`hl_image_new`/`hl_image_free` (referenced by `mod_gpu`'s `gpu.texture_read`), and
+per-runtime `runtime/{lua,js}/image_stub.c` carry weak `luaopen_hull_image` /
+`hl_js_init_image_module` (referenced by `modules.c`'s registration) — so an
+image-free app links, and `HL_ENABLE_IMAGE` stays **defined** in the base
+(resolver keeps reporting the cap; `modules.c`/`mod_gpu` need no `#ifdef` change).
 The archives are whole-archived at compose (no single anchor symbol), inside a
 GNU-ld `--start-group` (native) / `-force_load` (ld64) with the platform lib + Keel,
 since the caps reference base symbols + Keel and the web/compute bindings reference
 the caps.
+
+**"Needs IMAGE" is module-inferred.** `hull build` composes the image codec core +
+the per-runtime image bridge only when the resolved manifest declares `hull/image`
+(`req_caps & HL_MOD_CAP_IMAGE`, exposed as `needs_image` from
+`tool.modules_resolve`, mirrors `needs_http`/`needs_wasm`). Unlike WASM this needs
+no second signal: the only reachable `HlImage` producer is the `image` module
+itself, so a declared `hull/image` is the whole gate. An image-free app links
+**zero** stb (~146 KB smaller; `nm app | grep stbi_load_from_memory` → empty). The
+subtractive `make HL_ENABLE_IMAGE=0` knob still exists (drops image entirely, no
+feature to compose); the composable path is the default `HL_ENABLE_IMAGE=1` base.
+See [docs/image_feature.md](docs/image_feature.md); covered by
+`tests/e2e_feature_image.sh`.
 
 **"Needs HTTP" is resolved, not guessed.** `hull build` composes the http core +
 web bindings only when the resolved manifest trips an HTTP cap

@@ -2048,6 +2048,13 @@ HTTP_WEAKSTUB_OBJ := $(BUILDDIR)/http_weakstub.o
 # cap_wasm* defs win while WAMR is still compiled in (the base flip is Phase 1).
 WASM_WEAKSTUB_OBJ := $(BUILDDIR)/wasm_weakstub.o
 
+# IMAGE-as-a-feature seam (docs/image_feature.md). Weak, fail-closed defaults for
+# the two runtime-agnostic image cap symbols base objects reference (mod_gpu:
+# gpu.texture_read builds an HlImage, the paired free), so an image-less base
+# links. The strong cap_image defs win when the image feature is composed (or on
+# a cosmo full base). Mirrors WASM_WEAKSTUB_OBJ.
+IMAGE_WEAKSTUB_OBJ := $(BUILDDIR)/image_weakstub.o
+
 # ── Stdlib embedding (xxd) ──────────────────────────────────────────
 #
 # Two Lua source trees feed the embedded stdlib registry:
@@ -2665,22 +2672,31 @@ FEATURE_HTTP_OBJS := $(BUILDDIR)/cap_http.o $(BUILDDIR)/cap_http_async.o \
 # keeps the wasm_weakstub.c weak defaults (Phase 0) so a compute-less app links.
 FEATURE_WASM_OBJS := $(BUILDDIR)/cap_wasm.o $(BUILDDIR)/cap_wasm_buffer.o \
                      $(BUILDDIR)/cap_wasm_data.o $(BUILDDIR)/cap_wasm_stream.o
+# IMAGE as a composable feature (docs/image_feature.md). The runtime-AGNOSTIC
+# codec caps move into libhull_feature-image.a (with vendored stb) and compose
+# back at `hull build`; the per-runtime binding (mod_image) moves into
+# libhull_feature-image-<rt>.a. The base keeps image_weakstub.c so an image-less
+# app links. Mirrors FEATURE_WASM_OBJS.
+FEATURE_IMAGE_OBJS := $(BUILDDIR)/cap_image.o $(BUILDDIR)/cap_image_stb.o
 ifdef COSMO
   PLATFORM_RT_OBJS       := $(RT_OBJS)
   PLATFORM_MANIFEST_OBJ  := $(MANIFEST_OBJ)
   PLATFORM_RUNTIME_EXTRA := $(STDLIB_RT_REGISTRY_OBJS) $(STDLIB_TOOLCHAIN_REGISTRY_O) $(RUNTIME_TOOLCHAIN_REGISTRY_O) $(VEND_OBJS)
   PLATFORM_CAP_OBJS      := $(CAP_OBJS)                 # cosmo stays full (features native-only)
+  PLATFORM_STB_OBJ       := $(STB_OBJ)                  # cosmo base bundles stb (cap_image stays in-base)
 else
   PLATFORM_RT_OBJS       := $(RUNTIME_CACHE_COMMON_OBJ)  # runtime-agnostic; VMs dropped
   PLATFORM_MANIFEST_OBJ  := $(BUILDDIR)/manifest.o       # runtime-agnostic
   PLATFORM_RUNTIME_EXTRA :=
   # HTTP core caps move to libhull_feature-http.a; the wasm caps move to
-  # libhull_feature-wasm.a (docs/wasm_feature.md, Phase 1). Both compose back at
-  # `hull build`; the base keeps the weak stubs (http_weakstub / wasm_weakstub).
-  PLATFORM_CAP_OBJS      := $(filter-out $(FEATURE_HTTP_OBJS) $(FEATURE_WASM_OBJS),$(CAP_OBJS))
+  # libhull_feature-wasm.a (docs/wasm_feature.md, Phase 1); the image codec caps
+  # move to libhull_feature-image.a (docs/image_feature.md). All compose back at
+  # `hull build`; the base keeps the weak stubs (http/wasm/image_weakstub).
+  PLATFORM_CAP_OBJS      := $(filter-out $(FEATURE_HTTP_OBJS) $(FEATURE_WASM_OBJS) $(FEATURE_IMAGE_OBJS),$(CAP_OBJS))
+  PLATFORM_STB_OBJ       :=                              # stb moves into libhull_feature-image.a
 endif
-PLATFORM_OBJS := $(PLATFORM_CAP_OBJS) $(CAP_TOOL_OBJ) $(CAP_TEST_OBJ) $(CMD_OBJS) $(PLATFORM_RT_OBJS) $(ALLOC_OBJ) $(ASYNC_OBJ) $(COMPRESS_OBJ) $(MINIZ_OBJ) $(WORKER_DB_OBJ) $(WORKER_GPU_OBJ) $(PLATFORM_MANIFEST_OBJ) $(MODULE_OBJ) $(ASYNC_BACKEND_OBJS) $(NET_BACKEND_OBJS) $(SANDBOX_OBJ) $(SANDBOX_TOOL_OBJ) $(SIG_OBJ) $(RELEASE_OBJ) $(RELEASE_IO_OBJ) $(TOOLS_INSTALL_OBJ) $(PLATFORM_SIG_OBJ) $(EMBEDDED_PLATFORM_SIG_OBJ) $(TEST_RUNNER_OBJ) $(RUNTIME_FACTORY_OBJ) $(STATIC_OBJ) $(MIGRATE_OBJ) $(VFS_OBJ) $(PATH_NORM_OBJ) $(THREAD_AFFINITY_OBJ) $(CACHE_DIR_OBJ) $(BLOB_STORE_OBJ) $(CACHE_REGISTRY_OBJ) $(CACERT_OBJ) $(TLS_CLIENT_OBJ) $(CSP_OBJ) $(SBOM_OBJ) $(STDLIB_FEATURE_OBJ) $(APP_CONTEXT_OBJ) $(APP_CONTEXT_RT_OBJ) $(AGENT_LIB_OBJ) $(AGENT_API_OBJ) $(MAIN_OBJ) $(SERVE_OBJ) $(APP_RUNNER_OBJ) $(HTTP_WEAKSTUB_OBJ) $(WASM_WEAKSTUB_OBJ) $(TOOL_OBJ) $(BUILD_ASSET_STUB_OBJ) $(STDLIB_REGISTRY_O) $(PLATFORM_RUNTIME_EXTRA) $(MBEDTLS_OBJS) \
-	$(SQLITE_OBJ) $(LOG_OBJ) $(LOG_LOCK_OBJ) $(SH_ARENA_OBJ) $(SH_JSON_OBJ) $(TWEETNACL_OBJ) $(STB_OBJ) $(PLEDGE_OBJS) \
+PLATFORM_OBJS := $(PLATFORM_CAP_OBJS) $(CAP_TOOL_OBJ) $(CAP_TEST_OBJ) $(CMD_OBJS) $(PLATFORM_RT_OBJS) $(ALLOC_OBJ) $(ASYNC_OBJ) $(COMPRESS_OBJ) $(MINIZ_OBJ) $(WORKER_DB_OBJ) $(WORKER_GPU_OBJ) $(PLATFORM_MANIFEST_OBJ) $(MODULE_OBJ) $(ASYNC_BACKEND_OBJS) $(NET_BACKEND_OBJS) $(SANDBOX_OBJ) $(SANDBOX_TOOL_OBJ) $(SIG_OBJ) $(RELEASE_OBJ) $(RELEASE_IO_OBJ) $(TOOLS_INSTALL_OBJ) $(PLATFORM_SIG_OBJ) $(EMBEDDED_PLATFORM_SIG_OBJ) $(TEST_RUNNER_OBJ) $(RUNTIME_FACTORY_OBJ) $(STATIC_OBJ) $(MIGRATE_OBJ) $(VFS_OBJ) $(PATH_NORM_OBJ) $(THREAD_AFFINITY_OBJ) $(CACHE_DIR_OBJ) $(BLOB_STORE_OBJ) $(CACHE_REGISTRY_OBJ) $(CACERT_OBJ) $(TLS_CLIENT_OBJ) $(CSP_OBJ) $(SBOM_OBJ) $(STDLIB_FEATURE_OBJ) $(APP_CONTEXT_OBJ) $(APP_CONTEXT_RT_OBJ) $(AGENT_LIB_OBJ) $(AGENT_API_OBJ) $(MAIN_OBJ) $(SERVE_OBJ) $(APP_RUNNER_OBJ) $(HTTP_WEAKSTUB_OBJ) $(WASM_WEAKSTUB_OBJ) $(IMAGE_WEAKSTUB_OBJ) $(TOOL_OBJ) $(BUILD_ASSET_STUB_OBJ) $(STDLIB_REGISTRY_O) $(PLATFORM_RUNTIME_EXTRA) $(MBEDTLS_OBJS) \
+	$(SQLITE_OBJ) $(LOG_OBJ) $(LOG_LOCK_OBJ) $(SH_ARENA_OBJ) $(SH_JSON_OBJ) $(TWEETNACL_OBJ) $(PLATFORM_STB_OBJ) $(PLEDGE_OBJS) \
 	$(COMPILER_OBJ) $(COMPILER_TCC_OBJ)
 
 PLATFORM_LIB := $(BUILDDIR)/libhull_platform.a
@@ -3047,6 +3063,45 @@ feature-sqlite-js: $(BUILDDIR)/libhull_feature-sqlite-js.a
 $(BUILDDIR)/libhull_feature-sqlite-js.a: $(BUILDDIR)/js_mod_db_udf.o | $(BUILDDIR)
 	$(call AR_FEATURE_LIB,$(BUILDDIR)/js_mod_db_udf.o)
 
+# libhull_feature-image.a: the runtime-agnostic image CODEC core
+# (docs/image_feature.md). Bundles the codec vtable + stb backend + vendored stb
+# (~146 KB that leaves the base). Composed back at `hull build` and embedded in
+# hull (embedded_image.h). The per-runtime image binding (mod_image) is a
+# separate archive below, like the wasm compute bridge.
+FEATURE_IMAGE_CORE := $(FEATURE_IMAGE_OBJS) $(STB_OBJ)
+feature-image: $(BUILDDIR)/libhull_feature-image.a
+.PHONY: feature-image
+$(BUILDDIR)/libhull_feature-image.a: $(FEATURE_IMAGE_CORE) | $(BUILDDIR)
+	$(call AR_FEATURE_LIB,$(FEATURE_IMAGE_CORE))
+
+# Per-runtime image-binding bridges (mod_image). Tiny (one object each);
+# embedded in hull + composed for the app's runtime alongside the image core.
+feature-image-lua: $(BUILDDIR)/libhull_feature-image-lua.a
+.PHONY: feature-image-lua
+$(BUILDDIR)/libhull_feature-image-lua.a: $(BUILDDIR)/lua_rt_mod_image.o | $(BUILDDIR)
+	$(call AR_FEATURE_LIB,$(BUILDDIR)/lua_rt_mod_image.o)
+
+feature-image-js: $(BUILDDIR)/libhull_feature-image-js.a
+.PHONY: feature-image-js
+$(BUILDDIR)/libhull_feature-image-js.a: $(BUILDDIR)/js_mod_image.o | $(BUILDDIR)
+	$(call AR_FEATURE_LIB,$(BUILDDIR)/js_mod_image.o)
+
+# Gate the image archives behind HL_ENABLE_IMAGE: on the subtractive image-less
+# flavor (make HL_ENABLE_IMAGE=0) cap_image.o + stb aren't built, so the archives
+# can't (and needn't) build. These vars resolve empty there so FEATURE_ARCHIVES /
+# RUNTIME_FEATURE_LIBS / the embed don't pull them.
+ifeq ($(HL_ENABLE_IMAGE),1)
+IMG_FEATURE_CORE := $(BUILDDIR)/libhull_feature-image.a
+IMG_FEATURE_LUA  := $(BUILDDIR)/libhull_feature-image-lua.a
+IMG_FEATURE_JS   := $(BUILDDIR)/libhull_feature-image-js.a
+IMG_FEATURE_LIBS := $(IMG_FEATURE_CORE) $(IMG_FEATURE_LUA) $(IMG_FEATURE_JS)
+else
+IMG_FEATURE_CORE :=
+IMG_FEATURE_LUA  :=
+IMG_FEATURE_JS   :=
+IMG_FEATURE_LIBS :=
+endif
+
 # libhull_feature-lua.a / -js.a: a runtime as a composable feature archive.
 # Bundles the runtime objects, its vendored VM, its manifest extractor, and its
 # stdlib VFS array (hl_stdlib_<rt>_entries). The tui bridge (mod_tui) is excluded
@@ -3069,9 +3124,9 @@ FEATURE_HTTP_RT_NAMES := mod_ws_server mod_ws_client mod_http_server mod_sse \
 FEATURE_HTTP_LUA_OBJS := $(addprefix $(BUILDDIR)/lua_rt_,$(addsuffix .o,$(FEATURE_HTTP_RT_NAMES)))
 FEATURE_HTTP_JS_OBJS  := $(addprefix $(BUILDDIR)/js_,$(addsuffix .o,$(FEATURE_HTTP_RT_NAMES)))
 
-FEATURE_LUA_OBJS := $(filter-out $(BUILDDIR)/lua_rt_mod_tui.o $(BUILDDIR)/lua_rt_mod_tool.o $(BUILDDIR)/lua_rt_mod_compute.o $(BUILDDIR)/lua_rt_mod_db_udf.o $(FEATURE_HTTP_LUA_OBJS),$(LUA_RT_OBJS)) \
+FEATURE_LUA_OBJS := $(filter-out $(BUILDDIR)/lua_rt_mod_tui.o $(BUILDDIR)/lua_rt_mod_tool.o $(BUILDDIR)/lua_rt_mod_compute.o $(BUILDDIR)/lua_rt_mod_db_udf.o $(BUILDDIR)/lua_rt_mod_image.o $(FEATURE_HTTP_LUA_OBJS),$(LUA_RT_OBJS)) \
                     $(LUA_OBJS) $(BUILDDIR)/manifest_lua.o $(STDLIB_LUA_REGISTRY_O)
-FEATURE_JS_OBJS  := $(filter-out $(BUILDDIR)/js_mod_tui.o $(BUILDDIR)/js_mod_compute.o $(BUILDDIR)/js_mod_db_udf.o $(FEATURE_HTTP_JS_OBJS),$(JS_RT_OBJS)) \
+FEATURE_JS_OBJS  := $(filter-out $(BUILDDIR)/js_mod_tui.o $(BUILDDIR)/js_mod_compute.o $(BUILDDIR)/js_mod_db_udf.o $(BUILDDIR)/js_mod_image.o $(FEATURE_HTTP_JS_OBJS),$(JS_RT_OBJS)) \
                     $(QJS_OBJS) $(BUILDDIR)/manifest_js.o $(STDLIB_JS_REGISTRY_O)
 
 feature-lua: $(BUILDDIR)/libhull_feature-lua.a
@@ -3111,7 +3166,8 @@ FEATURE_ARCHIVES := $(BUILDDIR)/libhull_feature-lua.a $(BUILDDIR)/libhull_featur
                     $(BUILDDIR)/libhull_feature-tui-lua.a $(BUILDDIR)/libhull_feature-tui-js.a \
                     $(BUILDDIR)/libhull_feature-wasm.a \
                     $(BUILDDIR)/libhull_feature-wasm-lua.a $(BUILDDIR)/libhull_feature-wasm-js.a \
-                    $(BUILDDIR)/libhull_feature-sqlite-lua.a $(BUILDDIR)/libhull_feature-sqlite-js.a
+                    $(BUILDDIR)/libhull_feature-sqlite-lua.a $(BUILDDIR)/libhull_feature-sqlite-js.a \
+                    $(IMG_FEATURE_LIBS)
 $(FEATURE_ARCHIVES): Makefile
 # The base platform lib is built from an object LIST (PLATFORM_OBJS); a Phase-1
 # change to that list (wasm caps + WAMR removed) must retrigger the ar, which an
@@ -3132,19 +3188,25 @@ $(PLATFORM_LIB): Makefile
 ifndef COSMO
 ifeq ($(RUNTIME),js)
   RUNTIME_FEATURE_LIBS := $(BUILDDIR)/libhull_feature-js.a $(BUILDDIR)/libhull_feature-http-js.a \
-                          $(BUILDDIR)/libhull_feature-wasm-js.a $(BUILDDIR)/libhull_feature-sqlite-js.a
+                          $(BUILDDIR)/libhull_feature-wasm-js.a $(BUILDDIR)/libhull_feature-sqlite-js.a \
+                          $(IMG_FEATURE_JS)
 else ifeq ($(RUNTIME),lua)
   RUNTIME_FEATURE_LIBS := $(BUILDDIR)/libhull_feature-lua.a $(BUILDDIR)/libhull_feature-http-lua.a \
-                          $(BUILDDIR)/libhull_feature-wasm-lua.a $(BUILDDIR)/libhull_feature-sqlite-lua.a
+                          $(BUILDDIR)/libhull_feature-wasm-lua.a $(BUILDDIR)/libhull_feature-sqlite-lua.a \
+                          $(IMG_FEATURE_LUA)
 else
   RUNTIME_FEATURE_LIBS := $(BUILDDIR)/libhull_feature-lua.a $(BUILDDIR)/libhull_feature-http-lua.a \
                           $(BUILDDIR)/libhull_feature-wasm-lua.a $(BUILDDIR)/libhull_feature-sqlite-lua.a \
+                          $(IMG_FEATURE_LUA) \
                           $(BUILDDIR)/libhull_feature-js.a $(BUILDDIR)/libhull_feature-http-js.a \
-                          $(BUILDDIR)/libhull_feature-wasm-js.a $(BUILDDIR)/libhull_feature-sqlite-js.a
+                          $(BUILDDIR)/libhull_feature-wasm-js.a $(BUILDDIR)/libhull_feature-sqlite-js.a \
+                          $(IMG_FEATURE_JS)
 endif
-  # HTTP + WASM core feature archives (runtime-agnostic), composed for every
-  # full-flavor app (docs/wasm_feature.md, Phase 1 composes wasm always).
-  RUNTIME_FEATURE_LIBS += $(BUILDDIR)/libhull_feature-http.a $(BUILDDIR)/libhull_feature-wasm.a
+  # HTTP + WASM + IMAGE core feature archives (runtime-agnostic), composed for
+  # every full-flavor app (docs/wasm_feature.md, Phase 1 composes wasm always).
+  # IMG_FEATURE_CORE is empty on an image-less base (HL_ENABLE_IMAGE=0).
+  RUNTIME_FEATURE_LIBS += $(BUILDDIR)/libhull_feature-http.a $(BUILDDIR)/libhull_feature-wasm.a \
+                          $(IMG_FEATURE_CORE)
 else
   RUNTIME_FEATURE_LIBS :=
 endif
@@ -3323,8 +3385,19 @@ $(EMBEDDED_SQLITE_RT_H): $(BUILDDIR)/libhull_feature-sqlite-lua.a $(BUILDDIR)/li
 	@xxd -i $(BUILDDIR)/libhull_feature-sqlite-lua.a | sed 's/build_libhull_feature_sqlite_lua_a/hl_embedded_feature_sqlite_lua_a/g' | $(XXD_CONST_PIPE) >> $@
 	@xxd -i $(BUILDDIR)/libhull_feature-sqlite-js.a  | sed 's/build_libhull_feature_sqlite_js_a/hl_embedded_feature_sqlite_js_a/g'   | $(XXD_CONST_PIPE) >> $@
 
-CFLAGS += -DHL_BUILD_EMBEDDED -DHL_BUILD_EMBEDDED_RUNTIME -DHL_BUILD_EMBEDDED_HTTP -DHL_BUILD_EMBEDDED_TUI -DHL_BUILD_EMBEDDED_WASM -DHL_BUILD_EMBEDDED_SQLITE_RT
-$(BUILD_ASSET_OBJ): $(EMBEDDED_PLATFORM_H) $(EMBEDDED_TEMPLATES_H) $(EMBEDDED_RUNTIME_H) $(EMBEDDED_HTTP_H) $(EMBEDDED_TUI_H) $(EMBEDDED_WASM_H) $(EMBEDDED_SQLITE_RT_H)
+# Embed the image feature archives too (docs/image_feature.md). The native base
+# is image-less; the default distributed hull composes the image codec core + the
+# app's runtime image bridge back whenever the app declares hull/image, with no
+# install.
+EMBEDDED_IMAGE_H := $(BUILDDIR)/embedded_image.h
+$(EMBEDDED_IMAGE_H): $(BUILDDIR)/libhull_feature-image.a $(BUILDDIR)/libhull_feature-image-lua.a $(BUILDDIR)/libhull_feature-image-js.a | $(BUILDDIR)
+	@echo "/* Auto-generated - do not edit */" > $@
+	@xxd -i $(BUILDDIR)/libhull_feature-image.a     | sed 's/build_libhull_feature_image_a/hl_embedded_feature_image_a/g'         | $(XXD_CONST_PIPE) >> $@
+	@xxd -i $(BUILDDIR)/libhull_feature-image-lua.a | sed 's/build_libhull_feature_image_lua_a/hl_embedded_feature_image_lua_a/g' | $(XXD_CONST_PIPE) >> $@
+	@xxd -i $(BUILDDIR)/libhull_feature-image-js.a  | sed 's/build_libhull_feature_image_js_a/hl_embedded_feature_image_js_a/g'   | $(XXD_CONST_PIPE) >> $@
+
+CFLAGS += -DHL_BUILD_EMBEDDED -DHL_BUILD_EMBEDDED_RUNTIME -DHL_BUILD_EMBEDDED_HTTP -DHL_BUILD_EMBEDDED_TUI -DHL_BUILD_EMBEDDED_WASM -DHL_BUILD_EMBEDDED_SQLITE_RT -DHL_BUILD_EMBEDDED_IMAGE
+$(BUILD_ASSET_OBJ): $(EMBEDDED_PLATFORM_H) $(EMBEDDED_TEMPLATES_H) $(EMBEDDED_RUNTIME_H) $(EMBEDDED_HTTP_H) $(EMBEDDED_TUI_H) $(EMBEDDED_WASM_H) $(EMBEDDED_SQLITE_RT_H) $(EMBEDDED_IMAGE_H)
 
 # Phase D: when the app-build base is SQLite-less, embed the SQLite ENGINE
 # archive (cap/db_sqlite + vendored sqlite3 + FTS5 + udf cap + sqlite agent) so a
@@ -3750,6 +3823,9 @@ $(HTTP_WEAKSTUB_OBJ): $(SRCDIR)/hull/http_weakstub.c | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
 
 $(WASM_WEAKSTUB_OBJ): $(SRCDIR)/hull/wasm_weakstub.c | $(BUILDDIR)
+	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
+
+$(IMAGE_WEAKSTUB_OBJ): $(SRCDIR)/hull/image_weakstub.c | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
 
 # Serve-cli (CLI counterpart, used when HL_ENABLE_HTTP_SERVER=0)
@@ -4400,6 +4476,10 @@ e2e-feature-wasm: $(BUILDDIR)/hull
 .PHONY: e2e-feature-sqlite
 e2e-feature-sqlite: $(BUILDDIR)/hull
 	sh tests/e2e_feature_sqlite.sh
+
+.PHONY: e2e-feature-image
+e2e-feature-image: $(BUILDDIR)/hull
+	sh tests/e2e_feature_image.sh
 
 e2e-multipart: $(BUILDDIR)/hull
 	RUNTIME=$(RUNTIME) sh tests/e2e_multipart.sh

@@ -1729,6 +1729,12 @@ int main(int argc, char **argv) { return hl_app_run(argc, argv); }
             -- base, or composed as the engine feature by the Phase C block above),
             -- so the bridge's sqlite3_* references always resolve.
             local needs_sqlite = false
+            -- needs_image (docs/image_feature.md): the app declares hull/image, so
+            -- compose the image codec core + the per-runtime image bridge, which the
+            -- native base no longer carries. Cleanly module-inferable (the resolver's
+            -- HL_MOD_CAP_IMAGE); a genuinely image-free app links zero stb (~146 KB
+            -- smaller).
+            local needs_image = false
             do
                 local mf = extract_app_manifest(opts.app_dir)
                 if mf then
@@ -1736,6 +1742,7 @@ int main(int argc, char **argv) { return hl_app_run(argc, argv); }
                     if r.ok and r.needs_http ~= nil then needs_http = r.needs_http end
                     if r.ok and r.needs_wasm then needs_wasm = true end
                     if r.ok and r.needs_sqlite then needs_sqlite = true end
+                    if r.ok and r.needs_image then needs_image = true end
                 end
             end
 
@@ -1859,6 +1866,52 @@ int main(int argc, char **argv) { return hl_app_run(argc, argv); }
                 feature_libs[#feature_libs + 1] = f
             end
             print("hull build: composed SQLite udf bridge '" .. app_rt .. "'")
+            end
+
+            -- Compose the IMAGE feature (docs/image_feature.md). The native base is
+            -- image-less: the codec caps + vendored stb live in
+            -- libhull_feature-image.a and the image.* binding (mod_image) in
+            -- libhull_feature-image-<rt>.a. Composed only when needs_image (the app
+            -- declared hull/image); a genuinely image-free app links zero stb
+            -- (~146 KB smaller). Whole-archive both inside the --start-group.
+            if needs_image then
+            local img_lib = "libhull_feature-image.a"
+            local img_path, img_from = fcompose.resolve_image_lib(tmpdir,
+                                       { hull_dir = rt_hull_dir, plat = rt_plat })
+            if not img_path then
+                tool.stderr("hull build: the image feature lib (libhull_feature-image.a) "
+                    .. "was not found "
+                    .. (img_from == "cache-verify-failed"
+                        and "(cache re-verify failed)\n" or "(normally embedded in hull)\n"))
+                tool.stderr("hint: build it from source with `make feature-image`\n")
+                tool.rmdir(tmpdir); tool.exit(1)
+            end
+            local img_dest = tmpdir .. "/" .. img_lib
+            if img_path ~= img_dest then tool.copy(img_path, img_dest) end
+            record_composed("libhull_feature-image." .. (rt_plat or "") .. ".a",
+                            img_dest, "platform")
+            for _, f in ipairs(fcompose.whole_archive_flags(img_dest, is_darwin)) do
+                feature_libs[#feature_libs + 1] = f
+            end
+
+            local imgrt_lib = "libhull_feature-image-" .. app_rt .. ".a"
+            local imgrt_path, imgrt_from = fcompose.resolve_image_rt_lib(app_rt, tmpdir,
+                                           { hull_dir = rt_hull_dir, plat = rt_plat })
+            if not imgrt_path then
+                tool.stderr("hull build: the image-bindings feature lib (" .. imgrt_lib
+                    .. ") was not found "
+                    .. (imgrt_from == "cache-verify-failed"
+                        and "(cache re-verify failed)\n" or "(normally embedded in hull)\n"))
+                tool.rmdir(tmpdir); tool.exit(1)
+            end
+            local imgrt_dest = tmpdir .. "/" .. imgrt_lib
+            if imgrt_path ~= imgrt_dest then tool.copy(imgrt_path, imgrt_dest) end
+            record_composed("libhull_feature-image-" .. app_rt .. "."
+                            .. (rt_plat or "") .. ".a", imgrt_dest, "platform")
+            for _, f in ipairs(fcompose.whole_archive_flags(imgrt_dest, is_darwin)) do
+                feature_libs[#feature_libs + 1] = f
+            end
+            print("hull build: composed image feature + image bridge '" .. app_rt .. "'")
             end
 
             if needs_http then
