@@ -395,11 +395,13 @@ static JSValue js_db_udf_register(JSContext *ctx, JSValueConst this_val,
 
         JS_FreeCString(ctx, sql_name);
 
-        if (rc != SQLITE_OK) {
-            js_scalar_udf_destroy(udf_ctx);
+        if (rc != SQLITE_OK)
+            /* SQLite invokes the xDestroy (js_scalar_udf_destroy) ITSELF when
+             * create_function_v2 fails (the destructor runs when its nRef stays
+             * 0), freeing udf_ctx and JS_FreeValue-ing its func. Do NOT free
+             * again here -- that double-frees + corrupts the QuickJS refcount. */
             return JS_ThrowInternalError(ctx, "db.udf.register: %s",
                                          sqlite3_errmsg(raw_db));
-        }
     } else if (JS_IsObject(argv[1])) {
         /* ── JS aggregate UDF ({step, finalize}) ───────────────── */
         JSValue step_fn = JS_GetPropertyStr(ctx, argv[1], "step");
@@ -442,11 +444,11 @@ static JSValue js_db_udf_register(JSContext *ctx, JSValueConst this_val,
 
         JS_FreeCString(ctx, sql_name);
 
-        if (rc != SQLITE_OK) {
-            js_agg_udf_destroy(udf_ctx);
+        if (rc != SQLITE_OK)
+            /* SQLite already invoked the xDestroy (js_agg_udf_destroy) on
+             * failure -- do NOT free again (double-free + refcount corruption). */
             return JS_ThrowInternalError(ctx, "db.udf.register: %s",
                                          sqlite3_errmsg(raw_db));
-        }
     } else {
         JS_FreeCString(ctx, sql_name);
         return JS_ThrowTypeError(ctx,
