@@ -153,7 +153,9 @@ static JSValue js_http_request(JSContext *ctx, JSValueConst this_val,
         JS_FreeValue(ctx, hdrs_val);
     }
 
-    KlClientResponse resp;
+    KlClientResponse resp = {0}; /* zero-init: resp.error is read on the rc!=0
+                                  * path; don't depend on the cap layer's
+                                  * internal memset ordering. */
     int rc = hl_cap_http_request(js->base.http_cfg, method, url,
                                     headers, num_headers, body, body_len, &resp);
 
@@ -196,7 +198,9 @@ static JSValue js_http_get(JSContext *ctx, JSValueConst this_val,
         JS_FreeValue(ctx, hdrs_val);
     }
 
-    KlClientResponse resp;
+    KlClientResponse resp = {0}; /* zero-init: resp.error is read on the rc!=0
+                                  * path; don't depend on the cap layer's
+                                  * internal memset ordering. */
     int rc = hl_cap_http_request(js->base.http_cfg, "GET", url,
                                     headers, num_headers, NULL, 0, &resp);
     JS_FreeCString(ctx, url);
@@ -240,7 +244,9 @@ static JSValue js_http_body_method(JSContext *ctx, int argc, JSValueConst *argv,
         JS_FreeValue(ctx, hdrs_val);
     }
 
-    KlClientResponse resp;
+    KlClientResponse resp = {0}; /* zero-init: resp.error is read on the rc!=0
+                                  * path; don't depend on the cap layer's
+                                  * internal memset ordering. */
     int rc = hl_cap_http_request(js->base.http_cfg, method_name, url,
                                     headers, num_headers, body, body_len, &resp);
     JS_FreeCString(ctx, url);
@@ -293,7 +299,9 @@ static JSValue js_http_del(JSContext *ctx, JSValueConst this_val,
         JS_FreeValue(ctx, hdrs_val);
     }
 
-    KlClientResponse resp;
+    KlClientResponse resp = {0}; /* zero-init: resp.error is read on the rc!=0
+                                  * path; don't depend on the cap layer's
+                                  * internal memset ordering. */
     int rc = hl_cap_http_request(js->base.http_cfg, "DELETE", url,
                                     headers, num_headers, NULL, 0, &resp);
     JS_FreeCString(ctx, url);

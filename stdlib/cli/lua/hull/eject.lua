@@ -442,15 +442,29 @@ local function main()
     -- Copy app files, preserving directory structure
     for _, path in ipairs(files) do
         local rel = path:sub(#opts.app_dir + 2)
-        local dest = dir .. "/app/" .. rel
 
-        -- Create parent directories
-        local parent = dest:match("(.*/)")
-        if parent then
-            tool.mkdir(parent)
+        -- Path-traversal defense (mirrors verify.lua): a crafted app tree with a
+        -- `..`-escaping or absolute relative path would otherwise write outside
+        -- the output dir.
+        if rel:find("%.%.") or rel:sub(1, 1) == "/" then
+            tool.stderr("hull eject: skipping suspicious app path: " .. rel .. "\n")
+            goto continue_files
         end
 
-        tool.copy(path, dest)
+        local dest = dir .. "/app/" .. rel
+
+        -- Never copy a file onto itself (tool.copy opens dest "wb" before reading
+        -- src, so src==dest 0-bytes the source). Guards `hull eject . -o .`-style
+        -- output/app-dir overlaps.
+        if dest ~= path then
+            -- Create parent directories
+            local parent = dest:match("(.*/)")
+            if parent then
+                tool.mkdir(parent)
+            end
+            tool.copy(path, dest)
+        end
+        ::continue_files::
     end
 
     print("hull eject: created " .. dir .. "/")

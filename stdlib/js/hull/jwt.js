@@ -92,6 +92,9 @@ function sign(payload, secret) {
         throw new Error("payload must be an object");
     if (!secret || typeof secret !== "string")
         throw new Error("secret is required");
+    // SECURITY: use a 32+ byte random HMAC key. A short (<16 byte) HS256 secret
+    // is brute-forceable. Not hard-rejected here (would break existing apps),
+    // but strongly recommended; oauth.init enforces >=16 for its state secret.
 
     const p = Object.create(null);
     for (const k of Object.keys(payload)) p[k] = payload[k];

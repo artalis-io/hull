@@ -133,6 +133,8 @@ function jwtMiddleware(opts) {
 
     if (!secret)
         throw new Error("jwtMiddleware requires opts.secret");
+    // SECURITY: opts.secret should be a 32+ byte random key; a short secret is
+    // brute-forceable. Not hard-rejected (back-compat), but strongly recommended.
 
     return function jwtMw(req, res) {
         // Check if path is excluded

@@ -24,6 +24,12 @@ function tableExists(name) {
 }
 
 function rowCount(name) {
+    // All callers pass hardcoded `_hull_*` literals, but this interpolates the
+    // name into SQL (SQLite can't parameterize identifiers), so fail closed on
+    // anything that isn't a plain identifier -- a future variable table name can
+    // never become an injection vector (mirrors auth-health.lua).
+    if (typeof name !== "string" || !/^[A-Za-z0-9_]+$/.test(name))
+        throw new Error("auth-health.rowCount: table name must be a plain identifier");
     if (!tableExists(name)) return 0;
     const rows = db.query("SELECT count(*) AS n FROM " + name);
     return (rows && rows[0] && rows[0].n) || 0;

@@ -223,6 +223,22 @@ function query(name, q, opts) {
         throw new Error("query string is required");
 
     const o = opts || {};
+
+    // Bound the FTS5 MATCH expression (mirrors search.lua). The query is safely
+    // `?`-parameterized (no injection), but a pathological expression (thousands
+    // of OR terms, deeply nested NEAR/parens) is a CPU-amplification DoS when a
+    // public search box forwards untrusted input verbatim.
+    const maxLen = o.maxQueryLen !== undefined ? o.maxQueryLen : 1024;
+    const maxTerms = o.maxQueryTerms !== undefined ? o.maxQueryTerms : 64;
+    if (q.length > maxLen)
+        throw new Error("query too long (" + q.length + " > " + maxLen + ")");
+    const complexity =
+        (q.match(/[()]/g) || []).length +
+        (q.match(/\bOR\b/g) || []).length +
+        (q.match(/\bNEAR\b/g) || []).length;
+    if (complexity > maxTerms)
+        throw new Error("query too complex (>" + maxTerms +
+                        " operators/groups); bound untrusted input");
     const table = ftsTable(name);
     let limit = o.limit !== undefined ? o.limit : 20;
     let offset = o.offset !== undefined ? o.offset : 0;

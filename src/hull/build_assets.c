@@ -44,7 +44,8 @@
  * on the embedded-platform macros. */
 #if defined(HL_BUILD_EMBEDDED) || defined(HL_BUILD_EMBEDDED_MULTIARCH) \
     || defined(HL_BUILD_EMBEDDED_RUNTIME) || defined(HL_BUILD_EMBEDDED_HTTP) \
-    || defined(HL_BUILD_EMBEDDED_TUI) || defined(HL_BUILD_EMBEDDED_WASM)
+    || defined(HL_BUILD_EMBEDDED_TUI) || defined(HL_BUILD_EMBEDDED_WASM) \
+    || defined(HL_BUILD_EMBEDDED_SQLITE) || defined(HL_BUILD_EMBEDDED_SQLITE_RT)
 static int write_blob(const char *path, const unsigned char *data, size_t len)
 {
     FILE *f = fopen(path, "wb");

@@ -234,6 +234,25 @@ function search.query(name, query, opts)
     end
     opts = opts or {}
 
+    -- Bound the FTS5 MATCH expression. The query is safely `?`-parameterized
+    -- (no SQL injection), but a pathological expression (thousands of OR terms,
+    -- deeply nested NEAR/parentheses) is a CPU-amplification DoS when a public
+    -- search box forwards untrusted `req.query.q` verbatim. Cap length and
+    -- boolean-operator/paren count; callers that legitimately need more can
+    -- raise opts.max_query_len / opts.max_query_terms.
+    local max_len = opts.max_query_len or 1024
+    local max_terms = opts.max_query_terms or 64
+    if #query > max_len then
+        error("search.query: query too long (" .. #query .. " > " .. max_len .. ")")
+    end
+    local _, term_count = query:gsub("[%(%)]", "")           -- parentheses
+    local _, or_count = query:gsub("%f[%w]OR%f[%W]", "")     -- OR operators
+    local _, near_count = query:gsub("%f[%w]NEAR%f[%W]", "") -- NEAR operators
+    if term_count + or_count + near_count > max_terms then
+        error("search.query: query too complex (>" .. max_terms
+              .. " operators/groups); bound untrusted input")
+    end
+
     local tbl = fts_table(name)
     local limit = opts.limit or 20
     local offset = opts.offset or 0

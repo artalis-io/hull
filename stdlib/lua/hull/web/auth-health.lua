@@ -58,6 +58,13 @@ end
 
 -- Helper: how many rows in a table (0 if table missing).
 local function row_count(name)
+    -- All callers pass hardcoded `_hull_*` literals, but this interpolates the
+    -- name into SQL (SQLite can't parameterize identifiers), so fail closed on
+    -- anything that isn't a plain identifier -- a future variable table name
+    -- can never become an injection vector.
+    if type(name) ~= "string" or not name:find("^[%w_]+$") then
+        error("auth-health.row_count: table name must be a plain identifier")
+    end
     if not table_exists(name) then return 0 end
     local rows = db.query("SELECT count(*) AS n FROM " .. name)
     return (rows and rows[1] and rows[1].n) or 0
