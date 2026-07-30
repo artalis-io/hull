@@ -2766,10 +2766,19 @@ platform-pure-compute: platform-%:
 # EMBED_PLATFORM path xxd's this instead of the sqlite-full libhull_platform.a
 # when HL_APP_BASE_SQLITELESS=1. See docs/sqlite_feature.md.
 SQLITELESS_PLATFORM_LIB := $(BUILDDIR)/libhull_platform-sqliteless.a
+ifeq ($(TRUST_PLATFORM_LIB),1)
+# Release stage 3: the SQLite-less base was downloaded from build-platform-native
+# (the exact bytes sign-platform-manifest hashed). Trust it as-is, like
+# $(PLATFORM_LIB) above; never sub-build over the signed artifact.
+$(SQLITELESS_PLATFORM_LIB): | $(BUILDDIR)
+	@test -f $@ || (echo "ERROR: TRUST_PLATFORM_LIB=1 but $@ is missing"; exit 1)
+	@echo "$@: trusting pre-built artifact (TRUST_PLATFORM_LIB=1)"
+else
 $(SQLITELESS_PLATFORM_LIB):
 	$(MAKE) platform BUILDDIR=$(BUILDDIR)/sqliteless HL_SQLITE_FEATURE=1
 	cp $(BUILDDIR)/sqliteless/libhull_platform.a $@
 	@echo "built $@ (SQLite-less app-build base)"
+endif
 .PHONY: platform-sqliteless
 platform-sqliteless: $(SQLITELESS_PLATFORM_LIB)
 

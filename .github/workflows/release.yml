@@ -75,12 +75,14 @@ jobs:
             make feature-lua feature-js feature-http feature-http-lua
             feature-http-js feature-tui-lua feature-tui-js
             feature-wasm feature-wasm-lua feature-wasm-js
+            feature-sqlite feature-sqlite-lua feature-sqlite-js
       - name: Build embedded feature archives (macOS)
         if: runner.os == 'macOS'
         run: >
           make feature-lua feature-js feature-http feature-http-lua
           feature-http-js feature-tui-lua feature-tui-js
           feature-wasm feature-wasm-lua feature-wasm-js
+          feature-sqlite feature-sqlite-lua feature-sqlite-js
       - name: Upload embedded feature archives
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
         with:
@@ -96,6 +98,9 @@ jobs:
             build/libhull_feature-wasm.a
             build/libhull_feature-wasm-lua.a
             build/libhull_feature-wasm-js.a
+            build/libhull_feature-sqlite.a
+            build/libhull_feature-sqlite-lua.a
+            build/libhull_feature-sqlite-js.a
 
       # Per-flavor platform libs for `hull build --flavor` + `hull platform
       # install`. Each native platform-<flavor> target builds into its own obj
@@ -107,8 +112,13 @@ jobs:
         if: runner.os == 'Linux'
         uses: ./.github/actions/hull-build-container
         with:
+          # `sqliteless` is not a --flavor preset: it is the Phase D app-build
+          # base (docs/sqlite_feature.md), built by the `platform-sqliteless`
+          # target (HL_SQLITE_FEATURE=1 sub-build) and embedded by stage 3 when
+          # HL_APP_BASE_SQLITELESS=1. It shares this step's obj-dir isolation +
+          # arch-qualified naming.
           run: |
-            for f in pure-compute; do
+            for f in pure-compute sqliteless; do
               make "platform-$f"
               mv "build/libhull_platform-$f.a" \
                  "build/libhull_platform-$f-${{ matrix.name }}.a"
@@ -116,7 +126,7 @@ jobs:
       - name: Build platform flavors (macOS)
         if: runner.os == 'macOS'
         run: |
-          for f in pure-compute; do
+          for f in pure-compute sqliteless; do
             make "platform-$f"
             mv "build/libhull_platform-$f.a" \
                "build/libhull_platform-$f-${{ matrix.name }}.a"
@@ -261,14 +271,20 @@ jobs:
         run: |
           set -eu
           {
+            # The native arch entry hashes the EMBEDDED app-build base. Phase D
+            # (docs/sqlite_feature.md): stage 3 embeds the SQLite-LESS base
+            # (HL_APP_BASE_SQLITELESS=1), so verify_platform checks it against
+            # THIS hash -- hash the sqlite-less base, not the sqlite-full one.
+            # Cosmo keeps SQLite in-base (no Phase D), so its entries are the
+            # sqlite-full cosmo archives.
             sha256sum \
-              platforms/platform-linux-x86_64/libhull_platform.a \
+              platforms/platform-flavors-linux-x86_64/libhull_platform-sqliteless-linux-x86_64.a \
               | awk '{print $1"  linux-x86_64"}'
             sha256sum \
-              platforms/platform-linux-aarch64/libhull_platform.a \
+              platforms/platform-flavors-linux-aarch64/libhull_platform-sqliteless-linux-aarch64.a \
               | awk '{print $1"  linux-aarch64"}'
             sha256sum \
-              platforms/platform-darwin-arm64/libhull_platform.a \
+              platforms/platform-flavors-darwin-arm64/libhull_platform-sqliteless-darwin-arm64.a \
               | awk '{print $1"  darwin-arm64"}'
             sha256sum \
               platforms/platform-cosmo/libhull_platform.x86_64-cosmo.a \
@@ -276,12 +292,14 @@ jobs:
             sha256sum \
               platforms/platform-cosmo/libhull_platform.aarch64-cosmo.a \
               | awk '{print $1"  cosmo-aarch64"}'
-            # Embedded feature archives (issue #114), native arches only (cosmo
-            # composes nothing). Name column is the COMPOSED asset name that
-            # build.lua records in package.sig.gethull.composed and that the
-            # runtime §5c looks up: "libhull_feature-<stem>.<arch>.a".
+            # Embedded feature archives (issue #114 + SQLite Phase C.2b/D), native
+            # arches only (cosmo composes nothing). Name column is the COMPOSED
+            # asset name that build.lua records in package.sig.gethull.composed
+            # and that the runtime §5c looks up: "libhull_feature-<stem>.<arch>.a".
+            # `sqlite` = the engine (Phase D), `sqlite-lua`/`sqlite-js` = the udf
+            # bridges (Phase C.2b).
             for arch in linux-x86_64 linux-aarch64 darwin-arm64; do
-              for stem in lua js http http-lua http-js tui-lua tui-js wasm wasm-lua wasm-js; do
+              for stem in lua js http http-lua http-js tui-lua tui-js wasm wasm-lua wasm-js sqlite sqlite-lua sqlite-js; do
                 f="platforms/platform-features-$arch/libhull_feature-$stem.a"
                 sha256sum "$f" \
                   | awk -v n="libhull_feature-$stem.$arch.a" '{print $1"  "n}'
@@ -532,6 +550,18 @@ jobs:
           name: platform-features-${{ matrix.name }}
           path: build/
 
+      # Phase D (docs/sqlite_feature.md): the SQLite-LESS app-build base. Land it
+      # at build/libhull_platform-sqliteless.a (the name the Makefile's
+      # SQLITELESS_PLATFORM_LIB + TRUST_PLATFORM_LIB expect) so HL_APP_BASE_SQLITELESS=1
+      # embeds these exact signed bytes.
+      - name: Download SQLite-less app-build base (this arch)
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
+        with:
+          name: platform-flavors-${{ matrix.name }}
+          path: build/flavors/
+      - name: Stage SQLite-less base
+        run: cp build/flavors/libhull_platform-sqliteless-${{ matrix.name }}.a build/libhull_platform-sqliteless.a
+
       - name: Download signed manifest header
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
         with:
@@ -544,24 +574,27 @@ jobs:
         # See same step in build-cosmo for rationale.
         run: |
           set -eu
-          actual=$(sha256sum build/libhull_platform.a | awk '{print $1}')
+          # Phase D: the native arch entry hashes the SQLite-LESS base (what stage
+          # 3 embeds via HL_APP_BASE_SQLITELESS=1), so verify THAT against it.
+          actual=$(sha256sum build/libhull_platform-sqliteless.a | awk '{print $1}')
           expected=$(awk -v a="${{ matrix.name }}" '$2==a {print $1}' build/platform-manifest.txt)
           if [ -z "$expected" ]; then
             echo "::error::arch '${{ matrix.name }}' not in signed manifest"
             exit 1
           fi
           if [ "$actual" != "$expected" ]; then
-            echo "::error::libhull_platform.a SHA mismatch"
+            echo "::error::SQLite-less base SHA mismatch"
             echo "  expected (signed manifest): $expected"
             echo "  actual   (downloaded .a):   $actual"
             exit 1
           fi
-          echo "✓ ${{ matrix.name }} .a SHA matches signed manifest: $actual"
+          echo "✓ ${{ matrix.name }} SQLite-less base SHA matches signed manifest: $actual"
           # Same cross-check for each embedded feature archive: its downloaded
           # bytes MUST match the signed-manifest entry keyed by the composed asset
           # name (libhull_feature-<stem>.<arch>.a), or the runtime §5c check on
-          # every app this hull builds would fail.
-          for stem in lua js http http-lua http-js tui-lua tui-js wasm wasm-lua wasm-js; do
+          # every app this hull builds would fail. Includes the SQLite engine
+          # (sqlite) + udf bridges (sqlite-lua/sqlite-js).
+          for stem in lua js http http-lua http-js tui-lua tui-js wasm wasm-lua wasm-js sqlite sqlite-lua sqlite-js; do
             fa="build/libhull_feature-$stem.a"
             name="libhull_feature-$stem.${{ matrix.name }}.a"
             fact=$(sha256sum "$fa" | awk '{print $1}')
@@ -599,12 +632,12 @@ jobs:
         with:
           user: host
           run: |
-            make EMBED_PLATFORM=1 TRUST_PLATFORM_LIB=1 TRUST_FEATURE_LIBS=1
+            make EMBED_PLATFORM=1 HL_APP_BASE_SQLITELESS=1 TRUST_PLATFORM_LIB=1 TRUST_FEATURE_LIBS=1
             make hardening
             make check-hardening
       - name: Build hull with embedded platform (macOS)
         if: runner.os == 'macOS'
-        run: make EMBED_PLATFORM=1 TRUST_PLATFORM_LIB=1 TRUST_FEATURE_LIBS=1
+        run: make EMBED_PLATFORM=1 HL_APP_BASE_SQLITELESS=1 TRUST_PLATFORM_LIB=1 TRUST_FEATURE_LIBS=1
       - name: Hardening summary (macOS)
         if: runner.os == 'macOS'
         run: make hardening
