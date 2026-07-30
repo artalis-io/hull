@@ -259,6 +259,22 @@ function M.resolve_wasm_rt_lib(rt, tmpdir, ctx)
     return M.resolve_lib(libname, asset, ctx)
 end
 
+--- Resolve the SQLite ENGINE archive (libhull_feature-sqlite.a: cap/db_sqlite +
+--- vendored sqlite3 + FTS5 + udf cap + sqlite agent), embedded first (Phase D).
+--- On an HL_APP_BASE_SQLITELESS distributed hull the engine ships embedded, so a
+--- db app auto-composes it with no `hull feature install sqlite`; otherwise this
+--- falls back to the local build dir / installed feature cache (the pre-Phase-D
+--- path). Mirrors resolve_wasm_lib.
+function M.resolve_sqlite_lib(tmpdir, ctx)
+    local libname = "libhull_feature-sqlite.a"
+    if tool.extract_feature_sqlite and tool.extract_feature_sqlite(tmpdir)
+       and file_exists(tmpdir .. "/" .. libname) then
+        return tmpdir .. "/" .. libname, "embedded"
+    end
+    local asset = ctx.plat and ("libhull_feature-sqlite-" .. ctx.plat .. ".a") or nil
+    return M.resolve_lib(libname, asset, ctx)
+end
+
 --- Resolve the per-runtime SQLite UDF bridge (libhull_feature-sqlite-<rt>.a),
 --- embedded first. Holds mod_db_udf (the db.udf bindings); composed for the
 --- app's runtime whenever the app uses a udf-capable DB, so the runtime archive

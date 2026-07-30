@@ -435,6 +435,17 @@ ifeq ($(HL_SQLITE_FEATURE),1)
 override HL_ENABLE_SQLITE := 0
 endif
 
+# HL_APP_BASE_SQLITELESS=1 (Phase D, docs/sqlite_feature.md): the distributed
+# hull embeds a SQLite-LESS platform lib as the app-build base (built in a
+# HL_SQLITE_FEATURE=1 sub-build) plus the SQLite engine archive, so a stock
+# `hull build` produces SQLite-DROPPING apps (a db-free app links zero sqlite3.*;
+# a db app auto-composes the engine via the Phase C nm-probe gate). The hull
+# binary ITSELF stays SQLite-full (it links SQLITE_OBJ for its own toolchain:
+# hull test / agent). Only the EMBED_PLATFORM path honours this; a plain dev
+# `make` is unaffected. Default 0 so the default distributed behaviour is
+# unchanged until release.yml opts in. Cosmo ignores it (SQLite stays in-base).
+HL_APP_BASE_SQLITELESS ?= 0
+
 # Keel (KlTls) + mbedTLS are linked when an HTTP half OR PostgreSQL OR MySQL is
 # enabled (MySQL's caching_sha2_password full-auth + ed25519 need TLS + crypto).
 # HTTP still owns the -DHL_ENABLE_HTTP macro (above), so a DB-only build links
@@ -2748,6 +2759,20 @@ platform-pure-compute: platform-%:
 	cp $(BUILDDIR)/flavor-$*/libhull_platform.a $(BUILDDIR)/libhull_platform-$*.a
 	@echo "built $(BUILDDIR)/libhull_platform-$*.a"
 
+# ── SQLite-less app-build base (Phase D, HL_APP_BASE_SQLITELESS=1) ──────
+# The platform lib the distributed hull embeds as the DEFAULT app-build base.
+# Built in a dedicated object dir at HL_SQLITE_FEATURE=1 (SQLite dropped, DB core
+# intact) so it never clobbers the main sqlite-full build or build/hull. The
+# EMBED_PLATFORM path xxd's this instead of the sqlite-full libhull_platform.a
+# when HL_APP_BASE_SQLITELESS=1. See docs/sqlite_feature.md.
+SQLITELESS_PLATFORM_LIB := $(BUILDDIR)/libhull_platform-sqliteless.a
+$(SQLITELESS_PLATFORM_LIB):
+	$(MAKE) platform BUILDDIR=$(BUILDDIR)/sqliteless HL_SQLITE_FEATURE=1
+	cp $(BUILDDIR)/sqliteless/libhull_platform.a $@
+	@echo "built $@ (SQLite-less app-build base)"
+.PHONY: platform-sqliteless
+platform-sqliteless: $(SQLITELESS_PLATFORM_LIB)
+
 # ── DuckDB feature archive (composable feature: hull build --with=duckdb) ──
 # libhull_feature-duckdb.a bundles the DuckDB backend object (cap_db_duckdb.o,
 # which defines hl_db_backend_duckdb) + the isolated DuckDB static libs into ONE
@@ -3221,9 +3246,17 @@ CFLAGS += -DHL_BUILD_EMBEDDED -DHL_BUILD_EMBEDDED_MULTIARCH
 $(BUILD_ASSET_OBJ): $(EMBEDDED_PLATFORM_H) $(EMBEDDED_TEMPLATES_H)
 
 else ifneq ($(EMBED_PLATFORM),)
-# Single-arch embedding (existing behavior)
-$(EMBEDDED_PLATFORM_H): $(PLATFORM_LIB) | $(BUILDDIR)
-	xxd -i $< | sed 's/build_libhull_platform_a/hl_embedded_platform_a/g' | $(XXD_CONST_PIPE) > $@
+# Single-arch embedding (existing behavior). The app-build base is the
+# sqlite-full platform lib by default; HL_APP_BASE_SQLITELESS=1 (Phase D) swaps
+# in the SQLite-less sub-build so produced apps drop SQLite. Either way the hull
+# binary itself stays sqlite-full (it links its own objects, not this archive).
+ifeq ($(HL_APP_BASE_SQLITELESS),1)
+APP_BASE_LIB := $(SQLITELESS_PLATFORM_LIB)
+else
+APP_BASE_LIB := $(PLATFORM_LIB)
+endif
+$(EMBEDDED_PLATFORM_H): $(APP_BASE_LIB) | $(BUILDDIR)
+	xxd -i $< | sed 's/build_libhull_platform\(_sqliteless\)\{0,1\}_a/hl_embedded_platform_a/g' | $(XXD_CONST_PIPE) > $@
 
 $(EMBEDDED_TEMPLATES_H): templates/app_main.c templates/entry.h | $(BUILDDIR)
 	@echo "/* Auto-generated — do not edit */" > $@
@@ -3283,6 +3316,20 @@ $(EMBEDDED_SQLITE_RT_H): $(BUILDDIR)/libhull_feature-sqlite-lua.a $(BUILDDIR)/li
 
 CFLAGS += -DHL_BUILD_EMBEDDED -DHL_BUILD_EMBEDDED_RUNTIME -DHL_BUILD_EMBEDDED_HTTP -DHL_BUILD_EMBEDDED_TUI -DHL_BUILD_EMBEDDED_WASM -DHL_BUILD_EMBEDDED_SQLITE_RT
 $(BUILD_ASSET_OBJ): $(EMBEDDED_PLATFORM_H) $(EMBEDDED_TEMPLATES_H) $(EMBEDDED_RUNTIME_H) $(EMBEDDED_HTTP_H) $(EMBEDDED_TUI_H) $(EMBEDDED_WASM_H) $(EMBEDDED_SQLITE_RT_H)
+
+# Phase D: when the app-build base is SQLite-less, embed the SQLite ENGINE
+# archive (cap/db_sqlite + vendored sqlite3 + FTS5 + udf cap + sqlite agent) so a
+# db app auto-composes it with no `hull feature install sqlite`. Mirrors the WASM
+# core embed. Only pulled when HL_APP_BASE_SQLITELESS=1 (else the engine is
+# in-base and this would be ~2 MB of dormant bloat).
+ifeq ($(HL_APP_BASE_SQLITELESS),1)
+EMBEDDED_SQLITE_H := $(BUILDDIR)/embedded_sqlite.h
+$(EMBEDDED_SQLITE_H): $(BUILDDIR)/libhull_feature-sqlite.a | $(BUILDDIR)
+	@echo "/* Auto-generated - do not edit */" > $@
+	@xxd -i $(BUILDDIR)/libhull_feature-sqlite.a | sed 's/build_libhull_feature_sqlite_a/hl_embedded_feature_sqlite_a/g' | $(XXD_CONST_PIPE) >> $@
+CFLAGS += -DHL_BUILD_EMBEDDED_SQLITE
+$(BUILD_ASSET_OBJ): $(EMBEDDED_SQLITE_H)
+endif
 endif
 
 # Hull binary
