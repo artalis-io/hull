@@ -225,17 +225,10 @@ local function main()
         tool.stderr("Usage: hull new <name> [--runtime lua|js] [--cli]\n")
         tool.exit(1)
     end
-    -- The name becomes a directory that gets mkdir'd + written into. Reject
-    -- absolute paths and '..' segments so `hull new` can only scaffold under the
-    -- current directory (defense in depth: keeps a stray name from writing
-    -- elsewhere on the filesystem).
-    if opts.name:sub(1, 1) == "/" or opts.name == ".."
-       or opts.name:find("^%.%./") or opts.name:find("/%.%./")
-       or opts.name:find("/%.%.$") then
-        tool.stderr("hull new: project name must be a relative path without "
-                    .. "'..' segments: '" .. opts.name .. "'\n")
-        tool.exit(1)
-    end
+    -- Note: the name IS the target directory and may be relative OR absolute
+    -- (like `git init <path>` / `cargo new <path>`); the user explicitly chooses
+    -- where to scaffold, and the file_exists gate below refuses to clobber, so
+    -- no path restriction is imposed here.
 
     local runtime = opts.runtime
     if runtime ~= "lua" and runtime ~= "js" then
