@@ -32,6 +32,9 @@
 #ifdef HL_BUILD_EMBEDDED_SQLITE_RT
 #include "embedded_sqlite_rt.h" /* hl_embedded_feature_sqlite_{lua,js}_a[] */
 #endif
+#ifdef HL_BUILD_EMBEDDED_SQLITE
+#include "embedded_sqlite.h"    /* hl_embedded_feature_sqlite_a[] (engine) */
+#endif
 
 /* ── Helper: write data to a file ──────────────────────────────────── */
 
@@ -217,6 +220,23 @@ int hl_build_extract_feature_tui_rt(const char *dir, const char *rt)
     return write_blob(path, data, len);
 #else
     (void)dir; (void)rt;
+    return -1;
+#endif
+}
+
+int hl_build_extract_feature_sqlite(const char *dir)
+{
+#ifdef HL_BUILD_EMBEDDED_SQLITE
+    if (!dir)
+        return -1;
+    char path[1024];
+    int n = snprintf(path, sizeof(path), "%s/libhull_feature-sqlite.a", dir);
+    if (n < 0 || (size_t)n >= sizeof(path))
+        return -1;
+    return write_blob(path, hl_embedded_feature_sqlite_a,
+                      hl_embedded_feature_sqlite_a_len);
+#else
+    (void)dir;
     return -1;
 #endif
 }

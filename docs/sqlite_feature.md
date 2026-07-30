@@ -203,11 +203,30 @@ WASM). `HL_ENABLE_SQLITE` stays the compile switch; the feature is the
       pre-existing `JS_FreeRuntime` GC-leak assertion (reproduces on pre-C.2
       `main`; the DB isn't closed before the runtime is freed). Tracked
       separately; unrelated to the bridge split.
-- **Phase D — embed + publish.** Embed the SQLite-less base + the archive in the
-  distributed `hull` so a stock install produces SQLite-dropping apps, add the
-  composed-feature signing entry (platform domain, like the runtime archives),
-  and make the SQLite-less base the default app-build target. Cosmo keeps SQLite
-  in-base (fat APE can't force-load a native archive).
+- **Phase D — embed the SQLite-less base as the default app-build target.**
+  🚧 CORE landed (gated), release wiring pending.
+  - **Model.** The `hull` binary stays SQLite-full (it links `SQLITE_OBJ` for its
+    own toolchain: `hull test`, `hull agent db`). Only the **embedded app-build
+    base** goes SQLite-less, so a stock `hull build` produces SQLite-dropping
+    apps: a db-free app links zero `sqlite3.*`; a db app auto-composes the engine
+    (Phase C nm-probe) + the udf bridge (C.2b).
+  - **Gate.** `make HL_APP_BASE_SQLITELESS=1` (in the `EMBED_PLATFORM` path). The
+    embedded base is built in a dedicated `HL_SQLITE_FEATURE=1` sub-build
+    (`platform-sqliteless` → `build/sqliteless/`) so it never clobbers the main
+    sqlite-full build or `build/hull`; `EMBEDDED_PLATFORM_H` xxd's that instead of
+    the sqlite-full lib. The engine `libhull_feature-sqlite.a` is embedded too
+    (`EMBEDDED_SQLITE_H`, `HL_BUILD_EMBEDDED_SQLITE`) and resolved **embedded-first**
+    (`fcompose.resolve_sqlite_lib`, mirrors the wasm core). Default `0` keeps the
+    distributed behaviour unchanged until release.yml opts in.
+  - **Signing.** An embedded-resolved engine is recorded in the composed
+    attestation under the **platform** domain (embedded-asset name
+    `libhull_feature-sqlite.<arch>.a`, §5c FATAL, like the runtime/wasm cores);
+    an externally-installed engine keeps the **release** domain. release.yml must
+    (a) build + embed the SQLite-less base + engine, (b) sign the SQLite-less base
+    into `embedded_platform_sig.h` so `verify_platform` passes, and (c) add the
+    engine hash to the platform manifest so §5c can verify it. **(pending)**
+  - **Cosmo** keeps SQLite in-base (a fat APE can't force-load a native archive);
+    `HL_APP_BASE_SQLITELESS` is native-only.
 
 ## Testing
 

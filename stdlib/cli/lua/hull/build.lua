@@ -1525,8 +1525,18 @@ int main(int argc, char **argv) { return hl_app_run(argc, argv); }
             -- embedded release pubkey).
             local libname = "libhull_feature-" .. fname .. ".a"
             local asset = plat and ("libhull_feature-" .. fname .. "-" .. plat .. ".a") or nil
-            local lib, from = fcompose.resolve_lib(libname, asset,
-                                                   { hull_dir = hull_dir, plat = plat })
+            local lib, from
+            if fname == "sqlite" then
+                -- Phase D: the SQLite engine ships EMBEDDED in an
+                -- HL_APP_BASE_SQLITELESS hull, so resolve it embedded-first (like
+                -- the wasm core). Falls back to the local build dir / installed
+                -- feature cache on a pre-Phase-D hull.
+                lib, from = fcompose.resolve_sqlite_lib(tmpdir,
+                                                        { hull_dir = hull_dir, plat = plat })
+            else
+                lib, from = fcompose.resolve_lib(libname, asset,
+                                                 { hull_dir = hull_dir, plat = plat })
+            end
             if not lib then
                 if from == "cache-verify-failed" then
                     tool.stderr("hull build: cached " .. fname .. " feature lib could not "
@@ -1550,10 +1560,23 @@ int main(int argc, char **argv) { return hl_app_run(argc, argv); }
             end
             local from_cache = (from == "cache")
             local dest = tmpdir .. "/" .. libname
-            tool.copy(lib, dest)
-            -- Externally-installed feature: attested by the release-key
-            -- hull.sha256 under its release asset name (libhull_feature-<n>-<arch>.a).
-            record_composed(asset or libname, dest, "release")
+            -- An embedded-resolved engine (Phase D: resolve_sqlite_lib extracts
+            -- straight into tmpdir) is already at `dest`; copying a file onto
+            -- itself truncates it to 0 bytes, so guard like the wasm compose.
+            if lib ~= dest then tool.copy(lib, dest) end
+            -- Attestation domain (docs/composed_feature_signing.md): an archive
+            -- resolved EMBEDDED (Phase D: the SQLite engine on an
+            -- HL_APP_BASE_SQLITELESS hull) ships INSIDE hull, so it is attested by
+            -- the platform-key manifest (§5c FATAL) under the embedded-asset name
+            -- `libhull_feature-<n>.<arch>.a`, exactly like the runtime/wasm cores.
+            -- An externally-installed feature keeps the release domain + its
+            -- release-asset name `libhull_feature-<n>-<arch>.a`.
+            if from == "embedded" then
+                record_composed("libhull_feature-" .. fname .. "."
+                                .. (plat or "") .. ".a", dest, "platform")
+            else
+                record_composed(asset or libname, dest, "release")
+            end
             local is_darwin = plat and plat:sub(1, 6) == "darwin"
 
             if spec.whole_archive then
@@ -1608,7 +1631,8 @@ int main(int argc, char **argv) { return hl_app_run(argc, argv); }
             for _, l in ipairs(platlibs) do feature_libs[#feature_libs + 1] = l end
 
             print("hull build: composed feature '" .. fname .. "'"
-                  .. (from_cache and " (~/.hull/feature)" or " (local)"))
+                  .. (from == "embedded" and " (embedded)"
+                      or from_cache and " (~/.hull/feature)" or " (local)"))
         end
 
         -- A C++ feature archive cannot be linked by the embedded TinyCC (it links
