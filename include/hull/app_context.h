@@ -65,6 +65,16 @@ typedef struct HlAppContextOpts {
      * Use hl_app_context_load() to load app code later. */
     int           no_load;
 
+    /* Tolerate a top-level error while loading the app (read-only extraction
+     * paths only). app.manifest() stores the manifest the moment it is called,
+     * so an app that errors LATER in its top-level code (e.g. does DB work at
+     * module scope against an unmigrated :memory: schema) still has an
+     * extractable manifest. With this set, load_app's failure is logged but not
+     * fatal: init succeeds, app_loaded stays 0, gate_modules is skipped, and the
+     * caller can still call extract_manifest. Consumers that RUN the app
+     * (serve/test) leave this 0 so a broken app fails loudly. */
+    int           tolerate_load_error;
+
     /* Module-system gating:
      *   1 = run the resolver after manifest extraction and wire the
      *       result onto rt->module_set so require/import enforce the

@@ -88,6 +88,10 @@ int hl_agent_deploy(const char *app_dir, ShJsonBuf *out)
         .entry_point = entry_point,
         .no_db = 0,
         .no_migrate = 1,
+        /* Read-only introspection: if the app errors LATE in its top-level code
+         * (e.g. does DB work at module scope against the unmigrated :memory:
+         * schema), still recover the manifest app.manifest() already stored. */
+        .tolerate_load_error = 1,
     };
 
     HlManifest manifest;
