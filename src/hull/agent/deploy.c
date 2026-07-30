@@ -73,12 +73,21 @@ int hl_agent_deploy(const char *app_dir, ShJsonBuf *out)
     if (!entry_point)
         return hl_agent_write_error(out, "no entry point found (app.lua or app.js)");
 
-    /* Initialize app context to extract manifest */
+    /* Initialize app context to extract manifest. Register the hull.db module
+     * (backed by an in-memory DB) rather than running in no_db mode: apps
+     * commonly acquire the connection at module top level
+     * (`local db = require("hull.db").default()`), which would otherwise fail
+     * manifest extraction with "module not found: hull.db" and wrongly report
+     * no manifest. no_migrate keeps this read-only introspection from running
+     * the app's migrations; db_path stays NULL (-> :memory:), so there is no
+     * file side effect and the connection is discarded when the context is
+     * freed. */
     HlAppContext *ctx = NULL;
     HlAppContextOpts opts = {
         .app_dir = app_dir,
         .entry_point = entry_point,
-        .no_db = 1,
+        .no_db = 0,
+        .no_migrate = 1,
     };
 
     HlManifest manifest;
