@@ -279,10 +279,15 @@ int hl_app_context_init(HlAppContext **out, const HlAppContextOpts *opts)
     ctx->rt_init = 1;
 
     if (!opts->no_load) {
-        if (load_app_code(ctx, entry) != 0) {
+        int load_rc = load_app_code(ctx, entry);
+        if (load_rc != 0 && !opts->tolerate_load_error) {
             hl_app_context_free(ctx);
             return -1;
         }
+        /* On a tolerated load error the app is only PARTIALLY loaded: skip
+         * module gating (no reliable module surface) but keep the context so the
+         * caller can still extract whatever manifest app.manifest() stored
+         * before the error. load_app_code left app_loaded = 0. */
 
         /* Module-system gating (opt-in via opts.gate_modules).
          *
@@ -296,7 +301,7 @@ int hl_app_context_init(HlAppContext **out, const HlAppContextOpts *opts)
          *
          * The set lives in HlAppContext (lifetime matches the runtime).
          * Resolver failure is fatal — caller sees init failure. */
-        if (opts->gate_modules) {
+        if (load_rc == 0 && opts->gate_modules) {
             HlManifest m = {0};
             if (ctx->rt->vt->extract_manifest(ctx->rt, &m) == 0) {
                 char err[HL_MODULE_RESOLVER_ERR_MAX] = {0};

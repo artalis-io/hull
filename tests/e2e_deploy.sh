@@ -216,6 +216,11 @@ AGENT_OUT=$("$HULL" agent deploy "$SRCDIR/examples/todo" 2>/dev/null)
 check_contains "agent: runtime" "$AGENT_OUT" '"runtime"'
 check_contains "agent: lua" "$AGENT_OUT" '"lua"'
 check_contains "agent: manifest" "$AGENT_OUT" '"manifest"'
+# todo acquires the DB at module top level AND does DB work there (search
+# reindex against the unmigrated :memory: schema). The manifest must still be
+# recovered: app.manifest() stored it before the top-level error, and the
+# extraction context tolerates the load error (regression: tolerate_load_error).
+check_contains "agent todo: manifest present (top-level DB work)" "$AGENT_OUT" '"present":true'
 check_contains "agent: configs" "$AGENT_OUT" '"configs"'
 check_contains "agent: files" "$AGENT_OUT" '"files"'
 check_contains "agent: recommendations" "$AGENT_OUT" '"recommendations"'
