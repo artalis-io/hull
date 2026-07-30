@@ -90,6 +90,9 @@ function jwt.sign(payload, secret)
     if not payload or not secret then
         return nil, "payload and secret are required"
     end
+    -- SECURITY: use a 32+ byte random HMAC key. A short (<16 byte) HS256 secret
+    -- is brute-forceable. Not hard-rejected here (would break existing apps),
+    -- but strongly recommended; oauth.init enforces >=16 for its state secret.
 
     local claims = {}
     for k, v in pairs(payload) do claims[k] = v end

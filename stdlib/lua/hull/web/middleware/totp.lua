@@ -370,12 +370,10 @@ end
 -- the per-comparison side-channel uniform.
 local function ct_eq(a, b)
     if type(a) ~= "string" or type(b) ~= "string" then return false end
-    if #a ~= #b then return false end
-    local diff = 0
-    for i = 1, #a do
-        diff = diff | (string.byte(a, i) ~ string.byte(b, i))
-    end
-    return diff == 0
+    -- Delegate to the C constant-time compare (the same primitive jwt/csrf use)
+    -- so the whole stdlib shares one audited implementation rather than a
+    -- per-module hand-rolled loop.
+    return crypto.constant_time_eq(a, b)
 end
 
 -- At-rest encryption: versioned NaCl secretbox.

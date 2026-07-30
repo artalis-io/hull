@@ -486,6 +486,10 @@ static JSValue js_db_udf_unregister(JSContext *ctx, JSValueConst this_val,
         JS_FreeCString(ctx, sql_name);
         return JS_ThrowInternalError(ctx, "database not available");
     }
+    /* NOTE: SQLite keys functions by (name, nargs); nargs = -1 removes only a
+     * VARIADIC registration. A udf registered with a specific arity (opts.args
+     * = N) is not removed here (register arity is not tracked). register
+     * defaults to variadic, matching the common case. */
     int rc = sqlite3_create_function_v2(
         raw_db, sql_name, -1, SQLITE_UTF8,
         NULL, NULL, NULL, NULL, NULL);

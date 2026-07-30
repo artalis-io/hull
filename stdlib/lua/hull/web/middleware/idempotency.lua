@@ -246,15 +246,10 @@ function idempotency.middleware(opts)
             else
                 -- Fingerprint comparison. Fingerprints are SHA-256(public
                 -- inputs) — not secrets — so timing leaks are not exploitable.
-                -- We still use a constant-time loop for consistency with jwt.lua
-                -- and csrf.lua so the comparison contract is the same everywhere
-                -- in the stdlib.
-                local diff = (row.fingerprint and #row.fingerprint or 0) == #fingerprint and 0 or 1
-                local n = math.min(#fingerprint, row.fingerprint and #row.fingerprint or 0)
-                for i = 1, n do
-                    diff = diff | (string.byte(row.fingerprint, i) ~ string.byte(fingerprint, i))
-                end
-                if diff ~= 0 then
+                -- We still use the C constant-time compare (crypto.constant_time_eq)
+                -- for consistency with jwt.lua/csrf.lua so the comparison contract
+                -- is one audited implementation everywhere in the stdlib.
+                if not crypto.constant_time_eq(row.fingerprint or "", fingerprint) then
                     res:status(409):json({
                         error = "idempotency key already used with different request body"
                     })

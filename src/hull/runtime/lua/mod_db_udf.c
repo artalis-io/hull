@@ -417,7 +417,13 @@ static int lua_db_udf_unregister(lua_State *L)
         return luaL_error(L, "db.udf.unregister: failed");
 #else
     /* Fall back to direct sqlite3 call when WASM (and the UDF cap helper)
-     * is compiled out — Lua/JS callback UDFs still work without WASM. */
+     * is compiled out — Lua/JS callback UDFs still work without WASM.
+     * NOTE: SQLite keys functions by (name, nargs); passing nargs = -1 removes
+     * only a VARIADIC registration. A udf registered with a specific arity
+     * (opts.args = N) is not removed by this path (the register arity is not
+     * tracked here). db.udf.register defaults to variadic, so this matches the
+     * common case; register with an explicit arity implies unregister is a
+     * no-op for it. */
     sqlite3 *raw_db = hl_db_sqlite_raw(conn);
     if (!raw_db)
         return luaL_error(L, "database not available");

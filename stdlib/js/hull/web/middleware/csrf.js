@@ -155,6 +155,8 @@ function middleware(opts) {
 
     if (!secret)
         throw new Error("csrf.middleware requires opts.secret");
+    // SECURITY: opts.secret should be a 32+ byte random key; a short secret is
+    // brute-forceable. Not hard-rejected (back-compat), but strongly recommended.
 
     // Resolve session id with the same precedence as the Lua sibling:
     // prefer req.ctx[sessionKey] (set by upstream session middleware

@@ -150,7 +150,9 @@ static int lua_http_request(lua_State *L)
         lua_pop(L, 1);
     }
 
-    KlClientResponse resp;
+    KlClientResponse resp = {0}; /* zero-init: resp.error is read on the rc!=0
+                                  * path; don't depend on the cap layer's
+                                  * internal memset ordering. */
     int rc = hl_cap_http_request(lua->base.http_cfg, method, url,
                                     headers, num_headers, body, body_len, &resp);
     if (rc != 0)
@@ -183,7 +185,9 @@ static int lua_http_get(lua_State *L)
         lua_pop(L, 1);
     }
 
-    KlClientResponse resp;
+    KlClientResponse resp = {0}; /* zero-init: resp.error is read on the rc!=0
+                                  * path; don't depend on the cap layer's
+                                  * internal memset ordering. */
     int rc = hl_cap_http_request(lua->base.http_cfg, "GET", url,
                                     headers, num_headers, NULL, 0, &resp);
     if (rc != 0)
@@ -220,7 +224,9 @@ static int lua_http_body_method(lua_State *L, const char *method)
         lua_pop(L, 1);
     }
 
-    KlClientResponse resp;
+    KlClientResponse resp = {0}; /* zero-init: resp.error is read on the rc!=0
+                                  * path; don't depend on the cap layer's
+                                  * internal memset ordering. */
     int rc = hl_cap_http_request(lua->base.http_cfg, method, url,
                                     headers, num_headers, body, body_len, &resp);
     if (rc != 0)
@@ -257,7 +263,9 @@ static int lua_http_delete(lua_State *L)
         lua_pop(L, 1);
     }
 
-    KlClientResponse resp;
+    KlClientResponse resp = {0}; /* zero-init: resp.error is read on the rc!=0
+                                  * path; don't depend on the cap layer's
+                                  * internal memset ordering. */
     int rc = hl_cap_http_request(lua->base.http_cfg, "DELETE", url,
                                     headers, num_headers, NULL, 0, &resp);
     if (rc != 0)

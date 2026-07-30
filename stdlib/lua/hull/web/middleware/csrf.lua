@@ -151,6 +151,8 @@ function csrf.middleware(opts)
     if not opts or not opts.secret then
         error("csrf.middleware requires opts.secret")
     end
+    -- SECURITY: opts.secret should be a 32+ byte random key; a short secret is
+    -- brute-forceable. Not hard-rejected (back-compat), but strongly recommended.
 
     local secret = opts.secret
     local session_key = opts.session_key or "session_id"

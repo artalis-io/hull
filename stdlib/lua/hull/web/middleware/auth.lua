@@ -63,7 +63,7 @@ function auth.session_middleware(opts)
         end
 
         -- Parse cookies from request
-        local cookies = cookie.parse(req.headers["cookie"])
+        local cookies = cookie.parse(req.headers["cookie"] or "")
         local session_id = cookies[cookie_name]
         local stale = false
 
@@ -124,6 +124,8 @@ function auth.jwt_middleware(opts)
     if not opts.secret then
         error("auth.jwt_middleware requires opts.secret")
     end
+    -- SECURITY: opts.secret should be a 32+ byte random key; a short secret is
+    -- brute-forceable. Not hard-rejected (back-compat), but strongly recommended.
 
     local secret = opts.secret
     local optional = opts.optional or false
@@ -190,6 +192,12 @@ end
 --                   Mirrors the JS option.
 --
 -- @treturn string  Newly-created session id (hex).
+--
+-- NOTE: this legacy helper creates a fresh session but does NOT rotate/destroy
+-- any pre-existing session id, so it does not defend against session fixation.
+-- Prefer `session.login_handler(cookie)` (from hull/web/middleware/session),
+-- which rotates by default (opts.rotate = true) and wires the Set-Cookie +
+-- response in one line. Keep this only for simple flows with no prior session.
 -- @usage
 -- app.post("/login", function(req, res)
 --     local user = authenticate(req)

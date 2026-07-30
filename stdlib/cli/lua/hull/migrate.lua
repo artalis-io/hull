@@ -39,7 +39,7 @@ end
 -- ── Helpers ──────────────────────────────────────────────────────────
 
 local function find_next_sequence(dir)
-    local files = tool.find_files(dir, "*.sql")
+    local files = tool.find_files(dir, "*.sql") or {}
     local max_seq = 0
 
     for _, path in ipairs(files) do

@@ -148,6 +148,14 @@ local function parse_args()
             tool.stderr("hull deploy: " .. label .. " cannot start with '-': '" .. value .. "'\n")
             tool.exit(1)
         end
+        -- Reject '..' segments: the charset permits '.'+'/', so without this a
+        -- --data-dir / --install-dir like `/var/lib/hull/../..` would retarget
+        -- the systemd ExecStart / ReadWritePaths / install.sh mkdir paths.
+        if value == ".." or value:find("^%.%./") or value:find("/%.%./")
+           or value:find("/%.%.$") then
+            tool.stderr("hull deploy: " .. label .. " must not contain '..': '" .. value .. "'\n")
+            tool.exit(1)
+        end
     end
     if opts.user then validate_ident(opts.user, "--user") end
     validate_ident(opts.name, "--name")
@@ -211,14 +219,32 @@ local function introspect_app(app_dir)
                 local m = app.get_manifest()
                 if m then
                     info.manifest = m
+                    -- The manifest is UNTRUSTED third-party input that gets
+                    -- interpolated into the generated Dockerfile / fly.toml /
+                    -- systemd unit. Validate each entry so a value containing a
+                    -- newline (or shell/TOML metachars) can't inject directives;
+                    -- skip + warn on anything malformed rather than emitting it.
                     if m.env then
                         for _, v in ipairs(m.env) do
-                            info.env_vars[#info.env_vars + 1] = v
+                            if type(v) == "string" and v:find("^[A-Za-z_][A-Za-z0-9_]*$") then
+                                info.env_vars[#info.env_vars + 1] = v
+                            else
+                                tool.stderr("hull deploy: skipping invalid env name in manifest: "
+                                            .. tostring(v) .. "\n")
+                            end
                         end
                     end
                     if m.hosts then
                         for _, h in ipairs(m.hosts) do
-                            info.hosts[#info.hosts + 1] = h
+                            -- hostname / '*.suffix' glob / IPv4 / CIDR; no
+                            -- whitespace, quotes, or shell/TOML metacharacters.
+                            if type(h) == "string" and h ~= ""
+                               and h:find("^[%w%.%*%-/:]+$") then
+                                info.hosts[#info.hosts + 1] = h
+                            else
+                                tool.stderr("hull deploy: skipping invalid host in manifest: "
+                                            .. tostring(h) .. "\n")
+                            end
                         end
                     end
                 end

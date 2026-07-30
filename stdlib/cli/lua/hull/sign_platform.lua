@@ -76,17 +76,19 @@ local function detect_arch(dir, filename)
     if cc_data then
         local cc = cc_data:match("^%s*(.-)%s*$")
         if cc:find("cosmocc") then
-            -- Detect host architecture for cosmo builds
-            local uname = tool.spawn_read({"uname", "-m"})
-            if uname then
-                uname = uname:match("^%s*(.-)%s*$")
-                if uname == "x86_64" or uname == "amd64" then
-                    return "x86_64-cosmo"
-                elseif uname == "aarch64" or uname == "arm64" then
-                    return "aarch64-cosmo"
-                end
+            -- Detect host CPU arch from the in-process platform name (bound in
+            -- C) rather than spawning `uname` (not in the tool sandbox's spawn
+            -- allowlist, so it returned nil and silently mislabeled an aarch64
+            -- host's signed artifact as x86_64-cosmo).
+            local plat = tool.platform_name and tool.platform_name() or ""
+            if plat:find("x86_64") or plat:find("amd64") then
+                return "x86_64-cosmo"
+            elseif plat:find("aarch64") or plat:find("arm64") then
+                return "aarch64-cosmo"
             end
-            return "x86_64-cosmo" -- fallback
+            tool.stderr("hull sign-platform: cannot determine cosmo host arch "
+                        .. "from platform name '" .. plat .. "'\n")
+            tool.exit(1)
         end
     end
 

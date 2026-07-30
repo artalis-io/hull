@@ -225,6 +225,17 @@ local function main()
         tool.stderr("Usage: hull new <name> [--runtime lua|js] [--cli]\n")
         tool.exit(1)
     end
+    -- The name becomes a directory that gets mkdir'd + written into. Reject
+    -- absolute paths and '..' segments so `hull new` can only scaffold under the
+    -- current directory (defense in depth: keeps a stray name from writing
+    -- elsewhere on the filesystem).
+    if opts.name:sub(1, 1) == "/" or opts.name == ".."
+       or opts.name:find("^%.%./") or opts.name:find("/%.%./")
+       or opts.name:find("/%.%.$") then
+        tool.stderr("hull new: project name must be a relative path without "
+                    .. "'..' segments: '" .. opts.name .. "'\n")
+        tool.exit(1)
+    end
 
     local runtime = opts.runtime
     if runtime ~= "lua" and runtime ~= "js" then

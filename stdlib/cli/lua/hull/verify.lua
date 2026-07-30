@@ -50,37 +50,37 @@ local function read_file(path)
     return tool.read_file(path)
 end
 
--- Cap the HTTPS key fetch at 4 KiB. A pubkey is 64 hex chars; even
--- with surrounding whitespace, comments, or PEM-armor headers an
--- honest key file is well under this. Defends against a misbehaving
--- key URL (intentional or not) streaming megabytes through the
--- verifier on an opt-in CLI flag.
-local KEY_FETCH_MAX_BYTES = 4096
-
+-- Resolve a key SOURCE to its hex pubkey. Returns nil ONLY when no source was
+-- given (the caller then legitimately skips that key check). A source that IS
+-- given but cannot be read is a HARD ERROR (fail-closed): silently returning nil
+-- there would skip the operator-intended key pin (a fail-open security bypass).
 local function read_key(source)
     if not source then return nil end
 
-    -- URL fetch
-    -- WARNING: HTTPS key fetch trusts system CA store. Use local key files for high-security verification.
-    if source:sub(1, 8) == "https://" then
-        local data = tool.spawn_read({
-            "curl", "-sfL",
-            "--proto", "=https",
-            "--max-filesize", tostring(KEY_FETCH_MAX_BYTES),
-            source,
-        })
-        if data then
-            return data:match("^(%x+)")
-        end
-        return nil
+    -- URL fetch is not supported: the tool sandbox's spawn allowlist has no
+    -- network client (curl et al. are not permitted), so a `https://` source
+    -- could only ever fail. Error clearly instead of failing open.
+    if source:sub(1, 8) == "https://" or source:sub(1, 7) == "http://" then
+        tool.stderr("hull verify: URL key sources are not supported "
+                    .. "(no network client in the tool sandbox).\n"
+                    .. "Download the key and pass a local file path instead: "
+                    .. source .. "\n")
+        tool.exit(1)
     end
 
     -- File path
     local data = read_file(source)
-    if data then
-        return data:match("^(%x+)")
+    if not data then
+        tool.stderr("hull verify: cannot read key file: " .. source .. "\n")
+        tool.exit(1)
     end
-    return nil
+    local hex = data:match("^(%x+)")
+    if not hex then
+        tool.stderr("hull verify: key file has no valid hex public key: "
+                    .. source .. "\n")
+        tool.exit(1)
+    end
+    return hex
 end
 
 local function parse_args()

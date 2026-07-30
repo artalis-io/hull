@@ -312,7 +312,13 @@ HlMappedBuffer *hl_cap_fs_mmap(const HlFsConfig *cfg, const char *path,
     }
 
     struct stat st;
-    if (fstat(fd, &st) != 0 || st.st_size <= 0) {
+    if (fstat(fd, &st) != 0) {
+        /* Do NOT read st here — it is uninitialized when fstat fails. */
+        close(fd);
+        if (err_msg) *err_msg = "mmap_failed";
+        goto audit;
+    }
+    if (st.st_size <= 0) {
         close(fd);
         if (err_msg) *err_msg = st.st_size == 0 ? "empty_file" : "mmap_failed";
         goto audit;
