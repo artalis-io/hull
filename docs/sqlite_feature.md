@@ -199,10 +199,13 @@ WASM). `HL_ENABLE_SQLITE` stays the compile switch; the feature is the
       (`nm app | grep sqlite3_open` → empty); a udf app composes the bridge and
       `db.udf` runs; a db app composes the engine and `db.query` runs. Covered by
       `tests/e2e_feature_sqlite.sh`.
-    - **Known-orthogonal:** a JS `app.main` + `db.udf` + clean-exit path trips a
-      pre-existing `JS_FreeRuntime` GC-leak assertion (reproduces on pre-C.2
-      `main`; the DB isn't closed before the runtime is freed). Tracked
-      separately; unrelated to the bridge split.
+    - **Fixed (was known-orthogonal):** a JS `app.main` + `db.udf` + clean-exit
+      path used to trip a pre-existing `JS_FreeRuntime` GC-leak assertion (the DB
+      was closed AFTER the runtime was freed, so the udf's dup'd closure leaked).
+      Fixed in `app_context.c::hl_app_context_free` by closing the DB **before**
+      destroying the runtime, so `sqlite3_close`'s udf `xDestroy` frees the
+      closure while the runtime is alive (WASM cache still destroyed after the
+      runtime). Regression-guarded by `tests/e2e_cli.sh` (both runtimes).
 - **Phase D — embed the SQLite-less base as the default app-build target.**
   🚧 CORE landed (gated), release wiring pending.
   - **Model.** The `hull` binary stays SQLite-full (it links `SQLITE_OBJ` for its
