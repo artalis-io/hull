@@ -2950,11 +2950,11 @@ platform-keelless: $(KEELLESS_PLATFORM_LIB)
 		echo "FAIL: Keel-less base is missing the serve_cli.o entry"; exit 1; fi
 	@echo "ok  Keel-less base drops serve.o + async_keel.o + net_keel.o (4.2b base-drop verified)"
 
-# ── Combined SQLite-less + TLS-less app-build base ─────────────────────
-# When a release drops BOTH SQLite and TLS from the app base, they must share one
-# sub-build (the embedded base is a single platform lib). HL_SQLITE_FEATURE=1 +
-# HL_TLS_FEATURE=1 together. Used only when HL_APP_BASE_SQLITELESS=1 AND
-# HL_APP_BASE_TLSLESS=1.
+# ── Combined SLIM app-build base: SQLite-less + TLS-less + Keel-less ────
+# The release's minimal app-build base: every composable subsystem dropped, each
+# composed back per app. One shared sub-build (the embedded base is a single
+# platform lib): HL_SQLITE_FEATURE=1 + HL_TLS_FEATURE=1 + HL_KEEL_FEATURE=1. Used
+# when HL_APP_BASE_SQLITELESS=1 AND HL_APP_BASE_TLSLESS=1 (the release sets both).
 SLIM_PLATFORM_LIB := $(BUILDDIR)/libhull_platform-slim.a
 ifeq ($(TRUST_PLATFORM_LIB),1)
 $(SLIM_PLATFORM_LIB): | $(BUILDDIR)
@@ -2962,9 +2962,9 @@ $(SLIM_PLATFORM_LIB): | $(BUILDDIR)
 	@echo "$@: trusting pre-built artifact (TRUST_PLATFORM_LIB=1)"
 else
 $(SLIM_PLATFORM_LIB):
-	$(MAKE) platform BUILDDIR=$(BUILDDIR)/slim HL_SQLITE_FEATURE=1 HL_TLS_FEATURE=1
+	$(MAKE) platform BUILDDIR=$(BUILDDIR)/slim HL_SQLITE_FEATURE=1 HL_TLS_FEATURE=1 HL_KEEL_FEATURE=1
 	cp $(BUILDDIR)/slim/libhull_platform.a $@
-	@echo "built $@ (SQLite-less + TLS-less app-build base)"
+	@echo "built $@ (SQLite-less + TLS-less + Keel-less app-build base)"
 endif
 .PHONY: platform-slim
 platform-slim: $(SLIM_PLATFORM_LIB)
@@ -3644,6 +3644,20 @@ $(EMBEDDED_TLS_H): $(BUILDDIR)/libhull_feature-tls.a | $(BUILDDIR)
 	@xxd -i $(BUILDDIR)/libhull_feature-tls.a | sed 's/build_libhull_feature_tls_a/hl_embedded_feature_tls_a/g' | $(XXD_CONST_PIPE) >> $@
 CFLAGS += -DHL_BUILD_EMBEDDED_TLS
 $(BUILD_ASSET_OBJ): $(EMBEDDED_TLS_H)
+endif
+
+# Keel feature archive embed (Phase 4.2b): keel is folded into the SLIM base, so
+# when the app-build base is SLIM (SQLITELESS + TLSLESS both set) it is also
+# Keel-less -- embed libhull_feature-keel.a (serve.o + async_keel + net_keel +
+# the server-only static/agent/test objects) so an http app auto-composes the
+# Keel event loop with no `hull feature install`. Only pulled for the SLIM base.
+ifeq ($(HL_APP_BASE_SQLITELESS)$(HL_APP_BASE_TLSLESS),11)
+EMBEDDED_KEEL_H := $(BUILDDIR)/embedded_keel.h
+$(EMBEDDED_KEEL_H): $(BUILDDIR)/libhull_feature-keel.a | $(BUILDDIR)
+	@echo "/* Auto-generated - do not edit */" > $@
+	@xxd -i $(BUILDDIR)/libhull_feature-keel.a | sed 's/build_libhull_feature_keel_a/hl_embedded_feature_keel_a/g' | $(XXD_CONST_PIPE) >> $@
+CFLAGS += -DHL_BUILD_EMBEDDED_KEEL
+$(BUILD_ASSET_OBJ): $(EMBEDDED_KEEL_H)
 endif
 endif
 
