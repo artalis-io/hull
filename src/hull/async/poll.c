@@ -866,35 +866,24 @@ const HlAsyncBackend hl_async_backend_poll = {
     .op_complete      = poll_op_complete,
 };
 
-/* ── Backend selection ─────────────────────────────────────────────── */
-
-/*
- * Lives here (poll.c is always compiled) rather than in keel.c (dropped
- * when neither HTTP half is on). Compile-time pick so the hot-path
- * call (hl_async_backend()->whatever) costs one indirection.
+/* ── Backend selection (weak seam) ─────────────────────────────────────
  *
- *   either HTTP half on : keel wins. The same KlEventCtx backs both
- *                          KlServer (HL_ENABLE_HTTP_SERVER) and
- *                          kl_client_* (HL_ENABLE_HTTP_CLIENT).
- *   both halves off     : poll wins. async/keel.c isn't compiled and
- *                          libkeel.a isn't linked.
+ * Weak default: the Keel-free poll backend. The Keel event loop provides a
+ * STRONG hl_async_backend() override (in async/keel.c) that wins whenever that
+ * TU is linked. keel.c compiles into any HTTP build today; docs/keel_feature.md
+ * (Phase 4) moves it into the composed http feature so a genuinely HTTP-free app
+ * links neither keel.c nor libkeel.a and this weak default stands — app.main /
+ * compute.async / timers then run entirely on poll.
  *
- * HL_ENABLE_HTTP is the legacy "any HTTP at all" macro — still
- * defined by the Makefile when either granular flag is on, and that's
- * exactly the condition under which keel.c compiles. Keep using it
- * here for symmetry with the build.
- */
-#ifdef HL_ENABLE_HTTP
-extern const HlAsyncBackend hl_async_backend_keel;
-#endif
-
+ * This is a no-op on a full base: keel.c's strong def always wins there, exactly
+ * as the old compile-time #ifdef selector did. It replaces that #ifdef so the
+ * choice is a LINK fact (is keel.c present?) rather than a compile fact, which is
+ * what makes it composable. Mirrors the a2 crypto/tls active-backend seams. The
+ * hot-path cost is unchanged: one indirection through the returned vtable. */
+__attribute__((weak))
 const HlAsyncBackend *hl_async_backend(void)
 {
-#ifdef HL_ENABLE_HTTP
-    return &hl_async_backend_keel;
-#else
     return &hl_async_backend_poll;
-#endif
 }
 
 /* ── HlNetBackend stubs for HL_ENABLE_HTTP_SERVER=0 builds ──────────
