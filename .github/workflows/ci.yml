@@ -56,6 +56,12 @@ jobs:
       - name: Build
         run: make
 
+      # a2 base-drop guard (docs/tls_feature.md): the TLS-less app-build base
+      # (HL_TLS_FEATURE=1) must build and carry zero mbedTLS. Self-verifying.
+      - name: TLS-less base builds + is mbedTLS-free
+        timeout-minutes: 3
+        run: make platform-tlsless
+
       - name: Hardening summary
         run: make hardening
 
