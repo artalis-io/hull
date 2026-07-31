@@ -35,6 +35,9 @@
 #ifdef HL_BUILD_EMBEDDED_SQLITE
 #include "embedded_sqlite.h"    /* hl_embedded_feature_sqlite_a[] (engine) */
 #endif
+#ifdef HL_BUILD_EMBEDDED_TLS
+#include "embedded_tls.h"       /* hl_embedded_feature_tls_a[] (mbedTLS + crypto/tls) */
+#endif
 #ifdef HL_BUILD_EMBEDDED_IMAGE
 #include "embedded_image.h"     /* hl_embedded_feature_image{,_lua,_js}_a[] */
 #endif
@@ -49,7 +52,7 @@
     || defined(HL_BUILD_EMBEDDED_RUNTIME) || defined(HL_BUILD_EMBEDDED_HTTP) \
     || defined(HL_BUILD_EMBEDDED_TUI) || defined(HL_BUILD_EMBEDDED_WASM) \
     || defined(HL_BUILD_EMBEDDED_SQLITE) || defined(HL_BUILD_EMBEDDED_SQLITE_RT) \
-    || defined(HL_BUILD_EMBEDDED_IMAGE)
+    || defined(HL_BUILD_EMBEDDED_IMAGE) || defined(HL_BUILD_EMBEDDED_TLS)
 static int write_blob(const char *path, const unsigned char *data, size_t len)
 {
     FILE *f = fopen(path, "wb");
@@ -240,6 +243,23 @@ int hl_build_extract_feature_sqlite(const char *dir)
         return -1;
     return write_blob(path, hl_embedded_feature_sqlite_a,
                       hl_embedded_feature_sqlite_a_len);
+#else
+    (void)dir;
+    return -1;
+#endif
+}
+
+int hl_build_extract_feature_tls(const char *dir)
+{
+#ifdef HL_BUILD_EMBEDDED_TLS
+    if (!dir)
+        return -1;
+    char path[1024];
+    int n = snprintf(path, sizeof(path), "%s/libhull_feature-tls.a", dir);
+    if (n < 0 || (size_t)n >= sizeof(path))
+        return -1;
+    return write_blob(path, hl_embedded_feature_tls_a,
+                      hl_embedded_feature_tls_a_len);
 #else
     (void)dir;
     return -1;

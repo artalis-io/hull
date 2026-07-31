@@ -793,6 +793,59 @@ int hl_cap_crypto_asym_verify_default(const void *pubkey_pem, size_t pubkey_len,
                                      alg, data, data_len, sig, sig_len);
 }
 
+/* Pure string<->enum alg helpers. Base-resident (no mbedTLS) so mod_crypto's
+ * references link on a TLS-less base where cap/crypto_asym_mbedtls.c is composed
+ * away. Relocated from that TU. See docs/tls_feature.md, a2. */
+static int hl_asym_ieq_n(const char *a, const char *b, size_t n)
+{
+    for (size_t i = 0; i < n; i++) {
+        unsigned char ca = (unsigned char)a[i];
+        unsigned char cb = (unsigned char)b[i];
+        if (ca >= 'A' && ca <= 'Z') ca = (unsigned char)(ca + 32);
+        if (cb >= 'A' && cb <= 'Z') cb = (unsigned char)(cb + 32);
+        if (ca != cb) return 0;
+    }
+    return 1;
+}
+
+HlCryptoAsymAlg hl_crypto_asym_alg_from_string(const char *s, size_t len)
+{
+    if (!s || len != 5) return HL_CRYPTO_ASYM_NONE;
+    if (hl_asym_ieq_n(s, "rs256", 5)) return HL_CRYPTO_ASYM_RS256;
+    if (hl_asym_ieq_n(s, "rs384", 5)) return HL_CRYPTO_ASYM_RS384;
+    if (hl_asym_ieq_n(s, "rs512", 5)) return HL_CRYPTO_ASYM_RS512;
+    if (hl_asym_ieq_n(s, "ps256", 5)) return HL_CRYPTO_ASYM_PS256;
+    if (hl_asym_ieq_n(s, "es256", 5)) return HL_CRYPTO_ASYM_ES256;
+    if (hl_asym_ieq_n(s, "es384", 5)) return HL_CRYPTO_ASYM_ES384;
+    return HL_CRYPTO_ASYM_NONE;
+}
+
+const char *hl_crypto_asym_alg_to_string(HlCryptoAsymAlg alg)
+{
+    switch (alg) {
+        case HL_CRYPTO_ASYM_RS256: return "RS256";
+        case HL_CRYPTO_ASYM_RS384: return "RS384";
+        case HL_CRYPTO_ASYM_RS512: return "RS512";
+        case HL_CRYPTO_ASYM_PS256: return "PS256";
+        case HL_CRYPTO_ASYM_ES256: return "ES256";
+        case HL_CRYPTO_ASYM_ES384: return "ES384";
+        case HL_CRYPTO_ASYM_NONE:  /* fallthrough */
+        default:            return NULL;
+    }
+}
+
+/* Weak, fail-closed x509->SPKI-PEM default. The real mbedTLS implementation lives
+ * in cap/crypto_asym_mbedtls.c (composed into libhull_feature-tls.a); when that TU
+ * is linked its strong def wins, else (a TLS-less base with no TLS composed) this
+ * returns -1 so OAuth JWKS x5c parsing fails closed rather than failing the link. */
+__attribute__((weak))
+int hl_cap_crypto_x509_pubkey_pem(const void *der, size_t der_len,
+                                  char *out_pem, size_t out_size, size_t *out_len)
+{
+    (void)der; (void)der_len; (void)out_pem; (void)out_size; (void)out_len;
+    return -1;
+}
+
 /* ── HMAC-SHA256 (vtable-dispatched) ───────────────────────────────── */
 
 int hl_cap_crypto_hmac_sha256(const uint8_t *key, size_t key_len,

@@ -275,6 +275,21 @@ function M.resolve_sqlite_lib(tmpdir, ctx)
     return M.resolve_lib(libname, asset, ctx)
 end
 
+--- Resolve the TLS feature archive (libhull_feature-tls.a: mbedTLS + the crypto
+--- mbedTLS backends + tls_client + tls_transport), embedded first (a2). On an
+--- HL_APP_BASE_TLSLESS distributed hull it ships embedded, so an HTTPS / net-DB
+--- app auto-composes it with no `hull feature install`; otherwise this falls back
+--- to the local build dir / installed feature cache. Mirrors resolve_sqlite_lib.
+function M.resolve_tls_lib(tmpdir, ctx)
+    local libname = "libhull_feature-tls.a"
+    if tool.extract_feature_tls and tool.extract_feature_tls(tmpdir)
+       and file_exists(tmpdir .. "/" .. libname) then
+        return tmpdir .. "/" .. libname, "embedded"
+    end
+    local asset = ctx.plat and ("libhull_feature-tls-" .. ctx.plat .. ".a") or nil
+    return M.resolve_lib(libname, asset, ctx)
+end
+
 --- Resolve the per-runtime SQLite UDF bridge (libhull_feature-sqlite-<rt>.a),
 --- embedded first. Holds mod_db_udf (the db.udf bindings); composed for the
 --- app's runtime whenever the app uses a udf-capable DB, so the runtime archive

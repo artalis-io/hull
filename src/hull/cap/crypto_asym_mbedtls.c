@@ -403,62 +403,18 @@ done:
 
 #else /* !HL_ENABLE_HTTP - mbedTLS is not linked */
 
-/* The mbedTLS asym backend (hl_crypto_asym_backend_mbedtls) + its
- * hl_crypto_asym_active_backend() override are NOT defined here: on a TLS-less
- * base the weak fail-closed stub + accessor in cap/crypto.c win, and nothing
- * references the mbedTLS backend symbol. Only x509_pubkey_pem keeps a base stub
- * (a direct cap fn, not routed through the asym vtable; a later phase moves it
- * behind the feature too). See docs/tls_feature.md. */
-
-int hl_cap_crypto_x509_pubkey_pem(const void *der, size_t der_len,
-                                  char *out_pem, size_t out_size,
-                                  size_t *out_len)
-{
-    (void)der; (void)der_len; (void)out_pem; (void)out_size; (void)out_len;
-    return -1;
-}
+/* Nothing is defined in this branch anymore: on a build without mbedTLS the base
+ * provides the weak fail-closed defaults for the whole asym surface -- the
+ * accessor + stub backend + x509 in cap/crypto.c. This TU only carries the REAL
+ * mbedTLS implementations (the #ifdef branch), which compose into
+ * libhull_feature-tls.a as strong overrides. See docs/tls_feature.md, a2. */
 
 #endif /* HL_ENABLE_HTTP */
 
-/* ── Public cap surface ─────────────────────────────────────────── */
-
-static int ieq_n(const char *a, const char *b, size_t n)
-{
-    for (size_t i = 0; i < n; i++) {
-        unsigned char ca = (unsigned char)a[i];
-        unsigned char cb = (unsigned char)b[i];
-        if (ca >= 'A' && ca <= 'Z') ca = (unsigned char)(ca + 32);
-        if (cb >= 'A' && cb <= 'Z') cb = (unsigned char)(cb + 32);
-        if (ca != cb) return 0;
-    }
-    return 1;
-}
-
-HlCryptoAsymAlg hl_crypto_asym_alg_from_string(const char *s, size_t len)
-{
-    if (!s || len != 5) return HL_CRYPTO_ASYM_NONE;
-    if (ieq_n(s, "rs256", 5)) return HL_CRYPTO_ASYM_RS256;
-    if (ieq_n(s, "rs384", 5)) return HL_CRYPTO_ASYM_RS384;
-    if (ieq_n(s, "rs512", 5)) return HL_CRYPTO_ASYM_RS512;
-    if (ieq_n(s, "ps256", 5)) return HL_CRYPTO_ASYM_PS256;
-    if (ieq_n(s, "es256", 5)) return HL_CRYPTO_ASYM_ES256;
-    if (ieq_n(s, "es384", 5)) return HL_CRYPTO_ASYM_ES384;
-    return HL_CRYPTO_ASYM_NONE;
-}
-
-const char *hl_crypto_asym_alg_to_string(HlCryptoAsymAlg alg)
-{
-    switch (alg) {
-        case HL_CRYPTO_ASYM_RS256: return "RS256";
-        case HL_CRYPTO_ASYM_RS384: return "RS384";
-        case HL_CRYPTO_ASYM_RS512: return "RS512";
-        case HL_CRYPTO_ASYM_PS256: return "PS256";
-        case HL_CRYPTO_ASYM_ES256: return "ES256";
-        case HL_CRYPTO_ASYM_ES384: return "ES384";
-        case HL_CRYPTO_ASYM_NONE:  /* fallthrough */
-        default:            return NULL;
-    }
-}
+/* hl_crypto_asym_alg_{from,to}_string moved to cap/crypto.c (base-resident, pure
+ * string<->enum helpers with no mbedTLS dependency) so mod_crypto's references
+ * resolve on a TLS-less base where this whole TU is composed away. See
+ * docs/tls_feature.md, a2. */
 
 /* hl_cap_crypto_asym_verify (generic dispatcher) + hl_cap_crypto_asym_verify_default
  * moved to cap/crypto.c (base-resident) so they no longer tie those symbols to this

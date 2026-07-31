@@ -1735,6 +1735,11 @@ int main(int argc, char **argv) { return hl_app_run(argc, argv); }
             -- HL_MOD_CAP_IMAGE); a genuinely image-free app links zero stb (~146 KB
             -- smaller).
             local needs_image = false
+            -- needs_tls (docs/tls_feature.md, a2): the app implies the TLS stack
+            -- (HTTP -> https fetch / TLS serving / smtp; a net-DB sslmode). Compose
+            -- libhull_feature-tls.a (mbedTLS + the crypto/tls backends) which a
+            -- TLS-less base no longer carries; a plaintext app links zero mbedTLS.
+            local needs_tls = false
             do
                 local mf = extract_app_manifest(opts.app_dir)
                 if mf then
@@ -1743,6 +1748,7 @@ int main(int argc, char **argv) { return hl_app_run(argc, argv); }
                     if r.ok and r.needs_wasm then needs_wasm = true end
                     if r.ok and r.needs_sqlite then needs_sqlite = true end
                     if r.ok and r.needs_image then needs_image = true end
+                    if r.ok and r.needs_tls then needs_tls = true end
                 end
             end
 
@@ -1912,6 +1918,44 @@ int main(int argc, char **argv) { return hl_app_run(argc, argv); }
                 feature_libs[#feature_libs + 1] = f
             end
             print("hull build: composed image feature + image bridge '" .. app_rt .. "'")
+            end
+
+            -- Compose the TLS feature (docs/tls_feature.md, a2). A tls-less base
+            -- (HL_TLS_FEATURE=1) drops mbedTLS + the crypto/tls backends; compose
+            -- libhull_feature-tls.a back when the app needs TLS AND the base is
+            -- actually tls-less. Probe the base: a TLS-full base defines
+            -- mbedtls_ssl_handshake, a tls-less one does not -- gate on its ABSENCE
+            -- so this is a no-op (byte-identical) on a stock TLS-full base. Whole-
+            -- archive inside the --start-group (the archive refs base crypto/vfs +
+            -- Keel's tls_mbedtls.o).
+            if needs_tls then
+            local base_has_tls = true
+            local tls_nm = tool.spawn_read({ "nm", platform_lib })
+            if tls_nm and not tls_nm:find("mbedtls_ssl_handshake") then
+                base_has_tls = false
+            end
+            if not base_has_tls then
+                local tls_lib = "libhull_feature-tls.a"
+                local tls_path, tls_from = fcompose.resolve_tls_lib(tmpdir,
+                                           { hull_dir = rt_hull_dir, plat = rt_plat })
+                if not tls_path then
+                    tool.stderr("hull build: the TLS feature lib (libhull_feature-tls.a) "
+                        .. "was not found "
+                        .. (tls_from == "cache-verify-failed"
+                            and "(cache re-verify failed)\n" or "(normally embedded in hull)\n"))
+                    tool.stderr("hint: build it from source with `make feature-tls`\n")
+                    tool.rmdir(tmpdir); tool.exit(1)
+                end
+                local tls_dest = tmpdir .. "/" .. tls_lib
+                if tls_path ~= tls_dest then tool.copy(tls_path, tls_dest) end
+                record_composed("libhull_feature-tls." .. (rt_plat or "") .. ".a",
+                                tls_dest, "platform")
+                needs_base_group = true  -- tls archive refs base + Keel symbols
+                for _, f in ipairs(fcompose.whole_archive_flags(tls_dest, is_darwin)) do
+                    feature_libs[#feature_libs + 1] = f
+                end
+                print("hull build: composed TLS feature (tls-less base + app needs TLS)")
+            end
             end
 
             if needs_http then

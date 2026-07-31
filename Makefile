@@ -456,6 +456,16 @@ HL_TLS_FEATURE     ?= 0
 # unchanged until release.yml opts in. Cosmo ignores it (SQLite stays in-base).
 HL_APP_BASE_SQLITELESS ?= 0
 
+# HL_APP_BASE_TLSLESS=1 (docs/tls_feature.md, a2): the same idea for TLS. The
+# distributed hull embeds a TLS-LESS platform lib as the app-build base (built in
+# an HL_TLS_FEATURE=1 sub-build) plus libhull_feature-tls.a, so a stock `hull
+# build` produces TLS-DROPPING apps (a plaintext app links zero mbedTLS; an HTTPS
+# / net-DB app auto-composes the TLS feature via the needs_tls gate). The hull
+# binary ITSELF stays TLS-full (its own `hull update` needs HTTPS). Composes with
+# HL_APP_BASE_SQLITELESS (both -> a combined sub-build). Only the EMBED_PLATFORM
+# path honours it; a plain dev `make` is unaffected. Cosmo ignores it. Default 0.
+HL_APP_BASE_TLSLESS    ?= 0
+
 # Keel (KlTls) + mbedTLS are linked when an HTTP half OR PostgreSQL OR MySQL is
 # enabled (MySQL's caching_sha2_password full-auth + ed25519 need TLS + crypto).
 # HTTP still owns the -DHL_ENABLE_HTTP macro (above), so a DB-only build links
@@ -2569,6 +2579,7 @@ BUILD_FINGERPRINT := \
   TUI=$(HL_ENABLE_TUI)|\
   TUI_TC=$(HL_TUI_TOOLCHAIN)|\
   IMAGE=$(HL_ENABLE_IMAGE)|\
+  TLS_FEATURE=$(HL_TLS_FEATURE)|\
   CA=$(HL_EMBED_CA_BUNDLE)|\
   JS=$(HL_ENABLE_JS)|\
   LUA=$(HL_ENABLE_LUA)|\
@@ -2798,6 +2809,7 @@ $(PLATFORM_LIB): $(PLATFORM_OBJS) $(CANARY_OBJ) $(PLATFORM_NOKEEL_OBJS) $(KEEL_L
 		tmpdir=$$(mktemp -d) && \
 		cd $$tmpdir && \
 		$(AR) x $(CURDIR)/$(KEEL_LIB) && \
+		$(if $(filter 1,$(HL_TLS_FEATURE)),rm -f tls_mbedtls.o &&,) \
 		$(AR) rcs $(CURDIR)/$@ *.o && \
 		rm -rf $$tmpdir ; \
 	fi
@@ -2869,6 +2881,25 @@ platform-tlsless: $(TLSLESS_PLATFORM_LIB)
 	@if nm $(TLSLESS_PLATFORM_LIB) 2>/dev/null | grep -qE ' [TtWw] _?mbedtls_ssl_handshake'; then \
 		echo "FAIL: TLS-less base defines mbedtls_ssl_handshake"; exit 1; fi
 	@echo "ok  TLS-less base carries no mbedTLS (a2 base-drop verified)"
+
+# ── Combined SQLite-less + TLS-less app-build base ─────────────────────
+# When a release drops BOTH SQLite and TLS from the app base, they must share one
+# sub-build (the embedded base is a single platform lib). HL_SQLITE_FEATURE=1 +
+# HL_TLS_FEATURE=1 together. Used only when HL_APP_BASE_SQLITELESS=1 AND
+# HL_APP_BASE_TLSLESS=1.
+SLIM_PLATFORM_LIB := $(BUILDDIR)/libhull_platform-slim.a
+ifeq ($(TRUST_PLATFORM_LIB),1)
+$(SLIM_PLATFORM_LIB): | $(BUILDDIR)
+	@test -f $@ || (echo "ERROR: TRUST_PLATFORM_LIB=1 but $@ is missing"; exit 1)
+	@echo "$@: trusting pre-built artifact (TRUST_PLATFORM_LIB=1)"
+else
+$(SLIM_PLATFORM_LIB):
+	$(MAKE) platform BUILDDIR=$(BUILDDIR)/slim HL_SQLITE_FEATURE=1 HL_TLS_FEATURE=1
+	cp $(BUILDDIR)/slim/libhull_platform.a $@
+	@echo "built $@ (SQLite-less + TLS-less app-build base)"
+endif
+.PHONY: platform-slim
+platform-slim: $(SLIM_PLATFORM_LIB)
 
 # ── DuckDB feature archive (composable feature: hull build --with=duckdb) ──
 # libhull_feature-duckdb.a bundles the DuckDB backend object (cap_db_duckdb.o,
@@ -3167,8 +3198,15 @@ $(BUILDDIR)/libhull_feature-image-js.a: $(BUILDDIR)/js_mod_image.o | $(BUILDDIR)
 # (resolved from the base's KEEL_LIB at compose) + base crypto/vfs symbols, so the
 # compose whole-archives it inside a --start-group. Built at HL_LINK_TLS=1 (the
 # default HTTP build already compiles all members).
+# Keel's TLS session object (kl_tls_mbedtls_*). It normally rides inside the
+# platform lib's Keel merge, but a TLS-less base excludes it (see the keel-merge
+# rule); so the feature archive carries its own copy, extracted from KEEL_LIB and
+# renamed (keel_tls_mbedtls.o) to avoid a member-name clash with the crypto TUs.
+$(BUILDDIR)/keel_tls_mbedtls.o: $(KEEL_LIB) | $(BUILDDIR)
+	@cd $(BUILDDIR) && $(AR) x $(CURDIR)/$(KEEL_LIB) tls_mbedtls.o && mv -f tls_mbedtls.o keel_tls_mbedtls.o
 FEATURE_TLS_OBJS := $(BUILDDIR)/cap_crypto_hmac_mbedtls.o $(BUILDDIR)/cap_crypto_asym_mbedtls.o \
-                    $(BUILDDIR)/tls_client.o $(BUILDDIR)/tls_transport.o $(MBEDTLS_OBJS)
+                    $(BUILDDIR)/tls_client.o $(BUILDDIR)/tls_transport.o \
+                    $(BUILDDIR)/keel_tls_mbedtls.o $(MBEDTLS_OBJS)
 feature-tls: $(BUILDDIR)/libhull_feature-tls.a
 .PHONY: feature-tls
 $(BUILDDIR)/libhull_feature-tls.a: $(FEATURE_TLS_OBJS) | $(BUILDDIR)
@@ -3409,13 +3447,22 @@ else ifneq ($(EMBED_PLATFORM),)
 # sqlite-full platform lib by default; HL_APP_BASE_SQLITELESS=1 (Phase D) swaps
 # in the SQLite-less sub-build so produced apps drop SQLite. Either way the hull
 # binary itself stays sqlite-full (it links its own objects, not this archive).
-ifeq ($(HL_APP_BASE_SQLITELESS),1)
-APP_BASE_LIB := $(SQLITELESS_PLATFORM_LIB)
+# The embedded app-build base: full, or a sub-build with composable subsystems
+# dropped per HL_APP_BASE_{SQLITELESS,TLSLESS} (each composed back at hull build).
+# The four combinations map to four sub-build libs so a release can drop both.
+ifeq ($(HL_APP_BASE_SQLITELESS)$(HL_APP_BASE_TLSLESS),00)
+APP_BASE_LIB := $(PLATFORM_LIB)                # full
+else ifeq ($(HL_APP_BASE_SQLITELESS)$(HL_APP_BASE_TLSLESS),10)
+APP_BASE_LIB := $(SQLITELESS_PLATFORM_LIB)     # SQLite dropped
+else ifeq ($(HL_APP_BASE_SQLITELESS)$(HL_APP_BASE_TLSLESS),01)
+APP_BASE_LIB := $(TLSLESS_PLATFORM_LIB)        # TLS dropped
 else
-APP_BASE_LIB := $(PLATFORM_LIB)
+APP_BASE_LIB := $(SLIM_PLATFORM_LIB)           # both dropped (combined sub-build)
 endif
+# The xxd symbol carries the archive's basename suffix (_sqliteless/_tlsless/_slim/
+# none); rename any of them to the canonical hl_embedded_platform_a.
 $(EMBEDDED_PLATFORM_H): $(APP_BASE_LIB) | $(BUILDDIR)
-	xxd -i $< | sed 's/build_libhull_platform\(_sqliteless\)\{0,1\}_a/hl_embedded_platform_a/g' | $(XXD_CONST_PIPE) > $@
+	xxd -i $< | sed 's/build_libhull_platform[a-z_]*_a/hl_embedded_platform_a/g' | $(XXD_CONST_PIPE) > $@
 
 $(EMBEDDED_TEMPLATES_H): templates/app_main.c templates/entry.h | $(BUILDDIR)
 	@echo "/* Auto-generated — do not edit */" > $@
@@ -3499,6 +3546,19 @@ $(EMBEDDED_SQLITE_H): $(BUILDDIR)/libhull_feature-sqlite.a | $(BUILDDIR)
 	@xxd -i $(BUILDDIR)/libhull_feature-sqlite.a | sed 's/build_libhull_feature_sqlite_a/hl_embedded_feature_sqlite_a/g' | $(XXD_CONST_PIPE) >> $@
 CFLAGS += -DHL_BUILD_EMBEDDED_SQLITE
 $(BUILD_ASSET_OBJ): $(EMBEDDED_SQLITE_H)
+endif
+
+# TLS feature archive embed (a2, HL_APP_BASE_TLSLESS=1): when the app-build base
+# is TLS-less, embed libhull_feature-tls.a (mbedTLS + the crypto/tls TUs) so an
+# HTTPS / net-DB app auto-composes it with no `hull feature install`. Mirrors the
+# SQLite engine embed. Only pulled when HL_APP_BASE_TLSLESS=1.
+ifeq ($(HL_APP_BASE_TLSLESS),1)
+EMBEDDED_TLS_H := $(BUILDDIR)/embedded_tls.h
+$(EMBEDDED_TLS_H): $(BUILDDIR)/libhull_feature-tls.a | $(BUILDDIR)
+	@echo "/* Auto-generated - do not edit */" > $@
+	@xxd -i $(BUILDDIR)/libhull_feature-tls.a | sed 's/build_libhull_feature_tls_a/hl_embedded_feature_tls_a/g' | $(XXD_CONST_PIPE) >> $@
+CFLAGS += -DHL_BUILD_EMBEDDED_TLS
+$(BUILD_ASSET_OBJ): $(EMBEDDED_TLS_H)
 endif
 endif
 
@@ -4050,12 +4110,12 @@ TEST_BINS := $(addprefix $(BUILDDIR)/,$(notdir $(basename $(TEST_SRCS))))
 TEST_CAP_OBJS := $(CAP_OBJS)
 
 # Shared link deps for all tests
-TEST_COMMON_DEPS := $(TEST_CAP_OBJS) $(ALLOC_OBJ) $(ASYNC_OBJ) $(ASYNC_BACKEND_OBJS) $(NET_BACKEND_OBJS) $(COMPRESS_OBJ) $(MINIZ_OBJ) $(WORKER_DB_OBJ) $(WORKER_WASM_OBJ) $(WORKER_GPU_OBJ) $(VFS_OBJ) $(PATH_NORM_OBJ) $(THREAD_AFFINITY_OBJ) $(CACHE_DIR_OBJ) $(BLOB_STORE_OBJ) $(CACHE_REGISTRY_OBJ) $(CACERT_OBJ) $(TLS_CLIENT_OBJ) $(SH_SEAL_ARENA_OBJ) $(TOOLS_INSTALL_OBJ) $(PLATFORM_SIG_OBJ) $(WAMR_OBJS) $(MBEDTLS_OBJS) $(SQLITE_OBJ) $(LOG_OBJ) $(LOG_LOCK_OBJ) $(SH_ARENA_OBJ) $(SH_JSON_OBJ) $(TWEETNACL_OBJ) $(STB_OBJ) $(KEEL_LIB)
+TEST_COMMON_DEPS := $(TEST_CAP_OBJS) $(ALLOC_OBJ) $(ASYNC_OBJ) $(ASYNC_BACKEND_OBJS) $(NET_BACKEND_OBJS) $(COMPRESS_OBJ) $(MINIZ_OBJ) $(WORKER_DB_OBJ) $(WORKER_WASM_OBJ) $(WORKER_GPU_OBJ) $(VFS_OBJ) $(PATH_NORM_OBJ) $(THREAD_AFFINITY_OBJ) $(CACHE_DIR_OBJ) $(BLOB_STORE_OBJ) $(CACHE_REGISTRY_OBJ) $(CACERT_OBJ) $(TLS_CLIENT_OBJ) $(TLS_TRANSPORT_OBJ) $(TLS_TRANSPORT_STUB_OBJ) $(SH_SEAL_ARENA_OBJ) $(TOOLS_INSTALL_OBJ) $(PLATFORM_SIG_OBJ) $(WAMR_OBJS) $(MBEDTLS_OBJS) $(SQLITE_OBJ) $(LOG_OBJ) $(LOG_LOCK_OBJ) $(SH_ARENA_OBJ) $(SH_JSON_OBJ) $(TWEETNACL_OBJ) $(STB_OBJ) $(KEEL_LIB)
 # SH_SEAL_ARENA_OBJ comes BEFORE $(KEEL_LIB) so Hull's instrumented
 # copy resolves sh_seal_arena_* symbols first; Keel's copy stays in
 # libkeel.a but the linker doesn't pull it (its symbols are already
 # satisfied).  Required for MSan instrumentation visibility.
-TEST_COMMON_LIBS := $(TEST_CAP_OBJS) $(ALLOC_OBJ) $(ASYNC_OBJ) $(ASYNC_BACKEND_OBJS) $(NET_BACKEND_OBJS) $(COMPRESS_OBJ) $(MINIZ_OBJ) $(WORKER_DB_OBJ) $(WORKER_WASM_OBJ) $(WORKER_GPU_OBJ) $(VFS_OBJ) $(PATH_NORM_OBJ) $(THREAD_AFFINITY_OBJ) $(CACHE_DIR_OBJ) $(BLOB_STORE_OBJ) $(CACHE_REGISTRY_OBJ) $(CACERT_OBJ) $(TLS_CLIENT_OBJ) $(SH_SEAL_ARENA_OBJ) $(WAMR_OBJS) $(MBEDTLS_OBJS) $(KEEL_LIB) $(SQLITE_OBJ) $(LOG_OBJ) $(LOG_LOCK_OBJ) $(SH_ARENA_OBJ) $(SH_JSON_OBJ) $(TWEETNACL_OBJ) $(STB_OBJ) $(WGPU_LIB) $(WGPU_FRAMEWORKS) $(DUCKDB_LIBS) -lm -lpthread
+TEST_COMMON_LIBS := $(TEST_CAP_OBJS) $(ALLOC_OBJ) $(ASYNC_OBJ) $(ASYNC_BACKEND_OBJS) $(NET_BACKEND_OBJS) $(COMPRESS_OBJ) $(MINIZ_OBJ) $(WORKER_DB_OBJ) $(WORKER_WASM_OBJ) $(WORKER_GPU_OBJ) $(VFS_OBJ) $(PATH_NORM_OBJ) $(THREAD_AFFINITY_OBJ) $(CACHE_DIR_OBJ) $(BLOB_STORE_OBJ) $(CACHE_REGISTRY_OBJ) $(CACERT_OBJ) $(TLS_CLIENT_OBJ) $(TLS_TRANSPORT_OBJ) $(TLS_TRANSPORT_STUB_OBJ) $(SH_SEAL_ARENA_OBJ) $(WAMR_OBJS) $(MBEDTLS_OBJS) $(KEEL_LIB) $(SQLITE_OBJ) $(LOG_OBJ) $(LOG_LOCK_OBJ) $(SH_ARENA_OBJ) $(SH_JSON_OBJ) $(TWEETNACL_OBJ) $(STB_OBJ) $(WGPU_LIB) $(WGPU_FRAMEWORKS) $(DUCKDB_LIBS) -lm -lpthread
 # forkpty(3) is in libutil on glibc/musl Linux (used by
 # tests/hull/cap/test_tui_lifecycle.c). macOS / BSD ship it inside
 # libSystem so no extra flag is needed. Cosmopolitan does not provide
@@ -4187,7 +4247,7 @@ $(BUILDDIR)/test_js: $(TESTDIR)/hull/runtime/js/test_js.c $(TEST_COMMON_DEPS) $(
 # so it expands to nothing in both the prereq and link lines.
 $(BUILDDIR)/test_lua: $(TESTDIR)/hull/runtime/lua/test_lua.c $(TEST_COMMON_DEPS) $(CAP_TOOL_OBJ) $(CAP_TEST_LUA_OBJ) $(BUILD_ASSET_OBJ) $(BUILDDIR)/cmd_doctor.o $(BUILDDIR)/cmd_dev.o $(BUILDDIR)/compiler.o $(COMPILER_TCC_OBJ) $(BUILDDIR)/tool.o $(BUILDDIR)/tool_orchestration.o $(BUILDDIR)/sandbox.o $(BUILDDIR)/sandbox_tool.o $(AGENT_LIB_OBJ) $(AGENT_API_OBJ) $(STDLIB_FEATURE_OBJ) $(APP_CONTEXT_OBJ) $(APP_CONTEXT_RT_OBJ) $(MIGRATE_OBJ) $(MANIFEST_OBJ) $(MODULE_OBJ) $(APP_ENTRIES_DEFAULT_OBJ) $(STDLIB_REGISTRY_O) $(STDLIB_RT_REGISTRY_OBJS) $(STDLIB_TOOLCHAIN_REGISTRY_O) $(VFS_OBJ) $(PATH_NORM_OBJ) $(THREAD_AFFINITY_OBJ) $(CACHE_DIR_OBJ) $(BLOB_STORE_OBJ) $(CACHE_REGISTRY_OBJ) $(RUNTIME_CACHE_COMMON_OBJ) $(LUA_RT_OBJS) $(JS_RT_OBJS) $(LUA_OBJS) $(QJS_OBJS) $(RUNTIME_FACTORY_OBJ) $(STATIC_OBJ) $(TEST_RUNNER_OBJ) $(TOOLS_INSTALL_OBJ) $(PLATFORM_SIG_OBJ) $(EMBEDDED_PLATFORM_SIG_OBJ) $(RELEASE_OBJ) $(RELEASE_IO_OBJ) $(CACERT_OBJ) $(PLEDGE_OBJS) | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< \
-		$(TEST_CAP_OBJS) $(CAP_TOOL_OBJ) $(CAP_TEST_LUA_OBJ) $(BUILD_ASSET_OBJ) $(BUILDDIR)/cmd_doctor.o $(BUILDDIR)/cmd_dev.o $(BUILDDIR)/compiler.o $(COMPILER_TCC_OBJ) $(BUILDDIR)/tool.o $(BUILDDIR)/tool_orchestration.o $(BUILDDIR)/sandbox.o $(BUILDDIR)/sandbox_tool.o $(BUILDDIR)/cacert.o $(TLS_CLIENT_OBJ) $(TOOLS_INSTALL_OBJ) $(PLATFORM_SIG_OBJ) $(EMBEDDED_PLATFORM_SIG_OBJ) $(RELEASE_OBJ) $(RELEASE_IO_OBJ) $(AGENT_LIB_OBJ) $(AGENT_API_OBJ) $(STDLIB_FEATURE_OBJ) $(APP_CONTEXT_OBJ) $(APP_CONTEXT_RT_OBJ) $(MIGRATE_OBJ) $(LUA_RT_OBJS) $(JS_RT_OBJS) $(MANIFEST_OBJ) $(MODULE_OBJ) $(APP_ENTRIES_DEFAULT_OBJ) $(STDLIB_REGISTRY_O) $(STDLIB_RT_REGISTRY_OBJS) $(STDLIB_TOOLCHAIN_REGISTRY_O) $(VFS_OBJ) $(PATH_NORM_OBJ) $(THREAD_AFFINITY_OBJ) $(CACHE_DIR_OBJ) $(BLOB_STORE_OBJ) $(CACHE_REGISTRY_OBJ) $(RUNTIME_CACHE_COMMON_OBJ) $(RUNTIME_FACTORY_OBJ) $(STATIC_OBJ) $(TEST_RUNNER_OBJ) $(ALLOC_OBJ) $(ASYNC_OBJ) $(ASYNC_BACKEND_OBJS) $(NET_BACKEND_OBJS) $(COMPRESS_OBJ) $(MINIZ_OBJ) $(WORKER_DB_OBJ) $(WORKER_WASM_OBJ) $(WORKER_GPU_OBJ) $(WAMR_OBJS) $(LUA_OBJS) $(QJS_OBJS) \
+		$(TEST_CAP_OBJS) $(CAP_TOOL_OBJ) $(CAP_TEST_LUA_OBJ) $(BUILD_ASSET_OBJ) $(BUILDDIR)/cmd_doctor.o $(BUILDDIR)/cmd_dev.o $(BUILDDIR)/compiler.o $(COMPILER_TCC_OBJ) $(BUILDDIR)/tool.o $(BUILDDIR)/tool_orchestration.o $(BUILDDIR)/sandbox.o $(BUILDDIR)/sandbox_tool.o $(BUILDDIR)/cacert.o $(TLS_CLIENT_OBJ) $(TOOLS_INSTALL_OBJ) $(PLATFORM_SIG_OBJ) $(EMBEDDED_PLATFORM_SIG_OBJ) $(RELEASE_OBJ) $(RELEASE_IO_OBJ) $(TLS_TRANSPORT_OBJ) $(TLS_TRANSPORT_STUB_OBJ) $(AGENT_LIB_OBJ) $(AGENT_API_OBJ) $(STDLIB_FEATURE_OBJ) $(APP_CONTEXT_OBJ) $(APP_CONTEXT_RT_OBJ) $(MIGRATE_OBJ) $(LUA_RT_OBJS) $(JS_RT_OBJS) $(MANIFEST_OBJ) $(MODULE_OBJ) $(APP_ENTRIES_DEFAULT_OBJ) $(STDLIB_REGISTRY_O) $(STDLIB_RT_REGISTRY_OBJS) $(STDLIB_TOOLCHAIN_REGISTRY_O) $(VFS_OBJ) $(PATH_NORM_OBJ) $(THREAD_AFFINITY_OBJ) $(CACHE_DIR_OBJ) $(BLOB_STORE_OBJ) $(CACHE_REGISTRY_OBJ) $(RUNTIME_CACHE_COMMON_OBJ) $(RUNTIME_FACTORY_OBJ) $(STATIC_OBJ) $(TEST_RUNNER_OBJ) $(ALLOC_OBJ) $(ASYNC_OBJ) $(ASYNC_BACKEND_OBJS) $(NET_BACKEND_OBJS) $(COMPRESS_OBJ) $(MINIZ_OBJ) $(WORKER_DB_OBJ) $(WORKER_WASM_OBJ) $(WORKER_GPU_OBJ) $(WAMR_OBJS) $(LUA_OBJS) $(QJS_OBJS) \
 		$(KEEL_LIB) $(MBEDTLS_OBJS) $(SQLITE_OBJ) $(LOG_OBJ) $(LOG_LOCK_OBJ) $(SH_ARENA_OBJ) $(SH_JSON_OBJ) $(TWEETNACL_OBJ) $(STB_OBJ) $(WGPU_LIB) $(WGPU_FRAMEWORKS) $(PLEDGE_OBJS) -lm -lpthread
 
 # Tool hardening test — cap/tool.c compiled without runtime flags (self-contained C functions)
@@ -4258,16 +4318,16 @@ CRYPTO_TEST_OBJS := $(BUILDDIR)/cap_crypto.o $(BUILDDIR)/cap_crypto_hmac_mbedtls
 # atomic write). Skipped on HL_ENABLE_HTTP_CLIENT=0 builds where the
 # helper module isn't compiled in.
 ifneq ($(HL_ENABLE_HTTP_CLIENT),0)
-$(BUILDDIR)/test_release_io: $(TESTDIR)/hull/test_release_io.c $(RELEASE_IO_OBJ) $(RELEASE_OBJ) $(CACERT_OBJ) $(CRYPTO_TEST_OBJS) $(MBEDTLS_OBJS) $(KEEL_LIB) | $(BUILDDIR)
-	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< $(RELEASE_IO_OBJ) $(RELEASE_OBJ) $(CACERT_OBJ) $(CRYPTO_TEST_OBJS) $(MBEDTLS_OBJS) $(KEEL_LIB) -lm -lpthread
+$(BUILDDIR)/test_release_io: $(TESTDIR)/hull/test_release_io.c $(RELEASE_IO_OBJ) $(RELEASE_OBJ) $(CACERT_OBJ) $(TLS_TRANSPORT_OBJ) $(TLS_TRANSPORT_STUB_OBJ) $(CRYPTO_TEST_OBJS) $(MBEDTLS_OBJS) $(KEEL_LIB) | $(BUILDDIR)
+	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< $(RELEASE_IO_OBJ) $(RELEASE_OBJ) $(CACERT_OBJ) $(TLS_TRANSPORT_OBJ) $(TLS_TRANSPORT_STUB_OBJ) $(CRYPTO_TEST_OBJS) $(MBEDTLS_OBJS) $(KEEL_LIB) -lm -lpthread
 endif
 
 # Verify-self helpers test. Reuses release_io.{c,h} for asset-name,
 # checksum-line lookup, SHA-256, and self-path resolution. Same link
 # dependencies as test_release_io.
 ifneq ($(HL_ENABLE_HTTP_CLIENT),0)
-$(BUILDDIR)/test_verify_self: $(TESTDIR)/hull/test_verify_self.c $(RELEASE_IO_OBJ) $(RELEASE_OBJ) $(CACERT_OBJ) $(CRYPTO_TEST_OBJS) $(MBEDTLS_OBJS) $(KEEL_LIB) | $(BUILDDIR)
-	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< $(RELEASE_IO_OBJ) $(RELEASE_OBJ) $(CACERT_OBJ) $(CRYPTO_TEST_OBJS) $(MBEDTLS_OBJS) $(KEEL_LIB) -lm -lpthread
+$(BUILDDIR)/test_verify_self: $(TESTDIR)/hull/test_verify_self.c $(RELEASE_IO_OBJ) $(RELEASE_OBJ) $(CACERT_OBJ) $(TLS_TRANSPORT_OBJ) $(TLS_TRANSPORT_STUB_OBJ) $(CRYPTO_TEST_OBJS) $(MBEDTLS_OBJS) $(KEEL_LIB) | $(BUILDDIR)
+	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< $(RELEASE_IO_OBJ) $(RELEASE_OBJ) $(CACERT_OBJ) $(TLS_TRANSPORT_OBJ) $(TLS_TRANSPORT_STUB_OBJ) $(CRYPTO_TEST_OBJS) $(MBEDTLS_OBJS) $(KEEL_LIB) -lm -lpthread
 endif
 
 # Platform-sig helpers — reuses release.c (sign/verify) +
@@ -4574,6 +4634,10 @@ e2e-feature-sqlite: $(BUILDDIR)/hull
 .PHONY: e2e-feature-image
 e2e-feature-image: $(BUILDDIR)/hull
 	sh tests/e2e_feature_image.sh
+
+.PHONY: e2e-feature-tls
+e2e-feature-tls: $(BUILDDIR)/hull
+	sh tests/e2e_feature_tls.sh
 
 e2e-multipart: $(BUILDDIR)/hull
 	RUNTIME=$(RUNTIME) sh tests/e2e_multipart.sh

@@ -16,7 +16,7 @@
 #include <keel/allocator.h>
 #include <keel/client.h>
 #include <keel/redirect.h>
-#include <keel/tls_mbedtls.h>
+#include "hull/tls_transport.h"
 #include <keel/tls.h>
 
 #include <errno.h>
@@ -103,7 +103,7 @@ KlTlsCtx *hl_release_io_open_tls(KlAllocator *alloc)
     const unsigned char *cab = NULL;
     size_t cab_len = 0;
     if (hl_embedded_ca_bundle(&cab, &cab_len) == 0) {
-        tls = kl_tls_mbedtls_client_ctx_create_from_buf(cab, cab_len, alloc);
+        tls = hl_tls_client_ctx_create_from_buf(cab, cab_len, alloc);
     }
     if (!tls) {
         /* Fall back to a system CA bundle path. */
@@ -115,7 +115,7 @@ KlTlsCtx *hl_release_io_open_tls(KlAllocator *alloc)
         };
         for (const char **p = paths; *p && !tls; p++) {
             if (access(*p, R_OK) == 0)
-                tls = kl_tls_mbedtls_client_ctx_create(*p, alloc);
+                tls = hl_tls_client_ctx_create(*p, alloc);
         }
     }
     return tls;
@@ -130,11 +130,8 @@ int hl_release_io_get(const char *url,
 {
     if (!url || !out_body || !out_len || !alloc || !tls) return -1;
 
-    KlTlsConfig tls_cfg = {
-        .ctx         = tls,
-        .factory     = (KlTlsFactory)kl_tls_mbedtls_create,
-        .ctx_destroy = (void (*)(KlTlsCtx *))kl_tls_mbedtls_ctx_destroy,
-    };
+    KlTlsConfig tls_cfg = {0};
+    hl_tls_config_wire(&tls_cfg, tls);
     KlClientConfig cfg = {
         .timeout_ms        = 30000,
         .max_response_size = 200 * 1024 * 1024,  /* 200 MB headroom for releases */
