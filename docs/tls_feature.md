@@ -202,12 +202,22 @@ Keel, so this is one deliberate relocation. Because Keel isolates TLS in a singl
 - **Validate:** `e2e_build_flavor.sh` updated; release-pipeline dry-run
   (hyphenated pre-release tag, per [[project_release_dryrun_prerelease_tag]]).
 
-### Phase 5 — Release + signing
-- Add the `tls` stem to `release.yml` (build + sign into the platform manifest,
-  embed via `TRUST_FEATURE_LIBS`), landing it in the `platform_domain` of
-  `package.sig.gethull.composed` (platform-key attested, runtime §5c FATAL) — the
-  same trust chain as the runtime/HTTP/WASM/image archives
+### Phase 5 — Release + signing — **DONE (a2 part 3)**
+- The `tls` stem is wired into `release.yml`: `feature-tls` is built + uploaded
+  with the other embedded feature archives, hashed into the signed platform
+  manifest (native-arch feature stems), SHA-verified in stage 3, and embedded
+  via `TRUST_FEATURE_LIBS`. It lands in the `platform_domain` of
+  `package.sig.gethull.composed` (platform-key attested, runtime §5c FATAL) —
+  the same trust chain as the runtime/HTTP/WASM/image archives
   ([docs/composed_feature_signing.md](composed_feature_signing.md)).
+- The embedded **app-build base** for a release is now the combined **SLIM**
+  base (`platform-slim` = `HL_SQLITE_FEATURE=1 HL_TLS_FEATURE=1`), embedded via
+  `HL_APP_BASE_SQLITELESS=1 HL_APP_BASE_TLSLESS=1`, replacing the SQLite-only
+  `sqliteless` base. So a stock `hull build` drops **both** SQLite and mbedTLS
+  and composes each back per app. Cosmo stays full (fat APE can't force-load).
+  Validate via a dry-run pre-release tag before a real release (the shipped
+  `HL_PLATFORM_PUBKEY_HEX` placeholder means §5c is skipped at runtime today, so
+  this is future-correct; the produced-app size payoff is already live).
 
 ## Risks + open questions
 
