@@ -445,6 +445,22 @@ endif
 # binary + a plain `make` are unaffected. Native only. Default 0.
 HL_TLS_FEATURE     ?= 0
 
+# HL_KEEL_FEATURE=1 builds a Keel-less app-build base (docs/keel_feature.md,
+# Phase 4.2b): the base uses the Keel-free serve_cli.o app-entry (weak hull_serve)
+# instead of serve.o, and drops async/keel.c (the Keel event loop), keeping only
+# the weak poll backend. serve.o + async/keel.c (the strong hull_serve +
+# hl_async_backend overrides) compose back in the whole-archived http feature on
+# needs_http. A compute app references no kl_* and links Keel-free; libkeel stays
+# available (merged in the base .a, pulled on-demand by a composed serve.o).
+# Used only by the KEELLESS app-build base; the hull binary + plain `make`
+# unaffected. Native only. Default 0.
+HL_KEEL_FEATURE    ?= 0
+# Surface the flag to C so async/poll.c compiles its weak net-backend stubs on a
+# Keel-less base (HTTP_SERVER stays 1, so the plain #ifndef would miss it).
+ifeq ($(HL_KEEL_FEATURE),1)
+CFLAGS += -DHL_KEEL_FEATURE
+endif
+
 # HL_APP_BASE_SQLITELESS=1 (Phase D, docs/sqlite_feature.md): the distributed
 # hull embeds a SQLite-LESS platform lib as the app-build base (built in a
 # HL_SQLITE_FEATURE=1 sub-build) plus the SQLite engine archive, so a stock
@@ -1870,7 +1886,11 @@ EMBED_OBJ        := $(BUILDDIR)/embed.o
 #                  selected by hl_async_backend() when neither HTTP
 #                  half is compiled in.
 ASYNC_BACKEND_SRCS := $(wildcard $(SRCDIR)/hull/async/*.c)
-ifeq ($(HL_ENABLE_HTTP_ANY),0)
+# Drop the Keel event-loop backend (async/keel.c) from the base when HTTP is off
+# OR when building the Keel-less app-build base (HL_KEEL_FEATURE=1, Phase 4.2b):
+# the base keeps only the weak poll backend, and async/keel.c (the strong
+# hl_async_backend override) composes back in the whole-archived http feature.
+ifneq ($(filter 1,$(if $(filter 0,$(HL_ENABLE_HTTP_ANY)),1,) $(HL_KEEL_FEATURE)),)
   ASYNC_BACKEND_SRCS := $(filter-out $(SRCDIR)/hull/async/keel.c,$(ASYNC_BACKEND_SRCS))
 endif
 ASYNC_BACKEND_OBJS := $(patsubst $(SRCDIR)/hull/async/%.c,$(BUILDDIR)/async_%.o,$(ASYNC_BACKEND_SRCS))
@@ -1881,7 +1901,12 @@ ASYNC_BACKEND_OBJS := $(patsubst $(SRCDIR)/hull/async/%.c,$(BUILDDIR)/async_%.o,
 #                connection-bound request suspension. CLIENT-only or
 #                pure-compute builds use the no-op stubs in async/poll.c.
 NET_BACKEND_SRCS := $(wildcard $(SRCDIR)/hull/net/*.c)
-ifeq ($(HL_ENABLE_HTTP_SERVER),0)
+# Drop the Keel net backend (net/keel.c) from the base when the server is off OR
+# when building the Keel-less app-build base (HL_KEEL_FEATURE=1): net/keel.c
+# references kl_async_* and would re-pull Keel via shared/async.o. The weak no-op
+# stubs in async/poll.c stand in the base; net/keel.c composes back (strong) in
+# the whole-archived http feature on needs_http.
+ifneq ($(filter 1,$(if $(filter 0,$(HL_ENABLE_HTTP_SERVER)),1,) $(HL_KEEL_FEATURE)),)
   NET_BACKEND_SRCS :=
 endif
 NET_BACKEND_OBJS := $(patsubst $(SRCDIR)/hull/net/%.c,$(BUILDDIR)/net_%.o,$(NET_BACKEND_SRCS))
@@ -2075,6 +2100,16 @@ SERVE_OBJ      := $(BUILDDIR)/serve_cli.o
 else
 AGENT_API_OBJ  := $(BUILDDIR)/agent_api.o
 SERVE_OBJ      := $(BUILDDIR)/serve.o
+endif
+# HL_KEEL_FEATURE=1 (docs/keel_feature.md, Phase 4.2b): the Keel-less app-build
+# base. Even at HTTP_SERVER=1 it uses the Keel-free serve_cli.o app-entry (weak
+# hull_serve; compiles clean under HTTP_SERVER=1 via the a1/4.1/4.2a seams)
+# instead of serve.o (the KlServer loop, strong hull_serve), which composes back
+# in the whole-archived http feature on needs_http. agent_api (in-process HTTP
+# introspection) drops out with the server.
+ifeq ($(HL_KEEL_FEATURE),1)
+AGENT_API_OBJ  :=
+SERVE_OBJ      := $(BUILDDIR)/serve_cli.o
 endif
 MAIN_OBJ       := $(BUILDDIR)/main.o
 APP_RUNNER_OBJ := $(BUILDDIR)/app_runner.o
@@ -2580,6 +2615,7 @@ BUILD_FINGERPRINT := \
   TUI_TC=$(HL_TUI_TOOLCHAIN)|\
   IMAGE=$(HL_ENABLE_IMAGE)|\
   TLS_FEATURE=$(HL_TLS_FEATURE)|\
+  KEEL_FEATURE=$(HL_KEEL_FEATURE)|\
   CA=$(HL_EMBED_CA_BUNDLE)|\
   JS=$(HL_ENABLE_JS)|\
   LUA=$(HL_ENABLE_LUA)|\
@@ -2881,6 +2917,38 @@ platform-tlsless: $(TLSLESS_PLATFORM_LIB)
 	@if nm $(TLSLESS_PLATFORM_LIB) 2>/dev/null | grep -qE ' [TtWw] _?mbedtls_ssl_handshake'; then \
 		echo "FAIL: TLS-less base defines mbedtls_ssl_handshake"; exit 1; fi
 	@echo "ok  TLS-less base carries no mbedTLS (a2 base-drop verified)"
+
+# ── Keel-less app-build base (Phase 4.2b, HL_KEEL_FEATURE=1) ────────────
+# The event-loop half of the composable base: serve.o (KlServer loop) +
+# async/keel.c (Keel event loop) + net/keel.c (Keel net backend) leave the base
+# object set, replaced by the Keel-free serve_cli.o entry + the weak poll backend
+# + weak net stubs. serve.o/keel.c/net_keel.o compose back (strong overrides) in
+# the whole-archived http feature on needs_http; libkeel stays merged in the base
+# .a (pulled on-demand by a composed serve.o). A compute app references no kl_*
+# and links Keel-free. Combined with HL_TLS_FEATURE it is a genuinely
+# Keel-and-mbedTLS-free base. `make platform-keelless` builds + verifies the
+# event-loop objects are gone. Compose wiring (http feature + app-base) is the
+# next step; the hull binary + plain `make` are unaffected. See docs/keel_feature.md.
+KEELLESS_PLATFORM_LIB := $(BUILDDIR)/libhull_platform-keelless.a
+ifeq ($(TRUST_PLATFORM_LIB),1)
+$(KEELLESS_PLATFORM_LIB): | $(BUILDDIR)
+	@test -f $@ || (echo "ERROR: TRUST_PLATFORM_LIB=1 but $@ is missing"; exit 1)
+	@echo "$@: trusting pre-built artifact (TRUST_PLATFORM_LIB=1)"
+else
+$(KEELLESS_PLATFORM_LIB):
+	$(MAKE) platform BUILDDIR=$(BUILDDIR)/keelless HL_KEEL_FEATURE=1
+	cp $(BUILDDIR)/keelless/libhull_platform.a $@
+	@echo "built $@ (Keel-less app-build base)"
+endif
+.PHONY: platform-keelless
+platform-keelless: $(KEELLESS_PLATFORM_LIB)
+	@echo "verifying $(KEELLESS_PLATFORM_LIB) drops the Keel event loop..."
+	@for o in serve.o async_keel.o net_keel.o; do \
+		if [ "$$(ar t $(KEELLESS_PLATFORM_LIB) | grep -cE "^$$o\$$")" != "0" ]; then \
+			echo "FAIL: Keel-less base still bundles $$o"; exit 1; fi; done
+	@if [ "$$(ar t $(KEELLESS_PLATFORM_LIB) | grep -cE '^serve_cli\.o$$')" != "1" ]; then \
+		echo "FAIL: Keel-less base is missing the serve_cli.o entry"; exit 1; fi
+	@echo "ok  Keel-less base drops serve.o + async_keel.o + net_keel.o (4.2b base-drop verified)"
 
 # ── Combined SQLite-less + TLS-less app-build base ─────────────────────
 # When a release drops BOTH SQLite and TLS from the app base, they must share one

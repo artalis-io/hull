@@ -62,6 +62,12 @@ jobs:
         timeout-minutes: 3
         run: make platform-tlsless
 
+      # The Keel-less app-build base (HL_KEEL_FEATURE=1) must build and drop the
+      # Keel event loop (serve.o + async_keel.o + net_keel.o). Self-verifying.
+      - name: Keel-less base builds + drops the event loop
+        timeout-minutes: 3
+        run: make platform-keelless
+
       - name: Hardening summary
         run: make hardening
 
