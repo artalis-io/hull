@@ -2,6 +2,18 @@
 
 Status: **Draft / Proposed** | Tracked in: [`roadmap_next.md`](roadmap_next.md)
 
+> **Phase 4.3 update (docs/keel_feature.md).** `pure-compute` is no longer a
+> pre-built per-flavor platform lib. Once every composable subsystem (HTTP, TLS,
+> Keel) drops from the base and composes back per app, a compute app on the
+> default composable base already links zero HTTP/Keel/mbedTLS. So
+> `--flavor=pure-compute` is now a **build.lua preset**: it builds on the default
+> base and only **validates** that the app declares no HTTP/TLS (rejecting an HTTP
+> app at build time). The `platform-pure-compute` archive, its release-matrix
+> entries, and `hull flavor install pure-compute` were removed; `hull flavor list`
+> shows it as `preset (default base)`. Only `full` (the embedded default) remains
+> a "real" base. Sections below describing pre-built per-flavor libs are historical
+> for `pure-compute`.
+
 This is the design for making a build flavor a property of the **app
 binary you ship**, not of the `hull` toolchain that builds it. Today every
 app `hull build` produces inherits whatever `HL_ENABLE_*` flags the `hull`

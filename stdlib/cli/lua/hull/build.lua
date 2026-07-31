@@ -860,7 +860,11 @@ typedef struct {
             tool.rmdir(tmpdir)
             tool.exit(1)
         end
-        flavor_asset = fr.asset
+        -- A PRESET flavor (empty asset, e.g. pure-compute) builds on the default
+        -- composable base and only enforces its cleared caps below; the compose
+        -- steps naturally add nothing for an app with no HTTP/TLS. A pre-built
+        -- flavor lib (non-empty asset) overrides the base via flavor_asset.
+        if fr.asset and fr.asset ~= "" then flavor_asset = fr.asset end
         local manifest = extract_app_manifest(opts.app_dir)
         if manifest then
             local r = tool.modules_resolve(manifest, opts.flavor, with_feature_list(opts))

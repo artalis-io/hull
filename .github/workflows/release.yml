@@ -130,7 +130,7 @@ jobs:
           # HL_APP_BASE_TLSLESS=1. It shares this step's obj-dir isolation +
           # arch-qualified naming.
           run: |
-            for f in pure-compute slim; do
+            for f in slim; do
               make "platform-$f"
               mv "build/libhull_platform-$f.a" \
                  "build/libhull_platform-$f-${{ matrix.name }}.a"
@@ -138,7 +138,7 @@ jobs:
       - name: Build platform flavors (macOS)
         if: runner.os == 'macOS'
         run: |
-          for f in pure-compute slim; do
+          for f in slim; do
             make "platform-$f"
             mv "build/libhull_platform-$f.a" \
                "build/libhull_platform-$f-${{ matrix.name }}.a"
@@ -177,47 +177,6 @@ jobs:
             build/libhull_platform.x86_64-cosmo.a
             build/libhull_platform.aarch64-cosmo.a
 
-  # Per-flavor cosmo platform libs (dual-arch), for `hull platform install
-  # <flavor>` -> `hull build --flavor` on a cosmo hull. One flavor per fresh
-  # runner (matrix): each does exactly ONE `make platform-cosmo-<flavor>` and
-  # uploads its dual-arch pair. This isolation is REQUIRED -- a second cosmo
-  # platform build in the same job corrupts the dynamic loader (system
-  # cc/sh/gcc/clang can no longer mmap libc.so.6, while static cosmo APEs are
-  # fine; disk + RAM are abundant, so it is not a resource limit). The lib
-  # build itself always succeeds; we just never shell out to a compiler after
-  # it (SHA-256 + sign + publish happen later on clean runners). Mirrors the
-  # build-platform-cosmo job above, which proves one cosmo build + upload works.
-  build-platform-cosmo-flavors:
-    name: Build platform (cosmo, ${{ matrix.flavor }})
-    runs-on: ubuntu-24.04
-    strategy:
-      fail-fast: false
-      matrix:
-        flavor: [pure-compute]
-
-    steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
-        with:
-          submodules: true
-
-      - name: Write VERSION file
-        run: echo "${GITHUB_REF_NAME#v}" > VERSION
-
-      # cosmocc is baked into the reproducible container (roadmap 0.3.1), so
-      # there is no fetch step.
-      - name: Build cosmo flavor platform lib (dual-arch, reproducible container)
-        uses: ./.github/actions/hull-build-container
-        with:
-          run: make platform-cosmo-${{ matrix.flavor }}
-
-      - name: Upload cosmo flavor archives
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
-        with:
-          name: platform-cosmo-flavor-${{ matrix.flavor }}
-          path: |
-            build/libhull_platform-${{ matrix.flavor }}.x86_64-cosmo.a
-            build/libhull_platform-${{ matrix.flavor }}.aarch64-cosmo.a
-          if-no-files-found: error
 
   # ────────────────────────────────────────────────────────────────────
   # Stage 2: build + sign the platform manifest. Generates the
@@ -1163,7 +1122,7 @@ jobs:
   release:
     name: Create Release
     runs-on: ubuntu-24.04
-    needs: [build-cosmo, build-native, build-wamrc, build-tcc, build-platform-cosmo-flavors, build-feature-native, build-feature-gpu, build-feature-tui, build-feature-postgres, build-feature-mysql, build-feature-lua, build-feature-js]
+    needs: [build-cosmo, build-native, build-wamrc, build-tcc, build-feature-native, build-feature-gpu, build-feature-tui, build-feature-postgres, build-feature-mysql, build-feature-lua, build-feature-js]
     permissions:
       contents: write       # publish GitHub release + assets
       id-token: write       # SLSA: OIDC for Sigstore signing
@@ -1195,7 +1154,6 @@ jobs:
           mv artifacts/platform-flavors-linux-x86_64/*.a  dist/
           mv artifacts/platform-flavors-linux-aarch64/*.a dist/
           mv artifacts/platform-flavors-darwin-arm64/*.a  dist/
-          mv artifacts/platform-cosmo-flavor-pure-compute/*.a  dist/
           # libhull: the no-runtime embedding archive (libhull L-4). Native
           # per-arch (libhull-<arch>.a) + dual-arch cosmo
           # (libhull.{x86_64,aarch64}-cosmo.a). Added explicitly to the
@@ -1265,17 +1223,9 @@ jobs:
           ./hull-linux-x86_64 sbom --subject=libhull --format=json      > libhull.sbom.json
           ./hull-linux-x86_64 sbom --subject=libhull --format=cyclonedx > libhull.sbom.cdx.json
           ./hull-linux-x86_64 sbom --subject=libhull --format=spdx      > libhull.sbom.spdx.json
-          # Per-flavor SBOMs for the published `hull build --flavor` platform
-          # libs. Named to match libhull_platform-<flavor>.a. Today only
-          # pure-compute differs (drops Keel + mbedTLS); the others equal the
-          # full hull SBOM minus the binary hash, published for symmetry so a
-          # `hull platform install <flavor>` consumer has its own bill.
-          for f in pure-compute; do
-            ./hull-linux-x86_64 sbom --flavor="$f" --format=json      > "libhull_platform-$f.sbom.json"
-            ./hull-linux-x86_64 sbom --flavor="$f" --format=cyclonedx > "libhull_platform-$f.sbom.cdx.json"
-            ./hull-linux-x86_64 sbom --flavor="$f" --format=spdx      > "libhull_platform-$f.sbom.spdx.json"
-          done
-          ls -la hull.sbom.* libhull.sbom.* libhull_platform-*.sbom.*
+          # (Phase 4.3: pure-compute became a build.lua preset on the default
+          # composable base, so there are no per-flavor platform libs to SBOM.)
+          ls -la hull.sbom.* libhull.sbom.*
 
       - name: Generate build-environment manifest
         # §0.3.14. Capture the release-workflow runner identity, commit,
