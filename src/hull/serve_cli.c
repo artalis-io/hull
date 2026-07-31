@@ -44,7 +44,7 @@
 #include "hull/cap/http.h"
 #include "hull/cacert.h"
 #include <keel/client.h>
-#include <keel/tls_mbedtls.h>
+#include "hull/tls_transport.h"
 #endif
 
 #include "log.h"
@@ -290,12 +290,10 @@ int hull_serve(int argc, char **argv)
         const unsigned char *emb_data = NULL;
         size_t emb_len = 0;
         if (hl_embedded_ca_bundle(&emb_data, &emb_len) == 0) {
-            tls_ctx = kl_tls_mbedtls_client_ctx_create_from_buf(
+            tls_ctx = hl_tls_client_ctx_create_from_buf(
                 emb_data, emb_len, &kalloc);
             if (tls_ctx) {
-                tls_cfg.ctx         = tls_ctx;
-                tls_cfg.factory     = (KlTlsFactory)kl_tls_mbedtls_create;
-                tls_cfg.ctx_destroy = (void (*)(KlTlsCtx *))kl_tls_mbedtls_ctx_destroy;
+                hl_tls_config_wire(&tls_cfg, tls_ctx);
                 http_cfg.tls        = &tls_cfg;
             }
         }
@@ -313,7 +311,7 @@ int hull_serve(int argc, char **argv)
                              NULL, NULL, NULL) != 0) {
             log_error("[hull:cli] sandbox enforcement failed");
 #ifdef HL_ENABLE_HTTP_CLIENT
-            if (tls_ctx) kl_tls_mbedtls_ctx_destroy(tls_ctx);
+            if (tls_ctx) hl_tls_ctx_destroy(tls_ctx);
 #endif
             rt->async_ctx = NULL;
             rt->thread_pool = NULL;
@@ -339,7 +337,7 @@ int hull_serve(int argc, char **argv)
     rt->env_cfg = NULL;
 #ifdef HL_ENABLE_HTTP_CLIENT
     rt->http_cfg = NULL;
-    if (tls_ctx) kl_tls_mbedtls_ctx_destroy(tls_ctx);
+    if (tls_ctx) hl_tls_ctx_destroy(tls_ctx);
 #endif
     if (pool) be->pool_free(pool);
     be->free(async_ctx);
