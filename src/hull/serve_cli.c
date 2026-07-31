@@ -29,6 +29,7 @@
 
 #include "hull/app_context.h"
 #include "hull/entry.h"        /* HlEntry / hl_app_entries[] (embedded apps) */
+#include "hull/utils/alloc.h"  /* HlAllocator + hl_alloc_kl (Keel-free KlAllocator) */
 #include "hull/shared/async_backend.h"
 #include "hull/shared/log_lock.h"
 #include "hull/shared/thread_affinity.h"
@@ -276,7 +277,17 @@ int hull_serve(int argc, char **argv)
      * matches the resolution order in serve.c minus the system-store
      * probe (which adds platform-specific cruft we don't need for CLI). */
     HlHttpConfig http_cfg = {0};
-    KlAllocator kalloc    = kl_allocator_default();
+    /* Hull's tracking allocator (uncapped: limit 0 = track, no cap), bridged to
+     * a KlAllocator for the composed HTTPS client. Mirrors serve.c's
+     * `s->kl_alloc = hl_alloc_kl(&s->alloc)`. This replaces kl_allocator_default(),
+     * which lives in libkeel.a: routing the base app.main runner through Hull's
+     * own allocator (hl_alloc_kl references only the KlAllocator *type*, no kl_*
+     * symbol) keeps serve_cli.o Keel-free, the prerequisite for a Keel-less base
+     * (docs/keel_feature.md, Phase 4.2). http_alloc must outlive tls_ctx; both are
+     * function-scope and live for the whole app.main run. */
+    HlAllocator http_alloc;
+    hl_alloc_init(&http_alloc, 0);
+    KlAllocator kalloc    = hl_alloc_kl(&http_alloc);
     KlTlsConfig tls_cfg   = {0};
     KlTlsCtx *tls_ctx     = NULL;
 
