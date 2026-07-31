@@ -3101,6 +3101,22 @@ feature-image-js: $(BUILDDIR)/libhull_feature-image-js.a
 $(BUILDDIR)/libhull_feature-image-js.a: $(BUILDDIR)/js_mod_image.o | $(BUILDDIR)
 	$(call AR_FEATURE_LIB,$(BUILDDIR)/js_mod_image.o)
 
+# libhull_feature-tls.a: the mbedTLS transport + crypto backends as a composable
+# feature (docs/tls_feature.md, a2). Bundles the mbedTLS-consuming TUs -- the two
+# crypto mbedTLS backends (strong overrides of the weak hl_crypto_*_active_backend
+# hooks), the outbound TLS client (smtp/pg/mysql sslmode), the serve TLS ctx setup
+# (a1), and the vendored mbedTLS (~1 MB) -- so a TLS-less app-build base drops them
+# and composes them back when the app needs TLS. References Keel's tls_mbedtls.o
+# (resolved from the base's KEEL_LIB at compose) + base crypto/vfs symbols, so the
+# compose whole-archives it inside a --start-group. Built at HL_LINK_TLS=1 (the
+# default HTTP build already compiles all members).
+FEATURE_TLS_OBJS := $(BUILDDIR)/cap_crypto_hmac_mbedtls.o $(BUILDDIR)/cap_crypto_asym_mbedtls.o \
+                    $(BUILDDIR)/tls_client.o $(BUILDDIR)/tls_transport.o $(MBEDTLS_OBJS)
+feature-tls: $(BUILDDIR)/libhull_feature-tls.a
+.PHONY: feature-tls
+$(BUILDDIR)/libhull_feature-tls.a: $(FEATURE_TLS_OBJS) | $(BUILDDIR)
+	$(call AR_FEATURE_LIB,$(FEATURE_TLS_OBJS))
+
 # Gate the image archives behind HL_ENABLE_IMAGE: on the subtractive image-less
 # flavor (make HL_ENABLE_IMAGE=0) cap_image.o + stb aren't built, so the archives
 # can't (and needn't) build. These vars resolve empty there so FEATURE_ARCHIVES /

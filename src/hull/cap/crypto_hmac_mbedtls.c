@@ -16,6 +16,7 @@
  */
 
 #include "hull/cap/crypto.h"
+#include "hull/tls_feature.h"   /* hl_crypto_hmac_active_backend (strong override) */
 
 #include <stddef.h>
 #include <stdint.h>
@@ -90,3 +91,15 @@ const HlCryptoHmacBackend hl_crypto_hmac_backend_mbedtls = {
     .supports = mbedtls_supports,
     .compute  = mbedtls_compute,
 };
+
+#ifdef HL_ENABLE_HTTP
+/* STRONG override of the base's weak hl_crypto_hmac_active_backend() (cap/crypto.c):
+ * when this real mbedTLS HMAC TU is linked (or composed into libhull_feature-tls.a),
+ * HMAC uses mbedTLS. Absent on a TLS-less base (this branch compiled out), where
+ * the weak default returns the portable backend. Mirrors the asym override in
+ * cap/crypto_asym_mbedtls.c. See docs/tls_feature.md. */
+const HlCryptoHmacBackend *hl_crypto_hmac_active_backend(void)
+{
+    return &hl_crypto_hmac_backend_mbedtls;
+}
+#endif
