@@ -474,10 +474,13 @@ typedef struct HlCryptoAsymBackend {
                   const void *sig,  size_t sig_len);
 } HlCryptoAsymBackend;
 
-/** Built-in mbedTLS backend. Always present in builds that link
- *  mbedTLS (any build with `HL_ENABLE_HTTP_CLIENT=1` or
- *  `HL_ENABLE_HTTP_SERVER=1`). On builds without mbedTLS the symbol
- *  still exists but its `verify` returns -2 (input error).
+/** Built-in mbedTLS asym backend. Present only in builds that link mbedTLS
+ *  (any build with `HL_ENABLE_HTTP_CLIENT=1` or `HL_ENABLE_HTTP_SERVER=1`, or a
+ *  composed TLS feature). On a TLS-less base the symbol is ABSENT; the active
+ *  backend is then a fail-closed stub whose `verify` returns -2. Prefer
+ *  `hl_crypto_asym_active_backend()` (hull/tls_feature.h) /
+ *  `hl_cap_crypto_asym_verify_default()` over referencing this symbol directly,
+ *  so code links on both TLS and TLS-less bases. See docs/tls_feature.md.
  */
 extern const HlCryptoAsymBackend hl_crypto_asym_backend_mbedtls;
 

@@ -17,6 +17,7 @@
  */
 
 #include "hull/cap/crypto.h"
+#include "hull/tls_feature.h"   /* hl_crypto_asym_active_backend (strong override) */
 
 #include <stdint.h>
 #include <stdlib.h>
@@ -302,6 +303,15 @@ const HlCryptoAsymBackend hl_crypto_asym_backend_mbedtls = {
     .verify   = mbed_verify,
 };
 
+/* STRONG override of the base's weak hl_crypto_asym_active_backend() (cap/crypto.c):
+ * when this mbedTLS TU is linked, asym verify uses the real backend. Absent on a
+ * TLS-less base (this whole #ifdef is compiled out), where the weak fail-closed
+ * stub wins. A composed libhull_feature-tls.a provides the same override. */
+const HlCryptoAsymBackend *hl_crypto_asym_active_backend(void)
+{
+    return &hl_crypto_asym_backend_mbedtls;
+}
+
 /* ── X.509 -> SPKI PEM (for OIDC JWKS x5c entries) ───────────────── */
 
 int hl_cap_crypto_x509_pubkey_pem(const void *der, size_t der_len,
@@ -393,20 +403,12 @@ done:
 
 #else /* !HL_ENABLE_HTTP - mbedTLS is not linked */
 
-static int stub_supports(HlCryptoAsymAlg alg) { (void)alg; return 0; }
-static int stub_verify(const void *pk, size_t plen,
-                       HlCryptoAsymAlg alg,
-                       const void *d, size_t dlen,
-                       const void *s, size_t slen)
-{
-    (void)pk; (void)plen; (void)alg;
-    (void)d;  (void)dlen; (void)s;  (void)slen;
-    return -2;
-}
-const HlCryptoAsymBackend hl_crypto_asym_backend_mbedtls = {
-    .supports = stub_supports,
-    .verify   = stub_verify,
-};
+/* The mbedTLS asym backend (hl_crypto_asym_backend_mbedtls) + its
+ * hl_crypto_asym_active_backend() override are NOT defined here: on a TLS-less
+ * base the weak fail-closed stub + accessor in cap/crypto.c win, and nothing
+ * references the mbedTLS backend symbol. Only x509_pubkey_pem keeps a base stub
+ * (a direct cap fn, not routed through the asym vtable; a later phase moves it
+ * behind the feature too). See docs/tls_feature.md. */
 
 int hl_cap_crypto_x509_pubkey_pem(const void *der, size_t der_len,
                                   char *out_pem, size_t out_size,
@@ -458,25 +460,7 @@ const char *hl_crypto_asym_alg_to_string(HlCryptoAsymAlg alg)
     }
 }
 
-int hl_cap_crypto_asym_verify(const HlCryptoAsymBackend *backend,
-                       const void *pubkey_pem, size_t pubkey_len,
-                       HlCryptoAsymAlg alg,
-                       const void *data, size_t data_len,
-                       const void *sig,  size_t sig_len)
-{
-    if (!backend || !backend->verify) return -2;
-    if (alg == HL_CRYPTO_ASYM_NONE) return -2;
-    if (!backend->supports || !backend->supports(alg)) return -2;
-    return backend->verify(pubkey_pem, pubkey_len, alg,
-                           data, data_len, sig, sig_len);
-}
-
-int hl_cap_crypto_asym_verify_default(const void *pubkey_pem, size_t pubkey_len,
-                               HlCryptoAsymAlg alg,
-                               const void *data, size_t data_len,
-                               const void *sig,  size_t sig_len)
-{
-    return hl_cap_crypto_asym_verify(&hl_crypto_asym_backend_mbedtls,
-                              pubkey_pem, pubkey_len,
-                              alg, data, data_len, sig, sig_len);
-}
+/* hl_cap_crypto_asym_verify (generic dispatcher) + hl_cap_crypto_asym_verify_default
+ * moved to cap/crypto.c (base-resident) so they no longer tie those symbols to this
+ * mbedTLS TU. verify_default now dispatches through hl_crypto_asym_active_backend(),
+ * whose STRONG override lives below (HL_ENABLE_HTTP only). See docs/tls_feature.md. */
