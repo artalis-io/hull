@@ -9,6 +9,7 @@
  */
 
 #include "hull/cap/crypto.h"
+#include "hull/tls_feature.h"
 #include "tweetnacl.h"
 /* SHA-1 is hand-rolled below (hl_cap_crypto_sha1) so it works in mbedtls-free
  * builds, same as the hand-rolled SHA-256 in this file. No mbedtls include. */
@@ -708,15 +709,29 @@ int hl_cap_crypto_random(void *buf, size_t len)
 #endif
 }
 
-/* Active HMAC backend. mbedTLS when it is linked (any build with an HTTP
- * half); the portable hand-rolled backend in the pure-compute flavor, where
- * mbedTLS is dropped. Both symbols always exist — this only picks which one
- * the cap entry points dispatch through. */
+/* Active HMAC backend, chosen at RUNTIME via the weak hl_crypto_hmac_active_backend()
+ * hook (hull/tls_feature.h) instead of the historical compile-time macro, so a
+ * future TLS-less base defaults to the portable backend while a composed TLS
+ * feature swaps in mbedTLS via a strong override (docs/tls_feature.md, Phase 1).
+ *
+ * Per-backend accessor (not a combined {hmac,asym} struct) on purpose: the base
+ * splits crypto.o from the asym TU (test link sets pull crypto.o + the HMAC TU
+ * without the asym TU), so a hook whose default referenced the asym symbol would
+ * break those links. Asym gets its own accessor in the asym follow-up.
+ *
+ * Phase 1 is dormant: this weak default preserves the historical selection
+ * byte-for-byte -- mbedTLS when it is linked (HL_ENABLE_HTTP), portable
+ * otherwise. Both symbols always exist today; portable and mbedTLS HMAC produce
+ * identical output. */
+__attribute__((weak))
+const HlCryptoHmacBackend *hl_crypto_hmac_active_backend(void)
+{
 #ifdef HL_ENABLE_HTTP
-#define HL_HMAC_BACKEND hl_crypto_hmac_backend_mbedtls
+    return &hl_crypto_hmac_backend_mbedtls;
 #else
-#define HL_HMAC_BACKEND hl_crypto_hmac_backend_portable
+    return &hl_crypto_hmac_backend_portable;
 #endif
+}
 
 /* ── HMAC-SHA256 (vtable-dispatched) ───────────────────────────────── */
 
@@ -735,8 +750,9 @@ int hl_cap_crypto_hmac_sha256(const uint8_t *key, size_t key_len,
      * reach the backend implementation. */
     if (!key || !msg || !out)
         return -1;
-    return HL_HMAC_BACKEND.compute(
-        &HL_HMAC_BACKEND,
+    const HlCryptoHmacBackend *b = hl_crypto_hmac_active_backend();
+    return b->compute(
+        b,
         HL_CRYPTO_HMAC_SHA256,
         key, key_len, msg, msg_len, out, 32);
 }
@@ -757,8 +773,9 @@ int hl_cap_crypto_hmac_sha1(const uint8_t *key, size_t key_len,
      * depth (the backend would reject too) but keeps the two
      * cap entry points symmetric. */
     if (!key || !msg || !out) return -1;
-    return HL_HMAC_BACKEND.compute(
-        &HL_HMAC_BACKEND,
+    const HlCryptoHmacBackend *b = hl_crypto_hmac_active_backend();
+    return b->compute(
+        b,
         HL_CRYPTO_HMAC_SHA1,
         key, key_len, msg, msg_len, out, 20);
 }
@@ -1228,8 +1245,8 @@ int hl_cap_crypto_sha1(const void *data, size_t len, uint8_t out[20])
 /* ── Portable HMAC backend (mbedtls-free) ─────────────────────────────
  *
  * HMAC per RFC 2104 over the in-tree hand-rolled hashes. Selected by the
- * cap layer (HL_HMAC_BACKEND, above) only in the pure-compute flavor where
- * mbedTLS is not linked; always compiled so test_crypto exercises it in
+ * cap layer (hl_crypto_hmac_active_backend, above) only in the pure-compute
+ * flavor where mbedTLS is not linked; always compiled so test_crypto exercises it in
  * every build. Block size is 64 for both SHA-1 and SHA-256. The ipad/opad
  * block and the message are absorbed incrementally — no heap, any message
  * length. HMAC-SHA512 is intentionally unsupported (no streaming SHA-512 in
