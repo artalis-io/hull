@@ -726,11 +726,14 @@ int hl_cap_crypto_random(void *buf, size_t len)
 __attribute__((weak))
 const HlCryptoHmacBackend *hl_crypto_hmac_active_backend(void)
 {
-#ifdef HL_ENABLE_HTTP
-    return &hl_crypto_hmac_backend_mbedtls;
-#else
+    /* Base default: the always-present portable backend. The mbedTLS HMAC TU
+     * (cap/crypto_hmac_mbedtls.c), when linked or composed into a TLS feature,
+     * provides a STRONG override returning the mbedTLS backend. Output is
+     * byte-identical either way, so this is transparent to callers. Returning
+     * portable (not &hl_crypto_hmac_backend_mbedtls) keeps crypto.o free of a
+     * hard reference to the mbedTLS HMAC TU so a TLS-less base links -- same
+     * shape as the asym accessor. */
     return &hl_crypto_hmac_backend_portable;
-#endif
 }
 
 /* ── Asymmetric verify backend selection (TLS feature Phase 1b) ─────────
