@@ -413,8 +413,11 @@ else
             fail "sandbox_violation.c compilation failed (OpenBSD): $COMPILE_ERR"
         fi
     else
-        # Native Linux: link against pledge polyfill objects
-        PLEDGE_OBJS=$(find "$BUILDDIR" -path '*/pledge*' -name '*.o' 2>/dev/null | tr '\n' ' ')
+        # Native Linux: link against pledge polyfill objects. Anchor the glob to
+        # the TOP-LEVEL pledge dir ("$BUILDDIR/pledge*") so it never picks up a
+        # sub-build's copy (build/tlsless, build/sqliteless, build/flavor-*, ...),
+        # which would link two sets and fail with "multiple definition of ...".
+        PLEDGE_OBJS=$(find "$BUILDDIR" -path "$BUILDDIR/pledge*" -name '*.o' 2>/dev/null | tr '\n' ' ')
 
         if [ -z "$PLEDGE_OBJS" ]; then
             fail "pledge polyfill objects not found in $BUILDDIR"
