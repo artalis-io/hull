@@ -897,15 +897,24 @@ const HlAsyncBackend *hl_async_backend(void)
  * `if (active_conn)` / `if (!ctx->detached)` checks that never fire
  * without a server. Stubs let the link succeed.
  */
-#ifndef HL_ENABLE_HTTP_SERVER
+/* Weak no-op net-backend stubs. Present when there is no server (HTTP_SERVER=0)
+ * or on the Keel-less app-build base (HL_KEEL_FEATURE=1), where net/keel.c (the
+ * strong, Keel-referencing HlNetBackend) is dropped from the base and composes
+ * back in the whole-archived http feature. WEAK so that composed strong def wins
+ * (docs/keel_feature.md, Phase 4.2b). The call sites are gated by `if (active_conn)`
+ * / `if (!ctx->detached)`, which never fire without a server, so returning -1 /
+ * no-op here is never reached by a genuine compute app. */
+#if !defined(HL_ENABLE_HTTP_SERVER) || defined(HL_KEEL_FEATURE)
 #include "hull/net_backend.h"
 
+__attribute__((weak))
 int hl_net_op_suspend(HlNetBackendCtx *ctx, HlReqHandle *req, HlSuspendOp *op)
 {
     (void)ctx; (void)req; (void)op;
-    return -1;       /* CLI mode: no net backend to suspend on */
+    return -1;       /* no net backend to suspend on */
 }
 
+__attribute__((weak))
 void hl_net_op_complete(HlNetBackendCtx *ctx, HlSuspendOp *op)
 {
     (void)ctx; (void)op;
