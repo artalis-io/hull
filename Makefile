@@ -435,6 +435,16 @@ ifeq ($(HL_SQLITE_FEATURE),1)
 override HL_ENABLE_SQLITE := 0
 endif
 
+# HL_TLS_FEATURE=1 builds a TLS-as-a-composable-feature base (docs/tls_feature.md,
+# a2): the vendored mbedTLS + the mbedTLS-consuming TUs (cap_crypto_{hmac,asym}
+# _mbedtls.o, tls_client.o, tls_transport.o) leave the base object set, composed
+# back from libhull_feature-tls.a. Keel + the HTTP server/event loop stay
+# (HL_ENABLE_HTTP unchanged), as do the crypto weak defaults + tls_transport_stub;
+# Keel's own tls_mbedtls.o then dead-strips from a TLS-less app link (nothing
+# references kl_tls_*). Used only by the TLSLESS_PLATFORM_LIB sub-build; the hull
+# binary + a plain `make` are unaffected. Native only. Default 0.
+HL_TLS_FEATURE     ?= 0
+
 # HL_APP_BASE_SQLITELESS=1 (Phase D, docs/sqlite_feature.md): the distributed
 # hull embeds a SQLite-LESS platform lib as the app-build base (built in a
 # HL_SQLITE_FEATURE=1 sub-build) plus the SQLite engine archive, so a stock
@@ -521,6 +531,8 @@ MBEDTLS_DIR    := $(VENDDIR)/mbedtls
 MBEDTLS_SRCS   := $(wildcard $(MBEDTLS_DIR)/library/*.c)
 ifeq ($(HL_LINK_TLS),0)
 MBEDTLS_OBJS   :=
+else ifeq ($(HL_TLS_FEATURE),1)
+MBEDTLS_OBJS   :=   # composed from libhull_feature-tls.a; not in the base object set
 else
 MBEDTLS_OBJS   := $(patsubst $(MBEDTLS_DIR)/library/%.c,$(BUILDDIR)/mbed_%.o,$(MBEDTLS_SRCS))
 endif
@@ -1962,7 +1974,11 @@ CACERT_OBJ     := $(BUILDDIR)/cacert.o
 # PostgreSQL SSLRequest; a retrofitted SMTP STARTTLS later). Only built
 # when TLS is linked at all (an HTTP half or PostgreSQL enabled).
 ifeq ($(HL_LINK_TLS),1)
+ifeq ($(HL_TLS_FEATURE),1)
+TLS_CLIENT_OBJ :=   # -> libhull_feature-tls.a
+else
 TLS_CLIENT_OBJ := $(BUILDDIR)/tls_client.o
+endif
 else
 TLS_CLIENT_OBJ :=
 endif
@@ -1975,7 +1991,11 @@ endif
 # TLS-less base drops it. The weak stub (tls_transport_stub.o) is always in the
 # base so serve.c links when the override is absent (serves plaintext HTTP).
 ifeq ($(HL_LINK_TLS),1)
+ifeq ($(HL_TLS_FEATURE),1)
+TLS_TRANSPORT_OBJ :=   # -> libhull_feature-tls.a (the strong override)
+else
 TLS_TRANSPORT_OBJ := $(BUILDDIR)/tls_transport.o
+endif
 else
 TLS_TRANSPORT_OBJ :=
 endif
@@ -2693,6 +2713,17 @@ FEATURE_WASM_OBJS := $(BUILDDIR)/cap_wasm.o $(BUILDDIR)/cap_wasm_buffer.o \
 # libhull_feature-image-<rt>.a. The base keeps image_weakstub.c so an image-less
 # app links. Mirrors FEATURE_WASM_OBJS.
 FEATURE_IMAGE_OBJS := $(BUILDDIR)/cap_image.o $(BUILDDIR)/cap_image_stb.o
+# TLS as a composable feature (docs/tls_feature.md, a2). The mbedTLS crypto
+# backends (strong overrides of the weak hl_crypto_*_active_backend hooks) leave
+# the base under HL_TLS_FEATURE=1, composed back from libhull_feature-tls.a; the
+# base keeps crypto.o's portable/stub weak defaults. Empty on a normal build so
+# the base stays TLS-full. (tls_client.o / tls_transport.o are dropped via their
+# own OBJ vars above; mbedTLS via MBEDTLS_OBJS.)
+ifeq ($(HL_TLS_FEATURE),1)
+FEATURE_TLS_CAP_OBJS := $(BUILDDIR)/cap_crypto_hmac_mbedtls.o $(BUILDDIR)/cap_crypto_asym_mbedtls.o
+else
+FEATURE_TLS_CAP_OBJS :=
+endif
 ifdef COSMO
   PLATFORM_RT_OBJS       := $(RT_OBJS)
   PLATFORM_MANIFEST_OBJ  := $(MANIFEST_OBJ)
@@ -2707,7 +2738,7 @@ else
   # libhull_feature-wasm.a (docs/wasm_feature.md, Phase 1); the image codec caps
   # move to libhull_feature-image.a (docs/image_feature.md). All compose back at
   # `hull build`; the base keeps the weak stubs (http/wasm/image_weakstub).
-  PLATFORM_CAP_OBJS      := $(filter-out $(FEATURE_HTTP_OBJS) $(FEATURE_WASM_OBJS) $(FEATURE_IMAGE_OBJS),$(CAP_OBJS))
+  PLATFORM_CAP_OBJS      := $(filter-out $(FEATURE_HTTP_OBJS) $(FEATURE_WASM_OBJS) $(FEATURE_IMAGE_OBJS) $(FEATURE_TLS_CAP_OBJS),$(CAP_OBJS))
   PLATFORM_STB_OBJ       :=                              # stb moves into libhull_feature-image.a
 endif
 PLATFORM_OBJS := $(PLATFORM_CAP_OBJS) $(CAP_TOOL_OBJ) $(CAP_TEST_OBJ) $(CMD_OBJS) $(PLATFORM_RT_OBJS) $(ALLOC_OBJ) $(ASYNC_OBJ) $(COMPRESS_OBJ) $(MINIZ_OBJ) $(WORKER_DB_OBJ) $(WORKER_GPU_OBJ) $(PLATFORM_MANIFEST_OBJ) $(MODULE_OBJ) $(ASYNC_BACKEND_OBJS) $(NET_BACKEND_OBJS) $(SANDBOX_OBJ) $(SANDBOX_TOOL_OBJ) $(SIG_OBJ) $(RELEASE_OBJ) $(RELEASE_IO_OBJ) $(TOOLS_INSTALL_OBJ) $(PLATFORM_SIG_OBJ) $(EMBEDDED_PLATFORM_SIG_OBJ) $(TEST_RUNNER_OBJ) $(RUNTIME_FACTORY_OBJ) $(STATIC_OBJ) $(MIGRATE_OBJ) $(VFS_OBJ) $(PATH_NORM_OBJ) $(THREAD_AFFINITY_OBJ) $(CACHE_DIR_OBJ) $(BLOB_STORE_OBJ) $(CACHE_REGISTRY_OBJ) $(CACERT_OBJ) $(TLS_CLIENT_OBJ) $(TLS_TRANSPORT_OBJ) $(TLS_TRANSPORT_STUB_OBJ) $(CSP_OBJ) $(SBOM_OBJ) $(STDLIB_FEATURE_OBJ) $(APP_CONTEXT_OBJ) $(APP_CONTEXT_RT_OBJ) $(AGENT_LIB_OBJ) $(AGENT_API_OBJ) $(MAIN_OBJ) $(SERVE_OBJ) $(APP_RUNNER_OBJ) $(HTTP_WEAKSTUB_OBJ) $(WASM_WEAKSTUB_OBJ) $(IMAGE_WEAKSTUB_OBJ) $(TOOL_OBJ) $(BUILD_ASSET_STUB_OBJ) $(STDLIB_REGISTRY_O) $(PLATFORM_RUNTIME_EXTRA) $(MBEDTLS_OBJS) \
@@ -2812,6 +2843,32 @@ $(SQLITELESS_PLATFORM_LIB):
 endif
 .PHONY: platform-sqliteless
 platform-sqliteless: $(SQLITELESS_PLATFORM_LIB)
+
+# ── TLS-less app-build base (a2, HL_APP_BASE_TLSLESS=1) ─────────────────
+# The platform lib the distributed hull will embed as the app-build base once
+# the compose is wired (docs/tls_feature.md, a2-main part 2). Built in a
+# dedicated object dir at HL_TLS_FEATURE=1 (mbedTLS + the mbedTLS-consuming TUs
+# dropped, Keel + HTTP core intact) so it never clobbers the main TLS-full build
+# or build/hull. `make platform-tlsless` builds + verifies it is mbedTLS-free.
+TLSLESS_PLATFORM_LIB := $(BUILDDIR)/libhull_platform-tlsless.a
+ifeq ($(TRUST_PLATFORM_LIB),1)
+$(TLSLESS_PLATFORM_LIB): | $(BUILDDIR)
+	@test -f $@ || (echo "ERROR: TRUST_PLATFORM_LIB=1 but $@ is missing"; exit 1)
+	@echo "$@: trusting pre-built artifact (TRUST_PLATFORM_LIB=1)"
+else
+$(TLSLESS_PLATFORM_LIB):
+	$(MAKE) platform BUILDDIR=$(BUILDDIR)/tlsless HL_TLS_FEATURE=1
+	cp $(BUILDDIR)/tlsless/libhull_platform.a $@
+	@echo "built $@ (TLS-less app-build base)"
+endif
+.PHONY: platform-tlsless
+platform-tlsless: $(TLSLESS_PLATFORM_LIB)
+	@echo "verifying $(TLSLESS_PLATFORM_LIB) is mbedTLS-free..."
+	@if [ "$$(ar t $(TLSLESS_PLATFORM_LIB) | grep -cE '^mbed_')" != "0" ]; then \
+		echo "FAIL: TLS-less base still bundles mbedTLS objects"; exit 1; fi
+	@if nm $(TLSLESS_PLATFORM_LIB) 2>/dev/null | grep -qE ' [TtWw] _?mbedtls_ssl_handshake'; then \
+		echo "FAIL: TLS-less base defines mbedtls_ssl_handshake"; exit 1; fi
+	@echo "ok  TLS-less base carries no mbedTLS (a2 base-drop verified)"
 
 # ── DuckDB feature archive (composable feature: hull build --with=duckdb) ──
 # libhull_feature-duckdb.a bundles the DuckDB backend object (cap_db_duckdb.o,
