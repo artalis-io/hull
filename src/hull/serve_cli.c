@@ -105,6 +105,14 @@ static int cli_parse_args(int argc, char **argv,
     return entry_idx;
 }
 
+/* Weak default: the Keel-free app.main runner. serve.c provides a STRONG
+ * hull_serve() (the full KlServer serve loop) that wins whenever serve.o is
+ * linked -- in the http feature, composed on needs_http (docs/keel_feature.md,
+ * Phase 4.2). A compute app links only this weak runner and never touches Keel.
+ * hull_serve is the ONLY external symbol serve.c and serve_cli.c share, so the
+ * weak/strong pick is unambiguous. Byte-identical today (only one of serve.o /
+ * serve_cli.o is built per config; a lone weak def resolves like a strong one). */
+__attribute__((weak))
 int hull_serve(int argc, char **argv)
 {
     int app_argc = 0;
