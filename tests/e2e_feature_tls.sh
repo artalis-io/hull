@@ -85,6 +85,14 @@ echo "ok  auto-inference: plain hull build on a tls-less base composes tls (HTTP
 mkdir -p "$W/cli"
 cat > "$W/cli/app.lua" <<'LUA'
 app.manifest({ modules = {} })
+app.main(function() return 0 end)
+LUA
+# DIAGNOSTIC (temporary): a second app matching the original repro (writes to
+# stdout via ctx) so a failing CI reveals whether the abort is the ctx.stdout
+# path or the tls-less base itself. Remove once the Linux run is understood.
+mkdir -p "$W/cli2"
+cat > "$W/cli2/app.lua" <<'LUA'
+app.manifest({ modules = {} })
 app.main(function(ctx) ctx.stdout:write("CLI_OK\n") return 0 end)
 LUA
 out=$("$HULL" build --no-verify-platform "$W/cli" -o "$W/cli/bin" 2>&1) \
@@ -93,8 +101,19 @@ echo "$out" | grep -qi "composed TLS feature" \
     && fail "tls-free app should compose no TLS, got: $out" || true
 n=$(nm "$W/cli/bin" 2>/dev/null | grep -c "$hs" || true)
 [ "$n" = 0 ] || fail "tls-free app still carries mbedTLS ($n mbedtls_ssl_handshake) — the drop regressed"
-rc=0; "$W/cli/bin" >/dev/null 2>&1 || rc=$?
-[ "$rc" = 0 ] || fail "tls-free app should run (exit 0), got $rc"
+rc=0; "$W/cli/bin" >/dev/null 2>"$W/cli.err" || rc=$?
+[ "$rc" = 0 ] || { echo "--- tls-free app (return 0) stderr ---"; cat "$W/cli.err"; \
+    fail "tls-free app should run (exit 0), got $rc"; }
+
+# DIAGNOSTIC (temporary): build + run the ctx.stdout variant, sandbox and
+# no-sandbox, printing stderr + exit codes so a failing Linux CI reveals the
+# abort's origin. Does not fail the suite.
+"$HULL" build --no-verify-platform "$W/cli2" -o "$W/cli2/bin" >/dev/null 2>&1 && {
+    r1=0; "$W/cli2/bin" >/dev/null 2>"$W/cli2.err" || r1=$?
+    echo "diag: ctx.stdout variant, sandbox   -> exit=$r1"; [ "$r1" = 0 ] || sed 's/^/diag|  /' "$W/cli2.err"
+    r2=0; "$W/cli2/bin" --no-sandbox >/dev/null 2>"$W/cli2b.err" || r2=$?
+    echo "diag: ctx.stdout variant, no-sandbox -> exit=$r2"; [ "$r2" = 0 ] || sed 's/^/diag|  /' "$W/cli2b.err"
+}
 echo "ok  PAYOFF: tls-free app on a tls-less base drops mbedTLS entirely (0 mbedtls_ssl_handshake) + runs"
 
 echo "PASS: e2e_feature_tls (tls-less base; HTTPS app composes mbedTLS; tls-free drops it)"
