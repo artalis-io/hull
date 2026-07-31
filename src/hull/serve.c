@@ -59,7 +59,7 @@
 #include <keel/decompress_miniz.h>
 #include "hull/vfs.h"
 
-#include <keel/tls_mbedtls.h>
+#include "hull/tls_transport.h"
 #include "hull/commands/dispatch.h"
 #include "hull/commands/version.h"
 #include "hull/agent_api.h"
@@ -867,16 +867,15 @@ static int hl_serve_init_server(HlServerState *s)
     s->server_tls_ctx = NULL;
 
     if (s->cfg.tls_cert_path && s->cfg.tls_key_path) {
-        s->server_tls_ctx = kl_tls_mbedtls_ctx_create(
-            s->cfg.tls_cert_path, s->cfg.tls_key_path, NULL, KL_MTLS_NONE, &s->kl_alloc);
+        s->server_tls_ctx = hl_tls_server_ctx_create(
+            s->cfg.tls_cert_path, s->cfg.tls_key_path, &s->kl_alloc);
         if (!s->server_tls_ctx) {
             log_error("[hull:c] failed to create server TLS context "
-                      "(cert=%s, key=%s)", s->cfg.tls_cert_path, s->cfg.tls_key_path);
+                      "(cert=%s, key=%s) -- TLS not composed into this build?",
+                      s->cfg.tls_cert_path, s->cfg.tls_key_path);
             return -1;
         }
-        s->server_tls_config.ctx         = s->server_tls_ctx;
-        s->server_tls_config.factory     = (KlTlsFactory)kl_tls_mbedtls_create;
-        s->server_tls_config.ctx_destroy = (void (*)(KlTlsCtx *))kl_tls_mbedtls_ctx_destroy;
+        hl_tls_config_wire(&s->server_tls_config, s->server_tls_ctx);
         config.tls = &s->server_tls_config;
     }
 
@@ -884,7 +883,7 @@ static int hl_serve_init_server(HlServerState *s)
         log_error("[hull:c] server init failed: %s",
                   kl_strerror(s->server.last_error));
         if (s->server_tls_ctx) {
-            kl_tls_mbedtls_ctx_destroy(s->server_tls_ctx);
+            hl_tls_ctx_destroy(s->server_tls_ctx);
             s->server_tls_ctx = NULL;
         }
         return -1;
@@ -1471,18 +1470,18 @@ static int hl_serve_wire_caps(HlServerState *s)
          */
         if (s->cfg.skip_ca_bundle) {
             log_warn("[hull:c] TLS certificate verification disabled (--no-ca-bundle)");
-            s->client_tls_ctx = kl_tls_mbedtls_client_ctx_create(NULL, &s->kl_alloc);
+            s->client_tls_ctx = hl_tls_client_ctx_create(NULL, &s->kl_alloc);
         } else if (s->cfg.ca_bundle_override) {
             s->ca_bundle_path = s->cfg.ca_bundle_override;
             log_info("[hull:c] using CA bundle (override): %s", s->ca_bundle_path);
-            s->client_tls_ctx = kl_tls_mbedtls_client_ctx_create(s->ca_bundle_path, &s->kl_alloc);
+            s->client_tls_ctx = hl_tls_client_ctx_create(s->ca_bundle_path, &s->kl_alloc);
             if (!s->client_tls_ctx)
                 log_warn("[hull:c] failed to load CA bundle from %s", s->ca_bundle_path);
         } else {
             s->ca_bundle_path = find_ca_bundle();
             if (s->ca_bundle_path) {
                 log_info("[hull:c] using CA bundle: %s", s->ca_bundle_path);
-                s->client_tls_ctx = kl_tls_mbedtls_client_ctx_create(s->ca_bundle_path, &s->kl_alloc);
+                s->client_tls_ctx = hl_tls_client_ctx_create(s->ca_bundle_path, &s->kl_alloc);
             } else {
                 /* System bundle not found — try embedded fallback */
                 const unsigned char *emb_data = NULL;
@@ -1490,7 +1489,7 @@ static int hl_serve_wire_caps(HlServerState *s)
                 if (hl_embedded_ca_bundle(&emb_data, &emb_len) == 0) {
                     log_info("[hull:c] using embedded CA bundle (%s)",
                              hl_embedded_ca_bundle_label());
-                    s->client_tls_ctx = kl_tls_mbedtls_client_ctx_create_from_buf(
+                    s->client_tls_ctx = hl_tls_client_ctx_create_from_buf(
                         emb_data, emb_len, &s->kl_alloc);
                     /* Sentinel so doctor / introspection sees "(embedded)" */
                     s->ca_bundle_path = "(embedded)";
@@ -1505,9 +1504,7 @@ static int hl_serve_wire_caps(HlServerState *s)
         }
 
         if (s->client_tls_ctx) {
-            s->client_tls_config.ctx         = s->client_tls_ctx;
-            s->client_tls_config.factory     = (KlTlsFactory)kl_tls_mbedtls_create;
-            s->client_tls_config.ctx_destroy = (void (*)(KlTlsCtx *))kl_tls_mbedtls_ctx_destroy;
+            hl_tls_config_wire(&s->client_tls_config, s->client_tls_ctx);
             s->http_cfg_storage.tls          = &s->client_tls_config;
         }
 
@@ -1544,7 +1541,7 @@ static void hl_serve_undo_caps(HlServerState *s)
     hl_manifest_free(&s->manifest);
     s->manifest_extracted = 0;
     if (s->client_tls_ctx) {
-        kl_tls_mbedtls_ctx_destroy(s->client_tls_ctx);
+        hl_tls_ctx_destroy(s->client_tls_ctx);
         s->client_tls_ctx = NULL;
     }
     /* Sealed manifest arena: LAST. The TLS ctx destroyed above (and
@@ -1802,11 +1799,11 @@ static void hl_serve_teardown_after_serve(HlServerState *s)
     if (gpu_ctx_ok)
         hl_cap_gpu_destroy(&gpu_ctx);
     if (s->client_tls_ctx) {
-        kl_tls_mbedtls_ctx_destroy(s->client_tls_ctx);
+        hl_tls_ctx_destroy(s->client_tls_ctx);
         s->client_tls_ctx = NULL;
     }
     if (s->server_tls_ctx) {
-        kl_tls_mbedtls_ctx_destroy(s->server_tls_ctx);
+        hl_tls_ctx_destroy(s->server_tls_ctx);
         s->server_tls_ctx = NULL;
     }
 
@@ -1991,11 +1988,11 @@ static void hl_serve_cleanup(HlServerState *s)
 
     /* Free client TLS context */
     if (s->client_tls_ctx)
-        kl_tls_mbedtls_ctx_destroy(s->client_tls_ctx);
+        hl_tls_ctx_destroy(s->client_tls_ctx);
 
     /* Free server TLS context (if server init failed after TLS ctx create) */
     if (s->server_tls_ctx)
-        kl_tls_mbedtls_ctx_destroy(s->server_tls_ctx);
+        hl_tls_ctx_destroy(s->server_tls_ctx);
 
     if (s->server_init)
         kl_server_free(&s->server);
