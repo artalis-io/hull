@@ -28,7 +28,7 @@
 #ifndef HL_TLS_FEATURE_H
 #define HL_TLS_FEATURE_H
 
-#include "hull/cap/crypto.h"   /* HlCryptoHmacBackend */
+#include "hull/cap/crypto.h"   /* HlCryptoHmacBackend, HlCryptoAsymBackend */
 
 /**
  * Return the active HMAC backend.
@@ -40,5 +40,18 @@
  * produce identical output, so the choice is transparent to callers.
  */
 const HlCryptoHmacBackend *hl_crypto_hmac_active_backend(void);
+
+/**
+ * Return the active asymmetric-verify backend (RSA / ECDSA over PEM keys).
+ *
+ * WEAK in the base (cap/crypto.c): the default returns a FAIL-CLOSED stub (every
+ * verify returns -2), so an asym verify on a TLS-less base fails closed rather
+ * than crashing. A build that links the mbedTLS asym TU (`HL_ENABLE_HTTP`), or a
+ * composed TLS feature, provides a STRONG override returning the real mbedTLS
+ * backend. `hl_cap_crypto_asym_verify_default` dispatches through this so callers
+ * (JWT-RS256, OAuth JWKS) transparently pick up mbedTLS when present. Keeps
+ * cap/crypto.o independent of the asym TU (the base link-granularity invariant).
+ */
+const HlCryptoAsymBackend *hl_crypto_asym_active_backend(void);
 
 #endif /* HL_TLS_FEATURE_H */

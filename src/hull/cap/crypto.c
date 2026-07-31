@@ -733,6 +733,63 @@ const HlCryptoHmacBackend *hl_crypto_hmac_active_backend(void)
 #endif
 }
 
+/* ── Asymmetric verify backend selection (TLS feature Phase 1b) ─────────
+ *
+ * Base-resident FAIL-CLOSED asym stub + weak accessor. The mbedTLS asym backend
+ * (cap/crypto_asym_mbedtls.c) provides a STRONG override of the accessor when it
+ * is linked (HL_ENABLE_HTTP) or composed (a future libhull_feature-tls.a), so a
+ * TLS-less base fails closed (verify -> -2) while a TLS build uses mbedTLS -- no
+ * behavior change today. The two dispatchers below live here (not in the asym TU)
+ * so cap/crypto.o stays independent of that TU: some test link sets pull crypto.o
+ * without the asym TU, and the accessor's weak default references only this
+ * file-local stub. See docs/tls_feature.md. */
+static int asym_stub_supports(HlCryptoAsymAlg alg) { (void)alg; return 0; }
+static int asym_stub_verify(const void *pk, size_t plen, HlCryptoAsymAlg alg,
+                            const void *d, size_t dlen, const void *s, size_t slen)
+{
+    (void)pk; (void)plen; (void)alg;
+    (void)d;  (void)dlen; (void)s;  (void)slen;
+    return -2;   /* fail closed */
+}
+static const HlCryptoAsymBackend hl_crypto_asym_backend_stub = {
+    .supports = asym_stub_supports,
+    .verify   = asym_stub_verify,
+};
+
+__attribute__((weak))
+const HlCryptoAsymBackend *hl_crypto_asym_active_backend(void)
+{
+    return &hl_crypto_asym_backend_stub;   /* fail-closed; mbedTLS TU overrides */
+}
+
+/* Generic asym-verify dispatcher (backend-agnostic). Relocated here from
+ * cap/crypto_asym_mbedtls.c so it is base-resident. */
+int hl_cap_crypto_asym_verify(const HlCryptoAsymBackend *backend,
+                       const void *pubkey_pem, size_t pubkey_len,
+                       HlCryptoAsymAlg alg,
+                       const void *data, size_t data_len,
+                       const void *sig,  size_t sig_len)
+{
+    if (!backend || !backend->verify) return -2;
+    if (alg == HL_CRYPTO_ASYM_NONE) return -2;
+    if (!backend->supports || !backend->supports(alg)) return -2;
+    return backend->verify(pubkey_pem, pubkey_len, alg,
+                           data, data_len, sig, sig_len);
+}
+
+/* Convenience wrapper: verify via the active asym backend (mbedTLS when linked/
+ * composed, else the fail-closed stub). Relocated here from the asym TU + now
+ * dispatches through the hook instead of hard-wiring hl_crypto_asym_backend_mbedtls. */
+int hl_cap_crypto_asym_verify_default(const void *pubkey_pem, size_t pubkey_len,
+                                      HlCryptoAsymAlg alg,
+                                      const void *data, size_t data_len,
+                                      const void *sig,  size_t sig_len)
+{
+    return hl_cap_crypto_asym_verify(hl_crypto_asym_active_backend(),
+                                     pubkey_pem, pubkey_len,
+                                     alg, data, data_len, sig, sig_len);
+}
+
 /* ── HMAC-SHA256 (vtable-dispatched) ───────────────────────────────── */
 
 int hl_cap_crypto_hmac_sha256(const uint8_t *key, size_t key_len,
