@@ -31,6 +31,7 @@
 #include "hull/app_context.h"
 #ifdef HL_ENABLE_DB
 #include "hull/cap/db_registry.h"
+#include "hull/cap/db_backend.h"    /* hl_db_backend_select (runtime default-DSN probe) */
 #endif
 #include "hull/shared/async_backend.h"
 #include "hull/shared/log_lock.h"
@@ -361,16 +362,17 @@ typedef struct {
  * no -d runs DB-less (like a compute-only build) instead of failing to open a
  * SQLite file it can't. An explicit postgres:// -d or manifest.databases still
  * works; an explicit SQLite -d correctly errors at open. */
-#ifdef HL_ENABLE_SQLITE
+/* The default persistent DB file. NOT applied at compile time: this serve.o may
+ * be the composed keel-feature copy (compiled HL_ENABLE_SQLITE=on) linked onto a
+ * SQLite-LESS base, so a compile-time default would try to open a SQLite file
+ * with no backend. The config default is NULL; the default is resolved at
+ * RUNTIME against the actually-available backends (see hl_serve_init_state). */
 #define HL_DEFAULT_DB_PATH "data.db"
-#else
-#define HL_DEFAULT_DB_PATH NULL
-#endif
 
 #define HL_SERVE_CONFIG_DEFAULT { \
     .port = HL_DEFAULT_PORT, \
     .bind_addr = "127.0.0.1", \
-    .db_path = HL_DEFAULT_DB_PATH, \
+    .db_path = NULL, \
     .gpu_device = -1, \
     .log_level = LOG_INFO, \
     .drain_timeout = HL_DEFAULT_DRAIN_TIMEOUT_MS, \
@@ -727,6 +729,19 @@ static int hl_serve_parse_args(HlServerState *s, int argc, char **argv)
 {
     s->cfg = (HlServeConfig)HL_SERVE_CONFIG_DEFAULT;
     int rc = hl_parse_serve_args(argc, argv, &s->cfg);
+    if (rc != 0) return rc;
+#ifdef HL_ENABLE_DB
+    /* Resolve the default DB path at RUNTIME: when the user gave no -d, default
+     * to the persistent SQLite file ONLY if a scheme-less DSN actually has a
+     * backend. On a SQLite-less base (this composed serve.o linked onto a SLIM
+     * base) that probe returns NULL, so the server runs DB-less -- matching the
+     * app.main / serve_cli path -- instead of failing app-context init trying to
+     * open a SQLite file with no engine. An explicit -d still errors loudly if it
+     * names an unavailable backend. */
+    if (!s->cfg.no_db && !s->cfg.db_path
+        && hl_db_backend_select(HL_DEFAULT_DB_PATH, NULL))
+        s->cfg.db_path = HL_DEFAULT_DB_PATH;
+#endif
     return rc; /* 0 = ok, -1 = error, 1 = help shown */
 }
 
