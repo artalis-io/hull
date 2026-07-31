@@ -257,6 +257,18 @@ static int l_tool_modules_resolve(lua_State *L)
     lua_pushboolean(L, (req_caps & HL_MOD_CAP_IMAGE) ? 1 : 0);
     lua_setfield(L, -2, "needs_image");
 
+    /* needs_tls (TLS as a composable feature, docs/tls_feature.md) = does the
+     * resolved set imply the TLS stack? Mirrors the compile-time HL_LINK_TLS
+     * switch (any HTTP half OR a network DB backend), moved to compose time. Here
+     * we report the module-inferable part: HTTP (which also covers hull/smtp, an
+     * http-client module, and hull/http-client's https fetches). `hull build`
+     * will OR in the network-DB signal (a postgres/mysql --with or net DSN, the
+     * same signal those backend features use) when the TLS archive lands (the
+     * Keel move). DORMANT today: nothing composes on it yet -- the base still
+     * links mbedTLS + Keel; this is Phase-0 scaffolding for the compose gate. */
+    lua_pushboolean(L, (req_caps & HL_MOD_CAP_HTTP) ? 1 : 0);
+    lua_setfield(L, -2, "needs_tls");
+
     /* auto = the minimal build flavor that still satisfies this app's
      * declared modules (drives `hull build --flavor=auto`). Computed from
      * the resolved set's aggregate required-caps. */
