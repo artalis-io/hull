@@ -72,6 +72,7 @@ int hl_build_extract_feature_wasm_rt(const char *dir, const char *rt);
 int hl_build_extract_feature_sqlite_rt(const char *dir, const char *rt);
 int hl_build_extract_feature_sqlite(const char *dir);
 int hl_build_extract_feature_tls(const char *dir);
+int hl_build_extract_feature_keel(const char *dir);
 int hl_build_extract_feature_image(const char *dir);
 int hl_build_extract_feature_image_rt(const char *dir, const char *rt);
 
