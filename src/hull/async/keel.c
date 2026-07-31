@@ -359,6 +359,13 @@ const HlAsyncBackend hl_async_backend_keel = {
     .op_complete      = keel_op_complete,
 };
 
-/* The hl_async_backend() selector lives in async/poll.c — poll.c is
- * always compiled, this file (keel.c) gets dropped on HL_ENABLE_HTTP=0
- * so the selector can't live here. */
+/* Strong override of the weak hl_async_backend() default in async/poll.c: when
+ * this TU is linked (any HTTP build today; a composed http feature tomorrow,
+ * docs/keel_feature.md, Phase 4), the Keel event loop wins. keel.c is dropped on
+ * HL_ENABLE_HTTP=0, so the weak poll default in poll.c stands there instead. This
+ * makes the backend choice a LINK fact rather than a compile-time #ifdef, which
+ * is what lets Keel move into the http feature. Byte-identical on a full base. */
+const HlAsyncBackend *hl_async_backend(void)
+{
+    return &hl_async_backend_keel;
+}
