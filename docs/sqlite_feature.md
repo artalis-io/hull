@@ -226,20 +226,26 @@ WASM). `HL_ENABLE_SQLITE` stays the compile switch; the feature is the
     `libhull_feature-sqlite.<arch>.a`, §5c FATAL, like the runtime/wasm cores);
     an externally-installed engine keeps the **release** domain.
   - **Release wiring (release.yml).** ✅ WIRED (validate via a dry-run
-    pre-release tag before a real release). Stage 1 builds the sqlite-less base
-    (`platform-sqliteless`, published `libhull_platform-sqliteless-<arch>.a`) + the
-    engine + the C.2b udf bridges (`feature-sqlite{,-lua,-js}`). Stage 2's signed
-    platform manifest hashes the **sqlite-less** base for each native arch entry
-    (what stage 3 embeds) and adds the `sqlite`/`sqlite-lua`/`sqlite-js` feature
-    stems (the latter two also closed a C.2b manifest gap). Stage 3 downloads the
-    sqlite-less base + engine/bridges, SHA-verifies them against the signed
-    manifest, and builds with `HL_APP_BASE_SQLITELESS=1 TRUST_PLATFORM_LIB=1
-    TRUST_FEATURE_LIBS=1` (the Makefile's `SQLITELESS_PLATFORM_LIB` honours
-    `TRUST_PLATFORM_LIB`, embedding the exact signed bytes). No new keys — same
-    platform-key trust chain as the runtime/http/wasm cores. Cosmo arch entries
-    stay sqlite-full. The shipped `HL_PLATFORM_PUBKEY_HEX` is still the placeholder
-    (the whole §5b/§5c layer is skipped at runtime), so this is future-correct;
-    the produced-app payoff (drop SQLite) is already live regardless.
+    pre-release tag before a real release). **Superseded by the combined SLIM
+    base once TLS shipped** (docs/tls_feature.md, a2 part 3): the embedded
+    app-build base is now `slim` (SQLite-less **and** TLS-less) rather than
+    `sqliteless`, so the release drops both by default and composes each back
+    per app. Stage 1 builds `platform-slim` (published
+    `libhull_platform-slim-<arch>.a`) + the engine + the C.2b udf bridges + the
+    TLS backends (`feature-sqlite{,-lua,-js}`, `feature-tls`). Stage 2's signed
+    platform manifest hashes the **slim** base for each native arch entry (what
+    stage 3 embeds) and adds the `sqlite`/`sqlite-lua`/`sqlite-js`/`tls` feature
+    stems. Stage 3 downloads the slim base + engine/bridges/tls, SHA-verifies
+    them against the signed manifest, and builds with `HL_APP_BASE_SQLITELESS=1
+    HL_APP_BASE_TLSLESS=1 TRUST_PLATFORM_LIB=1 TRUST_FEATURE_LIBS=1` (the
+    Makefile's `SLIM_PLATFORM_LIB` honours `TRUST_PLATFORM_LIB`, embedding the
+    exact signed bytes). No new keys — same platform-key trust chain as the
+    runtime/http/wasm cores. Cosmo arch entries stay full (sqlite + TLS
+    in-base). The shipped `HL_PLATFORM_PUBKEY_HEX` is still the placeholder (the
+    whole §5b/§5c layer is skipped at runtime), so this is future-correct; the
+    produced-app payoff (drop SQLite) is already live regardless. The
+    standalone `platform-sqliteless` target + `HL_APP_BASE_SQLITELESS`-only path
+    remain for a SQLite-only drop.
   - **Cosmo** keeps SQLite in-base (a fat APE can't force-load a native archive);
     `HL_APP_BASE_SQLITELESS` is native-only.
 
