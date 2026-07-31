@@ -3187,6 +3187,23 @@ feature-http: $(BUILDDIR)/libhull_feature-http.a
 $(BUILDDIR)/libhull_feature-http.a: $(FEATURE_HTTP_OBJS) | $(BUILDDIR)
 	$(call AR_FEATURE_LIB,$(FEATURE_HTTP_OBJS))
 
+# libhull_feature-keel.a: the Keel EVENT LOOP as a composable feature
+# (docs/keel_feature.md, Phase 4.2b). The event-loop objects a Keel-less base
+# (HL_KEEL_FEATURE=1) drops -- serve.o (the KlServer serve loop + strong
+# hull_serve), async_keel.o (strong hl_async_backend), net_keel.o (strong
+# hl_net_op_*), plus the server-only hull_static.o / agent_api.o / test_runner.o.
+# Composed (whole-archived) at `hull build` on needs_http, but ONLY onto a
+# Keel-less base (build.lua nm-probes for an ABSENT strong hull_serve, so a full
+# base -- which already carries these -- never double-composes them). Built from
+# the default (HTTP_SERVER=1, HL_KEEL_FEATURE=0) objects, i.e. the real server.
+FEATURE_KEEL_OBJS := $(BUILDDIR)/serve.o $(BUILDDIR)/async_keel.o \
+                     $(BUILDDIR)/net_keel.o $(BUILDDIR)/hull_static.o \
+                     $(BUILDDIR)/agent_api.o $(BUILDDIR)/test_runner.o
+feature-keel: $(BUILDDIR)/libhull_feature-keel.a
+.PHONY: feature-keel
+$(BUILDDIR)/libhull_feature-keel.a: $(FEATURE_KEEL_OBJS) | $(BUILDDIR)
+	$(call AR_FEATURE_LIB,$(FEATURE_KEEL_OBJS))
+
 # libhull_feature-wasm.a: the runtime-agnostic WASM CORE (docs/wasm_feature.md,
 # Phase 1). Bundles the wasm caps + worker_wasm + the vendored WAMR objects
 # (the ~256 KB that leaves the base). Composed back at `hull build` and embedded

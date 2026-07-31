@@ -185,6 +185,19 @@ function M.resolve_http_lib(tmpdir, ctx)
     return M.resolve_lib(libname, asset, ctx)
 end
 
+--- Resolve the Keel event-loop feature archive (libhull_feature-keel.a),
+--- composed onto a Keel-less base on needs_http (docs/keel_feature.md, Phase
+--- 4.2b). Embedded-in-hull first (once wired), else the local build dir / cache.
+function M.resolve_keel_lib(tmpdir, ctx)
+    local libname = "libhull_feature-keel.a"
+    if tool.extract_feature_keel and tool.extract_feature_keel(tmpdir)
+       and file_exists(tmpdir .. "/" .. libname) then
+        return tmpdir .. "/" .. libname, "embedded"
+    end
+    local asset = ctx.plat and ("libhull_feature-keel-" .. ctx.plat .. ".a") or nil
+    return M.resolve_lib(libname, asset, ctx)
+end
+
 --- Resolve the per-runtime web-bindings archive (libhull_feature-http-<rt>.a),
 --- trying the embedded-in-hull copy first (issue #114, Phase C).
 --
