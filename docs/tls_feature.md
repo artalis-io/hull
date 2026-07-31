@@ -50,6 +50,19 @@ shipped, which is what makes the rest mechanical:
    converts that compile-time selection to a weak-hook the composed feature fills
    (Phase 1) — it does not need a new abstraction.
 
+3. **Keel isolates *all* its mbedTLS in one object.** `vendor/keel/src/tls_mbedtls.c`
+   is the **only** Keel source that references mbedTLS; the event loop
+   (`event_{epoll,kqueue,poll}.c`), server, client, router, and thread pool are
+   entirely mbedTLS-free. So "split Keel from TLS" is not a rewrite — it is
+   dead-stripping / relocating a single `tls_mbedtls.o` (see the R1 update below).
+
+> **Status (2026-07-31).** Prerequisite 2 is now **done in the tree**: PR #140
+> (HMAC) + #141 (asym) converted the crypto selection to the weak accessors
+> `hl_crypto_hmac_active_backend()` / `hl_crypto_asym_active_backend()`
+> (`include/hull/tls_feature.h`). crypto-core is fully mbedTLS-optional behind
+> runtime hooks. Prerequisites 1 + 3 were already true. What remains is the
+> **transport = Keel move** (Phases 2-3 below, now merged into one).
+
 ## Current coupling (the map)
 
 `HL_LINK_TLS` is the existing all-or-nothing switch (Makefile ~454):
@@ -67,23 +80,29 @@ with* mbedTLS: `$(KEEL_LIB): $(MBEDTLS_OBJS)`).
 
 | TU | Concern | Notes |
 |----|---------|-------|
-| `cap/crypto_hmac_mbedtls.c` | crypto (HMAC) | already a backend vtable + portable fallback |
-| `cap/crypto_asym_mbedtls.c` | crypto (RSA/ECDSA/x509) | already a backend vtable + stub fallback |
-| `shared/tls_client.c` | transport | KlTls blocking handshake for SMTP + Postgres + MySQL `sslmode` |
-| `cacert.c` | transport | mbedTLS x509 parse of the embedded CA bundle |
-| `serve.c` / `serve_cli.c` | transport | inbound TLS server setup (HTTPS serving) |
-| `release_io.c` | **toolchain** | HTTPS client for `hull update` + the install commands |
-| `commands/{update,flavor,tools,feature}.c` | **toolchain** | HTTPS download (via Keel client) |
+| `cap/crypto_hmac_mbedtls.c` | crypto (HMAC) | **DONE (#140):** weak accessor + portable fallback |
+| `cap/crypto_asym_mbedtls.c` | crypto (RSA/ECDSA/x509) | **DONE (#141):** weak accessor + base fail-closed stub |
+| `shared/tls_client.c` | transport | KlTls blocking handshake for SMTP + Postgres + MySQL `sslmode`. **Not referenced by any base TU** — the smtp / pg / mysql consumers live in *features* and resolve it at compose via `--start-group`. |
+| `serve.c` | transport (Keel) | uses Keel's `KlTlsConfig` for HTTPS serving → pulls Keel's `tls_mbedtls.o`. No direct `mbedtls_*` calls. |
+| `release_io.c` + `commands/{update,flavor,tools,feature}.c` | **toolchain** (Keel) | HTTPS client for `hull update` / installs, via Keel's client → `tls_mbedtls.o`. |
+| ~~`cacert.c`~~ | — | **Data only.** Just the embedded CA-bundle bytes + label; zero `mbedtls_*` calls (the x509 mention is a code comment). No seam needed. |
 
-Three concerns, and the split matters:
+**The finding that reframes Phases 2-3.** Once crypto is decoupled (done), the
+base's *entire* remaining mbedTLS coupling flows through **Keel**: `serve.c`
+(HTTPS serving) and the toolchain HTTPS client both reach mbedTLS only via Keel's
+`tls_mbedtls.o`; `cacert.c` is pure data; and `tls_client.c` is not referenced by
+the base at all (its consumers are feature-resident). So there is **no
+crypto-style series of dormant Hull-side transport seams** — "the transport seam"
+*is* the Keel move. And because Keel isolates TLS in a single object (finding #3),
+that move is a bounded relocation, not a rewrite.
 
-- **crypto** — already abstracted; convert selection to a weak hook.
-- **transport** (tls_client, cacert-parse, serve TLS) — genuinely network TLS;
-  moves to the feature with weak stubs left in the base.
-- **toolchain HTTPS** (`hull update` / `flavor|tools|feature install`) — a
+The one remaining split that matters:
+
+- **toolchain HTTPS** (`hull update` / `flavor|tools|feature install`) is a
   property of the **hull binary**, not of apps. Hull stays TLS-full for its own
   commands (exactly like it stays image-full while the base is image-less). Only
-  the **app-build base** goes TLS-less.
+  the **app-build base** goes TLS-less. So the Keel move must keep Keel+mbedTLS on
+  the `hull` link line while dropping them from the app-build `PLATFORM_OBJS`.
 
 ## Key design decisions
 
@@ -132,43 +151,45 @@ Three concerns, and the split matters:
 
 Each phase is independently valuable and independently landable.
 
-### Phase 0 — Audit + weak-hook scaffolding (no base change)
-- Enumerate the exact `mbedtls_*` + `kl_tls_*` reference surface per TU (grep is
-  in this doc; turn it into the seam header).
-- Add `include/hull/tls_feature.h`: a weak `hl_crypto_tls_backends()` hook
-  (returns the mbedTLS HMAC + asym backends when composed, NULL/portable in the
-  base) + weak transport stubs for `tls_client` / `cacert`-parse. Additive and
-  dormant (the strong mbedTLS defs still win while `HL_LINK_TLS=1`), mirroring
-  the WASM Phase-0 `wasm_weakstub.c`.
-- **Validate:** default build byte-identical behavior; `make test` green.
+### Phase 1 — Crypto selection: `#ifdef` → weak hooks — **DONE (#140 + #141)**
+Shipped as per-backend weak accessors (`hl_crypto_hmac_active_backend()` +
+`hl_crypto_asym_active_backend()` in `include/hull/tls_feature.h`) rather than one
+combined `hl_crypto_tls_backends()` struct. The per-backend shape was forced by a
+hard invariant that surfaced during #140: **`cap/crypto.o` must stay independent
+of the asym TU** — some test link sets (`test_sbom`) pull `crypto.o` + the HMAC TU
+without the asym TU, so a hook whose default referenced the asym symbol broke
+those links. Each accessor's weak default references only its own file-local
+symbol; the concrete mbedTLS backend is a **strong override in its own TU**. This
+same `--start-group` / link-granularity rule governs the TLS archive below.
+Dormant: HTTP builds still use mbedTLS, TLS-less builds fail closed.
 
-### Phase 1 — Crypto selection: `#ifdef` → weak hook
-- Route `cap/crypto.c`'s HMAC + asym dispatch through `hl_crypto_tls_backends()`
-  instead of the `HL_ENABLE_HTTP` / `HL_LINK_TLS` `#ifdef`. Base default =
-  portable HMAC + stub asym; a strong override (in the TLS feature) swaps in
-  mbedTLS.
-- **Validate:** `test_crypto` green with and without the override linked; a
-  pure-compute build still does HMAC via the portable backend.
+### Phase 2+3 — The Keel move: base drops Keel+mbedTLS, HTTP feature composes them
+The transport is **not** a series of dormant Hull-side weak stubs (see "The
+finding that reframes Phases 2-3"): the base's remaining mbedTLS coupling is
+Keel, so this is one deliberate relocation. Because Keel isolates TLS in a single
+`tls_mbedtls.o`, it is bounded:
 
-### Phase 2 — Transport seam (TLS-less base links)
-- Weak-stub `shared/tls_client.c` (KlTls handshake) + the `cacert.c` x509 parse +
-  the `serve.c` TLS-server setup so the base links with mbedTLS absent. SMTP /
-  Postgres / MySQL over TLS fail closed without the feature (a `sslmode=require`
-  DSN on a TLS-less binary errors with a compose hint), plaintext still works.
-- **Validate:** a `HL_LINK_TLS=0`-shaped base links; `nm base | grep
-  mbedtls_ssl_handshake` → empty.
-
-### Phase 3 — The TLS feature archive(s) + compose
-- `libhull_feature-tls.a` = `MBEDTLS_OBJS` + `tls_client.o` + the cacert x509
-  parse + `crypto_{hmac,asym}_mbedtls.o` + the strong `hl_crypto_tls_backends()`
-  override. Embedded in hull (`embedded_tls.h`), whole-archived at compose.
-- Move `libkeel.a` into the HTTP feature's compose (D4).
-- Wire `needs_tls` (D2) into `tool.modules_resolve` + `build.lua` +
-  `feature_compose.lua` + `build_assets.c`, mirroring image/wasm.
+- **The seam** is `serve.c`'s `KlTlsConfig` usage (HTTPS serving). Route it
+  through a weak `hl_tls_server_*` accessor (mirrors the crypto hooks) so a
+  TLS-less base serves HTTP-only; the HTTP feature's strong override wires Keel's
+  server TLS + pulls `tls_mbedtls.o` + mbedTLS.
+- **`libhull_feature-tls.a`** = `MBEDTLS_OBJS` + `tls_client.o` +
+  `crypto_{hmac,asym}_mbedtls.o` + the strong crypto/TLS overrides. Whole-archived
+  at compose inside `--start-group` (the crypto link-granularity rule from #140).
+- **Keel** (`libkeel.a`, minus `tls_mbedtls.o` from the base's view) rides with
+  the HTTP feature (D4); its TLS object is pulled only when the TLS feature is
+  composed. Verify Keel dead-strips `tls_mbedtls.o` cleanly when unreferenced.
+- **Toolchain HTTPS stays on the `hull` link line** (D1): drop Keel+mbedTLS from
+  the app-build `PLATFORM_OBJS`, keep them for the `hull` binary's own
+  `update`/`install` commands. This is the part that needs the most care — today
+  `release_io.o` + `CMD_OBJS` sit in `PLATFORM_OBJS`.
+- Wire `needs_tls` (already exposed dormant from `tool.modules_resolve`) into
+  `build.lua` + `feature_compose.lua` + `build_assets.c`, OR-ing in the network-DB
+  signal, mirroring image/wasm.
 - **Validate:** new `tests/e2e_feature_tls.sh` — a plaintext-only app drops
-  mbedTLS (`nm app | grep mbedtls_ssl_handshake` → empty, ~1 MB smaller); an
-  HTTPS app composes TLS and a real handshake to `example.com` succeeds; both
-  runtimes.
+  mbedTLS (`nm app | grep mbedtls_ssl_handshake` → empty, ~1 MB smaller); an HTTPS
+  app composes TLS and a real handshake to `example.com` succeeds; both runtimes;
+  cosmo stays TLS-full in-base; `hull update` still works.
 
 ### Phase 4 — Redefine `pure-compute` as a preset; flavors → presets
 - `pure-compute` becomes "compose neither HTTP nor TLS" — a `build.lua` preset,
@@ -190,13 +211,21 @@ Each phase is independently valuable and independently landable.
 
 ## Risks + open questions
 
-- **R1 — Keel ↔ mbedTLS build coupling.** Keel is *built with* mbedTLS
-  (`$(KEEL_LIB): $(MBEDTLS_OBJS)`) and links its own TLS half. Splitting "Keel
-  the event loop" (already base-free via async/poll — not linked) from "Keel the
-  HTTP+TLS server/client" (in the HTTP feature) needs care that the HTTP feature
-  archive pulls Keel + mbedTLS together and the base pulls neither. Verify Keel's
-  `libkeel.a` dead-strips cleanly when only the client or only the server half is
-  referenced (it already claims to). **This is the one real unknown** — Phase 3.
+- **R1 — Keel ↔ mbedTLS build coupling — DE-RISKED (was "the one real unknown").**
+  Keel is *built with* mbedTLS (`$(KEEL_LIB): $(MBEDTLS_OBJS)`), but investigation
+  (2026-07-31) shows **`vendor/keel/src/tls_mbedtls.c` is the only Keel TU that
+  references mbedTLS** — the event loop, server, client, and router are all
+  mbedTLS-free. So the split is a clean dead-strip: a base/link that references no
+  `kl_tls_*` symbol pulls neither `tls_mbedtls.o` nor mbedTLS from `libkeel.a`, and
+  the HTTP+TLS feature pulls both. The residual work is (a) confirming `libkeel.a`
+  ships `tls_mbedtls.o` as a separately-strippable member (it should — one object,
+  one archive member), and (b) routing `serve.c`'s `KlTlsConfig` use through a
+  weak accessor so the base emits no `kl_tls_*` reference. Bounded, not a rewrite.
+- **R1b — toolchain HTTPS in `PLATFORM_OBJS`.** `release_io.o` + `CMD_OBJS` (the
+  `hull update`/install HTTPS client) currently sit in the app-build platform lib,
+  so they'd force mbedTLS/Keel into the base. The Keel move must relocate them to
+  the `hull`-binary link only (apps never call hull commands). Verify nothing in
+  the app-build path references them (they should dead-strip today already).
 - **R2 — mbedTLS is ~1 MB and referenced from many mbedTLS-internal TUs.** The
   archive is self-contained (it's a vendored lib), so whole-archiving it is fine;
   the risk is link ordering (`--start-group` with crypto-core which references
