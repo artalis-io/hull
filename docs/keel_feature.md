@@ -95,16 +95,29 @@ drop yet. **This is the first PR.**
   work is making it **composable** (weak seam + feature archive) rather than a
   separate compile, so ONE base composes Keel back for http apps.
 
-### Phase 4.3 — `pure-compute` becomes a preset; drop the base matrix
-- `--flavor=pure-compute` becomes a `build.lua` preset meaning "validate the app
-  declares no HTTP/TLS caps, and compose neither" — on the standard composable
-  base, which now genuinely links zero Keel/mbedTLS for such an app.
-- Delete `platform-pure-compute` (build + publish), its release-matrix entries
-  (native + cosmo-flavor), and `hull flavor install pure-compute`. Generalize
-  `--flavor` to named feature-sets in `build.lua` (`full` = the common web set).
-- **Validate:** `e2e_build_flavor.sh` updated to assert a pure-compute app links
-  zero `kl_*`; release-pipeline dry-run (hyphenated pre-release tag, see
-  [[project_release_dryrun_prerelease_tag]]).
+### Phase 4.3 — `pure-compute` becomes a preset; drop the base matrix — **DONE**
+- `--flavor=pure-compute` is now a **preset** in `BUILD_FLAVORS[]` with an EMPTY
+  asset stem: it builds on the standard composable base and only validates that
+  the app declares no HTTP/TLS caps (rejects any HTTP app at build time). A
+  compute app on the release's SLIM app-base already links zero Keel/mbedTLS/
+  SQLite, so the size payoff comes from the composable base, not a flavor lib.
+- Deleted `platform-pure-compute` + `platform-cosmo-pure-compute` (Makefile),
+  their release-matrix entries (the native `for f in slim` loop, the whole
+  `build-platform-cosmo-flavors` job, the per-flavor SBOMs), and the
+  `hull flavor install pure-compute` fetch path (`flavor.c` treats an empty-asset
+  flavor as a preset: "nothing to install / builds on the default base").
+- **Validated:** `e2e_build_flavor.sh` (rewritten) — unknown-flavor rejection,
+  HTTP-app rejection under the preset, build+run, `--flavor=auto`, and the payoff:
+  a compute app on a `HL_KEEL_FEATURE=1 HL_TLS_FEATURE=1` base links **0 `kl_*` +
+  0 `mbedtls_ssl_handshake`**. Release-pipeline dry-run (hyphenated pre-release
+  tag, see [[project_release_dryrun_prerelease_tag]]) still recommended before the
+  next real release.
+
+**Epic complete.** Every composable subsystem (runtime, HTTP, WASM, image, TLS,
+Keel) now drops from the base and composes back per app; the distributed hull's
+default app-base (SLIM) carries none of SQLite/mbedTLS/Keel, and `pure-compute`
+is a validation preset rather than a pre-built artifact. "Flavors become feature
+presets" is realized.
 
 ## Risks + open questions
 

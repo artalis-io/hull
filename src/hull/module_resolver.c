@@ -244,13 +244,19 @@ uint32_t hl_module_build_caps(void)
 
 /* ── Build flavors ─────────────────────────────────────────────────────
  *
- * Each flavor clears a subset of the build caps vs `full`. The asset stem
- * names the matching libhull_platform-<flavor>.a. Single source of truth
- * for the resolver target-caps, the platform-lib lookup, and listing.
+ * Each flavor clears a subset of the build caps vs `full`. A NON-EMPTY asset
+ * stem names a pre-built libhull_platform-<flavor>.a to link against; an EMPTY
+ * asset marks a PRESET flavor -- it builds on the DEFAULT composable base and
+ * only enforces the cleared caps (compose nothing extra). Since the composable
+ * base drops HTTP/TLS/Keel and composes each back per app (docs/keel_feature.md),
+ * a compute app on the default base already links zero HTTP/Keel/mbedTLS, so
+ * `pure-compute` no longer needs a pre-built base -- it is a validation preset
+ * (reject any HTTP-declaring app). Single source of truth for the resolver
+ * target-caps, the platform-lib lookup, and listing.
  * Note: HL_MOD_CAP_HTTP == HTTP_CLIENT | HTTP_SERVER (the alias). */
 static const HlBuildFlavor BUILD_FLAVORS[] = {
     { "full",         0,               "libhull_platform" },
-    { "pure-compute", HL_MOD_CAP_HTTP, "libhull_platform-pure-compute" },
+    { "pure-compute", HL_MOD_CAP_HTTP, "" },
 };
 
 const HlBuildFlavor *hl_build_flavor_find(const char *name)

@@ -180,6 +180,13 @@ static int cmd_install(const char *flavor, const char *repo)
                         "nothing to install.\n");
         return 0;
     }
+    if (f->asset[0] == '\0') {
+        fprintf(stdout, "hull platform: '%s' is a preset flavor -- it builds on "
+                        "the default composable base (which drops HTTP/TLS/Keel "
+                        "and composes each back per app); nothing to install.\n",
+                f->name);
+        return 0;
+    }
 
     char cache_dir[PATH_MAX];
     if (platform_cache_dir(cache_dir, sizeof(cache_dir)) != 0) return 1;
@@ -254,6 +261,10 @@ static int cmd_list(void)
     for (int i = 0; i < count; i++) {
         if (strcmp(all[i].name, "full") == 0) {
             fprintf(stdout, "  %-14s embedded\n", all[i].name);
+            continue;
+        }
+        if (all[i].asset[0] == '\0') {
+            fprintf(stdout, "  %-14s preset (default base)\n", all[i].name);
             continue;
         }
         char assets[2][160];
