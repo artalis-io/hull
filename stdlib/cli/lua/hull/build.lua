@@ -1991,6 +1991,44 @@ int main(int argc, char **argv) { return hl_app_run(argc, argv); }
             end
             print("hull build: composed HTTP feature")
 
+            -- Compose the Keel event loop (docs/keel_feature.md, Phase 4.2b) when
+            -- the base is Keel-less. Sentinel: hl_async_backend_keel (async_keel.o's
+            -- vtable) is fully ABSENT from a Keel-less base (HL_KEEL_FEATURE=1 drops
+            -- async/keel.c) and present in a Keel-full base. It is a cleaner probe
+            -- than hull_serve, which serve_cli.o defines WEAK -- and macOS plain `nm`
+            -- prints a weak def as `T`, indistinguishable from a strong one. When the
+            -- sentinel is absent, compose libhull_feature-keel.a (serve.o + async_keel
+            -- + net_keel + the server-only static/agent/test objects); a full base,
+            -- which already carries them, never double-composes (no duplicate
+            -- hull_serve). The composed serve.o's kl_* refs pull libkeel from the base
+            -- .a on demand.
+            local base_has_keel = false
+            local serve_nm = tool.spawn_read({ "nm", platform_lib })
+            if serve_nm and serve_nm:find("hl_async_backend_keel") then
+                base_has_keel = true
+            end
+            if not base_has_keel then
+                local keel_lib = "libhull_feature-keel.a"
+                local keel_path, keel_from = fcompose.resolve_keel_lib(tmpdir,
+                                             { hull_dir = rt_hull_dir, plat = rt_plat })
+                if not keel_path then
+                    tool.stderr("hull build: the Keel feature lib "
+                        .. "(libhull_feature-keel.a) was not found "
+                        .. (keel_from == "cache-verify-failed"
+                            and "(cache re-verify failed)\n" or "(normally embedded in hull)\n"))
+                    tool.stderr("hint: build it from source with `make feature-keel`\n")
+                    tool.rmdir(tmpdir); tool.exit(1)
+                end
+                local keel_dest = tmpdir .. "/" .. keel_lib
+                if keel_path ~= keel_dest then tool.copy(keel_path, keel_dest) end
+                record_composed("libhull_feature-keel." .. (rt_plat or "") .. ".a",
+                                keel_dest, "platform")
+                for _, f in ipairs(fcompose.whole_archive_flags(keel_dest, is_darwin)) do
+                    feature_libs[#feature_libs + 1] = f
+                end
+                print("hull build: composed Keel event loop (Keel-less base)")
+            end
+
             -- Phase C: the per-runtime web bindings (routes/dispatch/res:*/ws/sse/
             -- http-client/smtp) live in libhull_feature-http-<rt>.a, not the pure
             -- runtime archive. Whole-archive it too (its strong defs override the
