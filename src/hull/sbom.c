@@ -269,6 +269,8 @@ static const HlSbomEntry sbom_entries[] = {
         .name = "keel",
         .in_libhull = 1,
         .needs_http = 1,
+        .tier = HL_SBOM_TIER_FEATURE,
+        .feature = "keel",
         .version = HULL_VENDOR_KEEL_VERSION,
         .commit = HULL_VENDOR_KEEL_COMMIT,
         .license_spdx = "MIT",
@@ -282,6 +284,8 @@ static const HlSbomEntry sbom_entries[] = {
     /* ── Snapshot: Lua 5.4 ── */
     {
         .name = "lua",
+        .tier = HL_SBOM_TIER_FEATURE,
+        .feature = "lua",
         .version = "5.4",
         .commit = "",
         .license_spdx = "MIT",
@@ -296,6 +300,8 @@ static const HlSbomEntry sbom_entries[] = {
     /* ── Snapshot: QuickJS ── */
     {
         .name = "quickjs",
+        .tier = HL_SBOM_TIER_FEATURE,
+        .feature = "js",
         .version = "2024-01-13",
         .commit = "",
         .license_spdx = "MIT",
@@ -311,6 +317,8 @@ static const HlSbomEntry sbom_entries[] = {
     {
         .name = "sqlite",
         .in_libhull = 1,
+        .tier = HL_SBOM_TIER_FEATURE,
+        .feature = "sqlite",
         .version = "3.x",
         .commit = "",
         .license_spdx = "blessing",   /* SQLite uses "Public Domain" / blessing */
@@ -330,6 +338,8 @@ static const HlSbomEntry sbom_entries[] = {
         .name = "mbedtls",
         .in_libhull = 1,
         .needs_http = 1,
+        .tier = HL_SBOM_TIER_FEATURE,
+        .feature = "tls",
         .version = "3.x",
         .commit = "",
         .license_spdx = "Apache-2.0",
@@ -417,6 +427,8 @@ static const HlSbomEntry sbom_entries[] = {
     {
         .name = "wamr",
         .in_libhull = 1,
+        .tier = HL_SBOM_TIER_FEATURE,
+        .feature = "wasm",
         .version = HULL_VENDOR_WAMR_VERSION,
         .commit = HULL_VENDOR_WAMR_COMMIT,
         .license_spdx = "Apache-2.0",
@@ -427,15 +439,39 @@ static const HlSbomEntry sbom_entries[] = {
 #endif
 
 #ifdef HL_ENABLE_GPU
-    /* ── Snapshot: wgpu-native ── */
+    /* ── Snapshot: wgpu-native (composed via `hull build --with=gpu`) ── */
     {
         .name = "wgpu-native",
         .in_libhull = 1,
+        .tier = HL_SBOM_TIER_WITH,
+        .feature = "gpu",
         .version = "",
         .commit = "",
         .license_spdx = "MPL-2.0 OR Apache-2.0",
         .url = "https://github.com/gfx-rs/wgpu-native",
         .role = "GPU compute (Vulkan/Metal/DX12)",
+        .embedded_blob_sha256 = NULL,
+    },
+#endif
+
+#ifdef HL_ENABLE_DUCKDB
+    /* ── Vendored: DuckDB (composed via `hull build --with=duckdb`) ──
+     * The one `--with=` feature that adds a large vendored dependency; the
+     * postgres / mysql wire backends are pure first-party C (covered by the
+     * `hull` entry) and tui adds no vendored lib, so they carry no SBOM
+     * component of their own. Gated on HL_ENABLE_DUCKDB, so the stock base
+     * binary's SBOM does not list it; a `--with=duckdb` build does. */
+    {
+        .name = "duckdb",
+        .in_libhull = 1,
+        .tier = HL_SBOM_TIER_WITH,
+        .feature = "duckdb",
+        .version = "",
+        .commit = "",
+        .license_spdx = "MIT",
+        .url = "https://github.com/duckdb/duckdb",
+        .role = "embedded DuckDB OLAP backend (duckdb:// DSN)",
+        .cpe = "cpe:2.3:a:duckdb:duckdb:*:*:*:*:*:*:*:*",
         .embedded_blob_sha256 = NULL,
     },
 #endif
@@ -458,6 +494,8 @@ static const HlSbomEntry sbom_entries[] = {
     {
         .name = "stb",
         .in_libhull = 1,
+        .tier = HL_SBOM_TIER_FEATURE,
+        .feature = "image",
         .version = "",
         .commit = "",
         .license_spdx = "MIT OR blessing",  /* dual-licensed */
@@ -509,6 +547,35 @@ int hl_sbom_parse_format(const char *str)
     return -1;
 }
 
+/* ── Modularization tier helpers ───────────────────────────────────── */
+
+static const char *sbom_tier_str(HlSbomTier t)
+{
+    switch (t) {
+        case HL_SBOM_TIER_FEATURE: return "feature";
+        case HL_SBOM_TIER_WITH:    return "with";
+        case HL_SBOM_TIER_BASE:
+        default:                   return "base";
+    }
+}
+
+/* The catalog of opt-in `--with=` features. Emitted at document level so the
+ * SBOM reflects the feature axis even when this build composed none of them
+ * (the stock base binary has all of these OFF). Informational: it is not a
+ * claim that any of them is linked into this particular binary. */
+static const char *const sbom_with_features[] = {
+    "duckdb", "postgres", "mysql", "gpu", "tui",
+};
+static const size_t sbom_with_features_count =
+    sizeof(sbom_with_features) / sizeof(sbom_with_features[0]);
+
+/* One-line description of the composition model, shared across formats. */
+#define HL_SBOM_COMPOSITION_NOTE                                              \
+    "The distributed hull embeds the SLIM base plus every auto-composed "    \
+    "feature archive; a `hull build` app links only the subset it composes. " \
+    "Components with tier=feature or tier=with are composed per app at build " \
+    "time (static, no dlopen), not unconditionally linked."
+
 /* ── Format: human (table) ─────────────────────────────────────────── */
 
 static void format_human(FILE *fp)
@@ -526,6 +593,8 @@ static void format_human(FILE *fp)
         fprintf(fp, "Hull %s, plus %zu component(s):\n",
                 HL_VERSION, sbom_entries_count - 1);
     }
+    fprintf(fp, "Composable base: a [feature: X] component composes per app when "
+                "needed; [--with=X] is opt-in. Base components are always linked.\n");
     const char *bin_sha = sbom_scoped() ? NULL : sha256_binary();
     if (bin_sha) fprintf(fp, "Binary sha256: %s\n", bin_sha);
     fputc('\n', fp);
@@ -554,8 +623,15 @@ static void format_human(FILE *fp)
         } else {
             snprintf(vc, sizeof(vc), "n/a");
         }
-        fprintf(fp, "  %-20s %-20s %-22s %s\n",
-                e->name, vc, e->license_spdx, e->role);
+        char tsuf[48] = "";
+        if (e->tier == HL_SBOM_TIER_FEATURE)
+            snprintf(tsuf, sizeof(tsuf), "  [feature: %s]",
+                     e->feature ? e->feature : "?");
+        else if (e->tier == HL_SBOM_TIER_WITH)
+            snprintf(tsuf, sizeof(tsuf), "  [--with=%s]",
+                     e->feature ? e->feature : "?");
+        fprintf(fp, "  %-20s %-20s %-22s %s%s\n",
+                e->name, vc, e->license_spdx, e->role, tsuf);
         if (e->embedded_blob_sha256) {
             const char *sha = e->embedded_blob_sha256();
             if (sha) fprintf(fp, "  %-20s sha256: %s\n", "", sha);
@@ -605,6 +681,14 @@ static void format_json(FILE *fp)
     sh_json_write_object_start(&w);
     sh_json_write_kv_string(&w, "hull_version", HL_VERSION);
     sh_json_write_kv_string(&w, "subject", sbom_subject_name());
+    /* Modularization: the base is composed, not monolithic. */
+    sh_json_write_kv_string(&w, "app_build_base", "slim");
+    sh_json_write_kv_string(&w, "composition", HL_SBOM_COMPOSITION_NOTE);
+    sh_json_write_key(&w, "with_features");
+    sh_json_write_array_start(&w);
+    for (size_t i = 0; i < sbom_with_features_count; i++)
+        sh_json_write_string(&w, sbom_with_features[i]);
+    sh_json_write_array_end(&w);
     /* The runtime binary hash describes the hull binary, not libhull.a — omit
      * it in libhull scope (the archive's own hash lives in libhull.a.sha256). */
     const char *bin_sha = sbom_scoped() ? NULL : sha256_binary();
@@ -622,6 +706,9 @@ static void format_json(FILE *fp)
         sh_json_write_kv_string(&w, "license_spdx", e->license_spdx);
         sh_json_write_kv_string(&w, "url",          e->url);
         sh_json_write_kv_string(&w, "role",         e->role);
+        sh_json_write_kv_string(&w, "tier",         sbom_tier_str(e->tier));
+        if (e->feature && e->feature[0])
+            sh_json_write_kv_string(&w, "composed_in", e->feature);
         if (e->cpe && e->cpe[0])
             sh_json_write_kv_string(&w, "cpe", e->cpe);
         if (e->embedded_blob_sha256) {
@@ -633,6 +720,15 @@ static void format_json(FILE *fp)
     sh_json_write_array_end(&w);
     sh_json_write_object_end(&w);
     fputc('\n', fp);
+}
+
+/* Emit a single CycloneDX `{name, value}` property object. */
+static void cdx_prop(ShJsonWriter *w, const char *name, const char *value)
+{
+    sh_json_write_object_start(w);
+    sh_json_write_kv_string(w, "name",  name);
+    sh_json_write_kv_string(w, "value", value);
+    sh_json_write_object_end(w);
 }
 
 /* ── Format: CycloneDX 1.5 ─────────────────────────────────────────── */
@@ -670,6 +766,16 @@ static void format_cyclonedx(FILE *fp)
         sh_json_write_array_end(&w);
     }
     sh_json_write_object_end(&w);  /* component */
+    /* Document-level modularization metadata: the composition model + the
+     * catalog of opt-in `--with=` features. Lets a scanner see that Hull's
+     * base is composed rather than monolithic. */
+    sh_json_write_key(&w, "properties");
+    sh_json_write_array_start(&w);
+    cdx_prop(&w, "hull:appBuildBase", "slim");
+    cdx_prop(&w, "hull:composition", HL_SBOM_COMPOSITION_NOTE);
+    for (size_t i = 0; i < sbom_with_features_count; i++)
+        cdx_prop(&w, "hull:withFeature", sbom_with_features[i]);
+    sh_json_write_array_end(&w);
     sh_json_write_object_end(&w);  /* metadata  */
 
     sh_json_write_key(&w, "components");
@@ -722,6 +828,14 @@ static void format_cyclonedx(FILE *fp)
             }
         }
         sh_json_write_kv_string(&w, "description", e->role);
+        /* Modularization tier as CycloneDX properties (consumed by
+         * Dependency-Track / Trivy custom-property queries). */
+        sh_json_write_key(&w, "properties");
+        sh_json_write_array_start(&w);
+        cdx_prop(&w, "hull:tier", sbom_tier_str(e->tier));
+        if (e->feature && e->feature[0])
+            cdx_prop(&w, "hull:composedIn", e->feature);
+        sh_json_write_array_end(&w);
         sh_json_write_object_end(&w);
     }
     sh_json_write_array_end(&w);
@@ -756,6 +870,7 @@ static void format_spdx(FILE *fp)
     sh_json_write_string(&w, "Tool: hull-sbom");
     sh_json_write_array_end(&w);
     sh_json_write_kv_string(&w, "created", "2026-05-29T00:00:00Z");
+    sh_json_write_kv_string(&w, "comment", HL_SBOM_COMPOSITION_NOTE);
     sh_json_write_object_end(&w);
 
     /* describes + hull-binary package: documents that the subject of this
@@ -816,7 +931,18 @@ static void format_spdx(FILE *fp)
         sh_json_write_kv_string(&w, "downloadLocation", e->url);
         sh_json_write_kv_string(&w, "licenseConcluded", e->license_spdx);
         sh_json_write_kv_string(&w, "licenseDeclared",  e->license_spdx);
-        sh_json_write_kv_string(&w, "comment",          e->role);
+        {
+            char cmt[256];
+            if (e->tier == HL_SBOM_TIER_FEATURE)
+                snprintf(cmt, sizeof(cmt), "%s [tier=feature; composed via %s]",
+                         e->role, e->feature ? e->feature : "?");
+            else if (e->tier == HL_SBOM_TIER_WITH)
+                snprintf(cmt, sizeof(cmt), "%s [tier=with; opt-in --with=%s]",
+                         e->role, e->feature ? e->feature : "?");
+            else
+                snprintf(cmt, sizeof(cmt), "%s [tier=base]", e->role);
+            sh_json_write_kv_string(&w, "comment", cmt);
+        }
         if (e->embedded_blob_sha256) {
             const char *sha = e->embedded_blob_sha256();
             if (sha) {

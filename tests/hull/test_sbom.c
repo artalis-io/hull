@@ -74,6 +74,29 @@ UTEST(sbom, submodule_commits_are_hex)
     }
 }
 
+/* ── Modularization tier: table invariant (no formatter needed) ────── */
+
+UTEST(sbom, tier_feature_invariant)
+{
+    /* Every entry's `feature` stem is set iff its tier is not BASE, and a
+     * non-BASE tier is one of the two composable kinds. The hull self-entry
+     * is base with no feature. */
+    size_t n = 0;
+    const HlSbomEntry *e = hl_sbom_entries(&n);
+    for (size_t i = 0; i < n; i++) {
+        int has_feature = e[i].feature && e[i].feature[0];
+        if (e[i].tier == HL_SBOM_TIER_BASE) {
+            ASSERT_FALSE_MSG(has_feature, e[i].name);
+        } else {
+            ASSERT_TRUE_MSG(e[i].tier == HL_SBOM_TIER_FEATURE ||
+                            e[i].tier == HL_SBOM_TIER_WITH, e[i].name);
+            ASSERT_TRUE_MSG(has_feature, e[i].name);
+        }
+    }
+    /* hull itself is base. */
+    ASSERT_TRUE_MSG(e[0].tier == HL_SBOM_TIER_BASE, "hull self-entry is base tier");
+}
+
 /* ── Format parsing ───────────────────────────────────────────────── */
 
 UTEST(sbom, parse_format_known_names)
@@ -179,6 +202,36 @@ UTEST(sbom, format_spdx_structure)
                   "must have document SPDXID");
     ASSERT_NE_MSG(strstr(out, "\"packages\""), NULL,
                   "must have packages array");
+    free(out);
+}
+
+/* ── Modularization tier: formatter emission ──────────────────────── */
+
+UTEST(sbom, json_emits_tier_and_composition)
+{
+    /* Default (whole-hull) scope must expose the modularization angle:
+     * a document-level composition note + the --with feature catalog, and
+     * per-component tier. keel is a feature (needs_http; present in the
+     * default HTTP-enabled test build). */
+    hl_sbom_set_scope_libhull(0);
+    hl_sbom_set_scope_flavor(NULL);
+    char *out = format_to_string(HL_SBOM_JSON);
+    ASSERT_NE(out, NULL);
+    ASSERT_NE_MSG(strstr(out, "\"composition\""), NULL, "doc-level composition note");
+    ASSERT_NE_MSG(strstr(out, "\"with_features\""), NULL, "with-feature catalog");
+    ASSERT_NE_MSG(strstr(out, "\"duckdb\""), NULL, "catalog lists duckdb");
+    ASSERT_NE_MSG(strstr(out, "\"tier\":\"feature\""), NULL, "a feature-tier component");
+    ASSERT_NE_MSG(strstr(out, "\"composed_in\":\"keel\""), NULL, "keel composed_in stem");
+    free(out);
+}
+
+UTEST(sbom, cyclonedx_emits_tier_properties)
+{
+    char *out = format_to_string(HL_SBOM_CYCLONEDX);
+    ASSERT_NE(out, NULL);
+    ASSERT_NE_MSG(strstr(out, "\"hull:tier\""), NULL, "per-component tier property");
+    ASSERT_NE_MSG(strstr(out, "\"hull:withFeature\""), NULL, "doc-level with-feature property");
+    ASSERT_NE_MSG(strstr(out, "\"hull:composedIn\""), NULL, "composed-in property");
     free(out);
 }
 

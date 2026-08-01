@@ -31,6 +31,22 @@ typedef enum {
     HL_SBOM_SPDX,        /* SPDX 2.3 JSON */
 } HlSbomFormat;
 
+/* Modularization tier: which axis of Hull's composable build carries this
+ * component. The distributed hull embeds the SLIM base plus every
+ * auto-composed feature archive, but a `hull build` app links only the
+ * subset it composes - so a flat "everything is present" list would
+ * misrepresent a built app. The tier makes the composition explicit. */
+typedef enum {
+    HL_SBOM_TIER_BASE = 0,   /* always linked into every hull build (the SLIM base) */
+    HL_SBOM_TIER_FEATURE,    /* auto-composed feature: embedded in hull, composed
+                              * per-app only when the app needs it (the runtime
+                              * inferred from the entry extension, plus
+                              * needs_http / needs_sqlite / needs_wasm /
+                              * needs_image / needs_tls). Static, no dlopen. */
+    HL_SBOM_TIER_WITH,       /* opt-in `hull build --with=<name>`: NOT in the base
+                              * binary; installed + composed on demand */
+} HlSbomTier;
+
 /* Per-component entry. All string pointers are static; never freed. */
 typedef struct {
     const char *name;          /* e.g. "keel", "hull", "Lua 5.4" */
@@ -56,9 +72,17 @@ typedef struct {
      * Consumed by the `hull sbom --subject=libhull` scope. */
     int in_libhull;
     /* 1 if this component is only present when HTTP is compiled in (Keel +
-     * mbedTLS). The `pure-compute` build flavor (HL_ENABLE_HTTP=0) drops
-     * these; consumed by the `hull sbom --flavor=<flavor>` scope. */
+     * mbedTLS). The `pure-compute` preset (an app declaring no HTTP/TLS
+     * module) drops these; consumed by the `hull sbom --flavor=<flavor>`
+     * scope. */
     int needs_http;
+    /* Modularization tier (base / auto-composed feature / --with). Default
+     * HL_SBOM_TIER_BASE for entries that don't set it. See HlSbomTier. */
+    HlSbomTier tier;
+    /* When tier != BASE, the composable-archive stem that carries this
+     * component ("keel", "tls", "sqlite", "wasm", "image", "lua", "js",
+     * "gpu", "duckdb", ...). NULL for base-tier components. */
+    const char *feature;
 } HlSbomEntry;
 
 /* Returns a pointer to the static entry table. Sets *count to its length.
@@ -72,11 +96,15 @@ const HlSbomEntry *hl_sbom_entries(size_t *count);
  * whole-hull scope. Process-global, like hl_sbom_set_binary_path. */
 void hl_sbom_set_scope_libhull(int on);
 
-/* Scope the next hl_sbom_format() to a `hull build --flavor` target: report
- * the dependency set that flavor's platform lib links. "pure-compute" drops the
- * needs_http components (Keel + mbedTLS); "full" links the full vendored set.
- * @p flavor is one of those two names, or NULL/"" to clear the scope. Returns 0
- * on success, -1 on an unknown flavor. Process-global. */
+/* Scope the next hl_sbom_format() to a `hull build --flavor` target: report the
+ * dependency set that flavor validates for. Since Phase 4.3 a flavor is a
+ * build.lua preset on the composable base (no per-flavor platform lib):
+ * "pure-compute" is the preset for an app that declares no HTTP/TLS, so it drops
+ * the needs_http components (Keel + mbedTLS); "full" is the whole vendored set.
+ * (A real compute app drops more still - SQLite / WASM / image compose per app;
+ * this coarse flavor scope reflects only the HTTP/TLS axis.) @p flavor is one of
+ * those two names, or NULL/"" to clear the scope. Returns 0 on success, -1 on an
+ * unknown flavor. Process-global. */
 int hl_sbom_set_scope_flavor(const char *flavor);
 
 /* Format the SBOM and write to `fp`. Returns 0 on success, -1 on error.

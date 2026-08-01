@@ -8,6 +8,106 @@ release-artifact layout).
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-08-01
+
+The fully-composable base. Every remaining reducible subsystem - the WASM
+interpreter, the SQLite engine, the image codecs, mbedTLS, and the Keel event
+loop itself - becomes an auto-composed feature, and the distributed `hull`
+embeds the SLIM base that drops all of them. `hull build` composes back only
+what the app declares, statically at build time (no `dlopen`, no runtime
+plugins). A stock build of an `app.main` compute or CLI tool links zero Keel,
+mbedTLS, SQLite, and WASM (~2.1 MB, versus ~6.5 MB for a full web app). Flavors
+collapse into build.lua presets on that base. This completes the composable-base
+arc begun in 0.8.0.
+
+### Added
+
+- **WASM as an auto-composed feature (#118).** The native base is compute-less;
+  `hull build` composes the WAMR core + the per-runtime `compute` binding back
+  on a two-signal gate (a declared `hull/compute` cap, or a shipped
+  `compute/*.wasm` that catches a WASM-backed `db.udf`). A compute-free app
+  drops ~256 KB of WAMR. See `docs/wasm_feature.md`.
+- **Image codecs as an auto-composed feature (#138).** The base is image-less;
+  it composes `libhull_feature-image.a` + the per-runtime `image` binding only
+  when the app declares `hull/image` (the `needs_image` gate), so a compute app
+  drops ~146 KB of vendored stb. The subtractive `HL_ENABLE_IMAGE=0` knob still
+  drops it entirely. See `docs/image_feature.md`.
+- **SQLite as an auto-composed feature (#123-#132).** The base ships the DB core
+  (the `HlDbBackend` vtable + registry) but not the SQLite engine; it composes
+  `libhull_feature-sqlite.a` + the per-runtime udf bridge only when the app uses
+  `db` (the `needs_sqlite` gate). A db-free app links zero SQLite. See
+  `docs/sqlite_feature.md`.
+- **mbedTLS / TLS as an auto-composed feature (#139-#147).** The crypto HMAC and
+  asym-verify backends move behind weak hooks and the TLS transport behind a
+  seam; the base is TLS-less and composes `libhull_feature-tls.a` only when the
+  app needs TLS - an HTTP module, or a `--with=postgres`/`mysql` net-DB
+  connection (the `needs_tls` gate, #158). A plaintext app links zero mbedTLS;
+  `crypto.*` stays fully available via the portable backend. See
+  `docs/tls_feature.md`.
+- **The Keel event loop as an auto-composed feature (#148-#153).** The base is
+  Keel-free: an `app.main` runner (`serve_cli.c`) on a Keel-less async backend
+  (`async/poll.c`). `hull build` composes `libhull_feature-keel.a` (the KlServer
+  loop + `libkeel.a`) only when the app needs HTTP (the `needs_http` gate). A
+  compute app runs `app.main` / `compute.async` and links zero Keel. See
+  `docs/keel_feature.md`.
+
+### Changed
+
+- **The distributed `hull` now embeds the SLIM app-build base** (SQLite-less +
+  TLS-less + Keel-less), so a stock `hull build` composes every subsystem up
+  from the minimum. Nothing to install or flag: the runtime, HTTP, WASM, image,
+  SQLite, TLS, and Keel archives are embedded in `hull` and auto-composed per
+  app. Cosmo is exempt (a fat APE cannot force-load native feature archives), so
+  its base keeps everything compiled in.
+- **`--flavor=pure-compute` is now a build.lua preset (#154), not a pre-built
+  platform library.** Since the base already composes, the preset only
+  *validates* that the app declares no HTTP/TLS. The pre-built per-flavor
+  platform libs and their release matrix were removed. `hull flavor install
+  pure-compute` reports "preset flavor, nothing to install"; `hull flavor list`
+  shows it as `preset (default base)`.
+- **Composed-feature signing extended.** `package.sig.gethull.composed`'s
+  `platform_domain` now attests the TLS, Keel, WASM, image, and SQLite archives
+  in addition to the runtime + HTTP + tui archives; runtime `--verify-sig` (§5c)
+  refuses to boot on any tamper. `HL_PLATFORM_PUBKEY_HEX` is a real key, so §5c
+  enforces on every released binary. See `docs/composed_feature_signing.md`.
+
+### Fixed
+
+- **serve:** resolve the default DB path at runtime, not compile time (#155), so
+  an HTTP app on the SQLite-less SLIM base initializes cleanly.
+- **build/flavor:** default the Keel compose probe to skip (fail-safe) and make
+  the flavor asset NULL-safe (#157, audit follow-up).
+- **release:** drop the deleted per-flavor SBOM globs left over from the
+  flavor-to-preset move (#156).
+- Rolled-in pre-arc fixes: udf ctx double-free on `sqlite3_create_function_v2`
+  failure (#134), tool-plugin / stdlib / cap audit hardening (#135), agent
+  manifest extraction for DB-requiring apps (#136, #137).
+
+## [0.8.0] - 2026-07-27
+
+The composable runtime + HTTP base. The two largest always-present layers - the
+script interpreters and the HTTP stack - move out of the app-build base and
+compose back only when the app needs them.
+
+### Added
+
+- **Runtimes as composable features (#113).** The base is runtime-less; `hull
+  build` composes exactly one interpreter (Lua or JS), auto-inferred from the
+  entry extension (`app.lua` -> lua, `app.js` -> js) and embedded in `hull`. A
+  single-runtime app no longer carries the other VM.
+- **HTTP as a composable feature (#114, Phases A-D).** The HTTP core caps and the
+  per-runtime web bindings (routes, `res:*`, ws/sse/smtp, the in-process test
+  harness) split behind a weak seam into `libhull_feature-http.a` +
+  `libhull_feature-http-<rt>.a`, composed only when the manifest declares an HTTP
+  module (the `needs_http` gate). A genuine `app.main` CLI / compute app links
+  only the pure runtime. The `server-only` / `client-only` flavors were removed
+  (the HTTP axis is `full` vs `pure-compute`).
+- **Composed-feature signing (#114).** `hull build` records every composed
+  archive into `package.sig.gethull.composed`, split into a platform-key-attested
+  `platform_domain` and a release-key-attested `release_domain`; runtime
+  `--verify-sig` (§5c) verifies the platform domain against the embedded platform
+  key. See `docs/composed_feature_signing.md`.
+
 ## [0.7.0] — 2026-07-24
 
 The composable-features release. Optional heavy subsystems (analytics,
