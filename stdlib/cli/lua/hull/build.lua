@@ -1301,6 +1301,297 @@ local function compose_features(opts, tmpdir, platform_lib, is_cosmo, compute_fi
     return feature_objs, feature_libs, needs_base_group, composed_assets
 end
 
+-- prepare_platform: extract the platform library into the temp build dir (from
+-- the embedded base, a --flavor asset, or the eject dir) and run the platform-sig
+-- cross-check. Extracted from main() in Phase 3.2 (docs/build_modularization.md).
+-- Inputs: opts, tmpdir, cc, is_cosmo, flavor_asset. Returns the platform archive
+-- path, its dir, and the cross-checked sig blob + per-arch hashes (for signing).
+local function prepare_platform(opts, tmpdir, cc, is_cosmo, flavor_asset)
+    local platform_extracted = false
+    local platform_lib = tmpdir .. "/libhull_platform.a"
+
+    -- --flavor: link a locally-built non-default platform lib instead of the
+    -- embedded (full) one. The flavor lib isn't covered by the signed
+    -- platform manifest yet, so the platform-sig cross-check is skipped (MVP;
+    -- signed fetch is a follow-on phase).
+    if flavor_asset then
+        local hull_dir = __hull_exe and (__hull_exe:match("(.*/)") or "") or ""
+        local dirs = { hull_dir, "build/", "../build/", "" }
+        if is_cosmo then
+            -- Dual-arch: <asset>.x86_64-cosmo.a + <asset>.aarch64-cosmo.a,
+            -- laid out the way cosmocc's apelink expects (.aarch64/ counterpart).
+            -- Search local build dirs, then the ~/.hull/platform cache where
+            -- `hull flavor install <flavor>` stores the fetched+verified pair
+            -- (as <asset>.x86_64-cosmo.a / <asset>.aarch64-cosmo.a).
+            local search = { hull_dir, "build/", "../build/", "" }
+            local cache = tool.platform_cache_dir and tool.platform_cache_dir()
+            if cache then search[#search + 1] = cache .. "/" end
+            local x86, arm, from_cache
+            for _, d in ipairs(search) do
+                local a = d .. flavor_asset .. ".x86_64-cosmo.a"
+                local b = d .. flavor_asset .. ".aarch64-cosmo.a"
+                if file_exists(a) and file_exists(b) then
+                    x86, arm = a, b
+                    from_cache = (cache ~= nil and d == cache .. "/")
+                    break
+                end
+            end
+            if not (x86 and arm) then
+                tool.stderr("hull build: --flavor=" .. opts.flavor .. ": "
+                            .. flavor_asset .. ".{x86_64,aarch64}-cosmo.a not found"
+                            .. " (locally or in ~/.hull/platform)\n")
+                tool.stderr("hint: `hull flavor install " .. opts.flavor
+                            .. "`, or build from source: `make platform-cosmo-"
+                            .. opts.flavor .. "`\n")
+                tool.rmdir(tmpdir)
+                tool.exit(1)
+            end
+            -- A lib pulled from ~/.hull/platform is re-verified against its
+            -- signed manifest (embedded release pubkey) before linking; a
+            -- lib the developer built locally is trusted as-is.
+            if from_cache and tool.platform_verify then
+                if not (tool.platform_verify(cache, flavor_asset .. ".x86_64-cosmo.a")
+                    and tool.platform_verify(cache, flavor_asset .. ".aarch64-cosmo.a")) then
+                    tool.stderr("hull build: --flavor=" .. opts.flavor
+                        .. ": cached cosmo platform lib failed re-verification; "
+                        .. "run `hull flavor install " .. opts.flavor .. "` again\n")
+                    tool.rmdir(tmpdir)
+                    tool.exit(1)
+                end
+            end
+            tool.copy(x86, platform_lib)
+            tool.mkdir(tmpdir .. "/.aarch64")
+            tool.copy(arm, tmpdir .. "/.aarch64/libhull_platform.a")
+        else
+            local cand = {}
+            for _, d in ipairs(dirs) do cand[#cand + 1] = d .. flavor_asset .. ".a" end
+            -- Cached lib from `hull flavor install <flavor>`: stored
+            -- platform-qualified (<asset>-<platform>.a) in ~/.hull/platform.
+            local cache = tool.platform_cache_dir and tool.platform_cache_dir()
+            local cache_asset, cache_path
+            if cache and tool.platform_name then
+                cache_asset = flavor_asset .. "-" .. tool.platform_name() .. ".a"
+                cache_path = cache .. "/" .. cache_asset
+                cand[#cand + 1] = cache_path
+            end
+            local found = nil
+            for _, p in ipairs(cand) do
+                if file_exists(p) then found = p; break end
+            end
+            if not found then
+                tool.stderr("hull build: --flavor=" .. opts.flavor
+                            .. ": platform lib not found (locally or in ~/.hull/platform)\n")
+                tool.stderr("hint: `hull flavor install " .. opts.flavor
+                            .. "`, or build from source: `make platform-"
+                            .. opts.flavor .. "`\n")
+                tool.rmdir(tmpdir)
+                tool.exit(1)
+            end
+            -- Re-verify a cache-sourced lib against its signed manifest before
+            -- linking (locally-built libs are trusted as-is).
+            if cache_path and found == cache_path and tool.platform_verify then
+                if not tool.platform_verify(cache, cache_asset) then
+                    tool.stderr("hull build: --flavor=" .. opts.flavor
+                        .. ": cached platform lib failed re-verification; "
+                        .. "run `hull flavor install " .. opts.flavor .. "` again\n")
+                    tool.rmdir(tmpdir)
+                    tool.exit(1)
+                end
+            end
+            tool.copy(found, platform_lib)
+        end
+        platform_extracted = true
+        opts.verify_platform = false
+    end
+
+    -- Try to find platform library in known locations
+    -- 1. Check if build_assets has it embedded (multi-arch cosmo)
+    if is_cosmo and tool.platform_archs then
+        local archs = tool.platform_archs()
+        if archs then
+            local ok = tool.extract_platform_cosmo(tmpdir)
+            if ok then
+                platform_extracted = true
+            end
+        end
+    end
+
+    -- 1b. Single-arch embedded extraction
+    if not platform_extracted and tool.extract_platform then
+        local ok = tool.extract_platform(tmpdir)
+        if ok and file_exists(platform_lib) then
+            platform_extracted = true
+        end
+    end
+
+    -- 2. Check build/ directory (development mode)
+    local platform_dir = nil
+    if not platform_extracted then
+        -- Derive hull binary directory from __hull_exe global
+        local hull_dir = ""
+        if __hull_exe then
+            hull_dir = __hull_exe:match("(.*/)" ) or ""
+        end
+        local dev_paths = {
+            hull_dir,
+            "build/",
+            "../build/",
+        }
+
+        if is_cosmo then
+            -- Look for multi-arch cosmo archives
+            for _, d in ipairs(dev_paths) do
+                local x86 = d .. "libhull_platform.x86_64-cosmo.a"
+                local arm = d .. "libhull_platform.aarch64-cosmo.a"
+                if file_exists(x86) and file_exists(arm) then
+                    tool.copy(x86, tmpdir .. "/libhull_platform.a")
+                    tool.mkdir(tmpdir .. "/.aarch64")
+                    tool.copy(arm, tmpdir .. "/.aarch64/libhull_platform.a")
+                    platform_dir = d
+                    platform_extracted = true
+                    break
+                end
+            end
+            if not platform_extracted then
+                -- Fallback: try single-arch archive (non-fat build)
+                for _, d in ipairs(dev_paths) do
+                    if file_exists(d .. "libhull_platform.a") then
+                        tool.copy(d .. "libhull_platform.a", platform_lib)
+                        platform_dir = d
+                        platform_extracted = true
+                        break
+                    end
+                end
+            end
+        else
+            -- Single-arch fallback (unchanged)
+            for _, d in ipairs(dev_paths) do
+                if file_exists(d .. "libhull_platform.a") then
+                    tool.copy(d .. "libhull_platform.a", platform_lib)
+                    platform_dir = d
+                    platform_extracted = true
+                    break
+                end
+            end
+        end
+    end
+
+    if not platform_extracted then
+        if is_cosmo then
+            tool.stderr("hull build: cannot find platform archives\n")
+            tool.stderr("hint: run `make platform-cosmo` first\n")
+        else
+            tool.stderr("hull build: cannot find libhull_platform.a\n")
+            tool.stderr("hint: run `make platform` first, or use an embedded hull build\n")
+        end
+        tool.rmdir(tmpdir)
+        tool.exit(1)
+    end
+
+    -- ── Platform-sig cross-check ──
+    -- Hash the libhull_platform.a we're about to embed and compare
+    -- against the gethull-signed manifest baked into this hull binary.
+    -- A mismatch means either:
+    --   (a) this hull was built locally (no embedded manifest), OR
+    --   (b) the .a was modified between hull install and now
+    -- (a) is the dev workflow; (b) is what the platform-sig chain is
+    -- designed to catch.
+    --
+    -- The signed manifest blob, signature, and the cross-checked
+    -- per-arch hashes get written into package.sig.platform later in
+    -- sign_app() for runtime verify (C4 will enforce them).
+    local platform_sig_blob = nil    -- {manifest, signature} or nil
+    local platform_arch_hashes = nil -- {arch: hex, ...} the cross-checked entries
+    if opts.verify_platform then
+        platform_sig_blob = tool.platform_sig_get()
+        if not platform_sig_blob then
+            tool.stderr(
+                "hull build: this hull has no embedded platform manifest\n" ..
+                "       (built locally or from a release that predates platform-sig).\n" ..
+                "       Use --no-verify-platform to build anyway; runtime --verify-sig\n" ..
+                "       will reject the resulting app unless it too uses --no-verify-platform.\n")
+            tool.rmdir(tmpdir)
+            tool.exit(1)
+        end
+
+        -- Build the list of arches whose .a hashes we cross-check.
+        -- Native: just the running arch. Cosmo: both cosmo arches.
+        -- Cross-compile (--target=...) skips with a soft warning since
+        -- we don't have the target .a's hash in the running hull's
+        -- manifest (target arch may differ from build arch).
+        local arches_to_check = {}
+        if is_cosmo then
+            arches_to_check = {
+                { arch = "cosmo-x86_64",  path = tmpdir .. "/libhull_platform.a" },
+                { arch = "cosmo-aarch64", path = tmpdir .. "/.aarch64/libhull_platform.a" },
+            }
+        elseif opts.target then
+            tool.stderr(
+                "hull build: --target=" .. opts.target ..
+                ": skipping platform-sig cross-check (cross-compile target\n" ..
+                "       differs from running hull's arch). Use --no-verify-platform\n" ..
+                "       to silence this warning.\n")
+        else
+            arches_to_check = {
+                { arch = tool.platform_name(), path = tmpdir .. "/libhull_platform.a" },
+            }
+        end
+
+        platform_arch_hashes = {}
+        for _, entry in ipairs(arches_to_check) do
+            if not file_exists(entry.path) then
+                tool.stderr("hull build: missing platform archive for cross-check: " .. entry.path .. "\n")
+                tool.rmdir(tmpdir)
+                tool.exit(1)
+            end
+            local actual = crypto.sha256(read_file(entry.path))
+            local expected = tool.platform_sig_arch_hash(entry.arch)
+            if not expected then
+                tool.stderr(
+                    "hull build: arch '" .. entry.arch .. "' not in embedded\n" ..
+                    "       platform manifest. The hull binary may be older than the\n" ..
+                    "       release that publishes this arch, or this is a dev build\n" ..
+                    "       with an incomplete manifest. Use --no-verify-platform to skip.\n")
+                tool.rmdir(tmpdir)
+                tool.exit(1)
+            end
+            if actual ~= expected then
+                tool.stderr(
+                    "hull build: libhull_platform.a hash does not match the embedded\n" ..
+                    "       signed manifest for arch '" .. entry.arch .. "':\n" ..
+                    "         expected: " .. expected .. "\n" ..
+                    "         actual:   " .. actual .. "\n" ..
+                    "       The platform archive was modified between hull install\n" ..
+                    "       and now, OR this hull was rebuilt against a different\n" ..
+                    "       libhull_platform.a than CI signed. Use --no-verify-platform\n" ..
+                    "       to override (runtime verify will then reject the app).\n")
+                tool.rmdir(tmpdir)
+                tool.exit(1)
+            end
+            platform_arch_hashes[entry.arch] = actual
+        end
+    else
+        -- --no-verify-platform: try to fetch the blob anyway so apps
+        -- built with this flag still inherit the manifest (just without
+        -- the cross-check guarantee). If there's no embedded blob, the
+        -- app's package.sig.platform omits the new fields entirely.
+        platform_sig_blob = tool.platform_sig_get()
+    end
+
+    -- Validate compiler matches platform (cc already resolved above)
+    if platform_dir then
+        local cc_data = read_file(platform_dir .. "platform_cc")
+        if cc_data and opts.cc then
+            local platform_cc = cc_data:match("^%s*(.-)%s*$")
+            if platform_cc ~= opts.cc then
+                tool.stderr("hull build: warning: --compiler " .. opts.cc ..
+                    " does not match platform (built with " .. platform_cc .. ")\n")
+            end
+        end
+    end
+    return platform_lib, platform_dir, platform_sig_blob, platform_arch_hashes
+end
+
 local function main()
     local opts = parse_args()
 
@@ -1711,288 +2002,9 @@ int main(int argc, char **argv) { return hl_app_run(argc, argv); }
     write_file(tmpdir .. "/app_main.c", app_main)
 
     -- Extract platform library (if embedded)
-    local platform_extracted = false
-    local platform_lib = tmpdir .. "/libhull_platform.a"
-
-    -- --flavor: link a locally-built non-default platform lib instead of the
-    -- embedded (full) one. The flavor lib isn't covered by the signed
-    -- platform manifest yet, so the platform-sig cross-check is skipped (MVP;
-    -- signed fetch is a follow-on phase).
-    if flavor_asset then
-        local hull_dir = __hull_exe and (__hull_exe:match("(.*/)") or "") or ""
-        local dirs = { hull_dir, "build/", "../build/", "" }
-        if is_cosmo then
-            -- Dual-arch: <asset>.x86_64-cosmo.a + <asset>.aarch64-cosmo.a,
-            -- laid out the way cosmocc's apelink expects (.aarch64/ counterpart).
-            -- Search local build dirs, then the ~/.hull/platform cache where
-            -- `hull flavor install <flavor>` stores the fetched+verified pair
-            -- (as <asset>.x86_64-cosmo.a / <asset>.aarch64-cosmo.a).
-            local search = { hull_dir, "build/", "../build/", "" }
-            local cache = tool.platform_cache_dir and tool.platform_cache_dir()
-            if cache then search[#search + 1] = cache .. "/" end
-            local x86, arm, from_cache
-            for _, d in ipairs(search) do
-                local a = d .. flavor_asset .. ".x86_64-cosmo.a"
-                local b = d .. flavor_asset .. ".aarch64-cosmo.a"
-                if file_exists(a) and file_exists(b) then
-                    x86, arm = a, b
-                    from_cache = (cache ~= nil and d == cache .. "/")
-                    break
-                end
-            end
-            if not (x86 and arm) then
-                tool.stderr("hull build: --flavor=" .. opts.flavor .. ": "
-                            .. flavor_asset .. ".{x86_64,aarch64}-cosmo.a not found"
-                            .. " (locally or in ~/.hull/platform)\n")
-                tool.stderr("hint: `hull flavor install " .. opts.flavor
-                            .. "`, or build from source: `make platform-cosmo-"
-                            .. opts.flavor .. "`\n")
-                tool.rmdir(tmpdir)
-                tool.exit(1)
-            end
-            -- A lib pulled from ~/.hull/platform is re-verified against its
-            -- signed manifest (embedded release pubkey) before linking; a
-            -- lib the developer built locally is trusted as-is.
-            if from_cache and tool.platform_verify then
-                if not (tool.platform_verify(cache, flavor_asset .. ".x86_64-cosmo.a")
-                    and tool.platform_verify(cache, flavor_asset .. ".aarch64-cosmo.a")) then
-                    tool.stderr("hull build: --flavor=" .. opts.flavor
-                        .. ": cached cosmo platform lib failed re-verification; "
-                        .. "run `hull flavor install " .. opts.flavor .. "` again\n")
-                    tool.rmdir(tmpdir)
-                    tool.exit(1)
-                end
-            end
-            tool.copy(x86, platform_lib)
-            tool.mkdir(tmpdir .. "/.aarch64")
-            tool.copy(arm, tmpdir .. "/.aarch64/libhull_platform.a")
-        else
-            local cand = {}
-            for _, d in ipairs(dirs) do cand[#cand + 1] = d .. flavor_asset .. ".a" end
-            -- Cached lib from `hull flavor install <flavor>`: stored
-            -- platform-qualified (<asset>-<platform>.a) in ~/.hull/platform.
-            local cache = tool.platform_cache_dir and tool.platform_cache_dir()
-            local cache_asset, cache_path
-            if cache and tool.platform_name then
-                cache_asset = flavor_asset .. "-" .. tool.platform_name() .. ".a"
-                cache_path = cache .. "/" .. cache_asset
-                cand[#cand + 1] = cache_path
-            end
-            local found = nil
-            for _, p in ipairs(cand) do
-                if file_exists(p) then found = p; break end
-            end
-            if not found then
-                tool.stderr("hull build: --flavor=" .. opts.flavor
-                            .. ": platform lib not found (locally or in ~/.hull/platform)\n")
-                tool.stderr("hint: `hull flavor install " .. opts.flavor
-                            .. "`, or build from source: `make platform-"
-                            .. opts.flavor .. "`\n")
-                tool.rmdir(tmpdir)
-                tool.exit(1)
-            end
-            -- Re-verify a cache-sourced lib against its signed manifest before
-            -- linking (locally-built libs are trusted as-is).
-            if cache_path and found == cache_path and tool.platform_verify then
-                if not tool.platform_verify(cache, cache_asset) then
-                    tool.stderr("hull build: --flavor=" .. opts.flavor
-                        .. ": cached platform lib failed re-verification; "
-                        .. "run `hull flavor install " .. opts.flavor .. "` again\n")
-                    tool.rmdir(tmpdir)
-                    tool.exit(1)
-                end
-            end
-            tool.copy(found, platform_lib)
-        end
-        platform_extracted = true
-        opts.verify_platform = false
-    end
-
-    -- Try to find platform library in known locations
-    -- 1. Check if build_assets has it embedded (multi-arch cosmo)
-    if is_cosmo and tool.platform_archs then
-        local archs = tool.platform_archs()
-        if archs then
-            local ok = tool.extract_platform_cosmo(tmpdir)
-            if ok then
-                platform_extracted = true
-            end
-        end
-    end
-
-    -- 1b. Single-arch embedded extraction
-    if not platform_extracted and tool.extract_platform then
-        local ok = tool.extract_platform(tmpdir)
-        if ok and file_exists(platform_lib) then
-            platform_extracted = true
-        end
-    end
-
-    -- 2. Check build/ directory (development mode)
-    local platform_dir = nil
-    if not platform_extracted then
-        -- Derive hull binary directory from __hull_exe global
-        local hull_dir = ""
-        if __hull_exe then
-            hull_dir = __hull_exe:match("(.*/)" ) or ""
-        end
-        local dev_paths = {
-            hull_dir,
-            "build/",
-            "../build/",
-        }
-
-        if is_cosmo then
-            -- Look for multi-arch cosmo archives
-            for _, d in ipairs(dev_paths) do
-                local x86 = d .. "libhull_platform.x86_64-cosmo.a"
-                local arm = d .. "libhull_platform.aarch64-cosmo.a"
-                if file_exists(x86) and file_exists(arm) then
-                    tool.copy(x86, tmpdir .. "/libhull_platform.a")
-                    tool.mkdir(tmpdir .. "/.aarch64")
-                    tool.copy(arm, tmpdir .. "/.aarch64/libhull_platform.a")
-                    platform_dir = d
-                    platform_extracted = true
-                    break
-                end
-            end
-            if not platform_extracted then
-                -- Fallback: try single-arch archive (non-fat build)
-                for _, d in ipairs(dev_paths) do
-                    if file_exists(d .. "libhull_platform.a") then
-                        tool.copy(d .. "libhull_platform.a", platform_lib)
-                        platform_dir = d
-                        platform_extracted = true
-                        break
-                    end
-                end
-            end
-        else
-            -- Single-arch fallback (unchanged)
-            for _, d in ipairs(dev_paths) do
-                if file_exists(d .. "libhull_platform.a") then
-                    tool.copy(d .. "libhull_platform.a", platform_lib)
-                    platform_dir = d
-                    platform_extracted = true
-                    break
-                end
-            end
-        end
-    end
-
-    if not platform_extracted then
-        if is_cosmo then
-            tool.stderr("hull build: cannot find platform archives\n")
-            tool.stderr("hint: run `make platform-cosmo` first\n")
-        else
-            tool.stderr("hull build: cannot find libhull_platform.a\n")
-            tool.stderr("hint: run `make platform` first, or use an embedded hull build\n")
-        end
-        tool.rmdir(tmpdir)
-        tool.exit(1)
-    end
-
-    -- ── Platform-sig cross-check ──
-    -- Hash the libhull_platform.a we're about to embed and compare
-    -- against the gethull-signed manifest baked into this hull binary.
-    -- A mismatch means either:
-    --   (a) this hull was built locally (no embedded manifest), OR
-    --   (b) the .a was modified between hull install and now
-    -- (a) is the dev workflow; (b) is what the platform-sig chain is
-    -- designed to catch.
-    --
-    -- The signed manifest blob, signature, and the cross-checked
-    -- per-arch hashes get written into package.sig.platform later in
-    -- sign_app() for runtime verify (C4 will enforce them).
-    local platform_sig_blob = nil    -- {manifest, signature} or nil
-    local platform_arch_hashes = nil -- {arch: hex, ...} the cross-checked entries
-    if opts.verify_platform then
-        platform_sig_blob = tool.platform_sig_get()
-        if not platform_sig_blob then
-            tool.stderr(
-                "hull build: this hull has no embedded platform manifest\n" ..
-                "       (built locally or from a release that predates platform-sig).\n" ..
-                "       Use --no-verify-platform to build anyway; runtime --verify-sig\n" ..
-                "       will reject the resulting app unless it too uses --no-verify-platform.\n")
-            tool.rmdir(tmpdir)
-            tool.exit(1)
-        end
-
-        -- Build the list of arches whose .a hashes we cross-check.
-        -- Native: just the running arch. Cosmo: both cosmo arches.
-        -- Cross-compile (--target=...) skips with a soft warning since
-        -- we don't have the target .a's hash in the running hull's
-        -- manifest (target arch may differ from build arch).
-        local arches_to_check = {}
-        if is_cosmo then
-            arches_to_check = {
-                { arch = "cosmo-x86_64",  path = tmpdir .. "/libhull_platform.a" },
-                { arch = "cosmo-aarch64", path = tmpdir .. "/.aarch64/libhull_platform.a" },
-            }
-        elseif opts.target then
-            tool.stderr(
-                "hull build: --target=" .. opts.target ..
-                ": skipping platform-sig cross-check (cross-compile target\n" ..
-                "       differs from running hull's arch). Use --no-verify-platform\n" ..
-                "       to silence this warning.\n")
-        else
-            arches_to_check = {
-                { arch = tool.platform_name(), path = tmpdir .. "/libhull_platform.a" },
-            }
-        end
-
-        platform_arch_hashes = {}
-        for _, entry in ipairs(arches_to_check) do
-            if not file_exists(entry.path) then
-                tool.stderr("hull build: missing platform archive for cross-check: " .. entry.path .. "\n")
-                tool.rmdir(tmpdir)
-                tool.exit(1)
-            end
-            local actual = crypto.sha256(read_file(entry.path))
-            local expected = tool.platform_sig_arch_hash(entry.arch)
-            if not expected then
-                tool.stderr(
-                    "hull build: arch '" .. entry.arch .. "' not in embedded\n" ..
-                    "       platform manifest. The hull binary may be older than the\n" ..
-                    "       release that publishes this arch, or this is a dev build\n" ..
-                    "       with an incomplete manifest. Use --no-verify-platform to skip.\n")
-                tool.rmdir(tmpdir)
-                tool.exit(1)
-            end
-            if actual ~= expected then
-                tool.stderr(
-                    "hull build: libhull_platform.a hash does not match the embedded\n" ..
-                    "       signed manifest for arch '" .. entry.arch .. "':\n" ..
-                    "         expected: " .. expected .. "\n" ..
-                    "         actual:   " .. actual .. "\n" ..
-                    "       The platform archive was modified between hull install\n" ..
-                    "       and now, OR this hull was rebuilt against a different\n" ..
-                    "       libhull_platform.a than CI signed. Use --no-verify-platform\n" ..
-                    "       to override (runtime verify will then reject the app).\n")
-                tool.rmdir(tmpdir)
-                tool.exit(1)
-            end
-            platform_arch_hashes[entry.arch] = actual
-        end
-    else
-        -- --no-verify-platform: try to fetch the blob anyway so apps
-        -- built with this flag still inherit the manifest (just without
-        -- the cross-check guarantee). If there's no embedded blob, the
-        -- app's package.sig.platform omits the new fields entirely.
-        platform_sig_blob = tool.platform_sig_get()
-    end
-
-    -- Validate compiler matches platform (cc already resolved above)
-    if platform_dir then
-        local cc_data = read_file(platform_dir .. "platform_cc")
-        if cc_data and opts.cc then
-            local platform_cc = cc_data:match("^%s*(.-)%s*$")
-            if platform_cc ~= opts.cc then
-                tool.stderr("hull build: warning: --compiler " .. opts.cc ..
-                    " does not match platform (built with " .. platform_cc .. ")\n")
-            end
-        end
-    end
+    -- Extract platform library + sig cross-check: see prepare_platform() above.
+    local platform_lib, platform_dir, platform_sig_blob, platform_arch_hashes =
+        prepare_platform(opts, tmpdir, cc, is_cosmo, flavor_asset)
 
     -- Compile
     print("hull build: compiling with " .. tool.compiler.name() .. "...")
