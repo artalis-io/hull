@@ -2006,10 +2006,16 @@ int main(int argc, char **argv) { return hl_app_run(argc, argv); }
             -- which already carries them, never double-composes (no duplicate
             -- hull_serve). The composed serve.o's kl_* refs pull libkeel from the base
             -- .a on demand.
-            local base_has_keel = false
+            -- Default to "present" (skip compose), flipping to compose only on a
+            -- CONFIRMED nm result lacking the sentinel -- mirrors the sqlite/tls
+            -- probes. If nm is absent or errors (serve_nm == nil), skipping is the
+            -- safe no-op for the common Keel-FULL base: composing there would
+            -- duplicate serve.o's strong hull_serve / hl_async_backend and fail the
+            -- link. The Keel-less release base is only built where nm exists.
+            local base_has_keel = true
             local serve_nm = tool.spawn_read({ "nm", platform_lib })
-            if serve_nm and serve_nm:find("hl_async_backend_keel") then
-                base_has_keel = true
+            if serve_nm and not serve_nm:find("hl_async_backend_keel") then
+                base_has_keel = false
             end
             if not base_has_keel then
                 local keel_lib = "libhull_feature-keel.a"
@@ -2027,6 +2033,7 @@ int main(int argc, char **argv) { return hl_app_run(argc, argv); }
                 if keel_path ~= keel_dest then tool.copy(keel_path, keel_dest) end
                 record_composed("libhull_feature-keel." .. (rt_plat or "") .. ".a",
                                 keel_dest, "platform")
+                needs_base_group = true  -- keel archive refs base + libkeel symbols
                 for _, f in ipairs(fcompose.whole_archive_flags(keel_dest, is_darwin)) do
                     feature_libs[#feature_libs + 1] = f
                 end
