@@ -21,11 +21,4 @@ feature-duckdb:
 	$(MAKE) $(BUILDDIR)/libhull_feature-duckdb.a HL_ENABLE_DUCKDB=1
 .PHONY: feature-duckdb
 
-$(BUILDDIR)/libhull_feature-duckdb.a: $(BUILDDIR)/cap_db_duckdb.o $(DUCKDB_ARCHIVES) | $(BUILDDIR)
-	@rm -f $@
-	$(AR) rcs $@ $(BUILDDIR)/cap_db_duckdb.o
-	@tmproot=$$(mktemp -d); n=0; for a in $(DUCKDB_ARCHIVES); do \
-		mkdir -p $$tmproot/$$n && ( cd $$tmproot/$$n && $(AR) x $(CURDIR)/$$a ) && \
-		$(AR) rcs $(CURDIR)/$@ $$tmproot/$$n/*.o && n=$$((n+1)); \
-	done; rm -rf $$tmproot
-	@echo "built $@ ($$(du -h $@ | cut -f1))"
+$(eval $(call define-feature-bundle,duckdb,$(BUILDDIR)/cap_db_duckdb.o,DUCKDB_ARCHIVES))

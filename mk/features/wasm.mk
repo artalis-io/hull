@@ -24,22 +24,13 @@ FEATURE_WASM_OBJS := $(BUILDDIR)/cap_wasm.o $(BUILDDIR)/cap_wasm_buffer.o \
 # in hull (embedded_wasm.h). The per-runtime compute binding (mod_compute) is a
 # separate archive below, like the http web bindings.
 FEATURE_WASM_CORE := $(FEATURE_WASM_OBJS) $(WORKER_WASM_OBJ) $(WAMR_OBJS)
-feature-wasm: $(BUILDDIR)/libhull_feature-wasm.a
-.PHONY: feature-wasm
-$(BUILDDIR)/libhull_feature-wasm.a: $(FEATURE_WASM_CORE) | $(BUILDDIR)
-	$(call AR_FEATURE_LIB,$(FEATURE_WASM_CORE))
+$(eval $(call define-feature-archive,wasm,$(FEATURE_WASM_CORE)))
 
 # Per-runtime compute-binding bridges (mod_compute). Tiny (one object each);
 # embedded in hull + composed for the app's runtime alongside the wasm core.
-feature-wasm-lua: $(BUILDDIR)/libhull_feature-wasm-lua.a
-.PHONY: feature-wasm-lua
-$(BUILDDIR)/libhull_feature-wasm-lua.a: $(BUILDDIR)/lua_rt_mod_compute.o | $(BUILDDIR)
-	$(call AR_FEATURE_LIB,$(BUILDDIR)/lua_rt_mod_compute.o)
+$(eval $(call define-feature-archive,wasm-lua,$(BUILDDIR)/lua_rt_mod_compute.o))
 
-feature-wasm-js: $(BUILDDIR)/libhull_feature-wasm-js.a
-.PHONY: feature-wasm-js
-$(BUILDDIR)/libhull_feature-wasm-js.a: $(BUILDDIR)/js_mod_compute.o | $(BUILDDIR)
-	$(call AR_FEATURE_LIB,$(BUILDDIR)/js_mod_compute.o)
+$(eval $(call define-feature-archive,wasm-js,$(BUILDDIR)/js_mod_compute.o))
 
 # Embed the WASM feature archives too (docs/wasm_feature.md, Phase 1). The native
 # base is compute-less; the default distributed hull composes the wasm core + the

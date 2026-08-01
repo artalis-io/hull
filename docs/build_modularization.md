@@ -234,3 +234,65 @@ re-create the scattered-hunt problem the split exists to remove.
   order is load-bearing (see Validation). The existing tail `-include
   $(DEPS_ALL)` (the `.d` auto-deps) and `-include $(SANITIZER_STAMP)` stay in
   the root Makefile at their positions and coexist with the new includes.
+
+## What remains in the root Makefile (~4.7k lines) and why
+
+After the 13 feature fragments + `mk/{flags,feature,hardening}.mk`, the root
+Makefile is ~4.7k lines. It is NOT more feature-extractable - what is left is the
+BASE build machinery, which falls into three modularizability classes:
+
+| Lines | Bucket | Further modularizable? |
+|------:|--------|------------------------|
+| ~220  | toolchain / CFLAGS base / sanitizer / version / dirs | **No** - `CFLAGS :=`/`+=` accumulation root; everything downstream depends on order |
+| ~1140 | vendored-lib configs (QuickJS, Lua, Keel, mbedTLS, SQLite, log.c, sh_arena, sh_json, TweetNaCl, stb, unicode, **WAMR**, LTO, CFI, TinyCC, wgpu, DuckDB, pledge, CA-bundle, pwned, HTMX) | **Partly** - a `mk/vendor/<lib>.mk` per lib is possible, but each carries a `CFLAGS +=` so it's order-sensitive like the coarse sections |
+| ~550  | Hull source-file object lists (`CAP_OBJS`, `RT_OBJS`, all `*_OBJ`) + compile pattern rules (`%.o: %.c`) | **No** - the central object registry + the ~10 pattern rules every archive/link consumes |
+| ~440  | stdlib/context/asset/app embedding (xxd) + registries | Partly (a `mk/embed-stdlib.mk`), low value |
+| ~85   | include paths + build-flag fingerprint | No - tiny, central |
+| ~180  | **platform-lib composition + the `hull` link rule** | **No - this is the assembly point.** `PLATFORM_OBJS` and the single `cc -o build/hull ...` line reference *everything*; splitting them loses the one-place-to-see-the-link property |
+| ~295  | base variants (SQLite/TLS/Keel-less + SLIM) + wamrc | No - they re-invoke the base build with flag overrides; inherently central |
+| ~83   | embedded build assets (`embedded_platform.h`, `embedded_templates.h`) + `BUILD_ASSET_OBJ` | No - the aggregation point the feature embeds feed into |
+| ~500  | libhull no-runtime embedding library | Yes → a `mk/libhull.mk` (self-contained), a reasonable future extraction |
+| ~760  | debug / tests / msan / fuzz / e2e | Yes → `mk/tests.mk`, but weak gate (rules, no value-diff) + `TEST_COMMON_*` shared with bench |
+| ~445  | self-build / repro / check / analysis / bench / coverage / lint / fetch / docs / clean | Partly → `mk/dev.mk` (dev/CI targets), low value |
+
+**Why the core cannot shrink much further.** Three structural facts:
+1. **The `CFLAGS`/`LDFLAGS` accumulation is a single ordered pipeline.** Anything
+   touching it can only move as a whole block at its exact position (proven with
+   `flags.mk` / `hardening.mk`); you cannot scatter it into per-topic files
+   without a reorder hazard.
+2. **The link + platform-lib composition is an assembly point by nature.** Its
+   value is that one `PLATFORM_OBJS` list and one `hull` link line name every
+   object; fragmenting them trades legibility for file count.
+3. **The compile pattern rules + object registry are the shared substrate** every
+   fragment already references; they belong in one place.
+
+The genuinely-extractable remainder (`libhull.mk`, `tests.mk`, per-vendor
+configs) is *tidying*, not the feature/flavor axis - lower value, weaker gates.
+
+## Platform axis (Darwin / Linux / Cosmopolitan / future Windows)
+
+Orthogonal to the feature axis. The ~22 platform conditionals split two ways,
+and the split dictates where each belongs:
+
+- **Platform-GLOBAL policy → `mk/platform/<os>.mk`:** the sandbox backend
+  selection (Linux pledge/landlock, macOS seatbelt no-op, cosmo built-in), the
+  OS link flags (macOS `-framework ...`, Linux `-Wl,-z,relro` + `-ldl`), the ar
+  determinism envelope, and the cosmo fat-APE conventions (`.aarch64/`, poll
+  backend). Driver: a computed `PLATFORM := darwin|linux|cosmo` at the top +
+  `include mk/platform/$(PLATFORM).mk`.
+- **Feature-LOCAL platform choices → stay in the feature fragment:** gpu's
+  `WGPU_FRAMEWORKS` (Metal vs Vulkan), duckdb/tcc/tui cosmo-exclusion. Moving
+  these into a platform file would fragment feature cohesion - the Metal-vs-Vulkan
+  choice belongs *with* gpu, not in `darwin.mk`. **This is the key design call:
+  the platform file holds OS policy, not a feature's per-OS wiring.**
+
+`mk/platform/windows.mk` is a **stub today**: Hull already runs on Windows via
+the cosmo APE (one binary, no native build), so there is no native-Windows
+toolchain yet. The stub documents the seam a future native port fills - a Windows
+sandbox backend (Restricted Tokens / AppContainer), `VirtualAlloc`/`VirtualProtect`
+for the sealed arena (see docs/security.md §5b), and the MSVC/clang-cl link flags.
+
+**Status:** the platform axis is a scattered, order-sensitive extraction with an
+all-or-nothing coherence requirement (like the coarse sections). Designed here;
+the `windows.mk` stub lands now as the forward seam. The full `mk/platform/*.mk`
+rollout is a follow-up PR.

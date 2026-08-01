@@ -56,15 +56,9 @@ $(BUILDDIR)/libhull_feature-tui.a: $(BUILDDIR)/cap_tui.o $(BUILDDIR)/cap_tui_inp
 
 # Per-runtime tui bridge archives (issue #114, Phase D). Tiny (one object each);
 # embedded in hull + composed for the app's runtime alongside the cap core.
-feature-tui-lua: $(BUILDDIR)/libhull_feature-tui-lua.a
-.PHONY: feature-tui-lua
-$(BUILDDIR)/libhull_feature-tui-lua.a: $(BUILDDIR)/lua_rt_mod_tui.o | $(BUILDDIR)
-	$(call AR_FEATURE_LIB,$(BUILDDIR)/lua_rt_mod_tui.o)
+$(eval $(call define-feature-archive,tui-lua,$(BUILDDIR)/lua_rt_mod_tui.o))
 
-feature-tui-js: $(BUILDDIR)/libhull_feature-tui-js.a
-.PHONY: feature-tui-js
-$(BUILDDIR)/libhull_feature-tui-js.a: $(BUILDDIR)/js_mod_tui.o | $(BUILDDIR)
-	$(call AR_FEATURE_LIB,$(BUILDDIR)/js_mod_tui.o)
+$(eval $(call define-feature-archive,tui-js,$(BUILDDIR)/js_mod_tui.o))
 
 EMBEDDED_TUI_H := $(BUILDDIR)/embedded_tui.h
 $(EMBEDDED_TUI_H): $(BUILDDIR)/libhull_feature-tui-lua.a $(BUILDDIR)/libhull_feature-tui-js.a | $(BUILDDIR)
