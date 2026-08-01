@@ -29,6 +29,7 @@
 #include <strings.h>   /* strncasecmp (DSN scheme match) */
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <unistd.h>    /* isatty / STDIN_FILENO (controlling-terminal probe) */
 
 /* Buffer size for cross-platform path resolution. Big enough to
  * hold any realpath() output (PATH_MAX-bound) and any reasonable
@@ -540,8 +541,26 @@ static int sb_supported(void) { return 0; }
 
 /* ── Phase 1: pre-load pledge ──────────────────────────────────────── */
 
+/* Whether any of stdin/stdout/stderr is a controlling terminal, probed once
+ * in phase 1 BEFORE any pledge is applied. Read by phase 2 (which cannot probe
+ * itself: phase-1 pledge is already active there, and isatty()'s ioctl(TCGETS)
+ * is not permitted by the `stdio` promise). See the probe site below. */
+static int g_stdio_is_tty = 0;
+
 int hl_sandbox_apply_pledge(void)
 {
+    /* Probe the controlling terminal before ANY sandbox is installed. glibc
+     * stdio issues isatty() -> ioctl(TCGETS) on first write to a character
+     * device (a real tty) to pick line- vs full-buffering; that ioctl is
+     * covered by the `tty` promise, not `stdio`. Without this, a plain CLI
+     * app.main that prints to a terminal is killed by the seccomp filter the
+     * moment it writes. Probing here, unsandboxed, lets both phases grant
+     * `tty` when a terminal is present (seccomp can only restrict, not widen,
+     * so phase 1 must be a superset of phase 2). Piped/redirected fds are not
+     * terminals, so a server/CI process gets nothing extra. */
+    g_stdio_is_tty = (isatty(STDIN_FILENO) || isatty(STDOUT_FILENO) ||
+                      isatty(STDERR_FILENO)) ? 1 : 0;
+
     if (!sb_supported()) {
         log_info("[sandbox] kernel sandbox not available on this platform");
         return 0;
@@ -570,10 +589,16 @@ int hl_sandbox_apply_pledge(void)
      * futimes() via bump_atime_fd for LRU tracking. Without it the
      * JS / Lua runtime gets killed during stdlib module compilation. */
 #if defined(__linux__) && !defined(__COSMOPOLITAN__)
-    const char *phase1 = "stdio inet unix rpath wpath cpath flock fattr dns netlink unveil";
+    const char *phase1_base = "stdio inet unix rpath wpath cpath flock fattr dns netlink unveil";
 #else
-    const char *phase1 = "stdio inet rpath wpath cpath flock fattr dns unveil";
+    const char *phase1_base = "stdio inet rpath wpath cpath flock fattr dns unveil";
 #endif
+    /* Grant `tty` in phase 1 too when a terminal is present, so phase 2's
+     * `tty` (for TUI or a terminal-connected CLI) is actually effective -
+     * seccomp only restricts, so phase 1 must be a superset. */
+    char phase1[256];
+    snprintf(phase1, sizeof(phase1), "%s%s",
+             phase1_base, g_stdio_is_tty ? " tty" : "");
     if (pledge(phase1, NULL) != 0) {
         log_error("[sandbox] phase 1 pledge failed");
         return -1;
@@ -895,10 +920,16 @@ int hl_sandbox_apply(const HlSandboxPolicy *policy, const char *app_dir,
                          " inet");
         if (n > 0) plen += n;
     }
-    /* `tty` covers tcsetattr / tcgetattr / TIOCGWINSZ / ioctl on the
-     * controlling terminal. Required for TUI's raw-mode toggle and
-     * size queries; rejected silently if the app never asks for it. */
-    if (plen > 0 && policy->tui &&
+    /* `tty` covers tcsetattr / tcgetattr / TIOCGWINSZ / ioctl(TCGETS) on the
+     * controlling terminal. Required for TUI's raw-mode toggle and size
+     * queries, AND for the isatty()/buffering-probe ioctl glibc stdio runs on
+     * first write to a terminal-connected fd (so a plain CLI app.main that
+     * prints to a terminal is not killed). Granted when the app is a TUI OR a
+     * terminal is present (g_stdio_is_tty, probed unsandboxed in phase 1 -
+     * we must NOT call isatty() here, as phase-1 pledge already forbids that
+     * ioctl). Phase 1 grants the matching superset. Piped/redirected fds are
+     * not terminals, so a server/CI process's promise set is unchanged. */
+    if (plen > 0 && (policy->tui || g_stdio_is_tty) &&
         (size_t)plen < sizeof(promises)) {
         int n = snprintf(promises + plen, sizeof(promises) - (size_t)plen,
                          " tty");
