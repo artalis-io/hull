@@ -614,6 +614,693 @@ local function sign_app(app_dir, key_file, sign_ctx, files, tmpdir, output)
     print("wrote " .. app_dir .. "/package.sig")
 end
 
+-- compose_features: resolve + compose every feature archive this app needs -
+-- the --with backends/tui (via FEATURE_SPECS) plus the auto-composed runtime /
+-- http / keel / tls / wasm / sqlite / image archives - into the temp build dir.
+-- Extracted verbatim from main() in Phase 3.2 (docs/build_modularization.md).
+-- Inputs: opts (mutated - opts.with sqlite auto-compose), tmpdir, platform_lib,
+-- is_cosmo, compute_files. Returns the four values the link + sign stages read.
+local function compose_features(opts, tmpdir, platform_lib, is_cosmo, compute_files)
+    -- ── Compose features (--with / inferred) ──
+    -- Composable features (docs/features_and_flavors.md): a large optional
+    -- subsystem linked in from a signed feature archive rather than compiled
+    -- into the base. Each feature fills a base subsystem's WEAK hook with a
+    -- STRONG override -- a generated registry .o that displaces the weak default
+    -- -- so the base routes to the feature's backend at runtime. Selected with
+    -- --with=<name>. (Manifest inference is deliberately NOT done here:
+    -- extract_app_manifest EXECUTES app.lua and re-running it corrupts the sign
+    -- flow; a side-effect-free manifest read is a tracked follow-up.)
+    -- FEATURE_SPECS (the per-feature compose registry) is required at the top
+    -- of this file from hull.feature_specs; that module carries the field docs.
+    -- SQLite auto-compose (docs/sqlite_feature.md, Phase C). SQLite is Hull's
+    -- DEFAULT backend, so a DB-using app auto-composes libhull_feature-sqlite.a
+    -- -- but ONLY when the target base is SQLite-less. A stock base carries the
+    -- SQLite backend in-lib; composing it there would double-define the backend,
+    -- so we gate on the base NOT already providing hl_db_backend_sqlite. Net:
+    -- a no-op on a stock (SQLite-full) base -> byte-identical; on a
+    -- HL_SQLITE_FEATURE=1 base a DB app composes SQLite and a DB-free app drops
+    -- it. Inferred (not a hand-typed --with=sqlite), like hull/tui.
+    if not (opts.with and opts.with.sqlite) then
+        local mf = extract_app_manifest(opts.app_dir)
+        local needs_sqlite = false
+        if mf then
+            local r = tool.modules_resolve(mf, opts.flavor, with_feature_list(opts))
+            if r.ok and r.needs_sqlite then needs_sqlite = true end
+        end
+        if needs_sqlite then
+            -- Probe the resolved base: a stock base defines hl_db_backend_sqlite,
+            -- a SQLite-less (HL_SQLITE_FEATURE=1) base does not. nm may be absent
+            -- (or the base unreadable); default to "has sqlite" so we never
+            -- wrongly compose onto a SQLite-full base.
+            local base_has_sqlite = true
+            local nm_out = tool.spawn_read({ "nm", platform_lib })
+            if nm_out and not nm_out:find("hl_db_backend_sqlite") then
+                base_has_sqlite = false
+            end
+            if not base_has_sqlite then
+                opts.with = opts.with or {}
+                opts.with.sqlite = true
+                opts.with_inferred = opts.with_inferred or {}
+                opts.with_inferred.sqlite = true
+                print("hull build: composing feature 'sqlite' "
+                      .. "(SQLite-less base + app uses db)")
+            end
+        end
+    end
+
+    local features_needed = {}
+    if opts.with then for f in pairs(opts.with) do features_needed[f] = true end end
+    local feature_objs = {}
+    local feature_libs = {}
+    -- Composed-feature signature attestation (issue #114). Each composed archive
+    -- is recorded as { name, sha256, domain } so sign_app can write the
+    -- package.sig.gethull.composed block. `domain = "platform"` = an archive that
+    -- ships INSIDE hull (runtime / http / web bindings / tui bridge), attested by
+    -- the platform-key manifest; `domain = "release"` = an externally-installed
+    -- --with / --flavor lib, attested by the release-key hull.sha256. The `name`
+    -- must match that manifest's name column. See docs/composed_feature_signing.md.
+    local composed_assets = {}
+    local function record_composed(name, path, domain)
+        -- Only a --sign build writes the attestation; a plain `hull build`
+        -- discards composed_assets, so skip the (up to ~127 MB) hash entirely.
+        if not opts.sign then return end
+        -- Fail CLOSED. A malformed name would record an asset the runtime §5c
+        -- can never find in the signed manifest (a signed app that refuses to
+        -- boot), and an unhashable archive would silently drop out of the
+        -- attestation. Both are build-integrity failures, not to be papered over.
+        if type(name) ~= "string" or name == "" or name:find("..", 1, true) then
+            tool.stderr("hull build: internal error: malformed composed-asset "
+                        .. "name '" .. tostring(name) .. "'\n")
+            tool.rmdir(tmpdir); tool.exit(1)
+        end
+        -- Stream-hash the archive in C (tool.sha256_file) rather than
+        -- read_file + crypto.sha256: a --with feature archive can be huge
+        -- (~127 MB DuckDB, the wgpu GPU lib) and slurping it into a Lua
+        -- string blows the tool VM's 64 MB sandbox allocator.
+        local sha = tool.sha256_file(path)
+        if not sha then
+            tool.stderr("hull build: cannot hash composed archive '" .. path
+                        .. "' for signing (" .. name .. ")\n")
+            tool.rmdir(tmpdir); tool.exit(1)
+        end
+        composed_assets[#composed_assets + 1] =
+            { name = name, sha256 = sha, domain = domain }
+    end
+    -- A DB wire feature (postgres/mysql) references base symbols (crypto,
+    -- tls_client) that a DB-only app doesn't otherwise pull, so on GNU ld the
+    -- platform lib + feature archive must be wrapped in --start-group. Set by
+    -- any composed feature with `base_group = true`.
+    local needs_base_group = false
+    if next(features_needed) then
+        local plat = tool.platform_name and tool.platform_name() or nil
+        local hull_dir = ""
+        if __hull_exe then hull_dir = __hull_exe:match("(.*/)") or "" end
+
+        -- Pass 1: validate + resolve each feature's archive, collect its link
+        -- libs, and group backends by the base hook they fill (one hook per
+        -- subsystem kind; multiple same-kind features share one hook + array).
+        local by_hook = {}       -- hook -> { type = <ctype>, backends = { sym... } }
+        local needs_cxx = false
+        for fname in pairs(features_needed) do
+            local spec = FEATURE_SPECS[fname]
+            if not spec then
+                tool.stderr("hull build: --with=" .. fname .. ": unknown feature\n")
+                tool.rmdir(tmpdir); tool.exit(1)
+            end
+            if is_cosmo then
+                tool.stderr("hull build: the '" .. fname .. "' feature is native-only "
+                            .. "(not available for cosmo builds)\n")
+                tool.rmdir(tmpdir); tool.exit(1)
+            end
+            if spec.cxx then needs_cxx = true end
+            if spec.base_group then needs_base_group = true end
+
+            -- Resolve libhull_feature-<name>.a via the shared ladder: local
+            -- build dirs (`make feature-<name>`), then the signed feature cache
+            -- (`hull feature install`, re-verified fail-closed against the
+            -- embedded release pubkey).
+            local libname = "libhull_feature-" .. fname .. ".a"
+            local asset = plat and ("libhull_feature-" .. fname .. "-" .. plat .. ".a") or nil
+            local lib, from
+            if fname == "sqlite" then
+                -- Phase D: the SQLite engine ships EMBEDDED in an
+                -- HL_APP_BASE_SQLITELESS hull, so resolve it embedded-first (like
+                -- the wasm core). Falls back to the local build dir / installed
+                -- feature cache on a pre-Phase-D hull.
+                lib, from = fcompose.resolve_sqlite_lib(tmpdir,
+                                                        { hull_dir = hull_dir, plat = plat })
+            else
+                lib, from = fcompose.resolve_lib(libname, asset,
+                                                 { hull_dir = hull_dir, plat = plat })
+            end
+            if not lib then
+                if from == "cache-verify-failed" then
+                    tool.stderr("hull build: cached " .. fname .. " feature lib could not "
+                        .. "be re-verified; run `hull feature install " .. fname .. "` again\n")
+                elseif opts.with_inferred and opts.with_inferred[fname] then
+                    -- Auto-inferred from a manifest declaration (e.g. hull/tui):
+                    -- frame the error around what the app requires, not a --with
+                    -- flag the user never typed.
+                    tool.stderr("hull build: this app declares hull/" .. fname
+                                .. " but the '" .. fname .. "' feature is not installed\n")
+                    tool.stderr("hint: `hull feature install " .. fname .. "` "
+                                .. "(the app's manifest requires it), "
+                                .. "or build from source: `make feature-" .. fname .. "`\n")
+                else
+                    tool.stderr("hull build: the '" .. fname .. "' feature lib was not found "
+                                .. "(locally or in ~/.hull/feature)\n")
+                    tool.stderr("hint: `hull feature install " .. fname .. "`, "
+                                .. "or build from source: `make feature-" .. fname .. "`\n")
+                end
+                tool.rmdir(tmpdir); tool.exit(1)
+            end
+            local from_cache = (from == "cache")
+            local dest = tmpdir .. "/" .. libname
+            -- An embedded-resolved engine (Phase D: resolve_sqlite_lib extracts
+            -- straight into tmpdir) is already at `dest`; copying a file onto
+            -- itself truncates it to 0 bytes, so guard like the wasm compose.
+            if lib ~= dest then tool.copy(lib, dest) end
+            -- Attestation domain (docs/composed_feature_signing.md): an archive
+            -- resolved EMBEDDED (Phase D: the SQLite engine on an
+            -- HL_APP_BASE_SQLITELESS hull) ships INSIDE hull, so it is attested by
+            -- the platform-key manifest (§5c FATAL) under the embedded-asset name
+            -- `libhull_feature-<n>.<arch>.a`, exactly like the runtime/wasm cores.
+            -- An externally-installed feature keeps the release domain + its
+            -- release-asset name `libhull_feature-<n>-<arch>.a`.
+            if from == "embedded" then
+                record_composed("libhull_feature-" .. fname .. "."
+                                .. (plat or "") .. ".a", dest, "platform")
+            else
+                record_composed(asset or libname, dest, "release")
+            end
+            local is_darwin = plat and plat:sub(1, 6) == "darwin"
+
+            if spec.whole_archive then
+                -- Force-load the whole archive: its strong overrides of the
+                -- base weak hooks are spread across several object files with no
+                -- single backend symbol to anchor a selective pull.
+                for _, f in ipairs(fcompose.whole_archive_flags(dest, is_darwin)) do
+                    feature_libs[#feature_libs + 1] = f
+                end
+                -- tui (issue #114, Phase D): the cap core above is runtime-agnostic;
+                -- the per-runtime bridge (register_lua/_js strong override) lives in
+                -- its own archive so the WRONG runtime's bridge is never pulled onto
+                -- a single-runtime base. Compose the APP's runtime bridge too
+                -- (embedded in hull, resolved embedded-first). Its refs to the
+                -- runtime resolve because the runtime archive is composed alongside.
+                if fname == "tui" and not is_cosmo then
+                    local app_rt = fcompose.detect_app_rt(opts.app_dir)
+                    if app_rt then
+                        local tb, tfrom = fcompose.resolve_tui_rt_lib(app_rt, tmpdir,
+                                          { hull_dir = hull_dir, plat = plat })
+                        if not tb then
+                            tool.stderr("hull build: the tui bridge for '" .. app_rt
+                                .. "' (libhull_feature-tui-" .. app_rt .. ".a) was not found "
+                                .. (tfrom == "cache-verify-failed"
+                                    and "(cache re-verify failed)\n"
+                                    or  "(normally embedded in hull)\n"))
+                            tool.rmdir(tmpdir); tool.exit(1)
+                        end
+                        local tdest = tmpdir .. "/libhull_feature-tui-" .. app_rt .. ".a"
+                        if tb ~= tdest then tool.copy(tb, tdest) end
+                        -- The per-runtime tui bridge ships INSIDE hull -> platform domain.
+                        record_composed("libhull_feature-tui-" .. app_rt .. "."
+                                        .. (plat or "") .. ".a", tdest, "platform")
+                        for _, f in ipairs(fcompose.whole_archive_flags(tdest, is_darwin)) do
+                            feature_libs[#feature_libs + 1] = f
+                        end
+                        print("hull build: composed tui bridge '" .. app_rt .. "'")
+                    end
+                end
+            else
+                -- Backend feature: linked plainly; the generated registry's
+                -- extern-&backend reference pulls the backend object.
+                feature_libs[#feature_libs + 1] = dest
+                by_hook[spec.hook] = by_hook[spec.hook] or { type = spec.type, backends = {} }
+                local g = by_hook[spec.hook]
+                g.backends[#g.backends + 1] = spec.backend
+            end
+
+            -- Per-feature link libs (C++ runtime / native frameworks / -lvulkan).
+            local platlibs = is_darwin and (spec.libs.darwin or {})
+                                        or  (spec.libs.other or {})
+            for _, l in ipairs(platlibs) do feature_libs[#feature_libs + 1] = l end
+
+            print("hull build: composed feature '" .. fname .. "'"
+                  .. (from == "embedded" and " (embedded)"
+                      or from_cache and " (~/.hull/feature)" or " (local)"))
+        end
+
+        -- A C++ feature archive cannot be linked by the embedded TinyCC (it links
+        -- no C++ runtime and does not run the archive's static initializers, so a
+        -- tcc-linked binary crashes at first use). Require a system compiler.
+        if needs_cxx and tool.compiler.name() == "tcc" then
+            tool.stderr("hull build: a composable C++ feature cannot be linked by "
+                        .. "the embedded TinyCC.\n")
+            tool.stderr("hint: build with a system compiler, e.g. "
+                        .. "`hull build --compiler=system --with=<name>`\n")
+            tool.rmdir(tmpdir); tool.exit(1)
+        end
+
+        -- Generate ONE registry filling each aggregating base hook with the
+        -- STRONG override returning that kind's composed backends. Only backend
+        -- features populate `by_hook`; a compose of only whole_archive features
+        -- (e.g. --with=tui alone) needs no registry (its strong overrides come
+        -- straight from the force-loaded archive). Self-contained (no <stddef.h>:
+        -- these files compile with a bare include path; size_t comes from the
+        -- compiler builtin, ABI-exact under tcc/gcc/clang).
+        if next(by_hook) then
+            local reg = {
+                "/* Auto-generated by hull build — do not edit. */",
+                "typedef __SIZE_TYPE__ size_t;",
+            }
+            for hook, g in pairs(by_hook) do
+                reg[#reg + 1] = "typedef struct " .. g.type .. " " .. g.type .. ";"
+                local addrs = {}
+                for i, b in ipairs(g.backends) do
+                    reg[#reg + 1] = "extern const " .. g.type .. " " .. b .. ";"
+                    addrs[i] = "&" .. b
+                end
+                local arr = "HL_FEAT_" .. hook
+                reg[#reg + 1] = "static const " .. g.type .. " *const " .. arr
+                                .. "[] = { " .. table.concat(addrs, ", ") .. " };"
+                reg[#reg + 1] = "const " .. g.type .. " *const *" .. hook .. "(size_t *count) {"
+                reg[#reg + 1] = "    if (count) *count = " .. #g.backends .. ";"
+                reg[#reg + 1] = "    return " .. arr .. ";"
+                reg[#reg + 1] = "}"
+            end
+            reg[#reg + 1] = ""
+            write_file(tmpdir .. "/feature_registry.c", table.concat(reg, "\n"))
+            if not tool.compiler.compile(tmpdir .. "/feature_registry.c",
+                                         tmpdir .. "/feature_registry.o", nil) then
+                tool.stderr("hull build: compilation failed (feature_registry.c)\n")
+                tool.rmdir(tmpdir); tool.exit(1)
+            end
+            feature_objs[#feature_objs + 1] = tmpdir .. "/feature_registry.o"
+        end
+    end
+
+    -- Every produced app needs STRONG hl_stdlib_feature_entries() +
+    -- hl_runtime_feature_factories() for its one runtime (see
+    -- fcompose.gen_app_registry_c for the full why). The base defaults are weak
+    -- and win first from the archive, leaving the app with an empty stdlib and
+    -- no runtime; this generated object overrides both. The registry codegen +
+    -- the archive-resolution ladder + the whole-archive link fragment are shared
+    -- with `hull eject` via hull.feature_compose so the two paths cannot drift.
+    do
+        local app_rt = fcompose.detect_app_rt(opts.app_dir)
+        -- Cosmo has a DUAL base (both runtimes + the toolchain registry embedded
+        -- in the fat APE); a cosmo app must NOT get an app_feature_registry (it
+        -- would duplicate the base's strong hooks) and does not compose a runtime
+        -- archive (features are native-only). Native has a runtime-less base and
+        -- composes exactly one runtime here.
+        if app_rt and not is_cosmo then
+            -- Reduced-flavor x composed-runtime (issue #114, Phase D). The only
+            -- flavors are `full` (HTTP on) and `pure-compute` (HTTP off), both
+            -- fully supported here: a pure-compute app declares no HTTP module,
+            -- so needs_http (below) is false and only the pure runtime is
+            -- composed onto the Keel-free base (the runtime's few web-symbol
+            -- references resolve to the base http_weakstub no-ops). An unknown
+            -- flavor is already rejected upstream at flavor validation.
+
+            -- Does this app need HTTP? (issue #114, Phase C2.) The route/ws/sse
+            -- decorations (app.get/…) only exist when an HTTP module is declared,
+            -- so a serving app always trips an HTTP cap in the resolver. When it
+            -- needs none (a pure app.main CLI / compute tool) skip composing the
+            -- http core + the per-runtime web bindings: the pure runtime's few
+            -- web-symbol refs are then satisfied by the base http_weakstub no-ops.
+            -- Fail safe: if resolution is unavailable, compose HTTP (never
+            -- under-compose and silently break serving).
+            local needs_http = true
+            -- needs_wasm two-signal gate (docs/wasm_feature.md, Phase 2):
+            --   S2 = the app ships compute/*.wasm (catches a WASM-backed db.udf
+            --        that declares no compute module — invisible to the resolver);
+            --   S1 = a declared WASM cap (hull/compute), from modules_resolve.
+            -- Compose the wasm feature iff either fires; a genuinely compute-free
+            -- app then links zero WAMR (~256 KB smaller).
+            local needs_wasm = (#compute_files > 0)
+            -- needs_sqlite (Phase C.2b): the app uses a udf-capable DB, so compose
+            -- the per-runtime SQLite UDF bridge (mod_db_udf), which the base runtime
+            -- archive no longer carries. SQLite is guaranteed reachable here (in the
+            -- base, or composed as the engine feature by the Phase C block above),
+            -- so the bridge's sqlite3_* references always resolve.
+            local needs_sqlite = false
+            -- needs_image (docs/image_feature.md): the app declares hull/image, so
+            -- compose the image codec core + the per-runtime image bridge, which the
+            -- native base no longer carries. Cleanly module-inferable (the resolver's
+            -- HL_MOD_CAP_IMAGE); a genuinely image-free app links zero stb (~146 KB
+            -- smaller).
+            local needs_image = false
+            -- needs_tls (docs/tls_feature.md, a2): the app implies the TLS stack
+            -- (HTTP -> https fetch / TLS serving / smtp; a net-DB sslmode). Compose
+            -- libhull_feature-tls.a (mbedTLS + the crypto/tls backends) which a
+            -- TLS-less base no longer carries; a plaintext app links zero mbedTLS.
+            local needs_tls = false
+            do
+                local mf = extract_app_manifest(opts.app_dir)
+                if mf then
+                    local r = tool.modules_resolve(mf, opts.flavor, with_feature_list(opts))
+                    if r.ok and r.needs_http ~= nil then needs_http = r.needs_http end
+                    if r.ok and r.needs_wasm then needs_wasm = true end
+                    if r.ok and r.needs_sqlite then needs_sqlite = true end
+                    if r.ok and r.needs_image then needs_image = true end
+                    if r.ok and r.needs_tls then needs_tls = true end
+                end
+            end
+            -- OR in the network-DB signal (the piece tool_orchestration.c's
+            -- needs_tls left to build time): the postgres/mysql wire backends link
+            -- the shared tls_client (which the a2 TLS feature now owns) for
+            -- sslmode, so composing either onto a TLS-less base needs the TLS
+            -- feature too -- regardless of the DSN's sslmode, since the archive's
+            -- tls_client refs must resolve. These are explicit --with=/inferred
+            -- (opts.with), the same signal the backend features compose on.
+            if opts.with and (opts.with.postgres or opts.with.mysql) then
+                needs_tls = true
+            end
+
+            write_file(tmpdir .. "/app_feature_registry.c",
+                       fcompose.gen_app_registry_c(app_rt))
+            if not tool.compiler.compile(tmpdir .. "/app_feature_registry.c",
+                                         tmpdir .. "/app_feature_registry.o", nil) then
+                tool.stderr("hull build: compilation failed (app_feature_registry.c)\n")
+                tool.rmdir(tmpdir); tool.exit(1)
+            end
+            feature_objs[#feature_objs + 1] = tmpdir .. "/app_feature_registry.o"
+
+            -- Compose the runtime. The base platform lib is RUNTIME-LESS, so the
+            -- app must link exactly one runtime archive (libhull_feature-<rt>.a)
+            -- to be runnable. Auto-inferred from the entry extension. Whole-
+            -- archive so the entire runtime + its embedded stdlib + vendored VM
+            -- are pulled (like the tui feature), not merely what the registry's
+            -- factory reference reaches. The runtime references base symbols
+            -- (crypto/vfs/...) resolved from the platform lib, so the GNU-ld link
+            -- must --start-group them.
+            local rt_lib  = "libhull_feature-" .. app_rt .. ".a"
+            local rt_plat = tool.platform_name and tool.platform_name() or nil
+            local rt_hull_dir = ""
+            if __hull_exe then rt_hull_dir = __hull_exe:match("(.*/)") or "" end
+            local rt_path, rt_from = fcompose.resolve_runtime_lib(app_rt, tmpdir,
+                                     { hull_dir = rt_hull_dir, plat = rt_plat })
+            if not rt_path then
+                if rt_from == "cache-verify-failed" then
+                    tool.stderr("hull build: cached " .. app_rt
+                        .. " runtime lib could not be re-verified\n")
+                else
+                    tool.stderr("hull build: the '" .. app_rt .. "' runtime feature lib "
+                        .. "was not found (the runtime is normally embedded in hull)\n")
+                    tool.stderr("hint: build it from source with `make feature-"
+                        .. app_rt .. "`\n")
+                end
+                tool.rmdir(tmpdir); tool.exit(1)
+            end
+            local rt_dest = tmpdir .. "/" .. rt_lib
+            if rt_path ~= rt_dest then tool.copy(rt_path, rt_dest) end  -- already there if extracted
+            -- The runtime archive ships INSIDE hull -> platform domain.
+            record_composed("libhull_feature-" .. app_rt .. "."
+                            .. (rt_plat or "") .. ".a", rt_dest, "platform")
+            needs_base_group = true  -- runtime refs base symbols; GNU ld needs the group
+            local is_darwin = rt_plat and rt_plat:sub(1, 6) == "darwin"
+            for _, f in ipairs(fcompose.whole_archive_flags(rt_dest, is_darwin)) do
+                feature_libs[#feature_libs + 1] = f
+            end
+            print("hull build: composed runtime '" .. app_rt .. "'")
+
+            -- Compose the WASM feature (docs/wasm_feature.md, Phase 2). The native
+            -- base is compute-less: the wasm caps + WAMR live in
+            -- libhull_feature-wasm.a and the compute.* binding (mod_compute) in
+            -- libhull_feature-wasm-<rt>.a. Composed only when needs_wasm (S1 or S2,
+            -- above); a genuinely compute-free app links zero WAMR. Whole-archive
+            -- both inside the --start-group.
+            if needs_wasm then
+            local wasm_lib = "libhull_feature-wasm.a"
+            local wasm_path, wasm_from = fcompose.resolve_wasm_lib(tmpdir,
+                                         { hull_dir = rt_hull_dir, plat = rt_plat })
+            if not wasm_path then
+                tool.stderr("hull build: the WASM feature lib (libhull_feature-wasm.a) "
+                    .. "was not found "
+                    .. (wasm_from == "cache-verify-failed"
+                        and "(cache re-verify failed)\n" or "(normally embedded in hull)\n"))
+                tool.stderr("hint: build it from source with `make feature-wasm`\n")
+                tool.rmdir(tmpdir); tool.exit(1)
+            end
+            local wasm_dest = tmpdir .. "/" .. wasm_lib
+            if wasm_path ~= wasm_dest then tool.copy(wasm_path, wasm_dest) end
+            record_composed("libhull_feature-wasm." .. (rt_plat or "") .. ".a",
+                            wasm_dest, "platform")
+            for _, f in ipairs(fcompose.whole_archive_flags(wasm_dest, is_darwin)) do
+                feature_libs[#feature_libs + 1] = f
+            end
+
+            local wasmrt_lib = "libhull_feature-wasm-" .. app_rt .. ".a"
+            local wasmrt_path, wasmrt_from = fcompose.resolve_wasm_rt_lib(app_rt, tmpdir,
+                                             { hull_dir = rt_hull_dir, plat = rt_plat })
+            if not wasmrt_path then
+                tool.stderr("hull build: the compute-bindings feature lib (" .. wasmrt_lib
+                    .. ") was not found "
+                    .. (wasmrt_from == "cache-verify-failed"
+                        and "(cache re-verify failed)\n" or "(normally embedded in hull)\n"))
+                tool.rmdir(tmpdir); tool.exit(1)
+            end
+            local wasmrt_dest = tmpdir .. "/" .. wasmrt_lib
+            if wasmrt_path ~= wasmrt_dest then tool.copy(wasmrt_path, wasmrt_dest) end
+            record_composed("libhull_feature-wasm-" .. app_rt .. "."
+                            .. (rt_plat or "") .. ".a", wasmrt_dest, "platform")
+            for _, f in ipairs(fcompose.whole_archive_flags(wasmrt_dest, is_darwin)) do
+                feature_libs[#feature_libs + 1] = f
+            end
+            print("hull build: composed WASM feature + compute bridge '" .. app_rt .. "'")
+            else
+                print("hull build: compute-free app (no hull/compute, no "
+                    .. "compute/*.wasm) - skipped the WASM feature (~256 KB smaller)")
+            end
+
+            -- Compose the per-runtime SQLite UDF bridge (Phase C.2b). The runtime
+            -- archive is SQLite-free; the db.udf bindings (mod_db_udf, the sole
+            -- per-runtime sqlite3_* consumer) live in libhull_feature-sqlite-<rt>.a
+            -- and compose only when the app uses a udf-capable DB. A db-free app
+            -- composes neither this nor the engine, so it links zero SQLite.
+            if needs_sqlite then
+            local sqrt_lib = "libhull_feature-sqlite-" .. app_rt .. ".a"
+            local sqrt_path, sqrt_from = fcompose.resolve_sqlite_rt_lib(app_rt, tmpdir,
+                                         { hull_dir = rt_hull_dir, plat = rt_plat })
+            if not sqrt_path then
+                tool.stderr("hull build: the SQLite udf-bridge feature lib (" .. sqrt_lib
+                    .. ") was not found "
+                    .. (sqrt_from == "cache-verify-failed"
+                        and "(cache re-verify failed)\n" or "(normally embedded in hull)\n"))
+                tool.rmdir(tmpdir); tool.exit(1)
+            end
+            local sqrt_dest = tmpdir .. "/" .. sqrt_lib
+            if sqrt_path ~= sqrt_dest then tool.copy(sqrt_path, sqrt_dest) end
+            record_composed("libhull_feature-sqlite-" .. app_rt .. "."
+                            .. (rt_plat or "") .. ".a", sqrt_dest, "platform")
+            for _, f in ipairs(fcompose.whole_archive_flags(sqrt_dest, is_darwin)) do
+                feature_libs[#feature_libs + 1] = f
+            end
+            print("hull build: composed SQLite udf bridge '" .. app_rt .. "'")
+            end
+
+            -- Compose the IMAGE feature (docs/image_feature.md). The native base is
+            -- image-less: the codec caps + vendored stb live in
+            -- libhull_feature-image.a and the image.* binding (mod_image) in
+            -- libhull_feature-image-<rt>.a. Composed only when needs_image (the app
+            -- declared hull/image); a genuinely image-free app links zero stb
+            -- (~146 KB smaller). Whole-archive both inside the --start-group.
+            if needs_image then
+            local img_lib = "libhull_feature-image.a"
+            local img_path, img_from = fcompose.resolve_image_lib(tmpdir,
+                                       { hull_dir = rt_hull_dir, plat = rt_plat })
+            if not img_path then
+                tool.stderr("hull build: the image feature lib (libhull_feature-image.a) "
+                    .. "was not found "
+                    .. (img_from == "cache-verify-failed"
+                        and "(cache re-verify failed)\n" or "(normally embedded in hull)\n"))
+                tool.stderr("hint: build it from source with `make feature-image`\n")
+                tool.rmdir(tmpdir); tool.exit(1)
+            end
+            local img_dest = tmpdir .. "/" .. img_lib
+            if img_path ~= img_dest then tool.copy(img_path, img_dest) end
+            record_composed("libhull_feature-image." .. (rt_plat or "") .. ".a",
+                            img_dest, "platform")
+            for _, f in ipairs(fcompose.whole_archive_flags(img_dest, is_darwin)) do
+                feature_libs[#feature_libs + 1] = f
+            end
+
+            local imgrt_lib = "libhull_feature-image-" .. app_rt .. ".a"
+            local imgrt_path, imgrt_from = fcompose.resolve_image_rt_lib(app_rt, tmpdir,
+                                           { hull_dir = rt_hull_dir, plat = rt_plat })
+            if not imgrt_path then
+                tool.stderr("hull build: the image-bindings feature lib (" .. imgrt_lib
+                    .. ") was not found "
+                    .. (imgrt_from == "cache-verify-failed"
+                        and "(cache re-verify failed)\n" or "(normally embedded in hull)\n"))
+                tool.rmdir(tmpdir); tool.exit(1)
+            end
+            local imgrt_dest = tmpdir .. "/" .. imgrt_lib
+            if imgrt_path ~= imgrt_dest then tool.copy(imgrt_path, imgrt_dest) end
+            record_composed("libhull_feature-image-" .. app_rt .. "."
+                            .. (rt_plat or "") .. ".a", imgrt_dest, "platform")
+            for _, f in ipairs(fcompose.whole_archive_flags(imgrt_dest, is_darwin)) do
+                feature_libs[#feature_libs + 1] = f
+            end
+            print("hull build: composed image feature + image bridge '" .. app_rt .. "'")
+            end
+
+            -- Compose the TLS feature (docs/tls_feature.md, a2). A tls-less base
+            -- (HL_TLS_FEATURE=1) drops mbedTLS + the crypto/tls backends; compose
+            -- libhull_feature-tls.a back when the app needs TLS AND the base is
+            -- actually tls-less. Probe the base: a TLS-full base defines
+            -- mbedtls_ssl_handshake, a tls-less one does not -- gate on its ABSENCE
+            -- so this is a no-op (byte-identical) on a stock TLS-full base. Whole-
+            -- archive inside the --start-group (the archive refs base crypto/vfs +
+            -- Keel's tls_mbedtls.o).
+            if needs_tls then
+            local base_has_tls = true
+            local tls_nm = tool.spawn_read({ "nm", platform_lib })
+            if tls_nm and not tls_nm:find("mbedtls_ssl_handshake") then
+                base_has_tls = false
+            end
+            if not base_has_tls then
+                local tls_lib = "libhull_feature-tls.a"
+                local tls_path, tls_from = fcompose.resolve_tls_lib(tmpdir,
+                                           { hull_dir = rt_hull_dir, plat = rt_plat })
+                if not tls_path then
+                    tool.stderr("hull build: the TLS feature lib (libhull_feature-tls.a) "
+                        .. "was not found "
+                        .. (tls_from == "cache-verify-failed"
+                            and "(cache re-verify failed)\n" or "(normally embedded in hull)\n"))
+                    tool.stderr("hint: build it from source with `make feature-tls`\n")
+                    tool.rmdir(tmpdir); tool.exit(1)
+                end
+                local tls_dest = tmpdir .. "/" .. tls_lib
+                if tls_path ~= tls_dest then tool.copy(tls_path, tls_dest) end
+                record_composed("libhull_feature-tls." .. (rt_plat or "") .. ".a",
+                                tls_dest, "platform")
+                needs_base_group = true  -- tls archive refs base + Keel symbols
+                for _, f in ipairs(fcompose.whole_archive_flags(tls_dest, is_darwin)) do
+                    feature_libs[#feature_libs + 1] = f
+                end
+                print("hull build: composed TLS feature (tls-less base + app needs TLS)")
+            end
+            end
+
+            if needs_http then
+            -- Compose the HTTP feature (issue #114, Phase B). The native base is
+            -- HTTP-CORE-LESS: serve.c + the runtime's web-module bindings
+            -- reference the http/ws/smtp/body caps, which now live in
+            -- libhull_feature-http.a. Whole-archive it inside the --start-group
+            -- (the caps reference Keel + base symbols, and the runtime's web
+            -- bindings reference the caps). Composed for every full-flavor native
+            -- app for now; a reduced flavor fails closed earlier, and skipping it
+            -- for a genuinely HTTP-free app is a later refinement.
+            local http_lib = "libhull_feature-http.a"
+            local http_path, http_from = fcompose.resolve_http_lib(tmpdir,
+                                         { hull_dir = rt_hull_dir, plat = rt_plat })
+            if not http_path then
+                if http_from == "cache-verify-failed" then
+                    tool.stderr("hull build: cached HTTP feature lib could not be re-verified\n")
+                else
+                    tool.stderr("hull build: the HTTP feature lib "
+                        .. "(libhull_feature-http.a) was not found "
+                        .. "(normally embedded in hull)\n")
+                    tool.stderr("hint: build it from source with `make feature-http`\n")
+                end
+                tool.rmdir(tmpdir); tool.exit(1)
+            end
+            local http_dest = tmpdir .. "/" .. http_lib
+            if http_path ~= http_dest then tool.copy(http_path, http_dest) end
+            -- The HTTP core archive ships INSIDE hull -> platform domain.
+            record_composed("libhull_feature-http." .. (rt_plat or "") .. ".a",
+                            http_dest, "platform")
+            for _, f in ipairs(fcompose.whole_archive_flags(http_dest, is_darwin)) do
+                feature_libs[#feature_libs + 1] = f
+            end
+            print("hull build: composed HTTP feature")
+
+            -- Compose the Keel event loop (docs/keel_feature.md, Phase 4.2b) when
+            -- the base is Keel-less. Sentinel: hl_async_backend_keel (async_keel.o's
+            -- vtable) is fully ABSENT from a Keel-less base (HL_KEEL_FEATURE=1 drops
+            -- async/keel.c) and present in a Keel-full base. It is a cleaner probe
+            -- than hull_serve, which serve_cli.o defines WEAK -- and macOS plain `nm`
+            -- prints a weak def as `T`, indistinguishable from a strong one. When the
+            -- sentinel is absent, compose libhull_feature-keel.a (serve.o + async_keel
+            -- + net_keel + the server-only static/agent/test objects); a full base,
+            -- which already carries them, never double-composes (no duplicate
+            -- hull_serve). The composed serve.o's kl_* refs pull libkeel from the base
+            -- .a on demand.
+            -- Default to "present" (skip compose), flipping to compose only on a
+            -- CONFIRMED nm result lacking the sentinel -- mirrors the sqlite/tls
+            -- probes. If nm is absent or errors (serve_nm == nil), skipping is the
+            -- safe no-op for the common Keel-FULL base: composing there would
+            -- duplicate serve.o's strong hull_serve / hl_async_backend and fail the
+            -- link. The Keel-less release base is only built where nm exists.
+            local base_has_keel = true
+            local serve_nm = tool.spawn_read({ "nm", platform_lib })
+            if serve_nm and not serve_nm:find("hl_async_backend_keel") then
+                base_has_keel = false
+            end
+            if not base_has_keel then
+                local keel_lib = "libhull_feature-keel.a"
+                local keel_path, keel_from = fcompose.resolve_keel_lib(tmpdir,
+                                             { hull_dir = rt_hull_dir, plat = rt_plat })
+                if not keel_path then
+                    tool.stderr("hull build: the Keel feature lib "
+                        .. "(libhull_feature-keel.a) was not found "
+                        .. (keel_from == "cache-verify-failed"
+                            and "(cache re-verify failed)\n" or "(normally embedded in hull)\n"))
+                    tool.stderr("hint: build it from source with `make feature-keel`\n")
+                    tool.rmdir(tmpdir); tool.exit(1)
+                end
+                local keel_dest = tmpdir .. "/" .. keel_lib
+                if keel_path ~= keel_dest then tool.copy(keel_path, keel_dest) end
+                record_composed("libhull_feature-keel." .. (rt_plat or "") .. ".a",
+                                keel_dest, "platform")
+                needs_base_group = true  -- keel archive refs base + libkeel symbols
+                for _, f in ipairs(fcompose.whole_archive_flags(keel_dest, is_darwin)) do
+                    feature_libs[#feature_libs + 1] = f
+                end
+                print("hull build: composed Keel event loop (Keel-less base)")
+            end
+
+            -- Phase C: the per-runtime web bindings (routes/dispatch/res:*/ws/sse/
+            -- http-client/smtp) live in libhull_feature-http-<rt>.a, not the pure
+            -- runtime archive. Whole-archive it too (its strong defs override the
+            -- base http_weakstub no-ops; it references the http core caps + Keel,
+            -- all inside the --start-group).
+            local httprt_lib = "libhull_feature-http-" .. app_rt .. ".a"
+            local httprt_path, httprt_from = fcompose.resolve_http_rt_lib(app_rt, tmpdir,
+                                             { hull_dir = rt_hull_dir, plat = rt_plat })
+            if not httprt_path then
+                if httprt_from == "cache-verify-failed" then
+                    tool.stderr("hull build: cached web-bindings lib (" .. httprt_lib
+                        .. ") could not be re-verified\n")
+                else
+                    tool.stderr("hull build: the web-bindings feature lib "
+                        .. "(" .. httprt_lib .. ") was not found "
+                        .. "(normally embedded in hull)\n")
+                    tool.stderr("hint: build it from source with `make feature-http-"
+                        .. app_rt .. "`\n")
+                end
+                tool.rmdir(tmpdir); tool.exit(1)
+            end
+            local httprt_dest = tmpdir .. "/" .. httprt_lib
+            if httprt_path ~= httprt_dest then tool.copy(httprt_path, httprt_dest) end
+            -- The per-runtime web bindings ship INSIDE hull -> platform domain.
+            record_composed("libhull_feature-http-" .. app_rt .. "."
+                            .. (rt_plat or "") .. ".a", httprt_dest, "platform")
+            for _, f in ipairs(fcompose.whole_archive_flags(httprt_dest, is_darwin)) do
+                feature_libs[#feature_libs + 1] = f
+            end
+            print("hull build: composed web bindings '" .. app_rt .. "'")
+            else
+                print("hull build: HTTP-free app (app.main, no HTTP modules) - "
+                    .. "skipped http core + web bindings")
+            end
+        end
+    end
+    return feature_objs, feature_libs, needs_base_group, composed_assets
+end
+
 local function main()
     local opts = parse_args()
 
@@ -1327,683 +2014,9 @@ int main(int argc, char **argv) { return hl_app_run(argc, argv); }
         tool.exit(1)
     end
 
-    -- ── Compose features (--with / inferred) ──
-    -- Composable features (docs/features_and_flavors.md): a large optional
-    -- subsystem linked in from a signed feature archive rather than compiled
-    -- into the base. Each feature fills a base subsystem's WEAK hook with a
-    -- STRONG override -- a generated registry .o that displaces the weak default
-    -- -- so the base routes to the feature's backend at runtime. Selected with
-    -- --with=<name>. (Manifest inference is deliberately NOT done here:
-    -- extract_app_manifest EXECUTES app.lua and re-running it corrupts the sign
-    -- flow; a side-effect-free manifest read is a tracked follow-up.)
-    -- FEATURE_SPECS (the per-feature compose registry) is required at the top
-    -- of this file from hull.feature_specs; that module carries the field docs.
-    -- SQLite auto-compose (docs/sqlite_feature.md, Phase C). SQLite is Hull's
-    -- DEFAULT backend, so a DB-using app auto-composes libhull_feature-sqlite.a
-    -- -- but ONLY when the target base is SQLite-less. A stock base carries the
-    -- SQLite backend in-lib; composing it there would double-define the backend,
-    -- so we gate on the base NOT already providing hl_db_backend_sqlite. Net:
-    -- a no-op on a stock (SQLite-full) base -> byte-identical; on a
-    -- HL_SQLITE_FEATURE=1 base a DB app composes SQLite and a DB-free app drops
-    -- it. Inferred (not a hand-typed --with=sqlite), like hull/tui.
-    if not (opts.with and opts.with.sqlite) then
-        local mf = extract_app_manifest(opts.app_dir)
-        local needs_sqlite = false
-        if mf then
-            local r = tool.modules_resolve(mf, opts.flavor, with_feature_list(opts))
-            if r.ok and r.needs_sqlite then needs_sqlite = true end
-        end
-        if needs_sqlite then
-            -- Probe the resolved base: a stock base defines hl_db_backend_sqlite,
-            -- a SQLite-less (HL_SQLITE_FEATURE=1) base does not. nm may be absent
-            -- (or the base unreadable); default to "has sqlite" so we never
-            -- wrongly compose onto a SQLite-full base.
-            local base_has_sqlite = true
-            local nm_out = tool.spawn_read({ "nm", platform_lib })
-            if nm_out and not nm_out:find("hl_db_backend_sqlite") then
-                base_has_sqlite = false
-            end
-            if not base_has_sqlite then
-                opts.with = opts.with or {}
-                opts.with.sqlite = true
-                opts.with_inferred = opts.with_inferred or {}
-                opts.with_inferred.sqlite = true
-                print("hull build: composing feature 'sqlite' "
-                      .. "(SQLite-less base + app uses db)")
-            end
-        end
-    end
-
-    local features_needed = {}
-    if opts.with then for f in pairs(opts.with) do features_needed[f] = true end end
-    local feature_objs = {}
-    local feature_libs = {}
-    -- Composed-feature signature attestation (issue #114). Each composed archive
-    -- is recorded as { name, sha256, domain } so sign_app can write the
-    -- package.sig.gethull.composed block. `domain = "platform"` = an archive that
-    -- ships INSIDE hull (runtime / http / web bindings / tui bridge), attested by
-    -- the platform-key manifest; `domain = "release"` = an externally-installed
-    -- --with / --flavor lib, attested by the release-key hull.sha256. The `name`
-    -- must match that manifest's name column. See docs/composed_feature_signing.md.
-    local composed_assets = {}
-    local function record_composed(name, path, domain)
-        -- Only a --sign build writes the attestation; a plain `hull build`
-        -- discards composed_assets, so skip the (up to ~127 MB) hash entirely.
-        if not opts.sign then return end
-        -- Fail CLOSED. A malformed name would record an asset the runtime §5c
-        -- can never find in the signed manifest (a signed app that refuses to
-        -- boot), and an unhashable archive would silently drop out of the
-        -- attestation. Both are build-integrity failures, not to be papered over.
-        if type(name) ~= "string" or name == "" or name:find("..", 1, true) then
-            tool.stderr("hull build: internal error: malformed composed-asset "
-                        .. "name '" .. tostring(name) .. "'\n")
-            tool.rmdir(tmpdir); tool.exit(1)
-        end
-        -- Stream-hash the archive in C (tool.sha256_file) rather than
-        -- read_file + crypto.sha256: a --with feature archive can be huge
-        -- (~127 MB DuckDB, the wgpu GPU lib) and slurping it into a Lua
-        -- string blows the tool VM's 64 MB sandbox allocator.
-        local sha = tool.sha256_file(path)
-        if not sha then
-            tool.stderr("hull build: cannot hash composed archive '" .. path
-                        .. "' for signing (" .. name .. ")\n")
-            tool.rmdir(tmpdir); tool.exit(1)
-        end
-        composed_assets[#composed_assets + 1] =
-            { name = name, sha256 = sha, domain = domain }
-    end
-    -- A DB wire feature (postgres/mysql) references base symbols (crypto,
-    -- tls_client) that a DB-only app doesn't otherwise pull, so on GNU ld the
-    -- platform lib + feature archive must be wrapped in --start-group. Set by
-    -- any composed feature with `base_group = true`.
-    local needs_base_group = false
-    if next(features_needed) then
-        local plat = tool.platform_name and tool.platform_name() or nil
-        local hull_dir = ""
-        if __hull_exe then hull_dir = __hull_exe:match("(.*/)") or "" end
-
-        -- Pass 1: validate + resolve each feature's archive, collect its link
-        -- libs, and group backends by the base hook they fill (one hook per
-        -- subsystem kind; multiple same-kind features share one hook + array).
-        local by_hook = {}       -- hook -> { type = <ctype>, backends = { sym... } }
-        local needs_cxx = false
-        for fname in pairs(features_needed) do
-            local spec = FEATURE_SPECS[fname]
-            if not spec then
-                tool.stderr("hull build: --with=" .. fname .. ": unknown feature\n")
-                tool.rmdir(tmpdir); tool.exit(1)
-            end
-            if is_cosmo then
-                tool.stderr("hull build: the '" .. fname .. "' feature is native-only "
-                            .. "(not available for cosmo builds)\n")
-                tool.rmdir(tmpdir); tool.exit(1)
-            end
-            if spec.cxx then needs_cxx = true end
-            if spec.base_group then needs_base_group = true end
-
-            -- Resolve libhull_feature-<name>.a via the shared ladder: local
-            -- build dirs (`make feature-<name>`), then the signed feature cache
-            -- (`hull feature install`, re-verified fail-closed against the
-            -- embedded release pubkey).
-            local libname = "libhull_feature-" .. fname .. ".a"
-            local asset = plat and ("libhull_feature-" .. fname .. "-" .. plat .. ".a") or nil
-            local lib, from
-            if fname == "sqlite" then
-                -- Phase D: the SQLite engine ships EMBEDDED in an
-                -- HL_APP_BASE_SQLITELESS hull, so resolve it embedded-first (like
-                -- the wasm core). Falls back to the local build dir / installed
-                -- feature cache on a pre-Phase-D hull.
-                lib, from = fcompose.resolve_sqlite_lib(tmpdir,
-                                                        { hull_dir = hull_dir, plat = plat })
-            else
-                lib, from = fcompose.resolve_lib(libname, asset,
-                                                 { hull_dir = hull_dir, plat = plat })
-            end
-            if not lib then
-                if from == "cache-verify-failed" then
-                    tool.stderr("hull build: cached " .. fname .. " feature lib could not "
-                        .. "be re-verified; run `hull feature install " .. fname .. "` again\n")
-                elseif opts.with_inferred and opts.with_inferred[fname] then
-                    -- Auto-inferred from a manifest declaration (e.g. hull/tui):
-                    -- frame the error around what the app requires, not a --with
-                    -- flag the user never typed.
-                    tool.stderr("hull build: this app declares hull/" .. fname
-                                .. " but the '" .. fname .. "' feature is not installed\n")
-                    tool.stderr("hint: `hull feature install " .. fname .. "` "
-                                .. "(the app's manifest requires it), "
-                                .. "or build from source: `make feature-" .. fname .. "`\n")
-                else
-                    tool.stderr("hull build: the '" .. fname .. "' feature lib was not found "
-                                .. "(locally or in ~/.hull/feature)\n")
-                    tool.stderr("hint: `hull feature install " .. fname .. "`, "
-                                .. "or build from source: `make feature-" .. fname .. "`\n")
-                end
-                tool.rmdir(tmpdir); tool.exit(1)
-            end
-            local from_cache = (from == "cache")
-            local dest = tmpdir .. "/" .. libname
-            -- An embedded-resolved engine (Phase D: resolve_sqlite_lib extracts
-            -- straight into tmpdir) is already at `dest`; copying a file onto
-            -- itself truncates it to 0 bytes, so guard like the wasm compose.
-            if lib ~= dest then tool.copy(lib, dest) end
-            -- Attestation domain (docs/composed_feature_signing.md): an archive
-            -- resolved EMBEDDED (Phase D: the SQLite engine on an
-            -- HL_APP_BASE_SQLITELESS hull) ships INSIDE hull, so it is attested by
-            -- the platform-key manifest (§5c FATAL) under the embedded-asset name
-            -- `libhull_feature-<n>.<arch>.a`, exactly like the runtime/wasm cores.
-            -- An externally-installed feature keeps the release domain + its
-            -- release-asset name `libhull_feature-<n>-<arch>.a`.
-            if from == "embedded" then
-                record_composed("libhull_feature-" .. fname .. "."
-                                .. (plat or "") .. ".a", dest, "platform")
-            else
-                record_composed(asset or libname, dest, "release")
-            end
-            local is_darwin = plat and plat:sub(1, 6) == "darwin"
-
-            if spec.whole_archive then
-                -- Force-load the whole archive: its strong overrides of the
-                -- base weak hooks are spread across several object files with no
-                -- single backend symbol to anchor a selective pull.
-                for _, f in ipairs(fcompose.whole_archive_flags(dest, is_darwin)) do
-                    feature_libs[#feature_libs + 1] = f
-                end
-                -- tui (issue #114, Phase D): the cap core above is runtime-agnostic;
-                -- the per-runtime bridge (register_lua/_js strong override) lives in
-                -- its own archive so the WRONG runtime's bridge is never pulled onto
-                -- a single-runtime base. Compose the APP's runtime bridge too
-                -- (embedded in hull, resolved embedded-first). Its refs to the
-                -- runtime resolve because the runtime archive is composed alongside.
-                if fname == "tui" and not is_cosmo then
-                    local app_rt = fcompose.detect_app_rt(opts.app_dir)
-                    if app_rt then
-                        local tb, tfrom = fcompose.resolve_tui_rt_lib(app_rt, tmpdir,
-                                          { hull_dir = hull_dir, plat = plat })
-                        if not tb then
-                            tool.stderr("hull build: the tui bridge for '" .. app_rt
-                                .. "' (libhull_feature-tui-" .. app_rt .. ".a) was not found "
-                                .. (tfrom == "cache-verify-failed"
-                                    and "(cache re-verify failed)\n"
-                                    or  "(normally embedded in hull)\n"))
-                            tool.rmdir(tmpdir); tool.exit(1)
-                        end
-                        local tdest = tmpdir .. "/libhull_feature-tui-" .. app_rt .. ".a"
-                        if tb ~= tdest then tool.copy(tb, tdest) end
-                        -- The per-runtime tui bridge ships INSIDE hull -> platform domain.
-                        record_composed("libhull_feature-tui-" .. app_rt .. "."
-                                        .. (plat or "") .. ".a", tdest, "platform")
-                        for _, f in ipairs(fcompose.whole_archive_flags(tdest, is_darwin)) do
-                            feature_libs[#feature_libs + 1] = f
-                        end
-                        print("hull build: composed tui bridge '" .. app_rt .. "'")
-                    end
-                end
-            else
-                -- Backend feature: linked plainly; the generated registry's
-                -- extern-&backend reference pulls the backend object.
-                feature_libs[#feature_libs + 1] = dest
-                by_hook[spec.hook] = by_hook[spec.hook] or { type = spec.type, backends = {} }
-                local g = by_hook[spec.hook]
-                g.backends[#g.backends + 1] = spec.backend
-            end
-
-            -- Per-feature link libs (C++ runtime / native frameworks / -lvulkan).
-            local platlibs = is_darwin and (spec.libs.darwin or {})
-                                        or  (spec.libs.other or {})
-            for _, l in ipairs(platlibs) do feature_libs[#feature_libs + 1] = l end
-
-            print("hull build: composed feature '" .. fname .. "'"
-                  .. (from == "embedded" and " (embedded)"
-                      or from_cache and " (~/.hull/feature)" or " (local)"))
-        end
-
-        -- A C++ feature archive cannot be linked by the embedded TinyCC (it links
-        -- no C++ runtime and does not run the archive's static initializers, so a
-        -- tcc-linked binary crashes at first use). Require a system compiler.
-        if needs_cxx and tool.compiler.name() == "tcc" then
-            tool.stderr("hull build: a composable C++ feature cannot be linked by "
-                        .. "the embedded TinyCC.\n")
-            tool.stderr("hint: build with a system compiler, e.g. "
-                        .. "`hull build --compiler=system --with=<name>`\n")
-            tool.rmdir(tmpdir); tool.exit(1)
-        end
-
-        -- Generate ONE registry filling each aggregating base hook with the
-        -- STRONG override returning that kind's composed backends. Only backend
-        -- features populate `by_hook`; a compose of only whole_archive features
-        -- (e.g. --with=tui alone) needs no registry (its strong overrides come
-        -- straight from the force-loaded archive). Self-contained (no <stddef.h>:
-        -- these files compile with a bare include path; size_t comes from the
-        -- compiler builtin, ABI-exact under tcc/gcc/clang).
-        if next(by_hook) then
-            local reg = {
-                "/* Auto-generated by hull build — do not edit. */",
-                "typedef __SIZE_TYPE__ size_t;",
-            }
-            for hook, g in pairs(by_hook) do
-                reg[#reg + 1] = "typedef struct " .. g.type .. " " .. g.type .. ";"
-                local addrs = {}
-                for i, b in ipairs(g.backends) do
-                    reg[#reg + 1] = "extern const " .. g.type .. " " .. b .. ";"
-                    addrs[i] = "&" .. b
-                end
-                local arr = "HL_FEAT_" .. hook
-                reg[#reg + 1] = "static const " .. g.type .. " *const " .. arr
-                                .. "[] = { " .. table.concat(addrs, ", ") .. " };"
-                reg[#reg + 1] = "const " .. g.type .. " *const *" .. hook .. "(size_t *count) {"
-                reg[#reg + 1] = "    if (count) *count = " .. #g.backends .. ";"
-                reg[#reg + 1] = "    return " .. arr .. ";"
-                reg[#reg + 1] = "}"
-            end
-            reg[#reg + 1] = ""
-            write_file(tmpdir .. "/feature_registry.c", table.concat(reg, "\n"))
-            if not tool.compiler.compile(tmpdir .. "/feature_registry.c",
-                                         tmpdir .. "/feature_registry.o", nil) then
-                tool.stderr("hull build: compilation failed (feature_registry.c)\n")
-                tool.rmdir(tmpdir); tool.exit(1)
-            end
-            feature_objs[#feature_objs + 1] = tmpdir .. "/feature_registry.o"
-        end
-    end
-
-    -- Every produced app needs STRONG hl_stdlib_feature_entries() +
-    -- hl_runtime_feature_factories() for its one runtime (see
-    -- fcompose.gen_app_registry_c for the full why). The base defaults are weak
-    -- and win first from the archive, leaving the app with an empty stdlib and
-    -- no runtime; this generated object overrides both. The registry codegen +
-    -- the archive-resolution ladder + the whole-archive link fragment are shared
-    -- with `hull eject` via hull.feature_compose so the two paths cannot drift.
-    do
-        local app_rt = fcompose.detect_app_rt(opts.app_dir)
-        -- Cosmo has a DUAL base (both runtimes + the toolchain registry embedded
-        -- in the fat APE); a cosmo app must NOT get an app_feature_registry (it
-        -- would duplicate the base's strong hooks) and does not compose a runtime
-        -- archive (features are native-only). Native has a runtime-less base and
-        -- composes exactly one runtime here.
-        if app_rt and not is_cosmo then
-            -- Reduced-flavor x composed-runtime (issue #114, Phase D). The only
-            -- flavors are `full` (HTTP on) and `pure-compute` (HTTP off), both
-            -- fully supported here: a pure-compute app declares no HTTP module,
-            -- so needs_http (below) is false and only the pure runtime is
-            -- composed onto the Keel-free base (the runtime's few web-symbol
-            -- references resolve to the base http_weakstub no-ops). An unknown
-            -- flavor is already rejected upstream at flavor validation.
-
-            -- Does this app need HTTP? (issue #114, Phase C2.) The route/ws/sse
-            -- decorations (app.get/…) only exist when an HTTP module is declared,
-            -- so a serving app always trips an HTTP cap in the resolver. When it
-            -- needs none (a pure app.main CLI / compute tool) skip composing the
-            -- http core + the per-runtime web bindings: the pure runtime's few
-            -- web-symbol refs are then satisfied by the base http_weakstub no-ops.
-            -- Fail safe: if resolution is unavailable, compose HTTP (never
-            -- under-compose and silently break serving).
-            local needs_http = true
-            -- needs_wasm two-signal gate (docs/wasm_feature.md, Phase 2):
-            --   S2 = the app ships compute/*.wasm (catches a WASM-backed db.udf
-            --        that declares no compute module — invisible to the resolver);
-            --   S1 = a declared WASM cap (hull/compute), from modules_resolve.
-            -- Compose the wasm feature iff either fires; a genuinely compute-free
-            -- app then links zero WAMR (~256 KB smaller).
-            local needs_wasm = (#compute_files > 0)
-            -- needs_sqlite (Phase C.2b): the app uses a udf-capable DB, so compose
-            -- the per-runtime SQLite UDF bridge (mod_db_udf), which the base runtime
-            -- archive no longer carries. SQLite is guaranteed reachable here (in the
-            -- base, or composed as the engine feature by the Phase C block above),
-            -- so the bridge's sqlite3_* references always resolve.
-            local needs_sqlite = false
-            -- needs_image (docs/image_feature.md): the app declares hull/image, so
-            -- compose the image codec core + the per-runtime image bridge, which the
-            -- native base no longer carries. Cleanly module-inferable (the resolver's
-            -- HL_MOD_CAP_IMAGE); a genuinely image-free app links zero stb (~146 KB
-            -- smaller).
-            local needs_image = false
-            -- needs_tls (docs/tls_feature.md, a2): the app implies the TLS stack
-            -- (HTTP -> https fetch / TLS serving / smtp; a net-DB sslmode). Compose
-            -- libhull_feature-tls.a (mbedTLS + the crypto/tls backends) which a
-            -- TLS-less base no longer carries; a plaintext app links zero mbedTLS.
-            local needs_tls = false
-            do
-                local mf = extract_app_manifest(opts.app_dir)
-                if mf then
-                    local r = tool.modules_resolve(mf, opts.flavor, with_feature_list(opts))
-                    if r.ok and r.needs_http ~= nil then needs_http = r.needs_http end
-                    if r.ok and r.needs_wasm then needs_wasm = true end
-                    if r.ok and r.needs_sqlite then needs_sqlite = true end
-                    if r.ok and r.needs_image then needs_image = true end
-                    if r.ok and r.needs_tls then needs_tls = true end
-                end
-            end
-            -- OR in the network-DB signal (the piece tool_orchestration.c's
-            -- needs_tls left to build time): the postgres/mysql wire backends link
-            -- the shared tls_client (which the a2 TLS feature now owns) for
-            -- sslmode, so composing either onto a TLS-less base needs the TLS
-            -- feature too -- regardless of the DSN's sslmode, since the archive's
-            -- tls_client refs must resolve. These are explicit --with=/inferred
-            -- (opts.with), the same signal the backend features compose on.
-            if opts.with and (opts.with.postgres or opts.with.mysql) then
-                needs_tls = true
-            end
-
-            write_file(tmpdir .. "/app_feature_registry.c",
-                       fcompose.gen_app_registry_c(app_rt))
-            if not tool.compiler.compile(tmpdir .. "/app_feature_registry.c",
-                                         tmpdir .. "/app_feature_registry.o", nil) then
-                tool.stderr("hull build: compilation failed (app_feature_registry.c)\n")
-                tool.rmdir(tmpdir); tool.exit(1)
-            end
-            feature_objs[#feature_objs + 1] = tmpdir .. "/app_feature_registry.o"
-
-            -- Compose the runtime. The base platform lib is RUNTIME-LESS, so the
-            -- app must link exactly one runtime archive (libhull_feature-<rt>.a)
-            -- to be runnable. Auto-inferred from the entry extension. Whole-
-            -- archive so the entire runtime + its embedded stdlib + vendored VM
-            -- are pulled (like the tui feature), not merely what the registry's
-            -- factory reference reaches. The runtime references base symbols
-            -- (crypto/vfs/...) resolved from the platform lib, so the GNU-ld link
-            -- must --start-group them.
-            local rt_lib  = "libhull_feature-" .. app_rt .. ".a"
-            local rt_plat = tool.platform_name and tool.platform_name() or nil
-            local rt_hull_dir = ""
-            if __hull_exe then rt_hull_dir = __hull_exe:match("(.*/)") or "" end
-            local rt_path, rt_from = fcompose.resolve_runtime_lib(app_rt, tmpdir,
-                                     { hull_dir = rt_hull_dir, plat = rt_plat })
-            if not rt_path then
-                if rt_from == "cache-verify-failed" then
-                    tool.stderr("hull build: cached " .. app_rt
-                        .. " runtime lib could not be re-verified\n")
-                else
-                    tool.stderr("hull build: the '" .. app_rt .. "' runtime feature lib "
-                        .. "was not found (the runtime is normally embedded in hull)\n")
-                    tool.stderr("hint: build it from source with `make feature-"
-                        .. app_rt .. "`\n")
-                end
-                tool.rmdir(tmpdir); tool.exit(1)
-            end
-            local rt_dest = tmpdir .. "/" .. rt_lib
-            if rt_path ~= rt_dest then tool.copy(rt_path, rt_dest) end  -- already there if extracted
-            -- The runtime archive ships INSIDE hull -> platform domain.
-            record_composed("libhull_feature-" .. app_rt .. "."
-                            .. (rt_plat or "") .. ".a", rt_dest, "platform")
-            needs_base_group = true  -- runtime refs base symbols; GNU ld needs the group
-            local is_darwin = rt_plat and rt_plat:sub(1, 6) == "darwin"
-            for _, f in ipairs(fcompose.whole_archive_flags(rt_dest, is_darwin)) do
-                feature_libs[#feature_libs + 1] = f
-            end
-            print("hull build: composed runtime '" .. app_rt .. "'")
-
-            -- Compose the WASM feature (docs/wasm_feature.md, Phase 2). The native
-            -- base is compute-less: the wasm caps + WAMR live in
-            -- libhull_feature-wasm.a and the compute.* binding (mod_compute) in
-            -- libhull_feature-wasm-<rt>.a. Composed only when needs_wasm (S1 or S2,
-            -- above); a genuinely compute-free app links zero WAMR. Whole-archive
-            -- both inside the --start-group.
-            if needs_wasm then
-            local wasm_lib = "libhull_feature-wasm.a"
-            local wasm_path, wasm_from = fcompose.resolve_wasm_lib(tmpdir,
-                                         { hull_dir = rt_hull_dir, plat = rt_plat })
-            if not wasm_path then
-                tool.stderr("hull build: the WASM feature lib (libhull_feature-wasm.a) "
-                    .. "was not found "
-                    .. (wasm_from == "cache-verify-failed"
-                        and "(cache re-verify failed)\n" or "(normally embedded in hull)\n"))
-                tool.stderr("hint: build it from source with `make feature-wasm`\n")
-                tool.rmdir(tmpdir); tool.exit(1)
-            end
-            local wasm_dest = tmpdir .. "/" .. wasm_lib
-            if wasm_path ~= wasm_dest then tool.copy(wasm_path, wasm_dest) end
-            record_composed("libhull_feature-wasm." .. (rt_plat or "") .. ".a",
-                            wasm_dest, "platform")
-            for _, f in ipairs(fcompose.whole_archive_flags(wasm_dest, is_darwin)) do
-                feature_libs[#feature_libs + 1] = f
-            end
-
-            local wasmrt_lib = "libhull_feature-wasm-" .. app_rt .. ".a"
-            local wasmrt_path, wasmrt_from = fcompose.resolve_wasm_rt_lib(app_rt, tmpdir,
-                                             { hull_dir = rt_hull_dir, plat = rt_plat })
-            if not wasmrt_path then
-                tool.stderr("hull build: the compute-bindings feature lib (" .. wasmrt_lib
-                    .. ") was not found "
-                    .. (wasmrt_from == "cache-verify-failed"
-                        and "(cache re-verify failed)\n" or "(normally embedded in hull)\n"))
-                tool.rmdir(tmpdir); tool.exit(1)
-            end
-            local wasmrt_dest = tmpdir .. "/" .. wasmrt_lib
-            if wasmrt_path ~= wasmrt_dest then tool.copy(wasmrt_path, wasmrt_dest) end
-            record_composed("libhull_feature-wasm-" .. app_rt .. "."
-                            .. (rt_plat or "") .. ".a", wasmrt_dest, "platform")
-            for _, f in ipairs(fcompose.whole_archive_flags(wasmrt_dest, is_darwin)) do
-                feature_libs[#feature_libs + 1] = f
-            end
-            print("hull build: composed WASM feature + compute bridge '" .. app_rt .. "'")
-            else
-                print("hull build: compute-free app (no hull/compute, no "
-                    .. "compute/*.wasm) - skipped the WASM feature (~256 KB smaller)")
-            end
-
-            -- Compose the per-runtime SQLite UDF bridge (Phase C.2b). The runtime
-            -- archive is SQLite-free; the db.udf bindings (mod_db_udf, the sole
-            -- per-runtime sqlite3_* consumer) live in libhull_feature-sqlite-<rt>.a
-            -- and compose only when the app uses a udf-capable DB. A db-free app
-            -- composes neither this nor the engine, so it links zero SQLite.
-            if needs_sqlite then
-            local sqrt_lib = "libhull_feature-sqlite-" .. app_rt .. ".a"
-            local sqrt_path, sqrt_from = fcompose.resolve_sqlite_rt_lib(app_rt, tmpdir,
-                                         { hull_dir = rt_hull_dir, plat = rt_plat })
-            if not sqrt_path then
-                tool.stderr("hull build: the SQLite udf-bridge feature lib (" .. sqrt_lib
-                    .. ") was not found "
-                    .. (sqrt_from == "cache-verify-failed"
-                        and "(cache re-verify failed)\n" or "(normally embedded in hull)\n"))
-                tool.rmdir(tmpdir); tool.exit(1)
-            end
-            local sqrt_dest = tmpdir .. "/" .. sqrt_lib
-            if sqrt_path ~= sqrt_dest then tool.copy(sqrt_path, sqrt_dest) end
-            record_composed("libhull_feature-sqlite-" .. app_rt .. "."
-                            .. (rt_plat or "") .. ".a", sqrt_dest, "platform")
-            for _, f in ipairs(fcompose.whole_archive_flags(sqrt_dest, is_darwin)) do
-                feature_libs[#feature_libs + 1] = f
-            end
-            print("hull build: composed SQLite udf bridge '" .. app_rt .. "'")
-            end
-
-            -- Compose the IMAGE feature (docs/image_feature.md). The native base is
-            -- image-less: the codec caps + vendored stb live in
-            -- libhull_feature-image.a and the image.* binding (mod_image) in
-            -- libhull_feature-image-<rt>.a. Composed only when needs_image (the app
-            -- declared hull/image); a genuinely image-free app links zero stb
-            -- (~146 KB smaller). Whole-archive both inside the --start-group.
-            if needs_image then
-            local img_lib = "libhull_feature-image.a"
-            local img_path, img_from = fcompose.resolve_image_lib(tmpdir,
-                                       { hull_dir = rt_hull_dir, plat = rt_plat })
-            if not img_path then
-                tool.stderr("hull build: the image feature lib (libhull_feature-image.a) "
-                    .. "was not found "
-                    .. (img_from == "cache-verify-failed"
-                        and "(cache re-verify failed)\n" or "(normally embedded in hull)\n"))
-                tool.stderr("hint: build it from source with `make feature-image`\n")
-                tool.rmdir(tmpdir); tool.exit(1)
-            end
-            local img_dest = tmpdir .. "/" .. img_lib
-            if img_path ~= img_dest then tool.copy(img_path, img_dest) end
-            record_composed("libhull_feature-image." .. (rt_plat or "") .. ".a",
-                            img_dest, "platform")
-            for _, f in ipairs(fcompose.whole_archive_flags(img_dest, is_darwin)) do
-                feature_libs[#feature_libs + 1] = f
-            end
-
-            local imgrt_lib = "libhull_feature-image-" .. app_rt .. ".a"
-            local imgrt_path, imgrt_from = fcompose.resolve_image_rt_lib(app_rt, tmpdir,
-                                           { hull_dir = rt_hull_dir, plat = rt_plat })
-            if not imgrt_path then
-                tool.stderr("hull build: the image-bindings feature lib (" .. imgrt_lib
-                    .. ") was not found "
-                    .. (imgrt_from == "cache-verify-failed"
-                        and "(cache re-verify failed)\n" or "(normally embedded in hull)\n"))
-                tool.rmdir(tmpdir); tool.exit(1)
-            end
-            local imgrt_dest = tmpdir .. "/" .. imgrt_lib
-            if imgrt_path ~= imgrt_dest then tool.copy(imgrt_path, imgrt_dest) end
-            record_composed("libhull_feature-image-" .. app_rt .. "."
-                            .. (rt_plat or "") .. ".a", imgrt_dest, "platform")
-            for _, f in ipairs(fcompose.whole_archive_flags(imgrt_dest, is_darwin)) do
-                feature_libs[#feature_libs + 1] = f
-            end
-            print("hull build: composed image feature + image bridge '" .. app_rt .. "'")
-            end
-
-            -- Compose the TLS feature (docs/tls_feature.md, a2). A tls-less base
-            -- (HL_TLS_FEATURE=1) drops mbedTLS + the crypto/tls backends; compose
-            -- libhull_feature-tls.a back when the app needs TLS AND the base is
-            -- actually tls-less. Probe the base: a TLS-full base defines
-            -- mbedtls_ssl_handshake, a tls-less one does not -- gate on its ABSENCE
-            -- so this is a no-op (byte-identical) on a stock TLS-full base. Whole-
-            -- archive inside the --start-group (the archive refs base crypto/vfs +
-            -- Keel's tls_mbedtls.o).
-            if needs_tls then
-            local base_has_tls = true
-            local tls_nm = tool.spawn_read({ "nm", platform_lib })
-            if tls_nm and not tls_nm:find("mbedtls_ssl_handshake") then
-                base_has_tls = false
-            end
-            if not base_has_tls then
-                local tls_lib = "libhull_feature-tls.a"
-                local tls_path, tls_from = fcompose.resolve_tls_lib(tmpdir,
-                                           { hull_dir = rt_hull_dir, plat = rt_plat })
-                if not tls_path then
-                    tool.stderr("hull build: the TLS feature lib (libhull_feature-tls.a) "
-                        .. "was not found "
-                        .. (tls_from == "cache-verify-failed"
-                            and "(cache re-verify failed)\n" or "(normally embedded in hull)\n"))
-                    tool.stderr("hint: build it from source with `make feature-tls`\n")
-                    tool.rmdir(tmpdir); tool.exit(1)
-                end
-                local tls_dest = tmpdir .. "/" .. tls_lib
-                if tls_path ~= tls_dest then tool.copy(tls_path, tls_dest) end
-                record_composed("libhull_feature-tls." .. (rt_plat or "") .. ".a",
-                                tls_dest, "platform")
-                needs_base_group = true  -- tls archive refs base + Keel symbols
-                for _, f in ipairs(fcompose.whole_archive_flags(tls_dest, is_darwin)) do
-                    feature_libs[#feature_libs + 1] = f
-                end
-                print("hull build: composed TLS feature (tls-less base + app needs TLS)")
-            end
-            end
-
-            if needs_http then
-            -- Compose the HTTP feature (issue #114, Phase B). The native base is
-            -- HTTP-CORE-LESS: serve.c + the runtime's web-module bindings
-            -- reference the http/ws/smtp/body caps, which now live in
-            -- libhull_feature-http.a. Whole-archive it inside the --start-group
-            -- (the caps reference Keel + base symbols, and the runtime's web
-            -- bindings reference the caps). Composed for every full-flavor native
-            -- app for now; a reduced flavor fails closed earlier, and skipping it
-            -- for a genuinely HTTP-free app is a later refinement.
-            local http_lib = "libhull_feature-http.a"
-            local http_path, http_from = fcompose.resolve_http_lib(tmpdir,
-                                         { hull_dir = rt_hull_dir, plat = rt_plat })
-            if not http_path then
-                if http_from == "cache-verify-failed" then
-                    tool.stderr("hull build: cached HTTP feature lib could not be re-verified\n")
-                else
-                    tool.stderr("hull build: the HTTP feature lib "
-                        .. "(libhull_feature-http.a) was not found "
-                        .. "(normally embedded in hull)\n")
-                    tool.stderr("hint: build it from source with `make feature-http`\n")
-                end
-                tool.rmdir(tmpdir); tool.exit(1)
-            end
-            local http_dest = tmpdir .. "/" .. http_lib
-            if http_path ~= http_dest then tool.copy(http_path, http_dest) end
-            -- The HTTP core archive ships INSIDE hull -> platform domain.
-            record_composed("libhull_feature-http." .. (rt_plat or "") .. ".a",
-                            http_dest, "platform")
-            for _, f in ipairs(fcompose.whole_archive_flags(http_dest, is_darwin)) do
-                feature_libs[#feature_libs + 1] = f
-            end
-            print("hull build: composed HTTP feature")
-
-            -- Compose the Keel event loop (docs/keel_feature.md, Phase 4.2b) when
-            -- the base is Keel-less. Sentinel: hl_async_backend_keel (async_keel.o's
-            -- vtable) is fully ABSENT from a Keel-less base (HL_KEEL_FEATURE=1 drops
-            -- async/keel.c) and present in a Keel-full base. It is a cleaner probe
-            -- than hull_serve, which serve_cli.o defines WEAK -- and macOS plain `nm`
-            -- prints a weak def as `T`, indistinguishable from a strong one. When the
-            -- sentinel is absent, compose libhull_feature-keel.a (serve.o + async_keel
-            -- + net_keel + the server-only static/agent/test objects); a full base,
-            -- which already carries them, never double-composes (no duplicate
-            -- hull_serve). The composed serve.o's kl_* refs pull libkeel from the base
-            -- .a on demand.
-            -- Default to "present" (skip compose), flipping to compose only on a
-            -- CONFIRMED nm result lacking the sentinel -- mirrors the sqlite/tls
-            -- probes. If nm is absent or errors (serve_nm == nil), skipping is the
-            -- safe no-op for the common Keel-FULL base: composing there would
-            -- duplicate serve.o's strong hull_serve / hl_async_backend and fail the
-            -- link. The Keel-less release base is only built where nm exists.
-            local base_has_keel = true
-            local serve_nm = tool.spawn_read({ "nm", platform_lib })
-            if serve_nm and not serve_nm:find("hl_async_backend_keel") then
-                base_has_keel = false
-            end
-            if not base_has_keel then
-                local keel_lib = "libhull_feature-keel.a"
-                local keel_path, keel_from = fcompose.resolve_keel_lib(tmpdir,
-                                             { hull_dir = rt_hull_dir, plat = rt_plat })
-                if not keel_path then
-                    tool.stderr("hull build: the Keel feature lib "
-                        .. "(libhull_feature-keel.a) was not found "
-                        .. (keel_from == "cache-verify-failed"
-                            and "(cache re-verify failed)\n" or "(normally embedded in hull)\n"))
-                    tool.stderr("hint: build it from source with `make feature-keel`\n")
-                    tool.rmdir(tmpdir); tool.exit(1)
-                end
-                local keel_dest = tmpdir .. "/" .. keel_lib
-                if keel_path ~= keel_dest then tool.copy(keel_path, keel_dest) end
-                record_composed("libhull_feature-keel." .. (rt_plat or "") .. ".a",
-                                keel_dest, "platform")
-                needs_base_group = true  -- keel archive refs base + libkeel symbols
-                for _, f in ipairs(fcompose.whole_archive_flags(keel_dest, is_darwin)) do
-                    feature_libs[#feature_libs + 1] = f
-                end
-                print("hull build: composed Keel event loop (Keel-less base)")
-            end
-
-            -- Phase C: the per-runtime web bindings (routes/dispatch/res:*/ws/sse/
-            -- http-client/smtp) live in libhull_feature-http-<rt>.a, not the pure
-            -- runtime archive. Whole-archive it too (its strong defs override the
-            -- base http_weakstub no-ops; it references the http core caps + Keel,
-            -- all inside the --start-group).
-            local httprt_lib = "libhull_feature-http-" .. app_rt .. ".a"
-            local httprt_path, httprt_from = fcompose.resolve_http_rt_lib(app_rt, tmpdir,
-                                             { hull_dir = rt_hull_dir, plat = rt_plat })
-            if not httprt_path then
-                if httprt_from == "cache-verify-failed" then
-                    tool.stderr("hull build: cached web-bindings lib (" .. httprt_lib
-                        .. ") could not be re-verified\n")
-                else
-                    tool.stderr("hull build: the web-bindings feature lib "
-                        .. "(" .. httprt_lib .. ") was not found "
-                        .. "(normally embedded in hull)\n")
-                    tool.stderr("hint: build it from source with `make feature-http-"
-                        .. app_rt .. "`\n")
-                end
-                tool.rmdir(tmpdir); tool.exit(1)
-            end
-            local httprt_dest = tmpdir .. "/" .. httprt_lib
-            if httprt_path ~= httprt_dest then tool.copy(httprt_path, httprt_dest) end
-            -- The per-runtime web bindings ship INSIDE hull -> platform domain.
-            record_composed("libhull_feature-http-" .. app_rt .. "."
-                            .. (rt_plat or "") .. ".a", httprt_dest, "platform")
-            for _, f in ipairs(fcompose.whole_archive_flags(httprt_dest, is_darwin)) do
-                feature_libs[#feature_libs + 1] = f
-            end
-            print("hull build: composed web bindings '" .. app_rt .. "'")
-            else
-                print("hull build: HTTP-free app (app.main, no HTTP modules) - "
-                    .. "skipped http core + web bindings")
-            end
-        end
-    end
+    -- Compose features (--with / inferred): see compose_features() above.
+    local feature_objs, feature_libs, needs_base_group, composed_assets =
+        compose_features(opts, tmpdir, platform_lib, is_cosmo, compute_files)
 
     -- Link
     print("hull build: linking...")
