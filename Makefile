@@ -3021,22 +3021,8 @@ $(BUILDDIR)/libhull_feature-tui-js.a: $(BUILDDIR)/js_mod_tui.o | $(BUILDDIR)
 	$(call AR_FEATURE_LIB,$(BUILDDIR)/js_mod_tui.o)
 
 
-# libhull_feature-keel.a: the Keel EVENT LOOP as a composable feature
-# (docs/keel_feature.md, Phase 4.2b). The event-loop objects a Keel-less base
-# (HL_KEEL_FEATURE=1) drops -- serve.o (the KlServer serve loop + strong
-# hull_serve), async_keel.o (strong hl_async_backend), net_keel.o (strong
-# hl_net_op_*), plus the server-only hull_static.o / agent_api.o / test_runner.o.
-# Composed (whole-archived) at `hull build` on needs_http, but ONLY onto a
-# Keel-less base (build.lua nm-probes for an ABSENT strong hull_serve, so a full
-# base -- which already carries these -- never double-composes them). Built from
-# the default (HTTP_SERVER=1, HL_KEEL_FEATURE=0) objects, i.e. the real server.
-FEATURE_KEEL_OBJS := $(BUILDDIR)/serve.o $(BUILDDIR)/async_keel.o \
-                     $(BUILDDIR)/net_keel.o $(BUILDDIR)/hull_static.o \
-                     $(BUILDDIR)/agent_api.o $(BUILDDIR)/test_runner.o
-feature-keel: $(BUILDDIR)/libhull_feature-keel.a
-.PHONY: feature-keel
-$(BUILDDIR)/libhull_feature-keel.a: $(FEATURE_KEEL_OBJS) | $(BUILDDIR)
-	$(call AR_FEATURE_LIB,$(FEATURE_KEEL_OBJS))
+# Keel event-loop feature (archive + SLIM-base embed) moved to mk/features/keel.mk
+include mk/features/keel.mk
 
 
 # Per-runtime SQLite UDF bridges (mod_db_udf). Tiny (one object each); the sole
@@ -3286,19 +3272,6 @@ $(BUILD_ASSET_OBJ): $(EMBEDDED_PLATFORM_H) $(EMBEDDED_TEMPLATES_H) $(EMBEDDED_RU
 
 
 
-# Keel feature archive embed (Phase 4.2b): keel is folded into the SLIM base, so
-# when the app-build base is SLIM (SQLITELESS + TLSLESS both set) it is also
-# Keel-less -- embed libhull_feature-keel.a (serve.o + async_keel + net_keel +
-# the server-only static/agent/test objects) so an http app auto-composes the
-# Keel event loop with no `hull feature install`. Only pulled for the SLIM base.
-ifeq ($(HL_APP_BASE_SQLITELESS)$(HL_APP_BASE_TLSLESS),11)
-EMBEDDED_KEEL_H := $(BUILDDIR)/embedded_keel.h
-$(EMBEDDED_KEEL_H): $(BUILDDIR)/libhull_feature-keel.a | $(BUILDDIR)
-	@echo "/* Auto-generated - do not edit */" > $@
-	@xxd -i $(BUILDDIR)/libhull_feature-keel.a | sed 's/build_libhull_feature_keel_a/hl_embedded_feature_keel_a/g' | $(XXD_CONST_PIPE) >> $@
-CFLAGS += -DHL_BUILD_EMBEDDED_KEEL
-$(BUILD_ASSET_OBJ): $(EMBEDDED_KEEL_H)
-endif
 endif
 
 # Hull binary
