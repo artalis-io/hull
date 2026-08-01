@@ -1755,6 +1755,16 @@ int main(int argc, char **argv) { return hl_app_run(argc, argv); }
                     if r.ok and r.needs_tls then needs_tls = true end
                 end
             end
+            -- OR in the network-DB signal (the piece tool_orchestration.c's
+            -- needs_tls left to build time): the postgres/mysql wire backends link
+            -- the shared tls_client (which the a2 TLS feature now owns) for
+            -- sslmode, so composing either onto a TLS-less base needs the TLS
+            -- feature too -- regardless of the DSN's sslmode, since the archive's
+            -- tls_client refs must resolve. These are explicit --with=/inferred
+            -- (opts.with), the same signal the backend features compose on.
+            if opts.with and (opts.with.postgres or opts.with.mysql) then
+                needs_tls = true
+            end
 
             write_file(tmpdir .. "/app_feature_registry.c",
                        fcompose.gen_app_registry_c(app_rt))
