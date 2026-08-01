@@ -36,15 +36,9 @@ feature-sqlite:
 $(BUILDDIR)/libhull_feature-sqlite.a: $(FEATURE_SQLITE_OBJS) | $(BUILDDIR)
 	$(call AR_FEATURE_LIB,$(FEATURE_SQLITE_OBJS))
 
-feature-sqlite-lua: $(BUILDDIR)/libhull_feature-sqlite-lua.a
-.PHONY: feature-sqlite-lua
-$(BUILDDIR)/libhull_feature-sqlite-lua.a: $(BUILDDIR)/lua_rt_mod_db_udf.o | $(BUILDDIR)
-	$(call AR_FEATURE_LIB,$(BUILDDIR)/lua_rt_mod_db_udf.o)
+$(eval $(call define-feature-archive,sqlite-lua,$(BUILDDIR)/lua_rt_mod_db_udf.o))
 
-feature-sqlite-js: $(BUILDDIR)/libhull_feature-sqlite-js.a
-.PHONY: feature-sqlite-js
-$(BUILDDIR)/libhull_feature-sqlite-js.a: $(BUILDDIR)/js_mod_db_udf.o | $(BUILDDIR)
-	$(call AR_FEATURE_LIB,$(BUILDDIR)/js_mod_db_udf.o)
+$(eval $(call define-feature-archive,sqlite-js,$(BUILDDIR)/js_mod_db_udf.o))
 
 # Embed the per-runtime SQLite UDF bridges too (Phase C.2b). The runtime archive
 # is SQLite-free; the default distributed hull composes the app's runtime bridge

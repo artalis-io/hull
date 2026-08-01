@@ -28,10 +28,7 @@ $(BUILDDIR)/keel_tls_mbedtls.o: $(KEEL_LIB) | $(BUILDDIR)
 FEATURE_TLS_OBJS := $(BUILDDIR)/cap_crypto_hmac_mbedtls.o $(BUILDDIR)/cap_crypto_asym_mbedtls.o \
                     $(BUILDDIR)/tls_client.o $(BUILDDIR)/tls_transport.o \
                     $(BUILDDIR)/keel_tls_mbedtls.o $(MBEDTLS_OBJS)
-feature-tls: $(BUILDDIR)/libhull_feature-tls.a
-.PHONY: feature-tls
-$(BUILDDIR)/libhull_feature-tls.a: $(FEATURE_TLS_OBJS) | $(BUILDDIR)
-	$(call AR_FEATURE_LIB,$(FEATURE_TLS_OBJS))
+$(eval $(call define-feature-archive,tls,$(FEATURE_TLS_OBJS)))
 
 # TLS feature archive embed (a2, HL_APP_BASE_TLSLESS=1): when the app-build base
 # is TLS-less, embed libhull_feature-tls.a (mbedTLS + the crypto/tls TUs) so an

@@ -23,10 +23,7 @@
 FEATURE_KEEL_OBJS := $(BUILDDIR)/serve.o $(BUILDDIR)/async_keel.o \
                      $(BUILDDIR)/net_keel.o $(BUILDDIR)/hull_static.o \
                      $(BUILDDIR)/agent_api.o $(BUILDDIR)/test_runner.o
-feature-keel: $(BUILDDIR)/libhull_feature-keel.a
-.PHONY: feature-keel
-$(BUILDDIR)/libhull_feature-keel.a: $(FEATURE_KEEL_OBJS) | $(BUILDDIR)
-	$(call AR_FEATURE_LIB,$(FEATURE_KEEL_OBJS))
+$(eval $(call define-feature-archive,keel,$(FEATURE_KEEL_OBJS)))
 
 # Keel feature archive embed (Phase 4.2b): keel is folded into the SLIM base, so
 # when the app-build base is SLIM (SQLITELESS + TLSLESS both set) it is also

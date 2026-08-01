@@ -35,10 +35,7 @@ FEATURE_HTTP_OBJS := $(BUILDDIR)/cap_http.o $(BUILDDIR)/cap_http_async.o \
 # (FEATURE_HTTP_OBJS is defined earlier, above PLATFORM_OBJS, so the native app
 # base filters these caps out; the archive below and the base share one list.)
 
-feature-http: $(BUILDDIR)/libhull_feature-http.a
-.PHONY: feature-http
-$(BUILDDIR)/libhull_feature-http.a: $(FEATURE_HTTP_OBJS) | $(BUILDDIR)
-	$(call AR_FEATURE_LIB,$(FEATURE_HTTP_OBJS))
+$(eval $(call define-feature-archive,http,$(FEATURE_HTTP_OBJS)))
 
 # Per-runtime web bindings (issue #114, Phase C). This is the same set the
 # HL_ENABLE_HTTP_SERVER=0 + HL_ENABLE_HTTP_CLIENT=0 source filters enumerate -
@@ -53,15 +50,9 @@ FEATURE_HTTP_LUA_OBJS := $(addprefix $(BUILDDIR)/lua_rt_,$(addsuffix .o,$(FEATUR
 FEATURE_HTTP_JS_OBJS  := $(addprefix $(BUILDDIR)/js_,$(addsuffix .o,$(FEATURE_HTTP_RT_NAMES)))
 
 # Per-runtime web-bindings feature archives (issue #114, Phase C).
-feature-http-lua: $(BUILDDIR)/libhull_feature-http-lua.a
-.PHONY: feature-http-lua
-$(BUILDDIR)/libhull_feature-http-lua.a: $(FEATURE_HTTP_LUA_OBJS) | $(BUILDDIR)
-	$(call AR_FEATURE_LIB,$(FEATURE_HTTP_LUA_OBJS))
+$(eval $(call define-feature-archive,http-lua,$(FEATURE_HTTP_LUA_OBJS)))
 
-feature-http-js: $(BUILDDIR)/libhull_feature-http-js.a
-.PHONY: feature-http-js
-$(BUILDDIR)/libhull_feature-http-js.a: $(FEATURE_HTTP_JS_OBJS) | $(BUILDDIR)
-	$(call AR_FEATURE_LIB,$(FEATURE_HTTP_JS_OBJS))
+$(eval $(call define-feature-archive,http-js,$(FEATURE_HTTP_JS_OBJS)))
 
 # Embed the HTTP core feature archive too (issue #114). The native base is
 # HTTP-core-less; the default distributed hull composes this back for every

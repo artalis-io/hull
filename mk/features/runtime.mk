@@ -27,15 +27,9 @@ FEATURE_LUA_OBJS := $(filter-out $(BUILDDIR)/lua_rt_mod_tui.o $(BUILDDIR)/lua_rt
 FEATURE_JS_OBJS  := $(filter-out $(BUILDDIR)/js_mod_tui.o $(BUILDDIR)/js_mod_compute.o $(BUILDDIR)/js_mod_db_udf.o $(BUILDDIR)/js_mod_image.o $(FEATURE_HTTP_JS_OBJS),$(JS_RT_OBJS)) \
                     $(QJS_OBJS) $(BUILDDIR)/manifest_js.o $(STDLIB_JS_REGISTRY_O)
 
-feature-lua: $(BUILDDIR)/libhull_feature-lua.a
-.PHONY: feature-lua
-$(BUILDDIR)/libhull_feature-lua.a: $(FEATURE_LUA_OBJS) | $(BUILDDIR)
-	$(call AR_FEATURE_LIB,$(FEATURE_LUA_OBJS))
+$(eval $(call define-feature-archive,lua,$(FEATURE_LUA_OBJS)))
 
-feature-js: $(BUILDDIR)/libhull_feature-js.a
-.PHONY: feature-js
-$(BUILDDIR)/libhull_feature-js.a: $(FEATURE_JS_OBJS) | $(BUILDDIR)
-	$(call AR_FEATURE_LIB,$(FEATURE_JS_OBJS))
+$(eval $(call define-feature-archive,js,$(FEATURE_JS_OBJS)))
 
 # Embed both runtime feature archives so the runtime-less native base composes
 # one at build time with no `hull feature install` (the runtime is mandatory).
