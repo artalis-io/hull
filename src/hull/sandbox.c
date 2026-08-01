@@ -29,7 +29,6 @@
 #include <strings.h>   /* strncasecmp (DSN scheme match) */
 #include <sys/stat.h>
 #include <sys/types.h>
-#include <unistd.h>    /* isatty / STDIN_FILENO (tty-promise probe below) */
 
 /* Buffer size for cross-platform path resolution. Big enough to
  * hold any realpath() output (PATH_MAX-bound) and any reasonable
@@ -897,19 +896,10 @@ int hl_sandbox_apply(const HlSandboxPolicy *policy, const char *app_dir,
         if (n > 0) plen += n;
     }
     /* `tty` covers tcsetattr / tcgetattr / TIOCGWINSZ / ioctl on the
-     * controlling terminal. Required for TUI's raw-mode toggle and size
-     * queries, AND for the buffering probe glibc stdio runs on first use
-     * of a terminal-connected fd: writing to stdout/stderr calls
-     * isatty(), i.e. ioctl(TCGETS), which pledge routes through `tty`.
-     * Without it a plain CLI app.main that prints to a terminal is killed
-     * by the seccomp filter (Linux) the moment it writes. We grant it when
-     * the app is a TUI OR any of stdin/stdout/stderr is an actual terminal.
-     * Piped/redirected fds (the production/server case) are not terminals,
-     * so this grants nothing extra there. The probe runs before pledge(),
-     * so the isatty() ioctls themselves are unrestricted. */
-    if (plen > 0 && (size_t)plen < sizeof(promises) &&
-        (policy->tui || isatty(STDIN_FILENO) || isatty(STDOUT_FILENO) ||
-         isatty(STDERR_FILENO))) {
+     * controlling terminal. Required for TUI's raw-mode toggle and
+     * size queries; rejected silently if the app never asks for it. */
+    if (plen > 0 && policy->tui &&
+        (size_t)plen < sizeof(promises)) {
         int n = snprintf(promises + plen, sizeof(promises) - (size_t)plen,
                          " tty");
         if (n > 0) plen += n;
