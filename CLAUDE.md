@@ -9,7 +9,7 @@ covers installation, the required-reading order through this guide, a
 forced discovery / plan / implement workflow, the widget-tier reach
 order, the anti-pattern table, and a `PLATFORM_GAPS.md` protocol for
 flagging Hull-side gaps instead of coding around them. Same file works
-for any product spec — hand the agent BOOTSTRAP.md + the spec.
+for any product spec - hand the agent BOOTSTRAP.md + the spec.
 
 The rest of THIS file is the Hull-internal development guide for
 contributors hacking on the runtime, stdlib, or build pipeline.
@@ -140,13 +140,13 @@ Hull's distribution is one binary; what's compiled into it is controlled by a sm
 |------|---------|-----------------|
 | `HL_ENABLE_LUA` | 1 | Drop the Lua 5.4 runtime; QuickJS-only build |
 | `HL_ENABLE_JS` | 1 | Drop QuickJS; Lua-only build |
-| `HL_ENABLE_WASM` | 1 | Compile-time drop of WAMR (`compute.*` unavailable, ~256 KB): base + no wasm archive. Orthogonal to the auto-composed axis — with the default `=1`, the native base is still **compute-less** and composes WASM only for apps that need it (see "Composable runtime + HTTP base"). Cosmo keeps WASM in-base. |
+| `HL_ENABLE_WASM` | 1 | Compile-time drop of WAMR (`compute.*` unavailable, ~256 KB): base + no wasm archive. Orthogonal to the auto-composed axis - with the default `=1`, the native base is still **compute-less** and composes WASM only for apps that need it (see "Composable runtime + HTTP base"). Cosmo keeps WASM in-base. |
 | `HL_ENABLE_GPU` | 0 | (Off by default.) On enables wgpu-native (`gpu.*`). Normally composed via the `gpu` **feature** (`hull build --with=gpu`) rather than set directly; see "Composable features" below. Native-only (no cosmo). |
 | `HL_ENABLE_DUCKDB` | 0 | (Off by default.) On enables the embedded DuckDB OLAP backend (`cap/db_duckdb.c` + fetched static libs via `make fetch-duckdb`). A `duckdb://` DSN selects it. Native-only (no cosmo). Normally composed via the `duckdb` **feature** (`hull build --with=duckdb`) rather than set directly; see "Composable features" below. |
-| `HL_ENABLE_TCC` | 1 Linux / 0 macOS+cosmo | Compile the tcc backend for `hull build --compiler=tcc`. tcc is **not embedded** (~400 KB lighter binary) — it's a side-loaded tool (`hull tools install tcc`), resolved at build time from `~/.hull/tools` → `dirname(hull)` → `$PATH`. Off on macOS (Mach-O) / cosmo (APE archives), where tcc's ELF output is unusable and the system compiler is used instead. |
+| `HL_ENABLE_TCC` | 1 Linux / 0 macOS+cosmo | Compile the tcc backend for `hull build --compiler=tcc`. tcc is **not embedded** (~400 KB lighter binary) - it's a side-loaded tool (`hull tools install tcc`), resolved at build time from `~/.hull/tools` → `dirname(hull)` → `$PATH`. Off on macOS (Mach-O) / cosmo (APE archives), where tcc's ELF output is unusable and the system compiler is used instead. |
 | `HL_EMBED_CA_BUNDLE` | 1 | Drop Mozilla CA bundle (~200 KB, breaks HTTPS without system store) |
 | `HL_ENABLE_SQLITE` | 1 | Drop the SQLite backend (`cap/db_sqlite.c`, `cap/db_udf.c`, vendored `sqlite3.c`). A SQLite file path or `:memory:` DSN then has no backend. |
-| `HL_ENABLE_IMAGE` | 1 | Drop the image codec subsystem (`cap/image.c`, `cap/image_stb.c`, per-runtime `mod_image`, and vendored `stb_image` — image's **sole** consumer, ~146 KB). **Two-mode knob:** at the default `=1` the base is IMAGE-LESS and auto-composes the image feature (`libhull_feature-image.a` + `-image-<rt>.a`, embedded in hull) back for apps that declare `hull/image` (the `needs_image` gate; see "Composable runtime + HTTP base"). `=0` is the subtractive path — drops image entirely (no feature to compose, like `HL_ENABLE_DB=0`). `hull/image` then fails module resolution unless declared optional (`"hull/image@1?"` → `require` returns nil). The GPU texture paths that take/return an `HlImage` (`gpu.texture(img)`, `gpu.texture_read`/`textureRead`) stay `#ifdef HL_ENABLE_IMAGE`-gated, so a `GPU=1 IMAGE=0` build keeps raw-byte textures but not the image bridge. See "Image-less builds" below and [docs/image_feature.md](docs/image_feature.md). |
+| `HL_ENABLE_IMAGE` | 1 | Drop the image codec subsystem (`cap/image.c`, `cap/image_stb.c`, per-runtime `mod_image`, and vendored `stb_image` - image's **sole** consumer, ~146 KB). **Two-mode knob:** at the default `=1` the base is IMAGE-LESS and auto-composes the image feature (`libhull_feature-image.a` + `-image-<rt>.a`, embedded in hull) back for apps that declare `hull/image` (the `needs_image` gate; see "Composable runtime + HTTP base"). `=0` is the subtractive path - drops image entirely (no feature to compose, like `HL_ENABLE_DB=0`). `hull/image` then fails module resolution unless declared optional (`"hull/image@1?"` → `require` returns nil). The GPU texture paths that take/return an `HlImage` (`gpu.texture(img)`, `gpu.texture_read`/`textureRead`) stay `#ifdef HL_ENABLE_IMAGE`-gated, so a `GPU=1 IMAGE=0` build keeps raw-byte textures but not the image bridge. See "Image-less builds" below and [docs/image_feature.md](docs/image_feature.md). |
 | `HL_ENABLE_POSTGRES` | 0 | (Off by default.) On compiles the pure-C PostgreSQL wire backend (`cap/pgwire.c` + `cap/pg_conn.c` + `cap/db_postgres.c`; no libpq) into the base. A `postgres://` / `postgresql://` DSN selects it. Links the shared TLS client (`HL_LINK_TLS`) for SSL connections. Normally composed via the `postgres` **feature** (`hull build --with=postgres`) rather than set directly; the flag is the monolithic path and what `make feature-postgres` builds the archive with. See "Composable features" above and "PostgreSQL + multi-backend DB" below. |
 | `HL_ENABLE_MYSQL` | 0 | (Off by default.) On compiles the pure-C MySQL / MariaDB wire backend (`cap/mysqlwire.c` + `cap/mysql_conn.c` + `cap/db_mysql.c`; no libmysql/libmariadb) into the base. A `mysql://` / `mariadb://` DSN selects it. Links the shared TLS client (`HL_LINK_TLS`). Normally composed via the `mysql` **feature** (`hull build --with=mysql`) rather than set directly; the flag is the monolithic path and what `make feature-mysql` builds the archive with. See "Composable features" above and "MySQL/MariaDB specifics" below. |
 | `HL_ENABLE_DB` | 1 | **Umbrella, derived** from the three granular flags: defined iff `HL_ENABLE_SQLITE`, `HL_ENABLE_POSTGRES`, or `HL_ENABLE_MYSQL` is on. Off (all granular off) drops `db.*` + `migrate.*` + worker-DB + the connection registry + DB-backed stdlib (session, ratelimit, idempotency, outbox, inbox, rbac, search). ~1.4 MB smaller. See "Compute-only builds" below. |
@@ -159,7 +159,7 @@ Combine flags freely: `make HL_ENABLE_DB=0 HL_ENABLE_WASM=1 HL_ENABLE_TCC=0` yie
 
 ### HTTP build flags
 
-The two HTTP flags (`HL_ENABLE_HTTP_SERVER` / `HL_ENABLE_HTTP_CLIENT`) are independent **internal knobs**. They drive the per-runtime web-archive split; they are NOT exposed as shippable `--flavor` presets (the shipped HTTP axis is binary: `full` vs `pure-compute` — see "Build flavors for apps" below). Each combination still produces a useful binary at the `make` level (arm64 Darwin sizes for the default invocation, i.e. DB + WASM + TUI + TCC all on):
+The two HTTP flags (`HL_ENABLE_HTTP_SERVER` / `HL_ENABLE_HTTP_CLIENT`) are independent **internal knobs**. They drive the per-runtime web-archive split; they are NOT exposed as shippable `--flavor` presets (the shipped HTTP axis is binary: `full` vs `pure-compute` - see "Build flavors for apps" below). Each combination still produces a useful binary at the `make` level (arm64 Darwin sizes for the default invocation, i.e. DB + WASM + TUI + TCC all on):
 
 | Config | Server | Client | Binary | Notes |
 |---|---|---|---|---|
@@ -178,11 +178,32 @@ The `full` (both on) and `pure-compute` (both off) configs are link-validated on
 
 The build flags above are compile-time properties of the `hull` binary. `hull build --flavor` makes the flavor a property of the **app binary you produce** instead: a full `hull` can build a narrower app.
 
-`hull build --flavor=full|pure-compute [app_dir]` links the app against the matching per-flavor platform library instead of the embedded (full) one. The HTTP axis is binary: `full` (HTTP on: server + client + Keel + mbedTLS) and `pure-compute` (no HTTP at all; drops mbedTLS + Keel; smallest). (The former `server-only` / `client-only` flavors were removed in #114: they were size-neutral vs `full` because Keel + mbedTLS stay linked whenever either HTTP half is on.) `--flavor=auto` infers the minimal flavor from the app's declared modules (via `hl_build_flavor_auto`, which picks the flavor clearing the most caps the app doesn't need). The build **validates the app manifest against the TARGET flavor's caps**: a declared module that needs a dropped subsystem (e.g. `hull/http-server` under `pure-compute`) is rejected at build time with a clear message, so a flavor choice never silently breaks at runtime. Registry + resolver live in `src/hull/module_resolver.c` (`BUILD_FLAVORS[]`, `hl_module_resolver_resolve_caps`, `hl_build_flavor_auto`); the tool-side redirect is in `stdlib/cli/lua/hull/build.lua`.
+`hull build --flavor=full|pure-compute [app_dir]`. Since **Phase 4.3** the flavor
+axis has collapsed into the composable base: every reducible subsystem (HTTP,
+TLS, Keel, SQLite, WASM, image) already drops from the distributed base and
+composes back per app, so a compute app is *already* minimal without a flavor.
+- **`full`** - the embedded default base; the only "real" base.
+- **`pure-compute`** - now a **build.lua PRESET** (empty asset in `BUILD_FLAVORS[]`),
+  **not** a pre-built per-flavor platform lib. It builds on the default composable
+  base and only **validates** that the app declares no HTTP/TLS (rejects e.g.
+  `hull/http-server` at build time with a clear message). The size win comes from
+  the base, not the flavor. `hull flavor install pure-compute` → "preset flavor,
+  nothing to install"; `hull flavor list` shows it as `preset (default base)`.
+  (The former `server-only`/`client-only` were removed in #114; the pre-built
+  `platform-pure-compute` / `platform-cosmo-pure-compute` libs + their release
+  matrix were deleted in Phase 4.3.)
 
-The per-flavor platform lib is found (in order) in the local build dirs, then `~/.hull/platform/` (where `hull flavor install <flavor>` caches it, see below), then it errors with a fix-it hint. `make platform-<flavor>` (native) / `make platform-cosmo-<flavor>` (cosmo dual-arch) build it from source; cosmo lays the pair out in the `.aarch64/` apelink layout.
+`--flavor=auto` infers the minimal flavor from the app's declared modules (via
+`hl_build_flavor_auto`). Registry + resolver: `src/hull/module_resolver.c`
+(`BUILD_FLAVORS[]` - a NON-empty asset stem still means "pre-built lib"; an EMPTY
+stem means "preset"; `hl_build_flavor_auto`); the tool-side handling is in
+`stdlib/cli/lua/hull/build.lua` (only a non-empty asset overrides the base).
+Full design: [docs/build_flavors.md](docs/build_flavors.md).
 
-**Two signature layers, and the flavor asymmetry.** Hull has (1) the **release signature** (Ed25519 release key over `hull.sha256`, plus Sigstore/cosign + SLSA) and (2) the inner **platform signature** (`embedded_platform_sig.h`, the platform-key layer of an app's `package.sig`) that a normal `hull build` cross-checks so its **embedded** platform lib is provably gethull.dev-built. The per-flavor libs are covered by the **release** signature (so `hull flavor install` verifies authenticity at fetch time), but they are **not** in the platform-sig, and `hull build --flavor` sets `verify_platform = false` (skips that cross-check). So the install-time release-signature verification is one anchor. **Build-time re-verify (closes the install-to-build TOCTOU):** `hull flavor install` also caches the signed manifest (`hull.sha256` + `.sig`) in `~/.hull/platform/`, and `hull build --flavor` re-verifies any cache-sourced lib before linking it, offline, via `hl_release_io_verify_local_asset` (exposed as `tool.platform_verify`): the manifest signature is re-checked against the **embedded** release pubkey (the trust anchor, baked into the binary, not the writable cache dir), then the lib's SHA-256 is matched to the signed manifest. A tampered cache lib, or a swapped/absent cached manifest, fails the build with a reinstall hint. A lib the developer built locally (`make platform-<flavor>`) is trusted as-is (not re-verified). Full design: [docs/build_flavors.md](docs/build_flavors.md).
+*(Historical: pre-Phase-4.3, a non-default flavor linked a signed pre-built
+per-flavor `libhull_platform-<flavor>.a` fetched via `hull flavor install`, with
+a build-time release-signature re-verify closing the install→build TOCTOU. That
+machinery still exists for any FUTURE non-preset flavor but has no user today.)*
 
 ### Composable features (`hull build --with=<name>`)
 
@@ -203,7 +224,7 @@ three native platforms (`linux-x86_64`, `linux-aarch64`, `darwin-arm64`):
 | `postgres` | pure-C PostgreSQL wire backend (~4 KB, no libpq) | a `postgres://` / `postgresql://` DSN on `hull/db` |
 | `mysql` | pure-C MySQL / MariaDB wire backend (~4 KB, no libmysql) | a `mysql://` / `mariadb://` DSN on `hull/db` |
 | `gpu` | wgpu-native GPU compute | `gpu.*` (the base ships the generic dispatch layer; the feature fills the concrete wgpu backend) |
-| `tui` | terminal UI subsystem (`hull.tui`) | `hull/tui` module (auto-inferred; force-loaded — see [docs/features_and_flavors.md](docs/features_and_flavors.md)) |
+| `tui` | terminal UI subsystem (`hull.tui`) | `hull/tui` module (auto-inferred; force-loaded - see [docs/features_and_flavors.md](docs/features_and_flavors.md)) |
 
 `duckdb`, `postgres`, and `mysql` are **backend features**: all fill the same weak
 `hl_db_feature_backends` hook (DSN-scheme-selected via the `HlDbBackend` vtable),
@@ -212,7 +233,7 @@ generated collector. `postgres` and `mysql` are pure C (no vendored engine), so
 their archives are tiny (~48 KB); because a wire backend references base
 `tls_client` (sslmode) + crypto (auth) that a DB-only app doesn't otherwise pull,
 `hull build` wraps the platform lib + the archive in a GNU-ld `--start-group` at
-compose (`base_group` in FEATURE_SPECS; Linux only — macOS ld64 rescans natively
+compose (`base_group` in FEATURE_SPECS; Linux only - macOS ld64 rescans natively
 and rejects the flag). Like DuckDB, the backend is reached by DSN and carries no
 module gate, so selection is **explicit `--with=<name>`** (DSNs are often `$VAR`
 env-refs, invisible at build time) rather than auto-inferred; e.g. a `mysql://`
@@ -223,7 +244,7 @@ net DSN), so a sandboxed DB-only app can reach its database.
 
 **Install (end users):** `hull feature install <name>` / `hull feature list` /
 `hull feature uninstall <name>` fetch + Ed25519-verify + cache the signed lib to
-`~/.hull/feature/`, via the shared `hl_release_io_fetch_verified_manifest` — the
+`~/.hull/feature/`, via the shared `hl_release_io_fetch_verified_manifest` - the
 **same trust chain** as `hull flavor install` / `hull tools install` /
 `hull update`, no new keys. The registry is the `FEATURES[]` table in
 `src/hull/commands/feature.c` (the single registration point: one row per
@@ -244,27 +265,33 @@ hint), re-verifies a cache-sourced lib against its signed manifest offline
 `hl_gpu_feature_backends` hook with a **strong** override returning the composed
 backend. `FEATURE_SPECS` in `stdlib/cli/lua/hull/build.lua` is the codegen
 source of truth per feature (backend symbol, vtable type, hook name, C++ flag,
-and extra link libs that can't live in a `.a` — DuckDB's `-lstdc++`, GPU's
+and extra link libs that can't live in a `.a` - DuckDB's `-lstdc++`, GPU's
 `-lvulkan` / Metal frameworks). Selection can be **inferred** from the manifest
 (a `duckdb://` connection) or **forced** with `--with=`. A C++ feature (duckdb)
-can't be linked by the embedded TinyCC — use `--compiler=system`.
+can't be linked by the embedded TinyCC - use `--compiler=system`.
 
 Verified end to end by `tests/e2e_feature_duckdb.sh` and
 `tests/e2e_feature_gpu.sh` (each builds a base hull + the feature archive,
 composes an app with `--with=`, runs it, and asserts a plain app stays
-feature-free — the GPU one is build-only since `gpu.dispatch` needs a device
+feature-free - the GPU one is build-only since `gpu.dispatch` needs a device
 CI lacks).
 
 ### Composable runtime + HTTP base (the mandatory, auto-composed axis)
 
 `--with=` features above are the **optional, additive** axis. There is a second,
 **mandatory** composition axis that a plain `hull build` drives automatically:
-the native base platform library is **runtime-less AND HTTP-core-less AND
-compute-less**, and the produced app composes back exactly what it uses. Unlike a
-`--with=` feature, you never install or flag these — they are **embedded in the
-distributed `hull`** and auto-composed. (Issues #113 runtime, #114 HTTP, #118
-WASM; cosmo is exempt — a fat APE can't force-load native feature archives, so its
-base keeps both runtimes + HTTP + WASM compiled in.)
+the distributed hull's app-build base (the **SLIM** base) drops **every**
+composable subsystem - it is **runtime-less, HTTP-core-less, compute-less,
+image-less, SQLite-less, mbedTLS-less, AND Keel-event-loop-less** - and the
+produced app composes back exactly what it uses. This is the endgame of "Hull is
+completely modular and composable": the base is the minimum, and each subsystem
+is whole-archived in **at build time** (static composition - *not* dynamically
+loaded; no `dlopen`, no runtime plugins, so the manifest stays enforceable and
+the build stays reproducible). Unlike a `--with=` feature, you never install or
+flag these - they are **embedded in the distributed `hull`** and auto-composed.
+(Issues #113 runtime, #114 HTTP, #118 WASM, image #138, TLS a2, Keel Phase 4;
+cosmo is exempt - a fat APE can't force-load native feature archives, so its base
+keeps everything compiled in.)
 
 What the native base **drops** and what composes it back at `hull build`:
 
@@ -273,11 +300,18 @@ What the native base **drops** and what composes it back at `hull build`:
 | both interpreters (Lua VM, QuickJS) | `libhull_feature-{lua,js}.a` | exactly one, auto-inferred from the entry extension (`app.lua` → lua, `app.js` → js). Mandatory: an app must have a runtime to run. |
 | the HTTP core caps (`cap/http` + async, `ws`, `smtp`, `body`) | `libhull_feature-http.a` | only when the app needs HTTP |
 | the per-runtime web bindings (routes, dispatch, `res:*` helpers, `mod_http_*`/`mod_ws_*`/`sse`/`mod_smtp`, the in-process test harness, timers) | `libhull_feature-http-<rt>.a` | with the http core, only when the app needs HTTP |
+| **the Keel event loop + HTTP server** (`serve.o` the KlServer loop, `async/keel.c`, `net/keel.c`, the server-only static/agent/test objects, + `libkeel.a` pulled on demand) | `libhull_feature-keel.a` | only when the app needs HTTP (the `needs_http` gate). A compute app runs `app.main` / `compute.async` on the base's Keel-free `async/poll.c` and links **zero Keel** |
+| **mbedTLS + the crypto/TLS transport backends** (`cap_crypto_{hmac,asym}_mbedtls.o`, `tls_client.o`, `tls_transport.o`, Keel's `tls_mbedtls.o`, all of vendored mbedTLS) | `libhull_feature-tls.a` | when the app needs TLS: an HTTP module, or a `--with=postgres`/`mysql` net-DB backend (the `needs_tls` gate). A plaintext app links **zero mbedTLS** |
+| the SQLite engine (`cap/db_sqlite`, vendored `sqlite3`, FTS5, the udf cap) | `libhull_feature-sqlite.a` + per-runtime udf bridge `libhull_feature-sqlite-<rt>.a` | only when the app uses `db` (the `needs_sqlite` gate) |
 | the WASM caps + WAMR (`cap/wasm*`, `worker_wasm`, ~256 KB of vendored WAMR) | `libhull_feature-wasm.a` | only when the app needs compute (the `needs_wasm` gate below) |
-| the per-runtime compute binding (`mod_compute` — `compute.*` + the `WasmBuffer` userdata) | `libhull_feature-wasm-<rt>.a` | with the wasm core, only when the app needs compute |
+| the per-runtime compute binding (`mod_compute` - `compute.*` + the `WasmBuffer` userdata) | `libhull_feature-wasm-<rt>.a` | with the wasm core, only when the app needs compute |
 | the per-runtime tui bridge | `libhull_feature-tui-<rt>.a` (the tui cap core stays the installable `--with=tui` asset) | with `--with=tui`, only the app's runtime's bridge |
 | the image codec caps + vendored stb (`cap/image`, `cap/image_stb`, `stb_impl`, ~146 KB) | `libhull_feature-image.a` | only when the app declares `hull/image` (the `needs_image` gate below) |
-| the per-runtime image binding (`mod_image` — `image.*` + the `HlImage` userdata) | `libhull_feature-image-<rt>.a` | with the image core, only when the app declares `hull/image` |
+| the per-runtime image binding (`mod_image` - `image.*` + the `HlImage` userdata) | `libhull_feature-image-<rt>.a` | with the image core, only when the app declares `hull/image` |
+
+Net for the distributed hull: a stock `hull build` of a compute-only `app.main`
+links **zero Keel, zero mbedTLS, zero SQLite, zero WASM** (~2.1 MB); a full web
+app composes all of them back. Every reduction is composition, not a flavor.
 
 **The seam.** Each dropped piece leaves a **weak no-op default** in the base that
 a **strong override** in the composed archive replaces (mirrors the gpu/tui
@@ -287,18 +321,28 @@ real-signature stubs so the pure runtime's few references to the web bindings
 link even when HTTP is not composed. The WASM seam is weak-stubs-only (no hook
 header): `src/hull/wasm_weakstub.c` carries weak `hl_cap_wasm_*` / `hl_wasm_buffer_*`
 defaults (referenced by `db_udf` / `mod_buffer` / `mod_image` / `mod_gpu` /
-`app_context` / `serve`) plus the per-runtime compute-binding stubs — so a WASM-free
+`app_context` / `serve`) plus the per-runtime compute-binding stubs - so a WASM-free
 app links; a function `db.udf` still works while a WASM-backed one fails closed.
 The IMAGE seam is weak-stubs-only too: `src/hull/image_weakstub.c` carries weak
 `hl_image_new`/`hl_image_free` (referenced by `mod_gpu`'s `gpu.texture_read`), and
 per-runtime `runtime/{lua,js}/image_stub.c` carry weak `luaopen_hull_image` /
-`hl_js_init_image_module` (referenced by `modules.c`'s registration) — so an
+`hl_js_init_image_module` (referenced by `modules.c`'s registration) - so an
 image-free app links, and `HL_ENABLE_IMAGE` stays **defined** in the base
 (resolver keeps reporting the cap; `modules.c`/`mod_gpu` need no `#ifdef` change).
+The TLS seam is crypto weak-hooks (`include/hull/tls_feature.h`:
+`hl_crypto_{hmac,asym}_active_backend` weak defaults → portable/fail-closed, a
+composed `libhull_feature-tls.a` strong-overrides to mbedTLS) plus a transport
+seam (`include/hull/tls_transport.h`: `hl_tls_*` weak in `tls_transport_stub.c`,
+strong in `shared/tls_transport.c` = the sole in-Hull consumer of Keel's
+`tls_mbedtls.o`). The KEEL seam is the async backend (`hl_async_backend()` weak →
+Keel-free `async/poll.c`, strong override in `async/keel.c`), the app entry
+(`hull_serve` weak in `serve_cli.c` = the Keel-free `app.main` runner, strong in
+`serve.c` = the KlServer loop), and weak net-backend stubs; the base is compiled
+Keel-free (`serve_cli.c` compiles clean under HTTP_SERVER=1 via these seams).
 The archives are whole-archived at compose (no single anchor symbol), inside a
-GNU-ld `--start-group` (native) / `-force_load` (ld64) with the platform lib + Keel,
-since the caps reference base symbols + Keel and the web/compute bindings reference
-the caps.
+GNU-ld `--start-group` (native) / `-force_load` (ld64) with the platform lib -
+`libkeel.a` stays merged in the base `.a` and is pulled on demand only by a
+composed `serve.o`, so a compute app pulls none of it.
 
 **"Needs IMAGE" is module-inferred.** `hull build` composes the image codec core +
 the per-runtime image bridge only when the resolved manifest declares `hull/image`
@@ -316,10 +360,11 @@ See [docs/image_feature.md](docs/image_feature.md); covered by
 web bindings only when the resolved manifest trips an HTTP cap
 (`hl_module_set_required_caps & HL_MOD_CAP_HTTP`, exposed as `needs_http` from
 `tool.modules_resolve`). This is reliable because `app.get`/`app.post`/`app.ws`
-/… are module-conditional decorations — nil unless the app declares
+/… are module-conditional decorations - nil unless the app declares
 `hull/http-server`. A genuine `app.main` CLI / compute app with no HTTP module
-links only the pure runtime; on a `--flavor=pure-compute` base it also drops Keel
-+ mbedTLS (~785 KB smaller than a full-flavor CLI). The base defines **zero** HTTP
+links only the pure runtime and - on the distributed SLIM base - drops Keel +
+mbedTLS + SQLite automatically (no flavor needed; `--flavor=pure-compute` only
+adds the "reject any HTTP/TLS module" validation). The base defines **zero** HTTP
 caps (verifiable: `nm libhull_platform.a | grep hl_cap_http_request` → empty).
 
 **"Needs WASM" is a two-signal gate** (docs/wasm_feature.md). WASM is harder than
@@ -358,7 +403,7 @@ twenty lines of Lua. The four, and the single question that separates each:
 |------|-----------|----------|-------------|------|
 | **stdlib** | pure Lua/JS built on capabilities the base already has (no new C, no new authority) | always in the base VFS | `require("hull.X")` / `import "hull:X"` + `manifest.modules` | orchestration |
 | **feature** | a large optional C subsystem, off by default, adding a new vendored engine, wire backend, or authority | signed `libhull_feature-<name>-<arch>.a` | `hull build --with=<name>` (auto-inferred or forced) | **additive** |
-| **flavor** | a preset of the default base that turns subsystems OFF to slim it | `libhull_platform-<flavor>-<arch>.a` | `hull build --flavor=<name>` | **subtractive** |
+| **flavor** | a build.lua **preset** validating the app against a slimmer cap set (since Phase 4.3 - the base already composes; pre-built per-flavor libs are gone) | (none - a preset on the default base) | `hull build --flavor=<name>` | **subtractive** |
 | **tool** | a separate companion **program** Hull spawns (never linked in) | `hull-<tool>-<platform>` binary | `hl_tool_spawn` at build time; `hull tools install` | is-it-Hull-or-a-program-Hull-runs |
 
 **Decision procedure** (ask in order; first yes wins):
@@ -450,13 +495,13 @@ Binary size on arm64 Darwin: ~3.66 MB vs ~5.06 MB with DB (about 28% smaller).
 subsystem. Use for a compute / CLI / signing binary that never decodes or
 encodes images (a WASM/GPU transform pipeline, an air-gapped batch job, a data
 tool). Image is **on by default** (web apps want avatars / thumbnails), so this
-is a subtractive flavor knob like `HL_ENABLE_DB=0` — a make-level switch, not a
+is a subtractive flavor knob like `HL_ENABLE_DB=0` - a make-level switch, not a
 `hull build --with=` feature and not exposed as a `--flavor` preset.
 
 What's removed:
 - `src/hull/cap/image.c`, `cap/image_stb.c` (the codec vtable + stb backend)
 - `runtime/{lua,js}/mod_image.c` (the `image` module bindings)
-- `vendor/stb/stb_impl.c` (stb_image + stb_image_write — image is its **only**
+- `vendor/stb/stb_impl.c` (stb_image + stb_image_write - image is its **only**
   consumer, so it drops entirely; ~146 KB smaller on arm64 Darwin)
 
 What's unavailable to app code:
@@ -471,7 +516,7 @@ What's unavailable to app code:
   `textureRead` (which return an `HlImage`) are compiled out. `gpu.buffer_read`
   and the rest of `gpu.*` are unaffected.
 
-What still works: everything else — Lua/JS runtimes, `db.*`, `http.*`,
+What still works: everything else - Lua/JS runtimes, `db.*`, `http.*`,
 `compute.*`, `gpu.*` (buffers/dispatch/pipeline), `crypto.*`, `fs.*`, templates,
 CSV, i18n, `hull build/dev/test/agent`. The image-less link is CI-covered by the
 `flavors` matrix (`HL_ENABLE_IMAGE=0`); combine with `HL_ENABLE_DB=0` /
@@ -496,7 +541,7 @@ change to the selector, just a `.schemes` declaration + one `BACKENDS[]` line.
 
 **Abstract interface vs concrete backends (§2.3).** `cap/db_backend.h` is the
 pure interface: the vtable, `HlDbHandle`, the inline `hl_db_*` wrappers, and
-`hl_db_backend_select` — no concrete-backend symbol. Each backend's
+`hl_db_backend_select` - no concrete-backend symbol. Each backend's
 `extern const HlDbBackend` + backend-specific helpers live in its own header
 (`cap/db_sqlite.h`, `cap/db_postgres.h`), included only by the registry
 (`db_select.c`) and the few SQLite-aware consumers. Code that needs a backend's
@@ -508,7 +553,7 @@ typed `hl_db_sqlite_raw` convenience in `db_sqlite.h` built on top of it.
 `db_sqlite.h`. A new backend sets its `native_tag` + optional `native_handle`;
 consumers needing its handle add a tag case, not a header symbol.
 
-**Dialect surface — identifier quoting (§2.4).** The vtable carries a
+**Dialect surface - identifier quoting (§2.4).** The vtable carries a
 `char identifier_quote` (`"` for SQLite / Postgres / DuckDB, `` ` `` for MySQL);
 `hl_db_quote_ident(h, name, out, sz)` wraps a name in it, doubling any internal
 occurrence (reserved-word- and injection-safe). Exposed to app / stdlib code as
@@ -1061,25 +1106,25 @@ Each command is a separate `.c`/`.h` under `src/hull/commands/`. Adding a new co
 
 **`hull init [dir] [--runtime lua|js]`**. Initialize a hull project in-place. Like `git init`: creates missing files (`app.lua`, `tests/`, `migrations/`, `.gitignore`) without touching existing ones. Detects existing runtime from `app.lua`/`app.js` presence. Implemented as a Lua tool module (`stdlib/cli/lua/hull/init.lua`).
 
-**`hull doctor [--json]`**. Environment check for distribution readiness. Reports hull version/runtime/platform, whether the platform library is embedded (none / single-arch / multi-arch), whether a `tcc` tool is resolvable (side-loaded, not embedded), which system C compilers (`cc`, `gcc`, `clang`, `cosmocc`) are found in PATH, and a **Caches** section listing every registered cache kind with status / entries / size / on-disk path (sourced from `hl_cache_registry()` — the same registry that powers `hull cache list`, so doctor and the cache subcommand always agree). Surfaces an active `HULL_CACHE_DIR` override when set. Exits 0 only when `hull build` is fully ready (platform embedded AND at least one compiler available). Pure C implementation (`src/hull/commands/doctor.c`). `--json` includes a `"caches"` array and a `"hull_cache_dir"` field for machine-readable output.
+**`hull doctor [--json]`**. Environment check for distribution readiness. Reports hull version/runtime/platform, whether the platform library is embedded (none / single-arch / multi-arch), whether a `tcc` tool is resolvable (side-loaded, not embedded), which system C compilers (`cc`, `gcc`, `clang`, `cosmocc`) are found in PATH, and a **Caches** section listing every registered cache kind with status / entries / size / on-disk path (sourced from `hl_cache_registry()` - the same registry that powers `hull cache list`, so doctor and the cache subcommand always agree). Surfaces an active `HULL_CACHE_DIR` override when set. Exits 0 only when `hull build` is fully ready (platform embedded AND at least one compiler available). Pure C implementation (`src/hull/commands/doctor.c`). `--json` includes a `"caches"` array and a `"hull_cache_dir"` field for machine-readable output.
 
-**`hull build --compiler=<backend>`**. Select the C compiler backend for `hull build`. Options: `tcc` (side-loaded TinyCC tool, compile-only — install with `hull tools install tcc`, or put tcc on PATH), `system` (system cc/gcc/clang, no tcc fallback), or an explicit compiler path. Default: a resolvable tcc if one is installed, otherwise system cc. tcc is **not embedded** — the backend resolves it via `hl_tools_lookup_path` (`~/.hull/tools` → `dirname(hull)` → `$PATH`); its link step always delegates to a system linker regardless. The compiler abstraction uses `HlCompilerVtable` (`include/hull/compiler.h`); backends live in `src/hull/compiler.c` and `src/hull/compiler_tcc.c`.
+**`hull build --compiler=<backend>`**. Select the C compiler backend for `hull build`. Options: `tcc` (side-loaded TinyCC tool, compile-only - install with `hull tools install tcc`, or put tcc on PATH), `system` (system cc/gcc/clang, no tcc fallback), or an explicit compiler path. Default: a resolvable tcc if one is installed, otherwise system cc. tcc is **not embedded** - the backend resolves it via `hl_tools_lookup_path` (`~/.hull/tools` → `dirname(hull)` → `$PATH`); its link step always delegates to a system linker regardless. The compiler abstraction uses `HlCompilerVtable` (`include/hull/compiler.h`); backends live in `src/hull/compiler.c` and `src/hull/compiler_tcc.c`.
 
 **`hull update [--check] [--force] [--channel=stable|beta] [--repo=ORG/NAME]`**. Self-update from GitHub releases. Fetches the latest release metadata via `api.github.com`, picks the asset matching this binary's OS/arch (`hull-linux-x86_64`, `hull-linux-aarch64`, `hull-darwin-arm64`, or `hull-cosmo` fallback), downloads via HTTPS using the embedded Mozilla CA bundle (Phase D4), verifies the manifest's Ed25519 signature against the embedded `HL_RELEASE_PUBKEY_HEX` (when configured), verifies SHA-256 against `hull.sha256` from the same release (constant-time compare), and atomically replaces the running binary via `rename(2)`. `--check` exits after the version compare without installing. Pure C implementation in `src/hull/commands/update.c`; shared HTTPS / SHA-256 / manifest plumbing lives in `src/hull/release_io.{c,h}`.
 
 **`hull tools install <name> [--all]` / `tools list [--json]` / `tools uninstall <name>`** (Side-load optional Hull-native tools (currently: `wamrc`, `tcc`) from GitHub releases into `$HOME/.hull/tools/`. The trust chain is identical to `hull update`) same Ed25519-signed `hull.sha256` manifest covers tool binaries, no new keys. Install is version-coupled: it pulls from the SAME release as the running hull binary (not "latest"), so e.g. wamrc stays at the WAMR commit hull was compiled against. Tool registry is a compile-time-constant static table in `src/hull/tools_install.c`; adding a tool means one entry in the registry + matching `hull-<tool>-<platform>` assets in `hull.sha256`. Cosmo unsupported for tools that need LLVM (cosmo users build from source with `make wamrc`). Pure C; consumers locate installed tools via `hl_tools_lookup_path()` (or `tool.find_tool()` from build-tool Lua) which checks `~/.hull/tools/` → `dirname(hull_exe)/` → `$PATH`. Full design: [docs/tools_install.md](docs/tools_install.md).
 
-The live install path is intentionally not tested in CI (it would need the just-published release to exist before publishing). The post-release validation step is `tests/release_smoke.sh`: install hull, run `sh tests/release_smoke.sh`, watch `hull tools install wamrc` actually fetch the asset, verify SHA-256, exercise `wamrc --help`, and uninstall cleanly. It also exercises `hull flavor install pure-compute` (below) on both native and cosmo binaries. Run it manually after every `gh release create`.
+The live install path is intentionally not tested in CI (it would need the just-published release to exist before publishing). The post-release validation step is `tests/release_smoke.sh`: install hull, run `sh tests/release_smoke.sh`, watch `hull tools install wamrc` actually fetch the asset, verify SHA-256, exercise `wamrc --help`, and uninstall cleanly. Run it manually after every `gh release create`. (Phase 4.3 removed the pre-built pure-compute flavor lib, so there is no longer a `hull flavor install pure-compute` to smoke-test.)
 
-**`hull flavor install <flavor> [--repo=ORG/NAME]` / `flavor list`**. Fetch the per-flavor platform library (`libhull_platform-<flavor>.a`) for `hull build --flavor` so end users do not build it from source. Same trust chain as `hull tools install` / `hull update`, via the shared `hl_release_io_fetch_verified_manifest`: download `hull.sha256` + `.sig` from the release matching this hull's version, verify the Ed25519 release signature against the embedded `HL_RELEASE_PUBKEY_HEX`, then for each asset look up its SHA-256 in the verified manifest, download, constant-time-compare the hash, and atomic-write to `$HOME/.hull/platform/`. Native platforms fetch one `libhull_platform-<flavor>-<arch>.a`; cosmo fetches the dual-arch pair `libhull_platform-<flavor>.{x86_64,aarch64}-cosmo.a`. `flavor list` shows each flavor as `embedded` (full), `installed`, or `not installed`. `hull build --flavor` then finds the cached lib automatically (see "Build flavors" above). Pure C, HTTP-client-gated (`src/hull/commands/flavor.c`); the `~/.hull/platform/` store is a signed durable store like `~/.hull/tools/`, not a prunable cache. Full design: [docs/build_flavors.md](docs/build_flavors.md).
+**`hull flavor install <flavor> [--repo=ORG/NAME]` / `flavor list`**. Since Phase 4.3 the only flavors are `full` (embedded) and `pure-compute` (a preset on the default composable base), and neither is a fetchable per-flavor platform lib: `hull flavor install pure-compute` reports "preset flavor, nothing to install", and `hull flavor list` shows `full` as `embedded` and `pure-compute` as `preset (default base)`. The fetch/verify machinery (the shared `hl_release_io_fetch_verified_manifest`, atomic-write to `$HOME/.hull/platform/`, build-time re-verify) still exists in `src/hull/commands/flavor.c` for any FUTURE non-preset flavor with a non-empty asset stem, but has no user today (`flavor.c` treats an empty-asset flavor as a preset). Pure C, HTTP-client-gated. Full design: [docs/build_flavors.md](docs/build_flavors.md).
 
 **`hull feature install <name> [--repo=ORG/NAME]` / `feature list` / `feature uninstall <name>`**. Fetch the per-feature composable library (`libhull_feature-<name>-<arch>.a`) for `hull build --with=<name>` so end users do not build it from source. Same trust chain as `hull flavor install` (the shared `hl_release_io_fetch_verified_manifest`: verify the Ed25519 signature on `hull.sha256` against the embedded `HL_RELEASE_PUBKEY_HEX`, then per asset look up its SHA-256 in the verified manifest, download, constant-time-compare, atomic-write to `$HOME/.hull/feature/`). Five features today: `duckdb`, `postgres`, `mysql`, `gpu`, `tui`, all native-only (features are static archives; cosmo is never published). `feature list` shows each as `not installed` / `installed` for this platform. Registry is the `FEATURES[]` table in `src/hull/commands/feature.c` (one row per feature). Pure C, HTTP-client-gated. See "Composable features" above and [docs/features_and_flavors.md](docs/features_and_flavors.md).
 
-**`hull cache list|prune|clear|verify`**. Inspect and manage the runtime cache pool (`$HOME/.hull/blobs/runtime/` by default — set `HULL_CACHE_DIR=/abs/path` to redirect for per-app isolation). Full reference: [docs/cache.md](docs/cache.md). Six registered kinds today: `lua-bytecode` (Lua source → bytecode), `js-bytecode` (QuickJS module bytecode), `compute-aot` (WASM AOT artifacts), `templates` (compiled Lua template render functions), `js-templates` (compiled JS template render functions), `tools` (signed side-loaded tool binaries; system store, not pruned by default). `list` enumerates every kind with entry count + total size + on-disk path; `--json` for machine output. `prune [--kind=K] [--max-size=N] [--max-age=N] [--strategy=lru|fifo] [--dry-run]` runs LRU/FIFO eviction over runtime caches; system stores are preserved unless `--kind=tools` is named. `--max-size` accepts `K`/`M`/`G` suffixes (binary, 1024-based; trailing `B` optional, so `100M` and `100MB` are equivalent); `--max-age` accepts `s`/`m`/`h`/`d`/`w`/`y` suffixes (bare numbers = seconds for back-compat). Bad units are rejected with an example. `clear --yes` wipes runtime caches entirely (iter + delete, not policy-based — so even sub-second-old files go). `verify [--kind=K] [--repair] [--json]` walks every entry and flags corruption: for CAS-mode kinds (`tools`) it recomputes `sha256(contents)` and compares to filename; for keyed-mode runtime caches it does a structural check (regular file, non-empty, readable). `--repair` unlinks corrupt entries — safe because the next compile/install repopulates from source. Exits non-zero on corruption unless `--repair` was able to fix it. Cache registry (`include/hull/cache_registry.h`) is the single source of truth for cache kinds, also consumed by `hull doctor` (Caches section), `hull inspect` (runtime-caches disclosure), and `hull cache verify` (CAS vs keyed mode dispatch via `is_cas` field). Adding a new cache kind = one entry in `REGISTRY[]` and the new consumer auto-shows up in list / prune / clear / verify / doctor / inspect.
+**`hull cache list|prune|clear|verify`**. Inspect and manage the runtime cache pool (`$HOME/.hull/blobs/runtime/` by default - set `HULL_CACHE_DIR=/abs/path` to redirect for per-app isolation). Full reference: [docs/cache.md](docs/cache.md). Six registered kinds today: `lua-bytecode` (Lua source → bytecode), `js-bytecode` (QuickJS module bytecode), `compute-aot` (WASM AOT artifacts), `templates` (compiled Lua template render functions), `js-templates` (compiled JS template render functions), `tools` (signed side-loaded tool binaries; system store, not pruned by default). `list` enumerates every kind with entry count + total size + on-disk path; `--json` for machine output. `prune [--kind=K] [--max-size=N] [--max-age=N] [--strategy=lru|fifo] [--dry-run]` runs LRU/FIFO eviction over runtime caches; system stores are preserved unless `--kind=tools` is named. `--max-size` accepts `K`/`M`/`G` suffixes (binary, 1024-based; trailing `B` optional, so `100M` and `100MB` are equivalent); `--max-age` accepts `s`/`m`/`h`/`d`/`w`/`y` suffixes (bare numbers = seconds for back-compat). Bad units are rejected with an example. `clear --yes` wipes runtime caches entirely (iter + delete, not policy-based - so even sub-second-old files go). `verify [--kind=K] [--repair] [--json]` walks every entry and flags corruption: for CAS-mode kinds (`tools`) it recomputes `sha256(contents)` and compares to filename; for keyed-mode runtime caches it does a structural check (regular file, non-empty, readable). `--repair` unlinks corrupt entries - safe because the next compile/install repopulates from source. Exits non-zero on corruption unless `--repair` was able to fix it. Cache registry (`include/hull/cache_registry.h`) is the single source of truth for cache kinds, also consumed by `hull doctor` (Caches section), `hull inspect` (runtime-caches disclosure), and `hull cache verify` (CAS vs keyed mode dispatch via `is_cas` field). Adding a new cache kind = one entry in `REGISTRY[]` and the new consumer auto-shows up in list / prune / clear / verify / doctor / inspect.
 
-**Cache eviction is manual.** No automatic TTL / background sweep / on-write cap. Stale entries are harmless (content-keyed → orphans never serve incorrect data), and the caches are tiny per entry, so correctness doesn't depend on freshness. The only automatic hygiene is `hl_blob_store_open`'s `tmp_max_age_sec` sweep (default 1 hour) which removes abandoned `tmp/.blob-*.tmp` files from crashed writers. `hull doctor` surfaces a `⚠ large` mark next to any cache kind that passes 250 MB or runtime total past 1 GB and prints an actionable `hull cache prune --max-age=30d --strategy=lru` hint — but does not act on it. Disk-pressure users who want fully automatic eviction wire `hull cache prune` into cron / a systemd timer.
+**Cache eviction is manual.** No automatic TTL / background sweep / on-write cap. Stale entries are harmless (content-keyed → orphans never serve incorrect data), and the caches are tiny per entry, so correctness doesn't depend on freshness. The only automatic hygiene is `hl_blob_store_open`'s `tmp_max_age_sec` sweep (default 1 hour) which removes abandoned `tmp/.blob-*.tmp` files from crashed writers. `hull doctor` surfaces a `⚠ large` mark next to any cache kind that passes 250 MB or runtime total past 1 GB and prints an actionable `hull cache prune --max-age=30d --strategy=lru` hint - but does not act on it. Disk-pressure users who want fully automatic eviction wire `hull cache prune` into cron / a systemd timer.
 
-**`HULL_CACHE_DIR` (per-app cache isolation).** `HULL_CACHE_DIR=/absolute/path` redirects the entire runtime cache pool from `$HOME/.hull/blobs/runtime/` to the given directory. Use on multi-tenant boxes or under systemd / k8s / Docker so each deployment has its own cache and never reads / writes another deployment's blobs. Must be an absolute path; the sandbox auto-allows the resolved path. All `HULL_NO_*_CACHE` opt-outs (below) still apply on top. The tools store (`$HOME/.hull/blobs/tools/`) is intentionally NOT redirected — those are signed durable downloads with a stable system home, not per-app caches. Layer C (automatic per-app isolation derived from app identity) is a planned follow-up; the override here is the manual / deployment-controlled equivalent. See [docs/blob.md §"Per-app cache isolation"](docs/blob.md).
+**`HULL_CACHE_DIR` (per-app cache isolation).** `HULL_CACHE_DIR=/absolute/path` redirects the entire runtime cache pool from `$HOME/.hull/blobs/runtime/` to the given directory. Use on multi-tenant boxes or under systemd / k8s / Docker so each deployment has its own cache and never reads / writes another deployment's blobs. Must be an absolute path; the sandbox auto-allows the resolved path. All `HULL_NO_*_CACHE` opt-outs (below) still apply on top. The tools store (`$HOME/.hull/blobs/tools/`) is intentionally NOT redirected - those are signed durable downloads with a stable system home, not per-app caches. Layer C (automatic per-app isolation derived from app identity) is a planned follow-up; the override here is the manual / deployment-controlled equivalent. See [docs/blob.md §"Per-app cache isolation"](docs/blob.md).
 
 ### Cache environment variables (full table)
 
@@ -1281,7 +1326,7 @@ Violation = SIGABRT on OpenBSD, SIGKILL on Linux/Cosmo, EPERM on macOS. `--no-sa
 - **SQL injection impossible:** All DB access uses `sqlite3_bind_*` parameterized binding. SQL is always a literal string.
 - **Internal tables protected:** `hl_cap_db_check_namespace()` blocks user code from accessing `_hull_*` tables. Enforcement uses call-stack inspection (Lua checks `ar.source` for `hull.` prefix, JS checks module name for `hull:` prefix) so stdlib modules transparently bypass the check via normal `db.exec`/`db.query`. No internal API is exposed. Tables: `_hull_outbox`, `_hull_inbox_processed`, `_hull_idempotency_keys`, `_hull_sessions`.
 - **Path traversal blocked:** `hl_cap_fs_validate()` rejects absolute paths, `..` components, symlink escapes via `realpath()` ancestor check. Plus kernel unveil.
-- **Host allowlist enforced:** `hl_cap_http_request()` validates target host against manifest's `hosts` array. Since §2.8 the check delegates to the shared matcher `hl_host_match_any_env` (`src/hull/utils/host_match.c`), so `hosts` entries may be an exact hostname (case-insensitive), `"*"` (any), a `"*.suffix"` subdomain glob, a CIDR (matches only IP-literal hosts, never a DNS name), or a `"$VAR"` / `"${VAR}"` env reference resolved at match time. The same matcher gates `ws.connect` (shares the http config) and `smtp.send` (`hl_smtp_check_host`), and `databases.dynamic.hosts` — one convention across every outbound host allowlist.
+- **Host allowlist enforced:** `hl_cap_http_request()` validates target host against manifest's `hosts` array. Since §2.8 the check delegates to the shared matcher `hl_host_match_any_env` (`src/hull/utils/host_match.c`), so `hosts` entries may be an exact hostname (case-insensitive), `"*"` (any), a `"*.suffix"` subdomain glob, a CIDR (matches only IP-literal hosts, never a DNS name), or a `"$VAR"` / `"${VAR}"` env reference resolved at match time. The same matcher gates `ws.connect` (shares the http config) and `smtp.send` (`hl_smtp_check_host`), and `databases.dynamic.hosts` - one convention across every outbound host allowlist.
 - **Env allowlist enforced:** `hl_cap_env_get()` checks against manifest's `env` array (max 32 entries).
 - **No shell invocation:** Tool mode uses `hl_tool_spawn()` with compiler allowlist. No `system()`/`popen()`.
 - **Key material zeroed:** `hull_secure_zero()` (volatile memset) scrubs crypto material from stack buffers.
@@ -1296,7 +1341,7 @@ Apps declare which first-party Hull stdlib modules they import via `manifest.mod
 
 
 1. **Every external capability is declared.** Language intrinsics (Lua: `string/table/math/utf8/coroutine`; JS: `Object/Array/Math/JSON`) and Hull's intrinsic core are always available; everything else must appear in `manifest.modules`. The intrinsic core is the minimum needed to bootstrap an app: **`hull/app`** alone, providing `app.manifest`, `app.get/post/use`, `app.router`, `app.ws/sse`, and `app.main`. `app` stays intrinsic because the manifest itself is expressed via `app.manifest(...)` (it must exist before the manifest is parsed. **Module-conditional decoration:** some declared modules don't just enable imports, they add methods to the `app` intrinsic. Today: `"hull/timers@1"` decorates `app` with `app.every(ms, fn)` and `app.daily(hhmm, fn)`. Without the declaration those methods don't exist on `app` at all (calling them raises "attempt to call a nil value" / "is not a function")) the C# partial-class metaphor. `hull/log` and `hull/json` are also declared modules; apps that call `log.X` or `json.X` directly must put `"hull/log@1"` / `"hull/json@1"` in `manifest.modules`. Response helpers (`res:json(...)`) and internal JSON marshalling work without either declaration. They bypass user-visible imports at the C layer.
-2. **Import-only exposure.** Declared modules are reached via `require("hull.X")` (Lua) / `import "hull:X"` (JS). They are NOT exposed as globals. The two-level `hull.web.X` / `hull:web:X` form (also `hull.web.middleware.X` / `hull:web:middleware:X`) works identically — segment depth is unrestricted, the resolver just translates separator-to-`/` for canonical lookup.
+2. **Import-only exposure.** Declared modules are reached via `require("hull.X")` (Lua) / `import "hull:X"` (JS). They are NOT exposed as globals. The two-level `hull.web.X` / `hull:web:X` form (also `hull.web.middleware.X` / `hull:web:middleware:X`) works identically - segment depth is unrestricted, the resolver just translates separator-to-`/` for canonical lookup.
 3. **Capability + module are independent gates, and deps auto-resolve.** Declaring `hull/http-client@1` makes `require("hull.http-client")` resolve; it does not open the network. The per-call cap layer (`hl_cap_http_request`, `hl_cap_fs_validate`, `hl_cap_env_get`) fails closed against an empty allowlist, so an unused module is harmless. The resolver only hard-blocks build-time gates (`HL_ENABLE_*`); manifest `fs/env/hosts` sections are validated at call time. **Transitive deps are auto-admitted**. Declaring `hull/web/middleware/session@1` implicitly admits `hull/db`, `hull/crypto`, `hull/json`, `hull/time`, `hull/http-server` (and triggers the matching `app` decorations). The dep graph lives in the registry; `hull modules list` shows the resolved set. Apps don't need to re-declare every transitive utility. **Top-of-file imports/requires are tracked** during the pre-manifest window (before `app.manifest()` runs the resolver) and validated against the resolved set immediately after; an undeclared `import { db } from "hull:db"` at the top of an app.js fails app load synchronously with a clear message instead of silently slipping through (the gate isn't wired yet at import time). See `hl_import_tracker_record` / `_validate` in `module_resolver.c`.
 
 ```lua
@@ -1375,7 +1420,7 @@ Three independent Ed25519 layers:
 - **App layer (outer, in `package.sig`):** Signed by developer key. Proves app hasn't been tampered with.
 - **Release layer (`hull.sha256.sig`):** Signed by Hull release key. Proves the `hull` binary you just downloaded via `hull update` matches the SHA-256 manifest signed by the release authority. Embedded pubkey: `HL_RELEASE_PUBKEY_HEX` in `include/hull/release.h`.
 
-**Composed-feature attestation (`package.sig.gethull.composed`).** Since #114 the native base is composed (runtime + optional HTTP + tui bridge whole-archived at `hull build`), so the platform layer above, which only covers `libhull_platform.a`, is no longer the whole trusted surface. `hull build` records **every** archive it composes into `package.sig.gethull.composed`, in two trust domains: `platform_domain` (the archives EMBEDDED in hull: runtime `lua`/`js`, HTTP core, per-runtime web bindings, tui bridge) attested by the **platform** key, and `release_domain` (`--with` backend features: duckdb/postgres/mysql/gpu) attested by the **release** key. Each entry is `{name, sha256}` keyed by the composed asset name `libhull_feature-<stem>.<arch>.a`. At runtime, `--verify-sig` (`src/hull/signature.c` §5c, right after the base §5b) verifies the `platform_domain` block against the embedded `HL_PLATFORM_PUBKEY_HEX` via `hl_platform_sig_verify_composed` and **refuses to boot** on any tamper — presence-gated (absent on pre-#114 apps and on cosmo, where §5b alone anchors trust). `release_domain` is recorded + app-sig-sealed for provenance; its trust is already anchored at `hull feature install` (release-key fetch) and at `hull build --with` (compose re-verify), so it is not runtime-re-anchored. The whole block sits inside the developer-signed payload, so it cannot be stripped without breaking the app signature. Release wiring: `release.yml` signs the seven embedded archive hashes into the platform manifest and stage 3 embeds those exact bytes (`TRUST_FEATURE_LIBS=1`, mirroring `TRUST_PLATFORM_LIB`). Big composed archives (~127 MB DuckDB, wgpu) are hashed with the streaming C binding `tool.sha256_file` so the tool VM's 64 MB Lua allocator never sees them. Full design: [docs/composed_feature_signing.md](docs/composed_feature_signing.md); covered by `tests/e2e_composed_sig.sh` (a throwaway test-key chain, since the shipped `HL_PLATFORM_PUBKEY_HEX` is still the placeholder that skips the whole layer).
+**Composed-feature attestation (`package.sig.gethull.composed`).** The native base is composed (every optional subsystem whole-archived at `hull build`), so the platform layer above, which only covers `libhull_platform.a`, is no longer the whole trusted surface. `hull build` records **every** archive it composes into `package.sig.gethull.composed`, in two trust domains: `platform_domain` (the archives EMBEDDED in hull: runtime `lua`/`js`, HTTP core + per-runtime web bindings, WASM core + per-runtime compute bridge, image core + per-runtime bridge, SQLite engine + per-runtime udf bridge, the TLS feature (`tls`), the Keel event loop (`keel`), and the tui bridge) attested by the **platform** key, and `release_domain` (`--with` backend features: duckdb/postgres/mysql/gpu) attested by the **release** key. Each entry is `{name, sha256}` keyed by the composed asset name `libhull_feature-<stem>.<arch>.a`. At runtime, `--verify-sig` (`src/hull/signature.c` §5c, right after the base §5b) verifies the `platform_domain` block against the embedded `HL_PLATFORM_PUBKEY_HEX` via `hl_platform_sig_verify_composed` and **refuses to boot** on any tamper - presence-gated (absent on pre-#114 apps and on cosmo, where §5b alone anchors trust). `release_domain` is recorded + app-sig-sealed for provenance; its trust is already anchored at `hull feature install` (release-key fetch) and at `hull build --with` (compose re-verify), so it is not runtime-re-anchored. The whole block sits inside the developer-signed payload, so it cannot be stripped without breaking the app signature. Release wiring: `release.yml` signs every embedded feature-archive hash (the `platform_domain` stems, incl. `tls` and `keel`) into the platform manifest and stage 3 embeds those exact bytes (`TRUST_FEATURE_LIBS=1`, mirroring `TRUST_PLATFORM_LIB`). Big composed archives (~127 MB DuckDB, wgpu) are hashed with the streaming C binding `tool.sha256_file` so the tool VM's 64 MB Lua allocator never sees them. Full design: [docs/composed_feature_signing.md](docs/composed_feature_signing.md); covered by `tests/e2e_composed_sig.sh` (a throwaway test-key chain, because a test cannot use the production platform key). **§5c is LIVE:** `HL_PLATFORM_PUBKEY_HEX` is a real key (restored at v0.1.3; `hl_platform_pubkey_is_placeholder()` matches ONLY all-zeros), so §5c enforces on every released binary - validated end-to-end by the v0.9.0 keel dry-run (the Platform-sig E2E smoke test runs `--verify-sig`, which verified the composed archives against the real-key-signed embedded manifest).
 
 See [docs/security.md](docs/security.md) for the full attack model and [docs/release_signing.md](docs/release_signing.md) for the release-signing design.
 
@@ -1554,7 +1599,7 @@ cross-provider or by a CSRF.
   or fully-explicit `{ authorization_endpoint, token_endpoint, jwks_uri,
   issuer, client_id, client_secret?, scopes? }`.
 - Allowed signing algs: `RS256 / RS384 / RS512 / PS256 / ES256 / ES384`
-  (HS256 excluded — OIDC IdPs don't sign ID tokens with HMAC).
+  (HS256 excluded - OIDC IdPs don't sign ID tokens with HMAC).
 - App must declare `hull/web/middleware/oauth@1` in `manifest.modules` plus
   add the IdP host (e.g. `accounts.google.com`, `login.microsoftonline.com`)
   to `manifest.hosts`.
@@ -1565,26 +1610,26 @@ cross-provider or by a CSRF.
   `tests/e2e_oauth.sh`.
 
 **totp**. RFC 6238 Time-based One-Time Password 2FA. Composes with
-the existing `auth` + `session` modules — after password verify, the
+the existing `auth` + `session` modules - after password verify, the
 app sets `req.ctx.session.pending_2fa = true`; this module's
 middleware gates sensitive routes until a valid TOTP code (or recovery
 code) is presented. Algorithm is fixed at HMAC-SHA1 (RFC 6238 default,
-what every mainstream authenticator app — Google Authenticator,
-Authy, 1Password — supports).
+what every mainstream authenticator app - Google Authenticator,
+Authy, 1Password - supports).
 
 - `totp.init(opts)`. Required at app startup. Creates `_hull_totp` +
   `_hull_totp_recovery` tables.
-  - `opts.issuer` (default `"Hull"`) — label shown in authenticator.
+  - `opts.issuer` (default `"Hull"`) - label shown in authenticator.
   - `opts.digits` (default `6`; also accepts `8`).
   - `opts.period` (default `30s`, RFC default).
   - `opts.window` (default `±1` step → ~90s clock-skew tolerance).
   - `opts.recovery_codes` (default `10`).
-  - `opts.encryption_key` — optional 32-byte string. When set,
+  - `opts.encryption_key` - optional 32-byte string. When set,
     secrets are NaCl-secretbox-encrypted at rest with a fresh nonce
     per enrollment. Caller manages the key (env, fs.read, etc.).
 - `totp.enroll(user_id)` → `{ secret_base32, otpauth_url, qr_svg,
   recovery_codes }`. Recovery codes are returned ONCE; only PBKDF2
-  hashes persist. Re-enrolling overwrites — intentional, it's the
+  hashes persist. Re-enrolling overwrites - intentional, it's the
   recovery path when both authenticator and codes are lost.
 - `totp.confirm(user_id, code)` → bool. Pairs the authenticator;
   flips the row's `confirmed` flag.
@@ -1595,24 +1640,24 @@ Authy, 1Password — supports).
   replay-protected via `last_used_step` (atomic compare-and-set in
   the UPDATE WHERE). Recovery-code path scans unused rows; consumed
   codes get `used_at` stamped.
-- `totp.disable(user_id)` — deletes secret + recovery codes.
+- `totp.disable(user_id)` - deletes secret + recovery codes.
 - `totp.enrolled(user_id)` → bool. Confirmed enrollment check.
 - Login-time 2FA gating happens via `hull/web/auth-flows`
   (enable_totp + user_totp_enrolled + totp_verify callbacks). There
-  is no `totp.middleware` / `pending_2fa` mechanism — the auth-flows
+  is no `totp.middleware` / `pending_2fa` mechanism - the auth-flows
   envelope path is the single supported way.
 - JS API mirrors the Lua surface with camelCase
   (`verifyWithKind` / `secretBase32` / `otpauthUrl` / `qrSvg` /
   `recoveryCodes` in the enroll return).
 - Local-first note: TOTP needs no network at verify time (works
-  air-gapped). Clock skew matters more off-cloud — raise `opts.window`
+  air-gapped). Clock skew matters more off-cloud - raise `opts.window`
   on devices without NTP.
 
 **auth-flows**. Transactional auth-flow recipes. Bundle of routes that
 cover registration / email-verify / login / password-reset / magic-link
 / email-change. The module owns the auth-internal bookkeeping tables
 (`_hull_auth_used_tokens`, `_hull_auth_pending_email_changes`) but
-does NOT own the users table — the app provides `user_*` callbacks so
+does NOT own the users table - the app provides `user_*` callbacks so
 existing user models drop in. Optional TOTP composition wedges a 2FA
 verify step between successful first-factor auth and `on_login` when
 `enable_totp = true` is set (see below).
@@ -1701,7 +1746,7 @@ verify step between successful first-factor auth and `on_login` when
       after a successful `password-reset/confirm` updates the
       hash. Recommended implementation:
       `function(req, res, user) session.destroy_all(user.id) end`
-      — revokes every existing session because a reset is the
+      - revokes every existing session because a reset is the
       standard recovery move after a suspected compromise.
 - `authflows.routes(app)`. Mounts the routes under `prefix`:
   POST `/register`, GET `/verify`, POST `/verify/resend`,
@@ -1710,7 +1755,7 @@ verify step between successful first-factor auth and `on_login` when
   POST `/password-reset/confirm`, POST `/email-change`,
   GET `/email-change/confirm`, GET `/email-change/revoke`,
   POST `/totp-verify` (404s when `enable_totp` is off).
-  `/verify/resend` is enumeration-safe — always returns `{ok:true}`
+  `/verify/resend` is enumeration-safe - always returns `{ok:true}`
   whether the user exists, is unverified, or is already verified.
   Apps SHOULD rate-limit it (per-email key) to bound mail volume.
 - `authflows.send_verify_email(user, url_prefix)`,
@@ -1729,10 +1774,10 @@ verify step between successful first-factor auth and `on_login` when
   `onLogin`, `magicLinkAutoSignup`, `requireVerifiedEmail`, `enableTotp`,
   `userTotpEnrolled`, `totpVerify`, `totpPendingTtl`, `totpPendingRedirect`).
   `totp.verify(userId, code)` returns a bare boolean (the historical
-  `[ok, kind]` tuple lives behind `totp.verifyWithKind` now — see
+  `[ok, kind]` tuple lives behind `totp.verifyWithKind` now - see
   the TOTP section), so a `totpVerify: (user, code) => totp.verify(
   user.id, code)` delegate is safe by default.
-- Email-change flow re-verifies on the NEW address — old email stays
+- Email-change flow re-verifies on the NEW address - old email stays
   active until the user clicks the link sent to the new one.
 
 **session**. Server-side sessions backed by SQLite. Requires `session.init()` at startup.
@@ -1742,17 +1787,17 @@ verify step between successful first-factor auth and `on_login` when
 - `session.update(session_id, data)`. Updates session data.
 - `session.destroy(session_id)`. Deletes session.
 - `session.cleanup()` → count of deleted expired sessions.
-- **Device management** — `session.list_for_user(user_id)` → array of `{id, created_at, last_accessed, ip, user_agent}`; `session.destroy_others(current_sid, user_id)` → "sign out everywhere else"; `session.destroy_all(user_id)` → "sign out everywhere" (used by auth-flows on password reset cascade).
-- **Login/logout factories** — `session.login_handler(cookie, opts?)` returns a turnkey `on_login(req, res, user, ctx?)` callback that creates a session, sets the cookie, and responds. Defaults to session-fixation defense (`session.rotate(prior_sid, ...)`). `opts.name` (cookie name, default `"hull_session"` — same as `auth.session_middleware`), `opts.cookie_opts` (forwarded to `cookie.serialize`), `opts.extract_data(user) -> data`, `opts.respond(res, user, sid)`, `opts.rotate` (default `true`), `opts.audit_log` (module ref — when set, records a login event after the session is set), `opts.audit_kind` (default `"login"`), `opts.audit_metadata(user, ctx) -> table` (default derives `{ factors = ctx.factors }` for auth-flows or `{ factors = "oauth:" .. ctx.provider }` for oauth), `opts.on_new_device(req, res, user)` (requires `audit_log` — called before record when `audit_log.is_new_device` returns true). `session.logout_handler(cookie, opts?)` is the matching `on_logout`. Same factories work for `hull/web/auth-flows` AND `hull/web/middleware/oauth` (the audit + new-device seam covers both for free).
-- `session.rotate(old_sid, data, opts)` — destroy + recreate, session-fixation defense primitive. Used by `login_handler`; apps doing custom on_login can call it directly.
+- **Device management** - `session.list_for_user(user_id)` → array of `{id, created_at, last_accessed, ip, user_agent}`; `session.destroy_others(current_sid, user_id)` → "sign out everywhere else"; `session.destroy_all(user_id)` → "sign out everywhere" (used by auth-flows on password reset cascade).
+- **Login/logout factories** - `session.login_handler(cookie, opts?)` returns a turnkey `on_login(req, res, user, ctx?)` callback that creates a session, sets the cookie, and responds. Defaults to session-fixation defense (`session.rotate(prior_sid, ...)`). `opts.name` (cookie name, default `"hull_session"` - same as `auth.session_middleware`), `opts.cookie_opts` (forwarded to `cookie.serialize`), `opts.extract_data(user) -> data`, `opts.respond(res, user, sid)`, `opts.rotate` (default `true`), `opts.audit_log` (module ref - when set, records a login event after the session is set), `opts.audit_kind` (default `"login"`), `opts.audit_metadata(user, ctx) -> table` (default derives `{ factors = ctx.factors }` for auth-flows or `{ factors = "oauth:" .. ctx.provider }` for oauth), `opts.on_new_device(req, res, user)` (requires `audit_log` - called before record when `audit_log.is_new_device` returns true). `session.logout_handler(cookie, opts?)` is the matching `on_logout`. Same factories work for `hull/web/auth-flows` AND `hull/web/middleware/oauth` (the audit + new-device seam covers both for free).
+- `session.rotate(old_sid, data, opts)` - destroy + recreate, session-fixation defense primitive. Used by `login_handler`; apps doing custom on_login can call it directly.
 
 **The `on_login(req, res, user, ctx?)` contract.** Both `hull/web/auth-flows` and `hull/web/middleware/oauth` hand off through this single shape. Guarantees:
-- `user` is the **app's** user object (whatever `find_user` / `standard_users` / a custom adapter produced). `user.id` MUST be a non-empty string — `session.login_handler` enforces it and throws otherwise. `user.email` is conventionally present but not required.
+- `user` is the **app's** user object (whatever `find_user` / `standard_users` / a custom adapter produced). `user.id` MUST be a non-empty string - `session.login_handler` enforces it and throws otherwise. `user.email` is conventionally present but not required.
 - `ctx` is `nil` for the simplest call sites, or a table carrying source-specific metadata. auth-flows passes `{ factors = "password" | "magic_link" | "password+totp" }`. oauth passes `{ provider, claims, tokens }` (the IdP claims + raw tokens, for apps that want to capture them).
 - Returning a string overrides the post-login redirect target (oauth honors this; auth-flows uses the redirect from `login_redirect` opt).
-- `on_logout(req, res)` is the matching shape — no `user` arg because the session row is the source of truth there.
+- `on_logout(req, res)` is the matching shape - no `user` arg because the session row is the source of truth there.
 
-**Audit-metadata scrub at the session.login_handler seam.** When `audit_log` is wired, the factory calls your `audit_metadata(user, ctx)` and then **strips** these keys from the result before passing it to `audit_log.record`: `tokens`, `token`, `access_token`, `refresh_token`, `id_token`, `claims`, `password`, `password_hash`, `pwhash`, `secret`. This is defense in depth — the **OAuth ctx already contains `claims` and `tokens`** (the raw IdP tokens), so a `audit_metadata = function(_,c) return c end` override would otherwise persist access_token + refresh_token in `_hull_audit_log.metadata` for `retain_days` (default 365). The scrub is top-level only; if you need to log claim details, pull them out by name in your custom `audit_metadata` (e.g. `return { factors = "oauth:" .. ctx.provider, sub = ctx.claims.sub }`) — never pass the raw `ctx` through.
+**Audit-metadata scrub at the session.login_handler seam.** When `audit_log` is wired, the factory calls your `audit_metadata(user, ctx)` and then **strips** these keys from the result before passing it to `audit_log.record`: `tokens`, `token`, `access_token`, `refresh_token`, `id_token`, `claims`, `password`, `password_hash`, `pwhash`, `secret`. This is defense in depth - the **OAuth ctx already contains `claims` and `tokens`** (the raw IdP tokens), so a `audit_metadata = function(_,c) return c end` override would otherwise persist access_token + refresh_token in `_hull_audit_log.metadata` for `retain_days` (default 365). The scrub is top-level only; if you need to log claim details, pull them out by name in your custom `audit_metadata` (e.g. `return { factors = "oauth:" .. ctx.provider, sub = ctx.claims.sub }`) - never pass the raw `ctx` through.
 
 **cookie**. Cookie helpers (not middleware).
 - `cookie.parse(header)` → table `{ name = value, ... }`.
@@ -2084,7 +2129,7 @@ app.sse("/sse/events", async (req, stream) => {
 
 ### Streaming Multipart Uploads
 
-Routes can opt into streaming `multipart/form-data` parsing via `opts.multipart` on `app.<verb>(...)`. The handler runs before the body is buffered and pulls bytes out of the socket on demand via an iterator. There is no `req.body` for these routes — `req:multipart()` / `req.multipart()` is the only way to read the body.
+Routes can opt into streaming `multipart/form-data` parsing via `opts.multipart` on `app.<verb>(...)`. The handler runs before the body is buffered and pulls bytes out of the socket on demand via an iterator. There is no `req.body` for these routes - `req:multipart()` / `req.multipart()` is the only way to read the body.
 
 ```lua
 app.post("/upload", function(req, res)
@@ -2116,11 +2161,11 @@ app.post("/upload", async (req, res) => {
 }, { multipart: { maxPartSize: 64 * 1024 * 1024, maxTotalSize: 256 * 1024 * 1024, maxParts: 32 } });
 ```
 
-**Caps** (all default to `0` = unlimited): `max_part_size` / `maxPartSize`, `max_total_size` / `maxTotalSize`, `max_parts` / `maxParts`, `max_headers_size` / `maxHeadersSize`, `max_input_buffer` / `maxInputBuffer`. Exceeding any cap raises a parser error which the handler can `pcall` / try-catch to write a structured 4xx response; uncaught errors → 500. Works for both single-read and multi-read bodies — Keel v2.2.0's streaming-async dispatch invokes the handler BEFORE feeding leftover body bytes, so the handler is alive when the cap trips in `on_data`. JS accepts both naming conventions; snake_case wins if both appear.
+**Caps** (all default to `0` = unlimited): `max_part_size` / `maxPartSize`, `max_total_size` / `maxTotalSize`, `max_parts` / `maxParts`, `max_headers_size` / `maxHeadersSize`, `max_input_buffer` / `maxInputBuffer`. Exceeding any cap raises a parser error which the handler can `pcall` / try-catch to write a structured 4xx response; uncaught errors → 500. Works for both single-read and multi-read bodies - Keel v2.2.0's streaming-async dispatch invokes the handler BEFORE feeding leftover body bytes, so the handler is alive when the cap trips in `on_data`. JS accepts both naming conventions; snake_case wins if both appear.
 
 **Part fields:** `name` (always), `filename` (`nil`/`null` for text fields), `content_type` (Lua) / `contentType` (JS).
 
-**Binary safety:** Lua chunks/`read()` return byte-clean Lua strings. JS chunks/`read()` return `ArrayBuffer` (never JS strings — `JS_NewStringLen` would UTF-8-mangle binary input). To decode text fields in JS, use `new TextDecoder().decode(buf)` (BYOP — QuickJS doesn't bundle it; ASCII can use a manual loop).
+**Binary safety:** Lua chunks/`read()` return byte-clean Lua strings. JS chunks/`read()` return `ArrayBuffer` (never JS strings - `JS_NewStringLen` would UTF-8-mangle binary input). To decode text fields in JS, use `new TextDecoder().decode(buf)` (BYOP - QuickJS doesn't bundle it; ASCII can use a manual loop).
 
 **Implementation:**
 - Route is registered via `kl_server_route_streaming_async` (Keel v2.2.0+) + a per-runtime factory shim (`hl_{lua,js}_multipart_factory` in `runtime/{lua,js}/routes.c`) that wraps Keel's `kl_body_reader_multipart` with the parkable `hl_cap_multipart_factory` wrapper (`src/hull/cap/body.c`). The async variant means Keel invokes the handler BEFORE feeding leftover body bytes; the handler parks on `NEED_DATA` immediately, and `on_data` resumes it for both leftover and subsequent socket reads.
@@ -2129,10 +2174,10 @@ app.post("/upload", async (req, res) => {
 - Bindings live in `src/hull/runtime/lua/mod_request.c` and `src/hull/runtime/js/mod_request.c`.
 
 **Known limitations:**
-- Live connection required — in-process `hull test` dispatch raises on first `NEED_DATA`. End-to-end coverage is in `tests/e2e_multipart.sh` (run via `make e2e-multipart`).
-- `Part` is invalidated after the next iter step (parser is forward-only — don't stash parts past their iteration).
+- Live connection required - in-process `hull test` dispatch raises on first `NEED_DATA`. End-to-end coverage is in `tests/e2e_multipart.sh` (run via `make e2e-multipart`).
+- `Part` is invalidated after the next iter step (parser is forward-only - don't stash parts past their iteration).
 - `chunks(n)` accepts a min-bytes hint that's currently advisory (each parser event = one chunk; coalescing is a follow-up).
-- Mid-stream connection close leaks the parked continuation — production deployments should run behind a reverse proxy with request timeouts.
+- Mid-stream connection close leaks the parked continuation - production deployments should run behind a reverse proxy with request timeouts.
 
 See [docs/multipart.md](docs/multipart.md) for the full API + `examples/multipart_upload/` for a runnable Lua + JS demo.
 

@@ -51,7 +51,7 @@ GPU compute shaders (optional, `HL_ENABLE_GPU=1`) provide massively parallel dat
 
 Both WASM and GPU compute accept the same input types via the unified buffer protocol: strings, `MappedBuffer` (from `fs.mmap()`), and `WasmBuffer` (from `compute.call({buffer=true})`). This enables zero-copy data flow between disk, WASM, and GPU without Lua/JS string intermediaries. Declare `gpu: true` and/or `compute: true` in manifest.
 
-**The produced binary is tailored to the app.** The native base library is runtime-less and HTTP-core-less; `hull build` composes back only what the app uses — exactly one interpreter (Lua or JS, inferred from the entry file), and the HTTP layer (routes, `res:*`, ws/sse, outbound `http.fetch`, Keel) only when the manifest declares an HTTP module (`hull/http-server`, `hull/http-client`, ws/sse/smtp/email). An `app.main` CLI or compute tool with no HTTP module links neither the web bindings nor the HTTP caps; built with `--flavor=pure-compute` it also drops Keel + mbedTLS (~785 KB smaller). This is automatic — nothing to install or flag (the Lua/JS runtimes and the HTTP layer are embedded in `hull` and auto-composed; only large optional subsystems like gpu/duckdb/tui are `hull build --with=<name>`). Cosmo (the fat APE) keeps both runtimes + HTTP in-base.
+**The produced binary is tailored to the app.** Hull is completely modular and composable: the distributed hull's app-build base drops **every** reducible subsystem (both interpreters, the HTTP layer, the Keel event loop, mbedTLS, SQLite, WASM, image codecs), and `hull build` composes back only what the app uses, statically at build time (not dynamically loaded, no `dlopen`). You get exactly one interpreter (Lua or JS, inferred from the entry file); the HTTP layer + the Keel event loop + server only when the manifest declares an HTTP module (`hull/http-server`, `hull/http-client`, ws/sse/smtp/email); mbedTLS only when the app needs TLS (HTTP or a `--with=postgres`/`mysql` net-DB); SQLite only when the app uses `db`; WASM only when it uses `compute`; image codecs only when it declares `hull/image`. So an `app.main` CLI or compute tool with no HTTP/TLS/DB links **zero** Keel, mbedTLS, SQLite, or WASM (~2.1 MB, vs ~6.5 MB full). This is automatic, nothing to install or flag (all of it is embedded in `hull` and auto-composed); only large optional subsystems like gpu/duckdb/tui are `hull build --with=<name>`. `--flavor=pure-compute` is now just a preset that also *validates* the app declares no HTTP/TLS. Cosmo (the fat APE) keeps everything in-base.
 
 Each app is a single file (`app.lua` or `app.js`) with optional:
 - `migrations/*.sql`. Database schema (auto-run on startup)
@@ -290,7 +290,7 @@ Auth-stack health probe. Same shape as `hull.web.auth_health.check({include_coun
 
 #### `hull agent tools`
 
-Tool-registry × install-state. Lists every registered side-loadable tool (today: `wamrc`), whether it's available for this platform, whether it's installed, the install path, the expected asset name, and a copy-paste install hint. Independent of `HL_ENABLE_HTTP_CLIENT` — CLI flavors without the installer still list what's registered.
+Tool-registry × install-state. Lists every registered side-loadable tool (today: `wamrc`), whether it's available for this platform, whether it's installed, the install path, the expected asset name, and a copy-paste install hint. Independent of `HL_ENABLE_HTTP_CLIENT` - CLI flavors without the installer still list what's registered.
 
 #### `hull agent sbom`
 
@@ -904,37 +904,30 @@ hull inspect myapp/
 
 ### Build flavors
 
-`hull build` can produce a flavored app binary that drops subsystems the
-app doesn't use. Smaller binary, smaller attack surface. Pass `--flavor`:
+Your app binary is *already* minimal without a flavor: the distributed hull's
+base composes back only the subsystems the app uses (see "The produced binary is
+tailored to the app" above), so a compute app links zero HTTP/Keel/mbedTLS/SQLite
+on its own. `--flavor` is now a thin validation layer on that composable base:
 
 ```bash
-hull build myapp/ --flavor=full          # HTTP on: server + client (default)
-hull build myapp/ --flavor=pure-compute  # no HTTP at all; drops mbedTLS + Keel; smallest
+hull build myapp/ --flavor=full          # the default embedded base (no-op)
+hull build myapp/ --flavor=pure-compute  # validate: reject any HTTP/TLS module
 hull build myapp/ --flavor=auto          # infer the minimal flavor from declared modules
 ```
 
-The build validates the app manifest against the TARGET flavor's caps: a
-declared module that needs a dropped subsystem is rejected at build time
-with a clear error, so you get a build failure rather than a runtime
-surprise. `--flavor=auto` reads the app's declared modules and picks the
-smallest flavor that still satisfies them.
-
-To build a flavored binary on a released hull without compiling the
-platform lib from source, install the per-flavor platform lib first:
-
-```bash
-hull platform list                # show which flavor libs are installed / embedded
-hull platform install pure-compute  # fetch + verify (Ed25519 sig + SHA-256) into ~/.hull/platform/
-hull build myapp/ --flavor=pure-compute   # now uses the cached lib
-```
-
-`hull platform install` uses the same signed-release trust chain as
-`hull update` and `hull tools install` (no new keys). Reference:
+`--flavor=pure-compute` is a preset: it builds on the default composable base and
+rejects an app that declares an HTTP/TLS module at build time (a build failure
+rather than a runtime surprise). The size win comes from the composable base, not
+the flavor, so there is nothing to install: `hull flavor install pure-compute`
+reports "preset flavor, nothing to install", and `hull flavor list` shows it as
+`preset (default base)`. (Pre-built per-flavor platform libs were removed in Phase
+4.3.) `--flavor=auto` reads the app's declared modules and picks the smallest
+flavor that still satisfies them. Reference:
 [docs/build_flavors.md](docs/build_flavors.md).
 
 ### Composable features (`--with=`)
 
-Some large subsystems are **not** in the base binary — they're optional
+Some large subsystems are **not** in the base binary - they're optional
 **features** you bolt on at build time. Where a flavor *slims* the base
 (subtractive), a feature *adds* a subsystem (additive), shipped as its own
 signed archive `libhull_feature-<name>.a`. Two features today, both
@@ -942,7 +935,7 @@ signed archive `libhull_feature-<name>.a`. Two features today, both
 
 - **`duckdb`** - embedded DuckDB OLAP backend, reached via a `duckdb://` DSN on
   `hull.db`.
-- **`gpu`** — wgpu-native GPU compute (`gpu.*`).
+- **`gpu`** - wgpu-native GPU compute (`gpu.*`).
 
 ```bash
 hull feature install gpu          # fetch + verify + cache to ~/.hull/feature/
@@ -953,7 +946,7 @@ hull build myapp/ --with=duckdb --compiler=system   # duckdb is C++: needs syste
 
 `--flavor` and `--with` are orthogonal and compose. If an app declares
 `"hull/gpu@1"` or uses a `duckdb://` DSN but you build **without** the feature,
-the app is rejected (base build) — either compose the feature, or mark the
+the app is rejected (base build) - either compose the feature, or mark the
 module optional (below). Same signed trust chain as `hull flavor install`;
 `make feature-<name>` builds from source. Reference:
 [docs/features_and_flavors.md](docs/features_and_flavors.md).
@@ -961,7 +954,7 @@ module optional (below). Same signed trust chain as `hull flavor install`;
 **Signed builds attest every composed archive.** A `hull build --sign` records
 each archive it composes (the runtime, HTTP core, tui bridge, and any `--with`
 feature) into `package.sig.gethull.composed`, so `--verify-sig` proves the app is
-built from genuine gethull.dev artefacts — not just the base platform lib. This is
+built from genuine gethull.dev artefacts - not just the base platform lib. This is
 automatic; you don't manage it. (On a release-built hull with a real platform key,
 a mismatched composed archive makes `--verify-sig` refuse to boot; today's builds
 carry the placeholder pubkey, which skips the check.) Design:

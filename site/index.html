@@ -523,15 +523,15 @@ hull v0.7.0  &middot;  ca-bundle: embedded  &middot;  platform: embedded  &middo
       <div class="grid grid-cols-2 md:grid-cols-4 gap-x-6 gap-y-8">
 
         <div>
-          <div class="stat-num">5.0<small> MB</small></div>
-          <div class="stat-label">Full binary</div>
-          <div class="stat-foot">HTTP &middot; DB &middot; WASM &middot; Lua &middot; JS, statically linked</div>
+          <div class="stat-num">6.5<small> MB</small></div>
+          <div class="stat-label">Full web app</div>
+          <div class="stat-foot">HTTP &middot; DB &middot; WASM &middot; Lua &middot; JS composed in, statically linked</div>
         </div>
 
         <div>
-          <div class="stat-num">4.4<small> MB</small></div>
+          <div class="stat-num">2.1<small> MB</small></div>
           <div class="stat-label">Pure compute</div>
-          <div class="stat-foot">No HTTP, no DB. CLI / compute service flavor</div>
+          <div class="stat-foot">An <code class="text-paper-100 text-[0.7rem]">app.main</code> build links zero Keel, mbedTLS, SQLite, WASM</div>
         </div>
 
         <div>
@@ -659,11 +659,17 @@ hull v0.7.0  &middot;  ca-bundle: embedded  &middot;  platform: embedded  &middo
             Pure-function WASM via WAMR. No I/O imports,
             gas-metered. Parallel workloads dispatch to WebGPU
             shaders via wgpu-native (Vulkan, Metal, DX12) through the
-            same capability boundary. Every binary is tailored to the
-            app: <code class="text-paper-100">hull build</code> composes back only
-            the interpreter it uses (Lua or JS) and the HTTP layer only if
-            it serves or fetches — a pure compute or CLI tool drops the HTTP
-            stack, Keel and mbedTLS entirely (~785&nbsp;KB leaner). Heavier
+            same capability boundary. Hull is completely modular and
+            composable: the base library drops <em>every</em> reducible
+            subsystem, and <code class="text-paper-100">hull build</code>
+            composes back only what the app uses, statically at build time (not
+            dynamically loaded, no <code class="text-paper-100">dlopen</code>, so
+            the manifest stays enforceable and the build stays reproducible). You
+            get exactly one interpreter (Lua or JS); the HTTP layer, the Keel
+            event loop and server only if it serves or fetches; mbedTLS only if
+            it uses TLS; SQLite only if it uses a database; WASM only if it runs
+            compute. A pure compute or CLI tool links zero Keel, mbedTLS, SQLite
+            or WASM (~2.1&nbsp;MB, versus ~6.5&nbsp;MB for a full web app). Heavier
             subsystems ship as opt-in composable features
             (<code class="text-paper-100">hull build --with=duckdb&hairsp;|&hairsp;postgres&hairsp;|&hairsp;mysql&hairsp;|&hairsp;gpu&hairsp;|&hairsp;tui</code>)
             for DuckDB OLAP, PostgreSQL, MySQL/MariaDB, GPU compute,
@@ -1723,7 +1729,7 @@ hull dev: listening on :8080  (auto-reload)
 
 <span class="tk-com"># Build a sealed, signed, single-binary release.</span>
 $ hull build .
-hull build: my-tool  5.0 MB  signed  ed25519
+hull build: my-tool  6.5 MB  signed  ed25519
 
 <span class="tk-com"># Run on Linux, macOS, or any APE host.</span>
 $ ./my-tool
