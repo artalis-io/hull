@@ -271,28 +271,49 @@ configs) is *tidying*, not the feature/flavor axis - lower value, weaker gates.
 
 ## Platform axis (Darwin / Linux / Cosmopolitan / future Windows)
 
-Orthogonal to the feature axis. The ~22 platform conditionals split two ways,
-and the split dictates where each belongs:
+Orthogonal to the feature axis. Platform conditionals split two ways, and the
+split dictates where each belongs:
 
-- **Platform-GLOBAL policy → `mk/platform/<os>.mk`:** the sandbox backend
-  selection (Linux pledge/landlock, macOS seatbelt no-op, cosmo built-in), the
-  OS link flags (macOS `-framework ...`, Linux `-Wl,-z,relro` + `-ldl`), the ar
-  determinism envelope, and the cosmo fat-APE conventions (`.aarch64/`, poll
-  backend). Driver: a computed `PLATFORM := darwin|linux|cosmo` at the top +
+- **Platform-GLOBAL policy → `mk/platform/<os>.mk`:** OS build policy that is not
+  tied to any one vendor or feature - today just the **sandbox backend**. A
+  computed `PLATFORM := darwin|linux|cosmo` at the top of the Makefile (COSMO
+  checked first, since a cosmo build reports `UNAME_S=Linux`) selects
   `include mk/platform/$(PLATFORM).mk`.
-- **Feature-LOCAL platform choices → stay in the feature fragment:** gpu's
-  `WGPU_FRAMEWORKS` (Metal vs Vulkan), duckdb/tcc/tui cosmo-exclusion. Moving
-  these into a platform file would fragment feature cohesion - the Metal-vs-Vulkan
-  choice belongs *with* gpu, not in `darwin.mk`. **This is the key design call:
-  the platform file holds OS policy, not a feature's per-OS wiring.**
+- **Feature-LOCAL platform choices → stay in the feature/vendor fragment:** gpu's
+  `WGPU_FRAMEWORKS` (Metal vs Vulkan) in `mk/vendor/wgpu.mk`, tcc's ELF-only
+  exclusion, WAMR's per-OS `platform_init`, duckdb/tui cosmo-exclusion. Moving
+  these into a platform file would fragment cohesion - the Metal-vs-Vulkan choice
+  belongs *with* gpu, not in `darwin.mk`. **This is the key design call: the
+  platform file holds OS policy, not a feature's per-OS wiring.**
 
-`mk/platform/windows.mk` is a **stub today**: Hull already runs on Windows via
-the cosmo APE (one binary, no native build), so there is no native-Windows
-toolchain yet. The stub documents the seam a future native port fills - a Windows
-sandbox backend (Restricted Tokens / AppContainer), `VirtualAlloc`/`VirtualProtect`
-for the sealed arena (see docs/security.md §5b), and the MSVC/clang-cl link flags.
+**What the vendor/feature extraction already achieved.** By the time this axis
+landed, the earlier `mk/vendor/*` + `mk/features/*` work had *already* moved
+almost every platform conditional out of the root **with its concern** (WAMR
+per-OS wiring, wgpu frameworks, tcc ELF gate, TUI cosmo force-load). What
+remained platform-GLOBAL in the root was a single block: the **jart/pledge
+polyfill** (the Linux-only `pledge()`/`unveil()` implementation). There are no
+per-OS link libs left in the root (the hull link is the universal
+`-lm -lpthread`), and no darwin/cosmo-global blocks. So the axis is small by
+design - the modularization did the heavy lifting.
 
-**Status:** the platform axis is a scattered, order-sensitive extraction with an
-all-or-nothing coherence requirement (like the coarse sections). Designed here;
-the `windows.mk` stub lands now as the forward seam. The full `mk/platform/*.mk`
-rollout is a follow-up PR.
+Concretely:
+- **`mk/platform/linux.mk`** holds the `PLEDGE_*` vars + the `pledge_%.o` compile
+  rule (no `ifeq(Linux)/ifndef(COSMO)` guard - the file is only included when
+  `PLATFORM=linux`). `PLEDGE_OBJS ?=` in the root defaults it empty elsewhere, so
+  the hull link references it unconditionally.
+- **`mk/platform/{darwin,cosmo}.mk`** are thin seams: macOS uses seatbelt (applied
+  in `sandbox.c`, no compiled polyfill) and cosmo has pledge/unveil built in, so
+  neither needs Makefile content today. They document where any future OS-global
+  policy goes.
+- **`mk/platform/unknown.mk`** is the empty fallback for an unrecognized `uname`.
+
+`mk/platform/windows.mk` is a **stub**: Hull already runs on Windows via the
+cosmo APE (one binary, no native build), so there is no native-Windows toolchain
+yet. The stub documents the seam a future native port fills - a Windows sandbox
+backend (Restricted Tokens / AppContainer), `VirtualAlloc`/`VirtualProtect` for
+the sealed arena (see docs/security.md §5b), and the MSVC/clang-cl link flags.
+
+**Status: implemented.** `PLATFORM` detection + `include mk/platform/$(PLATFORM).mk`
+are live; pledge moved to `linux.mk` verbatim. Validated by resolved-value parity
+(PLATFORM + `PLEDGE_OBJS` identical to the old inline `ifeq` under simulated
+`UNAME_S=Linux`, `COSMO=1`, and native Darwin) plus the full CI matrix.

@@ -30,6 +30,23 @@ endif
 UNAME_S := $(shell uname -s)
 UNAME_M := $(shell uname -m)
 
+# Platform axis: darwin | linux | cosmo (native Windows is future; Windows runs
+# via the cosmo APE today). Selects mk/platform/<PLATFORM>.mk, which holds the
+# OS-global build policy (currently just the sandbox backend: the pledge polyfill
+# is Linux-only). A vendor's or feature's per-OS wiring stays inline with its
+# vendor/feature fragment; only OS-GLOBAL policy lives in mk/platform/. See
+# docs/build_modularization.md ("Platform axis"). COSMO is checked first because
+# a cosmo build reports UNAME_S=Linux but must not pull the Linux pledge polyfill.
+ifdef COSMO
+PLATFORM := cosmo
+else ifeq ($(UNAME_S),Darwin)
+PLATFORM := darwin
+else ifeq ($(UNAME_S),Linux)
+PLATFORM := linux
+else
+PLATFORM := unknown
+endif
+
 # Retry knob for network fetches (toolchains + vendored assets). --retry-all-errors
 # also retries partial transfers (curl exit 18), the observed CI download flake.
 CURL_RETRY := --retry 3 --retry-all-errors --retry-delay 2
@@ -856,47 +873,14 @@ fetch-unicode:
 include mk/vendor/wgpu.mk
 # DuckDB static-libs config -> mk/vendor/duckdb.mk
 include mk/vendor/duckdb.mk
-# ── jart/pledge polyfill (Linux-only: seccomp + landlock) ──────────
+# ── Platform-specific policy (the sandbox backend) ─────────────────
 #
-# Provides real pledge()/unveil() on native Linux.
-# Cosmopolitan has these built-in; macOS uses no-op stubs.
-
-PLEDGE_DIR := $(VENDDIR)/pledge
-PLEDGE_CFLAGS := -std=c11 -O2 -w -D_GNU_SOURCE -I$(PLEDGE_DIR) $(DEPFLAGS)
-
-ifeq ($(UNAME_S),Linux)
-ifndef COSMO
-PLEDGE_SRCS := \
-	$(PLEDGE_DIR)/libc/calls/pledge.c \
-	$(PLEDGE_DIR)/libc/calls/pledge-linux.c \
-	$(PLEDGE_DIR)/libc/calls/unveil.c \
-	$(PLEDGE_DIR)/libc/calls/parsepromises.c \
-	$(PLEDGE_DIR)/libc/calls/landlock_add_rule.c \
-	$(PLEDGE_DIR)/libc/calls/landlock_create_ruleset.c \
-	$(PLEDGE_DIR)/libc/calls/landlock_restrict_self.c \
-	$(PLEDGE_DIR)/libc/calls/commandv.c \
-	$(PLEDGE_DIR)/libc/calls/getcpucount.c \
-	$(PLEDGE_DIR)/libc/calls/islinux.c \
-	$(PLEDGE_DIR)/libc/intrin/promises.c \
-	$(PLEDGE_DIR)/libc/intrin/pthread_setcancelstate.c \
-	$(PLEDGE_DIR)/libc/elf/checkelfaddress.c \
-	$(PLEDGE_DIR)/libc/elf/getelfsegmentheaderaddress.c \
-	$(PLEDGE_DIR)/libc/str/classifypath.c \
-	$(PLEDGE_DIR)/libc/str/endswith.c \
-	$(PLEDGE_DIR)/libc/str/isabspath.c \
-	$(PLEDGE_DIR)/libc/fmt/joinpaths.c \
-	$(PLEDGE_DIR)/libc/fmt/sizetol.c \
-	$(PLEDGE_DIR)/libc/runtime/isdynamicexecutable.c \
-	$(PLEDGE_DIR)/libc/sysv/calls/ioprio_set.c \
-	$(PLEDGE_DIR)/libc/x/xdie.c \
-	$(PLEDGE_DIR)/libc/x/xjoinpaths.c \
-	$(PLEDGE_DIR)/libc/x/xmalloc.c \
-	$(PLEDGE_DIR)/libc/x/xrealloc.c \
-	$(PLEDGE_DIR)/libc/x/xstrcat.c \
-	$(PLEDGE_DIR)/libc/x/xstrdup.c
-PLEDGE_OBJS := $(patsubst $(PLEDGE_DIR)/%.c,$(BUILDDIR)/pledge_%.o,$(PLEDGE_SRCS))
-endif
-endif
+# PLATFORM is computed near the top. mk/platform/linux.mk defines the
+# PLEDGE_* vars + compile rule (the Linux pledge/unveil polyfill);
+# darwin/cosmo are thin seams (their OS specifics live with their
+# vendor/feature). PLEDGE_OBJS defaults empty on non-Linux so the hull
+# link references it unconditionally.
+include mk/platform/$(PLATFORM).mk
 PLEDGE_OBJS ?=
 
 # ── Hull source files ───────────────────────────────────────────────
@@ -2893,10 +2877,6 @@ $(TWEETNACL_OBJ): $(TWEETNACL_DIR)/tweetnacl.c | $(BUILDDIR)
 	$(CC) $(TWEETNACL_CFLAGS) -I$(TWEETNACL_DIR) -c -o $@ $<
 
 # jart/pledge polyfill (vendored, Linux only, relaxed warnings)
-# Flatten libc/calls/pledge.c → build/pledge_libc_calls_pledge.o
-$(BUILDDIR)/pledge_%.o: $(PLEDGE_DIR)/%.c | $(BUILDDIR)
-	@mkdir -p $(dir $@)
-	$(CC) $(PLEDGE_CFLAGS) -c -o $@ $<
 
 # WAMR (vendored, relaxed warnings)
 # Flatten vendor/wamr/core/iwasm/... → build/wamr_core_iwasm_...
