@@ -169,13 +169,26 @@ enumeration, and the install catalog all follow.
 
 ## Phasing (each phase independently green)
 
-0. **Design + PoC.** This doc + `define-feature` proven on one representative
-   feature (image: core + 2 bridges + embed) with `make` green. De-risks the
-   macro before touching the other 13.
-1. **Physical split.** Move coarse sections into `mk/*.mk` via `include`,
-   behavior-preserving. No template yet. `make check` green.
-2. **Featurize.** Convert each feature to `mk/features/<name>.mk` +
-   `define-feature`. One feature per commit, `make && make test` after each.
+**Structure precedes template: Phase 1 (split) before Phase 2 (macro).** The
+split is the order-sensitive, higher-risk step (see the `make -pn` gate below);
+keeping it a *verbatim relocation* isolates that risk and makes it exactly
+verifiable. Applying the macro is trivial once each feature lives in its own
+fragment, and doing bulk macro conversions in the 5300-line monolith would
+re-create the scattered-hunt problem the split exists to remove.
+
+0. **Design + macro PoC.** This doc + `define-feature-archive` proven on one
+   feature (image: core + 2 bridges) with `make` green + `e2e-feature-image`
+   passing. This step is an *out-of-order mechanism proof* - it applies the
+   macro in the monolith to de-risk the machinery. It is NOT Phase 2 starting;
+   the monolith `eval` call relocates into `mk/features/image.mk` in Phase 1.
+1. **Physical split (verbatim).** Move the coarse sections into `mk/*.mk` via
+   `include` at their exact original positions, AND move each feature's rules
+   into `mk/features/<name>.mk`, unchanged. No new templating beyond the Phase 0
+   PoC. `make check` green + `make -pn` diff clean after each move.
+2. **Featurize.** Within each fragment, convert the hand-written archive rules to
+   `$(call define-feature-archive,...)` (+ normalize sqlite's raw-ar → the macro,
+   fixing the F5 `TRUST_FEATURE_LIBS` bypass; add `define-feature-bundle` for
+   duckdb/gpu). One feature per commit, `make && make test` after each.
 3. **build.lua.** `COMPOSE_SPECS` + generic resolver; `main()` stages.
 4. **Cross-file.** `print-feature-*` helpers; release.yml consumes them;
    feature.c parity check (or codegen).
