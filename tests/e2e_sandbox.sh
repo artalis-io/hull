@@ -446,6 +446,50 @@ else
     fi
 fi
 
+# ── Test 7: CLI app.main writing to a real TTY under the sandbox ──────
+#
+# glibc stdio runs isatty() -> ioctl(TCGETS) on first write to a
+# character device (a real tty). The sandbox grants the `tty` pledge
+# promise (which covers that ioctl) only when a terminal is present or
+# the app is a TUI; a plain app.main printing to a terminal must still
+# work. The bug is invisible under a pipe (glibc skips the isatty probe
+# for non-char-device fds), which is why it escaped CI - so this test
+# drives hull under a PTY. Native-Linux-only: that is the platform whose
+# seccomp filter SIGKILLs the ioctl (macOS seatbelt returns EPERM from
+# isatty - graceful "not a tty", no crash; cosmo/OpenBSD pledge differ).
+
+echo ""
+echo "=== Test 7: CLI app.main writes to a TTY under the sandbox ==="
+
+if [ "$UNAME_S" != "Linux" ] || [ "${IS_COSMO:-0}" = "1" ]; then
+    skip "TTY-write regression — native Linux only"
+elif ! command -v python3 >/dev/null 2>&1; then
+    skip "TTY-write regression — python3 (pty) unavailable"
+else
+    cat > "$WORKDIR/cli.lua" << 'EOF'
+app.manifest({ modules = {} })
+app.main(function(ctx)
+    ctx.stdout:write("cli-tty-ok\n")
+    return 0
+end)
+EOF
+    # Allocate a PTY so isatty(stdout) is true, exercising the char-device
+    # path. pty.spawn copies the child's tty output onto our stdout and
+    # returns its wait status; a seccomp SIGKILL surfaces as !WIFEXITED.
+    TTY_OUT=$(python3 - "$HULL" "$WORKDIR/cli.lua" <<'PY' 2>&1
+import os, pty, sys
+status = pty.spawn([sys.argv[1], sys.argv[2]])
+sys.exit(os.WEXITSTATUS(status) if os.WIFEXITED(status) else 1)
+PY
+)
+    RC=$?
+    if [ "$RC" = "0" ] && printf '%s' "$TTY_OUT" | grep -q "cli-tty-ok"; then
+        pass "app.main stdout under a PTY not killed by the sandbox"
+    else
+        fail "app.main under a PTY failed (exit $RC): $TTY_OUT"
+    fi
+fi
+
 # ── Summary ──────────────────────────────────────────────────────────
 
 echo ""
