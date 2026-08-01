@@ -195,14 +195,20 @@ re-create the scattered-hunt problem the split exists to remove.
 
 ## Validation (behavior-preserving)
 
-- **`make -pn` database diff (the ordering gate).** Dump Make's parsed
-  variable + rule database before and after each phase and diff it. This is the
-  primary guard because the hazard is *evaluation order*, not just output:
-  `CFLAGS` is `+=`-accumulated across the whole file (from ~line 245, through the
-  flags block, and beyond), so a fragment `include`d at the wrong position
-  silently reorders flags in a way an archive diff would not catch. Every
-  `mk/*.mk` that touches `CFLAGS` (or any `+=`/`override` variable) must be
-  included at its **exact original textual position**; "include early" is a bug.
+- **Resolved-value diff (the ordering gate).** The hazard is *evaluation order*,
+  not just output: `CFLAGS` is `+=`-accumulated across the whole file (from
+  ~line 245, through the flags block, and beyond), so a fragment `include`d at
+  the wrong position silently reorders flags in a way an archive diff would not
+  catch. Every `mk/*.mk` that touches `CFLAGS` (or any `+=`/`override` variable)
+  must be included at its **exact original textual position**. Gate: dump the
+  *resolved values* of the moved/affected variables with
+  `make -pn 2>/dev/null | grep -E '^(CFLAGS|HL_...) '` before and after, and diff
+  (normalize the `-DHL_VERSION` git-describe string, which carries a `-dirty`
+  suffix once the tree has uncommitted edits). Do NOT diff the *whole* `make -pn`
+  dump: touching the Makefile marks the tree stale, so the dry-run leaks rebuild
+  recipe echoes into the dump and drowns the real signal. Follow with a full
+  `make` (which must reach "Nothing to be done" on a second run) + the e2e
+  suite.
 - `make` (default), `make platform`, `make check` (clean + ASan + test + e2e),
   `make self-build` (reproducible hull→hull2→hull3).
 - `make e2e-feature-runtime / -tui / -wasm / -image / -duckdb / -gpu`,
