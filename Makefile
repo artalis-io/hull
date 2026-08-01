@@ -2916,31 +2916,8 @@ include mk/features/tls.mk
 
 # (IMG_FEATURE_* registration vars moved to mk/features/image.mk.)
 
-# libhull_feature-lua.a / -js.a: a runtime as a composable feature archive.
-# Bundles the runtime objects, its vendored VM, its manifest extractor, and its
-# stdlib VFS array (hl_stdlib_<rt>_entries). The tui bridge (mod_tui) is excluded
-# - it belongs to libhull_feature-tui.a. Phase 3c builds these additively (base
-# still dual, objects already compiled); Phase 3b flips the base runtime-less and
-# force-loads them into hull. Whole-archive at compose (no single anchor symbol).
-# Exclude the tui bridge (-> libhull_feature-tui.a) and the Lua tool VM bindings
-# (lua_rt_mod_tool.o: tool.extract_manifest_js etc., toolchain-only; whole-
-# archiving the runtime must not force-load them - they pull the JS manifest
-# extractor the runtime-less base no longer carries). hull links them directly.
-
-FEATURE_LUA_OBJS := $(filter-out $(BUILDDIR)/lua_rt_mod_tui.o $(BUILDDIR)/lua_rt_mod_tool.o $(BUILDDIR)/lua_rt_mod_compute.o $(BUILDDIR)/lua_rt_mod_db_udf.o $(BUILDDIR)/lua_rt_mod_image.o $(FEATURE_HTTP_LUA_OBJS),$(LUA_RT_OBJS)) \
-                    $(LUA_OBJS) $(BUILDDIR)/manifest_lua.o $(STDLIB_LUA_REGISTRY_O)
-FEATURE_JS_OBJS  := $(filter-out $(BUILDDIR)/js_mod_tui.o $(BUILDDIR)/js_mod_compute.o $(BUILDDIR)/js_mod_db_udf.o $(BUILDDIR)/js_mod_image.o $(FEATURE_HTTP_JS_OBJS),$(JS_RT_OBJS)) \
-                    $(QJS_OBJS) $(BUILDDIR)/manifest_js.o $(STDLIB_JS_REGISTRY_O)
-
-feature-lua: $(BUILDDIR)/libhull_feature-lua.a
-.PHONY: feature-lua
-$(BUILDDIR)/libhull_feature-lua.a: $(FEATURE_LUA_OBJS) | $(BUILDDIR)
-	$(call AR_FEATURE_LIB,$(FEATURE_LUA_OBJS))
-
-feature-js: $(BUILDDIR)/libhull_feature-js.a
-.PHONY: feature-js
-$(BUILDDIR)/libhull_feature-js.a: $(FEATURE_JS_OBJS) | $(BUILDDIR)
-	$(call AR_FEATURE_LIB,$(FEATURE_JS_OBJS))
+# Lua + JS runtime features (both archives + shared embed) moved to mk/features/runtime.mk
+include mk/features/runtime.mk
 
 
 # Rebuild every feature archive when the Makefile changes. The archives are
@@ -3113,13 +3090,6 @@ $(EMBEDDED_TEMPLATES_H): templates/app_main.c templates/entry.h | $(BUILDDIR)
 	@xxd -i templates/app_main.c | sed 's/templates_app_main_c/hl_embedded_app_main_c/g' | $(XXD_CONST_PIPE) >> $@
 	@xxd -i templates/entry.h | sed 's/templates_entry_h/hl_embedded_entry_h/g' | $(XXD_CONST_PIPE) >> $@
 
-# Embed both runtime feature archives so the runtime-less native base composes
-# one at build time with no `hull feature install` (the runtime is mandatory).
-EMBEDDED_RUNTIME_H := $(BUILDDIR)/embedded_runtime.h
-$(EMBEDDED_RUNTIME_H): $(BUILDDIR)/libhull_feature-lua.a $(BUILDDIR)/libhull_feature-js.a | $(BUILDDIR)
-	@echo "/* Auto-generated - do not edit */" > $@
-	@xxd -i $(BUILDDIR)/libhull_feature-lua.a | sed 's/build_libhull_feature_lua_a/hl_embedded_feature_lua_a/g' | $(XXD_CONST_PIPE) >> $@
-	@xxd -i $(BUILDDIR)/libhull_feature-js.a  | sed 's/build_libhull_feature_js_a/hl_embedded_feature_js_a/g'   | $(XXD_CONST_PIPE) >> $@
 
 
 # Embed the per-runtime tui bridges too (issue #114, Phase D). The tui cap core
