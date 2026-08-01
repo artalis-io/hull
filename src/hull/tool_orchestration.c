@@ -262,10 +262,10 @@ static int l_tool_modules_resolve(lua_State *L)
      * switch (any HTTP half OR a network DB backend), moved to compose time. Here
      * we report the module-inferable part: HTTP (which also covers hull/smtp, an
      * http-client module, and hull/http-client's https fetches). `hull build`
-     * will OR in the network-DB signal (a postgres/mysql --with or net DSN, the
-     * same signal those backend features use) when the TLS archive lands (the
-     * Keel move). DORMANT today: nothing composes on it yet -- the base still
-     * links mbedTLS + Keel; this is Phase-0 scaffolding for the compose gate. */
+     * ORs in the network-DB signal (a postgres/mysql --with, whose wire backend
+     * links the shared tls_client for sslmode) at compose time. ACTIVE: on a
+     * TLS-less base (the release SLIM base) an HTTP or net-DB app composes
+     * libhull_feature-tls.a; a plaintext app links zero mbedTLS. */
     lua_pushboolean(L, (req_caps & HL_MOD_CAP_HTTP) ? 1 : 0);
     lua_setfield(L, -2, "needs_tls");
 
