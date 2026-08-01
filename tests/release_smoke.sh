@@ -55,28 +55,26 @@ assert_contains() {
     fi
 }
 
-# hull flavor install <flavor> — LIVE fetch + verify of the published
-# per-flavor platform lib(s). Native binaries pull one
-# libhull_platform-<flavor>-<arch>.a; cosmo binaries pull the dual-arch pair
-# libhull_platform-<flavor>.{x86_64,aarch64}-cosmo.a. Uses an isolated HOME so
-# a real ~/.hull/platform is never touched. Works for both flavors of binary.
+# hull flavor install <flavor> — since Phase 4.3, pure-compute is a build.lua
+# PRESET on the default composable base (which already drops HTTP/TLS/Keel and
+# composes each back per app). There is no per-flavor platform lib to fetch, so
+# `hull flavor install pure-compute` is a no-op that reports the preset and
+# installs nothing. Uses an isolated HOME so a real ~/.hull/platform is never
+# touched. (A FUTURE non-preset flavor with a real asset stem would
+# download+verify a lib here; there is no such flavor today.)
 smoke_platform_install() {
     echo ""
-    echo "── hull flavor install pure-compute (LIVE GitHub HTTPS download) ──"
+    echo "── hull flavor install pure-compute (preset -- nothing to install) ──"
     PLAT_HOME=$(mktemp -d)
     OUT=$(HOME="$PLAT_HOME" "$HULL" flavor install pure-compute 2>&1)
     RC=$?
     echo "$OUT" | sed 's/^/    /'
-    assert "exits 0"                         [ "$RC" -eq 0 ]
-    assert_contains "SHA-256 verified"       "$OUT" "SHA-256 verified"
-    if echo "$OUT" | grep -q "release signature verified"; then
-        echo "  ok  release signature verified (Ed25519)"
-        PASS=$((PASS + 1))
-    fi
+    assert "exits 0"                              [ "$RC" -eq 0 ]
+    assert_contains "reports preset (nothing to install)"  "$OUT" "preset"
     N=$(ls "$PLAT_HOME"/.hull/platform/libhull_platform-pure-compute*.a 2>/dev/null | wc -l | tr -d ' ')
-    assert "flavor lib(s) landed in ~/.hull/platform (got $N)"  [ "$N" -ge 1 ]
+    assert "preset installs no lib (got $N, want 0)"  [ "$N" -eq 0 ]
     OUT=$(HOME="$PLAT_HOME" "$HULL" flavor list 2>&1)
-    assert_contains "list shows pure-compute installed"  "$OUT" "pure-compute"
+    assert_contains "list shows pure-compute"     "$OUT" "pure-compute"
     rm -rf "$PLAT_HOME"
 }
 
