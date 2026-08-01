@@ -3252,23 +3252,18 @@ $(BUILDDIR)/libhull_feature-sqlite-js.a: $(BUILDDIR)/js_mod_db_udf.o | $(BUILDDI
 # (~146 KB that leaves the base). Composed back at `hull build` and embedded in
 # hull (embedded_image.h). The per-runtime image binding (mod_image) is a
 # separate archive below, like the wasm compute bridge.
+#
+# Phase 0 PoC of the build modularization (docs/build_modularization.md): the
+# archive rules + `feature-*` phonies come from the shared define-feature-archive
+# macro (mk/feature.mk) instead of being hand-written. Behaviour-identical.
+include mk/feature.mk
 FEATURE_IMAGE_CORE := $(FEATURE_IMAGE_OBJS) $(STB_OBJ)
-feature-image: $(BUILDDIR)/libhull_feature-image.a
-.PHONY: feature-image
-$(BUILDDIR)/libhull_feature-image.a: $(FEATURE_IMAGE_CORE) | $(BUILDDIR)
-	$(call AR_FEATURE_LIB,$(FEATURE_IMAGE_CORE))
+$(eval $(call define-feature-archive,image,$(FEATURE_IMAGE_CORE)))
 
 # Per-runtime image-binding bridges (mod_image). Tiny (one object each);
 # embedded in hull + composed for the app's runtime alongside the image core.
-feature-image-lua: $(BUILDDIR)/libhull_feature-image-lua.a
-.PHONY: feature-image-lua
-$(BUILDDIR)/libhull_feature-image-lua.a: $(BUILDDIR)/lua_rt_mod_image.o | $(BUILDDIR)
-	$(call AR_FEATURE_LIB,$(BUILDDIR)/lua_rt_mod_image.o)
-
-feature-image-js: $(BUILDDIR)/libhull_feature-image-js.a
-.PHONY: feature-image-js
-$(BUILDDIR)/libhull_feature-image-js.a: $(BUILDDIR)/js_mod_image.o | $(BUILDDIR)
-	$(call AR_FEATURE_LIB,$(BUILDDIR)/js_mod_image.o)
+$(eval $(call define-feature-archive,image-lua,$(BUILDDIR)/lua_rt_mod_image.o))
+$(eval $(call define-feature-archive,image-js,$(BUILDDIR)/js_mod_image.o))
 
 # libhull_feature-tls.a: the mbedTLS transport + crypto backends as a composable
 # feature (docs/tls_feature.md, a2). Bundles the mbedTLS-consuming TUs -- the two
