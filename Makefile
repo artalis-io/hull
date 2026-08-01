@@ -2912,30 +2912,8 @@ $(BUILDDIR)/libhull_feature-mysql.a: $(BUILDDIR)/cap_db_mysql.o $(BUILDDIR)/cap_
 	$(AR) rcs $@ $(BUILDDIR)/cap_db_mysql.o $(BUILDDIR)/cap_mysql_conn.o $(BUILDDIR)/cap_mysqlwire.o
 	@echo "built $@ ($$(du -h $@ | cut -f1))"
 
-# ── SQLite feature archive (SQLite as a composable feature, Phase B) ──
-# docs/sqlite_feature.md. Bundles the vendored SQLite engine + the SQLite
-# backend + UDF bridge + the SQLite-only agent introspection into ONE archive
-# so the base can become SQLite-less (Phase B.2) and compose it back (Phase
-# B.3). Unlike postgres/mysql (installable, off-by-default, filtered out of the
-# base), SQLite is still in the default base today, so this target just packages
-# the same objects into the archive as the additive first step; the base-flip +
-# auto-compose land in later Phase B increments. The strong hl_db_feature_backends
-# override is generated at compose (merges with any --with backends), not baked
-# into the archive. agent/db.c references hl_agent_open_app_db + hl_agent_write_error
-# from the base today; Phase B.2 splits agent/helpers.c so the opener moves here.
-FEATURE_SQLITE_OBJS := $(SQLITE_OBJ) $(BUILDDIR)/cap_db.o \
-                       $(BUILDDIR)/cap_db_sqlite.o \
-                       $(BUILDDIR)/cap_db_udf.o $(BUILDDIR)/agent_db.o \
-                       $(BUILDDIR)/agent_sql.o $(BUILDDIR)/agent_schema_diff.o \
-                       $(BUILDDIR)/agent_db_open.o
-feature-sqlite:
-	$(MAKE) $(BUILDDIR)/libhull_feature-sqlite.a HL_ENABLE_SQLITE=1
-.PHONY: feature-sqlite
-
-$(BUILDDIR)/libhull_feature-sqlite.a: $(FEATURE_SQLITE_OBJS) | $(BUILDDIR)
-	@rm -f $@
-	$(AR) rcs $@ $(FEATURE_SQLITE_OBJS)
-	@echo "built $@ ($$(du -h $@ | cut -f1))"
+# SQLite feature (archive + udf bridges + both embeds) moved to mk/features/sqlite.mk
+include mk/features/sqlite.mk
 
 # ── GPU feature archive (composable feature: hull build --with=gpu) ──
 # libhull_feature-gpu.a bundles the wgpu backend object (cap_gpu_wgpu.o, which
@@ -3098,15 +3076,6 @@ ifneq ($(filter 1,$(HL_ENABLE_SQLITE) $(HL_SQLITE_FEATURE)),)
 $(BUILDDIR)/lua_rt_mod_db_udf.o $(BUILDDIR)/js_mod_db_udf.o: CFLAGS += -DHL_ENABLE_SQLITE
 endif
 
-feature-sqlite-lua: $(BUILDDIR)/libhull_feature-sqlite-lua.a
-.PHONY: feature-sqlite-lua
-$(BUILDDIR)/libhull_feature-sqlite-lua.a: $(BUILDDIR)/lua_rt_mod_db_udf.o | $(BUILDDIR)
-	$(call AR_FEATURE_LIB,$(BUILDDIR)/lua_rt_mod_db_udf.o)
-
-feature-sqlite-js: $(BUILDDIR)/libhull_feature-sqlite-js.a
-.PHONY: feature-sqlite-js
-$(BUILDDIR)/libhull_feature-sqlite-js.a: $(BUILDDIR)/js_mod_db_udf.o | $(BUILDDIR)
-	$(call AR_FEATURE_LIB,$(BUILDDIR)/js_mod_db_udf.o)
 
 # (Image feature moved to mk/features/image.mk - included above near the
 # FEATURE_*_OBJS cluster, before the PLATFORM_CAP_OBJS aggregate references it.)
@@ -3367,32 +3336,11 @@ $(EMBEDDED_TUI_H): $(BUILDDIR)/libhull_feature-tui-lua.a $(BUILDDIR)/libhull_fea
 	@xxd -i $(BUILDDIR)/libhull_feature-tui-js.a  | sed 's/build_libhull_feature_tui_js_a/hl_embedded_feature_tui_js_a/g'   | $(XXD_CONST_PIPE) >> $@
 
 
-# Embed the per-runtime SQLite UDF bridges too (Phase C.2b). The runtime archive
-# is SQLite-free; the default distributed hull composes the app's runtime bridge
-# back whenever the app uses a udf-capable DB, with no install.
-EMBEDDED_SQLITE_RT_H := $(BUILDDIR)/embedded_sqlite_rt.h
-$(EMBEDDED_SQLITE_RT_H): $(BUILDDIR)/libhull_feature-sqlite-lua.a $(BUILDDIR)/libhull_feature-sqlite-js.a | $(BUILDDIR)
-	@echo "/* Auto-generated - do not edit */" > $@
-	@xxd -i $(BUILDDIR)/libhull_feature-sqlite-lua.a | sed 's/build_libhull_feature_sqlite_lua_a/hl_embedded_feature_sqlite_lua_a/g' | $(XXD_CONST_PIPE) >> $@
-	@xxd -i $(BUILDDIR)/libhull_feature-sqlite-js.a  | sed 's/build_libhull_feature_sqlite_js_a/hl_embedded_feature_sqlite_js_a/g'   | $(XXD_CONST_PIPE) >> $@
 
 
 CFLAGS += -DHL_BUILD_EMBEDDED -DHL_BUILD_EMBEDDED_RUNTIME -DHL_BUILD_EMBEDDED_HTTP -DHL_BUILD_EMBEDDED_TUI -DHL_BUILD_EMBEDDED_WASM -DHL_BUILD_EMBEDDED_SQLITE_RT -DHL_BUILD_EMBEDDED_IMAGE
 $(BUILD_ASSET_OBJ): $(EMBEDDED_PLATFORM_H) $(EMBEDDED_TEMPLATES_H) $(EMBEDDED_RUNTIME_H) $(EMBEDDED_HTTP_H) $(EMBEDDED_TUI_H) $(EMBEDDED_WASM_H) $(EMBEDDED_SQLITE_RT_H) $(EMBEDDED_IMAGE_H)
 
-# Phase D: when the app-build base is SQLite-less, embed the SQLite ENGINE
-# archive (cap/db_sqlite + vendored sqlite3 + FTS5 + udf cap + sqlite agent) so a
-# db app auto-composes it with no `hull feature install sqlite`. Mirrors the WASM
-# core embed. Only pulled when HL_APP_BASE_SQLITELESS=1 (else the engine is
-# in-base and this would be ~2 MB of dormant bloat).
-ifeq ($(HL_APP_BASE_SQLITELESS),1)
-EMBEDDED_SQLITE_H := $(BUILDDIR)/embedded_sqlite.h
-$(EMBEDDED_SQLITE_H): $(BUILDDIR)/libhull_feature-sqlite.a | $(BUILDDIR)
-	@echo "/* Auto-generated - do not edit */" > $@
-	@xxd -i $(BUILDDIR)/libhull_feature-sqlite.a | sed 's/build_libhull_feature_sqlite_a/hl_embedded_feature_sqlite_a/g' | $(XXD_CONST_PIPE) >> $@
-CFLAGS += -DHL_BUILD_EMBEDDED_SQLITE
-$(BUILD_ASSET_OBJ): $(EMBEDDED_SQLITE_H)
-endif
 
 
 # Keel feature archive embed (Phase 4.2b): keel is folded into the SLIM base, so
