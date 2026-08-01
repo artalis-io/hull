@@ -22,11 +22,4 @@ feature-gpu:
 	$(MAKE) $(BUILDDIR)/libhull_feature-gpu.a HL_ENABLE_GPU=1
 .PHONY: feature-gpu
 
-$(BUILDDIR)/libhull_feature-gpu.a: $(BUILDDIR)/cap_gpu_wgpu.o $(WGPU_LIB) | $(BUILDDIR)
-	@rm -f $@
-	$(AR) rcs $@ $(BUILDDIR)/cap_gpu_wgpu.o
-	@tmproot=$$(mktemp -d); n=0; for a in $(WGPU_LIB); do \
-		mkdir -p $$tmproot/$$n && ( cd $$tmproot/$$n && $(AR) x $(CURDIR)/$$a ) && \
-		$(AR) rcs $(CURDIR)/$@ $$tmproot/$$n/*.o && n=$$((n+1)); \
-	done; rm -rf $$tmproot
-	@echo "built $@ ($$(du -h $@ | cut -f1))"
+$(eval $(call define-feature-bundle,gpu,$(BUILDDIR)/cap_gpu_wgpu.o,WGPU_LIB))
