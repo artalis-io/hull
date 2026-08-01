@@ -417,46 +417,20 @@ endif
 #   HTTP at all" — granular guards (HL_ENABLE_HTTP_{SERVER,CLIENT})
 #   are only used where the distinction matters.
 
-# ── SQLite (vendored amalgamation) ─────────────────────────────────
+# SQLite vendored config -> mk/vendor/sqlite.mk
+include mk/vendor/sqlite.mk
 
-SQLITE_DIR    := $(VENDDIR)/sqlite
-ifeq ($(HL_ENABLE_SQLITE),1)
-SQLITE_OBJ    := $(BUILDDIR)/sqlite3.o
-else
-SQLITE_OBJ    :=
-endif
-SQLITE_CFLAGS := -std=c11 -O2 -w -DSQLITE_THREADSAFE=1 -DSQLITE_ENABLE_FTS5
+# log.c vendored config -> mk/vendor/log.mk
+include mk/vendor/log.mk
 
-# ── rxi/log.c ─────────────────────────────────────────────────────────
+# sh_arena vendored config -> mk/vendor/sh_arena.mk
+include mk/vendor/sh_arena.mk
 
-LOG_DIR    := $(VENDDIR)/log.c
-LOG_OBJ    := $(BUILDDIR)/log.o
-LOG_CFLAGS := -std=c11 -O2 -w -DLOG_USE_COLOR
+# sh_json vendored config -> mk/vendor/sh_json.mk
+include mk/vendor/sh_json.mk
 
-# ── sh_arena (vendored from otto) ────────────────────────────────────
-
-SH_ARENA_DIR    := $(VENDDIR)/sh_arena
-SH_ARENA_OBJ    := $(BUILDDIR)/sh_arena.o
-SH_ARENA_CFLAGS := -std=c11 -O2 -w
-# Under ASan (`make debug`) instrument the arena TU so its manual ASan
-# poison/unpoison calls activate (dangling-into-arena reads in Hull code
-# become hard ASan errors). Other vendored TUs intentionally stay
-# uninstrumented; this one is tiny and the integration needs it ASan-aware.
-ifdef DEBUG
-SH_ARENA_CFLAGS += -fsanitize=address,undefined -fno-omit-frame-pointer
-endif
-
-# ── sh_json (vendored from otto) ──────────────────────────────────────
-
-SH_JSON_DIR    := $(VENDDIR)/sh_json
-SH_JSON_OBJ    := $(BUILDDIR)/sh_json.o
-SH_JSON_CFLAGS := -std=c11 -O2 -w
-
-# ── TweetNaCl (Ed25519 signatures) ─────────────────────────────────
-
-TWEETNACL_DIR    := $(VENDDIR)/tweetnacl
-TWEETNACL_OBJ    := $(BUILDDIR)/tweetnacl.o
-TWEETNACL_CFLAGS := -std=c11 -O2 -w
+# tweetnacl vendored config -> mk/vendor/tweetnacl.mk
+include mk/vendor/tweetnacl.mk
 
 # ── HL_ENABLE_IMAGE (image codecs, on by default) ─────────────────────
 # The image decode/encode subsystem: cap/image.c + cap/image_stb.c + the
@@ -473,30 +447,11 @@ ifeq ($(HL_ENABLE_IMAGE),1)
 CFLAGS += -DHL_ENABLE_IMAGE
 endif
 
-# ── stb_image (image decode/encode) ──────────────────────────────────
+# stb vendored config -> mk/vendor/stb.mk
+include mk/vendor/stb.mk
 
-STB_DIR     := $(VENDDIR)/stb
-STB_CFLAGS  := -std=c11 -O2 -w
-
-ifeq ($(HL_ENABLE_IMAGE),1)
-STB_OBJ     := $(BUILDDIR)/stb_impl.o
-
-$(STB_OBJ): $(STB_DIR)/stb_impl.c | $(BUILDDIR)
-	$(CC) $(STB_CFLAGS) -I$(STB_DIR) -c -o $@ $<
-else
-# Image codecs disabled: no stb object linked (image's sole consumer).
-STB_OBJ     :=
-endif
-
-# ── Unicode tables (TUI cell-width lookup) ──────────────────────────
-#
-# vendor/unicode/eaw.h is checked in (~28 KB) and included by
-# src/hull/cap/tui_width.c via "unicode/eaw.h". The Unicode data
-# files (EastAsianWidth.txt + UnicodeData.txt) and the generator
-# (gen.lua) live alongside it; `make fetch-unicode` refreshes the
-# data and regenerates the header.
-
-UNICODE_DIR := $(VENDDIR)/unicode
+# unicode tables vendored config -> mk/vendor/unicode.mk
+include mk/vendor/unicode.mk
 
 # ── Apply DEPFLAGS to every vendor CFLAGS variant ────────────────────
 # Bundled here (rather than inline in each := definition) so the policy
