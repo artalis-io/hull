@@ -88,12 +88,38 @@ FEAT_image_EMBED     := 1               # embedded_image.h
 $(eval $(call define-feature,image))
 ```
 
+### Build on the existing `AR_FEATURE_LIB` (do not re-invent the ar body)
+
+The Makefile already has a `define AR_FEATURE_LIB` macro used by **17** archive
+rules; it encapsulates the `ar rcs` body AND the `TRUST_FEATURE_LIBS=1`
+release-stage-3 branch (trust a pre-built signed artifact instead of rebuilding).
+So the recipe body is *already* factored - the real duplication is the rule
+**scaffolding** around it. `define-feature` generates the scaffolding and calls
+`AR_FEATURE_LIB`; it never re-implements the ar step.
+
+### Three archive-rule shapes (the macro is not one-size-fits-all)
+
+1. **Simple** (`$(call AR_FEATURE_LIB,$(FEAT_<NAME>_CORE_OBJS))`) - 17 rules
+   (http, keel, tls, wasm, image, lua, js, postgres, mysql, tui, and the
+   per-runtime bridges). `define-feature` covers these.
+2. **Inconsistent** - `sqlite`'s rule currently uses a raw `$(AR) rcs` instead of
+   `AR_FEATURE_LIB` (Makefile ~line 3054), so it **bypasses the
+   `TRUST_FEATURE_LIBS` trust branch** that `feature-sqlite` relies on at release
+   stage 3. Routing it through the macro during the refactor **fixes** this latent
+   inconsistency - a correctness payoff, not just tidiness.
+3. **Bundle** - `duckdb` and `gpu` (only these two) merge vendored static
+   archives (`$(DUCKDB_ARCHIVES)` / `$(WGPU_LIB)`) via a `mktemp -d; for a in ...;
+   ar x; ar rcs` recipe. This is a distinct shape; add a small
+   `define-feature-bundle` variant (the two differ only by the archive-list var),
+   or keep the two recipes hand-written in `duckdb.mk` / `gpu.mk`.
+
 ### `define-feature` macro contract
 
 `$(call define-feature,NAME)` reads `FEAT_<NAME>_*` vars and emits:
 
-- `$(BUILDDIR)/libhull_feature-NAME.a` (ar of `CORE_OBJS`; C++/`base_group`
-  variants selected by the quirk vars)
+- `$(BUILDDIR)/libhull_feature-NAME.a` via `$(call AR_FEATURE_LIB,...)`
+  (`base_group`/`cxx` are link-time quirks consumed by build.lua at compose, not
+  by the ar step)
 - `feature-NAME:` phony target (what release.yml invokes)
 - one bridge archive rule per `FEAT_<NAME>_RT` runtime
   (`libhull_feature-NAME-<rt>.a`)
@@ -106,8 +132,9 @@ Feature-specific quirks stay explicit parameters, never hidden in the macro:
 `FEAT_<NAME>_CXX`, `_WHOLE_ARCHIVE`, `_BASE_GROUP`, `_EXTRA_LIBS`, `_HOOK`.
 
 GNU Make `define`/`$(eval)`/`$(call)` is the mechanism; it is kept to the
-mechanical rule-emission only. Anything conditional or quirky stays as plain
-Make in the per-feature fragment, where a misfire is legible.
+mechanical rule-emission only. Anything conditional or quirky (the bundle shape,
+cosmo) stays as plain Make in the per-feature fragment, where a misfire is
+legible.
 
 ## build.lua + feature_compose.lua
 
@@ -155,6 +182,14 @@ enumeration, and the install catalog all follow.
 
 ## Validation (behavior-preserving)
 
+- **`make -pn` database diff (the ordering gate).** Dump Make's parsed
+  variable + rule database before and after each phase and diff it. This is the
+  primary guard because the hazard is *evaluation order*, not just output:
+  `CFLAGS` is `+=`-accumulated across the whole file (from ~line 245, through the
+  flags block, and beyond), so a fragment `include`d at the wrong position
+  silently reorders flags in a way an archive diff would not catch. Every
+  `mk/*.mk` that touches `CFLAGS` (or any `+=`/`override` variable) must be
+  included at its **exact original textual position**; "include early" is a bug.
 - `make` (default), `make platform`, `make check` (clean + ASan + test + e2e),
   `make self-build` (reproducible hull→hull2→hull3).
 - `make e2e-feature-runtime / -tui / -wasm / -image / -duckdb / -gpu`,
@@ -175,3 +210,8 @@ enumeration, and the install catalog all follow.
 - The SLIM app-build base (`HL_APP_BASE_SQLITELESS=1 HL_APP_BASE_TLSLESS=1` +
   Keel-less) stays the shipped default; the split does not change what the
   distributed hull embeds.
+- **Ordered includes.** `mk/*.mk` fragments are `include`d at their original
+  textual positions, never reordered; `CFLAGS`/`+=`/`override` accumulation
+  order is load-bearing (see Validation). The existing tail `-include
+  $(DEPS_ALL)` (the `.d` auto-deps) and `-include $(SANITIZER_STAMP)` stay in
+  the root Makefile at their positions and coexist with the new includes.
