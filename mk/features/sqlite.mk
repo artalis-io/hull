@@ -34,9 +34,7 @@ feature-sqlite:
 .PHONY: feature-sqlite
 
 $(BUILDDIR)/libhull_feature-sqlite.a: $(FEATURE_SQLITE_OBJS) | $(BUILDDIR)
-	@rm -f $@
-	$(AR) rcs $@ $(FEATURE_SQLITE_OBJS)
-	@echo "built $@ ($$(du -h $@ | cut -f1))"
+	$(call AR_FEATURE_LIB,$(FEATURE_SQLITE_OBJS))
 
 feature-sqlite-lua: $(BUILDDIR)/libhull_feature-sqlite-lua.a
 .PHONY: feature-sqlite-lua
