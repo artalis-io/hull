@@ -226,7 +226,7 @@
         <span class="text-paper-100 font-semibold tracking-tight">Hull</span>
         <a href="https://github.com/artalis-io/hull/releases" class="chip ml-1.5 hidden sm:inline-flex hover:text-paper-50 transition" title="Release notes on GitHub">
           <span class="accent-dot"></span>
-          v0.7.0
+          v0.9.0
         </a>
       </a>
 
@@ -478,7 +478,7 @@
 <pre><span class="tk-com"># Install over TLS. install.sh is minisign-signed (verify it below);</span>
 <span class="tk-com"># it SHA-256-checks each binary against the manifest as it downloads.</span>
 $ curl -fsSL <span class="tk-str">https://gethull.dev/install.sh</span> | sh
-hull installed to ~/.local/bin/hull  (v0.7.0)
+hull installed to ~/.local/bin/hull  (v0.9.0)
 
 <span class="tk-com"># Don't trust gethull.dev? Verify the installer offline first</span>
 <span class="tk-com"># (minisign, no Hull needed). Cross-check the key below against</span>
@@ -496,7 +496,7 @@ $ hull verify-release hull.sha256 hull.sha256.sig
 <span class="tk-acc">ok</span>. Signature valid
 
 $ hull doctor
-hull v0.7.0  &middot;  ca-bundle: embedded  &middot;  platform: embedded  &middot;  cc: ok
+hull v0.9.0  &middot;  ca-bundle: embedded  &middot;  platform: embedded  &middot;  cc: ok
 </pre>
           </div>
           <p class="mt-3 text-[11px] text-mute-400 leading-relaxed">
@@ -1558,7 +1558,7 @@ hull v0.7.0  &middot;  ca-bundle: embedded  &middot;  platform: embedded  &middo
           <div class="bg-ink-900 p-6">
             <div class="flex items-center gap-2 mb-4">
               <i data-lucide="check-circle-2" class="w-4 h-4 text-accent"></i>
-              <span class="text-sm font-semibold text-paper-50">Shipped through v0.7.0</span>
+              <span class="text-sm font-semibold text-paper-50">Shipped through v0.9.0</span>
             </div>
             <ul class="space-y-3 text-sm text-mute-400 leading-relaxed">
               <li class="flex gap-2">
@@ -1818,7 +1818,7 @@ $ hull agent routes my-tool
       </div>
 
       <p class="text-[11px] text-mute-400 leading-relaxed">
-        Hull is at <span class="text-paper-100">v0.7.0</span>. APIs and the manifest schema are pre-stable, so pin your version and read the
+        Hull is at <span class="text-paper-100">v0.9.0</span>. APIs and the manifest schema are pre-stable, so pin your version and read the
         <a href="https://github.com/artalis-io/hull/releases" class="link">changelog</a>
         before upgrading.
         Page last updated <time datetime="2026-07">July&nbsp;2026</time>.
