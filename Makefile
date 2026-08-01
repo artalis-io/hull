@@ -372,125 +372,14 @@ LUA_OBJS := $(patsubst $(LUA_DIR)/%.c,$(BUILDDIR)/lua_%.o,$(LUA_SRCS))
 # Lua compiled with relaxed warnings (vendored code)
 LUA_CFLAGS := -std=c11 -O2 -w -DLUA_USE_POSIX
 
-# ── HTTP server / client — config flags ─────────────────────────────
-#
-# Declared here (early) because the Keel + mbedTLS sections below gate
-# on $(HL_ENABLE_HTTP_ANY). Full prose docs are repeated at line 195
-# (where they used to live) so anyone scrolling the build flags table
-# also finds them.
+# HTTP / DB / composable-feature config flags live in mk/flags.mk, included
+# here at the original position (CFLAGS += order is load-bearing).
+include mk/flags.mk
 
-HL_ENABLE_HTTP ?= 1
-
-# Back-compat: HL_ENABLE_HTTP=0 forces both off; otherwise honour the
-# granular flag defaults (both ?= 1 below).
-ifeq ($(HL_ENABLE_HTTP),0)
-HL_ENABLE_HTTP_SERVER ?= 0
-HL_ENABLE_HTTP_CLIENT ?= 0
-endif
-HL_ENABLE_HTTP_SERVER ?= 1
-HL_ENABLE_HTTP_CLIENT ?= 1
-
-# CFLAGS macros: granular always defined; HL_ENABLE_HTTP (the legacy
-# "any HTTP at all" gate) defined when either is on.
-ifeq ($(HL_ENABLE_HTTP_SERVER),1)
-CFLAGS += -DHL_ENABLE_HTTP_SERVER
-endif
-ifeq ($(HL_ENABLE_HTTP_CLIENT),1)
-CFLAGS += -DHL_ENABLE_HTTP_CLIENT
-endif
-ifeq ($(HL_ENABLE_HTTP_SERVER)$(HL_ENABLE_HTTP_CLIENT),00)
-HL_ENABLE_HTTP_ANY := 0
-else
-HL_ENABLE_HTTP_ANY := 1
-CFLAGS += -DHL_ENABLE_HTTP
-endif
-
-# ── Database backend flags (resolved early) ─────────────────────────
-# The granular SQLite / PostgreSQL flags are resolved here, ahead of the
-# Keel + mbedTLS sections below, because those link gates now extend to
-# PostgreSQL: its TLS transport (Phase 3b) and SCRAM auth (Phase 3a) need
-# Keel's KlTls and mbedTLS. The -D macros, SQLITE_OBJ gate, and the derived
-# HL_ENABLE_DB umbrella stay in the DB section further down. Back-compat:
-# HL_ENABLE_DB=0 pins both granular flags off.
-ifeq ($(HL_ENABLE_DB),0)
-HL_ENABLE_SQLITE   ?= 0
-HL_ENABLE_POSTGRES ?= 0
-HL_ENABLE_MYSQL    ?= 0
-HL_ENABLE_DUCKDB   ?= 0
-endif
-HL_ENABLE_SQLITE   ?= 1
-HL_ENABLE_POSTGRES ?= 0
-HL_ENABLE_MYSQL    ?= 0
-HL_ENABLE_DUCKDB   ?= 0
-
-# HL_SQLITE_FEATURE=1 builds a SQLite-as-a-composable-feature base
-# (docs/sqlite_feature.md, Phase B): SQLite leaves the base object set (composed
-# back from libhull_feature-sqlite.a) but the DB CORE stays on. It forces
-# HL_ENABLE_SQLITE off here; the umbrella below keeps HL_ENABLE_DB on so the
-# vtable + selector + generic db.* caps + weak hl_db_feature_backends remain,
-# with zero compiled backend. Orthogonal to the postgres/mysql flags (those may
-# still be composed alongside). Native only; the default (0) is unchanged.
-HL_SQLITE_FEATURE  ?= 0
-ifeq ($(HL_SQLITE_FEATURE),1)
-override HL_ENABLE_SQLITE := 0
-endif
-
-# HL_TLS_FEATURE=1 builds a TLS-as-a-composable-feature base (docs/tls_feature.md,
-# a2): the vendored mbedTLS + the mbedTLS-consuming TUs (cap_crypto_{hmac,asym}
-# _mbedtls.o, tls_client.o, tls_transport.o) leave the base object set, composed
-# back from libhull_feature-tls.a. Keel + the HTTP server/event loop stay
-# (HL_ENABLE_HTTP unchanged), as do the crypto weak defaults + tls_transport_stub;
-# Keel's own tls_mbedtls.o then dead-strips from a TLS-less app link (nothing
-# references kl_tls_*). Used only by the TLSLESS_PLATFORM_LIB sub-build; the hull
-# binary + a plain `make` are unaffected. Native only. Default 0.
-HL_TLS_FEATURE     ?= 0
-
-# HL_KEEL_FEATURE=1 builds a Keel-less app-build base (docs/keel_feature.md,
-# Phase 4.2b): the base uses the Keel-free serve_cli.o app-entry (weak hull_serve)
-# instead of serve.o, and drops async/keel.c (the Keel event loop), keeping only
-# the weak poll backend. serve.o + async/keel.c (the strong hull_serve +
-# hl_async_backend overrides) compose back in the whole-archived http feature on
-# needs_http. A compute app references no kl_* and links Keel-free; libkeel stays
-# available (merged in the base .a, pulled on-demand by a composed serve.o).
-# Used only by the KEELLESS app-build base; the hull binary + plain `make`
-# unaffected. Native only. Default 0.
-HL_KEEL_FEATURE    ?= 0
-# Surface the flag to C so async/poll.c compiles its weak net-backend stubs on a
-# Keel-less base (HTTP_SERVER stays 1, so the plain #ifndef would miss it).
-ifeq ($(HL_KEEL_FEATURE),1)
-CFLAGS += -DHL_KEEL_FEATURE
-endif
-
-# HL_APP_BASE_SQLITELESS=1 (Phase D, docs/sqlite_feature.md): the distributed
-# hull embeds a SQLite-LESS platform lib as the app-build base (built in a
-# HL_SQLITE_FEATURE=1 sub-build) plus the SQLite engine archive, so a stock
-# `hull build` produces SQLite-DROPPING apps (a db-free app links zero sqlite3.*;
-# a db app auto-composes the engine via the Phase C nm-probe gate). The hull
-# binary ITSELF stays SQLite-full (it links SQLITE_OBJ for its own toolchain:
-# hull test / agent). Only the EMBED_PLATFORM path honours this; a plain dev
-# `make` is unaffected. Default 0 so the default distributed behaviour is
-# unchanged until release.yml opts in. Cosmo ignores it (SQLite stays in-base).
-HL_APP_BASE_SQLITELESS ?= 0
-
-# HL_APP_BASE_TLSLESS=1 (docs/tls_feature.md, a2): the same idea for TLS. The
-# distributed hull embeds a TLS-LESS platform lib as the app-build base (built in
-# an HL_TLS_FEATURE=1 sub-build) plus libhull_feature-tls.a, so a stock `hull
-# build` produces TLS-DROPPING apps (a plaintext app links zero mbedTLS; an HTTPS
-# / net-DB app auto-composes the TLS feature via the needs_tls gate). The hull
-# binary ITSELF stays TLS-full (its own `hull update` needs HTTPS). Composes with
-# HL_APP_BASE_SQLITELESS (both -> a combined sub-build). Only the EMBED_PLATFORM
-# path honours it; a plain dev `make` is unaffected. Cosmo ignores it. Default 0.
-HL_APP_BASE_TLSLESS    ?= 0
-
-# Keel (KlTls) + mbedTLS are linked when an HTTP half OR PostgreSQL OR MySQL is
-# enabled (MySQL's caching_sha2_password full-auth + ed25519 need TLS + crypto).
-# HTTP still owns the -DHL_ENABLE_HTTP macro (above), so a DB-only build links
-# the TLS stack without activating HTTP code.
-ifeq ($(HL_ENABLE_HTTP_ANY)$(HL_ENABLE_POSTGRES)$(HL_ENABLE_MYSQL),000)
-HL_LINK_TLS := 0
-else
-HL_LINK_TLS := 1
-endif
+# define-feature-archive macro (mk/feature.mk). Only defines a macro (no side
+# effects), so it is safe to include early; the per-feature fragments below use
+# it. AR_FEATURE_LIB / BUILDDIR are resolved at rule time, not here.
+include mk/feature.mk
 
 # ── Keel (external library) ─────────────────────────────────────────
 
@@ -2740,26 +2629,16 @@ check-hardening: $(BUILDDIR)/hull
 # native-only static archives, so a fat-APE app cannot compose one - the
 # cosmo base embeds both runtimes (full, no slim). The hull toolchain link
 # (below) stays dual on every target.
-# The runtime-agnostic HTTP core caps (cap/http + async, ws, smtp, body). Defined
-# here (before PLATFORM_OBJS) so the native app base can filter them out - they
-# move into libhull_feature-http.a (issue #114, Phase B) and are composed back at
-# `hull build`. The feature-http archive target below reuses this list.
-FEATURE_HTTP_OBJS := $(BUILDDIR)/cap_http.o $(BUILDDIR)/cap_http_async.o \
-                     $(BUILDDIR)/cap_ws.o $(BUILDDIR)/cap_smtp.o $(BUILDDIR)/cap_body.o
+# HTTP feature (core caps + web bindings + embed) moved to mk/features/http.mk
+include mk/features/http.mk
 
-# WASM as a composable feature (docs/wasm_feature.md, Phase 1). The runtime-
-# AGNOSTIC wasm caps move into libhull_feature-wasm.a (with worker_wasm + the
-# vendored WAMR objects) and compose back at `hull build`; the per-runtime
-# compute BINDING (mod_compute) moves into libhull_feature-wasm-<rt>.a. The base
-# keeps the wasm_weakstub.c weak defaults (Phase 0) so a compute-less app links.
-FEATURE_WASM_OBJS := $(BUILDDIR)/cap_wasm.o $(BUILDDIR)/cap_wasm_buffer.o \
-                     $(BUILDDIR)/cap_wasm_data.o $(BUILDDIR)/cap_wasm_stream.o
-# IMAGE as a composable feature (docs/image_feature.md). The runtime-AGNOSTIC
-# codec caps move into libhull_feature-image.a (with vendored stb) and compose
-# back at `hull build`; the per-runtime binding (mod_image) moves into
-# libhull_feature-image-<rt>.a. The base keeps image_weakstub.c so an image-less
-# app links. Mirrors FEATURE_WASM_OBJS.
-FEATURE_IMAGE_OBJS := $(BUILDDIR)/cap_image.o $(BUILDDIR)/cap_image_stb.o
+# WASM feature (archive + compute bridges + embed) moved to mk/features/wasm.mk
+include mk/features/wasm.mk
+# Image feature (FEATURE_IMAGE_OBJS + core/bridge archives + IMG_FEATURE_* +
+# embedded_image.h). Included here, before PLATFORM_CAP_OBJS / RUNTIME_FEATURE_
+# LIBS / BUILD_ASSET_OBJ below reference its vars; the fragment self-gates on
+# HL_ENABLE_IMAGE.
+include mk/features/image.mk
 # TLS as a composable feature (docs/tls_feature.md, a2). The mbedTLS crypto
 # backends (strong overrides of the weak hl_crypto_*_active_backend hooks) leave
 # the base under HL_TLS_FEATURE=1, composed back from libhull_feature-tls.a; the
@@ -2965,151 +2844,21 @@ endif
 .PHONY: platform-slim
 platform-slim: $(SLIM_PLATFORM_LIB)
 
-# ── DuckDB feature archive (composable feature: hull build --with=duckdb) ──
-# libhull_feature-duckdb.a bundles the DuckDB backend object (cap_db_duckdb.o,
-# which defines hl_db_backend_duckdb) + the isolated DuckDB static libs into ONE
-# self-contained archive. A build composes it in rather than compiling DuckDB
-# into the base platform lib -- the feature model, see docs/features_and_flavors.md.
-#
-# Combining the archives is deliberate: it makes the DuckDB engine's circular
-# refs (loader <-> extensions <-> core) INTRA-archive, so the composing link
-# needs no --start-group (ld iterates a single archive's members to a fixed
-# point). Each source archive is extracted into its own subdir first, because
-# distinct archives can share a member name (e.g. two `utils.o`); collecting
-# them by subdir keeps both -- ar tolerates duplicate member names in the output
-# and ld pulls whichever resolves a needed symbol via the archive index.
-# Native only (DuckDB is not cosmo-compatible). `feature-duckdb` re-invokes make
-# with HL_ENABLE_DUCKDB=1 so DUCKDB_ARCHIVES + cap_db_duckdb.o are in scope.
-feature-duckdb:
-	$(MAKE) $(BUILDDIR)/libhull_feature-duckdb.a HL_ENABLE_DUCKDB=1
-.PHONY: feature-duckdb
+# DuckDB --with feature moved to mk/features/duckdb.mk
+include mk/features/duckdb.mk
 
-$(BUILDDIR)/libhull_feature-duckdb.a: $(BUILDDIR)/cap_db_duckdb.o $(DUCKDB_ARCHIVES) | $(BUILDDIR)
-	@rm -f $@
-	$(AR) rcs $@ $(BUILDDIR)/cap_db_duckdb.o
-	@tmproot=$$(mktemp -d); n=0; for a in $(DUCKDB_ARCHIVES); do \
-		mkdir -p $$tmproot/$$n && ( cd $$tmproot/$$n && $(AR) x $(CURDIR)/$$a ) && \
-		$(AR) rcs $(CURDIR)/$@ $$tmproot/$$n/*.o && n=$$((n+1)); \
-	done; rm -rf $$tmproot
-	@echo "built $@ ($$(du -h $@ | cut -f1))"
+# PostgreSQL --with feature moved to mk/features/postgres.mk
+include mk/features/postgres.mk
 
-# ── PostgreSQL feature archive (composable feature: hull build --with=postgres) ──
-# Bundles the pure-C Postgres v3 wire client (cap_db_postgres.o + cap_pg_conn.o +
-# cap_pgwire.o, defining hl_db_backend_postgres) into ONE archive. Unlike DuckDB
-# there is no vendored engine — it's ~4 KB of Hull's own code, so a straight
-# bundle, no isolation. The backend references base crypto (SCRAM auth) + the
-# shared tls_client (sslmode TLS); both resolve from the platform lib at compose,
-# which build.lua wraps in --start-group because tls_client is not otherwise
-# pulled by a DB-only app (only cap/smtp references it in the base). Native only.
-# `feature-postgres` re-invokes make with HL_ENABLE_POSTGRES=1 so the wire objects
-# (filtered out of a base build) are in scope.
-feature-postgres:
-	$(MAKE) $(BUILDDIR)/libhull_feature-postgres.a HL_ENABLE_POSTGRES=1
-.PHONY: feature-postgres
+# MySQL --with feature moved to mk/features/mysql.mk
+include mk/features/mysql.mk
 
-$(BUILDDIR)/libhull_feature-postgres.a: $(BUILDDIR)/cap_db_postgres.o $(BUILDDIR)/cap_pg_conn.o $(BUILDDIR)/cap_pgwire.o | $(BUILDDIR)
-	@rm -f $@
-	$(AR) rcs $@ $(BUILDDIR)/cap_db_postgres.o $(BUILDDIR)/cap_pg_conn.o $(BUILDDIR)/cap_pgwire.o
-	@echo "built $@ ($$(du -h $@ | cut -f1))"
+# SQLite feature (archive + udf bridges + both embeds) moved to mk/features/sqlite.mk
+include mk/features/sqlite.mk
 
-# ── MySQL/MariaDB feature archive (composable feature: hull build --with=mysql) ──
-# Bundles the pure-C MySQL/MariaDB wire client (cap_db_mysql.o + cap_mysql_conn.o
-# + cap_mysqlwire.o, defining hl_db_backend_mysql) into ONE archive. One backend
-# serves both mysql:// and mariadb://. Same shape as feature-postgres: pure C, no
-# vendored engine, references base crypto (native/caching_sha2 auth) + tls_client
-# (sslmode) resolved from the platform lib at compose, so build.lua wraps them in
-# --start-group (base_group). Native only. `feature-mysql` re-invokes make with
-# HL_ENABLE_MYSQL=1 so the wire objects (filtered out of a base build) are in scope.
-feature-mysql:
-	$(MAKE) $(BUILDDIR)/libhull_feature-mysql.a HL_ENABLE_MYSQL=1
-.PHONY: feature-mysql
+# GPU --with feature moved to mk/features/gpu.mk
+include mk/features/gpu.mk
 
-$(BUILDDIR)/libhull_feature-mysql.a: $(BUILDDIR)/cap_db_mysql.o $(BUILDDIR)/cap_mysql_conn.o $(BUILDDIR)/cap_mysqlwire.o | $(BUILDDIR)
-	@rm -f $@
-	$(AR) rcs $@ $(BUILDDIR)/cap_db_mysql.o $(BUILDDIR)/cap_mysql_conn.o $(BUILDDIR)/cap_mysqlwire.o
-	@echo "built $@ ($$(du -h $@ | cut -f1))"
-
-# ── SQLite feature archive (SQLite as a composable feature, Phase B) ──
-# docs/sqlite_feature.md. Bundles the vendored SQLite engine + the SQLite
-# backend + UDF bridge + the SQLite-only agent introspection into ONE archive
-# so the base can become SQLite-less (Phase B.2) and compose it back (Phase
-# B.3). Unlike postgres/mysql (installable, off-by-default, filtered out of the
-# base), SQLite is still in the default base today, so this target just packages
-# the same objects into the archive as the additive first step; the base-flip +
-# auto-compose land in later Phase B increments. The strong hl_db_feature_backends
-# override is generated at compose (merges with any --with backends), not baked
-# into the archive. agent/db.c references hl_agent_open_app_db + hl_agent_write_error
-# from the base today; Phase B.2 splits agent/helpers.c so the opener moves here.
-FEATURE_SQLITE_OBJS := $(SQLITE_OBJ) $(BUILDDIR)/cap_db.o \
-                       $(BUILDDIR)/cap_db_sqlite.o \
-                       $(BUILDDIR)/cap_db_udf.o $(BUILDDIR)/agent_db.o \
-                       $(BUILDDIR)/agent_sql.o $(BUILDDIR)/agent_schema_diff.o \
-                       $(BUILDDIR)/agent_db_open.o
-feature-sqlite:
-	$(MAKE) $(BUILDDIR)/libhull_feature-sqlite.a HL_ENABLE_SQLITE=1
-.PHONY: feature-sqlite
-
-$(BUILDDIR)/libhull_feature-sqlite.a: $(FEATURE_SQLITE_OBJS) | $(BUILDDIR)
-	@rm -f $@
-	$(AR) rcs $@ $(FEATURE_SQLITE_OBJS)
-	@echo "built $@ ($$(du -h $@ | cut -f1))"
-
-# ── GPU feature archive (composable feature: hull build --with=gpu) ──
-# libhull_feature-gpu.a bundles the wgpu backend object (cap_gpu_wgpu.o, which
-# defines hl_gpu_backend_wgpu) + the wgpu-native static lib into ONE archive,
-# mirroring feature-duckdb. Merging into a single archive keeps the
-# cap_gpu_wgpu.o <-> libwgpu_native.a refs intra-archive, so the composing link
-# needs no --start-group.
-#
-# Unlike DuckDB (whose libs embed a clashing second mbedTLS that must be renamed),
-# wgpu-native shares no symbols with Hull: the monolithic HL_ENABLE_GPU=1 build
-# links wgpu + mbedTLS + SQLite + Lua together cleanly, and `nm` shows wgpu
-# exports none of those names. So this archive is a straight bundle, no isolation.
-# The platform link libs (-framework Metal ... on macOS / -lvulkan on Linux)
-# cannot live inside a .a; they are recorded in build.lua's FEATURE_SPECS.gpu and
-# emitted at the composing link. Native only (wgpu is not cosmo-compatible).
-# `feature-gpu` re-invokes make with HL_ENABLE_GPU=1 so cap_gpu_wgpu.o (compiled
-# as the real backend, not the base stub) + WGPU_LIB are in scope.
-feature-gpu:
-	$(MAKE) $(BUILDDIR)/libhull_feature-gpu.a HL_ENABLE_GPU=1
-.PHONY: feature-gpu
-
-$(BUILDDIR)/libhull_feature-gpu.a: $(BUILDDIR)/cap_gpu_wgpu.o $(WGPU_LIB) | $(BUILDDIR)
-	@rm -f $@
-	$(AR) rcs $@ $(BUILDDIR)/cap_gpu_wgpu.o
-	@tmproot=$$(mktemp -d); n=0; for a in $(WGPU_LIB); do \
-		mkdir -p $$tmproot/$$n && ( cd $$tmproot/$$n && $(AR) x $(CURDIR)/$$a ) && \
-		$(AR) rcs $(CURDIR)/$@ $$tmproot/$$n/*.o && n=$$((n+1)); \
-	done; rm -rf $$tmproot
-	@echo "built $@ ($$(du -h $@ | cut -f1))"
-
-# ── TUI feature archive (composable feature: hull build --with=tui) ──
-# libhull_feature-tui.a bundles the whole TUI subsystem: the cap layer
-# (cap_tui.o + cap_tui_input.o + cap_tui_width.o) and both runtime bridges
-# (lua_rt_mod_tui.o + js_mod_tui.o). Those objects carry the STRONG overrides of
-# the base's weak feature hooks (hl_tui_feature_present in cap/tui.c;
-# hl_tui_feature_register_lua / _js in the mod_tui.c files), so composing the
-# archive lights TUI up. Unlike a backend feature (duckdb/gpu) there is no single
-# entry symbol, so the compose link must whole-archive / -force_load this lib to
-# pull every member (wired in build.lua's FEATURE_SPECS.tui). The archive is
-# SELF-CONTAINED: cap_tui_width.o (used only by the tui trio) travels with it so
-# a GNU-ld whole-archive compose resolves its refs internally. No vendored lib
-# and no extra link libs (TUI is pure POSIX termios). cap_tui_feature.o (weak
-# base hooks) stays base-resident.
-#
-# The five subsystem objects are filtered OUT of a TUI-free base build, so they
-# only ever exist to back this archive. The target-specific rule below compiles
-# them with -DHL_ENABLE_TUI regardless of the base HL_ENABLE_TUI setting -- tui.h
-# is ABI-independent of the flag (its feature hooks are unconditional void*
-# signatures), so a TUI-enabled cap_tui.o links cleanly into a TUI-free base.
-# This means the archive builds in-place with no sub-make / separate builddir:
-# `make` (TUI-off default) can produce both the lean base AND this archive in one
-# pass for the toolchain force_load (HL_TUI_TOOLCHAIN).
-feature-tui: $(BUILDDIR)/libhull_feature-tui.a
-.PHONY: feature-tui
-
-$(BUILDDIR)/cap_tui.o $(BUILDDIR)/cap_tui_input.o $(BUILDDIR)/cap_tui_width.o \
-$(BUILDDIR)/lua_rt_mod_tui.o $(BUILDDIR)/js_mod_tui.o: CFLAGS += -DHL_ENABLE_TUI
 
 # TRUST_FEATURE_LIBS=1 (release stage 3, issue #114): the embedded runtime /
 # HTTP-core / web-bindings / tui-bridge feature archives were downloaded from
@@ -3135,93 +2884,14 @@ define AR_FEATURE_LIB
 endef
 endif
 
-# libhull_feature-tui.a is the runtime-AGNOSTIC cap core only (issue #114,
-# Phase D). The per-runtime bridges (lua_rt_mod_tui.o / js_mod_tui.o) whole-
-# archive would pull BOTH runtimes' bridges, and the non-composed runtime's
-# bridge references runtime symbols the runtime-less base lacks -> undefined at
-# link. So each bridge is its own archive (libhull_feature-tui-<rt>.a), and a
-# `--with=tui` app whole-archives the cap core + ONLY its runtime's bridge. The
-# cap core stays the single INSTALLABLE asset (FEATURES[]/release unchanged); the
-# tiny bridges are embedded in hull and composed from there (like the web
-# bindings), so `hull feature install tui` still fetches one archive.
-$(BUILDDIR)/libhull_feature-tui.a: $(BUILDDIR)/cap_tui.o $(BUILDDIR)/cap_tui_input.o \
-                                   $(BUILDDIR)/cap_tui_width.o | $(BUILDDIR)
-	@rm -f $@
-	$(AR) rcs $@ $(BUILDDIR)/cap_tui.o $(BUILDDIR)/cap_tui_input.o \
-	            $(BUILDDIR)/cap_tui_width.o
-	@echo "built $@ ($$(du -h $@ | cut -f1))"
+# TUI feature (cap core + runtime bridges + embed) moved to mk/features/tui.mk
+include mk/features/tui.mk
 
-# Per-runtime tui bridge archives (issue #114, Phase D). Tiny (one object each);
-# embedded in hull + composed for the app's runtime alongside the cap core.
-feature-tui-lua: $(BUILDDIR)/libhull_feature-tui-lua.a
-.PHONY: feature-tui-lua
-$(BUILDDIR)/libhull_feature-tui-lua.a: $(BUILDDIR)/lua_rt_mod_tui.o | $(BUILDDIR)
-	$(call AR_FEATURE_LIB,$(BUILDDIR)/lua_rt_mod_tui.o)
 
-feature-tui-js: $(BUILDDIR)/libhull_feature-tui-js.a
-.PHONY: feature-tui-js
-$(BUILDDIR)/libhull_feature-tui-js.a: $(BUILDDIR)/js_mod_tui.o | $(BUILDDIR)
-	$(call AR_FEATURE_LIB,$(BUILDDIR)/js_mod_tui.o)
 
-# libhull_feature-http.a: the runtime-agnostic HTTP CORE as a composable feature
-# archive (issue #114, Phase B). Bundles the HTTP capability objects - client
-# (cap/http + async), server WebSocket registry (cap/ws), SMTP (cap/smtp), and
-# the request body reader (cap/body). These are runtime-agnostic C, reached by
-# both runtimes through the cap layer. Phase A already routed the runtime core
-# through the hl_*_http_* seam, so this archive holds the strong seam overrides
-# that live cap-side (hl_http_ws_registry_free in cap/ws.o). This step is
-# ADDITIVE (base still compiles HTTP in); a later step makes the base
-# HTTP-core-less and composes this. The per-runtime web BINDINGS (routes, sse,
-# ws, bindings_response, http_register, mod_http_*/ws_*/sse/smtp/request) are a
-# separate per-runtime archive (Phase C). Keel is linked separately (the app
-# still pulls libkeel.a), not bundled here.
-# (FEATURE_HTTP_OBJS is defined earlier, above PLATFORM_OBJS, so the native app
-# base filters these caps out; the archive below and the base share one list.)
+# Keel event-loop feature (archive + SLIM-base embed) moved to mk/features/keel.mk
+include mk/features/keel.mk
 
-feature-http: $(BUILDDIR)/libhull_feature-http.a
-.PHONY: feature-http
-$(BUILDDIR)/libhull_feature-http.a: $(FEATURE_HTTP_OBJS) | $(BUILDDIR)
-	$(call AR_FEATURE_LIB,$(FEATURE_HTTP_OBJS))
-
-# libhull_feature-keel.a: the Keel EVENT LOOP as a composable feature
-# (docs/keel_feature.md, Phase 4.2b). The event-loop objects a Keel-less base
-# (HL_KEEL_FEATURE=1) drops -- serve.o (the KlServer serve loop + strong
-# hull_serve), async_keel.o (strong hl_async_backend), net_keel.o (strong
-# hl_net_op_*), plus the server-only hull_static.o / agent_api.o / test_runner.o.
-# Composed (whole-archived) at `hull build` on needs_http, but ONLY onto a
-# Keel-less base (build.lua nm-probes for an ABSENT strong hull_serve, so a full
-# base -- which already carries these -- never double-composes them). Built from
-# the default (HTTP_SERVER=1, HL_KEEL_FEATURE=0) objects, i.e. the real server.
-FEATURE_KEEL_OBJS := $(BUILDDIR)/serve.o $(BUILDDIR)/async_keel.o \
-                     $(BUILDDIR)/net_keel.o $(BUILDDIR)/hull_static.o \
-                     $(BUILDDIR)/agent_api.o $(BUILDDIR)/test_runner.o
-feature-keel: $(BUILDDIR)/libhull_feature-keel.a
-.PHONY: feature-keel
-$(BUILDDIR)/libhull_feature-keel.a: $(FEATURE_KEEL_OBJS) | $(BUILDDIR)
-	$(call AR_FEATURE_LIB,$(FEATURE_KEEL_OBJS))
-
-# libhull_feature-wasm.a: the runtime-agnostic WASM CORE (docs/wasm_feature.md,
-# Phase 1). Bundles the wasm caps + worker_wasm + the vendored WAMR objects
-# (the ~256 KB that leaves the base). Composed back at `hull build` and embedded
-# in hull (embedded_wasm.h). The per-runtime compute binding (mod_compute) is a
-# separate archive below, like the http web bindings.
-FEATURE_WASM_CORE := $(FEATURE_WASM_OBJS) $(WORKER_WASM_OBJ) $(WAMR_OBJS)
-feature-wasm: $(BUILDDIR)/libhull_feature-wasm.a
-.PHONY: feature-wasm
-$(BUILDDIR)/libhull_feature-wasm.a: $(FEATURE_WASM_CORE) | $(BUILDDIR)
-	$(call AR_FEATURE_LIB,$(FEATURE_WASM_CORE))
-
-# Per-runtime compute-binding bridges (mod_compute). Tiny (one object each);
-# embedded in hull + composed for the app's runtime alongside the wasm core.
-feature-wasm-lua: $(BUILDDIR)/libhull_feature-wasm-lua.a
-.PHONY: feature-wasm-lua
-$(BUILDDIR)/libhull_feature-wasm-lua.a: $(BUILDDIR)/lua_rt_mod_compute.o | $(BUILDDIR)
-	$(call AR_FEATURE_LIB,$(BUILDDIR)/lua_rt_mod_compute.o)
-
-feature-wasm-js: $(BUILDDIR)/libhull_feature-wasm-js.a
-.PHONY: feature-wasm-js
-$(BUILDDIR)/libhull_feature-wasm-js.a: $(BUILDDIR)/js_mod_compute.o | $(BUILDDIR)
-	$(call AR_FEATURE_LIB,$(BUILDDIR)/js_mod_compute.o)
 
 # Per-runtime SQLite UDF bridges (mod_db_udf). Tiny (one object each); the sole
 # per-runtime sqlite3_* consumer, split out of mod_db so the runtime archive is
@@ -3237,125 +2907,18 @@ ifneq ($(filter 1,$(HL_ENABLE_SQLITE) $(HL_SQLITE_FEATURE)),)
 $(BUILDDIR)/lua_rt_mod_db_udf.o $(BUILDDIR)/js_mod_db_udf.o: CFLAGS += -DHL_ENABLE_SQLITE
 endif
 
-feature-sqlite-lua: $(BUILDDIR)/libhull_feature-sqlite-lua.a
-.PHONY: feature-sqlite-lua
-$(BUILDDIR)/libhull_feature-sqlite-lua.a: $(BUILDDIR)/lua_rt_mod_db_udf.o | $(BUILDDIR)
-	$(call AR_FEATURE_LIB,$(BUILDDIR)/lua_rt_mod_db_udf.o)
 
-feature-sqlite-js: $(BUILDDIR)/libhull_feature-sqlite-js.a
-.PHONY: feature-sqlite-js
-$(BUILDDIR)/libhull_feature-sqlite-js.a: $(BUILDDIR)/js_mod_db_udf.o | $(BUILDDIR)
-	$(call AR_FEATURE_LIB,$(BUILDDIR)/js_mod_db_udf.o)
+# (Image feature moved to mk/features/image.mk - included above near the
+# FEATURE_*_OBJS cluster, before the PLATFORM_CAP_OBJS aggregate references it.)
 
-# libhull_feature-image.a: the runtime-agnostic image CODEC core
-# (docs/image_feature.md). Bundles the codec vtable + stb backend + vendored stb
-# (~146 KB that leaves the base). Composed back at `hull build` and embedded in
-# hull (embedded_image.h). The per-runtime image binding (mod_image) is a
-# separate archive below, like the wasm compute bridge.
-FEATURE_IMAGE_CORE := $(FEATURE_IMAGE_OBJS) $(STB_OBJ)
-feature-image: $(BUILDDIR)/libhull_feature-image.a
-.PHONY: feature-image
-$(BUILDDIR)/libhull_feature-image.a: $(FEATURE_IMAGE_CORE) | $(BUILDDIR)
-	$(call AR_FEATURE_LIB,$(FEATURE_IMAGE_CORE))
+# TLS feature (archive + embed) moved to mk/features/tls.mk
+include mk/features/tls.mk
 
-# Per-runtime image-binding bridges (mod_image). Tiny (one object each);
-# embedded in hull + composed for the app's runtime alongside the image core.
-feature-image-lua: $(BUILDDIR)/libhull_feature-image-lua.a
-.PHONY: feature-image-lua
-$(BUILDDIR)/libhull_feature-image-lua.a: $(BUILDDIR)/lua_rt_mod_image.o | $(BUILDDIR)
-	$(call AR_FEATURE_LIB,$(BUILDDIR)/lua_rt_mod_image.o)
+# (IMG_FEATURE_* registration vars moved to mk/features/image.mk.)
 
-feature-image-js: $(BUILDDIR)/libhull_feature-image-js.a
-.PHONY: feature-image-js
-$(BUILDDIR)/libhull_feature-image-js.a: $(BUILDDIR)/js_mod_image.o | $(BUILDDIR)
-	$(call AR_FEATURE_LIB,$(BUILDDIR)/js_mod_image.o)
+# Lua + JS runtime features (both archives + shared embed) moved to mk/features/runtime.mk
+include mk/features/runtime.mk
 
-# libhull_feature-tls.a: the mbedTLS transport + crypto backends as a composable
-# feature (docs/tls_feature.md, a2). Bundles the mbedTLS-consuming TUs -- the two
-# crypto mbedTLS backends (strong overrides of the weak hl_crypto_*_active_backend
-# hooks), the outbound TLS client (smtp/pg/mysql sslmode), the serve TLS ctx setup
-# (a1), and the vendored mbedTLS (~1 MB) -- so a TLS-less app-build base drops them
-# and composes them back when the app needs TLS. References Keel's tls_mbedtls.o
-# (resolved from the base's KEEL_LIB at compose) + base crypto/vfs symbols, so the
-# compose whole-archives it inside a --start-group. Built at HL_LINK_TLS=1 (the
-# default HTTP build already compiles all members).
-# Keel's TLS session object (kl_tls_mbedtls_*). It normally rides inside the
-# platform lib's Keel merge, but a TLS-less base excludes it (see the keel-merge
-# rule); so the feature archive carries its own copy, extracted from KEEL_LIB and
-# renamed (keel_tls_mbedtls.o) to avoid a member-name clash with the crypto TUs.
-$(BUILDDIR)/keel_tls_mbedtls.o: $(KEEL_LIB) | $(BUILDDIR)
-	@cd $(BUILDDIR) && $(AR) x $(CURDIR)/$(KEEL_LIB) tls_mbedtls.o && mv -f tls_mbedtls.o keel_tls_mbedtls.o
-FEATURE_TLS_OBJS := $(BUILDDIR)/cap_crypto_hmac_mbedtls.o $(BUILDDIR)/cap_crypto_asym_mbedtls.o \
-                    $(BUILDDIR)/tls_client.o $(BUILDDIR)/tls_transport.o \
-                    $(BUILDDIR)/keel_tls_mbedtls.o $(MBEDTLS_OBJS)
-feature-tls: $(BUILDDIR)/libhull_feature-tls.a
-.PHONY: feature-tls
-$(BUILDDIR)/libhull_feature-tls.a: $(FEATURE_TLS_OBJS) | $(BUILDDIR)
-	$(call AR_FEATURE_LIB,$(FEATURE_TLS_OBJS))
-
-# Gate the image archives behind HL_ENABLE_IMAGE: on the subtractive image-less
-# flavor (make HL_ENABLE_IMAGE=0) cap_image.o + stb aren't built, so the archives
-# can't (and needn't) build. These vars resolve empty there so FEATURE_ARCHIVES /
-# RUNTIME_FEATURE_LIBS / the embed don't pull them.
-ifeq ($(HL_ENABLE_IMAGE),1)
-IMG_FEATURE_CORE := $(BUILDDIR)/libhull_feature-image.a
-IMG_FEATURE_LUA  := $(BUILDDIR)/libhull_feature-image-lua.a
-IMG_FEATURE_JS   := $(BUILDDIR)/libhull_feature-image-js.a
-IMG_FEATURE_LIBS := $(IMG_FEATURE_CORE) $(IMG_FEATURE_LUA) $(IMG_FEATURE_JS)
-else
-IMG_FEATURE_CORE :=
-IMG_FEATURE_LUA  :=
-IMG_FEATURE_JS   :=
-IMG_FEATURE_LIBS :=
-endif
-
-# libhull_feature-lua.a / -js.a: a runtime as a composable feature archive.
-# Bundles the runtime objects, its vendored VM, its manifest extractor, and its
-# stdlib VFS array (hl_stdlib_<rt>_entries). The tui bridge (mod_tui) is excluded
-# - it belongs to libhull_feature-tui.a. Phase 3c builds these additively (base
-# still dual, objects already compiled); Phase 3b flips the base runtime-less and
-# force-loads them into hull. Whole-archive at compose (no single anchor symbol).
-# Exclude the tui bridge (-> libhull_feature-tui.a) and the Lua tool VM bindings
-# (lua_rt_mod_tool.o: tool.extract_manifest_js etc., toolchain-only; whole-
-# archiving the runtime must not force-load them - they pull the JS manifest
-# extractor the runtime-less base no longer carries). hull links them directly.
-# Per-runtime web bindings (issue #114, Phase C). This is the same set the
-# HL_ENABLE_HTTP_SERVER=0 + HL_ENABLE_HTTP_CLIENT=0 source filters enumerate -
-# the tested definition of "what is HTTP" per runtime. They move OUT of the pure
-# runtime archive into libhull_feature-http-<rt>.a, composed only when an app
-# needs HTTP; the pure runtime references a few of their symbols and the base
-# http_weakstub.o satisfies that link when the web archive is not composed.
-FEATURE_HTTP_RT_NAMES := mod_ws_server mod_ws_client mod_http_server mod_sse \
-    mod_test routes dispatch sse ws timers mod_request bindings bindings_response \
-    http_register mod_http_client mod_smtp
-FEATURE_HTTP_LUA_OBJS := $(addprefix $(BUILDDIR)/lua_rt_,$(addsuffix .o,$(FEATURE_HTTP_RT_NAMES)))
-FEATURE_HTTP_JS_OBJS  := $(addprefix $(BUILDDIR)/js_,$(addsuffix .o,$(FEATURE_HTTP_RT_NAMES)))
-
-FEATURE_LUA_OBJS := $(filter-out $(BUILDDIR)/lua_rt_mod_tui.o $(BUILDDIR)/lua_rt_mod_tool.o $(BUILDDIR)/lua_rt_mod_compute.o $(BUILDDIR)/lua_rt_mod_db_udf.o $(BUILDDIR)/lua_rt_mod_image.o $(FEATURE_HTTP_LUA_OBJS),$(LUA_RT_OBJS)) \
-                    $(LUA_OBJS) $(BUILDDIR)/manifest_lua.o $(STDLIB_LUA_REGISTRY_O)
-FEATURE_JS_OBJS  := $(filter-out $(BUILDDIR)/js_mod_tui.o $(BUILDDIR)/js_mod_compute.o $(BUILDDIR)/js_mod_db_udf.o $(BUILDDIR)/js_mod_image.o $(FEATURE_HTTP_JS_OBJS),$(JS_RT_OBJS)) \
-                    $(QJS_OBJS) $(BUILDDIR)/manifest_js.o $(STDLIB_JS_REGISTRY_O)
-
-feature-lua: $(BUILDDIR)/libhull_feature-lua.a
-.PHONY: feature-lua
-$(BUILDDIR)/libhull_feature-lua.a: $(FEATURE_LUA_OBJS) | $(BUILDDIR)
-	$(call AR_FEATURE_LIB,$(FEATURE_LUA_OBJS))
-
-feature-js: $(BUILDDIR)/libhull_feature-js.a
-.PHONY: feature-js
-$(BUILDDIR)/libhull_feature-js.a: $(FEATURE_JS_OBJS) | $(BUILDDIR)
-	$(call AR_FEATURE_LIB,$(FEATURE_JS_OBJS))
-
-# Per-runtime web-bindings feature archives (issue #114, Phase C).
-feature-http-lua: $(BUILDDIR)/libhull_feature-http-lua.a
-.PHONY: feature-http-lua
-$(BUILDDIR)/libhull_feature-http-lua.a: $(FEATURE_HTTP_LUA_OBJS) | $(BUILDDIR)
-	$(call AR_FEATURE_LIB,$(FEATURE_HTTP_LUA_OBJS))
-
-feature-http-js: $(BUILDDIR)/libhull_feature-http-js.a
-.PHONY: feature-http-js
-$(BUILDDIR)/libhull_feature-http-js.a: $(FEATURE_HTTP_JS_OBJS) | $(BUILDDIR)
-	$(call AR_FEATURE_LIB,$(FEATURE_HTTP_JS_OBJS))
 
 # Rebuild every feature archive when the Makefile changes. The archives are
 # `ar rcs` over an object LIST (FEATURE_*_OBJS / the tui trio), and those lists
@@ -3527,111 +3090,21 @@ $(EMBEDDED_TEMPLATES_H): templates/app_main.c templates/entry.h | $(BUILDDIR)
 	@xxd -i templates/app_main.c | sed 's/templates_app_main_c/hl_embedded_app_main_c/g' | $(XXD_CONST_PIPE) >> $@
 	@xxd -i templates/entry.h | sed 's/templates_entry_h/hl_embedded_entry_h/g' | $(XXD_CONST_PIPE) >> $@
 
-# Embed both runtime feature archives so the runtime-less native base composes
-# one at build time with no `hull feature install` (the runtime is mandatory).
-EMBEDDED_RUNTIME_H := $(BUILDDIR)/embedded_runtime.h
-$(EMBEDDED_RUNTIME_H): $(BUILDDIR)/libhull_feature-lua.a $(BUILDDIR)/libhull_feature-js.a | $(BUILDDIR)
-	@echo "/* Auto-generated - do not edit */" > $@
-	@xxd -i $(BUILDDIR)/libhull_feature-lua.a | sed 's/build_libhull_feature_lua_a/hl_embedded_feature_lua_a/g' | $(XXD_CONST_PIPE) >> $@
-	@xxd -i $(BUILDDIR)/libhull_feature-js.a  | sed 's/build_libhull_feature_js_a/hl_embedded_feature_js_a/g'   | $(XXD_CONST_PIPE) >> $@
 
-# Embed the HTTP core feature archive too (issue #114). The native base is
-# HTTP-core-less; the default distributed hull composes this back for every
-# full-flavor app with no `hull feature install`. (Cosmo keeps HTTP in the base,
-# so this native single-arch embed path is the only one that needs it.)
-#
-# The per-runtime web bindings (Phase C) are embedded here too, so a full-flavor
-# app composes the http core + its runtime's web bindings with no install.
-EMBEDDED_HTTP_H := $(BUILDDIR)/embedded_http.h
-$(EMBEDDED_HTTP_H): $(BUILDDIR)/libhull_feature-http.a $(BUILDDIR)/libhull_feature-http-lua.a $(BUILDDIR)/libhull_feature-http-js.a | $(BUILDDIR)
-	@echo "/* Auto-generated - do not edit */" > $@
-	@xxd -i $(BUILDDIR)/libhull_feature-http.a     | sed 's/build_libhull_feature_http_a/hl_embedded_feature_http_a/g'         | $(XXD_CONST_PIPE) >> $@
-	@xxd -i $(BUILDDIR)/libhull_feature-http-lua.a | sed 's/build_libhull_feature_http_lua_a/hl_embedded_feature_http_lua_a/g' | $(XXD_CONST_PIPE) >> $@
-	@xxd -i $(BUILDDIR)/libhull_feature-http-js.a  | sed 's/build_libhull_feature_http_js_a/hl_embedded_feature_http_js_a/g'   | $(XXD_CONST_PIPE) >> $@
 
 # Embed the per-runtime tui bridges too (issue #114, Phase D). The tui cap core
 # stays the single installable feature asset; a full-flavor `--with=tui` app
 # composes the cap core (installed/local) + its runtime's bridge (embedded here),
 # so `hull feature install tui` still fetches one archive.
-EMBEDDED_TUI_H := $(BUILDDIR)/embedded_tui.h
-$(EMBEDDED_TUI_H): $(BUILDDIR)/libhull_feature-tui-lua.a $(BUILDDIR)/libhull_feature-tui-js.a | $(BUILDDIR)
-	@echo "/* Auto-generated - do not edit */" > $@
-	@xxd -i $(BUILDDIR)/libhull_feature-tui-lua.a | sed 's/build_libhull_feature_tui_lua_a/hl_embedded_feature_tui_lua_a/g' | $(XXD_CONST_PIPE) >> $@
-	@xxd -i $(BUILDDIR)/libhull_feature-tui-js.a  | sed 's/build_libhull_feature_tui_js_a/hl_embedded_feature_tui_js_a/g'   | $(XXD_CONST_PIPE) >> $@
 
-# Embed the WASM feature archives too (docs/wasm_feature.md, Phase 1). The native
-# base is compute-less; the default distributed hull composes the wasm core + the
-# app's runtime compute bridge back for every full-flavor app with no install.
-EMBEDDED_WASM_H := $(BUILDDIR)/embedded_wasm.h
-$(EMBEDDED_WASM_H): $(BUILDDIR)/libhull_feature-wasm.a $(BUILDDIR)/libhull_feature-wasm-lua.a $(BUILDDIR)/libhull_feature-wasm-js.a | $(BUILDDIR)
-	@echo "/* Auto-generated - do not edit */" > $@
-	@xxd -i $(BUILDDIR)/libhull_feature-wasm.a     | sed 's/build_libhull_feature_wasm_a/hl_embedded_feature_wasm_a/g'         | $(XXD_CONST_PIPE) >> $@
-	@xxd -i $(BUILDDIR)/libhull_feature-wasm-lua.a | sed 's/build_libhull_feature_wasm_lua_a/hl_embedded_feature_wasm_lua_a/g' | $(XXD_CONST_PIPE) >> $@
-	@xxd -i $(BUILDDIR)/libhull_feature-wasm-js.a  | sed 's/build_libhull_feature_wasm_js_a/hl_embedded_feature_wasm_js_a/g'   | $(XXD_CONST_PIPE) >> $@
 
-# Embed the per-runtime SQLite UDF bridges too (Phase C.2b). The runtime archive
-# is SQLite-free; the default distributed hull composes the app's runtime bridge
-# back whenever the app uses a udf-capable DB, with no install.
-EMBEDDED_SQLITE_RT_H := $(BUILDDIR)/embedded_sqlite_rt.h
-$(EMBEDDED_SQLITE_RT_H): $(BUILDDIR)/libhull_feature-sqlite-lua.a $(BUILDDIR)/libhull_feature-sqlite-js.a | $(BUILDDIR)
-	@echo "/* Auto-generated - do not edit */" > $@
-	@xxd -i $(BUILDDIR)/libhull_feature-sqlite-lua.a | sed 's/build_libhull_feature_sqlite_lua_a/hl_embedded_feature_sqlite_lua_a/g' | $(XXD_CONST_PIPE) >> $@
-	@xxd -i $(BUILDDIR)/libhull_feature-sqlite-js.a  | sed 's/build_libhull_feature_sqlite_js_a/hl_embedded_feature_sqlite_js_a/g'   | $(XXD_CONST_PIPE) >> $@
 
-# Embed the image feature archives too (docs/image_feature.md). The native base
-# is image-less; the default distributed hull composes the image codec core + the
-# app's runtime image bridge back whenever the app declares hull/image, with no
-# install.
-EMBEDDED_IMAGE_H := $(BUILDDIR)/embedded_image.h
-$(EMBEDDED_IMAGE_H): $(BUILDDIR)/libhull_feature-image.a $(BUILDDIR)/libhull_feature-image-lua.a $(BUILDDIR)/libhull_feature-image-js.a | $(BUILDDIR)
-	@echo "/* Auto-generated - do not edit */" > $@
-	@xxd -i $(BUILDDIR)/libhull_feature-image.a     | sed 's/build_libhull_feature_image_a/hl_embedded_feature_image_a/g'         | $(XXD_CONST_PIPE) >> $@
-	@xxd -i $(BUILDDIR)/libhull_feature-image-lua.a | sed 's/build_libhull_feature_image_lua_a/hl_embedded_feature_image_lua_a/g' | $(XXD_CONST_PIPE) >> $@
-	@xxd -i $(BUILDDIR)/libhull_feature-image-js.a  | sed 's/build_libhull_feature_image_js_a/hl_embedded_feature_image_js_a/g'   | $(XXD_CONST_PIPE) >> $@
 
 CFLAGS += -DHL_BUILD_EMBEDDED -DHL_BUILD_EMBEDDED_RUNTIME -DHL_BUILD_EMBEDDED_HTTP -DHL_BUILD_EMBEDDED_TUI -DHL_BUILD_EMBEDDED_WASM -DHL_BUILD_EMBEDDED_SQLITE_RT -DHL_BUILD_EMBEDDED_IMAGE
 $(BUILD_ASSET_OBJ): $(EMBEDDED_PLATFORM_H) $(EMBEDDED_TEMPLATES_H) $(EMBEDDED_RUNTIME_H) $(EMBEDDED_HTTP_H) $(EMBEDDED_TUI_H) $(EMBEDDED_WASM_H) $(EMBEDDED_SQLITE_RT_H) $(EMBEDDED_IMAGE_H)
 
-# Phase D: when the app-build base is SQLite-less, embed the SQLite ENGINE
-# archive (cap/db_sqlite + vendored sqlite3 + FTS5 + udf cap + sqlite agent) so a
-# db app auto-composes it with no `hull feature install sqlite`. Mirrors the WASM
-# core embed. Only pulled when HL_APP_BASE_SQLITELESS=1 (else the engine is
-# in-base and this would be ~2 MB of dormant bloat).
-ifeq ($(HL_APP_BASE_SQLITELESS),1)
-EMBEDDED_SQLITE_H := $(BUILDDIR)/embedded_sqlite.h
-$(EMBEDDED_SQLITE_H): $(BUILDDIR)/libhull_feature-sqlite.a | $(BUILDDIR)
-	@echo "/* Auto-generated - do not edit */" > $@
-	@xxd -i $(BUILDDIR)/libhull_feature-sqlite.a | sed 's/build_libhull_feature_sqlite_a/hl_embedded_feature_sqlite_a/g' | $(XXD_CONST_PIPE) >> $@
-CFLAGS += -DHL_BUILD_EMBEDDED_SQLITE
-$(BUILD_ASSET_OBJ): $(EMBEDDED_SQLITE_H)
-endif
 
-# TLS feature archive embed (a2, HL_APP_BASE_TLSLESS=1): when the app-build base
-# is TLS-less, embed libhull_feature-tls.a (mbedTLS + the crypto/tls TUs) so an
-# HTTPS / net-DB app auto-composes it with no `hull feature install`. Mirrors the
-# SQLite engine embed. Only pulled when HL_APP_BASE_TLSLESS=1.
-ifeq ($(HL_APP_BASE_TLSLESS),1)
-EMBEDDED_TLS_H := $(BUILDDIR)/embedded_tls.h
-$(EMBEDDED_TLS_H): $(BUILDDIR)/libhull_feature-tls.a | $(BUILDDIR)
-	@echo "/* Auto-generated - do not edit */" > $@
-	@xxd -i $(BUILDDIR)/libhull_feature-tls.a | sed 's/build_libhull_feature_tls_a/hl_embedded_feature_tls_a/g' | $(XXD_CONST_PIPE) >> $@
-CFLAGS += -DHL_BUILD_EMBEDDED_TLS
-$(BUILD_ASSET_OBJ): $(EMBEDDED_TLS_H)
-endif
 
-# Keel feature archive embed (Phase 4.2b): keel is folded into the SLIM base, so
-# when the app-build base is SLIM (SQLITELESS + TLSLESS both set) it is also
-# Keel-less -- embed libhull_feature-keel.a (serve.o + async_keel + net_keel +
-# the server-only static/agent/test objects) so an http app auto-composes the
-# Keel event loop with no `hull feature install`. Only pulled for the SLIM base.
-ifeq ($(HL_APP_BASE_SQLITELESS)$(HL_APP_BASE_TLSLESS),11)
-EMBEDDED_KEEL_H := $(BUILDDIR)/embedded_keel.h
-$(EMBEDDED_KEEL_H): $(BUILDDIR)/libhull_feature-keel.a | $(BUILDDIR)
-	@echo "/* Auto-generated - do not edit */" > $@
-	@xxd -i $(BUILDDIR)/libhull_feature-keel.a | sed 's/build_libhull_feature_keel_a/hl_embedded_feature_keel_a/g' | $(XXD_CONST_PIPE) >> $@
-CFLAGS += -DHL_BUILD_EMBEDDED_KEEL
-$(BUILD_ASSET_OBJ): $(EMBEDDED_KEEL_H)
-endif
 endif
 
 # Hull binary
