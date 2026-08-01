@@ -376,6 +376,11 @@ LUA_CFLAGS := -std=c11 -O2 -w -DLUA_USE_POSIX
 # here at the original position (CFLAGS += order is load-bearing).
 include mk/flags.mk
 
+# define-feature-archive macro (mk/feature.mk). Only defines a macro (no side
+# effects), so it is safe to include early; the per-feature fragments below use
+# it. AR_FEATURE_LIB / BUILDDIR are resolved at rule time, not here.
+include mk/feature.mk
+
 # ── Keel (external library) ─────────────────────────────────────────
 
 # Keel is included as a git submodule in vendor/keel. Dropped from the
@@ -2638,12 +2643,11 @@ FEATURE_HTTP_OBJS := $(BUILDDIR)/cap_http.o $(BUILDDIR)/cap_http_async.o \
 # keeps the wasm_weakstub.c weak defaults (Phase 0) so a compute-less app links.
 FEATURE_WASM_OBJS := $(BUILDDIR)/cap_wasm.o $(BUILDDIR)/cap_wasm_buffer.o \
                      $(BUILDDIR)/cap_wasm_data.o $(BUILDDIR)/cap_wasm_stream.o
-# IMAGE as a composable feature (docs/image_feature.md). The runtime-AGNOSTIC
-# codec caps move into libhull_feature-image.a (with vendored stb) and compose
-# back at `hull build`; the per-runtime binding (mod_image) moves into
-# libhull_feature-image-<rt>.a. The base keeps image_weakstub.c so an image-less
-# app links. Mirrors FEATURE_WASM_OBJS.
-FEATURE_IMAGE_OBJS := $(BUILDDIR)/cap_image.o $(BUILDDIR)/cap_image_stb.o
+# Image feature (FEATURE_IMAGE_OBJS + core/bridge archives + IMG_FEATURE_* +
+# embedded_image.h). Included here, before PLATFORM_CAP_OBJS / RUNTIME_FEATURE_
+# LIBS / BUILD_ASSET_OBJ below reference its vars; the fragment self-gates on
+# HL_ENABLE_IMAGE.
+include mk/features/image.mk
 # TLS as a composable feature (docs/tls_feature.md, a2). The mbedTLS crypto
 # backends (strong overrides of the weak hl_crypto_*_active_backend hooks) leave
 # the base under HL_TLS_FEATURE=1, composed back from libhull_feature-tls.a; the
@@ -3131,23 +3135,8 @@ feature-sqlite-js: $(BUILDDIR)/libhull_feature-sqlite-js.a
 $(BUILDDIR)/libhull_feature-sqlite-js.a: $(BUILDDIR)/js_mod_db_udf.o | $(BUILDDIR)
 	$(call AR_FEATURE_LIB,$(BUILDDIR)/js_mod_db_udf.o)
 
-# libhull_feature-image.a: the runtime-agnostic image CODEC core
-# (docs/image_feature.md). Bundles the codec vtable + stb backend + vendored stb
-# (~146 KB that leaves the base). Composed back at `hull build` and embedded in
-# hull (embedded_image.h). The per-runtime image binding (mod_image) is a
-# separate archive below, like the wasm compute bridge.
-#
-# Phase 0 PoC of the build modularization (docs/build_modularization.md): the
-# archive rules + `feature-*` phonies come from the shared define-feature-archive
-# macro (mk/feature.mk) instead of being hand-written. Behaviour-identical.
-include mk/feature.mk
-FEATURE_IMAGE_CORE := $(FEATURE_IMAGE_OBJS) $(STB_OBJ)
-$(eval $(call define-feature-archive,image,$(FEATURE_IMAGE_CORE)))
-
-# Per-runtime image-binding bridges (mod_image). Tiny (one object each);
-# embedded in hull + composed for the app's runtime alongside the image core.
-$(eval $(call define-feature-archive,image-lua,$(BUILDDIR)/lua_rt_mod_image.o))
-$(eval $(call define-feature-archive,image-js,$(BUILDDIR)/js_mod_image.o))
+# (Image feature moved to mk/features/image.mk - included above near the
+# FEATURE_*_OBJS cluster, before the PLATFORM_CAP_OBJS aggregate references it.)
 
 # libhull_feature-tls.a: the mbedTLS transport + crypto backends as a composable
 # feature (docs/tls_feature.md, a2). Bundles the mbedTLS-consuming TUs -- the two
@@ -3172,21 +3161,7 @@ feature-tls: $(BUILDDIR)/libhull_feature-tls.a
 $(BUILDDIR)/libhull_feature-tls.a: $(FEATURE_TLS_OBJS) | $(BUILDDIR)
 	$(call AR_FEATURE_LIB,$(FEATURE_TLS_OBJS))
 
-# Gate the image archives behind HL_ENABLE_IMAGE: on the subtractive image-less
-# flavor (make HL_ENABLE_IMAGE=0) cap_image.o + stb aren't built, so the archives
-# can't (and needn't) build. These vars resolve empty there so FEATURE_ARCHIVES /
-# RUNTIME_FEATURE_LIBS / the embed don't pull them.
-ifeq ($(HL_ENABLE_IMAGE),1)
-IMG_FEATURE_CORE := $(BUILDDIR)/libhull_feature-image.a
-IMG_FEATURE_LUA  := $(BUILDDIR)/libhull_feature-image-lua.a
-IMG_FEATURE_JS   := $(BUILDDIR)/libhull_feature-image-js.a
-IMG_FEATURE_LIBS := $(IMG_FEATURE_CORE) $(IMG_FEATURE_LUA) $(IMG_FEATURE_JS)
-else
-IMG_FEATURE_CORE :=
-IMG_FEATURE_LUA  :=
-IMG_FEATURE_JS   :=
-IMG_FEATURE_LIBS :=
-endif
+# (IMG_FEATURE_* registration vars moved to mk/features/image.mk.)
 
 # libhull_feature-lua.a / -js.a: a runtime as a composable feature archive.
 # Bundles the runtime objects, its vendored VM, its manifest extractor, and its
@@ -3457,16 +3432,6 @@ $(EMBEDDED_SQLITE_RT_H): $(BUILDDIR)/libhull_feature-sqlite-lua.a $(BUILDDIR)/li
 	@xxd -i $(BUILDDIR)/libhull_feature-sqlite-lua.a | sed 's/build_libhull_feature_sqlite_lua_a/hl_embedded_feature_sqlite_lua_a/g' | $(XXD_CONST_PIPE) >> $@
 	@xxd -i $(BUILDDIR)/libhull_feature-sqlite-js.a  | sed 's/build_libhull_feature_sqlite_js_a/hl_embedded_feature_sqlite_js_a/g'   | $(XXD_CONST_PIPE) >> $@
 
-# Embed the image feature archives too (docs/image_feature.md). The native base
-# is image-less; the default distributed hull composes the image codec core + the
-# app's runtime image bridge back whenever the app declares hull/image, with no
-# install.
-EMBEDDED_IMAGE_H := $(BUILDDIR)/embedded_image.h
-$(EMBEDDED_IMAGE_H): $(BUILDDIR)/libhull_feature-image.a $(BUILDDIR)/libhull_feature-image-lua.a $(BUILDDIR)/libhull_feature-image-js.a | $(BUILDDIR)
-	@echo "/* Auto-generated - do not edit */" > $@
-	@xxd -i $(BUILDDIR)/libhull_feature-image.a     | sed 's/build_libhull_feature_image_a/hl_embedded_feature_image_a/g'         | $(XXD_CONST_PIPE) >> $@
-	@xxd -i $(BUILDDIR)/libhull_feature-image-lua.a | sed 's/build_libhull_feature_image_lua_a/hl_embedded_feature_image_lua_a/g' | $(XXD_CONST_PIPE) >> $@
-	@xxd -i $(BUILDDIR)/libhull_feature-image-js.a  | sed 's/build_libhull_feature_image_js_a/hl_embedded_feature_image_js_a/g'   | $(XXD_CONST_PIPE) >> $@
 
 CFLAGS += -DHL_BUILD_EMBEDDED -DHL_BUILD_EMBEDDED_RUNTIME -DHL_BUILD_EMBEDDED_HTTP -DHL_BUILD_EMBEDDED_TUI -DHL_BUILD_EMBEDDED_WASM -DHL_BUILD_EMBEDDED_SQLITE_RT -DHL_BUILD_EMBEDDED_IMAGE
 $(BUILD_ASSET_OBJ): $(EMBEDDED_PLATFORM_H) $(EMBEDDED_TEMPLATES_H) $(EMBEDDED_RUNTIME_H) $(EMBEDDED_HTTP_H) $(EMBEDDED_TUI_H) $(EMBEDDED_WASM_H) $(EMBEDDED_SQLITE_RT_H) $(EMBEDDED_IMAGE_H)
