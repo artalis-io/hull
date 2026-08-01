@@ -523,15 +523,15 @@ hull v0.7.0  &middot;  ca-bundle: embedded  &middot;  platform: embedded  &middo
       <div class="grid grid-cols-2 md:grid-cols-4 gap-x-6 gap-y-8">
 
         <div>
-          <div class="stat-num">5.0<small> MB</small></div>
-          <div class="stat-label">Full binary</div>
-          <div class="stat-foot">HTTP &middot; DB &middot; WASM &middot; Lua &middot; JS, statically linked</div>
+          <div class="stat-num">6.5<small> MB</small></div>
+          <div class="stat-label">Full web app</div>
+          <div class="stat-foot">HTTP &middot; DB &middot; WASM &middot; Lua &middot; JS composed in, statically linked</div>
         </div>
 
         <div>
-          <div class="stat-num">4.4<small> MB</small></div>
+          <div class="stat-num">2.1<small> MB</small></div>
           <div class="stat-label">Pure compute</div>
-          <div class="stat-foot">No HTTP, no DB. CLI / compute service flavor</div>
+          <div class="stat-foot">An <code class="text-paper-100 text-[0.7rem]">app.main</code> build links zero Keel, mbedTLS, SQLite, WASM</div>
         </div>
 
         <div>
@@ -1729,7 +1729,7 @@ hull dev: listening on :8080  (auto-reload)
 
 <span class="tk-com"># Build a sealed, signed, single-binary release.</span>
 $ hull build .
-hull build: my-tool  5.0 MB  signed  ed25519
+hull build: my-tool  6.5 MB  signed  ed25519
 
 <span class="tk-com"># Run on Linux, macOS, or any APE host.</span>
 $ ./my-tool
