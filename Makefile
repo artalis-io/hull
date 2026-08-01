@@ -2636,13 +2636,8 @@ check-hardening: $(BUILDDIR)/hull
 FEATURE_HTTP_OBJS := $(BUILDDIR)/cap_http.o $(BUILDDIR)/cap_http_async.o \
                      $(BUILDDIR)/cap_ws.o $(BUILDDIR)/cap_smtp.o $(BUILDDIR)/cap_body.o
 
-# WASM as a composable feature (docs/wasm_feature.md, Phase 1). The runtime-
-# AGNOSTIC wasm caps move into libhull_feature-wasm.a (with worker_wasm + the
-# vendored WAMR objects) and compose back at `hull build`; the per-runtime
-# compute BINDING (mod_compute) moves into libhull_feature-wasm-<rt>.a. The base
-# keeps the wasm_weakstub.c weak defaults (Phase 0) so a compute-less app links.
-FEATURE_WASM_OBJS := $(BUILDDIR)/cap_wasm.o $(BUILDDIR)/cap_wasm_buffer.o \
-                     $(BUILDDIR)/cap_wasm_data.o $(BUILDDIR)/cap_wasm_stream.o
+# WASM feature (archive + compute bridges + embed) moved to mk/features/wasm.mk
+include mk/features/wasm.mk
 # Image feature (FEATURE_IMAGE_OBJS + core/bridge archives + IMG_FEATURE_* +
 # embedded_image.h). Included here, before PLATFORM_CAP_OBJS / RUNTIME_FEATURE_
 # LIBS / BUILD_ASSET_OBJ below reference its vars; the fragment self-gates on
@@ -3088,28 +3083,6 @@ feature-keel: $(BUILDDIR)/libhull_feature-keel.a
 $(BUILDDIR)/libhull_feature-keel.a: $(FEATURE_KEEL_OBJS) | $(BUILDDIR)
 	$(call AR_FEATURE_LIB,$(FEATURE_KEEL_OBJS))
 
-# libhull_feature-wasm.a: the runtime-agnostic WASM CORE (docs/wasm_feature.md,
-# Phase 1). Bundles the wasm caps + worker_wasm + the vendored WAMR objects
-# (the ~256 KB that leaves the base). Composed back at `hull build` and embedded
-# in hull (embedded_wasm.h). The per-runtime compute binding (mod_compute) is a
-# separate archive below, like the http web bindings.
-FEATURE_WASM_CORE := $(FEATURE_WASM_OBJS) $(WORKER_WASM_OBJ) $(WAMR_OBJS)
-feature-wasm: $(BUILDDIR)/libhull_feature-wasm.a
-.PHONY: feature-wasm
-$(BUILDDIR)/libhull_feature-wasm.a: $(FEATURE_WASM_CORE) | $(BUILDDIR)
-	$(call AR_FEATURE_LIB,$(FEATURE_WASM_CORE))
-
-# Per-runtime compute-binding bridges (mod_compute). Tiny (one object each);
-# embedded in hull + composed for the app's runtime alongside the wasm core.
-feature-wasm-lua: $(BUILDDIR)/libhull_feature-wasm-lua.a
-.PHONY: feature-wasm-lua
-$(BUILDDIR)/libhull_feature-wasm-lua.a: $(BUILDDIR)/lua_rt_mod_compute.o | $(BUILDDIR)
-	$(call AR_FEATURE_LIB,$(BUILDDIR)/lua_rt_mod_compute.o)
-
-feature-wasm-js: $(BUILDDIR)/libhull_feature-wasm-js.a
-.PHONY: feature-wasm-js
-$(BUILDDIR)/libhull_feature-wasm-js.a: $(BUILDDIR)/js_mod_compute.o | $(BUILDDIR)
-	$(call AR_FEATURE_LIB,$(BUILDDIR)/js_mod_compute.o)
 
 # Per-runtime SQLite UDF bridges (mod_db_udf). Tiny (one object each); the sole
 # per-runtime sqlite3_* consumer, split out of mod_db so the runtime archive is
@@ -3393,15 +3366,6 @@ $(EMBEDDED_TUI_H): $(BUILDDIR)/libhull_feature-tui-lua.a $(BUILDDIR)/libhull_fea
 	@xxd -i $(BUILDDIR)/libhull_feature-tui-lua.a | sed 's/build_libhull_feature_tui_lua_a/hl_embedded_feature_tui_lua_a/g' | $(XXD_CONST_PIPE) >> $@
 	@xxd -i $(BUILDDIR)/libhull_feature-tui-js.a  | sed 's/build_libhull_feature_tui_js_a/hl_embedded_feature_tui_js_a/g'   | $(XXD_CONST_PIPE) >> $@
 
-# Embed the WASM feature archives too (docs/wasm_feature.md, Phase 1). The native
-# base is compute-less; the default distributed hull composes the wasm core + the
-# app's runtime compute bridge back for every full-flavor app with no install.
-EMBEDDED_WASM_H := $(BUILDDIR)/embedded_wasm.h
-$(EMBEDDED_WASM_H): $(BUILDDIR)/libhull_feature-wasm.a $(BUILDDIR)/libhull_feature-wasm-lua.a $(BUILDDIR)/libhull_feature-wasm-js.a | $(BUILDDIR)
-	@echo "/* Auto-generated - do not edit */" > $@
-	@xxd -i $(BUILDDIR)/libhull_feature-wasm.a     | sed 's/build_libhull_feature_wasm_a/hl_embedded_feature_wasm_a/g'         | $(XXD_CONST_PIPE) >> $@
-	@xxd -i $(BUILDDIR)/libhull_feature-wasm-lua.a | sed 's/build_libhull_feature_wasm_lua_a/hl_embedded_feature_wasm_lua_a/g' | $(XXD_CONST_PIPE) >> $@
-	@xxd -i $(BUILDDIR)/libhull_feature-wasm-js.a  | sed 's/build_libhull_feature_wasm_js_a/hl_embedded_feature_wasm_js_a/g'   | $(XXD_CONST_PIPE) >> $@
 
 # Embed the per-runtime SQLite UDF bridges too (Phase C.2b). The runtime archive
 # is SQLite-free; the default distributed hull composes the app's runtime bridge
