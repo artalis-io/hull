@@ -2844,101 +2844,20 @@ endif
 .PHONY: platform-slim
 platform-slim: $(SLIM_PLATFORM_LIB)
 
-# ── DuckDB feature archive (composable feature: hull build --with=duckdb) ──
-# libhull_feature-duckdb.a bundles the DuckDB backend object (cap_db_duckdb.o,
-# which defines hl_db_backend_duckdb) + the isolated DuckDB static libs into ONE
-# self-contained archive. A build composes it in rather than compiling DuckDB
-# into the base platform lib -- the feature model, see docs/features_and_flavors.md.
-#
-# Combining the archives is deliberate: it makes the DuckDB engine's circular
-# refs (loader <-> extensions <-> core) INTRA-archive, so the composing link
-# needs no --start-group (ld iterates a single archive's members to a fixed
-# point). Each source archive is extracted into its own subdir first, because
-# distinct archives can share a member name (e.g. two `utils.o`); collecting
-# them by subdir keeps both -- ar tolerates duplicate member names in the output
-# and ld pulls whichever resolves a needed symbol via the archive index.
-# Native only (DuckDB is not cosmo-compatible). `feature-duckdb` re-invokes make
-# with HL_ENABLE_DUCKDB=1 so DUCKDB_ARCHIVES + cap_db_duckdb.o are in scope.
-feature-duckdb:
-	$(MAKE) $(BUILDDIR)/libhull_feature-duckdb.a HL_ENABLE_DUCKDB=1
-.PHONY: feature-duckdb
+# DuckDB --with feature moved to mk/features/duckdb.mk
+include mk/features/duckdb.mk
 
-$(BUILDDIR)/libhull_feature-duckdb.a: $(BUILDDIR)/cap_db_duckdb.o $(DUCKDB_ARCHIVES) | $(BUILDDIR)
-	@rm -f $@
-	$(AR) rcs $@ $(BUILDDIR)/cap_db_duckdb.o
-	@tmproot=$$(mktemp -d); n=0; for a in $(DUCKDB_ARCHIVES); do \
-		mkdir -p $$tmproot/$$n && ( cd $$tmproot/$$n && $(AR) x $(CURDIR)/$$a ) && \
-		$(AR) rcs $(CURDIR)/$@ $$tmproot/$$n/*.o && n=$$((n+1)); \
-	done; rm -rf $$tmproot
-	@echo "built $@ ($$(du -h $@ | cut -f1))"
+# PostgreSQL --with feature moved to mk/features/postgres.mk
+include mk/features/postgres.mk
 
-# ── PostgreSQL feature archive (composable feature: hull build --with=postgres) ──
-# Bundles the pure-C Postgres v3 wire client (cap_db_postgres.o + cap_pg_conn.o +
-# cap_pgwire.o, defining hl_db_backend_postgres) into ONE archive. Unlike DuckDB
-# there is no vendored engine — it's ~4 KB of Hull's own code, so a straight
-# bundle, no isolation. The backend references base crypto (SCRAM auth) + the
-# shared tls_client (sslmode TLS); both resolve from the platform lib at compose,
-# which build.lua wraps in --start-group because tls_client is not otherwise
-# pulled by a DB-only app (only cap/smtp references it in the base). Native only.
-# `feature-postgres` re-invokes make with HL_ENABLE_POSTGRES=1 so the wire objects
-# (filtered out of a base build) are in scope.
-feature-postgres:
-	$(MAKE) $(BUILDDIR)/libhull_feature-postgres.a HL_ENABLE_POSTGRES=1
-.PHONY: feature-postgres
-
-$(BUILDDIR)/libhull_feature-postgres.a: $(BUILDDIR)/cap_db_postgres.o $(BUILDDIR)/cap_pg_conn.o $(BUILDDIR)/cap_pgwire.o | $(BUILDDIR)
-	@rm -f $@
-	$(AR) rcs $@ $(BUILDDIR)/cap_db_postgres.o $(BUILDDIR)/cap_pg_conn.o $(BUILDDIR)/cap_pgwire.o
-	@echo "built $@ ($$(du -h $@ | cut -f1))"
-
-# ── MySQL/MariaDB feature archive (composable feature: hull build --with=mysql) ──
-# Bundles the pure-C MySQL/MariaDB wire client (cap_db_mysql.o + cap_mysql_conn.o
-# + cap_mysqlwire.o, defining hl_db_backend_mysql) into ONE archive. One backend
-# serves both mysql:// and mariadb://. Same shape as feature-postgres: pure C, no
-# vendored engine, references base crypto (native/caching_sha2 auth) + tls_client
-# (sslmode) resolved from the platform lib at compose, so build.lua wraps them in
-# --start-group (base_group). Native only. `feature-mysql` re-invokes make with
-# HL_ENABLE_MYSQL=1 so the wire objects (filtered out of a base build) are in scope.
-feature-mysql:
-	$(MAKE) $(BUILDDIR)/libhull_feature-mysql.a HL_ENABLE_MYSQL=1
-.PHONY: feature-mysql
-
-$(BUILDDIR)/libhull_feature-mysql.a: $(BUILDDIR)/cap_db_mysql.o $(BUILDDIR)/cap_mysql_conn.o $(BUILDDIR)/cap_mysqlwire.o | $(BUILDDIR)
-	@rm -f $@
-	$(AR) rcs $@ $(BUILDDIR)/cap_db_mysql.o $(BUILDDIR)/cap_mysql_conn.o $(BUILDDIR)/cap_mysqlwire.o
-	@echo "built $@ ($$(du -h $@ | cut -f1))"
+# MySQL --with feature moved to mk/features/mysql.mk
+include mk/features/mysql.mk
 
 # SQLite feature (archive + udf bridges + both embeds) moved to mk/features/sqlite.mk
 include mk/features/sqlite.mk
 
-# ── GPU feature archive (composable feature: hull build --with=gpu) ──
-# libhull_feature-gpu.a bundles the wgpu backend object (cap_gpu_wgpu.o, which
-# defines hl_gpu_backend_wgpu) + the wgpu-native static lib into ONE archive,
-# mirroring feature-duckdb. Merging into a single archive keeps the
-# cap_gpu_wgpu.o <-> libwgpu_native.a refs intra-archive, so the composing link
-# needs no --start-group.
-#
-# Unlike DuckDB (whose libs embed a clashing second mbedTLS that must be renamed),
-# wgpu-native shares no symbols with Hull: the monolithic HL_ENABLE_GPU=1 build
-# links wgpu + mbedTLS + SQLite + Lua together cleanly, and `nm` shows wgpu
-# exports none of those names. So this archive is a straight bundle, no isolation.
-# The platform link libs (-framework Metal ... on macOS / -lvulkan on Linux)
-# cannot live inside a .a; they are recorded in build.lua's FEATURE_SPECS.gpu and
-# emitted at the composing link. Native only (wgpu is not cosmo-compatible).
-# `feature-gpu` re-invokes make with HL_ENABLE_GPU=1 so cap_gpu_wgpu.o (compiled
-# as the real backend, not the base stub) + WGPU_LIB are in scope.
-feature-gpu:
-	$(MAKE) $(BUILDDIR)/libhull_feature-gpu.a HL_ENABLE_GPU=1
-.PHONY: feature-gpu
-
-$(BUILDDIR)/libhull_feature-gpu.a: $(BUILDDIR)/cap_gpu_wgpu.o $(WGPU_LIB) | $(BUILDDIR)
-	@rm -f $@
-	$(AR) rcs $@ $(BUILDDIR)/cap_gpu_wgpu.o
-	@tmproot=$$(mktemp -d); n=0; for a in $(WGPU_LIB); do \
-		mkdir -p $$tmproot/$$n && ( cd $$tmproot/$$n && $(AR) x $(CURDIR)/$$a ) && \
-		$(AR) rcs $(CURDIR)/$@ $$tmproot/$$n/*.o && n=$$((n+1)); \
-	done; rm -rf $$tmproot
-	@echo "built $@ ($$(du -h $@ | cut -f1))"
+# GPU --with feature moved to mk/features/gpu.mk
+include mk/features/gpu.mk
 
 # ── TUI feature archive (composable feature: hull build --with=tui) ──
 # libhull_feature-tui.a bundles the whole TUI subsystem: the cap layer
