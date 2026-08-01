@@ -215,38 +215,11 @@ XXD_CONST_PIPE := sed \
 	-e 's/^unsigned char /const unsigned char /' \
 	-e 's/^unsigned int /const unsigned int /'
 
-# ── QuickJS ──────────────────────────────────────────────────────────
+# QuickJS vendored config -> mk/vendor/quickjs.mk
+include mk/vendor/quickjs.mk
 
-QJS_DIR  := $(VENDDIR)/quickjs
-QJS_SRCS := $(QJS_DIR)/quickjs.c $(QJS_DIR)/libregexp.c \
-            $(QJS_DIR)/libunicode.c $(QJS_DIR)/cutils.c $(QJS_DIR)/libbf.c
-QJS_OBJS := $(patsubst $(QJS_DIR)/%.c,$(BUILDDIR)/qjs_%.o,$(QJS_SRCS))
-
-# QuickJS vendored-snapshot version. Bump this — and only this —
-# whenever vendor/quickjs/ changes. Both the vendored QuickJS build
-# (CONFIG_VERSION, used by quickjs.c) and the Hull-side bytecode /
-# template caches (QJS_TAG, used to derive cache keys) read from
-# this single variable, so cache invalidation is automatic on a
-# QuickJS upgrade.
-QJS_VERSION := 2024-01-13
-
-# QuickJS compiled with relaxed warnings (vendored code)
-QJS_CFLAGS := -std=c11 -O2 -w -DCONFIG_VERSION=\"$(QJS_VERSION)\" \
-              -DCONFIG_BIGNUM -D_GNU_SOURCE
-
-# Hull-side code (bytecode/template caches) reads the same string via
-# `include/hull/runtime/quickjs_tag.h`.
-CFLAGS += -DHL_QJS_VERSION=\"$(QJS_VERSION)\"
-
-# ── Lua 5.4 ──────────────────────────────────────────────────────────
-
-LUA_DIR  := $(VENDDIR)/lua
-LUA_SRCS := $(filter-out $(LUA_DIR)/lua.c $(LUA_DIR)/luac.c, \
-             $(wildcard $(LUA_DIR)/*.c))
-LUA_OBJS := $(patsubst $(LUA_DIR)/%.c,$(BUILDDIR)/lua_%.o,$(LUA_SRCS))
-
-# Lua compiled with relaxed warnings (vendored code)
-LUA_CFLAGS := -std=c11 -O2 -w -DLUA_USE_POSIX
+# Lua 5.4 vendored config -> mk/vendor/lua.mk
+include mk/vendor/lua.mk
 
 # HTTP / DB / composable-feature config flags live in mk/flags.mk, included
 # here at the original position (CFLAGS += order is load-bearing).
