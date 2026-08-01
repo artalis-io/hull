@@ -1273,7 +1273,6 @@ jobs:
                     hull-tcc-linux-x86_64 hull-tcc-linux-aarch64 \
                     hull.sbom.json hull.sbom.cdx.json hull.sbom.spdx.json \
                     libhull.sbom.json libhull.sbom.cdx.json libhull.sbom.spdx.json \
-                    libhull_platform-*.sbom.* \
                     hull.build-env.json \
                     libhull_platform-*.a \
                     libhull-linux-x86_64.a libhull-linux-aarch64.a libhull-darwin-arm64.a \
@@ -1398,8 +1397,8 @@ jobs:
             dist/libhull.sbom.cdx.json
             dist/libhull.sbom.spdx.json
           )
-          # Per-flavor platform-lib SBOMs (hull sbom --flavor).
-          assets+=(dist/libhull_platform-*.sbom.*)
+          # (Phase 4.3: no per-flavor platform-lib SBOMs -- pure-compute is a
+          # build.lua preset, not a pre-built lib.)
           if [ -f dist/hull.sha256.sig ]; then
             assets+=(dist/hull.sha256.sig)
           fi
