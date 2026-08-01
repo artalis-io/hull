@@ -1592,10 +1592,12 @@ local function prepare_platform(opts, tmpdir, cc, is_cosmo, flavor_asset)
     return platform_lib, platform_dir, platform_sig_blob, platform_arch_hashes
 end
 
-local function main()
-    local opts = parse_args()
-
-    -- Find app source files
+-- discover: find the app’s source/asset files, make the temp build dir, run the
+-- stale compute-AOT rebuild, and detect the compiler + cosmo flavor. Returns a
+-- ctx table of the discovered state main() threads into the later stages.
+-- Extracted from main() in Phase 3.2 (docs/build_modularization.md). The internal
+-- *_dir path locals stay private; only the 11 fields main uses downstream return.
+local function discover(opts)
     local lua_files = find_lua_files(opts.app_dir)
     local js_files = find_js_files(opts.app_dir)
     local json_files = find_json_files(opts.app_dir)
@@ -1828,6 +1830,25 @@ typedef struct {
         opts.flavor = picked
     end
 
+    return {
+        lua_files = lua_files, js_files = js_files, json_files = json_files,
+        tmpdir = tmpdir, html_files = html_files, static_files = static_files,
+        migration_files = migration_files, compute_files = compute_files,
+        shader_files = shader_files, cc = cc, is_cosmo = is_cosmo,
+    }
+end
+
+local function main()
+    local opts = parse_args()
+
+    -- Find app source files
+    -- Discover app files + toolchain (see discover() above); unpack into locals.
+    local ctx = discover(opts)
+    local lua_files, js_files, json_files, tmpdir, html_files, static_files,
+          migration_files, compute_files, shader_files, cc, is_cosmo =
+        ctx.lua_files, ctx.js_files, ctx.json_files, ctx.tmpdir, ctx.html_files,
+        ctx.static_files, ctx.migration_files, ctx.compute_files, ctx.shader_files,
+        ctx.cc, ctx.is_cosmo
     -- ── Build flavor (--flavor) ──
     -- Validate the requested flavor and (for non-default flavors) check the
     -- app's manifest against the TARGET flavor's caps, aborting if a declared
