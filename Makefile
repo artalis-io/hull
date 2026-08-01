@@ -769,30 +769,8 @@ ifeq ($(HL_ENABLE_CFI),1)
   endif
 endif
 
-# ── TinyCC (embedded C compiler for zero-dependency hull build) ──────
-#
-# On by default for non-cosmo builds. Disable with HL_ENABLE_TCC=0.
-# Requires vendor/tcc submodule (git submodule add -b mob ...)
-#
-# Build tcc: make tcc  (builds build/tcc from vendor/tcc source)
-
-TCC_DIR         := vendor/tcc
-COMPILER_OBJ    := $(BUILDDIR)/compiler.o
-COMPILER_TCC_OBJ :=
-
-# tcc emits ELF, so the backend is only useful on Linux. macOS (Mach-O) and
-# cosmo (APE archives) use the system compiler, so tcc is off there. On Linux
-# the backend is compiled in but tcc itself is NO LONGER EMBEDDED — it's a
-# side-loaded tool (`hull tools install tcc`), resolved at build time from
-# ~/.hull/tools → PATH. See compiler_tcc.c.
-ifdef COSMO
-  HL_ENABLE_TCC ?= 0
-else ifeq ($(UNAME_S),Darwin)
-  HL_ENABLE_TCC ?= 0
-else
-  HL_ENABLE_TCC ?= 1
-endif
-
+# TinyCC vendored config -> mk/vendor/tcc.mk
+include mk/vendor/tcc.mk
 # ── HL_ENABLE_TUI — terminal UI capability (composable feature) ────
 #
 # TUI is a composable feature (like gpu / duckdb): the base is built
@@ -1062,109 +1040,10 @@ fetch-unicode:
 	    $$LUA $(UNICODE_DIR)/gen.lua $(UNICODE_EAW_TXT) $(UNICODE_UCD_TXT) > $(UNICODE_EAW_H)
 	@echo "Done — $$(grep -c '^    {' $(UNICODE_EAW_H)) ranges in $(UNICODE_EAW_H)."
 
-# ── wgpu-native (GPU compute — optional) ─────────────────────────
-#
-# Optional GPU compute backend. Disabled by default.
-# Enable with: make HL_ENABLE_GPU=1
-#   - Auto-detects vendor/wgpu/libwgpu_native.a if present
-#   - Or specify: make HL_ENABLE_GPU=1 WGPU_LIB_DIR=/path/to/lib
-#   - Fetch automatically: make fetch-wgpu && make HL_ENABLE_GPU=1
-
-HL_ENABLE_GPU ?= 0
-
-ifeq ($(HL_ENABLE_GPU),1)
-  CFLAGS += -DHL_ENABLE_GPU -I$(VENDDIR)/wgpu
-  # Auto-detect vendor/wgpu if WGPU_LIB_DIR not specified
-  ifndef WGPU_LIB_DIR
-    ifneq (,$(wildcard $(VENDDIR)/wgpu/libwgpu_native.a))
-      WGPU_LIB_DIR := $(VENDDIR)/wgpu
-    else
-      $(error HL_ENABLE_GPU=1 requires wgpu-native. Run: make fetch-wgpu)
-    endif
-  endif
-  WGPU_LIB := $(WGPU_LIB_DIR)/libwgpu_native.a
-  ifeq ($(UNAME_S),Darwin)
-    WGPU_FRAMEWORKS := -framework Metal -framework QuartzCore -framework CoreGraphics -framework Foundation
-  else
-    WGPU_FRAMEWORKS := -lvulkan
-  endif
-  # GPU is not compatible with Cosmopolitan builds
-  ifdef COSMO
-    $(error GPU compute is not compatible with Cosmopolitan builds)
-  endif
-  WORKER_GPU_OBJ := $(BUILDDIR)/worker_gpu.o
-else
-  WORKER_GPU_OBJ := $(BUILDDIR)/worker_gpu.o
-  WGPU_LIB :=
-  WGPU_FRAMEWORKS :=
-endif
-
-# ── DuckDB (side-loaded, statically-linked OLAP backend) ────────────
-#
-# Enable with: make HL_ENABLE_DUCKDB=1
-#   - Auto-detects vendor/duckdb/libduckdb_static.a if present
-#   - Or specify: make HL_ENABLE_DUCKDB=1 DUCKDB_LIB_DIR=/path/to/libs
-#   - Fetch automatically: make fetch-duckdb && make HL_ENABLE_DUCKDB=1
-#
-# The -DHL_ENABLE_DUCKDB macro + -I are emitted in the DB section above; this
-# block resolves the archive set to link. DuckDB is a large C++ static library,
-# so this is an opt-in side variant (the default `hull` rejects duckdb:// with
-# the reserved-scheme hint). Not compatible with Cosmopolitan.
-
-ifeq ($(HL_ENABLE_DUCKDB),1)
-  ifdef COSMO
-    $(error DuckDB is not compatible with Cosmopolitan builds)
-  endif
-  # libduckdb_static.a embeds its OWN (different-version) mbedTLS, which would
-  # collide with Hull's. `make fetch-duckdb` isolates it by renaming DuckDB's
-  # bundled mbedtls_/psa_ symbols to a private hlduck_ prefix (objcopy
-  # --redefine-syms), so DuckDB and Hull's mbedTLS coexist in one binary and
-  # DuckDB works alongside the full HTTP/TLS stack. See
-  # docs/duckdb_backend_design.md §3.4.
-  ifndef DUCKDB_LIB_DIR
-    ifneq (,$(wildcard $(VENDDIR)/duckdb/libduckdb_static.a))
-      DUCKDB_LIB_DIR := $(VENDDIR)/duckdb
-    else
-      $(error HL_ENABLE_DUCKDB=1 requires the DuckDB static libs. Run: make fetch-duckdb)
-    endif
-  endif
-  # Proven link set (v1.5.4): the core static lib + the five default extensions
-  # + their generated loader (which references those five, so none can be
-  # dropped) + the third-party dep archives. Deliberately OMITS
-  # libduckdb_mbedtls.a (unused by the default set) and the benchmark-only
-  # tpch/tpcds extensions. See docs/duckdb_backend_design.md.
-  DUCKDB_ARCHIVES := \
-      $(DUCKDB_LIB_DIR)/libduckdb_static.a \
-      $(DUCKDB_LIB_DIR)/libcore_functions_extension.a \
-      $(DUCKDB_LIB_DIR)/libparquet_extension.a \
-      $(DUCKDB_LIB_DIR)/libjson_extension.a \
-      $(DUCKDB_LIB_DIR)/libicu_extension.a \
-      $(DUCKDB_LIB_DIR)/libautocomplete_extension.a \
-      $(DUCKDB_LIB_DIR)/libduckdb_generated_extension_loader.a \
-      $(DUCKDB_LIB_DIR)/libduckdb_zstd.a \
-      $(DUCKDB_LIB_DIR)/libduckdb_miniz.a \
-      $(DUCKDB_LIB_DIR)/libduckdb_yyjson.a \
-      $(DUCKDB_LIB_DIR)/libduckdb_re2.a \
-      $(DUCKDB_LIB_DIR)/libduckdb_hyperloglog.a \
-      $(DUCKDB_LIB_DIR)/libduckdb_utf8proc.a \
-      $(DUCKDB_LIB_DIR)/libduckdb_fastpforlib.a \
-      $(DUCKDB_LIB_DIR)/libduckdb_pg_query.a \
-      $(DUCKDB_LIB_DIR)/libduckdb_skiplistlib.a \
-      $(DUCKDB_LIB_DIR)/libduckdb_fmt.a \
-      $(DUCKDB_LIB_DIR)/libduckdb_fsst.a
-  # These archives reference each other circularly (the loader -> extensions ->
-  # core, and back). GNU ld resolves that only within a --start-group; macOS
-  # ld64 resolves regardless of order, so no group there. DuckDB is C++, so pull
-  # in the C++ runtime (+ libdl for its extension machinery on Linux).
-  ifeq ($(UNAME_S),Darwin)
-    DUCKDB_LIBS := $(DUCKDB_ARCHIVES) -lc++
-  else
-    DUCKDB_LIBS := -Wl,--start-group $(DUCKDB_ARCHIVES) -Wl,--end-group -lstdc++ -ldl
-  endif
-else
-  DUCKDB_LIBS :=
-endif
-
+# wgpu-native config -> mk/vendor/wgpu.mk
+include mk/vendor/wgpu.mk
+# DuckDB static-libs config -> mk/vendor/duckdb.mk
+include mk/vendor/duckdb.mk
 # ── jart/pledge polyfill (Linux-only: seccomp + landlock) ──────────
 #
 # Provides real pledge()/unveil() on native Linux.
