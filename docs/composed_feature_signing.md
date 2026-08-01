@@ -24,8 +24,12 @@ Landed:
   the composed block is recorded, a valid app verifies (5b base + 5c composed),
   and a tampered composed hash is fatal at runtime.
 
-Not yet validated: the multi-runner release artifact flow (needs a pre-release
-tag dry-run; the local harness stands in with a single-arch test key).
+Validated end to end by the v0.9.0-keel pre-release dry-run: the multi-runner
+release artifact flow signs every platform's embedded feature-archive hashes
+into the platform manifest, stage 3 embeds those signed bytes as-is, and the
+Platform-sig E2E smoke runs `--verify-sig` against the real-key-signed manifest.
+The local `e2e_composed_sig.sh` harness remains the fast single-arch test-key
+stand-in.
 
 ## The gap
 
