@@ -12,6 +12,10 @@
 
 local json = require("hull.json")
 local fcompose = require("hull.feature_compose")
+-- The per-feature compose registry (single source of truth): { backend, type,
+-- hook, cxx, base_group, whole_archive, libs } per --with feature. Hoisted out
+-- of main() in Phase 3 of the build modularization (docs/build_modularization.md).
+local FEATURE_SPECS = require("hull.feature_specs")
 
 -- ── Argument parsing ─────────────────────────────────────────────────
 
@@ -1332,94 +1336,8 @@ int main(int argc, char **argv) { return hl_app_run(argc, argv); }
     -- --with=<name>. (Manifest inference is deliberately NOT done here:
     -- extract_app_manifest EXECUTES app.lua and re-running it corrupts the sign
     -- flow; a side-effect-free manifest read is a tracked follow-up.)
-    --
-    -- FEATURE_SPECS is the single source of truth per feature. A feature that
-    -- contributes a backend to a base hook that returns an ARRAY (so several
-    -- features could feed one hook) carries { backend, type, hook }: the compose
-    -- step generates one strong collector filling that hook. A feature whose
-    -- base hooks each have exactly one provider carries no backend/hook; instead
-    -- `whole_archive = true` tells the compose step to force-load its archive so
-    -- the strong overrides (spread across its object files, with no single
-    -- backend symbol to anchor on) all get pulled. `whole_archive` is a plain
-    -- per-feature LINK attribute, sibling to `cxx` -- not a second kind of
-    -- feature. Other fields: `cxx` (needs a system compiler + C++ runtime) and
-    -- `libs` (extra link libs). Adding a feature is one row here + a
-    -- `make feature-<name>` archive + a release-pipeline entry.
-    local FEATURE_SPECS = {
-        -- sqlite: the vendored SQLite engine + backend + UDF + agent
-        -- introspection in libhull_feature-sqlite.a (`make feature-sqlite`),
-        -- filling the same hl_db_feature_backends hook. Unlike the others,
-        -- SQLite is Hull's DEFAULT backend composed onto a SQLite-less DB-core
-        -- base (built HL_SQLITE_FEATURE=1); docs/sqlite_feature.md, Phase B.
-        -- `base_group = true` because the archive references base symbols
-        -- (db_registry, the _hull_* guard, agent write_error, vfs, migrate) and
-        -- the base's generated override references the archive's backend, so the
-        -- compose wraps platform lib + archive in --start-group for GNU ld.
-        sqlite = {
-            backend    = "hl_db_backend_sqlite",
-            type       = "HlDbBackend",
-            hook       = "hl_db_feature_backends",
-            cxx        = false,
-            base_group = true,
-            libs       = { darwin = {}, other = {} },
-        },
-        duckdb = {
-            backend = "hl_db_backend_duckdb",
-            type    = "HlDbBackend",
-            hook    = "hl_db_feature_backends",
-            cxx     = true,
-            libs    = { darwin = { "-lc++" }, other = { "-lstdc++", "-ldl" } },
-        },
-        -- postgres: pure-C PostgreSQL wire backend in libhull_feature-postgres.a
-        -- (`make feature-postgres`), filling the same hl_db_feature_backends hook
-        -- as duckdb. No vendored engine / no extra link libs. `base_group = true`
-        -- because the backend references base crypto (SCRAM) + tls_client
-        -- (sslmode) that a DB-only app doesn't otherwise pull, so the compose must
-        -- wrap the platform lib + this archive in --start-group for GNU ld.
-        postgres = {
-            backend    = "hl_db_backend_postgres",
-            type       = "HlDbBackend",
-            hook       = "hl_db_feature_backends",
-            cxx        = false,
-            base_group = true,
-            libs       = { darwin = {}, other = {} },
-        },
-        -- mysql: pure-C MySQL/MariaDB wire backend in libhull_feature-mysql.a
-        -- (`make feature-mysql`), one backend serving both mysql:// and
-        -- mariadb://. Identical shape to postgres — fills hl_db_feature_backends,
-        -- references base crypto (native/caching_sha2 auth) + tls_client
-        -- (sslmode), so base_group = true (--start-group at compose on GNU ld).
-        mysql = {
-            backend    = "hl_db_backend_mysql",
-            type       = "HlDbBackend",
-            hook       = "hl_db_feature_backends",
-            cxx        = false,
-            base_group = true,
-            libs       = { darwin = {}, other = {} },
-        },
-        -- gpu: wgpu-native backend, isolated in libhull_feature-gpu.a
-        -- (`make feature-gpu`). Base ships the generic gpu dispatch layer +
-        -- the weak hl_gpu_feature_backends hook; this fills it. C (no cxx). The
-        -- frameworks / -lvulkan can't live in the .a so they're emitted here.
-        gpu = {
-            backend = "hl_gpu_backend_wgpu", type = "HlGpuBackend",
-            hook = "hl_gpu_feature_backends", cxx = false,
-            libs = { darwin = { "-framework", "Metal", "-framework", "QuartzCore",
-                                "-framework", "CoreGraphics", "-framework", "Foundation" },
-                     other  = { "-lvulkan" } },
-        },
-        -- tui: the whole TUI subsystem (cap + both runtime bridges) in
-        -- libhull_feature-tui.a (`make feature-tui`). Its base hooks
-        -- (hl_tui_feature_present / register_lua / register_js) each have one
-        -- provider, and the strong overrides live across several object files
-        -- with no single backend symbol, so the archive is whole-archive-linked
-        -- (force_load) rather than pull-by-backend-symbol. Pure C, no extra libs
-        -- (POSIX termios).
-        tui = {
-            whole_archive = true, cxx = false,
-            libs = { darwin = {}, other = {} },
-        },
-    }
+    -- FEATURE_SPECS (the per-feature compose registry) is required at the top
+    -- of this file from hull.feature_specs; that module carries the field docs.
     -- SQLite auto-compose (docs/sqlite_feature.md, Phase C). SQLite is Hull's
     -- DEFAULT backend, so a DB-using app auto-composes libhull_feature-sqlite.a
     -- -- but ONLY when the target base is SQLite-less. A stock base carries the
