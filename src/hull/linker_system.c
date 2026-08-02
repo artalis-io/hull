@@ -139,6 +139,20 @@ HlLinker *hl_linker_select(const char *explicit_linker, const char *hull_exe)
         return NULL;
     }
 
+    /* --linker=zig: link via `zig cc` - toolchain-free (zig bundles
+     * clang+lld+crt+libc) and cross-capable (--target). Resolve the `zig` tool
+     * (~/.hull/tools -> dirname(hull) -> $PATH). docs/toolchain_free_build.md */
+    if (explicit_linker && strcmp(explicit_linker, "zig") == 0) {
+        char zig[PATH_MAX] = {0};
+        hl_tools_lookup_path("zig", hull_exe, zig, sizeof zig);
+        HlLinker *l = hl_linker_zig_new(zig[0] ? zig : NULL);
+        if (l && hl_linker_is_available(l)) return l;
+        if (l) hl_linker_destroy(l);
+        fprintf(stderr, "hull: --linker=zig requested but no `zig` was found "
+                        "(install zig, or put it on PATH / ~/.hull/tools)\n");
+        return NULL;
+    }
+
     int is_system = (explicit_linker && strcmp(explicit_linker, "system") == 0);
     if (explicit_linker && !is_system) {
         HlLinker *l = hl_linker_system_new(explicit_linker);

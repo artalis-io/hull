@@ -133,6 +133,9 @@ int hl_tool_unveil_check(const HlToolUnveilCtx *ctx, const char *path, char need
 static const char *allowed_prefixes[] = {
     "cc", "gcc", "clang", "cosmocc", "cosmoar", "ar", "wamrc", "hull",
     "ld",
+    /* zig: `hull build --linker=zig` drives `zig cc` as a toolchain-free +
+     * cross-compiling link driver (docs/toolchain_free_build.md). */
+    "zig",
     /* nm: read-only symbol lister. `hull build` probes the resolved platform lib
      * for hl_db_backend_sqlite to decide whether to auto-compose the SQLite
      * feature onto a SQLite-less base (docs/sqlite_feature.md, Phase C). */

@@ -99,13 +99,28 @@ hundred KB, and could itself be a `hull tools install libc-<target>` asset),
 but it is genuinely per-(os, arch) engineering, not a one-liner. Sizing and
 sourcing it is the epic's real cost.
 
-> **`zig cc` as the turnkey alternative.** Zig bundles a full cross toolchain
-> (clang + lld + musl/glibc/mingw headers + crt) for dozens of targets and
-> cross-links from any host with `zig cc --target=<t>`. A `--linker=zig`
-> backend (or a `zig`-tool) would deliver Tier B **and** cross-compilation in
-> one move, at the cost of a larger tool download and a non-LLD invocation
-> convention. It is worth prototyping against the hand-rolled lld+musl floor
-> before committing to either.
+> **`zig cc` (implemented: `--linker=zig`).** Zig bundles a full cross
+> toolchain (clang + lld + musl/glibc/mingw crt+headers) for ~40 targets and
+> cross-links from any host with `zig cc --target=<triple>`. `linker_zig.c` is
+> a `HlLinkerVtable` backend that runs `zig cc [--target=] <objs> <libs>`; the
+> compiler-free emitter is untouched (zig only links the emitted
+> `app_registry.o`). It delivers Tier B **and** cross-compilation in one tool,
+> and - targeting `linux-gnu` - sidesteps the musl port (`__O_TMPFILE` resolves
+> under glibc headers). Empirically (macOS/arm64 host, run in Docker): zig
+> cross-links Hull's emitted object into **glibc-dynamic** (runs on Ubuntu) and
+> **static-musl** (runs on Alpine) Linux binaries, both arches.
+>
+> **Where zig works vs. not:** great for **Linux native + cross-to-Linux**
+> (bundles the complete floor). It does **not** relink a **macOS-native** app:
+> Hull's macOS platform lib references the system SDK `.tbd` stubs
+> (frameworks/libSystem), which zig's Mach-O linker rejects
+> (`failed to parse TBD file: NotLibStub`). So on macOS use `--linker=lld` or
+> `--linker=system`; `--linker=zig` targets Linux. It needs the
+> target-appropriate GC flag (`-dead_strip` Mach-O / `--gc-sections` ELF) so an
+> unreferenced archive member (tool.o's `hull_tool`) is stripped rather than
+> left dangling - Apple ld64 / gnu ld do this by default, zig's lld does not.
+> Costs: ~45 MB tool; multi-file tree (binary + `lib/`), so `hull tools install
+> zig` extracts a directory, not one binary; pre-1.0 (version-pin it).
 
 ## Axis 3 - cross-compilation
 
