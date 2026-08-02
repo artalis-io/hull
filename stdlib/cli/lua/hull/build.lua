@@ -2097,6 +2097,16 @@ local function main()
         shaders     = shader_files,
     }
 
+    -- The invariant app_main trampoline source. On the default path it's
+    -- written + compiled; on --no-compiler the bundled app_main.o (compiled
+    -- from exactly this source) is used instead. Either way this string
+    -- defines the sign payload's trampoline_hash (below), so the signature is
+    -- byte-identical across both paths.
+    local app_main = [[
+extern int hl_app_run(int argc, char **argv);
+int main(int argc, char **argv) { return hl_app_run(argc, argv); }
+]]
+
     -- app_registry + app_main: either COMPILE them (default) or, with
     -- --no-compiler, EMIT app_registry.o directly and extract the bundled
     -- app_main.o - no C compiler. See docs/compiler_free_build.md.
@@ -2124,13 +2134,10 @@ local function main()
         local registry_c = generate_app_registry(opts.app_dir, app_files)
         write_file(tmpdir .. "/app_registry.c", registry_c)
 
-        -- Generate app_main.c. hl_app_run is the slim app-runner entry
-        -- (hull_serve only); it pulls none of the hull dev CLI, so a produced
-        -- single-runtime app stays slim.
-        write_file(tmpdir .. "/app_main.c", [[
-extern int hl_app_run(int argc, char **argv);
-int main(int argc, char **argv) { return hl_app_run(argc, argv); }
-]])
+        -- app_main.c: hl_app_run is the slim app-runner entry (hull_serve
+        -- only); it pulls none of the hull dev CLI, so a produced single-
+        -- runtime app stays slim.
+        write_file(tmpdir .. "/app_main.c", app_main)
     end
 
     -- Extract platform library (if embedded)
