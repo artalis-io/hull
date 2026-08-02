@@ -7,13 +7,22 @@
  * is built from self-defined constants (no elf.h or mach-o headers - a macOS
  * host must emit ELF for a Linux target and vice versa).
  *
- * A single planner lays out one read-only section:
+ * A single planner lays out one section:
  *   [ name strings | file blobs | pad-to-8 | (N+1)-entry array ]
  * Each real entry's name/data pointer slots become ABS64 relocation sites
  * (target offset = where the string/blob lives); `len` is inline. The
  * trailing sentinel entry is 24 zero bytes with no relocations. Three
  * format backends serialize that plan (ELF, Mach-O, COFF/PE); cosmo reuses
  * the ELF backend, parameterized by (osabi, flags).
+ *
+ * The section holds relocated pointers, so it must be RELRO-eligible, NOT
+ * plain read-only: at load time the dynamic linker writes the relocated
+ * name/data addresses into the entry array, then (with -z relro) remaps it
+ * read-only. ELF expresses this as `.data.rel.ro` (SHF_ALLOC|SHF_WRITE);
+ * Mach-O as `__DATA,__const`. Placing it in `.rodata` (SHF_ALLOC only) puts
+ * the relocation targets in a truly read-only page - glibc tolerates the
+ * resulting text relocations, but musl's stricter loader SIGSEGVs applying
+ * them. This is what `cc` does for a `const T[]` with pointer initializers.
  *
  * See docs/compiler_free_build.md.
  *
@@ -132,7 +141,7 @@ static int emit_elf(const HlObjTarget *tgt, const Plan *pl,
     uint16_t machine = (tgt->arch == HL_OBJ_AARCH64) ? EM_AARCH64 : EM_X86_64;
     uint32_t rtype   = (tgt->arch == HL_OBJ_AARCH64) ? R_AARCH64_ABS64 : R_X86_64_64;
 
-    /* .rela.rodata: explicit addend, targeting the .rodata section symbol (1). */
+    /* .rela.data.rel.ro: explicit addend, targeting the section symbol (1). */
     Buf rela = {0};
     for (size_t i = 0; i < pl->nreloc; i++) {
         buf_u64(&rela, pl->relocs[i].site);
@@ -151,8 +160,8 @@ static int emit_elf(const HlObjTarget *tgt, const Plan *pl,
     buf_u64(&symtab, pl->array_off); buf_u64(&symtab, pl->sym_size);
 
     Buf shstr = {0}; buf_u8(&shstr, 0);
-    uint32_t nm_rodata = strtab_add(&shstr, ".rodata");
-    uint32_t nm_rela   = strtab_add(&shstr, ".rela.rodata");
+    uint32_t nm_sec    = strtab_add(&shstr, ".data.rel.ro");
+    uint32_t nm_rela   = strtab_add(&shstr, ".rela.data.rel.ro");
     uint32_t nm_symtab = strtab_add(&shstr, ".symtab");
     uint32_t nm_strtab = strtab_add(&shstr, ".strtab");
     uint32_t nm_shstr  = strtab_add(&shstr, ".shstrtab");
@@ -173,8 +182,8 @@ static int emit_elf(const HlObjTarget *tgt, const Plan *pl,
     buf_u16(&o, 64); buf_u16(&o, 0); buf_u16(&o, 0);
     buf_u16(&o, 64); buf_u16(&o, 6); buf_u16(&o, 5);
 
-    uint64_t off_rodata, off_rela, off_symtab, off_strtab, off_shstr, off_shdrs;
-    buf_pad(&o, 8); off_rodata = o.len; buf_put(&o, pl->sec.p, pl->sec.len);
+    uint64_t off_sec, off_rela, off_symtab, off_strtab, off_shstr, off_shdrs;
+    buf_pad(&o, 8); off_sec = o.len; buf_put(&o, pl->sec.p, pl->sec.len);
     buf_pad(&o, 8); off_rela   = o.len; buf_put(&o, rela.p, rela.len);
     buf_pad(&o, 8); off_symtab = o.len; buf_put(&o, symtab.p, symtab.len);
     off_strtab = o.len; buf_put(&o, strtab.p, strtab.len);
@@ -187,7 +196,7 @@ static int emit_elf(const HlObjTarget *tgt, const Plan *pl,
         buf_u64(&o,(of)); buf_u64(&o,(sz)); buf_u32(&o,(lk)); buf_u32(&o,(inf)); \
         buf_u64(&o,(al)); buf_u64(&o,(es)); } while (0)
     SHDR(0,0,0,0,0,0,0,0,0);
-    SHDR(nm_rodata, 1 /*PROGBITS*/, 0x2 /*ALLOC*/, off_rodata, pl->sec.len, 0,0, 8, 0);
+    SHDR(nm_sec, 1 /*PROGBITS*/, 0x3 /*ALLOC|WRITE → RELRO*/, off_sec, pl->sec.len, 0,0, 8, 0);
     SHDR(nm_rela, 4 /*RELA*/, 0x40 /*INFO_LINK*/, off_rela, rela.len, 3,1, 8, 24);
     SHDR(nm_symtab, 2 /*SYMTAB*/, 0, off_symtab, symtab.len, 4, 2, 8, 24);
     SHDR(nm_strtab, 3 /*STRTAB*/, 0, off_strtab, strtab.len, 0,0, 1, 0);
