@@ -713,6 +713,9 @@ e2e-compiler-free: $(BUILDDIR)/hull $(BUILDDIR)/libhull_platform.a
 e2e-linker: $(BUILDDIR)/hull $(BUILDDIR)/libhull_platform.a
 	sh tests/e2e_linker.sh
 
+e2e-cross-build:
+	sh tests/e2e_cross_build.sh
+
 # `hull build --flavor` MVP. Builds the pure-compute platform lib itself.
 e2e-build-flavor: $(BUILDDIR)/hull
 	sh tests/e2e_build_flavor.sh
