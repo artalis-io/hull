@@ -112,6 +112,10 @@ jobs:
         timeout-minutes: 5
         run: make e2e-feature-tls
 
+      - name: Compiler-free build E2E test (emit app_registry.o + bundled trampoline, no cc)
+        timeout-minutes: 4
+        run: make e2e-compiler-free
+
       - name: Attachment E2E tests
         timeout-minutes: 2
         run: make e2e-attachment
