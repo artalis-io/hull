@@ -39,11 +39,14 @@ local function parse_args()
                                 -- --no-verify-platform skips it; use for
                                 -- dev hulls (no embedded manifest) or
                                 -- forks signing with their own platform key.
-        no_compiler = false,    -- Compiler-free build: emit app_registry.o
-                                -- directly (obj_emit) + extract the bundled
-                                -- app_main.o / app_feature_registry-<rt>.o and
-                                -- link, with no C compiler. Opt-in; the common
-                                -- (no --with) case. docs/compiler_free_build.md
+        no_compiler = true,     -- Compiler-free build (DEFAULT since Phase 3):
+                                -- emit app_registry.o (obj_emit) + extract the
+                                -- bundled app_main.o / app_feature_registry-<rt>.o
+                                -- and link, with no C compiler. Auto-falls back
+                                -- to the compiler for --with features / cosmo /
+                                -- when no linker is resolvable (see the guard in
+                                -- main()). `--compiler[=X]` forces the compiler
+                                -- path. docs/compiler_free_build.md
     }
 
     local i = 1
@@ -65,6 +68,12 @@ local function parse_args()
             else
                 opts.cc = comp
             end
+            -- Asking for a specific compiler opts back into the compiler path
+            -- (the emit path is now the default).
+            opts.no_compiler = false
+        elseif a:sub(1, 11) == "--compiler=" then
+            opts.cc = a:sub(12)
+            opts.no_compiler = false
         elseif a == "--output" or a == "-o" then
             i = i + 1
             opts.output = arg[i]
@@ -2064,24 +2073,24 @@ local function main()
         end
     end
 
-    -- --no-compiler scope guard (docs/compiler_free_build.md "Rollout"). A
-    -- --with feature additionally codegens feature_registry.c (real code that
-    -- varies by feature combo), and cosmo/APE is a dual-arch link the emitter
-    -- v1 doesn't drive - both still need the compiler. Fail early + clearly.
+    -- The compiler-free (emit) path is the default (docs/compiler_free_build.md
+    -- "Rollout"). It can't cover every case yet, so auto-fall back to the C
+    -- compiler when needed rather than erroring: a --with feature additionally
+    -- codegens feature_registry.c (real code, varies by feature combo); cosmo/APE
+    -- is a dual-arch link the emitter v1 doesn't drive; and it needs a resolvable
+    -- linker. `--compiler[=X]` already forced the compiler path in parse_args.
     if opts.no_compiler then
+        local fallback
         if opts.with and next(opts.with) then
-            tool.stderr("hull build --no-compiler does not support --with features yet "
-                        .. "(feature_registry.c needs a compiler); drop --with or --no-compiler\n")
-            tool.rmdir(tmpdir); tool.exit(1)
+            fallback = "a --with feature (needs a generated feature registry)"
+        elseif is_cosmo then
+            fallback = "a cosmo/APE target (dual-arch)"
+        elseif not tool.linker or not tool.linker.is_available() then
+            fallback = "no resolvable linker"
         end
-        if is_cosmo then
-            tool.stderr("hull build --no-compiler does not support cosmo/APE targets yet "
-                        .. "(dual-arch); use a native target\n")
-            tool.rmdir(tmpdir); tool.exit(1)
-        end
-        if not tool.linker or not tool.linker.is_available() then
-            tool.stderr("hull build --no-compiler: no linker available (need cc/ld on PATH)\n")
-            tool.rmdir(tmpdir); tool.exit(1)
+        if fallback then
+            print("hull build: using the C compiler (" .. fallback .. ")")
+            opts.no_compiler = false
         end
     end
 

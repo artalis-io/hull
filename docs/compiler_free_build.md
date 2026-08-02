@@ -302,13 +302,19 @@ The whole reason to keep the linked form over an appended overlay:
 
 ## Rollout
 
-1. Land `obj_emit.c` + `HlLinkerVtable` + bundled `app_main.o` assets +
-   `tool.emit_app_registry` binding, behind `hull build --no-compiler`
-   (opt-in), keeping the current compile path as fallback.
-2. Flip `--no-compiler` to default once the per-format e2e is green
-   across the CI matrix.
-3. Remove `compiler_tcc.c`, the `vendor/tcc` submodule, `e2e_tcc.sh`,
-   and the tcc embedding pipeline (this design is its replacement).
+1. **Done (#182).** Land `obj_emit.c` + `HlLinkerVtable` +
+   `tool.emit_app_registry`/`tool.linker` bindings + `test_obj_emit`.
+   **Done (#185).** Bundled `app_main.o` / `app_feature_registry-<rt>.o`
+   assets + the `hull build --no-compiler` opt-in path + `e2e_compiler_free.sh`.
+2. **Done (Phase 3a).** The emit path is now the **default**. `--compiler[=X]`
+   opts back into the C compiler; a `--with` feature (needs a generated
+   feature registry), a cosmo/APE target (dual-arch), or a missing linker
+   **auto-fall back** to the compiler rather than erroring. The whole e2e
+   suite now builds through the emit path on the CI matrix.
+3. **Next.** Remove `compiler_tcc.c`, `mk/vendor/tcc.mk`, the `vendor/tcc`
+   submodule, `e2e_tcc.sh`, the `test_compiler` tcc cases, the tcc embedding
+   pipeline, and the `build-tcc` release job (this design is its replacement).
+   The system compiler stays as the `--with`/cosmo fallback.
 4. `linker_lld`/`linker_mold` embedding is a follow-up that upgrades
    "compiler-free" to "toolchain-free" on the user's box.
 

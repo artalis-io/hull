@@ -102,9 +102,16 @@ else
     echo "  (skip JS: entry not built)"
 fi
 
-echo "== scope guard: --no-compiler rejects --with features =="
-out="$($HULL build "$APP" --no-compiler --with=gpu --no-verify-platform -o "$WORKDIR/nope" 2>&1 || true)"
-assert "--with=gpu is rejected under --no-compiler" sh -c "printf '%s' \"$out\" | grep -qi 'does not support --with'"
+echo "== default is now the emit path; --with auto-falls back to the compiler =="
+# The emit path is the default (Phase 3): a plain build emits, and a --with
+# feature transparently falls back to the C compiler (it needs a generated
+# feature registry) rather than erroring.
+out_default="$($HULL build "$APP" --no-verify-platform -o "$WORKDIR/def" 2>&1 || true)"
+assert "default build uses the emit path" sh -c "printf '%s' \"$out_default\" | grep -qi 'emitting app_registry'"
+out_with="$($HULL build "$APP" --with=gpu --no-verify-platform -o "$WORKDIR/nope" 2>&1 || true)"
+assert "--with falls back to the C compiler" sh -c "printf '%s' \"$out_with\" | grep -qi 'using the C compiler'"
+out_cc="$($HULL build "$APP" --compiler=system --no-verify-platform -o "$WORKDIR/ccbin" 2>&1 || true)"
+assert "--compiler=system forces the compiler path" sh -c "printf '%s' \"$out_cc\" | grep -qi 'compiling with'"
 
 echo ""
 echo "compiler-free e2e: $PASS passed, $FAIL failed"
