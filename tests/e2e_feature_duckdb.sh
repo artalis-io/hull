@@ -17,14 +17,21 @@ cd "$(dirname "$0")/.."
 
 echo "=== build base hull (EMBED_PLATFORM=1; base is DuckDB-free) ==="
 make EMBED_PLATFORM=1 >/dev/null
+# Stash the base hull: `make feature-duckdb` re-invokes make with
+# HL_ENABLE_DUCKDB=1, and the build-config sentinel cleans build/ on the flag
+# flip (EMBED_PLATFORM is fingerprinted since #179), which would wipe build/hull.
+# Save the build-tool binary first so it survives the feature-archive build
+# (mirrors e2e_feature_gpu.sh).
+cp build/hull /tmp/hull_base_duckdb_e2e
+
 echo "=== build the DuckDB feature archive ==="
 make feature-duckdb >/dev/null
 ls -la build/libhull_feature-duckdb.a
 
-HULL=./build/hull
+HULL=/tmp/hull_base_duckdb_e2e
 APP=$(mktemp -d)
 PLAIN=$(mktemp -d)
-trap 'rm -rf "$APP" "$PLAIN"' EXIT
+trap 'rm -rf "$APP" "$PLAIN" /tmp/hull_base_duckdb_e2e' EXIT
 
 cat > "$APP/app.lua" <<'LUA'
 app.manifest({
