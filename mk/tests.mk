@@ -719,6 +719,12 @@ e2e-cross-build:
 e2e-tierb-musl:
 	sh tests/e2e_tierb_musl.sh
 
+# Full musl support: builds hull under musl (Alpine) and runs emit-path compute
+# + HTTP apps. Self-re-execs into Docker on a non-musl host. No prereqs (it does
+# its own musl build). See tests/e2e_musl.sh + docs/musl_build.md.
+e2e-musl:
+	sh tests/e2e_musl.sh
+
 # `hull build --flavor` MVP. Builds the pure-compute platform lib itself.
 e2e-build-flavor: $(BUILDDIR)/hull
 	sh tests/e2e_build_flavor.sh
