@@ -1,0 +1,81 @@
+/*
+ * linker.h — linker vtable for the compiler-free `hull build`
+ *
+ * The object emitter (obj_emit.h) removes the need to COMPILE the app's
+ * data object; the link step remains. This vtable abstracts it so the
+ * default system driver (cc/ld) and later embedded linkers (lld/mold, for
+ * a fully toolchain-free box) are interchangeable. It mirrors the link
+ * half of HlCompilerVtable but is a separate, pluggable component: the
+ * linker choice is orthogonal to the emitter (the emitter's output is a
+ * standard relocatable object any linker consumes).
+ *
+ * See docs/compiler_free_build.md.
+ *
+ * SPDX-License-Identifier: AGPL-3.0-or-later
+ */
+
+#ifndef HL_LINKER_H
+#define HL_LINKER_H
+
+#include <stdlib.h>
+
+#include "hull/obj_emit.h"   /* HlObjFormat, HlObjArch */
+
+typedef struct HlLinker HlLinker;
+
+/* What we are linking, so a cross/embedded linker knows how to invoke.
+ * The system-cc backend infers format/arch from the objects and mostly
+ * ignores this; it exists for cosmo dual-arch + future lld/mold. */
+typedef struct {
+    HlObjFormat format;
+    HlObjArch   arch;
+} HlLinkTarget;
+
+typedef struct {
+    /* Short name: "cc", "ld", "lld", "mold". Never NULL, never freed. */
+    const char *(*name)(HlLinker *l);
+    /* 1 if the linker is usable, 0 otherwise. */
+    int         (*is_available)(HlLinker *l);
+    /*
+     * Link objects + libraries → output binary. Returns 0 on success.
+     * objs / libs: NULL-terminated arrays (.o paths / -lfoo or lib.a paths).
+     * tgt: may be NULL (native host default).
+     */
+    int (*link)(HlLinker *l, const char *output,
+                const char **objs, const char **libs,
+                const HlLinkTarget *tgt);
+    void (*destroy)(HlLinker *l);
+} HlLinkerVtable;
+
+struct HlLinker {
+    const HlLinkerVtable *vtable;
+    void                 *ctx;
+};
+
+static inline const char *hl_linker_name(HlLinker *l)
+    { return l->vtable->name(l); }
+static inline int hl_linker_is_available(HlLinker *l)
+    { return l->vtable->is_available(l); }
+static inline int hl_linker_link(HlLinker *l, const char *out,
+    const char **objs, const char **libs, const HlLinkTarget *tgt)
+    { return l->vtable->link(l, out, objs, libs, tgt); }
+static inline void hl_linker_destroy(HlLinker *l)
+    { if (l) { l->vtable->destroy(l); free(l); } }
+
+/*
+ * Create the system linker backend, invoking cc_path as the link driver
+ * (cc/gcc/clang resolves crt startup + libc). cc_path must not be NULL.
+ * Returns NULL on allocation failure.
+ */
+HlLinker *hl_linker_system_new(const char *cc_path);
+
+/*
+ * Auto-select a linker:
+ *   "system" / NULL → first cc/gcc/clang found in $PATH
+ *   other           → hl_linker_system_new(explicit) (a cc/ld path)
+ * hull_exe (may be NULL) is reserved for future embedded-linker resolution.
+ * Returns NULL if nothing is found.
+ */
+HlLinker *hl_linker_select(const char *explicit_linker, const char *hull_exe);
+
+#endif /* HL_LINKER_H */

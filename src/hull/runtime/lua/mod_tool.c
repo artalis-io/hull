@@ -27,6 +27,8 @@
 #include "hull/runtime/tool.h"
 #include "hull/build_assets.h"
 #include "hull/compiler.h"
+#include "hull/obj_emit.h"
+#include "hull/linker.h"
 #include "hull/tools_install.h"
 #include "hull/embedded_platform_sig.h"
 #include "hull/platform_sig.h"
@@ -746,6 +748,132 @@ static int l_compiler_link(lua_State *L) {
     return 1;
 }
 
+/*
+ * tool.emit_app_registry(entries, format, arch [, elf_osabi, elf_flags]) → string|nil
+ *
+ * Serialize hl_app_entries[] directly as a relocatable object (the
+ * compiler-free build path). entries is an array of { name = "...",
+ * data = "<bytes>" }; format ∈ "elf"|"macho"|"coff"; arch ∈
+ * "x86_64"|"aarch64". Returns the object bytes as a Lua string (caller
+ * writes them out), or nil + message on error. See docs/compiler_free_build.md.
+ */
+static int l_emit_app_registry(lua_State *L) {
+    luaL_checktype(L, 1, LUA_TTABLE);
+    const char *fmt  = luaL_checkstring(L, 2);
+    const char *arch = luaL_checkstring(L, 3);
+    int osabi = (int)luaL_optinteger(L, 4, 0);
+    int flags = (int)luaL_optinteger(L, 5, 0);
+
+    HlObjTarget tgt;
+    if      (strcmp(fmt, "elf")   == 0) tgt.format = HL_OBJ_ELF;
+    else if (strcmp(fmt, "macho") == 0) tgt.format = HL_OBJ_MACHO;
+    else if (strcmp(fmt, "coff")  == 0) tgt.format = HL_OBJ_COFF;
+    else { lua_pushnil(L); lua_pushfstring(L, "unknown object format '%s'", fmt); return 2; }
+    if      (strcmp(arch, "x86_64")  == 0) tgt.arch = HL_OBJ_X86_64;
+    else if (strcmp(arch, "aarch64") == 0) tgt.arch = HL_OBJ_AARCH64;
+    else { lua_pushnil(L); lua_pushfstring(L, "unknown object arch '%s'", arch); return 2; }
+    tgt.elf_osabi = (unsigned char)osabi;
+    tgt.elf_flags = (unsigned int)flags;
+
+    size_t n = (size_t)luaL_len(L, 1);
+    HlEmitEntry *ents = NULL;
+    if (n) {
+        ents = (HlEmitEntry *)calloc(n, sizeof(*ents));
+        if (!ents) { lua_pushnil(L); lua_pushstring(L, "out of memory"); return 2; }
+    }
+    /* Borrow name/data pointers from the Lua strings on the stack; they stay
+     * valid until we pop, which is after the emit call completes. */
+    for (size_t i = 0; i < n; i++) {
+        lua_rawgeti(L, 1, (lua_Integer)(i + 1));      /* entry table */
+        lua_getfield(L, -1, "name");
+        lua_getfield(L, -2, "data");
+        size_t dlen = 0;
+        const char *name = lua_tostring(L, -2);
+        const char *data = lua_tolstring(L, -1, &dlen);
+        if (!name) {
+            free(ents);
+            lua_pushnil(L); lua_pushfstring(L, "entry %d missing name", (int)(i + 1));
+            return 2;
+        }
+        ents[i].name = name;
+        ents[i].data = (const unsigned char *)(data ? data : "");
+        ents[i].len  = (unsigned int)dlen;
+        /* Keep name+data+entry on the stack so the pointers stay alive. */
+    }
+
+    unsigned char *obj = NULL; size_t objlen = 0;
+    int rc = hl_obj_emit_app_registry(&tgt, ents, n, &obj, &objlen);
+    free(ents);
+    if (rc != 0 || !obj) {
+        lua_pushnil(L); lua_pushstring(L, "object emit failed"); return 2;
+    }
+    lua_pushlstring(L, (const char *)obj, objlen);
+    free(obj);
+    return 1;
+}
+
+/* ── tool.linker.* (the link-only vtable) ──────────────────────────── */
+#define TOOL_LINKER_KEY "__hull_linker"
+
+static int l_linker_name(lua_State *L) {
+    lua_getfield(L, LUA_REGISTRYINDEX, TOOL_LINKER_KEY);
+    HlLinker *l = (HlLinker *)lua_touserdata(L, -1);
+    lua_pop(L, 1);
+    if (!l) { lua_pushnil(L); return 1; }
+    lua_pushstring(L, hl_linker_name(l));
+    return 1;
+}
+
+static int l_linker_is_available(lua_State *L) {
+    lua_getfield(L, LUA_REGISTRYINDEX, TOOL_LINKER_KEY);
+    HlLinker *l = (HlLinker *)lua_touserdata(L, -1);
+    lua_pop(L, 1);
+    lua_pushboolean(L, l && hl_linker_is_available(l));
+    return 1;
+}
+
+static int l_linker_link(lua_State *L) {
+    const char *output = luaL_checkstring(L, 1);
+    luaL_checktype(L, 2, LUA_TTABLE);
+    luaL_checktype(L, 3, LUA_TTABLE);
+    lua_getfield(L, LUA_REGISTRYINDEX, TOOL_LINKER_KEY);
+    HlLinker *l = (HlLinker *)lua_touserdata(L, -1);
+    lua_pop(L, 1);
+    if (!l) { lua_pushboolean(L, 0); return 1; }
+
+    int nobj = (int)luaL_len(L, 2);
+    int nlib = (int)luaL_len(L, 3);
+    const char **objs = (const char **)malloc(((size_t)nobj + 1) * sizeof(char *));
+    const char **libs = (const char **)malloc(((size_t)nlib + 1) * sizeof(char *));
+    if (!objs || !libs) { free(objs); free(libs); lua_pushboolean(L, 0); return 1; }
+    for (int i = 1; i <= nobj; i++) { lua_rawgeti(L, 2, i); objs[i - 1] = lua_tostring(L, -1); lua_pop(L, 1); }
+    for (int i = 1; i <= nlib; i++) { lua_rawgeti(L, 3, i); libs[i - 1] = lua_tostring(L, -1); lua_pop(L, 1); }
+    objs[nobj] = NULL; libs[nlib] = NULL;
+
+    int rc = hl_linker_link(l, output, objs, libs, NULL);
+    free(objs); free(libs);
+    lua_pushboolean(L, rc == 0);
+    return 1;
+}
+
+void hl_lua_tool_expose_linker(lua_State *L, HlLinker *linker)
+{
+    if (!linker || !L) return;
+
+    lua_pushlightuserdata(L, linker);
+    lua_setfield(L, LUA_REGISTRYINDEX, TOOL_LINKER_KEY);
+
+    lua_getglobal(L, "tool");
+    if (!lua_istable(L, -1)) { lua_pop(L, 1); return; }
+
+    lua_newtable(L);
+    lua_pushcfunction(L, l_linker_name);          lua_setfield(L, -2, "name");
+    lua_pushcfunction(L, l_linker_is_available);  lua_setfield(L, -2, "is_available");
+    lua_pushcfunction(L, l_linker_link);          lua_setfield(L, -2, "link");
+    lua_setfield(L, -2, "linker");
+    lua_pop(L, 1);
+}
+
 void hl_lua_tool_expose_compiler(lua_State *L, HlCompiler *compiler)
 {
     if (!compiler || !L) return;
@@ -1266,6 +1394,7 @@ static int l_tool_sha256_file(lua_State *L)
 static const luaL_Reg tool_funcs[] = {
     { "spawn",                       l_tool_spawn },
     { "sha256_file",                 l_tool_sha256_file },
+    { "emit_app_registry",           l_emit_app_registry },
     { "spawn_read",                  l_tool_spawn_read },
     { "find_files",                  l_tool_find_files },
     { "find_tool",                   l_tool_find_tool },
