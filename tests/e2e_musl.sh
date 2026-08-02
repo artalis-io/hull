@@ -116,6 +116,30 @@ else
     bad "HTTP server app build"; tail -10 /tmp/musl_h.log
 fi
 
+# [3] Tier B: a FULLY STATIC musl binary via --linker=lld-static (ld.lld invoked
+# directly - no cc driving the link). Needs lld + the musl floor (crt1.o/libc.a
+# in /usr/lib, from musl-dev) + libgcc (found via `cc -print-libgcc-file-name`).
+if command -v ld.lld >/dev/null 2>&1 && [ -r /usr/lib/crt1.o ]; then
+    mkdir -p "$WORKDIR/static"
+    printf 'app.manifest({ modules = {} })\napp.main(function() return 0 end)\n' \
+        > "$WORKDIR/static/app.lua"
+    if HULL_LIBC_DIR=/usr/lib "$HULL" build "$WORKDIR/static" --no-verify-platform \
+            --linker=lld-static -o "$WORKDIR/static/bin" >/tmp/musl_t.log 2>&1; then
+        # static iff no PT_INTERP program header; plus it must run.
+        if readelf -l "$WORKDIR/static/bin" 2>/dev/null | grep -q INTERP; then
+            bad "Tier B binary is not static (has a PT_INTERP)"
+        elif "$WORKDIR/static/bin" --no-sandbox >/dev/null 2>&1; then
+            ok "Tier B (--linker=lld-static) builds a fully static musl binary that runs"
+        else
+            bad "Tier B static binary did not run cleanly"
+        fi
+    else
+        bad "Tier B (--linker=lld-static) build"; tail -12 /tmp/musl_t.log
+    fi
+else
+    echo "  skip Tier B (no ld.lld or no musl floor at /usr/lib)"
+fi
+
 echo
 echo "== e2e_musl: $PASS passed, $FAIL failed =="
 [ "$FAIL" -eq 0 ]
