@@ -71,47 +71,25 @@ jobs:
         if: runner.os == 'Linux'
         uses: ./.github/actions/hull-build-container
         with:
-          run: >
-            make feature-lua feature-js feature-http feature-http-lua
-            feature-http-js feature-tui-lua feature-tui-js
-            feature-wasm feature-wasm-lua feature-wasm-js
-            feature-sqlite feature-sqlite-lua feature-sqlite-js
-            feature-image feature-image-lua feature-image-js
-            feature-tls
-            feature-keel
+          # The embedded-archive set is the FEATURE_EMBEDDED_STEMS registry in
+          # mk/feature.mk (Phase 4). feature-embedded builds all of them, so
+          # adding an embedded feature is one edit there, not four here.
+          run: make feature-embedded
       - name: Build embedded feature archives (macOS)
         if: runner.os == 'macOS'
-        run: >
-          make feature-lua feature-js feature-http feature-http-lua
-          feature-http-js feature-tui-lua feature-tui-js
-          feature-wasm feature-wasm-lua feature-wasm-js
-          feature-sqlite feature-sqlite-lua feature-sqlite-js
-          feature-image feature-image-lua feature-image-js
-          feature-tls
-          feature-keel
+        run: make feature-embedded
+      - name: Stage embedded feature archives (registry-explicit)
+        # Copy exactly the FEATURE_EMBEDDED_STEMS archives (via the registry
+        # print target) into a clean dir, so the uploaded artifact is precisely
+        # those regardless of anything else that may sit in build/.
+        run: |
+          mkdir -p features-out
+          cp $(make -s print-feature-embedded-libs) features-out/
       - name: Upload embedded feature archives
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
         with:
           name: platform-features-${{ matrix.name }}
-          path: |
-            build/libhull_feature-lua.a
-            build/libhull_feature-js.a
-            build/libhull_feature-http.a
-            build/libhull_feature-http-lua.a
-            build/libhull_feature-http-js.a
-            build/libhull_feature-tui-lua.a
-            build/libhull_feature-tui-js.a
-            build/libhull_feature-wasm.a
-            build/libhull_feature-wasm-lua.a
-            build/libhull_feature-wasm-js.a
-            build/libhull_feature-sqlite.a
-            build/libhull_feature-sqlite-lua.a
-            build/libhull_feature-sqlite-js.a
-            build/libhull_feature-image.a
-            build/libhull_feature-image-lua.a
-            build/libhull_feature-image-js.a
-            build/libhull_feature-tls.a
-            build/libhull_feature-keel.a
+          path: features-out/libhull_feature-*.a
 
       # Per-flavor platform libs for `hull build --flavor` + `hull platform
       # install`. Each native platform-<flavor> target builds into its own obj
@@ -270,9 +248,12 @@ jobs:
             # `sqlite` = the engine (Phase D), `sqlite-lua`/`sqlite-js` = the udf
             # bridges (Phase C.2b). `tls` = the mbedTLS + crypto/transport backends
             # (docs/tls_feature.md, a2; one archive, no per-runtime bridge).
+            # Glob the downloaded embedded archives (the FEATURE_EMBEDDED_STEMS
+            # set that feature-embedded produced + uploaded) rather than a
+            # hardcoded stem list; the stem is recovered from each filename.
             for arch in linux-x86_64 linux-aarch64 darwin-arm64; do
-              for stem in lua js http http-lua http-js tui-lua tui-js wasm wasm-lua wasm-js sqlite sqlite-lua sqlite-js image image-lua image-js tls keel; do
-                f="platforms/platform-features-$arch/libhull_feature-$stem.a"
+              for f in platforms/platform-features-$arch/libhull_feature-*.a; do
+                stem=$(basename "$f" .a); stem=${stem#libhull_feature-}
                 sha256sum "$f" \
                   | awk -v n="libhull_feature-$stem.$arch.a" '{print $1"  "n}'
               done
@@ -566,7 +547,7 @@ jobs:
           # name (libhull_feature-<stem>.<arch>.a), or the runtime §5c check on
           # every app this hull builds would fail. Includes the SQLite engine
           # (sqlite) + udf bridges (sqlite-lua/sqlite-js) + the TLS backends (tls).
-          for stem in lua js http http-lua http-js tui-lua tui-js wasm wasm-lua wasm-js sqlite sqlite-lua sqlite-js image image-lua image-js tls keel; do
+          for stem in $(make -s print-feature-embedded-stems); do
             fa="build/libhull_feature-$stem.a"
             name="libhull_feature-$stem.${{ matrix.name }}.a"
             fact=$(sha256sum "$fa" | awk '{print $1}')
