@@ -54,3 +54,27 @@ $$(BUILDDIR)/libhull_feature-$(1).a: $(2) $$($(3)) | $$(BUILDDIR)
 	done; rm -rf $$$$tmproot
 	@echo "built $$@ ($$$$(du -h $$@ | cut -f1))"
 endef
+
+# ── Canonical feature registry (single source of truth, Phase 4) ─────
+# The one place the feature set is enumerated. release.yml derives its
+# embedded-archive build / upload / sign lists from these (via the
+# feature-embedded aggregate + the print-* targets) so adding a feature is one
+# edit here, not four across Makefile / build.lua / feature.c / release.yml.
+#
+#   FEATURE_EMBEDDED_STEMS     archives that ship INSIDE the distributed hull
+#                              (platform-domain, attested by signature.c 5c:
+#                              runtime + http + wasm + sqlite + image + tls +
+#                              keel + per-runtime bridges). Native-only; cosmo
+#                              (fat APE) has none.
+#   FEATURE_INSTALLABLE_STEMS  the --with features published as signed archives
+#                              for `hull feature install` (release-domain).
+FEATURE_EMBEDDED_STEMS := lua js http http-lua http-js tui-lua tui-js wasm wasm-lua wasm-js sqlite sqlite-lua sqlite-js image image-lua image-js tls keel
+FEATURE_INSTALLABLE_STEMS := duckdb postgres mysql gpu tui
+FEATURE_EMBEDDED_LIBS := $(addprefix $(BUILDDIR)/libhull_feature-,$(addsuffix .a,$(FEATURE_EMBEDDED_STEMS)))
+
+.PHONY: feature-embedded print-feature-embedded-stems print-feature-embedded-libs print-feature-installable-stems
+# Build every embedded feature archive (what release.yml's embedded build step runs).
+feature-embedded: $(addprefix feature-,$(FEATURE_EMBEDDED_STEMS))
+print-feature-embedded-stems: ; @echo $(FEATURE_EMBEDDED_STEMS)
+print-feature-embedded-libs: ; @echo $(FEATURE_EMBEDDED_LIBS)
+print-feature-installable-stems: ; @echo $(FEATURE_INSTALLABLE_STEMS)
