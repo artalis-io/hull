@@ -5,7 +5,7 @@
  * the bytes back: header, sections, the exported hl_app_entries symbol, the
  * ABS64 relocations, and that each entry's len is inline while its name/data
  * pointer slots are zeroed and their reloc addends point at the right bytes
- * in .rodata. Host-independent (no linking), so it runs on every CI arch;
+ * in .data.rel.ro. Host-independent (no linking), so it runs on every CI arch;
  * the link+run round-trip lives in the e2e.
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
@@ -83,16 +83,19 @@ static void check_emit(int *utest_result,
     ASSERT_EQ(want_machine, rd16(o + 18)); /* e_machine */
 
     Elf e; parse(&e, o);
-    int i_rodata = find_sec(&e, ".rodata");
-    int i_rela   = find_sec(&e, ".rela.rodata");
+    int i_sec = find_sec(&e, ".data.rel.ro");
+    int i_rela   = find_sec(&e, ".rela.data.rel.ro");
     int i_sym    = find_sec(&e, ".symtab");
     int i_str    = find_sec(&e, ".strtab");
-    ASSERT_TRUE(i_rodata > 0 && i_rela > 0 && i_sym > 0 && i_str > 0);
+    ASSERT_TRUE(i_sec > 0 && i_rela > 0 && i_sym > 0 && i_str > 0);
 
-    /* .rodata must be read-only (SHF_ALLOC, no SHF_WRITE = 0x1). */
-    ASSERT_EQ((uint64_t)0x2, SH_FLAGS(shdr(&e, i_rodata)) & 0x3);
+    /* The entry array holds relocated pointers, so the section must be
+     * RELRO-eligible: SHF_ALLOC|SHF_WRITE (0x3), NOT read-only .rodata. A
+     * plain-.rodata placement (0x2) puts the RELATIVE reloc targets in a
+     * truly RO page and musl's loader SIGSEGVs applying them. */
+    ASSERT_EQ((uint64_t)0x3, SH_FLAGS(shdr(&e, i_sec)) & 0x3);
 
-    const unsigned char *rodata = o + SH_OFFSET(shdr(&e, i_rodata));
+    const unsigned char *sec = o + SH_OFFSET(shdr(&e, i_sec));
     const unsigned char *strtab = o + SH_OFFSET(shdr(&e, i_str));
 
     /* Find the hl_app_entries global in .symtab. */
@@ -111,27 +114,27 @@ static void check_emit(int *utest_result,
         }
     }
     ASSERT_EQ(1, found);
-    ASSERT_EQ(i_rodata, sym_shndx);
+    ASSERT_EQ(i_sec, sym_shndx);
     ASSERT_EQ((uint64_t)(n + 1) * 24, sym_size);  /* N real + sentinel */
 
     /* Array: each real entry's len inline; name/data slots zeroed; sentinel zero. */
     for (size_t k = 0; k < n; k++) {
-        const unsigned char *ent = rodata + array_off + k*24;
+        const unsigned char *ent = sec + array_off + k*24;
         ASSERT_EQ((uint64_t)0, rd64(ent + 0));   /* name slot (reloc-filled) */
         ASSERT_EQ((uint64_t)0, rd64(ent + 8));   /* data slot */
         ASSERT_EQ(ents[k].len, rd32(ent + 16));  /* len inline */
     }
-    const unsigned char *sentinel = rodata + array_off + n*24;
+    const unsigned char *sentinel = sec + array_off + n*24;
     for (int b = 0; b < 24; b++) ASSERT_EQ(0, sentinel[b]);
 
     /* Relocs: exactly 2N ABS64, targeting the array slots, addends pointing
-     * at the entry's name / data bytes in .rodata. */
+     * at the entry's name / data bytes in .data.rel.ro. */
     const unsigned char *rela = o + SH_OFFSET(shdr(&e, i_rela));
     uint64_t nrel = SH_SIZE(shdr(&e, i_rela)) / 24;
     ASSERT_EQ((uint64_t)2 * n, nrel);
     ASSERT_EQ((uint64_t)24, SH_ENTSIZE(shdr(&e, i_rela)));
     ASSERT_EQ((uint32_t)i_sym, SH_LINK(shdr(&e, i_rela)));    /* → .symtab */
-    ASSERT_EQ((uint32_t)i_rodata, SH_INFO(shdr(&e, i_rela))); /* applies to .rodata */
+    ASSERT_EQ((uint32_t)i_sec, SH_INFO(shdr(&e, i_rela))); /* applies to .data.rel.ro */
 
     for (size_t k = 0; k < n; k++) {
         const unsigned char *rn = rela + (2*k)   * 24;  /* name reloc */
@@ -139,12 +142,12 @@ static void check_emit(int *utest_result,
         ASSERT_EQ(array_off + k*24 + 0, rd64(rn + 0));
         ASSERT_EQ(array_off + k*24 + 8, rd64(rd + 0));
         ASSERT_EQ(want_rtype, (uint32_t)(rd64(rn + 8) & 0xffffffff));
-        ASSERT_EQ((uint64_t)1, rd64(rn + 8) >> 32);     /* sym idx 1 = .rodata */
+        ASSERT_EQ((uint64_t)1, rd64(rn + 8) >> 32);     /* sym idx 1 = .data.rel.ro */
         uint64_t name_add = rd64(rn + 16);
         uint64_t data_add = rd64(rd + 16);
-        ASSERT_STREQ(ents[k].name, (const char *)rodata + name_add);
+        ASSERT_STREQ(ents[k].name, (const char *)sec + name_add);
         if (ents[k].len)
-            ASSERT_EQ(0, memcmp(rodata + data_add, ents[k].data, ents[k].len));
+            ASSERT_EQ(0, memcmp(sec + data_add, ents[k].data, ents[k].len));
     }
 
     free(o);
@@ -165,7 +168,7 @@ UTEST(obj_emit, empty_is_just_sentinel) {
     ASSERT_EQ(0, hl_obj_emit_app_registry(&tgt, NULL, 0, &o, &olen));
     ASSERT_TRUE(o != NULL);
     Elf e; parse(&e, o);
-    int i_sym = find_sec(&e, ".symtab"), i_rela = find_sec(&e, ".rela.rodata");
+    int i_sym = find_sec(&e, ".symtab"), i_rela = find_sec(&e, ".rela.data.rel.ro");
     /* one hl_app_entries sym of size 24 (sentinel only), zero relocs */
     ASSERT_EQ((uint64_t)0, SH_SIZE(shdr(&e, i_rela)));
     const unsigned char *strtab = o + SH_OFFSET(shdr(&e, find_sec(&e, ".strtab")));
