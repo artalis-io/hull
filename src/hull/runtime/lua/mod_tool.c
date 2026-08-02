@@ -866,7 +866,20 @@ static int l_linker_link(lua_State *L) {
     for (int i = 1; i <= nlib; i++) { lua_rawgeti(L, 3, i); libs[i - 1] = lua_tostring(L, -1); lua_pop(L, 1); }
     objs[nobj] = NULL; libs[nlib] = NULL;
 
-    int rc = hl_linker_link(l, output, objs, libs, NULL);
+    /* Optional 4th arg: cross target triple ("x86_64-linux-gnu"); 5th: target
+     * format ("elf"/"macho"/"coff"). Both feed the zig backend (--target= +
+     * the format-correct GC flag). Strings borrowed from the Lua stack, valid
+     * across the link call. A NULL tgt (no triple + no fmt) = native default. */
+    const char *triple = lua_tostring(L, 4);
+    const char *fmts   = lua_tostring(L, 5);
+    HlObjFormat fmt = HL_OBJ_ELF;
+    if (fmts) {
+        if      (strcmp(fmts, "macho") == 0) fmt = HL_OBJ_MACHO;
+        else if (strcmp(fmts, "coff")  == 0) fmt = HL_OBJ_COFF;
+    }
+    HlLinkTarget tgt = { fmt, 0, triple };
+    int rc = hl_linker_link(l, output, objs, libs,
+                            ((triple && *triple) || fmts) ? &tgt : NULL);
     free(objs); free(libs);
     lua_pushboolean(L, rc == 0);
     return 1;

@@ -25,10 +25,14 @@ typedef struct HlLinker HlLinker;
 
 /* What we are linking, so a cross/embedded linker knows how to invoke.
  * The system-cc backend infers format/arch from the objects and mostly
- * ignores this; it exists for cosmo dual-arch + future lld/mold. */
+ * ignores this; it exists for cosmo dual-arch + lld/zig. */
 typedef struct {
     HlObjFormat format;
     HlObjArch   arch;
+    /* Full cross triple <arch>-<os>-<abi> (e.g. x86_64-linux-gnu). NULL/empty
+     * = native host. Consumed by the zig backend's `--target=`; other backends
+     * ignore it. Not owned. */
+    const char *triple;
 } HlLinkTarget;
 
 typedef struct {
@@ -84,6 +88,14 @@ HlLinker *hl_linker_lld_new(const char *cc_path, const char *lld_bin);
  * backend. Requires musl-built app archives. See docs/toolchain_free_build.md.
  */
 HlLinker *hl_linker_lld_direct_new(const char *ld_path, const char *libdir);
+
+/*
+ * Create the zig backend wrapping zig_path (the `zig` executable), which links
+ * via `zig cc [--target=<triple>]` - toolchain-free (zig bundles clang + lld +
+ * crt/libc) and cross-capable. zig_path may be NULL (unavailable backend).
+ * See docs/toolchain_free_build.md.
+ */
+HlLinker *hl_linker_zig_new(const char *zig_path);
 
 /*
  * Auto-select a linker:

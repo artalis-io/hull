@@ -332,13 +332,37 @@ local function collect_app_entries(app_dir, files)
     return entries
 end
 
--- Map the running hull's platform (darwin-arm64 / linux-x86_64 / linux-aarch64)
--- to the (obj_emit format, arch) the emitter + bundled objects target.
-local function compiler_free_target()
+-- Resolve the build target into { arch, fmt, os, triple } from --target
+-- (docs/toolchain_free_build.md). --target accepts an ARCH ("x86_64" /
+-- "aarch64", native OS) or a full zig cross triple "<arch>-<os>-<abi>"
+-- (e.g. x86_64-linux-gnu, aarch64-macos). triple is nil for a native build.
+local function target_spec(opts)
     local pn = tool.platform_name() or ""
-    local fmt = (pn:sub(1, 6) == "darwin") and "macho" or "elf"
-    local arch = (pn:find("aarch64") or pn:find("arm64")) and "aarch64" or "x86_64"
-    return fmt, arch
+    local nat_fmt = (pn:sub(1, 6) == "darwin") and "macho" or "elf"
+    local nat_arch = (pn:find("aarch64") or pn:find("arm64")) and "aarch64" or "x86_64"
+    local nat_os = (nat_fmt == "macho") and "macos" or "linux"
+    local t = opts and opts.target
+    if not t or t == "" then
+        return { arch = nat_arch, fmt = nat_fmt, os = nat_os, triple = nil }
+    end
+    if t == "x86_64" or t == "aarch64" or t == "arm64" then
+        local a = (t == "arm64") and "aarch64" or t
+        local triple = a .. "-" .. (nat_os == "macos" and "macos" or "linux-gnu")
+        return { arch = a, fmt = nat_fmt, os = nat_os, triple = triple }
+    end
+    -- full triple <arch>-<os>[-<abi>]
+    local arch = t:match("^([%w_]+)-") or nat_arch
+    if arch == "arm64" then arch = "aarch64" end
+    local osp = t:match("^[%w_]+-([%w_]+)") or nat_os
+    local fmt = (osp == "macos" or osp == "darwin") and "macho"
+             or (osp == "windows") and "coff" or "elf"
+    return { arch = arch, fmt = fmt, os = osp, triple = t }
+end
+
+-- (obj_emit format, arch) for the (possibly cross) target.
+local function compiler_free_target(opts)
+    local s = target_spec(opts)
+    return s.fmt, s.arch
 end
 
 local function generate_app_registry(app_dir, files)
@@ -1983,7 +2007,8 @@ local function main()
         if wamrc then
             local targets = {}
             if opts.target then
-                targets = { opts.target }
+                -- AOT wants a bare arch; --target may be a full cross triple.
+                targets = { target_spec(opts).arch }
             elseif is_cosmo then
                 targets = { "x86_64", "aarch64" }
             else
@@ -2131,7 +2156,7 @@ int main(int argc, char **argv) { return hl_app_run(argc, argv); }
     local ok
     if opts.no_compiler then
         local entries = collect_app_entries(opts.app_dir, app_files)
-        local fmt, arch = compiler_free_target()
+        local fmt, arch = compiler_free_target(opts)
         print(string.format("hull build: emitting app_registry.o (%s/%s, %d entries)...",
                              fmt, arch, #entries))
         local obj, emsg = tool.emit_app_registry(entries, fmt, arch)
@@ -2211,7 +2236,11 @@ int main(int argc, char **argv) { return hl_app_run(argc, argv); }
     -- (tool.linker, cc/ld driver); the default path uses the compiler's own
     -- link. Both consume the same objects + libs.
     if opts.no_compiler then
-        ok = tool.linker.link(opts.output, link_objs, link_libs)
+        -- Pass the cross triple (nil for native) + the target format; only the
+        -- zig backend consumes them (--target= + the format-correct link GC
+        -- flag). docs/toolchain_free_build.md.
+        local ts = target_spec(opts)
+        ok = tool.linker.link(opts.output, link_objs, link_libs, ts.triple, ts.fmt)
     else
         ok = tool.compiler.link(opts.output, link_objs, link_libs)
     end
