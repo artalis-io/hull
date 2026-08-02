@@ -112,42 +112,37 @@ UTEST(compiler, system_version_cc)
     hl_compiler_destroy(c);
 }
 
-/* ── Tests: compile + link round-trip ───────────────────────────── */
+/* ── Tests: compile ─────────────────────────────────────────────── */
 
-UTEST(compiler, compile_and_link_hello)
+/* The compiler vtable is compile-only now; linking goes through the linker
+ * vtable (hl_linker_link), exercised by the linker e2es (e2e_linker.sh,
+ * e2e_compiler_free.sh) and every `hull build` e2e. This asserts only the
+ * .c → .o step. */
+UTEST(compiler, compile_hello)
 {
     char *tmpdir = make_tmpdir();
     ASSERT_NE(tmpdir, NULL);
 
     /* Write a trivial C program */
-    char src[512], obj[512], out[512];
+    char src[512], obj[512];
     snprintf(src, sizeof(src), "%s/hello.c", tmpdir);
     snprintf(obj, sizeof(obj), "%s/hello.o", tmpdir);
-    snprintf(out, sizeof(out), "%s/hello", tmpdir);
 
     int w = write_file(src,
         "extern int puts(const char *);\n"
         "int main(void) { puts(\"hello\"); return 0; }\n");
     ASSERT_EQ(w, 0);
 
-    HlCompiler *c = hl_compiler_select(NULL, NULL);
+    HlCompiler *c = hl_compiler_select(NULL);
     if (!c) {
         /* No compiler available — skip */
         rm_rf(tmpdir); free(tmpdir);
         return;
     }
 
-    /* Compile */
     int rc = hl_compiler_compile(c, src, obj, NULL);
     ASSERT_EQ(rc, 0);
     ASSERT_EQ(access(obj, F_OK), 0);
-
-    /* Link */
-    const char *objs[] = { obj, NULL };
-    const char *libs[] = { NULL };
-    rc = hl_compiler_link(c, out, objs, libs);
-    ASSERT_EQ(rc, 0);
-    ASSERT_EQ(access(out, X_OK), 0);
 
     hl_compiler_destroy(c);
     rm_rf(tmpdir);
@@ -174,7 +169,7 @@ UTEST(compiler, compile_with_include_dir)
         "#include \"entry.h\"\n"
         "const HlEntry entries[] = { { 0, 0, 0 } };\n");
 
-    HlCompiler *c = hl_compiler_select(NULL, NULL);
+    HlCompiler *c = hl_compiler_select(NULL);
     if (!c) { rm_rf(tmpdir); free(tmpdir); return; }
 
     int rc = hl_compiler_compile(c, src, obj, tmpdir);
@@ -190,7 +185,7 @@ UTEST(compiler, compile_with_include_dir)
 
 UTEST(compiler, select_null_returns_compiler)
 {
-    HlCompiler *c = hl_compiler_select(NULL, NULL);
+    HlCompiler *c = hl_compiler_select(NULL);
     /* At least one compiler should be available in CI */
     ASSERT_NE(c, NULL);
     ASSERT_EQ(hl_compiler_is_available(c), 1);
@@ -199,7 +194,7 @@ UTEST(compiler, select_null_returns_compiler)
 
 UTEST(compiler, select_explicit_cc)
 {
-    HlCompiler *c = hl_compiler_select("cc", NULL);
+    HlCompiler *c = hl_compiler_select("cc");
     ASSERT_NE(c, NULL);
     ASSERT_STREQ(hl_compiler_name(c), "cc");
     hl_compiler_destroy(c);
@@ -207,13 +202,13 @@ UTEST(compiler, select_explicit_cc)
 
 UTEST(compiler, select_fake_returns_null)
 {
-    HlCompiler *c = hl_compiler_select("__nonexistent_xyz__", NULL);
+    HlCompiler *c = hl_compiler_select("__nonexistent_xyz__");
     ASSERT_EQ(c, NULL);
 }
 
 UTEST(compiler, select_system_forces_system)
 {
-    HlCompiler *c = hl_compiler_select("system", NULL);
+    HlCompiler *c = hl_compiler_select("system");
     /* system compilers should always be available in CI */
     ASSERT_NE(c, NULL);
     hl_compiler_destroy(c);
@@ -254,7 +249,7 @@ UTEST(compiler, compile_app_registry_pattern)
         "    { 0, 0, 0 }\n"
         "};\n");
 
-    HlCompiler *c = hl_compiler_select(NULL, NULL);
+    HlCompiler *c = hl_compiler_select(NULL);
     if (!c) { rm_rf(tmpdir); free(tmpdir); return; }
 
     int rc = hl_compiler_compile(c, src, obj, tmpdir);
@@ -271,7 +266,7 @@ UTEST(compiler, compile_app_registry_pattern)
 UTEST(compiler, default_compiler_resolves)
 {
     /* Auto-select must resolve an available compiler (the system cc). */
-    HlCompiler *c = hl_compiler_select(NULL, NULL);
+    HlCompiler *c = hl_compiler_select(NULL);
     ASSERT_NE(c, NULL);
     ASSERT_EQ(hl_compiler_is_available(c), 1);
     hl_compiler_destroy(c);

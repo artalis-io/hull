@@ -2114,13 +2114,16 @@ local function main()
     -- is a dual-arch link the emitter v1 doesn't drive; and it needs a resolvable
     -- linker. `--compiler[=X]` already forced the compiler path in parse_args.
     if opts.no_compiler then
+        -- An unresolvable linker is NOT a fallback reason: both the emit path
+        -- and the compiler path link through tool.linker now, so switching to
+        -- the compiler can't rescue a missing linker. It's a hard error at the
+        -- link step below, which also correctly surfaces an explicit
+        -- --linker=<x> that failed to resolve instead of silently using cc.
         local fallback
         if opts.with and next(opts.with) then
             fallback = "a --with feature (needs a generated feature registry)"
         elseif is_cosmo then
             fallback = "a cosmo/APE target (dual-arch)"
-        elseif not tool.linker or not tool.linker.is_available() then
-            fallback = "no resolvable linker"
         end
         if fallback then
             print("hull build: using the C compiler (" .. fallback .. ")")
@@ -2232,17 +2235,26 @@ int main(int argc, char **argv) { return hl_app_run(argc, argv); }
     if group then link_libs[#link_libs + 1] = "-Wl,--end-group" end
     link_libs[#link_libs + 1] = "-lm"
     link_libs[#link_libs + 1] = "-lpthread"
-    -- The compiler-free path links through the standalone linker vtable
-    -- (tool.linker, cc/ld driver); the default path uses the compiler's own
-    -- link. Both consume the same objects + libs.
+    -- BOTH build paths link through the standalone linker vtable (tool.linker,
+    -- a cc/ld driver) - the compiler vtable is compile-only now, so there is one
+    -- code path for the `cc -o out objs libs` invocation. Both consume the same
+    -- objects + libs.
+    if not tool.linker or not tool.linker.is_available() then
+        tool.stderr("hull build: no usable linker (need cc/gcc/clang on PATH, "
+                    .. "or an installed --linker=<lld|zig|...>)\n")
+        tool.rmdir(tmpdir)
+        tool.exit(1)
+    end
     if opts.no_compiler then
-        -- Pass the cross triple (nil for native) + the target format; only the
-        -- zig backend consumes them (--target= + the format-correct link GC
-        -- flag). docs/toolchain_free_build.md.
+        -- Emit path may cross-target: pass the triple (nil for native) + the
+        -- target format; only the zig backend consumes them (--target= + the
+        -- format-correct link GC flag). docs/toolchain_free_build.md.
         local ts = target_spec(opts)
         ok = tool.linker.link(opts.output, link_objs, link_libs, ts.triple, ts.fmt)
     else
-        ok = tool.compiler.link(opts.output, link_objs, link_libs)
+        -- Compiler path is native-only (--with features + cosmo are native), so
+        -- it passes no triple/format.
+        ok = tool.linker.link(opts.output, link_objs, link_libs)
     end
     if not ok then
         tool.stderr("hull build: linking failed\n")

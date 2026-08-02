@@ -10,6 +10,7 @@
  */
 
 #include "hull/linker.h"
+#include "hull/compiler.h"   /* hl_driver_resolve_native (shared cc resolution) */
 #include "hull/cap/tool.h"
 #include "hull/tools_install.h"
 
@@ -162,40 +163,11 @@ HlLinker *hl_linker_select(const char *explicit_linker, const char *hull_exe)
         return NULL;
     }
 
-#ifdef __COSMOPOLITAN__
-    /* Cosmo hull links cosmo-format archives → prefer cosmocc as the driver
-     * (mirrors compiler.c's cosmo resolution). */
-    {
-        const char *home = getenv("HOME");
-        char path[512];
-        if (home && *home) {
-            int m = snprintf(path, sizeof(path), "%s/.cosmocc/bin/cosmocc", home);
-            if (m > 0 && (size_t)m < sizeof(path)) {
-                HlLinker *l = hl_linker_system_new(path);
-                if (l && hl_linker_is_available(l)) return l;
-                if (l) hl_linker_destroy(l);
-            }
-            m = snprintf(path, sizeof(path), "%s/cosmocc/bin/cosmocc", home);
-            if (m > 0 && (size_t)m < sizeof(path)) {
-                HlLinker *l = hl_linker_system_new(path);
-                if (l && hl_linker_is_available(l)) return l;
-                if (l) hl_linker_destroy(l);
-            }
-        }
-        HlLinker *l = hl_linker_system_new("/opt/cosmo/bin/cosmocc");
-        if (l && hl_linker_is_available(l)) return l;
-        if (l) hl_linker_destroy(l);
-        l = hl_linker_system_new("cosmocc");
-        if (l && hl_linker_is_available(l)) return l;
-        if (l) hl_linker_destroy(l);
-    }
-#endif
-
-    static const char *candidates[] = { "cc", "gcc", "clang", NULL };
-    for (const char **p = candidates; *p; p++) {
-        HlLinker *l = hl_linker_system_new(*p);
-        if (l && hl_linker_is_available(l)) return l;
-        if (l) hl_linker_destroy(l);
-    }
+    /* Auto: the shared native-driver resolver (cc/gcc/clang; cosmocc on a cosmo
+     * hull) - the same cc the compiler backend resolves, so one link driver
+     * serves both build paths. See compiler.c::hl_driver_resolve_native. */
+    char cc[PATH_MAX];
+    if (hl_driver_resolve_native(cc, sizeof cc) == 0)
+        return hl_linker_system_new(cc);
     return NULL;
 }
