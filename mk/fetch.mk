@@ -197,7 +197,7 @@ fetch-wgpu:
 			echo "Supported: macos-aarch64, macos-x86_64, linux-x86_64, linux-aarch64"; \
 			exit 1; \
 		fi; \
-		curl $(CURL_RETRY) -sL -o /tmp/$(WGPU_ZIP) "$(WGPU_URL)"; \
+		curl $(CURL_RETRY_LARGE) -sL -o /tmp/$(WGPU_ZIP) "$(WGPU_URL)"; \
 		echo "Verifying SHA-256..."; \
 		ACTUAL=$$($(SHA256CMD) /tmp/$(WGPU_ZIP) | cut -d' ' -f1); \
 		if [ "$$ACTUAL" != "$(WGPU_EXPECTED_SHA)" ]; then \
@@ -227,7 +227,7 @@ fetch-duckdb:
 			echo "Supported: osx-arm64, osx-amd64, linux-amd64, linux-arm64 (glibc)"; \
 			exit 1; \
 		fi; \
-		curl $(CURL_RETRY) -sL -o /tmp/$(DUCKDB_ZIP) "$(DUCKDB_URL)"; \
+		curl $(CURL_RETRY_LARGE) -sL -o /tmp/$(DUCKDB_ZIP) "$(DUCKDB_URL)"; \
 		echo "Verifying SHA-256..."; \
 		ACTUAL=$$($(SHA256CMD) /tmp/$(DUCKDB_ZIP) | cut -d' ' -f1); \
 		if [ "$$ACTUAL" != "$(DUCKDB_EXPECTED_SHA)" ]; then \
@@ -274,7 +274,7 @@ fetch-cosmocc:
 		echo "cosmocc already installed: $$(which cosmocc)"; \
 	else \
 		echo "=== Fetching cosmocc $(COSMOCC_VERSION) to $(COSMOCC_DIR) ==="; \
-		curl $(CURL_RETRY) -sL -o /tmp/cosmocc.zip "$(COSMOCC_URL)"; \
+		curl $(CURL_RETRY_LARGE) -sL -o /tmp/cosmocc.zip "$(COSMOCC_URL)"; \
 		echo "Verifying SHA-256..."; \
 		ACTUAL=$$($(SHA256CMD) /tmp/cosmocc.zip | cut -d' ' -f1); \
 		if [ "$$ACTUAL" != "$(COSMOCC_SHA256)" ]; then \

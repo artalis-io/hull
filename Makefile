@@ -50,6 +50,12 @@ endif
 # Retry knob for network fetches (toolchains + vendored assets). --retry-all-errors
 # also retries partial transfers (curl exit 18), the observed CI download flake.
 CURL_RETRY := --retry 3 --retry-all-errors --retry-delay 2
+# For LARGE binary downloads (DuckDB ~127 MB, wgpu, cosmocc): --retry alone does
+# not catch a *stalled* transfer (slow-but-not-erroring), which is the recurring
+# CI flake. Add a connect timeout + stall detection (--speed-limit/--speed-time:
+# abort, then retry, if throughput drops below 4 KB/s for 30s) and more attempts.
+CURL_RETRY_LARGE := --retry 5 --retry-all-errors --retry-delay 3 \
+                    --connect-timeout 30 --speed-limit 4096 --speed-time 30
 
 # ── Version string ────────────────────────────────────────────────────
 #
