@@ -1161,3 +1161,18 @@ jobs:
           out=$(make embed-zig-smoke 2>&1); echo "$out"
           echo "$out" | grep -q "embed-zig-smoke: OK" \
             || { echo "::error::embed_zig did not run to completion"; exit 1; }
+
+  musl:
+    name: musl (Alpine)
+    runs-on: ubuntu-24.04
+    # A plain ubuntu runner (not container: alpine) so actions/checkout keeps
+    # working - GitHub's node runs on the glibc host. tests/e2e_musl.sh detects
+    # the non-musl host and re-execs itself inside an alpine:3.20 container,
+    # building hull under musl and running emit-path compute + HTTP apps.
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          submodules: recursive
+
+      - name: Build + emit/run E2E under musl (Docker Alpine)
+        run: sh tests/e2e_musl.sh

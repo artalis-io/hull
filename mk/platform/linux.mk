@@ -8,6 +8,18 @@
 PLEDGE_DIR := $(VENDDIR)/pledge
 PLEDGE_CFLAGS := -std=c11 -O2 -w -D_GNU_SOURCE -I$(PLEDGE_DIR) $(DEPFLAGS)
 
+# musl (Alpine) omits the glibc-only __O_TMPFILE macro that pledge-linux.c
+# references - purely as the numeric seccomp-mask constant 020000000 (the
+# vendored polyfill's own comments spell out that value; it is the Linux ABI
+# flag, identical on x86_64/aarch64). glibc defines it via <bits/fcntl-linux.h>,
+# so scope the define to a musl target (a glibc -D would just warn on redefine)
+# and to PLEDGE_CFLAGS (pledge-linux.c is its sole user tree-wide). Detected from
+# the compiler's target triple. This is the one shim a musl build needs; the
+# rest of the vendored stack is musl-clean. See docs/musl_build.md.
+ifneq ($(findstring musl,$(shell $(CC) -dumpmachine 2>/dev/null)),)
+PLEDGE_CFLAGS += -D__O_TMPFILE=020000000
+endif
+
 PLEDGE_SRCS := \
 	$(PLEDGE_DIR)/libc/calls/pledge.c \
 	$(PLEDGE_DIR)/libc/calls/pledge-linux.c \
