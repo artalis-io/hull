@@ -39,6 +39,11 @@ local function parse_args()
                                 -- --no-verify-platform skips it; use for
                                 -- dev hulls (no embedded manifest) or
                                 -- forks signing with their own platform key.
+        no_compiler = false,    -- Compiler-free build: emit app_registry.o
+                                -- directly (obj_emit) + extract the bundled
+                                -- app_main.o / app_feature_registry-<rt>.o and
+                                -- link, with no C compiler. Opt-in; the common
+                                -- (no --with) case. docs/compiler_free_build.md
     }
 
     local i = 1
@@ -69,6 +74,8 @@ local function parse_args()
             opts.cache = false
         elseif a == "--no-build-compute" then
             opts.build_compute = false
+        elseif a == "--no-compiler" then
+            opts.no_compiler = true
         elseif a == "--target" then
             i = i + 1
             opts.target = arg[i]
@@ -268,6 +275,52 @@ local function c_string_escape(s)
         if ch == '\\' then return '\\\\' end
         return string.format('\\%03o', ch:byte())
     end))
+end
+
+-- Collect the { name = <VFS entry name>, data = <file bytes> } list for the
+-- compiler-free build (fed to tool.emit_app_registry). Mirrors the exact
+-- entry-naming of generate_app_registry below and sorts by name (the same
+-- byte-wise order HlVfs's binary search requires). Kept parallel rather than
+-- refactoring the C-emitting path, so the default build is untouched;
+-- tests/e2e_compiler_free.sh builds an app both ways and asserts identical
+-- runtime behavior, catching any drift.
+local function collect_app_entries(app_dir, files)
+    local entries = {}
+    local function add(path, name)
+        local data = read_file(path)
+        if not data then
+            tool.stderr("hull build: cannot read " .. path .. "\n"); tool.exit(1)
+        end
+        entries[#entries + 1] = { name = name, data = data }
+    end
+    local function rel_of(path) return path:sub(#app_dir + 2) end
+
+    for _, p in ipairs(files.lua or {})     do add(p, "./" .. rel_of(p):gsub("%.lua$", "")) end
+    for _, p in ipairs(files.js or {})      do add(p, "./" .. rel_of(p)) end
+    for _, p in ipairs(files.json or {})    do add(p, "./" .. rel_of(p)) end
+    for _, p in ipairs(files.html or {})    do add(p, rel_of(p)) end   -- templates/…
+    for _, p in ipairs(files.static or {})  do add(p, rel_of(p)) end   -- static/…
+    for _, p in ipairs(files.sql or {})     do add(p, rel_of(p)) end   -- migrations/…
+    for _, p in ipairs(files.compute or {}) do add(p, rel_of(p)) end   -- compute/…
+    for _, p in ipairs(files.shaders or {}) do add(p, rel_of(p)) end   -- shaders/…
+    for _, item in ipairs(files.compute_aot or {}) do
+        local data = read_file(item.path)
+        if not data then
+            error("hull build: AOT artifact missing or unreadable: " .. item.path)
+        end
+        entries[#entries + 1] = { name = item.entry_name, data = data }
+    end
+    table.sort(entries, function(a, b) return a.name < b.name end)
+    return entries
+end
+
+-- Map the running hull's platform (darwin-arm64 / linux-x86_64 / linux-aarch64)
+-- to the (obj_emit format, arch) the emitter + bundled objects target.
+local function compiler_free_target()
+    local pn = tool.platform_name() or ""
+    local fmt = (pn:sub(1, 6) == "darwin") and "macho" or "elf"
+    local arch = (pn:find("aarch64") or pn:find("arm64")) and "aarch64" or "x86_64"
+    return fmt, arch
 end
 
 local function generate_app_registry(app_dir, files)
@@ -978,10 +1031,22 @@ local function compose_features(opts, tmpdir, platform_lib, is_cosmo, compute_fi
                 needs_tls = true
             end
 
+            -- The per-runtime feature registry is invariant code (depends only
+            -- on app_rt), so --no-compiler extracts a pre-compiled bundled copy
+            -- instead of compiling gen_app_registry_c. Keep the generated .c on
+            -- disk either way for provenance / debugging.
             write_file(tmpdir .. "/app_feature_registry.c",
                        fcompose.gen_app_registry_c(app_rt))
-            if not tool.compiler.compile(tmpdir .. "/app_feature_registry.c",
-                                         tmpdir .. "/app_feature_registry.o", nil) then
+            if opts.no_compiler then
+                local afr = tool.bundled_object("app_feature_registry_" .. app_rt)
+                if not afr then
+                    tool.stderr("hull build --no-compiler: no bundled app_feature_registry for runtime '"
+                                .. app_rt .. "'\n")
+                    tool.rmdir(tmpdir); tool.exit(1)
+                end
+                write_file(tmpdir .. "/app_feature_registry.o", afr)
+            elseif not tool.compiler.compile(tmpdir .. "/app_feature_registry.c",
+                                             tmpdir .. "/app_feature_registry.o", nil) then
                 tool.stderr("hull build: compilation failed (app_feature_registry.c)\n")
                 tool.rmdir(tmpdir); tool.exit(1)
             end
@@ -1999,8 +2064,28 @@ local function main()
         end
     end
 
-    -- Generate unified app_registry.c
-    local registry_c = generate_app_registry(opts.app_dir, {
+    -- --no-compiler scope guard (docs/compiler_free_build.md "Rollout"). A
+    -- --with feature additionally codegens feature_registry.c (real code that
+    -- varies by feature combo), and cosmo/APE is a dual-arch link the emitter
+    -- v1 doesn't drive - both still need the compiler. Fail early + clearly.
+    if opts.no_compiler then
+        if opts.with and next(opts.with) then
+            tool.stderr("hull build --no-compiler does not support --with features yet "
+                        .. "(feature_registry.c needs a compiler); drop --with or --no-compiler\n")
+            tool.rmdir(tmpdir); tool.exit(1)
+        end
+        if is_cosmo then
+            tool.stderr("hull build --no-compiler does not support cosmo/APE targets yet "
+                        .. "(dual-arch); use a native target\n")
+            tool.rmdir(tmpdir); tool.exit(1)
+        end
+        if not tool.linker or not tool.linker.is_available() then
+            tool.stderr("hull build --no-compiler: no linker available (need cc/ld on PATH)\n")
+            tool.rmdir(tmpdir); tool.exit(1)
+        end
+    end
+
+    local app_files = {
         lua         = lua_files,
         js          = js_files,
         json        = json_files,
@@ -2010,41 +2095,74 @@ local function main()
         compute     = compute_files,
         compute_aot = compute_aot,
         shaders     = shader_files,
-    })
-    write_file(tmpdir .. "/app_registry.c", registry_c)
+    }
 
-    -- Generate app_main.c. hl_app_run is the slim app-runner entry (hull_serve
-    -- only); it pulls none of the hull dev CLI (dispatch/subcommands/agent), so a
-    -- produced single-runtime app stays slim.
+    -- The invariant app_main trampoline source. On the default path it's
+    -- written + compiled; on --no-compiler the bundled app_main.o (compiled
+    -- from exactly this source) is used instead. Either way this string
+    -- defines the sign payload's trampoline_hash (below), so the signature is
+    -- byte-identical across both paths.
     local app_main = [[
 extern int hl_app_run(int argc, char **argv);
 int main(int argc, char **argv) { return hl_app_run(argc, argv); }
 ]]
-    write_file(tmpdir .. "/app_main.c", app_main)
+
+    -- app_registry + app_main: either COMPILE them (default) or, with
+    -- --no-compiler, EMIT app_registry.o directly and extract the bundled
+    -- app_main.o - no C compiler. See docs/compiler_free_build.md.
+    local ok
+    if opts.no_compiler then
+        local entries = collect_app_entries(opts.app_dir, app_files)
+        local fmt, arch = compiler_free_target()
+        print(string.format("hull build: emitting app_registry.o (%s/%s, %d entries)...",
+                             fmt, arch, #entries))
+        local obj, emsg = tool.emit_app_registry(entries, fmt, arch)
+        if not obj then
+            tool.stderr("hull build: app_registry emit failed: " .. tostring(emsg) .. "\n")
+            tool.rmdir(tmpdir); tool.exit(1)
+        end
+        write_file(tmpdir .. "/app_registry.o", obj)
+
+        local am = tool.bundled_object("app_main")
+        if not am then
+            tool.stderr("hull build --no-compiler: this hull has no bundled app_main.o\n")
+            tool.rmdir(tmpdir); tool.exit(1)
+        end
+        write_file(tmpdir .. "/app_main.o", am)
+    else
+        -- Generate unified app_registry.c
+        local registry_c = generate_app_registry(opts.app_dir, app_files)
+        write_file(tmpdir .. "/app_registry.c", registry_c)
+
+        -- app_main.c: hl_app_run is the slim app-runner entry (hull_serve
+        -- only); it pulls none of the hull dev CLI, so a produced single-
+        -- runtime app stays slim.
+        write_file(tmpdir .. "/app_main.c", app_main)
+    end
 
     -- Extract platform library (if embedded)
     -- Extract platform library + sig cross-check: see prepare_platform() above.
     local platform_lib, platform_dir, platform_sig_blob, platform_arch_hashes =
         prepare_platform(opts, tmpdir, cc, is_cosmo, flavor_asset)
 
-    -- Compile
-    print("hull build: compiling with " .. tool.compiler.name() .. "...")
-    local ok = tool.compiler.compile(tmpdir .. "/app_registry.c",
-                                      tmpdir .. "/app_registry.o",
-                                      tmpdir)
-    if not ok then
-        tool.stderr("hull build: compilation failed (app_registry.c)\n")
-        tool.rmdir(tmpdir)
-        tool.exit(1)
-    end
+    if not opts.no_compiler then
+        -- Compile
+        print("hull build: compiling with " .. tool.compiler.name() .. "...")
+        ok = tool.compiler.compile(tmpdir .. "/app_registry.c",
+                                   tmpdir .. "/app_registry.o", tmpdir)
+        if not ok then
+            tool.stderr("hull build: compilation failed (app_registry.c)\n")
+            tool.rmdir(tmpdir)
+            tool.exit(1)
+        end
 
-    ok = tool.compiler.compile(tmpdir .. "/app_main.c",
-                                tmpdir .. "/app_main.o",
-                                nil)
-    if not ok then
-        tool.stderr("hull build: compilation failed (app_main.c)\n")
-        tool.rmdir(tmpdir)
-        tool.exit(1)
+        ok = tool.compiler.compile(tmpdir .. "/app_main.c",
+                                   tmpdir .. "/app_main.o", nil)
+        if not ok then
+            tool.stderr("hull build: compilation failed (app_main.c)\n")
+            tool.rmdir(tmpdir)
+            tool.exit(1)
+        end
     end
 
     -- Compose features (--with / inferred): see compose_features() above.
@@ -2071,7 +2189,14 @@ int main(int argc, char **argv) { return hl_app_run(argc, argv); }
     if group then link_libs[#link_libs + 1] = "-Wl,--end-group" end
     link_libs[#link_libs + 1] = "-lm"
     link_libs[#link_libs + 1] = "-lpthread"
-    ok = tool.compiler.link(opts.output, link_objs, link_libs)
+    -- The compiler-free path links through the standalone linker vtable
+    -- (tool.linker, cc/ld driver); the default path uses the compiler's own
+    -- link. Both consume the same objects + libs.
+    if opts.no_compiler then
+        ok = tool.linker.link(opts.output, link_objs, link_libs)
+    else
+        ok = tool.compiler.link(opts.output, link_objs, link_libs)
+    end
     if not ok then
         tool.stderr("hull build: linking failed\n")
         tool.rmdir(tmpdir)

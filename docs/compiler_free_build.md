@@ -189,6 +189,45 @@ release signature.
 > code-object backend), removing the pre-built blobs. Bundling is the
 > pragmatic v1 — trivial, robust, no hand-written codegen.
 
+### Second bundled object: `app_feature_registry-<rt>.o`
+
+`app_registry.o` is not the only object `hull build` generates today. For
+**every** native app, `build.lua` also codegens a tiny C file
+(`feature_compose.gen_app_registry_c(rt)`) that defines two functions
+overriding the base's weak seams:
+
+```c
+extern const HlEntry hl_stdlib_<rt>_entries[];
+const HlEntry *const *hl_stdlib_feature_entries(size_t *count)
+    { if (count) *count = 1; return (const HlEntry *const[]){ hl_stdlib_<rt>_entries }; }
+extern const HlRuntimeFactory hl_<rt>_factory;
+const HlRuntimeFactory *const *hl_runtime_feature_factories(size_t *count)
+    { if (count) *count = 1; return (const HlRuntimeFactory *const[]){ &hl_<rt>_factory }; }
+```
+
+These are **code**, so the data-object emitter can't produce them — but
+they are **invariant per runtime** (they depend only on `rt` ∈ {lua, js},
+never on the app), so they bundle exactly like `app_main.o`, one blob per
+`(rt, format, arch)`:
+
+```
+app_feature_registry-lua-macho-arm64.o   app_feature_registry-js-macho-arm64.o
+app_feature_registry-lua-elf-x86_64.o    app_feature_registry-js-elf-x86_64.o    …
+```
+
+So the compiler-free link set for a plain app is: **emit** `app_registry.o`
++ **bundle-extract** `app_main.o` and `app_feature_registry-<rt>.o` + link.
+Three compiles collapse to one emit and two blob extracts.
+
+**Scope of `--no-compiler`.** A `--with=<feature>` build additionally
+codegens `feature_registry.c` (filling `hl_db_feature_backends` /
+`hl_gpu_feature_backends`), which varies by the feature *combination* and is
+genuine code. Bundling every combo is out of scope for v1, so `--no-compiler`
+covers the **common case** (no `--with`); a `--with` build still needs the
+compiler for that one file (or falls back cleanly). Cosmo's fat base already
+has both runtimes' strong hooks compiled in, so a cosmo app emits **no**
+`app_feature_registry` at all — only `app_registry.o` + `app_main`.
+
 ## Linker integration (`HlLinkerVtable`)
 
 Mirror the existing `HlCompilerVtable`. `include/hull/linker.h`:
