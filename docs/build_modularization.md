@@ -1,7 +1,21 @@
 # Build modularization: one record per feature
 
-**Status:** design (approved approach: hybrid mk/ split + `define-feature`
-macro; cross-file registry unified). Lands **after v0.9.0**.
+**Status: COMPLETE (phases 0-4, shipped post-v0.9.0).** The Makefile split into
+`mk/` fragments (5,344 -> ~3,090 lines): 13 `mk/features/*.mk` + `mk/feature.mk`
+macros, 15 `mk/vendor/*.mk`, `mk/platform/{darwin,linux,cosmo,windows}.mk`,
+`mk/{flags,hardening,libhull,tests,fetch}.mk`. `build.lua`'s `main()` staged from
+~1,585 to ~328 lines (`discover()` -> a ctx table, `prepare_platform()`,
+`compose_features()`) with `FEATURE_SPECS` hoisted to the `hull.feature_specs`
+module. Phase 4 (cross-file registry unify): the canonical `FEATURE_EMBEDDED_STEMS`
+/ `FEATURE_INSTALLABLE_STEMS` in `mk/feature.mk` drive `release.yml`'s
+build/upload/sign lists, and `make check-feature-registry` (a CI fail-fast) guards
+`feature.c` `FEATURES[]` against drift. Every network-fetch target (CA bundle,
+pwned, HTMX, unicode, wgpu, DuckDB, cosmocc) lives in `mk/fetch.mk`.
+
+The remaining root Makefile (~3,090 lines) is the irreducible core: the CFLAGS
+accumulation pipeline, the object registry + compile pattern rules, and the single
+platform-lib + `hull` link assembly point. The rest of this document is the
+original design + phasing that the shipped work followed.
 
 ## Problem
 
