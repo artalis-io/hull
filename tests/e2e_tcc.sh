@@ -127,14 +127,16 @@ if [ "$TCC_VIABLE" = "1" ]; then
     wait "$SERVER_PID" 2>/dev/null || true
     SERVER_PID=""
 
-    # ── Auto-select prefers a resolvable tcc ──
+    # ── Bare `hull build` uses the emit path (Phase 3 default), even with a
+    #    resolvable tcc installed. tcc is used only when explicitly asked
+    #    (`--compiler=tcc`, tested above). ──
     echo ""
-    echo "Test: hull build (no --compiler) prefers a resolvable tcc"
+    echo "Test: hull build (no --compiler) uses the emit path, not tcc"
     HOME="$FAKEHOME" "$HULL" build --no-verify-platform -o "$WORKDIR/hello.auto" . \
         > "$WORKDIR/auto.log" 2>&1
     assert "hull build exits 0" [ $? -eq 0 ]
-    grep -qi "compiling with tcc" "$WORKDIR/auto.log"
-    assert "auto-select prefers tcc when installed" [ $? -eq 0 ]
+    grep -qi "emitting app_registry" "$WORKDIR/auto.log"
+    assert "bare build emits by default (does not auto-pick tcc)" [ $? -eq 0 ]
 
 else
     # ── macOS/cosmo: --compiler=tcc must fail; system cc still works. ──
