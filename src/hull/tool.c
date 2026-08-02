@@ -95,8 +95,8 @@ int hull_keygen(int argc, char **argv)
 
 /*
  * Parse --compiler from argv. Accepts both forms:
- *   --compiler tcc      (space-separated)
- *   --compiler=tcc      (equals-separated)
+ *   --compiler system   (space-separated)
+ *   --compiler=system   (equals-separated)
  * Returns compiler name (or NULL for default).
  */
 /* Returns a function that does nothing — used as the __index of the
@@ -160,8 +160,8 @@ int hull_tool(const char *module, int argc, char **argv, const char *hull_exe)
     const char *cc_explicit = parse_cc_option(argc, argv);
     const char *cc = cc_explicit ? cc_explicit : HL_DEFAULT_CC;
 
-    /* Validate compiler against allowlist (skip for "tcc" and "system" sentinels) */
-    if (strcmp(cc, "tcc") != 0 && strcmp(cc, "system") != 0 &&
+    /* Validate compiler against allowlist (skip for the "system" sentinel) */
+    if (strcmp(cc, "system") != 0 &&
         hl_tool_check_allowlist(cc) != 0) {
         fprintf(stderr, "hull: compiler '%s' not in allowlist\n", cc);
         return 1;

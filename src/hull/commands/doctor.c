@@ -160,16 +160,6 @@ static PlatformEmbed detect_platform(void)
     return PLATFORM_NONE;
 }
 
-#ifdef HL_ENABLE_TCC
-/* tcc is a side-loaded tool now (not embedded): report whether one is
- * currently resolvable (~/.hull/tools → sibling of hull → PATH). */
-static int tcc_resolvable(const char *hull_exe)
-{
-    char path[PATH_MAX];
-    return hl_tools_lookup_path("tcc", hull_exe, path, sizeof(path)) == 0;
-}
-#endif
-
 /* ── Compute (WASM/AOT) capability detection ───────────────────────── */
 /*
  * Reports what this hull binary can do with compute WASM modules
@@ -367,21 +357,6 @@ static void print_human(FILE *f, CompilerInfo *ci, int nci,
         print_check(f, ci[i].name, found, found ? ci[i].path : NULL);
     }
     fprintf(f, "\n");
-
-#ifdef HL_ENABLE_TCC
-    fprintf(f, "tcc  (compile step; side-loaded tool, %s)\n",
-            hl_build_tcc_version_string());
-    {
-        char tccp[PATH_MAX];
-        if (hl_tools_lookup_path("tcc", NULL, tccp, sizeof(tccp)) == 0) {
-            fprintf(f, "  tcc         \xe2\x9c\x93  %s\n", tccp);
-        } else {
-            fprintf(f, "  tcc         \xe2\x9c\x97  not installed "
-                       "(`hull tools install tcc`, or put tcc on PATH)\n");
-        }
-    }
-    fprintf(f, "\n");
-#endif
 
     /* ── CA bundle (HTTPS trust store) ── */
     {
@@ -583,16 +558,9 @@ static void print_human(FILE *f, CompilerInfo *ci, int nci,
         fprintf(f, "not ready — platform library not embedded\n");
         fprintf(f, "              hint: make platform && make EMBED_PLATFORM=1\n");
     } else {
-#ifdef HL_ENABLE_TCC
-        int tcc_avail = tcc_resolvable(NULL);
-#else
-        int tcc_avail = 0;
-#endif
-        if (!any_compiler && !tcc_avail) {
+        if (!any_compiler) {
             fprintf(f, "not ready — no C compiler found\n");
             fprintf(f, "              hint: install gcc or clang\n");
-        } else if (!any_compiler) {
-            fprintf(f, "ready (embedded tcc for compile, system linker for link)\n");
         } else {
             fprintf(f, "ready\n");
         }
@@ -625,14 +593,9 @@ static void print_json(FILE *f, CompilerInfo *ci, int nci,
         embed == PLATFORM_MULTI  ? "multi-arch" :
         embed == PLATFORM_SINGLE ? "single-arch" : "none";
 
-#ifdef HL_ENABLE_TCC
-    int tcc_avail_json = tcc_resolvable(NULL);
-#else
-    int tcc_avail_json = 0;
-#endif
     const char *ready_str =
-        (embed == PLATFORM_NONE)              ? "no-platform" :
-        (!any_compiler && !tcc_avail_json)    ? "no-compiler"  : "ready";
+        (embed == PLATFORM_NONE)  ? "no-platform" :
+        (!any_compiler)           ? "no-compiler"  : "ready";
 
     ShJsonWriter w;
     sh_json_writer_init(&w, stdio_write_fn, f);
@@ -652,12 +615,6 @@ static void print_json(FILE *f, CompilerInfo *ci, int nci,
         sh_json_write_object_end(&w);
     }
     sh_json_write_array_end(&w);
-
-#ifdef HL_ENABLE_TCC
-    /* tcc is a side-loaded tool now; report whether one is resolvable rather
-     * than whether it's embedded. Field renamed accordingly. */
-    sh_json_write_kv_bool(&w, "tcc_available", tcc_resolvable(NULL) != 0);
-#endif
 
     /* CA bundle status */
     {
@@ -840,15 +797,7 @@ int hl_cmd_doctor(int argc, char **argv, const HlCommandEnv *env)
         print_human(stdout, ci, MAX_COMPILERS, embed, any_compiler, &cmp);
 
     /* Exit 1 if hull build cannot work, so scripts can check: hull doctor || ... */
-#ifdef HL_ENABLE_TCC
-    int tcc_available = tcc_resolvable(env->hull_exe);
-#else
-    int tcc_available = 0;
-#endif
-    /* hull build is ready when platform is embedded AND a compiler exists.
-     * Note: even the tcc backend delegates the LINK step to a system cc, so a
-     * resolvable tcc without any system compiler still can't complete a build;
-     * any_compiler is the real gate, tcc_available is a positive signal. */
-    int build_ready = (embed != PLATFORM_NONE) && (any_compiler || tcc_available);
+    /* hull build is ready when platform is embedded AND a compiler exists. */
+    int build_ready = (embed != PLATFORM_NONE) && any_compiler;
     return build_ready ? 0 : 1;
 }

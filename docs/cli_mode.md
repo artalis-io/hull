@@ -261,7 +261,7 @@ cron, etc.
 
 ## `hull doctor`
 
-New row in the subsystems section (alongside DB/WASM/GPU/TCC):
+New row in the subsystems section (alongside DB/WASM/GPU):
 
 ```
 HTTP server (Keel):    yes

@@ -101,7 +101,7 @@ hull build --flavor=auto myapp           # infer minimal flavor from manifest
 | `pure-compute` | `HL_ENABLE_HTTP=0` | both HTTP halves + Keel + mbedTLS | `app.main`; no HTTP/web modules |
 
 Orthogonal toggles (`HL_ENABLE_DB`, `HL_ENABLE_TUI`, `HL_ENABLE_WASM`,
-`HL_ENABLE_GPU`, `HL_ENABLE_TCC`) can compose with any flavor. Whether
+`HL_ENABLE_GPU`) can compose with any flavor. Whether
 `--flavor` exposes them as a free-form flag set or only ships a curated
 list of named flavors is an open question (§8).
 

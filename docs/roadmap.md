@@ -139,7 +139,7 @@ vs flavor vs tool vs stdlib") and the rationale in
 | **stdlib** | pure Lua/JS over caps we already ship; no new C, no new authority | always in base | jwt, csrf, template, an S3/SigV4 client |
 | **feature** | large optional C subsystem / new authority, **off by default** (additive) | `libhull_feature-<name>.a`, `--with=` | duckdb, postgres, mysql, gpu, tui |
 | **flavor** | preset that validates the app against a slimmer cap set; the base already composes (subtractive) | build.lua preset on the default base (no per-flavor lib since Phase 4.3), `--flavor=` | pure-compute |
-| **tool** | a companion **program** Hull spawns at build time (never linked) | `hull-<tool>-<platform>`, `hull tools install` | wamrc, tcc |
+| **tool** | a companion **program** Hull spawns at build time (never linked) | `hull-<tool>-<platform>`, `hull tools install` | wamrc |
 
 **First yes wins:** separate program → tool; buildable on existing caps → stdlib;
 new vendored C / new authority off by default → feature; turning a default off →
@@ -206,18 +206,24 @@ The missing piece: `hull build` shells out to `cc` to compile generated C code. 
 |---------|--------|-------|
 | Install script (`curl -fsSL .../install.sh \| sh`) | **Done** | POSIX, ~250 LOC: detect OS/arch, fetch latest release, SHA-256 verify, install to `~/.local/bin/hull` |
 | `hull init` (in-place project init) | **Done** | Like `git init`; idempotent; auto-detects existing runtime; Lua tool module |
-| First-run welcome + doctor | **Done** | `hull doctor` reports platform embed, compiler availability, TCC + CA bundle status; `--json` mode |
+| First-run welcome + doctor | **Done** | `hull doctor` reports platform embed, compiler availability, CA bundle status; `--json` mode |
 | Shell completions | **Done** | bash, zsh, fish; covers every subcommand and flag in `completions/` |
 
-#### Phase D3: Zero-Dependency Builds (Embedded TCC). **Done**
+#### Phase D3: Zero-Dependency Builds (Embedded TCC). **Done, later superseded**
+
+> **Superseded.** The embedded-TinyCC backend has since been fully retired.
+> `hull build` is now **compiler-free by default**: it emits `app_registry.o`
+> directly and links, with the system compiler as the `--with=`/cosmo fallback.
+> See [docs/compiler_free_build.md](compiler_free_build.md). The table below is
+> the historical record of the (now-removed) embedded-TCC phase.
 
 | Feature | Status | Notes |
 |---------|--------|-------|
-| Vendor tcc | **Done** | `vendor/tcc` submodule (mob branch), built by Makefile, embedded via xxd into `libhull_platform.a` |
-| `hull build` auto-selects compiler | **Done** | `HlCompilerVtable`: TCC backend (compile) + system cc/gcc/clang (link); auto-fallback on macOS where TCC produces ELF |
-| `hull build --compiler=tcc\|system\|<path>` | **Done** | Explicit backend selection; both `--compiler tcc` and `--compiler=tcc` accepted |
-| Linux native + cosmo coverage | **Done** | TCC compile + system link verified end-to-end on Linux CI in `e2e_tcc.sh` |
-| `hull toolchain install` | Skipped | Embedded TCC removes the original need; cosmocc users can `make fetch-cosmocc` |
+| Vendor tcc | **Done (removed)** | Was a `vendor/tcc` submodule (mob branch), built by Makefile, embedded via xxd into `libhull_platform.a`; retired |
+| `hull build` auto-selects compiler | **Done (superseded)** | `HlCompilerVtable`: was TCC backend (compile) + system cc/gcc/clang (link); now the emit path is default, system compiler is the fallback |
+| `hull build --compiler=tcc\|system\|<path>` | **Done (superseded)** | `--compiler=tcc` now just names a user's own `tcc` on `$PATH` as a plain system compiler; tcc is no longer Hull-provided |
+| Linux native + cosmo coverage | **Done (removed)** | Was verified end-to-end on Linux CI in `e2e_tcc.sh`; that suite is gone |
+| `hull toolchain install` | Skipped | cosmocc users can `make fetch-cosmocc` |
 
 #### Phase D4: Embedded CA Bundle. **Done**
 
@@ -261,7 +267,7 @@ $ curl hull.com/install | sh     ──────►   install.sh (detect OS/a
                                                 ▼
                                            hull (Cosmo APE binary)
                                              ├── libhull_platform.a (x86_64 + aarch64, embedded)
-                                             ├── tcc (bundled compiler, embedded)
+                                             ├── obj emitter (compiler-free build; no bundled compiler)
                                              ├── CA bundle (embedded)
                                              ├── Lua 5.4 + QuickJS (in platform lib)
                                              ├── SQLite + mbedTLS (in platform lib)
@@ -1005,7 +1011,7 @@ Attested inputs:
 
 - Hull version
 - platform archive hash
-- TCC/cosmocc hash
+- linker/cosmocc hash
 - app source hash
 - manifest hash
 - generated asset hash

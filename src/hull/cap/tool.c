@@ -132,7 +132,7 @@ int hl_tool_unveil_check(const HlToolUnveilCtx *ctx, const char *path, char need
 
 static const char *allowed_prefixes[] = {
     "cc", "gcc", "clang", "cosmocc", "cosmoar", "ar", "wamrc", "hull",
-    "tcc", "ld",
+    "ld",
     /* nm: read-only symbol lister. `hull build` probes the resolved platform lib
      * for hl_db_backend_sqlite to decide whether to auto-compose the SQLite
      * feature onto a SQLite-less base (docs/sqlite_feature.md, Phase C). */
@@ -194,12 +194,6 @@ int hl_tool_validate_args(const char *const argv[])
                  * references base symbols (tls_client) in the platform lib. Only
                  * affects archive resolution order -- no code execution. */
                 "--start-group", "--end-group",
-                /* Suppress the .eh_frame_hdr, emitted by the tcc backend's
-                 * delegated link (compiler_tcc.c): tcc's .eh_frame FDEs make GNU
-                 * ld fail building the header once the composed runtime archive
-                 * is whole-archived. Only drops an unwind-index section from an
-                 * exception-free C link -- no code execution. */
-                "--no-eh-frame-hdr",
                 NULL
             };
             const char *wl_arg = a + 4;

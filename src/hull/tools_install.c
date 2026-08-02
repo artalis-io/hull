@@ -50,20 +50,6 @@ static const HlToolSpec REGISTRY[] = {
          * users build from source with `make wamrc`. See docs/tools_install.md. */
         .has_cosmo         = 0,
     },
-    {
-        .name              = "tcc",
-        .description       =
-            "TinyCC — zero-dependency C compiler backend for "
-            "`hull build --compiler=tcc` (no system cc needed for the compile "
-            "step). Formerly embedded; now a side-loaded tool.",
-        /* tcc emits ELF only: usable on Linux, not macOS (Mach-O) or cosmo
-         * (APE archives), which use the system compiler. Build from source
-         * with `make tcc`. */
-        .has_linux_x86_64  = 1,
-        .has_linux_aarch64 = 1,
-        .has_darwin_arm64  = 0,
-        .has_cosmo         = 0,
-    },
     { 0 }  /* sentinel */
 };
 

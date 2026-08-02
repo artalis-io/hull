@@ -34,7 +34,7 @@ Three sources contribute:
 1. **Submodule commits.** The Makefile reads each submodule's HEAD SHA
    via `git rev-parse --short=12 HEAD` and passes them as
    `-DHULL_VENDOR_<NAME>_COMMIT="..."` defines. Current submodules:
-   `keel`, `wamr`, `tcc`. Every `make` reads fresh; the resulting binary
+   `keel`, `wamr`. Every `make` reads fresh; the resulting binary
    self-describes the actual vendored contents. If `git` is unavailable,
    the value falls back to `"unknown"` (build still succeeds).
 
@@ -67,7 +67,7 @@ strategy where the binary cannot lie about its own contents.
 ## Embedded blob SHA-256 (tamper-detection signal)
 
 For components whose actual bytes are embedded into the binary (Mozilla
-CA bundle today; future: TCC bytes, embedded platform sig), the SHA-256
+CA bundle today; future: embedded platform sig), the SHA-256
 is computed at runtime by hashing the embedded data with mbedTLS.
 The first call caches the result; subsequent calls return the cached
 string. This means:

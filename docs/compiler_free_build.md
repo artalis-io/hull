@@ -92,8 +92,9 @@ Data flow, per `hull build`:
    libhull_platform.a (+ crt + system libs)` → executable. Cosmo path
    feeds two per-arch ELF objects into the cosmo link + `apelink`.
 
-The **compile** step is gone. `HlCompilerVtable` (and `compiler_tcc.c`,
-`compiler.c`'s `-c` path) leave the app-data path entirely.
+The **compile** step is gone. `HlCompilerVtable` (and `compiler.c`'s `-c` path)
+leave the app-data path entirely; the retired `compiler_tcc.c` backend is gone
+with it.
 
 ## The emitter (`src/hull/obj_emit.c`)
 
@@ -179,8 +180,8 @@ app_main-elf-aarch64.o    app_main-macho-arm64.o
 app_main-elf-cosmo-x86_64.o   app_main-elf-cosmo-aarch64.o
 ```
 
-(~200 bytes each, stable, xxd'd into `build_assets` like the current
-embedded tcc / CA bundle / stdlib.) `hull build` selects by target and
+(~200 bytes each, stable, xxd'd into `build_assets` like the embedded
+CA bundle / stdlib.) `hull build` selects by target and
 extracts to the tmp dir. Provenance: built by Hull CI, covered by the
 release signature.
 
@@ -311,10 +312,13 @@ The whole reason to keep the linked form over an appended overlay:
    feature registry), a cosmo/APE target (dual-arch), or a missing linker
    **auto-fall back** to the compiler rather than erroring. The whole e2e
    suite now builds through the emit path on the CI matrix.
-3. **Next.** Remove `compiler_tcc.c`, `mk/vendor/tcc.mk`, the `vendor/tcc`
-   submodule, `e2e_tcc.sh`, the `test_compiler` tcc cases, the tcc embedding
-   pipeline, and the `build-tcc` release job (this design is its replacement).
-   The system compiler stays as the `--with`/cosmo fallback.
+3. **Done.** Removed `compiler_tcc.c`, `mk/vendor/tcc.mk`, the `vendor/tcc`
+   submodule, `e2e_tcc.sh`, the `test_compiler` tcc cases, the `hull tools
+   install tcc` registration, the tcc embedding pipeline, the `HL_ENABLE_TCC`
+   flags, and the `build-tcc` release job (this design is its replacement).
+   tcc is no longer a Hull-provided, vendored, or installable tool; a user's own
+   `tcc` on `$PATH` still works via `--compiler=tcc` as a plain named system
+   compiler. The system compiler stays as the `--with`/cosmo fallback.
 4. `linker_lld`/`linker_mold` embedding is a follow-up that upgrades
    "compiler-free" to "toolchain-free" on the user's box.
 

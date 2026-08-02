@@ -102,8 +102,8 @@ int hl_tool_sandbox_init(HlToolUnveilCtx *ctx,
         hl_tool_unveil_add(ctx, app_dir, "r");
 
     /* Temp directory: read/write/create (build artifacts) */
-    /* /tmp needs execute too: embedded TinyCC is extracted to /tmp/hull_tcc_XXX/tcc
-     * and must be executable by the build pipeline. */
+    /* /tmp needs execute too: the build pipeline stages tooling and
+     * intermediate artifacts there that must be executable. */
     hl_tool_unveil_add(ctx, "/tmp", "rwcx");
 
     /* System compilers and headers */

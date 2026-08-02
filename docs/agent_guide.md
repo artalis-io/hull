@@ -104,7 +104,7 @@ make check          # clean + ASan + test + e2e (full validation)
 ```
 
 Build flags (see [§14](#14-build) for full list): `HL_ENABLE_DB`, `HL_ENABLE_LUA`,
-`HL_ENABLE_JS`, `HL_ENABLE_WASM`, `HL_ENABLE_GPU`, `HL_ENABLE_TCC`,
+`HL_ENABLE_JS`, `HL_ENABLE_WASM`, `HL_ENABLE_GPU`,
 `HL_EMBED_CA_BUNDLE`.
 
 ### Verify install
@@ -275,7 +275,7 @@ Grouped by purpose. Run `hull <cmd> --help` for full per-command flags.
 
 | Command | Purpose |
 |---|---|
-| `hull build <app> [--compiler=tcc\|system\|...]` | Compile to standalone binary |
+| `hull build <app> [--compiler=system\|<path>]` | Build a standalone binary (compiler-free by default) |
 | `hull deploy <app> --target=dockerfile\|systemd\|fly` | Generate deployment config |
 | `hull migrate [app]` | Run pending migrations |
 | `hull migrate status [app]` | Show applied / pending |
@@ -1228,15 +1228,16 @@ hull build myapp              # use embedded platform to compile myapp
 3. Generate `app_registry.c`: sorted `HlEntry` array of all app files
    (templates, static, migrations, modules) + extracted source +
    stdlib registry.
-4. Compile + link against `libhull_platform.a` using the selected compiler
-   (`tcc`, `system`, or `cosmocc`).
+4. Build against `libhull_platform.a`. By default this is compiler-free: emit
+   `app_registry.o` directly and link. `--compiler=system` (or an explicit path),
+   `--with=` features, and cosmo/APE targets go through a system compiler instead.
 5. Sign (if `--sign-key` given): platform sig stays from `libhull_platform.a`;
    app sig added.
 6. Output: single binary `myapp/build/myapp` (or wherever `--output`).
 
 ```bash
+hull build myapp                             # compiler-free by default
 hull build myapp --compiler=system           # use system cc
-hull build myapp --compiler=tcc              # use embedded TinyCC
 hull build myapp --compiler=/usr/bin/clang   # explicit path
 hull build myapp CC=cosmocc                  # universal APE binary
 hull build myapp --sign-key=mykey.priv       # sign with private key
@@ -1252,12 +1253,11 @@ Each flag controls a `-D` define and which sources are linked.
 | `HL_ENABLE_JS` | 1 | Drop QuickJS; Lua-only build |
 | `HL_ENABLE_WASM` | 1 | Drop WAMR (`compute.*` unavailable, ~256 KB smaller) |
 | `HL_ENABLE_GPU` | 0 | On enables wgpu-native (`gpu.*`) |
-| `HL_ENABLE_TCC` | 1 | Drop embedded TinyCC (`--compiler=tcc` rejected) |
 | `HL_EMBED_CA_BUNDLE` | 1 | Drop Mozilla CA bundle (~200 KB, breaks HTTPS without system store) |
 | `HL_ENABLE_DB` | 1 | Drop SQLite + `db.*` + `migrate.*` + DB-backed stdlib (~1.4 MB smaller) |
 
-Combine freely: `make HL_ENABLE_DB=0 HL_ENABLE_WASM=1 HL_ENABLE_TCC=0` →
-compute-only runtime with Lua/JS orchestration, no DB, no build toolchain.
+Combine freely: `make HL_ENABLE_DB=0 HL_ENABLE_WASM=1 HL_ENABLE_HTTP=0` →
+compute-only runtime with Lua/JS orchestration, no DB, no HTTP.
 
 ### Cosmopolitan (universal APE)
 
@@ -1471,7 +1471,7 @@ Sixteen additional subcommands close common agent productivity gaps:
 | `vfs [app]` | `{ app_dir, app:[{name,size,bucket}], stdlib:[...] }`. Every embedded file |
 | `compute [app]` | `{ available, modules:[{name,size,aot,aot_arch}] }` |
 | `gpu [app]` | `{ available, shaders:[{name,size}] }` |
-| `perf [app]` | `{ runtime, features:{lua,js,wasm,gpu,db,tcc}, limits:{...}, live_stats_hint }` |
+| `perf [app]` | `{ runtime, features:{lua,js,wasm,gpu,db}, limits:{...}, live_stats_hint }` |
 | `logs [app] [--tail N]` | `{ path, exists, total_lines_in_tail, truncated, lines:[...] }` |
 | `eval <code> [app]` | `{ ok, result\|error }`. Runs the snippet against the loaded app, JSON-serialises the return value |
 | `template <name> [data.json] [app]` | `{ template, output, bytes }`. Renders via the loaded runtime's template engine |

@@ -22,12 +22,15 @@ extras (`wamrc`, `wgpu-native`, future stuff) serve narrow audiences:
 | Tool | Audience | Cost if bundled | Cost if missed |
 |---|---|---|---|
 | `wamrc` | Compute-heavy WASM workloads (ML, image pipelines, tight loops) | +~150 MB to hull binary (LLVM-backed AOT compilation) | Modules run via fast interpreter, ~50× slower than AOT for the few workloads where it matters |
-| `tcc` | `hull build --compiler=tcc` on a box with no system C compiler (Linux ELF only) | +~400 KB to the hull binary | Use `--compiler=system` (needs a system cc); tcc's link step needs a system linker anyway |
 | `wgpu-native` | GPU compute (ML inference, large parallel) | +~12 MB + Vulkan/Metal runtime dep | Out of scope for v0.1.2 (needs runtime dlopen. Separate design) |
 
-`tcc` was embedded until it moved to this model — dropping the ~400 KB blob from every native binary (and it was pure dead weight on macOS, where tcc's ELF output can't link a Mach-O). It's Linux-only: `has_darwin_arm64 = 0`, `has_cosmo = 0`.
+(A former `tcc` side-loaded tool has been retired. `hull build` is now
+compiler-free by default: it emits `app_registry.o` directly and links, no C
+compiler needed. `--compiler=system` opts into a system `cc`, and `--with=`
+features / cosmo targets fall back to it automatically. `wamrc` is the only
+Hull-provided side-loaded tool today.)
 
-Bundling either into the main hull binary would inflate it for the 80%
+Bundling `wamrc` into the main hull binary would inflate it for the 80%
 who don't need them. Side-loading is the clean separation.
 
 The trust chain stays identical: tools are listed in `hull.sha256`, so

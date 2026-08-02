@@ -48,9 +48,9 @@
 /* ── Helper: write data to a file ──────────────────────────────────── */
 
 /* write_blob is only called from the embedded-platform extraction paths
- * below (tcc is no longer embedded). On a non-embedded build the function is
- * defined-but-unused and -Werror=unused-function kills the build, so gate it
- * on the embedded-platform macros. */
+ * below. On a non-embedded build the function is defined-but-unused and
+ * -Werror=unused-function kills the build, so gate it on the
+ * embedded-platform macros. */
 #if defined(HL_BUILD_EMBEDDED) || defined(HL_BUILD_EMBEDDED_MULTIARCH) \
     || defined(HL_BUILD_EMBEDDED_RUNTIME) || defined(HL_BUILD_EMBEDDED_HTTP) \
     || defined(HL_BUILD_EMBEDDED_TUI) || defined(HL_BUILD_EMBEDDED_WASM) \
@@ -423,16 +423,3 @@ int hl_build_get_entry_header(const char **data, size_t *len)
     return -1;
 #endif
 }
-
-/* ── tcc version ────────────────────────────────────────────────────
- * tcc is no longer embedded — it's resolved as an external tool
- * (`hull tools install tcc`, see compiler_tcc.c). The version reported here is
- * the vendored tcc revision this hull was built against (for `hull doctor`),
- * not a query of the resolved binary. */
-
-#ifdef HL_ENABLE_TCC
-const char *hl_build_tcc_version_string(void)
-{
-    return "TinyCC " HULL_VENDOR_TCC_VERSION;
-}
-#endif /* HL_ENABLE_TCC */

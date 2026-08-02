@@ -176,16 +176,12 @@ CFLAGS += -DHL_VERSION=\"$(HL_VERSION)\"
 # gives a clean tag ("v2.0.0") when one exists, else "<tag>-N-g<sha>".
 HULL_VENDOR_KEEL_COMMIT  := $(shell git -C vendor/keel rev-parse --short=12 HEAD 2>/dev/null || echo unknown)
 HULL_VENDOR_WAMR_COMMIT  := $(shell git -C vendor/wamr rev-parse --short=12 HEAD 2>/dev/null || echo unknown)
-HULL_VENDOR_TCC_COMMIT   := $(shell git -C vendor/tcc  rev-parse --short=12 HEAD 2>/dev/null || echo unknown)
 HULL_VENDOR_KEEL_VERSION := $(shell git -C vendor/keel describe --tags --always 2>/dev/null || echo unknown)
 HULL_VENDOR_WAMR_VERSION := $(shell git -C vendor/wamr describe --tags --always 2>/dev/null || echo unknown)
-HULL_VENDOR_TCC_VERSION  := $(shell git -C vendor/tcc  describe --tags --always 2>/dev/null || echo unknown)
 CFLAGS += -DHULL_VENDOR_KEEL_COMMIT=\"$(HULL_VENDOR_KEEL_COMMIT)\"
 CFLAGS += -DHULL_VENDOR_WAMR_COMMIT=\"$(HULL_VENDOR_WAMR_COMMIT)\"
-CFLAGS += -DHULL_VENDOR_TCC_COMMIT=\"$(HULL_VENDOR_TCC_COMMIT)\"
 CFLAGS += -DHULL_VENDOR_KEEL_VERSION=\"$(HULL_VENDOR_KEEL_VERSION)\"
 CFLAGS += -DHULL_VENDOR_WAMR_VERSION=\"$(HULL_VENDOR_WAMR_VERSION)\"
-CFLAGS += -DHULL_VENDOR_TCC_VERSION=\"$(HULL_VENDOR_TCC_VERSION)\"
 
 # Escape hatch to append flags from the command line, e.g.
 #   make EXTRA_CFLAGS='-DHL_PLATFORM_PUBKEY_HEX="<hex>"'
@@ -211,7 +207,7 @@ VENDDIR  := vendor
 # land in `.rodata`, which the OS protects as read-only at the page
 # level. Defense-in-depth against heap memory-write bugs that would
 # otherwise be able to rewrite embedded modules, the CA bundle, the
-# TCC binary, the cosmo platform archives, etc., post-boot. See
+# cosmo platform archives, etc., post-boot. See
 # docs/security.md §4b "Sealed runtime tables".
 #
 # Two forms, used by ~20 xxd invocations across the Makefile:
@@ -225,12 +221,11 @@ VENDDIR  := vendor
 #     Usage: `xxd -i FILE | sed 's/.../.../g' | $(XXD_CONST_PIPE) > $@`
 #
 # Defined unconditionally near the top so every rule sees them
-# regardless of HL_ENABLE_TCC / HL_EMBED_CA_BUNDLE / HL_ENABLE_LUA /
-# etc. (Previously buried inside ifeq HL_ENABLE_TCC, which meant
-# cosmocc builds — where TCC is disabled — silently lost the
-# const-qualification on the cacert + stdlib + cosmo-platform
-# rules and the redirect failed with "permission denied" because
-# the missing variable left a bare filename being execve'd.)
+# regardless of HL_EMBED_CA_BUNDLE / HL_ENABLE_LUA / etc. (A build
+# variant that omitted these once silently lost the const-
+# qualification on the cacert + stdlib + cosmo-platform rules and
+# the redirect failed with "permission denied" because the missing
+# variable left a bare filename being execve'd.)
 XXD_CONST_SEAL := sed -i.bak \
 	-e 's/^unsigned char /const unsigned char /' \
 	-e 's/^unsigned int /const unsigned int /'
@@ -604,8 +599,6 @@ ifeq ($(HL_ENABLE_CFI),1)
   endif
 endif
 
-# TinyCC vendored config -> mk/vendor/tcc.mk
-include mk/vendor/tcc.mk
 # ── HL_ENABLE_TUI — terminal UI capability (composable feature) ────
 #
 # TUI is a composable feature (like gpu / duckdb): the base is built
@@ -688,32 +681,8 @@ TUI_TOOLCHAIN_ARCHIVE :=
 TUI_TOOLCHAIN_LDFLAGS :=
 endif
 
-ifeq ($(HL_ENABLE_TCC),1)
-CFLAGS += -DHL_ENABLE_TCC
-
-# Build tcc binary from vendored source
-.PHONY: tcc
-tcc: $(BUILDDIR)/tcc
-
-# Build the tcc binary from vendored source. NOT embedded into hull anymore —
-# this target exists for local dev (a `make tcc` puts tcc on the build dir, which
-# hl_tools_lookup_path finds as a sibling of a locally-built hull) and for the
-# release `build-tcc` job that publishes it as the `hull-tcc-<platform>` asset.
-$(BUILDDIR)/tcc: $(TCC_DIR)/tcc.c | $(BUILDDIR)
-	cd $(TCC_DIR) && ./configure
-	$(MAKE) -C $(TCC_DIR) tcc
-	cp $(TCC_DIR)/tcc $(BUILDDIR)/tcc
-	chmod +x $(BUILDDIR)/tcc
-
-# compiler_tcc.o — the tcc backend. Resolves tcc as an external tool at build
-# time (no embedded blob), so it has no generated-header dependency.
-COMPILER_TCC_OBJ := $(BUILDDIR)/compiler_tcc.o
-$(COMPILER_TCC_OBJ): $(SRCDIR)/hull/compiler_tcc.c | $(BUILDDIR)
-	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
-
-endif
-
 # compiler.c — always compiled (system backend + selection)
+COMPILER_OBJ := $(BUILDDIR)/compiler.o
 $(COMPILER_OBJ): $(SRCDIR)/hull/compiler.c $(INCDIR)/hull/compiler.h | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
 
@@ -1842,7 +1811,6 @@ BUILD_FINGERPRINT := \
   POSTGRES=$(HL_ENABLE_POSTGRES)|\
   WASM=$(HL_ENABLE_WASM)|\
   GPU=$(HL_ENABLE_GPU)|\
-  TCC=$(HL_ENABLE_TCC)|\
   TUI=$(HL_ENABLE_TUI)|\
   TUI_TC=$(HL_TUI_TOOLCHAIN)|\
   IMAGE=$(HL_ENABLE_IMAGE)|\
@@ -1888,7 +1856,7 @@ $(shell test "$$(cat $(BUILD_CONFIG_FILE) 2>/dev/null)" = "$(BUILD_FINGERPRINT)"
           $(BUILDDIR)/test_runner.o $(BUILDDIR)/runtime_factory.o $(BUILDDIR)/hull_static.o \
           $(BUILDDIR)/migrate.o $(BUILDDIR)/vfs.o $(BUILDDIR)/cacert.o \
           $(BUILDDIR)/app_context.o $(BUILDDIR)/tool.o $(BUILDDIR)/tool_orchestration.o $(BUILDDIR)/build_assets.o \
-          $(BUILDDIR)/compiler.o $(BUILDDIR)/compiler_tcc.o $(BUILDDIR)/obj_emit.o $(BUILDDIR)/linker_system.o $(BUILDDIR)/bundled_objs.o \
+          $(BUILDDIR)/compiler.o $(BUILDDIR)/obj_emit.o $(BUILDDIR)/linker_system.o $(BUILDDIR)/bundled_objs.o \
           $(BUILDDIR)/hull_alloc.o $(BUILDDIR)/hull_async.o $(BUILDDIR)/hull_compress.o \
           $(BUILDDIR)/worker_db.o $(BUILDDIR)/worker_wasm.o $(BUILDDIR)/worker_gpu.o \
           $(BUILDDIR)/stdlib_registry.o $(BUILDDIR)/app_entries_default.o \
@@ -1899,7 +1867,7 @@ $(shell test "$$(cat $(BUILD_CONFIG_FILE) 2>/dev/null)" = "$(BUILD_FINGERPRINT)"
 
 # ── Targets ─────────────────────────────────────────────────────────
 
-.PHONY: all clean test debug msan tsan fuzz fuzz-run e2e e2e-build e2e-postgres e2e-mysql e2e-http e2e-sandbox e2e-examples e2e-cli e2e-migrate e2e-templates e2e-agent e2e-context e2e-mcp e2e-agent-api e2e-compute e2e-compute-dev e2e-aot-cache e2e-cache e2e-cache-concurrent e2e-cache-cosmo e2e-named-connections e2e-dynamic-connections e2e-tcc e2e-compiler-free e2e-build-flavor e2e-install e2e-ca-bundle e2e-update e2e-tools e2e-multipart e2e-attachment e2e-blob e2e-hypermedia-photos-upload e2e-jwt-asym hull-test-examples self-build check analyze cppcheck bench bench-template bench-wasm bench-gpu bench-bytecode-cache wamrc coverage lint-lua lint-js lint platform platform-cosmo hardening check-hardening
+.PHONY: all clean test debug msan tsan fuzz fuzz-run e2e e2e-build e2e-postgres e2e-mysql e2e-http e2e-sandbox e2e-examples e2e-cli e2e-migrate e2e-templates e2e-agent e2e-context e2e-mcp e2e-agent-api e2e-compute e2e-compute-dev e2e-aot-cache e2e-cache e2e-cache-concurrent e2e-cache-cosmo e2e-named-connections e2e-dynamic-connections e2e-compiler-free e2e-build-flavor e2e-install e2e-ca-bundle e2e-update e2e-tools e2e-multipart e2e-attachment e2e-blob e2e-hypermedia-photos-upload e2e-jwt-asym hull-test-examples self-build check analyze cppcheck bench bench-template bench-wasm bench-gpu bench-bytecode-cache wamrc coverage lint-lua lint-js lint platform platform-cosmo hardening check-hardening
 
 all: $(BUILDDIR)/hull
 
@@ -2015,7 +1983,7 @@ else
 endif
 PLATFORM_OBJS := $(PLATFORM_CAP_OBJS) $(CAP_TOOL_OBJ) $(CAP_TEST_OBJ) $(CMD_OBJS) $(PLATFORM_RT_OBJS) $(ALLOC_OBJ) $(ASYNC_OBJ) $(COMPRESS_OBJ) $(MINIZ_OBJ) $(WORKER_DB_OBJ) $(WORKER_GPU_OBJ) $(PLATFORM_MANIFEST_OBJ) $(MODULE_OBJ) $(ASYNC_BACKEND_OBJS) $(NET_BACKEND_OBJS) $(SANDBOX_OBJ) $(SANDBOX_TOOL_OBJ) $(SIG_OBJ) $(RELEASE_OBJ) $(RELEASE_IO_OBJ) $(TOOLS_INSTALL_OBJ) $(PLATFORM_SIG_OBJ) $(EMBEDDED_PLATFORM_SIG_OBJ) $(TEST_RUNNER_OBJ) $(RUNTIME_FACTORY_OBJ) $(STATIC_OBJ) $(MIGRATE_OBJ) $(VFS_OBJ) $(PATH_NORM_OBJ) $(THREAD_AFFINITY_OBJ) $(CACHE_DIR_OBJ) $(BLOB_STORE_OBJ) $(CACHE_REGISTRY_OBJ) $(CACERT_OBJ) $(TLS_CLIENT_OBJ) $(TLS_TRANSPORT_OBJ) $(TLS_TRANSPORT_STUB_OBJ) $(CSP_OBJ) $(SBOM_OBJ) $(STDLIB_FEATURE_OBJ) $(APP_CONTEXT_OBJ) $(APP_CONTEXT_RT_OBJ) $(AGENT_LIB_OBJ) $(AGENT_API_OBJ) $(MAIN_OBJ) $(SERVE_OBJ) $(APP_RUNNER_OBJ) $(HTTP_WEAKSTUB_OBJ) $(WASM_WEAKSTUB_OBJ) $(IMAGE_WEAKSTUB_OBJ) $(TOOL_OBJ) $(BUILD_ASSET_STUB_OBJ) $(STDLIB_REGISTRY_O) $(PLATFORM_RUNTIME_EXTRA) $(MBEDTLS_OBJS) \
 	$(SQLITE_OBJ) $(LOG_OBJ) $(LOG_LOCK_OBJ) $(SH_ARENA_OBJ) $(SH_JSON_OBJ) $(TWEETNACL_OBJ) $(PLATFORM_STB_OBJ) $(PLEDGE_OBJS) \
-	$(COMPILER_OBJ) $(COMPILER_TCC_OBJ) $(OBJ_EMIT_OBJ) $(LINKER_SYSTEM_OBJ) $(BUNDLED_OBJS_OBJ)
+	$(COMPILER_OBJ) $(OBJ_EMIT_OBJ) $(LINKER_SYSTEM_OBJ) $(BUNDLED_OBJS_OBJ)
 
 PLATFORM_LIB := $(BUILDDIR)/libhull_platform.a
 
@@ -2454,8 +2422,8 @@ $(BUILD_ASSET_OBJ): $(EMBEDDED_PLATFORM_H) $(EMBEDDED_TEMPLATES_H) $(EMBEDDED_RU
 endif
 
 # Hull binary
-$(BUILDDIR)/hull: $(CAP_OBJS) $(CAP_TOOL_OBJ) $(CAP_TEST_OBJ) $(CMD_OBJS) $(RT_OBJS) $(ALLOC_OBJ) $(ASYNC_OBJ) $(COMPRESS_OBJ) $(MINIZ_OBJ) $(WORKER_DB_OBJ) $(WORKER_WASM_OBJ) $(WORKER_GPU_OBJ) $(MANIFEST_OBJ) $(MODULE_OBJ) $(ASYNC_BACKEND_OBJS) $(NET_BACKEND_OBJS) $(SANDBOX_OBJ) $(SANDBOX_TOOL_OBJ) $(SIG_OBJ) $(RELEASE_OBJ) $(RELEASE_IO_OBJ) $(TOOLS_INSTALL_OBJ) $(PLATFORM_SIG_OBJ) $(EMBEDDED_PLATFORM_SIG_OBJ) $(TEST_RUNNER_OBJ) $(RUNTIME_FACTORY_OBJ) $(STATIC_OBJ) $(MIGRATE_OBJ) $(VFS_OBJ) $(PATH_NORM_OBJ) $(THREAD_AFFINITY_OBJ) $(CACHE_DIR_OBJ) $(BLOB_STORE_OBJ) $(CACHE_REGISTRY_OBJ) $(CACERT_OBJ) $(TLS_CLIENT_OBJ) $(TLS_TRANSPORT_OBJ) $(TLS_TRANSPORT_STUB_OBJ) $(CSP_OBJ) $(SH_SEAL_ARENA_OBJ) $(SBOM_OBJ) $(STDLIB_FEATURE_OBJ) $(APP_CONTEXT_OBJ) $(APP_CONTEXT_RT_OBJ) $(AGENT_LIB_OBJ) $(AGENT_API_OBJ) $(TOOL_OBJ) $(BUILD_ASSET_OBJ) $(COMPILER_OBJ) $(COMPILER_TCC_OBJ) $(OBJ_EMIT_OBJ) $(LINKER_SYSTEM_OBJ) $(BUNDLED_OBJS_OBJ) $(MAIN_OBJ) $(SERVE_OBJ) $(ENTRY_OBJ) $(APP_EXTRA_OBJS) $(STDLIB_REGISTRY_O) $(STDLIB_RT_REGISTRY_OBJS) $(STDLIB_TOOLCHAIN_REGISTRY_O) $(RUNTIME_TOOLCHAIN_REGISTRY_O) $(WAMR_OBJS) $(VEND_OBJS) $(MBEDTLS_OBJS) $(SQLITE_OBJ) $(LOG_OBJ) $(LOG_LOCK_OBJ) $(SH_ARENA_OBJ) $(SH_JSON_OBJ) $(TWEETNACL_OBJ) $(STB_OBJ) $(PLEDGE_OBJS) $(KEEL_LIB) $(TUI_TOOLCHAIN_ARCHIVE) | $(RUNTIME_FEATURE_LIBS)
-	$(CC) $(LDFLAGS) -o $@ $(CAP_OBJS) $(CAP_TOOL_OBJ) $(CAP_TEST_OBJ) $(CMD_OBJS) $(RT_OBJS) $(ALLOC_OBJ) $(ASYNC_OBJ) $(COMPRESS_OBJ) $(MINIZ_OBJ) $(WORKER_DB_OBJ) $(WORKER_WASM_OBJ) $(WORKER_GPU_OBJ) $(MANIFEST_OBJ) $(MODULE_OBJ) $(ASYNC_BACKEND_OBJS) $(NET_BACKEND_OBJS) $(SANDBOX_OBJ) $(SANDBOX_TOOL_OBJ) $(SIG_OBJ) $(RELEASE_OBJ) $(RELEASE_IO_OBJ) $(TOOLS_INSTALL_OBJ) $(PLATFORM_SIG_OBJ) $(EMBEDDED_PLATFORM_SIG_OBJ) $(TEST_RUNNER_OBJ) $(RUNTIME_FACTORY_OBJ) $(STATIC_OBJ) $(MIGRATE_OBJ) $(VFS_OBJ) $(PATH_NORM_OBJ) $(THREAD_AFFINITY_OBJ) $(CACHE_DIR_OBJ) $(BLOB_STORE_OBJ) $(CACHE_REGISTRY_OBJ) $(CACERT_OBJ) $(TLS_CLIENT_OBJ) $(TLS_TRANSPORT_OBJ) $(TLS_TRANSPORT_STUB_OBJ) $(CSP_OBJ) $(SH_SEAL_ARENA_OBJ) $(SBOM_OBJ) $(STDLIB_FEATURE_OBJ) $(APP_CONTEXT_OBJ) $(APP_CONTEXT_RT_OBJ) $(AGENT_LIB_OBJ) $(AGENT_API_OBJ) $(TOOL_OBJ) $(BUILD_ASSET_OBJ) $(COMPILER_OBJ) $(COMPILER_TCC_OBJ) $(OBJ_EMIT_OBJ) $(LINKER_SYSTEM_OBJ) $(BUNDLED_OBJS_OBJ) $(MAIN_OBJ) $(SERVE_OBJ) $(ENTRY_OBJ) $(APP_EXTRA_OBJS) $(STDLIB_REGISTRY_O) $(STDLIB_RT_REGISTRY_OBJS) $(STDLIB_TOOLCHAIN_REGISTRY_O) $(RUNTIME_TOOLCHAIN_REGISTRY_O) $(WAMR_OBJS) $(VEND_OBJS) $(MBEDTLS_OBJS) \
+$(BUILDDIR)/hull: $(CAP_OBJS) $(CAP_TOOL_OBJ) $(CAP_TEST_OBJ) $(CMD_OBJS) $(RT_OBJS) $(ALLOC_OBJ) $(ASYNC_OBJ) $(COMPRESS_OBJ) $(MINIZ_OBJ) $(WORKER_DB_OBJ) $(WORKER_WASM_OBJ) $(WORKER_GPU_OBJ) $(MANIFEST_OBJ) $(MODULE_OBJ) $(ASYNC_BACKEND_OBJS) $(NET_BACKEND_OBJS) $(SANDBOX_OBJ) $(SANDBOX_TOOL_OBJ) $(SIG_OBJ) $(RELEASE_OBJ) $(RELEASE_IO_OBJ) $(TOOLS_INSTALL_OBJ) $(PLATFORM_SIG_OBJ) $(EMBEDDED_PLATFORM_SIG_OBJ) $(TEST_RUNNER_OBJ) $(RUNTIME_FACTORY_OBJ) $(STATIC_OBJ) $(MIGRATE_OBJ) $(VFS_OBJ) $(PATH_NORM_OBJ) $(THREAD_AFFINITY_OBJ) $(CACHE_DIR_OBJ) $(BLOB_STORE_OBJ) $(CACHE_REGISTRY_OBJ) $(CACERT_OBJ) $(TLS_CLIENT_OBJ) $(TLS_TRANSPORT_OBJ) $(TLS_TRANSPORT_STUB_OBJ) $(CSP_OBJ) $(SH_SEAL_ARENA_OBJ) $(SBOM_OBJ) $(STDLIB_FEATURE_OBJ) $(APP_CONTEXT_OBJ) $(APP_CONTEXT_RT_OBJ) $(AGENT_LIB_OBJ) $(AGENT_API_OBJ) $(TOOL_OBJ) $(BUILD_ASSET_OBJ) $(COMPILER_OBJ) $(OBJ_EMIT_OBJ) $(LINKER_SYSTEM_OBJ) $(BUNDLED_OBJS_OBJ) $(MAIN_OBJ) $(SERVE_OBJ) $(ENTRY_OBJ) $(APP_EXTRA_OBJS) $(STDLIB_REGISTRY_O) $(STDLIB_RT_REGISTRY_OBJS) $(STDLIB_TOOLCHAIN_REGISTRY_O) $(RUNTIME_TOOLCHAIN_REGISTRY_O) $(WAMR_OBJS) $(VEND_OBJS) $(MBEDTLS_OBJS) $(SQLITE_OBJ) $(LOG_OBJ) $(LOG_LOCK_OBJ) $(SH_ARENA_OBJ) $(SH_JSON_OBJ) $(TWEETNACL_OBJ) $(STB_OBJ) $(PLEDGE_OBJS) $(KEEL_LIB) $(TUI_TOOLCHAIN_ARCHIVE) | $(RUNTIME_FEATURE_LIBS)
+	$(CC) $(LDFLAGS) -o $@ $(CAP_OBJS) $(CAP_TOOL_OBJ) $(CAP_TEST_OBJ) $(CMD_OBJS) $(RT_OBJS) $(ALLOC_OBJ) $(ASYNC_OBJ) $(COMPRESS_OBJ) $(MINIZ_OBJ) $(WORKER_DB_OBJ) $(WORKER_WASM_OBJ) $(WORKER_GPU_OBJ) $(MANIFEST_OBJ) $(MODULE_OBJ) $(ASYNC_BACKEND_OBJS) $(NET_BACKEND_OBJS) $(SANDBOX_OBJ) $(SANDBOX_TOOL_OBJ) $(SIG_OBJ) $(RELEASE_OBJ) $(RELEASE_IO_OBJ) $(TOOLS_INSTALL_OBJ) $(PLATFORM_SIG_OBJ) $(EMBEDDED_PLATFORM_SIG_OBJ) $(TEST_RUNNER_OBJ) $(RUNTIME_FACTORY_OBJ) $(STATIC_OBJ) $(MIGRATE_OBJ) $(VFS_OBJ) $(PATH_NORM_OBJ) $(THREAD_AFFINITY_OBJ) $(CACHE_DIR_OBJ) $(BLOB_STORE_OBJ) $(CACHE_REGISTRY_OBJ) $(CACERT_OBJ) $(TLS_CLIENT_OBJ) $(TLS_TRANSPORT_OBJ) $(TLS_TRANSPORT_STUB_OBJ) $(CSP_OBJ) $(SH_SEAL_ARENA_OBJ) $(SBOM_OBJ) $(STDLIB_FEATURE_OBJ) $(APP_CONTEXT_OBJ) $(APP_CONTEXT_RT_OBJ) $(AGENT_LIB_OBJ) $(AGENT_API_OBJ) $(TOOL_OBJ) $(BUILD_ASSET_OBJ) $(COMPILER_OBJ) $(OBJ_EMIT_OBJ) $(LINKER_SYSTEM_OBJ) $(BUNDLED_OBJS_OBJ) $(MAIN_OBJ) $(SERVE_OBJ) $(ENTRY_OBJ) $(APP_EXTRA_OBJS) $(STDLIB_REGISTRY_O) $(STDLIB_RT_REGISTRY_OBJS) $(STDLIB_TOOLCHAIN_REGISTRY_O) $(RUNTIME_TOOLCHAIN_REGISTRY_O) $(WAMR_OBJS) $(VEND_OBJS) $(MBEDTLS_OBJS) \
 		$(SQLITE_OBJ) $(LOG_OBJ) $(LOG_LOCK_OBJ) $(SH_ARENA_OBJ) $(SH_JSON_OBJ) $(TWEETNACL_OBJ) $(STB_OBJ) $(PLEDGE_OBJS) $(KEEL_LIB) $(TUI_TOOLCHAIN_LDFLAGS) $(WGPU_LIB) $(WGPU_FRAMEWORKS) $(DUCKDB_LIBS) -lm -lpthread
 
 # libhull no-runtime embedding library lives in mk/libhull.mk.
@@ -2721,7 +2689,6 @@ $(BUILDDIR)/tool_orchestration.o: $(SRCDIR)/hull/tool_orchestration.c | $(BUILDD
 	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
 
 # Build assets (embedded platform lib — stub unless HL_BUILD_EMBEDDED=1).
-# tcc is no longer embedded, so there's no generated-header dependency.
 $(BUILD_ASSET_OBJ): $(SRCDIR)/hull/build_assets.c | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
 
@@ -2886,10 +2853,7 @@ self-build: $(BUILDDIR)/hull platform $(RUNTIME_FEATURE_LIBS)
 # Forces `--compiler=system` so the test exercises the gcc/clang
 # backend's `sys_compile`, which passes `-ffile-prefix-map=<srcdir>=.`
 # to strip the per-build random tempdir from the .o file's embedded
-# source-name. TCC's compile path doesn't yet have the equivalent
-# (its `-ffile-prefix-map` support is patchy), so TCC-default builds
-# can still produce per-tempdir .o variance on Linux. TCC-mode
-# determinism is a separate, smaller-impact follow-up.
+# source-name.
 reproducible-check: $(BUILDDIR)/hull platform
 	@echo '=== Reproducibility: byte-identical hull build outputs ==='
 	@TMPDIR=$$(mktemp -d) && \

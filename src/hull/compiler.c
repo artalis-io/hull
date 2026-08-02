@@ -64,8 +64,7 @@ static int sys_compile(HlCompiler *c, const char *src, const char *obj,
      * the link-time Build-ID hash and breaks byte-identity.
      *
      * `-ffile-prefix-map` is gcc 8+ / clang 10+; both are present on
-     * supported Linux distros and macOS Xcode. TCC ignores unknown
-     * flags silently (its determinism story is separate).
+     * supported Linux distros and macOS Xcode.
      *
      * The buffer lives on the stack for the lifetime of this call,
      * which is fine since hl_tool_spawn() runs execve and returns
@@ -105,9 +104,9 @@ static int sys_link(HlCompiler *c, const char *output,
      * produces content-addressed Build-IDs (deterministic for identical
      * inputs) so apps `hull build` produces on Linux are reproducible
      * without an explicit flag. An earlier attempt to inject
-     * `-Wl,--build-id=none` here broke test_compiler's link tests via
-     * the TCC backend's sys_link delegation; the default behavior is
-     * already correct, so no flag is needed. macOS LC_UUID is a
+     * `-Wl,--build-id=none` here broke test_compiler's link tests; the
+     * default behavior is already correct, so no flag is needed. macOS
+     * LC_UUID is a
      * separate (unfixable-here) story tracked in roadmap_next.md §0.2. */
     for (int i = 0; objs && objs[i] && n < HL_COMPILER_MAX_ARGS - 2; i++)
         argv[n++] = objs[i];
@@ -145,45 +144,21 @@ HlCompiler *hl_compiler_system_new(const char *cc_path)
 
 HlCompiler *hl_compiler_select(const char *explicit_cc, const char *hull_exe)
 {
-    /* Explicit "tcc" sentinel → tcc backend */
-    if (explicit_cc && strcmp(explicit_cc, "tcc") == 0) {
-#ifdef HL_ENABLE_TCC
-        HlCompiler *t = hl_compiler_tcc_new(hull_exe);
-        if (t && hl_compiler_is_available(t)) return t;
-        if (t) hl_compiler_destroy(t);
-        fprintf(stderr, "hull: tcc requested but no tcc was found "
-                        "(install it with `hull tools install tcc`, or put "
-                        "tcc on PATH)\n");
-#else
-        fprintf(stderr, "hull: this build has no tcc backend "
-                        "(macOS/cosmo use the system compiler; "
-                        "rebuild with HL_ENABLE_TCC=1 on Linux)\n");
-#endif
-        return NULL;
-    }
+    (void)hull_exe;   /* was used to resolve the retired tcc tool */
 
-    /* Explicit "system" sentinel → skip tcc, force system auto-detect */
-    int skip_tcc = (explicit_cc && strcmp(explicit_cc, "system") == 0);
+    /* "system" sentinel → force system auto-detect below (kept for symmetry
+     * with `hull build --compiler=system`; the emit path is the default now). */
+    int is_system = (explicit_cc && strcmp(explicit_cc, "system") == 0);
 
-    /* Explicit named compiler */
-    if (explicit_cc && !skip_tcc) {
+    /* Explicit named compiler (a path or a PATH name; a user's own `tcc`
+     * still works here as a plain system compiler). */
+    if (explicit_cc && !is_system) {
         HlCompiler *c = hl_compiler_system_new(explicit_cc);
         if (c && hl_compiler_is_available(c)) return c;
         if (c) hl_compiler_destroy(c);
         fprintf(stderr, "hull: compiler '%s' not found in PATH\n", explicit_cc);
         return NULL;
     }
-
-#ifdef HL_ENABLE_TCC
-    /* Auto: try an external tcc first (resolved from ~/.hull/tools → sibling of
-     * hull → PATH). Falls through to the system compiler when no tcc is
-     * installed, so auto-detect never hard-requires the tool. */
-    if (!skip_tcc) {
-        HlCompiler *t = hl_compiler_tcc_new(hull_exe);
-        if (t && hl_compiler_is_available(t)) return t;
-        if (t) hl_compiler_destroy(t);
-    }
-#endif
 
 #ifdef __COSMOPOLITAN__
     /* Cosmo hull: prefer cosmocc since the embedded platform .a's are
