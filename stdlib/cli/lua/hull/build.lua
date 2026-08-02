@@ -74,6 +74,15 @@ local function parse_args()
         elseif a:sub(1, 11) == "--compiler=" then
             opts.cc = a:sub(12)
             opts.no_compiler = false
+        elseif a == "--linker" then
+            -- Link backend (system | lld | <path>). The tool VM already
+            -- selected it (tool.c parses --linker into hl_linker_select and
+            -- exposes tool.linker); consume the value so it is not mistaken for
+            -- the app dir. docs/toolchain_free_build.md
+            i = i + 1
+            opts.linker = arg[i]
+        elseif a:sub(1, 9) == "--linker=" then
+            opts.linker = a:sub(10)
         elseif a == "--output" or a == "-o" then
             i = i + 1
             opts.output = arg[i]
