@@ -716,6 +716,9 @@ e2e-linker: $(BUILDDIR)/hull $(BUILDDIR)/libhull_platform.a
 e2e-cross-build:
 	sh tests/e2e_cross_build.sh
 
+e2e-tierb-musl:
+	sh tests/e2e_tierb_musl.sh
+
 # `hull build --flavor` MVP. Builds the pure-compute platform lib itself.
 e2e-build-flavor: $(BUILDDIR)/hull
 	sh tests/e2e_build_flavor.sh

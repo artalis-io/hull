@@ -132,20 +132,28 @@ fetch-target-platform-lib (new). The design should make `--target=<os>-<arch>`
 
 ## Rollout (tiers, de-risked)
 
-1. **Tier A + the install axis.** `linker_lld.c` + `linker_mold.c` via
-   `cc -fuse-ld=lld` (low risk, `cc` supplies the floor); `--linker=`
-   selection in `hl_linker_select`; `hull tools install lld|mold` registry
-   rows + `release.yml` assets; `tool.linker` already exposes the vtable, so
-   `build.lua` just forwards `--linker`. Ships the user-facing "axis" with an
-   e2e that installs lld and builds through it.
-2. **Tier B, static-musl ELF first.** A bundled musl crt + `libc.a` (or a
-   `libc-linux-<arch>` tool) so `ld.lld -static` links a Linux app with **no
-   system toolchain**. The narrowest, highest-value slice of toolchain-free.
+1. **Done. Tier A + `--linker=`.** `linker_lld.c` via `cc -fuse-ld=lld`,
+   `--linker=system|lld|<path>` in `hl_linker_select`, `tool.linker` exposure,
+   `e2e_linker.sh` + `e2e_cross_build.sh` (cross-emit + cross-link proof).
+   (`hull tools install lld` release asset + `linker_mold.c` deferred; today
+   `--linker=lld` resolves lld from `~/.hull/tools` / PATH.)
+2. **Tier B, static-musl ELF: mechanism DONE, integration blocked.**
+   `hl_linker_lld_direct_new` + `--linker=lld-static` invoke `ld.lld -static`
+   DIRECTLY against the musl floor (`crt1.o crti.o <objs> --start-group <libs>
+   -lc --end-group -L<dir> crtn.o`, floor discovered from `HULL_LIBC_DIR` /
+   `/usr/lib`) - **no cc in the link**. Proven end to end on Alpine
+   (`e2e_tierb_musl.sh`: emit + direct static link + run). **BUT** it needs a
+   **musl-built `libhull_platform.a`**, i.e. Hull building on musl - currently
+   blocked by vendored glibc-isms (first: `vendor/pledge/.../pledge-linux.c`
+   uses `__O_TMPFILE`, which musl spells `O_TMPFILE`). The **prerequisite is
+   "make Hull build on musl"** (a build-level compat shim, NOT editing vendored
+   code), then a musl platform-lib build variant. Bundling the floor (a
+   `hull tools install libc-musl-<arch>` asset) makes it fully self-contained.
 3. **Cross-compilation.** `--target=<os>-<arch>` drives emit-fmt + cross-link
-   + `hull platform install <target>`. Prove host!=target host-to-target in
-   CI (macOS -> Linux, Linux -> Linux-other-arch).
+   + `hull platform install <target>`. The **object-level** half is proven
+   (`e2e_cross_build.sh`); the runnable half needs the target platform lib.
 4. **`zig cc` spike** (parallel) - evaluate against Tiers B/3 as a possibly
-   simpler total answer.
+   simpler total answer (bundles cross sysroots; sidesteps the musl-build work).
 5. **Mach-O + Windows Tier B**, then cosmo/APE.
 
 ## Testing (cross-compilation is a first-class requirement)

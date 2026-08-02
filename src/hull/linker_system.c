@@ -17,6 +17,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <limits.h>
+#include <unistd.h>
 
 #define HL_LINKER_MAX_ARGS 256
 
@@ -103,6 +104,38 @@ HlLinker *hl_linker_select(const char *explicit_linker, const char *hull_exe)
         if (l) hl_linker_destroy(l);
         fprintf(stderr, "hull: --linker=lld requested but no usable lld + cc was found "
                         "(install lld with `hull tools install lld`, or put ld.lld on PATH)\n");
+        return NULL;
+    }
+
+    /* --linker=lld-static: Tier B. Invoke ld.lld DIRECTLY against a static musl
+     * floor (crt1.o + libc.a), no C compiler. Resolve the dotless `lld` tool,
+     * derive ld.lld from its directory, and discover the libc floor from
+     * HULL_LIBC_DIR / the standard musl paths (crt1.o is the sentinel).
+     * docs/toolchain_free_build.md. */
+    if (explicit_linker && strcmp(explicit_linker, "lld-static") == 0) {
+        char lld[PATH_MAX] = {0};
+        hl_tools_lookup_path("lld", hull_exe, lld, sizeof lld);
+        char ld[PATH_MAX] = {0};
+        if (lld[0]) {
+            char dir[PATH_MAX]; snprintf(dir, sizeof dir, "%s", lld);
+            char *s = strrchr(dir, '/');
+            if (s) { *s = '\0'; snprintf(ld, sizeof ld, "%s/ld.lld", dir); }
+        }
+        char libdir[PATH_MAX] = {0};
+        const char *env = getenv("HULL_LIBC_DIR");
+        const char *cands[] = { env, "/usr/lib", "/lib", NULL };
+        for (const char **c = cands; *c; c++) {
+            if (!**c) continue;
+            char crt[PATH_MAX];
+            snprintf(crt, sizeof crt, "%s/crt1.o", *c);
+            if (access(crt, R_OK) == 0) { snprintf(libdir, sizeof libdir, "%s", *c); break; }
+        }
+        HlLinker *l = hl_linker_lld_direct_new(ld[0] ? ld : NULL, libdir[0] ? libdir : NULL);
+        if (l && hl_linker_is_available(l)) return l;
+        if (l) hl_linker_destroy(l);
+        fprintf(stderr, "hull: --linker=lld-static needs ld.lld + a static libc floor "
+                        "(crt1.o + libc.a). Set HULL_LIBC_DIR, or use a musl system "
+                        "(Alpine) with lld + musl-dev.\n");
         return NULL;
     }
 
