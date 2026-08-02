@@ -133,6 +133,12 @@ int hl_tool_unveil_check(const HlToolUnveilCtx *ctx, const char *path, char need
 static const char *allowed_prefixes[] = {
     "cc", "gcc", "clang", "cosmocc", "cosmoar", "ar", "wamrc", "hull",
     "ld",
+    /* lld personalities spawned DIRECTLY (not via a cc driver) by
+     * `hull build --linker=lld-static` (Tier B): `ld.lld` on ELF, `ld64.lld`
+     * on Mach-O. The bare "ld" prefix above does not admit them - the match
+     * requires the next char to be '\0' or a "-<digit>" version suffix, and
+     * "ld.lld" has a '.'. docs/toolchain_free_build.md. */
+    "ld.lld", "ld64.lld",
     /* zig: `hull build --linker=zig` drives `zig cc` as a toolchain-free +
      * cross-compiling link driver (docs/toolchain_free_build.md). */
     "zig",

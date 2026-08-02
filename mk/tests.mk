@@ -716,12 +716,11 @@ e2e-linker: $(BUILDDIR)/hull $(BUILDDIR)/libhull_platform.a
 e2e-cross-build:
 	sh tests/e2e_cross_build.sh
 
-e2e-tierb-musl:
-	sh tests/e2e_tierb_musl.sh
-
 # Full musl support: builds hull under musl (Alpine) and runs emit-path compute
-# + HTTP apps. Self-re-execs into Docker on a non-musl host. No prereqs (it does
-# its own musl build). See tests/e2e_musl.sh + docs/musl_build.md.
+# + HTTP apps AND a fully static Tier B (--linker=lld-static) app. Self-re-execs
+# into Docker on a non-musl host. No prereqs (it does its own musl build). See
+# tests/e2e_musl.sh + docs/musl_build.md. (Supersedes the old e2e_tierb_musl.sh,
+# which only static-linked a toy stub, not a real Hull app.)
 e2e-musl:
 	sh tests/e2e_musl.sh
 

@@ -26,6 +26,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <limits.h>
+#include <unistd.h>
 
 #define HL_LINKER_MAX_ARGS 256
 
@@ -38,6 +39,7 @@ typedef struct {
     char ld[PATH_MAX];        /* the ld.lld executable (ELF flavor) */
     char libdir[PATH_MAX];    /* dir holding crt1.o / crti.o / crtn.o / libc.a */
     char crt1[PATH_MAX], crti[PATH_MAX], crtn[PATH_MAX], ldash[PATH_MAX];
+    char libgcc[PATH_MAX];    /* the compiler runtime (libgcc.a / compiler-rt) */
 } LldCtx;
 
 static const char *lld_name(HlLinker *l)
@@ -66,7 +68,7 @@ static int lld_link(HlLinker *l, const char *output,
 
     if (ctx->direct) {
         /* ld.lld -static -o out crt1 crti <objs> --start-group <libs> -lc
-         * --end-group -L<libdir> crtn. Validated on Alpine/musl aarch64. */
+         * --end-group -L<libdir> crtn. */
         argv[n++] = ctx->ld;
         argv[n++] = "-static";
         argv[n++] = "-o"; argv[n++] = output;
@@ -75,8 +77,31 @@ static int lld_link(HlLinker *l, const char *output,
         for (int i = 0; objs && objs[i] && n < HL_LINKER_MAX_ARGS - 8; i++)
             argv[n++] = objs[i];
         argv[n++] = "--start-group";
-        for (int i = 0; libs && libs[i] && n < HL_LINKER_MAX_ARGS - 8; i++)
-            argv[n++] = libs[i];
+        /* build.lua emits linker flags in the compiler-driver convention
+         * (-Wl,X) because every OTHER backend is a driver (cc, `zig cc`). We
+         * invoke ld.lld directly, so translate each lib:
+         *   - strip a leading "-Wl," (driver escape) to the raw linker flag;
+         *   - drop --start-group / --end-group (build.lua wraps the composed
+         *     feature archives in their own group; we already wrap everything
+         *     in one outer group here, and ld.lld rejects NESTED groups - a
+         *     single group over all archives + libc resolves every circular
+         *     dep anyway).
+         * --whole-archive / --no-whole-archive pass through unchanged inside
+         * the group. ELF -Wl, flags are single-token; the comma'd
+         * -Wl,-force_load,<a> form is macOS/ld64-only and never reaches this
+         * ELF-only path. */
+        for (int i = 0; libs && libs[i] && n < HL_LINKER_MAX_ARGS - 8; i++) {
+            const char *a = libs[i];
+            if (strncmp(a, "-Wl,", 4) == 0) a += 4;
+            if (strcmp(a, "--start-group") == 0 || strcmp(a, "--end-group") == 0)
+                continue;
+            argv[n++] = a;
+        }
+        /* The compiler runtime (libgcc / compiler-rt) supplies soft-float and
+         * other builtins (e.g. 128-bit long double __multf3) that a cc/zig-cc
+         * driver would auto-link but a raw ld.lld does not. Inside the group so
+         * it resolves against libc + the app archives. */
+        if (ctx->libgcc[0]) argv[n++] = ctx->libgcc;
         argv[n++] = "-lc";
         argv[n++] = "--end-group";
         argv[n++] = ctx->ldash;   /* -L<libdir> */
@@ -146,6 +171,26 @@ HlLinker *hl_linker_lld_direct_new(const char *ld_path, const char *libdir)
         snprintf(ctx->crti, sizeof(ctx->crti), "%s/crti.o", libdir);
         snprintf(ctx->crtn, sizeof(ctx->crtn), "%s/crtn.o", libdir);
         snprintf(ctx->ldash, sizeof(ctx->ldash), "-L%s", libdir);
+    }
+    /* Discover the compiler runtime (libgcc.a) the way a cc driver would: via
+     * `cc -print-libgcc-file-name`. It lives in a gcc-version-specific dir the
+     * raw linker can't guess, and supplies builtins (soft-float __multf3, etc.)
+     * the app archives reference. HULL_LIBGCC overrides (a hand-assembled floor
+     * with no cc, or a clang compiler-rt archive). Absent = link without it. */
+    {
+        const char *env = getenv("HULL_LIBGCC");
+        if (env && *env) {
+            snprintf(ctx->libgcc, sizeof(ctx->libgcc), "%s", env);
+        } else {
+            const char *q[] = { "cc", "-print-libgcc-file-name", NULL };
+            char *lg = hl_tool_spawn_read(q, NULL);
+            if (lg) {
+                char *nl = strchr(lg, '\n'); if (nl) *nl = '\0';
+                if (lg[0] && access(lg, R_OK) == 0)
+                    snprintf(ctx->libgcc, sizeof(ctx->libgcc), "%s", lg);
+                free(lg);
+            }
+        }
     }
     HlLinker *l = (HlLinker *)malloc(sizeof(HlLinker));
     if (!l) { free(ctx); return NULL; }

@@ -152,18 +152,27 @@ fetch-target-platform-lib (new). The design should make `--target=<os>-<arch>`
    `e2e_linker.sh` + `e2e_cross_build.sh` (cross-emit + cross-link proof).
    (`hull tools install lld` release asset + `linker_mold.c` deferred; today
    `--linker=lld` resolves lld from `~/.hull/tools` / PATH.)
-2. **Tier B, static-musl ELF: mechanism DONE, integration blocked.**
+2. **Tier B, static-musl ELF: DONE and validated end to end.**
    `hl_linker_lld_direct_new` + `--linker=lld-static` invoke `ld.lld -static`
    DIRECTLY against the musl floor (`crt1.o crti.o <objs> --start-group <libs>
-   -lc --end-group -L<dir> crtn.o`, floor discovered from `HULL_LIBC_DIR` /
-   `/usr/lib`) - **no cc in the link**. Proven end to end on Alpine
-   (`e2e_tierb_musl.sh`: emit + direct static link + run). **BUT** it needs a
-   **musl-built `libhull_platform.a`**, i.e. Hull building on musl - currently
-   blocked by vendored glibc-isms (first: `vendor/pledge/.../pledge-linux.c`
-   uses `__O_TMPFILE`, which musl spells `O_TMPFILE`). The **prerequisite is
-   "make Hull build on musl"** (a build-level compat shim, NOT editing vendored
-   code), then a musl platform-lib build variant. Bundling the floor (a
-   `hull tools install libc-musl-<arch>` asset) makes it fully self-contained.
+   libgcc.a -lc --end-group -L<dir> crtn.o`, floor from `HULL_LIBC_DIR` /
+   `/usr/lib`) - **no cc drives the link**. A real Hull app builds to a fully
+   static musl binary that runs (`tests/e2e_musl.sh` on Alpine: build hull on
+   musl, then `--linker=lld-static` a real app + assert static + run). Making it
+   work with real apps took three fixes beyond the toy-stub mechanism:
+   (a) admit `ld.lld` in the tool-spawn allowlist (`cap/tool.c`; the bare `ld`
+   prefix rejects the `.lld` suffix); (b) the direct linker translates
+   build.lua's compiler-driver flags (`-Wl,--whole-archive`, `-Wl,--start-group`,
+   ...) to raw linker args and flattens the nested groups into one outer group;
+   (c) it links the compiler runtime `libgcc.a` (soft-float builtins like
+   `__multf3` a cc driver auto-adds), discovered via `cc -print-libgcc-file-name`
+   with a `HULL_LIBGCC` override. The prerequisite "Hull builds on musl" is also
+   done (one `-D__O_TMPFILE` shim; see docs/musl_build.md).
+   **Honest caveat:** Tier B is compiler-DRIVER-free, but locating `libgcc.a`
+   still consults `cc` unless `HULL_LIBGCC` is set - so "no compiler in the link"
+   is precise, "no compiler present" needs the override. Bundling the floor +
+   libgcc (a `hull tools install libc-musl-<arch>` asset) would make it fully
+   self-contained.
 3. **Cross-compilation.** `--target=<os>-<arch>` drives emit-fmt + cross-link
    + `hull platform install <target>`. The **object-level** half is proven
    (`e2e_cross_build.sh`); the runnable half needs the target platform lib.

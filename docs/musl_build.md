@@ -61,7 +61,8 @@ under musl and then, through the default emit path, builds and runs:
 
 - a **compute `app.main`** app - the regression lock for the `.data.rel.ro` fix
   (this binary used to SIGSEGV in `ld-musl`'s `do_relocs` before `main`);
-- an **HTTP server** app - proves the full server runtime serves a request.
+- an **HTTP server** app - proves the full server runtime serves a request;
+- a **fully static** app via `--linker=lld-static` (Tier B) - see below.
 
 The script is dual-mode: on a musl host it builds directly; on a non-musl host
 (dev macOS/glibc, CI ubuntu) it re-execs itself inside an `alpine:3.20` Docker
@@ -69,13 +70,27 @@ container. That is why the CI job runs on a plain ubuntu runner rather than
 `container: alpine` - it sidesteps `actions/checkout`'s glibc-node breakage on an
 Alpine container while still exercising a real musl build.
 
+## Fully static binaries (Tier B, `--linker=lld-static`)
+
+On musl, `hull build --linker=lld-static ./app` produces a **fully static**
+executable (no interpreter, runs on bare `scratch`) by invoking `ld.lld`
+directly - no cc driving the link. It needs three things beyond the emitted
+object: the musl floor (`crt1.o`/`crti.o`/`crtn.o`/`libc.a`, from `musl-dev`,
+located via `HULL_LIBC_DIR`, default `/usr/lib`), `ld.lld` (from `lld`), and the
+**compiler runtime** `libgcc.a` (soft-float builtins the app archives
+reference). The linker discovers `libgcc.a` via `cc -print-libgcc-file-name`;
+`HULL_LIBGCC=/path/to/libgcc.a` overrides it for a hand-assembled, cc-free floor.
+
+Note the honest nuance: Tier B is **compiler-DRIVER-free** (no cc invokes the
+link), but locating `libgcc.a` still consults `cc` unless `HULL_LIBGCC` is set.
+`zig cc` (`--linker=zig`) remains the turnkey, self-contained alternative
+(bundles crt+libc+compiler-rt for ~40 targets); Tier B is the purist path when
+you want `ld.lld` + a system floor and nothing else. See
+[docs/toolchain_free_build.md](toolchain_free_build.md). Covered by
+`tests/e2e_musl.sh` (asserts the binary is static and runs).
+
 ## Caveats / not-yet
 
-- **Static musl (`--linker=lld-static`, Tier B).** A musl platform library now
-  exists, which is the precondition Tier B was blocked on. End-to-end validation
-  of the direct `ld.lld -static` link on musl is the remaining follow-up before
-  Tier B is a supported, tested path. See
-  [docs/toolchain_free_build.md](toolchain_free_build.md).
 - **Sandbox in a container.** The e2e runs apps with `--no-sandbox`: Docker's
   default seccomp/landlock restrictions make pledge/unveil enforcement fail
   inside an unprivileged container. That is a container-capability limitation,
