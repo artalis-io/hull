@@ -586,21 +586,30 @@ jobs:
           user: host
           run: |
             make EMBED_PLATFORM=1 HL_APP_BASE_SQLITELESS=1 HL_APP_BASE_TLSLESS=1 TRUST_PLATFORM_LIB=1 TRUST_FEATURE_LIBS=1
-            make hardening
-            make check-hardening
+            # hardening/check-hardening MUST carry the same EMBED flags. check-hardening
+            # depends on $(BUILDDIR)/hull; run plain, it rebuilds the shared build_assets.o
+            # in the non-EMBED (stub) config and relinks hull WITHOUT the embedded platform
+            # (EMBED_PLATFORM isn't in the config-sentinel fingerprint), which then breaks
+            # the Platform-sig E2E + the released binary. Same flags = no non-EMBED rebuild.
+            make hardening EMBED_PLATFORM=1 HL_APP_BASE_SQLITELESS=1 HL_APP_BASE_TLSLESS=1 TRUST_PLATFORM_LIB=1 TRUST_FEATURE_LIBS=1
+            make check-hardening EMBED_PLATFORM=1 HL_APP_BASE_SQLITELESS=1 HL_APP_BASE_TLSLESS=1 TRUST_PLATFORM_LIB=1 TRUST_FEATURE_LIBS=1
       - name: Build hull with embedded platform (macOS)
         if: runner.os == 'macOS'
         run: make EMBED_PLATFORM=1 HL_APP_BASE_SQLITELESS=1 HL_APP_BASE_TLSLESS=1 TRUST_PLATFORM_LIB=1 TRUST_FEATURE_LIBS=1
       - name: Hardening summary (macOS)
         if: runner.os == 'macOS'
-        run: make hardening
+        # Same EMBED flags as the build (see the Linux step) so this does not
+        # rebuild build_assets.o / hull in the non-EMBED config.
+        run: make hardening EMBED_PLATFORM=1 HL_APP_BASE_SQLITELESS=1 HL_APP_BASE_TLSLESS=1 TRUST_PLATFORM_LIB=1 TRUST_FEATURE_LIBS=1
       - name: Hardening verification (macOS)
         # Verifies the just-built binary carries the expected compiler/linker
         # hardening properties (PIE, RELRO+BIND_NOW, NX, canaries, CET/BTI).
         # Required protections missing for this platform cause a non-zero exit
         # and the release fails.
         if: runner.os == 'macOS'
-        run: make check-hardening
+        # Same EMBED flags (see the Linux step): plain check-hardening rebuilds
+        # build_assets.o + relinks hull WITHOUT the embedded platform.
+        run: make check-hardening EMBED_PLATFORM=1 HL_APP_BASE_SQLITELESS=1 HL_APP_BASE_TLSLESS=1 TRUST_PLATFORM_LIB=1 TRUST_FEATURE_LIBS=1
 
       - name: Smoke-test version + platform
         run: |
