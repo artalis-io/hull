@@ -2,7 +2,7 @@
  * compiler.h — C compiler vtable for hull build
  *
  * Abstracts compile (.c → .o) and link (objs+libs → binary) so the
- * system cc backend and the embedded tcc backend are interchangeable.
+ * system cc backend + the compiler-free emit path drive hull build.
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
@@ -15,7 +15,7 @@
 typedef struct HlCompiler HlCompiler;
 
 typedef struct {
-    /* Short name: "cc", "gcc", "tcc", etc. Never NULL, never freed. */
+    /* Short name: "cc", "gcc", "clang", etc. Never NULL, never freed. */
     const char *(*name)(HlCompiler *c);
     /* 1 if compiler is usable, 0 otherwise. */
     int         (*is_available)(HlCompiler *c);
@@ -65,24 +65,14 @@ static inline void hl_compiler_destroy(HlCompiler *c)
  */
 HlCompiler *hl_compiler_system_new(const char *cc_path);
 
-#ifdef HL_ENABLE_TCC
 /*
- * Create the tcc backend. tcc is resolved as an EXTERNAL tool (not embedded):
- * hull_exe (may be NULL) seeds hl_tools_lookup_path's search — $HOME/.hull/tools
- * → dirname(hull_exe) → $PATH. compile() uses tcc -c -nostdinc; link() delegates
- * to the system linker. is_available()/compile() fail if no tcc is resolvable
- * (hint: `hull tools install tcc`).
- */
-HlCompiler *hl_compiler_tcc_new(const char *hull_exe);
-#endif
-
-/*
- * Auto-select a compiler:
- *   "tcc"    → hl_compiler_tcc_new(hull_exe) [HL_ENABLE_TCC only]
- *   "system" → skip tcc, find first system compiler
- *   other    → hl_compiler_system_new(explicit_cc)
- *   NULL     → tcc if resolvable, else cc/gcc/clang from PATH
- * hull_exe (may be NULL) is forwarded to the tcc backend for tool resolution.
+ * Auto-select a compiler (the emit path - obj_emit - is the default build
+ * path now; this feeds the --compiler / --with / cosmo fallback):
+ *   "system" → find the first system compiler in PATH
+ *   other    → hl_compiler_system_new(explicit_cc) (a path or PATH name)
+ *   NULL     → cc/gcc/clang from PATH (cosmocc on a cosmo hull)
+ * hull_exe (may be NULL) is currently unused (was the retired tcc tool's
+ * resolution seed); kept for call-site stability.
  * Returns NULL if nothing is found.
  */
 HlCompiler *hl_compiler_select(const char *explicit_cc, const char *hull_exe);

@@ -206,9 +206,8 @@ cross-checked at app-build time.
 
 `hull sbom --subject=libhull [--format=human|json|cyclonedx|spdx]` emits an
 SBOM scoped to the embedding surface: the subject component is named
-`libhull`, the script runtimes (Lua, QuickJS) and the `hull build` compiler
-backend (TinyCC) are dropped, and the linked core (Keel, mbedTLS, WAMR,
-SQLite, tweetnacl, the CA bundle, …) is kept. Each release also publishes
+`libhull`, the script runtimes (Lua, QuickJS) are dropped, and the linked
+core (Keel, mbedTLS, WAMR, SQLite, tweetnacl, the CA bundle, …) is kept. Each release also publishes
 `libhull.sbom.{json,cdx.json,spdx.json}`, covered by `hull.sha256` so they
 inherit the release signature. The per-component membership is the
 `in_libhull` flag on `HlSbomEntry` (`src/hull/sbom.c`).

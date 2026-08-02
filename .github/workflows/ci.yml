@@ -180,10 +180,6 @@ jobs:
         timeout-minutes: 2
         run: make e2e-dynamic-connections
 
-      - name: TCC E2E tests
-        timeout-minutes: 3
-        run: make e2e-tcc
-
       - name: Build-flavor E2E tests
         timeout-minutes: 6
         run: make e2e-build-flavor

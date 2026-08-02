@@ -84,7 +84,7 @@ Four core beliefs:
 
 ### Runtime
 
-- **~5 MB single binary, ~3.66 MB compute-only.** The default build (Lua + QuickJS + SQLite + mbedTLS + TweetNaCl + pledge/unveil + WAMR + embedded Mozilla CA bundle + embedded TinyCC) is around 5 MB on aarch64. `make HL_ENABLE_DB=0` drops SQLite and the DB-backed stdlib for a ~3.66 MB compute-focused build. Add `HL_ENABLE_GPU=1` (wgpu-native) for GPU compute.
+- **~5 MB single binary, ~3.66 MB compute-only.** The default build (Lua + QuickJS + SQLite + mbedTLS + TweetNaCl + pledge/unveil + WAMR + embedded Mozilla CA bundle) is around 5 MB on aarch64. `make HL_ENABLE_DB=0` drops SQLite and the DB-backed stdlib for a ~3.66 MB compute-focused build. Add `HL_ENABLE_GPU=1` (wgpu-native) for GPU compute.
 - **Fast enough. And native speed when you need it.** Lua 5.4 and QuickJS are 10-30× faster than Python and 5-10× faster than Ruby for application logic, sustaining 70-100K req/s on a single core for I/O-bound routes. For CPU-bound work, WASM compute plugins (interpreter or AOT, gas-metered, no I/O) close the gap to ~1.2-1.9× native C. For massively parallel workloads, GPU compute via wgpu-native (Vulkan/Metal/DX12) runs WGSL shaders with persistent buffers and pipeline support. Apps drop down only when they need to; the sandbox boundary doesn't move.
 - **Batteries included**. Routing, auth, JWT, sessions, CSRF, RBAC, templates, CORS, rate limiting, WebSockets, SSE, full-text search, CSV, i18n, idempotency, transactional outbox/inbox, health checks, ETags, image codecs, SMTP. All in the stdlib, all sandboxed, all auditable.
 - **Single-threaded event loop + bounded worker pool**. Keel's epoll/kqueue/io_uring/poll event loop drives one Lua/JS handler at a time per request; async DB and HTTP work runs on a configurable thread pool (`--workers N`) so the loop stays responsive. Easy to reason about, no shared mutable state, no race conditions in app code.
@@ -168,7 +168,6 @@ Hull is a capability-secure application runtime that embeds the entire stack (HT
 | [log.c](https://github.com/rxi/log.c), [sh_arena](https://github.com/sailorhg/sh_arena), [sh_json](https://github.com/sailorhg/sh_json) | Logging, arena allocator, streaming JSON |
 | [miniz](https://github.com/richgel999/miniz) | gzip response compression + client decompression |
 | Mozilla CA bundle | ~145 root certificates embedded for HTTPS without a system store |
-| Embedded TinyCC | ~400 KB compiler embedded so `hull build` does not require a separately-installed C compiler (the system linker is still used for the link step) |
 | [WAMR](https://github.com/bytecodealliance/wasm-micro-runtime) *(optional)* | WebAssembly compute plugins (interpreter + AOT, SIMD128, Memory64) |
 | [wgpu-native](https://github.com/gfx-rs/wgpu-native) *(optional)* | GPU compute shaders (Vulkan/Metal/DX12) |
 

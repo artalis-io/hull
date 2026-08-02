@@ -258,7 +258,7 @@ BASE build machinery, which falls into three modularizability classes:
 | Lines | Bucket | Further modularizable? |
 |------:|--------|------------------------|
 | ~220  | toolchain / CFLAGS base / sanitizer / version / dirs | **No** - `CFLAGS :=`/`+=` accumulation root; everything downstream depends on order |
-| ~1140 | vendored-lib configs (QuickJS, Lua, Keel, mbedTLS, SQLite, log.c, sh_arena, sh_json, TweetNaCl, stb, unicode, **WAMR**, LTO, CFI, TinyCC, wgpu, DuckDB, pledge, CA-bundle, pwned, HTMX) | **Partly** - a `mk/vendor/<lib>.mk` per lib is possible, but each carries a `CFLAGS +=` so it's order-sensitive like the coarse sections |
+| ~1140 | vendored-lib configs (QuickJS, Lua, Keel, mbedTLS, SQLite, log.c, sh_arena, sh_json, TweetNaCl, stb, unicode, **WAMR**, LTO, CFI, wgpu, DuckDB, pledge, CA-bundle, pwned, HTMX) | **Partly** - a `mk/vendor/<lib>.mk` per lib is possible, but each carries a `CFLAGS +=` so it's order-sensitive like the coarse sections |
 | ~550  | Hull source-file object lists (`CAP_OBJS`, `RT_OBJS`, all `*_OBJ`) + compile pattern rules (`%.o: %.c`) | **No** - the central object registry + the ~10 pattern rules every archive/link consumes |
 | ~440  | stdlib/context/asset/app embedding (xxd) + registries | Partly (a `mk/embed-stdlib.mk`), low value |
 | ~85   | include paths + build-flag fingerprint | No - tiny, central |
@@ -294,8 +294,8 @@ split dictates where each belongs:
   checked first, since a cosmo build reports `UNAME_S=Linux`) selects
   `include mk/platform/$(PLATFORM).mk`.
 - **Feature-LOCAL platform choices → stay in the feature/vendor fragment:** gpu's
-  `WGPU_FRAMEWORKS` (Metal vs Vulkan) in `mk/vendor/wgpu.mk`, tcc's ELF-only
-  exclusion, WAMR's per-OS `platform_init`, duckdb/tui cosmo-exclusion. Moving
+  `WGPU_FRAMEWORKS` (Metal vs Vulkan) in `mk/vendor/wgpu.mk`,
+  WAMR's per-OS `platform_init`, duckdb/tui cosmo-exclusion. Moving
   these into a platform file would fragment cohesion - the Metal-vs-Vulkan choice
   belongs *with* gpu, not in `darwin.mk`. **This is the key design call: the
   platform file holds OS policy, not a feature's per-OS wiring.**
@@ -303,7 +303,7 @@ split dictates where each belongs:
 **What the vendor/feature extraction already achieved.** By the time this axis
 landed, the earlier `mk/vendor/*` + `mk/features/*` work had *already* moved
 almost every platform conditional out of the root **with its concern** (WAMR
-per-OS wiring, wgpu frameworks, tcc ELF gate, TUI cosmo force-load). What
+per-OS wiring, wgpu frameworks, TUI cosmo force-load). What
 remained platform-GLOBAL in the root was a single block: the **jart/pledge
 polyfill** (the Linux-only `pledge()`/`unveil()` implementation). There are no
 per-OS link libs left in the root (the hull link is the universal

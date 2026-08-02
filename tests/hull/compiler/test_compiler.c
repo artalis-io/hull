@@ -1,9 +1,7 @@
 /*
  * test_compiler.c — Tests for HlCompilerVtable (compiler.c)
  *
- * Tests the system compiler backend, selection logic, and (when
- * compiled with HL_ENABLE_TCC and embedded tcc is available) the
- * tcc backend end-to-end.
+ * Tests the system compiler backend and selection logic.
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
@@ -218,26 +216,14 @@ UTEST(compiler, select_system_forces_system)
     HlCompiler *c = hl_compiler_select("system", NULL);
     /* system compilers should always be available in CI */
     ASSERT_NE(c, NULL);
-    /* name should not be "tcc" */
-    ASSERT_NE(strcmp(hl_compiler_name(c), "tcc"), 0);
     hl_compiler_destroy(c);
 }
 
-/* ── Tests: allowlist (tcc and ld added) ────────────────────────── */
-
-UTEST(compiler, allowlist_tcc)
-{
-    ASSERT_EQ(hl_tool_check_allowlist("tcc"), 0);
-}
+/* ── Tests: allowlist ───────────────────────────────────────────── */
 
 UTEST(compiler, allowlist_ld)
 {
     ASSERT_EQ(hl_tool_check_allowlist("ld"), 0);
-}
-
-UTEST(compiler, allowlist_tcc_with_path)
-{
-    ASSERT_EQ(hl_tool_check_allowlist("/tmp/hull_tcc_abc/tcc"), 0);
 }
 
 /* ── Tests: compile app_registry.c pattern (pure refactor check) ── */
@@ -280,113 +266,15 @@ UTEST(compiler, compile_app_registry_pattern)
     free(tmpdir);
 }
 
-/* ── Tests: tcc backend end-to-end (HL_ENABLE_TCC only) ─────────── */
+/* ── Tests: auto-selection resolves a usable compiler ───────────── */
 
-#ifdef HL_ENABLE_TCC
-
-/* These tests skip themselves on platforms where tcc is not viable
- * (cosmo APE archives, macOS Mach-O linker). They MUST run for real
- * on Linux/x86_64 and Linux/arm64 CI runners — that's how we verify
- * the embedded-tcc build path actually works end-to-end. */
-
-UTEST(compiler, tcc_explicit_sentinel)
+UTEST(compiler, default_compiler_resolves)
 {
-    HlCompiler *c = hl_compiler_select("tcc", NULL);
-    if (!c) {
-        /* macOS: tcc_is_available returns 0 by design (Mach-O linker
-         * incompatibility); cosmo: rejected when platforms embedded.
-         * Skip silently — coverage is enforced via the linux_tcc_*
-         * tests below which fail loudly if tcc isn't selected. */
-        return;
-    }
-    ASSERT_STREQ(hl_compiler_name(c), "tcc");
-    ASSERT_EQ(hl_compiler_is_available(c), 1);
-    hl_compiler_destroy(c);
-}
-
-#if defined(__linux__) && !defined(__COSMOPOLITAN__)
-
-/* tcc is no longer embedded — it's an external tool (`hull tools install tcc`,
- * or a tcc on PATH). So it's no longer GUARANTEED present in a unit-test
- * environment, and no longer the guaranteed default. These tests assert the
- * new invariants: auto-selection always resolves *some* available compiler,
- * and IF a tcc is resolvable the backend works. The guaranteed end-to-end
- * "tcc actually compiles + links + runs" path is covered by e2e_tcc.sh, which
- * provides a tcc. */
-
-UTEST(compiler, linux_default_compiler_resolves)
-{
-    /* Auto-select must resolve an available compiler: an external tcc when one
-     * is installed (~/.hull/tools or PATH), else the system cc. tcc being the
-     * default is no longer guaranteed (it's not embedded). */
+    /* Auto-select must resolve an available compiler (the system cc). */
     HlCompiler *c = hl_compiler_select(NULL, NULL);
     ASSERT_NE(c, NULL);
     ASSERT_EQ(hl_compiler_is_available(c), 1);
     hl_compiler_destroy(c);
 }
-
-UTEST(compiler, linux_tcc_version_string)
-{
-    HlCompiler *c = hl_compiler_select("tcc", NULL);
-    if (!c) return;  /* no external tcc installed — e2e_tcc.sh covers the real path */
-    char *v = hl_compiler_version(c);
-    ASSERT_NE(v, NULL);
-    /* version string should start with "TinyCC"/"tcc" */
-    ASSERT_TRUE(strstr(v, "TinyCC") != NULL || strncmp(v, "tcc", 3) == 0);
-    free(v);
-    hl_compiler_destroy(c);
-}
-
-UTEST(compiler, linux_tcc_compile_and_link)
-{
-    /* Force the tcc backend; skip when no external tcc is resolvable. */
-    HlCompiler *c = hl_compiler_select("tcc", NULL);
-    if (!c) return;  /* no external tcc — e2e_tcc.sh exercises the guaranteed path */
-    ASSERT_STREQ(hl_compiler_name(c), "tcc");
-
-    char *tmpdir = make_tmpdir();
-    ASSERT_NE(tmpdir, NULL);
-
-    char src[512], obj[512], out[512];
-    snprintf(src, sizeof(src), "%s/hello.c", tmpdir);
-    snprintf(obj, sizeof(obj), "%s/hello.o", tmpdir);
-    snprintf(out, sizeof(out), "%s/hello", tmpdir);
-
-    write_file(src,
-        "extern int puts(const char *);\n"
-        "int main(void) { puts(\"tcc-linux-ok\"); return 0; }\n");
-
-    /* Compile via tcc → ELF .o */
-    int rc = hl_compiler_compile(c, src, obj, NULL);
-    ASSERT_EQ_MSG(rc, 0, "tcc compile of hello.c must succeed");
-    ASSERT_EQ(access(obj, F_OK), 0);
-
-    /* Link via tcc backend (delegates to system cc/ld on Linux) */
-    const char *objs[] = { obj, NULL };
-    const char *libs[] = { NULL };
-    rc = hl_compiler_link(c, out, objs, libs);
-    ASSERT_EQ_MSG(rc, 0, "tcc-backend link must succeed on Linux");
-    ASSERT_EQ(access(out, X_OK), 0);
-
-    /* The proof: actually execute the binary and check it runs.
-     * If the .o is the wrong format or the link produced garbage,
-     * this will fail. */
-    char run_cmd[1024];
-    snprintf(run_cmd, sizeof(run_cmd), "%s 2>&1", out);
-    FILE *p = popen(run_cmd, "r");
-    ASSERT_NE(p, NULL);
-    char buf[64] = {0};
-    fgets(buf, sizeof(buf), p);
-    int status = pclose(p);
-    ASSERT_EQ_MSG(status, 0, "binary built by tcc must run and exit 0");
-    ASSERT_TRUE(strstr(buf, "tcc-linux-ok") != NULL);
-
-    hl_compiler_destroy(c);
-    rm_rf(tmpdir);
-    free(tmpdir);
-}
-
-#endif /* __linux__ && !__COSMOPOLITAN__ */
-#endif /* HL_ENABLE_TCC */
 
 UTEST_MAIN()

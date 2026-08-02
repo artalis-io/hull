@@ -16,7 +16,7 @@ You should fork Hull (instead of running upstream binaries) if any of these appl
 - **Sovereign trust.** Your deployment policy says "no foreign trust roots in the supply chain" and the embedded `gethull.dev` release pubkey is a non-starter.
 - **Compliance ban on third-party signers.** Your auditor requires that every binary you run be signed by a key your organisation controls.
 - **Air-gapped or vendor-specific distribution.** You need `acme update` to pull from `releases.acme.internal`, not from `github.com/artalis-io/hull`.
-- **Custom feature set baked in.** You ship a build with `HL_ENABLE_GPU=0` and `HL_ENABLE_TCC=0` by default and you want that to be the canonical "acme-hull" binary.
+- **Custom feature set baked in.** You ship a build with `HL_ENABLE_GPU=0` and `HL_ENABLE_DB=0` by default and you want that to be the canonical "acme-hull" binary.
 
 If you just want to *use* Hull with your own apps, you do not need to fork. Run upstream `hull`, ship apps signed by your own developer key. Forking is only required when you want to replace the runtime's trust root itself.
 

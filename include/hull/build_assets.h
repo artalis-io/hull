@@ -101,13 +101,4 @@ int hl_build_get_template(const char **data, size_t *len);
  */
 int hl_build_get_entry_header(const char **data, size_t *len);
 
-#ifdef HL_ENABLE_TCC
-/*
- * Return the vendored tcc version string this hull was built against
- * (e.g. "TinyCC mob"), for `hull doctor`. tcc itself is an external tool
- * (`hull tools install tcc`), not embedded. Never NULL. Do not free.
- */
-const char *hl_build_tcc_version_string(void);
-#endif
-
 #endif /* HL_BUILD_ASSETS_H */

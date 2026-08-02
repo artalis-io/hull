@@ -40,10 +40,3 @@ int hl_build_get_entry_header(const char **data, size_t *len)
     (void)data; (void)len;
     return -1;
 }
-
-#ifdef HL_ENABLE_TCC
-const char *hl_build_tcc_version_string(void)
-{
-    return "tcc-not-embedded";
-}
-#endif

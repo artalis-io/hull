@@ -29,7 +29,7 @@ For completed historical roadmaps see [`archive/roadmaps/`](archive/roadmaps/).
 - ✅ **v0.5.0 batch (2026-07-10, §5 + §6 native)**. Build-flavor epic (native half). All four HTTP flavors (full / server-only / client-only / pure-compute) link clean and are CI-covered (server-only/client-only later removed, #114; the HTTP axis is now full vs pure-compute); `hull build --flavor` + `--flavor=auto` (infers the minimal flavor from declared modules, validates the manifest against the target flavor at build time); signed per-flavor native platform libs + `hull flavor install <flavor>` / `flavor list`; build-time platform-lib re-verify closing the install->build TOCTOU. See [`../CHANGELOG.md#050`](../CHANGELOG.md).
 - ✅ **v0.6.0 batch (2026-07-10, §6 cosmo)**. Signed published cosmo per-flavor platform libs (dual-arch), each built on its own fresh runner to avoid the second-cosmo-build loader corruption, + cosmo `hull flavor install`. See [`../CHANGELOG.md#060`](../CHANGELOG.md).
 - ✅ **libhull no-runtime embedding flavor (L-1..L-5, post-v0.6.0, on main)**. `make libhull` -> `libhull.a`, the runtime-free hardened core (no Lua/JS) that a native C/Rust/Zig host links to drive the two-phase sandbox + capability layer + WASM/GPU + signed-artifact machinery via the stable `<hull/embed.h>` ABI. L-1 archive + `sandbox_tool.c` split; L-2 versioned `hl_embed_*` ABI; L-3 sealed per-call `base_dir` (RO `sh_seal_arena`) + fail-closed seal + fork/SIGSEGV death test; L-4 release-signed archive (native + dual-arch cosmo) + scoped SBOM (`hull sbom --subject=libhull`); L-5 Rust + Zig reference embedders (`examples/embed_{c,rust,zig}`) with CI jobs. Follow-ups: c-audit single-shot-seal fix, SBOM `keel`/`mbedtls` gated on `HL_ENABLE_HTTP`, `hull sbom --flavor=<flavor>` + per-flavor release SBOMs, `tool_orchestration.o` purge-list fix, and the CI runner-pin ([§0.3.1](#03-trust-chain-hardening-post-v015-gap-analysis) runner-pin step). Design + use-cases + trust boundary: [`libhull_flavor.md`](libhull_flavor.md); [`roadmap.md`](roadmap.md) row 8.
-- ✅ **v0.7.0 batch. Composable features + extension taxonomy**. Five optional C subsystems shipped as signed per-feature archives composed at `hull build --with=<name>`: `duckdb` (embedded OLAP), `postgres` + `mysql` (pure-C wire backends), `gpu` (wgpu-native), `tui` (terminal UI). `hull feature install/list/uninstall` on the same Ed25519 trust chain as `hull update`. tcc dropped from the binary to a side-loaded tool (`hull tools install tcc`). The four-way feature / flavor / tool / stdlib extension taxonomy documented (`docs/features_and_flavors.md`). See [`../CHANGELOG.md#070`](../CHANGELOG.md).
+- ✅ **v0.7.0 batch. Composable features + extension taxonomy**. Five optional C subsystems shipped as signed per-feature archives composed at `hull build --with=<name>`: `duckdb` (embedded OLAP), `postgres` + `mysql` (pure-C wire backends), `gpu` (wgpu-native), `tui` (terminal UI). `hull feature install/list/uninstall` on the same Ed25519 trust chain as `hull update`. tcc dropped from the binary to a side-loaded tool (`hull tools install tcc`) - since fully retired once `hull build` became compiler-free by default; see [docs/compiler_free_build.md](compiler_free_build.md). The four-way feature / flavor / tool / stdlib extension taxonomy documented (`docs/features_and_flavors.md`). See [`../CHANGELOG.md#070`](../CHANGELOG.md).
 - ✅ **v0.9.0 batch. Fully-composable SLIM base**. The distributed base drops *every* reducible subsystem and composes it back per app at `hull build`: the two runtimes (compose one), the HTTP core + per-runtime web bindings, the Keel event loop + server, mbedTLS + TLS transport, SQLite, WASM/WAMR, and the image codecs are all auto-composed features now. A stock `hull build` of a compute `app.main` links zero Keel / mbedTLS / SQLite / WAMR (~2.1 MB); a full web app composes them all back. Flavors collapsed into build.lua presets (`pure-compute` validates, the base already slims). Composed-feature signing (§0.4) + composable-aware SBOM (§0.5) landed here. See [`../CHANGELOG.md#090`](../CHANGELOG.md).
 - ✅ **Build modularization (post-v0.9.0, on main)**. The monolithic Makefile split into `mk/` fragments mirroring the feature/vendor/platform axes: 13 `mk/features/*.mk` + `mk/feature.mk` macros (`define-feature-archive` / `define-feature-bundle`), 15 `mk/vendor/*.mk`, `mk/platform/{darwin,linux,cosmo,windows}.mk` (pledge is the sole platform-global block; a computed `PLATFORM` selects the include), `mk/libhull.mk`, `mk/tests.mk`, `mk/hardening.mk`, `mk/flags.mk`, `mk/fetch.mk` (asset-refresh maintenance targets). Makefile 5,344 -> ~3,235 lines (-40%); the residual is the irreducible core (CFLAGS pipeline, object registry + compile rules, the single platform-lib + `hull` link assembly point). Every extraction gated by resolved-value parity + build/e2e. Design: [`build_modularization.md`](build_modularization.md).
 
@@ -100,7 +100,7 @@ provenance chain.
 - License (SPDX identifier preferred)
 - Upstream source URL
 - Author / maintainer
-- Optional: SHA-256 of the embedded blob (CA bundle, TCC bytes, etc.)
+- Optional: SHA-256 of the embedded blob (CA bundle, etc.)
   for tamper detection
 
 **Must-include entries (beyond third-party):**
@@ -192,12 +192,12 @@ flags). Real determinism investigation needs same-input + same-
 operation comparison; anything else measures the test, not the
 system.
 
-**TCC follow-up (minor):** the `--compiler=tcc` codepath still has
-the tempdir-in-.o issue because TCC doesn't support
-`-ffile-prefix-map`. The reproducibility CI test sidesteps this
-with `--compiler=system`, which is the documented production path.
-Closing TCC determinism would need either a TCC patch or a
-post-compile path-strip pass.
+**TCC follow-up: resolved by removal.** The former embedded-TinyCC
+codepath had a tempdir-in-.o determinism gap (TCC lacked
+`-ffile-prefix-map`). It is moot now: tcc has been fully retired and
+`hull build` is compiler-free by default (it emits `app_registry.o`
+directly, which is deterministic), with `--compiler=system` using
+`-ffile-prefix-map` for the feature/cosmo fallback path.
 
 ---
 
@@ -3424,11 +3424,13 @@ promise.
    `/opt/cosmo/bin`) before falling back to `$PATH`. Doesn't fix the
    shared-library mmap issue for native compilers, but at least
    lets `cosmocc` work.
-3. **Use embedded TinyCC on the cosmo binary too.** If TCC's
-   embedded codegen can target the cosmo runtime, `hull build` could
-   skip the system compiler entirely on cosmo. Requires investigating
-   whether the embedded TCC builds cleanly under cosmocc and produces
-   loadable APE/native output.
+3. **Extend the compiler-free emit path to cosmo.** `hull build` is
+   already compiler-free on native targets (it emits `app_registry.o`
+   directly). Teaching the object emitter to produce the dual-arch
+   cosmo objects + drive `apelink` would let `hull-cosmo` build without
+   invoking any system compiler at all. Requires investigating the
+   dual-arch/apelink object contract. (This supersedes the retired
+   "embedded TinyCC" idea.)
 4. **Run the cosmo-side E2E smoke test inside a chroot** that
    doesn't apply the polyfill. Closes the CI gap without affecting
    end-users.

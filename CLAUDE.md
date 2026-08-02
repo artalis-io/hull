@@ -39,7 +39,7 @@ curl -fsSL https://gethull.dev/install.sh | sh
 
 `install.sh` (POSIX, ~250 lines) detects OS/arch via `uname`, picks `hull-linux-x86_64` / `hull-linux-aarch64` / `hull-darwin-arm64` / `hull-cosmo` from the latest GitHub release, verifies the SHA-256 from `hull.sha256`, and installs to `~/.local/bin/hull` (or `/usr/local/bin` if root). Knobs: `HULL_VERSION`, `HULL_PREFIX`, `HULL_FLAVOR=cosmo|native`, `HULL_FORCE=1`, `HULL_DRY_RUN=1`.
 
-Shell completions for bash, zsh, fish live in `completions/`. They cover every subcommand, `--compiler=tcc|system|cc|...`, agent subcommands, deploy targets, etc. See `completions/README.md`.
+Shell completions for bash, zsh, fish live in `completions/`. They cover every subcommand, `--compiler=system|cc|...`, agent subcommands, deploy targets, etc. See `completions/README.md`.
 
 Tested by `tests/e2e_install.sh` (`make e2e-install`. Runs install.sh in dry-run mode, syntax-checks all three completion shells, exercises bash completion behavior for representative inputs).
 
@@ -143,7 +143,6 @@ Hull's distribution is one binary; what's compiled into it is controlled by a sm
 | `HL_ENABLE_WASM` | 1 | Compile-time drop of WAMR (`compute.*` unavailable, ~256 KB): base + no wasm archive. Orthogonal to the auto-composed axis - with the default `=1`, the native base is still **compute-less** and composes WASM only for apps that need it (see "Composable runtime + HTTP base"). Cosmo keeps WASM in-base. |
 | `HL_ENABLE_GPU` | 0 | (Off by default.) On enables wgpu-native (`gpu.*`). Normally composed via the `gpu` **feature** (`hull build --with=gpu`) rather than set directly; see "Composable features" below. Native-only (no cosmo). |
 | `HL_ENABLE_DUCKDB` | 0 | (Off by default.) On enables the embedded DuckDB OLAP backend (`cap/db_duckdb.c` + fetched static libs via `make fetch-duckdb`). A `duckdb://` DSN selects it. Native-only (no cosmo). Normally composed via the `duckdb` **feature** (`hull build --with=duckdb`) rather than set directly; see "Composable features" below. |
-| `HL_ENABLE_TCC` | 1 Linux / 0 macOS+cosmo | Compile the tcc backend for `hull build --compiler=tcc`. tcc is **not embedded** (~400 KB lighter binary) - it's a side-loaded tool (`hull tools install tcc`), resolved at build time from `~/.hull/tools` → `dirname(hull)` → `$PATH`. Off on macOS (Mach-O) / cosmo (APE archives), where tcc's ELF output is unusable and the system compiler is used instead. |
 | `HL_EMBED_CA_BUNDLE` | 1 | Drop Mozilla CA bundle (~200 KB, breaks HTTPS without system store) |
 | `HL_ENABLE_SQLITE` | 1 | Drop the SQLite backend (`cap/db_sqlite.c`, `cap/db_udf.c`, vendored `sqlite3.c`). A SQLite file path or `:memory:` DSN then has no backend. |
 | `HL_ENABLE_IMAGE` | 1 | Drop the image codec subsystem (`cap/image.c`, `cap/image_stb.c`, per-runtime `mod_image`, and vendored `stb_image` - image's **sole** consumer, ~146 KB). **Two-mode knob:** at the default `=1` the base is IMAGE-LESS and auto-composes the image feature (`libhull_feature-image.a` + `-image-<rt>.a`, embedded in hull) back for apps that declare `hull/image` (the `needs_image` gate; see "Composable runtime + HTTP base"). `=0` is the subtractive path - drops image entirely (no feature to compose, like `HL_ENABLE_DB=0`). `hull/image` then fails module resolution unless declared optional (`"hull/image@1?"` → `require` returns nil). The GPU texture paths that take/return an `HlImage` (`gpu.texture(img)`, `gpu.texture_read`/`textureRead`) stay `#ifdef HL_ENABLE_IMAGE`-gated, so a `GPU=1 IMAGE=0` build keeps raw-byte textures but not the image bridge. See "Image-less builds" below and [docs/image_feature.md](docs/image_feature.md). |
@@ -155,11 +154,11 @@ Hull's distribution is one binary; what's compiled into it is controlled by a sm
 | `HL_ENABLE_HTTP` | 1 | **Back-compat alias.** Setting `HL_ENABLE_HTTP=0` pins both `HL_ENABLE_HTTP_SERVER` and `HL_ENABLE_HTTP_CLIENT` to 0. The macro stays defined when either granular flag is on, so existing source guards continue to mean "any HTTP at all". |
 | `HL_ENABLE_TUI` | 0 native / 1 cosmo | Whether the terminal UI capability (`cap/tui.c`, `cap/tui_input.c`, `cap/tui_width.c`, the runtime bindings, the `hull.tui` stdlib module) is compiled INTO the base. TUI is a **composable feature** (like gpu/duckdb): the native base is TUI-free so apps that never touch the terminal link a leaner platform lib (~80-150 KB), and an app that declares `hull/tui` composes it back via `hull build --with=tui` (auto-inferred from the manifest, so a plain `hull build` of a `hull/tui` app just works). The hull TOOLCHAIN keeps its own `--tui` commands (`hull doctor / dev / agent context / agent errors / modules available`) by force-loading `libhull_feature-tui.a` at link time (`HL_TUI_TOOLCHAIN`, default 1 on a TUI-free native base). Cosmo compiles TUI in (a fat APE can't force-load a native feature archive). See "Terminal UI module" and [docs/features_and_flavors.md](docs/features_and_flavors.md). |
 
-Combine flags freely: `make HL_ENABLE_DB=0 HL_ENABLE_WASM=1 HL_ENABLE_TCC=0` yields a pure compute runtime with Lua/JS orchestration but no database or build-toolchain.
+Combine flags freely: `make HL_ENABLE_DB=0 HL_ENABLE_WASM=1 HL_ENABLE_HTTP=0` yields a pure compute runtime with Lua/JS orchestration but no database or HTTP.
 
 ### HTTP build flags
 
-The two HTTP flags (`HL_ENABLE_HTTP_SERVER` / `HL_ENABLE_HTTP_CLIENT`) are independent **internal knobs**. They drive the per-runtime web-archive split; they are NOT exposed as shippable `--flavor` presets (the shipped HTTP axis is binary: `full` vs `pure-compute` - see "Build flavors for apps" below). Each combination still produces a useful binary at the `make` level (arm64 Darwin sizes for the default invocation, i.e. DB + WASM + TUI + TCC all on):
+The two HTTP flags (`HL_ENABLE_HTTP_SERVER` / `HL_ENABLE_HTTP_CLIENT`) are independent **internal knobs**. They drive the per-runtime web-archive split; they are NOT exposed as shippable `--flavor` presets (the shipped HTTP axis is binary: `full` vs `pure-compute` - see "Build flavors for apps" below). Each combination still produces a useful binary at the `make` level (arm64 Darwin sizes for the default invocation, i.e. DB + WASM + TUI all on):
 
 | Config | Server | Client | Binary | Notes |
 |---|---|---|---|---|
@@ -267,8 +266,10 @@ backend. `FEATURE_SPECS` in `stdlib/cli/lua/hull/build.lua` is the codegen
 source of truth per feature (backend symbol, vtable type, hook name, C++ flag,
 and extra link libs that can't live in a `.a` - DuckDB's `-lstdc++`, GPU's
 `-lvulkan` / Metal frameworks). Selection can be **inferred** from the manifest
-(a `duckdb://` connection) or **forced** with `--with=`. A C++ feature (duckdb)
-can't be linked by the embedded TinyCC - use `--compiler=system`.
+(a `duckdb://` connection) or **forced** with `--with=`. A `--with=` feature
+falls back to the system compiler automatically (the default compiler-free emit
+path only emits + links `app_registry.o`); a C++ feature (duckdb) additionally
+needs a C++-capable driver, so `--compiler=system` resolves a system `cc`.
 
 Verified end to end by `tests/e2e_feature_duckdb.sh` and
 `tests/e2e_feature_gpu.sh` (each builds a base hull + the feature archive,
@@ -411,7 +412,7 @@ twenty lines of Lua. The four, and the single question that separates each:
 1. **Is it a separate program Hull executes, not code linked into the app?**
    (a compiler, an AOT/optimizer pass, a codegen binary) → **tool**. Version-
    coupled to the release, side-loaded, resolved via `hl_tools_lookup_path`.
-   Examples: `wamrc`, `tcc`.
+   Example: `wamrc`.
 2. **Can it be built entirely on existing capabilities** (`http`/`crypto`/`fs`/
    `db`/`compute`/…) **with no new C and no new authority?** → **stdlib module**.
    If the answer is "it's just HTTP + a signing scheme" or "it's composition over
@@ -461,7 +462,7 @@ What still works:
 
 > **Invariant for contributors:** core C code (`cap/`, `commands/`, `shared/`) must hash via `hl_cap_crypto_sha256` / the cap HMAC entry points, **never** `mbedtls_sha*` / `mbedtls_md_hmac` directly. A direct mbedTLS hash call re-breaks this flavor at link time (the `flavors` CI job catches it).
 
-Binary size on arm64 Darwin: ~5.8 MB vs ~6.5 MB for the default build. Combine with `HL_ENABLE_DB=0` (and optionally `HL_ENABLE_TUI=0` / `HL_ENABLE_TCC=0`) for the smallest possible compute runtime.
+Binary size on arm64 Darwin: ~5.8 MB vs ~6.5 MB for the default build. Combine with `HL_ENABLE_DB=0` (and optionally `HL_ENABLE_TUI=0`) for the smallest possible compute runtime.
 
 Pure-compute is a **build flavor, not a published release artifact**. The signed `hull.sha256` release manifest covers the four standard binaries (`hull-linux-x86_64`, `hull-linux-aarch64`, `hull-darwin-arm64`, `hull-cosmo`), all full-HTTP. Build pure-compute from source with the flag above; publishing a signed pure-compute binary would be a separate release-pipeline decision (new matrix entry + manifest line + `install.sh` flavor).
 
@@ -1106,13 +1107,13 @@ Each command is a separate `.c`/`.h` under `src/hull/commands/`. Adding a new co
 
 **`hull init [dir] [--runtime lua|js]`**. Initialize a hull project in-place. Like `git init`: creates missing files (`app.lua`, `tests/`, `migrations/`, `.gitignore`) without touching existing ones. Detects existing runtime from `app.lua`/`app.js` presence. Implemented as a Lua tool module (`stdlib/cli/lua/hull/init.lua`).
 
-**`hull doctor [--json]`**. Environment check for distribution readiness. Reports hull version/runtime/platform, whether the platform library is embedded (none / single-arch / multi-arch), whether a `tcc` tool is resolvable (side-loaded, not embedded), which system C compilers (`cc`, `gcc`, `clang`, `cosmocc`) are found in PATH, and a **Caches** section listing every registered cache kind with status / entries / size / on-disk path (sourced from `hl_cache_registry()` - the same registry that powers `hull cache list`, so doctor and the cache subcommand always agree). Surfaces an active `HULL_CACHE_DIR` override when set. Exits 0 only when `hull build` is fully ready (platform embedded AND at least one compiler available). Pure C implementation (`src/hull/commands/doctor.c`). `--json` includes a `"caches"` array and a `"hull_cache_dir"` field for machine-readable output.
+**`hull doctor [--json]`**. Environment check for distribution readiness. Reports hull version/runtime/platform, whether the platform library is embedded (none / single-arch / multi-arch), which system C compilers (`cc`, `gcc`, `clang`, `cosmocc`) are found in PATH (used only for `--compiler=system`, `--with=` features, and cosmo/APE targets - the default `hull build` emit path needs no compiler), and a **Caches** section listing every registered cache kind with status / entries / size / on-disk path (sourced from `hl_cache_registry()` - the same registry that powers `hull cache list`, so doctor and the cache subcommand always agree). Surfaces an active `HULL_CACHE_DIR` override when set. Exits 0 only when `hull build` is fully ready (platform embedded AND at least one compiler available). Pure C implementation (`src/hull/commands/doctor.c`). `--json` includes a `"caches"` array and a `"hull_cache_dir"` field for machine-readable output.
 
-**`hull build --compiler=<backend>`**. Select the C compiler backend for `hull build`. Options: `tcc` (side-loaded TinyCC tool, compile-only - install with `hull tools install tcc`, or put tcc on PATH), `system` (system cc/gcc/clang, no tcc fallback), or an explicit compiler path. Default: a resolvable tcc if one is installed, otherwise system cc. tcc is **not embedded** - the backend resolves it via `hl_tools_lookup_path` (`~/.hull/tools` → `dirname(hull)` → `$PATH`); its link step always delegates to a system linker regardless. The compiler abstraction uses `HlCompilerVtable` (`include/hull/compiler.h`); backends live in `src/hull/compiler.c` and `src/hull/compiler_tcc.c`.
+**`hull build --compiler=<backend>`**. Select how `hull build` produces the app binary. **By default `hull build` is compiler-free**: it emits `app_registry.o` directly via the object emitter (`obj_emit`) and links, needing no C compiler at all. `--compiler=system` (or an explicit compiler path) opts into a system `cc`/`gcc`/`clang` instead; `--with=` features and cosmo/APE targets fall back to the system compiler automatically (they can't go through the emit path). Passing `--compiler=<name>` (e.g. `--compiler=tcc`) treats `<name>` as a plain system compiler resolved from `$PATH` - a user's own `tcc` on `$PATH` still works this way, but tcc is no longer a Hull-provided, vendored, or installable tool. The compiler abstraction uses `HlCompilerVtable` (`include/hull/compiler.h`); the system backend lives in `src/hull/compiler.c`.
 
 **`hull update [--check] [--force] [--channel=stable|beta] [--repo=ORG/NAME]`**. Self-update from GitHub releases. Fetches the latest release metadata via `api.github.com`, picks the asset matching this binary's OS/arch (`hull-linux-x86_64`, `hull-linux-aarch64`, `hull-darwin-arm64`, or `hull-cosmo` fallback), downloads via HTTPS using the embedded Mozilla CA bundle (Phase D4), verifies the manifest's Ed25519 signature against the embedded `HL_RELEASE_PUBKEY_HEX` (when configured), verifies SHA-256 against `hull.sha256` from the same release (constant-time compare), and atomically replaces the running binary via `rename(2)`. `--check` exits after the version compare without installing. Pure C implementation in `src/hull/commands/update.c`; shared HTTPS / SHA-256 / manifest plumbing lives in `src/hull/release_io.{c,h}`.
 
-**`hull tools install <name> [--all]` / `tools list [--json]` / `tools uninstall <name>`** (Side-load optional Hull-native tools (currently: `wamrc`, `tcc`) from GitHub releases into `$HOME/.hull/tools/`. The trust chain is identical to `hull update`) same Ed25519-signed `hull.sha256` manifest covers tool binaries, no new keys. Install is version-coupled: it pulls from the SAME release as the running hull binary (not "latest"), so e.g. wamrc stays at the WAMR commit hull was compiled against. Tool registry is a compile-time-constant static table in `src/hull/tools_install.c`; adding a tool means one entry in the registry + matching `hull-<tool>-<platform>` assets in `hull.sha256`. Cosmo unsupported for tools that need LLVM (cosmo users build from source with `make wamrc`). Pure C; consumers locate installed tools via `hl_tools_lookup_path()` (or `tool.find_tool()` from build-tool Lua) which checks `~/.hull/tools/` → `dirname(hull_exe)/` → `$PATH`. Full design: [docs/tools_install.md](docs/tools_install.md).
+**`hull tools install <name> [--all]` / `tools list [--json]` / `tools uninstall <name>`** (Side-load optional Hull-native tools (currently: `wamrc`) from GitHub releases into `$HOME/.hull/tools/`. The trust chain is identical to `hull update`) same Ed25519-signed `hull.sha256` manifest covers tool binaries, no new keys. Install is version-coupled: it pulls from the SAME release as the running hull binary (not "latest"), so e.g. wamrc stays at the WAMR commit hull was compiled against. Tool registry is a compile-time-constant static table in `src/hull/tools_install.c`; adding a tool means one entry in the registry + matching `hull-<tool>-<platform>` assets in `hull.sha256`. Cosmo unsupported for tools that need LLVM (cosmo users build from source with `make wamrc`). Pure C; consumers locate installed tools via `hl_tools_lookup_path()` (or `tool.find_tool()` from build-tool Lua) which checks `~/.hull/tools/` → `dirname(hull_exe)/` → `$PATH`. Full design: [docs/tools_install.md](docs/tools_install.md).
 
 The live install path is intentionally not tested in CI (it would need the just-published release to exist before publishing). The post-release validation step is `tests/release_smoke.sh`: install hull, run `sh tests/release_smoke.sh`, watch `hull tools install wamrc` actually fetch the asset, verify SHA-256, exercise `wamrc --help`, and uninstall cleanly. Run it manually after every `gh release create`. (Phase 4.3 removed the pre-built pure-compute flavor lib, so there is no longer a `hull flavor install pure-compute` to smoke-test.)
 
@@ -2817,7 +2818,7 @@ make e2e                            # run all E2E tests (examples + build + sand
 | `test_signature` | 20 | Ed25519 sign/verify round-trips, dual-layer signature |
 | `test_release` | 20 | Ed25519 release-manifest sign/verify, tamper detect, hex edge cases, secret-key file IO |
 | `test_parse_size` | 9 | Size string parser ("1m", "1g", etc.) |
-| `test_compiler` | 16 | Compiler vtable: system + tcc backends, allowlist, end-to-end on Linux |
+| `test_compiler` | 16 | Compiler vtable: system backend, allowlist, end-to-end on Linux |
 | `test_cacert` | 6 | Embedded Mozilla CA bundle: presence, NUL-termination, mbedTLS parse |
 | `test_dispatch` | 4 | Command dispatch table, unknown-command handling |
 | `test_csp` | 7 | CSP preset registry: `htmx` preset expansion, literal passthrough, NULL passthrough, reverse name lookup |
@@ -2833,7 +2834,7 @@ make e2e                            # run all E2E tests (examples + build + sand
 Plus libFuzzer harnesses (sh_json, path_normalize, mime_sniff, host_match, pgwire,
 pg_dsn, pg_rewrite, mysqlwire, mysql_dsn) run 60s each in CI.
 
-\+ E2E suites (`e2e_build.sh`, `e2e_examples.sh`, `e2e_http.sh`, `e2e_sandbox.sh`, `e2e_tcc.sh`, `e2e_install.sh`, `e2e_ca_bundle.sh`, `e2e_update.sh`)
+\+ E2E suites (`e2e_build.sh`, `e2e_examples.sh`, `e2e_http.sh`, `e2e_sandbox.sh`, `e2e_install.sh`, `e2e_ca_bundle.sh`, `e2e_update.sh`)
 
 ### E2E Tests
 
@@ -2847,7 +2848,6 @@ pg_dsn, pg_rewrite, mysqlwire, mysql_dsn) run 60s each in CI.
 | `e2e_migrate.sh` | Migration system: apply, status, idempotency, embedding |
 | `e2e_compute.sh` | WASM compute: compute.call() from Lua + JS, preload, error handling |
 | `e2e_deploy.sh` | Deploy config generator: Dockerfile, systemd, fly.toml, agent deploy |
-| `e2e_tcc.sh` | Embedded TinyCC: `hull build --compiler=tcc` end-to-end on Linux; rejection path on macOS/cosmo |
 | `e2e_install.sh` | `install.sh` dry-run across platform/flavor/prefix; shell-completion syntax + behavior |
 | `e2e_ca_bundle.sh` | Doctor output; real HTTPS handshake to `example.com` via embedded CA bundle (sandbox-active) |
 | `e2e_update.sh` | `hull update --check` against real public repo; full GitHub-API + JSON parse + version compare via embedded CA bundle |

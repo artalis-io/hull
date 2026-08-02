@@ -72,11 +72,6 @@ int hl_agent_perf_ctx(HlAppContext *ctx, ShJsonBuf *out)
 #else
     sh_json_write_kv_bool(&w, "db", false);
 #endif
-#ifdef HL_ENABLE_TCC
-    sh_json_write_kv_bool(&w, "tcc", true);
-#else
-    sh_json_write_kv_bool(&w, "tcc", false);
-#endif
     sh_json_write_object_end(&w);
 
     /* Compile-time defaults — agent can compare against runtime override

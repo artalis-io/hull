@@ -177,8 +177,9 @@ process — it produces a *new statically-linked binary* and `execv`s. Static li
 + re-exec, W^X and CFI intact. It's exactly what `hull build` does, aimed at a
 dev runtime instead of a shipping artifact.
 
-**Caveats.** It needs a linker at dev time (embedded tcc or system cc) — the same
-requirement as `hull build`, so "feature dev" isn't zero-toolchain the way
+**Caveats.** It needs a linker at dev time (the same system `ld` that
+compiler-free `hull build` uses) - the same requirement as `hull build`, so
+"feature dev" isn't zero-toolchain the way
 pure-Lua `hull dev` is today. The produced dev binary is a **local, ephemeral**
 artifact (developer-owned, like any `hull build` output); its *inputs* (platform
 lib + feature lib) are still release-signed + re-verified, so no trust hole
@@ -273,7 +274,7 @@ the intended direction is to make the model reflect it.
 **The unification.** There is one concept: a **feature**. A **flavor** is just a
 *saved feature preset* — a named bundle. Then:
 
-- `full` = the preset "all default features on" (db + http + wasm + tui + tcc).
+- `full` = the preset "all default features on" (db + http + wasm + tui).
 - `pure-compute` = a minimal / feature-less preset (defaults minus HTTP, …).
 - `duckdb` = the preset "defaults + DuckDB."
 - `hull build --flavor=X` becomes sugar for `hull build --preset=X`, itself sugar

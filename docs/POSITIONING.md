@@ -90,7 +90,7 @@ Honest small print on the "Always say" phrases. Use these expansions
 when the audience asks; don't lead with them.
 
 - **"Single static binary"** is true for Hull's own dependencies: Lua, JS,
-  SQLite, mbedTLS, TweetNaCl, miniz, the CA bundle, WAMR, and TinyCC are
+  SQLite, mbedTLS, TweetNaCl, miniz, the CA bundle, and WAMR are
   all baked in, no external `.so`/`.dylib` required. On macOS, every
   executable links `libSystem.B.dylib` (Apple-mandated since 10.7+);
   this is not a Hull-specific dependency, just how macOS executables
@@ -116,11 +116,12 @@ when the audience asks; don't lead with them.
   build.
 
 - **"`hull build` requires no separately-installed C compiler"** is
-  true via embedded TinyCC, but the system linker (`cc`/`ld`) is still
-  used for the link step. The "zero compiler dependency" claim covers
-  the compile side; the linker side falls back to whatever the system
-  provides. On platforms where TinyCC isn't available (macOS Mach-O,
-  cosmo APE), `hull build` requires a system compiler.
+  true because `hull build` is compiler-free by default: it emits
+  `app_registry.o` directly and links, so no C compiler is invoked. The
+  system linker (`cc`/`ld`) is still used for the link step. `--with=`
+  features (which need a generated feature registry) and cosmo/APE
+  targets fall back to a system compiler, so on those paths `hull build`
+  does need one.
 
 - **"Kernel-enforced boundary the script cannot cross"** holds for
   fs/network capabilities (pledge/unveil filters the syscall). For

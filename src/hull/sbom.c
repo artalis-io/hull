@@ -38,17 +38,11 @@
 #ifndef HULL_VENDOR_WAMR_COMMIT
 #define HULL_VENDOR_WAMR_COMMIT "unknown"
 #endif
-#ifndef HULL_VENDOR_TCC_COMMIT
-#define HULL_VENDOR_TCC_COMMIT "unknown"
-#endif
 #ifndef HULL_VENDOR_KEEL_VERSION
 #define HULL_VENDOR_KEEL_VERSION ""
 #endif
 #ifndef HULL_VENDOR_WAMR_VERSION
 #define HULL_VENDOR_WAMR_VERSION ""
-#endif
-#ifndef HULL_VENDOR_TCC_VERSION
-#define HULL_VENDOR_TCC_VERSION ""
 #endif
 
 /* ── SHA-256 of embedded blobs + the running binary (lazy, cached) ──── */
@@ -472,20 +466,6 @@ static const HlSbomEntry sbom_entries[] = {
         .url = "https://github.com/duckdb/duckdb",
         .role = "embedded DuckDB OLAP backend (duckdb:// DSN)",
         .cpe = "cpe:2.3:a:duckdb:duckdb:*:*:*:*:*:*:*:*",
-        .embedded_blob_sha256 = NULL,
-    },
-#endif
-
-#ifdef HL_ENABLE_TCC
-    /* ── Submodule: TinyCC ── */
-    {
-        .name = "tinycc",
-        .version = HULL_VENDOR_TCC_VERSION,
-        .commit = HULL_VENDOR_TCC_COMMIT,
-        .license_spdx = "LGPL-2.1-or-later",
-        .url = "https://github.com/TinyCC/tinycc",
-        .role = "embedded C compiler for `hull build`",
-        .cpe = "cpe:2.3:a:tinycc:tinycc:*:*:*:*:*:*:*:*",
         .embedded_blob_sha256 = NULL,
     },
 #endif

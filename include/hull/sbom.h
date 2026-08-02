@@ -62,7 +62,7 @@ typedef struct {
      * field; downstream scanners (Dependency-Track, Trivy, etc.)
      * consume CPE for automated vulnerability matching. */
     const char *cpe;
-    /* SHA-256 of an embedded blob (CA bundle, TCC bytes, etc.) computed
+    /* SHA-256 of an embedded blob (CA bundle, etc.) computed
      * at runtime from the actual bytes. Returns a static hex string
      * (cached on first call) or NULL if no embedded blob. */
     const char *(*embedded_blob_sha256)(void);

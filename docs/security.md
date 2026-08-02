@@ -1436,7 +1436,7 @@ Tier 4 makes that detectable as soon as anyone re-derives.
 
 #### Vendored-dependency reproducibility
 
-Every dependency is vendored (submodules: keel, wamr, tcc; source
+Every dependency is vendored (submodules: keel, wamr; source
 snapshots: lua, quickjs, sqlite, mbedtls, tweetnacl, miniz, stb,
 sh_arena, sh_json, log.c, pledge). None ship as a prebuilt binary;
 every vendored translation unit is compiled from the pinned source on
@@ -1529,13 +1529,14 @@ Rollout status is tracked in roadmap §0.3.1.
 Run your own build host. Pin your own platform key. Your customers
 trust you, not gethull.dev.
 
-#### Known follow-up
+#### Compiler-free by default
 
-The `hull build --compiler=tcc` codepath still has per-tempdir
-variance because TCC doesn't support `-ffile-prefix-map`. The
-reproducibility CI test forces `--compiler=system` (the documented
-production path). TCC determinism is a smaller separate work item;
-tracked in `docs/roadmap_next.md §0.2`.
+`hull build` is compiler-free by default: it emits `app_registry.o`
+directly and links, so the produced object is deterministic with no
+per-tempdir variance. `--compiler=system` (used for `--with=` features
+and cosmo/APE targets) runs a system `cc` with `-ffile-prefix-map` for
+the same reproducibility. (The former embedded-TinyCC backend, which
+lacked `-ffile-prefix-map`, has been retired along with tcc.)
 
 ### 7.2. Sigstore + Rekor transparency log (shipped v0.1.6)
 
