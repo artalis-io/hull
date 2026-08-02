@@ -18,6 +18,7 @@
 typedef struct lua_State        lua_State;
 typedef struct HlToolUnveilCtx  HlToolUnveilCtx;
 typedef struct HlCompiler       HlCompiler;
+typedef struct HlLinker         HlLinker;
 
 /*
  * Register the `tool` global table in the Lua state.
@@ -51,6 +52,13 @@ void hl_lua_tool_register(lua_State *L, HlToolUnveilCtx *ctx);
  * Must be called after hl_lua_tool_register(). compiler must not be NULL.
  */
 void hl_lua_tool_expose_compiler(lua_State *L, HlCompiler *compiler);
+
+/*
+ * Expose the linker vtable as tool.linker in the Lua tool global (the
+ * compiler-free build's link step). Must be called after
+ * hl_lua_tool_register(). linker must not be NULL.
+ */
+void hl_lua_tool_expose_linker(lua_State *L, HlLinker *linker);
 
 #endif /* HL_ENABLE_LUA */
 
