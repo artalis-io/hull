@@ -121,6 +121,19 @@ static const char *parse_cc_option(int argc, char **argv)
     return NULL;
 }
 
+/* Parse --linker (`--linker lld` / `--linker=lld`) for the link backend
+ * (system | lld | <path>). NULL = auto-select. */
+static const char *parse_linker_option(int argc, char **argv)
+{
+    for (int i = 0; i < argc; i++) {
+        if (strcmp(argv[i], "--linker") == 0 && i + 1 < argc)
+            return argv[i + 1];
+        if (strncmp(argv[i], "--linker=", 9) == 0)
+            return argv[i] + 9;
+    }
+    return NULL;
+}
+
 /*
  * Extract app_dir from argv (first positional arg not starting with '-').
  * Returns "." if not found.
@@ -344,7 +357,7 @@ int hull_tool(const char *module, int argc, char **argv, const char *hull_exe)
 
     /* Select a linker backend and expose as tool.linker (the compiler-free
      * build's link step; independent of the compiler choice). */
-    HlLinker *linker = hl_linker_select(cc_explicit, hull_exe);
+    HlLinker *linker = hl_linker_select(parse_linker_option(argc, argv), hull_exe);
     if (linker)
         hl_lua_tool_expose_linker(L, linker);
 

@@ -70,6 +70,14 @@ static inline void hl_linker_destroy(HlLinker *l)
 HlLinker *hl_linker_system_new(const char *cc_path);
 
 /*
+ * Create the lld backend (Tier A: drives cc_path with `-B<dir(lld_bin)>
+ * -fuse-ld=lld`). cc_path is the driver; lld_bin is a resolved
+ * ld.lld / ld64.lld. Either may be NULL (yields an unavailable backend).
+ * See docs/toolchain_free_build.md.
+ */
+HlLinker *hl_linker_lld_new(const char *cc_path, const char *lld_bin);
+
+/*
  * Auto-select a linker:
  *   "system" / NULL → first cc/gcc/clang found in $PATH
  *   other           → hl_linker_system_new(explicit) (a cc/ld path)

@@ -11,6 +11,7 @@
 
 #include "hull/linker.h"
 #include "hull/cap/tool.h"
+#include "hull/tools_install.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -88,7 +89,22 @@ HlLinker *hl_linker_system_new(const char *cc_path)
 
 HlLinker *hl_linker_select(const char *explicit_linker, const char *hull_exe)
 {
-    (void)hull_exe;   /* reserved for future embedded lld/mold resolution */
+    /* --linker=lld: drive cc with a side-loaded lld (Tier A). Resolve the
+     * `lld` tool (~/.hull/tools -> dirname(hull) -> $PATH); its directory holds
+     * the personality names cc's `-fuse-ld=lld` needs (ld.lld on ELF, ld64.lld
+     * on Mach-O), which `hull tools install lld` places alongside it. The tool
+     * name must be dotless (hl_tools_name_valid), so we look up `lld`, not
+     * `ld.lld`. docs/toolchain_free_build.md */
+    if (explicit_linker && strcmp(explicit_linker, "lld") == 0) {
+        char lld[PATH_MAX] = {0};
+        hl_tools_lookup_path("lld", hull_exe, lld, sizeof lld);
+        HlLinker *l = hl_linker_lld_new("cc", lld[0] ? lld : NULL);
+        if (l && hl_linker_is_available(l)) return l;
+        if (l) hl_linker_destroy(l);
+        fprintf(stderr, "hull: --linker=lld requested but no usable lld + cc was found "
+                        "(install lld with `hull tools install lld`, or put ld.lld on PATH)\n");
+        return NULL;
+    }
 
     int is_system = (explicit_linker && strcmp(explicit_linker, "system") == 0);
     if (explicit_linker && !is_system) {
