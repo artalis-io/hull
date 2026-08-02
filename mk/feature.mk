@@ -78,3 +78,9 @@ feature-embedded: $(addprefix feature-,$(FEATURE_EMBEDDED_STEMS))
 print-feature-embedded-stems: ; @echo $(FEATURE_EMBEDDED_STEMS)
 print-feature-embedded-libs: ; @echo $(FEATURE_EMBEDDED_LIBS)
 print-feature-installable-stems: ; @echo $(FEATURE_INSTALLABLE_STEMS)
+
+# Phase 4c: fail if src/hull/commands/feature.c FEATURES[] (the `hull feature
+# install/list` registry) drifts from this single source of truth. Closes the
+# last of the four-place feature-list duplication; run in CI.
+.PHONY: check-feature-registry
+check-feature-registry: ; @sh scripts/check_feature_registry.sh "$(FEATURE_INSTALLABLE_STEMS)" "$(FEATURE_EMBEDDED_STEMS)"

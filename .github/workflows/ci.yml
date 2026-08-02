@@ -53,6 +53,11 @@ jobs:
         with:
           submodules: true
 
+      # Phase 4c: fail fast if feature.c FEATURES[] drifts from the mk/feature.mk
+      # feature registry (the single source of truth). Cheap (grep + make vars).
+      - name: Feature registry consistency (feature.c vs mk/feature.mk)
+        run: make check-feature-registry
+
       - name: Build
         run: make
 
