@@ -12,6 +12,7 @@
 #include "hull/compilers.h"
 #include "hull/module_registry.h"
 #include "hull/compiler.h"
+#include "hull/linker.h"
 #include "hull/cap/crypto.h"
 #include "hull/cap/tool.h"
 #include "hull/runtime/tool.h"
@@ -340,6 +341,12 @@ int hull_tool(const char *module, int argc, char **argv, const char *hull_exe)
     HlCompiler *compiler = hl_compiler_select(cc_explicit, hull_exe);
     if (compiler)
         hl_lua_tool_expose_compiler(L, compiler);
+
+    /* Select a linker backend and expose as tool.linker (the compiler-free
+     * build's link step; independent of the compiler choice). */
+    HlLinker *linker = hl_linker_select(cc_explicit, hull_exe);
+    if (linker)
+        hl_lua_tool_expose_linker(L, linker);
 
     /* Pass CLI args as global `arg` table */
     lua_newtable(L);
