@@ -29,6 +29,7 @@
 #include "hull/compiler.h"
 #include "hull/obj_emit.h"
 #include "hull/linker.h"
+#include "hull/bundled_objs.h"
 #include "hull/tools_install.h"
 #include "hull/embedded_platform_sig.h"
 #include "hull/platform_sig.h"
@@ -812,6 +813,21 @@ static int l_emit_app_registry(lua_State *L) {
     return 1;
 }
 
+/*
+ * tool.bundled_object(kind) → string|nil
+ *
+ * Return the bytes of a pre-compiled bundled object embedded in this hull
+ * (kind ∈ "app_main" | "app_feature_registry_lua" | "app_feature_registry_js"),
+ * or nil when this build embedded none. Used by the --no-compiler build path.
+ */
+static int l_tool_bundled_object(lua_State *L) {
+    const char *kind = luaL_checkstring(L, 1);
+    const unsigned char *data = NULL; size_t len = 0;
+    if (hl_bundled_object(kind, &data, &len) != 0) { lua_pushnil(L); return 1; }
+    lua_pushlstring(L, (const char *)data, len);
+    return 1;
+}
+
 /* ── tool.linker.* (the link-only vtable) ──────────────────────────── */
 #define TOOL_LINKER_KEY "__hull_linker"
 
@@ -1395,6 +1411,7 @@ static const luaL_Reg tool_funcs[] = {
     { "spawn",                       l_tool_spawn },
     { "sha256_file",                 l_tool_sha256_file },
     { "emit_app_registry",           l_emit_app_registry },
+    { "bundled_object",              l_tool_bundled_object },
     { "spawn_read",                  l_tool_spawn_read },
     { "find_files",                  l_tool_find_files },
     { "find_tool",                   l_tool_find_tool },
