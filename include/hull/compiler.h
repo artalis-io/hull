@@ -28,13 +28,11 @@ typedef struct {
     int (*compile)(HlCompiler *c, const char *src, const char *obj,
                    const char *include_dir);
     /*
-     * Link objects + libraries → output binary. Returns 0 on success.
-     * objs: NULL-terminated array of .o paths.
-     * libs: NULL-terminated array of -lfoo flags or /path/to/lib.a paths.
+     * Free compiler resources. (Linking is NOT a compiler responsibility -
+     * it goes through HlLinkerVtable / hl_linker_link, so a single code path
+     * drives the `cc -o out objs libs` invocation for both the compile and the
+     * emit build paths. See linker.h.)
      */
-    int (*link)(HlCompiler *c, const char *output,
-                const char **objs, const char **libs);
-    /* Free compiler resources. */
     void (*destroy)(HlCompiler *c);
 } HlCompilerVtable;
 
@@ -53,9 +51,6 @@ static inline char *hl_compiler_version(HlCompiler *c)
 static inline int hl_compiler_compile(HlCompiler *c,
     const char *src, const char *obj, const char *inc)
     { return c->vtable->compile(c, src, obj, inc); }
-static inline int hl_compiler_link(HlCompiler *c,
-    const char *out, const char **objs, const char **libs)
-    { return c->vtable->link(c, out, objs, libs); }
 static inline void hl_compiler_destroy(HlCompiler *c)
     { if (c) { c->vtable->destroy(c); free(c); } }
 
@@ -71,10 +66,19 @@ HlCompiler *hl_compiler_system_new(const char *cc_path);
  *   "system" → find the first system compiler in PATH
  *   other    → hl_compiler_system_new(explicit_cc) (a path or PATH name)
  *   NULL     → cc/gcc/clang from PATH (cosmocc on a cosmo hull)
- * hull_exe (may be NULL) is currently unused (was the retired tcc tool's
- * resolution seed); kept for call-site stability.
  * Returns NULL if nothing is found.
  */
-HlCompiler *hl_compiler_select(const char *explicit_cc, const char *hull_exe);
+HlCompiler *hl_compiler_select(const char *explicit_cc);
+
+/*
+ * Resolve a native toolchain driver (the cc/gcc/clang - or cosmocc on a cosmo
+ * hull - that acts as the compile AND default-link driver). Writes the resolved
+ * invocation (a PATH name or absolute path) into out and returns 0; returns -1
+ * if none is available. Availability is probed via `<cand> --version`.
+ *
+ * Shared by hl_compiler_select and the linker's hl_linker_select so the
+ * candidate list + cosmo resolution live in exactly one place.
+ */
+int hl_driver_resolve_native(char *out, size_t outsz);
 
 #endif /* HL_COMPILER_H */

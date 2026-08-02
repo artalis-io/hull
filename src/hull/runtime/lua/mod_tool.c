@@ -713,42 +713,6 @@ static int l_compiler_compile(lua_State *L) {
     return 1;
 }
 
-static int l_compiler_link(lua_State *L) {
-    const char *output = luaL_checkstring(L, 1);
-    luaL_checktype(L, 2, LUA_TTABLE);
-    luaL_checktype(L, 3, LUA_TTABLE);
-    lua_getfield(L, LUA_REGISTRYINDEX, TOOL_COMPILER_KEY);
-    HlCompiler *c = (HlCompiler *)lua_touserdata(L, -1);
-    lua_pop(L, 1);
-    if (!c) { lua_pushboolean(L, 0); return 1; }
-
-    int nobj = (int)luaL_len(L, 2);
-    int nlib = (int)luaL_len(L, 3);
-    const char **objs = (const char **)malloc(((size_t)nobj + 1) * sizeof(char *));
-    const char **libs = (const char **)malloc(((size_t)nlib + 1) * sizeof(char *));
-    if (!objs || !libs) {
-        free(objs); free(libs);
-        lua_pushboolean(L, 0); return 1;
-    }
-    for (int i = 1; i <= nobj; i++) {
-        lua_rawgeti(L, 2, i);
-        objs[i - 1] = lua_tostring(L, -1);
-        lua_pop(L, 1);
-    }
-    for (int i = 1; i <= nlib; i++) {
-        lua_rawgeti(L, 3, i);
-        libs[i - 1] = lua_tostring(L, -1);
-        lua_pop(L, 1);
-    }
-    objs[nobj] = NULL;
-    libs[nlib] = NULL;
-
-    int rc = hl_compiler_link(c, output, objs, libs);
-    free(objs); free(libs);
-    lua_pushboolean(L, rc == 0);
-    return 1;
-}
-
 /*
  * tool.emit_app_registry(entries, format, arch [, elf_osabi, elf_flags]) → string|nil
  *
@@ -877,7 +841,7 @@ static int l_linker_link(lua_State *L) {
         if      (strcmp(fmts, "macho") == 0) fmt = HL_OBJ_MACHO;
         else if (strcmp(fmts, "coff")  == 0) fmt = HL_OBJ_COFF;
     }
-    HlLinkTarget tgt = { fmt, 0, triple };
+    HlLinkTarget tgt = { fmt, triple };
     int rc = hl_linker_link(l, output, objs, libs,
                             ((triple && *triple) || fmts) ? &tgt : NULL);
     free(objs); free(libs);
@@ -918,7 +882,6 @@ void hl_lua_tool_expose_compiler(lua_State *L, HlCompiler *compiler)
     lua_pushcfunction(L, l_compiler_is_available);  lua_setfield(L, -2, "is_available");
     lua_pushcfunction(L, l_compiler_version);       lua_setfield(L, -2, "version");
     lua_pushcfunction(L, l_compiler_compile);       lua_setfield(L, -2, "compile");
-    lua_pushcfunction(L, l_compiler_link);          lua_setfield(L, -2, "link");
     lua_setfield(L, -2, "compiler");
     lua_pop(L, 1);
 }

@@ -19,16 +19,16 @@
 
 #include <stdlib.h>
 
-#include "hull/obj_emit.h"   /* HlObjFormat, HlObjArch */
+#include "hull/obj_emit.h"   /* HlObjFormat */
 
 typedef struct HlLinker HlLinker;
 
 /* What we are linking, so a cross/embedded linker knows how to invoke.
- * The system-cc backend infers format/arch from the objects and mostly
- * ignores this; it exists for cosmo dual-arch + lld/zig. */
+ * The system-cc + lld backends infer format/arch from the objects and ignore
+ * this entirely; only zig reads it (format → the GC flag, triple → --target=).
+ * The emitted objects already carry the arch, so no `arch` field is needed. */
 typedef struct {
     HlObjFormat format;
-    HlObjArch   arch;
     /* Full cross triple <arch>-<os>-<abi> (e.g. x86_64-linux-gnu). NULL/empty
      * = native host. Consumed by the zig backend's `--target=`; other backends
      * ignore it. Not owned. */
