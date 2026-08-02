@@ -78,6 +78,14 @@ HlLinker *hl_linker_system_new(const char *cc_path);
 HlLinker *hl_linker_lld_new(const char *cc_path, const char *lld_bin);
 
 /*
+ * Create the Tier B (direct static) lld backend: invokes ld_path (ld.lld)
+ * directly with the static musl floor in libdir (crt1.o / crti.o / crtn.o /
+ * libc.a) - no C compiler in the link. Either arg NULL yields an unavailable
+ * backend. Requires musl-built app archives. See docs/toolchain_free_build.md.
+ */
+HlLinker *hl_linker_lld_direct_new(const char *ld_path, const char *libdir);
+
+/*
  * Auto-select a linker:
  *   "system" / NULL → first cc/gcc/clang found in $PATH
  *   other           → hl_linker_system_new(explicit) (a cc/ld path)
