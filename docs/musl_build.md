@@ -126,7 +126,7 @@ the musl counterpart of the floor script:
 # On a musl host (Alpine) with the C toolchain, or via Docker from anywhere:
 docker run --rm -v "$PWD":/work:ro -v /tmp/out:/out alpine:3.20 sh -c '
   apk add --no-cache build-base clang lld make xxd bash git perl linux-headers
-  sh /work/scripts/build_musl_platform.sh /work /out/hull-libhull-platform-musl-$(uname -m).tar
+  sh /work/scripts/build_musl_platform.sh /work /out/hull-platform-musl-$(uname -m).tar
 '
 ```
 
@@ -143,10 +143,13 @@ is never clobbered by the in-container musl objects.
   default seccomp/landlock restrictions make pledge/unveil enforcement fail
   inside an unprivileged container. That is a container-capability limitation,
   not a musl issue; a musl binary on a real host sandboxes normally.
-- **Publishing + consuming the musl archives.** `scripts/build_musl_platform.sh`
-  can now PRODUCE the musl archive set (above), but the signed release matrix
-  still ships only glibc + cosmo binaries, and `hull build` does not yet select a
-  musl platform lib for a `-musl` target (the `#206` guard rejects the cross with
-  a clear message). Publishing the set into the signed platform manifest (a new
-  `build-platform-musl` release job + a fetch/select path) is the remaining
-  half of audit item #4 (docs/build_arc_audit.md).
+- **Consuming the musl archives.** The release now BUILDS + PUBLISHES the musl
+  archive set: the `build-platform-musl` job runs `build_musl_platform.sh` per
+  arch and the resulting `hull-platform-musl-<arch>.tar` is hashed into the signed
+  `hull.sha256` (release-key trust chain, same as the floor / wamrc / zig tars) -
+  so it can be fetched + verified. What is NOT wired yet: `hull build` does not
+  select a musl platform lib for a `-musl` target (the `#206` guard still rejects
+  the cross with a clear message), and the runtime §5c composed-archive
+  attestation is not musl-aware. Teaching `hull ... install musl-<arch>` +
+  `prepare_platform`/`feature_compose` to fetch + select the musl base AND feature
+  archives (atomically) is audit item #4c (docs/build_arc_audit.md).
