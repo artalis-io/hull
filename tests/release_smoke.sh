@@ -230,6 +230,40 @@ if [ "$(uname -s)" = "Linux" ]; then
     assert "floor dir removed"             [ ! -d "$FLOOR_DIR" ]
 fi
 
+# Toolchain-free linker bundles: lld + zig. Per-platform multi-file .tar
+# bundles published for all three native platforms (hull-<name>-<platform>.tar).
+# Exercises the per-platform-bundle asset name + fetch -> verify -> nested
+# extract -> the bundled DRIVER actually runs -> directory uninstall. Native
+# (this runs after the cosmo early-exit above); no OS gate - both Linux + macOS.
+for LINKER_TOOL in lld zig; do
+    LINKER_DIR="$HOME/.hull/tools/$LINKER_TOOL"
+    "$HULL" tools uninstall "$LINKER_TOOL" >/dev/null 2>&1 || true
+    echo ""
+    echo "── hull tools install $LINKER_TOOL (per-platform bundle, LIVE download) ──"
+    OUT=$("$HULL" tools install "$LINKER_TOOL" 2>&1); RC=$?
+    echo "$OUT" | sed 's/^/    /'
+    assert "exits 0"                        [ "$RC" -eq 0 ]
+    assert_contains "SHA-256 verified"      "$OUT" "SHA-256 verified"
+    assert_contains "installed as bundle"   "$OUT" "(bundle)"
+    assert "bundle dir created"             [ -d "$LINKER_DIR" ]
+    # The driver inside the bundle is executable and runs.
+    assert "driver executable"              [ -x "$LINKER_DIR/$LINKER_TOOL" ]
+    if [ "$LINKER_TOOL" = "zig" ]; then
+        DOUT=$("$LINKER_DIR/zig" version 2>&1) || true
+        assert_contains "zig version runs"  "$DOUT" "0.13"
+        assert "zig lib/ tree extracted"    [ -d "$LINKER_DIR/lib" ]
+    else
+        DOUT=$("$LINKER_DIR/ld.lld" --version 2>&1) || true
+        assert_contains "ld.lld --version runs"  "$DOUT" "LLD"
+    fi
+    OUT=$("$HULL" tools list 2>&1)
+    assert_contains "list shows $LINKER_TOOL installed"  "$OUT" "$LINKER_TOOL"
+    echo "── hull tools uninstall $LINKER_TOOL ──"
+    OUT=$("$HULL" tools uninstall "$LINKER_TOOL" 2>&1)
+    assert_contains "$LINKER_TOOL uninstalled"  "$OUT" "uninstalled $LINKER_TOOL"
+    assert "$LINKER_TOOL dir removed"       [ ! -d "$LINKER_DIR" ]
+done
+
 # Per-flavor platform lib install (native single-arch lib).
 smoke_platform_install
 
