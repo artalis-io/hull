@@ -113,12 +113,40 @@ crt+libc+compiler-rt for ~40 targets); Tier B is the purist `ld.lld` + floor
 path. See [docs/toolchain_free_build.md](toolchain_free_build.md). Covered by
 `tests/e2e_musl.sh` (asserts static + runs, cc-free, and via the bundle).
 
+## Producing the musl platform archive set
+
+The floor above is only half of a musl static link: `--linker=lld-static` (Tier
+B) and `--linker=zig --target=<arch>-linux-musl` (cross) also need Hull's OWN
+archives - `libhull_platform.a` + every composed feature archive - built against
+musl, because a glibc-built `.a` will not static-link against musl (see the
+`linker_lld.c` header). `scripts/build_musl_platform.sh` produces that full set,
+the musl counterpart of the floor script:
+
+```sh
+# On a musl host (Alpine) with the C toolchain, or via Docker from anywhere:
+docker run --rm -v "$PWD":/work:ro -v /tmp/out:/out alpine:3.20 sh -c '
+  apk add --no-cache build-base clang lld make xxd bash git perl linux-headers
+  sh /work/scripts/build_musl_platform.sh /work /out/hull-libhull-platform-musl-$(uname -m).tar
+'
+```
+
+It builds `make platform` + `platform-slim` + `feature-embedded` (the exact set
+the release's `build-platform-native` job produces, but musl-built) and packs a
+flat ustar of `libhull_platform.a`, `libhull_platform-slim.a`, and every
+`libhull_feature-*.a`. The build runs in a container-internal copy of the
+checkout, so the source may be mounted **read-only** - a host checkout's `build/`
+is never clobbered by the in-container musl objects.
+
 ## Caveats / not-yet
 
 - **Sandbox in a container.** The e2e runs apps with `--no-sandbox`: Docker's
   default seccomp/landlock restrictions make pledge/unveil enforcement fail
   inside an unprivileged container. That is a container-capability limitation,
   not a musl issue; a musl binary on a real host sandboxes normally.
-- **Published artifacts.** The signed release matrix ships glibc + cosmo
-  binaries. A published, signed musl platform library / binary would be a
-  separate release-pipeline decision (new matrix entry + manifest line).
+- **Publishing + consuming the musl archives.** `scripts/build_musl_platform.sh`
+  can now PRODUCE the musl archive set (above), but the signed release matrix
+  still ships only glibc + cosmo binaries, and `hull build` does not yet select a
+  musl platform lib for a `-musl` target (the `#206` guard rejects the cross with
+  a clear message). Publishing the set into the signed platform manifest (a new
+  `build-platform-musl` release job + a fetch/select path) is the remaining
+  half of audit item #4 (docs/build_arc_audit.md).

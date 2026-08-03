@@ -34,10 +34,28 @@ Execution order (agreed): **#6+#1 → #7 → #4 → #5 → #2 → #3 → #8**, t
 
 ## Tier 2 — make the toolchain-free story real for install-only users
 
-- [ ] **#4 No published musl `libhull_platform.a`.** ✓ Release builds Linux libs on glibc only,
+- **#4 No published musl `libhull_platform.a`.** ✓ Release builds Linux libs on glibc only,
   so `--linker=lld-static` and `--linker=zig --target=…-musl` work ONLY from a source build.
-  Publish a signed `libhull_platform-musl-<arch>.a` (+ runtime/feature archives) and teach
-  `prepare_platform` to select it for a musl target. Highest-value "make it real" gap.
+  A coupled producer+pipeline+consumer epic; split into sub-steps:
+  - [x] **#4a Producer.** `scripts/build_musl_platform.sh` builds the FULL musl archive set
+    (`make platform` + `platform-slim` + `feature-embedded` = base + slim + all 18
+    `libhull_feature-*.a`), read-only-mount-safe (builds in a container-internal copy so a host
+    checkout's `build/` is never clobbered). Validated end-to-end in `alpine:3.20`: all 20
+    archives build under musl + pack to a ~15.8 MB flat ustar. Mirrors `build_musl_floor.sh`.
+    Docs: musl_build.md "Producing the musl platform archive set".
+  - [ ] **#4b Release pipeline.** A `build-platform-musl` Alpine job (mirror `build-floor-musl`)
+    that runs #4a per arch, uploads the tar, and signs each `.a`'s SHA-256 into the platform
+    manifest (`sign-platform-manifest`, the same `embedded_platform_sig.h` §5c anchors, OR a
+    separate musl manifest). Touches the SIGNED release artifacts → needs a pre-release dry-run
+    (hyphenated tag) before it can land. `hull.sha256` gains the musl tars.
+  - [ ] **#4c Fetch + select.** A `hull flavor install musl-<arch>` (or tool-bundle) fetch to
+    `~/.hull/platform/`, + teach `prepare_platform` (and the `feature_compose` resolve ladder)
+    to select the musl base AND musl feature archives for a `-musl`/cross target, re-verifying
+    against the signed manifest; relax the `#206` cross guard once a musl lib is resolvable.
+    A partial consumer that redirects only the base (not the feature archives) would re-link a
+    glibc feature lib against a musl base - the exact bug - so this lands atomically.
+  - [ ] **#4d Smoke.** `release_smoke.sh` section: `hull … install musl-x86_64` + a
+    `--target=x86_64-linux-musl --linker=zig` build that runs in Alpine.
 - [x] **#5 `--linker=zig` has zero e2e** ✓. DONE (PR #205): `tests/e2e_linker_zig.sh` builds +
   runs a real app through the zig backend on Linux x86_64 (skips elsewhere - cross needs a
   target platform lib, #2/#4); wired into Linux CI. A `test_linker.c` unit test was deferred
