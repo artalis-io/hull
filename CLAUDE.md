@@ -396,16 +396,17 @@ composed `compute.call`, both runtimes).
 
 ### Extension taxonomy: feature vs flavor vs tool vs stdlib
 
-A new capability reaches an app through exactly one of four shipping units.
+A new capability reaches an app through exactly one of five shipping units.
 Classifying it correctly is the difference between a signed static archive and
-twenty lines of Lua. The four, and the single question that separates each:
+twenty lines of Lua. The five, and the single question that separates each:
 
 | Unit | What it is | Ships as | Reached via | Axis |
 |------|-----------|----------|-------------|------|
 | **stdlib** | pure Lua/JS built on capabilities the base already has (no new C, no new authority) | always in the base VFS | `require("hull.X")` / `import "hull:X"` + `manifest.modules` | orchestration |
+| **base cap module** | a SMALL always-in-base C capability (a codec / sniffer / store) built on stdio + the caps already shipped, with no vendored engine and no off switch | compiled into the base (`CAP_OBJS`; NO `HL_ENABLE_*` gate + NO `--with` archive) | `require`/`import` + `manifest.modules` (like stdlib, but C-backed) | in-base |
 | **feature** | a large optional C subsystem, off by default, adding a new vendored engine, wire backend, or authority | signed `libhull_feature-<name>-<arch>.a` | `hull build --with=<name>` (auto-inferred or forced) | **additive** |
 | **flavor** | a build.lua **preset** validating the app against a slimmer cap set (since Phase 4.3 - the base already composes; pre-built per-flavor libs are gone) | (none - a preset on the default base) | `hull build --flavor=<name>` | **subtractive** |
-| **tool** | a separate companion **program** Hull spawns (never linked in) | `hull-<tool>-<platform>` binary | `hl_tool_spawn` at build time; `hull tools install` | is-it-Hull-or-a-program-Hull-runs |
+| **tool** | a separate companion **program** Hull spawns (never linked in) | `hull-<tool>-<platform>` binary, OR a `.tar` **bundle** for a multi-file tool (`hull-<name>.tar` / `hull-<name>-<platform>.tar` extracting to a dir) | `hl_tool_spawn` at build time; `hull tools install` | is-it-Hull-or-a-program-Hull-runs |
 
 **Decision procedure** (ask in order; first yes wins):
 
@@ -419,24 +420,39 @@ twenty lines of Lua. The four, and the single question that separates each:
    caps we already ship," it does NOT get a C archive. Example: an S3 /
    object-storage client is `http.fetch` + SigV4 (`crypto`) → stdlib, never a
    feature. Same for most webhook/integration clients.
-3. **Does it add a large optional C subsystem or a new authority, off by
+3. **Does it need a LITTLE new C (a codec, a sniffer, a store) but no vendored
+   engine, no new OS/hardware authority, and no reason to be optional** (it's
+   small and every app might want it)? → **base cap module**. Add
+   `src/hull/cap/<name>.c` (it rides `CAP_OBJS` in the base automatically - the
+   Makefile globs `cap/*.c` and only *subtracts* the reducible ones) + the two
+   runtime bindings + one `HlModuleSpec` row. No `HL_ENABLE_*` gate, no `--with`
+   archive, no weak seam. Examples: `mime` (content sniffer), `blob` (cache
+   store), `tar` (archive codec). `image` is the boundary case: it is a base cap
+   module by nature but is ALSO auto-composed for size (see T4b / "Composable
+   runtime + HTTP base"), so it carries both an `HL_ENABLE_IMAGE` knob and a weak
+   seam - do NOT copy that dual role for a plain codec.
+4. **Does it add a large optional C subsystem or a new authority, off by
    default?** (a vendored engine, a pure-C wire protocol, a new hardware/OS
    surface) → **feature**. It fills a base-resident **weak hook** with a
    **strong override** from the composed archive; register one row in
    `FEATURES[]` (`src/hull/commands/feature.c`) + one `FEATURE_SPECS` entry
    (`stdlib/cli/lua/hull/build.lua`). Examples: `duckdb`, `postgres`, `mysql`,
    `gpu`, `tui`.
-4. **Are you turning a default subsystem OFF to produce a smaller base?** →
+5. **Are you turning a default subsystem OFF to produce a smaller base?** →
    **flavor** (preset). Example: `pure-compute`.
 
-**The sharp rules.** New vendored C or new authority → **feature** (additive).
-Turning a default off → **flavor** (subtractive). A separate program → **tool**.
-Pure orchestration over existing caps → **stdlib** (and this is the most common
-misclassification: reach for stdlib before a feature). "On by default and you
-subtract" is a flavor; "off by default and you add" is a feature. HTTP itself is
-just a feature that happens to be on by default, which is why the flavor/feature
-line is a distribution fact (enumerable pre-published base vs. combinatorial
-bolt-on), not an architectural one. Full rationale in
+**The sharp rules.** SMALL new C, always wanted, no new authority → **base cap
+module** (in-base, rides `CAP_OBJS`). LARGE new vendored C or a new authority,
+off by default → **feature** (additive). Turning a default off → **flavor**
+(subtractive). A separate program → **tool**. Pure orchestration over existing
+caps → **stdlib** (and this is the most common misclassification: reach for
+stdlib before a feature). The base-cap-module ↔ feature line is SIZE + optionality:
+a self-contained codec everyone might use rides the base; a vendored engine or a
+new authority that most apps never touch is a composed feature. "On by default
+and you subtract" is a flavor; "off by default and you add" is a feature. HTTP
+itself is just a feature that happens to be on by default, which is why the
+flavor/feature line is a distribution fact (enumerable pre-published base vs.
+combinatorial bolt-on), not an architectural one. Full rationale in
 [docs/features_and_flavors.md](docs/features_and_flavors.md); near-term
 candidates classified against this table live in
 [docs/roadmap.md](docs/roadmap.md) ("Extension taxonomy and near-term targets").

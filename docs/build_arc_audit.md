@@ -114,17 +114,23 @@ Execution order (agreed): **#6+#1 → #7 → #4 → #5 → #2 → #3 → #8**, t
 
 ## Tier 4 — architectural consistency & docs (lower urgency)
 
-- [ ] **T4a "base cap module" taxonomy category.** image/mime/blob/**tar** are all-C in-base cap
-  modules, but the CLAUDE.md taxonomy says stdlib = "no new C" and has no home for them; mime
-  `.pure=1` vs tar `.pure=0` exposes the inconsistency. Document a 5th row + the small+in-base
-  vs large+off-by-default rule vs a feature. Also add an explicit "tar rides CAP_OBJS,
-  always-in-base" note (today it's implicit via `wildcard` + denylist omission).
-- [ ] **T4b image half-migrated** — `#ifdef HL_ENABLE_IMAGE` in `modules.c` coexists with the
-  composed-feature weak-stub seam; document the dual role or unify on the seam.
-- [ ] **T4c Weak-hook seam divergence** — two shapes (header hook + `_present()` vs
-  weak-stub-as-sentinel, forcing WASM's bespoke `HL_CAP_WASM_ABSENT`); no `HL_WEAK` macro,
-  no single "how to add a seam" doc. Add a canonical section to features_and_flavors.md;
-  optionally an `HL_WEAK` macro over the ~21 raw `__attribute__((weak))` sites.
+- [x] **T4a "base cap module" taxonomy category.** DONE (docs). Added a 5th "base cap module" row
+  to the CLAUDE.md extension-taxonomy table (small always-in-base C cap: mime/blob/tar; no
+  `HL_ENABLE_*` gate, no `--with` archive), a decision-procedure step 3 + a size-vs-optionality
+  sharp rule separating it from a feature, and a Makefile comment on the `CAP_SRCS` glob-minus-
+  denylist "always-in-base" convention (a new base cap module needs no Makefile edit).
+- [x] **T4b image half-migrated** — DONE (docs). Documented the image DUAL role at both
+  `runtime/{lua,js}/modules.c` `#ifdef HL_ENABLE_IMAGE` sites: the `#ifdef` is the SUBTRACTIVE gate
+  (`HL_ENABLE_IMAGE=0` drops image wholesale), the weak `luaopen_hull_image` /
+  `hl_js_init_image_module` (image_stub.c) is the independent COMPOSABLE gate on the default base.
+  Kept both (they gate different axes); the taxonomy note flags image as the boundary case not to
+  copy for a plain codec.
+- [x] **T4c Weak-hook seam divergence** — DONE (docs). Added §3.4 "Weak-hook seams" to
+  features_and_flavors.md documenting the two shapes (header-hook + accessor vs
+  weak-stub-as-sentinel, incl. `HL_CAP_WASM_ABSENT`), when to use each, and the add-a-seam steps.
+  `HL_WEAK` macro DELIBERATELY NOT added: `__attribute__((weak))` is load-bearing (it decides link
+  resolution + what the base falls back to under security review), so it should stay visible at
+  each site, not named away - documented as an explicit decision.
 - [x] **T4d tools "bundle" facts duplicated** — DONE. Fixed the misleading `tools_install.c`
   registry comment (it claimed the registry was the single source; it is the CONSUMER side -
   release.yml is a second, coordinated edit site) and added `scripts/check_tools_registry.sh`
@@ -138,9 +144,12 @@ Execution order (agreed): **#6+#1 → #7 → #4 → #5 → #2 → #3 → #8**, t
   entry in `feature_specs.lua` (the codegen source `hull build --with=<name>` reads). Directional
   (installable ⊆ FEATURE_SPECS keys, since FEATURE_SPECS also carries the mandatory `sqlite`
   default). Negative-tested: removing a spec key fails the check with a fix-it hint.
-- [ ] **T4f doc-rot** — build.lua tcc hints (retired), "planned" COFF/Mach-O comments (done),
-  mold "near-term" (deferred/not-started), CLAUDE.md tool row missing `.tar` bundle shape,
-  `obj_emit.h`/`linker.h` "planned" comments.
+- [x] **T4f doc-rot** — DONE. Fixed: the build.lua `--compiler` docstring (was "default: embedded
+  tcc"; now "default: NONE - compiler-free emitter"); the `obj_emit.h` `HL_OBJ_MACHO`/`HL_OBJ_COFF`
+  `/* planned */` comments + header intro (all three formats are IMPLEMENTED - emit_elf/emit_macho/
+  emit_coff); the CLAUDE.md `tool` taxonomy row (now notes the `.tar` bundle shape). Verified
+  ACCURATE (no change needed): `mold` is honestly "deferred/unregistered", and `linker.h`'s
+  `hull_exe … reserved for future` is a live placeholder.
 
 ## Already resolved (do not re-chase)
 

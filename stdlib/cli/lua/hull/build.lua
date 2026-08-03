@@ -4,7 +4,8 @@
 -- Usage: hull build [options] [app_dir]
 --   --runtime lua|js|both  Runtime to include (default: lua)
 --   --sign <key_file>      Sign with Ed25519 private key
---   --compiler tcc|system|<path>  C compiler backend (default: embedded tcc → cc/gcc/clang)
+--   --compiler system|<path>  Opt into a system C compiler (default: NONE - the
+--                             compiler-free object emitter + linker; docs/compiler_free_build.md)
 --   --output <path>        Output binary path (default: app_dir/app)
 --
 -- SPDX-License-Identifier: AGPL-3.0-or-later
