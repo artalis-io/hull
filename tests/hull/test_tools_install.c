@@ -420,4 +420,132 @@ UTEST_F(tools_fixture, lookup_rejects_invalid_name) {
     ASSERT_EQ(hl_tools_lookup_path("foo/bar", NULL, out, sizeof(out)), -1);
 }
 
+/* ── libc-musl bundle (.tar) tests ─────────────────────────────────── */
+
+/* Minimal ustar header (name, size, regular-file typeflag). Our reader ignores
+ * the checksum field, so we leave it blank. */
+static void tar_put_header(unsigned char *b, const char *name, size_t size) {
+    memset(b, 0, 512);
+    strncpy((char *)b, name, 99);
+    snprintf((char *)(b + 124), 12, "%011o", (unsigned)size);  /* size, octal */
+    memset(b + 148, ' ', 8);                                   /* chksum: blank */
+    b[156] = '0';                                              /* regular file */
+}
+
+static void tar_add_file(unsigned char *buf, size_t *off,
+                         const char *name, const char *data, size_t len) {
+    tar_put_header(buf + *off, name, len);
+    *off += 512;
+    memcpy(buf + *off, data, len);
+    *off += (len + 511) & ~(size_t)511;
+}
+
+UTEST(tools_bundle, registry_has_musl_floors) {
+    const HlToolSpec *x = hl_tools_find("libc-musl-x86_64");
+    const HlToolSpec *a = hl_tools_find("libc-musl-aarch64");
+    ASSERT_NE(x, NULL);
+    ASSERT_NE(a, NULL);
+    ASSERT_TRUE(x->is_bundle);
+    ASSERT_TRUE(a->is_bundle);
+    ASSERT_TRUE(hl_tools_published_for(x, "linux-x86_64"));
+    ASSERT_EQ(hl_tools_published_for(x, "linux-aarch64"), 0);  /* wrong arch */
+    ASSERT_TRUE(hl_tools_published_for(a, "linux-aarch64"));
+    ASSERT_EQ(hl_tools_published_for(a, "darwin-arm64"), 0);
+}
+
+UTEST(tools_bundle, asset_name_is_dot_tar) {
+    char asset[128];
+    ASSERT_EQ(hl_tools_asset_name(hl_tools_find("libc-musl-x86_64"),
+                                  "linux-x86_64", asset, sizeof(asset)), 0);
+    ASSERT_STREQ(asset, "hull-libc-musl-x86_64.tar");
+    /* a binary tool keeps the per-platform form */
+    ASSERT_EQ(hl_tools_asset_name(hl_tools_find("wamrc"),
+                                  "linux-x86_64", asset, sizeof(asset)), 0);
+    ASSERT_STREQ(asset, "hull-wamrc-linux-x86_64");
+}
+
+UTEST_F(tools_fixture, extract_tar_bundle) {
+    unsigned char *buf = calloc(1, 8192);
+    ASSERT_NE(buf, NULL);
+    size_t off = 0;
+    tar_add_file(buf, &off, "./crt1.o", "OBJ1", 4);        /* leading ./ stripped */
+    tar_add_file(buf, &off, "libgcc.a", "ARCHIVE-BYTES", 13);
+    off += 512;                                            /* zero terminator block */
+
+    char dest[PATH_MAX];
+    snprintf(dest, sizeof(dest), "%s/floor", utest_fixture->tmpdir);
+    ASSERT_EQ(hl_tools_extract_tar(buf, off, dest), 0);
+
+    char p[PATH_MAX], rd[64];
+    FILE *f;
+    snprintf(p, sizeof(p), "%s/crt1.o", dest);
+    f = fopen(p, "rb"); ASSERT_NE(f, NULL);
+    size_t n = fread(rd, 1, sizeof(rd), f); fclose(f);
+    ASSERT_EQ(n, (size_t)4);
+    ASSERT_EQ(memcmp(rd, "OBJ1", 4), 0);
+
+    snprintf(p, sizeof(p), "%s/libgcc.a", dest);
+    f = fopen(p, "rb"); ASSERT_NE(f, NULL);
+    n = fread(rd, 1, sizeof(rd), f); fclose(f);
+    ASSERT_EQ(n, (size_t)13);
+    ASSERT_EQ(memcmp(rd, "ARCHIVE-BYTES", 13), 0);
+    free(buf);
+}
+
+/* Extract an archive produced by the SYSTEM `tar` (busybox / bsdtar / GNU),
+ * the way scripts/build_musl_floor.sh does it - proves the producer/consumer
+ * format contract, not just our hand-rolled headers. Skips if tar is absent. */
+UTEST_F(tools_fixture, extract_real_tar) {
+    char srcdir[PATH_MAX], f1[PATH_MAX], tarpath[PATH_MAX], cmd[PATH_MAX * 3];
+    snprintf(srcdir, sizeof(srcdir), "%s/src", utest_fixture->tmpdir);
+    ASSERT_EQ(mkdir(srcdir, 0755), 0);
+    snprintf(f1, sizeof(f1), "%s/crt1.o", srcdir);
+    FILE *w = fopen(f1, "wb");
+    ASSERT_NE(w, NULL);
+    fwrite("REALTARBYTES", 1, 12, w);
+    fclose(w);
+
+    snprintf(tarpath, sizeof(tarpath), "%s/floor.tar", utest_fixture->tmpdir);
+    /* The fixture blanks PATH for hermetic lookup tests; give system() a PATH. */
+    setenv("PATH", "/usr/bin:/bin", 1);
+    snprintf(cmd, sizeof(cmd), "tar cf '%s' -C '%s' . 2>/dev/null", tarpath, srcdir);
+    if (system(cmd) != 0) { setenv("PATH", "", 1); return; }  /* no tar → skip */
+    setenv("PATH", "", 1);
+
+    FILE *tf = fopen(tarpath, "rb");
+    ASSERT_NE(tf, NULL);
+    fseek(tf, 0, SEEK_END);
+    long tlen = ftell(tf);
+    fseek(tf, 0, SEEK_SET);
+    ASSERT_GT(tlen, 512);
+    unsigned char *tbuf = malloc((size_t)tlen);
+    ASSERT_NE(tbuf, NULL);
+    ASSERT_EQ(fread(tbuf, 1, (size_t)tlen, tf), (size_t)tlen);
+    fclose(tf);
+
+    char dest[PATH_MAX], out[PATH_MAX], rd[32];
+    snprintf(dest, sizeof(dest), "%s/floor", utest_fixture->tmpdir);
+    ASSERT_EQ(hl_tools_extract_tar(tbuf, (size_t)tlen, dest), 0);
+    snprintf(out, sizeof(out), "%s/crt1.o", dest);
+    FILE *rf = fopen(out, "rb");
+    ASSERT_NE(rf, NULL);
+    size_t n = fread(rd, 1, sizeof(rd), rf);
+    fclose(rf);
+    ASSERT_EQ(n, (size_t)12);
+    ASSERT_EQ(memcmp(rd, "REALTARBYTES", 12), 0);
+    free(tbuf);
+}
+
+UTEST_F(tools_fixture, extract_tar_rejects_traversal) {
+    unsigned char *buf = calloc(1, 4096);
+    ASSERT_NE(buf, NULL);
+    size_t off = 0;
+    tar_add_file(buf, &off, "../escape.o", "X", 1);
+    off += 512;
+    char dest[PATH_MAX];
+    snprintf(dest, sizeof(dest), "%s/floor2", utest_fixture->tmpdir);
+    ASSERT_EQ(hl_tools_extract_tar(buf, off, dest), -1);   /* traversal refused */
+    free(buf);
+}
+
 UTEST_MAIN()

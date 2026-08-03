@@ -88,19 +88,25 @@ archives reference, e.g. `__multf3`). Both the floor and `libgcc.a` are resolved
 
 So Tier B is **fully self-contained** on any Alpine with `build-base` (the glob
 finds the system `libgcc`; cc is never spawned), and on a box with **nothing**
-but hull + `ld.lld` once the bundle is present:
+but hull + `ld.lld` once the bundle is present. Two ways to get the bundle:
 
 ```sh
-make floor-musl                       # assemble ~/.hull/tools/libc-musl-<arch>
-hull build --linker=lld-static ./app  # no musl-dev, no gcc, no cc needed
+# 1. Fetch a prebuilt, Ed25519-signed bundle from Hull's release (no musl host):
+hull tools install libc-musl-$(uname -m)   # -> ~/.hull/tools/libc-musl-<arch>/
+# 2. Or assemble it yourself on a musl host:
+make floor-musl                            # (wrapper over scripts/build_musl_floor.sh)
+
+hull build --linker=lld-static ./app       # no musl-dev, no gcc, no cc needed
 ```
 
-`make floor-musl` (a wrapper over `scripts/build_musl_floor.sh`) collects
-`crt*.o` + `libc.a` + `libgcc.a` from a musl host into
-`~/.hull/tools/libc-musl-<arch>/`, and the linker resolves that dir automatically
-(above). A `hull tools install libc-musl-<arch>` that fetches a prebuilt,
-Ed25519-signed bundle from Hull's release - so end users need no musl host to
-assemble one - is the next step (the release producer + verified-fetch installer).
+The bundle holds `crt*.o` + `libc.a` + the stub `libm`/`libpthread` + `libgcc.a`,
+packed as a flat ustar. `hull tools install libc-musl-<arch>` fetches
+`hull-libc-musl-<arch>.tar` and verifies its SHA-256 against the signed
+`hull.sha256` manifest (the same trust chain as `hull tools install wamrc` /
+`hull update`) before extracting to `~/.hull/tools/libc-musl-<arch>/`, which the
+linker resolves automatically. Published for `linux-x86_64` and `linux-aarch64`
+(musl is Linux; macOS/cosmo have no floor). Like `wamrc`, the live install is
+exercised post-release via `tests/release_smoke.sh`, not in CI.
 
 `zig cc` (`--linker=zig`) remains the turnkey cross-target alternative (bundles
 crt+libc+compiler-rt for ~40 targets); Tier B is the purist `ld.lld` + floor

@@ -50,6 +50,26 @@ static const HlToolSpec REGISTRY[] = {
          * users build from source with `make wamrc`. See docs/tools_install.md. */
         .has_cosmo         = 0,
     },
+    /* The static-link floor bundles for `hull build --linker=lld-static` (Tier B):
+     * crt*.o + libc.a + the stub libm/libpthread + libgcc.a, so a box with only
+     * hull + ld.lld can link a fully static musl binary - no musl-dev, no gcc.
+     * Arch-baked into the name (one row per arch, each published only for its
+     * platform) so the install dir matches the linker's ~/.hull/tools/
+     * libc-musl-<arch>/ lookup. Native-only; musl is Linux. See docs/musl_build.md. */
+    {
+        .name              = "libc-musl-x86_64",
+        .description       = "musl static-link floor (crt/libc/libgcc) for "
+                             "`hull build --linker=lld-static` on x86_64.",
+        .has_linux_x86_64  = 1,
+        .is_bundle         = 1,
+    },
+    {
+        .name              = "libc-musl-aarch64",
+        .description       = "musl static-link floor (crt/libc/libgcc) for "
+                             "`hull build --linker=lld-static` on aarch64.",
+        .has_linux_aarch64 = 1,
+        .is_bundle         = 1,
+    },
     { 0 }  /* sentinel */
 };
 
@@ -107,8 +127,97 @@ int hl_tools_asset_name(const HlToolSpec *spec, const char *platform,
 {
     if (!spec || !platform || !out || out_sz == 0) return -1;
     if (!hl_tools_published_for(spec, platform))   return -1;
-    int n = snprintf(out, out_sz, "hull-%s-%s", spec->name, platform);
+    /* A bundle's arch is already baked into its name (libc-musl-<arch>) and it
+     * is published for exactly that one platform, so the asset is
+     * `hull-<name>.tar` - no redundant platform suffix. A binary tool keeps the
+     * per-platform `hull-<name>-<platform>` form. */
+    int n = spec->is_bundle
+        ? snprintf(out, out_sz, "hull-%s.tar", spec->name)
+        : snprintf(out, out_sz, "hull-%s-%s", spec->name, platform);
     if (n < 0 || (size_t)n >= out_sz) return -1;
+    return 0;
+}
+
+/* ── ustar (.tar) bundle extraction ──────────────────────────────────
+ *
+ * A minimal, flat, read-only ustar reader for `is_bundle` tools. We control
+ * both the producer (build_musl_floor.sh -> `tar cf`) and consumer, and the
+ * archive is SHA-256-verified before we get here, so we only need the regular-
+ * file path and reject everything unusual. FLAT only: every member must be a
+ * bare filename (after stripping a leading "./") with no other '/', no "..",
+ * not absolute - a floor bundle has no subdirectories.
+ */
+static int ensure_dir(const char *path, mode_t mode);   /* defined below */
+
+static unsigned long tar_octal(const unsigned char *p, size_t n)
+{
+    unsigned long v = 0;
+    size_t i = 0;
+    while (i < n && (p[i] == ' ' || p[i] == '\0')) i++;   /* leading pad */
+    for (; i < n && p[i] >= '0' && p[i] <= '7'; i++)
+        v = (v << 3) + (unsigned long)(p[i] - '0');
+    return v;
+}
+
+/* Validate + normalize a ustar member name to a bare filename. Returns the
+ * pointer to the flat name on success, NULL to reject. */
+static const char *tar_flat_name(const char *name)
+{
+    if (name[0] == '/') return NULL;                 /* absolute */
+    if (name[0] == '.' && name[1] == '/') name += 2; /* strip leading "./" */
+    if (name[0] == '\0') return NULL;                /* the "./" dir entry */
+    if (strstr(name, "..")) return NULL;             /* traversal */
+    if (strchr(name, '/'))  return NULL;             /* not flat */
+    return name;
+}
+
+int hl_tools_extract_tar(const unsigned char *tar, size_t tar_len,
+                         const char *dest_dir)
+{
+    if (!tar || !dest_dir) return -1;
+    if (ensure_dir(dest_dir, 0755) != 0) return -1;
+
+    size_t off = 0;
+    while (off + 512 <= tar_len) {
+        const unsigned char *hdr = tar + off;
+
+        /* An all-zero header block marks end of archive. */
+        int zero = 1;
+        for (int i = 0; i < 512; i++) if (hdr[i]) { zero = 0; break; }
+        if (zero) break;
+
+        /* name is NUL-padded within [0,100); ensure it terminates. */
+        char name[101];
+        memcpy(name, hdr, 100);
+        name[100] = '\0';
+
+        char typeflag = (char)hdr[156];
+        unsigned long size = tar_octal(hdr + 124, 12);
+
+        off += 512;
+        if (off + size > tar_len) return -1;          /* truncated data */
+
+        /* Only extract regular files ('0' or legacy '\0'); skip dir/link/etc. */
+        if (typeflag == '0' || typeflag == '\0') {
+            const char *flat = tar_flat_name(name);
+            if (!flat) return -1;
+
+            char path[PATH_MAX];
+            int pn = snprintf(path, sizeof(path), "%s/%s", dest_dir, flat);
+            if (pn < 0 || (size_t)pn >= sizeof(path)) return -1;
+
+            FILE *f = fopen(path, "wb");
+            if (!f) return -1;
+            if (size && fwrite(tar + off, 1, size, f) != size) {
+                fclose(f);
+                return -1;
+            }
+            if (fclose(f) != 0) return -1;
+        }
+
+        /* Advance past the data, rounded up to the 512-byte block. */
+        off += (size + 511) & ~(size_t)511;
+    }
     return 0;
 }
 

@@ -47,6 +47,12 @@ typedef struct {
     int         has_linux_aarch64;
     int         has_darwin_arm64;
     int         has_cosmo;
+    /* A "bundle" tool ships as a `hull-<name>.tar` archive of several files
+     * (not a single executable) and installs by EXTRACTING to a DIRECTORY
+     * $HOME/.hull/tools/<name>/ rather than writing one blob + a symlink.
+     * Used by the libc-musl-<arch> static-link floor (crt*.o/libc.a/libgcc.a
+     * for `hull build --linker=lld-static`). 0 = a normal single-binary tool. */
+    int         is_bundle;
 } HlToolSpec;
 
 /**
@@ -132,5 +138,19 @@ int hl_tools_install_path(const char *name, char *out, size_t out_sz);
  */
 int hl_tools_lookup_path(const char *name, const char *hull_exe,
                          char *out, size_t out_sz);
+
+/**
+ * @brief Extract a ustar (.tar) bundle's flat files into @p dest_dir.
+ *
+ * For `is_bundle` tools. The archive is already SHA-256-verified by the caller
+ * (commands/tools.c) against the signed manifest, so this is trusted content;
+ * it still validates each member is a bare regular-file name (no '/', no "..",
+ * not absolute) as defense in depth and refuses anything else. @p dest_dir is
+ * created 0755; existing same-named files are overwritten.
+ *
+ * @returns 0 on success, -1 on a malformed archive / path / write error.
+ */
+int hl_tools_extract_tar(const unsigned char *tar, size_t tar_len,
+                         const char *dest_dir);
 
 #endif /* HL_TOOLS_INSTALL_H */

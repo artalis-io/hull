@@ -216,6 +216,34 @@ if [ "$(uname -s)" = "Linux" ]; then
     assert "tcc file removed"              [ ! -e "$TCC_PATH" ]
 fi
 
+# libc-musl static-link floor bundle (Tier B). Published for linux-x86_64 /
+# linux-aarch64 only. This is the ONLY multi-file .tar bundle asset, so it
+# exercises the new install path end to end: fetch -> SHA-256 verify -> ustar
+# extract into a directory -> directory uninstall. Linux-only (musl is Linux).
+if [ "$(uname -s)" = "Linux" ]; then
+    A=$(uname -m); [ "$A" = "arm64" ] && A=aarch64
+    FLOOR_TOOL="libc-musl-$A"
+    FLOOR_DIR="$HOME/.hull/tools/$FLOOR_TOOL"
+    "$HULL" tools uninstall "$FLOOR_TOOL" >/dev/null 2>&1 || true
+    echo ""
+    echo "── hull tools install $FLOOR_TOOL (Tier B floor bundle, LIVE download) ──"
+    OUT=$("$HULL" tools install "$FLOOR_TOOL" 2>&1); RC=$?
+    echo "$OUT" | sed 's/^/    /'
+    assert "exits 0"                       [ "$RC" -eq 0 ]
+    assert_contains "SHA-256 verified"     "$OUT" "SHA-256 verified"
+    assert_contains "installed as bundle"  "$OUT" "(bundle)"
+    assert "floor dir created"             [ -d "$FLOOR_DIR" ]
+    assert "crt1.o extracted"              [ -f "$FLOOR_DIR/crt1.o" ]
+    assert "libc.a extracted"              [ -f "$FLOOR_DIR/libc.a" ]
+    assert "libgcc.a extracted"            [ -f "$FLOOR_DIR/libgcc.a" ]
+    OUT=$("$HULL" tools list 2>&1)
+    assert_contains "list shows floor installed"  "$OUT" "$FLOOR_TOOL"
+    echo "── hull tools uninstall $FLOOR_TOOL ──"
+    OUT=$("$HULL" tools uninstall "$FLOOR_TOOL" 2>&1)
+    assert_contains "floor uninstalled"    "$OUT" "uninstalled $FLOOR_TOOL"
+    assert "floor dir removed"             [ ! -d "$FLOOR_DIR" ]
+fi
+
 # Per-flavor platform lib install (native single-arch lib).
 smoke_platform_install
 

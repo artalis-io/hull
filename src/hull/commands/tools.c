@@ -41,6 +41,7 @@
 #include <keel/allocator.h>
 #include <keel/tls_mbedtls.h>
 
+#include <dirent.h>
 #include <errno.h>
 #include <limits.h>
 #include <stdbool.h>
@@ -104,6 +105,23 @@ static int tool_installed(const char *name, char *out_path, size_t out_path_sz,
     if (hl_tools_install_path(name, path, sizeof(path)) != 0) return 0;
     struct stat st;
     if (stat(path, &st) != 0) return 0;
+
+    const HlToolSpec *spec = hl_tools_find(name);
+    if (spec && spec->is_bundle) {
+        /* A bundle installs as a DIRECTORY; consider it present when the dir
+         * exists and holds the crt1.o sentinel (a complete floor). */
+        if (!S_ISDIR(st.st_mode)) return 0;
+        char crt[PATH_MAX];
+        int n = snprintf(crt, sizeof(crt), "%s/crt1.o", path);
+        struct stat cs;
+        if (n < 0 || (size_t)n >= sizeof(crt) ||
+            stat(crt, &cs) != 0 || !S_ISREG(cs.st_mode))
+            return 0;
+        if (out_path && out_path_sz > 0) snprintf(out_path, out_path_sz, "%s", path);
+        if (out_size) *out_size = 0;
+        return 1;
+    }
+
     if (!S_ISREG(st.st_mode)) return 0;
     if (out_path && out_path_sz > 0)
         snprintf(out_path, out_path_sz, "%s", path);
@@ -311,6 +329,26 @@ static int install_one(const HlToolSpec *spec, const char *platform,
     }
     fprintf(stdout, "hull tools: SHA-256 verified, blob stored (%s)\n",
             blob_id);
+
+    /* A bundle (libc-musl-<arch>) is a .tar of several files, not one
+     * executable: extract the just-verified archive into ~/.hull/tools/<name>/
+     * and we're done - no blob chmod / symlink dance. */
+    if (spec->is_bundle) {
+        char dest[PATH_MAX];
+        int rc = hl_tools_install_path(spec->name, dest, sizeof(dest));
+        if (rc == 0)
+            rc = hl_tools_extract_tar((const unsigned char *)body, body_len, dest);
+        hl_blob_store_close(store);
+        kl_free(alloc, body, body_len);
+        if (rc != 0) {
+            fprintf(stderr, "hull tools: failed to extract %s bundle\n", spec->name);
+            return -1;
+        }
+        fprintf(stdout, "hull tools: installed %s → %s/ (bundle)\n",
+                spec->name, dest);
+        return 0;
+    }
+
     kl_free(alloc, body, body_len);
 
     /* Compose the on-disk blob path so we can chmod it executable and
@@ -475,7 +513,8 @@ static int cmd_uninstall(int argc, char **argv)
         return 2;
     }
     const char *name = argv[1];
-    if (!hl_tools_find(name)) {
+    const HlToolSpec *spec = hl_tools_find(name);
+    if (!spec) {
         fprintf(stderr, "hull tools: unknown tool '%s'\n", name);
         return 1;
     }
@@ -484,6 +523,39 @@ static int cmd_uninstall(int argc, char **argv)
         fprintf(stderr, "hull tools: cannot compose install path\n");
         return 1;
     }
+
+    /* A bundle installs as a flat directory (crt*.o/libc.a/...); unlink its
+     * files then rmdir. The floor has no subdirectories, so a shallow sweep is
+     * enough. */
+    if (spec->is_bundle) {
+        DIR *d = opendir(path);
+        if (!d) {
+            if (errno == ENOENT) {
+                fprintf(stdout, "hull tools: %s is not installed\n", name);
+                return 0;
+            }
+            fprintf(stderr, "hull tools: cannot open %s: %s\n",
+                    path, strerror(errno));
+            return 1;
+        }
+        struct dirent *e;
+        while ((e = readdir(d)) != NULL) {
+            if (strcmp(e->d_name, ".") == 0 || strcmp(e->d_name, "..") == 0)
+                continue;
+            char fp[PATH_MAX];
+            int fn = snprintf(fp, sizeof(fp), "%s/%s", path, e->d_name);
+            if (fn > 0 && (size_t)fn < sizeof(fp)) (void)unlink(fp);
+        }
+        closedir(d);
+        if (rmdir(path) != 0 && errno != ENOENT) {
+            fprintf(stderr, "hull tools: cannot remove %s: %s\n",
+                    path, strerror(errno));
+            return 1;
+        }
+        fprintf(stdout, "hull tools: uninstalled %s (%s)\n", name, path);
+        return 0;
+    }
+
     if (unlink(path) != 0) {
         if (errno == ENOENT) {
             fprintf(stdout, "hull tools: %s is not installed\n", name);
