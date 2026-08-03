@@ -109,13 +109,15 @@ static int tool_installed(const char *name, char *out_path, size_t out_path_sz,
     const HlToolSpec *spec = hl_tools_find(name);
     if (spec && spec->is_bundle) {
         /* A bundle installs as a DIRECTORY; consider it present when the dir
-         * exists and holds the crt1.o sentinel (a complete floor). */
-        if (!S_ISDIR(st.st_mode)) return 0;
-        char crt[PATH_MAX];
-        int n = snprintf(crt, sizeof(crt), "%s/crt1.o", path);
+         * exists and holds its bundle_entry sentinel (crt1.o for the floor, the
+         * zig/lld executable for a toolchain - a complete extraction). */
+        if (!S_ISDIR(st.st_mode) || !spec->bundle_entry) return 0;
+        char sentinel[PATH_MAX];
+        int n = snprintf(sentinel, sizeof(sentinel), "%s/%s", path,
+                         spec->bundle_entry);
         struct stat cs;
-        if (n < 0 || (size_t)n >= sizeof(crt) ||
-            stat(crt, &cs) != 0 || !S_ISREG(cs.st_mode))
+        if (n < 0 || (size_t)n >= sizeof(sentinel) ||
+            stat(sentinel, &cs) != 0 || !S_ISREG(cs.st_mode))
             return 0;
         if (out_path && out_path_sz > 0) snprintf(out_path, out_path_sz, "%s", path);
         if (out_size) *out_size = 0;
@@ -506,6 +508,31 @@ static int cmd_install(int argc, char **argv, const char *repo)
 
 /* ── `hull tools uninstall` ──────────────────────────────────────── */
 
+/* Recursively remove a file or directory tree (an extracted bundle, which may
+ * be nested - zig's lib/). Depth is bounded by the bundle's real nesting.
+ * Returns 0 on success, -1 on any failure (errno set). */
+static int rm_rf(const char *path)
+{
+    struct stat st;
+    if (lstat(path, &st) != 0) return errno == ENOENT ? 0 : -1;
+    if (!S_ISDIR(st.st_mode)) return unlink(path) == 0 ? 0 : -1;
+
+    DIR *d = opendir(path);
+    if (!d) return -1;
+    int rc = 0;
+    struct dirent *e;
+    while ((e = readdir(d)) != NULL) {
+        if (strcmp(e->d_name, ".") == 0 || strcmp(e->d_name, "..") == 0) continue;
+        char child[PATH_MAX];
+        int n = snprintf(child, sizeof(child), "%s/%s", path, e->d_name);
+        if (n < 0 || (size_t)n >= sizeof(child)) { rc = -1; continue; }
+        if (rm_rf(child) != 0) rc = -1;
+    }
+    closedir(d);
+    if (rmdir(path) != 0) rc = -1;
+    return rc;
+}
+
 static int cmd_uninstall(int argc, char **argv)
 {
     if (argc < 2) {
@@ -524,30 +551,20 @@ static int cmd_uninstall(int argc, char **argv)
         return 1;
     }
 
-    /* A bundle installs as a flat directory (crt*.o/libc.a/...); unlink its
-     * files then rmdir. The floor has no subdirectories, so a shallow sweep is
-     * enough. */
+    /* A bundle installs as a DIRECTORY, possibly nested (zig's lib/ tree).
+     * Remove it recursively - nftw(FTW_DEPTH) visits children before parents. */
     if (spec->is_bundle) {
-        DIR *d = opendir(path);
-        if (!d) {
+        struct stat bst;
+        if (stat(path, &bst) != 0) {
             if (errno == ENOENT) {
                 fprintf(stdout, "hull tools: %s is not installed\n", name);
                 return 0;
             }
-            fprintf(stderr, "hull tools: cannot open %s: %s\n",
+            fprintf(stderr, "hull tools: cannot stat %s: %s\n",
                     path, strerror(errno));
             return 1;
         }
-        struct dirent *e;
-        while ((e = readdir(d)) != NULL) {
-            if (strcmp(e->d_name, ".") == 0 || strcmp(e->d_name, "..") == 0)
-                continue;
-            char fp[PATH_MAX];
-            int fn = snprintf(fp, sizeof(fp), "%s/%s", path, e->d_name);
-            if (fn > 0 && (size_t)fn < sizeof(fp)) (void)unlink(fp);
-        }
-        closedir(d);
-        if (rmdir(path) != 0 && errno != ENOENT) {
+        if (rm_rf(path) != 0) {
             fprintf(stderr, "hull tools: cannot remove %s: %s\n",
                     path, strerror(errno));
             return 1;

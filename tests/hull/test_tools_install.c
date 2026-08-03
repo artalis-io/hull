@@ -427,9 +427,17 @@ UTEST_F(tools_fixture, lookup_rejects_invalid_name) {
 static void tar_put_header(unsigned char *b, const char *name, size_t size) {
     memset(b, 0, 512);
     strncpy((char *)b, name, 99);
+    snprintf((char *)(b + 100), 8, "%07o", 0755);              /* mode 0755 */
     snprintf((char *)(b + 124), 12, "%011o", (unsigned)size);  /* size, octal */
     memset(b + 148, ' ', 8);                                   /* chksum: blank */
     b[156] = '0';                                              /* regular file */
+}
+
+/* A ustar directory entry (typeflag '5', no data). */
+static void tar_add_dir(unsigned char *buf, size_t *off, const char *name) {
+    tar_put_header(buf + *off, name, 0);
+    buf[*off + 156] = '5';   /* directory */
+    *off += 512;
 }
 
 static void tar_add_file(unsigned char *buf, size_t *off,
@@ -545,6 +553,43 @@ UTEST_F(tools_fixture, extract_tar_rejects_traversal) {
     char dest[PATH_MAX];
     snprintf(dest, sizeof(dest), "%s/floor2", utest_fixture->tmpdir);
     ASSERT_EQ(hl_tools_extract_tar(buf, off, dest), -1);   /* traversal refused */
+    free(buf);
+}
+
+UTEST_F(tools_fixture, extract_nested_tree) {
+    /* A zig-like nested tree: root dir entry (skipped), a top-level executable,
+     * and a file two directories deep with an explicit dir entry. */
+    unsigned char *buf = calloc(1, 16384);
+    ASSERT_NE(buf, NULL);
+    size_t off = 0;
+    tar_add_dir(buf, &off, "./");
+    tar_add_file(buf, &off, "./zig", "BINARY", 6);
+    tar_add_dir(buf, &off, "lib/std");
+    tar_add_file(buf, &off, "lib/std/foo.zig", "SRC", 3);
+    off += 512;
+
+    char dest[PATH_MAX], p[PATH_MAX];
+    struct stat st;
+    snprintf(dest, sizeof(dest), "%s/tree", utest_fixture->tmpdir);
+    ASSERT_EQ(hl_tools_extract_tar(buf, off, dest), 0);
+
+    snprintf(p, sizeof(p), "%s/zig", dest);
+    ASSERT_EQ(stat(p, &st), 0);
+    ASSERT_TRUE(st.st_mode & S_IXUSR);            /* exec bit preserved */
+    snprintf(p, sizeof(p), "%s/lib/std/foo.zig", dest);
+    ASSERT_EQ(stat(p, &st), 0);                   /* deep nested file created */
+    free(buf);
+}
+
+UTEST_F(tools_fixture, extract_rejects_nested_traversal) {
+    unsigned char *buf = calloc(1, 4096);
+    ASSERT_NE(buf, NULL);
+    size_t off = 0;
+    tar_add_file(buf, &off, "lib/../../escape", "X", 1);
+    off += 512;
+    char dest[PATH_MAX];
+    snprintf(dest, sizeof(dest), "%s/tree2", utest_fixture->tmpdir);
+    ASSERT_EQ(hl_tools_extract_tar(buf, off, dest), -1);   /* nested ".." refused */
     free(buf);
 }
 
