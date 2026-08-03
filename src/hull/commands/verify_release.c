@@ -15,6 +15,7 @@
 
 #include "hull/commands/verify_release.h"
 #include "hull/release.h"
+#include "hull/cap/crypto.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -30,26 +31,6 @@ static void usage(void)
         "  --pubkey <hex> override, 64 hex chars).\n"
         "\n"
         "  Exit code: 0 = valid, 1 = invalid / error.\n");
-}
-
-static int hex_nibble(unsigned char c)
-{
-    if (c >= '0' && c <= '9') return c - '0';
-    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
-    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
-    return -1;
-}
-
-static int hex_decode_pk(const char *hex, uint8_t out[32])
-{
-    if (strlen(hex) != 64) return -1;
-    for (size_t i = 0; i < 32; i++) {
-        int hi = hex_nibble((unsigned char)hex[i * 2]);
-        int lo = hex_nibble((unsigned char)hex[i * 2 + 1]);
-        if (hi < 0 || lo < 0) return -1;
-        out[i] = (uint8_t)((hi << 4) | lo);
-    }
-    return 0;
 }
 
 static int read_file(const char *path, char **out_buf, size_t *out_len)
@@ -116,7 +97,7 @@ int hl_cmd_verify_release(int argc, char **argv, const HlCommandEnv *env)
     uint8_t pubkey_buf[32];
     const uint8_t *pubkey = NULL;
     if (pubkey_hex) {
-        if (hex_decode_pk(pubkey_hex, pubkey_buf) != 0) {
+        if (hl_cap_crypto_hex_decode(pubkey_hex, strlen(pubkey_hex), pubkey_buf, 32) != 32) {
             fprintf(stderr, "hull verify-release: --pubkey must be 64 hex chars\n");
             return 1;
         }
