@@ -713,6 +713,11 @@ e2e-compiler-free: $(BUILDDIR)/hull $(BUILDDIR)/libhull_platform.a
 e2e-linker: $(BUILDDIR)/hull $(BUILDDIR)/libhull_platform.a
 	sh tests/e2e_linker.sh
 
+# The zig linker backend (hull build --linker=zig). Runs on Linux x86_64 only
+# (a foreign-target link needs a matching platform lib); skips elsewhere.
+e2e-linker-zig: $(BUILDDIR)/hull $(BUILDDIR)/libhull_platform.a
+	sh tests/e2e_linker_zig.sh
+
 e2e-cross-build:
 	sh tests/e2e_cross_build.sh
 

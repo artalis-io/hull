@@ -128,6 +128,24 @@ jobs:
           command -v ld.lld >/dev/null 2>&1 || sudo apt-get install -y lld 2>/dev/null || true
           make e2e-linker
 
+      - name: Linker (zig) E2E test (hull build --linker=zig)
+        # Linux x86_64 only (the e2e self-skips elsewhere: a foreign-target link
+        # needs a matching platform lib). Install the same Zig the embed-zig job
+        # uses, then build + run a real app through the zig linker backend.
+        if: runner.os == 'Linux' && runner.arch == 'X64'
+        timeout-minutes: 5
+        run: |
+          if ! command -v zig >/dev/null 2>&1; then
+            curl -fsSL --retry 3 --retry-all-errors --retry-delay 2 \
+              https://ziglang.org/download/0.13.0/zig-linux-x86_64-0.13.0.tar.xz \
+              -o /tmp/zig.tar.xz
+            sudo mkdir -p /opt/zig
+            sudo tar -xJf /tmp/zig.tar.xz -C /opt/zig --strip-components=1
+            echo "/opt/zig" >> "$GITHUB_PATH"
+            export PATH="/opt/zig:$PATH"
+          fi
+          make e2e-linker-zig
+
       - name: Attachment E2E tests
         timeout-minutes: 2
         run: make e2e-attachment
