@@ -136,6 +136,40 @@ if command -v ld.lld >/dev/null 2>&1 && [ -r /usr/lib/crt1.o ]; then
     else
         bad "Tier B (--linker=lld-static) build"; tail -12 /tmp/musl_t.log
     fi
+
+    # A PATH with ONLY ld.lld/lld (no cc/gcc), to prove the link needs no cc.
+    ccfree="$(mktemp -d)"
+    ln -sf "$(command -v ld.lld)" "$ccfree/ld.lld"
+    [ -n "$(command -v lld || true)" ] && ln -sf "$(command -v lld)" "$ccfree/lld"
+
+    # [4] cc-free: with no cc on PATH, libgcc is found by glob (not `cc -print-...`).
+    if PATH="$ccfree" HULL_LIBC_DIR=/usr/lib "$HULL" build "$WORKDIR/static" \
+            --no-verify-platform --linker=lld-static -o "$WORKDIR/ccfree" \
+            >/tmp/musl_cf.log 2>&1 \
+       && "$WORKDIR/ccfree" --no-sandbox >/dev/null 2>&1; then
+        ok "Tier B links with NO cc on PATH (libgcc found by glob, not cc)"
+    else
+        bad "Tier B cc-free build"; tail -10 /tmp/musl_cf.log
+    fi
+
+    # [5] self-contained via an installed bundle: assemble
+    # ~/.hull/tools/libc-musl-<arch> (crt*.o + libc.a + libgcc.a), then build with
+    # NO cc AND no HULL_LIBC_DIR/HULL_LIBGCC - the bundle supplies everything.
+    arch="$(uname -m)"; [ "$arch" = arm64 ] && arch=aarch64
+    floor="${HOME:-/root}/.hull/tools/libc-musl-$arch"
+    if sh scripts/build_musl_floor.sh "$floor" >/tmp/musl_floor.log 2>&1; then
+        if PATH="$ccfree" "$HULL" build "$WORKDIR/static" --no-verify-platform \
+                --linker=lld-static -o "$WORKDIR/bundle" >/tmp/musl_bn.log 2>&1 \
+           && "$WORKDIR/bundle" --no-sandbox >/dev/null 2>&1; then
+            ok "Tier B self-contained via installed libc-musl-$arch bundle (no cc, no HULL_LIBC_DIR)"
+        else
+            bad "Tier B bundle build"; tail -10 /tmp/musl_bn.log
+        fi
+        rm -rf "$floor"
+    else
+        bad "assemble libc-musl bundle"; tail -6 /tmp/musl_floor.log
+    fi
+    rm -rf "$ccfree"
 else
     echo "  skip Tier B (no ld.lld or no musl floor at /usr/lib)"
 fi

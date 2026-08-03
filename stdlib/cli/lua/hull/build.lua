@@ -1866,7 +1866,11 @@ typedef struct {
     -- isn't available (very old hulls, mocked test harnesses):
     -- fall back to the compiler name. The cosmocc CC name is a
     -- reliable cosmo signal — a real cosmo build invokes cosmocc.
-    if not is_cosmo then
+    -- Only trust this when a real compiler resolved: with NO compiler
+    -- available, `cc` above defaults to tool.cc ("cosmocc"), which would
+    -- mis-flag a native, compiler-less emit build (e.g. --linker=lld-static
+    -- on a box with only ld.lld) as cosmo.
+    if not is_cosmo and tool.compiler then
         is_cosmo = cc:find("cosmocc") ~= nil
     end
 
@@ -1987,8 +1991,15 @@ local function main()
         end
     end
 
-    -- Guard: ensure compiler vtable is available
-    if not tool.compiler then
+    -- Guard: a C compiler is needed only when we will actually COMPILE - the
+    -- compiler build path, or a --with feature / cosmo target (both force the
+    -- compiler path via the fallback below). The default emit path links through
+    -- tool.linker and needs no compiler, so an explicit non-cc linker
+    -- (--linker=lld-static / lld / zig) can build on a box with no cc at all.
+    local will_compile = (not opts.no_compiler)
+        or (opts.with and next(opts.with) ~= nil)
+        or is_cosmo
+    if will_compile and not tool.compiler then
         tool.stderr("hull build: no C compiler available\n")
         tool.stderr("hint: install gcc or clang, or rebuild hull with HL_ENABLE_TCC=1\n")
         tool.rmdir(tmpdir)

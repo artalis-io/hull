@@ -724,6 +724,13 @@ e2e-cross-build:
 e2e-musl:
 	sh tests/e2e_musl.sh
 
+# Assemble a self-contained musl static-link floor (crt*.o + libc.a + libgcc.a)
+# for Tier B (`hull build --linker=lld-static`) - the contents of a
+# `hull tools install libc-musl-<arch>` bundle. Run on a musl host (Alpine).
+# DEST overrides the destination (default ~/.hull/tools/libc-musl-<arch>).
+floor-musl:
+	sh scripts/build_musl_floor.sh "$(if $(DEST),$(DEST),$(HOME)/.hull/tools/libc-musl-$(shell uname -m | sed -e s/arm64/aarch64/))"
+
 # `hull build --flavor` MVP. Builds the pure-compute platform lib itself.
 e2e-build-flavor: $(BUILDDIR)/hull
 	sh tests/e2e_build_flavor.sh
