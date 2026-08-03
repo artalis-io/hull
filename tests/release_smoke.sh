@@ -199,22 +199,8 @@ OUT=$("$HULL" tools uninstall wamrc 2>&1)
 assert_contains "uninstalled"          "$OUT" "uninstalled wamrc"
 assert "file removed"                  [ ! -e "$WAMRC_PATH" ]
 
-# tcc is a Linux-only tool (ELF); skip the live install on macOS/cosmo where
-# it isn't published.
-if [ "$(uname -s)" = "Linux" ]; then
-    echo ""
-    echo "── hull tools install tcc (LIVE GitHub HTTPS download) ──"
-    OUT=$("$HULL" tools install tcc 2>&1)
-    assert_contains "tcc installed"        "$OUT" "tcc"
-    TCC_PATH="$HOME/.hull/tools/tcc"
-    assert "tcc file present"              [ -x "$TCC_PATH" ]
-    OUT=$("$TCC_PATH" -v 2>&1 || true)
-    assert_contains "tcc -v runs"          "$OUT" "tcc"
-    echo "── hull tools uninstall tcc ──"
-    OUT=$("$HULL" tools uninstall tcc 2>&1)
-    assert_contains "tcc uninstalled"      "$OUT" "uninstalled tcc"
-    assert "tcc file removed"              [ ! -e "$TCC_PATH" ]
-fi
+# (tcc-as-a-tool was retired in the compiler-free work - it is no longer in the
+# registry nor published, so there is no `hull tools install tcc` to smoke-test.)
 
 # libc-musl static-link floor bundle (Tier B). Published for linux-x86_64 /
 # linux-aarch64 only. This is the ONLY multi-file .tar bundle asset, so it
