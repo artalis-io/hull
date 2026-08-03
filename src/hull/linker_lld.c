@@ -72,6 +72,12 @@ static int lld_link(HlLinker *l, const char *output,
          * --end-group -L<libdir> crtn. */
         argv[n++] = ctx->ld;
         argv[n++] = "-static";
+        /* Dead-strip unreferenced sections. A raw ld.lld does NOT --gc-sections
+         * by default (only a cc/ld64 driver defaults it on), so without this the
+         * static binary carries dead sections and any unresolved symbol reachable
+         * only from dead code would fail the link - the exact hazard the zig
+         * backend guards against for the same reason (linker_zig.c). */
+        argv[n++] = "--gc-sections";
         argv[n++] = "-o"; argv[n++] = output;
         argv[n++] = ctx->crt1;
         argv[n++] = ctx->crti;
