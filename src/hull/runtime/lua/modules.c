@@ -81,6 +81,20 @@ int hl_lua_register_modules(HlLua *lua)
     register_native_module(L, "hull.blob",   luaopen_hull_blob);
     register_native_module(L, "hull.mime",   luaopen_hull_mime);
     register_native_module(L, "hull.archive.tar", luaopen_hull_tar);
+    /* image has a DUAL role (audit T4b), unlike blob/mime/tar above which are
+     * plain always-in-base cap modules. Two independent gates:
+     *   - #ifdef HL_ENABLE_IMAGE: the SUBTRACTIVE gate. `make HL_ENABLE_IMAGE=0`
+     *     drops image entirely (no cap, no bindings) - registration compiles out
+     *     and `hull/image` fails module resolution. This is why image alone here
+     *     is #ifdef-wrapped.
+     *   - luaopen_hull_image itself: the COMPOSABLE gate. On the default
+     *     HL_ENABLE_IMAGE=1 base, image is DROPPED from the base and composed
+     *     back only for apps that declare hull/image (docs/image_feature.md). The
+     *     symbol is a WEAK no-op stub (runtime/lua/image_stub.c) that returns 0
+     *     (module absent -> require returns nil) until the composed
+     *     libhull_feature-image-lua.a provides the STRONG real opener.
+     * So the registration CALL is always emitted on an HL_ENABLE_IMAGE=1 build;
+     * whether it yields a real module is decided at LINK by the seam, not here. */
 #ifdef HL_ENABLE_IMAGE
     register_native_module(L, "hull.image",  luaopen_hull_image);
 #endif
