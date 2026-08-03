@@ -36,6 +36,7 @@
 #include "hull/release.h"
 #include "hull/release_io.h"
 #include "hull/tools_install.h"
+#include "hull/cap/tar.h"
 #include "sh_json.h"
 
 #include <keel/allocator.h>
@@ -339,7 +340,7 @@ static int install_one(const HlToolSpec *spec, const char *platform,
         char dest[PATH_MAX];
         int rc = hl_tools_install_path(spec->name, dest, sizeof(dest));
         if (rc == 0)
-            rc = hl_tools_extract_tar((const unsigned char *)body, body_len, dest);
+            rc = hl_tar_extract((const unsigned char *)body, body_len, dest);
         hl_blob_store_close(store);
         kl_free(alloc, body, body_len);
         if (rc != 0) {

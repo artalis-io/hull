@@ -21,6 +21,7 @@
  */
 
 #include "hull/tools_install.h"
+#include "hull/shared/fs_util.h"
 
 #include <errno.h>
 #include <limits.h>
@@ -140,163 +141,6 @@ int hl_tools_asset_name(const HlToolSpec *spec, const char *platform,
     return 0;
 }
 
-/* ── ustar (.tar) bundle extraction ──────────────────────────────────
- *
- * A minimal read-only ustar reader for `is_bundle` tools. We control both the
- * producer (`tar cf`) and consumer, and the archive is SHA-256-verified before
- * we get here, so we ship files + directories only (producers dereference any
- * symlink to a copy). NESTED relative paths are allowed (zig's lib/ tree); every
- * member is still validated - not absolute, no ".." component - as defense in
- * depth. The exec bit is preserved (zig / ld.lld need +x).
- */
-static int ensure_dir(const char *path, mode_t mode);   /* defined below */
-
-static unsigned long tar_octal(const unsigned char *p, size_t n)
-{
-    unsigned long v = 0;
-    size_t i = 0;
-    while (i < n && (p[i] == ' ' || p[i] == '\0')) i++;   /* leading pad */
-    for (; i < n && p[i] >= '0' && p[i] <= '7'; i++)
-        v = (v << 3) + (unsigned long)(p[i] - '0');
-    return v;
-}
-
-/* Validate + normalize a ustar member path for safe NESTED extraction. Strips a
- * leading "./" and any trailing "/", then requires every segment to be non-empty
- * and not "..", and the whole path to be relative (not absolute). Nested
- * relative paths (a/b/c) are allowed - zig's lib/ tree needs them. Mutates
- * `name` (trailing-slash strip). Returns the cleaned path or NULL to reject. */
-static const char *tar_safe_path(char *name)
-{
-    if (name[0] == '/') return NULL;                     /* absolute → reject */
-    while (name[0] == '.' && name[1] == '/') name += 2;  /* strip leading "./" */
-    size_t len = strlen(name);
-    while (len > 0 && name[len - 1] == '/') name[--len] = '\0';  /* trailing "/" */
-    /* "" (from "./") or "." is the archive root - benign; return an EMPTY
-     * string so the caller skips it rather than treating it as a reject. */
-    if (len == 0)                    return name;          /* -> "" */
-    if (len == 1 && name[0] == '.')  return name + 1;      /* -> "" */
-    for (const char *p = name; *p; ) {
-        const char *slash = strchr(p, '/');
-        size_t seg = slash ? (size_t)(slash - p) : strlen(p);
-        if (seg == 0) return NULL;                        /* "//" */
-        if (seg == 2 && p[0] == '.' && p[1] == '.') return NULL;  /* ".." */
-        p += seg;
-        if (*p == '/') p++;
-    }
-    return name;
-}
-
-/* mkdir every component of `path` (parents included). EEXIST is success. */
-static int mkdir_p(const char *path, mode_t mode)
-{
-    char tmp[PATH_MAX];
-    size_t n = strlen(path);
-    if (n == 0 || n >= sizeof(tmp)) return -1;
-    memcpy(tmp, path, n + 1);
-    for (char *p = tmp + 1; *p; p++) {
-        if (*p == '/') {
-            *p = '\0';
-            if (mkdir(tmp, mode) != 0 && errno != EEXIST) return -1;
-            *p = '/';
-        }
-    }
-    if (mkdir(tmp, mode) != 0 && errno != EEXIST) return -1;
-    return 0;
-}
-
-int hl_tools_extract_tar(const unsigned char *tar, size_t tar_len,
-                         const char *dest_dir)
-{
-    if (!tar || !dest_dir) return -1;
-    if (ensure_dir(dest_dir, 0755) != 0) return -1;
-
-    size_t off = 0;
-    while (off + 512 <= tar_len) {
-        const unsigned char *hdr = tar + off;
-
-        /* An all-zero header block marks end of archive. */
-        int zero = 1;
-        for (int i = 0; i < 512; i++) if (hdr[i]) { zero = 0; break; }
-        if (zero) break;
-
-        /* name is NUL-padded within [0,100); ensure it terminates. */
-        char name[101];
-        memcpy(name, hdr, 100);
-        name[100] = '\0';
-
-        char typeflag = (char)hdr[156];
-        unsigned long size = tar_octal(hdr + 124, 12);
-
-        off += 512;
-        if (off + size > tar_len) return -1;          /* truncated data */
-
-        /* Directory ('5'): create it + parents. Regular file ('0'/legacy '\0'):
-         * create parent dirs, write, preserve the exec bit (zig / ld.lld need
-         * +x). Skip everything else (symlinks '2', hardlinks '1', ...) - our
-         * producers ship files + dirs only, dereferencing any symlink to a copy. */
-        const char *rel = (typeflag == '5' || typeflag == '0' || typeflag == '\0')
-            ? tar_safe_path(name) : NULL;
-        /* rel: NULL means either "not a file/dir entry we handle" (skip) or a
-         * MALICIOUS path. Distinguish: only the file/dir typeflags call
-         * tar_safe_path, and it returns NULL just for absolute/".." - reject
-         * those. An empty string is the archive root - skip. */
-        if ((typeflag == '5' || typeflag == '0' || typeflag == '\0') && !rel)
-            return -1;
-        if (rel && rel[0] != '\0') {
-            char path[PATH_MAX];
-            int pn = snprintf(path, sizeof(path), "%s/%s", dest_dir, rel);
-            if (pn < 0 || (size_t)pn >= sizeof(path)) return -1;
-
-            if (typeflag == '5') {
-                if (mkdir_p(path, 0755) != 0) return -1;
-            } else {
-                char *last = strrchr(path, '/');
-                if (last && last != path) {
-                    *last = '\0';
-                    if (mkdir_p(path, 0755) != 0) { *last = '/'; return -1; }
-                    *last = '/';
-                }
-                FILE *f = fopen(path, "wb");
-                if (!f) return -1;
-                if (size && fwrite(tar + off, 1, size, f) != size) {
-                    fclose(f);
-                    return -1;
-                }
-                if (fclose(f) != 0) return -1;
-                mode_t m = (mode_t)(tar_octal(hdr + 100, 8) & 0777);
-                if (m) (void)chmod(path, m);
-            }
-        }
-
-        /* Advance past the data, rounded up to the 512-byte block. */
-        off += (size + 511) & ~(size_t)511;
-    }
-    return 0;
-}
-
-/* ── Directory resolution + creation ────────────────────────────── */
-
-/* Create `path` with `mode` if it doesn't already exist as a
- * directory. EEXIST + S_ISDIR is success. */
-static int ensure_dir(const char *path, mode_t mode)
-{
-    struct stat st;
-    if (stat(path, &st) == 0) {
-        if (S_ISDIR(st.st_mode)) return 0;
-        errno = ENOTDIR;
-        return -1;
-    }
-    if (errno != ENOENT) return -1;
-    if (mkdir(path, mode) != 0) {
-        if (errno == EEXIST) {
-            /* Lost race with another process — re-stat. */
-            if (stat(path, &st) == 0 && S_ISDIR(st.st_mode)) return 0;
-        }
-        return -1;
-    }
-    return 0;
-}
 
 int hl_tools_dir(char *out, size_t out_sz)
 {
@@ -315,7 +159,7 @@ int hl_tools_dir(char *out, size_t out_sz)
         errno = ENAMETOOLONG;
         return -1;
     }
-    if (ensure_dir(hull_dir, 0755) != 0) return -1;
+    if (hl_ensure_dir(hull_dir, 0755) != 0) return -1;
 
     /* `$HOME/.hull/tools` */
     char tools_dir[PATH_MAX];
@@ -324,7 +168,7 @@ int hl_tools_dir(char *out, size_t out_sz)
         errno = ENAMETOOLONG;
         return -1;
     }
-    if (ensure_dir(tools_dir, 0755) != 0) return -1;
+    if (hl_ensure_dir(tools_dir, 0755) != 0) return -1;
 
     /* Return with trailing slash for easy concatenation. */
     n = snprintf(out, out_sz, "%s/", tools_dir);
