@@ -97,6 +97,8 @@ local function parse_args()
         elseif a == "--target" then
             i = i + 1
             opts.target = arg[i]
+        elseif a:sub(1, 9) == "--target=" then
+            opts.target = a:sub(10)
         elseif a == "--no-verify-platform" then
             opts.verify_platform = false
         elseif a == "--flavor" then
@@ -353,7 +355,20 @@ local function target_spec(opts)
     -- full triple <arch>-<os>[-<abi>]
     local arch = t:match("^([%w_]+)-") or nat_arch
     if arch == "arm64" then arch = "aarch64" end
+    -- Validate the arch/os rather than silently defaulting a typo'd triple
+    -- (e.g. `amd64-linux` -> arch "amd64" -> emit falls through to x86_64 and
+    -- the link fails opaquely). Only the shapes the emitter + a linker support.
+    if arch ~= "x86_64" and arch ~= "aarch64" then
+        tool.stderr("hull build: unsupported --target arch '" .. arch
+            .. "' (expected x86_64 or aarch64, e.g. x86_64-linux-gnu)\n")
+        tool.exit(1)
+    end
     local osp = t:match("^[%w_]+-([%w_]+)") or nat_os
+    if osp ~= "linux" and osp ~= "macos" and osp ~= "darwin" and osp ~= "windows" then
+        tool.stderr("hull build: unsupported --target os '" .. osp
+            .. "' (expected linux, macos, or windows)\n")
+        tool.exit(1)
+    end
     local fmt = (osp == "macos" or osp == "darwin") and "macho"
              or (osp == "windows") and "coff" or "elf"
     return { arch = arch, fmt = fmt, os = osp, triple = t }
@@ -1592,6 +1607,32 @@ end
 
 local function main()
     local opts = parse_args()
+
+    -- Cross-target guard (docs/build_arc_audit.md #2). The emit path can produce
+    -- a cross-ARCH app_registry.o, but the platform library + the bundled
+    -- app_main.o trampoline are built for the HOST, so a full link to a foreign
+    -- (arch, format) target cannot succeed until a target platform lib is
+    -- publishable (#4). Only the zig backend even consumes the triple; system /
+    -- lld ignore it and hand a cross object to a native driver. Reject a
+    -- host-mismatched --target EARLY (before discover/compose/emit) with a clear
+    -- message instead of a cryptic downstream "linking failed". A same-arch/
+    -- format target (e.g. --target=x86_64-linux-gnu on an x86_64 Linux host) is
+    -- native and allowed - it exercises the zig `--target=` path without cross.
+    if opts.target and opts.target ~= "" then
+        local ts = target_spec(opts)   -- also validates the arch/os shape
+        local pn = tool.platform_name() or ""
+        local nat_fmt = (pn:sub(1, 6) == "darwin") and "macho" or "elf"
+        local nat_arch = (pn:find("aarch64") or pn:find("arm64")) and "aarch64" or "x86_64"
+        if ts.arch ~= nat_arch or ts.fmt ~= nat_fmt then
+            tool.stderr("hull build: cross-compilation to '" .. (ts.triple or ts.arch)
+                .. "' is not yet supported - the platform library is built for the "
+                .. "host (" .. nat_arch .. "/"
+                .. (nat_fmt == "macho" and "macos" or "linux") .. "). A target "
+                .. "platform lib is a tracked follow-up (docs/build_arc_audit.md "
+                .. "#2/#4); native builds only for now.\n")
+            tool.exit(1)
+        end
+    end
 
     -- Find app source files
     -- Discover app files + toolchain (see discover() above); unpack into locals.
