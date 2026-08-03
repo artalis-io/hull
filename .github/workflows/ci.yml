@@ -146,6 +146,18 @@ jobs:
           fi
           make e2e-linker-zig
 
+      - name: musl cross-build E2E (hull build --target=…-linux-musl --linker=zig)
+        # Linux x86_64 + Docker only (self-skips elsewhere). Builds the musl
+        # archive set (scripts/build_musl_platform.sh, Alpine), stages it + the
+        # zig installed above, cross-builds a compute app, and RUNS the static
+        # musl result in Alpine. Audit #4c. The musl archive build is the slow
+        # part, hence the wider timeout.
+        if: runner.os == 'Linux' && runner.arch == 'X64'
+        timeout-minutes: 25
+        run: |
+          command -v zig >/dev/null 2>&1 || export PATH="/opt/zig:$PATH"
+          make e2e-musl-cross
+
       - name: Attachment E2E tests
         timeout-minutes: 2
         run: make e2e-attachment

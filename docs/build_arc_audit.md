@@ -72,8 +72,14 @@ Execution order (agreed): **#6+#1 → #7 → #4 → #5 → #2 → #3 → #8**, t
     `hl_tool_validate_args`. **Validated end-to-end**: `hull build --target=x86_64-linux-musl
     --linker=zig` on macOS/arm64 → a static x86_64 musl ELF that RUNS on Alpine (`app.main` →
     `exit 0`); native macOS build unregressed (`make test` green).
-  - [ ] **#4d Smoke.** `release_smoke.sh` section: `hull … install musl-x86_64` + a
-    `--target=x86_64-linux-musl --linker=zig` build that runs in Alpine.
+  - [x] **#4d Smoke + e2e.** DONE. `release_smoke.sh` gained a `platform-musl-x86_64` install
+    section (LIVE fetch → SHA-256 verify → bundle extract → assert the base + slim + a feature
+    archive → uninstall), mirroring the floor. New `tests/e2e_musl_cross.sh` (+ `make
+    e2e-musl-cross`, wired into the Linux-x86_64 CI job) does the FULL loop per-push: builds the
+    musl archive set (`build_musl_platform.sh`, Alpine), stages it + zig, cross-builds a compute
+    app with `--target=x86_64-linux-musl --linker=zig`, and RUNS the static musl result in Alpine
+    (asserts ELF/x86-64 + statically-linked + the app's stdout). Skips cleanly off Linux-x86_64 /
+    without Docker or zig.
 - [x] **#5 `--linker=zig` has zero e2e** ✓. DONE (PR #205): `tests/e2e_linker_zig.sh` builds +
   runs a real app through the zig backend on Linux x86_64 (skips elsewhere - cross needs a
   target platform lib, #2/#4); wired into Linux CI. A `test_linker.c` unit test was deferred
