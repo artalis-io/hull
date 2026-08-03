@@ -38,16 +38,21 @@ Execution order (agreed): **#6+#1 → #7 → #4 → #5 → #2 → #3 → #8**, t
   so `--linker=lld-static` and `--linker=zig --target=…-musl` work ONLY from a source build.
   Publish a signed `libhull_platform-musl-<arch>.a` (+ runtime/feature archives) and teach
   `prepare_platform` to select it for a musl target. Highest-value "make it real" gap.
-- [ ] **#5 `--linker=zig` has zero e2e** ✓ **and no `test_linker` unit test** ✓. Add
-  `tests/hull/test_linker.c` (mock vtable capturing argv: `-Wl,` stripping + group flatten,
-  zig format→GC flag, `hl_linker_select` dispatch) + `tests/e2e_linker_zig.sh` (Docker run of
-  a cross/native zig-linked app) wired into Linux CI.
+- [x] **#5 `--linker=zig` has zero e2e** ✓. DONE (PR #205): `tests/e2e_linker_zig.sh`
+  stages a system zig, `hull build --linker=zig` a real app, runs it; wired into the
+  Linux CI `build` job (installs zig 0.13.0, `runner.arch == X64`). Runs on Linux x86_64
+  only and SKIPS elsewhere - a foreign-target link needs a target-matching platform lib
+  (this is exactly the #2/#4 cross-compile gap, which the e2e surfaced directly: a
+  darwin-arm64 platform lib can't link an x86_64-linux binary). A `test_linker.c` unit test
+  was DEFERRED: the backends' `is_available`/`link` spawn via `hl_tool_spawn`, so a
+  meaningful unit test needs the tool-spawn stub + only covers the constructor-name
+  contract (low regression risk now that the backend is e2e-covered).
 
 ## Tier 3 — simplifications (two prevent Tier-1 bugs)
 
 - [x] **#6 Table-drive `compose_features()`** — 690-line fn, same 12-line block ×8. Collapse to a
   data table + one loop; **fixes #1 for free** (eject calls the same helper). DONE (PR #203): build.lua 2365->1995 lines; compose blocks -> one data-driven plan + loop; extract_manifest also centralized. e2e composed_sig/build/feature_runtime/feature_wasm green.
-- [ ] **#7 One `HULL_CORE_OBJS` variable** — the ~60-token object list is duplicated across 8
+- [x] **#7 One `HULL_CORE_OBJS` variable** (HULL_LINK_OBJS + purge fix; full cross-target collapse deferred as interleaved-reorder-risk — PR #204) — the ~60-token object list is duplicated across 8
   sites (hull link prereqs+recipe, `PLATFORM_OBJS`, 5 test lists); drift already exists
   (`fs_util.o` missing from the sentinel purge). Collapse to one var + `$^` recipe; derive
   `PLATFORM_OBJS` via `filter-out`. Also: derive the sentinel purge list from the same set.
