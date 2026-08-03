@@ -230,6 +230,34 @@ if [ "$(uname -s)" = "Linux" ]; then
     assert "floor dir removed"             [ ! -d "$FLOOR_DIR" ]
 fi
 
+# musl platform archive SET (audit #4c) — the counterpart of the floor: Hull's
+# own archives (libhull_platform.a + slim + every libhull_feature-*.a) built
+# against musl, for `hull build --target=<arch>-linux-musl`. A data-only .tar
+# bundle like the floor, but a CROSS-target asset published for ALL native
+# hosts (install on any host to build TO musl), so this runs unconditionally.
+# fetch -> SHA-256 verify -> ustar extract into a dir -> dir uninstall.
+PM_ARCH=x86_64
+PM_TOOL="platform-musl-$PM_ARCH"
+PM_DIR="$HOME/.hull/tools/$PM_TOOL"
+"$HULL" tools uninstall "$PM_TOOL" >/dev/null 2>&1 || true
+echo ""
+echo "── hull tools install $PM_TOOL (musl platform archive set, LIVE download) ──"
+OUT=$("$HULL" tools install "$PM_TOOL" 2>&1); RC=$?
+echo "$OUT" | sed 's/^/    /'
+assert "exits 0"                       [ "$RC" -eq 0 ]
+assert_contains "SHA-256 verified"     "$OUT" "SHA-256 verified"
+assert_contains "installed as bundle"  "$OUT" "(bundle)"
+assert "bundle dir created"            [ -d "$PM_DIR" ]
+assert "musl base extracted"           [ -f "$PM_DIR/libhull_platform.a" ]
+assert "musl slim base extracted"      [ -f "$PM_DIR/libhull_platform-slim.a" ]
+assert "musl lua runtime archive"      [ -f "$PM_DIR/libhull_feature-lua.a" ]
+OUT=$("$HULL" tools list 2>&1)
+assert_contains "list shows $PM_TOOL installed" "$OUT" "$PM_TOOL"
+echo "── hull tools uninstall $PM_TOOL ──"
+OUT=$("$HULL" tools uninstall "$PM_TOOL" 2>&1)
+assert_contains "musl set uninstalled" "$OUT" "uninstalled $PM_TOOL"
+assert "musl set dir removed"          [ ! -d "$PM_DIR" ]
+
 # Toolchain-free linker bundle: zig. A per-platform multi-file .tar bundle
 # published for all three native platforms (hull-zig-<platform>.tar) - the
 # largest tool asset (~330 MB), so it also exercises the raised download cap.

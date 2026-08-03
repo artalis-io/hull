@@ -73,6 +73,38 @@ static const HlToolSpec REGISTRY[] = {
         .is_bundle         = 1,
         .bundle_entry      = "crt1.o",
     },
+    /* The musl-built Hull platform archive SET (libhull_platform.a + slim +
+     * every libhull_feature-*.a) for `hull build --target=<arch>-linux-musl`
+     * (cross via zig) or `--linker=lld-static` (Tier B). The counterpart of the
+     * libc-musl floor above: the floor is the musl libc, this is Hull's own
+     * archives, musl-built. A data-only bundle extracting to $HOME/.hull/tools/
+     * platform-musl-<arch>/; build.lua resolves the dir via the sentinel
+     * bundle_entry libhull_platform.a. Unlike the floor (on-musl-host only),
+     * this is a CROSS-target asset: you install it on ANY native host to
+     * cross-build TO musl, so all three native platforms can fetch it (the tar
+     * bytes are host-independent). No cosmo (a fat APE can't drive a native
+     * cross tree). Asset: hull-platform-musl-<arch>.tar. See docs/musl_build.md
+     * + audit #4c. */
+    {
+        .name              = "platform-musl-x86_64",
+        .description       = "musl-built Hull platform archive set for "
+                             "`hull build --target=x86_64-linux-musl`.",
+        .has_linux_x86_64  = 1,
+        .has_linux_aarch64 = 1,
+        .has_darwin_arm64  = 1,
+        .is_bundle         = 1,
+        .bundle_entry      = "libhull_platform.a", /* data-only; dir sentinel */
+    },
+    {
+        .name              = "platform-musl-aarch64",
+        .description       = "musl-built Hull platform archive set for "
+                             "`hull build --target=aarch64-linux-musl`.",
+        .has_linux_x86_64  = 1,
+        .has_linux_aarch64 = 1,
+        .has_darwin_arm64  = 1,
+        .is_bundle         = 1,
+        .bundle_entry      = "libhull_platform.a",
+    },
     /* The toolchain-free LINKER for `hull build --linker=zig --target=<triple>`.
      * A multi-file tree shipped as a per-platform bundle (arch-free name, one
      * artifact per native platform -> hull-zig-<platform>.tar). The bundle

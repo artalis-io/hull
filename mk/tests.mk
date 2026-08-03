@@ -729,6 +729,14 @@ e2e-cross-build:
 e2e-musl:
 	sh tests/e2e_musl.sh
 
+# The musl CROSS-build loop (audit #4c): a glibc host builds the musl archive set
+# (scripts/build_musl_platform.sh, Alpine), stages it + zig, then
+# `hull build --target=x86_64-linux-musl --linker=zig` a compute app and RUNS the
+# static musl result in Alpine. Linux x86_64 + Docker + zig; skips elsewhere. An
+# EMBED_PLATFORM hull is needed to compose, so it depends on the platform lib.
+e2e-musl-cross: $(BUILDDIR)/hull $(BUILDDIR)/libhull_platform.a
+	sh tests/e2e_musl_cross.sh
+
 # Assemble a self-contained musl static-link floor (crt*.o + libc.a + libgcc.a)
 # for Tier B (`hull build --linker=lld-static`) - the contents of a
 # `hull tools install libc-musl-<arch>` bundle. Run on a musl host (Alpine).

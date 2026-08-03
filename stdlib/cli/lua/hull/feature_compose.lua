@@ -129,6 +129,15 @@ end
 -- @return string, string    (path, "local"|"cache") on success.
 -- @return nil, string       (nil, "cache-verify-failed"|"not-found") on failure.
 function M.resolve_lib(libname, asset_name, ctx)
+    -- Musl cross-target: the archives come from an installed musl bundle
+    -- (`hull tools install platform-musl-<arch>` -> ctx.musl_dir), not the
+    -- glibc copy embedded in this hull. Takes precedence over every other
+    -- source; the embedded extract above is gated off (and not ctx.musl_dir).
+    -- Trust: the whole bundle tar was release-signed + SHA-256-verified at
+    -- install (hull.sha256), same as the libc-musl floor. See docs/musl_build.md.
+    if ctx.musl_dir and file_exists(ctx.musl_dir .. "/" .. libname) then
+        return ctx.musl_dir .. "/" .. libname, "musl"
+    end
     for _, d in ipairs({ ctx.hull_dir or "", "build/", "../build/" }) do
         if file_exists(d .. libname) then return d .. libname, "local" end
     end
@@ -203,7 +212,7 @@ function M.resolve_runtime_lib(rt, tmpdir, ctx)
     local libname = "libhull_feature-" .. rt .. ".a"
     -- 1. Embedded in this hull (the distributed native path): extract it.
     if tool.extract_feature_runtime and tool.extract_feature_runtime(tmpdir, rt)
-       and file_exists(tmpdir .. "/" .. libname) then
+       and file_exists(tmpdir .. "/" .. libname) and not ctx.musl_dir then
         return tmpdir .. "/" .. libname, "embedded"
     end
     -- 2/3. Local build dirs, then the signed feature cache.
@@ -226,7 +235,7 @@ function M.resolve_http_lib(tmpdir, ctx)
     local libname = "libhull_feature-http.a"
     -- 1. Embedded in this hull (the distributed native path): extract it.
     if tool.extract_feature_http and tool.extract_feature_http(tmpdir)
-       and file_exists(tmpdir .. "/" .. libname) then
+       and file_exists(tmpdir .. "/" .. libname) and not ctx.musl_dir then
         return tmpdir .. "/" .. libname, "embedded"
     end
     -- 2/3. Local build dirs, then the signed feature cache.
@@ -240,7 +249,7 @@ end
 function M.resolve_keel_lib(tmpdir, ctx)
     local libname = "libhull_feature-keel.a"
     if tool.extract_feature_keel and tool.extract_feature_keel(tmpdir)
-       and file_exists(tmpdir .. "/" .. libname) then
+       and file_exists(tmpdir .. "/" .. libname) and not ctx.musl_dir then
         return tmpdir .. "/" .. libname, "embedded"
     end
     local asset = ctx.plat and ("libhull_feature-keel-" .. ctx.plat .. ".a") or nil
@@ -264,7 +273,7 @@ function M.resolve_http_rt_lib(rt, tmpdir, ctx)
     local libname = "libhull_feature-http-" .. rt .. ".a"
     -- 1. Embedded in this hull (the distributed native path): extract it.
     if tool.extract_feature_http_rt and tool.extract_feature_http_rt(tmpdir, rt)
-       and file_exists(tmpdir .. "/" .. libname) then
+       and file_exists(tmpdir .. "/" .. libname) and not ctx.musl_dir then
         return tmpdir .. "/" .. libname, "embedded"
     end
     -- 2/3. Local build dirs, then the signed feature cache.
@@ -287,7 +296,7 @@ end
 function M.resolve_tui_rt_lib(rt, tmpdir, ctx)
     local libname = "libhull_feature-tui-" .. rt .. ".a"
     if tool.extract_feature_tui_rt and tool.extract_feature_tui_rt(tmpdir, rt)
-       and file_exists(tmpdir .. "/" .. libname) then
+       and file_exists(tmpdir .. "/" .. libname) and not ctx.musl_dir then
         return tmpdir .. "/" .. libname, "embedded"
     end
     local asset = ctx.plat and ("libhull_feature-tui-" .. rt .. "-" .. ctx.plat .. ".a") or nil
@@ -301,7 +310,7 @@ end
 function M.resolve_wasm_lib(tmpdir, ctx)
     local libname = "libhull_feature-wasm.a"
     if tool.extract_feature_wasm and tool.extract_feature_wasm(tmpdir)
-       and file_exists(tmpdir .. "/" .. libname) then
+       and file_exists(tmpdir .. "/" .. libname) and not ctx.musl_dir then
         return tmpdir .. "/" .. libname, "embedded"
     end
     local asset = ctx.plat and ("libhull_feature-wasm-" .. ctx.plat .. ".a") or nil
@@ -314,7 +323,7 @@ end
 function M.resolve_wasm_rt_lib(rt, tmpdir, ctx)
     local libname = "libhull_feature-wasm-" .. rt .. ".a"
     if tool.extract_feature_wasm_rt and tool.extract_feature_wasm_rt(tmpdir, rt)
-       and file_exists(tmpdir .. "/" .. libname) then
+       and file_exists(tmpdir .. "/" .. libname) and not ctx.musl_dir then
         return tmpdir .. "/" .. libname, "embedded"
     end
     local asset = ctx.plat and ("libhull_feature-wasm-" .. rt .. "-" .. ctx.plat .. ".a") or nil
@@ -330,7 +339,7 @@ end
 function M.resolve_sqlite_lib(tmpdir, ctx)
     local libname = "libhull_feature-sqlite.a"
     if tool.extract_feature_sqlite and tool.extract_feature_sqlite(tmpdir)
-       and file_exists(tmpdir .. "/" .. libname) then
+       and file_exists(tmpdir .. "/" .. libname) and not ctx.musl_dir then
         return tmpdir .. "/" .. libname, "embedded"
     end
     local asset = ctx.plat and ("libhull_feature-sqlite-" .. ctx.plat .. ".a") or nil
@@ -345,7 +354,7 @@ end
 function M.resolve_tls_lib(tmpdir, ctx)
     local libname = "libhull_feature-tls.a"
     if tool.extract_feature_tls and tool.extract_feature_tls(tmpdir)
-       and file_exists(tmpdir .. "/" .. libname) then
+       and file_exists(tmpdir .. "/" .. libname) and not ctx.musl_dir then
         return tmpdir .. "/" .. libname, "embedded"
     end
     local asset = ctx.plat and ("libhull_feature-tls-" .. ctx.plat .. ".a") or nil
@@ -359,7 +368,7 @@ end
 function M.resolve_sqlite_rt_lib(rt, tmpdir, ctx)
     local libname = "libhull_feature-sqlite-" .. rt .. ".a"
     if tool.extract_feature_sqlite_rt and tool.extract_feature_sqlite_rt(tmpdir, rt)
-       and file_exists(tmpdir .. "/" .. libname) then
+       and file_exists(tmpdir .. "/" .. libname) and not ctx.musl_dir then
         return tmpdir .. "/" .. libname, "embedded"
     end
     local asset = ctx.plat and ("libhull_feature-sqlite-" .. rt .. "-" .. ctx.plat .. ".a") or nil
@@ -374,7 +383,7 @@ end
 function M.resolve_image_lib(tmpdir, ctx)
     local libname = "libhull_feature-image.a"
     if tool.extract_feature_image and tool.extract_feature_image(tmpdir)
-       and file_exists(tmpdir .. "/" .. libname) then
+       and file_exists(tmpdir .. "/" .. libname) and not ctx.musl_dir then
         return tmpdir .. "/" .. libname, "embedded"
     end
     local asset = ctx.plat and ("libhull_feature-image-" .. ctx.plat .. ".a") or nil
@@ -387,7 +396,7 @@ end
 function M.resolve_image_rt_lib(rt, tmpdir, ctx)
     local libname = "libhull_feature-image-" .. rt .. ".a"
     if tool.extract_feature_image_rt and tool.extract_feature_image_rt(tmpdir, rt)
-       and file_exists(tmpdir .. "/" .. libname) then
+       and file_exists(tmpdir .. "/" .. libname) and not ctx.musl_dir then
         return tmpdir .. "/" .. libname, "embedded"
     end
     local asset = ctx.plat and ("libhull_feature-image-" .. rt .. "-" .. ctx.plat .. ".a") or nil
@@ -422,7 +431,8 @@ end
 --                   --start-group). runtime, tls, keel set it.
 function M.plan_mandatory(ctx)
     local rt = ctx.app_rt
-    local rctx = { hull_dir = ctx.hull_dir or "", plat = ctx.plat }
+    local rctx = { hull_dir = ctx.hull_dir or "", plat = ctx.plat,
+                   musl_dir = ctx.musl_dir }
     local plat_infix = ctx.plat or ""
 
     -- ── Compute the needs-gates (resolver + build-time signals) ──
@@ -454,6 +464,12 @@ function M.plan_mandatory(ctx)
     -- dropped them (HL_TLS_FEATURE=1 / HL_KEEL_FEATURE=1). Default to "present"
     -- (skip) on an unreadable/absent nm, so a stock full base is byte-identical.
     local function base_lacks(sym)
+        -- The musl base is always the SLIM base (build_musl_platform.sh runs
+        -- `make platform`, which is TLS-less + Keel-less), so it lacks every
+        -- dropped symbol - compose tls/keel whenever needed. Special-cased
+        -- because a cross-libc `nm` probe (macOS host reading a Linux/musl ELF
+        -- archive) is unreliable; assuming "present" there would under-compose.
+        if ctx.musl_dir then return true end
         local out = tool.spawn_read({ "nm", ctx.platform_lib })
         return out and not out:find(sym, 1, true)
     end

@@ -874,7 +874,7 @@ local function compose_features(opts, tmpdir, platform_lib, is_cosmo, compute_fi
             else
                 record_composed(asset or libname, dest, "release")
             end
-            local is_darwin = plat and plat:sub(1, 6) == "darwin"
+            local is_darwin = target_spec(opts).fmt == "macho"  -- target, not host (#4c)
 
             if spec.whole_archive then
                 -- Force-load the whole archive: its strong overrides of the
@@ -1002,7 +1002,31 @@ local function compose_features(opts, tmpdir, platform_lib, is_cosmo, compute_fi
             -- disk either way for provenance / debugging.
             write_file(tmpdir .. "/app_feature_registry.c",
                        fcompose.gen_app_registry_c(app_rt))
-            if opts.no_compiler then
+            if opts.musl_dir then
+                -- Cross-target (audit #4c): the bundled app_feature_registry.o is
+                -- host-arch; compile the (self-contained, no-libc-headers)
+                -- generated registry FOR the target with zig, exactly like
+                -- app_main.o. These are the only two link objects obj_emit can't
+                -- produce (compiled C, not an emitted data table).
+                local zig = tool.find_tool and tool.find_tool("zig")
+                if not zig or zig == "" then
+                    tool.stderr("hull build: --target=" .. opts.target
+                        .. " needs zig to compile app_feature_registry.o.\n"
+                        .. "hint: `hull tools install zig`\n")
+                    tool.rmdir(tmpdir); tool.exit(1)
+                end
+                local triple = target_spec(opts).triple
+                local zcache = { ZIG_GLOBAL_CACHE_DIR = tmpdir .. "/zig-cache",
+                                 ZIG_LOCAL_CACHE_DIR = tmpdir .. "/zig-cache" }
+                local ok_fr = tool.spawn({ zig, "cc", "--target=" .. triple, "-O2",
+                    "-c", tmpdir .. "/app_feature_registry.c",
+                    "-o", tmpdir .. "/app_feature_registry.o" }, zcache)
+                if not ok_fr then
+                    tool.stderr("hull build: failed to cross-compile "
+                        .. "app_feature_registry.o for " .. triple .. " with zig\n")
+                    tool.rmdir(tmpdir); tool.exit(1)
+                end
+            elseif opts.no_compiler then
                 local afr = tool.bundled_object("app_feature_registry_" .. app_rt)
                 if not afr then
                     tool.stderr("hull build --no-compiler: no bundled app_feature_registry for runtime '"
@@ -1028,11 +1052,14 @@ local function compose_features(opts, tmpdir, platform_lib, is_cosmo, compute_fi
             local rt_plat = tool.platform_name and tool.platform_name() or nil
             local rt_hull_dir = ""
             if __hull_exe then rt_hull_dir = __hull_exe:match("(.*/)") or "" end
-            local is_darwin = rt_plat and rt_plat:sub(1, 6) == "darwin"
+            -- Target format, not host: a musl cross FROM macOS whole-archives
+            -- ELF (--whole-archive), not Mach-O (-force_load). Audit #4c.
+            local is_darwin = target_spec(opts).fmt == "macho"
 
             local plan = fcompose.plan_mandatory({
                 app_dir = opts.app_dir, app_rt = app_rt, tmpdir = tmpdir,
                 hull_dir = rt_hull_dir, plat = rt_plat, platform_lib = platform_lib,
+                musl_dir = opts.musl_dir,
                 compute_count = #compute_files, with = opts.with, flavor = opts.flavor,
                 with_list = with_feature_list(opts),
                 on_fail = function(msg)
@@ -1072,6 +1099,28 @@ end
 local function prepare_platform(opts, tmpdir, cc, is_cosmo, flavor_asset)
     local platform_extracted = false
     local platform_lib = tmpdir .. "/libhull_platform.a"
+
+    -- Musl cross-target (audit #4c): the base comes from the installed musl
+    -- archive set (opts.musl_dir, from `hull tools install platform-musl-<arch>`),
+    -- NOT the glibc lib embedded in this hull. platform_sig_blob is left nil so
+    -- no gethull/composed block is written: the running (glibc) hull's manifest
+    -- can't attest a musl archive it doesn't embed, and the musl base is itself
+    -- HL_EMBED_PLATFORM_SIG=0, so §5c is present-gated off in the produced app
+    -- (trust comes from the release-signed install + the developer app
+    -- signature). The feature archives resolve from the same dir via
+    -- feature_compose's ctx.musl_dir.
+    if opts.musl_dir then
+        local src = opts.musl_dir .. "/libhull_platform.a"
+        if not file_exists(src) then
+            tool.stderr("hull build: musl platform lib not found at " .. src
+                .. "\nhint: re-run `hull tools install platform-musl-"
+                .. target_spec(opts).arch .. "`\n")
+            tool.rmdir(tmpdir)
+            tool.exit(1)
+        end
+        tool.copy(src, platform_lib)
+        return platform_lib, nil, nil, nil
+    end
 
     -- --flavor: link a locally-built non-default platform lib instead of the
     -- embedded (full) one. The flavor lib isn't covered by the signed
@@ -1623,7 +1672,34 @@ local function main()
         local pn = tool.platform_name() or ""
         local nat_fmt = (pn:sub(1, 6) == "darwin") and "macho" or "elf"
         local nat_arch = (pn:find("aarch64") or pn:find("arm64")) and "aarch64" or "x86_64"
-        if ts.arch ~= nat_arch or ts.fmt ~= nat_fmt then
+        local is_musl = ts.os == "linux" and opts.target:match("%-musl$") ~= nil
+        if is_musl then
+            -- Cross-build to musl (audit #4c). Select the installed musl platform
+            -- archive set (`hull tools install platform-musl-<arch>` ->
+            -- ~/.hull/tools/platform-musl-<arch>/, resolved via the sentinel
+            -- bundle_entry). A cross-capable linker does the link: `--linker=zig`
+            -- bundles musl libc; `--linker=lld-static` uses the libc-musl floor.
+            -- The archive set was release-signed + SHA-256-verified at install
+            -- (hull.sha256), so it is trusted; the runtime platform-sig
+            -- cross-attest (§5c) is skipped for cross in prepare_platform.
+            -- hl_tools_lookup_path returns the bundle DIR for this data-only
+            -- bundle: the sentinel (libhull_platform.a) isn't executable, so the
+            -- bundle_entry X_OK probe misses and it falls through to the
+            -- $HOME/.hull/tools/<name> dir (searchable → X_OK on the dir). So the
+            -- returned path IS ~/.hull/tools/platform-musl-<arch>, used as-is.
+            local bundle = "platform-musl-" .. ts.arch
+            local dir = tool.find_tool and tool.find_tool(bundle)
+            if dir and dir ~= "" and file_exists(dir .. "/libhull_platform.a") then
+                opts.musl_dir = dir
+            end
+            if not opts.musl_dir then
+                tool.stderr("hull build: --target=" .. opts.target
+                    .. " needs the musl platform archives, which are not installed.\n"
+                    .. "hint: `hull tools install " .. bundle
+                    .. "`  then build with `--linker=zig`.\n")
+                tool.exit(1)
+            end
+        elseif ts.arch ~= nat_arch or ts.fmt ~= nat_fmt then
             tool.stderr("hull build: cross-compilation to '" .. (ts.triple or ts.arch)
                 .. "' is not yet supported - the platform library is built for the "
                 .. "host (" .. nat_arch .. "/"
@@ -1862,12 +1938,44 @@ int main(int argc, char **argv) { return hl_app_run(argc, argv); }
         end
         write_file(tmpdir .. "/app_registry.o", obj)
 
-        local am = tool.bundled_object("app_main")
-        if not am then
-            tool.stderr("hull build --no-compiler: this hull has no bundled app_main.o\n")
-            tool.rmdir(tmpdir); tool.exit(1)
+        if opts.musl_dir then
+            -- Cross-target (audit #4c): the bundled app_main.o is host-arch
+            -- (Mach-O/arm64 or the host ELF), incompatible with the ELF/musl
+            -- target - so compile the tiny entry trampoline FOR the target with
+            -- the zig linker's zig (`zig cc --target=<triple> -c`). zig bundles
+            -- clang + the target crt/libc headers, so no host toolchain and no
+            -- second linker is involved. This is the one object obj_emit can't
+            -- produce (it's compiled C, not an emitted data table).
+            local zig = tool.find_tool and tool.find_tool("zig")
+            if not zig or zig == "" then
+                tool.stderr("hull build: --target=" .. opts.target
+                    .. " compiles the entry trampoline for the target with zig,\n"
+                    .. "which was not found. hint: `hull tools install zig`\n")
+                tool.rmdir(tmpdir); tool.exit(1)
+            end
+            write_file(tmpdir .. "/app_main.c", app_main)
+            local triple = target_spec(opts).triple
+            -- Redirect zig's cache into the build tmpdir (under /tmp, which the
+            -- tool-mode sandbox unveils rwcx); zig's default ~/.cache/zig /
+            -- ./.zig-cache are NOT sandbox-writable, so a `zig cc -c` under the
+            -- build sandbox fails AccessDenied without this. (#4c)
+            local zcache = { ZIG_GLOBAL_CACHE_DIR = tmpdir .. "/zig-cache",
+                             ZIG_LOCAL_CACHE_DIR = tmpdir .. "/zig-cache" }
+            local ok_am = tool.spawn({ zig, "cc", "--target=" .. triple, "-O2",
+                "-c", tmpdir .. "/app_main.c", "-o", tmpdir .. "/app_main.o" }, zcache)
+            if not ok_am then
+                tool.stderr("hull build: failed to cross-compile app_main.o for "
+                    .. triple .. " with zig\n")
+                tool.rmdir(tmpdir); tool.exit(1)
+            end
+        else
+            local am = tool.bundled_object("app_main")
+            if not am then
+                tool.stderr("hull build --no-compiler: this hull has no bundled app_main.o\n")
+                tool.rmdir(tmpdir); tool.exit(1)
+            end
+            write_file(tmpdir .. "/app_main.o", am)
         end
-        write_file(tmpdir .. "/app_main.o", am)
     else
         -- Generate unified app_registry.c
         local registry_c = generate_app_registry(opts.app_dir, app_files)
@@ -1919,7 +2027,9 @@ int main(int argc, char **argv) { return hl_app_run(argc, argv); }
     -- archives in --start-group/--end-group (ld iterates to a fixed point).
     -- GNU ld / lld only: macOS ld64 rescans archives natively AND rejects
     -- --start-group ("unknown option"), so it's gated off for a darwin target.
-    local target_is_darwin = (tool.platform_name() or ""):sub(1, 6) == "darwin"
+    -- Keyed on the TARGET format, not the host: a musl cross-build FROM macOS
+    -- links an ELF target that DOES need --start-group (audit #4c).
+    local target_is_darwin = target_spec(opts).fmt == "macho"
     local group = needs_base_group and not target_is_darwin
     local link_libs = {}
     if group then link_libs[#link_libs + 1] = "-Wl,--start-group" end
