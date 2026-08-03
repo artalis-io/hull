@@ -51,6 +51,22 @@ explicit name. Adding lld/mold is a new backend behind this vtable + a
 
 ## Axis 1 - the linker as a Hull tool (`hull tools install lld`)
 
+> **STATUS (SHIPPED):** `lld` AND `zig` are registered installable tools -
+> `hull tools install lld` / `hull tools install zig`. Both are **per-platform
+> bundles** (`.is_bundle` + `.bundle_per_platform` in the registry): a multi-file
+> tree published as `hull-<name>-<platform>.tar` that extracts to
+> `$HOME/.hull/tools/<name>/`, with the driver at `<name>/<bundle_entry>` (`lld`
+> / `zig`) resolved by `hl_tools_lookup_path`. Release producers:
+> `scripts/build_zig_bundle.sh` (repacks the official ziglang.org tree - self-
+> contained, symlink-free) and `scripts/build_lld_bundle.sh` (packs the lld
+> personalities `lld`+`ld.lld`+`ld64.lld`+`wasm-ld`, symlinks deref'd to copies;
+> sources from the distro/Homebrew lld-18 via `LLD_SRC_DIR`, or an LLVM-release
+> download). Both jobs live in `release.yml` and each tar's SHA-256 is in the
+> signed `hull.sha256` (same trust chain as `wamrc`). Native-only (a cosmo fat
+> APE can't drive a native tree). `mold` is not yet registered. Caveat: the
+> lld bundle links against the release runner's libc (a later refinement can
+> source the LLVM-official ubuntu-18.04-floor build for wider portability).
+
 `lld` is LLVM's linker: one binary that is `ld.lld` (ELF), `ld64.lld`
 (Mach-O), and `lld-link` (COFF/PE) depending on how it is invoked. `mold` is
 a faster ELF/Mach-O linker. Both are far too large to embed in `hull`
