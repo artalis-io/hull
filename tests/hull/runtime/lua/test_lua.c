@@ -3767,6 +3767,68 @@ UTEST(lua_stdlib, csv_encode_sanitize_formulas)
     cleanup_lua();
 }
 
+/* ── hull.archive.tar tests (parse/create marshalling) ──────────────── */
+
+UTEST(lua_stdlib, tar_create_parse_roundtrip)
+{
+    init_lua();
+    ASSERT_TRUE(lua_initialized);
+
+    /* create -> parse must recover names, data, dir flag, and mode. */
+    int ok = eval_int(
+        "(function() "
+        "  local tar = require('hull.archive.tar') "
+        "  local b = tar.create({ "
+        "     { name='greet.txt', data='hello', mode=420 }, "     /* 0644 */
+        "     { name='sub', is_dir=true, mode=493 }, "            /* 0755 */
+        "     { name='sub/x.bin', data='\\0\\1\\2' } }) "
+        "  local e = tar.parse(b) "
+        "  return (#e==3 and e[1].name=='greet.txt' and e[1].data=='hello' "
+        "          and e[1].mode==420 and e[2].is_dir==true "
+        "          and e[3].name=='sub/x.bin' and #e[3].data==3) and 1 or 0 "
+        "end)()");
+    ASSERT_EQ(ok, 1);
+
+    cleanup_lua();
+}
+
+UTEST(lua_stdlib, tar_parse_rejects_truncated)
+{
+    init_lua();
+    ASSERT_TRUE(lua_initialized);
+
+    /* A valid archive truncated mid-data: the 512-byte header declares a
+     * 1000-byte member but the buffer is cut short, so parse returns
+     * (nil, err) rather than reading past the end. */
+    int ok = eval_int(
+        "(function() "
+        "  local tar = require('hull.archive.tar') "
+        "  local b = tar.create({ { name='f', data=string.rep('x', 1000) } }) "
+        "  local r, err = tar.parse(b:sub(1, 600)) "
+        "  return (r == nil and type(err) == 'string') and 1 or 0 "
+        "end)()");
+    ASSERT_EQ(ok, 1);
+
+    cleanup_lua();
+}
+
+UTEST(lua_stdlib, tar_create_rejects_unsafe_name)
+{
+    init_lua();
+    ASSERT_TRUE(lua_initialized);
+
+    /* An absolute / ".." member name is refused by the writer. */
+    int ok = eval_int(
+        "(function() "
+        "  local tar = require('hull.archive.tar') "
+        "  local r = tar.create({ { name='../escape', data='x' } }) "
+        "  return (r == nil) and 1 or 0 "
+        "end)()");
+    ASSERT_EQ(ok, 1);
+
+    cleanup_lua();
+}
+
 /* ── hull.search tests ───────────────────────────────────────────────── */
 
 UTEST(lua_stdlib, search_create_and_query)

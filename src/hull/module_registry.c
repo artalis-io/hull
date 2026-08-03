@@ -46,6 +46,18 @@ static const HlModuleSpec REGISTRY[] = {
 
     /* ── C-native side-effect modules + cross-cutting utilities ───── */
     {
+        /* ustar archive parse/create/extract/pack. Namespaced under
+         * hull/archive/ as the container-format family (zip/etc. would
+         * be siblings; stream codecs live under a separate hull/compress/).
+         * parse/create are pure byte<->table transforms (no authority);
+         * extract/pack compose the fs capability, so they need
+         * manifest.fs.write / fs.read at call time (gated independently,
+         * not a module dep). */
+        .name = "hull/archive/tar",
+        .api_major = 1, .intrinsic = 0, .pure = 0,
+        .required_caps = 0, .deps = {0},
+    },
+    {
         /* Attachment storage: content-addressed disk via hull/blob,
          * metadata + dedup-by-refcount via hull/db. Flat top-level
          * (not under hull/web/) — the core API (store/read/metadata/

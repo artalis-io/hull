@@ -1995,6 +1995,80 @@ UTEST(js_cap, crypto_base64url_encode_arraybuffer)
 
 /* ── hull:qrcode tests ─────────────────────────────────────────────────── */
 
+/* ── hull:archive:tar tests (parse/create marshalling) ──────────────── */
+
+UTEST(js_stdlib, tar_create_parse_roundtrip)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+
+    const char *code =
+        "import { tar } from 'hull:archive:tar';\n"
+        "const ascii = (ab) => String.fromCharCode.apply(null, new Uint8Array(ab));\n"
+        "const b = tar.create([\n"
+        "  { name: 'greet.txt', data: 'hello', mode: 0o644 },\n"
+        "  { name: 'sub', isDir: true, mode: 0o755 },\n"
+        "  { name: 'sub/x.bin', data: 'abc' },\n"
+        "]);\n"
+        "const e = tar.parse(b);\n"
+        "globalThis.__tar_ok = (e.length === 3 && e[0].name === 'greet.txt' &&\n"
+        "  ascii(e[0].data) === 'hello' && e[0].mode === 0o644 &&\n"
+        "  e[1].isDir === true && e[2].name === 'sub/x.bin' &&\n"
+        "  e[2].data.byteLength === 3) ? 1 : 0;\n";
+    JSValue val = JS_Eval(js.ctx, code, strlen(code), "<test>",
+                          JS_EVAL_TYPE_MODULE);
+    if (JS_IsException(val)) hl_js_dump_error(&js);
+    JS_FreeValue(js.ctx, val);
+    hl_js_run_jobs(&js);
+
+    ASSERT_EQ(eval_int("globalThis.__tar_ok"), 1);
+    cleanup_js_caps();
+}
+
+UTEST(js_stdlib, tar_parse_rejects_truncated)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+
+    /* A valid archive truncated mid-data throws rather than over-reading. */
+    const char *code =
+        "import { tar } from 'hull:archive:tar';\n"
+        "let threw = 0;\n"
+        "const b = tar.create([{ name: 'f', data: 'x'.repeat(1000) }]);\n"
+        "try { tar.parse(b.slice(0, 600)); }\n"
+        "catch (e) { threw = 1; }\n"
+        "globalThis.__tar_threw = threw;\n";
+    JSValue val = JS_Eval(js.ctx, code, strlen(code), "<test>",
+                          JS_EVAL_TYPE_MODULE);
+    if (JS_IsException(val)) hl_js_dump_error(&js);
+    JS_FreeValue(js.ctx, val);
+    hl_js_run_jobs(&js);
+
+    ASSERT_EQ(eval_int("globalThis.__tar_threw"), 1);
+    cleanup_js_caps();
+}
+
+UTEST(js_stdlib, tar_create_rejects_unsafe_name)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+
+    const char *code =
+        "import { tar } from 'hull:archive:tar';\n"
+        "let threw = 0;\n"
+        "try { tar.create([{ name: '../escape', data: 'x' }]); }\n"
+        "catch (e) { threw = 1; }\n"
+        "globalThis.__tar_unsafe = threw;\n";
+    JSValue val = JS_Eval(js.ctx, code, strlen(code), "<test>",
+                          JS_EVAL_TYPE_MODULE);
+    if (JS_IsException(val)) hl_js_dump_error(&js);
+    JS_FreeValue(js.ctx, val);
+    hl_js_run_jobs(&js);
+
+    ASSERT_EQ(eval_int("globalThis.__tar_unsafe"), 1);
+    cleanup_js_caps();
+}
+
 UTEST(js_stdlib, qrcode_hello_v1)
 {
     init_js_with_caps();
