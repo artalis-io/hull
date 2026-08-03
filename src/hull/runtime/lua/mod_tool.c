@@ -117,7 +117,11 @@ static int l_tool_spawn(lua_State *L)
         if (!envadd) { free(argv); return luaL_error(L, "tool.spawn: oom"); }
         lua_pushnil(L);
         while (lua_next(L, 2) != 0) {
-            const char *k = lua_tostring(L, -2);
+            /* Only string KEYS: never call lua_tostring on the key during a
+             * lua_next walk (it converts a numeric key in place and can then
+             * corrupt the traversal - a documented Lua footgun). An env-var name
+             * is always a string anyway; a non-string key is skipped. */
+            const char *k = (lua_type(L, -2) == LUA_TSTRING) ? lua_tostring(L, -2) : NULL;
             const char *v = lua_tostring(L, -1);
             if (k && v) {
                 size_t len = strlen(k) + 1 + strlen(v) + 1;
