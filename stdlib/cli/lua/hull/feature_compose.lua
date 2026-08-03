@@ -21,7 +21,56 @@
 
 local M = {}
 
+local json = require("hull.json")
+
 local function file_exists(p) return tool.file_exists(p) end
+
+-- ── App manifest extraction (shared by build + eject) ────────────────
+--
+-- Runs the app entry to capture its app.manifest({...}). EXECUTING app.lua a
+-- second time corrupts the sign flow, so the result is cached per app_dir (each
+-- `hull build`/`hull eject` is a fresh process, so this is a per-invocation
+-- cache). Both `hull build` and the mandatory-compose plan below read the
+-- manifest; centralizing avoids running the app twice and keeps one impl.
+--
+-- @param app_dir string
+-- @return table|nil  The captured manifest, or nil if extraction failed.
+local _manifest_cache = {}
+function M.extract_manifest(app_dir)
+    local cached = _manifest_cache[app_dir]
+    if cached ~= nil then return cached.manifest end
+    local manifest = nil
+    local lua_entry = app_dir .. "/app.lua"
+    local js_entry  = app_dir .. "/app.js"
+    if file_exists(lua_entry) then
+        local chunk = tool.loadfile(lua_entry)
+        if chunk then
+            local ok, err = pcall(chunk)
+            if ok then
+                manifest = app.get_manifest()
+            else
+                tool.stderr("hull: warning: Lua manifest extraction failed: "
+                            .. tostring(err) .. "\n")
+            end
+        end
+    elseif file_exists(js_entry) then
+        local ok, js_json_or_err = pcall(tool.extract_manifest_js, js_entry)
+        if not ok then
+            tool.stderr("hull: warning: JS manifest extraction failed: "
+                        .. tostring(js_json_or_err) .. "\n")
+        elseif js_json_or_err then
+            local decoded, decode_err = json.decode(js_json_or_err)
+            if decoded then
+                manifest = decoded
+            else
+                tool.stderr("hull: warning: JS manifest JSON decode failed: "
+                            .. tostring(decode_err) .. "\n")
+            end
+        end
+    end
+    _manifest_cache[app_dir] = { manifest = manifest }
+    return manifest
+end
 
 -- ── App runtime detection ────────────────────────────────────────────
 
@@ -343,6 +392,152 @@ function M.resolve_image_rt_lib(rt, tmpdir, ctx)
     end
     local asset = ctx.plat and ("libhull_feature-image-" .. rt .. "-" .. ctx.plat .. ".a") or nil
     return M.resolve_lib(libname, asset, ctx)
+end
+
+-- ── The mandatory auto-composed archive plan ─────────────────────────
+--
+-- The native SLIM base drops runtime + http core + per-runtime web bindings +
+-- wasm(+bridge) + sqlite-rt bridge + image(+bridge) + tls + keel, and the
+-- produced app composes back exactly what it uses. Both `hull build` (links the
+-- archives directly) and `hull eject` (copies them into the ejected project +
+-- emits Makefile link flags) need the SAME ordered set. This function is that
+-- single source of truth: it computes the needs-gates + nm-probes ONCE and
+-- returns the resolved, ORDERED descriptor list. Before this, build.lua composed
+-- all 8 while eject.lua composed only runtime+http — the exact drift the module
+-- header warns about, one level up (the ladder was shared, the decision to
+-- invoke each rung was not).
+--
+-- @param ctx table Fields:
+--   app_dir, app_rt ("lua"|"js"), hull_dir, plat, platform_lib,
+--   compute_count (int, # of compute/*.wasm), with (opts.with table|nil),
+--   flavor, with_list (array for tool.modules_resolve),
+--   on_fail = function(msg)  (caller's cleanup+exit; must not return).
+-- @return table { list = { desc, ... }, needs_http = bool }
+--   desc = { record_name, lib, path, sets_base_group, is_rt, label }
+--     record_name : the composed-asset name (with the .<plat>. infix) for
+--                   package.sig attestation + the caller's provenance.
+--     lib         : the archive filename (no plat), the copy destination stem.
+--     path        : the resolved source archive path.
+--     sets_base_group : true iff the archive refs base/Keel symbols (GNU-ld
+--                   --start-group). runtime, tls, keel set it.
+function M.plan_mandatory(ctx)
+    local rt = ctx.app_rt
+    local rctx = { hull_dir = ctx.hull_dir or "", plat = ctx.plat }
+    local plat_infix = ctx.plat or ""
+
+    -- ── Compute the needs-gates (resolver + build-time signals) ──
+    -- needs_http defaults true (fail safe: never under-compose serving); the
+    -- resolver flips it false for a pure app.main/compute app.
+    local needs_http = true
+    -- needs_wasm S2: the app ships compute/*.wasm (catches a WASM-backed db.udf
+    -- that declares no module). S1 (a declared WASM cap) ORs in from the resolver.
+    local needs_wasm = (ctx.compute_count or 0) > 0
+    local needs_sqlite, needs_image, needs_tls = false, false, false
+    do
+        local mf = M.extract_manifest(ctx.app_dir)
+        if mf then
+            local r = tool.modules_resolve(mf, ctx.flavor, ctx.with_list)
+            if r.ok then
+                if r.needs_http ~= nil then needs_http = r.needs_http end
+                if r.needs_wasm then needs_wasm = true end
+                if r.needs_sqlite then needs_sqlite = true end
+                if r.needs_image then needs_image = true end
+                if r.needs_tls then needs_tls = true end
+            end
+        end
+    end
+    -- A net-DB --with backend (postgres/mysql) links the shared tls_client for
+    -- sslmode, so composing it onto a TLS-less base needs the TLS feature too.
+    if ctx.with and (ctx.with.postgres or ctx.with.mysql) then needs_tls = true end
+
+    -- Base-presence nm-probes: compose tls/keel ONLY when the base actually
+    -- dropped them (HL_TLS_FEATURE=1 / HL_KEEL_FEATURE=1). Default to "present"
+    -- (skip) on an unreadable/absent nm, so a stock full base is byte-identical.
+    local function base_lacks(sym)
+        local out = tool.spawn_read({ "nm", ctx.platform_lib })
+        return out and not out:find(sym, 1, true)
+    end
+
+    local list = {}
+    local function add(spec)
+        -- spec: { name (stem), lib, path, sets_base_group, label }
+        list[#list + 1] = {
+            record_name    = "libhull_feature-" .. spec.name .. "." .. plat_infix .. ".a",
+            lib            = spec.lib,
+            path           = spec.path,
+            sets_base_group = spec.sets_base_group or false,
+            label          = spec.label,
+        }
+    end
+    -- Resolve one archive, failing CLOSED via ctx.on_fail with a specific hint.
+    -- `make_stem` names the `make feature-<stem>` build-from-source hint.
+    local function resolve(kind, make_stem, fn, ...)
+        local path, from = fn(...)
+        if not path then
+            local why = (from == "cache-verify-failed")
+                and " (cache re-verify failed)" or " (normally embedded in hull)"
+            ctx.on_fail("hull build: the " .. kind .. " feature lib was not found"
+                        .. why .. "\nhint: build it from source with `make feature-"
+                        .. make_stem .. "`\n")
+        end
+        return path
+    end
+
+    -- 1. Runtime (always; the base is runtime-less). refs base symbols -> group.
+    add({ name = rt, lib = "libhull_feature-" .. rt .. ".a", sets_base_group = true,
+          label = "runtime '" .. rt .. "'",
+          path = resolve("'" .. rt .. "' runtime", rt, M.resolve_runtime_lib, rt, ctx.tmpdir, rctx) })
+
+    -- 2. WASM core + per-runtime compute bridge.
+    if needs_wasm then
+        add({ name = "wasm", lib = "libhull_feature-wasm.a", label = "WASM feature",
+              path = resolve("WASM", "wasm", M.resolve_wasm_lib, ctx.tmpdir, rctx) })
+        add({ name = "wasm-" .. rt, lib = "libhull_feature-wasm-" .. rt .. ".a",
+              label = "compute bridge",
+              path = resolve("compute-bindings", "wasm-" .. rt, M.resolve_wasm_rt_lib, rt, ctx.tmpdir, rctx) })
+    end
+
+    -- 3. Per-runtime SQLite UDF bridge (the engine itself is a --with feature).
+    if needs_sqlite then
+        add({ name = "sqlite-" .. rt, lib = "libhull_feature-sqlite-" .. rt .. ".a",
+              label = "SQLite udf bridge",
+              path = resolve("SQLite udf-bridge", "sqlite-" .. rt, M.resolve_sqlite_rt_lib, rt, ctx.tmpdir, rctx) })
+    end
+
+    -- 4. Image codec core + per-runtime image bridge.
+    if needs_image then
+        add({ name = "image", lib = "libhull_feature-image.a", label = "image feature",
+              path = resolve("image", "image", M.resolve_image_lib, ctx.tmpdir, rctx) })
+        add({ name = "image-" .. rt, lib = "libhull_feature-image-" .. rt .. ".a",
+              label = "image bridge",
+              path = resolve("image-bindings", "image-" .. rt, M.resolve_image_rt_lib, rt, ctx.tmpdir, rctx) })
+    end
+
+    -- 5. TLS feature (only when the base is actually TLS-less). refs base+Keel.
+    if needs_tls and base_lacks("mbedtls_ssl_handshake") then
+        add({ name = "tls", lib = "libhull_feature-tls.a", sets_base_group = true,
+              label = "TLS feature",
+              path = resolve("TLS", "tls", M.resolve_tls_lib, ctx.tmpdir, rctx) })
+    end
+
+    -- 6. HTTP core + (Keel when base-less) + per-runtime web bindings.
+    if needs_http then
+        add({ name = "http", lib = "libhull_feature-http.a", label = "HTTP feature",
+              path = resolve("HTTP", "http", M.resolve_http_lib, ctx.tmpdir, rctx) })
+        if base_lacks("hl_async_backend_keel") then
+            add({ name = "keel", lib = "libhull_feature-keel.a", sets_base_group = true,
+                  label = "Keel event loop",
+                  path = resolve("Keel", "keel", M.resolve_keel_lib, ctx.tmpdir, rctx) })
+        end
+        add({ name = "http-" .. rt, lib = "libhull_feature-http-" .. rt .. ".a",
+              label = "web bindings",
+              path = resolve("web-bindings", "http-" .. rt, M.resolve_http_rt_lib, rt, ctx.tmpdir, rctx) })
+    end
+
+    -- needs_wasm is returned so the caller can print the compute-free skip note;
+    -- needs_http likewise for the HTTP-free note (both are grepped by the tui/
+    -- wasm feature e2es as over-compose regression guards).
+    return { list = list, needs_http = needs_http, needs_wasm = needs_wasm }
 end
 
 return M
