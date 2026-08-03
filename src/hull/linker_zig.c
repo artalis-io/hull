@@ -73,7 +73,27 @@ static int zig_link(HlLinker *l, const char *output,
     for (int i = 0; libs && libs[i] && n < HL_LINKER_MAX_ARGS - 2; i++)
         argv[n++] = libs[i];
     argv[n] = NULL;
-    return hl_tool_spawn(argv) == 0 ? 0 : -1;
+
+    /* Point zig's cache at the build tmpdir (under /tmp, which the tool-mode
+     * sandbox unveils rwcx) so a SANDBOXED link doesn't fail AccessDenied
+     * writing zig's default ~/.cache/zig / ./.zig-cache. A cross-musl link
+     * compiles zig's bundled crt/libc glue, so it DOES write a cache (unlike a
+     * native-glibc link, which is why --linker=zig worked before this). The
+     * build's objects live in that tmpdir, so derive it from objs[0]
+     * (<tmpdir>/app_main.o); fall back to /tmp. Mirrors the compile-side
+     * redirect in build.lua. (#4c) */
+    char dbuf[PATH_MAX];
+    const char *base = "/tmp";
+    if (objs && objs[0]) {
+        snprintf(dbuf, sizeof dbuf, "%s", objs[0]);
+        char *slash = strrchr(dbuf, '/');
+        if (slash) { *slash = '\0'; base = dbuf; }
+    }
+    char gcache[PATH_MAX + 64], lcache[PATH_MAX + 64];
+    snprintf(gcache, sizeof gcache, "ZIG_GLOBAL_CACHE_DIR=%s/zig-cache", base);
+    snprintf(lcache, sizeof lcache, "ZIG_LOCAL_CACHE_DIR=%s/zig-cache", base);
+    const char *envadd[] = { gcache, lcache, NULL };
+    return hl_tool_spawn_env(argv, envadd) == 0 ? 0 : -1;
 }
 
 static void zig_destroy(HlLinker *l)
