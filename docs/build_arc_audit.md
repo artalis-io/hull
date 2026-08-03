@@ -52,20 +52,23 @@ Execution order (agreed): **#6+#1 → #7 → #4 → #5 → #2 → #3 → #8**, t
   (fs_util.o + ~20 others). Full cross-target `HULL_CORE_OBJS`-with-`PLATFORM_OBJS` DEFERRED:
   the shared vars are interleaved with each list's distinct ones, so a shared-core extraction
   would REORDER the link line and risk weak/strong seam resolution.
-- [~] **#8 Consolidate trust-critical duplicate helpers** — ASSESSED + DEFERRED (needs focused,
-  security-reviewed work). The `hex_decode` ×4 copies (`signature.c`, `release.c`,
-  `verify_release.c`, `verify_self.c`) are byte-identical to EACH OTHER, but the canonical
-  `hl_cap_crypto_hex_decode` has a DIFFERENT contract: it returns the BYTE COUNT (not 0) on
-  success and does NOT enforce exact length (out_size is a capacity, not the expected size),
-  whereas the local copies return 0/-1 and require `hex_len == out_len*2` exactly. So a naive
-  swap breaks every caller's `!= 0` check AND drops the exact-length enforcement — a SECURITY
-  regression risk on Ed25519 signature-verify paths (a short/malformed sig could decode
-  partially instead of failing closed). Two safe paths, either a focused PR: (a) a shared
-  `hl_hex_decode_exact` helper preserving the local 0/-1 exact-length contract (no canonical
-  change; needs its own object + link-list wiring); or (b) adapt each of the ~10 call sites to
-  the canonical's byte-count/`< 0` contract AND add an explicit `hex_len == N*2` check. NOT a
-  mechanical mkdir_p-style consolidation. (`hex_encode` ×9, `secure_zero` ×5 have the same
-  "identical-to-each-other but a different-contract canonical exists" shape.)
+- [x] **#8 Consolidate trust-critical duplicate `hex_decode`** — DONE. Deleted the 4 byte-identical
+  local copies (`hex_nibble` + `hex_decode`/`hex_decode_pk` in `signature.c`, `release.c`,
+  `commands/verify_release.c`, `commands/verify_self.c`) and routed all ~10 call sites through the
+  canonical `hl_cap_crypto_hex_decode`. Resolution of the contract mismatch (canonical returns the
+  BYTE COUNT with out_size as a capacity; the locals returned 0/-1 with an exact `hex_len==out_len*2`
+  check): the exact-length behavior is preserved by checking `rc == N` (not `rc != 0`), which is
+  provably equivalent — success requires `hex_len/2 == N` exactly, since a short input returns `<N`
+  and a long one returns `-1` (insufficient capacity). No security regression: fail-closed on
+  short/malformed input is retained, and the canonical adds NULL-guards + explicit bounds the
+  locals lacked. The `hex_decode_pk` sites pass `strlen(pubkey_hex)` so an over/under-length
+  `--pubkey` still rejects. No new object / link-list wiring (canonical's `cap_crypto.o` is a base
+  object already linked wherever `signature.o`/`release.o` are, all flavors). Validated:
+  `test_signature` (20), `test_release` (20), `test_crypto` (58), `test_dispatch` (4),
+  `test_verify_self` (5), full `make test` green, cppcheck clean. (`hex_encode` ×N, `secure_zero` ×N
+  have the same "identical-to-each-other but a different-contract canonical exists" shape — left as a
+  Tier-4 follow-on; `hex_encode` stays local in `signature.c`/`release.c` since it has no exact-length
+  hazard and a differing signature.)
 
 ## Tier 4 — architectural consistency & docs (lower urgency)
 

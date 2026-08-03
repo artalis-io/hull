@@ -18,26 +18,10 @@
 
 /* ── Local hex helpers ─────────────────────────────────────────────── */
 
-static int hex_nibble(unsigned char c)
-{
-    if (c >= '0' && c <= '9') return c - '0';
-    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
-    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
-    return -1;
-}
-
-static int hex_decode(const char *hex, size_t hex_len,
-                      uint8_t *out, size_t out_len)
-{
-    if (hex_len != out_len * 2) return -1;
-    for (size_t i = 0; i < out_len; i++) {
-        int hi = hex_nibble((unsigned char)hex[i * 2]);
-        int lo = hex_nibble((unsigned char)hex[i * 2 + 1]);
-        if (hi < 0 || lo < 0) return -1;
-        out[i] = (uint8_t)((hi << 4) | lo);
-    }
-    return 0;
-}
+/* hex decode goes through the canonical hl_cap_crypto_hex_decode (cap/crypto.h):
+ * it returns the byte count written (out_size is a capacity), so `rc == N`
+ * checks an exact N-byte decode - equivalent to the old local 0/-1 contract
+ * that required hex_len == N*2. See signature.c for the rationale. */
 
 static void hex_encode(const uint8_t *data, size_t len, char *out)
 {
@@ -84,7 +68,7 @@ int hl_release_pubkey_configured(void)
 int hl_release_pubkey_decode(uint8_t out_pk[32])
 {
     if (!out_pk) return -1;
-    return hex_decode(HL_RELEASE_PUBKEY_HEX, 64, out_pk, 32);
+    return hl_cap_crypto_hex_decode(HL_RELEASE_PUBKEY_HEX, 64, out_pk, 32) == 32 ? 0 : -1;
 }
 
 int hl_release_verify_manifest_sig(const void *manifest, size_t manifest_len,
@@ -99,7 +83,7 @@ int hl_release_verify_manifest_sig(const void *manifest, size_t manifest_len,
 
     /* Decode signature */
     uint8_t sig[64];
-    if (hex_decode(sig_hex, sig_hex_len, sig, sizeof(sig)) != 0)
+    if (hl_cap_crypto_hex_decode(sig_hex, sig_hex_len, sig, sizeof(sig)) != (int)sizeof(sig))
         return -1;
 
     /* Resolve public key */
@@ -164,7 +148,7 @@ int hl_release_load_secret_key(const char *path, uint8_t out_sk[64])
         return -1;
     }
 
-    int rc = hex_decode(buf, hex_len, out_sk, 64);
+    int rc = hl_cap_crypto_hex_decode(buf, hex_len, out_sk, 64) == 64 ? 0 : -1;
     secure_zero(buf, sizeof(buf));
     return rc;
 }
