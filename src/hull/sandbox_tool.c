@@ -157,6 +157,20 @@ int hl_tool_sandbox_init(HlToolUnveilCtx *ctx,
     if (platform_dir)
         hl_tool_unveil_add(ctx, platform_dir, "rx");
 
+    /* Side-loaded tool assets: $HOME/.hull/tools holds tool binaries (wamrc,
+     * lld) that get executed AND the libc-musl-<arch> floor bundle
+     * (crt*.o / libc.a / libgcc.a) that Tier B's `ld.lld` reads at link time.
+     * Read + execute; narrow to the .hull/tools subtree, not all of $HOME. */
+    {
+        const char *home = getenv("HOME");
+        if (home && *home) {
+            char path[PATH_MAX];
+            int n = snprintf(path, sizeof(path), "%s/.hull/tools", home);
+            if (n > 0 && (size_t)n < sizeof(path))
+                hl_tool_unveil_add(ctx, path, "rx");
+        }
+    }
+
     hl_tool_unveil_seal(ctx);
 
     /* Also apply kernel-level unveil on supported platforms */
@@ -192,6 +206,15 @@ int hl_tool_sandbox_init(HlToolUnveilCtx *ctx,
             char cache_path[PATH_MAX];
             if (hl_hull_cache_dir(cache_path, sizeof(cache_path)) == 0)
                 unveil(cache_path, "rwc");
+        }
+        {
+            const char *home = getenv("HOME");
+            if (home && *home) {
+                char path[PATH_MAX];
+                int n = snprintf(path, sizeof(path), "%s/.hull/tools", home);
+                if (n > 0 && (size_t)n < sizeof(path))
+                    unveil(path, "rx");   /* installed tools + Tier B floor bundle */
+            }
         }
         unveil(NULL, NULL); /* seal */
 
