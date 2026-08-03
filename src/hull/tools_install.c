@@ -62,6 +62,7 @@ static const HlToolSpec REGISTRY[] = {
                              "`hull build --linker=lld-static` on x86_64.",
         .has_linux_x86_64  = 1,
         .is_bundle         = 1,
+        .bundle_entry      = "crt1.o",   /* data-only floor; not exec-resolved */
     },
     {
         .name              = "libc-musl-aarch64",
@@ -69,6 +70,7 @@ static const HlToolSpec REGISTRY[] = {
                              "`hull build --linker=lld-static` on aarch64.",
         .has_linux_aarch64 = 1,
         .is_bundle         = 1,
+        .bundle_entry      = "crt1.o",
     },
     { 0 }  /* sentinel */
 };
@@ -140,12 +142,12 @@ int hl_tools_asset_name(const HlToolSpec *spec, const char *platform,
 
 /* ── ustar (.tar) bundle extraction ──────────────────────────────────
  *
- * A minimal, flat, read-only ustar reader for `is_bundle` tools. We control
- * both the producer (build_musl_floor.sh -> `tar cf`) and consumer, and the
- * archive is SHA-256-verified before we get here, so we only need the regular-
- * file path and reject everything unusual. FLAT only: every member must be a
- * bare filename (after stripping a leading "./") with no other '/', no "..",
- * not absolute - a floor bundle has no subdirectories.
+ * A minimal read-only ustar reader for `is_bundle` tools. We control both the
+ * producer (`tar cf`) and consumer, and the archive is SHA-256-verified before
+ * we get here, so we ship files + directories only (producers dereference any
+ * symlink to a copy). NESTED relative paths are allowed (zig's lib/ tree); every
+ * member is still validated - not absolute, no ".." component - as defense in
+ * depth. The exec bit is preserved (zig / ld.lld need +x).
  */
 static int ensure_dir(const char *path, mode_t mode);   /* defined below */
 
@@ -159,16 +161,48 @@ static unsigned long tar_octal(const unsigned char *p, size_t n)
     return v;
 }
 
-/* Validate + normalize a ustar member name to a bare filename. Returns the
- * pointer to the flat name on success, NULL to reject. */
-static const char *tar_flat_name(const char *name)
+/* Validate + normalize a ustar member path for safe NESTED extraction. Strips a
+ * leading "./" and any trailing "/", then requires every segment to be non-empty
+ * and not "..", and the whole path to be relative (not absolute). Nested
+ * relative paths (a/b/c) are allowed - zig's lib/ tree needs them. Mutates
+ * `name` (trailing-slash strip). Returns the cleaned path or NULL to reject. */
+static const char *tar_safe_path(char *name)
 {
-    if (name[0] == '/') return NULL;                 /* absolute */
-    if (name[0] == '.' && name[1] == '/') name += 2; /* strip leading "./" */
-    if (name[0] == '\0') return NULL;                /* the "./" dir entry */
-    if (strstr(name, "..")) return NULL;             /* traversal */
-    if (strchr(name, '/'))  return NULL;             /* not flat */
+    if (name[0] == '/') return NULL;                     /* absolute → reject */
+    while (name[0] == '.' && name[1] == '/') name += 2;  /* strip leading "./" */
+    size_t len = strlen(name);
+    while (len > 0 && name[len - 1] == '/') name[--len] = '\0';  /* trailing "/" */
+    /* "" (from "./") or "." is the archive root - benign; return an EMPTY
+     * string so the caller skips it rather than treating it as a reject. */
+    if (len == 0)                    return name;          /* -> "" */
+    if (len == 1 && name[0] == '.')  return name + 1;      /* -> "" */
+    for (const char *p = name; *p; ) {
+        const char *slash = strchr(p, '/');
+        size_t seg = slash ? (size_t)(slash - p) : strlen(p);
+        if (seg == 0) return NULL;                        /* "//" */
+        if (seg == 2 && p[0] == '.' && p[1] == '.') return NULL;  /* ".." */
+        p += seg;
+        if (*p == '/') p++;
+    }
     return name;
+}
+
+/* mkdir every component of `path` (parents included). EEXIST is success. */
+static int mkdir_p(const char *path, mode_t mode)
+{
+    char tmp[PATH_MAX];
+    size_t n = strlen(path);
+    if (n == 0 || n >= sizeof(tmp)) return -1;
+    memcpy(tmp, path, n + 1);
+    for (char *p = tmp + 1; *p; p++) {
+        if (*p == '/') {
+            *p = '\0';
+            if (mkdir(tmp, mode) != 0 && errno != EEXIST) return -1;
+            *p = '/';
+        }
+    }
+    if (mkdir(tmp, mode) != 0 && errno != EEXIST) return -1;
+    return 0;
 }
 
 int hl_tools_extract_tar(const unsigned char *tar, size_t tar_len,
@@ -197,22 +231,42 @@ int hl_tools_extract_tar(const unsigned char *tar, size_t tar_len,
         off += 512;
         if (off + size > tar_len) return -1;          /* truncated data */
 
-        /* Only extract regular files ('0' or legacy '\0'); skip dir/link/etc. */
-        if (typeflag == '0' || typeflag == '\0') {
-            const char *flat = tar_flat_name(name);
-            if (!flat) return -1;
-
+        /* Directory ('5'): create it + parents. Regular file ('0'/legacy '\0'):
+         * create parent dirs, write, preserve the exec bit (zig / ld.lld need
+         * +x). Skip everything else (symlinks '2', hardlinks '1', ...) - our
+         * producers ship files + dirs only, dereferencing any symlink to a copy. */
+        const char *rel = (typeflag == '5' || typeflag == '0' || typeflag == '\0')
+            ? tar_safe_path(name) : NULL;
+        /* rel: NULL means either "not a file/dir entry we handle" (skip) or a
+         * MALICIOUS path. Distinguish: only the file/dir typeflags call
+         * tar_safe_path, and it returns NULL just for absolute/".." - reject
+         * those. An empty string is the archive root - skip. */
+        if ((typeflag == '5' || typeflag == '0' || typeflag == '\0') && !rel)
+            return -1;
+        if (rel && rel[0] != '\0') {
             char path[PATH_MAX];
-            int pn = snprintf(path, sizeof(path), "%s/%s", dest_dir, flat);
+            int pn = snprintf(path, sizeof(path), "%s/%s", dest_dir, rel);
             if (pn < 0 || (size_t)pn >= sizeof(path)) return -1;
 
-            FILE *f = fopen(path, "wb");
-            if (!f) return -1;
-            if (size && fwrite(tar + off, 1, size, f) != size) {
-                fclose(f);
-                return -1;
+            if (typeflag == '5') {
+                if (mkdir_p(path, 0755) != 0) return -1;
+            } else {
+                char *last = strrchr(path, '/');
+                if (last && last != path) {
+                    *last = '\0';
+                    if (mkdir_p(path, 0755) != 0) { *last = '/'; return -1; }
+                    *last = '/';
+                }
+                FILE *f = fopen(path, "wb");
+                if (!f) return -1;
+                if (size && fwrite(tar + off, 1, size, f) != size) {
+                    fclose(f);
+                    return -1;
+                }
+                if (fclose(f) != 0) return -1;
+                mode_t m = (mode_t)(tar_octal(hdr + 100, 8) & 0777);
+                if (m) (void)chmod(path, m);
             }
-            if (fclose(f) != 0) return -1;
         }
 
         /* Advance past the data, rounded up to the 512-byte block. */
@@ -371,6 +425,25 @@ int hl_tools_lookup_path(const char *name, const char *hull_exe,
     if (!hl_tools_name_valid(name)) {
         errno = EINVAL;
         return -1;
+    }
+
+    /* 0) An installed bundle: the toolchain executable lives INSIDE the
+     *    extracted dir at $HOME/.hull/tools/<name>/<bundle_entry> (e.g. zig,
+     *    lld). A data-only bundle (the floor) has a non-exec bundle_entry and
+     *    won't match X_OK here, so it falls through harmlessly. */
+    const HlToolSpec *bspec = hl_tools_find(name);
+    if (bspec && bspec->is_bundle && bspec->bundle_entry) {
+        char bdir[PATH_MAX];
+        if (hl_tools_install_path(name, bdir, sizeof(bdir)) == 0) {
+            char be[PATH_MAX];
+            int n = snprintf(be, sizeof(be), "%s/%s", bdir, bspec->bundle_entry);
+            if (n > 0 && (size_t)n < sizeof(be) && access(be, X_OK) == 0) {
+                int m = snprintf(out, out_sz, "%s", be);
+                if (m < 0 || (size_t)m >= out_sz) return -1;
+                return 0;
+            }
+        }
+        /* not installed as a bundle → fall through to PATH (a system zig/lld). */
     }
 
     /* 1) $HOME/.hull/tools/<name>  ── canonical install location.

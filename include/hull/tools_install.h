@@ -49,10 +49,18 @@ typedef struct {
     int         has_cosmo;
     /* A "bundle" tool ships as a `hull-<name>.tar` archive of several files
      * (not a single executable) and installs by EXTRACTING to a DIRECTORY
-     * $HOME/.hull/tools/<name>/ rather than writing one blob + a symlink.
-     * Used by the libc-musl-<arch> static-link floor (crt*.o/libc.a/libgcc.a
-     * for `hull build --linker=lld-static`). 0 = a normal single-binary tool. */
+     * $HOME/.hull/tools/<name>/ rather than writing one blob + a symlink. The
+     * archive may be nested (subdirs), e.g. zig's lib/ tree. Used by the
+     * libc-musl-<arch> static-link floor and the lld/zig toolchains.
+     * 0 = a normal single-binary tool. */
     int         is_bundle;
+    /* For a bundle: the primary file inside the extracted dir. It proves the
+     * bundle is installed (tool_installed checks $dir/<bundle_entry>) and, when
+     * it is the toolchain executable (zig, lld), is what hl_tools_lookup_path
+     * resolves to ($HOME/.hull/tools/<name>/<bundle_entry>). Data-only bundles
+     * (the floor) point it at a sentinel file (crt1.o) that is never exec-looked
+     * up. NULL for a single-binary tool. */
+    const char *bundle_entry;
 } HlToolSpec;
 
 /**
