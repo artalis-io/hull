@@ -122,9 +122,29 @@ HlLinker *hl_linker_select(const char *explicit_linker, const char *hull_exe)
             char *s = strrchr(dir, '/');
             if (s) { *s = '\0'; snprintf(ld, sizeof ld, "%s/ld.lld", dir); }
         }
+        /* Floor discovery (crt1.o is the sentinel). An installed self-contained
+         * bundle - `hull tools install libc-musl-<arch>` extracts crt*.o +
+         * libc.a + libgcc.a to ~/.hull/tools/libc-musl-<arch>/ - takes
+         * precedence over the system musl-dev floor; HULL_LIBC_DIR overrides
+         * everything. */
+        char bundle[PATH_MAX] = {0};
+#if defined(__aarch64__)
+        const char *arch = "aarch64";
+#elif defined(__x86_64__)
+        const char *arch = "x86_64";
+#else
+        const char *arch = NULL;
+#endif
+        {
+            const char *home = getenv("HOME");
+            if (arch && home && *home)
+                snprintf(bundle, sizeof bundle, "%s/.hull/tools/libc-musl-%s",
+                         home, arch);
+        }
         char libdir[PATH_MAX] = {0};
         const char *env = getenv("HULL_LIBC_DIR");
-        const char *cands[] = { env, "/usr/lib", "/lib", NULL };
+        if (!env) env = "";   /* an empty entry is skipped, not a NULL terminator */
+        const char *cands[] = { env, bundle, "/usr/lib", "/lib", NULL };
         for (const char **c = cands; *c; c++) {
             if (!**c) continue;
             char crt[PATH_MAX];

@@ -74,20 +74,38 @@ Alpine container while still exercising a real musl build.
 
 On musl, `hull build --linker=lld-static ./app` produces a **fully static**
 executable (no interpreter, runs on bare `scratch`) by invoking `ld.lld`
-directly - no cc driving the link. It needs three things beyond the emitted
-object: the musl floor (`crt1.o`/`crti.o`/`crtn.o`/`libc.a`, from `musl-dev`,
-located via `HULL_LIBC_DIR`, default `/usr/lib`), `ld.lld` (from `lld`), and the
-**compiler runtime** `libgcc.a` (soft-float builtins the app archives
-reference). The linker discovers `libgcc.a` via `cc -print-libgcc-file-name`;
-`HULL_LIBGCC=/path/to/libgcc.a` overrides it for a hand-assembled, cc-free floor.
+directly - no cc driving the link. Beyond the emitted object it needs `ld.lld`
+(from `lld`), the musl floor (`crt1.o`/`crti.o`/`crtn.o`/`libc.a`, from
+`musl-dev`), and the **compiler runtime** `libgcc.a` (soft-float builtins the app
+archives reference, e.g. `__multf3`). Both the floor and `libgcc.a` are resolved
+**without a compiler**, in this order:
 
-Note the honest nuance: Tier B is **compiler-DRIVER-free** (no cc invokes the
-link), but locating `libgcc.a` still consults `cc` unless `HULL_LIBGCC` is set.
-`zig cc` (`--linker=zig`) remains the turnkey, self-contained alternative
-(bundles crt+libc+compiler-rt for ~40 targets); Tier B is the purist path when
-you want `ld.lld` + a system floor and nothing else. See
-[docs/toolchain_free_build.md](toolchain_free_build.md). Covered by
-`tests/e2e_musl.sh` (asserts the binary is static and runs).
+- **Floor** (`crt*.o` + `libc.a`): `HULL_LIBC_DIR` → an installed bundle
+  `~/.hull/tools/libc-musl-<arch>/` → `/usr/lib` (the musl-dev default).
+- **libgcc.a**: `HULL_LIBGCC` → the installed bundle → a glob of the system gcc
+  runtime (`/usr/lib/gcc/*/*/libgcc.a`, no cc spawn) → `cc
+  -print-libgcc-file-name` (last resort, the only cc-needing path).
+
+So Tier B is **fully self-contained** on any Alpine with `build-base` (the glob
+finds the system `libgcc`; cc is never spawned), and on a box with **nothing**
+but hull + `ld.lld` once the bundle is present:
+
+```sh
+make floor-musl                       # assemble ~/.hull/tools/libc-musl-<arch>
+hull build --linker=lld-static ./app  # no musl-dev, no gcc, no cc needed
+```
+
+`make floor-musl` (a wrapper over `scripts/build_musl_floor.sh`) collects
+`crt*.o` + `libc.a` + `libgcc.a` from a musl host into
+`~/.hull/tools/libc-musl-<arch>/`, and the linker resolves that dir automatically
+(above). A `hull tools install libc-musl-<arch>` that fetches a prebuilt,
+Ed25519-signed bundle from Hull's release - so end users need no musl host to
+assemble one - is the next step (the release producer + verified-fetch installer).
+
+`zig cc` (`--linker=zig`) remains the turnkey cross-target alternative (bundles
+crt+libc+compiler-rt for ~40 targets); Tier B is the purist `ld.lld` + floor
+path. See [docs/toolchain_free_build.md](toolchain_free_build.md). Covered by
+`tests/e2e_musl.sh` (asserts static + runs, cc-free, and via the bundle).
 
 ## Caveats / not-yet
 

@@ -27,6 +27,7 @@
 #include <string.h>
 #include <limits.h>
 #include <unistd.h>
+#include <glob.h>
 
 #define HL_LINKER_MAX_ARGS 256
 
@@ -172,23 +173,42 @@ HlLinker *hl_linker_lld_direct_new(const char *ld_path, const char *libdir)
         snprintf(ctx->crtn, sizeof(ctx->crtn), "%s/crtn.o", libdir);
         snprintf(ctx->ldash, sizeof(ctx->ldash), "-L%s", libdir);
     }
-    /* Discover the compiler runtime (libgcc.a) the way a cc driver would: via
-     * `cc -print-libgcc-file-name`. It lives in a gcc-version-specific dir the
-     * raw linker can't guess, and supplies builtins (soft-float __multf3, etc.)
-     * the app archives reference. HULL_LIBGCC overrides (a hand-assembled floor
-     * with no cc, or a clang compiler-rt archive). Absent = link without it. */
+    /* Discover the compiler runtime (libgcc.a) - it supplies builtins (soft-
+     * float __multf3, etc.) the app archives reference, and a raw ld.lld does
+     * not auto-link it. Resolution order, cc-free where possible:
+     *   1. HULL_LIBGCC override (explicit, or a hand-assembled floor).
+     *   2. <libdir>/libgcc.a - an installed self-contained floor bundle
+     *      (`hull tools install libc-musl-<arch>`) drops it beside crt/libc, so
+     *      a bare box with no gcc still resolves it.
+     *   3. glob the system gcc runtime dir - no compiler spawn.
+     *   4. `cc -print-libgcc-file-name` - last resort, the only cc-needing path.
+     * So Tier B is fully self-contained on any box that has the bundle OR a
+     * system libgcc; cc is consulted only if neither is present. */
     {
         const char *env = getenv("HULL_LIBGCC");
+        char cand[PATH_MAX];
         if (env && *env) {
             snprintf(ctx->libgcc, sizeof(ctx->libgcc), "%s", env);
+        } else if (libdir && *libdir &&
+                   snprintf(cand, sizeof(cand), "%s/libgcc.a", libdir) > 0 &&
+                   access(cand, R_OK) == 0) {
+            snprintf(ctx->libgcc, sizeof(ctx->libgcc), "%s", cand);
         } else {
-            const char *q[] = { "cc", "-print-libgcc-file-name", NULL };
-            char *lg = hl_tool_spawn_read(q, NULL);
-            if (lg) {
-                char *nl = strchr(lg, '\n'); if (nl) *nl = '\0';
-                if (lg[0] && access(lg, R_OK) == 0)
-                    snprintf(ctx->libgcc, sizeof(ctx->libgcc), "%s", lg);
-                free(lg);
+            glob_t g;
+            if (glob("/usr/lib/gcc/*/*/libgcc.a", 0, NULL, &g) == 0 &&
+                g.gl_pathc > 0) {
+                snprintf(ctx->libgcc, sizeof(ctx->libgcc), "%s", g.gl_pathv[0]);
+            }
+            globfree(&g);
+            if (!ctx->libgcc[0]) {
+                const char *q[] = { "cc", "-print-libgcc-file-name", NULL };
+                char *lg = hl_tool_spawn_read(q, NULL);
+                if (lg) {
+                    char *nl = strchr(lg, '\n'); if (nl) *nl = '\0';
+                    if (lg[0] && access(lg, R_OK) == 0)
+                        snprintf(ctx->libgcc, sizeof(ctx->libgcc), "%s", lg);
+                    free(lg);
+                }
             }
         }
     }
