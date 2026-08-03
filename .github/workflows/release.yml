@@ -771,6 +771,44 @@ jobs:
           name: ${{ matrix.artifact }}
           path: ${{ matrix.artifact }}
 
+  build-floor-musl:
+    # The libc-musl-<arch> static-link floor bundles pulled by
+    # `hull tools install libc-musl-<arch>` for `hull build --linker=lld-static`
+    # (Tier B). Assembled INSIDE Alpine (musl) - crt*.o + libc.a + stub
+    # libm/libpthread + libgcc.a packed as a flat ustar - so a box with only
+    # hull + ld.lld links a fully static musl binary. Each tar's SHA-256 lands in
+    # the signed hull.sha256 below (same trust chain as wamrc). Native-only (musl
+    # is Linux); the name bakes in the arch, one artifact per arch. Uses the same
+    # scripts/build_musl_floor.sh the tests do. See docs/musl_build.md.
+    name: Build libc-musl floor (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: x86_64
+            os: ubuntu-24.04
+          - name: aarch64
+            os: ubuntu-24.04-arm
+
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+
+      - name: Assemble + pack the floor in Alpine (musl)
+        run: |
+          docker run --rm -v "$PWD":/work alpine:3.20 sh -c '
+            set -eu
+            apk add --no-cache build-base >/dev/null 2>&1
+            sh /work/scripts/build_musl_floor.sh /tmp/floor \
+               /work/hull-libc-musl-${{ matrix.name }}.tar
+          '
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        with:
+          name: hull-libc-musl-${{ matrix.name }}.tar
+          path: hull-libc-musl-${{ matrix.name }}.tar
+
   build-feature-native:
     # Composable DuckDB feature archive (libhull_feature-duckdb-<arch>.a),
     # shipped as a release asset and pulled by `hull feature install duckdb`
@@ -1069,7 +1107,7 @@ jobs:
   release:
     name: Create Release
     runs-on: ubuntu-24.04
-    needs: [build-cosmo, build-native, build-wamrc, build-feature-native, build-feature-gpu, build-feature-tui, build-feature-postgres, build-feature-mysql, build-feature-lua, build-feature-js]
+    needs: [build-cosmo, build-native, build-wamrc, build-floor-musl, build-feature-native, build-feature-gpu, build-feature-tui, build-feature-postgres, build-feature-mysql, build-feature-lua, build-feature-js]
     permissions:
       contents: write       # publish GitHub release + assets
       id-token: write       # SLSA: OIDC for Sigstore signing
@@ -1090,6 +1128,10 @@ jobs:
           mv artifacts/hull-wamrc-linux-x86_64/hull-wamrc-linux-x86_64    dist/hull-wamrc-linux-x86_64
           mv artifacts/hull-wamrc-linux-aarch64/hull-wamrc-linux-aarch64  dist/hull-wamrc-linux-aarch64
           mv artifacts/hull-wamrc-darwin-arm64/hull-wamrc-darwin-arm64    dist/hull-wamrc-darwin-arm64
+          # libc-musl-<arch> static-link floor bundles (`hull tools install
+          # libc-musl-<arch>`); hashed into hull.sha256 below.
+          mv artifacts/hull-libc-musl-x86_64.tar/hull-libc-musl-x86_64.tar   dist/hull-libc-musl-x86_64.tar
+          mv artifacts/hull-libc-musl-aarch64.tar/hull-libc-musl-aarch64.tar dist/hull-libc-musl-aarch64.tar
           # Per-flavor platform libs. Consumed by `hull platform install
           # <flavor>` -> `hull build --flavor`. Native files:
           # libhull_platform-<flavor>-<arch>.a; cosmo files (dual-arch):
@@ -1215,6 +1257,7 @@ jobs:
         run: |
           sha256sum hull-cosmo hull-linux-x86_64 hull-linux-aarch64 hull-darwin-arm64 \
                     hull-wamrc-linux-x86_64 hull-wamrc-linux-aarch64 hull-wamrc-darwin-arm64 \
+                    hull-libc-musl-x86_64.tar hull-libc-musl-aarch64.tar \
                     hull.sbom.json hull.sbom.cdx.json hull.sbom.spdx.json \
                     libhull.sbom.json libhull.sbom.cdx.json libhull.sbom.spdx.json \
                     hull.build-env.json \
@@ -1290,6 +1333,8 @@ jobs:
             dist/hull-wamrc-linux-x86_64
             dist/hull-wamrc-linux-aarch64
             dist/hull-wamrc-darwin-arm64
+            dist/hull-libc-musl-x86_64.tar
+            dist/hull-libc-musl-aarch64.tar
             dist/hull.sha256
             dist/hull.sbom.json
             dist/hull.sbom.cdx.json
@@ -1309,6 +1354,8 @@ jobs:
             dist/hull-wamrc-linux-x86_64
             dist/hull-wamrc-linux-aarch64
             dist/hull-wamrc-darwin-arm64
+            dist/hull-libc-musl-x86_64.tar
+            dist/hull-libc-musl-aarch64.tar
             dist/hull.sha256
             dist/hull.sbom.json
             dist/hull.sbom.cdx.json
