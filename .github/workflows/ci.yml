@@ -55,8 +55,14 @@ jobs:
 
       # Phase 4c: fail fast if feature.c FEATURES[] drifts from the mk/feature.mk
       # feature registry (the single source of truth). Cheap (grep + make vars).
-      - name: Feature registry consistency (feature.c vs mk/feature.mk)
+      # Also asserts every installable feature has a FEATURE_SPECS codegen entry (T4e).
+      - name: Feature registry consistency (feature.c vs mk/feature.mk vs FEATURE_SPECS)
         run: make check-feature-registry
+
+      # T4d: the side-load tool REGISTRY (tools_install.c) vs the release workflow
+      # that must publish each tool's asset.
+      - name: Tool registry consistency (tools_install.c vs release.yml)
+        run: make check-tools-registry
 
       - name: Build
         run: make

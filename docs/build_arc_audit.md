@@ -125,12 +125,19 @@ Execution order (agreed): **#6+#1 → #7 → #4 → #5 → #2 → #3 → #8**, t
   weak-stub-as-sentinel, forcing WASM's bespoke `HL_CAP_WASM_ABSENT`); no `HL_WEAK` macro,
   no single "how to add a seam" doc. Add a canonical section to features_and_flavors.md;
   optionally an `HL_WEAK` macro over the ~21 raw `__attribute__((weak))` sites.
-- [ ] **T4d tools "bundle" facts duplicated** across `release.yml` (3×) + `tools.c`; registry
-  isn't the single source the comment claims. Consider `hull tools list --json --assets`.
-  Extend `release_smoke.sh` to install one bundle shape (zig/floor), not just wamrc.
-- [ ] **T4e FEATURE_SPECS not cross-checked** against `feature.c` FEATURES[] / Makefile —
-  extend `scripts/check_feature_registry.sh` to assert `feature_specs.lua` keys ⊇ installable
-  stems.
+- [x] **T4d tools "bundle" facts duplicated** — DONE. Fixed the misleading `tools_install.c`
+  registry comment (it claimed the registry was the single source; it is the CONSUMER side -
+  release.yml is a second, coordinated edit site) and added `scripts/check_tools_registry.sh`
+  (+ `make check-tools-registry`, wired into the Linux CI `build` job) that asserts every REGISTRY
+  `.name` has a matching `hull-<name>` asset in release.yml - catching drift per push instead of
+  only at `release_smoke.sh` time. The `release_smoke.sh` bundle-install half was already done in
+  #4d (floor + platform-musl + zig). `hull tools list --json --assets` deliberately NOT added (the
+  drift guard covers the need; a machine-readable asset dump is a speculative feature).
+- [x] **T4e FEATURE_SPECS not cross-checked** — DONE. Extended `scripts/check_feature_registry.sh`
+  (already run in CI) to assert every INSTALLABLE `--with` stem has a top-level `FEATURE_SPECS`
+  entry in `feature_specs.lua` (the codegen source `hull build --with=<name>` reads). Directional
+  (installable ⊆ FEATURE_SPECS keys, since FEATURE_SPECS also carries the mandatory `sqlite`
+  default). Negative-tested: removing a spec key fails the check with a fix-it hint.
 - [ ] **T4f doc-rot** — build.lua tcc hints (retired), "planned" COFF/Mach-O comments (done),
   mold "near-term" (deferred/not-started), CLAUDE.md tool row missing `.tar` bundle shape,
   `obj_emit.h`/`linker.h` "planned" comments.
