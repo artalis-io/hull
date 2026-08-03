@@ -1821,6 +1821,7 @@ BUILD_FINGERPRINT := \
   DB=$(HL_ENABLE_DB)|\
   SQLITE=$(HL_ENABLE_SQLITE)|\
   POSTGRES=$(HL_ENABLE_POSTGRES)|\
+  MYSQL=$(HL_ENABLE_MYSQL)|\
   WASM=$(HL_ENABLE_WASM)|\
   GPU=$(HL_ENABLE_GPU)|\
   TUI=$(HL_ENABLE_TUI)|\
@@ -2266,15 +2267,14 @@ include mk/features/runtime.mk
 # stale member would then linger and surface as a `duplicate symbol` at compose.
 # The lists change only via a Makefile edit, so depending on the Makefile forces
 # the (cheap) rebuild exactly then. CI clean-builds are unaffected.
-FEATURE_ARCHIVES := $(BUILDDIR)/libhull_feature-lua.a $(BUILDDIR)/libhull_feature-js.a \
-                    $(BUILDDIR)/libhull_feature-http.a \
-                    $(BUILDDIR)/libhull_feature-http-lua.a $(BUILDDIR)/libhull_feature-http-js.a \
-                    $(BUILDDIR)/libhull_feature-tui.a \
-                    $(BUILDDIR)/libhull_feature-tui-lua.a $(BUILDDIR)/libhull_feature-tui-js.a \
-                    $(BUILDDIR)/libhull_feature-wasm.a \
-                    $(BUILDDIR)/libhull_feature-wasm-lua.a $(BUILDDIR)/libhull_feature-wasm-js.a \
-                    $(BUILDDIR)/libhull_feature-sqlite-lua.a $(BUILDDIR)/libhull_feature-sqlite-js.a \
-                    $(IMG_FEATURE_LIBS)
+# Derived from the registry (mk/feature.mk FEATURE_EMBEDDED_STEMS) rather than
+# hand-listed: the hand-list had drifted and OMITTED the tls, keel, and sqlite
+# (core) embedded archives, so those three missed this rebuild guard (the exact
+# stale-`ar` duplicate-symbol hazard the comment above warns about). Plus the
+# tui CORE archive (installable, but built here from an object list in this
+# Makefile, so it needs the guard too). FEATURE_EMBEDDED_LIBS already covers
+# lua/js/http(+rt)/wasm(+rt)/sqlite(+rt)/image(+rt)/tls/keel + the tui rt bridges.
+FEATURE_ARCHIVES := $(FEATURE_EMBEDDED_LIBS) $(BUILDDIR)/libhull_feature-tui.a
 $(FEATURE_ARCHIVES): Makefile
 # The base platform lib is built from an object LIST (PLATFORM_OBJS); a Phase-1
 # change to that list (wasm caps + WAMR removed) must retrigger the ar, which an
@@ -3148,4 +3148,5 @@ clean:
 # is the simplest portable way to gather all of them.
 DEPS_ALL := $(shell find $(BUILDDIR) -name '*.d' 2>/dev/null)
 -include $(DEPS_ALL)
+
 
