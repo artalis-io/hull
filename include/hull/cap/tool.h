@@ -70,6 +70,14 @@ int hl_tool_unveil_check(const HlToolUnveilCtx *ctx, const char *path, char need
 int hl_tool_spawn(const char *const argv[]);
 
 /*
+ * Like hl_tool_spawn, but apply extra environment entries (an array of
+ * "KEY=VALUE" strings, NULL-terminated; NULL = none) in the child before exec.
+ * Used to redirect a spawned toolchain's cache into a sandbox-writable dir
+ * (e.g. ZIG_GLOBAL_CACHE_DIR under the build tmpdir for zig cross-compiles).
+ */
+int hl_tool_spawn_env(const char *const argv[], const char *const envadd[]);
+
+/*
  * Spawn a process and capture its stdout.
  * Returns a malloc'd string (caller frees), or NULL on error.
  * If out_len is non-NULL, the output length is stored there.

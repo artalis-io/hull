@@ -103,8 +103,38 @@ static int l_tool_spawn(lua_State *L)
     }
     argv[n] = NULL;
 
-    int rc = hl_tool_spawn(argv);
+    /* Optional arg 2: an env table { KEY = VALUE, ... } applied in the child
+     * before exec (e.g. ZIG_GLOBAL_CACHE_DIR for a sandbox-writable zig cache).
+     * Built into a NULL-terminated array of malloc'd "KEY=VALUE" strings. */
+    const char **envadd = NULL;
+    int envn = 0;
+    if (!lua_isnoneornil(L, 2)) {
+        luaL_checktype(L, 2, LUA_TTABLE);
+        int cap = 0;
+        lua_pushnil(L);
+        while (lua_next(L, 2) != 0) { cap++; lua_pop(L, 1); }
+        envadd = malloc(((size_t)cap + 1) * sizeof(const char *));
+        if (!envadd) { free(argv); return luaL_error(L, "tool.spawn: oom"); }
+        lua_pushnil(L);
+        while (lua_next(L, 2) != 0) {
+            const char *k = lua_tostring(L, -2);
+            const char *v = lua_tostring(L, -1);
+            if (k && v) {
+                size_t len = strlen(k) + 1 + strlen(v) + 1;
+                char *kv = malloc(len);
+                if (kv) { snprintf(kv, len, "%s=%s", k, v); envadd[envn++] = kv; }
+            }
+            lua_pop(L, 1);
+        }
+        envadd[envn] = NULL;
+    }
+
+    int rc = envadd ? hl_tool_spawn_env(argv, envadd) : hl_tool_spawn(argv);
     free(argv);
+    if (envadd) {
+        for (int i = 0; i < envn; i++) free((void *)(uintptr_t)envadd[i]);
+        free(envadd);
+    }
 
     if (rc == 0) {
         lua_pushboolean(L, 1);

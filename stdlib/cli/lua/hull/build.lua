@@ -1016,9 +1016,11 @@ local function compose_features(opts, tmpdir, platform_lib, is_cosmo, compute_fi
                     tool.rmdir(tmpdir); tool.exit(1)
                 end
                 local triple = target_spec(opts).triple
+                local zcache = { ZIG_GLOBAL_CACHE_DIR = tmpdir .. "/zig-cache",
+                                 ZIG_LOCAL_CACHE_DIR = tmpdir .. "/zig-cache" }
                 local ok_fr = tool.spawn({ zig, "cc", "--target=" .. triple, "-O2",
                     "-c", tmpdir .. "/app_feature_registry.c",
-                    "-o", tmpdir .. "/app_feature_registry.o" })
+                    "-o", tmpdir .. "/app_feature_registry.o" }, zcache)
                 if not ok_fr then
                     tool.stderr("hull build: failed to cross-compile "
                         .. "app_feature_registry.o for " .. triple .. " with zig\n")
@@ -1953,8 +1955,14 @@ int main(int argc, char **argv) { return hl_app_run(argc, argv); }
             end
             write_file(tmpdir .. "/app_main.c", app_main)
             local triple = target_spec(opts).triple
+            -- Redirect zig's cache into the build tmpdir (under /tmp, which the
+            -- tool-mode sandbox unveils rwcx); zig's default ~/.cache/zig /
+            -- ./.zig-cache are NOT sandbox-writable, so a `zig cc -c` under the
+            -- build sandbox fails AccessDenied without this. (#4c)
+            local zcache = { ZIG_GLOBAL_CACHE_DIR = tmpdir .. "/zig-cache",
+                             ZIG_LOCAL_CACHE_DIR = tmpdir .. "/zig-cache" }
             local ok_am = tool.spawn({ zig, "cc", "--target=" .. triple, "-O2",
-                "-c", tmpdir .. "/app_main.c", "-o", tmpdir .. "/app_main.o" })
+                "-c", tmpdir .. "/app_main.c", "-o", tmpdir .. "/app_main.o" }, zcache)
             if not ok_am then
                 tool.stderr("hull build: failed to cross-compile app_main.o for "
                     .. triple .. " with zig\n")

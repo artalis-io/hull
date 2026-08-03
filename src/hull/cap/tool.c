@@ -227,6 +227,11 @@ int hl_tool_validate_args(const char *const argv[])
 
 int hl_tool_spawn(const char *const argv[])
 {
+    return hl_tool_spawn_env(argv, NULL);
+}
+
+int hl_tool_spawn_env(const char *const argv[], const char *const envadd[])
+{
     if (!argv || !argv[0]) return -1;
     if (hl_tool_check_allowlist(argv[0]) != 0 ||
         hl_tool_validate_args(argv) != 0) {
@@ -245,7 +250,12 @@ int hl_tool_spawn(const char *const argv[])
     if (pid < 0) return -1;
 
     if (pid == 0) {
-        /* Child: exec */
+        /* Child: apply extra env (KEY=VALUE strings), then exec. putenv points
+         * into envadd, which lives in the parent's memory the child shares
+         * post-fork until execvp - fine for this immediate exec. */
+        if (envadd)
+            for (int i = 0; envadd[i]; i++)
+                putenv((char *)(uintptr_t)envadd[i]);
         execvp(argv[0], (char *const *)(uintptr_t)argv);  /* POSIX execvp takes char*const[] but does not modify argv */
         _exit(127);
     }
