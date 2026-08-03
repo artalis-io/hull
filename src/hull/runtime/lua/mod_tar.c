@@ -286,7 +286,7 @@ static int l_tar_pack(lua_State *L)
         HlTarEntry *e = &ents[i - 1];
         e->name = name;                 /* borrowed from arg-1 nested string */
         e->data = (const unsigned char *)buf;
-        e->size = (size_t)(size < 0 ? 0 : size);
+        e->size = (size_t)size;   /* size >= 0 here (guarded above) */
         e->mode = 0644;
         e->is_dir = 0;
         built++;
