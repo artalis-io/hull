@@ -43,17 +43,24 @@ Execution order (agreed): **#6+#1 → #7 → #4 → #5 → #2 → #3 → #8**, t
     checkout's `build/` is never clobbered). Validated end-to-end in `alpine:3.20`: all 20
     archives build under musl + pack to a ~15.8 MB flat ustar. Mirrors `build_musl_floor.sh`.
     Docs: musl_build.md "Producing the musl platform archive set".
-  - [ ] **#4b Release pipeline.** A `build-platform-musl` Alpine job (mirror `build-floor-musl`)
-    that runs #4a per arch, uploads the tar, and signs each `.a`'s SHA-256 into the platform
-    manifest (`sign-platform-manifest`, the same `embedded_platform_sig.h` §5c anchors, OR a
-    separate musl manifest). Touches the SIGNED release artifacts → needs a pre-release dry-run
-    (hyphenated tag) before it can land. `hull.sha256` gains the musl tars.
-  - [ ] **#4c Fetch + select.** A `hull flavor install musl-<arch>` (or tool-bundle) fetch to
-    `~/.hull/platform/`, + teach `prepare_platform` (and the `feature_compose` resolve ladder)
-    to select the musl base AND musl feature archives for a `-musl`/cross target, re-verifying
-    against the signed manifest; relax the `#206` cross guard once a musl lib is resolvable.
-    A partial consumer that redirects only the base (not the feature archives) would re-link a
-    glibc feature lib against a musl base - the exact bug - so this lands atomically.
+  - [~] **#4b Publish (release pipeline).** A `build-platform-musl` Alpine job (mirror
+    `build-floor-musl`) runs #4a per arch and packs `hull-platform-musl-<arch>.tar`; the final
+    `release` job hashes it into the signed `hull.sha256` (release-key trust chain, same as the
+    floor / wamrc / zig tars), attests it (SLSA), and publishes it. Scoped to the FETCHABLE tar
+    in `hull.sha256` - deliberately NOT the embedded platform-sig (`platform-manifest.txt`/§5c):
+    the runtime §5c coupling for a musl cross-built app is only testable with the composer that
+    records the musl-tagged composed names, so it moves to #4c. Artifact named
+    `hull-platform-musl-` (not `platform-`) so it does NOT leak into the untouched
+    `sign-platform-manifest` job. Touches signed release artifacts → validated by a pre-release
+    dry-run (hyphenated tag) before landing. IMPLEMENTED (release.yml); pending the dry-run.
+  - [ ] **#4c Fetch + select (+ §5c).** A `hull ... install musl-<arch>` fetch (release-key
+    verify, to `~/.hull/platform/`) + teach `prepare_platform` (and the `feature_compose` resolve
+    ladder) to select the musl base AND musl feature archives for a `-musl`/cross target;
+    determine + wire whatever runtime §5c / `platform-manifest.txt` change a musl cross-built app
+    needs (may need the musl-tagged rows in the embedded platform manifest + a `platform_sig.c`
+    entry-cap bump 64→128); relax the `#206` cross guard once a musl lib is resolvable. A partial
+    consumer that redirects only the base (not the feature archives) would re-link a glibc feature
+    lib against a musl base - the exact bug - so this lands atomically.
   - [ ] **#4d Smoke.** `release_smoke.sh` section: `hull … install musl-x86_64` + a
     `--target=x86_64-linux-musl --linker=zig` build that runs in Alpine.
 - [x] **#5 `--linker=zig` has zero e2e** ✓. DONE (PR #205): `tests/e2e_linker_zig.sh` builds +

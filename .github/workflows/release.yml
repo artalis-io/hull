@@ -809,6 +809,59 @@ jobs:
           name: hull-libc-musl-${{ matrix.name }}.tar
           path: hull-libc-musl-${{ matrix.name }}.tar
 
+  build-platform-musl:
+    # The musl-built Hull archive SET (libhull_platform.a + libhull_platform-slim.a
+    # + every libhull_feature-*.a), the counterpart of build-floor-musl above: the
+    # floor is the musl libc; THIS is Hull's own archives, musl-built. Needed so
+    # `hull build --linker=lld-static` (Tier B) or `--linker=zig --target=<arch>-
+    # linux-musl` (cross) can link against a musl base - a glibc-built .a can't
+    # (audit item #4, docs/build_arc_audit.md). Assembled INSIDE Alpine (musl) via
+    # scripts/build_musl_platform.sh, packed as a flat ustar. Its SHA-256 lands in
+    # the signed hull.sha256 below (release-key trust chain, same as the floor /
+    # wamrc / zig tars), so `hull ... install` (the #4c fetch) can verify it.
+    # Native-only (musl is Linux); one artifact per arch.
+    #
+    # NOTE (#4b scope): this publishes the FETCHABLE tar into hull.sha256. Wiring
+    # the runtime §5c composed-archive attestation (platform-manifest.txt / the
+    # embedded platform-sig) for a musl cross-built app is #4c, where the composer
+    # that records the musl-tagged archive names is built + tested alongside it.
+    name: Build platform (musl, ${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: x86_64
+            os: ubuntu-24.04
+          - name: aarch64
+            os: ubuntu-24.04-arm
+
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          submodules: true          # keel + wamr are needed to build the platform
+
+      - name: Write VERSION file
+        run: echo "${GITHUB_REF_NAME#v}" > VERSION
+
+      - name: Build the musl platform archive set in Alpine (musl)
+        # RW mount is fine on the ephemeral runner; the producer builds in a
+        # container-internal copy regardless, so nothing writes into the checkout
+        # except the output tar. Same toolchain set tests/e2e_musl.sh installs.
+        run: |
+          docker run --rm -v "$PWD":/work alpine:3.20 sh -c '
+            set -eu
+            apk add --no-cache build-base clang lld make xxd bash git perl linux-headers >/dev/null 2>&1
+            sh /work/scripts/build_musl_platform.sh /work \
+               /work/hull-platform-musl-${{ matrix.name }}.tar
+          '
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        with:
+          name: hull-platform-musl-${{ matrix.name }}.tar
+          path: hull-platform-musl-${{ matrix.name }}.tar
+
   build-zig:
     # The turnkey cross-linker bundle pulled by `hull tools install zig` ->
     # `hull build --linker=zig --target=<triple>`. Zig's official release is a
@@ -1145,7 +1198,7 @@ jobs:
   release:
     name: Create Release
     runs-on: ubuntu-24.04
-    needs: [build-cosmo, build-native, build-wamrc, build-floor-musl, build-zig, build-feature-native, build-feature-gpu, build-feature-tui, build-feature-postgres, build-feature-mysql, build-feature-lua, build-feature-js]
+    needs: [build-cosmo, build-native, build-wamrc, build-floor-musl, build-platform-musl, build-zig, build-feature-native, build-feature-gpu, build-feature-tui, build-feature-postgres, build-feature-mysql, build-feature-lua, build-feature-js]
     permissions:
       contents: write       # publish GitHub release + assets
       id-token: write       # SLSA: OIDC for Sigstore signing
@@ -1170,6 +1223,11 @@ jobs:
           # libc-musl-<arch>`); hashed into hull.sha256 below.
           mv artifacts/hull-libc-musl-x86_64.tar/hull-libc-musl-x86_64.tar   dist/hull-libc-musl-x86_64.tar
           mv artifacts/hull-libc-musl-aarch64.tar/hull-libc-musl-aarch64.tar dist/hull-libc-musl-aarch64.tar
+          # musl-built Hull platform archive set (base + slim + feature archives),
+          # the #4c fetch target for a musl cross/static build; hashed into
+          # hull.sha256 below (release-key trust chain).
+          mv artifacts/hull-platform-musl-x86_64.tar/hull-platform-musl-x86_64.tar   dist/hull-platform-musl-x86_64.tar
+          mv artifacts/hull-platform-musl-aarch64.tar/hull-platform-musl-aarch64.tar dist/hull-platform-musl-aarch64.tar
           # Toolchain-free linker bundles (`hull tools install zig` / `install
           # lld`); per-platform flat ustar, hashed into hull.sha256 below.
           mv artifacts/hull-zig-linux-x86_64.tar/hull-zig-linux-x86_64.tar   dist/hull-zig-linux-x86_64.tar
@@ -1301,6 +1359,7 @@ jobs:
           sha256sum hull-cosmo hull-linux-x86_64 hull-linux-aarch64 hull-darwin-arm64 \
                     hull-wamrc-linux-x86_64 hull-wamrc-linux-aarch64 hull-wamrc-darwin-arm64 \
                     hull-libc-musl-x86_64.tar hull-libc-musl-aarch64.tar \
+                    hull-platform-musl-x86_64.tar hull-platform-musl-aarch64.tar \
                     hull-zig-linux-x86_64.tar hull-zig-linux-aarch64.tar hull-zig-darwin-arm64.tar \
                     hull.sbom.json hull.sbom.cdx.json hull.sbom.spdx.json \
                     libhull.sbom.json libhull.sbom.cdx.json libhull.sbom.spdx.json \
@@ -1379,6 +1438,8 @@ jobs:
             dist/hull-wamrc-darwin-arm64
             dist/hull-libc-musl-x86_64.tar
             dist/hull-libc-musl-aarch64.tar
+            dist/hull-platform-musl-x86_64.tar
+            dist/hull-platform-musl-aarch64.tar
             dist/hull-zig-linux-x86_64.tar
             dist/hull-zig-linux-aarch64.tar
             dist/hull-zig-darwin-arm64.tar
@@ -1403,6 +1464,8 @@ jobs:
             dist/hull-wamrc-darwin-arm64
             dist/hull-libc-musl-x86_64.tar
             dist/hull-libc-musl-aarch64.tar
+            dist/hull-platform-musl-x86_64.tar
+            dist/hull-platform-musl-aarch64.tar
             dist/hull-zig-linux-x86_64.tar
             dist/hull-zig-linux-aarch64.tar
             dist/hull-zig-darwin-arm64.tar
