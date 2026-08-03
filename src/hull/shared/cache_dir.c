@@ -6,6 +6,7 @@
  */
 
 #include "hull/shared/cache_dir.h"
+#include "hull/shared/fs_util.h"
 #include <ctype.h>
 #include <errno.h>
 #include <limits.h>
@@ -13,17 +14,6 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
-
-/* Create a directory if absent; tolerate concurrent creation. */
-static int ensure_dir(const char *path, mode_t mode)
-{
-    if (mkdir(path, mode) == 0) return 0;
-    if (errno == EEXIST) {
-        struct stat st;
-        if (stat(path, &st) == 0 && S_ISDIR(st.st_mode)) return 0;
-    }
-    return -1;
-}
 
 /* Cache subdir names are filesystem path components — restrict to a
  * conservative charset so a misconfigured caller can't path-traverse
@@ -40,24 +30,6 @@ static int name_valid(const char *name)
         if (!ok) return 0;
     }
     return 1;
-}
-
-/* Walk path components and mkdir each missing piece. */
-static int mkdir_p(const char *path)
-{
-    char buf[PATH_MAX];
-    size_t len = strlen(path);
-    if (len == 0 || len >= sizeof(buf)) { errno = ENAMETOOLONG; return -1; }
-    memcpy(buf, path, len + 1);
-    for (size_t i = 1; i <= len; i++) {
-        if (buf[i] == '/' || buf[i] == '\0') {
-            char saved = buf[i];
-            buf[i] = '\0';
-            if (ensure_dir(buf, 0755) != 0) return -1;
-            buf[i] = saved;
-        }
-    }
-    return 0;
 }
 
 int hl_hull_cache_dir(char *out, size_t out_sz)
@@ -97,7 +69,7 @@ int hl_hull_cache_dir(char *out, size_t out_sz)
         if (olen >= sizeof(abspath)) { errno = ENAMETOOLONG; return -1; }
         memcpy(abspath, override, olen);
         abspath[olen] = '\0';
-        if (mkdir_p(abspath) != 0) return -1;
+        if (hl_mkdir_p(abspath, 0755) != 0) return -1;
         return 0;
     }
 
@@ -116,21 +88,21 @@ int hl_hull_cache_dir(char *out, size_t out_sz)
     if (n < 0 || (size_t)n >= sizeof(hull_dir)) {
         errno = ENAMETOOLONG; return -1;
     }
-    if (ensure_dir(hull_dir, 0755) != 0) return -1;
+    if (hl_ensure_dir(hull_dir, 0755) != 0) return -1;
 
     char blobs_dir[PATH_MAX];
     n = snprintf(blobs_dir, sizeof(blobs_dir), "%s/blobs", hull_dir);
     if (n < 0 || (size_t)n >= sizeof(blobs_dir)) {
         errno = ENAMETOOLONG; return -1;
     }
-    if (ensure_dir(blobs_dir, 0755) != 0) return -1;
+    if (hl_ensure_dir(blobs_dir, 0755) != 0) return -1;
 
     char runtime_dir[PATH_MAX];
     n = snprintf(runtime_dir, sizeof(runtime_dir), "%s/runtime", blobs_dir);
     if (n < 0 || (size_t)n >= sizeof(runtime_dir)) {
         errno = ENAMETOOLONG; return -1;
     }
-    if (ensure_dir(runtime_dir, 0755) != 0) return -1;
+    if (hl_ensure_dir(runtime_dir, 0755) != 0) return -1;
 
     /* Trailing slash for easy concatenation. */
     n = snprintf(out, out_sz, "%s/", runtime_dir);
@@ -154,7 +126,7 @@ int hl_hull_cache_subdir(const char *name, char *out, size_t out_sz)
     if (n < 0 || (size_t)n >= sizeof(sub)) {
         errno = ENAMETOOLONG; return -1;
     }
-    if (ensure_dir(sub, 0755) != 0) return -1;
+    if (hl_ensure_dir(sub, 0755) != 0) return -1;
 
     n = snprintf(out, out_sz, "%s/", sub);
     if (n < 0 || (size_t)n >= out_sz) {

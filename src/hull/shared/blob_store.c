@@ -12,6 +12,7 @@
  */
 
 #include "hull/shared/blob_store.h"
+#include "hull/shared/fs_util.h"
 #include "hull/cap/crypto.h"
 #include "hull/utils/alloc.h"
 
@@ -142,24 +143,6 @@ static int build_shard_dir(HlBlobStore *s, const char *id,
     return (n > 0 && (size_t)n < out_cap) ? 0 : -1;
 }
 
-static int mkdir_p(const char *path, mode_t mode)
-{
-    char buf[PATH_MAX];
-    size_t len = strlen(path);
-    if (len == 0 || len >= sizeof(buf)) { errno = ENAMETOOLONG; return -1; }
-    memcpy(buf, path, len + 1);
-
-    for (size_t i = 1; i <= len; i++) {
-        if (buf[i] == '/' || buf[i] == '\0') {
-            char saved = buf[i];
-            buf[i] = '\0';
-            if (mkdir(buf, mode) < 0 && errno != EEXIST) return -1;
-            buf[i] = saved;
-        }
-    }
-    return 0;
-}
-
 static int make_tmp_name(char *out, size_t out_cap)
 {
     if (out_cap < HL_BLOB_STORE_TMP_NAME_SIZE) return -1;
@@ -224,15 +207,15 @@ int hl_blob_store_open(HlBlobStore **out,
     root[root_len] = '\0';
 
     char path[PATH_MAX];
-    if (mkdir_p(root, 0755) < 0) goto fail_root;
+    if (hl_mkdir_p(root, 0755) < 0) goto fail_root;
 
     if (snprintf(path, sizeof(path), "%s/blobs", root) >=
         (int)sizeof(path)) goto fail_root;
-    if (mkdir_p(path, 0755) < 0) goto fail_root;
+    if (hl_mkdir_p(path, 0755) < 0) goto fail_root;
 
     if (snprintf(path, sizeof(path), "%s/tmp", root) >=
         (int)sizeof(path)) goto fail_root;
-    if (mkdir_p(path, 0755) < 0) goto fail_root;
+    if (hl_mkdir_p(path, 0755) < 0) goto fail_root;
 
     sweep_stale_tmps(root, tmp_max_age_sec);
 
@@ -397,7 +380,7 @@ int hl_blob_store_writer_finalize(HlBlobStoreWriter *w,
         writer_release(w);
         return -1;
     }
-    if (mkdir_p(shard, 0755) < 0) {
+    if (hl_mkdir_p(shard, 0755) < 0) {
         unlink(w->tmp_path);
         writer_release(w);
         return -1;
@@ -551,7 +534,7 @@ int hl_blob_store_put_keyed(HlBlobStore *s, const char *key,
         unlink(tmp_path);
         return -1;
     }
-    if (mkdir_p(shard, 0755) < 0) {
+    if (hl_mkdir_p(shard, 0755) < 0) {
         unlink(tmp_path);
         return -1;
     }
