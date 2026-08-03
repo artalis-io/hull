@@ -43,24 +43,39 @@ Execution order (agreed): **#6+#1 → #7 → #4 → #5 → #2 → #3 → #8**, t
     checkout's `build/` is never clobbered). Validated end-to-end in `alpine:3.20`: all 20
     archives build under musl + pack to a ~15.8 MB flat ustar. Mirrors `build_musl_floor.sh`.
     Docs: musl_build.md "Producing the musl platform archive set".
-  - [~] **#4b Publish (release pipeline).** A `build-platform-musl` Alpine job (mirror
-    `build-floor-musl`) runs #4a per arch and packs `hull-platform-musl-<arch>.tar`; the final
-    `release` job hashes it into the signed `hull.sha256` (release-key trust chain, same as the
-    floor / wamrc / zig tars), attests it (SLSA), and publishes it. Scoped to the FETCHABLE tar
-    in `hull.sha256` - deliberately NOT the embedded platform-sig (`platform-manifest.txt`/§5c):
-    the runtime §5c coupling for a musl cross-built app is only testable with the composer that
-    records the musl-tagged composed names, so it moves to #4c. Artifact named
-    `hull-platform-musl-` (not `platform-`) so it does NOT leak into the untouched
-    `sign-platform-manifest` job. Touches signed release artifacts → validated by a pre-release
-    dry-run (hyphenated tag) before landing. IMPLEMENTED (release.yml); pending the dry-run.
-  - [ ] **#4c Fetch + select (+ §5c).** A `hull ... install musl-<arch>` fetch (release-key
-    verify, to `~/.hull/platform/`) + teach `prepare_platform` (and the `feature_compose` resolve
-    ladder) to select the musl base AND musl feature archives for a `-musl`/cross target;
-    determine + wire whatever runtime §5c / `platform-manifest.txt` change a musl cross-built app
-    needs (may need the musl-tagged rows in the embedded platform manifest + a `platform_sig.c`
-    entry-cap bump 64→128); relax the `#206` cross guard once a musl lib is resolvable. A partial
-    consumer that redirects only the base (not the feature archives) would re-link a glibc feature
-    lib against a musl base - the exact bug - so this lands atomically.
+  - [x] **#4b Publish (release pipeline).** DONE (PR #211). A `build-platform-musl` Alpine job
+    (mirror `build-floor-musl`) runs #4a per arch and packs `hull-platform-musl-<arch>.tar`; the
+    final `release` job hashes it into the signed `hull.sha256` (release-key trust chain, same as
+    the floor / wamrc / zig tars), adds it to the SLSA attestation subjects, and publishes it.
+    Scoped to the FETCHABLE tar in `hull.sha256` - deliberately NOT the embedded platform-sig
+    (`platform-manifest.txt`/§5c); the artifact is named `hull-platform-musl-` (not `platform-`)
+    so it does NOT leak into the untouched `sign-platform-manifest` job. **Validated by a real
+    pre-release dry-run** (`v0.9.1-musl4b-dryrun.1`, run 30847822944): both musl jobs green, the
+    full signed release published, `hull-platform-musl-x86_64.tar` SHA `4d731724…` matched its
+    `hull.sha256` entry byte-for-byte, tar held all 20 archives, prerelease flag set (v0.9.0 stayed
+    Latest), then torn down (`gh release delete --cleanup-tag`).
+  - [ ] **#4c Fetch + select (+ maybe §5c).** A `hull ... install musl-<arch>` fetch (release-key
+    verify, a `tools install` bundle like `libc-musl-<arch>`, or a `flavor install` to
+    `~/.hull/platform/`) + teach `prepare_platform` (and the `feature_compose` resolve ladder) to
+    select the musl base AND musl feature archives for a `-musl`/cross target; relax the `#206`
+    cross guard once a musl lib is resolvable. A partial consumer that redirects only the base (not
+    the feature archives) would re-link a glibc feature lib against a musl base - the exact bug -
+    so this lands atomically. **PIVOTAL §5c-for-cross question** (determines whether #4c needs a
+    2nd release dry-run): §5c is present-gated on the app's `package.sig.gethull.composed.
+    platform_domain` block (signature.c ~748). The musl platform lib is built by #4a's
+    `make platform` with **`HL_EMBED_PLATFORM_SIG=0`** (no signed manifest present at build), so it
+    carries NO embedded manifest. So the open question is whether the glibc RELEASE hull (which
+    DOES have an embedded platform-sig) *writes* the composed block when cross-building a musl app,
+    and if so whether the musl app's §5c then tries to verify musl hashes it has no manifest for.
+    - If cross builds **skip** writing the composed block (mirrors the build-time cross-check skip
+      at prepare_platform ~1291) OR the musl app has no manifest and §5c is absent → **#4c is just
+      fetch + select + guard**, no platform-manifest change, no 2nd dry-run.
+    - If cross builds **do** write it AND the musl app runs §5c → the musl archive hashes must be
+      signed into the platform manifest (`sign-platform-manifest` gains `musl-<arch>` /
+      `libhull_feature-<stem>.musl-<arch>.a` rows), #4a's producer must embed the signed manifest
+      into the musl lib, and `platform_sig.c`'s entry cap bumps 64→128 (~97 rows) → a **2nd release
+      dry-run**. Answer it with a real glibc-hull cross-build of a musl app + inspect its
+      `package.sig`, once the fetch/select scaffolding exists to run the experiment.
   - [ ] **#4d Smoke.** `release_smoke.sh` section: `hull … install musl-x86_64` + a
     `--target=x86_64-linux-musl --linker=zig` build that runs in Alpine.
 - [x] **#5 `--linker=zig` has zero e2e** ✓. DONE (PR #205): `tests/e2e_linker_zig.sh` builds +
