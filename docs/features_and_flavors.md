@@ -151,6 +151,51 @@ exactly like the missing-flavor-lib path today. A cache-sourced feature lib is
 re-verified against its signed manifest before linking (the same
 `hl_release_io_verify_local_asset` TOCTOU close as flavored builds).
 
+### 3.4 Weak-hook seams: how a base-resident symbol gets overridden
+
+§3.2's generated registry is one seam. The other - used by the AUTO-composed
+subsystems (runtime, http, wasm, image, tls, keel) and the gpu/tui features - is
+a **weak default + strong override**: the base defines a symbol
+`__attribute__((weak))` so it links on its own; a composed archive defines the
+same symbol *strong* and wins at link. No `dlopen`, no linker sets, portable
+across ELF / Mach-O / cosmo. There are **two shapes**; pick by whether callers
+need to distinguish "feature absent" from "feature present but failed":
+
+1. **Header hook + accessor** (the richer shape). A header
+   (`include/hull/<x>_feature.h`) declares an accessor
+   `const HlFooBackend *hl_foo_active_backend(void)`; the base provides a WEAK
+   default returning a fail-closed / portable backend, the composed archive a
+   STRONG override returning the real one. Callers get a vtable and never branch
+   on presence. Examples: `hl_crypto_hmac_active_backend` /
+   `hl_crypto_asym_active_backend` (tls_feature.h), the gpu/db feature hooks.
+   Use this when the subsystem is a **vtable/backend** and "absent" should behave
+   as a working fail-closed default (verify returns -2, HMAC uses the portable
+   backend).
+
+2. **Weak-stub-as-sentinel** (the leaner shape). No header hook: a base TU
+   (`src/hull/<x>_weakstub.c`) defines each entry point WEAK, returning a
+   distinguished **absent sentinel** so callers can tell "not composed" from a
+   real error. WASM uses `HL_CAP_WASM_ABSENT` (a positive code, distinct from
+   0-ok / -1-error) so `db.udf` can fail closed with a specific message when the
+   wasm feature wasn't composed. The per-runtime module openers use the simplest
+   form: a weak `luaopen_hull_image` / `hl_js_init_image_module` returning 0
+   (module absent → `require` yields nil). Use this when there is **no vtable** -
+   just entry points whose absence must be detectable, or a module opener whose
+   absence is a soft nil.
+
+**Convention.** Prefer shape 1 when a vtable exists (callers stay branch-free);
+use shape 2 for entry-point sets or module openers. Keep `__attribute__((weak))`
+**written out at each site** rather than behind an `HL_WEAK` macro - the weakness
+of a symbol is load-bearing (it decides link resolution + the security review of
+what the base falls back to), so it should be visible, not named away. A
+composed archive's override MUST be strong (plain, non-weak) and the whole
+archive is `--whole-archive`/`-force_load`'d so the linker can't drop the
+overriding TU. Adding a seam = (a) declare/define the weak default in the base,
+(b) `extern` the same signature in the feature TU and define it strong, (c) if
+callers must detect absence, return a documented sentinel (shape 2) or a
+fail-closed backend (shape 1). The base must link + run correctly with EVERY
+seam left at its weak default (that is the "SLIM base" contract).
+
 ## 4. The dev loop: `hull dev` self-links a cached feature runtime
 
 A pre-built lean `hull` **cannot statically compose a feature at runtime** — no

@@ -88,8 +88,14 @@ int hl_js_register_modules(HlJS *js)
     if (hl_js_init_tar_module(js->ctx, js) != 0)
         return -1;
 
+    /* image has a DUAL role (audit T4b), unlike the always-in-base blob/mime/tar
+     * above. Two independent gates: the #ifdef HL_ENABLE_IMAGE is the SUBTRACTIVE
+     * gate (HL_ENABLE_IMAGE=0 drops image wholesale), while
+     * hl_js_init_image_module itself is a WEAK no-op stub (runtime/js/image_stub.c)
+     * on the default composable base - a no-op until the composed
+     * libhull_feature-image-js.a provides the STRONG real initializer for an app
+     * that declares hull/image. See the Lua modules.c for the full note. */
 #ifdef HL_ENABLE_IMAGE
-    /* Register hull:image module (dropped on a HL_ENABLE_IMAGE=0 build). */
     if (hl_js_init_image_module(js->ctx, js) != 0)
         return -1;
 #endif

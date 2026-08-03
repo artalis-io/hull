@@ -797,10 +797,15 @@ PLEDGE_OBJS ?=
 
 # ── Hull source files ───────────────────────────────────────────────
 
-# Capability sources (always compiled, except cap/tool.c and cap/test.c
-# which need runtimes / linker visibility from runtime bindings).
-# Runtime-layer test bindings live in runtime/{lua,js}/mod_test.c (picked
-# up via the JS_RT_SRCS / LUA_RT_SRCS globs below).
+# Capability sources. The convention: `cap/*.c` is glob-included by DEFAULT and
+# reducible subsystems are SUBTRACTED below (the ifeq/ifneq `filter-out` blocks).
+# So a "base cap module" - a small always-in-base C capability with no HL_ENABLE_*
+# gate and no --with archive (mime, blob, tar; see CLAUDE.md "Extension taxonomy")
+# - needs NO Makefile edit: dropping cap/<name>.c into the glob rides CAP_OBJS
+# automatically. Only tool.c / test.c (they need runtime/linker visibility from
+# the runtime bindings) and the OPTIONAL subsystems (image, the DB backends, GPU,
+# HTTP halves) are filtered out. Runtime-layer test bindings live in
+# runtime/{lua,js}/mod_test.c (picked up via the JS_RT_SRCS / LUA_RT_SRCS globs).
 CAP_SRCS := $(filter-out $(SRCDIR)/hull/cap/tool.c $(SRCDIR)/hull/cap/test.c,$(wildcard $(SRCDIR)/hull/cap/*.c))
 ifeq ($(HL_ENABLE_IMAGE),0)
   # Image codecs off: drop the codec vtable + stb backend (stb obj already
