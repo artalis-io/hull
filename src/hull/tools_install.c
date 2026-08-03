@@ -73,29 +73,27 @@ static const HlToolSpec REGISTRY[] = {
         .is_bundle         = 1,
         .bundle_entry      = "crt1.o",
     },
-    /* The toolchain-free LINKERS for `hull build --linker=lld` / `--linker=zig`.
-     * Both are multi-file trees shipped as per-platform bundles (arch-free name,
-     * one artifact per native platform -> hull-<name>-<platform>.tar). The bundle
-     * extracts to $HOME/.hull/tools/<name>/ and the driver at
-     * <name>/<bundle_entry> is what hl_tools_lookup_path resolves for the linker
-     * backend. Native-only (cosmo can't drive a native lld/zig tree). See
-     * docs/toolchain_free_build.md. */
-    {
-        .name                 = "lld",
-        .description          = "LLVM lld linker (lld + ld.lld + ld64.lld) for "
-                                "`hull build --linker=lld` - no system linker.",
-        .has_linux_x86_64     = 1,
-        .has_linux_aarch64    = 1,
-        .has_darwin_arm64     = 1,
-        .is_bundle            = 1,
-        .bundle_entry         = "lld",   /* the dotless driver; -B prefix dir */
-        .bundle_per_platform  = 1,
-    },
+    /* The toolchain-free LINKER for `hull build --linker=zig --target=<triple>`.
+     * A multi-file tree shipped as a per-platform bundle (arch-free name, one
+     * artifact per native platform -> hull-zig-<platform>.tar). The bundle
+     * extracts to $HOME/.hull/tools/zig/ and the driver at zig/<bundle_entry> is
+     * what hl_tools_lookup_path resolves. zig is fully self-contained (a static
+     * driver + its libc/compiler-rt tree, and its OWN bundled lld), so it runs
+     * anywhere. Native-only (cosmo can't drive a native zig tree). See
+     * docs/toolchain_free_build.md.
+     *
+     * NOTE: a standalone `lld` bundle is intentionally NOT registered. Every
+     * binary lld distribution (Homebrew / apt / LLVM release) is DYNAMICALLY
+     * linked against libLLVM + the lld*.dylib set (an absolute-path
+     * libLLVM.dylib on macOS), so a flat bundle of just the binaries can't run
+     * portably. A runnable lld bundle needs a statically-linked lld (a full
+     * LLVM source build) - a tracked follow-up. `hull build --linker=lld` still
+     * works against a system / PATH lld (its dylibs intact on the user's box). */
     {
         .name                 = "zig",
-        .description          = "Zig toolchain (bundles clang+lld+crt+libc) for "
-                                "`hull build --linker=zig --target=<triple>` - "
-                                "turnkey cross-compilation.",
+        .description          = "Zig toolchain (self-contained: driver + libc + "
+                                "its own lld) for `hull build --linker=zig "
+                                "--target=<triple>` - turnkey cross-compilation.",
         .has_linux_x86_64     = 1,
         .has_linux_aarch64    = 1,
         .has_darwin_arm64     = 1,

@@ -134,7 +134,12 @@ int hl_release_io_get(const char *url,
     hl_tls_config_wire(&tls_cfg, tls);
     KlClientConfig cfg = {
         .timeout_ms        = 30000,
-        .max_response_size = 200 * 1024 * 1024,  /* 200 MB headroom for releases */
+        /* 512 MB: a released binary / feature lib is small, but a multi-file
+         * TOOL BUNDLE can be large - the `zig` toolchain is ~330 MB (a 168 MB
+         * driver + its cross-libc tree). The download is SHA-256-verified
+         * against the signed manifest, so this is a sanity bound, not a trust
+         * boundary. Buffered in RAM only for the duration of an opt-in install. */
+        .max_response_size = 512 * 1024 * 1024,
         .tls               = &tls_cfg,
     };
     KlRedirectConfig redir = { .max_redirects = 10 };

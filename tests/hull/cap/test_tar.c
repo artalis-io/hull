@@ -239,6 +239,28 @@ UTEST_F(tar_fixture, extract_real_tar) {
     free(tbuf);
 }
 
+UTEST_F(tar_fixture, extract_creates_missing_parent_dirs) {
+    /* dest_dir's PARENT doesn't exist yet (mirrors `hull tools install <bundle>`
+     * into a fresh $HOME, extracting to ~/.hull/tools/<name>/ before anything
+     * created ~/.hull/tools). hl_tar_extract must mkdir -p, not single-mkdir. */
+    unsigned char *buf = calloc(1, 4096);
+    ASSERT_NE(buf, NULL);
+    size_t off = 0;
+    tar_add_file(buf, &off, "driver", "BIN", 3);
+    off += 512;
+
+    char dest[PATH_MAX];
+    /* Two levels of not-yet-existing parents under the tmp root. */
+    snprintf(dest, sizeof(dest), "%s/a/b/c", utest_fixture->tmpdir);
+    ASSERT_EQ(hl_tar_extract(buf, off, dest), 0);
+
+    char p[PATH_MAX];
+    struct stat st;
+    snprintf(p, sizeof(p), "%s/driver", dest);
+    ASSERT_EQ(stat(p, &st), 0);
+    free(buf);
+}
+
 UTEST_F(tar_fixture, extract_rejects_traversal) {
     unsigned char *buf = calloc(1, 4096);
     ASSERT_NE(buf, NULL);

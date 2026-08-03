@@ -133,7 +133,10 @@ static int extract_cb(const HlTarEntry *e, void *vctx)
 int hl_tar_extract(const unsigned char *tar, size_t tar_len, const char *dest_dir)
 {
     if (!dest_dir) return -1;
-    if (hl_ensure_dir(dest_dir, 0755) != 0) return -1;
+    /* mkdir -p, not a single mkdir: dest_dir's parent may not exist yet. A
+     * `hull tools install <bundle>` into a fresh $HOME extracts to
+     * ~/.hull/tools/<name>/ before anything else created ~/.hull/tools. */
+    if (hl_mkdir_p(dest_dir, 0755) != 0) return -1;
     struct extract_ctx c = { dest_dir };
     return hl_tar_parse(tar, tar_len, extract_cb, &c);
 }
