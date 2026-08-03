@@ -534,7 +534,10 @@ function M.plan_mandatory(ctx)
               path = resolve("web-bindings", "http-" .. rt, M.resolve_http_rt_lib, rt, ctx.tmpdir, rctx) })
     end
 
-    return { list = list, needs_http = needs_http }
+    -- needs_wasm is returned so the caller can print the compute-free skip note;
+    -- needs_http likewise for the HTTP-free note (both are grepped by the tui/
+    -- wasm feature e2es as over-compose regression guards).
+    return { list = list, needs_http = needs_http, needs_wasm = needs_wasm }
 end
 
 return M

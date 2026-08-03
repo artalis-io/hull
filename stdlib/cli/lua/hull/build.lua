@@ -1034,6 +1034,16 @@ local function compose_features(opts, tmpdir, platform_lib, is_cosmo, compute_fi
                 end
                 print("hull build: composed " .. d.label)
             end
+            -- Skip notes for the dropped subsystems (grepped by the wasm/tui
+            -- feature e2es as over-compose regression guards).
+            if not plan.needs_wasm then
+                print("hull build: compute-free app (no hull/compute, no "
+                    .. "compute/*.wasm) - skipped the WASM feature (~256 KB smaller)")
+            end
+            if not plan.needs_http then
+                print("hull build: HTTP-free app (app.main, no HTTP modules) - "
+                    .. "skipped http core + web bindings")
+            end
         end
     end
     return feature_objs, feature_libs, needs_base_group, composed_assets
