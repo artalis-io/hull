@@ -86,29 +86,21 @@ clean:
     end
 
     -- Native runtime-less base: link the platform lib + the whole-archived
-    -- runtime feature. The runtime references base symbols (crypto/vfs), so the
-    -- GNU-ld link wraps both in --start-group; ld64 rescans natively and
-    -- rejects the flag, so darwin uses a plain platform lib + -force_load. The
-    -- default CC is the native `cc` (the extracted .a is native single-arch;
-    -- cosmocc would reject its object format).
-    local rt_lib = "platform/libhull_feature-" .. rt.name .. ".a"
-    local waf = table.concat(rt.fcompose.whole_archive_flags(rt_lib, rt.darwin), " ")
-    -- HTTP core feature (issue #114): whole-archive it alongside the runtime so
-    -- the web bindings' http/ws/smtp/body cap refs resolve. Inside the same
-    -- --start-group (the caps reference base symbols + Keel from the platform lib).
-    if rt.http_path then
-        waf = waf .. " " .. table.concat(
-            rt.fcompose.whole_archive_flags("platform/libhull_feature-http.a", rt.darwin), " ")
+    -- mandatory feature set (runtime + http/wasm/sqlite-rt/image/tls/keel as the
+    -- app needs them, in the plan's order). Archives that reference base / Keel
+    -- symbols (runtime, tls, keel) need the GNU-ld --start-group with the
+    -- platform lib; ld64 rescans natively and rejects the flag, so darwin uses a
+    -- plain platform lib + -force_load. The default CC is the native `cc` (the
+    -- extracted .a is native single-arch; cosmocc would reject its object format).
+    local parts = {}
+    for _, d in ipairs(rt.plan) do
+        for _, f in ipairs(rt.fcompose.whole_archive_flags("platform/" .. d.lib, rt.darwin)) do
+            parts[#parts + 1] = f
+        end
     end
-    -- Phase C: the runtime's web bindings archive (whole-archived, overrides the
-    -- base http_weakstub no-ops).
-    if rt.httprt_path then
-        waf = waf .. " " .. table.concat(
-            rt.fcompose.whole_archive_flags(
-                "platform/libhull_feature-http-" .. rt.name .. ".a", rt.darwin), " ")
-    end
+    local waf = table.concat(parts, " ")
     local link_libs
-    if rt.darwin then
+    if rt.darwin or not rt.base_group then
         link_libs = "platform/libhull_platform.a " .. waf
     else
         link_libs = "-Wl,--start-group platform/libhull_platform.a " .. waf
@@ -332,56 +324,37 @@ local function main()
         local app_rt = fcompose.detect_app_rt(opts.app_dir)
         if app_rt then
             local plat = tool.platform_name and tool.platform_name() or nil
-            local rt_path, rt_from = fcompose.resolve_runtime_lib(app_rt, extracted_dir,
-                                         { hull_dir = hull_dir, plat = plat })
-            if not rt_path then
-                if rt_from == "cache-verify-failed" then
-                    tool.stderr("hull eject: cached " .. app_rt
-                        .. " runtime lib could not be re-verified\n")
-                else
-                    tool.stderr("hull eject: the '" .. app_rt .. "' runtime feature lib "
-                        .. "was not found (normally embedded in a release hull)\n")
-                    tool.stderr("hint: `hull feature install " .. app_rt .. "`, or build "
-                        .. "from source with `make feature-" .. app_rt .. "`\n")
-                end
-                tool.exit(1)
+            -- Count compute/*.wasm so a WASM-backed db.udf (which declares no
+            -- compute module, invisible to the resolver) still composes the wasm
+            -- feature -- plan_mandatory's S2 signal, matching `hull build`.
+            local compute_count = 0
+            if tool.file_exists(opts.app_dir .. "/compute") then
+                local wasm = tool.find_files(opts.app_dir .. "/compute", "*.wasm")
+                if wasm then compute_count = #wasm end
             end
-            -- The native base is also HTTP-core-less (issue #114): the runtime's
-            -- web bindings reference the http/ws/smtp/body caps that now live in
-            -- libhull_feature-http.a. Compose it back too, mirroring `hull build`.
-            local http_path, http_from = fcompose.resolve_http_lib(extracted_dir,
-                                         { hull_dir = hull_dir, plat = plat })
-            if not http_path then
-                if http_from == "cache-verify-failed" then
-                    tool.stderr("hull eject: cached HTTP feature lib could not be re-verified\n")
-                else
-                    tool.stderr("hull eject: the HTTP feature lib "
-                        .. "(libhull_feature-http.a) was not found "
-                        .. "(normally embedded in a release hull)\n")
-                    tool.stderr("hint: `hull feature install http` is not applicable; build "
-                        .. "from source with `make feature-http`\n")
-                end
-                tool.exit(1)
-            end
-            -- Phase C: the runtime's web bindings live in a separate archive too.
-            local httprt_path, httprt_from = fcompose.resolve_http_rt_lib(app_rt, extracted_dir,
-                                             { hull_dir = hull_dir, plat = plat })
-            if not httprt_path then
-                if httprt_from == "cache-verify-failed" then
-                    tool.stderr("hull eject: cached web-bindings lib could not be re-verified\n")
-                else
-                    tool.stderr("hull eject: the web-bindings feature lib "
-                        .. "(libhull_feature-http-" .. app_rt .. ".a) was not found\n")
-                    tool.stderr("hint: build from source with `make feature-http-"
-                        .. app_rt .. "`\n")
-                end
-                tool.exit(1)
+            -- Compose the SAME ordered mandatory-archive set `hull build` does
+            -- (runtime + http/wasm/sqlite-rt/image/tls/keel as the app needs
+            -- them) via the shared plan. Before this, eject composed ONLY runtime
+            -- + http, so an ejected db/compute/image/HTTPS app failed to link
+            -- (missing sqlite3_*/WAMR/mbedTLS symbols). One source of truth now.
+            local plan = fcompose.plan_mandatory({
+                app_dir = opts.app_dir, app_rt = app_rt, tmpdir = extracted_dir,
+                hull_dir = hull_dir, plat = plat, platform_lib = platform_lib,
+                compute_count = compute_count, with = opts.with, flavor = opts.flavor,
+                with_list = {},
+                on_fail = function(msg)
+                    tool.stderr((msg:gsub("hull build:", "hull eject:")))
+                    tool.exit(1)
+                end,
+            })
+            local base_group = false
+            for _, d in ipairs(plan.list) do
+                if d.sets_base_group then base_group = true end
             end
             rt_compose = {
                 name = app_rt,
-                path = rt_path,
-                http_path = http_path,
-                httprt_path = httprt_path,
+                plan = plan.list,
+                base_group = base_group,
                 darwin = (plat and plat:sub(1, 6) == "darwin") or false,
                 fcompose = fcompose,
             }
@@ -418,15 +391,10 @@ local function main()
     if rt_compose then
         write_file(dir .. "/src/app_feature_registry.c",
                    fcompose.gen_app_registry_c(rt_compose.name))
-        tool.copy(rt_compose.path,
-                  dir .. "/platform/libhull_feature-" .. rt_compose.name .. ".a")
-        if rt_compose.http_path then
-            tool.copy(rt_compose.http_path,
-                      dir .. "/platform/libhull_feature-http.a")
-        end
-        if rt_compose.httprt_path then
-            tool.copy(rt_compose.httprt_path,
-                      dir .. "/platform/libhull_feature-http-" .. rt_compose.name .. ".a")
+        -- Copy every composed archive in the plan into platform/ under its
+        -- canonical filename; the Makefile whole-archives each (see gen_makefile).
+        for _, d in ipairs(rt_compose.plan) do
+            tool.copy(d.path, dir .. "/platform/" .. d.lib)
         end
     end
 

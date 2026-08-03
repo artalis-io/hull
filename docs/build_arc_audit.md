@@ -11,11 +11,11 @@ Execution order (agreed): **#6+#1 → #7 → #4 → #5 → #2 → #3 → #8**, t
 
 ## Tier 1 — correctness bugs
 
-- [ ] **#1 `hull eject` composes only runtime+http — broken for db/compute/image/TLS apps.** ✓
+- [x] **#1 `hull eject` composes only runtime+http — broken for db/compute/image/TLS apps.** ✓
   `eject.lua` calls only `resolve_runtime_lib` / `resolve_http_lib` / `resolve_http_rt_lib`;
   `build.lua`'s `compose_features()` also composes wasm/wasm-rt/sqlite-rt/image/image-rt/tls/keel.
   Ejecting a db/compute/image/HTTPS app yields a project that won't link/run. Drift
-  the modularization arc introduced. **Fix converges with #6.**
+  the modularization arc introduced. **Fix converges with #6.** DONE (PR #203): shared fcompose.plan_mandatory; eject now composes the full ordered set (validated: ejected compute app links + runs with WAMR).
 
 - [ ] **#2 Cross-compile silently mis-links.** ✓ `--target=<foreign>` emits a correct cross
   `app_registry.o`, but only the `zig` backend consumes the triple (system/lld `(void)tgt`),
@@ -45,8 +45,8 @@ Execution order (agreed): **#6+#1 → #7 → #4 → #5 → #2 → #3 → #8**, t
 
 ## Tier 3 — simplifications (two prevent Tier-1 bugs)
 
-- [ ] **#6 Table-drive `compose_features()`** — 690-line fn, same 12-line block ×8. Collapse to a
-  data table + one loop; **fixes #1 for free** (eject calls the same helper).
+- [x] **#6 Table-drive `compose_features()`** — 690-line fn, same 12-line block ×8. Collapse to a
+  data table + one loop; **fixes #1 for free** (eject calls the same helper). DONE (PR #203): build.lua 2365->1995 lines; compose blocks -> one data-driven plan + loop; extract_manifest also centralized. e2e composed_sig/build/feature_runtime/feature_wasm green.
 - [ ] **#7 One `HULL_CORE_OBJS` variable** — the ~60-token object list is duplicated across 8
   sites (hull link prereqs+recipe, `PLATFORM_OBJS`, 5 test lists); drift already exists
   (`fs_util.o` missing from the sentinel purge). Collapse to one var + `$^` recipe; derive
