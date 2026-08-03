@@ -230,39 +230,33 @@ if [ "$(uname -s)" = "Linux" ]; then
     assert "floor dir removed"             [ ! -d "$FLOOR_DIR" ]
 fi
 
-# Toolchain-free linker bundles: lld + zig. Per-platform multi-file .tar
-# bundles published for all three native platforms (hull-<name>-<platform>.tar).
-# Exercises the per-platform-bundle asset name + fetch -> verify -> nested
-# extract -> the bundled DRIVER actually runs -> directory uninstall. Native
-# (this runs after the cosmo early-exit above); no OS gate - both Linux + macOS.
-for LINKER_TOOL in lld zig; do
-    LINKER_DIR="$HOME/.hull/tools/$LINKER_TOOL"
-    "$HULL" tools uninstall "$LINKER_TOOL" >/dev/null 2>&1 || true
-    echo ""
-    echo "── hull tools install $LINKER_TOOL (per-platform bundle, LIVE download) ──"
-    OUT=$("$HULL" tools install "$LINKER_TOOL" 2>&1); RC=$?
-    echo "$OUT" | sed 's/^/    /'
-    assert "exits 0"                        [ "$RC" -eq 0 ]
-    assert_contains "SHA-256 verified"      "$OUT" "SHA-256 verified"
-    assert_contains "installed as bundle"   "$OUT" "(bundle)"
-    assert "bundle dir created"             [ -d "$LINKER_DIR" ]
-    # The driver inside the bundle is executable and runs.
-    assert "driver executable"              [ -x "$LINKER_DIR/$LINKER_TOOL" ]
-    if [ "$LINKER_TOOL" = "zig" ]; then
-        DOUT=$("$LINKER_DIR/zig" version 2>&1) || true
-        assert_contains "zig version runs"  "$DOUT" "0.13"
-        assert "zig lib/ tree extracted"    [ -d "$LINKER_DIR/lib" ]
-    else
-        DOUT=$("$LINKER_DIR/ld.lld" --version 2>&1) || true
-        assert_contains "ld.lld --version runs"  "$DOUT" "LLD"
-    fi
-    OUT=$("$HULL" tools list 2>&1)
-    assert_contains "list shows $LINKER_TOOL installed"  "$OUT" "$LINKER_TOOL"
-    echo "── hull tools uninstall $LINKER_TOOL ──"
-    OUT=$("$HULL" tools uninstall "$LINKER_TOOL" 2>&1)
-    assert_contains "$LINKER_TOOL uninstalled"  "$OUT" "uninstalled $LINKER_TOOL"
-    assert "$LINKER_TOOL dir removed"       [ ! -d "$LINKER_DIR" ]
-done
+# Toolchain-free linker bundle: zig. A per-platform multi-file .tar bundle
+# published for all three native platforms (hull-zig-<platform>.tar) - the
+# largest tool asset (~330 MB), so it also exercises the raised download cap.
+# fetch -> verify -> nested extract -> the bundled DRIVER runs -> dir uninstall.
+# Native (runs after the cosmo early-exit); no OS gate - Linux + macOS.
+# (A standalone lld bundle is intentionally NOT shipped - binary lld is
+# dynamically linked against libLLVM; see tools_install.c's registry NOTE.)
+ZIG_DIR="$HOME/.hull/tools/zig"
+"$HULL" tools uninstall zig >/dev/null 2>&1 || true
+echo ""
+echo "── hull tools install zig (per-platform bundle, LIVE download) ──"
+OUT=$("$HULL" tools install zig 2>&1); RC=$?
+echo "$OUT" | sed 's/^/    /'
+assert "exits 0"                        [ "$RC" -eq 0 ]
+assert_contains "SHA-256 verified"      "$OUT" "SHA-256 verified"
+assert_contains "installed as bundle"   "$OUT" "(bundle)"
+assert "bundle dir created"             [ -d "$ZIG_DIR" ]
+assert "zig driver executable"          [ -x "$ZIG_DIR/zig" ]
+assert "zig lib/ tree extracted"        [ -d "$ZIG_DIR/lib" ]
+DOUT=$("$ZIG_DIR/zig" version 2>&1) || true
+assert_contains "zig version runs"      "$DOUT" "0.13"
+OUT=$("$HULL" tools list 2>&1)
+assert_contains "list shows zig installed"  "$OUT" "zig"
+echo "── hull tools uninstall zig ──"
+OUT=$("$HULL" tools uninstall zig 2>&1)
+assert_contains "zig uninstalled"       "$OUT" "uninstalled zig"
+assert "zig dir removed"                [ ! -d "$ZIG_DIR" ]
 
 # Per-flavor platform lib install (native single-arch lib).
 smoke_platform_install

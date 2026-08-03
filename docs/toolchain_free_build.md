@@ -51,21 +51,28 @@ explicit name. Adding lld/mold is a new backend behind this vtable + a
 
 ## Axis 1 - the linker as a Hull tool (`hull tools install lld`)
 
-> **STATUS (SHIPPED):** `lld` AND `zig` are registered installable tools -
-> `hull tools install lld` / `hull tools install zig`. Both are **per-platform
-> bundles** (`.is_bundle` + `.bundle_per_platform` in the registry): a multi-file
-> tree published as `hull-<name>-<platform>.tar` that extracts to
-> `$HOME/.hull/tools/<name>/`, with the driver at `<name>/<bundle_entry>` (`lld`
-> / `zig`) resolved by `hl_tools_lookup_path`. Release producers:
-> `scripts/build_zig_bundle.sh` (repacks the official ziglang.org tree - self-
-> contained, symlink-free) and `scripts/build_lld_bundle.sh` (packs the lld
-> personalities `lld`+`ld.lld`+`ld64.lld`+`wasm-ld`, symlinks deref'd to copies;
-> sources from the distro/Homebrew lld-18 via `LLD_SRC_DIR`, or an LLVM-release
-> download). Both jobs live in `release.yml` and each tar's SHA-256 is in the
-> signed `hull.sha256` (same trust chain as `wamrc`). Native-only (a cosmo fat
-> APE can't drive a native tree). `mold` is not yet registered. Caveat: the
-> lld bundle links against the release runner's libc (a later refinement can
-> source the LLVM-official ubuntu-18.04-floor build for wider portability).
+> **STATUS (SHIPPED — zig; lld deferred):** `zig` is a registered installable
+> tool - `hull tools install zig` - as a **per-platform bundle** (`.is_bundle` +
+> `.bundle_per_platform`): a multi-file tree published as
+> `hull-zig-<platform>.tar` that extracts to `$HOME/.hull/tools/zig/`, driver at
+> `zig/zig` resolved by `hl_tools_lookup_path`. Producer
+> `scripts/build_zig_bundle.sh` repacks the official ziglang.org 0.13.0 tree
+> (self-contained, symlink-free); `release.yml` `build-zig` job × 3 native
+> platforms; each tar's SHA-256 is in the signed `hull.sha256`. **Dry-run
+> validated** (v0.9.1-lld-zig-dryrun): live install → `zig version` → run. The
+> bundle is ~330 MB (a 168 MB driver + a 138 MB cross-libc tree), so
+> `hl_release_io`'s `max_response_size` was raised to 512 MB and `hl_tar_extract`
+> mkdir-p's its dest.
+>
+> **lld is intentionally NOT a bundle-installable tool.** The dry-run proved that
+> every binary lld distribution (Homebrew / apt / LLVM release) is *dynamically*
+> linked against libLLVM + the `lld*.dylib` set (an **absolute-path**
+> `libLLVM.dylib` on macOS), so a flat bundle of just the binaries fails at
+> runtime (`dyld: Library not loaded: @rpath/liblldELF.dylib`). A runnable lld
+> bundle needs a **statically-linked** lld (a full LLVM source build) - a tracked
+> follow-up. `hull build --linker=lld` still resolves a system / PATH lld (its
+> dylibs intact on the user's box), and `zig` already ships a working lld
+> internally. `mold` is likewise unregistered.
 
 `lld` is LLVM's linker: one binary that is `ld.lld` (ELF), `ld64.lld`
 (Mach-O), and `lld-link` (COFF/PE) depending on how it is invoked. `mold` is

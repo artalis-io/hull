@@ -847,65 +847,6 @@ jobs:
           name: hull-zig-${{ matrix.name }}.tar
           path: hull-zig-${{ matrix.name }}.tar
 
-  build-lld:
-    # The lld linker bundle pulled by `hull tools install lld` ->
-    # `hull build --linker=lld`. Packs the LLVM lld personalities (lld + ld.lld +
-    # ld64.lld + wasm-ld, symlinks deref'd to copies) as a per-platform flat
-    # ustar. Sourced from the distro/Homebrew lld-18 package via LLD_SRC_DIR (the
-    # script also supports an LLVM-release download; the package path is the
-    # reliable CI build). CAVEAT: the packaged lld links against the runner's
-    # libc, so the produced binary needs a glibc/macOS at least as new as the
-    # runner's - a later refinement can source the LLVM official (ubuntu-18.04
-    # floor) build. Each tar's SHA-256 lands in the signed hull.sha256 below.
-    # Native-only. See docs/toolchain_free_build.md.
-    name: Build lld bundle (${{ matrix.name }})
-    runs-on: ${{ matrix.os }}
-
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - name: linux-x86_64
-            os: ubuntu-24.04
-          - name: linux-aarch64
-            os: ubuntu-24.04-arm
-          - name: darwin-arm64
-            os: macos-15
-
-    steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
-
-      - name: Install lld-18 (Linux)
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y lld-18
-          # Stage the dotless personalities so build_lld_bundle.sh finds them.
-          mkdir -p /tmp/lldbin
-          for f in lld ld.lld ld64.lld wasm-ld; do
-            if [ -x "/usr/lib/llvm-18/bin/$f" ]; then
-              ln -sf "/usr/lib/llvm-18/bin/$f" "/tmp/lldbin/$f"
-            fi
-          done
-          echo "LLD_SRC_DIR=/tmp/lldbin" >> "$GITHUB_ENV"
-
-      - name: Install lld (macOS)
-        if: runner.os == 'macOS'
-        run: |
-          brew install lld
-          echo "LLD_SRC_DIR=$(brew --prefix)/opt/lld/bin" >> "$GITHUB_ENV"
-
-      - name: Build lld bundle
-        run: |
-          # triple/version args are ignored in LLD_SRC_DIR mode.
-          LLD_SRC_DIR="$LLD_SRC_DIR" sh scripts/build_lld_bundle.sh \
-             pkg 18 hull-lld-${{ matrix.name }}.tar
-
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
-        with:
-          name: hull-lld-${{ matrix.name }}.tar
-          path: hull-lld-${{ matrix.name }}.tar
-
   build-feature-native:
     # Composable DuckDB feature archive (libhull_feature-duckdb-<arch>.a),
     # shipped as a release asset and pulled by `hull feature install duckdb`
@@ -1204,7 +1145,7 @@ jobs:
   release:
     name: Create Release
     runs-on: ubuntu-24.04
-    needs: [build-cosmo, build-native, build-wamrc, build-floor-musl, build-zig, build-lld, build-feature-native, build-feature-gpu, build-feature-tui, build-feature-postgres, build-feature-mysql, build-feature-lua, build-feature-js]
+    needs: [build-cosmo, build-native, build-wamrc, build-floor-musl, build-zig, build-feature-native, build-feature-gpu, build-feature-tui, build-feature-postgres, build-feature-mysql, build-feature-lua, build-feature-js]
     permissions:
       contents: write       # publish GitHub release + assets
       id-token: write       # SLSA: OIDC for Sigstore signing
@@ -1234,9 +1175,6 @@ jobs:
           mv artifacts/hull-zig-linux-x86_64.tar/hull-zig-linux-x86_64.tar   dist/hull-zig-linux-x86_64.tar
           mv artifacts/hull-zig-linux-aarch64.tar/hull-zig-linux-aarch64.tar dist/hull-zig-linux-aarch64.tar
           mv artifacts/hull-zig-darwin-arm64.tar/hull-zig-darwin-arm64.tar   dist/hull-zig-darwin-arm64.tar
-          mv artifacts/hull-lld-linux-x86_64.tar/hull-lld-linux-x86_64.tar   dist/hull-lld-linux-x86_64.tar
-          mv artifacts/hull-lld-linux-aarch64.tar/hull-lld-linux-aarch64.tar dist/hull-lld-linux-aarch64.tar
-          mv artifacts/hull-lld-darwin-arm64.tar/hull-lld-darwin-arm64.tar   dist/hull-lld-darwin-arm64.tar
           # Per-flavor platform libs. Consumed by `hull platform install
           # <flavor>` -> `hull build --flavor`. Native files:
           # libhull_platform-<flavor>-<arch>.a; cosmo files (dual-arch):
@@ -1364,7 +1302,6 @@ jobs:
                     hull-wamrc-linux-x86_64 hull-wamrc-linux-aarch64 hull-wamrc-darwin-arm64 \
                     hull-libc-musl-x86_64.tar hull-libc-musl-aarch64.tar \
                     hull-zig-linux-x86_64.tar hull-zig-linux-aarch64.tar hull-zig-darwin-arm64.tar \
-                    hull-lld-linux-x86_64.tar hull-lld-linux-aarch64.tar hull-lld-darwin-arm64.tar \
                     hull.sbom.json hull.sbom.cdx.json hull.sbom.spdx.json \
                     libhull.sbom.json libhull.sbom.cdx.json libhull.sbom.spdx.json \
                     hull.build-env.json \
@@ -1445,9 +1382,6 @@ jobs:
             dist/hull-zig-linux-x86_64.tar
             dist/hull-zig-linux-aarch64.tar
             dist/hull-zig-darwin-arm64.tar
-            dist/hull-lld-linux-x86_64.tar
-            dist/hull-lld-linux-aarch64.tar
-            dist/hull-lld-darwin-arm64.tar
             dist/hull.sha256
             dist/hull.sbom.json
             dist/hull.sbom.cdx.json
@@ -1472,9 +1406,6 @@ jobs:
             dist/hull-zig-linux-x86_64.tar
             dist/hull-zig-linux-aarch64.tar
             dist/hull-zig-darwin-arm64.tar
-            dist/hull-lld-linux-x86_64.tar
-            dist/hull-lld-linux-aarch64.tar
-            dist/hull-lld-darwin-arm64.tar
             dist/hull.sha256
             dist/hull.sbom.json
             dist/hull.sbom.cdx.json
