@@ -61,6 +61,13 @@ typedef struct {
      * (the floor) point it at a sentinel file (crt1.o) that is never exec-looked
      * up. NULL for a single-binary tool. */
     const char *bundle_entry;
+    /* Asset-name shape for a bundle. 0 (default): the ARCH is baked into the
+     * name and the bundle is published for exactly one platform, so the asset is
+     * `hull-<name>.tar` (the libc-musl-<arch> floor). 1: the name is arch-free
+     * and the bundle is published per-platform, so the asset carries a platform
+     * suffix `hull-<name>-<platform>.tar` (the lld / zig toolchains, one artifact
+     * per native platform). Ignored for a non-bundle tool. */
+    int         bundle_per_platform;
 } HlToolSpec;
 
 /**

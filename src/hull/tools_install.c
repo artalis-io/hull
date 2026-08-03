@@ -73,6 +73,36 @@ static const HlToolSpec REGISTRY[] = {
         .is_bundle         = 1,
         .bundle_entry      = "crt1.o",
     },
+    /* The toolchain-free LINKERS for `hull build --linker=lld` / `--linker=zig`.
+     * Both are multi-file trees shipped as per-platform bundles (arch-free name,
+     * one artifact per native platform -> hull-<name>-<platform>.tar). The bundle
+     * extracts to $HOME/.hull/tools/<name>/ and the driver at
+     * <name>/<bundle_entry> is what hl_tools_lookup_path resolves for the linker
+     * backend. Native-only (cosmo can't drive a native lld/zig tree). See
+     * docs/toolchain_free_build.md. */
+    {
+        .name                 = "lld",
+        .description          = "LLVM lld linker (lld + ld.lld + ld64.lld) for "
+                                "`hull build --linker=lld` - no system linker.",
+        .has_linux_x86_64     = 1,
+        .has_linux_aarch64    = 1,
+        .has_darwin_arm64     = 1,
+        .is_bundle            = 1,
+        .bundle_entry         = "lld",   /* the dotless driver; -B prefix dir */
+        .bundle_per_platform  = 1,
+    },
+    {
+        .name                 = "zig",
+        .description          = "Zig toolchain (bundles clang+lld+crt+libc) for "
+                                "`hull build --linker=zig --target=<triple>` - "
+                                "turnkey cross-compilation.",
+        .has_linux_x86_64     = 1,
+        .has_linux_aarch64    = 1,
+        .has_darwin_arm64     = 1,
+        .is_bundle            = 1,
+        .bundle_entry         = "zig",   /* the zig driver binary */
+        .bundle_per_platform  = 1,
+    },
     { 0 }  /* sentinel */
 };
 
@@ -130,13 +160,19 @@ int hl_tools_asset_name(const HlToolSpec *spec, const char *platform,
 {
     if (!spec || !platform || !out || out_sz == 0) return -1;
     if (!hl_tools_published_for(spec, platform))   return -1;
-    /* A bundle's arch is already baked into its name (libc-musl-<arch>) and it
-     * is published for exactly that one platform, so the asset is
-     * `hull-<name>.tar` - no redundant platform suffix. A binary tool keeps the
-     * per-platform `hull-<name>-<platform>` form. */
-    int n = spec->is_bundle
-        ? snprintf(out, out_sz, "hull-%s.tar", spec->name)
-        : snprintf(out, out_sz, "hull-%s-%s", spec->name, platform);
+    /* Three asset shapes:
+     *   - a binary tool:            `hull-<name>-<platform>`  (wamrc)
+     *   - a single-platform bundle: `hull-<name>.tar`         (libc-musl-<arch>:
+     *       the arch is already in the name, published for one platform)
+     *   - a per-platform bundle:    `hull-<name>-<platform>.tar`  (lld / zig:
+     *       arch-free name, one artifact per native platform) */
+    int n;
+    if (!spec->is_bundle)
+        n = snprintf(out, out_sz, "hull-%s-%s", spec->name, platform);
+    else if (spec->bundle_per_platform)
+        n = snprintf(out, out_sz, "hull-%s-%s.tar", spec->name, platform);
+    else
+        n = snprintf(out, out_sz, "hull-%s.tar", spec->name);
     if (n < 0 || (size_t)n >= out_sz) return -1;
     return 0;
 }

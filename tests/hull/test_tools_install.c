@@ -449,4 +449,41 @@ UTEST(tools_bundle, asset_name_is_dot_tar) {
     ASSERT_STREQ(asset, "hull-wamrc-linux-x86_64");
 }
 
+/* ── lld / zig per-platform linker bundles ─────────────────────────── */
+
+UTEST(tools_linker, registry_has_lld_and_zig) {
+    const HlToolSpec *lld = hl_tools_find("lld");
+    const HlToolSpec *zig = hl_tools_find("zig");
+    ASSERT_NE(lld, NULL);
+    ASSERT_NE(zig, NULL);
+    ASSERT_TRUE(lld->is_bundle);
+    ASSERT_TRUE(zig->is_bundle);
+    ASSERT_TRUE(lld->bundle_per_platform);
+    ASSERT_TRUE(zig->bundle_per_platform);
+    /* The exec driver inside the extracted dir (what lookup resolves). */
+    ASSERT_STREQ(lld->bundle_entry, "lld");
+    ASSERT_STREQ(zig->bundle_entry, "zig");
+    /* Published for all three native platforms, never cosmo. */
+    ASSERT_TRUE(hl_tools_published_for(lld, "linux-x86_64"));
+    ASSERT_TRUE(hl_tools_published_for(lld, "linux-aarch64"));
+    ASSERT_TRUE(hl_tools_published_for(lld, "darwin-arm64"));
+    ASSERT_EQ(hl_tools_published_for(lld, "cosmo"), 0);
+    ASSERT_TRUE(hl_tools_published_for(zig, "darwin-arm64"));
+    ASSERT_EQ(hl_tools_published_for(zig, "cosmo"), 0);
+}
+
+UTEST(tools_linker, per_platform_bundle_asset_names) {
+    char asset[128];
+    /* A per-platform bundle carries BOTH the platform suffix AND `.tar`. */
+    ASSERT_EQ(hl_tools_asset_name(hl_tools_find("lld"),
+                                  "linux-x86_64", asset, sizeof(asset)), 0);
+    ASSERT_STREQ(asset, "hull-lld-linux-x86_64.tar");
+    ASSERT_EQ(hl_tools_asset_name(hl_tools_find("zig"),
+                                  "darwin-arm64", asset, sizeof(asset)), 0);
+    ASSERT_STREQ(asset, "hull-zig-darwin-arm64.tar");
+    /* An unpublished platform (cosmo) is refused. */
+    ASSERT_EQ(hl_tools_asset_name(hl_tools_find("zig"),
+                                  "cosmo", asset, sizeof(asset)), -1);
+}
+
 UTEST_MAIN()
