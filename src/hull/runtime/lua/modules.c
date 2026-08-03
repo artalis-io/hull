@@ -80,6 +80,7 @@ int hl_lua_register_modules(HlLua *lua)
     register_native_module(L, "hull.fs",     luaopen_hull_fs);
     register_native_module(L, "hull.blob",   luaopen_hull_blob);
     register_native_module(L, "hull.mime",   luaopen_hull_mime);
+    register_native_module(L, "hull.archive.tar", luaopen_hull_tar);
 #ifdef HL_ENABLE_IMAGE
     register_native_module(L, "hull.image",  luaopen_hull_image);
 #endif

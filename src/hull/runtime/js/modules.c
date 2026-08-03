@@ -84,6 +84,10 @@ int hl_js_register_modules(HlJS *js)
     if (hl_js_init_mime_module(js->ctx, js) != 0)
         return -1;
 
+    /* Register hull:tar module — pure format core; extract/pack use fs cap */
+    if (hl_js_init_tar_module(js->ctx, js) != 0)
+        return -1;
+
 #ifdef HL_ENABLE_IMAGE
     /* Register hull:image module (dropped on a HL_ENABLE_IMAGE=0 build). */
     if (hl_js_init_image_module(js->ctx, js) != 0)

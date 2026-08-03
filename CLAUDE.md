@@ -1515,6 +1515,7 @@ Register with `app.use(method, pattern, mw)`:
 | `form` | `hull.web.form` | `hull:web:form` | URL-encoded form body parsing |
 | `i18n` | `hull.i18n` | `hull:i18n` | Internationalization: locale detection, translations, formatting |
 | `csv` | `hull.csv` | `hull:csv` | CSV parse/encode (RFC 4180) |
+| `tar` | `hull.archive.tar` | `hull:archive:tar` | ustar archive parse/create/extract/pack (extract/pack compose the fs capability) |
 | `qrcode` | `hull.qrcode` | `hull:qrcode` | QR Code generator (ISO/IEC 18004), pure Lua/JS |
 | `search` | `hull.search` | `hull:search` | Full-text search (SQLite FTS5) |
 | `rbac` | `hull.web.middleware.rbac` | `hull:web:middleware:rbac` | Role-based access control |
@@ -1941,6 +1942,30 @@ template.clearCache();                           // clear compiled function cach
 - `opts.headers`. Rows are objects; emit header row (default: `false`)
 - `opts.separator`. Field delimiter (default: `","`)
 - Returns CSV string.
+
+**tar** (`hull.archive.tar` / `hull:archive:tar`). ustar (`.tar`) archive
+handling backed by the shared C core (`cap/tar.c`) - the SAME core `hull tools
+install` uses for signed bundles. Namespaced under `hull/archive/` as the
+container-format family (a future `zip` would be a sibling; stream codecs like
+gzip belong under a separate `hull/compress/`). `parse`/`create` are pure
+byte<->table transforms (no authority); `extract`/`pack` COMPOSE the fs
+capability, so they enforce `manifest.fs.write` / `fs.read` exactly like
+`fs.write`/`fs.read` (path validation + allowlist), NOT the trusted install-path
+extractor. `parse`/`create`/`extract` accept any buffer type (string /
+`MappedBuffer` / `WasmBuffer` / `ArrayBuffer`) for the archive bytes.
+- `tar.parse(bytes)` -> array of `{ name, data, size, mode, is_dir }` (JS:
+  `isDir`; `data` is a Lua string / JS `ArrayBuffer`). Malformed / truncated /
+  traversal-bearing archives return `nil, err` (Lua) / throw (JS).
+- `tar.create(entries)` -> archive bytes (Lua string / JS `ArrayBuffer`). Each
+  entry is `{ name, data?, mode?, is_dir? }` (JS: `isDir`; `mode` defaults 0644).
+  An absolute or `..`-bearing member name is refused.
+- `tar.extract(bytes, dest_dir)` -> `true` | `nil, err` (JS: throws on error).
+  Writes each member under `dest_dir` via the fs capability (needs
+  `manifest.fs.write`). Directory entries are skipped (file writes create their
+  parents; empty dirs are dropped).
+- `tar.pack(files)` -> archive bytes. `files` is an array of path strings or
+  `{ path, name? }` tables; each is read via the fs capability (needs
+  `manifest.fs.read`) and added as a member (name defaults to the path).
 
 **qrcode**. QR Code generator (ISO/IEC 18004). Pure Lua / JS, byte
 mode, all four EC levels, versions 1-40, all 8 mask patterns scored
