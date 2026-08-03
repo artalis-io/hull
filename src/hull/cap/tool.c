@@ -203,6 +203,11 @@ int hl_tool_validate_args(const char *const argv[])
                  * references base symbols (tls_client) in the platform lib. Only
                  * affects archive resolution order -- no code execution. */
                 "--start-group", "--end-group",
+                /* Dead-code section stripping, emitted by the zig linker backend
+                 * (linker_zig.c) per target format: --gc-sections on ELF,
+                 * -dead_strip on Mach-O. Pure size optimization (drops unreferenced
+                 * sections) -- no plugin, no codegen, no code execution. */
+                "--gc-sections", "-dead_strip",
                 NULL
             };
             const char *wl_arg = a + 4;

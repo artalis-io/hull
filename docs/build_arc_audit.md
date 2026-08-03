@@ -54,28 +54,24 @@ Execution order (agreed): **#6+#1 → #7 → #4 → #5 → #2 → #3 → #8**, t
     full signed release published, `hull-platform-musl-x86_64.tar` SHA `4d731724…` matched its
     `hull.sha256` entry byte-for-byte, tar held all 20 archives, prerelease flag set (v0.9.0 stayed
     Latest), then torn down (`gh release delete --cleanup-tag`).
-  - [ ] **#4c Fetch + select (+ maybe §5c).** A `hull ... install musl-<arch>` fetch (release-key
-    verify, a `tools install` bundle like `libc-musl-<arch>`, or a `flavor install` to
-    `~/.hull/platform/`) + teach `prepare_platform` (and the `feature_compose` resolve ladder) to
-    select the musl base AND musl feature archives for a `-musl`/cross target; relax the `#206`
-    cross guard once a musl lib is resolvable. A partial consumer that redirects only the base (not
-    the feature archives) would re-link a glibc feature lib against a musl base - the exact bug -
-    so this lands atomically. **PIVOTAL §5c-for-cross question** (determines whether #4c needs a
-    2nd release dry-run): §5c is present-gated on the app's `package.sig.gethull.composed.
-    platform_domain` block (signature.c ~748). The musl platform lib is built by #4a's
-    `make platform` with **`HL_EMBED_PLATFORM_SIG=0`** (no signed manifest present at build), so it
-    carries NO embedded manifest. So the open question is whether the glibc RELEASE hull (which
-    DOES have an embedded platform-sig) *writes* the composed block when cross-building a musl app,
-    and if so whether the musl app's §5c then tries to verify musl hashes it has no manifest for.
-    - If cross builds **skip** writing the composed block (mirrors the build-time cross-check skip
-      at prepare_platform ~1291) OR the musl app has no manifest and §5c is absent → **#4c is just
-      fetch + select + guard**, no platform-manifest change, no 2nd dry-run.
-    - If cross builds **do** write it AND the musl app runs §5c → the musl archive hashes must be
-      signed into the platform manifest (`sign-platform-manifest` gains `musl-<arch>` /
-      `libhull_feature-<stem>.musl-<arch>.a` rows), #4a's producer must embed the signed manifest
-      into the musl lib, and `platform_sig.c`'s entry cap bumps 64→128 (~97 rows) → a **2nd release
-      dry-run**. Answer it with a real glibc-hull cross-build of a musl app + inspect its
-      `package.sig`, once the fetch/select scaffolding exists to run the experiment.
+  - [x] **#4c Fetch + select.** DONE. `hull tools install platform-musl-<arch>` (a data-only bundle
+    in `tools_install.c`'s REGISTRY, mirror of `libc-musl-<arch>`, release-key-verified to
+    `~/.hull/tools/platform-musl-<arch>/`; all three native hosts publish it since it is a
+    cross-target asset). `feature_compose` gained a `ctx.musl_dir` that takes precedence over the
+    embedded glibc copies for EVERY resolver (base + all feature archives, atomically);
+    `prepare_platform` sources the musl base from it and sets `platform_sig_blob = nil`; the `#206`
+    guard now resolves the bundle for a `-musl` target (fails closed with a `hull tools install`
+    hint if absent). The two link objects `obj_emit` can't produce (`app_main.o` +
+    `app_feature_registry.o`, compiled C) are cross-compiled for the target with
+    `zig cc --target`; the `is_darwin`/`--start-group` link-flag gates were fixed to key on the
+    TARGET format, not the host. **§5c question RESOLVED (the simple branch): no 2nd dry-run
+    needed.** A cross target sets `platform_sig_blob = nil`, so build.lua writes NO gethull/composed
+    block, so §5c is present-gated off in the produced app (and the musl base is
+    `HL_EMBED_PLATFORM_SIG=0` anyway); trust is the release-signed install + the developer app sig.
+    Also allowlisted the zig backend's benign `-Wl,--gc-sections` / `-Wl,-dead_strip` in
+    `hl_tool_validate_args`. **Validated end-to-end**: `hull build --target=x86_64-linux-musl
+    --linker=zig` on macOS/arm64 → a static x86_64 musl ELF that RUNS on Alpine (`app.main` →
+    `exit 0`); native macOS build unregressed (`make test` green).
   - [ ] **#4d Smoke.** `release_smoke.sh` section: `hull … install musl-x86_64` + a
     `--target=x86_64-linux-musl --linker=zig` build that runs in Alpine.
 - [x] **#5 `--linker=zig` has zero e2e** ✓. DONE (PR #205): `tests/e2e_linker_zig.sh` builds +

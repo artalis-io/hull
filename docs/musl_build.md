@@ -143,13 +143,27 @@ is never clobbered by the in-container musl objects.
   default seccomp/landlock restrictions make pledge/unveil enforcement fail
   inside an unprivileged container. That is a container-capability limitation,
   not a musl issue; a musl binary on a real host sandboxes normally.
-- **Consuming the musl archives.** The release now BUILDS + PUBLISHES the musl
-  archive set: the `build-platform-musl` job runs `build_musl_platform.sh` per
-  arch and the resulting `hull-platform-musl-<arch>.tar` is hashed into the signed
-  `hull.sha256` (release-key trust chain, same as the floor / wamrc / zig tars) -
-  so it can be fetched + verified. What is NOT wired yet: `hull build` does not
-  select a musl platform lib for a `-musl` target (the `#206` guard still rejects
-  the cross with a clear message), and the runtime §5c composed-archive
-  attestation is not musl-aware. Teaching `hull ... install musl-<arch>` +
-  `prepare_platform`/`feature_compose` to fetch + select the musl base AND feature
-  archives (atomically) is audit item #4c (docs/build_arc_audit.md).
+
+## Cross-building to musl from any host
+
+The full loop is wired (audit #4). Install the musl platform archive set + the
+zig cross-linker, then build with a `-musl` target - from macOS or Linux:
+
+```sh
+hull tools install platform-musl-$(uname -m)   # release-signed archive set
+hull tools install zig                          # cross-linker (bundles musl libc)
+hull build --target=x86_64-linux-musl --linker=zig ./app -o app-musl
+# -> a fully static x86_64 musl ELF; runs on Alpine / any musl box.
+```
+
+`hull build` selects the installed musl base + every composed feature archive
+(`~/.hull/tools/platform-musl-<arch>/`) instead of the glibc copies embedded in
+hull, cross-compiles the two entry objects (`app_main.o` +
+`app_feature_registry.o`) for the target with `zig cc --target`, and links with
+the target-format archive flags. The musl archive set is release-signed +
+SHA-256-verified at install (`hull.sha256`); the runtime platform-sig §5c
+composed-archive attestation is skipped for a cross target (the running glibc
+hull can't attest musl archives it doesn't embed, and the musl base is built
+`HL_EMBED_PLATFORM_SIG=0`), so trust comes from the signed install + the
+developer app signature. Without `platform-musl-<arch>` installed, a `-musl`
+target fails closed with a `hull tools install` hint (the `#206` guard).
