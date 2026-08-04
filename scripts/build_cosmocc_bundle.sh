@@ -159,8 +159,12 @@ echo "build_cosmocc_bundle: trimmed ${before} MB -> ${after} MB"
 
 if [ "$after" -gt "$MAX_MB" ]; then
     echo "build_cosmocc_bundle: trimmed tree ${after} MB exceeds ${MAX_MB} MB margin" >&2
-    echo "  the trace closure is larger than expected; biggest remaining paths:" >&2
-    du -h --max-depth=2 "$work/tree" 2>/dev/null | sort -rh | head -25 >&2
+    echo "  the trace closure is larger than expected; biggest remaining dirs:" >&2
+    du -h --max-depth=2 "$work/tree" 2>/dev/null | sort -rh | head -20 >&2
+    echo "  biggest remaining FILES:" >&2
+    find "$work/tree" -type f -printf '%s\t%p\n' 2>/dev/null | sort -rn | head -25 \
+        | sed "s#$work/tree/##" \
+        | awk -F'\t' '{printf "  %.1fMB  %s\n", $1/1048576, $2}' >&2
     echo "  -> investigate the closure in scripts/build_cosmocc_bundle.sh" >&2
     exit 1
 fi
