@@ -28,6 +28,9 @@ on:
       - 'src/hull/sandbox_tool.c'
       - 'src/hull/compiler.c'
       - 'src/hull/cap/tar.c'
+      - 'src/hull/cap/fs.c'
+      - 'src/hull/sandbox.c'
+      - 'src/hull/shared/fs_util.c'
       - 'stdlib/cli/lua/hull/build.lua'
 
 permissions:
@@ -121,6 +124,51 @@ jobs:
           Write-Host "cosmocc : $(Test-Path "$dest\bin\cosmocc")"
           Write-Host "busybox : $(Test-Path "$dest\bin\busybox.exe")"
           .\hull-cosmo.exe version
+
+      # Regression guard for the Windows blob.init drive-root mkdir bug (nexogen
+      # asset-tracker PLATFORM_GAPS 2026-07-14, mis-filed as "spaces in path"):
+      # hl_mkdir_p walks an absolute path from the root and mkdir()s the drive-root
+      # component ("/C", "/D"), which Cosmo-on-Windows rejects with EIO (not
+      # EEXIST) - so blob.init failed for ANY path (case B has no space, and still
+      # failed before the fix). The fix makes hl_ensure_dir stat-check for an
+      # existing directory on any mkdir errno. All three path shapes must boot
+      # blob.init cleanly; a regression fails the job. HULL_FS_DEBUG keeps the
+      # mkdir-fail trace on if it ever breaks again.
+      - name: blob.init on Windows (drive-root mkdir + spaces regression guard)
+        shell: pwsh
+        run: |
+          $lua = @'
+          local blob = require("hull.blob")
+          app.manifest({ modules = { "hull/blob@1" }, fs = { write = { "data/blobs" } } })
+          app.main(function(ctx)
+            local ok, err = pcall(function() blob.init({ dir = "data/blobs" }) end)
+            ctx.stdout:write("REPRO blob.init ok=" .. tostring(ok) .. " err=" .. tostring(err) .. "\n")
+            return ok and 0 or 3
+          end)
+          '@
+          $env:HULL_FS_DEBUG = "1"
+          $script:fails = @()
+          function Try-Path($label, $dir) {
+            New-Item -ItemType Directory -Force -Path $dir | Out-Null
+            Set-Content -NoNewline "$dir\app.lua" -Value $lua -Encoding ascii
+            Write-Host "=== [$label] cosmo hull on: $dir ==="
+            $out = & .\hull-cosmo.exe "$dir\app.lua" 2>&1 | Out-String
+            Write-Host $out
+            if ($out -match "REPRO blob.init ok=true") { Write-Host "[$label] OK" }
+            else { Write-Host "[$label] FAIL"; $script:fails += $label }
+            Write-Host "------------------------------------------------------------"
+          }
+          # A: RUNNER_TEMP (clean prefix, no 8.3) + a SPACE.
+          Try-Path "A space-clean-prefix" "$env:RUNNER_TEMP\sp ace\reproapp"
+          # B: RUNNER_TEMP, NO space (control - drive-root mkdir path).
+          Try-Path "B nospace-clean-prefix" "$env:RUNNER_TEMP\nospace\reproapp"
+          # C: TEMP (8.3 'RUNNER~1' short-name) + a space (the original report).
+          Try-Path "C space-and-83" "$env:TEMP\has space\reproapp"
+          if ($script:fails.Count -gt 0) {
+            Write-Host "BLOB-WINDOWS-FAIL: $($script:fails -join ', ')"
+            exit 1
+          }
+          Write-Host "BLOB-WINDOWS-OK: blob.init works on Windows for all path shapes"
 
       - name: hull build a trivial app -> APE
         id: build
