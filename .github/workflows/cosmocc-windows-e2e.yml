@@ -25,6 +25,7 @@ on:
       - 'scripts/build_cosmocc_bundle.sh'
       - 'src/hull/cap/tool.c'
       - 'src/hull/runtime/lua/mod_tool.c'
+      - 'src/hull/sandbox_tool.c'
       - 'src/hull/compiler.c'
       - 'src/hull/cap/tar.c'
 
