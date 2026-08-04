@@ -117,7 +117,9 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path app | Out-Null
-          "app.manifest({ modules = {} })`napp.main(function() return 0 end)" | Set-Content -NoNewline app\app.lua -Encoding ascii
+          # Print a marker + return 0 so we can see whether main runs cleanly and
+          # what exit code it produces (the exit=256 follow-up).
+          "app.manifest({ modules = {} })`napp.main(function(ctx) ctx.stdout:write('APP-MARKER-OK\n'); return 0 end)" | Set-Content -NoNewline app\app.lua -Encoding ascii
           # Audit on so the reroute (busybox sh -c 'exec cosmocc ...') is visible.
           $out = .\hull-cosmo.exe build app -o app.exe --no-verify-platform --audit 2>&1 | Out-String
           Write-Host $out
@@ -130,10 +132,15 @@ jobs:
           Write-Host "app.exe built: $built"
           $ran = $false
           if ($built) {
-            & .\app.exe; $rc = $LASTEXITCODE; $global:LASTEXITCODE = 0
+            # Capture stdout+stderr: exit=256 (=1<<8) means main errored (rc=1)
+            # and printed to stderr - surface it.
+            $appout = & .\app.exe 2>&1 | Out-String
+            $rc = $LASTEXITCODE; $global:LASTEXITCODE = 0
             $lo = $rc -band 0xFF; $hi = ($rc -shr 8) -band 0xFF
+            Write-Host "app.exe output: [$appout]"
             Write-Host "app.exe ran, exit=$rc (lo=$lo hi=$hi; expected 0)"
-            if ($rc -eq 0 -or $lo -eq 0) { $ran = $true }
+            # The APE's real exit code is the HIGH byte on Windows (§0.6); 0 = OK.
+            if ($rc -eq 0 -or $hi -eq 0) { $ran = $true }
           }
           Write-Host "=================================================================="
           if ($built -and $ran) {
