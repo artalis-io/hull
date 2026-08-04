@@ -151,6 +151,13 @@ sort -u "$keep" -o "$keep"
 # then prune the directories left empty.
 find "$work/tree" -type f | sort -u > "$work/all.txt"
 comm -23 "$work/all.txt" "$keep" | tr '\n' '\0' | xargs -0 rm -f 2>/dev/null || true
+# cosmo ships ALTERNATE libcosmo.a builds in lib/{dbg,optlinux,tiny}/ (~390 MB
+# total). A default -O2 build links only lib/libcosmo.a; the variants are never
+# used. The lib-stub keep above (-name libcosmo.a) matched them all, so drop the
+# variant subdirs explicitly here - this is the ~390 MB that blew the gate.
+for v in dbg optlinux tiny; do
+    rm -rf "$work"/tree/*-linux-cosmo/lib/"$v" 2>/dev/null || true
+done
 find "$work/tree" -depth -type d -empty -delete 2>/dev/null || true
 rm -rf "$probe"
 
