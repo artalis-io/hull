@@ -323,11 +323,10 @@ static int l_tool_tmpdir(lua_State *L)
      * resolves them (cosmo maps `/tmp` via $TMPDIR). No-op / `/tmp` elsewhere. */
     const char *base = "/tmp";
 #ifdef __COSMOPOLITAN__
+    char cosmo_td[512];
     hl_tool_cosmo_prepare_tmpdir();
-    {
-        const char *t = getenv("TMPDIR");
-        if (t && *t) base = t;
-    }
+    if (hl_tool_cosmo_tmpdir(cosmo_td, sizeof(cosmo_td)) == 0)
+        base = cosmo_td;   /* forward-slash shared dir on cosmo/Windows */
 #endif
     char tmpl[600];
     int n = snprintf(tmpl, sizeof(tmpl), "%s/hull_XXXXXX", base);

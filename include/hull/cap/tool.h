@@ -118,6 +118,14 @@ int hl_tool_cosmo_shell(char *out, size_t outsz);
 void hl_tool_cosmo_prepare_tmpdir(void);
 
 /*
+ * Fetch the shared forward-slash cosmo/Windows temp dir set by
+ * hl_tool_cosmo_prepare_tmpdir (0 = written to @p out, -1 = unset / not this
+ * flavor). hull's build tempdir is created under it, and the cosmocc reroute
+ * exports it into busybox as TMPDIR so hull, cosmocc, and busybox all agree.
+ */
+int hl_tool_cosmo_tmpdir(char *out, size_t outsz);
+
+/*
  * Spawn a process and capture its stdout.
  * Returns a malloc'd string (caller frees), or NULL on error.
  * If out_len is non-NULL, the output length is stored there.

@@ -312,9 +312,14 @@ static int is_shell_basename(const char *base)
  * shell basename (sh/busybox) and the driver (allowlist + dangerous-flag), so a
  * NULL return means "rejected". The -c program is a COMPILE-TIME LITERAL; the
  * driver is $0 and args are $@ (all positional), so no app byte is shell code.
+ * When @p tmpdir is non-NULL (the cosmo/Windows path) the shell EXPORTS it as
+ * TMPDIR/TMP/TEMP itself (a forward-slash path passed as a positional, then
+ * shift'd off) - a cosmo hull's setenv does not survive the exec to native
+ * busybox as forward-slash, so busybox must set it in its own env (§0.6).
  * Shared by the exec (hl_tool_spawn_driver_shell) and read (spawn_read) paths. */
 static const char **build_shell_argv(const char *shell, const char *driver,
-                                     const char *const args[])
+                                     const char *const args[],
+                                     const char *tmpdir)
 {
     if (!shell || !driver) return NULL;
     if (hl_tool_check_allowlist(driver) != 0) return NULL;
@@ -338,17 +343,24 @@ static const char **build_shell_argv(const char *shell, const char *driver,
     free((void *)(uintptr_t)checkv);
     if (bad != 0) return NULL;
 
-    /* argv: shell [sh] "-c" 'exec "$0" "$@"' driver args... NULL
-     * (the "sh" applet selector is busybox-only; a real sh takes -c directly).
-     * Max fixed slots: shell + sh + -c + PROG + driver + NULL = 6. */
-    const char **argv = (const char **)calloc(nargs + 6, sizeof(*argv));
+    /* argv: shell [sh] "-c" PROG [tmpdir] driver args... NULL. With a tmpdir the
+     * PROG exports $1 (=tmpdir) then shift's it so $0=driver, $@=args; both PROGs
+     * are compile-time literals. Max fixed slots: shell+sh+-c+PROG+tmpdir+driver
+     * +NULL = 7. */
+    const char **argv = (const char **)calloc(nargs + 7, sizeof(*argv));
     if (!argv) return NULL;
     size_t i = 0;
     argv[i++] = shell;
     if (is_busybox) argv[i++] = "sh";
     argv[i++] = "-c";
-    argv[i++] = "exec \"$0\" \"$@\"";
-    argv[i++] = driver;
+    if (tmpdir) {
+        argv[i++] = "export TMPDIR=\"$1\" TMP=\"$1\" TEMP=\"$1\"; shift; exec \"$0\" \"$@\"";
+        argv[i++] = driver;
+        argv[i++] = tmpdir;
+    } else {
+        argv[i++] = "exec \"$0\" \"$@\"";
+        argv[i++] = driver;
+    }
     for (size_t j = 0; j < nargs; j++) argv[i++] = args[j];
     argv[i] = NULL;
     return argv;
@@ -358,7 +370,7 @@ int hl_tool_spawn_driver_shell(const char *shell, const char *driver,
                                const char *const args[],
                                const char *const envadd[])
 {
-    const char **argv = build_shell_argv(shell, driver, args);
+    const char **argv = build_shell_argv(shell, driver, args, NULL);
     if (!argv) return -1;
     int rc = spawn_and_wait(argv, envadd);
     free((void *)(uintptr_t)argv);
@@ -466,6 +478,20 @@ int hl_tool_cosmo_shell(char *out, size_t outsz)
 #endif
 }
 
+/* The one shared, FORWARD-SLASH temp dir hull's build tempdir + cosmocc +
+ * busybox all use on cosmo/Windows (empty = unset). Read by hl_tool_cosmo_tmpdir
+ * (which threads it into the busybox `-c` as an exported TMPDIR - a cosmo hull's
+ * setenv does NOT survive as forward-slash across the exec to native busybox, so
+ * busybox must export it itself, §0.6). */
+static char g_cosmo_tmpdir[512] = "";
+
+int hl_tool_cosmo_tmpdir(char *out, size_t outsz)
+{
+    if (!out || outsz == 0 || g_cosmo_tmpdir[0] == '\0') return -1;
+    int n = snprintf(out, outsz, "%s", g_cosmo_tmpdir);
+    return (n > 0 && (size_t)n < outsz) ? 0 : -1;
+}
+
 void hl_tool_cosmo_prepare_tmpdir(void)
 {
 #ifdef __COSMOPOLITAN__
@@ -500,6 +526,7 @@ void hl_tool_cosmo_prepare_tmpdir(void)
             (void)snprintf(hull, sizeof(hull), "%s/.hull", h);
             (void)mkdir(hull, 0700);
             (void)mkdir(tmp, 0700);
+            (void)snprintf(g_cosmo_tmpdir, sizeof(g_cosmo_tmpdir), "%s", tmp);
             setenv("TMPDIR", tmp, 1);
             setenv("TMP", tmp, 1);
             setenv("TEMP", tmp, 1);
@@ -564,7 +591,9 @@ static int cosmocc_reroute_exec(const char *const argv[],
     char shell[512];
     if (hl_tool_cosmo_shell(shell, sizeof(shell)) != 0) return 0;
     cosmo_prepare(shell);
-    const char **sv = build_shell_argv(shell, argv[0], argv + 1);
+    char td[512];
+    const char *tmpdir = (hl_tool_cosmo_tmpdir(td, sizeof(td)) == 0) ? td : NULL;
+    const char **sv = build_shell_argv(shell, argv[0], argv + 1, tmpdir);
     if (!sv) { *rc = -1; return 1; }
     *rc = spawn_and_wait(sv, envadd);
     free((void *)(uintptr_t)sv);
@@ -578,7 +607,9 @@ static int cosmocc_reroute_read(const char *const argv[],
     char shell[512];
     if (hl_tool_cosmo_shell(shell, sizeof(shell)) != 0) return 0;
     cosmo_prepare(shell);
-    const char **sv = build_shell_argv(shell, argv[0], argv + 1);
+    char td[512];
+    const char *tmpdir = (hl_tool_cosmo_tmpdir(td, sizeof(td)) == 0) ? td : NULL;
+    const char **sv = build_shell_argv(shell, argv[0], argv + 1, tmpdir);
     *out = sv ? spawn_read_argv(sv, out_len) : NULL;
     free((void *)(uintptr_t)sv);
     return 1;
