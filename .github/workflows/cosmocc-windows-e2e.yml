@@ -59,14 +59,19 @@ jobs:
           # cosmocc is native here, so hull-cosmo builds + the produced APE runs
           # on Linux too. If it fails to pre-load hull.json HERE, the bug is
           # cosmo-general (not Windows); if it exits 0 here, it is Windows-specific.
+          set -x
+          command -v cosmocc || true
+          /opt/cosmo/bin/cosmocc --version | head -1 || true
           mkdir -p /tmp/jsonapp
           printf 'app.manifest({ modules = {} })\napp.main(function(ctx) ctx.stdout:write("APP-MARKER-OK\\n"); return 0 end)\n' > /tmp/jsonapp/app.lua
-          # Force the COSMO path (--compiler=cosmocc), else hull-cosmo on Linux
-          # takes the native ELF emit path and never builds the APE we want to test.
-          ./build/hull build /tmp/jsonapp -o /tmp/jsonapp/app.com --compiler=cosmocc --no-verify-platform 2>&1 | tail -4
+          # Force the COSMO compiler path by ABSOLUTE PATH (a bare --compiler=cosmocc
+          # let hull's availability probe pick a broken system clang first); this
+          # opts out of the native ELF emit path so we actually link the APE.
+          ./build/hull build /tmp/jsonapp -o /tmp/jsonapp/app.com \
+              --compiler=/opt/cosmo/bin/cosmocc --no-verify-platform 2>&1 | tail -8
           echo "--- run the cosmo-built APE on Linux ---"
           rc=0; /tmp/jsonapp/app.com || rc=$?
-          echo "LINUX cosmo-app exit: $rc"
+          echo "LINUX cosmo-app exit: $rc  (0 => Windows-specific; 1 => cosmo-general)"
       - uses: actions/upload-artifact@v4
         with:
           name: hull-cosmo-branch
