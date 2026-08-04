@@ -486,10 +486,18 @@ void hl_tool_cosmo_prepare_tmpdir(void)
     const char *home = getenv("HOME");
     if (!home || !*home) home = getenv("USERPROFILE");
     if (home && *home) {
+        /* $USERPROFILE is a backslash path (C:\Users\me); the cosmocc #!/bin/sh
+         * driver mangles backslashes (sh escapes), which corrupts the per-arch
+         * temp paths (x86_64 built, aarch64 failed with "can't create :"). Use
+         * forward slashes throughout - cosmo + busybox both accept C:/... . */
+        char h[512];
+        size_t i = 0;
+        for (; home[i] && i < sizeof(h) - 1; i++) h[i] = (home[i] == '\\') ? '/' : home[i];
+        h[i] = '\0';
         char hull[512], tmp[512];
-        int n = snprintf(tmp, sizeof(tmp), "%s/.hull/tmp", home);
+        int n = snprintf(tmp, sizeof(tmp), "%s/.hull/tmp", h);
         if (n > 0 && (size_t)n < sizeof(tmp)) {
-            (void)snprintf(hull, sizeof(hull), "%s/.hull", home);
+            (void)snprintf(hull, sizeof(hull), "%s/.hull", h);
             (void)mkdir(hull, 0700);
             (void)mkdir(tmp, 0700);
             setenv("TMPDIR", tmp, 1);
