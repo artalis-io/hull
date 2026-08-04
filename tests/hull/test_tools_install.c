@@ -508,4 +508,32 @@ UTEST(tools_linker, per_platform_bundle_asset_names) {
                                   "cosmo", asset, sizeof(asset)), -1);
 }
 
+/* ── cosmocc bundle (the cosmo-only APE toolchain, item E) ─────────────── */
+
+UTEST(tools_cosmocc, registry_row) {
+    const HlToolSpec *cc = hl_tools_find("cosmocc");
+    ASSERT_NE(cc, NULL);
+    ASSERT_TRUE(cc->is_bundle);
+    /* Arch-free (cosmocc binaries are APEs) → NOT per-platform. */
+    ASSERT_FALSE(cc->bundle_per_platform);
+    /* The exec resolved inside the extracted dir. */
+    ASSERT_STREQ(cc->bundle_entry, "bin/cosmocc");
+    /* COSMO-ONLY: the exception to every other tool. A native hull can't drive
+     * cosmocc (its resolver branch is #ifdef __COSMOPOLITAN__). */
+    ASSERT_TRUE(hl_tools_published_for(cc, "cosmo"));
+    ASSERT_EQ(hl_tools_published_for(cc, "linux-x86_64"), 0);
+    ASSERT_EQ(hl_tools_published_for(cc, "darwin-arm64"), 0);
+}
+
+UTEST(tools_cosmocc, asset_name_is_arch_free_tar) {
+    char asset[128];
+    /* A non-per-platform bundle: arch-free `hull-cosmocc.tar`, for cosmo. */
+    ASSERT_EQ(hl_tools_asset_name(hl_tools_find("cosmocc"),
+                                  "cosmo", asset, sizeof(asset)), 0);
+    ASSERT_STREQ(asset, "hull-cosmocc.tar");
+    /* A native platform is not published for it. */
+    ASSERT_EQ(hl_tools_asset_name(hl_tools_find("cosmocc"),
+                                  "linux-x86_64", asset, sizeof(asset)), -1);
+}
+
 UTEST_MAIN()

@@ -128,11 +128,15 @@ COFF `libhull_platform.a` that does not exist); changing the POSIX-host path
 The five items, sequenced by dependency (D, B are standalone and land first; A
 needs busybox present; E productionizes and depends on the C decision).
 
-**Status: D, B, and A have landed** (the C changes; A is the transparent
-cosmocc-through-busybox reroute in the spawn layer - see below) and **C is
-decided** (trim the tree to a ~309 MB closure, under the cap uncompressed). Only
-**E (productionize)** remains - the bundle producer + registry row + release +
-the Windows end-to-end validation.
+**Status: D, B, A, and E have landed; C is decided.** All the code + wiring is
+in: A = the transparent cosmocc-through-busybox reroute (below); C = trim to a
+~309 MB closure (below); E = the trim producer (`scripts/build_cosmocc_bundle.sh`)
++ the `cosmocc` registry row + the `release.yml` asset + `release_smoke.sh` + the
+Windows E2E workflow (`cosmocc-windows-e2e.yml`, which builds a cosmo hull from
+the branch, produces the bundle, and runs `hull build` on `windows-latest`). The
+one gate before a release ships it: the E2E going green on a real Windows runner
+(it exercises A+D against the real bundle for the first time) - if it flags an
+A/D bug, that's a C-code fix, not a wiring change.
 
 ### A - drive cosmocc through busybox `sh` (the invocation change)
 
@@ -305,6 +309,21 @@ the bundle path.
 
 ### E - productionize (registry + producer + release + dry-run)
 
+> **AS BUILT (landed).** Two deviations from the plan below: (1) the registry row
+> is **cosmo-only** (`has_cosmo = 1`, all natives `0`), not "all native + cosmo" -
+> a native hull can't drive cosmocc (its resolver branch is
+> `#ifdef __COSMOPOLITAN__`), so publishing it for native would be a dead asset.
+> (2) busybox is found by the **transparent reroute** (`hl_tool_cosmo_shell` at
+> `~/.hull/tools/cosmocc/bin/busybox.exe`), not a `tool.cosmo_shell` build.lua
+> accessor - item A moved the whole thing into the spawn layer. The producer
+> (`build_cosmocc_bundle.sh`) trims by a denylist with a hard 490 MB size gate
+> (fails loudly + prints a `du` breakdown if the trim regresses), pins both
+> cosmocc and the busybox64u.exe digest, and packs a symlink-preserving tar.
+> `release.yml` builds + publishes `hull-cosmocc.tar` (one arch-free asset, in the
+> signed `hull.sha256`); `release_smoke.sh` LIVE-installs it on a cosmo binary and
+> asserts `bin/cosmocc` + `bin/busybox.exe` land. Covered end to end by
+> `cosmocc-windows-e2e.yml`.
+
 - **REGISTRY row** in `src/hull/tools_install.c`: `cosmocc`,
   `.is_bundle = 1`, `.bundle_entry = "bin/cosmocc"`, **not**
   `bundle_per_platform` (cosmocc binaries are themselves APEs → one arch-free
@@ -350,14 +369,22 @@ once A+B+D are in.
 1. ~~**Ship it at all?**~~ DECIDED: ship it.
 2. ~~**C: bundle format?**~~ DECIDED: trim the tree (~309 MB closure fits the
    512 MB cap uncompressed; no inflater, no cap change).
-3. **A: gate** - is Windows cosmo-build automatic when a bundled busybox is
-   present, or behind an explicit `--host-shell`/opt-in flag?
-4. **Licensing** - confirm the GPLv2 busybox "aggregation, not derivative"
-   redistribution stance + source-offer handling.
+3. ~~**A: gate?**~~ DECIDED: **automatic** - the reroute triggers transparently
+   when a cosmocc `argv[0]` is spawned on cosmo+Windows AND a bundled busybox
+   resolves; no opt-in flag. (POSIX/native never trigger it.)
+4. **Licensing** - busybox is **GPLv2**, redistributed as a separate spawned
+   program (mere aggregation, like the Apache-2 `wamrc` / MIT `zig` bundles), so
+   it is compatible with Hull's AGPLv3. The producer pins the exact upstream
+   `busybox64u.exe` by SHA-256; the remaining release-time task is to honor the
+   GPLv2 **written-offer / source** obligation (link Ron Yorston's busybox-w64
+   source at the pinned revision in the release notes). Flag to confirm at the
+   dry-run.
 
-Until these are decided, no `cosmocc` REGISTRY row / release asset is added (the
-`check_tools_registry` guard stays satisfied), and `scripts/build_cosmocc_bundle.sh`
-stays the producer skeleton such a decision would build on.
+All landed. The remaining gate before a release ships the asset is the
+`cosmocc-windows-e2e.yml` acceptance run going green on a real Windows runner
+(first exercise of A+D against the real bundle), then the standard pre-release
+dry-run (a hyphenated pre-release tag; teardown with
+`gh release delete --cleanup-tag`).
 
 ## Where cosmocc IS the answer today
 

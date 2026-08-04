@@ -138,6 +138,29 @@ static const HlToolSpec REGISTRY[] = {
         .bundle_entry         = "zig",   /* the zig driver binary */
         .bundle_per_platform  = 1,
     },
+    /* The trimmed Cosmopolitan cosmocc toolchain (+ a busybox-w64 ride-along at
+     * bin/busybox.exe) for `hull build` of a cosmo-APE app - the ONLY toolchain
+     * that can link an APE (obj_emit has no APE format). cosmocc binaries are
+     * themselves APEs, so ONE arch-free bundle (hull-cosmocc.tar) serves every
+     * host and a cosmo `hull` can drive it. UNLIKE every other tool here, this is
+     * COSMO-ONLY (has_cosmo = 1, all natives 0): a native hull resolves only
+     * cc/gcc/clang (the cosmocc branch of hl_driver_resolve_native is
+     * `#ifdef __COSMOPOLITAN__`), so only a cosmo hull can use it. On Windows the
+     * cosmo hull drives cosmocc's #!/bin/sh driver through the bundled busybox
+     * (item A); the toolchain is trimmed from ~1.37 GB to fit the 512 MB download
+     * cap (item C). bundle_entry bin/cosmocc is the exec resolved by
+     * hl_tools_lookup_path (also probed directly by the compiler resolver, item
+     * D). Producer: scripts/build_cosmocc_bundle.sh. Full design:
+     * docs/cosmocc_install.md. */
+    {
+        .name                 = "cosmocc",
+        .description          = "Cosmopolitan cosmocc toolchain (trimmed) + "
+                                "busybox-w64, for `hull build` of a cosmo-APE app "
+                                "on any host (incl. Windows).",
+        .has_cosmo            = 1,
+        .is_bundle            = 1,
+        .bundle_entry         = "bin/cosmocc",
+    },
     { 0 }  /* sentinel */
 };
 

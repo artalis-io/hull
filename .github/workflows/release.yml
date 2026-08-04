@@ -900,6 +900,34 @@ jobs:
           name: hull-zig-${{ matrix.name }}.tar
           path: hull-zig-${{ matrix.name }}.tar
 
+  build-cosmocc-bundle:
+    # The trimmed Cosmopolitan cosmocc toolchain + a busybox-w64 ride-along,
+    # pulled by `hull tools install cosmocc` -> `hull build` of a cosmo-APE app on
+    # any host (incl. Windows, where the cosmo hull drives cosmocc's #!/bin/sh
+    # driver through the bundled busybox - see docs/cosmocc_install.md). ONE
+    # arch-free asset: cosmocc binaries are themselves APEs, so one bundle serves
+    # every host. The producer SHA-pins both cosmocc and busybox and trims the
+    # ~1.37 GB tree under the 512 MB download cap (a hard size gate fails the
+    # build otherwise). Its SHA-256 lands in the signed hull.sha256 below (same
+    # release-key trust chain as wamrc/zig). cosmocc version + digest kept in
+    # lockstep with mk/fetch.mk; the busybox digest is the pinned frippery.org
+    # busybox64u.exe (fail-closed if upstream rolls the "latest" file).
+    name: Build cosmocc bundle
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+      - name: Build cosmocc bundle
+        run: |
+          sh scripts/build_cosmocc_bundle.sh \
+             4.0.2 85b8c37a406d862e656ad4ec14be9f6ce474c1b436b9615e91a55208aced3f44 \
+             https://frippery.org/files/busybox/busybox64u.exe \
+             6e263d154d8548d1eb936f65d1d8312c80df31c45974e48d6335e4dcc0f4f34c \
+             hull-cosmocc.tar
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        with:
+          name: hull-cosmocc.tar
+          path: hull-cosmocc.tar
+
   build-feature-native:
     # Composable DuckDB feature archive (libhull_feature-duckdb-<arch>.a),
     # shipped as a release asset and pulled by `hull feature install duckdb`
@@ -1198,7 +1226,7 @@ jobs:
   release:
     name: Create Release
     runs-on: ubuntu-24.04
-    needs: [build-cosmo, build-native, build-wamrc, build-floor-musl, build-platform-musl, build-zig, build-feature-native, build-feature-gpu, build-feature-tui, build-feature-postgres, build-feature-mysql, build-feature-lua, build-feature-js]
+    needs: [build-cosmo, build-native, build-wamrc, build-floor-musl, build-platform-musl, build-zig, build-cosmocc-bundle, build-feature-native, build-feature-gpu, build-feature-tui, build-feature-postgres, build-feature-mysql, build-feature-lua, build-feature-js]
     permissions:
       contents: write       # publish GitHub release + assets
       id-token: write       # SLSA: OIDC for Sigstore signing
@@ -1233,6 +1261,9 @@ jobs:
           mv artifacts/hull-zig-linux-x86_64.tar/hull-zig-linux-x86_64.tar   dist/hull-zig-linux-x86_64.tar
           mv artifacts/hull-zig-linux-aarch64.tar/hull-zig-linux-aarch64.tar dist/hull-zig-linux-aarch64.tar
           mv artifacts/hull-zig-darwin-arm64.tar/hull-zig-darwin-arm64.tar   dist/hull-zig-darwin-arm64.tar
+          # Trimmed cosmocc toolchain + busybox bundle (`hull tools install
+          # cosmocc`); ONE arch-free asset, hashed into hull.sha256 below.
+          mv artifacts/hull-cosmocc.tar/hull-cosmocc.tar dist/hull-cosmocc.tar
           # Per-flavor platform libs. Consumed by `hull platform install
           # <flavor>` -> `hull build --flavor`. Native files:
           # libhull_platform-<flavor>-<arch>.a; cosmo files (dual-arch):
@@ -1361,6 +1392,7 @@ jobs:
                     hull-libc-musl-x86_64.tar hull-libc-musl-aarch64.tar \
                     hull-platform-musl-x86_64.tar hull-platform-musl-aarch64.tar \
                     hull-zig-linux-x86_64.tar hull-zig-linux-aarch64.tar hull-zig-darwin-arm64.tar \
+                    hull-cosmocc.tar \
                     hull.sbom.json hull.sbom.cdx.json hull.sbom.spdx.json \
                     libhull.sbom.json libhull.sbom.cdx.json libhull.sbom.spdx.json \
                     hull.build-env.json \
@@ -1443,6 +1475,7 @@ jobs:
             dist/hull-zig-linux-x86_64.tar
             dist/hull-zig-linux-aarch64.tar
             dist/hull-zig-darwin-arm64.tar
+            dist/hull-cosmocc.tar
             dist/hull.sha256
             dist/hull.sbom.json
             dist/hull.sbom.cdx.json
@@ -1469,6 +1502,7 @@ jobs:
             dist/hull-zig-linux-x86_64.tar
             dist/hull-zig-linux-aarch64.tar
             dist/hull-zig-darwin-arm64.tar
+            dist/hull-cosmocc.tar
             dist/hull.sha256
             dist/hull.sbom.json
             dist/hull.sbom.cdx.json
