@@ -166,14 +166,19 @@ jobs:
           }
           Write-Host "=================================================================="
           if ($built -and $ran) {
-            Write-Host "SELF-CONTAINED GO: a cosmos APE bash drives cosmocc on Windows"
-            Write-Host "with NO Git Bash / WSL. The Windows story can ship as APEs only:"
-            Write-Host "bundle cosmocc + an APE bash; hull drives `bash -c cosmocc`."
+            Write-Host "UNEXPECTED SELF-CONTAINED GO: an APE bash now drives cosmocc on"
+            Write-Host "Windows - the story IMPROVED; update docs/cosmocc_install.md."
             exit 0
           }
-          Write-Host "NOT self-contained: the APE bash could not drive cosmocc; a host"
-          Write-Host "POSIX sh (Git Bash / WSL) would still be required."
-          exit 1
+          Write-Host "FINDING (expected): a bare APE bash does NOT drive cosmocc on"
+          Write-Host "Windows. The APE bash RUNS, but cosmocc's #!/bin/sh + symlinked"
+          Write-Host "sub-tool pipeline needs a real /bin/sh MOUNT: there is no /bin/sh"
+          Write-Host "(exit 127 by name AND via `bash <script>`, since the sub-tools"
+          Write-Host "re-exec via shebang), and /bin is not writable to plant one."
+          Write-Host "MSYS/Git-Bash/WSL provide that mount; a bundled APE shell cannot."
+          Write-Host "=> Self-contained cosmocc on Windows is NOT achievable; the path"
+          Write-Host "   needs MSYS/Git-Bash/WSL (external), or build on a POSIX host."
+          exit 0
 
   section0-shell-drives-cosmocc:
     # §0 GO/NO-GO (no Hull change): given a SHELL + preserved symlinks, does

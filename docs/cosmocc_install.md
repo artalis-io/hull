@@ -6,7 +6,11 @@ self-sufficient on Windows (symmetric to `hull tools install zig` for native
 targets)?
 
 **Answer (proven by `.github/workflows/windows-cosmocc.yml` on `windows-latest`):
-NO, not with cosmocc alone.**
+NO. cosmocc alone does not unlock Windows builds, and — the decisive follow-up —
+hull cannot make it self-contained by bundling an APE shell either: cosmocc
+needs a real `/bin/sh` filesystem mount that only MSYS / Git-Bash / WSL supply
+(see §0.5). The self-sufficient Windows story is not achievable with cosmocc as
+it ships today.**
 
 ## What the experiment found
 
@@ -45,6 +49,38 @@ pipeline compile on Windows at all? — is answered **GO** by the `section0` job
 `sh` (bash / MSYS `sh`, ubiquitous via Git for Windows), NOT cosmo's `cocmd`.
 Either hull requires a POSIX `sh` on PATH for the cosmo/Windows path, or it
 bundles/points at one.
+
+## §0.5 can hull SUPPLY that shell itself (bundle an APE bash)? — NO
+
+The §0 GO relied on **Git Bash** providing `/bin/sh`, which is not on a stock
+Windows box. The obvious next move — bundle an APE `bash` (cosmo ships one at
+`cosmo.zip/pub/cosmos/bin`) alongside cosmocc so the toolchain is
+self-contained — was probed by the `section0b-ape-shell-self-contained` job.
+**It does not work.** The APE bash *runs* on Windows and *finds* cosmocc, but:
+
+- There is **no `/bin/sh`** under the APE bash (`command -v sh` → none), so
+  cosmocc's `#!/bin/sh` driver can't launch: **exit 127 by name**.
+- Running the driver *through* the interpreter (`bash ./bin/cosmocc`) still
+  **exits 127** — cosmocc's symlinked sub-tools (`x86_64-unknown-cosmo-cc` →
+  cosmocc, etc.) *also* re-exec via `#!/bin/sh`, so bypassing the top-level
+  shebang doesn't help; the whole pipeline needs `/bin/sh` to exist.
+- You **cannot plant one**: writing `/bin/sh` from the APE bash fails
+  (`cannot write /bin/sh` — no writable `/` root on Windows).
+
+So the blocker is not "a shell binary is missing" — it is that **cosmocc
+requires a real `/bin/sh` filesystem mount** (a Unix-like FS layout that
+resolves `#!/bin/sh`). MSYS / Git-Bash / WSL provide that mount; a bundled APE
+shell provides an interpreter but no mount and cannot create one. **A
+self-contained, APE-only cosmocc toolchain on Windows is therefore not
+achievable** with cosmocc as it ships today.
+
+**What this leaves for Windows:** the cosmo/Windows build path fundamentally
+depends on an external POSIX environment (MSYS2 / Git-Bash / WSL) that supplies
+`/bin/sh`. `hull tools install cosmocc` could still remove the "download
+cosmocc yourself" step *within* such an environment, but it cannot make a stock
+Windows box self-sufficient. The friction-free Windows story stays: **build the
+cosmo APE on a POSIX host (Linux/macOS/CI) and ship the APE** — it runs on
+Windows directly (proven by the `characterize` job).
 
 ## What it would actually take (a design change, not a tool install)
 
