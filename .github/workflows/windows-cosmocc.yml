@@ -71,12 +71,19 @@ jobs:
           New-Item -ItemType Directory -Force -Path app | Out-Null
           "app.manifest({ modules = {} })`napp.main(function() return 0 end)" | Set-Content -NoNewline app\app.lua -Encoding ascii
           $out = .\hull-cosmo.exe build app -o app-out.exe --no-verify-platform 2>&1 | Out-String
+          $buildExit = $LASTEXITCODE
           Write-Host $out
+          Write-Host "--- hull build exit: $buildExit ---"
+          # hull build is EXPECTED to fail here (cosmocc = shell script). Its
+          # non-zero exit must not fail this characterization step, so decide the
+          # step result explicitly: PASS on the expected failure, FLAG (exit 1)
+          # only if it UNEXPECTEDLY produced a binary (i.e. Windows now works).
           if (Test-Path app-out.exe) {
-            Write-Host "UNEXPECTED: hull build produced a binary on Windows - the cosmocc-on-Windows story may now work; re-evaluate."
-          } else {
-            Write-Host "PASS (finding): hull build fails on Windows (cosmocc is a shell script hull cannot execvp)."
+            Write-Host "UNEXPECTED: hull build produced a binary on Windows - the cosmocc-on-Windows story may now work; re-evaluate the finding."
+            exit 1
           }
+          Write-Host "PASS (finding): hull build fails on Windows (cosmocc is a #!/bin/sh driver hull cannot execvp)."
+          exit 0
 
       - name: Conclusion
         shell: pwsh
