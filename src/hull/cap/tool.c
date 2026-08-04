@@ -22,6 +22,7 @@
 #include <errno.h>
 #include <fnmatch.h>
 #include <limits.h>
+#include <spawn.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -603,6 +604,47 @@ static void cosmo_prepare(const char *shell)
     cosmo_plant_sh(shell);
 }
 
+/* Spawn + wait via posix_spawn instead of fork()+execvp(). On cosmo/Windows,
+ * fork() is EMULATED and its handle inheritance to a native child's descendants
+ * doesn't preserve the pipes cosmocc's driver needs for out2=$(mktemper) (the
+ * capture comes back empty). posix_spawn maps to a direct CreateProcess, which
+ * inherits the standard handles cleanly. envp = environ + envadd. Same audit +
+ * return-code contract as spawn_and_wait. */
+extern char **environ;
+static int cosmo_spawn_wait(const char *const argv[], const char *const envadd[])
+{
+    size_t nenv = 0;
+    for (char **e = environ; *e; e++) nenv++;
+    size_t nadd = 0;
+    if (envadd) while (envadd[nadd]) nadd++;
+    char **envp = (char **)calloc(nenv + nadd + 1, sizeof(char *));
+    if (!envp) return -1;
+    size_t i = 0;
+    for (size_t j = 0; j < nadd; j++) envp[i++] = (char *)(uintptr_t)envadd[j];
+    for (char **e = environ; *e; e++) envp[i++] = *e;   /* envadd overrides */
+    envp[i] = NULL;
+
+    pid_t pid;
+    int rc = posix_spawn(&pid, argv[0], NULL, NULL,
+                         (char *const *)(uintptr_t)argv, envp);
+    free(envp);
+    if (rc != 0) return -1;
+
+    int status;
+    if (waitpid(pid, &status, 0) < 0) return -1;
+    int exit_code = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+    {
+        ShJsonWriter w = hl_audit_begin("tool.spawn");
+        sh_json_write_key(&w, "argv");
+        sh_json_write_array_start(&w);
+        for (int k = 0; argv[k]; k++) sh_json_write_string(&w, argv[k]);
+        sh_json_write_array_end(&w);
+        sh_json_write_kv_int(&w, "exit_code", exit_code);
+        hl_audit_end(&w);
+    }
+    return exit_code;
+}
+
 /* basename(argv[0]) starts with "cosmocc"? (hull only ever spawns the driver
  * itself, never the arch-cc symlinks its script invokes internally.) */
 static int argv_is_cosmocc(const char *const argv[])
@@ -624,11 +666,9 @@ static int cosmocc_reroute_exec(const char *const argv[],
     const char *tmpdir = (hl_tool_cosmo_tmpdir(td, sizeof(td)) == 0) ? td : NULL;
     const char **sv = build_shell_argv(shell, argv[0], argv + 1, tmpdir);
     if (!sv) { *rc = -1; return 1; }
-    /* TEMP diagnostic (remove after E2E green): the exact busybox argv. */
-    fprintf(stderr, "[cosmo-dbg] reroute tmpdir=%s argv:", tmpdir ? tmpdir : "(null)");
-    for (size_t k = 0; sv[k]; k++) fprintf(stderr, " <%s>", sv[k]);
-    fprintf(stderr, "\n");
-    *rc = spawn_and_wait(sv, envadd);
+    /* posix_spawn, not fork()+execvp(): cosmo's emulated fork drops the pipe
+     * handles cosmocc's driver needs for its $(mktemper) capture on Windows. */
+    *rc = cosmo_spawn_wait(sv, envadd);
     free((void *)(uintptr_t)sv);
     return 1;
 }
