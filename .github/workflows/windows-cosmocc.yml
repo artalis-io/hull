@@ -357,8 +357,11 @@ jobs:
           cat trace.* > trace.txt
           echo "strace produced $(ls trace.* | wc -l) per-pid logs"
           ls -la app.com
-          # Prove it runs + returns 42 (APE exit may be raw here on Linux).
-          ./app.com; rc=$?; echo "app.com exit: $rc"; [ "$rc" = "42" ] || echo "note: exit $rc"
+          # Prove it runs + returns 42. `&& || ` keeps errexit (-e) from killing
+          # the step on the intentional non-zero (42) exit.
+          rc=0; ./app.com || rc=$?
+          echo "app.com exit: $rc"
+          [ "$rc" = "42" ] && echo "OK: APE ran, returned 42" || echo "note: exit $rc"
 
       - name: Compute the touched closure vs the full tree
         shell: bash
