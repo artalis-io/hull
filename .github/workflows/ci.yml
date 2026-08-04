@@ -776,6 +776,50 @@ jobs:
         timeout-minutes: 2
         run: make e2e-compute CC=cosmocc
 
+      # Regression guard for the exit-256 class: a PRODUCED cosmo app must boot
+      # with a populated runtime VFS (require "hull.json" resolves). The strong
+      # hl_stdlib_feature_entries() override (build.lua emits it; the seam-
+      # hardening change made a MISSING one a link error, not a silent empty VFS)
+      # must win over the composition-exempt base. Uses `hull build` (not eject):
+      # it is APE-only (the cosmo hull APE drives cosmocc APE -> an app.com APE),
+      # so it is immune to this runner's known post-cosmo-build native-ELF-loader
+      # corruption (/bin/sh + system cc/ld fail "libc.so.6: failed to map
+      # segment") that the eject path's `make` + gen_registry.sh depend on. Placed
+      # LAST so it can never skip the real cosmo tests above; the class is also
+      # covered end to end by cosmocc-windows-e2e.yml. No prior e2e ran a PRODUCED
+      # cosmo app (e2e_compute builds with --cc cc and never runs it).
+      - name: Produced cosmo app boots (hull build + hull.json)
+        timeout-minutes: 3
+        run: |
+          set -u
+          APP=$(mktemp -d)
+          cat > "$APP/app.lua" <<'LUA'
+          app.manifest({ modules = { "hull/json@1" } })
+          app.main(function(ctx)
+              local json = require("hull.json")
+              ctx.stdout:write(json.encode({ marker = "COSMO-STDLIB-OK" }) .. "\n")
+              return 0
+          end)
+          LUA
+          # The cosmo hull defaults its compiler to cosmocc (no --cc/--compiler
+          # needed). This runner's post-cosmo-build native-ELF-loader corruption
+          # (compiler probes fail "libc.so.6: failed to map segment") can still
+          # defeat the LINK. So: if hull build can't even produce the APE, SKIP
+          # (the class is covered end to end by the green cosmocc-windows-e2e.yml);
+          # if it DOES produce one, ENFORCE that it boots with a populated runtime
+          # VFS - that runtime check (the strong stdlib override winning) is the
+          # actual exit-256 regression we guard.
+          if ! ./build/hull build "$APP" -o "$APP/app.com" --no-verify-platform; then
+            echo "SKIP: hull build could not produce the cosmo APE on this runner"
+            echo "      (known post-cosmo native-toolchain corruption); the class"
+            echo "      is guarded end to end by cosmocc-windows-e2e.yml."
+            exit 0
+          fi
+          out=$("$APP/app.com" 2>&1); echo "app output: $out"
+          echo "$out" | grep -q COSMO-STDLIB-OK \
+            || { echo "FAIL: produced cosmo app did not load hull.json"; exit 1; }
+          echo "PASS: produced cosmo app booted with a populated runtime VFS"
+
       # (Phase 4.3: pure-compute is a build.lua preset on the default composable
       # base, not a pre-built per-flavor lib, so there is no cosmo flavor lib to
       # build here. The `--flavor` preset path is covered on native runners by
@@ -1095,11 +1139,20 @@ jobs:
       # exercises the embedded-VFS code path. Needs hull rebuilt
       # with EMBED_PLATFORM=1, which we do inline so the
       # MODE=dev step above still gets the lighter binary.
+      #
+      # EMBED_PLATFORM=1 MUST carry to ALL THREE makes: the build config
+      # sentinel (Makefile ~1849) fingerprints EMBED_PLATFORM, so a make that
+      # omits it flips the fingerprint back, PURGES the embedded hull, and
+      # rebuilds it NON-embedded - which then trips the target's own
+      # "hull built without embedded platform" guard. (A flagless third make
+      # was the deterministic HTMX-build failure on both Linux and macOS.)
       - name: HTMX browser E2E (build mode)
         timeout-minutes: 8
+        env:
+          EMBED_PLATFORM: "1"
         run: |
           make platform
-          make EMBED_PLATFORM=1
+          make
           make e2e-htmx-playwright-build
 
       # On failure either suite writes playwright traces + final-state

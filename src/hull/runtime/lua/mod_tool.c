@@ -317,7 +317,23 @@ static int l_tool_rmdir(lua_State *L)
 
 static int l_tool_tmpdir(lua_State *L)
 {
-    char tmpl[] = "/tmp/hull_XXXXXX";
+    /* On a cosmo hull on Windows, ensure the shared TMPDIR is set BEFORE
+     * mkdtemp, and create the build tempdir under it - so hull's inputs
+     * (app_registry.c, ...) land where cosmocc, driven later through busybox,
+     * resolves them (cosmo maps `/tmp` via $TMPDIR). No-op / `/tmp` elsewhere. */
+    const char *base = "/tmp";
+#ifdef __COSMOPOLITAN__
+    char cosmo_td[512];
+    hl_tool_cosmo_prepare_tmpdir();
+    if (hl_tool_cosmo_tmpdir(cosmo_td, sizeof(cosmo_td)) == 0)
+        base = cosmo_td;   /* forward-slash shared dir on cosmo/Windows */
+#endif
+    char tmpl[600];
+    int n = snprintf(tmpl, sizeof(tmpl), "%s/hull_XXXXXX", base);
+    if (n < 0 || (size_t)n >= sizeof(tmpl)) {
+        lua_pushnil(L);
+        return 1;
+    }
     char *dir = mkdtemp(tmpl);
     if (!dir) {
         lua_pushnil(L);
@@ -630,7 +646,6 @@ static int l_tool_extract_feature_image_rt(lua_State *L)
 static int l_tool_extract_platform_cosmo(lua_State *L)
 {
     const char *dir = luaL_checkstring(L, 1);
-    HlToolUnveilCtx *ctx = get_unveil_ctx(L);
 
     const HlEmbeddedPlatform *platforms = NULL;
     int count = hl_build_get_platforms(&platforms);
@@ -664,10 +679,14 @@ static int l_tool_extract_platform_cosmo(lua_State *L)
     fclose(f);
     if (w != x86->len) { lua_pushboolean(L, 0); return 1; }
 
-    /* Create .aarch64/ subdir */
+    /* Create .aarch64/ subdir. Raw mkdir (single component; the parent `dir` is
+     * hull's own build tempdir, already created) - consistent with the raw fopen
+     * writes above, and unlike hl_tool_mkdir it doesn't component-walk, which on
+     * cosmo/Windows would try to mkdir the "C:" drive prefix of a drive-colon
+     * path and fail. EEXIST is fine (re-extract). */
     char aarch64_dir[1024];
     snprintf(aarch64_dir, sizeof(aarch64_dir), "%s/.aarch64", dir);
-    if (hl_tool_mkdir(aarch64_dir, ctx) != 0) {
+    if (mkdir(aarch64_dir, 0755) != 0 && errno != EEXIST) {
         lua_pushboolean(L, 0);
         return 1;
     }
@@ -775,13 +794,34 @@ static int l_emit_app_registry(lua_State *L) {
     tgt.elf_flags = (unsigned int)flags;
 
     size_t n = (size_t)luaL_len(L, 1);
+
+    /* The marshalling loop below pushes 3 values per entry (entry table, name,
+     * data) and KEEPS them on the Lua stack so the borrowed name/data pointers
+     * stay alive through the emit. That is 3*n slots - far past the LUA_MINSTACK
+     * (20) a C function starts with. The Lua C API REQUIRES growing the stack
+     * before pushing beyond that; without it, entry ~7 (3*7 > 20) writes past
+     * the stack top - undefined behaviour that corrupts memory and crashed with
+     * a SIGSEGV on x86_64 while silently "working" on arm64 (a real app has
+     * dozens of embedded files). Grow it up front, with an overflow-safe bound. */
+    if (n > (size_t)(INT_MAX - LUA_MINSTACK) / 3) {
+        lua_pushnil(L);
+        lua_pushfstring(L, "too many app_registry entries (%d)", (int)n);
+        return 2;
+    }
+    if (n && !lua_checkstack(L, (int)(3 * n) + LUA_MINSTACK)) {
+        lua_pushnil(L);
+        lua_pushstring(L, "cannot grow the Lua stack for app_registry entries");
+        return 2;
+    }
+
     HlEmitEntry *ents = NULL;
     if (n) {
         ents = (HlEmitEntry *)calloc(n, sizeof(*ents));
         if (!ents) { lua_pushnil(L); lua_pushstring(L, "out of memory"); return 2; }
     }
-    /* Borrow name/data pointers from the Lua strings on the stack; they stay
-     * valid until we pop, which is after the emit call completes. */
+    /* Borrow name/data pointers from the Lua strings kept on the stack (grown
+     * above); they stay valid until the C function returns, which is after the
+     * emit call completes. */
     for (size_t i = 0; i < n; i++) {
         lua_rawgeti(L, 1, (lua_Integer)(i + 1));      /* entry table */
         lua_getfield(L, -1, "name");

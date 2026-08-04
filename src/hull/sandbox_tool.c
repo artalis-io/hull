@@ -20,6 +20,7 @@
  */
 
 #include "hull/sandbox.h"
+#include "hull/cap/tool.h"   /* hl_tool_cosmo_prepare_tmpdir / _tmpdir */
 #include "hull/shared/cache_dir.h"
 #include "log.h"
 
@@ -163,12 +164,29 @@ int hl_tool_sandbox_init(HlToolUnveilCtx *ctx,
      * Read + execute; narrow to the .hull/tools subtree, not all of $HOME. */
     {
         const char *home = getenv("HOME");
+        if (!home || !*home) home = getenv("USERPROFILE");   /* Windows */
         if (home && *home) {
             char path[PATH_MAX];
             int n = snprintf(path, sizeof(path), "%s/.hull/tools", home);
             if (n > 0 && (size_t)n < sizeof(path))
                 hl_tool_unveil_add(ctx, path, "rx");
         }
+    }
+
+    /* cosmo/Windows: the shared build temp dir (~/.hull/tmp) that cosmocc's
+     * driver - driven through the bundled busybox - writes its mktemper scratch
+     * to. It must be creatable + writable + executable; without it the child
+     * busybox is denied mkdir and cosmocc fails "nonexistent directory". unveil
+     * needs the path to EXIST when added and the sandbox seals before the build
+     * could create it, so hl_tool_cosmo_prepare_tmpdir creates it here (pre-seal,
+     * filesystem still open) and records the SAME forward-slash path the reroute
+     * later exports as TMPDIR (so the unveil string matches what busybox uses).
+     * No-op / returns -1 off a cosmo hull on Windows. */
+    {
+        hl_tool_cosmo_prepare_tmpdir();
+        char td[PATH_MAX];
+        if (hl_tool_cosmo_tmpdir(td, sizeof(td)) == 0)
+            hl_tool_unveil_add(ctx, td, "rwcx");
     }
 
     hl_tool_unveil_seal(ctx);

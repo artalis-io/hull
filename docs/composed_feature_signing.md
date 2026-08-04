@@ -211,6 +211,20 @@ platform lib only (dual-arch, as today). `--with` features are native-only, so
 `composed.release_domain` is empty on cosmo. No cosmo-specific work beyond the
 existing dual-arch platform-sig handling.
 
+**`app_stdlib_registry.o` (cosmo produced/ejected app) is binary-hash-covered,
+not composed-attested — by design.** A cosmo app emits a small regular object
+(`app_stdlib_registry.o`) filling the strong `hl_stdlib_feature_entries()` seam
+(see `docs/cosmocc_install.md` and `feature_compose.gen_app_registry_c`). It is
+**not** recorded in `package.sig.gethull.composed`, and that is the correct
+boundary: `platform_domain` attests gethull.dev-shipped **archives** against the
+platform key, and this object carries no third-party bytes — Hull's own tool VM
+generates it from the base's own `hl_stdlib_<rt>_entries`. It is the moral
+equivalent of `app_main.o` / `app_registry.o`, which are likewise covered by the
+final binary's `binary_hash` inside the developer-signed payload, not by the
+composed-attestation block. (§5c is presence-gated off on cosmo anyway; on the
+fat base §5b alone anchors platform trust, and the whole-binary hash binds the
+emitted object to the developer signature.)
+
 ## Effort + risk
 
 **Moderate.** It reuses every existing primitive (the `hl_platform_sig_*` codec,

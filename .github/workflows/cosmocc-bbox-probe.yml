@@ -1,0 +1,90 @@
+name: cosmocc busybox capture probe
+
+# Lean diagnostic for the E2E wall (docs/cosmocc_install.md): cosmocc's driver
+# captures a cosmo-APE's stdout via command substitution - out2=$(mktemper .txt)
+# - in six places, and under busybox-w64 out2 came back EMPTY. Isolate the exact
+# question with NO 20-min cosmo-hull build: does busybox-w64 capture a cosmo
+# APE's $(...) stdout on Windows at all? Test both busybox variants
+# (busybox64.exe vs busybox64u.exe) and, for contrast, a shell builtin.
+#
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - '.github/workflows/cosmocc-bbox-probe.yml'
+
+permissions:
+  contents: read
+
+env:
+  COSMOCC_VERSION: 4.0.2
+  COSMOCC_SHA256: 85b8c37a406d862e656ad4ec14be9f6ce474c1b436b9615e91a55208aced3f44
+
+jobs:
+  probe:
+    name: "does busybox capture a cosmo-APE's $() stdout?"
+    runs-on: windows-latest
+    steps:
+      - name: Extract cosmocc (bsdtar) + fetch both busybox variants
+        shell: pwsh
+        run: |
+          curl.exe -fsSL --retry 3 -o cosmocc.zip "https://cosmo.zip/pub/cosmocc/cosmocc-$env:COSMOCC_VERSION.zip"
+          if ((Get-FileHash cosmocc.zip -Algorithm SHA256).Hash.ToLower() -ne $env:COSMOCC_SHA256) { throw "sha mismatch" }
+          New-Item -ItemType Directory -Force -Path cosmo | Out-Null
+          tar.exe -xpf cosmocc.zip -C cosmo 2>&1 | Write-Host
+          New-Item -ItemType Directory -Force -Path bb, C:\tmp | Out-Null
+          curl.exe -fsSL --retry 3 -L -o bb\busybox64u.exe "https://frippery.org/files/busybox/busybox64u.exe"
+          curl.exe -fsSL --retry 3 -L -o bb\busybox64.exe  "https://frippery.org/files/busybox/busybox64.exe"
+          Write-Host "mktemper is: $((Get-Content cosmo\bin\mktemper -TotalCount 1))"
+
+      - name: Probe each busybox variant
+        id: probe
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          # mktemper needs EXACTLY the 13-X template the driver uses:
+          #   "$TMPDIR/fatcosmocc.XXXXXXXXXXXXX$suffix"
+          $fwdOK = $false
+          foreach ($bb in @("busybox64u.exe","busybox64.exe")) {
+            Write-Host "================= $bb ================="
+            # 0) builtin + APE-version captures (baselines: $() works, APE stdout captured).
+            & ".\bb\$bb" sh -c 'echo "builtin=[$(echo hi)]"; echo "ape_version=[$("./cosmo/bin/cosmocc" --version 2>/dev/null|head -1)]"' 2>&1 | Out-String | Write-Host
+            # 1) FORWARD-slash TMPDIR, correct 13-X template - reproduce the driver's
+            #    out2=$(mktemper .txt) THEN the aarch64 redirect ( ... ) 2>"$out2".
+            & ".\bb\$bb" sh -c 'export TMPDIR=C:/tmp; out2=$("./cosmo/bin/mktemper" "$TMPDIR/fatcosmocc.XXXXXXXXXXXXX.txt"); echo "fwd out2=[$out2]"; ( echo err >&2 ) 2>"$out2" && echo "fwd REDIRECT OK" || echo "fwd REDIRECT FAIL"; [ -f "$out2" ] && echo "fwd FILE OK"' 2>&1 | Out-String | Write-Host
+            # 2) BACK-slash TMPDIR (what a cosmo hull's setenv produces) - is THIS what breaks it?
+            & ".\bb\$bb" sh -c 'export TMPDIR="C:\tmp"; out2=$("./cosmo/bin/mktemper" "$TMPDIR/fatcosmocc.XXXXXXXXXXXXX.txt"); echo "bs out2=[$out2]"; ( echo err >&2 ) 2>"$out2" && echo "bs REDIRECT OK" || echo "bs REDIRECT FAIL"' 2>&1 | Out-String | Write-Host
+            # 3) Is mktemper's stdout captured by $() - top-level vs NESTED (busybox
+            #    running busybox, mimicking hull -> busybox -> cosmocc #!/bin/sh)?
+            #    Dump byte len + hex to catch an empty capture or a trailing \r.
+            New-Item -ItemType Directory -Force -Path C:\tmp | Out-Null
+            $inner = 'v=$("./cosmo/bin/mktemper" "C:/tmp/fatcosmocc.XXXXXXXXXXXXX.txt"); printf "len=%s hex=[" "${#v}"; printf "%s" "$v" | od -An -tx1 | tr -d "\n"; printf "] "; ( echo e >&2 ) 2>"$v" && echo REDIRECT_OK || echo REDIRECT_FAIL'
+            Write-Host "-- top-level --"
+            & ".\bb\$bb" sh -c $inner 2>&1 | Out-String | Write-Host
+            Write-Host "-- nested (busybox -> busybox) --"
+            & ".\bb\$bb" sh -c "./bb/$bb sh -c '$inner'" 2>&1 | Out-String | Write-Host
+            # Machine verdict: forward-slash path -> redirect works?
+            $r = (& ".\bb\$bb" sh -c 'export TMPDIR=C:/tmp; out2=$("./cosmo/bin/mktemper" "$TMPDIR/fatcosmocc.XXXXXXXXXXXXX.txt"); ( echo x >&2 ) 2>"$out2" && [ -n "$out2" ] && echo FWD_OK || echo FWD_BAD' 2>&1 | Out-String)
+            Write-Host "verdict($bb): $r"
+            if ($r -match "FWD_OK") { $fwdOK = $true }
+          }
+          "fwd_ok=$fwdOK" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
+      - name: Verdict
+        shell: pwsh
+        run: |
+          $fwd = "${{ steps.probe.outputs.fwd_ok }}"
+          Write-Host "=================================================================="
+          if ($fwd -eq "True") {
+            Write-Host "FIXABLE: with a FORWARD-slash TMPDIR, mktemper + the out2 redirect"
+            Write-Host "work under busybox. The E2E wall was the TMPDIR PATH FORMAT, not a"
+            Write-Host "capture failure (busybox captures a cosmo-APE's stdout fine - see"
+            Write-Host "ape_version). So the real fix is ensuring the driver actually sees"
+            Write-Host "a forward-slash TMPDIR (compare fwd vs bs above). Retract the wall."
+          } else {
+            Write-Host "Even a forward-slash TMPDIR fails - the redirect/capture breaks for"
+            Write-Host "a deeper reason. Compare the fwd vs bs blocks above to localize."
+          }
+          exit 0

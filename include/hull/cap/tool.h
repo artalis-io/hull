@@ -19,7 +19,11 @@
 
 /* ── Unveil path table ─────────────────────────────────────────────── */
 
-#define HL_TOOL_MAX_UNVEILED 16
+/* Cap on unveiled tool-mode paths. The default set already fills ~16 (each
+ * add can store TWO entries when realpath differs), so keep headroom for the
+ * cosmo/Windows ~/.hull/tmp entry + future additions - an over-full table
+ * silently drops adds (hl_tool_unveil_add returns -1 at the cap). */
+#define HL_TOOL_MAX_UNVEILED 24
 
 typedef struct {
     const char *path;
@@ -76,6 +80,54 @@ int hl_tool_spawn(const char *const argv[]);
  * (e.g. ZIG_GLOBAL_CACHE_DIR under the build tmpdir for zig cross-compiles).
  */
 int hl_tool_spawn_env(const char *const argv[], const char *const envadd[]);
+
+/*
+ * Drive an allowlisted compiler @p driver THROUGH a POSIX shell @p shell,
+ * running `<shell> [sh] -c 'exec "$0" "$@"' <driver> <args...>` (the "sh"
+ * applet selector is inserted only when @p shell is busybox). Used only on the
+ * cosmo/Windows build path, where cosmocc's driver is a `#!/bin/sh` script that
+ * Windows cannot execvp directly: a bundled busybox-w64 supplies the shell.
+ *
+ * This does NOT widen the "no arbitrary shell" invariant: @p shell's basename
+ * must be sh / busybox, @p driver must pass hl_tool_check_allowlist, @p args are
+ * dangerous-flag-validated, and the `-c` program is a COMPILE-TIME LITERAL - so
+ * no app-derived byte is ever parsed as shell code (driver is $0, args are $@,
+ * all positional). @p args / @p envadd are NULL-terminated arrays (NULL = none).
+ * Returns the driver's exit code, or -1 on a validation / spawn failure.
+ */
+int hl_tool_spawn_driver_shell(const char *shell, const char *driver,
+                               const char *const args[],
+                               const char *const envadd[]);
+
+/*
+ * Resolve the bundled busybox shell used to drive cosmocc on Windows (the
+ * cosmo/Windows build path). Returns 0 and writes the path to @p out when a
+ * cosmocc-bundle busybox is present AND this is a cosmo hull on Windows; returns
+ * -1 otherwise (always -1 on a native build / on a POSIX host, where cosmocc's
+ * #!/bin/sh driver runs directly). Used by the transparent cosmocc reroute in
+ * the spawn layer (hl_tool_spawn_env / _read), which covers every cosmocc call
+ * site - the compiler vtable, tool.spawn, and the -dumpmachine / --version
+ * probes - so the build tool needs no per-call-site change.
+ */
+int hl_tool_cosmo_shell(char *out, size_t outsz);
+
+/*
+ * On a cosmo hull on Windows, point TMPDIR/TMP/TEMP at one real directory that
+ * hull's build tempdir, cosmocc, and the bundled busybox all agree on (cosmo
+ * maps `/tmp` via $TMPDIR). MUST be called before hull creates its build
+ * tempdir, so the input files hull writes are where cosmocc later looks. Windows
+ * only; idempotent; a no-op on a native build / POSIX host. Called from
+ * tool.tmpdir and from the cosmocc reroute.
+ */
+void hl_tool_cosmo_prepare_tmpdir(void);
+
+/*
+ * Fetch the shared forward-slash cosmo/Windows temp dir set by
+ * hl_tool_cosmo_prepare_tmpdir (0 = written to @p out, -1 = unset / not this
+ * flavor). hull's build tempdir is created under it, and the cosmocc reroute
+ * exports it into busybox as TMPDIR so hull, cosmocc, and busybox all agree.
+ */
+int hl_tool_cosmo_tmpdir(char *out, size_t outsz);
 
 /*
  * Spawn a process and capture its stdout.

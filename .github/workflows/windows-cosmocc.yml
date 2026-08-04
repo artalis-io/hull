@@ -1,0 +1,596 @@
+name: Windows cosmocc (investigation)
+
+# Characterizes whether a `hull-cosmo` APE can `hull build` an app ON Windows by
+# spawning cosmocc. VERDICT (this workflow proves it): NO, not with cosmocc alone.
+# hull-cosmo itself RUNS on Windows (it is a real fat APE), but cosmocc's DRIVER
+# is a `#!/bin/sh` POSIX shell script (only its leaf tools are `.ape` APEs; the
+# arch compilers are symlinks -> cosmocc). So `hull build` spawning `cosmocc` via
+# execvp fails on Windows ("no C compiler available") - there is no /bin/sh, and a
+# naive extraction breaks the symlinks. §0.6 (section0c) then found the FIX: a
+# bundled busybox-w64 (~1 MB native PE, no MSYS DLL) supplies sh + coreutils +
+# #!/bin/sh routing, and with a planted /bin/sh + a shared TMPDIR drives cosmocc
+# to a clean exit 0 producing a working APE - so a self-sufficient Windows build
+# IS achievable via a bounded design change (drive cosmocc via `busybox sh -c` +
+# symlink-aware extraction), not a plain `hull tools install`. Details +
+# recipe in docs/cosmocc_install.md.
+#
+# Informational + non-required: it asserts the CURRENT reality and passes, so if
+# Cosmopolitan ever makes cosmocc directly drivable on Windows the assertions flip
+# and flag it. Standalone workflow, run on demand / when the cosmocc files change.
+#
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+on:
+  # Manual-only: this is the completed INVESTIGATION (§0-§0.7, §C, §E inventory)
+  # whose findings are recorded in docs/cosmocc_install.md. Keep it dispatchable
+  # to re-probe upstream changes, but don't tax the runner pool on every push -
+  # the acceptance test is cosmocc-windows-e2e.yml (which stays on pull_request).
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  HULL_VERSION: v0.9.0
+  COSMOCC_VERSION: 4.0.2
+  COSMOCC_SHA256: 85b8c37a406d862e656ad4ec14be9f6ce474c1b436b9615e91a55208aced3f44
+
+jobs:
+  characterize:
+    name: cosmocc on Windows — characterize
+    runs-on: windows-latest
+    steps:
+      - name: hull-cosmo (a fat APE) runs on Windows
+        shell: pwsh
+        run: |
+          $url = "https://github.com/${{ github.repository }}/releases/download/$env:HULL_VERSION/hull-cosmo"
+          curl.exe -fsSL --retry 3 -o hull-cosmo.exe $url
+          $out = .\hull-cosmo.exe version 2>&1 | Out-String
+          Write-Host $out
+          if ($LASTEXITCODE -ne 0) { throw "EXPECTED PASS FLIPPED: hull-cosmo no longer runs on Windows" }
+          Write-Host "PASS: hull-cosmo runs on Windows."
+
+      - name: cosmocc driver is a POSIX shell script (not an APE)
+        shell: pwsh
+        run: |
+          curl.exe -fsSL --retry 3 -o cosmocc.zip "https://cosmo.zip/pub/cosmocc/cosmocc-$env:COSMOCC_VERSION.zip"
+          $actual = (Get-FileHash cosmocc.zip -Algorithm SHA256).Hash.ToLower()
+          if ($actual -ne $env:COSMOCC_SHA256) { throw "cosmocc sha mismatch: $actual" }
+          $dest = "$env:USERPROFILE\.cosmocc"
+          Expand-Archive cosmocc.zip -DestinationPath $dest -Force
+          $bytes = [System.IO.File]::ReadAllBytes("$dest\bin\cosmocc")[0..15]
+          $head = -join ($bytes | ForEach-Object { if ($_ -ge 32 -and $_ -lt 127) { [char]$_ } else { '.' } })
+          Write-Host "cosmocc head : $head"
+          Write-Host "cosmocc size : $((Get-Item "$dest\bin\cosmocc").Length) bytes"
+          $archcc = "$dest\bin\x86_64-unknown-cosmo-cc"
+          Write-Host "arch cc size : $((Get-Item $archcc).Length) bytes (symlink stub)"
+          if ($head -notlike '#!/bin/sh*') { throw "FINDING FLIPPED: cosmocc is no longer a #!/bin/sh script - re-evaluate the Windows story" }
+          Write-Host "PASS (finding): cosmocc is a #!/bin/sh driver; arch cc's are symlinks -> a POSIX shell + symlink-aware extraction are required."
+
+      - name: hull build cannot spawn cosmocc on Windows (the consequence)
+        shell: pwsh
+        run: |
+          $env:HOME = $env:USERPROFILE
+          $env:PATH = "$env:USERPROFILE\.cosmocc\bin;$env:PATH"
+          New-Item -ItemType Directory -Force -Path app | Out-Null
+          "app.manifest({ modules = {} })`napp.main(function() return 0 end)" | Set-Content -NoNewline app\app.lua -Encoding ascii
+          $out = .\hull-cosmo.exe build app -o app-out.exe --no-verify-platform 2>&1 | Out-String
+          $buildExit = $LASTEXITCODE
+          Write-Host $out
+          Write-Host "--- hull build exit: $buildExit ---"
+          # hull build is EXPECTED to fail here (cosmocc = shell script). Its
+          # non-zero exit must not fail this characterization step, so decide the
+          # step result explicitly: PASS on the expected failure, FLAG (exit 1)
+          # only if it UNEXPECTEDLY produced a binary (i.e. Windows now works).
+          if (Test-Path app-out.exe) {
+            Write-Host "UNEXPECTED: hull build produced a binary on Windows - the cosmocc-on-Windows story may now work; re-evaluate the finding."
+            exit 1
+          }
+          Write-Host "PASS (finding): hull build fails on Windows (cosmocc is a #!/bin/sh driver hull cannot execvp)."
+          exit 0
+
+      - name: Conclusion
+        shell: pwsh
+        run: |
+          Write-Host "=================================================================="
+          Write-Host "hull-cosmo runs on Windows: YES."
+          Write-Host "hull build via cosmocc on Windows: NO (cosmocc = #!/bin/sh driver"
+          Write-Host "+ symlink toolchain). `hull tools install cosmocc` alone does not"
+          Write-Host "solve it; hull would need to drive cosmocc through cosmo's bundled"
+          Write-Host "shell (cocmd) with symlink-aware extraction - a design change."
+          Write-Host "=================================================================="
+
+  section0b-ape-shell-self-contained:
+    # §0.5 SELF-CONTAINMENT (the crux for "install one thing + it works"): Git
+    # Bash is not on a stock Windows box, so requiring a host POSIX sh defeats the
+    # goal. Cosmopolitan ships bash/dash as APEs (cosmo.zip/pub/cosmos/bin) - which
+    # run on Windows natively, like hull-cosmo. Does an APE bash (NOT Git Bash)
+    # drive cosmocc on Windows? If YES, the toolchain is fully self-contained
+    # (bundle cosmocc + an APE bash); if NO, you still need Git Bash / WSL.
+    name: "§0.5 — does an APE bash drive cosmocc (self-contained)?"
+    runs-on: windows-latest
+    steps:
+      - name: Extract cosmocc (bsdtar, symlink-preserving) + fetch the APE bash
+        shell: pwsh
+        run: |
+          curl.exe -fsSL --retry 3 -o cosmocc.zip "https://cosmo.zip/pub/cosmocc/cosmocc-$env:COSMOCC_VERSION.zip"
+          if ((Get-FileHash cosmocc.zip -Algorithm SHA256).Hash.ToLower() -ne $env:COSMOCC_SHA256) { throw "sha mismatch" }
+          New-Item -ItemType Directory -Force -Path cosmo | Out-Null
+          tar.exe -xpf cosmocc.zip -C cosmo 2>&1 | Write-Host
+          # The cosmos APE bash - runs on Windows natively (no Git Bash / WSL).
+          curl.exe -fsSL --retry 3 -o cosmo\bin\bash.exe "https://cosmo.zip/pub/cosmos/bin/bash"
+          Write-Host "bash.exe size: $((Get-Item cosmo\bin\bash.exe).Length)"
+
+      - name: APE bash runs on Windows
+        id: ape_bash_runs
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          & .\cosmo\bin\bash.exe -c "echo ape-bash-ok; uname -a 2>/dev/null || true"
+          if ($LASTEXITCODE -ne 0) { throw "APE bash did not run (exit $LASTEXITCODE)" }
+
+      - name: Write hello.c
+        shell: pwsh
+        run: '"int main(void){return 42;}" | Set-Content -NoNewline hello.c -Encoding ascii'
+
+      - name: APE bash drives cosmocc
+        id: ape_drives
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          # bash inherits pwsh's cwd (the workspace), so relative paths resolve.
+          # Diagnose the /bin/sh dependency (cosmocc is #!/bin/sh) and try driving
+          # it (a) by name (triggers shebang exec) and (b) via the interpreter
+          # explicitly (bypasses the driver's shebang), and (c) after planting the
+          # APE bash at /bin/sh to satisfy the shebang + the symlinked sub-tools.
+          & .\cosmo\bin\bash.exe -c 'echo "--- /bin ---"; ls -la /bin/sh 2>&1 || echo "no /bin/sh"; echo "sh: $(command -v sh || echo none)"' 2>&1 | Out-String | Write-Host
+          Write-Host "=== (a) by name ==="
+          & .\cosmo\bin\bash.exe -c 'export PATH="./cosmo/bin:$PATH"; cosmocc -o hello_a.com hello.c; echo "exit=$?"' 2>&1 | Out-String | Write-Host
+          Write-Host "=== (b) via interpreter (bash <script>) ==="
+          & .\cosmo\bin\bash.exe -c 'export PATH="./cosmo/bin:$PATH"; bash ./cosmo/bin/cosmocc -o hello_b.com hello.c; echo "exit=$?"' 2>&1 | Out-String | Write-Host
+          Write-Host "=== (c) plant /bin/sh = the APE dash, then by name ==="
+          & .\cosmo\bin\bash.exe -c 'mkdir -p /bin 2>/dev/null; cp ./cosmo/bin/bash.exe /bin/sh 2>&1 || echo "cannot write /bin/sh"; export PATH="./cosmo/bin:$PATH"; cosmocc -o hello_c.com hello.c; echo "exit=$?"' 2>&1 | Out-String | Write-Host
+          if (Test-Path hello_a.com) { Copy-Item hello_a.com hello_ape.com -Force }
+          elseif (Test-Path hello_b.com) { Copy-Item hello_b.com hello_ape.com -Force }
+          elseif (Test-Path hello_c.com) { Copy-Item hello_c.com hello_ape.com -Force }
+          Write-Host "any variant built: $(Test-Path hello_ape.com)"
+
+      - name: Verdict — self-contained APE toolchain on Windows?
+        shell: pwsh
+        run: |
+          $built = Test-Path hello_ape.com
+          Write-Host "APE bash built hello_ape.com : $built"
+          $ran = $false
+          if ($built) {
+            Copy-Item hello_ape.com hello_ape.exe -Force
+            & .\hello_ape.exe; $rc = $LASTEXITCODE; $global:LASTEXITCODE = 0
+            $lo = $rc -band 0xFF; $hi = ($rc -shr 8) -band 0xFF
+            Write-Host "hello_ape ran, exit=$rc (lo=$lo hi=$hi; expected 42)"
+            if ($lo -eq 42 -or $hi -eq 42) { $ran = $true }
+          }
+          Write-Host "=================================================================="
+          if ($built -and $ran) {
+            Write-Host "UNEXPECTED SELF-CONTAINED GO: an APE bash now drives cosmocc on"
+            Write-Host "Windows - the story IMPROVED; update docs/cosmocc_install.md."
+            exit 0
+          }
+          Write-Host "FINDING (expected): a bare APE bash does NOT drive cosmocc on"
+          Write-Host "Windows. The APE bash RUNS, but cosmocc's #!/bin/sh + symlinked"
+          Write-Host "sub-tool pipeline needs a real /bin/sh MOUNT: there is no /bin/sh"
+          Write-Host "(exit 127 by name AND via `bash <script>`, since the sub-tools"
+          Write-Host "re-exec via shebang), and /bin is not writable to plant one."
+          Write-Host "MSYS/Git-Bash/WSL provide that mount; a bundled APE shell cannot."
+          Write-Host "=> Self-contained cosmocc on Windows is NOT achievable; the path"
+          Write-Host "   needs MSYS/Git-Bash/WSL (external), or build on a POSIX host."
+          exit 0
+
+  section0d-minimal-recipe:
+    # §0.7 MINIMAL RECIPE (de-risks epic item A's prepare() step). §0.6 proved a
+    # CLEAN exit 0 with BOTH a planted /bin/sh.exe AND a shared TMPDIR, but never
+    # isolated whether the plant is needed: busybox routes #!/bin/sh to its own sh
+    # applet, so a shared TMPDIR alone (fixing the .dbg-rename /tmp mismatch) might
+    # suffice - which would let hull SKIP the fragile C:\bin write (a normal user
+    # can't always write the drive root). Drive cosmocc with a shared TMPDIR and
+    # NO /bin/sh planted; if it exits 0, prepare() is just "share TMPDIR".
+    name: "§0.7 — minimal recipe: TMPDIR-only, no /bin/sh plant?"
+    runs-on: windows-latest
+    steps:
+      - name: Extract cosmocc (bsdtar) + fetch busybox-w64
+        shell: pwsh
+        run: |
+          curl.exe -fsSL --retry 3 -o cosmocc.zip "https://cosmo.zip/pub/cosmocc/cosmocc-$env:COSMOCC_VERSION.zip"
+          if ((Get-FileHash cosmocc.zip -Algorithm SHA256).Hash.ToLower() -ne $env:COSMOCC_SHA256) { throw "sha mismatch" }
+          New-Item -ItemType Directory -Force -Path cosmo | Out-Null
+          tar.exe -xpf cosmocc.zip -C cosmo 2>&1 | Write-Host
+          New-Item -ItemType Directory -Force -Path bb | Out-Null
+          curl.exe -fsSL --retry 3 -L -o bb\busybox.exe "https://frippery.org/files/busybox/busybox64u.exe"
+          "int main(void){return 42;}" | Set-Content -NoNewline hello.c -Encoding ascii
+
+      - name: Drive cosmocc with shared TMPDIR, NO /bin/sh plant
+        id: drive
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          # Deliberately do NOT create C:\bin\sh.exe. Only share one real TMPDIR.
+          New-Item -ItemType Directory -Force -Path C:\tmp | Out-Null
+          if (Test-Path C:\bin\sh.exe) { Remove-Item C:\bin\sh.exe -Force }  # ensure no stray plant
+          & .\bb\busybox.exe sh -c 'export PATH="./cosmo/bin:$PATH"; export TMPDIR=C:/tmp TMP=C:/tmp TEMP=C:/tmp; cosmocc -O2 -o hello.com hello.c; echo "exit=$?"' 2>&1 | Out-String | Write-Host
+
+      - name: Verdict — is a plant-free recipe enough?
+        shell: pwsh
+        run: |
+          $built = Test-Path hello.com
+          $ran = $false
+          if ($built) {
+            Copy-Item hello.com hello.exe -Force
+            & .\hello.exe; $rc = $LASTEXITCODE; $global:LASTEXITCODE = 0
+            $lo = $rc -band 0xFF; $hi = ($rc -shr 8) -band 0xFF
+            Write-Host "hello ran, exit=$rc (lo=$lo hi=$hi; expected 42)"
+            if ($lo -eq 42 -or $hi -eq 42) { $ran = $true }
+          }
+          Write-Host "=================================================================="
+          if ($built -and $ran) {
+            Write-Host "MINIMAL RECIPE = SHARE TMPDIR ONLY: busybox drove cosmocc to a"
+            Write-Host "working APE with NO /bin/sh plant - busybox's own #!/bin/sh"
+            Write-Host "routing suffices. So epic item A's prepare() only needs to set"
+            Write-Host "TMPDIR/TMP/TEMP to one real dir; it can SKIP the C:\bin write."
+          } else {
+            Write-Host "PLANT ALSO REQUIRED: TMPDIR alone did not yield a working build"
+            Write-Host "(built=$built ran=$ran). prepare() must ALSO plant /bin/sh.exe"
+            Write-Host "= busybox (needs a writable drive root / Developer setup)."
+          }
+          exit 0
+
+  section0c-busybox-w64-self-contained:
+    # §0.6 SELF-CONTAINMENT via busybox-w64 (the lighter-than-MSYS candidate).
+    # §0.5 failed because an APE bash provides an interpreter but (a) no /bin/sh
+    # MOUNT and (b) no coreutils - and cosmocc's #!/bin/sh driver shells out to
+    # dirname/readlink/uname/sed/... busybox-w64 is a SINGLE native Windows PE (no
+    # Cygwin/MSYS DLL) that provides BOTH the sh (ash) AND every coreutil as
+    # applets, and it has built-in shebang handling that can route #!/bin/sh to its
+    # own sh. If busybox drives cosmocc, a stock Windows box is self-sufficient with
+    # a ~1 MB extra binary (vs a ~40 MB GPLv3 MSYS runtime). If not, the diagnostics
+    # say why (/bin/sh routing, applet resolution, or APE-child path translation).
+    name: "§0.6 — does busybox-w64 sh drive cosmocc (self-contained)?"
+    runs-on: windows-latest
+    steps:
+      - name: Extract cosmocc (bsdtar, symlink-preserving) + fetch busybox-w64
+        shell: pwsh
+        run: |
+          curl.exe -fsSL --retry 3 -o cosmocc.zip "https://cosmo.zip/pub/cosmocc/cosmocc-$env:COSMOCC_VERSION.zip"
+          if ((Get-FileHash cosmocc.zip -Algorithm SHA256).Hash.ToLower() -ne $env:COSMOCC_SHA256) { throw "sha mismatch" }
+          New-Item -ItemType Directory -Force -Path cosmo | Out-Null
+          tar.exe -xpf cosmocc.zip -C cosmo 2>&1 | Write-Host
+          New-Item -ItemType Directory -Force -Path bb | Out-Null
+          # busybox-w64 (Ron Yorston). Single native PE, no Cygwin/MSYS runtime.
+          curl.exe -fsSL --retry 3 -L -o bb\busybox.exe "https://frippery.org/files/busybox/busybox64u.exe"
+          Write-Host "busybox.exe size: $((Get-Item bb\busybox.exe).Length)"
+
+      - name: busybox-w64 runs on Windows (sh + coreutils applets)
+        id: bb_runs
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          & .\bb\busybox.exe echo busybox-ok
+          if ($LASTEXITCODE -ne 0) { throw "busybox did not run (exit $LASTEXITCODE)" }
+          & .\bb\busybox.exe sh -c 'echo "sh-ok: $(dirname /a/b) $(uname -s 2>/dev/null || echo nouname)"'
+          if ($LASTEXITCODE -ne 0) { throw "busybox sh -c failed (exit $LASTEXITCODE)" }
+
+      - name: Write hello.c
+        shell: pwsh
+        run: '"int main(void){return 42;}" | Set-Content -NoNewline hello.c -Encoding ascii'
+
+      - name: busybox sh drives cosmocc
+        id: bb_drives
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          # Diagnose how busybox resolves /bin/sh (the cosmocc shebang target) and
+          # whether it routes bare applet names (dirname/uname) the driver calls.
+          & .\bb\busybox.exe sh -c 'echo "sh: $(command -v sh || echo none)"; echo "--- /bin/sh ---"; ls -la /bin/sh 2>&1 || echo "no /bin/sh"; echo "dirname applet: $(command -v dirname || echo none)"' 2>&1 | Out-String | Write-Host
+          # Plant C:\bin\sh.exe (the #!/bin/sh target; busybox appends .exe) so the
+          # driver AND its symlinked sub-tools resolve their shebang to busybox sh.
+          New-Item -ItemType Directory -Force -Path C:\bin | Out-Null
+          Copy-Item bb\busybox.exe C:\bin\sh.exe -Force
+          Write-Host "=== (a) by name (busybox shebang routing) ==="
+          & .\bb\busybox.exe sh -c 'export PATH="./cosmo/bin:$PATH"; cosmocc -o hello_a.com hello.c; echo "exit=$?" > exit_a.txt' 2>&1 | Out-String | Write-Host
+          Write-Host "=== (b) via interpreter (busybox sh <driver>) ==="
+          & .\bb\busybox.exe sh -c 'export PATH="./cosmo/bin:$PATH"; busybox sh ./cosmo/bin/cosmocc -o hello_b.com hello.c; echo "exit=$?" > exit_b.txt' 2>&1 | Out-String | Write-Host
+          # (a)/(b) build a correct APE but the driver's final `mv /tmp/....com.dbg`
+          # fails: busybox /tmp and the native APE sub-tools' /tmp resolve to
+          # DIFFERENT real dirs, so the debug sidecar isn't where the driver looks.
+          # (c) aligns them: one real C:\tmp, exported as TMPDIR/TMP/TEMP, which both
+          # busybox AND the cosmo APEs honor for ${TMPDIR:-/tmp} - aiming for exit 0.
+          Write-Host "=== (c) shared TMPDIR (C:\tmp) so the .dbg rename resolves ==="
+          New-Item -ItemType Directory -Force -Path C:\tmp | Out-Null
+          & .\bb\busybox.exe sh -c 'export PATH="./cosmo/bin:$PATH"; export TMPDIR=C:/tmp TMP=C:/tmp TEMP=C:/tmp; cosmocc -o hello_c.com hello.c; echo "exit=$?" > exit_c.txt' 2>&1 | Out-String | Write-Host
+          foreach ($f in @("hello_c.com","hello_a.com","hello_b.com")) {
+            if (Test-Path $f) { Copy-Item $f hello_bb.com -Force; break }
+          }
+          Write-Host "any variant built: $(Test-Path hello_bb.com)"
+          foreach ($v in @("a","b","c")) { if (Test-Path "exit_$v.txt") { Write-Host "variant $v $((Get-Content "exit_$v.txt").Trim())" } }
+
+      - name: Verdict — self-contained busybox-w64 toolchain on Windows?
+        shell: pwsh
+        run: |
+          $built = Test-Path hello_bb.com
+          Write-Host "busybox built hello_bb.com : $built"
+          $ran = $false
+          if ($built) {
+            Copy-Item hello_bb.com hello_bb.exe -Force
+            & .\hello_bb.exe; $rc = $LASTEXITCODE; $global:LASTEXITCODE = 0
+            $lo = $rc -band 0xFF; $hi = ($rc -shr 8) -band 0xFF
+            Write-Host "hello_bb ran, exit=$rc (lo=$lo hi=$hi; expected 42)"
+            if ($lo -eq 42 -or $hi -eq 42) { $ran = $true }
+          }
+          # A CLEAN go needs a variant where cosmocc itself exited 0 (a real hull
+          # build checks the exit code). Track whether any variant returned exit=0.
+          $clean = $false
+          foreach ($v in @("a","b","c")) {
+            if (Test-Path "exit_$v.txt") {
+              $e = (Get-Content "exit_$v.txt").Trim()
+              if ($e -eq "exit=0") { $clean = $true }
+            }
+          }
+          Write-Host "some variant exited cleanly (exit=0): $clean"
+          Write-Host "=================================================================="
+          if ($built -and $ran -and $clean) {
+            Write-Host "CLEAN GO (self-contained): busybox-w64 sh drives cosmocc on"
+            Write-Host "Windows, cosmocc exits 0, and the APE runs (42). A single ~1 MB"
+            Write-Host "native PE supplies /bin/sh + every coreutil the driver needs,"
+            Write-Host "with NO Cygwin/MSYS runtime and NO Git Bash. The self-sufficient"
+            Write-Host "Windows story IS achievable: bundle cosmocc + busybox, plant"
+            Write-Host "/bin/sh, share TMPDIR, drive cosmocc via busybox sh."
+            exit 0
+          }
+          if ($built -and $ran) {
+            Write-Host "QUALIFIED GO (self-contained): busybox-w64 sh COMPILED + LINKED"
+            Write-Host "a correct cosmocc APE on Windows (it runs, returns 42) with NO"
+            Write-Host "MSYS/Git Bash - the hard parts (POSIX sh + coreutils applets +"
+            Write-Host "#!/bin/sh routing + APE-child argv path translation) all work."
+            Write-Host "The driver still exits non-zero on its final debug-sidecar"
+            Write-Host "rename (mv /tmp/....com.dbg): busybox /tmp vs the APE /tmp. The"
+            Write-Host "remaining work is aligning /tmp (or --nodbg). Self-contained"
+            Write-Host "cosmocc on Windows via busybox is the viable path; finish the"
+            Write-Host "/tmp alignment for a clean exit 0."
+            exit 0
+          }
+          Write-Host "FINDING: busybox-w64 sh did NOT build a runnable cosmocc APE on"
+          Write-Host "Windows (see the (a)/(b)/(c) exit codes + stderr for the failing"
+          Write-Host "stage: /bin/sh routing, applet resolution, or APE-child argv path"
+          Write-Host "translation). MSYS/Git-Bash/WSL (external) or build-on-a-POSIX-host"
+          Write-Host "remains the Windows story."
+          exit 0
+
+  sectione-inventory:
+    # §E INVENTORY (feeds the item-E producer's trim keep-list). §C proved an APE
+    # build touches only ~309 MB of the 1.37 GB tree; this dumps WHAT the other
+    # ~1 GB is (per-dir sizes + biggest files) so build_cosmocc_bundle.sh can trim
+    # by an exact, confident keep-list instead of guessing.
+    name: "§E — inventory the cosmocc tree (trim keep-list)"
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fetch/verify/extract cosmocc + inventory
+        shell: bash
+        run: |
+          curl -fsSL --retry 3 -o cosmocc.zip "https://cosmo.zip/pub/cosmocc/cosmocc-$COSMOCC_VERSION.zip"
+          [ "$(sha256sum cosmocc.zip | cut -d' ' -f1)" = "$COSMOCC_SHA256" ] || { echo "sha mismatch"; exit 1; }
+          mkdir -p tree && ( cd tree && unzip -q -o "$GITHUB_WORKSPACE/cosmocc.zip" )
+          root=$(ls -d tree/*/ 2>/dev/null | head -1); [ -n "$root" ] || root=tree
+          echo "=== total ==="; du -sh "$root"
+          echo "=== top-level dirs ==="; du -sh "$root"*/ 2>/dev/null | sort -rh | head -30
+          echo "=== depth-2 (biggest 40) ==="; du -h --max-depth=2 "$root" 2>/dev/null | sort -rh | head -40
+          echo "=== 30 biggest files ==="; find "$root" -type f -printf '%s\t%p\n' | sort -rn | head -30 | awk '{printf "%.1fMB\t%s\n",$1/1048576,$2}'
+          echo "=== other-language compilers present (cc1plus/f951/lto1/...) ==="; find "$root" -type f \( -name 'cc1plus' -o -name 'f951' -o -name 'cc1obj*' -o -name 'lto1' -o -name 'd21' -o -name 'go1' -o -name 'gnat1' \) -printf '%s\t%p\n' | awk '{printf "%.1fMB\t%s\n",$1/1048576,$2}'
+          echo "=== C++ / unwind libs (droppable for a C-only build) ==="; find "$root" -type f \( -name 'libc++*' -o -name 'libstdc++*' -o -name 'libunwind*' \) -printf '%s\t%p\n' | awk '{printf "%.1fMB\t%s\n",$1/1048576,$2}' | head -30
+          echo "=== .dbg sidecars ==="; find "$root" -name '*.dbg' -printf '%s\t%p\n' | awk '{s+=$1} END{printf "total %.1fMB across %d files\n", s/1048576, NR}'
+
+  sectionc-trim-trace:
+    # §C SPIKE (bundle size, epic item C): the cosmocc tree is ~1.43 GB, over the
+    # release_io 512 MB download cap. Does an APE BUILD actually touch all of it,
+    # or would a trimmed subset fit under the cap uncompressed (option 1, no new
+    # inflate in the trust path)? strace a fat-APE build and measure the file
+    # closure it opens vs the full tree. Linux runner: cosmocc runs natively and
+    # strace is available. The closure is a floor estimate (a real hull build also
+    # apelinks the embedded platform .a, but that .a is IN hull, not the cosmocc
+    # tree; linking any symbol still opens cosmopolitan.a fully, so the big tree
+    # files are captured).
+    name: "§C — trimmed cosmocc closure vs the full tree"
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install strace + fetch/verify/extract cosmocc
+        shell: bash
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y strace >/dev/null
+          curl -fsSL --retry 3 -o cosmocc.zip "https://cosmo.zip/pub/cosmocc/cosmocc-$COSMOCC_VERSION.zip"
+          actual=$(sha256sum cosmocc.zip | cut -d' ' -f1)
+          [ "$actual" = "$COSMOCC_SHA256" ] || { echo "sha mismatch: $actual"; exit 1; }
+          mkdir -p "$HOME/.cosmocc"
+          ( cd "$HOME/.cosmocc" && unzip -q -o "$GITHUB_WORKSPACE/cosmocc.zip" )
+          echo "COSMO_ROOT=$HOME/.cosmocc" >> "$GITHUB_ENV"
+
+      - name: Build a representative APE under strace
+        shell: bash
+        run: |
+          # Reference a broad libc surface so apelink pulls widely from
+          # cosmopolitan.a (mimics hull's fat platform .a link more than a bare
+          # hello world). cosmocc runs BOTH arch passes for the fat APE.
+          cat > app.c <<'EOF'
+          #include <stdio.h>
+          #include <stdint.h>
+          #include <string.h>
+          #include <stdlib.h>
+          #include <math.h>
+          #include <pthread.h>
+          static void *thr(void *a){ return a; }
+          int main(void){
+            pthread_t t; pthread_create(&t,0,thr,0); pthread_join(t,0);
+            char *p = malloc(64); snprintf(p,64,"%f",sqrt(2.0)); size_t n=strlen(p);
+            free(p); return (int)(n>0?42:1);
+          }
+          EOF
+          # -ff writes one file per PID (trace.<pid>) so per-process calls stay
+          # sequential - avoids the unfinished/resumed interleaving of plain -f
+          # that would drop path args. cosmocc forks compile.ape/assembler/apelink.
+          strace -ff -y -e trace=open,openat,stat,lstat,newfstatat,access,readlink \
+            -o trace "$COSMO_ROOT/bin/cosmocc" -O2 -o app.com app.c
+          cat trace.* > trace.txt
+          echo "strace produced $(ls trace.* | wc -l) per-pid logs"
+          ls -la app.com
+          # Prove it runs + returns 42. `&& || ` keeps errexit (-e) from killing
+          # the step on the intentional non-zero (42) exit.
+          rc=0; ./app.com || rc=$?
+          echo "app.com exit: $rc"
+          [ "$rc" = "42" ] && echo "OK: APE ran, returned 42" || echo "note: exit $rc"
+
+      - name: Compute the touched closure vs the full tree
+        shell: bash
+        run: |
+          root="$COSMO_ROOT"
+          real_files(){ while IFS= read -r f; do [ -f "$f" ] && echo "$f"; done; }
+          sum_mb(){ xargs -a "$1" -d '\n' stat -c '%s' 2>/dev/null | awk '{s+=$1} END{printf "%.0f", (s+0)/1048576}'; }
+
+          # SUCCESSFUL syscalls only (drop '= -1 ...' ENOENT probes) -> the files
+          # the build actually needs present. First quoted path per line, kept if
+          # under the cosmocc root and still a real file.
+          grep -E '\)[[:space:]]*=[[:space:]]*[0-9]' trace.txt \
+            | grep -oE '"[^"]*"' | sed 's/^"//; s/"$//' \
+            | grep -F "$root/" | sort -u | real_files > closure.txt
+
+          # SUPERSET: every tree path mentioned (success or not) -> a safe upper
+          # bound, in case -ff still split a few resumed calls.
+          grep -oE '"[^"]*"' trace.txt | sed 's/^"//; s/"$//' \
+            | grep -F "$root/" | sort -u | real_files > closure.super.txt
+
+          full_mb=$(du -sm "$root" | cut -f1)
+          clo_mb=$(sum_mb closure.txt);  clo_n=$(wc -l < closure.txt)
+          sup_mb=$(sum_mb closure.super.txt); sup_n=$(wc -l < closure.super.txt)
+          echo "full tree        : ${full_mb} MB"
+          echo "needed closure   : ${clo_mb} MB (${clo_n} files, successful opens)"
+          echo "superset (upper) : ${sup_mb} MB (${sup_n} files, all mentions)"
+          echo "--- needed closure by top-level component ---"
+          sed "s#^$root/##" closure.txt | awk -F/ '{print $1}' | sort | uniq -c | sort -rn | head -20
+          echo "--- 15 largest needed files ---"
+          xargs -a closure.txt -d '\n' du -h 2>/dev/null | sort -rh | head -15
+          {
+            echo "FULL_MB=$full_mb"
+            echo "CLO_MB=$clo_mb"
+            echo "CLO_FILES=$clo_n"
+            echo "SUP_MB=$sup_mb"
+          } >> "$GITHUB_ENV"
+
+      - name: Verdict — does a trimmed cosmocc fit under the 512 MB cap?
+        shell: bash
+        run: |
+          echo "=================================================================="
+          echo "Full cosmocc-$COSMOCC_VERSION tree : ${FULL_MB} MB"
+          echo "APE-build needed closure          : ${CLO_MB} MB (${CLO_FILES} files)"
+          echo "APE-build superset (upper bound)  : ${SUP_MB} MB"
+          echo "release_io download cap           : 512 MB"
+          # Judge on the SUPERSET (the safe upper bound): if even that fits, trim
+          # is unambiguously viable.
+          if [ "${SUP_MB:-99999}" -lt 512 ]; then
+            echo "TRIM VIABLE: even the upper-bound closure (${SUP_MB} MB) fits UNDER"
+            echo "the 512 MB cap uncompressed -> epic item C option (1) 'trim the"
+            echo "tree' works with NO new inflate in the trust path. Build the bundle"
+            echo "from the closure (+ symlinks/parent dirs), not the ~${FULL_MB} MB tree."
+          elif [ "${CLO_MB:-99999}" -lt 512 ]; then
+            echo "TRIM LIKELY VIABLE: the needed closure (${CLO_MB} MB) fits, but the"
+            echo "superset (${SUP_MB} MB) does not - tighten the keep-set (drop probed"
+            echo "-but-unopened files) and re-measure before committing to option (1)."
+          else
+            echo "TRIM INSUFFICIENT ALONE: even the needed closure ${CLO_MB} MB exceeds"
+            echo "512 MB; epic item C needs option (2) gzip-inflate in the install"
+            echo "path or option (3) raise the cap. (A gzip of the closure is ~1/3.)"
+          fi
+          echo "Note: closure is a floor estimate (hull also apelinks its embedded"
+          echo "platform .a; cosmopolitan.a is opened fully regardless, so the large"
+          echo "tree files are captured). Treat as guidance for the C decision."
+
+  section0-shell-drives-cosmocc:
+    # §0 GO/NO-GO (no Hull change): given a SHELL + preserved symlinks, does
+    # cosmocc's #!/bin/sh pipeline actually compile on Windows at all? If NO, the
+    # A-E Hull epic is not worth starting. Extract with bsdtar (tar.exe -
+    # symlink-preserving, unlike Expand-Archive), reconstruct any symlinks Windows
+    # dropped, then drive cosmocc via Git Bash AND cosmo's own cocmd.
+    name: "§0 — can a shell drive cosmocc on Windows?"
+    runs-on: windows-latest
+    steps:
+      - name: Download + symlink-preserving extract (bsdtar)
+        shell: pwsh
+        run: |
+          curl.exe -fsSL --retry 3 -o cosmocc.zip "https://cosmo.zip/pub/cosmocc/cosmocc-$env:COSMOCC_VERSION.zip"
+          $actual = (Get-FileHash cosmocc.zip -Algorithm SHA256).Hash.ToLower()
+          if ($actual -ne $env:COSMOCC_SHA256) { throw "cosmocc sha mismatch: $actual" }
+          New-Item -ItemType Directory -Force -Path cosmo | Out-Null
+          # bsdtar (Windows-bundled tar.exe) extracts zip AND creates symlinks
+          # where it can. Emit its stderr so any "can't create symlink" shows.
+          tar.exe -xpf cosmocc.zip -C cosmo 2>&1 | Write-Host
+          $cc = Get-Item cosmo\bin\x86_64-unknown-cosmo-cc
+          Write-Host "arch-cc: size=$($cc.Length) LinkType=$($cc.LinkType) Target=$($cc.Target)"
+
+      # (bsdtar preserved real symlinks on the runner - LinkType=SymbolicLink - so
+      # no reconstruction is needed; hull's symlink-aware extraction would do the
+      # same. Straight to the probes.)
+      - name: Write hello.c
+        shell: pwsh
+        run: '"int main(void){return 42;}" | Set-Content -NoNewline hello.c -Encoding ascii'
+
+      - name: "Probe A — Git Bash (POSIX /bin/sh) drives cosmocc"
+        id: probe_bash
+        continue-on-error: true
+        shell: bash
+        run: |
+          export PATH="$(pwd)/cosmo/bin:$PATH"
+          echo "which cosmocc: $(command -v cosmocc || echo none)"
+          cosmocc -o hello_bash.com hello.c
+          echo "cosmocc exit: $?"
+          ls -la hello_bash.com
+
+      - name: "Probe B — cosmo cocmd drives cosmocc"
+        id: probe_cocmd
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          Copy-Item cosmo\bin\cocmd cosmo\bin\cocmd.exe -Force
+          $env:PATH = "$PWD\cosmo\bin;$env:PATH"
+          & cosmo\bin\cocmd.exe -c "cosmocc -o hello_cocmd.com hello.c" 2>&1 | Out-String | Write-Host
+          Write-Host "--- cocmd cosmocc exit: $LASTEXITCODE ---"
+          if (-not (Test-Path hello_cocmd.com)) { throw "cocmd did not build" }
+
+      - name: Verdict — did a shell build (and run) the APE?
+        shell: pwsh
+        run: |
+          $bashOK = (Test-Path hello_bash.com)
+          $cocmdOK = (Test-Path hello_cocmd.com)
+          Write-Host "Git Bash built hello.com : $bashOK"
+          Write-Host "cocmd built hello.com    : $cocmdOK"
+          $ran = $false
+          foreach ($f in @("hello_bash.com","hello_cocmd.com")) {
+            if (Test-Path $f) {
+              Copy-Item $f "$f.exe" -Force
+              & ".\$f.exe"; $rc = $LASTEXITCODE
+              # The APE returns 42; on Windows the exit may arrive wait-status-
+              # encoded (42 << 8 = 10752), so accept either byte.
+              $lo = $rc -band 0xFF; $hi = ($rc -shr 8) -band 0xFF
+              Write-Host "$f ran, exit=$rc (lo=$lo hi=$hi; expected 42)"
+              if ($lo -eq 42 -or $hi -eq 42) { $ran = $true }
+            }
+          }
+          $global:LASTEXITCODE = 0
+          Write-Host "=================================================================="
+          if (($bashOK -or $cocmdOK) -and $ran) {
+            Write-Host "GO: a POSIX shell CAN drive cosmocc's full pipeline on Windows"
+            Write-Host "(APE built + ran). Git Bash (/bin/sh) works; cosmo's cocmd does"
+            Write-Host "NOT (it is a cmd-like shell, not a POSIX sh for the #!/bin/sh"
+            Write-Host "driver). So the A-E Hull epic is VIABLE, but the 'shell' is a"
+            Write-Host "POSIX sh (bash/MSYS), not cocmd - hull must provide/require one."
+            exit 0
+          } elseif ($bashOK -or $cocmdOK) {
+            Write-Host "PARTIAL: cosmocc built an APE but it did not run as expected."
+            exit 1
+          } else {
+            Write-Host "NO-GO: no shell could drive cosmocc's pipeline on Windows."
+            Write-Host "The A-E Hull epic would not pay off; WSL2 stays the path."
+            exit 1
+          }

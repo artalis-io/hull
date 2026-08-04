@@ -136,6 +136,24 @@ case "$VERSION" in
         # Cosmo DOES publish per-flavor platform libs (dual-arch), so the
         # `hull flavor install` path is exercised on cosmo binaries.
         smoke_platform_install
+        # cosmocc IS published for cosmo (the exception to every other tool): it's
+        # the toolchain a cosmo hull needs to `hull build` an APE. Exercise the
+        # LIVE install + assert the bundle lays down cosmocc + the busybox
+        # ride-along (item E). This downloads ~300 MB - the point is to prove the
+        # trimmed big-asset fetch + trust chain end to end.
+        assert_contains "registry lists cosmocc"       "$OUT" "\"name\":\"cosmocc\""
+        echo ""
+        echo "── hull tools install cosmocc (LIVE ~300 MB HTTPS download) ──"
+        "$HULL" tools uninstall cosmocc >/dev/null 2>&1 || true
+        OUT_CC=$("$HULL" tools install cosmocc 2>&1)
+        RC_CC=$?
+        echo "$OUT_CC" | sed 's/^/    /'
+        assert "cosmocc install exits 0"               [ "$RC_CC" -eq 0 ]
+        assert_contains "cosmocc SHA-256 verified"     "$OUT_CC" "SHA-256 verified"
+        CC_DIR="${HOME}/.hull/tools/cosmocc"
+        assert "bundle laid down bin/cosmocc"          [ -e "$CC_DIR/bin/cosmocc" ]
+        assert "bundle laid down bin/busybox.exe"      [ -e "$CC_DIR/bin/busybox.exe" ]
+        "$HULL" tools uninstall cosmocc >/dev/null 2>&1 || true
         echo ""
         echo "── Summary ──"
         echo "  Passed: $PASS"

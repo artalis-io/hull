@@ -56,8 +56,29 @@ static const char *tar_safe_path(char *name)
     return name;
 }
 
-int hl_tar_parse(const unsigned char *tar, size_t tar_len,
-                 int (*cb)(const HlTarEntry *e, void *ctx), void *ctx)
+/* A symlink target is safe if it is relative (not absolute) and has no ".."
+ * segment, so it can't point outside its own directory subtree. cosmocc's
+ * arch-cc symlinks are bare same-dir names (e.g. "cosmocc"). */
+static int tar_safe_linkname(const char *ln)
+{
+    if (!ln || ln[0] == '\0' || ln[0] == '/') return 0;
+    for (const char *p = ln; *p; ) {
+        const char *slash = strchr(p, '/');
+        size_t seg = slash ? (size_t)(slash - p) : strlen(p);
+        if (seg == 2 && p[0] == '.' && p[1] == '.') return 0;
+        p += seg;
+        if (*p == '/') p++;
+    }
+    return 1;
+}
+
+/* The shared ustar iterator. @p want_files surfaces regular-file / directory
+ * members; @p want_symlinks surfaces symlink members (typeflag '2', target in
+ * HlTarEntry.linkname). hl_tar_parse selects files only (preserving the
+ * app-facing contract); extraction runs it twice (files, then symlinks). */
+static int tar_iter(const unsigned char *tar, size_t tar_len,
+                    int (*cb)(const HlTarEntry *e, void *ctx), void *ctx,
+                    int want_files, int want_symlinks)
 {
     if (!tar || !cb) return -1;
 
@@ -81,18 +102,39 @@ int hl_tar_parse(const unsigned char *tar, size_t tar_len,
         if (off + size > tar_len) return -1;    /* truncated data */
 
         if (typeflag == '5' || typeflag == '0' || typeflag == '\0') {
-            const char *rel = tar_safe_path(name);
-            if (!rel) return -1;                /* absolute / ".." */
-            if (rel[0] != '\0') {               /* skip the archive root */
-                HlTarEntry e = {
-                    .name   = rel,
-                    .is_dir = (typeflag == '5'),
-                    .mode   = mode ? mode : 0644,
-                    .data   = (typeflag == '5') ? NULL : tar + off,
-                    .size   = (typeflag == '5') ? 0 : size,
-                };
-                int rc = cb(&e, ctx);
-                if (rc) return rc;
+            if (want_files) {
+                const char *rel = tar_safe_path(name);
+                if (!rel) return -1;            /* absolute / ".." */
+                if (rel[0] != '\0') {           /* skip the archive root */
+                    HlTarEntry e = {
+                        .name   = rel,
+                        .is_dir = (typeflag == '5'),
+                        .mode   = mode ? mode : 0644,
+                        .data   = (typeflag == '5') ? NULL : tar + off,
+                        .size   = (typeflag == '5') ? 0 : size,
+                    };
+                    int rc = cb(&e, ctx);
+                    if (rc) return rc;
+                }
+            }
+        } else if (typeflag == '2') {           /* symlink */
+            if (want_symlinks) {
+                const char *rel = tar_safe_path(name);
+                if (!rel) return -1;
+                char linkname[101];
+                memcpy(linkname, hdr + 157, 100);
+                linkname[100] = '\0';
+                if (!tar_safe_linkname(linkname)) return -1;
+                if (rel[0] != '\0') {
+                    HlTarEntry e = {
+                        .name       = rel,
+                        .mode       = mode ? mode : 0755,
+                        .is_symlink = 1,
+                        .linkname   = linkname,
+                    };
+                    int rc = cb(&e, ctx);
+                    if (rc) return rc;
+                }
             }
         }
         off += (size + (TAR_BLOCK - 1)) & ~(size_t)(TAR_BLOCK - 1);
@@ -100,11 +142,32 @@ int hl_tar_parse(const unsigned char *tar, size_t tar_len,
     return 0;
 }
 
+int hl_tar_parse(const unsigned char *tar, size_t tar_len,
+                 int (*cb)(const HlTarEntry *e, void *ctx), void *ctx)
+{
+    /* Files + directories only; symlinks/hardlinks are skipped, preserving the
+     * app-facing hull.tar contract. Extraction handles symlinks separately. */
+    return tar_iter(tar, tar_len, cb, ctx, /*want_files=*/1, /*want_symlinks=*/0);
+}
+
 /* ── Extraction (trusted; hull's own install path) ─────────────────── */
 
 struct extract_ctx { const char *dest; };
 
-static int extract_cb(const HlTarEntry *e, void *vctx)
+/* Create parent directories of @p path (which ends in the member name). */
+static int extract_make_parents(char *path)
+{
+    char *last = strrchr(path, '/');
+    if (last && last != path) {
+        *last = '\0';
+        int rc = hl_mkdir_p(path, 0755);
+        *last = '/';
+        return rc;
+    }
+    return 0;
+}
+
+static int extract_file_cb(const HlTarEntry *e, void *vctx)
 {
     struct extract_ctx *c = (struct extract_ctx *)vctx;
     char path[PATH_MAX];
@@ -113,12 +176,7 @@ static int extract_cb(const HlTarEntry *e, void *vctx)
 
     if (e->is_dir) return hl_mkdir_p(path, 0755);
 
-    char *last = strrchr(path, '/');
-    if (last && last != path) {                 /* create parent dirs */
-        *last = '\0';
-        if (hl_mkdir_p(path, 0755) != 0) { *last = '/'; return -1; }
-        *last = '/';
-    }
+    if (extract_make_parents(path) != 0) return -1;
     FILE *f = fopen(path, "wb");
     if (!f) return -1;
     if (e->size && fwrite(e->data, 1, e->size, f) != e->size) {
@@ -130,6 +188,50 @@ static int extract_cb(const HlTarEntry *e, void *vctx)
     return 0;
 }
 
+/* Copy @p src -> @p dst (the symlink copy-fallback). */
+static int extract_copy(const char *src, const char *dst, unsigned mode)
+{
+    FILE *in = fopen(src, "rb");
+    if (!in) return -1;
+    FILE *out = fopen(dst, "wb");
+    if (!out) { fclose(in); return -1; }
+    char buf[8192];
+    size_t n;
+    int rc = 0;
+    while ((n = fread(buf, 1, sizeof(buf), in)) > 0) {
+        if (fwrite(buf, 1, n, out) != n) { rc = -1; break; }
+    }
+    if (ferror(in)) rc = -1;
+    if (fclose(out) != 0) rc = -1;
+    fclose(in);
+    if (rc == 0 && mode) (void)chmod(dst, (mode_t)mode);
+    return rc;
+}
+
+static int extract_symlink_cb(const HlTarEntry *e, void *vctx)
+{
+    struct extract_ctx *c = (struct extract_ctx *)vctx;
+    char path[PATH_MAX];
+    int pn = snprintf(path, sizeof(path), "%s/%s", c->dest, e->name);
+    if (pn < 0 || (size_t)pn >= sizeof(path)) return -1;
+
+    if (extract_make_parents(path) != 0) return -1;
+    (void)unlink(path);                          /* idempotent re-extract */
+    if (symlink(e->linkname, path) == 0) return 0;
+
+    /* Fallback where symlinks are unavailable (e.g. Windows without the
+     * privilege): copy the target file. The target is relative to the link's
+     * OWN directory; pass 1 already wrote it, so it is on disk. */
+    char target[PATH_MAX];
+    char *last = strrchr(path, '/');
+    int tn = last
+        ? snprintf(target, sizeof(target), "%.*s/%s",
+                   (int)(last - path), path, e->linkname)
+        : snprintf(target, sizeof(target), "%s/%s", c->dest, e->linkname);
+    if (tn < 0 || (size_t)tn >= sizeof(target)) return -1;
+    return extract_copy(target, path, e->mode ? e->mode : 0755);
+}
+
 int hl_tar_extract(const unsigned char *tar, size_t tar_len, const char *dest_dir)
 {
     if (!dest_dir) return -1;
@@ -138,7 +240,11 @@ int hl_tar_extract(const unsigned char *tar, size_t tar_len, const char *dest_di
      * ~/.hull/tools/<name>/ before anything else created ~/.hull/tools. */
     if (hl_mkdir_p(dest_dir, 0755) != 0) return -1;
     struct extract_ctx c = { dest_dir };
-    return hl_tar_parse(tar, tar_len, extract_cb, &c);
+    /* Two passes: files + dirs first, THEN symlinks, so a link's target is
+     * already on disk for the copy-fallback (and symlink ordering is moot). */
+    int rc = tar_iter(tar, tar_len, extract_file_cb, &c, 1, 0);
+    if (rc) return rc;
+    return tar_iter(tar, tar_len, extract_symlink_cb, &c, 0, 1);
 }
 
 /* ── Creation ──────────────────────────────────────────────────────── */

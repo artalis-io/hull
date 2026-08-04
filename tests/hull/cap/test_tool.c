@@ -222,6 +222,51 @@ UTEST(tool, spawn_read_reject_disallowed)
     ASSERT_TRUE(out == NULL);
 }
 
+/* ── hl_tool_spawn_driver_shell (cosmo/Windows shell-driver path) ─────── */
+
+UTEST(tool, driver_shell_rejects_non_allowlisted_driver)
+{
+    /* The driver must be an allowlisted compiler - never an arbitrary program. */
+    const char *args[] = { "--version", NULL };
+    ASSERT_EQ(hl_tool_spawn_driver_shell("/bin/sh", "python", args, NULL), -1);
+    ASSERT_EQ(hl_tool_spawn_driver_shell("/bin/sh", "rm", args, NULL), -1);
+}
+
+UTEST(tool, driver_shell_rejects_non_shell)
+{
+    /* The shell must be a bare sh / busybox - not an arbitrary interpreter. */
+    const char *args[] = { "--version", NULL };
+    ASSERT_EQ(hl_tool_spawn_driver_shell("/bin/bash", "cc", args, NULL), -1);
+    ASSERT_EQ(hl_tool_spawn_driver_shell("/usr/bin/python3", "cc", args, NULL), -1);
+    ASSERT_EQ(hl_tool_spawn_driver_shell(NULL, "cc", args, NULL), -1);
+    ASSERT_EQ(hl_tool_spawn_driver_shell("/bin/sh", NULL, args, NULL), -1);
+}
+
+UTEST(tool, driver_shell_rejects_dangerous_driver_args)
+{
+    /* The driver's args go through the same dangerous-flag filter. */
+    const char *load[]    = { "-load", "x.so", NULL };
+    const char *xlinker[] = { "-Xlinker", "--bad", NULL };
+    const char *respfile[] = { "@resp", NULL };
+    ASSERT_EQ(hl_tool_spawn_driver_shell("/bin/sh", "cc", load, NULL), -1);
+    ASSERT_EQ(hl_tool_spawn_driver_shell("/bin/sh", "cc", xlinker, NULL), -1);
+    ASSERT_EQ(hl_tool_spawn_driver_shell("/bin/sh", "cc", respfile, NULL), -1);
+}
+
+/* Positive: run an allowlisted driver THROUGH /bin/sh and prove the $0/$@
+ * plumbing reaches it. `sh -c 'exec "$0" "$@"' cc --version` -> `cc --version`.
+ * A real cc is standard on the CI hosts; skip cleanly if it is somehow absent. */
+UTEST(tool, driver_shell_runs_driver_through_sh)
+{
+    const char *probe[] = { "cc", "--version", NULL };
+    char *out = hl_tool_spawn_read(probe, NULL);
+    if (!out) UTEST_SKIP("no cc on this host");   /* UTEST_SKIP returns */
+    free(out);
+
+    const char *args[] = { "--version", NULL };
+    ASSERT_EQ(hl_tool_spawn_driver_shell("/bin/sh", "cc", args, NULL), 0);
+}
+
 /* ── find_files tests ─────────────────────────────────────────────── */
 
 UTEST(tool, find_files_basic)

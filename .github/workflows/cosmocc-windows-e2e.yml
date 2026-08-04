@@ -1,0 +1,166 @@
+name: cosmocc Windows E2E
+
+# The payoff for the cosmocc-on-Windows epic (docs/cosmocc_install.md items A-E):
+# prove that a cosmo `hull` built from THIS branch, given the trimmed cosmocc +
+# busybox bundle, actually `hull build`s a working APE on a stock Windows box -
+# exercising item D (resolver $HOME->$USERPROFILE + bundle probe), item A (the
+# transparent cosmocc->busybox reroute in the spawn layer), and E.1 (the trim +
+# busybox ride-along producer) end to end.
+#
+# Three jobs: build the cosmo hull (Linux, EMBED_PLATFORM=cosmo), build the
+# bundle (Linux, also validates the producer + its size gate), then Windows:
+# install the bundle the way `hull tools install` would and run `hull build`.
+#
+# Non-required / on demand: run when the cosmocc code paths or the producer
+# change. It is the acceptance test for E; the release wiring (E.3) follows once
+# this is green.
+#
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - '.github/workflows/cosmocc-windows-e2e.yml'
+      - 'scripts/build_cosmocc_bundle.sh'
+      - 'src/hull/cap/tool.c'
+      - 'src/hull/runtime/lua/mod_tool.c'
+      - 'src/hull/sandbox_tool.c'
+      - 'src/hull/compiler.c'
+      - 'src/hull/cap/tar.c'
+      - 'stdlib/cli/lua/hull/build.lua'
+
+permissions:
+  contents: read
+
+env:
+  COSMOCC_VERSION: 4.0.2
+  COSMOCC_SHA256: 85b8c37a406d862e656ad4ec14be9f6ce474c1b436b9615e91a55208aced3f44
+  BUSYBOX_URL: https://frippery.org/files/busybox/busybox64u.exe
+
+jobs:
+  build-cosmo-hull:
+    name: Build cosmo hull from branch (EMBED_PLATFORM=cosmo)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          submodules: true
+      - name: Install cosmocc
+        run: |
+          COSMOCC_DIR=/opt/cosmo make fetch-cosmocc
+          echo "/opt/cosmo/bin" >> "$GITHUB_PATH"
+      - name: Build platform (multi-arch) + hull (embedded)
+        run: |
+          make platform-cosmo
+          make CC=cosmocc EMBED_PLATFORM=cosmo
+          ./build/hull version
+      # NOTE: a Linux-side "build the cosmo APE and run it here" isolation was
+      # tried to classify the exit-256 (hull.json preload) bug, but this runner
+      # environment corrupts the system ELF loader once cosmocc is installed
+      # (every /bin/sh, cc, gcc, clang fails "libc.so.6: failed to map segment"),
+      # so hull never reaches cosmocc and the produced APE is never built. The
+      # bug was instead root-caused by construction (the weak
+      # hl_stdlib_feature_entries seam not force-loaded on the composition-exempt
+      # cosmo base) and localized locally (a NATIVE hull build of the same app
+      # runs clean). The fix (whole-archive the cosmo base in build.lua) is
+      # validated by the Windows leg below running the APE to exit 0.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hull-cosmo-branch
+          path: build/hull
+
+  build-bundle:
+    name: Build trimmed cosmocc bundle (+ size gate)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+      - name: Install strace (the producer traces a build to trim the tree)
+        run: sudo apt-get update -qq && sudo apt-get install -y strace
+      - name: Produce hull-cosmocc.tar
+        shell: bash
+        run: |
+          # Pin busybox by computing its digest now (the real release, E.3, hard-
+          # pins this constant; the E2E just needs it consistent with the fetch).
+          curl -fsSL --retry 3 -L "$BUSYBOX_URL" -o bb.exe
+          bb_sha=$(sha256sum bb.exe | cut -d' ' -f1)
+          echo "busybox64u.exe sha256 = $bb_sha   (pin this in release.yml for E.3)"
+          sh scripts/build_cosmocc_bundle.sh \
+             "$COSMOCC_VERSION" "$COSMOCC_SHA256" \
+             "$BUSYBOX_URL" "$bb_sha" \
+             hull-cosmocc.tar
+          ls -la hull-cosmocc.tar
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hull-cosmocc-tar
+          path: hull-cosmocc.tar
+
+  windows-e2e:
+    name: Windows — install bundle + hull build an APE
+    runs-on: windows-latest
+    needs: [build-cosmo-hull, build-bundle]
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: hull-cosmo-branch
+          path: hbin
+      - uses: actions/download-artifact@v4
+        with:
+          name: hull-cosmocc-tar
+          path: btar
+
+      - name: Install the bundle to %USERPROFILE%\.hull\tools\cosmocc
+        shell: pwsh
+        run: |
+          $dest = "$env:USERPROFILE\.hull\tools\cosmocc"
+          New-Item -ItemType Directory -Force -Path $dest | Out-Null
+          # bsdtar (tar.exe) preserves the arch-cc symlinks, matching what hull's
+          # own symlink-aware hl_tar_extract (item B) produces.
+          tar.exe -xpf btar\hull-cosmocc.tar -C $dest 2>&1 | Write-Host
+          Copy-Item hbin\hull hull-cosmo.exe -Force
+          Write-Host "cosmocc : $(Test-Path "$dest\bin\cosmocc")"
+          Write-Host "busybox : $(Test-Path "$dest\bin\busybox.exe")"
+          .\hull-cosmo.exe version
+
+      - name: hull build a trivial app -> APE
+        id: build
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path app | Out-Null
+          # Print a marker + return 0 so we can see whether main runs cleanly and
+          # what exit code it produces (the exit=256 follow-up).
+          "app.manifest({ modules = {} })`napp.main(function(ctx) ctx.stdout:write('APP-MARKER-OK\n'); return 0 end)" | Set-Content -NoNewline app\app.lua -Encoding ascii
+          # Audit on so the reroute (busybox sh -c 'exec cosmocc ...') is visible.
+          $out = .\hull-cosmo.exe build app -o app.exe --no-verify-platform --audit 2>&1 | Out-String
+          Write-Host $out
+          Write-Host "--- build exit: $LASTEXITCODE ---"
+
+      - name: Verdict — did hull build produce a runnable APE on Windows?
+        shell: pwsh
+        run: |
+          $built = Test-Path app.exe
+          Write-Host "app.exe built: $built"
+          $ran = $false
+          if ($built) {
+            # Capture stdout+stderr: exit=256 (=1<<8) means main errored (rc=1)
+            # and printed to stderr - surface it.
+            $appout = & .\app.exe 2>&1 | Out-String
+            $rc = $LASTEXITCODE; $global:LASTEXITCODE = 0
+            $lo = $rc -band 0xFF; $hi = ($rc -shr 8) -band 0xFF
+            Write-Host "app.exe output: [$appout]"
+            Write-Host "app.exe ran, exit=$rc (lo=$lo hi=$hi; expected 0)"
+            # The APE's real exit code is the HIGH byte on Windows (§0.6); 0 = OK.
+            if ($rc -eq 0 -or $hi -eq 0) { $ran = $true }
+          }
+          Write-Host "=================================================================="
+          if ($built -and $ran) {
+            Write-Host "E2E PASS: a cosmo hull built from this branch drove the trimmed"
+            Write-Host "cosmocc+busybox bundle to a working APE on stock Windows - items"
+            Write-Host "A (reroute) + D (resolver) + E.1 (bundle) verified end to end."
+            exit 0
+          }
+          Write-Host "E2E FAIL (built=$built ran=$ran): see the --audit tool.spawn lines"
+          Write-Host "above for where the cosmocc reroute broke (resolve / compile /"
+          Write-Host "apelink)."
+          exit 1

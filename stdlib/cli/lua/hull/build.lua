@@ -1088,6 +1088,33 @@ local function compose_features(opts, tmpdir, platform_lib, is_cosmo, compute_fi
                     .. "skipped http core + web bindings")
             end
         end
+
+        if app_rt and is_cosmo then
+            -- Cosmo composes no runtime archive (features are native-only) and
+            -- gets its runtime factory from the fat base's strong
+            -- hl_runtime_feature_factories() (which IS pulled). But the base's
+            -- strong hl_stdlib_feature_entries() lives in
+            -- stdlib_toolchain_registry.o - an archive member SHADOWED by the
+            -- weak default in the always-pulled stdlib_feature.o, so plain
+            -- archive resolution never pulls it and the produced APE boots with
+            -- an empty runtime VFS ("module not found: hull.json", exit 1). Emit
+            -- a STDLIB-ONLY strong override as a regular object: it wins over the
+            -- weak default (strong-over-weak, no error) and references the base's
+            -- hl_stdlib_<rt>_entries so that registry (hull.json et al.) is
+            -- pulled. NOT the factory hook - the base already fills it and a
+            -- second strong def would be a multiple-definition link error.
+            -- Whole-archiving the base instead is WRONG: it force-pulls the
+            -- selectively-linked WASM caps whose worker symbols aren't in the
+            -- base, breaking the link.
+            write_file(tmpdir .. "/app_stdlib_registry.c",
+                       fcompose.gen_app_registry_c(app_rt, { factory = false }))
+            if not tool.compiler.compile(tmpdir .. "/app_stdlib_registry.c",
+                                         tmpdir .. "/app_stdlib_registry.o", nil) then
+                tool.stderr("hull build: compilation failed (app_stdlib_registry.c)\n")
+                tool.rmdir(tmpdir); tool.exit(1)
+            end
+            feature_objs[#feature_objs + 1] = tmpdir .. "/app_stdlib_registry.o"
+        end
     end
     return feature_objs, feature_libs, needs_base_group, composed_assets
 end

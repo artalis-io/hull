@@ -1699,8 +1699,14 @@ hull v0.9.0  &middot;  ca-bundle: embedded  &middot;  platform: embedded  &middo
           </h2>
           <p class="mt-6 text-mute-400 leading-relaxed">
             Hull keeps its surface small on purpose. The CLI is one
-            binary. The toolchain is embedded. The signing keys are
-            yours.
+            binary, and <code class="text-paper-100 text-[0.78rem]">hull build</code>
+            needs no C compiler: it emits the app object and links it
+            directly. Cross-compile, or fetch a self-contained toolchain on
+            demand (<code class="text-paper-100 text-[0.78rem]">hull tools install
+            zig</code> or <code class="text-paper-100 text-[0.78rem]">cosmocc</code>,
+            each Ed25519-verified against the same release) and build a
+            run-anywhere binary from any host, Windows included. The signing
+            keys are yours.
           </p>
           <div class="mt-8 flex flex-wrap items-center gap-3">
             <a href="https://github.com/artalis-io/hull#quick-start" class="btn btn-primary">
@@ -1727,11 +1733,18 @@ $ hull init my-tool &amp;&amp; cd my-tool
 $ hull dev
 hull dev: listening on :8080  (auto-reload)
 
-<span class="tk-com"># Build a sealed, signed, single-binary release.</span>
+<span class="tk-com"># Build a sealed, signed, single-binary release. No C compiler</span>
+<span class="tk-com"># needed: hull emits the app object and links it directly.</span>
 $ hull build .
 hull build: my-tool  6.5 MB  signed  ed25519
 
-<span class="tk-com"># Run on Linux, macOS, or any APE host.</span>
+<span class="tk-com"># One binary for every OS? The APE flavor fetches a verified</span>
+<span class="tk-com"># toolchain on demand and builds from any host, Windows included.</span>
+$ hull tools install cosmocc
+$ hull build .
+hull build: my-tool.com  APE  Linux &middot; macOS &middot; Windows &middot; BSD
+
+<span class="tk-com"># Run on Linux, macOS, Windows, or any APE host.</span>
 $ ./my-tool
 </pre>
           </div>
