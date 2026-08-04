@@ -1107,7 +1107,7 @@ local function compose_features(opts, tmpdir, platform_lib, is_cosmo, compute_fi
             -- selectively-linked WASM caps whose worker symbols aren't in the
             -- base, breaking the link.
             write_file(tmpdir .. "/app_stdlib_registry.c",
-                       fcompose.gen_app_stdlib_registry_c(app_rt))
+                       fcompose.gen_app_registry_c(app_rt, { factory = false }))
             if not tool.compiler.compile(tmpdir .. "/app_stdlib_registry.c",
                                          tmpdir .. "/app_stdlib_registry.o", nil) then
                 tool.stderr("hull build: compilation failed (app_stdlib_registry.c)\n")

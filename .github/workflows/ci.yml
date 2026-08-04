@@ -745,6 +745,34 @@ jobs:
       - name: Build hull
         run: make CC=cosmocc
 
+      # Guards the exit-256 class: a produced cosmo app must boot with a
+      # populated runtime VFS (require "hull.json" resolves). The composition-
+      # exempt cosmo base carries the strong hl_stdlib_feature_entries() override
+      # in an archive member shadowed by the weak default, so build.lua/eject.lua
+      # emit a stdlib-only strong override as a regular object. `hull eject` +
+      # `make` links exactly that path (app_stdlib_registry.o before the archive)
+      # via cosmocc. No existing e2e ran a PRODUCED cosmo app (e2e_compute builds
+      # with --cc cc and never runs it), so this is the regression guard.
+      - name: Produced cosmo app boots (eject + hull.json)
+        timeout-minutes: 3
+        run: |
+          set -eu
+          APP=$(mktemp -d); EJ=$(mktemp -d)/out
+          cat > "$APP/app.lua" <<'LUA'
+          app.manifest({ modules = { "hull/json@1" } })
+          app.main(function(ctx)
+              local json = require("hull.json")
+              ctx.stdout:write(json.encode({ marker = "COSMO-STDLIB-OK" }) .. "\n")
+              return 0
+          end)
+          LUA
+          ./build/hull eject "$APP" -o "$EJ"
+          make -C "$EJ" OUTPUT=ejected_app
+          out=$("$EJ/ejected_app"); echo "app output: $out"
+          echo "$out" | grep -q COSMO-STDLIB-OK \
+            || { echo "FAIL: produced cosmo app did not load hull.json"; exit 1; }
+          echo "PASS: produced cosmo app booted with a populated runtime VFS"
+
       - name: Hardening summary (cosmocc)
         run: make CC=cosmocc hardening
 

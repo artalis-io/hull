@@ -171,12 +171,32 @@ end
 -- never dereferenced, so layout-compatible local decls suffice (same
 -- convention as build.lua's by_hook feature_registry codegen).
 --
+-- Two shapes, selected by opts.factory:
+--
+--   opts.factory ~= false (DEFAULT) - fills BOTH hooks. The NATIVE produced app
+--     and the ejected native app use this: their base is runtime-less, so the
+--     app must supply both its runtime factory AND its stdlib.
+--
+--   opts.factory == false - fills ONLY hl_stdlib_feature_entries(). The COSMO
+--     produced/ejected app uses this: its fat base already carries both runtimes
+--     and a STRONG hl_runtime_feature_factories() (which IS pulled, via the
+--     direct reference in app_context.c), so emitting a second strong factory
+--     def would be a multiple-definition link error. But the base's strong
+--     hl_stdlib_feature_entries() lives in stdlib_toolchain_registry.o - an
+--     archive member SHADOWED by the weak default in the always-pulled
+--     stdlib_feature.o (whose hl_platform_vfs_init IS referenced), so plain
+--     archive resolution never pulls it and the APE boots with an empty runtime
+--     VFS (require "hull.json" -> "module not found", exit 1/256). This stdlib-
+--     only regular object wins strong-over-weak and references the base's
+--     hl_stdlib_<rt>_entries so that registry (hull.json et al.) is pulled.
+--
 -- @param rt "lua" | "js"
+-- @param opts table|nil  { factory = boolean }  (factory defaults true)
 -- @return string  C source.
-function M.gen_app_registry_c(rt)
+function M.gen_app_registry_c(rt, opts)
+    local with_factory = not (opts and opts.factory == false)
     local entries = "hl_stdlib_" .. rt .. "_entries"
-    local factory = "hl_" .. rt .. "_factory"
-    return table.concat({
+    local lines = {
         "/* Auto-generated feature registry - do not edit. */",
         "typedef __SIZE_TYPE__ size_t;",
         "typedef struct { const char *n; const unsigned char *d; unsigned int l; } HlEntry;",
@@ -186,50 +206,19 @@ function M.gen_app_registry_c(rt)
         "    if (count) *count = 1;",
         "    return HL_STDLIB_FEATS;",
         "}",
-        "typedef struct HlRuntimeFactory HlRuntimeFactory;",
-        "extern const HlRuntimeFactory " .. factory .. ";",
-        "static const HlRuntimeFactory *const HL_RT_FEATS[] = { &" .. factory .. " };",
-        "const HlRuntimeFactory *const *hl_runtime_feature_factories(size_t *count) {",
-        "    if (count) *count = 1;",
-        "    return HL_RT_FEATS;",
-        "}",
-        "",
-    }, "\n")
-end
-
---- Emit a STDLIB-ONLY strong hl_stdlib_feature_entries() override.
---
--- For the COSMO produced app only. The cosmo base is composition-exempt: it
--- carries both runtimes + the toolchain registries compiled into the fat APE,
--- so a cosmo app composes no runtime archive and gets its runtime factory from
--- the base's strong hl_runtime_feature_factories() (which IS pulled). But the
--- base's strong hl_stdlib_feature_entries() lives in stdlib_toolchain_registry.o
--- - an archive member SHADOWED by the weak default in the always-pulled
--- stdlib_feature.o, so plain archive resolution never pulls it and the produced
--- APE boots with an empty runtime VFS (require "hull.json" -> "module not
--- found"). Emitting this stdlib-only override as a regular object wins over the
--- weak default (strong-over-weak, no error) and references the base's
--- hl_stdlib_<rt>_entries so that registry (hull.json et al.) is pulled.
---
--- Deliberately NOT the factory hook: the cosmo base already fills it, and a
--- second strong definition would be a multiple-definition link error.
---
--- @param rt "lua" | "js"
--- @return string  C source.
-function M.gen_app_stdlib_registry_c(rt)
-    local entries = "hl_stdlib_" .. rt .. "_entries"
-    return table.concat({
-        "/* Auto-generated cosmo stdlib registry - do not edit. */",
-        "typedef __SIZE_TYPE__ size_t;",
-        "typedef struct { const char *n; const unsigned char *d; unsigned int l; } HlEntry;",
-        "extern const HlEntry " .. entries .. "[];",
-        "static const HlEntry *const HL_STDLIB_FEATS[] = { " .. entries .. " };",
-        "const HlEntry *const *hl_stdlib_feature_entries(size_t *count) {",
-        "    if (count) *count = 1;",
-        "    return HL_STDLIB_FEATS;",
-        "}",
-        "",
-    }, "\n")
+    }
+    if with_factory then
+        local factory = "hl_" .. rt .. "_factory"
+        lines[#lines + 1] = "typedef struct HlRuntimeFactory HlRuntimeFactory;"
+        lines[#lines + 1] = "extern const HlRuntimeFactory " .. factory .. ";"
+        lines[#lines + 1] = "static const HlRuntimeFactory *const HL_RT_FEATS[] = { &" .. factory .. " };"
+        lines[#lines + 1] = "const HlRuntimeFactory *const *hl_runtime_feature_factories(size_t *count) {"
+        lines[#lines + 1] = "    if (count) *count = 1;"
+        lines[#lines + 1] = "    return HL_RT_FEATS;"
+        lines[#lines + 1] = "}"
+    end
+    lines[#lines + 1] = ""
+    return table.concat(lines, "\n")
 end
 
 --- Resolve the app's runtime archive, trying the embedded-in-hull copy first.

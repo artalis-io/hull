@@ -42,7 +42,13 @@ end
 -- Generate the standalone Makefile.
 --
 --   rt == nil  → cosmo dual base (both runtimes embedded in the fat-APE
---                platform lib); links platform/libhull_platform.a alone.
+--                platform lib); links platform/libhull_platform.a. When the
+--                app's runtime is known (`cosmo_rt`), also compiles + links a
+--                stdlib-only app_stdlib_registry.o BEFORE the archive: the
+--                base's strong hl_stdlib_feature_entries() is archive-shadowed
+--                by the weak default, so a plain link would boot with an empty
+--                runtime VFS ("module not found: hull.json"). Mirrors the
+--                `hull build` cosmo path.
 --   rt table   → native runtime-less base; also compiles the generated
 --                app_feature_registry.o and whole-archive-links the composed
 --                runtime archive. rt = { name = "lua"|"js", darwin = bool,
@@ -52,9 +58,18 @@ end
 -- source lives under app/, and a target named `app` collides with that
 -- directory (make treats the up-to-date dir as the target and never links).
 -- Callers guarantee out_name ~= "app".
-local function gen_makefile(rt, out_name)
+local function gen_makefile(rt, out_name, cosmo_rt)
     local sub = out_name:gsub("%%", "%%%%")
     if not rt then
+        -- The stdlib override object is ordered BEFORE the archive in the link
+        -- deps so its strong hl_stdlib_feature_entries() wins over the base's
+        -- weak default (strong-over-weak). `$^` preserves prereq order.
+        local reg_rule, reg_obj = "", ""
+        if cosmo_rt then
+            reg_obj = " build/app_stdlib_registry.o"
+            reg_rule = "\nbuild/app_stdlib_registry.o: src/app_stdlib_registry.c | build"
+                .. "\n\t$(CC) $(CFLAGS) -Isrc -c -o $@ $<\n"
+        end
         return ([[CC      ?= cosmocc
 CFLAGS  := -std=c11 -O2 -w
 OUTPUT  ?= __OUTPUT__
@@ -76,13 +91,15 @@ build/app_registry.o: build/app_registry.c | build
 
 build/app_main.o: src/app_main.c | build
 	$(CC) $(CFLAGS) -c -o $@ $<
-
-$(OUTPUT): build/app_main.o build/app_registry.o platform/libhull_platform.a
+__REG_RULE__
+$(OUTPUT): build/app_main.o build/app_registry.o__REG_OBJ__ platform/libhull_platform.a
 	$(CC) -o $@ $^ -lm -lpthread
 
 clean:
 	rm -rf build $(OUTPUT)
-]]):gsub("__OUTPUT__", sub)
+]]):gsub("__REG_RULE__", (reg_rule:gsub("%%", "%%%%")))
+   :gsub("__REG_OBJ__", (reg_obj:gsub("%%", "%%%%")))
+   :gsub("__OUTPUT__", sub)
     end
 
     -- Native runtime-less base: link the platform lib + the whole-archived
@@ -320,6 +337,17 @@ local function main()
     -- ejected binary links but has zero runtimes and an empty stdlib -- it
     -- cannot run any app.
     local rt_compose = nil
+    local cosmo_rt = nil  -- app runtime for the cosmo dual base (stdlib override)
+    if platform_lib_arm then
+        -- Cosmo dual base: composition-exempt (both runtimes embedded), so no
+        -- runtime archive to compose. But its strong hl_stdlib_feature_entries()
+        -- is archive-shadowed by the weak default (see
+        -- feature_compose.gen_app_registry_c), so - exactly as `hull build` does
+        -- - emit a stdlib-only strong override as a regular object, else the
+        -- ejected APE boots with an empty runtime VFS ("module not found:
+        -- hull.json"). Requires knowing the app's one runtime.
+        cosmo_rt = fcompose.detect_app_rt(opts.app_dir)
+    end
     if not platform_lib_arm then
         local app_rt = fcompose.detect_app_rt(opts.app_dir)
         if app_rt then
@@ -381,10 +409,17 @@ local function main()
     tool.mkdir(dir .. "/build")
 
     -- Write generated files
-    write_file(dir .. "/Makefile", gen_makefile(rt_compose, out_name))
+    write_file(dir .. "/Makefile", gen_makefile(rt_compose, out_name, cosmo_rt))
     write_file(dir .. "/src/app_main.c", gen_app_main())
     write_file(dir .. "/src/entry.h", gen_entry_h())
     write_file(dir .. "/scripts/gen_registry.sh", gen_registry_sh())
+
+    -- Cosmo dual base: the stdlib-only strong override the Makefile compiles +
+    -- links before the archive (see gen_makefile / gen_app_registry_c).
+    if cosmo_rt then
+        write_file(dir .. "/src/app_stdlib_registry.c",
+                   fcompose.gen_app_registry_c(cosmo_rt, { factory = false }))
+    end
 
     -- Native runtime feature: the generated registry (strong hooks for the
     -- app's one runtime) + the whole-archived runtime lib the Makefile links.
