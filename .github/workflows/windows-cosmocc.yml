@@ -21,11 +21,11 @@ name: Windows cosmocc (investigation)
 # SPDX-License-Identifier: AGPL-3.0-or-later
 
 on:
+  # Manual-only: this is the completed INVESTIGATION (§0-§0.7, §C, §E inventory)
+  # whose findings are recorded in docs/cosmocc_install.md. Keep it dispatchable
+  # to re-probe upstream changes, but don't tax the runner pool on every push -
+  # the acceptance test is cosmocc-windows-e2e.yml (which stays on pull_request).
   workflow_dispatch:
-  pull_request:
-    paths:
-      - '.github/workflows/windows-cosmocc.yml'
-      - 'scripts/build_cosmocc_bundle.sh'
 
 permissions:
   contents: read
