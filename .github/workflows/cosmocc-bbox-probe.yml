@@ -44,35 +44,38 @@ jobs:
         continue-on-error: true
         shell: pwsh
         run: |
-          $anyCap = $false
+          # mktemper needs EXACTLY the 13-X template the driver uses:
+          #   "$TMPDIR/fatcosmocc.XXXXXXXXXXXXX$suffix"
+          $fwdOK = $false
           foreach ($bb in @("busybox64u.exe","busybox64.exe")) {
             Write-Host "================= $bb ================="
-            # 1) builtin capture (baseline: does $() work at all here?)
-            & ".\bb\$bb" sh -c 'v=$(echo hello-builtin); echo "builtin=[$v]"' 2>&1 | Out-String | Write-Host
-            # 2) cosmo-APE capture via a pipe/$() - mktemper prints the temp path.
-            & ".\bb\$bb" sh -c 'export TMPDIR=C:/tmp; v=$("./cosmo/bin/mktemper" "C:/tmp/t.XXXXXXXX"); echo "ape_mktemper=[$v]"; ls -la "$v" 2>&1 || echo "(no file)"' 2>&1 | Out-String | Write-Host
-            # 3) another cosmo-APE capture (cosmocc --version, first line).
-            & ".\bb\$bb" sh -c 'v=$("./cosmo/bin/cosmocc" --version 2>/dev/null | head -1); echo "ape_version=[$v]"' 2>&1 | Out-String | Write-Host
-            # Machine-checkable verdict for THIS variant: capture non-empty?
-            $cap = (& ".\bb\$bb" sh -c 'export TMPDIR=C:/tmp; v=$("./cosmo/bin/mktemper" "C:/tmp/t.XXXXXXXX"); if [ -n "$v" ]; then echo CAP_OK; else echo CAP_EMPTY; fi' 2>&1 | Out-String)
-            Write-Host "verdict($bb): $cap"
-            if ($cap -match "CAP_OK") { $anyCap = $true; Write-Host "=> $bb CAPTURES a cosmo-APE's \$() stdout" }
+            # 0) builtin + APE-version captures (baselines: $() works, APE stdout captured).
+            & ".\bb\$bb" sh -c 'echo "builtin=[$(echo hi)]"; echo "ape_version=[$("./cosmo/bin/cosmocc" --version 2>/dev/null|head -1)]"' 2>&1 | Out-String | Write-Host
+            # 1) FORWARD-slash TMPDIR, correct 13-X template - reproduce the driver's
+            #    out2=$(mktemper .txt) THEN the aarch64 redirect ( ... ) 2>"$out2".
+            & ".\bb\$bb" sh -c 'export TMPDIR=C:/tmp; out2=$("./cosmo/bin/mktemper" "$TMPDIR/fatcosmocc.XXXXXXXXXXXXX.txt"); echo "fwd out2=[$out2]"; ( echo err >&2 ) 2>"$out2" && echo "fwd REDIRECT OK" || echo "fwd REDIRECT FAIL"; [ -f "$out2" ] && echo "fwd FILE OK"' 2>&1 | Out-String | Write-Host
+            # 2) BACK-slash TMPDIR (what a cosmo hull's setenv produces) - is THIS what breaks it?
+            & ".\bb\$bb" sh -c 'export TMPDIR="C:\tmp"; out2=$("./cosmo/bin/mktemper" "$TMPDIR/fatcosmocc.XXXXXXXXXXXXX.txt"); echo "bs out2=[$out2]"; ( echo err >&2 ) 2>"$out2" && echo "bs REDIRECT OK" || echo "bs REDIRECT FAIL"' 2>&1 | Out-String | Write-Host
+            # Machine verdict: forward-slash path -> redirect works?
+            $r = (& ".\bb\$bb" sh -c 'export TMPDIR=C:/tmp; out2=$("./cosmo/bin/mktemper" "$TMPDIR/fatcosmocc.XXXXXXXXXXXXX.txt"); ( echo x >&2 ) 2>"$out2" && [ -n "$out2" ] && echo FWD_OK || echo FWD_BAD' 2>&1 | Out-String)
+            Write-Host "verdict($bb): $r"
+            if ($r -match "FWD_OK") { $fwdOK = $true }
           }
-          "any_capture=$anyCap" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "fwd_ok=$fwdOK" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
 
       - name: Verdict
         shell: pwsh
         run: |
-          $any = "${{ steps.probe.outputs.any_capture }}"
+          $fwd = "${{ steps.probe.outputs.fwd_ok }}"
           Write-Host "=================================================================="
-          if ($any -eq "True") {
-            Write-Host "CAPTURE WORKS with at least one busybox variant - the E2E wall is"
-            Write-Host "fixable by using that variant (and/or the workaround). Switch the"
-            Write-Host "bundle's bin/busybox.exe to the capturing variant and re-run E2E."
+          if ($fwd -eq "True") {
+            Write-Host "FIXABLE: with a FORWARD-slash TMPDIR, mktemper + the out2 redirect"
+            Write-Host "work under busybox. The E2E wall was the TMPDIR PATH FORMAT, not a"
+            Write-Host "capture failure (busybox captures a cosmo-APE's stdout fine - see"
+            Write-Host "ape_version). So the real fix is ensuring the driver actually sees"
+            Write-Host "a forward-slash TMPDIR (compare fwd vs bs above). Retract the wall."
           } else {
-            Write-Host "NO busybox variant captures a cosmo-APE's \$() stdout on Windows."
-            Write-Host "cosmocc's driver depends on out2=\$(mktemper) in six places, so the"
-            Write-Host "self-contained busybox path is fundamentally blocked - the Windows"
-            Write-Host "story needs a real POSIX sh (MSYS/Git-Bash/WSL), the §0.5 result."
+            Write-Host "Even a forward-slash TMPDIR fails - the redirect/capture breaks for"
+            Write-Host "a deeper reason. Compare the fwd vs bs blocks above to localize."
           }
           exit 0
