@@ -128,26 +128,23 @@ COFF `libhull_platform.a` that does not exist); changing the POSIX-host path
 The five items, sequenced by dependency (D, B are standalone and land first; A
 needs busybox present; E productionizes and depends on the C decision).
 
-> **E2E WALL (2026-08-04): busybox-w64 is not a faithful enough shell for
-> cosmocc's real driver.** The `cosmocc-windows-e2e.yml` acceptance run drove the
-> full hull-side chain and fixed six real integration bugs in sequence (trim size
-> gate → busybox-swept-by-trim → /tmp ordering → backslash TMPDIR → setenv not
-> reaching busybox → the reroute itself). It got as far as: bundle installs,
-> resolver finds cosmocc, the reroute drives it through busybox, and **the x86_64
-> object compiles** - then hit a wall INSIDE cosmocc's driver: the dual-arch
-> parallel compile does `out2=$(mktemper .txt)` (command substitution capturing a
-> cosmo-APE's stdout) and `out2` comes back EMPTY under busybox-w64 (mktemper's
-> path leaks to the console uncaptured), so the aarch64 subshell's `2>"$out2"`
-> fails ("can't create : nonexistent directory") while x86_64 (no such redirect)
-> succeeds. `bin/mktemper` IS in the trimmed bundle - this is not a trim gap; it
-> is **busybox-w64 not capturing a cosmo-APE's stdout in `$(...)` on Windows**,
-> below hull's layer. §0.6's CLEAN GO used a trivial single-file build that never
-> exercised the driver's `$(mktemper)` command substitution. So the
-> self-contained busybox path is blocked by a busybox-w64 ↔ cosmo-APE
-> incompatibility in cosmocc's own `#!/bin/sh` driver. **Decision pending** (see
-> the end of this doc). The hull-side work (D/A/B/E) is landed and independently
-> valuable: on a POSIX host `hull tools install cosmocc` + `hull build` needs no
-> busybox and works today.
+> **E2E journey (2026-08-04): seven bugs, no wall.** The `cosmocc-windows-e2e.yml`
+> acceptance run drove the full hull-side chain and fixed a sequence of real
+> integration bugs: trim size gate → busybox-swept-by-trim → /tmp ordering →
+> backslash TMPDIR → setenv-not-reaching-busybox → then a mis-diagnosis (see
+> below) → **the real cause: `~/.hull/tmp` did not exist** when cosmocc's driver
+> ran, so its `mktemper` couldn't create the temp file the parallel aarch64
+> subshell redirects to (`out2=$(mktemper); ( … ) 2>"$out2"`), giving
+> "can't create : nonexistent directory". A lean probe (`cosmocc-bbox-probe.yml`)
+> isolated it conclusively: with the dir ABSENT the exact E2E error reproduces;
+> with it PRESENT, mktemper + the redirect work - **even with the long backslash
+> path** `C:\Users\...\.hull\tmp`. So the earlier "busybox can't capture a
+> cosmo-APE's `$(...)` stdout" reading was WRONG (a flawed probe: an 8-X mktemper
+> template vs the required 13; the same run in fact showed
+> `ape_version=[cosmocc (GCC) 14.1.0]` - capture works). Fix: the busybox `-c`
+> program `mkdir -p`s the (backslash-normalized) TMPDIR itself before exporting
+> it, so the dir reliably exists regardless of cosmo's mkdir. The self-contained
+> busybox path is **not** blocked.
 
 **Status: D, B, A, and E have landed; C is decided.** All the code + wiring is
 in: A = the transparent cosmocc-through-busybox reroute (below); C = trim to a
