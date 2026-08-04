@@ -125,16 +125,16 @@ jobs:
           Write-Host "busybox : $(Test-Path "$dest\bin\busybox.exe")"
           .\hull-cosmo.exe version
 
-      # Reproduce + verify the spaces-in-path fs-sandbox gap (nexogen asset-tracker
-      # PLATFORM_GAPS 2026-07-14): `hull dev` on a path WITH A SPACE failed
-      # blob.init ("check fs.write declares data/blobs") because realpath()
-      # canonicalizes a spaced Windows path inconsistently, breaking the cap-layer
-      # prefix match. HULL_FS_DEBUG traces the exact realpath in/out so we can see
-      # (and, after the fix, confirm) it. Plain local NTFS path with a space -
-      # isolates the space from the Google-Drive virtual FS in the original report.
-      - name: Spaces-in-path fs sandbox (isolate space vs 8.3 short-name)
-        id: spaces
-        continue-on-error: true
+      # Regression guard for the Windows blob.init drive-root mkdir bug (nexogen
+      # asset-tracker PLATFORM_GAPS 2026-07-14, mis-filed as "spaces in path"):
+      # hl_mkdir_p walks an absolute path from the root and mkdir()s the drive-root
+      # component ("/C", "/D"), which Cosmo-on-Windows rejects with EIO (not
+      # EEXIST) - so blob.init failed for ANY path (case B has no space, and still
+      # failed before the fix). The fix makes hl_ensure_dir stat-check for an
+      # existing directory on any mkdir errno. All three path shapes must boot
+      # blob.init cleanly; a regression fails the job. HULL_FS_DEBUG keeps the
+      # mkdir-fail trace on if it ever breaks again.
+      - name: blob.init on Windows (drive-root mkdir + spaces regression guard)
         shell: pwsh
         run: |
           $lua = @'
@@ -147,6 +147,7 @@ jobs:
           end)
           '@
           $env:HULL_FS_DEBUG = "1"
+          $script:fails = @()
           function Try-Path($label, $dir) {
             New-Item -ItemType Directory -Force -Path $dir | Out-Null
             Set-Content -NoNewline "$dir\app.lua" -Value $lua -Encoding ascii
@@ -154,15 +155,20 @@ jobs:
             $out = & .\hull-cosmo.exe "$dir\app.lua" 2>&1 | Out-String
             Write-Host $out
             if ($out -match "REPRO blob.init ok=true") { Write-Host "[$label] OK" }
-            else { Write-Host "[$label] FAIL" }
+            else { Write-Host "[$label] FAIL"; $script:fails += $label }
             Write-Host "------------------------------------------------------------"
           }
-          # A: RUNNER_TEMP (clean prefix, no 8.3) + a SPACE  -> isolates the SPACE.
+          # A: RUNNER_TEMP (clean prefix, no 8.3) + a SPACE.
           Try-Path "A space-clean-prefix" "$env:RUNNER_TEMP\sp ace\reproapp"
-          # B: RUNNER_TEMP, NO space (control - should pass).
+          # B: RUNNER_TEMP, NO space (control - drive-root mkdir path).
           Try-Path "B nospace-clean-prefix" "$env:RUNNER_TEMP\nospace\reproapp"
           # C: TEMP (8.3 'RUNNER~1' short-name) + a space (the original report).
           Try-Path "C space-and-83" "$env:TEMP\has space\reproapp"
+          if ($script:fails.Count -gt 0) {
+            Write-Host "BLOB-WINDOWS-FAIL: $($script:fails -join ', ')"
+            exit 1
+          }
+          Write-Host "BLOB-WINDOWS-OK: blob.init works on Windows for all path shapes"
 
       - name: hull build a trivial app -> APE
         id: build

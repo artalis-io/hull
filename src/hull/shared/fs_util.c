@@ -10,25 +10,25 @@
 #include <limits.h>
 #include <string.h>
 #include <sys/stat.h>
-#include <stdio.h>    /* TEMP DIAG */
-#include <stdlib.h>   /* TEMP DIAG (getenv) */
 
 int hl_ensure_dir(const char *path, mode_t mode)
 {
     if (mkdir(path, mode) == 0) return 0;
-    int mkerr = errno;
-    if (mkerr == EEXIST) {
-        struct stat st;
-        if (stat(path, &st) == 0 && S_ISDIR(st.st_mode)) return 0;
-        /* TEMP DIAG: EEXIST but stat failed / not a dir (Windows spaces gap). */
-        if (getenv("HULL_FS_DEBUG"))
-            fprintf(stderr, "[FSDBG] ensure_dir '%s': EEXIST but stat-fail/not-dir (errno=%d)\n",
-                    path, errno);
-        if (errno == 0) errno = ENOTDIR;
-    } else if (getenv("HULL_FS_DEBUG")) {
-        /* TEMP DIAG: mkdir failed with something other than EEXIST. */
-        fprintf(stderr, "[FSDBG] ensure_dir '%s': mkdir FAILED errno=%d\n", path, mkerr);
-    }
+
+    /* mkdir failed. On POSIX an already-existing directory yields EEXIST, but
+     * some platforms report a pre-existing path with a DIFFERENT errno: notably
+     * Cosmopolitan on Windows returns EIO (errno 5) for a drive root ("/C",
+     * "/D") - which every absolute Windows path starts with - and can return
+     * EACCES for some existing system directories. So do NOT special-case
+     * EEXIST: if the path already IS a directory, treat it as created regardless
+     * of the mkdir errno. Without this, hl_mkdir_p fails on the very first
+     * (drive-root) component of any absolute path on Windows, which broke
+     * hull/blob@1 there for ALL paths (nexogen PLATFORM_GAPS 2026-07-14, which
+     * mis-attributed it to spaces in the path). A real failure - the path exists
+     * but is not a directory, or is unreadable - still returns -1 below. */
+    struct stat st;
+    if (stat(path, &st) == 0 && S_ISDIR(st.st_mode)) return 0;
+    if (errno == 0) errno = ENOTDIR;
     return -1;
 }
 
