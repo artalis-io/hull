@@ -180,6 +180,99 @@ jobs:
           Write-Host "   needs MSYS/Git-Bash/WSL (external), or build on a POSIX host."
           exit 0
 
+  section0c-busybox-w64-self-contained:
+    # §0.6 SELF-CONTAINMENT via busybox-w64 (the lighter-than-MSYS candidate).
+    # §0.5 failed because an APE bash provides an interpreter but (a) no /bin/sh
+    # MOUNT and (b) no coreutils - and cosmocc's #!/bin/sh driver shells out to
+    # dirname/readlink/uname/sed/... busybox-w64 is a SINGLE native Windows PE (no
+    # Cygwin/MSYS DLL) that provides BOTH the sh (ash) AND every coreutil as
+    # applets, and it has built-in shebang handling that can route #!/bin/sh to its
+    # own sh. If busybox drives cosmocc, a stock Windows box is self-sufficient with
+    # a ~1 MB extra binary (vs a ~40 MB GPLv3 MSYS runtime). If not, the diagnostics
+    # say why (/bin/sh routing, applet resolution, or APE-child path translation).
+    name: "§0.6 — does busybox-w64 sh drive cosmocc (self-contained)?"
+    runs-on: windows-latest
+    steps:
+      - name: Extract cosmocc (bsdtar, symlink-preserving) + fetch busybox-w64
+        shell: pwsh
+        run: |
+          curl.exe -fsSL --retry 3 -o cosmocc.zip "https://cosmo.zip/pub/cosmocc/cosmocc-$env:COSMOCC_VERSION.zip"
+          if ((Get-FileHash cosmocc.zip -Algorithm SHA256).Hash.ToLower() -ne $env:COSMOCC_SHA256) { throw "sha mismatch" }
+          New-Item -ItemType Directory -Force -Path cosmo | Out-Null
+          tar.exe -xpf cosmocc.zip -C cosmo 2>&1 | Write-Host
+          New-Item -ItemType Directory -Force -Path bb | Out-Null
+          # busybox-w64 (Ron Yorston). Single native PE, no Cygwin/MSYS runtime.
+          curl.exe -fsSL --retry 3 -L -o bb\busybox.exe "https://frippery.org/files/busybox/busybox64u.exe"
+          Write-Host "busybox.exe size: $((Get-Item bb\busybox.exe).Length)"
+
+      - name: busybox-w64 runs on Windows (sh + coreutils applets)
+        id: bb_runs
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          & .\bb\busybox.exe echo busybox-ok
+          if ($LASTEXITCODE -ne 0) { throw "busybox did not run (exit $LASTEXITCODE)" }
+          & .\bb\busybox.exe sh -c 'echo "sh-ok: $(dirname /a/b) $(uname -s 2>/dev/null || echo nouname)"'
+          if ($LASTEXITCODE -ne 0) { throw "busybox sh -c failed (exit $LASTEXITCODE)" }
+
+      - name: Write hello.c
+        shell: pwsh
+        run: '"int main(void){return 42;}" | Set-Content -NoNewline hello.c -Encoding ascii'
+
+      - name: busybox sh drives cosmocc
+        id: bb_drives
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          # Diagnose how busybox resolves /bin/sh (the cosmocc shebang target) and
+          # whether it routes bare applet names (dirname/uname) the driver calls.
+          & .\bb\busybox.exe sh -c 'echo "sh: $(command -v sh || echo none)"; echo "--- /bin/sh ---"; ls -la /bin/sh 2>&1 || echo "no /bin/sh"; echo "dirname applet: $(command -v dirname || echo none)"' 2>&1 | Out-String | Write-Host
+          Write-Host "=== (a) by name (busybox shebang routing) ==="
+          & .\bb\busybox.exe sh -c 'export PATH="./cosmo/bin:$PATH"; cosmocc -o hello_a.com hello.c; echo "exit=$?"' 2>&1 | Out-String | Write-Host
+          Write-Host "=== (b) via interpreter (busybox sh <driver>) ==="
+          & .\bb\busybox.exe sh -c 'export PATH="./cosmo/bin:$PATH"; busybox sh ./cosmo/bin/cosmocc -o hello_b.com hello.c; echo "exit=$?"' 2>&1 | Out-String | Write-Host
+          Write-Host "=== (c) plant a real /bin/sh.exe = busybox, then by name ==="
+          # Plant C:\bin\sh.exe (the #!/bin/sh target; busybox appends .exe) so the
+          # driver AND its symlinked sub-tools resolve their shebang to busybox sh.
+          New-Item -ItemType Directory -Force -Path C:\bin | Out-Null
+          Copy-Item bb\busybox.exe C:\bin\sh.exe -Force
+          & .\bb\busybox.exe sh -c 'export PATH="./cosmo/bin:$PATH"; cosmocc -o hello_c.com hello.c; echo "exit=$?"' 2>&1 | Out-String | Write-Host
+          foreach ($f in @("hello_a.com","hello_b.com","hello_c.com")) {
+            if (Test-Path $f) { Copy-Item $f hello_bb.com -Force; break }
+          }
+          Write-Host "any variant built: $(Test-Path hello_bb.com)"
+
+      - name: Verdict — self-contained busybox-w64 toolchain on Windows?
+        shell: pwsh
+        run: |
+          $built = Test-Path hello_bb.com
+          Write-Host "busybox built hello_bb.com : $built"
+          $ran = $false
+          if ($built) {
+            Copy-Item hello_bb.com hello_bb.exe -Force
+            & .\hello_bb.exe; $rc = $LASTEXITCODE; $global:LASTEXITCODE = 0
+            $lo = $rc -band 0xFF; $hi = ($rc -shr 8) -band 0xFF
+            Write-Host "hello_bb ran, exit=$rc (lo=$lo hi=$hi; expected 42)"
+            if ($lo -eq 42 -or $hi -eq 42) { $ran = $true }
+          }
+          Write-Host "=================================================================="
+          if ($built -and $ran) {
+            Write-Host "GO (self-contained): busybox-w64 sh drives cosmocc on Windows -"
+            Write-Host "a single ~1 MB native PE supplies /bin/sh + the coreutils the"
+            Write-Host "driver needs, with NO Cygwin/MSYS runtime and NO Git Bash. The"
+            Write-Host "self-sufficient Windows story IS achievable: bundle cosmocc +"
+            Write-Host "busybox, plant /bin/sh, drive cosmocc via busybox sh. Update"
+            Write-Host "docs/cosmocc_install.md and design the epic around this."
+            exit 0
+          }
+          Write-Host "FINDING: busybox-w64 sh did NOT drive cosmocc end-to-end on"
+          Write-Host "Windows (see the (a)/(b)/(c) exit codes above for the failing"
+          Write-Host "stage: /bin/sh routing, applet resolution, or the path"
+          Write-Host "translation of POSIX argv handed to the native APE sub-tools)."
+          Write-Host "The lighter-than-MSYS path did not pan out; MSYS/Git-Bash/WSL"
+          Write-Host "(external) or build-on-a-POSIX-host remains the Windows story."
+          exit 0
+
   section0-shell-drives-cosmocc:
     # §0 GO/NO-GO (no Hull change): given a SHELL + preserved symlinks, does
     # cosmocc's #!/bin/sh pipeline actually compile on Windows at all? If NO, the
