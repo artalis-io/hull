@@ -108,6 +108,16 @@ int hl_tool_spawn_driver_shell(const char *shell, const char *driver,
 int hl_tool_cosmo_shell(char *out, size_t outsz);
 
 /*
+ * On a cosmo hull on Windows, point TMPDIR/TMP/TEMP at one real directory that
+ * hull's build tempdir, cosmocc, and the bundled busybox all agree on (cosmo
+ * maps `/tmp` via $TMPDIR). MUST be called before hull creates its build
+ * tempdir, so the input files hull writes are where cosmocc later looks. Windows
+ * only; idempotent; a no-op on a native build / POSIX host. Called from
+ * tool.tmpdir and from the cosmocc reroute.
+ */
+void hl_tool_cosmo_prepare_tmpdir(void);
+
+/*
  * Spawn a process and capture its stdout.
  * Returns a malloc'd string (caller frees), or NULL on error.
  * If out_len is non-NULL, the output length is stored there.

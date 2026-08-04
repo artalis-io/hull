@@ -317,7 +317,24 @@ static int l_tool_rmdir(lua_State *L)
 
 static int l_tool_tmpdir(lua_State *L)
 {
-    char tmpl[] = "/tmp/hull_XXXXXX";
+    /* On a cosmo hull on Windows, ensure the shared TMPDIR is set BEFORE
+     * mkdtemp, and create the build tempdir under it - so hull's inputs
+     * (app_registry.c, ...) land where cosmocc, driven later through busybox,
+     * resolves them (cosmo maps `/tmp` via $TMPDIR). No-op / `/tmp` elsewhere. */
+    const char *base = "/tmp";
+#ifdef __COSMOPOLITAN__
+    hl_tool_cosmo_prepare_tmpdir();
+    {
+        const char *t = getenv("TMPDIR");
+        if (t && *t) base = t;
+    }
+#endif
+    char tmpl[600];
+    int n = snprintf(tmpl, sizeof(tmpl), "%s/hull_XXXXXX", base);
+    if (n < 0 || (size_t)n >= sizeof(tmpl)) {
+        lua_pushnil(L);
+        return 1;
+    }
     char *dir = mkdtemp(tmpl);
     if (!dir) {
         lua_pushnil(L);

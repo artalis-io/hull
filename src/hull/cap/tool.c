@@ -466,6 +466,41 @@ int hl_tool_cosmo_shell(char *out, size_t outsz)
 #endif
 }
 
+void hl_tool_cosmo_prepare_tmpdir(void)
+{
+#ifdef __COSMOPOLITAN__
+    /* Point TMPDIR/TMP/TEMP at ONE real dir that hull's own build tempdir,
+     * cosmocc, and busybox all agree on. Load-bearing on Windows: cosmo maps
+     * `/tmp` via $TMPDIR, so this MUST run before hull creates its build tempdir
+     * (via tool.tmpdir) - otherwise hull writes app_registry.c under the old
+     * /tmp while cosmocc (spawned later, with TMPDIR set) resolves /tmp
+     * elsewhere and can't find it. Also fixes the driver's final `.dbg` rename,
+     * whose /tmp otherwise differs between busybox and the APEs (§0.6). Windows
+     * only; idempotent; no-op on a native build or a POSIX host. */
+    static int done = 0;
+    if (done) return;
+    if (!getenv("SystemRoot") && !getenv("SYSTEMROOT") && !getenv("windir")) {
+        done = 1;
+        return;
+    }
+    const char *home = getenv("HOME");
+    if (!home || !*home) home = getenv("USERPROFILE");
+    if (home && *home) {
+        char hull[512], tmp[512];
+        int n = snprintf(tmp, sizeof(tmp), "%s/.hull/tmp", home);
+        if (n > 0 && (size_t)n < sizeof(tmp)) {
+            (void)snprintf(hull, sizeof(hull), "%s/.hull", home);
+            (void)mkdir(hull, 0700);
+            (void)mkdir(tmp, 0700);
+            setenv("TMPDIR", tmp, 1);
+            setenv("TMP", tmp, 1);
+            setenv("TEMP", tmp, 1);
+        }
+    }
+    done = 1;
+#endif
+}
+
 #ifdef __COSMOPOLITAN__
 /* Raw file copy (best-effort /bin/sh plant). Returns 0 / -1. */
 static int cosmo_copy(const char *src, const char *dst)
@@ -485,36 +520,23 @@ static int cosmo_copy(const char *src, const char *dst)
     return rc;
 }
 
-/* Once per process: (1) point TMPDIR/TMP/TEMP at one real directory the cosmocc
- * driver AND the native APE sub-tools agree on - fixes the driver's final
- * `.dbg` rename, whose /tmp otherwise differs between busybox and the APEs
- * (load-bearing; proven in docs/cosmocc_install.md §0.6). (2) Best-effort plant
- * /bin/sh.exe = busybox so cosmocc's #!/bin/sh driver + its symlinked sub-tools
- * resolve their shebang; ignored on failure (busybox's own shebang routing
- * covers the common case, and the drive root is not always writable). */
-static void cosmo_prepare(const char *shell)
+/* Best-effort plant /bin/sh.exe = busybox so cosmocc's #!/bin/sh driver + its
+ * symlinked sub-tools resolve their shebang; ignored on failure (busybox's own
+ * shebang routing covers the common case, and the drive root is not always
+ * writable). Once per process. */
+static void cosmo_plant_sh(const char *shell)
 {
-    static int done = 0;
-    if (done) return;
-    done = 1;
-
-    const char *home = getenv("HOME");
-    if (!home || !*home) home = getenv("USERPROFILE");
-    if (home && *home) {
-        char tmp[512];
-        int n = snprintf(tmp, sizeof(tmp), "%s/.hull/tmp", home);
-        if (n > 0 && (size_t)n < sizeof(tmp)) {
-            char hull[512];
-            (void)snprintf(hull, sizeof(hull), "%s/.hull", home);
-            (void)mkdir(hull, 0700);
-            (void)mkdir(tmp, 0700);
-            setenv("TMPDIR", tmp, 1);
-            setenv("TMP", tmp, 1);
-            setenv("TEMP", tmp, 1);
-        }
-    }
+    static int planted = 0;
+    if (planted) return;
+    planted = 1;
     (void)mkdir("/bin", 0755);
     (void)cosmo_copy(shell, "/bin/sh.exe");   /* best-effort */
+}
+
+static void cosmo_prepare(const char *shell)
+{
+    hl_tool_cosmo_prepare_tmpdir();
+    cosmo_plant_sh(shell);
 }
 
 /* basename(argv[0]) starts with "cosmocc"? (hull only ever spawns the driver

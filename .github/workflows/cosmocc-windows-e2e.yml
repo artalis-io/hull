@@ -24,6 +24,7 @@ on:
       - '.github/workflows/cosmocc-windows-e2e.yml'
       - 'scripts/build_cosmocc_bundle.sh'
       - 'src/hull/cap/tool.c'
+      - 'src/hull/runtime/lua/mod_tool.c'
       - 'src/hull/compiler.c'
       - 'src/hull/cap/tar.c'
 
