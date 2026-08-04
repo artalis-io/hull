@@ -95,3 +95,100 @@ jobs:
           Write-Host "solve it; hull would need to drive cosmocc through cosmo's bundled"
           Write-Host "shell (cocmd) with symlink-aware extraction - a design change."
           Write-Host "=================================================================="
+
+  section0-shell-drives-cosmocc:
+    # §0 GO/NO-GO (no Hull change): given a SHELL + preserved symlinks, does
+    # cosmocc's #!/bin/sh pipeline actually compile on Windows at all? If NO, the
+    # A-E Hull epic is not worth starting. Extract with bsdtar (tar.exe -
+    # symlink-preserving, unlike Expand-Archive), reconstruct any symlinks Windows
+    # dropped, then drive cosmocc via Git Bash AND cosmo's own cocmd.
+    name: "§0 — can a shell drive cosmocc on Windows?"
+    runs-on: windows-latest
+    steps:
+      - name: Download + symlink-preserving extract (bsdtar)
+        shell: pwsh
+        run: |
+          curl.exe -fsSL --retry 3 -o cosmocc.zip "https://cosmo.zip/pub/cosmocc/cosmocc-$env:COSMOCC_VERSION.zip"
+          $actual = (Get-FileHash cosmocc.zip -Algorithm SHA256).Hash.ToLower()
+          if ($actual -ne $env:COSMOCC_SHA256) { throw "cosmocc sha mismatch: $actual" }
+          New-Item -ItemType Directory -Force -Path cosmo | Out-Null
+          # bsdtar (Windows-bundled tar.exe) extracts zip AND creates symlinks
+          # where it can. Emit its stderr so any "can't create symlink" shows.
+          tar.exe -xpf cosmocc.zip -C cosmo 2>&1 | Write-Host
+          $cc = Get-Item cosmo\bin\x86_64-unknown-cosmo-cc
+          Write-Host "arch-cc: size=$($cc.Length) LinkType=$($cc.LinkType) Target=$($cc.Target)"
+
+      - name: Reconstruct symlinks Windows dropped (each *-cc stub -> its target)
+        shell: pwsh
+        run: |
+          # If bsdtar could not make real symlinks, the *-cc names are tiny files
+          # holding the target string (e.g. "cosmocc"). Reify them as copies so
+          # cosmocc's argv[0]-dispatch works, mimicking what a symlink-aware
+          # hl_tar_extract would do.
+          $bin = "cosmo\bin"
+          Get-ChildItem $bin | Where-Object { $_.Length -lt 64 -and -not $_.PSIsContainer } | ForEach-Object {
+            $target = (Get-Content $_.FullName -Raw -ErrorAction SilentlyContinue).Trim()
+            $tpath = Join-Path $bin $target
+            if ($target -and (Test-Path $tpath)) {
+              Copy-Item $tpath $_.FullName -Force
+              Write-Host "reified $($_.Name) -> $target"
+            } else {
+              Write-Host "skip $($_.Name) (target '$target' not found)"
+            }
+          }
+          Write-Host "shells/interpreters present:"
+          Get-ChildItem $bin | Where-Object { $_.Name -match 'cocmd|bash|dash|(^|\W)sh(\W|$)' } | Format-Table Name, Length -AutoSize | Out-String | Write-Host
+
+      - name: Write hello.c
+        shell: pwsh
+        run: '"int main(void){return 42;}" | Set-Content -NoNewline hello.c -Encoding ascii'
+
+      - name: "Probe A — Git Bash (POSIX /bin/sh) drives cosmocc"
+        id: probe_bash
+        continue-on-error: true
+        shell: bash
+        run: |
+          export PATH="$(pwd)/cosmo/bin:$PATH"
+          echo "which cosmocc: $(command -v cosmocc || echo none)"
+          cosmocc -o hello_bash.com hello.c
+          echo "cosmocc exit: $?"
+          ls -la hello_bash.com
+
+      - name: "Probe B — cosmo cocmd drives cosmocc"
+        id: probe_cocmd
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          Copy-Item cosmo\bin\cocmd cosmo\bin\cocmd.exe -Force
+          $env:PATH = "$PWD\cosmo\bin;$env:PATH"
+          & cosmo\bin\cocmd.exe -c "cosmocc -o hello_cocmd.com hello.c" 2>&1 | Out-String | Write-Host
+          Write-Host "--- cocmd cosmocc exit: $LASTEXITCODE ---"
+          if (-not (Test-Path hello_cocmd.com)) { throw "cocmd did not build" }
+
+      - name: Verdict — did a shell build (and run) the APE?
+        shell: pwsh
+        run: |
+          $bashOK = (Test-Path hello_bash.com)
+          $cocmdOK = (Test-Path hello_cocmd.com)
+          Write-Host "Git Bash built hello.com : $bashOK"
+          Write-Host "cocmd built hello.com    : $cocmdOK"
+          $ran = $false
+          foreach ($f in @("hello_bash.com","hello_cocmd.com")) {
+            if (Test-Path $f) {
+              Copy-Item $f "$f.exe" -Force
+              & ".\$f.exe"; $rc = $LASTEXITCODE
+              Write-Host "$f ran, exit=$rc (expected 42)"
+              if ($rc -eq 42) { $ran = $true }
+            }
+          }
+          Write-Host "=================================================================="
+          if (($bashOK -or $cocmdOK) -and $ran) {
+            Write-Host "GO: a shell CAN drive cosmocc on Windows (APE built + ran)."
+            Write-Host "The A-E Hull epic is viable (drive via a shell + symlink extract)."
+          } elseif ($bashOK -or $cocmdOK) {
+            Write-Host "PARTIAL: cosmocc built an APE but it did not run as expected."
+          } else {
+            Write-Host "NO-GO: no shell could drive cosmocc's pipeline on Windows."
+            Write-Host "The A-E Hull epic would not pay off; WSL2 stays the path."
+          }
+          Write-Host "=================================================================="
