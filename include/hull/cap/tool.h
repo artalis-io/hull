@@ -19,7 +19,11 @@
 
 /* ── Unveil path table ─────────────────────────────────────────────── */
 
-#define HL_TOOL_MAX_UNVEILED 16
+/* Cap on unveiled tool-mode paths. The default set already fills ~16 (each
+ * add can store TWO entries when realpath differs), so keep headroom for the
+ * cosmo/Windows ~/.hull/tmp entry + future additions - an over-full table
+ * silently drops adds (hl_tool_unveil_add returns -1 at the cap). */
+#define HL_TOOL_MAX_UNVEILED 24
 
 typedef struct {
     const char *path;
