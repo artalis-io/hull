@@ -25,18 +25,38 @@ NO, not with cosmocc alone.**
 
 So the "cosmocc is an APE, so it runs on Windows" premise is wrong: only the
 *leaves* are APEs; the *driver* is a shell script, and the toolchain is wired
-with symlinks. cosmo's intended Windows usage is *inside* its bundled shell
-(`cocmd`/bash), not `execvp("cosmocc")`.
+with symlinks. cosmo's intended Windows usage is *inside* a POSIX shell, not
+`execvp("cosmocc")`.
+
+## §0 go/no-go (proven): a POSIX shell CAN drive cosmocc on Windows — GO
+
+The gating question — *given* a shell + preserved symlinks, does cosmocc's
+pipeline compile on Windows at all? — is answered **GO** by the `section0` job:
+
+- **Git Bash (which provides `/bin/sh`) drove cosmocc's full pipeline**: `cosmocc
+  exit 0`, produced a 401 KB APE (`hello_bash.com`, `-rwxr-xr-x`) that runs and
+  returns 42 (arriving wait-status-encoded as `10752 = 42<<8` on Windows).
+- **cosmo's own `cocmd` did NOT** (`cosmocc: No such file or directory`) — it is a
+  `cmd`-like shell, not a POSIX `sh` that can run the `#!/bin/sh` driver.
+- **`bsdtar` (`tar.exe`) preserved the toolchain symlinks** on the runner
+  (`LinkType=SymbolicLink`), so a symlink-aware extractor is sufficient.
+
+**Conclusion: the epic below is viable** — but the "shell" hull needs is a POSIX
+`sh` (bash / MSYS `sh`, ubiquitous via Git for Windows), NOT cosmo's `cocmd`.
+Either hull requires a POSIX `sh` on PATH for the cosmo/Windows path, or it
+bundles/points at one.
 
 ## What it would actually take (a design change, not a tool install)
 
 To make `hull build` drive cosmocc on Windows, hull would need to:
 
-- **Invoke cosmocc through cosmo's bundled shell** — `cocmd -c "cosmocc …"` (or
-  bash) rather than `execvp("cosmocc")` — for the cosmo/Windows path only. That
-  is a real change to the build's spawn layer + the compiler resolver, and it
-  crosses the spawn-allowlist design (now it's "hull runs a shell that runs the
-  compiler").
+- **Invoke cosmocc through a POSIX `sh`** — `sh -c "cosmocc …"` (bash / MSYS `sh`;
+  §0 showed cosmo's `cocmd` is NOT sufficient) rather than `execvp("cosmocc")`,
+  for the cosmo/Windows path only. That is a real change to the build's spawn
+  layer + the compiler resolver, it crosses the spawn-allowlist design (now it's
+  "hull runs a shell that runs the compiler"), and it adds a POSIX-`sh`
+  dependency on Windows (require it on PATH, or bundle one — cosmo does not ship
+  a POSIX `sh`, only `cocmd`).
 - **Symlink-aware bundle extraction** — the tools installer's `hl_tar_extract`
   writes regular files; the cosmocc tree needs symlinks (or a Windows-side
   reification of them).
