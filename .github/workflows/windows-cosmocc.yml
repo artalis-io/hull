@@ -159,18 +159,27 @@ jobs:
             if (Test-Path $f) {
               Copy-Item $f "$f.exe" -Force
               & ".\$f.exe"; $rc = $LASTEXITCODE
-              Write-Host "$f ran, exit=$rc (expected 42)"
-              if ($rc -eq 42) { $ran = $true }
+              # The APE returns 42; on Windows the exit may arrive wait-status-
+              # encoded (42 << 8 = 10752), so accept either byte.
+              $lo = $rc -band 0xFF; $hi = ($rc -shr 8) -band 0xFF
+              Write-Host "$f ran, exit=$rc (lo=$lo hi=$hi; expected 42)"
+              if ($lo -eq 42 -or $hi -eq 42) { $ran = $true }
             }
           }
+          $global:LASTEXITCODE = 0
           Write-Host "=================================================================="
           if (($bashOK -or $cocmdOK) -and $ran) {
-            Write-Host "GO: a shell CAN drive cosmocc on Windows (APE built + ran)."
-            Write-Host "The A-E Hull epic is viable (drive via a shell + symlink extract)."
+            Write-Host "GO: a POSIX shell CAN drive cosmocc's full pipeline on Windows"
+            Write-Host "(APE built + ran). Git Bash (/bin/sh) works; cosmo's cocmd does"
+            Write-Host "NOT (it is a cmd-like shell, not a POSIX sh for the #!/bin/sh"
+            Write-Host "driver). So the A-E Hull epic is VIABLE, but the 'shell' is a"
+            Write-Host "POSIX sh (bash/MSYS), not cocmd - hull must provide/require one."
+            exit 0
           } elseif ($bashOK -or $cocmdOK) {
             Write-Host "PARTIAL: cosmocc built an APE but it did not run as expected."
+            exit 1
           } else {
             Write-Host "NO-GO: no shell could drive cosmocc's pipeline on Windows."
             Write-Host "The A-E Hull epic would not pay off; WSL2 stays the path."
+            exit 1
           }
-          Write-Host "=================================================================="
