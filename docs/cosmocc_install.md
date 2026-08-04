@@ -6,11 +6,15 @@ self-sufficient on Windows (symmetric to `hull tools install zig` for native
 targets)?
 
 **Answer (proven by `.github/workflows/windows-cosmocc.yml` on `windows-latest`):
-NO. cosmocc alone does not unlock Windows builds, and — the decisive follow-up —
-hull cannot make it self-contained by bundling an APE shell either: cosmocc
-needs a real `/bin/sh` filesystem mount that only MSYS / Git-Bash / WSL supply
-(see §0.5). The self-sufficient Windows story is not achievable with cosmocc as
-it ships today.**
+`hull tools install cosmocc` alone does NOT unlock Windows builds (cosmocc's
+driver is a `#!/bin/sh` script + symlink toolchain, not an execvp-able binary),
+and an APE bash cannot self-contain it (no `/bin/sh` mount, no coreutils — §0.5).
+BUT the self-sufficient Windows story IS achievable, with a bounded design
+change, by bundling `busybox-w64` (§0.6): a single ~1 MB native Windows PE — no
+Cygwin/MSYS runtime — that supplies BOTH `sh` and every coreutil the driver
+shells out to, routes `#!/bin/sh` to its own applet, and (with a planted
+`/bin/sh` + a shared `TMPDIR`) drives cosmocc to a clean `exit 0` producing a
+working APE that runs and returns 42.**
 
 ## What the experiment found
 
@@ -82,20 +86,54 @@ Windows box self-sufficient. The friction-free Windows story stays: **build the
 cosmo APE on a POSIX host (Linux/macOS/CI) and ship the APE** — it runs on
 Windows directly (proven by the `characterize` job).
 
+## §0.6 can a bundled `busybox-w64` self-contain it? — YES (CLEAN GO)
+
+§0.5 ruled out an APE bash because it is an interpreter with (a) no `/bin/sh`
+mount and (b) no coreutils — and cosmocc's `#!/bin/sh` driver shells out to
+`dirname` / `readlink` / `uname` / `sed` / `mv`. **busybox-w64** (Ron Yorston's
+native-Windows busybox) fixes both: it is a single ~1 MB native PE — **no
+Cygwin/MSYS DLL** — that provides `sh` (ash) AND every coreutil as applets, and
+its `sh` routes `#!/bin/sh` to its own applet. The
+`section0c-busybox-w64-self-contained` job proved it drives cosmocc end-to-end:
+
+- busybox runs on Windows ✅ (`busybox-ok`; `dirname` / `uname` applets resolve).
+- Driving cosmocc **built a correct APE** (runs, returns 42) in every variant.
+- The driver's final `mv /tmp/fatcosmocc.XXXX.com.dbg` initially failed
+  (`No such file or directory`): busybox's `/tmp` and the native APE sub-tools'
+  `/tmp` resolved to **different real dirs**, so the debug sidecar wasn't where
+  the driver looked. Not a compile failure — a `/tmp` disagreement.
+- **Aligning them fixed it**: with a real `C:\tmp` exported as
+  `TMPDIR=C:/tmp TMP=C:/tmp TEMP=C:/tmp` (both busybox and the cosmo APEs honor
+  `${TMPDIR:-/tmp}`), cosmocc exited **0** and the APE ran and returned 42 →
+  **CLEAN GO**.
+
+So a stock Windows box can be made self-sufficient with a **~1 MB** extra binary
+(vs a ~40 MB GPLv3 MSYS runtime, and vs requiring the user to have Git-Bash/WSL).
+The recipe hull would implement: extract cosmocc (symlink-aware), **plant
+`/bin/sh` = busybox** (so the `#!/bin/sh` driver + its symlinked sub-tools
+resolve), **share one `TMPDIR`**, and **drive cosmocc via `busybox sh -c`**.
+
 ## What it would actually take (a design change, not a tool install)
 
 To make `hull build` drive cosmocc on Windows, hull would need to:
 
-- **Invoke cosmocc through a POSIX `sh`** — `sh -c "cosmocc …"` (bash / MSYS `sh`;
-  §0 showed cosmo's `cocmd` is NOT sufficient) rather than `execvp("cosmocc")`,
-  for the cosmo/Windows path only. That is a real change to the build's spawn
-  layer + the compiler resolver, it crosses the spawn-allowlist design (now it's
-  "hull runs a shell that runs the compiler"), and it adds a POSIX-`sh`
-  dependency on Windows (require it on PATH, or bundle one — cosmo does not ship
-  a POSIX `sh`, only `cocmd`).
+- **Invoke cosmocc through a POSIX `sh`** — `sh -c "cosmocc …"` rather than
+  `execvp("cosmocc")`, for the cosmo/Windows path only. That is a real change to
+  the build's spawn layer + the compiler resolver, and it crosses the
+  spawn-allowlist design (now it's "hull runs a shell that runs the compiler").
+  §0 showed cosmo's own `cocmd` is NOT a POSIX `sh`; §0.6 showed **`busybox-w64`
+  IS the concrete, self-contained enabler** — a ~1 MB native PE that hull can
+  bundle (no external Git-Bash/WSL dependency, no ~40 MB GPLv3 MSYS runtime).
+- **Plant `/bin/sh` + share `TMPDIR`** (the two setup steps §0.6 found load-
+  bearing): copy busybox to `/bin/sh.exe` so the `#!/bin/sh` driver and its
+  symlinked sub-tools resolve their shebang, and export one real `TMPDIR`
+  (`TMP`/`TEMP`) so the driver's final `.dbg` rename finds what the native APE
+  sub-tools wrote. Without the shared temp, cosmocc builds a correct APE but
+  exits non-zero on the sidecar `mv`.
 - **Symlink-aware bundle extraction** — the tools installer's `hl_tar_extract`
   writes regular files; the cosmocc tree needs symlinks (or a Windows-side
-  reification of them).
+  reification of them). `bsdtar`/`tar.exe` preserved them on the runner, so the
+  extractor's symlink support is the gap, not the bundle format.
 - Plus the **bundle-size problem**: `cosmocc-4.0.2` extracts to **~1.43 GB**
   (4× zig, past the `release_io` 512 MB cap), so the asset needs either a ~2 GB
   uncompressed tar or **compressed-bundle support in the trust-critical install

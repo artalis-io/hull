@@ -6,9 +6,13 @@ name: Windows cosmocc (investigation)
 # is a `#!/bin/sh` POSIX shell script (only its leaf tools are `.ape` APEs; the
 # arch compilers are symlinks -> cosmocc). So `hull build` spawning `cosmocc` via
 # execvp fails on Windows ("no C compiler available") - there is no /bin/sh, and a
-# naive extraction breaks the symlinks. Enabling it would need hull to drive
-# cosmocc THROUGH cosmo's bundled shell (cocmd/bash) + symlink-aware extraction -
-# a design change, not a `hull tools install`. See docs/cosmocc_install.md.
+# naive extraction breaks the symlinks. §0.6 (section0c) then found the FIX: a
+# bundled busybox-w64 (~1 MB native PE, no MSYS DLL) supplies sh + coreutils +
+# #!/bin/sh routing, and with a planted /bin/sh + a shared TMPDIR drives cosmocc
+# to a clean exit 0 producing a working APE - so a self-sufficient Windows build
+# IS achievable via a bounded design change (drive cosmocc via `busybox sh -c` +
+# symlink-aware extraction), not a plain `hull tools install`. Details +
+# recipe in docs/cosmocc_install.md.
 #
 # Informational + non-required: it asserts the CURRENT reality and passes, so if
 # Cosmopolitan ever makes cosmocc directly drivable on Windows the assertions flip
