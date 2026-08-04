@@ -61,8 +61,10 @@ jobs:
           # cosmo-general (not Windows); if it exits 0 here, it is Windows-specific.
           mkdir -p /tmp/jsonapp
           printf 'app.manifest({ modules = {} })\napp.main(function(ctx) ctx.stdout:write("APP-MARKER-OK\\n"); return 0 end)\n' > /tmp/jsonapp/app.lua
-          ./build/hull build /tmp/jsonapp -o /tmp/jsonapp/app.com --no-verify-platform 2>&1 | tail -3
-          echo "--- run the cosmo-built app on Linux ---"
+          # Force the COSMO path (--compiler=cosmocc), else hull-cosmo on Linux
+          # takes the native ELF emit path and never builds the APE we want to test.
+          ./build/hull build /tmp/jsonapp -o /tmp/jsonapp/app.com --compiler=cosmocc --no-verify-platform 2>&1 | tail -4
+          echo "--- run the cosmo-built APE on Linux ---"
           rc=0; /tmp/jsonapp/app.com || rc=$?
           echo "LINUX cosmo-app exit: $rc"
       - uses: actions/upload-artifact@v4
