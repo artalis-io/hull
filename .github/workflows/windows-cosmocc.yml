@@ -118,27 +118,9 @@ jobs:
           $cc = Get-Item cosmo\bin\x86_64-unknown-cosmo-cc
           Write-Host "arch-cc: size=$($cc.Length) LinkType=$($cc.LinkType) Target=$($cc.Target)"
 
-      - name: Reconstruct symlinks Windows dropped (each *-cc stub -> its target)
-        shell: pwsh
-        run: |
-          # If bsdtar could not make real symlinks, the *-cc names are tiny files
-          # holding the target string (e.g. "cosmocc"). Reify them as copies so
-          # cosmocc's argv[0]-dispatch works, mimicking what a symlink-aware
-          # hl_tar_extract would do.
-          $bin = "cosmo\bin"
-          Get-ChildItem $bin | Where-Object { $_.Length -lt 64 -and -not $_.PSIsContainer } | ForEach-Object {
-            $target = (Get-Content $_.FullName -Raw -ErrorAction SilentlyContinue).Trim()
-            $tpath = Join-Path $bin $target
-            if ($target -and (Test-Path $tpath)) {
-              Copy-Item $tpath $_.FullName -Force
-              Write-Host "reified $($_.Name) -> $target"
-            } else {
-              Write-Host "skip $($_.Name) (target '$target' not found)"
-            }
-          }
-          Write-Host "shells/interpreters present:"
-          Get-ChildItem $bin | Where-Object { $_.Name -match 'cocmd|bash|dash|(^|\W)sh(\W|$)' } | Format-Table Name, Length -AutoSize | Out-String | Write-Host
-
+      # (bsdtar preserved real symlinks on the runner - LinkType=SymbolicLink - so
+      # no reconstruction is needed; hull's symlink-aware extraction would do the
+      # same. Straight to the probes.)
       - name: Write hello.c
         shell: pwsh
         run: '"int main(void){return 42;}" | Set-Content -NoNewline hello.c -Encoding ascii'
