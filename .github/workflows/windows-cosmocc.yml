@@ -1,15 +1,18 @@
-name: Windows cosmocc (experimental)
+name: Windows cosmocc (investigation)
 
-# EXPERIMENT (memory: cosmocc install follow-up). Answers the open question:
-# can a `hull-cosmo` APE, running on Windows, spawn cosmocc to `hull build` an
-# app - i.e. does cosmocc's nested pipeline (cosmocc -> cc1 -> as -> ld ->
-# apelink) survive Cosmopolitan's EMULATED fork/exec on Windows, driven by
-# hull's hl_tool_spawn? This is Cosmopolitan's frontier, not a Hull design gap,
-# so the job is INFORMATIONAL: it is a standalone workflow (not a required
-# check), each frontier step is `continue-on-error`, and a final step prints a
-# verdict. It uses the SHIPPED v0.9.0 hull-cosmo (a real APE) + the pinned
-# cosmocc, staged at ~/.cosmocc (the path hull's #ifdef __COSMOPOLITAN__ compiler
-# resolver already probes - no install-bundle needed).
+# Characterizes whether a `hull-cosmo` APE can `hull build` an app ON Windows by
+# spawning cosmocc. VERDICT (this workflow proves it): NO, not with cosmocc alone.
+# hull-cosmo itself RUNS on Windows (it is a real fat APE), but cosmocc's DRIVER
+# is a `#!/bin/sh` POSIX shell script (only its leaf tools are `.ape` APEs; the
+# arch compilers are symlinks -> cosmocc). So `hull build` spawning `cosmocc` via
+# execvp fails on Windows ("no C compiler available") - there is no /bin/sh, and a
+# naive extraction breaks the symlinks. Enabling it would need hull to drive
+# cosmocc THROUGH cosmo's bundled shell (cocmd/bash) + symlink-aware extraction -
+# a design change, not a `hull tools install`. See docs/cosmocc_install.md.
+#
+# Informational + non-required: it asserts the CURRENT reality and passes, so if
+# Cosmopolitan ever makes cosmocc directly drivable on Windows the assertions flip
+# and flag it. Standalone workflow, run on demand / when the cosmocc files change.
 #
 # SPDX-License-Identifier: AGPL-3.0-or-later
 
@@ -29,116 +32,59 @@ env:
   COSMOCC_SHA256: 85b8c37a406d862e656ad4ec14be9f6ce474c1b436b9615e91a55208aced3f44
 
 jobs:
-  windows-build-app:
-    name: hull-cosmo builds an app on Windows
+  characterize:
+    name: cosmocc on Windows — characterize
     runs-on: windows-latest
     steps:
-      - name: Download the shipped hull-cosmo APE
+      - name: hull-cosmo (a fat APE) runs on Windows
         shell: pwsh
         run: |
           $url = "https://github.com/${{ github.repository }}/releases/download/$env:HULL_VERSION/hull-cosmo"
-          Write-Host "downloading $url"
           curl.exe -fsSL --retry 3 -o hull-cosmo.exe $url
-          (Get-Item hull-cosmo.exe).Length
+          $out = .\hull-cosmo.exe version 2>&1 | Out-String
+          Write-Host $out
+          if ($LASTEXITCODE -ne 0) { throw "EXPECTED PASS FLIPPED: hull-cosmo no longer runs on Windows" }
+          Write-Host "PASS: hull-cosmo runs on Windows."
 
-      # Step 1: does an APE even run on windows-latest?
-      - name: hull-cosmo runs on Windows (hull version)
-        id: run_hull
-        continue-on-error: true
+      - name: cosmocc driver is a POSIX shell script (not an APE)
         shell: pwsh
         run: |
-          .\hull-cosmo.exe version
-          if ($LASTEXITCODE -ne 0) { throw "hull-cosmo did not run (exit $LASTEXITCODE)" }
-
-      # Step 2: stage cosmocc where the cosmo compiler-resolver probes
-      # (~/.cosmocc/bin/cosmocc - see hl_driver_resolve_native).
-      - name: Stage cosmocc at ~/.cosmocc
-        id: stage_cosmocc
-        continue-on-error: true
-        shell: pwsh
-        run: |
-          $zip = "cosmocc.zip"
-          curl.exe -fsSL --retry 3 -o $zip "https://cosmo.zip/pub/cosmocc/cosmocc-$env:COSMOCC_VERSION.zip"
-          $actual = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLower()
+          curl.exe -fsSL --retry 3 -o cosmocc.zip "https://cosmo.zip/pub/cosmocc/cosmocc-$env:COSMOCC_VERSION.zip"
+          $actual = (Get-FileHash cosmocc.zip -Algorithm SHA256).Hash.ToLower()
           if ($actual -ne $env:COSMOCC_SHA256) { throw "cosmocc sha mismatch: $actual" }
           $dest = "$env:USERPROFILE\.cosmocc"
-          New-Item -ItemType Directory -Force -Path $dest | Out-Null
-          Expand-Archive -Path $zip -DestinationPath $dest -Force
-          Get-ChildItem "$dest\bin\cosmocc*" | Select-Object -First 3 Name, Length
+          Expand-Archive cosmocc.zip -DestinationPath $dest -Force
+          $bytes = [System.IO.File]::ReadAllBytes("$dest\bin\cosmocc")[0..15]
+          $head = -join ($bytes | ForEach-Object { if ($_ -ge 32 -and $_ -lt 127) { [char]$_ } else { '.' } })
+          Write-Host "cosmocc head : $head"
+          Write-Host "cosmocc size : $((Get-Item "$dest\bin\cosmocc").Length) bytes"
+          $archcc = "$dest\bin\x86_64-unknown-cosmo-cc"
+          Write-Host "arch cc size : $((Get-Item $archcc).Length) bytes (symlink stub)"
+          if ($head -notlike '#!/bin/sh*') { throw "FINDING FLIPPED: cosmocc is no longer a #!/bin/sh script - re-evaluate the Windows story" }
+          Write-Host "PASS (finding): cosmocc is a #!/bin/sh driver; arch cc's are symlinks -> a POSIX shell + symlink-aware extraction are required."
 
-      # Diagnostic: does cosmocc even RUN on Windows, directly (independent of
-      # hull)? Isolates "cosmocc-on-Windows broken" from "hull can't resolve/spawn
-      # it". cosmocc is a gcc wrapper; -dumpversion is the cheapest probe.
-      - name: cosmocc runs directly on Windows
-        id: cosmocc_direct
-        continue-on-error: true
+      - name: hull build cannot spawn cosmocc on Windows (the consequence)
         shell: pwsh
         run: |
-          $bin = "$env:USERPROFILE\.cosmocc\bin"
-          Write-Host "=== bin/ listing (sizes) ==="
-          Get-ChildItem $bin | Sort-Object Length | Format-Table Name, Length -AutoSize | Out-String | Write-Host
-          Write-Host "=== first bytes of the cosmocc driver (script vs APE?) ==="
-          $bytes = [System.IO.File]::ReadAllBytes("$bin\cosmocc")[0..63]
-          $ascii = -join ($bytes | ForEach-Object { if ($_ -ge 32 -and $_ -lt 127) { [char]$_ } else { '.' } })
-          Write-Host "head: $ascii"
-          Write-Host "magic: $('{0:X2} {1:X2} {2:X2} {3:X2}' -f $bytes[0],$bytes[1],$bytes[2],$bytes[3])"
-          # Try the ARCH compiler directly (the real fat APE, if it is one).
-          $archcc = Get-ChildItem "$bin\*cosmo*cc*" | Where-Object { $_.Name -like '*x86_64*' } | Select-Object -First 1
-          if ($archcc) {
-            Copy-Item $archcc.FullName "$bin\archcc.exe" -Force
-            Write-Host "=== $($archcc.Name) --version (as .exe) ==="
-            & "$bin\archcc.exe" --version 2>&1 | Out-String | Write-Host
-            Write-Host "--- exit: $LASTEXITCODE ---"
-          } else { Write-Host "no x86_64 arch compiler found in bin/" }
-
-      # Step 3: the app to build.
-      - name: Write a minimal app.lua
-        shell: pwsh
-        run: |
-          New-Item -ItemType Directory -Force -Path app | Out-Null
-          @'
-          app.manifest({ modules = {} })
-          app.main(function() print("cosmocc-on-windows-ok"); return 0 end)
-          '@ | Set-Content -NoNewline -Path app\app.lua -Encoding ascii
-          Get-Content app\app.lua
-
-      # Step 4: THE experiment - hull-cosmo spawns cosmocc to build the app.
-      - name: hull build the app (spawns cosmocc)
-        id: hull_build
-        continue-on-error: true
-        shell: pwsh
-        run: |
-          # hull's cosmo compiler-resolver probes $HOME/.cosmocc/bin/cosmocc, but
-          # Windows sets USERPROFILE, not HOME - the released v0.9.0 hull has no
-          # USERPROFILE fallback (the Hull-side fix this experiment pins down). Map
-          # it here so we can prove the cosmocc PIPELINE past that resolution gap.
           $env:HOME = $env:USERPROFILE
           $env:PATH = "$env:USERPROFILE\.cosmocc\bin;$env:PATH"
-          .\hull-cosmo.exe build app -o app-out.exe --no-verify-platform 2>&1 | Tee-Object -Variable out
-          Write-Host "--- exit: $LASTEXITCODE ---"
-          if ($LASTEXITCODE -ne 0 -or -not (Test-Path app-out.exe)) { throw "hull build failed (exit $LASTEXITCODE)" }
-          (Get-Item app-out.exe).Length
-
-      # Step 5: does the produced APE run on Windows?
-      - name: Run the produced APE
-        id: run_app
-        continue-on-error: true
-        shell: pwsh
-        run: |
-          $out = .\app-out.exe --no-sandbox 2>&1 | Out-String
+          New-Item -ItemType Directory -Force -Path app | Out-Null
+          "app.manifest({ modules = {} })`napp.main(function() return 0 end)" | Set-Content -NoNewline app\app.lua -Encoding ascii
+          $out = .\hull-cosmo.exe build app -o app-out.exe --no-verify-platform 2>&1 | Out-String
           Write-Host $out
-          if ($out -notmatch "cosmocc-on-windows-ok") { throw "app did not print the expected line" }
+          if (Test-Path app-out.exe) {
+            Write-Host "UNEXPECTED: hull build produced a binary on Windows - the cosmocc-on-Windows story may now work; re-evaluate."
+          } else {
+            Write-Host "PASS (finding): hull build fails on Windows (cosmocc is a shell script hull cannot execvp)."
+          }
 
-      - name: Verdict
+      - name: Conclusion
         shell: pwsh
         run: |
-          function S($v) { if ($v -eq 'success') { 'PASS' } else { 'FAIL' } }
-          Write-Host "==================== Windows cosmocc verdict ===================="
-          Write-Host ("1. hull-cosmo runs on Windows : {0}" -f (S '${{ steps.run_hull.outcome }}'))
-          Write-Host ("2. cosmocc staged            : {0}" -f (S '${{ steps.stage_cosmocc.outcome }}'))
-          Write-Host ("3. hull build spawns cosmocc : {0}" -f (S '${{ steps.hull_build.outcome }}'))
-          Write-Host ("4. produced APE runs         : {0}" -f (S '${{ steps.run_app.outcome }}'))
-          Write-Host "================================================================"
-          Write-Host "Informational only - a FAIL here is a Cosmopolitan-on-Windows"
-          Write-Host "finding (emulated fork/exec of the nested cc1/as/ld/apelink"
-          Write-Host "pipeline), not a Hull regression."
+          Write-Host "=================================================================="
+          Write-Host "hull-cosmo runs on Windows: YES."
+          Write-Host "hull build via cosmocc on Windows: NO (cosmocc = #!/bin/sh driver"
+          Write-Host "+ symlink toolchain). `hull tools install cosmocc` alone does not"
+          Write-Host "solve it; hull would need to drive cosmocc through cosmo's bundled"
+          Write-Host "shell (cocmd) with symlink-aware extraction - a design change."
+          Write-Host "=================================================================="

@@ -1,59 +1,62 @@
-# `hull tools install cosmocc` — making `hull build` self-sufficient for APE apps
+# `hull tools install cosmocc` on Windows — investigation
 
-Status: **investigation + Windows experiment.** The productionized install is
-**deferred** on one design decision (below).
+**Question:** can a `hull-cosmo` APE, running on Windows, `hull build` an app by
+spawning cosmocc — i.e. would `hull tools install cosmocc` make `hull build`
+self-sufficient on Windows (symmetric to `hull tools install zig` for native
+targets)?
 
-## Goal
+**Answer (proven by `.github/workflows/windows-cosmocc.yml` on `windows-latest`):
+NO, not with cosmocc alone.**
 
-A `hull-cosmo` APE runs everywhere (Linux/macOS/Windows/BSD). We want it to also
-`hull build` an app *on* those hosts with no separately-installed toolchain — the
-symmetric counterpart of `hull tools install zig` (which gives native targets a
-self-contained linker). cosmocc is the only toolchain that can produce an APE:
-`obj_emit` has no APE format (only ELF/Mach-O/COFF), so the compiler-free path is
-native-only, and a cosmo app is built by *spawning* cosmocc (build.lua gates the
-emit path `if not is_cosmo`; cosmocc compiles `app_registry.c`/`app_main.c` and
-`apelink`s the fat binary against the cosmo platform archive embedded in
-hull-cosmo). cosmocc is already on hull's spawn allowlist (`cap/tool.c`).
+## What the experiment found
 
-## Why it maps onto the tool-bundle pattern
+1. **`hull-cosmo` runs on Windows** ✅ — it is a real fat APE; `hull version`
+   works on `windows-latest`.
+2. **cosmocc's driver is a `#!/bin/sh` POSIX shell script**, not an APE. The
+   `cosmo.zip` cosmocc tree is: `bin/cosmocc` = an 18 KB `#!/bin/sh` script
+   ("fat cosmopolitan c/c++ compiler"); the arch compilers
+   (`x86_64-unknown-cosmo-cc`, …) are **symlinks → cosmocc** (7–22 byte stubs);
+   only the leaf tools (`compile.ape`, `assembler`, `apelink`, …) are actual
+   APEs. cosmo even bundles its own shell (`cocmd`, ~1.1 MB) and `make`.
+3. Therefore **`hull build` spawning `cosmocc` via `execvp` fails on Windows**
+   with `no C compiler available`: Windows has no `/bin/sh` to run the driver
+   script, and a naive extraction (`Expand-Archive`, or a flat tar) **breaks the
+   symlinks**.
 
-Mirrors `hull tools install zig`/`wamrc`: a signed `.tar`, Ed25519-verified into
-`~/.hull/tools/cosmocc/`, resolved by `hl_tools_lookup_path`, spawned by
-`hull build`. cosmocc's binaries are themselves APEs → **one arch-free bundle**
-serves every host (simpler than zig's per-platform), and a *cosmo* hull can drive
-it (unlike a native zig tree). Version-coupling is load-bearing: the embedded
-cosmo platform archive is cosmo-libc-version-specific, so the cosmocc must match
-(same as wamrc ↔ the WAMR commit); `hull tools install` pins to the running
-hull's release, giving that for free. Producer: `scripts/build_cosmocc_bundle.sh`
-(repacks the SHA-pinned `cosmo.zip/pub/cosmocc/cosmocc-<ver>.zip`).
+So the "cosmocc is an APE, so it runs on Windows" premise is wrong: only the
+*leaves* are APEs; the *driver* is a shell script, and the toolchain is wired
+with symlinks. cosmo's intended Windows usage is *inside* its bundled shell
+(`cocmd`/bash), not `execvp("cosmocc")`.
 
-## The deferred design decision: bundle size / format
+## What it would actually take (a design change, not a tool install)
 
-`cosmocc-4.0.2` extracts to **~1.43 GB** (two full arch toolchains + cosmo libc +
-apelink). That is 4× the zig bundle and far past the `release_io` 512 MB download
-cap. Shipping it as a tool bundle therefore forces one of:
+To make `hull build` drive cosmocc on Windows, hull would need to:
 
-1. **A ~1.43 GB uncompressed `.tar`** + raise the cap to ~2 GB. Simple, but a
-   punishing download.
-2. **Compressed-bundle support in the trust-critical tools-install extract path**
-   (gzip via the already-vendored miniz, or zip). ~150 MB download, but it adds a
-   format to the signed-bundle install path — a real change to review.
-3. **Prune cosmocc** to a minimal link-only subset. Fragile; both arches are
-   needed for a fat APE.
+- **Invoke cosmocc through cosmo's bundled shell** — `cocmd -c "cosmocc …"` (or
+  bash) rather than `execvp("cosmocc")` — for the cosmo/Windows path only. That
+  is a real change to the build's spawn layer + the compiler resolver, and it
+  crosses the spawn-allowlist design (now it's "hull runs a shell that runs the
+  compiler").
+- **Symlink-aware bundle extraction** — the tools installer's `hl_tar_extract`
+  writes regular files; the cosmocc tree needs symlinks (or a Windows-side
+  reification of them).
+- Plus the **bundle-size problem**: `cosmocc-4.0.2` extracts to **~1.43 GB**
+  (4× zig, past the `release_io` 512 MB cap), so the asset needs either a ~2 GB
+  uncompressed tar or **compressed-bundle support in the trust-critical install
+  path**.
 
-This is a Hull-shaping decision (installer capability + release-asset size), so it
-is left for an explicit call rather than defaulted. Until then the release does
-NOT publish a cosmocc asset and there is NO `cosmocc` REGISTRY row (so the
-`check_tools_registry` guard stays satisfied).
+These are Hull-shaping decisions, so they are **left for an explicit call**. No
+`cosmocc` REGISTRY row / release asset is added (the `check_tools_registry`
+guard stays satisfied), and `scripts/build_cosmocc_bundle.sh` (the SHA-pinned
+`cosmo.zip` repack) is kept only as the producer such a decision would build on —
+note it does not yet preserve symlinks.
 
-## The Windows experiment (`.github/workflows/windows-cosmocc.yml`)
+## Where cosmocc IS the answer today
 
-Independent of the bundle decision, the *frontier* question is: does cosmocc's
-nested pipeline (`cosmocc → cc1 → as → ld → apelink`) survive Cosmopolitan's
-**emulated fork/exec on Windows**, driven by hull's `hl_tool_spawn`? That's
-Cosmopolitan's story, not a Hull design gap — so a standalone, non-required,
-`continue-on-error` workflow probes it on `windows-latest`: download the shipped
-`hull-cosmo` APE, stage the pinned cosmocc at `~/.cosmocc` (a path the cosmo
-compiler-resolver already checks — no bundle needed), `hull build` a minimal
-`app.main`, and run the produced APE. Each step reports PASS/FAIL so the verdict
-shows exactly how far the pipeline gets. See the workflow header for the model.
+On a POSIX host (Linux/macOS) a `hull-cosmo` already builds cosmo-APE apps by
+spawning cosmocc from `~/.cosmocc` / `/opt/cosmo` (its `#ifdef __COSMOPOLITAN__`
+resolver). The install-bundle only removes the "install cosmocc yourself" step
+there; it does not change the Windows conclusion above. (A minor, orthogonal
+Hull gap the experiment also surfaced: that resolver probes `$HOME` but not
+`USERPROFILE`, so it wouldn't find cosmocc on Windows even if cosmocc were
+directly runnable.)
