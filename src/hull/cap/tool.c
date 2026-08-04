@@ -519,13 +519,24 @@ void hl_tool_cosmo_prepare_tmpdir(void)
     const char *home = getenv("HOME");
     if (!home || !*home) home = getenv("USERPROFILE");
     if (home && *home) {
-        /* $USERPROFILE is a backslash path (C:\Users\me); the cosmocc #!/bin/sh
-         * driver mangles backslashes (sh escapes), which corrupts the per-arch
-         * temp paths (x86_64 built, aarch64 failed with "can't create :"). Use
-         * forward slashes throughout - cosmo + busybox both accept C:/... . */
+        /* Normalize the home path to DRIVE-COLON form (C:/Users/me), the one
+         * form BOTH cosmo and the bundled busybox-w64 accept:
+         *  - cosmo's $HOME on Windows is unix-style /C/Users/me (drive mapped to
+         *    /C/); busybox does NOT understand /C/... so its mkdir + redirects
+         *    would hit a different place than cosmo's mktemper -> the driver's
+         *    "nonexistent directory". Convert a leading /X/ to X:/.
+         *  - $USERPROFILE is backslash C:\Users\me; the #!/bin/sh driver mangles
+         *    backslashes. Convert '\\' to '/'.
+         * Result C:/Users/me works for cosmo AND busybox. */
         char h[512];
-        size_t i = 0;
-        for (; home[i] && i < sizeof(h) - 1; i++) h[i] = (home[i] == '\\') ? '/' : home[i];
+        size_t i = 0, k = 0;
+        if (home[0] == '/' && home[1] && home[2] == '/') {   /* /C/... -> C:/... */
+            h[i++] = home[1];
+            h[i++] = ':';
+            k = 2;                                            /* keep the '/' at [2] */
+        }
+        for (; home[k] && i < sizeof(h) - 1; k++)
+            h[i++] = (home[k] == '\\') ? '/' : home[k];
         h[i] = '\0';
         char hull[512], tmp[512];
         int n = snprintf(tmp, sizeof(tmp), "%s/.hull/tmp", h);
