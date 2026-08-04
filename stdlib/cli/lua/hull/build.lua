@@ -2034,7 +2034,25 @@ int main(int argc, char **argv) { return hl_app_run(argc, argv); }
     local group = needs_base_group and not target_is_darwin
     local link_libs = {}
     if group then link_libs[#link_libs + 1] = "-Wl,--start-group" end
+    -- Cosmo is exempt from feature composition: `hull build` plain-links the FULL
+    -- base cosmo platform archive with no whole-archived runtime feature lib. But
+    -- the runtime-owned stdlib entries (hull.json and every other Lua/JS stdlib
+    -- module) live behind the weak hl_stdlib_feature_entries() seam
+    -- (src/hull/stdlib_feature.c): the base's own weak default (0 entries)
+    -- satisfies hl_platform_vfs_init's call at link time, so GNU ld never pulls
+    -- the STRONG override + its stdlib-registry data out of the archive. The
+    -- produced APE then boots with an empty runtime VFS and dies at runtime init
+    -- with "module not found: hull.json" (exit 1). hull itself escapes this only
+    -- because `make` links those registry objects explicitly, not via archive
+    -- resolution. Force-load the whole cosmo base so every strong override is
+    -- present. Safe: cosmo composes zero feature libs, so there is no sibling
+    -- archive to collide with; native builds don't need it (their runtime stdlib
+    -- already rides a whole-archived libhull_feature-<rt>.a). Size cost is
+    -- inherent to cosmo's "everything in the base" model.
+    local cosmo_whole = is_cosmo and not group
+    if cosmo_whole then link_libs[#link_libs + 1] = "-Wl,--whole-archive" end
     link_libs[#link_libs + 1] = platform_a
+    if cosmo_whole then link_libs[#link_libs + 1] = "-Wl,--no-whole-archive" end
     for _, l in ipairs(feature_libs) do link_libs[#link_libs + 1] = l end
     if group then link_libs[#link_libs + 1] = "-Wl,--end-group" end
     link_libs[#link_libs + 1] = "-lm"
