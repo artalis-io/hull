@@ -1139,11 +1139,20 @@ jobs:
       # exercises the embedded-VFS code path. Needs hull rebuilt
       # with EMBED_PLATFORM=1, which we do inline so the
       # MODE=dev step above still gets the lighter binary.
+      #
+      # EMBED_PLATFORM=1 MUST carry to ALL THREE makes: the build config
+      # sentinel (Makefile ~1849) fingerprints EMBED_PLATFORM, so a make that
+      # omits it flips the fingerprint back, PURGES the embedded hull, and
+      # rebuilds it NON-embedded - which then trips the target's own
+      # "hull built without embedded platform" guard. (A flagless third make
+      # was the deterministic HTMX-build failure on both Linux and macOS.)
       - name: HTMX browser E2E (build mode)
         timeout-minutes: 8
+        env:
+          EMBED_PLATFORM: "1"
         run: |
           make platform
-          make EMBED_PLATFORM=1
+          make
           make e2e-htmx-playwright-build
 
       # On failure either suite writes playwright traces + final-state
