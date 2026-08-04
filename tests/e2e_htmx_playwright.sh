@@ -135,14 +135,6 @@ fi
 # was built without EMBED_PLATFORM=1 — there's no graceful path
 # (hull build literally can't proceed without the platform lib).
 if [ "$MODE" = "build" ]; then
-    # MITIGATION (see the js-bytecode-cache root-cause investigation): the dev
-    # run above populates the js-bytecode cache; reusing it here for the `hull
-    # build` tool VM's stdlib-module load has produced an embedded module missing
-    # an export on Linux ("Could not find export 'attachmentServe'"), failing the
-    # build. Force a fresh compile so a build never depends on a prior run's
-    # cache state. TODO(js-bytecode-cache): remove once the underlying cache
-    # round-trip bug is fixed - a cached module must never lose an export.
-    export HULL_NO_JS_BYTECODE_CACHE=1
     if ! "$HULL" doctor --json 2>/dev/null | grep -q '"hull_build":"ready"'; then
         echo "e2e_htmx_playwright: MODE=build needs hull built with"
         echo "  make platform && make EMBED_PLATFORM=1"

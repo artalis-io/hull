@@ -32,6 +32,8 @@ static char *strdup_safe(const char *s)
 #ifdef HL_ENABLE_JS
 
 #include "hull/runtime/js.h"
+#include "hull/stdlib_feature.h"   /* hl_platform_vfs_init / _dispose */
+#include "hull/vfs.h"              /* HlVfs */
 #include "quickjs.h"
 
 int hl_manifest_extract_js_from_file(const char *path,
@@ -60,83 +62,102 @@ int hl_manifest_extract_js_from_file(const char *path,
         return -1;
     }
 
+    /* Give the transient extractor the SAME composed platform VFS the real app
+     * runtime gets. Without it js->base.platform_vfs is NULL, so every stdlib
+     * `hull:*` import (hull:web:attachment-serve, hull:json, ...) misses the VFS
+     * lookup in hl_js_module_loader and falls to the manifest-extract lenient
+     * stub below - and an app that imports a NAMED export from such a module then
+     * dies at link with "Could not find export X", failing extraction. Composing
+     * it lets stdlib modules resolve for real; a genuine feature-only module
+     * (hull:tui, not in the base VFS) still hits the stub. Disposed in cleanup. */
+    HlVfs pvfs;
+    void *pvfs_owned = NULL;
+    hl_platform_vfs_init(&pvfs, &pvfs_owned);
+    js->base.platform_vfs = &pvfs;
+
     /* Only reading app.manifest(): tolerate an unresolvable `hull:*` import (a
      * feature-module stdlib file that rides the composed feature, e.g. hull:tui)
      * so extraction succeeds instead of failing and forcing callers onto their
      * fail-safe path (issue #114). */
     js->manifest_extract_lenient = 1;
 
+    /* Single cleanup path (goto) so the composed platform VFS is disposed on
+     * every exit without repeating it at each error site. */
+    int    rc       = 0;
+    char  *copy     = NULL;
+    size_t json_len = 0;
+
     if (hl_js_load_app(js, path) != 0) {
-        hl_js_free(js);
-        free(js);
         if (out_err) *out_err = strdup_safe(
             "failed to load app (syntax error, throw at top-level, "
             "or unresolved import?)");
-        return -1;
+        rc = -1;
+        goto cleanup;
     }
 
-    JSContext *ctx = js->ctx;
-    JSValue global = JS_GetGlobalObject(ctx);
-    JSValue manifest = JS_GetPropertyStr(ctx, global, "__hull_manifest");
-    JS_FreeValue(ctx, global);
+    {
+        JSContext *ctx = js->ctx;
+        JSValue global = JS_GetGlobalObject(ctx);
+        JSValue manifest = JS_GetPropertyStr(ctx, global, "__hull_manifest");
+        JS_FreeValue(ctx, global);
 
-    /* Treat exception, undefined, and null all as "no manifest
-     * declared" — leave *out_json NULL and return success. */
-    if (JS_IsException(manifest) || JS_IsUndefined(manifest) || JS_IsNull(manifest)) {
+        /* Treat exception, undefined, and null all as "no manifest
+         * declared" — leave *out_json NULL and return success. */
+        if (JS_IsException(manifest) || JS_IsUndefined(manifest) ||
+            JS_IsNull(manifest)) {
+            JS_FreeValue(ctx, manifest);
+            goto cleanup;   /* rc stays 0, copy stays NULL */
+        }
+
+        JSValue json = JS_JSONStringify(ctx, manifest, JS_UNDEFINED, JS_UNDEFINED);
         JS_FreeValue(ctx, manifest);
-        hl_js_free(js);
-        free(js);
-        return 0;
-    }
+        if (JS_IsException(json)) {
+            JS_FreeValue(ctx, json);
+            if (out_err) *out_err = strdup_safe("JSON.stringify(manifest) failed");
+            rc = -1;
+            goto cleanup;
+        }
 
-    JSValue json = JS_JSONStringify(ctx, manifest, JS_UNDEFINED, JS_UNDEFINED);
-    JS_FreeValue(ctx, manifest);
-    if (JS_IsException(json)) {
-        JS_FreeValue(ctx, json);
-        hl_js_free(js);
-        free(js);
-        if (out_err) *out_err = strdup_safe("JSON.stringify(manifest) failed");
-        return -1;
-    }
+        const char *json_str = JS_ToCStringLen(ctx, &json_len, json);
+        if (!json_str) {
+            JS_FreeValue(ctx, json);
+            if (out_err) *out_err = strdup_safe(
+                "cannot convert JSON value to string");
+            rc = -1;
+            goto cleanup;
+        }
 
-    size_t json_len = 0;
-    const char *json_str = JS_ToCStringLen(ctx, &json_len, json);
-    if (!json_str) {
-        JS_FreeValue(ctx, json);
-        hl_js_free(js);
-        free(js);
-        if (out_err) *out_err = strdup_safe(
-            "cannot convert JSON value to string");
-        return -1;
-    }
+        /* Heap-copy the JSON BEFORE tearing down the JS runtime — the
+         * cstring lifetime ends with JS_FreeCString. */
+        copy = malloc(json_len + 1);
+        if (!copy) {
+            JS_FreeCString(ctx, json_str);
+            JS_FreeValue(ctx, json);
+            if (out_err) *out_err = strdup_safe("out of memory");
+            json_len = 0;
+            rc = -1;
+            goto cleanup;
+        }
+        memcpy(copy, json_str, json_len);
+        copy[json_len] = '\0';
 
-    /* Heap-copy the JSON BEFORE tearing down the JS runtime — the
-     * cstring lifetime ends with JS_FreeCString. */
-    char *copy = malloc(json_len + 1);
-    if (!copy) {
         JS_FreeCString(ctx, json_str);
         JS_FreeValue(ctx, json);
-        hl_js_free(js);
-        free(js);
-        if (out_err) *out_err = strdup_safe("out of memory");
-        return -1;
     }
-    memcpy(copy, json_str, json_len);
-    copy[json_len] = '\0';
 
-    JS_FreeCString(ctx, json_str);
-    JS_FreeValue(ctx, json);
+cleanup:
     hl_js_free(js);
     free(js);
+    hl_platform_vfs_dispose(pvfs_owned);
 
-    if (out_json) {
+    if (rc == 0 && copy && out_json) {
         *out_json = copy;
     } else {
-        /* Caller doesn't want the buffer — don't leak it. */
+        /* Error, no-manifest, or caller doesn't want the buffer — don't leak. */
         free(copy);
     }
     if (out_json_len) *out_json_len = json_len;
-    return 0;
+    return rc;
 }
 
 #else /* HL_ENABLE_JS */
