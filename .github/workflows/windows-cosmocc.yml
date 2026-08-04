@@ -135,8 +135,21 @@ jobs:
         shell: pwsh
         run: |
           # bash inherits pwsh's cwd (the workspace), so relative paths resolve.
-          & .\cosmo\bin\bash.exe -c 'export PATH="./cosmo/bin:$PATH"; echo "which cosmocc: $(command -v cosmocc)"; cosmocc -o hello_ape.com hello.c; echo "cosmocc exit: $?"; ls -la hello_ape.com' 2>&1 | Out-String | Write-Host
-          if (-not (Test-Path hello_ape.com)) { throw "APE bash could not build via cosmocc" }
+          # Diagnose the /bin/sh dependency (cosmocc is #!/bin/sh) and try driving
+          # it (a) by name (triggers shebang exec) and (b) via the interpreter
+          # explicitly (bypasses the driver's shebang), and (c) after planting the
+          # APE bash at /bin/sh to satisfy the shebang + the symlinked sub-tools.
+          & .\cosmo\bin\bash.exe -c 'echo "--- /bin ---"; ls -la /bin/sh 2>&1 || echo "no /bin/sh"; echo "sh: $(command -v sh || echo none)"' 2>&1 | Out-String | Write-Host
+          Write-Host "=== (a) by name ==="
+          & .\cosmo\bin\bash.exe -c 'export PATH="./cosmo/bin:$PATH"; cosmocc -o hello_a.com hello.c; echo "exit=$?"' 2>&1 | Out-String | Write-Host
+          Write-Host "=== (b) via interpreter (bash <script>) ==="
+          & .\cosmo\bin\bash.exe -c 'export PATH="./cosmo/bin:$PATH"; bash ./cosmo/bin/cosmocc -o hello_b.com hello.c; echo "exit=$?"' 2>&1 | Out-String | Write-Host
+          Write-Host "=== (c) plant /bin/sh = the APE dash, then by name ==="
+          & .\cosmo\bin\bash.exe -c 'mkdir -p /bin 2>/dev/null; cp ./cosmo/bin/bash.exe /bin/sh 2>&1 || echo "cannot write /bin/sh"; export PATH="./cosmo/bin:$PATH"; cosmocc -o hello_c.com hello.c; echo "exit=$?"' 2>&1 | Out-String | Write-Host
+          if (Test-Path hello_a.com) { Copy-Item hello_a.com hello_ape.com -Force }
+          elseif (Test-Path hello_b.com) { Copy-Item hello_b.com hello_ape.com -Force }
+          elseif (Test-Path hello_c.com) { Copy-Item hello_c.com hello_ape.com -Force }
+          Write-Host "any variant built: $(Test-Path hello_ape.com)"
 
       - name: Verdict — self-contained APE toolchain on Windows?
         shell: pwsh
