@@ -230,22 +230,11 @@ int hl_tool_spawn(const char *const argv[])
     return hl_tool_spawn_env(argv, NULL);
 }
 
-int hl_tool_spawn_env(const char *const argv[], const char *const envadd[])
+/* fork + (env) + execvp + wait + audit. NO allowlist/arg validation: callers
+ * validate BEFORE calling (hl_tool_spawn_env on argv[0]; the shell-driver path
+ * on its shell + driver + args). */
+static int spawn_and_wait(const char *const argv[], const char *const envadd[])
 {
-    if (!argv || !argv[0]) return -1;
-    if (hl_tool_check_allowlist(argv[0]) != 0 ||
-        hl_tool_validate_args(argv) != 0) {
-        ShJsonWriter w = hl_audit_begin("tool.spawn");
-        sh_json_write_key(&w, "argv");
-        sh_json_write_array_start(&w);
-        for (int i = 0; argv[i]; i++)
-            sh_json_write_string(&w, argv[i]);
-        sh_json_write_array_end(&w);
-        sh_json_write_kv_string(&w, "result", "denied");
-        hl_audit_end(&w);
-        return -1;
-    }
-
     pid_t pid = fork();
     if (pid < 0) return -1;
 
@@ -277,6 +266,81 @@ int hl_tool_spawn_env(const char *const argv[], const char *const envadd[])
         hl_audit_end(&w);
     }
     return exit_code;
+}
+
+int hl_tool_spawn_env(const char *const argv[], const char *const envadd[])
+{
+    if (!argv || !argv[0]) return -1;
+    if (hl_tool_check_allowlist(argv[0]) != 0 ||
+        hl_tool_validate_args(argv) != 0) {
+        ShJsonWriter w = hl_audit_begin("tool.spawn");
+        sh_json_write_key(&w, "argv");
+        sh_json_write_array_start(&w);
+        for (int i = 0; argv[i]; i++)
+            sh_json_write_string(&w, argv[i]);
+        sh_json_write_array_end(&w);
+        sh_json_write_kv_string(&w, "result", "denied");
+        hl_audit_end(&w);
+        return -1;
+    }
+    return spawn_and_wait(argv, envadd);
+}
+
+/* Is @p base one of the accepted shell basenames? */
+static int is_shell_basename(const char *base)
+{
+    return strcmp(base, "sh") == 0 || strcmp(base, "sh.exe") == 0 ||
+           strcmp(base, "busybox") == 0 || strcmp(base, "busybox.exe") == 0;
+}
+
+int hl_tool_spawn_driver_shell(const char *shell, const char *driver,
+                               const char *const args[],
+                               const char *const envadd[])
+{
+    if (!shell || !driver) return -1;
+
+    /* The driver must be an allowlisted compiler; the shell must be a bare
+     * sh / busybox. With the fixed -c program below (a compile-time literal),
+     * this runs one allowlisted compiler through a known shell - never an
+     * app-supplied command string. Basename handles both '/' and '\\'. */
+    if (hl_tool_check_allowlist(driver) != 0) return -1;
+    const char *base = strrchr(shell, '/');
+    base = base ? base + 1 : shell;
+    { const char *bs = strrchr(base, '\\'); if (bs) base = bs + 1; }
+    if (!is_shell_basename(base)) return -1;
+    int is_busybox = (strcmp(base, "busybox") == 0 ||
+                      strcmp(base, "busybox.exe") == 0);
+
+    size_t nargs = 0;
+    if (args) while (args[nargs]) nargs++;
+
+    /* Dangerous-flag-validate the driver's args as { driver, args... }
+     * (hl_tool_validate_args skips index 0, so the driver goes in slot 0). */
+    const char **checkv = (const char **)calloc(nargs + 2, sizeof(*checkv));
+    if (!checkv) return -1;
+    checkv[0] = driver;
+    for (size_t j = 0; j < nargs; j++) checkv[j + 1] = args[j];
+    int bad = hl_tool_validate_args(checkv);
+    free((void *)(uintptr_t)checkv);
+    if (bad != 0) return -1;
+
+    /* argv: shell [sh] "-c" 'exec "$0" "$@"' driver args... NULL
+     * (the "sh" applet selector is busybox-only; a real sh takes -c directly).
+     * Max fixed slots: shell + sh + -c + PROG + driver + NULL = 6. */
+    const char **argv = (const char **)calloc(nargs + 6, sizeof(*argv));
+    if (!argv) return -1;
+    size_t i = 0;
+    argv[i++] = shell;
+    if (is_busybox) argv[i++] = "sh";
+    argv[i++] = "-c";
+    argv[i++] = "exec \"$0\" \"$@\"";
+    argv[i++] = driver;
+    for (size_t j = 0; j < nargs; j++) argv[i++] = args[j];
+    argv[i] = NULL;
+
+    int rc = spawn_and_wait(argv, envadd);
+    free((void *)(uintptr_t)argv);
+    return rc;
 }
 
 char *hl_tool_spawn_read(const char *const argv[], size_t *out_len)

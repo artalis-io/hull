@@ -78,6 +78,24 @@ int hl_tool_spawn(const char *const argv[]);
 int hl_tool_spawn_env(const char *const argv[], const char *const envadd[]);
 
 /*
+ * Drive an allowlisted compiler @p driver THROUGH a POSIX shell @p shell,
+ * running `<shell> [sh] -c 'exec "$0" "$@"' <driver> <args...>` (the "sh"
+ * applet selector is inserted only when @p shell is busybox). Used only on the
+ * cosmo/Windows build path, where cosmocc's driver is a `#!/bin/sh` script that
+ * Windows cannot execvp directly: a bundled busybox-w64 supplies the shell.
+ *
+ * This does NOT widen the "no arbitrary shell" invariant: @p shell's basename
+ * must be sh / busybox, @p driver must pass hl_tool_check_allowlist, @p args are
+ * dangerous-flag-validated, and the `-c` program is a COMPILE-TIME LITERAL - so
+ * no app-derived byte is ever parsed as shell code (driver is $0, args are $@,
+ * all positional). @p args / @p envadd are NULL-terminated arrays (NULL = none).
+ * Returns the driver's exit code, or -1 on a validation / spawn failure.
+ */
+int hl_tool_spawn_driver_shell(const char *shell, const char *driver,
+                               const char *const args[],
+                               const char *const envadd[]);
+
+/*
  * Spawn a process and capture its stdout.
  * Returns a malloc'd string (caller frees), or NULL on error.
  * If out_len is non-NULL, the output length is stored there.
