@@ -128,25 +128,47 @@ COFF `libhull_platform.a` that does not exist); changing the POSIX-host path
 The five items, sequenced by dependency (D, B are standalone and land first; A
 needs busybox present; E productionizes and depends on the C decision).
 
-> **E2E GREEN (2026-08-04): the self-contained Windows build WORKS.**
-> `cosmocc-windows-e2e.yml` passed: a cosmo `hull` built from this branch
-> installed the trimmed cosmocc+busybox bundle and `hull build`'d a **working fat
-> APE on `windows-latest`** (`build exit 0`, `app.exe built: True`, runs). It took
-> 19 E2E runs + ~7 isolation probes to get there, through a chain of real fixes.
-> The **turning point** was the spawn mechanism: only `hull(cosmo APE) → busybox
-> → cosmocc` failed the driver's `out2=$(mktemper)` capture (pwsh→busybox→cosmocc
-> and every isolated probe captured fine) - because hull spawned busybox via
-> `fork()+execvp()`, which Cosmopolitan EMULATES on Windows, dropping the stdio
-> handles a native child's grandchildren need for command substitution. Switching
-> the reroute to **`posix_spawn`** (→ `CreateProcess`, no fork emulation) fixed it
-> and unblocked the whole compile. The rest were ordinary hull/trim bugs, in
-> order: trim size gate → busybox-swept-by-trim → /tmp ordering → backslash TMPDIR
-> → setenv-not-reaching-busybox → the `mkdir -p`/dir-exists chain → cosmo's
-> `/C/Users` vs busybox `C:/Users` path dialect → posix_spawn → the `.aarch64/`
-> dual-arch platform subdir (drive-colon broke `hl_tool_mkdir`'s component walk) →
-> the `-lm`/`-lpthread` stub archives the trace-closure trim missed → dropping the
-> ~390 MB `lib/{dbg,optlinux,tiny}/` libcosmo variants to fit the size gate. All
-> landed; the epic is validated end to end.
+> **E2E GREEN (2026-08-04): the self-contained Windows build WORKS end to end.**
+> `cosmocc-windows-e2e.yml` passes: a cosmo `hull` built from this branch installs
+> the trimmed cosmocc+busybox bundle, `hull build`s a fat APE on `windows-latest`
+> (`build exit 0`, `app.exe built: True`), AND **the produced APE runs clean**
+> (`app.exe ran, exit=0`, prints its marker). It took ~21 E2E runs + isolation
+> probes, through two distinct phases of real fixes.
+>
+> **Phase 1 - make the build produce an APE.** The **turning point** was the spawn
+> mechanism: only `hull(cosmo APE) → busybox → cosmocc` failed the driver's
+> `out2=$(mktemper)` capture (pwsh→busybox→cosmocc and every isolated probe
+> captured fine) - because hull spawned busybox via `fork()+execvp()`, which
+> Cosmopolitan EMULATES on Windows, dropping the stdio handles a native child's
+> grandchildren need for command substitution. Switching the reroute to
+> **`posix_spawn`** (→ `CreateProcess`, no fork emulation) unblocked the compile.
+> The rest were ordinary hull/trim bugs: trim size gate → busybox-swept-by-trim →
+> /tmp ordering → backslash TMPDIR → setenv-not-reaching-busybox → the `mkdir -p`/
+> dir-exists chain → cosmo's `/C/Users` vs busybox `C:/Users` path dialect → the
+> `.aarch64/` dual-arch platform subdir (drive-colon broke `hl_tool_mkdir`'s
+> component walk) → the `-lm`/`-lpthread` stub archives the trace-closure trim
+> missed → dropping the ~390 MB `lib/{dbg,optlinux,tiny}/` libcosmo variants.
+>
+> **Phase 2 - make the produced APE actually run (the exit-256 bug).** The build
+> succeeded but the APE died at startup: `failed to pre-load json: module not
+> found: hull.json` (exit 1, seen as 256 in the Windows APE encoding). Root cause
+> is an archive-link gap, not anything Windows/cosmo runtime-specific: the runtime
+> stdlib (`hull.json` + every Lua/JS module) sits behind the weak
+> `hl_stdlib_feature_entries()` seam (`src/hull/stdlib_feature.c`). Native builds
+> whole-archive the runtime feature lib so the strong override wins; `hull` itself
+> links the registry objects explicitly. But the **composition-exempt cosmo base**
+> plain-links its full archive, where the strong override
+> (`stdlib_toolchain_registry.o`) is an archive member SHADOWED by the weak default
+> in the always-pulled `stdlib_feature.o` - so ld never pulls it and the APE boots
+> with an empty runtime VFS. Fix: `build.lua` emits a STDLIB-ONLY strong
+> `hl_stdlib_feature_entries()` as a regular object (wins over the weak default;
+> references the base's `hl_stdlib_<rt>_entries` so the registry is pulled) - NOT
+> the factory hook, which the fat base already fills (a second strong def would be
+> a multiple-definition error). A first attempt to whole-archive the whole base was
+> WRONG - it force-pulls the selectively-linked WASM caps whose worker symbols
+> aren't in the base, breaking the link. A NATIVE build of the same app always ran
+> clean, which localized the break to the cosmo link path. The epic is validated
+> end to end.
 
 **Status: D, B, A, and E have landed; C is decided.** All the code + wiring is
 in: A = the transparent cosmocc-through-busybox reroute (below); C = trim to a
