@@ -128,6 +128,27 @@ COFF `libhull_platform.a` that does not exist); changing the POSIX-host path
 The five items, sequenced by dependency (D, B are standalone and land first; A
 needs busybox present; E productionizes and depends on the C decision).
 
+> **E2E WALL (2026-08-04): busybox-w64 is not a faithful enough shell for
+> cosmocc's real driver.** The `cosmocc-windows-e2e.yml` acceptance run drove the
+> full hull-side chain and fixed six real integration bugs in sequence (trim size
+> gate → busybox-swept-by-trim → /tmp ordering → backslash TMPDIR → setenv not
+> reaching busybox → the reroute itself). It got as far as: bundle installs,
+> resolver finds cosmocc, the reroute drives it through busybox, and **the x86_64
+> object compiles** - then hit a wall INSIDE cosmocc's driver: the dual-arch
+> parallel compile does `out2=$(mktemper .txt)` (command substitution capturing a
+> cosmo-APE's stdout) and `out2` comes back EMPTY under busybox-w64 (mktemper's
+> path leaks to the console uncaptured), so the aarch64 subshell's `2>"$out2"`
+> fails ("can't create : nonexistent directory") while x86_64 (no such redirect)
+> succeeds. `bin/mktemper` IS in the trimmed bundle - this is not a trim gap; it
+> is **busybox-w64 not capturing a cosmo-APE's stdout in `$(...)` on Windows**,
+> below hull's layer. §0.6's CLEAN GO used a trivial single-file build that never
+> exercised the driver's `$(mktemper)` command substitution. So the
+> self-contained busybox path is blocked by a busybox-w64 ↔ cosmo-APE
+> incompatibility in cosmocc's own `#!/bin/sh` driver. **Decision pending** (see
+> the end of this doc). The hull-side work (D/A/B/E) is landed and independently
+> valuable: on a POSIX host `hull tools install cosmocc` + `hull build` needs no
+> busybox and works today.
+
 **Status: D, B, A, and E have landed; C is decided.** All the code + wiring is
 in: A = the transparent cosmocc-through-busybox reroute (below); C = trim to a
 ~309 MB closure (below); E = the trim producer (`scripts/build_cosmocc_bundle.sh`)
