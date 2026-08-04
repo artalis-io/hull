@@ -1,0 +1,114 @@
+name: Windows cosmocc (experimental)
+
+# EXPERIMENT (memory: cosmocc install follow-up). Answers the open question:
+# can a `hull-cosmo` APE, running on Windows, spawn cosmocc to `hull build` an
+# app - i.e. does cosmocc's nested pipeline (cosmocc -> cc1 -> as -> ld ->
+# apelink) survive Cosmopolitan's EMULATED fork/exec on Windows, driven by
+# hull's hl_tool_spawn? This is Cosmopolitan's frontier, not a Hull design gap,
+# so the job is INFORMATIONAL: it is a standalone workflow (not a required
+# check), each frontier step is `continue-on-error`, and a final step prints a
+# verdict. It uses the SHIPPED v0.9.0 hull-cosmo (a real APE) + the pinned
+# cosmocc, staged at ~/.cosmocc (the path hull's #ifdef __COSMOPOLITAN__ compiler
+# resolver already probes - no install-bundle needed).
+#
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - '.github/workflows/windows-cosmocc.yml'
+      - 'scripts/build_cosmocc_bundle.sh'
+
+permissions:
+  contents: read
+
+env:
+  HULL_VERSION: v0.9.0
+  COSMOCC_VERSION: 4.0.2
+  COSMOCC_SHA256: 85b8c37a406d862e656ad4ec14be9f6ce474c1b436b9615e91a55208aced3f44
+
+jobs:
+  windows-build-app:
+    name: hull-cosmo builds an app on Windows
+    runs-on: windows-latest
+    steps:
+      - name: Download the shipped hull-cosmo APE
+        shell: pwsh
+        run: |
+          $url = "https://github.com/${{ github.repository }}/releases/download/$env:HULL_VERSION/hull-cosmo"
+          Write-Host "downloading $url"
+          curl.exe -fsSL --retry 3 -o hull-cosmo.exe $url
+          (Get-Item hull-cosmo.exe).Length
+
+      # Step 1: does an APE even run on windows-latest?
+      - name: hull-cosmo runs on Windows (hull version)
+        id: run_hull
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          .\hull-cosmo.exe version
+          if ($LASTEXITCODE -ne 0) { throw "hull-cosmo did not run (exit $LASTEXITCODE)" }
+
+      # Step 2: stage cosmocc where the cosmo compiler-resolver probes
+      # (~/.cosmocc/bin/cosmocc - see hl_driver_resolve_native).
+      - name: Stage cosmocc at ~/.cosmocc
+        id: stage_cosmocc
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          $zip = "cosmocc.zip"
+          curl.exe -fsSL --retry 3 -o $zip "https://cosmo.zip/pub/cosmocc/cosmocc-$env:COSMOCC_VERSION.zip"
+          $actual = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLower()
+          if ($actual -ne $env:COSMOCC_SHA256) { throw "cosmocc sha mismatch: $actual" }
+          $dest = "$env:USERPROFILE\.cosmocc"
+          New-Item -ItemType Directory -Force -Path $dest | Out-Null
+          Expand-Archive -Path $zip -DestinationPath $dest -Force
+          Get-ChildItem "$dest\bin\cosmocc*" | Select-Object -First 3 Name, Length
+
+      # Step 3: the app to build.
+      - name: Write a minimal app.lua
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path app | Out-Null
+          @'
+          app.manifest({ modules = {} })
+          app.main(function() print("cosmocc-on-windows-ok"); return 0 end)
+          '@ | Set-Content -NoNewline -Path app\app.lua -Encoding ascii
+          Get-Content app\app.lua
+
+      # Step 4: THE experiment - hull-cosmo spawns cosmocc to build the app.
+      - name: hull build the app (spawns cosmocc)
+        id: hull_build
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          $env:PATH = "$env:USERPROFILE\.cosmocc\bin;$env:PATH"
+          .\hull-cosmo.exe build app -o app-out.exe --no-verify-platform 2>&1 | Tee-Object -Variable out
+          Write-Host "--- exit: $LASTEXITCODE ---"
+          if ($LASTEXITCODE -ne 0 -or -not (Test-Path app-out.exe)) { throw "hull build failed (exit $LASTEXITCODE)" }
+          (Get-Item app-out.exe).Length
+
+      # Step 5: does the produced APE run on Windows?
+      - name: Run the produced APE
+        id: run_app
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          $out = .\app-out.exe --no-sandbox 2>&1 | Out-String
+          Write-Host $out
+          if ($out -notmatch "cosmocc-on-windows-ok") { throw "app did not print the expected line" }
+
+      - name: Verdict
+        shell: pwsh
+        run: |
+          function S($v) { if ($v -eq 'success') { 'PASS' } else { 'FAIL' } }
+          Write-Host "==================== Windows cosmocc verdict ===================="
+          Write-Host ("1. hull-cosmo runs on Windows : {0}" -f (S '${{ steps.run_hull.outcome }}'))
+          Write-Host ("2. cosmocc staged            : {0}" -f (S '${{ steps.stage_cosmocc.outcome }}'))
+          Write-Host ("3. hull build spawns cosmocc : {0}" -f (S '${{ steps.hull_build.outcome }}'))
+          Write-Host ("4. produced APE runs         : {0}" -f (S '${{ steps.run_app.outcome }}'))
+          Write-Host "================================================================"
+          Write-Host "Informational only - a FAIL here is a Cosmopolitan-on-Windows"
+          Write-Host "finding (emulated fork/exec of the nested cc1/as/ld/apelink"
+          Write-Host "pipeline), not a Hull regression."
