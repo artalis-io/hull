@@ -54,6 +54,17 @@ jobs:
           make platform-cosmo
           make CC=cosmocc EMBED_PLATFORM=cosmo
           ./build/hull version
+      - name: Isolate the exit-256 json bug - build + RUN the app on LINUX
+        run: |
+          # cosmocc is native here, so hull-cosmo builds + the produced APE runs
+          # on Linux too. If it fails to pre-load hull.json HERE, the bug is
+          # cosmo-general (not Windows); if it exits 0 here, it is Windows-specific.
+          mkdir -p /tmp/jsonapp
+          printf 'app.manifest({ modules = {} })\napp.main(function(ctx) ctx.stdout:write("APP-MARKER-OK\\n"); return 0 end)\n' > /tmp/jsonapp/app.lua
+          ./build/hull build /tmp/jsonapp -o /tmp/jsonapp/app.com --no-verify-platform 2>&1 | tail -3
+          echo "--- run the cosmo-built app on Linux ---"
+          rc=0; /tmp/jsonapp/app.com || rc=$?
+          echo "LINUX cosmo-app exit: $rc"
       - uses: actions/upload-artifact@v4
         with:
           name: hull-cosmo-branch
