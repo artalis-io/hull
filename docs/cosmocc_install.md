@@ -113,37 +113,217 @@ The recipe hull would implement: extract cosmocc (symlink-aware), **plant
 `/bin/sh` = busybox** (so the `#!/bin/sh` driver + its symlinked sub-tools
 resolve), **share one `TMPDIR`**, and **drive cosmocc via `busybox sh -c`**.
 
-## What it would actually take (a design change, not a tool install)
+## Epic spec (A-E): self-contained cosmocc `hull build` on Windows
 
-To make `hull build` drive cosmocc on Windows, hull would need to:
+This is the design for turning §0.6's CLEAN GO into a shipped capability. It is a
+**design change, not a `hull tools install`** (it crosses the "no shell
+invocation" spawn-allowlist invariant), so it is written out fully here for an
+explicit go/no-go. **Goal:** a `hull-cosmo` on a stock Windows box, with one
+`hull tools install cosmocc`, builds a cosmo-APE app. **Non-goals:** native
+Windows PE output (that needs the separate Windows C port of Hull -
+pledge/unveil→JobObjects, fork/exec→CreateProcess, Keel epoll→IOCP, and a
+COFF `libhull_platform.a` that does not exist); changing the POSIX-host path
+(Linux/macOS already work); cosmo's own `cocmd`.
 
-- **Invoke cosmocc through a POSIX `sh`** — `sh -c "cosmocc …"` rather than
-  `execvp("cosmocc")`, for the cosmo/Windows path only. That is a real change to
-  the build's spawn layer + the compiler resolver, and it crosses the
-  spawn-allowlist design (now it's "hull runs a shell that runs the compiler").
-  §0 showed cosmo's own `cocmd` is NOT a POSIX `sh`; §0.6 showed **`busybox-w64`
-  IS the concrete, self-contained enabler** — a ~1 MB native PE that hull can
-  bundle (no external Git-Bash/WSL dependency, no ~40 MB GPLv3 MSYS runtime).
-- **Plant `/bin/sh` + share `TMPDIR`** (the two setup steps §0.6 found load-
-  bearing): copy busybox to `/bin/sh.exe` so the `#!/bin/sh` driver and its
-  symlinked sub-tools resolve their shebang, and export one real `TMPDIR`
-  (`TMP`/`TEMP`) so the driver's final `.dbg` rename finds what the native APE
-  sub-tools wrote. Without the shared temp, cosmocc builds a correct APE but
-  exits non-zero on the sidecar `mv`.
-- **Symlink-aware bundle extraction** — the tools installer's `hl_tar_extract`
-  writes regular files; the cosmocc tree needs symlinks (or a Windows-side
-  reification of them). `bsdtar`/`tar.exe` preserved them on the runner, so the
-  extractor's symlink support is the gap, not the bundle format.
-- Plus the **bundle-size problem**: `cosmocc-4.0.2` extracts to **~1.43 GB**
-  (4× zig, past the `release_io` 512 MB cap), so the asset needs either a ~2 GB
-  uncompressed tar or **compressed-bundle support in the trust-critical install
-  path**.
+The five items, sequenced by dependency (D, B are standalone and land first; A
+needs busybox present; E productionizes and depends on the C decision):
 
-These are Hull-shaping decisions, so they are **left for an explicit call**. No
-`cosmocc` REGISTRY row / release asset is added (the `check_tools_registry`
-guard stays satisfied), and `scripts/build_cosmocc_bundle.sh` (the SHA-pinned
-`cosmo.zip` repack) is kept only as the producer such a decision would build on —
-note it does not yet preserve symlinks.
+### A - drive cosmocc through busybox `sh` (the invocation change)
+
+**Problem.** For a cosmo target, `build.lua` always uses the compiler path (the
+`if not is_cosmo` gate around the compiler-free `obj_emit`): it does
+`tool.spawn({ cc, "-c", "app_registry.c", ... })`, the same for `app_main.c`, and
+the apelink of the fat binary, with `cc` = cosmocc resolved by
+`hl_driver_resolve_native` (`src/hull/compiler.c:131`). Each lands in
+`hl_tool_spawn` → `execvp(argv[0])` (`src/hull/cap/tool.c:233`). On a POSIX host
+the kernel honors cosmocc's `#!/bin/sh` shebang; on Windows there is no kernel
+shebang, so `execvp("cosmocc")` fails. The invocation must become
+`busybox sh -c 'cosmocc "$@"' cosmocc <args...>` (positional `$@`, so no arg
+needs shell-quoting - paths with spaces stay safe).
+
+**Touchpoints.**
+- `src/hull/cap/tool.c:133` `allowed_prefixes[]` - currently `cosmocc` is
+  allowed as `argv[0]`; routing through the shell makes `busybox` the `argv[0]`.
+- `src/hull/cap/tool.c:233` `hl_tool_spawn_env` - the fork/execvp site.
+- `stdlib/cli/lua/hull/build.lua` - every cosmo-path `tool.spawn({ cc, ... })`.
+
+**Design (keeps the no-shell invariant closed).** Do NOT add a general `sh` to
+the allowlist - that would re-open arbitrary shell execution. Instead add a
+dedicated, tightly-scoped entry point:
+
+```
+int hl_tool_spawn_driver_shell(const char *shell,      /* the busybox path   */
+                               const char *driver,      /* an allowlisted cc  */
+                               const char *const args[],/* compiler args only */
+                               const char *const envadd[]);
+```
+
+It builds the argv ITSELF as a fixed shape - `{ shell, "sh", "-c",
+"exec \"$0\" \"$@\"", driver, args... }` - so the `-c` string is a **compile-time
+literal** (no app-derived bytes ever reach the shell as code) and every
+app-derived value arrives as a positional parameter. It validates `driver`
+through the existing `hl_tool_check_allowlist` (must be `cosmocc`) and validates
+`shell`'s basename is exactly `busybox`/`sh`. Result: the surface added is "run
+busybox as `sh` to exec one allowlisted compiler with positional args," not "run
+a shell." `build.lua` calls this only on the cosmo+Windows path (a new
+`tool.cosmo_shell` accessor exposes the resolved busybox path; nil elsewhere, and
+when nil `build.lua` keeps the direct `tool.spawn` call).
+
+**Plant `/bin/sh` + share `TMPDIR` (the §0.6 setup, done in C at build start).**
+Before the first driver spawn on Windows: copy the bundled busybox to a
+`/bin/sh.exe` the cosmocc driver + its symlinked sub-tools resolve (the shebang
+target), and set `TMPDIR`/`TMP`/`TEMP` to one real directory (passed via the
+`envadd` arg above) so the driver's final `.dbg` `mv` finds what the native APE
+sub-tools wrote. Planting `/bin/sh` writes outside the app dir, so it is a
+build-tool action (unveiled `~/.hull` region or the cosmo bundle's own `bin/`),
+never an app capability.
+
+**Risks.** (1) Crosses the "No shell invocation" convention in CLAUDE.md - the
+scoped entry point + literal `-c` is the mitigation, and it must be called out
+in the security docs. (2) Windows-only code path with no product-path CI until
+Windows `hull build` CI exists (the investigation workflow is the stand-in). (3)
+The `/bin/sh` plant needs a writable location; if `/bin` is not writable, fall
+back to putting busybox's dir on `PATH` as `sh` + relying on busybox shebang
+routing (variant (a) built the APE; only the `.dbg` step needed the plant, which
+the shared `TMPDIR` also addresses).
+
+**Tests.** Extend `windows-cosmocc.yml` into a real `hull build` smoke on
+`windows-latest` once A+B+D land (build the null app, run it, assert exit code);
+a `test_tool` unit case asserting `hl_tool_spawn_driver_shell` rejects a
+non-allowlisted driver and a non-busybox shell.
+
+### B - symlink-aware `hl_tar_extract`
+
+**Problem.** `hl_tar_extract` (`src/hull/cap/tar.c:133`, contract in
+`include/hull/cap/tar.h:38`) handles only typeflags `'5'`/`'0'`/`'\0'` (dir /
+file) and **skips symlinks** (`'2'`) and hardlinks (`'1'`). cosmocc's arch
+compilers (`x86_64-unknown-cosmo-cc`, …) are symlinks → `cosmocc`; skipping them
+yields a broken toolchain. `bsdtar` preserved them on the runner, so the gap is
+purely hull's extractor.
+
+**Design.** Add typeflag `'2'` handling. The ustar `linkname` is
+`hdr[157..257]` (100 bytes), adjacent to the `typeflag` at `hdr[156]` the parser
+already reads. Validate `linkname` with the same `tar_safe_path` gate the member
+name uses (reject absolute / `..`-escaping - a malicious symlink is a
+write-through primitive even in a trusted bundle: defense in depth). Then, at
+extract time: `symlink(linkname, path)`; on `EPERM`/`EEXIST`/Windows failure,
+**fall back to copying** the already-extracted target file
+(`dirname(path)/linkname` - the targets are same-dir regular members, e.g.
+`cosmocc`), which needs a two-pass extract (regular files first, deferred
+symlink members second). The copy fallback removes the hard Windows
+requirement; the `symlink` fast-path is used where privilege allows.
+
+**Touchpoints.** `src/hull/cap/tar.c` (parse: surface linkname on `HlTarEntry`;
+extract: the two-pass + symlink/copy), `include/hull/cap/tar.h` (add
+`const char *linkname` to `HlTarEntry`, update the contract comment), the
+producer `scripts/build_cosmocc_bundle.sh` (emit symlinks, see E).
+
+**Windows note.** `symlink()` maps to `CreateSymbolicLink`, which needs
+`SeCreateSymbolicLinkPrivilege` (admin or Developer Mode). The copy fallback is
+why B does not hard-require either.
+
+**Tests.** `test_tar` cases: a symlink member extracts as a link where allowed
+and as a copy where not; a `..`-escaping linkname is rejected. This is a pure C
+change testable without cosmocc.
+
+### C - bundle size / format (the one real open question)
+
+**Problem.** `cosmocc-4.0.2` extracts to **~1.43 GB**. A flat uncompressed
+`.tar` of the tree is ~1.43 GB, over the `release_io.c:142`
+`max_response_size = 512 MB` download cap; the upstream `.zip` is ~113 MB
+compressed. And hull has **no in-tree inflate** - `src/hull/utils/compress.c` is
+HTTP-response gzip *encode* only - so a `.tar.gz` asset can't be decompressed by
+the install path today. Three options, in preference order:
+
+1. **Trim the tree.** APE output needs only the compiler + assembler + apelink +
+   the cosmo runtime libs/headers cosmocc links; the full 1.43 GB includes
+   x86_64-linux sysroots, examples, and docs a Hull APE build never touches.
+   A trimmed subset could plausibly land under ~300-500 MB uncompressed (fits
+   the cap, no new code). Exact keep-set is a spike: build the null app, trace
+   which tree files cosmocc opens (`strace`/`--ftrace`), keep that closure.
+2. **Add gzip inflate** to make a `.tar.gz` (~120 MB) bundle work. Vendors a
+   small inflate (e.g. `tinfl` from miniz, ~1 file) behind `hl_tar_extract_gz`.
+   New trust-path code (must be fuzzed) but shrinks the asset ~10×.
+3. **Raise the cap** to ship the ~1.43 GB uncompressed tar. Simplest, but a
+   heavy asset (GitHub's 2 GB/asset limit still fits) and a big download.
+
+Recommendation: **(1) trim first** (no new decompressor in the trust path, asset
+under the existing cap), keep (2) as the fallback if the trimmed tree won't fit.
+This is the item that needs a decision before E.
+
+### D - resolver: `$HOME`→`USERPROFILE` + the installed-bundle location
+
+**Problem.** `hl_driver_resolve_native` (`src/hull/compiler.c:143`) probes
+`getenv("HOME")` for `~/.cosmocc/bin/cosmocc`, then `/opt/cosmo`, then `cosmocc`
+on `$PATH`. On Windows cosmo libc populates `USERPROFILE`, not `HOME`, so none
+resolve; and it never checks the `hull tools install` location.
+
+**Design (smallest item, standalone).** (1) Home fallback:
+`getenv("HOME")` ? : `getenv("USERPROFILE")`. (2) Probe the installed bundle
+FIRST via `hl_tools_lookup_path("cosmocc", hull_exe, ...)` →
+`~/.hull/tools/cosmocc/bin/cosmocc`, so `hull tools install cosmocc` is found
+before the ad-hoc locations. Confirm `hl_tools_lookup_path`'s own home lookup
+has the same `USERPROFILE` fallback.
+
+**Tests.** `test_compiler` case with `HOME` unset + `USERPROFILE` set resolves
+the bundle path.
+
+### E - productionize (registry + producer + release + dry-run)
+
+- **REGISTRY row** in `src/hull/tools_install.c`: `cosmocc`,
+  `.is_bundle = 1`, `.bundle_entry = "bin/cosmocc"`, **not**
+  `bundle_per_platform` (cosmocc binaries are themselves APEs → one arch-free
+  bundle serves every host). Platform gating: publish for all native platforms
+  **and** cosmo (unlike zig, cosmocc is *for* the cosmo hull). Adding the row
+  keeps `check_tools_registry.sh` satisfied (one row + one matching asset).
+- **Bundle busybox-w64 INSIDE the cosmocc bundle** (`bin/busybox.exe`, ~1 MB)
+  rather than as its own tool. Rationale: hull's tool-platform enum is
+  `{linux-x86_64, linux-aarch64, darwin-arm64, cosmo}` with no "windows" - a
+  Windows-only `busybox-w64` tool has no platform key. Riding inside the
+  cosmocc bundle sidesteps that (it is unused on non-Windows hosts) and keeps
+  "install cosmocc" as the single user step. `build.lua` finds it at
+  `<bundle>/bin/busybox.exe` via `tool.cosmo_shell`.
+- **Producer** `scripts/build_cosmocc_bundle.sh` already exists (SHA-pinned
+  `cosmo.zip` repack) but must be updated per B (symlink-preserving `tar`,
+  `--dereference` OFF) and C (trim set or gzip), and drop `bin/busybox.exe` in.
+- **Release** `release.yml` asset + `hull.sha256` manifest line +
+  `tests/release_smoke.sh` step; **dry-run** first via a hyphenated pre-release
+  tag (auto `--prerelease`; teardown with `gh release delete --cleanup-tag`).
+- **Licensing.** busybox is **GPLv2**; it is a separate program hull *spawns*
+  (mere aggregation, like the Apache-2 `wamrc` / MIT `zig` bundles), not linked,
+  so redistribution alongside Hull's AGPLv3 is fine - but the GPLv2 source-offer
+  obligation for the redistributed busybox binary must be honored (pin the
+  upstream source + SHA, note it in the release). Flag for confirmation.
+
+### Sequencing & what blocks what
+
+```
+D (resolver, tiny, standalone)  ─┐
+B (symlink extract, pure C)     ─┤→ A (shell-driver spawn; needs busybox present)
+C DECISION (trim vs gzip vs cap)─┘        │
+                                          └→ E (registry + producer + release + dry-run)
+```
+
+D and B can land immediately (both are self-contained, CI-testable without
+cosmocc). A needs busybox available (dev: drop it next to a locally-unzipped
+cosmocc). E is gated on the C decision (it determines the producer + asset). A
+Windows `hull build` smoke in `windows-cosmocc.yml` is the acceptance test, added
+once A+B+D are in.
+
+### Open decisions (need an explicit call before E)
+
+1. **Ship it at all, or keep it documented-and-parked?** It is a real
+   spawn-layer/security-invariant change for one platform's build path.
+2. **C: bundle format** - trim the tree (preferred), add gzip inflate to the
+   trust path, or raise the download cap for a 1.43 GB asset.
+3. **A: gate** - is Windows cosmo-build automatic when a bundled busybox is
+   present, or behind an explicit `--host-shell`/opt-in flag?
+4. **Licensing** - confirm the GPLv2 busybox "aggregation, not derivative"
+   redistribution stance + source-offer handling.
+
+Until these are decided, no `cosmocc` REGISTRY row / release asset is added (the
+`check_tools_registry` guard stays satisfied), and `scripts/build_cosmocc_bundle.sh`
+stays the producer skeleton such a decision would build on.
 
 ## Where cosmocc IS the answer today
 
