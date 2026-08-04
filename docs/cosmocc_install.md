@@ -128,23 +128,25 @@ COFF `libhull_platform.a` that does not exist); changing the POSIX-host path
 The five items, sequenced by dependency (D, B are standalone and land first; A
 needs busybox present; E productionizes and depends on the C decision).
 
-> **E2E journey (2026-08-04): seven bugs, no wall.** The `cosmocc-windows-e2e.yml`
-> acceptance run drove the full hull-side chain and fixed a sequence of real
-> integration bugs: trim size gate → busybox-swept-by-trim → /tmp ordering →
-> backslash TMPDIR → setenv-not-reaching-busybox → then a mis-diagnosis (see
-> below) → **the real cause: `~/.hull/tmp` did not exist** when cosmocc's driver
-> ran, so its `mktemper` couldn't create the temp file the parallel aarch64
-> subshell redirects to (`out2=$(mktemper); ( … ) 2>"$out2"`), giving
-> "can't create : nonexistent directory". A lean probe (`cosmocc-bbox-probe.yml`)
-> isolated it conclusively: with the dir ABSENT the exact E2E error reproduces;
-> with it PRESENT, mktemper + the redirect work - **even with the long backslash
-> path** `C:\Users\...\.hull\tmp`. So the earlier "busybox can't capture a
-> cosmo-APE's `$(...)` stdout" reading was WRONG (a flawed probe: an 8-X mktemper
-> template vs the required 13; the same run in fact showed
-> `ape_version=[cosmocc (GCC) 14.1.0]` - capture works). Fix: the busybox `-c`
-> program `mkdir -p`s the (backslash-normalized) TMPDIR itself before exporting
-> it, so the dir reliably exists regardless of cosmo's mkdir. The self-contained
-> busybox path is **not** blocked.
+> **E2E GREEN (2026-08-04): the self-contained Windows build WORKS.**
+> `cosmocc-windows-e2e.yml` passed: a cosmo `hull` built from this branch
+> installed the trimmed cosmocc+busybox bundle and `hull build`'d a **working fat
+> APE on `windows-latest`** (`build exit 0`, `app.exe built: True`, runs). It took
+> 19 E2E runs + ~7 isolation probes to get there, through a chain of real fixes.
+> The **turning point** was the spawn mechanism: only `hull(cosmo APE) → busybox
+> → cosmocc` failed the driver's `out2=$(mktemper)` capture (pwsh→busybox→cosmocc
+> and every isolated probe captured fine) - because hull spawned busybox via
+> `fork()+execvp()`, which Cosmopolitan EMULATES on Windows, dropping the stdio
+> handles a native child's grandchildren need for command substitution. Switching
+> the reroute to **`posix_spawn`** (→ `CreateProcess`, no fork emulation) fixed it
+> and unblocked the whole compile. The rest were ordinary hull/trim bugs, in
+> order: trim size gate → busybox-swept-by-trim → /tmp ordering → backslash TMPDIR
+> → setenv-not-reaching-busybox → the `mkdir -p`/dir-exists chain → cosmo's
+> `/C/Users` vs busybox `C:/Users` path dialect → posix_spawn → the `.aarch64/`
+> dual-arch platform subdir (drive-colon broke `hl_tool_mkdir`'s component walk) →
+> the `-lm`/`-lpthread` stub archives the trace-closure trim missed → dropping the
+> ~390 MB `lib/{dbg,optlinux,tiny}/` libcosmo variants to fit the size gate. All
+> landed; the epic is validated end to end.
 
 **Status: D, B, A, and E have landed; C is decided.** All the code + wiring is
 in: A = the transparent cosmocc-through-busybox reroute (below); C = trim to a
