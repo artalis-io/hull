@@ -128,8 +128,9 @@ COFF `libhull_platform.a` that does not exist); changing the POSIX-host path
 The five items, sequenced by dependency (D, B are standalone and land first; A
 needs busybox present; E productionizes and depends on the C decision).
 
-**Status: D and B have landed** (the two standalone C changes). A (spawn layer),
-C (bundle-format decision), and E (productionize) remain.
+**Status: D and B have landed** (the two standalone C changes) and **C is
+decided** (trim the tree to a ~309 MB closure, under the cap uncompressed - see
+below). A (spawn layer) and E (productionize) remain.
 
 ### A - drive cosmocc through busybox `sh` (the invocation change)
 
@@ -229,30 +230,42 @@ why B does not hard-require either.
 and as a copy where not; a `..`-escaping linkname is rejected. This is a pure C
 change testable without cosmocc.
 
-### C - bundle size / format (the one real open question)
+### C - bundle size / format (DECIDED: trim the tree)
 
-**Problem.** `cosmocc-4.0.2` extracts to **~1.43 GB**. A flat uncompressed
-`.tar` of the tree is ~1.43 GB, over the `release_io.c:142`
-`max_response_size = 512 MB` download cap; the upstream `.zip` is ~113 MB
-compressed. And hull has **no in-tree inflate** - `src/hull/utils/compress.c` is
-HTTP-response gzip *encode* only - so a `.tar.gz` asset can't be decompressed by
-the install path today. Three options, in preference order:
+**Problem.** `cosmocc-4.0.2` extracts to **~1.37 GB**. A flat uncompressed `.tar`
+of the whole tree is over the `release_io.c:142` `max_response_size = 512 MB`
+download cap; and hull has **no in-tree inflate** (`src/hull/utils/compress.c` is
+HTTP-response gzip *encode* only), so a `.tar.gz` asset can't be decompressed by
+the install path today.
 
-1. **Trim the tree.** APE output needs only the compiler + assembler + apelink +
-   the cosmo runtime libs/headers cosmocc links; the full 1.43 GB includes
-   x86_64-linux sysroots, examples, and docs a Hull APE build never touches.
-   A trimmed subset could plausibly land under ~300-500 MB uncompressed (fits
-   the cap, no new code). Exact keep-set is a spike: build the null app, trace
-   which tree files cosmocc opens (`strace`/`--ftrace`), keep that closure.
-2. **Add gzip inflate** to make a `.tar.gz` (~120 MB) bundle work. Vendors a
-   small inflate (e.g. `tinfl` from miniz, ~1 file) behind `hl_tar_extract_gz`.
-   New trust-path code (must be fuzzed) but shrinks the asset ~10×.
-3. **Raise the cap** to ship the ~1.43 GB uncompressed tar. Simplest, but a
-   heavy asset (GitHub's 2 GB/asset limit still fits) and a big download.
+**Spike result (the `sectionc-trim-trace` CI job, `strace -ff` of a fat-APE
+build).** The set of cosmocc-tree files an APE build actually opens is only
+**~309 MB / 64 files** - and the superset upper bound (every path mentioned,
+success or not) is identical, so there is no measurement gap. The closure is
+dominated by, per arch:
 
-Recommendation: **(1) trim first** (no new decompressor in the trust path, asset
-under the existing cap), keep (2) as the fallback if the trimmed tree won't fit.
-This is the item that needs a decision before E.
+| Kept file (per arch, x86_64 + aarch64) | Size |
+|---|---|
+| `libexec/gcc/<arch>-linux-cosmo/14.1.0/cc1` (the C compiler) | 79 + 75 MB |
+| `<arch>-linux-cosmo/lib/libcosmo.a` (cosmo runtime) | 59 + 56 MB |
+| `as`, `ld.bfd`, `collect2`, `<arch>-linux-cosmo-gcc` drivers | ~35 MB |
+| `bin/{cosmocc,apelink,fixupobj,pecheck}` + arch-cc symlinks | ~2 MB |
+| headers (`include/`, `<arch>-linux-cosmo/include/`) | few MB |
+
+`cc1` and `libcosmo.a` are opened *whole* as files regardless of how many
+symbols link, so this floor is faithful even though the trace program is small
+(and hull's real link only adds its own embedded platform `.a`, not cosmocc
+third-party libs - hull uses cosmo libc only). **~1060 MB is droppable**:
+examples, docs, the bundled python, unused third-party libs, and `.dbg` debug
+variants a Hull build never touches.
+
+**Decision: option (1) TRIM.** A trimmed bundle of the ~309 MB closure (round up
+to ~350-400 MB for header slack + the crt/ape link objects + margin) fits under
+the existing 512 MB cap **uncompressed** - so NO gzip inflater is added to the
+trust path, and no cap change. The producer (`scripts/build_cosmocc_bundle.sh`,
+item E) builds the bundle from the keep-set above (+ its symlinks + parent dirs),
+not the whole tree. (Rejected: option 2 gzip-inflate - unnecessary new
+trust-path code; option 3 raise-the-cap - ships a needless ~1 GB.)
 
 ### D - resolver: `$HOME`→`USERPROFILE` + the installed-bundle location
 
@@ -315,10 +328,9 @@ once A+B+D are in.
 
 ### Open decisions (need an explicit call before E)
 
-1. **Ship it at all, or keep it documented-and-parked?** It is a real
-   spawn-layer/security-invariant change for one platform's build path.
-2. **C: bundle format** - trim the tree (preferred), add gzip inflate to the
-   trust path, or raise the download cap for a 1.43 GB asset.
+1. ~~**Ship it at all?**~~ DECIDED: ship it.
+2. ~~**C: bundle format?**~~ DECIDED: trim the tree (~309 MB closure fits the
+   512 MB cap uncompressed; no inflater, no cap change).
 3. **A: gate** - is Windows cosmo-build automatic when a bundled busybox is
    present, or behind an explicit `--host-shell`/opt-in flag?
 4. **Licensing** - confirm the GPLv2 busybox "aggregation, not derivative"
