@@ -56,13 +56,24 @@ jobs:
             & ".\bb\$bb" sh -c 'export TMPDIR=C:/tmp; out2=$("./cosmo/bin/mktemper" "$TMPDIR/fatcosmocc.XXXXXXXXXXXXX.txt"); echo "fwd out2=[$out2]"; ( echo err >&2 ) 2>"$out2" && echo "fwd REDIRECT OK" || echo "fwd REDIRECT FAIL"; [ -f "$out2" ] && echo "fwd FILE OK"' 2>&1 | Out-String | Write-Host
             # 2) BACK-slash TMPDIR (what a cosmo hull's setenv produces) - is THIS what breaks it?
             & ".\bb\$bb" sh -c 'export TMPDIR="C:\tmp"; out2=$("./cosmo/bin/mktemper" "$TMPDIR/fatcosmocc.XXXXXXXXXXXXX.txt"); echo "bs out2=[$out2]"; ( echo err >&2 ) 2>"$out2" && echo "bs REDIRECT OK" || echo "bs REDIRECT FAIL"' 2>&1 | Out-String | Write-Host
-            # 3) Does busybox `mkdir -p` actually CREATE the tmp dir? (the reroute's
-            #    fix assumed it does.) Test several path forms, dir absent first.
-            foreach ($td in @("C:/tmp2", "$($env:USERPROFILE -replace '\\','/')/.hull/tmp", "/tmp3", "//./C:/tmp4")) {
-              if (Test-Path $td -ErrorAction SilentlyContinue) { Remove-Item -Recurse -Force $td -ErrorAction SilentlyContinue }
-              $r = (& ".\bb\$bb" sh -c "mkdir -p `"$td`" 2>&1; if [ -d `"$td`" ]; then echo MKDIR_OK; else echo MKDIR_FAIL; fi; v=`$(`"./cosmo/bin/mktemper`" `"$td/fatcosmocc.XXXXXXXXXXXXX.txt`" 2>/dev/null); if [ -n `"`$v`" ]; then echo TEMP_OK; else echo TEMP_FAIL; fi" 2>&1 | Out-String)
-              Write-Host "[$bb] td=[$td] -> $($r -replace '\r?\n',' ')"
-            }
+            # 3) Is mktemper's stdout captured by $() - top-level vs NESTED in a
+            #    script busybox runs (mimicking cosmocc's driver)? Dump byte len +
+            #    hex to catch an empty capture or a trailing \r (0d).
+            New-Item -ItemType Directory -Force -Path C:\tmp | Out-Null
+            Write-Host "-- top-level \$(mktemper) --"
+            & ".\bb\$bb" sh -c 'export TMPDIR=C:/tmp; v=$("./cosmo/bin/mktemper" "$TMPDIR/fatcosmocc.XXXXXXXXXXXXX.txt"); printf "len=%s hex=[" "${#v}"; printf "%s" "$v" | od -An -tx1 | tr -d "\n"; printf "]\n"' 2>&1 | Out-String | Write-Host
+            # Nested: a script (run by busybox) does the capture, like the driver.
+            @'
+export TMPDIR=C:/tmp
+v=$("./cosmo/bin/mktemper" "$TMPDIR/fatcosmocc.XXXXXXXXXXXXX.txt")
+printf "nested len=%s hex=[" "${#v}"; printf "%s" "$v" | od -An -tx1 | tr -d "\n"; printf "]\n"
+( echo e >&2 ) 2>"$v" && echo "nested REDIRECT OK" || echo "nested REDIRECT FAIL"
+'@ | Set-Content -NoNewline drv.sh -Encoding ascii
+            Write-Host "-- nested (busybox runs a script) --"
+            & ".\bb\$bb" sh drv.sh 2>&1 | Out-String | Write-Host
+            # And exactly as a shebang script busybox execs (cosmocc IS #!/bin/sh):
+            "#!/bin/sh`n" + (Get-Content drv.sh -Raw) | Set-Content -NoNewline drv2.sh -Encoding ascii
+            & ".\bb\$bb" sh -c './drv2.sh' 2>&1 | Out-String | Write-Host
             # Machine verdict: forward-slash path -> redirect works?
             $r = (& ".\bb\$bb" sh -c 'export TMPDIR=C:/tmp; out2=$("./cosmo/bin/mktemper" "$TMPDIR/fatcosmocc.XXXXXXXXXXXXX.txt"); ( echo x >&2 ) 2>"$out2" && [ -n "$out2" ] && echo FWD_OK || echo FWD_BAD' 2>&1 | Out-String)
             Write-Host "verdict($bb): $r"
