@@ -74,25 +74,22 @@ jobs:
         continue-on-error: true
         shell: pwsh
         run: |
-          # PowerShell refuses to run an extension-less APE ("cannot run a
-          # document"), so copy to .exe. This also exercises cosmocc's INTERNAL
-          # spawns of its extension-less sub-tools (cc1/as/ld) via cosmo's execvp
-          # emulation - the true "does the pipeline work on Windows" probe.
           $bin = "$env:USERPROFILE\.cosmocc\bin"
-          Copy-Item "$bin\cosmocc" "$bin\cosmocc.exe" -Force
-          Write-Host "=== cosmocc.exe --version ==="
-          & "$bin\cosmocc.exe" --version 2>&1 | Out-String | Write-Host
-          Write-Host "--- exit: $LASTEXITCODE ---"
-          Write-Host "=== cosmocc.exe -dumpmachine ==="
-          & "$bin\cosmocc.exe" -dumpmachine 2>&1 | Out-String | Write-Host
-          Write-Host "--- exit: $LASTEXITCODE ---"
-          # Actually compile a trivial .c to prove the full cc1->as->ld->apelink
-          # chain runs (not just the driver's --version fast path).
-          "int main(void){return 0;}" | Set-Content -NoNewline hello.c -Encoding ascii
-          Write-Host "=== cosmocc.exe -o hello.com hello.c ==="
-          & "$bin\cosmocc.exe" -o hello.com hello.c 2>&1 | Out-String | Write-Host
-          Write-Host "--- compile exit: $LASTEXITCODE ; hello.com exists: $(Test-Path hello.com) ---"
-          if ($LASTEXITCODE -ne 0 -or -not (Test-Path hello.com)) { throw "cosmocc could not compile on Windows" }
+          Write-Host "=== bin/ listing (sizes) ==="
+          Get-ChildItem $bin | Sort-Object Length | Format-Table Name, Length -AutoSize | Out-String | Write-Host
+          Write-Host "=== first bytes of the cosmocc driver (script vs APE?) ==="
+          $bytes = [System.IO.File]::ReadAllBytes("$bin\cosmocc")[0..63]
+          $ascii = -join ($bytes | ForEach-Object { if ($_ -ge 32 -and $_ -lt 127) { [char]$_ } else { '.' } })
+          Write-Host "head: $ascii"
+          Write-Host "magic: $('{0:X2} {1:X2} {2:X2} {3:X2}' -f $bytes[0],$bytes[1],$bytes[2],$bytes[3])"
+          # Try the ARCH compiler directly (the real fat APE, if it is one).
+          $archcc = Get-ChildItem "$bin\*cosmo*cc*" | Where-Object { $_.Name -like '*x86_64*' } | Select-Object -First 1
+          if ($archcc) {
+            Copy-Item $archcc.FullName "$bin\archcc.exe" -Force
+            Write-Host "=== $($archcc.Name) --version (as .exe) ==="
+            & "$bin\archcc.exe" --version 2>&1 | Out-String | Write-Host
+            Write-Host "--- exit: $LASTEXITCODE ---"
+          } else { Write-Host "no x86_64 arch compiler found in bin/" }
 
       # Step 3: the app to build.
       - name: Write a minimal app.lua
