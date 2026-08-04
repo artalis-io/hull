@@ -745,34 +745,6 @@ jobs:
       - name: Build hull
         run: make CC=cosmocc
 
-      # Guards the exit-256 class: a produced cosmo app must boot with a
-      # populated runtime VFS (require "hull.json" resolves). The composition-
-      # exempt cosmo base carries the strong hl_stdlib_feature_entries() override
-      # in an archive member shadowed by the weak default, so build.lua/eject.lua
-      # emit a stdlib-only strong override as a regular object. `hull eject` +
-      # `make` links exactly that path (app_stdlib_registry.o before the archive)
-      # via cosmocc. No existing e2e ran a PRODUCED cosmo app (e2e_compute builds
-      # with --cc cc and never runs it), so this is the regression guard.
-      - name: Produced cosmo app boots (eject + hull.json)
-        timeout-minutes: 3
-        run: |
-          set -eu
-          APP=$(mktemp -d); EJ=$(mktemp -d)/out
-          cat > "$APP/app.lua" <<'LUA'
-          app.manifest({ modules = { "hull/json@1" } })
-          app.main(function(ctx)
-              local json = require("hull.json")
-              ctx.stdout:write(json.encode({ marker = "COSMO-STDLIB-OK" }) .. "\n")
-              return 0
-          end)
-          LUA
-          ./build/hull eject "$APP" -o "$EJ"
-          make -C "$EJ" OUTPUT=ejected_app
-          out=$("$EJ/ejected_app"); echo "app output: $out"
-          echo "$out" | grep -q COSMO-STDLIB-OK \
-            || { echo "FAIL: produced cosmo app did not load hull.json"; exit 1; }
-          echo "PASS: produced cosmo app booted with a populated runtime VFS"
-
       - name: Hardening summary (cosmocc)
         run: make CC=cosmocc hardening
 
@@ -803,6 +775,37 @@ jobs:
       - name: Compute E2E tests
         timeout-minutes: 2
         run: make e2e-compute CC=cosmocc
+
+      # Regression guard for the exit-256 class: a PRODUCED cosmo app must boot
+      # with a populated runtime VFS (require "hull.json" resolves). The strong
+      # hl_stdlib_feature_entries() override (build.lua emits it; the seam-
+      # hardening change made a MISSING one a link error, not a silent empty VFS)
+      # must win over the composition-exempt base. Uses `hull build` (not eject):
+      # it is APE-only (the cosmo hull APE drives cosmocc APE -> an app.com APE),
+      # so it is immune to this runner's known post-cosmo-build native-ELF-loader
+      # corruption (/bin/sh + system cc/ld fail "libc.so.6: failed to map
+      # segment") that the eject path's `make` + gen_registry.sh depend on. Placed
+      # LAST so it can never skip the real cosmo tests above; the class is also
+      # covered end to end by cosmocc-windows-e2e.yml. No prior e2e ran a PRODUCED
+      # cosmo app (e2e_compute builds with --cc cc and never runs it).
+      - name: Produced cosmo app boots (hull build + hull.json)
+        timeout-minutes: 3
+        run: |
+          set -eu
+          APP=$(mktemp -d)
+          cat > "$APP/app.lua" <<'LUA'
+          app.manifest({ modules = { "hull/json@1" } })
+          app.main(function(ctx)
+              local json = require("hull.json")
+              ctx.stdout:write(json.encode({ marker = "COSMO-STDLIB-OK" }) .. "\n")
+              return 0
+          end)
+          LUA
+          ./build/hull build "$APP" -o "$APP/app.com" --cc cosmocc --no-verify-platform
+          out=$("$APP/app.com"); echo "app output: $out"
+          echo "$out" | grep -q COSMO-STDLIB-OK \
+            || { echo "FAIL: produced cosmo app did not load hull.json"; exit 1; }
+          echo "PASS: produced cosmo app booted with a populated runtime VFS"
 
       # (Phase 4.3: pure-compute is a build.lua preset on the default composable
       # base, not a pre-built per-flavor lib, so there is no cosmo flavor lib to
