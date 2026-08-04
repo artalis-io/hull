@@ -33,10 +33,15 @@
 
 /* ── Registry ────────────────────────────────────────────────────────
  *
- * Static table; entries are NUL-terminated by an all-zeros sentinel.
- * Adding a tool here is half of the install-path wiring; the other
- * half is publishing matching `hull-<name>-<platform>` artifacts in
- * the release workflow and listing them in `hull.sha256`.
+ * Static table; entries are NUL-terminated by an all-zeros sentinel. This
+ * registry is the CONSUMER-side source of truth (install / lookup / list); it is
+ * NOT the only edit site. Adding a tool is TWO coordinated edits: (1) a row here,
+ * and (2) publishing matching `hull-<name>[-<platform>]` (binary) or
+ * `hull-<name>[-<platform>].tar` (bundle) artifacts in .github/workflows/
+ * release.yml (the build job + the flatten/sha256/attest/publish lists). The two
+ * are kept from drifting by scripts/check_tools_registry.sh (a CI guard asserting
+ * every registry name has a matching release.yml asset) + the post-release
+ * tests/release_smoke.sh (which actually fetches + verifies each). See T4d.
  */
 static const HlToolSpec REGISTRY[] = {
     {

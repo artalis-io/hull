@@ -84,3 +84,9 @@ print-feature-installable-stems: ; @echo $(FEATURE_INSTALLABLE_STEMS)
 # last of the four-place feature-list duplication; run in CI.
 .PHONY: check-feature-registry
 check-feature-registry: ; @sh scripts/check_feature_registry.sh "$(FEATURE_INSTALLABLE_STEMS)" "$(FEATURE_EMBEDDED_STEMS)"
+
+# T4d: the side-load tool REGISTRY (src/hull/tools_install.c) vs the release
+# workflow that must publish each tool's asset. Catches a new tool row with no
+# matching release.yml artifact per push (before release_smoke.sh would).
+.PHONY: check-tools-registry
+check-tools-registry: ; @sh scripts/check_tools_registry.sh

@@ -31,4 +31,27 @@ for f in $(grep -E '\{ *"[a-z]+".*HL_FEATURE_EMBEDDED,' "$FC" \
   esac
 done
 
-echo "check-feature-registry: OK (installable: $c_inst)"
+# T4e: every INSTALLABLE `--with` feature must have a FEATURE_SPECS entry - the
+# codegen source of truth `hull build --with=<name>` reads to compose it (backend
+# symbol, vtable type, hook name, extra link libs). Without it, `--with=<name>`
+# would resolve the archive but emit no feature_registry.c to wire it into the
+# base. FEATURE_SPECS is a SUPERSET (it also carries the mandatory `sqlite`
+# default backend, which is not a `--with` feature), so the check is directional:
+# installable stems must be a SUBSET of FEATURE_SPECS keys.
+FS=stdlib/cli/lua/hull/feature_specs.lua
+# Top-level keys only: exactly 4 leading spaces (direct children of `return {`).
+# A looser `[[:space:]]+` would also match nested sub-tables like the 8-space
+# `libs = {` inside the gpu/tui specs.
+fs_keys=$(grep -E '^    [a-z][a-z_-]* = \{' "$FS" \
+          | sed -E 's/^    ([a-z][a-z_-]*) =.*/\1/' | sort | tr '\n' ' ')
+for f in $1; do
+  case " $fs_keys " in
+    *" $f "*) ;;
+    *) echo "ERROR: installable feature '$f' has no FEATURE_SPECS entry in $FS" >&2
+       echo "  FEATURE_SPECS keys: [$fs_keys]" >&2
+       echo "  -> add a '$f = { ... }' block so 'hull build --with=$f' can compose it" >&2
+       exit 1 ;;
+  esac
+done
+
+echo "check-feature-registry: OK (installable: $c_inst; FEATURE_SPECS: $fs_keys)"
