@@ -225,6 +225,18 @@ int hl_tool_validate_args(const char *const argv[])
 
 /* ── Process spawning ──────────────────────────────────────────────── */
 
+#ifdef __COSMOPOLITAN__
+/* cosmo/Windows: transparently reroute a cosmocc spawn through the bundled
+ * busybox (cosmocc's #!/bin/sh driver can't be execvp'd on Windows). Defined
+ * after the shell-argv builder + spawn cores below; forward-declared here so the
+ * spawn entry points can call them. Return 1 = handled (result out), 0 = not a
+ * cosmocc call → proceed normally. */
+static int cosmocc_reroute_exec(const char *const argv[],
+                                const char *const envadd[], int *rc);
+static int cosmocc_reroute_read(const char *const argv[],
+                                char **out, size_t *out_len);
+#endif
+
 int hl_tool_spawn(const char *const argv[])
 {
     return hl_tool_spawn_env(argv, NULL);
@@ -283,6 +295,9 @@ int hl_tool_spawn_env(const char *const argv[], const char *const envadd[])
         hl_audit_end(&w);
         return -1;
     }
+#ifdef __COSMOPOLITAN__
+    { int rc; if (cosmocc_reroute_exec(argv, envadd, &rc)) return rc; }
+#endif
     return spawn_and_wait(argv, envadd);
 }
 
@@ -293,21 +308,20 @@ static int is_shell_basename(const char *base)
            strcmp(base, "busybox") == 0 || strcmp(base, "busybox.exe") == 0;
 }
 
-int hl_tool_spawn_driver_shell(const char *shell, const char *driver,
-                               const char *const args[],
-                               const char *const envadd[])
+/* Build the scoped shell-driver argv (malloc'd; caller frees). Validates the
+ * shell basename (sh/busybox) and the driver (allowlist + dangerous-flag), so a
+ * NULL return means "rejected". The -c program is a COMPILE-TIME LITERAL; the
+ * driver is $0 and args are $@ (all positional), so no app byte is shell code.
+ * Shared by the exec (hl_tool_spawn_driver_shell) and read (spawn_read) paths. */
+static const char **build_shell_argv(const char *shell, const char *driver,
+                                     const char *const args[])
 {
-    if (!shell || !driver) return -1;
-
-    /* The driver must be an allowlisted compiler; the shell must be a bare
-     * sh / busybox. With the fixed -c program below (a compile-time literal),
-     * this runs one allowlisted compiler through a known shell - never an
-     * app-supplied command string. Basename handles both '/' and '\\'. */
-    if (hl_tool_check_allowlist(driver) != 0) return -1;
+    if (!shell || !driver) return NULL;
+    if (hl_tool_check_allowlist(driver) != 0) return NULL;
     const char *base = strrchr(shell, '/');
     base = base ? base + 1 : shell;
     { const char *bs = strrchr(base, '\\'); if (bs) base = bs + 1; }
-    if (!is_shell_basename(base)) return -1;
+    if (!is_shell_basename(base)) return NULL;
     int is_busybox = (strcmp(base, "busybox") == 0 ||
                       strcmp(base, "busybox.exe") == 0);
 
@@ -317,18 +331,18 @@ int hl_tool_spawn_driver_shell(const char *shell, const char *driver,
     /* Dangerous-flag-validate the driver's args as { driver, args... }
      * (hl_tool_validate_args skips index 0, so the driver goes in slot 0). */
     const char **checkv = (const char **)calloc(nargs + 2, sizeof(*checkv));
-    if (!checkv) return -1;
+    if (!checkv) return NULL;
     checkv[0] = driver;
     for (size_t j = 0; j < nargs; j++) checkv[j + 1] = args[j];
     int bad = hl_tool_validate_args(checkv);
     free((void *)(uintptr_t)checkv);
-    if (bad != 0) return -1;
+    if (bad != 0) return NULL;
 
     /* argv: shell [sh] "-c" 'exec "$0" "$@"' driver args... NULL
      * (the "sh" applet selector is busybox-only; a real sh takes -c directly).
      * Max fixed slots: shell + sh + -c + PROG + driver + NULL = 6. */
     const char **argv = (const char **)calloc(nargs + 6, sizeof(*argv));
-    if (!argv) return -1;
+    if (!argv) return NULL;
     size_t i = 0;
     argv[i++] = shell;
     if (is_busybox) argv[i++] = "sh";
@@ -337,28 +351,25 @@ int hl_tool_spawn_driver_shell(const char *shell, const char *driver,
     argv[i++] = driver;
     for (size_t j = 0; j < nargs; j++) argv[i++] = args[j];
     argv[i] = NULL;
+    return argv;
+}
 
+int hl_tool_spawn_driver_shell(const char *shell, const char *driver,
+                               const char *const args[],
+                               const char *const envadd[])
+{
+    const char **argv = build_shell_argv(shell, driver, args);
+    if (!argv) return -1;
     int rc = spawn_and_wait(argv, envadd);
     free((void *)(uintptr_t)argv);
     return rc;
 }
 
-char *hl_tool_spawn_read(const char *const argv[], size_t *out_len)
+/* fork + pipe + read child stdout. NO allowlist check (callers validate first,
+ * or route a validated shell-driver argv here). Returns malloc'd output or NULL
+ * (child failed / OOM). */
+static char *spawn_read_argv(const char *const argv[], size_t *out_len)
 {
-    if (!argv || !argv[0]) return NULL;
-    if (hl_tool_check_allowlist(argv[0]) != 0 ||
-        hl_tool_validate_args(argv) != 0) {
-        ShJsonWriter w = hl_audit_begin("tool.spawn_read");
-        sh_json_write_key(&w, "argv");
-        sh_json_write_array_start(&w);
-        for (int i = 0; argv[i]; i++)
-            sh_json_write_string(&w, argv[i]);
-        sh_json_write_array_end(&w);
-        sh_json_write_kv_string(&w, "result", "denied");
-        hl_audit_end(&w);
-        return NULL;
-    }
-
     int pipefd[2];
     if (pipe(pipefd) < 0) return NULL;
 
@@ -418,6 +429,151 @@ char *hl_tool_spawn_read(const char *const argv[], size_t *out_len)
 
     if (out_len) *out_len = len;
     return result;
+}
+
+/* ── cosmo/Windows: drive cosmocc through the bundled busybox ───────── */
+
+int hl_tool_cosmo_shell(char *out, size_t outsz)
+{
+    if (!out || outsz == 0) return -1;
+#ifdef __COSMOPOLITAN__
+    /* Only on Windows: elsewhere cosmocc's #!/bin/sh driver runs via the
+     * loader shebang and is execvp'd directly. Detect Windows by its
+     * always-present env (no cosmo-API include needed). */
+    if (!getenv("SystemRoot") && !getenv("SYSTEMROOT") && !getenv("windir"))
+        return -1;
+    const char *home = getenv("HOME");
+    if (!home || !*home) home = getenv("USERPROFILE");
+    if (!home || !*home) return -1;
+    /* busybox rides inside the cosmocc bundle (item E: bin/busybox.exe). */
+    static const char *rel[] = {
+        "/.hull/tools/cosmocc/bin/busybox.exe",   /* the installed bundle */
+        "/.cosmocc/bin/busybox.exe",              /* a manual cosmocc tree */
+        NULL,
+    };
+    for (const char **r = rel; *r; r++) {
+        char p[512];
+        int n = snprintf(p, sizeof(p), "%s%s", home, *r);
+        if (n > 0 && (size_t)n < sizeof(p) && access(p, X_OK) == 0) {
+            n = snprintf(out, outsz, "%s", p);
+            return (n > 0 && (size_t)n < outsz) ? 0 : -1;
+        }
+    }
+    return -1;
+#else
+    (void)out; (void)outsz;
+    return -1;
+#endif
+}
+
+#ifdef __COSMOPOLITAN__
+/* Raw file copy (best-effort /bin/sh plant). Returns 0 / -1. */
+static int cosmo_copy(const char *src, const char *dst)
+{
+    FILE *in = fopen(src, "rb");
+    if (!in) return -1;
+    FILE *o = fopen(dst, "wb");
+    if (!o) { fclose(in); return -1; }
+    char b[8192];
+    size_t n;
+    int rc = 0;
+    while ((n = fread(b, 1, sizeof(b), in)) > 0)
+        if (fwrite(b, 1, n, o) != n) { rc = -1; break; }
+    if (ferror(in)) rc = -1;
+    if (fclose(o) != 0) rc = -1;
+    fclose(in);
+    return rc;
+}
+
+/* Once per process: (1) point TMPDIR/TMP/TEMP at one real directory the cosmocc
+ * driver AND the native APE sub-tools agree on - fixes the driver's final
+ * `.dbg` rename, whose /tmp otherwise differs between busybox and the APEs
+ * (load-bearing; proven in docs/cosmocc_install.md §0.6). (2) Best-effort plant
+ * /bin/sh.exe = busybox so cosmocc's #!/bin/sh driver + its symlinked sub-tools
+ * resolve their shebang; ignored on failure (busybox's own shebang routing
+ * covers the common case, and the drive root is not always writable). */
+static void cosmo_prepare(const char *shell)
+{
+    static int done = 0;
+    if (done) return;
+    done = 1;
+
+    const char *home = getenv("HOME");
+    if (!home || !*home) home = getenv("USERPROFILE");
+    if (home && *home) {
+        char tmp[512];
+        int n = snprintf(tmp, sizeof(tmp), "%s/.hull/tmp", home);
+        if (n > 0 && (size_t)n < sizeof(tmp)) {
+            char hull[512];
+            (void)snprintf(hull, sizeof(hull), "%s/.hull", home);
+            (void)mkdir(hull, 0700);
+            (void)mkdir(tmp, 0700);
+            setenv("TMPDIR", tmp, 1);
+            setenv("TMP", tmp, 1);
+            setenv("TEMP", tmp, 1);
+        }
+    }
+    (void)mkdir("/bin", 0755);
+    (void)cosmo_copy(shell, "/bin/sh.exe");   /* best-effort */
+}
+
+/* basename(argv[0]) starts with "cosmocc"? (hull only ever spawns the driver
+ * itself, never the arch-cc symlinks its script invokes internally.) */
+static int argv_is_cosmocc(const char *const argv[])
+{
+    const char *b = strrchr(argv[0], '/');
+    b = b ? b + 1 : argv[0];
+    { const char *bs = strrchr(b, '\\'); if (bs) b = bs + 1; }
+    return strncmp(b, "cosmocc", 7) == 0;
+}
+
+static int cosmocc_reroute_exec(const char *const argv[],
+                                const char *const envadd[], int *rc)
+{
+    if (!argv_is_cosmocc(argv)) return 0;
+    char shell[512];
+    if (hl_tool_cosmo_shell(shell, sizeof(shell)) != 0) return 0;
+    cosmo_prepare(shell);
+    const char **sv = build_shell_argv(shell, argv[0], argv + 1);
+    if (!sv) { *rc = -1; return 1; }
+    *rc = spawn_and_wait(sv, envadd);
+    free((void *)(uintptr_t)sv);
+    return 1;
+}
+
+static int cosmocc_reroute_read(const char *const argv[],
+                                char **out, size_t *out_len)
+{
+    if (!argv_is_cosmocc(argv)) return 0;
+    char shell[512];
+    if (hl_tool_cosmo_shell(shell, sizeof(shell)) != 0) return 0;
+    cosmo_prepare(shell);
+    const char **sv = build_shell_argv(shell, argv[0], argv + 1);
+    *out = sv ? spawn_read_argv(sv, out_len) : NULL;
+    free((void *)(uintptr_t)sv);
+    return 1;
+}
+#endif  /* __COSMOPOLITAN__ */
+
+char *hl_tool_spawn_read(const char *const argv[], size_t *out_len)
+{
+    if (!argv || !argv[0]) return NULL;
+    if (hl_tool_check_allowlist(argv[0]) != 0 ||
+        hl_tool_validate_args(argv) != 0) {
+        ShJsonWriter w = hl_audit_begin("tool.spawn_read");
+        sh_json_write_key(&w, "argv");
+        sh_json_write_array_start(&w);
+        for (int i = 0; argv[i]; i++)
+            sh_json_write_string(&w, argv[i]);
+        sh_json_write_array_end(&w);
+        sh_json_write_kv_string(&w, "result", "denied");
+        hl_audit_end(&w);
+        return NULL;
+    }
+#ifdef __COSMOPOLITAN__
+    { char *out; if (cosmocc_reroute_read(argv, &out, out_len)) return out; }
+#endif
+    return spawn_read_argv(argv, out_len);
 }
 
 /* ── File discovery ────────────────────────────────────────────────── */

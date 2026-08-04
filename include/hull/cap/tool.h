@@ -96,6 +96,18 @@ int hl_tool_spawn_driver_shell(const char *shell, const char *driver,
                                const char *const envadd[]);
 
 /*
+ * Resolve the bundled busybox shell used to drive cosmocc on Windows (the
+ * cosmo/Windows build path). Returns 0 and writes the path to @p out when a
+ * cosmocc-bundle busybox is present AND this is a cosmo hull on Windows; returns
+ * -1 otherwise (always -1 on a native build / on a POSIX host, where cosmocc's
+ * #!/bin/sh driver runs directly). Used by the transparent cosmocc reroute in
+ * the spawn layer (hl_tool_spawn_env / _read), which covers every cosmocc call
+ * site - the compiler vtable, tool.spawn, and the -dumpmachine / --version
+ * probes - so the build tool needs no per-call-site change.
+ */
+int hl_tool_cosmo_shell(char *out, size_t outsz);
+
+/*
  * Spawn a process and capture its stdout.
  * Returns a malloc'd string (caller frees), or NULL on error.
  * If out_len is non-NULL, the output length is stored there.

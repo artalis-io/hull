@@ -128,11 +128,30 @@ COFF `libhull_platform.a` that does not exist); changing the POSIX-host path
 The five items, sequenced by dependency (D, B are standalone and land first; A
 needs busybox present; E productionizes and depends on the C decision).
 
-**Status: D and B have landed** (the two standalone C changes) and **C is
-decided** (trim the tree to a ~309 MB closure, under the cap uncompressed - see
-below). A (spawn layer) and E (productionize) remain.
+**Status: D, B, and A have landed** (the C changes; A is the transparent
+cosmocc-through-busybox reroute in the spawn layer - see below) and **C is
+decided** (trim the tree to a ~309 MB closure, under the cap uncompressed). Only
+**E (productionize)** remains - the bundle producer + registry row + release +
+the Windows end-to-end validation.
 
 ### A - drive cosmocc through busybox `sh` (the invocation change)
+
+> **AS BUILT (landed).** The primitive is `hl_tool_spawn_driver_shell` +
+> `hl_tool_cosmo_shell` (`src/hull/cap/tool.c`). The reroute is **transparent in
+> the C spawn layer**, not threaded through `build.lua`: `hl_tool_spawn_env` and
+> `hl_tool_spawn_read` detect a `cosmocc` `argv[0]` on cosmo+Windows and, when a
+> bundled busybox resolves, run it through the shell-driver form. That was chosen
+> over per-call-site wrapping because cosmocc is *also* spawned by the C compiler
+> vtable (`tool.compiler.compile`, which never passes through Lua) and by the
+> `-dumpmachine` / `--version` probes - so `build.lua` needs **zero** changes and
+> every call site is covered uniformly. All of it is `#ifdef __COSMOPOLITAN__`, so
+> native/POSIX builds are byte-identical (the reroute compiles out; `cosmo_shell`
+> returns -1). `cosmo_prepare` shares one `TMPDIR`/`TMP`/`TEMP` (load-bearing) and
+> best-effort-plants `/bin/sh.exe = busybox` (ignored on failure). Unit tests in
+> `test_tool` cover the primitive on POSIX (reject non-allowlisted driver /
+> non-sh shell / dangerous args; run `cc --version` through `/bin/sh`). Windows
+> end-to-end is validated at E (needs the bundle). The original per-call-site
+> design below is kept for context.
 
 **Problem.** For a cosmo target, `build.lua` always uses the compiler path (the
 `if not is_cosmo` gate around the compiler-free `obj_emit`): it does
