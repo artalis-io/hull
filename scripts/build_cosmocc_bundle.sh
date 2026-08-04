@@ -132,6 +132,14 @@ cat "$probe"/tr.* \
   | while IFS= read -r p; do realpath "$p" 2>/dev/null || true; done \
   | sort -u > "$keep"
 find "$work/tree" -type f -path '*/include/*' >> "$keep"
+# The linker resolves -lm / -lpthread / -lrt / ... to arch-lib stub archives even
+# when the symbols actually live in libcosmo.a; the trace closure misses stubs
+# the probe never opened (it resolved those symbols from libcosmo.a). Keep ALL
+# arch-lib archives + link glue EXCEPT the big C++ / unwind ones a C build never
+# links (that is what keeps lib/ under the size gate).
+find "$work/tree" -path '*/lib/*' -type f \
+    ! -name 'libc++*' ! -name 'libc++abi*' ! -name 'libstdc++*' ! -name 'libunwind*' \
+    >> "$keep"
 sort -u "$keep" -o "$keep"
 
 # Delete every regular file NOT in the keep set (symlinks + dirs untouched),
