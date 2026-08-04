@@ -794,13 +794,34 @@ static int l_emit_app_registry(lua_State *L) {
     tgt.elf_flags = (unsigned int)flags;
 
     size_t n = (size_t)luaL_len(L, 1);
+
+    /* The marshalling loop below pushes 3 values per entry (entry table, name,
+     * data) and KEEPS them on the Lua stack so the borrowed name/data pointers
+     * stay alive through the emit. That is 3*n slots - far past the LUA_MINSTACK
+     * (20) a C function starts with. The Lua C API REQUIRES growing the stack
+     * before pushing beyond that; without it, entry ~7 (3*7 > 20) writes past
+     * the stack top - undefined behaviour that corrupts memory and crashed with
+     * a SIGSEGV on x86_64 while silently "working" on arm64 (a real app has
+     * dozens of embedded files). Grow it up front, with an overflow-safe bound. */
+    if (n > (size_t)(INT_MAX - LUA_MINSTACK) / 3) {
+        lua_pushnil(L);
+        lua_pushfstring(L, "too many app_registry entries (%d)", (int)n);
+        return 2;
+    }
+    if (n && !lua_checkstack(L, (int)(3 * n) + LUA_MINSTACK)) {
+        lua_pushnil(L);
+        lua_pushstring(L, "cannot grow the Lua stack for app_registry entries");
+        return 2;
+    }
+
     HlEmitEntry *ents = NULL;
     if (n) {
         ents = (HlEmitEntry *)calloc(n, sizeof(*ents));
         if (!ents) { lua_pushnil(L); lua_pushstring(L, "out of memory"); return 2; }
     }
-    /* Borrow name/data pointers from the Lua strings on the stack; they stay
-     * valid until we pop, which is after the emit call completes. */
+    /* Borrow name/data pointers from the Lua strings kept on the stack (grown
+     * above); they stay valid until the C function returns, which is after the
+     * emit call completes. */
     for (size_t i = 0; i < n; i++) {
         lua_rawgeti(L, 1, (lua_Integer)(i + 1));      /* entry table */
         lua_getfield(L, -1, "name");
