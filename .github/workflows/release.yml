@@ -916,6 +916,8 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+      - name: Install strace (the producer traces a build to trim the tree)
+        run: sudo apt-get update -qq && sudo apt-get install -y strace
       - name: Build cosmocc bundle
         run: |
           sh scripts/build_cosmocc_bundle.sh \
