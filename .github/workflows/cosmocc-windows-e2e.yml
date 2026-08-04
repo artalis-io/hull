@@ -28,6 +28,7 @@ on:
       - 'src/hull/sandbox_tool.c'
       - 'src/hull/compiler.c'
       - 'src/hull/cap/tar.c'
+      - 'stdlib/cli/lua/hull/build.lua'
 
 permissions:
   contents: read
