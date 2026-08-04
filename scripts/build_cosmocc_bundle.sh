@@ -132,18 +132,18 @@ cat "$probe"/tr.* \
   | while IFS= read -r p; do realpath "$p" 2>/dev/null || true; done \
   | sort -u > "$keep"
 find "$work/tree" -type f -path '*/include/*' >> "$keep"
-# The linker resolves -lm / -lpthread / -lrt / ... to arch-lib stub archives even
-# when the symbols actually live in libcosmo.a; the trace closure misses stubs
-# the probe never opened (it resolved those symbols from libcosmo.a). Keep ONLY
-# the STANDARD C link set by name (libcosmo + the libc-family stubs + libgcc +
-# all crt/ape/*.o/*.lds glue) - NOT the ~300 MB/arch of third-party archives
-# (libz/libsqlite3/libcurl/...) a Hull app never links (it vendors its own),
-# which is what keeps lib/ under the 490 MB size gate.
+# The linker resolves -lm / -lpthread / -lrt / ... to arch-lib STUB archives even
+# when the symbols actually live in libcosmo.a; the trace closure misses those
+# stubs because the probe resolved the symbols from libcosmo.a and never opened
+# the stub files. Everything else the link needs (libcosmo.a, libgcc, the crt
+# objects the link actually pulls) is ALREADY in the trace closure. So add ONLY
+# the small named stubs + the link-script/ape glue (keep libcosmo.a explicitly
+# too as belt-and-suspenders). Do NOT keep generic *.o (loose lib objects, the
+# ~180 MB/arch bulk) or the third-party archives - that is what blows the gate.
 find "$work/tree" -path '*/lib/*' -type f \( \
-        -name 'libcosmo.a'  -o -name 'libc.a'    -o -name 'libm.a'       -o \
-        -name 'libpthread.a' -o -name 'librt.a'  -o -name 'libdl.a'      -o \
-        -name 'libresolv.a' -o -name 'libgcc*'   -o -name 'libatomic*'   -o \
-        -name 'crt*.o'      -o -name '*.o'        -o -name '*.lds'        -o \
+        -name 'libcosmo.a'  -o -name 'libc.a'     -o -name 'libm.a'      -o \
+        -name 'libpthread.a' -o -name 'librt.a'   -o -name 'libdl.a'     -o \
+        -name 'libresolv.a' -o -name 'crt*.o'     -o -name '*.lds'       -o \
         -name 'ape*' \) >> "$keep"
 sort -u "$keep" -o "$keep"
 
