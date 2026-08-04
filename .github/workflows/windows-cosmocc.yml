@@ -96,6 +96,72 @@ jobs:
           Write-Host "shell (cocmd) with symlink-aware extraction - a design change."
           Write-Host "=================================================================="
 
+  section0b-ape-shell-self-contained:
+    # §0.5 SELF-CONTAINMENT (the crux for "install one thing + it works"): Git
+    # Bash is not on a stock Windows box, so requiring a host POSIX sh defeats the
+    # goal. Cosmopolitan ships bash/dash as APEs (cosmo.zip/pub/cosmos/bin) - which
+    # run on Windows natively, like hull-cosmo. Does an APE bash (NOT Git Bash)
+    # drive cosmocc on Windows? If YES, the toolchain is fully self-contained
+    # (bundle cosmocc + an APE bash); if NO, you still need Git Bash / WSL.
+    name: "§0.5 — does an APE bash drive cosmocc (self-contained)?"
+    runs-on: windows-latest
+    steps:
+      - name: Extract cosmocc (bsdtar, symlink-preserving) + fetch the APE bash
+        shell: pwsh
+        run: |
+          curl.exe -fsSL --retry 3 -o cosmocc.zip "https://cosmo.zip/pub/cosmocc/cosmocc-$env:COSMOCC_VERSION.zip"
+          if ((Get-FileHash cosmocc.zip -Algorithm SHA256).Hash.ToLower() -ne $env:COSMOCC_SHA256) { throw "sha mismatch" }
+          New-Item -ItemType Directory -Force -Path cosmo | Out-Null
+          tar.exe -xpf cosmocc.zip -C cosmo 2>&1 | Write-Host
+          # The cosmos APE bash - runs on Windows natively (no Git Bash / WSL).
+          curl.exe -fsSL --retry 3 -o cosmo\bin\bash.exe "https://cosmo.zip/pub/cosmos/bin/bash"
+          Write-Host "bash.exe size: $((Get-Item cosmo\bin\bash.exe).Length)"
+
+      - name: APE bash runs on Windows
+        id: ape_bash_runs
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          & .\cosmo\bin\bash.exe -c "echo ape-bash-ok; uname -a 2>/dev/null || true"
+          if ($LASTEXITCODE -ne 0) { throw "APE bash did not run (exit $LASTEXITCODE)" }
+
+      - name: Write hello.c
+        shell: pwsh
+        run: '"int main(void){return 42;}" | Set-Content -NoNewline hello.c -Encoding ascii'
+
+      - name: APE bash drives cosmocc
+        id: ape_drives
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          # bash inherits pwsh's cwd (the workspace), so relative paths resolve.
+          & .\cosmo\bin\bash.exe -c 'export PATH="./cosmo/bin:$PATH"; echo "which cosmocc: $(command -v cosmocc)"; cosmocc -o hello_ape.com hello.c; echo "cosmocc exit: $?"; ls -la hello_ape.com' 2>&1 | Out-String | Write-Host
+          if (-not (Test-Path hello_ape.com)) { throw "APE bash could not build via cosmocc" }
+
+      - name: Verdict — self-contained APE toolchain on Windows?
+        shell: pwsh
+        run: |
+          $built = Test-Path hello_ape.com
+          Write-Host "APE bash built hello_ape.com : $built"
+          $ran = $false
+          if ($built) {
+            Copy-Item hello_ape.com hello_ape.exe -Force
+            & .\hello_ape.exe; $rc = $LASTEXITCODE; $global:LASTEXITCODE = 0
+            $lo = $rc -band 0xFF; $hi = ($rc -shr 8) -band 0xFF
+            Write-Host "hello_ape ran, exit=$rc (lo=$lo hi=$hi; expected 42)"
+            if ($lo -eq 42 -or $hi -eq 42) { $ran = $true }
+          }
+          Write-Host "=================================================================="
+          if ($built -and $ran) {
+            Write-Host "SELF-CONTAINED GO: a cosmos APE bash drives cosmocc on Windows"
+            Write-Host "with NO Git Bash / WSL. The Windows story can ship as APEs only:"
+            Write-Host "bundle cosmocc + an APE bash; hull drives `bash -c cosmocc`."
+            exit 0
+          }
+          Write-Host "NOT self-contained: the APE bash could not drive cosmocc; a host"
+          Write-Host "POSIX sh (Git Bash / WSL) would still be required."
+          exit 1
+
   section0-shell-drives-cosmocc:
     # §0 GO/NO-GO (no Hull change): given a SHELL + preserved symlinks, does
     # cosmocc's #!/bin/sh pipeline actually compile on Windows at all? If NO, the
