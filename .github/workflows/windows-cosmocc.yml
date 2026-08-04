@@ -184,6 +184,63 @@ jobs:
           Write-Host "   needs MSYS/Git-Bash/WSL (external), or build on a POSIX host."
           exit 0
 
+  section0d-minimal-recipe:
+    # §0.7 MINIMAL RECIPE (de-risks epic item A's prepare() step). §0.6 proved a
+    # CLEAN exit 0 with BOTH a planted /bin/sh.exe AND a shared TMPDIR, but never
+    # isolated whether the plant is needed: busybox routes #!/bin/sh to its own sh
+    # applet, so a shared TMPDIR alone (fixing the .dbg-rename /tmp mismatch) might
+    # suffice - which would let hull SKIP the fragile C:\bin write (a normal user
+    # can't always write the drive root). Drive cosmocc with a shared TMPDIR and
+    # NO /bin/sh planted; if it exits 0, prepare() is just "share TMPDIR".
+    name: "§0.7 — minimal recipe: TMPDIR-only, no /bin/sh plant?"
+    runs-on: windows-latest
+    steps:
+      - name: Extract cosmocc (bsdtar) + fetch busybox-w64
+        shell: pwsh
+        run: |
+          curl.exe -fsSL --retry 3 -o cosmocc.zip "https://cosmo.zip/pub/cosmocc/cosmocc-$env:COSMOCC_VERSION.zip"
+          if ((Get-FileHash cosmocc.zip -Algorithm SHA256).Hash.ToLower() -ne $env:COSMOCC_SHA256) { throw "sha mismatch" }
+          New-Item -ItemType Directory -Force -Path cosmo | Out-Null
+          tar.exe -xpf cosmocc.zip -C cosmo 2>&1 | Write-Host
+          New-Item -ItemType Directory -Force -Path bb | Out-Null
+          curl.exe -fsSL --retry 3 -L -o bb\busybox.exe "https://frippery.org/files/busybox/busybox64u.exe"
+          "int main(void){return 42;}" | Set-Content -NoNewline hello.c -Encoding ascii
+
+      - name: Drive cosmocc with shared TMPDIR, NO /bin/sh plant
+        id: drive
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          # Deliberately do NOT create C:\bin\sh.exe. Only share one real TMPDIR.
+          New-Item -ItemType Directory -Force -Path C:\tmp | Out-Null
+          if (Test-Path C:\bin\sh.exe) { Remove-Item C:\bin\sh.exe -Force }  # ensure no stray plant
+          & .\bb\busybox.exe sh -c 'export PATH="./cosmo/bin:$PATH"; export TMPDIR=C:/tmp TMP=C:/tmp TEMP=C:/tmp; cosmocc -O2 -o hello.com hello.c; echo "exit=$?"' 2>&1 | Out-String | Write-Host
+
+      - name: Verdict — is a plant-free recipe enough?
+        shell: pwsh
+        run: |
+          $built = Test-Path hello.com
+          $ran = $false
+          if ($built) {
+            Copy-Item hello.com hello.exe -Force
+            & .\hello.exe; $rc = $LASTEXITCODE; $global:LASTEXITCODE = 0
+            $lo = $rc -band 0xFF; $hi = ($rc -shr 8) -band 0xFF
+            Write-Host "hello ran, exit=$rc (lo=$lo hi=$hi; expected 42)"
+            if ($lo -eq 42 -or $hi -eq 42) { $ran = $true }
+          }
+          Write-Host "=================================================================="
+          if ($built -and $ran) {
+            Write-Host "MINIMAL RECIPE = SHARE TMPDIR ONLY: busybox drove cosmocc to a"
+            Write-Host "working APE with NO /bin/sh plant - busybox's own #!/bin/sh"
+            Write-Host "routing suffices. So epic item A's prepare() only needs to set"
+            Write-Host "TMPDIR/TMP/TEMP to one real dir; it can SKIP the C:\bin write."
+          } else {
+            Write-Host "PLANT ALSO REQUIRED: TMPDIR alone did not yield a working build"
+            Write-Host "(built=$built ran=$ran). prepare() must ALSO plant /bin/sh.exe"
+            Write-Host "= busybox (needs a writable drive root / Developer setup)."
+          }
+          exit 0
+
   section0c-busybox-w64-self-contained:
     # §0.6 SELF-CONTAINMENT via busybox-w64 (the lighter-than-MSYS candidate).
     # §0.5 failed because an APE bash provides an interpreter but (a) no /bin/sh
