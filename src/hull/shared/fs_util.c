@@ -10,14 +10,24 @@
 #include <limits.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <stdio.h>    /* TEMP DIAG */
+#include <stdlib.h>   /* TEMP DIAG (getenv) */
 
 int hl_ensure_dir(const char *path, mode_t mode)
 {
     if (mkdir(path, mode) == 0) return 0;
-    if (errno == EEXIST) {
+    int mkerr = errno;
+    if (mkerr == EEXIST) {
         struct stat st;
         if (stat(path, &st) == 0 && S_ISDIR(st.st_mode)) return 0;
+        /* TEMP DIAG: EEXIST but stat failed / not a dir (Windows spaces gap). */
+        if (getenv("HULL_FS_DEBUG"))
+            fprintf(stderr, "[FSDBG] ensure_dir '%s': EEXIST but stat-fail/not-dir (errno=%d)\n",
+                    path, errno);
         if (errno == 0) errno = ENOTDIR;
+    } else if (getenv("HULL_FS_DEBUG")) {
+        /* TEMP DIAG: mkdir failed with something other than EEXIST. */
+        fprintf(stderr, "[FSDBG] ensure_dir '%s': mkdir FAILED errno=%d\n", path, mkerr);
     }
     return -1;
 }

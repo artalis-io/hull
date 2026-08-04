@@ -30,6 +30,7 @@ on:
       - 'src/hull/cap/tar.c'
       - 'src/hull/cap/fs.c'
       - 'src/hull/sandbox.c'
+      - 'src/hull/shared/fs_util.c'
       - 'stdlib/cli/lua/hull/build.lua'
 
 permissions:
@@ -131,13 +132,11 @@ jobs:
       # prefix match. HULL_FS_DEBUG traces the exact realpath in/out so we can see
       # (and, after the fix, confirm) it. Plain local NTFS path with a space -
       # isolates the space from the Google-Drive virtual FS in the original report.
-      - name: Spaces-in-path fs sandbox (blob.init on a spaced dir)
+      - name: Spaces-in-path fs sandbox (isolate space vs 8.3 short-name)
         id: spaces
         continue-on-error: true
         shell: pwsh
         run: |
-          $sp = "$env:TEMP\has space\reproapp"
-          New-Item -ItemType Directory -Force -Path $sp | Out-Null
           $lua = @'
           local blob = require("hull.blob")
           app.manifest({ modules = { "hull/blob@1" }, fs = { write = { "data/blobs" } } })
@@ -147,17 +146,23 @@ jobs:
             return ok and 0 or 3
           end)
           '@
-          Set-Content -NoNewline "$sp\app.lua" -Value $lua -Encoding ascii
           $env:HULL_FS_DEBUG = "1"
-          Write-Host "=== cosmo hull on SPACED path: $sp ==="
-          $out = & .\hull-cosmo.exe "$sp\app.lua" 2>&1 | Out-String
-          Write-Host $out
-          Write-Host "--- spaced-path run exit: $LASTEXITCODE ---"
-          if ($out -match "REPRO blob.init ok=true") {
-            Write-Host "SPACES-OK: blob.init succeeded on a spaced path"
-          } else {
-            Write-Host "SPACES-FAIL: blob.init failed on a spaced path (the gap)"
+          function Try-Path($label, $dir) {
+            New-Item -ItemType Directory -Force -Path $dir | Out-Null
+            Set-Content -NoNewline "$dir\app.lua" -Value $lua -Encoding ascii
+            Write-Host "=== [$label] cosmo hull on: $dir ==="
+            $out = & .\hull-cosmo.exe "$dir\app.lua" 2>&1 | Out-String
+            Write-Host $out
+            if ($out -match "REPRO blob.init ok=true") { Write-Host "[$label] OK" }
+            else { Write-Host "[$label] FAIL" }
+            Write-Host "------------------------------------------------------------"
           }
+          # A: RUNNER_TEMP (clean prefix, no 8.3) + a SPACE  -> isolates the SPACE.
+          Try-Path "A space-clean-prefix" "$env:RUNNER_TEMP\sp ace\reproapp"
+          # B: RUNNER_TEMP, NO space (control - should pass).
+          Try-Path "B nospace-clean-prefix" "$env:RUNNER_TEMP\nospace\reproapp"
+          # C: TEMP (8.3 'RUNNER~1' short-name) + a space (the original report).
+          Try-Path "C space-and-83" "$env:TEMP\has space\reproapp"
 
       - name: hull build a trivial app -> APE
         id: build
