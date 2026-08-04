@@ -94,7 +94,10 @@ HlLinker *hl_linker_select(const char *explicit_linker, const char *hull_exe)
     /* --linker=lld: drive cc with a side-loaded lld (Tier A). Resolve the
      * `lld` tool (~/.hull/tools -> dirname(hull) -> $PATH); its directory holds
      * the personality names cc's `-fuse-ld=lld` needs (ld.lld on ELF, ld64.lld
-     * on Mach-O), which `hull tools install lld` places alongside it. The tool
+     * on Mach-O), which a system lld install (brew llvm / apt lld) provides
+     * alongside it. There is intentionally NO `hull tools install lld` (a binary
+     * lld is dynamically linked to libLLVM and can't be flat-bundled - see
+     * tools_install.c); the self-contained installable linker is `zig`. The tool
      * name must be dotless (hl_tools_name_valid), so we look up `lld`, not
      * `ld.lld`. docs/toolchain_free_build.md */
     if (explicit_linker && strcmp(explicit_linker, "lld") == 0) {
@@ -104,7 +107,8 @@ HlLinker *hl_linker_select(const char *explicit_linker, const char *hull_exe)
         if (l && hl_linker_is_available(l)) return l;
         if (l) hl_linker_destroy(l);
         fprintf(stderr, "hull: --linker=lld requested but no usable lld + cc was found "
-                        "(install lld with `hull tools install lld`, or put ld.lld on PATH)\n");
+                        "(install a system lld: brew install llvm / apt install lld, "
+                        "or use the self-contained `--linker=zig` via `hull tools install zig`)\n");
         return NULL;
     }
 

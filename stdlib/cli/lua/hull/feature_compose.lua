@@ -537,8 +537,14 @@ function M.plan_mandatory(ctx)
               path = resolve("compute-bindings", "wasm-" .. rt, M.resolve_wasm_rt_lib, rt, ctx.tmpdir, rctx) })
     end
 
-    -- 3. Per-runtime SQLite UDF bridge (the engine itself is a --with feature).
-    if needs_sqlite then
+    -- 3. Per-runtime SQLite UDF bridge. The bridge and the SQLite ENGINE (a
+    -- --with feature composed in build.lua compose_features) MUST be gated
+    -- identically, else a full (non-slim) base that already carries both would
+    -- get the bridge composed on top of the in-base one (a double definition).
+    -- The engine gate is `needs_sqlite AND base lacks hl_db_backend_sqlite`; this
+    -- mirrors it via the same base_lacks probe. On the distributed SLIM base the
+    -- base lacks SQLite, so both compose (unchanged); on a full base both skip.
+    if needs_sqlite and base_lacks("hl_db_backend_sqlite") then
         add({ name = "sqlite-" .. rt, lib = "libhull_feature-sqlite-" .. rt .. ".a",
               label = "SQLite udf bridge",
               path = resolve("SQLite udf-bridge", "sqlite-" .. rt, M.resolve_sqlite_rt_lib, rt, ctx.tmpdir, rctx) })
