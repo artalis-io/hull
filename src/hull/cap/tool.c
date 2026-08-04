@@ -359,13 +359,19 @@ static const char **build_shell_argv(const char *shell, const char *driver,
          * driver's mktemper writes there - the E2E's actual failure was a MISSING
          * ~/.hull/tmp), then export it as TMPDIR/TMP/TEMP. All positional; the
          * program stays a compile-time literal (no app byte is shell code). */
+        /* Run the driver as a CHILD (no `exec`): exec-replacing busybox with
+         * cosmocc's #!/bin/sh shebang script breaks the grandchild stdio so the
+         * driver's out2=$(mktemper) capture comes back empty on Windows. Running
+         * it as a child (as §0.6's working recipe did) keeps busybox as the
+         * parent + the pipes intact. The sh exit code is the driver's (last
+         * command), so the return still propagates. */
         argv[i++] = "D=$(printf '%s' \"$1\" | tr '\\\\' /); mkdir -p \"$D\"; "
                     "export TMPDIR=\"$D\" TMP=\"$D\" TEMP=\"$D\"; shift; "
-                    "exec \"$0\" \"$@\"";
+                    "\"$0\" \"$@\"";
         argv[i++] = driver;
         argv[i++] = tmpdir;
     } else {
-        argv[i++] = "exec \"$0\" \"$@\"";
+        argv[i++] = "\"$0\" \"$@\"";
         argv[i++] = driver;
     }
     for (size_t j = 0; j < nargs; j++) argv[i++] = args[j];
