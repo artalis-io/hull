@@ -1181,6 +1181,14 @@ else
 TEST_RUNNER_OBJ := $(BUILDDIR)/test_runner.o
 endif
 RUNTIME_FACTORY_OBJ := $(BUILDDIR)/runtime_factory.o
+# Explicit empty default for the composable runtime-factory seam. The base ships
+# NO weak default for hl_runtime_feature_factories() (see runtime/factory.c), so
+# a forgotten override is a link-time error, not a silent empty-runtime boot.
+# Non-app link targets that compose no runtime (the unit-test binaries, which
+# init runtimes directly) link this explicit empty. (The sibling stdlib seam
+# hl_stdlib_feature_entries() has no such stub: every consumer today links a real
+# registry - the toolchain one or a produced app's emitted one.)
+RUNTIME_FACTORY_NONE_OBJ := $(BUILDDIR)/runtime_factory_none.o
 # (RUNTIME_CACHE_COMMON_OBJ is defined earlier — see the runtime
 # selection block — because RT_OBJS references it.)
 # static.c serves embedded static files via Keel response writers —
@@ -2643,6 +2651,10 @@ $(TEST_RUNNER_OBJ): $(SRCDIR)/hull/test_runner.c | $(BUILDDIR)
 
 # Runtime factory registry (table-driven runtime selection — item K)
 $(RUNTIME_FACTORY_OBJ): $(SRCDIR)/hull/runtime/factory.c | $(BUILDDIR)
+	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
+
+# Explicit empty default for the runtime-factory seam (see the var block above).
+$(RUNTIME_FACTORY_NONE_OBJ): $(SRCDIR)/hull/runtime/factory_none.c | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
 
 # Shared helpers for every runtime cache (Lua + JS, bytecode + template)

@@ -14,12 +14,20 @@
 
 #include <stdlib.h>
 
-__attribute__((weak))
-const HlEntry *const *hl_stdlib_feature_entries(size_t *count)
-{
-    if (count) *count = 0;
-    return NULL;
-}
+/* hl_stdlib_feature_entries() is the composable seam. There is deliberately NO
+ * weak default here: a weak default in this always-linked TU (hl_platform_vfs_init
+ * below references the hook, so this file is always pulled) would be BOUND FIRST
+ * from the base archive and SHADOW a strong override that lives in another
+ * archive member - the archive-resolution rule pulls a member only to satisfy an
+ * UNDEFINED symbol, and a weak def already satisfies it. That shadow is exactly
+ * what shipped an empty runtime VFS ("module not found: hull.json") on the
+ * composition-exempt cosmo base. Leaving the symbol UNDEFINED in the base turns a
+ * forgotten override into a link-time "undefined reference" instead of a silent
+ * boot failure. Providers today: a produced app's emitted registry, or the hull
+ * toolchain registry. Every consumer that builds a platform VFS links one of
+ * those; a future non-app consumer that ships no composed stdlib would add an
+ * explicit strong empty (mirroring runtime/factory_none.c for the factory seam)
+ * rather than reintroduce a shadowing weak default here. */
 
 void hl_platform_vfs_init(HlVfs *vfs, void **out_owned)
 {

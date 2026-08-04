@@ -32,20 +32,23 @@ const HlRuntimeFactory *const *hl_runtime_factories(size_t *count)
 }
 
 /*
- * Weak default: a base build composes no runtime as a feature, so there are
- * none. A `hull build --with=<runtime>` build links a STRONG override (the
- * generated feature_registry.c) returning that runtime's factory. Same-TU weak
- * default + collector, mirroring hl_db_feature_backends in cap/db_select.c. Always
- * present (factory.c is linked wherever the registry is used) so the symbol
- * resolves whether or not a runtime feature is composed. See
+ * hl_runtime_feature_factories() is the composable seam: a produced app links a
+ * STRONG override (its generated feature registry) returning its runtime's
+ * factory; the hull toolchain links the toolchain registry (both runtimes); a
+ * unit-test binary that inits runtimes directly links the explicit empty default
+ * in runtime/factory_none.c.
+ *
+ * There is deliberately NO weak default here. A weak default sitting in this
+ * always-linked TU would be BOUND FIRST when this file is pulled from the base
+ * archive, SHADOWING a strong override that lives in another archive member (the
+ * archive-resolution rule: a member is only pulled to satisfy an UNDEFINED
+ * symbol; a weak def already satisfies it). That is exactly the class of bug
+ * that shipped an empty runtime VFS on the composition-exempt cosmo base (see
+ * hl_stdlib_feature_entries in stdlib_feature.c). Leaving the symbol UNDEFINED in
+ * the base turns "a link target forgot to provide the override" from a silent
+ * runtime failure into a link-time "undefined reference" error. See
  * docs/runtime_feature_phase1.md.
  */
-__attribute__((weak))
-const HlRuntimeFactory *const *hl_runtime_feature_factories(size_t *count)
-{
-    if (count) *count = 0;
-    return NULL;
-}
 
 const HlRuntimeFactory *hl_runtime_factory_for_extension(const char *ext)
 {
