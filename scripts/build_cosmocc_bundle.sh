@@ -77,8 +77,9 @@ echo "build_cosmocc_bundle: fetching busybox $bb_url"
 curl -fsSL --retry 3 --retry-all-errors --retry-delay 2 -L "$bb_url" -o "$work/busybox.exe"
 verify "$work/busybox.exe" "$bb_sha"
 echo "build_cosmocc_bundle: busybox SHA-256 OK"
-cp "$work/busybox.exe" "$work/tree/bin/busybox.exe"
-chmod 0755 "$work/tree/bin/busybox.exe"
+# NOTE: busybox is dropped into the tree AFTER the trim below - the trace closure
+# only keeps files a Linux build TOUCHES, and busybox (a Windows-only shell) is
+# not among them, so copying it in first would get it swept by the trim.
 
 # ── trim (trace-closure) ──────────────────────────────────────────────────
 # An APE build opens only ~309 MB of the ~1.37 GB tree (§C); the rest is
@@ -150,6 +151,12 @@ if [ "$after" -gt "$MAX_MB" ]; then
     echo "  -> investigate the closure in scripts/build_cosmocc_bundle.sh" >&2
     exit 1
 fi
+
+# ── busybox ride-along (AFTER the trim, so it survives) ──────────────────
+cp "$work/busybox.exe" "$work/tree/bin/busybox.exe"
+chmod 0755 "$work/tree/bin/busybox.exe"
+test -x "$work/tree/bin/busybox.exe" || { echo "build_cosmocc_bundle: busybox drop-in failed" >&2; exit 1; }
+echo "build_cosmocc_bundle: busybox placed at bin/busybox.exe"
 
 # ── pack (symlink-preserving) ────────────────────────────────────────────
 out_abs=$(cd "$(dirname "$out")" && pwd)/$(basename "$out")
