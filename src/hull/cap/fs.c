@@ -60,12 +60,20 @@ int hl_cap_fs_validate(const HlFsConfig *cfg, const char *path,
         p = slash + 1;
     }
 
+    /* TEMP DIAG (HULL_FS_DEBUG): trace realpath canonicalization for the Windows
+     * spaces-in-path gap (nexogen PLATFORM_GAPS 2026-07-14). Remove after fix. */
+    int fsdbg = getenv("HULL_FS_DEBUG") != NULL;
+    if (fsdbg) fprintf(stderr, "[FSDBG] validate path='%s' base_dir='%s'\n",
+                       path, cfg->base_dir);
+
     /* Resolve the base directory (must exist) */
     char resolved_base[PATH_MAX];
     if (realpath(cfg->base_dir, resolved_base) == NULL) {
+        if (fsdbg) fprintf(stderr, "[FSDBG] realpath(base_dir) FAILED errno=%d\n", errno);
         if (err_msg) *err_msg = "validate_failed";
         return -1; /* base dir must exist */
     }
+    if (fsdbg) fprintf(stderr, "[FSDBG] resolved_base='%s'\n", resolved_base);
 
     /* Build full path */
     char full[PATH_MAX];
@@ -85,18 +93,24 @@ int hl_cap_fs_validate(const HlFsConfig *cfg, const char *path,
     while (realpath(probe, resolved) == NULL) {
         char *slash = strrchr(probe, '/');
         if (!slash || slash == probe) {
+            if (fsdbg) fprintf(stderr, "[FSDBG] walk-up exhausted, full='%s'\n", full);
             if (err_msg) *err_msg = "validate_failed";
             return -1; /* exhausted all ancestors */
         }
         *slash = '\0';
     }
+    if (fsdbg) fprintf(stderr, "[FSDBG] full='%s' resolved_ancestor='%s'\n", full, resolved);
 
     /* Verify the resolved ancestor starts with resolved base */
     size_t base_len = strlen(resolved_base);
     if (strncmp(resolved, resolved_base, base_len) != 0) {
+        if (fsdbg) fprintf(stderr, "[FSDBG] PREFIX MISMATCH: resolved='%s' !startswith resolved_base='%s' (base_len=%zu)\n",
+                           resolved, resolved_base, base_len);
         if (err_msg) *err_msg = "symlink_escape";
         return -1;
     }
+    if (fsdbg) fprintf(stderr, "[FSDBG] prefix OK; boundary char='%c'\n",
+                       resolved[base_len] ? resolved[base_len] : '0');
 
     /* Must be followed by '/' or be exactly the base dir */
     if (resolved[base_len] != '/' && resolved[base_len] != '\0') {

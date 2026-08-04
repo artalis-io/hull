@@ -28,6 +28,8 @@ on:
       - 'src/hull/sandbox_tool.c'
       - 'src/hull/compiler.c'
       - 'src/hull/cap/tar.c'
+      - 'src/hull/cap/fs.c'
+      - 'src/hull/sandbox.c'
       - 'stdlib/cli/lua/hull/build.lua'
 
 permissions:
@@ -121,6 +123,41 @@ jobs:
           Write-Host "cosmocc : $(Test-Path "$dest\bin\cosmocc")"
           Write-Host "busybox : $(Test-Path "$dest\bin\busybox.exe")"
           .\hull-cosmo.exe version
+
+      # Reproduce + verify the spaces-in-path fs-sandbox gap (nexogen asset-tracker
+      # PLATFORM_GAPS 2026-07-14): `hull dev` on a path WITH A SPACE failed
+      # blob.init ("check fs.write declares data/blobs") because realpath()
+      # canonicalizes a spaced Windows path inconsistently, breaking the cap-layer
+      # prefix match. HULL_FS_DEBUG traces the exact realpath in/out so we can see
+      # (and, after the fix, confirm) it. Plain local NTFS path with a space -
+      # isolates the space from the Google-Drive virtual FS in the original report.
+      - name: Spaces-in-path fs sandbox (blob.init on a spaced dir)
+        id: spaces
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          $sp = "$env:TEMP\has space\reproapp"
+          New-Item -ItemType Directory -Force -Path $sp | Out-Null
+          $lua = @'
+          local blob = require("hull.blob")
+          app.manifest({ modules = { "hull/blob@1" }, fs = { write = { "data/blobs" } } })
+          app.main(function(ctx)
+            local ok, err = pcall(function() blob.init({ dir = "data/blobs" }) end)
+            ctx.stdout:write("REPRO blob.init ok=" .. tostring(ok) .. " err=" .. tostring(err) .. "\n")
+            return ok and 0 or 3
+          end)
+          '@
+          Set-Content -NoNewline "$sp\app.lua" -Value $lua -Encoding ascii
+          $env:HULL_FS_DEBUG = "1"
+          Write-Host "=== cosmo hull on SPACED path: $sp ==="
+          $out = & .\hull-cosmo.exe "$sp\app.lua" 2>&1 | Out-String
+          Write-Host $out
+          Write-Host "--- spaced-path run exit: $LASTEXITCODE ---"
+          if ($out -match "REPRO blob.init ok=true") {
+            Write-Host "SPACES-OK: blob.init succeeded on a spaced path"
+          } else {
+            Write-Host "SPACES-FAIL: blob.init failed on a spaced path (the gap)"
+          }
 
       - name: hull build a trivial app -> APE
         id: build
