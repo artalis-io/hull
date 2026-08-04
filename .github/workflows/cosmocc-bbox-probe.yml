@@ -56,6 +56,14 @@ jobs:
             & ".\bb\$bb" sh -c 'export TMPDIR=C:/tmp; out2=$("./cosmo/bin/mktemper" "$TMPDIR/fatcosmocc.XXXXXXXXXXXXX.txt"); echo "fwd out2=[$out2]"; ( echo err >&2 ) 2>"$out2" && echo "fwd REDIRECT OK" || echo "fwd REDIRECT FAIL"; [ -f "$out2" ] && echo "fwd FILE OK"' 2>&1 | Out-String | Write-Host
             # 2) BACK-slash TMPDIR (what a cosmo hull's setenv produces) - is THIS what breaks it?
             & ".\bb\$bb" sh -c 'export TMPDIR="C:\tmp"; out2=$("./cosmo/bin/mktemper" "$TMPDIR/fatcosmocc.XXXXXXXXXXXXX.txt"); echo "bs out2=[$out2]"; ( echo err >&2 ) 2>"$out2" && echo "bs REDIRECT OK" || echo "bs REDIRECT FAIL"' 2>&1 | Out-String | Write-Host
+            # 3) The EXACT E2E scenario: the real ~/.hull/tmp path, dir ABSENT then PRESENT.
+            $real = "$env:USERPROFILE\.hull\tmp"
+            if (Test-Path $real) { Remove-Item -Recurse -Force $real }
+            Write-Host "-- ~/.hull/tmp ABSENT --"
+            & ".\bb\$bb" sh -c "export TMPDIR=`"$real`"; out2=`$(`"./cosmo/bin/mktemper`" `"`$TMPDIR/fatcosmocc.XXXXXXXXXXXXX.txt`"); echo `"absent out2=[`$out2]`"; ( echo err >&2 ) 2>`"`$out2`" && echo 'absent REDIRECT OK' || echo 'absent REDIRECT FAIL'" 2>&1 | Out-String | Write-Host
+            New-Item -ItemType Directory -Force -Path $real | Out-Null
+            Write-Host "-- ~/.hull/tmp PRESENT --"
+            & ".\bb\$bb" sh -c "export TMPDIR=`"$real`"; out2=`$(`"./cosmo/bin/mktemper`" `"`$TMPDIR/fatcosmocc.XXXXXXXXXXXXX.txt`"); echo `"present out2=[`$out2]`"; ( echo err >&2 ) 2>`"`$out2`" && echo 'present REDIRECT OK' || echo 'present REDIRECT FAIL'" 2>&1 | Out-String | Write-Host
             # Machine verdict: forward-slash path -> redirect works?
             $r = (& ".\bb\$bb" sh -c 'export TMPDIR=C:/tmp; out2=$("./cosmo/bin/mktemper" "$TMPDIR/fatcosmocc.XXXXXXXXXXXXX.txt"); ( echo x >&2 ) 2>"$out2" && [ -n "$out2" ] && echo FWD_OK || echo FWD_BAD' 2>&1 | Out-String)
             Write-Host "verdict($bb): $r"
