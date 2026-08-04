@@ -134,12 +134,17 @@ cat "$probe"/tr.* \
 find "$work/tree" -type f -path '*/include/*' >> "$keep"
 # The linker resolves -lm / -lpthread / -lrt / ... to arch-lib stub archives even
 # when the symbols actually live in libcosmo.a; the trace closure misses stubs
-# the probe never opened (it resolved those symbols from libcosmo.a). Keep ALL
-# arch-lib archives + link glue EXCEPT the big C++ / unwind ones a C build never
-# links (that is what keeps lib/ under the size gate).
-find "$work/tree" -path '*/lib/*' -type f \
-    ! -name 'libc++*' ! -name 'libc++abi*' ! -name 'libstdc++*' ! -name 'libunwind*' \
-    >> "$keep"
+# the probe never opened (it resolved those symbols from libcosmo.a). Keep ONLY
+# the STANDARD C link set by name (libcosmo + the libc-family stubs + libgcc +
+# all crt/ape/*.o/*.lds glue) - NOT the ~300 MB/arch of third-party archives
+# (libz/libsqlite3/libcurl/...) a Hull app never links (it vendors its own),
+# which is what keeps lib/ under the 490 MB size gate.
+find "$work/tree" -path '*/lib/*' -type f \( \
+        -name 'libcosmo.a'  -o -name 'libc.a'    -o -name 'libm.a'       -o \
+        -name 'libpthread.a' -o -name 'librt.a'  -o -name 'libdl.a'      -o \
+        -name 'libresolv.a' -o -name 'libgcc*'   -o -name 'libatomic*'   -o \
+        -name 'crt*.o'      -o -name '*.o'        -o -name '*.lds'        -o \
+        -name 'ape*' \) >> "$keep"
 sort -u "$keep" -o "$keep"
 
 # Delete every regular file NOT in the keep set (symlinks + dirs untouched),
