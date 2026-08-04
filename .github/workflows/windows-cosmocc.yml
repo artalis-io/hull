@@ -362,6 +362,29 @@ jobs:
           Write-Host "remains the Windows story."
           exit 0
 
+  sectione-inventory:
+    # §E INVENTORY (feeds the item-E producer's trim keep-list). §C proved an APE
+    # build touches only ~309 MB of the 1.37 GB tree; this dumps WHAT the other
+    # ~1 GB is (per-dir sizes + biggest files) so build_cosmocc_bundle.sh can trim
+    # by an exact, confident keep-list instead of guessing.
+    name: "§E — inventory the cosmocc tree (trim keep-list)"
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fetch/verify/extract cosmocc + inventory
+        shell: bash
+        run: |
+          curl -fsSL --retry 3 -o cosmocc.zip "https://cosmo.zip/pub/cosmocc/cosmocc-$COSMOCC_VERSION.zip"
+          [ "$(sha256sum cosmocc.zip | cut -d' ' -f1)" = "$COSMOCC_SHA256" ] || { echo "sha mismatch"; exit 1; }
+          mkdir -p tree && ( cd tree && unzip -q -o "$GITHUB_WORKSPACE/cosmocc.zip" )
+          root=$(ls -d tree/*/ 2>/dev/null | head -1); [ -n "$root" ] || root=tree
+          echo "=== total ==="; du -sh "$root"
+          echo "=== top-level dirs ==="; du -sh "$root"*/ 2>/dev/null | sort -rh | head -30
+          echo "=== depth-2 (biggest 40) ==="; du -h --max-depth=2 "$root" 2>/dev/null | sort -rh | head -40
+          echo "=== 30 biggest files ==="; find "$root" -type f -printf '%s\t%p\n' | sort -rn | head -30 | awk '{printf "%.1fMB\t%s\n",$1/1048576,$2}'
+          echo "=== other-language compilers present (cc1plus/f951/lto1/...) ==="; find "$root" -type f \( -name 'cc1plus' -o -name 'f951' -o -name 'cc1obj*' -o -name 'lto1' -o -name 'd21' -o -name 'go1' -o -name 'gnat1' \) -printf '%s\t%p\n' | awk '{printf "%.1fMB\t%s\n",$1/1048576,$2}'
+          echo "=== C++ / unwind libs (droppable for a C-only build) ==="; find "$root" -type f \( -name 'libc++*' -o -name 'libstdc++*' -o -name 'libunwind*' \) -printf '%s\t%p\n' | awk '{printf "%.1fMB\t%s\n",$1/1048576,$2}' | head -30
+          echo "=== .dbg sidecars ==="; find "$root" -name '*.dbg' -printf '%s\t%p\n' | awk '{s+=$1} END{printf "total %.1fMB across %d files\n", s/1048576, NR}'
+
   sectionc-trim-trace:
     # §C SPIKE (bundle size, epic item C): the cosmocc tree is ~1.43 GB, over the
     # release_io 512 MB download cap. Does an APE BUILD actually touch all of it,
