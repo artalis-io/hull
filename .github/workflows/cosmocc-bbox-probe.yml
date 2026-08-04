@@ -1,0 +1,78 @@
+name: cosmocc busybox capture probe
+
+# Lean diagnostic for the E2E wall (docs/cosmocc_install.md): cosmocc's driver
+# captures a cosmo-APE's stdout via command substitution - out2=$(mktemper .txt)
+# - in six places, and under busybox-w64 out2 came back EMPTY. Isolate the exact
+# question with NO 20-min cosmo-hull build: does busybox-w64 capture a cosmo
+# APE's $(...) stdout on Windows at all? Test both busybox variants
+# (busybox64.exe vs busybox64u.exe) and, for contrast, a shell builtin.
+#
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - '.github/workflows/cosmocc-bbox-probe.yml'
+
+permissions:
+  contents: read
+
+env:
+  COSMOCC_VERSION: 4.0.2
+  COSMOCC_SHA256: 85b8c37a406d862e656ad4ec14be9f6ce474c1b436b9615e91a55208aced3f44
+
+jobs:
+  probe:
+    name: "does busybox capture a cosmo-APE's $() stdout?"
+    runs-on: windows-latest
+    steps:
+      - name: Extract cosmocc (bsdtar) + fetch both busybox variants
+        shell: pwsh
+        run: |
+          curl.exe -fsSL --retry 3 -o cosmocc.zip "https://cosmo.zip/pub/cosmocc/cosmocc-$env:COSMOCC_VERSION.zip"
+          if ((Get-FileHash cosmocc.zip -Algorithm SHA256).Hash.ToLower() -ne $env:COSMOCC_SHA256) { throw "sha mismatch" }
+          New-Item -ItemType Directory -Force -Path cosmo | Out-Null
+          tar.exe -xpf cosmocc.zip -C cosmo 2>&1 | Write-Host
+          New-Item -ItemType Directory -Force -Path bb, C:\tmp | Out-Null
+          curl.exe -fsSL --retry 3 -L -o bb\busybox64u.exe "https://frippery.org/files/busybox/busybox64u.exe"
+          curl.exe -fsSL --retry 3 -L -o bb\busybox64.exe  "https://frippery.org/files/busybox/busybox64.exe"
+          Write-Host "mktemper is: $((Get-Content cosmo\bin\mktemper -TotalCount 1))"
+
+      - name: Probe each busybox variant
+        id: probe
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          $anyCap = $false
+          foreach ($bb in @("busybox64u.exe","busybox64.exe")) {
+            Write-Host "================= $bb ================="
+            # 1) builtin capture (baseline: does $() work at all here?)
+            & ".\bb\$bb" sh -c 'v=$(echo hello-builtin); echo "builtin=[$v]"' 2>&1 | Out-String | Write-Host
+            # 2) cosmo-APE capture via a pipe/$() - mktemper prints the temp path.
+            & ".\bb\$bb" sh -c 'export TMPDIR=C:/tmp; v=$("./cosmo/bin/mktemper" "C:/tmp/t.XXXXXXXX"); echo "ape_mktemper=[$v]"; ls -la "$v" 2>&1 || echo "(no file)"' 2>&1 | Out-String | Write-Host
+            # 3) another cosmo-APE capture (cosmocc --version, first line).
+            & ".\bb\$bb" sh -c 'v=$("./cosmo/bin/cosmocc" --version 2>/dev/null | head -1); echo "ape_version=[$v]"' 2>&1 | Out-String | Write-Host
+            # Machine-checkable verdict for THIS variant: capture non-empty?
+            $cap = (& ".\bb\$bb" sh -c 'export TMPDIR=C:/tmp; v=$("./cosmo/bin/mktemper" "C:/tmp/t.XXXXXXXX"); if [ -n "$v" ]; then echo CAP_OK; else echo CAP_EMPTY; fi' 2>&1 | Out-String)
+            Write-Host "verdict($bb): $cap"
+            if ($cap -match "CAP_OK") { $anyCap = $true; Write-Host "=> $bb CAPTURES a cosmo-APE's \$() stdout" }
+          }
+          "any_capture=$anyCap" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
+      - name: Verdict
+        shell: pwsh
+        run: |
+          $any = "${{ steps.probe.outputs.any_capture }}"
+          Write-Host "=================================================================="
+          if ($any -eq "True") {
+            Write-Host "CAPTURE WORKS with at least one busybox variant - the E2E wall is"
+            Write-Host "fixable by using that variant (and/or the workaround). Switch the"
+            Write-Host "bundle's bin/busybox.exe to the capturing variant and re-run E2E."
+          } else {
+            Write-Host "NO busybox variant captures a cosmo-APE's \$() stdout on Windows."
+            Write-Host "cosmocc's driver depends on out2=\$(mktemper) in six places, so the"
+            Write-Host "self-contained busybox path is fundamentally blocked - the Windows"
+            Write-Host "story needs a real POSIX sh (MSYS/Git-Bash/WSL), the §0.5 result."
+          }
+          exit 0
