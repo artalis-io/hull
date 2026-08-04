@@ -66,6 +66,23 @@ jobs:
           Expand-Archive -Path $zip -DestinationPath $dest -Force
           Get-ChildItem "$dest\bin\cosmocc*" | Select-Object -First 3 Name, Length
 
+      # Diagnostic: does cosmocc even RUN on Windows, directly (independent of
+      # hull)? Isolates "cosmocc-on-Windows broken" from "hull can't resolve/spawn
+      # it". cosmocc is a gcc wrapper; -dumpversion is the cheapest probe.
+      - name: cosmocc runs directly on Windows
+        id: cosmocc_direct
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          $cc = "$env:USERPROFILE\.cosmocc\bin\cosmocc"
+          Write-Host "trying: $cc --version"
+          & $cc --version 2>&1 | Out-String | Write-Host
+          Write-Host "--- --version exit: $LASTEXITCODE ---"
+          Write-Host "trying: $cc -dumpmachine"
+          & $cc -dumpmachine 2>&1 | Out-String | Write-Host
+          Write-Host "--- -dumpmachine exit: $LASTEXITCODE ---"
+          if ($LASTEXITCODE -ne 0) { throw "cosmocc did not run on Windows (exit $LASTEXITCODE)" }
+
       # Step 3: the app to build.
       - name: Write a minimal app.lua
         shell: pwsh
