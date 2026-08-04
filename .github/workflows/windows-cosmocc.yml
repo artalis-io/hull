@@ -305,6 +305,125 @@ jobs:
           Write-Host "remains the Windows story."
           exit 0
 
+  sectionc-trim-trace:
+    # §C SPIKE (bundle size, epic item C): the cosmocc tree is ~1.43 GB, over the
+    # release_io 512 MB download cap. Does an APE BUILD actually touch all of it,
+    # or would a trimmed subset fit under the cap uncompressed (option 1, no new
+    # inflate in the trust path)? strace a fat-APE build and measure the file
+    # closure it opens vs the full tree. Linux runner: cosmocc runs natively and
+    # strace is available. The closure is a floor estimate (a real hull build also
+    # apelinks the embedded platform .a, but that .a is IN hull, not the cosmocc
+    # tree; linking any symbol still opens cosmopolitan.a fully, so the big tree
+    # files are captured).
+    name: "§C — trimmed cosmocc closure vs the full tree"
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install strace + fetch/verify/extract cosmocc
+        shell: bash
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y strace >/dev/null
+          curl -fsSL --retry 3 -o cosmocc.zip "https://cosmo.zip/pub/cosmocc/cosmocc-$COSMOCC_VERSION.zip"
+          actual=$(sha256sum cosmocc.zip | cut -d' ' -f1)
+          [ "$actual" = "$COSMOCC_SHA256" ] || { echo "sha mismatch: $actual"; exit 1; }
+          mkdir -p "$HOME/.cosmocc"
+          ( cd "$HOME/.cosmocc" && unzip -q -o "$GITHUB_WORKSPACE/cosmocc.zip" )
+          echo "COSMO_ROOT=$HOME/.cosmocc" >> "$GITHUB_ENV"
+
+      - name: Build a representative APE under strace
+        shell: bash
+        run: |
+          # Reference a broad libc surface so apelink pulls widely from
+          # cosmopolitan.a (mimics hull's fat platform .a link more than a bare
+          # hello world). cosmocc runs BOTH arch passes for the fat APE.
+          cat > app.c <<'EOF'
+          #include <stdio.h>
+          #include <stdint.h>
+          #include <string.h>
+          #include <stdlib.h>
+          #include <math.h>
+          #include <pthread.h>
+          static void *thr(void *a){ return a; }
+          int main(void){
+            pthread_t t; pthread_create(&t,0,thr,0); pthread_join(t,0);
+            char *p = malloc(64); snprintf(p,64,"%f",sqrt(2.0)); size_t n=strlen(p);
+            free(p); return (int)(n>0?42:1);
+          }
+          EOF
+          # -ff writes one file per PID (trace.<pid>) so per-process calls stay
+          # sequential - avoids the unfinished/resumed interleaving of plain -f
+          # that would drop path args. cosmocc forks compile.ape/assembler/apelink.
+          strace -ff -y -e trace=open,openat,stat,lstat,newfstatat,access,readlink \
+            -o trace "$COSMO_ROOT/bin/cosmocc" -O2 -o app.com app.c
+          cat trace.* > trace.txt
+          echo "strace produced $(ls trace.* | wc -l) per-pid logs"
+          ls -la app.com
+          # Prove it runs + returns 42 (APE exit may be raw here on Linux).
+          ./app.com; rc=$?; echo "app.com exit: $rc"; [ "$rc" = "42" ] || echo "note: exit $rc"
+
+      - name: Compute the touched closure vs the full tree
+        shell: bash
+        run: |
+          root="$COSMO_ROOT"
+          real_files(){ while IFS= read -r f; do [ -f "$f" ] && echo "$f"; done; }
+          sum_mb(){ xargs -a "$1" -d '\n' stat -c '%s' 2>/dev/null | awk '{s+=$1} END{printf "%.0f", (s+0)/1048576}'; }
+
+          # SUCCESSFUL syscalls only (drop '= -1 ...' ENOENT probes) -> the files
+          # the build actually needs present. First quoted path per line, kept if
+          # under the cosmocc root and still a real file.
+          grep -E '\)[[:space:]]*=[[:space:]]*[0-9]' trace.txt \
+            | grep -oE '"[^"]*"' | sed 's/^"//; s/"$//' \
+            | grep -F "$root/" | sort -u | real_files > closure.txt
+
+          # SUPERSET: every tree path mentioned (success or not) -> a safe upper
+          # bound, in case -ff still split a few resumed calls.
+          grep -oE '"[^"]*"' trace.txt | sed 's/^"//; s/"$//' \
+            | grep -F "$root/" | sort -u | real_files > closure.super.txt
+
+          full_mb=$(du -sm "$root" | cut -f1)
+          clo_mb=$(sum_mb closure.txt);  clo_n=$(wc -l < closure.txt)
+          sup_mb=$(sum_mb closure.super.txt); sup_n=$(wc -l < closure.super.txt)
+          echo "full tree        : ${full_mb} MB"
+          echo "needed closure   : ${clo_mb} MB (${clo_n} files, successful opens)"
+          echo "superset (upper) : ${sup_mb} MB (${sup_n} files, all mentions)"
+          echo "--- needed closure by top-level component ---"
+          sed "s#^$root/##" closure.txt | awk -F/ '{print $1}' | sort | uniq -c | sort -rn | head -20
+          echo "--- 15 largest needed files ---"
+          xargs -a closure.txt -d '\n' du -h 2>/dev/null | sort -rh | head -15
+          {
+            echo "FULL_MB=$full_mb"
+            echo "CLO_MB=$clo_mb"
+            echo "CLO_FILES=$clo_n"
+            echo "SUP_MB=$sup_mb"
+          } >> "$GITHUB_ENV"
+
+      - name: Verdict — does a trimmed cosmocc fit under the 512 MB cap?
+        shell: bash
+        run: |
+          echo "=================================================================="
+          echo "Full cosmocc-$COSMOCC_VERSION tree : ${FULL_MB} MB"
+          echo "APE-build needed closure          : ${CLO_MB} MB (${CLO_FILES} files)"
+          echo "APE-build superset (upper bound)  : ${SUP_MB} MB"
+          echo "release_io download cap           : 512 MB"
+          # Judge on the SUPERSET (the safe upper bound): if even that fits, trim
+          # is unambiguously viable.
+          if [ "${SUP_MB:-99999}" -lt 512 ]; then
+            echo "TRIM VIABLE: even the upper-bound closure (${SUP_MB} MB) fits UNDER"
+            echo "the 512 MB cap uncompressed -> epic item C option (1) 'trim the"
+            echo "tree' works with NO new inflate in the trust path. Build the bundle"
+            echo "from the closure (+ symlinks/parent dirs), not the ~${FULL_MB} MB tree."
+          elif [ "${CLO_MB:-99999}" -lt 512 ]; then
+            echo "TRIM LIKELY VIABLE: the needed closure (${CLO_MB} MB) fits, but the"
+            echo "superset (${SUP_MB} MB) does not - tighten the keep-set (drop probed"
+            echo "-but-unopened files) and re-measure before committing to option (1)."
+          else
+            echo "TRIM INSUFFICIENT ALONE: even the needed closure ${CLO_MB} MB exceeds"
+            echo "512 MB; epic item C needs option (2) gzip-inflate in the install"
+            echo "path or option (3) raise the cap. (A gzip of the closure is ~1/3.)"
+          fi
+          echo "Note: closure is a floor estimate (hull also apelinks its embedded"
+          echo "platform .a; cosmopolitan.a is opened fully regardless, so the large"
+          echo "tree files are captured). Treat as guidance for the C decision."
+
   section0-shell-drives-cosmocc:
     # §0 GO/NO-GO (no Hull change): given a SHELL + preserved symlinks, does
     # cosmocc's #!/bin/sh pipeline actually compile on Windows at all? If NO, the
