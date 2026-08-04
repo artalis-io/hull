@@ -354,7 +354,14 @@ static const char **build_shell_argv(const char *shell, const char *driver,
     if (is_busybox) argv[i++] = "sh";
     argv[i++] = "-c";
     if (tmpdir) {
-        argv[i++] = "export TMPDIR=\"$1\" TMP=\"$1\" TEMP=\"$1\"; shift; exec \"$0\" \"$@\"";
+        /* Normalize $1 backslashes -> '/', mkdir -p it (busybox creates the dir
+         * itself, sidestepping cosmo's mkdir + guaranteeing it exists before the
+         * driver's mktemper writes there - the E2E's actual failure was a MISSING
+         * ~/.hull/tmp), then export it as TMPDIR/TMP/TEMP. All positional; the
+         * program stays a compile-time literal (no app byte is shell code). */
+        argv[i++] = "D=$(printf '%s' \"$1\" | tr '\\\\' /); mkdir -p \"$D\"; "
+                    "export TMPDIR=\"$D\" TMP=\"$D\" TEMP=\"$D\"; shift; "
+                    "exec \"$0\" \"$@\"";
         argv[i++] = driver;
         argv[i++] = tmpdir;
     } else {
