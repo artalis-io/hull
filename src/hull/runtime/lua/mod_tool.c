@@ -646,7 +646,6 @@ static int l_tool_extract_feature_image_rt(lua_State *L)
 static int l_tool_extract_platform_cosmo(lua_State *L)
 {
     const char *dir = luaL_checkstring(L, 1);
-    HlToolUnveilCtx *ctx = get_unveil_ctx(L);
 
     const HlEmbeddedPlatform *platforms = NULL;
     int count = hl_build_get_platforms(&platforms);
@@ -680,10 +679,14 @@ static int l_tool_extract_platform_cosmo(lua_State *L)
     fclose(f);
     if (w != x86->len) { lua_pushboolean(L, 0); return 1; }
 
-    /* Create .aarch64/ subdir */
+    /* Create .aarch64/ subdir. Raw mkdir (single component; the parent `dir` is
+     * hull's own build tempdir, already created) - consistent with the raw fopen
+     * writes above, and unlike hl_tool_mkdir it doesn't component-walk, which on
+     * cosmo/Windows would try to mkdir the "C:" drive prefix of a drive-colon
+     * path and fail. EEXIST is fine (re-extract). */
     char aarch64_dir[1024];
     snprintf(aarch64_dir, sizeof(aarch64_dir), "%s/.aarch64", dir);
-    if (hl_tool_mkdir(aarch64_dir, ctx) != 0) {
+    if (mkdir(aarch64_dir, 0755) != 0 && errno != EEXIST) {
         lua_pushboolean(L, 0);
         return 1;
     }
