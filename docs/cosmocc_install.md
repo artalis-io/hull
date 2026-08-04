@@ -126,7 +126,10 @@ COFF `libhull_platform.a` that does not exist); changing the POSIX-host path
 (Linux/macOS already work); cosmo's own `cocmd`.
 
 The five items, sequenced by dependency (D, B are standalone and land first; A
-needs busybox present; E productionizes and depends on the C decision):
+needs busybox present; E productionizes and depends on the C decision).
+
+**Status: D and B have landed** (the two standalone C changes). A (spawn layer),
+C (bundle-format decision), and E (productionize) remain.
 
 ### A - drive cosmocc through busybox `sh` (the invocation change)
 

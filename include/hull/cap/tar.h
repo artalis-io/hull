@@ -31,6 +31,8 @@ typedef struct {
     size_t               size;   /**< content length (0 for a directory) */
     unsigned             mode;   /**< permission bits, e.g. 0755 */
     int                  is_dir; /**< 1 = directory, 0 = regular file */
+    int                  is_symlink; /**< 1 = symlink (data NULL; target in @c linkname) */
+    const char          *linkname;   /**< symlink target (NULL unless @c is_symlink) */
 } HlTarEntry;
 
 /**
@@ -52,6 +54,13 @@ int hl_tar_parse(const unsigned char *tar, size_t tar_len,
  *        the exec bit). TRUSTED: writes files directly, for hull's own install
  *        of a verified bundle. NOT for untrusted archives - apps extract via the
  *        hull.tar stdlib, which writes through the sandboxed fs capability.
+ *
+ * Symlink members (typeflag '2') ARE extracted here (unlike @c hl_tar_parse,
+ * which skips them): files/dirs are written first, then symlinks in a second
+ * pass (so a link's target is already on disk) via @c symlink(), falling back
+ * to COPYING the target file where symlinks are unavailable (e.g. Windows
+ * without the privilege). A symlink target that is absolute or contains a ".."
+ * segment is rejected (the archive is malformed) as defense in depth.
  * @returns 0 on success, -1 on a malformed archive / write error.
  */
 int hl_tar_extract(const unsigned char *tar, size_t tar_len,

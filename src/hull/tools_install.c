@@ -213,12 +213,24 @@ int hl_tools_asset_name(const HlToolSpec *spec, const char *platform,
 }
 
 
+/* Home directory, with a Windows fallback. A cosmo `hull` running on Windows
+ * has no $HOME (Windows populates $USERPROFILE), so fall back to it - keeps
+ * `$HOME/.hull/...` resolution working when a cosmo-APE hull runs natively on
+ * Windows (see docs/cosmocc_install.md, spec item D). */
+static const char *tools_home(void)
+{
+    const char *home = getenv("HOME");
+    if (home && *home) return home;
+    home = getenv("USERPROFILE");
+    return (home && *home) ? home : NULL;
+}
+
 int hl_tools_dir(char *out, size_t out_sz)
 {
     if (!out || out_sz < 2) return -1;
 
-    const char *home = getenv("HOME");
-    if (!home || !*home) {
+    const char *home = tools_home();
+    if (!home) {
         errno = ENOENT;
         return -1;
     }
@@ -257,8 +269,8 @@ int hl_tools_install_path(const char *name, char *out, size_t out_sz)
         errno = EINVAL;
         return -1;
     }
-    const char *home = getenv("HOME");
-    if (!home || !*home) {
+    const char *home = tools_home();
+    if (!home) {
         errno = ENOENT;
         return -1;
     }

@@ -140,10 +140,21 @@ int hl_driver_resolve_native(char *out, size_t outsz)
      * installer typically doesn't put cosmocc on PATH by default. §3.1 of
      * roadmap_next.md. */
     {
+        /* $HOME, falling back to $USERPROFILE: a cosmo hull running natively on
+         * Windows has no $HOME (see docs/cosmocc_install.md, spec item D). */
         const char *home = getenv("HOME");
+        if (!home || !*home) home = getenv("USERPROFILE");
         char path[512];
         if (home && *home) {
-            int n = snprintf(path, sizeof(path), "%s/.cosmocc/bin/cosmocc", home);
+            /* The `hull tools install cosmocc` bundle (spec item E) installs to
+             * `$HOME/.hull/tools/cosmocc/bin/cosmocc`; probe it FIRST so an
+             * explicitly-installed toolchain wins over ad-hoc `~/.cosmocc`. */
+            int n = snprintf(path, sizeof(path),
+                             "%s/.hull/tools/cosmocc/bin/cosmocc", home);
+            if (n > 0 && (size_t)n < sizeof(path) && driver_ok(path)) {
+                snprintf(out, outsz, "%s", path); return 0;
+            }
+            n = snprintf(path, sizeof(path), "%s/.cosmocc/bin/cosmocc", home);
             if (n > 0 && (size_t)n < sizeof(path) && driver_ok(path)) {
                 snprintf(out, outsz, "%s", path); return 0;
             }

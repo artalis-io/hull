@@ -61,6 +61,15 @@ static void tar_add_file(unsigned char *buf, size_t *off,
     *off += (len + 511) & ~(size_t)511;
 }
 
+/* A ustar symlink entry (typeflag '2', target in the linkname field @ 157). */
+static void tar_add_symlink(unsigned char *buf, size_t *off,
+                            const char *name, const char *target) {
+    tar_put_header(buf + *off, name, 0);
+    buf[*off + 156] = '2';                          /* symlink typeflag */
+    strncpy((char *)(buf + *off + 157), target, 99);
+    *off += 512;
+}
+
 /* ── Fixture: per-test sandbox under /tmp ───────────────────────────── */
 
 struct tar_fixture {
@@ -307,6 +316,69 @@ UTEST_F(tar_fixture, extract_rejects_nested_traversal) {
     char dest[PATH_MAX];
     snprintf(dest, sizeof(dest), "%s/tree2", utest_fixture->tmpdir);
     ASSERT_EQ(hl_tar_extract(buf, off, dest), -1);   /* nested ".." refused */
+    free(buf);
+}
+
+/* Spec item B: a symlink member extracts as a link where supported, else a copy
+ * of its (already-extracted) target. Either way the path resolves to the target
+ * content - the cosmocc arch-cc -> cosmocc case. */
+UTEST_F(tar_fixture, extract_symlink_resolves_to_target) {
+    unsigned char *buf = calloc(1, 8192);
+    ASSERT_NE(buf, NULL);
+    size_t off = 0;
+    tar_add_file(buf, &off, "bin/cosmocc", "DRIVER-BYTES", 12);
+    tar_add_symlink(buf, &off, "bin/x86_64-cc", "cosmocc");  /* same-dir target */
+    off += 512;
+
+    char dest[PATH_MAX];
+    snprintf(dest, sizeof(dest), "%s/cc", utest_fixture->tmpdir);
+    ASSERT_EQ(hl_tar_extract(buf, off, dest), 0);
+
+    /* The link path resolves to the target's bytes (link or copy fallback). */
+    char p[PATH_MAX], rd[64];
+    snprintf(p, sizeof(p), "%s/bin/x86_64-cc", dest);
+    FILE *f = fopen(p, "rb"); ASSERT_NE(f, NULL);
+    size_t n = fread(rd, 1, sizeof(rd), f); fclose(f);
+    ASSERT_EQ(n, (size_t)12);
+    ASSERT_EQ(memcmp(rd, "DRIVER-BYTES", 12), 0);
+
+    /* On this POSIX host it is a real symlink pointing at the same-dir target. */
+    struct stat st;
+    ASSERT_EQ(lstat(p, &st), 0);
+    ASSERT_TRUE(S_ISLNK(st.st_mode));
+    char tgt[64];
+    ssize_t ln = readlink(p, tgt, sizeof(tgt) - 1);
+    ASSERT_GT(ln, (ssize_t)0);
+    tgt[ln] = '\0';
+    ASSERT_STREQ(tgt, "cosmocc");
+    free(buf);
+}
+
+/* A symlink whose target is absolute or escapes via ".." is rejected (a
+ * malformed archive), so it can never become a write-through primitive. */
+UTEST_F(tar_fixture, extract_rejects_unsafe_symlink_target) {
+    char dest[PATH_MAX];
+    unsigned char *buf = calloc(1, 4096);
+    ASSERT_NE(buf, NULL);
+
+    size_t off = 0;
+    tar_add_symlink(buf, &off, "bin/evil", "../../../../etc/passwd");
+    off += 512;
+    snprintf(dest, sizeof(dest), "%s/s1", utest_fixture->tmpdir);
+    ASSERT_EQ(hl_tar_extract(buf, off, dest), -1);   /* ".." target refused */
+
+    memset(buf, 0, 4096);
+    off = 0;
+    tar_add_symlink(buf, &off, "bin/evil", "/etc/passwd");
+    off += 512;
+    snprintf(dest, sizeof(dest), "%s/s2", utest_fixture->tmpdir);
+    ASSERT_EQ(hl_tar_extract(buf, off, dest), -1);   /* absolute target refused */
+
+    /* hl_tar_parse still ignores symlinks entirely (contract preserved): the
+     * same archive parses clean (0), it just yields no entries. */
+    struct collect col = { .n = 0 };
+    ASSERT_EQ(hl_tar_parse(buf, off, collect_cb, &col), 0);
+    ASSERT_EQ(col.n, 0);
     free(buf);
 }
 

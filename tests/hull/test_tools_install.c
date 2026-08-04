@@ -46,8 +46,10 @@
 struct tools_fixture {
     char tmpdir[PATH_MAX];          /* sandbox root */
     char saved_home[PATH_MAX];      /* original HOME, restored on teardown */
+    char saved_userprofile[PATH_MAX]; /* original USERPROFILE (Windows home) */
     char saved_path[2048];          /* original PATH */
     int  had_home;
+    int  had_userprofile;
     int  had_path;
 };
 
@@ -85,6 +87,13 @@ UTEST_F_SETUP(tools_fixture) {
     if (h) snprintf(utest_fixture->saved_home, sizeof(utest_fixture->saved_home), "%s", h);
     setenv("HOME", utest_fixture->tmpdir, 1);
 
+    /* Clear USERPROFILE (the Windows home fallback) so HOME is the sole driver
+     * by default; tests that exercise the fallback set it explicitly. */
+    const char *u = getenv("USERPROFILE");
+    utest_fixture->had_userprofile = u != NULL;
+    if (u) snprintf(utest_fixture->saved_userprofile, sizeof(utest_fixture->saved_userprofile), "%s", u);
+    unsetenv("USERPROFILE");
+
     const char *p = getenv("PATH");
     utest_fixture->had_path = p != NULL;
     if (p) snprintf(utest_fixture->saved_path, sizeof(utest_fixture->saved_path), "%s", p);
@@ -97,6 +106,8 @@ UTEST_F_TEARDOWN(tools_fixture) {
     (void)utest_result;
     if (utest_fixture->had_home) setenv("HOME", utest_fixture->saved_home, 1);
     else                          unsetenv("HOME");
+    if (utest_fixture->had_userprofile) setenv("USERPROFILE", utest_fixture->saved_userprofile, 1);
+    else                                unsetenv("USERPROFILE");
     if (utest_fixture->had_path) setenv("PATH", utest_fixture->saved_path, 1);
     else                          unsetenv("PATH");
     rm_recursive(utest_fixture->tmpdir);
@@ -234,7 +245,20 @@ UTEST_F(tools_fixture, dir_fails_without_home) {
     (void)utest_fixture;
     char out[PATH_MAX];
     unsetenv("HOME");
+    unsetenv("USERPROFILE");   /* neither home var set → fail closed */
     ASSERT_EQ(hl_tools_dir(out, sizeof(out)), -1);
+}
+
+/* Spec item D: a cosmo hull on Windows has no $HOME; $USERPROFILE is the home
+ * fallback, so tool paths still resolve. */
+UTEST_F(tools_fixture, home_falls_back_to_userprofile) {
+    char out[PATH_MAX];
+    unsetenv("HOME");
+    setenv("USERPROFILE", utest_fixture->tmpdir, 1);
+    ASSERT_EQ(hl_tools_install_path("cosmocc", out, sizeof(out)), 0);
+    char expect[PATH_MAX];
+    snprintf(expect, sizeof(expect), "%s/.hull/tools/cosmocc", utest_fixture->tmpdir);
+    ASSERT_STREQ(out, expect);
 }
 
 /* ── Install path ────────────────────────────────────────────────── */
