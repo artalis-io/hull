@@ -74,14 +74,25 @@ jobs:
         continue-on-error: true
         shell: pwsh
         run: |
-          $cc = "$env:USERPROFILE\.cosmocc\bin\cosmocc"
-          Write-Host "trying: $cc --version"
-          & $cc --version 2>&1 | Out-String | Write-Host
-          Write-Host "--- --version exit: $LASTEXITCODE ---"
-          Write-Host "trying: $cc -dumpmachine"
-          & $cc -dumpmachine 2>&1 | Out-String | Write-Host
-          Write-Host "--- -dumpmachine exit: $LASTEXITCODE ---"
-          if ($LASTEXITCODE -ne 0) { throw "cosmocc did not run on Windows (exit $LASTEXITCODE)" }
+          # PowerShell refuses to run an extension-less APE ("cannot run a
+          # document"), so copy to .exe. This also exercises cosmocc's INTERNAL
+          # spawns of its extension-less sub-tools (cc1/as/ld) via cosmo's execvp
+          # emulation - the true "does the pipeline work on Windows" probe.
+          $bin = "$env:USERPROFILE\.cosmocc\bin"
+          Copy-Item "$bin\cosmocc" "$bin\cosmocc.exe" -Force
+          Write-Host "=== cosmocc.exe --version ==="
+          & "$bin\cosmocc.exe" --version 2>&1 | Out-String | Write-Host
+          Write-Host "--- exit: $LASTEXITCODE ---"
+          Write-Host "=== cosmocc.exe -dumpmachine ==="
+          & "$bin\cosmocc.exe" -dumpmachine 2>&1 | Out-String | Write-Host
+          Write-Host "--- exit: $LASTEXITCODE ---"
+          # Actually compile a trivial .c to prove the full cc1->as->ld->apelink
+          # chain runs (not just the driver's --version fast path).
+          "int main(void){return 0;}" | Set-Content -NoNewline hello.c -Encoding ascii
+          Write-Host "=== cosmocc.exe -o hello.com hello.c ==="
+          & "$bin\cosmocc.exe" -o hello.com hello.c 2>&1 | Out-String | Write-Host
+          Write-Host "--- compile exit: $LASTEXITCODE ; hello.com exists: $(Test-Path hello.com) ---"
+          if ($LASTEXITCODE -ne 0 -or -not (Test-Path hello.com)) { throw "cosmocc could not compile on Windows" }
 
       # Step 3: the app to build.
       - name: Write a minimal app.lua
