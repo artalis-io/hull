@@ -197,6 +197,41 @@ function M.gen_app_registry_c(rt)
     }, "\n")
 end
 
+--- Emit a STDLIB-ONLY strong hl_stdlib_feature_entries() override.
+--
+-- For the COSMO produced app only. The cosmo base is composition-exempt: it
+-- carries both runtimes + the toolchain registries compiled into the fat APE,
+-- so a cosmo app composes no runtime archive and gets its runtime factory from
+-- the base's strong hl_runtime_feature_factories() (which IS pulled). But the
+-- base's strong hl_stdlib_feature_entries() lives in stdlib_toolchain_registry.o
+-- - an archive member SHADOWED by the weak default in the always-pulled
+-- stdlib_feature.o, so plain archive resolution never pulls it and the produced
+-- APE boots with an empty runtime VFS (require "hull.json" -> "module not
+-- found"). Emitting this stdlib-only override as a regular object wins over the
+-- weak default (strong-over-weak, no error) and references the base's
+-- hl_stdlib_<rt>_entries so that registry (hull.json et al.) is pulled.
+--
+-- Deliberately NOT the factory hook: the cosmo base already fills it, and a
+-- second strong definition would be a multiple-definition link error.
+--
+-- @param rt "lua" | "js"
+-- @return string  C source.
+function M.gen_app_stdlib_registry_c(rt)
+    local entries = "hl_stdlib_" .. rt .. "_entries"
+    return table.concat({
+        "/* Auto-generated cosmo stdlib registry - do not edit. */",
+        "typedef __SIZE_TYPE__ size_t;",
+        "typedef struct { const char *n; const unsigned char *d; unsigned int l; } HlEntry;",
+        "extern const HlEntry " .. entries .. "[];",
+        "static const HlEntry *const HL_STDLIB_FEATS[] = { " .. entries .. " };",
+        "const HlEntry *const *hl_stdlib_feature_entries(size_t *count) {",
+        "    if (count) *count = 1;",
+        "    return HL_STDLIB_FEATS;",
+        "}",
+        "",
+    }, "\n")
+end
+
 --- Resolve the app's runtime archive, trying the embedded-in-hull copy first.
 --
 -- Shared by build.lua and eject.lua so the "extract embedded -> local build

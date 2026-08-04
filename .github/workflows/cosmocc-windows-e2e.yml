@@ -55,24 +55,16 @@ jobs:
           make platform-cosmo
           make CC=cosmocc EMBED_PLATFORM=cosmo
           ./build/hull version
-      - name: Isolate the exit-256 json bug - build + RUN the app on LINUX
-        run: |
-          # cosmocc is native here, so hull-cosmo builds + the produced APE runs
-          # on Linux too. If it fails to pre-load hull.json HERE, the bug is
-          # cosmo-general (not Windows); if it exits 0 here, it is Windows-specific.
-          set -x
-          command -v cosmocc || true
-          /opt/cosmo/bin/cosmocc --version | head -1 || true
-          mkdir -p /tmp/jsonapp
-          printf 'app.manifest({ modules = {} })\napp.main(function(ctx) ctx.stdout:write("APP-MARKER-OK\\n"); return 0 end)\n' > /tmp/jsonapp/app.lua
-          # Force the COSMO compiler path by ABSOLUTE PATH (a bare --compiler=cosmocc
-          # let hull's availability probe pick a broken system clang first); this
-          # opts out of the native ELF emit path so we actually link the APE.
-          ./build/hull build /tmp/jsonapp -o /tmp/jsonapp/app.com \
-              --compiler=/opt/cosmo/bin/cosmocc --no-verify-platform 2>&1 | tail -8
-          echo "--- run the cosmo-built APE on Linux ---"
-          rc=0; /tmp/jsonapp/app.com || rc=$?
-          echo "LINUX cosmo-app exit: $rc  (0 => Windows-specific; 1 => cosmo-general)"
+      # NOTE: a Linux-side "build the cosmo APE and run it here" isolation was
+      # tried to classify the exit-256 (hull.json preload) bug, but this runner
+      # environment corrupts the system ELF loader once cosmocc is installed
+      # (every /bin/sh, cc, gcc, clang fails "libc.so.6: failed to map segment"),
+      # so hull never reaches cosmocc and the produced APE is never built. The
+      # bug was instead root-caused by construction (the weak
+      # hl_stdlib_feature_entries seam not force-loaded on the composition-exempt
+      # cosmo base) and localized locally (a NATIVE hull build of the same app
+      # runs clean). The fix (whole-archive the cosmo base in build.lua) is
+      # validated by the Windows leg below running the APE to exit 0.
       - uses: actions/upload-artifact@v4
         with:
           name: hull-cosmo-branch
