@@ -531,12 +531,17 @@ void hl_tool_cosmo_prepare_tmpdir(void)
         int n = snprintf(tmp, sizeof(tmp), "%s/.hull/tmp", h);
         if (n > 0 && (size_t)n < sizeof(tmp)) {
             (void)snprintf(hull, sizeof(hull), "%s/.hull", h);
-            (void)mkdir(hull, 0700);
-            (void)mkdir(tmp, 0700);
+            int rh = mkdir(hull, 0700); int eh = errno;
+            int rt = mkdir(tmp, 0700);  int et = errno;
             (void)snprintf(g_cosmo_tmpdir, sizeof(g_cosmo_tmpdir), "%s", tmp);
             setenv("TMPDIR", tmp, 1);
             setenv("TMP", tmp, 1);
             setenv("TEMP", tmp, 1);
+            /* TEMP diagnostic (remove after the E2E is green): why isn't the dir
+             * created / why does the driver see "nonexistent directory"? */
+            fprintf(stderr, "[cosmo-dbg] home=%s tmp=%s mkdir_hull=%d(%d) "
+                    "mkdir_tmp=%d(%d) exists=%d\n", h, tmp, rh, eh, rt, et,
+                    access(tmp, F_OK) == 0);
         }
     }
     done = 1;
@@ -602,6 +607,10 @@ static int cosmocc_reroute_exec(const char *const argv[],
     const char *tmpdir = (hl_tool_cosmo_tmpdir(td, sizeof(td)) == 0) ? td : NULL;
     const char **sv = build_shell_argv(shell, argv[0], argv + 1, tmpdir);
     if (!sv) { *rc = -1; return 1; }
+    /* TEMP diagnostic (remove after E2E green): the exact busybox argv. */
+    fprintf(stderr, "[cosmo-dbg] reroute tmpdir=%s argv:", tmpdir ? tmpdir : "(null)");
+    for (size_t k = 0; sv[k]; k++) fprintf(stderr, " <%s>", sv[k]);
+    fprintf(stderr, "\n");
     *rc = spawn_and_wait(sv, envadd);
     free((void *)(uintptr_t)sv);
     return 1;
