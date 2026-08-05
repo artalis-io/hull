@@ -137,18 +137,22 @@ case "$PLATFORM" in
     *cosmo*)
         echo ""
         echo "── cosmo binary — wamrc install is unsupported by design ──"
-        OUT=$("$HULL" agent tools 2>&1)
-        assert_contains "registry lists wamrc"             "$OUT" "\"name\":\"wamrc\""
-        assert_contains "wamrc not available on cosmo"     "$OUT" "\"available_for_platform\":false"
+        # Capture `agent tools` into a DEDICATED var: smoke_platform_install
+        # (called below) reassigns the global $OUT, so the cosmocc assert must
+        # not read $OUT after it. All three registry asserts share this snapshot.
+        TOOLS_JSON=$("$HULL" agent tools 2>&1)
+        assert_contains "registry lists wamrc"             "$TOOLS_JSON" "\"name\":\"wamrc\""
+        assert_contains "wamrc not available on cosmo"     "$TOOLS_JSON" "\"available_for_platform\":false"
+        # cosmocc IS published for cosmo (the exception to every other tool): it's
+        # the toolchain a cosmo hull needs to `hull build` an APE. Assert it is in
+        # the registry, then exercise the LIVE install below.
+        assert_contains "registry lists cosmocc"           "$TOOLS_JSON" "\"name\":\"cosmocc\""
         # Cosmo DOES publish per-flavor platform libs (dual-arch), so the
         # `hull flavor install` path is exercised on cosmo binaries.
         smoke_platform_install
-        # cosmocc IS published for cosmo (the exception to every other tool): it's
-        # the toolchain a cosmo hull needs to `hull build` an APE. Exercise the
-        # LIVE install + assert the bundle lays down cosmocc + the busybox
-        # ride-along (item E). This downloads ~300 MB - the point is to prove the
-        # trimmed big-asset fetch + trust chain end to end.
-        assert_contains "registry lists cosmocc"       "$OUT" "\"name\":\"cosmocc\""
+        # Exercise the LIVE cosmocc install + assert the bundle lays down cosmocc
+        # + the busybox ride-along (item E). This downloads ~300 MB - the point is
+        # to prove the trimmed big-asset fetch + trust chain end to end.
         echo ""
         echo "── hull tools install cosmocc (LIVE ~300 MB HTTPS download) ──"
         "$HULL" tools uninstall cosmocc >/dev/null 2>&1 || true
