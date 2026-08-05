@@ -11,7 +11,7 @@
 -- Full surface: schema + jobs.init, enqueue, the atomic claim, per-type +
 -- catch-all handlers, the work loop (retry-with-backoff, dead-letter, and the
 -- visibility-timeout reaper), the dedicated worker (jobs.run_worker +
--- `hull jobs worker`), and the ops surface (jobs.stats / dead / retry / cancel / cleanup). v1.1 adds durable cron (jobs.cron / uncron) and intra-process concurrency (run_worker concurrency=N), jobs.get(id), jobs.heartbeat for long jobs, fleet-wide rate limiting (jobs.limit), queue pause/resume/purge, and workflows (depends_on + result passing). v1.5 adds the standalone result backend (jobs.result / jobs.await), multi-queue draining (opts.queues, strict list or weighted map), bulk enqueue (jobs.enqueue_many), in-process lifecycle hooks (jobs.on completed/retried/dead), and polish (absolute at, jobs.progress, throttle window, fixed-offset tz cron).
+-- `hull jobs worker`), and the ops surface (jobs.stats / dead / retry / cancel / cleanup). v1.1 adds durable cron (jobs.cron / uncron) and intra-process concurrency (run_worker concurrency=N), jobs.get(id), jobs.heartbeat for long jobs, fleet-wide rate limiting (jobs.limit), queue pause/resume/purge, and workflows (depends_on + result passing). v1.5 adds the standalone result backend (jobs.result / jobs.await), multi-queue draining (opts.queues, strict list or weighted map), bulk enqueue (jobs.enqueue_many), in-process lifecycle hooks (jobs.on completed/retried/dead), and polish (absolute at, jobs.progress, throttle window, fixed-offset tz cron). Durable workflows (jobs.workflow / jobs.start / ctx.step, Phase 1a) add crash-safe resumable step memoization - a workflow instance is a job that rides the same claim/reaper/retry/result machinery (docs/jobs_durable_execution_design.md).
 --
 -- Usage (target shape):
 --   local jobs = require("hull.jobs")
@@ -61,6 +61,10 @@ local _default = nil
 -- the worker that processed the job, for jobs THAT worker ran. Not fleet-wide -
 -- a durable cross-process event stream is the LISTEN/NOTIFY epic (#235).
 local _listeners = { completed = {}, retried = {}, dead = {} }
+
+-- Registered durable workflows: name -> fn(ctx). jobs.workflow registers a
+-- reserved-type handler that runs the workflow through a memoizing ctx.
+local _workflows = {}
 
 -- Unix ts of the last reaper sweep (throttled in jobs.work via _cfg.reap_interval).
 local _last_reap = 0
@@ -216,6 +220,18 @@ function jobs.init(opts)
         "CREATE TABLE IF NOT EXISTS _hull_job_results ("
         .. "job_id INTEGER NOT NULL PRIMARY KEY,"
         .. "result TEXT)")
+
+    -- Durable-execution step memo (jobs.workflow / ctx.step). One row per
+    -- completed step of a workflow instance; a re-run of the workflow (crash or
+    -- retry) reads these to skip already-done steps. Composite PK = idempotent.
+    db.exec(
+        "CREATE TABLE IF NOT EXISTS _hull_workflow_steps ("
+        .. "workflow_id INTEGER      NOT NULL,"
+        .. "step_key    VARCHAR(255) NOT NULL,"
+        .. "result      TEXT,"
+        .. "status      VARCHAR(16)  NOT NULL DEFAULT 'done',"
+        .. "created_at  INTEGER      NOT NULL,"
+        .. "PRIMARY KEY (workflow_id, step_key))")
 
     -- Verify the server actually parses SKIP LOCKED (the compile-time dialect
     -- flag says "this backend supports it" but a MySQL<8 / MariaDB<10.6 server
@@ -1238,6 +1254,119 @@ function jobs.await(id, opts)
     end
 end
 
+-- ── Durable execution: workflow-as-code (Phase 1a) ──────────────────────────
+-- A durable workflow is a normal function fn(ctx) run as a job of the reserved
+-- type "__wf:<name>". Each ctx.step(name, fn) memoizes its result in
+-- _hull_workflow_steps; if the workflow re-runs (a crash or a retry re-enters it
+-- from the top), completed steps return their stored result instead of
+-- re-executing, so the body resumes where it left off. Design:
+-- docs/jobs_durable_execution_design.md.
+local WF_PREFIX = "__wf:"
+
+-- Run (or replay) one memoized step. Returns fn()'s value; on a re-run of the
+-- workflow the value comes from the store and fn is NOT called again.
+local function run_step(workflow_id, step_key, fn)
+    if type(step_key) ~= "string" or step_key == "" then
+        error("ctx.step: name must be a non-empty string")
+    end
+    if type(fn) ~= "function" then error("ctx.step: fn must be a function") end
+    local rows = db.query(
+        "SELECT result FROM _hull_workflow_steps WHERE workflow_id=? AND step_key=?",
+        { workflow_id, step_key })
+    if rows and #rows > 0 then
+        if rows[1].result == nil then return nil end
+        local ok, decoded = pcall(json.decode, rows[1].result)
+        if ok then return decoded else return rows[1].result end
+    end
+    -- First execution: run, then persist. At-least-once - a crash between the
+    -- side effect and this INSERT re-runs the step on resume (steps must be
+    -- idempotent, same contract as a job handler).
+    local result = fn()
+    local enc = result ~= nil and json.encode(result) or nil
+    db.exec(
+        "INSERT INTO _hull_workflow_steps (workflow_id, step_key, result, status, created_at) "
+        .. "VALUES (?, ?, ?, 'done', ?)",
+        { workflow_id, step_key, enc, time.now() })
+    return result
+end
+
+-- Build the durable ctx handed to a workflow function.
+local function make_ctx(job, name)
+    local ctx = {
+        id    = job.id,
+        name  = name,
+        input = job.data,
+        trace = job.trace,   -- trace-context propagation (observability design)
+    }
+    ctx.step = function(step_key, fn) return run_step(job.id, step_key, fn) end
+    return ctx
+end
+
+--- Register a durable workflow. `fn(ctx)` is the workflow body; its return value
+-- becomes the workflow's result (fetch via jobs.await / jobs.result). Inside it,
+-- `ctx.step(name, fn)` runs `fn` once and memoizes the result, so a crashed or
+-- retried workflow resumes past completed steps. `ctx.input` is the payload from
+-- jobs.start, `ctx.id` the workflow id. A workflow instance IS a job (reserved
+-- type "__wf:<name>"), so it inherits claim / reaper / retry / worker / result.
+-- @tparam string name
+-- @tparam function fn   function(ctx) -> result
+function jobs.workflow(name, fn)
+    if type(name) ~= "string" or name == "" then
+        error("jobs.workflow: name must be a non-empty string")
+    end
+    if type(fn) ~= "function" then error("jobs.workflow: fn must be a function") end
+    _workflows[name] = fn
+    -- The workflow runs as a normal handler for its reserved type.
+    jobs.handler(WF_PREFIX .. name, function(job)
+        return fn(make_ctx(job, name))
+    end)
+    return jobs
+end
+
+--- Start a durable workflow instance. Returns the workflow id (a job id); the
+-- input is the workflow's `ctx.input`. Accepts the usual enqueue opts (queue,
+-- priority, dedup_key for an idempotent start, delay/at). Poll jobs.workflow_
+-- status(id) or jobs.await(id) for the outcome.
+-- @tparam string name
+-- @tparam[opt] table input
+-- @tparam[opt] table opts   enqueue options
+-- @treturn number|nil  the workflow id, or nil if a dedup_key collapsed it
+function jobs.start(name, input, opts)
+    if not _workflows[name] then
+        error("jobs.start: unknown workflow '" .. tostring(name) .. "' (register it with jobs.workflow)")
+    end
+    return jobs.enqueue(WF_PREFIX .. name, input, opts)
+end
+
+--- Query a workflow instance's state (DB-derived, so it works even when no
+-- worker is currently running it). Returns nil for an unknown id, else
+-- { status, name, steps_done, started_at, updated_at, result?, error? }.
+-- @tparam number id
+-- @treturn table|nil
+function jobs.workflow_status(id)
+    local job = jobs.get(id)
+    if not job then return nil end
+    local rows = db.query(
+        "SELECT step_key FROM _hull_workflow_steps WHERE workflow_id=? ORDER BY created_at, step_key",
+        { id })
+    local steps_done = {}
+    for _, s in ipairs(rows or {}) do steps_done[#steps_done + 1] = s.step_key end
+    local out = {
+        status     = job.status,
+        name       = tostring(job.type):match("^" .. WF_PREFIX .. "(.+)$") or job.type,
+        steps_done = steps_done,
+        started_at = job.created_at,
+        updated_at = job.updated_at,
+    }
+    if job.status == "done" then
+        local r = jobs.result(id)
+        if r then out.result = r.result end
+    elseif job.status == "dead" then
+        out.error = job.last_error
+    end
+    return out
+end
+
 --- Extend the claim on a job the current handler is processing (heartbeat). A
 -- handler whose work may exceed `visibility_timeout` should call this
 -- periodically (at least every visibility_timeout/2 s) so the reaper doesn't
@@ -1336,8 +1465,9 @@ function jobs.cleanup(opts)
         params[#params + 1] = opts.queue
     end
     local deleted = db.exec(sql, params) or 0
-    -- Drop results whose producing job is gone (workflow result store hygiene).
+    -- Drop results + workflow steps whose producing job is gone (store hygiene).
     db.exec("DELETE FROM _hull_job_results WHERE job_id NOT IN (SELECT id FROM _hull_jobs)")
+    db.exec("DELETE FROM _hull_workflow_steps WHERE workflow_id NOT IN (SELECT id FROM _hull_jobs)")
     return deleted
 end
 
