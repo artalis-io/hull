@@ -183,6 +183,16 @@ static const HlModuleSpec REGISTRY[] = {
         .api_major = 1, .intrinsic = 0, .pure = 1,
         .required_caps = 0, .deps = {0},
     },
+    {
+        /* Durable DB-backed background job queue. Design: docs/jobs_design.md.
+         * The DB requirement rides in via the hull/db dep (HL_MOD_CAP_DB), so a
+         * DB-less build rejects a hull/jobs declaration with the right message. */
+        .name = "hull/jobs",
+        .api_major = 1, .intrinsic = 0, .pure = 0,
+        .required_caps = 0,
+        /* crypto: the per-claim token nonce (crypto.random). */
+        .deps = {"hull/db", "hull/time", "hull/json", "hull/crypto", 0},
+    },
 
     /* ── Pure data codec ──────────────────────────────────────────── */
     {

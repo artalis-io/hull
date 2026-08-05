@@ -610,6 +610,7 @@ const HlDbBackend hl_db_backend_duckdb = {
         .upsert_style                 = "on_conflict",
         .supports_returning           = 1,
         .supports_index_if_not_exists = 1,
+        .supports_skip_locked         = 0,   /* not a hull/jobs target */
         .identity_column              = "BIGINT DEFAULT nextval('%s') PRIMARY KEY",
         .identity_sequence            = "CREATE SEQUENCE %s",
     },

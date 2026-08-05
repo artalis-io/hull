@@ -457,6 +457,7 @@ UTEST(db_backend, dialect_descriptor_sqlite)
     ASSERT_STREQ(d->upsert_style, "on_conflict");
     ASSERT_TRUE(d->supports_returning);              /* SQLite >= 3.35 */
     ASSERT_TRUE(d->supports_index_if_not_exists);
+    ASSERT_FALSE(d->supports_skip_locked);           /* single-writer serializes */
     ASSERT_STREQ(d->identity_column, "INTEGER PRIMARY KEY AUTOINCREMENT");
     ASSERT_TRUE(d->identity_sequence == NULL);       /* identity is inline */
 }

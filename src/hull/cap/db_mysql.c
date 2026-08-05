@@ -504,6 +504,7 @@ const HlDbBackend hl_db_backend_mysql = {
         .upsert_style                 = "on_duplicate_key",
         .supports_returning           = 0,   /* MySQL 8; MariaDB is 1 (see design doc) */
         .supports_index_if_not_exists = 0,   /* rewritten by the backend shim */
+        .supports_skip_locked         = 1,   /* MySQL 8+ / MariaDB 10.6+ */
         .identity_column              = "BIGINT AUTO_INCREMENT PRIMARY KEY",
         .identity_sequence            = NULL,
     },

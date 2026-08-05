@@ -307,6 +307,38 @@ echo "$DYN_OUT" | grep -qE "my_has_udf=false" || { echo "::error mysql connectio
 echo "PASS: db.open dynamic connections (CIDR host allow + out-of-CIDR deny + scheme deny)"
 rm -rf "$APPDIR_DYN"
 
+# ── hull/jobs SKIP LOCKED concurrency (Phase 2 correctness gate) ───────
+# 200 jobs, 4 parallel claimer processes against real MySQL 8. The claim uses
+# SELECT ... FOR UPDATE SKIP LOCKED then UPDATE-by-id (no RETURNING on MySQL),
+# read back by claim_token, so each job is claimed by exactly one process.
+echo "=== jobs: SKIP LOCKED concurrency on MySQL ==="
+JOBSDIR=$(mktemp -d)
+cat > "$JOBSDIR/seed.lua" <<'LUA'
+local jobs = require("hull.jobs")
+app.manifest({ modules = { "hull/jobs@1" } })
+app.main(function() jobs.init(); for i = 1, 200 do jobs.enqueue("t", { n = i }) end; return 0 end)
+LUA
+cat > "$JOBSDIR/claim.lua" <<'LUA'
+local jobs = require("hull.jobs")
+app.manifest({ modules = { "hull/jobs@1" } })
+app.main(function(ctx)
+  while true do local b = jobs.claim({ batch = 7 }); if #b == 0 then break end
+    for _, j in ipairs(b) do ctx.stdout:write(j.id .. "\n") end end
+  return 0
+end)
+LUA
+./build/hull "$JOBSDIR/seed.lua" -d "$DSN" >/dev/null 2>&1
+ji=1; while [ "$ji" -le 4 ]; do ./build/hull "$JOBSDIR/claim.lua" -d "$DSN" > "$JOBSDIR/out.$ji" 2>/dev/null & ji=$((ji + 1)); done
+wait
+jtotal=$(cat "$JOBSDIR"/out.* | grep -c . || true)
+juniq=$(cat "$JOBSDIR"/out.* | sort -n | uniq | grep -c . || true)
+if [ "$jtotal" -eq 200 ] && [ "$juniq" -eq 200 ]; then
+    echo "PASS: jobs SKIP LOCKED - 200 claimed exactly once by 4 processes (MySQL)"
+    rm -rf "$JOBSDIR"
+else
+    echo "::error jobs concurrency: total=$jtotal uniq=$juniq (want 200/200)"; exit 1
+fi
+
 # ── TLS + caching_sha2_password phase ─────────────────────────────────
 # MySQL 8 ships TLS on by default (auto-generated certs). Switch the user to
 # caching_sha2_password so its cache is empty, then connect over TLS: the

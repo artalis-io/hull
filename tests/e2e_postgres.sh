@@ -309,6 +309,38 @@ echo "$DYN_OUT" | grep -qE "pg_has_udf=false" || { echo "::error postgres connec
 echo "PASS: db.open dynamic connections (CIDR host allow + out-of-CIDR deny + scheme deny)"
 rm -rf "$APPDIR_DYN"
 
+# ── hull/jobs SKIP LOCKED concurrency (Phase 2 correctness gate) ───────
+# 200 jobs, 4 parallel claimer processes against real Postgres. The claim uses
+# UPDATE ... WHERE id IN (SELECT ... FOR UPDATE SKIP LOCKED) RETURNING, so each
+# job must be claimed by exactly one process. See docs/jobs_design.md.
+echo "=== jobs: SKIP LOCKED concurrency on Postgres ==="
+JOBSDIR=$(mktemp -d)
+cat > "$JOBSDIR/seed.lua" <<'LUA'
+local jobs = require("hull.jobs")
+app.manifest({ modules = { "hull/jobs@1" } })
+app.main(function() jobs.init(); for i = 1, 200 do jobs.enqueue("t", { n = i }) end; return 0 end)
+LUA
+cat > "$JOBSDIR/claim.lua" <<'LUA'
+local jobs = require("hull.jobs")
+app.manifest({ modules = { "hull/jobs@1" } })
+app.main(function(ctx)
+  while true do local b = jobs.claim({ batch = 7 }); if #b == 0 then break end
+    for _, j in ipairs(b) do ctx.stdout:write(j.id .. "\n") end end
+  return 0
+end)
+LUA
+./build/hull "$JOBSDIR/seed.lua" -d "$DSN" >/dev/null 2>&1
+ji=1; while [ "$ji" -le 4 ]; do ./build/hull "$JOBSDIR/claim.lua" -d "$DSN" > "$JOBSDIR/out.$ji" 2>/dev/null & ji=$((ji + 1)); done
+wait
+jtotal=$(cat "$JOBSDIR"/out.* | grep -c . || true)
+juniq=$(cat "$JOBSDIR"/out.* | sort -n | uniq | grep -c . || true)
+if [ "$jtotal" -eq 200 ] && [ "$juniq" -eq 200 ]; then
+    echo "PASS: jobs SKIP LOCKED - 200 claimed exactly once by 4 processes (Postgres)"
+    rm -rf "$JOBSDIR"
+else
+    echo "::error jobs concurrency: total=$jtotal uniq=$juniq (want 200/200)"; exit 1
+fi
+
 # ── TLS phase (Phase 3b.2) ────────────────────────────────────────────
 # Enable SSL on the running container with a self-signed cert, then connect
 # with sslmode=require and assert (via pg_stat_ssl) the session is encrypted.

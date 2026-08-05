@@ -102,6 +102,10 @@ jobs:
         timeout-minutes: 2
         run: make e2e-test-harness
 
+      - name: Jobs queue E2E tests
+        timeout-minutes: 2
+        run: make e2e-jobs
+
       - name: Multipart upload E2E tests
         timeout-minutes: 3
         run: make e2e-multipart

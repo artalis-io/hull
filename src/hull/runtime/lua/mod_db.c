@@ -856,6 +856,8 @@ static void push_dialect_table(lua_State *L, const HlDbBackend *be)
     lua_setfield(L, -2, "supports_returning");
     lua_pushboolean(L, be && be->dialect.supports_index_if_not_exists);
     lua_setfield(L, -2, "supports_index_if_not_exists");
+    lua_pushboolean(L, be && be->dialect.supports_skip_locked);
+    lua_setfield(L, -2, "supports_skip_locked");
     lua_pushstring(L, (be && be->dialect.identity_column)
                        ? be->dialect.identity_column : "INTEGER PRIMARY KEY");
     lua_setfield(L, -2, "identity_column");
