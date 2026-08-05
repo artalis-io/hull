@@ -1281,6 +1281,68 @@ app.main(async (ctx) => {
 echo "== observability A+C: Lua =="; check_metrics "lua" "lua" "$LUA_METRICS"
 echo "== observability A+C: JS =="; check_metrics "js" "js" "$JS_METRICS"
 
+# ── observability Bet #1 Pillar B: opt-in attempt history + latency/throughput ─
+# history OFF -> no attempt rows, no latency in metrics. history ON -> each
+# attempt is recorded (a retried-then-done job -> 2 rows [retried, done]; a dead
+# job -> [dead]); jobs.history is the timeline; jobs.metrics gains run-latency
+# percentiles + throughput.
+check_history() {
+    label="$1"; ext="$2"; app="$3"
+    T="$(mktemp -d)"; printf '%s\n' "$app" > "$T/app.$ext"
+    out="$("$HULL" "$T/app.$ext" -d "$T/a.db" 2>/dev/null)" || true
+    case "$out" in
+        *"HIST off_rows=0 off_lat=no on_attempts=2 seq=retried,done dead=dead p50=yes tput=yes"*)
+            pass "$label: attempt history (opt-in timeline + latency percentiles + throughput)" ;;
+        *) fail "$label: observability B" "$out" ;;
+    esac
+    rm -rf "$T"
+}
+
+LUA_HISTORY='local jobs = require("hull.jobs")
+app.manifest({ modules = { "hull/jobs@1" } })
+app.main(function(ctx)
+  jobs.init({ backoff = function() return 0 end })
+  jobs.handler("ok", function(j) end)
+  local off_id = jobs.enqueue("ok", {}); jobs.work({ batch = 1 })
+  local off_rows = #jobs.history(off_id)
+  local off_lat = jobs.metrics().latency and "yes" or "no"
+  jobs.init({ history = true, backoff = function() return 0 end })
+  jobs.handler("boom", function(j) error("x") end)
+  jobs.handler("retry_once", function(j) if j.attempts == 1 then error("once") end end)
+  local rid = jobs.enqueue("retry_once", {}); local bid = jobs.enqueue("boom", {}, { max_attempts = 1 })
+  jobs.enqueue("ok", {})
+  jobs.run_worker({ drain = true, poll_ms = 1 })
+  local rh = jobs.history(rid); local bh = jobs.history(bid); local m = jobs.metrics()
+  ctx.stdout:write(("HIST off_rows=%d off_lat=%s on_attempts=%d seq=%s,%s dead=%s p50=%s tput=%s\n"):format(
+    off_rows, off_lat, #rh, rh[1] and rh[1].outcome or "-", rh[2] and rh[2].outcome or "-",
+    bh[1] and bh[1].outcome or "-",
+    (m.latency and m.latency.run_ms.p50 ~= nil) and "yes" or "no",
+    (m.throughput and m.throughput.done_per_sec > 0) and "yes" or "no"))
+  return 0
+end)'
+
+JS_HISTORY='import { app } from "hull:app"; import { jobs } from "hull:jobs";
+app.manifest({ modules: ["hull/jobs@1"] });
+app.main(async (ctx) => {
+  jobs.init({ backoff: () => 0 });
+  jobs.handler("ok", (j) => {});
+  const offId = jobs.enqueue("ok", {}); await jobs.work({ batch: 1 });
+  const offRows = jobs.history(offId).length;
+  const offLat = jobs.metrics().latency ? "yes" : "no";
+  jobs.init({ history: true, backoff: () => 0 });
+  jobs.handler("boom", (j) => { throw new Error("x"); });
+  jobs.handler("retry_once", (j) => { if (j.attempts === 1) throw new Error("once"); });
+  const rid = jobs.enqueue("retry_once", {}); const bid = jobs.enqueue("boom", {}, { maxAttempts: 1 });
+  jobs.enqueue("ok", {});
+  await jobs.runWorker({ drain: true, pollMs: 1 });
+  const rh = jobs.history(rid), bh = jobs.history(bid), m = jobs.metrics();
+  ctx.stdout.write(`HIST off_rows=${offRows} off_lat=${offLat} on_attempts=${rh.length} seq=${rh[0]?.outcome},${rh[1]?.outcome} dead=${bh[0]?.outcome} p50=${m.latency&&m.latency.runMs.p50!=null?"yes":"no"} tput=${m.throughput&&m.throughput.donePerSec>0?"yes":"no"}\n`);
+  return 0;
+});'
+
+echo "== observability B: Lua =="; check_history "lua" "lua" "$LUA_HISTORY"
+echo "== observability B: JS =="; check_history "js" "js" "$JS_HISTORY"
+
 # Fleet gate: K processes share one rate counter -> total dispatched == rate.
 echo "== v1.2 rate limit fleet ($CONC processes, one shared counter) =="
 W="$(mktemp -d)"; DB="$W/rl.db"

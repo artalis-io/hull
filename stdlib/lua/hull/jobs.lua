@@ -11,7 +11,7 @@
 -- Full surface: schema + jobs.init, enqueue, the atomic claim, per-type +
 -- catch-all handlers, the work loop (retry-with-backoff, dead-letter, and the
 -- visibility-timeout reaper), the dedicated worker (jobs.run_worker +
--- `hull jobs worker`), and the ops surface (jobs.stats / dead / retry / cancel / cleanup). v1.1 adds durable cron (jobs.cron / uncron) and intra-process concurrency (run_worker concurrency=N), jobs.get(id), jobs.heartbeat for long jobs, fleet-wide rate limiting (jobs.limit), queue pause/resume/purge, and workflows (depends_on + result passing). v1.5 adds the standalone result backend (jobs.result / jobs.await), multi-queue draining (opts.queues, strict list or weighted map), bulk enqueue (jobs.enqueue_many), in-process lifecycle hooks (jobs.on completed/retried/dead), and polish (absolute at, jobs.progress, throttle window, fixed-offset tz cron). Durable workflows (jobs.workflow / jobs.start / ctx.step / ctx.sleep / ctx.wait_signal / jobs.signal, Phase 1) add crash-safe workflow-as-code: step memoization, durable timers, external signals, and saga compensation - a workflow instance is a job that rides the same claim/reaper/retry/result machinery (docs/jobs_durable_execution_design.md). Observability: jobs.metrics() (DB-derived per-queue gauges + backlog age) and W3C trace-context propagation (enqueue { trace } -> job.trace).
+-- `hull jobs worker`), and the ops surface (jobs.stats / dead / retry / cancel / cleanup). v1.1 adds durable cron (jobs.cron / uncron) and intra-process concurrency (run_worker concurrency=N), jobs.get(id), jobs.heartbeat for long jobs, fleet-wide rate limiting (jobs.limit), queue pause/resume/purge, and workflows (depends_on + result passing). v1.5 adds the standalone result backend (jobs.result / jobs.await), multi-queue draining (opts.queues, strict list or weighted map), bulk enqueue (jobs.enqueue_many), in-process lifecycle hooks (jobs.on completed/retried/dead), and polish (absolute at, jobs.progress, throttle window, fixed-offset tz cron). Durable workflows (jobs.workflow / jobs.start / ctx.step / ctx.sleep / ctx.wait_signal / jobs.signal, Phase 1) add crash-safe workflow-as-code: step memoization, durable timers, external signals, and saga compensation - a workflow instance is a job that rides the same claim/reaper/retry/result machinery (docs/jobs_durable_execution_design.md). Observability: jobs.metrics() (DB-derived per-queue gauges + backlog age) and W3C trace-context propagation (enqueue { trace } -> job.trace). Opt-in attempt history (jobs.init { history=true }) records a per-attempt timeline (jobs.history) and adds latency percentiles + throughput to jobs.metrics.
 --
 -- Usage (target shape):
 --   local jobs = require("hull.jobs")
@@ -40,6 +40,8 @@ local _cfg = {
     max_attempts       = 25,    -- dead-letter threshold
     visibility_timeout = 300,   -- seconds before an orphaned `running` job is reclaimed
     reap_interval      = 30,    -- min seconds between reaper sweeps (0 = every work() call)
+    history            = false, -- attempt-history recording: true | { queues={...} } | false
+    history_retention  = nil,   -- seconds to keep attempt rows (nil = jobs.cleanup default)
 }
 
 -- Exponential backoff: 2^attempt * 10s, capped at 1h (shared with outbox math).
@@ -99,6 +101,8 @@ function jobs.init(opts)
     if opts.visibility_timeout ~= nil then _cfg.visibility_timeout = opts.visibility_timeout end
     if opts.reap_interval ~= nil then _cfg.reap_interval = opts.reap_interval end
     if opts.backoff ~= nil then _cfg.backoff = opts.backoff end
+    if opts.history ~= nil then _cfg.history = opts.history end
+    if opts.history_retention ~= nil then _cfg.history_retention = opts.history_retention end
 
     -- Keyed / indexed text columns are VARCHAR(255) so MySQL can index them;
     -- data-only columns (payload, last_error) stay TEXT. status/type/queue are
@@ -246,6 +250,32 @@ function jobs.init(opts)
         .. "created_at  INTEGER      NOT NULL,"
         .. "consumed_at INTEGER,"
         .. "PRIMARY KEY (workflow_id, name))")
+
+    -- Opt-in attempt history (jobs.init { history=true }). One row per attempt,
+    -- written by jobs.work at each outcome when history is enabled for the queue.
+    -- The durable timeline behind jobs.history + the latency/throughput metrics.
+    db.exec(
+        "CREATE TABLE IF NOT EXISTS _hull_job_attempts ("
+        .. "attempt_id  " .. db.autoincrement_id_ddl .. ", "
+        .. "job_id      INTEGER      NOT NULL,"
+        .. "queue       VARCHAR(255) NOT NULL,"
+        .. "type        VARCHAR(255) NOT NULL,"
+        .. "attempt_no  INTEGER      NOT NULL,"
+        .. "wait_ms     INTEGER,"
+        .. "started_ms  INTEGER      NOT NULL,"
+        .. "finished_ms INTEGER      NOT NULL,"
+        .. "duration_ms INTEGER      NOT NULL,"
+        .. "outcome     VARCHAR(16)  NOT NULL,"
+        .. "error       TEXT,"
+        .. "trace_id    VARCHAR(255))")
+    db.exec([[
+        CREATE INDEX IF NOT EXISTS idx_hull_job_attempts_job
+        ON _hull_job_attempts(job_id, attempt_no)
+    ]])
+    db.exec([[
+        CREATE INDEX IF NOT EXISTS idx_hull_job_attempts_recent
+        ON _hull_job_attempts(finished_ms)
+    ]])
 
     -- Verify the server actually parses SKIP LOCKED (the compile-time dialect
     -- flag says "this backend supports it" but a MySQL<8 / MariaDB<10.6 server
@@ -465,6 +495,7 @@ local function shape(row)
         id = row.id, type = row.type, data = data,
         attempts = row.attempts, max_attempts = row.max_attempts,
         trace = row.trace_context,   -- trace-context propagation (nil if unset)
+        queue = row.queue, created_at = row.created_at,   -- for attempt history
     }
 end
 
@@ -634,7 +665,7 @@ local function claim_one(queue, batch)
             .. "attempts=attempts+1, updated_at=? WHERE id IN ("
             .. "SELECT id FROM _hull_jobs WHERE queue=? AND status='pending' AND run_at<=? "
             .. "ORDER BY priority DESC, id LIMIT ? " .. lock .. ") "
-            .. "RETURNING id, type, payload, priority, attempts, max_attempts, trace_context",
+            .. "RETURNING id, queue, type, payload, priority, attempts, max_attempts, trace_context, created_at",
             { token, now, now, queue, now, batch })
     elseif d.supports_skip_locked then
         -- MySQL: no RETURNING. Lock + mark in one txn, then read back by token.
@@ -652,7 +683,7 @@ local function claim_one(queue, batch)
                 params)
         end)
         rows = db.query(
-            "SELECT id, type, payload, priority, attempts, max_attempts, trace_context FROM _hull_jobs WHERE claim_token=?",
+            "SELECT id, queue, type, payload, priority, attempts, max_attempts, trace_context, created_at FROM _hull_jobs WHERE claim_token=?",
             { token })
     else
         -- SQLite: single-writer serializes the claim, so the marked-running rows
@@ -662,7 +693,7 @@ local function claim_one(queue, batch)
             .. "attempts=attempts+1, updated_at=? WHERE id IN ("
             .. "SELECT id FROM _hull_jobs WHERE queue=? AND status='pending' AND run_at<=? "
             .. "ORDER BY priority DESC, id LIMIT ?) "
-            .. "RETURNING id, type, payload, priority, attempts, max_attempts, trace_context",
+            .. "RETURNING id, queue, type, payload, priority, attempts, max_attempts, trace_context, created_at",
             { token, now, now, queue, now, batch })
     end
 
@@ -1031,6 +1062,31 @@ jobs._cron_next = function(spec, from, offset)
 end
 jobs._tick = function(now) process_cron(now or time.now()) end
 
+-- Is attempt-history recording on for this queue? true = all queues; a table
+-- with a `queues` list = only those.
+local function history_enabled(queue)
+    local h = _cfg.history
+    if h == true then return true end
+    if type(h) == "table" and h.queues then
+        for _, q in ipairs(h.queues) do if q == queue then return true end end
+    end
+    return false
+end
+
+-- Record one attempt into the (opt-in) history timeline. `started_ms` is captured
+-- before the handler; `outcome` is "done" | "retried" | "dead". wait_ms is the
+-- queue latency (start - enqueue), computed from the job's created_at.
+local function record_attempt(job, started_ms, finished_ms, outcome, err)
+    local wait_ms
+    if job.created_at then wait_ms = started_ms - (job.created_at * 1000) end
+    db.exec(
+        "INSERT INTO _hull_job_attempts (job_id, queue, type, attempt_no, wait_ms, "
+        .. "started_ms, finished_ms, duration_ms, outcome, error, trace_id) "
+        .. "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        { job.id, job.queue or "default", job.type, job.attempts, wait_ms,
+          started_ms, finished_ms, finished_ms - started_ms, outcome, err, job.trace })
+end
+
 --- Claim a batch and run each job's handler, applying the outcome (done /
 -- retry-with-backoff / dead-letter). Runs the reaper first. Drive it from a
 -- timer (`app.every(1000, function() jobs.work() end)`) or a dedicated worker
@@ -1057,10 +1113,13 @@ function jobs.work(opts)
     for _, job in ipairs(batch) do
         job.deps = load_deps(job.id)   -- workflow: dependency results, in order
         local h = _handlers[job.type] or _default
+        local started_ms = time.now_ms()   -- attempt timing (used only if history on)
+        local outcome, err_str             -- nil outcome = a yield (not recorded)
         if not h then
-            local err = "no handler for job type '" .. tostring(job.type) .. "'"
-            mark_dead(job.id, err)
-            emit("dead", job, { error = err })
+            err_str = "no handler for job type '" .. tostring(job.type) .. "'"
+            mark_dead(job.id, err_str)
+            emit("dead", job, { error = err_str })
+            outcome = "dead"
         else
             local ok, result = pcall(h, job)
             if ok and type(result) == "table" and result.__hull_wf_yield then
@@ -1097,14 +1156,17 @@ function jobs.work(opts)
                         { result.wake_at or wf_now, wf_now, job.id })
                 end
             elseif not ok then
-                local err = tostring(result)
-                emit(mark_retry(job, err), job, { error = err, attempt = job.attempts })
+                err_str = tostring(result)
+                outcome = mark_retry(job, err_str)
+                emit(outcome, job, { error = err_str, attempt = job.attempts })
             elseif result == jobs.DEAD then
-                mark_dead(job.id, "handler returned jobs.DEAD")
-                emit("dead", job, { error = "handler returned jobs.DEAD" })
+                err_str = "handler returned jobs.DEAD"; outcome = "dead"
+                mark_dead(job.id, err_str)
+                emit("dead", job, { error = err_str })
             elseif result == jobs.RETRY then
-                emit(mark_retry(job, "handler requested retry"), job,
-                     { error = "handler requested retry", attempt = job.attempts })
+                err_str = "handler requested retry"
+                outcome = mark_retry(job, err_str)
+                emit(outcome, job, { error = err_str, attempt = job.attempts })
             else
                 -- nil / true / jobs.DISCARD -> done, no result; any other return
                 -- value is stored as the job's result (for dependents).
@@ -1114,7 +1176,12 @@ function jobs.work(opts)
                 end
                 mark_done(job.id, res)
                 emit("completed", job, { result = res })
+                outcome = "done"
             end
+        end
+        -- Opt-in attempt history (a yield leaves outcome nil -> not recorded).
+        if outcome and history_enabled(job.queue) then
+            record_attempt(job, started_ms, time.now_ms(), outcome, err_str)
         end
     end
     return #batch
@@ -1195,6 +1262,19 @@ end
 --- Count jobs by status (optionally scoped to a queue). The ops overview.
 -- @tparam[opt] table opts  { queue }
 -- @treturn table  { pending, running, done, dead }
+-- p50/p95/p99 of a numeric list (computed host-side; portable SQL has no
+-- PERCENTILE). Nearest-rank on the sorted sample.
+local function percentiles(vals)
+    if #vals == 0 then return { p50 = 0, p95 = 0, p99 = 0 } end
+    table.sort(vals)
+    local function pick(p)
+        local idx = math.ceil(p * #vals)
+        if idx < 1 then idx = 1 elseif idx > #vals then idx = #vals end
+        return vals[idx]
+    end
+    return { p50 = pick(0.50), p95 = pick(0.95), p99 = pick(0.99) }
+end
+
 function jobs.stats(opts)
     opts = opts or {}
     local rows
@@ -1249,7 +1329,47 @@ function jobs.metrics(opts)
         local q = queues[r.queue]
         if q and r.oldest then q.oldest_pending_age = now - r.oldest end
     end
-    return { queues = queues, totals = totals }
+    local out = { queues = queues, totals = totals }
+    -- Latency + throughput from the attempt history over the last `window`
+    -- seconds (present only when attempt recording is on, i.e. there is data).
+    local window = opts.window or 300
+    local sample = db.query(
+        "SELECT wait_ms, duration_ms, outcome FROM _hull_job_attempts WHERE finished_ms >= ?"
+        .. (opts.queue and " AND queue=?" or "") .. " ORDER BY finished_ms DESC LIMIT 5000",
+        opts.queue and { (now - window) * 1000, opts.queue } or { (now - window) * 1000 })
+    if sample and #sample > 0 then
+        local waits, runs, done_n, dead_n = {}, {}, 0, 0
+        for _, r in ipairs(sample) do
+            if r.wait_ms ~= nil then waits[#waits + 1] = r.wait_ms end
+            runs[#runs + 1] = r.duration_ms
+            if r.outcome == "done" then done_n = done_n + 1
+            elseif r.outcome == "dead" then dead_n = dead_n + 1 end
+        end
+        out.latency = { wait_ms = percentiles(waits), run_ms = percentiles(runs) }
+        out.throughput = { done_per_sec = done_n / window, dead_per_sec = dead_n / window }
+    end
+    return out
+end
+
+--- The attempt timeline for a job (opt-in history; empty when off / none). Each
+-- entry is `{ attempt_no, started_ms, finished_ms, duration_ms, wait_ms, outcome,
+-- error }`, oldest first - a queryable "what happened to this job".
+-- @tparam number id
+-- @treturn table  array of attempts
+function jobs.history(id)
+    local rows = db.query(
+        "SELECT attempt_no, started_ms, finished_ms, duration_ms, wait_ms, outcome, error "
+        .. "FROM _hull_job_attempts WHERE job_id=? ORDER BY attempt_no, started_ms",
+        { id })
+    local out = {}
+    for _, r in ipairs(rows or {}) do
+        out[#out + 1] = {
+            attempt_no = r.attempt_no, started_ms = r.started_ms,
+            finished_ms = r.finished_ms, duration_ms = r.duration_ms,
+            wait_ms = r.wait_ms, outcome = r.outcome, error = r.error,
+        }
+    end
+    return out
 end
 
 -- Decode an ops row into an inspection view: the handler-facing shape plus the
@@ -1719,6 +1839,10 @@ function jobs.cleanup(opts)
     db.exec("DELETE FROM _hull_job_results WHERE job_id NOT IN (SELECT id FROM _hull_jobs)")
     db.exec("DELETE FROM _hull_workflow_steps WHERE workflow_id NOT IN (SELECT id FROM _hull_jobs)")
     db.exec("DELETE FROM _hull_workflow_signals WHERE workflow_id NOT IN (SELECT id FROM _hull_jobs)")
+    -- Attempt history is retained by AGE (it outlives the job on purpose, for
+    -- post-hoc metrics), not by orphan-ness.
+    local hr = _cfg.history_retention or opts.older_than or 604800
+    db.exec("DELETE FROM _hull_job_attempts WHERE finished_ms < ?", { (time.now() - hr) * 1000 })
     return deleted
 end
 
