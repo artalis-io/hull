@@ -276,6 +276,14 @@ const wf = jobs.start("checkout", { orderId: 42, amount: 100 });
   steps' `compensate` functions run in **reverse order** (undo the charge if
   shipping can't be arranged). Compensations are at-least-once (idempotent) and
   recorded, so a crash mid-rollback resumes.
+- **Deterministic replay** - the body re-runs from the top on every resume, so
+  reading the clock or RNG **directly** would differ each replay and break the
+  memo matching. Use the memoized primitives **`ctx.now()`**, **`ctx.random()`**,
+  **`ctx.uuid()`** instead: each records its value on first run and returns the
+  **same** value on every replay. (A direct `time.now` / `math.random` in a
+  workflow body is a determinism bug - route it through `ctx.*`. For a
+  deterministic heavy *computation*, run a WASM module via `compute.call` inside a
+  step. Rationale: [docs/jobs_wasm_replay_spike.md](jobs_wasm_replay_spike.md).)
 - **`jobs.workflow_status(id)`** (`workflowStatus`) → `{ status, name,
   steps_done, result?, error? }`, DB-derived (works even when no worker is
   running it). Fetch the final value with `jobs.await(id)` / `jobs.result(id)`.

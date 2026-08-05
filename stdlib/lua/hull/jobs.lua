@@ -11,7 +11,7 @@
 -- Full surface: schema + jobs.init, enqueue, the atomic claim, per-type +
 -- catch-all handlers, the work loop (retry-with-backoff, dead-letter, and the
 -- visibility-timeout reaper), the dedicated worker (jobs.run_worker +
--- `hull jobs worker`), and the ops surface (jobs.stats / dead / retry / cancel / cleanup). v1.1 adds durable cron (jobs.cron / uncron) and intra-process concurrency (run_worker concurrency=N), jobs.get(id), jobs.heartbeat for long jobs, fleet-wide rate limiting (jobs.limit), queue pause/resume/purge, and workflows (depends_on + result passing). v1.5 adds the standalone result backend (jobs.result / jobs.await), multi-queue draining (opts.queues, strict list or weighted map), bulk enqueue (jobs.enqueue_many), in-process lifecycle hooks (jobs.on completed/retried/dead), and polish (absolute at, jobs.progress, throttle window, fixed-offset tz cron). Durable workflows (jobs.workflow / jobs.start / ctx.step / ctx.sleep / ctx.wait_signal / jobs.signal, Phase 1) add crash-safe workflow-as-code: step memoization, durable timers, external signals, and saga compensation - a workflow instance is a job that rides the same claim/reaper/retry/result machinery (docs/jobs_durable_execution_design.md). Observability: jobs.metrics() (DB-derived per-queue gauges + backlog age) and W3C trace-context propagation (enqueue { trace } -> job.trace). Opt-in attempt history (jobs.init { history=true }) records a per-attempt timeline (jobs.history) and adds latency percentiles + throughput to jobs.metrics.
+-- `hull jobs worker`), and the ops surface (jobs.stats / dead / retry / cancel / cleanup). v1.1 adds durable cron (jobs.cron / uncron) and intra-process concurrency (run_worker concurrency=N), jobs.get(id), jobs.heartbeat for long jobs, fleet-wide rate limiting (jobs.limit), queue pause/resume/purge, and workflows (depends_on + result passing). v1.5 adds the standalone result backend (jobs.result / jobs.await), multi-queue draining (opts.queues, strict list or weighted map), bulk enqueue (jobs.enqueue_many), in-process lifecycle hooks (jobs.on completed/retried/dead), and polish (absolute at, jobs.progress, throttle window, fixed-offset tz cron). Durable workflows (jobs.workflow / jobs.start / ctx.step / ctx.sleep / ctx.wait_signal / jobs.signal, Phase 1) add crash-safe workflow-as-code: step memoization, durable timers, external signals, and saga compensation, plus deterministic-replay primitives (ctx.now / ctx.random / ctx.uuid, memoized) - a workflow instance is a job that rides the same claim/reaper/retry/result machinery (docs/jobs_durable_execution_design.md). Observability: jobs.metrics() (DB-derived per-queue gauges + backlog age) and W3C trace-context propagation (enqueue { trace } -> job.trace). Opt-in attempt history (jobs.init { history=true }) records a per-attempt timeline (jobs.history) and adds latency percentiles + throughput to jobs.metrics.
 --
 -- Usage (target shape):
 --   local jobs = require("hull.jobs")
@@ -1616,6 +1616,27 @@ local function make_ctx(job, name)
         return run_sleep(job.id, sleep_n, seconds)
     end
     ctx.wait_signal = function(signal_name, opts) return run_wait_signal(job.id, signal_name, opts) end
+    -- Deterministic primitives (Phase 2). A workflow body re-runs from the top on
+    -- every resume; reading the clock / RNG directly would return a different
+    -- value each replay and break memo-key matching. These memoize their value
+    -- via the step store, so ctx.now / ctx.random / ctx.uuid return the SAME
+    -- value on every replay - the supported way to be non-deterministic in a
+    -- workflow. `det_n` gives each call a stable ordinal key (the call sequence is
+    -- stable across replays); the keys are hidden from workflow_status.steps_done.
+    local det_n = 0
+    ctx.now = function()
+        det_n = det_n + 1
+        return run_step(job.id, "__now:" .. det_n, function() return time.now() end)
+    end
+    ctx.random = function()
+        det_n = det_n + 1
+        return run_step(job.id, "__rand:" .. det_n, function() return math.random() end)
+    end
+    ctx.uuid = function()
+        det_n = det_n + 1
+        return run_step(job.id, "__uuid:" .. det_n,
+            function() return crypto.base64url_encode(crypto.random(16)) end)
+    end
     return ctx
 end
 
