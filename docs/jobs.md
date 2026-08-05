@@ -120,6 +120,36 @@ jobs.uncron("heartbeat");
 - **Missed ticks** (all workers were down) advance to the next future occurrence
   - fire-once, no backfill storm.
 
+## Rate limiting
+
+`jobs.limit(queue, { rate, per })` caps how fast a queue is dispatched:
+**at most `rate` jobs per `per`-second window across the whole fleet** (default
+`per = 1`). The window counter lives in the DB (`_hull_ratelimit`), so K worker
+processes share one budget - unlike a per-process limiter that would let K
+workers each run `rate`. Use it to respect a downstream's limit (an email
+provider, a third-party API quota).
+
+```lua
+jobs.limit("emails", { rate = 10 })            -- <=10 jobs/sec, fleet-wide
+jobs.limit("reports", { rate = 100, per = 60 })-- <=100/min
+jobs.limit("emails", nil)                       -- remove the limit
+```
+```javascript
+jobs.limit("emails", { rate: 10 });
+jobs.limit("reports", { rate: 100, per: 60 });
+```
+
+- The limit is **per queue** (the `queue` arg). Enqueue rate-limited work onto
+  that queue: `jobs.enqueue("send", data, { queue = "emails" })`.
+- Register the limit at startup **on every worker** (the limit config lives in
+  code; only the counter is shared). A homogeneous fleet is assumed.
+- Enforcement is **claim-then-reconcile**: a claim keeps the highest-priority
+  jobs the window budget allows and requeues the excess (undoing the claim, so a
+  rate-deferred job keeps its full retry budget). Deferred jobs run in the next
+  window - throughput is shaped, nothing is dropped.
+- Costs one extra small DB write per claim **only on limited queues**; unlimited
+  queues are unaffected.
+
 ## Handler contract
 
 `jobs.work` dispatches each claimed job to its registered handler, else the
