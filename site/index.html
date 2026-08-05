@@ -3,19 +3,19 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Hull. Hardened runtime for AI-native systems</title>
-  <meta name="description" content="Code became disposable. Trust is not. Hull is a hardened, capability-secure runtime for AI-native systems. Local-first, single static binary, every capability declared in the manifest and checked at a kernel-enforced boundary the script cannot cross.">
+  <title>Hull. Secure execution for AI-generated code</title>
+  <meta name="description" content="Run AI-generated applications and tools without ambient access to your machine, network, credentials, or data. Hull packages each app as a signed static binary and enforces declared capabilities at the OS boundary.">
   <meta name="theme-color" content="#0a0a0a">
 
-  <meta property="og:title" content="Hull. Hardened runtime for AI-native systems">
-  <meta property="og:description" content="Code became disposable. Trust is not. Hardened, capability-secure runtime for AI-native systems. Local-first, single static binary, kernel-sandboxed, W^X.">
+  <meta property="og:title" content="Hull. Secure execution for AI-generated code">
+  <meta property="og:description" content="Code became disposable. Trust is not. The portable trust boundary for AI-generated applications and tools.">
   <meta property="og:type" content="website">
   <meta property="og:url" content="https://gethull.dev/">
   <meta property="og:image" content="https://gethull.dev/og-card.png">
   <meta property="og:image:type" content="image/png">
   <meta property="og:image:width" content="1200">
   <meta property="og:image:height" content="630">
-  <meta property="og:image:alt" content="Hull. Code became disposable. Trust is not. Hardened runtime infrastructure for AI-native systems.">
+  <meta property="og:image:alt" content="Hull. Code became disposable. Trust is not. Secure execution for AI-generated code.">
   <meta name="twitter:card" content="summary_large_image">
   <meta name="twitter:image" content="https://gethull.dev/og-card.png">
   <meta name="twitter:image:alt" content="Hull. Code became disposable. Trust is not.">
@@ -32,7 +32,7 @@
     "applicationCategory": "DeveloperApplication",
     "applicationSubCategory": "Runtime",
     "operatingSystem": "Linux, macOS, Windows (via Cosmopolitan), FreeBSD, OpenBSD, NetBSD",
-    "description": "Hardened, capability-secure runtime for AI-native systems. Code became disposable; trust is not. Every external capability (filesystem, network, env, process) is declared in the manifest and checked at a kernel-enforced boundary the script cannot cross. Local-first, single static binary, only the bootstrap registration API is intrinsic.",
+    "description": "Secure execution for AI-generated applications and tools. Every external capability is declared in the manifest and checked at an OS-enforced boundary the script cannot cross. Local-first, deploy-anywhere, and packaged as a signed static binary.",
     "softwareVersion": "0.10.0",
     "url": "https://gethull.dev/",
     "downloadUrl": "https://github.com/artalis-io/hull/releases",
@@ -231,15 +231,10 @@
       </a>
 
       <nav class="hidden md:flex items-center gap-x-6 text-sm">
+        <a href="#use-cases" class="link">Use cases</a>
+        <a href="#platforms" class="link">Platform fit</a>
+        <a href="#how" class="link">Security model</a>
         <a href="#not" class="link">Scope</a>
-        <a href="#principles" class="link">Principles</a>
-        <a href="#composability" class="link">Composable</a>
-        <a href="#agents" class="link">Agents</a>
-        <a href="#compare" class="link">Compare</a>
-        <a href="#how" class="link">How</a>
-        <a href="#stdlib" class="link">Stdlib</a>
-        <a href="#security" class="link">Security</a>
-        <a href="#trust" class="link">Trust chain</a>
         <a href="/verify.html" class="link">Verify</a>
         <a href="https://github.com/artalis-io/hull#readme" class="link">Docs</a>
       </nav>
@@ -265,7 +260,7 @@
         <div class="lg:col-span-7">
           <a href="#agents" class="inline-flex items-center gap-2 px-3 py-1 rounded-full border border-white/10 bg-white/[0.025] hover:bg-white/[0.05] hover:border-white/20 transition text-[11px] text-mute-400 hover:text-paper-100 mb-6">
             <i data-lucide="zap" class="w-3 h-3 shrink-0"></i>
-            <span>Built for code you almost trust</span>
+            <span>The execution boundary beneath your agents</span>
             <i data-lucide="arrow-right" class="w-3 h-3 shrink-0"></i>
           </a>
 
@@ -275,20 +270,20 @@
           </h1>
 
           <p class="mt-6 text-base md:text-lg text-mute-400 max-w-xl leading-relaxed">
-            Hardened, capability-secure runtime infrastructure for
-            AI-native systems. AI generates code endlessly.
-            Hull constrains what it can actually do, at a
-            kernel-enforced boundary the script cannot cross.
+            Run AI-generated applications and tools without giving their
+            code ambient access to your machine, network, credentials, or
+            data. Hull packages each app as a signed static binary and
+            enforces its declared capabilities at the OS boundary.
           </p>
 
           <div class="mt-8 flex flex-wrap items-center gap-3">
-            <a href="https://github.com/artalis-io/hull#readme" class="btn btn-primary">
-              Read the docs
+            <a href="https://github.com/artalis-io/hull#quick-start" class="btn btn-primary">
+              Run a constrained app
               <i data-lucide="arrow-right" class="w-4 h-4"></i>
             </a>
-            <a href="https://github.com/artalis-io/hull" class="btn btn-ghost">
-              <i data-lucide="github" class="w-4 h-4"></i>
-              View on GitHub
+            <a href="#how" class="btn btn-ghost">
+              <i data-lucide="shield-check" class="w-4 h-4"></i>
+              See the security model
             </a>
           </div>
 
@@ -307,7 +302,7 @@
             </div>
             <div class="flex items-center gap-2">
               <i data-lucide="hard-drive" class="w-3.5 h-3.5"></i>
-              <span>Linux &middot; macOS &middot; APE</span>
+              <span>Local &middot; edge &middot; on-prem &middot; air-gapped</span>
             </div>
           </div>
         </div>
@@ -401,34 +396,99 @@
         <div class="bg-ink-900 p-6">
           <div class="text-xs uppercase tracking-widest text-mute-500 mb-3">What</div>
           <h3 class="text-paper-50 font-medium leading-snug mb-3">
-            Hardened runtime infrastructure for AI-native systems.
+            The hardened execution layer for AI-generated code.
           </h3>
           <p class="text-sm text-mute-400 leading-relaxed">
-            Lua, JavaScript, and WASM execute under declared, kernel-enforced
-            capability boundaries. SQLite storage by default; PostgreSQL and
-            MySQL/MariaDB over pure-C wire clients compose in as opt-in
-            features. Single static binary, around five megabytes. Runs on
-            every desktop OS from one file. No daemon, no service mesh, no
-            installer.
+            Your model or agent platform chooses what code to run. Hull decides
+            what that code may do. Lua, JavaScript, and WASM execute under
+            declared capability boundaries in one independently deployable
+            binary. No resident control plane, package manager, or service mesh.
           </p>
         </div>
 
         <div class="bg-ink-900 p-6">
           <div class="text-xs uppercase tracking-widest text-mute-500 mb-3">How</div>
           <h3 class="text-paper-50 font-medium leading-snug mb-3">
-            Every external capability is declared. The kernel enforces it.
+            The security contract travels with the application.
           </h3>
           <p class="text-sm text-mute-400 leading-relaxed">
-            The app&rsquo;s manifest lists files, hosts, env vars, and GPU
-            devices. Undeclared access fails at load.
+            The signed manifest lists files, hosts, env vars, and GPU devices.
+            Undeclared access fails at load or at the native capability boundary.
             <code class="text-paper-100 text-[0.78rem]">pledge</code> +
             <code class="text-paper-100 text-[0.78rem]">unveil</code>
             (Linux/Cosmo/OpenBSD) or Seatbelt (macOS) backs the policy at
             the syscall layer. Signed releases and reproducible builds
-            make the whole chain auditable end-to-end.
+            make the chain auditable from source to deployed binary.
           </p>
         </div>
 
+      </div>
+    </div>
+  </section>
+
+  <!-- USE CASES. Lead with the work Hull enables before the implementation proof. -->
+  <section id="use-cases" class="hairline-t">
+    <div class="max-w-6xl mx-auto px-6 py-20 md:py-24">
+      <div class="max-w-2xl">
+        <div class="text-xs uppercase tracking-widest text-mute-500 mb-3">Use cases</div>
+        <h2 class="text-2xl md:text-3xl font-semibold text-paper-50 tracking-tight">Code you did not write. Authority you still control.</h2>
+        <p class="mt-4 text-sm md:text-base text-mute-400 leading-relaxed">
+          Hull gives generated software a narrow, reviewable operating envelope.
+          Use it wherever an agent can create or invoke code, but the code must not
+          inherit the authority of the machine running it.
+        </p>
+      </div>
+      <div class="mt-10 grid md:grid-cols-3 gap-px bg-white/[0.06] border border-white/[0.06] rounded-md overflow-hidden">
+        <div class="bg-ink-900 p-6">
+          <i data-lucide="bot" class="w-5 h-5 text-paper-100 mb-4"></i>
+          <h3 class="text-paper-50 font-medium">Run agent-generated tools</h3>
+          <p class="mt-2 text-sm text-mute-400 leading-relaxed">Expose a small callable interface while denying undeclared filesystem, network, environment, and process access. The agent may write the handler; it cannot silently expand the tool's authority.</p>
+        </div>
+        <div class="bg-ink-900 p-6">
+          <i data-lucide="workflow" class="w-5 h-5 text-paper-100 mb-4"></i>
+          <h3 class="text-paper-50 font-medium">Ship internal automation</h3>
+          <p class="mt-2 text-sm text-mute-400 leading-relaxed">Package application code, runtime, dependencies, and policy into one signed binary. Run predictable work as deterministic code and call a model only where judgment adds value.</p>
+        </div>
+        <div class="bg-ink-900 p-6">
+          <i data-lucide="radio-tower" class="w-5 h-5 text-paper-100 mb-4"></i>
+          <h3 class="text-paper-50 font-medium">Deploy beyond the cloud boundary</h3>
+          <p class="mt-2 text-sm text-mute-400 leading-relaxed">Keep the same signed capability contract on developer machines, edge nodes, customer premises, and isolated networks. Horizontal scaling remains a choice for your platform, not a runtime dependency.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- PLATFORM RELATIONSHIP. Hull is the execution boundary, not an agent workspace. -->
+  <section id="platforms" class="hairline-t bg-ink-900/30">
+    <div class="max-w-6xl mx-auto px-6 py-20 md:py-24">
+      <div class="grid lg:grid-cols-12 gap-10 lg:gap-16 items-start">
+        <div class="lg:col-span-5">
+          <div class="text-xs uppercase tracking-widest text-mute-500 mb-3">Works beneath your stack</div>
+          <h2 class="text-2xl md:text-3xl font-semibold text-paper-50 tracking-tight">Your agent platform decides what to run. Hull decides what that code may do.</h2>
+          <p class="mt-6 text-mute-400 leading-relaxed">Hull is not an enterprise agent workspace, identity system, model router, or autoscaler. It is the portable execution boundary underneath agents, workflows, MCP clients, and coding tools.</p>
+          <p class="mt-4 text-mute-400 leading-relaxed">Use Hull with your existing model, orchestrator, and deployment platform, or run it without any of them. The manifest and enforcement stay with the binary wherever it goes.</p>
+        </div>
+        <div class="lg:col-span-7 border border-white/[0.08] rounded-md bg-ink-950 p-6 md:p-8">
+          <div class="text-[10px] uppercase tracking-widest text-mute-500 mb-6">Responsibility boundary</div>
+          <div class="space-y-3 text-sm">
+            <div class="border border-white/[0.08] rounded-md bg-white/[0.025] p-4"><div class="text-paper-50 font-medium">Agent, model, workflow, or developer tool</div><div class="mt-1 text-mute-400">Chooses or generates the application code</div></div>
+            <div class="flex justify-center text-mute-500"><i data-lucide="arrow-down" class="w-4 h-4"></i></div>
+            <div class="border border-accent/30 rounded-md bg-accent/[0.04] p-4"><div class="text-paper-50 font-medium">Signed Hull application</div><div class="mt-1 text-mute-400">Declares the exact modules, hosts, paths, environment, process, and compute authority</div></div>
+            <div class="flex justify-center text-mute-500"><i data-lucide="arrow-down" class="w-4 h-4"></i></div>
+            <div class="border border-white/[0.08] rounded-md bg-white/[0.025] p-4"><div class="text-paper-50 font-medium">Native capability layer and OS sandbox</div><div class="mt-1 text-mute-400">Allows declared operations and rejects everything else</div></div>
+            <div class="flex justify-center text-mute-500"><i data-lucide="arrow-down" class="w-4 h-4"></i></div>
+            <div class="grid sm:grid-cols-5 gap-2 text-center text-[12px] text-mute-400">
+              <div class="border border-white/[0.06] rounded p-2">Filesystem</div><div class="border border-white/[0.06] rounded p-2">Network</div><div class="border border-white/[0.06] rounded p-2">Database</div><div class="border border-white/[0.06] rounded p-2">Process</div><div class="border border-white/[0.06] rounded p-2">GPU / WASM</div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="mt-12 border border-white/[0.08] rounded-md overflow-hidden">
+        <div class="grid md:grid-cols-3 gap-px bg-white/[0.06]">
+          <div class="bg-ink-900 p-5"><div class="text-xs uppercase tracking-widest text-mute-500">Cloud agent platforms</div><p class="mt-3 text-sm text-mute-400 leading-relaxed">Govern identities, collaboration, models, and connected company resources inside their platform.</p></div>
+          <div class="bg-ink-900 p-5"><div class="text-xs uppercase tracking-widest text-paper-50">Hull</div><p class="mt-3 text-sm text-mute-400 leading-relaxed">Constrains generated code in a signed, independently deployable application wherever it must run.</p></div>
+          <div class="bg-ink-900 p-5"><div class="text-xs uppercase tracking-widest text-mute-500">Your infrastructure</div><p class="mt-3 text-sm text-mute-400 leading-relaxed">Provides identity, placement, scaling, scheduling, and operations according to your environment.</p></div>
+        </div>
       </div>
     </div>
   </section>
@@ -771,11 +831,11 @@ hull v0.10.0  &middot;  ca-bundle: embedded  &middot;  platform: embedded  &midd
         <div class="lg:col-span-5">
           <div class="text-xs uppercase tracking-widest text-mute-500 mb-3">For agents</div>
           <h2 class="text-2xl md:text-3xl font-semibold text-paper-50 tracking-tight">
-            The runtime agents
-            already live in.
+            The execution boundary
+            beneath your agents.
           </h2>
           <p class="mt-6 text-mute-400 leading-relaxed">
-            Hull is built for both sides of the agent loop:
+            Hull works with any model or orchestrator. It is built for both sides of the agent loop:
             hosting LLM-callable tools behind a manifest the model
             can't write to, and giving AI coding agents a structured
             CLI surface to read, test, and deploy Hull apps.
@@ -917,6 +977,11 @@ hull v0.10.0  &middot;  ca-bundle: embedded  &middot;  platform: embedded  &midd
             combination. Manifest-declared capabilities,
             sealed signed bundles, kernel sandboxing, and no
             runtime codegen in one binary.
+          </p>
+          <p class="mt-4 text-sm text-mute-400 leading-relaxed">
+            This table compares execution runtimes. Agent workspaces and cloud
+            application platforms sit above that layer; Hull can run beneath or
+            independently of them.
           </p>
           <p class="mt-4 text-xs text-mute-400 leading-relaxed">
             Marks reflect default configurations.
