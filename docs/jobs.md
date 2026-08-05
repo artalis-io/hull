@@ -221,9 +221,10 @@ jobs.enqueue("merge", {}, { depends_on = { p1, p2 } })   -- job.deps = { r1, r2 
 The `depends_on` DAG above is a *static* graph of independent jobs. For a
 *dynamic*, long-running process - loops, conditionals, resumable across crashes -
 use a **durable workflow**: a normal function whose steps are memoized, so a
-crashed or retried workflow resumes past the work it already did. (Phases 1a-1b:
-steps + durable timers; signals and saga compensation are on the roadmap - see
-[docs/jobs_durable_execution_design.md](jobs_durable_execution_design.md).)
+crashed or retried workflow resumes past the work it already did. It can sleep for
+days, wait for external signals, and roll back on failure. (See
+[docs/jobs_durable_execution_design.md](jobs_durable_execution_design.md);
+deterministic WASM-replay strict mode is the remaining Phase 2.)
 
 ```lua
 jobs.workflow("checkout", function(ctx)
@@ -262,6 +263,19 @@ const wf = jobs.start("checkout", { orderId: 42, amount: 100 });
   in-memory timer. A worker must be running when it is due. A sleep does not
   consume the retry budget. `workflow_status` reports `waiting_for = "sleep:<ts>"`
   while it waits.
+- **`ctx.wait_signal(name, opts?)`** (`waitSignal`) pauses the workflow until
+  `jobs.signal(id, name, payload)` (`workflowStatus` shows `waiting_for =
+  "signal"`); it returns the delivered payload. The workflow parks in a
+  non-terminal `waiting` status (claimed by nobody) and is re-activated on
+  delivery - the human-in-the-loop / wait-for-webhook / approval primitive. A
+  signal delivered **before** the workflow reaches the wait is stored and
+  consumed when it gets there (no lost-signal race). `opts.timeout` (seconds)
+  makes the wait return `nil` if no signal arrives in time.
+- **Saga compensation:** `ctx.step(name, fn, { compensate = cfn })` registers a
+  rollback. If the workflow **fails terminally** (dead-letters), the completed
+  steps' `compensate` functions run in **reverse order** (undo the charge if
+  shipping can't be arranged). Compensations are at-least-once (idempotent) and
+  recorded, so a crash mid-rollback resumes.
 - **`jobs.workflow_status(id)`** (`workflowStatus`) → `{ status, name,
   steps_done, result?, error? }`, DB-derived (works even when no worker is
   running it). Fetch the final value with `jobs.await(id)` / `jobs.result(id)`.
