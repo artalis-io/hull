@@ -33,7 +33,7 @@ FAIL=0
 pass() { PASS=$((PASS + 1)); echo "  PASS: $1"; }
 fail() { FAIL=$((FAIL + 1)); echo "  FAIL: $1${2:+ - $2}"; }
 
-EXPECT_COLS="id,queue,type,payload,status,priority,attempts,max_attempts,run_at,claim_token,claimed_at,dedup_key,last_error,created_at,updated_at"
+EXPECT_COLS="id,queue,type,payload,status,priority,attempts,max_attempts,run_at,claim_token,claimed_at,dedup_key,last_error,created_at,updated_at,progress"
 
 # ── Phase 1: init + schema; Phase 2: correctness round-trip (both runtimes) ──
 check_runtime() {
@@ -917,6 +917,59 @@ app.main(async (ctx) => {
 
 echo "== v1.5 job events: Lua =="; check_events "lua" "lua" "$LUA_EVENTS"
 echo "== v1.5 job events: JS =="; check_events "js" "js" "$JS_EVENTS"
+
+# ── v1.5: polish - absolute at, progress, windowed throttle, fixed-offset tz ──
+check_polish() {
+    label="$1"; ext="$2"; app="$3"
+    T="$(mktemp -d)"; printf '%s\n' "$app" > "$T/app.$ext"
+    out="$("$HULL" "$T/app.$ext" -d "$T/a.db" 2>/dev/null)" || true
+    case "$out" in
+        *"POLISH claimed=1 prog=43 throttle=ok tzhh=7 iana_reject=true"*)
+            pass "$label: polish (absolute at / progress / throttle window / tz-offset cron + IANA reject)" ;;
+        *) fail "$label: v1.5 polish" "$out" ;;
+    esac
+    rm -rf "$T"
+}
+
+LUA_POLISH='local jobs = require("hull.jobs"); local time = require("hull.time")
+app.manifest({ modules = { "hull/jobs@1", "hull/time@1" } })
+app.main(function(ctx)
+  jobs.init()
+  jobs.enqueue("t", {}, { at = time.now() + 3600 })
+  local now_id = jobs.enqueue("t", {})
+  local claimed = jobs.claim({ batch = 10 })
+  jobs.progress(now_id, 42.6)
+  local prog = jobs.get(now_id).progress
+  local a = jobs.enqueue("th", {}, { throttle = 60 })
+  local b = jobs.enqueue("th", {}, { throttle = 60 })
+  local nx = jobs._cron_next("0 9 * * *", 1735689600, 2*3600)
+  local hh = math.floor((nx % 86400) / 3600)
+  local ok_iana = pcall(function() jobs.cron("x", "0 9 * * *", nil, { tz = "Europe/Budapest" }) end)
+  ctx.stdout:write(("POLISH claimed=%d prog=%s throttle=%s tzhh=%d iana_reject=%s\n"):format(
+    #claimed, tostring(prog), (a~=nil and b==nil) and "ok" or "bad", hh, tostring(not ok_iana)))
+  return 0
+end)'
+
+JS_POLISH='import { app } from "hull:app"; import { jobs } from "hull:jobs"; import { time } from "hull:time";
+app.manifest({ modules: ["hull/jobs@1","hull/time@1"] });
+app.main((ctx) => {
+  jobs.init();
+  jobs.enqueue("t", {}, { at: time.now() + 3600 });
+  const nowId = jobs.enqueue("t", {});
+  const claimed = jobs.claim({ batch: 10 });
+  jobs.progress(nowId, 42.6);
+  const prog = jobs.get(nowId).progress;
+  const a = jobs.enqueue("th", {}, { throttle: 60 });
+  const b = jobs.enqueue("th", {}, { throttle: 60 });
+  const nx = jobs._cronNext("0 9 * * *", 1735689600, 2*3600);
+  const hh = Math.floor((nx % 86400) / 3600);
+  let okIana = true; try { jobs.cron("x", "0 9 * * *", null, { tz: "Europe/Budapest" }); } catch(e){ okIana = false; }
+  ctx.stdout.write(`POLISH claimed=${claimed.length} prog=${prog} throttle=${a!==null&&b===null?"ok":"bad"} tzhh=${hh} iana_reject=${!okIana}\n`);
+  return 0;
+});'
+
+echo "== v1.5 polish: Lua =="; check_polish "lua" "lua" "$LUA_POLISH"
+echo "== v1.5 polish: JS =="; check_polish "js" "js" "$JS_POLISH"
 
 # Fleet gate: K processes share one rate counter -> total dispatched == rate.
 echo "== v1.2 rate limit fleet ($CONC processes, one shared counter) =="

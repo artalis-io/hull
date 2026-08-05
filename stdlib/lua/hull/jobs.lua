@@ -115,7 +115,8 @@ function jobs.init(opts)
         .. "dedup_key    VARCHAR(255),"
         .. "last_error   TEXT,"
         .. "created_at   INTEGER      NOT NULL,"
-        .. "updated_at   INTEGER      NOT NULL)")
+        .. "updated_at   INTEGER      NOT NULL,"
+        .. "progress     INTEGER      NOT NULL DEFAULT 0)")
 
     -- Claim scan path: ready-to-run pending jobs in a queue, by priority then id.
     db.exec([[
@@ -150,10 +151,16 @@ function jobs.init(opts)
         .. "max_attempts INTEGER,"
         .. "next_run_at  INTEGER      NOT NULL,"
         .. "last_run_at  INTEGER,"
-        .. "updated_at   INTEGER      NOT NULL)")
+        .. "updated_at   INTEGER      NOT NULL,"
+        .. "tz_offset    INTEGER      NOT NULL DEFAULT 0)")
     db.exec([[
         CREATE INDEX IF NOT EXISTS idx_hull_cron_due ON _hull_cron(next_run_at)
     ]])
+
+    -- Additive migrations for DBs created before v1.5 (idempotent: a duplicate-
+    -- column error on an already-migrated DB is expected and swallowed).
+    pcall(db.exec, "ALTER TABLE _hull_jobs ADD COLUMN progress INTEGER NOT NULL DEFAULT 0")
+    pcall(db.exec, "ALTER TABLE _hull_cron ADD COLUMN tz_offset INTEGER NOT NULL DEFAULT 0")
 
     -- Fleet-wide rate-limit counters (jobs.limit). One row per limited queue;
     -- `name` (not the reserved word `key`), a window start, and the count.
@@ -302,7 +309,17 @@ function jobs.enqueue(job_type, data, opts)
     end
     opts = opts or {}
     local now    = time.now()
-    local run_at = opts.run_at or (now + (opts.delay or 0))
+    -- Schedule: absolute `at` (unix ts) wins, else `run_at`, else now + `delay`.
+    local run_at = opts.at or opts.run_at or (now + (opts.delay or 0))
+    -- Windowed throttle: skip (return nil) if a job of this (queue, type) was
+    -- created within the last `throttle` seconds. Best-effort - keyed by
+    -- (queue, type), no unique constraint (use dedup_key for exact-once).
+    if opts.throttle and opts.throttle > 0 then
+        local hit = db.query(
+            "SELECT 1 AS x FROM _hull_jobs WHERE queue=? AND type=? AND created_at > ? LIMIT 1",
+            { opts.queue or "default", job_type, now - opts.throttle })
+        if hit and #hit > 0 then return nil end
+    end
     local deps = opts.depends_on
     local has_deps = type(deps) == "table" and #deps > 0
     local vals = {
@@ -827,10 +844,37 @@ end
 -- Smallest unix ts strictly after `from_ts` whose UTC time matches `c`.
 -- Coarse-to-fine skips (whole day / hour / minute) keep it fast even for rare
 -- specs like "0 0 29 2 *". Returns nil if none within the search bound.
-local function cron_next(c, from_ts)
+-- Resolve a cron `tz` option to a FIXED offset in seconds east of UTC. Accepts a
+-- number (minutes east of UTC) or a string "+HH:MM" / "-HH:MM" / "+HHMM" / "Z".
+-- IANA names ("Europe/Budapest") are rejected: a DST-correct named zone needs a
+-- tz database Hull can't read inside the sandbox. So this is fixed-offset only -
+-- no daylight-saving transitions.
+local function parse_tz_offset(tz)
+    if tz == nil then return 0 end
+    if type(tz) == "number" then return math.floor(tz * 60) end
+    if type(tz) == "string" then
+        if tz == "Z" or tz == "UTC" or tz == "utc" then return 0 end
+        local sign, hh, mm = tz:match("^([+-])(%d%d):?(%d%d)$")
+        if sign then
+            local off = tonumber(hh) * 3600 + tonumber(mm) * 60
+            return sign == "-" and -off or off
+        end
+        error("jobs.cron: tz must be a fixed offset (\"+02:00\", \"-0530\", or minutes "
+            .. "east of UTC); IANA zone names like '" .. tz .. "' need a tz database "
+            .. "unavailable in the sandbox")
+    end
+    error("jobs.cron: tz must be a string offset or a number of minutes")
+end
+
+-- Next matching instant AT OR AFTER from_ts, as a UTC unix timestamp. `offset`
+-- (seconds east of UTC, default 0) shifts only the calendar decode, so the spec
+-- matches wall-clock fields in that fixed-offset zone while the returned value
+-- stays UTC.
+local function cron_next(c, from_ts, offset)
+    offset = offset or 0
     local t = math.floor(from_ts / 60) * 60 + 60
     for _ = 1, 200000 do
-        local month, day, hour, minute, dow = decode_ts(t)
+        local month, day, hour, minute, dow = decode_ts(t + offset)
         if not c.month[month] then
             t = (math.floor(t / 86400) + 1) * 86400
         else
@@ -858,11 +902,11 @@ end
 -- occurrence - fire-once, no backfill storm. Called (throttled) from jobs.work.
 local function process_cron(now)
     local due = db.query(
-        "SELECT name, spec, type, payload, queue, priority, max_attempts, next_run_at "
+        "SELECT name, spec, type, payload, queue, priority, max_attempts, next_run_at, tz_offset "
         .. "FROM _hull_cron WHERE next_run_at <= ?", { now })
     for _, c in ipairs(due) do
         local parsed = parse_cron(c.spec)
-        local nxt = parsed and cron_next(parsed, now) or (now + 60)
+        local nxt = parsed and cron_next(parsed, now, c.tz_offset) or (now + 60)
         local won = db.exec(
             "UPDATE _hull_cron SET next_run_at=?, last_run_at=?, updated_at=? "
             .. "WHERE name=? AND next_run_at=?",
@@ -896,7 +940,8 @@ function jobs.cron(name, spec, data, opts)
     if not parsed then error("jobs.cron: " .. (err or "invalid cron spec")) end
     opts = opts or {}
     local now = time.now()
-    local nxt = cron_next(parsed, now)
+    local tz_offset = parse_tz_offset(opts.tz)
+    local nxt = cron_next(parsed, now, tz_offset)
     if not nxt then error("jobs.cron: spec has no upcoming occurrence") end
     local job_type = opts.type or name
     local payload  = data ~= nil and json.encode(data) or nil
@@ -904,13 +949,13 @@ function jobs.cron(name, spec, data, opts)
     local priority = opts.priority or 0
     local n = db.exec(
         "UPDATE _hull_cron SET spec=?, type=?, payload=?, queue=?, priority=?, "
-        .. "max_attempts=?, next_run_at=?, updated_at=? WHERE name=?",
-        { spec, job_type, payload, queue, priority, opts.max_attempts, nxt, now, name })
+        .. "max_attempts=?, next_run_at=?, tz_offset=?, updated_at=? WHERE name=?",
+        { spec, job_type, payload, queue, priority, opts.max_attempts, nxt, tz_offset, now, name })
     if (n or 0) == 0 then
         db.exec(
             "INSERT INTO _hull_cron (name, spec, type, payload, queue, priority, "
-            .. "max_attempts, next_run_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            { name, spec, job_type, payload, queue, priority, opts.max_attempts, nxt, now })
+            .. "max_attempts, next_run_at, tz_offset, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            { name, spec, job_type, payload, queue, priority, opts.max_attempts, nxt, tz_offset, now })
     end
     return jobs
 end
@@ -923,9 +968,9 @@ function jobs.uncron(name)
 end
 
 -- Internal seams for tests / introspection; not part of the app-facing contract.
-jobs._cron_next = function(spec, from)
+jobs._cron_next = function(spec, from, offset)
     local p = parse_cron(spec)
-    return p and cron_next(p, from or time.now()) or nil
+    return p and cron_next(p, from or time.now(), offset) or nil
 end
 jobs._tick = function(now) process_cron(now or time.now()) end
 
@@ -1087,7 +1132,23 @@ local function shape_ops(r)
     j.last_error = r.last_error
     j.created_at = r.created_at
     j.updated_at = r.updated_at
+    j.progress   = r.progress
     return j
+end
+
+--- Set a running job's progress percent (0-100), surfaced by
+-- `jobs.get(id).progress`. Advisory - a UI/ops hint for long jobs, orthogonal
+-- to the claim/heartbeat. The value is clamped to [0,100] and rounded. Call it
+-- from a handler with `job.id`. Returns the clamped value stored.
+-- @tparam number id
+-- @tparam number pct  0..100
+-- @treturn number  the clamped value written
+function jobs.progress(id, pct)
+    local p = tonumber(pct) or 0
+    if p < 0 then p = 0 elseif p > 100 then p = 100 end
+    p = math.floor(p + 0.5)
+    db.exec("UPDATE _hull_jobs SET progress=?, updated_at=? WHERE id=?", { p, time.now(), id })
+    return p
 end
 
 --- Fetch a single job by id (its full status view), or nil if it doesn't exist.

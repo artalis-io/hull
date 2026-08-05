@@ -108,7 +108,8 @@ function init(opts) {
         "dedup_key    VARCHAR(255)," +
         "last_error   TEXT," +
         "created_at   INTEGER      NOT NULL," +
-        "updated_at   INTEGER      NOT NULL)");
+        "updated_at   INTEGER      NOT NULL," +
+        "progress     INTEGER      NOT NULL DEFAULT 0)");
 
     // Claim scan path: ready-to-run pending jobs in a queue, by priority then id.
     db.exec(
@@ -140,8 +141,14 @@ function init(opts) {
         "max_attempts INTEGER," +
         "next_run_at  INTEGER      NOT NULL," +
         "last_run_at  INTEGER," +
-        "updated_at   INTEGER      NOT NULL)");
+        "updated_at   INTEGER      NOT NULL," +
+        "tz_offset    INTEGER      NOT NULL DEFAULT 0)");
     db.exec("CREATE INDEX IF NOT EXISTS idx_hull_cron_due ON _hull_cron(next_run_at)");
+
+    // Additive migrations for DBs created before v1.5 (idempotent: a duplicate-
+    // column error on an already-migrated DB is expected and swallowed).
+    try { db.exec("ALTER TABLE _hull_jobs ADD COLUMN progress INTEGER NOT NULL DEFAULT 0"); } catch (e) { /* exists */ }
+    try { db.exec("ALTER TABLE _hull_cron ADD COLUMN tz_offset INTEGER NOT NULL DEFAULT 0"); } catch (e) { /* exists */ }
 
     // Fleet-wide rate-limit counters (jobs.limit). One row per limited queue;
     // `name` (not the reserved word `key`), a window start, and the count.
@@ -279,7 +286,18 @@ function enqueue(jobType, data, opts) {
         throw new Error("jobs.enqueue: type must be a non-empty string");
     const o = opts || {};
     const now = time.now();
-    const runAt = o.runAt !== undefined ? o.runAt : now + (o.delay || 0);
+    // Schedule: absolute `at` (unix ts) wins, else `runAt`, else now + `delay`.
+    const runAt = o.at !== undefined ? o.at
+        : (o.runAt !== undefined ? o.runAt : now + (o.delay || 0));
+    // Windowed throttle: skip (return null) if a job of this (queue, type) was
+    // created within the last `throttle` seconds. Best-effort - keyed by
+    // (queue, type), no unique constraint (use dedupKey for exact-once).
+    if (o.throttle && o.throttle > 0) {
+        const hit = db.query(
+            "SELECT 1 AS x FROM _hull_jobs WHERE queue=? AND type=? AND created_at > ? LIMIT 1",
+            [o.queue || "default", jobType, now - o.throttle]);
+        if (hit.length) return null;
+    }
     const deps = o.dependsOn;
     const hasDeps = Array.isArray(deps) && deps.length > 0;
     const vals = [
@@ -770,10 +788,34 @@ function parseCron(spec) {
 }
 
 // Smallest unix ts strictly after `fromTs` whose UTC time matches `c`.
-function cronNext(c, fromTs) {
+// Resolve a cron `tz` option to a FIXED offset in seconds east of UTC. Accepts a
+// number (minutes east of UTC) or a string "+HH:MM" / "-HH:MM" / "+HHMM" / "Z".
+// IANA names ("Europe/Budapest") are rejected: a DST-correct named zone needs a
+// tz database Hull can't read inside the sandbox. Fixed-offset only - no DST.
+function parseTzOffset(tz) {
+    if (tz == null) return 0;
+    if (typeof tz === "number") return Math.floor(tz * 60);
+    if (typeof tz === "string") {
+        if (tz === "Z" || tz === "UTC" || tz === "utc") return 0;
+        const m = tz.match(/^([+-])(\d\d):?(\d\d)$/);
+        if (m) {
+            const off = Number(m[2]) * 3600 + Number(m[3]) * 60;
+            return m[1] === "-" ? -off : off;
+        }
+        throw new Error(`jobs.cron: tz must be a fixed offset ("+02:00", "-0530", or minutes ` +
+            `east of UTC); IANA zone names like '${tz}' need a tz database unavailable in the sandbox`);
+    }
+    throw new Error("jobs.cron: tz must be a string offset or a number of minutes");
+}
+
+// Next matching instant at or after fromTs, as a UTC unix timestamp. `offset`
+// (seconds east of UTC, default 0) shifts only the calendar decode, so the spec
+// matches wall-clock fields in that fixed-offset zone while the result stays UTC.
+function cronNext(c, fromTs, offset) {
+    const off = offset || 0;
     let t = Math.floor(fromTs / 60) * 60 + 60;
     for (let i = 0; i < 200000; i++) {
-        const { month, day, hour, minute, dow } = decodeTs(t);
+        const { month, day, hour, minute, dow } = decodeTs(t + off);
         if (!c.month.has(month)) { t = (Math.floor(t / 86400) + 1) * 86400; continue; }
         let dayOk;
         if (c.domStar && c.dowStar) dayOk = true;
@@ -793,11 +835,11 @@ function cronNext(c, fromTs) {
 // (fire-once, no backfill). Called (throttled) from work().
 function processCron(now) {
     const due = db.query(
-        "SELECT name, spec, type, payload, queue, priority, max_attempts, next_run_at " +
+        "SELECT name, spec, type, payload, queue, priority, max_attempts, next_run_at, tz_offset " +
         "FROM _hull_cron WHERE next_run_at <= ?", [now]);
     for (const c of due) {
         const parsed = parseCron(c.spec);
-        const nxt = parsed ? cronNext(parsed, now) : (now + 60);
+        const nxt = parsed ? cronNext(parsed, now, c.tz_offset) : (now + 60);
         const won = db.exec(
             "UPDATE _hull_cron SET next_run_at=?, last_run_at=?, updated_at=? " +
             "WHERE name=? AND next_run_at=?",
@@ -833,7 +875,8 @@ function cron(name, spec, data, opts) {
     if (!parsed) throw new Error("jobs.cron: invalid cron spec");
     const o = opts || {};
     const now = time.now();
-    const nxt = cronNext(parsed, now);
+    const tzOffset = parseTzOffset(o.tz);
+    const nxt = cronNext(parsed, now, tzOffset);
     if (nxt === null) throw new Error("jobs.cron: spec has no upcoming occurrence");
     const jobType = o.type || name;
     const payload = data !== undefined && data !== null ? json.encode(data) : null;
@@ -842,13 +885,13 @@ function cron(name, spec, data, opts) {
     const ma = o.maxAttempts !== undefined ? o.maxAttempts : null;
     const n = db.exec(
         "UPDATE _hull_cron SET spec=?, type=?, payload=?, queue=?, priority=?, " +
-        "max_attempts=?, next_run_at=?, updated_at=? WHERE name=?",
-        [spec, jobType, payload, queue, priority, ma, nxt, now, name]);
+        "max_attempts=?, next_run_at=?, tz_offset=?, updated_at=? WHERE name=?",
+        [spec, jobType, payload, queue, priority, ma, nxt, tzOffset, now, name]);
     if ((n || 0) === 0) {
         db.exec(
             "INSERT INTO _hull_cron (name, spec, type, payload, queue, priority, " +
-            "max_attempts, next_run_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            [name, spec, jobType, payload, queue, priority, ma, nxt, now]);
+            "max_attempts, next_run_at, tz_offset, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            [name, spec, jobType, payload, queue, priority, ma, nxt, tzOffset, now]);
     }
     return jobs;
 }
@@ -1010,7 +1053,25 @@ function shapeOps(r) {
     j.lastError = r.last_error;
     j.createdAt = r.created_at;
     j.updatedAt = r.updated_at;
+    j.progress = r.progress;
     return j;
+}
+
+/**
+ * Set a running job's progress percent (0-100), surfaced by
+ * `jobs.get(id).progress`. Advisory - a UI/ops hint for long jobs, orthogonal to
+ * the claim/heartbeat. Clamped to [0,100] and rounded. Call from a handler with
+ * `job.id`. Returns the clamped value stored.
+ * @param {number} id
+ * @param {number} pct  0..100
+ * @returns {number}  the clamped value written
+ */
+function progress(id, pct) {
+    let p = Number(pct) || 0;
+    if (p < 0) p = 0; else if (p > 100) p = 100;
+    p = Math.round(p);
+    db.exec("UPDATE _hull_jobs SET progress=?, updated_at=? WHERE id=?", [p, time.now(), id]);
+    return p;
 }
 
 /**
@@ -1173,20 +1234,20 @@ function cleanup(opts) {
 }
 
 // Internal seams for tests / introspection; not part of the app-facing contract.
-function _cronNext(spec, from) {
+function _cronNext(spec, from, offset) {
     const p = parseCron(spec);
-    return p ? cronNext(p, from !== undefined ? from : time.now()) : null;
+    return p ? cronNext(p, from !== undefined ? from : time.now(), offset) : null;
 }
 function _tick(now) { processCron(now !== undefined ? now : time.now()); }
 
 export const jobs = {
     init, enqueue, enqueueMany, claim, handler, default: setDefault, on, work, reap,
-    stats, runWorker, stop, get, result, await: await_, heartbeat, limit,
+    stats, runWorker, stop, get, result, await: await_, progress, heartbeat, limit,
     pause, resume, purge,
     dead, retry, cancel, cleanup, cron, uncron,
     RETRY, DEAD, DISCARD, _config: _cfg, _cronNext, _tick,
 };
 export { init, enqueue, enqueueMany, claim, handler, on, work, reap, stats,
-         runWorker, stop, get, result, heartbeat, limit, pause, resume, purge,
-         dead, retry, cancel, cleanup, cron, uncron };
+         runWorker, stop, get, result, progress, heartbeat, limit, pause, resume,
+         purge, dead, retry, cancel, cleanup, cron, uncron };
 export default jobs;
