@@ -1061,7 +1061,7 @@ function jobs.work(opts)
                 -- yield is not a failed attempt, so undo the claim's attempt
                 -- increment (a workflow may sleep / wait many times without
                 -- exhausting max_attempts).
-                local now = time.now()
+                local wf_now = time.now()
                 if result.waiting then
                     -- ctx.wait_signal: park in the non-terminal 'waiting' status
                     -- (excluded by the claim query). run_at carries the optional
@@ -1069,7 +1069,7 @@ function jobs.work(opts)
                     -- wait, jobs.signal wakes a delivered one.
                     db.exec("UPDATE _hull_jobs SET status='waiting', run_at=?, "
                         .. "attempts=attempts-1, claim_token=NULL, updated_at=? WHERE id=?",
-                        { result.deadline or 0, now, job.id })
+                        { result.deadline or 0, wf_now, job.id })
                     -- Close the deliver-before-park race: a signal delivered in the
                     -- check->park window couldn't re-activate us (we were 'running'),
                     -- so re-check now that we are 'waiting'.
@@ -1080,14 +1080,14 @@ function jobs.work(opts)
                         if sig and #sig > 0 then
                             db.exec("UPDATE _hull_jobs SET status='pending', run_at=?, "
                                 .. "updated_at=? WHERE id=? AND status='waiting'",
-                                { now, now, job.id })
+                                { wf_now, wf_now, job.id })
                         end
                     end
                 else
                     -- ctx.sleep: future-dated pending job.
                     db.exec("UPDATE _hull_jobs SET status='pending', run_at=?, "
                         .. "attempts=attempts-1, claim_token=NULL, updated_at=? WHERE id=?",
-                        { result.wake_at or now, now, job.id })
+                        { result.wake_at or wf_now, wf_now, job.id })
                 end
             elseif not ok then
                 local err = tostring(result)
