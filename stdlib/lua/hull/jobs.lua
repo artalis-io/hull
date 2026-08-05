@@ -61,6 +61,8 @@ local _default = nil
 local _last_reap = 0
 -- Unix ts of the last cron due-check (throttled to >=1s; cron is minute-grained).
 local _last_cron = 0
+-- Whether the server parses SKIP LOCKED (probed in jobs.init; nil = not probed).
+local _skip_locked = nil
 
 --- Create the `_hull_jobs` table and its indexes. Idempotent - safe to call on
 -- every boot. Uses the connection's portable identity DDL + IF-NOT-EXISTS index
@@ -137,6 +139,18 @@ function jobs.init(opts)
     db.exec([[
         CREATE INDEX IF NOT EXISTS idx_hull_cron_due ON _hull_cron(next_run_at)
     ]])
+
+    -- Verify the server actually parses SKIP LOCKED (the compile-time dialect
+    -- flag says "this backend supports it" but a MySQL<8 / MariaDB<10.6 server
+    -- does not). A 0-row probe against the real table detects it once; the claim
+    -- falls back to plain FOR UPDATE otherwise.
+    _skip_locked = db.dialect.supports_skip_locked
+    if _skip_locked then
+        local ok = pcall(function()
+            db.query("SELECT id FROM _hull_jobs WHERE 1=0 FOR UPDATE SKIP LOCKED")
+        end)
+        if not ok then _skip_locked = false end
+    end
 
     return jobs
 end
@@ -216,6 +230,11 @@ function jobs.claim(opts)
     local now   = time.now()
     local token = crypto.base64url_encode(crypto.random(16))
     local d = db.dialect
+    -- SKIP LOCKED needs PG 9.5+ / MySQL 8+ / MariaDB 10.6+. jobs.init probes the
+    -- server and clears _skip_locked on older ones, where we fall back to plain
+    -- FOR UPDATE (correct - one job, one worker - but claimants block instead of
+    -- skipping). nil = not probed yet -> assume supported.
+    local lock = (_skip_locked ~= false) and "FOR UPDATE SKIP LOCKED" or "FOR UPDATE"
 
     local rows
     if d.supports_skip_locked and d.supports_returning then
@@ -224,7 +243,7 @@ function jobs.claim(opts)
             "UPDATE _hull_jobs SET status='running', claim_token=?, claimed_at=?, "
             .. "attempts=attempts+1, updated_at=? WHERE id IN ("
             .. "SELECT id FROM _hull_jobs WHERE queue=? AND status='pending' AND run_at<=? "
-            .. "ORDER BY priority DESC, id LIMIT ? FOR UPDATE SKIP LOCKED) "
+            .. "ORDER BY priority DESC, id LIMIT ? " .. lock .. ") "
             .. "RETURNING id, type, payload, priority, attempts, max_attempts",
             { token, now, now, queue, now, batch })
     elseif d.supports_skip_locked then
@@ -232,7 +251,7 @@ function jobs.claim(opts)
         db.batch(function()
             local sel = db.query(
                 "SELECT id FROM _hull_jobs WHERE queue=? AND status='pending' AND run_at<=? "
-                .. "ORDER BY priority DESC, id LIMIT ? FOR UPDATE SKIP LOCKED",
+                .. "ORDER BY priority DESC, id LIMIT ? " .. lock,
                 { queue, now, batch })
             if #sel == 0 then return end
             local ph, params = {}, { token, now, now }

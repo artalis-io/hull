@@ -54,6 +54,9 @@ function defaultBackoff(attempt) {
 const _handlers = Object.create(null);
 let _default = null;
 
+// Whether the server parses SKIP LOCKED (probed in init(); null = not probed).
+let _skipLocked = null;
+
 /**
  * Create the `_hull_jobs` table and its indexes. Idempotent - safe on every
  * boot. Uses the connection's portable identity DDL + IF-NOT-EXISTS index
@@ -125,6 +128,16 @@ function init(opts) {
         "updated_at   INTEGER      NOT NULL)");
     db.exec("CREATE INDEX IF NOT EXISTS idx_hull_cron_due ON _hull_cron(next_run_at)");
 
+    // Verify the server actually parses SKIP LOCKED (the compile-time dialect
+    // flag says "this backend supports it" but a MySQL<8 / MariaDB<10.6 server
+    // does not). A 0-row probe against the real table detects it once; the claim
+    // falls back to plain FOR UPDATE otherwise.
+    _skipLocked = db.dialect.supportsSkipLocked;
+    if (_skipLocked) {
+        try { db.query("SELECT id FROM _hull_jobs WHERE 1=0 FOR UPDATE SKIP LOCKED"); }
+        catch (_e) { _skipLocked = false; }
+    }
+
     return jobs;
 }
 
@@ -193,6 +206,11 @@ function claim(opts) {
     const now = time.now();
     const token = crypto.base64urlEncode(crypto.random(16));
     const d = db.dialect;
+    // SKIP LOCKED needs PG 9.5+ / MySQL 8+ / MariaDB 10.6+. init() probes the
+    // server and clears _skipLocked on older ones, where we fall back to plain
+    // FOR UPDATE (correct - one job, one worker - but claimants block instead of
+    // skipping). null = not probed yet -> assume supported.
+    const lock = _skipLocked === false ? "FOR UPDATE" : "FOR UPDATE SKIP LOCKED";
 
     let rows;
     if (d.supportsSkipLocked && d.supportsReturning) {
@@ -200,14 +218,14 @@ function claim(opts) {
             "UPDATE _hull_jobs SET status='running', claim_token=?, claimed_at=?, " +
             "attempts=attempts+1, updated_at=? WHERE id IN (" +
             "SELECT id FROM _hull_jobs WHERE queue=? AND status='pending' AND run_at<=? " +
-            "ORDER BY priority DESC, id LIMIT ? FOR UPDATE SKIP LOCKED) " +
+            "ORDER BY priority DESC, id LIMIT ? " + lock + ") " +
             "RETURNING id, type, payload, priority, attempts, max_attempts",
             [token, now, now, queue, now, batch]);
     } else if (d.supportsSkipLocked) {
         db.batch(() => {
             const sel = db.query(
                 "SELECT id FROM _hull_jobs WHERE queue=? AND status='pending' AND run_at<=? " +
-                "ORDER BY priority DESC, id LIMIT ? FOR UPDATE SKIP LOCKED",
+                "ORDER BY priority DESC, id LIMIT ? " + lock,
                 [queue, now, batch]);
             if (sel.length === 0) return;
             const ph = [], params = [token, now, now];

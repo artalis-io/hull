@@ -262,3 +262,9 @@ handlers; bounded / batch-drain runs) and `jobs.stop()` for graceful shutdown.
 - **PostgreSQL / MySQL**: `SKIP LOCKED` gives lock-free, contention-free claims
   across many worker processes. Selected by DSN scheme on the connection; the
   same jobs code runs unchanged.
+- **`SKIP LOCKED` version floor.** It needs PostgreSQL 9.5+, MySQL 8+, or
+  MariaDB 10.6+. `jobs.init` probes the server once; on an older one it
+  transparently falls back to plain `FOR UPDATE` - still exactly-once (one job,
+  one worker), but concurrent claimants **block** on locked rows instead of
+  skipping them (lower throughput under heavy contention). No configuration
+  needed; upgrade the server to regain skip-based claims.
