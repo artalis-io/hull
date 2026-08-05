@@ -86,16 +86,60 @@ int hl_cap_test_dispatch(KlRouter *router, const char *method,
     }
     req.num_headers = num_headers;
 
-    /* Fake body reader if body provided — must be KlBufReader so that
-     * hl_cap_body_data() can cast and read .data/.len fields. */
+    KlAllocator alloc = kl_allocator_default();
+
+    /* Body reader. Two shapes:
+     *
+     *  - A streaming-multipart route (registered via kl_server_route_streaming*)
+     *    needs the parkable multipart wrapper (hl_cap_multipart_factory) as
+     *    req.body_reader so req:multipart() / req.multipart() resolve. Unlike a
+     *    live socket, the synthetic harness has the WHOLE body up front, so we
+     *    reconstruct the wrapper via the matched route's own factory and pre-feed
+     *    the entire body + on_complete BEFORE dispatch. A well-formed body then
+     *    drives the iterator straight to DONE (Keel's body_reader_multipart.c
+     *    returns DONE, not NEED_DATA, once the stream has ended), so the handler
+     *    never parks / yields and no live connection is required. Previously
+     *    req:multipart() raised "no active connection" in-process.
+     *
+     *  - Any other route uses the plain KlBufReader (hl_cap_body_data reads it).
+     *
+     * mp_wrapper is destroyed after dispatch (the handler consumed the parts
+     * synchronously during dispatch, so the parsed state is no longer needed).
+     */
     KlBufReader fake_buf;
     memset(&fake_buf, 0, sizeof(fake_buf));
+    KlBodyReader *mp_wrapper = NULL;
     if (body_data && body_len > 0) {
-        fake_buf.data = (char *)(uintptr_t)body_data;  /* KlBody.data is char* but not modified here */
-        fake_buf.len = body_len;
-        fake_buf.cap = body_len;
-        req.body_reader = &fake_buf.base;
-        req.content_length = body_len;
+        KlRoute *matched = NULL;
+        int nparams = 0;
+        (void)kl_router_match(router, method, req.method_len,
+                              req.path, req.path_len,
+                              &matched, req.params, &nparams);
+        if (matched && matched->streaming_handler && matched->body_reader) {
+            KlBodyReader *w = matched->body_reader(&alloc, &req,
+                                                   matched->user_data);
+            if (w) {
+                /* Feed the whole body in one on_data, then complete the stream.
+                 * A cap-exceeding body makes on_data return < 0, which the
+                 * wrapper records as errored (mp_wrap_on_data); we then skip
+                 * on_complete and still hand the wrapper to the handler so
+                 * req:multipart() surfaces the parser error the same way a live
+                 * server would. */
+                int rc = w->on_data ? w->on_data(w, body_data, body_len) : 0;
+                if (rc >= 0 && w->on_complete)
+                    w->on_complete(w);
+                req.body_reader = w;
+                req.content_length = body_len;
+                mp_wrapper = w;
+            }
+        }
+        if (!mp_wrapper) {
+            fake_buf.data = (char *)(uintptr_t)body_data;  /* KlBody.data is char* but not modified here */
+            fake_buf.len = body_len;
+            fake_buf.cap = body_len;
+            req.body_reader = &fake_buf.base;
+            req.content_length = body_len;
+        }
     }
 
     /* Inject context if provided (parsed as JSON by Lua/JS bindings).
@@ -121,7 +165,6 @@ int hl_cap_test_dispatch(KlRouter *router, const char *method,
      * pipeline. dispatch_synthetic encapsulates the match → pre-body
      * mw → post-body mw → handler sequence so this file no longer
      * needs to mirror Keel internals. */
-    KlAllocator alloc = kl_allocator_default();
     KlResponse res;
     if (kl_response_init(&res, &alloc) != 0) return -1;
     res.conn_fd = -1; /* no actual connection */
@@ -136,6 +179,11 @@ int hl_cap_test_dispatch(KlRouter *router, const char *method,
      * value because the caller inspects res->status / res->body
      * directly, not the dispatch verdict. */
     (void)kl_router_dispatch_synthetic(router, &req, &res, run_middleware);
+
+    /* The handler consumed the multipart parts synchronously during dispatch;
+     * tear the wrapper (and its inner reader + buffered parts) down now. */
+    if (mp_wrapper && mp_wrapper->destroy)
+        mp_wrapper->destroy(mp_wrapper);
 
     /* Extract results — copy body and headers into hl_alloc-owned
      * storage before freeing the response (kl_response_free releases

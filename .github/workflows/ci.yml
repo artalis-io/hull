@@ -98,6 +98,10 @@ jobs:
         timeout-minutes: 2
         run: make e2e-blob
 
+      - name: Test-harness fs + multipart E2E tests
+        timeout-minutes: 2
+        run: make e2e-test-harness
+
       - name: Multipart upload E2E tests
         timeout-minutes: 3
         run: make e2e-multipart
