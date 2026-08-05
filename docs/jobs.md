@@ -76,6 +76,50 @@ hull jobs worker worker.lua -d ./app.db  # resolves the entry, runs its app.main
 `hull jobs worker [entry|dir] [-d DSN] [args...]` resolves the entry (a file
 as-is; a directory -> `app.lua`|`app.js`) and forwards the rest to the app.
 
+**Intra-process concurrency.** `run_worker({ concurrency = N })` runs N
+independent claim-loops in one process, so up to N handlers are in flight at
+once - real parallelism for I/O-bound handlers (each loop claims disjoint jobs
+via the atomic claim). It's orthogonal to running K processes; the two multiply
+(K processes x N concurrency). Leave it at 1 for CPU-bound handlers (more
+processes scale those better).
+
+```lua
+app.main(function() jobs.init(); jobs.run_worker({ concurrency = 8 }) end)
+```
+
+## Recurring jobs (cron)
+
+`jobs.cron(name, spec, data?, opts?)` registers a **durable** recurring
+schedule: on each matching minute, exactly one worker enqueues a job. Schedules
+live in the DB (`_hull_cron`), so they survive restarts and coordinate across
+the fleet (a compare-and-set on the schedule row - no double-fire even with many
+workers). A worker (an `app.every` poller or `run_worker`) must be running to
+fire them.
+
+```lua
+jobs.init()
+jobs.handler("nightly_report", function(job) build_report(job.data) end)
+
+jobs.cron("nightly_report", "0 2 * * *", { region = "us" })   -- 02:00 UTC daily
+jobs.cron("heartbeat", "*/5 * * * *")                          -- every 5 minutes
+jobs.uncron("heartbeat")                                       -- remove a schedule
+```
+```javascript
+jobs.cron("nightly_report", "0 2 * * *", { region: "us" });
+jobs.cron("heartbeat", "*/5 * * * *");
+jobs.uncron("heartbeat");
+```
+
+- **`name`** is the schedule id and, by default, the enqueued **job type**
+  (override with `opts.type`). Re-registering the same `name` updates it.
+- **`spec`** is standard 5-field cron - `minute hour day-of-month month
+  day-of-week` - in **UTC**. Supports `*`, `n`, `a-b`, `*/step`, `a-b/step`, and
+  comma lists; `day-of-week` is `0`/`7` = Sunday. When both day-of-month and
+  day-of-week are restricted, a match on **either** fires (standard cron).
+- **`opts`**: `type`, `queue`, `priority`, `max_attempts` for the enqueued jobs.
+- **Missed ticks** (all workers were down) advance to the next future occurrence
+  - fire-once, no backfill storm.
+
 ## Handler contract
 
 `jobs.work` dispatches each claimed job to its registered handler, else the
@@ -112,14 +156,72 @@ camelCase (`runAt`, `maxAttempts`, `dedupKey`).
 ## Ops surface
 
 ```lua
+jobs.get(id)                  -- one job's full status view, or nil if it doesn't exist
 jobs.stats()                  -- { pending, running, done, dead } (opts.queue to scope)
 jobs.dead({ limit = 50 })     -- list dead-lettered jobs (newest first) for inspection
 jobs.retry(id)                -- requeue a dead job with a fresh attempt budget; false if not dead
 jobs.cancel(id)               -- delete a still-pending (e.g. delayed) job; false if not pending
 jobs.cleanup({ older_than = 7 * 86400 })   -- purge terminal (done + dead) rows past a retention age
 ```
+`jobs.get(id)` is the "did my job run?" primitive: after `local id =
+jobs.enqueue(...)`, poll `jobs.get(id).status` (`pending` → `running` → `done` /
+`dead`). It's the only way to inspect an individual job from app code -
+`_hull_jobs` is namespace-protected, so a direct query is blocked. Jobs are
+fire-and-forget (no result backend), so a job that produces output must persist
+it itself; poll `get(id)` only for the terminal *status*.
+
 `jobs.cancel` only removes a `pending` job (a delayed/scheduled one that hasn't
 started); a `running` job is mid-flight and is left to finish or dead-letter.
+
+## Compute-heavy jobs (WASM / GPU)
+
+A handler is ordinary app code, so it has full capability access - `compute.*`
+(WASM), `gpu.*`, `db.async.*`, `http.fetch`, everything the app's manifest
+grants. Offloading heavy work to a background job is a natural fit. Five things
+to get right (these are general compute-orchestration rules, not jobs-specific,
+but the visibility timeout makes the last one sharper):
+
+- **Use the async variants.** `compute.async.call` / `gpu.async.dispatch` yield
+  to the event loop; `compute.call` / `gpu.dispatch` **block** the single
+  event-loop thread for the whole computation, stalling every other concurrent
+  loop, timer, and (if the process also serves) HTTP request. With
+  `run_worker({ concurrency = N })` this matters more - one sync compute call
+  freezes the other N-1 loops.
+- **Parallelism is bounded by the thread pool, not by `concurrency`.**
+  `compute.async` / `gpu.async` / `db.async` all dispatch to one shared worker
+  pool; `concurrency = 32` firing async compute still only runs pool-size jobs on
+  hardware at once.
+- **Reference large inputs, don't inline them.** Payloads are JSON text, so a big
+  binary compute input would be base64-bloated. Store it (fs / blob / db) and put
+  a path/key in the payload; the handler loads it and feeds compute via the
+  zero-copy buffer protocol (`fs.mmap`, `WasmBuffer`).
+- **Jobs are fire-and-forget - persist the result.** There is no result backend;
+  a compute job that produces output must write it somewhere (db / blob) for the
+  enqueuer to read later. If you need the result inline, call `compute.async` in
+  the request handler instead of enqueuing a job.
+- **Heartbeat long jobs.** A job that runs longer than `visibility_timeout`
+  (default 300s) is presumed orphaned and re-run. A long WASM/GPU handler should
+  call `jobs.heartbeat(job)` periodically (at least every `visibility_timeout/2`
+  s) to extend its claim. It returns `false` once the claim has been lost (the
+  reaper already reclaimed it, or another worker re-claimed it) - the handler's
+  signal to stop and let the other runner win, avoiding a double-run:
+
+  ```lua
+  jobs.handler("transcode", function(job)
+      for _, chunk in ipairs(chunks(job.data)) do
+          process(chunk)                       -- long, per-chunk work
+          if not jobs.heartbeat(job) then      -- lost the claim -> abort
+              return jobs.DEAD
+          end
+      end
+  end)
+  ```
+  (Or just raise `visibility_timeout` at `jobs.init` if the handler can't
+  checkpoint.)
+
+Declare the modules (`hull/compute` + ship `compute/*.wasm`; `hull/gpu` +
+`manifest.gpu = true` for the sandbox grants), and `require`/`import` them -
+`compute` and `gpu` are modules, not globals.
 Run `jobs.cleanup` from `app.daily` to bound table growth; it only touches
 terminal rows, so it never races a live job. JS: `jobs.cleanup({ olderThan: ... })`.
 
@@ -149,8 +251,8 @@ terminal rows, so it never races a live job. JS: `jobs.cleanup({ olderThan: ... 
 | `backoff(attempt)` | `2^n·10s` cap 1h | retry-delay function |
 
 `jobs.work` / `jobs.run_worker` take `{ queue, batch, visibility_timeout, poll_ms }`;
-`jobs.run_worker` also accepts `{ drain, max_empty_polls }` for bounded / batch-drain
-runs and `jobs.stop()` for graceful shutdown.
+`jobs.run_worker` also accepts `{ concurrency, drain, max_empty_polls }` (N in-flight
+handlers; bounded / batch-drain runs) and `jobs.stop()` for graceful shutdown.
 
 ## Backend notes
 

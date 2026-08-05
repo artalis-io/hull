@@ -467,82 +467,6 @@ static int lua_tui_enable_kitty_kbd(lua_State *L)
     return 0;
 }
 
-/* ── Async helper ──────────────────────────────────────────────── */
-
-/* tui.async(fn) — spawn fn in a detached coroutine running on the
- * event loop. Lives under hull.tui (not hull.*) because TUI is its
- * only caller today; promote to hull.async if another consumer
- * shows up.
- *
- * The body might call async-yielding primitives (hull.sleep,
- * compute.async, http.fetch). Those primitives capture
- * `lua->active_co` at suspension time as the coroutine they should
- * resume — so we MUST set active_co (and the matching dispatch
- * bookkeeping) to the bg coroutine for the duration of its first
- * resume. Subsequent resumes happen via hl_lua_async_resume which
- * sets active_co correctly itself.
- *
- * We hold a registry ref so the new coroutine survives GC until it
- * either returns synchronously here, or yields and is later
- * cleaned up by hl_lua_async_resume's LUA_OK / error branches
- * (which already unref + decrement dispatch_depth). */
-static int lua_tui_async(lua_State *L)
-{
-    luaL_checktype(L, 1, LUA_TFUNCTION);
-
-    lua_getfield(L, LUA_REGISTRYINDEX, "__hull_lua");
-    HlLua *lua = (HlLua *)lua_touserdata(L, -1);
-    lua_pop(L, 1);
-    if (!lua)
-        return luaL_error(L, "tui.async: no runtime context");
-
-    /* Create + ref the new coroutine. */
-    lua_State *co = lua_newthread(L);
-    int co_ref = luaL_ref(L, LUA_REGISTRYINDEX);
-
-    /* Move the user function onto the new coroutine's stack. */
-    lua_pushvalue(L, 1);
-    lua_xmove(L, co, 1);
-
-    /* Save caller's dispatch state so we can restore it after the
-     * first resume (whether the bg yields or completes). */
-    lua_State *saved_co         = lua->active_co;
-    int        saved_thread_ref = lua->active_thread_ref;
-    KlConn    *saved_conn       = lua->active_conn;
-
-    lua->active_co         = co;
-    lua->active_thread_ref = co_ref;
-    lua->active_conn       = NULL;  /* bg is always detached */
-    lua->dispatch_depth++;
-
-    int nres = 0;
-    int sr   = lua_resume(co, L, 0, &nres);
-
-    if (sr == LUA_OK) {
-        /* Completed synchronously — unref + balance dispatch. */
-        luaL_unref(L, LUA_REGISTRYINDEX, co_ref);
-        lua->dispatch_depth--;
-    } else if (sr == LUA_YIELD) {
-        /* Bg yielded. The async machinery captured (co_ref, co) on
-         * the suspension's cont; cleanup happens in
-         * hl_lua_async_resume when the bg finally returns. We just
-         * restore the caller's state below. */
-    } else {
-        /* Error on first dispatch. Log + unref + balance. */
-        const char *msg = lua_tostring(co, -1);
-        log_error("[hull:tui] tui.async coroutine error: %s",
-                  msg ? msg : "(unknown)");
-        luaL_unref(L, LUA_REGISTRYINDEX, co_ref);
-        lua->dispatch_depth--;
-    }
-
-    /* Restore caller's dispatch state. */
-    lua->active_co         = saved_co;
-    lua->active_thread_ref = saved_thread_ref;
-    lua->active_conn       = saved_conn;
-    return 0;
-}
-
 /* ── Module table ──────────────────────────────────────────────── */
 
 static const luaL_Reg tui_funcs[] = {
@@ -569,7 +493,7 @@ static const luaL_Reg tui_funcs[] = {
     {"enable_focus",     lua_tui_enable_focus},
     {"enable_kitty_kbd", lua_tui_enable_kitty_kbd},
 
-    {"async",            lua_tui_async},
+    {"async",            lua_hull_async},   /* shared primitive (async.c) */
 
     {NULL, NULL}
 };

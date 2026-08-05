@@ -11,7 +11,7 @@
 -- Full surface: schema + jobs.init, enqueue, the atomic claim, per-type +
 -- catch-all handlers, the work loop (retry-with-backoff, dead-letter, and the
 -- visibility-timeout reaper), the dedicated worker (jobs.run_worker +
--- `hull jobs worker`), and the ops surface (jobs.stats / dead / retry / cancel / cleanup).
+-- `hull jobs worker`), and the ops surface (jobs.stats / dead / retry / cancel / cleanup). v1.1 adds durable cron (jobs.cron / uncron) and intra-process concurrency (run_worker concurrency=N), jobs.get(id), and jobs.heartbeat for long jobs.
 --
 -- Usage (target shape):
 --   local jobs = require("hull.jobs")
@@ -59,6 +59,8 @@ local _default = nil
 
 -- Unix ts of the last reaper sweep (throttled in jobs.work via _cfg.reap_interval).
 local _last_reap = 0
+-- Unix ts of the last cron due-check (throttled to >=1s; cron is minute-grained).
+local _last_cron = 0
 
 --- Create the `_hull_jobs` table and its indexes. Idempotent - safe to call on
 -- every boot. Uses the connection's portable identity DDL + IF-NOT-EXISTS index
@@ -115,6 +117,25 @@ function jobs.init(opts)
     db.exec([[
         CREATE UNIQUE INDEX IF NOT EXISTS idx_hull_jobs_dedup
         ON _hull_jobs(queue, dedup_key)
+    ]])
+
+    -- Durable cron schedules (jobs.cron). A worker atomically advances a due
+    -- row's next_run_at (compare-and-set) and enqueues, so exactly one worker
+    -- fires each tick across the fleet.
+    db.exec(
+        "CREATE TABLE IF NOT EXISTS _hull_cron ("
+        .. "name         VARCHAR(255) NOT NULL PRIMARY KEY,"
+        .. "spec         VARCHAR(255) NOT NULL,"
+        .. "type         VARCHAR(255) NOT NULL,"
+        .. "payload      TEXT,"
+        .. "queue        VARCHAR(255) NOT NULL DEFAULT 'default',"
+        .. "priority     INTEGER      NOT NULL DEFAULT 0,"
+        .. "max_attempts INTEGER,"
+        .. "next_run_at  INTEGER      NOT NULL,"
+        .. "last_run_at  INTEGER,"
+        .. "updated_at   INTEGER      NOT NULL)")
+    db.exec([[
+        CREATE INDEX IF NOT EXISTS idx_hull_cron_due ON _hull_cron(next_run_at)
     ]])
 
     return jobs
@@ -247,7 +268,11 @@ function jobs.claim(opts)
     end)
 
     local out = {}
-    for _, r in ipairs(rows) do out[#out + 1] = shape(r) end
+    for _, r in ipairs(rows) do
+        local j = shape(r)
+        j.claim_token = token   -- handle for jobs.heartbeat on long-running work
+        out[#out + 1] = j
+    end
     return out
 end
 
@@ -320,6 +345,176 @@ function jobs.reap(opts)
         { now, now - vt }) or 0
 end
 
+-- ── Cron (durable recurring schedules) ─────────────────────────────────────
+
+-- Broken-down UTC calendar from a unix ts (civil algorithm; no os/time-fields
+-- dependency, so it's identical across backends and platforms).
+local function civil_from_days(z)
+    z = z + 719468
+    local era = math.floor((z >= 0 and z or z - 146096) / 146097)
+    local doe = z - era * 146097
+    local yoe = math.floor((doe - math.floor(doe / 1460) + math.floor(doe / 36524)
+                - math.floor(doe / 146096)) / 365)
+    local y = yoe + era * 400
+    local doy = doe - (365 * yoe + math.floor(yoe / 4) - math.floor(yoe / 100))
+    local mp = math.floor((5 * doy + 2) / 153)
+    local d = doy - math.floor((153 * mp + 2) / 5) + 1
+    local m = mp < 10 and mp + 3 or mp - 9
+    return y + (m <= 2 and 1 or 0), m, d
+end
+
+local function decode_ts(ts)
+    local days = math.floor(ts / 86400)
+    local secs = ts - days * 86400
+    local _, month, day = civil_from_days(days)
+    return month, day, math.floor(secs / 3600), math.floor((secs % 3600) / 60),
+           (days % 7 + 4) % 7   -- dow: 0=Sunday
+end
+
+-- Parse one cron field into a set over [lo,hi]. Supports *, n, a-b, */s, a-b/s,
+-- and comma lists of those. Returns nil on any malformed / out-of-range part.
+local function parse_field(f, lo, hi)
+    local set = {}
+    for part in f:gmatch("[^,]+") do
+        local range, step = part:match("^([^/]+)/(%d+)$")
+        step = step and tonumber(step) or 1
+        range = range or part
+        local a, b
+        if range == "*" then
+            a, b = lo, hi
+        else
+            local x, y = range:match("^(%d+)%-(%d+)$")
+            if x then a, b = tonumber(x), tonumber(y) else a = tonumber(range); b = a end
+        end
+        if not a or not b or step < 1 or a < lo or b > hi or a > b then return nil end
+        local v = a
+        while v <= b do set[v] = true; v = v + step end
+    end
+    return set
+end
+
+-- Parse a 5-field cron spec (min hour dom month dow; dow 0/7=Sunday).
+local function parse_cron(spec)
+    if type(spec) ~= "string" then return nil, "cron spec must be a string" end
+    local f = {}
+    for w in spec:gmatch("%S+") do f[#f + 1] = w end
+    if #f ~= 5 then return nil, "cron spec must have 5 fields" end
+    local min   = parse_field(f[1], 0, 59)
+    local hour  = parse_field(f[2], 0, 23)
+    local dom   = parse_field(f[3], 1, 31)
+    local month = parse_field(f[4], 1, 12)
+    local dow   = parse_field(f[5], 0, 7)
+    if not (min and hour and dom and month and dow) then return nil, "invalid cron field" end
+    if dow[7] then dow[0] = true; dow[7] = nil end
+    return { min = min, hour = hour, dom = dom, month = month, dow = dow,
+             dom_star = (f[3] == "*"), dow_star = (f[5] == "*") }
+end
+
+-- Smallest unix ts strictly after `from_ts` whose UTC time matches `c`.
+-- Coarse-to-fine skips (whole day / hour / minute) keep it fast even for rare
+-- specs like "0 0 29 2 *". Returns nil if none within the search bound.
+local function cron_next(c, from_ts)
+    local t = math.floor(from_ts / 60) * 60 + 60
+    for _ = 1, 200000 do
+        local month, day, hour, minute, dow = decode_ts(t)
+        if not c.month[month] then
+            t = (math.floor(t / 86400) + 1) * 86400
+        else
+            local day_ok
+            if c.dom_star and c.dow_star then day_ok = true
+            elseif c.dom_star then day_ok = c.dow[dow]
+            elseif c.dow_star then day_ok = c.dom[day]
+            else day_ok = c.dom[day] or c.dow[dow] end
+            if not day_ok then
+                t = (math.floor(t / 86400) + 1) * 86400
+            elseif not c.hour[hour] then
+                t = (math.floor(t / 3600) + 1) * 3600
+            elseif not c.min[minute] then
+                t = t + 60
+            else
+                return t
+            end
+        end
+    end
+    return nil
+end
+
+-- Fire due schedules: compare-and-set next_run_at (multi-worker-safe on every
+-- backend), then enqueue. Missed ticks (worker down) advance to the next future
+-- occurrence - fire-once, no backfill storm. Called (throttled) from jobs.work.
+local function process_cron(now)
+    local due = db.query(
+        "SELECT name, spec, type, payload, queue, priority, max_attempts, next_run_at "
+        .. "FROM _hull_cron WHERE next_run_at <= ?", { now })
+    for _, c in ipairs(due) do
+        local parsed = parse_cron(c.spec)
+        local nxt = parsed and cron_next(parsed, now) or (now + 60)
+        local won = db.exec(
+            "UPDATE _hull_cron SET next_run_at=?, last_run_at=?, updated_at=? "
+            .. "WHERE name=? AND next_run_at=?",
+            { nxt, now, now, c.name, c.next_run_at })
+        if (won or 0) > 0 then
+            local data
+            if c.payload and c.payload ~= "" then
+                local ok, d = pcall(json.decode, c.payload)
+                if ok then data = d end
+            end
+            jobs.enqueue(c.type, data,
+                { queue = c.queue, priority = c.priority, max_attempts = c.max_attempts })
+        end
+    end
+end
+
+--- Register (or update) a durable recurring schedule. On each matching minute,
+-- exactly one worker enqueues a job (compare-and-set on the schedule row).
+-- Schedules live in the DB, so they survive restarts and coordinate across the
+-- fleet; a worker (poller or `run_worker`) must be running to fire them.
+-- @tparam string name  unique schedule id; also the enqueued job type by default
+-- @tparam string spec  5-field cron: "min hour dom month dow" (UTC; dow 0/7=Sun)
+-- @tparam[opt] any data  payload for the enqueued job
+-- @tparam[opt] table opts  { type, queue, priority, max_attempts }
+-- @treturn table the jobs module (for chaining)
+function jobs.cron(name, spec, data, opts)
+    if type(name) ~= "string" or name == "" then
+        error("jobs.cron: name must be a non-empty string")
+    end
+    local parsed, err = parse_cron(spec)
+    if not parsed then error("jobs.cron: " .. (err or "invalid cron spec")) end
+    opts = opts or {}
+    local now = time.now()
+    local nxt = cron_next(parsed, now)
+    if not nxt then error("jobs.cron: spec has no upcoming occurrence") end
+    local job_type = opts.type or name
+    local payload  = data ~= nil and json.encode(data) or nil
+    local queue    = opts.queue or "default"
+    local priority = opts.priority or 0
+    local n = db.exec(
+        "UPDATE _hull_cron SET spec=?, type=?, payload=?, queue=?, priority=?, "
+        .. "max_attempts=?, next_run_at=?, updated_at=? WHERE name=?",
+        { spec, job_type, payload, queue, priority, opts.max_attempts, nxt, now, name })
+    if (n or 0) == 0 then
+        db.exec(
+            "INSERT INTO _hull_cron (name, spec, type, payload, queue, priority, "
+            .. "max_attempts, next_run_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            { name, spec, job_type, payload, queue, priority, opts.max_attempts, nxt, now })
+    end
+    return jobs
+end
+
+--- Remove a cron schedule by name. Returns whether a schedule was removed.
+-- @tparam string name
+-- @treturn boolean
+function jobs.uncron(name)
+    return (db.exec("DELETE FROM _hull_cron WHERE name=?", { name }) or 0) > 0
+end
+
+-- Internal seams for tests / introspection; not part of the app-facing contract.
+jobs._cron_next = function(spec, from)
+    local p = parse_cron(spec)
+    return p and cron_next(p, from or time.now()) or nil
+end
+jobs._tick = function(now) process_cron(now or time.now()) end
+
 --- Claim a batch and run each job's handler, applying the outcome (done /
 -- retry-with-backoff / dead-letter). Runs the reaper first. Drive it from a
 -- timer (`app.every(1000, function() jobs.work() end)`) or a dedicated worker
@@ -336,6 +531,11 @@ function jobs.work(opts)
     if now - _last_reap >= interval then
         jobs.reap(opts)
         _last_reap = now
+    end
+    -- Fire due cron schedules (throttled; cron is minute-grained).
+    if now - _last_cron >= 1 then
+        process_cron(now)
+        _last_cron = now
     end
     local batch = jobs.claim(opts)
     for _, job in ipairs(batch) do
@@ -379,32 +579,56 @@ end
 -- event loop, so async handlers and timers keep running). Returns the total
 -- number of jobs processed when the loop exits.
 --
+-- `concurrency` (default 1) runs N independent claim-loops in this one process
+-- (via hull.async), so up to N handlers are in flight at once - real
+-- intra-process parallelism for I/O-bound handlers (each loop's `jobs.work`
+-- claims disjoint jobs via the atomic claim). Orthogonal to running K processes;
+-- they multiply.
+--
 -- Exit conditions: `jobs.stop()` (graceful), or - for bounded / batch-drain
 -- runs - `opts.drain` / `opts.max_empty_polls`. With neither, it runs until
 -- stopped or the process is signalled (an in-flight job is then reclaimed by
 -- the visibility-timeout reaper, since handlers are at-least-once).
--- @tparam[opt] table opts  { queue, batch, poll_ms, visibility_timeout,
---                            drain, max_empty_polls }
+-- @tparam[opt] table opts  { queue, batch, concurrency, poll_ms,
+--                            visibility_timeout, drain, max_empty_polls }
 -- @treturn number  total jobs processed
 function jobs.run_worker(opts)
     opts = opts or {}
     local poll_ms = opts.poll_ms or 1000
     -- drain = "exit as soon as the queue is empty" (== max_empty_polls 1).
     local max_empty = opts.max_empty_polls or (opts.drain and 1 or 0)
+    local concurrency = (opts.concurrency and opts.concurrency > 1) and opts.concurrency or 1
     _running = true
-    local processed, empty = 0, 0
-    while _running do
-        local n = jobs.work(opts)
-        processed = processed + n
-        if n == 0 then
-            empty = empty + 1
-            if max_empty > 0 and empty >= max_empty then break end
-            hull.sleep(poll_ms)
-        else
-            empty = 0
+
+    -- Shared across loops (single event-loop thread, so no data race).
+    local total, active = 0, concurrency
+    local function loop()
+        local empty = 0
+        while _running do
+            local n = jobs.work(opts)
+            total = total + n
+            if n == 0 then
+                empty = empty + 1
+                if max_empty > 0 and empty >= max_empty then break end
+                hull.sleep(poll_ms)
+            else
+                empty = 0
+            end
         end
+        active = active - 1
     end
-    return processed
+
+    if concurrency == 1 then
+        loop()
+    else
+        -- N-1 detached loops (hull.async has no join) + 1 inline. Every loop
+        -- exits on the same _running flag / drain, and `active` counts down as
+        -- each finishes, so we can wait for all to settle before returning.
+        for _ = 1, concurrency - 1 do hull.async(loop) end
+        loop()
+        while active > 0 do hull.sleep(5) end
+    end
+    return total
 end
 
 --- Count jobs by status (optionally scoped to a queue). The ops overview.
@@ -426,15 +650,53 @@ function jobs.stats(opts)
 end
 
 -- Decode an ops row into an inspection view: the handler-facing shape plus the
--- bookkeeping columns an operator needs (queue, last_error, timestamps).
+-- bookkeeping columns an operator needs (status, queue, last_error, timestamps).
 local function shape_ops(r)
     local j = shape(r)
+    j.status     = r.status
     j.queue      = r.queue
+    j.priority   = r.priority
     j.attempts   = r.attempts
+    j.run_at     = r.run_at
     j.last_error = r.last_error
     j.created_at = r.created_at
     j.updated_at = r.updated_at
     return j
+end
+
+--- Fetch a single job by id (its full status view), or nil if it doesn't exist.
+-- The only way to inspect an individual job from app code: `_hull_jobs` is in the
+-- protected namespace, so a direct query is blocked. Poll this for a terminal
+-- status (jobs are fire-and-forget; there is no result backend - a handler that
+-- produces output must persist it itself).
+-- @tparam number id
+-- @treturn table|nil  { id, type, data, status, queue, priority, attempts,
+--                       max_attempts, run_at, last_error, created_at, updated_at }
+function jobs.get(id)
+    local rows = db.query("SELECT * FROM _hull_jobs WHERE id=?", { id })
+    if not rows or #rows == 0 then return nil end
+    return shape_ops(rows[1])
+end
+
+--- Extend the claim on a job the current handler is processing (heartbeat). A
+-- handler whose work may exceed `visibility_timeout` should call this
+-- periodically (at least every visibility_timeout/2 s) so the reaper doesn't
+-- presume it orphaned and re-run it elsewhere. Bumps `claimed_at` only while
+-- THIS worker still owns the claim (guarded by the job's claim_token): returns
+-- false once the claim has been lost (already reaped / re-claimed / finished),
+-- which is the handler's signal to stop and let the other runner win.
+-- @tparam table job  the job object passed to the handler
+-- @treturn boolean  true if the claim was extended, false if it is no longer held
+function jobs.heartbeat(job)
+    if type(job) ~= "table" or job.id == nil or job.claim_token == nil then
+        return false
+    end
+    local now = time.now()
+    local n = db.exec(
+        "UPDATE _hull_jobs SET claimed_at=?, updated_at=? "
+        .. "WHERE id=? AND claim_token=? AND status='running'",
+        { now, now, job.id, job.claim_token })
+    return (n or 0) > 0
 end
 
 --- List dead-lettered jobs (status='dead'), newest first. The ops entry point

@@ -15,7 +15,7 @@
  * Full surface: schema + jobs.init, enqueue, the atomic claim, per-type +
  * catch-all handlers, the work loop (retry-with-backoff, dead-letter, and the
  * visibility-timeout reaper), the dedicated worker (jobs.runWorker +
- * `hull jobs worker`), and the ops surface (jobs.stats / dead / retry / cancel / cleanup).
+ * `hull jobs worker`), and the ops surface (jobs.stats / dead / retry / cancel / cleanup). v1.1 adds durable cron (jobs.cron / uncron) and intra-process concurrency (run_worker concurrency=N), jobs.get(id), and jobs.heartbeat for long jobs.
  *
  * @license AGPL-3.0-or-later
  */
@@ -107,6 +107,23 @@ function init(opts) {
     db.exec(
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_hull_jobs_dedup " +
         "ON _hull_jobs(queue, dedup_key)");
+
+    // Durable cron schedules (jobs.cron). A worker atomically advances a due
+    // row's next_run_at (compare-and-set) and enqueues, so exactly one worker
+    // fires each tick across the fleet.
+    db.exec(
+        "CREATE TABLE IF NOT EXISTS _hull_cron (" +
+        "name         VARCHAR(255) NOT NULL PRIMARY KEY," +
+        "spec         VARCHAR(255) NOT NULL," +
+        "type         VARCHAR(255) NOT NULL," +
+        "payload      TEXT," +
+        "queue        VARCHAR(255) NOT NULL DEFAULT 'default'," +
+        "priority     INTEGER      NOT NULL DEFAULT 0," +
+        "max_attempts INTEGER," +
+        "next_run_at  INTEGER      NOT NULL," +
+        "last_run_at  INTEGER," +
+        "updated_at   INTEGER      NOT NULL)");
+    db.exec("CREATE INDEX IF NOT EXISTS idx_hull_cron_due ON _hull_cron(next_run_at)");
 
     return jobs;
 }
@@ -217,7 +234,11 @@ function claim(opts) {
     // don't preserve the subquery's ORDER BY, so sort by priority DESC, id ASC.
     return (rows || [])
         .sort((x, y) => (y.priority || 0) - (x.priority || 0) || (x.id - y.id))
-        .map(shape);
+        .map((r) => {
+            const j = shape(r);
+            j.claimToken = token;   // handle for jobs.heartbeat on long-running work
+            return j;
+        });
 }
 
 // ── Handlers + the work loop ────────────────────────────────────────────
@@ -289,6 +310,159 @@ function reap(opts) {
         [now, now - vt]) || 0;
 }
 
+// ── Cron (durable recurring schedules) ──────────────────────────────────────
+
+// Broken-down UTC calendar from a unix ts (civil algorithm; no Date/gmtime
+// dependency, so it's identical across backends and platforms).
+function civilFromDays(z) {
+    z += 719468;
+    const era = Math.floor((z >= 0 ? z : z - 146096) / 146097);
+    const doe = z - era * 146097;
+    const yoe = Math.floor((doe - Math.floor(doe / 1460) + Math.floor(doe / 36524)
+                - Math.floor(doe / 146096)) / 365);
+    const y = yoe + era * 400;
+    const doy = doe - (365 * yoe + Math.floor(yoe / 4) - Math.floor(yoe / 100));
+    const mp = Math.floor((5 * doy + 2) / 153);
+    const d = doy - Math.floor((153 * mp + 2) / 5) + 1;
+    const m = mp < 10 ? mp + 3 : mp - 9;
+    return { year: y + (m <= 2 ? 1 : 0), month: m, day: d };
+}
+
+function decodeTs(ts) {
+    const days = Math.floor(ts / 86400);
+    const secs = ts - days * 86400;
+    const c = civilFromDays(days);
+    return { month: c.month, day: c.day, hour: Math.floor(secs / 3600),
+             minute: Math.floor((secs % 3600) / 60), dow: ((days % 7) + 4) % 7 };
+}
+
+// Parse one cron field into a Set over [lo,hi]. Supports *, n, a-b, */s, a-b/s,
+// and comma lists. Returns null on any malformed / out-of-range part.
+function parseField(f, lo, hi) {
+    const set = new Set();
+    for (const part of f.split(",")) {
+        const m = part.match(/^([^/]+)\/(\d+)$/);
+        const step = m ? parseInt(m[2], 10) : 1;
+        const range = m ? m[1] : part;
+        let a, b;
+        if (range === "*") { a = lo; b = hi; }
+        else {
+            const r = range.match(/^(\d+)-(\d+)$/);
+            if (r) { a = parseInt(r[1], 10); b = parseInt(r[2], 10); }
+            else { a = parseInt(range, 10); b = a; }
+        }
+        if (!Number.isFinite(a) || !Number.isFinite(b) || step < 1 || a < lo || b > hi || a > b) return null;
+        for (let v = a; v <= b; v += step) set.add(v);
+    }
+    return set;
+}
+
+// Parse a 5-field cron spec (min hour dom month dow; dow 0/7=Sunday).
+function parseCron(spec) {
+    if (typeof spec !== "string") return null;
+    const f = spec.trim().split(/\s+/);
+    if (f.length !== 5) return null;
+    const min = parseField(f[0], 0, 59), hour = parseField(f[1], 0, 23);
+    const dom = parseField(f[2], 1, 31), month = parseField(f[3], 1, 12);
+    const dow = parseField(f[4], 0, 7);
+    if (!min || !hour || !dom || !month || !dow) return null;
+    if (dow.has(7)) { dow.add(0); dow.delete(7); }
+    return { min, hour, dom, month, dow, domStar: f[2] === "*", dowStar: f[4] === "*" };
+}
+
+// Smallest unix ts strictly after `fromTs` whose UTC time matches `c`.
+function cronNext(c, fromTs) {
+    let t = Math.floor(fromTs / 60) * 60 + 60;
+    for (let i = 0; i < 200000; i++) {
+        const { month, day, hour, minute, dow } = decodeTs(t);
+        if (!c.month.has(month)) { t = (Math.floor(t / 86400) + 1) * 86400; continue; }
+        let dayOk;
+        if (c.domStar && c.dowStar) dayOk = true;
+        else if (c.domStar) dayOk = c.dow.has(dow);
+        else if (c.dowStar) dayOk = c.dom.has(day);
+        else dayOk = c.dom.has(day) || c.dow.has(dow);
+        if (!dayOk) { t = (Math.floor(t / 86400) + 1) * 86400; continue; }
+        if (!c.hour.has(hour)) { t = (Math.floor(t / 3600) + 1) * 3600; continue; }
+        if (!c.min.has(minute)) { t += 60; continue; }
+        return t;
+    }
+    return null;
+}
+
+// Fire due schedules: compare-and-set next_run_at (multi-worker-safe on every
+// backend), then enqueue. Missed ticks advance to the next future occurrence
+// (fire-once, no backfill). Called (throttled) from work().
+function processCron(now) {
+    const due = db.query(
+        "SELECT name, spec, type, payload, queue, priority, max_attempts, next_run_at " +
+        "FROM _hull_cron WHERE next_run_at <= ?", [now]);
+    for (const c of due) {
+        const parsed = parseCron(c.spec);
+        const nxt = parsed ? cronNext(parsed, now) : (now + 60);
+        const won = db.exec(
+            "UPDATE _hull_cron SET next_run_at=?, last_run_at=?, updated_at=? " +
+            "WHERE name=? AND next_run_at=?",
+            [nxt, now, now, c.name, c.next_run_at]);
+        if ((won || 0) > 0) {
+            let data = null;
+            if (c.payload) { try { data = json.decode(c.payload); } catch (_e) { data = null; } }
+            enqueue(c.type, data, {
+                queue: c.queue, priority: c.priority,
+                // NULL (no override) -> undefined so enqueue applies its default,
+                // not a NULL bind into the NOT-NULL max_attempts column.
+                maxAttempts: c.max_attempts === null ? undefined : c.max_attempts,
+            });
+        }
+    }
+}
+
+/**
+ * Register (or update) a durable recurring schedule. On each matching minute,
+ * exactly one worker enqueues a job (compare-and-set on the schedule row).
+ * Schedules live in the DB, so they survive restarts and coordinate across the
+ * fleet; a worker (poller or runWorker) must be running to fire them.
+ * @param {string} name  unique schedule id; also the enqueued job type by default
+ * @param {string} spec  5-field cron: "min hour dom month dow" (UTC; dow 0/7=Sun)
+ * @param {*} [data]      payload for the enqueued job
+ * @param {object} [opts] { type, queue, priority, maxAttempts }
+ * @returns {object} the jobs module (for chaining)
+ */
+function cron(name, spec, data, opts) {
+    if (typeof name !== "string" || name === "")
+        throw new Error("jobs.cron: name must be a non-empty string");
+    const parsed = parseCron(spec);
+    if (!parsed) throw new Error("jobs.cron: invalid cron spec");
+    const o = opts || {};
+    const now = time.now();
+    const nxt = cronNext(parsed, now);
+    if (nxt === null) throw new Error("jobs.cron: spec has no upcoming occurrence");
+    const jobType = o.type || name;
+    const payload = data !== undefined && data !== null ? json.encode(data) : null;
+    const queue = o.queue || "default";
+    const priority = o.priority || 0;
+    const ma = o.maxAttempts !== undefined ? o.maxAttempts : null;
+    const n = db.exec(
+        "UPDATE _hull_cron SET spec=?, type=?, payload=?, queue=?, priority=?, " +
+        "max_attempts=?, next_run_at=?, updated_at=? WHERE name=?",
+        [spec, jobType, payload, queue, priority, ma, nxt, now, name]);
+    if ((n || 0) === 0) {
+        db.exec(
+            "INSERT INTO _hull_cron (name, spec, type, payload, queue, priority, " +
+            "max_attempts, next_run_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            [name, spec, jobType, payload, queue, priority, ma, nxt, now]);
+    }
+    return jobs;
+}
+
+/**
+ * Remove a cron schedule by name. Returns whether a schedule was removed.
+ * @param {string} name
+ * @returns {boolean}
+ */
+function uncron(name) {
+    return (db.exec("DELETE FROM _hull_cron WHERE name=?", [name]) || 0) > 0;
+}
+
 /**
  * Claim a batch and run each job's handler (awaited, so sync and async handlers
  * both work), applying the outcome. Runs the reaper first. Drive from a timer
@@ -305,6 +479,8 @@ async function work(opts) {
     const interval = o.reapInterval !== undefined ? o.reapInterval : _cfg.reapInterval;
     const now = time.now();
     if (now - _lastReap >= interval) { reap(o); _lastReap = now; }
+    // Fire due cron schedules (throttled; cron is minute-grained).
+    if (now - _lastCron >= 1) { processCron(now); _lastCron = now; }
     const batch = claim(o);
     for (const job of batch) {
         const h = _handlers[job.type] || _default;
@@ -327,6 +503,8 @@ let _running = false;
 
 // Unix ts of the last reaper sweep (throttled in work() via _cfg.reapInterval).
 let _lastReap = 0;
+// Unix ts of the last cron due-check (throttled to >=1s; cron is minute-grained).
+let _lastCron = 0;
 
 /**
  * Request the running runWorker loop to stop after the current iteration.
@@ -345,32 +523,47 @@ function stop() {
  * back empty it sleeps `pollMs` (yielding to the event loop, so async handlers
  * and timers keep running). Returns the total jobs processed when the loop exits.
  *
+ * `concurrency` (default 1) runs N independent claim-loops in this one process,
+ * so up to N handlers are in flight at once - real intra-process parallelism for
+ * I/O-bound handlers (each loop's `work` claims disjoint jobs via the atomic
+ * claim). Orthogonal to running K processes; they multiply.
+ *
  * Exit conditions: `jobs.stop()` (graceful), or - for bounded / batch-drain
  * runs - `opts.drain` / `opts.maxEmptyPolls`. With neither, it runs until
  * stopped or the process is signalled (an in-flight job is then reclaimed by
  * the visibility-timeout reaper, since handlers are at-least-once).
- * @param {object} [opts]  { queue, batch, pollMs, visibilityTimeout, drain,
- *                           maxEmptyPolls }
+ * @param {object} [opts]  { queue, batch, concurrency, pollMs,
+ *                           visibilityTimeout, drain, maxEmptyPolls }
  * @returns {Promise<number>}  total jobs processed
  */
 async function runWorker(opts) {
     const o = opts || {};
     const pollMs = o.pollMs !== undefined ? o.pollMs : 1000;
     const maxEmpty = o.maxEmptyPolls !== undefined ? o.maxEmptyPolls : (o.drain ? 1 : 0);
+    const concurrency = (o.concurrency && o.concurrency > 1) ? o.concurrency : 1;
     _running = true;
-    let processed = 0, empty = 0;
-    while (_running) {
-        const n = await work(o);
-        processed += n;
-        if (n === 0) {
-            empty++;
-            if (maxEmpty > 0 && empty >= maxEmpty) break;
-            await hull.sleep(pollMs);
-        } else {
-            empty = 0;
+
+    // One independent claim-loop; returns its own processed count.
+    const loop = async () => {
+        let processed = 0, empty = 0;
+        while (_running) {
+            const n = await work(o);
+            processed += n;
+            if (n === 0) {
+                empty++;
+                if (maxEmpty > 0 && empty >= maxEmpty) break;
+                await hull.sleep(pollMs);
+            } else {
+                empty = 0;
+            }
         }
-    }
-    return processed;
+        return processed;
+    };
+
+    if (concurrency === 1) return loop();
+    // N loops in flight; Promise.all joins them (all exit on stop / drain).
+    const counts = await Promise.all(Array.from({ length: concurrency }, loop));
+    return counts.reduce((a, b) => a + b, 0);
 }
 
 /**
@@ -389,15 +582,53 @@ function stats(opts) {
 }
 
 // Decode an ops row into an inspection view: the handler-facing shape plus the
-// bookkeeping columns an operator needs (queue, lastError, timestamps).
+// bookkeeping columns an operator needs (status, queue, lastError, timestamps).
 function shapeOps(r) {
     const j = shape(r);
+    j.status = r.status;
     j.queue = r.queue;
+    j.priority = r.priority;
     j.attempts = r.attempts;
+    j.runAt = r.run_at;
     j.lastError = r.last_error;
     j.createdAt = r.created_at;
     j.updatedAt = r.updated_at;
     return j;
+}
+
+/**
+ * Fetch a single job by id (its full status view), or null if it doesn't exist.
+ * The only way to inspect an individual job from app code: `_hull_jobs` is in the
+ * protected namespace, so a direct query is blocked. Poll this for a terminal
+ * status (jobs are fire-and-forget; there is no result backend - a handler that
+ * produces output must persist it itself).
+ * @param {number} id
+ * @returns {object|null}
+ */
+function get(id) {
+    const rows = db.query("SELECT * FROM _hull_jobs WHERE id=?", [id]);
+    return rows.length ? shapeOps(rows[0]) : null;
+}
+
+/**
+ * Extend the claim on a job the current handler is processing (heartbeat). A
+ * handler whose work may exceed `visibilityTimeout` should call this
+ * periodically (at least every visibilityTimeout/2 s) so the reaper doesn't
+ * presume it orphaned and re-run it elsewhere. Bumps `claimed_at` only while
+ * THIS worker still owns the claim (guarded by the job's claimToken): returns
+ * false once the claim has been lost (already reaped / re-claimed / finished),
+ * which is the handler's signal to stop and let the other runner win.
+ * @param {object} job  the job object passed to the handler
+ * @returns {boolean}  true if the claim was extended, false if no longer held
+ */
+function heartbeat(job) {
+    if (!job || job.id === undefined || job.claimToken === undefined) return false;
+    const now = time.now();
+    const n = db.exec(
+        "UPDATE _hull_jobs SET claimed_at=?, updated_at=? " +
+        "WHERE id=? AND claim_token=? AND status='running'",
+        [now, now, job.id, job.claimToken]);
+    return (n || 0) > 0;
 }
 
 /**
@@ -467,10 +698,18 @@ function cleanup(opts) {
     return db.exec(sql, params) || 0;
 }
 
+// Internal seams for tests / introspection; not part of the app-facing contract.
+function _cronNext(spec, from) {
+    const p = parseCron(spec);
+    return p ? cronNext(p, from !== undefined ? from : time.now()) : null;
+}
+function _tick(now) { processCron(now !== undefined ? now : time.now()); }
+
 export const jobs = {
     init, enqueue, claim, handler, default: setDefault, work, reap, stats,
-    runWorker, stop, dead, retry, cancel, cleanup, RETRY, DEAD, DISCARD, _config: _cfg,
+    runWorker, stop, get, heartbeat, dead, retry, cancel, cleanup, cron, uncron,
+    RETRY, DEAD, DISCARD, _config: _cfg, _cronNext, _tick,
 };
 export { init, enqueue, claim, handler, work, reap, stats, runWorker, stop,
-         dead, retry, cancel, cleanup };
+         get, heartbeat, dead, retry, cancel, cleanup, cron, uncron };
 export default jobs;
