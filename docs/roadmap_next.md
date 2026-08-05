@@ -3618,6 +3618,18 @@ isn't the artifact CI built" surprise.
 
 ## 4. Background job queue (`hull.jobs`)
 
+**Status: designed (2026-08-05).** Full design committed in
+[`docs/jobs_design.md`](jobs_design.md): DB-backend-agnostic (SQLite / Postgres
+/ MySQL via the `HlDbBackend` capability surface + one additive
+`supports_skip_locked` flag), transactionally coupled `enqueue` (joins the
+caller's `db.batch`, no dual-write), a concurrency-safe atomic claim (SKIP
+LOCKED on Postgres/MySQL, serialized on SQLite, `claim_token`-disambiguated),
+both execution models (in-process `app.every` poller + a dedicated `hull jobs
+worker` process), per-type handlers + optional catch-all, and v1 features
+delay/`run_at`, priority, named queues, dedup. At-least-once with a
+visibility-timeout reaper + dead-letter. The API sketch below is superseded by
+the design doc's surface.
+
 **Priority:** High (bumped from Low after the §1.5.c HTMX surface
 landed). The existing transactional outbox + inbox patterns cover
 reliable side-effect delivery for *outgoing* events, and `app.every` /
