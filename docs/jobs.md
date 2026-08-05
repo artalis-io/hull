@@ -87,6 +87,32 @@ processes scale those better).
 app.main(function() jobs.init(); jobs.run_worker({ concurrency = 8 }) end)
 ```
 
+**Multiple queues.** A worker can drain several named queues via `opts.queues`
+(on `claim`, `work`, or `run_worker`). A **list** is strict priority - each queue
+tried in order, claiming from the first with ready work (higher queues drain
+first). A **map** is weighted fairness - a weighted-random draw with every queue
+still a fallback, so none starves and a homogeneous fleet is fair fleet-wide.
+
+```lua
+jobs.run_worker({ queues = { "critical", "default", "low" } })  -- strict priority
+jobs.run_worker({ queues = { critical = 3, default = 2, low = 1 } })  -- weighted
+```
+
+## Lifecycle hooks
+
+`jobs.on(event, fn)` registers an **in-process** listener fired synchronously by
+`jobs.work`, in the worker that processed the job - for observability, metrics,
+and side-effects. Events: `completed` (`info.result`), `retried`
+(`info = { error, attempt }`, a failed attempt that will retry), `dead`
+(`info.error`; exhausted / `jobs.DEAD` / no handler). Listeners are isolated (a
+throwing hook can't derail the loop); keep them fast and synchronous. These are
+per-worker (not fleet-wide - durable cross-process eventing is a separate epic).
+
+```lua
+jobs.on("completed", function(job, info) metrics.inc("jobs.done", { type = job.type }) end)
+jobs.on("dead",      function(job, info) log.error("job died: " .. info.error) end)
+```
+
 ## Recurring jobs (cron)
 
 `jobs.cron(name, spec, data?, opts?)` registers a **durable** recurring
@@ -117,6 +143,10 @@ jobs.uncron("heartbeat");
   comma lists; `day-of-week` is `0`/`7` = Sunday. When both day-of-month and
   day-of-week are restricted, a match on **either** fires (standard cron).
 - **`opts`**: `type`, `queue`, `priority`, `max_attempts` for the enqueued jobs.
+- **`opts.tz`**: evaluate the spec in a **fixed offset** east of UTC -
+  `"+02:00"`, `"-0530"`, or minutes as a number (`120`). IANA zone names
+  (`"Europe/Budapest"`) are rejected: a DST-correct named zone needs a tz
+  database Hull can't read inside the sandbox. Default is UTC.
 - **Missed ticks** (all workers were down) advance to the next future occurrence
   - fire-once, no backfill storm.
 
@@ -211,18 +241,38 @@ jobs.enqueue(type, data, {
     queue        = "emails",   -- named queue (default "default")
     priority     = 10,         -- higher runs first (default 0)
     delay        = 60,         -- seconds until claimable (run_at = now + delay)
+    at           = 1735689600, -- absolute unix ts to run at (wins over run_at/delay)
     run_at       = 1735689600, -- absolute unix ts (overrides delay)
     max_attempts = 5,          -- override the module default (25)
     dedup_key    = "order-42", -- idempotent enqueue: a duplicate un-run key is a no-op
+    throttle     = 60,         -- windowed: skip if a (queue,type) job was made in the last N s
 })
 ```
-Returns the new job id, or `nil` when a `dedup_key` collapsed it. JS keys are
-camelCase (`runAt`, `maxAttempts`, `dedupKey`).
+Returns the new job id, or `nil` when a `dedup_key` collapsed it (or a
+`throttle` window suppressed it). JS keys are camelCase (`runAt`, `maxAttempts`,
+`dedupKey`). `throttle` is best-effort (keyed by `(queue, type)`, no unique
+constraint - use `dedup_key` for exact-once).
+
+**Bulk enqueue.** `jobs.enqueue_many(items)` (`enqueueMany` in JS) inserts a list
+of `{ type, data, opts }` in **one transaction** - a single commit/fsync instead
+of one per job. Returns ids in input order (`nil` for a deduped item). Every
+`opts` field works except `depends_on` (bulk is for independent jobs; build
+graphs with `enqueue`).
+
+```lua
+local ids = jobs.enqueue_many({
+    { type = "email", data = { to = "a@b.c" } },
+    { type = "email", data = { to = "d@e.f" }, opts = { priority = 5 } },
+})
+```
 
 ## Ops surface
 
 ```lua
 jobs.get(id)                  -- one job's full status view, or nil if it doesn't exist
+jobs.result(id)               -- terminal result: { status, result?, error? }, or nil if unknown
+jobs.await(id, { timeout = 5000 })   -- yield until the job is terminal, then return jobs.result
+jobs.progress(id, 42)         -- set a running job's progress 0-100 (surfaced by get(id).progress)
 jobs.stats()                  -- { pending, running, done, dead } (opts.queue to scope)
 jobs.dead({ limit = 50 })     -- list dead-lettered jobs (newest first) for inspection
 jobs.retry(id)                -- requeue a dead job with a fresh attempt budget; false if not dead
@@ -238,9 +288,17 @@ finish, and `enqueue` still works) - durable and fleet-wide, taking effect withi
 `jobs.get(id)` is the "did my job run?" primitive: after `local id =
 jobs.enqueue(...)`, poll `jobs.get(id).status` (`pending` → `running` → `done` /
 `dead`). It's the only way to inspect an individual job from app code -
-`_hull_jobs` is namespace-protected, so a direct query is blocked. Jobs are
-fire-and-forget (no result backend), so a job that produces output must persist
-it itself; poll `get(id)` only for the terminal *status*.
+`_hull_jobs` is namespace-protected, so a direct query is blocked.
+
+**Result backend.** A handler's non-nil return value is persisted, so
+`jobs.result(id)` returns `{ status, result?, error? }` for any job (a `done`
+job carries its return value, a `dead` job its error) - `nil` if the id is
+unknown or already purged. `jobs.await(id, { timeout, interval })` yields to the
+event loop and polls until the job is terminal (or the timeout elapses), then
+returns the same shape - the "enqueue then wait for the value" pattern. Results
+live as long as the job row (governed by `jobs.cleanup`), so read before purge.
+`jobs.progress(id, pct)` lets a long handler publish 0-100 progress, surfaced on
+`jobs.get(id).progress`.
 
 `jobs.cancel` only removes a `pending` job (a delayed/scheduled one that hasn't
 started); a `running` job is mid-flight and is left to finish or dead-letter.
