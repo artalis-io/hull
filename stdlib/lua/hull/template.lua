@@ -49,6 +49,15 @@ local function validate_ident(s, context)
     if not s:match("^[%a_][%w_]*$") then
         error("invalid identifier in template " .. (context or "expression") .. ": " .. s)
     end
+    -- Must NOT start with `__` (parity with the JS sibling): those names are
+    -- reserved for codegen helpers (`__p` output buffer, `__d` data, `__e`
+    -- escape, `__f` filters). A template var like `{% for __p in items %}`
+    -- would otherwise pass validation and shadow the output accumulator,
+    -- silently corrupting the render.
+    if s:sub(1, 2) == "__" then
+        error("identifier in template " .. (context or "expression")
+              .. " cannot start with '__' (reserved): " .. s)
+    end
 end
 
 -- ── HTML escape ──────────────────────────────────────────────────────

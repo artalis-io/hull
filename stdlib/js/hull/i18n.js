@@ -38,6 +38,12 @@ function deepGet(obj, key) {
 function interpolate(str, params) {
     if (!params) return str;
     return str.replace(/\$\{(\w+)\}/g, function(match, key) {
+        // Own-property lookup only: `${constructor}` / `${toString}` /
+        // `${__proto__}` must echo the literal placeholder, not resolve to an
+        // Object.prototype member. This matches the Lua sibling (a plain-table
+        // `params[k]` has no prototype chain, so a missing key returns nil ->
+        // the literal `${key}`).
+        if (!Object.prototype.hasOwnProperty.call(params, key)) return match;
         const v = params[key];
         if (v === undefined || v === null) return match;
         return String(v);

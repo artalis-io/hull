@@ -746,6 +746,11 @@ function handleMagicLink(req, res) {
         if (!_state.magicLinkAutoSignup) return genericOk(res);
         const uid = _state.userCreate(body.email, null);
         user = _state.userGet(uid);
+        // Guard the create->get race / adapter inconsistency: a nil user here
+        // would mint a magic-link token with sub=null and then throw in
+        // sendEmail(user...). Stay enumeration-safe (same shape as the
+        // unknown-email path above) rather than 500.
+        if (!user) return genericOk(res);
     }
     const token = issueToken(userId(user), ACTIONS.magic_link,
         _state.magicLinkTtl);
@@ -924,8 +929,11 @@ function handleEmailChange(req, res) {
         user, link, token, new_email: body.new_email,
     });
     // Defense in depth: notify the OLD address with a revoke link
-    // if templates.email_change_notify is provided.
-    if (_state.templates.email_change_notify) {
+    // if templates.email_change_notify is provided. Guard `user` (nil only on
+    // a pathological row-deleted-mid-request race): the confirm email above
+    // passes it through a nil-safe template ctx, but user.email below is a
+    // hard deref.
+    if (user && _state.templates.email_change_notify) {
         const revokeTok = issueToken(uid, ACTIONS.email_change_revoke,
             _state.emailChangeTtl);
         const revokeUrl = origin + _state.prefix
@@ -1347,6 +1355,9 @@ function sendMagicLink(email, magicUrlPrefix) {
         if (!_state.magicLinkAutoSignup) return;
         const uid = _state.userCreate(email, null);
         user = _state.userGet(uid);
+        // create->get race guard (see handleMagicLink): a nil user would mint
+        // a sub=null token and throw in sendEmail.
+        if (!user) return;
     }
     const uid = userId(user);
     const token = issueToken(uid, ACTIONS.magic_link, _state.magicLinkTtl);

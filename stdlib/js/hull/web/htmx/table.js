@@ -87,7 +87,14 @@ function render(rows, schema, opts) {
                 const value = row[col.name];
                 let cellHtml;
                 if (col.render) {
+                    // CONTRACT: a custom render owns its own escaping; its
+                    // return is spliced into <td> RAW (see docs/htmx_widgets.md).
+                    // If a column shows user-controlled data, the render fn MUST
+                    // escape it. Defensive net: a non-string return (a bare
+                    // value from a naive `render:(v)=>v`) is routed through esc
+                    // so it can't inject.
                     cellHtml = col.render(value, row);
+                    if (typeof cellHtml !== "string") cellHtml = esc(cellHtml);
                 } else if (col.editable) {
                     if (!opts.editUrlFor) {
                         throw new Error("table.render: opts.editUrlFor is required "

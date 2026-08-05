@@ -734,10 +734,23 @@ local function compose_features(opts, tmpdir, platform_lib, is_cosmo, compute_fi
             -- a SQLite-less (HL_SQLITE_FEATURE=1) base does not. nm may be absent
             -- (or the base unreadable); default to "has sqlite" so we never
             -- wrongly compose onto a SQLite-full base.
+            --
+            -- MUST mirror fcompose.plan_mandatory's base_lacks() musl short-circuit:
+            -- the musl base is always the SLIM base (build_musl_platform.sh runs
+            -- `make platform`, which is SQLite-less), and a cross-libc `nm` (a
+            -- macOS host reading a Linux/musl ELF archive) is unreliable - it can
+            -- return nil/empty and leave base_has_sqlite=true. Without this guard
+            -- the per-runtime udf BRIDGE (composed via base_lacks, which DOES
+            -- special-case musl) would compose while the ENGINE here would not,
+            -- and the app link fails on unresolved sqlite3_*/hl_db_backend_sqlite.
             local base_has_sqlite = true
-            local nm_out = tool.spawn_read({ "nm", platform_lib })
-            if nm_out and not nm_out:find("hl_db_backend_sqlite") then
+            if opts.musl_dir then
                 base_has_sqlite = false
+            else
+                local nm_out = tool.spawn_read({ "nm", platform_lib })
+                if nm_out and not nm_out:find("hl_db_backend_sqlite", 1, true) then
+                    base_has_sqlite = false
+                end
             end
             if not base_has_sqlite then
                 opts.with = opts.with or {}
