@@ -15,7 +15,7 @@
  * Full surface: schema + jobs.init, enqueue, the atomic claim, per-type +
  * catch-all handlers, the work loop (retry-with-backoff, dead-letter, and the
  * visibility-timeout reaper), the dedicated worker (jobs.runWorker +
- * `hull jobs worker`), and the ops surface (jobs.stats / dead / retry / cancel / cleanup). v1.1 adds durable cron (jobs.cron / uncron) and intra-process concurrency (run_worker concurrency=N), jobs.get(id), jobs.heartbeat for long jobs, fleet-wide rate limiting (jobs.limit), queue pause/resume/purge, and workflows (depends_on + result passing). v1.5 adds the standalone result backend (jobs.result / jobs.await), multi-queue draining (opts.queues, strict list or weighted map), bulk enqueue (jobs.enqueueMany), in-process lifecycle hooks (jobs.on completed/retried/dead), and polish (absolute at, jobs.progress, throttle window, fixed-offset tz cron). Durable workflows (jobs.workflow / jobs.start / ctx.step / ctx.sleep / ctx.wait_signal / jobs.signal, Phase 1) add crash-safe workflow-as-code: step memoization, durable timers, external signals, and saga compensation - a workflow instance is a job that rides the same claim/reaper/retry/result machinery (docs/jobs_durable_execution_design.md).
+ * `hull jobs worker`), and the ops surface (jobs.stats / dead / retry / cancel / cleanup). v1.1 adds durable cron (jobs.cron / uncron) and intra-process concurrency (run_worker concurrency=N), jobs.get(id), jobs.heartbeat for long jobs, fleet-wide rate limiting (jobs.limit), queue pause/resume/purge, and workflows (depends_on + result passing). v1.5 adds the standalone result backend (jobs.result / jobs.await), multi-queue draining (opts.queues, strict list or weighted map), bulk enqueue (jobs.enqueueMany), in-process lifecycle hooks (jobs.on completed/retried/dead), and polish (absolute at, jobs.progress, throttle window, fixed-offset tz cron). Durable workflows (jobs.workflow / jobs.start / ctx.step / ctx.sleep / ctx.wait_signal / jobs.signal, Phase 1) add crash-safe workflow-as-code: step memoization, durable timers, external signals, and saga compensation - a workflow instance is a job that rides the same claim/reaper/retry/result machinery (docs/jobs_durable_execution_design.md). Observability: jobs.metrics() (DB-derived per-queue gauges + backlog age) and W3C trace-context propagation (enqueue { trace } -> job.trace).
  *
  * @license AGPL-3.0-or-later
  */
@@ -113,7 +113,8 @@ function init(opts) {
         "last_error   TEXT," +
         "created_at   INTEGER      NOT NULL," +
         "updated_at   INTEGER      NOT NULL," +
-        "progress     INTEGER      NOT NULL DEFAULT 0)");
+        "progress     INTEGER      NOT NULL DEFAULT 0," +
+        "trace_context VARCHAR(255))");
 
     // Claim scan path: ready-to-run pending jobs in a queue, by priority then id.
     db.exec(
@@ -164,6 +165,7 @@ function init(opts) {
             db.exec(`ALTER TABLE ${tbl} ADD COLUMN ${coldef}`);
     };
     ensureColumn("_hull_jobs", "progress", "progress INTEGER NOT NULL DEFAULT 0");
+    ensureColumn("_hull_jobs", "trace_context", "trace_context VARCHAR(255)");
     ensureColumn("_hull_cron", "tz_offset", "tz_offset INTEGER NOT NULL DEFAULT 0");
 
     // Fleet-wide rate-limit counters (jobs.limit). One row per limited queue;
@@ -353,6 +355,8 @@ function enqueue(jobType, data, opts) {
     const cols = ["queue", "type", "payload", "priority", "max_attempts",
                   "run_at", "dedup_key", "created_at", "updated_at"];
     if (hasDeps) { cols.push("status"); vals.push("blocked"); }
+    // Optional W3C trace context, carried through to the handler as job.trace.
+    if (o.trace !== undefined && o.trace !== null) { cols.push("trace_context"); vals.push(o.trace); }
     let id;
     if (o.dedupKey !== undefined && o.dedupKey !== null) {
         const n = db.insertIfAbsent("_hull_jobs", ["queue", "dedup_key"], cols, vals);
@@ -417,7 +421,8 @@ function shape(row) {
         try { data = json.decode(row.payload); } catch (_e) { data = null; }
     }
     return { id: row.id, type: row.type, data,
-             attempts: row.attempts, maxAttempts: row.max_attempts };
+             attempts: row.attempts, maxAttempts: row.max_attempts,
+             trace: row.trace_context };   // trace-context propagation (null if unset)
 }
 
 /**
@@ -587,7 +592,7 @@ function claimOne(queue, batch) {
             "attempts=attempts+1, updated_at=? WHERE id IN (" +
             "SELECT id FROM _hull_jobs WHERE queue=? AND status='pending' AND run_at<=? " +
             "ORDER BY priority DESC, id LIMIT ? " + lock + ") " +
-            "RETURNING id, type, payload, priority, attempts, max_attempts",
+            "RETURNING id, type, payload, priority, attempts, max_attempts, trace_context",
             [token, now, now, queue, now, batch]);
     } else if (d.supportsSkipLocked) {
         db.batch(() => {
@@ -604,7 +609,7 @@ function claimOne(queue, batch) {
                 params);
         });
         rows = db.query(
-            "SELECT id, type, payload, priority, attempts, max_attempts FROM _hull_jobs WHERE claim_token=?",
+            "SELECT id, type, payload, priority, attempts, max_attempts, trace_context FROM _hull_jobs WHERE claim_token=?",
             [token]);
     } else {
         rows = db.query(
@@ -612,7 +617,7 @@ function claimOne(queue, batch) {
             "attempts=attempts+1, updated_at=? WHERE id IN (" +
             "SELECT id FROM _hull_jobs WHERE queue=? AND status='pending' AND run_at<=? " +
             "ORDER BY priority DESC, id LIMIT ?) " +
-            "RETURNING id, type, payload, priority, attempts, max_attempts",
+            "RETURNING id, type, payload, priority, attempts, max_attempts, trace_context",
             [token, now, now, queue, now, batch]);
     }
 
@@ -1120,6 +1125,41 @@ function stats(opts) {
     return s;
 }
 
+/**
+ * A DB-derived metrics snapshot for dashboards / a /metrics route. Pull-based (no
+ * exporter, no process counters), so it is correct across a whole fleet of
+ * workers. Returns `{ queues: { <queue>: { pending, running, waiting, blocked,
+ * dead, oldestPendingAge }, ... }, totals: { ... } }`. `oldestPendingAge` is
+ * `now - createdAt` of the oldest READY (run_at<=now) pending job in the queue -
+ * the actionable backlog age. `opts.queue` scopes to one queue. Latency
+ * percentiles and throughput are added by the attempt-history pillar (opt-in).
+ * @param {object} [opts]  { queue }
+ * @returns {object}
+ */
+function metrics(opts) {
+    const o = opts || {};
+    const now = time.now();
+    const LIVE = { pending: 1, running: 1, waiting: 1, blocked: 1, dead: 1 };
+    const newBucket = () => ({ pending: 0, running: 0, waiting: 0, blocked: 0, dead: 0 });
+    const queues = {}, totals = newBucket();
+    const rows = o.queue
+        ? db.query("SELECT queue, status, COUNT(*) AS n FROM _hull_jobs WHERE queue=? GROUP BY queue, status", [o.queue])
+        : db.query("SELECT queue, status, COUNT(*) AS n FROM _hull_jobs GROUP BY queue, status");
+    for (const r of rows) {
+        const q = queues[r.queue] || (queues[r.queue] = newBucket());
+        if (LIVE[r.status]) { q[r.status] = (q[r.status] || 0) + r.n; totals[r.status] += r.n; }
+    }
+    // Oldest ready-to-run pending job per queue -> backlog age.
+    const ages = o.queue
+        ? db.query("SELECT queue, MIN(created_at) AS oldest FROM _hull_jobs WHERE status='pending' AND run_at<=? AND queue=? GROUP BY queue", [now, o.queue])
+        : db.query("SELECT queue, MIN(created_at) AS oldest FROM _hull_jobs WHERE status='pending' AND run_at<=? GROUP BY queue", [now]);
+    for (const r of ages) {
+        const q = queues[r.queue];
+        if (q && r.oldest != null) q.oldestPendingAge = now - r.oldest;
+    }
+    return { queues, totals };
+}
+
 // Decode an ops row into an inspection view: the handler-facing shape plus the
 // bookkeeping columns an operator needs (status, queue, lastError, timestamps).
 function shapeOps(r) {
@@ -1586,14 +1626,14 @@ function _tick(now) { processCron(now !== undefined ? now : time.now()); }
 
 export const jobs = {
     init, enqueue, enqueueMany, claim, handler, default: setDefault, on, work, reap,
-    stats, runWorker, stop, get, result, await: await_, progress, heartbeat, limit,
+    stats, runWorker, stop, get, result, await: await_, progress, heartbeat, limit, metrics,
     pause, resume, purge,
     workflow, start, signal, workflowStatus,
     dead, retry, cancel, cleanup, cron, uncron,
     RETRY, DEAD, DISCARD, _config: _cfg, _cronNext, _tick,
 };
 export { init, enqueue, enqueueMany, claim, handler, on, work, reap, stats,
-         runWorker, stop, get, result, progress, heartbeat, limit, pause, resume,
+         runWorker, stop, get, result, progress, heartbeat, limit, metrics, pause, resume,
          purge, workflow, start, signal, workflowStatus,
          dead, retry, cancel, cleanup, cron, uncron };
 export default jobs;
