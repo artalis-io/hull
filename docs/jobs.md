@@ -164,6 +164,41 @@ jobs.cleanup({ older_than = 7 * 86400 })   -- purge terminal (done + dead) rows 
 ```
 `jobs.cancel` only removes a `pending` job (a delayed/scheduled one that hasn't
 started); a `running` job is mid-flight and is left to finish or dead-letter.
+
+## Compute-heavy jobs (WASM / GPU)
+
+A handler is ordinary app code, so it has full capability access - `compute.*`
+(WASM), `gpu.*`, `db.async.*`, `http.fetch`, everything the app's manifest
+grants. Offloading heavy work to a background job is a natural fit. Five things
+to get right (these are general compute-orchestration rules, not jobs-specific,
+but the visibility timeout makes the last one sharper):
+
+- **Use the async variants.** `compute.async.call` / `gpu.async.dispatch` yield
+  to the event loop; `compute.call` / `gpu.dispatch` **block** the single
+  event-loop thread for the whole computation, stalling every other concurrent
+  loop, timer, and (if the process also serves) HTTP request. With
+  `run_worker({ concurrency = N })` this matters more - one sync compute call
+  freezes the other N-1 loops.
+- **Parallelism is bounded by the thread pool, not by `concurrency`.**
+  `compute.async` / `gpu.async` / `db.async` all dispatch to one shared worker
+  pool; `concurrency = 32` firing async compute still only runs pool-size jobs on
+  hardware at once.
+- **Reference large inputs, don't inline them.** Payloads are JSON text, so a big
+  binary compute input would be base64-bloated. Store it (fs / blob / db) and put
+  a path/key in the payload; the handler loads it and feeds compute via the
+  zero-copy buffer protocol (`fs.mmap`, `WasmBuffer`).
+- **Jobs are fire-and-forget - persist the result.** There is no result backend;
+  a compute job that produces output must write it somewhere (db / blob) for the
+  enqueuer to read later. If you need the result inline, call `compute.async` in
+  the request handler instead of enqueuing a job.
+- **Mind the visibility timeout.** A compute job that runs longer than
+  `visibility_timeout` (default 300s) is presumed orphaned and re-run. For
+  multi-minute WASM/GPU work, raise `visibility_timeout` accordingly (a per-job
+  heartbeat is a tracked follow-up).
+
+Declare the modules (`hull/compute` + ship `compute/*.wasm`; `hull/gpu` +
+`manifest.gpu = true` for the sandbox grants), and `require`/`import` them -
+`compute` and `gpu` are modules, not globals.
 Run `jobs.cleanup` from `app.daily` to bound table growth; it only touches
 terminal rows, so it never races a live job. JS: `jobs.cleanup({ olderThan: ... })`.
 
