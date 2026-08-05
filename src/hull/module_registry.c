@@ -190,7 +190,8 @@ static const HlModuleSpec REGISTRY[] = {
         .name = "hull/jobs",
         .api_major = 1, .intrinsic = 0, .pure = 0,
         .required_caps = 0,
-        .deps = {"hull/db", "hull/time", "hull/json", 0},
+        /* crypto: the per-claim token nonce (crypto.random). */
+        .deps = {"hull/db", "hull/time", "hull/json", "hull/crypto", 0},
     },
 
     /* ── Pure data codec ──────────────────────────────────────────── */

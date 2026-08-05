@@ -21,8 +21,8 @@
 import { db as dbModule } from "hull:db";
 import { time } from "hull:time";
 import { json } from "hull:json";
+import { crypto } from "hull:crypto";
 const db = dbModule.default();
-void time; void json;   // reserved for enqueue/claim payload (Phase 2)
 
 // Outcome sentinels a handler returns (consumed in Phase 3). Frozen objects so
 // a handler can't collide with them by returning ordinary data.
@@ -98,6 +98,115 @@ function init(opts) {
     return jobs;
 }
 
-export const jobs = { init, RETRY, DEAD, DISCARD, _config: _cfg };
-export { init };
+/**
+ * Enqueue a job. A plain INSERT, so calling it inside a `db.batch()` commits
+ * the job atomically with the business row (transactional coupling).
+ *
+ * @param {string} jobType  handler dispatch key (non-empty)
+ * @param {*} [data]        JSON-encodable payload (reaches the handler as job.data)
+ * @param {object} [opts]   { queue, priority, delay, runAt, maxAttempts, dedupKey }
+ * @returns {number|null}   the new job id, or null when a dedupKey collapsed it
+ */
+function enqueue(jobType, data, opts) {
+    if (typeof jobType !== "string" || jobType === "")
+        throw new Error("jobs.enqueue: type must be a non-empty string");
+    const o = opts || {};
+    const now = time.now();
+    const runAt = o.runAt !== undefined ? o.runAt : now + (o.delay || 0);
+    const vals = [
+        o.queue || "default",
+        jobType,
+        data !== undefined && data !== null ? json.encode(data) : null,
+        o.priority || 0,
+        o.maxAttempts !== undefined ? o.maxAttempts : _cfg.maxAttempts,
+        runAt,
+        o.dedupKey !== undefined ? o.dedupKey : null,
+        now, now,
+    ];
+    const cols = ["queue", "type", "payload", "priority", "max_attempts",
+                  "run_at", "dedup_key", "created_at", "updated_at"];
+    if (o.dedupKey !== undefined && o.dedupKey !== null) {
+        const n = db.insertIfAbsent("_hull_jobs", ["queue", "dedup_key"], cols, vals);
+        if (n && n > 0) return db.lastId();
+        return null;   // an un-run job with this (queue, dedupKey) already exists
+    }
+    db.exec(
+        "INSERT INTO _hull_jobs (queue, type, payload, priority, max_attempts, " +
+        "run_at, dedup_key, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        vals);
+    return db.lastId();
+}
+
+// Decode a claimed DB row into a handler-facing job (payload -> data).
+function shape(row) {
+    let data = null;
+    if (row.payload !== undefined && row.payload !== null && row.payload !== "") {
+        try { data = json.decode(row.payload); } catch (_e) { data = null; }
+    }
+    return { id: row.id, type: row.type, data,
+             attempts: row.attempts, maxAttempts: row.max_attempts };
+}
+
+/**
+ * Atomically claim up to `batch` ready jobs from a queue, marking them
+ * `running`. Concurrency-safe across workers and processes (SKIP LOCKED on
+ * Postgres/MySQL, serialized on SQLite). Each ready job is claimed by exactly
+ * one caller. Low-level: `jobs.work` (Phase 3) wraps this.
+ *
+ * @param {object} [opts]  { queue = "default", batch = 10 }
+ * @returns {Array}  claimed jobs { id, type, data, attempts, maxAttempts }
+ */
+function claim(opts) {
+    const o = opts || {};
+    const queue = o.queue || "default";
+    const batch = o.batch || 10;
+    const now = time.now();
+    const token = crypto.base64urlEncode(crypto.random(16));
+    const d = db.dialect;
+
+    let rows;
+    if (d.supportsSkipLocked && d.supportsReturning) {
+        rows = db.query(
+            "UPDATE _hull_jobs SET status='running', claim_token=?, claimed_at=?, " +
+            "attempts=attempts+1, updated_at=? WHERE id IN (" +
+            "SELECT id FROM _hull_jobs WHERE queue=? AND status='pending' AND run_at<=? " +
+            "ORDER BY priority DESC, id LIMIT ? FOR UPDATE SKIP LOCKED) " +
+            "RETURNING id, type, payload, priority, attempts, max_attempts",
+            [token, now, now, queue, now, batch]);
+    } else if (d.supportsSkipLocked) {
+        db.batch(() => {
+            const sel = db.query(
+                "SELECT id FROM _hull_jobs WHERE queue=? AND status='pending' AND run_at<=? " +
+                "ORDER BY priority DESC, id LIMIT ? FOR UPDATE SKIP LOCKED",
+                [queue, now, batch]);
+            if (sel.length === 0) return;
+            const ph = [], params = [token, now, now];
+            for (const r of sel) { ph.push("?"); params.push(r.id); }
+            db.exec(
+                "UPDATE _hull_jobs SET status='running', claim_token=?, claimed_at=?, " +
+                "attempts=attempts+1, updated_at=? WHERE id IN (" + ph.join(",") + ")",
+                params);
+        });
+        rows = db.query(
+            "SELECT id, type, payload, priority, attempts, max_attempts FROM _hull_jobs WHERE claim_token=?",
+            [token]);
+    } else {
+        rows = db.query(
+            "UPDATE _hull_jobs SET status='running', claim_token=?, claimed_at=?, " +
+            "attempts=attempts+1, updated_at=? WHERE id IN (" +
+            "SELECT id FROM _hull_jobs WHERE queue=? AND status='pending' AND run_at<=? " +
+            "ORDER BY priority DESC, id LIMIT ?) " +
+            "RETURNING id, type, payload, priority, attempts, max_attempts",
+            [token, now, now, queue, now, batch]);
+    }
+
+    // Priority-correct order within the batch: RETURNING / the token read-back
+    // don't preserve the subquery's ORDER BY, so sort by priority DESC, id ASC.
+    return (rows || [])
+        .sort((x, y) => (y.priority || 0) - (x.priority || 0) || (x.id - y.id))
+        .map(shape);
+}
+
+export const jobs = { init, enqueue, claim, RETRY, DEAD, DISCARD, _config: _cfg };
+export { init, enqueue, claim };
 export default jobs;
