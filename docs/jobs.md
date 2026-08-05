@@ -376,9 +376,18 @@ pull-based (no process counters), so it's correct across a whole fleet;
 `oldest_pending_age` is the backlog age of the oldest ready pending job.
 `enqueue(..., { trace })` carries a W3C `traceparent` through to the handler as
 `job.trace` (and into a durable workflow's `ctx.trace`), so app-created spans
-link across the async boundary. (Latency percentiles, throughput, and a per-job
-attempt timeline arrive with the opt-in attempt-history pillar - see
-[docs/jobs_observability_design.md](jobs_observability_design.md).)
+link across the async boundary.
+
+**Attempt history (opt-in).** `jobs.init({ history = true })` (or
+`{ history = { queues = {...} } }` for specific queues) records one row per
+attempt. `jobs.history(id)` then returns the **timeline** -
+`{ attempt_no, started_ms, finished_ms, duration_ms, wait_ms, outcome, error }`
+per attempt, oldest first - and `jobs.metrics()` gains `latency`
+(`wait_ms` = queue latency, `run_ms` = execution, each as `{ p50, p95, p99 }`)
+and `throughput` (`done_per_sec` / `dead_per_sec`) over the last `opts.window`
+seconds (default 300). It costs one write per attempt (hence opt-in); retention
+is governed by `jobs.cleanup` (or `history_retention`). Design:
+[docs/jobs_observability_design.md](jobs_observability_design.md).
 
 ## Compute-heavy jobs (WASM / GPU)
 

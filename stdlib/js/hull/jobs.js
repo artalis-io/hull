@@ -15,7 +15,7 @@
  * Full surface: schema + jobs.init, enqueue, the atomic claim, per-type +
  * catch-all handlers, the work loop (retry-with-backoff, dead-letter, and the
  * visibility-timeout reaper), the dedicated worker (jobs.runWorker +
- * `hull jobs worker`), and the ops surface (jobs.stats / dead / retry / cancel / cleanup). v1.1 adds durable cron (jobs.cron / uncron) and intra-process concurrency (run_worker concurrency=N), jobs.get(id), jobs.heartbeat for long jobs, fleet-wide rate limiting (jobs.limit), queue pause/resume/purge, and workflows (depends_on + result passing). v1.5 adds the standalone result backend (jobs.result / jobs.await), multi-queue draining (opts.queues, strict list or weighted map), bulk enqueue (jobs.enqueueMany), in-process lifecycle hooks (jobs.on completed/retried/dead), and polish (absolute at, jobs.progress, throttle window, fixed-offset tz cron). Durable workflows (jobs.workflow / jobs.start / ctx.step / ctx.sleep / ctx.wait_signal / jobs.signal, Phase 1) add crash-safe workflow-as-code: step memoization, durable timers, external signals, and saga compensation - a workflow instance is a job that rides the same claim/reaper/retry/result machinery (docs/jobs_durable_execution_design.md). Observability: jobs.metrics() (DB-derived per-queue gauges + backlog age) and W3C trace-context propagation (enqueue { trace } -> job.trace).
+ * `hull jobs worker`), and the ops surface (jobs.stats / dead / retry / cancel / cleanup). v1.1 adds durable cron (jobs.cron / uncron) and intra-process concurrency (run_worker concurrency=N), jobs.get(id), jobs.heartbeat for long jobs, fleet-wide rate limiting (jobs.limit), queue pause/resume/purge, and workflows (depends_on + result passing). v1.5 adds the standalone result backend (jobs.result / jobs.await), multi-queue draining (opts.queues, strict list or weighted map), bulk enqueue (jobs.enqueueMany), in-process lifecycle hooks (jobs.on completed/retried/dead), and polish (absolute at, jobs.progress, throttle window, fixed-offset tz cron). Durable workflows (jobs.workflow / jobs.start / ctx.step / ctx.sleep / ctx.wait_signal / jobs.signal, Phase 1) add crash-safe workflow-as-code: step memoization, durable timers, external signals, and saga compensation - a workflow instance is a job that rides the same claim/reaper/retry/result machinery (docs/jobs_durable_execution_design.md). Observability: jobs.metrics() (DB-derived per-queue gauges + backlog age) and W3C trace-context propagation (enqueue { trace } -> job.trace). Opt-in attempt history (jobs.init { history=true }) records a per-attempt timeline (jobs.history) and adds latency percentiles + throughput to jobs.metrics.
  *
  * @license AGPL-3.0-or-later
  */
@@ -38,6 +38,8 @@ const _cfg = {
     visibilityTimeout: 300,   // seconds before an orphaned `running` job is reclaimed
     reapInterval:      30,    // min seconds between reaper sweeps (0 = every work() call)
     backoff: defaultBackoff,
+    history:           false, // attempt-history recording: true | { queues:[...] } | false
+    historyRetention:  null,  // seconds to keep attempt rows (null = jobs.cleanup default)
 };
 
 // Exponential backoff: 2^attempt * 10s, capped at 1h (shared with outbox math).
@@ -92,6 +94,8 @@ function init(opts) {
     if (o.maxAttempts !== undefined) _cfg.maxAttempts = o.maxAttempts;
     if (o.visibilityTimeout !== undefined) _cfg.visibilityTimeout = o.visibilityTimeout;
     if (o.reapInterval !== undefined) _cfg.reapInterval = o.reapInterval;
+    if (o.history !== undefined) _cfg.history = o.history;
+    if (o.historyRetention !== undefined) _cfg.historyRetention = o.historyRetention;
     if (o.backoff !== undefined) _cfg.backoff = o.backoff;
 
     // Keyed/indexed text columns are VARCHAR(255) so MySQL can index them;
@@ -230,6 +234,26 @@ function init(opts) {
         "created_at  INTEGER      NOT NULL," +
         "consumed_at INTEGER," +
         "PRIMARY KEY (workflow_id, name))");
+
+    // Opt-in attempt history (jobs.init { history:true }). One row per attempt,
+    // written by jobs.work at each outcome when history is enabled for the queue.
+    // The durable timeline behind jobs.history + the latency/throughput metrics.
+    db.exec(
+        "CREATE TABLE IF NOT EXISTS _hull_job_attempts (" +
+        "attempt_id  " + db.autoincrementIdDdl + ", " +
+        "job_id      INTEGER      NOT NULL," +
+        "queue       VARCHAR(255) NOT NULL," +
+        "type        VARCHAR(255) NOT NULL," +
+        "attempt_no  INTEGER      NOT NULL," +
+        "wait_ms     INTEGER," +
+        "started_ms  INTEGER      NOT NULL," +
+        "finished_ms INTEGER      NOT NULL," +
+        "duration_ms INTEGER      NOT NULL," +
+        "outcome     VARCHAR(16)  NOT NULL," +
+        "error       TEXT," +
+        "trace_id    VARCHAR(255))");
+    db.exec("CREATE INDEX IF NOT EXISTS idx_hull_job_attempts_job ON _hull_job_attempts(job_id, attempt_no)");
+    db.exec("CREATE INDEX IF NOT EXISTS idx_hull_job_attempts_recent ON _hull_job_attempts(finished_ms)");
 
     // Verify the server actually parses SKIP LOCKED (the compile-time dialect
     // flag says "this backend supports it" but a MySQL<8 / MariaDB<10.6 server
@@ -422,7 +446,8 @@ function shape(row) {
     }
     return { id: row.id, type: row.type, data,
              attempts: row.attempts, maxAttempts: row.max_attempts,
-             trace: row.trace_context };   // trace-context propagation (null if unset)
+             trace: row.trace_context,   // trace-context propagation (null if unset)
+             queue: row.queue, createdAt: row.created_at };   // for attempt history
 }
 
 /**
@@ -592,7 +617,7 @@ function claimOne(queue, batch) {
             "attempts=attempts+1, updated_at=? WHERE id IN (" +
             "SELECT id FROM _hull_jobs WHERE queue=? AND status='pending' AND run_at<=? " +
             "ORDER BY priority DESC, id LIMIT ? " + lock + ") " +
-            "RETURNING id, type, payload, priority, attempts, max_attempts, trace_context",
+            "RETURNING id, queue, type, payload, priority, attempts, max_attempts, trace_context, created_at",
             [token, now, now, queue, now, batch]);
     } else if (d.supportsSkipLocked) {
         db.batch(() => {
@@ -609,7 +634,7 @@ function claimOne(queue, batch) {
                 params);
         });
         rows = db.query(
-            "SELECT id, type, payload, priority, attempts, max_attempts, trace_context FROM _hull_jobs WHERE claim_token=?",
+            "SELECT id, queue, type, payload, priority, attempts, max_attempts, trace_context, created_at FROM _hull_jobs WHERE claim_token=?",
             [token]);
     } else {
         rows = db.query(
@@ -617,7 +642,7 @@ function claimOne(queue, batch) {
             "attempts=attempts+1, updated_at=? WHERE id IN (" +
             "SELECT id FROM _hull_jobs WHERE queue=? AND status='pending' AND run_at<=? " +
             "ORDER BY priority DESC, id LIMIT ?) " +
-            "RETURNING id, type, payload, priority, attempts, max_attempts, trace_context",
+            "RETURNING id, queue, type, payload, priority, attempts, max_attempts, trace_context, created_at",
             [token, now, now, queue, now, batch]);
     }
 
@@ -957,6 +982,28 @@ function uncron(name) {
     return (db.exec("DELETE FROM _hull_cron WHERE name=?", [name]) || 0) > 0;
 }
 
+// Is attempt-history recording on for this queue? true = all queues; an object
+// with a `queues` list = only those.
+function historyEnabled(queue) {
+    const h = _cfg.history;
+    if (h === true) return true;
+    if (h && typeof h === "object" && Array.isArray(h.queues)) return h.queues.includes(queue);
+    return false;
+}
+
+// Record one attempt into the (opt-in) history timeline. `startedMs` is captured
+// before the handler; `outcome` is "done" | "retried" | "dead". waitMs is the
+// queue latency (start - enqueue), from the job's createdAt.
+function recordAttempt(job, startedMs, finishedMs, outcome, err) {
+    const waitMs = job.createdAt != null ? startedMs - job.createdAt * 1000 : null;
+    db.exec(
+        "INSERT INTO _hull_job_attempts (job_id, queue, type, attempt_no, wait_ms, " +
+        "started_ms, finished_ms, duration_ms, outcome, error, trace_id) " +
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        [job.id, job.queue || "default", job.type, job.attempts, waitMs,
+         startedMs, finishedMs, finishedMs - startedMs, outcome, err || null, job.trace || null]);
+}
+
 /**
  * Claim a batch and run each job's handler (awaited, so sync and async handlers
  * both work), applying the outcome. Runs the reaper first. Drive from a timer
@@ -979,12 +1026,14 @@ async function work(opts) {
     for (const job of batch) {
         job.deps = loadDeps(job.id);   // workflow: dependency results, in order
         const h = _handlers[job.type] || _default;
+        const startedMs = time.nowMs();   // attempt timing (used only if history on)
+        let outcome, errStr;              // undefined outcome = a yield (not recorded)
         if (!h) {
-            const err = `no handler for job type '${job.type}'`;
-            markDead(job.id, err);
-            emit("dead", job, { error: err });
-            continue;
-        }
+            errStr = `no handler for job type '${job.type}'`;
+            markDead(job.id, errStr);
+            emit("dead", job, { error: errStr });
+            outcome = "dead";
+        } else {
         try {
             const result = await h(job);
             if (result && typeof result === "object" && result.__hullWfYield) {
@@ -1020,11 +1069,13 @@ async function work(opts) {
                         [result.wakeAt || now, now, job.id]);
                 }
             } else if (result === DEAD) {
-                markDead(job.id, "handler returned jobs.DEAD");
-                emit("dead", job, { error: "handler returned jobs.DEAD" });
+                errStr = "handler returned jobs.DEAD"; outcome = "dead";
+                markDead(job.id, errStr);
+                emit("dead", job, { error: errStr });
             } else if (result === RETRY) {
-                emit(markRetry(job, "handler requested retry"), job,
-                     { error: "handler requested retry", attempt: job.attempts });
+                errStr = "handler requested retry";
+                outcome = markRetry(job, errStr);
+                emit(outcome, job, { error: errStr, attempt: job.attempts });
             } else {
                 // undefined / true / DISCARD -> done, no result; any other return
                 // value is stored as the job's result (for dependents).
@@ -1032,10 +1083,17 @@ async function work(opts) {
                     ? result : undefined;
                 markDone(job.id, res);
                 emit("completed", job, { result: res });
+                outcome = "done";
             }
         } catch (e) {
-            const err = String((e && e.message) || e);
-            emit(markRetry(job, err), job, { error: err, attempt: job.attempts });
+            errStr = String((e && e.message) || e);
+            outcome = markRetry(job, errStr);
+            emit(outcome, job, { error: errStr, attempt: job.attempts });
+        }
+        }
+        // Opt-in attempt history (a yield leaves outcome undefined -> not recorded).
+        if (outcome && historyEnabled(job.queue)) {
+            recordAttempt(job, startedMs, time.nowMs(), outcome, errStr);
         }
     }
     return batch.length;
@@ -1115,6 +1173,15 @@ async function runWorker(opts) {
  * @param {object} [opts]  { queue }
  * @returns {{pending:number, running:number, done:number, dead:number}}
  */
+// p50/p95/p99 of a numeric list (computed host-side; portable SQL has no
+// PERCENTILE). Nearest-rank on the sorted sample.
+function percentiles(vals) {
+    if (vals.length === 0) return { p50: 0, p95: 0, p99: 0 };
+    vals.sort((a, b) => a - b);
+    const pick = (p) => vals[Math.min(vals.length - 1, Math.max(0, Math.ceil(p * vals.length) - 1))];
+    return { p50: pick(0.50), p95: pick(0.95), p99: pick(0.99) };
+}
+
 function stats(opts) {
     const o = opts || {};
     const rows = o.queue
@@ -1157,7 +1224,42 @@ function metrics(opts) {
         const q = queues[r.queue];
         if (q && r.oldest != null) q.oldestPendingAge = now - r.oldest;
     }
-    return { queues, totals };
+    const out = { queues, totals };
+    // Latency + throughput from the attempt history over the last `window`
+    // seconds (present only when attempt recording is on, i.e. there is data).
+    const window = o.window || 300;
+    const sinceMs = (now - window) * 1000;
+    const sample = o.queue
+        ? db.query("SELECT wait_ms, duration_ms, outcome FROM _hull_job_attempts WHERE finished_ms >= ? AND queue=? ORDER BY finished_ms DESC LIMIT 5000", [sinceMs, o.queue])
+        : db.query("SELECT wait_ms, duration_ms, outcome FROM _hull_job_attempts WHERE finished_ms >= ? ORDER BY finished_ms DESC LIMIT 5000", [sinceMs]);
+    if (sample.length) {
+        const waits = [], runs = []; let doneN = 0, deadN = 0;
+        for (const r of sample) {
+            if (r.wait_ms != null) waits.push(r.wait_ms);
+            runs.push(r.duration_ms);
+            if (r.outcome === "done") doneN++; else if (r.outcome === "dead") deadN++;
+        }
+        out.latency = { waitMs: percentiles(waits), runMs: percentiles(runs) };
+        out.throughput = { donePerSec: doneN / window, deadPerSec: deadN / window };
+    }
+    return out;
+}
+
+/**
+ * The attempt timeline for a job (opt-in history; empty when off / none). Each
+ * entry is `{ attemptNo, startedMs, finishedMs, durationMs, waitMs, outcome,
+ * error }`, oldest first - a queryable "what happened to this job".
+ * @param {number} id
+ * @returns {object[]}
+ */
+function history(id) {
+    const rows = db.query(
+        "SELECT attempt_no, started_ms, finished_ms, duration_ms, wait_ms, outcome, error " +
+        "FROM _hull_job_attempts WHERE job_id=? ORDER BY attempt_no, started_ms", [id]);
+    return rows.map((r) => ({
+        attemptNo: r.attempt_no, startedMs: r.started_ms, finishedMs: r.finished_ms,
+        durationMs: r.duration_ms, waitMs: r.wait_ms, outcome: r.outcome, error: r.error,
+    }));
 }
 
 // Decode an ops row into an inspection view: the handler-facing shape plus the
@@ -1614,6 +1716,10 @@ function cleanup(opts) {
     db.exec("DELETE FROM _hull_job_results WHERE job_id NOT IN (SELECT id FROM _hull_jobs)");
     db.exec("DELETE FROM _hull_workflow_steps WHERE workflow_id NOT IN (SELECT id FROM _hull_jobs)");
     db.exec("DELETE FROM _hull_workflow_signals WHERE workflow_id NOT IN (SELECT id FROM _hull_jobs)");
+    // Attempt history is retained by AGE (it outlives the job on purpose, for
+    // post-hoc metrics), not by orphan-ness.
+    const hr = _cfg.historyRetention || o.olderThan || 604800;
+    db.exec("DELETE FROM _hull_job_attempts WHERE finished_ms < ?", [(time.now() - hr) * 1000]);
     return deleted;
 }
 
@@ -1626,14 +1732,14 @@ function _tick(now) { processCron(now !== undefined ? now : time.now()); }
 
 export const jobs = {
     init, enqueue, enqueueMany, claim, handler, default: setDefault, on, work, reap,
-    stats, runWorker, stop, get, result, await: await_, progress, heartbeat, limit, metrics,
+    stats, runWorker, stop, get, result, await: await_, progress, heartbeat, limit, metrics, history,
     pause, resume, purge,
     workflow, start, signal, workflowStatus,
     dead, retry, cancel, cleanup, cron, uncron,
     RETRY, DEAD, DISCARD, _config: _cfg, _cronNext, _tick,
 };
 export { init, enqueue, enqueueMany, claim, handler, on, work, reap, stats,
-         runWorker, stop, get, result, progress, heartbeat, limit, metrics, pause, resume,
+         runWorker, stop, get, result, progress, heartbeat, limit, metrics, history, pause, resume,
          purge, workflow, start, signal, workflowStatus,
          dead, retry, cancel, cleanup, cron, uncron };
 export default jobs;
