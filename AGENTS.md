@@ -65,8 +65,8 @@ Each app is a single file (`app.lua` or `app.js`) with optional:
 
 Apps run in one of two modes, selected by what they register (not by a
 build flag). Knowing which mode an app is in tells you which subcommands
-apply (`hull dev` is server-only; `hull run` works for both) and what the
-process lifecycle looks like.
+apply (`hull dev` is server-only; running the entry directly, `hull app.lua`,
+works for both) and what the process lifecycle looks like.
 
 **Server mode**. App registers `app.get/post/use/ws/sse/every/daily`.
 
@@ -78,7 +78,7 @@ process start → init runtime → sandbox phase 1 → load app
   → graceful shutdown → exit
 ```
 
-**CLI mode** (planned, see [docs/cli_mode.md](docs/cli_mode.md)). App
+**CLI mode** (see [docs/cli_mode.md](docs/cli_mode.md)). App
 registers `app.main(fn)`.
 
 ```
@@ -93,9 +93,9 @@ process start → init runtime → sandbox phase 1 → load app
 Apply this when working on app code:
 - If you see `app.get/post/use` in the app, it's server mode. `hull dev`
   + `hull agent request` are the right tools to iterate.
-- If you see `app.main`, it's CLI mode. `hull run` is the right tool;
-  `hull dev` doesn't apply. Test files use `test.run_main({args=...,
-  stdin=...})` instead of `test.get/post`.
+- If you see `app.main`, it's CLI mode. Run the entry directly
+  (`hull app.lua ...`); `hull dev` doesn't apply. Test files use
+  `test.run_main({args=..., stdin=...})` instead of `test.get/post`.
 - Registering both `app.main` and routes is an error. Hull fails at
   startup. If you're refactoring, pick one mode for the whole app.
 - `hull agent manifest` reports `"mode": "server" | "cli"` so you can
@@ -290,7 +290,7 @@ Auth-stack health probe. Same shape as `hull.web.auth_health.check({include_coun
 
 #### `hull agent tools`
 
-Tool-registry × install-state. Lists every registered side-loadable tool (today: `wamrc`), whether it's available for this platform, whether it's installed, the install path, the expected asset name, and a copy-paste install hint. Independent of `HL_ENABLE_HTTP_CLIENT` - CLI flavors without the installer still list what's registered.
+Tool-registry × install-state. Lists every registered side-loadable tool (today: `wamrc`, the `zig` toolchain-free linker bundle, the `libc-musl-<arch>` static-link floors, and the `cosmocc` bundle for self-contained builds on stock Windows), whether each is available for this platform, whether it's installed, the install path, the expected asset name, and a copy-paste install hint. Independent of `HL_ENABLE_HTTP_CLIENT` - CLI flavors without the installer still list what's registered.
 
 #### `hull agent sbom`
 
@@ -665,7 +665,7 @@ Every module except the intrinsic core must be listed in `manifest.modules`. The
 | `app` | `app` (intrinsic, gets methods via declarations) | `import { app } from "hull:app"` | _intrinsic_ | Bootstrap: `app.manifest` + `app.main` only. The rest is decorated by declared modules. |
 | `log` | `local log = require("hull.log")` | `import { log } from "hull:log"` | `"hull/log@1"` | Logging |
 | `json` | `local json = require("hull.json")` | `import { json } from "hull:json"` (or built-in `JSON`) | `"hull/json@1"` | Encode/decode |
-| `db` | `local db = require("hull.db")` | `import { db } from "hull:db"` | `"hull/db@1"` | SQLite / Postgres / MySQL queries (requires `HL_ENABLE_DB=1`). A `duckdb://` DSN needs the **`duckdb` composable feature** (`hull feature install duckdb` → `hull build --with=duckdb`, native-only) |
+| `db` | `local db = require("hull.db")` | `import { db } from "hull:db"` | `"hull/db@1"` | SQLite queries (in-base default). A `postgres://` / `mysql://` / `duckdb://` DSN needs the matching **composable feature** (`hull feature install postgres\|mysql\|duckdb` → `hull build --with=postgres\|mysql\|duckdb`, native-only) |
 | `crypto` | `local crypto = require("hull.crypto")` | `import { crypto } from "hull:crypto"` | `"hull/crypto@1"` | Hashing, signing, random |
 | `time` | `local time = require("hull.time")` | `import { time } from "hull:time"` | `"hull/time@1"` | Timestamps |
 | `env` | `local env = require("hull.env")` | `import { env } from "hull:env"` | `"hull/env@1"` | Environment vars (also needs `env` allowlist) |
@@ -703,14 +703,18 @@ Every module except the intrinsic core must be listed in `manifest.modules`. The
 
 To get the authoritative list for your hull build (including deps and capability requirements), run `hull modules available --json`. For a single module's spec, `hull modules explain hull/web/middleware/session`.
 
-**Modules that require an HTTP-enabled build** (i.e. `HL_ENABLE_HTTP=1`, the
-default): `hull/http`, `hull/ws`, `hull/server`, `hull/smtp`, `hull/email`,
-and every entry under `hull/middleware/*` (auth, cors, csrf, etag, health,
-idempotency, inbox, logger, outbox, ratelimit, rbac, session, transaction).
-On a CLI-only build (`HL_ENABLE_HTTP=0`, see [docs/cli_mode.md](docs/cli_mode.md))
-declaring any of these in `manifest.modules` fails at resolve time with
-`requires HL_ENABLE_HTTP (build-time)`. `hull doctor` reports which
-subsystems your binary supports.
+**Modules that require an HTTP-enabled build** (i.e. `HL_ENABLE_HTTP_SERVER=1` /
+`HL_ENABLE_HTTP_CLIENT=1`, both default on): `hull/http-server`,
+`hull/http-client`, `hull/web/ws-server`, `hull/web/ws-client`, `hull/web/sse`,
+`hull/smtp`, `hull/email`, and every entry under `hull/web/middleware/*` (auth,
+cors, csrf, etag, health, idempotency, inbox, logger, outbox, ratelimit, rbac,
+session, transaction). On a CLI-only build (`HL_ENABLE_HTTP=0`, the back-compat
+alias that pins both halves off, see [docs/cli_mode.md](docs/cli_mode.md))
+declaring an inbound module fails at resolve time with
+`requires HL_ENABLE_HTTP_SERVER (build-time)` (or `_CLIENT` for outbound ones).
+`hull doctor` reports which subsystems your binary supports. On the distributed
+SLIM base these subsystems are dropped and auto-composed back at `hull build`
+only when the app declares an HTTP module (nothing to install or flag).
 
 ## Database API
 
@@ -851,12 +855,12 @@ HULL_AUDIT=1 hull dev --agent app.lua -p 3000
 Example audit output (one JSON object per line on stderr):
 
 ```
-{"ts":"2026-03-06T14:23:01Z","cap":"db.query","sql":"SELECT * FROM tasks WHERE id = ?","nparams":1,"result":0}
-{"ts":"2026-03-06T14:23:01Z","cap":"fs.read","path":"uploads/file.txt","bytes":4096}
-{"ts":"2026-03-06T14:23:02Z","cap":"http.request","method":"POST","url":"https://api.example.com","status":200,"result":0}
-{"ts":"2026-03-06T14:23:02Z","cap":"env.get","name":"DATABASE_URL","result":"ok"}
-{"ts":"2026-03-06T14:23:03Z","cap":"smtp.send","host":"smtp.example.com","from":"noreply@app.com","to":"user@example.com","subject":"Welcome","result":0}
-{"ts":"2026-03-06T14:23:04Z","cap":"tool.spawn","cmd":"cc","exit_code":0}
+{"ts":"2026-08-05T14:23:01Z","cap":"db.query","sql":"SELECT * FROM tasks WHERE id = ?","nparams":1,"result":0}
+{"ts":"2026-08-05T14:23:01Z","cap":"fs.read","path":"uploads/file.txt","bytes":4096}
+{"ts":"2026-08-05T14:23:02Z","cap":"http.request","method":"POST","url":"https://api.example.com","status":200,"result":0}
+{"ts":"2026-08-05T14:23:02Z","cap":"env.get","name":"DATABASE_URL","result":"ok"}
+{"ts":"2026-08-05T14:23:03Z","cap":"smtp.send","host":"smtp.example.com","from":"noreply@app.com","to":"user@example.com","subject":"Welcome","result":0}
+{"ts":"2026-08-05T14:23:04Z","cap":"tool.spawn","cmd":"cc","exit_code":0}
 ```
 
 Every capability module is instrumented: `db.query`, `db.exec`, `fs.read`, `fs.write`, `fs.delete`, `http.request`, `env.get`, `tool.spawn`, `smtp.send`. SQL queries are truncated to 512 bytes. Passwords and secrets are never logged.
@@ -871,12 +875,12 @@ Every capability module is instrumented: `db.query`, `db.exec`, `fs.read`, `fs.w
 
 ```bash
 # Print hull version
-hull version              # hull 0.1.0
-hull version --json       # {"version":"0.1.0","runtime":"lua+js","platform":"darwin-arm64","build":"release"}
+hull version              # hull 0.10.0
+hull version --json       # {"version":"0.10.0","runtime":"lua+js","platform":"darwin-arm64","build":"release"}
 
-# Check environment readiness (compiler available, platform embedded)
+# Check environment readiness (linker/compiler available, platform embedded)
 hull doctor               # human-readable report; exits 0 if hull build is ready
-hull doctor --json        # {"version":"0.1.0","platform_embedded":"multi-arch","tcc_embedded":true,"hull_build":"ready",...}
+hull doctor --json        # {"version":"0.10.0","platform_embedded":"multi-arch","hull_build":"ready",...}
 
 # Self-update (verifies SHA-256, atomic replace via rename)
 hull update               # download + verify + install latest stable release
@@ -888,11 +892,17 @@ hull init                 # initialize in current directory (Lua)
 hull init myapp           # initialize in ./myapp/ (creates dir if needed)
 hull init . --runtime js  # initialize with JS runtime
 
-# Build standalone binary (includes app + stdlib + SQLite)
-hull build myapp/
-hull build myapp/ --compiler=tcc     # force embedded TinyCC (zero-dependency)
-hull build myapp/ --compiler=system  # force system cc (gcc/clang from PATH)
+# Build standalone binary (composes app + the exactly-needed subsystems)
+hull build myapp/                    # compiler-FREE by default: emits app_registry.o
+                                     #   via the object emitter and links. No C compiler needed.
+hull build myapp/ --compiler=system  # opt into a system cc (gcc/clang from PATH)
 hull build myapp/ --compiler=/path/to/cc  # explicit compiler path
+
+# hull build needs only a LINKER by default. Pick one (or a toolchain-free bundle):
+hull build myapp/ --linker=lld       # system/PATH lld
+hull build myapp/ --linker=zig       # self-contained zig bundle (hull tools install zig)
+hull build myapp/ --linker=lld-static # fully static link (musl floor, hull tools install libc-musl-<arch>)
+hull build myapp/ --linker=zig --target=x86_64-linux-musl  # cross-compile via the zig bundle
 
 # The binary is self-contained. Deploy anywhere
 ./myapp -p 8080 -d /data/app.db
@@ -930,12 +940,17 @@ flavor that still satisfies them. Reference:
 Some large subsystems are **not** in the base binary - they're optional
 **features** you bolt on at build time. Where a flavor *slims* the base
 (subtractive), a feature *adds* a subsystem (additive), shipped as its own
-signed archive `libhull_feature-<name>.a`. Two features today, both
+signed archive `libhull_feature-<name>.a`. Five features today, all
 **native-only (no cosmo)**:
 
 - **`duckdb`** - embedded DuckDB OLAP backend, reached via a `duckdb://` DSN on
   `hull.db`.
+- **`postgres`** - pure-C PostgreSQL wire backend, reached via a
+  `postgres://` / `postgresql://` DSN on `hull.db`.
+- **`mysql`** - pure-C MySQL / MariaDB wire backend, reached via a
+  `mysql://` / `mariadb://` DSN on `hull.db`.
 - **`gpu`** - wgpu-native GPU compute (`gpu.*`).
+- **`tui`** - terminal UI subsystem (`hull/tui`; auto-inferred from the manifest).
 
 ```bash
 hull feature install gpu          # fetch + verify + cache to ~/.hull/feature/
@@ -1075,8 +1090,8 @@ hull deploy systemd myapp/         # generate systemd unit
 > etc.) and drafting release notes.
 
 The release pipeline (`.github/workflows/release.yml`) is fully wired:
-it builds `hull-{linux-x86_64,darwin-arm64,cosmo}`, signs `hull.sha256`
-with the offline release Ed25519 key (loaded from the
+it builds `hull-{linux-x86_64,linux-aarch64,darwin-arm64,cosmo}`, signs
+`hull.sha256` with the offline release Ed25519 key (loaded from the
 `HULL_RELEASE_KEY` repo secret), and publishes a GitHub release.
 End-user `hull update` verifies the signature against the public key
 embedded as `HL_RELEASE_PUBKEY_HEX` (in `include/hull/release.h`)
@@ -1102,7 +1117,8 @@ cd ~/.hull/keys && hull keygen release   # writes release.{pub,key}
    re-runs `make`, signs from the freshly built linux-native binary,
    and publishes. Red CI means a red release.
 2. `git tag -a vX.Y.Z -m "Hull vX.Y.Z" && git push origin vX.Y.Z`
-3. `.github/workflows/release.yml` produces the five release assets.
+3. `.github/workflows/release.yml` produces the six release assets
+   (four platform binaries + `hull.sha256` + `hull.sha256.sig`).
 4. Smoke-test from a clean machine:
    `curl -fsSL https://gethull.dev/install.sh | sh && hull update --check`.
 
@@ -1111,7 +1127,7 @@ cd ~/.hull/keys && hull keygen release   # writes release.{pub,key}
 | Command | Use |
 |---------|-----|
 | `gh run list --branch main --limit 3` | check CI state before suggesting a tag |
-| `gh release view vX.Y.Z` | confirm the release landed with all five assets |
+| `gh release view vX.Y.Z` | confirm the release landed with all six assets |
 | `hull verify-release hull.sha256 hull.sha256.sig` | offline integrity check of a downloaded release |
 | `hull update --check` | end-user view: is a newer release available? |
 

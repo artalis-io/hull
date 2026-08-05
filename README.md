@@ -103,7 +103,8 @@ Hull ships 30+ subcommands for the full development lifecycle:
 | `hull init [dir] [--profile htmx]` | Initialize a hull project in-place (idempotent, like `git init`). `--profile htmx` scaffolds a full HTMX + Pico app (CSP nonce, CSRF, session, flash, pagination, search, inline edit) |
 | <code>hull dev &lt;app&gt; [--tui]</code> | Development server with hot reload. [`--tui`](#terminal-ui) streams the child's log into an alt-screen pane with substring filtering, file-watch auto-reload, and `r` for manual reload |
 | <code>hull build -o &lt;out&gt; &lt;dir&gt;</code> | Compile app into a standalone binary |
-| <code>hull build --compiler=tcc\|system\|&lt;path&gt;</code> | Select compiler backend (default: a resolvable `tcc` tool if installed, else system cc). `tcc` is side-loaded via `hull tools install tcc` |
+| <code>hull build [--compiler=system\|&lt;path&gt;]</code> | Compiler-free by default (emits `app_registry.o` directly and links, no C compiler needed). `--compiler=system` (or an explicit path) opts into a system `cc`; `--with=` features and cosmo/APE targets fall back to a system compiler automatically |
+| <code>hull build [--linker=lld\|zig\|lld-static\|&lt;path&gt;]</code> | Select the linker (default: system `cc`/`ld`). `--linker=zig` uses the self-contained `hull tools install zig` bundle (also cross-compiles via `--target=&lt;triple&gt;`); `--linker=lld-static` links fully static against the musl floors |
 | <code>hull test &lt;dir&gt;</code> | In-process test runner (no TCP, memory SQLite) |
 | <code>hull deploy &lt;target&gt; [app_dir]</code> | [Generate deployment configs](#deployment). Dockerfile, systemd, fly.toml |
 | <code>hull agent &lt;subcommand&gt;</code> | [AI agent interface](#using-hull-with-ai-agents). Routes, schema, tests, requests as JSON |
@@ -125,7 +126,7 @@ Hull ships 30+ subcommands for the full development lifecycle:
 | `hull version [--json]` | Print version string (`--json` for machine-readable output) |
 | `hull doctor [--json\|--tui]` | Check environment: compiler, platform embed, module subsystems (DB/WASM/GPU), build readiness. [`--tui`](#terminal-ui) opens a live, color-coded interactive readiness pane with `r` to reprobe and `c` to copy JSON to the clipboard |
 | `hull update [--check] [--force] [--channel=beta]` | Self-update from GitHub releases (verifies SHA-256, atomic replace) |
-| `hull tools install <name>` / `list` / `uninstall <name>` | Side-load optional tools (`wamrc`, `tcc`) routed through signed `blob_store` from the same release as the running hull |
+| `hull tools install <name>` / `list` / `uninstall <name>` | Side-load optional companion tools (`wamrc`, the `zig` linker bundle, the `libc-musl-<arch>` static floors, the `cosmocc` bundle) routed through the signed `blob_store` from the same release as the running hull |
 | `hull cache list \| prune \| clear \| verify` | Runtime cache management (Lua/JS bytecode, Lua/JS template, compute AOT, tools store). Per-app isolation via `HULL_CACHE_DIR` |
 | <code>hull &lt;app&gt; --max-instructions N</code> | Set per-request instruction limit (default: 100M) |
 | <code>hull &lt;app&gt; --audit</code> | Enable capability audit logging (JSON to stderr) |
@@ -156,74 +157,68 @@ hull build: collect → generate sorted registry (hl_app_entries[]) → compile 
 Single binary + package.sig (Ed25519 signed)
 ```
 
-The build links against `libhull_platform.a`. A static archive containing Keel HTTP server, Lua 5.4, QuickJS, SQLite, mbedTLS, TweetNaCl, and the kernel sandbox. The platform library is signed separately with the gethull.dev key.
+The build links against `libhull_platform.a`, the **SLIM base** static archive. The distributed base drops every reducible subsystem (both interpreters, the HTTP core + web bindings, the Keel event loop + server, mbedTLS + TLS transport, SQLite, WASM/WAMR, image codecs) and `hull build` composes back exactly what the app uses via signed feature archives whole-archived in at link time. A stock build of a compute-only `app.main` links zero Keel / mbedTLS / SQLite / WAMR (~2.1 MB); a full web app composes them all back. See [The composable base](#the-composable-base-features-flavors-and-tools) below. The platform library (and every composed feature archive) is signed with the gethull.dev key.
 
-### Cross-Platform Builds
+### Compiler-free and toolchain-free builds
 
-Hull supports four compiler targets:
+**`hull build` is compiler-free by default.** It emits the app registry (`app_registry.o`) directly through Hull's own object emitter and links, needing **no C compiler at all**. You opt into a system compiler only when you need one:
 
-| Compiler | Target | Binary Type | Notes |
-|----------|--------|-------------|-------|
-| `tcc` (TinyCC) | Linux | ELF | Side-loaded tool (`hull tools install tcc`); compile-only (links via system ld) |
-| `gcc` / `clang` | Linux / macOS | ELF / Mach-O | `--compiler=system` or explicit path |
-| `cosmocc` | Any x86_64/aarch64 | APE (Actually Portable Executable) | Multi-arch fat binary |
+| Backend | When it's used |
+|---------|----------------|
+| (none — object emitter) | The default. `hull build -o myapp .` links the emitted `app_registry.o` against the platform lib. No `cc` on the box required. |
+| `--compiler=system` / `--compiler=<path>` | Opt into a system `cc`/`gcc`/`clang`. Auto-selected for `--with=` features (a C++ feature like duckdb needs a C++ driver) and for cosmo/APE targets, which can't go through the emit path. |
 
-**TinyCC as a side-loaded tool:** [TinyCC](https://github.com/TinyCC/tinycc) (mob branch, ~400 KB) is **not embedded** in the hull binary — it's a companion tool installed with `hull tools install tcc` (Linux only; tcc emits ELF, so it's not viable on macOS Mach-O or cosmo). `hull build` resolves it from `~/.hull/tools` → next to the hull binary → `$PATH`. When resolvable, `--compiler=tcc` (or auto-select) uses it for the compile step and delegates linking to the system linker (`ld`/`cc`). Most dev machines have gcc/clang, so builds work out of the box; a bare Linux box with no system compiler installs tcc first. `hull doctor` reports whether a `tcc` tool is resolvable and whether a system compiler is available.
+**`hull build` needs only a *linker* by default**, and the linker is itself pluggable via `hull tools install`:
 
 ```bash
-hull build -o myapp .                  # auto-select: resolvable tcc → system cc → gcc/clang
-hull tools install tcc                 # install the tcc backend (Linux, no system cc needed)
-hull build -o myapp . --compiler=tcc   # force tcc (compile) + system linker
-hull build -o myapp . --compiler=system  # force system cc (no tcc)
+hull build -o myapp .                       # compiler-free: emit + link with system cc/ld
+hull build -o myapp . --linker=lld          # link with a system/PATH lld
+hull tools install zig                      # self-contained zig bundle (driver + libc + lld)
+hull build -o myapp . --linker=zig          # toolchain-free link — runs on a bare box
+hull build -o myapp . --linker=zig --target=x86_64-linux-musl   # cross-compile
+hull tools install libc-musl-x86_64         # static musl floor for lld-static
+hull build -o myapp . --linker=lld-static   # fully static link against the musl floor
+hull build -o myapp . --compiler=system     # opt into a system cc (e.g. for a C++ feature)
 hull build -o myapp . --compiler=/path/to/cc  # explicit compiler path
 ```
 
-Cosmopolitan APE binaries run on Linux, macOS, Windows, FreeBSD, OpenBSD, and NetBSD from a single file. Hull builds multi-architecture platform archives (`make platform-cosmo`) so the resulting APE binary is a true fat binary for both x86_64 and aarch64.
+Net: a stock box with **no toolchain installed** can `hull build` end to end (emit the object, link with the `zig` or `lld` bundle). Note: a standalone `lld` bundle is **not** shipped (a binary `lld` is dynamically linked against libLLVM, so it can't be bundled flat); `--linker=lld` still works against a system/PATH `lld`. **tcc is fully retired** — Hull no longer vendors, bundles, or installs it (a user's own `tcc` on `$PATH` still works as a plain system compiler via `--compiler=tcc`). `hull doctor` reports which system compilers and linkers are resolvable. Full design: [docs/compiler_free_build.md](docs/compiler_free_build.md) · [docs/toolchain_free_build.md](docs/toolchain_free_build.md).
 
-### Features, flavors, and tools
+### Cross-platform builds
 
-At the mechanism level there's **one** kind of thing: a **feature** — a compile-time capability knob (`HL_ENABLE_*`). `HL_ENABLE_HTTP_SERVER`, `HL_ENABLE_DUCKDB`, `HL_ENABLE_WASM` are all the same kind of `-D` flag; **HTTP isn't special, it's just a feature that's on by default.** The database connectors (`sqlite`/`postgres`/`mysql`/`duckdb`) are one feature *family* behind `HlDbBackend`, chosen by DSN scheme — so Postgres and MySQL aren't separate flavors, they're sibling connectors. A **flavor is not a second primitive** — it's a *named preset* over features (`full` = all defaults on; `pure-compute` = HTTP off).
+Hull supports these compiler/target combinations:
 
-The distinction that earns its keep is **distribution**, not architecture, because the *shipping units* differ. Three ways to get capability without compiling from source:
+| Compiler | Target | Binary Type | Notes |
+|----------|--------|-------------|-------|
+| (none — object emitter) | Native | ELF / Mach-O | The default compiler-free path; links with `cc`/`ld` or a `--linker=` bundle |
+| `gcc` / `clang` | Linux / macOS | ELF / Mach-O | `--compiler=system` or an explicit path |
+| `cosmocc` | Any x86_64/aarch64 | APE (Actually Portable Executable) | Multi-arch fat binary. `hull tools install cosmocc` makes a cosmo `hull` self-contained on stock Windows |
 
-- **Flavor** — a named preset shipped as a **base build** (`libhull_platform-<flavor>.a`). The flavors are a **subtractive** set — `full` → `pure-compute`, a slim of the default — small and enumerable, so they're pre-published. `hull flavor install <flavor>`, `hull build --flavor=<flavor>`. (It's `flavor`, not `platform`: in Hull *platform* is the build **target** — `darwin-arm64`, `linux-x86_64`, ….)
+Cosmopolitan APE binaries run on Linux, macOS, Windows, FreeBSD, OpenBSD, and NetBSD from a single file. Hull builds multi-architecture platform archives (`make platform-cosmo`) so the resulting APE binary is a true fat binary for both x86_64 and aarch64. As of v0.10.0, a cosmo `hull` plus the `hull tools install cosmocc` bundle can run a self-contained `hull build` on a stock Windows box.
 
-- **Feature** - a large **additive** subsystem shipped as its **own bolt-on lib** (`libhull_feature-<name>.a`), composed onto a base at `hull build --with=<name>`. Additive features are orthogonal - N of them means 2^N combos - so they can't be enumerated as flavors; instead **M flavors + N features publish M+N libs but build any of M×N combos**. `hull feature install <name>`; the build links it when the app needs it. Two features ship today - **DuckDB** (~58 MB OLAP, `duckdb://`) and **GPU** (wgpu-native compute) - both native-only; the tiny pure-C `postgres`/`mysql` connectors stay compiled into the base. *(Design: [docs/features_and_flavors.md](docs/features_and_flavors.md). Direction: collapse to one primitive - features - with flavors becoming named presets.)*
+### The composable base: features, flavors, and tools
 
-- **Tool** — a separate companion **program** Hull shells out to, not a build of Hull (e.g. `wamrc`, the LLVM-based WASM AOT compiler, or `tcc`, the C compiler backend for `hull build --compiler=tcc`). `hull tools install <name>`; Hull spawns it when needed.
+The distributed `hull` ships a **fully-composable SLIM base**. Its app-build base drops **every** reducible subsystem — both interpreters (Lua VM + QuickJS), the HTTP core + per-runtime web bindings, the Keel event loop + server, mbedTLS + the TLS transport, SQLite, WASM/WAMR, and the image codecs — and `hull build` composes back exactly what the app uses. Composition is **static** (each subsystem is whole-archived in at *build* time; there is no `dlopen`, no runtime plugin, so the manifest stays enforceable and builds stay reproducible), **auto-inferred** (from the entry extension + the resolved manifest — you never install or flag these), and **embedded** (the pieces live inside the distributed `hull`). A stock `hull build` of a compute-only `app.main` links **zero** Keel / mbedTLS / SQLite / WAMR (~2.1 MB); a full web app composes them all back. (The Cosmopolitan APE base is exempt — a fat APE can't force-load native archives, so it keeps everything compiled in.)
 
-Three install verbs, one signed trust chain (`hull.sha256` + Ed25519): `hull tools install` for foreign programs, `hull flavor install` for a base build, `hull feature install` for a bolt-on subsystem.
+On top of that mandatory axis, capability reaches an app through exactly one of **five shipping units** (full taxonomy in [docs/features_and_flavors.md](docs/features_and_flavors.md)):
 
-### Build Flavors
+| Unit | What it is | Ships as | Reached via |
+|------|-----------|----------|-------------|
+| **stdlib** | pure Lua/JS over caps the base already has (no new C, no new authority) | in the base VFS | `require`/`import` + `manifest.modules` |
+| **base cap module** | a small always-in-base C capability (a codec / sniffer / store), no `HL_ENABLE_*` gate, no `--with` | compiled into the base | `require`/`import` + `manifest.modules` |
+| **feature** (additive) | a large optional C subsystem, off by default (a vendored engine, a wire backend, a new authority) | a signed `libhull_feature-<name>-<arch>.a` | `hull build --with=<name>` (installed via `hull feature install`) |
+| **flavor** (subtractive) | a build.lua **preset** validating an app against a slimmer cap set — since Phase 4.3 there are **no** pre-built per-flavor libs | a preset on the default base | `hull build --flavor=<name>` |
+| **tool** | a separate companion **program** Hull spawns (never linked in) | a `hull-<name>-<platform>` binary or `.tar` bundle | `hl_tool_spawn` at build time; `hull tools install` |
 
-`hull build --flavor=<flavor>` builds a slimmer app binary by linking a matching per-flavor platform library instead of the full one. The flavor selects whether HTTP is compiled in, and the app's manifest is validated against the target flavor at build time: an app that declares a module needing a dropped subsystem is rejected before it links.
-
-| Flavor | HTTP | Use case |
-|--------|------|----------|
-| `full` | server + client | Web apps that serve requests and call out to APIs (default) |
-| `pure-compute` | none | Offline compute / signing binary. Drops mbedTLS + Keel; smallest binary |
-| `auto` | inferred | Picks the minimal flavor from the app's declared modules |
-
-You do not build the platform library from source. `hull flavor install <flavor>` (and `hull flavor list`) fetches the per-flavor libs for this hull's platform from the matching signed release, verifies the Ed25519 signature on `hull.sha256` and the SHA-256 of each lib, and caches them under `~/.hull/platform/`; `hull build --flavor` then picks up the cached lib automatically.
-
-```bash
-hull flavor install pure-compute          # fetch + verify + cache the platform lib
-hull build --flavor=pure-compute -o mytool .
-hull build --flavor=auto -o myapp .        # infer the minimal flavor
-```
-
-Releases publish signed per-flavor platform libs for every target: native `libhull_platform-<flavor>-<arch>.a` (linux-x86_64, linux-aarch64, darwin-arm64) and cosmo dual-arch `libhull_platform-<flavor>.{x86_64,aarch64}-cosmo.a`, all covered by the Ed25519-signed `hull.sha256` (plus Sigstore/cosign signatures and SLSA provenance). See [docs/build_flavors.md](docs/build_flavors.md) for the full design.
-
-Each flavor also gets a signed SBOM (`libhull_platform-<flavor>.sbom.{json,cdx.json,spdx.json}`), generated with `hull sbom --flavor=<flavor>` — it reports the exact dependency set that flavor links (e.g. `pure-compute` omits Keel + mbedTLS). Run it locally against any hull binary to inspect a flavor's bill of materials without building it.
-
-### Composable features
-
-Where a flavor slims the base (subtractive), a **feature** bolts a large optional subsystem **on** (additive), via a separate signed archive `libhull_feature-<name>.a` composed at build time. `--flavor` and `--with` are orthogonal and compose. Two features ship today, both **native-only (no cosmo)**:
+**Features** are the additive axis. Five ship today, all **native-only (no cosmo)**, published for `linux-x86_64` / `linux-aarch64` / `darwin-arm64`:
 
 | Feature | What | Reached via |
 |---------|------|-------------|
-| `duckdb` | embedded DuckDB OLAP backend (~58 MB) | a `duckdb://` DSN on `hull.db` |
+| `duckdb` | embedded DuckDB OLAP backend (~58 MB, C++) | a `duckdb://` DSN on `hull/db` |
+| `postgres` | pure-C PostgreSQL wire backend (no libpq) | a `postgres://` / `postgresql://` DSN on `hull/db` |
+| `mysql` | pure-C MySQL / MariaDB wire backend (no libmysql) | a `mysql://` / `mariadb://` DSN on `hull/db` |
 | `gpu` | wgpu-native GPU compute | `gpu.*` |
+| `tui` | terminal UI subsystem (`hull.tui`) | the `hull/tui` module (auto-inferred + force-loaded) |
 
 ```bash
 hull feature install duckdb               # fetch + verify + cache to ~/.hull/feature/
@@ -232,7 +227,22 @@ hull build --with=duckdb -o myapp .        # compose the feature into the app bi
 hull build --with=gpu --compiler=system .  # gpu links -lvulkan / Metal frameworks
 ```
 
-`hull feature install` shares the same Ed25519 `hull.sha256` trust chain as `hull flavor install`; `hull build --with=<name>` re-verifies a cached lib before linking and generates a small registry that fills the base's backend hook with the composed backend. Build from source with `make feature-duckdb` / `make feature-gpu`. Full design: [docs/features_and_flavors.md](docs/features_and_flavors.md).
+`hull feature install` shares the same Ed25519 `hull.sha256` trust chain as `hull update` / `hull tools install`; `hull build --with=<name>` re-verifies a cached lib before linking and generates a small registry that fills the base's weak backend hook with the composed backend (`duckdb`/`postgres`/`mysql` all fill the same `HlDbBackend` hook, so they compose together). Build from source with `make feature-duckdb` / `make feature-gpu` / `make feature-postgres` / `make feature-mysql` / `make feature-tui`.
+
+**Flavors** are the subtractive axis — and since Phase 4.3 they are **build.lua presets, not pre-built libs**. The base already composes, so a compute app is *already* minimal without a flavor:
+
+| Flavor | What it does | Use case |
+|--------|--------------|----------|
+| `full` | the embedded default base — the only "real" base | Web apps that serve requests and call out to APIs (default) |
+| `pure-compute` | a **preset**: validates the app declares no HTTP/TLS (rejects e.g. `hull/http-server` at build time). The size win comes from the composable base, not the flavor. | Offline compute / signing binary |
+| `auto` | infers the minimal flavor from the app's declared modules | — |
+
+```bash
+hull build --flavor=pure-compute -o mytool .   # validate: no HTTP/TLS
+hull build --flavor=auto -o myapp .            # infer the minimal flavor
+```
+
+`hull flavor install pure-compute` reports "preset flavor, nothing to install"; `hull flavor list` shows `full` as `embedded` and `pure-compute` as `preset (default base)`. (The fetch/verify machinery still exists for any *future* non-preset flavor but has no user today.) Each subject still gets a signed SBOM via `hull sbom` for compliance pipelines. Full design: [docs/build_flavors.md](docs/build_flavors.md) · [docs/features_and_flavors.md](docs/features_and_flavors.md).
 
 ### libhull: embed the hardened core (no runtime)
 
@@ -289,7 +299,7 @@ process start → init runtime → sandbox phase 1 → load app code
   → graceful shutdown → exit
 ```
 
-**CLI mode** *(planned (see [docs/cli_mode.md](docs/cli_mode.md))*) app registers a single entry point with `app.main(fn)`:
+**CLI mode** (see [docs/cli_mode.md](docs/cli_mode.md)). App registers a single entry point with `app.main(fn)`:
 
 ```
 process start → init runtime → sandbox phase 1 → load app code
@@ -302,10 +312,14 @@ process start → init runtime → sandbox phase 1 → load app code
 
 Both modes share the same manifest, sandbox, module resolver, signature
 system, and capability layer. Only the dispatch surface differs.
-Registering both `app.main` and routes in the same app is a startup
-error; pick one. A future `HL_ENABLE_HTTP=0` build will drop Keel +
-middleware entirely, producing a pure CLI / compute runtime; CLI apps
-written today run unchanged on that future binary.
+`app.main` and route registration are **no longer mutually exclusive**:
+register them in any order. `app.main` runs once as a startup hook (run
+migrations, warm caches); a non-zero return short-circuits the serve
+loop, matching shell exit-code conventions, while a zero/nil return with
+handlers registered enters the serve loop. A compute-only `app.main` app
+built on the composable base already drops Keel + mbedTLS + SQLite
+automatically (no flavor needed); `--flavor=pure-compute` just adds the
+"reject any HTTP/TLS module" validation.
 
 ### App Layout Conventions
 
@@ -580,6 +594,7 @@ Key principles: rate limit before auth (reject early), CORS before auth (preflig
 | [Lua 5.4](https://www.lua.org/) | Application scripting (1.9x faster than QuickJS) |
 | [QuickJS](https://bellard.org/quickjs/) | ES2023 JavaScript runtime with instruction-count gas metering |
 | [SQLite](https://sqlite.org/) | Embedded database (WAL mode, parameterized queries) |
+| [WAMR](https://github.com/bytecodealliance/wasm-micro-runtime) | WebAssembly Micro Runtime for gas-metered compute plugins (composed by the `wasm` axis) |
 | [mbedTLS](https://github.com/Mbed-TLS/mbedtls) | TLS client for outbound HTTPS |
 | [TweetNaCl](https://tweetnacl.cr.yp.to/) | Ed25519 signatures, XSalsa20+Poly1305, Curve25519 |
 | [miniz](https://github.com/richgel999/miniz) | gzip compression (response compression, client decompression) |
@@ -974,7 +989,7 @@ hull build myapp --target=x86_64   # cross-compile AOT for different arch
 
 ### GPU Compute
 
-GPU compute uses wgpu-native for massively parallel workloads via WGSL compute shaders. It ships as the **`gpu` composable feature** - `hull feature install gpu` then `hull build --with=gpu` (native-only; see [Composable features](#composable-features) above) - or build hull from source with `make HL_ENABLE_GPU=1`. Declare `"hull/gpu@1"` in the manifest (`"hull/gpu@1?"` to fall back gracefully when no GPU is present). Features:
+GPU compute uses wgpu-native for massively parallel workloads via WGSL compute shaders. It ships as the **`gpu` composable feature** - `hull feature install gpu` then `hull build --with=gpu` (native-only; see [The composable base](#the-composable-base-features-flavors-and-tools) above) - or build hull from source with `make HL_ENABLE_GPU=1`. Declare `"hull/gpu@1"` in the manifest (`"hull/gpu@1?"` to fall back gracefully when no GPU is present). Features:
 
 - **Dispatch + Pipeline**. Single or multi-stage shader execution with shared named buffers
 - **Persistent buffers**. Keep data GPU-resident across requests (`gpu.buffer()`)
@@ -1014,7 +1029,7 @@ Removed: SQLite + `db.*` + `migrate.*` + `worker_db` + DB-backed stdlib modules 
 
 Still works: HTTP routing, middleware, both runtimes, sandbox, `http.fetch`, `ws.*`, `fs.*`, `crypto.*`, `compute.*`, `gpu.*`, templates, static files, image codecs, SSE, timers, validation, CSV, i18n, CORS, ETag, health, JWT, stateless CSRF, form parsing, logger.
 
-Combine with other flags freely, e.g. `make HL_ENABLE_DB=0 HL_ENABLE_TCC=0 HL_ENABLE_GPU=1 WGPU_LIB_DIR=vendor/wgpu` for a GPU-focused compute service.
+Combine with other flags freely, e.g. `make HL_ENABLE_DB=0 HL_ENABLE_HTTP=0 HL_ENABLE_GPU=1 WGPU_LIB_DIR=vendor/wgpu` for a GPU-focused compute service. (`HL_ENABLE_HTTP=0` is the `pure-compute` knob — drops mbedTLS + Keel entirely.)
 
 ## Terminal UI
 
@@ -1421,7 +1436,7 @@ $ hull agent request POST /tasks -d '{"title":"Buy milk"}' -H 'Content-Type: app
 ### Deployment
 
 ```bash
-# Build standalone binary (embeds app + stdlib + SQLite + HTTP server)
+# Build standalone binary (embeds app + stdlib + the composable subsystems it uses)
 hull build -o myapp .
 
 # The binary is the product. No runtime, no dependencies
@@ -1431,7 +1446,7 @@ hull build -o myapp .
 hull build -o myapp . CC=cosmocc
 ```
 
-The agent workflow for deployment: run `hull agent test .` to verify all tests pass, then `hull build -o myapp .` to produce the binary. The output is a single file (~5 MB on aarch64 with the full default build; ~3.66 MB compute-only with `HL_ENABLE_DB=0`). Copy it anywhere and run it.
+The agent workflow for deployment: run `hull agent test .` to verify all tests pass, then `hull build -o myapp .` to produce the binary. Because the base is composable, the output size tracks what the app actually uses: a compute-only `app.main` links ~2.1 MB (zero Keel / mbedTLS / SQLite / WAMR), while a full web app composing all of them back is ~6.5 MB on aarch64. Copy the single file anywhere and run it.
 
 #### `hull deploy`. Config Generator
 
@@ -1472,7 +1487,7 @@ hull agent deploy myapp/                       # JSON deployment readiness analy
 
 ```bash
 make                    # build hull binary
-make test               # run 344 unit tests
+make test               # run all unit tests (~58 suites, ~1280 cases)
 make e2e                # end-to-end tests (all examples, both runtimes)
 make e2e-migrate        # migration system tests
 make e2e-templates      # template engine tests (40 tests, both runtimes)
@@ -1491,10 +1506,11 @@ make clean              # remove all build artifacts
 ## Release Process
 
 Releases are tagged commits (`v0.1.0`, `v0.1.1`, …) that trigger
-`.github/workflows/release.yml`. The workflow builds three platform
-binaries in parallel, signs a SHA-256 manifest with an offline Ed25519
-key, and publishes a GitHub release. `hull update` then verifies the
-signature against the public key embedded in the binary
+`.github/workflows/release.yml`. The workflow builds four platform
+binaries in parallel (`hull-linux-x86_64`, `hull-linux-aarch64`,
+`hull-darwin-arm64`, `hull-cosmo`), signs a SHA-256 manifest with an
+offline Ed25519 key, and publishes a GitHub release. `hull update` then
+verifies the signature against the public key embedded in the binary
 (`HL_RELEASE_PUBKEY_HEX` in `include/hull/release.h`) before atomically
 replacing itself.
 
@@ -1522,7 +1538,7 @@ cd ~/.hull/keys && hull keygen release      # writes release.{pub,key}
    workflow re-runs `make`, signs from the freshly built linux native
    binary, and publishes. Broken CI means a broken release.
 2. `git tag -a vX.Y.Z -m "Hull vX.Y.Z" && git push origin vX.Y.Z`
-3. `.github/workflows/release.yml` builds `hull-{linux-x86_64,darwin-arm64,cosmo}`,
+3. `.github/workflows/release.yml` builds `hull-{linux-x86_64,linux-aarch64,darwin-arm64,cosmo}`,
    produces `hull.sha256` and `hull.sha256.sig`, and publishes the
    GitHub release.
 4. Smoke-test on a clean machine:
@@ -1534,11 +1550,11 @@ manifest rather than each binary individually are in
 
 ## Status
 
-Hull is at **v0.2.0**. Pre-stable: APIs and the manifest schema may change. Pin versions and read the [changelog](https://github.com/artalis-io/hull/releases) before upgrading.
+Hull is at **v0.10.0** (2026-08-05). Pre-stable: APIs and the manifest schema may change. Pin versions and read the [changelog](https://github.com/artalis-io/hull/releases) before upgrading. The v0.10.0 release delivers self-contained `hull build` on stock Windows (a cosmo `hull` + `hull tools install cosmocc` bundle), the Windows drive-root-mkdir path fix, in-process test-harness fs + multipart, and build-modularization + stdlib-audit follow-ups. Recent milestones: v0.9.0 (the fully-composable SLIM base), v0.7.0 (composable features + the feature/flavor/tool taxonomy).
 
-**Platform coverage.** Linux (gcc + clang, x86_64 + aarch64), macOS (arm64), and Cosmopolitan APE (multi-arch fat binary). Capability sandbox enforced via pledge/unveil (Linux / Cosmo / OpenBSD) or Seatbelt (macOS). All releases are signed with Ed25519. Verify with `hull verify-release` or in-browser at [verify.gethull.dev](https://verify.gethull.dev).
+**Platform coverage.** Linux (gcc + clang, x86_64 + aarch64), macOS (arm64), and Cosmopolitan APE (multi-arch fat binary). Capability sandbox enforced via pledge/unveil (Linux / Cosmo / OpenBSD) or Seatbelt (macOS). All releases are signed with Ed25519 (plus Sigstore/Rekor + SLSA provenance). Verify with `hull verify-release` or in-browser at [verify.gethull.dev](https://verify.gethull.dev).
 
-See [docs/roadmap.md](docs/roadmap.md) for what's next (PostgreSQL backend, module ecosystem, HTTP/2, agent platform Phase 5).
+See [docs/roadmap.md](docs/roadmap.md) for what's next (module ecosystem, HTTP/2, agent platform).
 
 ## Changelog & Contributing
 
