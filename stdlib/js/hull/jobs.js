@@ -15,7 +15,7 @@
  * Full surface: schema + jobs.init, enqueue, the atomic claim, per-type +
  * catch-all handlers, the work loop (retry-with-backoff, dead-letter, and the
  * visibility-timeout reaper), the dedicated worker (jobs.runWorker +
- * `hull jobs worker`), and the ops surface (jobs.stats / dead / retry / cancel / cleanup). v1.1 adds durable cron (jobs.cron / uncron) and intra-process concurrency (run_worker concurrency=N), jobs.get(id), jobs.heartbeat for long jobs, fleet-wide rate limiting (jobs.limit), queue pause/resume/purge, and workflows (depends_on + result passing).
+ * `hull jobs worker`), and the ops surface (jobs.stats / dead / retry / cancel / cleanup). v1.1 adds durable cron (jobs.cron / uncron) and intra-process concurrency (run_worker concurrency=N), jobs.get(id), jobs.heartbeat for long jobs, fleet-wide rate limiting (jobs.limit), queue pause/resume/purge, and workflows (depends_on + result passing). v1.5 adds the standalone result backend (jobs.result / jobs.await), multi-queue draining (opts.queues, strict list or weighted map), bulk enqueue (jobs.enqueueMany), in-process lifecycle hooks (jobs.on completed/retried/dead), and polish (absolute at, jobs.progress, throttle window, fixed-offset tz cron).
  *
  * @license AGPL-3.0-or-later
  */
@@ -53,6 +53,11 @@ function defaultBackoff(attempt) {
 // user-controlled type; mirrors Lua tables (which have no prototype chain).
 const _handlers = Object.create(null);
 let _default = null;
+
+// In-process lifecycle listeners (jobs.on). Fired synchronously by work() in the
+// worker that processed the job, for jobs THAT worker ran. Not fleet-wide - a
+// durable cross-process event stream is the LISTEN/NOTIFY epic (#235).
+const _listeners = { completed: [], retried: [], dead: [] };
 
 // Whether the server parses SKIP LOCKED (probed in init(); null = not probed).
 let _skipLocked = null;
@@ -103,7 +108,8 @@ function init(opts) {
         "dedup_key    VARCHAR(255)," +
         "last_error   TEXT," +
         "created_at   INTEGER      NOT NULL," +
-        "updated_at   INTEGER      NOT NULL)");
+        "updated_at   INTEGER      NOT NULL," +
+        "progress     INTEGER      NOT NULL DEFAULT 0)");
 
     // Claim scan path: ready-to-run pending jobs in a queue, by priority then id.
     db.exec(
@@ -135,8 +141,14 @@ function init(opts) {
         "max_attempts INTEGER," +
         "next_run_at  INTEGER      NOT NULL," +
         "last_run_at  INTEGER," +
-        "updated_at   INTEGER      NOT NULL)");
+        "updated_at   INTEGER      NOT NULL," +
+        "tz_offset    INTEGER      NOT NULL DEFAULT 0)");
     db.exec("CREATE INDEX IF NOT EXISTS idx_hull_cron_due ON _hull_cron(next_run_at)");
+
+    // Additive migrations for DBs created before v1.5 (idempotent: a duplicate-
+    // column error on an already-migrated DB is expected and swallowed).
+    try { db.exec("ALTER TABLE _hull_jobs ADD COLUMN progress INTEGER NOT NULL DEFAULT 0"); } catch (e) { /* exists */ }
+    try { db.exec("ALTER TABLE _hull_cron ADD COLUMN tz_offset INTEGER NOT NULL DEFAULT 0"); } catch (e) { /* exists */ }
 
     // Fleet-wide rate-limit counters (jobs.limit). One row per limited queue;
     // `name` (not the reserved word `key`), a window start, and the count.
@@ -274,7 +286,18 @@ function enqueue(jobType, data, opts) {
         throw new Error("jobs.enqueue: type must be a non-empty string");
     const o = opts || {};
     const now = time.now();
-    const runAt = o.runAt !== undefined ? o.runAt : now + (o.delay || 0);
+    // Schedule: absolute `at` (unix ts) wins, else `runAt`, else now + `delay`.
+    const runAt = o.at !== undefined ? o.at
+        : (o.runAt !== undefined ? o.runAt : now + (o.delay || 0));
+    // Windowed throttle: skip (return null) if a job of this (queue, type) was
+    // created within the last `throttle` seconds. Best-effort - keyed by
+    // (queue, type), no unique constraint (use dedupKey for exact-once).
+    if (o.throttle && o.throttle > 0) {
+        const hit = db.query(
+            "SELECT 1 AS x FROM _hull_jobs WHERE queue=? AND type=? AND created_at > ? LIMIT 1",
+            [o.queue || "default", jobType, now - o.throttle]);
+        if (hit.length) return null;
+    }
     const deps = o.dependsOn;
     const hasDeps = Array.isArray(deps) && deps.length > 0;
     const vals = [
@@ -316,6 +339,35 @@ function enqueue(jobType, data, opts) {
         }
     }
     return id;
+}
+
+/**
+ * Enqueue many jobs in one transaction. `items` is an array of
+ * `{ type, data?, opts? }`, each accepting the same `opts` as `jobs.enqueue`
+ * EXCEPT `dependsOn` (bulk is for independent jobs - build graphs with
+ * `jobs.enqueue`, which throws here if seen). All rows commit together (one
+ * `db.batch`), so the batch is atomic AND cheap: a single commit/fsync instead
+ * of one per job. Returns an array of ids in input order, with `null` for any
+ * item whose `dedupKey` collided with an existing un-run job.
+ * @param {Array<{type:string,data?:*,opts?:object}>} items
+ * @returns {Array<number|null>}  ids in input order (null per deduped item)
+ */
+function enqueueMany(items) {
+    if (!Array.isArray(items)) throw new Error("jobs.enqueueMany: items must be an array");
+    if (items.length === 0) return [];
+    items.forEach((it, i) => {
+        if (!it || typeof it.type !== "string" || it.type === "")
+            throw new Error(`jobs.enqueueMany: item ${i} needs a non-empty string type`);
+        if (it.opts && it.opts.dependsOn)
+            throw new Error("jobs.enqueueMany: dependsOn is not supported in bulk; use jobs.enqueue for graph nodes");
+    });
+    const ids = [];
+    db.batch(() => {
+        for (let i = 0; i < items.length; i++) {
+            ids[i] = enqueue(items[i].type, items[i].data, items[i].opts);
+        }
+    });
+    return ids;
 }
 
 // Decode a claimed DB row into a handler-facing job (payload -> data).
@@ -443,10 +495,41 @@ function purge(queue, opts) {
  * @param {object} [opts]  { queue = "default", batch = 10 }
  * @returns {Array}  claimed jobs { id, type, data, attempts, maxAttempts }
  */
-function claim(opts) {
-    const o = opts || {};
-    const queue = o.queue || "default";
-    const batch = o.batch || 10;
+// Resolve opts.queue / opts.queues to an ordered list of queues to try. A single
+// `queue` (or the default) is a one-element order. `queues` may be a LIST
+// ["critical","default","low"] (strict priority - try each in order, claim from
+// the first with ready work) or a MAP {critical:3, default:2, low:1} (weighted
+// fairness: a weighted-random shuffle with every queue still present as a
+// fallback, so no claim cycle is wasted and no queue starves; a homogeneous
+// fleet gives fleet-wide fairness). Zero/negative/non-number weights are dropped.
+function resolveQueueOrder(opts) {
+    const qs = opts.queues;
+    if (qs == null) return [opts.queue || "default"];
+    if (Array.isArray(qs)) return qs.slice();                 // list (strict priority)
+    const names = [], weights = {};                           // map (weighted)
+    let total = 0;
+    for (const name of Object.keys(qs)) {
+        const w = qs[name];
+        if (typeof w === "number" && w > 0) { names.push(name); weights[name] = w; total += w; }
+    }
+    const order = [];
+    while (names.length) {
+        const pick = Math.random() * total;
+        let acc = 0, idx = names.length - 1;
+        for (let i = 0; i < names.length; i++) {
+            acc += weights[names[i]];
+            if (pick <= acc) { idx = i; break; }
+        }
+        const chosen = names[idx];
+        order.push(chosen);
+        total -= weights[chosen];
+        names.splice(idx, 1);
+    }
+    return order;
+}
+
+// Claim up to `batch` ready jobs from ONE queue (the per-backend atomic claim).
+function claimOne(queue, batch) {
     if (isPaused(queue)) return [];   // paused: don't dispatch
     const now = time.now();
     const token = crypto.base64urlEncode(crypto.random(16));
@@ -506,6 +589,26 @@ function claim(opts) {
     return rlApply(queue, out);
 }
 
+/**
+ * Atomically claim up to `batch` ready jobs, marking them `running`.
+ * Concurrency-safe (SKIP LOCKED on Postgres/MySQL, serialized on SQLite). Draws
+ * from a single queue (`opts.queue`, default "default") or across several via
+ * `opts.queues` - a LIST for strict priority or a MAP for weighted fairness (see
+ * resolveQueueOrder). Multi-queue claims from the first queue in the resolved
+ * order with ready work; a worker loop drains the rest on later calls.
+ * @param {object} [opts]  { queue | queues, batch }
+ * @returns {object[]}
+ */
+function claim(opts) {
+    const o = opts || {};
+    const batch = o.batch || 10;
+    for (const q of resolveQueueOrder(o)) {
+        const got = claimOne(q, batch);
+        if (got.length) return got;
+    }
+    return [];
+}
+
 // ── Handlers + the work loop ────────────────────────────────────────────
 
 /**
@@ -535,6 +638,33 @@ function setDefault(fn) {
     return jobs;
 }
 
+/**
+ * Register an in-process lifecycle listener. `event` is one of "completed",
+ * "retried" (a failed attempt that will be retried with backoff), or "dead"
+ * (dead-lettered: retries exhausted, handler returned jobs.DEAD, or no handler).
+ * The listener is called `fn(job, info)` synchronously by work(), in the worker
+ * that processed the job, right after the outcome is applied:
+ *   - completed -> info = { result }   (the handler's return value, or undefined)
+ *   - retried   -> info = { error, attempt }   (attempt = the one that just failed)
+ *   - dead      -> info = { error }
+ * Multiple listeners per event fire in registration order; each is isolated (a
+ * throwing listener can't derail the loop or the others). Keep hooks fast and
+ * synchronous - they run inline on the event-loop thread and their return
+ * (incl. a promise) is not awaited. Per-worker, for observability/metrics/side-
+ * effects; a durable fleet-wide event stream is the LISTEN/NOTIFY epic (#235).
+ * Workflow cascade-failures don't emit here (the dependency's own `dead` fires).
+ * @param {string} event  "completed" | "retried" | "dead"
+ * @param {Function} fn
+ * @returns {object} the jobs module (for chaining)
+ */
+function on(event, fn) {
+    if (!_listeners[event])
+        throw new Error(`jobs.on: unknown event '${event}' (completed|retried|dead)`);
+    if (typeof fn !== "function") throw new Error("jobs.on: listener must be a function");
+    _listeners[event].push(fn);
+    return jobs;
+}
+
 function markDone(id, result) {
     db.exec("UPDATE _hull_jobs SET status='done', claim_token=NULL, updated_at=? WHERE id=?",
         [time.now(), id]);
@@ -556,16 +686,29 @@ function markDead(id, err) {
 
 // Reschedule with backoff, or dead-letter once attempts are exhausted. attempts
 // was already incremented by the claim (the attempt that just ran).
+// Returns the disposition it applied: "dead" (retries exhausted -> dead-letter)
+// or "retried" (rescheduled with backoff), so work() can emit the right event.
 function markRetry(job, err) {
     const attempts = job.attempts || 0;
     const max = job.maxAttempts !== undefined && job.maxAttempts !== null
         ? job.maxAttempts : _cfg.maxAttempts;
-    if (attempts >= max) { markDead(job.id, err); return; }
+    if (attempts >= max) { markDead(job.id, err); return "dead"; }
     const now = time.now();
     db.exec(
         "UPDATE _hull_jobs SET status='pending', run_at=?, last_error=?, claim_token=NULL, " +
         "updated_at=? WHERE id=?",
         [now + _cfg.backoff(attempts), err, now, job.id]);
+    return "retried";
+}
+
+// Fire in-process listeners for a lifecycle event. Each listener is isolated: a
+// throwing hook can't derail the work loop or the other listeners. Listener
+// return values (incl. promises) are ignored - hooks are fire-and-forget.
+function emit(event, job, info) {
+    const L = _listeners[event];
+    for (let i = 0; i < L.length; i++) {
+        try { L[i](job, info); } catch (e) { /* isolated: hooks must not break work */ }
+    }
 }
 
 /**
@@ -645,10 +788,34 @@ function parseCron(spec) {
 }
 
 // Smallest unix ts strictly after `fromTs` whose UTC time matches `c`.
-function cronNext(c, fromTs) {
+// Resolve a cron `tz` option to a FIXED offset in seconds east of UTC. Accepts a
+// number (minutes east of UTC) or a string "+HH:MM" / "-HH:MM" / "+HHMM" / "Z".
+// IANA names ("Europe/Budapest") are rejected: a DST-correct named zone needs a
+// tz database Hull can't read inside the sandbox. Fixed-offset only - no DST.
+function parseTzOffset(tz) {
+    if (tz == null) return 0;
+    if (typeof tz === "number") return Math.floor(tz * 60);
+    if (typeof tz === "string") {
+        if (tz === "Z" || tz === "UTC" || tz === "utc") return 0;
+        const m = tz.match(/^([+-])(\d\d):?(\d\d)$/);
+        if (m) {
+            const off = Number(m[2]) * 3600 + Number(m[3]) * 60;
+            return m[1] === "-" ? -off : off;
+        }
+        throw new Error(`jobs.cron: tz must be a fixed offset ("+02:00", "-0530", or minutes ` +
+            `east of UTC); IANA zone names like '${tz}' need a tz database unavailable in the sandbox`);
+    }
+    throw new Error("jobs.cron: tz must be a string offset or a number of minutes");
+}
+
+// Next matching instant at or after fromTs, as a UTC unix timestamp. `offset`
+// (seconds east of UTC, default 0) shifts only the calendar decode, so the spec
+// matches wall-clock fields in that fixed-offset zone while the result stays UTC.
+function cronNext(c, fromTs, offset) {
+    const off = offset || 0;
     let t = Math.floor(fromTs / 60) * 60 + 60;
     for (let i = 0; i < 200000; i++) {
-        const { month, day, hour, minute, dow } = decodeTs(t);
+        const { month, day, hour, minute, dow } = decodeTs(t + off);
         if (!c.month.has(month)) { t = (Math.floor(t / 86400) + 1) * 86400; continue; }
         let dayOk;
         if (c.domStar && c.dowStar) dayOk = true;
@@ -668,11 +835,11 @@ function cronNext(c, fromTs) {
 // (fire-once, no backfill). Called (throttled) from work().
 function processCron(now) {
     const due = db.query(
-        "SELECT name, spec, type, payload, queue, priority, max_attempts, next_run_at " +
+        "SELECT name, spec, type, payload, queue, priority, max_attempts, next_run_at, tz_offset " +
         "FROM _hull_cron WHERE next_run_at <= ?", [now]);
     for (const c of due) {
         const parsed = parseCron(c.spec);
-        const nxt = parsed ? cronNext(parsed, now) : (now + 60);
+        const nxt = parsed ? cronNext(parsed, now, c.tz_offset) : (now + 60);
         const won = db.exec(
             "UPDATE _hull_cron SET next_run_at=?, last_run_at=?, updated_at=? " +
             "WHERE name=? AND next_run_at=?",
@@ -708,7 +875,8 @@ function cron(name, spec, data, opts) {
     if (!parsed) throw new Error("jobs.cron: invalid cron spec");
     const o = opts || {};
     const now = time.now();
-    const nxt = cronNext(parsed, now);
+    const tzOffset = parseTzOffset(o.tz);
+    const nxt = cronNext(parsed, now, tzOffset);
     if (nxt === null) throw new Error("jobs.cron: spec has no upcoming occurrence");
     const jobType = o.type || name;
     const payload = data !== undefined && data !== null ? json.encode(data) : null;
@@ -717,13 +885,13 @@ function cron(name, spec, data, opts) {
     const ma = o.maxAttempts !== undefined ? o.maxAttempts : null;
     const n = db.exec(
         "UPDATE _hull_cron SET spec=?, type=?, payload=?, queue=?, priority=?, " +
-        "max_attempts=?, next_run_at=?, updated_at=? WHERE name=?",
-        [spec, jobType, payload, queue, priority, ma, nxt, now, name]);
+        "max_attempts=?, next_run_at=?, tz_offset=?, updated_at=? WHERE name=?",
+        [spec, jobType, payload, queue, priority, ma, nxt, tzOffset, now, name]);
     if ((n || 0) === 0) {
         db.exec(
             "INSERT INTO _hull_cron (name, spec, type, payload, queue, priority, " +
-            "max_attempts, next_run_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            [name, spec, jobType, payload, queue, priority, ma, nxt, now]);
+            "max_attempts, next_run_at, tz_offset, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            [name, spec, jobType, payload, queue, priority, ma, nxt, tzOffset, now]);
     }
     return jobs;
 }
@@ -759,20 +927,31 @@ async function work(opts) {
     for (const job of batch) {
         job.deps = loadDeps(job.id);   // workflow: dependency results, in order
         const h = _handlers[job.type] || _default;
-        if (!h) { markDead(job.id, `no handler for job type '${job.type}'`); continue; }
+        if (!h) {
+            const err = `no handler for job type '${job.type}'`;
+            markDead(job.id, err);
+            emit("dead", job, { error: err });
+            continue;
+        }
         try {
             const result = await h(job);
-            if (result === DEAD) markDead(job.id, "handler returned jobs.DEAD");
-            else if (result === RETRY) markRetry(job, "handler requested retry");
-            else {
+            if (result === DEAD) {
+                markDead(job.id, "handler returned jobs.DEAD");
+                emit("dead", job, { error: "handler returned jobs.DEAD" });
+            } else if (result === RETRY) {
+                emit(markRetry(job, "handler requested retry"), job,
+                     { error: "handler requested retry", attempt: job.attempts });
+            } else {
                 // undefined / true / DISCARD -> done, no result; any other return
                 // value is stored as the job's result (for dependents).
                 const res = (result !== undefined && result !== true && result !== DISCARD)
                     ? result : undefined;
                 markDone(job.id, res);
+                emit("completed", job, { result: res });
             }
         } catch (e) {
-            markRetry(job, String((e && e.message) || e));
+            const err = String((e && e.message) || e);
+            emit(markRetry(job, err), job, { error: err, attempt: job.attempts });
         }
     }
     return batch.length;
@@ -874,21 +1053,93 @@ function shapeOps(r) {
     j.lastError = r.last_error;
     j.createdAt = r.created_at;
     j.updatedAt = r.updated_at;
+    j.progress = r.progress;
     return j;
+}
+
+/**
+ * Set a running job's progress percent (0-100), surfaced by
+ * `jobs.get(id).progress`. Advisory - a UI/ops hint for long jobs, orthogonal to
+ * the claim/heartbeat. Clamped to [0,100] and rounded. Call from a handler with
+ * `job.id`. Returns the clamped value stored.
+ * @param {number} id
+ * @param {number} pct  0..100
+ * @returns {number}  the clamped value written
+ */
+function progress(id, pct) {
+    let p = Number(pct) || 0;
+    if (p < 0) p = 0; else if (p > 100) p = 100;
+    p = Math.round(p);
+    db.exec("UPDATE _hull_jobs SET progress=?, updated_at=? WHERE id=?", [p, time.now(), id]);
+    return p;
 }
 
 /**
  * Fetch a single job by id (its full status view), or null if it doesn't exist.
  * The only way to inspect an individual job from app code: `_hull_jobs` is in the
  * protected namespace, so a direct query is blocked. Poll this for a terminal
- * status (jobs are fire-and-forget; there is no result backend - a handler that
- * produces output must persist it itself).
+ * status, or use `jobs.result` / `jobs.await` to fetch a finished job's return
+ * value (a handler's non-null return is persisted as the job's result).
  * @param {number} id
  * @returns {object|null}
  */
 function get(id) {
     const rows = db.query("SELECT * FROM _hull_jobs WHERE id=?", [id]);
     return rows.length ? shapeOps(rows[0]) : null;
+}
+
+/**
+ * Fetch a job's terminal result without the full status view. Returns null when
+ * the job is unknown (never enqueued, or already purged by `jobs.cleanup`);
+ * otherwise `{ status, result?, error? }`:
+ *   - a `done` job carries `result` = the handler's decoded return value (absent
+ *     when the handler returned null/undefined/true/jobs.DISCARD),
+ *   - a `dead` job carries `error` = its last error string,
+ *   - a still-running (`pending`/`running`/`blocked`) job carries neither.
+ * The standalone counterpart to a workflow dependent's injected
+ * `job.deps[i].result`: any job's return value is readable here, not only a
+ * dependency's. The result lives as long as the job row (governed by
+ * `jobs.cleanup`), so read it before the terminal row is purged.
+ * @param {number} id
+ * @returns {object|null}
+ */
+function result(id) {
+    const rows = db.query("SELECT status, last_error FROM _hull_jobs WHERE id=?", [id]);
+    if (!rows.length) return null;
+    const status = rows[0].status;
+    const out = { status };
+    if (status === "done") {
+        const rr = db.query("SELECT result FROM _hull_job_results WHERE job_id=?", [id]);
+        if (rr.length && rr[0].result != null) out.result = JSON.parse(rr[0].result);
+    } else if (status === "dead") {
+        out.error = rows[0].last_error;
+    }
+    return out;
+}
+
+/**
+ * Block (yielding to the event loop) until a job reaches a terminal status, then
+ * return its `result`. For the "enqueue then await the value" pattern; it polls
+ * `result` every `opts.interval` ms (default 100), `await hull.sleep`-ing between
+ * polls so other work keeps running. With `opts.timeout` (ms) it gives up after
+ * that budget and returns the last (non-terminal) result view instead of the
+ * terminal one; without a timeout it waits indefinitely. Returns null immediately
+ * if the job is unknown. Async: `await jobs.await(id)`.
+ * @param {number} id
+ * @param {object} [opts]  { timeout: <ms>, interval: <ms> }
+ * @returns {Promise<object|null>}
+ */
+async function await_(id, opts) {
+    opts = opts || {};
+    const interval = opts.interval || 100;
+    const deadline = opts.timeout != null ? time.clock() + opts.timeout : null;
+    for (;;) {
+        const r = result(id);
+        if (r === null) return null;                            // unknown / purged
+        if (r.status === "done" || r.status === "dead") return r;
+        if (deadline !== null && time.clock() >= deadline) return r;
+        await hull.sleep(interval);
+    }
 }
 
 /**
@@ -983,19 +1234,20 @@ function cleanup(opts) {
 }
 
 // Internal seams for tests / introspection; not part of the app-facing contract.
-function _cronNext(spec, from) {
+function _cronNext(spec, from, offset) {
     const p = parseCron(spec);
-    return p ? cronNext(p, from !== undefined ? from : time.now()) : null;
+    return p ? cronNext(p, from !== undefined ? from : time.now(), offset) : null;
 }
 function _tick(now) { processCron(now !== undefined ? now : time.now()); }
 
 export const jobs = {
-    init, enqueue, claim, handler, default: setDefault, work, reap, stats,
-    runWorker, stop, get, heartbeat, limit, pause, resume, purge,
+    init, enqueue, enqueueMany, claim, handler, default: setDefault, on, work, reap,
+    stats, runWorker, stop, get, result, await: await_, progress, heartbeat, limit,
+    pause, resume, purge,
     dead, retry, cancel, cleanup, cron, uncron,
     RETRY, DEAD, DISCARD, _config: _cfg, _cronNext, _tick,
 };
-export { init, enqueue, claim, handler, work, reap, stats, runWorker, stop,
-         get, heartbeat, limit, pause, resume, purge,
-         dead, retry, cancel, cleanup, cron, uncron };
+export { init, enqueue, enqueueMany, claim, handler, on, work, reap, stats,
+         runWorker, stop, get, result, progress, heartbeat, limit, pause, resume,
+         purge, dead, retry, cancel, cleanup, cron, uncron };
 export default jobs;

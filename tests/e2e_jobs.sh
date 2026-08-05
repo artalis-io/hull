@@ -33,7 +33,7 @@ FAIL=0
 pass() { PASS=$((PASS + 1)); echo "  PASS: $1"; }
 fail() { FAIL=$((FAIL + 1)); echo "  FAIL: $1${2:+ - $2}"; }
 
-EXPECT_COLS="id,queue,type,payload,status,priority,attempts,max_attempts,run_at,claim_token,claimed_at,dedup_key,last_error,created_at,updated_at"
+EXPECT_COLS="id,queue,type,payload,status,priority,attempts,max_attempts,run_at,claim_token,claimed_at,dedup_key,last_error,created_at,updated_at,progress"
 
 # ── Phase 1: init + schema; Phase 2: correctness round-trip (both runtimes) ──
 check_runtime() {
@@ -700,6 +700,276 @@ app.main(async (ctx) => {
 
 echo "== v1.4 workflows: Lua =="; check_wf "lua" "lua" "$LUA_WF"
 echo "== v1.4 workflows: JS =="; check_wf "js" "js" "$JS_WF"
+
+# ── v1.5: jobs.result(id) + jobs.await(id) - the standalone result backend ──
+# A handler's non-nil return is readable via jobs.result (done->value,
+# dead->error, pending->neither, unknown->nil); jobs.await yields until terminal.
+check_result() {
+    label="$1"; ext="$2"; app="$3"
+    T="$(mktemp -d)"; printf '%s\n' "$app" > "$T/app.$ext"
+    out="$("$HULL" "$T/app.$ext" -d "$T/a.db" 2>/dev/null)" || true
+    case "$out" in
+        *"RES pre=pending done=7 dead=boom void=nil unknown=nil await=7"*)
+            pass "$label: result/await (done-value / dead-error / void / unknown / yielding await)" ;;
+        *) fail "$label: v1.5 result/await" "$out" ;;
+    esac
+    rm -rf "$T"
+}
+
+LUA_RES='local jobs = require("hull.jobs")
+app.manifest({ modules = { "hull/jobs@1" } })
+app.main(function(ctx)
+  jobs.init()
+  jobs.handler("sum",  function(j) return { total = j.data.a + j.data.b } end)
+  jobs.handler("boom", function(j) error("boom") end)
+  jobs.handler("void", function(j) return end)
+  local ok=jobs.enqueue("sum",{a=2,b=5}); local bad=jobs.enqueue("boom",{},{max_attempts=1}); local vd=jobs.enqueue("void",{})
+  local pre=jobs.result(ok).status
+  jobs.work({ batch = 10 })
+  local r1=jobs.result(ok); local r2=jobs.result(bad); local r3=jobs.result(vd); local r4=jobs.result(999999)
+  local aw=jobs.await(ok, { timeout = 2000 })
+  local derr = tostring(r2.error):match("boom") and "boom" or "?"
+  ctx.stdout:write(("RES pre=%s done=%s dead=%s void=%s unknown=%s await=%s\n"):format(
+    pre, tostring(r1.result.total), derr, tostring(r3.result), tostring(r4), tostring(aw.result.total)))
+  return 0
+end)'
+
+JS_RES='import { app } from "hull:app"; import { jobs } from "hull:jobs";
+app.manifest({ modules: ["hull/jobs@1"] });
+app.main(async (ctx) => {
+  jobs.init();
+  jobs.handler("sum",  (j) => ({ total: j.data.a + j.data.b }));
+  jobs.handler("boom", (j) => { throw new Error("boom"); });
+  jobs.handler("void", (j) => {});
+  const ok=jobs.enqueue("sum",{a:2,b:5}); const bad=jobs.enqueue("boom",{},{maxAttempts:1}); const vd=jobs.enqueue("void",{});
+  const pre=jobs.result(ok).status;
+  await jobs.work({ batch: 10 });
+  const r1=jobs.result(ok), r2=jobs.result(bad), r3=jobs.result(vd), r4=jobs.result(999999);
+  const aw=await jobs.await(ok, { timeout: 2000 });
+  const derr = /boom/.test(String(r2.error)) ? "boom" : "?";
+  ctx.stdout.write(`RES pre=${pre} done=${r1.result.total} dead=${derr} void=${r3.result === undefined ? "nil" : r3.result} unknown=${r4 === null ? "nil" : r4} await=${aw.result.total}\n`);
+  return 0;
+});'
+
+echo "== v1.5 result/await: Lua =="; check_result "lua" "lua" "$LUA_RES"
+echo "== v1.5 result/await: JS =="; check_result "js" "js" "$JS_RES"
+
+# ── v1.5: multi-queue draining - strict-priority list + weighted map ────────
+# A list = strict priority (critical drained before default before low); a map =
+# weighted fairness (every queue drains, no starvation).
+check_queues() {
+    label="$1"; ext="$2"; app="$3"
+    T="$(mktemp -d)"; printf '%s\n' "$app" > "$T/app.$ext"
+    out="$("$HULL" "$T/app.$ext" -d "$T/a.db" 2>/dev/null)" || true
+    case "$out" in
+        *"STRICT order=c1,c2,d1,l1 WEIGHTED drained=20"*)
+            pass "$label: multi-queue (strict-priority list + weighted-map no-starvation)" ;;
+        *) fail "$label: v1.5 multi-queue draining" "$out" ;;
+    esac
+    rm -rf "$T"
+}
+
+LUA_QUEUES='local jobs = require("hull.jobs")
+app.manifest({ modules = { "hull/jobs@1" } })
+app.main(function(ctx)
+  jobs.init()
+  jobs.enqueue("t",{n="c1"},{queue="critical"}); jobs.enqueue("t",{n="c2"},{queue="critical"})
+  jobs.enqueue("t",{n="d1"},{queue="default"});  jobs.enqueue("t",{n="l1"},{queue="low"})
+  local order = {}
+  while true do
+    local b = jobs.claim({ queues = {"critical","default","low"}, batch = 1 })
+    if #b == 0 then break end
+    order[#order+1] = b[1].data.n
+  end
+  for i=1,10 do jobs.enqueue("t",{},{queue="A"}); jobs.enqueue("t",{},{queue="B"}) end
+  local drained, safety = 0, 0
+  while safety < 200 do
+    local b = jobs.claim({ queues = {A=3, B=1}, batch = 3 })
+    if #b == 0 then break end
+    drained = drained + #b; safety = safety + 1
+  end
+  ctx.stdout:write(("STRICT order=%s WEIGHTED drained=%d\n"):format(table.concat(order,","), drained))
+  return 0
+end)'
+
+JS_QUEUES='import { app } from "hull:app"; import { jobs } from "hull:jobs";
+app.manifest({ modules: ["hull/jobs@1"] });
+app.main((ctx) => {
+  jobs.init();
+  jobs.enqueue("t",{n:"c1"},{queue:"critical"}); jobs.enqueue("t",{n:"c2"},{queue:"critical"});
+  jobs.enqueue("t",{n:"d1"},{queue:"default"});  jobs.enqueue("t",{n:"l1"},{queue:"low"});
+  const order = [];
+  for (;;) { const b = jobs.claim({ queues: ["critical","default","low"], batch: 1 }); if (!b.length) break; order.push(b[0].data.n); }
+  for (let i=0;i<10;i++){ jobs.enqueue("t",{},{queue:"A"}); jobs.enqueue("t",{},{queue:"B"}); }
+  let drained=0, safety=0;
+  while (safety<200){ const b=jobs.claim({ queues:{A:3,B:1}, batch:3 }); if(!b.length) break; drained+=b.length; safety++; }
+  ctx.stdout.write(`STRICT order=${order.join(",")} WEIGHTED drained=${drained}\n`);
+  return 0;
+});'
+
+echo "== v1.5 multi-queue: Lua =="; check_queues "lua" "lua" "$LUA_QUEUES"
+echo "== v1.5 multi-queue: JS =="; check_queues "js" "js" "$JS_QUEUES"
+
+# ── v1.5: bulk enqueue - one transaction, chunked, dedup holes, no depends_on ──
+check_bulk() {
+    label="$1"; ext="$2"; app="$3"
+    T="$(mktemp -d)"; printf '%s\n' "$app" > "$T/app.$ext"
+    out="$("$HULL" "$T/app.$ext" -d "$T/a.db" 2>/dev/null)" || true
+    case "$out" in
+        *"BULK ids=251 dupnil=nil total=251 reject=true"*)
+            pass "$label: enqueue_many (250+ in one txn, dedup->nil, depends_on rejected)" ;;
+        *) fail "$label: v1.5 bulk enqueue" "$out" ;;
+    esac
+    rm -rf "$T"
+}
+
+LUA_BULK='local jobs = require("hull.jobs")
+app.manifest({ modules = { "hull/jobs@1" } })
+app.main(function(ctx)
+  jobs.init()
+  local items = {}
+  for i=1,250 do items[i] = { type="t", data={n=i}, opts={priority=(i%3)} } end
+  items[251] = { type="dup", data={}, opts={dedup_key="k"} }
+  items[252] = { type="dup", data={}, opts={dedup_key="k"} }
+  local ids = jobs.enqueue_many(items)
+  local nn=0; for i=1,252 do if ids[i]~=nil then nn=nn+1 end end
+  local total=0
+  while true do local b=jobs.claim({batch=50}); if #b==0 then break end; total=total+#b end
+  local ok = pcall(function() jobs.enqueue_many({{type="x", opts={depends_on={1}}}}) end)
+  ctx.stdout:write(("BULK ids=%d dupnil=%s total=%d reject=%s\n"):format(nn, tostring(ids[252]), total, tostring(not ok)))
+  return 0
+end)'
+
+JS_BULK='import { app } from "hull:app"; import { jobs } from "hull:jobs";
+app.manifest({ modules: ["hull/jobs@1"] });
+app.main((ctx) => {
+  jobs.init();
+  const items = [];
+  for (let i=1;i<=250;i++) items.push({ type:"t", data:{n:i}, opts:{priority:(i%3)} });
+  items.push({ type:"dup", data:{}, opts:{dedupKey:"k"} });
+  items.push({ type:"dup", data:{}, opts:{dedupKey:"k"} });
+  const ids = jobs.enqueueMany(items);
+  let nn=0; for (const x of ids) if (x!=null) nn++;
+  let total=0; for(;;){ const b=jobs.claim({batch:50}); if(!b.length) break; total+=b.length; }
+  let reject=false; try { jobs.enqueueMany([{type:"x", opts:{dependsOn:[1]}}]); } catch(e){ reject=true; }
+  ctx.stdout.write(`BULK ids=${nn} dupnil=${ids[251]===null?"nil":ids[251]} total=${total} reject=${reject}\n`);
+  return 0;
+});'
+
+echo "== v1.5 bulk enqueue: Lua =="; check_bulk "lua" "lua" "$LUA_BULK"
+echo "== v1.5 bulk enqueue: JS =="; check_bulk "js" "js" "$JS_BULK"
+
+# ── v1.5: in-process lifecycle hooks (jobs.on completed/retried/dead) ───────
+# A throwing hook is isolated (completed still counts). ok->completed, a
+# max_attempts=1 throw + a no-handler type ->2 dead, a max_attempts=2 throw
+# ->1 retried (backoff defers its death past the drain, so dead stays 2).
+check_events() {
+    label="$1"; ext="$2"; app="$3"
+    T="$(mktemp -d)"; printf '%s\n' "$app" > "$T/app.$ext"
+    out="$("$HULL" "$T/app.$ext" -d "$T/a.db" 2>/dev/null)" || true
+    case "$out" in
+        *"EV completed=1 retried=1 dead=2 res=42 deaderr=nohandler"*)
+            pass "$label: jobs.on (completed/retried/dead, isolated throwing hook)" ;;
+        *) fail "$label: v1.5 job events" "$out" ;;
+    esac
+    rm -rf "$T"
+}
+
+LUA_EVENTS='local jobs = require("hull.jobs")
+app.manifest({ modules = { "hull/jobs@1" } })
+app.main(function(ctx)
+  jobs.init()
+  local ev = { completed=0, retried=0, dead=0 }; local last_result, last_err
+  jobs.on("completed", function(job, info) ev.completed = ev.completed + 1; last_result = info.result and info.result.v end)
+  jobs.on("completed", function(job, info) error("hook boom") end)
+  jobs.on("retried",   function(job, info) ev.retried = ev.retried + 1 end)
+  jobs.on("dead",      function(job, info) ev.dead = ev.dead + 1; last_err = info.error end)
+  jobs.handler("ok",    function(j) return { v = 42 } end)
+  jobs.handler("die",   function(j) error("fatal") end)
+  jobs.handler("flaky", function(j) error("transient") end)
+  jobs.enqueue("ok", {}); jobs.enqueue("die", {}, { max_attempts = 1 })
+  jobs.enqueue("mystery", {}); jobs.enqueue("flaky", {}, { max_attempts = 2 })
+  jobs.run_worker({ drain = true, poll_ms = 1 })
+  ctx.stdout:write(("EV completed=%d retried=%d dead=%d res=%s deaderr=%s\n"):format(
+    ev.completed, ev.retried, ev.dead, tostring(last_result),
+    tostring(last_err):match("no handler") and "nohandler" or "other"))
+  return 0
+end)'
+
+JS_EVENTS='import { app } from "hull:app"; import { jobs } from "hull:jobs";
+app.manifest({ modules: ["hull/jobs@1"] });
+app.main(async (ctx) => {
+  jobs.init();
+  const ev = { completed:0, retried:0, dead:0 }; let lastResult, lastErr;
+  jobs.on("completed", (job, info) => { ev.completed++; lastResult = info.result && info.result.v; });
+  jobs.on("completed", (job, info) => { throw new Error("hook boom"); });
+  jobs.on("retried",   (job, info) => { ev.retried++; });
+  jobs.on("dead",      (job, info) => { ev.dead++; lastErr = info.error; });
+  jobs.handler("ok",    (j) => ({ v: 42 }));
+  jobs.handler("die",   (j) => { throw new Error("fatal"); });
+  jobs.handler("flaky", (j) => { throw new Error("transient"); });
+  jobs.enqueue("ok", {}); jobs.enqueue("die", {}, { maxAttempts: 1 });
+  jobs.enqueue("mystery", {}); jobs.enqueue("flaky", {}, { maxAttempts: 2 });
+  await jobs.runWorker({ drain: true, pollMs: 1 });
+  ctx.stdout.write(`EV completed=${ev.completed} retried=${ev.retried} dead=${ev.dead} res=${lastResult} deaderr=${/no handler/.test(String(lastErr))?"nohandler":"other"}\n`);
+  return 0;
+});'
+
+echo "== v1.5 job events: Lua =="; check_events "lua" "lua" "$LUA_EVENTS"
+echo "== v1.5 job events: JS =="; check_events "js" "js" "$JS_EVENTS"
+
+# ── v1.5: polish - absolute at, progress, windowed throttle, fixed-offset tz ──
+check_polish() {
+    label="$1"; ext="$2"; app="$3"
+    T="$(mktemp -d)"; printf '%s\n' "$app" > "$T/app.$ext"
+    out="$("$HULL" "$T/app.$ext" -d "$T/a.db" 2>/dev/null)" || true
+    case "$out" in
+        *"POLISH claimed=1 prog=43 throttle=ok tzhh=7 iana_reject=true"*)
+            pass "$label: polish (absolute at / progress / throttle window / tz-offset cron + IANA reject)" ;;
+        *) fail "$label: v1.5 polish" "$out" ;;
+    esac
+    rm -rf "$T"
+}
+
+LUA_POLISH='local jobs = require("hull.jobs"); local time = require("hull.time")
+app.manifest({ modules = { "hull/jobs@1", "hull/time@1" } })
+app.main(function(ctx)
+  jobs.init()
+  jobs.enqueue("t", {}, { at = time.now() + 3600 })
+  local now_id = jobs.enqueue("t", {})
+  local claimed = jobs.claim({ batch = 10 })
+  jobs.progress(now_id, 42.6)
+  local prog = jobs.get(now_id).progress
+  local a = jobs.enqueue("th", {}, { throttle = 60 })
+  local b = jobs.enqueue("th", {}, { throttle = 60 })
+  local nx = jobs._cron_next("0 9 * * *", 1735689600, 2*3600)
+  local hh = math.floor((nx % 86400) / 3600)
+  local ok_iana = pcall(function() jobs.cron("x", "0 9 * * *", nil, { tz = "Europe/Budapest" }) end)
+  ctx.stdout:write(("POLISH claimed=%d prog=%s throttle=%s tzhh=%d iana_reject=%s\n"):format(
+    #claimed, tostring(prog), (a~=nil and b==nil) and "ok" or "bad", hh, tostring(not ok_iana)))
+  return 0
+end)'
+
+JS_POLISH='import { app } from "hull:app"; import { jobs } from "hull:jobs"; import { time } from "hull:time";
+app.manifest({ modules: ["hull/jobs@1","hull/time@1"] });
+app.main((ctx) => {
+  jobs.init();
+  jobs.enqueue("t", {}, { at: time.now() + 3600 });
+  const nowId = jobs.enqueue("t", {});
+  const claimed = jobs.claim({ batch: 10 });
+  jobs.progress(nowId, 42.6);
+  const prog = jobs.get(nowId).progress;
+  const a = jobs.enqueue("th", {}, { throttle: 60 });
+  const b = jobs.enqueue("th", {}, { throttle: 60 });
+  const nx = jobs._cronNext("0 9 * * *", 1735689600, 2*3600);
+  const hh = Math.floor((nx % 86400) / 3600);
+  let okIana = true; try { jobs.cron("x", "0 9 * * *", null, { tz: "Europe/Budapest" }); } catch(e){ okIana = false; }
+  ctx.stdout.write(`POLISH claimed=${claimed.length} prog=${prog} throttle=${a!==null&&b===null?"ok":"bad"} tzhh=${hh} iana_reject=${!okIana}\n`);
+  return 0;
+});'
+
+echo "== v1.5 polish: Lua =="; check_polish "lua" "lua" "$LUA_POLISH"
+echo "== v1.5 polish: JS =="; check_polish "js" "js" "$JS_POLISH"
 
 # Fleet gate: K processes share one rate counter -> total dispatched == rate.
 echo "== v1.2 rate limit fleet ($CONC processes, one shared counter) =="

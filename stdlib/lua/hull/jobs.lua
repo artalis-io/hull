@@ -11,7 +11,7 @@
 -- Full surface: schema + jobs.init, enqueue, the atomic claim, per-type +
 -- catch-all handlers, the work loop (retry-with-backoff, dead-letter, and the
 -- visibility-timeout reaper), the dedicated worker (jobs.run_worker +
--- `hull jobs worker`), and the ops surface (jobs.stats / dead / retry / cancel / cleanup). v1.1 adds durable cron (jobs.cron / uncron) and intra-process concurrency (run_worker concurrency=N), jobs.get(id), jobs.heartbeat for long jobs, fleet-wide rate limiting (jobs.limit), queue pause/resume/purge, and workflows (depends_on + result passing).
+-- `hull jobs worker`), and the ops surface (jobs.stats / dead / retry / cancel / cleanup). v1.1 adds durable cron (jobs.cron / uncron) and intra-process concurrency (run_worker concurrency=N), jobs.get(id), jobs.heartbeat for long jobs, fleet-wide rate limiting (jobs.limit), queue pause/resume/purge, and workflows (depends_on + result passing). v1.5 adds the standalone result backend (jobs.result / jobs.await), multi-queue draining (opts.queues, strict list or weighted map), bulk enqueue (jobs.enqueue_many), in-process lifecycle hooks (jobs.on completed/retried/dead), and polish (absolute at, jobs.progress, throttle window, fixed-offset tz cron).
 --
 -- Usage (target shape):
 --   local jobs = require("hull.jobs")
@@ -56,6 +56,11 @@ jobs._config = _cfg
 -- Registered handlers: type -> fn. `_default` is the optional catch-all.
 local _handlers = {}
 local _default = nil
+
+-- In-process lifecycle listeners (jobs.on). Fired synchronously by jobs.work in
+-- the worker that processed the job, for jobs THAT worker ran. Not fleet-wide -
+-- a durable cross-process event stream is the LISTEN/NOTIFY epic (#235).
+local _listeners = { completed = {}, retried = {}, dead = {} }
 
 -- Unix ts of the last reaper sweep (throttled in jobs.work via _cfg.reap_interval).
 local _last_reap = 0
@@ -110,7 +115,8 @@ function jobs.init(opts)
         .. "dedup_key    VARCHAR(255),"
         .. "last_error   TEXT,"
         .. "created_at   INTEGER      NOT NULL,"
-        .. "updated_at   INTEGER      NOT NULL)")
+        .. "updated_at   INTEGER      NOT NULL,"
+        .. "progress     INTEGER      NOT NULL DEFAULT 0)")
 
     -- Claim scan path: ready-to-run pending jobs in a queue, by priority then id.
     db.exec([[
@@ -145,10 +151,16 @@ function jobs.init(opts)
         .. "max_attempts INTEGER,"
         .. "next_run_at  INTEGER      NOT NULL,"
         .. "last_run_at  INTEGER,"
-        .. "updated_at   INTEGER      NOT NULL)")
+        .. "updated_at   INTEGER      NOT NULL,"
+        .. "tz_offset    INTEGER      NOT NULL DEFAULT 0)")
     db.exec([[
         CREATE INDEX IF NOT EXISTS idx_hull_cron_due ON _hull_cron(next_run_at)
     ]])
+
+    -- Additive migrations for DBs created before v1.5 (idempotent: a duplicate-
+    -- column error on an already-migrated DB is expected and swallowed).
+    pcall(db.exec, "ALTER TABLE _hull_jobs ADD COLUMN progress INTEGER NOT NULL DEFAULT 0")
+    pcall(db.exec, "ALTER TABLE _hull_cron ADD COLUMN tz_offset INTEGER NOT NULL DEFAULT 0")
 
     -- Fleet-wide rate-limit counters (jobs.limit). One row per limited queue;
     -- `name` (not the reserved word `key`), a window start, and the count.
@@ -297,7 +309,17 @@ function jobs.enqueue(job_type, data, opts)
     end
     opts = opts or {}
     local now    = time.now()
-    local run_at = opts.run_at or (now + (opts.delay or 0))
+    -- Schedule: absolute `at` (unix ts) wins, else `run_at`, else now + `delay`.
+    local run_at = opts.at or opts.run_at or (now + (opts.delay or 0))
+    -- Windowed throttle: skip (return nil) if a job of this (queue, type) was
+    -- created within the last `throttle` seconds. Best-effort - keyed by
+    -- (queue, type), no unique constraint (use dedup_key for exact-once).
+    if opts.throttle and opts.throttle > 0 then
+        local hit = db.query(
+            "SELECT 1 AS x FROM _hull_jobs WHERE queue=? AND type=? AND created_at > ? LIMIT 1",
+            { opts.queue or "default", job_type, now - opts.throttle })
+        if hit and #hit > 0 then return nil end
+    end
     local deps = opts.depends_on
     local has_deps = type(deps) == "table" and #deps > 0
     local vals = {
@@ -349,6 +371,38 @@ function jobs.enqueue(job_type, data, opts)
         end
     end
     return id
+end
+
+--- Enqueue many jobs in one transaction. `items` is a list of
+-- `{ type, data?, opts? }` tables, each accepting the same `opts` as
+-- `jobs.enqueue` EXCEPT `depends_on` (bulk is for independent jobs - build graphs
+-- with `jobs.enqueue`, which errors here if seen). All rows commit together (one
+-- `db.batch`), so the whole batch is atomic AND cheap: a single commit/fsync
+-- instead of one per job - the reason to prefer this over a loop of `enqueue`.
+-- Returns an array of ids in input order, with `nil` for any item whose
+-- `dedup_key` collided with an existing un-run job (same as `jobs.enqueue`).
+-- @tparam table items  list of { type, data, opts }
+-- @treturn table  array of ids (nil per deduped item), in input order
+function jobs.enqueue_many(items)
+    if type(items) ~= "table" then error("jobs.enqueue_many: items must be a list") end
+    local n = #items
+    local ids = {}
+    if n == 0 then return ids end
+    for i = 1, n do
+        local it = items[i]
+        if type(it) ~= "table" or type(it.type) ~= "string" or it.type == "" then
+            error("jobs.enqueue_many: item " .. i .. " needs a non-empty string type")
+        end
+        if it.opts and it.opts.depends_on then
+            error("jobs.enqueue_many: depends_on is not supported in bulk; use jobs.enqueue for graph nodes")
+        end
+    end
+    db.batch(function()
+        for i = 1, n do
+            ids[i] = jobs.enqueue(items[i].type, items[i].data, items[i].opts)
+        end
+    end)
+    return ids
 end
 
 -- Decode a claimed DB row into a handler-facing job (payload -> data).
@@ -472,19 +526,46 @@ function jobs.purge(queue, opts)
         params) or 0
 end
 
---- Atomically claim up to `batch` ready jobs from a queue, marking them
--- `running`. Concurrency-safe across workers and processes: SKIP LOCKED on
--- Postgres/MySQL, serialized on SQLite (single-writer + WAL busy-wait). A
--- `claim_token` nonce disambiguates the claimant on backends without RETURNING.
--- Each ready job is claimed by exactly one caller. Low-level: `jobs.work`
--- wraps this; a custom worker can call it directly.
---
--- @tparam[opt] table opts  { queue = "default", batch = 10 }
--- @treturn table  array of claimed jobs { id, type, data, attempts, max_attempts }
-function jobs.claim(opts)
-    opts = opts or {}
-    local queue = opts.queue or "default"
-    local batch = opts.batch or 10
+-- Resolve opts.queue / opts.queues to an ordered list of queues to try. A single
+-- `queue` (or the default) is a one-element order. `queues` may be:
+--   * a LIST { "critical", "default", "low" } - strict priority: try each in
+--     order, claim from the first with ready work (higher queues drain first).
+--   * a MAP { critical=3, default=2, low=1 } - weighted fairness: the order is a
+--     weighted-random shuffle (first-choice ~ weight over many calls), with every
+--     queue still present as a fallback so no claim cycle is wasted and no queue
+--     starves. A homogeneous fleet gives fleet-wide fairness (each worker draws
+--     independently). Zero/negative weights and non-number values are dropped.
+local function resolve_queue_order(opts)
+    local qs = opts.queues
+    if qs == nil then return { opts.queue or "default" } end
+    if qs[1] ~= nil then                          -- list form (strict priority)
+        local order = {}
+        for i = 1, #qs do order[i] = qs[i] end
+        return order
+    end
+    local names, weights, total = {}, {}, 0       -- map form (weighted)
+    for name, w in pairs(qs) do
+        if type(w) == "number" and w > 0 then
+            names[#names + 1] = name; weights[name] = w; total = total + w
+        end
+    end
+    local order = {}
+    while #names > 0 do
+        local pick, acc, idx = math.random() * total, 0, #names
+        for i = 1, #names do
+            acc = acc + weights[names[i]]
+            if pick <= acc then idx = i; break end
+        end
+        local chosen = names[idx]
+        order[#order + 1] = chosen
+        total = total - weights[chosen]
+        table.remove(names, idx)
+    end
+    return order
+end
+
+-- Claim up to `batch` ready jobs from ONE queue (the per-backend atomic claim).
+local function claim_one(queue, batch)
     if is_paused(queue) then return {} end   -- paused: don't dispatch
     local now   = time.now()
     local token = crypto.base64url_encode(crypto.random(16))
@@ -555,6 +636,30 @@ function jobs.claim(opts)
     return rl_apply(queue, out)
 end
 
+--- Atomically claim up to `batch` ready jobs, marking them `running`.
+-- Concurrency-safe across workers and processes: SKIP LOCKED on Postgres/MySQL,
+-- serialized on SQLite (single-writer + WAL busy-wait). A `claim_token` nonce
+-- disambiguates the claimant on backends without RETURNING. Each ready job is
+-- claimed by exactly one caller. Low-level: `jobs.work` wraps this.
+--
+-- Draws from a single queue (`opts.queue`, default "default") or across several
+-- via `opts.queues` - a LIST for strict priority or a MAP for weighted fairness
+-- (see `resolve_queue_order`). Multi-queue claims from the first queue in the
+-- resolved order that has ready work, so a single call returns jobs from one
+-- queue; a worker loop drains the rest on subsequent calls.
+--
+-- @tparam[opt] table opts  { queue = "default" | queues = {...}, batch = 10 }
+-- @treturn table  array of claimed jobs { id, type, data, attempts, max_attempts }
+function jobs.claim(opts)
+    opts = opts or {}
+    local batch = opts.batch or 10
+    for _, q in ipairs(resolve_queue_order(opts)) do
+        local got = claim_one(q, batch)
+        if #got > 0 then return got end
+    end
+    return {}
+end
+
 -- ── Handlers + the work loop ────────────────────────────────────────────
 
 --- Register a handler for a job type. `jobs.work` dispatches each claimed job
@@ -582,6 +687,32 @@ function jobs.default(fn)
     return jobs
 end
 
+--- Register an in-process lifecycle listener. `event` is one of "completed",
+-- "retried" (a failed attempt that will be retried with backoff), or "dead"
+-- (dead-lettered: retries exhausted, handler returned jobs.DEAD, or no handler).
+-- The listener is called `fn(job, info)` synchronously by `jobs.work`, in the
+-- worker that processed the job, right after the outcome is applied:
+--   * completed -> info = { result = <handler return value or nil> }
+--   * retried   -> info = { error, attempt }   (attempt = the one that just failed)
+--   * dead      -> info = { error }
+-- Multiple listeners per event fire in registration order; each is isolated (a
+-- throwing listener can't derail the loop or the others). Keep hooks fast and
+-- synchronous - they run inline on the event-loop thread. These are per-worker,
+-- for observability/metrics/side-effects; a durable fleet-wide event stream is
+-- the LISTEN/NOTIFY epic (#235). Workflow cascade-failures don't emit here (the
+-- failing dependency's own `dead` event is the signal).
+-- @tparam string event  "completed" | "retried" | "dead"
+-- @tparam function fn
+function jobs.on(event, fn)
+    if not _listeners[event] then
+        error("jobs.on: unknown event '" .. tostring(event) .. "' (completed|retried|dead)")
+    end
+    if type(fn) ~= "function" then error("jobs.on: listener must be a function") end
+    local L = _listeners[event]
+    L[#L + 1] = fn
+    return jobs
+end
+
 local function mark_done(id, result)
     db.exec("UPDATE _hull_jobs SET status='done', claim_token=NULL, updated_at=? WHERE id=?",
         { time.now(), id })
@@ -606,18 +737,28 @@ end
 -- Reschedule with backoff, or dead-letter once attempts are exhausted. `attempts`
 -- was already incremented by the claim, so it is the count of the attempt that
 -- just ran.
+-- Returns the disposition it applied: "dead" (retries exhausted -> dead-letter)
+-- or "retried" (rescheduled with backoff), so jobs.work can emit the right event.
 local function mark_retry(job, err)
     local attempts = job.attempts or 0
     local max = job.max_attempts or _cfg.max_attempts
     if attempts >= max then
         mark_dead(job.id, err)
-        return
+        return "dead"
     end
     local now = time.now()
     db.exec(
         "UPDATE _hull_jobs SET status='pending', run_at=?, last_error=?, claim_token=NULL, "
         .. "updated_at=? WHERE id=?",
         { now + _cfg.backoff(attempts), err, now, job.id })
+    return "retried"
+end
+
+-- Fire in-process listeners for a lifecycle event. Each listener is isolated:
+-- a throwing hook can't derail the work loop or the other listeners.
+local function emit(event, job, info)
+    local L = _listeners[event]
+    for i = 1, #L do pcall(L[i], job, info) end
 end
 
 --- Reclaim jobs stuck in `running` past the visibility timeout - a worker that
@@ -703,10 +844,37 @@ end
 -- Smallest unix ts strictly after `from_ts` whose UTC time matches `c`.
 -- Coarse-to-fine skips (whole day / hour / minute) keep it fast even for rare
 -- specs like "0 0 29 2 *". Returns nil if none within the search bound.
-local function cron_next(c, from_ts)
+-- Resolve a cron `tz` option to a FIXED offset in seconds east of UTC. Accepts a
+-- number (minutes east of UTC) or a string "+HH:MM" / "-HH:MM" / "+HHMM" / "Z".
+-- IANA names ("Europe/Budapest") are rejected: a DST-correct named zone needs a
+-- tz database Hull can't read inside the sandbox. So this is fixed-offset only -
+-- no daylight-saving transitions.
+local function parse_tz_offset(tz)
+    if tz == nil then return 0 end
+    if type(tz) == "number" then return math.floor(tz * 60) end
+    if type(tz) == "string" then
+        if tz == "Z" or tz == "UTC" or tz == "utc" then return 0 end
+        local sign, hh, mm = tz:match("^([+-])(%d%d):?(%d%d)$")
+        if sign then
+            local off = tonumber(hh) * 3600 + tonumber(mm) * 60
+            return sign == "-" and -off or off
+        end
+        error("jobs.cron: tz must be a fixed offset (\"+02:00\", \"-0530\", or minutes "
+            .. "east of UTC); IANA zone names like '" .. tz .. "' need a tz database "
+            .. "unavailable in the sandbox")
+    end
+    error("jobs.cron: tz must be a string offset or a number of minutes")
+end
+
+-- Next matching instant AT OR AFTER from_ts, as a UTC unix timestamp. `offset`
+-- (seconds east of UTC, default 0) shifts only the calendar decode, so the spec
+-- matches wall-clock fields in that fixed-offset zone while the returned value
+-- stays UTC.
+local function cron_next(c, from_ts, offset)
+    offset = offset or 0
     local t = math.floor(from_ts / 60) * 60 + 60
     for _ = 1, 200000 do
-        local month, day, hour, minute, dow = decode_ts(t)
+        local month, day, hour, minute, dow = decode_ts(t + offset)
         if not c.month[month] then
             t = (math.floor(t / 86400) + 1) * 86400
         else
@@ -734,11 +902,11 @@ end
 -- occurrence - fire-once, no backfill storm. Called (throttled) from jobs.work.
 local function process_cron(now)
     local due = db.query(
-        "SELECT name, spec, type, payload, queue, priority, max_attempts, next_run_at "
+        "SELECT name, spec, type, payload, queue, priority, max_attempts, next_run_at, tz_offset "
         .. "FROM _hull_cron WHERE next_run_at <= ?", { now })
     for _, c in ipairs(due) do
         local parsed = parse_cron(c.spec)
-        local nxt = parsed and cron_next(parsed, now) or (now + 60)
+        local nxt = parsed and cron_next(parsed, now, c.tz_offset) or (now + 60)
         local won = db.exec(
             "UPDATE _hull_cron SET next_run_at=?, last_run_at=?, updated_at=? "
             .. "WHERE name=? AND next_run_at=?",
@@ -772,7 +940,8 @@ function jobs.cron(name, spec, data, opts)
     if not parsed then error("jobs.cron: " .. (err or "invalid cron spec")) end
     opts = opts or {}
     local now = time.now()
-    local nxt = cron_next(parsed, now)
+    local tz_offset = parse_tz_offset(opts.tz)
+    local nxt = cron_next(parsed, now, tz_offset)
     if not nxt then error("jobs.cron: spec has no upcoming occurrence") end
     local job_type = opts.type or name
     local payload  = data ~= nil and json.encode(data) or nil
@@ -780,13 +949,13 @@ function jobs.cron(name, spec, data, opts)
     local priority = opts.priority or 0
     local n = db.exec(
         "UPDATE _hull_cron SET spec=?, type=?, payload=?, queue=?, priority=?, "
-        .. "max_attempts=?, next_run_at=?, updated_at=? WHERE name=?",
-        { spec, job_type, payload, queue, priority, opts.max_attempts, nxt, now, name })
+        .. "max_attempts=?, next_run_at=?, tz_offset=?, updated_at=? WHERE name=?",
+        { spec, job_type, payload, queue, priority, opts.max_attempts, nxt, tz_offset, now, name })
     if (n or 0) == 0 then
         db.exec(
             "INSERT INTO _hull_cron (name, spec, type, payload, queue, priority, "
-            .. "max_attempts, next_run_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            { name, spec, job_type, payload, queue, priority, opts.max_attempts, nxt, now })
+            .. "max_attempts, next_run_at, tz_offset, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            { name, spec, job_type, payload, queue, priority, opts.max_attempts, nxt, tz_offset, now })
     end
     return jobs
 end
@@ -799,9 +968,9 @@ function jobs.uncron(name)
 end
 
 -- Internal seams for tests / introspection; not part of the app-facing contract.
-jobs._cron_next = function(spec, from)
+jobs._cron_next = function(spec, from, offset)
     local p = parse_cron(spec)
-    return p and cron_next(p, from or time.now()) or nil
+    return p and cron_next(p, from or time.now(), offset) or nil
 end
 jobs._tick = function(now) process_cron(now or time.now()) end
 
@@ -832,15 +1001,20 @@ function jobs.work(opts)
         job.deps = load_deps(job.id)   -- workflow: dependency results, in order
         local h = _handlers[job.type] or _default
         if not h then
-            mark_dead(job.id, "no handler for job type '" .. tostring(job.type) .. "'")
+            local err = "no handler for job type '" .. tostring(job.type) .. "'"
+            mark_dead(job.id, err)
+            emit("dead", job, { error = err })
         else
             local ok, result = pcall(h, job)
             if not ok then
-                mark_retry(job, tostring(result))
+                local err = tostring(result)
+                emit(mark_retry(job, err), job, { error = err, attempt = job.attempts })
             elseif result == jobs.DEAD then
                 mark_dead(job.id, "handler returned jobs.DEAD")
+                emit("dead", job, { error = "handler returned jobs.DEAD" })
             elseif result == jobs.RETRY then
-                mark_retry(job, "handler requested retry")
+                emit(mark_retry(job, "handler requested retry"), job,
+                     { error = "handler requested retry", attempt = job.attempts })
             else
                 -- nil / true / jobs.DISCARD -> done, no result; any other return
                 -- value is stored as the job's result (for dependents).
@@ -849,6 +1023,7 @@ function jobs.work(opts)
                     res = result
                 end
                 mark_done(job.id, res)
+                emit("completed", job, { result = res })
             end
         end
     end
@@ -957,14 +1132,30 @@ local function shape_ops(r)
     j.last_error = r.last_error
     j.created_at = r.created_at
     j.updated_at = r.updated_at
+    j.progress   = r.progress
     return j
+end
+
+--- Set a running job's progress percent (0-100), surfaced by
+-- `jobs.get(id).progress`. Advisory - a UI/ops hint for long jobs, orthogonal
+-- to the claim/heartbeat. The value is clamped to [0,100] and rounded. Call it
+-- from a handler with `job.id`. Returns the clamped value stored.
+-- @tparam number id
+-- @tparam number pct  0..100
+-- @treturn number  the clamped value written
+function jobs.progress(id, pct)
+    local p = tonumber(pct) or 0
+    if p < 0 then p = 0 elseif p > 100 then p = 100 end
+    p = math.floor(p + 0.5)
+    db.exec("UPDATE _hull_jobs SET progress=?, updated_at=? WHERE id=?", { p, time.now(), id })
+    return p
 end
 
 --- Fetch a single job by id (its full status view), or nil if it doesn't exist.
 -- The only way to inspect an individual job from app code: `_hull_jobs` is in the
 -- protected namespace, so a direct query is blocked. Poll this for a terminal
--- status (jobs are fire-and-forget; there is no result backend - a handler that
--- produces output must persist it itself).
+-- status, or use `jobs.result` / `jobs.await` to fetch a finished job's return
+-- value (a handler's non-nil return is persisted as the job's result).
 -- @tparam number id
 -- @treturn table|nil  { id, type, data, status, queue, priority, attempts,
 --                       max_attempts, run_at, last_error, created_at, updated_at }
@@ -972,6 +1163,60 @@ function jobs.get(id)
     local rows = db.query("SELECT * FROM _hull_jobs WHERE id=?", { id })
     if not rows or #rows == 0 then return nil end
     return shape_ops(rows[1])
+end
+
+--- Fetch a job's terminal result without the full status view. Returns nil when
+-- the job is unknown (never enqueued, or already purged by `jobs.cleanup`);
+-- otherwise `{ status, result?, error? }`:
+--   * a `done` job carries `result` = the handler's decoded return value (absent
+--     when the handler returned nil / true / jobs.DISCARD),
+--   * a `dead` job carries `error` = its last error string,
+--   * a still-running (`pending`/`running`/`blocked`) job carries neither.
+-- This is the standalone counterpart to a workflow dependent's injected
+-- `job.deps[i].result`: any job's return value is readable here, not only a
+-- dependency's. The result lives as long as the job row (governed by
+-- `jobs.cleanup`), so read it before the terminal row is purged.
+-- @tparam number id
+-- @treturn table|nil
+function jobs.result(id)
+    local rows = db.query("SELECT status, last_error FROM _hull_jobs WHERE id=?", { id })
+    if not rows or #rows == 0 then return nil end
+    local status = rows[1].status
+    local out = { status = status }
+    if status == "done" then
+        local rr = db.query("SELECT result FROM _hull_job_results WHERE job_id=?", { id })
+        if rr and #rr > 0 and rr[1].result ~= nil then
+            out.result = json.decode(rr[1].result)
+        end
+    elseif status == "dead" then
+        out.error = rows[1].last_error
+    end
+    return out
+end
+
+--- Block (yielding to the event loop) until a job reaches a terminal status,
+-- then return its `jobs.result`. For the "enqueue then wait for the value"
+-- pattern; it polls `jobs.result` every `opts.interval` ms (default 100),
+-- sleeping via `hull.sleep` between polls so other work keeps running. With
+-- `opts.timeout` (ms) it gives up after that budget and returns the last
+-- (non-terminal) result view instead of the terminal one; without a timeout it
+-- waits indefinitely. Returns nil immediately if the job is unknown. Requires a
+-- yielding context (`app.main`, a handler, a timer) - a worker still processes
+-- jobs while another coroutine awaits.
+-- @tparam number id
+-- @tparam[opt] table opts  { timeout = <ms>, interval = <ms> }
+-- @treturn table|nil  the terminal `jobs.result`, a timed-out view, or nil
+function jobs.await(id, opts)
+    opts = opts or {}
+    local interval = opts.interval or 100
+    local deadline = opts.timeout and (time.clock() + opts.timeout) or nil
+    while true do
+        local r = jobs.result(id)
+        if r == nil then return nil end                     -- unknown / purged
+        if r.status == "done" or r.status == "dead" then return r end
+        if deadline and time.clock() >= deadline then return r end
+        hull.sleep(interval)
+    end
 end
 
 --- Extend the claim on a job the current handler is processing (heartbeat). A
