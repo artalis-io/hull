@@ -85,6 +85,7 @@ int hl_cmd_help(int argc, char **argv, const HlCommandEnv *env)
 #ifdef HL_ENABLE_DB
     section(f, "Database");
     row(f, "migrate",       "apply / list / scaffold SQL migrations");
+    row(f, "jobs",          "run a dedicated job-queue worker (jobs worker)");
 #endif
 
     section(f, "Deployment");

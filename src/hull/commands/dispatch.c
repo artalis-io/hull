@@ -25,6 +25,7 @@
 #endif
 #include "hull/commands/eject.h"
 #ifdef HL_ENABLE_DB
+#include "hull/commands/jobs.h"
 #include "hull/commands/migrate.h"
 #endif
 #include "hull/commands/sign_platform.h"
@@ -73,6 +74,7 @@ static const HlCommand commands[] = {
     { "sign-platform", hl_cmd_sign_platform },
 #ifdef HL_ENABLE_DB
     { "migrate",       hl_cmd_migrate },
+    { "jobs",          hl_cmd_jobs },
 #endif
 #ifdef HL_ENABLE_HTTP_SERVER
     { "agent",         hl_cmd_agent },

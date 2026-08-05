@@ -10,6 +10,9 @@
 # Phase 3: handlers + work loop + outcomes (done / dead-letter / retry-backoff),
 #          the optional catch-all default handler, and the visibility-timeout
 #          reaper - in both runtimes.
+# Phase 4: the dedicated worker - jobs.run_worker (drain + jobs.stop graceful
+#          exit) in both runtimes, plus the worker-mode concurrency gate driven
+#          through the `hull jobs worker` CLI (K workers, exactly-once).
 #
 # Design: docs/jobs_design.md.
 #
@@ -217,6 +220,98 @@ echo "== Phase 3: Lua =="
 check_phase3 "lua" "lua" "$LUA_P3"
 echo "== Phase 3: JS =="
 check_phase3 "js" "js" "$JS_P3"
+
+# ── Phase 4: dedicated worker - run_worker drain + stop, both runtimes ───────
+# The worker app enqueues 5, drains via run_worker({drain=true}), then proves
+# jobs.stop() exits a non-drain loop mid-batch. Emits: P4 processed=5 stopped=3
+check_phase4() {
+    label="$1"; ext="$2"; app="$3"
+    T="$(mktemp -d)"
+    printf '%s\n' "$app" > "$T/app.$ext"
+    out="$("$HULL" "$T/app.$ext" -d "$T/a.db" 2>/dev/null)" || true
+    case "$out" in
+        *"P4 processed=5 stopped=3"*)
+            pass "$label: run_worker drain + jobs.stop graceful exit" ;;
+        *) fail "$label: phase-4 worker loop" "$out" ;;
+    esac
+    rm -rf "$T"
+}
+
+LUA_P4='local jobs = require("hull.jobs")
+app.manifest({ modules = { "hull/jobs@1" } })
+app.main(function(ctx)
+  jobs.init()
+  jobs.handler("d", function(j) return end)
+  for i = 1, 5 do jobs.enqueue("d", {}) end
+  local processed = jobs.run_worker({ drain = true, poll_ms = 10 })
+  -- stop(): 3 more jobs, handler stops the (non-drain) loop on the first; the
+  -- batch still finishes, then the loop exits at the next _running check.
+  local done = 0
+  jobs.handler("s", function(j) done = done + 1; if done == 1 then jobs.stop() end end)
+  for i = 1, 3 do jobs.enqueue("s", {}) end
+  jobs.run_worker({ poll_ms = 10 })
+  ctx.stdout:write(("P4 processed=%d stopped=%d\n"):format(processed, done))
+  return 0
+end)'
+
+JS_P4='import { app } from "hull:app"; import { jobs } from "hull:jobs";
+app.manifest({ modules: ["hull/jobs@1"] });
+app.main(async (ctx) => {
+  jobs.init();
+  jobs.handler("d", (j) => {});
+  for (let i = 1; i <= 5; i++) jobs.enqueue("d", {});
+  const processed = await jobs.runWorker({ drain: true, pollMs: 10 });
+  let done = 0;
+  jobs.handler("s", (j) => { done++; if (done === 1) jobs.stop(); });
+  for (let i = 1; i <= 3; i++) jobs.enqueue("s", {});
+  await jobs.runWorker({ pollMs: 10 });
+  ctx.stdout.write(`P4 processed=${processed} stopped=${done}\n`);
+  return 0;
+});'
+
+echo "== Phase 4: Lua =="
+check_phase4 "lua" "lua" "$LUA_P4"
+echo "== Phase 4: JS =="
+check_phase4 "js" "js" "$JS_P4"
+
+# ── Phase 4: worker-mode concurrency via `hull jobs worker` ──────────────────
+# The Phase-2 claim gate, but driven through the dedicated-worker CLI: K
+# `hull jobs worker` processes drain one shared WAL DB; each job's handler runs
+# exactly once across all workers (no double-processing).
+echo "== worker concurrency ($CONC `hull jobs worker` processes) =="
+W="$(mktemp -d)"; DB="$W/jobs.db"
+cat > "$W/seed.lua" <<LUA
+local jobs = require("hull.jobs")
+app.manifest({ modules = { "hull/jobs@1" } })
+app.main(function() jobs.init(); for i=1,$N do jobs.enqueue("w",{n=i}) end; return 0 end)
+LUA
+cat > "$W/worker.lua" <<'LUA'
+local jobs = require("hull.jobs")
+app.manifest({ modules = { "hull/jobs@1" } })
+app.main(function(ctx)
+  jobs.init()
+  jobs.handler("w", function(j) ctx.stdout:write(j.data.n .. "\n") end)
+  jobs.run_worker({ drain = true, batch = 7, poll_ms = 5 })
+  return 0
+end)
+LUA
+
+"$HULL" "$W/seed.lua" -d "$DB" >/dev/null 2>&1
+i=1
+while [ "$i" -le "$CONC" ]; do
+    "$HULL" jobs worker "$W/worker.lua" -d "$DB" > "$W/out.$i" 2>/dev/null &
+    i=$((i + 1))
+done
+wait
+
+total="$(cat "$W"/out.* | grep -c . || true)"
+uniq="$(cat "$W"/out.* | sort -n | uniq | grep -c . || true)"
+if [ "$total" -eq "$N" ] && [ "$uniq" -eq "$N" ]; then
+    pass "worker concurrency: $N jobs processed exactly once by $CONC workers"
+else
+    fail "worker concurrency: expected $N processed once" "total=$total uniq=$uniq"
+fi
+rm -rf "$W"
 
 echo ""
 echo "=== Summary ==="

@@ -13,9 +13,9 @@
  * Full design: docs/jobs_design.md.
  *
  * Implemented: schema + jobs.init, enqueue, the atomic claim, per-type +
- * catch-all handlers, and the work loop (retry-with-backoff, dead-letter, and
- * the visibility-timeout reaper). The dedicated `hull jobs worker` process
- * lands in a later phase.
+ * catch-all handlers, the work loop (retry-with-backoff, dead-letter, and the
+ * visibility-timeout reaper), and the dedicated worker (jobs.runWorker +
+ * `hull jobs worker`). Ops (dead / retry / cleanup) land in a later phase.
  *
  * @license AGPL-3.0-or-later
  */
@@ -285,7 +285,7 @@ function reap(opts) {
 /**
  * Claim a batch and run each job's handler (awaited, so sync and async handlers
  * both work), applying the outcome. Runs the reaper first. Drive from a timer
- * (`app.every(1000, () => jobs.work())`) or a dedicated worker (Phase 4).
+ * (`app.every(1000, () => jobs.work())`) or a dedicated worker (runWorker).
  * Idempotent handlers required (a job may run more than once). Returns the
  * number of jobs processed.
  * @param {object} [opts]  { queue, batch, visibilityTimeout }
@@ -310,6 +310,55 @@ async function work(opts) {
     return batch.length;
 }
 
+// Worker loop control: stop() flips this so a running runWorker returns after
+// its current iteration. A fresh runWorker resets it to true.
+let _running = false;
+
+/**
+ * Request the running runWorker loop to stop after the current iteration.
+ * No-op if no worker is running. Safe to call from a handler.
+ */
+function stop() {
+    _running = false;
+}
+
+/**
+ * Blocking claim loop: the dedicated-worker execution model. Call it from
+ * `app.main` (`app.main(async () => { await jobs.runWorker(); })`) and run the
+ * app as its own process (`hull app.js`, or `hull jobs worker app.js`); run K
+ * copies for horizontal scale - each claims disjoint jobs via the atomic claim.
+ * Each iteration runs `work` (claim a batch, dispatch, reap); when a claim comes
+ * back empty it sleeps `pollMs` (yielding to the event loop, so async handlers
+ * and timers keep running). Returns the total jobs processed when the loop exits.
+ *
+ * Exit conditions: `jobs.stop()` (graceful), or - for bounded / batch-drain
+ * runs - `opts.drain` / `opts.maxEmptyPolls`. With neither, it runs until
+ * stopped or the process is signalled (an in-flight job is then reclaimed by
+ * the visibility-timeout reaper, since handlers are at-least-once).
+ * @param {object} [opts]  { queue, batch, pollMs, visibilityTimeout, drain,
+ *                           maxEmptyPolls }
+ * @returns {Promise<number>}  total jobs processed
+ */
+async function runWorker(opts) {
+    const o = opts || {};
+    const pollMs = o.pollMs !== undefined ? o.pollMs : 1000;
+    const maxEmpty = o.maxEmptyPolls !== undefined ? o.maxEmptyPolls : (o.drain ? 1 : 0);
+    _running = true;
+    let processed = 0, empty = 0;
+    while (_running) {
+        const n = await work(o);
+        processed += n;
+        if (n === 0) {
+            empty++;
+            if (maxEmpty > 0 && empty >= maxEmpty) break;
+            await hull.sleep(pollMs);
+        } else {
+            empty = 0;
+        }
+    }
+    return processed;
+}
+
 /**
  * Count jobs by status (optionally scoped to a queue). A minimal ops view.
  * @param {object} [opts]  { queue }
@@ -327,7 +376,7 @@ function stats(opts) {
 
 export const jobs = {
     init, enqueue, claim, handler, default: setDefault, work, reap, stats,
-    RETRY, DEAD, DISCARD, _config: _cfg,
+    runWorker, stop, RETRY, DEAD, DISCARD, _config: _cfg,
 };
-export { init, enqueue, claim, handler, work, reap, stats };
+export { init, enqueue, claim, handler, work, reap, stats, runWorker, stop };
 export default jobs;

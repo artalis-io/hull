@@ -9,9 +9,9 @@
 -- Full design: docs/jobs_design.md.
 --
 -- Implemented: schema + jobs.init, enqueue, the atomic claim, per-type +
--- catch-all handlers, and the work loop (retry-with-backoff, dead-letter, and
--- the visibility-timeout reaper). The dedicated `hull jobs worker` process
--- lands in a later phase.
+-- catch-all handlers, the work loop (retry-with-backoff, dead-letter, and the
+-- visibility-timeout reaper), and the dedicated worker (jobs.run_worker +
+-- `hull jobs worker`). Ops (dead / retry / cleanup) land in a later phase.
 --
 -- Usage (target shape):
 --   local jobs = require("hull.jobs")
@@ -317,8 +317,8 @@ end
 --- Claim a batch and run each job's handler, applying the outcome (done /
 -- retry-with-backoff / dead-letter). Runs the reaper first. Drive it from a
 -- timer (`app.every(1000, function() jobs.work() end)`) or a dedicated worker
--- (Phase 4). Idempotent handlers required: a job may run more than once
--- (crash-then-reclaim). Returns the number of jobs processed this call.
+-- (`jobs.run_worker`). Idempotent handlers required: a job may run more than
+-- once (crash-then-reclaim). Returns the number of jobs processed this call.
 -- @tparam[opt] table opts  { queue, batch, visibility_timeout }
 -- @treturn number
 function jobs.work(opts)
@@ -344,6 +344,54 @@ function jobs.work(opts)
         end
     end
     return #batch
+end
+
+-- Worker loop control: jobs.stop() flips this so a running jobs.run_worker
+-- returns after its current iteration (graceful shutdown from a handler,
+-- signal wrapper, or timer). A fresh run_worker resets it to true.
+local _running = false
+
+--- Request the running `jobs.run_worker` loop to stop after the current
+-- iteration. No-op if no worker is running. Safe to call from a handler.
+function jobs.stop()
+    _running = false
+end
+
+--- Blocking claim loop: the dedicated-worker execution model. Call it from
+-- `app.main` (`app.main(function() jobs.run_worker() end)`) and run the app as
+-- its own process (`hull app.lua`, or `hull jobs worker app.lua`); run K copies
+-- for horizontal scale - each claims disjoint jobs via the atomic claim. Each
+-- iteration runs `jobs.work` (claim a batch, dispatch, reap); when a claim
+-- comes back empty it sleeps `poll_ms` before polling again (yielding to the
+-- event loop, so async handlers and timers keep running). Returns the total
+-- number of jobs processed when the loop exits.
+--
+-- Exit conditions: `jobs.stop()` (graceful), or - for bounded / batch-drain
+-- runs - `opts.drain` / `opts.max_empty_polls`. With neither, it runs until
+-- stopped or the process is signalled (an in-flight job is then reclaimed by
+-- the visibility-timeout reaper, since handlers are at-least-once).
+-- @tparam[opt] table opts  { queue, batch, poll_ms, visibility_timeout,
+--                            drain, max_empty_polls }
+-- @treturn number  total jobs processed
+function jobs.run_worker(opts)
+    opts = opts or {}
+    local poll_ms = opts.poll_ms or 1000
+    -- drain = "exit as soon as the queue is empty" (== max_empty_polls 1).
+    local max_empty = opts.max_empty_polls or (opts.drain and 1 or 0)
+    _running = true
+    local processed, empty = 0, 0
+    while _running do
+        local n = jobs.work(opts)
+        processed = processed + n
+        if n == 0 then
+            empty = empty + 1
+            if max_empty > 0 and empty >= max_empty then break end
+            hull.sleep(poll_ms)
+        else
+            empty = 0
+        end
+    end
+    return processed
 end
 
 --- Count jobs by status (optionally scoped to a queue). A minimal ops view;
