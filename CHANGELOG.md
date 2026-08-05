@@ -8,6 +8,48 @@ release-artifact layout).
 
 ## [Unreleased]
 
+## [0.10.0] — 2026-08-05
+
+Self-contained cross-platform builds. A cosmo `hull` on a stock machine with no
+pre-installed toolchain can now produce a working APE, capped by the self-hosted
+Windows story: `hull tools install cosmocc` side-loads a trimmed, signed
+compiler+shell bundle and `hull build` drives it transparently. Rounds out with
+in-process `hull test` harness parity, the Makefile modularization, and a sweep
+of stdlib audit follow-ups.
+
+### Added
+
+- **Self-contained `hull build` on stock Windows.** A cosmo `hull` plus `hull
+  tools install cosmocc` (a trimmed cosmocc + busybox-w64 bundle, published as
+  `hull-cosmocc.tar` and Ed25519-signed in the release) builds a working APE on
+  a stock Windows box with no pre-installed toolchain. The `cosmocc` tool is
+  registered in the side-load registry on the same trust chain as `hull update`
+  (fetch the release-signed `hull.sha256`, verify the asset's SHA-256, atomic
+  install to `$HOME/.hull/tools/`).
+
+### Changed
+
+- **In-process `hull test` harness parity.** The test harness now wires the fs
+  capability from the manifest, so `blob.*` / `fs.*` / `fs.mmap` work under `hull
+  test` exactly as they do under `hull dev`; and it supports streaming multipart
+  bodies (`req:multipart()` / `req.multipart()`) by pre-feeding the whole
+  synthetic body. Both runtimes.
+- **Build modularization.** The monolithic Makefile is split into `mk/`
+  fragments (features / vendor / platform / …), ~40% smaller, gated by
+  resolved-value parity so the split is behavior-preserving.
+
+### Fixed
+
+- **Windows:** `blob.init` / `hl_mkdir_p` failed on Windows because a `mkdir` of
+  a drive-root component (`/C`, `/D`) returns `EIO` (not `EEXIST`) under
+  Cosmopolitan; `hl_ensure_dir` now stat-checks for an existing directory on any
+  `mkdir` errno. (Was mis-filed as "spaces in the project path break the blob
+  sandbox.")
+- **Stdlib audit follow-ups:** `csrf.js` per-pair body cap (parity with Lua); a
+  `build.lua` musl SQLite-engine-probe fix; auth-flows nil-guards (both
+  runtimes); `i18n.js` own-property interpolation guard; `template.lua`
+  `__`-prefix identifier rejection.
+
 ## [0.9.0] - 2026-08-01
 
 The fully-composable base. Every remaining reducible subsystem - the WASM

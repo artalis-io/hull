@@ -13,7 +13,7 @@
 ### Capabilities (C enforcement layer)
 - **Crypto:** SHA-256 (with SHA-NI runtime dispatch on Linux/Cosmo arm64 + x86_64), SHA-512, SHA-1, incremental SHA-256 hasher, HMAC-SHA256, HMAC-SHA512/256, HMAC-SHA1 (HOTP/TOTP), PBKDF2, base64url, random bytes, password hash/verify, Ed25519 (sign/verify/keypair), XSalsa20+Poly1305 secretbox, Curve25519 box, **asymmetric verify (RS256/384/512, PS256, ES256/384)** via mbedTLS, x509 → SPKI PEM extraction. HMAC backend behind a vtable (`HlHmacBackend`).
 - **Filesystem:** Sandboxed read/write/exists/delete/mmap with path traversal rejection, symlink escape prevention via realpath
-- **Database:** Query/exec with parameterized binding, batch transactions, statement cache, user-defined functions (Lua/JS/WASM). SQL dialect helpers behind `HlDbBackend` vtable (SQLite + PostgreSQL shipped; MySQL/MariaDB/DuckDB planned).
+- **Database:** Query/exec with parameterized binding, batch transactions, statement cache, user-defined functions (Lua/JS/WASM). SQL dialect helpers behind `HlDbBackend` vtable (SQLite in-base; PostgreSQL + MySQL/MariaDB + DuckDB shipped as composable `--with=` features).
 - **Blob storage:** Content-addressed blob store (`hl_blob_store_*`). Per-blob hard-link layout (free dedup), streaming writers + readers. Powers `hull/attachment@1`, runtime bytecode + template caches, compute AOT cache, signed tools install. CLI: `hull cache list|prune|clear|verify`; per-app isolation via `HULL_CACHE_DIR`.
 - **MIME sniffer:** Magic-bytes + extension fallback (`cap/mime.c`).
 - **HTTP client:** Outbound HTTP/HTTPS with host allowlist enforcement (mbedTLS), connection pooling, redirect following, async
@@ -91,7 +91,7 @@
 - `hull sbom`. SBOM output in four formats (human / JSON / CycloneDX 1.5 / SPDX 2.3), includes binary SHA-256, published as signed release artifacts
 - `hull modules available|list|explain`. Module-registry introspection (grouped: Intrinsic / Core / Web / Web middleware)
 - `hull cache list|prune|clear|verify`. Runtime cache management (Lua/JS bytecode, Lua/JS template, compute AOT, tools store)
-- `hull tools install|list|uninstall`. Side-loaded optional tools (first: `wamrc`) routed through signed `blob_store`
+- `hull tools install|list|uninstall`. Side-loaded optional tools + toolchain bundles (`wamrc`, `zig`, musl static floors, `cosmocc`) routed through the signed `blob_store` / release trust chain
 - `hull update [--check]`. Self-update via signed release manifest (Ed25519 + Sigstore/Rekor + SLSA verification)
 - `hull doctor [--json]`. Environment + distribution readiness check
 - `hull agent`. ~25 machine-readable subcommands (routes, db schema/query, request, status, errors, test, context, migrate, deploy, sbom, tools, overview, modules, auth-status, etc.)
@@ -139,7 +139,7 @@ vs flavor vs tool vs stdlib") and the rationale in
 | **stdlib** | pure Lua/JS over caps we already ship; no new C, no new authority | always in base | jwt, csrf, template, an S3/SigV4 client |
 | **feature** | large optional C subsystem / new authority, **off by default** (additive) | `libhull_feature-<name>.a`, `--with=` | duckdb, postgres, mysql, gpu, tui |
 | **flavor** | preset that validates the app against a slimmer cap set; the base already composes (subtractive) | build.lua preset on the default base (no per-flavor lib since Phase 4.3), `--flavor=` | pure-compute |
-| **tool** | a companion **program** Hull spawns at build time (never linked) | `hull-<tool>-<platform>`, `hull tools install` | wamrc |
+| **tool** | a companion **program** (or toolchain bundle) Hull spawns at build time (never linked) | `hull-<tool>-<platform>` / `.tar` bundle, `hull tools install` | wamrc, zig, musl static floors, cosmocc |
 
 **First yes wins:** separate program → tool; buildable on existing caps → stdlib;
 new vendored C / new authority off by default → feature; turning a default off →
@@ -188,7 +188,7 @@ EMBED_PLATFORM=cosmo    ✅  platform archives embedded in hull binary
 make self-build         ✅  reproducible build chain verified
 ```
 
-The missing piece: `hull build` shells out to `cc` to compile generated C code. Users need gcc/clang/cosmocc installed. Everything else below addresses that gap and the surrounding distribution story.
+The missing piece at the time: `hull build` shelled out to `cc` to compile generated C code, so users needed gcc/clang/cosmocc installed. The phases below address that gap and the surrounding distribution story. **Since closed:** `hull build` is now **compiler-free by default** (it emits `app_registry.o` directly via the object emitter and links, no C compiler needed), and the toolchain-free axis side-loads a linker/toolchain on demand (`hull tools install zig` / `cosmocc` / musl static floors), so a stock install builds an app with zero pre-installed toolchain — see [docs/compiler_free_build.md](compiler_free_build.md) and [docs/toolchain_free_build.md](toolchain_free_build.md).
 
 #### Phase D1: Version + Release Pipeline. **Done**
 
@@ -223,7 +223,7 @@ The missing piece: `hull build` shells out to `cc` to compile generated C code. 
 | `hull build` auto-selects compiler | **Done (superseded)** | `HlCompilerVtable`: was TCC backend (compile) + system cc/gcc/clang (link); now the emit path is default, system compiler is the fallback |
 | `hull build --compiler=tcc\|system\|<path>` | **Done (superseded)** | `--compiler=tcc` now just names a user's own `tcc` on `$PATH` as a plain system compiler; tcc is no longer Hull-provided |
 | Linux native + cosmo coverage | **Done (removed)** | Was verified end-to-end on Linux CI in `e2e_tcc.sh`; that suite is gone |
-| `hull toolchain install` | Skipped | cosmocc users can `make fetch-cosmocc` |
+| `hull toolchain install` | **Superseded** | Toolchains ship as side-loaded tools now: `hull tools install cosmocc` (trimmed cosmocc + busybox bundle, v0.10.0) / `zig` / musl static floors, all on the signed `hull tools` trust chain. `make fetch-cosmocc` remains for from-source builds. |
 
 #### Phase D4: Embedded CA Bundle. **Done**
 

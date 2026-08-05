@@ -28,7 +28,7 @@ This installs to `~/.local/bin/hull` (or `/usr/local/bin/hull` if root).
 The install script detects OS/arch, verifies the SHA-256, and verifies
 the Ed25519 release signature against the embedded public key. No
 sudo prompt unless the prefix needs it. Pin a specific version with
-`HULL_VERSION=v0.4.0 curl ... | sh`.
+`HULL_VERSION=v0.10.0 curl ... | sh`.
 
 Verify:
 
@@ -126,7 +126,7 @@ before proceeding. Don't pick by vibe.
 | **REST / JSON API** | "API for clients to consume", mobile/SPA frontend, OpenAPI, no server-rendered UI | `hull init` (minimal server, then add JSON routes) | `examples/rest_api`, `examples/rest_api_modular`, `examples/jwt_api` |
 | **CLI tool** | Runs once, does a thing, exits. Pipelines / scripts / one-shot operations. Returns shell exit codes. | `hull init --cli` | `examples/hello_cli`, `examples/cli_modular` |
 | **TUI app** | Interactive terminal UI, "dashboard in the terminal", REPL, log tailer, picker. | `hull init` then add `hull/tui` bindings | `examples/tui_dashboard`, `examples/tui_chat`, `examples/tui_log_tailer`, `examples/tui_modular`, `examples/tui_picker`, `examples/tui_repl`. See `docs/cli_mode.md` for the `app.main` lifecycle TUI apps run on. |
-| **Compute / WASM service** | Pure data transformation, scoring, ML inference, no persistent state. Often run as a sidecar. | `hull init` + `compute/` modules; consider `make HL_ENABLE_DB=0` for compute-only builds. GPU compute + DuckDB OLAP are opt-in composable features (`hull build --with=gpu\|duckdb`, native-only) - see `docs/features_and_flavors.md` | `examples/compute`, `examples/compute_gpu_chain`. See `docs/wamr_architecture.md` and CLAUDE.md § "WASM Compute Plugins". |
+| **Compute / WASM service** | Pure data transformation, scoring, ML inference, no persistent state. Often run as a sidecar. | `hull init` + `compute/` modules; a compute app already links zero HTTP/Keel/TLS/SQLite/WASM it doesn't use (the SLIM base auto-composes), or add `--flavor=pure-compute` to also validate no HTTP/TLS is declared. GPU compute + DuckDB OLAP are opt-in composable features (`hull build --with=gpu\|duckdb`, native-only) - see `docs/features_and_flavors.md` | `examples/compute`, `examples/compute_gpu_chain`. See `docs/wamr_architecture.md` and CLAUDE.md § "WASM Compute Plugins". |
 | **Hybrid (app.main + serve loop)** | App needs startup migrations + a serve loop. App needs to run a one-shot then serve. | `hull init` (default) + register `app.main` alongside routes — both are supported simultaneously, see CLAUDE.md § "App Lifecycle" | Any of the above; the lifecycle page covers patterns. |
 
 After picking, run the chosen `hull init` invocation (still in the
@@ -135,20 +135,28 @@ empty app repo). It creates the right `app.lua` / `app.js`, `tests/`,
 overwriting any existing files.
 
 The archetype also determines how lean the built binary is, for free:
-`hull build` produces a binary tailored to the app. The base is
-runtime-less and HTTP-core-less, so the build composes back only what
-the app uses — exactly one interpreter (Lua or JS, from the entry
-file), and the HTTP layer (routes, `res:*`, ws/sse, outbound
-`http.fetch`, Keel) only when the manifest declares an HTTP module. A
-CLI / compute archetype (`app.main`, no HTTP module) links neither the
-web bindings nor the HTTP caps; add `--flavor=pure-compute` and it also
-drops Keel + mbedTLS (~785 KB smaller). This is automatic — the runtimes
-and the HTTP layer ride inside `hull` and auto-compose; only large
-optional subsystems (gpu / duckdb / tui) are `hull build --with=<name>`.
-Composition is signature-aware: `hull build --sign` attests every archive
-it composes (runtime, HTTP core, tui bridge, any `--with` feature) inside
-`package.sig`, and `--verify-sig` proves the app was built from genuine
-gethull.dev artefacts. You don't manage this — it just happens.
+`hull build` produces a binary tailored to the app. The distributed
+hull's app-build base is **fully composable** — it drops EVERY reducible
+subsystem (both interpreters, the HTTP core + web bindings, the Keel
+event loop + server, mbedTLS + TLS, SQLite, WASM/WAMR, image codecs) and
+composes back only what the app uses, statically at build time (a
+whole-archive link, NOT `dlopen`). You get exactly one interpreter (Lua
+or JS, from the entry file); the HTTP layer + Keel only when the manifest
+declares an HTTP module; TLS only when the app needs it (HTTP or a
+`--with=postgres`/`mysql` net-DB); SQLite only when it uses `db`; WASM
+only when it uses `compute`; image codecs only when it declares
+`hull/image`. A CLI / compute archetype (`app.main`, no HTTP/TLS/DB) links
+**zero** Keel, mbedTLS, SQLite, or WASM (~2.1 MB, vs ~6.5 MB full);
+`--flavor=pure-compute` additionally *validates* the app declares no
+HTTP/TLS. This is automatic — every subsystem rides inside `hull` and
+auto-composes; only large optional subsystems (gpu / duckdb / postgres /
+mysql / tui) are `hull build --with=<name>`. Composition is
+signature-aware: `hull build --sign` attests every archive it composes
+(the runtime, HTTP core, Keel, TLS, SQLite, WASM, image, tui bridge, any
+`--with` feature) inside `package.sig`, and `--verify-sig` proves the app
+was built from genuine gethull.dev artefacts. You don't manage this — it
+just happens. (Cosmo, the fat APE, is exempt and keeps everything
+in-base.)
 
 If the spec describes multiple shapes (e.g. an HTMX admin UI **plus**
 a CLI for batch import), pick the PRIMARY one for `hull init` and
@@ -177,7 +185,7 @@ from the CLI:
 | Is my app ready to deploy | `hull agent deploy` |
 | Run a request without booting the full server | `hull agent endpoint POST /items` |
 
-There are 27 `hull agent` subcommands — see [README.md § Using Hull
+There are dozens of `hull agent` subcommands — see [README.md § Using Hull
 with AI Agents](README.md#using-hull-with-ai-agents) for the full
 list. They emit JSON (or `--json`-flagged human output) designed for
 agent consumption: no screen-scraping, no log-parsing. If you find
@@ -324,14 +332,17 @@ in five minutes.
 
 ### What Hull is
 
-A single static binary (~5 MB) that runs HTTP-serving applications
-written in **Lua 5.4** OR **QuickJS** (ES2023). Apps are dynamically
-loaded from a source tree at startup OR compiled into a standalone
-binary via `hull build`. The binary embeds the runtime, the standard
-library, an HTTP server (Keel), SQLite, mbedTLS, a WASM runtime
-(WAMR), optionally a GPU runtime (wgpu-native), and a kernel-level
-sandbox (Seatbelt on macOS, unveil/pledge polyfill on Linux/Cosmo,
-native on OpenBSD).
+A single static binary (~6.5 MB full) that runs applications written in
+**Lua 5.4** OR **QuickJS** (ES2023) — either HTTP-serving or `app.main`
+CLI/compute. Apps are dynamically loaded from a source tree at startup OR
+composed into a standalone binary via `hull build` (which produces a
+binary tailored to the app — a compute-only app links ~2.1 MB). The `hull`
+binary embeds the runtimes, the standard library, an HTTP server (Keel),
+SQLite, mbedTLS, a WASM runtime (WAMR), image codecs, and a kernel-level
+sandbox (Seatbelt on macOS, unveil/pledge polyfill on Linux/Cosmo, native
+on OpenBSD) — and `hull build` composes back into the app only the pieces
+it actually uses. A GPU runtime (wgpu-native) and the DuckDB / Postgres /
+MySQL backends are opt-in composable features (`--with=`), native-only.
 
 ### One runtime per app
 
@@ -535,7 +546,7 @@ content, etc.).
 | Writing your own password hashing | `crypto.hash_password()` / `crypto.verify_password()` (PBKDF2). |
 | Hard-coding admin emails in handler logic | Use RBAC (`hull/web/middleware/rbac@1`) and seed roles in a migration. |
 | Adding `node_modules/` or `vendor/` Lua deps | Hull's stdlib is the answer 95% of the time. If it isn't, flag a platform gap. |
-| Assuming `gpu.*` or a `duckdb://` DSN work everywhere | They're opt-in composable **features** (`hull build --with=gpu\|duckdb`, native-only). Compose the feature, or declare the module optional (`"hull/gpu@1?"`) and branch on `gpu.available()`. |
+| Assuming `gpu.*` or a `postgres://` / `mysql://` / `duckdb://` DSN work everywhere | They're opt-in composable **features** (`hull build --with=gpu\|duckdb\|postgres\|mysql`, native-only). Compose the feature, or declare the module optional (`"hull/gpu@1?"`) and branch on `gpu.available()`. |
 | Bypassing the manifest because "it works" | The manifest is the contract. If you have to bypass it for the app to work, that's a platform gap, not a workaround. |
 | Skipping `hull test` because "I'll test later" | Each PLAN.md step should end with tests passing. No exceptions. |
 
@@ -695,44 +706,67 @@ hull build .                                    # produces ./app binary
 ./app -p 8080 -d /var/lib/myapp/data.db        # run it
 ```
 
-**Build flavors.** `hull build --flavor=<flavor>` produces a narrower,
-smaller binary matched to what the app needs: `full` (HTTP on: server +
-client, default) or `pure-compute` (no HTTP at
-all; smallest). `--flavor=auto` infers the minimal flavor from your
-declared modules. The build validates the manifest against the target
-flavor, so declaring a module that needs a dropped subsystem fails the
-build with a clear message (no silent runtime breakage). On a released
-hull, `hull flavor install <flavor>` fetches the matching platform lib
-(signature + SHA verified) so `--flavor` works without building from
-source. See `docs/build_flavors.md`.
+**Build flavors.** Your app binary is *already* minimal without a flavor:
+the distributed hull's base composes back only the subsystems the app uses
+(see the composition note under Phase 0), so a compute app links zero
+HTTP/Keel/TLS/SQLite/WASM on its own. `--flavor` is now a thin **preset**
+on that composable base: `full` (the default embedded base, a no-op) or
+`pure-compute` (validate: reject any HTTP/TLS module at build time — a
+build failure rather than a runtime surprise). `--flavor=auto` infers the
+minimal flavor from your declared modules. The size win comes from the
+composable base, not the flavor, so there is nothing to install:
+`hull flavor install pure-compute` reports "preset flavor, nothing to
+install". (Pre-built per-flavor platform libs were removed in Phase 4.3.)
+See `docs/build_flavors.md`.
+
+**Compiler-free / toolless builds.** `hull build` is **compiler-free by
+default** — it emits `app_registry.o` via the object emitter and links,
+needing no C compiler at all (`--compiler=system` opts into a system cc;
+`--with=` C++ features and cosmo targets fall back to one automatically).
+By default it needs only a **linker**: `--linker=lld|zig|lld-static|<path>`.
+`hull tools install zig` provides a self-contained per-platform zig bundle
+(a static driver + its libc tree + bundled lld) that runs anywhere and
+cross-compiles via `--target=`, so even a box with no system toolchain can
+`hull build`. `--linker=lld-static` links fully static against the musl
+floors (`hull tools install libc-musl-<arch>`). And a cosmo `hull` plus
+`hull tools install cosmocc` gives self-contained `hull build` on stock
+Windows.
 
 **Composable features (`--with=`).** Some heavy subsystems are NOT in the
 base binary: they're opt-in **features** you compose at build time, the
-additive counterpart to the subtractive flavors above. Two ship today,
-both **native-only (no cosmo)**: **`gpu`** (wgpu-native GPU compute, the
-`gpu.*` API) and **`duckdb`** (embedded OLAP, a `duckdb://` DSN). Install
-the signed lib then compose it:
+additive counterpart to the subtractive flavors above. Five ship today,
+all **native-only (no cosmo)**: **`gpu`** (wgpu-native GPU compute, the
+`gpu.*` API), **`duckdb`** (embedded OLAP, a `duckdb://` DSN), **`postgres`**
+(pure-C PostgreSQL wire backend, a `postgres://` DSN), **`mysql`** (pure-C
+MySQL / MariaDB wire backend, a `mysql://` DSN), and **`tui`** (terminal UI,
+`hull/tui`; auto-inferred from the manifest). Install the signed lib then
+compose it:
 
 ```bash
-hull feature install gpu          # or: duckdb
+hull feature install gpu          # or: duckdb / postgres / mysql / tui
 hull build myapp/ --with=gpu       # duckdb is C++: add --compiler=system
 ```
 
-If your spec needs GPU compute or an OLAP/analytics store, treat it as a
-feature — do NOT assume `gpu.*` or `duckdb://` work on a plain base build.
+If your spec needs GPU compute, an OLAP/analytics store, or a
+Postgres/MySQL database, treat it as a feature — do NOT assume `gpu.*` or a
+`postgres://` / `mysql://` / `duckdb://` DSN work on a plain base build.
 Either compose the feature, or declare the module optional (next) so the
 app degrades gracefully. See `docs/features_and_flavors.md`.
 
-**Companion tools (`hull tools install`).** A couple of build helpers are
+**Companion tools (`hull tools install`).** A few build helpers are
 separate signed programs, not part of the hull binary: **`wamrc`** (the
-LLVM WASM AOT compiler, for ~50x faster compute modules) and **`tcc`** (a
-zero-dependency C compiler backend for `hull build --compiler=tcc`, when
-the box has no system cc; Linux ELF only). `hull build` resolves them from
-`~/.hull/tools` → next to the hull binary → `$PATH`. tcc used to be
-embedded but is now side-loaded, so on a bare Linux box with no system
-compiler, install it first: `hull tools install tcc`. (Most dev machines
-have gcc/clang, so `hull build` just works with `--compiler=system` or the
-default auto-select.) See `docs/tools_install.md`.
+LLVM WASM AOT compiler, for ~50x faster compute modules), the **`zig`**
+toolchain-free linker bundle (`--linker=zig`, cross-compiles via
+`--target=`), the **`libc-musl-<arch>`** static-link floors
+(`--linker=lld-static`), and the **`cosmocc`** bundle (self-contained
+`hull build` on stock Windows). `hull build` resolves them from
+`~/.hull/tools` → next to the hull binary → `$PATH`. Because `hull build`
+is compiler-free by default (it emits `app_registry.o` directly) and needs
+only a linker, most boxes build with no extra install; a truly bare box
+can `hull tools install zig` for a self-contained linker. (There is **no**
+`tcc` — the former embedded/side-loaded TinyCC backend was fully retired;
+it is neither vendored, bundled, nor installable.) See
+`docs/tools_install.md`.
 
 **Optional modules - graceful fallback.** A trailing `?` on a manifest
 spec (`"hull/gpu@1?"`) makes the module optional: on a build without the
@@ -757,7 +791,7 @@ Or wrap in `hull deploy` for systemd + Dockerfile + fly.toml generation.
    know what's missing; you flagging gaps is helpful, not annoying.
 5. **Ask `hull` before you ask the human or grep the source.**
    `hull modules available`, `hull agent <subcmd>`, `hull modules
-   explain`, `hull agent context` — 27 introspection commands are
+   explain`, `hull agent context` — dozens of introspection commands are
    faster and more accurate than reading code. See [When in doubt,
    ask hull](#when-in-doubt-ask-hull).
 6. **Hull is opinionated.** When in doubt about whether to use a Hull

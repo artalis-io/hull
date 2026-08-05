@@ -33,7 +33,7 @@
     "applicationSubCategory": "Runtime",
     "operatingSystem": "Linux, macOS, Windows (via Cosmopolitan), FreeBSD, OpenBSD, NetBSD",
     "description": "Hardened, capability-secure runtime for AI-native systems. Code became disposable; trust is not. Every external capability (filesystem, network, env, process) is declared in the manifest and checked at a kernel-enforced boundary the script cannot cross. Local-first, single static binary, only the bootstrap registration API is intrinsic.",
-    "softwareVersion": "0.1.4",
+    "softwareVersion": "0.10.0",
     "url": "https://gethull.dev/",
     "downloadUrl": "https://github.com/artalis-io/hull/releases",
     "codeRepository": "https://github.com/artalis-io/hull",
@@ -226,13 +226,14 @@
         <span class="text-paper-100 font-semibold tracking-tight">Hull</span>
         <a href="https://github.com/artalis-io/hull/releases" class="chip ml-1.5 hidden sm:inline-flex hover:text-paper-50 transition" title="Release notes on GitHub">
           <span class="accent-dot"></span>
-          v0.9.0
+          v0.10.0
         </a>
       </a>
 
       <nav class="hidden md:flex items-center gap-x-6 text-sm">
         <a href="#not" class="link">Scope</a>
         <a href="#principles" class="link">Principles</a>
+        <a href="#composability" class="link">Composable</a>
         <a href="#agents" class="link">Agents</a>
         <a href="#compare" class="link">Compare</a>
         <a href="#how" class="link">How</a>
@@ -478,7 +479,7 @@
 <pre><span class="tk-com"># Install over TLS. install.sh is minisign-signed (verify it below);</span>
 <span class="tk-com"># it SHA-256-checks each binary against the manifest as it downloads.</span>
 $ curl -fsSL <span class="tk-str">https://gethull.dev/install.sh</span> | sh
-hull installed to ~/.local/bin/hull  (v0.9.0)
+hull installed to ~/.local/bin/hull  (v0.10.0)
 
 <span class="tk-com"># Don't trust gethull.dev? Verify the installer offline first</span>
 <span class="tk-com"># (minisign, no Hull needed). Cross-check the key below against</span>
@@ -496,7 +497,7 @@ $ hull verify-release hull.sha256 hull.sha256.sig
 <span class="tk-acc">ok</span>. Signature valid
 
 $ hull doctor
-hull v0.9.0  &middot;  ca-bundle: embedded  &middot;  platform: embedded  &middot;  cc: ok
+hull v0.10.0  &middot;  ca-bundle: embedded  &middot;  platform: embedded  &middot;  cc: ok
 </pre>
           </div>
           <p class="mt-3 text-[11px] text-mute-400 leading-relaxed">
@@ -659,26 +660,103 @@ hull v0.9.0  &middot;  ca-bundle: embedded  &middot;  platform: embedded  &middo
             Pure-function WASM via WAMR. No I/O imports,
             gas-metered. Parallel workloads dispatch to WebGPU
             shaders via wgpu-native (Vulkan, Metal, DX12) through the
-            same capability boundary. Hull is completely modular and
-            composable: the base library drops <em>every</em> reducible
-            subsystem, and <code class="text-paper-100">hull build</code>
-            composes back only what the app uses, statically at build time (not
-            dynamically loaded, no <code class="text-paper-100">dlopen</code>, so
-            the manifest stays enforceable and the build stays reproducible). You
-            get exactly one interpreter (Lua or JS); the HTTP layer, the Keel
-            event loop and server only if it serves or fetches; mbedTLS only if
-            it uses TLS; SQLite only if it uses a database; WASM only if it runs
-            compute. A pure compute or CLI tool links zero Keel, mbedTLS, SQLite
-            or WASM (~2.1&nbsp;MB, versus ~6.5&nbsp;MB for a full web app). Heavier
-            subsystems ship as opt-in composable features
-            (<code class="text-paper-100">hull build --with=duckdb&hairsp;|&hairsp;postgres&hairsp;|&hairsp;mysql&hairsp;|&hairsp;gpu&hairsp;|&hairsp;tui</code>)
-            for DuckDB OLAP, PostgreSQL, MySQL/MariaDB, GPU compute,
-            and the terminal UI. Each installs on demand
-            (<code class="text-paper-100">hull feature install &lt;name&gt;</code>)
-            under the same signed trust chain, so they never bloat the base.
+            same capability boundary.
           </p>
         </div>
 
+      </div>
+    </div>
+  </section>
+
+  <!-- ─────────────────────────────────────────────────────────────────
+       COMPOSABILITY. The base is composed to fit, and every piece is signed.
+       ───────────────────────────────────────────────────────────────── -->
+  <section id="composability" class="hairline-t">
+    <div class="max-w-6xl mx-auto px-6 py-20 md:py-28">
+      <div class="max-w-2xl">
+        <div class="text-xs uppercase tracking-widest text-mute-500 mb-3">Composable base</div>
+        <h2 class="text-2xl md:text-3xl font-semibold text-paper-50 tracking-tight">
+          The binary is composed to fit. Every piece is signed.
+        </h2>
+        <p class="mt-4 text-sm md:text-base text-mute-400 leading-relaxed">
+          The distributed <code class="text-paper-100 text-[0.85em]">hull</code> is a
+          minimal base. It drops <em>every</em> reducible subsystem &mdash; both
+          interpreters, the HTTP core, the Keel event loop and server, TLS, SQLite,
+          WASM, the image codecs &mdash; and <code class="text-paper-100 text-[0.85em]">hull build</code>
+          composes back <em>only</em> what your app declares, statically, at build
+          time. Not <code class="text-paper-100 text-[0.85em]">dlopen</code>, not a
+          plugin loaded at runtime: whole archives linked in, so the manifest stays
+          enforceable and the build stays byte-reproducible.
+        </p>
+      </div>
+
+      <div class="mt-12 grid md:grid-cols-3 gap-px bg-white/[0.06] border border-white/[0.06] rounded-md overflow-hidden">
+
+        <div class="bg-ink-900 p-6">
+          <i data-lucide="minimize-2" class="w-5 h-5 text-paper-100 mb-4"></i>
+          <h3 class="text-paper-50 font-medium">Attack surface is what you use</h3>
+          <p class="mt-2 text-sm text-mute-400 leading-relaxed">
+            A compute or CLI tool links <em>zero</em> Keel, TLS, SQLite or WASM
+            &mdash; there is no unused TLS stack or SQL engine in the binary to
+            audit, exploit, or CVE-inherit. You get exactly one interpreter (Lua
+            <em>or</em> JS), HTTP only if it serves or fetches, TLS only if it
+            speaks TLS, a database only if it opens one.
+            <span class="text-paper-100">~2.1&nbsp;MB</span> for a pure compute
+            tool, versus <span class="text-paper-100">~6.5&nbsp;MB</span> for a
+            full web app &mdash; the difference is code that simply is not there.
+          </p>
+        </div>
+
+        <div class="bg-ink-900 p-6">
+          <i data-lucide="badge-check" class="w-5 h-5 text-paper-100 mb-4"></i>
+          <h3 class="text-paper-50 font-medium">Composition doesn't weaken trust</h3>
+          <p class="mt-2 text-sm text-mute-400 leading-relaxed">
+            Every archive <code class="text-paper-100 text-[0.78rem]">hull build</code>
+            composes is recorded and attested in
+            <code class="text-paper-100 text-[0.78rem]">package.sig.gethull.composed</code>
+            and re-verified against the embedded platform key at boot &mdash; a
+            tampered composed archive refuses to run. Static build-time composition
+            keeps the whole trust chain, and the reproducible build, intact. Modular
+            does not mean a soft edge.
+          </p>
+        </div>
+
+        <div class="bg-ink-900 p-6">
+          <i data-lucide="blocks" class="w-5 h-5 text-paper-100 mb-4"></i>
+          <h3 class="text-paper-50 font-medium">Bolt on the heavy things</h3>
+          <p class="mt-2 text-sm text-mute-400 leading-relaxed">
+            Large optional subsystems ship as signed, on-demand features:
+            <code class="text-paper-100 text-[0.78rem]">hull build --with=duckdb&hairsp;|&hairsp;postgres&hairsp;|&hairsp;mysql&hairsp;|&hairsp;gpu&hairsp;|&hairsp;tui</code>.
+            Each is fetched by
+            <code class="text-paper-100 text-[0.78rem]">hull feature install &lt;name&gt;</code>
+            under the same Ed25519 trust chain as
+            <code class="text-paper-100 text-[0.78rem]">hull update</code>, so DuckDB
+            OLAP, GPU compute or a terminal UI never bloat the base for apps that
+            don't ask for them.
+          </p>
+        </div>
+
+      </div>
+
+      <!-- DB architecture: composability made concrete -->
+      <div class="mt-px grid md:grid-cols-1 gap-px bg-white/[0.06] border-x border-b border-white/[0.06] rounded-b-md overflow-hidden">
+        <div class="bg-ink-900 p-6">
+          <i data-lucide="database" class="w-5 h-5 text-paper-100 mb-4"></i>
+          <h3 class="text-paper-50 font-medium">One database API, four backends, selected by DSN</h3>
+          <p class="mt-2 text-sm text-mute-400 leading-relaxed">
+            The clearest example of the model. <code class="text-paper-100 text-[0.78rem]">hull/db</code>
+            is one handle-based API; the DSN scheme picks the backend behind a single
+            vtable. <span class="text-paper-100">SQLite</span> is in the base;
+            <span class="text-paper-100">PostgreSQL</span> and
+            <span class="text-paper-100">MySQL/MariaDB</span> are pure-C wire clients
+            (no libpq, no libmysql &mdash; nothing vendored beyond the protocol) composed as
+            <code class="text-paper-100 text-[0.78rem]">--with</code> features;
+            <span class="text-paper-100">DuckDB</span> is the embedded OLAP feature.
+            Every query is parameter-bound at the C boundary, so the SQL string is
+            always a literal &mdash; the injection surface is zero, by construction,
+            on all four.
+          </p>
+        </div>
       </div>
     </div>
   </section>
@@ -1558,9 +1636,25 @@ hull v0.9.0  &middot;  ca-bundle: embedded  &middot;  platform: embedded  &middo
           <div class="bg-ink-900 p-6">
             <div class="flex items-center gap-2 mb-4">
               <i data-lucide="check-circle-2" class="w-4 h-4 text-accent"></i>
-              <span class="text-sm font-semibold text-paper-50">Shipped through v0.9.0</span>
+              <span class="text-sm font-semibold text-paper-50">Shipped through v0.10.0</span>
             </div>
             <ul class="space-y-3 text-sm text-mute-400 leading-relaxed">
+              <li class="flex gap-2">
+                <span class="text-accent mt-0.5">&check;</span>
+                <span><strong class="text-paper-100">Fully-composable SLIM base (v0.9.0).</strong> The distributed base drops every reducible subsystem &mdash; both runtimes, HTTP, the Keel event loop, TLS, SQLite, WASM, image codecs &mdash; and <code class="text-paper-100 text-[0.78rem]">hull build</code> composes back only what the app uses, statically. A compute app links zero Keel/TLS/SQLite/WASM (~2.1&nbsp;MB); a full web app composes them back (~6.5&nbsp;MB). Composition is verifiable: every composed archive is attested in <code class="text-paper-100 text-[0.78rem]">package.sig.gethull.composed</code> and re-checked against the platform key at boot.</span>
+              </li>
+              <li class="flex gap-2">
+                <span class="text-accent mt-0.5">&check;</span>
+                <span><strong class="text-paper-100">Composable features + extension taxonomy (v0.7.0).</strong> Five large optional subsystems &mdash; <code class="text-paper-100 text-[0.78rem]">duckdb</code>, <code class="text-paper-100 text-[0.78rem]">postgres</code>, <code class="text-paper-100 text-[0.78rem]">mysql</code>, <code class="text-paper-100 text-[0.78rem]">gpu</code>, <code class="text-paper-100 text-[0.78rem]">tui</code> &mdash; ship as signed per-feature archives composed at <code class="text-paper-100 text-[0.78rem]">hull build --with=&lt;name&gt;</code>, installed via <code class="text-paper-100 text-[0.78rem]">hull feature install</code> on the same trust chain as <code class="text-paper-100 text-[0.78rem]">hull update</code>. One clean taxonomy: stdlib / feature / flavor / tool.</span>
+              </li>
+              <li class="flex gap-2">
+                <span class="text-accent mt-0.5">&check;</span>
+                <span><strong class="text-paper-100">Compiler-free &amp; toolchain-free builds (v0.10.0).</strong> <code class="text-paper-100 text-[0.78rem]">hull build</code> emits the app object itself and links &mdash; no C compiler needed. Only a linker, and <code class="text-paper-100 text-[0.78rem]">hull tools install zig</code> side-loads a self-contained cross-compiling one that runs on a bare box. The payoff: a cosmo <code class="text-paper-100 text-[0.78rem]">hull</code> + <code class="text-paper-100 text-[0.78rem]">hull tools install cosmocc</code> builds a working binary on stock Windows with no pre-installed toolchain.</span>
+              </li>
+              <li class="flex gap-2">
+                <span class="text-accent mt-0.5">&check;</span>
+                <span><strong class="text-paper-100">Multi-backend database, zero SQLi surface.</strong> One <code class="text-paper-100 text-[0.78rem]">hull/db</code> API, DSN-selected across SQLite (in base), PostgreSQL and MySQL/MariaDB (pure-C wire clients, no libpq/libmysql, composed as features), and embedded DuckDB. Every query is parameter-bound at the C boundary &mdash; the SQL is always a literal, on all four.</span>
+              </li>
               <li class="flex gap-2">
                 <span class="text-accent mt-0.5">&check;</span>
                 <span><strong class="text-paper-100">Three-layer Ed25519 signature scheme.</strong> Release, platform, app developer. Cryptographic primitives wired and verifiable.</span>
@@ -1831,10 +1925,10 @@ $ hull agent routes my-tool
       </div>
 
       <p class="text-[11px] text-mute-400 leading-relaxed">
-        Hull is at <span class="text-paper-100">v0.9.0</span>. APIs and the manifest schema are pre-stable, so pin your version and read the
+        Hull is at <span class="text-paper-100">v0.10.0</span>. APIs and the manifest schema are pre-stable, so pin your version and read the
         <a href="https://github.com/artalis-io/hull/releases" class="link">changelog</a>
         before upgrading.
-        Page last updated <time datetime="2026-07">July&nbsp;2026</time>.
+        Page last updated <time datetime="2026-08">August&nbsp;2026</time>.
       </p>
 
     </div>
