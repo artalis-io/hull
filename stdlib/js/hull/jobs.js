@@ -15,7 +15,7 @@
  * Full surface: schema + jobs.init, enqueue, the atomic claim, per-type +
  * catch-all handlers, the work loop (retry-with-backoff, dead-letter, and the
  * visibility-timeout reaper), the dedicated worker (jobs.runWorker +
- * `hull jobs worker`), and the ops surface (jobs.stats / dead / retry / cancel / cleanup). v1.1 adds durable cron (jobs.cron / uncron) and intra-process concurrency (run_worker concurrency=N), jobs.get(id), jobs.heartbeat for long jobs, fleet-wide rate limiting (jobs.limit), queue pause/resume/purge, and workflows (depends_on + result passing). v1.5 adds the standalone result backend (jobs.result / jobs.await), multi-queue draining (opts.queues, strict list or weighted map), bulk enqueue (jobs.enqueueMany), in-process lifecycle hooks (jobs.on completed/retried/dead), and polish (absolute at, jobs.progress, throttle window, fixed-offset tz cron). Durable workflows (jobs.workflow / jobs.start / ctx.step / ctx.sleep / ctx.wait_signal / jobs.signal, Phase 1) add crash-safe workflow-as-code: step memoization, durable timers, external signals, and saga compensation - a workflow instance is a job that rides the same claim/reaper/retry/result machinery (docs/jobs_durable_execution_design.md). Observability: jobs.metrics() (DB-derived per-queue gauges + backlog age) and W3C trace-context propagation (enqueue { trace } -> job.trace). Opt-in attempt history (jobs.init { history=true }) records a per-attempt timeline (jobs.history) and adds latency percentiles + throughput to jobs.metrics.
+ * `hull jobs worker`), and the ops surface (jobs.stats / dead / retry / cancel / cleanup). v1.1 adds durable cron (jobs.cron / uncron) and intra-process concurrency (run_worker concurrency=N), jobs.get(id), jobs.heartbeat for long jobs, fleet-wide rate limiting (jobs.limit), queue pause/resume/purge, and workflows (depends_on + result passing). v1.5 adds the standalone result backend (jobs.result / jobs.await), multi-queue draining (opts.queues, strict list or weighted map), bulk enqueue (jobs.enqueueMany), in-process lifecycle hooks (jobs.on completed/retried/dead), and polish (absolute at, jobs.progress, throttle window, fixed-offset tz cron). Durable workflows (jobs.workflow / jobs.start / ctx.step / ctx.sleep / ctx.wait_signal / jobs.signal, Phase 1) add crash-safe workflow-as-code: step memoization, durable timers, external signals, and saga compensation, plus deterministic-replay primitives (ctx.now / ctx.random / ctx.uuid, memoized) - a workflow instance is a job that rides the same claim/reaper/retry/result machinery (docs/jobs_durable_execution_design.md). Observability: jobs.metrics() (DB-derived per-queue gauges + backlog age) and W3C trace-context propagation (enqueue { trace } -> job.trace). Opt-in attempt history (jobs.init { history=true }) records a per-attempt timeline (jobs.history) and adds latency percentiles + throughput to jobs.metrics.
  *
  * @license AGPL-3.0-or-later
  */
@@ -1491,7 +1491,7 @@ async function runCompensations(comps, workflowId) {
 // `comps` collects saga compensations (registered by every ctx.step call that has
 // one, so on the terminal-failure run the list covers all completed steps).
 function makeCtx(job, name) {
-    let sleepN = 0;
+    let sleepN = 0, detN = 0;
     const comps = [];
     return {
         id: job.id,
@@ -1499,6 +1499,14 @@ function makeCtx(job, name) {
         input: job.data,
         trace: job.trace,   // trace-context propagation (observability design)
         _comps: comps,
+        // Deterministic primitives (Phase 2): a workflow body re-runs from the top
+        // on every resume, so reading the clock / RNG directly would differ each
+        // replay and break memo-key matching. These memoize via the step store, so
+        // now / random / uuid return the SAME value on every replay - the supported
+        // way to be non-deterministic in a workflow. Hidden from steps_done.
+        now: () => { detN += 1; return runStep(job.id, "__now:" + detN, () => time.now()); },
+        random: () => { detN += 1; return runStep(job.id, "__rand:" + detN, () => Math.random()); },
+        uuid: () => { detN += 1; return runStep(job.id, "__uuid:" + detN, () => crypto.base64urlEncode(crypto.random(16))); },
         step: async (stepKey, fn, opts) => {
             const result = await runStep(job.id, stepKey, fn);
             if (opts && typeof opts.compensate === "function") comps.push({ key: stepKey, fn: opts.compensate });

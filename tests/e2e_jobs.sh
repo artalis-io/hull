@@ -1223,6 +1223,60 @@ app.main(async (ctx) => {
 echo "== durable saga (Phase 1d): Lua =="; check_saga "lua" "lua" "$LUA_SAGA"
 echo "== durable saga (Phase 1d): JS =="; check_saga "js" "js" "$JS_SAGA"
 
+# ── durable execution (Phase 2): deterministic primitives (replay-stable) ────
+# ctx.now / ctx.random / ctx.uuid memoize via the step store, so a workflow that
+# fails its first attempt and REPLAYS sees byte-identical values -> deterministic
+# replay without WASM. Design: docs/jobs_wasm_replay_spike.md.
+check_deterministic() {
+    label="$1"; ext="$2"; app="$3"
+    T="$(mktemp -d)"; printf '%s\n' "$app" > "$T/app.$ext"
+    out="$("$HULL" "$T/app.$ext" -d "$T/a.db" 2>/dev/null)" || true
+    case "$out" in
+        *"DET identical=YES status=done"*)
+            pass "$label: deterministic ctx.now/random/uuid (byte-identical across replay)" ;;
+        *) fail "$label: durable determinism (Phase 2)" "$out" ;;
+    esac
+    rm -rf "$T"
+}
+
+LUA_DET='local jobs = require("hull.jobs")
+app.manifest({ modules = { "hull/jobs@1" } })
+app.main(function(ctx)
+  jobs.init({ backoff = function() return 0 end })
+  local runs = {}
+  jobs.workflow("det", function(w)
+    local sig = tostring(w.now()) .. "|" .. string.format("%.6f", w.random()) .. "|" .. w.uuid()
+    runs[#runs+1] = sig
+    if #runs == 1 then error("force replay") end
+    return { ok = true }
+  end)
+  local id = jobs.start("det", {})
+  jobs.run_worker({ drain = true, poll_ms = 1 })
+  ctx.stdout:write(("DET identical=%s status=%s\n"):format(
+    (runs[1] == runs[2]) and "YES" or "NO", jobs.workflow_status(id).status))
+  return 0
+end)'
+
+JS_DET='import { app } from "hull:app"; import { jobs } from "hull:jobs";
+app.manifest({ modules: ["hull/jobs@1"] });
+app.main(async (ctx) => {
+  jobs.init({ backoff: () => 0 });
+  const runs = [];
+  jobs.workflow("det", async (w) => {
+    const sig = (await w.now()) + "|" + (await w.random()).toFixed(6) + "|" + (await w.uuid());
+    runs.push(sig);
+    if (runs.length === 1) throw new Error("force replay");
+    return { ok: true };
+  });
+  const id = jobs.start("det", {});
+  await jobs.runWorker({ drain: true, pollMs: 1 });
+  ctx.stdout.write(`DET identical=${runs[0]===runs[1]?"YES":"NO"} status=${jobs.workflowStatus(id).status}\n`);
+  return 0;
+});'
+
+echo "== durable determinism (Phase 2): Lua =="; check_deterministic "lua" "lua" "$LUA_DET"
+echo "== durable determinism (Phase 2): JS =="; check_deterministic "js" "js" "$JS_DET"
+
 # ── observability Bet #1 Pillar A+C: jobs.metrics gauges + trace propagation ─
 # metrics() returns DB-derived per-queue gauges (pending/dead + backlog age) and
 # totals; a job enqueued with { trace } surfaces job.trace in the handler.
