@@ -54,6 +54,11 @@ function defaultBackoff(attempt) {
 const _handlers = Object.create(null);
 let _default = null;
 
+// In-process lifecycle listeners (jobs.on). Fired synchronously by work() in the
+// worker that processed the job, for jobs THAT worker ran. Not fleet-wide - a
+// durable cross-process event stream is the LISTEN/NOTIFY epic (#235).
+const _listeners = { completed: [], retried: [], dead: [] };
+
 // Whether the server parses SKIP LOCKED (probed in init(); null = not probed).
 let _skipLocked = null;
 // Per-queue rate limits { [queue]: { rate, per } }, in-memory (re-registered on
@@ -615,6 +620,33 @@ function setDefault(fn) {
     return jobs;
 }
 
+/**
+ * Register an in-process lifecycle listener. `event` is one of "completed",
+ * "retried" (a failed attempt that will be retried with backoff), or "dead"
+ * (dead-lettered: retries exhausted, handler returned jobs.DEAD, or no handler).
+ * The listener is called `fn(job, info)` synchronously by work(), in the worker
+ * that processed the job, right after the outcome is applied:
+ *   - completed -> info = { result }   (the handler's return value, or undefined)
+ *   - retried   -> info = { error, attempt }   (attempt = the one that just failed)
+ *   - dead      -> info = { error }
+ * Multiple listeners per event fire in registration order; each is isolated (a
+ * throwing listener can't derail the loop or the others). Keep hooks fast and
+ * synchronous - they run inline on the event-loop thread and their return
+ * (incl. a promise) is not awaited. Per-worker, for observability/metrics/side-
+ * effects; a durable fleet-wide event stream is the LISTEN/NOTIFY epic (#235).
+ * Workflow cascade-failures don't emit here (the dependency's own `dead` fires).
+ * @param {string} event  "completed" | "retried" | "dead"
+ * @param {Function} fn
+ * @returns {object} the jobs module (for chaining)
+ */
+function on(event, fn) {
+    if (!_listeners[event])
+        throw new Error(`jobs.on: unknown event '${event}' (completed|retried|dead)`);
+    if (typeof fn !== "function") throw new Error("jobs.on: listener must be a function");
+    _listeners[event].push(fn);
+    return jobs;
+}
+
 function markDone(id, result) {
     db.exec("UPDATE _hull_jobs SET status='done', claim_token=NULL, updated_at=? WHERE id=?",
         [time.now(), id]);
@@ -636,16 +668,29 @@ function markDead(id, err) {
 
 // Reschedule with backoff, or dead-letter once attempts are exhausted. attempts
 // was already incremented by the claim (the attempt that just ran).
+// Returns the disposition it applied: "dead" (retries exhausted -> dead-letter)
+// or "retried" (rescheduled with backoff), so work() can emit the right event.
 function markRetry(job, err) {
     const attempts = job.attempts || 0;
     const max = job.maxAttempts !== undefined && job.maxAttempts !== null
         ? job.maxAttempts : _cfg.maxAttempts;
-    if (attempts >= max) { markDead(job.id, err); return; }
+    if (attempts >= max) { markDead(job.id, err); return "dead"; }
     const now = time.now();
     db.exec(
         "UPDATE _hull_jobs SET status='pending', run_at=?, last_error=?, claim_token=NULL, " +
         "updated_at=? WHERE id=?",
         [now + _cfg.backoff(attempts), err, now, job.id]);
+    return "retried";
+}
+
+// Fire in-process listeners for a lifecycle event. Each listener is isolated: a
+// throwing hook can't derail the work loop or the other listeners. Listener
+// return values (incl. promises) are ignored - hooks are fire-and-forget.
+function emit(event, job, info) {
+    const L = _listeners[event];
+    for (let i = 0; i < L.length; i++) {
+        try { L[i](job, info); } catch (e) { /* isolated: hooks must not break work */ }
+    }
 }
 
 /**
@@ -839,20 +884,31 @@ async function work(opts) {
     for (const job of batch) {
         job.deps = loadDeps(job.id);   // workflow: dependency results, in order
         const h = _handlers[job.type] || _default;
-        if (!h) { markDead(job.id, `no handler for job type '${job.type}'`); continue; }
+        if (!h) {
+            const err = `no handler for job type '${job.type}'`;
+            markDead(job.id, err);
+            emit("dead", job, { error: err });
+            continue;
+        }
         try {
             const result = await h(job);
-            if (result === DEAD) markDead(job.id, "handler returned jobs.DEAD");
-            else if (result === RETRY) markRetry(job, "handler requested retry");
-            else {
+            if (result === DEAD) {
+                markDead(job.id, "handler returned jobs.DEAD");
+                emit("dead", job, { error: "handler returned jobs.DEAD" });
+            } else if (result === RETRY) {
+                emit(markRetry(job, "handler requested retry"), job,
+                     { error: "handler requested retry", attempt: job.attempts });
+            } else {
                 // undefined / true / DISCARD -> done, no result; any other return
                 // value is stored as the job's result (for dependents).
                 const res = (result !== undefined && result !== true && result !== DISCARD)
                     ? result : undefined;
                 markDone(job.id, res);
+                emit("completed", job, { result: res });
             }
         } catch (e) {
-            markRetry(job, String((e && e.message) || e));
+            const err = String((e && e.message) || e);
+            emit(markRetry(job, err), job, { error: err, attempt: job.attempts });
         }
     }
     return batch.length;
@@ -1124,13 +1180,13 @@ function _cronNext(spec, from) {
 function _tick(now) { processCron(now !== undefined ? now : time.now()); }
 
 export const jobs = {
-    init, enqueue, enqueueMany, claim, handler, default: setDefault, work, reap,
+    init, enqueue, enqueueMany, claim, handler, default: setDefault, on, work, reap,
     stats, runWorker, stop, get, result, await: await_, heartbeat, limit,
     pause, resume, purge,
     dead, retry, cancel, cleanup, cron, uncron,
     RETRY, DEAD, DISCARD, _config: _cfg, _cronNext, _tick,
 };
-export { init, enqueue, enqueueMany, claim, handler, work, reap, stats, runWorker,
-         stop, get, result, heartbeat, limit, pause, resume, purge,
+export { init, enqueue, enqueueMany, claim, handler, on, work, reap, stats,
+         runWorker, stop, get, result, heartbeat, limit, pause, resume, purge,
          dead, retry, cancel, cleanup, cron, uncron };
 export default jobs;

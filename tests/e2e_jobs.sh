@@ -859,6 +859,65 @@ app.main((ctx) => {
 echo "== v1.5 bulk enqueue: Lua =="; check_bulk "lua" "lua" "$LUA_BULK"
 echo "== v1.5 bulk enqueue: JS =="; check_bulk "js" "js" "$JS_BULK"
 
+# ── v1.5: in-process lifecycle hooks (jobs.on completed/retried/dead) ───────
+# A throwing hook is isolated (completed still counts). ok->completed, a
+# max_attempts=1 throw + a no-handler type ->2 dead, a max_attempts=2 throw
+# ->1 retried (backoff defers its death past the drain, so dead stays 2).
+check_events() {
+    label="$1"; ext="$2"; app="$3"
+    T="$(mktemp -d)"; printf '%s\n' "$app" > "$T/app.$ext"
+    out="$("$HULL" "$T/app.$ext" -d "$T/a.db" 2>/dev/null)" || true
+    case "$out" in
+        *"EV completed=1 retried=1 dead=2 res=42 deaderr=nohandler"*)
+            pass "$label: jobs.on (completed/retried/dead, isolated throwing hook)" ;;
+        *) fail "$label: v1.5 job events" "$out" ;;
+    esac
+    rm -rf "$T"
+}
+
+LUA_EVENTS='local jobs = require("hull.jobs")
+app.manifest({ modules = { "hull/jobs@1" } })
+app.main(function(ctx)
+  jobs.init()
+  local ev = { completed=0, retried=0, dead=0 }; local last_result, last_err
+  jobs.on("completed", function(job, info) ev.completed = ev.completed + 1; last_result = info.result and info.result.v end)
+  jobs.on("completed", function(job, info) error("hook boom") end)
+  jobs.on("retried",   function(job, info) ev.retried = ev.retried + 1 end)
+  jobs.on("dead",      function(job, info) ev.dead = ev.dead + 1; last_err = info.error end)
+  jobs.handler("ok",    function(j) return { v = 42 } end)
+  jobs.handler("die",   function(j) error("fatal") end)
+  jobs.handler("flaky", function(j) error("transient") end)
+  jobs.enqueue("ok", {}); jobs.enqueue("die", {}, { max_attempts = 1 })
+  jobs.enqueue("mystery", {}); jobs.enqueue("flaky", {}, { max_attempts = 2 })
+  jobs.run_worker({ drain = true, poll_ms = 1 })
+  ctx.stdout:write(("EV completed=%d retried=%d dead=%d res=%s deaderr=%s\n"):format(
+    ev.completed, ev.retried, ev.dead, tostring(last_result),
+    tostring(last_err):match("no handler") and "nohandler" or "other"))
+  return 0
+end)'
+
+JS_EVENTS='import { app } from "hull:app"; import { jobs } from "hull:jobs";
+app.manifest({ modules: ["hull/jobs@1"] });
+app.main(async (ctx) => {
+  jobs.init();
+  const ev = { completed:0, retried:0, dead:0 }; let lastResult, lastErr;
+  jobs.on("completed", (job, info) => { ev.completed++; lastResult = info.result && info.result.v; });
+  jobs.on("completed", (job, info) => { throw new Error("hook boom"); });
+  jobs.on("retried",   (job, info) => { ev.retried++; });
+  jobs.on("dead",      (job, info) => { ev.dead++; lastErr = info.error; });
+  jobs.handler("ok",    (j) => ({ v: 42 }));
+  jobs.handler("die",   (j) => { throw new Error("fatal"); });
+  jobs.handler("flaky", (j) => { throw new Error("transient"); });
+  jobs.enqueue("ok", {}); jobs.enqueue("die", {}, { maxAttempts: 1 });
+  jobs.enqueue("mystery", {}); jobs.enqueue("flaky", {}, { maxAttempts: 2 });
+  await jobs.runWorker({ drain: true, pollMs: 1 });
+  ctx.stdout.write(`EV completed=${ev.completed} retried=${ev.retried} dead=${ev.dead} res=${lastResult} deaderr=${/no handler/.test(String(lastErr))?"nohandler":"other"}\n`);
+  return 0;
+});'
+
+echo "== v1.5 job events: Lua =="; check_events "lua" "lua" "$LUA_EVENTS"
+echo "== v1.5 job events: JS =="; check_events "js" "js" "$JS_EVENTS"
+
 # Fleet gate: K processes share one rate counter -> total dispatched == rate.
 echo "== v1.2 rate limit fleet ($CONC processes, one shared counter) =="
 W="$(mktemp -d)"; DB="$W/rl.db"

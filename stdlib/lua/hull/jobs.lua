@@ -57,6 +57,11 @@ jobs._config = _cfg
 local _handlers = {}
 local _default = nil
 
+-- In-process lifecycle listeners (jobs.on). Fired synchronously by jobs.work in
+-- the worker that processed the job, for jobs THAT worker ran. Not fleet-wide -
+-- a durable cross-process event stream is the LISTEN/NOTIFY epic (#235).
+local _listeners = { completed = {}, retried = {}, dead = {} }
+
 -- Unix ts of the last reaper sweep (throttled in jobs.work via _cfg.reap_interval).
 local _last_reap = 0
 -- Unix ts of the last cron due-check (throttled to >=1s; cron is minute-grained).
@@ -665,6 +670,32 @@ function jobs.default(fn)
     return jobs
 end
 
+--- Register an in-process lifecycle listener. `event` is one of "completed",
+-- "retried" (a failed attempt that will be retried with backoff), or "dead"
+-- (dead-lettered: retries exhausted, handler returned jobs.DEAD, or no handler).
+-- The listener is called `fn(job, info)` synchronously by `jobs.work`, in the
+-- worker that processed the job, right after the outcome is applied:
+--   * completed -> info = { result = <handler return value or nil> }
+--   * retried   -> info = { error, attempt }   (attempt = the one that just failed)
+--   * dead      -> info = { error }
+-- Multiple listeners per event fire in registration order; each is isolated (a
+-- throwing listener can't derail the loop or the others). Keep hooks fast and
+-- synchronous - they run inline on the event-loop thread. These are per-worker,
+-- for observability/metrics/side-effects; a durable fleet-wide event stream is
+-- the LISTEN/NOTIFY epic (#235). Workflow cascade-failures don't emit here (the
+-- failing dependency's own `dead` event is the signal).
+-- @tparam string event  "completed" | "retried" | "dead"
+-- @tparam function fn
+function jobs.on(event, fn)
+    if not _listeners[event] then
+        error("jobs.on: unknown event '" .. tostring(event) .. "' (completed|retried|dead)")
+    end
+    if type(fn) ~= "function" then error("jobs.on: listener must be a function") end
+    local L = _listeners[event]
+    L[#L + 1] = fn
+    return jobs
+end
+
 local function mark_done(id, result)
     db.exec("UPDATE _hull_jobs SET status='done', claim_token=NULL, updated_at=? WHERE id=?",
         { time.now(), id })
@@ -689,18 +720,28 @@ end
 -- Reschedule with backoff, or dead-letter once attempts are exhausted. `attempts`
 -- was already incremented by the claim, so it is the count of the attempt that
 -- just ran.
+-- Returns the disposition it applied: "dead" (retries exhausted -> dead-letter)
+-- or "retried" (rescheduled with backoff), so jobs.work can emit the right event.
 local function mark_retry(job, err)
     local attempts = job.attempts or 0
     local max = job.max_attempts or _cfg.max_attempts
     if attempts >= max then
         mark_dead(job.id, err)
-        return
+        return "dead"
     end
     local now = time.now()
     db.exec(
         "UPDATE _hull_jobs SET status='pending', run_at=?, last_error=?, claim_token=NULL, "
         .. "updated_at=? WHERE id=?",
         { now + _cfg.backoff(attempts), err, now, job.id })
+    return "retried"
+end
+
+-- Fire in-process listeners for a lifecycle event. Each listener is isolated:
+-- a throwing hook can't derail the work loop or the other listeners.
+local function emit(event, job, info)
+    local L = _listeners[event]
+    for i = 1, #L do pcall(L[i], job, info) end
 end
 
 --- Reclaim jobs stuck in `running` past the visibility timeout - a worker that
@@ -915,15 +956,20 @@ function jobs.work(opts)
         job.deps = load_deps(job.id)   -- workflow: dependency results, in order
         local h = _handlers[job.type] or _default
         if not h then
-            mark_dead(job.id, "no handler for job type '" .. tostring(job.type) .. "'")
+            local err = "no handler for job type '" .. tostring(job.type) .. "'"
+            mark_dead(job.id, err)
+            emit("dead", job, { error = err })
         else
             local ok, result = pcall(h, job)
             if not ok then
-                mark_retry(job, tostring(result))
+                local err = tostring(result)
+                emit(mark_retry(job, err), job, { error = err, attempt = job.attempts })
             elseif result == jobs.DEAD then
                 mark_dead(job.id, "handler returned jobs.DEAD")
+                emit("dead", job, { error = "handler returned jobs.DEAD" })
             elseif result == jobs.RETRY then
-                mark_retry(job, "handler requested retry")
+                emit(mark_retry(job, "handler requested retry"), job,
+                     { error = "handler requested retry", attempt = job.attempts })
             else
                 -- nil / true / jobs.DISCARD -> done, no result; any other return
                 -- value is stored as the job's result (for dependents).
@@ -932,6 +978,7 @@ function jobs.work(opts)
                     res = result
                 end
                 mark_done(job.id, res)
+                emit("completed", job, { result = res })
             end
         end
     end
