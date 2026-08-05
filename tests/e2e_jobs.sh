@@ -315,19 +315,21 @@ else
 fi
 rm -rf "$W"
 
-# ── Phase 5: ops surface - dead / retry / cleanup (both runtimes) ────────────
+# ── Phase 5: ops surface - dead / retry / cancel / cleanup (both runtimes) ───
 # Two jobs dead-letter; jobs.dead lists them (with last_error); jobs.retry
 # requeues one (and no-ops on a bad id); jobs.cleanup purges the remaining
-# terminal row while leaving the requeued pending job. Emits:
+# terminal row while leaving the requeued pending job; jobs.cancel deletes a
+# delayed pending job (and no-ops the second time / on a live job). Emits:
 #   P5 dead=2 retry_ok=1 retry_bad=0 purged=1 dead_after=0 pending_after=1
+#      has_err=1 cancel_ok=1 cancel_bad=0
 check_phase5() {
     label="$1"; ext="$2"; app="$3"
     T="$(mktemp -d)"
     printf '%s\n' "$app" > "$T/app.$ext"
     out="$("$HULL" "$T/app.$ext" -d "$T/a.db" 2>/dev/null)" || true
     case "$out" in
-        *"P5 dead=2 retry_ok=1 retry_bad=0 purged=1 dead_after=0 pending_after=1 has_err=1"*)
-            pass "$label: ops surface (dead list / retry requeue / cleanup purge)" ;;
+        *"P5 dead=2 retry_ok=1 retry_bad=0 purged=1 dead_after=0 pending_after=1 has_err=1 cancel_ok=1 cancel_bad=0"*)
+            pass "$label: ops surface (dead / retry / cancel / cleanup)" ;;
         *) fail "$label: phase-5 ops surface" "$out" ;;
     esac
     rm -rf "$T"
@@ -346,9 +348,13 @@ app.main(function(ctx)
   local ok  = jobs.retry(d[1].id) and 1 or 0      -- requeue one
   local bad = jobs.retry(99999) and 1 or 0        -- non-existent -> false
   local purged = jobs.cleanup({ before = time.now() + 1 })
-  local s = jobs.stats()
-  ctx.stdout:write(("P5 dead=%d retry_ok=%d retry_bad=%d purged=%d dead_after=%d pending_after=%d has_err=%d\n"):format(
-    #d, ok, bad, purged, s.dead, s.pending, has_err))
+  local s = jobs.stats()                          -- capture before the cancel test
+  -- cancel a delayed (pending) job; the 2nd cancel no-ops (already gone).
+  local cid = jobs.enqueue("later",{},{delay=3600})
+  local cok  = jobs.cancel(cid) and 1 or 0
+  local cbad = jobs.cancel(cid) and 1 or 0
+  ctx.stdout:write(("P5 dead=%d retry_ok=%d retry_bad=%d purged=%d dead_after=%d pending_after=%d has_err=%d cancel_ok=%d cancel_bad=%d\n"):format(
+    #d, ok, bad, purged, s.dead, s.pending, has_err, cok, cbad))
   return 0
 end)'
 
@@ -365,7 +371,10 @@ app.main(async (ctx) => {
   const bad = jobs.retry(99999) ? 1 : 0;
   const purged = jobs.cleanup({ before: time.now() + 1 });
   const s = jobs.stats();
-  ctx.stdout.write(`P5 dead=${d.length} retry_ok=${ok} retry_bad=${bad} purged=${purged} dead_after=${s.dead} pending_after=${s.pending} has_err=${hasErr}\n`);
+  const cid = jobs.enqueue("later",{},{delay:3600});
+  const cok  = jobs.cancel(cid) ? 1 : 0;
+  const cbad = jobs.cancel(cid) ? 1 : 0;
+  ctx.stdout.write(`P5 dead=${d.length} retry_ok=${ok} retry_bad=${bad} purged=${purged} dead_after=${s.dead} pending_after=${s.pending} has_err=${hasErr} cancel_ok=${cok} cancel_bad=${cbad}\n`);
   return 0;
 });'
 

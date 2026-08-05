@@ -53,8 +53,9 @@ jobs.default((job) => {
 
 // In-process execution model: drain a batch every 500ms on the event loop.
 // Fire-and-forget (the timer re-arms immediately); jobs.work catches per-job
-// errors internally, so a failing handler retries rather than rejecting here.
-app.every(500, () => { jobs.work({ batch: 20 }); });
+// errors internally, and the .catch guards a claim/reap DB error so it can't
+// surface as an unhandled rejection.
+app.every(500, () => { jobs.work({ batch: 20 }).catch((e) => log.error("jobs.work: " + e)); });
 
 // Nightly retention sweep so done/dead rows don't accumulate forever.
 app.daily("03:00", () => { jobs.cleanup({ olderThan: 7 * 86400 }); });

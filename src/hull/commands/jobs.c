@@ -11,7 +11,8 @@
  *       and every remaining argument (-d DSN, app args) is forwarded
  *       unchanged, so worker config lives in the app's run_worker(opts) call.
  *
- * Ops subcommands (dead / retry / cleanup) land with jobs Phase 5.
+ * `worker` is the only subcommand: ops (stats / dead / retry / cancel /
+ * cleanup) are stdlib functions on the `hull/jobs` module, not CLI verbs.
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */

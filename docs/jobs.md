@@ -115,8 +115,11 @@ camelCase (`runAt`, `maxAttempts`, `dedupKey`).
 jobs.stats()                  -- { pending, running, done, failed, dead } (opts.queue to scope)
 jobs.dead({ limit = 50 })     -- list dead-lettered jobs (newest first) for inspection
 jobs.retry(id)                -- requeue a dead job with a fresh attempt budget; false if not dead
+jobs.cancel(id)               -- delete a still-pending (e.g. delayed) job; false if not pending
 jobs.cleanup({ older_than = 7 * 86400 })   -- purge terminal (done + dead) rows past a retention age
 ```
+`jobs.cancel` only removes a `pending` job (a delayed/scheduled one that hasn't
+started); a `running` job is mid-flight and is left to finish or dead-letter.
 Run `jobs.cleanup` from `app.daily` to bound table growth; it only touches
 terminal rows, so it never races a live job. JS: `jobs.cleanup({ olderThan: ... })`.
 
@@ -142,6 +145,7 @@ terminal rows, so it never races a live job. JS: `jobs.cleanup({ olderThan: ... 
 |--------|---------|---------|
 | `max_attempts` | 25 | dead-letter threshold |
 | `visibility_timeout` | 300 | seconds before an orphaned `running` job is reclaimed |
+| `reap_interval` | 30 | min seconds between reaper sweeps (a no-op sweep still takes the write lock, so `work` throttles it; `0` = every call) |
 | `backoff(attempt)` | `2^n·10s` cap 1h | retry-delay function |
 
 `jobs.work` / `jobs.run_worker` take `{ queue, batch, visibility_timeout, poll_ms }`;

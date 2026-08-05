@@ -11,7 +11,7 @@
 -- Full surface: schema + jobs.init, enqueue, the atomic claim, per-type +
 -- catch-all handlers, the work loop (retry-with-backoff, dead-letter, and the
 -- visibility-timeout reaper), the dedicated worker (jobs.run_worker +
--- `hull jobs worker`), and the ops surface (jobs.stats / dead / retry / cleanup).
+-- `hull jobs worker`), and the ops surface (jobs.stats / dead / retry / cancel / cleanup).
 --
 -- Usage (target shape):
 --   local jobs = require("hull.jobs")
@@ -29,16 +29,17 @@ local crypto = require("hull.crypto")
 
 local jobs = {}
 
--- Outcome sentinels a handler returns (consumed in Phase 3). Tables (not
+-- Outcome sentinels a handler returns. Tables (not
 -- strings) so a handler can't collide with them by returning ordinary data.
 jobs.RETRY   = setmetatable({}, { __tostring = function() return "jobs.RETRY" end })
 jobs.DEAD    = setmetatable({}, { __tostring = function() return "jobs.DEAD" end })
 jobs.DISCARD = setmetatable({}, { __tostring = function() return "jobs.DISCARD" end })
 
--- Module config; defaults overridable via jobs.init(opts). Read by later phases.
+-- Module config; defaults overridable via jobs.init(opts).
 local _cfg = {
     max_attempts       = 25,    -- dead-letter threshold
     visibility_timeout = 300,   -- seconds before an orphaned `running` job is reclaimed
+    reap_interval      = 30,    -- min seconds between reaper sweeps (0 = every work() call)
 }
 
 -- Exponential backoff: 2^attempt * 10s, capped at 1h (shared with outbox math).
@@ -56,6 +57,9 @@ jobs._config = _cfg
 local _handlers = {}
 local _default = nil
 
+-- Unix ts of the last reaper sweep (throttled in jobs.work via _cfg.reap_interval).
+local _last_reap = 0
+
 --- Create the `_hull_jobs` table and its indexes. Idempotent - safe to call on
 -- every boot. Uses the connection's portable identity DDL + IF-NOT-EXISTS index
 -- form, so the same call runs unchanged on SQLite, PostgreSQL, and MySQL.
@@ -63,12 +67,14 @@ local _default = nil
 -- @tparam[opt] table opts
 -- @tparam[opt=25]  number opts.max_attempts        dead-letter threshold
 -- @tparam[opt=300] number opts.visibility_timeout  seconds before reclaim
+-- @tparam[opt=30]  number opts.reap_interval        min seconds between reaper sweeps
 -- @tparam[opt]     function opts.backoff            attempt -> delay seconds
 -- @treturn table the jobs module (for chaining)
 function jobs.init(opts)
     opts = opts or {}
     if opts.max_attempts ~= nil then _cfg.max_attempts = opts.max_attempts end
     if opts.visibility_timeout ~= nil then _cfg.visibility_timeout = opts.visibility_timeout end
+    if opts.reap_interval ~= nil then _cfg.reap_interval = opts.reap_interval end
     if opts.backoff ~= nil then _cfg.backoff = opts.backoff end
 
     -- Keyed / indexed text columns are VARCHAR(255) so MySQL can index them;
@@ -178,7 +184,7 @@ end
 -- Postgres/MySQL, serialized on SQLite (single-writer + WAL busy-wait). A
 -- `claim_token` nonce disambiguates the claimant on backends without RETURNING.
 -- Each ready job is claimed by exactly one caller. Low-level: `jobs.work`
--- (Phase 3) wraps this; a custom worker can call it directly.
+-- wraps this; a custom worker can call it directly.
 --
 -- @tparam[opt] table opts  { queue = "default", batch = 10 }
 -- @treturn table  array of claimed jobs { id, type, data, attempts, max_attempts }
@@ -323,7 +329,14 @@ end
 -- @treturn number
 function jobs.work(opts)
     opts = opts or {}
-    jobs.reap(opts)
+    -- Throttle the reaper: a no-op sweep still takes the write lock, so under a
+    -- fast poller x N workers reaping every tick adds needless contention.
+    local interval = opts.reap_interval or _cfg.reap_interval
+    local now = time.now()
+    if now - _last_reap >= interval then
+        jobs.reap(opts)
+        _last_reap = now
+    end
     local batch = jobs.claim(opts)
     for _, job in ipairs(batch) do
         local h = _handlers[job.type] or _default
@@ -464,6 +477,15 @@ function jobs.retry(id)
         .. "WHERE id=? AND status='dead'",
         { now, now, id })
     return (n or 0) > 0
+end
+
+--- Cancel a not-yet-started job by id: delete it if it is still `pending`
+-- (covers delayed / scheduled jobs). A `running` job is mid-flight and is NOT
+-- cancelled (let it finish or dead-letter). Returns whether a row was removed.
+-- @tparam number id
+-- @treturn boolean
+function jobs.cancel(id)
+    return (db.exec("DELETE FROM _hull_jobs WHERE id=? AND status='pending'", { id }) or 0) > 0
 end
 
 --- Purge terminal jobs (done + dead by default) whose last update is older than

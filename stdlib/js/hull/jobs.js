@@ -15,7 +15,7 @@
  * Full surface: schema + jobs.init, enqueue, the atomic claim, per-type +
  * catch-all handlers, the work loop (retry-with-backoff, dead-letter, and the
  * visibility-timeout reaper), the dedicated worker (jobs.runWorker +
- * `hull jobs worker`), and the ops surface (jobs.stats / dead / retry / cleanup).
+ * `hull jobs worker`), and the ops surface (jobs.stats / dead / retry / cancel / cleanup).
  *
  * @license AGPL-3.0-or-later
  */
@@ -26,16 +26,17 @@ import { json } from "hull:json";
 import { crypto } from "hull:crypto";
 const db = dbModule.default();
 
-// Outcome sentinels a handler returns (consumed in Phase 3). Frozen objects so
+// Outcome sentinels a handler returns. Frozen objects so
 // a handler can't collide with them by returning ordinary data.
 export const RETRY   = Object.freeze({ _hullJobsOutcome: "retry" });
 export const DEAD    = Object.freeze({ _hullJobsOutcome: "dead" });
 export const DISCARD = Object.freeze({ _hullJobsOutcome: "discard" });
 
-// Module config; defaults overridable via init(opts). Read by later phases.
+// Module config; defaults overridable via init(opts).
 const _cfg = {
     maxAttempts:       25,    // dead-letter threshold
     visibilityTimeout: 300,   // seconds before an orphaned `running` job is reclaimed
+    reapInterval:      30,    // min seconds between reaper sweeps (0 = every work() call)
     backoff: defaultBackoff,
 };
 
@@ -46,7 +47,11 @@ function defaultBackoff(attempt) {
 }
 
 // Registered handlers: type -> fn. `_default` is the optional catch-all.
-const _handlers = {};
+// Prototype-free so a job whose `type` matches an Object.prototype name
+// ("toString", "constructor", ...) resolves to undefined (no handler -> default
+// / dead-letter), not an inherited function. Matters when the app enqueues a
+// user-controlled type; mirrors Lua tables (which have no prototype chain).
+const _handlers = Object.create(null);
 let _default = null;
 
 /**
@@ -57,12 +62,14 @@ let _default = null;
  * @param {object} [opts]
  * @param {number} [opts.maxAttempts=25]        dead-letter threshold
  * @param {number} [opts.visibilityTimeout=300] seconds before reclaim
+ * @param {number} [opts.reapInterval=30]       min seconds between reaper sweeps
  * @param {function} [opts.backoff]             attempt -> delay seconds
  */
 function init(opts) {
     const o = opts || {};
     if (o.maxAttempts !== undefined) _cfg.maxAttempts = o.maxAttempts;
     if (o.visibilityTimeout !== undefined) _cfg.visibilityTimeout = o.visibilityTimeout;
+    if (o.reapInterval !== undefined) _cfg.reapInterval = o.reapInterval;
     if (o.backoff !== undefined) _cfg.backoff = o.backoff;
 
     // Keyed/indexed text columns are VARCHAR(255) so MySQL can index them;
@@ -157,7 +164,7 @@ function shape(row) {
  * Atomically claim up to `batch` ready jobs from a queue, marking them
  * `running`. Concurrency-safe across workers and processes (SKIP LOCKED on
  * Postgres/MySQL, serialized on SQLite). Each ready job is claimed by exactly
- * one caller. Low-level: `jobs.work` (Phase 3) wraps this.
+ * one caller. Low-level: `jobs.work` wraps this.
  *
  * @param {object} [opts]  { queue = "default", batch = 10 }
  * @returns {Array}  claimed jobs { id, type, data, attempts, maxAttempts }
@@ -293,7 +300,11 @@ function reap(opts) {
  */
 async function work(opts) {
     const o = opts || {};
-    reap(o);
+    // Throttle the reaper: a no-op sweep still takes the write lock, so under a
+    // fast poller x N workers reaping every tick adds needless contention.
+    const interval = o.reapInterval !== undefined ? o.reapInterval : _cfg.reapInterval;
+    const now = time.now();
+    if (now - _lastReap >= interval) { reap(o); _lastReap = now; }
     const batch = claim(o);
     for (const job of batch) {
         const h = _handlers[job.type] || _default;
@@ -313,6 +324,9 @@ async function work(opts) {
 // Worker loop control: stop() flips this so a running runWorker returns after
 // its current iteration. A fresh runWorker resets it to true.
 let _running = false;
+
+// Unix ts of the last reaper sweep (throttled in work() via _cfg.reapInterval).
+let _lastReap = 0;
 
 /**
  * Request the running runWorker loop to stop after the current iteration.
@@ -423,6 +437,17 @@ function retry(id) {
 }
 
 /**
+ * Cancel a not-yet-started job by id: delete it if it is still `pending`
+ * (covers delayed / scheduled jobs). A `running` job is mid-flight and is NOT
+ * cancelled (let it finish or dead-letter). Returns whether a row was removed.
+ * @param {number} id
+ * @returns {boolean}
+ */
+function cancel(id) {
+    return (db.exec("DELETE FROM _hull_jobs WHERE id=? AND status='pending'", [id]) || 0) > 0;
+}
+
+/**
  * Purge terminal jobs (done + dead by default) whose last update is older than
  * a retention age. Run from app.daily to bound table growth. Only touches
  * terminal rows, so it never races a pending / running job.
@@ -444,8 +469,8 @@ function cleanup(opts) {
 
 export const jobs = {
     init, enqueue, claim, handler, default: setDefault, work, reap, stats,
-    runWorker, stop, dead, retry, cleanup, RETRY, DEAD, DISCARD, _config: _cfg,
+    runWorker, stop, dead, retry, cancel, cleanup, RETRY, DEAD, DISCARD, _config: _cfg,
 };
 export { init, enqueue, claim, handler, work, reap, stats, runWorker, stop,
-         dead, retry, cleanup };
+         dead, retry, cancel, cleanup };
 export default jobs;
