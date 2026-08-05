@@ -11,7 +11,7 @@
 -- Full surface: schema + jobs.init, enqueue, the atomic claim, per-type +
 -- catch-all handlers, the work loop (retry-with-backoff, dead-letter, and the
 -- visibility-timeout reaper), the dedicated worker (jobs.run_worker +
--- `hull jobs worker`), and the ops surface (jobs.stats / dead / retry / cancel / cleanup). v1.1 adds durable cron (jobs.cron / uncron) and intra-process concurrency (run_worker concurrency=N), jobs.get(id), jobs.heartbeat for long jobs, fleet-wide rate limiting (jobs.limit), and queue pause/resume/purge.
+-- `hull jobs worker`), and the ops surface (jobs.stats / dead / retry / cancel / cleanup). v1.1 adds durable cron (jobs.cron / uncron) and intra-process concurrency (run_worker concurrency=N), jobs.get(id), jobs.heartbeat for long jobs, fleet-wide rate limiting (jobs.limit), queue pause/resume/purge, and workflows (depends_on + result passing).
 --
 -- Usage (target shape):
 --   local jobs = require("hull.jobs")
@@ -169,6 +169,27 @@ function jobs.init(opts)
         .. "paused INTEGER      NOT NULL DEFAULT 0)")
     _paused, _paused_at = {}, 0   -- force a reload after (re)init
 
+    -- Workflow dependency edges (jobs.enqueue depends_on). A dependent starts
+    -- 'blocked'; each edge is marked satisfied when its dependency completes, and
+    -- the dependent unblocks (-> pending) once its last edge is satisfied. The
+    -- edge survives until the dependent runs, so its deps' results can be
+    -- injected. fail_mode 'run' = "run even if this dep failed" (else cascade).
+    db.exec(
+        "CREATE TABLE IF NOT EXISTS _hull_job_deps ("
+        .. "dependent_id INTEGER NOT NULL,"
+        .. "dep_id       INTEGER NOT NULL,"
+        .. "ord          INTEGER NOT NULL,"
+        .. "fail_mode    VARCHAR(8),"
+        .. "satisfied    INTEGER NOT NULL DEFAULT 0,"
+        .. "PRIMARY KEY (dependent_id, dep_id))")
+    db.exec([[ CREATE INDEX IF NOT EXISTS idx_hull_job_deps_dep ON _hull_job_deps(dep_id) ]])
+
+    -- A job's result (its handler's return value), for a dependent to consume.
+    db.exec(
+        "CREATE TABLE IF NOT EXISTS _hull_job_results ("
+        .. "job_id INTEGER NOT NULL PRIMARY KEY,"
+        .. "result TEXT)")
+
     -- Verify the server actually parses SKIP LOCKED (the compile-time dialect
     -- flag says "this backend supports it" but a MySQL<8 / MariaDB<10.6 server
     -- does not). A 0-row probe against the real table detects it once; the claim
@@ -184,9 +205,81 @@ function jobs.init(opts)
     return jobs
 end
 
+-- ── Workflow dependencies (jobs.enqueue depends_on) ─────────────────────────
+
+-- Apply one dependency's terminal outcome to one edge. Idempotent (safe if the
+-- edge was already resolved by a concurrent completion or the enqueue recheck).
+-- Returns "failed" when it cascade-fails the dependent (so callers recurse).
+local function resolve_edge(dependent_id, dep_id, dep_ok, fail_mode)
+    if dep_ok or fail_mode == "run" then
+        local n = db.exec(
+            "UPDATE _hull_job_deps SET satisfied=1 WHERE dependent_id=? AND dep_id=? AND satisfied=0",
+            { dependent_id, dep_id })
+        if (n or 0) == 0 then return nil end   -- already satisfied / gone
+        local rows = db.query(
+            "SELECT COUNT(*) AS c FROM _hull_job_deps WHERE dependent_id=? AND satisfied=0",
+            { dependent_id })
+        if (rows[1] and rows[1].c or 0) == 0 then
+            db.exec("UPDATE _hull_jobs SET status='pending', updated_at=? WHERE id=? AND status='blocked'",
+                { time.now(), dependent_id })
+        end
+        return nil
+    end
+    -- cascade-fail: this dependency died and the dependent didn't opt to run.
+    local n = db.exec(
+        "UPDATE _hull_jobs SET status='dead', last_error=?, updated_at=? WHERE id=? AND status='blocked'",
+        { "dependency " .. tostring(dep_id) .. " failed", time.now(), dependent_id })
+    if (n or 0) > 0 then
+        db.exec("DELETE FROM _hull_job_deps WHERE dependent_id=?", { dependent_id })
+        return "failed"
+    end
+    return nil
+end
+
+-- A job reached a terminal state; propagate to its dependents - unblock on
+-- success, cascade-fail on failure, transitively.
+local function resolve_deps(id, ok)
+    local work, guard = { { id = id, ok = ok } }, 0
+    while #work > 0 and guard < 100000 do
+        guard = guard + 1
+        local cur = table.remove(work)
+        local edges = db.query(
+            "SELECT dependent_id, fail_mode FROM _hull_job_deps WHERE dep_id=?", { cur.id })
+        for _, e in ipairs(edges) do
+            if resolve_edge(e.dependent_id, cur.id, cur.ok, e.fail_mode) == "failed" then
+                work[#work + 1] = { id = e.dependent_id, ok = false }
+            end
+        end
+    end
+end
+
+-- Gather a dependent's dependency results (in declaration order) for injection
+-- as job.deps. Returns nil when the job has no dependencies (the common case;
+-- a PK-indexed 0-row probe). A slot is nil when that dependency had no result.
+local function load_deps(dependent_id)
+    local edges = db.query(
+        "SELECT dep_id FROM _hull_job_deps WHERE dependent_id=? ORDER BY ord", { dependent_id })
+    if #edges == 0 then return nil end
+    local out = {}
+    for i, e in ipairs(edges) do
+        local r = db.query("SELECT result FROM _hull_job_results WHERE job_id=?", { e.dep_id })
+        if r[1] and r[1].result ~= nil then
+            local ok, decoded = pcall(json.decode, r[1].result)
+            if ok then out[i] = decoded end
+        end
+    end
+    return out
+end
+
 --- Enqueue a job. A plain INSERT, so calling it inside a `db.batch()` commits
 -- the job atomically with the business row (transactional coupling - the reason
 -- jobs is DB-backed, not an external broker).
+--
+-- With `opts.depends_on` (a list of job ids) the job starts `blocked` and only
+-- becomes claimable once all those jobs complete; each dependency's result is
+-- injected into the handler as `job.deps` (in declaration order). If a
+-- dependency dead-letters, the dependent cascade-fails too, unless
+-- `opts.on_dep_failure == "run"`.
 --
 -- @tparam string job_type  handler dispatch key (non-empty)
 -- @tparam[opt] any data     JSON-encodable payload (reaches the handler as job.data)
@@ -205,6 +298,8 @@ function jobs.enqueue(job_type, data, opts)
     opts = opts or {}
     local now    = time.now()
     local run_at = opts.run_at or (now + (opts.delay or 0))
+    local deps = opts.depends_on
+    local has_deps = type(deps) == "table" and #deps > 0
     local vals = {
         opts.queue or "default",
         job_type,
@@ -217,17 +312,43 @@ function jobs.enqueue(job_type, data, opts)
     }
     local cols = { "queue", "type", "payload", "priority", "max_attempts",
                    "run_at", "dedup_key", "created_at", "updated_at" }
+    if has_deps then
+        cols[#cols + 1] = "status"; vals[#vals + 1] = "blocked"
+    end
+    local id
     if opts.dedup_key ~= nil then
         -- INSERT ... ON CONFLICT(queue,dedup_key) DO NOTHING / INSERT OR IGNORE.
         local n = db.insert_if_absent("_hull_jobs", { "queue", "dedup_key" }, cols, vals)
-        if n and n > 0 then return db.last_id() end
-        return nil   -- an un-run job with this (queue, dedup_key) already exists
+        if not (n and n > 0) then
+            return nil   -- an un-run job with this (queue, dedup_key) already exists
+        end
+        id = db.last_id()
+    else
+        local ph = {}
+        for i = 1, #cols do ph[i] = "?" end
+        db.exec("INSERT INTO _hull_jobs (" .. table.concat(cols, ", ")
+            .. ") VALUES (" .. table.concat(ph, ", ") .. ")", vals)
+        id = db.last_id()
     end
-    db.exec(
-        "INSERT INTO _hull_jobs (queue, type, payload, priority, max_attempts, "
-        .. "run_at, dedup_key, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        vals)
-    return db.last_id()
+    if has_deps then
+        -- Record edges first, then re-check each dependency's current state: this
+        -- closes the enqueue/complete race (a dep that finished between the check
+        -- and the insert is caught by whichever side runs second - both idempotent).
+        local fail_mode = (opts.on_dep_failure == "run") and "run" or nil
+        for i, dep in ipairs(deps) do
+            db.exec("INSERT INTO _hull_job_deps (dependent_id, dep_id, ord, fail_mode) "
+                .. "VALUES (?, ?, ?, ?)", { id, dep, i, fail_mode })
+        end
+        for _, dep in ipairs(deps) do
+            local g = jobs.get(dep)
+            if g == nil or g.status == "done" then
+                resolve_edge(id, dep, true, fail_mode)   -- already satisfied
+            elseif g.status == "dead" then
+                resolve_edge(id, dep, false, fail_mode)  -- already failed
+            end
+        end
+    end
+    return id
 end
 
 -- Decode a claimed DB row into a handler-facing job (payload -> data).
@@ -461,14 +582,25 @@ function jobs.default(fn)
     return jobs
 end
 
-local function mark_done(id)
+local function mark_done(id, result)
     db.exec("UPDATE _hull_jobs SET status='done', claim_token=NULL, updated_at=? WHERE id=?",
         { time.now(), id })
+    if result ~= nil then   -- persist the handler's return value for dependents
+        local enc = json.encode(result)
+        local n = db.exec("UPDATE _hull_job_results SET result=? WHERE job_id=?", { enc, id })
+        if (n or 0) == 0 then
+            db.exec("INSERT INTO _hull_job_results (job_id, result) VALUES (?, ?)", { id, enc })
+        end
+    end
+    resolve_deps(id, true)                                   -- unblock dependents
+    db.exec("DELETE FROM _hull_job_deps WHERE dependent_id=?", { id })   -- consumed its own deps
 end
 
 local function mark_dead(id, err)
     db.exec("UPDATE _hull_jobs SET status='dead', last_error=?, claim_token=NULL, updated_at=? WHERE id=?",
         { err, time.now(), id })
+    resolve_deps(id, false)                                  -- cascade to dependents
+    db.exec("DELETE FROM _hull_job_deps WHERE dependent_id=?", { id })
 end
 
 -- Reschedule with backoff, or dead-letter once attempts are exhausted. `attempts`
@@ -697,6 +829,7 @@ function jobs.work(opts)
     end
     local batch = jobs.claim(opts)
     for _, job in ipairs(batch) do
+        job.deps = load_deps(job.id)   -- workflow: dependency results, in order
         local h = _handlers[job.type] or _default
         if not h then
             mark_dead(job.id, "no handler for job type '" .. tostring(job.type) .. "'")
@@ -709,8 +842,13 @@ function jobs.work(opts)
             elseif result == jobs.RETRY then
                 mark_retry(job, "handler requested retry")
             else
-                -- nil / true / jobs.DISCARD / any other value -> done.
-                mark_done(job.id)
+                -- nil / true / jobs.DISCARD -> done, no result; any other return
+                -- value is stored as the job's result (for dependents).
+                local res
+                if result ~= nil and result ~= true and result ~= jobs.DISCARD then
+                    res = result
+                end
+                mark_done(job.id, res)
             end
         end
     end
@@ -802,7 +940,7 @@ function jobs.stats(opts)
     else
         rows = db.query("SELECT status, COUNT(*) AS c FROM _hull_jobs GROUP BY status")
     end
-    local s = { pending = 0, running = 0, done = 0, dead = 0 }
+    local s = { pending = 0, running = 0, done = 0, dead = 0, blocked = 0 }
     for _, r in ipairs(rows) do s[r.status] = r.c end
     return s
 end
@@ -933,7 +1071,10 @@ function jobs.cleanup(opts)
         sql = sql .. " AND queue=?"
         params[#params + 1] = opts.queue
     end
-    return db.exec(sql, params) or 0
+    local deleted = db.exec(sql, params) or 0
+    -- Drop results whose producing job is gone (workflow result store hygiene).
+    db.exec("DELETE FROM _hull_job_results WHERE job_id NOT IN (SELECT id FROM _hull_jobs)")
+    return deleted
 end
 
 return jobs
