@@ -72,6 +72,13 @@ int hl_js_track_alloc(HlJS *js, void ***arr, size_t *count,
 
 /* ── Route wiring ──────────────────────────────────────────────────── */
 
+/* Defined below; forward-declared so the router (test-harness) wiring can
+ * register streaming-multipart routes the same way the server wiring does. */
+static KlMultipartConfig *js_build_multipart_config(HlJS *js, JSValueConst mp);
+static KlBodyReader *hl_js_multipart_factory(KlAllocator *alloc,
+                                             const KlRequest *req,
+                                             void *user_data);
+
 int hl_js_wire_routes(HlJS *js, KlRouter *router)
 {
     JSContext *ctx = js->ctx;
@@ -98,6 +105,7 @@ int hl_js_wire_routes(HlJS *js, KlRouter *router)
         JSValue method_val = JS_GetPropertyStr(ctx, def, "method");
         JSValue pattern_val = JS_GetPropertyStr(ctx, def, "pattern");
         JSValue id_val = JS_GetPropertyStr(ctx, def, "handler_id");
+        JSValue mp_val = JS_GetPropertyStr(ctx, def, "multipart");
 
         const char *method_str = JS_ToCString(ctx, method_val);
         const char *pattern = JS_ToCString(ctx, pattern_val);
@@ -111,14 +119,35 @@ int hl_js_wire_routes(HlJS *js, KlRouter *router)
                 route->js = js;
                 route->handler_id = handler_id;
                 route->multipart_config = NULL;
+
+                /* Peek def.multipart — present → streaming route. Mirror the
+                 * server path (hl_js_wire_routes_server) so req.multipart()
+                 * resolves under `hull test`; the in-process harness pre-feeds
+                 * the whole body to this factory's wrapper (hl_cap_test_dispatch). */
+                int is_streaming = JS_IsObject(mp_val) &&
+                                   !JS_IsFunction(ctx, mp_val) &&
+                                   !JS_IsArray(ctx, mp_val);
+                if (is_streaming) {
+                    route->multipart_config =
+                        js_build_multipart_config(js, mp_val);
+                    if (!route->multipart_config) is_streaming = 0;
+                }
+
                 hl_js_track_route(js, route);
-                kl_router_add(router, method_str, pattern,
-                              hl_js_keel_handler, route, NULL);
+                if (is_streaming) {
+                    kl_router_add_streaming_async(router, method_str, pattern,
+                                                  hl_js_keel_handler, route,
+                                                  hl_js_multipart_factory);
+                } else {
+                    kl_router_add(router, method_str, pattern,
+                                  hl_js_keel_handler, route, NULL);
+                }
             }
         }
 
         if (pattern) JS_FreeCString(ctx, pattern);
         if (method_str) JS_FreeCString(ctx, method_str);
+        JS_FreeValue(ctx, mp_val);
         JS_FreeValue(ctx, id_val);
         JS_FreeValue(ctx, pattern_val);
         JS_FreeValue(ctx, method_val);

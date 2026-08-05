@@ -20,6 +20,7 @@
 #include "hull/cap/db_backend.h"
 #include "hull/cap/db_sqlite.h"   /* hl_db_sqlite_raw (agent handle) */
 #include "hull/cap/db_registry.h"
+#include "hull/cap/fs.h"          /* HlFsConfig — test/agent fs sandbox wiring */
 #include "hull/migrate.h"
 #include "hull/worker_db.h"
 #include <sqlite3.h>
@@ -54,6 +55,17 @@ struct HlAppContext {
     HlVfs          platform_vfs;
     void          *platform_vfs_owned;  /* opaque sealed-arena handle to free, or NULL */
     HlRuntime     *rt;
+
+    /* Owned app_dir copy backing fs_cfg_storage.base_dir (rt->fs_cfg borrows it,
+     * so it must outlive the runtime — opts->app_dir may be a caller stack). */
+    char          *app_dir_copy;
+    /* fs capability config wired onto rt->fs_cfg when the app declares
+     * fs.read/fs.write, so blob.* / fs.* / fs.mmap work under `hull test` /
+     * `hull agent` the same way they do under `hull dev` (serve.c does the
+     * equivalent wiring in hl_serve_wire_caps). Only base_dir/base_len — the
+     * cap layer sandboxes to base_dir + rejects traversal; the per-path
+     * allowlist is the kernel sandbox, which the test harness runs without. */
+    HlFsConfig     fs_cfg_storage;
 
     /* Resolved module set (opt-in via opts.gate_modules). Lives here so
      * its lifetime matches the runtime — rt->module_set borrows. */
@@ -166,11 +178,15 @@ int hl_app_context_init(HlAppContext **out, const HlAppContextOpts *opts)
     HlAppContext *ctx = calloc(1, sizeof(*ctx));
     if (!ctx) return -1;
 
+    /* Own a stable copy of app_dir for fs_cfg.base_dir (see struct comment). */
+    ctx->app_dir_copy = strdup(opts->app_dir);
+    if (!ctx->app_dir_copy) { free(ctx); return -1; }
+
     /* Detect entry point and runtime type */
     char entry_buf[4096];
     const char *entry = NULL;
     if (resolve_entry_and_runtime(ctx, opts, &entry, entry_buf, sizeof(entry_buf)) != 0) {
-        free(ctx);
+        hl_app_context_free(ctx);
         return -1;
     }
 
@@ -307,6 +323,19 @@ int hl_app_context_init(HlAppContext **out, const HlAppContextOpts *opts)
                 char err[HL_MODULE_RESOLVER_ERR_MAX] = {0};
                 int rc = hl_module_resolver_resolve(&m, &ctx->module_set,
                                                      err, sizeof(err));
+                /* Wire the fs capability from the manifest, mirroring the serve
+                 * path (serve.c::hl_serve_wire_caps). Without this rt->fs_cfg
+                 * stays NULL and blob.init / fs.read/write / fs.mmap fail with
+                 * "fs config unavailable" under `hull test` / `hull agent`. Only
+                 * base_dir is needed (the cap layer sandboxes to base_dir +
+                 * rejects traversal; the per-path allowlist is the kernel
+                 * sandbox). Keyed on the app declaring fs.read OR fs.write, same
+                 * condition as serve. Safe to read m before the free below. */
+                if (m.fs_read_count > 0 || m.fs_write_count > 0) {
+                    ctx->fs_cfg_storage.base_dir = ctx->app_dir_copy;
+                    ctx->fs_cfg_storage.base_len = strlen(ctx->app_dir_copy);
+                    ctx->rt->fs_cfg = &ctx->fs_cfg_storage;
+                }
                 hl_manifest_free(&m);
                 if (rc != 0) {
                     fprintf(stderr, "[app-context] module resolver: %s\n", err);
@@ -393,6 +422,10 @@ void hl_app_context_free(HlAppContext *ctx)
     ctx->app_loaded = 0;
     hl_platform_vfs_dispose(ctx->platform_vfs_owned);
     ctx->platform_vfs_owned = NULL;
+    /* rt->fs_cfg borrowed &ctx->fs_cfg_storage, whose base_dir borrowed this;
+     * the runtime is already destroyed above, so no live borrow remains. */
+    free(ctx->app_dir_copy);
+    ctx->app_dir_copy = NULL;
     free(ctx);
 }
 

@@ -76,6 +76,13 @@ int hl_lua_track_alloc(HlLua *lua, void ***arr, size_t *count,
 
 /* ── Route wiring ──────────────────────────────────────────────────── */
 
+/* Defined below; forward-declared so the router (test-harness) wiring can
+ * register streaming-multipart routes the same way the server wiring does. */
+static KlMultipartConfig *lua_build_multipart_config(HlLua *lua);
+static KlBodyReader *hl_lua_multipart_factory(KlAllocator *alloc,
+                                              const KlRequest *req,
+                                              void *user_data);
+
 int hl_lua_wire_routes(HlLua *lua, KlRouter *router)
 {
     lua_State *L = lua->L;
@@ -116,8 +123,29 @@ int hl_lua_wire_routes(HlLua *lua, KlRouter *router)
                 route->lua = lua;
                 route->handler_id = handler_id;
                 route->multipart_config = NULL;
+
+                /* Peek def.multipart — present → streaming route. Mirror the
+                 * server path (hl_lua_wire_routes_server) so req:multipart()
+                 * resolves under `hull test`. The in-process harness pre-feeds
+                 * the whole body to this factory's wrapper (hl_cap_test_dispatch),
+                 * so the handler iterates synchronously without a live socket. */
+                lua_getfield(L, -4, "multipart");
+                int is_streaming = lua_istable(L, -1);
+                if (is_streaming) {
+                    route->multipart_config = lua_build_multipart_config(lua);
+                    if (!route->multipart_config) is_streaming = 0;
+                }
+                lua_pop(L, 1); /* multipart subtable */
+
                 if (hl_lua_track_route(lua, route) != 0) {
+                    if (route->multipart_config)
+                        hl_alloc_free(lua->base.alloc, route->multipart_config,
+                                      sizeof(KlMultipartConfig));
                     hl_alloc_free(lua->base.alloc, route, sizeof(HlLuaRoute));
+                } else if (is_streaming) {
+                    kl_router_add_streaming_async(router, method_str, pattern,
+                                                  hl_lua_keel_handler, route,
+                                                  hl_lua_multipart_factory);
                 } else {
                     kl_router_add(router, method_str, pattern,
                                   hl_lua_keel_handler, route, NULL);
