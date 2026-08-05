@@ -216,6 +216,70 @@ jobs.enqueue("merge", {}, { depends_on = { p1, p2 } })   -- job.deps = { r1, r2 
 - Depend on job **ids** returned from `enqueue`; enqueue parents first. Unknown /
   already-cleaned-up dependency ids are treated as satisfied.
 
+## Durable workflows (workflow-as-code)
+
+The `depends_on` DAG above is a *static* graph of independent jobs. For a
+*dynamic*, long-running process - loops, conditionals, resumable across crashes -
+use a **durable workflow**: a normal function whose steps are memoized, so a
+crashed or retried workflow resumes past the work it already did. It can sleep for
+days, wait for external signals, and roll back on failure. (See
+[docs/jobs_durable_execution_design.md](jobs_durable_execution_design.md);
+deterministic WASM-replay strict mode is the remaining Phase 2.)
+
+```lua
+jobs.workflow("checkout", function(ctx)
+  local charge = ctx.step("charge", function()   -- runs once, result persisted
+      return payments.charge(ctx.input.order_id, ctx.input.amount)
+  end)
+  ctx.step("ship", function() return shipping.dispatch(ctx.input.order_id) end)
+  return { charged = charge.id }
+end)
+
+local wf = jobs.start("checkout", { order_id = 42, amount = 100 })   -- returns a job id
+```
+```javascript
+jobs.workflow("checkout", async (ctx) => {
+  const charge = await ctx.step("charge", () => payments.charge(ctx.input.orderId, ctx.input.amount));
+  await ctx.step("ship", () => shipping.dispatch(ctx.input.orderId));
+  return { charged: charge.id };
+});
+const wf = jobs.start("checkout", { orderId: 42, amount: 100 });
+```
+
+- **A workflow instance is a job** (reserved type `__wf:<name>`), so it rides the
+  same claim / visibility-reaper / retry / worker / result machinery. If a
+  worker crashes mid-workflow, the reaper reclaims it and it resumes.
+- **`ctx.step(name, fn)`** runs `fn` once and stores the result in
+  `_hull_workflow_steps`; on any re-run (retry or crash-resume) the step returns
+  the stored result **without** re-executing `fn`. Steps are **at-least-once**
+  (idempotent, same contract as a handler): a crash between the side effect and
+  the memo write re-runs the step.
+- **`ctx.input`** is the payload from `jobs.start`; **`ctx.id`** is the workflow
+  id. The body between steps re-runs on each resume, so keep it cheap and put all
+  side effects inside steps.
+- **`ctx.sleep(seconds)`** is a **durable timer**: the workflow yields and is
+  rescheduled to wake later (it becomes a future-dated `pending` job), so a sleep
+  survives restarts, redeploys, and crashes at zero cost - no held thread, no
+  in-memory timer. A worker must be running when it is due. A sleep does not
+  consume the retry budget. `workflow_status` reports `waiting_for = "sleep:<ts>"`
+  while it waits.
+- **`ctx.wait_signal(name, opts?)`** (`waitSignal`) pauses the workflow until
+  `jobs.signal(id, name, payload)` (`workflowStatus` shows `waiting_for =
+  "signal"`); it returns the delivered payload. The workflow parks in a
+  non-terminal `waiting` status (claimed by nobody) and is re-activated on
+  delivery - the human-in-the-loop / wait-for-webhook / approval primitive. A
+  signal delivered **before** the workflow reaches the wait is stored and
+  consumed when it gets there (no lost-signal race). `opts.timeout` (seconds)
+  makes the wait return `nil` if no signal arrives in time.
+- **Saga compensation:** `ctx.step(name, fn, { compensate = cfn })` registers a
+  rollback. If the workflow **fails terminally** (dead-letters), the completed
+  steps' `compensate` functions run in **reverse order** (undo the charge if
+  shipping can't be arranged). Compensations are at-least-once (idempotent) and
+  recorded, so a crash mid-rollback resumes.
+- **`jobs.workflow_status(id)`** (`workflowStatus`) → `{ status, name,
+  steps_done, result?, error? }`, DB-derived (works even when no worker is
+  running it). Fetch the final value with `jobs.await(id)` / `jobs.result(id)`.
+
 ## Handler contract
 
 `jobs.work` dispatches each claimed job to its registered handler, else the

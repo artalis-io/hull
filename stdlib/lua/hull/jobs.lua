@@ -11,7 +11,7 @@
 -- Full surface: schema + jobs.init, enqueue, the atomic claim, per-type +
 -- catch-all handlers, the work loop (retry-with-backoff, dead-letter, and the
 -- visibility-timeout reaper), the dedicated worker (jobs.run_worker +
--- `hull jobs worker`), and the ops surface (jobs.stats / dead / retry / cancel / cleanup). v1.1 adds durable cron (jobs.cron / uncron) and intra-process concurrency (run_worker concurrency=N), jobs.get(id), jobs.heartbeat for long jobs, fleet-wide rate limiting (jobs.limit), queue pause/resume/purge, and workflows (depends_on + result passing). v1.5 adds the standalone result backend (jobs.result / jobs.await), multi-queue draining (opts.queues, strict list or weighted map), bulk enqueue (jobs.enqueue_many), in-process lifecycle hooks (jobs.on completed/retried/dead), and polish (absolute at, jobs.progress, throttle window, fixed-offset tz cron).
+-- `hull jobs worker`), and the ops surface (jobs.stats / dead / retry / cancel / cleanup). v1.1 adds durable cron (jobs.cron / uncron) and intra-process concurrency (run_worker concurrency=N), jobs.get(id), jobs.heartbeat for long jobs, fleet-wide rate limiting (jobs.limit), queue pause/resume/purge, and workflows (depends_on + result passing). v1.5 adds the standalone result backend (jobs.result / jobs.await), multi-queue draining (opts.queues, strict list or weighted map), bulk enqueue (jobs.enqueue_many), in-process lifecycle hooks (jobs.on completed/retried/dead), and polish (absolute at, jobs.progress, throttle window, fixed-offset tz cron). Durable workflows (jobs.workflow / jobs.start / ctx.step / ctx.sleep / ctx.wait_signal / jobs.signal, Phase 1) add crash-safe workflow-as-code: step memoization, durable timers, external signals, and saga compensation - a workflow instance is a job that rides the same claim/reaper/retry/result machinery (docs/jobs_durable_execution_design.md).
 --
 -- Usage (target shape):
 --   local jobs = require("hull.jobs")
@@ -61,6 +61,10 @@ local _default = nil
 -- the worker that processed the job, for jobs THAT worker ran. Not fleet-wide -
 -- a durable cross-process event stream is the LISTEN/NOTIFY epic (#235).
 local _listeners = { completed = {}, retried = {}, dead = {} }
+
+-- Registered durable workflows: name -> fn(ctx). jobs.workflow registers a
+-- reserved-type handler that runs the workflow through a memoizing ctx.
+local _workflows = {}
 
 -- Unix ts of the last reaper sweep (throttled in jobs.work via _cfg.reap_interval).
 local _last_reap = 0
@@ -216,6 +220,30 @@ function jobs.init(opts)
         "CREATE TABLE IF NOT EXISTS _hull_job_results ("
         .. "job_id INTEGER NOT NULL PRIMARY KEY,"
         .. "result TEXT)")
+
+    -- Durable-execution step memo (jobs.workflow / ctx.step). One row per
+    -- completed step of a workflow instance; a re-run of the workflow (crash or
+    -- retry) reads these to skip already-done steps. Composite PK = idempotent.
+    db.exec(
+        "CREATE TABLE IF NOT EXISTS _hull_workflow_steps ("
+        .. "workflow_id INTEGER      NOT NULL,"
+        .. "step_key    VARCHAR(255) NOT NULL,"
+        .. "result      TEXT,"
+        .. "status      VARCHAR(16)  NOT NULL DEFAULT 'done',"
+        .. "created_at  INTEGER      NOT NULL,"
+        .. "PRIMARY KEY (workflow_id, step_key))")
+
+    -- Durable-execution signals (jobs.signal / ctx.wait_signal). One row per
+    -- (workflow, signal name); the payload is consumed once. Composite PK makes a
+    -- duplicate delivery a no-op (first wins).
+    db.exec(
+        "CREATE TABLE IF NOT EXISTS _hull_workflow_signals ("
+        .. "workflow_id INTEGER      NOT NULL,"
+        .. "name        VARCHAR(255) NOT NULL,"
+        .. "payload     TEXT,"
+        .. "created_at  INTEGER      NOT NULL,"
+        .. "consumed_at INTEGER,"
+        .. "PRIMARY KEY (workflow_id, name))")
 
     -- Verify the server actually parses SKIP LOCKED (the compile-time dialect
     -- flag says "this backend supports it" but a MySQL<8 / MariaDB<10.6 server
@@ -785,6 +813,13 @@ function jobs.reap(opts)
     opts = opts or {}
     local vt = opts.visibility_timeout or _cfg.visibility_timeout
     local now = time.now()
+    -- Wake durable-workflow signal waits whose timeout (run_at > 0) has passed, so
+    -- they re-run and return nil from ctx.wait_signal. run_at = 0 means "no
+    -- timeout" (wait forever) and is left alone - only jobs.signal wakes it.
+    db.exec(
+        "UPDATE _hull_jobs SET status='pending', updated_at=? "
+        .. "WHERE status='waiting' AND run_at > 0 AND run_at <= ?",
+        { now, now })
     return db.exec(
         "UPDATE _hull_jobs SET status='pending', claim_token=NULL, updated_at=? "
         .. "WHERE status='running' AND claimed_at <= ?",
@@ -1021,7 +1056,40 @@ function jobs.work(opts)
             emit("dead", job, { error = err })
         else
             local ok, result = pcall(h, job)
-            if not ok then
+            if ok and type(result) == "table" and result.__hull_wf_yield then
+                -- Durable workflow yielded - no terminal outcome, no event. A
+                -- yield is not a failed attempt, so undo the claim's attempt
+                -- increment (a workflow may sleep / wait many times without
+                -- exhausting max_attempts).
+                local wf_now = time.now()
+                if result.waiting then
+                    -- ctx.wait_signal: park in the non-terminal 'waiting' status
+                    -- (excluded by the claim query). run_at carries the optional
+                    -- timeout deadline (0 = none); the reaper wakes a timed-out
+                    -- wait, jobs.signal wakes a delivered one.
+                    db.exec("UPDATE _hull_jobs SET status='waiting', run_at=?, "
+                        .. "attempts=attempts-1, claim_token=NULL, updated_at=? WHERE id=?",
+                        { result.deadline or 0, wf_now, job.id })
+                    -- Close the deliver-before-park race: a signal delivered in the
+                    -- check->park window couldn't re-activate us (we were 'running'),
+                    -- so re-check now that we are 'waiting'.
+                    if result.signal_name then
+                        local sig = db.query("SELECT 1 AS x FROM _hull_workflow_signals "
+                            .. "WHERE workflow_id=? AND name=? AND consumed_at IS NULL",
+                            { job.id, result.signal_name })
+                        if sig and #sig > 0 then
+                            db.exec("UPDATE _hull_jobs SET status='pending', run_at=?, "
+                                .. "updated_at=? WHERE id=? AND status='waiting'",
+                                { wf_now, wf_now, job.id })
+                        end
+                    end
+                else
+                    -- ctx.sleep: future-dated pending job.
+                    db.exec("UPDATE _hull_jobs SET status='pending', run_at=?, "
+                        .. "attempts=attempts-1, claim_token=NULL, updated_at=? WHERE id=?",
+                        { result.wake_at or wf_now, wf_now, job.id })
+                end
+            elseif not ok then
                 local err = tostring(result)
                 emit(mark_retry(job, err), job, { error = err, attempt = job.attempts })
             elseif result == jobs.DEAD then
@@ -1238,6 +1306,268 @@ function jobs.await(id, opts)
     end
 end
 
+-- ── Durable execution: workflow-as-code (Phase 1a) ──────────────────────────
+-- A durable workflow is a normal function fn(ctx) run as a job of the reserved
+-- type "__wf:<name>". Each ctx.step(name, fn) memoizes its result in
+-- _hull_workflow_steps; if the workflow re-runs (a crash or a retry re-enters it
+-- from the top), completed steps return their stored result instead of
+-- re-executing, so the body resumes where it left off. Design:
+-- docs/jobs_durable_execution_design.md.
+local WF_PREFIX = "__wf:"
+
+-- Run (or replay) one memoized step. Returns fn()'s value; on a re-run of the
+-- workflow the value comes from the store and fn is NOT called again.
+local function run_step(workflow_id, step_key, fn)
+    if type(step_key) ~= "string" or step_key == "" then
+        error("ctx.step: name must be a non-empty string")
+    end
+    if type(fn) ~= "function" then error("ctx.step: fn must be a function") end
+    local rows = db.query(
+        "SELECT result FROM _hull_workflow_steps WHERE workflow_id=? AND step_key=?",
+        { workflow_id, step_key })
+    if rows and #rows > 0 then
+        if rows[1].result == nil then return nil end
+        local ok, decoded = pcall(json.decode, rows[1].result)
+        if ok then return decoded else return rows[1].result end
+    end
+    -- First execution: run, then persist. At-least-once - a crash between the
+    -- side effect and this INSERT re-runs the step on resume (steps must be
+    -- idempotent, same contract as a job handler).
+    local result = fn()
+    local enc = result ~= nil and json.encode(result) or nil
+    db.exec(
+        "INSERT INTO _hull_workflow_steps (workflow_id, step_key, result, status, created_at) "
+        .. "VALUES (?, ?, ?, 'done', ?)",
+        { workflow_id, step_key, enc, time.now() })
+    return result
+end
+
+-- Durable timer. `n` is the ordinal of this sleep in the workflow body (stable
+-- across re-runs, since the step-call sequence is stable). On first encounter it
+-- records the wake time and raises the yield sentinel (the runner reschedules the
+-- job to run_at = wake_at); on a resume the recorded wake time is read, and once
+-- it has passed the call returns and the body continues past it.
+local function run_sleep(workflow_id, n, seconds)
+    local key = "__sleep:" .. n
+    local rows = db.query(
+        "SELECT result FROM _hull_workflow_steps WHERE workflow_id=? AND step_key=?",
+        { workflow_id, key })
+    local wake_at
+    if rows and #rows > 0 then
+        wake_at = tonumber(rows[1].result)
+    else
+        wake_at = time.now() + (tonumber(seconds) or 0)
+        db.exec(
+            "INSERT INTO _hull_workflow_steps (workflow_id, step_key, result, status, created_at) "
+            .. "VALUES (?, ?, ?, 'sleeping', ?)",
+            { workflow_id, key, tostring(wake_at), time.now() })
+    end
+    if time.now() >= wake_at then return end   -- elapsed: continue
+    error({ __hull_yield = true, wake_at = wake_at })   -- caught by the runner
+end
+
+-- Wait for an external signal (jobs.signal). If the named signal is present it is
+-- consumed and its payload returned; otherwise the workflow yields to the
+-- non-terminal 'waiting' status (re-activated by jobs.signal). With opts.timeout
+-- the wait also arms a deadline (stored once, stable across resumes) so the
+-- reaper wakes it if no signal arrives; a timed-out wait returns nil.
+local function run_wait_signal(workflow_id, name, opts)
+    if type(name) ~= "string" or name == "" then
+        error("ctx.wait_signal: name must be a non-empty string")
+    end
+    local rows = db.query(
+        "SELECT payload FROM _hull_workflow_signals WHERE workflow_id=? AND name=? AND consumed_at IS NULL",
+        { workflow_id, name })
+    if rows and #rows > 0 then
+        db.exec("UPDATE _hull_workflow_signals SET consumed_at=? WHERE workflow_id=? AND name=?",
+            { time.now(), workflow_id, name })
+        if rows[1].payload == nil then return nil end
+        local ok, decoded = pcall(json.decode, rows[1].payload)
+        if ok then return decoded else return rows[1].payload end
+    end
+    local deadline = 0
+    if opts and opts.timeout then
+        local key = "__waitdl:" .. name
+        local drows = db.query(
+            "SELECT result FROM _hull_workflow_steps WHERE workflow_id=? AND step_key=?",
+            { workflow_id, key })
+        if drows and #drows > 0 then
+            deadline = tonumber(drows[1].result) or 0
+        else
+            deadline = time.now() + opts.timeout
+            db.exec(
+                "INSERT INTO _hull_workflow_steps (workflow_id, step_key, result, status, created_at) "
+                .. "VALUES (?, ?, ?, 'waiting', ?)",
+                { workflow_id, key, tostring(deadline), time.now() })
+        end
+        if time.now() >= deadline then return nil end   -- timed out, no signal
+    end
+    error({ __hull_yield = true, waiting = true, signal_name = name, deadline = deadline })
+end
+
+-- Run the compensations of completed steps in reverse order (saga rollback). Each
+-- runs at most once (marked 'compensated'), so a crash mid-rollback resumes.
+local function run_compensations(comps, workflow_id)
+    for i = #comps, 1, -1 do
+        local c = comps[i]
+        local done = db.query(
+            "SELECT status FROM _hull_workflow_steps WHERE workflow_id=? AND step_key=?",
+            { workflow_id, c.key })
+        if not (done and #done > 0 and done[1].status == "compensated") then
+            pcall(c.fn)   -- at-least-once; compensations must be idempotent
+            db.exec("UPDATE _hull_workflow_steps SET status='compensated' WHERE workflow_id=? AND step_key=?",
+                { workflow_id, c.key })
+        end
+    end
+end
+
+-- Build the durable ctx handed to a workflow function. `sleep_n` is a per-run
+-- counter captured by ctx.sleep; `comps` collects saga compensations (registered
+-- by every ctx.step call that has one, so on the terminal-failure run the list
+-- covers all completed steps).
+local function make_ctx(job, name)
+    local sleep_n = 0
+    local comps = {}
+    local ctx = {
+        id    = job.id,
+        name  = name,
+        input = job.data,
+        trace = job.trace,   -- trace-context propagation (observability design)
+        _comps = comps,
+    }
+    ctx.step = function(step_key, fn, opts)
+        local result = run_step(job.id, step_key, fn)
+        if opts and type(opts.compensate) == "function" then
+            comps[#comps + 1] = { key = step_key, fn = opts.compensate }
+        end
+        return result
+    end
+    ctx.sleep = function(seconds)
+        sleep_n = sleep_n + 1
+        return run_sleep(job.id, sleep_n, seconds)
+    end
+    ctx.wait_signal = function(signal_name, opts) return run_wait_signal(job.id, signal_name, opts) end
+    return ctx
+end
+
+--- Register a durable workflow. `fn(ctx)` is the workflow body; its return value
+-- becomes the workflow's result (fetch via jobs.await / jobs.result). Inside it,
+-- `ctx.step(name, fn)` runs `fn` once and memoizes the result, so a crashed or
+-- retried workflow resumes past completed steps. `ctx.input` is the payload from
+-- jobs.start, `ctx.id` the workflow id. A workflow instance IS a job (reserved
+-- type "__wf:<name>"), so it inherits claim / reaper / retry / worker / result.
+-- @tparam string name
+-- @tparam function fn   function(ctx) -> result
+function jobs.workflow(name, fn)
+    if type(name) ~= "string" or name == "" then
+        error("jobs.workflow: name must be a non-empty string")
+    end
+    if type(fn) ~= "function" then error("jobs.workflow: fn must be a function") end
+    _workflows[name] = fn
+    -- The workflow runs as a normal handler for its reserved type. A ctx.sleep /
+    -- ctx.wait_signal raises the yield sentinel; catch it and hand work() the
+    -- yield marker (sleep -> reschedule pending; signal -> 'waiting'). A real
+    -- error re-raises for the normal retry path - but on the LAST attempt (about
+    -- to dead-letter) or an explicit jobs.DEAD, run the saga compensations first.
+    jobs.handler(WF_PREFIX .. name, function(job)
+        local ctx = make_ctx(job, name)
+        local ok, res = pcall(fn, ctx)
+        if ok then
+            if res == jobs.DEAD then run_compensations(ctx._comps, job.id) end
+            return res
+        end
+        if type(res) == "table" and res.__hull_yield then
+            return { __hull_wf_yield = true, wake_at = res.wake_at,
+                     waiting = res.waiting, signal_name = res.signal_name,
+                     deadline = res.deadline }
+        end
+        local max = job.max_attempts or _cfg.max_attempts
+        if (job.attempts or 0) >= max then run_compensations(ctx._comps, job.id) end
+        error(res, 0)
+    end)
+    return jobs
+end
+
+--- Start a durable workflow instance. Returns the workflow id (a job id); the
+-- input is the workflow's `ctx.input`. Accepts the usual enqueue opts (queue,
+-- priority, dedup_key for an idempotent start, delay/at). Poll jobs.workflow_
+-- status(id) or jobs.await(id) for the outcome.
+-- @tparam string name
+-- @tparam[opt] table input
+-- @tparam[opt] table opts   enqueue options
+-- @treturn number|nil  the workflow id, or nil if a dedup_key collapsed it
+function jobs.start(name, input, opts)
+    if not _workflows[name] then
+        error("jobs.start: unknown workflow '" .. tostring(name) .. "' (register it with jobs.workflow)")
+    end
+    return jobs.enqueue(WF_PREFIX .. name, input, opts)
+end
+
+--- Deliver a signal to a durable workflow (see ctx.wait_signal). Records the
+-- named payload (first delivery per name wins) and re-activates the workflow if
+-- it is parked waiting for it. Safe to call before the workflow reaches the wait
+-- (the signal is stored and consumed when it gets there) - no lost-signal race.
+-- Returns true.
+-- @tparam number id       the workflow id
+-- @tparam string name     the signal name
+-- @tparam[opt] any payload
+-- @treturn boolean
+function jobs.signal(id, name, payload)
+    if type(name) ~= "string" or name == "" then
+        error("jobs.signal: name must be a non-empty string")
+    end
+    local enc = payload ~= nil and json.encode(payload) or nil
+    local now = time.now()
+    db.insert_if_absent("_hull_workflow_signals", { "workflow_id", "name" },
+        { "workflow_id", "name", "payload", "created_at" }, { id, name, enc, now })
+    -- Re-activate a parked wait (waiting -> pending). A 'running' or unrelated
+    -- 'pending' workflow is left alone: it finds the stored signal on its own.
+    db.exec("UPDATE _hull_jobs SET status='pending', run_at=?, updated_at=? "
+        .. "WHERE id=? AND status='waiting'", { now, now, id })
+    return true
+end
+
+--- Query a workflow instance's state (DB-derived, so it works even when no
+-- worker is currently running it). Returns nil for an unknown id, else
+-- { status, name, steps_done, started_at, updated_at, result?, error? }.
+-- @tparam number id
+-- @treturn table|nil
+function jobs.workflow_status(id)
+    local job = jobs.get(id)
+    if not job then return nil end
+    local rows = db.query(
+        "SELECT step_key FROM _hull_workflow_steps WHERE workflow_id=? ORDER BY created_at, step_key",
+        { id })
+    local steps_done = {}
+    for _, s in ipairs(rows or {}) do
+        -- Hide internal keys (durable-sleep markers "__sleep:N"); only user steps.
+        if not tostring(s.step_key):match("^__") then
+            steps_done[#steps_done + 1] = s.step_key
+        end
+    end
+    local out = {
+        status     = job.status,
+        name       = tostring(job.type):match("^" .. WF_PREFIX .. "(.+)$") or job.type,
+        steps_done = steps_done,
+        started_at = job.created_at,
+        updated_at = job.updated_at,
+    }
+    -- What the workflow is parked on: a signal ('waiting') or a durable timer
+    -- (pending with a future run_at).
+    if job.status == "waiting" then
+        out.waiting_for = "signal"
+    elseif job.status == "pending" and job.run_at and job.run_at > time.now() then
+        out.waiting_for = "sleep:" .. job.run_at
+    end
+    if job.status == "done" then
+        local r = jobs.result(id)
+        if r then out.result = r.result end
+    elseif job.status == "dead" then
+        out.error = job.last_error
+    end
+    return out
+end
+
 --- Extend the claim on a job the current handler is processing (heartbeat). A
 -- handler whose work may exceed `visibility_timeout` should call this
 -- periodically (at least every visibility_timeout/2 s) so the reaper doesn't
@@ -1336,8 +1666,10 @@ function jobs.cleanup(opts)
         params[#params + 1] = opts.queue
     end
     local deleted = db.exec(sql, params) or 0
-    -- Drop results whose producing job is gone (workflow result store hygiene).
+    -- Drop results + workflow steps whose producing job is gone (store hygiene).
     db.exec("DELETE FROM _hull_job_results WHERE job_id NOT IN (SELECT id FROM _hull_jobs)")
+    db.exec("DELETE FROM _hull_workflow_steps WHERE workflow_id NOT IN (SELECT id FROM _hull_jobs)")
+    db.exec("DELETE FROM _hull_workflow_signals WHERE workflow_id NOT IN (SELECT id FROM _hull_jobs)")
     return deleted
 end
 

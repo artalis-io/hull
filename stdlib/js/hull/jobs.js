@@ -15,7 +15,7 @@
  * Full surface: schema + jobs.init, enqueue, the atomic claim, per-type +
  * catch-all handlers, the work loop (retry-with-backoff, dead-letter, and the
  * visibility-timeout reaper), the dedicated worker (jobs.runWorker +
- * `hull jobs worker`), and the ops surface (jobs.stats / dead / retry / cancel / cleanup). v1.1 adds durable cron (jobs.cron / uncron) and intra-process concurrency (run_worker concurrency=N), jobs.get(id), jobs.heartbeat for long jobs, fleet-wide rate limiting (jobs.limit), queue pause/resume/purge, and workflows (depends_on + result passing). v1.5 adds the standalone result backend (jobs.result / jobs.await), multi-queue draining (opts.queues, strict list or weighted map), bulk enqueue (jobs.enqueueMany), in-process lifecycle hooks (jobs.on completed/retried/dead), and polish (absolute at, jobs.progress, throttle window, fixed-offset tz cron).
+ * `hull jobs worker`), and the ops surface (jobs.stats / dead / retry / cancel / cleanup). v1.1 adds durable cron (jobs.cron / uncron) and intra-process concurrency (run_worker concurrency=N), jobs.get(id), jobs.heartbeat for long jobs, fleet-wide rate limiting (jobs.limit), queue pause/resume/purge, and workflows (depends_on + result passing). v1.5 adds the standalone result backend (jobs.result / jobs.await), multi-queue draining (opts.queues, strict list or weighted map), bulk enqueue (jobs.enqueueMany), in-process lifecycle hooks (jobs.on completed/retried/dead), and polish (absolute at, jobs.progress, throttle window, fixed-offset tz cron). Durable workflows (jobs.workflow / jobs.start / ctx.step / ctx.sleep / ctx.wait_signal / jobs.signal, Phase 1) add crash-safe workflow-as-code: step memoization, durable timers, external signals, and saga compensation - a workflow instance is a job that rides the same claim/reaper/retry/result machinery (docs/jobs_durable_execution_design.md).
  *
  * @license AGPL-3.0-or-later
  */
@@ -58,6 +58,10 @@ let _default = null;
 // worker that processed the job, for jobs THAT worker ran. Not fleet-wide - a
 // durable cross-process event stream is the LISTEN/NOTIFY epic (#235).
 const _listeners = { completed: [], retried: [], dead: [] };
+
+// Registered durable workflows: name -> fn(ctx). jobs.workflow registers a
+// reserved-type handler that runs the workflow through a memoizing ctx.
+const _workflows = Object.create(null);
 
 // Whether the server parses SKIP LOCKED (probed in init(); null = not probed).
 let _skipLocked = null;
@@ -200,6 +204,30 @@ function init(opts) {
         "CREATE TABLE IF NOT EXISTS _hull_job_results (" +
         "job_id INTEGER NOT NULL PRIMARY KEY," +
         "result TEXT)");
+
+    // Durable-execution step memo (jobs.workflow / ctx.step). One row per
+    // completed step of a workflow instance; a re-run of the workflow (crash or
+    // retry) reads these to skip already-done steps. Composite PK = idempotent.
+    db.exec(
+        "CREATE TABLE IF NOT EXISTS _hull_workflow_steps (" +
+        "workflow_id INTEGER      NOT NULL," +
+        "step_key    VARCHAR(255) NOT NULL," +
+        "result      TEXT," +
+        "status      VARCHAR(16)  NOT NULL DEFAULT 'done'," +
+        "created_at  INTEGER      NOT NULL," +
+        "PRIMARY KEY (workflow_id, step_key))");
+
+    // Durable-execution signals (jobs.signal / ctx.waitSignal). One row per
+    // (workflow, signal name); the payload is consumed once. Composite PK makes a
+    // duplicate delivery a no-op (first wins).
+    db.exec(
+        "CREATE TABLE IF NOT EXISTS _hull_workflow_signals (" +
+        "workflow_id INTEGER      NOT NULL," +
+        "name        VARCHAR(255) NOT NULL," +
+        "payload     TEXT," +
+        "created_at  INTEGER      NOT NULL," +
+        "consumed_at INTEGER," +
+        "PRIMARY KEY (workflow_id, name))");
 
     // Verify the server actually parses SKIP LOCKED (the compile-time dialect
     // flag says "this backend supports it" but a MySQL<8 / MariaDB<10.6 server
@@ -733,6 +761,13 @@ function reap(opts) {
     const o = opts || {};
     const vt = o.visibilityTimeout !== undefined ? o.visibilityTimeout : _cfg.visibilityTimeout;
     const now = time.now();
+    // Wake durable-workflow signal waits whose timeout (run_at > 0) has passed, so
+    // they re-run and return null from ctx.waitSignal. run_at = 0 means "no
+    // timeout" (wait forever) and is left alone - only jobs.signal wakes it.
+    db.exec(
+        "UPDATE _hull_jobs SET status='pending', updated_at=? " +
+        "WHERE status='waiting' AND run_at > 0 AND run_at <= ?",
+        [now, now]);
     return db.exec(
         "UPDATE _hull_jobs SET status='pending', claim_token=NULL, updated_at=? " +
         "WHERE status='running' AND claimed_at <= ?",
@@ -947,7 +982,39 @@ async function work(opts) {
         }
         try {
             const result = await h(job);
-            if (result === DEAD) {
+            if (result && typeof result === "object" && result.__hullWfYield) {
+                // Durable workflow yielded - no terminal outcome, no event. A
+                // yield is not a failed attempt, so undo the claim's attempt
+                // increment (a workflow may sleep / wait many times without
+                // exhausting maxAttempts).
+                const now = time.now();
+                if (result.waiting) {
+                    // ctx.waitSignal: park in the non-terminal 'waiting' status
+                    // (excluded by the claim query). run_at carries the optional
+                    // timeout deadline (0 = none); the reaper wakes a timed-out
+                    // wait, jobs.signal wakes a delivered one.
+                    db.exec("UPDATE _hull_jobs SET status='waiting', run_at=?, " +
+                        "attempts=attempts-1, claim_token=NULL, updated_at=? WHERE id=?",
+                        [result.deadline || 0, now, job.id]);
+                    // Close the deliver-before-park race: a signal delivered in the
+                    // check->park window couldn't re-activate us (we were 'running'),
+                    // so re-check now that we are 'waiting'.
+                    if (result.signalName) {
+                        const sig = db.query("SELECT 1 AS x FROM _hull_workflow_signals " +
+                            "WHERE workflow_id=? AND name=? AND consumed_at IS NULL",
+                            [job.id, result.signalName]);
+                        if (sig.length) {
+                            db.exec("UPDATE _hull_jobs SET status='pending', run_at=?, " +
+                                "updated_at=? WHERE id=? AND status='waiting'", [now, now, job.id]);
+                        }
+                    }
+                } else {
+                    // ctx.sleep: future-dated pending job.
+                    db.exec("UPDATE _hull_jobs SET status='pending', run_at=?, " +
+                        "attempts=attempts-1, claim_token=NULL, updated_at=? WHERE id=?",
+                        [result.wakeAt || now, now, job.id]);
+                }
+            } else if (result === DEAD) {
                 markDead(job.id, "handler returned jobs.DEAD");
                 emit("dead", job, { error: "handler returned jobs.DEAD" });
             } else if (result === RETRY) {
@@ -1159,6 +1226,264 @@ async function await_(id, opts) {
     }
 }
 
+// ── Durable execution: workflow-as-code (Phase 1a) ──────────────────────────
+// A durable workflow is a function fn(ctx) run as a job of the reserved type
+// "__wf:<name>". Each `await ctx.step(name, fn)` memoizes its result in
+// _hull_workflow_steps; if the workflow re-runs (crash or retry re-enters it from
+// the top), completed steps return their stored result instead of re-executing,
+// so the body resumes where it left off. Design:
+// docs/jobs_durable_execution_design.md.
+const WF_PREFIX = "__wf:";
+
+// Run (or replay) one memoized step. Returns fn()'s value; on a re-run of the
+// workflow the value comes from the store and fn is NOT called again.
+async function runStep(workflowId, stepKey, fn) {
+    if (typeof stepKey !== "string" || stepKey === "")
+        throw new Error("ctx.step: name must be a non-empty string");
+    if (typeof fn !== "function") throw new Error("ctx.step: fn must be a function");
+    const rows = db.query(
+        "SELECT result FROM _hull_workflow_steps WHERE workflow_id=? AND step_key=?",
+        [workflowId, stepKey]);
+    if (rows.length) {
+        if (rows[0].result == null) return undefined;
+        try { return JSON.parse(rows[0].result); } catch (e) { return rows[0].result; }
+    }
+    // First execution: run, then persist. At-least-once - a crash between the
+    // side effect and this INSERT re-runs the step on resume (steps must be
+    // idempotent, same contract as a job handler).
+    const res = await fn();
+    const enc = res !== undefined ? json.encode(res) : null;
+    db.exec(
+        "INSERT INTO _hull_workflow_steps (workflow_id, step_key, result, status, created_at) " +
+        "VALUES (?, ?, ?, 'done', ?)",
+        [workflowId, stepKey, enc, time.now()]);
+    return res;
+}
+
+// Durable timer. `n` is the ordinal of this sleep in the workflow body (stable
+// across re-runs). On first encounter it records the wake time and throws the
+// yield sentinel (the runner reschedules the job to run_at = wake_at); on a
+// resume the recorded wake time is read, and once it has passed the call returns
+// so the body continues past it.
+function runSleep(workflowId, n, seconds) {
+    const key = "__sleep:" + n;
+    const rows = db.query(
+        "SELECT result FROM _hull_workflow_steps WHERE workflow_id=? AND step_key=?",
+        [workflowId, key]);
+    let wakeAt;
+    if (rows.length) {
+        wakeAt = Number(rows[0].result);
+    } else {
+        wakeAt = time.now() + (Number(seconds) || 0);
+        db.exec(
+            "INSERT INTO _hull_workflow_steps (workflow_id, step_key, result, status, created_at) " +
+            "VALUES (?, ?, ?, 'sleeping', ?)",
+            [workflowId, key, String(wakeAt), time.now()]);
+    }
+    if (time.now() >= wakeAt) return;   // elapsed: continue
+    const e = new Error("__hull_yield");   // caught by the runner (Error carries the marker)
+    e.__hullYield = true;
+    e.wakeAt = wakeAt;
+    throw e;
+}
+
+// Wait for an external signal (jobs.signal). If the named signal is present it is
+// consumed and its payload returned; otherwise the workflow yields to the
+// non-terminal 'waiting' status (re-activated by jobs.signal). With opts.timeout
+// the wait also arms a deadline (stored once, stable across resumes) so the
+// reaper wakes it if no signal arrives; a timed-out wait returns null.
+function runWaitSignal(workflowId, name, opts) {
+    if (typeof name !== "string" || name === "")
+        throw new Error("ctx.waitSignal: name must be a non-empty string");
+    const rows = db.query(
+        "SELECT payload FROM _hull_workflow_signals WHERE workflow_id=? AND name=? AND consumed_at IS NULL",
+        [workflowId, name]);
+    if (rows.length) {
+        db.exec("UPDATE _hull_workflow_signals SET consumed_at=? WHERE workflow_id=? AND name=?",
+            [time.now(), workflowId, name]);
+        if (rows[0].payload == null) return null;
+        try { return JSON.parse(rows[0].payload); } catch (e) { return rows[0].payload; }
+    }
+    let deadline = 0;
+    if (opts && opts.timeout) {
+        const key = "__waitdl:" + name;
+        const drows = db.query(
+            "SELECT result FROM _hull_workflow_steps WHERE workflow_id=? AND step_key=?",
+            [workflowId, key]);
+        if (drows.length) {
+            deadline = Number(drows[0].result) || 0;
+        } else {
+            deadline = time.now() + opts.timeout;
+            db.exec(
+                "INSERT INTO _hull_workflow_steps (workflow_id, step_key, result, status, created_at) " +
+                "VALUES (?, ?, ?, 'waiting', ?)",
+                [workflowId, key, String(deadline), time.now()]);
+        }
+        if (time.now() >= deadline) return null;   // timed out, no signal
+    }
+    const e = new Error("__hull_yield");
+    e.__hullYield = true;
+    e.waiting = true;
+    e.signalName = name;
+    e.deadline = deadline;
+    throw e;
+}
+
+// Run the compensations of completed steps in reverse order (saga rollback). Each
+// runs at most once (marked 'compensated'), so a crash mid-rollback resumes.
+async function runCompensations(comps, workflowId) {
+    for (let i = comps.length - 1; i >= 0; i--) {
+        const c = comps[i];
+        const done = db.query(
+            "SELECT status FROM _hull_workflow_steps WHERE workflow_id=? AND step_key=?",
+            [workflowId, c.key]);
+        if (!(done.length && done[0].status === "compensated")) {
+            try { await c.fn(); } catch (e) { /* at-least-once; must be idempotent */ }
+            db.exec("UPDATE _hull_workflow_steps SET status='compensated' WHERE workflow_id=? AND step_key=?",
+                [workflowId, c.key]);
+        }
+    }
+}
+
+// Build the durable ctx handed to a workflow function. `sleepN` counts sleeps;
+// `comps` collects saga compensations (registered by every ctx.step call that has
+// one, so on the terminal-failure run the list covers all completed steps).
+function makeCtx(job, name) {
+    let sleepN = 0;
+    const comps = [];
+    return {
+        id: job.id,
+        name,
+        input: job.data,
+        trace: job.trace,   // trace-context propagation (observability design)
+        _comps: comps,
+        step: async (stepKey, fn, opts) => {
+            const result = await runStep(job.id, stepKey, fn);
+            if (opts && typeof opts.compensate === "function") comps.push({ key: stepKey, fn: opts.compensate });
+            return result;
+        },
+        sleep: (seconds) => { sleepN += 1; return runSleep(job.id, sleepN, seconds); },
+        waitSignal: (signalName, opts) => runWaitSignal(job.id, signalName, opts),
+    };
+}
+
+/**
+ * Register a durable workflow. `fn(ctx)` is the workflow body; its return value
+ * becomes the workflow's result (fetch via jobs.await / jobs.result). Inside it,
+ * `await ctx.step(name, fn)` runs `fn` once and memoizes the result, so a crashed
+ * or retried workflow resumes past completed steps. `ctx.input` is the payload
+ * from jobs.start, `ctx.id` the workflow id. A workflow instance IS a job
+ * (reserved type "__wf:<name>"), so it inherits claim / reaper / retry / worker /
+ * result.
+ * @param {string} name
+ * @param {Function} fn   (ctx) => result   (may be async)
+ * @returns {object} the jobs module (for chaining)
+ */
+function workflow(name, fn) {
+    if (typeof name !== "string" || name === "")
+        throw new Error("jobs.workflow: name must be a non-empty string");
+    if (typeof fn !== "function") throw new Error("jobs.workflow: fn must be a function");
+    _workflows[name] = fn;
+    // A ctx.sleep / ctx.waitSignal throws the yield sentinel; catch it and hand
+    // work() the yield marker (sleep -> reschedule pending; signal -> 'waiting').
+    // A real error re-throws for the retry path - but on the LAST attempt (about
+    // to dead-letter) or an explicit jobs.DEAD, run the saga compensations first.
+    handler(WF_PREFIX + name, async (job) => {
+        const ctx = makeCtx(job, name);
+        let res;
+        try { res = await fn(ctx); }
+        catch (e) {
+            if (e && e.__hullYield) {
+                return { __hullWfYield: true, wakeAt: e.wakeAt,
+                         waiting: e.waiting, signalName: e.signalName, deadline: e.deadline };
+            }
+            const max = (job.maxAttempts != null) ? job.maxAttempts : _cfg.maxAttempts;
+            if ((job.attempts || 0) >= max) await runCompensations(ctx._comps, job.id);
+            throw e;
+        }
+        if (res === DEAD) await runCompensations(ctx._comps, job.id);
+        return res;
+    });
+    return jobs;
+}
+
+/**
+ * Start a durable workflow instance. Returns the workflow id (a job id); the
+ * input is the workflow's `ctx.input`. Accepts the usual enqueue opts (queue,
+ * priority, dedupKey for an idempotent start, delay/at). Poll jobs.workflowStatus
+ * (id) or jobs.await(id) for the outcome.
+ * @param {string} name
+ * @param {*} [input]
+ * @param {object} [opts]   enqueue options
+ * @returns {number|null}   the workflow id, or null if a dedupKey collapsed it
+ */
+function start(name, input, opts) {
+    if (!_workflows[name])
+        throw new Error(`jobs.start: unknown workflow '${name}' (register it with jobs.workflow)`);
+    return enqueue(WF_PREFIX + name, input, opts);
+}
+
+/**
+ * Deliver a signal to a durable workflow (see ctx.waitSignal). Records the named
+ * payload (first delivery per name wins) and re-activates the workflow if it is
+ * parked waiting for it. Safe to call before the workflow reaches the wait (the
+ * signal is stored and consumed when it gets there) - no lost-signal race.
+ * @param {number} id       the workflow id
+ * @param {string} name     the signal name
+ * @param {*} [payload]
+ * @returns {boolean}
+ */
+function signal(id, name, payload) {
+    if (typeof name !== "string" || name === "")
+        throw new Error("jobs.signal: name must be a non-empty string");
+    const enc = payload !== undefined && payload !== null ? json.encode(payload) : null;
+    const now = time.now();
+    db.insertIfAbsent("_hull_workflow_signals", ["workflow_id", "name"],
+        ["workflow_id", "name", "payload", "created_at"], [id, name, enc, now]);
+    // Re-activate a parked wait (waiting -> pending). A 'running' or unrelated
+    // 'pending' workflow is left alone: it finds the stored signal on its own.
+    db.exec("UPDATE _hull_jobs SET status='pending', run_at=?, updated_at=? " +
+        "WHERE id=? AND status='waiting'", [now, now, id]);
+    return true;
+}
+
+/**
+ * Query a workflow instance's state (DB-derived, so it works even when no worker
+ * is currently running it). Returns null for an unknown id, else
+ * { status, name, stepsDone, startedAt, updatedAt, result?, error? }.
+ * @param {number} id
+ * @returns {object|null}
+ */
+function workflowStatus(id) {
+    const job = get(id);
+    if (!job) return null;
+    const rows = db.query(
+        "SELECT step_key FROM _hull_workflow_steps WHERE workflow_id=? ORDER BY created_at, step_key",
+        [id]);
+    const out = {
+        status: job.status,
+        name: String(job.type).startsWith(WF_PREFIX) ? String(job.type).slice(WF_PREFIX.length) : job.type,
+        // Hide internal keys (durable-sleep markers "__sleep:N"); only user steps.
+        stepsDone: rows.map((r) => r.step_key).filter((k) => !String(k).startsWith("__")),
+        startedAt: job.createdAt,
+        updatedAt: job.updatedAt,
+    };
+    // What the workflow is parked on: a signal ('waiting') or a durable timer
+    // (pending with a future run_at).
+    if (job.status === "waiting") {
+        out.waitingFor = "signal";
+    } else if (job.status === "pending" && job.runAt && job.runAt > time.now()) {
+        out.waitingFor = "sleep:" + job.runAt;
+    }
+    if (job.status === "done") {
+        const r = result(id);
+        if (r) out.result = r.result;
+    } else if (job.status === "dead") {
+        out.error = job.lastError;
+    }
+    return out;
+}
+
 /**
  * Extend the claim on a job the current handler is processing (heartbeat). A
  * handler whose work may exceed `visibilityTimeout` should call this
@@ -1247,6 +1572,8 @@ function cleanup(opts) {
     const deleted = db.exec(sql, params) || 0;
     // Drop results whose producing job is gone (workflow result store hygiene).
     db.exec("DELETE FROM _hull_job_results WHERE job_id NOT IN (SELECT id FROM _hull_jobs)");
+    db.exec("DELETE FROM _hull_workflow_steps WHERE workflow_id NOT IN (SELECT id FROM _hull_jobs)");
+    db.exec("DELETE FROM _hull_workflow_signals WHERE workflow_id NOT IN (SELECT id FROM _hull_jobs)");
     return deleted;
 }
 
@@ -1261,10 +1588,12 @@ export const jobs = {
     init, enqueue, enqueueMany, claim, handler, default: setDefault, on, work, reap,
     stats, runWorker, stop, get, result, await: await_, progress, heartbeat, limit,
     pause, resume, purge,
+    workflow, start, signal, workflowStatus,
     dead, retry, cancel, cleanup, cron, uncron,
     RETRY, DEAD, DISCARD, _config: _cfg, _cronNext, _tick,
 };
 export { init, enqueue, enqueueMany, claim, handler, on, work, reap, stats,
          runWorker, stop, get, result, progress, heartbeat, limit, pause, resume,
-         purge, dead, retry, cancel, cleanup, cron, uncron };
+         purge, workflow, start, signal, workflowStatus,
+         dead, retry, cancel, cleanup, cron, uncron };
 export default jobs;

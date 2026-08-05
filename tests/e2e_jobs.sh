@@ -971,6 +971,258 @@ app.main((ctx) => {
 echo "== v1.5 polish: Lua =="; check_polish "lua" "lua" "$LUA_POLISH"
 echo "== v1.5 polish: JS =="; check_polish "js" "js" "$JS_POLISH"
 
+# ── durable execution (Phase 1a): jobs.workflow / ctx.step memoization ──────
+# A workflow fails once after steps a+b, is retried (backoff 0 => immediate), and
+# on the re-run a+b return memoized results (their fn does NOT run again - proven
+# by per-step run counters), c runs, result is correct. Unknown start is rejected.
+check_workflow() {
+    label="$1"; ext="$2"; app="$3"
+    T="$(mktemp -d)"; printf '%s\n' "$app" > "$T/app.$ext"
+    out="$("$HULL" "$T/app.$ext" -d "$T/a.db" 2>/dev/null)" || true
+    case "$out" in
+        *"WF a=1 b=1 c=1 total=115 status=done steps=a,b,c unknown_reject=true"*)
+            pass "$label: workflow step-memoization across a retry (run-once, resume, status/steps)" ;;
+        *) fail "$label: durable workflow (Phase 1a)" "$out" ;;
+    esac
+    rm -rf "$T"
+}
+
+LUA_WORKFLOW='local jobs = require("hull.jobs")
+app.manifest({ modules = { "hull/jobs@1" } })
+app.main(function(ctx)
+  jobs.init({ backoff = function() return 0 end })
+  local runs = { a=0, b=0, c=0 }; local threw = false
+  jobs.workflow("wf", function(w)
+    local a = w.step("a", function() runs.a = runs.a + 1; return 10 end)
+    local b = w.step("b", function() runs.b = runs.b + 1; return a + 5 end)
+    if not threw then threw = true; error("boom after b") end
+    local c = w.step("c", function() runs.c = runs.c + 1; return b + 100 end)
+    return { total = c }
+  end)
+  local ok_unknown = pcall(function() jobs.start("nope", {}) end)
+  local id = jobs.start("wf", { hello = 1 })
+  jobs.run_worker({ drain = true, poll_ms = 1 })
+  local st = jobs.workflow_status(id); local r = jobs.await(id)
+  ctx.stdout:write(("WF a=%d b=%d c=%d total=%s status=%s steps=%s unknown_reject=%s\n"):format(
+    runs.a, runs.b, runs.c, tostring(r.result.total), st.status,
+    table.concat(st.steps_done, ","), tostring(not ok_unknown)))
+  return 0
+end)'
+
+JS_WORKFLOW='import { app } from "hull:app"; import { jobs } from "hull:jobs";
+app.manifest({ modules: ["hull/jobs@1"] });
+app.main(async (ctx) => {
+  jobs.init({ backoff: () => 0 });
+  const runs = { a:0, b:0, c:0 }; let threw = false;
+  jobs.workflow("wf", async (w) => {
+    const a = await w.step("a", () => { runs.a++; return 10; });
+    const b = await w.step("b", () => { runs.b++; return a + 5; });
+    if (!threw) { threw = true; throw new Error("boom after b"); }
+    const c = await w.step("c", () => { runs.c++; return b + 100; });
+    return { total: c };
+  });
+  let okUnknown = true; try { jobs.start("nope", {}); } catch(e){ okUnknown = false; }
+  const id = jobs.start("wf", { hello: 1 });
+  await jobs.runWorker({ drain: true, pollMs: 1 });
+  const st = jobs.workflowStatus(id); const r = await jobs.await(id);
+  ctx.stdout.write(`WF a=${runs.a} b=${runs.b} c=${runs.c} total=${r.result.total} status=${st.status} steps=${st.stepsDone.join(",")} unknown_reject=${!okUnknown}\n`);
+  return 0;
+});'
+
+echo "== durable workflow (Phase 1a): Lua =="; check_workflow "lua" "lua" "$LUA_WORKFLOW"
+echo "== durable workflow (Phase 1a): JS =="; check_workflow "js" "js" "$JS_WORKFLOW"
+
+# ── durable execution (Phase 1b): ctx.sleep durable timer ───────────────────
+# A workflow sleeps between step a and b. The first work() runs a and YIELDS (the
+# workflow goes pending with a future run_at = "sleeping"; b has NOT run). After
+# the timer elapses a second work() resumes: a is memoized, the sleep is
+# satisfied, b runs, done. A sleep must not consume the retry budget.
+check_sleep() {
+    label="$1"; ext="$2"; app="$3"
+    T="$(mktemp -d)"; printf '%s\n' "$app" > "$T/app.$ext"
+    out="$("$HULL" "$T/app.$ext" -d "$T/a.db" 2>/dev/null)" || true
+    case "$out" in
+        *"SLEEP mid=pending mid_b=0 wait=yes fin=done fin_b=1 steps=a,b"*)
+            pass "$label: ctx.sleep durable timer (yield -> reschedule -> resume, b gated)" ;;
+        *) fail "$label: durable timer (Phase 1b)" "$out" ;;
+    esac
+    rm -rf "$T"
+}
+
+LUA_SLEEP='local jobs = require("hull.jobs")
+app.manifest({ modules = { "hull/jobs@1" } })
+app.main(function(ctx)
+  jobs.init({ backoff = function() return 0 end })
+  local runs = { a=0, b=0 }
+  jobs.workflow("sleeper", function(w)
+    w.step("a", function() runs.a = runs.a + 1 end)
+    w.sleep(1)
+    w.step("b", function() runs.b = runs.b + 1 end)
+    return { ok = true }
+  end)
+  local id = jobs.start("sleeper", {})
+  jobs.work({ batch = 1 })
+  local mid = jobs.workflow_status(id); local mid_b = runs.b
+  hull.sleep(1200)
+  jobs.work({ batch = 1 })
+  local fin = jobs.workflow_status(id)
+  ctx.stdout:write(("SLEEP mid=%s mid_b=%d wait=%s fin=%s fin_b=%d steps=%s\n"):format(
+    mid.status, mid_b, (mid.waiting_for and "yes" or "no"), fin.status, runs.b,
+    table.concat(fin.steps_done, ",")))
+  return 0
+end)'
+
+JS_SLEEP='import { app } from "hull:app"; import { jobs } from "hull:jobs";
+app.manifest({ modules: ["hull/jobs@1"] });
+app.main(async (ctx) => {
+  jobs.init({ backoff: () => 0 });
+  const runs = { a:0, b:0 };
+  jobs.workflow("sleeper", async (w) => {
+    await w.step("a", () => { runs.a++; });
+    await w.sleep(1);
+    await w.step("b", () => { runs.b++; });
+    return { ok: true };
+  });
+  const id = jobs.start("sleeper", {});
+  await jobs.work({ batch: 1 });
+  const mid = jobs.workflowStatus(id); const midB = runs.b;
+  await hull.sleep(1200);
+  await jobs.work({ batch: 1 });
+  const fin = jobs.workflowStatus(id);
+  ctx.stdout.write(`SLEEP mid=${mid.status} mid_b=${midB} wait=${mid.waitingFor?"yes":"no"} fin=${fin.status} fin_b=${runs.b} steps=${fin.stepsDone.join(",")}\n`);
+  return 0;
+});'
+
+echo "== durable timer (Phase 1b): Lua =="; check_sleep "lua" "lua" "$LUA_SLEEP"
+echo "== durable timer (Phase 1b): JS =="; check_sleep "js" "js" "$JS_SLEEP"
+
+# ── durable execution (Phase 1c): signals - ctx.wait_signal / jobs.signal ───
+# Instance A parks on wait_signal ('waiting'); jobs.signal re-activates it
+# (waiting -> pending) and it resumes with the payload. Instance B is signalled
+# BEFORE it reaches the wait - the signal is stored and consumed when it gets
+# there (no lost-signal race).
+check_signals() {
+    label="$1"; ext="$2"; app="$3"
+    T="$(mktemp -d)"; printf '%s\n' "$app" > "$T/app.$ext"
+    out="$("$HULL" "$T/app.$ext" -d "$T/a.db" 2>/dev/null)" || true
+    case "$out" in
+        *"SIG mid=waiting wait=signal after=pending finA=done byA=alice finB=done byB=bob"*)
+            pass "$label: signals (park->signal->resume + deliver-before-wait, no lost signal)" ;;
+        *) fail "$label: durable signals (Phase 1c)" "$out" ;;
+    esac
+    rm -rf "$T"
+}
+
+LUA_SIGNALS='local jobs = require("hull.jobs")
+app.manifest({ modules = { "hull/jobs@1" } })
+app.main(function(ctx)
+  jobs.init({ backoff = function() return 0 end })
+  local got = {}
+  jobs.workflow("approve", function(w)
+    w.step("s", function() return 1 end)
+    local a = w.wait_signal("ok")
+    got[w.id] = a and a.by or "nil"
+    return { done = true }
+  end)
+  local a = jobs.start("approve", {})
+  jobs.work({ batch = 1 })
+  local mid = jobs.workflow_status(a)
+  jobs.signal(a, "ok", { by = "alice" })
+  local after = jobs.get(a).status
+  jobs.work({ batch = 1 })
+  local finA = jobs.workflow_status(a)
+  local b = jobs.start("approve", {})
+  jobs.signal(b, "ok", { by = "bob" })   -- delivered BEFORE the wait
+  jobs.work({ batch = 1 })
+  local finB = jobs.workflow_status(b)
+  ctx.stdout:write(("SIG mid=%s wait=%s after=%s finA=%s byA=%s finB=%s byB=%s\n"):format(
+    mid.status, tostring(mid.waiting_for), after, finA.status, tostring(got[a]),
+    finB.status, tostring(got[b])))
+  return 0
+end)'
+
+JS_SIGNALS='import { app } from "hull:app"; import { jobs } from "hull:jobs";
+app.manifest({ modules: ["hull/jobs@1"] });
+app.main(async (ctx) => {
+  jobs.init({ backoff: () => 0 });
+  const got = {};
+  jobs.workflow("approve", async (w) => {
+    await w.step("s", () => 1);
+    const a = await w.waitSignal("ok");
+    got[w.id] = a ? a.by : "nil";
+    return { done: true };
+  });
+  const a = jobs.start("approve", {});
+  await jobs.work({ batch: 1 });
+  const mid = jobs.workflowStatus(a);
+  jobs.signal(a, "ok", { by: "alice" });
+  const after = jobs.get(a).status;
+  await jobs.work({ batch: 1 });
+  const finA = jobs.workflowStatus(a);
+  const b = jobs.start("approve", {});
+  jobs.signal(b, "ok", { by: "bob" });
+  await jobs.work({ batch: 1 });
+  const finB = jobs.workflowStatus(b);
+  ctx.stdout.write(`SIG mid=${mid.status} wait=${mid.waitingFor} after=${after} finA=${finA.status} byA=${got[a]} finB=${finB.status} byB=${got[b]}\n`);
+  return 0;
+});'
+
+echo "== durable signals (Phase 1c): Lua =="; check_signals "lua" "lua" "$LUA_SIGNALS"
+echo "== durable signals (Phase 1c): JS =="; check_signals "js" "js" "$JS_SIGNALS"
+
+# ── durable execution (Phase 1d): saga compensation ─────────────────────────
+# A workflow charges (a compensable step), then a later step fails terminally
+# (max_attempts=1). On dead-letter the completed steps' compensations run in
+# reverse: charge -> ship(fails) -> uncharge; the workflow ends dead.
+check_saga() {
+    label="$1"; ext="$2"; app="$3"
+    T="$(mktemp -d)"; printf '%s\n' "$app" > "$T/app.$ext"
+    out="$("$HULL" "$T/app.$ext" -d "$T/a.db" 2>/dev/null)" || true
+    case "$out" in
+        *"SAGA status=dead log=charge,ship,uncharge"*)
+            pass "$label: saga compensation (reverse-order rollback on terminal failure)" ;;
+        *) fail "$label: durable saga (Phase 1d)" "$out" ;;
+    esac
+    rm -rf "$T"
+}
+
+LUA_SAGA='local jobs = require("hull.jobs")
+app.manifest({ modules = { "hull/jobs@1" } })
+app.main(function(ctx)
+  jobs.init({ backoff = function() return 0 end })
+  local log = {}
+  jobs.workflow("saga", function(w)
+    w.step("charge", function() log[#log+1]="charge" end, { compensate = function() log[#log+1]="uncharge" end })
+    w.step("ship", function() log[#log+1]="ship"; error("no stock") end)
+    return { ok = true }
+  end)
+  local sid = jobs.start("saga", {}, { max_attempts = 1 })
+  jobs.run_worker({ drain = true, poll_ms = 1 })
+  local st = jobs.workflow_status(sid)
+  ctx.stdout:write(("SAGA status=%s log=%s\n"):format(st.status, table.concat(log, ",")))
+  return 0
+end)'
+
+JS_SAGA='import { app } from "hull:app"; import { jobs } from "hull:jobs";
+app.manifest({ modules: ["hull/jobs@1"] });
+app.main(async (ctx) => {
+  jobs.init({ backoff: () => 0 });
+  const log = [];
+  jobs.workflow("saga", async (w) => {
+    await w.step("charge", () => { log.push("charge"); }, { compensate: () => { log.push("uncharge"); } });
+    await w.step("ship", () => { log.push("ship"); throw new Error("no stock"); });
+    return { ok: true };
+  });
+  const sid = jobs.start("saga", {}, { maxAttempts: 1 });
+  await jobs.runWorker({ drain: true, pollMs: 1 });
+  const st = jobs.workflowStatus(sid);
+  ctx.stdout.write(`SAGA status=${st.status} log=${log.join(",")}\n`);
+  return 0;
+});'
+
+echo "== durable saga (Phase 1d): Lua =="; check_saga "lua" "lua" "$LUA_SAGA"
+echo "== durable saga (Phase 1d): JS =="; check_saga "js" "js" "$JS_SAGA"
+
 # Fleet gate: K processes share one rate counter -> total dispatched == rate.
 echo "== v1.2 rate limit fleet ($CONC processes, one shared counter) =="
 W="$(mktemp -d)"; DB="$W/rl.db"
