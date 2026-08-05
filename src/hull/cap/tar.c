@@ -22,6 +22,30 @@
 
 #define TAR_BLOCK 512
 
+/* ustar (POSIX.1-1988) header field offsets + widths, in bytes. Named so the
+ * reader and writer share one source of truth instead of scattered literals. */
+#define TAR_NAME_OFF      0
+#define TAR_NAME_LEN    100
+#define TAR_NAME_BUF    (TAR_NAME_LEN + 1)    /* field + terminating NUL */
+#define TAR_NAME_MAX    (TAR_NAME_LEN - 1)    /* longest storable name (needs a NUL) */
+#define TAR_MODE_OFF    100
+#define TAR_MODE_LEN      8
+#define TAR_UID_OFF     108
+#define TAR_GID_OFF     116
+#define TAR_SIZE_OFF    124
+#define TAR_SIZE_LEN     12
+#define TAR_MTIME_OFF   136
+#define TAR_CHKSUM_OFF  148
+#define TAR_CHKSUM_LEN    8
+#define TAR_TYPE_OFF    156
+#define TAR_LINK_OFF    157
+#define TAR_LINK_LEN    100                   /* same width as the name field */
+#define TAR_LINK_BUF    (TAR_LINK_LEN + 1)
+#define TAR_MAGIC_OFF   257
+#define TAR_VERSION_OFF 263
+#define TAR_NUM_FIELD     8                   /* width of octal uid/gid/mode fields */
+#define TAR_NUM12_FIELD  12                   /* width of octal size/mtime fields */
+
 /* Parse a NUL/space-padded octal field of `n` bytes. */
 static unsigned long tar_octal(const unsigned char *p, size_t n)
 {
@@ -56,16 +80,43 @@ static const char *tar_safe_path(char *name)
     return name;
 }
 
-/* A symlink target is safe if it is relative (not absolute) and has no ".."
- * segment, so it can't point outside its own directory subtree. cosmocc's
- * arch-cc symlinks are bare same-dir names (e.g. "cosmocc"). */
-static int tar_safe_linkname(const char *ln)
+/* Path-depth of the directory CONTAINING a cleaned relative member `m`: the
+ * number of '/'-separated segments in m's parent dir. "bin/x" -> 1 (dir "bin");
+ * "x" -> 0 (the archive root). Used to resolve a symlink target relative to the
+ * link's own location. */
+static int tar_member_dir_depth(const char *m)
 {
-    if (!ln || ln[0] == '\0' || ln[0] == '/') return 0;
+    int d = 0;
+    for (const char *p = m; *p; p++) if (*p == '/') d++;
+    return d;
+}
+
+/* A symlink is safe iff its target, resolved relative to the link's OWN
+ * directory, stays WITHIN the extraction root. Absolute targets are always
+ * rejected. A ".." is allowed as long as it never rises above the root: this
+ * admits legitimate intra-bundle links like `bin/foo -> ../libexec/.../foo`
+ * (cosmocc's ld.bfd / as wrappers) while still rejecting escapes such as
+ * `bin/evil -> ../../../../etc/passwd` or a root-level `x -> ../y`.
+ *
+ * Safe against the symlink-write-through attack because hl_tar_extract writes
+ * ALL files in pass 1 before creating ANY symlink in pass 2, so a link can
+ * never redirect a subsequent file write out of the tree; the resolved target
+ * (and the copy-fallback's source) is therefore an in-root path. `member` is
+ * the cleaned member name (its parent dir sets the starting depth). */
+static int tar_safe_linkname(const char *member, const char *ln)
+{
+    if (!ln || ln[0] == '\0' || ln[0] == '/') return 0;   /* empty / absolute */
+    int depth = tar_member_dir_depth(member);
     for (const char *p = ln; *p; ) {
         const char *slash = strchr(p, '/');
         size_t seg = slash ? (size_t)(slash - p) : strlen(p);
-        if (seg == 2 && p[0] == '.' && p[1] == '.') return 0;
+        if (seg == 0 || (seg == 1 && p[0] == '.')) {
+            /* "//" (empty) or "." — no depth change. */
+        } else if (seg == 2 && p[0] == '.' && p[1] == '.') {
+            if (--depth < 0) return 0;                    /* escapes the root */
+        } else {
+            depth++;
+        }
         p += seg;
         if (*p == '/') p++;
     }
@@ -90,13 +141,13 @@ static int tar_iter(const unsigned char *tar, size_t tar_len,
         for (int i = 0; i < TAR_BLOCK; i++) if (hdr[i]) { zero = 0; break; }
         if (zero) break;                        /* end-of-archive marker */
 
-        char name[101];
-        memcpy(name, hdr, 100);
-        name[100] = '\0';
+        char name[TAR_NAME_BUF];
+        memcpy(name, hdr + TAR_NAME_OFF, TAR_NAME_LEN);
+        name[TAR_NAME_LEN] = '\0';
 
-        char typeflag = (char)hdr[156];
-        unsigned long size = tar_octal(hdr + 124, 12);
-        unsigned mode = (unsigned)(tar_octal(hdr + 100, 8) & 0777);
+        char typeflag = (char)hdr[TAR_TYPE_OFF];
+        unsigned long size = tar_octal(hdr + TAR_SIZE_OFF, TAR_SIZE_LEN);
+        unsigned mode = (unsigned)(tar_octal(hdr + TAR_MODE_OFF, TAR_MODE_LEN) & 0777);
 
         off += TAR_BLOCK;
         if (off + size > tar_len) return -1;    /* truncated data */
@@ -121,10 +172,10 @@ static int tar_iter(const unsigned char *tar, size_t tar_len,
             if (want_symlinks) {
                 const char *rel = tar_safe_path(name);
                 if (!rel) return -1;
-                char linkname[101];
-                memcpy(linkname, hdr + 157, 100);
-                linkname[100] = '\0';
-                if (!tar_safe_linkname(linkname)) return -1;
+                char linkname[TAR_LINK_BUF];
+                memcpy(linkname, hdr + TAR_LINK_OFF, TAR_LINK_LEN);
+                linkname[TAR_LINK_LEN] = '\0';
+                if (!tar_safe_linkname(rel, linkname)) return -1;
                 if (rel[0] != '\0') {
                     HlTarEntry e = {
                         .name       = rel,
@@ -274,24 +325,27 @@ static int tar_write_header(unsigned char hdr[TAR_BLOCK], const HlTarEntry *e)
 {
     memset(hdr, 0, TAR_BLOCK);
     size_t nl = strlen(e->name);
-    if (nl == 0 || nl > 99) { errno = ENAMETOOLONG; return -1; }
-    memcpy(hdr, e->name, nl);
-    snprintf((char *)(hdr + 100), 8, "%07o", (e->mode ? e->mode : 0644) & 0777);
-    snprintf((char *)(hdr + 108), 8, "%07o", 0);          /* uid */
-    snprintf((char *)(hdr + 116), 8, "%07o", 0);          /* gid */
-    snprintf((char *)(hdr + 124), 12, "%011o", (unsigned)(e->is_dir ? 0 : e->size));
-    snprintf((char *)(hdr + 136), 12, "%011o", 0);        /* mtime */
-    hdr[156] = e->is_dir ? '5' : '0';                     /* typeflag */
-    memcpy(hdr + 257, "ustar", 6);                        /* magic */
-    hdr[263] = '0'; hdr[264] = '0';                       /* version "00" */
+    if (nl == 0 || nl > TAR_NAME_MAX) { errno = ENAMETOOLONG; return -1; }
+    memcpy(hdr + TAR_NAME_OFF, e->name, nl);
+    snprintf((char *)(hdr + TAR_MODE_OFF), TAR_NUM_FIELD, "%07o",
+             (e->mode ? e->mode : 0644) & 0777);
+    snprintf((char *)(hdr + TAR_UID_OFF), TAR_NUM_FIELD, "%07o", 0);
+    snprintf((char *)(hdr + TAR_GID_OFF), TAR_NUM_FIELD, "%07o", 0);
+    snprintf((char *)(hdr + TAR_SIZE_OFF), TAR_NUM12_FIELD, "%011o",
+             (unsigned)(e->is_dir ? 0 : e->size));
+    snprintf((char *)(hdr + TAR_MTIME_OFF), TAR_NUM12_FIELD, "%011o", 0);
+    hdr[TAR_TYPE_OFF] = e->is_dir ? '5' : '0';
+    memcpy(hdr + TAR_MAGIC_OFF, "ustar", 6);
+    hdr[TAR_VERSION_OFF] = '0'; hdr[TAR_VERSION_OFF + 1] = '0';   /* version "00" */
 
     /* Checksum: sum of all header bytes with the chksum field taken as spaces. */
-    memset(hdr + 148, ' ', 8);
+    memset(hdr + TAR_CHKSUM_OFF, ' ', TAR_CHKSUM_LEN);
     unsigned sum = 0;
     for (int i = 0; i < TAR_BLOCK; i++) sum += hdr[i];
-    snprintf((char *)(hdr + 148), 7, "%06o", sum);
-    hdr[154] = '\0';
-    hdr[155] = ' ';
+    /* ustar chksum: 6 octal digits + NUL + space, filling the 8-byte field. */
+    snprintf((char *)(hdr + TAR_CHKSUM_OFF), 7, "%06o", sum);
+    hdr[TAR_CHKSUM_OFF + 6] = '\0';
+    hdr[TAR_CHKSUM_OFF + 7] = ' ';
     return 0;
 }
 
@@ -306,7 +360,7 @@ int hl_tar_create(const HlTarEntry *entries, size_t n,
 
     for (size_t i = 0; i < n; i++) {
         /* Reject an unsafe member name (absolute / "..") in the writer too. */
-        char nm[101];
+        char nm[TAR_NAME_BUF];
         snprintf(nm, sizeof(nm), "%s", entries[i].name ? entries[i].name : "");
         if (!tar_safe_path(nm) || nm[0] == '\0') { free(buf); return -1; }
 

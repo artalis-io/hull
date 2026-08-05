@@ -354,6 +354,43 @@ UTEST_F(tar_fixture, extract_symlink_resolves_to_target) {
     free(buf);
 }
 
+/* A symlink target may use ".." AS LONG AS it stays within the extraction
+ * root: `bin/foo -> ../libexec/.../foo` (cosmocc's ld.bfd / as wrappers point
+ * bin -> libexec). Regression for hull tools install cosmocc, which returned
+ * rc=1 ("failed to extract") when the old blanket-".."-reject aborted the
+ * symlink pass on these legitimate intra-bundle links. */
+UTEST_F(tar_fixture, extract_symlink_in_root_dotdot_ok) {
+    unsigned char *buf = calloc(1, 8192);
+    ASSERT_NE(buf, NULL);
+    size_t off = 0;
+    tar_add_file(buf, &off, "libexec/ld.bfd", "REAL-LD-BYTES", 13);
+    tar_add_symlink(buf, &off, "bin/x-ld.bfd", "../libexec/ld.bfd");  /* in-root .. */
+    off += 512;
+
+    char dest[PATH_MAX];
+    snprintf(dest, sizeof(dest), "%s/cc2", utest_fixture->tmpdir);
+    ASSERT_EQ(hl_tar_extract(buf, off, dest), 0);        /* no longer refused */
+
+    /* The link resolves (link or copy fallback) to the real file's bytes. */
+    char p[PATH_MAX], rd[64];
+    snprintf(p, sizeof(p), "%s/bin/x-ld.bfd", dest);
+    FILE *f = fopen(p, "rb"); ASSERT_NE(f, NULL);
+    size_t n = fread(rd, 1, sizeof(rd), f); fclose(f);
+    ASSERT_EQ(n, (size_t)13);
+    ASSERT_EQ(memcmp(rd, "REAL-LD-BYTES", 13), 0);
+
+    /* On this POSIX host it is a real symlink carrying the ".." target verbatim. */
+    struct stat st;
+    ASSERT_EQ(lstat(p, &st), 0);
+    ASSERT_TRUE(S_ISLNK(st.st_mode));
+    char tgt[64];
+    ssize_t ln = readlink(p, tgt, sizeof(tgt) - 1);
+    ASSERT_GT(ln, (ssize_t)0);
+    tgt[ln] = '\0';
+    ASSERT_STREQ(tgt, "../libexec/ld.bfd");
+    free(buf);
+}
+
 /* A symlink whose target is absolute or escapes via ".." is rejected (a
  * malformed archive), so it can never become a write-through primitive. */
 UTEST_F(tar_fixture, extract_rejects_unsafe_symlink_target) {
