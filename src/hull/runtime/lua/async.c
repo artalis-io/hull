@@ -351,10 +351,67 @@ static int lua_hull_sleep(lua_State *L)
     return lua_yieldk(L, 0, 0, NULL);
 }
 
+/* hull.async(fn) — spawn fn in a detached coroutine running on the event loop.
+ * The body may call async-yielding primitives (hull.sleep, compute.async,
+ * http.fetch, db.async); those capture `lua->active_co` at suspension, so we
+ * set active_co (+ dispatch bookkeeping) to the bg coroutine for its first
+ * resume. Subsequent resumes go through hl_lua_async_resume, which sets it
+ * itself. A registry ref keeps the coroutine alive until it returns (here on a
+ * synchronous finish, or later in hl_lua_async_resume's OK/error branches).
+ *
+ * Detached = fire-and-forget (no join). Used by jobs.run_worker's concurrency
+ * (N in-flight claim-loops) and by hull.tui (tui.async aliases this). */
+int lua_hull_async(lua_State *L)
+{
+    luaL_checktype(L, 1, LUA_TFUNCTION);
+
+    lua_getfield(L, LUA_REGISTRYINDEX, "__hull_lua");
+    HlLua *lua = (HlLua *)lua_touserdata(L, -1);
+    lua_pop(L, 1);
+    if (!lua)
+        return luaL_error(L, "hull.async: no runtime context");
+
+    lua_State *co = lua_newthread(L);
+    int co_ref = luaL_ref(L, LUA_REGISTRYINDEX);
+
+    lua_pushvalue(L, 1);
+    lua_xmove(L, co, 1);
+
+    lua_State *saved_co         = lua->active_co;
+    int        saved_thread_ref = lua->active_thread_ref;
+    KlConn    *saved_conn       = lua->active_conn;
+
+    lua->active_co         = co;
+    lua->active_thread_ref = co_ref;
+    lua->active_conn       = NULL;  /* bg is always detached */
+    lua->dispatch_depth++;
+
+    int nres = 0;
+    int sr   = lua_resume(co, L, 0, &nres);
+
+    if (sr == LUA_OK) {
+        luaL_unref(L, LUA_REGISTRYINDEX, co_ref);
+        lua->dispatch_depth--;
+    } else if (sr == LUA_YIELD) {
+        /* Bg yielded; hl_lua_async_resume owns cleanup when it returns. */
+    } else {
+        const char *msg = lua_tostring(co, -1);
+        log_error("[hull:async] coroutine error: %s", msg ? msg : "(unknown)");
+        luaL_unref(L, LUA_REGISTRYINDEX, co_ref);
+        lua->dispatch_depth--;
+    }
+
+    lua->active_co         = saved_co;
+    lua->active_thread_ref = saved_thread_ref;
+    lua->active_conn       = saved_conn;
+    return 0;
+}
+
 /* ── Module registration ──────────────────────────────────────────── */
 
 static const luaL_Reg hull_funcs[] = {
     {"sleep", lua_hull_sleep},
+    {"async", lua_hull_async},
     {NULL, NULL}
 };
 

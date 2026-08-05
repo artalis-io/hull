@@ -383,6 +383,114 @@ check_phase5 "lua" "lua" "$LUA_P5"
 echo "== Phase 5: JS =="
 check_phase5 "js" "js" "$JS_P5"
 
+# ── v1.1: intra-process concurrency (run_worker concurrency=N) ───────────────
+# 12 jobs, concurrency=4, batch=1; handlers sleep so claims overlap. All 12 must
+# be processed exactly once AND max-in-flight must exceed 1 (real parallelism).
+check_conc() {
+    label="$1"; ext="$2"; app="$3"
+    T="$(mktemp -d)"; printf '%s\n' "$app" > "$T/app.$ext"
+    out="$("$HULL" "$T/app.$ext" -d "$T/a.db" 2>/dev/null)" || true
+    case "$out" in
+        *"CONC ok=1"*) pass "$label: run_worker concurrency (N in-flight, exactly-once)" ;;
+        *) fail "$label: v1.1 concurrency" "$out" ;;
+    esac
+    rm -rf "$T"
+}
+
+LUA_CONC='local jobs = require("hull.jobs")
+app.manifest({ modules = { "hull/jobs@1" } })
+app.main(function(ctx)
+  jobs.init()
+  local inflight, maxf = 0, 0
+  jobs.handler("t", function(j)
+    inflight = inflight + 1; if inflight > maxf then maxf = inflight end
+    hull.sleep(30); inflight = inflight - 1
+  end)
+  for i=1,12 do jobs.enqueue("t", {}) end
+  local total = jobs.run_worker({ drain = true, concurrency = 4, batch = 1, poll_ms = 5 })
+  ctx.stdout:write(("CONC ok=%d total=%d max=%d\n"):format(
+    (total==12 and maxf>=2) and 1 or 0, total, maxf))
+  return 0
+end)'
+
+JS_CONC='import { app } from "hull:app"; import { jobs } from "hull:jobs";
+app.manifest({ modules: ["hull/jobs@1"] });
+app.main(async (ctx) => {
+  jobs.init();
+  let inflight = 0, maxf = 0;
+  jobs.handler("t", async (j) => {
+    inflight++; if (inflight > maxf) maxf = inflight;
+    await hull.sleep(30); inflight--;
+  });
+  for (let i=0;i<12;i++) jobs.enqueue("t", {});
+  const total = await jobs.runWorker({ drain: true, concurrency: 4, batch: 1, pollMs: 5 });
+  ctx.stdout.write(`CONC ok=${(total===12 && maxf>=2)?1:0} total=${total} max=${maxf}\n`);
+  return 0;
+});'
+
+echo "== v1.1 concurrency: Lua =="; check_conc "lua" "lua" "$LUA_CONC"
+echo "== v1.1 concurrency: JS =="; check_conc "js" "js" "$JS_CONC"
+
+# ── v1.1: durable cron (jobs.cron) ──────────────────────────────────────────
+# cron_next math on a fixed epoch; a due schedule fires exactly one job; a
+# second tick at the same time does NOT double-fire (CAS + missed-tick skip);
+# uncron removes it. Uses the _tick/_cronNext test seams for determinism.
+check_cron() {
+    label="$1"; ext="$2"; app="$3"
+    T="$(mktemp -d)"; printf '%s\n' "$app" > "$T/app.$ext"
+    out="$("$HULL" "$T/app.$ext" -d "$T/a.db" 2>/dev/null)" || true
+    case "$out" in
+        *"CRON math=1 fired=1 nodup=1 uncron=1"*)
+            pass "$label: cron (math / fire / no-double-fire / uncron)" ;;
+        *) fail "$label: v1.1 cron" "$out" ;;
+    esac
+    rm -rf "$T"
+}
+
+LUA_CRON='local jobs = require("hull.jobs")
+local time = require("hull.time")
+app.manifest({ modules = { "hull/jobs@1" } })
+app.main(function(ctx)
+  jobs.init()
+  local b = 1609459200   -- 2021-01-01 00:00:00 UTC
+  local math_ok = (jobs._cron_next("*/15 * * * *",b)-b==900
+    and jobs._cron_next("0 0 * * *",b)-b==86400
+    and jobs._cron_next("30 2 * * *",b)-b==9000) and 1 or 0
+  local fired = 0
+  jobs.handler("beep", function(j) fired = fired + 1 end)
+  jobs.cron("beep", "* * * * *")
+  jobs._tick(time.now()+120); jobs.work({batch=10})
+  local f1 = fired
+  jobs._tick(time.now()+120); jobs.work({batch=10})   -- must not double-fire
+  local nodup = (fired == f1) and 1 or 0
+  local uncron = jobs.uncron("beep") and 1 or 0
+  ctx.stdout:write(("CRON math=%d fired=%d nodup=%d uncron=%d\n"):format(math_ok, f1, nodup, uncron))
+  return 0
+end)'
+
+JS_CRON='import { app } from "hull:app"; import { jobs } from "hull:jobs"; import { time } from "hull:time";
+app.manifest({ modules: ["hull/jobs@1"] });
+app.main(async (ctx) => {
+  jobs.init();
+  const b = 1609459200;
+  const math_ok = (jobs._cronNext("*/15 * * * *",b)-b===900
+    && jobs._cronNext("0 0 * * *",b)-b===86400
+    && jobs._cronNext("30 2 * * *",b)-b===9000) ? 1 : 0;
+  let fired = 0;
+  jobs.handler("beep", (j) => { fired++; });
+  jobs.cron("beep", "* * * * *");
+  jobs._tick(time.now()+120); await jobs.work({batch:10});
+  const f1 = fired;
+  jobs._tick(time.now()+120); await jobs.work({batch:10});
+  const nodup = (fired === f1) ? 1 : 0;
+  const uncron = jobs.uncron("beep") ? 1 : 0;
+  ctx.stdout.write(`CRON math=${math_ok} fired=${f1} nodup=${nodup} uncron=${uncron}\n`);
+  return 0;
+});'
+
+echo "== v1.1 cron: Lua =="; check_cron "lua" "lua" "$LUA_CRON"
+echo "== v1.1 cron: JS =="; check_cron "js" "js" "$JS_CRON"
+
 echo ""
 echo "=== Summary ==="
 echo "PASSED: $PASS"

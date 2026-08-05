@@ -76,6 +76,50 @@ hull jobs worker worker.lua -d ./app.db  # resolves the entry, runs its app.main
 `hull jobs worker [entry|dir] [-d DSN] [args...]` resolves the entry (a file
 as-is; a directory -> `app.lua`|`app.js`) and forwards the rest to the app.
 
+**Intra-process concurrency.** `run_worker({ concurrency = N })` runs N
+independent claim-loops in one process, so up to N handlers are in flight at
+once - real parallelism for I/O-bound handlers (each loop claims disjoint jobs
+via the atomic claim). It's orthogonal to running K processes; the two multiply
+(K processes x N concurrency). Leave it at 1 for CPU-bound handlers (more
+processes scale those better).
+
+```lua
+app.main(function() jobs.init(); jobs.run_worker({ concurrency = 8 }) end)
+```
+
+## Recurring jobs (cron)
+
+`jobs.cron(name, spec, data?, opts?)` registers a **durable** recurring
+schedule: on each matching minute, exactly one worker enqueues a job. Schedules
+live in the DB (`_hull_cron`), so they survive restarts and coordinate across
+the fleet (a compare-and-set on the schedule row - no double-fire even with many
+workers). A worker (an `app.every` poller or `run_worker`) must be running to
+fire them.
+
+```lua
+jobs.init()
+jobs.handler("nightly_report", function(job) build_report(job.data) end)
+
+jobs.cron("nightly_report", "0 2 * * *", { region = "us" })   -- 02:00 UTC daily
+jobs.cron("heartbeat", "*/5 * * * *")                          -- every 5 minutes
+jobs.uncron("heartbeat")                                       -- remove a schedule
+```
+```javascript
+jobs.cron("nightly_report", "0 2 * * *", { region: "us" });
+jobs.cron("heartbeat", "*/5 * * * *");
+jobs.uncron("heartbeat");
+```
+
+- **`name`** is the schedule id and, by default, the enqueued **job type**
+  (override with `opts.type`). Re-registering the same `name` updates it.
+- **`spec`** is standard 5-field cron - `minute hour day-of-month month
+  day-of-week` - in **UTC**. Supports `*`, `n`, `a-b`, `*/step`, `a-b/step`, and
+  comma lists; `day-of-week` is `0`/`7` = Sunday. When both day-of-month and
+  day-of-week are restricted, a match on **either** fires (standard cron).
+- **`opts`**: `type`, `queue`, `priority`, `max_attempts` for the enqueued jobs.
+- **Missed ticks** (all workers were down) advance to the next future occurrence
+  - fire-once, no backfill storm.
+
 ## Handler contract
 
 `jobs.work` dispatches each claimed job to its registered handler, else the
@@ -149,8 +193,8 @@ terminal rows, so it never races a live job. JS: `jobs.cleanup({ olderThan: ... 
 | `backoff(attempt)` | `2^n·10s` cap 1h | retry-delay function |
 
 `jobs.work` / `jobs.run_worker` take `{ queue, batch, visibility_timeout, poll_ms }`;
-`jobs.run_worker` also accepts `{ drain, max_empty_polls }` for bounded / batch-drain
-runs and `jobs.stop()` for graceful shutdown.
+`jobs.run_worker` also accepts `{ concurrency, drain, max_empty_polls }` (N in-flight
+handlers; bounded / batch-drain runs) and `jobs.stop()` for graceful shutdown.
 
 ## Backend notes
 
