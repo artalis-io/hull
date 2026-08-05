@@ -15,7 +15,7 @@
  * Full surface: schema + jobs.init, enqueue, the atomic claim, per-type +
  * catch-all handlers, the work loop (retry-with-backoff, dead-letter, and the
  * visibility-timeout reaper), the dedicated worker (jobs.runWorker +
- * `hull jobs worker`), and the ops surface (jobs.stats / dead / retry / cancel / cleanup). v1.1 adds durable cron (jobs.cron / uncron) and intra-process concurrency (run_worker concurrency=N), jobs.get(id), jobs.heartbeat for long jobs, and fleet-wide rate limiting (jobs.limit).
+ * `hull jobs worker`), and the ops surface (jobs.stats / dead / retry / cancel / cleanup). v1.1 adds durable cron (jobs.cron / uncron) and intra-process concurrency (run_worker concurrency=N), jobs.get(id), jobs.heartbeat for long jobs, fleet-wide rate limiting (jobs.limit), and queue pause/resume/purge.
  *
  * @license AGPL-3.0-or-later
  */
@@ -62,6 +62,10 @@ const _limits = Object.create(null);
 // Row-lock clause for the rate counter: blocking FOR UPDATE on PG/MySQL, empty
 // on SQLite (its write txn already serializes). Set in init().
 let _rlLock = "";
+// Paused-queue cache: set of paused queue names + when it was last loaded.
+// Refreshed at most every 1s so pausing never adds a DB read to every claim.
+let _paused = Object.create(null);
+let _pausedAt = 0;
 
 /**
  * Create the `_hull_jobs` table and its indexes. Idempotent - safe on every
@@ -142,6 +146,15 @@ function init(opts) {
         "window_start INTEGER      NOT NULL," +
         "n            INTEGER      NOT NULL)");
     _rlLock = db.backendName === "sqlite" ? "" : " FOR UPDATE";
+
+    // Durable per-queue pause state (jobs.pause / resume). A paused queue is not
+    // claimed (workers skip it); fleet-wide (in the DB) and restart-durable.
+    db.exec(
+        "CREATE TABLE IF NOT EXISTS _hull_queue (" +
+        "name   VARCHAR(255) NOT NULL PRIMARY KEY," +
+        "paused INTEGER      NOT NULL DEFAULT 0)");
+    _paused = Object.create(null);
+    _pausedAt = 0;
 
     // Verify the server actually parses SKIP LOCKED (the compile-time dialect
     // flag says "this backend supports it" but a MySQL<8 / MariaDB<10.6 server
@@ -259,6 +272,58 @@ function rlApply(queue, out) {
     return out.slice(0, granted);   // keep the top `granted`
 }
 
+// Is `queue` paused? Reads the durable state at most once/second (cached), so
+// pausing never adds a DB read to the steady claim path.
+function isPaused(queue) {
+    const now = time.now();
+    if (now - _pausedAt >= 1) {
+        _paused = Object.create(null);
+        for (const r of db.query("SELECT name FROM _hull_queue WHERE paused=1")) _paused[r.name] = true;
+        _pausedAt = now;
+    }
+    return _paused[queue] === true;
+}
+
+function setPaused(queue, v) {
+    const n = db.exec("UPDATE _hull_queue SET paused=? WHERE name=?", [v, queue]);
+    if ((n || 0) === 0) db.exec("INSERT INTO _hull_queue (name, paused) VALUES (?, ?)", [queue, v]);
+    _pausedAt = 0;   // invalidate this process's cache so the change is seen now
+    return jobs;
+}
+
+/**
+ * Pause a queue: workers stop claiming from it (in-flight jobs finish; enqueue
+ * still works). Durable + fleet-wide. Takes effect within ~1s on other workers.
+ * @param {string} queue
+ * @returns {object} the jobs module (for chaining)
+ */
+function pause(queue) { return setPaused(queue, 1); }
+
+/**
+ * Resume a paused queue.
+ * @param {string} queue
+ * @returns {object} the jobs module (for chaining)
+ */
+function resume(queue) { return setPaused(queue, 0); }
+
+/**
+ * Delete jobs from a queue (the "clear the backlog" op). Defaults to `pending`
+ * only, leaving in-flight and terminal rows; pass opts.statuses to widen.
+ * Returns the number deleted.
+ * @param {string} queue
+ * @param {object} [opts]  { statuses = ["pending"] }
+ * @returns {number}
+ */
+function purge(queue, opts) {
+    const o = opts || {};
+    const statuses = o.statuses || ["pending"];
+    const params = [queue].concat(statuses);
+    const ph = statuses.map(() => "?");
+    return db.exec(
+        "DELETE FROM _hull_jobs WHERE queue=? AND status IN (" + ph.join(",") + ")",
+        params) || 0;
+}
+
 /**
  * Atomically claim up to `batch` ready jobs from a queue, marking them
  * `running`. Concurrency-safe across workers and processes (SKIP LOCKED on
@@ -272,6 +337,7 @@ function claim(opts) {
     const o = opts || {};
     const queue = o.queue || "default";
     const batch = o.batch || 10;
+    if (isPaused(queue)) return [];   // paused: don't dispatch
     const now = time.now();
     const token = crypto.base64urlEncode(crypto.random(16));
     const d = db.dialect;
@@ -796,9 +862,11 @@ function _tick(now) { processCron(now !== undefined ? now : time.now()); }
 
 export const jobs = {
     init, enqueue, claim, handler, default: setDefault, work, reap, stats,
-    runWorker, stop, get, heartbeat, limit, dead, retry, cancel, cleanup, cron, uncron,
+    runWorker, stop, get, heartbeat, limit, pause, resume, purge,
+    dead, retry, cancel, cleanup, cron, uncron,
     RETRY, DEAD, DISCARD, _config: _cfg, _cronNext, _tick,
 };
 export { init, enqueue, claim, handler, work, reap, stats, runWorker, stop,
-         get, heartbeat, limit, dead, retry, cancel, cleanup, cron, uncron };
+         get, heartbeat, limit, pause, resume, purge,
+         dead, retry, cancel, cleanup, cron, uncron };
 export default jobs;

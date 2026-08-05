@@ -192,7 +192,13 @@ jobs.dead({ limit = 50 })     -- list dead-lettered jobs (newest first) for insp
 jobs.retry(id)                -- requeue a dead job with a fresh attempt budget; false if not dead
 jobs.cancel(id)               -- delete a still-pending (e.g. delayed) job; false if not pending
 jobs.cleanup({ older_than = 7 * 86400 })   -- purge terminal (done + dead) rows past a retention age
+jobs.pause("emails") / jobs.resume("emails")   -- stop / resume dispatching a queue (durable, fleet-wide)
+jobs.purge("emails")          -- delete pending jobs in a queue ("clear the backlog"); returns count
 ```
+`jobs.pause(queue)` stops workers claiming from that queue (in-flight jobs
+finish, and `enqueue` still works) - durable and fleet-wide, taking effect within
+~1s on other workers. `jobs.purge(queue)` deletes `pending` jobs by default; pass
+`{ statuses = { "pending", "running", "done", "dead" } }` to widen.
 `jobs.get(id)` is the "did my job run?" primitive: after `local id =
 jobs.enqueue(...)`, poll `jobs.get(id).status` (`pending` → `running` → `done` /
 `dead`). It's the only way to inspect an individual job from app code -
