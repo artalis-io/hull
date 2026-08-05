@@ -881,14 +881,68 @@ function shapeOps(r) {
  * Fetch a single job by id (its full status view), or null if it doesn't exist.
  * The only way to inspect an individual job from app code: `_hull_jobs` is in the
  * protected namespace, so a direct query is blocked. Poll this for a terminal
- * status (jobs are fire-and-forget; there is no result backend - a handler that
- * produces output must persist it itself).
+ * status, or use `jobs.result` / `jobs.await` to fetch a finished job's return
+ * value (a handler's non-null return is persisted as the job's result).
  * @param {number} id
  * @returns {object|null}
  */
 function get(id) {
     const rows = db.query("SELECT * FROM _hull_jobs WHERE id=?", [id]);
     return rows.length ? shapeOps(rows[0]) : null;
+}
+
+/**
+ * Fetch a job's terminal result without the full status view. Returns null when
+ * the job is unknown (never enqueued, or already purged by `jobs.cleanup`);
+ * otherwise `{ status, result?, error? }`:
+ *   - a `done` job carries `result` = the handler's decoded return value (absent
+ *     when the handler returned null/undefined/true/jobs.DISCARD),
+ *   - a `dead` job carries `error` = its last error string,
+ *   - a still-running (`pending`/`running`/`blocked`) job carries neither.
+ * The standalone counterpart to a workflow dependent's injected
+ * `job.deps[i].result`: any job's return value is readable here, not only a
+ * dependency's. The result lives as long as the job row (governed by
+ * `jobs.cleanup`), so read it before the terminal row is purged.
+ * @param {number} id
+ * @returns {object|null}
+ */
+function result(id) {
+    const rows = db.query("SELECT status, last_error FROM _hull_jobs WHERE id=?", [id]);
+    if (!rows.length) return null;
+    const status = rows[0].status;
+    const out = { status };
+    if (status === "done") {
+        const rr = db.query("SELECT result FROM _hull_job_results WHERE job_id=?", [id]);
+        if (rr.length && rr[0].result != null) out.result = JSON.parse(rr[0].result);
+    } else if (status === "dead") {
+        out.error = rows[0].last_error;
+    }
+    return out;
+}
+
+/**
+ * Block (yielding to the event loop) until a job reaches a terminal status, then
+ * return its `result`. For the "enqueue then await the value" pattern; it polls
+ * `result` every `opts.interval` ms (default 100), `await hull.sleep`-ing between
+ * polls so other work keeps running. With `opts.timeout` (ms) it gives up after
+ * that budget and returns the last (non-terminal) result view instead of the
+ * terminal one; without a timeout it waits indefinitely. Returns null immediately
+ * if the job is unknown. Async: `await jobs.await(id)`.
+ * @param {number} id
+ * @param {object} [opts]  { timeout: <ms>, interval: <ms> }
+ * @returns {Promise<object|null>}
+ */
+async function await_(id, opts) {
+    opts = opts || {};
+    const interval = opts.interval || 100;
+    const deadline = opts.timeout != null ? time.clock() + opts.timeout : null;
+    for (;;) {
+        const r = result(id);
+        if (r === null) return null;                            // unknown / purged
+        if (r.status === "done" || r.status === "dead") return r;
+        if (deadline !== null && time.clock() >= deadline) return r;
+        await hull.sleep(interval);
+    }
 }
 
 /**
@@ -991,11 +1045,12 @@ function _tick(now) { processCron(now !== undefined ? now : time.now()); }
 
 export const jobs = {
     init, enqueue, claim, handler, default: setDefault, work, reap, stats,
-    runWorker, stop, get, heartbeat, limit, pause, resume, purge,
+    runWorker, stop, get, result, await: await_, heartbeat, limit,
+    pause, resume, purge,
     dead, retry, cancel, cleanup, cron, uncron,
     RETRY, DEAD, DISCARD, _config: _cfg, _cronNext, _tick,
 };
 export { init, enqueue, claim, handler, work, reap, stats, runWorker, stop,
-         get, heartbeat, limit, pause, resume, purge,
+         get, result, heartbeat, limit, pause, resume, purge,
          dead, retry, cancel, cleanup, cron, uncron };
 export default jobs;

@@ -963,8 +963,8 @@ end
 --- Fetch a single job by id (its full status view), or nil if it doesn't exist.
 -- The only way to inspect an individual job from app code: `_hull_jobs` is in the
 -- protected namespace, so a direct query is blocked. Poll this for a terminal
--- status (jobs are fire-and-forget; there is no result backend - a handler that
--- produces output must persist it itself).
+-- status, or use `jobs.result` / `jobs.await` to fetch a finished job's return
+-- value (a handler's non-nil return is persisted as the job's result).
 -- @tparam number id
 -- @treturn table|nil  { id, type, data, status, queue, priority, attempts,
 --                       max_attempts, run_at, last_error, created_at, updated_at }
@@ -972,6 +972,60 @@ function jobs.get(id)
     local rows = db.query("SELECT * FROM _hull_jobs WHERE id=?", { id })
     if not rows or #rows == 0 then return nil end
     return shape_ops(rows[1])
+end
+
+--- Fetch a job's terminal result without the full status view. Returns nil when
+-- the job is unknown (never enqueued, or already purged by `jobs.cleanup`);
+-- otherwise `{ status, result?, error? }`:
+--   * a `done` job carries `result` = the handler's decoded return value (absent
+--     when the handler returned nil / true / jobs.DISCARD),
+--   * a `dead` job carries `error` = its last error string,
+--   * a still-running (`pending`/`running`/`blocked`) job carries neither.
+-- This is the standalone counterpart to a workflow dependent's injected
+-- `job.deps[i].result`: any job's return value is readable here, not only a
+-- dependency's. The result lives as long as the job row (governed by
+-- `jobs.cleanup`), so read it before the terminal row is purged.
+-- @tparam number id
+-- @treturn table|nil
+function jobs.result(id)
+    local rows = db.query("SELECT status, last_error FROM _hull_jobs WHERE id=?", { id })
+    if not rows or #rows == 0 then return nil end
+    local status = rows[1].status
+    local out = { status = status }
+    if status == "done" then
+        local rr = db.query("SELECT result FROM _hull_job_results WHERE job_id=?", { id })
+        if rr and #rr > 0 and rr[1].result ~= nil then
+            out.result = json.decode(rr[1].result)
+        end
+    elseif status == "dead" then
+        out.error = rows[1].last_error
+    end
+    return out
+end
+
+--- Block (yielding to the event loop) until a job reaches a terminal status,
+-- then return its `jobs.result`. For the "enqueue then wait for the value"
+-- pattern; it polls `jobs.result` every `opts.interval` ms (default 100),
+-- sleeping via `hull.sleep` between polls so other work keeps running. With
+-- `opts.timeout` (ms) it gives up after that budget and returns the last
+-- (non-terminal) result view instead of the terminal one; without a timeout it
+-- waits indefinitely. Returns nil immediately if the job is unknown. Requires a
+-- yielding context (`app.main`, a handler, a timer) - a worker still processes
+-- jobs while another coroutine awaits.
+-- @tparam number id
+-- @tparam[opt] table opts  { timeout = <ms>, interval = <ms> }
+-- @treturn table|nil  the terminal `jobs.result`, a timed-out view, or nil
+function jobs.await(id, opts)
+    opts = opts or {}
+    local interval = opts.interval or 100
+    local deadline = opts.timeout and (time.clock() + opts.timeout) or nil
+    while true do
+        local r = jobs.result(id)
+        if r == nil then return nil end                     -- unknown / purged
+        if r.status == "done" or r.status == "dead" then return r end
+        if deadline and time.clock() >= deadline then return r end
+        hull.sleep(interval)
+    end
 end
 
 --- Extend the claim on a job the current handler is processing (heartbeat). A

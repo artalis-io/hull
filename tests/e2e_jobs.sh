@@ -701,6 +701,59 @@ app.main(async (ctx) => {
 echo "== v1.4 workflows: Lua =="; check_wf "lua" "lua" "$LUA_WF"
 echo "== v1.4 workflows: JS =="; check_wf "js" "js" "$JS_WF"
 
+# ── v1.5: jobs.result(id) + jobs.await(id) - the standalone result backend ──
+# A handler's non-nil return is readable via jobs.result (done->value,
+# dead->error, pending->neither, unknown->nil); jobs.await yields until terminal.
+check_result() {
+    label="$1"; ext="$2"; app="$3"
+    T="$(mktemp -d)"; printf '%s\n' "$app" > "$T/app.$ext"
+    out="$("$HULL" "$T/app.$ext" -d "$T/a.db" 2>/dev/null)" || true
+    case "$out" in
+        *"RES pre=pending done=7 dead=boom void=nil unknown=nil await=7"*)
+            pass "$label: result/await (done-value / dead-error / void / unknown / yielding await)" ;;
+        *) fail "$label: v1.5 result/await" "$out" ;;
+    esac
+    rm -rf "$T"
+}
+
+LUA_RES='local jobs = require("hull.jobs")
+app.manifest({ modules = { "hull/jobs@1" } })
+app.main(function(ctx)
+  jobs.init()
+  jobs.handler("sum",  function(j) return { total = j.data.a + j.data.b } end)
+  jobs.handler("boom", function(j) error("boom") end)
+  jobs.handler("void", function(j) return end)
+  local ok=jobs.enqueue("sum",{a=2,b=5}); local bad=jobs.enqueue("boom",{},{max_attempts=1}); local vd=jobs.enqueue("void",{})
+  local pre=jobs.result(ok).status
+  jobs.work({ batch = 10 })
+  local r1=jobs.result(ok); local r2=jobs.result(bad); local r3=jobs.result(vd); local r4=jobs.result(999999)
+  local aw=jobs.await(ok, { timeout = 2000 })
+  local derr = tostring(r2.error):match("boom") and "boom" or "?"
+  ctx.stdout:write(("RES pre=%s done=%s dead=%s void=%s unknown=%s await=%s\n"):format(
+    pre, tostring(r1.result.total), derr, tostring(r3.result), tostring(r4), tostring(aw.result.total)))
+  return 0
+end)'
+
+JS_RES='import { app } from "hull:app"; import { jobs } from "hull:jobs";
+app.manifest({ modules: ["hull/jobs@1"] });
+app.main(async (ctx) => {
+  jobs.init();
+  jobs.handler("sum",  (j) => ({ total: j.data.a + j.data.b }));
+  jobs.handler("boom", (j) => { throw new Error("boom"); });
+  jobs.handler("void", (j) => {});
+  const ok=jobs.enqueue("sum",{a:2,b:5}); const bad=jobs.enqueue("boom",{},{maxAttempts:1}); const vd=jobs.enqueue("void",{});
+  const pre=jobs.result(ok).status;
+  await jobs.work({ batch: 10 });
+  const r1=jobs.result(ok), r2=jobs.result(bad), r3=jobs.result(vd), r4=jobs.result(999999);
+  const aw=await jobs.await(ok, { timeout: 2000 });
+  const derr = /boom/.test(String(r2.error)) ? "boom" : "?";
+  ctx.stdout.write(`RES pre=${pre} done=${r1.result.total} dead=${derr} void=${r3.result === undefined ? "nil" : r3.result} unknown=${r4 === null ? "nil" : r4} await=${aw.result.total}\n`);
+  return 0;
+});'
+
+echo "== v1.5 result/await: Lua =="; check_result "lua" "lua" "$LUA_RES"
+echo "== v1.5 result/await: JS =="; check_result "js" "js" "$JS_RES"
+
 # Fleet gate: K processes share one rate counter -> total dispatched == rate.
 echo "== v1.2 rate limit fleet ($CONC processes, one shared counter) =="
 W="$(mktemp -d)"; DB="$W/rl.db"
