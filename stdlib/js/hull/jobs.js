@@ -318,6 +318,35 @@ function enqueue(jobType, data, opts) {
     return id;
 }
 
+/**
+ * Enqueue many jobs in one transaction. `items` is an array of
+ * `{ type, data?, opts? }`, each accepting the same `opts` as `jobs.enqueue`
+ * EXCEPT `dependsOn` (bulk is for independent jobs - build graphs with
+ * `jobs.enqueue`, which throws here if seen). All rows commit together (one
+ * `db.batch`), so the batch is atomic AND cheap: a single commit/fsync instead
+ * of one per job. Returns an array of ids in input order, with `null` for any
+ * item whose `dedupKey` collided with an existing un-run job.
+ * @param {Array<{type:string,data?:*,opts?:object}>} items
+ * @returns {Array<number|null>}  ids in input order (null per deduped item)
+ */
+function enqueueMany(items) {
+    if (!Array.isArray(items)) throw new Error("jobs.enqueueMany: items must be an array");
+    if (items.length === 0) return [];
+    items.forEach((it, i) => {
+        if (!it || typeof it.type !== "string" || it.type === "")
+            throw new Error(`jobs.enqueueMany: item ${i} needs a non-empty string type`);
+        if (it.opts && it.opts.dependsOn)
+            throw new Error("jobs.enqueueMany: dependsOn is not supported in bulk; use jobs.enqueue for graph nodes");
+    });
+    const ids = [];
+    db.batch(() => {
+        for (let i = 0; i < items.length; i++) {
+            ids[i] = enqueue(items[i].type, items[i].data, items[i].opts);
+        }
+    });
+    return ids;
+}
+
 // Decode a claimed DB row into a handler-facing job (payload -> data).
 function shape(row) {
     let data = null;
@@ -1095,13 +1124,13 @@ function _cronNext(spec, from) {
 function _tick(now) { processCron(now !== undefined ? now : time.now()); }
 
 export const jobs = {
-    init, enqueue, claim, handler, default: setDefault, work, reap, stats,
-    runWorker, stop, get, result, await: await_, heartbeat, limit,
+    init, enqueue, enqueueMany, claim, handler, default: setDefault, work, reap,
+    stats, runWorker, stop, get, result, await: await_, heartbeat, limit,
     pause, resume, purge,
     dead, retry, cancel, cleanup, cron, uncron,
     RETRY, DEAD, DISCARD, _config: _cfg, _cronNext, _tick,
 };
-export { init, enqueue, claim, handler, work, reap, stats, runWorker, stop,
-         get, result, heartbeat, limit, pause, resume, purge,
+export { init, enqueue, enqueueMany, claim, handler, work, reap, stats, runWorker,
+         stop, get, result, heartbeat, limit, pause, resume, purge,
          dead, retry, cancel, cleanup, cron, uncron };
 export default jobs;

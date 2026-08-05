@@ -810,6 +810,55 @@ app.main((ctx) => {
 echo "== v1.5 multi-queue: Lua =="; check_queues "lua" "lua" "$LUA_QUEUES"
 echo "== v1.5 multi-queue: JS =="; check_queues "js" "js" "$JS_QUEUES"
 
+# ── v1.5: bulk enqueue - one transaction, chunked, dedup holes, no depends_on ──
+check_bulk() {
+    label="$1"; ext="$2"; app="$3"
+    T="$(mktemp -d)"; printf '%s\n' "$app" > "$T/app.$ext"
+    out="$("$HULL" "$T/app.$ext" -d "$T/a.db" 2>/dev/null)" || true
+    case "$out" in
+        *"BULK ids=251 dupnil=nil total=251 reject=true"*)
+            pass "$label: enqueue_many (250+ in one txn, dedup->nil, depends_on rejected)" ;;
+        *) fail "$label: v1.5 bulk enqueue" "$out" ;;
+    esac
+    rm -rf "$T"
+}
+
+LUA_BULK='local jobs = require("hull.jobs")
+app.manifest({ modules = { "hull/jobs@1" } })
+app.main(function(ctx)
+  jobs.init()
+  local items = {}
+  for i=1,250 do items[i] = { type="t", data={n=i}, opts={priority=(i%3)} } end
+  items[251] = { type="dup", data={}, opts={dedup_key="k"} }
+  items[252] = { type="dup", data={}, opts={dedup_key="k"} }
+  local ids = jobs.enqueue_many(items)
+  local nn=0; for i=1,252 do if ids[i]~=nil then nn=nn+1 end end
+  local total=0
+  while true do local b=jobs.claim({batch=50}); if #b==0 then break end; total=total+#b end
+  local ok = pcall(function() jobs.enqueue_many({{type="x", opts={depends_on={1}}}}) end)
+  ctx.stdout:write(("BULK ids=%d dupnil=%s total=%d reject=%s\n"):format(nn, tostring(ids[252]), total, tostring(not ok)))
+  return 0
+end)'
+
+JS_BULK='import { app } from "hull:app"; import { jobs } from "hull:jobs";
+app.manifest({ modules: ["hull/jobs@1"] });
+app.main((ctx) => {
+  jobs.init();
+  const items = [];
+  for (let i=1;i<=250;i++) items.push({ type:"t", data:{n:i}, opts:{priority:(i%3)} });
+  items.push({ type:"dup", data:{}, opts:{dedupKey:"k"} });
+  items.push({ type:"dup", data:{}, opts:{dedupKey:"k"} });
+  const ids = jobs.enqueueMany(items);
+  let nn=0; for (const x of ids) if (x!=null) nn++;
+  let total=0; for(;;){ const b=jobs.claim({batch:50}); if(!b.length) break; total+=b.length; }
+  let reject=false; try { jobs.enqueueMany([{type:"x", opts:{dependsOn:[1]}}]); } catch(e){ reject=true; }
+  ctx.stdout.write(`BULK ids=${nn} dupnil=${ids[251]===null?"nil":ids[251]} total=${total} reject=${reject}\n`);
+  return 0;
+});'
+
+echo "== v1.5 bulk enqueue: Lua =="; check_bulk "lua" "lua" "$LUA_BULK"
+echo "== v1.5 bulk enqueue: JS =="; check_bulk "js" "js" "$JS_BULK"
+
 # Fleet gate: K processes share one rate counter -> total dispatched == rate.
 echo "== v1.2 rate limit fleet ($CONC processes, one shared counter) =="
 W="$(mktemp -d)"; DB="$W/rl.db"

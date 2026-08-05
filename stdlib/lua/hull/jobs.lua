@@ -351,6 +351,38 @@ function jobs.enqueue(job_type, data, opts)
     return id
 end
 
+--- Enqueue many jobs in one transaction. `items` is a list of
+-- `{ type, data?, opts? }` tables, each accepting the same `opts` as
+-- `jobs.enqueue` EXCEPT `depends_on` (bulk is for independent jobs - build graphs
+-- with `jobs.enqueue`, which errors here if seen). All rows commit together (one
+-- `db.batch`), so the whole batch is atomic AND cheap: a single commit/fsync
+-- instead of one per job - the reason to prefer this over a loop of `enqueue`.
+-- Returns an array of ids in input order, with `nil` for any item whose
+-- `dedup_key` collided with an existing un-run job (same as `jobs.enqueue`).
+-- @tparam table items  list of { type, data, opts }
+-- @treturn table  array of ids (nil per deduped item), in input order
+function jobs.enqueue_many(items)
+    if type(items) ~= "table" then error("jobs.enqueue_many: items must be a list") end
+    local n = #items
+    local ids = {}
+    if n == 0 then return ids end
+    for i = 1, n do
+        local it = items[i]
+        if type(it) ~= "table" or type(it.type) ~= "string" or it.type == "" then
+            error("jobs.enqueue_many: item " .. i .. " needs a non-empty string type")
+        end
+        if it.opts and it.opts.depends_on then
+            error("jobs.enqueue_many: depends_on is not supported in bulk; use jobs.enqueue for graph nodes")
+        end
+    end
+    db.batch(function()
+        for i = 1, n do
+            ids[i] = jobs.enqueue(items[i].type, items[i].data, items[i].opts)
+        end
+    end)
+    return ids
+end
+
 -- Decode a claimed DB row into a handler-facing job (payload -> data).
 local function shape(row)
     local data
