@@ -680,9 +680,9 @@ hull v0.10.0  &middot;  ca-bundle: embedded  &middot;  platform: embedded  &midd
         </h2>
         <p class="mt-4 text-sm md:text-base text-mute-400 leading-relaxed">
           The distributed <code class="text-paper-100 text-[0.85em]">hull</code> is a
-          minimal base. It drops <em>every</em> reducible subsystem &mdash; both
+          minimal base. It drops <em>every</em> reducible subsystem - both
           interpreters, the HTTP core, the Keel event loop and server, TLS, SQLite,
-          WASM, the image codecs &mdash; and <code class="text-paper-100 text-[0.85em]">hull build</code>
+          WASM, the image codecs - and <code class="text-paper-100 text-[0.85em]">hull build</code>
           composes back <em>only</em> what your app declares, statically, at build
           time. Not <code class="text-paper-100 text-[0.85em]">dlopen</code>, not a
           plugin loaded at runtime: whole archives linked in, so the manifest stays
@@ -697,13 +697,13 @@ hull v0.10.0  &middot;  ca-bundle: embedded  &middot;  platform: embedded  &midd
           <h3 class="text-paper-50 font-medium">Attack surface is what you use</h3>
           <p class="mt-2 text-sm text-mute-400 leading-relaxed">
             A compute or CLI tool links <em>zero</em> Keel, TLS, SQLite or WASM
-            &mdash; there is no unused TLS stack or SQL engine in the binary to
+            - there is no unused TLS stack or SQL engine in the binary to
             audit, exploit, or CVE-inherit. You get exactly one interpreter (Lua
             <em>or</em> JS), HTTP only if it serves or fetches, TLS only if it
             speaks TLS, a database only if it opens one.
             <span class="text-paper-100">~2.1&nbsp;MB</span> for a pure compute
             tool, versus <span class="text-paper-100">~6.5&nbsp;MB</span> for a
-            full web app &mdash; the difference is code that simply is not there.
+            full web app - the difference is code that simply is not there.
           </p>
         </div>
 
@@ -714,7 +714,7 @@ hull v0.10.0  &middot;  ca-bundle: embedded  &middot;  platform: embedded  &midd
             Every archive <code class="text-paper-100 text-[0.78rem]">hull build</code>
             composes is recorded and attested in
             <code class="text-paper-100 text-[0.78rem]">package.sig.gethull.composed</code>
-            and re-verified against the embedded platform key at boot &mdash; a
+            and re-verified against the embedded platform key at boot - a
             tampered composed archive refuses to run. Static build-time composition
             keeps the whole trust chain, and the reproducible build, intact. Modular
             does not mean a soft edge.
@@ -749,11 +749,11 @@ hull v0.10.0  &middot;  ca-bundle: embedded  &middot;  platform: embedded  &midd
             vtable. <span class="text-paper-100">SQLite</span> is in the base;
             <span class="text-paper-100">PostgreSQL</span> and
             <span class="text-paper-100">MySQL/MariaDB</span> are pure-C wire clients
-            (no libpq, no libmysql &mdash; nothing vendored beyond the protocol) composed as
+            (no libpq, no libmysql - nothing vendored beyond the protocol) composed as
             <code class="text-paper-100 text-[0.78rem]">--with</code> features;
             <span class="text-paper-100">DuckDB</span> is the embedded OLAP feature.
             Every query is parameter-bound at the C boundary, so the SQL string is
-            always a literal &mdash; the injection surface is zero, by construction,
+            always a literal - the injection surface is zero, by construction,
             on all four.
           </p>
         </div>
@@ -1641,19 +1641,19 @@ hull v0.10.0  &middot;  ca-bundle: embedded  &middot;  platform: embedded  &midd
             <ul class="space-y-3 text-sm text-mute-400 leading-relaxed">
               <li class="flex gap-2">
                 <span class="text-accent mt-0.5">&check;</span>
-                <span><strong class="text-paper-100">Fully-composable SLIM base (v0.9.0).</strong> The distributed base drops every reducible subsystem &mdash; both runtimes, HTTP, the Keel event loop, TLS, SQLite, WASM, image codecs &mdash; and <code class="text-paper-100 text-[0.78rem]">hull build</code> composes back only what the app uses, statically. A compute app links zero Keel/TLS/SQLite/WASM (~2.1&nbsp;MB); a full web app composes them back (~6.5&nbsp;MB). Composition is verifiable: every composed archive is attested in <code class="text-paper-100 text-[0.78rem]">package.sig.gethull.composed</code> and re-checked against the platform key at boot.</span>
+                <span><strong class="text-paper-100">Fully-composable SLIM base (v0.9.0).</strong> The distributed base drops every reducible subsystem - both runtimes, HTTP, the Keel event loop, TLS, SQLite, WASM, image codecs - and <code class="text-paper-100 text-[0.78rem]">hull build</code> composes back only what the app uses, statically. A compute app links zero Keel/TLS/SQLite/WASM (~2.1&nbsp;MB); a full web app composes them back (~6.5&nbsp;MB). Composition is verifiable: every composed archive is attested in <code class="text-paper-100 text-[0.78rem]">package.sig.gethull.composed</code> and re-checked against the platform key at boot.</span>
               </li>
               <li class="flex gap-2">
                 <span class="text-accent mt-0.5">&check;</span>
-                <span><strong class="text-paper-100">Composable features + extension taxonomy (v0.7.0).</strong> Five large optional subsystems &mdash; <code class="text-paper-100 text-[0.78rem]">duckdb</code>, <code class="text-paper-100 text-[0.78rem]">postgres</code>, <code class="text-paper-100 text-[0.78rem]">mysql</code>, <code class="text-paper-100 text-[0.78rem]">gpu</code>, <code class="text-paper-100 text-[0.78rem]">tui</code> &mdash; ship as signed per-feature archives composed at <code class="text-paper-100 text-[0.78rem]">hull build --with=&lt;name&gt;</code>, installed via <code class="text-paper-100 text-[0.78rem]">hull feature install</code> on the same trust chain as <code class="text-paper-100 text-[0.78rem]">hull update</code>. One clean taxonomy: stdlib / feature / flavor / tool.</span>
+                <span><strong class="text-paper-100">Composable features + extension taxonomy (v0.7.0).</strong> Five large optional subsystems - <code class="text-paper-100 text-[0.78rem]">duckdb</code>, <code class="text-paper-100 text-[0.78rem]">postgres</code>, <code class="text-paper-100 text-[0.78rem]">mysql</code>, <code class="text-paper-100 text-[0.78rem]">gpu</code>, <code class="text-paper-100 text-[0.78rem]">tui</code> - ship as signed per-feature archives composed at <code class="text-paper-100 text-[0.78rem]">hull build --with=&lt;name&gt;</code>, installed via <code class="text-paper-100 text-[0.78rem]">hull feature install</code> on the same trust chain as <code class="text-paper-100 text-[0.78rem]">hull update</code>. One clean taxonomy: stdlib / feature / flavor / tool.</span>
               </li>
               <li class="flex gap-2">
                 <span class="text-accent mt-0.5">&check;</span>
-                <span><strong class="text-paper-100">Compiler-free &amp; toolchain-free builds (v0.10.0).</strong> <code class="text-paper-100 text-[0.78rem]">hull build</code> emits the app object itself and links &mdash; no C compiler needed. Only a linker, and <code class="text-paper-100 text-[0.78rem]">hull tools install zig</code> side-loads a self-contained cross-compiling one that runs on a bare box. The payoff: a cosmo <code class="text-paper-100 text-[0.78rem]">hull</code> + <code class="text-paper-100 text-[0.78rem]">hull tools install cosmocc</code> builds a working binary on stock Windows with no pre-installed toolchain.</span>
+                <span><strong class="text-paper-100">Compiler-free &amp; toolchain-free builds (v0.10.0).</strong> <code class="text-paper-100 text-[0.78rem]">hull build</code> emits the app object itself and links - no C compiler needed. Only a linker, and <code class="text-paper-100 text-[0.78rem]">hull tools install zig</code> side-loads a self-contained cross-compiling one that runs on a bare box. The payoff: a cosmo <code class="text-paper-100 text-[0.78rem]">hull</code> + <code class="text-paper-100 text-[0.78rem]">hull tools install cosmocc</code> builds a working binary on stock Windows with no pre-installed toolchain.</span>
               </li>
               <li class="flex gap-2">
                 <span class="text-accent mt-0.5">&check;</span>
-                <span><strong class="text-paper-100">Multi-backend database, zero SQLi surface.</strong> One <code class="text-paper-100 text-[0.78rem]">hull/db</code> API, DSN-selected across SQLite (in base), PostgreSQL and MySQL/MariaDB (pure-C wire clients, no libpq/libmysql, composed as features), and embedded DuckDB. Every query is parameter-bound at the C boundary &mdash; the SQL is always a literal, on all four.</span>
+                <span><strong class="text-paper-100">Multi-backend database, zero SQLi surface.</strong> One <code class="text-paper-100 text-[0.78rem]">hull/db</code> API, DSN-selected across SQLite (in base), PostgreSQL and MySQL/MariaDB (pure-C wire clients, no libpq/libmysql, composed as features), and embedded DuckDB. Every query is parameter-bound at the C boundary - the SQL is always a literal, on all four.</span>
               </li>
               <li class="flex gap-2">
                 <span class="text-accent mt-0.5">&check;</span>
