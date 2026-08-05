@@ -124,7 +124,7 @@ function parseCookieSessionId(req, cookieName) {
  * Build a CSRF middleware. Register with `app.usePost()`.
  *
  * Safe methods (GET/HEAD/OPTIONS): generates a token, attaches to
- * `req.ctx.csrfToken`. Unsafe methods: verifies token from
+ * `req.ctx.csrf_token`. Unsafe methods: verifies token from
  * `X-CSRF-Token` header or `_csrf` form field; sends 403 on failure.
  *
  * Body parsing capped at 1 MiB / 256 form pairs.
@@ -219,6 +219,12 @@ function middleware(opts) {
                 return 1;
             }
             for (let k = 0; k < pairs.length; k++) {
+                // Parity with Lua sibling (MAX_PAIR_BYTES): skip any single
+                // pair over 4 KiB before indexOf/decode. A CSRF token is short
+                // by construction; without this bound a single ~1 MiB `_csrf`
+                // pair (under the total-body cap) forces a full-body
+                // decodeURIComponent on every unsafe request.
+                if (pairs[k].length > 4096) continue;
                 const eqIdx = pairs[k].indexOf("=");
                 if (eqIdx >= 0) {
                     const key = pairs[k].substring(0, eqIdx);

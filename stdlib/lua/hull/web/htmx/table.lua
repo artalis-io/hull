@@ -177,7 +177,17 @@ function M.render(rows, schema, opts)
                 local value = row[col.name]
                 local cell_html
                 if col.render then
+                    -- CONTRACT: a custom render owns its own escaping; its
+                    -- return is spliced into <td> RAW (see docs/htmx_widgets.md).
+                    -- If a column shows user-controlled data, the render fn MUST
+                    -- escape it (the shipped example does). Defensive net: a
+                    -- non-string return (a bare number/bool from a naive
+                    -- `render=function(v) return v end`) is routed through esc
+                    -- so it can't inject and can't raise a concat error.
                     cell_html = col.render(value, row)
+                    if type(cell_html) ~= "string" then
+                        cell_html = esc(cell_html)
+                    end
                 elseif col.editable then
                     if not opts.edit_url_for then
                         error("table.render: opts.edit_url_for is required when "

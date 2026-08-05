@@ -1065,6 +1065,11 @@ local function handle_magic_link(req, res)
         -- password_hash; the app's user_create must accept that.
         local user_id = _state.user_create(body.email, nil)
         user = _state.user_get(user_id)
+        -- Guard the create->get race / adapter inconsistency: a nil user here
+        -- would issue a magic-link token with sub=nil and then error in
+        -- send_email(user...). Stay enumeration-safe (matches the guarded
+        -- sibling sites in handle_register / handle_magic_link_consume).
+        if not user then return generic_ok(res) end
     end
     local token = issue_token(user_uid(user),
         ACTIONS.magic_link, _state.magic_link_ttl)
@@ -1293,8 +1298,10 @@ local function handle_email_change(req, res)
     -- Defense in depth: notify the OLD address with a revoke link
     -- so a stolen session cookie can't quietly move the account.
     -- Opt-in by providing templates.email_change_notify; apps
-    -- without the template keep the v1 behavior.
-    if _state.templates.email_change_notify then
+    -- without the template keep the v1 behavior. Guard `user` (nil only on a
+    -- pathological row-deleted-mid-request race): the confirm email above uses
+    -- a nil-safe template ctx, but user.email below is a hard deref.
+    if user and _state.templates.email_change_notify then
         local revoke_tok = issue_token(user_id,
             ACTIONS.email_change_revoke, _state.email_change_ttl)
         local revoke_url = origin .. _state.prefix
@@ -1814,6 +1821,9 @@ function M.send_magic_link(email, magic_url_prefix)
         if not _state.magic_link_auto_signup then return end
         local user_id = _state.user_create(email, nil)
         user = _state.user_get(user_id)
+        -- create->get race guard (see handle_magic_link): a nil user would
+        -- issue a sub=nil token and error in send_email.
+        if not user then return end
     end
     local user_id = user_uid(user)
     local token = issue_token(user_id, ACTIONS.magic_link,
