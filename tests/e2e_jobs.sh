@@ -33,7 +33,7 @@ FAIL=0
 pass() { PASS=$((PASS + 1)); echo "  PASS: $1"; }
 fail() { FAIL=$((FAIL + 1)); echo "  FAIL: $1${2:+ - $2}"; }
 
-EXPECT_COLS="id,queue,type,payload,status,priority,attempts,max_attempts,run_at,claim_token,claimed_at,dedup_key,last_error,created_at,updated_at,progress"
+EXPECT_COLS="id,queue,type,payload,status,priority,attempts,max_attempts,run_at,claim_token,claimed_at,dedup_key,last_error,created_at,updated_at,progress,trace_context"
 
 # ── Phase 1: init + schema; Phase 2: correctness round-trip (both runtimes) ──
 check_runtime() {
@@ -1222,6 +1222,64 @@ app.main(async (ctx) => {
 
 echo "== durable saga (Phase 1d): Lua =="; check_saga "lua" "lua" "$LUA_SAGA"
 echo "== durable saga (Phase 1d): JS =="; check_saga "js" "js" "$JS_SAGA"
+
+# ── observability Bet #1 Pillar A+C: jobs.metrics gauges + trace propagation ─
+# metrics() returns DB-derived per-queue gauges (pending/dead + backlog age) and
+# totals; a job enqueued with { trace } surfaces job.trace in the handler.
+check_metrics() {
+    label="$1"; ext="$2"; app="$3"
+    T="$(mktemp -d)"; printf '%s\n' "$app" > "$T/app.$ext"
+    out="$("$HULL" "$T/app.$ext" -d "$T/a.db" 2>/dev/null)" || true
+    case "$out" in
+        *"METRICS emails=5 default=2 dq_dead=1 totp=7 totd=1 age=yes TRACE=ok"*)
+            pass "$label: metrics gauges (per-queue pending/dead + backlog age) + trace propagation" ;;
+        *) fail "$label: observability A+C" "$out" ;;
+    esac
+    rm -rf "$T"
+}
+
+LUA_METRICS='local jobs = require("hull.jobs")
+app.manifest({ modules = { "hull/jobs@1" } })
+app.main(function(ctx)
+  jobs.init({ backoff = function() return 0 end })
+  local seen
+  jobs.handler("traced", function(j) seen = j.trace end)
+  jobs.handler("boom", function(j) error("x") end)
+  for i=1,5 do jobs.enqueue("x", {}, { queue = "emails" }) end          -- 5 pending, never run
+  jobs.enqueue("x", {}, { queue = "default" }); jobs.enqueue("x", {}, { queue = "default" })  -- 2 pending
+  jobs.enqueue("boom", {}, { queue = "dq", max_attempts = 1 })
+  jobs.run_worker({ queues = {"dq"}, drain = true, poll_ms = 1 })       -- dq boom -> dead
+  jobs.enqueue("traced", {}, { queue = "tq", trace = "00-abc-01" })
+  jobs.work({ queue = "tq", batch = 1 })                                 -- run only the traced job
+  local m = jobs.metrics()
+  ctx.stdout:write(("METRICS emails=%d default=%s dq_dead=%s totp=%d totd=%d age=%s TRACE=%s\n"):format(
+    m.queues.emails.pending, tostring(m.queues.default.pending), tostring(m.queues.dq.dead),
+    m.totals.pending, m.totals.dead,
+    (m.queues.emails.oldest_pending_age ~= nil) and "yes" or "no",
+    (seen == "00-abc-01") and "ok" or ("bad:" .. tostring(seen))))
+  return 0
+end)'
+
+JS_METRICS='import { app } from "hull:app"; import { jobs } from "hull:jobs";
+app.manifest({ modules: ["hull/jobs@1"] });
+app.main(async (ctx) => {
+  jobs.init({ backoff: () => 0 });
+  let seen;
+  jobs.handler("traced", (j) => { seen = j.trace; });
+  jobs.handler("boom", (j) => { throw new Error("x"); });
+  for (let i=0;i<5;i++) jobs.enqueue("x", {}, { queue: "emails" });
+  jobs.enqueue("x", {}, { queue: "default" }); jobs.enqueue("x", {}, { queue: "default" });
+  jobs.enqueue("boom", {}, { queue: "dq", maxAttempts: 1 });
+  await jobs.runWorker({ queues: ["dq"], drain: true, pollMs: 1 });
+  jobs.enqueue("traced", {}, { queue: "tq", trace: "00-abc-01" });
+  await jobs.work({ queue: "tq", batch: 1 });
+  const m = jobs.metrics();
+  ctx.stdout.write(`METRICS emails=${m.queues.emails.pending} default=${m.queues.default.pending} dq_dead=${m.queues.dq.dead} totp=${m.totals.pending} totd=${m.totals.dead} age=${m.queues.emails.oldestPendingAge!=null?"yes":"no"} TRACE=${seen==="00-abc-01"?"ok":"bad:"+seen}\n`);
+  return 0;
+});'
+
+echo "== observability A+C: Lua =="; check_metrics "lua" "lua" "$LUA_METRICS"
+echo "== observability A+C: JS =="; check_metrics "js" "js" "$JS_METRICS"
 
 # Fleet gate: K processes share one rate counter -> total dispatched == rate.
 echo "== v1.2 rate limit fleet ($CONC processes, one shared counter) =="

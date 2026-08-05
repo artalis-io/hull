@@ -11,7 +11,7 @@
 -- Full surface: schema + jobs.init, enqueue, the atomic claim, per-type +
 -- catch-all handlers, the work loop (retry-with-backoff, dead-letter, and the
 -- visibility-timeout reaper), the dedicated worker (jobs.run_worker +
--- `hull jobs worker`), and the ops surface (jobs.stats / dead / retry / cancel / cleanup). v1.1 adds durable cron (jobs.cron / uncron) and intra-process concurrency (run_worker concurrency=N), jobs.get(id), jobs.heartbeat for long jobs, fleet-wide rate limiting (jobs.limit), queue pause/resume/purge, and workflows (depends_on + result passing). v1.5 adds the standalone result backend (jobs.result / jobs.await), multi-queue draining (opts.queues, strict list or weighted map), bulk enqueue (jobs.enqueue_many), in-process lifecycle hooks (jobs.on completed/retried/dead), and polish (absolute at, jobs.progress, throttle window, fixed-offset tz cron). Durable workflows (jobs.workflow / jobs.start / ctx.step / ctx.sleep / ctx.wait_signal / jobs.signal, Phase 1) add crash-safe workflow-as-code: step memoization, durable timers, external signals, and saga compensation - a workflow instance is a job that rides the same claim/reaper/retry/result machinery (docs/jobs_durable_execution_design.md).
+-- `hull jobs worker`), and the ops surface (jobs.stats / dead / retry / cancel / cleanup). v1.1 adds durable cron (jobs.cron / uncron) and intra-process concurrency (run_worker concurrency=N), jobs.get(id), jobs.heartbeat for long jobs, fleet-wide rate limiting (jobs.limit), queue pause/resume/purge, and workflows (depends_on + result passing). v1.5 adds the standalone result backend (jobs.result / jobs.await), multi-queue draining (opts.queues, strict list or weighted map), bulk enqueue (jobs.enqueue_many), in-process lifecycle hooks (jobs.on completed/retried/dead), and polish (absolute at, jobs.progress, throttle window, fixed-offset tz cron). Durable workflows (jobs.workflow / jobs.start / ctx.step / ctx.sleep / ctx.wait_signal / jobs.signal, Phase 1) add crash-safe workflow-as-code: step memoization, durable timers, external signals, and saga compensation - a workflow instance is a job that rides the same claim/reaper/retry/result machinery (docs/jobs_durable_execution_design.md). Observability: jobs.metrics() (DB-derived per-queue gauges + backlog age) and W3C trace-context propagation (enqueue { trace } -> job.trace).
 --
 -- Usage (target shape):
 --   local jobs = require("hull.jobs")
@@ -120,7 +120,8 @@ function jobs.init(opts)
         .. "last_error   TEXT,"
         .. "created_at   INTEGER      NOT NULL,"
         .. "updated_at   INTEGER      NOT NULL,"
-        .. "progress     INTEGER      NOT NULL DEFAULT 0)")
+        .. "progress     INTEGER      NOT NULL DEFAULT 0,"
+        .. "trace_context VARCHAR(255))")
 
     -- Claim scan path: ready-to-run pending jobs in a queue, by priority then id.
     db.exec([[
@@ -179,6 +180,7 @@ function jobs.init(opts)
         db.exec("ALTER TABLE " .. tbl .. " ADD COLUMN " .. coldef)
     end
     ensure_column("_hull_jobs", "progress", "progress INTEGER NOT NULL DEFAULT 0")
+    ensure_column("_hull_jobs", "trace_context", "trace_context VARCHAR(255)")
     ensure_column("_hull_cron", "tz_offset", "tz_offset INTEGER NOT NULL DEFAULT 0")
 
     -- Fleet-wide rate-limit counters (jobs.limit). One row per limited queue;
@@ -380,6 +382,10 @@ function jobs.enqueue(job_type, data, opts)
     if has_deps then
         cols[#cols + 1] = "status"; vals[#vals + 1] = "blocked"
     end
+    -- Optional W3C trace context, carried through to the handler as job.trace.
+    if opts.trace ~= nil then
+        cols[#cols + 1] = "trace_context"; vals[#vals + 1] = opts.trace
+    end
     local id
     if opts.dedup_key ~= nil then
         -- INSERT ... ON CONFLICT(queue,dedup_key) DO NOTHING / INSERT OR IGNORE.
@@ -458,6 +464,7 @@ local function shape(row)
     return {
         id = row.id, type = row.type, data = data,
         attempts = row.attempts, max_attempts = row.max_attempts,
+        trace = row.trace_context,   -- trace-context propagation (nil if unset)
     }
 end
 
@@ -627,7 +634,7 @@ local function claim_one(queue, batch)
             .. "attempts=attempts+1, updated_at=? WHERE id IN ("
             .. "SELECT id FROM _hull_jobs WHERE queue=? AND status='pending' AND run_at<=? "
             .. "ORDER BY priority DESC, id LIMIT ? " .. lock .. ") "
-            .. "RETURNING id, type, payload, priority, attempts, max_attempts",
+            .. "RETURNING id, type, payload, priority, attempts, max_attempts, trace_context",
             { token, now, now, queue, now, batch })
     elseif d.supports_skip_locked then
         -- MySQL: no RETURNING. Lock + mark in one txn, then read back by token.
@@ -645,7 +652,7 @@ local function claim_one(queue, batch)
                 params)
         end)
         rows = db.query(
-            "SELECT id, type, payload, priority, attempts, max_attempts FROM _hull_jobs WHERE claim_token=?",
+            "SELECT id, type, payload, priority, attempts, max_attempts, trace_context FROM _hull_jobs WHERE claim_token=?",
             { token })
     else
         -- SQLite: single-writer serializes the claim, so the marked-running rows
@@ -655,7 +662,7 @@ local function claim_one(queue, batch)
             .. "attempts=attempts+1, updated_at=? WHERE id IN ("
             .. "SELECT id FROM _hull_jobs WHERE queue=? AND status='pending' AND run_at<=? "
             .. "ORDER BY priority DESC, id LIMIT ?) "
-            .. "RETURNING id, type, payload, priority, attempts, max_attempts",
+            .. "RETURNING id, type, payload, priority, attempts, max_attempts, trace_context",
             { token, now, now, queue, now, batch })
     end
 
@@ -1201,6 +1208,48 @@ function jobs.stats(opts)
     local s = { pending = 0, running = 0, done = 0, dead = 0, blocked = 0 }
     for _, r in ipairs(rows) do s[r.status] = r.c end
     return s
+end
+
+--- A DB-derived metrics snapshot for dashboards / a /metrics route. Pull-based
+-- (no exporter, no process counters), so it is correct across a whole fleet of
+-- workers. Returns `{ queues = { <queue> = { pending, running, waiting, blocked,
+-- dead, oldest_pending_age }, ... }, totals = { ... } }`. `oldest_pending_age`
+-- is `now - created_at` of the oldest READY (run_at<=now) pending job in the
+-- queue - the actionable backlog age. `opts.queue` scopes to one queue. Latency
+-- percentiles and throughput are added by the attempt-history pillar (opt-in).
+-- @tparam[opt] table opts  { queue }
+-- @treturn table
+function jobs.metrics(opts)
+    opts = opts or {}
+    local now = time.now()
+    local LIVE = { pending = true, running = true, waiting = true, blocked = true, dead = true }
+    local function new_bucket()
+        return { pending = 0, running = 0, waiting = 0, blocked = 0, dead = 0 }
+    end
+    local queues, totals = {}, new_bucket()
+    local rows = db.query(
+        "SELECT queue, status, COUNT(*) AS n FROM _hull_jobs"
+        .. (opts.queue and " WHERE queue=?" or "") .. " GROUP BY queue, status",
+        opts.queue and { opts.queue } or {})
+    for _, r in ipairs(rows or {}) do
+        local q = queues[r.queue]
+        if not q then q = new_bucket(); queues[r.queue] = q end
+        if LIVE[r.status] then
+            q[r.status] = (q[r.status] or 0) + r.n
+            totals[r.status] = totals[r.status] + r.n
+        end
+    end
+    -- Oldest ready-to-run pending job per queue -> backlog age.
+    local ages = db.query(
+        "SELECT queue, MIN(created_at) AS oldest FROM _hull_jobs "
+        .. "WHERE status='pending' AND run_at<=?"
+        .. (opts.queue and " AND queue=?" or "") .. " GROUP BY queue",
+        opts.queue and { now, opts.queue } or { now })
+    for _, r in ipairs(ages or {}) do
+        local q = queues[r.queue]
+        if q and r.oldest then q.oldest_pending_age = now - r.oldest end
+    end
+    return { queues = queues, totals = totals }
 end
 
 -- Decode an ops row into an inspection view: the handler-facing shape plus the

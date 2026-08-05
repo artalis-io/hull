@@ -310,6 +310,7 @@ jobs.enqueue(type, data, {
     max_attempts = 5,          -- override the module default (25)
     dedup_key    = "order-42", -- idempotent enqueue: a duplicate un-run key is a no-op
     throttle     = 60,         -- windowed: skip if a (queue,type) job was made in the last N s
+    trace        = traceparent,-- W3C trace context; surfaced to the handler as job.trace
 })
 ```
 Returns the new job id, or `nil` when a `dedup_key` collapsed it (or a
@@ -338,6 +339,7 @@ jobs.result(id)               -- terminal result: { status, result?, error? }, o
 jobs.await(id, { timeout = 5000 })   -- yield until the job is terminal, then return jobs.result
 jobs.progress(id, 42)         -- set a running job's progress 0-100 (surfaced by get(id).progress)
 jobs.stats()                  -- { pending, running, done, dead } (opts.queue to scope)
+jobs.metrics()                -- DB-derived dashboard snapshot: per-queue gauges + backlog age + totals
 jobs.dead({ limit = 50 })     -- list dead-lettered jobs (newest first) for inspection
 jobs.retry(id)                -- requeue a dead job with a fresh attempt budget; false if not dead
 jobs.cancel(id)               -- delete a still-pending (e.g. delayed) job; false if not pending
@@ -366,6 +368,17 @@ live as long as the job row (governed by `jobs.cleanup`), so read before purge.
 
 `jobs.cancel` only removes a `pending` job (a delayed/scheduled one that hasn't
 started); a `running` job is mid-flight and is left to finish or dead-letter.
+
+**Metrics & tracing.** `jobs.metrics()` returns a **DB-derived** snapshot for a
+dashboard or a `/metrics` route - `{ queues = { <q> = { pending, running,
+waiting, blocked, dead, oldest_pending_age }, ... }, totals = {...} }`. It's
+pull-based (no process counters), so it's correct across a whole fleet;
+`oldest_pending_age` is the backlog age of the oldest ready pending job.
+`enqueue(..., { trace })` carries a W3C `traceparent` through to the handler as
+`job.trace` (and into a durable workflow's `ctx.trace`), so app-created spans
+link across the async boundary. (Latency percentiles, throughput, and a per-job
+attempt timeline arrive with the opt-in attempt-history pillar - see
+[docs/jobs_observability_design.md](jobs_observability_design.md).)
 
 ## Compute-heavy jobs (WASM / GPU)
 
