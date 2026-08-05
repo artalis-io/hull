@@ -15,7 +15,7 @@
  * Full surface: schema + jobs.init, enqueue, the atomic claim, per-type +
  * catch-all handlers, the work loop (retry-with-backoff, dead-letter, and the
  * visibility-timeout reaper), the dedicated worker (jobs.runWorker +
- * `hull jobs worker`), and the ops surface (jobs.stats / dead / retry / cancel / cleanup). v1.1 adds durable cron (jobs.cron / uncron) and intra-process concurrency (run_worker concurrency=N), jobs.get(id), jobs.heartbeat for long jobs, fleet-wide rate limiting (jobs.limit), queue pause/resume/purge, and workflows (depends_on + result passing). v1.5 adds the standalone result backend (jobs.result / jobs.await), multi-queue draining (opts.queues, strict list or weighted map), bulk enqueue (jobs.enqueueMany), in-process lifecycle hooks (jobs.on completed/retried/dead), and polish (absolute at, jobs.progress, throttle window, fixed-offset tz cron). Durable workflows (jobs.workflow / jobs.start / ctx.step, Phase 1a) add crash-safe resumable step memoization - a workflow instance is a job that rides the same claim/reaper/retry/result machinery (docs/jobs_durable_execution_design.md).
+ * `hull jobs worker`), and the ops surface (jobs.stats / dead / retry / cancel / cleanup). v1.1 adds durable cron (jobs.cron / uncron) and intra-process concurrency (run_worker concurrency=N), jobs.get(id), jobs.heartbeat for long jobs, fleet-wide rate limiting (jobs.limit), queue pause/resume/purge, and workflows (depends_on + result passing). v1.5 adds the standalone result backend (jobs.result / jobs.await), multi-queue draining (opts.queues, strict list or weighted map), bulk enqueue (jobs.enqueueMany), in-process lifecycle hooks (jobs.on completed/retried/dead), and polish (absolute at, jobs.progress, throttle window, fixed-offset tz cron). Durable workflows (jobs.workflow / jobs.start / ctx.step / ctx.sleep, Phases 1a-1b) add crash-safe resumable step memoization + durable timers - a workflow instance is a job that rides the same claim/reaper/retry/result machinery (docs/jobs_durable_execution_design.md).
  *
  * @license AGPL-3.0-or-later
  */
@@ -963,7 +963,18 @@ async function work(opts) {
         }
         try {
             const result = await h(job);
-            if (result === DEAD) {
+            if (result && typeof result === "object" && result.__hullWfYield !== undefined) {
+                // Durable workflow yielded (ctx.sleep): reschedule to the wake
+                // time and continue later - no terminal outcome, no event. A
+                // yield is not a failed attempt, so undo the claim's attempt
+                // increment (a workflow may sleep/resume many times without
+                // exhausting maxAttempts). The future run_at keeps it out of the
+                // claim set until it is due.
+                const now = time.now();
+                db.exec("UPDATE _hull_jobs SET status='pending', run_at=?, " +
+                    "attempts=attempts-1, claim_token=NULL, updated_at=? WHERE id=?",
+                    [result.__hullWfYield, now, job.id]);
+            } else if (result === DEAD) {
                 markDead(job.id, "handler returned jobs.DEAD");
                 emit("dead", job, { error: "handler returned jobs.DEAD" });
             } else if (result === RETRY) {
@@ -1209,14 +1220,44 @@ async function runStep(workflowId, stepKey, fn) {
     return res;
 }
 
-// Build the durable ctx handed to a workflow function.
+// Durable timer. `n` is the ordinal of this sleep in the workflow body (stable
+// across re-runs). On first encounter it records the wake time and throws the
+// yield sentinel (the runner reschedules the job to run_at = wake_at); on a
+// resume the recorded wake time is read, and once it has passed the call returns
+// so the body continues past it.
+function runSleep(workflowId, n, seconds) {
+    const key = "__sleep:" + n;
+    const rows = db.query(
+        "SELECT result FROM _hull_workflow_steps WHERE workflow_id=? AND step_key=?",
+        [workflowId, key]);
+    let wakeAt;
+    if (rows.length) {
+        wakeAt = Number(rows[0].result);
+    } else {
+        wakeAt = time.now() + (Number(seconds) || 0);
+        db.exec(
+            "INSERT INTO _hull_workflow_steps (workflow_id, step_key, result, status, created_at) " +
+            "VALUES (?, ?, ?, 'sleeping', ?)",
+            [workflowId, key, String(wakeAt), time.now()]);
+    }
+    if (time.now() >= wakeAt) return;   // elapsed: continue
+    const e = new Error("__hull_yield");   // caught by the runner (Error carries the marker)
+    e.__hullYield = true;
+    e.wakeAt = wakeAt;
+    throw e;
+}
+
+// Build the durable ctx handed to a workflow function. `sleepN` is a per-run
+// counter captured by ctx.sleep, giving each sleep a stable ordinal key.
 function makeCtx(job, name) {
+    let sleepN = 0;
     return {
         id: job.id,
         name,
         input: job.data,
         trace: job.trace,   // trace-context propagation (observability design)
         step: (stepKey, fn) => runStep(job.id, stepKey, fn),
+        sleep: (seconds) => { sleepN += 1; return runSleep(job.id, sleepN, seconds); },
     };
 }
 
@@ -1237,7 +1278,15 @@ function workflow(name, fn) {
         throw new Error("jobs.workflow: name must be a non-empty string");
     if (typeof fn !== "function") throw new Error("jobs.workflow: fn must be a function");
     _workflows[name] = fn;
-    handler(WF_PREFIX + name, (job) => fn(makeCtx(job, name)));
+    // A ctx.sleep (or other yield) throws the yield sentinel; catch it and hand
+    // work() the reschedule marker. A real error re-throws for the retry path.
+    handler(WF_PREFIX + name, async (job) => {
+        try { return await fn(makeCtx(job, name)); }
+        catch (e) {
+            if (e && e.__hullYield) return { __hullWfYield: e.wakeAt };
+            throw e;
+        }
+    });
     return jobs;
 }
 
@@ -1273,10 +1322,15 @@ function workflowStatus(id) {
     const out = {
         status: job.status,
         name: String(job.type).startsWith(WF_PREFIX) ? String(job.type).slice(WF_PREFIX.length) : job.type,
-        stepsDone: rows.map((r) => r.step_key),
+        // Hide internal keys (durable-sleep markers "__sleep:N"); only user steps.
+        stepsDone: rows.map((r) => r.step_key).filter((k) => !String(k).startsWith("__")),
         startedAt: job.createdAt,
         updatedAt: job.updatedAt,
     };
+    // A pending workflow with a future run_at is sleeping on a durable timer.
+    if (job.status === "pending" && job.runAt && job.runAt > time.now()) {
+        out.waitingFor = "sleep:" + job.runAt;
+    }
     if (job.status === "done") {
         const r = result(id);
         if (r) out.result = r.result;

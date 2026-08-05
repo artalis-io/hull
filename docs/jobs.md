@@ -221,8 +221,8 @@ jobs.enqueue("merge", {}, { depends_on = { p1, p2 } })   -- job.deps = { r1, r2 
 The `depends_on` DAG above is a *static* graph of independent jobs. For a
 *dynamic*, long-running process - loops, conditionals, resumable across crashes -
 use a **durable workflow**: a normal function whose steps are memoized, so a
-crashed or retried workflow resumes past the work it already did. (Phase 1a:
-steps; durable timers, signals, and saga compensation are on the roadmap - see
+crashed or retried workflow resumes past the work it already did. (Phases 1a-1b:
+steps + durable timers; signals and saga compensation are on the roadmap - see
 [docs/jobs_durable_execution_design.md](jobs_durable_execution_design.md).)
 
 ```lua
@@ -256,6 +256,12 @@ const wf = jobs.start("checkout", { orderId: 42, amount: 100 });
 - **`ctx.input`** is the payload from `jobs.start`; **`ctx.id`** is the workflow
   id. The body between steps re-runs on each resume, so keep it cheap and put all
   side effects inside steps.
+- **`ctx.sleep(seconds)`** is a **durable timer**: the workflow yields and is
+  rescheduled to wake later (it becomes a future-dated `pending` job), so a sleep
+  survives restarts, redeploys, and crashes at zero cost - no held thread, no
+  in-memory timer. A worker must be running when it is due. A sleep does not
+  consume the retry budget. `workflow_status` reports `waiting_for = "sleep:<ts>"`
+  while it waits.
 - **`jobs.workflow_status(id)`** (`workflowStatus`) → `{ status, name,
   steps_done, result?, error? }`, DB-derived (works even when no worker is
   running it). Fetch the final value with `jobs.await(id)` / `jobs.result(id)`.

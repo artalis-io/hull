@@ -1032,6 +1032,70 @@ app.main(async (ctx) => {
 echo "== durable workflow (Phase 1a): Lua =="; check_workflow "lua" "lua" "$LUA_WORKFLOW"
 echo "== durable workflow (Phase 1a): JS =="; check_workflow "js" "js" "$JS_WORKFLOW"
 
+# ── durable execution (Phase 1b): ctx.sleep durable timer ───────────────────
+# A workflow sleeps between step a and b. The first work() runs a and YIELDS (the
+# workflow goes pending with a future run_at = "sleeping"; b has NOT run). After
+# the timer elapses a second work() resumes: a is memoized, the sleep is
+# satisfied, b runs, done. A sleep must not consume the retry budget.
+check_sleep() {
+    label="$1"; ext="$2"; app="$3"
+    T="$(mktemp -d)"; printf '%s\n' "$app" > "$T/app.$ext"
+    out="$("$HULL" "$T/app.$ext" -d "$T/a.db" 2>/dev/null)" || true
+    case "$out" in
+        *"SLEEP mid=pending mid_b=0 wait=yes fin=done fin_b=1 steps=a,b"*)
+            pass "$label: ctx.sleep durable timer (yield -> reschedule -> resume, b gated)" ;;
+        *) fail "$label: durable timer (Phase 1b)" "$out" ;;
+    esac
+    rm -rf "$T"
+}
+
+LUA_SLEEP='local jobs = require("hull.jobs")
+app.manifest({ modules = { "hull/jobs@1" } })
+app.main(function(ctx)
+  jobs.init({ backoff = function() return 0 end })
+  local runs = { a=0, b=0 }
+  jobs.workflow("sleeper", function(w)
+    w.step("a", function() runs.a = runs.a + 1 end)
+    w.sleep(1)
+    w.step("b", function() runs.b = runs.b + 1 end)
+    return { ok = true }
+  end)
+  local id = jobs.start("sleeper", {})
+  jobs.work({ batch = 1 })
+  local mid = jobs.workflow_status(id); local mid_b = runs.b
+  hull.sleep(1200)
+  jobs.work({ batch = 1 })
+  local fin = jobs.workflow_status(id)
+  ctx.stdout:write(("SLEEP mid=%s mid_b=%d wait=%s fin=%s fin_b=%d steps=%s\n"):format(
+    mid.status, mid_b, (mid.waiting_for and "yes" or "no"), fin.status, runs.b,
+    table.concat(fin.steps_done, ",")))
+  return 0
+end)'
+
+JS_SLEEP='import { app } from "hull:app"; import { jobs } from "hull:jobs";
+app.manifest({ modules: ["hull/jobs@1"] });
+app.main(async (ctx) => {
+  jobs.init({ backoff: () => 0 });
+  const runs = { a:0, b:0 };
+  jobs.workflow("sleeper", async (w) => {
+    await w.step("a", () => { runs.a++; });
+    await w.sleep(1);
+    await w.step("b", () => { runs.b++; });
+    return { ok: true };
+  });
+  const id = jobs.start("sleeper", {});
+  await jobs.work({ batch: 1 });
+  const mid = jobs.workflowStatus(id); const midB = runs.b;
+  await hull.sleep(1200);
+  await jobs.work({ batch: 1 });
+  const fin = jobs.workflowStatus(id);
+  ctx.stdout.write(`SLEEP mid=${mid.status} mid_b=${midB} wait=${mid.waitingFor?"yes":"no"} fin=${fin.status} fin_b=${runs.b} steps=${fin.stepsDone.join(",")}\n`);
+  return 0;
+});'
+
+echo "== durable timer (Phase 1b): Lua =="; check_sleep "lua" "lua" "$LUA_SLEEP"
+echo "== durable timer (Phase 1b): JS =="; check_sleep "js" "js" "$JS_SLEEP"
+
 # Fleet gate: K processes share one rate counter -> total dispatched == rate.
 echo "== v1.2 rate limit fleet ($CONC processes, one shared counter) =="
 W="$(mktemp -d)"; DB="$W/rl.db"

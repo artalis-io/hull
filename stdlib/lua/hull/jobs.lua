@@ -11,7 +11,7 @@
 -- Full surface: schema + jobs.init, enqueue, the atomic claim, per-type +
 -- catch-all handlers, the work loop (retry-with-backoff, dead-letter, and the
 -- visibility-timeout reaper), the dedicated worker (jobs.run_worker +
--- `hull jobs worker`), and the ops surface (jobs.stats / dead / retry / cancel / cleanup). v1.1 adds durable cron (jobs.cron / uncron) and intra-process concurrency (run_worker concurrency=N), jobs.get(id), jobs.heartbeat for long jobs, fleet-wide rate limiting (jobs.limit), queue pause/resume/purge, and workflows (depends_on + result passing). v1.5 adds the standalone result backend (jobs.result / jobs.await), multi-queue draining (opts.queues, strict list or weighted map), bulk enqueue (jobs.enqueue_many), in-process lifecycle hooks (jobs.on completed/retried/dead), and polish (absolute at, jobs.progress, throttle window, fixed-offset tz cron). Durable workflows (jobs.workflow / jobs.start / ctx.step, Phase 1a) add crash-safe resumable step memoization - a workflow instance is a job that rides the same claim/reaper/retry/result machinery (docs/jobs_durable_execution_design.md).
+-- `hull jobs worker`), and the ops surface (jobs.stats / dead / retry / cancel / cleanup). v1.1 adds durable cron (jobs.cron / uncron) and intra-process concurrency (run_worker concurrency=N), jobs.get(id), jobs.heartbeat for long jobs, fleet-wide rate limiting (jobs.limit), queue pause/resume/purge, and workflows (depends_on + result passing). v1.5 adds the standalone result backend (jobs.result / jobs.await), multi-queue draining (opts.queues, strict list or weighted map), bulk enqueue (jobs.enqueue_many), in-process lifecycle hooks (jobs.on completed/retried/dead), and polish (absolute at, jobs.progress, throttle window, fixed-offset tz cron). Durable workflows (jobs.workflow / jobs.start / ctx.step / ctx.sleep, Phases 1a-1b) add crash-safe resumable step memoization + durable timers - a workflow instance is a job that rides the same claim/reaper/retry/result machinery (docs/jobs_durable_execution_design.md).
 --
 -- Usage (target shape):
 --   local jobs = require("hull.jobs")
@@ -1037,7 +1037,18 @@ function jobs.work(opts)
             emit("dead", job, { error = err })
         else
             local ok, result = pcall(h, job)
-            if not ok then
+            if ok and type(result) == "table" and result.__hull_wf_yield then
+                -- Durable workflow yielded (ctx.sleep): reschedule to the wake
+                -- time and continue later - no terminal outcome, no event. A
+                -- yield is not a failed attempt, so undo the claim's attempt
+                -- increment (a workflow may sleep/resume many times without
+                -- exhausting max_attempts). The future run_at keeps it out of
+                -- the claim set until it is due.
+                local now = time.now()
+                db.exec("UPDATE _hull_jobs SET status='pending', run_at=?, "
+                    .. "attempts=attempts-1, claim_token=NULL, updated_at=? WHERE id=?",
+                    { result.__hull_wf_yield, now, job.id })
+            elseif not ok then
                 local err = tostring(result)
                 emit(mark_retry(job, err), job, { error = err, attempt = job.attempts })
             elseif result == jobs.DEAD then
@@ -1290,15 +1301,45 @@ local function run_step(workflow_id, step_key, fn)
     return result
 end
 
--- Build the durable ctx handed to a workflow function.
+-- Durable timer. `n` is the ordinal of this sleep in the workflow body (stable
+-- across re-runs, since the step-call sequence is stable). On first encounter it
+-- records the wake time and raises the yield sentinel (the runner reschedules the
+-- job to run_at = wake_at); on a resume the recorded wake time is read, and once
+-- it has passed the call returns and the body continues past it.
+local function run_sleep(workflow_id, n, seconds)
+    local key = "__sleep:" .. n
+    local rows = db.query(
+        "SELECT result FROM _hull_workflow_steps WHERE workflow_id=? AND step_key=?",
+        { workflow_id, key })
+    local wake_at
+    if rows and #rows > 0 then
+        wake_at = tonumber(rows[1].result)
+    else
+        wake_at = time.now() + (tonumber(seconds) or 0)
+        db.exec(
+            "INSERT INTO _hull_workflow_steps (workflow_id, step_key, result, status, created_at) "
+            .. "VALUES (?, ?, ?, 'sleeping', ?)",
+            { workflow_id, key, tostring(wake_at), time.now() })
+    end
+    if time.now() >= wake_at then return end   -- elapsed: continue
+    error({ __hull_yield = true, wake_at = wake_at })   -- caught by the runner
+end
+
+-- Build the durable ctx handed to a workflow function. `sleep_n` is a per-run
+-- counter captured by ctx.sleep, giving each sleep a stable ordinal key.
 local function make_ctx(job, name)
+    local sleep_n = 0
     local ctx = {
         id    = job.id,
         name  = name,
         input = job.data,
         trace = job.trace,   -- trace-context propagation (observability design)
     }
-    ctx.step = function(step_key, fn) return run_step(job.id, step_key, fn) end
+    ctx.step  = function(step_key, fn) return run_step(job.id, step_key, fn) end
+    ctx.sleep = function(seconds)
+        sleep_n = sleep_n + 1
+        return run_sleep(job.id, sleep_n, seconds)
+    end
     return ctx
 end
 
@@ -1316,9 +1357,16 @@ function jobs.workflow(name, fn)
     end
     if type(fn) ~= "function" then error("jobs.workflow: fn must be a function") end
     _workflows[name] = fn
-    -- The workflow runs as a normal handler for its reserved type.
+    -- The workflow runs as a normal handler for its reserved type. A ctx.sleep
+    -- (or other yield) raises the yield sentinel; catch it and hand work() the
+    -- reschedule marker. A real error re-raises for the normal retry path.
     jobs.handler(WF_PREFIX .. name, function(job)
-        return fn(make_ctx(job, name))
+        local ok, res = pcall(fn, make_ctx(job, name))
+        if ok then return res end
+        if type(res) == "table" and res.__hull_yield then
+            return { __hull_wf_yield = res.wake_at }
+        end
+        error(res, 0)
     end)
     return jobs
 end
@@ -1350,7 +1398,12 @@ function jobs.workflow_status(id)
         "SELECT step_key FROM _hull_workflow_steps WHERE workflow_id=? ORDER BY created_at, step_key",
         { id })
     local steps_done = {}
-    for _, s in ipairs(rows or {}) do steps_done[#steps_done + 1] = s.step_key end
+    for _, s in ipairs(rows or {}) do
+        -- Hide internal keys (durable-sleep markers "__sleep:N"); only user steps.
+        if not tostring(s.step_key):match("^__") then
+            steps_done[#steps_done + 1] = s.step_key
+        end
+    end
     local out = {
         status     = job.status,
         name       = tostring(job.type):match("^" .. WF_PREFIX .. "(.+)$") or job.type,
@@ -1358,6 +1411,10 @@ function jobs.workflow_status(id)
         started_at = job.created_at,
         updated_at = job.updated_at,
     }
+    -- A pending workflow with a future run_at is sleeping on a durable timer.
+    if job.status == "pending" and job.run_at and job.run_at > time.now() then
+        out.waiting_for = "sleep:" .. job.run_at
+    end
     if job.status == "done" then
         local r = jobs.result(id)
         if r then out.result = r.result end
