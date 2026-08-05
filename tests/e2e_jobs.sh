@@ -594,6 +594,49 @@ app.main(async (ctx) => {
 echo "== v1.2 rate limit: Lua =="; check_rl "lua" "lua" "$LUA_RL"
 echo "== v1.2 rate limit: JS =="; check_rl "js" "js" "$JS_RL"
 
+# ── v1.3: queue pause / resume / purge ──────────────────────────────────────
+# A paused queue is not claimed; resume restores it; purge deletes pending.
+check_pq() {
+    label="$1"; ext="$2"; app="$3"
+    T="$(mktemp -d)"; printf '%s\n' "$app" > "$T/app.$ext"
+    out="$("$HULL" "$T/app.$ext" -d "$T/a.db" 2>/dev/null)" || true
+    case "$out" in
+        *"PQ paused=0 resumed=5 purged=3 after_purge=0"*)
+            pass "$label: queue pause / resume / purge" ;;
+        *) fail "$label: v1.3 pause/resume/purge" "$out" ;;
+    esac
+    rm -rf "$T"
+}
+
+LUA_PQ='local jobs = require("hull.jobs")
+app.manifest({ modules = { "hull/jobs@1" } })
+app.main(function(ctx)
+  jobs.init()
+  for i=1,5 do jobs.enqueue("t", {}) end
+  jobs.pause("default"); local c1 = jobs.claim({ batch = 10 })
+  jobs.resume("default"); local c2 = jobs.claim({ batch = 10 })
+  for i=1,3 do jobs.enqueue("t", {}) end
+  local purged = jobs.purge("default"); local c3 = jobs.claim({ batch = 10 })
+  ctx.stdout:write(("PQ paused=%d resumed=%d purged=%d after_purge=%d\n"):format(#c1, #c2, purged, #c3))
+  return 0
+end)'
+
+JS_PQ='import { app } from "hull:app"; import { jobs } from "hull:jobs";
+app.manifest({ modules: ["hull/jobs@1"] });
+app.main(async (ctx) => {
+  jobs.init();
+  for (let i=0;i<5;i++) jobs.enqueue("t", {});
+  jobs.pause("default"); const c1 = jobs.claim({ batch: 10 });
+  jobs.resume("default"); const c2 = jobs.claim({ batch: 10 });
+  for (let i=0;i<3;i++) jobs.enqueue("t", {});
+  const purged = jobs.purge("default"); const c3 = jobs.claim({ batch: 10 });
+  ctx.stdout.write(`PQ paused=${c1.length} resumed=${c2.length} purged=${purged} after_purge=${c3.length}\n`);
+  return 0;
+});'
+
+echo "== v1.3 pause/resume/purge: Lua =="; check_pq "lua" "lua" "$LUA_PQ"
+echo "== v1.3 pause/resume/purge: JS =="; check_pq "js" "js" "$JS_PQ"
+
 # Fleet gate: K processes share one rate counter -> total dispatched == rate.
 echo "== v1.2 rate limit fleet ($CONC processes, one shared counter) =="
 W="$(mktemp -d)"; DB="$W/rl.db"

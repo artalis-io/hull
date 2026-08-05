@@ -11,7 +11,7 @@
 -- Full surface: schema + jobs.init, enqueue, the atomic claim, per-type +
 -- catch-all handlers, the work loop (retry-with-backoff, dead-letter, and the
 -- visibility-timeout reaper), the dedicated worker (jobs.run_worker +
--- `hull jobs worker`), and the ops surface (jobs.stats / dead / retry / cancel / cleanup). v1.1 adds durable cron (jobs.cron / uncron) and intra-process concurrency (run_worker concurrency=N), jobs.get(id), jobs.heartbeat for long jobs, and fleet-wide rate limiting (jobs.limit).
+-- `hull jobs worker`), and the ops surface (jobs.stats / dead / retry / cancel / cleanup). v1.1 adds durable cron (jobs.cron / uncron) and intra-process concurrency (run_worker concurrency=N), jobs.get(id), jobs.heartbeat for long jobs, fleet-wide rate limiting (jobs.limit), and queue pause/resume/purge.
 --
 -- Usage (target shape):
 --   local jobs = require("hull.jobs")
@@ -69,6 +69,10 @@ local _limits = {}
 -- Row-lock clause for the rate counter: blocking FOR UPDATE on PG/MySQL (serialize
 -- reservers), empty on SQLite (its write txn already serializes). Set in init.
 local _rl_lock = ""
+-- Paused-queue cache: a set of paused queue names + when it was last loaded.
+-- Refreshed at most every 1s so a paused queue isn't a DB read on every claim.
+local _paused = {}
+local _paused_at = 0
 
 --- Create the `_hull_jobs` table and its indexes. Idempotent - safe to call on
 -- every boot. Uses the connection's portable identity DDL + IF-NOT-EXISTS index
@@ -156,6 +160,14 @@ function jobs.init(opts)
     -- Blocking FOR UPDATE serializes reservers on PG/MySQL; SQLite's write txn
     -- already serializes (and rejects FOR UPDATE syntactically).
     _rl_lock = (db.backend_name == "sqlite") and "" or " FOR UPDATE"
+
+    -- Durable per-queue pause state (jobs.pause / resume). A paused queue is not
+    -- claimed (workers skip it); fleet-wide (in the DB) and restart-durable.
+    db.exec(
+        "CREATE TABLE IF NOT EXISTS _hull_queue ("
+        .. "name   VARCHAR(255) NOT NULL PRIMARY KEY,"
+        .. "paused INTEGER      NOT NULL DEFAULT 0)")
+    _paused, _paused_at = {}, 0   -- force a reload after (re)init
 
     -- Verify the server actually parses SKIP LOCKED (the compile-time dialect
     -- flag says "this backend supports it" but a MySQL<8 / MariaDB<10.6 server
@@ -290,6 +302,55 @@ local function rl_apply(queue, out)
     return out
 end
 
+-- Is `queue` currently paused? Reads the durable state at most once/second
+-- (cached), so pausing never adds a DB read to the steady claim path.
+local function is_paused(queue)
+    local now = time.now()
+    if now - _paused_at >= 1 then
+        _paused = {}
+        local rows = db.query("SELECT name FROM _hull_queue WHERE paused=1")
+        for _, r in ipairs(rows) do _paused[r.name] = true end
+        _paused_at = now
+    end
+    return _paused[queue] == true
+end
+
+local function set_paused(queue, v)
+    local n = db.exec("UPDATE _hull_queue SET paused=? WHERE name=?", { v, queue })
+    if (n or 0) == 0 then
+        db.exec("INSERT INTO _hull_queue (name, paused) VALUES (?, ?)", { queue, v })
+    end
+    _paused_at = 0   -- invalidate this process's cache so the change is seen now
+    return jobs
+end
+
+--- Pause a queue: workers stop claiming from it (in-flight jobs finish; enqueue
+-- still works). Durable + fleet-wide. Takes effect within ~1s on other workers.
+-- @tparam string queue
+-- @treturn table the jobs module (for chaining)
+function jobs.pause(queue) return set_paused(queue, 1) end
+
+--- Resume a paused queue.
+-- @tparam string queue
+-- @treturn table the jobs module (for chaining)
+function jobs.resume(queue) return set_paused(queue, 0) end
+
+--- Delete jobs from a queue (the "clear the backlog" op). Defaults to `pending`
+-- only, leaving in-flight and terminal rows; pass opts.statuses to widen (e.g.
+-- { "pending", "running", "done", "dead" }). Returns the number deleted.
+-- @tparam string queue
+-- @tparam[opt] table opts  { statuses = { "pending" } }
+-- @treturn number
+function jobs.purge(queue, opts)
+    opts = opts or {}
+    local statuses = opts.statuses or { "pending" }
+    local ph, params = {}, { queue }
+    for _, s in ipairs(statuses) do ph[#ph + 1] = "?"; params[#params + 1] = s end
+    return db.exec(
+        "DELETE FROM _hull_jobs WHERE queue=? AND status IN (" .. table.concat(ph, ",") .. ")",
+        params) or 0
+end
+
 --- Atomically claim up to `batch` ready jobs from a queue, marking them
 -- `running`. Concurrency-safe across workers and processes: SKIP LOCKED on
 -- Postgres/MySQL, serialized on SQLite (single-writer + WAL busy-wait). A
@@ -303,6 +364,7 @@ function jobs.claim(opts)
     opts = opts or {}
     local queue = opts.queue or "default"
     local batch = opts.batch or 10
+    if is_paused(queue) then return {} end   -- paused: don't dispatch
     local now   = time.now()
     local token = crypto.base64url_encode(crypto.random(16))
     local d = db.dialect
