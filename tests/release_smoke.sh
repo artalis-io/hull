@@ -126,7 +126,14 @@ echo "  $PLATFORM"
 
 # wamrc isn't published for cosmo — skip the install bit on a cosmo
 # binary and just verify the registry reports it correctly.
-case "$VERSION" in
+#
+# Detect cosmo from the doctor platform field ("platform":"cosmo"), NOT the
+# version string: `hull version` prints the git-describe tag (e.g. "hull
+# 0.10.0") with no "cosmo" marker, so keying on $VERSION silently ran the
+# native branch against a cosmo binary and produced spurious feature-install
+# failures (features are native-only). $PLATFORM is set above from
+# `doctor --json`.
+case "$PLATFORM" in
     *cosmo*)
         echo ""
         echo "── cosmo binary — wamrc install is unsupported by design ──"
