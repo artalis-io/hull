@@ -32,7 +32,7 @@ jobs.init();
 
 // A normal handler: return nothing -> the job is done.
 jobs.handler("send_email", (job) => {
-    log.info("send_email -> " + (job.data && job.data.to));
+    log.info(`send_email -> ${job.data?.to}`);
 });
 
 // A flaky handler: fails the first two attempts, succeeds on the third. Throwing
@@ -40,14 +40,14 @@ jobs.handler("send_email", (job) => {
 // dead-letters. `job.attempts` is the count of the attempt now running.
 jobs.handler("flaky", (job) => {
     if ((job.attempts || 0) < 3) {
-        throw new Error("transient failure (attempt " + job.attempts + ")");
+        throw new Error(`transient failure (attempt ${job.attempts})`);
     }
-    log.info("flaky succeeded on attempt " + job.attempts);
+    log.info(`flaky succeeded on attempt ${job.attempts}`);
 });
 
 // Catch-all for unregistered types.
 jobs.default((job) => {
-    log.warn("no handler for job type '" + job.type + "'");
+    log.warn(`no handler for job type '${job.type}'`);
     return jobs.DISCARD;
 });
 
@@ -55,7 +55,7 @@ jobs.default((job) => {
 // Fire-and-forget (the timer re-arms immediately); jobs.work catches per-job
 // errors internally, and the .catch guards a claim/reap DB error so it can't
 // surface as an unhandled rejection.
-app.every(500, () => { jobs.work({ batch: 20 }).catch((e) => log.error("jobs.work: " + e)); });
+app.every(500, () => { jobs.work({ batch: 20 }).catch((e) => log.error(`jobs.work: ${e}`)); });
 
 // Nightly retention sweep so done/dead rows don't accumulate forever.
 app.daily("03:00", () => { jobs.cleanup({ olderThan: 7 * 86400 }); });
@@ -71,12 +71,12 @@ app.post("/jobs", (req, res) => {
 });
 
 // Status counts (pending / running / done / dead).
-app.get("/jobs/stats", (req, res) => { res.json(jobs.stats()); });
+app.get("/jobs/stats", (_req, res) => { res.json(jobs.stats()); });
 
 // Inspect the dead-letter queue.
-app.get("/jobs/dead", (req, res) => { res.json({ dead: jobs.dead({ limit: 50 }) }); });
+app.get("/jobs/dead", (_req, res) => { res.json({ dead: jobs.dead({ limit: 50 }) }); });
 
 // Requeue a dead job for another run (fresh attempt budget).
 app.post("/jobs/retry/:id", (req, res) => {
-    res.json({ requeued: jobs.retry(parseInt(req.params.id, 10)) });
+    res.json({ requeued: jobs.retry(Number.parseInt(req.params.id, 10)) });
 });
