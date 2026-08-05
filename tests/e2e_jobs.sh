@@ -7,6 +7,9 @@
 #          parallel claimer processes against one shared SQLite (WAL) DB must
 #          claim each job exactly once. Postgres/MySQL run the same claim SQL
 #          (SKIP LOCKED) and are exercised in e2e_postgres / e2e_mysql.
+# Phase 3: handlers + work loop + outcomes (done / dead-letter / retry-backoff),
+#          the optional catch-all default handler, and the visibility-timeout
+#          reaper - in both runtimes.
 #
 # Design: docs/jobs_design.md.
 #
@@ -135,6 +138,85 @@ else
     fail "concurrency: expected $N claimed once" "total=$total uniq=$uniq"
 fi
 rm -rf "$W"
+
+# ── Phase 3: handlers, work-loop outcomes, catch-all, reaper (both runtimes) ─
+# One app exercises every outcome path and prints a single parseable line:
+#   P3 done=<n> dead=<n> caught=<n> retry_pending=<n> reclaimed=<n>
+# Expected: done=1 (the "ok" job), dead=3 (fail-exhausted + DEAD + no-handler),
+# caught=1 (a mystery type routed to the default handler in a 2nd DB), a failing
+# job with attempts left goes back to pending (retry_pending=1), and a claimed
+# job is reclaimed by the vt=0 reaper (reclaimed=1).
+check_phase3() {
+    label="$1"; ext="$2"; app="$3"
+    T="$(mktemp -d)"
+    printf '%s\n' "$app" > "$T/app.$ext"
+    out="$("$HULL" "$T/app.$ext" -d "$T/a.db" 2>/dev/null)" || true
+    case "$out" in
+        *"P3 done=1 dead=3 caught=1 retry_pending=1 reclaimed=1"*)
+            pass "$label: work-loop outcomes (done/dead/retry) + catch-all + reaper" ;;
+        *) fail "$label: phase-3 work loop" "$out" ;;
+    esac
+    rm -rf "$T"
+}
+
+LUA_P3='local jobs = require("hull.jobs")
+app.manifest({ modules = { "hull/jobs@1" } })
+app.main(function(ctx)
+  jobs.init()
+  jobs.handler("ok",    function(j) return end)
+  jobs.handler("fail",  function(j) error("boom") end)
+  jobs.handler("bad",   function(j) return jobs.DEAD end)
+  jobs.handler("retry", function(j) error("transient") end)
+  jobs.enqueue("ok",{}); jobs.enqueue("fail",{},{max_attempts=1})
+  jobs.enqueue("bad",{}); jobs.enqueue("nohandler",{})
+  jobs.enqueue("retry",{},{max_attempts=5})
+  jobs.work({ batch = 10 })
+  local s = jobs.stats()
+  -- catch-all: the retry job is pending with a FUTURE run_at, so the next
+  -- work() only claims "mystery" and routes it through jobs.default.
+  jobs.enqueue("mystery",{})
+  jobs.default(function(j) return end)
+  jobs.work({ batch = 10 })
+  local s2 = jobs.stats()
+  local caught = s2.done - s.done   -- the mystery job
+  -- reaper: claim a fresh job, reclaim it immediately with vt=0.
+  jobs.enqueue("ok",{})
+  jobs.claim({ batch = 1 })
+  local reclaimed = jobs.reap({ visibility_timeout = 0 })
+  ctx.stdout:write(("P3 done=%d dead=%d caught=%d retry_pending=%d reclaimed=%d\n"):format(
+    s.done, s.dead, caught, s.pending, reclaimed))
+  return 0
+end)'
+
+JS_P3='import { app } from "hull:app"; import { jobs } from "hull:jobs";
+app.manifest({ modules: ["hull/jobs@1"] });
+app.main(async (ctx) => {
+  jobs.init();
+  jobs.handler("ok",    (j) => {});
+  jobs.handler("fail",  (j) => { throw new Error("boom"); });
+  jobs.handler("bad",   (j) => jobs.DEAD);
+  jobs.handler("retry", (j) => { throw new Error("transient"); });
+  jobs.enqueue("ok",{}); jobs.enqueue("fail",{},{maxAttempts:1});
+  jobs.enqueue("bad",{}); jobs.enqueue("nohandler",{});
+  jobs.enqueue("retry",{},{maxAttempts:5});
+  await jobs.work({ batch: 10 });
+  const s = jobs.stats();
+  jobs.enqueue("mystery",{});
+  jobs.default((j) => {});
+  await jobs.work({ batch: 10 });
+  const s2 = jobs.stats();
+  const caught = s2.done - s.done;
+  jobs.enqueue("ok",{});
+  jobs.claim({ batch: 1 });
+  const reclaimed = await jobs.reap({ visibilityTimeout: 0 });
+  ctx.stdout.write(`P3 done=${s.done} dead=${s.dead} caught=${caught} retry_pending=${s.pending} reclaimed=${reclaimed}\n`);
+  return 0;
+});'
+
+echo "== Phase 3: Lua =="
+check_phase3 "lua" "lua" "$LUA_P3"
+echo "== Phase 3: JS =="
+check_phase3 "js" "js" "$JS_P3"
 
 echo ""
 echo "=== Summary ==="

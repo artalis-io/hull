@@ -12,8 +12,10 @@
  *
  * Full design: docs/jobs_design.md.
  *
- * Phase 1 (this file): schema + jobs.init. enqueue / handlers / the atomic
- * claim / the work loop / the dedicated worker land in later phases.
+ * Implemented: schema + jobs.init, enqueue, the atomic claim, per-type +
+ * catch-all handlers, and the work loop (retry-with-backoff, dead-letter, and
+ * the visibility-timeout reaper). The dedicated `hull jobs worker` process
+ * lands in a later phase.
  *
  * @license AGPL-3.0-or-later
  */
@@ -42,6 +44,10 @@ function defaultBackoff(attempt) {
     const d = Math.pow(2, attempt) * 10;
     return d > 3600 ? 3600 : d;
 }
+
+// Registered handlers: type -> fn. `_default` is the optional catch-all.
+const _handlers = {};
+let _default = null;
 
 /**
  * Create the `_hull_jobs` table and its indexes. Idempotent - safe on every
@@ -207,6 +213,121 @@ function claim(opts) {
         .map(shape);
 }
 
-export const jobs = { init, enqueue, claim, RETRY, DEAD, DISCARD, _config: _cfg };
-export { init, enqueue, claim };
+// ── Handlers + the work loop ────────────────────────────────────────────
+
+/**
+ * Register a handler for a job type. `jobs.work` dispatches each claimed job to
+ * its type's handler (the handler may be sync or async). Return nil/true (or
+ * any data) to complete; throw to retry with backoff; return `jobs.RETRY` /
+ * `jobs.DEAD` / `jobs.DISCARD` for that outcome explicitly.
+ * @param {string} jobType
+ * @param {function} fn  (job) => void | Promise
+ */
+function handler(jobType, fn) {
+    if (typeof jobType !== "string" || jobType === "")
+        throw new Error("jobs.handler: type must be a non-empty string");
+    if (typeof fn !== "function") throw new Error("jobs.handler: handler must be a function");
+    _handlers[jobType] = fn;
+    return jobs;
+}
+
+/**
+ * Optional catch-all for job types with no registered handler. Without it, an
+ * unhandled type is dead-lettered.
+ * @param {function} fn
+ */
+function setDefault(fn) {
+    if (typeof fn !== "function") throw new Error("jobs.default: handler must be a function");
+    _default = fn;
+    return jobs;
+}
+
+function markDone(id) {
+    db.exec("UPDATE _hull_jobs SET status='done', claim_token=NULL, updated_at=? WHERE id=?",
+        [time.now(), id]);
+}
+
+function markDead(id, err) {
+    db.exec("UPDATE _hull_jobs SET status='dead', last_error=?, claim_token=NULL, updated_at=? WHERE id=?",
+        [err, time.now(), id]);
+}
+
+// Reschedule with backoff, or dead-letter once attempts are exhausted. attempts
+// was already incremented by the claim (the attempt that just ran).
+function markRetry(job, err) {
+    const attempts = job.attempts || 0;
+    const max = job.maxAttempts !== undefined && job.maxAttempts !== null
+        ? job.maxAttempts : _cfg.maxAttempts;
+    if (attempts >= max) { markDead(job.id, err); return; }
+    const now = time.now();
+    db.exec(
+        "UPDATE _hull_jobs SET status='pending', run_at=?, last_error=?, claim_token=NULL, " +
+        "updated_at=? WHERE id=?",
+        [now + _cfg.backoff(attempts), err, now, job.id]);
+}
+
+/**
+ * Reclaim jobs stuck in `running` past the visibility timeout (a worker died
+ * mid-job). Reset to `pending`; their incremented attempts persist. `jobs.work`
+ * runs this each call.
+ * @param {object} [opts]  { visibilityTimeout }
+ */
+function reap(opts) {
+    const o = opts || {};
+    const vt = o.visibilityTimeout !== undefined ? o.visibilityTimeout : _cfg.visibilityTimeout;
+    const now = time.now();
+    return db.exec(
+        "UPDATE _hull_jobs SET status='pending', claim_token=NULL, updated_at=? " +
+        "WHERE status='running' AND claimed_at <= ?",
+        [now, now - vt]) || 0;
+}
+
+/**
+ * Claim a batch and run each job's handler (awaited, so sync and async handlers
+ * both work), applying the outcome. Runs the reaper first. Drive from a timer
+ * (`app.every(1000, () => jobs.work())`) or a dedicated worker (Phase 4).
+ * Idempotent handlers required (a job may run more than once). Returns the
+ * number of jobs processed.
+ * @param {object} [opts]  { queue, batch, visibilityTimeout }
+ * @returns {Promise<number>}
+ */
+async function work(opts) {
+    const o = opts || {};
+    reap(o);
+    const batch = claim(o);
+    for (const job of batch) {
+        const h = _handlers[job.type] || _default;
+        if (!h) { markDead(job.id, `no handler for job type '${job.type}'`); continue; }
+        try {
+            const result = await h(job);
+            if (result === DEAD) markDead(job.id, "handler returned jobs.DEAD");
+            else if (result === RETRY) markRetry(job, "handler requested retry");
+            else markDone(job.id);   // undefined / true / DISCARD / any value -> done
+        } catch (e) {
+            markRetry(job, String((e && e.message) || e));
+        }
+    }
+    return batch.length;
+}
+
+/**
+ * Count jobs by status (optionally scoped to a queue). A minimal ops view.
+ * @param {object} [opts]  { queue }
+ * @returns {{pending:number, running:number, done:number, failed:number, dead:number}}
+ */
+function stats(opts) {
+    const o = opts || {};
+    const rows = o.queue
+        ? db.query("SELECT status, COUNT(*) AS c FROM _hull_jobs WHERE queue=? GROUP BY status", [o.queue])
+        : db.query("SELECT status, COUNT(*) AS c FROM _hull_jobs GROUP BY status");
+    const s = { pending: 0, running: 0, done: 0, failed: 0, dead: 0 };
+    for (const r of rows) s[r.status] = r.c;
+    return s;
+}
+
+export const jobs = {
+    init, enqueue, claim, handler, default: setDefault, work, reap, stats,
+    RETRY, DEAD, DISCARD, _config: _cfg,
+};
+export { init, enqueue, claim, handler, work, reap, stats };
 export default jobs;

@@ -8,8 +8,10 @@
 --
 -- Full design: docs/jobs_design.md.
 --
--- Phase 1 (this file): schema + jobs.init. enqueue / handlers / the atomic
--- claim / the work loop / the dedicated worker land in later phases.
+-- Implemented: schema + jobs.init, enqueue, the atomic claim, per-type +
+-- catch-all handlers, and the work loop (retry-with-backoff, dead-letter, and
+-- the visibility-timeout reaper). The dedicated `hull jobs worker` process
+-- lands in a later phase.
 --
 -- Usage (target shape):
 --   local jobs = require("hull.jobs")
@@ -49,6 +51,10 @@ _cfg.backoff = default_backoff
 
 -- Exposed for tests / introspection; not part of the app-facing contract.
 jobs._config = _cfg
+
+-- Registered handlers: type -> fn. `_default` is the optional catch-all.
+local _handlers = {}
+local _default = nil
 
 --- Create the `_hull_jobs` table and its indexes. Idempotent - safe to call on
 -- every boot. Uses the connection's portable identity DDL + IF-NOT-EXISTS index
@@ -237,6 +243,126 @@ function jobs.claim(opts)
     local out = {}
     for _, r in ipairs(rows) do out[#out + 1] = shape(r) end
     return out
+end
+
+-- ── Handlers + the work loop ────────────────────────────────────────────
+
+--- Register a handler for a job type. `jobs.work` dispatches each claimed job
+-- to its type's handler. A handler receives the job `{ id, type, data,
+-- attempts, max_attempts }`; returning nil/true (or any data) completes it,
+-- raising an error retries it with backoff, and returning `jobs.RETRY` /
+-- `jobs.DEAD` / `jobs.DISCARD` requests that outcome explicitly.
+-- @tparam string job_type
+-- @tparam function fn
+function jobs.handler(job_type, fn)
+    if type(job_type) ~= "string" or job_type == "" then
+        error("jobs.handler: type must be a non-empty string")
+    end
+    if type(fn) ~= "function" then error("jobs.handler: handler must be a function") end
+    _handlers[job_type] = fn
+    return jobs
+end
+
+--- Optional catch-all for job types with no registered handler. Without it, an
+-- unhandled type is dead-lettered.
+-- @tparam function fn
+function jobs.default(fn)
+    if type(fn) ~= "function" then error("jobs.default: handler must be a function") end
+    _default = fn
+    return jobs
+end
+
+local function mark_done(id)
+    db.exec("UPDATE _hull_jobs SET status='done', claim_token=NULL, updated_at=? WHERE id=?",
+        { time.now(), id })
+end
+
+local function mark_dead(id, err)
+    db.exec("UPDATE _hull_jobs SET status='dead', last_error=?, claim_token=NULL, updated_at=? WHERE id=?",
+        { err, time.now(), id })
+end
+
+-- Reschedule with backoff, or dead-letter once attempts are exhausted. `attempts`
+-- was already incremented by the claim, so it is the count of the attempt that
+-- just ran.
+local function mark_retry(job, err)
+    local attempts = job.attempts or 0
+    local max = job.max_attempts or _cfg.max_attempts
+    if attempts >= max then
+        mark_dead(job.id, err)
+        return
+    end
+    local now = time.now()
+    db.exec(
+        "UPDATE _hull_jobs SET status='pending', run_at=?, last_error=?, claim_token=NULL, "
+        .. "updated_at=? WHERE id=?",
+        { now + _cfg.backoff(attempts), err, now, job.id })
+end
+
+--- Reclaim jobs stuck in `running` past the visibility timeout - a worker that
+-- claimed them died before completing. Reset to `pending` for reclaim (their
+-- incremented attempts persist, so a job that keeps killing its worker still
+-- dead-letters). `jobs.work` runs this each call.
+-- @tparam[opt] table opts  { visibility_timeout = <cfg default> }
+function jobs.reap(opts)
+    opts = opts or {}
+    local vt = opts.visibility_timeout or _cfg.visibility_timeout
+    local now = time.now()
+    return db.exec(
+        "UPDATE _hull_jobs SET status='pending', claim_token=NULL, updated_at=? "
+        .. "WHERE status='running' AND claimed_at <= ?",
+        { now, now - vt }) or 0
+end
+
+--- Claim a batch and run each job's handler, applying the outcome (done /
+-- retry-with-backoff / dead-letter). Runs the reaper first. Drive it from a
+-- timer (`app.every(1000, function() jobs.work() end)`) or a dedicated worker
+-- (Phase 4). Idempotent handlers required: a job may run more than once
+-- (crash-then-reclaim). Returns the number of jobs processed this call.
+-- @tparam[opt] table opts  { queue, batch, visibility_timeout }
+-- @treturn number
+function jobs.work(opts)
+    opts = opts or {}
+    jobs.reap(opts)
+    local batch = jobs.claim(opts)
+    for _, job in ipairs(batch) do
+        local h = _handlers[job.type] or _default
+        if not h then
+            mark_dead(job.id, "no handler for job type '" .. tostring(job.type) .. "'")
+        else
+            local ok, result = pcall(h, job)
+            if not ok then
+                mark_retry(job, tostring(result))
+            elseif result == jobs.DEAD then
+                mark_dead(job.id, "handler returned jobs.DEAD")
+            elseif result == jobs.RETRY then
+                mark_retry(job, "handler requested retry")
+            else
+                -- nil / true / jobs.DISCARD / any other value -> done.
+                mark_done(job.id)
+            end
+        end
+    end
+    return #batch
+end
+
+--- Count jobs by status (optionally scoped to a queue). A minimal ops view;
+-- the fuller dead-letter / retry / cleanup surface lands in a later phase.
+-- @tparam[opt] table opts  { queue }
+-- @treturn table  { pending, running, done, failed, dead }
+function jobs.stats(opts)
+    opts = opts or {}
+    local rows
+    if opts.queue then
+        rows = db.query(
+            "SELECT status, COUNT(*) AS c FROM _hull_jobs WHERE queue=? GROUP BY status",
+            { opts.queue })
+    else
+        rows = db.query("SELECT status, COUNT(*) AS c FROM _hull_jobs GROUP BY status")
+    end
+    local s = { pending = 0, running = 0, done = 0, failed = 0, dead = 0 }
+    for _, r in ipairs(rows) do s[r.status] = r.c end
+    return s
 end
 
 return jobs
