@@ -199,6 +199,7 @@ UTEST(db_duckdb, dialect_descriptor)
     ASSERT_STREQ(b->dialect.upsert_style, "on_conflict");
     ASSERT_EQ(b->dialect.supports_returning, 1);
     ASSERT_EQ(b->dialect.supports_index_if_not_exists, 1);
+    ASSERT_EQ(b->dialect.supports_skip_locked, 0);   /* not a hull/jobs target */
     ASSERT_TRUE(strstr(b->dialect.identity_column, "nextval") != NULL);
     ASSERT_STREQ(b->dialect.identity_sequence, "CREATE SEQUENCE %s");
     ASSERT_EQ((int)b->native_tag, (int)HL_DB_NATIVE_DUCKDB);

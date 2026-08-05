@@ -353,6 +353,7 @@ const HlDbBackend hl_db_backend_sqlite = {
         .upsert_style                 = "on_conflict",
         .supports_returning           = 1,   /* SQLite >= 3.35 */
         .supports_index_if_not_exists = 1,
+        .supports_skip_locked         = 0,   /* single-writer: claims serialize */
         .identity_column              = "INTEGER PRIMARY KEY AUTOINCREMENT",
         .identity_sequence            = NULL,
     },

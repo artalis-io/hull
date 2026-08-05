@@ -590,6 +590,9 @@ e2e-attachment: $(BUILDDIR)/hull
 e2e-blob: $(BUILDDIR)/hull
 	sh tests/e2e_blob.sh
 
+e2e-jobs: $(BUILDDIR)/hull
+	sh tests/e2e_jobs.sh
+
 e2e-test-harness: $(BUILDDIR)/hull
 	sh tests/e2e_test_harness.sh
 

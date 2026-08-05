@@ -474,6 +474,7 @@ const HlDbBackend hl_db_backend_postgres = {
         .upsert_style                 = "on_conflict",
         .supports_returning           = 1,
         .supports_index_if_not_exists = 1,
+        .supports_skip_locked         = 1,   /* Postgres 9.5+ */
         .identity_column              = "BIGSERIAL PRIMARY KEY",
         .identity_sequence            = NULL,
     },

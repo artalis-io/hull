@@ -70,6 +70,13 @@ typedef struct HlDbDialect {
      * so the schema builder can still emit the portable form. */
     unsigned char supports_index_if_not_exists;
 
+    /* Whether SELECT ... FOR UPDATE SKIP LOCKED is supported (Postgres 9.5+,
+     * MySQL 8+). 0 for SQLite, whose single-writer serializes every write so a
+     * claim is atomic without lock-skipping. Read by hull/jobs (via
+     * conn.dialect.supports_skip_locked) to pick the concurrency-safe atomic
+     * claim shape per backend. See docs/jobs_design.md. */
+    unsigned char supports_skip_locked;
+
     /* Inline DDL fragment declaring an auto-increment integer primary-key
      * column. SQLite: "INTEGER PRIMARY KEY AUTOINCREMENT". Postgres:
      * "BIGSERIAL PRIMARY KEY". MySQL: "BIGINT AUTO_INCREMENT PRIMARY KEY".

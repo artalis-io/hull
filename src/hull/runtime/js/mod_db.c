@@ -913,6 +913,8 @@ static void js_set_dialect(JSContext *ctx, JSValue obj, const HlDbBackend *be)
                       JS_NewBool(ctx, be && be->dialect.supports_returning));
     JS_SetPropertyStr(ctx, d, "supportsIndexIfNotExists",
                       JS_NewBool(ctx, be && be->dialect.supports_index_if_not_exists));
+    JS_SetPropertyStr(ctx, d, "supportsSkipLocked",
+                      JS_NewBool(ctx, be && be->dialect.supports_skip_locked));
     JS_SetPropertyStr(ctx, d, "identityColumn",
                       JS_NewString(ctx, (be && be->dialect.identity_column)
                                         ? be->dialect.identity_column
