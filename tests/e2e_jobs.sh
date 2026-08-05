@@ -1056,14 +1056,14 @@ app.main(function(ctx)
   local runs = { a=0, b=0 }
   jobs.workflow("sleeper", function(w)
     w.step("a", function() runs.a = runs.a + 1 end)
-    w.sleep(1)
+    w.sleep(3)   -- 3s: the mid-check margin absorbs any CI scheduling pause
     w.step("b", function() runs.b = runs.b + 1 end)
     return { ok = true }
   end)
   local id = jobs.start("sleeper", {})
   jobs.work({ batch = 1 })
   local mid = jobs.workflow_status(id); local mid_b = runs.b
-  hull.sleep(1200)
+  hull.sleep(3500)
   jobs.work({ batch = 1 })
   local fin = jobs.workflow_status(id)
   ctx.stdout:write(("SLEEP mid=%s mid_b=%d wait=%s fin=%s fin_b=%d steps=%s\n"):format(
@@ -1079,14 +1079,14 @@ app.main(async (ctx) => {
   const runs = { a:0, b:0 };
   jobs.workflow("sleeper", async (w) => {
     await w.step("a", () => { runs.a++; });
-    await w.sleep(1);
+    await w.sleep(3);   // 3s: the mid-check margin absorbs any CI scheduling pause
     await w.step("b", () => { runs.b++; });
     return { ok: true };
   });
   const id = jobs.start("sleeper", {});
   await jobs.work({ batch: 1 });
   const mid = jobs.workflowStatus(id); const midB = runs.b;
-  await hull.sleep(1200);
+  await hull.sleep(3500);
   await jobs.work({ batch: 1 });
   const fin = jobs.workflowStatus(id);
   ctx.stdout.write(`SLEEP mid=${mid.status} mid_b=${midB} wait=${mid.waitingFor?"yes":"no"} fin=${fin.status} fin_b=${runs.b} steps=${fin.stepsDone.join(",")}\n`);
