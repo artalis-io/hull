@@ -637,6 +637,70 @@ app.main(async (ctx) => {
 echo "== v1.3 pause/resume/purge: Lua =="; check_pq "lua" "lua" "$LUA_PQ"
 echo "== v1.3 pause/resume/purge: JS =="; check_pq "js" "js" "$JS_PQ"
 
+# ── v1.4: workflows (depends_on) - chain, result-passing, cascade, fan-in ───
+# extract->transform->load chain passes results via job.deps; a failed dep
+# cascade-fails its dependent (on_dep_failure="run" opts out); fan-in gets both.
+check_wf() {
+    label="$1"; ext="$2"; app="$3"
+    T="$(mktemp -d)"; printf '%s\n' "$app" > "$T/app.$ext"
+    out="$("$HULL" "$T/app.$ext" -d "$T/a.db" 2>/dev/null)" || true
+    case "$out" in
+        *"WF blocked=1 t=10 l=20 cascade=dead runaway=done ran=1 fanin=done m1=10 m2=10"*)
+            pass "$label: workflows (chain/result/cascade/run-anyway/fan-in)" ;;
+        *) fail "$label: v1.4 workflows" "$out" ;;
+    esac
+    rm -rf "$T"
+}
+
+LUA_WF='local jobs = require("hull.jobs")
+app.manifest({ modules = { "hull/jobs@1" } })
+app.main(function(ctx)
+  jobs.init()
+  local L = {}
+  jobs.handler("extract",   function(j) return { v = 10 } end)
+  jobs.handler("transform", function(j) L.t = j.deps[1].v; return { v = j.deps[1].v * 2 } end)
+  jobs.handler("load",      function(j) L.l = j.deps[1].v end)
+  jobs.handler("boom",      function(j) error("fail") end)
+  jobs.handler("child",     function(j) end)
+  jobs.handler("run_anyway",function(j) L.ran = true end)
+  jobs.handler("merge",     function(j) L.m1 = j.deps[1].v; L.m2 = j.deps[2].v end)
+  local a=jobs.enqueue("extract",{}); local b=jobs.enqueue("transform",{},{depends_on={a}})
+  local c=jobs.enqueue("load",{},{depends_on={b}}); local b0=jobs.get(b).status
+  local x=jobs.enqueue("boom",{},{max_attempts=1}); local y=jobs.enqueue("child",{},{depends_on={x}})
+  local p=jobs.enqueue("boom",{},{max_attempts=1}); local q=jobs.enqueue("run_anyway",{},{depends_on={p},on_dep_failure="run"})
+  local e1=jobs.enqueue("extract",{}); local e2=jobs.enqueue("extract",{}); local m=jobs.enqueue("merge",{},{depends_on={e1,e2}})
+  jobs.run_worker({ drain = true, poll_ms = 5 })
+  ctx.stdout:write(("WF blocked=%d t=%s l=%s cascade=%s runaway=%s ran=%d fanin=%s m1=%s m2=%s\n"):format(
+    b0=="blocked" and 1 or 0, tostring(L.t), tostring(L.l), jobs.get(y).status, jobs.get(q).status,
+    L.ran and 1 or 0, jobs.get(m).status, tostring(L.m1), tostring(L.m2)))
+  return 0
+end)'
+
+JS_WF='import { app } from "hull:app"; import { jobs } from "hull:jobs";
+app.manifest({ modules: ["hull/jobs@1"] });
+app.main(async (ctx) => {
+  jobs.init();
+  const L = {};
+  jobs.handler("extract",   (j) => ({ v: 10 }));
+  jobs.handler("transform", (j) => { L.t = j.deps[0].v; return { v: j.deps[0].v * 2 }; });
+  jobs.handler("load",      (j) => { L.l = j.deps[0].v; });
+  jobs.handler("boom",      (j) => { throw new Error("fail"); });
+  jobs.handler("child",     (j) => {});
+  jobs.handler("run_anyway",(j) => { L.ran = true; });
+  jobs.handler("merge",     (j) => { L.m1 = j.deps[0].v; L.m2 = j.deps[1].v; });
+  const a=jobs.enqueue("extract",{}); const b=jobs.enqueue("transform",{},{dependsOn:[a]});
+  const c=jobs.enqueue("load",{},{dependsOn:[b]}); const b0=jobs.get(b).status;
+  const x=jobs.enqueue("boom",{},{maxAttempts:1}); const y=jobs.enqueue("child",{},{dependsOn:[x]});
+  const p=jobs.enqueue("boom",{},{maxAttempts:1}); const q=jobs.enqueue("run_anyway",{},{dependsOn:[p],onDepFailure:"run"});
+  const e1=jobs.enqueue("extract",{}); const e2=jobs.enqueue("extract",{}); const m=jobs.enqueue("merge",{},{dependsOn:[e1,e2]});
+  await jobs.runWorker({ drain: true, pollMs: 5 });
+  ctx.stdout.write(`WF blocked=${b0==="blocked"?1:0} t=${L.t} l=${L.l} cascade=${jobs.get(y).status} runaway=${jobs.get(q).status} ran=${L.ran?1:0} fanin=${jobs.get(m).status} m1=${L.m1} m2=${L.m2}\n`);
+  return 0;
+});'
+
+echo "== v1.4 workflows: Lua =="; check_wf "lua" "lua" "$LUA_WF"
+echo "== v1.4 workflows: JS =="; check_wf "js" "js" "$JS_WF"
+
 # Fleet gate: K processes share one rate counter -> total dispatched == rate.
 echo "== v1.2 rate limit fleet ($CONC processes, one shared counter) =="
 W="$(mktemp -d)"; DB="$W/rl.db"

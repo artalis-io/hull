@@ -15,7 +15,7 @@
  * Full surface: schema + jobs.init, enqueue, the atomic claim, per-type +
  * catch-all handlers, the work loop (retry-with-backoff, dead-letter, and the
  * visibility-timeout reaper), the dedicated worker (jobs.runWorker +
- * `hull jobs worker`), and the ops surface (jobs.stats / dead / retry / cancel / cleanup). v1.1 adds durable cron (jobs.cron / uncron) and intra-process concurrency (run_worker concurrency=N), jobs.get(id), jobs.heartbeat for long jobs, fleet-wide rate limiting (jobs.limit), and queue pause/resume/purge.
+ * `hull jobs worker`), and the ops surface (jobs.stats / dead / retry / cancel / cleanup). v1.1 adds durable cron (jobs.cron / uncron) and intra-process concurrency (run_worker concurrency=N), jobs.get(id), jobs.heartbeat for long jobs, fleet-wide rate limiting (jobs.limit), queue pause/resume/purge, and workflows (depends_on + result passing).
  *
  * @license AGPL-3.0-or-later
  */
@@ -156,6 +156,27 @@ function init(opts) {
     _paused = Object.create(null);
     _pausedAt = 0;
 
+    // Workflow dependency edges (jobs.enqueue dependsOn). A dependent starts
+    // 'blocked'; each edge is marked satisfied when its dependency completes, and
+    // the dependent unblocks once its last edge is satisfied. The edge survives
+    // until the dependent runs, so its deps' results can be injected. failMode
+    // 'run' = "run even if this dep failed" (else cascade).
+    db.exec(
+        "CREATE TABLE IF NOT EXISTS _hull_job_deps (" +
+        "dependent_id INTEGER NOT NULL," +
+        "dep_id       INTEGER NOT NULL," +
+        "ord          INTEGER NOT NULL," +
+        "fail_mode    VARCHAR(8)," +
+        "satisfied    INTEGER NOT NULL DEFAULT 0," +
+        "PRIMARY KEY (dependent_id, dep_id))");
+    db.exec("CREATE INDEX IF NOT EXISTS idx_hull_job_deps_dep ON _hull_job_deps(dep_id)");
+
+    // A job's result (its handler's return value), for a dependent to consume.
+    db.exec(
+        "CREATE TABLE IF NOT EXISTS _hull_job_results (" +
+        "job_id INTEGER NOT NULL PRIMARY KEY," +
+        "result TEXT)");
+
     // Verify the server actually parses SKIP LOCKED (the compile-time dialect
     // flag says "this backend supports it" but a MySQL<8 / MariaDB<10.6 server
     // does not). A 0-row probe against the real table detects it once; the claim
@@ -169,13 +190,83 @@ function init(opts) {
     return jobs;
 }
 
+// ── Workflow dependencies (jobs.enqueue dependsOn) ──────────────────────────
+
+// Apply one dependency's terminal outcome to one edge. Idempotent. Returns
+// "failed" when it cascade-fails the dependent (so callers recurse).
+function resolveEdge(dependentId, depId, depOk, failMode) {
+    if (depOk || failMode === "run") {
+        const n = db.exec(
+            "UPDATE _hull_job_deps SET satisfied=1 WHERE dependent_id=? AND dep_id=? AND satisfied=0",
+            [dependentId, depId]);
+        if ((n || 0) === 0) return null;   // already satisfied / gone
+        const rows = db.query(
+            "SELECT COUNT(*) AS c FROM _hull_job_deps WHERE dependent_id=? AND satisfied=0",
+            [dependentId]);
+        if ((rows[0] ? rows[0].c : 0) === 0) {
+            db.exec("UPDATE _hull_jobs SET status='pending', updated_at=? WHERE id=? AND status='blocked'",
+                [time.now(), dependentId]);
+        }
+        return null;
+    }
+    // cascade-fail: this dependency died and the dependent didn't opt to run.
+    const n = db.exec(
+        "UPDATE _hull_jobs SET status='dead', last_error=?, updated_at=? WHERE id=? AND status='blocked'",
+        [`dependency ${depId} failed`, time.now(), dependentId]);
+    if ((n || 0) > 0) {
+        db.exec("DELETE FROM _hull_job_deps WHERE dependent_id=?", [dependentId]);
+        return "failed";
+    }
+    return null;
+}
+
+// A job reached a terminal state; propagate to its dependents transitively.
+function resolveDeps(id, ok) {
+    const work = [{ id, ok }];
+    let guard = 0;
+    while (work.length > 0 && guard < 100000) {
+        guard++;
+        const cur = work.pop();
+        const edges = db.query(
+            "SELECT dependent_id, fail_mode FROM _hull_job_deps WHERE dep_id=?", [cur.id]);
+        for (const e of edges) {
+            if (resolveEdge(e.dependent_id, cur.id, cur.ok, e.fail_mode) === "failed") {
+                work.push({ id: e.dependent_id, ok: false });
+            }
+        }
+    }
+}
+
+// Gather a dependent's dependency results (declaration order) for job.deps.
+// Returns null when the job has no dependencies (a PK-indexed 0-row probe).
+function loadDeps(dependentId) {
+    const edges = db.query(
+        "SELECT dep_id FROM _hull_job_deps WHERE dependent_id=? ORDER BY ord", [dependentId]);
+    if (edges.length === 0) return null;
+    const out = [];
+    edges.forEach((e, i) => {
+        const r = db.query("SELECT result FROM _hull_job_results WHERE job_id=?", [e.dep_id]);
+        if (r[0] && r[0].result !== undefined && r[0].result !== null) {
+            try { out[i] = json.decode(r[0].result); } catch (_e) { out[i] = undefined; }
+        } else {
+            out[i] = undefined;
+        }
+    });
+    return out;
+}
+
 /**
  * Enqueue a job. A plain INSERT, so calling it inside a `db.batch()` commits
  * the job atomically with the business row (transactional coupling).
  *
+ * With `opts.dependsOn` (a list of job ids) the job starts `blocked` and only
+ * becomes claimable once all those jobs complete; each dependency's result is
+ * injected into the handler as `job.deps` (in order). If a dependency
+ * dead-letters, the dependent cascade-fails too, unless `opts.onDepFailure === "run"`.
+ *
  * @param {string} jobType  handler dispatch key (non-empty)
  * @param {*} [data]        JSON-encodable payload (reaches the handler as job.data)
- * @param {object} [opts]   { queue, priority, delay, runAt, maxAttempts, dedupKey }
+ * @param {object} [opts]   { queue, priority, delay, runAt, maxAttempts, dedupKey, dependsOn, onDepFailure }
  * @returns {number|null}   the new job id, or null when a dedupKey collapsed it
  */
 function enqueue(jobType, data, opts) {
@@ -184,6 +275,8 @@ function enqueue(jobType, data, opts) {
     const o = opts || {};
     const now = time.now();
     const runAt = o.runAt !== undefined ? o.runAt : now + (o.delay || 0);
+    const deps = o.dependsOn;
+    const hasDeps = Array.isArray(deps) && deps.length > 0;
     const vals = [
         o.queue || "default",
         jobType,
@@ -196,16 +289,33 @@ function enqueue(jobType, data, opts) {
     ];
     const cols = ["queue", "type", "payload", "priority", "max_attempts",
                   "run_at", "dedup_key", "created_at", "updated_at"];
+    if (hasDeps) { cols.push("status"); vals.push("blocked"); }
+    let id;
     if (o.dedupKey !== undefined && o.dedupKey !== null) {
         const n = db.insertIfAbsent("_hull_jobs", ["queue", "dedup_key"], cols, vals);
-        if (n && n > 0) return db.lastId();
-        return null;   // an un-run job with this (queue, dedupKey) already exists
+        if (!(n && n > 0)) return null;   // an un-run job with this (queue, dedupKey) exists
+        id = db.lastId();
+    } else {
+        const ph = cols.map(() => "?");
+        db.exec("INSERT INTO _hull_jobs (" + cols.join(", ") +
+            ") VALUES (" + ph.join(", ") + ")", vals);
+        id = db.lastId();
     }
-    db.exec(
-        "INSERT INTO _hull_jobs (queue, type, payload, priority, max_attempts, " +
-        "run_at, dedup_key, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        vals);
-    return db.lastId();
+    if (hasDeps) {
+        // Record edges, then re-check each dep: closes the enqueue/complete race
+        // (whichever side runs second is a no-op - both idempotent).
+        const failMode = o.onDepFailure === "run" ? "run" : null;
+        deps.forEach((dep, i) => {
+            db.exec("INSERT INTO _hull_job_deps (dependent_id, dep_id, ord, fail_mode) " +
+                "VALUES (?, ?, ?, ?)", [id, dep, i + 1, failMode]);
+        });
+        for (const dep of deps) {
+            const g = get(dep);
+            if (g === null || g.status === "done") resolveEdge(id, dep, true, failMode);
+            else if (g.status === "dead") resolveEdge(id, dep, false, failMode);
+        }
+    }
+    return id;
 }
 
 // Decode a claimed DB row into a handler-facing job (payload -> data).
@@ -425,14 +535,23 @@ function setDefault(fn) {
     return jobs;
 }
 
-function markDone(id) {
+function markDone(id, result) {
     db.exec("UPDATE _hull_jobs SET status='done', claim_token=NULL, updated_at=? WHERE id=?",
         [time.now(), id]);
+    if (result !== undefined) {   // persist the handler's return value for dependents
+        const enc = json.encode(result);
+        const n = db.exec("UPDATE _hull_job_results SET result=? WHERE job_id=?", [enc, id]);
+        if ((n || 0) === 0) db.exec("INSERT INTO _hull_job_results (job_id, result) VALUES (?, ?)", [id, enc]);
+    }
+    resolveDeps(id, true);                                   // unblock dependents
+    db.exec("DELETE FROM _hull_job_deps WHERE dependent_id=?", [id]);   // consumed its own deps
 }
 
 function markDead(id, err) {
     db.exec("UPDATE _hull_jobs SET status='dead', last_error=?, claim_token=NULL, updated_at=? WHERE id=?",
         [err, time.now(), id]);
+    resolveDeps(id, false);                                  // cascade to dependents
+    db.exec("DELETE FROM _hull_job_deps WHERE dependent_id=?", [id]);
 }
 
 // Reschedule with backoff, or dead-letter once attempts are exhausted. attempts
@@ -638,13 +757,20 @@ async function work(opts) {
     if (now - _lastCron >= 1) { processCron(now); _lastCron = now; }
     const batch = claim(o);
     for (const job of batch) {
+        job.deps = loadDeps(job.id);   // workflow: dependency results, in order
         const h = _handlers[job.type] || _default;
         if (!h) { markDead(job.id, `no handler for job type '${job.type}'`); continue; }
         try {
             const result = await h(job);
             if (result === DEAD) markDead(job.id, "handler returned jobs.DEAD");
             else if (result === RETRY) markRetry(job, "handler requested retry");
-            else markDone(job.id);   // undefined / true / DISCARD / any value -> done
+            else {
+                // undefined / true / DISCARD -> done, no result; any other return
+                // value is stored as the job's result (for dependents).
+                const res = (result !== undefined && result !== true && result !== DISCARD)
+                    ? result : undefined;
+                markDone(job.id, res);
+            }
         } catch (e) {
             markRetry(job, String((e && e.message) || e));
         }
@@ -731,7 +857,7 @@ function stats(opts) {
     const rows = o.queue
         ? db.query("SELECT status, COUNT(*) AS c FROM _hull_jobs WHERE queue=? GROUP BY status", [o.queue])
         : db.query("SELECT status, COUNT(*) AS c FROM _hull_jobs GROUP BY status");
-    const s = { pending: 0, running: 0, done: 0, dead: 0 };
+    const s = { pending: 0, running: 0, done: 0, dead: 0, blocked: 0 };
     for (const r of rows) s[r.status] = r.c;
     return s;
 }
@@ -850,7 +976,10 @@ function cleanup(opts) {
     let sql = "DELETE FROM _hull_jobs WHERE status IN (" +
         placeholders.join(",") + ") AND updated_at < ?";
     if (o.queue) { sql += " AND queue=?"; params.push(o.queue); }
-    return db.exec(sql, params) || 0;
+    const deleted = db.exec(sql, params) || 0;
+    // Drop results whose producing job is gone (workflow result store hygiene).
+    db.exec("DELETE FROM _hull_job_results WHERE job_id NOT IN (SELECT id FROM _hull_jobs)");
+    return deleted;
 }
 
 // Internal seams for tests / introspection; not part of the app-facing contract.

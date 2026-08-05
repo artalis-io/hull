@@ -150,6 +150,42 @@ jobs.limit("reports", { rate: 100, per: 60 });
 - Costs one extra small DB write per claim **only on limited queues**; unlimited
   queues are unaffected.
 
+## Workflows (job dependencies)
+
+`jobs.enqueue(type, data, { depends_on = { id1, id2 } })` makes a job **wait
+until those jobs complete**. It starts `blocked` (not claimed) and becomes
+`pending` only once every dependency is `done`. Each dependency's result is
+passed to the handler as **`job.deps`** — an array in declaration order.
+
+```lua
+-- chain: extract -> transform -> load, passing results forward
+local a = jobs.enqueue("extract", { src = "..." })
+local b = jobs.enqueue("transform", {}, { depends_on = { a } })
+           jobs.enqueue("load", {}, { depends_on = { b } })
+
+jobs.handler("extract",   function(job) return fetch(job.data.src) end)     -- return = result
+jobs.handler("transform", function(job) return massage(job.deps[1]) end)    -- deps[1] = extract's result
+jobs.handler("load",      function(job) save(job.deps[1]) end)              -- deps[1] = transform's result
+
+-- fan-in: run after BOTH parts, with both results
+local p1 = jobs.enqueue("part1", d); local p2 = jobs.enqueue("part2", d)
+jobs.enqueue("merge", {}, { depends_on = { p1, p2 } })   -- job.deps = { r1, r2 }
+```
+`depends_on` with N parents expresses **chains** (depend on 1), **fan-in**
+(depend on N), and **fan-out** (enqueue N children). JS uses `dependsOn` and
+`job.deps[0]`, `[1]`, …
+
+- **Results.** A handler's **return value** is stored as the job's result (JSON)
+  and injected into dependents as `job.deps`. Returning nothing / `true` /
+  `jobs.DISCARD` stores no result. (Results live in `_hull_job_results` and are
+  swept by `jobs.cleanup`.)
+- **Failure cascades.** If a dependency **dead-letters**, the dependent
+  cascade-fails too (dead-lettered, transitively down the graph) - you don't run
+  `load` if `transform` died. Opt a job out with `on_dep_failure = "run"`
+  (`onDepFailure` in JS) to run it regardless (e.g. a cleanup / notify step).
+- Depend on job **ids** returned from `enqueue`; enqueue parents first. Unknown /
+  already-cleaned-up dependency ids are treated as satisfied.
+
 ## Handler contract
 
 `jobs.work` dispatches each claimed job to its registered handler, else the
