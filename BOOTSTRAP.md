@@ -136,7 +136,7 @@ overwriting any existing files.
 
 The archetype also determines how lean the built binary is, for free:
 `hull build` produces a binary tailored to the app. The distributed
-hull's app-build base is **fully composable** — it drops EVERY reducible
+hull's app-build base is **fully composable** - it drops EVERY reducible
 subsystem (both interpreters, the HTTP core + web bindings, the Keel
 event loop + server, mbedTLS + TLS, SQLite, WASM/WAMR, image codecs) and
 composes back only what the app uses, statically at build time (a
@@ -148,13 +148,13 @@ only when it uses `compute`; image codecs only when it declares
 `hull/image`. A CLI / compute archetype (`app.main`, no HTTP/TLS/DB) links
 **zero** Keel, mbedTLS, SQLite, or WASM (~2.1 MB, vs ~6.5 MB full);
 `--flavor=pure-compute` additionally *validates* the app declares no
-HTTP/TLS. This is automatic — every subsystem rides inside `hull` and
+HTTP/TLS. This is automatic - every subsystem rides inside `hull` and
 auto-composes; only large optional subsystems (gpu / duckdb / postgres /
 mysql / tui) are `hull build --with=<name>`. Composition is
 signature-aware: `hull build --sign` attests every archive it composes
 (the runtime, HTTP core, Keel, TLS, SQLite, WASM, image, tui bridge, any
 `--with` feature) inside `package.sig`, and `--verify-sig` proves the app
-was built from genuine gethull.dev artefacts. You don't manage this — it
+was built from genuine gethull.dev artefacts. You don't manage this - it
 just happens. (Cosmo, the fat APE, is exempt and keeps everything
 in-base.)
 
@@ -185,7 +185,7 @@ from the CLI:
 | Is my app ready to deploy | `hull agent deploy` |
 | Run a request without booting the full server | `hull agent endpoint POST /items` |
 
-There are dozens of `hull agent` subcommands — see [README.md § Using Hull
+There are dozens of `hull agent` subcommands - see [README.md § Using Hull
 with AI Agents](README.md#using-hull-with-ai-agents) for the full
 list. They emit JSON (or `--json`-flagged human output) designed for
 agent consumption: no screen-scraping, no log-parsing. If you find
@@ -333,14 +333,14 @@ in five minutes.
 ### What Hull is
 
 A single static binary (~6.5 MB full) that runs applications written in
-**Lua 5.4** OR **QuickJS** (ES2023) — either HTTP-serving or `app.main`
+**Lua 5.4** OR **QuickJS** (ES2023) - either HTTP-serving or `app.main`
 CLI/compute. Apps are dynamically loaded from a source tree at startup OR
 composed into a standalone binary via `hull build` (which produces a
-binary tailored to the app — a compute-only app links ~2.1 MB). The `hull`
+binary tailored to the app - a compute-only app links ~2.1 MB). The `hull`
 binary embeds the runtimes, the standard library, an HTTP server (Keel),
 SQLite, mbedTLS, a WASM runtime (WAMR), image codecs, and a kernel-level
 sandbox (Seatbelt on macOS, unveil/pledge polyfill on Linux/Cosmo, native
-on OpenBSD) — and `hull build` composes back into the app only the pieces
+on OpenBSD) - and `hull build` composes back into the app only the pieces
 it actually uses. A GPU runtime (wgpu-native) and the DuckDB / Postgres /
 MySQL backends are opt-in composable features (`--with=`), native-only.
 
@@ -711,7 +711,7 @@ the distributed hull's base composes back only the subsystems the app uses
 (see the composition note under Phase 0), so a compute app links zero
 HTTP/Keel/TLS/SQLite/WASM on its own. `--flavor` is now a thin **preset**
 on that composable base: `full` (the default embedded base, a no-op) or
-`pure-compute` (validate: reject any HTTP/TLS module at build time — a
+`pure-compute` (validate: reject any HTTP/TLS module at build time - a
 build failure rather than a runtime surprise). `--flavor=auto` infers the
 minimal flavor from your declared modules. The size win comes from the
 composable base, not the flavor, so there is nothing to install:
@@ -720,7 +720,7 @@ install". (Pre-built per-flavor platform libs were removed in Phase 4.3.)
 See `docs/build_flavors.md`.
 
 **Compiler-free / toolless builds.** `hull build` is **compiler-free by
-default** — it emits `app_registry.o` via the object emitter and links,
+default** - it emits `app_registry.o` via the object emitter and links,
 needing no C compiler at all (`--compiler=system` opts into a system cc;
 `--with=` C++ features and cosmo targets fall back to one automatically).
 By default it needs only a **linker**: `--linker=lld|zig|lld-static|<path>`.
@@ -748,7 +748,7 @@ hull build myapp/ --with=gpu       # duckdb is C++: add --compiler=system
 ```
 
 If your spec needs GPU compute, an OLAP/analytics store, or a
-Postgres/MySQL database, treat it as a feature — do NOT assume `gpu.*` or a
+Postgres/MySQL database, treat it as a feature - do NOT assume `gpu.*` or a
 `postgres://` / `mysql://` / `duckdb://` DSN work on a plain base build.
 Either compose the feature, or declare the module optional (next) so the
 app degrades gracefully. See `docs/features_and_flavors.md`.
@@ -764,7 +764,7 @@ toolchain-free linker bundle (`--linker=zig`, cross-compiles via
 is compiler-free by default (it emits `app_registry.o` directly) and needs
 only a linker, most boxes build with no extra install; a truly bare box
 can `hull tools install zig` for a self-contained linker. (There is **no**
-`tcc` — the former embedded/side-loaded TinyCC backend was fully retired;
+`tcc` - the former embedded/side-loaded TinyCC backend was fully retired;
 it is neither vendored, bundled, nor installable.) See
 `docs/tools_install.md`.
 
@@ -791,7 +791,7 @@ Or wrap in `hull deploy` for systemd + Dockerfile + fly.toml generation.
    know what's missing; you flagging gaps is helpful, not annoying.
 5. **Ask `hull` before you ask the human or grep the source.**
    `hull modules available`, `hull agent <subcmd>`, `hull modules
-   explain`, `hull agent context` — dozens of introspection commands are
+   explain`, `hull agent context` - dozens of introspection commands are
    faster and more accurate than reading code. See [When in doubt,
    ask hull](#when-in-doubt-ask-hull).
 6. **Hull is opinionated.** When in doubt about whether to use a Hull

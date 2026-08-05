@@ -165,7 +165,7 @@ The build links against `libhull_platform.a`, the **SLIM base** static archive. 
 
 | Backend | When it's used |
 |---------|----------------|
-| (none — object emitter) | The default. `hull build -o myapp .` links the emitted `app_registry.o` against the platform lib. No `cc` on the box required. |
+| (none - object emitter) | The default. `hull build -o myapp .` links the emitted `app_registry.o` against the platform lib. No `cc` on the box required. |
 | `--compiler=system` / `--compiler=<path>` | Opt into a system `cc`/`gcc`/`clang`. Auto-selected for `--with=` features (a C++ feature like duckdb needs a C++ driver) and for cosmo/APE targets, which can't go through the emit path. |
 
 **`hull build` needs only a *linker* by default**, and the linker is itself pluggable via `hull tools install`:
@@ -174,7 +174,7 @@ The build links against `libhull_platform.a`, the **SLIM base** static archive. 
 hull build -o myapp .                       # compiler-free: emit + link with system cc/ld
 hull build -o myapp . --linker=lld          # link with a system/PATH lld
 hull tools install zig                      # self-contained zig bundle (driver + libc + lld)
-hull build -o myapp . --linker=zig          # toolchain-free link — runs on a bare box
+hull build -o myapp . --linker=zig          # toolchain-free link - runs on a bare box
 hull build -o myapp . --linker=zig --target=x86_64-linux-musl   # cross-compile
 hull tools install libc-musl-x86_64         # static musl floor for lld-static
 hull build -o myapp . --linker=lld-static   # fully static link against the musl floor
@@ -182,7 +182,7 @@ hull build -o myapp . --compiler=system     # opt into a system cc (e.g. for a C
 hull build -o myapp . --compiler=/path/to/cc  # explicit compiler path
 ```
 
-Net: a stock box with **no toolchain installed** can `hull build` end to end (emit the object, link with the `zig` or `lld` bundle). Note: a standalone `lld` bundle is **not** shipped (a binary `lld` is dynamically linked against libLLVM, so it can't be bundled flat); `--linker=lld` still works against a system/PATH `lld`. **tcc is fully retired** — Hull no longer vendors, bundles, or installs it (a user's own `tcc` on `$PATH` still works as a plain system compiler via `--compiler=tcc`). `hull doctor` reports which system compilers and linkers are resolvable. Full design: [docs/compiler_free_build.md](docs/compiler_free_build.md) · [docs/toolchain_free_build.md](docs/toolchain_free_build.md).
+Net: a stock box with **no toolchain installed** can `hull build` end to end (emit the object, link with the `zig` or `lld` bundle). Note: a standalone `lld` bundle is **not** shipped (a binary `lld` is dynamically linked against libLLVM, so it can't be bundled flat); `--linker=lld` still works against a system/PATH `lld`. **tcc is fully retired** - Hull no longer vendors, bundles, or installs it (a user's own `tcc` on `$PATH` still works as a plain system compiler via `--compiler=tcc`). `hull doctor` reports which system compilers and linkers are resolvable. Full design: [docs/compiler_free_build.md](docs/compiler_free_build.md) · [docs/toolchain_free_build.md](docs/toolchain_free_build.md).
 
 ### Cross-platform builds
 
@@ -190,7 +190,7 @@ Hull supports these compiler/target combinations:
 
 | Compiler | Target | Binary Type | Notes |
 |----------|--------|-------------|-------|
-| (none — object emitter) | Native | ELF / Mach-O | The default compiler-free path; links with `cc`/`ld` or a `--linker=` bundle |
+| (none - object emitter) | Native | ELF / Mach-O | The default compiler-free path; links with `cc`/`ld` or a `--linker=` bundle |
 | `gcc` / `clang` | Linux / macOS | ELF / Mach-O | `--compiler=system` or an explicit path |
 | `cosmocc` | Any x86_64/aarch64 | APE (Actually Portable Executable) | Multi-arch fat binary. `hull tools install cosmocc` makes a cosmo `hull` self-contained on stock Windows |
 
@@ -198,7 +198,7 @@ Cosmopolitan APE binaries run on Linux, macOS, Windows, FreeBSD, OpenBSD, and Ne
 
 ### The composable base: features, flavors, and tools
 
-The distributed `hull` ships a **fully-composable SLIM base**. Its app-build base drops **every** reducible subsystem — both interpreters (Lua VM + QuickJS), the HTTP core + per-runtime web bindings, the Keel event loop + server, mbedTLS + the TLS transport, SQLite, WASM/WAMR, and the image codecs — and `hull build` composes back exactly what the app uses. Composition is **static** (each subsystem is whole-archived in at *build* time; there is no `dlopen`, no runtime plugin, so the manifest stays enforceable and builds stay reproducible), **auto-inferred** (from the entry extension + the resolved manifest — you never install or flag these), and **embedded** (the pieces live inside the distributed `hull`). A stock `hull build` of a compute-only `app.main` links **zero** Keel / mbedTLS / SQLite / WAMR (~2.1 MB); a full web app composes them all back. (The Cosmopolitan APE base is exempt — a fat APE can't force-load native archives, so it keeps everything compiled in.)
+The distributed `hull` ships a **fully-composable SLIM base**. Its app-build base drops **every** reducible subsystem - both interpreters (Lua VM + QuickJS), the HTTP core + per-runtime web bindings, the Keel event loop + server, mbedTLS + the TLS transport, SQLite, WASM/WAMR, and the image codecs - and `hull build` composes back exactly what the app uses. Composition is **static** (each subsystem is whole-archived in at *build* time; there is no `dlopen`, no runtime plugin, so the manifest stays enforceable and builds stay reproducible), **auto-inferred** (from the entry extension + the resolved manifest - you never install or flag these), and **embedded** (the pieces live inside the distributed `hull`). A stock `hull build` of a compute-only `app.main` links **zero** Keel / mbedTLS / SQLite / WAMR (~2.1 MB); a full web app composes them all back. (The Cosmopolitan APE base is exempt - a fat APE can't force-load native archives, so it keeps everything compiled in.)
 
 On top of that mandatory axis, capability reaches an app through exactly one of **five shipping units** (full taxonomy in [docs/features_and_flavors.md](docs/features_and_flavors.md)):
 
@@ -207,7 +207,7 @@ On top of that mandatory axis, capability reaches an app through exactly one of 
 | **stdlib** | pure Lua/JS over caps the base already has (no new C, no new authority) | in the base VFS | `require`/`import` + `manifest.modules` |
 | **base cap module** | a small always-in-base C capability (a codec / sniffer / store), no `HL_ENABLE_*` gate, no `--with` | compiled into the base | `require`/`import` + `manifest.modules` |
 | **feature** (additive) | a large optional C subsystem, off by default (a vendored engine, a wire backend, a new authority) | a signed `libhull_feature-<name>-<arch>.a` | `hull build --with=<name>` (installed via `hull feature install`) |
-| **flavor** (subtractive) | a build.lua **preset** validating an app against a slimmer cap set — since Phase 4.3 there are **no** pre-built per-flavor libs | a preset on the default base | `hull build --flavor=<name>` |
+| **flavor** (subtractive) | a build.lua **preset** validating an app against a slimmer cap set - since Phase 4.3 there are **no** pre-built per-flavor libs | a preset on the default base | `hull build --flavor=<name>` |
 | **tool** | a separate companion **program** Hull spawns (never linked in) | a `hull-<name>-<platform>` binary or `.tar` bundle | `hl_tool_spawn` at build time; `hull tools install` |
 
 **Features** are the additive axis. Five ship today, all **native-only (no cosmo)**, published for `linux-x86_64` / `linux-aarch64` / `darwin-arm64`:
@@ -229,13 +229,13 @@ hull build --with=gpu --compiler=system .  # gpu links -lvulkan / Metal framewor
 
 `hull feature install` shares the same Ed25519 `hull.sha256` trust chain as `hull update` / `hull tools install`; `hull build --with=<name>` re-verifies a cached lib before linking and generates a small registry that fills the base's weak backend hook with the composed backend (`duckdb`/`postgres`/`mysql` all fill the same `HlDbBackend` hook, so they compose together). Build from source with `make feature-duckdb` / `make feature-gpu` / `make feature-postgres` / `make feature-mysql` / `make feature-tui`.
 
-**Flavors** are the subtractive axis — and since Phase 4.3 they are **build.lua presets, not pre-built libs**. The base already composes, so a compute app is *already* minimal without a flavor:
+**Flavors** are the subtractive axis - and since Phase 4.3 they are **build.lua presets, not pre-built libs**. The base already composes, so a compute app is *already* minimal without a flavor:
 
 | Flavor | What it does | Use case |
 |--------|--------------|----------|
-| `full` | the embedded default base — the only "real" base | Web apps that serve requests and call out to APIs (default) |
+| `full` | the embedded default base - the only "real" base | Web apps that serve requests and call out to APIs (default) |
 | `pure-compute` | a **preset**: validates the app declares no HTTP/TLS (rejects e.g. `hull/http-server` at build time). The size win comes from the composable base, not the flavor. | Offline compute / signing binary |
-| `auto` | infers the minimal flavor from the app's declared modules | — |
+| `auto` | infers the minimal flavor from the app's declared modules | - |
 
 ```bash
 hull build --flavor=pure-compute -o mytool .   # validate: no HTTP/TLS
@@ -1029,7 +1029,7 @@ Removed: SQLite + `db.*` + `migrate.*` + `worker_db` + DB-backed stdlib modules 
 
 Still works: HTTP routing, middleware, both runtimes, sandbox, `http.fetch`, `ws.*`, `fs.*`, `crypto.*`, `compute.*`, `gpu.*`, templates, static files, image codecs, SSE, timers, validation, CSV, i18n, CORS, ETag, health, JWT, stateless CSRF, form parsing, logger.
 
-Combine with other flags freely, e.g. `make HL_ENABLE_DB=0 HL_ENABLE_HTTP=0 HL_ENABLE_GPU=1 WGPU_LIB_DIR=vendor/wgpu` for a GPU-focused compute service. (`HL_ENABLE_HTTP=0` is the `pure-compute` knob — drops mbedTLS + Keel entirely.)
+Combine with other flags freely, e.g. `make HL_ENABLE_DB=0 HL_ENABLE_HTTP=0 HL_ENABLE_GPU=1 WGPU_LIB_DIR=vendor/wgpu` for a GPU-focused compute service. (`HL_ENABLE_HTTP=0` is the `pure-compute` knob - drops mbedTLS + Keel entirely.)
 
 ## Terminal UI
 

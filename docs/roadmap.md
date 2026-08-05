@@ -188,7 +188,7 @@ EMBED_PLATFORM=cosmo    ✅  platform archives embedded in hull binary
 make self-build         ✅  reproducible build chain verified
 ```
 
-The missing piece at the time: `hull build` shelled out to `cc` to compile generated C code, so users needed gcc/clang/cosmocc installed. The phases below address that gap and the surrounding distribution story. **Since closed:** `hull build` is now **compiler-free by default** (it emits `app_registry.o` directly via the object emitter and links, no C compiler needed), and the toolchain-free axis side-loads a linker/toolchain on demand (`hull tools install zig` / `cosmocc` / musl static floors), so a stock install builds an app with zero pre-installed toolchain — see [docs/compiler_free_build.md](compiler_free_build.md) and [docs/toolchain_free_build.md](toolchain_free_build.md).
+The missing piece at the time: `hull build` shelled out to `cc` to compile generated C code, so users needed gcc/clang/cosmocc installed. The phases below address that gap and the surrounding distribution story. **Since closed:** `hull build` is now **compiler-free by default** (it emits `app_registry.o` directly via the object emitter and links, no C compiler needed), and the toolchain-free axis side-loads a linker/toolchain on demand (`hull tools install zig` / `cosmocc` / musl static floors), so a stock install builds an app with zero pre-installed toolchain - see [docs/compiler_free_build.md](compiler_free_build.md) and [docs/toolchain_free_build.md](toolchain_free_build.md).
 
 #### Phase D1: Version + Release Pipeline. **Done**
 
