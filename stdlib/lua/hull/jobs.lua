@@ -11,7 +11,7 @@
 -- Full surface: schema + jobs.init, enqueue, the atomic claim, per-type +
 -- catch-all handlers, the work loop (retry-with-backoff, dead-letter, and the
 -- visibility-timeout reaper), the dedicated worker (jobs.run_worker +
--- `hull jobs worker`), and the ops surface (jobs.stats / dead / retry / cancel / cleanup). v1.1 adds durable cron (jobs.cron / uncron) and intra-process concurrency (run_worker concurrency=N).
+-- `hull jobs worker`), and the ops surface (jobs.stats / dead / retry / cancel / cleanup). v1.1 adds durable cron (jobs.cron / uncron) and intra-process concurrency (run_worker concurrency=N), jobs.get(id), and jobs.heartbeat for long jobs.
 --
 -- Usage (target shape):
 --   local jobs = require("hull.jobs")
@@ -268,7 +268,11 @@ function jobs.claim(opts)
     end)
 
     local out = {}
-    for _, r in ipairs(rows) do out[#out + 1] = shape(r) end
+    for _, r in ipairs(rows) do
+        local j = shape(r)
+        j.claim_token = token   -- handle for jobs.heartbeat on long-running work
+        out[#out + 1] = j
+    end
     return out
 end
 
@@ -646,15 +650,53 @@ function jobs.stats(opts)
 end
 
 -- Decode an ops row into an inspection view: the handler-facing shape plus the
--- bookkeeping columns an operator needs (queue, last_error, timestamps).
+-- bookkeeping columns an operator needs (status, queue, last_error, timestamps).
 local function shape_ops(r)
     local j = shape(r)
+    j.status     = r.status
     j.queue      = r.queue
+    j.priority   = r.priority
     j.attempts   = r.attempts
+    j.run_at     = r.run_at
     j.last_error = r.last_error
     j.created_at = r.created_at
     j.updated_at = r.updated_at
     return j
+end
+
+--- Fetch a single job by id (its full status view), or nil if it doesn't exist.
+-- The only way to inspect an individual job from app code: `_hull_jobs` is in the
+-- protected namespace, so a direct query is blocked. Poll this for a terminal
+-- status (jobs are fire-and-forget; there is no result backend - a handler that
+-- produces output must persist it itself).
+-- @tparam number id
+-- @treturn table|nil  { id, type, data, status, queue, priority, attempts,
+--                       max_attempts, run_at, last_error, created_at, updated_at }
+function jobs.get(id)
+    local rows = db.query("SELECT * FROM _hull_jobs WHERE id=?", { id })
+    if not rows or #rows == 0 then return nil end
+    return shape_ops(rows[1])
+end
+
+--- Extend the claim on a job the current handler is processing (heartbeat). A
+-- handler whose work may exceed `visibility_timeout` should call this
+-- periodically (at least every visibility_timeout/2 s) so the reaper doesn't
+-- presume it orphaned and re-run it elsewhere. Bumps `claimed_at` only while
+-- THIS worker still owns the claim (guarded by the job's claim_token): returns
+-- false once the claim has been lost (already reaped / re-claimed / finished),
+-- which is the handler's signal to stop and let the other runner win.
+-- @tparam table job  the job object passed to the handler
+-- @treturn boolean  true if the claim was extended, false if it is no longer held
+function jobs.heartbeat(job)
+    if type(job) ~= "table" or job.id == nil or job.claim_token == nil then
+        return false
+    end
+    local now = time.now()
+    local n = db.exec(
+        "UPDATE _hull_jobs SET claimed_at=?, updated_at=? "
+        .. "WHERE id=? AND claim_token=? AND status='running'",
+        { now, now, job.id, job.claim_token })
+    return (n or 0) > 0
 end
 
 --- List dead-lettered jobs (status='dead'), newest first. The ops entry point

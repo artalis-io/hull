@@ -15,7 +15,7 @@
  * Full surface: schema + jobs.init, enqueue, the atomic claim, per-type +
  * catch-all handlers, the work loop (retry-with-backoff, dead-letter, and the
  * visibility-timeout reaper), the dedicated worker (jobs.runWorker +
- * `hull jobs worker`), and the ops surface (jobs.stats / dead / retry / cancel / cleanup). v1.1 adds durable cron (jobs.cron / uncron) and intra-process concurrency (run_worker concurrency=N).
+ * `hull jobs worker`), and the ops surface (jobs.stats / dead / retry / cancel / cleanup). v1.1 adds durable cron (jobs.cron / uncron) and intra-process concurrency (run_worker concurrency=N), jobs.get(id), and jobs.heartbeat for long jobs.
  *
  * @license AGPL-3.0-or-later
  */
@@ -234,7 +234,11 @@ function claim(opts) {
     // don't preserve the subquery's ORDER BY, so sort by priority DESC, id ASC.
     return (rows || [])
         .sort((x, y) => (y.priority || 0) - (x.priority || 0) || (x.id - y.id))
-        .map(shape);
+        .map((r) => {
+            const j = shape(r);
+            j.claimToken = token;   // handle for jobs.heartbeat on long-running work
+            return j;
+        });
 }
 
 // ── Handlers + the work loop ────────────────────────────────────────────
@@ -578,15 +582,53 @@ function stats(opts) {
 }
 
 // Decode an ops row into an inspection view: the handler-facing shape plus the
-// bookkeeping columns an operator needs (queue, lastError, timestamps).
+// bookkeeping columns an operator needs (status, queue, lastError, timestamps).
 function shapeOps(r) {
     const j = shape(r);
+    j.status = r.status;
     j.queue = r.queue;
+    j.priority = r.priority;
     j.attempts = r.attempts;
+    j.runAt = r.run_at;
     j.lastError = r.last_error;
     j.createdAt = r.created_at;
     j.updatedAt = r.updated_at;
     return j;
+}
+
+/**
+ * Fetch a single job by id (its full status view), or null if it doesn't exist.
+ * The only way to inspect an individual job from app code: `_hull_jobs` is in the
+ * protected namespace, so a direct query is blocked. Poll this for a terminal
+ * status (jobs are fire-and-forget; there is no result backend - a handler that
+ * produces output must persist it itself).
+ * @param {number} id
+ * @returns {object|null}
+ */
+function get(id) {
+    const rows = db.query("SELECT * FROM _hull_jobs WHERE id=?", [id]);
+    return rows.length ? shapeOps(rows[0]) : null;
+}
+
+/**
+ * Extend the claim on a job the current handler is processing (heartbeat). A
+ * handler whose work may exceed `visibilityTimeout` should call this
+ * periodically (at least every visibilityTimeout/2 s) so the reaper doesn't
+ * presume it orphaned and re-run it elsewhere. Bumps `claimed_at` only while
+ * THIS worker still owns the claim (guarded by the job's claimToken): returns
+ * false once the claim has been lost (already reaped / re-claimed / finished),
+ * which is the handler's signal to stop and let the other runner win.
+ * @param {object} job  the job object passed to the handler
+ * @returns {boolean}  true if the claim was extended, false if no longer held
+ */
+function heartbeat(job) {
+    if (!job || job.id === undefined || job.claimToken === undefined) return false;
+    const now = time.now();
+    const n = db.exec(
+        "UPDATE _hull_jobs SET claimed_at=?, updated_at=? " +
+        "WHERE id=? AND claim_token=? AND status='running'",
+        [now, now, job.id, job.claimToken]);
+    return (n || 0) > 0;
 }
 
 /**
@@ -665,9 +707,9 @@ function _tick(now) { processCron(now !== undefined ? now : time.now()); }
 
 export const jobs = {
     init, enqueue, claim, handler, default: setDefault, work, reap, stats,
-    runWorker, stop, dead, retry, cancel, cleanup, cron, uncron,
+    runWorker, stop, get, heartbeat, dead, retry, cancel, cleanup, cron, uncron,
     RETRY, DEAD, DISCARD, _config: _cfg, _cronNext, _tick,
 };
 export { init, enqueue, claim, handler, work, reap, stats, runWorker, stop,
-         dead, retry, cancel, cleanup, cron, uncron };
+         get, heartbeat, dead, retry, cancel, cleanup, cron, uncron };
 export default jobs;

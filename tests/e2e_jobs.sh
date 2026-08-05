@@ -491,6 +491,63 @@ app.main(async (ctx) => {
 echo "== v1.1 cron: Lua =="; check_cron "lua" "lua" "$LUA_CRON"
 echo "== v1.1 cron: JS =="; check_cron "js" "js" "$JS_CRON"
 
+# ── v1.1: jobs.get(id) + jobs.heartbeat(job) ────────────────────────────────
+# get() returns a job's status view (pending -> done; nil for a missing id).
+# heartbeat() extends a held claim (true) and reports a lost claim (false) once
+# the reaper has reclaimed it - the handler's anti-double-run signal.
+check_gethb() {
+    label="$1"; ext="$2"; app="$3"
+    T="$(mktemp -d)"; printf '%s\n' "$app" > "$T/app.$ext"
+    out="$("$HULL" "$T/app.$ext" -d "$T/a.db" 2>/dev/null)" || true
+    case "$out" in
+        *"GH get_ok=1 hb_held=1 hb_lost=1"*)
+            pass "$label: get(id) status view + heartbeat claim-guard" ;;
+        *) fail "$label: v1.1 get/heartbeat" "$out" ;;
+    esac
+    rm -rf "$T"
+}
+
+LUA_GH='local jobs = require("hull.jobs")
+app.manifest({ modules = { "hull/jobs@1" } })
+app.main(function(ctx)
+  jobs.init()
+  jobs.handler("t", function(j) return end)
+  local id = jobs.enqueue("t", { x = 7 })
+  local g0 = jobs.get(id)
+  jobs.work({ batch = 10 })
+  local g1 = jobs.get(id)
+  local get_ok = (g0.status=="pending" and g0.data.x==7 and g1.status=="done" and jobs.get(999999)==nil) and 1 or 0
+  jobs.enqueue("t", {})
+  local job = jobs.claim({ batch = 1 })[1]
+  local held = jobs.heartbeat(job) and 1 or 0
+  jobs.reap({ visibility_timeout = 0 })
+  local lost = (not jobs.heartbeat(job)) and 1 or 0
+  ctx.stdout:write(("GH get_ok=%d hb_held=%d hb_lost=%d\n"):format(get_ok, held, lost))
+  return 0
+end)'
+
+JS_GH='import { app } from "hull:app"; import { jobs } from "hull:jobs";
+app.manifest({ modules: ["hull/jobs@1"] });
+app.main(async (ctx) => {
+  jobs.init();
+  jobs.handler("t", (j) => {});
+  const id = jobs.enqueue("t", { x: 7 });
+  const g0 = jobs.get(id);
+  await jobs.work({ batch: 10 });
+  const g1 = jobs.get(id);
+  const get_ok = (g0.status==="pending" && g0.data.x===7 && g1.status==="done" && jobs.get(999999)===null) ? 1 : 0;
+  jobs.enqueue("t", {});
+  const job = jobs.claim({ batch: 1 })[0];
+  const held = jobs.heartbeat(job) ? 1 : 0;
+  jobs.reap({ visibilityTimeout: 0 });
+  const lost = (!jobs.heartbeat(job)) ? 1 : 0;
+  ctx.stdout.write(`GH get_ok=${get_ok} hb_held=${held} hb_lost=${lost}\n`);
+  return 0;
+});'
+
+echo "== v1.1 get/heartbeat: Lua =="; check_gethb "lua" "lua" "$LUA_GH"
+echo "== v1.1 get/heartbeat: JS =="; check_gethb "js" "js" "$JS_GH"
+
 echo ""
 echo "=== Summary ==="
 echo "PASSED: $PASS"

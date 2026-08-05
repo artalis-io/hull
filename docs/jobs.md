@@ -156,12 +156,20 @@ camelCase (`runAt`, `maxAttempts`, `dedupKey`).
 ## Ops surface
 
 ```lua
+jobs.get(id)                  -- one job's full status view, or nil if it doesn't exist
 jobs.stats()                  -- { pending, running, done, dead } (opts.queue to scope)
 jobs.dead({ limit = 50 })     -- list dead-lettered jobs (newest first) for inspection
 jobs.retry(id)                -- requeue a dead job with a fresh attempt budget; false if not dead
 jobs.cancel(id)               -- delete a still-pending (e.g. delayed) job; false if not pending
 jobs.cleanup({ older_than = 7 * 86400 })   -- purge terminal (done + dead) rows past a retention age
 ```
+`jobs.get(id)` is the "did my job run?" primitive: after `local id =
+jobs.enqueue(...)`, poll `jobs.get(id).status` (`pending` → `running` → `done` /
+`dead`). It's the only way to inspect an individual job from app code -
+`_hull_jobs` is namespace-protected, so a direct query is blocked. Jobs are
+fire-and-forget (no result backend), so a job that produces output must persist
+it itself; poll `get(id)` only for the terminal *status*.
+
 `jobs.cancel` only removes a `pending` job (a delayed/scheduled one that hasn't
 started); a `running` job is mid-flight and is left to finish or dead-letter.
 
@@ -191,10 +199,25 @@ but the visibility timeout makes the last one sharper):
   a compute job that produces output must write it somewhere (db / blob) for the
   enqueuer to read later. If you need the result inline, call `compute.async` in
   the request handler instead of enqueuing a job.
-- **Mind the visibility timeout.** A compute job that runs longer than
-  `visibility_timeout` (default 300s) is presumed orphaned and re-run. For
-  multi-minute WASM/GPU work, raise `visibility_timeout` accordingly (a per-job
-  heartbeat is a tracked follow-up).
+- **Heartbeat long jobs.** A job that runs longer than `visibility_timeout`
+  (default 300s) is presumed orphaned and re-run. A long WASM/GPU handler should
+  call `jobs.heartbeat(job)` periodically (at least every `visibility_timeout/2`
+  s) to extend its claim. It returns `false` once the claim has been lost (the
+  reaper already reclaimed it, or another worker re-claimed it) - the handler's
+  signal to stop and let the other runner win, avoiding a double-run:
+
+  ```lua
+  jobs.handler("transcode", function(job)
+      for _, chunk in ipairs(chunks(job.data)) do
+          process(chunk)                       -- long, per-chunk work
+          if not jobs.heartbeat(job) then      -- lost the claim -> abort
+              return jobs.DEAD
+          end
+      end
+  end)
+  ```
+  (Or just raise `visibility_timeout` at `jobs.init` if the handler can't
+  checkpoint.)
 
 Declare the modules (`hull/compute` + ship `compute/*.wasm`; `hull/gpu` +
 `manifest.gpu = true` for the sandbox grants), and `require`/`import` them -
