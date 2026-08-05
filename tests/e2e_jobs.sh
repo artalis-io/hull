@@ -13,8 +13,10 @@
 # Phase 4: the dedicated worker - jobs.run_worker (drain + jobs.stop graceful
 #          exit) in both runtimes, plus the worker-mode concurrency gate driven
 #          through the `hull jobs worker` CLI (K workers, exactly-once).
+# Phase 5: the ops surface - jobs.dead (list) / jobs.retry (requeue) /
+#          jobs.cleanup (purge terminal rows) in both runtimes.
 #
-# Design: docs/jobs_design.md.
+# Design: docs/jobs_design.md. User guide: docs/jobs.md.
 #
 # SPDX-License-Identifier: AGPL-3.0-or-later
 
@@ -312,6 +314,65 @@ else
     fail "worker concurrency: expected $N processed once" "total=$total uniq=$uniq"
 fi
 rm -rf "$W"
+
+# ── Phase 5: ops surface - dead / retry / cleanup (both runtimes) ────────────
+# Two jobs dead-letter; jobs.dead lists them (with last_error); jobs.retry
+# requeues one (and no-ops on a bad id); jobs.cleanup purges the remaining
+# terminal row while leaving the requeued pending job. Emits:
+#   P5 dead=2 retry_ok=1 retry_bad=0 purged=1 dead_after=0 pending_after=1
+check_phase5() {
+    label="$1"; ext="$2"; app="$3"
+    T="$(mktemp -d)"
+    printf '%s\n' "$app" > "$T/app.$ext"
+    out="$("$HULL" "$T/app.$ext" -d "$T/a.db" 2>/dev/null)" || true
+    case "$out" in
+        *"P5 dead=2 retry_ok=1 retry_bad=0 purged=1 dead_after=0 pending_after=1 has_err=1"*)
+            pass "$label: ops surface (dead list / retry requeue / cleanup purge)" ;;
+        *) fail "$label: phase-5 ops surface" "$out" ;;
+    esac
+    rm -rf "$T"
+}
+
+LUA_P5='local jobs = require("hull.jobs")
+local time = require("hull.time")
+app.manifest({ modules = { "hull/jobs@1" } })
+app.main(function(ctx)
+  jobs.init()
+  jobs.handler("boom", function(j) error("always fails") end)
+  jobs.enqueue("boom",{n=1},{max_attempts=1}); jobs.enqueue("boom",{n=2},{max_attempts=1})
+  jobs.work({ batch = 10 })                       -- both dead-letter
+  local d = jobs.dead()
+  local has_err = (d[1] and d[1].last_error and #d[1].last_error > 0) and 1 or 0
+  local ok  = jobs.retry(d[1].id) and 1 or 0      -- requeue one
+  local bad = jobs.retry(99999) and 1 or 0        -- non-existent -> false
+  local purged = jobs.cleanup({ before = time.now() + 1 })
+  local s = jobs.stats()
+  ctx.stdout:write(("P5 dead=%d retry_ok=%d retry_bad=%d purged=%d dead_after=%d pending_after=%d has_err=%d\n"):format(
+    #d, ok, bad, purged, s.dead, s.pending, has_err))
+  return 0
+end)'
+
+JS_P5='import { app } from "hull:app"; import { jobs } from "hull:jobs"; import { time } from "hull:time";
+app.manifest({ modules: ["hull/jobs@1"] });
+app.main(async (ctx) => {
+  jobs.init();
+  jobs.handler("boom", (j) => { throw new Error("always fails"); });
+  jobs.enqueue("boom",{n:1},{maxAttempts:1}); jobs.enqueue("boom",{n:2},{maxAttempts:1});
+  await jobs.work({ batch: 10 });
+  const d = jobs.dead();
+  const hasErr = (d[0] && d[0].lastError && d[0].lastError.length > 0) ? 1 : 0;
+  const ok  = jobs.retry(d[0].id) ? 1 : 0;
+  const bad = jobs.retry(99999) ? 1 : 0;
+  const purged = jobs.cleanup({ before: time.now() + 1 });
+  const s = jobs.stats();
+  ctx.stdout.write(`P5 dead=${d.length} retry_ok=${ok} retry_bad=${bad} purged=${purged} dead_after=${s.dead} pending_after=${s.pending} has_err=${hasErr}\n`);
+  return 0;
+});'
+
+echo "== Phase 5: Lua =="
+check_phase5 "lua" "lua" "$LUA_P5"
+echo "== Phase 5: JS =="
+check_phase5 "js" "js" "$JS_P5"
 
 echo ""
 echo "=== Summary ==="

@@ -12,10 +12,10 @@
  *
  * Full design: docs/jobs_design.md.
  *
- * Implemented: schema + jobs.init, enqueue, the atomic claim, per-type +
+ * Full surface: schema + jobs.init, enqueue, the atomic claim, per-type +
  * catch-all handlers, the work loop (retry-with-backoff, dead-letter, and the
- * visibility-timeout reaper), and the dedicated worker (jobs.runWorker +
- * `hull jobs worker`). Ops (dead / retry / cleanup) land in a later phase.
+ * visibility-timeout reaper), the dedicated worker (jobs.runWorker +
+ * `hull jobs worker`), and the ops surface (jobs.stats / dead / retry / cleanup).
  *
  * @license AGPL-3.0-or-later
  */
@@ -360,7 +360,7 @@ async function runWorker(opts) {
 }
 
 /**
- * Count jobs by status (optionally scoped to a queue). A minimal ops view.
+ * Count jobs by status (optionally scoped to a queue). The ops overview.
  * @param {object} [opts]  { queue }
  * @returns {{pending:number, running:number, done:number, failed:number, dead:number}}
  */
@@ -374,9 +374,78 @@ function stats(opts) {
     return s;
 }
 
+// Decode an ops row into an inspection view: the handler-facing shape plus the
+// bookkeeping columns an operator needs (queue, lastError, timestamps).
+function shapeOps(r) {
+    const j = shape(r);
+    j.queue = r.queue;
+    j.attempts = r.attempts;
+    j.lastError = r.last_error;
+    j.createdAt = r.created_at;
+    j.updatedAt = r.updated_at;
+    return j;
+}
+
+/**
+ * List dead-lettered jobs (status='dead'), newest first. The ops entry point
+ * for inspecting failures before requeuing (retry) or purging (cleanup).
+ * @param {object} [opts]  { queue, limit = 100, offset = 0 }
+ * @returns {Array}  { id, queue, type, data, attempts, maxAttempts, lastError,
+ *                     createdAt, updatedAt }
+ */
+function dead(opts) {
+    const o = opts || {};
+    const limit = o.limit !== undefined ? o.limit : 100;
+    const offset = o.offset !== undefined ? o.offset : 0;
+    const rows = o.queue
+        ? db.query("SELECT * FROM _hull_jobs WHERE status='dead' AND queue=? " +
+                   "ORDER BY updated_at DESC, id DESC LIMIT ? OFFSET ?", [o.queue, limit, offset])
+        : db.query("SELECT * FROM _hull_jobs WHERE status='dead' " +
+                   "ORDER BY updated_at DESC, id DESC LIMIT ? OFFSET ?", [limit, offset]);
+    return rows.map(shapeOps);
+}
+
+/**
+ * Requeue a dead-lettered job for another run. Resets it to pending with a
+ * fresh attempt budget (attempts=0) and clears the last error. No-op unless the
+ * job exists and is currently dead (so it can't double-requeue a live job).
+ * @param {number} id
+ * @returns {boolean}  true if a dead job was requeued
+ */
+function retry(id) {
+    const now = time.now();
+    const n = db.exec(
+        "UPDATE _hull_jobs SET status='pending', run_at=?, attempts=0, " +
+        "claim_token=NULL, claimed_at=NULL, last_error=NULL, updated_at=? " +
+        "WHERE id=? AND status='dead'",
+        [now, now, id]);
+    return (n || 0) > 0;
+}
+
+/**
+ * Purge terminal jobs (done + dead by default) whose last update is older than
+ * a retention age. Run from app.daily to bound table growth. Only touches
+ * terminal rows, so it never races a pending / running job.
+ * @param {object} [opts]  { queue, olderThan = 604800, before, statuses = ["done","dead"] }
+ * @returns {number}  rows deleted
+ */
+function cleanup(opts) {
+    const o = opts || {};
+    const statuses = o.statuses || ["done", "dead"];
+    const cutoff = o.before !== undefined ? o.before : (time.now() - (o.olderThan !== undefined ? o.olderThan : 604800));
+    const placeholders = statuses.map(() => "?");
+    const params = statuses.slice();
+    params.push(cutoff);
+    let sql = "DELETE FROM _hull_jobs WHERE status IN (" +
+        placeholders.join(",") + ") AND updated_at < ?";
+    if (o.queue) { sql += " AND queue=?"; params.push(o.queue); }
+    return db.exec(sql, params) || 0;
+}
+
 export const jobs = {
     init, enqueue, claim, handler, default: setDefault, work, reap, stats,
-    runWorker, stop, RETRY, DEAD, DISCARD, _config: _cfg,
+    runWorker, stop, dead, retry, cleanup, RETRY, DEAD, DISCARD, _config: _cfg,
 };
-export { init, enqueue, claim, handler, work, reap, stats, runWorker, stop };
+export { init, enqueue, claim, handler, work, reap, stats, runWorker, stop,
+         dead, retry, cleanup };
 export default jobs;

@@ -618,6 +618,32 @@ curl http://localhost:3000/avg-prices
 - `{ deterministic = true }` — enables SQLite query optimization
 - Aggregate UDFs with GROUP BY (per-group state)
 
+### jobs
+
+Durable, DB-backed background job queue (`hull/jobs@1`). Enqueue work from a
+request, process it out-of-band with retries, exponential backoff, and a
+dead-letter path. Shows both execution models — the in-process `app.every`
+poller (`app.lua`/`app.js`) and the dedicated `jobs.run_worker` process
+(`worker.lua`/`worker.js`) — plus the ops surface (`jobs.stats`/`dead`/`retry`/
+`cleanup`).
+
+```bash
+./build/hull -p 3000 examples/jobs/app.lua -d ./jobs.db
+
+curl -X POST localhost:3000/jobs -d '{"type":"send_email","data":{"to":"a@b.c"}}'
+curl localhost:3000/jobs/stats          # {"pending":..,"done":..,"dead":..}
+
+# scale out: a dedicated worker against the same DB
+hull jobs worker examples/jobs/worker.lua -d ./jobs.db
+```
+
+**Key features demonstrated:**
+- `jobs.enqueue` / `jobs.handler` / `jobs.default` — enqueue + dispatch
+- In-process poller (`app.every`) vs. dedicated worker (`jobs.run_worker`)
+- Retry-with-backoff, dead-letter, and the visibility-timeout reaper
+- Ops: `jobs.stats` / `jobs.dead` / `jobs.retry` / `jobs.cleanup`
+- See [`docs/jobs.md`](../docs/jobs.md) for the full guide
+
 ## WASM Compute Developer Tooling
 
 Hull provides `hull compute` commands for creating, building, and testing WASM modules:

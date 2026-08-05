@@ -8,10 +8,10 @@
 --
 -- Full design: docs/jobs_design.md.
 --
--- Implemented: schema + jobs.init, enqueue, the atomic claim, per-type +
+-- Full surface: schema + jobs.init, enqueue, the atomic claim, per-type +
 -- catch-all handlers, the work loop (retry-with-backoff, dead-letter, and the
--- visibility-timeout reaper), and the dedicated worker (jobs.run_worker +
--- `hull jobs worker`). Ops (dead / retry / cleanup) land in a later phase.
+-- visibility-timeout reaper), the dedicated worker (jobs.run_worker +
+-- `hull jobs worker`), and the ops surface (jobs.stats / dead / retry / cleanup).
 --
 -- Usage (target shape):
 --   local jobs = require("hull.jobs")
@@ -394,8 +394,7 @@ function jobs.run_worker(opts)
     return processed
 end
 
---- Count jobs by status (optionally scoped to a queue). A minimal ops view;
--- the fuller dead-letter / retry / cleanup surface lands in a later phase.
+--- Count jobs by status (optionally scoped to a queue). The ops overview.
 -- @tparam[opt] table opts  { queue }
 -- @treturn table  { pending, running, done, failed, dead }
 function jobs.stats(opts)
@@ -411,6 +410,88 @@ function jobs.stats(opts)
     local s = { pending = 0, running = 0, done = 0, failed = 0, dead = 0 }
     for _, r in ipairs(rows) do s[r.status] = r.c end
     return s
+end
+
+-- Decode an ops row into an inspection view: the handler-facing shape plus the
+-- bookkeeping columns an operator needs (queue, last_error, timestamps).
+local function shape_ops(r)
+    local j = shape(r)
+    j.queue      = r.queue
+    j.attempts   = r.attempts
+    j.last_error = r.last_error
+    j.created_at = r.created_at
+    j.updated_at = r.updated_at
+    return j
+end
+
+--- List dead-lettered jobs (status='dead'), newest first. The ops entry point
+-- for inspecting failures before requeuing (`jobs.retry`) or purging
+-- (`jobs.cleanup`).
+-- @tparam[opt] table opts  { queue, limit = 100, offset = 0 }
+-- @treturn table  array of { id, queue, type, data, attempts, max_attempts,
+--                            last_error, created_at, updated_at }
+function jobs.dead(opts)
+    opts = opts or {}
+    local limit  = opts.limit or 100
+    local offset = opts.offset or 0
+    local rows
+    if opts.queue then
+        rows = db.query(
+            "SELECT * FROM _hull_jobs WHERE status='dead' AND queue=? "
+            .. "ORDER BY updated_at DESC, id DESC LIMIT ? OFFSET ?",
+            { opts.queue, limit, offset })
+    else
+        rows = db.query(
+            "SELECT * FROM _hull_jobs WHERE status='dead' "
+            .. "ORDER BY updated_at DESC, id DESC LIMIT ? OFFSET ?",
+            { limit, offset })
+    end
+    local out = {}
+    for _, r in ipairs(rows) do out[#out + 1] = shape_ops(r) end
+    return out
+end
+
+--- Requeue a dead-lettered job for another run. Resets it to `pending` with a
+-- fresh attempt budget (attempts=0) and clears the last error. No-op unless the
+-- job exists and is currently `dead` (so it can't double-requeue a live job).
+-- @tparam number id
+-- @treturn boolean  true if a dead job was requeued
+function jobs.retry(id)
+    local now = time.now()
+    local n = db.exec(
+        "UPDATE _hull_jobs SET status='pending', run_at=?, attempts=0, "
+        .. "claim_token=NULL, claimed_at=NULL, last_error=NULL, updated_at=? "
+        .. "WHERE id=? AND status='dead'",
+        { now, now, id })
+    return (n or 0) > 0
+end
+
+--- Purge terminal jobs (done + dead by default) whose last update is older than
+-- a retention age. Run it from `app.daily` to bound table growth. Only touches
+-- terminal rows, so it never races a pending / running job.
+-- @tparam[opt] table opts
+-- @tparam[opt="default order"] string opts.queue        scope to one queue
+-- @tparam[opt=604800] number opts.older_than             retention seconds (7 days)
+-- @tparam[opt] number opts.before                        absolute cutoff ts (overrides older_than)
+-- @tparam[opt={"done","dead"}] table opts.statuses       which terminal statuses to purge
+-- @treturn number  rows deleted
+function jobs.cleanup(opts)
+    opts = opts or {}
+    local statuses = opts.statuses or { "done", "dead" }
+    local cutoff = opts.before or (time.now() - (opts.older_than or 604800))
+    local placeholders, params = {}, {}
+    for _, s in ipairs(statuses) do
+        placeholders[#placeholders + 1] = "?"
+        params[#params + 1] = s
+    end
+    params[#params + 1] = cutoff
+    local sql = "DELETE FROM _hull_jobs WHERE status IN ("
+        .. table.concat(placeholders, ",") .. ") AND updated_at < ?"
+    if opts.queue then
+        sql = sql .. " AND queue=?"
+        params[#params + 1] = opts.queue
+    end
+    return db.exec(sql, params) or 0
 end
 
 return jobs
