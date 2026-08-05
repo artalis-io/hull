@@ -376,14 +376,14 @@ async function runWorker(opts) {
 /**
  * Count jobs by status (optionally scoped to a queue). The ops overview.
  * @param {object} [opts]  { queue }
- * @returns {{pending:number, running:number, done:number, failed:number, dead:number}}
+ * @returns {{pending:number, running:number, done:number, dead:number}}
  */
 function stats(opts) {
     const o = opts || {};
     const rows = o.queue
         ? db.query("SELECT status, COUNT(*) AS c FROM _hull_jobs WHERE queue=? GROUP BY status", [o.queue])
         : db.query("SELECT status, COUNT(*) AS c FROM _hull_jobs GROUP BY status");
-    const s = { pending: 0, running: 0, done: 0, failed: 0, dead: 0 };
+    const s = { pending: 0, running: 0, done: 0, dead: 0 };
     for (const r of rows) s[r.status] = r.c;
     return s;
 }

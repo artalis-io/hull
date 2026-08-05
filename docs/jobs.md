@@ -112,7 +112,7 @@ camelCase (`runAt`, `maxAttempts`, `dedupKey`).
 ## Ops surface
 
 ```lua
-jobs.stats()                  -- { pending, running, done, failed, dead } (opts.queue to scope)
+jobs.stats()                  -- { pending, running, done, dead } (opts.queue to scope)
 jobs.dead({ limit = 50 })     -- list dead-lettered jobs (newest first) for inspection
 jobs.retry(id)                -- requeue a dead job with a fresh attempt budget; false if not dead
 jobs.cancel(id)               -- delete a still-pending (e.g. delayed) job; false if not pending

@@ -409,7 +409,7 @@ end
 
 --- Count jobs by status (optionally scoped to a queue). The ops overview.
 -- @tparam[opt] table opts  { queue }
--- @treturn table  { pending, running, done, failed, dead }
+-- @treturn table  { pending, running, done, dead }
 function jobs.stats(opts)
     opts = opts or {}
     local rows
@@ -420,7 +420,7 @@ function jobs.stats(opts)
     else
         rows = db.query("SELECT status, COUNT(*) AS c FROM _hull_jobs GROUP BY status")
     end
-    local s = { pending = 0, running = 0, done = 0, failed = 0, dead = 0 }
+    local s = { pending = 0, running = 0, done = 0, dead = 0 }
     for _, r in ipairs(rows) do s[r.status] = r.c end
     return s
 end
