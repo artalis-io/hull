@@ -22,11 +22,11 @@ app.main(async () => {
     jobs.init();
 
     jobs.handler("send_email", (job) => {
-        log.info("send_email -> " + (job.data && job.data.to));
+        log.info(`send_email -> ${job.data?.to}`);
     });
     jobs.handler("flaky", (job) => {
         if ((job.attempts || 0) < 3) {
-            throw new Error("transient failure (attempt " + job.attempts + ")");
+            throw new Error(`transient failure (attempt ${job.attempts})`);
         }
     });
 

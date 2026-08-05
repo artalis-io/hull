@@ -11,7 +11,7 @@
 -- Full surface: schema + jobs.init, enqueue, the atomic claim, per-type +
 -- catch-all handlers, the work loop (retry-with-backoff, dead-letter, and the
 -- visibility-timeout reaper), the dedicated worker (jobs.run_worker +
--- `hull jobs worker`), and the ops surface (jobs.stats / dead / retry / cancel / cleanup). v1.1 adds durable cron (jobs.cron / uncron) and intra-process concurrency (run_worker concurrency=N), jobs.get(id), and jobs.heartbeat for long jobs.
+-- `hull jobs worker`), and the ops surface (jobs.stats / dead / retry / cancel / cleanup). v1.1 adds durable cron (jobs.cron / uncron) and intra-process concurrency (run_worker concurrency=N), jobs.get(id), jobs.heartbeat for long jobs, and fleet-wide rate limiting (jobs.limit).
 --
 -- Usage (target shape):
 --   local jobs = require("hull.jobs")
@@ -61,6 +61,14 @@ local _default = nil
 local _last_reap = 0
 -- Unix ts of the last cron due-check (throttled to >=1s; cron is minute-grained).
 local _last_cron = 0
+-- Whether the server parses SKIP LOCKED (probed in jobs.init; nil = not probed).
+local _skip_locked = nil
+-- Per-queue rate limits { [queue] = { rate, per } }, in-memory (re-registered on
+-- boot); the shared window COUNTER lives in _hull_ratelimit (fleet-wide).
+local _limits = {}
+-- Row-lock clause for the rate counter: blocking FOR UPDATE on PG/MySQL (serialize
+-- reservers), empty on SQLite (its write txn already serializes). Set in init.
+local _rl_lock = ""
 
 --- Create the `_hull_jobs` table and its indexes. Idempotent - safe to call on
 -- every boot. Uses the connection's portable identity DDL + IF-NOT-EXISTS index
@@ -138,6 +146,29 @@ function jobs.init(opts)
         CREATE INDEX IF NOT EXISTS idx_hull_cron_due ON _hull_cron(next_run_at)
     ]])
 
+    -- Fleet-wide rate-limit counters (jobs.limit). One row per limited queue;
+    -- `name` (not the reserved word `key`), a window start, and the count.
+    db.exec(
+        "CREATE TABLE IF NOT EXISTS _hull_ratelimit ("
+        .. "name         VARCHAR(255) NOT NULL PRIMARY KEY,"
+        .. "window_start INTEGER      NOT NULL,"
+        .. "n            INTEGER      NOT NULL)")
+    -- Blocking FOR UPDATE serializes reservers on PG/MySQL; SQLite's write txn
+    -- already serializes (and rejects FOR UPDATE syntactically).
+    _rl_lock = (db.backend_name == "sqlite") and "" or " FOR UPDATE"
+
+    -- Verify the server actually parses SKIP LOCKED (the compile-time dialect
+    -- flag says "this backend supports it" but a MySQL<8 / MariaDB<10.6 server
+    -- does not). A 0-row probe against the real table detects it once; the claim
+    -- falls back to plain FOR UPDATE otherwise.
+    _skip_locked = db.dialect.supports_skip_locked
+    if _skip_locked then
+        local ok = pcall(function()
+            db.query("SELECT id FROM _hull_jobs WHERE 1=0 FOR UPDATE SKIP LOCKED")
+        end)
+        if not ok then _skip_locked = false end
+    end
+
     return jobs
 end
 
@@ -200,6 +231,65 @@ local function shape(row)
     }
 end
 
+--- Set (or clear) a fleet-wide rate limit for a queue: at most `rate` jobs are
+-- dispatched per `per`-second window across ALL workers (a shared DB counter, so
+-- K processes still total `rate`, unlike a per-process limiter). Use it to
+-- respect a downstream's limit (an email/API quota). Register at startup on
+-- every worker (the limit lives in code; only the counter is shared).
+-- @tparam string queue  the queue to limit
+-- @tparam[opt] table opts  { rate = <max jobs>, per = 1 } - nil/false removes it
+-- @treturn table the jobs module (for chaining)
+function jobs.limit(queue, opts)
+    if opts == nil or opts == false then _limits[queue] = nil; return jobs end
+    if type(opts.rate) ~= "number" or opts.rate < 1 then
+        error("jobs.limit: opts.rate must be a positive number")
+    end
+    _limits[queue] = { rate = opts.rate, per = opts.per or 1 }
+    return jobs
+end
+
+-- Atomically reserve up to `want` slots in the current window for `key`, rolling
+-- the window if stale. Returns how many were granted (0..want). The row is
+-- pre-created (idempotent), then read-modify-written under a row lock so K
+-- workers share one counter.
+local function rl_reserve(key, want, rate, per)
+    local now = time.now()
+    local granted = 0
+    db.insert_if_absent("_hull_ratelimit", { "name" },
+        { "name", "window_start", "n" }, { key, now, 0 })
+    db.batch(function()
+        local sel = db.query(
+            "SELECT window_start, n FROM _hull_ratelimit WHERE name=?" .. _rl_lock, { key })
+        local ws, cnt = sel[1].window_start, sel[1].n
+        if now - ws >= per then ws, cnt = now, 0 end
+        granted = math.min(want, rate - cnt)
+        if granted < 0 then granted = 0 end
+        db.exec("UPDATE _hull_ratelimit SET window_start=?, n=? WHERE name=?",
+            { ws, cnt + granted, key })
+    end)
+    return granted
+end
+
+-- Enforce a queue's rate limit on a just-claimed batch: keep the highest-priority
+-- `granted` jobs, requeue the excess (undoing the claim's attempts+1 so a
+-- rate-deferred job keeps its retry budget). Claim-then-reconcile avoids burning
+-- window budget on empty polls. Mutates + returns `out`.
+local function rl_apply(queue, out)
+    local lim = _limits[queue]
+    if not lim or #out == 0 then return out end
+    local granted = rl_reserve(queue, #out, lim.rate, lim.per)
+    if granted >= #out then return out end
+    local params = { time.now() }
+    local ph = {}
+    for i = granted + 1, #out do ph[#ph + 1] = "?"; params[#params + 1] = out[i].id end
+    db.exec(
+        "UPDATE _hull_jobs SET status='pending', claim_token=NULL, claimed_at=NULL, "
+        .. "attempts=attempts-1, updated_at=? WHERE id IN (" .. table.concat(ph, ",") .. ")",
+        params)
+    for i = #out, granted + 1, -1 do out[i] = nil end   -- keep the top `granted`
+    return out
+end
+
 --- Atomically claim up to `batch` ready jobs from a queue, marking them
 -- `running`. Concurrency-safe across workers and processes: SKIP LOCKED on
 -- Postgres/MySQL, serialized on SQLite (single-writer + WAL busy-wait). A
@@ -216,6 +306,11 @@ function jobs.claim(opts)
     local now   = time.now()
     local token = crypto.base64url_encode(crypto.random(16))
     local d = db.dialect
+    -- SKIP LOCKED needs PG 9.5+ / MySQL 8+ / MariaDB 10.6+. jobs.init probes the
+    -- server and clears _skip_locked on older ones, where we fall back to plain
+    -- FOR UPDATE (correct - one job, one worker - but claimants block instead of
+    -- skipping). nil = not probed yet -> assume supported.
+    local lock = (_skip_locked ~= false) and "FOR UPDATE SKIP LOCKED" or "FOR UPDATE"
 
     local rows
     if d.supports_skip_locked and d.supports_returning then
@@ -224,7 +319,7 @@ function jobs.claim(opts)
             "UPDATE _hull_jobs SET status='running', claim_token=?, claimed_at=?, "
             .. "attempts=attempts+1, updated_at=? WHERE id IN ("
             .. "SELECT id FROM _hull_jobs WHERE queue=? AND status='pending' AND run_at<=? "
-            .. "ORDER BY priority DESC, id LIMIT ? FOR UPDATE SKIP LOCKED) "
+            .. "ORDER BY priority DESC, id LIMIT ? " .. lock .. ") "
             .. "RETURNING id, type, payload, priority, attempts, max_attempts",
             { token, now, now, queue, now, batch })
     elseif d.supports_skip_locked then
@@ -232,7 +327,7 @@ function jobs.claim(opts)
         db.batch(function()
             local sel = db.query(
                 "SELECT id FROM _hull_jobs WHERE queue=? AND status='pending' AND run_at<=? "
-                .. "ORDER BY priority DESC, id LIMIT ? FOR UPDATE SKIP LOCKED",
+                .. "ORDER BY priority DESC, id LIMIT ? " .. lock,
                 { queue, now, batch })
             if #sel == 0 then return end
             local ph, params = {}, { token, now, now }
@@ -273,7 +368,8 @@ function jobs.claim(opts)
         j.claim_token = token   -- handle for jobs.heartbeat on long-running work
         out[#out + 1] = j
     end
-    return out
+    -- Enforce a fleet-wide rate limit (claim-then-reconcile; requeues the excess).
+    return rl_apply(queue, out)
 end
 
 -- ── Handlers + the work loop ────────────────────────────────────────────

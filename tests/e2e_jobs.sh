@@ -548,6 +548,85 @@ app.main(async (ctx) => {
 echo "== v1.1 get/heartbeat: Lua =="; check_gethb "lua" "lua" "$LUA_GH"
 echo "== v1.1 get/heartbeat: JS =="; check_gethb "js" "js" "$JS_GH"
 
+# ── v1.2: fleet-wide rate limiting (jobs.limit) ─────────────────────────────
+# rate=3 per long window: first claim yields 3, second yields 0 (budget spent),
+# and a rate-deferred (requeued) job keeps attempts=0 (the claim was undone).
+check_rl() {
+    label="$1"; ext="$2"; app="$3"
+    T="$(mktemp -d)"; printf '%s\n' "$app" > "$T/app.$ext"
+    out="$("$HULL" "$T/app.$ext" -d "$T/a.db" 2>/dev/null)" || true
+    case "$out" in
+        *"RL first=3 second=0 attempts=0"*)
+            pass "$label: rate limit (window budget + requeue keeps attempts)" ;;
+        *) fail "$label: v1.2 rate limit" "$out" ;;
+    esac
+    rm -rf "$T"
+}
+
+LUA_RL='local jobs = require("hull.jobs")
+app.manifest({ modules = { "hull/jobs@1" } })
+app.main(function(ctx)
+  jobs.init()
+  jobs.limit("default", { rate = 3, per = 100 })
+  for i=1,10 do jobs.enqueue("t", {}) end
+  local c1 = jobs.claim({ batch = 10 })
+  local c2 = jobs.claim({ batch = 10 })
+  local at = -1
+  for id=1,10 do local g=jobs.get(id); if g and g.status=="pending" then at=g.attempts; break end end
+  ctx.stdout:write(("RL first=%d second=%d attempts=%d\n"):format(#c1, #c2, at))
+  return 0
+end)'
+
+JS_RL='import { app } from "hull:app"; import { jobs } from "hull:jobs";
+app.manifest({ modules: ["hull/jobs@1"] });
+app.main(async (ctx) => {
+  jobs.init();
+  jobs.limit("default", { rate: 3, per: 100 });
+  for (let i=0;i<10;i++) jobs.enqueue("t", {});
+  const c1 = jobs.claim({ batch: 10 });
+  const c2 = jobs.claim({ batch: 10 });
+  let at = -1;
+  for (let id=1; id<=10; id++) { const g=jobs.get(id); if (g && g.status==="pending") { at=g.attempts; break; } }
+  ctx.stdout.write(`RL first=${c1.length} second=${c2.length} attempts=${at}\n`);
+  return 0;
+});'
+
+echo "== v1.2 rate limit: Lua =="; check_rl "lua" "lua" "$LUA_RL"
+echo "== v1.2 rate limit: JS =="; check_rl "js" "js" "$JS_RL"
+
+# Fleet gate: K processes share one rate counter -> total dispatched == rate.
+echo "== v1.2 rate limit fleet ($CONC processes, one shared counter) =="
+W="$(mktemp -d)"; DB="$W/rl.db"
+cat > "$W/seed.lua" <<LUA
+local jobs = require("hull.jobs")
+app.manifest({ modules = { "hull/jobs@1" } })
+app.main(function() jobs.init(); jobs.limit("default",{rate=5,per=100}); for i=1,50 do jobs.enqueue("t",{}) end; return 0 end)
+LUA
+cat > "$W/claim.lua" <<'LUA'
+local jobs = require("hull.jobs")
+app.manifest({ modules = { "hull/jobs@1" } })
+app.main(function(ctx)
+  jobs.init(); jobs.limit("default",{rate=5,per=100})
+  while true do
+    local b = jobs.claim({ batch = 2 })
+    if #b == 0 then break end
+    for _,j in ipairs(b) do ctx.stdout:write(j.id .. "\n") end
+  end
+  return 0
+end)
+LUA
+"$HULL" "$W/seed.lua" -d "$DB" >/dev/null 2>&1
+i=1; while [ "$i" -le "$CONC" ]; do "$HULL" "$W/claim.lua" -d "$DB" > "$W/out.$i" 2>/dev/null & i=$((i+1)); done
+wait
+total="$(cat "$W"/out.* | grep -c . || true)"
+uniq="$(cat "$W"/out.* | sort -n | uniq | grep -c . || true)"
+if [ "$total" -eq 5 ] && [ "$uniq" -eq 5 ]; then
+    pass "rate limit fleet: $CONC processes dispatched exactly 5 (the shared budget)"
+else
+    fail "rate limit fleet: expected 5 total" "total=$total uniq=$uniq"
+fi
+rm -rf "$W"
+
 echo ""
 echo "=== Summary ==="
 echo "PASSED: $PASS"

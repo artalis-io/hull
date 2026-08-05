@@ -15,7 +15,7 @@
  * Full surface: schema + jobs.init, enqueue, the atomic claim, per-type +
  * catch-all handlers, the work loop (retry-with-backoff, dead-letter, and the
  * visibility-timeout reaper), the dedicated worker (jobs.runWorker +
- * `hull jobs worker`), and the ops surface (jobs.stats / dead / retry / cancel / cleanup). v1.1 adds durable cron (jobs.cron / uncron) and intra-process concurrency (run_worker concurrency=N), jobs.get(id), and jobs.heartbeat for long jobs.
+ * `hull jobs worker`), and the ops surface (jobs.stats / dead / retry / cancel / cleanup). v1.1 adds durable cron (jobs.cron / uncron) and intra-process concurrency (run_worker concurrency=N), jobs.get(id), jobs.heartbeat for long jobs, and fleet-wide rate limiting (jobs.limit).
  *
  * @license AGPL-3.0-or-later
  */
@@ -53,6 +53,15 @@ function defaultBackoff(attempt) {
 // user-controlled type; mirrors Lua tables (which have no prototype chain).
 const _handlers = Object.create(null);
 let _default = null;
+
+// Whether the server parses SKIP LOCKED (probed in init(); null = not probed).
+let _skipLocked = null;
+// Per-queue rate limits { [queue]: { rate, per } }, in-memory (re-registered on
+// boot); the shared window COUNTER lives in _hull_ratelimit (fleet-wide).
+const _limits = Object.create(null);
+// Row-lock clause for the rate counter: blocking FOR UPDATE on PG/MySQL, empty
+// on SQLite (its write txn already serializes). Set in init().
+let _rlLock = "";
 
 /**
  * Create the `_hull_jobs` table and its indexes. Idempotent - safe on every
@@ -125,6 +134,25 @@ function init(opts) {
         "updated_at   INTEGER      NOT NULL)");
     db.exec("CREATE INDEX IF NOT EXISTS idx_hull_cron_due ON _hull_cron(next_run_at)");
 
+    // Fleet-wide rate-limit counters (jobs.limit). One row per limited queue;
+    // `name` (not the reserved word `key`), a window start, and the count.
+    db.exec(
+        "CREATE TABLE IF NOT EXISTS _hull_ratelimit (" +
+        "name         VARCHAR(255) NOT NULL PRIMARY KEY," +
+        "window_start INTEGER      NOT NULL," +
+        "n            INTEGER      NOT NULL)");
+    _rlLock = db.backendName === "sqlite" ? "" : " FOR UPDATE";
+
+    // Verify the server actually parses SKIP LOCKED (the compile-time dialect
+    // flag says "this backend supports it" but a MySQL<8 / MariaDB<10.6 server
+    // does not). A 0-row probe against the real table detects it once; the claim
+    // falls back to plain FOR UPDATE otherwise.
+    _skipLocked = db.dialect.supportsSkipLocked;
+    if (_skipLocked) {
+        try { db.query("SELECT id FROM _hull_jobs WHERE 1=0 FOR UPDATE SKIP LOCKED"); }
+        catch (_e) { _skipLocked = false; }
+    }
+
     return jobs;
 }
 
@@ -178,6 +206,60 @@ function shape(row) {
 }
 
 /**
+ * Set (or clear) a fleet-wide rate limit for a queue: at most `rate` jobs are
+ * dispatched per `per`-second window across ALL workers (a shared DB counter, so
+ * K processes still total `rate`). Register at startup on every worker (the
+ * limit lives in code; only the counter is shared).
+ * @param {string} queue  the queue to limit
+ * @param {object} [opts] { rate, per = 1 } - null/false removes it
+ * @returns {object} the jobs module (for chaining)
+ */
+function limit(queue, opts) {
+    if (opts === null || opts === undefined || opts === false) { delete _limits[queue]; return jobs; }
+    if (typeof opts.rate !== "number" || opts.rate < 1)
+        throw new Error("jobs.limit: opts.rate must be a positive number");
+    _limits[queue] = { rate: opts.rate, per: opts.per || 1 };
+    return jobs;
+}
+
+// Atomically reserve up to `want` slots in the current window for `key`, rolling
+// the window if stale. Returns how many were granted (0..want).
+function rlReserve(key, want, rate, per) {
+    const now = time.now();
+    let granted = 0;
+    db.insertIfAbsent("_hull_ratelimit", ["name"],
+        ["name", "window_start", "n"], [key, now, 0]);
+    db.batch(() => {
+        const sel = db.query(
+            "SELECT window_start, n FROM _hull_ratelimit WHERE name=?" + _rlLock, [key]);
+        let ws = sel[0].window_start, cnt = sel[0].n;
+        if (now - ws >= per) { ws = now; cnt = 0; }
+        granted = Math.min(want, rate - cnt);
+        if (granted < 0) granted = 0;
+        db.exec("UPDATE _hull_ratelimit SET window_start=?, n=? WHERE name=?",
+            [ws, cnt + granted, key]);
+    });
+    return granted;
+}
+
+// Enforce a queue's rate limit on a just-claimed batch: keep the highest-priority
+// `granted`, requeue the excess (undoing the claim's attempts+1). Returns kept.
+function rlApply(queue, out) {
+    const lim = _limits[queue];
+    if (!lim || out.length === 0) return out;
+    const granted = rlReserve(queue, out.length, lim.rate, lim.per);
+    if (granted >= out.length) return out;
+    const excess = out.slice(granted);
+    const params = [time.now()];
+    const ph = excess.map((j) => { params.push(j.id); return "?"; });
+    db.exec(
+        "UPDATE _hull_jobs SET status='pending', claim_token=NULL, claimed_at=NULL, " +
+        "attempts=attempts-1, updated_at=? WHERE id IN (" + ph.join(",") + ")",
+        params);
+    return out.slice(0, granted);   // keep the top `granted`
+}
+
+/**
  * Atomically claim up to `batch` ready jobs from a queue, marking them
  * `running`. Concurrency-safe across workers and processes (SKIP LOCKED on
  * Postgres/MySQL, serialized on SQLite). Each ready job is claimed by exactly
@@ -193,6 +275,11 @@ function claim(opts) {
     const now = time.now();
     const token = crypto.base64urlEncode(crypto.random(16));
     const d = db.dialect;
+    // SKIP LOCKED needs PG 9.5+ / MySQL 8+ / MariaDB 10.6+. init() probes the
+    // server and clears _skipLocked on older ones, where we fall back to plain
+    // FOR UPDATE (correct - one job, one worker - but claimants block instead of
+    // skipping). null = not probed yet -> assume supported.
+    const lock = _skipLocked === false ? "FOR UPDATE" : "FOR UPDATE SKIP LOCKED";
 
     let rows;
     if (d.supportsSkipLocked && d.supportsReturning) {
@@ -200,14 +287,14 @@ function claim(opts) {
             "UPDATE _hull_jobs SET status='running', claim_token=?, claimed_at=?, " +
             "attempts=attempts+1, updated_at=? WHERE id IN (" +
             "SELECT id FROM _hull_jobs WHERE queue=? AND status='pending' AND run_at<=? " +
-            "ORDER BY priority DESC, id LIMIT ? FOR UPDATE SKIP LOCKED) " +
+            "ORDER BY priority DESC, id LIMIT ? " + lock + ") " +
             "RETURNING id, type, payload, priority, attempts, max_attempts",
             [token, now, now, queue, now, batch]);
     } else if (d.supportsSkipLocked) {
         db.batch(() => {
             const sel = db.query(
                 "SELECT id FROM _hull_jobs WHERE queue=? AND status='pending' AND run_at<=? " +
-                "ORDER BY priority DESC, id LIMIT ? FOR UPDATE SKIP LOCKED",
+                "ORDER BY priority DESC, id LIMIT ? " + lock,
                 [queue, now, batch]);
             if (sel.length === 0) return;
             const ph = [], params = [token, now, now];
@@ -232,13 +319,15 @@ function claim(opts) {
 
     // Priority-correct order within the batch: RETURNING / the token read-back
     // don't preserve the subquery's ORDER BY, so sort by priority DESC, id ASC.
-    return (rows || [])
+    const out = (rows || [])
         .sort((x, y) => (y.priority || 0) - (x.priority || 0) || (x.id - y.id))
         .map((r) => {
             const j = shape(r);
             j.claimToken = token;   // handle for jobs.heartbeat on long-running work
             return j;
         });
+    // Enforce a fleet-wide rate limit (claim-then-reconcile; requeues the excess).
+    return rlApply(queue, out);
 }
 
 // ── Handlers + the work loop ────────────────────────────────────────────
@@ -707,9 +796,9 @@ function _tick(now) { processCron(now !== undefined ? now : time.now()); }
 
 export const jobs = {
     init, enqueue, claim, handler, default: setDefault, work, reap, stats,
-    runWorker, stop, get, heartbeat, dead, retry, cancel, cleanup, cron, uncron,
+    runWorker, stop, get, heartbeat, limit, dead, retry, cancel, cleanup, cron, uncron,
     RETRY, DEAD, DISCARD, _config: _cfg, _cronNext, _tick,
 };
 export { init, enqueue, claim, handler, work, reap, stats, runWorker, stop,
-         get, heartbeat, dead, retry, cancel, cleanup, cron, uncron };
+         get, heartbeat, limit, dead, retry, cancel, cleanup, cron, uncron };
 export default jobs;
