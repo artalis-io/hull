@@ -754,6 +754,62 @@ app.main(async (ctx) => {
 echo "== v1.5 result/await: Lua =="; check_result "lua" "lua" "$LUA_RES"
 echo "== v1.5 result/await: JS =="; check_result "js" "js" "$JS_RES"
 
+# ── v1.5: multi-queue draining - strict-priority list + weighted map ────────
+# A list = strict priority (critical drained before default before low); a map =
+# weighted fairness (every queue drains, no starvation).
+check_queues() {
+    label="$1"; ext="$2"; app="$3"
+    T="$(mktemp -d)"; printf '%s\n' "$app" > "$T/app.$ext"
+    out="$("$HULL" "$T/app.$ext" -d "$T/a.db" 2>/dev/null)" || true
+    case "$out" in
+        *"STRICT order=c1,c2,d1,l1 WEIGHTED drained=20"*)
+            pass "$label: multi-queue (strict-priority list + weighted-map no-starvation)" ;;
+        *) fail "$label: v1.5 multi-queue draining" "$out" ;;
+    esac
+    rm -rf "$T"
+}
+
+LUA_QUEUES='local jobs = require("hull.jobs")
+app.manifest({ modules = { "hull/jobs@1" } })
+app.main(function(ctx)
+  jobs.init()
+  jobs.enqueue("t",{n="c1"},{queue="critical"}); jobs.enqueue("t",{n="c2"},{queue="critical"})
+  jobs.enqueue("t",{n="d1"},{queue="default"});  jobs.enqueue("t",{n="l1"},{queue="low"})
+  local order = {}
+  while true do
+    local b = jobs.claim({ queues = {"critical","default","low"}, batch = 1 })
+    if #b == 0 then break end
+    order[#order+1] = b[1].data.n
+  end
+  for i=1,10 do jobs.enqueue("t",{},{queue="A"}); jobs.enqueue("t",{},{queue="B"}) end
+  local drained, safety = 0, 0
+  while safety < 200 do
+    local b = jobs.claim({ queues = {A=3, B=1}, batch = 3 })
+    if #b == 0 then break end
+    drained = drained + #b; safety = safety + 1
+  end
+  ctx.stdout:write(("STRICT order=%s WEIGHTED drained=%d\n"):format(table.concat(order,","), drained))
+  return 0
+end)'
+
+JS_QUEUES='import { app } from "hull:app"; import { jobs } from "hull:jobs";
+app.manifest({ modules: ["hull/jobs@1"] });
+app.main((ctx) => {
+  jobs.init();
+  jobs.enqueue("t",{n:"c1"},{queue:"critical"}); jobs.enqueue("t",{n:"c2"},{queue:"critical"});
+  jobs.enqueue("t",{n:"d1"},{queue:"default"});  jobs.enqueue("t",{n:"l1"},{queue:"low"});
+  const order = [];
+  for (;;) { const b = jobs.claim({ queues: ["critical","default","low"], batch: 1 }); if (!b.length) break; order.push(b[0].data.n); }
+  for (let i=0;i<10;i++){ jobs.enqueue("t",{},{queue:"A"}); jobs.enqueue("t",{},{queue:"B"}); }
+  let drained=0, safety=0;
+  while (safety<200){ const b=jobs.claim({ queues:{A:3,B:1}, batch:3 }); if(!b.length) break; drained+=b.length; safety++; }
+  ctx.stdout.write(`STRICT order=${order.join(",")} WEIGHTED drained=${drained}\n`);
+  return 0;
+});'
+
+echo "== v1.5 multi-queue: Lua =="; check_queues "lua" "lua" "$LUA_QUEUES"
+echo "== v1.5 multi-queue: JS =="; check_queues "js" "js" "$JS_QUEUES"
+
 # Fleet gate: K processes share one rate counter -> total dispatched == rate.
 echo "== v1.2 rate limit fleet ($CONC processes, one shared counter) =="
 W="$(mktemp -d)"; DB="$W/rl.db"

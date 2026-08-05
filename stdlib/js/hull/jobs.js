@@ -443,10 +443,41 @@ function purge(queue, opts) {
  * @param {object} [opts]  { queue = "default", batch = 10 }
  * @returns {Array}  claimed jobs { id, type, data, attempts, maxAttempts }
  */
-function claim(opts) {
-    const o = opts || {};
-    const queue = o.queue || "default";
-    const batch = o.batch || 10;
+// Resolve opts.queue / opts.queues to an ordered list of queues to try. A single
+// `queue` (or the default) is a one-element order. `queues` may be a LIST
+// ["critical","default","low"] (strict priority - try each in order, claim from
+// the first with ready work) or a MAP {critical:3, default:2, low:1} (weighted
+// fairness: a weighted-random shuffle with every queue still present as a
+// fallback, so no claim cycle is wasted and no queue starves; a homogeneous
+// fleet gives fleet-wide fairness). Zero/negative/non-number weights are dropped.
+function resolveQueueOrder(opts) {
+    const qs = opts.queues;
+    if (qs == null) return [opts.queue || "default"];
+    if (Array.isArray(qs)) return qs.slice();                 // list (strict priority)
+    const names = [], weights = {};                           // map (weighted)
+    let total = 0;
+    for (const name of Object.keys(qs)) {
+        const w = qs[name];
+        if (typeof w === "number" && w > 0) { names.push(name); weights[name] = w; total += w; }
+    }
+    const order = [];
+    while (names.length) {
+        const pick = Math.random() * total;
+        let acc = 0, idx = names.length - 1;
+        for (let i = 0; i < names.length; i++) {
+            acc += weights[names[i]];
+            if (pick <= acc) { idx = i; break; }
+        }
+        const chosen = names[idx];
+        order.push(chosen);
+        total -= weights[chosen];
+        names.splice(idx, 1);
+    }
+    return order;
+}
+
+// Claim up to `batch` ready jobs from ONE queue (the per-backend atomic claim).
+function claimOne(queue, batch) {
     if (isPaused(queue)) return [];   // paused: don't dispatch
     const now = time.now();
     const token = crypto.base64urlEncode(crypto.random(16));
@@ -504,6 +535,26 @@ function claim(opts) {
         });
     // Enforce a fleet-wide rate limit (claim-then-reconcile; requeues the excess).
     return rlApply(queue, out);
+}
+
+/**
+ * Atomically claim up to `batch` ready jobs, marking them `running`.
+ * Concurrency-safe (SKIP LOCKED on Postgres/MySQL, serialized on SQLite). Draws
+ * from a single queue (`opts.queue`, default "default") or across several via
+ * `opts.queues` - a LIST for strict priority or a MAP for weighted fairness (see
+ * resolveQueueOrder). Multi-queue claims from the first queue in the resolved
+ * order with ready work; a worker loop drains the rest on later calls.
+ * @param {object} [opts]  { queue | queues, batch }
+ * @returns {object[]}
+ */
+function claim(opts) {
+    const o = opts || {};
+    const batch = o.batch || 10;
+    for (const q of resolveQueueOrder(o)) {
+        const got = claimOne(q, batch);
+        if (got.length) return got;
+    }
+    return [];
 }
 
 // ── Handlers + the work loop ────────────────────────────────────────────

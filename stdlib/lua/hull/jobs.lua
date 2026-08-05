@@ -472,19 +472,46 @@ function jobs.purge(queue, opts)
         params) or 0
 end
 
---- Atomically claim up to `batch` ready jobs from a queue, marking them
--- `running`. Concurrency-safe across workers and processes: SKIP LOCKED on
--- Postgres/MySQL, serialized on SQLite (single-writer + WAL busy-wait). A
--- `claim_token` nonce disambiguates the claimant on backends without RETURNING.
--- Each ready job is claimed by exactly one caller. Low-level: `jobs.work`
--- wraps this; a custom worker can call it directly.
---
--- @tparam[opt] table opts  { queue = "default", batch = 10 }
--- @treturn table  array of claimed jobs { id, type, data, attempts, max_attempts }
-function jobs.claim(opts)
-    opts = opts or {}
-    local queue = opts.queue or "default"
-    local batch = opts.batch or 10
+-- Resolve opts.queue / opts.queues to an ordered list of queues to try. A single
+-- `queue` (or the default) is a one-element order. `queues` may be:
+--   * a LIST { "critical", "default", "low" } - strict priority: try each in
+--     order, claim from the first with ready work (higher queues drain first).
+--   * a MAP { critical=3, default=2, low=1 } - weighted fairness: the order is a
+--     weighted-random shuffle (first-choice ~ weight over many calls), with every
+--     queue still present as a fallback so no claim cycle is wasted and no queue
+--     starves. A homogeneous fleet gives fleet-wide fairness (each worker draws
+--     independently). Zero/negative weights and non-number values are dropped.
+local function resolve_queue_order(opts)
+    local qs = opts.queues
+    if qs == nil then return { opts.queue or "default" } end
+    if qs[1] ~= nil then                          -- list form (strict priority)
+        local order = {}
+        for i = 1, #qs do order[i] = qs[i] end
+        return order
+    end
+    local names, weights, total = {}, {}, 0       -- map form (weighted)
+    for name, w in pairs(qs) do
+        if type(w) == "number" and w > 0 then
+            names[#names + 1] = name; weights[name] = w; total = total + w
+        end
+    end
+    local order = {}
+    while #names > 0 do
+        local pick, acc, idx = math.random() * total, 0, #names
+        for i = 1, #names do
+            acc = acc + weights[names[i]]
+            if pick <= acc then idx = i; break end
+        end
+        local chosen = names[idx]
+        order[#order + 1] = chosen
+        total = total - weights[chosen]
+        table.remove(names, idx)
+    end
+    return order
+end
+
+-- Claim up to `batch` ready jobs from ONE queue (the per-backend atomic claim).
+local function claim_one(queue, batch)
     if is_paused(queue) then return {} end   -- paused: don't dispatch
     local now   = time.now()
     local token = crypto.base64url_encode(crypto.random(16))
@@ -553,6 +580,30 @@ function jobs.claim(opts)
     end
     -- Enforce a fleet-wide rate limit (claim-then-reconcile; requeues the excess).
     return rl_apply(queue, out)
+end
+
+--- Atomically claim up to `batch` ready jobs, marking them `running`.
+-- Concurrency-safe across workers and processes: SKIP LOCKED on Postgres/MySQL,
+-- serialized on SQLite (single-writer + WAL busy-wait). A `claim_token` nonce
+-- disambiguates the claimant on backends without RETURNING. Each ready job is
+-- claimed by exactly one caller. Low-level: `jobs.work` wraps this.
+--
+-- Draws from a single queue (`opts.queue`, default "default") or across several
+-- via `opts.queues` - a LIST for strict priority or a MAP for weighted fairness
+-- (see `resolve_queue_order`). Multi-queue claims from the first queue in the
+-- resolved order that has ready work, so a single call returns jobs from one
+-- queue; a worker loop drains the rest on subsequent calls.
+--
+-- @tparam[opt] table opts  { queue = "default" | queues = {...}, batch = 10 }
+-- @treturn table  array of claimed jobs { id, type, data, attempts, max_attempts }
+function jobs.claim(opts)
+    opts = opts or {}
+    local batch = opts.batch or 10
+    for _, q in ipairs(resolve_queue_order(opts)) do
+        local got = claim_one(q, batch)
+        if #got > 0 then return got end
+    end
+    return {}
 end
 
 -- ── Handlers + the work loop ────────────────────────────────────────────
