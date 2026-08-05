@@ -127,6 +127,12 @@ function init(opts) {
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_hull_jobs_dedup " +
         "ON _hull_jobs(queue, dedup_key)");
 
+    // Throttle scan path: recent jobs of a (queue, type) within the window
+    // (enqueue opts.throttle). Without this the throttle probe scans the queue.
+    db.exec(
+        "CREATE INDEX IF NOT EXISTS idx_hull_jobs_throttle " +
+        "ON _hull_jobs(queue, type, created_at)");
+
     // Durable cron schedules (jobs.cron). A worker atomically advances a due
     // row's next_run_at (compare-and-set) and enqueues, so exactly one worker
     // fires each tick across the fleet.
@@ -145,10 +151,16 @@ function init(opts) {
         "tz_offset    INTEGER      NOT NULL DEFAULT 0)");
     db.exec("CREATE INDEX IF NOT EXISTS idx_hull_cron_due ON _hull_cron(next_run_at)");
 
-    // Additive migrations for DBs created before v1.5 (idempotent: a duplicate-
-    // column error on an already-migrated DB is expected and swallowed).
-    try { db.exec("ALTER TABLE _hull_jobs ADD COLUMN progress INTEGER NOT NULL DEFAULT 0"); } catch (e) { /* exists */ }
-    try { db.exec("ALTER TABLE _hull_cron ADD COLUMN tz_offset INTEGER NOT NULL DEFAULT 0"); } catch (e) { /* exists */ }
+    // Additive migrations for DBs created before v1.5: add the column only when
+    // absent (checked via the portable db.tableColumns, mirroring session.js),
+    // rather than catching a duplicate-column error - a caught ALTER would abort
+    // a surrounding transaction on Postgres if jobs.init ran inside a db.batch.
+    const ensureColumn = (tbl, col, coldef) => {
+        if (!(db.tableColumns(tbl) || []).includes(col))
+            db.exec(`ALTER TABLE ${tbl} ADD COLUMN ${coldef}`);
+    };
+    ensureColumn("_hull_jobs", "progress", "progress INTEGER NOT NULL DEFAULT 0");
+    ensureColumn("_hull_cron", "tz_offset", "tz_offset INTEGER NOT NULL DEFAULT 0");
 
     // Fleet-wide rate-limit counters (jobs.limit). One row per limited queue;
     // `name` (not the reserved word `key`), a window start, and the count.
@@ -1110,7 +1122,12 @@ function result(id) {
     const out = { status };
     if (status === "done") {
         const rr = db.query("SELECT result FROM _hull_job_results WHERE job_id=?", [id]);
-        if (rr.length && rr[0].result != null) out.result = JSON.parse(rr[0].result);
+        // Fail soft on a corrupted result row (we wrote valid JSON, but don't
+        // throw on external corruption): fall back to the raw string.
+        if (rr.length && rr[0].result != null) {
+            try { out.result = JSON.parse(rr[0].result); }
+            catch (e) { out.result = rr[0].result; }
+        }
     } else if (status === "dead") {
         out.error = rows[0].last_error;
     }
@@ -1131,7 +1148,7 @@ function result(id) {
  */
 async function await_(id, opts) {
     opts = opts || {};
-    const interval = opts.interval || 100;
+    const interval = Math.max(opts.interval || 100, 10);   // floor: never a tight loop
     const deadline = opts.timeout != null ? time.clock() + opts.timeout : null;
     for (;;) {
         const r = result(id);

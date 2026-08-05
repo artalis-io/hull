@@ -137,6 +137,13 @@ function jobs.init(opts)
         ON _hull_jobs(queue, dedup_key)
     ]])
 
+    -- Throttle scan path: recent jobs of a (queue, type) within the window
+    -- (enqueue opts.throttle). Without this the throttle probe scans the queue.
+    db.exec([[
+        CREATE INDEX IF NOT EXISTS idx_hull_jobs_throttle
+        ON _hull_jobs(queue, type, created_at)
+    ]])
+
     -- Durable cron schedules (jobs.cron). A worker atomically advances a due
     -- row's next_run_at (compare-and-set) and enqueues, so exactly one worker
     -- fires each tick across the fleet.
@@ -157,10 +164,18 @@ function jobs.init(opts)
         CREATE INDEX IF NOT EXISTS idx_hull_cron_due ON _hull_cron(next_run_at)
     ]])
 
-    -- Additive migrations for DBs created before v1.5 (idempotent: a duplicate-
-    -- column error on an already-migrated DB is expected and swallowed).
-    pcall(db.exec, "ALTER TABLE _hull_jobs ADD COLUMN progress INTEGER NOT NULL DEFAULT 0")
-    pcall(db.exec, "ALTER TABLE _hull_cron ADD COLUMN tz_offset INTEGER NOT NULL DEFAULT 0")
+    -- Additive migrations for DBs created before v1.5: add the column only when
+    -- absent (checked via the portable db.table_columns, mirroring session.lua),
+    -- rather than catching a duplicate-column error - a caught ALTER would abort
+    -- a surrounding transaction on Postgres if jobs.init ran inside a db.batch.
+    local function ensure_column(tbl, col, coldef)
+        for _, name in ipairs(db.table_columns(tbl) or {}) do
+            if name == col then return end
+        end
+        db.exec("ALTER TABLE " .. tbl .. " ADD COLUMN " .. coldef)
+    end
+    ensure_column("_hull_jobs", "progress", "progress INTEGER NOT NULL DEFAULT 0")
+    ensure_column("_hull_cron", "tz_offset", "tz_offset INTEGER NOT NULL DEFAULT 0")
 
     -- Fleet-wide rate-limit counters (jobs.limit). One row per limited queue;
     -- `name` (not the reserved word `key`), a window start, and the count.
@@ -1186,7 +1201,11 @@ function jobs.result(id)
     if status == "done" then
         local rr = db.query("SELECT result FROM _hull_job_results WHERE job_id=?", { id })
         if rr and #rr > 0 and rr[1].result ~= nil then
-            out.result = json.decode(rr[1].result)
+            -- Fail soft on a corrupted result row (we wrote valid JSON, but don't
+            -- raise on external corruption). Explicit if: a decoded false/nil is
+            -- a valid result, so `ok and decoded or raw` would mis-map it.
+            local ok, decoded = pcall(json.decode, rr[1].result)
+            if ok then out.result = decoded else out.result = rr[1].result end
         end
     elseif status == "dead" then
         out.error = rows[1].last_error
@@ -1208,7 +1227,7 @@ end
 -- @treturn table|nil  the terminal `jobs.result`, a timed-out view, or nil
 function jobs.await(id, opts)
     opts = opts or {}
-    local interval = opts.interval or 100
+    local interval = math.max(opts.interval or 100, 10)   -- floor: never a tight yield-loop
     local deadline = opts.timeout and (time.clock() + opts.timeout) or nil
     while true do
         local r = jobs.result(id)
