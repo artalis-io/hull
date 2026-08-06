@@ -202,14 +202,30 @@ jobs.enqueue("report", data, { concurrencyKey: "tenant-42", concurrency: 2 });
   of that key finishes, a held-back one becomes claimable. Priority and FIFO
   order within the key are preserved (the release is ranked by claim age, so it
   is deterministic fleet-wide - no two workers evict the same slot).
-- **Soft** semantics: correct under normal load, but two workers claiming the same
-  key in the same instant can briefly exceed the limit (there is no reservation
-  counter). Use it for *fairness / politeness* caps (don't let one tenant hog the
-  fleet, cap per-host outbound), not as a hard mutual-exclusion lock. A strict,
-  counter-backed variant is a planned opt-in follow-up.
-- Costs one small indexed DB read per claimed job **only for keyed jobs**;
-  unkeyed jobs are unaffected. Rate limiting and per-key concurrency compose (both
-  reconcile the same claim).
+- **Soft** (the default): correct under normal load, but two workers claiming the
+  same key in the same instant can briefly exceed the limit (there is no
+  reservation counter). Right for *fairness / politeness* caps (don't let one
+  tenant hog the fleet, cap per-host outbound), not hard mutual exclusion.
+- **Strict** (opt in with `concurrency_strict = true` / `concurrencyStrict: true`):
+  a **hard cap, no overshoot**. Each claim atomically reserves a slot in a
+  fleet-wide counter (`n < limit`), so N racing workers admit *exactly* the limit,
+  never more:
+
+  ```lua
+  jobs.enqueue("charge", data, { concurrency_key = "acct-7", concurrency = 1,
+                                 concurrency_strict = true })   -- serialize per account
+  ```
+
+  The slot is released whenever the job leaves `running` (done / dead / retry /
+  workflow yield), and the reaper reconciles the counter to the true running count
+  every sweep, so a crashed worker can't permanently leak a slot (it self-heals,
+  briefly *under*-utilizing until the next reap - the safe direction for a hard
+  cap). All jobs of a key should agree on the strict flag. Strict trades one small
+  transactional counter update per claim/completion for the guarantee; soft is a
+  single indexed read. Use strict when correctness needs a true cap (per-account
+  serialization, a license-limited external resource); soft for politeness.
+- Costs are per-keyed-job only; unkeyed jobs are unaffected. Rate limiting and
+  per-key concurrency compose (both reconcile the same claim).
 
 ## Workflows (job dependencies)
 
@@ -387,13 +403,14 @@ jobs.enqueue(type, data, {
     dedup_key    = "order-42", -- idempotent enqueue: a duplicate un-run key is a no-op
     throttle     = 60,         -- windowed: skip if a (queue,type) job was made in the last N s
     trace        = traceparent,-- W3C trace context; surfaced to the handler as job.trace
-    concurrency_key = "tenant-42", -- soft concurrency group (see Per-key concurrency)
+    concurrency_key = "tenant-42", -- concurrency group (see Per-key concurrency)
     concurrency     = 2,           -- max jobs of that group running at once
+    concurrency_strict = true,     -- hard cap (counter-backed); omit for soft
 })
 ```
 Returns the new job id, or `nil` when a `dedup_key` collapsed it (or a
 `throttle` window suppressed it). JS keys are camelCase (`runAt`, `maxAttempts`,
-`dedupKey`, `concurrencyKey`). `throttle` is best-effort (keyed by `(queue, type)`, no unique
+`dedupKey`, `concurrencyKey`, `concurrencyStrict`). `throttle` is best-effort (keyed by `(queue, type)`, no unique
 constraint - use `dedup_key` for exact-once).
 
 **Bulk enqueue.** `jobs.enqueue_many(items)` (`enqueueMany` in JS) inserts a list
