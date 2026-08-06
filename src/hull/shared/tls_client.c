@@ -16,6 +16,7 @@
 #include <keel/tls_mbedtls.h>
 
 #include <poll.h>
+#include <pthread.h>
 #include <stdlib.h>
 #include <unistd.h>
 
@@ -23,6 +24,25 @@ struct HlTlsClient {
     KlTlsCtx *ctx;        /* NULL when the ctx is caller-owned (cfg path) */
     KlTls    *tls;
 };
+
+/* The KlTls / KlTlsCtx capture the KlAllocator BY POINTER and dereference it at
+ * destroy time - long after the handshake function returns - so the allocator
+ * must outlive them. kl_allocator_default() is a stateless process-wide default
+ * (static stdlib wrappers, NULL ctx); hold ONE copy in static storage and hand
+ * its address to every KlTls/KlTlsCtx, instead of a stack local that dangles the
+ * moment the handshake returns. A dangling stack allocator only bit LONG-LIVED
+ * TLS connections (e.g. a pooled DB connection) whose handshake frame is gone by
+ * teardown - it surfaced as a SIGSEGV in tls_destroy's kl_free(t->alloc, ...) on
+ * a graceful `-d <postgres|mysql>://...?sslmode!=disable` process exit. SMTP
+ * frees the KlTls inside the same call stack, so its local never dangled. */
+static KlAllocator    s_default_alloc;
+static pthread_once_t s_default_alloc_once = PTHREAD_ONCE_INIT;
+static void init_default_alloc(void) { s_default_alloc = kl_allocator_default(); }
+static KlAllocator *default_alloc(void)
+{
+    pthread_once(&s_default_alloc_once, init_default_alloc);
+    return &s_default_alloc;
+}
 
 /* Drive tls->handshake to completion with a poll-based blocking wait, bounded
  * by @p timeout_ms (<= 0 = wait indefinitely). 0 on success, -1 on error/timeout. */
@@ -61,7 +81,7 @@ static HlTlsClient *tls_client_wrap(KlTlsCtx *ctx, KlTls *tls)
 HlTlsClient *hl_tls_client_handshake(int fd, const char *host,
                                      int verify, int timeout_ms)
 {
-    KlAllocator alloc = kl_allocator_default();
+    KlAllocator *alloc = default_alloc();   /* persistent; outlives the KlTls/ctx */
 
     /* verify: trust anchor = embedded CA bundle, cert chain + hostname
      * checked. Otherwise: no CA, server certificate accepted as-is. */
@@ -70,14 +90,14 @@ HlTlsClient *hl_tls_client_handshake(int fd, const char *host,
         const unsigned char *cab = NULL;
         size_t cab_len = 0;
         if (hl_embedded_ca_bundle(&cab, &cab_len) == 0)
-            ctx = kl_tls_mbedtls_client_ctx_create_from_buf(cab, cab_len, &alloc);
+            ctx = kl_tls_mbedtls_client_ctx_create_from_buf(cab, cab_len, alloc);
     } else {
-        ctx = kl_tls_mbedtls_client_ctx_create(NULL, &alloc);
+        ctx = kl_tls_mbedtls_client_ctx_create(NULL, alloc);
     }
     if (!ctx)
         return NULL;
 
-    KlTls *tls = kl_tls_mbedtls_create(ctx, &alloc);
+    KlTls *tls = kl_tls_mbedtls_create(ctx, alloc);
     if (!tls) {
         kl_tls_mbedtls_ctx_destroy(ctx);
         return NULL;
@@ -102,8 +122,7 @@ HlTlsClient *hl_tls_client_handshake_cfg(int fd, const char *host,
     if (!cfg || !cfg->factory)
         return NULL;
 
-    KlAllocator alloc = kl_allocator_default();
-    KlTls *tls = cfg->factory(cfg->ctx, &alloc);
+    KlTls *tls = cfg->factory(cfg->ctx, default_alloc());
     if (!tls)
         return NULL;
     if (host && host[0] && tls->set_hostname)
