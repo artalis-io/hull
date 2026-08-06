@@ -8,6 +8,90 @@ release-artifact layout).
 
 ## [Unreleased]
 
+## [0.11.0] — 2026-08-06
+
+`hull/jobs@1`: a durable, DB-backed background job queue. Enqueue a unit of work
+and process it later with retries, exponential backoff, and a dead-letter path.
+It runs unchanged on SQLite, PostgreSQL, or MySQL through the `hull/db`
+capability, and `jobs.enqueue` is a plain `INSERT`, so a job commits atomically
+with the business row inside the same `db.batch()` (no external broker, no
+lost-job window). The module grows from a simple queue all the way to durable
+**workflow-as-code** with signals, sagas, and deterministic replay, plus a
+DB-derived observability surface. Both runtimes (Lua + JS) at full parity.
+
+### Added
+
+- **`hull/jobs@1` durable job queue.** `jobs.init` / `jobs.enqueue` /
+  `jobs.handler` / `jobs.work`; at-least-once delivery with idempotent handlers;
+  a concurrency-safe atomic claim (`SKIP LOCKED` on PostgreSQL/MySQL, single-
+  writer-serialized on SQLite, with a `FOR UPDATE` fallback for older servers);
+  retries with exponential backoff, a `dead` dead-letter status, and a
+  visibility-timeout reaper. Enqueue options: `delay` / `at` / `run_at`,
+  `priority`, named `queue`, `dedup_key` (idempotent enqueue), `throttle`,
+  `max_attempts`.
+- **Two execution models, one claim.** An in-process `app.every` poller and a
+  dedicated `hull jobs worker` process share the same claim. `run_worker` adds
+  intra-process `concurrency = N` (N in-flight handlers) and multi-queue draining
+  via `opts.queues` (a **list** for strict priority, a **map** for weighted
+  fairness).
+- **Ops surface:** `jobs.stats`, `jobs.get`, `jobs.dead`, `jobs.retry`,
+  `jobs.cancel`, `jobs.cleanup`, `jobs.heartbeat` (claim-token lock extension for
+  long jobs), `jobs.pause` / `jobs.resume` / `jobs.purge` (durable, fleet-wide
+  queue control).
+- **Durable cron.** `jobs.cron(name, spec, data, opts)` / `jobs.uncron` - 5-field
+  UTC schedules in the DB, fired exactly once across the fleet via compare-and-
+  set; missed ticks advance to the next occurrence. Fixed-offset `opts.tz`.
+- **Fleet-wide rate limiting.** `jobs.limit(queue, { rate, per })` - a shared DB
+  counter so K workers share one budget (claim-then-reconcile, nothing dropped).
+- **Workflows (job dependencies).** `enqueue({ depends_on = {...} })` - a job
+  starts `blocked` and unblocks when its dependencies complete; each dependency's
+  return value is injected as `job.deps`. A dead dependency cascade-fails the
+  dependent unless `on_dep_failure = "run"`.
+- **Result backend + more.** `jobs.result(id)` / `jobs.await(id, { timeout })`
+  (yielding wait for a job's value); `jobs.enqueue_many` (bulk); lifecycle hooks
+  `jobs.on("completed" | "retried" | "dead", fn)`; `jobs.progress`.
+- **Durable workflows (workflow-as-code).** `jobs.workflow(name, fn)` /
+  `jobs.start` - a workflow instance IS a job, so it inherits claim / reaper /
+  retry / worker / result. Inside the body: `ctx.step(name, fn)` (memoized, so a
+  crash or retry resumes past completed steps), `ctx.sleep` (durable timer),
+  `ctx.wait_signal` + `jobs.signal` (durable signals with a new non-terminal
+  `waiting` status), saga compensation (`ctx.step(name, fn, { compensate })`,
+  run in reverse on terminal failure), and the deterministic-replay primitives
+  `ctx.now` / `ctx.random` / `ctx.uuid` (memoized, byte-identical across
+  replays). `jobs.workflow_status(id)` for DB-derived introspection.
+- **Workflow versioning (`ctx.patched`).** Temporal-style patching so a changed
+  workflow definition keeps in-flight instances correct: an instance already past
+  a patch point keeps the old branch, a new one adopts the patch. Derived from
+  the durable step store, no schema change.
+- **Soft per-key concurrency.** `enqueue({ concurrency_key, concurrency })` caps
+  how many jobs sharing a key run at once, fleet-wide (claim-then-reconcile;
+  released over-limit claims keep their full retry budget).
+- **Observability.** `jobs.metrics()` - DB-derived, fleet-correct gauges
+  (pending / running / waiting / blocked / dead, oldest-pending age) plus, with
+  opt-in attempt history (`jobs.init({ history = true })`), latency percentiles
+  (wait/run p50/p95/p99) and throughput. `jobs.history(id)` timeline; W3C trace
+  propagation (`enqueue({ trace })` → `job.trace` / `ctx.trace`, carried to child
+  jobs).
+
+### Fixed
+
+- **TLS teardown crash on long-lived connections.** `hl_tls_client_handshake`
+  passed a stack-local `KlAllocator` by address, but Keel's `KlTls` captures the
+  allocator by pointer and frees through it at destroy - a dangling read that
+  crashed (SIGSEGV) when a long-lived TLS connection (e.g. a `hull/db` PostgreSQL
+  or MySQL registry connection) was torn down. Now uses a `pthread_once`-initialized
+  static allocator (handshakes run on `db.async` worker threads, so the init is
+  thread-safe and TSan-clean).
+
+## [0.10.1] — 2026-08-05
+
+### Fixed
+
+- **`tar` extraction** wrongly rejected a symlink whose `..`-containing target
+  still resolved *within* the extraction root, which broke `hull tools install
+  cosmocc`; the traversal check now resolves the target against the root before
+  rejecting.
+
 ## [0.10.0] — 2026-08-05
 
 Self-contained cross-platform builds. A cosmo `hull` on a stock machine with no
