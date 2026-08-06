@@ -261,10 +261,10 @@ function jobs.init(opts)
         .. "queue       VARCHAR(255) NOT NULL,"
         .. "type        VARCHAR(255) NOT NULL,"
         .. "attempt_no  INTEGER      NOT NULL,"
-        .. "wait_ms     INTEGER,"
-        .. "started_ms  INTEGER      NOT NULL,"
-        .. "finished_ms INTEGER      NOT NULL,"
-        .. "duration_ms INTEGER      NOT NULL,"
+        .. "wait_ms     BIGINT,"
+        .. "started_ms  BIGINT       NOT NULL,"
+        .. "finished_ms BIGINT       NOT NULL,"
+        .. "duration_ms BIGINT       NOT NULL,"
         .. "outcome     VARCHAR(16)  NOT NULL,"
         .. "error       TEXT,"
         .. "trace_id    VARCHAR(255))")
@@ -423,13 +423,24 @@ function jobs.enqueue(job_type, data, opts)
         if not (n and n > 0) then
             return nil   -- an un-run job with this (queue, dedup_key) already exists
         end
-        id = db.last_id()
+        -- Portable id fetch: the unique (queue, dedup_key) identifies the new row.
+        -- (db.last_id is unsupported on Postgres, which has no last-insert-rowid.)
+        local rows = db.query("SELECT id FROM _hull_jobs WHERE queue=? AND dedup_key=?",
+            { opts.queue or "default", opts.dedup_key })
+        id = rows and rows[1] and rows[1].id
     else
         local ph = {}
         for i = 1, #cols do ph[i] = "?" end
-        db.exec("INSERT INTO _hull_jobs (" .. table.concat(cols, ", ")
-            .. ") VALUES (" .. table.concat(ph, ", ") .. ")", vals)
-        id = db.last_id()
+        local sql = "INSERT INTO _hull_jobs (" .. table.concat(cols, ", ")
+            .. ") VALUES (" .. table.concat(ph, ", ") .. ")"
+        if db.dialect.supports_returning then
+            -- SQLite + Postgres: read the id back from the INSERT itself.
+            local rows = db.query(sql .. " RETURNING id", vals)
+            id = rows and rows[1] and rows[1].id
+        else
+            db.exec(sql, vals)   -- MySQL: LAST_INSERT_ID via db.last_id
+            id = db.last_id()
+        end
     end
     if has_deps then
         -- Record edges first, then re-check each dependency's current state: this
