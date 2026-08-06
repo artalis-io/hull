@@ -33,7 +33,7 @@ FAIL=0
 pass() { PASS=$((PASS + 1)); echo "  PASS: $1"; }
 fail() { FAIL=$((FAIL + 1)); echo "  FAIL: $1${2:+ - $2}"; }
 
-EXPECT_COLS="id,queue,type,payload,status,priority,attempts,max_attempts,run_at,claim_token,claimed_at,dedup_key,last_error,created_at,updated_at,progress,trace_context"
+EXPECT_COLS="id,queue,type,payload,status,priority,attempts,max_attempts,run_at,claim_token,claimed_at,dedup_key,last_error,created_at,updated_at,progress,trace_context,concurrency_key,concurrency_limit"
 
 # ── Phase 1: init + schema; Phase 2: correctness round-trip (both runtimes) ──
 check_runtime() {
@@ -593,6 +593,76 @@ app.main(async (ctx) => {
 
 echo "== v1.2 rate limit: Lua =="; check_rl "lua" "lua" "$LUA_RL"
 echo "== v1.2 rate limit: JS =="; check_rl "js" "js" "$JS_RL"
+
+# ── soft per-key concurrency ────────────────────────────────────────────────
+# The claim caps how many jobs sharing a concurrency_key run at once (soft:
+# claim-then-reconcile, releasing the over-limit ones back to pending with the
+# attempt undone). Part 1 asserts the cap + held-back requeue; Part 2 asserts a
+# freed slot lets a held job run (drained via jobs.work).
+check_perkey_conc() {
+    label="$1"; ext="$2"; app="$3"
+    T="$(mktemp -d)"; printf '%s\n' "$app" > "$T/app.$ext"
+    out="$("$HULL" "$T/app.$ext" -d "$T/a.db" 2>/dev/null)" || true
+    case "$out" in
+        *"PKC a=2 b=1 none=1 held=2 held_att=0 drained=3"*)
+            pass "$label: per-key concurrency (cap + held requeue + slot reuse)" ;;
+        *) fail "$label: soft per-key concurrency" "$out" ;;
+    esac
+    rm -rf "$T"
+}
+
+LUA_PKC='local jobs = require("hull.jobs")
+app.manifest({ modules = { "hull/jobs@1" } })
+app.main(function(ctx)
+  jobs.init()
+  -- Part 1: the claim cap. Jobs stay running (manual claim, never completed).
+  for i=1,3 do jobs.enqueue("t",{},{concurrency_key="A",concurrency=2}) end
+  for i=1,2 do jobs.enqueue("t",{},{concurrency_key="B",concurrency=1}) end
+  jobs.enqueue("t",{})
+  local c1 = jobs.claim({ batch = 10 })
+  local a,b,none = 0,0,0
+  for _,j in ipairs(c1) do
+    if j._conc_key=="A" then a=a+1 elseif j._conc_key=="B" then b=b+1 else none=none+1 end
+  end
+  local held, held_att = 0, 0
+  for id=1,6 do local g=jobs.get(id)
+    if g and g.status=="pending" then held=held+1; held_att=held_att+g.attempts end
+  end
+  -- Part 2: slot reuse. Fresh key C (limit 2), 3 jobs, drained via work(): the
+  -- 3rd only runs once one of the first two completes and frees its slot.
+  jobs.handler("tc", function(j) return end)
+  for i=1,3 do jobs.enqueue("tc",{},{concurrency_key="C",concurrency=2}) end
+  for _=1,5 do jobs.work({ batch = 10 }) end
+  local drained = 0
+  for id=7,9 do local g=jobs.get(id); if g and g.status=="done" then drained=drained+1 end end
+  ctx.stdout:write(("PKC a=%d b=%d none=%d held=%d held_att=%d drained=%d\n"):format(
+    a,b,none,held,held_att,drained))
+  return 0
+end)'
+
+JS_PKC='import { app } from "hull:app"; import { jobs } from "hull:jobs";
+app.manifest({ modules: ["hull/jobs@1"] });
+app.main(async (ctx) => {
+  jobs.init();
+  for (let i=0;i<3;i++) jobs.enqueue("t",{},{concurrencyKey:"A",concurrency:2});
+  for (let i=0;i<2;i++) jobs.enqueue("t",{},{concurrencyKey:"B",concurrency:1});
+  jobs.enqueue("t",{});
+  const c1 = jobs.claim({ batch: 10 });
+  let a=0,b=0,none=0;
+  for (const j of c1) { if (j._concKey==="A") a++; else if (j._concKey==="B") b++; else none++; }
+  let held=0, heldAtt=0;
+  for (let id=1; id<=6; id++) { const g=jobs.get(id); if (g && g.status==="pending") { held++; heldAtt+=g.attempts; } }
+  jobs.handler("tc", (j) => {});
+  for (let i=0;i<3;i++) jobs.enqueue("tc",{},{concurrencyKey:"C",concurrency:2});
+  for (let k=0;k<5;k++) await jobs.work({ batch: 10 });
+  let drained=0;
+  for (let id=7; id<=9; id++) { const g=jobs.get(id); if (g && g.status==="done") drained++; }
+  ctx.stdout.write(`PKC a=${a} b=${b} none=${none} held=${held} held_att=${heldAtt} drained=${drained}\n`);
+  return 0;
+});'
+
+echo "== soft per-key concurrency: Lua =="; check_perkey_conc "lua" "lua" "$LUA_PKC"
+echo "== soft per-key concurrency: JS  =="; check_perkey_conc "js"  "js"  "$JS_PKC"
 
 # ── v1.3: queue pause / resume / purge ──────────────────────────────────────
 # A paused queue is not claimed; resume restores it; purge deletes pending.
