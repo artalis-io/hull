@@ -842,6 +842,64 @@ else
 fi
 rm -rf "$EW"
 
+# ── durable events Phase 3 (poison-event skip-after-N + metrics) ─────────────
+# A subscription with max_failures=N skips a poison event after N consecutive
+# handler failures (advancing past it + recording a durable subscription_skipped
+# event), so one bad event can't wedge the subscription or block retention.
+# jobs.metrics gains an events block (log depth + per-subscription lag/failures).
+check_events_p3() {
+    label="$1"; ext="$2"; app="$3"
+    T="$(mktemp -d)"; printf '%s\n' "$app" > "$T/app.$ext"
+    out="$("$HULL" "$T/app.$ext" -d "$T/a.db" 2>/dev/null)" || true
+    case "$out" in
+        *"POISON seen=1,3,4 d1=1 d2skip=true skips=1 lag=0 fail=0 depth=4"*)
+            pass "$label: poison-event skip-after-N + subscription_skipped + metrics" ;;
+        *) fail "$label: durable events Phase 3" "$out" ;;
+    esac
+    rm -rf "$T"
+}
+
+LUA_EV3='local jobs = require("hull.jobs")
+app.manifest({ modules = { "hull/jobs@1" } })
+app.main(function(ctx)
+  jobs.init({ events = true })
+  jobs.enqueue("ok",{}); jobs.enqueue("ok",{}); jobs.enqueue("ok",{})
+  local seen = {}
+  jobs.subscribe("p", function(ev) if ev.id == 2 then error("poison") end seen[#seen+1] = ev.id end,
+    { from = "beginning", max_failures = 2 })
+  local d1 = jobs._events_drain("p", { now = 1000 })
+  local d2 = jobs._events_drain("p", { now = 1000 })
+  jobs._events_drain("p", { now = 1000 })
+  local skips = #jobs.events({ types = { "subscription_skipped" } })
+  local m = jobs.metrics()
+  local sub = m.events and m.events.subscriptions[1]
+  ctx.stdout:write(("POISON seen=%s d1=%d d2skip=%s skips=%d lag=%s fail=%s depth=%s\n"):format(
+    table.concat(seen, ","), d1.delivered, tostring(d2.skipped), skips,
+    tostring(sub and sub.lag), tostring(sub and sub.failures), tostring(m.events and m.events.log_depth)))
+  return 0
+end)'
+
+JS_EV3='import { app } from "hull:app"; import { jobs } from "hull:jobs";
+app.manifest({ modules: ["hull/jobs@1"] });
+app.main(async (ctx) => {
+  jobs.init({ events: true });
+  jobs.enqueue("ok",{}); jobs.enqueue("ok",{}); jobs.enqueue("ok",{});
+  const seen = [];
+  jobs.subscribe("p", (ev) => { if (ev.id === 2) throw new Error("poison"); seen.push(ev.id); },
+    { from: "beginning", maxFailures: 2 });
+  const d1 = jobs._eventsDrain("p", { now: 1000 });
+  const d2 = jobs._eventsDrain("p", { now: 1000 });
+  jobs._eventsDrain("p", { now: 1000 });
+  const skips = jobs.events({ types: ["subscription_skipped"] }).length;
+  const m = jobs.metrics();
+  const sub = m.events && m.events.subscriptions[0];
+  ctx.stdout.write(`POISON seen=${seen.join(",")} d1=${d1.delivered} d2skip=${d2.skipped} skips=${skips} lag=${sub&&sub.lag} fail=${sub&&sub.failures} depth=${m.events&&m.events.logDepth}\n`);
+  return 0;
+});'
+
+echo "== durable events Phase 3: Lua =="; check_events_p3 "lua" "lua" "$LUA_EV3"
+echo "== durable events Phase 3: JS  =="; check_events_p3 "js"  "js"  "$JS_EV3"
+
 # ── v1.3: queue pause / resume / purge ──────────────────────────────────────
 # A paused queue is not claimed; resume restores it; purge deletes pending.
 check_pq() {

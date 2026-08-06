@@ -298,6 +298,7 @@ function init(opts) {
         "lease_token VARCHAR(255)," +
         "lease_until INTEGER," +
         "failures    INTEGER      NOT NULL DEFAULT 0," +
+        "max_failures INTEGER," +   // skip a poison event after N failures (NULL = never)
         "updated_at  INTEGER      NOT NULL)");
 
     // Verify the server actually parses SKIP LOCKED (the compile-time dialect
@@ -1393,6 +1394,22 @@ function metrics(opts) {
         out.latency = { waitMs: percentiles(waits), runMs: percentiles(runs) };
         out.throughput = { donePerSec: doneN / window, deadPerSec: deadN / window };
     }
+    // Durable-event log health (Phase 3): total log depth + per-subscription lag
+    // (positions behind the log head = max id - cursor) and failure count.
+    {
+        const depth = db.query("SELECT COUNT(*) AS n, MAX(id) AS mx FROM _hull_job_events");
+        const logDepth = (depth[0] && depth[0].n) || 0;
+        if (logDepth > 0) {
+            const maxId = (depth[0] && depth[0].mx) || 0;
+            const subs = db.query("SELECT name, cursor_id, failures FROM _hull_job_subscriptions ORDER BY name");
+            out.events = {
+                logDepth,
+                subscriptions: subs.map((s) => ({
+                    name: s.name, lag: maxId - (s.cursor_id || 0), failures: s.failures || 0,
+                })),
+            };
+        }
+    }
     return out;
 }
 
@@ -1958,6 +1975,7 @@ function subscribe(name, handler, opts) {
         throw new Error("jobs.subscribe: handler must be a function");
     const o = opts || {};
     const typesCsv = (Array.isArray(o.types) && o.types.length) ? o.types.join(",") : null;
+    const maxF = (typeof o.maxFailures === "number" && o.maxFailures > 0) ? o.maxFailures : null;
     // Start cursor: "now" (default) skips existing history; "beginning" replays all.
     let start = 0;
     if (o.from !== "beginning") {
@@ -1966,10 +1984,11 @@ function subscribe(name, handler, opts) {
     }
     const now = time.now();
     const n = db.insertIfAbsent("_hull_job_subscriptions", ["name"],
-        ["name", "cursor_id", "types", "failures", "updated_at"], [name, start, typesCsv, 0, now]);
+        ["name", "cursor_id", "types", "failures", "max_failures", "updated_at"],
+        [name, start, typesCsv, 0, maxF, now]);
     if (!(n && n > 0)) {
-        db.exec("UPDATE _hull_job_subscriptions SET types=?, updated_at=? WHERE name=?",
-            [typesCsv, now, name]);
+        db.exec("UPDATE _hull_job_subscriptions SET types=?, max_failures=?, updated_at=? WHERE name=?",
+            [typesCsv, maxF, now, name]);
     }
     _subscribers[name] = { handler };
     return jobs;
@@ -2004,9 +2023,10 @@ function eventsDrain(name, opts) {
         ? db.query(leaseSql + " RETURNING name", leaseParams).length
         : (db.exec(leaseSql, leaseParams) || 0);
     if (got === 0) return { delivered: 0, leased: false };
-    const row = db.query("SELECT cursor_id, types, failures FROM _hull_job_subscriptions WHERE name=?", [name]);
+    const row = db.query("SELECT cursor_id, types, failures, max_failures FROM _hull_job_subscriptions WHERE name=?", [name]);
     const cursor = row[0].cursor_id;
     const failures = row[0].failures || 0;
+    const maxFailures = row[0].max_failures;
     const where = ["id > ?"], params = [cursor];
     if (row[0].types) {
         const parts = String(row[0].types).split(",").filter((s) => s.length);
@@ -2019,22 +2039,44 @@ function eventsDrain(name, opts) {
     const evs = db.query(
         "SELECT id, ts, type, job_id, job_type, queue, data FROM _hull_job_events " +
         "WHERE " + where.join(" AND ") + " ORDER BY id LIMIT ?", params);
-    let lastOk = cursor, delivered = 0, failed = false;
+    // Deliver in id order. On a handler error, stop at that event (the poison);
+    // the successful prefix is committed and the poison retried on the next drain.
+    let lastOk = cursor, delivered = 0, poison = null, poisonErr = null;
     for (const e of evs) {
         if (e.data !== undefined && e.data !== null && e.data !== "") {
             try { e.data = json.decode(e.data); } catch (_e) { /* leave raw */ }
         }
         try { sub.handler(e); lastOk = e.id; delivered += 1; }
-        catch (_e) { failed = true; break; }
+        catch (err) { poison = e; poisonErr = err; break; }
     }
-    const newCursor = (o.commitCursor === false) ? cursor : lastOk;
+    // Failure accounting + poison skip (Phase 3). `failures` counts consecutive
+    // drains stalled on the SAME frontier event; making progress resets to a fresh
+    // 1. Once it reaches maxFailures (opt-in), skip the poison: advance past it and
+    // record a durable `subscription_skipped` event so it can't wedge the
+    // subscription (or retention) forever.
+    let newFailures = 0, newCursor = lastOk;
+    if (poison) {
+        newFailures = (delivered > 0) ? 1 : failures + 1;
+        if (maxFailures && newFailures >= maxFailures) {
+            if (poison.type !== "subscription_skipped") {   // don't chain skip-of-skip
+                emitDurable("subscription_skipped",
+                    { id: poison.job_id, type: poison.job_type, queue: poison.queue },
+                    { error: `subscription '${name}' skipped event ${poison.id} after ` +
+                        `${newFailures} failures: ${(poisonErr && poisonErr.message) || poisonErr}` });
+            }
+            newCursor = poison.id;   // advance PAST the poison
+            newFailures = 0;
+        }
+    }
+    if (o.commitCursor === false) newCursor = cursor;
     const release = o.releaseLease !== false;
     db.exec(
         "UPDATE _hull_job_subscriptions SET cursor_id=?, failures=?, " +
         (release ? "lease_token=NULL, lease_until=NULL, " : "") +
         "updated_at=? WHERE name=? AND lease_token=?",
-        [newCursor, failed ? failures + 1 : 0, now, name, token]);
-    return { delivered, cursor: newCursor, leased: true };
+        [newCursor, newFailures, now, name, token]);
+    return { delivered, cursor: newCursor, leased: true,
+             skipped: (poison !== null && newCursor === poison.id) };
 }
 
 /**

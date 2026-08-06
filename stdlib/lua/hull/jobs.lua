@@ -338,6 +338,7 @@ function jobs.init(opts)
         .. "lease_token VARCHAR(255),"
         .. "lease_until INTEGER,"
         .. "failures    INTEGER      NOT NULL DEFAULT 0,"
+        .. "max_failures INTEGER,"    -- skip a poison event after N failures (NULL = never)
         .. "updated_at  INTEGER      NOT NULL)")
 
     -- Verify the server actually parses SKIP LOCKED (the compile-time dialect
@@ -1516,6 +1517,22 @@ function jobs.metrics(opts)
         out.latency = { wait_ms = percentiles(waits), run_ms = percentiles(runs) }
         out.throughput = { done_per_sec = done_n / window, dead_per_sec = dead_n / window }
     end
+    -- Durable-event log health (Phase 3): total log depth + per-subscription lag
+    -- (positions behind the log head = max id - cursor) and failure count, so a
+    -- stuck / lagging subscriber is visible. Present only when the log has data.
+    local depth = db.query("SELECT COUNT(*) AS n, MAX(id) AS mx FROM _hull_job_events")
+    local log_depth = (depth[1] and depth[1].n) or 0
+    if log_depth > 0 then
+        local max_id = (depth[1] and depth[1].mx) or 0
+        local subs = db.query(
+            "SELECT name, cursor_id, failures FROM _hull_job_subscriptions ORDER BY name")
+        local sub_list = {}
+        for _, sn in ipairs(subs or {}) do
+            sub_list[#sub_list + 1] =
+                { name = sn.name, lag = max_id - (sn.cursor_id or 0), failures = sn.failures or 0 }
+        end
+        out.events = { log_depth = log_depth, subscriptions = sub_list }
+    end
     return out
 end
 
@@ -2101,7 +2118,9 @@ end
 -- (like jobs.handler). Drained by jobs.work / jobs.run_worker.
 -- @tparam string name
 -- @tparam function handler   function(event)
--- @tparam[opt] table opts { types = {"dead", ...}, from = "now" | "beginning" }
+-- @tparam[opt] table opts { types = {"dead", ...}, from = "now" | "beginning",
+--                            max_failures = N }  N = skip a poison event after N
+--                            consecutive handler failures (nil = block forever)
 function jobs.subscribe(name, handler, opts)
     if type(name) ~= "string" or name == "" then
         error("jobs.subscribe: name must be a non-empty string")
@@ -2110,6 +2129,7 @@ function jobs.subscribe(name, handler, opts)
     opts = opts or {}
     local types_csv
     if type(opts.types) == "table" and #opts.types > 0 then types_csv = table.concat(opts.types, ",") end
+    local max_f = (type(opts.max_failures) == "number" and opts.max_failures > 0) and opts.max_failures or nil
     -- Start cursor: "now" (default) skips existing history; "beginning" replays all.
     local start = 0
     if opts.from ~= "beginning" then
@@ -2118,12 +2138,13 @@ function jobs.subscribe(name, handler, opts)
     end
     local now = time.now()
     -- Create the durable row once; a re-subscribe keeps the persisted cursor and
-    -- only refreshes the type filter.
+    -- only refreshes the config (type filter, skip threshold).
     local n = db.insert_if_absent("_hull_job_subscriptions", { "name" },
-        { "name", "cursor_id", "types", "failures", "updated_at" }, { name, start, types_csv, 0, now })
+        { "name", "cursor_id", "types", "failures", "max_failures", "updated_at" },
+        { name, start, types_csv, 0, max_f, now })
     if not (n and n > 0) then
-        db.exec("UPDATE _hull_job_subscriptions SET types=?, updated_at=? WHERE name=?",
-            { types_csv, now, name })
+        db.exec("UPDATE _hull_job_subscriptions SET types=?, max_failures=?, updated_at=? WHERE name=?",
+            { types_csv, max_f, now, name })
     end
     _subscribers[name] = { handler = handler }
     return jobs
@@ -2162,9 +2183,10 @@ function jobs._events_drain(name, opts)
     end
     if got == 0 then return { delivered = 0, leased = false } end
     local row = db.query(
-        "SELECT cursor_id, types, failures FROM _hull_job_subscriptions WHERE name=?", { name })
+        "SELECT cursor_id, types, failures, max_failures FROM _hull_job_subscriptions WHERE name=?", { name })
     local cursor = row[1].cursor_id
     local failures = row[1].failures or 0
+    local max_failures = row[1].max_failures
     -- Fetch events past the cursor, filtered by the subscription's types.
     local where, params = { "id > ?" }, { cursor }
     if row[1].types and row[1].types ~= "" then
@@ -2176,24 +2198,46 @@ function jobs._events_drain(name, opts)
     local evs = db.query(
         "SELECT id, ts, type, job_id, job_type, queue, data FROM _hull_job_events "
         .. "WHERE " .. table.concat(where, " AND ") .. " ORDER BY id LIMIT ?", params)
-    -- Deliver in id order. On a handler error, stop - advance only past the
-    -- successful prefix; the failing event is retried on the next drain.
-    local last_ok, delivered, failed = cursor, 0, false
+    -- Deliver in id order. On a handler error, stop at that event (the poison);
+    -- the successful prefix is committed and the poison retried on the next drain.
+    local last_ok, delivered, poison, poison_err = cursor, 0, nil, nil
     for _, e in ipairs(evs) do
         if e.data ~= nil and e.data ~= "" then
             local ok, d = pcall(json.decode, e.data); if ok then e.data = d end
         end
-        if pcall(sub.handler, e) then last_ok = e.id; delivered = delivered + 1
-        else failed = true; break end
+        local ok, herr = pcall(sub.handler, e)
+        if ok then last_ok = e.id; delivered = delivered + 1
+        else poison = e; poison_err = herr; break end
     end
-    local new_cursor = (opts.commit_cursor == false) and cursor or last_ok
+    -- Failure accounting + poison skip. `failures` counts consecutive drains that
+    -- stalled on the SAME frontier event; making progress this drain resets it to
+    -- a fresh 1. Once it reaches max_failures (opt-in), skip the poison: advance
+    -- past it and record a durable `subscription_skipped` event so it can't wedge
+    -- the subscription (or retention) forever.
+    local new_failures, new_cursor = 0, last_ok
+    if poison then
+        new_failures = (delivered > 0) and 1 or (failures + 1)
+        if max_failures and new_failures >= max_failures then
+            -- Don't chain: skipping a subscription_skipped must not emit another.
+            if poison.type ~= "subscription_skipped" then
+                emit_durable("subscription_skipped",
+                    { id = poison.job_id, type = poison.job_type, queue = poison.queue },
+                    { error = "subscription '" .. name .. "' skipped event " .. poison.id
+                        .. " after " .. new_failures .. " failures: " .. tostring(poison_err) })
+            end
+            new_cursor = poison.id   -- advance PAST the poison
+            new_failures = 0
+        end
+    end
+    if opts.commit_cursor == false then new_cursor = cursor end
     local release = opts.release_lease ~= false
     db.exec(
         "UPDATE _hull_job_subscriptions SET cursor_id=?, failures=?, "
         .. (release and "lease_token=NULL, lease_until=NULL, " or "")
         .. "updated_at=? WHERE name=? AND lease_token=?",
-        { new_cursor, failed and (failures + 1) or 0, now, name, token })
-    return { delivered = delivered, cursor = new_cursor, leased = true }
+        { new_cursor, new_failures, now, name, token })
+    return { delivered = delivered, cursor = new_cursor, leased = true,
+             skipped = (poison ~= nil and new_cursor == poison.id) or false }
 end
 
 --- Purge terminal jobs (done + dead by default) whose last update is older than

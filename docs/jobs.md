@@ -171,10 +171,23 @@ jobs.subscribe("fulfillment", (ev) => { if (ev.type === "completed") webhook.not
   `"beginning"` replays the whole retained log.
 - **Ordered per subscription** (by event id); no cross-subscription order promise.
 - **Retention is subscription-aware**: `jobs.cleanup` never truncates the log past
-  the slowest subscription's cursor, so a lagging consumer keeps its unseen events
-  (watch subscription lag so a stuck one doesn't hold the log open indefinitely).
-- A handler that keeps throwing stops its subscription at that event (retried on
-  the next drain); a skip-after-N poison-event policy is the Phase 3 follow-up.
+  the slowest subscription's cursor, so a lagging consumer keeps its unseen events.
+- **Poison events don't wedge a subscription.** By default a handler that keeps
+  throwing on one event blocks there (retried each drain). Pass
+  `max_failures = N` (`maxFailures` in JS) to **skip** that event after `N`
+  consecutive failures: the drain advances past it and records a durable
+  `subscription_skipped` event (queryable via `jobs.events({ types =
+  { "subscription_skipped" } })`), so one bad event can't stall delivery or hold
+  the log open for retention.
+
+```lua
+jobs.subscribe("reactor", handler, { types = { "completed" }, max_failures = 5 })
+```
+
+**Observability.** `jobs.metrics()` includes an `events` block when the log has
+data: `log_depth` (total events) and per-subscription `{ name, lag, failures }`,
+where `lag` = positions behind the log head (`max id − cursor`). A stuck or
+lagging subscriber shows up as high `lag` / `failures`.
 
 Design + testability: [docs/jobs_events_design.md](jobs_events_design.md).
 
