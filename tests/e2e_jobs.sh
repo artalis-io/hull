@@ -664,6 +664,64 @@ app.main(async (ctx) => {
 echo "== soft per-key concurrency: Lua =="; check_perkey_conc "lua" "lua" "$LUA_PKC"
 echo "== soft per-key concurrency: JS  =="; check_perkey_conc "js"  "js"  "$JS_PKC"
 
+# ── durable fleet-wide events, Phase 1 (log + transactional emit + tail) ─────
+# jobs.init{events=true} appends a lifecycle event in the SAME transaction as the
+# state change (enqueued/completed/dead/cancelled). jobs.events tails it. Counts
+# must match committed state exactly (no phantom events); the tail filters by type.
+check_events() {
+    label="$1"; ext="$2"; app="$3"
+    T="$(mktemp -d)"; printf '%s\n' "$app" > "$T/app.$ext"
+    out="$("$HULL" "$T/app.$ext" -d "$T/a.db" 2>/dev/null)" || true
+    case "$out" in
+        *"EVENTS e=4 c=1 d=2 x=1 err=yes filtered=2"*)
+            pass "$label: durable events (transactional emit + tail + type filter)" ;;
+        *) fail "$label: durable events Phase 1" "$out" ;;
+    esac
+    rm -rf "$T"
+}
+
+LUA_EVENTS='local jobs = require("hull.jobs")
+app.manifest({ modules = { "hull/jobs@1" } })
+app.main(function(ctx)
+  jobs.init({ events = true })
+  jobs.handler("ok",  function(j) return { r = 1 } end)
+  jobs.handler("bad", function(j) error("boom") end)
+  jobs.enqueue("ok", { x = 1 })
+  jobs.enqueue("bad", {}, { max_attempts = 1 })
+  jobs.enqueue("nohandler", {})
+  local c = jobs.enqueue("ok", {}); jobs.cancel(c)
+  for _=1,3 do jobs.work({ batch = 10 }) end
+  local n = {}
+  for _,e in ipairs(jobs.events({ limit = 100 })) do n[e.type] = (n[e.type] or 0) + 1 end
+  local deads = jobs.events({ types = { "dead" }, limit = 10 })
+  local err = (deads[1] and deads[1].data and deads[1].data.error) and "yes" or "no"
+  ctx.stdout:write(("EVENTS e=%d c=%d d=%d x=%d err=%s filtered=%d\n"):format(
+    n.enqueued or 0, n.completed or 0, n.dead or 0, n.cancelled or 0, err, #deads))
+  return 0
+end)'
+
+JS_EVENTS='import { app } from "hull:app"; import { jobs } from "hull:jobs";
+app.manifest({ modules: ["hull/jobs@1"] });
+app.main(async (ctx) => {
+  jobs.init({ events: true });
+  jobs.handler("ok",  (j) => ({ r: 1 }));
+  jobs.handler("bad", (j) => { throw new Error("boom"); });
+  jobs.enqueue("ok", { x: 1 });
+  jobs.enqueue("bad", {}, { maxAttempts: 1 });
+  jobs.enqueue("nohandler", {});
+  const c = jobs.enqueue("ok", {}); jobs.cancel(c);
+  for (let k=0;k<3;k++) await jobs.work({ batch: 10 });
+  const n = {};
+  for (const e of jobs.events({ limit: 100 })) n[e.type] = (n[e.type] || 0) + 1;
+  const deads = jobs.events({ types: ["dead"], limit: 10 });
+  const err = (deads[0] && deads[0].data && deads[0].data.error) ? "yes" : "no";
+  ctx.stdout.write(`EVENTS e=${n.enqueued||0} c=${n.completed||0} d=${n.dead||0} x=${n.cancelled||0} err=${err} filtered=${deads.length}\n`);
+  return 0;
+});'
+
+echo "== durable events Phase 1: Lua =="; check_events "lua" "lua" "$LUA_EVENTS"
+echo "== durable events Phase 1: JS  =="; check_events "js"  "js"  "$JS_EVENTS"
+
 # ── v1.3: queue pause / resume / purge ──────────────────────────────────────
 # A paused queue is not claimed; resume restores it; purge deletes pending.
 check_pq() {

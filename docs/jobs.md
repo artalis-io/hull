@@ -113,6 +113,42 @@ jobs.on("completed", function(job, info) metrics.inc("jobs.done", { type = job.t
 jobs.on("dead",      function(job, info) log.error("job died: " .. info.error) end)
 ```
 
+## Durable events (fleet-wide)
+
+Where `jobs.on` is in-process and lost on a crash, the **durable event log** is
+opt-in (`jobs.init({ events = true })`) and records every lifecycle transition -
+`enqueued`, `completed`, `retried`, `dead`, `cancelled` - as a row in
+`_hull_job_events`, **written in the same transaction as the state change that
+produced it**. So an event exists *iff* the transition committed: no lost events
+(crash after the change, before an external publish) and no phantom events
+(publish, then the change rolls back) - the same transactional coupling that makes
+`enqueue` a plain `INSERT`. It survives restarts and is visible to any process
+against the same DB (a dashboard, an analytics sink, a reacting service).
+
+```lua
+jobs.init({ events = true })
+
+-- Read-only tail, newest first (for a dashboard / ad-hoc inspection):
+local recent = jobs.events({ types = { "dead" }, since = last_id, limit = 100 })
+-- each: { id, ts, type, job_id, job_type, queue, data = { error?, attempt?, trace? } }
+```
+```javascript
+jobs.init({ events: true });
+const recent = jobs.events({ types: ["dead"], since: lastId, limit: 100 });
+```
+
+- **`id`** is a monotonic total order (and the cursor space Phase 2 subscriptions
+  will use). Tail incrementally by passing the last id you saw as `since`.
+- **`data`** is compact metadata (`error` / `attempt` / `trace`), never the full
+  result - join `jobs.result(job_id)` when you need the value.
+- **Retention** is by age via `jobs.cleanup` (same window as terminal rows).
+- **Off by default** - an app that doesn't opt in pays nothing (no log writes).
+- This is **Phase 1** (the log + a pollable tail, enough to power a dashboard).
+  Phase 2 adds **durable subscriptions** (`jobs.subscribe(name, handler)`) with
+  at-least-once delivery + per-consumer cursors, so a reacting service processes
+  every event exactly-once-effectively across the fleet. Design:
+  [docs/jobs_events_design.md](jobs_events_design.md).
+
 ## Recurring jobs (cron)
 
 `jobs.cron(name, spec, data?, opts?)` registers a **durable** recurring

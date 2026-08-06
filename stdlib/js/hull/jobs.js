@@ -40,6 +40,7 @@ const _cfg = {
     backoff: defaultBackoff,
     history:           false, // attempt-history recording: true | { queues:[...] } | false
     historyRetention:  null,  // seconds to keep attempt rows (null = jobs.cleanup default)
+    events:            false, // durable fleet-wide event log (jobs.subscribe / jobs.events)
 };
 
 // Exponential backoff: 2^attempt * 10s, capped at 1h (shared with outbox math).
@@ -96,6 +97,7 @@ function init(opts) {
     if (o.reapInterval !== undefined) _cfg.reapInterval = o.reapInterval;
     if (o.history !== undefined) _cfg.history = o.history;
     if (o.historyRetention !== undefined) _cfg.historyRetention = o.historyRetention;
+    if (o.events !== undefined) _cfg.events = o.events;
     if (o.backoff !== undefined) _cfg.backoff = o.backoff;
 
     // Keyed/indexed text columns are VARCHAR(255) so MySQL can index them;
@@ -267,6 +269,23 @@ function init(opts) {
     db.exec("CREATE INDEX IF NOT EXISTS idx_hull_job_attempts_job ON _hull_job_attempts(job_id, attempt_no)");
     db.exec("CREATE INDEX IF NOT EXISTS idx_hull_job_attempts_recent ON _hull_job_attempts(finished_ms)");
 
+    // Durable fleet-wide event log (jobs.init{events:true}). Append-only lifecycle
+    // events, written in the SAME transaction as the state change that produced
+    // them (transactional coupling: an event exists iff the transition committed).
+    // The `id` is the total order + the future subscription cursor space. `data`
+    // is small JSON metadata (error/attempt/trace), never the full result.
+    db.exec(
+        "CREATE TABLE IF NOT EXISTS _hull_job_events (" +
+        "id       " + db.autoincrementIdDdl + ", " +
+        "ts       INTEGER      NOT NULL," +
+        "type     VARCHAR(32)  NOT NULL," +
+        "job_id   INTEGER," +
+        "job_type VARCHAR(255)," +
+        "queue    VARCHAR(255)," +
+        "data     TEXT)");
+    db.exec("CREATE INDEX IF NOT EXISTS idx_hull_job_events_type ON _hull_job_events(type, id)");
+    db.exec("CREATE INDEX IF NOT EXISTS idx_hull_job_events_ts ON _hull_job_events(ts)");
+
     // Verify the server actually parses SKIP LOCKED (the compile-time dialect
     // flag says "this backend supports it" but a MySQL<8 / MariaDB<10.6 server
     // does not). A 0-row probe against the real table detects it once; the claim
@@ -343,6 +362,41 @@ function loadDeps(dependentId) {
         }
     });
     return out;
+}
+
+// Append a durable lifecycle event (opt-in via jobs.init{events:true}). Called
+// INSIDE the transition's transaction, so the event commits iff the state change
+// does (transactional coupling: no lost, no phantom events). `job` supplies
+// id/type/queue/trace; `info` is small metadata (error/attempt) - never the full
+// result (a consumer joins _hull_job_results for that).
+function emitDurable(event, job, info) {
+    if (!_cfg.events) return;
+    info = info || {};
+    let data = null;
+    if (info.error !== undefined || info.attempt !== undefined ||
+        (job.trace !== undefined && job.trace !== null)) {
+        data = json.encode({ error: info.error, attempt: info.attempt, trace: job.trace });
+    }
+    db.exec(
+        "INSERT INTO _hull_job_events (ts, type, job_id, job_type, queue, data) " +
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        [time.now(), event, job.id, job.type, job.queue, data]);
+}
+
+// Apply a terminal transition and its durable event ATOMICALLY (one txn), then
+// fire the in-process listeners. `transition()` runs the markX state change and
+// returns the effective outcome ("done"|"dead"|"retried"). Wrapping in db.batch
+// both couples the event to the state change and collapses markDone's several
+// statements into one commit (fewer fsyncs, even when events are off).
+const EVENT_OF = { done: "completed", dead: "dead", retried: "retried" };
+function finish(job, info, transition) {
+    let outcome;
+    db.batch(() => {
+        outcome = transition();
+        emitDurable(EVENT_OF[outcome] || outcome, job, info);
+    });
+    emit(EVENT_OF[outcome] || outcome, job, info);
+    return outcome;
 }
 
 /**
@@ -435,6 +489,10 @@ function enqueue(jobType, data, opts) {
             else if (g.status === "dead") resolveEdge(id, dep, false, failMode);
         }
     }
+    // Durable "enqueued" event (opt-in). Emitted here so it joins the caller's
+    // db.batch when enqueue is called inside one (transactional coupling).
+    emitDurable("enqueued",
+        { id, type: jobType, queue: o.queue || "default", trace: o.trace }, {});
     return id;
 }
 
@@ -1098,9 +1156,7 @@ async function work(opts) {
         let outcome, errStr;              // undefined outcome = a yield (not recorded)
         if (!h) {
             errStr = `no handler for job type '${job.type}'`;
-            markDead(job.id, errStr);
-            emit("dead", job, { error: errStr });
-            outcome = "dead";
+            outcome = finish(job, { error: errStr }, () => { markDead(job.id, errStr); return "dead"; });
         } else {
         try {
             const result = await h(job);
@@ -1137,26 +1193,23 @@ async function work(opts) {
                         [result.wakeAt || now, now, job.id]);
                 }
             } else if (result === DEAD) {
-                errStr = "handler returned jobs.DEAD"; outcome = "dead";
-                markDead(job.id, errStr);
-                emit("dead", job, { error: errStr });
+                errStr = "handler returned jobs.DEAD";
+                outcome = finish(job, { error: errStr }, () => { markDead(job.id, errStr); return "dead"; });
             } else if (result === RETRY) {
                 errStr = "handler requested retry";
-                outcome = markRetry(job, errStr);
-                emit(outcome, job, { error: errStr, attempt: job.attempts });
+                outcome = finish(job, { error: errStr, attempt: job.attempts },
+                    () => markRetry(job, errStr));
             } else {
                 // undefined / true / DISCARD -> done, no result; any other return
                 // value is stored as the job's result (for dependents).
                 const res = (result !== undefined && result !== true && result !== DISCARD)
                     ? result : undefined;
-                markDone(job.id, res);
-                emit("completed", job, { result: res });
-                outcome = "done";
+                outcome = finish(job, { result: res }, () => { markDone(job.id, res); return "done"; });
             }
         } catch (e) {
             errStr = String((e && e.message) || e);
-            outcome = markRetry(job, errStr);
-            emit(outcome, job, { error: errStr, attempt: job.attempts });
+            outcome = finish(job, { error: errStr, attempt: job.attempts },
+                () => markRetry(job, errStr));
         }
         }
         // Opt-in attempt history (a yield leaves outcome undefined -> not recorded).
@@ -1813,7 +1866,48 @@ function retry(id) {
  * @returns {boolean}
  */
 function cancel(id) {
-    return (db.exec("DELETE FROM _hull_jobs WHERE id=? AND status='pending'", [id]) || 0) > 0;
+    if (!_cfg.events) {
+        return (db.exec("DELETE FROM _hull_jobs WHERE id=? AND status='pending'", [id]) || 0) > 0;
+    }
+    // events on: capture type/queue for the "cancelled" event, delete + emit in
+    // one txn (BEGIN IMMEDIATE serializes, so the SELECT->DELETE stays consistent).
+    let cancelled = false;
+    db.batch(() => {
+        const r = db.query("SELECT type, queue FROM _hull_jobs WHERE id=? AND status='pending'", [id]);
+        if (r[0]) {
+            db.exec("DELETE FROM _hull_jobs WHERE id=? AND status='pending'", [id]);
+            emitDurable("cancelled", { id, type: r[0].type, queue: r[0].queue }, {});
+            cancelled = true;
+        }
+    });
+    return cancelled;
+}
+
+/**
+ * Read-only tail of the durable event log (jobs.init{events:true}), newest first
+ * - for a dashboard or ad-hoc inspection. Phase 2 adds durable subscriptions
+ * (jobs.subscribe) with at-least-once delivery + cursors.
+ * @param {object} [opts] { since: <event id>, types: ["dead", ...], limit: 100 }
+ * @returns {Array} of { id, ts, type, job_id, job_type, queue, data }
+ */
+function events(opts) {
+    const o = opts || {};
+    const where = ["1=1"], params = [];
+    if (o.since !== undefined) { where.push("id > ?"); params.push(o.since); }
+    if (Array.isArray(o.types) && o.types.length) {
+        where.push("type IN (" + o.types.map(() => "?").join(",") + ")");
+        for (const t of o.types) params.push(t);
+    }
+    params.push(Math.min(Number(o.limit) || 100, 1000));
+    const rows = db.query(
+        "SELECT id, ts, type, job_id, job_type, queue, data FROM _hull_job_events " +
+        "WHERE " + where.join(" AND ") + " ORDER BY id DESC LIMIT ?", params);
+    for (const r of rows) {
+        if (r.data !== undefined && r.data !== null && r.data !== "") {
+            try { r.data = json.decode(r.data); } catch (_e) { /* leave raw */ }
+        }
+    }
+    return rows;
 }
 
 /**
@@ -1842,6 +1936,9 @@ function cleanup(opts) {
     // post-hoc metrics), not by orphan-ness.
     const hr = _cfg.historyRetention || o.olderThan || 604800;
     db.exec("DELETE FROM _hull_job_attempts WHERE finished_ms < ?", [(time.now() - hr) * 1000]);
+    // Durable event log retained by age. Phase 1 has no subscription cursors, so a
+    // pure time window; Phase 2 will additionally never truncate past min(cursor).
+    db.exec("DELETE FROM _hull_job_events WHERE ts < ?", [cutoff]);
     return deleted;
 }
 
@@ -1857,11 +1954,11 @@ export const jobs = {
     stats, runWorker, stop, get, result, await: await_, progress, heartbeat, limit, metrics, history,
     pause, resume, purge,
     workflow, start, signal, workflowStatus,
-    dead, retry, cancel, cleanup, cron, uncron,
+    dead, retry, cancel, cleanup, cron, uncron, events,
     RETRY, DEAD, DISCARD, _config: _cfg, _cronNext, _tick,
 };
 export { init, enqueue, enqueueMany, claim, handler, on, work, reap, stats,
          runWorker, stop, get, result, progress, heartbeat, limit, metrics, history, pause, resume,
          purge, workflow, start, signal, workflowStatus,
-         dead, retry, cancel, cleanup, cron, uncron };
+         dead, retry, cancel, cleanup, cron, uncron, events };
 export default jobs;

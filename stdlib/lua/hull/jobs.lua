@@ -42,6 +42,7 @@ local _cfg = {
     reap_interval      = 30,    -- min seconds between reaper sweeps (0 = every work() call)
     history            = false, -- attempt-history recording: true | { queues={...} } | false
     history_retention  = nil,   -- seconds to keep attempt rows (nil = jobs.cleanup default)
+    events             = false, -- durable fleet-wide event log (jobs.subscribe / jobs.events)
 }
 
 -- Exponential backoff: 2^attempt * 10s, capped at 1h (shared with outbox math).
@@ -103,6 +104,7 @@ function jobs.init(opts)
     if opts.backoff ~= nil then _cfg.backoff = opts.backoff end
     if opts.history ~= nil then _cfg.history = opts.history end
     if opts.history_retention ~= nil then _cfg.history_retention = opts.history_retention end
+    if opts.events ~= nil then _cfg.events = opts.events end
 
     -- Keyed / indexed text columns are VARCHAR(255) so MySQL can index them;
     -- data-only columns (payload, last_error) stay TEXT. status/type/queue are
@@ -290,6 +292,27 @@ function jobs.init(opts)
         ON _hull_job_attempts(finished_ms)
     ]])
 
+    -- Durable fleet-wide event log (jobs.init{events=true}). Append-only lifecycle
+    -- events, written in the SAME transaction as the state change that produced
+    -- them (transactional coupling: an event exists iff the transition committed).
+    -- The `id` is the total order + the future subscription cursor space. `data`
+    -- is small JSON metadata (error/attempt/trace), never the full result.
+    db.exec(
+        "CREATE TABLE IF NOT EXISTS _hull_job_events ("
+        .. "id       " .. db.autoincrement_id_ddl .. ", "
+        .. "ts       INTEGER      NOT NULL,"
+        .. "type     VARCHAR(32)  NOT NULL,"
+        .. "job_id   INTEGER,"
+        .. "job_type VARCHAR(255),"
+        .. "queue    VARCHAR(255),"
+        .. "data     TEXT)")
+    db.exec([[
+        CREATE INDEX IF NOT EXISTS idx_hull_job_events_type ON _hull_job_events(type, id)
+    ]])
+    db.exec([[
+        CREATE INDEX IF NOT EXISTS idx_hull_job_events_ts ON _hull_job_events(ts)
+    ]])
+
     -- Verify the server actually parses SKIP LOCKED (the compile-time dialect
     -- flag says "this backend supports it" but a MySQL<8 / MariaDB<10.6 server
     -- does not). A 0-row probe against the real table detects it once; the claim
@@ -369,6 +392,24 @@ local function load_deps(dependent_id)
         end
     end
     return out
+end
+
+-- Append a durable lifecycle event (opt-in via jobs.init{events=true}). Called
+-- INSIDE the transition's transaction, so the event commits iff the state change
+-- does (transactional coupling: no lost, no phantom events). `job` supplies
+-- id/type/queue/trace; `info` is small metadata (error/attempt) - never the full
+-- result (a consumer joins _hull_job_results for that).
+local function emit_durable(event, job, info)
+    if not _cfg.events then return end
+    info = info or {}
+    local data
+    if info.error ~= nil or info.attempt ~= nil or job.trace ~= nil then
+        data = json.encode({ error = info.error, attempt = info.attempt, trace = job.trace })
+    end
+    db.exec(
+        "INSERT INTO _hull_job_events (ts, type, job_id, job_type, queue, data) "
+        .. "VALUES (?, ?, ?, ?, ?, ?)",
+        { time.now(), event, job.id, job.type, job.queue, data })
 end
 
 --- Enqueue a job. A plain INSERT, so calling it inside a `db.batch()` commits
@@ -481,6 +522,10 @@ function jobs.enqueue(job_type, data, opts)
             end
         end
     end
+    -- Durable "enqueued" event (opt-in). Emitted here so it joins the caller's
+    -- db.batch when enqueue is called inside one (transactional coupling).
+    emit_durable("enqueued",
+        { id = id, type = job_type, queue = opts.queue or "default", trace = opts.trace }, {})
     return id
 end
 
@@ -914,6 +959,23 @@ local function emit(event, job, info)
     for i = 1, #L do pcall(L[i], job, info) end
 end
 
+-- Apply a terminal transition and its durable event ATOMICALLY (one txn), then
+-- fire the in-process listeners. `transition()` runs the mark_* state change and
+-- returns the effective outcome ("done"|"dead"|"retried"). Wrapping in db.batch
+-- both couples the event to the state change and collapses mark_done's several
+-- statements into one commit (fewer fsyncs, even when events are off). Returns
+-- the outcome.
+local EVENT_OF = { done = "completed", dead = "dead", retried = "retried" }
+local function finish(job, info, transition)
+    local outcome
+    db.batch(function()
+        outcome = transition()
+        emit_durable(EVENT_OF[outcome] or outcome, job, info)
+    end)
+    emit(EVENT_OF[outcome] or outcome, job, info)
+    return outcome
+end
+
 --- Reclaim jobs stuck in `running` past the visibility timeout - a worker that
 -- claimed them died before completing. Reset to `pending` for reclaim (their
 -- incremented attempts persist, so a job that keeps killing its worker still
@@ -1189,9 +1251,9 @@ function jobs.work(opts)
         local outcome, err_str             -- nil outcome = a yield (not recorded)
         if not h then
             err_str = "no handler for job type '" .. tostring(job.type) .. "'"
-            mark_dead(job.id, err_str)
-            emit("dead", job, { error = err_str })
-            outcome = "dead"
+            outcome = finish(job, { error = err_str }, function()
+                mark_dead(job.id, err_str); return "dead"
+            end)
         else
             local ok, result = pcall(h, job)
             if ok and type(result) == "table" and result.__hull_wf_yield then
@@ -1229,16 +1291,17 @@ function jobs.work(opts)
                 end
             elseif not ok then
                 err_str = tostring(result)
-                outcome = mark_retry(job, err_str)
-                emit(outcome, job, { error = err_str, attempt = job.attempts })
+                outcome = finish(job, { error = err_str, attempt = job.attempts },
+                    function() return mark_retry(job, err_str) end)
             elseif result == jobs.DEAD then
-                err_str = "handler returned jobs.DEAD"; outcome = "dead"
-                mark_dead(job.id, err_str)
-                emit("dead", job, { error = err_str })
+                err_str = "handler returned jobs.DEAD"
+                outcome = finish(job, { error = err_str }, function()
+                    mark_dead(job.id, err_str); return "dead"
+                end)
             elseif result == jobs.RETRY then
                 err_str = "handler requested retry"
-                outcome = mark_retry(job, err_str)
-                emit(outcome, job, { error = err_str, attempt = job.attempts })
+                outcome = finish(job, { error = err_str, attempt = job.attempts },
+                    function() return mark_retry(job, err_str) end)
             else
                 -- nil / true / jobs.DISCARD -> done, no result; any other return
                 -- value is stored as the job's result (for dependents).
@@ -1246,9 +1309,9 @@ function jobs.work(opts)
                 if result ~= nil and result ~= true and result ~= jobs.DISCARD then
                     res = result
                 end
-                mark_done(job.id, res)
-                emit("completed", job, { result = res })
-                outcome = "done"
+                outcome = finish(job, { result = res }, function()
+                    mark_done(job.id, res); return "done"
+                end)
             end
         end
         -- Opt-in attempt history (a yield leaves outcome nil -> not recorded).
@@ -1953,7 +2016,48 @@ end
 -- @tparam number id
 -- @treturn boolean
 function jobs.cancel(id)
-    return (db.exec("DELETE FROM _hull_jobs WHERE id=? AND status='pending'", { id }) or 0) > 0
+    if not _cfg.events then
+        return (db.exec("DELETE FROM _hull_jobs WHERE id=? AND status='pending'", { id }) or 0) > 0
+    end
+    -- events on: capture type/queue for the "cancelled" event, delete + emit in
+    -- one txn (BEGIN IMMEDIATE serializes, so the SELECT->DELETE stays consistent).
+    local cancelled = false
+    db.batch(function()
+        local r = db.query("SELECT type, queue FROM _hull_jobs WHERE id=? AND status='pending'", { id })
+        if r and r[1] then
+            db.exec("DELETE FROM _hull_jobs WHERE id=? AND status='pending'", { id })
+            emit_durable("cancelled", { id = id, type = r[1].type, queue = r[1].queue }, {})
+            cancelled = true
+        end
+    end)
+    return cancelled
+end
+
+--- Read-only tail of the durable event log (jobs.init{events=true}), newest
+-- first - for a dashboard or ad-hoc inspection. Phase 2 adds durable
+-- subscriptions (jobs.subscribe) with at-least-once delivery + cursors.
+-- @tparam[opt] table opts { since = <event id>, types = {"dead", ...}, limit = 100 }
+-- @treturn table array of { id, ts, type, job_id, job_type, queue, data }
+function jobs.events(opts)
+    opts = opts or {}
+    local where, params = { "1=1" }, {}
+    if opts.since ~= nil then where[#where + 1] = "id > ?"; params[#params + 1] = opts.since end
+    if type(opts.types) == "table" and #opts.types > 0 then
+        local ph = {}
+        for _, t in ipairs(opts.types) do ph[#ph + 1] = "?"; params[#params + 1] = t end
+        where[#where + 1] = "type IN (" .. table.concat(ph, ",") .. ")"
+    end
+    params[#params + 1] = math.min(tonumber(opts.limit) or 100, 1000)
+    local rows = db.query(
+        "SELECT id, ts, type, job_id, job_type, queue, data FROM _hull_job_events "
+        .. "WHERE " .. table.concat(where, " AND ") .. " ORDER BY id DESC LIMIT ?", params)
+    for _, r in ipairs(rows or {}) do
+        if r.data ~= nil and r.data ~= "" then
+            local ok, decoded = pcall(json.decode, r.data)
+            if ok then r.data = decoded end
+        end
+    end
+    return rows or {}
 end
 
 --- Purge terminal jobs (done + dead by default) whose last update is older than
@@ -1990,6 +2094,9 @@ function jobs.cleanup(opts)
     -- post-hoc metrics), not by orphan-ness.
     local hr = _cfg.history_retention or opts.older_than or 604800
     db.exec("DELETE FROM _hull_job_attempts WHERE finished_ms < ?", { (time.now() - hr) * 1000 })
+    -- Durable event log retained by age. Phase 1 has no subscription cursors, so a
+    -- pure time window; Phase 2 will additionally never truncate past min(cursor).
+    db.exec("DELETE FROM _hull_job_events WHERE ts < ?", { cutoff })
     return deleted
 end
 
