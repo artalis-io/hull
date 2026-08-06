@@ -29,12 +29,14 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <netdb.h>
+#include <poll.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/select.h>
+#include <time.h>
 #include <unistd.h>
 
 #ifdef MSG_NOSIGNAL
@@ -1300,5 +1302,74 @@ int hl_pg_exec_simple(HlPgConn *conn, const char *sql)
         default:
             break;
         }
+    }
+}
+
+/* Monotonic milliseconds for the wait deadline (not wall-clock, so it is immune
+ * to clock steps). */
+static int64_t mono_ms(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+}
+
+int hl_pg_wait_notify(HlPgConn *conn, int timeout_ms)
+{
+    if (!conn || conn->fd < 0) return -1;
+    if (timeout_ms < 0) timeout_ms = 0;
+    int64_t deadline = mono_ms() + timeout_ms;
+
+    for (;;) {
+        /* 1. Consume any COMPLETE frame already buffered. poll(2) watches the
+         * socket, not our accumulation buffer, so a frame received alongside an
+         * earlier one would be invisible to poll and must be drained here first. */
+        if (conn->consumed > 0) {
+            memmove(conn->rbuf, conn->rbuf + conn->consumed,
+                    conn->rlen - conn->consumed);
+            conn->rlen -= conn->consumed;
+            conn->consumed = 0;
+        }
+        HlPgFrame f;
+        size_t consumed = 0;
+        HlPgResult r = hl_pg_frame_next(conn->rbuf, conn->rlen, &f, &consumed);
+        if (r == HL_PG_ERR) {
+            set_err(conn->errmsg, sizeof conn->errmsg, "malformed message from server");
+            return -1;
+        }
+        if (r == HL_PG_OK) {
+            uint8_t type = f.type;
+            conn->consumed = consumed;   /* compacted at the top of the next loop */
+            if (type == HL_PG_B_NOTIFY) return 1;
+            continue;   /* a stray Notice / ParameterStatus: skip, check for more */
+        }
+
+        /* 2. NEED_MORE: poll the socket with the REMAINING time (so stray async
+         * frames can't extend the total wait past timeout_ms). */
+        int remaining = (int)(deadline - mono_ms());
+        if (remaining <= 0) return 0;   /* timed out, no notification */
+        struct pollfd pfd = { .fd = conn->fd, .events = POLLIN, .revents = 0 };
+        int pr = poll(&pfd, 1, remaining);
+        if (pr < 0) { if (errno == EINTR) continue; return -1; }
+        if (pr == 0) return 0;          /* timed out */
+        if (pfd.revents & (POLLERR | POLLHUP | POLLNVAL)) return -1;   /* dead conn */
+
+        /* 3. Readable: recv one chunk into the buffer (grow if full, bounded like
+         * conn_next_frame), then loop back to parse. */
+        if (conn->rlen == conn->rcap) {
+            size_t ncap = conn->rcap ? conn->rcap * 2 : 8192;
+            if (ncap > (size_t)HL_PG_MAX_MSG + 8192) {
+                set_err(conn->errmsg, sizeof conn->errmsg, "server message exceeds limit");
+                return -1;
+            }
+            uint8_t *nb = realloc(conn->rbuf, ncap);
+            if (!nb) { set_err(conn->errmsg, sizeof conn->errmsg, "out of memory"); return -1; }
+            conn->rbuf = nb;
+            conn->rcap = ncap;
+        }
+        ssize_t n = io_recv(conn, conn->rbuf + conn->rlen, conn->rcap - conn->rlen);
+        if (n <= 0) { set_err(conn->errmsg, sizeof conn->errmsg, "connection closed by server");
+                      return -1; }
+        conn->rlen += (size_t)n;
     }
 }

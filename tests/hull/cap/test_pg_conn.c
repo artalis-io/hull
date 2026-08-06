@@ -359,6 +359,41 @@ UTEST(pg_query, exec_affected_count)
     close(sv[0]);
 }
 
+/* hl_pg_wait_notify: the LISTEN/NOTIFY consumer primitive (Phase 4). A queued
+ * NotificationResponse ('A') returns 1; an empty socket times out to 0; a closed
+ * peer returns -1. Deterministic over a socketpair - no real Postgres. */
+UTEST(pg_query, wait_notify)
+{
+    int sv[2];
+    ASSERT_EQ(0, socketpair(AF_UNIX, SOCK_STREAM, 0, sv));
+
+    /* NotificationResponse: int32 pid, cstr channel, cstr payload. */
+    HlPgWriter s;
+    hl_pg_writer_init(&s);
+    size_t m = hl_pg_msg_begin(&s, 'A');
+    hl_pg_put_i32(&s, 4321);
+    hl_pg_put_cstr(&s, "hull_jobs");
+    hl_pg_put_cstr(&s, "");
+    hl_pg_msg_end(&s, m);
+    ASSERT_FALSE(s.err);
+    ASSERT_TRUE(write(sv[0], s.buf, s.len) == (ssize_t)s.len);
+    hl_pg_writer_free(&s);
+
+    HlPgConn conn;
+    memset(&conn, 0, sizeof conn);
+    conn.fd = sv[1];
+
+    /* 1. A notification is queued -> 1. */
+    ASSERT_EQ(1, hl_pg_wait_notify(&conn, 1000));
+    /* 2. Nothing more -> times out to 0 (a short bound, no real delay needed). */
+    ASSERT_EQ(0, hl_pg_wait_notify(&conn, 20));
+    /* 3. Peer closed -> connection dead -> -1. */
+    close(sv[0]);
+    ASSERT_EQ(-1, hl_pg_wait_notify(&conn, 1000));
+
+    hl_pg_conn_close(&conn);
+}
+
 UTEST(pg_query, server_error_then_ready)
 {
     int sv[2];
