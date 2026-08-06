@@ -137,17 +137,46 @@ jobs.init({ events: true });
 const recent = jobs.events({ types: ["dead"], since: lastId, limit: 100 });
 ```
 
-- **`id`** is a monotonic total order (and the cursor space Phase 2 subscriptions
-  will use). Tail incrementally by passing the last id you saw as `since`.
+- **`id`** is a monotonic total order (and the subscription cursor space). Tail
+  incrementally by passing the last id you saw as `since`.
 - **`data`** is compact metadata (`error` / `attempt` / `trace`), never the full
   result - join `jobs.result(job_id)` when you need the value.
-- **Retention** is by age via `jobs.cleanup` (same window as terminal rows).
 - **Off by default** - an app that doesn't opt in pays nothing (no log writes).
-- This is **Phase 1** (the log + a pollable tail, enough to power a dashboard).
-  Phase 2 adds **durable subscriptions** (`jobs.subscribe(name, handler)`) with
-  at-least-once delivery + per-consumer cursors, so a reacting service processes
-  every event exactly-once-effectively across the fleet. Design:
-  [docs/jobs_events_design.md](jobs_events_design.md).
+
+### Durable subscriptions
+
+For a service that must **react** to events (not just tail them), a durable
+**subscription** delivers each event to a handler **at-least-once**, tracking its
+own cursor so it resumes exactly where it left off after a restart - fleet-wide:
+
+```lua
+-- Register on every worker (like jobs.handler). Handlers must be idempotent.
+jobs.subscribe("fulfillment", function(ev)
+    if ev.type == "completed" and ev.job_type == "charge" then webhook.notify(ev) end
+end, { types = { "completed", "dead" }, from = "now" })
+jobs.unsubscribe("fulfillment")
+```
+```javascript
+jobs.subscribe("fulfillment", (ev) => { if (ev.type === "completed") webhook.notify(ev); },
+               { types: ["completed", "dead"], from: "now" });
+```
+
+- **Drained by `jobs.work` / `jobs.run_worker`** - no separate process needed.
+  A per-subscription **lease** (a claim-token + visibility timeout, exactly like
+  the job claim) means one worker drains a subscription at a time; if that worker
+  dies, another resumes from the cursor. So delivery is **at-least-once** (a crash
+  between a handler succeeding and the cursor advancing re-delivers) - handlers
+  must be idempotent, the same contract as a job handler.
+- **`from`**: `"now"` (default) starts at the current head (skip history);
+  `"beginning"` replays the whole retained log.
+- **Ordered per subscription** (by event id); no cross-subscription order promise.
+- **Retention is subscription-aware**: `jobs.cleanup` never truncates the log past
+  the slowest subscription's cursor, so a lagging consumer keeps its unseen events
+  (watch subscription lag so a stuck one doesn't hold the log open indefinitely).
+- A handler that keeps throwing stops its subscription at that event (retried on
+  the next drain); a skip-after-N poison-event policy is the Phase 3 follow-up.
+
+Design + testability: [docs/jobs_events_design.md](jobs_events_design.md).
 
 ## Recurring jobs (cron)
 

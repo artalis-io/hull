@@ -722,6 +722,126 @@ app.main(async (ctx) => {
 echo "== durable events Phase 1: Lua =="; check_events "lua" "lua" "$LUA_EVENTS"
 echo "== durable events Phase 1: JS  =="; check_events "js"  "js"  "$JS_EVENTS"
 
+# ── durable events Phase 2 (subscriptions: cursor + lease drain) ─────────────
+# The jobs._events_drain seam is synchronous + clock-injectable, so at-least-once,
+# lease reclaim, and retention are asserted at exact instants with NO sleeps.
+# Covers: deterministic in-order capture (T3), crash-before-cursor -> re-delivery
+# (T5a), worker-death lease reclaim (T5b), retention-never-past-min(cursor) (T6).
+check_events_p2() {
+    label="$1"; ext="$2"; app="$3"
+    T="$(mktemp -d)"; printf '%s\n' "$app" > "$T/app.$ext"
+    out="$("$HULL" "$T/app.$ext" -d "$T/a.db" 2>/dev/null)" || true
+    case "$out" in
+        *"EV deliv=3 order=y recaught=0 dup=6 held=false reclaim=3 retain=y purged=y"*)
+            pass "$label: durable subscriptions (capture + at-least-once + lease reclaim + retention)" ;;
+        *) fail "$label: durable events Phase 2" "$out" ;;
+    esac
+    rm -rf "$T"
+}
+
+LUA_EV2='local jobs = require("hull.jobs")
+local time = require("hull.time")
+app.manifest({ modules = { "hull/jobs@1", "hull/time@1" } })
+app.main(function(ctx)
+  jobs.init({ events = true })
+  local future = time.now() + 100   -- > every event ts, within int4 (PG-safe)
+  jobs.enqueue("ok", {}); jobs.enqueue("ok", {}); jobs.enqueue("ok", {})
+  local seen = {}
+  jobs.subscribe("cap", function(ev) seen[#seen+1] = ev.id end, { from = "beginning" })
+  local r  = jobs._events_drain("cap", { now = 1000 })
+  local re = jobs._events_drain("cap", { now = 1000 })
+  local order = (seen[1]==1 and seen[2]==2 and seen[3]==3) and "y" or "n"
+  local dc = 0
+  jobs.subscribe("dup", function() dc = dc + 1 end, { from = "beginning" })
+  jobs._events_drain("dup", { now = 1000, commit_cursor = false })
+  jobs._events_drain("dup", { now = 1000 })
+  jobs.subscribe("lease", function() end, { from = "beginning" })
+  jobs._events_drain("lease", { now = 1000, commit_cursor = false, release_lease = false })
+  local held = jobs._events_drain("lease", { now = 1000 })
+  local rec  = jobs._events_drain("lease", { now = 1040 })
+  jobs.subscribe("lag", function() end, { from = "beginning" })
+  local before = #jobs.events({ limit = 100 })
+  jobs.cleanup({ before = future })
+  local after = #jobs.events({ limit = 100 })
+  jobs._events_drain("lag", { now = 1000 })
+  jobs.cleanup({ before = future })
+  local final = #jobs.events({ limit = 100 })
+  ctx.stdout:write(("EV deliv=%d order=%s recaught=%d dup=%d held=%s reclaim=%d retain=%s purged=%s\n"):format(
+    r.delivered, order, re.delivered, dc, tostring(held.leased), rec.delivered,
+    (after==before) and "y" or "n", (final==0) and "y" or "n"))
+  return 0
+end)'
+
+JS_EV2='import { app } from "hull:app"; import { jobs } from "hull:jobs"; import { time } from "hull:time";
+app.manifest({ modules: ["hull/jobs@1", "hull/time@1"] });
+app.main(async (ctx) => {
+  jobs.init({ events: true });
+  const future = time.now() + 100;   // > every event ts, within int4 (PG-safe)
+  jobs.enqueue("ok", {}); jobs.enqueue("ok", {}); jobs.enqueue("ok", {});
+  const seen = [];
+  jobs.subscribe("cap", (ev) => seen.push(ev.id), { from: "beginning" });
+  const r  = jobs._eventsDrain("cap", { now: 1000 });
+  const re = jobs._eventsDrain("cap", { now: 1000 });
+  const order = (seen[0]===1 && seen[1]===2 && seen[2]===3) ? "y" : "n";
+  let dc = 0;
+  jobs.subscribe("dup", () => { dc++; }, { from: "beginning" });
+  jobs._eventsDrain("dup", { now: 1000, commitCursor: false });
+  jobs._eventsDrain("dup", { now: 1000 });
+  jobs.subscribe("lease", () => {}, { from: "beginning" });
+  jobs._eventsDrain("lease", { now: 1000, commitCursor: false, releaseLease: false });
+  const held = jobs._eventsDrain("lease", { now: 1000 });
+  const rec  = jobs._eventsDrain("lease", { now: 1040 });
+  jobs.subscribe("lag", () => {}, { from: "beginning" });
+  const before = jobs.events({ limit: 100 }).length;
+  jobs.cleanup({ before: future });
+  const after = jobs.events({ limit: 100 }).length;
+  jobs._eventsDrain("lag", { now: 1000 });
+  jobs.cleanup({ before: future });
+  const final = jobs.events({ limit: 100 }).length;
+  ctx.stdout.write(`EV deliv=${r.delivered} order=${order} recaught=${re.delivered} dup=${dc} held=${held.leased} reclaim=${rec.delivered} retain=${after===before?"y":"n"} purged=${final===0?"y":"n"}\n`);
+  return 0;
+});'
+
+echo "== durable events Phase 2: Lua =="; check_events_p2 "lua" "lua" "$LUA_EV2"
+echo "== durable events Phase 2: JS  =="; check_events_p2 "js"  "js"  "$JS_EV2"
+
+# Fleet gate: K processes drain ONE shared subscription. The per-subscription
+# lease + monotonic cursor mean each event is delivered exactly once across the
+# fleet - the union of per-process deliveries is all N ids, no duplicates.
+echo "== durable events fleet gate ($CONC processes, one subscription) =="
+EW="$(mktemp -d)"; EDB="$EW/e.db"
+cat > "$EW/seed.lua" <<LUA
+local jobs = require("hull.jobs")
+app.manifest({ modules = { "hull/jobs@1" } })
+app.main(function()
+  jobs.init({ events = true })
+  for i=1,20 do jobs.enqueue("t", {}) end          -- 20 "enqueued" events
+  jobs.subscribe("g", function() end, { from = "beginning" })  -- create sub at cursor 0
+  return 0
+end)
+LUA
+cat > "$EW/drain.lua" <<'LUA'
+local jobs = require("hull.jobs")
+app.manifest({ modules = { "hull/jobs@1" } })
+app.main(function(ctx)
+  jobs.init({ events = true })
+  jobs.subscribe("g", function(ev) ctx.stdout:write(ev.id .. "\n") end, { from = "beginning" })
+  for _=1,40 do jobs._events_drain("g", {}) end     -- drain to exhaustion (lease-serialized)
+  return 0
+end)
+LUA
+"$HULL" "$EW/seed.lua" -d "$EDB" >/dev/null 2>&1
+i=1; while [ "$i" -le "$CONC" ]; do "$HULL" "$EW/drain.lua" -d "$EDB" > "$EW/out.$i" 2>/dev/null & i=$((i+1)); done
+wait
+etot="$(cat "$EW"/out.* | grep -c . || true)"
+euniq="$(cat "$EW"/out.* | sort -n | uniq | grep -c . || true)"
+if [ "$etot" -eq 20 ] && [ "$euniq" -eq 20 ]; then
+    pass "durable events fleet: $CONC processes delivered all 20 events exactly once (lease + cursor)"
+else
+    fail "durable events fleet: expected 20/20" "total=$etot uniq=$euniq"
+fi
+rm -rf "$EW"
+
 # ── v1.3: queue pause / resume / purge ──────────────────────────────────────
 # A paused queue is not claimed; resume restores it; purge deletes pending.
 check_pq() {

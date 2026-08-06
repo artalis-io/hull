@@ -286,6 +286,20 @@ function init(opts) {
     db.exec("CREATE INDEX IF NOT EXISTS idx_hull_job_events_type ON _hull_job_events(type, id)");
     db.exec("CREATE INDEX IF NOT EXISTS idx_hull_job_events_ts ON _hull_job_events(ts)");
 
+    // Durable event subscriptions (jobs.subscribe). One row per named consumer:
+    // `cursor` = last delivered event id, `types` = optional comma-list filter,
+    // `lease_token`/`lease_until` = the drain lease (one worker drains at a time;
+    // a crashed drainer's lease expires and another resumes from the cursor).
+    db.exec(
+        "CREATE TABLE IF NOT EXISTS _hull_job_subscriptions (" +
+        "name        VARCHAR(255) NOT NULL PRIMARY KEY," +
+        "cursor_id   INTEGER      NOT NULL DEFAULT 0," +
+        "types       VARCHAR(255)," +
+        "lease_token VARCHAR(255)," +
+        "lease_until INTEGER," +
+        "failures    INTEGER      NOT NULL DEFAULT 0," +
+        "updated_at  INTEGER      NOT NULL)");
+
     // Verify the server actually parses SKIP LOCKED (the compile-time dialect
     // flag says "this backend supports it" but a MySQL<8 / MariaDB<10.6 server
     // does not). A 0-row probe against the real table detects it once; the claim
@@ -1148,6 +1162,13 @@ async function work(opts) {
     if (now - _lastReap >= interval) { reap(o); _lastReap = now; }
     // Fire due cron schedules (throttled; cron is minute-grained).
     if (now - _lastCron >= 1) { processCron(now); _lastCron = now; }
+    // Drain durable event subscriptions (throttled; the per-subscription lease
+    // makes this fleet-safe). Only workers that registered subscribers do work.
+    const subNames = Object.keys(_subscribers);
+    if (subNames.length && now - _lastEdrain >= 1) {
+        for (const name of subNames) eventsDrain(name, { now });
+        _lastEdrain = now;
+    }
     const batch = claim(o);
     for (const job of batch) {
         job.deps = loadDeps(job.id);   // workflow: dependency results, in order
@@ -1228,6 +1249,15 @@ let _running = false;
 let _lastReap = 0;
 // Unix ts of the last cron due-check (throttled to >=1s; cron is minute-grained).
 let _lastCron = 0;
+// Unix ts of the last subscription drain (throttled to >=1s in work()).
+let _lastEdrain = 0;
+// Durable event subscribers registered on THIS worker (jobs.subscribe):
+// name -> { handler(event) }. The subscription row (cursor/lease) is durable in
+// _hull_job_subscriptions; the handler is per-worker, like a job handler.
+const _subscribers = Object.create(null);
+// Lease duration (seconds) for a subscription drain (a crashed drainer's lease
+// expires after this and another worker resumes from the unadvanced cursor).
+const _EDRAIN_LEASE = 30;
 
 /**
  * Request the running runWorker loop to stop after the current iteration.
@@ -1911,6 +1941,103 @@ function events(opts) {
 }
 
 /**
+ * Register a durable named subscription over the event log (Phase 2). `handler`
+ * is called once per event, in id order, AT-LEAST-ONCE (a crash between a handler
+ * succeeding and the cursor advancing re-delivers it) - so handlers must be
+ * idempotent. The cursor is durable (survives restarts); the handler is
+ * per-worker, so call jobs.subscribe on every worker (like jobs.handler). Drained
+ * by jobs.work / jobs.run_worker.
+ * @param {string} name
+ * @param {Function} handler   (event) => void
+ * @param {object} [opts] { types: ["dead", ...], from: "now" | "beginning" }
+ */
+function subscribe(name, handler, opts) {
+    if (typeof name !== "string" || name === "")
+        throw new Error("jobs.subscribe: name must be a non-empty string");
+    if (typeof handler !== "function")
+        throw new Error("jobs.subscribe: handler must be a function");
+    const o = opts || {};
+    const typesCsv = (Array.isArray(o.types) && o.types.length) ? o.types.join(",") : null;
+    // Start cursor: "now" (default) skips existing history; "beginning" replays all.
+    let start = 0;
+    if (o.from !== "beginning") {
+        const m = db.query("SELECT MAX(id) AS m FROM _hull_job_events");
+        start = (m[0] && m[0].m) || 0;
+    }
+    const now = time.now();
+    const n = db.insertIfAbsent("_hull_job_subscriptions", ["name"],
+        ["name", "cursor_id", "types", "failures", "updated_at"], [name, start, typesCsv, 0, now]);
+    if (!(n && n > 0)) {
+        db.exec("UPDATE _hull_job_subscriptions SET types=?, updated_at=? WHERE name=?",
+            [typesCsv, now, name]);
+    }
+    _subscribers[name] = { handler };
+    return jobs;
+}
+
+/** Remove a subscription: this worker's handler and the durable row (cursor). */
+function unsubscribe(name) {
+    delete _subscribers[name];
+    db.exec("DELETE FROM _hull_job_subscriptions WHERE name=?", [name]);
+    return jobs;
+}
+
+// Synchronous drain seam (the Phase 2 testability keystone): lease the
+// subscription, deliver new events in id order, advance the cursor, release the
+// lease. No timers/sleeps - work() drives it. Returns { delivered, cursor,
+// leased }. Test seams: opts.now (clock), opts.batch, opts.commitCursor (false =
+// deliver but don't advance -> models a crash before the cursor write),
+// opts.releaseLease (false = hold the lease -> models a worker death mid-drain).
+function eventsDrain(name, opts) {
+    const o = opts || {};
+    const sub = _subscribers[name];
+    if (!sub) return { delivered: 0, leased: false };
+    const now = o.now !== undefined ? o.now : time.now();
+    const token = crypto.base64urlEncode(crypto.random(8));
+    // Acquire the lease (CAS): detect acquisition via RETURNING on PG/SQLite
+    // (db.exec does not surface an affected-row count on Postgres); MySQL has no
+    // RETURNING but returns the count.
+    const leaseSql = "UPDATE _hull_job_subscriptions SET lease_token=?, lease_until=?, updated_at=? " +
+        "WHERE name=? AND (lease_until IS NULL OR lease_until <= ?)";
+    const leaseParams = [token, now + _EDRAIN_LEASE, now, name, now];
+    const got = db.dialect.supportsReturning
+        ? db.query(leaseSql + " RETURNING name", leaseParams).length
+        : (db.exec(leaseSql, leaseParams) || 0);
+    if (got === 0) return { delivered: 0, leased: false };
+    const row = db.query("SELECT cursor_id, types, failures FROM _hull_job_subscriptions WHERE name=?", [name]);
+    const cursor = row[0].cursor_id;
+    const failures = row[0].failures || 0;
+    const where = ["id > ?"], params = [cursor];
+    if (row[0].types) {
+        const parts = String(row[0].types).split(",").filter((s) => s.length);
+        if (parts.length) {
+            where.push("type IN (" + parts.map(() => "?").join(",") + ")");
+            for (const t of parts) params.push(t);
+        }
+    }
+    params.push(o.batch || 100);
+    const evs = db.query(
+        "SELECT id, ts, type, job_id, job_type, queue, data FROM _hull_job_events " +
+        "WHERE " + where.join(" AND ") + " ORDER BY id LIMIT ?", params);
+    let lastOk = cursor, delivered = 0, failed = false;
+    for (const e of evs) {
+        if (e.data !== undefined && e.data !== null && e.data !== "") {
+            try { e.data = json.decode(e.data); } catch (_e) { /* leave raw */ }
+        }
+        try { sub.handler(e); lastOk = e.id; delivered += 1; }
+        catch (_e) { failed = true; break; }
+    }
+    const newCursor = (o.commitCursor === false) ? cursor : lastOk;
+    const release = o.releaseLease !== false;
+    db.exec(
+        "UPDATE _hull_job_subscriptions SET cursor_id=?, failures=?, " +
+        (release ? "lease_token=NULL, lease_until=NULL, " : "") +
+        "updated_at=? WHERE name=? AND lease_token=?",
+        [newCursor, failed ? failures + 1 : 0, now, name, token]);
+    return { delivered, cursor: newCursor, leased: true };
+}
+
+/**
  * Purge terminal jobs (done + dead by default) whose last update is older than
  * a retention age. Run from app.daily to bound table growth. Only touches
  * terminal rows, so it never races a pending / running job.
@@ -1936,9 +2063,16 @@ function cleanup(opts) {
     // post-hoc metrics), not by orphan-ness.
     const hr = _cfg.historyRetention || o.olderThan || 604800;
     db.exec("DELETE FROM _hull_job_attempts WHERE finished_ms < ?", [(time.now() - hr) * 1000]);
-    // Durable event log retained by age. Phase 1 has no subscription cursors, so a
-    // pure time window; Phase 2 will additionally never truncate past min(cursor).
-    db.exec("DELETE FROM _hull_job_events WHERE ts < ?", [cutoff]);
+    // Durable event log: retained by age, but NEVER past an unconsumed event -
+    // min(cursor) across subscriptions is the safe watermark. No subscriptions ->
+    // age only (the Phase 1 behavior).
+    const mc = db.query("SELECT MIN(cursor_id) AS m FROM _hull_job_subscriptions");
+    const watermark = mc[0] ? mc[0].m : null;
+    if (watermark === null || watermark === undefined) {
+        db.exec("DELETE FROM _hull_job_events WHERE ts < ?", [cutoff]);
+    } else {
+        db.exec("DELETE FROM _hull_job_events WHERE ts < ? AND id <= ?", [cutoff, watermark]);
+    }
     return deleted;
 }
 
@@ -1954,11 +2088,11 @@ export const jobs = {
     stats, runWorker, stop, get, result, await: await_, progress, heartbeat, limit, metrics, history,
     pause, resume, purge,
     workflow, start, signal, workflowStatus,
-    dead, retry, cancel, cleanup, cron, uncron, events,
-    RETRY, DEAD, DISCARD, _config: _cfg, _cronNext, _tick,
+    dead, retry, cancel, cleanup, cron, uncron, events, subscribe, unsubscribe,
+    RETRY, DEAD, DISCARD, _config: _cfg, _cronNext, _tick, _eventsDrain: eventsDrain,
 };
 export { init, enqueue, enqueueMany, claim, handler, on, work, reap, stats,
          runWorker, stop, get, result, progress, heartbeat, limit, metrics, history, pause, resume,
          purge, workflow, start, signal, workflowStatus,
-         dead, retry, cancel, cleanup, cron, uncron, events };
+         dead, retry, cancel, cleanup, cron, uncron, events, subscribe, unsubscribe };
 export default jobs;

@@ -69,10 +69,22 @@ local _listeners = { completed = {}, retried = {}, dead = {} }
 -- reserved-type handler that runs the workflow through a memoizing ctx.
 local _workflows = {}
 
+-- Durable event subscribers registered on THIS worker (jobs.subscribe):
+-- name -> { handler = fn(event) }. The subscription row (cursor/lease) is durable
+-- in _hull_job_subscriptions; the handler is per-worker, like jobs.handler. A
+-- homogeneous fleet re-registers every subscription at startup, so any worker can
+-- drain any subscription (the per-subscription lease serializes them).
+local _subscribers = {}
+
 -- Unix ts of the last reaper sweep (throttled in jobs.work via _cfg.reap_interval).
 local _last_reap = 0
 -- Unix ts of the last cron due-check (throttled to >=1s; cron is minute-grained).
 local _last_cron = 0
+-- Unix ts of the last subscription drain (throttled to >=1s in jobs.work).
+local _last_edrain = 0
+-- Lease duration (seconds) for a subscription drain - a crashed drainer's lease
+-- expires after this and another worker resumes from the unadvanced cursor.
+local _EDRAIN_LEASE = 30
 -- Whether the server parses SKIP LOCKED (probed in jobs.init; nil = not probed).
 local _skip_locked = nil
 -- Per-queue rate limits { [queue] = { rate, per } }, in-memory (re-registered on
@@ -312,6 +324,21 @@ function jobs.init(opts)
     db.exec([[
         CREATE INDEX IF NOT EXISTS idx_hull_job_events_ts ON _hull_job_events(ts)
     ]])
+
+    -- Durable event subscriptions (jobs.subscribe). One row per named consumer:
+    -- `cursor` = last delivered event id (the drain advances it), `types` = an
+    -- optional comma-list filter, `lease_token`/`lease_until` = the drain lease
+    -- (one worker drains a subscription at a time; a crashed drainer's lease
+    -- expires and another resumes from the cursor). Restart-durable + fleet-wide.
+    db.exec(
+        "CREATE TABLE IF NOT EXISTS _hull_job_subscriptions ("
+        .. "name        VARCHAR(255) NOT NULL PRIMARY KEY,"
+        .. "cursor_id   INTEGER      NOT NULL DEFAULT 0,"
+        .. "types       VARCHAR(255),"
+        .. "lease_token VARCHAR(255),"
+        .. "lease_until INTEGER,"
+        .. "failures    INTEGER      NOT NULL DEFAULT 0,"
+        .. "updated_at  INTEGER      NOT NULL)")
 
     -- Verify the server actually parses SKIP LOCKED (the compile-time dialect
     -- flag says "this backend supports it" but a MySQL<8 / MariaDB<10.6 server
@@ -1243,6 +1270,12 @@ function jobs.work(opts)
         process_cron(now)
         _last_cron = now
     end
+    -- Drain durable event subscriptions (throttled; the per-subscription lease
+    -- makes this fleet-safe). Only workers that registered subscribers do work.
+    if next(_subscribers) and now - _last_edrain >= 1 then
+        for name in pairs(_subscribers) do jobs._events_drain(name, { now = now }) end
+        _last_edrain = now
+    end
     local batch = jobs.claim(opts)
     for _, job in ipairs(batch) do
         job.deps = load_deps(job.id)   -- workflow: dependency results, in order
@@ -2060,6 +2093,109 @@ function jobs.events(opts)
     return rows or {}
 end
 
+--- Register a durable named subscription over the event log (Phase 2). `handler`
+-- is called once per event, in id order, AT-LEAST-ONCE (a crash between a handler
+-- succeeding and the cursor advancing re-delivers it) - so handlers must be
+-- idempotent, the same contract as a job handler. The cursor is durable (survives
+-- restarts); the handler is per-worker, so call jobs.subscribe on every worker
+-- (like jobs.handler). Drained by jobs.work / jobs.run_worker.
+-- @tparam string name
+-- @tparam function handler   function(event)
+-- @tparam[opt] table opts { types = {"dead", ...}, from = "now" | "beginning" }
+function jobs.subscribe(name, handler, opts)
+    if type(name) ~= "string" or name == "" then
+        error("jobs.subscribe: name must be a non-empty string")
+    end
+    if type(handler) ~= "function" then error("jobs.subscribe: handler must be a function") end
+    opts = opts or {}
+    local types_csv
+    if type(opts.types) == "table" and #opts.types > 0 then types_csv = table.concat(opts.types, ",") end
+    -- Start cursor: "now" (default) skips existing history; "beginning" replays all.
+    local start = 0
+    if opts.from ~= "beginning" then
+        local m = db.query("SELECT MAX(id) AS m FROM _hull_job_events")
+        start = (m[1] and m[1].m) or 0
+    end
+    local now = time.now()
+    -- Create the durable row once; a re-subscribe keeps the persisted cursor and
+    -- only refreshes the type filter.
+    local n = db.insert_if_absent("_hull_job_subscriptions", { "name" },
+        { "name", "cursor_id", "types", "failures", "updated_at" }, { name, start, types_csv, 0, now })
+    if not (n and n > 0) then
+        db.exec("UPDATE _hull_job_subscriptions SET types=?, updated_at=? WHERE name=?",
+            { types_csv, now, name })
+    end
+    _subscribers[name] = { handler = handler }
+    return jobs
+end
+
+--- Remove a subscription: this worker's handler and the durable row (cursor).
+function jobs.unsubscribe(name)
+    _subscribers[name] = nil
+    db.exec("DELETE FROM _hull_job_subscriptions WHERE name=?", { name })
+    return jobs
+end
+
+-- Synchronous drain seam (the Phase 2 testability keystone): lease the
+-- subscription, deliver new events in id order, advance the cursor, release the
+-- lease. No timers/sleeps - jobs.work drives it. Returns { delivered, cursor,
+-- leased }. Test seams: opts.now (clock), opts.batch, opts.commit_cursor (false =
+-- deliver but don't advance -> models a crash before the cursor write),
+-- opts.release_lease (false = hold the lease -> models a worker death mid-drain).
+function jobs._events_drain(name, opts)
+    opts = opts or {}
+    local sub = _subscribers[name]
+    if not sub then return { delivered = 0, leased = false } end
+    local now = opts.now or time.now()
+    local token = crypto.base64url_encode(crypto.random(8))
+    -- Acquire the lease (CAS): only if free or expired. Fleet-safe, no global lock.
+    -- Detect acquisition via RETURNING on PG/SQLite (db.exec does not surface an
+    -- affected-row count on Postgres); MySQL has no RETURNING but returns the count.
+    local lease_sql = "UPDATE _hull_job_subscriptions SET lease_token=?, lease_until=?, updated_at=? "
+        .. "WHERE name=? AND (lease_until IS NULL OR lease_until <= ?)"
+    local lease_params = { token, now + _EDRAIN_LEASE, now, name, now }
+    local got
+    if db.dialect.supports_returning then
+        got = #db.query(lease_sql .. " RETURNING name", lease_params)
+    else
+        got = db.exec(lease_sql, lease_params) or 0
+    end
+    if got == 0 then return { delivered = 0, leased = false } end
+    local row = db.query(
+        "SELECT cursor_id, types, failures FROM _hull_job_subscriptions WHERE name=?", { name })
+    local cursor = row[1].cursor_id
+    local failures = row[1].failures or 0
+    -- Fetch events past the cursor, filtered by the subscription's types.
+    local where, params = { "id > ?" }, { cursor }
+    if row[1].types and row[1].types ~= "" then
+        local ph = {}
+        for t in tostring(row[1].types):gmatch("[^,]+") do ph[#ph + 1] = "?"; params[#params + 1] = t end
+        where[#where + 1] = "type IN (" .. table.concat(ph, ",") .. ")"
+    end
+    params[#params + 1] = opts.batch or 100
+    local evs = db.query(
+        "SELECT id, ts, type, job_id, job_type, queue, data FROM _hull_job_events "
+        .. "WHERE " .. table.concat(where, " AND ") .. " ORDER BY id LIMIT ?", params)
+    -- Deliver in id order. On a handler error, stop - advance only past the
+    -- successful prefix; the failing event is retried on the next drain.
+    local last_ok, delivered, failed = cursor, 0, false
+    for _, e in ipairs(evs) do
+        if e.data ~= nil and e.data ~= "" then
+            local ok, d = pcall(json.decode, e.data); if ok then e.data = d end
+        end
+        if pcall(sub.handler, e) then last_ok = e.id; delivered = delivered + 1
+        else failed = true; break end
+    end
+    local new_cursor = (opts.commit_cursor == false) and cursor or last_ok
+    local release = opts.release_lease ~= false
+    db.exec(
+        "UPDATE _hull_job_subscriptions SET cursor_id=?, failures=?, "
+        .. (release and "lease_token=NULL, lease_until=NULL, " or "")
+        .. "updated_at=? WHERE name=? AND lease_token=?",
+        { new_cursor, failed and (failures + 1) or 0, now, name, token })
+    return { delivered = delivered, cursor = new_cursor, leased = true }
+end
+
 --- Purge terminal jobs (done + dead by default) whose last update is older than
 -- a retention age. Run it from `app.daily` to bound table growth. Only touches
 -- terminal rows, so it never races a pending / running job.
@@ -2094,9 +2230,16 @@ function jobs.cleanup(opts)
     -- post-hoc metrics), not by orphan-ness.
     local hr = _cfg.history_retention or opts.older_than or 604800
     db.exec("DELETE FROM _hull_job_attempts WHERE finished_ms < ?", { (time.now() - hr) * 1000 })
-    -- Durable event log retained by age. Phase 1 has no subscription cursors, so a
-    -- pure time window; Phase 2 will additionally never truncate past min(cursor).
-    db.exec("DELETE FROM _hull_job_events WHERE ts < ?", { cutoff })
+    -- Durable event log: retained by age, but NEVER past an unconsumed event -
+    -- min(cursor) across subscriptions is the safe watermark. No subscriptions ->
+    -- age only (the Phase 1 behavior).
+    local mc = db.query("SELECT MIN(cursor_id) AS m FROM _hull_job_subscriptions")
+    local watermark = mc[1] and mc[1].m
+    if watermark == nil then
+        db.exec("DELETE FROM _hull_job_events WHERE ts < ?", { cutoff })
+    else
+        db.exec("DELETE FROM _hull_job_events WHERE ts < ? AND id <= ?", { cutoff, watermark })
+    end
     return deleted
 end
 
