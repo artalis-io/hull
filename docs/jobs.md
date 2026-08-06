@@ -319,6 +319,43 @@ const wf = jobs.start("checkout", { orderId: 42, amount: 100 });
   steps_done, result?, error? }`, DB-derived (works even when no worker is
   running it). Fetch the final value with `jobs.await(id)` / `jobs.result(id)`.
 
+### Versioning changed workflows (`ctx.patched`)
+
+A workflow instance runs to completion on the definition it *started* with, but
+your code changes while instances are still in flight (parked on a sleep or
+signal, or mid-retry). Changing a step's key or reordering steps would break
+those instances on resume - their recorded history no longer matches the new
+body. `ctx.patched` (Temporal's patching model) lets you branch old-vs-new so
+both cohorts stay correct:
+
+```lua
+if ctx.patched("use-v2-pricing") then
+    price = ctx.step("price_v2", compute_v2)   -- new instances
+else
+    price = ctx.step("price_v1", compute_v1)   -- instances already past this point
+end
+```
+```javascript
+const price = ctx.patched("use-v2-pricing")
+    ? await ctx.step("price_v2", computeV2)
+    : await ctx.step("price_v1", computeV1);
+```
+
+- `ctx.patched(patchId)` returns a boolean and takes **no `await`** (JS).
+- An instance that **already executed past this point** under the old definition
+  returns `false` (keeps the old branch). A **new** instance - or one that hadn't
+  yet reached this point - returns `true` (adopts the patch) and records the
+  decision, so every later resume of that instance stays on the new branch.
+- **Call `ctx.patched(patchId)` once per `patchId`.** Capture the result in a
+  local; don't call it twice.
+- **Rollout / deprecation.** Ship the patched code with **both** branches and
+  keep them until every pre-patch instance has drained (watch
+  `jobs.workflow_status` / `jobs.metrics`). Once none remain, you may delete the
+  old branch and the `ctx.patched` call and inline the new code - a fully-drained
+  patch is inert (the recorded markers are harmless).
+- It is durable and backend-portable (the decision lives in the step store, same
+  as `ctx.step`); no schema change.
+
 ## Handler contract
 
 `jobs.work` dispatches each claimed job to its registered handler, else the

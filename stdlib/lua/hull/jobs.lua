@@ -1676,7 +1676,28 @@ local function make_ctx(job, name)
         trace = job.trace,   -- trace-context propagation (observability design)
         _comps = comps,
     }
+    -- Workflow versioning (Temporal-style patching). `frontier` = how many
+    -- step-family rows this instance had recorded when THIS run began; `step_pos`
+    -- counts the step-family ops executed so far this run. Sleep / wait-deadline
+    -- rows are excluded from both (they are control rows, not body positions), so
+    -- the two stay aligned regardless of how a workflow interleaves sleeps.
+    -- ctx.patched compares them to decide old-vs-new (see below).
+    local step_pos = 0
+    local frontier = (function()
+        -- Exclude the sleep / wait-deadline control rows with a prefix compare, not
+        -- LIKE: '__sleep:' / '__waitdl:' contain '_' (a LIKE wildcard) and no
+        -- portable ESCAPE clause exists - MySQL processes backslash escapes at the
+        -- string-literal level, and "ESCAPE '\'" there is a mangled quote. substr
+        -- prefix compare is wildcard-free and identical on SQLite / PG / MySQL.
+        local r = db.query(
+            "SELECT COUNT(*) AS n FROM _hull_workflow_steps WHERE workflow_id=? "
+            .. "AND substr(step_key, 1, 8) <> '__sleep:' "
+            .. "AND substr(step_key, 1, 9) <> '__waitdl:'",
+            { job.id })
+        return (r and r[1] and r[1].n) or 0
+    end)()
     ctx.step = function(step_key, fn, opts)
+        step_pos = step_pos + 1
         local result = run_step(job.id, step_key, fn)
         if opts and type(opts.compensate) == "function" then
             comps[#comps + 1] = { key = step_key, fn = opts.compensate }
@@ -1697,17 +1718,50 @@ local function make_ctx(job, name)
     -- stable across replays); the keys are hidden from workflow_status.steps_done.
     local det_n = 0
     ctx.now = function()
-        det_n = det_n + 1
+        det_n = det_n + 1; step_pos = step_pos + 1
         return run_step(job.id, "__now:" .. det_n, function() return time.now() end)
     end
     ctx.random = function()
-        det_n = det_n + 1
+        det_n = det_n + 1; step_pos = step_pos + 1
         return run_step(job.id, "__rand:" .. det_n, function() return math.random() end)
     end
     ctx.uuid = function()
-        det_n = det_n + 1
+        det_n = det_n + 1; step_pos = step_pos + 1
         return run_step(job.id, "__uuid:" .. det_n,
             function() return crypto.base64url_encode(crypto.random(16)) end)
+    end
+    -- Workflow versioning: ctx.patched(patch_id) lets a changed workflow branch
+    -- old-vs-new so in-flight instances finish on the definition they started.
+    -- Call it ONCE per patch_id. Semantics (see frontier/step_pos above):
+    --   * marker already recorded for this instance -> true (memoized).
+    --   * undecided AND this point falls inside the already-recorded prefix
+    --     (step_pos < frontier) -> the instance ran past here under the OLD
+    --     definition, so keep the old branch: return false, record nothing.
+    --   * undecided AND at/after the frontier -> reached fresh: adopt the patch,
+    --     record it true so every later resume returns true.
+    -- Result: instances already past the patch point keep old behavior; new ones
+    -- (and instances not yet at the patch point) adopt it.
+    ctx.patched = function(patch_id)
+        if type(patch_id) ~= "string" or patch_id == "" then
+            error("ctx.patched: patch_id must be a non-empty string")
+        end
+        local key = "__patch:" .. patch_id
+        local rows = db.query(
+            "SELECT status FROM _hull_workflow_steps WHERE workflow_id=? AND step_key=?",
+            { job.id, key })
+        if rows and #rows > 0 then
+            step_pos = step_pos + 1   -- the marker occupies one recorded position
+            return true               -- markers are only ever recorded true
+        end
+        if step_pos < frontier then
+            return false              -- replaying an old prefix: keep old branch
+        end
+        step_pos = step_pos + 1
+        db.exec(
+            "INSERT INTO _hull_workflow_steps (workflow_id, step_key, result, status, created_at) "
+            .. "VALUES (?, ?, ?, 'done', ?)",
+            { job.id, key, json.encode(true), time.now() })
+        return true
     end
     return ctx
 end
