@@ -341,6 +341,47 @@ else
     echo "::error jobs concurrency: total=$jtotal uniq=$juniq (want 200/200)"; exit 1
 fi
 
+# ── hull/jobs durable execution + observability on Postgres ────────────
+# Regression coverage for two Postgres-specific bugs the concurrency gate above
+# missed (it never uses the enqueue id): (1) jobs.enqueue relied on db.last_id,
+# unsupported on PG - jobs.start returned -1 and workflows/await broke; fixed to
+# INSERT ... RETURNING id. (2) attempt-history ms columns were INTEGER (int4) -
+# ms timestamps (~1.78e12) overflow on PG; fixed to BIGINT.
+echo "=== jobs: durable execution + observability on Postgres ==="
+WFDIR=$(mktemp -d)
+cat > "$WFDIR/wf.lua" <<'LUA'
+local jobs = require("hull.jobs")
+app.manifest({ modules = { "hull/jobs@1" } })
+app.main(function(ctx)
+  jobs.init({ history = true, backoff = function() return 0 end })
+  local threw = false
+  jobs.workflow("wf", function(w)
+    local a = w.step("charge", function() return { amt = 10 } end)
+    local ts = w.now(); local uid = w.uuid()   -- deterministic primitives (memoized)
+    if not threw then threw = true; error("retry once") end
+    return { amt = a.amt, ts = ts, uid = uid }
+  end)
+  local wid = jobs.start("wf", {})
+  jobs.run_worker({ drain = true, poll_ms = 1 })
+  local st = jobs.workflow_status(wid); local r = jobs.await(wid)
+  local hist = jobs.history(wid); local m = jobs.metrics()
+  local ms_ok = false
+  for _, h in ipairs(hist) do if h.finished_ms and h.finished_ms > 1000000000000 then ms_ok = true end end
+  ctx.stdout:write(("PGWF wid_valid=%s status=%s amt=%s attempts=%d hist_ms=%s run_p50=%s\n"):format(
+    (type(wid) == "number" and wid > 0) and "yes" or "no", st and st.status or "nil",
+    tostring(r and r.result and r.result.amt), #hist, ms_ok and "yes" or "no",
+    (m.latency and m.latency.run_ms and m.latency.run_ms.p50 ~= nil) and "yes" or "no"))
+  return 0
+end)
+LUA
+wfout=$(./build/hull "$WFDIR/wf.lua" -d "$DSN" 2>/dev/null)
+case "$wfout" in
+    *"PGWF wid_valid=yes status=done amt=10 attempts=2 hist_ms=yes run_p50=yes"*)
+        echo "PASS: jobs workflows + deterministic primitives + attempt history + metrics (Postgres)"
+        rm -rf "$WFDIR" ;;
+    *)  echo "::error jobs durable/observability on PG: $wfout"; exit 1 ;;
+esac
+
 # ── TLS phase (Phase 3b.2) ────────────────────────────────────────────
 # Enable SSL on the running container with a self-signed cert, then connect
 # with sslmode=require and assert (via pg_stat_ssl) the session is encrypted.

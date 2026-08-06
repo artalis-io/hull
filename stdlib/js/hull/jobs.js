@@ -245,10 +245,10 @@ function init(opts) {
         "queue       VARCHAR(255) NOT NULL," +
         "type        VARCHAR(255) NOT NULL," +
         "attempt_no  INTEGER      NOT NULL," +
-        "wait_ms     INTEGER," +
-        "started_ms  INTEGER      NOT NULL," +
-        "finished_ms INTEGER      NOT NULL," +
-        "duration_ms INTEGER      NOT NULL," +
+        "wait_ms     BIGINT," +
+        "started_ms  BIGINT       NOT NULL," +
+        "finished_ms BIGINT       NOT NULL," +
+        "duration_ms BIGINT       NOT NULL," +
         "outcome     VARCHAR(16)  NOT NULL," +
         "error       TEXT," +
         "trace_id    VARCHAR(255))");
@@ -385,12 +385,22 @@ function enqueue(jobType, data, opts) {
     if (o.dedupKey !== undefined && o.dedupKey !== null) {
         const n = db.insertIfAbsent("_hull_jobs", ["queue", "dedup_key"], cols, vals);
         if (!(n && n > 0)) return null;   // an un-run job with this (queue, dedupKey) exists
-        id = db.lastId();
+        // Portable id fetch: the unique (queue, dedup_key) identifies the new row.
+        // (db.lastId is unsupported on Postgres, which has no last-insert-rowid.)
+        const rows = db.query("SELECT id FROM _hull_jobs WHERE queue=? AND dedup_key=?",
+            [o.queue || "default", o.dedupKey]);
+        id = rows.length ? rows[0].id : null;
     } else {
         const ph = cols.map(() => "?");
-        db.exec("INSERT INTO _hull_jobs (" + cols.join(", ") +
-            ") VALUES (" + ph.join(", ") + ")", vals);
-        id = db.lastId();
+        const sql = "INSERT INTO _hull_jobs (" + cols.join(", ") + ") VALUES (" + ph.join(", ") + ")";
+        if (db.dialect.supportsReturning) {
+            // SQLite + Postgres: read the id back from the INSERT itself.
+            const rows = db.query(sql + " RETURNING id", vals);
+            id = rows.length ? rows[0].id : null;
+        } else {
+            db.exec(sql, vals);   // MySQL: LAST_INSERT_ID via db.lastId
+            id = db.lastId();
+        }
     }
     if (hasDeps) {
         // Record edges, then re-check each dep: closes the enqueue/complete race

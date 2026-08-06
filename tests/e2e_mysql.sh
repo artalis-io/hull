@@ -339,6 +339,42 @@ else
     echo "::error jobs concurrency: total=$jtotal uniq=$juniq (want 200/200)"; exit 1
 fi
 
+# ── hull/jobs durable execution + observability on MySQL ───────────────
+# Regression coverage for the attempt-history BIGINT fix (ms timestamps overflow
+# a 32-bit INTEGER on MySQL) plus workflows / deterministic primitives / history.
+# Asserted via DB state (not app stdout): a graceful-exit `-d mysql` app currently
+# hits a MySQL-backend connection-teardown crash that swallows the final buffered
+# stdout line - the DB writes commit first, so the state check is reliable. (The
+# teardown crash is a separate backend bug, tracked independently.)
+echo "=== jobs: durable execution + observability on MySQL (DB-state) ==="
+WFDIR=$(mktemp -d)
+cat > "$WFDIR/wf.lua" <<'LUA'
+local jobs = require("hull.jobs")
+app.manifest({ modules = { "hull/jobs@1" } })
+app.main(function(ctx)
+  jobs.init({ history = true, backoff = function() return 0 end })
+  local threw = false
+  jobs.workflow("wfm", function(w)
+    local a = w.step("charge", function() return { amt = 10 } end)
+    w.now(); w.uuid()   -- deterministic primitives (memoized)
+    if not threw then threw = true; error("retry once") end
+    return { amt = a.amt }
+  end)
+  jobs.start("wfm", {})
+  jobs.run_worker({ drain = true, poll_ms = 1 })
+  return 0
+end)
+LUA
+./build/hull "$WFDIR/wf.lua" -d "$DSN" >/dev/null 2>&1 || true
+wfstat=$(docker exec "$CONTAINER" mysql -uhull -ps3cretpw hulldb -N -se \
+  "SELECT CONCAT((SELECT status FROM _hull_jobs WHERE type='__wf:wfm' ORDER BY id DESC LIMIT 1),',',(SELECT COUNT(*) FROM _hull_workflow_steps),',',(SELECT COUNT(*) FROM _hull_job_attempts),',',CASE WHEN (SELECT MAX(finished_ms) FROM _hull_job_attempts)>1000000000000 THEN 'bigint' ELSE 'small' END)" 2>/dev/null)
+case "$wfstat" in
+    done,*bigint)
+        echo "PASS: jobs workflows + deterministic primitives + attempt history (MySQL, DB-verified: $wfstat)"
+        rm -rf "$WFDIR" ;;
+    *)  echo "::error jobs durable/observability on MySQL: got '$wfstat'"; exit 1 ;;
+esac
+
 # ── TLS + caching_sha2_password phase ─────────────────────────────────
 # MySQL 8 ships TLS on by default (auto-generated certs). Switch the user to
 # caching_sha2_password so its cache is empty, then connect over TLS: the
