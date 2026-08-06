@@ -1347,6 +1347,90 @@ app.main(async (ctx) => {
 echo "== durable determinism (Phase 2): Lua =="; check_deterministic "lua" "lua" "$LUA_DET"
 echo "== durable determinism (Phase 2): JS =="; check_deterministic "js" "js" "$JS_DET"
 
+# ── workflow versioning (Temporal-style patching) ───────────────────────────
+# An instance that already ran past a patch point under the OLD definition keeps
+# the old branch; a new instance (and one not yet at the point) adopts the patch.
+# Signal-driven parking makes the resume deterministic (no wall-clock sleeps): I1
+# records s1,s2 under v1 then parks; v2 inserts ctx.patched before that step, so
+# I1 resumes on the OLD branch (s2) while a fresh I2 takes the NEW branch (s2b).
+check_patched() {
+    label="$1"; ext="$2"; app="$3"
+    T="$(mktemp -d)"; printf '%s\n' "$app" > "$T/app.$ext"
+    out="$("$HULL" "$T/app.$ext" -d "$T/a.db" 2>/dev/null)" || true
+    case "$out" in
+        *"PATCH i1=old steps1=[s1,s2] i2=new steps2=[s1,s2b]"*)
+            pass "$label: workflow patching (old instance keeps old branch, new adopts)" ;;
+        *) fail "$label: workflow patching" "$out" ;;
+    esac
+    rm -rf "$T"
+}
+
+LUA_PATCH='local jobs = require("hull.jobs")
+app.manifest({ modules = { "hull/jobs@1" } })
+app.main(function(ctx)
+  jobs.init()
+  jobs.workflow("wf", function(w)
+    w.step("s1", function() return "a" end)
+    w.step("s2", function() return "old-step" end)
+    w.wait_signal("go")
+    return "v1"
+  end)
+  local i1 = jobs.start("wf", {})
+  jobs.work({ batch = 10 })                       -- I1 records s1,s2; parks on go
+  jobs.workflow("wf", function(w)                 -- redeploy v2: patch before s2
+    w.step("s1", function() return "a" end)
+    local p = w.patched("p1")
+    if p then w.step("s2b", function() return "new-step" end)
+    else      w.step("s2",  function() return "old-step" end) end
+    w.wait_signal("go")
+    return p and "new" or "old"
+  end)
+  local i2 = jobs.start("wf", {})
+  jobs.work({ batch = 10 })                       -- I2 (fresh) adopts the patch
+  jobs.signal(i1, "go"); jobs.signal(i2, "go")
+  jobs.work({ batch = 10 }); jobs.work({ batch = 10 })
+  local r1 = jobs.result(i1).result
+  local r2 = jobs.result(i2).result
+  local s1 = table.concat(jobs.workflow_status(i1).steps_done, ",")
+  local s2 = table.concat(jobs.workflow_status(i2).steps_done, ",")
+  ctx.stdout:write(("PATCH i1=%s steps1=[%s] i2=%s steps2=[%s]\n"):format(r1, s1, r2, s2))
+  return 0
+end)'
+
+JS_PATCH='import { app } from "hull:app"; import { jobs } from "hull:jobs";
+app.manifest({ modules: ["hull/jobs@1"] });
+app.main(async (ctx) => {
+  jobs.init();
+  jobs.workflow("wf", async (w) => {
+    await w.step("s1", () => "a");
+    await w.step("s2", () => "old-step");
+    await w.waitSignal("go");
+    return "v1";
+  });
+  const i1 = jobs.start("wf", {});
+  await jobs.work({ batch: 10 });
+  jobs.workflow("wf", async (w) => {
+    await w.step("s1", () => "a");
+    const p = w.patched("p1");
+    if (p) await w.step("s2b", () => "new-step");
+    else   await w.step("s2",  () => "old-step");
+    await w.waitSignal("go");
+    return p ? "new" : "old";
+  });
+  const i2 = jobs.start("wf", {});
+  await jobs.work({ batch: 10 });
+  jobs.signal(i1, "go"); jobs.signal(i2, "go");
+  await jobs.work({ batch: 10 }); await jobs.work({ batch: 10 });
+  const r1 = jobs.result(i1).result, r2 = jobs.result(i2).result;
+  const s1 = jobs.workflowStatus(i1).stepsDone.join(",");
+  const s2 = jobs.workflowStatus(i2).stepsDone.join(",");
+  ctx.stdout.write(`PATCH i1=${r1} steps1=[${s1}] i2=${r2} steps2=[${s2}]\n`);
+  return 0;
+});'
+
+echo "== workflow patching: Lua =="; check_patched "lua" "lua" "$LUA_PATCH"
+echo "== workflow patching: JS  =="; check_patched "js"  "js"  "$JS_PATCH"
+
 # ── observability Bet #1 Pillar A+C: jobs.metrics gauges + trace propagation ─
 # metrics() returns DB-derived per-queue gauges (pending/dead + backlog age) and
 # totals; a job enqueued with { trace } surfaces job.trace in the handler.

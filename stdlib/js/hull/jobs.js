@@ -1561,6 +1561,26 @@ async function runCompensations(comps, workflowId) {
 function makeCtx(job, name) {
     let sleepN = 0, detN = 0;
     const comps = [];
+    // Workflow versioning (Temporal-style patching). `frontier` = how many
+    // step-family rows this instance had recorded when THIS run began; `stepPos`
+    // counts the step-family ops executed so far this run. Sleep / wait-deadline
+    // rows are excluded from both (control rows, not body positions), so the two
+    // stay aligned regardless of how a workflow interleaves sleeps. ctx.patched
+    // compares them to decide old-vs-new (see below).
+    let stepPos = 0;
+    const frontier = (() => {
+        // Exclude the sleep / wait-deadline control rows with a prefix compare, not
+        // LIKE: '__sleep:' / '__waitdl:' contain '_' (a LIKE wildcard) and no
+        // portable ESCAPE clause exists - MySQL processes backslash escapes at the
+        // string-literal level, and "ESCAPE '\'" there is a mangled quote. substr
+        // prefix compare is wildcard-free and identical on SQLite / PG / MySQL.
+        const r = db.query(
+            "SELECT COUNT(*) AS n FROM _hull_workflow_steps WHERE workflow_id=? " +
+            "AND substr(step_key, 1, 8) <> '__sleep:' " +
+            "AND substr(step_key, 1, 9) <> '__waitdl:'",
+            [job.id]);
+        return (r[0] && r[0].n) || 0;
+    })();
     return {
         id: job.id,
         name,
@@ -1572,16 +1592,42 @@ function makeCtx(job, name) {
         // replay and break memo-key matching. These memoize via the step store, so
         // now / random / uuid return the SAME value on every replay - the supported
         // way to be non-deterministic in a workflow. Hidden from steps_done.
-        now: () => { detN += 1; return runStep(job.id, "__now:" + detN, () => time.now()); },
-        random: () => { detN += 1; return runStep(job.id, "__rand:" + detN, () => Math.random()); },
-        uuid: () => { detN += 1; return runStep(job.id, "__uuid:" + detN, () => crypto.base64urlEncode(crypto.random(16))); },
+        now: () => { detN += 1; stepPos += 1; return runStep(job.id, "__now:" + detN, () => time.now()); },
+        random: () => { detN += 1; stepPos += 1; return runStep(job.id, "__rand:" + detN, () => Math.random()); },
+        uuid: () => { detN += 1; stepPos += 1; return runStep(job.id, "__uuid:" + detN, () => crypto.base64urlEncode(crypto.random(16))); },
         step: async (stepKey, fn, opts) => {
+            stepPos += 1;
             const result = await runStep(job.id, stepKey, fn);
             if (opts && typeof opts.compensate === "function") comps.push({ key: stepKey, fn: opts.compensate });
             return result;
         },
         sleep: (seconds) => { sleepN += 1; return runSleep(job.id, sleepN, seconds); },
         waitSignal: (signalName, opts) => runWaitSignal(job.id, signalName, opts),
+        // Workflow versioning: ctx.patched(patchId) lets a changed workflow branch
+        // old-vs-new so in-flight instances finish on the definition they started.
+        // Call it ONCE per patchId (no await - returns a boolean). Semantics:
+        //   * marker already recorded for this instance -> true (memoized).
+        //   * undecided AND inside the already-recorded prefix (stepPos < frontier)
+        //     -> ran past here under the OLD definition: keep old branch, return
+        //     false, record nothing.
+        //   * undecided AND at/after the frontier -> reached fresh: adopt the
+        //     patch, record it true so every later resume returns true.
+        patched: (patchId) => {
+            if (typeof patchId !== "string" || patchId === "")
+                throw new Error("ctx.patched: patchId must be a non-empty string");
+            const key = "__patch:" + patchId;
+            const rows = db.query(
+                "SELECT status FROM _hull_workflow_steps WHERE workflow_id=? AND step_key=?",
+                [job.id, key]);
+            if (rows.length) { stepPos += 1; return true; }   // marker: only ever true
+            if (stepPos < frontier) return false;             // replaying old prefix
+            stepPos += 1;
+            db.exec(
+                "INSERT INTO _hull_workflow_steps (workflow_id, step_key, result, status, created_at) " +
+                "VALUES (?, ?, ?, 'done', ?)",
+                [job.id, key, json.encode(true), time.now()]);
+            return true;
+        },
     };
 }
 
