@@ -180,6 +180,37 @@ jobs.limit("reports", { rate: 100, per: 60 });
 - Costs one extra small DB write per claim **only on limited queues**; unlimited
   queues are unaffected.
 
+## Per-key concurrency
+
+Where a rate limit caps a whole queue's *dispatch rate*, per-key concurrency caps
+how many jobs sharing a **key** run *at the same time*. The key is per job, set at
+enqueue time, so it can be a static group or a dynamic value like a tenant id:
+
+```lua
+-- at most 2 report jobs for this tenant run concurrently, fleet-wide
+jobs.enqueue("report", data, { concurrency_key = "tenant-42", concurrency = 2 })
+```
+```javascript
+jobs.enqueue("report", data, { concurrencyKey: "tenant-42", concurrency: 2 });
+```
+
+- **Fleet-wide.** The cap is enforced in the DB across every worker, not
+  per-process.
+- **Claim-then-reconcile** (same shape as rate limiting): a claim that would put a
+  key over its limit releases the over-limit jobs back to `pending`, undoing the
+  claim so a held-back job keeps its full retry budget. As soon as a running job
+  of that key finishes, a held-back one becomes claimable. Priority and FIFO
+  order within the key are preserved (the release is ranked by claim age, so it
+  is deterministic fleet-wide - no two workers evict the same slot).
+- **Soft** semantics: correct under normal load, but two workers claiming the same
+  key in the same instant can briefly exceed the limit (there is no reservation
+  counter). Use it for *fairness / politeness* caps (don't let one tenant hog the
+  fleet, cap per-host outbound), not as a hard mutual-exclusion lock. A strict,
+  counter-backed variant is a planned opt-in follow-up.
+- Costs one small indexed DB read per claimed job **only for keyed jobs**;
+  unkeyed jobs are unaffected. Rate limiting and per-key concurrency compose (both
+  reconcile the same claim).
+
 ## Workflows (job dependencies)
 
 `jobs.enqueue(type, data, { depends_on = { id1, id2 } })` makes a job **wait
@@ -319,11 +350,13 @@ jobs.enqueue(type, data, {
     dedup_key    = "order-42", -- idempotent enqueue: a duplicate un-run key is a no-op
     throttle     = 60,         -- windowed: skip if a (queue,type) job was made in the last N s
     trace        = traceparent,-- W3C trace context; surfaced to the handler as job.trace
+    concurrency_key = "tenant-42", -- soft concurrency group (see Per-key concurrency)
+    concurrency     = 2,           -- max jobs of that group running at once
 })
 ```
 Returns the new job id, or `nil` when a `dedup_key` collapsed it (or a
 `throttle` window suppressed it). JS keys are camelCase (`runAt`, `maxAttempts`,
-`dedupKey`). `throttle` is best-effort (keyed by `(queue, type)`, no unique
+`dedupKey`, `concurrencyKey`). `throttle` is best-effort (keyed by `(queue, type)`, no unique
 constraint - use `dedup_key` for exact-once).
 
 **Bulk enqueue.** `jobs.enqueue_many(items)` (`enqueueMany` in JS) inserts a list

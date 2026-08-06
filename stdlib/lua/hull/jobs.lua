@@ -125,7 +125,11 @@ function jobs.init(opts)
         .. "created_at   INTEGER      NOT NULL,"
         .. "updated_at   INTEGER      NOT NULL,"
         .. "progress     INTEGER      NOT NULL DEFAULT 0,"
-        .. "trace_context VARCHAR(255))")
+        .. "trace_context VARCHAR(255),"
+        -- Soft per-key concurrency (jobs.enqueue concurrency_key/concurrency):
+        -- at most `concurrency_limit` jobs sharing `concurrency_key` run at once.
+        .. "concurrency_key   VARCHAR(255),"
+        .. "concurrency_limit INTEGER)")
 
     -- Claim scan path: ready-to-run pending jobs in a queue, by priority then id.
     db.exec([[
@@ -151,6 +155,13 @@ function jobs.init(opts)
     db.exec([[
         CREATE INDEX IF NOT EXISTS idx_hull_jobs_throttle
         ON _hull_jobs(queue, type, created_at)
+    ]])
+
+    -- Concurrency reconcile path: running jobs of a key, ranked by claim age.
+    -- The claim-then-reconcile rank probe (conc_apply) scans this.
+    db.exec([[
+        CREATE INDEX IF NOT EXISTS idx_hull_jobs_conc
+        ON _hull_jobs(concurrency_key, status, claimed_at, id)
     ]])
 
     -- Durable cron schedules (jobs.cron). A worker atomically advances a due
@@ -185,6 +196,8 @@ function jobs.init(opts)
     end
     ensure_column("_hull_jobs", "progress", "progress INTEGER NOT NULL DEFAULT 0")
     ensure_column("_hull_jobs", "trace_context", "trace_context VARCHAR(255)")
+    ensure_column("_hull_jobs", "concurrency_key", "concurrency_key VARCHAR(255)")
+    ensure_column("_hull_jobs", "concurrency_limit", "concurrency_limit INTEGER")
     ensure_column("_hull_cron", "tz_offset", "tz_offset INTEGER NOT NULL DEFAULT 0")
 
     -- Fleet-wide rate-limit counters (jobs.limit). One row per limited queue;
@@ -377,6 +390,8 @@ end
 -- @tparam[opt]    number opts.run_at        absolute unix ts (overrides delay)
 -- @tparam[opt]    number opts.max_attempts  overrides the module default
 -- @tparam[opt]    string opts.dedup_key     unique per queue; a duplicate enqueue is a no-op
+-- @tparam[opt]    string opts.concurrency_key  soft concurrency group (e.g. a tenant id)
+-- @tparam[opt]    number opts.concurrency      max jobs of that group running at once
 -- @treturn number|nil  the new job id, or nil when a dedup_key collapsed it
 function jobs.enqueue(job_type, data, opts)
     if type(job_type) ~= "string" or job_type == "" then
@@ -415,6 +430,12 @@ function jobs.enqueue(job_type, data, opts)
     -- Optional W3C trace context, carried through to the handler as job.trace.
     if opts.trace ~= nil then
         cols[#cols + 1] = "trace_context"; vals[#vals + 1] = opts.trace
+    end
+    -- Optional soft per-key concurrency: at most `concurrency` jobs sharing
+    -- `concurrency_key` run at once (enforced at claim via claim-then-reconcile).
+    if opts.concurrency_key ~= nil and opts.concurrency and opts.concurrency > 0 then
+        cols[#cols + 1] = "concurrency_key";   vals[#vals + 1] = opts.concurrency_key
+        cols[#cols + 1] = "concurrency_limit"; vals[#vals + 1] = opts.concurrency
     end
     local id
     if opts.dedup_key ~= nil then
@@ -656,6 +677,43 @@ local function resolve_queue_order(opts)
     return order
 end
 
+-- Soft per-key concurrency (claim-then-reconcile, mirroring rl_apply). A just-
+-- claimed job whose `concurrency_key` already has `concurrency_limit` running
+-- peers ahead of it is released back to pending (its attempt undone). "Soft":
+-- correct under normal load; may briefly overshoot when workers claim the same
+-- key in the same instant (no reservation counter). A strict counter-backed cap
+-- is the opt-in follow-up. `now` is the claim time (== claimed_at of every job
+-- in `out`), so a job's rank counts only strictly-older running peers.
+local function conc_apply(out, now)
+    if #out == 0 then return out end
+    local drop = {}
+    for _, j in ipairs(out) do
+        local lim = j._conc_limit
+        if j._conc_key ~= nil and lim and lim > 0 then
+            -- Rank = running peers strictly ahead in (claimed_at, id) order. This
+            -- ordering is fleet-wide deterministic, so no two workers evict the
+            -- same slot: each keyed job keeps iff its rank is under the limit.
+            local r = db.query(
+                "SELECT COUNT(*) AS n FROM _hull_jobs "
+                .. "WHERE concurrency_key=? AND status='running' "
+                .. "AND (claimed_at < ? OR (claimed_at = ? AND id < ?))",
+                { j._conc_key, now, now, j.id })
+            local rank = (r and r[1] and r[1].n) or 0
+            if rank >= lim then drop[j.id] = true end
+        end
+    end
+    if next(drop) == nil then return out end
+    local ph, params = {}, { now }
+    for id in pairs(drop) do ph[#ph + 1] = "?"; params[#params + 1] = id end
+    db.exec(
+        "UPDATE _hull_jobs SET status='pending', claim_token=NULL, claimed_at=NULL, "
+        .. "attempts=attempts-1, updated_at=? WHERE id IN (" .. table.concat(ph, ",") .. ")",
+        params)
+    local kept = {}
+    for _, j in ipairs(out) do if not drop[j.id] then kept[#kept + 1] = j end end
+    return kept
+end
+
 -- Claim up to `batch` ready jobs from ONE queue (the per-backend atomic claim).
 local function claim_one(queue, batch)
     if is_paused(queue) then return {} end   -- paused: don't dispatch
@@ -676,7 +734,7 @@ local function claim_one(queue, batch)
             .. "attempts=attempts+1, updated_at=? WHERE id IN ("
             .. "SELECT id FROM _hull_jobs WHERE queue=? AND status='pending' AND run_at<=? "
             .. "ORDER BY priority DESC, id LIMIT ? " .. lock .. ") "
-            .. "RETURNING id, queue, type, payload, priority, attempts, max_attempts, trace_context, created_at",
+            .. "RETURNING id, queue, type, payload, priority, attempts, max_attempts, trace_context, created_at, concurrency_key, concurrency_limit",
             { token, now, now, queue, now, batch })
     elseif d.supports_skip_locked then
         -- MySQL: no RETURNING. Lock + mark in one txn, then read back by token.
@@ -694,7 +752,7 @@ local function claim_one(queue, batch)
                 params)
         end)
         rows = db.query(
-            "SELECT id, queue, type, payload, priority, attempts, max_attempts, trace_context, created_at FROM _hull_jobs WHERE claim_token=?",
+            "SELECT id, queue, type, payload, priority, attempts, max_attempts, trace_context, created_at, concurrency_key, concurrency_limit FROM _hull_jobs WHERE claim_token=?",
             { token })
     else
         -- SQLite: single-writer serializes the claim, so the marked-running rows
@@ -704,7 +762,7 @@ local function claim_one(queue, batch)
             .. "attempts=attempts+1, updated_at=? WHERE id IN ("
             .. "SELECT id FROM _hull_jobs WHERE queue=? AND status='pending' AND run_at<=? "
             .. "ORDER BY priority DESC, id LIMIT ?) "
-            .. "RETURNING id, queue, type, payload, priority, attempts, max_attempts, trace_context, created_at",
+            .. "RETURNING id, queue, type, payload, priority, attempts, max_attempts, trace_context, created_at, concurrency_key, concurrency_limit",
             { token, now, now, queue, now, batch })
     end
 
@@ -722,10 +780,13 @@ local function claim_one(queue, batch)
     for _, r in ipairs(rows) do
         local j = shape(r)
         j.claim_token = token   -- handle for jobs.heartbeat on long-running work
+        j._conc_key   = r.concurrency_key      -- internal: conc_apply reconcile
+        j._conc_limit = r.concurrency_limit
         out[#out + 1] = j
     end
-    -- Enforce a fleet-wide rate limit (claim-then-reconcile; requeues the excess).
-    return rl_apply(queue, out)
+    -- Reconcile the claim: fleet-wide rate limit, then soft per-key concurrency.
+    -- Both requeue the excess (claim-then-reconcile, mirroring each other).
+    return conc_apply(rl_apply(queue, out), now)
 end
 
 --- Atomically claim up to `batch` ready jobs, marking them `running`.
