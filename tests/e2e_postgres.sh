@@ -540,6 +540,48 @@ echo "=== jobs low-latency pickup (run_worker wakes on enqueue NOTIFY) ==="
 check_notify_latency "lua" "lua" "$LUA_LAT_WORKER" "$LUA_LAT_ENQ"
 check_notify_latency "js"  "js"  "$JS_LAT_WORKER"  "$JS_LAT_ENQ"
 
+# ── LISTEN reconnect after a dropped connection (Phase 4, R2) ──────────
+# Kill the worker's LISTEN backend mid-run; the worker must reopen its
+# connection, re-issue LISTEN, and catch a SUBSEQUENT NOTIFY (RECOVERED=true).
+# Without the reconnect (hl_worker_db_invalidate on a -1 wait) it would stay on
+# the dead connection and spin/return false forever, never waking. The reconnect
+# lives in the C worker layer (db_work_fn), shared by both runtimes, so one
+# runtime proves it.
+check_reconnect() {
+    _label="$1"; _ext="$2"; _worker="$3"
+    RD=$(mktemp -d)
+    printf '%s\n' "$_worker" > "$RD/worker.$_ext"
+    ./build/hull "$RD/worker.$_ext" -d "$DSN" > "$RD/w.out" 2>/dev/null &
+    _wpid=$!
+    sleep 3   # worker LISTENing on its first wait
+    docker exec "$CONTAINER" psql -U hull -d hulldb -tAc \
+        "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE query = 'LISTEN hull_jobs'" \
+        >/dev/null 2>&1 || true
+    sleep 3   # worker hits the dead conn -> invalidate -> reopen -> re-LISTEN
+    docker exec "$CONTAINER" psql -U hull -d hulldb -tAc "NOTIFY hull_jobs" >/dev/null 2>&1 || true
+    wait "$_wpid" || true
+    case "$(cat "$RD/w.out")" in
+        *"RECOVERED=true"*)
+            echo "PASS: $_label wait_notify reconnects after a dropped LISTEN connection" ;;
+        *)  echo "::error $_label reconnect: $(cat "$RD/w.out")"; exit 1 ;;
+    esac
+    rm -rf "$RD"
+}
+
+LUA_RC_WORKER='local db = require("hull.db").default()
+app.manifest({ modules = { "hull/db@1" } })
+app.main(function(ctx)
+  local ok = false
+  for _ = 1, 12 do
+    if db.wait_notify("hull_jobs", 1500) then ok = true break end
+  end
+  ctx.stdout:write(("RECOVERED=%s\n"):format(tostring(ok)))
+  return 0
+end)'
+
+echo "=== LISTEN reconnect after a dropped connection ==="
+check_reconnect "lua" "lua" "$LUA_RC_WORKER"
+
 # ── TLS phase (Phase 3b.2) ────────────────────────────────────────────
 # Enable SSL on the running container with a self-signed cert, then connect
 # with sslmode=require and assert (via pg_stat_ssl) the session is encrypted.

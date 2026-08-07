@@ -55,6 +55,16 @@ HlWorkerDb *hl_worker_db_get(void);
 HlWorkerDb *hl_worker_db_get_for(const char *dsn);
 
 /*
+ * Drop this thread's cached connection to @p dsn (NULL = default), closing it,
+ * so the next hl_worker_db_get_for(@p dsn) reopens a fresh one. Used to recover
+ * a connection the caller found dead (e.g. a LISTEN/NOTIFY wait that returned
+ * "connection lost"): the next use reconnects and re-establishes any per-
+ * connection state (LISTEN). A no-op if this thread has no such cached
+ * connection. Thread-safe: touches only the calling thread's local cache.
+ */
+void hl_worker_db_invalidate(const char *dsn);
+
+/*
  * Shared "get worker DB + check internal-table namespace" helper for the
  * per-thread runtime bindings (runtime/{lua,js}/worker_db.c). Returns the
  * worker's backend handle on success, or NULL with *out_err set to a static
