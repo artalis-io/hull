@@ -382,6 +382,119 @@ case "$wfout" in
     *)  echo "::error jobs durable/observability on PG: $wfout"; exit 1 ;;
 esac
 
+# ── hull/jobs durable events + strict concurrency on Postgres ─────────
+# Events (log + subscription cursor-lease drain) and strict per-key concurrency
+# are otherwise only CI-tested on SQLite (e2e_jobs.sh). Their SQL has real
+# backend divergence - the lease CAS uses RETURNING on PG/SQLite vs an affected-
+# row count on MySQL, and the strict counter reserve races SKIP LOCKED - so pin
+# them on real Postgres here. Each phase drops the jobs tables first (via psql,
+# to bypass the _hull_* namespace guard) for a clean, deterministic slate.
+jobs_reset_pg() {
+    docker exec "$CONTAINER" psql -U hull -d hulldb -q -c \
+      "DROP TABLE IF EXISTS _hull_jobs, _hull_job_events, _hull_job_subscriptions, _hull_job_concurrency, _hull_job_history CASCADE" \
+      >/dev/null 2>&1 || true
+}
+
+echo "=== jobs: durable events + subscriptions on Postgres ==="
+jobs_reset_pg
+EVDIR=$(mktemp -d)
+cat > "$EVDIR/ev.lua" <<'LUA'
+local jobs = require("hull.jobs")
+app.manifest({ modules = { "hull/db@1", "hull/jobs@1" } })
+app.main(function(ctx)
+  jobs.init({ events = true })
+  jobs.handler("ok",  function(j) return { r = 1 } end)
+  jobs.handler("bad", function(j) error("boom") end)
+  jobs.enqueue("ok", { x = 1 })
+  jobs.enqueue("bad", {}, { max_attempts = 1 })
+  jobs.enqueue("nohandler", {})
+  local c = jobs.enqueue("ok", {}); jobs.cancel(c)
+  for _ = 1, 3 do jobs.work({ batch = 10 }) end
+  local n = {}
+  for _, e in ipairs(jobs.events({ limit = 100 })) do n[e.type] = (n[e.type] or 0) + 1 end
+  -- Subscription cursor lease drain: the RETURNING-vs-rowcount CAS path.
+  local seen = 0
+  jobs.subscribe("s", function(ev) seen = seen + 1 end, { from = "beginning" })
+  local d = jobs._events_drain("s", { now = 1000, batch = 100 })
+  ctx.stdout:write(("JEV e=%d c=%d d=%d x=%d deliv=%d seen=%d\n"):format(
+    n.enqueued or 0, n.completed or 0, n.dead or 0, n.cancelled or 0, d.delivered, seen))
+  return 0
+end)
+LUA
+evout=$(./build/hull "$EVDIR/ev.lua" -d "$DSN" 2>/dev/null)
+case "$evout" in
+    *"JEV e=4 c=1 d=2 x=1 deliv=8 seen=8"*)
+        echo "PASS: jobs durable events + subscription lease drain (Postgres)"
+        rm -rf "$EVDIR" ;;
+    *)  echo "::error jobs events on PG: $evout"; exit 1 ;;
+esac
+
+echo "=== jobs: strict per-key concurrency on Postgres ==="
+jobs_reset_pg
+STDIR=$(mktemp -d)
+cat > "$STDIR/st.lua" <<'LUA'
+local jobs = require("hull.jobs")
+app.manifest({ modules = { "hull/db@1", "hull/jobs@1" } })
+app.main(function(ctx)
+  jobs.init()
+  for i = 1, 4 do jobs.enqueue("t", { i = i },
+      { concurrency_key = "A", concurrency = 2, concurrency_strict = true }) end
+  local c1 = jobs.claim({ batch = 10 })          -- hard cap: keeps EXACTLY 2
+  local kept = 0; for _, j in ipairs(c1) do if j._conc_key == "A" then kept = kept + 1 end end
+  jobs.handler("tb", function(j) return end)
+  for i = 1, 3 do jobs.enqueue("tb", { i = i },
+      { concurrency_key = "B", concurrency = 2, concurrency_strict = true }) end
+  for _ = 1, 6 do jobs.work({ batch = 10 }) end   -- slot released on each done
+  local done = 0; for id = 5, 7 do local g = jobs.get(id); if g and g.status == "done" then done = done + 1 end end
+  ctx.stdout:write(("JSTRICT cap_kept=%d drained=%d\n"):format(kept, done))
+  return 0
+end)
+LUA
+stout=$(./build/hull "$STDIR/st.lua" -d "$DSN" 2>/dev/null)
+case "$stout" in
+    *"JSTRICT cap_kept=2 drained=3"*)
+        echo "PASS: jobs strict per-key concurrency (hard cap + slot release, Postgres)"
+        rm -rf "$STDIR" ;;
+    *)  echo "::error jobs strict on PG: $stout"; exit 1 ;;
+esac
+
+echo "=== jobs: strict concurrency fleet (4 processes, hard cap 2, Postgres) ==="
+jobs_reset_pg
+SFDIR=$(mktemp -d)
+cat > "$SFDIR/seed.lua" <<'LUA'
+local jobs = require("hull.jobs")
+app.manifest({ modules = { "hull/jobs@1" } })
+app.main(function() jobs.init()
+  for i = 1, 50 do jobs.enqueue("t", {},
+      { concurrency_key = "K", concurrency = 2, concurrency_strict = true }) end
+  return 0 end)
+LUA
+cat > "$SFDIR/claim.lua" <<'LUA'
+local jobs = require("hull.jobs")
+app.manifest({ modules = { "hull/jobs@1" } })
+app.main(function(ctx)
+  jobs.init()
+  local b = jobs.claim({ batch = 10 })   -- leaves them running (no complete)
+  for _, j in ipairs(b) do ctx.stdout:write(j.id .. "\n") end
+  return 0
+end)
+LUA
+./build/hull "$SFDIR/seed.lua" -d "$DSN" >/dev/null 2>&1
+si=1; while [ "$si" -le 4 ]; do ./build/hull "$SFDIR/claim.lua" -d "$DSN" > "$SFDIR/out.$si" 2>/dev/null & si=$((si + 1)); done
+wait
+stot=$(cat "$SFDIR"/out.* | grep -c . || true)
+suniq=$(cat "$SFDIR"/out.* | sort -n | uniq | grep -c . || true)
+if [ "$stot" -eq 2 ] && [ "$suniq" -eq 2 ]; then
+    echo "PASS: jobs strict fleet - 4 processes claimed exactly 2 (hard cap, Postgres)"
+    rm -rf "$SFDIR"
+else
+    echo "::error jobs strict fleet on PG: total=$stot uniq=$suniq (want 2/2)"; exit 1
+fi
+# Leave a clean slate: these phases seed strict/pending jobs + a live concurrency
+# counter that would otherwise skew the downstream jobs phases (rowcount, the
+# Phase-4 latency/reconnect waits).
+jobs_reset_pg
+
 # ── db.exec affected-row count (regression guard) ─────────────────────
 # The pg backend must surface the CommandComplete row count (like sqlite3_changes
 # / MySQL affected_rows); it previously discarded it and returned 0, which broke
