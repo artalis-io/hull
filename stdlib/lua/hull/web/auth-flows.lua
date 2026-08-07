@@ -97,6 +97,7 @@
 
 local crypto    = require("hull.crypto")
 local envelope  = require("hull.crypto.envelope")
+local _hex      = require("hull.crypto._hex")
 local db        = require("hull.db").default()
 local time      = require("hull.time")
 local json      = require("hull.json")
@@ -1635,25 +1636,12 @@ function M.init(opts)
     -- crypto.hmac_sha256 takes the key as a hex string; we encode
     -- once at init and reuse the hex form per request.
     --
-    -- bytes_to_hex_local mirrors stdlib/js/hull/web/auth-flows.js
-    -- `bytesToHex`. Hand-rolled because crypto.hex_encode treats its
-    -- input as a *string* that's passed via Lua's C boundary; on the
-    -- JS side the equivalent UTF-8-inflates code points >= 0x80,
-    -- producing a different hex digest. State secrets that contain
-    -- any byte >= 0x80 (e.g. a passphrase with non-ASCII) would
-    -- silently derive different HMAC keys per runtime, breaking the
-    -- byte-identical wire-format guarantee the JS header promises
-    -- ("a Lua-Hull → JS-Hull migration works without re-issuing
-    -- pending tokens"). string.byte iterates the raw bytes.
-    local function bytes_to_hex_local(s)
-        local n = #s
-        local out = {}
-        for i = 1, n do
-            out[i] = string.format("%02x", string.byte(s, i))
-        end
-        return table.concat(out)
-    end
-    _state.state_secret_hex = bytes_to_hex_local(opts.state_secret)
+    -- Raw-byte hex via the shared hull.crypto._hex helper: NOT crypto.hex_encode,
+    -- which UTF-8-inflates code points >= 0x80 on the JS side, so a state secret
+    -- with a non-ASCII byte would derive different HMAC keys per runtime and
+    -- break the cross-runtime wire-format guarantee. _hex is byte-identical in
+    -- both runtimes.
+    _state.state_secret_hex = _hex.to_hex(opts.state_secret)
     _state.email_send       = opts.email_send
     _state.public_origin    = opts.public_origin
     _state.trusted_hosts    = opts.trusted_hosts

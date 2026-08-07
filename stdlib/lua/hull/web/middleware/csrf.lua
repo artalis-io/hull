@@ -17,6 +17,7 @@
 -- NOT need CSRF protection (browsers don't auto-send Bearer tokens).
 
 local crypto = require("hull.crypto")
+local _hex = require("hull.crypto._hex")
 local time = require("hull.time")
 
 local csrf = {}
@@ -30,14 +31,6 @@ local function url_decode(s)
     return s
 end
 
---- Convert a raw string to hex representation.
-local function str_to_hex(s)
-    local hex = {}
-    for i = 1, #s do
-        hex[i] = string.format("%02x", string.byte(s, i))
-    end
-    return table.concat(hex)
-end
 
 --- Constant-time comparison of two strings, done in C
 --- (crypto.constant_time_eq) so timing is not subject to interpreter variance.
@@ -59,7 +52,7 @@ function csrf.generate(session_id, secret)
     local ts_hex = string.format("%x", ts)
 
     local message = session_id .. ":" .. ts_hex
-    local key_hex = str_to_hex(secret)
+    local key_hex = _hex.to_hex(secret)
     local mac = crypto.hmac_sha256(message, key_hex)
 
     return ts_hex .. "." .. mac
@@ -117,7 +110,7 @@ function csrf.verify(token, session_id, secret, max_age)
     -- the canonical wire encoding (tsHex), so a token minted by the
     -- JS sibling verifies bit-for-bit here.
     local message = session_id .. ":" .. ts_hex
-    local key_hex = str_to_hex(secret)
+    local key_hex = _hex.to_hex(secret)
     local expected_mac = crypto.hmac_sha256(message, key_hex)
 
     return constant_time_compare(mac, expected_mac)

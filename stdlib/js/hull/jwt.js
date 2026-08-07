@@ -59,15 +59,10 @@ function constantTimeCompare(a, b) {
     return crypto.constantTimeEq(a, b);
 }
 
-function secretToHex(secret) {
-    let hex = "";
-    for (let i = 0; i < secret.length; i++) {
-        const c = secret.charCodeAt(i);
-        if (c > 127) throw new Error("jwt: secret must be ASCII-only");
-        hex += c.toString(16).padStart(2, "0");
-    }
-    return hex;
-}
+import { _hex } from "hull:crypto:_hex";
+// Raw-byte hex (byte-consistent with Lua; NOT crypto.hexEncode which
+// UTF-8-inflates in JS). Accepts any byte, so non-ASCII secrets work too.
+const secretToHex = _hex.toHex;
 
 // HS256: HMAC-SHA256 over the signing input, returning the
 // base64url-encoded 32-byte digest (matches what the JWS token holds).
