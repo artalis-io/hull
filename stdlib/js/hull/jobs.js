@@ -1385,16 +1385,31 @@ async function runWorker(opts) {
     // (latency only, never correctness). Gated on concurrency === 1: with N
     // in-process loops all idle we would occupy N worker-pool threads on the
     // wait, so the multi-loop case keeps plain sleep (the fleet still gets the
-    // win via separate single-loop worker processes). A first wait that throws
-    // (no thread pool / event loop) disables the fast path for the rest of the
-    // run and falls back to sleep.
-    let useNotify = db.dialect.supportsNotify && concurrency === 1;
+    // win via separate single-loop worker processes).
+    //
+    // Three wait outcomes:
+    //   * true  -> work is available; return at once (the whole point).
+    //   * false at ~pollMs -> a real timeout; loop and poll.
+    //   * false well before pollMs -> a dropped-connection wait (worker_db
+    //     already invalidated it), NOT a real timeout, so sleep the remainder;
+    //     otherwise a flapping connection would spin the loop.
+    // A throw (no thread pool / event loop, or a transient DB error mid-reopen)
+    // sleeps this tick and retries next tick, so a recovered database restores
+    // the fast path without a worker restart.
+    const useNotify = db.dialect.supportsNotify && concurrency === 1;
     const idleWait = async () => {
-        if (useNotify) {
-            try { await db.waitNotify("hull_jobs", pollMs); }
-            catch (_e) { useNotify = false; await hull.sleep(pollMs); }
-        } else {
+        if (!useNotify) { await hull.sleep(pollMs); return; }
+        const t0 = time.nowMs();
+        let got;
+        try {
+            got = await db.waitNotify("hull_jobs", pollMs);
+        } catch (_e) {
             await hull.sleep(pollMs);
+            return;
+        }
+        if (got === false) {
+            const elapsed = time.nowMs() - t0;
+            if (elapsed < pollMs) await hull.sleep(pollMs - elapsed);
         }
     };
 
