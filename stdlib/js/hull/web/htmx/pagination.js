@@ -18,11 +18,10 @@
  */
 
 import { pagination as basePagination } from "hull:web:pagination";
+import { htmx } from "hull:web:htmx";
 
-const ESC = { "&": "&amp;", '"': "&quot;", "<": "&lt;", ">": "&gt;", "'": "&#39;" };
-function attrEscape(s) {
-    return String(s == null ? "" : s).replace(/[&"<>']/g, (c) => ESC[c]);
-}
+// HTML attribute-value escaping (shared across the htmx widgets).
+const attrEscape = htmx.escape;
 
 function linkAttrs(url, target, pushUrl) {
     const parts = [

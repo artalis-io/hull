@@ -78,16 +78,8 @@ local inline_edit = require("hull.web.htmx.inline-edit")
 
 local M = {}
 
-local ESC = {
-    ["&"] = "&amp;",
-    ['"'] = "&quot;",
-    ["<"] = "&lt;",
-    [">"] = "&gt;",
-    ["'"] = "&#39;",
-}
-local function esc(s)
-    return (tostring(s == nil and "" or s):gsub('[&"<>\']', ESC))
-end
+-- HTML escaping (shared across the htmx widgets).
+local esc = require("hull.web.htmx").escape
 
 local function check_required_opt(opts, name)
     if not opts or opts[name] == nil then

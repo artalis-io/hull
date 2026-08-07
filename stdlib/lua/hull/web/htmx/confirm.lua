@@ -47,20 +47,8 @@
 
 local confirm = {}
 
--- HTML attribute-value escaping. Covers the five characters that
--- can break out of a double-quoted attribute value (& and " are
--- the load-bearing ones; <, >, ' included for defense in depth and
--- to render correctly inside any container context).
-local ESC = {
-    ["&"] = "&amp;",
-    ['"'] = "&quot;",
-    ["<"] = "&lt;",
-    [">"] = "&gt;",
-    ["'"] = "&#39;",
-}
-local function attr_escape(s)
-    return (tostring(s):gsub('[&"<>\']', ESC))
-end
+-- HTML attribute-value escaping (shared across the htmx widgets).
+local attr_escape = require("hull.web.htmx").escape
 
 --- Render htmx + data attributes for a confirm dialog.
 --

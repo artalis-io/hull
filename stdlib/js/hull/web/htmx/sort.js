@@ -19,10 +19,9 @@
  * URLs round-trip and stay bookmarkable.
  */
 
-const ESC = { "&": "&amp;", '"': "&quot;", "<": "&lt;", ">": "&gt;", "'": "&#39;" };
-function attrEscape(s) {
-    return String(s == null ? "" : s).replace(/[&"<>']/g, (c) => ESC[c]);
-}
+// HTML attribute-value escaping (shared across the htmx widgets).
+import { htmx } from "hull:web:htmx";
+const attrEscape = htmx.escape;
 function safeColumn(s) {
     if (s == null) return "";
     return String(s).replace(/[^A-Za-z0-9_-]/g, "");

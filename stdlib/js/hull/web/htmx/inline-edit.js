@@ -24,10 +24,9 @@
  * map snake_case (Lua) → camelCase (JS).
  */
 
-const ESC = { "&": "&amp;", '"': "&quot;", "<": "&lt;", ">": "&gt;", "'": "&#39;" };
-function esc(s) {
-    return String(s == null ? "" : s).replace(/[&"<>']/g, (c) => ESC[c]);
-}
+// HTML escaping (shared across the htmx widgets).
+import { htmx } from "hull:web:htmx";
+const esc = htmx.escape;
 
 /**
  * Render the display-mode cell (read-only span that swaps to

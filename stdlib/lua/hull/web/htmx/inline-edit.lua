@@ -91,17 +91,8 @@
 
 local inline_edit = {}
 
--- HTML body / attribute escape (covers both contexts; safest).
-local ESC = {
-    ["&"] = "&amp;",
-    ['"'] = "&quot;",
-    ["<"] = "&lt;",
-    [">"] = "&gt;",
-    ["'"] = "&#39;",
-}
-local function esc(s)
-    return (tostring(s == nil and "" or s):gsub('[&"<>\']', ESC))
-end
+-- HTML body / attribute escape (shared across the htmx widgets).
+local esc = require("hull.web.htmx").escape
 
 -- Reject non-string/number values at entry points so a caller
 -- passing a table accidentally produces a clear error rather than

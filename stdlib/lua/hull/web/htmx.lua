@@ -26,6 +26,27 @@
 
 local htmx = {}
 
+-- ── Shared HTML escape ────────────────────────────────────────────────
+--
+-- The htmx widgets render user data into element text and double-quoted
+-- attributes, so they all need HTML escaping. It lives here, once, rather
+-- than being re-rolled in each widget (where copies had already drifted -
+-- some missed the nil guard). Escapes the five HTML metacharacters plus the
+-- backtick (unquoted-attribute contexts), matching hull.template.
+local _escape_map = {
+    ["&"] = "&amp;", ["<"] = "&lt;", [">"] = "&gt;",
+    ['"'] = "&quot;", ["'"] = "&#39;", ["`"] = "&#96;",
+}
+
+--- HTML-escape a value for safe interpolation into element text or a
+--- double-quoted attribute. `nil` becomes the empty string.
+-- @tparam any s
+-- @treturn string
+function htmx.escape(s)
+    if s == nil then return "" end
+    return (tostring(s):gsub("[&<>\"'`]", _escape_map))
+end
+
 --- True if the request was sent by the htmx client runtime.
 --
 -- Checks for `HX-Request: true`. HTMX sets this on every AJAX request

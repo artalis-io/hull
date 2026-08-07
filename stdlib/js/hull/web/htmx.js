@@ -27,6 +27,26 @@
  * @license AGPL-3.0-or-later
  */
 
+// ── Shared HTML escape ────────────────────────────────────────────────
+//
+// The htmx widgets render user data into element text and double-quoted
+// attributes, so they all need HTML escaping. It lives here, once, rather
+// than being re-rolled in each widget. Escapes the five HTML metacharacters
+// plus the backtick (unquoted-attribute contexts), matching hull.template.
+const _escapeMap = {
+    "&": "&amp;", "<": "&lt;", ">": "&gt;",
+    '"': "&quot;", "'": "&#39;", "`": "&#96;",
+};
+
+/**
+ * HTML-escape a value for safe interpolation into element text or a
+ * double-quoted attribute. null/undefined become the empty string.
+ */
+function escape(s) {
+    if (s === null || s === undefined) return "";
+    return String(s).replace(/[&<>"'`]/g, (ch) => _escapeMap[ch]);
+}
+
 /** True if the request was sent by the htmx client runtime. */
 function is(req) {
     if (!req || !req.headers) return false;
@@ -167,6 +187,7 @@ function location(res, pathOrOpts) {
 }
 
 export const htmx = {
+    escape,
     is, boosted, currentUrl, target, triggerName,
     redirect, retarget, reswap,
     trigger,
