@@ -382,6 +382,38 @@ case "$wfout" in
     *)  echo "::error jobs durable/observability on PG: $wfout"; exit 1 ;;
 esac
 
+# ── db.exec affected-row count (regression guard) ─────────────────────
+# The pg backend must surface the CommandComplete row count (like sqlite3_changes
+# / MySQL affected_rows); it previously discarded it and returned 0, which broke
+# every rowcount-based caller (jobs.cancel/retry/reap, session/ratelimit cleanup).
+RCDIR=$(mktemp -d)
+cat > "$RCDIR/rc.lua" <<'LUA'
+local db = require("hull.db").default()
+local jobs = require("hull.jobs")
+app.manifest({ modules = { "hull/db@1", "hull/jobs@1" } })
+app.main(function(ctx)
+  db.exec("DROP TABLE IF EXISTS rc_t")
+  db.exec("CREATE TABLE rc_t (id INTEGER PRIMARY KEY, n INTEGER)")
+  db.exec("INSERT INTO rc_t (id,n) VALUES (1,0),(2,0),(3,0)")
+  local upd = db.exec("UPDATE rc_t SET n=1 WHERE id<=2")       -- 2
+  local del = db.exec("DELETE FROM rc_t WHERE id=3")            -- 1
+  local no  = db.exec("UPDATE rc_t SET n=9 WHERE id=99")        -- 0
+  jobs.init()
+  local jid = jobs.enqueue("x", {}, { delay = 3600 })          -- pending
+  local ok  = jobs.cancel(jid)                                 -- true (was false on PG)
+  ctx.stdout:write(("PGRC upd=%s del=%s no=%s cancel=%s\n"):format(
+    tostring(upd), tostring(del), tostring(no), tostring(ok)))
+  return 0
+end)
+LUA
+rcout="$(./build/hull "$RCDIR/rc.lua" -d "$DSN" 2>/dev/null)" || true
+case "$rcout" in
+    *"PGRC upd=2 del=1 no=0 cancel=true"*)
+        echo "PASS: db.exec returns the affected-row count on Postgres (jobs.cancel etc. correct)"
+        rm -rf "$RCDIR" ;;
+    *)  echo "::error db.exec affected-row count on PG: $rcout"; exit 1 ;;
+esac
+
 # ── TLS phase (Phase 3b.2) ────────────────────────────────────────────
 # Enable SSL on the running container with a self-signed cert, then connect
 # with sslmode=require and assert (via pg_stat_ssl) the session is encrypted.

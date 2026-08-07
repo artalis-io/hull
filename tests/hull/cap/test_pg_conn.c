@@ -325,6 +325,40 @@ UTEST(pg_query, select_rows_and_affected)
     close(sv[0]);
 }
 
+/* An exec-style statement (no rows, no callback) surfaces its CommandComplete
+ * row count via the `affected` out-param - the "UPDATE N" tag form, distinct from
+ * "SELECT N". This is what db.exec returns on Postgres (fixed: db_postgres.c's
+ * pg_query now threads this through instead of discarding it). */
+UTEST(pg_query, exec_affected_count)
+{
+    int sv[2];
+    ASSERT_EQ(0, socketpair(AF_UNIX, SOCK_STREAM, 0, sv));
+
+    HlPgWriter s;
+    hl_pg_writer_init(&s);
+    size_t m;
+    m = hl_pg_msg_begin(&s, '1'); hl_pg_msg_end(&s, m);   /* ParseComplete */
+    m = hl_pg_msg_begin(&s, '2'); hl_pg_msg_end(&s, m);   /* BindComplete  */
+    m = hl_pg_msg_begin(&s, 'C'); hl_pg_put_cstr(&s, "UPDATE 3"); hl_pg_msg_end(&s, m);
+    m = hl_pg_msg_begin(&s, 'Z'); hl_pg_put_u8(&s, 'I'); hl_pg_msg_end(&s, m);
+    ASSERT_FALSE(s.err);
+    ASSERT_TRUE(write(sv[0], s.buf, s.len) == (ssize_t)s.len);
+    hl_pg_writer_free(&s);
+
+    HlPgConn conn;
+    memset(&conn, 0, sizeof conn);
+    conn.fd = sv[1];
+
+    int64_t affected = -1;
+    ASSERT_EQ(0, hl_pg_query(&conn, "UPDATE t SET n=1 WHERE id > ?",
+                             &(HlPgParam){ .text = "0", .len = 1 }, 1,
+                             NULL, NULL, NULL, &affected));
+    ASSERT_EQ(affected, (int64_t)3);
+
+    hl_pg_conn_close(&conn);
+    close(sv[0]);
+}
+
 UTEST(pg_query, server_error_then_ready)
 {
     int sv[2];

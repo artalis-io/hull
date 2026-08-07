@@ -19,6 +19,7 @@
 #include "hull/cap/types.h"
 #include "hull/utils/alloc.h"
 
+#include <limits.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -276,9 +277,12 @@ static int pg_query(HlDbHandle *h, const char *sql,
     a.user_cb = cb;
     a.user_ctx = cb_ctx;
 
+    /* Capture the CommandComplete row count (parsed by the wire client) so the
+     * exec path can surface it, matching sqlite3_changes / MySQL affected_rows. */
+    int64_t affected = -1;
     int rc = hl_pg_query(&s->conn, sql, pp, nparams,
                          cb ? adapter_desc : NULL,
-                         cb ? adapter_row : NULL, &a, NULL);
+                         cb ? adapter_row : NULL, &a, &affected);
 
     if (a.names)
         for (int i = 0; i < a.nfields; i++) free(a.names[i]);
@@ -288,7 +292,15 @@ static int pg_query(HlDbHandle *h, const char *sql,
         for (int i = 0; i < nparams; i++) free(scratch[i]);
     free(scratch);
     free(pp);
-    return rc;
+
+    if (rc != 0) return rc;   /* error path unchanged */
+    /* exec path (no row callback): return the affected-row count (0 when the
+     * command has no numeric tag, e.g. BEGIN). The query path returns 0 - its
+     * rows were delivered via the callback, and callers use the row set, not
+     * this value. int cast: practical counts fit; clamp an absurd one honestly. */
+    if (cb == NULL && affected >= 0)
+        return affected > INT_MAX ? INT_MAX : (int)affected;
+    return 0;
 }
 
 static int pg_exec(HlDbHandle *h, const char *sql,
