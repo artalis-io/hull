@@ -406,7 +406,7 @@ app.main(function(ctx)
   return 0
 end)
 LUA
-rcout="$("$HULL" "$RCDIR/rc.lua" -d "$DSN" 2>/dev/null)" || true
+rcout="$(./build/hull "$RCDIR/rc.lua" -d "$DSN" 2>/dev/null)" || true
 case "$rcout" in
     *"PGRC upd=2 del=1 no=0 cancel=true"*)
         echo "PASS: db.exec returns the affected-row count on Postgres (jobs.cancel etc. correct)"
