@@ -25,8 +25,9 @@ local STATE_QUOTE_IN_QUOTED = 4
 --     instead of an array of arrays.
 --   - `separator` (string, default `","`): field delimiter.
 --   - `quote`     (string, default `'"'`): quote character.
---   - `max_rows`  (integer, default `100_000`): hard cap; rows past this
---     are silently dropped.
+--   - `max_rows`  (integer, default `100_000`): hard cap; parsing THROWS
+--     (error) if the input exceeds it. A cap breach is a failure, not a
+--     truncated success (see docs/stdlib_style.md §1).
 --
 -- @treturn table[]  Array of row arrays (or row objects if `headers=true`).
 -- @usage

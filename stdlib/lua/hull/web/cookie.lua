@@ -47,7 +47,8 @@ end
 --
 --   - `path`     (string, default `"/"`)
 --   - `httponly` (boolean, default `true`)
---   - `secure`   (boolean, default `false`)
+--   - `secure`   (boolean, default `true`; set `false` explicitly for local
+--                 HTTP dev). Secure-by-default matches the code.
 --   - `samesite` (string, default `"Lax"`; one of `"Lax"|"Strict"|"None"`)
 --   - `max_age`  (integer, seconds; omits attribute if `nil`)
 --   - `domain`   (string)
