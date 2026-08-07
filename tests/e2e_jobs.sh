@@ -668,7 +668,7 @@ echo "== soft per-key concurrency: JS  =="; check_perkey_conc "js"  "js"  "$JS_P
 # jobs.init{events=true} appends a lifecycle event in the SAME transaction as the
 # state change (enqueued/completed/dead/cancelled). jobs.events tails it. Counts
 # must match committed state exactly (no phantom events); the tail filters by type.
-check_events() {
+check_durable_events() {
     label="$1"; ext="$2"; app="$3"
     T="$(mktemp -d)"; printf '%s\n' "$app" > "$T/app.$ext"
     out="$("$HULL" "$T/app.$ext" -d "$T/a.db" 2>/dev/null)" || true
@@ -680,7 +680,7 @@ check_events() {
     rm -rf "$T"
 }
 
-LUA_EVENTS='local jobs = require("hull.jobs")
+LUA_DUR_EVENTS='local jobs = require("hull.jobs")
 app.manifest({ modules = { "hull/jobs@1" } })
 app.main(function(ctx)
   jobs.init({ events = true })
@@ -700,7 +700,7 @@ app.main(function(ctx)
   return 0
 end)'
 
-JS_EVENTS='import { app } from "hull:app"; import { jobs } from "hull:jobs";
+JS_DUR_EVENTS='import { app } from "hull:app"; import { jobs } from "hull:jobs";
 app.manifest({ modules: ["hull/jobs@1"] });
 app.main(async (ctx) => {
   jobs.init({ events: true });
@@ -719,8 +719,8 @@ app.main(async (ctx) => {
   return 0;
 });'
 
-echo "== durable events Phase 1: Lua =="; check_events "lua" "lua" "$LUA_EVENTS"
-echo "== durable events Phase 1: JS  =="; check_events "js"  "js"  "$JS_EVENTS"
+echo "== durable events Phase 1: Lua =="; check_durable_events "lua" "lua" "$LUA_DUR_EVENTS"
+echo "== durable events Phase 1: JS  =="; check_durable_events "js"  "js"  "$JS_DUR_EVENTS"
 
 # ── durable events Phase 2 (subscriptions: cursor + lease drain) ─────────────
 # The jobs._events_drain seam is synchronous + clock-injectable, so at-least-once,
