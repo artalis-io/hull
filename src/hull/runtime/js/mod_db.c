@@ -724,8 +724,13 @@ static JSValue js_db_async_common(JSContext *ctx, JSValueConst this_val,
         if (!channel)
             return JS_EXCEPTION;
         int32_t timeout_ms = 1000;
-        if (argc >= 2 && !JS_IsUndefined(argv[1]) && !JS_IsNull(argv[1]))
-            JS_ToInt32(ctx, &timeout_ms, argv[1]);
+        if (argc >= 2 && !JS_IsUndefined(argv[1]) && !JS_IsNull(argv[1]) &&
+            JS_ToInt32(ctx, &timeout_ms, argv[1]) < 0) {
+            /* A throwing valueOf/Symbol.toPrimitive on the timeout arg left a
+             * pending exception; propagate it rather than proceeding. */
+            JS_FreeCString(ctx, channel);
+            return JS_EXCEPTION;
+        }
         op = calloc(1, sizeof(HlWorkerDbOp));
         if (!op) {
             JS_FreeCString(ctx, channel);

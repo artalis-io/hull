@@ -1487,19 +1487,30 @@ function jobs.run_worker(opts)
     -- single-loop worker parks on conn.wait_notify, so a freshly enqueued job
     -- or appended event wakes it immediately instead of after poll_ms; the
     -- timeout is still poll_ms, so a missed/absent NOTIFY just falls back to a
-    -- poll (latency only, never correctness). Gated on concurrency == 1: with
-    -- N in-process loops all idle we would occupy N worker-pool threads on the
+    -- poll (latency only, never correctness). Gated on concurrency == 1: with N
+    -- in-process loops all idle we would occupy N worker-pool threads on the
     -- wait, so the multi-loop case keeps plain sleep (the fleet still gets the
-    -- win via separate single-loop worker processes). A first wait that throws
-    -- (no thread pool / event loop) disables the fast path for the rest of the
-    -- run and falls back to sleep.
+    -- win via separate single-loop worker processes).
+    --
+    -- Three wait outcomes:
+    --   * true  -> work is available; return at once (the whole point).
+    --   * false at ~poll_ms -> a real timeout; loop and poll.
+    --   * false well before poll_ms -> a dropped-connection wait (worker_db
+    --     already invalidated it), NOT a real timeout, so sleep the remainder;
+    --     otherwise a flapping connection would spin the loop.
+    -- A throw (no thread pool / event loop, or a transient DB error mid-reopen)
+    -- sleeps this tick and retries next tick, so a recovered database restores
+    -- the fast path without a worker restart.
     local use_notify = db.dialect.supports_notify and concurrency == 1
     local function idle_wait()
-        if use_notify then
-            local ok = pcall(db.wait_notify, "hull_jobs", poll_ms)
-            if not ok then use_notify = false; hull.sleep(poll_ms) end
-        else
+        if not use_notify then hull.sleep(poll_ms); return end
+        local t0 = time.now_ms()
+        local ok, got = pcall(db.wait_notify, "hull_jobs", poll_ms)
+        if not ok then
             hull.sleep(poll_ms)
+        elseif got == false then
+            local elapsed = time.now_ms() - t0
+            if elapsed < poll_ms then hull.sleep(poll_ms - elapsed) end
         end
     end
 

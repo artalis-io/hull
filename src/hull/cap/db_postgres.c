@@ -477,9 +477,12 @@ static int pg_table_columns(HlDbHandle *h, const char *table,
 /* ── Low-latency LISTEN/NOTIFY wait (Phase 4) ─────────────────────── */
 
 /* A LISTEN channel is an SQL identifier, not a bind param, so an unsafe name
- * would be an injection vector. Accept only [A-Za-z_][A-Za-z0-9_]{0,62} (the
- * Postgres 63-char identifier limit). hull/jobs passes the fixed literal
- * "hull_jobs"; this guard is defense in depth for any other caller. */
+ * would be an injection vector. The channel IS app-reachable (conn.wait_notify /
+ * waitNotify is a public connection method), so this allowlist is load-bearing,
+ * not merely defensive: accept only [A-Za-z_][A-Za-z0-9_]{0,62} (the Postgres
+ * 63-char identifier limit) and reject anything else (-> -1, mapped by the
+ * worker to a not-notified false). hull/jobs itself only ever passes the fixed
+ * literal "hull_jobs". */
 static int pg_channel_ok(const char *ch)
 {
     if (!ch) return 0;
