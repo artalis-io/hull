@@ -33,7 +33,7 @@ FAIL=0
 pass() { PASS=$((PASS + 1)); echo "  PASS: $1"; }
 fail() { FAIL=$((FAIL + 1)); echo "  FAIL: $1${2:+ - $2}"; }
 
-EXPECT_COLS="id,queue,type,payload,status,priority,attempts,max_attempts,run_at,claim_token,claimed_at,dedup_key,last_error,created_at,updated_at,progress,trace_context,concurrency_key,concurrency_limit"
+EXPECT_COLS="id,queue,type,payload,status,priority,attempts,max_attempts,run_at,claim_token,claimed_at,dedup_key,last_error,created_at,updated_at,progress,trace_context,concurrency_key,concurrency_limit,concurrency_strict"
 
 # ── Phase 1: init + schema; Phase 2: correctness round-trip (both runtimes) ──
 check_runtime() {
@@ -899,6 +899,91 @@ app.main(async (ctx) => {
 
 echo "== durable events Phase 3: Lua =="; check_events_p3 "lua" "lua" "$LUA_EV3"
 echo "== durable events Phase 3: JS  =="; check_events_p3 "js"  "js"  "$JS_EV3"
+
+# ── strict per-key concurrency (counter-backed hard cap) ────────────────────
+# The opt-in `concurrency_strict` path reserves a slot in _hull_job_concurrency
+# at claim (n < limit -> n+1) - a hard cap, no overshoot. Part 1: a claim of 4
+# key-A jobs (limit 2) keeps EXACTLY 2. Part 2: a fresh key B drains fully via
+# work() (the slot is released on each completion). The fleet gate below proves
+# the no-overshoot guarantee under concurrent claimers.
+check_strict_conc() {
+    label="$1"; ext="$2"; app="$3"
+    T="$(mktemp -d)"; printf '%s\n' "$app" > "$T/app.$ext"
+    out="$("$HULL" "$T/app.$ext" -d "$T/a.db" 2>/dev/null)" || true
+    case "$out" in
+        *"STRICT cap_kept=2 drained=3"*)
+            pass "$label: strict per-key concurrency (hard cap + slot release/reuse)" ;;
+        *) fail "$label: strict per-key concurrency" "$out" ;;
+    esac
+    rm -rf "$T"
+}
+
+LUA_STRICT='local jobs = require("hull.jobs")
+app.manifest({ modules = { "hull/jobs@1" } })
+app.main(function(ctx)
+  jobs.init()
+  for i=1,4 do jobs.enqueue("t",{i=i},{concurrency_key="A",concurrency=2,concurrency_strict=true}) end
+  local c1 = jobs.claim({ batch = 10 })
+  local kept = 0; for _,j in ipairs(c1) do if j._conc_key=="A" then kept=kept+1 end end
+  jobs.handler("tb", function(j) return end)
+  for i=1,3 do jobs.enqueue("tb",{i=i},{concurrency_key="B",concurrency=2,concurrency_strict=true}) end
+  for _=1,6 do jobs.work({ batch = 10 }) end
+  local done=0; for id=5,7 do local g=jobs.get(id); if g and g.status=="done" then done=done+1 end end
+  ctx.stdout:write(("STRICT cap_kept=%d drained=%d\n"):format(kept, done))
+  return 0
+end)'
+
+JS_STRICT='import { app } from "hull:app"; import { jobs } from "hull:jobs";
+app.manifest({ modules: ["hull/jobs@1"] });
+app.main(async (ctx) => {
+  jobs.init();
+  for (let i=0;i<4;i++) jobs.enqueue("t",{i},{concurrencyKey:"A",concurrency:2,concurrencyStrict:true});
+  const c1 = jobs.claim({ batch: 10 });
+  let kept=0; for (const j of c1) if (j._concKey==="A") kept++;
+  jobs.handler("tb", (j) => {});
+  for (let i=0;i<3;i++) jobs.enqueue("tb",{i},{concurrencyKey:"B",concurrency:2,concurrencyStrict:true});
+  for (let k=0;k<6;k++) await jobs.work({ batch: 10 });
+  let done=0; for (let id=5;id<=7;id++){ const g=jobs.get(id); if (g && g.status==="done") done++; }
+  ctx.stdout.write(`STRICT cap_kept=${kept} drained=${done}\n`);
+  return 0;
+});'
+
+echo "== strict per-key concurrency: Lua =="; check_strict_conc "lua" "lua" "$LUA_STRICT"
+echo "== strict per-key concurrency: JS  =="; check_strict_conc "js"  "js"  "$JS_STRICT"
+
+# Fleet gate: K processes claim from ONE strict key (limit 2), leaving jobs
+# running. The counter is authoritative, so total distinct claimed == exactly 2
+# no matter how many claimers race (soft could overshoot here).
+echo "== strict concurrency fleet gate ($CONC processes, hard cap 2) =="
+SW="$(mktemp -d)"; SDB="$SW/s.db"
+cat > "$SW/seed.lua" <<LUA
+local jobs = require("hull.jobs")
+app.manifest({ modules = { "hull/jobs@1" } })
+app.main(function() jobs.init()
+  for i=1,50 do jobs.enqueue("t",{},{concurrency_key="K",concurrency=2,concurrency_strict=true}) end
+  return 0 end)
+LUA
+cat > "$SW/claim.lua" <<'LUA'
+local jobs = require("hull.jobs")
+app.manifest({ modules = { "hull/jobs@1" } })
+app.main(function(ctx)
+  jobs.init()
+  local b = jobs.claim({ batch = 10 })   -- leaves them running (no complete)
+  for _,j in ipairs(b) do ctx.stdout:write(j.id .. "\n") end
+  return 0
+end)
+LUA
+"$HULL" "$SW/seed.lua" -d "$SDB" >/dev/null 2>&1
+i=1; while [ "$i" -le "$CONC" ]; do "$HULL" "$SW/claim.lua" -d "$SDB" > "$SW/out.$i" 2>/dev/null & i=$((i+1)); done
+wait
+stot="$(cat "$SW"/out.* | grep -c . || true)"
+suniq="$(cat "$SW"/out.* | sort -n | uniq | grep -c . || true)"
+if [ "$stot" -eq 2 ] && [ "$suniq" -eq 2 ]; then
+    pass "strict concurrency fleet: $CONC processes claimed exactly 2 (hard cap, no overshoot)"
+else
+    fail "strict concurrency fleet: expected exactly 2" "total=$stot uniq=$suniq"
+fi
+rm -rf "$SW"
 
 # ── v1.3: queue pause / resume / purge ──────────────────────────────────────
 # A paused queue is not claimed; resume restores it; purge deletes pending.

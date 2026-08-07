@@ -121,10 +121,12 @@ function init(opts) {
         "updated_at   INTEGER      NOT NULL," +
         "progress     INTEGER      NOT NULL DEFAULT 0," +
         "trace_context VARCHAR(255)," +
-        // Soft per-key concurrency (jobs.enqueue concurrencyKey/concurrency):
-        // at most `concurrency_limit` jobs sharing `concurrency_key` run at once.
-        "concurrency_key   VARCHAR(255)," +
-        "concurrency_limit INTEGER)");
+        // Per-key concurrency (jobs.enqueue concurrencyKey/concurrency): at most
+        // `concurrency_limit` jobs sharing `concurrency_key` run at once. `strict`
+        // (1) opts into the counter-backed hard cap; NULL/0 is the soft default.
+        "concurrency_key    VARCHAR(255)," +
+        "concurrency_limit  INTEGER," +
+        "concurrency_strict INTEGER)");
 
     // Claim scan path: ready-to-run pending jobs in a queue, by priority then id.
     db.exec(
@@ -184,6 +186,7 @@ function init(opts) {
     ensureColumn("_hull_jobs", "trace_context", "trace_context VARCHAR(255)");
     ensureColumn("_hull_jobs", "concurrency_key", "concurrency_key VARCHAR(255)");
     ensureColumn("_hull_jobs", "concurrency_limit", "concurrency_limit INTEGER");
+    ensureColumn("_hull_jobs", "concurrency_strict", "concurrency_strict INTEGER");
     ensureColumn("_hull_cron", "tz_offset", "tz_offset INTEGER NOT NULL DEFAULT 0");
 
     // Fleet-wide rate-limit counters (jobs.limit). One row per limited queue;
@@ -194,6 +197,16 @@ function init(opts) {
         "window_start INTEGER      NOT NULL," +
         "n            INTEGER      NOT NULL)");
     _rlLock = db.backendName === "sqlite" ? "" : " FOR UPDATE";
+
+    // Strict per-key concurrency counter (jobs.enqueue concurrencyStrict). One
+    // row per strict key: `n` running slots reserved. A claim atomically reserves
+    // (n < limit -> n+1), work() releases on any exit from running, and the reaper
+    // reconciles `n` to the true running count so a crashed worker can't leak a
+    // slot. `name` (not the reserved word `key`) mirrors _hull_ratelimit.
+    db.exec(
+        "CREATE TABLE IF NOT EXISTS _hull_job_concurrency (" +
+        "name VARCHAR(255) NOT NULL PRIMARY KEY," +
+        "n    INTEGER      NOT NULL DEFAULT 0)");
 
     // Durable per-queue pause state (jobs.pause / resume). A paused queue is not
     // claimed (workers skip it); fleet-wide (in the DB) and restart-durable.
@@ -462,12 +475,15 @@ function enqueue(jobType, data, opts) {
     if (hasDeps) { cols.push("status"); vals.push("blocked"); }
     // Optional W3C trace context, carried through to the handler as job.trace.
     if (o.trace !== undefined && o.trace !== null) { cols.push("trace_context"); vals.push(o.trace); }
-    // Optional soft per-key concurrency: at most `concurrency` jobs sharing
-    // `concurrencyKey` run at once (enforced at claim via claim-then-reconcile).
+    // Optional per-key concurrency: at most `concurrency` jobs sharing
+    // `concurrencyKey` run at once. Soft (default) reconciles at claim (may
+    // briefly overshoot); `concurrencyStrict: true` opts into the counter-backed
+    // hard cap. All jobs of a key should agree on the strict flag.
     if (o.concurrencyKey !== undefined && o.concurrencyKey !== null &&
         o.concurrency && o.concurrency > 0) {
         cols.push("concurrency_key");   vals.push(o.concurrencyKey);
         cols.push("concurrency_limit"); vals.push(o.concurrency);
+        if (o.concurrencyStrict) { cols.push("concurrency_strict"); vals.push(1); }
     }
     let id;
     if (o.dedupKey !== undefined && o.dedupKey !== null) {
@@ -606,29 +622,59 @@ function rlApply(queue, out) {
     return out.slice(0, granted);   // keep the top `granted`
 }
 
-// Soft per-key concurrency (claim-then-reconcile, mirroring rlApply). A just-
-// claimed job whose `concurrency_key` already has `concurrency_limit` running
-// peers ahead of it is released back to pending (its attempt undone). "Soft":
-// correct under normal load; may briefly overshoot when workers claim the same
-// key in the same instant (no reservation counter). A strict counter-backed cap
-// is the opt-in follow-up. `now` is the claim time (== claimed_at of every job
-// in `out`), so a job's rank counts only strictly-older running peers.
+// Atomically reserve one STRICT-concurrency slot for `key`: bump n iff n < limit.
+// Returns true when reserved. Mirrors rlReserve - blocking FOR UPDATE serializes
+// reservers on PG/MySQL, SQLite's write txn serializes - so the hard cap holds
+// with no overshoot even under concurrent claimers.
+function concReserve(key, limit) {
+    db.insertIfAbsent("_hull_job_concurrency", ["name"], ["name", "n"], [key, 0]);
+    let ok = false;
+    db.batch(() => {
+        const sel = db.query("SELECT n FROM _hull_job_concurrency WHERE name=?" + _rlLock, [key]);
+        const n = (sel[0] && sel[0].n) || 0;
+        if (n < limit) {
+            ok = true;
+            db.exec("UPDATE _hull_job_concurrency SET n=n+1 WHERE name=?", [key]);
+        }
+    });
+    return ok;
+}
+
+// Release one strict-concurrency slot (floored at 0). Called when a strict-keyed
+// job leaves 'running' (any work() outcome). The reaper reconciles the counter to
+// the true running count, so a slot lost to a crashed worker self-heals.
+function concRelease(key) {
+    db.exec("UPDATE _hull_job_concurrency SET n = CASE WHEN n > 0 THEN n - 1 ELSE 0 END " +
+        "WHERE name=?", [key]);
+}
+
+// Per-key concurrency reconcile (claim-then-reconcile, mirroring rlApply). Soft
+// (default): a job with `concurrency_limit` running peers ahead is released to
+// pending (attempt undone); correct under load, may briefly overshoot under
+// same-instant races. Strict (`concurrencyStrict`): an atomic counter reserve -
+// a hard cap with no overshoot; a failed reserve releases the claim. `now` is the
+// claim time (== claimed_at of every job in `out`).
 function concApply(out, now) {
     if (out.length === 0) return out;
     const drop = new Set();
     for (const j of out) {
         const lim = j._concLimit;
         if (j._concKey !== undefined && j._concKey !== null && lim && lim > 0) {
-            // Rank = running peers strictly ahead in (claimed_at, id) order. This
-            // ordering is fleet-wide deterministic, so no two workers evict the
-            // same slot: each keyed job keeps iff its rank is under the limit.
-            const r = db.query(
-                "SELECT COUNT(*) AS n FROM _hull_jobs " +
-                "WHERE concurrency_key=? AND status='running' " +
-                "AND (claimed_at < ? OR (claimed_at = ? AND id < ?))",
-                [j._concKey, now, now, j.id]);
-            const rank = (r[0] && r[0].n) || 0;
-            if (rank >= lim) drop.add(j.id);
+            if (j._concStrict === 1) {
+                // Strict: atomic counter reserve; a full key releases the claim.
+                if (!concReserve(j._concKey, lim)) drop.add(j.id);
+            } else {
+                // Soft: rank = running peers strictly ahead in (claimed_at, id)
+                // order. Fleet-wide deterministic, so no two workers evict the
+                // same slot: each job keeps iff its rank is under the limit.
+                const r = db.query(
+                    "SELECT COUNT(*) AS n FROM _hull_jobs " +
+                    "WHERE concurrency_key=? AND status='running' " +
+                    "AND (claimed_at < ? OR (claimed_at = ? AND id < ?))",
+                    [j._concKey, now, now, j.id]);
+                const rank = (r[0] && r[0].n) || 0;
+                if (rank >= lim) drop.add(j.id);
+            }
         }
     }
     if (drop.size === 0) return out;
@@ -755,7 +801,7 @@ function claimOne(queue, batch) {
             "attempts=attempts+1, updated_at=? WHERE id IN (" +
             "SELECT id FROM _hull_jobs WHERE queue=? AND status='pending' AND run_at<=? " +
             "ORDER BY priority DESC, id LIMIT ? " + lock + ") " +
-            "RETURNING id, queue, type, payload, priority, attempts, max_attempts, trace_context, created_at, concurrency_key, concurrency_limit",
+            "RETURNING id, queue, type, payload, priority, attempts, max_attempts, trace_context, created_at, concurrency_key, concurrency_limit, concurrency_strict",
             [token, now, now, queue, now, batch]);
     } else if (d.supportsSkipLocked) {
         db.batch(() => {
@@ -772,7 +818,7 @@ function claimOne(queue, batch) {
                 params);
         });
         rows = db.query(
-            "SELECT id, queue, type, payload, priority, attempts, max_attempts, trace_context, created_at, concurrency_key, concurrency_limit FROM _hull_jobs WHERE claim_token=?",
+            "SELECT id, queue, type, payload, priority, attempts, max_attempts, trace_context, created_at, concurrency_key, concurrency_limit, concurrency_strict FROM _hull_jobs WHERE claim_token=?",
             [token]);
     } else {
         rows = db.query(
@@ -780,7 +826,7 @@ function claimOne(queue, batch) {
             "attempts=attempts+1, updated_at=? WHERE id IN (" +
             "SELECT id FROM _hull_jobs WHERE queue=? AND status='pending' AND run_at<=? " +
             "ORDER BY priority DESC, id LIMIT ?) " +
-            "RETURNING id, queue, type, payload, priority, attempts, max_attempts, trace_context, created_at, concurrency_key, concurrency_limit",
+            "RETURNING id, queue, type, payload, priority, attempts, max_attempts, trace_context, created_at, concurrency_key, concurrency_limit, concurrency_strict",
             [token, now, now, queue, now, batch]);
     }
 
@@ -791,8 +837,9 @@ function claimOne(queue, batch) {
         .map((r) => {
             const j = shape(r);
             j.claimToken = token;   // handle for jobs.heartbeat on long-running work
-            j._concKey   = r.concurrency_key;      // internal: concApply reconcile
-            j._concLimit = r.concurrency_limit;
+            j._concKey    = r.concurrency_key;     // internal: concApply reconcile
+            j._concLimit  = r.concurrency_limit;
+            j._concStrict = r.concurrency_strict;  // 1 = counter-backed hard cap
             return j;
         });
     // Reconcile the claim: fleet-wide rate limit, then soft per-key concurrency.
@@ -939,10 +986,20 @@ function reap(opts) {
         "UPDATE _hull_jobs SET status='pending', updated_at=? " +
         "WHERE status='waiting' AND run_at > 0 AND run_at <= ?",
         [now, now]);
-    return db.exec(
+    const reclaimed = db.exec(
         "UPDATE _hull_jobs SET status='pending', claim_token=NULL, updated_at=? " +
         "WHERE status='running' AND claimed_at <= ?",
         [now, now - vt]) || 0;
+    // Reconcile strict-concurrency counters to the true running count. This frees
+    // a slot leaked by a crashed worker (its job was just reclaimed) and returns a
+    // parked workflow's slot - the self-healing backstop for concReserve/release.
+    // The subquery reads _hull_jobs (a different table), so it is valid on MySQL.
+    db.exec(
+        "UPDATE _hull_job_concurrency SET n = (" +
+        "SELECT COUNT(*) FROM _hull_jobs j " +
+        "WHERE j.concurrency_key = _hull_job_concurrency.name " +
+        "AND j.concurrency_strict = 1 AND j.status = 'running')");
+    return reclaimed;
 }
 
 // ── Cron (durable recurring schedules) ──────────────────────────────────────
@@ -1237,6 +1294,12 @@ async function work(opts) {
         // Opt-in attempt history (a yield leaves outcome undefined -> not recorded).
         if (outcome && historyEnabled(job.queue)) {
             recordAttempt(job, startedMs, time.nowMs(), outcome, errStr);
+        }
+        // Release the strict-concurrency slot reserved at claim: any exit from
+        // 'running' (done / dead / retry / workflow yield) frees it. A yielded
+        // workflow re-reserves on its next claim.
+        if (job._concStrict === 1 && job._concKey !== undefined && job._concKey !== null) {
+            concRelease(job._concKey);
         }
     }
     return batch.length;
