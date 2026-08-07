@@ -644,6 +644,10 @@ static JSValue js_push_worker_db_result(JSContext *ctx, void *driver)
         return JS_ThrowInternalError(ctx, "db.async: %s", op->error_msg);
     }
 
+    if (op->kind == HL_WORK_DB_WAIT_NOTIFY) {
+        return JS_NewBool(ctx, op->notified);
+    }
+
     if (op->kind == HL_WORK_DB_EXEC) {
         JSValue obj = JS_NewObject(ctx);
         JS_SetPropertyStr(ctx, obj, "changes",
@@ -709,60 +713,90 @@ static JSValue js_db_async_common(JSContext *ctx, JSValueConst this_val,
     if (!js_call_handle(ctx, this_val))
         return JS_ThrowInternalError(ctx, "database not available");
 
-    if (argc < 1)
-        return JS_ThrowTypeError(ctx, "db.async requires (sql, params?)");
+    /* Input differs by kind: WAIT_NOTIFY takes (channel, timeoutMs); the
+     * query/exec kinds take (sql, params). */
+    HlWorkerDbOp *op = NULL;
 
-    const char *sql = JS_ToCString(ctx, argv[0]);
-    if (!sql)
-        return JS_EXCEPTION;
-
-    if (!js_is_stdlib_caller(ctx) && hl_cap_db_check_namespace(sql) != 0) {
-        JS_FreeCString(ctx, sql);
-        return JS_ThrowInternalError(ctx,
-            "access denied: _hull_* tables are reserved");
-    }
-
-    /* Parse params */
-    HlValue *params = NULL;
-    int nparams = 0;
-    if (argc >= 2) {
-        if (js_to_hl_values(ctx, argv[1], &params, &nparams) != 0) {
-            JS_FreeCString(ctx, sql);
-            return JS_ThrowTypeError(ctx, "params must be an array");
+    if (kind == HL_WORK_DB_WAIT_NOTIFY) {
+        if (argc < 1)
+            return JS_ThrowTypeError(ctx, "waitNotify requires (channel, timeoutMs?)");
+        const char *channel = JS_ToCString(ctx, argv[0]);
+        if (!channel)
+            return JS_EXCEPTION;
+        int32_t timeout_ms = 1000;
+        if (argc >= 2 && !JS_IsUndefined(argv[1]) && !JS_IsNull(argv[1]))
+            JS_ToInt32(ctx, &timeout_ms, argv[1]);
+        op = calloc(1, sizeof(HlWorkerDbOp));
+        if (!op) {
+            JS_FreeCString(ctx, channel);
+            return JS_ThrowInternalError(ctx, "db.async: out of memory");
         }
-    }
-
-    /* Allocate op */
-    HlWorkerDbOp *op = calloc(1, sizeof(HlWorkerDbOp));
-    if (!op) {
-        js_free_hl_values(ctx, params, nparams);
-        JS_FreeCString(ctx, sql);
-        return JS_ThrowInternalError(ctx, "db.async: out of memory");
-    }
-
-    op->kind = kind;
-    op->server = js->server;
-    op->alloc = js->base.alloc;
-    op->sql = strdup(sql);
-    JS_FreeCString(ctx, sql);
-    if (!op->sql) {
-        js_free_hl_values(ctx, params, nparams);
-        free(op);
-        return JS_ThrowInternalError(ctx, "db.async: out of memory");
-    }
-
-    /* Deep-copy params */
-    if (nparams > 0) {
-        op->params = hl_deep_copy_params(params, nparams);
-        op->nparams = nparams;
-        if (!op->params) {
-            js_free_hl_values(ctx, params, nparams);
-            free(op->sql);
+        op->kind = kind;
+        op->server = js->server;
+        op->alloc = js->base.alloc;
+        op->channel = strdup(channel);
+        op->timeout_ms = (int)timeout_ms;
+        JS_FreeCString(ctx, channel);
+        if (!op->channel) {
             free(op);
             return JS_ThrowInternalError(ctx, "db.async: out of memory");
         }
+    } else {
+        if (argc < 1)
+            return JS_ThrowTypeError(ctx, "db.async requires (sql, params?)");
+
+        const char *sql = JS_ToCString(ctx, argv[0]);
+        if (!sql)
+            return JS_EXCEPTION;
+
+        if (!js_is_stdlib_caller(ctx) && hl_cap_db_check_namespace(sql) != 0) {
+            JS_FreeCString(ctx, sql);
+            return JS_ThrowInternalError(ctx,
+                "access denied: _hull_* tables are reserved");
+        }
+
+        /* Parse params */
+        HlValue *params = NULL;
+        int nparams = 0;
+        if (argc >= 2) {
+            if (js_to_hl_values(ctx, argv[1], &params, &nparams) != 0) {
+                JS_FreeCString(ctx, sql);
+                return JS_ThrowTypeError(ctx, "params must be an array");
+            }
+        }
+
+        /* Allocate op */
+        op = calloc(1, sizeof(HlWorkerDbOp));
+        if (!op) {
+            js_free_hl_values(ctx, params, nparams);
+            JS_FreeCString(ctx, sql);
+            return JS_ThrowInternalError(ctx, "db.async: out of memory");
+        }
+
+        op->kind = kind;
+        op->server = js->server;
+        op->alloc = js->base.alloc;
+        op->sql = strdup(sql);
+        JS_FreeCString(ctx, sql);
+        if (!op->sql) {
+            js_free_hl_values(ctx, params, nparams);
+            free(op);
+            return JS_ThrowInternalError(ctx, "db.async: out of memory");
+        }
+
+        /* Deep-copy params */
+        if (nparams > 0) {
+            op->params = hl_deep_copy_params(params, nparams);
+            op->nparams = nparams;
+            if (!op->params) {
+                js_free_hl_values(ctx, params, nparams);
+                free(op->sql);
+                free(op);
+                return JS_ThrowInternalError(ctx, "db.async: out of memory");
+            }
+        }
+        js_free_hl_values(ctx, params, nparams);
     }
-    js_free_hl_values(ctx, params, nparams);
 
     /* Target the database this async call is bound to: db.connect(name).async
      * hits that named connection's DSN; db.open(dsn).async its dynamic DSN;
@@ -862,6 +896,16 @@ static JSValue js_db_async_exec(JSContext *ctx, JSValueConst this_val,
     return js_db_async_common(ctx, this_val, argc, argv, HL_WORK_DB_EXEC);
 }
 
+/* conn.waitNotify(channel, timeoutMs) -> Promise<boolean>. Yielding
+ * low-latency wakeup: parks on the db.async worker pool while a worker blocks
+ * on the backend's LISTEN/NOTIFY primitive; resolves true (notified) or false
+ * (timeout / unsupported backend). Callers gate on conn.dialect.supportsNotify. */
+static JSValue js_db_wait_notify(JSContext *ctx, JSValueConst this_val,
+                                 int argc, JSValueConst *argv)
+{
+    return js_db_async_common(ctx, this_val, argc, argv, HL_WORK_DB_WAIT_NOTIFY);
+}
+
 /* ── db.udf — user-defined SQL functions (JS) ────────────────────────── */
 /* The SQLite UDF bindings live in the composed per-runtime bridge
  * (mod_db_udf.c → libhull_feature-sqlite-js.a) so THIS base runtime archive
@@ -915,6 +959,8 @@ static void js_set_dialect(JSContext *ctx, JSValue obj, const HlDbBackend *be)
                       JS_NewBool(ctx, be && be->dialect.supports_index_if_not_exists));
     JS_SetPropertyStr(ctx, d, "supportsSkipLocked",
                       JS_NewBool(ctx, be && be->dialect.supports_skip_locked));
+    JS_SetPropertyStr(ctx, d, "supportsNotify",
+                      JS_NewBool(ctx, be && be->dialect.supports_notify));
     JS_SetPropertyStr(ctx, d, "identityColumn",
                       JS_NewString(ctx, (be && be->dialect.identity_column)
                                         ? be->dialect.identity_column
@@ -949,6 +995,8 @@ static JSValue push_conn_object(JSContext *ctx, HlDbHandle *h)
     JS_SetPropertyStr(ctx, obj, "quoteIdentifier",
                       JS_NewCFunction(ctx, js_db_quote_identifier,
                                        "quoteIdentifier", 1));
+    JS_SetPropertyStr(ctx, obj, "waitNotify",
+                      JS_NewCFunction(ctx, js_db_wait_notify, "waitNotify", 2));
     /* async targets this connection's database via the worker pool's per-DSN
      * connections; udf registers on this connection's SQLite handle (a udf on
      * a non-SQLite connection errors at call time). Both sub-objects share the
@@ -1057,6 +1105,8 @@ static JSValue push_owned_conn_object(JSContext *ctx, HlDbHandle *h,
     JS_SetPropertyStr(ctx, obj, "quoteIdentifier",
                       JS_NewCFunction(ctx, js_db_quote_identifier,
                                        "quoteIdentifier", 1));
+    JS_SetPropertyStr(ctx, obj, "waitNotify",
+                      JS_NewCFunction(ctx, js_db_wait_notify, "waitNotify", 2));
     JS_SetPropertyStr(ctx, obj, "close",
                       JS_NewCFunction(ctx, js_db_owned_close, "close", 0));
 

@@ -606,6 +606,11 @@ static void lua_push_worker_db_result(lua_State *L, void *driver)
         return; /* unreachable */
     }
 
+    if (op->kind == HL_WORK_DB_WAIT_NOTIFY) {
+        lua_pushboolean(L, op->notified);
+        return;
+    }
+
     if (op->kind == HL_WORK_DB_EXEC) {
         lua_newtable(L);
         lua_pushinteger(L, op->exec_changes);
@@ -664,17 +669,24 @@ static int lua_db_async_common(lua_State *L, HlWorkerDbKind kind)
     if (!db_call_handle(L))
         return luaL_error(L, "database not available");
 
-    const char *sql = luaL_checkstring(L, 1);
-
-    if (!lua_is_stdlib_caller(L) && hl_cap_db_check_namespace(sql) != 0)
-        return luaL_error(L, "access denied: _hull_* tables are reserved");
-
-    /* Parse params */
+    /* Input differs by kind: WAIT_NOTIFY takes (channel, timeout_ms); the
+     * query/exec kinds take (sql, params). */
+    const char *sql = NULL, *channel = NULL;
+    int timeout_ms = 0;
     HlValue *params = NULL;
     int nparams = 0;
-    if (lua_gettop(L) >= 2 && !lua_isnil(L, 2)) {
-        if (lua_to_hl_values(L, 2, &params, &nparams) != 0)
-            return luaL_error(L, "params must be a table");
+
+    if (kind == HL_WORK_DB_WAIT_NOTIFY) {
+        channel = luaL_checkstring(L, 1);
+        timeout_ms = (int)luaL_optinteger(L, 2, 1000);
+    } else {
+        sql = luaL_checkstring(L, 1);
+        if (!lua_is_stdlib_caller(L) && hl_cap_db_check_namespace(sql) != 0)
+            return luaL_error(L, "access denied: _hull_* tables are reserved");
+        if (lua_gettop(L) >= 2 && !lua_isnil(L, 2)) {
+            if (lua_to_hl_values(L, 2, &params, &nparams) != 0)
+                return luaL_error(L, "params must be a table");
+        }
     }
 
     /* Allocate op */
@@ -687,25 +699,34 @@ static int lua_db_async_common(lua_State *L, HlWorkerDbKind kind)
     op->kind = kind;
     op->server = lua->server;
     op->alloc = lua->base.alloc;
-    op->sql = strdup(sql);
-    if (!op->sql) {
-        lua_free_hl_values(L, params, nparams);
-        free(op);
-        return luaL_error(L, "db.async: out of memory");
-    }
 
-    /* Deep-copy params (they need to outlive this stack frame) */
-    if (nparams > 0) {
-        op->params = hl_deep_copy_params(params, nparams);
-        op->nparams = nparams;
-        if (!op->params) {
-            lua_free_hl_values(L, params, nparams);
-            free(op->sql);
+    if (kind == HL_WORK_DB_WAIT_NOTIFY) {
+        op->channel = strdup(channel);
+        op->timeout_ms = timeout_ms;
+        if (!op->channel) {
             free(op);
             return luaL_error(L, "db.async: out of memory");
         }
+    } else {
+        op->sql = strdup(sql);
+        if (!op->sql) {
+            lua_free_hl_values(L, params, nparams);
+            free(op);
+            return luaL_error(L, "db.async: out of memory");
+        }
+        /* Deep-copy params (they need to outlive this stack frame) */
+        if (nparams > 0) {
+            op->params = hl_deep_copy_params(params, nparams);
+            op->nparams = nparams;
+            if (!op->params) {
+                lua_free_hl_values(L, params, nparams);
+                free(op->sql);
+                free(op);
+                return luaL_error(L, "db.async: out of memory");
+            }
+        }
+        lua_free_hl_values(L, params, nparams);
     }
-    lua_free_hl_values(L, params, nparams);
 
     /* Target the database this async call is bound to: db.connect(name).async
      * hits that named connection's DSN; db.default().async (and the bare
@@ -784,6 +805,16 @@ static int lua_db_async_exec(lua_State *L)
     return lua_db_async_common(L, HL_WORK_DB_EXEC);
 }
 
+/* conn.wait_notify(channel, timeout_ms) - yielding low-latency wakeup. Parks
+ * the coroutine on the db.async worker pool while a worker blocks on the
+ * backend's LISTEN/NOTIFY primitive; returns true (notified) or false
+ * (timeout / unsupported backend). Latency only: false is indistinguishable
+ * from a plain sleep, so callers gate on conn.dialect.supports_notify. */
+static int lua_db_wait_notify(lua_State *L)
+{
+    return lua_db_async_common(L, HL_WORK_DB_WAIT_NOTIFY);
+}
+
 static const luaL_Reg db_async_funcs[] = {
     {"query", lua_db_async_query},
     {"exec",  lua_db_async_exec},
@@ -818,6 +849,7 @@ static const luaL_Reg db_conn_methods[] = {
     {"upsert",           lua_db_upsert},
     {"table_columns",    lua_db_table_columns},
     {"quote_identifier", lua_db_quote_identifier},
+    {"wait_notify",      lua_db_wait_notify},
     {NULL, NULL}
 };
 
@@ -842,7 +874,7 @@ static void push_bound_subtable(lua_State *L, const luaL_Reg *funcs,
  * and identity DDL that the query / schema builders read. */
 static void push_dialect_table(lua_State *L, const HlDbBackend *be)
 {
-    lua_createtable(L, 0, 7);
+    lua_createtable(L, 0, 8);
     char qs[2] = { (be && be->dialect.identifier_quote)
                    ? be->dialect.identifier_quote : '"', '\0' };
     lua_pushstring(L, qs);
@@ -858,6 +890,8 @@ static void push_dialect_table(lua_State *L, const HlDbBackend *be)
     lua_setfield(L, -2, "supports_index_if_not_exists");
     lua_pushboolean(L, be && be->dialect.supports_skip_locked);
     lua_setfield(L, -2, "supports_skip_locked");
+    lua_pushboolean(L, be && be->dialect.supports_notify);
+    lua_setfield(L, -2, "supports_notify");
     lua_pushstring(L, (be && be->dialect.identity_column)
                        ? be->dialect.identity_column : "INTEGER PRIMARY KEY");
     lua_setfield(L, -2, "identity_column");
@@ -871,7 +905,7 @@ static void push_dialect_table(lua_State *L, const HlDbBackend *be)
 /* Push a fresh connection-object table whose methods carry @p h as upvalue 1. */
 static int push_conn_object(lua_State *L, HlDbHandle *h)
 {
-    lua_createtable(L, 0, 11);
+    lua_createtable(L, 0, 12);
     for (const luaL_Reg *m = db_conn_methods; m->name; m++) {
         lua_pushlightuserdata(L, h);
         lua_pushcclosure(L, m->func, 1);

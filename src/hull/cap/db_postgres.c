@@ -28,6 +28,7 @@
 typedef struct HlDbPgCtx {
     HlPgConn     conn;
     HlAllocator *alloc;
+    int          listening;   /* 1 once LISTEN was issued on this connection */
 } HlDbPgCtx;
 
 static int hexval(char c)
@@ -473,6 +474,48 @@ static int pg_table_columns(HlDbHandle *h, const char *table,
         &p, 1, pg_table_columns_row, &fwd, NULL);
 }
 
+/* ── Low-latency LISTEN/NOTIFY wait (Phase 4) ─────────────────────── */
+
+/* A LISTEN channel is an SQL identifier, not a bind param, so an unsafe name
+ * would be an injection vector. Accept only [A-Za-z_][A-Za-z0-9_]{0,62} (the
+ * Postgres 63-char identifier limit). hull/jobs passes the fixed literal
+ * "hull_jobs"; this guard is defense in depth for any other caller. */
+static int pg_channel_ok(const char *ch)
+{
+    if (!ch) return 0;
+    char c0 = ch[0];
+    if (!((c0 >= 'a' && c0 <= 'z') || (c0 >= 'A' && c0 <= 'Z') || c0 == '_'))
+        return 0;
+    size_t n = 1;
+    for (const char *p = ch + 1; *p; p++, n++) {
+        char c = *p;
+        if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+              (c >= '0' && c <= '9') || c == '_'))
+            return 0;
+        if (n >= 63) return 0;
+    }
+    return 1;
+}
+
+/* Optional low-latency wakeup. LISTEN once per connection, then block up to
+ * timeout_ms for a NotificationResponse. Returns 1 (notified), 0 (timeout),
+ * -1 (bad channel or dead connection). Blocking: runs on the db.async worker
+ * pool, never the event-loop thread. On a -1 from the wait the connection is
+ * dead; the worker's per-DSN cache reopens a fresh handle (listening resets to
+ * 0 on the new ctx) and re-LISTENs on the next call. */
+static int pg_wait_notify(HlDbHandle *h, const char *channel, int timeout_ms)
+{
+    HlDbPgCtx *s = h->ctx;
+    if (!pg_channel_ok(channel)) return -1;
+    if (!s->listening) {
+        char sql[80];
+        snprintf(sql, sizeof sql, "LISTEN %s", channel);
+        if (hl_pg_exec_simple(&s->conn, sql) != 0) return -1;
+        s->listening = 1;
+    }
+    return hl_pg_wait_notify(&s->conn, timeout_ms);
+}
+
 /* ── Vtable (const, lands in .rodata) ─────────────────────────────── */
 
 static const char *const pg_schemes[] = { "postgres", "postgresql", NULL };
@@ -487,6 +530,7 @@ const HlDbBackend hl_db_backend_postgres = {
         .supports_returning           = 1,
         .supports_index_if_not_exists = 1,
         .supports_skip_locked         = 1,   /* Postgres 9.5+ */
+        .supports_notify              = 1,   /* LISTEN/NOTIFY */
         .identity_column              = "BIGSERIAL PRIMARY KEY",
         .identity_sequence            = NULL,
     },
@@ -508,6 +552,7 @@ const HlDbBackend hl_db_backend_postgres = {
     .insert_if_absent     = pg_insert_if_absent,
     .upsert               = pg_upsert,
     .table_columns        = pg_table_columns,
+    .wait_notify          = pg_wait_notify,
 };
 
 #endif /* HL_ENABLE_POSTGRES */

@@ -86,7 +86,8 @@ void hl_db_result_free(HlDbResult *r);
 
 /* ── Worker DB operation ───────────────────────────────────────────── */
 
-typedef enum { HL_WORK_DB_QUERY, HL_WORK_DB_EXEC } HlWorkerDbKind;
+typedef enum { HL_WORK_DB_QUERY, HL_WORK_DB_EXEC,
+               HL_WORK_DB_WAIT_NOTIFY } HlWorkerDbKind;
 
 typedef struct HlWorkerDbOp {
     HlWorkerDbKind kind;
@@ -103,10 +104,15 @@ typedef struct HlWorkerDbOp {
     HlValue       *params;
     int            nparams;
 
+    /* WAIT_NOTIFY input: LISTEN channel (owned) + wait bound in ms. */
+    char          *channel;
+    int            timeout_ms;
+
     /* Output (set by worker thread) */
     HlDbResult     result;        /* DB_QUERY */
     int            exec_changes;  /* DB_EXEC */
     int64_t        last_id;       /* DB_EXEC */
+    int            notified;      /* DB_WAIT_NOTIFY: 1 notified, 0 timeout */
     int            error;
     char           error_msg[HL_WORKER_ERR_SIZE];
     int            cancelled;     /* set by async cancel, checked by done_fn */
