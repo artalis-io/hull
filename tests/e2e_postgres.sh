@@ -476,6 +476,70 @@ echo "=== conn.wait_notify LISTEN/NOTIFY round trip ==="
 check_wait_notify "lua" "lua" "$LUA_WN_WAITER" "$LUA_WN_NOTIFIER"
 check_wait_notify "js"  "js"  "$JS_WN_WAITER"  "$JS_WN_NOTIFIER"
 
+# ── jobs low-latency pickup via NOTIFY (Phase 4.3) ────────────────────
+# A run_worker parked idle with a LONG poll (8s) must wake and process a job
+# enqueued by a SECOND process in WELL under that poll - proving enqueue's
+# pg_notify + run_worker's idle wait_notify. On a non-NOTIFY backend the same
+# path degrades to polling (covered green by e2e_jobs on SQLite). Latency, never
+# correctness: the poll timeout is the safety net.
+check_notify_latency() {
+    _label="$1"; _ext="$2"; _worker="$3"; _enq="$4"
+    LD=$(mktemp -d)
+    printf '%s\n' "$_worker" > "$LD/worker.$_ext"
+    printf '%s\n' "$_enq"    > "$LD/enq.$_ext"
+    ./build/hull "$LD/worker.$_ext" -d "$DSN" > "$LD/w.out" 2>/dev/null &
+    _wpid=$!
+    sleep 3   # let the worker init + park idle on wait_notify
+    ./build/hull "$LD/enq.$_ext" -d "$DSN" >/dev/null 2>&1 || true
+    wait "$_wpid" || true
+    _out="$(cat "$LD/w.out")"
+    _ms=$(printf '%s' "$_out" | sed -n 's/.*elapsed_ms=\([0-9][0-9]*\).*/\1/p' | head -1)
+    if [ -n "$_ms" ] && [ "$_ms" -lt 5000 ]; then
+        echo "PASS: $_label run_worker woke on enqueue NOTIFY (${_ms}ms << 8000 poll)"
+    else
+        echo "::error $_label notify latency: $_out"; exit 1
+    fi
+    rm -rf "$LD"
+}
+
+LUA_LAT_WORKER='local jobs = require("hull.jobs")
+local t = require("hull.time")
+app.manifest({ modules = { "hull/db@1", "hull/jobs@1", "hull/time@1" } })
+app.main(function(ctx)
+  jobs.init()
+  local a = t.now_ms()
+  jobs.handler("ping", function(j)
+    ctx.stdout:write(("WORKED elapsed_ms=%d\n"):format(t.now_ms()-a))
+    jobs.stop()
+    return {}
+  end)
+  jobs.run_worker({ poll_ms = 8000 })
+  return 0
+end)'
+LUA_LAT_ENQ='local jobs = require("hull.jobs")
+app.manifest({ modules = { "hull/db@1", "hull/jobs@1" } })
+app.main(function() jobs.init() jobs.enqueue("ping", {}) return 0 end)'
+
+JS_LAT_WORKER='import { app } from "hull:app";
+import { jobs } from "hull:jobs";
+import { time } from "hull:time";
+app.manifest({ modules: ["hull/db@1", "hull/jobs@1", "hull/time@1"] });
+app.main(async (ctx) => {
+  jobs.init();
+  const a = time.nowMs();
+  jobs.handler("ping", (j) => { ctx.stdout.write(`WORKED elapsed_ms=${time.nowMs()-a}\n`); jobs.stop(); return {}; });
+  await jobs.runWorker({ pollMs: 8000 });
+  return 0;
+});'
+JS_LAT_ENQ='import { app } from "hull:app";
+import { jobs } from "hull:jobs";
+app.manifest({ modules: ["hull/db@1", "hull/jobs@1"] });
+app.main((ctx) => { jobs.init(); jobs.enqueue("ping", {}); return 0; });'
+
+echo "=== jobs low-latency pickup (run_worker wakes on enqueue NOTIFY) ==="
+check_notify_latency "lua" "lua" "$LUA_LAT_WORKER" "$LUA_LAT_ENQ"
+check_notify_latency "js"  "js"  "$JS_LAT_WORKER"  "$JS_LAT_ENQ"
+
 # ── TLS phase (Phase 3b.2) ────────────────────────────────────────────
 # Enable SSL on the running container with a self-signed cert, then connect
 # with sslmode=require and assert (via pg_stat_ssl) the session is encrypted.

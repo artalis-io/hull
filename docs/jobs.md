@@ -98,6 +98,20 @@ jobs.run_worker({ queues = { "critical", "default", "low" } })  -- strict priori
 jobs.run_worker({ queues = { critical = 3, default = 2, low = 1 } })  -- weighted
 ```
 
+**Low-latency pickup (Postgres).** An idle `run_worker` normally sleeps `poll_ms`
+(default 1000) between empty polls, so a freshly enqueued job waits up to that
+long before it is claimed. On a Postgres connection Hull closes that gap
+automatically with `LISTEN`/`NOTIFY`: `jobs.enqueue` (and every durable event)
+issues a `pg_notify`, and a single-loop `run_worker` parks on it, so it wakes
+**immediately** on new work instead of at the next poll. This is transparent -
+no API change, and it is **latency only, never correctness**: the wait is still
+bounded by `poll_ms`, so a missed or unsupported notification only costs latency.
+SQLite and MySQL have no `LISTEN`/`NOTIFY` and keep polling unchanged;
+`conn.dialect.supports_notify` (`supportsNotify` in JS) reports whether the fast
+path is active. The fast path applies to `concurrency == 1` loops (the common
+case, including separate worker processes); a multi-loop `run_worker({ concurrency = N })`
+keeps plain polling to avoid occupying N worker-pool threads on the wait.
+
 ## Lifecycle hooks
 
 `jobs.on(event, fn)` registers an **in-process** listener fired synchronously by

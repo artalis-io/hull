@@ -440,6 +440,19 @@ end
 -- does (transactional coupling: no lost, no phantom events). `job` supplies
 -- id/type/queue/trace; `info` is small metadata (error/attempt) - never the full
 -- result (a consumer joins _hull_job_results for that).
+-- Latency-only wakeup: nudge idle workers / subscription drainers parked on
+-- conn.wait_notify so a freshly appended event or enqueued job wakes them
+-- immediately instead of at the next poll. Postgres LISTEN/NOTIFY; a no-op on
+-- backends without it (SQLite/MySQL keep polling). The channel is the fixed
+-- literal every emitter and waiter shares; the payload is unused. Issued on the
+-- same connection as the preceding INSERT, so inside a caller's db.batch it
+-- rides the same transaction and PG delivers (and coalesces) it on commit.
+local function wake_workers()
+    if db.dialect.supports_notify then
+        db.exec("SELECT pg_notify(?, ?)", { "hull_jobs", "" })
+    end
+end
+
 local function emit_durable(event, job, info)
     if not _cfg.events then return end
     info = info or {}
@@ -451,6 +464,7 @@ local function emit_durable(event, job, info)
         "INSERT INTO _hull_job_events (ts, type, job_id, job_type, queue, data) "
         .. "VALUES (?, ?, ?, ?, ?, ?)",
         { time.now(), event, job.id, job.type, job.queue, data })
+    wake_workers()   -- wake drainers on the new event (no-op off Postgres)
 end
 
 --- Enqueue a job. A plain INSERT, so calling it inside a `db.batch()` commits
@@ -572,6 +586,10 @@ function jobs.enqueue(job_type, data, opts)
     -- db.batch when enqueue is called inside one (transactional coupling).
     emit_durable("enqueued",
         { id = id, type = job_type, queue = opts.queue or "default", trace = opts.trace }, {})
+    -- Low-latency job pickup: wake an idle worker on the new job. When events
+    -- are on, emit_durable above already issued the NOTIFY (coalesced within the
+    -- transaction), so only nudge directly when it did not.
+    if not _cfg.events then wake_workers() end
     return id
 end
 
@@ -1465,6 +1483,26 @@ function jobs.run_worker(opts)
     local concurrency = (opts.concurrency and opts.concurrency > 1) and opts.concurrency or 1
     _running = true
 
+    -- Idle wait between empty polls. On a NOTIFY-capable backend (Postgres) a
+    -- single-loop worker parks on conn.wait_notify, so a freshly enqueued job
+    -- or appended event wakes it immediately instead of after poll_ms; the
+    -- timeout is still poll_ms, so a missed/absent NOTIFY just falls back to a
+    -- poll (latency only, never correctness). Gated on concurrency == 1: with
+    -- N in-process loops all idle we would occupy N worker-pool threads on the
+    -- wait, so the multi-loop case keeps plain sleep (the fleet still gets the
+    -- win via separate single-loop worker processes). A first wait that throws
+    -- (no thread pool / event loop) disables the fast path for the rest of the
+    -- run and falls back to sleep.
+    local use_notify = db.dialect.supports_notify and concurrency == 1
+    local function idle_wait()
+        if use_notify then
+            local ok = pcall(db.wait_notify, "hull_jobs", poll_ms)
+            if not ok then use_notify = false; hull.sleep(poll_ms) end
+        else
+            hull.sleep(poll_ms)
+        end
+    end
+
     -- Shared across loops (single event-loop thread, so no data race).
     local total, active = 0, concurrency
     local function loop()
@@ -1475,7 +1513,7 @@ function jobs.run_worker(opts)
             if n == 0 then
                 empty = empty + 1
                 if max_empty > 0 and empty >= max_empty then break end
-                hull.sleep(poll_ms)
+                idle_wait()
             else
                 empty = 0
             end
