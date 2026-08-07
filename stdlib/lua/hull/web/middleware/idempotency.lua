@@ -188,7 +188,9 @@ function idempotency.middleware(opts)
     -- L-3: dropped the leading underscore — Lua convention reserves `_x`
     -- for unused locals; this counter is actively mutated below.
     local cleanup_counter = 0
-    local ttl = opts.ttl or _ttl
+    -- `~= nil` (not `or`): a caller's ttl = 0 must override the default, matching
+    -- idempotency.init (Lua 0 is truthy, so `opts.ttl or _ttl` would drop it).
+    local ttl = opts.ttl ~= nil and opts.ttl or _ttl
     local header_name = opts.header_name or _header_name
 
     -- Build methods lookup
