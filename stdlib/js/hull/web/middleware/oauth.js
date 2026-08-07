@@ -177,18 +177,8 @@ const PRESETS = {
 // points >= 0x80 UTF-8-inflate when crossing the C boundary via
 // JS_ToCStringLen; binary-string inputs (state secrets with high
 // bytes, ID-token hashes) must round-trip byte-identically.
-function bytesToHex(s) {
-    let h = "";
-    for (let i = 0; i < s.length; i++) {
-        // & 0xff matches the sibling helpers in totp.js + auth-flows.js;
-        // without it, a state_secret with code points > 0xff (the
-        // case the comment block above claims to handle) emits 3+
-        // hex chars per char and the round-trip silently breaks.
-        const c = s.charCodeAt(i) & 0xff;
-        h += (c < 16 ? "0" : "") + c.toString(16);
-    }
-    return h;
-}
+import { _hex } from "hull:crypto:_hex";
+const bytesToHex = _hex.toHex;
 
 function hexToBytes(h) {
     const u8 = new Uint8Array(h.length >> 1);

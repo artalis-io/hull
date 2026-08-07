@@ -182,14 +182,8 @@ function extractUa(req) {
 // stable per-runtime but NOT byte-identical to Lua's, which means
 // a Lua→JS migration of the same DB would mark every existing user
 // as a new device on first request.
-function bytesToHex(s) {
-    let h = "";
-    for (let i = 0; i < s.length; i++) {
-        const c = s.charCodeAt(i) & 0xff;
-        h += (c < 16 ? "0" : "") + c.toString(16);
-    }
-    return h;
-}
+import { _hex } from "hull:crypto:_hex";
+const bytesToHex = _hex.toHex;
 
 // Hex SHA-256(salt || "|" || normalized_ua || "|" || ip_prefix),
 // truncated to 16 chars (64 bits). Salt is deployment-private (from

@@ -33,6 +33,7 @@
 
 local json = require("hull.json")
 local crypto = require("hull.crypto")
+local _hex = require("hull.crypto._hex")
 local time = require("hull.time")
 
 local jwt = {}
@@ -53,14 +54,6 @@ local SUPPORTED_ALGS = {
     ES256 = true, ES384 = true,
 }
 
-local function str_to_hex(s)
-    local hex = {}
-    for i = 1, #s do
-        hex[i] = string.format("%02x", string.byte(s, i))
-    end
-    return table.concat(hex)
-end
-
 -- Constant-time comparison, done in C (crypto.constant_time_eq) so timing is
 -- not subject to interpreter/bytecode-dispatch variance, matching
 -- crypto/envelope. Length leak is acceptable: both inputs are fixed-length
@@ -72,7 +65,7 @@ end
 -- HS256 signature: HMAC-SHA256 over the signing input, returning the
 -- raw 32-byte digest. The crypto cap returns hex; convert back.
 local function hs256_signature(data, secret)
-    local key_hex = str_to_hex(secret)
+    local key_hex = _hex.to_hex(secret)   -- raw-byte hex (2 chars/byte)
     local sig_hex = crypto.hmac_sha256(data, key_hex)
     local raw = {}
     for i = 1, #sig_hex, 2 do

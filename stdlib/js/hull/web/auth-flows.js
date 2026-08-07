@@ -144,14 +144,8 @@ const ACTIONS = {
 // string input goes through JS_ToCStringLen which UTF-8-inflates
 // them, breaking round-trips. The cap-layer helper is correct
 // for ArrayBuffer/Uint8Array; use it for those.
-function bytesToHex(s) {
-    let h = "";
-    for (let i = 0; i < s.length; i++) {
-        const c = s.charCodeAt(i) & 0xff;
-        h += (c < 16 ? "0" : "") + c.toString(16);
-    }
-    return h;
-}
+import { _hex } from "hull:crypto:_hex";
+const bytesToHex = _hex.toHex;
 
 // Signature framing lives in hull:crypto:envelope; this wrapper
 // just builds the payload and adds optional extra fields. The

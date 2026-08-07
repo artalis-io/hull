@@ -25,17 +25,10 @@ import { crypto } from "hull:crypto";
 import { cookie } from "hull:web:cookie";
 import { time } from "hull:time";
 
-// Secret must be ASCII-only; charCodeAt returns 16-bit code units
-// for non-ASCII which would produce inconsistent HMAC keys.
-function secretToHex(secret) {
-    let hex = "";
-    for (let i = 0; i < secret.length; i++) {
-        const c = secret.charCodeAt(i);
-        if (c > 127) throw new Error("secret must be ASCII-only");
-        hex += c.toString(16).padStart(2, "0");
-    }
-    return hex;
-}
+import { _hex } from "hull:crypto:_hex";
+// Raw-byte hex (byte-consistent with Lua; NOT crypto.hexEncode which
+// UTF-8-inflates in JS). Accepts any byte, so non-ASCII secrets work too.
+const secretToHex = _hex.toHex;
 
 function computeHmac(sessionId, tsHex, secret) {
     // ":" separator deliberately distinct from the wire-format "."

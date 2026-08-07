@@ -138,14 +138,8 @@ CREATE INDEX IF NOT EXISTS _hull_totp_attempts_by_ip_lf
 // trips. The cap-layer crypto.hexEncode / crypto.hexDecode
 // are binary-safe for ArrayBuffer/Uint8Array input — use
 // them when the input is already a typed array.
-function bytesToHex(s) {
-    let h = "";
-    for (let i = 0; i < s.length; i++) {
-        const c = s.charCodeAt(i) & 0xff;
-        h += (c < 16 ? "0" : "") + c.toString(16);
-    }
-    return h;
-}
+import { _hex } from "hull:crypto:_hex";
+const bytesToHex = _hex.toHex;
 
 function hexToBytes(h) {
     let s = "";
