@@ -130,6 +130,7 @@ int            hl_pg_cursor_err(const HlPgCursor *c);
 #define HL_PG_B_CMD_COMPLETE     'C'
 #define HL_PG_B_ERROR            'E'
 #define HL_PG_B_NOTICE           'N'
+#define HL_PG_B_NOTIFY           'A'   /* NotificationResponse (LISTEN/NOTIFY) */
 #define HL_PG_B_READY            'Z'
 #define HL_PG_B_PARSE_COMPLETE   '1'
 #define HL_PG_B_BIND_COMPLETE    '2'

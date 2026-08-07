@@ -189,4 +189,17 @@ int hl_pg_query(HlPgConn *conn, const char *sql,
  */
 int hl_pg_exec_simple(HlPgConn *conn, const char *sql);
 
+/*
+ * Wait (up to timeout_ms) for a NotificationResponse ('A') to arrive - the
+ * consumer half of LISTEN/NOTIFY. The caller must have issued `LISTEN <chan>`
+ * on this connection first (a normal hl_pg_exec_simple). Blocks on the socket
+ * via poll(2), bounded by timeout_ms total (a monotonic deadline, so stray
+ * async Notice / ParameterStatus frames don't extend it). Returns:
+ *   1  a notification arrived (drain now),
+ *   0  the timeout elapsed with no notification (fall back to a poll),
+ *  -1  the connection is dead (EOF / error; caller should reconnect + re-LISTEN).
+ * A latency primitive only: correctness must ride the timeout, never the wake.
+ */
+int hl_pg_wait_notify(HlPgConn *conn, int timeout_ms);
+
 #endif /* HL_CAP_PG_CONN_H */
