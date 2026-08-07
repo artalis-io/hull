@@ -178,6 +178,35 @@ HlWorkerDb *hl_worker_db_get_for(const char *dsn)
     return &node->wdb;
 }
 
+void hl_worker_db_invalidate(const char *dsn)
+{
+    if (!dsn) dsn = worker_db_dsn;
+    if (!dsn) return;
+
+    const HlDbBackend *be = hl_db_backend_select(dsn, NULL);
+    if (!be) return;
+
+    char keybuf[PATH_MAX];
+    const char *key = worker_db_resolve_key(dsn, be, keybuf);
+
+    WorkerConnNode *head = (WorkerConnNode *)pthread_getspecific(worker_db_key);
+    WorkerConnNode *prev = NULL;
+    for (WorkerConnNode *n = head; n; prev = n, n = n->next) {
+        if (n->dsn && strcmp(n->dsn, key) == 0) {
+            if (prev) {
+                prev->next = n->next;
+            } else {
+                pthread_setspecific(worker_db_key, n->next);
+            }
+            if (n->wdb.handle.backend)
+                n->wdb.handle.backend->close(&n->wdb.handle);
+            free(n->dsn);
+            free(n);
+            return;
+        }
+    }
+}
+
 HlWorkerDb *hl_worker_db_get(void)
 {
     return hl_worker_db_get_for(NULL);
@@ -349,10 +378,16 @@ static void db_work_fn(void *ud)
          * own connection. A -1 (dead connection / unsupported) is reported as
          * a not-notified timeout, NOT an error: the wait is latency-only, and
          * the caller (jobs run_worker) treats false exactly like a poll
-         * timeout, so a dropped connection just falls back to polling. The
-         * per-thread connection cache reopens on the next call. */
+         * timeout, so a dropped connection just falls back to polling. */
         int n = hl_db_wait_notify(h, op->channel, op->timeout_ms);
         op->notified = (n == 1) ? 1 : 0;
+        /* A dead LISTEN connection (-1) would otherwise stay cached and keep
+         * returning -1 immediately, spinning the idle loop. Drop it so the next
+         * wait reopens a fresh connection and re-issues LISTEN (R2). Reopen
+         * failure (DB still down) surfaces as an op error on the next call,
+         * which run_worker degrades to a plain sleep. */
+        if (n < 0)
+            hl_worker_db_invalidate(op->dsn);
         return;
     }
 
