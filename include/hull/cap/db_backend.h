@@ -77,6 +77,15 @@ typedef struct HlDbDialect {
      * claim shape per backend. See docs/jobs_design.md. */
     unsigned char supports_skip_locked;
 
+    /* Whether the backend supports a low-latency LISTEN/NOTIFY wakeup (the
+     * optional wait_notify vtable method below). 1 = Postgres; 0 = SQLite /
+     * MySQL / DuckDB, which keep polling. Read by hull/jobs (via
+     * conn.dialect.supports_notify) to decide whether an idle worker parks on
+     * a NOTIFY-wait or a plain sleep. Latency only, never a correctness
+     * dependency: every wait is bounded by a poll timeout. See
+     * docs/jobs_events_phase4_design.md. */
+    unsigned char supports_notify;
+
     /* Inline DDL fragment declaring an auto-increment integer primary-key
      * column. SQLite: "INTEGER PRIMARY KEY AUTOINCREMENT". Postgres:
      * "BIGSERIAL PRIMARY KEY". MySQL: "BIGINT AUTO_INCREMENT PRIMARY KEY".
@@ -177,6 +186,15 @@ typedef struct HlDbBackend {
      * or NULL. Consumers key off native_tag to know the concrete type; this
      * replaces the per-backend hl_db_<x>_raw accessors. NULL = none exposed. */
     void  *(*native_handle)(HlDbHandle *h);
+
+    /* Optional low-latency wakeup: LISTEN on @p channel (idempotent per
+     * connection) then block up to @p timeout_ms for a notification. Returns
+     * 1 if notified, 0 on timeout, -1 on a dead connection. NULL where the
+     * backend has no such primitive (SQLite / MySQL / DuckDB) - callers gate
+     * on dialect.supports_notify. This is a blocking call, meant to run on the
+     * db.async worker pool, not the event-loop thread. See
+     * docs/jobs_events_phase4_design.md. */
+    int    (*wait_notify)(HlDbHandle *h, const char *channel, int timeout_ms);
 } HlDbBackend;
 
 struct HlDbHandle {
@@ -245,6 +263,17 @@ static inline void hl_db_guard_stale_txn(HlDbHandle *h)
 {
     if (!h || !h->backend || !h->backend->guard_stale_txn) return;
     h->backend->guard_stale_txn(h);
+}
+
+/* Low-latency LISTEN/NOTIFY wait. Returns 1 (notified), 0 (timeout), or -1
+ * (dead connection / backend has no wait_notify). Callers gate on
+ * dialect.supports_notify; a -1 from an unsupported backend is a caller bug,
+ * not a runtime path (hull/jobs never calls this unless supports_notify). */
+static inline int hl_db_wait_notify(HlDbHandle *h, const char *channel,
+                                    int timeout_ms)
+{
+    if (!h || !h->backend || !h->backend->wait_notify) return -1;
+    return h->backend->wait_notify(h, channel, timeout_ms);
 }
 
 static inline const char *hl_db_autoincrement_id_ddl(HlDbHandle *h)

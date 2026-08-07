@@ -344,6 +344,18 @@ static void db_work_fn(void *ud)
         return;
     }
 
+    if (op->kind == HL_WORK_DB_WAIT_NOTIFY) {
+        /* Block up to timeout_ms for a LISTEN/NOTIFY wakeup on this worker's
+         * own connection. A -1 (dead connection / unsupported) is reported as
+         * a not-notified timeout, NOT an error: the wait is latency-only, and
+         * the caller (jobs run_worker) treats false exactly like a poll
+         * timeout, so a dropped connection just falls back to polling. The
+         * per-thread connection cache reopens on the next call. */
+        int n = hl_db_wait_notify(h, op->channel, op->timeout_ms);
+        op->notified = (n == 1) ? 1 : 0;
+        return;
+    }
+
     /* HL_WORK_DB_QUERY: materialize all rows through the vtable. */
     HlDbResult *r = &op->result;
     memset(r, 0, sizeof(*r));
@@ -441,6 +453,7 @@ void hl_worker_db_op_free(HlWorkerDbOp *op)
     if (!op) return;
     free(op->sql);
     free(op->dsn);
+    free(op->channel);
     if (op->params) {
         for (int i = 0; i < op->nparams; i++) {
             if ((op->params[i].type == HL_TYPE_TEXT ||

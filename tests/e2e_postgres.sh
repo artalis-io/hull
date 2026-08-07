@@ -414,6 +414,68 @@ case "$rcout" in
     *)  echo "::error db.exec affected-row count on PG: $rcout"; exit 1 ;;
 esac
 
+# ── conn.wait_notify: low-latency LISTEN/NOTIFY (Phase 4.2) ────────────
+# A waiter app parks on conn.wait_notify (yielding on the db.async worker pool);
+# a SECOND connection issues pg_notify; the waiter must wake with notified=true
+# well under its timeout - proving the yielding worker-pool wait + cross-
+# connection NOTIFY delivery. Latency-only: a follow-up wait with no NOTIFY
+# times out to false (the poll-fallback shape). Runs for both runtimes.
+check_wait_notify() {
+    _label="$1"; _ext="$2"; _waiter="$3"; _notifier="$4"
+    WND=$(mktemp -d)
+    printf '%s\n' "$_waiter"   > "$WND/waiter.$_ext"
+    printf '%s\n' "$_notifier" > "$WND/notifier.$_ext"
+    ./build/hull "$WND/waiter.$_ext" -d "$DSN" > "$WND/w.out" 2>/dev/null &
+    _wpid=$!
+    sleep 3   # let the waiter connect + LISTEN + park before we notify
+    ./build/hull "$WND/notifier.$_ext" -d "$DSN" >/dev/null 2>&1 || true
+    wait "$_wpid" || true
+    _out="$(cat "$WND/w.out")"
+    case "$_out" in
+        *"WN notified=true"*"WN2 timeout_false=true"*)
+            echo "PASS: $_label conn.wait_notify wakes on NOTIFY + times out to false" ;;
+        *)  echo "::error $_label wait_notify on PG: $_out"; exit 1 ;;
+    esac
+    rm -rf "$WND"
+}
+
+LUA_WN_WAITER='local db = require("hull.db").default()
+local t = require("hull.time")
+app.manifest({ modules = { "hull/db@1", "hull/time@1" } })
+app.main(function(ctx)
+  local a = t.now_ms()
+  local got = db.wait_notify("hull_jobs", 10000)
+  ctx.stdout:write(("WN notified=%s waited_ms=%d\n"):format(tostring(got), t.now_ms()-a))
+  local none = db.wait_notify("hull_jobs", 300)
+  ctx.stdout:write(("WN2 timeout_false=%s\n"):format(tostring(none == false)))
+  return 0
+end)'
+LUA_WN_NOTIFIER='local db = require("hull.db").default()
+app.manifest({ modules = { "hull/db@1" } })
+app.main(function() db.exec("SELECT pg_notify(?, ?)", { "hull_jobs", "" }) return 0 end)'
+
+JS_WN_WAITER='import { app } from "hull:app";
+import { db as dbm } from "hull:db";
+import { time } from "hull:time";
+app.manifest({ modules: ["hull/db@1", "hull/time@1"] });
+app.main(async (ctx) => {
+  const db = dbm.default();
+  const a = time.nowMs();
+  const got = await db.waitNotify("hull_jobs", 10000);
+  ctx.stdout.write(`WN notified=${got} waited_ms=${time.nowMs()-a}\n`);
+  const none = await db.waitNotify("hull_jobs", 300);
+  ctx.stdout.write(`WN2 timeout_false=${none === false}\n`);
+  return 0;
+});'
+JS_WN_NOTIFIER='import { app } from "hull:app";
+import { db as dbm } from "hull:db";
+app.manifest({ modules: ["hull/db@1"] });
+app.main((ctx) => { dbm.default().exec("SELECT pg_notify(?, ?)", ["hull_jobs", ""]); return 0; });'
+
+echo "=== conn.wait_notify LISTEN/NOTIFY round trip ==="
+check_wait_notify "lua" "lua" "$LUA_WN_WAITER" "$LUA_WN_NOTIFIER"
+check_wait_notify "js"  "js"  "$JS_WN_WAITER"  "$JS_WN_NOTIFIER"
+
 # ── TLS phase (Phase 3b.2) ────────────────────────────────────────────
 # Enable SSL on the running container with a self-signed cert, then connect
 # with sslmode=require and assert (via pg_stat_ssl) the session is encrypted.

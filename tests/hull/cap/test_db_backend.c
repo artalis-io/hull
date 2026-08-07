@@ -66,6 +66,22 @@ UTEST(db_backend, sqlite_open_close)
     hl_db_backend_sqlite.close(&h);
 }
 
+/* Backend safety for the Phase 4 LISTEN/NOTIFY surface: SQLite has no such
+ * primitive, so it must advertise supports_notify == 0 AND leave wait_notify
+ * NULL. The generic hl_db_wait_notify wrapper then fails closed (-1), which the
+ * worker maps to a not-notified false - never a bogus wakeup. Guards against a
+ * backend claiming NOTIFY support without wiring an implementation. */
+UTEST(db_backend, sqlite_no_notify)
+{
+    ASSERT_EQ(hl_db_backend_sqlite.dialect.supports_notify, (unsigned char)0);
+    ASSERT_TRUE(hl_db_backend_sqlite.wait_notify == NULL);
+
+    HlDbHandle h = { .backend = &hl_db_backend_sqlite, .ctx = NULL };
+    ASSERT_EQ(hl_db_backend_sqlite.open(&h.ctx, ":memory:", NULL), 0);
+    ASSERT_EQ(hl_db_wait_notify(&h, "hull_jobs", 0), -1);
+    hl_db_backend_sqlite.close(&h);
+}
+
 UTEST(db_backend, sqlite_exec_via_vtable)
 {
     HlDbHandle h;
