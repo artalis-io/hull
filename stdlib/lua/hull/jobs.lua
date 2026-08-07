@@ -140,10 +140,12 @@ function jobs.init(opts)
         .. "updated_at   INTEGER      NOT NULL,"
         .. "progress     INTEGER      NOT NULL DEFAULT 0,"
         .. "trace_context VARCHAR(255),"
-        -- Soft per-key concurrency (jobs.enqueue concurrency_key/concurrency):
-        -- at most `concurrency_limit` jobs sharing `concurrency_key` run at once.
-        .. "concurrency_key   VARCHAR(255),"
-        .. "concurrency_limit INTEGER)")
+        -- Per-key concurrency (jobs.enqueue concurrency_key/concurrency): at most
+        -- `concurrency_limit` jobs sharing `concurrency_key` run at once. `strict`
+        -- (1) opts into the counter-backed hard cap; NULL/0 is the soft default.
+        .. "concurrency_key    VARCHAR(255),"
+        .. "concurrency_limit  INTEGER,"
+        .. "concurrency_strict INTEGER)")
 
     -- Claim scan path: ready-to-run pending jobs in a queue, by priority then id.
     db.exec([[
@@ -212,6 +214,7 @@ function jobs.init(opts)
     ensure_column("_hull_jobs", "trace_context", "trace_context VARCHAR(255)")
     ensure_column("_hull_jobs", "concurrency_key", "concurrency_key VARCHAR(255)")
     ensure_column("_hull_jobs", "concurrency_limit", "concurrency_limit INTEGER")
+    ensure_column("_hull_jobs", "concurrency_strict", "concurrency_strict INTEGER")
     ensure_column("_hull_cron", "tz_offset", "tz_offset INTEGER NOT NULL DEFAULT 0")
 
     -- Fleet-wide rate-limit counters (jobs.limit). One row per limited queue;
@@ -224,6 +227,16 @@ function jobs.init(opts)
     -- Blocking FOR UPDATE serializes reservers on PG/MySQL; SQLite's write txn
     -- already serializes (and rejects FOR UPDATE syntactically).
     _rl_lock = (db.backend_name == "sqlite") and "" or " FOR UPDATE"
+
+    -- Strict per-key concurrency counter (jobs.enqueue concurrency_strict). One
+    -- row per strict key: `n` running slots reserved. A claim atomically reserves
+    -- (n < limit -> n+1), work() releases on any exit from running, and the reaper
+    -- reconciles `n` to the true running count so a crashed worker can't leak a
+    -- slot. `name` (not the reserved word `key`) mirrors _hull_ratelimit.
+    db.exec(
+        "CREATE TABLE IF NOT EXISTS _hull_job_concurrency ("
+        .. "name VARCHAR(255) NOT NULL PRIMARY KEY,"
+        .. "n    INTEGER      NOT NULL DEFAULT 0)")
 
     -- Durable per-queue pause state (jobs.pause / resume). A paused queue is not
     -- claimed (workers skip it); fleet-wide (in the DB) and restart-durable.
@@ -500,11 +513,16 @@ function jobs.enqueue(job_type, data, opts)
     if opts.trace ~= nil then
         cols[#cols + 1] = "trace_context"; vals[#vals + 1] = opts.trace
     end
-    -- Optional soft per-key concurrency: at most `concurrency` jobs sharing
-    -- `concurrency_key` run at once (enforced at claim via claim-then-reconcile).
+    -- Optional per-key concurrency: at most `concurrency` jobs sharing
+    -- `concurrency_key` run at once. Soft (default) reconciles at claim (may
+    -- briefly overshoot); `concurrency_strict = true` opts into the counter-backed
+    -- hard cap. All jobs of a key should agree on the strict flag.
     if opts.concurrency_key ~= nil and opts.concurrency and opts.concurrency > 0 then
         cols[#cols + 1] = "concurrency_key";   vals[#vals + 1] = opts.concurrency_key
         cols[#cols + 1] = "concurrency_limit"; vals[#vals + 1] = opts.concurrency
+        if opts.concurrency_strict then
+            cols[#cols + 1] = "concurrency_strict"; vals[#vals + 1] = 1
+        end
     end
     local id
     if opts.dedup_key ~= nil then
@@ -757,22 +775,55 @@ end
 -- key in the same instant (no reservation counter). A strict counter-backed cap
 -- is the opt-in follow-up. `now` is the claim time (== claimed_at of every job
 -- in `out`), so a job's rank counts only strictly-older running peers.
+-- Atomically reserve one STRICT-concurrency slot for `key`: bump n iff n < limit.
+-- Returns true when reserved. Mirrors rl_reserve - blocking FOR UPDATE serializes
+-- reservers on PG/MySQL, SQLite's write txn serializes - so the hard cap holds
+-- with no overshoot even under concurrent claimers.
+local function conc_reserve(key, limit)
+    db.insert_if_absent("_hull_job_concurrency", { "name" }, { "name", "n" }, { key, 0 })
+    local ok = false
+    db.batch(function()
+        local sel = db.query("SELECT n FROM _hull_job_concurrency WHERE name=?" .. _rl_lock, { key })
+        local n = (sel[1] and sel[1].n) or 0
+        if n < limit then
+            ok = true
+            db.exec("UPDATE _hull_job_concurrency SET n=n+1 WHERE name=?", { key })
+        end
+    end)
+    return ok
+end
+
+-- Release one strict-concurrency slot (floored at 0). Called when a strict-keyed
+-- job leaves 'running' (any work() outcome). The reaper reconciles the counter to
+-- the true running count, so a slot lost to a crashed worker self-heals.
+local function conc_release(key)
+    db.exec("UPDATE _hull_job_concurrency SET n = CASE WHEN n > 0 THEN n - 1 ELSE 0 END "
+        .. "WHERE name=?", { key })
+end
+
 local function conc_apply(out, now)
     if #out == 0 then return out end
     local drop = {}
     for _, j in ipairs(out) do
         local lim = j._conc_limit
         if j._conc_key ~= nil and lim and lim > 0 then
-            -- Rank = running peers strictly ahead in (claimed_at, id) order. This
-            -- ordering is fleet-wide deterministic, so no two workers evict the
-            -- same slot: each keyed job keeps iff its rank is under the limit.
-            local r = db.query(
-                "SELECT COUNT(*) AS n FROM _hull_jobs "
-                .. "WHERE concurrency_key=? AND status='running' "
-                .. "AND (claimed_at < ? OR (claimed_at = ? AND id < ?))",
-                { j._conc_key, now, now, j.id })
-            local rank = (r and r[1] and r[1].n) or 0
-            if rank >= lim then drop[j.id] = true end
+            if j._conc_strict == 1 then
+                -- Strict: an atomic counter reserve. A failed reserve means the key
+                -- is full - release the claim (no slot was taken). Hard cap, no
+                -- overshoot.
+                if not conc_reserve(j._conc_key, lim) then drop[j.id] = true end
+            else
+                -- Soft: rank = running peers strictly ahead in (claimed_at, id)
+                -- order. This ordering is fleet-wide deterministic, so no two
+                -- workers evict the same slot: each job keeps iff rank < limit.
+                local r = db.query(
+                    "SELECT COUNT(*) AS n FROM _hull_jobs "
+                    .. "WHERE concurrency_key=? AND status='running' "
+                    .. "AND (claimed_at < ? OR (claimed_at = ? AND id < ?))",
+                    { j._conc_key, now, now, j.id })
+                local rank = (r and r[1] and r[1].n) or 0
+                if rank >= lim then drop[j.id] = true end
+            end
         end
     end
     if next(drop) == nil then return out end
@@ -807,7 +858,7 @@ local function claim_one(queue, batch)
             .. "attempts=attempts+1, updated_at=? WHERE id IN ("
             .. "SELECT id FROM _hull_jobs WHERE queue=? AND status='pending' AND run_at<=? "
             .. "ORDER BY priority DESC, id LIMIT ? " .. lock .. ") "
-            .. "RETURNING id, queue, type, payload, priority, attempts, max_attempts, trace_context, created_at, concurrency_key, concurrency_limit",
+            .. "RETURNING id, queue, type, payload, priority, attempts, max_attempts, trace_context, created_at, concurrency_key, concurrency_limit, concurrency_strict",
             { token, now, now, queue, now, batch })
     elseif d.supports_skip_locked then
         -- MySQL: no RETURNING. Lock + mark in one txn, then read back by token.
@@ -825,7 +876,7 @@ local function claim_one(queue, batch)
                 params)
         end)
         rows = db.query(
-            "SELECT id, queue, type, payload, priority, attempts, max_attempts, trace_context, created_at, concurrency_key, concurrency_limit FROM _hull_jobs WHERE claim_token=?",
+            "SELECT id, queue, type, payload, priority, attempts, max_attempts, trace_context, created_at, concurrency_key, concurrency_limit, concurrency_strict FROM _hull_jobs WHERE claim_token=?",
             { token })
     else
         -- SQLite: single-writer serializes the claim, so the marked-running rows
@@ -835,7 +886,7 @@ local function claim_one(queue, batch)
             .. "attempts=attempts+1, updated_at=? WHERE id IN ("
             .. "SELECT id FROM _hull_jobs WHERE queue=? AND status='pending' AND run_at<=? "
             .. "ORDER BY priority DESC, id LIMIT ?) "
-            .. "RETURNING id, queue, type, payload, priority, attempts, max_attempts, trace_context, created_at, concurrency_key, concurrency_limit",
+            .. "RETURNING id, queue, type, payload, priority, attempts, max_attempts, trace_context, created_at, concurrency_key, concurrency_limit, concurrency_strict",
             { token, now, now, queue, now, batch })
     end
 
@@ -853,8 +904,9 @@ local function claim_one(queue, batch)
     for _, r in ipairs(rows) do
         local j = shape(r)
         j.claim_token = token   -- handle for jobs.heartbeat on long-running work
-        j._conc_key   = r.concurrency_key      -- internal: conc_apply reconcile
-        j._conc_limit = r.concurrency_limit
+        j._conc_key    = r.concurrency_key     -- internal: conc_apply reconcile
+        j._conc_limit  = r.concurrency_limit
+        j._conc_strict = r.concurrency_strict  -- 1 = counter-backed hard cap
         out[#out + 1] = j
     end
     -- Reconcile the claim: fleet-wide rate limit, then soft per-key concurrency.
@@ -1020,10 +1072,20 @@ function jobs.reap(opts)
         "UPDATE _hull_jobs SET status='pending', updated_at=? "
         .. "WHERE status='waiting' AND run_at > 0 AND run_at <= ?",
         { now, now })
-    return db.exec(
+    local reclaimed = db.exec(
         "UPDATE _hull_jobs SET status='pending', claim_token=NULL, updated_at=? "
         .. "WHERE status='running' AND claimed_at <= ?",
         { now, now - vt }) or 0
+    -- Reconcile strict-concurrency counters to the true running count. This frees
+    -- a slot leaked by a crashed worker (its job was just reclaimed) and returns a
+    -- parked workflow's slot - the self-healing backstop for conc_reserve/release.
+    -- The subquery reads _hull_jobs (a different table), so it is valid on MySQL.
+    db.exec(
+        "UPDATE _hull_job_concurrency SET n = ("
+        .. "SELECT COUNT(*) FROM _hull_jobs j "
+        .. "WHERE j.concurrency_key = _hull_job_concurrency.name "
+        .. "AND j.concurrency_strict = 1 AND j.status = 'running')")
+    return reclaimed
 end
 
 -- ── Cron (durable recurring schedules) ─────────────────────────────────────
@@ -1351,6 +1413,12 @@ function jobs.work(opts)
         -- Opt-in attempt history (a yield leaves outcome nil -> not recorded).
         if outcome and history_enabled(job.queue) then
             record_attempt(job, started_ms, time.now_ms(), outcome, err_str)
+        end
+        -- Release the strict-concurrency slot reserved at claim: any exit from
+        -- 'running' (done / dead / retry / workflow yield) frees it. A yielded
+        -- workflow re-reserves on its next claim.
+        if job._conc_strict == 1 and job._conc_key ~= nil then
+            conc_release(job._conc_key)
         end
     end
     return #batch
