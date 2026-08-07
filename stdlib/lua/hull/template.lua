@@ -68,12 +68,13 @@ local escape_map = {
     [">"] = "&gt;",
     ['"'] = "&quot;",
     ["'"] = "&#39;",
+    ["`"] = "&#96;",   -- backtick: unquoted-attribute contexts (parity with JS)
 }
 
 local function html_escape(s)
     if s == nil then return "" end
     s = tostring(s)
-    return (s:gsub("[&<>\"']", escape_map))
+    return (s:gsub("[&<>\"'`]", escape_map))
 end
 
 -- ── Built-in filters ────────────────────────────────────────────────
@@ -93,7 +94,15 @@ function filters.trim(val)
 end
 
 function filters.length(val)
-    if type(val) == "table" then return #val end
+    if type(val) == "table" then
+        local n = #val
+        if n > 0 then return n end
+        -- Hash-style table (no array part): count keys, matching the JS
+        -- Object.keys(val).length behavior (#val is 0 for a pure hash).
+        local count = 0
+        for _ in pairs(val) do count = count + 1 end
+        return count
+    end
     return #tostring(val or "")
 end
 
@@ -105,7 +114,9 @@ function filters.default(val, fallback)
 end
 
 function filters.json(val)
-    return json.encode(val)
+    -- Post-escape "<" so `{{ data | json }}` embedded in a <script> block
+    -- cannot break out via "</script>" (parity with JS's < escaping).
+    return (json.encode(val):gsub("<", "\\u003c"))
 end
 
 function filters.raw(val)
@@ -675,7 +686,12 @@ local function codegen(ast)
 
             elseif node.kind == "for" then
                 validate_ident(node.var, "for loop variable")
-                emit("for _, " .. node.var .. " in ipairs(" .. gen_dot_path(node.expr, nil, locals_set) .. " or {}) do")
+                -- Coerce a non-table source (nil/string/number) to {} rather
+                -- than error, matching JS's `Array.isArray(it) ? it : []`.
+                -- The dot-path is pure, so evaluating it twice is safe.
+                local for_src = gen_dot_path(node.expr, nil, locals_set)
+                emit("for _, " .. node.var .. " in ipairs(type(" .. for_src ..
+                     ") == \"table\" and " .. for_src .. " or {}) do")
                 locals_set[node.var] = (locals_set[node.var] or 0) + 1
                 indent = indent + 1
                 gen_body(node.body)
@@ -687,7 +703,9 @@ local function codegen(ast)
             elseif node.kind == "for_kv" then
                 validate_ident(node.key, "for loop key")
                 validate_ident(node.val, "for loop value")
-                emit("for " .. node.key .. ", " .. node.val .. " in pairs(" .. gen_dot_path(node.expr, nil, locals_set) .. " or {}) do")
+                local forkv_src = gen_dot_path(node.expr, nil, locals_set)
+                emit("for " .. node.key .. ", " .. node.val .. " in pairs(type(" .. forkv_src ..
+                     ") == \"table\" and " .. forkv_src .. " or {}) do")
                 locals_set[node.key] = (locals_set[node.key] or 0) + 1
                 locals_set[node.val] = (locals_set[node.val] or 0) + 1
                 indent = indent + 1

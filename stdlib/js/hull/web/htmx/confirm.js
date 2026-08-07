@@ -17,12 +17,9 @@
  * Lua parity: same surface as `hull.web.htmx.confirm`.
  */
 
-// HTML attribute-value escaping. Covers the five characters that
-// can break out of a double-quoted attribute value.
-const ESC = { "&": "&amp;", '"': "&quot;", "<": "&lt;", ">": "&gt;", "'": "&#39;" };
-function attrEscape(s) {
-    return String(s == null ? "" : s).replace(/[&"<>']/g, (c) => ESC[c]);
-}
+// HTML attribute-value escaping (shared across the htmx widgets).
+import { htmx } from "hull:web:htmx";
+const attrEscape = htmx.escape;
 
 /**
  * Render htmx + data attributes for a confirm dialog.

@@ -57,16 +57,8 @@ local base_pagination = require("hull.web.pagination")
 
 local pagination = {}
 
-local ESC = {
-    ["&"] = "&amp;",
-    ['"'] = "&quot;",
-    ["<"] = "&lt;",
-    [">"] = "&gt;",
-    ["'"] = "&#39;",
-}
-local function attr_escape(s)
-    return (tostring(s == nil and "" or s):gsub('[&"<>\']', ESC))
-end
+-- HTML attribute-value escaping (shared across the htmx widgets).
+local attr_escape = require("hull.web.htmx").escape
 
 -- Render the attrs that go on every active page link. Same set on
 -- prev / next / numbered pages so the htmx behavior is uniform.

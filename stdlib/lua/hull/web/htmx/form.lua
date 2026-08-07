@@ -59,19 +59,8 @@
 
 local form = {}
 
--- Minimal HTML body escape — covers the four characters that
--- terminate an element body context. Apostrophe included for the
--- inline-attribute case some downstream templates wrap us in.
-local BODY_ESC = {
-    ["&"] = "&amp;",
-    ["<"] = "&lt;",
-    [">"] = "&gt;",
-    ['"'] = "&quot;",
-    ["'"] = "&#39;",
-}
-local function esc(s)
-    return (tostring(s):gsub('[&<>"\']', BODY_ESC))
-end
+-- HTML escaping (shared across the htmx widgets).
+local esc = require("hull.web.htmx").escape
 
 -- Stable per-field id used by `aria-describedby` <-> error span.
 -- Field names from validate.check() are already constrained to

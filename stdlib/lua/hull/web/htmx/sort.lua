@@ -95,17 +95,8 @@
 
 local sort = {}
 
--- HTML attribute-value escaping; same shape as the other widgets.
-local ESC = {
-    ["&"] = "&amp;",
-    ['"'] = "&quot;",
-    ["<"] = "&lt;",
-    [">"] = "&gt;",
-    ["'"] = "&#39;",
-}
-local function attr_escape(s)
-    return (tostring(s == nil and "" or s):gsub('[&"<>\']', ESC))
-end
+-- HTML attribute-value escaping (shared across the htmx widgets).
+local attr_escape = require("hull.web.htmx").escape
 
 -- Column-name safety: only [A-Za-z0-9_-] reaches the URL or the SQL
 -- ORDER BY (after the app's allowlist check). Defense in depth

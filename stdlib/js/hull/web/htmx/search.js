@@ -41,10 +41,9 @@
  *     });
  */
 
-const ESC = { "&": "&amp;", '"': "&quot;", "<": "&lt;", ">": "&gt;", "'": "&#39;" };
-function attrEscape(s) {
-    return String(s == null ? "" : s).replace(/[&"<>']/g, (c) => ESC[c]);
-}
+// HTML attribute-value escaping (shared across the htmx widgets).
+import { htmx } from "hull:web:htmx";
+const attrEscape = htmx.escape;
 
 /**
  * Render the htmx attribute set for a debounced search input.

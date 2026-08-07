@@ -20,10 +20,9 @@
  * snake_case (Lua) → camelCase (JS) per Hull convention.
  */
 
-const BODY_ESC = { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" };
-function esc(s) {
-    return String(s == null ? "" : s).replace(/[&<>"']/g, (c) => BODY_ESC[c]);
-}
+// HTML escaping (shared across the htmx widgets).
+import { htmx } from "hull:web:htmx";
+const esc = htmx.escape;
 // Field names from validate.check() are already constrained to
 // ASCII identifiers; we collapse anything outside [A-Za-z0-9_-]
 // to "_" as defense in depth in case a future caller passes a

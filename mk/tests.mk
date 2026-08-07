@@ -672,6 +672,10 @@ e2e-mysql:
 e2e-templates: $(BUILDDIR)/hull
 	RUNTIME=$(RUNTIME) sh tests/e2e_templates.sh
 
+.PHONY: e2e-template-parity
+e2e-template-parity: $(BUILDDIR)/hull
+	sh tests/e2e_template_parity.sh
+
 e2e-agent: $(BUILDDIR)/hull
 	RUNTIME=$(RUNTIME) sh tests/e2e_agent.sh
 

@@ -54,18 +54,8 @@
 
 local search = {}
 
--- HTML attribute-value escaping. Same shape as the confirm widget;
--- duplicated here to avoid a cross-module dep on a tiny helper.
-local ESC = {
-    ["&"] = "&amp;",
-    ['"'] = "&quot;",
-    ["<"] = "&lt;",
-    [">"] = "&gt;",
-    ["'"] = "&#39;",
-}
-local function attr_escape(s)
-    return (tostring(s):gsub('[&"<>\']', ESC))
-end
+-- HTML attribute-value escaping (shared across the htmx widgets).
+local attr_escape = require("hull.web.htmx").escape
 
 --- Render the htmx attribute set for a debounced search input.
 --

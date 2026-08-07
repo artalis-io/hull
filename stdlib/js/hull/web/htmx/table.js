@@ -18,11 +18,10 @@
 
 import { sort as sortWidget } from "hull:web:htmx:sort";
 import { inlineEdit } from "hull:web:htmx:inline-edit";
+import { htmx } from "hull:web:htmx";
 
-const ESC = { "&": "&amp;", '"': "&quot;", "<": "&lt;", ">": "&gt;", "'": "&#39;" };
-function esc(s) {
-    return String(s == null ? "" : s).replace(/[&"<>']/g, (c) => ESC[c]);
-}
+// HTML escaping (shared across the htmx widgets).
+const esc = htmx.escape;
 
 /**
  * Render a sortable, inline-editable `<table>` from rows + schema.
