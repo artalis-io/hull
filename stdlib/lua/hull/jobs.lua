@@ -42,6 +42,7 @@ local _cfg = {
     reap_interval      = 30,    -- min seconds between reaper sweeps (0 = every work() call)
     history            = false, -- attempt-history recording: true | { queues={...} } | false
     history_retention  = nil,   -- seconds to keep attempt rows (nil = jobs.cleanup default)
+    events             = false, -- durable fleet-wide event log (jobs.subscribe / jobs.events)
 }
 
 -- Exponential backoff: 2^attempt * 10s, capped at 1h (shared with outbox math).
@@ -68,10 +69,22 @@ local _listeners = { completed = {}, retried = {}, dead = {} }
 -- reserved-type handler that runs the workflow through a memoizing ctx.
 local _workflows = {}
 
+-- Durable event subscribers registered on THIS worker (jobs.subscribe):
+-- name -> { handler = fn(event) }. The subscription row (cursor/lease) is durable
+-- in _hull_job_subscriptions; the handler is per-worker, like jobs.handler. A
+-- homogeneous fleet re-registers every subscription at startup, so any worker can
+-- drain any subscription (the per-subscription lease serializes them).
+local _subscribers = {}
+
 -- Unix ts of the last reaper sweep (throttled in jobs.work via _cfg.reap_interval).
 local _last_reap = 0
 -- Unix ts of the last cron due-check (throttled to >=1s; cron is minute-grained).
 local _last_cron = 0
+-- Unix ts of the last subscription drain (throttled to >=1s in jobs.work).
+local _last_edrain = 0
+-- Lease duration (seconds) for a subscription drain - a crashed drainer's lease
+-- expires after this and another worker resumes from the unadvanced cursor.
+local _EDRAIN_LEASE = 30
 -- Whether the server parses SKIP LOCKED (probed in jobs.init; nil = not probed).
 local _skip_locked = nil
 -- Per-queue rate limits { [queue] = { rate, per } }, in-memory (re-registered on
@@ -103,6 +116,7 @@ function jobs.init(opts)
     if opts.backoff ~= nil then _cfg.backoff = opts.backoff end
     if opts.history ~= nil then _cfg.history = opts.history end
     if opts.history_retention ~= nil then _cfg.history_retention = opts.history_retention end
+    if opts.events ~= nil then _cfg.events = opts.events end
 
     -- Keyed / indexed text columns are VARCHAR(255) so MySQL can index them;
     -- data-only columns (payload, last_error) stay TEXT. status/type/queue are
@@ -290,6 +304,43 @@ function jobs.init(opts)
         ON _hull_job_attempts(finished_ms)
     ]])
 
+    -- Durable fleet-wide event log (jobs.init{events=true}). Append-only lifecycle
+    -- events, written in the SAME transaction as the state change that produced
+    -- them (transactional coupling: an event exists iff the transition committed).
+    -- The `id` is the total order + the future subscription cursor space. `data`
+    -- is small JSON metadata (error/attempt/trace), never the full result.
+    db.exec(
+        "CREATE TABLE IF NOT EXISTS _hull_job_events ("
+        .. "id       " .. db.autoincrement_id_ddl .. ", "
+        .. "ts       INTEGER      NOT NULL,"
+        .. "type     VARCHAR(32)  NOT NULL,"
+        .. "job_id   INTEGER,"
+        .. "job_type VARCHAR(255),"
+        .. "queue    VARCHAR(255),"
+        .. "data     TEXT)")
+    db.exec([[
+        CREATE INDEX IF NOT EXISTS idx_hull_job_events_type ON _hull_job_events(type, id)
+    ]])
+    db.exec([[
+        CREATE INDEX IF NOT EXISTS idx_hull_job_events_ts ON _hull_job_events(ts)
+    ]])
+
+    -- Durable event subscriptions (jobs.subscribe). One row per named consumer:
+    -- `cursor` = last delivered event id (the drain advances it), `types` = an
+    -- optional comma-list filter, `lease_token`/`lease_until` = the drain lease
+    -- (one worker drains a subscription at a time; a crashed drainer's lease
+    -- expires and another resumes from the cursor). Restart-durable + fleet-wide.
+    db.exec(
+        "CREATE TABLE IF NOT EXISTS _hull_job_subscriptions ("
+        .. "name        VARCHAR(255) NOT NULL PRIMARY KEY,"
+        .. "cursor_id   INTEGER      NOT NULL DEFAULT 0,"
+        .. "types       VARCHAR(255),"
+        .. "lease_token VARCHAR(255),"
+        .. "lease_until INTEGER,"
+        .. "failures    INTEGER      NOT NULL DEFAULT 0,"
+        .. "max_failures INTEGER,"    -- skip a poison event after N failures (NULL = never)
+        .. "updated_at  INTEGER      NOT NULL)")
+
     -- Verify the server actually parses SKIP LOCKED (the compile-time dialect
     -- flag says "this backend supports it" but a MySQL<8 / MariaDB<10.6 server
     -- does not). A 0-row probe against the real table detects it once; the claim
@@ -369,6 +420,24 @@ local function load_deps(dependent_id)
         end
     end
     return out
+end
+
+-- Append a durable lifecycle event (opt-in via jobs.init{events=true}). Called
+-- INSIDE the transition's transaction, so the event commits iff the state change
+-- does (transactional coupling: no lost, no phantom events). `job` supplies
+-- id/type/queue/trace; `info` is small metadata (error/attempt) - never the full
+-- result (a consumer joins _hull_job_results for that).
+local function emit_durable(event, job, info)
+    if not _cfg.events then return end
+    info = info or {}
+    local data
+    if info.error ~= nil or info.attempt ~= nil or job.trace ~= nil then
+        data = json.encode({ error = info.error, attempt = info.attempt, trace = job.trace })
+    end
+    db.exec(
+        "INSERT INTO _hull_job_events (ts, type, job_id, job_type, queue, data) "
+        .. "VALUES (?, ?, ?, ?, ?, ?)",
+        { time.now(), event, job.id, job.type, job.queue, data })
 end
 
 --- Enqueue a job. A plain INSERT, so calling it inside a `db.batch()` commits
@@ -481,6 +550,10 @@ function jobs.enqueue(job_type, data, opts)
             end
         end
     end
+    -- Durable "enqueued" event (opt-in). Emitted here so it joins the caller's
+    -- db.batch when enqueue is called inside one (transactional coupling).
+    emit_durable("enqueued",
+        { id = id, type = job_type, queue = opts.queue or "default", trace = opts.trace }, {})
     return id
 end
 
@@ -914,6 +987,23 @@ local function emit(event, job, info)
     for i = 1, #L do pcall(L[i], job, info) end
 end
 
+-- Apply a terminal transition and its durable event ATOMICALLY (one txn), then
+-- fire the in-process listeners. `transition()` runs the mark_* state change and
+-- returns the effective outcome ("done"|"dead"|"retried"). Wrapping in db.batch
+-- both couples the event to the state change and collapses mark_done's several
+-- statements into one commit (fewer fsyncs, even when events are off). Returns
+-- the outcome.
+local EVENT_OF = { done = "completed", dead = "dead", retried = "retried" }
+local function finish(job, info, transition)
+    local outcome
+    db.batch(function()
+        outcome = transition()
+        emit_durable(EVENT_OF[outcome] or outcome, job, info)
+    end)
+    emit(EVENT_OF[outcome] or outcome, job, info)
+    return outcome
+end
+
 --- Reclaim jobs stuck in `running` past the visibility timeout - a worker that
 -- claimed them died before completing. Reset to `pending` for reclaim (their
 -- incremented attempts persist, so a job that keeps killing its worker still
@@ -1181,6 +1271,12 @@ function jobs.work(opts)
         process_cron(now)
         _last_cron = now
     end
+    -- Drain durable event subscriptions (throttled; the per-subscription lease
+    -- makes this fleet-safe). Only workers that registered subscribers do work.
+    if next(_subscribers) and now - _last_edrain >= 1 then
+        for name in pairs(_subscribers) do jobs._events_drain(name, { now = now }) end
+        _last_edrain = now
+    end
     local batch = jobs.claim(opts)
     for _, job in ipairs(batch) do
         job.deps = load_deps(job.id)   -- workflow: dependency results, in order
@@ -1189,9 +1285,9 @@ function jobs.work(opts)
         local outcome, err_str             -- nil outcome = a yield (not recorded)
         if not h then
             err_str = "no handler for job type '" .. tostring(job.type) .. "'"
-            mark_dead(job.id, err_str)
-            emit("dead", job, { error = err_str })
-            outcome = "dead"
+            outcome = finish(job, { error = err_str }, function()
+                mark_dead(job.id, err_str); return "dead"
+            end)
         else
             local ok, result = pcall(h, job)
             if ok and type(result) == "table" and result.__hull_wf_yield then
@@ -1229,16 +1325,17 @@ function jobs.work(opts)
                 end
             elseif not ok then
                 err_str = tostring(result)
-                outcome = mark_retry(job, err_str)
-                emit(outcome, job, { error = err_str, attempt = job.attempts })
+                outcome = finish(job, { error = err_str, attempt = job.attempts },
+                    function() return mark_retry(job, err_str) end)
             elseif result == jobs.DEAD then
-                err_str = "handler returned jobs.DEAD"; outcome = "dead"
-                mark_dead(job.id, err_str)
-                emit("dead", job, { error = err_str })
+                err_str = "handler returned jobs.DEAD"
+                outcome = finish(job, { error = err_str }, function()
+                    mark_dead(job.id, err_str); return "dead"
+                end)
             elseif result == jobs.RETRY then
                 err_str = "handler requested retry"
-                outcome = mark_retry(job, err_str)
-                emit(outcome, job, { error = err_str, attempt = job.attempts })
+                outcome = finish(job, { error = err_str, attempt = job.attempts },
+                    function() return mark_retry(job, err_str) end)
             else
                 -- nil / true / jobs.DISCARD -> done, no result; any other return
                 -- value is stored as the job's result (for dependents).
@@ -1246,9 +1343,9 @@ function jobs.work(opts)
                 if result ~= nil and result ~= true and result ~= jobs.DISCARD then
                     res = result
                 end
-                mark_done(job.id, res)
-                emit("completed", job, { result = res })
-                outcome = "done"
+                outcome = finish(job, { result = res }, function()
+                    mark_done(job.id, res); return "done"
+                end)
             end
         end
         -- Opt-in attempt history (a yield leaves outcome nil -> not recorded).
@@ -1419,6 +1516,22 @@ function jobs.metrics(opts)
         end
         out.latency = { wait_ms = percentiles(waits), run_ms = percentiles(runs) }
         out.throughput = { done_per_sec = done_n / window, dead_per_sec = dead_n / window }
+    end
+    -- Durable-event log health (Phase 3): total log depth + per-subscription lag
+    -- (positions behind the log head = max id - cursor) and failure count, so a
+    -- stuck / lagging subscriber is visible. Present only when the log has data.
+    local depth = db.query("SELECT COUNT(*) AS n, MAX(id) AS mx FROM _hull_job_events")
+    local log_depth = (depth[1] and depth[1].n) or 0
+    if log_depth > 0 then
+        local max_id = (depth[1] and depth[1].mx) or 0
+        local subs = db.query(
+            "SELECT name, cursor_id, failures FROM _hull_job_subscriptions ORDER BY name")
+        local sub_list = {}
+        for _, sn in ipairs(subs or {}) do
+            sub_list[#sub_list + 1] =
+                { name = sn.name, lag = max_id - (sn.cursor_id or 0), failures = sn.failures or 0 }
+        end
+        out.events = { log_depth = log_depth, subscriptions = sub_list }
     end
     return out
 end
@@ -1953,7 +2066,178 @@ end
 -- @tparam number id
 -- @treturn boolean
 function jobs.cancel(id)
-    return (db.exec("DELETE FROM _hull_jobs WHERE id=? AND status='pending'", { id }) or 0) > 0
+    if not _cfg.events then
+        return (db.exec("DELETE FROM _hull_jobs WHERE id=? AND status='pending'", { id }) or 0) > 0
+    end
+    -- events on: capture type/queue for the "cancelled" event, delete + emit in
+    -- one txn (BEGIN IMMEDIATE serializes, so the SELECT->DELETE stays consistent).
+    local cancelled = false
+    db.batch(function()
+        local r = db.query("SELECT type, queue FROM _hull_jobs WHERE id=? AND status='pending'", { id })
+        if r and r[1] then
+            db.exec("DELETE FROM _hull_jobs WHERE id=? AND status='pending'", { id })
+            emit_durable("cancelled", { id = id, type = r[1].type, queue = r[1].queue }, {})
+            cancelled = true
+        end
+    end)
+    return cancelled
+end
+
+--- Read-only tail of the durable event log (jobs.init{events=true}), newest
+-- first - for a dashboard or ad-hoc inspection. Phase 2 adds durable
+-- subscriptions (jobs.subscribe) with at-least-once delivery + cursors.
+-- @tparam[opt] table opts { since = <event id>, types = {"dead", ...}, limit = 100 }
+-- @treturn table array of { id, ts, type, job_id, job_type, queue, data }
+function jobs.events(opts)
+    opts = opts or {}
+    local where, params = { "1=1" }, {}
+    if opts.since ~= nil then where[#where + 1] = "id > ?"; params[#params + 1] = opts.since end
+    if type(opts.types) == "table" and #opts.types > 0 then
+        local ph = {}
+        for _, t in ipairs(opts.types) do ph[#ph + 1] = "?"; params[#params + 1] = t end
+        where[#where + 1] = "type IN (" .. table.concat(ph, ",") .. ")"
+    end
+    params[#params + 1] = math.min(tonumber(opts.limit) or 100, 1000)
+    local rows = db.query(
+        "SELECT id, ts, type, job_id, job_type, queue, data FROM _hull_job_events "
+        .. "WHERE " .. table.concat(where, " AND ") .. " ORDER BY id DESC LIMIT ?", params)
+    for _, r in ipairs(rows or {}) do
+        if r.data ~= nil and r.data ~= "" then
+            local ok, decoded = pcall(json.decode, r.data)
+            if ok then r.data = decoded end
+        end
+    end
+    return rows or {}
+end
+
+--- Register a durable named subscription over the event log (Phase 2). `handler`
+-- is called once per event, in id order, AT-LEAST-ONCE (a crash between a handler
+-- succeeding and the cursor advancing re-delivers it) - so handlers must be
+-- idempotent, the same contract as a job handler. The cursor is durable (survives
+-- restarts); the handler is per-worker, so call jobs.subscribe on every worker
+-- (like jobs.handler). Drained by jobs.work / jobs.run_worker.
+-- @tparam string name
+-- @tparam function handler   function(event)
+-- @tparam[opt] table opts { types = {"dead", ...}, from = "now" | "beginning",
+--                            max_failures = N }  N = skip a poison event after N
+--                            consecutive handler failures (nil = block forever)
+function jobs.subscribe(name, handler, opts)
+    if type(name) ~= "string" or name == "" then
+        error("jobs.subscribe: name must be a non-empty string")
+    end
+    if type(handler) ~= "function" then error("jobs.subscribe: handler must be a function") end
+    opts = opts or {}
+    local types_csv
+    if type(opts.types) == "table" and #opts.types > 0 then types_csv = table.concat(opts.types, ",") end
+    local max_f = (type(opts.max_failures) == "number" and opts.max_failures > 0) and opts.max_failures or nil
+    -- Start cursor: "now" (default) skips existing history; "beginning" replays all.
+    local start = 0
+    if opts.from ~= "beginning" then
+        local m = db.query("SELECT MAX(id) AS m FROM _hull_job_events")
+        start = (m[1] and m[1].m) or 0
+    end
+    local now = time.now()
+    -- Create the durable row once; a re-subscribe keeps the persisted cursor and
+    -- only refreshes the config (type filter, skip threshold).
+    local n = db.insert_if_absent("_hull_job_subscriptions", { "name" },
+        { "name", "cursor_id", "types", "failures", "max_failures", "updated_at" },
+        { name, start, types_csv, 0, max_f, now })
+    if not (n and n > 0) then
+        db.exec("UPDATE _hull_job_subscriptions SET types=?, max_failures=?, updated_at=? WHERE name=?",
+            { types_csv, max_f, now, name })
+    end
+    _subscribers[name] = { handler = handler }
+    return jobs
+end
+
+--- Remove a subscription: this worker's handler and the durable row (cursor).
+function jobs.unsubscribe(name)
+    _subscribers[name] = nil
+    db.exec("DELETE FROM _hull_job_subscriptions WHERE name=?", { name })
+    return jobs
+end
+
+-- Synchronous drain seam (the Phase 2 testability keystone): lease the
+-- subscription, deliver new events in id order, advance the cursor, release the
+-- lease. No timers/sleeps - jobs.work drives it. Returns { delivered, cursor,
+-- leased }. Test seams: opts.now (clock), opts.batch, opts.commit_cursor (false =
+-- deliver but don't advance -> models a crash before the cursor write),
+-- opts.release_lease (false = hold the lease -> models a worker death mid-drain).
+function jobs._events_drain(name, opts)
+    opts = opts or {}
+    local sub = _subscribers[name]
+    if not sub then return { delivered = 0, leased = false } end
+    local now = opts.now or time.now()
+    local token = crypto.base64url_encode(crypto.random(8))
+    -- Acquire the lease (CAS): only if free or expired. Fleet-safe, no global lock.
+    -- Detect acquisition via RETURNING on PG/SQLite (db.exec does not surface an
+    -- affected-row count on Postgres); MySQL has no RETURNING but returns the count.
+    local lease_sql = "UPDATE _hull_job_subscriptions SET lease_token=?, lease_until=?, updated_at=? "
+        .. "WHERE name=? AND (lease_until IS NULL OR lease_until <= ?)"
+    local lease_params = { token, now + _EDRAIN_LEASE, now, name, now }
+    local got
+    if db.dialect.supports_returning then
+        got = #db.query(lease_sql .. " RETURNING name", lease_params)
+    else
+        got = db.exec(lease_sql, lease_params) or 0
+    end
+    if got == 0 then return { delivered = 0, leased = false } end
+    local row = db.query(
+        "SELECT cursor_id, types, failures, max_failures FROM _hull_job_subscriptions WHERE name=?", { name })
+    local cursor = row[1].cursor_id
+    local failures = row[1].failures or 0
+    local max_failures = row[1].max_failures
+    -- Fetch events past the cursor, filtered by the subscription's types.
+    local where, params = { "id > ?" }, { cursor }
+    if row[1].types and row[1].types ~= "" then
+        local ph = {}
+        for t in tostring(row[1].types):gmatch("[^,]+") do ph[#ph + 1] = "?"; params[#params + 1] = t end
+        where[#where + 1] = "type IN (" .. table.concat(ph, ",") .. ")"
+    end
+    params[#params + 1] = opts.batch or 100
+    local evs = db.query(
+        "SELECT id, ts, type, job_id, job_type, queue, data FROM _hull_job_events "
+        .. "WHERE " .. table.concat(where, " AND ") .. " ORDER BY id LIMIT ?", params)
+    -- Deliver in id order. On a handler error, stop at that event (the poison);
+    -- the successful prefix is committed and the poison retried on the next drain.
+    local last_ok, delivered, poison, poison_err = cursor, 0, nil, nil
+    for _, e in ipairs(evs) do
+        if e.data ~= nil and e.data ~= "" then
+            local ok, d = pcall(json.decode, e.data); if ok then e.data = d end
+        end
+        local ok, herr = pcall(sub.handler, e)
+        if ok then last_ok = e.id; delivered = delivered + 1
+        else poison = e; poison_err = herr; break end
+    end
+    -- Failure accounting + poison skip. `failures` counts consecutive drains that
+    -- stalled on the SAME frontier event; making progress this drain resets it to
+    -- a fresh 1. Once it reaches max_failures (opt-in), skip the poison: advance
+    -- past it and record a durable `subscription_skipped` event so it can't wedge
+    -- the subscription (or retention) forever.
+    local new_failures, new_cursor = 0, last_ok
+    if poison then
+        new_failures = (delivered > 0) and 1 or (failures + 1)
+        if max_failures and new_failures >= max_failures then
+            -- Don't chain: skipping a subscription_skipped must not emit another.
+            if poison.type ~= "subscription_skipped" then
+                emit_durable("subscription_skipped",
+                    { id = poison.job_id, type = poison.job_type, queue = poison.queue },
+                    { error = "subscription '" .. name .. "' skipped event " .. poison.id
+                        .. " after " .. new_failures .. " failures: " .. tostring(poison_err) })
+            end
+            new_cursor = poison.id   -- advance PAST the poison
+            new_failures = 0
+        end
+    end
+    if opts.commit_cursor == false then new_cursor = cursor end
+    local release = opts.release_lease ~= false
+    db.exec(
+        "UPDATE _hull_job_subscriptions SET cursor_id=?, failures=?, "
+        .. (release and "lease_token=NULL, lease_until=NULL, " or "")
+        .. "updated_at=? WHERE name=? AND lease_token=?",
+        { new_cursor, new_failures, now, name, token })
+    return { delivered = delivered, cursor = new_cursor, leased = true,
+             skipped = (poison ~= nil and new_cursor == poison.id) or false }
 end
 
 --- Purge terminal jobs (done + dead by default) whose last update is older than
@@ -1990,6 +2274,16 @@ function jobs.cleanup(opts)
     -- post-hoc metrics), not by orphan-ness.
     local hr = _cfg.history_retention or opts.older_than or 604800
     db.exec("DELETE FROM _hull_job_attempts WHERE finished_ms < ?", { (time.now() - hr) * 1000 })
+    -- Durable event log: retained by age, but NEVER past an unconsumed event -
+    -- min(cursor) across subscriptions is the safe watermark. No subscriptions ->
+    -- age only (the Phase 1 behavior).
+    local mc = db.query("SELECT MIN(cursor_id) AS m FROM _hull_job_subscriptions")
+    local watermark = mc[1] and mc[1].m
+    if watermark == nil then
+        db.exec("DELETE FROM _hull_job_events WHERE ts < ?", { cutoff })
+    else
+        db.exec("DELETE FROM _hull_job_events WHERE ts < ? AND id <= ?", { cutoff, watermark })
+    end
     return deleted
 end
 

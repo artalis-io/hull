@@ -113,6 +113,84 @@ jobs.on("completed", function(job, info) metrics.inc("jobs.done", { type = job.t
 jobs.on("dead",      function(job, info) log.error("job died: " .. info.error) end)
 ```
 
+## Durable events (fleet-wide)
+
+Where `jobs.on` is in-process and lost on a crash, the **durable event log** is
+opt-in (`jobs.init({ events = true })`) and records every lifecycle transition -
+`enqueued`, `completed`, `retried`, `dead`, `cancelled` - as a row in
+`_hull_job_events`, **written in the same transaction as the state change that
+produced it**. So an event exists *iff* the transition committed: no lost events
+(crash after the change, before an external publish) and no phantom events
+(publish, then the change rolls back) - the same transactional coupling that makes
+`enqueue` a plain `INSERT`. It survives restarts and is visible to any process
+against the same DB (a dashboard, an analytics sink, a reacting service).
+
+```lua
+jobs.init({ events = true })
+
+-- Read-only tail, newest first (for a dashboard / ad-hoc inspection):
+local recent = jobs.events({ types = { "dead" }, since = last_id, limit = 100 })
+-- each: { id, ts, type, job_id, job_type, queue, data = { error?, attempt?, trace? } }
+```
+```javascript
+jobs.init({ events: true });
+const recent = jobs.events({ types: ["dead"], since: lastId, limit: 100 });
+```
+
+- **`id`** is a monotonic total order (and the subscription cursor space). Tail
+  incrementally by passing the last id you saw as `since`.
+- **`data`** is compact metadata (`error` / `attempt` / `trace`), never the full
+  result - join `jobs.result(job_id)` when you need the value.
+- **Off by default** - an app that doesn't opt in pays nothing (no log writes).
+
+### Durable subscriptions
+
+For a service that must **react** to events (not just tail them), a durable
+**subscription** delivers each event to a handler **at-least-once**, tracking its
+own cursor so it resumes exactly where it left off after a restart - fleet-wide:
+
+```lua
+-- Register on every worker (like jobs.handler). Handlers must be idempotent.
+jobs.subscribe("fulfillment", function(ev)
+    if ev.type == "completed" and ev.job_type == "charge" then webhook.notify(ev) end
+end, { types = { "completed", "dead" }, from = "now" })
+jobs.unsubscribe("fulfillment")
+```
+```javascript
+jobs.subscribe("fulfillment", (ev) => { if (ev.type === "completed") webhook.notify(ev); },
+               { types: ["completed", "dead"], from: "now" });
+```
+
+- **Drained by `jobs.work` / `jobs.run_worker`** - no separate process needed.
+  A per-subscription **lease** (a claim-token + visibility timeout, exactly like
+  the job claim) means one worker drains a subscription at a time; if that worker
+  dies, another resumes from the cursor. So delivery is **at-least-once** (a crash
+  between a handler succeeding and the cursor advancing re-delivers) - handlers
+  must be idempotent, the same contract as a job handler.
+- **`from`**: `"now"` (default) starts at the current head (skip history);
+  `"beginning"` replays the whole retained log.
+- **Ordered per subscription** (by event id); no cross-subscription order promise.
+- **Retention is subscription-aware**: `jobs.cleanup` never truncates the log past
+  the slowest subscription's cursor, so a lagging consumer keeps its unseen events.
+- **Poison events don't wedge a subscription.** By default a handler that keeps
+  throwing on one event blocks there (retried each drain). Pass
+  `max_failures = N` (`maxFailures` in JS) to **skip** that event after `N`
+  consecutive failures: the drain advances past it and records a durable
+  `subscription_skipped` event (queryable via `jobs.events({ types =
+  { "subscription_skipped" } })`), so one bad event can't stall delivery or hold
+  the log open for retention.
+
+```lua
+jobs.subscribe("reactor", handler, { types = { "completed" }, max_failures = 5 })
+```
+
+**Observability.** `jobs.metrics()` includes an `events` block when the log has
+data: `log_depth` (total events) and per-subscription `{ name, lag, failures }`,
+where `lag` = positions behind the log head (`max id − cursor`). A stuck or
+lagging subscriber shows up as high `lag` / `failures`.
+
+Design + testability: [docs/jobs_events_design.md](jobs_events_design.md).
+
 ## Recurring jobs (cron)
 
 `jobs.cron(name, spec, data?, opts?)` registers a **durable** recurring
