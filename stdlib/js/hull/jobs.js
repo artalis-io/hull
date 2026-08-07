@@ -397,6 +397,19 @@ function loadDeps(dependentId) {
 // does (transactional coupling: no lost, no phantom events). `job` supplies
 // id/type/queue/trace; `info` is small metadata (error/attempt) - never the full
 // result (a consumer joins _hull_job_results for that).
+// Latency-only wakeup: nudge idle workers / subscription drainers parked on
+// conn.waitNotify so a freshly appended event or enqueued job wakes them
+// immediately instead of at the next poll. Postgres LISTEN/NOTIFY; a no-op on
+// backends without it (SQLite/MySQL keep polling). The channel is the fixed
+// literal every emitter and waiter shares; the payload is unused. Issued on the
+// same connection as the preceding INSERT, so inside a caller's db.batch it
+// rides the same transaction and PG delivers (and coalesces) it on commit.
+function wakeWorkers() {
+    if (db.dialect.supportsNotify) {
+        db.exec("SELECT pg_notify(?, ?)", ["hull_jobs", ""]);
+    }
+}
+
 function emitDurable(event, job, info) {
     if (!_cfg.events) return;
     info = info || {};
@@ -409,6 +422,7 @@ function emitDurable(event, job, info) {
         "INSERT INTO _hull_job_events (ts, type, job_id, job_type, queue, data) " +
         "VALUES (?, ?, ?, ?, ?, ?)",
         [time.now(), event, job.id, job.type, job.queue, data]);
+    wakeWorkers();   // wake drainers on the new event (no-op off Postgres)
 }
 
 // Apply a terminal transition and its durable event ATOMICALLY (one txn), then
@@ -524,6 +538,10 @@ function enqueue(jobType, data, opts) {
     // db.batch when enqueue is called inside one (transactional coupling).
     emitDurable("enqueued",
         { id, type: jobType, queue: o.queue || "default", trace: o.trace }, {});
+    // Low-latency job pickup: wake an idle worker on the new job. When events
+    // are on, emitDurable already issued the NOTIFY (coalesced within the
+    // transaction), so only nudge directly when it did not.
+    if (!_cfg.events) wakeWorkers();
     return id;
 }
 
@@ -1360,6 +1378,26 @@ async function runWorker(opts) {
     const concurrency = (o.concurrency && o.concurrency > 1) ? o.concurrency : 1;
     _running = true;
 
+    // Idle wait between empty polls. On a NOTIFY-capable backend (Postgres) a
+    // single-loop worker parks on conn.waitNotify, so a freshly enqueued job or
+    // appended event wakes it immediately instead of after pollMs; the timeout
+    // is still pollMs, so a missed/absent NOTIFY just falls back to a poll
+    // (latency only, never correctness). Gated on concurrency === 1: with N
+    // in-process loops all idle we would occupy N worker-pool threads on the
+    // wait, so the multi-loop case keeps plain sleep (the fleet still gets the
+    // win via separate single-loop worker processes). A first wait that throws
+    // (no thread pool / event loop) disables the fast path for the rest of the
+    // run and falls back to sleep.
+    let useNotify = db.dialect.supportsNotify && concurrency === 1;
+    const idleWait = async () => {
+        if (useNotify) {
+            try { await db.waitNotify("hull_jobs", pollMs); }
+            catch (_e) { useNotify = false; await hull.sleep(pollMs); }
+        } else {
+            await hull.sleep(pollMs);
+        }
+    };
+
     // One independent claim-loop; returns its own processed count.
     const loop = async () => {
         let processed = 0, empty = 0;
@@ -1369,7 +1407,7 @@ async function runWorker(opts) {
             if (n === 0) {
                 empty++;
                 if (maxEmpty > 0 && empty >= maxEmpty) break;
-                await hull.sleep(pollMs);
+                await idleWait();
             } else {
                 empty = 0;
             }
