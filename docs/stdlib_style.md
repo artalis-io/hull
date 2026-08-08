@@ -45,7 +45,7 @@ boundary. Never phrase a stdlib contract in terms of HTTP status.
 | a cache `get(k)` | hit / miss / backend error | value / `nil` / **throw** |
 | `csv.parse(input)` | valid / malformed | parsed value / **throw** |
 | `validate.check(data, schema)` | valid / invalid / validator broken | `(true, {})` / `(false, findings)` / **throw** |
-| `email.send(msg)` | sent / missing arg / transport fail | receipt / **throw** / **throw** |
+| `email.send(msg)` | sent / missing arg / transport fail | `true` / **throw** / **throw** |
 
 **Validation failure ≠ validator failure.** An *invalid input* is a normal,
 successful outcome of running the validator: it returns `(false, findings)`. The

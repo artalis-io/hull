@@ -11,19 +11,35 @@
 -- loop. SMTP delivery goes through the C `smtp.send()` cap which handles
 -- TLS via mbedTLS and the embedded Mozilla CA bundle.
 --
+-- **Errors.** `email.send` follows the stdlib error convention
+-- (docs/stdlib_style.md section 1): a failure to send THROWS. The thrown value
+-- is a table carrying a stable `code` and a human `message` (with a `__tostring`
+-- so an uncaught throw still prints cleanly). Success returns `true`. Callers
+-- that want to branch use `pcall`:
+--
+--     local ok, err = pcall(email.send, opts)
+--     if not ok then log.error(tostring(err))   -- err.code is stable
+--         if err.code == "delivery_failed" then ... end
+--     end
+--
+-- Codes: `invalid_argument` (missing/invalid opts, from, to, subject, body, or a
+-- provider's required api_key), `unknown_provider`, `delivery_failed` (the
+-- provider attempted delivery and it failed: transport error, no response, or a
+-- non-2xx status). This composes with `hull/jobs`: a `send_email` handler that
+-- just calls `email.send(job.data)` retries automatically on a thrown failure.
+--
 -- @module hull.email
 -- @license AGPL-3.0-or-later
 -- @usage
 --   local email = require("hull.email")
---   local result = email.send({
+--   email.send({
 --       provider = "smtp",
 --       from = "app@example.com",  to = "user@example.com",
 --       subject = "Hello",         body = "Message body",
 --       smtp_host = "smtp.example.com", smtp_port = 587,
 --       smtp_user = "apikey",      smtp_pass = env.get("SMTP_PASS"),
 --       smtp_tls  = true,
---   })
---   if not result.ok then log.error(result.error) end
+--   })   -- throws on failure; returns true on success
 
 local json = require("hull.json")
 local http_client = require("hull.http-client")
@@ -31,11 +47,19 @@ local smtp = require("hull.smtp")
 
 local email = {}
 
--- Provider adapters: each takes (opts) and returns { ok, error }
+-- Throw a coded error table. __tostring keeps an uncaught throw readable;
+-- err.code is the stable, branch-on identity (docs/stdlib_style.md section 1).
+local _err_mt = { __tostring = function(e) return e.message end }
+local function email_error(code, message)
+    error(setmetatable({ code = code, message = message }, _err_mt), 0)
+end
+
+-- Provider adapters: each takes (opts), returns true on success, throws on
+-- failure (delivery_failed / invalid_argument).
 local providers = {}
 
 function providers.smtp(opts)
-    return smtp.send({
+    local r = smtp.send({
         host = opts.smtp_host,
         port = opts.smtp_port or 587,
         username = opts.smtp_user,
@@ -49,11 +73,17 @@ function providers.smtp(opts)
         body = opts.body,
         content_type = opts.content_type or "text/plain",
     })
+    -- smtp.send is a thin C-cap binding that keeps its own {ok,error} shape;
+    -- translate a failure into the email.send throw convention here.
+    if not (r and r.ok) then
+        email_error("delivery_failed", "smtp: " .. ((r and r.error) or "send failed"))
+    end
+    return true
 end
 
 function providers.postmark(opts)
     if not opts.api_key then
-        return { ok = false, error = "postmark: api_key required" }
+        email_error("invalid_argument", "postmark: api_key required")
     end
 
     local payload = {
@@ -85,20 +115,20 @@ function providers.postmark(opts)
         }
     )
     if not ok then
-        return { ok = false, error = "postmark: " .. tostring(resp) }
+        email_error("delivery_failed", "postmark: " .. tostring(resp))
     end
     if not resp then
-        return { ok = false, error = "postmark: no response" }
+        email_error("delivery_failed", "postmark: no response")
     end
     if resp.status >= 200 and resp.status < 300 then
-        return { ok = true }
+        return true
     end
-    return { ok = false, error = "postmark: " .. (resp.body or "unknown error") }
+    email_error("delivery_failed", "postmark: " .. (resp.body or "unknown error"))
 end
 
 function providers.sendgrid(opts)
     if not opts.api_key then
-        return { ok = false, error = "sendgrid: api_key required" }
+        email_error("invalid_argument", "sendgrid: api_key required")
     end
 
     local payload = {
@@ -125,20 +155,20 @@ function providers.sendgrid(opts)
         }
     )
     if not ok then
-        return { ok = false, error = "sendgrid: " .. tostring(resp) }
+        email_error("delivery_failed", "sendgrid: " .. tostring(resp))
     end
     if not resp then
-        return { ok = false, error = "sendgrid: no response" }
+        email_error("delivery_failed", "sendgrid: no response")
     end
     if resp.status >= 200 and resp.status < 300 then
-        return { ok = true }
+        return true
     end
-    return { ok = false, error = "sendgrid: " .. (resp.body or "unknown error") }
+    email_error("delivery_failed", "sendgrid: " .. (resp.body or "unknown error"))
 end
 
 function providers.resend(opts)
     if not opts.api_key then
-        return { ok = false, error = "resend: api_key required" }
+        email_error("invalid_argument", "resend: api_key required")
     end
 
     local payload = {
@@ -165,22 +195,22 @@ function providers.resend(opts)
         }
     )
     if not ok then
-        return { ok = false, error = "resend: " .. tostring(resp) }
+        email_error("delivery_failed", "resend: " .. tostring(resp))
     end
     if not resp then
-        return { ok = false, error = "resend: no response" }
+        email_error("delivery_failed", "resend: no response")
     end
     if resp.status >= 200 and resp.status < 300 then
-        return { ok = true }
+        return true
     end
-    return { ok = false, error = "resend: " .. (resp.body or "unknown error") }
+    email_error("delivery_failed", "resend: " .. (resp.body or "unknown error"))
 end
 
 --- Send an email via the selected provider.
 --
--- Always validates `from`/`to` against a simple `local@domain.tld`
--- pattern before dispatch; provider-specific errors are surfaced as
--- `{ok=false, error="<provider>: <msg>"}`.
+-- Validates `from`/`to` against a simple `local@domain.tld` pattern before
+-- dispatch. THROWS a coded error table (`.code`, `.message`) on any failure;
+-- returns `true` on success. See the module header for the code list.
 --
 -- @function email.send
 -- @tparam table opts
@@ -200,26 +230,26 @@ end
 -- @tparam[opt] string opts.smtp_user          SMTP username.
 -- @tparam[opt] string opts.smtp_pass          SMTP password.
 -- @tparam[opt=true] boolean opts.smtp_tls     Enable STARTTLS.
--- @treturn table  `{ok = true}` on success, `{ok = false, error = "..."}` on failure.
+-- @treturn boolean  `true` on success. Throws `{code, message}` on failure.
 function email.send(opts)
-    if not opts then return { ok = false, error = "opts required" } end
-    if not opts.from then return { ok = false, error = "from required" } end
-    if not opts.to then return { ok = false, error = "to required" } end
-    if not opts.subject then return { ok = false, error = "subject required" } end
-    if not opts.body then return { ok = false, error = "body required" } end
+    if not opts then email_error("invalid_argument", "opts required") end
+    if not opts.from then email_error("invalid_argument", "from required") end
+    if not opts.to then email_error("invalid_argument", "to required") end
+    if not opts.subject then email_error("invalid_argument", "subject required") end
+    if not opts.body then email_error("invalid_argument", "body required") end
 
     -- Basic email format validation
     if not opts.from:match("^[^%s@]+@[^%s@]+%.[^%s@]+$") then
-        return { ok = false, error = "invalid from address" }
+        email_error("invalid_argument", "invalid from address")
     end
     if not opts.to:match("^[^%s@]+@[^%s@]+%.[^%s@]+$") then
-        return { ok = false, error = "invalid to address" }
+        email_error("invalid_argument", "invalid to address")
     end
 
     local provider = opts.provider or "smtp"
     local fn = providers[provider]
     if not fn then
-        return { ok = false, error = "unknown provider: " .. tostring(provider) }
+        email_error("unknown_provider", "unknown provider: " .. tostring(provider))
     end
     return fn(opts)
 end

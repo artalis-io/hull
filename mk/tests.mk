@@ -684,6 +684,10 @@ e2e-hex-parity: $(BUILDDIR)/hull
 e2e-client-ip-parity: $(BUILDDIR)/hull
 	sh tests/e2e_client_ip_parity.sh
 
+.PHONY: e2e-email
+e2e-email: $(BUILDDIR)/hull
+	sh tests/e2e_email.sh
+
 e2e-agent: $(BUILDDIR)/hull
 	RUNTIME=$(RUNTIME) sh tests/e2e_agent.sh
 

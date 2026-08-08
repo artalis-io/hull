@@ -3473,12 +3473,11 @@ UTEST(js_stdlib, email_validation)
         "import { app } from 'hull:app';\n"
         "app.manifest({ modules: ['hull/http-client@1'] });\n"
         "import { email } from 'hull:email';\n"
-        "var r1 = await email.send(null);\n"
-        "globalThis.__test_ev1 = (r1.ok === false && r1.error === 'opts required') ? 1 : 0;\n"
-        "var r2 = await email.send({ to: 'x@y.com', subject: 's', body: 'b' });\n"
-        "globalThis.__test_ev2 = (r2.ok === false && r2.error === 'from required') ? 1 : 0;\n"
-        "var r3 = await email.send({ from: 'x@y.com', subject: 's', body: 'b' });\n"
-        "globalThis.__test_ev3 = (r3.ok === false && r3.error === 'to required') ? 1 : 0;\n";
+        "async function code(o){ try { await email.send(o); return '_ok'; } "
+        "catch (e) { return (e.code||'_nocode') + ':' + (e.message||''); } }\n"
+        "globalThis.__test_ev1 = ((await code(null)) === 'invalid_argument:opts required') ? 1 : 0;\n"
+        "globalThis.__test_ev2 = ((await code({ to: 'x@y.com', subject: 's', body: 'b' })) === 'invalid_argument:from required') ? 1 : 0;\n"
+        "globalThis.__test_ev3 = ((await code({ from: 'x@y.com', subject: 's', body: 'b' })) === 'invalid_argument:to required') ? 1 : 0;\n";
 
     JSValue val = JS_Eval(js.ctx, code, strlen(code), "<test>",
                           JS_EVAL_TYPE_MODULE);
@@ -3503,9 +3502,11 @@ UTEST(js_stdlib, email_unknown_provider)
         "import { app } from 'hull:app';\n"
         "app.manifest({ modules: ['hull/http-client@1'] });\n"
         "import { email } from 'hull:email';\n"
-        "var r = await email.send({ provider: 'foo', from: 'a@b.com', "
+        "async function code(o){ try { await email.send(o); return '_ok'; } "
+        "catch (e) { return (e.code||'_nocode') + '|' + (e.message||''); } }\n"
+        "var r = await code({ provider: 'foo', from: 'a@b.com', "
         "to: 'c@d.com', subject: 's', body: 'b' });\n"
-        "globalThis.__test_eup = (r.ok === false && r.error.indexOf('unknown provider') >= 0) ? 1 : 0;\n";
+        "globalThis.__test_eup = (r.indexOf('unknown_provider|') === 0 && r.indexOf('unknown provider') >= 0) ? 1 : 0;\n";
 
     JSValue val = JS_Eval(js.ctx, code, strlen(code), "<test>",
                           JS_EVAL_TYPE_MODULE);
@@ -3528,9 +3529,11 @@ UTEST(js_stdlib, email_api_key_required)
         "import { app } from 'hull:app';\n"
         "app.manifest({ modules: ['hull/http-client@1'] });\n"
         "import { email } from 'hull:email';\n"
-        "var r = await email.send({ provider: 'postmark', from: 'a@b.com', "
+        "async function code(o){ try { await email.send(o); return '_ok'; } "
+        "catch (e) { return (e.code||'_nocode') + '|' + (e.message||''); } }\n"
+        "var r = await code({ provider: 'postmark', from: 'a@b.com', "
         "to: 'c@d.com', subject: 's', body: 'b' });\n"
-        "globalThis.__test_eak = (r.ok === false && r.error.indexOf('api_key required') >= 0) ? 1 : 0;\n";
+        "globalThis.__test_eak = (r.indexOf('invalid_argument|') === 0 && r.indexOf('api_key required') >= 0) ? 1 : 0;\n";
 
     JSValue val = JS_Eval(js.ctx, code, strlen(code), "<test>",
                           JS_EVAL_TYPE_MODULE);
