@@ -56,10 +56,14 @@ static void buf_reserve(Buf *b, size_t extra) {
     b->p = np; b->cap = ncap;
 }
 static void buf_put(Buf *b, const void *src, size_t n) {
+    if (n == 0) return;  /* memcpy(b->p + b->len, src, 0) is UB when b->p is
+                          * still NULL (empty buf) or src is NULL - copying 0
+                          * bytes is a no-op anyway. */
     buf_reserve(b, n); if (b->oom) return;
     memcpy(b->p + b->len, src, n); b->len += n;
 }
 static void buf_zero(Buf *b, size_t n) {
+    if (n == 0) return;  /* same: memset(NULL, 0, 0) is UB; no-op regardless. */
     buf_reserve(b, n); if (b->oom) return;
     memset(b->p + b->len, 0, n); b->len += n;
 }
