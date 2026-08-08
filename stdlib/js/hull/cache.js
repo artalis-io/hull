@@ -26,6 +26,10 @@
  */
 
 import { time } from "hull:time";
+import kvUtil from "hull:kv:_util";
+import kvHandle from "hull:kv:_handle";
+import kvMemstore from "hull:kv:_memstore";
+import kvSql from "hull:kv:_sql";
 
 const DEFAULT_MAX = 1000;
 
@@ -157,6 +161,66 @@ const cache = {
     delete: _default.delete,
     clear: _default.clear,
     size: _default.size,
+};
+
+// ---------------------------------------------------------------------------
+// cache.open({}) - the byte-oriented, backend-selectable CACHE handle.
+//
+// Distinct from cache.new() above: cache.new is a lightweight in-process
+// memoizer for arbitrary VALUES (item-count bound). cache.open deals in BYTE
+// STRINGS and adds byte accounting, pluggable backends (memory / sqlite), and
+// namespaces - sharing the same store cores as hull:kv but with CACHE policy
+// (eviction ON). Use cache.open for max_bytes / a durable SQL cache / explicit
+// namespaces; cache.new for a quick local value memoizer.
+//
+//   const c = cache.open({ backend: "memory", namespace: "query-ir",
+//                          maxBytes: 512*1024*1024, defaultTtl: 600 });
+//   c.set(k, bytes); const v = c.get(k);           // bytes | null
+//   c.fetch(k, 60, () => render());                // get-or-compute (bytes)
+//   c.stats();   // { hits, misses, evictions, items, bytes }
+// ---------------------------------------------------------------------------
+cache.open = function (opts) {
+    if (typeof opts !== "object" || opts === null)
+        kvUtil.error("invalid_argument", "cache.open: options object required");
+    const backend = opts.backend || "memory";
+    const namespace = opts.namespace || "default";
+    const storeNs = "cache:" + namespace; // isolated from hull:kv's "kv:" namespaces
+
+    let store, bname;
+    if (backend === "memory") {
+        store = kvMemstore.get(storeNs, {
+            evict: true, defaultTtl: opts.defaultTtl,
+            maxBytes: opts.maxBytes, maxItems: opts.maxItems,
+        });
+        bname = "memory";
+    } else if (backend === "sqlite") {
+        const conn = opts.database;
+        if (!conn || typeof conn.exec !== "function")
+            kvUtil.error("invalid_argument", "cache.open: sqlite backend needs database: <db connection>");
+        store = kvSql.new(conn, storeNs, {
+            evict: true, defaultTtl: opts.defaultTtl, maxItems: opts.maxItems,
+        });
+        bname = conn.backendName || "sqlite";
+    } else {
+        kvUtil.error("invalid_argument", "cache.open: unknown backend '" + backend + "'");
+    }
+
+    const h = kvHandle.build(store, { namespace, backend: bname });
+
+    // Get key, or compute + cache it. fetch(key, ttl, fn) or fetch(key, fn).
+    // fn must return bytes (a string); it is synchronous.
+    h.fetch = function (key, ttl, fn) {
+        if (fn === undefined && typeof ttl === "function") { fn = ttl; ttl = undefined; }
+        kvUtil.checkKey(key);
+        const v = h._store.get(key);
+        if (v !== null) return v;
+        const produced = fn();
+        kvUtil.checkValue(produced);
+        h._store.put(key, produced, ttl);
+        return produced;
+    };
+
+    return h;
 };
 
 export { cache };

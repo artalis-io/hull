@@ -231,6 +231,18 @@ static const HlModuleSpec REGISTRY[] = {
         /* HMAC needs crypto; payload encoding needs json; exp/iat checks need time. */
         .deps = {"hull/crypto", "hull/json", "hull/time", 0},
     },
+    {
+        /* Portable key/value STORE. Distinct from hull/cache (ephemeral +
+         * evicting): hull/kv is externally-meaningful state with no eviction
+         * unless explicitly requested. Backends: memory (in-process), sqlite /
+         * postgres (durable, over an EXISTING hull/db connection passed by the
+         * app). Pure Lua/JS over hull/time; it carries no new authority of its
+         * own - a SQL backend's fs/network access is the db capability's,
+         * already gated, so hull/db is the app's declaration, not a dep here. */
+        .name = "hull/kv",
+        .api_major = 1, .intrinsic = 0, .pure = 0,
+        .required_caps = 0, .deps = {"hull/time", 0},
+    },
 
     /* ── Logger ───────────────────────────────────────────────────── */
     {

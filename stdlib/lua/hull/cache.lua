@@ -151,6 +151,74 @@ function cache.new(opts)
     return self
 end
 
+-- ---------------------------------------------------------------------------
+-- cache.open{} - the byte-oriented, backend-selectable CACHE handle.
+--
+-- Distinct from cache.new() above: cache.new is a lightweight in-process
+-- memoizer for arbitrary Lua VALUES (item-count bound). cache.open deals in
+-- BYTES (keys/values are strings) and adds byte accounting, pluggable backends
+-- (memory / sqlite), and namespaces - sharing the same store cores as
+-- hull.kv but with CACHE policy (eviction ON). Use cache.open when you need
+-- max_bytes, a durable/SQL cache, or explicit namespaces; cache.new for a
+-- quick local value memoizer.
+--
+--   local c = require("hull.cache").open{ backend = "memory",
+--       namespace = "query-ir", max_bytes = 512*1024*1024, default_ttl = 600 }
+--   c:set(k, bytes); local v = c:get(k)   -- bytes | nil
+--   c:fetch(k, 60, function() return render() end)   -- get-or-compute (bytes)
+--   c.stats()   -- { hits, misses, evictions, items, bytes }
+-- ---------------------------------------------------------------------------
+function cache.open(opts)
+    local u      = require("hull.kv._util")
+    local handle = require("hull.kv._handle")
+    if type(opts) ~= "table" then
+        u.error("invalid_argument", "cache.open: options table required")
+    end
+    local backend = opts.backend or "memory"
+    local ns = opts.namespace or "default"
+    local store_ns = "cache:" .. ns   -- isolated from hull.kv's "kv:" namespaces
+
+    local store, bname
+    if backend == "memory" then
+        store = require("hull.kv._memstore").get(store_ns, {
+            evict       = true,                 -- CACHE: LRU eviction ON
+            default_ttl = opts.default_ttl,
+            max_bytes   = opts.max_bytes,
+            max_items   = opts.max_items,
+        })
+        bname = "memory"
+    elseif backend == "sqlite" then
+        local conn = opts.database
+        if type(conn) ~= "table" or type(conn.exec) ~= "function" then
+            u.error("invalid_argument",
+                "cache.open: sqlite backend needs database = <db connection>")
+        end
+        store = require("hull.kv._sql").new(conn, store_ns, {
+            evict = true, default_ttl = opts.default_ttl, max_items = opts.max_items,
+        })
+        bname = conn.backend_name or "sqlite"
+    else
+        u.error("invalid_argument", "cache.open: unknown backend '" .. tostring(backend) .. "'")
+    end
+
+    local h = handle.build(store, { namespace = ns, backend = bname })
+
+    --- Get `key`, or compute + cache it. `fetch(key, ttl, fn)` or
+    -- `fetch(key, fn)`. `fn` must return bytes (a string); it is synchronous.
+    function h:fetch(key, ttl, fn)
+        if fn == nil and type(ttl) == "function" then fn = ttl; ttl = nil end
+        u.check_key(key)
+        local v = self._s:get(key)
+        if v ~= nil then return v end
+        v = fn()
+        u.check_value(v)
+        self._s:put(key, v, ttl)
+        return v
+    end
+
+    return h
+end
+
 -- Default instance backs the top-level cache.* convenience API. A cache is
 -- intentionally cross-request shared state (like ratelimit's buckets), so a
 -- module-level default is correct here, not the request-scoped-global footgun.
