@@ -129,6 +129,10 @@ function parseCookieSessionId(req, cookieName) {
  * @param {string[]} [opts.safeMethods=["GET","HEAD","OPTIONS"]]
  * @param {string}  [opts.headerName="x-csrf-token"]
  * @param {string}  [opts.fieldName="_csrf"]
+ * @param {string}  [opts.name="hull_session"]  Session cookie name for the
+ *   session-id fallback. Alias: `cookieName`.
+ * @param {boolean} [opts.requireSession=false]  Reject unsafe requests with no
+ *   resolvable session (403) instead of passing them through.
  * @returns {(req, res) => number}
  * @throws {Error} If `opts.secret` is missing.
  */
@@ -140,7 +144,8 @@ function middleware(opts) {
     // Fallback session-cookie name when upstream session middleware hasn't
     // populated req.ctx[sessionKey]. Matches the session/auth middleware
     // default ("hull_session") so the fallback actually finds the cookie.
-    const cookieName = o.cookieName || "hull_session";
+    // Canonical `name`; back-compat alias `cookieName`.
+    const cookieName = o.name || o.cookieName || "hull_session";
     const sessionKey = o.sessionKey || "session_id";
     const headerName = o.headerName || "X-CSRF-Token";
     const fieldName = o.fieldName || "_csrf";
