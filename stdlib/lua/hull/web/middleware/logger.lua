@@ -1,4 +1,5 @@
 local log = require("hull.log")
+local _logfmt = require("hull.web._logfmt")
 
 --- Request logging middleware (logfmt output).
 --
@@ -28,32 +29,18 @@ function logger.generate_id()
     return string.format("%08x", _counter)
 end
 
---- Sanitize a value for safe logfmt output (prevent log injection).
-local function sanitize_value(v)
-    v = v:gsub("\\", "\\\\")
-    v = v:gsub("\n", "\\n")
-    v = v:gsub("\r", "\\r")
-    v = v:gsub('"', '\\"')
-    return v
-end
-
 --- Format `{key, value}` pairs into a logfmt line.
 --
--- Quotes values that contain spaces, `=`, `"`, or newlines. Sanitises
--- control characters.
+-- Escaping + quoting is the shared `hull.web._logfmt` rule (escapes
+-- `\ CR LF "`; quotes values containing a space, `=`, `"`, or a CR/LF). The
+-- same rule backs `hull.logx`, so the two logfmt producers can't drift.
 --
 -- @tparam {{string,any},...} entries  List of pairs.
 -- @treturn string  Single-line logfmt-encoded.
 function logger.format_line(entries)
     local parts = {}
     for _, entry in ipairs(entries) do
-        local k = entry[1]
-        local v = sanitize_value(tostring(entry[2]))
-        if v:find("[ =\"\n\r]") then
-            parts[#parts + 1] = k .. '="' .. v .. '"'
-        else
-            parts[#parts + 1] = k .. "=" .. v
-        end
+        parts[#parts + 1] = _logfmt.pair(entry[1], entry[2])
     end
     return table.concat(parts, " ")
 end

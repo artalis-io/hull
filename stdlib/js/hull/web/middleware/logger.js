@@ -12,6 +12,7 @@
  */
 
 import { log } from "hull:log";
+import { _logfmt } from "hull:web:_logfmt";
 
 let counter = 0;
 
@@ -21,25 +22,13 @@ function generateId() {
     return counter.toString(16).padStart(8, "0");
 }
 
-function sanitizeValue(v) {
-    return v.replace(/\\/g, "\\\\").replace(/\n/g, "\\n").replace(/\r/g, "\\r").replace(/"/g, '\\"');
-}
-
-function needsQuoting(v) {
-    return v.indexOf(" ") >= 0 || v.indexOf("=") >= 0 || v.indexOf('"') >= 0 || v.indexOf("\n") >= 0 || v.indexOf("\r") >= 0;
-}
-
+// Escaping + quoting is the shared hull:web:_logfmt rule (escapes \ CR LF ";
+// quotes values containing a space, =, ", or a CR/LF). The same rule backs
+// hull:logx, so the two logfmt producers can't drift.
 function formatLine(entries) {
     const parts = [];
     for (let i = 0; i < entries.length; i++) {
-        const k = entries[i][0];
-        const raw = String(entries[i][1]);
-        const v = sanitizeValue(raw);
-        if (needsQuoting(raw)) {
-            parts.push(k + '="' + v + '"');
-        } else {
-            parts.push(k + "=" + v);
-        }
+        parts.push(_logfmt.pair(entries[i][0], entries[i][1]));
     }
     return parts.join(" ");
 }

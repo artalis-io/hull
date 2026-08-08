@@ -27,25 +27,23 @@
  */
 
 import { log } from "hull:log";
+import { _logfmt } from "hull:web:_logfmt";
 
 const logx = {};
 
 const LEVELS = ["info", "warn", "error", "debug"];
 
 // Format a fields object as a leading-space logfmt fragment " k=v k2=v2". Keys
-// sorted for deterministic, cross-runtime-identical output. A value containing
-// whitespace, a quote, or '=' is double-quoted with '"' escaped.
+// sorted for deterministic, cross-runtime-identical output. Value escaping +
+// quoting is the shared hull:web:_logfmt rule (escapes \ CR LF ", quotes when
+// needed) - the logger middleware uses the same one.
 function fmt(fields) {
     if (!fields) return "";
     const keys = Object.keys(fields).sort();
     if (keys.length === 0) return "";
     const parts = [];
     for (let i = 0; i < keys.length; i++) {
-        const k = keys[i];
-        const v = fields[k];
-        let s = (typeof v === "boolean") ? (v ? "true" : "false") : String(v);
-        if (/[\s"=]/.test(s)) s = '"' + s.replace(/"/g, '\\"') + '"';
-        parts.push(k + "=" + s);
+        parts.push(_logfmt.pair(keys[i], fields[keys[i]]));
     }
     return " " + parts.join(" ");
 }
