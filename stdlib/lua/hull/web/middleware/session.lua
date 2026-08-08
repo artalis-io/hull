@@ -12,6 +12,7 @@ local json = require("hull.json")
 local crypto = require("hull.crypto")
 local db = require("hull.db").default()
 local time = require("hull.time")
+local _request = require("hull.web._request")
 
 local session = {}
 
@@ -206,12 +207,7 @@ function session.create(data, opts)
     local ip, ua
     if opts and opts.req then
         local h = opts.req.headers
-        local xff = h and h["x-forwarded-for"]
-        if _trust_proxy and xff then
-            ip = (xff:match("^([^,]+)") or xff):gsub("^%s+", ""):gsub("%s+$", "")
-        else
-            ip = opts.req.remote_addr
-        end
+        ip = _request.client_ip(opts.req, _trust_proxy)
         ua = h and h["user-agent"]
         -- Real UAs top out around 500 chars; bots and scanners can
         -- send 100KB UAs. Cap to bound the row size — the value is

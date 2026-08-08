@@ -118,6 +118,10 @@ jobs:
         timeout-minutes: 2
         run: make e2e-hex-parity
 
+      - name: Client-IP Lua/JS parity E2E test
+        timeout-minutes: 2
+        run: make e2e-client-ip-parity
+
       - name: Email error-convention Lua/JS E2E test
         timeout-minutes: 2
         run: make e2e-email
