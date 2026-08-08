@@ -61,15 +61,15 @@ end
 --- Verify a CSRF token.
 --
 -- Constant-time HMAC comparison + age check. Tokens older than
--- `max_age` are rejected even if the HMAC matches.
+-- `ttl` are rejected even if the HMAC matches.
 --
 -- @tparam string token
 -- @tparam string session_id
 -- @tparam string secret
--- @tparam[opt] integer max_age  Max token age in seconds (default `3600`).
+-- @tparam[opt] integer ttl  Max token age in seconds (default `3600`).
 -- @treturn boolean  `true` if valid.
-function csrf.verify(token, session_id, secret, max_age)
-    max_age = max_age or 3600
+function csrf.verify(token, session_id, secret, ttl)
+    ttl = ttl or 3600
 
     if not token or not session_id or not secret then
         return false
@@ -99,7 +99,7 @@ function csrf.verify(token, session_id, secret, max_age)
     -- Check expiry (and reject clearly-future timestamps to bound
     -- replay windows; mirrors the JS sibling's ts > now + 60 check).
     local now = time.now()
-    if now - ts > max_age then
+    if now - ts > ttl then
         return false
     end
     if ts > now + 60 then
@@ -133,7 +133,8 @@ end
 --
 --   - `secret`       (string, **required**): HMAC secret.
 --   - `session_key`  (string, default `"session_id"`): key in `req.ctx`.
---   - `max_age`      (integer, default `3600`).
+--   - `ttl`          (integer, default `3600`): max token age in seconds.
+--                    Back-compat alias: `max_age`.
 --   - `safe_methods` (`{string,...}`, default `{"GET","HEAD","OPTIONS"}`).
 --   - `header_name`  (string, default `"x-csrf-token"`).
 --   - `field_name`   (string, default `"_csrf"`).
@@ -149,7 +150,10 @@ function csrf.middleware(opts)
 
     local secret = opts.secret
     local session_key = opts.session_key or "session_id"
-    local max_age = opts.max_age or 3600
+    -- Canonical `ttl`; back-compat alias `max_age`.
+    local ttl = opts.ttl
+    if ttl == nil then ttl = opts.max_age end
+    if ttl == nil then ttl = 3600 end
     local header_name = opts.header_name or "x-csrf-token"
     local field_name = opts.field_name or "_csrf"
 
@@ -221,7 +225,7 @@ function csrf.middleware(opts)
             end
         end
 
-        if not csrf.verify(token, sid, secret, max_age) then
+        if not csrf.verify(token, sid, secret, ttl) then
             res:status(403):json({ error = "csrf: invalid token" })
             return 1
         end

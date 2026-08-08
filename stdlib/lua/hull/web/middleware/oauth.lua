@@ -77,7 +77,7 @@
 --
 --     local oauth = require("hull.web.middleware.oauth")
 --     oauth.init({
---         state_secret = env.get("OAUTH_STATE_SECRET"),
+--         secret = env.get("OAUTH_STATE_SECRET"),  -- alias: state_secret
 --         providers = {
 --             entra = {
 --                 preset      = "microsoft",
@@ -582,12 +582,14 @@ function oauth.init(opts)
     if type(opts) ~= "table" then
         error("oauth.init: opts table required")
     end
-    if type(opts.state_secret) ~= "string" or #opts.state_secret < 32 then
-        error("oauth.init: state_secret must be a string >= 32 bytes "
+    -- Canonical `secret`; back-compat alias `state_secret` (same HMAC key).
+    local secret = opts.secret or opts.state_secret
+    if type(secret) ~= "string" or #secret < 32 then
+        error("oauth.init: secret must be a string >= 32 bytes "
               .. "(same HMAC primitive as hull/web/auth-flows; pick "
               .. "one floor)")
     end
-    _state.state_secret_hex = bytes_to_hex(opts.state_secret)
+    _state.state_secret_hex = bytes_to_hex(secret)
     -- redirect_uri origin (see compute_redirect_uri): explicit base_url wins,
     -- else trust_proxy gates the spoofable X-Forwarded-Proto/Host headers.
     if opts.base_url ~= nil then

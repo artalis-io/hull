@@ -54,7 +54,7 @@
  * @example
  *   import { oauth } from "hull:web:middleware:oauth";
  *   oauth.init({
- *       stateSecret: env.get("OAUTH_STATE_SECRET"),
+ *       secret: env.get("OAUTH_STATE_SECRET"),   // alias: stateSecret
  *       providers: {
  *           entra: {
  *               preset: "microsoft",
@@ -541,11 +541,13 @@ function init(opts) {
     if (!opts || typeof opts !== "object") {
         throw new Error("oauth.init: opts object required");
     }
-    if (typeof opts.stateSecret !== "string" || opts.stateSecret.length < 32) {
-        throw new Error("oauth.init: stateSecret must be a string >= 32 bytes "
+    // Canonical `secret`; back-compat alias `stateSecret` (same HMAC key).
+    const secret = opts.secret || opts.stateSecret;
+    if (typeof secret !== "string" || secret.length < 32) {
+        throw new Error("oauth.init: secret must be a string >= 32 bytes "
             + "(same HMAC primitive as hull/web/auth-flows; pick one floor)");
     }
-    _state.stateSecretHex = bytesToHex(opts.stateSecret);
+    _state.stateSecretHex = bytesToHex(secret);
     _state.stateCookie = opts.stateCookie || _state.stateCookie;
     _state.stateCookiePath =
         opts.stateCookiePath || _state.stateCookiePath;
