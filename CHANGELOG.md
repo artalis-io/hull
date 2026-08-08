@@ -102,6 +102,58 @@ interop test so the two runtimes cannot silently diverge again.
   correct (a `csv.parse` doc, the `cookie.secure` doc default, and
   `idempotency`'s `ttl = 0` handling).
 
+## [0.12.0] - 2026-08-07
+
+`hull/jobs@1` grows a nervous system. On top of 0.11.0's durable queue and
+workflows, this release adds a durable, subscribable **fleet-wide event log**, a
+**strict** (hard-cap) per-key concurrency mode alongside the existing soft
+limiter, and **low-latency worker wakeup** over PostgreSQL LISTEN/NOTIFY so a
+newly enqueued job is picked up in milliseconds instead of at the next poll.
+Every new surface runs unchanged on SQLite, PostgreSQL, and MySQL, at full
+Lua/JS parity, and is exercised against real Postgres 16 and MySQL 8 in CI.
+
+### Added
+
+- **Durable fleet-wide events.** `jobs.init({ events = true })` records every job
+  lifecycle transition (completed / retried / dead / cancelled / ...) into a
+  durable `_hull_job_events` log. `jobs.events(opts)` tails it newest-first
+  (filter by `since` / `types` / `limit`) for a dashboard or ad-hoc inspection;
+  `jobs.subscribe(name, handler, opts)` / `jobs.unsubscribe(name)` register
+  durable named subscriptions with **at-least-once** delivery and a durable
+  cursor - a crash between a handler succeeding and the cursor advancing
+  re-delivers, so handlers must be idempotent, the same contract as a job
+  handler.
+- **Strict per-key concurrency.** `enqueue({ concurrency_key, concurrency,
+  concurrency_strict = true })` enforces the per-key cap with a hard,
+  counter-backed gate that never lets an over-limit job run - complementing
+  0.11.0's soft claim-then-reconcile limiter (which favors throughput by letting
+  a claimed over-limit job yield and requeue). Pick strict for a hard external
+  quota, soft for maximum drain.
+- **`conn.wait_notify` (db capability).** A new primitive - `conn.wait_notify`
+  (Lua) / `conn.waitNotify` (JS) - that blocks until a `NOTIFY` arrives on a
+  channel, backed by a LISTEN/NOTIFY consumer path added to the pure-C PostgreSQL
+  wire client. This is the plumbing under the low-latency wakeup below, and is
+  usable directly for any app-level pub/sub over a Postgres connection.
+- **`examples/workflows`** - a runnable durable workflow-as-code example wired to
+  the jobs observability surface.
+
+### Changed
+
+- **Low-latency job wakeup (PostgreSQL LISTEN/NOTIFY).** Workers and durable
+  subscriptions on a Postgres backend now wake within milliseconds of a new job
+  or event via LISTEN/NOTIFY instead of waiting out the poll interval; a dropped
+  LISTEN connection reconnects transparently. SQLite and MySQL keep the poll
+  loop. Pure latency win - claim semantics and at-least-once delivery are
+  unchanged.
+- **`db.exec` returns the affected-row count on PostgreSQL**, matching SQLite and
+  MySQL, so an `UPDATE` / `DELETE` reports rows changed uniformly across all
+  three backends.
+
+### Fixed
+
+- Hardening pass over the new LISTEN/NOTIFY surface (Low-severity findings from a
+  code audit of the events consumer + reconnect path).
+
 ## [0.11.0] — 2026-08-06
 
 `hull/jobs@1`: a durable, DB-backed background job queue. Enqueue a unit of work
