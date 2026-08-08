@@ -600,8 +600,12 @@ static const HlModuleSpec REGISTRY[] = {
         .name = "hull/web/middleware/csrf",
         .api_major = 1, .intrinsic = 0, .pure = 0,
         .required_caps = HL_MOD_CAP_HTTP_SERVER,
-        /* HMAC token + max-age check; needs crypto + time. */
-        .deps = {"hull/http-server", "hull/crypto", "hull/time", 0},
+        /* HMAC token (crypto + time). hull/web/cookie for the session-id
+         * cookie fallback: both runtimes parse it now (previously only JS,
+         * which broke a JS app that declared only csrf - the cookie import
+         * wasn't auto-admitted). */
+        .deps = {"hull/http-server", "hull/crypto", "hull/time",
+                 "hull/web/cookie", 0},
     },
     {
         .name = "hull/web/middleware/etag",

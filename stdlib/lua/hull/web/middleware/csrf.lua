@@ -19,6 +19,7 @@
 local crypto = require("hull.crypto")
 local _hex = require("hull.crypto._hex")
 local time = require("hull.time")
+local cookie = require("hull.web.cookie")
 
 local csrf = {}
 
@@ -138,6 +139,10 @@ end
 --   - `safe_methods` (`{string,...}`, default `{"GET","HEAD","OPTIONS"}`).
 --   - `header_name`  (string, default `"x-csrf-token"`).
 --   - `field_name`   (string, default `"_csrf"`).
+--   - `name`         (string, default `"hull_session"`): session cookie name
+--                    for the session-id fallback (alias: `cookie_name`).
+--   - `require_session` (boolean, default `false`): reject unsafe requests
+--                    that have no resolvable session (403) instead of passing.
 --
 -- @treturn function  Middleware `(req, res) -> integer`.
 -- @raise If `opts.secret` is missing.
@@ -156,6 +161,24 @@ function csrf.middleware(opts)
     if ttl == nil then ttl = 3600 end
     local header_name = opts.header_name or "x-csrf-token"
     local field_name = opts.field_name or "_csrf"
+    -- Fallback session-cookie name when upstream session middleware hasn't
+    -- populated req.ctx[session_key]. Matches the session/auth default so the
+    -- fallback actually finds the cookie.
+    local cookie_name = opts.name or opts.cookie_name or "hull_session"
+    local require_session = opts.require_session or false
+
+    -- Resolve the session id: prefer req.ctx[session_key] (set by upstream
+    -- session middleware on the SAME request), else parse it out of the
+    -- session cookie. Parity with the JS sibling.
+    local function resolve_session_id(req)
+        local sid = req.ctx and req.ctx[session_key]
+        if sid then return sid end
+        local ck = req.headers and req.headers["cookie"]
+        if not ck then return nil end
+        local v = cookie.parse(ck)[cookie_name]
+        if v == nil or v == "" then return nil end
+        return v
+    end
 
     -- Build safe methods lookup
     local safe_list = opts.safe_methods or { "GET", "HEAD", "OPTIONS" }
@@ -173,17 +196,22 @@ function csrf.middleware(opts)
             -- inspects req.ctx. HMAC-SHA256 here is sub-millisecond
             -- and the audit's "wasted" qualification was a perf
             -- observation, not a correctness issue.
-            local sid = req.ctx[session_key]
+            local sid = resolve_session_id(req)
             if sid then
+                if not req.ctx then req.ctx = {} end
                 req.ctx.csrf_token = csrf.generate(sid, secret)
             end
             return 0
         end
 
-        -- CSRF only applies to authenticated sessions. Unauthenticated POST
-        -- requests pass through — handlers must independently verify authentication.
-        local sid = req.ctx[session_key]
+        -- CSRF only applies to authenticated sessions by default.
+        -- require_session = true rejects unauthenticated unsafe requests.
+        local sid = resolve_session_id(req)
         if not sid then
+            if require_session then
+                res:status(403):json({ error = "csrf: session required for unsafe methods" })
+                return 1
+            end
             return 0
         end
 
@@ -223,6 +251,11 @@ function csrf.middleware(opts)
                 end
                 ::continue::
             end
+        end
+
+        if not token then
+            res:status(403):json({ error = "csrf: token missing" })
+            return 1
         end
 
         if not csrf.verify(token, sid, secret, ttl) then

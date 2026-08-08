@@ -14,6 +14,34 @@ destructive action, toast on completion, surface validation errors
 with the right a11y wiring. Zero client framework. ~395 LOC of plain
 JS total across all 8 widgets, all loaded once per page.
 
+## Positioning: an optional component pack, not frontend-agnostic core
+
+Draw a firm line between two things that both live under `hull/web/htmx*`:
+
+- **`hull/web/htmx` (the base module) is frontend-agnostic core.** It emits
+  *no HTML* — only the server-side htmx *protocol dialect*: detect an htmx
+  request (`HX-Request`) and set the response headers htmx interprets
+  (`HX-Redirect`, `HX-Retarget`, `HX-Reswap`, `HX-Trigger`, …). It is the
+  legitimate peer of `csv` / `jwt` / `validate` — a wire-format helper that
+  doesn't care what your frontend is.
+
+- **The 8 widgets (`hull/web/htmx/{toast,confirm,form,search,inline-edit,sort,pagination,table}`)
+  are an opinionated, optional component pack.** They emit real HTML with
+  hardcoded class names (`hull-table`, `hull-pagination`, …), a prescribed DOM
+  structure, URL conventions (`?sort=col:asc`), and a paired client JS/CSS
+  runtime — all **inert without htmx on the page**. That makes them a
+  single-frontend-library UI kit, categorically different from the
+  frontend-agnostic modules above. They are well-built (centralized escaping,
+  real a11y, SQL-injection-conscious sort allowlisting) and honestly gated
+  (namespaced, explicit `manifest.modules` declaration, `csp = "htmx"`), but
+  they are **not** core stdlib on equal footing with `jwt`/`validate`.
+
+**What this means for you:** reach for the widgets only if you are deliberately
+building htmx-first. Nothing else in the stdlib depends on them; an app on any
+other frontend (or a JSON API) never touches them and pays nothing for them.
+Treat this page as the docs for an optional pack you opt into, not a description
+of baseline framework surface.
+
 ## At a glance
 
 | Widget | Server helpers | Client JS | Client CSS |

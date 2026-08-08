@@ -8,6 +8,13 @@
 > [HTMX widgets guide](htmx_widgets.md). The page below covers the
 > broader profile — scaffolding, Pico, CSP nonces, htmx core
 > helpers — that the widgets sit on top of.
+>
+> **Positioning:** the base `hull/web/htmx` module (htmx request
+> detection + `HX-*` response headers) is frontend-agnostic core, a peer
+> of `csv`/`jwt`/`validate`. The 8 **widgets** are an *optional,
+> opinionated component pack* (they emit HTML/CSS/JS and are inert
+> without htmx on the page) — opt into them only if you're building
+> htmx-first. See the widgets guide's "Positioning" section.
 
 Hypermedia means HTML is the application protocol. Browsers fetch HTML, render it, follow links, submit forms. HTMX (`htmx.org`, v2.x in Hull's profile) extends the HTML vocabulary so any element can issue any HTTP verb and swap the response into the page. The server's job is unchanged: return HTML. There is no JSON state machine, no client-side router, no build step.
 

@@ -146,6 +146,10 @@ jobs:
         timeout-minutes: 2
         run: make e2e-naming-aliases
 
+      - name: CSRF session-id cookie-fallback Lua/JS parity E2E test
+        timeout-minutes: 2
+        run: make e2e-csrf-cookie-fallback
+
       - name: Validate Lua/JS parity E2E test
         timeout-minutes: 2
         run: make e2e-validate-parity
