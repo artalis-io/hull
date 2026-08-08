@@ -38,4 +38,20 @@ typedef struct HlEnvConfig {
  */
 const char *hl_cap_env_get(const HlEnvConfig *cfg, const char *name);
 
+/**
+ * @brief Report whether @p name is in the allowlist (regardless of whether it
+ *        is set in the process environment).
+ *
+ * Read-only introspection of the manifest allowlist — reveals membership, never
+ * a value, so it grants no new authority. Lets app code distinguish
+ * "not declared" from "declared but unset", which `hl_cap_env_get` folds
+ * together. Used by `hull/config`'s `.env` layering to apply a file value only
+ * for a name the manifest already permits.
+ *
+ * @param cfg   Env capability config.
+ * @param name  Variable name to query.
+ * @return non-zero if @p name is allowlisted, 0 otherwise.
+ */
+int hl_cap_env_allowed(const HlEnvConfig *cfg, const char *name);
+
 #endif /* HL_CAP_ENV_H */

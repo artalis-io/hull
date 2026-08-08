@@ -126,6 +126,14 @@ jobs:
         timeout-minutes: 2
         run: make e2e-email
 
+      - name: UUID (v4/v7) E2E test
+        timeout-minutes: 2
+        run: make e2e-uuid
+
+      - name: Config (typed env + .env) Lua/JS parity E2E test
+        timeout-minutes: 2
+        run: make e2e-config-parity
+
       - name: Validate Lua/JS parity E2E test
         timeout-minutes: 2
         run: make e2e-validate-parity

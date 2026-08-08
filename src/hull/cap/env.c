@@ -41,3 +41,16 @@ const char *hl_cap_env_get(const HlEnvConfig *cfg, const char *name)
     hl_audit_end(&w);
     return NULL;
 }
+
+int hl_cap_env_allowed(const HlEnvConfig *cfg, const char *name)
+{
+    if (!cfg || !name || !cfg->allowed) {
+        return 0;
+    }
+    for (int i = 0; i < cfg->count; i++) {
+        if (cfg->allowed[i] && strcmp(cfg->allowed[i], name) == 0) {
+            return 1;
+        }
+    }
+    return 0;
+}

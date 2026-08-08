@@ -86,6 +86,15 @@ static const HlModuleSpec REGISTRY[] = {
         .required_caps = HL_MOD_CAP_WASM, .deps = {0},
     },
     {
+        /* Typed, fail-fast config over the env capability. The env allowlist
+         * still gates each read (config just wraps env.get). load_dotenv reads
+         * an optional .env via fs (needs manifest.fs.read) and applies only
+         * allowlisted keys, so hull/fs is a dep. */
+        .name = "hull/config",
+        .api_major = 1, .intrinsic = 0, .pure = 0,
+        .required_caps = 0, .deps = {"hull/env", "hull/fs", 0},
+    },
+    {
         .name = "hull/crypto",
         .api_major = 1, .intrinsic = 0, .pure = 0,
         .required_caps = 0, .deps = {0},
@@ -291,6 +300,13 @@ static const HlModuleSpec REGISTRY[] = {
         /* Terminal UI capability. Requires HL_ENABLE_TUI at build AND
          * tui = true in the manifest. */
         .required_caps = HL_MOD_CAP_TUI, .deps = {0},
+    },
+    {
+        /* RFC 9562 UUID v4/v7. Pure composition over crypto.random + time;
+         * no new authority. */
+        .name = "hull/uuid",
+        .api_major = 1, .intrinsic = 0, .pure = 0,
+        .required_caps = 0, .deps = {"hull/crypto", "hull/time", 0},
     },
     {
         .name = "hull/validate",
