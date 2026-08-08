@@ -686,7 +686,8 @@ static const HlModuleSpec REGISTRY[] = {
         .name = "hull/web/middleware/ratelimit",
         .api_major = 1, .intrinsic = 0, .pure = 0,
         .required_caps = HL_MOD_CAP_HTTP_SERVER,
-        .deps = {"hull/http-server", "hull/time", 0},
+        /* hull/cache backs the per-key bucket store (LRU-bounded). */
+        .deps = {"hull/http-server", "hull/time", "hull/cache", 0},
     },
     {
         .name = "hull/web/middleware/rbac",
