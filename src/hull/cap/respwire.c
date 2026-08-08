@@ -228,7 +228,11 @@ static HlRespResult parse_one(const uint8_t *buf, size_t avail, size_t *consumed
 HlRespResult hl_resp_parse(const uint8_t *buf, size_t avail, size_t *consumed,
                            HlRespValue *out, HlRespAlloc alloc, void *alloc_ctx) {
     *consumed = 0;
-    if (!buf || !out) return HL_RESP_PARSE_ERR;
+    if (!out) return HL_RESP_PARSE_ERR;
+    /* A NULL buffer with no bytes is a valid "need more" state (an empty recv
+     * buffer before the first read); only reject NULL with claimed bytes. */
+    if (!buf && avail > 0) return HL_RESP_PARSE_ERR;
+    if (avail == 0) return HL_RESP_NEED_MORE;
     return parse_one(buf, avail, consumed, out, alloc, alloc_ctx, 0);
 }
 

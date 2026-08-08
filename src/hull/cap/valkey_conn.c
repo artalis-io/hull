@@ -1,20 +1,49 @@
 /*
- * cap/valkey_conn.c: Valkey/Redis DSN parser (+ connection in a later part).
+ * cap/valkey_conn.c: Valkey/Redis DSN parser + RESP connection transport.
  *
  * The DSN parser is pure and fuzzed (fuzz/fuzz_valkey_dsn.c): every field is
- * bounded, percent-escapes are decoded, oversized input is rejected. See
- * valkey_conn.h.
+ * bounded, percent-escapes decoded, oversized input rejected. The connection
+ * (blocking TCP + optional rediss TLS via shared/tls_client.c) runs the
+ * HELLO 3 / AUTH handshake with a RESP2 fallback, then SELECT, and issues
+ * commands via the RESP codec (cap/respwire.c). Replies borrow into a bounded
+ * receive buffer + a non-moving reply arena, valid until the next command.
+ * Covered by test_valkey_conn (socketpair). -DHL_VALKEY_NO_TLS drops the TLS
+ * branch for the DSN-only test/fuzzer. See valkey_conn.h.
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
 
 #include "hull/cap/valkey_conn.h"
+#include "hull/cap/respwire.h"
 
 #include <ctype.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+#include <errno.h>
+#include <fcntl.h>
+#include <netdb.h>
+#include <sys/select.h>
+#include <sys/socket.h>
+#include <sys/types.h>
+#include <unistd.h>
+
+#ifndef HL_VALKEY_NO_TLS
+#include "hull/shared/tls_client.h"
+#endif
+
+#ifdef MSG_NOSIGNAL
+#define VK_SEND_FLAGS MSG_NOSIGNAL
+#else
+#define VK_SEND_FLAGS 0
+#endif
+
+/* Cap the receive buffer so a hostile server can't force unbounded growth. */
+#ifndef HL_VALKEY_MAX_REPLY
+#define HL_VALKEY_MAX_REPLY (64u * 1024u * 1024u)
+#endif
 
 void hl_valkey_dsn_scrub(HlValkeyDsn *dsn) {
     if (dsn) memset(dsn->password, 0, sizeof dsn->password);
@@ -188,4 +217,310 @@ int hl_valkey_dsn_parse(const char *dsn, HlValkeyDsn *out, char *errbuf, size_t 
 
     return 0;
 #undef FAIL
+}
+
+/* ── Connection ───────────────────────────────────────────────────────────
+ *
+ * Non-moving reply arena (chunk list) so aggregate item arrays built during a
+ * single hl_resp_parse are never realloc-moved; reset (not freed) between
+ * replies to reuse chunks. */
+
+typedef struct VkChunk { struct VkChunk *next; size_t cap, off; } VkChunk;
+
+struct HlValkeyConn {
+    int      fd;
+    uint8_t *rbuf;
+    size_t   rlen, rcap, consumed;
+    VkChunk *arena_head, *arena_tail, *arena_cur;
+    char     errmsg[256];
+    int      resp3;
+#ifndef HL_VALKEY_NO_TLS
+    HlTlsClient *tls;
+#endif
+};
+
+static void set_err(HlValkeyConn *c, const char *msg) {
+    snprintf(c->errmsg, sizeof c->errmsg, "%s", msg);
+}
+
+static void arena_reset(HlValkeyConn *c) {
+    for (VkChunk *ch = c->arena_head; ch; ch = ch->next) ch->off = 0;
+    c->arena_cur = c->arena_head;
+}
+
+static void arena_free(HlValkeyConn *c) {
+    VkChunk *ch = c->arena_head;
+    while (ch) { VkChunk *nx = ch->next; free(ch); ch = nx; }
+    c->arena_head = c->arena_tail = c->arena_cur = NULL;
+}
+
+static void *arena_alloc(void *ctx, size_t n) {
+    HlValkeyConn *c = (HlValkeyConn *)ctx;
+    n = (n + 15u) & ~(size_t)15u;                 /* 16-byte align */
+    VkChunk *ch = c->arena_cur;
+    while (ch && ch->cap - ch->off < n) { c->arena_cur = ch->next; ch = ch->next; }
+    if (!ch) {
+        size_t csz = n > 8192u ? n : 8192u;
+        if (csz > HL_VALKEY_MAX_REPLY) return NULL;
+        VkChunk *nc = (VkChunk *)malloc(sizeof(VkChunk) + csz);
+        if (!nc) return NULL;
+        nc->next = NULL; nc->cap = csz; nc->off = 0;
+        if (c->arena_tail) c->arena_tail->next = nc; else c->arena_head = nc;
+        c->arena_tail = nc; c->arena_cur = nc; ch = nc;
+    }
+    void *p = (uint8_t *)(ch + 1) + ch->off;
+    ch->off += n;
+    return p;
+}
+
+/* TCP connect with a bounded wait (non-blocking connect + select), mirroring
+ * cap/pg_conn.c. Returns a blocking fd, or -1. */
+static int vk_connect(const char *host, const char *port, int timeout_ms) {
+    struct addrinfo hints;
+    memset(&hints, 0, sizeof hints);
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
+
+    struct addrinfo *res = NULL;
+    if (getaddrinfo(host, port, &hints, &res) != 0 || !res) return -1;
+
+    int fd = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
+    if (fd < 0) { freeaddrinfo(res); return -1; }
+#ifdef SO_NOSIGPIPE
+    int on = 1;
+    setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &on, sizeof on);
+#endif
+    int flags = fcntl(fd, F_GETFL, 0);
+    fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+
+    int rc = connect(fd, res->ai_addr, res->ai_addrlen);
+    if (rc < 0 && errno == EINPROGRESS) {
+        fd_set wf; FD_ZERO(&wf); FD_SET(fd, &wf);
+        struct timeval tv;
+        tv.tv_sec = timeout_ms / 1000;
+        tv.tv_usec = (timeout_ms % 1000) * 1000;
+        rc = select(fd + 1, NULL, &wf, NULL, timeout_ms > 0 ? &tv : NULL);
+        if (rc > 0) {
+            int soerr = 0; socklen_t l = sizeof soerr;
+            getsockopt(fd, SOL_SOCKET, SO_ERROR, &soerr, &l);
+            rc = soerr == 0 ? 0 : -1;
+        } else rc = -1;
+    }
+    freeaddrinfo(res);
+    if (rc < 0) { close(fd); return -1; }
+    fcntl(fd, F_SETFL, flags);                    /* restore blocking */
+    return fd;
+}
+
+static ssize_t io_send(HlValkeyConn *c, const uint8_t *buf, size_t len) {
+#ifndef HL_VALKEY_NO_TLS
+    if (c->tls) return hl_tls_client_write(c->fd, c->tls, buf, len);
+#endif
+    ssize_t n;
+    do { n = send(c->fd, buf, len, VK_SEND_FLAGS); } while (n < 0 && errno == EINTR);
+    return n;
+}
+
+static ssize_t io_recv(HlValkeyConn *c, uint8_t *buf, size_t len) {
+#ifndef HL_VALKEY_NO_TLS
+    if (c->tls) return hl_tls_client_read(c->fd, c->tls, buf, len);
+#endif
+    ssize_t n;
+    do { n = recv(c->fd, buf, len, 0); } while (n < 0 && errno == EINTR);
+    return n;
+}
+
+static int conn_send(HlValkeyConn *c, const uint8_t *buf, size_t len) {
+    size_t sent = 0;
+    while (sent < len) {
+        ssize_t n = io_send(c, buf + sent, len - sent);
+        if (n <= 0) { set_err(c, "socket write failed"); return -1; }
+        sent += (size_t)n;
+    }
+    return 0;
+}
+
+/* Read exactly one reply into *out (borrows into rbuf + the reply arena, valid
+ * until the next read). Returns 0 / -1. */
+static int read_reply(HlValkeyConn *c, HlRespValue *out) {
+    if (c->consumed > 0) {
+        memmove(c->rbuf, c->rbuf + c->consumed, c->rlen - c->consumed);
+        c->rlen -= c->consumed;
+        c->consumed = 0;
+    }
+    for (;;) {
+        arena_reset(c);
+        size_t consumed = 0;
+        HlRespResult r = hl_resp_parse(c->rbuf, c->rlen, &consumed, out, arena_alloc, c);
+        if (r == HL_RESP_OK) { c->consumed = consumed; return 0; }
+        if (r == HL_RESP_PARSE_ERR) { set_err(c, "malformed reply from server"); return -1; }
+        if (c->rlen == c->rcap) {                 /* NEED_MORE: grow bounded */
+            size_t ncap = c->rcap ? c->rcap * 2 : 8192u;
+            if (ncap > HL_VALKEY_MAX_REPLY) { set_err(c, "server reply exceeds limit"); return -1; }
+            uint8_t *nb = realloc(c->rbuf, ncap);
+            if (!nb) { set_err(c, "out of memory"); return -1; }
+            c->rbuf = nb; c->rcap = ncap;
+        }
+        ssize_t n = io_recv(c, c->rbuf + c->rlen, c->rcap - c->rlen);
+        if (n <= 0) { set_err(c, "connection closed by server"); return -1; }
+        c->rlen += (size_t)n;
+    }
+}
+
+/* Send a command built with hl_resp_cmd_* and read its reply. */
+int hl_valkey_command(HlValkeyConn *c, const HlRespWriter *cmd, HlRespValue *out) {
+    if (cmd->err) { set_err(c, "command encode failed"); return -1; }
+    if (conn_send(c, cmd->buf, cmd->len) != 0) return -1;
+    return read_reply(c, out);
+}
+
+static int reply_is_err(const HlRespValue *v) { return v && v->type == HL_RESP_ERR; }
+
+/* Bounded substring search (memmem is a GNU/BSD extension; avoid it). */
+static int mem_has(const char *hay, size_t hn, const char *needle) {
+    size_t nn = strlen(needle);
+    if (nn == 0 || nn > hn) return 0;
+    for (size_t i = 0; i + nn <= hn; i++)
+        if (memcmp(hay + i, needle, nn) == 0) return 1;
+    return 0;
+}
+
+/* Does a server error look like "HELLO not understood" (pre-6 server) vs a real
+ * auth/other failure? */
+static int err_is_unknown_cmd(const HlRespValue *v) {
+    if (!reply_is_err(v)) return 0;
+    return mem_has(v->str.p, v->str.len, "unknown command") ||
+           mem_has(v->str.p, v->str.len, "unknown subcommand");
+}
+
+/* HELLO 3 [AUTH user pass]; on an unknown-command error fall back to RESP2 +
+ * a legacy AUTH. Returns 0 / -1. */
+static int handshake(HlValkeyConn *c, const HlValkeyDsn *dsn) {
+    int have_pass = dsn->password[0] != '\0';
+    const char *user = dsn->username[0] ? dsn->username : "default";
+
+    HlRespWriter w; hl_resp_writer_init(&w);
+    hl_resp_cmd_begin(&w, have_pass ? 5 : 2);
+    hl_resp_cmd_arg_cstr(&w, "HELLO");
+    hl_resp_cmd_arg_cstr(&w, "3");
+    if (have_pass) {
+        hl_resp_cmd_arg_cstr(&w, "AUTH");
+        hl_resp_cmd_arg_cstr(&w, user);
+        hl_resp_cmd_arg(&w, dsn->password, strlen(dsn->password));
+    }
+    HlRespValue reply;
+    int rc = hl_valkey_command(c, &w, &reply);
+    hl_resp_writer_free(&w);
+    if (rc != 0) return -1;
+
+    if (!reply_is_err(&reply)) { c->resp3 = 1; return 0; }   /* HELLO 3 accepted */
+    if (!err_is_unknown_cmd(&reply)) {
+        set_err(c, "server rejected HELLO (auth failed?)");
+        return -1;
+    }
+    /* Pre-6 server: RESP2 + legacy AUTH. */
+    c->resp3 = 0;
+    if (have_pass) {
+        hl_resp_writer_init(&w);
+        if (dsn->username[0]) {
+            hl_resp_cmd_begin(&w, 3);
+            hl_resp_cmd_arg_cstr(&w, "AUTH");
+            hl_resp_cmd_arg_cstr(&w, dsn->username);
+            hl_resp_cmd_arg(&w, dsn->password, strlen(dsn->password));
+        } else {
+            hl_resp_cmd_begin(&w, 2);
+            hl_resp_cmd_arg_cstr(&w, "AUTH");
+            hl_resp_cmd_arg(&w, dsn->password, strlen(dsn->password));
+        }
+        rc = hl_valkey_command(c, &w, &reply);
+        hl_resp_writer_free(&w);
+        if (rc != 0) return -1;
+        if (!hl_resp_is_ok(&reply)) { set_err(c, "AUTH rejected"); return -1; }
+    }
+    return 0;
+}
+
+/* SELECT the DB index if non-zero. */
+static int select_db(HlValkeyConn *c, const HlValkeyDsn *dsn) {
+    if (dsn->dbindex[0] == '\0' || strcmp(dsn->dbindex, "0") == 0) return 0;
+    HlRespWriter w; hl_resp_writer_init(&w);
+    hl_resp_cmd_begin(&w, 2);
+    hl_resp_cmd_arg_cstr(&w, "SELECT");
+    hl_resp_cmd_arg_cstr(&w, dsn->dbindex);
+    HlRespValue reply;
+    int rc = hl_valkey_command(c, &w, &reply);
+    hl_resp_writer_free(&w);
+    if (rc != 0) return -1;
+    if (!hl_resp_is_ok(&reply)) { set_err(c, "SELECT rejected"); return -1; }
+    return 0;
+}
+
+static HlValkeyConn *conn_new(int fd) {
+    HlValkeyConn *c = (HlValkeyConn *)calloc(1, sizeof *c);
+    if (!c) return NULL;
+    c->fd = fd;
+    return c;
+}
+
+int hl_valkey_conn_start(HlValkeyConn **out, int fd, const HlValkeyDsn *dsn,
+                         char *errbuf, size_t errlen) {
+    HlValkeyConn *c = conn_new(fd);
+    if (!c) { if (errbuf && errlen) snprintf(errbuf, errlen, "out of memory"); return -1; }
+    if (handshake(c, dsn) != 0 || select_db(c, dsn) != 0) {
+        if (errbuf && errlen) snprintf(errbuf, errlen, "%s", c->errmsg);
+        hl_valkey_conn_close(c);
+        return -1;
+    }
+    *out = c;
+    return 0;
+}
+
+int hl_valkey_conn_open(HlValkeyConn **out, const HlValkeyDsn *dsn,
+                        char *errbuf, size_t errlen) {
+    int fd = vk_connect(dsn->host, dsn->port, dsn->connect_timeout_ms);
+    if (fd < 0) {
+        if (errbuf && errlen) snprintf(errbuf, errlen, "connect to %s:%s failed", dsn->host, dsn->port);
+        return -1;
+    }
+    HlValkeyConn *c = conn_new(fd);
+    if (!c) { close(fd); if (errbuf && errlen) snprintf(errbuf, errlen, "out of memory"); return -1; }
+
+#ifndef HL_VALKEY_NO_TLS
+    if (dsn->tls) {
+        c->tls = hl_tls_client_handshake(fd, dsn->host, dsn->verify, dsn->connect_timeout_ms);
+        if (!c->tls) {
+            if (errbuf && errlen) snprintf(errbuf, errlen, "TLS handshake to %s failed", dsn->host);
+            hl_valkey_conn_close(c);
+            return -1;
+        }
+    }
+#else
+    if (dsn->tls) {
+        if (errbuf && errlen) snprintf(errbuf, errlen, "TLS not available in this build");
+        hl_valkey_conn_close(c);
+        return -1;
+    }
+#endif
+
+    if (handshake(c, dsn) != 0 || select_db(c, dsn) != 0) {
+        if (errbuf && errlen) snprintf(errbuf, errlen, "%s", c->errmsg);
+        hl_valkey_conn_close(c);
+        return -1;
+    }
+    *out = c;
+    return 0;
+}
+
+const char *hl_valkey_conn_error(HlValkeyConn *c) { return c ? c->errmsg : ""; }
+int hl_valkey_conn_is_resp3(HlValkeyConn *c) { return c ? c->resp3 : 0; }
+
+void hl_valkey_conn_close(HlValkeyConn *c) {
+    if (!c) return;
+#ifndef HL_VALKEY_NO_TLS
+    if (c->tls) { hl_tls_client_shutdown(c->fd, c->tls); hl_tls_client_free(c->tls); c->tls = NULL; }
+#endif
+    if (c->fd >= 0) close(c->fd);
+    if (c->rbuf) { memset(c->rbuf, 0, c->rcap); free(c->rbuf); }  /* scrub residual */
+    arena_free(c);
+    free(c);
 }
