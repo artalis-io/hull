@@ -8,6 +8,100 @@ release-artifact layout).
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-08-08
+
+Stdlib maturation: five new plumbing modules, a house style guide that codifies
+the stdlib error convention, and a sweep of cross-runtime (Lua/JS) drift fixes -
+several security-relevant - each now guarded by a byte-for-byte parity or
+interop test so the two runtimes cannot silently diverge again.
+
+### Added
+
+- **`hull/cache`** - in-memory key/value cache with TTL and get-or-compute
+  memoization: `cache.fetch(key, ttl, fn)` / `get` / `set` / `has` / `delete` /
+  `clear` / `size`, plus `cache.new(opts)` for an isolated instance. Bounded
+  (LRU eviction at a `max_entries` cap), lazily expiring, process-local; stores
+  any value with no serialization.
+- **`hull/config`** - typed configuration over the env capability:
+  `config.get(name, { type, default, required })` / `config.require`, with
+  `string` / `number` / `integer` / `boolean` coercion that throws on a missing
+  required value or an uncoercible one. `config.load_dotenv([path])` loads a
+  `.env` behind two independent gates - the `fs` capability for the file AND the
+  `manifest.env` allowlist per key - so `.env` can never widen what config
+  exposes beyond the manifest.
+- **`hull/uuid`** - RFC 9562 UUID v4 (random) and v7 (time-ordered, lexically
+  sortable - good for database primary keys).
+- **`hull/retry`** - generic retry-with-backoff for any fallible operation:
+  `retry.run(fn, opts)` + `retry.backoff`. `fn` is arbitrary (HTTP, WASM/GPU
+  compute, DB, a plain function); it retries on a thrown error or a
+  `retry_on`-flagged result, with exponential backoff and optional jitter.
+- **`hull/logx`** - contextual logging over `hull/log`: `logx.with({fields})`
+  returns a child logger that appends the bound fields (logfmt) to every line;
+  children compose via `.with()`.
+- **`env.allowed(name)`** capability - reports manifest env-allowlist membership
+  (membership only, never a value), letting code distinguish "declared but
+  unset" from "not declared". Used by `hull/config`'s `.env` loader.
+- **House style guide** (`docs/stdlib_style.md`) codifying the stdlib error
+  convention (failure throws with a stable `.code`; absence is a value;
+  validators return data), naming rules, footguns, and the DRY/parity policy.
+- **Shared internal helpers** so load-bearing logic lives in exactly one place
+  per runtime: `hull.crypto._hex` (raw-byte hex), `hull.web._request` (client-IP
+  under a `trust_proxy` policy), and `hull.web._logfmt` (logfmt value formatting,
+  shared by the logger middleware and `logx`).
+- **Cross-runtime parity / interop test guards** - byte-for-byte Lua/JS e2e
+  tests for hex, client-IP, template escaping, `validate`, `config`, `uuid`,
+  `cache`, `ratelimit`, `logx`, the option-name aliases, csrf cookie-fallback,
+  and `email` error codes, plus a jwt / envelope / csrf mint-in-one-runtime,
+  verify-in-the-other interop suite.
+
+### Changed
+
+- **`email.send` throws a coded error** (`invalid_argument` /
+  `unknown_provider` / `delivery_failed`) instead of returning
+  `{ ok = false, error }`, and returns `true` on success - aligning it with the
+  stdlib throw-on-failure convention. **Breaking:** callers must `pcall` /
+  try-catch. The JS side also gained the `from`/`to` address validation the Lua
+  side already had.
+- **Option-name reconciliation.** Modules configured side by side now share one
+  canonical option name, with the old spelling kept as a back-compat alias: the
+  session cookie is **`name`** (was `cookie_name` in `auth.*`), the auth HMAC
+  key is **`secret`** (was `state_secret` in `oauth` / `auth-flows`), and the
+  CSRF token lifetime is **`ttl`** (was `max_age`). `cookie.max_age` /
+  `cors.max_age` keep `max_age` (a real HTTP `Max-Age`).
+- **`ratelimit`** now backs its per-key bucket store with a bounded `hull/cache`
+  instance (dropping the hand-rolled sweep + cap). Core rate-limiting is
+  unchanged; at the memory cap a new key is now admitted by evicting the
+  least-recently-used idle bucket instead of being rejected, so a unique-key
+  flood can no longer 429 a genuine new client.
+- **`jwt.sign` / `jwt.verify` throw on precondition failures** (missing
+  payload/secret, missing verification key) rather than returning a
+  `(nil, err)` tuple; an invalid-but-well-formed token still returns nil.
+- **`validate`'s email check is stricter and identical across runtimes** (length
+  cap, rejects `..` and edge dots, requires a letter TLD).
+- **`csrf`** gained a session-id cookie fallback plus `name` / `require_session`
+  options, bringing the Lua behavior in line with JS; `session.create` /
+  `load` / `update` honor a per-call `ttl = 0` (immediate expiry) in Lua too.
+- The htmx widget tier is repositioned in the docs as an optional, opinionated
+  component pack, distinct from the frontend-agnostic core (`hull/web/htmx`).
+
+### Fixed
+
+- **jwt HS256 tokens are now interoperable across runtimes (security).** The JS
+  side base64url-encoded the signature via a byte-string, UTF-8-inflating every
+  byte >= 0x80, so a JS-Hull could not verify a Lua-Hull HS256 JWT (and
+  vice-versa). It now encodes the raw digest bytes directly.
+- **`logx` / logger log-injection escaping (security).** `logx` escaped only
+  `"`; both now share `hull.web._logfmt`, which escapes `\` / CR / LF / `"` (a
+  field containing a newline could otherwise forge a second log line), and a
+  latent Lua/JS quoting divergence in the logger middleware is fixed too.
+- **Template XSS drift (security)** between the Lua and JS engines - a backtick
+  and the `json` filter's `<` were left unescaped on the Lua side.
+- **`csrf` JS module resolution** - a JS app declaring only
+  `hull/web/middleware/csrf` now resolves its `hull/web/cookie` dependency.
+- Three Lua-only convention/footgun bugs where the JS sibling was already
+  correct (a `csv.parse` doc, the `cookie.secure` doc default, and
+  `idempotency`'s `ttl = 0` handling).
+
 ## [0.11.0] — 2026-08-06
 
 `hull/jobs@1`: a durable, DB-backed background job queue. Enqueue a unit of work
