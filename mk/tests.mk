@@ -98,24 +98,27 @@ $(BUILDDIR)/test_respwire: $(TESTDIR)/hull/cap/test_respwire.c $(SRCDIR)/hull/ca
 # socket/TLS yet) and gated out of CAP_OBJS until HL_ENABLE_VALKEY.
 # -DHL_VALKEY_NO_TLS keeps the (Phase 1b) TLS transport out so the DSN test
 # needs no Keel/mbedTLS link, mirroring test_pg_conn's -DHL_PG_NO_TLS.
-$(BUILDDIR)/test_valkey_dsn: $(TESTDIR)/hull/cap/test_valkey_dsn.c $(SRCDIR)/hull/cap/valkey_conn.c $(SRCDIR)/hull/cap/respwire.c | $(BUILDDIR)
+# valkey_conn.c uses the pluggable allocator ($(ALLOC_OBJ)) + sh_arena
+# ($(SH_ARENA_OBJ)) for the connection buffer + reply arena.
+$(BUILDDIR)/test_valkey_dsn: $(TESTDIR)/hull/cap/test_valkey_dsn.c $(SRCDIR)/hull/cap/valkey_conn.c $(SRCDIR)/hull/cap/respwire.c $(ALLOC_OBJ) $(SH_ARENA_OBJ) | $(BUILDDIR)
 	$(CC) $(CFLAGS) -DHL_VALKEY_NO_TLS $(INCLUDES) -I$(VENDDIR) -o $@ \
-		$(TESTDIR)/hull/cap/test_valkey_dsn.c $(SRCDIR)/hull/cap/valkey_conn.c $(SRCDIR)/hull/cap/respwire.c $(LDFLAGS)
+		$(TESTDIR)/hull/cap/test_valkey_dsn.c $(SRCDIR)/hull/cap/valkey_conn.c $(SRCDIR)/hull/cap/respwire.c \
+		$(ALLOC_OBJ) $(SH_ARENA_OBJ) $(LDFLAGS)
 
 # Valkey/Redis connection: HELLO/AUTH handshake + RESP2 fallback + SELECT + a
 # command round-trip over a socketpair. -DHL_VALKEY_NO_TLS drives the plaintext
 # transport (no Keel/mbedTLS), mirroring test_pg_conn.
-$(BUILDDIR)/test_valkey_conn: $(TESTDIR)/hull/cap/test_valkey_conn.c $(SRCDIR)/hull/cap/valkey_conn.c $(SRCDIR)/hull/cap/respwire.c | $(BUILDDIR)
+$(BUILDDIR)/test_valkey_conn: $(TESTDIR)/hull/cap/test_valkey_conn.c $(SRCDIR)/hull/cap/valkey_conn.c $(SRCDIR)/hull/cap/respwire.c $(ALLOC_OBJ) $(SH_ARENA_OBJ) | $(BUILDDIR)
 	$(CC) $(CFLAGS) -DHL_VALKEY_NO_TLS $(INCLUDES) -I$(VENDDIR) -o $@ \
 		$(TESTDIR)/hull/cap/test_valkey_conn.c $(SRCDIR)/hull/cap/valkey_conn.c \
-		$(SRCDIR)/hull/cap/respwire.c $(LDFLAGS)
+		$(SRCDIR)/hull/cap/respwire.c $(ALLOC_OBJ) $(SH_ARENA_OBJ) $(LDFLAGS)
 
 # Valkey/Redis HlKvBackend op->RESP mapping over a socketpair (valkey.c +
 # valkey_conn.c + respwire.c). -DHL_VALKEY_NO_TLS drives the plaintext transport.
-$(BUILDDIR)/test_valkey_backend: $(TESTDIR)/hull/cap/test_valkey_backend.c $(SRCDIR)/hull/cap/valkey.c $(SRCDIR)/hull/cap/valkey_conn.c $(SRCDIR)/hull/cap/respwire.c | $(BUILDDIR)
+$(BUILDDIR)/test_valkey_backend: $(TESTDIR)/hull/cap/test_valkey_backend.c $(SRCDIR)/hull/cap/valkey.c $(SRCDIR)/hull/cap/valkey_conn.c $(SRCDIR)/hull/cap/respwire.c $(ALLOC_OBJ) $(SH_ARENA_OBJ) | $(BUILDDIR)
 	$(CC) $(CFLAGS) -DHL_VALKEY_NO_TLS $(INCLUDES) -I$(VENDDIR) -o $@ \
 		$(TESTDIR)/hull/cap/test_valkey_backend.c $(SRCDIR)/hull/cap/valkey.c \
-		$(SRCDIR)/hull/cap/valkey_conn.c $(SRCDIR)/hull/cap/respwire.c $(LDFLAGS)
+		$(SRCDIR)/hull/cap/valkey_conn.c $(SRCDIR)/hull/cap/respwire.c $(ALLOC_OBJ) $(SH_ARENA_OBJ) $(LDFLAGS)
 
 # MySQL/MariaDB codec + DSN test: mysqlwire.c + mysql_conn.c (Phase 1b) are
 # self-contained (no socket/TLS/crypto yet) and gated out of CAP_OBJS until
@@ -546,8 +549,8 @@ fuzz/fuzz_respwire: fuzz/fuzz_respwire.c $(SRCDIR)/hull/cap/respwire.c
 # Valkey/Redis DSN parser: percent-decoding + bounded field splitting over a
 # user-supplied connection string. -DHL_VALKEY_NO_TLS keeps the (Phase 1b) TLS
 # transport out so the pure-parser fuzzer needs no Keel/mbedTLS.
-fuzz/fuzz_valkey_dsn: fuzz/fuzz_valkey_dsn.c $(SRCDIR)/hull/cap/valkey_conn.c $(SRCDIR)/hull/cap/respwire.c
-	$(CC) $(FUZZ_CFLAGS) -DHL_VALKEY_NO_TLS -o $@ $^
+fuzz/fuzz_valkey_dsn: fuzz/fuzz_valkey_dsn.c $(SRCDIR)/hull/cap/valkey_conn.c $(SRCDIR)/hull/cap/respwire.c $(SRCDIR)/hull/utils/alloc.c $(SH_ARENA_DIR)/sh_arena.c
+	$(CC) $(FUZZ_CFLAGS) -Ivendor/keel/include -DHL_VALKEY_NO_TLS -o $@ $^
 
 # PostgreSQL wire-protocol reader: the untrusted-server parser (§1 Phase 2).
 fuzz/fuzz_pgwire: fuzz/fuzz_pgwire.c $(SRCDIR)/hull/cap/pgwire.c

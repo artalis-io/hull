@@ -45,6 +45,11 @@ void hl_resp_cmd_begin(HlRespWriter *w, size_t argc);
 void hl_resp_cmd_arg(HlRespWriter *w, const void *arg, size_t len);
 void hl_resp_cmd_arg_cstr(HlRespWriter *w, const char *arg);      /* strlen */
 void hl_resp_cmd_arg_i64(HlRespWriter *w, int64_t v);            /* decimal */
+/* Append a bulk arg = glob-escaped(prefix) followed by a literal '*', written
+ * directly into the buffer (no temp allocation). Backslash-escapes each of
+ * \ * ? [ ] in `prefix` so binary glob metacharacters match literally; the
+ * trailing '*' is the only wildcard. Used to build a safe Redis SCAN MATCH. */
+void hl_resp_cmd_arg_globprefix(HlRespWriter *w, const void *prefix, size_t plen);
 
 /* ── Reply parser (UNTRUSTED INPUT) ───────────────────────────────────── */
 

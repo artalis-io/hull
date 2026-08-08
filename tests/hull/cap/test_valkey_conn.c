@@ -31,7 +31,7 @@ UTEST(valkey_conn, handshake_resp3) {
     ASSERT_EQ((ssize_t)strlen(HELLO_MAP), write(sv[0], HELLO_MAP, strlen(HELLO_MAP)));
     HlValkeyDsn d; ASSERT_EQ(0, dsn_of("redis://localhost", &d));
     HlValkeyConn *c = NULL; char e[128];
-    ASSERT_EQ(0, hl_valkey_conn_start(&c, sv[1], &d, e, sizeof e));
+    ASSERT_EQ(0, hl_valkey_conn_start(&c, sv[1], &d, NULL, e, sizeof e));
     ASSERT_EQ(1, hl_valkey_conn_is_resp3(c));
     hl_valkey_conn_close(c);
     close(sv[0]);
@@ -44,7 +44,7 @@ UTEST(valkey_conn, handshake_with_auth_in_hello) {
     write(sv[0], HELLO_MAP, strlen(HELLO_MAP));
     HlValkeyDsn d; ASSERT_EQ(0, dsn_of("redis://:secret@localhost", &d));
     HlValkeyConn *c = NULL; char e[128];
-    ASSERT_EQ(0, hl_valkey_conn_start(&c, sv[1], &d, e, sizeof e));
+    ASSERT_EQ(0, hl_valkey_conn_start(&c, sv[1], &d, NULL, e, sizeof e));
     ASSERT_EQ(1, hl_valkey_conn_is_resp3(c));
     hl_valkey_conn_close(c);
     close(sv[0]);
@@ -57,7 +57,7 @@ UTEST(valkey_conn, resp2_fallback_on_unknown_hello) {
     write(sv[0], err, strlen(err));
     HlValkeyDsn d; ASSERT_EQ(0, dsn_of("redis://localhost", &d));   /* no pass */
     HlValkeyConn *c = NULL; char e[128];
-    ASSERT_EQ(0, hl_valkey_conn_start(&c, sv[1], &d, e, sizeof e));
+    ASSERT_EQ(0, hl_valkey_conn_start(&c, sv[1], &d, NULL, e, sizeof e));
     ASSERT_EQ(0, hl_valkey_conn_is_resp3(c));                       /* fell back */
     hl_valkey_conn_close(c);
     close(sv[0]);
@@ -72,7 +72,7 @@ UTEST(valkey_conn, resp2_fallback_then_legacy_auth) {
     write(sv[0], ok, strlen(ok));     /* AUTH secret -> +OK */
     HlValkeyDsn d; ASSERT_EQ(0, dsn_of("redis://:secret@localhost", &d));
     HlValkeyConn *c = NULL; char e[128];
-    ASSERT_EQ(0, hl_valkey_conn_start(&c, sv[1], &d, e, sizeof e));
+    ASSERT_EQ(0, hl_valkey_conn_start(&c, sv[1], &d, NULL, e, sizeof e));
     ASSERT_EQ(0, hl_valkey_conn_is_resp3(c));
     hl_valkey_conn_close(c);
     close(sv[0]);
@@ -86,7 +86,7 @@ UTEST(valkey_conn, select_db) {
     write(sv[0], ok, strlen(ok));                 /* SELECT 3 -> +OK */
     HlValkeyDsn d; ASSERT_EQ(0, dsn_of("redis://localhost/3", &d));
     HlValkeyConn *c = NULL; char e[128];
-    ASSERT_EQ(0, hl_valkey_conn_start(&c, sv[1], &d, e, sizeof e));
+    ASSERT_EQ(0, hl_valkey_conn_start(&c, sv[1], &d, NULL, e, sizeof e));
     hl_valkey_conn_close(c);
     close(sv[0]);
 }
@@ -98,7 +98,7 @@ UTEST(valkey_conn, auth_failure_rejected) {
     write(sv[0], err, strlen(err));
     HlValkeyDsn d; ASSERT_EQ(0, dsn_of("redis://:bad@localhost", &d));
     HlValkeyConn *c = NULL; char e[128];
-    ASSERT_EQ(-1, hl_valkey_conn_start(&c, sv[1], &d, e, sizeof e));  /* not unknown-cmd -> fail */
+    ASSERT_EQ(-1, hl_valkey_conn_start(&c, sv[1], &d, NULL, e, sizeof e));  /* not unknown-cmd -> fail */
     close(sv[1]);
     close(sv[0]);
 }
@@ -111,7 +111,7 @@ UTEST(valkey_conn, command_get_roundtrip) {
     write(sv[0], getr, strlen(getr));             /* GET reply */
     HlValkeyDsn d; ASSERT_EQ(0, dsn_of("redis://localhost", &d));
     HlValkeyConn *c = NULL; char e[128];
-    ASSERT_EQ(0, hl_valkey_conn_start(&c, sv[1], &d, e, sizeof e));
+    ASSERT_EQ(0, hl_valkey_conn_start(&c, sv[1], &d, NULL, e, sizeof e));
 
     HlRespWriter w; hl_resp_writer_init(&w);
     hl_resp_cmd_begin(&w, 2);
@@ -119,7 +119,7 @@ UTEST(valkey_conn, command_get_roundtrip) {
     hl_resp_cmd_arg_cstr(&w, "k");
     HlRespValue reply;
     ASSERT_EQ(0, hl_valkey_command(c, &w, &reply));
-    ASSERT_EQ(reply.type, HL_RESP_STR);
+    ASSERT_EQ((int)reply.type, (int)HL_RESP_STR);
     ASSERT_EQ(reply.str.len, (size_t)5);
     ASSERT_EQ(0, memcmp(reply.str.p, "hello", 5));
     hl_resp_writer_free(&w);

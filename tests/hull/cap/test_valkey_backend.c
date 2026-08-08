@@ -52,7 +52,7 @@ UTEST(valkey_backend, ops_roundtrip) {
     HlValkeyDsn d; char e[128];
     ASSERT_EQ(0, hl_valkey_dsn_parse("redis://localhost", &d, e, sizeof e));
     HlValkeyConn *conn = NULL;
-    ASSERT_EQ(0, hl_valkey_conn_start(&conn, sv[1], &d, e, sizeof e));
+    ASSERT_EQ(0, hl_valkey_conn_start(&conn, sv[1], &d, NULL, e, sizeof e));
     HlKvHandle *h = hl_kv_valkey_wrap(conn);
     ASSERT_TRUE(h != NULL);
 
@@ -92,6 +92,33 @@ UTEST(valkey_backend, ops_roundtrip) {
     ASSERT_STREQ(ks.buf[1], "k2");
 
     B->close(h);
+    close(sv[0]);
+}
+
+/* incr with a TTL on a FRESH key runs the WATCH/EXISTS/MULTI/INCRBY/PEXPIRE/
+ * EXEC transaction; the returned value is EXEC's array item 0. */
+UTEST(valkey_backend, incr_with_ttl_fresh_is_transactional) {
+    int sv[2];
+    ASSERT_EQ(0, socketpair(AF_UNIX, SOCK_STREAM, 0, sv));
+    WR(sv[0], HELLO_MAP);
+    WR(sv[0], "+OK\r\n");            /* WATCH   */
+    WR(sv[0], ":0\r\n");             /* EXISTS -> fresh */
+    WR(sv[0], "+OK\r\n");            /* MULTI   */
+    WR(sv[0], "+QUEUED\r\n");        /* INCRBY  */
+    WR(sv[0], "+QUEUED\r\n");        /* PEXPIRE (queued because fresh) */
+    WR(sv[0], "*2\r\n:5\r\n:1\r\n"); /* EXEC -> [INCRBY=5, PEXPIRE=1] */
+
+    HlValkeyDsn d; char e[128];
+    ASSERT_EQ(0, hl_valkey_dsn_parse("redis://localhost", &d, e, sizeof e));
+    HlValkeyConn *conn = NULL;
+    ASSERT_EQ(0, hl_valkey_conn_start(&conn, sv[1], &d, NULL, e, sizeof e));
+    HlKvHandle *h = hl_kv_valkey_wrap(conn);
+
+    int64_t nv = 0;
+    ASSERT_EQ(0, hl_kv_backend_valkey.incr(h, (const uint8_t *)"n", 1, 5, 1000, &nv));
+    ASSERT_EQ(nv, (int64_t)5);
+
+    hl_kv_backend_valkey.close(h);
     close(sv[0]);
 }
 

@@ -64,6 +64,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "hull/utils/alloc.h"   /* HlAllocator (pluggable allocator) */
+
 /*
  * Capability bits a backend advertises, and their EXACT mapping to the vtable.
  * A method whose gating cap is clear is left NULL and MUST NOT be called; the
@@ -127,7 +129,7 @@ typedef struct HlKvBackend {
      * errbuf (caller-provided; never a borrowed pointer) on failure.
      * timeout_ms bounds the connect + handshake. Scrubs credentials post-open. */
     int  (*open)(HlKvHandle **out, const char *dsn, int timeout_ms,
-                 char *errbuf, size_t errlen);
+                 HlAllocator *alloc, char *errbuf, size_t errlen);
     /* Free the handle + its buffers (scrubbing any residual secret material).
      * NULL-safe; idempotent is NOT required - the caller must not reuse or
      * double-close a handle. */

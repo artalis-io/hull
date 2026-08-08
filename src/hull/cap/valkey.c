@@ -3,11 +3,26 @@
  *
  * Maps the narrow byte-oriented KV ops onto RESP commands over cap/valkey_conn:
  *   get -> GET     set -> SET [PX]     del -> DEL     exists -> EXISTS
- *   incr -> INCRBY (+ PEXPIRE NX for a fresh key's TTL)
- *   cas  -> SET NX (set-if-absent) or WATCH/MULTI/EXEC (optimistic, retryable)
- *   clear/scan -> cursor SCAN MATCH <prefix>* (bounded, non-atomic; never KEYS)
- * No generic command escape hatch. Returned value bytes borrow into the
- * connection's buffer (valid until the next op), per the HlKvBackend contract.
+ *   incr -> INCRBY; with a TTL, a WATCH/EXISTS/MULTI/INCRBY[/PEXPIRE]/EXEC
+ *     transaction so the expiry lands ONLY on a freshly-created key (an existing
+ *     key keeps its own TTL) - atomic, not a racy INCRBY-then-PEXPIRE.
+ *   cas  -> SET NX (set-if-absent) or WATCH/MULTI/EXEC (optimistic, retryable ->
+ *     the four-state HlKvCasResult OK/MISMATCH/CONFLICT/ERROR; a GET error is an
+ *     ERROR, never a mismatch; every abort leaves the connection clean).
+ *   clear/scan -> cursor SCAN MATCH <glob-escaped-prefix>* (bounded, non-atomic;
+ *     never blocking KEYS; iteration-capped; scan strips the prefix before cb).
+ * No generic command escape hatch. All memory is the connection's pluggable
+ * HlAllocator.
+ *
+ * Invariants (validated in the pre-2b backend review):
+ *  - Returned value bytes BORROW into the connection buffer, valid only until
+ *    the next op; every internal borrow (SCAN keys, cursor) is copied first.
+ *  - No auto-reconnect: a transport failure fails the op and poisons the handle
+ *    (the caller reopens). Non-idempotent ops (incr, EXEC) are NEVER replayed.
+ *  - Physical keys/prefixes come from the caller and are treated opaquely. The
+ *    milestone-1 wiring (Phase 2b) makes them collision-free + glob-free by
+ *    hex-encoding the namespace; the SCAN pattern is glob-escaped here so the
+ *    backend is safe for ANY prefix bytes it is handed.
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
@@ -19,22 +34,28 @@
 #include <stdlib.h>
 #include <string.h>
 
+#define KV_VALKEY_ERRMSG 256u   /* matches the connection's error-buffer size */
+
 struct HlKvHandle {
     HlValkeyConn *conn;
-    char          errmsg[256];
+    HlAllocator  *alloc;
+    char          errmsg[KV_VALKEY_ERRMSG];
 };
 
 HlKvHandle *hl_kv_valkey_wrap(HlValkeyConn *conn) {
-    HlKvHandle *h = (HlKvHandle *)calloc(1, sizeof *h);
+    HlAllocator *alloc = hl_valkey_conn_alloc(conn);
+    HlKvHandle *h = (HlKvHandle *)hl_alloc_calloc(alloc, 1, sizeof *h);
     if (!h) return NULL;
     h->conn = conn;
+    h->alloc = alloc;
     return h;
 }
 
 static void vk_close(HlKvHandle *h) {
     if (!h) return;
+    HlAllocator *alloc = h->alloc;
     hl_valkey_conn_close(h->conn);
-    free(h);
+    hl_alloc_free(alloc, h, sizeof *h);
 }
 
 static const char *vk_last_error(HlKvHandle *h) { return h ? h->errmsg : ""; }
@@ -62,12 +83,12 @@ static int is_srv_err(HlKvHandle *h, const HlRespValue *r) {
 /* ── open ─────────────────────────────────────────────────────────────── */
 
 static int vk_open(HlKvHandle **out, const char *dsn, int timeout_ms,
-                   char *errbuf, size_t errlen) {
+                   HlAllocator *alloc, char *errbuf, size_t errlen) {
     HlValkeyDsn d;
     if (hl_valkey_dsn_parse(dsn, &d, errbuf, errlen) != 0) return -1;
     if (timeout_ms > 0) d.connect_timeout_ms = timeout_ms;
     HlValkeyConn *conn = NULL;
-    int rc = hl_valkey_conn_open(&conn, &d, errbuf, errlen);
+    int rc = hl_valkey_conn_open(&conn, &d, alloc, errbuf, errlen);
     hl_valkey_dsn_scrub(&d);
     if (rc != 0) return -1;
     HlKvHandle *h = hl_kv_valkey_wrap(conn);
@@ -135,8 +156,17 @@ static int vk_exists(HlKvHandle *h, const uint8_t *key, size_t klen, int *presen
 
 /* ── counters ─────────────────────────────────────────────────────────── */
 
-static int vk_incr(HlKvHandle *h, const uint8_t *key, size_t klen,
-                   int64_t by, int64_t ttl_ms, int64_t *newval) {
+/* Best-effort UNWATCH / DISCARD to leave the connection clean after aborting a
+ * transaction on a still-alive connection (skip when the conn is already dead,
+ * i.e. a prior run() returned -1). */
+static void kv_unwatch(HlKvHandle *h) {
+    HlRespWriter w; hl_resp_writer_init(&w);
+    hl_resp_cmd_begin(&w, 1); hl_resp_cmd_arg_cstr(&w, "UNWATCH");
+    HlRespValue r; (void)run(h, &w, &r);
+}
+
+static int incr_simple(HlKvHandle *h, const uint8_t *key, size_t klen,
+                       int64_t by, int64_t *newval) {
     HlRespWriter w; hl_resp_writer_init(&w);
     hl_resp_cmd_begin(&w, 3);
     hl_resp_cmd_arg_cstr(&w, "INCRBY");
@@ -146,19 +176,54 @@ static int vk_incr(HlKvHandle *h, const uint8_t *key, size_t klen,
     if (run(h, &w, &r) != 0) return -1;
     if (r.type != HL_RESP_INT) { if (is_srv_err(h, &r)) return -1; seterr(h, "INCRBY: not an integer"); return -1; }
     *newval = r.i;
-    if (ttl_ms > 0) {
-        /* Apply the TTL only to a fresh key (no existing expiry): PEXPIRE .. NX.
-         * Existing keys keep their TTL. Best-effort; ignore the reply value. */
-        hl_resp_writer_init(&w);
-        hl_resp_cmd_begin(&w, 4);
-        hl_resp_cmd_arg_cstr(&w, "PEXPIRE");
-        hl_resp_cmd_arg(&w, key, klen);
-        hl_resp_cmd_arg_i64(&w, ttl_ms);
-        hl_resp_cmd_arg_cstr(&w, "NX");
-        HlRespValue r2;
-        (void)run(h, &w, &r2);
-    }
     return 0;
+}
+
+static int vk_incr(HlKvHandle *h, const uint8_t *key, size_t klen,
+                   int64_t by, int64_t ttl_ms, int64_t *newval) {
+    if (ttl_ms <= 0) return incr_simple(h, key, klen, by, newval);
+
+    /* TTL requested: apply it ONLY to a freshly-created key (an existing key
+     * keeps its own expiry, including "no expiry"), atomically. WATCH the key,
+     * decide fresh-vs-existing under that watch, then MULTI { INCRBY [PEXPIRE] }
+     * EXEC. EXEC aborts (null) if the key changed since WATCH -> retry. This is
+     * the transactional handling a separate INCRBY + PEXPIRE cannot provide. */
+    for (int attempt = 0; attempt < 8; attempt++) {
+        HlRespWriter w; HlRespValue r;
+        hl_resp_writer_init(&w); hl_resp_cmd_begin(&w, 2);
+        hl_resp_cmd_arg_cstr(&w, "WATCH"); hl_resp_cmd_arg(&w, key, klen);
+        if (run(h, &w, &r) != 0) return -1;
+        if (!hl_resp_is_ok(&r)) { is_srv_err(h, &r); return -1; }
+
+        hl_resp_writer_init(&w); hl_resp_cmd_begin(&w, 2);
+        hl_resp_cmd_arg_cstr(&w, "EXISTS"); hl_resp_cmd_arg(&w, key, klen);
+        if (run(h, &w, &r) != 0) return -1;
+        if (r.type != HL_RESP_INT) { is_srv_err(h, &r); kv_unwatch(h); return -1; }
+        int exists = r.i > 0;
+
+        hl_resp_writer_init(&w); hl_resp_cmd_begin(&w, 1); hl_resp_cmd_arg_cstr(&w, "MULTI");
+        if (run(h, &w, &r) != 0) return -1;
+
+        hl_resp_writer_init(&w); hl_resp_cmd_begin(&w, 3);
+        hl_resp_cmd_arg_cstr(&w, "INCRBY"); hl_resp_cmd_arg(&w, key, klen); hl_resp_cmd_arg_i64(&w, by);
+        if (run(h, &w, &r) != 0) return -1;                 /* +QUEUED */
+        if (!exists) {
+            hl_resp_writer_init(&w); hl_resp_cmd_begin(&w, 3);
+            hl_resp_cmd_arg_cstr(&w, "PEXPIRE"); hl_resp_cmd_arg(&w, key, klen); hl_resp_cmd_arg_i64(&w, ttl_ms);
+            if (run(h, &w, &r) != 0) return -1;             /* +QUEUED */
+        }
+        hl_resp_writer_init(&w); hl_resp_cmd_begin(&w, 1); hl_resp_cmd_arg_cstr(&w, "EXEC");
+        if (run(h, &w, &r) != 0) return -1;
+        if (r.type == HL_RESP_NULL) continue;               /* watched key changed -> retry */
+        if (r.type == HL_RESP_ARRAY && r.arr.count >= 1 && r.arr.items[0].type == HL_RESP_INT) {
+            *newval = r.arr.items[0].i;                      /* INCRBY result */
+            return 0;
+        }
+        if (is_srv_err(h, &r)) return -1;
+        seterr(h, "INCRBY(txn): unexpected EXEC reply"); return -1;
+    }
+    seterr(h, "incr: contended past retry budget");
+    return -1;
 }
 
 /* ── compare-and-swap ─────────────────────────────────────────────────── */
@@ -181,7 +246,9 @@ static HlKvCasResult set_if_absent(HlKvHandle *h, const uint8_t *key, size_t kle
 }
 
 /* One WATCH/GET/compare/MULTI/SET/EXEC pass. Returns OK / MISMATCH / CONFLICT
- * (retry) / ERROR. */
+ * (retry) / ERROR. Every non-transport abort leaves the connection clean
+ * (UNWATCH after a mismatch; EXEC itself clears WATCH+MULTI). A GET error is an
+ * ERROR, never a mismatch. */
 static HlKvCasResult cas_attempt(HlKvHandle *h, const uint8_t *key, size_t klen,
                                  const uint8_t *expected, size_t elen,
                                  const uint8_t *newv, size_t nlen, int64_t ttl_ms) {
@@ -191,32 +258,33 @@ static HlKvCasResult cas_attempt(HlKvHandle *h, const uint8_t *key, size_t klen,
     hl_resp_cmd_arg_cstr(&w, "WATCH"); hl_resp_cmd_arg(&w, key, klen);
     if (run(h, &w, &r) != 0) return HL_KV_CAS_ERROR;
     if (!hl_resp_is_ok(&r)) { is_srv_err(h, &r); return HL_KV_CAS_ERROR; }
-    /* GET + compare (value borrows into the buffer only until the next cmd) */
+
+    /* GET + compare (the value borrows into the buffer only until the next cmd,
+     * so we compare BEFORE issuing any further command). */
     hl_resp_writer_init(&w); hl_resp_cmd_begin(&w, 2);
     hl_resp_cmd_arg_cstr(&w, "GET"); hl_resp_cmd_arg(&w, key, klen);
     if (run(h, &w, &r) != 0) return HL_KV_CAS_ERROR;
+    if (r.type == HL_RESP_ERR) {          /* e.g. WRONGTYPE - a real error, not a mismatch */
+        is_srv_err(h, &r); kv_unwatch(h); return HL_KV_CAS_ERROR;
+    }
+    /* STR compares by bytes; NULL (absent key) fails to match a provided value. */
     int match = (r.type == HL_RESP_STR && r.str.len == elen &&
                  (elen == 0 || memcmp(r.str.p, expected, elen) == 0));
-    if (!match) {
-        hl_resp_writer_init(&w); hl_resp_cmd_begin(&w, 1); hl_resp_cmd_arg_cstr(&w, "UNWATCH");
-        HlRespValue u; (void)run(h, &w, &u);
-        return HL_KV_CAS_MISMATCH;
-    }
-    /* MULTI */
+    if (!match) { kv_unwatch(h); return HL_KV_CAS_MISMATCH; }
+
+    /* MULTI { SET } EXEC */
     hl_resp_writer_init(&w); hl_resp_cmd_begin(&w, 1); hl_resp_cmd_arg_cstr(&w, "MULTI");
     if (run(h, &w, &r) != 0) return HL_KV_CAS_ERROR;
-    /* SET (queued) */
     hl_resp_writer_init(&w);
     hl_resp_cmd_begin(&w, ttl_ms > 0 ? 5 : 3);
     hl_resp_cmd_arg_cstr(&w, "SET"); hl_resp_cmd_arg(&w, key, klen); hl_resp_cmd_arg(&w, newv, nlen);
     if (ttl_ms > 0) { hl_resp_cmd_arg_cstr(&w, "PX"); hl_resp_cmd_arg_i64(&w, ttl_ms); }
-    if (run(h, &w, &r) != 0) return HL_KV_CAS_ERROR;   /* +QUEUED */
-    /* EXEC */
+    if (run(h, &w, &r) != 0) return HL_KV_CAS_ERROR;   /* +QUEUED (or -ERR queued -> EXECABORT) */
     hl_resp_writer_init(&w); hl_resp_cmd_begin(&w, 1); hl_resp_cmd_arg_cstr(&w, "EXEC");
     if (run(h, &w, &r) != 0) return HL_KV_CAS_ERROR;
     if (r.type == HL_RESP_ARRAY) return HL_KV_CAS_OK;        /* committed */
     if (r.type == HL_RESP_NULL)  return HL_KV_CAS_CONFLICT;  /* key changed -> retry */
-    is_srv_err(h, &r);
+    is_srv_err(h, &r);                                        /* EXECABORT / error */
     return HL_KV_CAS_ERROR;
 }
 
@@ -242,19 +310,10 @@ static int scan_step(HlKvHandle *h, const char *cursor, const uint8_t *prefix, s
     hl_resp_cmd_arg_cstr(&w, "SCAN");
     hl_resp_cmd_arg_cstr(&w, cursor);
     hl_resp_cmd_arg_cstr(&w, "MATCH");
-    /* pattern = prefix + '*' (glob metacharacters in the prefix are the caller's
-     * concern; our namespace prefixes are ASCII "kv:<ns>:"). */
-    {
-        HlRespWriter pw; (void)pw;
-        /* Build the MATCH arg as prefix bytes followed by '*'. */
-        size_t patlen = plen + 1;
-        char stackbuf[256];
-        char *pat = patlen <= sizeof stackbuf ? stackbuf : (char *)malloc(patlen);
-        if (!pat) { hl_resp_writer_free(&w); seterr(h, "out of memory"); return -1; }
-        memcpy(pat, prefix, plen); pat[plen] = '*';
-        hl_resp_cmd_arg(&w, pat, patlen);
-        if (pat != stackbuf) free(pat);
-    }
+    /* Glob-safe "<prefix>*" written straight into the command (the prefix's
+     * binary glob metacharacters are escaped so they match literally; only the
+     * trailing '*' is a wildcard). No temp allocation. */
+    hl_resp_cmd_arg_globprefix(&w, prefix, plen);
     hl_resp_cmd_arg_cstr(&w, "COUNT");
     hl_resp_cmd_arg_cstr(&w, "128");
     if (run(h, &w, out) != 0) return -1;
@@ -267,18 +326,35 @@ static int scan_step(HlKvHandle *h, const char *cursor, const uint8_t *prefix, s
     return 0;
 }
 
+/* Cursor iterations before we give up on a server that never returns "0". */
+#define VK_SCAN_MAX_ITERS (1u << 20)
+/* A Redis SCAN cursor is an opaque uint64 (<= 20 decimal digits). */
+#define KV_VALKEY_CURSOR_MAX 32u
+
+/* Copy the reply's cursor (which borrows into the buffer) into `out` before any
+ * further command reuses that buffer. -1 on a malformed / oversized cursor. */
+static int copy_cursor(HlKvHandle *h, const HlRespValue *cur, char out[KV_VALKEY_CURSOR_MAX]) {
+    if (cur->type != HL_RESP_STR || cur->str.len >= KV_VALKEY_CURSOR_MAX) {
+        seterr(h, "SCAN: malformed cursor"); return -1;
+    }
+    memcpy(out, cur->str.p, cur->str.len);
+    out[cur->str.len] = '\0';
+    return 0;
+}
+
 static int vk_scan(HlKvHandle *h, const uint8_t *prefix, size_t plen, size_t limit,
                    HlKvScanCb cb, void *cbctx) {
-    char cursor[64]; snprintf(cursor, sizeof cursor, "0");
+    char cursor[KV_VALKEY_CURSOR_MAX]; snprintf(cursor, sizeof cursor, "0");
     size_t emitted = 0;
+    unsigned iters = 0;
     do {
+        if (++iters > VK_SCAN_MAX_ITERS) { seterr(h, "SCAN: cursor did not terminate"); return -1; }
         HlRespValue r;
         if (scan_step(h, cursor, prefix, plen, &r) != 0) return -1;
         const HlRespValue *keys = &r.arr.items[1];
-        /* copy the next cursor before any callback/command can clobber rbuf */
-        char next[64];
-        size_t cl = r.arr.items[0].str.len < sizeof next - 1 ? r.arr.items[0].str.len : sizeof next - 1;
-        memcpy(next, r.arr.items[0].str.p, cl); next[cl] = '\0';
+        /* copy the next cursor before any callback/command can clobber the buffer */
+        char next[KV_VALKEY_CURSOR_MAX];
+        if (copy_cursor(h, &r.arr.items[0], next) != 0) return -1;
         for (size_t i = 0; i < keys->arr.count; i++) {
             const HlRespValue *k = &keys->arr.items[i];
             if (k->type != HL_RESP_STR) continue;
@@ -295,15 +371,16 @@ static int vk_scan(HlKvHandle *h, const uint8_t *prefix, size_t plen, size_t lim
 
 /* clear: SCAN + batched DEL under the prefix. Bounded, non-atomic. */
 static int vk_clear(HlKvHandle *h, const uint8_t *prefix, size_t plen, int64_t *removed) {
-    char cursor[64]; snprintf(cursor, sizeof cursor, "0");
+    char cursor[KV_VALKEY_CURSOR_MAX]; snprintf(cursor, sizeof cursor, "0");
     int64_t total = 0;
+    unsigned iters = 0;
     do {
+        if (++iters > VK_SCAN_MAX_ITERS) { seterr(h, "SCAN: cursor did not terminate"); return -1; }
         HlRespValue r;
         if (scan_step(h, cursor, prefix, plen, &r) != 0) return -1;
         const HlRespValue *keys = &r.arr.items[1];
-        char next[64];
-        size_t cl = r.arr.items[0].str.len < sizeof next - 1 ? r.arr.items[0].str.len : sizeof next - 1;
-        memcpy(next, r.arr.items[0].str.p, cl); next[cl] = '\0';
+        char next[KV_VALKEY_CURSOR_MAX];
+        if (copy_cursor(h, &r.arr.items[0], next) != 0) return -1;
         if (keys->arr.count > 0) {
             /* DEL k1 k2 ...  (cmd_arg copies each key out of rbuf before send) */
             HlRespWriter w; hl_resp_writer_init(&w);

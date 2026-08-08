@@ -47,23 +47,29 @@ void hl_valkey_dsn_scrub(HlValkeyDsn *dsn);
 typedef struct HlValkeyConn HlValkeyConn;
 
 #include "hull/cap/respwire.h"
+#include "hull/utils/alloc.h"   /* HlAllocator (pluggable allocator) */
 
 /*
  * Connect (TCP + optional rediss TLS via the shared client) and run the
  * HELLO 3 / AUTH handshake (RESP2 fallback if HELLO is unknown), then SELECT
- * the DB index. On success returns 0 and *out; on failure -1 with a message in
- * errbuf. The caller's dsn password should be scrubbed by the caller after this
- * returns (the connection retains no plaintext credential).
+ * the DB index. All memory (the handle, the receive buffer, the reply arena)
+ * comes from `alloc` (NULL -> the process default). On success returns 0 and
+ * *out; on failure -1 with a message in errbuf. The caller's dsn password
+ * should be scrubbed by the caller after this returns (the connection retains
+ * no plaintext credential).
  */
 int hl_valkey_conn_open(HlValkeyConn **out, const HlValkeyDsn *dsn,
-                        char *errbuf, size_t errlen);
+                        HlAllocator *alloc, char *errbuf, size_t errlen);
 
 /*
  * Run the handshake over an ALREADY-CONNECTED plaintext fd (takes ownership of
  * fd). For tests over a socketpair; no TLS. Same return contract as open().
  */
 int hl_valkey_conn_start(HlValkeyConn **out, int fd, const HlValkeyDsn *dsn,
-                         char *errbuf, size_t errlen);
+                         HlAllocator *alloc, char *errbuf, size_t errlen);
+
+/* The allocator this connection was opened with (for handles built over it). */
+HlAllocator *hl_valkey_conn_alloc(HlValkeyConn *c);
 
 /*
  * Send a fully-encoded command (a RESP array of bulk strings, from

@@ -15,6 +15,8 @@
 
 #include "hull/cap/valkey_conn.h"
 #include "hull/cap/respwire.h"
+#include "hull/utils/alloc.h"
+#include "sh_arena.h"
 
 #include <ctype.h>
 #include <stdint.h>
@@ -44,6 +46,19 @@
 #ifndef HL_VALKEY_MAX_REPLY
 #define HL_VALKEY_MAX_REPLY (64u * 1024u * 1024u)
 #endif
+
+/* Fixed capacity of the per-connection reply arena: it holds decoded aggregate
+ * item arrays (payload bytes borrow into rbuf), reset per reply. A reply whose
+ * item metadata exceeds this is rejected - a natural bound on hostile
+ * aggregates, since sh_arena_alloc returns NULL when full. */
+#ifndef HL_VALKEY_REPLY_ARENA_CAP
+#define HL_VALKEY_REPLY_ARENA_CAP (256u * 1024u)
+#endif
+
+/* Initial receive-buffer size; grows (via the allocator) up to MAX_REPLY. */
+#define HL_VALKEY_RBUF_INIT 8192u
+/* Error-message buffer size (matches the pg/mysql wire-client convention). */
+#define HL_VALKEY_ERRMSG    256u
 
 void hl_valkey_dsn_scrub(HlValkeyDsn *dsn) {
     if (dsn) memset(dsn->password, 0, sizeof dsn->password);
@@ -221,56 +236,36 @@ int hl_valkey_dsn_parse(const char *dsn, HlValkeyDsn *out, char *errbuf, size_t 
 
 /* ── Connection ───────────────────────────────────────────────────────────
  *
- * Non-moving reply arena (chunk list) so aggregate item arrays built during a
- * single hl_resp_parse are never realloc-moved; reset (not freed) between
- * replies to reuse chunks. */
-
-typedef struct VkChunk { struct VkChunk *next; size_t cap, off; } VkChunk;
+ * The connection owns a fixed-capacity sh_arena (allocated through Hull's
+ * pluggable HlAllocator) for decoded aggregate item arrays, reset per reply.
+ * ALL memory - the handle, the receive buffer, the arena - comes from
+ * c->alloc, so an embedder's allocator and limits apply. */
 
 struct HlValkeyConn {
+    HlAllocator *alloc;
     int      fd;
     uint8_t *rbuf;
     size_t   rlen, rcap, consumed;
-    VkChunk *arena_head, *arena_tail, *arena_cur;
-    char     errmsg[256];
+    SHArena *arena;          /* reply aggregate items; reset per reply */
+    char     errmsg[HL_VALKEY_ERRMSG];
     int      resp3;
 #ifndef HL_VALKEY_NO_TLS
     HlTlsClient *tls;
 #endif
 };
 
+HlAllocator *hl_valkey_conn_alloc(HlValkeyConn *c) { return c ? c->alloc : NULL; }
+
 static void set_err(HlValkeyConn *c, const char *msg) {
     snprintf(c->errmsg, sizeof c->errmsg, "%s", msg);
 }
 
-static void arena_reset(HlValkeyConn *c) {
-    for (VkChunk *ch = c->arena_head; ch; ch = ch->next) ch->off = 0;
-    c->arena_cur = c->arena_head;
-}
-
-static void arena_free(HlValkeyConn *c) {
-    VkChunk *ch = c->arena_head;
-    while (ch) { VkChunk *nx = ch->next; free(ch); ch = nx; }
-    c->arena_head = c->arena_tail = c->arena_cur = NULL;
-}
-
-static void *arena_alloc(void *ctx, size_t n) {
+/* HlRespAlloc over the connection's reply arena. Returns NULL when the fixed
+ * arena is full, which makes the parser reject the reply - a natural bound on
+ * a hostile aggregate. */
+static void *reply_alloc(void *ctx, size_t n) {
     HlValkeyConn *c = (HlValkeyConn *)ctx;
-    n = (n + 15u) & ~(size_t)15u;                 /* 16-byte align */
-    VkChunk *ch = c->arena_cur;
-    while (ch && ch->cap - ch->off < n) { c->arena_cur = ch->next; ch = ch->next; }
-    if (!ch) {
-        size_t csz = n > 8192u ? n : 8192u;
-        if (csz > HL_VALKEY_MAX_REPLY) return NULL;
-        VkChunk *nc = (VkChunk *)malloc(sizeof(VkChunk) + csz);
-        if (!nc) return NULL;
-        nc->next = NULL; nc->cap = csz; nc->off = 0;
-        if (c->arena_tail) c->arena_tail->next = nc; else c->arena_head = nc;
-        c->arena_tail = nc; c->arena_cur = nc; ch = nc;
-    }
-    void *p = (uint8_t *)(ch + 1) + ch->off;
-    ch->off += n;
-    return p;
+    return sh_arena_alloc(c->arena, n);
 }
 
 /* TCP connect with a bounded wait (non-blocking connect + select), mirroring
@@ -309,6 +304,15 @@ static int vk_connect(const char *host, const char *port, int timeout_ms) {
     freeaddrinfo(res);
     if (rc < 0) { close(fd); return -1; }
     fcntl(fd, F_SETFL, flags);                    /* restore blocking */
+    /* Bound every blocking recv/send so a hung/slow server cannot stall the
+     * event loop forever (the connect wait above is separate). */
+    if (timeout_ms > 0) {
+        struct timeval to;
+        to.tv_sec = timeout_ms / 1000;
+        to.tv_usec = (timeout_ms % 1000) * 1000;
+        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &to, sizeof to);
+        setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &to, sizeof to);
+    }
     return fd;
 }
 
@@ -349,15 +353,15 @@ static int read_reply(HlValkeyConn *c, HlRespValue *out) {
         c->consumed = 0;
     }
     for (;;) {
-        arena_reset(c);
+        sh_arena_reset(c->arena);
         size_t consumed = 0;
-        HlRespResult r = hl_resp_parse(c->rbuf, c->rlen, &consumed, out, arena_alloc, c);
+        HlRespResult r = hl_resp_parse(c->rbuf, c->rlen, &consumed, out, reply_alloc, c);
         if (r == HL_RESP_OK) { c->consumed = consumed; return 0; }
         if (r == HL_RESP_PARSE_ERR) { set_err(c, "malformed reply from server"); return -1; }
         if (c->rlen == c->rcap) {                 /* NEED_MORE: grow bounded */
-            size_t ncap = c->rcap ? c->rcap * 2 : 8192u;
+            size_t ncap = c->rcap ? c->rcap * 2 : HL_VALKEY_RBUF_INIT;
             if (ncap > HL_VALKEY_MAX_REPLY) { set_err(c, "server reply exceeds limit"); return -1; }
-            uint8_t *nb = realloc(c->rbuf, ncap);
+            uint8_t *nb = hl_alloc_realloc(c->alloc, c->rbuf, c->rcap, ncap);
             if (!nb) { set_err(c, "out of memory"); return -1; }
             c->rbuf = nb; c->rcap = ncap;
         }
@@ -455,16 +459,19 @@ static int select_db(HlValkeyConn *c, const HlValkeyDsn *dsn) {
     return 0;
 }
 
-static HlValkeyConn *conn_new(int fd) {
-    HlValkeyConn *c = (HlValkeyConn *)calloc(1, sizeof *c);
+static HlValkeyConn *conn_new(HlAllocator *alloc, int fd) {
+    HlValkeyConn *c = (HlValkeyConn *)hl_alloc_calloc(alloc, 1, sizeof *c);
     if (!c) return NULL;
+    c->alloc = alloc;
     c->fd = fd;
+    c->arena = hl_arena_create(alloc, HL_VALKEY_REPLY_ARENA_CAP);
+    if (!c->arena) { hl_alloc_free(alloc, c, sizeof *c); return NULL; }
     return c;
 }
 
 int hl_valkey_conn_start(HlValkeyConn **out, int fd, const HlValkeyDsn *dsn,
-                         char *errbuf, size_t errlen) {
-    HlValkeyConn *c = conn_new(fd);
+                         HlAllocator *alloc, char *errbuf, size_t errlen) {
+    HlValkeyConn *c = conn_new(alloc, fd);
     if (!c) { if (errbuf && errlen) snprintf(errbuf, errlen, "out of memory"); return -1; }
     if (handshake(c, dsn) != 0 || select_db(c, dsn) != 0) {
         if (errbuf && errlen) snprintf(errbuf, errlen, "%s", c->errmsg);
@@ -476,13 +483,13 @@ int hl_valkey_conn_start(HlValkeyConn **out, int fd, const HlValkeyDsn *dsn,
 }
 
 int hl_valkey_conn_open(HlValkeyConn **out, const HlValkeyDsn *dsn,
-                        char *errbuf, size_t errlen) {
+                        HlAllocator *alloc, char *errbuf, size_t errlen) {
     int fd = vk_connect(dsn->host, dsn->port, dsn->connect_timeout_ms);
     if (fd < 0) {
         if (errbuf && errlen) snprintf(errbuf, errlen, "connect to %s:%s failed", dsn->host, dsn->port);
         return -1;
     }
-    HlValkeyConn *c = conn_new(fd);
+    HlValkeyConn *c = conn_new(alloc, fd);
     if (!c) { close(fd); if (errbuf && errlen) snprintf(errbuf, errlen, "out of memory"); return -1; }
 
 #ifndef HL_VALKEY_NO_TLS
@@ -520,7 +527,10 @@ void hl_valkey_conn_close(HlValkeyConn *c) {
     if (c->tls) { hl_tls_client_shutdown(c->fd, c->tls); hl_tls_client_free(c->tls); c->tls = NULL; }
 #endif
     if (c->fd >= 0) close(c->fd);
-    if (c->rbuf) { memset(c->rbuf, 0, c->rcap); free(c->rbuf); }  /* scrub residual */
-    arena_free(c);
-    free(c);
+    if (c->rbuf) {
+        memset(c->rbuf, 0, c->rcap);                 /* scrub residual bytes */
+        hl_alloc_free(c->alloc, c->rbuf, c->rcap);
+    }
+    hl_arena_free(c->alloc, c->arena);
+    hl_alloc_free(c->alloc, c, sizeof *c);
 }

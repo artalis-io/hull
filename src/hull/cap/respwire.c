@@ -69,6 +69,27 @@ void hl_resp_cmd_arg_i64(HlRespWriter *w, int64_t v) {
     if (n > 0) hl_resp_cmd_arg(w, b, (size_t)n);
 }
 
+static int is_glob_meta(uint8_t b) {
+    return b == '\\' || b == '*' || b == '?' || b == '[' || b == ']';
+}
+
+void hl_resp_cmd_arg_globprefix(HlRespWriter *w, const void *prefix, size_t plen) {
+    const uint8_t *p = (const uint8_t *)prefix;
+    size_t esc = 0;
+    for (size_t i = 0; i < plen; i++) if (is_glob_meta(p[i])) esc++;
+    size_t total = plen + esc + 1;                 /* escaped bytes + trailing '*' */
+    char hd[24];
+    int n = snprintf(hd, sizeof hd, "$%zu\r\n", total);
+    if (n > 0) rw_put(w, hd, (size_t)n);
+    for (size_t i = 0; i < plen; i++) {
+        if (is_glob_meta(p[i])) { unsigned char bs = '\\'; rw_put(w, &bs, 1); }
+        rw_put(w, &p[i], 1);
+    }
+    unsigned char star = '*';
+    rw_put(w, &star, 1);
+    rw_put(w, "\r\n", 2);
+}
+
 /* ── parser helpers ───────────────────────────────────────────────────── */
 
 /* Parse a signed decimal integer from [p, p+n). Rejects empty, non-digits,
