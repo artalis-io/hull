@@ -6,55 +6,39 @@
 -- Sliding-window counter per key. **In-memory only — resets on restart.**
 -- For production-grade rate limiting across multiple instances, layer
 -- a DB-backed limiter on top.
+--
+-- The per-key buckets live in a bounded `hull.cache` instance, so memory is
+-- capped and stale buckets are evicted automatically (LRU) - no hand-rolled
+-- sweep. The window logic uses the caller-passed `now`, so `check` stays a
+-- pure, deterministically-testable function of its inputs.
 
 local time = require("hull.time")
+local cache = require("hull.cache")
 
 local ratelimit = {}
 
-local SWEEP_INTERVAL = 100  -- sweep every N checks
-local MAX_BUCKETS = 10000   -- max unique keys before forced eviction
+local MAX_BUCKETS = 10000   -- max unique keys per limiter (cache LRU cap)
 
---- Sweep expired buckets from the table.
--- Returns the number of remaining buckets after sweep.
-local function sweep_expired(buckets, window, now)
-    local remaining = 0
-    for k, v in pairs(buckets) do
-        if (now - v.window_start) >= window then
-            buckets[k] = nil
-        else
-            remaining = remaining + 1
-        end
-    end
-    return remaining
-end
-
---- Check rate-limit state for a key. Pure helper.
+--- Check rate-limit state for a key. Pure over the passed clock `now`.
 --
--- @tparam table buckets       `{ [key] = { count, window_start } }`.
--- @tparam string key          Limit key (e.g. user id, IP).
--- @tparam integer limit       Max hits per window.
--- @tparam integer window      Window length (seconds).
--- @tparam integer now         Current time (seconds).
--- @tparam[opt] integer bucket_count  Pre-tracked entry count for O(1) cap check.
--- @treturn table result       `{ allowed, remaining, reset }`.
--- @treturn integer new_bucket_count
-function ratelimit.check(buckets, key, limit, window, now, bucket_count)
-    bucket_count = bucket_count or 0
-    local bucket = buckets[key]
+-- @tparam table buckets  Bucket store: a `hull.cache` instance (from
+--   `cache.new`) mapping key -> `{ count, window_start }`.
+-- @tparam string key     Limit key (e.g. user id, IP).
+-- @tparam integer limit  Max hits per window.
+-- @tparam integer window Window length (seconds).
+-- @tparam integer now    Current time (seconds).
+-- @treturn table  `{ allowed, remaining, reset }`.
+function ratelimit.check(buckets, key, limit, window, now)
+    local bucket = buckets.get(key)
     if not bucket or (now - bucket.window_start) >= window then
-        -- Cap check: prevent unbounded memory growth from unique keys
-        if not bucket then
-            if bucket_count >= MAX_BUCKETS then
-                bucket_count = sweep_expired(buckets, window, now)
-                if bucket_count >= MAX_BUCKETS then
-                    return { allowed = false, remaining = 0, reset = now + window }, bucket_count
-                end
-            end
-            bucket_count = bucket_count + 1
-        end
-        buckets[key] = { count = 1, window_start = now }
-        bucket = buckets[key]
+        -- New window. cache.set bounds the store at max_entries by evicting
+        -- the least-recently-used bucket, so a flood of unique keys never
+        -- rejects a legitimate new key (it drops an idle one instead).
+        bucket = { count = 1, window_start = now }
+        buckets.set(key, bucket)
     else
+        -- Live window: bump in place. buckets.get already refreshed this
+        -- bucket's LRU rank, so an active key won't be the eviction victim.
         bucket.count = bucket.count + 1
     end
 
@@ -65,7 +49,7 @@ function ratelimit.check(buckets, key, limit, window, now, bucket_count)
         allowed = bucket.count <= limit,
         remaining = remaining,
         reset = bucket.window_start + window,
-    }, bucket_count
+    }
 end
 
 --- Build a rate-limit middleware.
@@ -74,10 +58,11 @@ end
 -- returns `1` (short-circuit). On allowed: sets `X-RateLimit-Limit` /
 -- `-Remaining` / `-Reset` headers and returns `0`.
 --
--- Memory cap: 10_000 unique keys per limiter instance. Beyond that,
--- expired entries are swept; if still full, new keys are rejected.
+-- Memory cap: 10_000 unique keys per limiter instance. Beyond that, the
+-- least-recently-used bucket is evicted to admit the new key (a unique-key
+-- flood cannot deny service to genuine new clients).
 --
--- Concurrency: the bucket map is per-process and in-memory. Multi-
+-- Concurrency: the bucket store is per-process and in-memory. Multi-
 -- process deployments (multiple Hull workers behind a load balancer,
 -- horizontal scaling) will multiply the effective limit by the
 -- worker count — each worker enforces independently. Apps that need
@@ -104,9 +89,7 @@ function ratelimit.middleware(opts)
     local limit = opts.limit or 60
     local window = opts.window or 60
     local key_fn = opts.key
-    local buckets = {}
-    local bucket_count = 0
-    local check_count = 0
+    local buckets = cache.new({ max_entries = MAX_BUCKETS })
 
     -- Normalize key option into a function
     if type(key_fn) ~= "function" then
@@ -118,14 +101,7 @@ function ratelimit.middleware(opts)
         local key = key_fn(req)
         local now = time.now()
 
-        -- Periodic sweep of expired buckets to prevent unbounded growth
-        check_count = check_count + 1
-        if check_count % SWEEP_INTERVAL == 0 then
-            bucket_count = sweep_expired(buckets, window, now)
-        end
-
-        local result
-        result, bucket_count = ratelimit.check(buckets, key, limit, window, now, bucket_count)
+        local result = ratelimit.check(buckets, key, limit, window, now)
 
         res:header("X-RateLimit-Limit", tostring(limit))
         res:header("X-RateLimit-Remaining", tostring(result.remaining))

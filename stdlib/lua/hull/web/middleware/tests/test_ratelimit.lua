@@ -4,6 +4,7 @@
 -- Run via: the C test harness (test_lua_runtime.c) loads and executes this.
 
 local ratelimit = require('hull.web.middleware.ratelimit')
+local cache = require('hull.cache')  -- bucket store is a cache instance now
 
 local pass = 0
 local fail = 0
@@ -27,14 +28,14 @@ end
 -- ── check ────────────────────────────────────────────────────────────
 
 test("check allows first request", function()
-    local buckets = {}
+    local buckets = cache.new()
     local r = ratelimit.check(buckets, "ip1", 5, 60, 1000)
     assert_eq(r.allowed, true)
     assert_eq(r.remaining, 4)
 end)
 
 test("check blocks after limit", function()
-    local buckets = {}
+    local buckets = cache.new()
     for i = 1, 5 do
         ratelimit.check(buckets, "ip2", 5, 60, 1000)
     end
@@ -44,7 +45,7 @@ test("check blocks after limit", function()
 end)
 
 test("check resets after window", function()
-    local buckets = {}
+    local buckets = cache.new()
     for i = 1, 5 do
         ratelimit.check(buckets, "ip3", 5, 60, 1000)
     end
@@ -54,7 +55,7 @@ test("check resets after window", function()
 end)
 
 test("check returns remaining count", function()
-    local buckets = {}
+    local buckets = cache.new()
     ratelimit.check(buckets, "ip4", 10, 60, 1000)
     ratelimit.check(buckets, "ip4", 10, 60, 1000)
     local r = ratelimit.check(buckets, "ip4", 10, 60, 1000)
@@ -62,7 +63,7 @@ test("check returns remaining count", function()
 end)
 
 test("check returns reset timestamp", function()
-    local buckets = {}
+    local buckets = cache.new()
     local r = ratelimit.check(buckets, "ip5", 5, 60, 1000)
     assert_eq(r.reset, 1060)
 end)
