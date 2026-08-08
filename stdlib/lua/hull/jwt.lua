@@ -80,8 +80,15 @@ end
 -- @tparam string secret  HMAC-SHA256 key.
 -- @treturn string  JWT in compact form.
 function jwt.sign(payload, secret)
-    if not payload or not secret then
-        return nil, "payload and secret are required"
+    -- Minting is the trusted-caller path: a missing/wrong-typed arg is a
+    -- precondition failure (a programming bug), so throw rather than return a
+    -- nil,err tuple (docs/stdlib_style.md section 1). Matches the JS sibling,
+    -- which already threw - this was a live Lua/JS drift.
+    if type(payload) ~= "table" then
+        error("jwt.sign: payload must be a table")
+    end
+    if type(secret) ~= "string" or secret == "" then
+        error("jwt.sign: secret is required")
     end
     -- SECURITY: use a 32+ byte random HMAC key. A short (<16 byte) HS256 secret
     -- is brute-forceable. Not hard-rejected here (would break existing apps),
@@ -146,8 +153,15 @@ end
 -- @treturn ?table payload  Decoded claims on success.
 -- @treturn ?string err     Reason on failure (when payload is nil).
 function jwt.verify(token, key_or_resolver, opts)
-    if not token or not key_or_resolver then
-        return nil, "token and key are required"
+    -- A missing KEY is a precondition failure (you cannot verify without one) ->
+    -- throw. A missing/malformed TOKEN is untrusted input -> return nil, the
+    -- expected-negative outcome a verifier reports (docs/stdlib_style.md
+    -- section 1). Both runtimes behave identically.
+    if key_or_resolver == nil then
+        error("jwt.verify: key is required")
+    end
+    if type(token) ~= "string" or token == "" then
+        return nil, "invalid token"
     end
     opts = opts or {}
     local allowed = opts.algs or { "HS256" }

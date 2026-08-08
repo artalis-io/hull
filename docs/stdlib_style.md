@@ -108,10 +108,15 @@ returns nil vs returns data" decision.
   applied, so a top-level bind fails or captures the wrong connection depending
   on require order. Acquire lazily inside `init()` / the middleware factory /
   the handler.
-- **Respect Lua's `0`/`""` truthiness.** `opts.ttl or default` silently drops a
-  caller's `ttl = 0`. Use `opts.ttl ~= nil and opts.ttl or default` (or an
-  explicit `if opts.ttl == nil then`). The same option must behave identically
-  in a module's `init` and its `middleware`.
+- **`or` defaulting differs between the runtimes — mind which value it drops.**
+  In Lua only `nil` and `false` are falsy, so `opts.x or default` keeps `0` and
+  `""` (unlike JS `||`, which drops them) but silently drops a legitimate
+  `false` — a real bug for a boolean option (`opts.secure or true` can never be
+  `false`). In JS `opts.x || default` drops `0`, `""`, AND `false`. For any
+  option whose valid values include `0`/`""`/`false`, use an explicit nil check
+  — Lua `opts.x ~= nil and opts.x or default` / `if opts.x == nil then`, JS
+  `opts.x !== undefined ? opts.x : default`. The same option must default
+  identically in a module's `init` and its `middleware`, and across runtimes.
 - **No process-global mutable state for request-scoped concerns.** A server
   handles many requests on one runtime; a module-level `active_locale` set by
   one request leaks into the next. Thread request-scoped state through `req.ctx`,

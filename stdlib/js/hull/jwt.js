@@ -69,10 +69,18 @@ const secretToHex = _hex.toHex;
 function hs256SignatureB64(signingInput, secret) {
     const keyHex = secretToHex(secret);
     const sigHex = crypto.hmacSha256(signingInput, keyHex);
-    let raw = "";
-    for (let i = 0; i < sigHex.length; i += 2)
-        raw += String.fromCharCode(parseInt(sigHex.substring(i, i + 2), 16));
-    return crypto.base64urlEncode(raw);
+    // Base64url the 32 raw digest bytes via an ArrayBuffer, NOT via a JS string.
+    // Building the digest into a String (String.fromCharCode) and passing it to
+    // crypto.base64urlEncode UTF-8-inflates every byte >= 0x80 at the C boundary,
+    // so the signature differs from the Lua sibling's raw-byte base64url for
+    // essentially every token - a real HS256 cross-runtime interop break (a
+    // Lua-Hull could not verify a JS-Hull JWT and vice-versa). base64urlEncode
+    // is binary-safe for an ArrayBuffer. Guarded by tests/e2e_token_interop.sh.
+    const n = sigHex.length >> 1;
+    const u8 = new Uint8Array(n);
+    for (let i = 0; i < n; i++)
+        u8[i] = parseInt(sigHex.substring(i * 2, i * 2 + 2), 16);
+    return crypto.base64urlEncode(u8.buffer);
 }
 
 /**
@@ -210,10 +218,14 @@ function verifySignature(alg, key, signingInput, sigB64) {
  *   `[null, reason]` on failure.
  */
 function verify(token, keyOrResolver, opts) {
+    // A missing KEY is a precondition failure (you cannot verify without one) ->
+    // throw, matching the Lua sibling (docs/stdlib_style.md section 1). A
+    // missing/malformed TOKEN is untrusted input -> return [null, reason], the
+    // expected-negative outcome a verifier reports.
+    if (keyOrResolver === undefined || keyOrResolver === null)
+        throw new Error("jwt.verify: key is required");
     if (!token || typeof token !== "string")
         return [null, "invalid token"];
-    if (!keyOrResolver)
-        return [null, "key is required"];
     opts = opts || {};
     const allowed = opts.algs || ["HS256"];
 
