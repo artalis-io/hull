@@ -61,7 +61,12 @@ function newCache(opts) {
     const evictOne = () => {
         const now = time.nowMs();
         let lruKey, lruSeq;
-        for (const [k, e] of store) {
+        // Iterate keys + store.get, NOT `for (const [k, e] of store)`: QuickJS's
+        // parser trips a known MSan use-of-uninit false-positive on array
+        // destructuring in a for-of (same issue jwt.js avoids by index access).
+        // Deleting the current key mid-iteration then returning is spec-safe.
+        for (const k of store.keys()) {
+            const e = store.get(k);
             if (e.expires != null && now >= e.expires) {
                 store.delete(k);
                 count -= 1;
