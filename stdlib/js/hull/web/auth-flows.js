@@ -21,6 +21,7 @@ import { pwned }     from "hull:web:pwned";
 import { auditLog }  from "hull:web:middleware:audit-log";
 import { log }       from "hull:log";
 import { ratelimit } from "hull:web:middleware:ratelimit";
+import { _request }  from "hull:web:_request";
 import { db as dbModule } from "hull:db";
 const db = dbModule.default();
 import { time }     from "hull:time";
@@ -994,25 +995,17 @@ function registerRoutes(app) {
     if (_state.loginRatelimit) {
         const rlOpts = typeof _state.loginRatelimit === "object"
             ? _state.loginRatelimit : {};
-        // Per-IP key. X-Forwarded-For can be a chain
-        // ("client, proxy1, proxy2") when behind multiple
-        // reverse proxies; the leftmost entry is the client IP
-        // the edge proxy observed. Using the whole chain as the
-        // bucket key would let a single client with rotating
-        // downstream proxies mint a new bucket per request.
-        // Take the first comma-separated value and trim. App-
-        // supplied opts.key still wins.
+        // Per-IP key via the shared hull:web:_request helper
+        // (trustProxy -> leftmost XFF entry -> remote_addr). Using
+        // the whole XFF chain as the bucket key would let a client
+        // with rotating downstream proxies mint a new bucket per
+        // request; the leftmost entry pins it to the client the
+        // edge proxy observed. App-supplied opts.key still wins.
         const mw = ratelimit.middleware({
             limit:  rlOpts.limit  || 20,
             window: rlOpts.window || 300,
-            key:    rlOpts.key || ((req) => {
-                const xff = req.headers && req.headers["x-forwarded-for"];
-                if (_state.trustProxy && xff) {
-                    const first = xff.split(",")[0].trim();
-                    if (first) return first;
-                }
-                return req.remote_addr || "_anon";
-            }),
+            key:    rlOpts.key || ((req) =>
+                _request.clientIp(req, _state.trustProxy) || "_anon"),
         });
         app.use("POST", p + "/register", mw);
         app.use("POST", p + "/login", mw);

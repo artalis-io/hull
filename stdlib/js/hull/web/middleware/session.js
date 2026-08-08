@@ -17,6 +17,7 @@ import { time } from "hull:time";
 import { json } from "hull:json";
 import { app } from "hull:app";
 import { log } from "hull:log";
+import { _request } from "hull:web:_request";
 
 let sessionTtl = 86400;
 // Round-8 MEDIUM-8: absolute (hard) TTL cap from created_at.
@@ -172,9 +173,7 @@ function create(data, opts) {
     let ip = null, ua = null;
     if (opts && opts.req) {
         const h = opts.req.headers || {};
-        const xff = h["x-forwarded-for"];
-        if (trustProxy && xff) ip = (xff.split(",")[0] || xff).trim();
-        else ip = opts.req.remote_addr || null;
+        ip = _request.clientIp(opts.req, trustProxy);
         ua = h["user-agent"] || null;
         // Real UAs top out around 500 chars; bots and scanners can
         // send 100KB UAs. Cap to bound the row size — the value is

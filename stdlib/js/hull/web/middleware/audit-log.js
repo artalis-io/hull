@@ -25,6 +25,7 @@ import { time }   from "hull:time";
 import { json }   from "hull:json";
 import { app }    from "hull:app";
 import { log }    from "hull:log";
+import { _request } from "hull:web:_request";
 
 const _state = {
     retainDays: 365,
@@ -157,16 +158,11 @@ function ipPrefix(ip) {
 }
 
 function extractIp(req) {
-    if (!req || !req.headers) return null;
-    let ip;
-    const xff = req.headers["x-forwarded-for"];
-    if (_state.trustProxy && xff) ip = (xff.split(",")[0] || xff).trim();
-    else ip = req.remote_addr || null;
-    // Round-9 MEDIUM-7: cap IP. See Lua sibling.
-    if (typeof ip === "string" && ip.length > 64) {
-        ip = ip.substring(0, 64);
-    }
-    return ip;
+    // Delegates to the shared hull:web:_request helper (trustProxy ->
+    // XFF-first -> remote_addr, capped at 64 chars). This module's
+    // extractIp was the canonical implementation the helper was lifted
+    // from; see docs/stdlib_style.md section 4.
+    return _request.clientIp(req, _state.trustProxy);
 }
 
 function extractUa(req) {

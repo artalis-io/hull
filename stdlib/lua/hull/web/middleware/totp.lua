@@ -92,6 +92,7 @@ local crypto = require("hull.crypto")
 local db     = require("hull.db").default()
 local time   = require("hull.time")
 local qrcode = require("hull.qrcode")
+local _request = require("hull.web._request")
 
 local totp = {}
 
@@ -689,16 +690,9 @@ end
 local _xff_warn_done = false
 local function extract_ip(req)
     if type(req) ~= "table" then return nil end
-    local h = req.headers or {}
-    local xff = h["x-forwarded-for"]
-    if _state.trust_xff then
-        if type(xff) == "string" and xff ~= "" then
-            local comma = xff:find(",", 1, true)
-            local first = comma and xff:sub(1, comma - 1) or xff
-            local trimmed = first:match("^%s*(.-)%s*$")
-            if trimmed and trimmed ~= "" then return trimmed end
-        end
-    elseif type(xff) == "string" and xff ~= "" and not _xff_warn_done then
+    local xff = (req.headers or {})["x-forwarded-for"]
+    if not _state.trust_xff and type(xff) == "string" and xff ~= ""
+       and not _xff_warn_done then
         -- Round-11 MEDIUM-8: one-shot warn. trust_xff = false is
         -- the safer default against XFF spoofing on direct-exposed
         -- apps, but apps behind a proxy stripping/setting XFF would
@@ -714,10 +708,9 @@ local function extract_ip(req)
               .. "= true}) so each upstream client gets its own "
               .. "bucket.")
     end
-    if type(req.remote_addr) == "string" and req.remote_addr ~= "" then
-        return req.remote_addr
-    end
-    return nil
+    -- Core extraction (trust_xff -> XFF-first -> remote_addr, 64-cap)
+    -- via the shared hull.web._request helper; see docs/stdlib_style.md.
+    return _request.client_ip(req, _state.trust_xff)
 end
 
 -- ── Public API ─────────────────────────────────────────────────────

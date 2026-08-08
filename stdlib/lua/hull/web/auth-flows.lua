@@ -104,6 +104,7 @@ local json      = require("hull.json")
 local pwned     = require("hull.web.pwned")
 local audit_log = require("hull.web.middleware.audit-log")
 local ratelimit = require("hull.web.middleware.ratelimit")
+local _request  = require("hull.web._request")
 
 local M = {}
 
@@ -1382,23 +1383,16 @@ local function register_routes(app)
         local mw = ratelimit.middleware({
             limit  = rl_opts.limit  or 20,
             window = rl_opts.window or 300,  -- 5 min
-            -- Per-IP key. X-Forwarded-For can be a chain
-            -- ("client, proxy1, proxy2") when behind multiple
-            -- reverse proxies; the leftmost entry is the client
-            -- IP the edge proxy observed. Using the whole chain
-            -- as the bucket key would let a single client with
-            -- rotating downstream proxies mint a new bucket per
-            -- request. Take the first comma-separated value and
-            -- trim whitespace. App-supplied opts.key still wins.
+            -- Per-IP key via the shared hull.web._request helper
+            -- (trust_proxy -> leftmost XFF entry -> remote_addr). Using
+            -- the whole XFF chain as the bucket key would let a client
+            -- with rotating downstream proxies mint a new bucket per
+            -- request; taking the leftmost entry pins it to the client
+            -- the edge proxy observed. Falls back to the literal
+            -- "_anon" so a malformed request can't escape the bucket
+            -- entirely. App-supplied opts.key still wins.
             key    = rl_opts.key or function(req)
-                local xff = req.headers and req.headers["x-forwarded-for"]
-                if _state.trust_proxy and xff and xff ~= "" then
-                    local comma = xff:find(",", 1, true)
-                    local first = comma and xff:sub(1, comma - 1) or xff
-                    local trimmed = first:match("^%s*(.-)%s*$")
-                    if trimmed and trimmed ~= "" then return trimmed end
-                end
-                return req.remote_addr or "_anon"
+                return _request.client_ip(req, _state.trust_proxy) or "_anon"
             end,
         })
         app.use("POST", p .. "/register", mw)

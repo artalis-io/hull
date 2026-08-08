@@ -28,6 +28,7 @@ local db     = require("hull.db").default()
 local time   = require("hull.time")
 local json   = require("hull.json")
 local log    = require("hull.log")
+local _request = require("hull.web._request")
 
 local audit_log = {}
 
@@ -214,24 +215,11 @@ local function ip_prefix(ip)
 end
 
 local function extract_ip(req)
-    if not (req and req.headers) then return nil end
-    local ip
-    local xff = req.headers["x-forwarded-for"]
-    if _state.trust_proxy and xff then
-        local first = xff:match("^([^,]+)")
-        if first then
-            ip = first:gsub("^%s+", ""):gsub("%s+$", "")
-        end
-    end
-    ip = ip or req.remote_addr
-    -- Round-9 MEDIUM-7: cap IP length. Same rationale as the
-    -- session.create cap — an attacker submitting a 64 KiB XFF
-    -- header would land the whole string in the indexed _hull_
-    -- audit_log.ip column. 64 chars covers IPv6 with headroom.
-    if type(ip) == "string" and #ip > 64 then
-        ip = ip:sub(1, 64)
-    end
-    return ip
+    -- Delegates to the shared hull.web._request helper (trust_proxy ->
+    -- XFF-first -> remote_addr, capped at 64 chars). This module's
+    -- extract_ip was the canonical implementation the helper was lifted
+    -- from; see docs/stdlib_style.md section 4.
+    return _request.client_ip(req, _state.trust_proxy)
 end
 
 local function extract_ua(req)
