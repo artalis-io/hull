@@ -33,6 +33,7 @@ import { time }   from "hull:time";
 import { qrcode } from "hull:qrcode";
 import { app }    from "hull:app";
 import { log }    from "hull:log";
+import { _request } from "hull:web:_request";
 
 // ── Module state ───────────────────────────────────────────────────
 
@@ -557,16 +558,9 @@ function clearFailedAttemptsIp(ip) {
 let _xffWarnDone = false;
 function extractIp(req) {
     if (!req || typeof req !== "object") return null;
-    const h = req.headers || {};
-    const xff = h["x-forwarded-for"];
-    if (_state.trustXff) {
-        if (typeof xff === "string" && xff !== "") {
-            const comma = xff.indexOf(",");
-            const first = comma >= 0 ? xff.substring(0, comma) : xff;
-            const trimmed = first.trim();
-            if (trimmed !== "") return trimmed;
-        }
-    } else if (typeof xff === "string" && xff !== "" && !_xffWarnDone) {
+    const xff = (req.headers || {})["x-forwarded-for"];
+    if (!_state.trustXff && typeof xff === "string" && xff !== ""
+        && !_xffWarnDone) {
         // Round-11 MEDIUM-8: one-shot warn. See Lua sibling.
         _xffWarnDone = true;
         log.warn("totp: X-Forwarded-For seen but trustXff = false; "
@@ -575,10 +569,9 @@ function extractIp(req) {
             + "that normalizes XFF, set totp.init({trustXff: true}) "
             + "so each upstream client gets its own bucket.");
     }
-    if (typeof req.remote_addr === "string" && req.remote_addr !== "") {
-        return req.remote_addr;
-    }
-    return null;
+    // Core extraction (trustXff -> XFF-first -> remote_addr, 64-cap)
+    // via the shared hull:web:_request helper; see docs/stdlib_style.md.
+    return _request.clientIp(req, _state.trustXff);
 }
 
 // ── Public API ─────────────────────────────────────────────────────
