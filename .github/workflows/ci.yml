@@ -130,6 +130,10 @@ jobs:
         timeout-minutes: 2
         run: make e2e-uuid
 
+      - name: Cache module (TTL/LRU) Lua/JS parity E2E test
+        timeout-minutes: 2
+        run: make e2e-cache-module
+
       - name: Config (typed env + .env) Lua/JS parity E2E test
         timeout-minutes: 2
         run: make e2e-config-parity
