@@ -196,7 +196,10 @@ end
 function session.create(data, opts)
     local id = generate_id()
     local now = time.now()
-    local ttl = (opts and opts.ttl) or _ttl
+    -- Explicit nil check (not `or`): a caller-supplied ttl = 0 is legal and
+    -- must not be silently replaced by the default. Matches session.init and
+    -- the JS sibling. (In Lua 0 is truthy, so `x and 0 or d` keeps the 0.)
+    local ttl = (opts and opts.ttl ~= nil) and opts.ttl or _ttl
     local encoded = json.encode(data or {})
 
     -- Capture device columns for hull/web/middleware/audit-log
@@ -287,7 +290,10 @@ function session.load(session_id, opts)
     end
 
     -- Update last_accessed and extend expiry
-    local ttl = (opts and opts.ttl) or _ttl
+    -- Explicit nil check (not `or`): a caller-supplied ttl = 0 is legal and
+    -- must not be silently replaced by the default. Matches session.init and
+    -- the JS sibling. (In Lua 0 is truthy, so `x and 0 or d` keeps the 0.)
+    local ttl = (opts and opts.ttl ~= nil) and opts.ttl or _ttl
     db.exec(
         "UPDATE _hull_sessions SET last_accessed = ?, expires_at = ? WHERE id = ?",
         { now, now + ttl, session_id }
@@ -315,7 +321,10 @@ function session.update(session_id, data, opts)
     end
 
     local now = time.now()
-    local ttl = (opts and opts.ttl) or _ttl
+    -- Explicit nil check (not `or`): a caller-supplied ttl = 0 is legal and
+    -- must not be silently replaced by the default. Matches session.init and
+    -- the JS sibling. (In Lua 0 is truthy, so `x and 0 or d` keeps the 0.)
+    local ttl = (opts and opts.ttl ~= nil) and opts.ttl or _ttl
     local encoded = json.encode(data or {})
 
     -- AND expires_at > ? prevents reviving a session that the user
