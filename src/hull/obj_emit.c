@@ -77,8 +77,13 @@ static void buf_fixed(Buf *b, const char *str, size_t field) {
     size_t n = strlen(str); if (n > field) n = field;
     buf_put(b, str, n); buf_zero(b, field - n);
 }
-/* Overwrite an already-appended u64 at absolute offset off (little-endian). */
+/* Overwrite an already-appended u64 at absolute offset off (little-endian).
+ * Only ever called after the u64 was appended, so b->p is non-NULL and
+ * off+8 <= b->len; the guard makes that invariant explicit (and keeps the
+ * static analyzer from tracing a NULL b->p through the empty-buffer path the
+ * n==0 short-circuits in buf_put/buf_zero opened up). */
 static void buf_patch64(Buf *b, size_t off, uint64_t v) {
+    if (b->oom || !b->p) return;
     for (int i = 0; i < 8; i++) b->p[off + i] = (unsigned char)(v >> (8*i));
 }
 static uint32_t strtab_add(Buf *b, const char *s) {
