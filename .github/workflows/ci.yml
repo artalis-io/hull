@@ -134,6 +134,14 @@ jobs:
         timeout-minutes: 2
         run: make e2e-config-parity
 
+      - name: Retry (generic backoff) Lua/JS parity E2E test
+        timeout-minutes: 2
+        run: make e2e-retry
+
+      - name: Logx (contextual logging) Lua/JS parity E2E test
+        timeout-minutes: 2
+        run: make e2e-logx-parity
+
       - name: Validate Lua/JS parity E2E test
         timeout-minutes: 2
         run: make e2e-validate-parity

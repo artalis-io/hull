@@ -235,6 +235,13 @@ static const HlModuleSpec REGISTRY[] = {
         .required_caps = 0, .deps = {0},
     },
     {
+        /* Contextual logging: logx.with{fields} binds logfmt fields onto a
+         * child logger over hull/log. Pure Lua/JS, no new authority. */
+        .name = "hull/logx",
+        .api_major = 1, .intrinsic = 0, .pure = 0,
+        .required_caps = 0, .deps = {"hull/log", 0},
+    },
+    {
         /* Content-MIME sniffer. Thin binding around hl_cap_mime_sniff:
          * mime.sniff(bytes) returns the sniffed MIME string or nil.
          * Pure — no fs/network/db access — usable in CLI tools as
@@ -254,6 +261,14 @@ static const HlModuleSpec REGISTRY[] = {
         .name = "hull/qrcode",
         .api_major = 1, .intrinsic = 0, .pure = 1,
         .required_caps = 0, .deps = {0},
+    },
+    {
+        /* Generic retry-with-backoff for any fallible op (http/compute/gpu/db).
+         * retry.run(fn, opts) + retry.backoff. Sleeps via the hull.sleep
+         * intrinsic; crypto is used only for optional jitter. */
+        .name = "hull/retry",
+        .api_major = 1, .intrinsic = 0, .pure = 0,
+        .required_caps = 0, .deps = {"hull/crypto", 0},
     },
     {
         .name = "hull/search",
