@@ -688,6 +688,14 @@ e2e-client-ip-parity: $(BUILDDIR)/hull
 e2e-email: $(BUILDDIR)/hull
 	sh tests/e2e_email.sh
 
+.PHONY: e2e-uuid
+e2e-uuid: $(BUILDDIR)/hull
+	sh tests/e2e_uuid.sh
+
+.PHONY: e2e-config-parity
+e2e-config-parity: $(BUILDDIR)/hull
+	sh tests/e2e_config_parity.sh
+
 .PHONY: e2e-validate-parity
 e2e-validate-parity: $(BUILDDIR)/hull
 	sh tests/e2e_validate_parity.sh

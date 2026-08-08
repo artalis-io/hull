@@ -88,4 +88,25 @@ UTEST(hl_cap_env, multiple_allowed)
     unsetenv("HULL_B");
 }
 
+UTEST(hl_cap_env, allowed_membership)
+{
+    const char *allowed[] = { "HULL_ALLOWED", NULL };
+    HlEnvConfig cfg = { .allowed = allowed, .count = 1 };
+
+    /* Membership only - independent of whether the var is set. */
+    ASSERT_TRUE(hl_cap_env_allowed(&cfg, "HULL_ALLOWED"));   /* declared, unset */
+    ASSERT_FALSE(hl_cap_env_allowed(&cfg, "HULL_OTHER"));    /* not declared */
+}
+
+UTEST(hl_cap_env, allowed_null_safe)
+{
+    const char *allowed[] = { "PATH", NULL };
+    HlEnvConfig cfg = { .allowed = allowed, .count = 1 };
+
+    ASSERT_FALSE(hl_cap_env_allowed(NULL, "PATH"));
+    ASSERT_FALSE(hl_cap_env_allowed(&cfg, NULL));
+    HlEnvConfig empty = { .allowed = NULL, .count = 0 };
+    ASSERT_FALSE(hl_cap_env_allowed(&empty, "PATH"));
+}
+
 UTEST_MAIN();

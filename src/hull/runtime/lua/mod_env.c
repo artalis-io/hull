@@ -28,8 +28,22 @@ static int lua_env_get(lua_State *L)
     return 1;
 }
 
+/* env.allowed(name) → boolean: is name in the manifest allowlist?
+ * (Membership only, never a value — lets callers tell "not declared" from
+ * "declared but unset", which env.get folds together. Used by hull/config.) */
+static int lua_env_allowed(lua_State *L)
+{
+    HlLua *lua = get_hl_lua(L);
+    const char *name = luaL_checkstring(L, 1);
+    int allowed = (lua && lua->base.env_cfg)
+        ? hl_cap_env_allowed(lua->base.env_cfg, name) : 0;
+    lua_pushboolean(L, allowed);
+    return 1;
+}
+
 static const luaL_Reg env_funcs[] = {
     {"get", lua_env_get},
+    {"allowed", lua_env_allowed},
     {NULL, NULL}
 };
 
