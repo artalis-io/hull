@@ -26,13 +26,16 @@
 
 local log = require("hull.log")
 
+local _logfmt = require("hull.web._logfmt")
+
 local logx = {}
 
 local LEVELS = { "info", "warn", "error", "debug" }
 
 -- Format a fields table as a leading-space logfmt fragment: " k=v k2=v2".
--- Keys are sorted for deterministic, cross-runtime-identical output. A value
--- containing whitespace, a quote, or '=' is double-quoted with '"' escaped.
+-- Keys are sorted for deterministic, cross-runtime-identical output. Value
+-- escaping + quoting is the shared hull.web._logfmt rule (escapes \ CR LF ",
+-- quotes when needed) - the logger middleware uses the same one.
 local function fmt(fields)
     if not fields then return "" end
     local keys = {}
@@ -41,17 +44,7 @@ local function fmt(fields)
     if #keys == 0 then return "" end
     local parts = {}
     for _, k in ipairs(keys) do
-        local v = fields[k]
-        local s
-        if type(v) == "boolean" then
-            s = v and "true" or "false"
-        else
-            s = tostring(v)
-        end
-        if s:find('[%s"=]') then
-            s = '"' .. s:gsub('"', '\\"') .. '"'
-        end
-        parts[#parts + 1] = k .. "=" .. s
+        parts[#parts + 1] = _logfmt.pair(k, fields[k])
     end
     return " " .. table.concat(parts, " ")
 end

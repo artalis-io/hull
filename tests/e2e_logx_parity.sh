@@ -21,6 +21,9 @@ app.manifest({ modules = { "hull/logx@1", "hull/log@1" } })
 app.main(function(ctx)
     logx.with({ b = "x y", a = 1, z = true }).info("AAAA")
     logx.with({ a = 1 }).with({ c = "d" }).warn("BBBB")
+    -- Escaping: backslash (escaped, unquoted), a quote (escaped + quoted),
+    -- an '=' (quoted). sorted keys bs, eq, qt.
+    logx.with({ bs = "a\\b", qt = 'x"y', eq = "k=v" }).info("CCCC")
     return 0
 end)
 LUA
@@ -30,6 +33,7 @@ app.manifest({ modules: ["hull/logx@1", "hull/log@1"] });
 app.main((ctx) => {
     logx.with({ b: "x y", a: 1, z: true }).info("AAAA");
     logx.with({ a: 1 }).with({ c: "d" }).warn("BBBB");
+    logx.with({ bs: "a\\b", qt: 'x"y', eq: "k=v" }).info("CCCC");
     return 0;
 });
 JS
@@ -38,7 +42,7 @@ JS
 extract() {
     "$HULL" "$1" 2>&1 \
         | sed 's/\x1b\[[0-9;]*m//g' \
-        | grep -oE '(AAAA|BBBB).*' \
+        | grep -oE '(AAAA|BBBB|CCCC).*' \
         | sed 's/[[:space:]]*$//' \
         | tr '\n' '~'
 }
@@ -46,8 +50,10 @@ extract() {
 lua_out="$(extract "$WD/l.lua")"
 js_out="$(extract "$WD/l.js")"
 
-# sorted keys (a,b,z); "x y" quoted; boolean true; child merge a+c
-expect='AAAA a=1 b="x y" z=true~BBBB a=1 c=d~'
+# AAAA: sorted keys (a,b,z); "x y" quoted; boolean true.
+# BBBB: child merge a+c.
+# CCCC: backslash doubled + unquoted; quote escaped + quoted; '=' quoted.
+expect='AAAA a=1 b="x y" z=true~BBBB a=1 c=d~CCCC bs=a\\b eq="k=v" qt="x\"y"~'
 
 if [ "$lua_out" = "$expect" ] && [ "$lua_out" = "$js_out" ]; then
     echo "PASS: hull.logx logfmt formatting is byte-identical across Lua and JS"
