@@ -47,6 +47,9 @@ local function run(s)
     o[#o+1] = #s:scan("p:") == 2 and "scan2" or "F_scan"
     s:set("e", "v", { ttl = 0 })
     o[#o+1] = s:get("e") == nil and "ttl0" or "F_ttl0"
+    s:set("empty", "")
+    o[#o+1] = (not pcall(function() s:incr("empty", 1) end)) and "incr_empty" or "F_incr_empty"
+    o[#o+1] = (not pcall(function() s:scan("p:", { limit = -1 }) end)) and "badlimit" or "F_badlimit"
     return table.concat(o, ",")
 end
 
@@ -71,6 +74,8 @@ import { kv } from "hull:kv";
 import { db as dbModule } from "hull:db";
 app.manifest({ modules: ["hull/kv@1", "hull/db@1"] });
 
+function threw(fn) { try { fn(); return false; } catch (e) { return e.code === "invalid_argument"; } }
+
 function run(s) {
     s.clear();
     const o = [];
@@ -94,6 +99,9 @@ function run(s) {
     o.push(s.scan("p:").length === 2 ? "scan2" : "F_scan");
     s.set("e", "v", { ttl: 0 });
     o.push(s.get("e") === null ? "ttl0" : "F_ttl0");
+    s.set("empty", "");
+    o.push(threw(() => s.incr("empty", 1)) ? "incr_empty" : "F_incr_empty");
+    o.push(threw(() => s.scan("p:", { limit: -1 })) ? "badlimit" : "F_badlimit");
     return o.join(",");
 }
 
@@ -111,7 +119,7 @@ app.main((ctx) => {
 });
 JS
 
-expect="miss_nil,set_get,binval,binkey,overwrite,delete,exists,incr,cas,scan2,ttl0|nsiso"
+expect="miss_nil,set_get,binval,binkey,overwrite,delete,exists,incr,cas,scan2,ttl0,incr_empty,badlimit|nsiso"
 lua_out="$("$HULL" "$WD/conf.lua" -d "$WD/conf_lua.db" 2>/dev/null | tail -1)"
 js_out="$( "$HULL" "$WD/conf.js"  -d "$WD/conf_js.db"  2>/dev/null | tail -1)"
 

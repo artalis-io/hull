@@ -64,7 +64,8 @@ function H:scan(prefix, opts)
     if prefix ~= nil and type(prefix) ~= "string" then
         u.error("invalid_argument", "kv: scan prefix must be a string (bytes)")
     end
-    return self._s:scan(prefix, opts and opts.limit)
+    local limit = u.check_count(opts and opts.limit, "scan limit")
+    return self._s:scan(prefix, limit)
 end
 
 function H:cleanup() return self._s:cleanup() end

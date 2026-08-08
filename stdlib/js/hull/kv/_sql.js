@@ -40,7 +40,7 @@ class SqlStore {
         this.ns = namespace;
         this.defaultTtl = policy.defaultTtl;
         this.evict = !!policy.evict;
-        this.maxItems = policy.maxItems || 0;
+        this.maxItems = util.checkCount(policy.maxItems, "max_items") || 0;
         this.caps = {
             ttl: true, atomic_increment: true, compare_exchange: true,
             scan: true, persistent: true, shared: (backend === "postgres"),

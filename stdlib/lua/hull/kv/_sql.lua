@@ -63,7 +63,7 @@ function M.new(conn, namespace, policy)
         conn = conn, ns = namespace,
         default_ttl = policy.default_ttl,
         evict = policy.evict and true or false,
-        max_items = policy.max_items or 0,
+        max_items = u.check_count(policy.max_items, "max_items") or 0,
         caps = {
             ttl = true, atomic_increment = true, compare_exchange = true,
             scan = true, persistent = true, shared = (backend == "postgres"),

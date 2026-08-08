@@ -135,6 +135,14 @@ honors the host allowlist and the `network_outbound` sandbox grant. Namespaces
 are first-class and isolate keyspaces; a `kv` and a `cache` that share a
 namespace name never collide (physical namespaces are prefixed `kv:` / `cache:`).
 
+**Namespaces are process-lifetime.** The memory backend keys one store per
+namespace at module level (so same-namespace opens share state), and that map is
+never pruned. Keep the set of namespaces **bounded** - do not derive a namespace
+from unbounded / attacker-controlled input (e.g. `namespace = "tenant:" .. id`
+for an unbounded id set), or each distinct value leaks a store for the process
+lifetime. A durable (SQL) namespace is just an `ns` column value, so it does not
+leak process memory, but the same bounded-cardinality guidance applies.
+
 ## Backend extension points
 
 The subsystem is deliberately narrow; new engines slot in without touching the

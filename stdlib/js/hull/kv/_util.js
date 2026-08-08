@@ -50,10 +50,25 @@ function expiryMs(ttl, defaultTtl) {
 function nowMs() { return time.nowMs(); }
 
 function toInt(bytes) {
+    // Reject empty / whitespace-only up front: Number("") and Number("  ") are
+    // 0 in JS (both Number.isInteger), but Lua's tonumber("") / tonumber(" ")
+    // are nil -> throw. Guard so incr() on such a value throws in BOTH runtimes.
+    if (typeof bytes !== "string" || bytes.trim() === "")
+        codedError("invalid_argument", "kv: value is not an integer for incr()");
     const n = Number(bytes);
     if (!Number.isInteger(n))
         codedError("invalid_argument", "kv: value is not an integer for incr()");
     return n;
+}
+
+// Validate an optional non-negative integer (a count/limit); undefined/null
+// passes through as undefined. Mirrors Lua's string.format("%d", ...) strictness
+// so a bad limit/max never reaches an inlined SQL LIMIT as "NaN" / "Infinity".
+function checkCount(v, what) {
+    if (v === undefined || v === null) return undefined;
+    if (typeof v !== "number" || !Number.isInteger(v) || v < 0)
+        codedError("invalid_argument", "kv: " + what + " must be a non-negative integer");
+    return v;
 }
 
 // ---- binary-safe base64 (standard alphabet, padded) over byte strings ----
@@ -112,8 +127,8 @@ function hexdecode(hex) {
 }
 
 const util = {
-    MAX_KEY, NO_EXPIRY, error: codedError, checkKey, checkValue, expiryMs,
-    nowMs, toInt, b64encode, b64decode, hexencode, hexdecode,
+    MAX_KEY, NO_EXPIRY, error: codedError, checkKey, checkValue, checkCount,
+    expiryMs, nowMs, toInt, b64encode, b64decode, hexencode, hexdecode,
 };
 
 export default util;
