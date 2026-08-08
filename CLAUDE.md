@@ -1534,6 +1534,8 @@ Register with `app.use(method, pattern, mw)`:
 | `tar` | `hull.archive.tar` | `hull:archive:tar` | ustar archive parse/create/extract/pack (extract/pack compose the fs capability) |
 | `qrcode` | `hull.qrcode` | `hull:qrcode` | QR Code generator (ISO/IEC 18004), pure Lua/JS |
 | `search` | `hull.search` | `hull:search` | Full-text search (SQLite FTS5) |
+| `kv` | `hull.kv` | `hull:kv` | Portable key/value STORE: `open{backend,namespace}` -> handle (`get/set/delete/exists/incr/cas/scan/clear/cleanup/stats/caps`). Backends: memory / sqlite / postgres (over an existing `hull/db` conn). Durable, no eviction unless asked; binary-safe bytes. See [docs/kv_cache.md](docs/kv_cache.md) |
+| `cache` | `hull.cache` | `hull:cache` | In-process value memoizer (`cache.new`/`get/set/fetch`) PLUS `cache.open{backend,namespace,max_bytes,default_ttl}` -> byte-oriented, LRU-evicting CACHE handle (memory / sqlite). Ephemeral + bounded; distinct from `hull/kv` (see [docs/kv_cache.md](docs/kv_cache.md)) |
 | `rbac` | `hull.web.middleware.rbac` | `hull:web:middleware:rbac` | Role-based access control |
 | `health` | `hull.web.middleware.health` | `hull:web:middleware:health` | Health check + readiness endpoints |
 | `etag` | `hull.web.middleware.etag` | `hull:web:middleware:etag` | ETag response helpers with 304 Not Modified |

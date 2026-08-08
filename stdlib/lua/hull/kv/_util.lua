@@ -67,6 +67,17 @@ end
 
 function M.now_ms() return time.now_ms() end
 
+-- Validate an optional non-negative integer (a count/limit); nil passes
+-- through. string.format("%d", ...) already rejects non-integers loudly, but
+-- validating up front gives a stable coded error instead of a format raise.
+function M.check_count(v, what)
+    if v == nil then return nil end
+    if type(v) ~= "number" or v ~= math.floor(v) or v < 0 then
+        M.error("invalid_argument", "kv: " .. what .. " must be a non-negative integer")
+    end
+    return v
+end
+
 -- Parse a stored value as a base-10 integer for incr(); a fresh key is 0.
 function M.to_int(bytes)
     local n = tonumber(bytes)

@@ -52,7 +52,8 @@ function build(store, meta) {
             need("scan");
             if (prefix !== undefined && prefix !== null && typeof prefix !== "string")
                 util.error("invalid_argument", "kv: scan prefix must be a string (bytes)");
-            return store.scan(prefix, opts && opts.limit);
+            const limit = util.checkCount(opts && opts.limit, "scan limit");
+            return store.scan(prefix, limit);
         },
 
         cleanup() { return store.cleanup(); },
