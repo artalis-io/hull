@@ -696,6 +696,10 @@ e2e-uuid: $(BUILDDIR)/hull
 e2e-cache-module: $(BUILDDIR)/hull
 	sh tests/e2e_cache_module.sh
 
+.PHONY: e2e-kv
+e2e-kv: $(BUILDDIR)/hull
+	sh tests/e2e_kv.sh
+
 .PHONY: e2e-ratelimit-parity
 e2e-ratelimit-parity: $(BUILDDIR)/hull
 	sh tests/e2e_ratelimit_parity.sh

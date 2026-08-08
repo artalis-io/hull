@@ -134,6 +134,10 @@ jobs:
         timeout-minutes: 2
         run: make e2e-cache-module
 
+      - name: KV + cache backends (memory/sqlite) conformance E2E test
+        timeout-minutes: 2
+        run: make e2e-kv
+
       - name: Ratelimit (hull.cache-backed) Lua/JS parity E2E test
         timeout-minutes: 2
         run: make e2e-ratelimit-parity
