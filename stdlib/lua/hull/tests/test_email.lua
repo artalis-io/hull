@@ -1,6 +1,8 @@
 -- test_email.lua — Tests for hull.email
 --
 -- Tests field validation and provider dispatch (no network I/O).
+-- email.send follows the stdlib error convention: it THROWS a coded error
+-- table ({ code, message }) on failure and returns true on success.
 -- Run via: the C test harness (test_lua_runtime.c) loads and executes this.
 
 local email = require('hull.email')
@@ -24,94 +26,87 @@ local function assert_eq(a, b, msg)
     end
 end
 
+-- Assert email.send(opts) throws a coded error whose code == want_code and
+-- (optionally) whose message contains want_msg.
+local function expect_code(name, opts, want_code, want_msg)
+    test(name, function()
+        local ok, err = pcall(email.send, opts)
+        assert_eq(ok, false, "expected a throw")
+        assert_eq(type(err), "table", "expected an error table")
+        assert_eq(err.code, want_code, "code")
+        if want_msg then
+            assert(tostring(err):find(want_msg, 1, true),
+                   "expected message to contain '" .. want_msg .. "', got: " .. tostring(err))
+        end
+    end)
+end
+
 -- ── validation ──────────────────────────────────────────────────────
 
-test("nil opts returns error", function()
-    local r = email.send(nil)
-    assert_eq(r.ok, false)
-    assert_eq(r.error, "opts required")
-end)
+expect_code("nil opts throws", nil, "invalid_argument", "opts required")
 
-test("missing from returns error", function()
-    local r = email.send({ to = "x@y.com", subject = "s", body = "b" })
-    assert_eq(r.ok, false)
-    assert_eq(r.error, "from required")
-end)
+expect_code("missing from throws",
+    { to = "x@y.com", subject = "s", body = "b" },
+    "invalid_argument", "from required")
 
-test("missing to returns error", function()
-    local r = email.send({ from = "x@y.com", subject = "s", body = "b" })
-    assert_eq(r.ok, false)
-    assert_eq(r.error, "to required")
-end)
+expect_code("missing to throws",
+    { from = "x@y.com", subject = "s", body = "b" },
+    "invalid_argument", "to required")
 
-test("missing subject returns error", function()
-    local r = email.send({ from = "x@y.com", to = "y@z.com", body = "b" })
-    assert_eq(r.ok, false)
-    assert_eq(r.error, "subject required")
-end)
+expect_code("missing subject throws",
+    { from = "x@y.com", to = "y@z.com", body = "b" },
+    "invalid_argument", "subject required")
 
-test("missing body returns error", function()
-    local r = email.send({ from = "x@y.com", to = "y@z.com", subject = "s" })
-    assert_eq(r.ok, false)
-    assert_eq(r.error, "body required")
-end)
+expect_code("missing body throws",
+    { from = "x@y.com", to = "y@z.com", subject = "s" },
+    "invalid_argument", "body required")
+
+expect_code("invalid from address throws",
+    { from = "not-an-email", to = "y@z.com", subject = "s", body = "b" },
+    "invalid_argument", "invalid from address")
+
+expect_code("invalid to address throws",
+    { from = "x@y.com", to = "not-an-email", subject = "s", body = "b" },
+    "invalid_argument", "invalid to address")
 
 -- ── provider dispatch ───────────────────────────────────────────────
 
-test("unknown provider returns error", function()
-    local r = email.send({
-        provider = "unknown",
-        from = "a@b.com", to = "c@d.com",
-        subject = "s", body = "b",
-    })
-    assert_eq(r.ok, false)
-    assert(r.error:find("unknown provider"), "expected 'unknown provider' in error")
-end)
+expect_code("unknown provider throws",
+    { provider = "unknown", from = "a@b.com", to = "c@d.com",
+      subject = "s", body = "b" },
+    "unknown_provider", "unknown provider")
 
 test("default provider is smtp", function()
-    -- Will fail because smtp is not configured in test env, but should not
-    -- error about "unknown provider" — it dispatches to smtp adapter
-    local r = email.send({
+    -- Dispatches to the smtp adapter (which then fails because smtp is not
+    -- configured / localhost is unreachable in the test env). The failure must
+    -- NOT be unknown_provider — that would mean it never reached smtp.
+    local ok, err = pcall(email.send, {
         from = "a@b.com", to = "c@d.com",
         subject = "s", body = "b",
         smtp_host = "localhost",
     })
-    -- Should either succeed or fail with smtp-related error, not "unknown provider"
-    assert(r.error == nil or not r.error:find("unknown provider"),
-           "should dispatch to smtp, not fail with unknown provider")
+    if not ok then
+        assert(type(err) ~= "table" or err.code ~= "unknown_provider",
+               "should dispatch to smtp, not fail with unknown_provider")
+    end
 end)
 
 -- ── api provider validation ─────────────────────────────────────────
 
-test("postmark requires api_key", function()
-    local r = email.send({
-        provider = "postmark",
-        from = "a@b.com", to = "c@d.com",
-        subject = "s", body = "b",
-    })
-    assert_eq(r.ok, false)
-    assert(r.error:find("api_key required"), "expected api_key required error")
-end)
+expect_code("postmark requires api_key",
+    { provider = "postmark", from = "a@b.com", to = "c@d.com",
+      subject = "s", body = "b" },
+    "invalid_argument", "api_key required")
 
-test("sendgrid requires api_key", function()
-    local r = email.send({
-        provider = "sendgrid",
-        from = "a@b.com", to = "c@d.com",
-        subject = "s", body = "b",
-    })
-    assert_eq(r.ok, false)
-    assert(r.error:find("api_key required"), "expected api_key required error")
-end)
+expect_code("sendgrid requires api_key",
+    { provider = "sendgrid", from = "a@b.com", to = "c@d.com",
+      subject = "s", body = "b" },
+    "invalid_argument", "api_key required")
 
-test("resend requires api_key", function()
-    local r = email.send({
-        provider = "resend",
-        from = "a@b.com", to = "c@d.com",
-        subject = "s", body = "b",
-    })
-    assert_eq(r.ok, false)
-    assert(r.error:find("api_key required"), "expected api_key required error")
-end)
+expect_code("resend requires api_key",
+    { provider = "resend", from = "a@b.com", to = "c@d.com",
+      subject = "s", body = "b" },
+    "invalid_argument", "api_key required")
 
 -- ── results ─────────────────────────────────────────────────────────
 

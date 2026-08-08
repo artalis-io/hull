@@ -15,6 +15,20 @@
  * loop. SMTP uses the C `smtp.send` cap (mbedTLS + embedded Mozilla CA
  * bundle).
  *
+ * Errors: `email.send` follows the stdlib error convention
+ * (docs/stdlib_style.md section 1) — a failure to send THROWS an `Error` with a
+ * stable `.code`; success resolves to `true`. Callers that branch use
+ * try/catch:
+ *
+ *     try { await email.send(opts); }
+ *     catch (e) { log.error(String(e));    // e.code is stable
+ *         if (e.code === "delivery_failed") { ... } }
+ *
+ * Codes: `invalid_argument` (missing/invalid opts, from, to, subject, body, or a
+ * provider's required apiKey), `unknown_provider`, `delivery_failed` (the
+ * provider attempted delivery and it failed). Composes with `hull/jobs`: a
+ * `send_email` handler that calls `email.send(job.data)` retries on a throw.
+ *
  * @license AGPL-3.0-or-later
  */
 
@@ -24,11 +38,21 @@ import { json } from "hull:json";
 
 const email = {};
 
+// Throw a coded Error. e.code is the stable, branch-on identity
+// (docs/stdlib_style.md section 1).
+function emailError(code, message) {
+    const e = new Error(message);
+    e.code = code;
+    throw e;
+}
+
+// Provider adapters: each takes (opts), returns true on success, throws on
+// failure (delivery_failed / invalid_argument).
 const providers = {};
 
 providers.smtp = function(opts) {
-    // Phase 6 audit M-3: mirror the three API providers — wrap in
-    // try/catch so the {ok, error} contract is uniform across providers.
+    // smtp.send is a thin C-cap binding that keeps its own {ok,error} shape;
+    // translate a failure (thrown or {ok:false}) into the email.send throw.
     let result;
     try {
         result = smtp.send({
@@ -46,21 +70,25 @@ providers.smtp = function(opts) {
             content_type: opts.content_type || "text/plain",
         });
     } catch (e) {
-        return { ok: false, error: "smtp: " + String(e) };
+        emailError("delivery_failed", "smtp: " + String(e));
     }
-    return result;
+    if (!result || !result.ok) {
+        emailError("delivery_failed",
+            "smtp: " + ((result && result.error) || "send failed"));
+    }
+    return true;
 };
 
 providers.postmark = async function(opts) {
     if (!opts.api_key)
-        return { ok: false, error: "postmark: api_key required" };
+        emailError("invalid_argument", "postmark: api_key required");
 
     const payload = {
         From: opts.from,
         To: opts.to,
         Subject: opts.subject,
     };
-    // M-3: accept either array or string for `cc`.
+    // Accept either array or string for `cc`.
     if (Array.isArray(opts.cc))
         payload.Cc = opts.cc.join(",");
     else if (typeof opts.cc === "string")
@@ -72,8 +100,6 @@ providers.postmark = async function(opts) {
     else
         payload.TextBody = opts.body;
 
-    // M-2: trap network exceptions and return the documented {ok, error}
-    // contract rather than throwing out of email.send().
     let resp;
     try {
         resp = await httpClient.async.post(
@@ -88,18 +114,18 @@ providers.postmark = async function(opts) {
             }
         );
     } catch (e) {
-        return { ok: false, error: "postmark: " + String(e) };
+        emailError("delivery_failed", "postmark: " + String(e));
     }
     if (!resp)
-        return { ok: false, error: "postmark: no response" };
+        emailError("delivery_failed", "postmark: no response");
     if (resp.status >= 200 && resp.status < 300)
-        return { ok: true };
-    return { ok: false, error: "postmark: " + (resp.body || "unknown error") };
+        return true;
+    emailError("delivery_failed", "postmark: " + (resp.body || "unknown error"));
 };
 
 providers.sendgrid = async function(opts) {
     if (!opts.api_key)
-        return { ok: false, error: "sendgrid: api_key required" };
+        emailError("invalid_argument", "sendgrid: api_key required");
 
     const payload = {
         personalizations: [{ to: [{ email: opts.to }] }],
@@ -126,18 +152,18 @@ providers.sendgrid = async function(opts) {
             }
         );
     } catch (e) {
-        return { ok: false, error: "sendgrid: " + String(e) };
+        emailError("delivery_failed", "sendgrid: " + String(e));
     }
     if (!resp)
-        return { ok: false, error: "sendgrid: no response" };
+        emailError("delivery_failed", "sendgrid: no response");
     if (resp.status >= 200 && resp.status < 300)
-        return { ok: true };
-    return { ok: false, error: "sendgrid: " + (resp.body || "unknown error") };
+        return true;
+    emailError("delivery_failed", "sendgrid: " + (resp.body || "unknown error"));
 };
 
 providers.resend = async function(opts) {
     if (!opts.api_key)
-        return { ok: false, error: "resend: api_key required" };
+        emailError("invalid_argument", "resend: api_key required");
 
     const payload = {
         from: opts.from,
@@ -149,8 +175,7 @@ providers.resend = async function(opts) {
     else
         payload.text = opts.body;
     if (opts.reply_to) payload.reply_to = opts.reply_to;
-    // M-3: Resend accepts cc as array of strings, but accept a single
-    // string too.
+    // Resend accepts cc as an array of strings; accept a single string too.
     if (Array.isArray(opts.cc)) payload.cc = opts.cc;
     else if (typeof opts.cc === "string") payload.cc = [opts.cc];
 
@@ -167,17 +192,23 @@ providers.resend = async function(opts) {
             }
         );
     } catch (e) {
-        return { ok: false, error: "resend: " + String(e) };
+        emailError("delivery_failed", "resend: " + String(e));
     }
     if (!resp)
-        return { ok: false, error: "resend: no response" };
+        emailError("delivery_failed", "resend: no response");
     if (resp.status >= 200 && resp.status < 300)
-        return { ok: true };
-    return { ok: false, error: "resend: " + (resp.body || "unknown error") };
+        return true;
+    emailError("delivery_failed", "resend: " + (resp.body || "unknown error"));
 };
+
+const ADDR_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 /**
  * Send an email via the selected provider.
+ *
+ * Validates `from`/`to` against a simple `local@domain.tld` pattern before
+ * dispatch. THROWS an `Error` with a stable `.code` on any failure; resolves to
+ * `true` on success. See the module header for the code list.
  *
  * @param {Object} opts
  * @param {("smtp"|"postmark"|"sendgrid"|"resend")} [opts.provider="smtp"]
@@ -194,28 +225,35 @@ providers.resend = async function(opts) {
  * @param {string}   [opts.smtp_user]
  * @param {string}   [opts.smtp_pass]
  * @param {boolean}  [opts.smtp_tls=true]
- * @returns {Promise<{ok:true} | {ok:false, error:string}>}
+ * @returns {Promise<true>}  resolves true on success; throws {code} on failure.
  *
  * @example
- * const r = await email.send({
- *     provider: "postmark",
- *     from: "app@example.com", to: "user@example.com",
- *     subject: "Hi", body: "Hello!",
- *     api_key: env.get("POSTMARK_TOKEN"),
- * });
- * if (!r.ok) log.error(r.error);
+ * try {
+ *     await email.send({
+ *         provider: "postmark",
+ *         from: "app@example.com", to: "user@example.com",
+ *         subject: "Hi", body: "Hello!",
+ *         api_key: env.get("POSTMARK_TOKEN"),
+ *     });
+ * } catch (e) { log.error(String(e)); }
  */
 email.send = async function(opts) {
-    if (!opts) return { ok: false, error: "opts required" };
-    if (!opts.from) return { ok: false, error: "from required" };
-    if (!opts.to) return { ok: false, error: "to required" };
-    if (!opts.subject) return { ok: false, error: "subject required" };
-    if (!opts.body) return { ok: false, error: "body required" };
+    if (!opts) emailError("invalid_argument", "opts required");
+    if (!opts.from) emailError("invalid_argument", "from required");
+    if (!opts.to) emailError("invalid_argument", "to required");
+    if (!opts.subject) emailError("invalid_argument", "subject required");
+    if (!opts.body) emailError("invalid_argument", "body required");
+
+    // Basic email format validation (parity with the Lua module).
+    if (!ADDR_RE.test(opts.from))
+        emailError("invalid_argument", "invalid from address");
+    if (!ADDR_RE.test(opts.to))
+        emailError("invalid_argument", "invalid to address");
 
     const provider = opts.provider || "smtp";
     const fn = providers[provider];
     if (!fn)
-        return { ok: false, error: "unknown provider: " + String(provider) };
+        emailError("unknown_provider", "unknown provider: " + String(provider));
     return await fn(opts);
 };
 
