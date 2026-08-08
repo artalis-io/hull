@@ -688,6 +688,14 @@ e2e-client-ip-parity: $(BUILDDIR)/hull
 e2e-email: $(BUILDDIR)/hull
 	sh tests/e2e_email.sh
 
+.PHONY: e2e-validate-parity
+e2e-validate-parity: $(BUILDDIR)/hull
+	sh tests/e2e_validate_parity.sh
+
+.PHONY: e2e-token-interop
+e2e-token-interop: $(BUILDDIR)/hull
+	sh tests/e2e_token_interop.sh
+
 e2e-agent: $(BUILDDIR)/hull
 	RUNTIME=$(RUNTIME) sh tests/e2e_agent.sh
 

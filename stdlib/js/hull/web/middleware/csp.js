@@ -45,10 +45,11 @@ function nonceB64url(nBytes) {
     nBytes = nBytes || 16;
     const ab = crypto.random(nBytes);
     if (!ab || ab.byteLength !== nBytes) return null;
-    const bytes = new Uint8Array(ab);
-    let bin = "";
-    for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
-    const b64 = crypto.base64urlEncode(bin);
+    // Base64url the ArrayBuffer directly - binary-safe. Going through a
+    // String.fromCharCode byte-string and then crypto.base64urlEncode would
+    // UTF-8-inflate every byte >= 0x80 (harmless for a per-response opaque
+    // nonce, but wasteful and the same footgun the jwt HS256 signature hit).
+    const b64 = crypto.base64urlEncode(ab);
     if (!b64) return null;
     // Defensive: strip trailing '=' if the encoder ever returns padded.
     return b64.replace(/=+$/, "");

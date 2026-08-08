@@ -14,7 +14,25 @@
  * if (!ok) return res.status(422).json({ errors });
  */
 
-const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+// Practical RFC-5322 subset. Kept byte-for-byte semantically identical to the
+// Lua sibling's email_ok (stdlib/lua/hull/validate.lua): local part starts
+// alphanumeric and allows . _ % + -, a single '@', domain starts alphanumeric
+// with at least one '.', TLD >= 2 letters. A secondary pass rejects "..",
+// leading ".", ".@", "@." which the regex alone would let through. A prior bare
+// /^[^\s@]+@[^\s@]+\.[^\s@]+$/ here was materially weaker than Lua (no length
+// cap, no ".." / dot-edge rejection, digit TLDs accepted); guarded by
+// tests/e2e_validate_parity.sh.
+const EMAIL_RE =
+    /^[A-Za-z0-9][A-Za-z0-9._+-]*@[A-Za-z0-9][A-Za-z0-9.-]*\.[A-Za-z][A-Za-z]+$/;
+
+function emailOk(s) {
+    if (typeof s !== "string") return false;
+    if (s.length > 254) return false;
+    if (!EMAIL_RE.test(s)) return false;
+    if (s.indexOf("..") !== -1) return false;
+    if (/^\./.test(s) || s.indexOf(".@") !== -1 || s.indexOf("@.") !== -1) return false;
+    return true;
+}
 
 /**
  * Validate a data object against a schema.
@@ -151,7 +169,7 @@ function check(data, schema) {
 
         // 8. email
         if (rules.email) {
-            if (typeof value !== "string" || !EMAIL_RE.test(value))
+            if (!emailOk(value))
                 err = customMsg || "is not a valid email";
         }
 
