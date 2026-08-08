@@ -87,6 +87,21 @@ $(BUILDDIR)/test_pg_conn: $(TESTDIR)/hull/cap/test_pg_conn.c $(SRCDIR)/hull/cap/
 		$(TESTDIR)/hull/cap/test_pg_conn.c $(SRCDIR)/hull/cap/pg_conn.c $(SRCDIR)/hull/cap/pgwire.c \
 		$(PG_CRYPTO_OBJS) $(LDFLAGS)
 
+# Valkey/Redis RESP2/3 codec test: respwire.c is a self-contained parser gated
+# out of CAP_OBJS until HL_ENABLE_VALKEY, so link it directly (explicit rule
+# wins over the generic pattern rule).
+$(BUILDDIR)/test_respwire: $(TESTDIR)/hull/cap/test_respwire.c $(SRCDIR)/hull/cap/respwire.c | $(BUILDDIR)
+	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ \
+		$(TESTDIR)/hull/cap/test_respwire.c $(SRCDIR)/hull/cap/respwire.c $(LDFLAGS)
+
+# Valkey/Redis DSN parser test: valkey_conn.c's DSN part is self-contained (no
+# socket/TLS yet) and gated out of CAP_OBJS until HL_ENABLE_VALKEY.
+# -DHL_VALKEY_NO_TLS keeps the (Phase 1b) TLS transport out so the DSN test
+# needs no Keel/mbedTLS link, mirroring test_pg_conn's -DHL_PG_NO_TLS.
+$(BUILDDIR)/test_valkey_dsn: $(TESTDIR)/hull/cap/test_valkey_dsn.c $(SRCDIR)/hull/cap/valkey_conn.c | $(BUILDDIR)
+	$(CC) $(CFLAGS) -DHL_VALKEY_NO_TLS $(INCLUDES) -I$(VENDDIR) -o $@ \
+		$(TESTDIR)/hull/cap/test_valkey_dsn.c $(SRCDIR)/hull/cap/valkey_conn.c $(LDFLAGS)
+
 # MySQL/MariaDB codec + DSN test: mysqlwire.c + mysql_conn.c (Phase 1b) are
 # self-contained (no socket/TLS/crypto yet) and gated out of CAP_OBJS until
 # HL_ENABLE_MYSQL, so link them directly. Explicit rule wins over the pattern.
@@ -509,6 +524,16 @@ fuzz/fuzz_mime_sniff: fuzz/fuzz_mime_sniff.c $(SRCDIR)/hull/cap/mime.c
 fuzz/fuzz_host_match: fuzz/fuzz_host_match.c $(SRCDIR)/hull/utils/host_match.c
 	$(CC) $(FUZZ_CFLAGS) -o $@ $^
 
+# Valkey/Redis RESP2/3 reply parser: the untrusted-server codec.
+fuzz/fuzz_respwire: fuzz/fuzz_respwire.c $(SRCDIR)/hull/cap/respwire.c
+	$(CC) $(FUZZ_CFLAGS) -o $@ $^
+
+# Valkey/Redis DSN parser: percent-decoding + bounded field splitting over a
+# user-supplied connection string. -DHL_VALKEY_NO_TLS keeps the (Phase 1b) TLS
+# transport out so the pure-parser fuzzer needs no Keel/mbedTLS.
+fuzz/fuzz_valkey_dsn: fuzz/fuzz_valkey_dsn.c $(SRCDIR)/hull/cap/valkey_conn.c
+	$(CC) $(FUZZ_CFLAGS) -DHL_VALKEY_NO_TLS -o $@ $^
+
 # PostgreSQL wire-protocol reader: the untrusted-server parser (§1 Phase 2).
 fuzz/fuzz_pgwire: fuzz/fuzz_pgwire.c $(SRCDIR)/hull/cap/pgwire.c
 	$(CC) $(FUZZ_CFLAGS) -o $@ $^
@@ -533,7 +558,7 @@ fuzz/fuzz_mysqlwire: fuzz/fuzz_mysqlwire.c $(SRCDIR)/hull/cap/mysqlwire.c
 fuzz/fuzz_mysql_dsn: fuzz/fuzz_mysql_dsn.c $(SRCDIR)/hull/cap/mysql_conn.c
 	$(CC) $(FUZZ_CFLAGS) -DHL_MY_NO_AUTH -o $@ $^
 
-fuzz: fuzz/fuzz_sh_json fuzz/fuzz_path_normalize fuzz/fuzz_mime_sniff fuzz/fuzz_host_match fuzz/fuzz_pgwire fuzz/fuzz_pg_dsn fuzz/fuzz_pg_rewrite fuzz/fuzz_mysqlwire fuzz/fuzz_mysql_dsn
+fuzz: fuzz/fuzz_sh_json fuzz/fuzz_path_normalize fuzz/fuzz_mime_sniff fuzz/fuzz_host_match fuzz/fuzz_pgwire fuzz/fuzz_pg_dsn fuzz/fuzz_pg_rewrite fuzz/fuzz_mysqlwire fuzz/fuzz_mysql_dsn fuzz/fuzz_respwire fuzz/fuzz_valkey_dsn
 
 # Time-boxed run over the seed corpora (what CI runs). FUZZ_TIME overrides.
 fuzz-run: fuzz
@@ -546,6 +571,8 @@ fuzz-run: fuzz
 	./fuzz/fuzz_pg_rewrite fuzz/corpus_pg_rewrite/ -max_total_time=$(FUZZ_TIME)
 	./fuzz/fuzz_mysqlwire fuzz/corpus_mysqlwire/ -max_total_time=$(FUZZ_TIME)
 	./fuzz/fuzz_mysql_dsn fuzz/corpus_mysql_dsn/ -max_total_time=$(FUZZ_TIME)
+	./fuzz/fuzz_respwire fuzz/corpus_respwire/ -max_total_time=$(FUZZ_TIME)
+	./fuzz/fuzz_valkey_dsn fuzz/corpus_valkey_dsn/ -max_total_time=$(FUZZ_TIME)
 
 # ── E2E tests ──────────────────────────────────────────────────────
 

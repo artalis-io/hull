@@ -852,6 +852,17 @@ ifneq ($(HL_ENABLE_MYSQL),1)
       $(SRCDIR)/hull/cap/mysqlwire.c, \
       $(CAP_SRCS))
 endif
+ifneq ($(HL_ENABLE_VALKEY),1)
+  # Valkey/Redis KV backend (the first NON-SQL connection feature): RESP codec +
+  # connection + the HlKvBackend vtable. Off by default; lives only in the
+  # composed --with=valkey feature archive. The base-resident weak hook
+  # (cap/kv_feature.c) and generic KV cap stay in CAP_SRCS.
+  CAP_SRCS := $(filter-out \
+      $(SRCDIR)/hull/cap/respwire.c \
+      $(SRCDIR)/hull/cap/valkey_conn.c \
+      $(SRCDIR)/hull/cap/valkey.c, \
+      $(CAP_SRCS))
+endif
 ifneq ($(HL_ENABLE_DUCKDB),1)
   # DuckDB backend vtable (statically-linked libduckdb). Off by default.
   CAP_SRCS := $(filter-out \

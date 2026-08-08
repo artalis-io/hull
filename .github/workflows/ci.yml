@@ -734,6 +734,19 @@ jobs:
         timeout-minutes: 3
         run: ./fuzz/fuzz_mysql_dsn fuzz/corpus_mysql_dsn/ -max_total_time=60
 
+      - name: Fuzz respwire (60s)
+        # RESP2/3 reply parser over untrusted server bytes: bounds-checked,
+        # depth-capped decode is the trust boundary for a malicious / MITM'd
+        # Valkey/Redis. An OOB read or unbounded recursion is a crash / DoS.
+        timeout-minutes: 3
+        run: ./fuzz/fuzz_respwire fuzz/corpus_respwire/ -max_total_time=60
+
+      - name: Fuzz valkey_dsn (60s)
+        # Valkey/Redis DSN parser: percent-decoding + bounded field splitting
+        # over a user-supplied connection string.
+        timeout-minutes: 3
+        run: ./fuzz/fuzz_valkey_dsn fuzz/corpus_valkey_dsn/ -max_total_time=60
+
   # End-to-end against a real PostgreSQL 16 (started in Docker by the script).
   # Exercises the whole path the unit tests can't: DSN -> SCRAM-SHA-256 auth
   # (plaintext + TLS via a self-signed cert) -> parameterized query + typed
