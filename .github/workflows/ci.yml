@@ -142,6 +142,10 @@ jobs:
         timeout-minutes: 2
         run: make e2e-logx-parity
 
+      - name: Naming-reconciliation alias E2E test (canonical + alias both work)
+        timeout-minutes: 2
+        run: make e2e-naming-aliases
+
       - name: Validate Lua/JS parity E2E test
         timeout-minutes: 2
         run: make e2e-validate-parity

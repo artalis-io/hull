@@ -30,7 +30,9 @@ local auth = {}
 --
 -- @tparam[opt] table opts  Options:
 --
---   - `cookie_name`   (string, default `"hull_session"`)
+--   - `name`          (string, default `"hull_session"`): session cookie name.
+--                     Matches `hull.web.middleware.session`'s `name` option.
+--                     Back-compat alias: `cookie_name`.
 --   - `cookie_opts`   (table): forwarded to @{hull.web.cookie.clear} on
 --                     stale-cookie cleanup.
 --   - `optional`      (boolean, default `false`)
@@ -44,7 +46,7 @@ local auth = {}
 -- app.use("*", "/app/*", auth.session_middleware({ login_path = "/login" }))
 function auth.session_middleware(opts)
     opts = opts or {}
-    local cookie_name = opts.cookie_name or "hull_session"
+    local cookie_name = opts.name or opts.cookie_name or "hull_session"
     local cookie_opts = opts.cookie_opts
     local optional = opts.optional or false
     local login_path = opts.login_path
@@ -185,7 +187,7 @@ end
 -- @tparam table user_data    Data to persist in the session, e.g. `{ user_id = 1 }`.
 -- @tparam[opt] table opts    Options:
 --
---   - `cookie_name` (string, default `"hull_session"`)
+--   - `name` (string, default `"hull_session"`; alias: `cookie_name`)
 --   - `cookie_opts` (table): forwarded to @{hull.web.cookie.serialize}.
 --   - `ttl`         (integer, seconds): convenience that auto-fills
 --                   `cookie_opts.max_age` when the caller didn't.
@@ -207,7 +209,7 @@ end
 -- end)
 function auth.login(_req, res, user_data, opts)
     opts = opts or {}
-    local cookie_name = opts.cookie_name or "hull_session"
+    local cookie_name = opts.name or opts.cookie_name or "hull_session"
     local cookie_opts = opts.cookie_opts or {}
     if cookie_opts.max_age == nil and opts.ttl then
         -- Copy on write so we don't mutate the caller's table.
@@ -232,12 +234,12 @@ end
 -- @tparam table res           Response — emits a `Set-Cookie` that clears it.
 -- @tparam[opt] table opts     Options:
 --
---   - `cookie_name` (string, default `"hull_session"`)
+--   - `name` (string, default `"hull_session"`; alias: `cookie_name`)
 --   - `cookie_opts` (table): forwarded to @{hull.web.cookie.clear} so `path`
 --     / `domain` match the original cookie.
 function auth.logout(req, res, opts)
     opts = opts or {}
-    local cookie_name = opts.cookie_name or "hull_session"
+    local cookie_name = opts.name or opts.cookie_name or "hull_session"
     local cookie_opts = opts.cookie_opts or {}
 
     -- Get session ID from cookie

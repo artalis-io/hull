@@ -75,7 +75,7 @@
 --
 --     local authflows = require("hull.web.auth-flows")
 --     authflows.init({
---         state_secret  = env.get("AUTH_FLOWS_SECRET"),
+--         secret        = env.get("AUTH_FLOWS_SECRET"),  -- alias: state_secret
 --         email_send    = function(to, subject, html, text) ... end,
 --         templates     = {
 --             welcome        = function(ctx) ... end,
@@ -1517,8 +1517,10 @@ end
 
 function M.init(opts)
     opts = opts or {}
-    if type(opts.state_secret) ~= "string" or #opts.state_secret < 32 then
-        error("auth-flows.init: state_secret must be a string >= 32 bytes")
+    -- Canonical `secret`; back-compat alias `state_secret` (same HMAC key).
+    local secret = opts.secret or opts.state_secret
+    if type(secret) ~= "string" or #secret < 32 then
+        error("auth-flows.init: secret must be a string >= 32 bytes")
     end
     if type(opts.email_send) ~= "function" then
         error("auth-flows.init: email_send(to, subject, html, text) required")
@@ -1635,7 +1637,7 @@ function M.init(opts)
     -- with a non-ASCII byte would derive different HMAC keys per runtime and
     -- break the cross-runtime wire-format guarantee. _hex is byte-identical in
     -- both runtimes.
-    _state.state_secret_hex = _hex.to_hex(opts.state_secret)
+    _state.state_secret_hex = _hex.to_hex(secret)
     _state.email_send       = opts.email_send
     _state.public_origin    = opts.public_origin
     _state.trusted_hosts    = opts.trusted_hosts

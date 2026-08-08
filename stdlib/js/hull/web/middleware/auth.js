@@ -41,7 +41,8 @@ function parseCookieHeader(req) {
  *   - returns 0 if `opts.optional`.
  *
  * @param {Object} [opts]
- * @param {string} [opts.cookieName="hull_session"]
+ * @param {string} [opts.name="hull_session"]  Session cookie name (matches
+ *   hull:web:middleware:session's `name`). Back-compat alias: `cookieName`.
  * @param {string} [opts.loginPath]    Redirect target on failure.
  * @param {boolean} [opts.optional=false]
  * @param {string[]} [opts.excludePaths]   Paths skipped entirely.
@@ -49,7 +50,7 @@ function parseCookieHeader(req) {
  */
 function sessionMiddleware(opts) {
     const o = opts || {};
-    const cookieName = o.cookieName || "hull_session";
+    const cookieName = o.name || o.cookieName || "hull_session";
     const loginPath = o.loginPath || null;
     const optional = o.optional === true;
     const excludePaths = o.excludePaths || [];
@@ -201,13 +202,14 @@ function copyCookieOpts(src) {
  * @param {Object} res            Response — `Set-Cookie` is added here.
  * @param {Object} userData       Session payload, e.g. `{ user_id: 1 }`.
  * @param {Object} [opts]
- * @param {string} [opts.cookieName="hull_session"]
+ * @param {string} [opts.name="hull_session"]  Session cookie name (matches
+ *   hull:web:middleware:session's `name`). Back-compat alias: `cookieName`.
  * @param {Object} [opts.cookieOpts]   Forwarded to {@link module:hull:web:cookie.serialize}.
  * @returns {string}              Session id (hex).
  */
 function login(req, res, userData, opts) {
     const o = opts || {};
-    const cookieName = o.cookieName || "hull_session";
+    const cookieName = o.name || o.cookieName || "hull_session";
     const cookieOpts = copyCookieOpts(o.cookieOpts);
 
     // Set Max-Age from session TTL if not explicitly provided
@@ -228,12 +230,13 @@ function login(req, res, userData, opts) {
  * @param {Object} req            Reads the session cookie.
  * @param {Object} res            Emits a `Set-Cookie` that clears it.
  * @param {Object} [opts]
- * @param {string} [opts.cookieName="hull_session"]
+ * @param {string} [opts.name="hull_session"]  Session cookie name (matches
+ *   hull:web:middleware:session's `name`). Back-compat alias: `cookieName`.
  * @param {Object} [opts.cookieOpts]   Forwarded to {@link module:hull:web:cookie.clear}.
  */
 function logout(req, res, opts) {
     const o = opts || {};
-    const cookieName = o.cookieName || "hull_session";
+    const cookieName = o.name || o.cookieName || "hull_session";
     const cookieOpts = o.cookieOpts || {};
 
     const cookies = parseCookieHeader(req);

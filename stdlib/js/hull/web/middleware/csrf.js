@@ -64,10 +64,10 @@ function generate(sessionId, secret) {
  * @param {string} token
  * @param {string} sessionId
  * @param {string} secret
- * @param {number} [maxAge=3600]
+ * @param {number} [ttl=3600]  Max token age in seconds.
  * @returns {boolean}
  */
-function verify(token, sessionId, secret, maxAge) {
+function verify(token, sessionId, secret, ttl) {
     if (!token || typeof token !== "string")
         return false;
     if (!sessionId || typeof sessionId !== "string")
@@ -95,7 +95,7 @@ function verify(token, sessionId, secret, maxAge) {
     if (isNaN(ts))
         return false;
 
-    const age = maxAge !== undefined ? maxAge : 3600;
+    const age = ttl !== undefined ? ttl : 3600;
     const now = time.now();
     if (now - ts > age)
         return false;
@@ -125,7 +125,7 @@ function parseCookieSessionId(req, cookieName) {
  * @param {Object}  opts
  * @param {string}  opts.secret              **Required.** HMAC secret.
  * @param {string}  [opts.sessionKey="session_id"]
- * @param {number}  [opts.maxAge=3600]
+ * @param {number}  [opts.ttl=3600]  Max token age in seconds. Alias: `maxAge`.
  * @param {string[]} [opts.safeMethods=["GET","HEAD","OPTIONS"]]
  * @param {string}  [opts.headerName="x-csrf-token"]
  * @param {string}  [opts.fieldName="_csrf"]
@@ -135,7 +135,8 @@ function parseCookieSessionId(req, cookieName) {
 function middleware(opts) {
     const o = opts || {};
     const secret = o.secret;
-    const maxAge = o.maxAge !== undefined ? o.maxAge : 3600;
+    // Canonical `ttl`; back-compat alias `maxAge`.
+    const ttl = o.ttl !== undefined ? o.ttl : (o.maxAge !== undefined ? o.maxAge : 3600);
     // Fallback session-cookie name when upstream session middleware hasn't
     // populated req.ctx[sessionKey]. Matches the session/auth middleware
     // default ("hull_session") so the fallback actually finds the cookie.
@@ -243,7 +244,7 @@ function middleware(opts) {
             return 1;
         }
 
-        if (!verify(token, sessionId, secret, maxAge)) {
+        if (!verify(token, sessionId, secret, ttl)) {
             res.status(403);
             res.json({ error: "CSRF token invalid" });
             return 1;

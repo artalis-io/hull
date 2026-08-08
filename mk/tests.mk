@@ -704,6 +704,10 @@ e2e-retry: $(BUILDDIR)/hull
 e2e-logx-parity: $(BUILDDIR)/hull
 	sh tests/e2e_logx_parity.sh
 
+.PHONY: e2e-naming-aliases
+e2e-naming-aliases: $(BUILDDIR)/hull
+	sh tests/e2e_naming_aliases.sh
+
 .PHONY: e2e-validate-parity
 e2e-validate-parity: $(BUILDDIR)/hull
 	sh tests/e2e_validate_parity.sh

@@ -1115,8 +1115,10 @@ function standardUsers(opts) {
 
 function init(opts) {
     opts = opts || {};
-    if (typeof opts.stateSecret !== "string" || opts.stateSecret.length < 32) {
-        throw new Error("auth-flows.init: stateSecret must be a string >= 32 bytes");
+    // Canonical `secret`; back-compat alias `stateSecret` (same HMAC key).
+    const secret = opts.secret || opts.stateSecret;
+    if (typeof secret !== "string" || secret.length < 32) {
+        throw new Error("auth-flows.init: secret must be a string >= 32 bytes");
     }
     if (typeof opts.emailSend !== "function") {
         throw new Error("auth-flows.init: emailSend(to, subject, html, text) required");
@@ -1220,7 +1222,7 @@ function init(opts) {
         }
     }
 
-    _state.stateSecretHex = bytesToHex(opts.stateSecret);
+    _state.stateSecretHex = bytesToHex(secret);
     _state.emailSend      = opts.emailSend;
     _state.publicOrigin   = opts.publicOrigin || null;
     _state.trustedHosts   = opts.trustedHosts || null;
