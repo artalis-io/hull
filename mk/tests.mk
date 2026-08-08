@@ -696,6 +696,14 @@ e2e-uuid: $(BUILDDIR)/hull
 e2e-config-parity: $(BUILDDIR)/hull
 	sh tests/e2e_config_parity.sh
 
+.PHONY: e2e-retry
+e2e-retry: $(BUILDDIR)/hull
+	sh tests/e2e_retry.sh
+
+.PHONY: e2e-logx-parity
+e2e-logx-parity: $(BUILDDIR)/hull
+	sh tests/e2e_logx_parity.sh
+
 .PHONY: e2e-validate-parity
 e2e-validate-parity: $(BUILDDIR)/hull
 	sh tests/e2e_validate_parity.sh
