@@ -81,6 +81,14 @@ static const HlModuleSpec REGISTRY[] = {
         .required_caps = HL_MOD_CAP_FS, .deps = {0},
     },
     {
+        /* In-memory key/value cache with TTL + get-or-compute memoization.
+         * Bounded (LRU on cap), lazily-expiring, process-local. Pure Lua/JS
+         * over time; no persistence, no new authority. */
+        .name = "hull/cache",
+        .api_major = 1, .intrinsic = 0, .pure = 0,
+        .required_caps = 0, .deps = {"hull/time", 0},
+    },
+    {
         .name = "hull/compute",
         .api_major = 1, .intrinsic = 0, .pure = 0,
         .required_caps = HL_MOD_CAP_WASM, .deps = {0},
