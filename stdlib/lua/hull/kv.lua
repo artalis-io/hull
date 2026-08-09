@@ -79,6 +79,10 @@ function M.open(opts)
         store, bname = memory_backend(opts, store_ns)
     elseif backend == "sqlite" or backend == "postgres" then
         store, bname = sql_backend(opts, store_ns)
+    elseif backend == "valkey" or backend == "redis" then
+        -- Networked KV over the composed Valkey/Redis backend. Caller-owned
+        -- connection (close it via the handle's :close(), or let GC finalize).
+        store, bname = require("hull.kv._valkey").new(opts, store_ns)
     else
         u.error("invalid_argument", "kv.open: unknown backend '" .. tostring(backend) .. "'")
     end

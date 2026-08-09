@@ -286,6 +286,14 @@ endif
 ifeq ($(HL_ENABLE_DUCKDB),1)
 CFLAGS += -DHL_ENABLE_DUCKDB -I$(VENDDIR)/duckdb
 endif
+# HL_ENABLE_VALKEY=1 compiles the Valkey/Redis KV backend (cap/respwire.c +
+# cap/valkey_conn.c + cap/valkey.c) INTO the base and self-registers it via the
+# strong hl_kv_feature_backends hook. Production composition is --with=valkey
+# (Phase 3); this flag is the compiled-in dev/test path. rediss:// TLS needs the
+# shared TLS client (HL_LINK_TLS), pulled below.
+ifeq ($(HL_ENABLE_VALKEY),1)
+CFLAGS += -DHL_ENABLE_VALKEY
+endif
 
 # Derived umbrella. `override` forces the derived value even if a
 # contradictory HL_ENABLE_DB=1 was passed with all backends off (resolves
@@ -1846,6 +1854,7 @@ BUILD_FINGERPRINT := \
   SQLITE=$(HL_ENABLE_SQLITE)|\
   POSTGRES=$(HL_ENABLE_POSTGRES)|\
   MYSQL=$(HL_ENABLE_MYSQL)|\
+  VALKEY=$(HL_ENABLE_VALKEY)|\
   WASM=$(HL_ENABLE_WASM)|\
   GPU=$(HL_ENABLE_GPU)|\
   TUI=$(HL_ENABLE_TUI)|\

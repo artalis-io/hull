@@ -54,6 +54,7 @@ int luaopen_hull_app(lua_State *L);
  * AFTER `lua_setglobal(L, "app")`. Idempotent per Lua state. */
 int hl_lua_install_app_router(lua_State *L);
 int luaopen_hull_db(lua_State *L);
+int luaopen_hull_kv_native(lua_State *L);   /* hull.kv._native (KV connection cap) */
 int luaopen_hull_time(lua_State *L);
 int luaopen_hull_env(lua_State *L);
 int luaopen_hull_crypto(lua_State *L);
