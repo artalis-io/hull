@@ -35,6 +35,12 @@ int hl_js_register_modules(HlJS *js)
     }
 #endif
 
+    /* Register hull:kv:_native (base-resident KV connection cap). The stdlib
+     * valkey backend imports it; on a base with no KV backend composed, open()
+     * fails closed with a 'hull feature install valkey' hint. */
+    if (hl_js_init_kv_module(js->ctx, js) != 0)
+        return -1;
+
     /* Register hull:json module */
     if (hl_js_init_json_module(js->ctx, js) != 0)
         return -1;

@@ -60,6 +60,11 @@ function build(store, meta) {
 
         stats() { return store.stats(); },
 
+        // Release an owned backend connection (the networked valkey/redis
+        // store). A no-op for the memory/sql stores (borrowed/shared); GC
+        // finalizes an unclosed network connection anyway.
+        close() { if (store.close) store.close(); },
+
         // Exposed for hull.cache.open's fetch() (byte-cache get-or-compute).
         _store: store,
     };
