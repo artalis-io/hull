@@ -23,7 +23,20 @@
 
 #include "hull/cap/kv_backend.h"   /* HlKvCasResult, HlKvScanCb, caps, HlAllocator */
 
+struct HlManifestKvDynamic;   /* fwd; the kv.open allowlist policy (manifest.h) */
+
 typedef struct HlKvConn HlKvConn;   /* opaque: backend + handle + allocator */
+
+/*
+ * Validate a runtime KV DSN against the manifest kv.dynamic policy (cap/
+ * kv_dynamic.c): the scheme must be listed in kv.dynamic.schemes and the host
+ * must match kv.dynamic.hosts (exact / "*.suffix" glob / CIDR / "$VAR" env ref,
+ * the shared host matcher). Every KV scheme is a network scheme. Fails closed:
+ * a NULL / undeclared / empty policy denies. Returns 0 if allowed, -1 with a
+ * message in errbuf. The binding calls this BEFORE hl_cap_kv_open.
+ */
+int hl_cap_kv_check_dsn(const struct HlManifestKvDynamic *policy, const char *dsn,
+                        char *errbuf, size_t errlen);
 
 /*
  * Open a KV connection from a DSN. Selects the composed backend by scheme; if

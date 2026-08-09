@@ -255,6 +255,12 @@ static JSValue js_kv_open(JSContext *ctx, JSValueConst this_val, int argc, JSVal
 
     HlJS *js = get_hl_js(ctx);
     char err[256];
+    /* Enforce the manifest kv.dynamic allowlist (scheme + host) before dialing.
+     * Fails closed with a policy message when no policy is declared. */
+    if (hl_cap_kv_check_dsn(js ? js->base.kv_policy : NULL, dsn, err, sizeof err) != 0) {
+        JS_FreeCString(ctx, dsn);
+        return JS_ThrowInternalError(ctx, "%s", err);
+    }
     HlKvConn *c = NULL;
     int rc = hl_cap_kv_open(&c, dsn, timeout_ms, js ? js->base.alloc : NULL, err, sizeof err);
     JS_FreeCString(ctx, dsn);

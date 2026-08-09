@@ -417,6 +417,28 @@ int hl_manifest_extract_js(JSContext *ctx, HlManifest *out, HlAllocator *alloc)
     }
     JS_FreeValue(ctx, db_val);
 
+    /* kv: { dynamic: { hosts: [...], schemes: [...] } }
+     * The kv.open({backend:"valkey", dsn}) allowlist (mirror of databases.dynamic
+     * and the Lua parser). Every KV scheme is a network scheme gated by hosts. */
+    JSValue kv_val = JS_GetPropertyStr(ctx, manifest, "kv");
+    if (JS_IsObject(kv_val) && !JS_IsNull(kv_val) && !JS_IsArray(ctx, kv_val)) {
+        out->kv.declared = 1;
+        JSValue kdyn = JS_GetPropertyStr(ctx, kv_val, "dynamic");
+        if (JS_IsObject(kdyn) && !JS_IsNull(kdyn) && !JS_IsArray(ctx, kdyn)) {
+            out->kv.dynamic.declared = 1;
+            out->kv.dynamic.host_count =
+                read_js_string_array(ctx, kdyn, "hosts",
+                                     out->kv.dynamic.hosts,
+                                     HL_MANIFEST_MAX_DB_HOSTS, alloc);
+            out->kv.dynamic.scheme_count =
+                read_js_string_array(ctx, kdyn, "schemes",
+                                     out->kv.dynamic.schemes,
+                                     HL_MANIFEST_MAX_DB_SCHEMES, alloc);
+        }
+        JS_FreeValue(ctx, kdyn);
+    }
+    JS_FreeValue(ctx, kv_val);
+
     /* allowDynamicCode: true — opt-in to JIT / runtime codegen.
      * Rejected by hl_sandbox_apply unless --no-sandbox.
      * Also accept the snake_case form for parity with the Lua manifest. */

@@ -168,6 +168,9 @@ struct HlRuntime {
                                    * --no-db / pure-compute builds. */
     HlAllocator  *alloc;
     HlFsConfig   *fs_cfg;
+    /* kv.open(dsn) allowlist policy (manifest kv.dynamic). Borrowed pointer into
+     * the sealed manifest; NULL means no policy (kv.open fails closed). */
+    const HlManifestKvDynamic *kv_policy;
     HlEnvConfig  *env_cfg;
     HlHttpConfig *http_cfg;
     HlSmtpConfig *smtp_cfg;

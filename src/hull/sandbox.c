@@ -996,7 +996,19 @@ static int sandbox_dsn_is_network(const char *dsn)
     return strncasecmp(dsn, "postgres://",   11) == 0
         || strncasecmp(dsn, "postgresql://", 13) == 0
         || strncasecmp(dsn, "mysql://",       8) == 0
-        || strncasecmp(dsn, "mariadb://",    10) == 0;
+        || strncasecmp(dsn, "mariadb://",    10) == 0
+        || strncasecmp(dsn, "redis://",       8) == 0
+        || strncasecmp(dsn, "rediss://",      9) == 0
+        || strncasecmp(dsn, "valkey://",      9) == 0
+        || strncasecmp(dsn, "valkeys://",    10) == 0;
+}
+
+/* A KV dynamic scheme that dials the network (all of them: Valkey/Redis are
+ * always networked). */
+static int kv_scheme_is_network(const char *s)
+{
+    return s && (strcmp(s, "redis") == 0 || strcmp(s, "rediss") == 0
+              || strcmp(s, "valkey") == 0 || strcmp(s, "valkeys") == 0);
 }
 
 /* True if the manifest declares any database connection that may dial the
@@ -1017,6 +1029,13 @@ static int manifest_has_network_db(const HlManifest *m)
                    || strcmp(s, "mysql") == 0 || strcmp(s, "mariadb") == 0))
                 return 1;
         }
+    }
+    /* A kv.dynamic policy admitting a Valkey/Redis scheme also dials out, so it
+     * needs network_outbound exactly like a network DB (kv.open would otherwise
+     * be SIGKILLed on connect). */
+    if (m->kv.dynamic.declared) {
+        for (int i = 0; i < m->kv.dynamic.scheme_count; i++)
+            if (kv_scheme_is_network(m->kv.dynamic.schemes[i])) return 1;
     }
     return 0;
 }

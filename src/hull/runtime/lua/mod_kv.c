@@ -200,6 +200,11 @@ static int l_kv_open(lua_State *L)
     HlLua *lua = get_hl_lua(L);
 
     char err[256];
+    /* Enforce the manifest kv.dynamic allowlist (scheme + host) before dialing.
+     * Fails closed with a policy message when no policy is declared. */
+    if (hl_cap_kv_check_dsn(lua ? lua->base.kv_policy : NULL, dsn, err, sizeof err) != 0)
+        return luaL_error(L, "%s", err);
+
     HlKvConn *c = NULL;
     if (hl_cap_kv_open(&c, dsn, timeout_ms, lua ? lua->base.alloc : NULL,
                        err, sizeof err) != 0)
