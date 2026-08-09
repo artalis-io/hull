@@ -809,11 +809,12 @@ jobs:
           # Ship the daemon disabled; the e2e scripts start their own on a test port.
           sudo systemctl disable --now redis-server || true
 
-      - name: Build hull with the Valkey backend compiled in
-        run: make HL_ENABLE_VALKEY=1
-
+      # The e2e-valkey target sub-makes a HL_ENABLE_VALKEY=1 hull itself, so it is
+      # a single step: a separate `make HL_ENABLE_VALKEY=1` build step followed by
+      # a plain `make e2e-valkey` would flip the build-config fingerprint and the
+      # config-sentinel would clean the just-built hull.
       - name: Valkey/Redis end-to-end (compiled-in, both runtimes)
-        timeout-minutes: 10
+        timeout-minutes: 15
         run: make e2e-valkey
 
       - name: Valkey/Redis feature compose (--with=valkey)

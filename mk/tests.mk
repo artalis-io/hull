@@ -718,10 +718,14 @@ e2e-mysql:
 # or docker valkey/redis). e2e-valkey exercises hull.kv / hull.cache against a
 # HL_ENABLE_VALKEY=1 hull; e2e-feature-valkey builds its own EMBED_PLATFORM base
 # + feature archive and validates the --with=valkey compose. Both SKIP with no
-# server. e2e-valkey needs a HL_ENABLE_VALKEY=1 build; not tied to $(BUILDDIR)/hull.
+# server. The compiled-in build must be HL_ENABLE_VALKEY=1: the recipe sub-makes
+# it FIRST so `make e2e-valkey` works from any tree state - invoking `make
+# e2e-valkey` alone would otherwise flip the build-config fingerprint (VALKEY=0)
+# and the config-sentinel would clean a previously-built HL_ENABLE_VALKEY=1 hull.
 .PHONY: e2e-valkey e2e-feature-valkey
 e2e-valkey:
-	sh tests/e2e_valkey.sh
+	$(MAKE) HL_ENABLE_VALKEY=1 $(BUILDDIR)/hull
+	HULL=$(BUILDDIR)/hull sh tests/e2e_valkey.sh
 
 e2e-feature-valkey:
 	sh tests/e2e_feature_valkey.sh
