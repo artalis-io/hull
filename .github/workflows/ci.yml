@@ -786,6 +786,40 @@ jobs:
         timeout-minutes: 15
         run: make e2e-mysql
 
+  # Real Valkey/Redis: kv.open{backend="valkey"} / cache.open over the RESP wire
+  # -> get/set/del/exists/TTL/incr/CAS/scan/clear, the borrow-copy guard, and
+  # kv/cache namespace isolation, in BOTH runtimes (e2e-valkey, a compiled-in
+  # HL_ENABLE_VALKEY=1 hull); then the production --with=valkey compose path,
+  # asserting the base stays valkey-free + the kv.dynamic host allowlist +
+  # network_outbound sandbox grant (e2e-feature-valkey builds its own base).
+  # redis-server from apt (no Docker); the e2e scripts also fall back to Docker.
+  valkey:
+    name: Valkey/Redis e2e
+    runs-on: ubuntu-24.04
+
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          submodules: true
+
+      - name: Install redis-server
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y redis-server
+          # Ship the daemon disabled; the e2e scripts start their own on a test port.
+          sudo systemctl disable --now redis-server || true
+
+      - name: Build hull with the Valkey backend compiled in
+        run: make HL_ENABLE_VALKEY=1
+
+      - name: Valkey/Redis end-to-end (compiled-in, both runtimes)
+        timeout-minutes: 10
+        run: make e2e-valkey
+
+      - name: Valkey/Redis feature compose (--with=valkey)
+        timeout-minutes: 15
+        run: make e2e-feature-valkey
+
   analyze:
     name: Static Analysis
     runs-on: ubuntu-24.04

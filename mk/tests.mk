@@ -714,6 +714,18 @@ e2e-postgres:
 e2e-mysql:
 	sh tests/e2e_mysql.sh
 
+# Valkey/Redis KV backend end-to-end against a real server (local redis-server
+# or docker valkey/redis). e2e-valkey exercises hull.kv / hull.cache against a
+# HL_ENABLE_VALKEY=1 hull; e2e-feature-valkey builds its own EMBED_PLATFORM base
+# + feature archive and validates the --with=valkey compose. Both SKIP with no
+# server. e2e-valkey needs a HL_ENABLE_VALKEY=1 build; not tied to $(BUILDDIR)/hull.
+.PHONY: e2e-valkey e2e-feature-valkey
+e2e-valkey:
+	sh tests/e2e_valkey.sh
+
+e2e-feature-valkey:
+	sh tests/e2e_feature_valkey.sh
+
 e2e-templates: $(BUILDDIR)/hull
 	RUNTIME=$(RUNTIME) sh tests/e2e_templates.sh
 
