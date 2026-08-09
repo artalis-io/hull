@@ -226,8 +226,12 @@ int hl_valkey_dsn_parse(const char *dsn, HlValkeyDsn *out, char *errbuf, size_t 
             }
         }
         if (!amp) break;
-        querylen -= (size_t)(amp + 1 - query);
+        /* Advance past "<pair>&". amp - query == pairlen, so the step is
+         * pairlen + 1; using pairlen (already computed) avoids a pointer
+         * subtraction that static analysis flags around the loop's `query`
+         * null-check. */
         query = amp + 1;
+        querylen -= pairlen + 1;
     }
 
     return 0;

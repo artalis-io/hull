@@ -50,9 +50,18 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 # ---- server ----------------------------------------------------------------
+# Readiness probe: POSIX-sh / dash safe (NO /dev/tcp bashism). Host redis-cli
+# reaches a local server and a docker container (-p mapping); container fallback.
+ping_ok() {
+    if command -v redis-cli >/dev/null 2>&1; then
+        redis-cli -p "$PORT" ping 2>/dev/null | grep -q PONG && return 0
+    fi
+    [ -n "$CONTAINER" ] && docker exec "$CONTAINER" redis-cli ping 2>/dev/null | grep -q PONG && return 0
+    return 1
+}
 wait_ready() {
-    i=0; while [ "$i" -lt 50 ]; do
-        if (exec 3<>"/dev/tcp/127.0.0.1/$PORT") 2>/dev/null; then exec 3>&- 3<&-; return 0; fi
+    i=0; while [ "$i" -lt 100 ]; do
+        ping_ok && return 0
         i=$((i+1)); sleep 0.1
     done
     return 1

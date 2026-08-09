@@ -46,11 +46,21 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
+# Readiness probe: a PING that works under POSIX sh / dash (NO /dev/tcp - that is
+# a bashism and CI runs `sh` = dash). Host redis-cli reaches both a local server
+# and a docker container (the -p PORT:6379 mapping); falls back to redis-cli
+# inside the container.
+ping_ok() {
+    if command -v redis-cli >/dev/null 2>&1; then
+        redis-cli -p "$PORT" ping 2>/dev/null | grep -q PONG && return 0
+    fi
+    [ -n "$CONTAINER" ] && docker exec "$CONTAINER" redis-cli ping 2>/dev/null | grep -q PONG && return 0
+    return 1
+}
 wait_ready() {
-    # $1 = engine label; poll a bare TCP connect via hull-independent means.
     i=0
-    while [ "$i" -lt 50 ]; do
-        if (exec 3<>"/dev/tcp/127.0.0.1/$PORT") 2>/dev/null; then exec 3>&- 3<&-; return 0; fi
+    while [ "$i" -lt 100 ]; do
+        ping_ok && return 0
         i=$((i+1)); sleep 0.1
     done
     return 1
