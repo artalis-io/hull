@@ -70,6 +70,7 @@ int js_get_buffer(JSContext *ctx, JSValueConst val,
 
 int hl_js_init_app_module(JSContext *ctx, HlJS *js);
 int hl_js_init_db_module(JSContext *ctx, HlJS *js);
+int hl_js_init_kv_module(JSContext *ctx, HlJS *js);   /* hull:kv:_native */
 int hl_js_init_json_module(JSContext *ctx, HlJS *js);
 int hl_js_init_time_module(JSContext *ctx, HlJS *js);
 int hl_js_init_env_module(JSContext *ctx, HlJS *js);

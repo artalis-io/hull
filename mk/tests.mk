@@ -87,6 +87,39 @@ $(BUILDDIR)/test_pg_conn: $(TESTDIR)/hull/cap/test_pg_conn.c $(SRCDIR)/hull/cap/
 		$(TESTDIR)/hull/cap/test_pg_conn.c $(SRCDIR)/hull/cap/pg_conn.c $(SRCDIR)/hull/cap/pgwire.c \
 		$(PG_CRYPTO_OBJS) $(LDFLAGS)
 
+# Valkey/Redis RESP2/3 codec test: respwire.c is a self-contained parser gated
+# out of CAP_OBJS until HL_ENABLE_VALKEY, so link it directly (explicit rule
+# wins over the generic pattern rule).
+$(BUILDDIR)/test_respwire: $(TESTDIR)/hull/cap/test_respwire.c $(SRCDIR)/hull/cap/respwire.c | $(BUILDDIR)
+	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ \
+		$(TESTDIR)/hull/cap/test_respwire.c $(SRCDIR)/hull/cap/respwire.c $(LDFLAGS)
+
+# Valkey/Redis DSN parser test: valkey_conn.c's DSN part is self-contained (no
+# socket/TLS yet) and gated out of CAP_OBJS until HL_ENABLE_VALKEY.
+# -DHL_VALKEY_NO_TLS keeps the (Phase 1b) TLS transport out so the DSN test
+# needs no Keel/mbedTLS link, mirroring test_pg_conn's -DHL_PG_NO_TLS.
+# valkey_conn.c uses the pluggable allocator ($(ALLOC_OBJ)) + sh_arena
+# ($(SH_ARENA_OBJ)) for the connection buffer + reply arena.
+$(BUILDDIR)/test_valkey_dsn: $(TESTDIR)/hull/cap/test_valkey_dsn.c $(SRCDIR)/hull/cap/valkey_conn.c $(SRCDIR)/hull/cap/respwire.c $(ALLOC_OBJ) $(SH_ARENA_OBJ) | $(BUILDDIR)
+	$(CC) $(CFLAGS) -DHL_VALKEY_NO_TLS $(INCLUDES) -I$(VENDDIR) -o $@ \
+		$(TESTDIR)/hull/cap/test_valkey_dsn.c $(SRCDIR)/hull/cap/valkey_conn.c $(SRCDIR)/hull/cap/respwire.c \
+		$(ALLOC_OBJ) $(SH_ARENA_OBJ) $(LDFLAGS)
+
+# Valkey/Redis connection: HELLO/AUTH handshake + RESP2 fallback + SELECT + a
+# command round-trip over a socketpair. -DHL_VALKEY_NO_TLS drives the plaintext
+# transport (no Keel/mbedTLS), mirroring test_pg_conn.
+$(BUILDDIR)/test_valkey_conn: $(TESTDIR)/hull/cap/test_valkey_conn.c $(SRCDIR)/hull/cap/valkey_conn.c $(SRCDIR)/hull/cap/respwire.c $(ALLOC_OBJ) $(SH_ARENA_OBJ) | $(BUILDDIR)
+	$(CC) $(CFLAGS) -DHL_VALKEY_NO_TLS $(INCLUDES) -I$(VENDDIR) -o $@ \
+		$(TESTDIR)/hull/cap/test_valkey_conn.c $(SRCDIR)/hull/cap/valkey_conn.c \
+		$(SRCDIR)/hull/cap/respwire.c $(ALLOC_OBJ) $(SH_ARENA_OBJ) $(LDFLAGS)
+
+# Valkey/Redis HlKvBackend op->RESP mapping over a socketpair (valkey.c +
+# valkey_conn.c + respwire.c). -DHL_VALKEY_NO_TLS drives the plaintext transport.
+$(BUILDDIR)/test_valkey_backend: $(TESTDIR)/hull/cap/test_valkey_backend.c $(SRCDIR)/hull/cap/valkey.c $(SRCDIR)/hull/cap/valkey_conn.c $(SRCDIR)/hull/cap/respwire.c $(ALLOC_OBJ) $(SH_ARENA_OBJ) | $(BUILDDIR)
+	$(CC) $(CFLAGS) -DHL_VALKEY_NO_TLS $(INCLUDES) -I$(VENDDIR) -o $@ \
+		$(TESTDIR)/hull/cap/test_valkey_backend.c $(SRCDIR)/hull/cap/valkey.c \
+		$(SRCDIR)/hull/cap/valkey_conn.c $(SRCDIR)/hull/cap/respwire.c $(ALLOC_OBJ) $(SH_ARENA_OBJ) $(LDFLAGS)
+
 # MySQL/MariaDB codec + DSN test: mysqlwire.c + mysql_conn.c (Phase 1b) are
 # self-contained (no socket/TLS/crypto yet) and gated out of CAP_OBJS until
 # HL_ENABLE_MYSQL, so link them directly. Explicit rule wins over the pattern.
@@ -509,6 +542,16 @@ fuzz/fuzz_mime_sniff: fuzz/fuzz_mime_sniff.c $(SRCDIR)/hull/cap/mime.c
 fuzz/fuzz_host_match: fuzz/fuzz_host_match.c $(SRCDIR)/hull/utils/host_match.c
 	$(CC) $(FUZZ_CFLAGS) -o $@ $^
 
+# Valkey/Redis RESP2/3 reply parser: the untrusted-server codec.
+fuzz/fuzz_respwire: fuzz/fuzz_respwire.c $(SRCDIR)/hull/cap/respwire.c
+	$(CC) $(FUZZ_CFLAGS) -o $@ $^
+
+# Valkey/Redis DSN parser: percent-decoding + bounded field splitting over a
+# user-supplied connection string. -DHL_VALKEY_NO_TLS keeps the (Phase 1b) TLS
+# transport out so the pure-parser fuzzer needs no Keel/mbedTLS.
+fuzz/fuzz_valkey_dsn: fuzz/fuzz_valkey_dsn.c $(SRCDIR)/hull/cap/valkey_conn.c $(SRCDIR)/hull/cap/respwire.c $(SRCDIR)/hull/utils/alloc.c $(SH_ARENA_DIR)/sh_arena.c
+	$(CC) $(FUZZ_CFLAGS) -Ivendor/keel/include -DHL_VALKEY_NO_TLS -o $@ $^
+
 # PostgreSQL wire-protocol reader: the untrusted-server parser (§1 Phase 2).
 fuzz/fuzz_pgwire: fuzz/fuzz_pgwire.c $(SRCDIR)/hull/cap/pgwire.c
 	$(CC) $(FUZZ_CFLAGS) -o $@ $^
@@ -533,7 +576,7 @@ fuzz/fuzz_mysqlwire: fuzz/fuzz_mysqlwire.c $(SRCDIR)/hull/cap/mysqlwire.c
 fuzz/fuzz_mysql_dsn: fuzz/fuzz_mysql_dsn.c $(SRCDIR)/hull/cap/mysql_conn.c
 	$(CC) $(FUZZ_CFLAGS) -DHL_MY_NO_AUTH -o $@ $^
 
-fuzz: fuzz/fuzz_sh_json fuzz/fuzz_path_normalize fuzz/fuzz_mime_sniff fuzz/fuzz_host_match fuzz/fuzz_pgwire fuzz/fuzz_pg_dsn fuzz/fuzz_pg_rewrite fuzz/fuzz_mysqlwire fuzz/fuzz_mysql_dsn
+fuzz: fuzz/fuzz_sh_json fuzz/fuzz_path_normalize fuzz/fuzz_mime_sniff fuzz/fuzz_host_match fuzz/fuzz_pgwire fuzz/fuzz_pg_dsn fuzz/fuzz_pg_rewrite fuzz/fuzz_mysqlwire fuzz/fuzz_mysql_dsn fuzz/fuzz_respwire fuzz/fuzz_valkey_dsn
 
 # Time-boxed run over the seed corpora (what CI runs). FUZZ_TIME overrides.
 fuzz-run: fuzz
@@ -546,6 +589,8 @@ fuzz-run: fuzz
 	./fuzz/fuzz_pg_rewrite fuzz/corpus_pg_rewrite/ -max_total_time=$(FUZZ_TIME)
 	./fuzz/fuzz_mysqlwire fuzz/corpus_mysqlwire/ -max_total_time=$(FUZZ_TIME)
 	./fuzz/fuzz_mysql_dsn fuzz/corpus_mysql_dsn/ -max_total_time=$(FUZZ_TIME)
+	./fuzz/fuzz_respwire fuzz/corpus_respwire/ -max_total_time=$(FUZZ_TIME)
+	./fuzz/fuzz_valkey_dsn fuzz/corpus_valkey_dsn/ -max_total_time=$(FUZZ_TIME)
 
 # ── E2E tests ──────────────────────────────────────────────────────
 
@@ -668,6 +713,22 @@ e2e-postgres:
 # MySQL/MariaDB backend end-to-end (needs Docker; builds its own MYSQL hull).
 e2e-mysql:
 	sh tests/e2e_mysql.sh
+
+# Valkey/Redis KV backend end-to-end against a real server (local redis-server
+# or docker valkey/redis). e2e-valkey exercises hull.kv / hull.cache against a
+# HL_ENABLE_VALKEY=1 hull; e2e-feature-valkey builds its own EMBED_PLATFORM base
+# + feature archive and validates the --with=valkey compose. Both SKIP with no
+# server. The compiled-in build must be HL_ENABLE_VALKEY=1: the recipe sub-makes
+# it FIRST so `make e2e-valkey` works from any tree state - invoking `make
+# e2e-valkey` alone would otherwise flip the build-config fingerprint (VALKEY=0)
+# and the config-sentinel would clean a previously-built HL_ENABLE_VALKEY=1 hull.
+.PHONY: e2e-valkey e2e-feature-valkey
+e2e-valkey:
+	$(MAKE) HL_ENABLE_VALKEY=1 $(BUILDDIR)/hull
+	HULL=$(BUILDDIR)/hull sh tests/e2e_valkey.sh
+
+e2e-feature-valkey:
+	sh tests/e2e_feature_valkey.sh
 
 e2e-templates: $(BUILDDIR)/hull
 	RUNTIME=$(RUNTIME) sh tests/e2e_templates.sh

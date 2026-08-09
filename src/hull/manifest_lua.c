@@ -384,6 +384,30 @@ int hl_manifest_extract_lua(lua_State *L, HlManifest *out, HlAllocator *alloc)
     }
     lua_pop(L, 1); /* pop databases */
 
+    /* kv = { dynamic = { hosts = {...}, schemes = {...} } }
+     * The kv.open{backend="valkey", dsn=...} allowlist (mirrors
+     * databases.dynamic). Every KV scheme is a network scheme gated by hosts. */
+    lua_getfield(L, manifest_idx, "kv");
+    if (lua_istable(L, -1)) {
+        int kv_idx = lua_gettop(L);
+        out->kv.declared = 1;
+        lua_getfield(L, kv_idx, "dynamic");
+        if (lua_istable(L, -1)) {
+            int dyn_idx = lua_gettop(L);
+            out->kv.dynamic.declared = 1;
+            out->kv.dynamic.host_count =
+                read_string_array(L, dyn_idx, "hosts",
+                                  out->kv.dynamic.hosts,
+                                  HL_MANIFEST_MAX_DB_HOSTS, alloc);
+            out->kv.dynamic.scheme_count =
+                read_string_array(L, dyn_idx, "schemes",
+                                  out->kv.dynamic.schemes,
+                                  HL_MANIFEST_MAX_DB_SCHEMES, alloc);
+        }
+        lua_pop(L, 1); /* pop dynamic */
+    }
+    lua_pop(L, 1); /* pop kv */
+
     /* allow_dynamic_code = true — opt-in to JIT / runtime codegen.
      * Rejected by hl_sandbox_apply unless --no-sandbox. */
     lua_getfield(L, manifest_idx, "allow_dynamic_code");

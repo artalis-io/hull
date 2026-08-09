@@ -115,11 +115,12 @@ HL_APP_BASE_SQLITELESS ?= 0
 # path honours it; a plain dev `make` is unaffected. Cosmo ignores it. Default 0.
 HL_APP_BASE_TLSLESS    ?= 0
 
-# Keel (KlTls) + mbedTLS are linked when an HTTP half OR PostgreSQL OR MySQL is
-# enabled (MySQL's caching_sha2_password full-auth + ed25519 need TLS + crypto).
-# HTTP still owns the -DHL_ENABLE_HTTP macro (above), so a DB-only build links
-# the TLS stack without activating HTTP code.
-ifeq ($(HL_ENABLE_HTTP_ANY)$(HL_ENABLE_POSTGRES)$(HL_ENABLE_MYSQL),000)
+# Keel (KlTls) + mbedTLS are linked when an HTTP half OR PostgreSQL OR MySQL OR
+# Valkey is enabled (MySQL's caching_sha2_password full-auth + ed25519, and
+# Valkey's rediss:// TLS, need the shared TLS client). HTTP still owns the
+# -DHL_ENABLE_HTTP macro (above), so a DB/KV-only build links the TLS stack
+# without activating HTTP code.
+ifeq ($(HL_ENABLE_HTTP_ANY)$(HL_ENABLE_POSTGRES)$(HL_ENABLE_MYSQL)$(HL_ENABLE_VALKEY),0000)
 HL_LINK_TLS := 0
 else
 HL_LINK_TLS := 1

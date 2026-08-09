@@ -70,6 +70,10 @@ int hl_lua_register_modules(HlLua *lua)
     if (lua->base.db_registry)
         register_native_module(L, "hull.db", luaopen_hull_db);
 #endif
+    /* KV connection cap (base-resident): the stdlib valkey backend requires
+     * this internally. With no KV backend composed, open() fails closed with a
+     * 'hull feature install valkey' hint rather than being absent. */
+    register_native_module(L, "hull.kv._native", luaopen_hull_kv_native);
     register_native_module(L, "hull.time",   luaopen_hull_time);
     register_native_module(L, "hull.env",    luaopen_hull_env);
     register_native_module(L, "hull.crypto", luaopen_hull_crypto);

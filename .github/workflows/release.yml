@@ -1225,10 +1225,50 @@ jobs:
           name: feature-mysql-${{ matrix.name }}
           path: libhull_feature-mysql-${{ matrix.name }}.a
 
+  build-feature-valkey:
+    # Composable Valkey/Redis KV feature archive (libhull_feature-valkey-<arch>.a),
+    # pulled by `hull feature install valkey` -> `hull build --with=valkey`. The
+    # FIRST non-SQL connection feature: fills its OWN hook hl_kv_feature_backends
+    # (not hl_db_feature_backends). Pure C (RESP codec + wire client, no vendored
+    # engine), like postgres/mysql. `make feature-valkey` re-invokes make with
+    # HL_ENABLE_VALKEY=1. Native-only.
+    name: Build feature valkey (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x86_64
+            os: ubuntu-24.04
+          - name: linux-aarch64
+            os: ubuntu-24.04-arm
+          - name: darwin-arm64
+            os: macos-15
+
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          submodules: true
+
+      - name: Write VERSION file
+        run: echo "${GITHUB_REF_NAME#v}" > VERSION
+
+      - name: Build Valkey feature archive
+        run: make feature-valkey
+
+      - name: Rename artifact (arch-qualified)
+        run: mv build/libhull_feature-valkey.a libhull_feature-valkey-${{ matrix.name }}.a
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        with:
+          name: feature-valkey-${{ matrix.name }}
+          path: libhull_feature-valkey-${{ matrix.name }}.a
+
   release:
     name: Create Release
     runs-on: ubuntu-24.04
-    needs: [build-cosmo, build-native, build-wamrc, build-floor-musl, build-platform-musl, build-zig, build-cosmocc-bundle, build-feature-native, build-feature-gpu, build-feature-tui, build-feature-postgres, build-feature-mysql, build-feature-lua, build-feature-js]
+    needs: [build-cosmo, build-native, build-wamrc, build-floor-musl, build-platform-musl, build-zig, build-cosmocc-bundle, build-feature-native, build-feature-gpu, build-feature-tui, build-feature-postgres, build-feature-mysql, build-feature-valkey, build-feature-lua, build-feature-js]
     permissions:
       contents: write       # publish GitHub release + assets
       id-token: write       # SLSA: OIDC for Sigstore signing
@@ -1322,6 +1362,12 @@ jobs:
           mv artifacts/feature-mysql-linux-x86_64/*.a   dist/
           mv artifacts/feature-mysql-linux-aarch64/*.a  dist/
           mv artifacts/feature-mysql-darwin-arm64/*.a   dist/
+          # Composable Valkey/Redis KV feature archives (libhull_feature-valkey-<arch>.a),
+          # native-only. Pulled by `hull feature install valkey`. Covered by the
+          # libhull_feature-*.a glob in the SHA-256 + publish steps below.
+          mv artifacts/feature-valkey-linux-x86_64/*.a   dist/
+          mv artifacts/feature-valkey-linux-aarch64/*.a  dist/
+          mv artifacts/feature-valkey-darwin-arm64/*.a   dist/
 
       - name: Make binaries executable
         run: chmod +x dist/*

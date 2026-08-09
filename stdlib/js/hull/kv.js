@@ -30,6 +30,7 @@ import util from "hull:kv:_util";
 import handle from "hull:kv:_handle";
 import memstore from "hull:kv:_memstore";
 import sqlstore from "hull:kv:_sql";
+import valkey from "hull:kv:_valkey";
 
 function open(opts) {
     if (typeof opts !== "object" || opts === null)
@@ -55,6 +56,10 @@ function open(opts) {
                 + "(e.g. dbModule.default())");
         store = sqlstore.new(conn, storeNs, { evict: false, defaultTtl: opts.defaultTtl });
         bname = conn.backendName || "sql";
+    } else if (backend === "valkey" || backend === "redis") {
+        // Networked KV over the composed Valkey/Redis backend. Caller-owned
+        // connection (close it via the handle's close(), or let GC finalize).
+        [store, bname] = valkey.new(opts, storeNs);
     } else {
         util.error("invalid_argument", "kv.open: unknown backend '" + backend + "'");
     }

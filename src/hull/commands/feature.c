@@ -71,6 +71,7 @@ static const HlFeatureSpec FEATURES[] = {
     { "duckdb",   "DuckDB embedded OLAP SQL backend (duckdb://)", HL_FEATURE_INSTALLABLE, 1, 1, 1 },
     { "postgres", "PostgreSQL wire backend (postgres:// / postgresql://)", HL_FEATURE_INSTALLABLE, 1, 1, 1 },
     { "mysql",    "MySQL / MariaDB wire backend (mysql:// / mariadb://)", HL_FEATURE_INSTALLABLE, 1, 1, 1 },
+    { "valkey",   "Valkey / Redis KV backend (valkey:// / redis://)", HL_FEATURE_INSTALLABLE, 1, 1, 1 },
     { "gpu",      "GPU compute via wgpu-native (Vulkan/Metal)",   HL_FEATURE_INSTALLABLE, 1, 1, 1 },
     { "tui",      "Terminal UI (hull.tui: full-screen, input, cell-diff)", HL_FEATURE_INSTALLABLE, 1, 1, 1 },
     { "lua",      "Lua 5.4 runtime (embedded; auto-composed for app.lua)", HL_FEATURE_EMBEDDED, 1, 1, 1 },

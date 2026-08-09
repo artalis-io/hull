@@ -197,6 +197,10 @@ function cache.open(opts)
             evict = true, default_ttl = opts.default_ttl, max_items = opts.max_items,
         })
         bname = conn.backend_name or "sqlite"
+    elseif backend == "valkey" or backend == "redis" then
+        -- Networked cache over the composed Valkey/Redis backend. Server-side
+        -- TTL + maxmemory eviction; caller-owned connection (h:close() / GC).
+        store, bname = require("hull.kv._valkey").new(opts, store_ns)
     else
         u.error("invalid_argument", "cache.open: unknown backend '" .. tostring(backend) .. "'")
     end

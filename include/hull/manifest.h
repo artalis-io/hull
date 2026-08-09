@@ -93,6 +93,29 @@ typedef struct HlManifestDatabase {
     HlManifestDbDynamic dynamic;
 } HlManifestDatabase;
 
+/* KV dynamic-open policy (`kv = { dynamic = { hosts = {...}, schemes = {...} } }`):
+ * the allowlist kv.open{backend="valkey", dsn=...} validates a runtime DSN
+ * against, mirroring databases.dynamic. `hosts` are host_match patterns (exact /
+ * "*.suffix" glob / CIDR / "$VAR" env ref); `schemes` restricts which KV schemes
+ * may be opened (redis / rediss / valkey / valkeys). Every KV scheme is a network
+ * scheme gated by `hosts`. Fails closed: no policy (or an empty one) denies every
+ * kv.open. `declared` distinguishes "no kv key" from an empty one. */
+typedef struct HlManifestKvDynamic {
+    const char *hosts[HL_MANIFEST_MAX_DB_HOSTS];
+    int         host_count;
+    const char *schemes[HL_MANIFEST_MAX_DB_SCHEMES];
+    int         scheme_count;
+    int         declared;
+} HlManifestKvDynamic;
+
+/* The whole `kv = { dynamic = {...} }` config. `declared` distinguishes "no kv
+ * key" (0) from a present one (1). KV has no named-connection map in this
+ * milestone: apps pass the DSN to kv.open directly, validated against dynamic. */
+typedef struct HlManifestKv {
+    HlManifestKvDynamic dynamic;
+    int                 declared;
+} HlManifestKv;
+
 /* ── Manifest struct ───────────────────────────────────────────────── */
 
 typedef struct HlManifest {
@@ -159,6 +182,10 @@ typedef struct HlManifest {
     /* Database config: named connections + the dynamic-open policy
      * (`databases = { named = {...}, dynamic = {...} }`). */
     HlManifestDatabase databases;
+
+    /* KV (Valkey/Redis) config: the dynamic-open policy
+     * (`kv = { dynamic = { hosts = {...}, schemes = {...} } }`). */
+    HlManifestKv kv;
 
     /* W^X / no runtime dynamic code — opt-in escape hatches.
      * Both default to 0 (deny). Setting either to 1 in a manifest is

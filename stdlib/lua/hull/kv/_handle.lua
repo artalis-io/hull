@@ -72,4 +72,9 @@ function H:cleanup() return self._s:cleanup() end
 
 function H:stats() return self._s:stats() end
 
+-- Release an owned backend connection (the networked valkey/redis store). A
+-- no-op for the memory/sql stores, whose connections are borrowed/shared. Safe
+-- to call more than once; GC finalizes an unclosed network connection anyway.
+function H:close() if self._s.close then self._s:close() end end
+
 return M

@@ -1454,6 +1454,11 @@ static int hl_serve_wire_caps(HlServerState *s)
         rt->fs_cfg = &s->fs_cfg_storage;
     }
 
+    /* Wire the kv.open allowlist policy (manifest kv.dynamic). Borrowed pointer
+     * into the sealed manifest; the cap validator reads ->declared and fails
+     * closed when absent. */
+    rt->kv_policy = &s->manifest.kv.dynamic;
+
     /* Wire env_cfg from manifest (if app declares env vars) */
     memset(&s->env_cfg_storage, 0, sizeof(s->env_cfg_storage));
     if (s->manifest.env_count > 0) {

@@ -286,6 +286,14 @@ endif
 ifeq ($(HL_ENABLE_DUCKDB),1)
 CFLAGS += -DHL_ENABLE_DUCKDB -I$(VENDDIR)/duckdb
 endif
+# HL_ENABLE_VALKEY=1 compiles the Valkey/Redis KV backend (cap/respwire.c +
+# cap/valkey_conn.c + cap/valkey.c) INTO the base and self-registers it via the
+# strong hl_kv_feature_backends hook. Production composition is --with=valkey
+# (Phase 3); this flag is the compiled-in dev/test path. rediss:// TLS needs the
+# shared TLS client (HL_LINK_TLS), pulled below.
+ifeq ($(HL_ENABLE_VALKEY),1)
+CFLAGS += -DHL_ENABLE_VALKEY
+endif
 
 # Derived umbrella. `override` forces the derived value even if a
 # contradictory HL_ENABLE_DB=1 was passed with all backends off (resolves
@@ -850,6 +858,18 @@ ifneq ($(HL_ENABLE_MYSQL),1)
       $(SRCDIR)/hull/cap/db_mysql.c \
       $(SRCDIR)/hull/cap/mysql_conn.c \
       $(SRCDIR)/hull/cap/mysqlwire.c, \
+      $(CAP_SRCS))
+endif
+ifneq ($(HL_ENABLE_VALKEY),1)
+  # Valkey/Redis KV backend (the first NON-SQL connection feature): RESP codec +
+  # connection + the HlKvBackend vtable. Off by default; lives only in the
+  # composed --with=valkey feature archive. The base-resident weak hook
+  # (cap/kv_feature.c) and generic KV cap stay in CAP_SRCS.
+  CAP_SRCS := $(filter-out \
+      $(SRCDIR)/hull/cap/respwire.c \
+      $(SRCDIR)/hull/cap/valkey_conn.c \
+      $(SRCDIR)/hull/cap/valkey.c \
+      $(SRCDIR)/hull/cap/valkey_register.c, \
       $(CAP_SRCS))
 endif
 ifneq ($(HL_ENABLE_DUCKDB),1)
@@ -1835,6 +1855,7 @@ BUILD_FINGERPRINT := \
   SQLITE=$(HL_ENABLE_SQLITE)|\
   POSTGRES=$(HL_ENABLE_POSTGRES)|\
   MYSQL=$(HL_ENABLE_MYSQL)|\
+  VALKEY=$(HL_ENABLE_VALKEY)|\
   WASM=$(HL_ENABLE_WASM)|\
   GPU=$(HL_ENABLE_GPU)|\
   TUI=$(HL_ENABLE_TUI)|\
@@ -1904,7 +1925,7 @@ $(shell test "$$(cat $(BUILD_CONFIG_FILE) 2>/dev/null)" = "$(BUILD_FINGERPRINT)"
 
 # ── Targets ─────────────────────────────────────────────────────────
 
-.PHONY: all clean test debug msan tsan fuzz fuzz-run e2e e2e-build e2e-postgres e2e-mysql e2e-http e2e-sandbox e2e-examples e2e-cli e2e-migrate e2e-templates e2e-agent e2e-context e2e-mcp e2e-agent-api e2e-compute e2e-compute-dev e2e-aot-cache e2e-cache e2e-cache-concurrent e2e-cache-cosmo e2e-named-connections e2e-dynamic-connections e2e-compiler-free e2e-linker e2e-linker-zig e2e-cross-build e2e-musl e2e-musl-cross floor-musl e2e-build-flavor e2e-install e2e-ca-bundle e2e-update e2e-tools e2e-multipart e2e-attachment e2e-blob e2e-test-harness e2e-jobs e2e-hypermedia-photos-upload e2e-jwt-asym hull-test-examples self-build check analyze cppcheck bench bench-template bench-wasm bench-gpu bench-bytecode-cache wamrc coverage lint-lua lint-js lint platform platform-cosmo hardening check-hardening
+.PHONY: all clean test debug msan tsan fuzz fuzz-run e2e e2e-build e2e-postgres e2e-mysql e2e-valkey e2e-feature-valkey e2e-http e2e-sandbox e2e-examples e2e-cli e2e-migrate e2e-templates e2e-agent e2e-context e2e-mcp e2e-agent-api e2e-compute e2e-compute-dev e2e-aot-cache e2e-cache e2e-cache-concurrent e2e-cache-cosmo e2e-named-connections e2e-dynamic-connections e2e-compiler-free e2e-linker e2e-linker-zig e2e-cross-build e2e-musl e2e-musl-cross floor-musl e2e-build-flavor e2e-install e2e-ca-bundle e2e-update e2e-tools e2e-multipart e2e-attachment e2e-blob e2e-test-harness e2e-jobs e2e-hypermedia-photos-upload e2e-jwt-asym hull-test-examples self-build check analyze cppcheck bench bench-template bench-wasm bench-gpu bench-bytecode-cache wamrc coverage lint-lua lint-js lint platform platform-cosmo hardening check-hardening
 
 all: $(BUILDDIR)/hull
 
@@ -2203,6 +2224,9 @@ include mk/features/postgres.mk
 
 # MySQL --with feature moved to mk/features/mysql.mk
 include mk/features/mysql.mk
+
+# Valkey/Redis KV --with feature (the first non-SQL connection feature)
+include mk/features/valkey.mk
 
 # SQLite feature (archive + udf bridges + both embeds) moved to mk/features/sqlite.mk
 include mk/features/sqlite.mk

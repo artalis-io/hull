@@ -76,7 +76,7 @@ Backends do not pretend to uniform guarantees. Each advertises a `caps` set;
 an optional op on a backend that lacks the cap **throws `unsupported`** rather
 than silently no-opping. Verified against the implementation:
 
-| capability | memory | sqlite | postgres | valkey/redis¹ | cachelib¹ |
+| capability | memory | sqlite | postgres | valkey/redis | cachelib¹ |
 |---|:---:|:---:|:---:|:---:|:---:|
 | local / in-process | ✅ | ✅ | ❌ | ❌ | ✅ |
 | persistent | ❌ | ✅ | ✅ | ✅ | limited (SSD) |
@@ -88,7 +88,8 @@ than silently no-opping. Verified against the implementation:
 | scan / prefix | ✅ | ✅ | ✅ | ✅ | limited |
 | transactions | ❌ | ✅ | ✅ | backend | ❌ |
 
-¹ planned backend (see extension points). ² a SQLite file can be opened by
+¹ planned backend (see extension points); valkey/redis is SHIPPED
+(`--with=valkey`). ² a SQLite file can be opened by
 multiple processes but is a local file, not a shared service; `caps.shared` is
 `false`. TTL is app-managed (a lazily-filtered `expires_at`) on every SQL
 backend - the same capability regardless of how it is implemented.
@@ -130,8 +131,9 @@ CREATE TABLE _hull_kv (
 
 The KV layer opens **no hidden fs or network access**. A SQLite-backed store
 runs through the `db` capability, so the file honors the fs sandbox exactly like
-`fs.read`/`db.open`; a network backend (Postgres today, Valkey/Redis later)
-honors the host allowlist and the `network_outbound` sandbox grant. Namespaces
+`fs.read`/`db.open`; a network backend (Postgres, or Valkey/Redis via the
+`kv.dynamic` allowlist) honors the host allowlist and the `network_outbound`
+sandbox grant. Namespaces
 are first-class and isolate keyspaces; a `kv` and a `cache` that share a
 namespace name never collide (physical namespaces are prefixed `kv:` / `cache:`).
 
@@ -153,12 +155,21 @@ semantic layer.
   Lua/JS memory backend presents, for high-throughput local caches. The stdlib
   memory backend already byte-accounts, so this is a performance drop-in, not a
   correctness prerequisite.
-- **Valkey / Redis** (preferred distributed backend): a `--with=valkey` /
-  `--with=redis` composable feature filling the existing weak
-  `hl_db_feature_backends` hook - reached by a `valkey://` / `redis://` DSN, the
-  same pattern as the Postgres/MySQL wire backends. The portable KV subset only;
-  streams / pub-sub / sorted-sets / vectors are out of scope and belong in
-  separate future capabilities.
+- **Valkey / Redis** (shipped: the preferred distributed backend): the
+  `--with=valkey` composable feature. Redis is a command protocol, not a query
+  language, so it does NOT go behind `HlDbBackend` / `hl_db_feature_backends`;
+  it fills a NEW, narrow non-SQL seam - the `HlKvBackend` vtable
+  (`include/hull/cap/kv_backend.h`) and its own weak hook
+  `hl_kv_feature_backends` (`cap/kv_feature.c`), a sibling of
+  `hl_db_feature_backends` so the two compose side by side. The feature is
+  reached by a `valkey://` / `redis://` (or `rediss://` / `valkeys://`) DSN on
+  `kv.open` / `cache.open` (`backend = "valkey"`), gated by the manifest
+  `kv.dynamic` allowlist and the same network sandbox grant as a network DB. It
+  packages exactly like the Postgres/MySQL wire backends (pure C, no vendored
+  engine, RESP2/RESP3, ACL/password auth, `rediss://` TLS via the shared TLS
+  client). The portable KV subset only; there is NO generic Redis-command escape
+  hatch, and cluster / Sentinel / streams / pub-sub / sorted-sets / scripting are
+  out of scope and belong in separate future capabilities.
 - **CacheLib**: an optional `--with=cachelib` high-performance local cache
   behind a narrow C/C++ boundary; never a default dependency.
 - **DuckDB**: usable as a KV backend where its semantics fit; the code does not

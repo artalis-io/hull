@@ -69,7 +69,7 @@ endef
 #   FEATURE_INSTALLABLE_STEMS  the --with features published as signed archives
 #                              for `hull feature install` (release-domain).
 FEATURE_EMBEDDED_STEMS := lua js http http-lua http-js tui-lua tui-js wasm wasm-lua wasm-js sqlite sqlite-lua sqlite-js image image-lua image-js tls keel
-FEATURE_INSTALLABLE_STEMS := duckdb postgres mysql gpu tui
+FEATURE_INSTALLABLE_STEMS := duckdb postgres mysql valkey gpu tui
 FEATURE_EMBEDDED_LIBS := $(addprefix $(BUILDDIR)/libhull_feature-,$(addsuffix .a,$(FEATURE_EMBEDDED_STEMS)))
 
 .PHONY: feature-embedded print-feature-embedded-stems print-feature-embedded-libs print-feature-installable-stems

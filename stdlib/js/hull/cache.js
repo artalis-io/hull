@@ -30,6 +30,7 @@ import kvUtil from "hull:kv:_util";
 import kvHandle from "hull:kv:_handle";
 import kvMemstore from "hull:kv:_memstore";
 import kvSql from "hull:kv:_sql";
+import kvValkey from "hull:kv:_valkey";
 
 const DEFAULT_MAX = 1000;
 
@@ -201,6 +202,10 @@ cache.open = function (opts) {
             evict: true, defaultTtl: opts.defaultTtl, maxItems: opts.maxItems,
         });
         bname = conn.backendName || "sqlite";
+    } else if (backend === "valkey" || backend === "redis") {
+        // Networked cache over the composed Valkey/Redis backend. Server-side
+        // TTL + maxmemory eviction; caller-owned connection (h.close() / GC).
+        [store, bname] = kvValkey.new(opts, storeNs);
     } else {
         kvUtil.error("invalid_argument", "cache.open: unknown backend '" + backend + "'");
     }
