@@ -1,10 +1,35 @@
-# `cap/kvmem.c` native cache store — design spike (no implementation)
+# `cap/kvmem.c` native cache store — design spike (CONCLUDED: not shipped)
 
-**Status:** design-only. **No code until this design is reviewed and the gates
-below are accepted.** This settles the open questions for a native C in-process
-byte cache that would back `hull/kv` (memory) and `hull/cache` (memory) as a
-performance drop-in for the pure-Lua/JS `_memstore`, chosen over CacheLib (see
-[cachelib_spike.md](cachelib_spike.md)).
+**Status:** CONCLUDED — experiment run, gates measured, **did not ship**. The
+store was implemented on a throwaway branch (`feat/kvmem-native`, unpushed) and
+measured against the five gates below. **Gate 2 (performance) and Gate 4
+(resident memory) failed decisively and structurally**, so the native store was
+NOT merged; the pure-Lua/JS `_memstore` remains the sole memory backend. Full
+methodology, exact numbers, and root causes:
+[kvmem_negative_result.md](kvmem_negative_result.md).
+
+Why it failed, in one line: semantic correctness (Gate 1, passed) and an O(1)
+eviction win (30-90x, the one bright spot) were NOT enough to offset the
+per-call boundary-copy cost on the common get/set workload (near-parity on Lua,
+~3x SLOWER on QuickJS because a byte value must convert to/from an `ArrayBuffer`
+every call) and the higher resident memory (~1.64x `_memstore` at 1e6 small
+entries). A C store behind the scripting boundary is the wrong shape for a
+byte cache whose values live most cheaply inside the runtime.
+
+The recommended follow-up is an in-stdlib O(1) LRU for `_memstore` (an intrusive
+linked list replacing the O(n) victim scan), which recovers the ONLY workload
+kvmem improved without any boundary or memory penalty. See
+[kvmem_negative_result.md § Recommended path forward](kvmem_negative_result.md#recommended-path-forward-a-stdlib-native-o1-lru-for-_memstore).
+
+The original design-only spike follows unchanged, for the record.
+
+---
+
+**Original status (superseded):** design-only. No code until this design is
+reviewed and the gates below are accepted. This settles the open questions for a
+native C in-process byte cache that would back `hull/kv` (memory) and
+`hull/cache` (memory) as a performance drop-in for the pure-Lua/JS `_memstore`,
+chosen over CacheLib (see [cachelib_spike.md](cachelib_spike.md)).
 
 ## Prime directive: a bit-identical drop-in
 
@@ -452,20 +477,25 @@ faster **and** identical **and** small **and** memory-lean **and** composable.
       accelerates both memory KV and memory cache; stdlib `_memstore` is the
       mandatory always-present fallback when the feature is absent (§10).
 
-## Gates to MEASURE at the implementation-review stage (before merge)
+## Gates as MEASURED (concluded — see kvmem_negative_result.md)
 
-- [ ] **Semantic:** conformance oracle diff = 0 under a stable clock (§ Gate 1).
-- [ ] **Performance:** ≥ 2× per runtime on mixed / TTL-churn / eviction-heavy
-      (§ Gate 2).
-- [ ] **Binary footprint:** composed delta ≤ ~20 KB (§ Gate 3).
-- [ ] **Resident memory:** peak RSS ≤ `_memstore`; accounted `bytes` within ≤1.5×
-      of real heap (§ Gate 4).
-- [ ] **Composability:** four platforms incl. cosmo, no new deps/authority,
-      ASan/MSan/fuzz clean (§ Gate 5).
+Measured on arm64 Darwin, Hull v0.13.0, `HL_ENABLE_CACHE_NATIVE=1`:
 
-Implementation stays **unauthorized** until the design PR is reviewed + merged;
-the gates above are then measured on the implementation PR, which ships only if
-all pass.
+- [x] **Semantic — PASS:** conformance oracle diff = 0, Lua == JS byte-identical.
+- [ ] **Performance — FAIL:** mixed Lua 1.11× / JS 0.29×; ttl Lua 1.10× / JS
+      0.36×; eviction Lua 93× / JS 33×. Below the ≥ 2× bar on mixed and
+      TTL-churn for both runtimes (native is SLOWER than `_memstore` on JS
+      get/set). Only eviction-heavy wins.
+- [x] **Binary footprint — PASS:** single-runtime composed delta ~15-17 KB.
+- [ ] **Resident memory — FAIL:** native 156 MB vs `_memstore` ~95 MB (1.64×) at
+      1e6 small entries; accounted `bytes` ~0.5× of real heap.
+- [~] **Composability — not decisive:** `_memstore` fallback verified,
+      ASan/UBSan + fuzz clean; cosmo not exercised (moot given the two failures).
+
+Two gates failed structurally, so the native store did **not** ship. The
+`_memstore` remains the only memory backend. This section is retained as the
+measured record; the ship/no-ship rule ("if any gate fails, keep `_memstore` and
+do not merge") was applied as written.
 
 Related: [kv_cache.md](kv_cache.md) (semantic layer + the retention defect + the
 two TTL semantics), [cachelib_spike.md](cachelib_spike.md) (why not CacheLib),
