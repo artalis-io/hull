@@ -58,8 +58,11 @@ local Store = {}
 Store.__index = Store
 
 local function ttl_ms(self, ttl)
-    ttl = ttl or self.default_ttl
-    if ttl == nil then return nil end
+    -- Mirror u.expiry_ms's contract exactly: nil -> use the default; an explicit
+    -- `false` (or a nil default) means NO expiry. `ttl or self.default_ttl` would
+    -- wrongly turn `false` into the default, so branch on nil explicitly.
+    if ttl == nil then ttl = self.default_ttl end
+    if ttl == nil or ttl == false then return nil end
     if type(ttl) ~= "number" or ttl < 0 then
         u.error("invalid_argument", "kv: ttl must be a non-negative number of seconds")
     end

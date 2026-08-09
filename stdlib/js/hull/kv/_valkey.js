@@ -62,8 +62,11 @@ function physPrefix(storeNs) {
 }
 
 function ttlMs(store, ttl) {
+    // Mirror util.expiryMs: undefined/null -> use the default; an explicit
+    // `false` (or a nil default) means NO expiry, matching the memory/SQL
+    // backends so `ttl: false` behaves the same on every backend.
     if (ttl === undefined || ttl === null) ttl = store.defaultTtl;
-    if (ttl === undefined || ttl === null) return undefined;
+    if (ttl === undefined || ttl === null || ttl === false) return undefined;
     if (typeof ttl !== "number" || ttl < 0)
         util.error("invalid_argument", "kv: ttl must be a non-negative number of seconds");
     return Math.floor(ttl * 1000);

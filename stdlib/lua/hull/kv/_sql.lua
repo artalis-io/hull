@@ -123,6 +123,12 @@ function Store:del(k)
 end
 
 -- Atomic compare-and-swap. expected == nil means "set only if absent".
+-- CAS/incr correctness relies on `conn.exec` returning rows CHANGED (not rows
+-- matched): `ON CONFLICT ... DO NOTHING` on an existing row must report 0, and a
+-- real insert/update 1. Both shipped backends satisfy this (SQLite
+-- sqlite3_changes(); Postgres command tag). A backend reporting rows-matched
+-- would break set-if-absent (a DO-NOTHING on an existing key would falsely
+-- report success) -- keep that invariant in mind when adding a backend.
 function Store:cas(k, expected, new, ttl)
     local now = u.now_ms()
     local exp = u.expiry_ms(ttl, self.default_ttl) or u.NO_EXPIRY

@@ -69,10 +69,10 @@ function M.open(opts)
         u.error("invalid_argument", "kv.open: options table required")
     end
     local backend = opts.backend or "memory"
-    opts.namespace = opts.namespace or "default"
+    local namespace = opts.namespace or "default"   -- do not mutate the caller's opts
     -- Prefix the physical store namespace so a kv and a cache that happen to
     -- share a namespace name never collide in the same memory table / _hull_kv.
-    local store_ns = "kv:" .. opts.namespace
+    local store_ns = "kv:" .. namespace
 
     local store, bname
     if backend == "memory" then
@@ -87,7 +87,7 @@ function M.open(opts)
         u.error("invalid_argument", "kv.open: unknown backend '" .. tostring(backend) .. "'")
     end
 
-    return handle.build(store, { namespace = opts.namespace, backend = bname })
+    return handle.build(store, { namespace = namespace, backend = bname })
 end
 
 return M

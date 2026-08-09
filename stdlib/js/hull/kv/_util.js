@@ -15,6 +15,14 @@ const MAX_KEY = 1024;
 // NULL and off the mid-array-nil binding path). Fits a 64-bit BIGINT.
 const NO_EXPIRY = Number.MAX_SAFE_INTEGER;
 
+// Any code unit > 255 means the caller passed a non-byte string (e.g. a UTF-16
+// string like "café" or "Ā"). The hex/base64/toBuf codecs mask `& 0xff`, which
+// would SILENTLY collapse distinct keys onto the same physical key ("Ā" U+0100
+// -> byte 0x00, colliding with "\x00") and corrupt values. Lua strings are
+// already bytes so the Lua side is immune; enforce the byte invariant here so
+// JS behaves identically and fails loudly instead of silently mangling.
+const NON_BYTE = /[^\u0000-\u00ff]/;
+
 function codedError(code, message) {
     const e = new Error(message);
     e.code = code;
@@ -28,12 +36,16 @@ function checkKey(k) {
         codedError("invalid_argument", "kv: key must be non-empty");
     if (k.length > MAX_KEY)
         codedError("invalid_argument", "kv: key exceeds " + MAX_KEY + " bytes");
+    if (NON_BYTE.test(k))
+        codedError("invalid_argument", "kv: key must be a byte string (code units 0-255)");
     return k;
 }
 
 function checkValue(v) {
     if (typeof v !== "string")
         codedError("invalid_argument", "kv: value must be a string (bytes), got " + typeof v);
+    if (NON_BYTE.test(v))
+        codedError("invalid_argument", "kv: value must be a byte string (code units 0-255)");
     return v;
 }
 
@@ -119,7 +131,7 @@ function hexdecode(hex) {
     if (hex.length % 2 !== 0) codedError("invalid_argument", "kv: corrupt hex in store");
     const out = [];
     for (let i = 0; i < hex.length; i += 2) {
-        const n = parseInt(hex.substr(i, 2), 16);
+        const n = parseInt(hex.slice(i, i + 2), 16);
         if (Number.isNaN(n)) codedError("invalid_argument", "kv: corrupt hex in store");
         out.push(String.fromCharCode(n));
     }
