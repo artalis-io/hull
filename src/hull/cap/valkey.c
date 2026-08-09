@@ -424,15 +424,9 @@ const HlKvBackend hl_kv_backend_valkey = {
     .scan       = vk_scan,
 };
 
-#if defined(HL_ENABLE_VALKEY) && !defined(HL_VALKEY_COMPOSED)
-/* Compiled-in path (make HL_ENABLE_VALKEY=1): supply the STRONG feature hook so
- * hl_kv_backend_select finds valkey without --with= composition, shadowing the
- * weak default in cap/kv_feature.c. The --with=valkey feature-archive path
- * (Phase 3) defines HL_VALKEY_COMPOSED and supplies a generated hook instead,
- * so this definition is compiled out there to avoid a duplicate symbol. */
-static const HlKvBackend *const g_valkey_backends[] = { &hl_kv_backend_valkey };
-const HlKvBackend *const *hl_kv_feature_backends(size_t *count) {
-    if (count) *count = 1;
-    return g_valkey_backends;
-}
-#endif
+/* The strong hl_kv_feature_backends hook lives in a SEPARATE TU
+ * (cap/valkey_register.c): the compiled-in dev/test base (make HL_ENABLE_VALKEY=1)
+ * links it to self-register, while the --with=valkey feature archive omits it
+ * (the generated feature_registry.c provides the hook instead). Keeping it out of
+ * this TU means the same object files feed both paths with no duplicate symbol
+ * and no build-time macro. */

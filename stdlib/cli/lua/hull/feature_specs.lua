@@ -77,6 +77,23 @@ return {
         base_group = true,
         libs       = { darwin = {}, other = {} },
     },
+    -- valkey: pure-C Valkey/Redis KV backend in libhull_feature-valkey.a
+    -- (`make feature-valkey`). The FIRST non-SQL connection feature: it fills
+    -- its OWN hook hl_kv_feature_backends (NOT hl_db_feature_backends), with C
+    -- type HlKvBackend, so the codegen emits a separate collector and it composes
+    -- side by side with the DB features. Pure C, no vendored engine. References
+    -- base crypto (auth) + tls_client (rediss sslmode), so base_group = true
+    -- (--start-group at compose on GNU ld). Selection is explicit --with=valkey
+    -- (redis:// DSNs are often $VAR env-refs, invisible at build time), never
+    -- auto-inferred.
+    valkey = {
+        backend    = "hl_kv_backend_valkey",
+        type       = "HlKvBackend",
+        hook       = "hl_kv_feature_backends",
+        cxx        = false,
+        base_group = true,
+        libs       = { darwin = {}, other = {} },
+    },
     -- gpu: wgpu-native backend, isolated in libhull_feature-gpu.a
     -- (`make feature-gpu`). Base ships the generic gpu dispatch layer +
     -- the weak hl_gpu_feature_backends hook; this fills it. C (no cxx). The

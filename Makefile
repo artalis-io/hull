@@ -868,7 +868,8 @@ ifneq ($(HL_ENABLE_VALKEY),1)
   CAP_SRCS := $(filter-out \
       $(SRCDIR)/hull/cap/respwire.c \
       $(SRCDIR)/hull/cap/valkey_conn.c \
-      $(SRCDIR)/hull/cap/valkey.c, \
+      $(SRCDIR)/hull/cap/valkey.c \
+      $(SRCDIR)/hull/cap/valkey_register.c, \
       $(CAP_SRCS))
 endif
 ifneq ($(HL_ENABLE_DUCKDB),1)
@@ -2223,6 +2224,9 @@ include mk/features/postgres.mk
 
 # MySQL --with feature moved to mk/features/mysql.mk
 include mk/features/mysql.mk
+
+# Valkey/Redis KV --with feature (the first non-SQL connection feature)
+include mk/features/valkey.mk
 
 # SQLite feature (archive + udf bridges + both embeds) moved to mk/features/sqlite.mk
 include mk/features/sqlite.mk
