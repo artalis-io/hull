@@ -170,8 +170,13 @@ semantic layer.
   client). The portable KV subset only; there is NO generic Redis-command escape
   hatch, and cluster / Sentinel / streams / pub-sub / sorted-sets / scripting are
   out of scope and belong in separate future capabilities.
-- **CacheLib**: an optional `--with=cachelib` high-performance local cache
-  behind a narrow C/C++ boundary; never a default dependency.
+- **CacheLib**: evaluated and **declined** - see the design spike
+  [docs/cachelib_spike.md](cachelib_spike.md). Meta's CacheLib pulls the full
+  folly/fbthrift/fizz/wangle stack (~15-20 C++ deps, OpenSSL/boost), is Linux-only
+  (no macOS/cosmo), has no C ABI, and owns its own allocator + background threads
+  + SSD I/O - incompatible with Hull's vendored-only, four-platform, `HlAllocator`
+  + sealed-arena model. The in-model answer for a fast local cache is the native
+  C cache store (the `cap/kvmem.c` follow-up above), not CacheLib.
 - **DuckDB**: usable as a KV backend where its semantics fit; the code does not
   force transactional guarantees DuckDB does not naturally provide.
 
