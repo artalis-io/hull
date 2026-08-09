@@ -1,19 +1,33 @@
-# In-stdlib O(1) LRU for `_memstore` — design + benchmark plan (no implementation)
+# In-stdlib O(1) LRU for `_memstore` — design + benchmark plan (CONCLUDED: NOT SHIPPED)
 
-**Status:** PLAN ONLY. No code until this plan's semantic-parity and
-memory-impact review is approved. This is the sanctioned follow-up from the
-concluded native-cache-store experiment
-([kvmem_negative_result.md](kvmem_negative_result.md)): fix the ONE workload that
-experiment improved (eviction-heavy, 30-90×) at its true root — an O(n) victim
-scan that lives entirely inside the interpreter — WITHOUT paying the
-scripting-boundary copy or the memory overhead that sank kvmem.
+**Status:** CONCLUDED — experiment run, **did not ship**. Two designs were
+tried against the five ship gates below and both were rejected; the pure
+Lua/JS `_memstore` remains **unchanged**. See **§11 Closure** for the full
+record. In short:
 
-Scope: `stdlib/lua/hull/kv/_memstore.lua` and `stdlib/js/hull/kv/_memstore.js`
-only. No C, no bindings, no capability change, no manifest/gate change. The
-`_memstore` is the semantic oracle both `hull/kv` (memory) and `hull/cache`
-(memory) depend on and that the retired kvmem was diffed against, so the bar is
-**observational identity with today's `_memstore`**, plus a strict eviction
-speedup and no memory regression.
+- The **eager** intrusive-list design was implemented and measured across the
+  whole matrix. It passed the semantic differential (0 mismatches), the eviction
+  gate (Lua 11.7×, JS 26.4×), and every RSS cell (0.99-1.00×), but FAILED Gates
+  2/3 on the `evict=true` cache path: mixed Lua +60%/+85%, JS +27%/+38%; ttl Lua
+  +49%, JS +31%. Exact O(1) LRU costs a ~6-write move-to-head on every touch vs
+  the old cheap `seq` bump, which is pure overhead when the working set fits.
+- The **lazily-activated** exact-LRU amendment (proposed to fix that) was
+  rejected at review: the six-slot transition is interruption-unsafe under the
+  per-request instruction hook, a seven-slot fix probably regresses the RSS gate,
+  and activation is an O(n log n) single operation whose latency (100k entries →
+  ~330 ms) and instruction cost (~66M of the 100M default budget at 100k, over
+  budget by ~1e6) impose a store-size ceiling above which a cache can never
+  complete its first eviction.
+
+Per the plan's own stop rule, **no third exact-LRU design is attempted.** The
+sections below are retained as the design of record; §11 records the outcome.
+
+Original scope (superseded): `stdlib/lua/hull/kv/_memstore.lua` and
+`stdlib/js/hull/kv/_memstore.js` only. No C, no bindings, no capability change,
+no manifest/gate change. The `_memstore` is the semantic oracle both `hull/kv`
+(memory) and `hull/cache` (memory) depend on and that the retired kvmem was
+diffed against, so the bar was **observational identity with today's
+`_memstore`**, plus a strict eviction speedup and no memory regression.
 
 ## 1. The defect (exact, from the current code)
 
@@ -427,10 +441,125 @@ are the places a doubly-linked list most easily corrupts silently:
 - Any change to `scan` order, TTL semantics, byte accounting, error codes,
   capability advertisement, or the shared-namespace/registry contract.
 
+## 11. Closure (CONCLUDED — NOT SHIPPED)
+
+The in-stdlib O(1) LRU experiment is concluded. Neither design cleared the five
+ship gates in §7, so nothing ships and today's `_memstore` is **unchanged**
+(byte-for-byte the version at `main` when this experiment began). This section is
+the record of why.
+
+### 11.1 Eager intrusive-list design — measured gate results
+
+Implemented on the branch `feat/memstore-o1-lru` (preserved locally, unpushed,
+NOT proposed for merge) and measured against a frozen `_memstore_ref` with the
+full §7 protocol (12 fresh-process invocations per cell, 2 warm-ups discarded,
+median of 10, hard-fail on any truncated run). Arm64 Darwin:
+
+| Gate | Target | Result | Verdict |
+|------|--------|--------|---------|
+| 1 Semantic differential | 0 mismatches, both runtimes | 24k random ops/runtime vs the frozen oracle, 0 mismatches (returns, `stats`, live-set, `scan`); §8 integrity green; existing e2e_kv/e2e_cache pass | PASS |
+| 2 Mixed get/set | ≤10%/runtime | KV (evict=false) ~1.00×; **CACHE (evict=true) FAIL** — lua +60%/+85%, js +27%/+38% | **FAIL** |
+| 3 TTL-churn | ≤10%/runtime | KV ~1.00×; **CACHE FAIL** — lua +49%, js +31% | **FAIL** |
+| 4 Eviction-heavy | ≥5×/runtime | lua 11.7×, js 26.4× | PASS |
+| 5 Peak RSS | ≤10%, 4 cells | 0.99-1.00× (positional Lua / stable-shape JS held) | PASS |
+| 6 Existing tests | 0 regressions | pass, unedited | PASS |
+
+Root cause (architectural, not a coding defect): exact O(1) LRU maintains the
+recency list on EVERY touch (a ~6-write move-to-head) versus the old store's
+single cheap `seq` bump. On an `evict=true` store whose working set fits (no
+eviction pressure) that is pure overhead with no offsetting benefit, so the
+common get/set cache workload regresses past 10%. The list only pays for itself
+under sustained eviction (Gate 4).
+
+### 11.2 Lazily-activated exact LRU — why it was rejected at review
+
+The proposed fix kept today's cheap `seq` behavior until the first real eviction,
+then reconstructed the exact order from the unique `seq` values and switched the
+store to intrusive-list mode. Formal review (throwaway probes, no `_memstore`
+change) found it not approvable:
+
+- **Interruption-unsafe six-slot transition.** Hull enforces a per-request
+  instruction budget via `lua_sethook` / `JS_SetInterruptHandler`, which stdlib
+  code cannot disable; it RAISES mid-execution when the budget is exhausted.
+  Post-activation needs both `prev` and `next` (slots 5+6); pre-activation needs
+  `seq` in slot 5. The commit overwrites slot 5 (seq → prev) entry-by-entry, so a
+  budget-kill mid-commit leaves some entries with a link where a number is
+  expected, `active` still false — a later activation then reads a non-number as
+  `seq` and crashes / diverges. Six slots cannot leave "valid SEQ or valid LIST
+  state" under interruption.
+- **Probable RSS regression with seven slots.** A dedicated seventh `seq` slot
+  (never written by activation) closes the atomicity hole, but adds ~16 B/entry
+  to a layout the eager design already measured AT parity (Gate 5 was 0.99-1.00×
+  with six slots). On the real 1e6-entry store that is a likely breach of the
+  10% RSS gate — trading one failed gate for another.
+- **Activation latency.** Reconstruction is an O(n log n) merge sort on a single
+  operation. Measured (allocation-free bottom-up, Lua): 10k → 22 ms, 100k →
+  **331 ms**. A first eviction that freezes the event loop for a third of a
+  second (and worse for larger caches) is an unusable single-operation latency
+  that aggregate throughput would hide.
+- **Instruction-budget ceiling.** At ~200 MIPS, 100k activation ≈ 66M of the
+  100M default per-request budget on one op; ~1e6 ≈ 660M, far over budget. Above
+  a ~100k-150k-entry ceiling the triggering operation is killed before
+  activation completes, leaves valid SEQ state, and the next eviction retries and
+  is killed again — the cache can **never** evict. A correctness-preserving cache
+  that breaks above a size ceiling is not acceptable.
+
+These are coupled: exact reconstruction is inherently O(n log n) on one
+gas-limited, non-atomic operation, so the lazy design trades the eager design's
+per-touch overhead for a first-eviction latency/budget cliff plus an
+interruption-atomicity gap. Per the plan's stop rule, no further exact-LRU design
+is attempted.
+
+### 11.3 What ships: nothing. `_memstore` is unchanged.
+
+The pure Lua/JS `_memstore` remains the sole memory backend for `hull/kv` and
+`hull/cache`, exactly as before this experiment. Its one known weakness — the
+O(n) min-`seq` victim scan under sustained eviction — stands, because every exact
+replacement measured either regresses the common get/set cache path, the RSS
+gate, or the first-eviction latency/budget.
+
+> **Sustained eviction-heavy local caches currently have no specialized
+> first-party backend. Valkey is a network workaround, not a drop-in
+> local-performance solution; use it only when distributed semantics and
+> measured end-to-end latency justify the round trip.**
+
+### 11.4 Explicitly ruled out
+
+- **Another exact-LRU redesign under the current requirements.** The requirement
+  is observational identity with today's `_memstore` (exact eviction order) at
+  ≤10% regression on get/set, ≤10% RSS, and within the per-request instruction
+  budget. The eager and lazy designs bracket the achievable space (always-on list
+  vs. deferred reconstruction); both fail. No third exact design is attempted.
+- **A seven-slot layout** (or any layout change chasing interruption-safety) — it
+  does not resolve the activation latency/budget ceiling and risks the RSS gate.
+
+### 11.5 The only reopening path
+
+Approximate-recency policies — **CLOCK / second-chance** or **segmented LRU** —
+CAN meet the O(1)-eviction goal with cheap touches and no O(n log n)
+reconstruction. But they change the eviction ORDER, so they are observationally
+DIFFERENT from today's `_memstore` and would fail the semantic-parity gate as it
+stands. They are therefore ruled out under the current requirements and may be
+reconsidered ONLY under a NEW product requirement that explicitly permits an
+observable change to eviction order. That is a product decision, not a
+performance tweak, and is out of scope here.
+
+**Production trigger to reopen.** Do not reopen local-eviction work on
+speculation. Reopen only when real workloads show ALL THREE of:
+
+1. a **hard-capped** `cache.open{backend="memory"}` store (a `max_items` /
+   `max_bytes` bound that is actually reached);
+2. **sustained over-cap insert** traffic (eviction firing on nearly every insert,
+   not the bursty or has-headroom case that never touches the O(n) path); and
+3. `_memstore`'s **victim scan measured as a hotspot** end to end (not assumed).
+
+Absent that evidence the subsystem stays closed; with it, the reopen is still
+gated on the eviction-order requirement change above.
+
 ## Related
 
-- [kvmem_negative_result.md](kvmem_negative_result.md) — why the native store
-  was concluded; this plan is its § Recommended path forward, elaborated.
+- [kvmem_negative_result.md](kvmem_negative_result.md) — the prior concluded
+  experiment (native cache store); this plan was its § Recommended path forward.
 - [kvmem_design.md](kvmem_design.md) — the concluded design spike (§11 workload
   matrix reused here).
 - [kv_cache.md](kv_cache.md) — the `hull/kv` + `hull/cache` semantic layer.
