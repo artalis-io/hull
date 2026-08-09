@@ -178,6 +178,12 @@ risk is a slowdown on get/set-heavy traffic. Controls:
 
 Both must be benchmarked per runtime (Lua and QuickJS), never blended.
 
+> **Measured outcome + fix.** The eager design DID regress the `evict=true`
+> get/set path beyond the margin (mixed Lua +60%/+85%, JS +27%/+38%; ttl Lua
+> +49%, JS +31%). §10 amends the design to a **lazily-activated exact LRU** that
+> keeps the cheap `seq` path until an eviction actually occurs, directly removing
+> this overhead from the fitting-cache case without changing any numeric gate.
+
 ## 6. Memory overhead
 
 The list is threaded through the existing entry records (`prev`/`next` are
@@ -344,7 +350,9 @@ pinned baseline so a later reader can reproduce the exact comparison.
 
 **Ship gates for the eventual implementation review (numeric; all required).**
 Measured on arm64 Darwin, the redesigned `_memstore` vs today's `_memstore`,
-each runtime measured separately and never blended:
+each runtime measured separately and never blended. **These gates are UNCHANGED
+by the §10 amendment** — the lazy-activation design must clear every one of them
+exactly as written:
 
 1. **Semantic differential — ZERO mismatches.** The golden-trace differential
    (§3) reports 0 observable differences vs the frozen reference across the full
@@ -426,6 +434,192 @@ are the places a doubly-linked list most easily corrupts silently:
   meet the eviction requirement (it is expected to meet it).
 - Any change to `scan` order, TTL semantics, byte accounting, error codes,
   capability advertisement, or the shared-namespace/registry contract.
+
+## 10. Amendment: lazily-activated exact LRU (targets the measured §5 failure)
+
+**Why this amendment.** The eager design above (maintain the intrusive list on
+every touch of an `evict=true` store) was implemented and measured against the
+full matrix. It PASSED the semantic differential (0 mismatches), the eviction
+gate (Lua 11.7x, JS 26.4x), and every RSS cell (0.99-1.00x, the positional /
+stable-shape layout held). It FAILED Gates 2/3 on the `evict=true` cache policy:
+mixed Lua +60%/+85%, JS +27%/+38%; ttl Lua +49%, JS +31%. Root cause is
+structural: an exact O(1) LRU does a move-to-head (~6 field writes) on EVERY
+touch, versus the old store's single cheap `seq` bump, and on a cache whose
+working set FITS (no eviction pressure) that is pure overhead with no offsetting
+benefit. The list only earns its cost under sustained eviction.
+
+This amendment removes that overhead from the fitting-cache case WITHOUT changing
+any gate and without changing observable behavior: keep the old cheap `seq`
+behavior until an eviction actually occurs, and only then pay a one-time cost to
+switch the store to intrusive-list mode. **No numeric gate changes** (§7 stands
+verbatim); the differential oracle is unchanged; this is purely a
+performance-mode transition invisible to callers.
+
+### 10.1 Two modes, one store
+
+A store is in one of two recency modes:
+
+- **SEQ mode (inactive, the default).** Exactly today's `_memstore`: a monotonic
+  `seq` counter, bumped on each touch (`get`-hit, `put` new/overwrite, `incr`
+  existing); NO links maintained. `del` and lazy-TTL `drop` are seq-only (there
+  is no list to unlink). A store with `evict=false` NEVER leaves this mode (it
+  never evicts), so the KV path is byte-for-byte today's behavior. A cache with
+  headroom stays here too, for as long as it never actually evicts.
+- **LIST mode (active).** The intrusive doubly-linked O(1) LRU of §2/§6: touch =
+  move-to-head, eviction = tail unlink, `drop` unlinks. Once active, a store
+  stays active until it empties or is `clear()`ed (§10.4).
+
+The transition SEQ -> LIST happens exactly once, lazily, at the FIRST real
+capacity eviction (§10.2). Fitting-cache mixed/TTL workloads never trigger it and
+so keep the low-cost touch path; eviction-heavy workloads pay the one-time
+ordering cost and then receive O(1) eviction.
+
+### 10.2 Activation: reconstruct exact order from the unique `seq` values
+
+Activation is invoked from inside `make_room`, at the point it determines a real
+eviction is required (`over()` is true, `evict` is true, `items > 0`) and the
+store is still inactive. It reconstructs the exact LRU order the seq counter
+already encodes, then flips the store to LIST mode; `make_room` then evicts the
+tail as usual.
+
+Correctness of the reconstruction: today's oracle evicts the minimum-`seq` entry;
+sorting the live entries by `seq` and making highest-`seq` the head / lowest the
+tail yields a list whose tail is that same minimum-`seq` entry, and whose order
+is the exact access-recency order. Because every touch bumps `seq` uniquely and
+monotonically, the order is total and unambiguous, so the first list-mode victim
+and every subsequent one match the oracle's min-`seq` selection (the same parity
+argument as §3, now established once at activation and preserved thereafter).
+
+### 10.3 Building the order with no large temporary allocation
+
+The RSS gate (§7 gate 5) must stay meaningful, so activation must not allocate an
+O(n) temporary (e.g. an array of all entries to `table.sort`). Instead it uses an
+**intrusive stable merge sort over the existing link fields** — zero heap growth
+beyond a handful of local pointers:
+
+- The entry record keeps its 6 positional slots (§6.1); slots 5 and 6 are
+  dual-purpose. In SEQ mode slot 5 (`E_SEQ`, aliasing `E_PREV`) holds the seq and
+  slot 6 (`E_NEXT`) is `false`/unused. In LIST mode slot 5 is `prev` and slot 6
+  is `next`. So the record size — and thus RSS — is identical in both modes and
+  identical to the already-measured layout.
+- **Collect:** iterate `data` once and thread every live entry onto a singly-
+  linked list via slot 6 (`E_NEXT`), reading each entry's seq from slot 5. This
+  writes only slot 6 (the unused slot); slot 5 (`seq`) is left intact.
+- **Sort:** bottom-up (or top-down) stable merge sort of that singly-linked list
+  by seq, using slot 6 as the "next" pointer. Merge sort on a linked list needs
+  only O(log n) / O(1) auxiliary pointers — no per-entry temporary. Stable so
+  that any equal keys (which cannot occur pre-rollover, §10.6) keep a defined
+  order rather than a hash-iteration-dependent one.
+- **Commit:** walk the sorted singly-linked list once and write the doubly-linked
+  `prev`/`next` into slots 5 and 6 and set `head`/`tail`. This is the point slot 5
+  changes from `seq` to `prev`; the seq value is no longer needed. Commit is O(n)
+  pointer writes, allocation-free.
+
+### 10.4 `clear()` and empty transitions reset to inactive
+
+`clear()` empties `data`, zeroes the counters, sets `head=tail` empty, resets the
+seq counter, and sets the store back to **SEQ mode** — a cleared store is a fresh
+store and may lazily re-activate on a future eviction (§10.9 covers this in the
+differential). A store that drains to zero items (via `del` / expiry) likewise
+returns to SEQ mode, since there is no order left to maintain and the next fill
+should get the cheap path until it again evicts. (Reactivation simply repeats
+§10.2 when the next real eviction arrives.)
+
+### 10.5 Pre- vs post-activation removal paths
+
+- **Before activation:** `del` and lazy-TTL `drop` are seq-only — remove from
+  `data`, adjust counters, do NOT touch links (there are none). Identical to
+  today's oracle.
+- **After activation:** `del`, lazy-TTL `drop`, `cleanup`, and eviction all
+  unlink the node from the list (§2), O(1).
+
+The `drop` helper therefore branches on the store's active flag: unlink only when
+active. This keeps the §8 list-integrity obligations but scopes them to the
+active state.
+
+### 10.6 Counter rollover handling
+
+`seq` is consulted only ONCE, at activation, to reconstruct order; after
+activation the store never reads it again. Rollover / precision loss (Lua 5.4
+integers wrap at 2^63; JS `Number` loses integer uniqueness past 2^53) can only
+matter if a store performs that many touches while STILL inactive — i.e. an
+`evict=true` store that never evicts across 2^53+ operations, or an `evict=false`
+store (which never consults seq at all, so rollover is harmless there). To keep
+uniqueness guaranteed at activation, the store treats a `seq` that reaches a
+safe threshold (`SEQ_SAFE_MAX`, well below 2^53) as a trigger to **force
+activation early** (run §10.2 now, from the still-unique seqs, and continue in
+LIST mode, which does not use seq). This bounds `seq` and makes non-unique seqs
+unreachable at activation. The differential exercises this with a lowered
+test-only threshold (§10.9).
+
+### 10.7 Shared handles observe one activation state
+
+Activation state (`active`, `head`, `tail`, `seq`) lives on the single per-
+namespace `Store`, exactly like `data` and the counters. Two `get(ns)` handles
+share it: an eviction triggered through handle A that activates the store is
+immediately observed by handle B (its subsequent touches take the list-mode
+path). There is no per-handle mode. §4's shared-namespace contract is unchanged.
+
+### 10.8 Activation is atomic; failure leaves the store and write unchanged
+
+Activation must be all-or-nothing so a hypothetical failure cannot corrupt the
+store or partially apply the triggering write. The structure above guarantees it:
+
+- The collect + sort phases write only slot 6 (`E_NEXT`), which is unused in SEQ
+  mode, and read slot 5 (`seq`) without modifying it. If any step raised before
+  commit, the store is still a valid SEQ-mode store (its reads use slot 5;
+  slot 6 is ignored in SEQ mode), `active` is still false, and no entry has been
+  dropped. The build allocates nothing, so the realistic failure surface is
+  empty; the invariant holds by construction regardless.
+- `active`, `head`, and `tail` are assigned only in the final commit, which is
+  allocation-free and cannot partially fail in a way that drops data.
+- Because activation runs INSIDE `make_room` BEFORE any eviction `drop` and (for
+  a new `put`) before the new entry is inserted, a raise propagates out of
+  `make_room` -> `put`/`incr` with the store unchanged and the triggering write
+  not applied (the same failure semantics as today's "value larger than budget"
+  path). An overwrite that raises during its `make_room(delta)` leaves the old
+  value in place (the value mutation happens only after `make_room` returns).
+
+### 10.9 Added differential + integrity coverage (still 0 mismatches required)
+
+The §3/§8 differential and integrity suites gain cases that specifically exercise
+the transition, all asserted against the unchanged frozen oracle:
+
+- **Activation boundary:** a workload that runs many touches with no eviction
+  (stays SEQ) then crosses its cap once (activates), asserting the first
+  post-activation victim and all subsequent ones equal the oracle's.
+- **Multi-victim first eviction:** the activating `put`/`incr` is oversized so the
+  first eviction removes several tail entries in one `make_room`; assert count and
+  survivors match the oracle.
+- **Expiry immediately before activation:** an entry lazily expires (seq-mode
+  `drop`, no links) on the very operation that then triggers activation; assert
+  the expired entry is excluded from the reconstructed order and the victim is
+  correct.
+- **Counter rollover:** with a lowered `SEQ_SAFE_MAX`, drive enough touches to
+  cross it and force early activation; assert order is exact and parity holds.
+- **clear / reactivation:** activate, `clear()` (back to SEQ), refill past the cap
+  to reactivate; assert both activation episodes match the oracle and no stale
+  links survive the clear.
+
+### 10.10 Expected effect on the gates (to be MEASURED, not assumed)
+
+Predicted, to be confirmed by re-running the §7 matrix on the amended
+implementation:
+
+- Gates 2/3 (mixed/ttl, `evict=true`, fitting working set): the store never
+  activates, so it runs the cheap SEQ path == the oracle -> expected within the
+  10% bound (near-parity), removing the +27%..+85% regression.
+- Gate 4 (eviction-heavy): activates on the first eviction, pays the one-time
+  O(n log n) sort, then O(1) evictions -> expected to keep the >=5x win (the
+  one-time sort amortizes over sustained eviction).
+- Gate 5 (RSS): entry record unchanged at 6 slots -> expected to stay 0.99-1.00x.
+- Gate 1 / Gate 6: the transition is observably invisible -> expected 0
+  mismatches and no existing-test regressions.
+
+**Stop condition (unchanged discipline):** the amended implementation ships only
+if EVERY numeric gate in §7 passes as written. If the lazy design still fails any
+gate, the experiment is ARCHIVED as a second negative result (like
+kvmem_negative_result.md); no third design is attempted.
 
 ## Related
 
