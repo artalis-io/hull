@@ -1,0 +1,1784 @@
+diff --git a/core/config.h b/core/config.h
+index 31404deb..f3347b75 100644
+--- a/core/config.h
++++ b/core/config.h
+@@ -84,7 +84,12 @@
+ #endif
+ 
+ #define AOT_MAGIC_NUMBER 0x746f6100
+-#define AOT_CURRENT_VERSION 6
++/* Hull ext: bumped 6 -> 7 atomically with the AOTModuleInstanceExtra layout
++ * change (shared_heap_read_only inserted before `common`, shifting `common` and
++ * every later field). A version-6 artifact carries the OLD layout and MUST be
++ * rejected by this runtime; a version-7 artifact must be rejected by an
++ * unpatched (version-6) runtime. See docs/wamr_patches.md. */
++#define AOT_CURRENT_VERSION 7
+ 
+ #ifndef WASM_ENABLE_JIT
+ #define WASM_ENABLE_JIT 0
+diff --git a/core/iwasm/aot/aot_runtime.c b/core/iwasm/aot/aot_runtime.c
+index 7f57b1ad..245895dc 100644
+--- a/core/iwasm/aot/aot_runtime.c
++++ b/core/iwasm/aot/aot_runtime.c
+@@ -62,6 +62,18 @@ bh_static_assert(offsetof(AOTModuleInstanceExtra, shared_heap_base_addr_adj)
+ bh_static_assert(offsetof(AOTModuleInstanceExtra, shared_heap_start_off) == 16);
+ bh_static_assert(offsetof(AOTModuleInstanceExtra, shared_heap_end_off) == 24);
+ bh_static_assert(offsetof(AOTModuleInstanceExtra, shared_heap) == 32);
++/* Hull ext: read_only cache field, placed right after shared_heap at a
++ * DETERMINISTIC offset (40). The AOT codegen loads it by this hard-coded offset,
++ * so wamrc and the runtime MUST agree -- hence it must precede `common` (whose
++ * size varies with conditionally-compiled features). All preceding fields are
++ * unconditional pointers/MemBounds, so 40 is stable; assert it exactly. */
++bh_static_assert(offsetof(AOTModuleInstanceExtra, shared_heap_read_only) == 40);
++/* Hull ext: `common` (and every field after it) is shifted by the read_only
++ * insertion. The AOT codegen reads NO field past read_only (audited), so this is
++ * a pure versioned layout change, not a codegen-offset break. Assert `common`'s
++ * post-shift offset so any accidental drift in either the wamrc or runtime build
++ * config is caught at compile time (this TU is compiled into both). */
++bh_static_assert(offsetof(AOTModuleInstanceExtra, common) == 48);
+ 
+ bh_static_assert(offsetof(WASMSharedHeap, next) == 0);
+ bh_static_assert(offsetof(WASMSharedHeap, chain_next) == 8);
+@@ -3618,6 +3630,18 @@ aot_memory_init(AOTModuleInstance *module_inst, uint32 seg_index, uint32 offset,
+                                         (uint64)dst, (uint64)len))
+         return false;
+ 
++#if WASM_ENABLE_SHARED_HEAP != 0
++    /* Hull ext: memory.init into a read-only shared-heap destination traps on
++     * the write path (validate_app_addr above serves reads and returns true for
++     * any in-heap address). Zero-length is gated inside the helper. */
++    if (wasm_runtime_shared_heap_is_readonly(
++            (WASMModuleInstanceCommon *)module_inst, (uint64)dst, (uint64)len,
++            memory_inst->is_memory64)) {
++        aot_set_exception(module_inst, "out of bounds memory access");
++        return false;
++    }
++#endif
++
+     if ((uint64)offset + (uint64)len > seg_len) {
+         aot_set_exception(module_inst, "out of bounds memory access");
+         return false;
+diff --git a/core/iwasm/aot/aot_runtime.h b/core/iwasm/aot/aot_runtime.h
+index 687c75e1..830a62a4 100644
+--- a/core/iwasm/aot/aot_runtime.h
++++ b/core/iwasm/aot/aot_runtime.h
+@@ -127,6 +127,15 @@ typedef struct AOTModuleInstanceExtra {
+     MemBound shared_heap_start_off;
+     MemBound shared_heap_end_off;
+     DefPointer(WASMSharedHeap *, shared_heap);
++    /* Hull ext: read_only of the last-used shared heap (write-path RO check).
++     * Placed IMMEDIATELY after shared_heap (deterministic offset 40) and BEFORE
++     * `common`: `common` has conditionally-compiled fields whose size can differ
++     * between the wamrc build and the runtime build, so a position after it
++     * would make wamrc and the runtime disagree on this field's offset -- and
++     * the AOT codegen loads it by hard-coded offset. All fields before it are
++     * unconditional (so 40 is stable), and it stays after shared_heap (offset
++     * 32) so the fixed AOT-ABI offsets the codegen depends on do not shift. */
++    uint8 shared_heap_read_only;
+ 
+     WASMModuleInstanceExtraCommon common;
+ 
+@@ -143,7 +152,6 @@ typedef struct AOTModuleInstanceExtra {
+     bh_list *sub_module_inst_list;
+     WASMModuleInstanceCommon **import_func_module_insts;
+ #endif
+-
+ } AOTModuleInstanceExtra;
+ 
+ #if defined(BUILD_TARGET_X86_64) || defined(BUILD_TARGET_AMD_64)
+diff --git a/core/iwasm/common/wasm_memory.c b/core/iwasm/common/wasm_memory.c
+index 628a0323..4e42f497 100644
+--- a/core/iwasm/common/wasm_memory.c
++++ b/core/iwasm/common/wasm_memory.c
+@@ -236,6 +236,14 @@ wasm_runtime_create_shared_heap(SharedHeapInitArgs *init_args)
+         goto fail1;
+     }
+ 
++    /* Hull ext: read-only is only coherent for a caller-owned pre-allocated
++     * buffer; the runtime-managed malloc heap must stay writable. Reject an
++     * incoherent read_only request explicitly rather than silently ignoring it. */
++    if (init_args->read_only && !init_args->pre_allocated_addr) {
++        LOG_WARNING("read-only shared heap requires a pre-allocated buffer");
++        goto fail1;
++    }
++
+     if (!(heap = runtime_malloc(heap_struct_size))) {
+         goto fail1;
+     }
+@@ -255,6 +263,7 @@ wasm_runtime_create_shared_heap(SharedHeapInitArgs *init_args)
+     heap->start_off_mem64 = UINT64_MAX - heap->size + 1;
+     heap->start_off_mem32 = UINT32_MAX - heap->size + 1;
+     heap->attached_count = 0;
++    heap->read_only = false; /* Hull ext: writable by default */
+ 
+     if (init_args->pre_allocated_addr != NULL) {
+         /* Create shared heap from a pre allocated buffer, its size need to
+@@ -267,6 +276,7 @@ wasm_runtime_create_shared_heap(SharedHeapInitArgs *init_args)
+ 
+         heap->heap_handle = NULL;
+         heap->base_addr = init_args->pre_allocated_addr;
++        heap->read_only = init_args->read_only; /* Hull ext: RO only for pre-alloc */
+         LOG_VERBOSE("Create preallocated shared heap %p with size %u",
+                     heap->base_addr, size);
+     }
+@@ -434,6 +444,27 @@ get_last_used_shared_heap_base_addr_adj(WASMModuleInstanceCommon *module_inst)
+     return 0;
+ }
+ 
++/* Hull ext: read_only flag of the last-matched shared heap (write-path gate). */
++static uint8
++get_last_used_shared_heap_read_only(WASMModuleInstanceCommon *module_inst)
++{
++#if WASM_ENABLE_INTERP != 0
++    if (module_inst->module_type == Wasm_Module_Bytecode) {
++        WASMModuleInstanceExtra *e =
++            (WASMModuleInstanceExtra *)((WASMModuleInstance *)module_inst)->e;
++        return e->shared_heap_read_only;
++    }
++#endif
++#if WASM_ENABLE_AOT != 0
++    if (module_inst->module_type == Wasm_Module_AoT) {
++        AOTModuleInstanceExtra *e =
++            (AOTModuleInstanceExtra *)((AOTModuleInstance *)module_inst)->e;
++        return e->shared_heap_read_only;
++    }
++#endif
++    return 0;
++}
++
+ static uintptr_t
+ get_last_used_shared_heap_start_offset(WASMModuleInstanceCommon *module_inst)
+ {
+@@ -507,12 +538,14 @@ update_last_used_shared_heap(WASMModuleInstanceCommon *module_inst,
+             e->shared_heap_start_off.u64 - 1 + shared_heap->size;
+         e->shared_heap_base_addr_adj =
+             shared_heap->base_addr - e->shared_heap_start_off.u64;
++        e->shared_heap_read_only = shared_heap->read_only;
+ #else
+         e->shared_heap_start_off.u32[0] = (uint32)shared_heap->start_off_mem32;
+         e->shared_heap_end_off.u32[0] =
+             e->shared_heap_start_off.u32[0] - 1 + shared_heap->size;
+         e->shared_heap_base_addr_adj =
+             shared_heap->base_addr - e->shared_heap_start_off.u32[0];
++        e->shared_heap_read_only = shared_heap->read_only;
+ #endif
+     }
+ #endif /* end of WASM_ENABLE_INTERP != 0 */
+@@ -529,12 +562,14 @@ update_last_used_shared_heap(WASMModuleInstanceCommon *module_inst,
+             e->shared_heap_start_off.u64 - 1 + shared_heap->size;
+         e->shared_heap_base_addr_adj =
+             shared_heap->base_addr - e->shared_heap_start_off.u64;
++        e->shared_heap_read_only = shared_heap->read_only;
+ #else
+         e->shared_heap_start_off.u32[0] = (uint32)shared_heap->start_off_mem32;
+         e->shared_heap_end_off.u32[0] =
+             e->shared_heap_start_off.u32[0] - 1 + shared_heap->size;
+         e->shared_heap_base_addr_adj =
+             shared_heap->base_addr - e->shared_heap_start_off.u32[0];
++        e->shared_heap_read_only = shared_heap->read_only;
+ #endif
+     }
+ #endif /* end of WASM_ENABLE_AOT != 0 */
+@@ -738,6 +773,32 @@ fail:
+     return false;
+ }
+ 
++/* Hull ext: true if [app_offset, app_offset+bytes) lies in a read-only shared
++ * heap (chain-aware). For write paths (memory.init) that map the address via a
++ * runtime call rather than the inline AOT/interp cache check. A zero-length
++ * write returns false: no write => read-only permission alone must not trap. */
++bool
++wasm_runtime_shared_heap_is_readonly(WASMModuleInstanceCommon *module_inst,
++                                     uint64 app_offset, uint64 bytes,
++                                     bool is_memory64)
++{
++    WASMSharedHeap *heap = wasm_runtime_get_shared_heap(module_inst), *cur;
++    uint64 shared_heap_start, shared_heap_end;
++
++    if (bytes == 0)
++        return false;
++
++    for (cur = heap; cur; cur = cur->chain_next) {
++        shared_heap_start =
++            is_memory64 ? cur->start_off_mem64 : cur->start_off_mem32;
++        shared_heap_end = shared_heap_start - 1 + cur->size;
++        if (bytes - 1 <= shared_heap_end && app_offset >= shared_heap_start
++            && app_offset <= shared_heap_end - bytes + 1)
++            return cur->read_only != 0;
++    }
++    return false;
++}
++
+ static bool
+ is_native_addr_in_shared_heap(WASMModuleInstanceCommon *module_inst,
+                               bool is_memory64, uint8 *addr, uint64 bytes)
+diff --git a/core/iwasm/common/wasm_memory.h b/core/iwasm/common/wasm_memory.h
+index a96e2504..78f2e7ae 100644
+--- a/core/iwasm/common/wasm_memory.h
++++ b/core/iwasm/common/wasm_memory.h
+@@ -75,9 +75,27 @@ SET_LINEAR_MEMORY_SIZE(WASMMemoryInstance *memory, uint64 size)
+     if (app_addr_in_shared_heap(app_addr, bytes))                \
+         shared_heap_addr_app_to_native(app_addr, native_addr);   \
+     else
++/* Hull ext: STORE variant. A write whose target lands in a read-only shared
++ * heap traps (goto out_of_bounds) instead of mapping to a native address. Loads
++ * keep using CHECK_SHARED_HEAP_OVERFLOW, so reads from a read-only heap are
++ * unaffected. Only a pre-allocated (file-backed) heap can be read-only; see the
++ * reject in wasm_runtime_create_shared_heap. shared_heap_read_only is the per-
++ * instance cache populated by update_last_used_shared_heap for the heap that
++ * app_addr_in_shared_heap just matched. */
++#define CHECK_SHARED_HEAP_STORE_OVERFLOW(app_addr, bytes, native_addr) \
++    if (app_addr_in_shared_heap(app_addr, bytes)) {                    \
++        /* A zero-length bulk op writes nothing, so read-only           \
++         * permission alone must not trap (WASM bounds semantics);      \
++         * scalar/SIMD stores always have bytes > 0 so they trap. */    \
++        if ((bytes) != 0 && module->e->shared_heap_read_only)          \
++            goto out_of_bounds;                                        \
++        shared_heap_addr_app_to_native(app_addr, native_addr);         \
++    }                                                                  \
++    else
+ 
+ #else /* else of WASM_ENABLE_SHARED_HEAP != 0 */
+ #define CHECK_SHARED_HEAP_OVERFLOW(app_addr, bytes, native_addr)
++#define CHECK_SHARED_HEAP_STORE_OVERFLOW(app_addr, bytes, native_addr)
+ #endif /* end of WASM_ENABLE_SHARED_HEAP != 0 */
+ #endif /* end of WASM_ENABLE_INTERP != 0 */
+ 
+@@ -86,6 +104,12 @@ bool
+ is_app_addr_in_shared_heap(WASMModuleInstanceCommon *module_inst,
+                            bool is_memory64, uint64 app_offset, uint64 bytes);
+ 
++/* Hull ext: true if the write range lands in a read-only shared heap. */
++bool
++wasm_runtime_shared_heap_is_readonly(WASMModuleInstanceCommon *module_inst,
++                                     uint64 app_offset, uint64 bytes,
++                                     bool is_memory64);
++
+ WASMSharedHeap *
+ wasm_runtime_create_shared_heap(SharedHeapInitArgs *init_args);
+ 
+diff --git a/core/iwasm/common/wasm_runtime_common.c b/core/iwasm/common/wasm_runtime_common.c
+index 98686c3f..4cbb1318 100644
+--- a/core/iwasm/common/wasm_runtime_common.c
++++ b/core/iwasm/common/wasm_runtime_common.c
+@@ -8108,7 +8108,8 @@ bool
+ wasm_runtime_check_and_update_last_used_shared_heap(
+     WASMModuleInstanceCommon *module_inst, uintptr_t app_offset, size_t bytes,
+     uintptr_t *shared_heap_start_off_p, uintptr_t *shared_heap_end_off_p,
+-    uint8 **shared_heap_base_addr_adj_p, bool is_memory64)
++    uint8 **shared_heap_base_addr_adj_p, uint8 *shared_heap_read_only_p,
++    bool is_memory64)
+ {
+     WASMSharedHeap *heap = wasm_runtime_get_shared_heap(module_inst), *cur;
+     uint64 shared_heap_start, shared_heap_end;
+@@ -8118,7 +8119,10 @@ wasm_runtime_check_and_update_last_used_shared_heap(
+     }
+ 
+     /* Find the exact shared heap that app addr is in, and update last used
+-     * shared heap info in func context */
++     * shared heap info in func context. Hull ext: the matched heap's read_only
++     * permission is written back TOGETHER with base_addr_adj/start_off/end_off,
++     * so the permission always belongs to the heap that formed the address --
++     * never a stale value from a different attached span. */
+     for (cur = heap; cur; cur = cur->chain_next) {
+         shared_heap_start =
+             is_memory64 ? cur->start_off_mem64 : cur->start_off_mem32;
+@@ -8129,6 +8133,7 @@ wasm_runtime_check_and_update_last_used_shared_heap(
+             *shared_heap_end_off_p = (uintptr_t)shared_heap_end;
+             *shared_heap_base_addr_adj_p =
+                 cur->base_addr - (uintptr_t)shared_heap_start;
++            *shared_heap_read_only_p = cur->read_only;
+             return true;
+         }
+     }
+diff --git a/core/iwasm/common/wasm_runtime_common.h b/core/iwasm/common/wasm_runtime_common.h
+index 0477387e..2b7f534a 100644
+--- a/core/iwasm/common/wasm_runtime_common.h
++++ b/core/iwasm/common/wasm_runtime_common.h
+@@ -1424,7 +1424,8 @@ bool
+ wasm_runtime_check_and_update_last_used_shared_heap(
+     WASMModuleInstanceCommon *module_inst, uintptr_t app_offset, size_t bytes,
+     uintptr_t *shared_heap_start_off_p, uintptr_t *shared_heap_end_off_p,
+-    uint8 **shared_heap_base_addr_adj_p, bool is_memory64);
++    uint8 **shared_heap_base_addr_adj_p, uint8 *shared_heap_read_only_p,
++    bool is_memory64);
+ #endif
+ 
+ struct WASMModuleInstanceExtraCommon *
+diff --git a/core/iwasm/compilation/aot_emit_memory.c b/core/iwasm/compilation/aot_emit_memory.c
+index 420096c6..3c753ec5 100644
+--- a/core/iwasm/compilation/aot_emit_memory.c
++++ b/core/iwasm/compilation/aot_emit_memory.c
+@@ -168,8 +168,8 @@ aot_check_shared_heap_chain_and_update(AOTCompContext *comp_ctx,
+                                        LLVMValueRef start_offset,
+                                        LLVMValueRef bytes, bool is_memory64)
+ {
+-    LLVMValueRef param_values[7], ret_value, func, value, cmp;
+-    LLVMTypeRef param_types[7], ret_type, func_type, func_ptr_type;
++    LLVMValueRef param_values[8], ret_value, func, value, cmp;
++    LLVMTypeRef param_types[8], ret_type, func_type, func_ptr_type;
+ 
+     param_types[0] = INT8_PTR_TYPE;
+     param_types[1] = INTPTR_T_TYPE;
+@@ -177,10 +177,12 @@ aot_check_shared_heap_chain_and_update(AOTCompContext *comp_ctx,
+     param_types[3] = INTPTR_T_PTR_TYPE;
+     param_types[4] = INTPTR_T_PTR_TYPE;
+     param_types[5] = INT8_PTR_TYPE;
+-    param_types[6] = INT8_TYPE;
++    /* Hull ext: uint8* read_only cache pointer, written from the matched heap */
++    param_types[6] = INT8_PTR_TYPE;
++    param_types[7] = INT8_TYPE;
+     ret_type = INT8_TYPE;
+ 
+-    GET_AOT_FUNCTION(wasm_runtime_check_and_update_last_used_shared_heap, 7);
++    GET_AOT_FUNCTION(wasm_runtime_check_and_update_last_used_shared_heap, 8);
+ 
+     /* Call function */
+     param_values[0] = func_ctx->aot_inst;
+@@ -190,10 +192,11 @@ aot_check_shared_heap_chain_and_update(AOTCompContext *comp_ctx,
+     param_values[3] = func_ctx->shared_heap_start_off;
+     param_values[4] = func_ctx->shared_heap_end_off;
+     param_values[5] = func_ctx->shared_heap_base_addr_adj;
+-    param_values[6] = is_memory64 ? I8_ONE : I8_ZERO;
++    param_values[6] = func_ctx->shared_heap_read_only;
++    param_values[7] = is_memory64 ? I8_ONE : I8_ZERO;
+ 
+     if (!(ret_value = LLVMBuildCall2(comp_ctx->builder, func_type, func,
+-                                     param_values, 7, "call"))) {
++                                     param_values, 8, "call"))) {
+         aot_set_last_error("llvm build call failed.");
+         goto fail;
+     }
+@@ -367,6 +370,63 @@ fail:
+     return false;
+ }
+ 
++/*
++ * Hull ext: for a STORE, trap if the matched shared heap is read-only, emitted
++ * inside app_addr_in_cache_shared_heap BEFORE build_get_maddr_in_cache_shared_heap
++ * so the permission branch dominates native-address formation. Both the direct
++ * cache-hit and the chain-hit converge on that block, and the chain helper wrote
++ * the MATCHED heap's read_only into func_ctx->shared_heap_read_only together with
++ * base_addr_adj -- so the permission always belongs to the heap that forms the
++ * address. `bulk_len` (a runtime length) gates a zero-length bulk op out of the
++ * trap (WASM bounds semantics: no write => permission alone must not trap); pass
++ * NULL for scalar/SIMD (fixed nonzero width). On success the builder is left in a
++ * new "store permitted" block where the caller continues address formation.
++ */
++static bool
++build_shared_heap_store_ro_trap(AOTCompContext *comp_ctx,
++                                AOTFuncContext *func_ctx, LLVMValueRef bulk_len)
++{
++    LLVMValueRef ro, is_ro, cond;
++    LLVMBasicBlockRef store_ok;
++
++    if (!(ro = LLVMBuildLoad2(comp_ctx->builder, INT8_TYPE,
++                              func_ctx->shared_heap_read_only,
++                              "shared_heap_ro"))) {
++        aot_set_last_error("llvm build load failed");
++        return false;
++    }
++    if (!(is_ro = LLVMBuildICmp(comp_ctx->builder, LLVMIntNE, ro, I8_ZERO,
++                                "is_readonly"))) {
++        aot_set_last_error("llvm build icmp failed");
++        return false;
++    }
++    cond = is_ro;
++    if (bulk_len) {
++        LLVMValueRef len_nz, zero = LLVMConstNull(LLVMTypeOf(bulk_len));
++        if (!(len_nz = LLVMBuildICmp(comp_ctx->builder, LLVMIntNE, bulk_len,
++                                     zero, "len_nonzero"))) {
++            aot_set_last_error("llvm build icmp failed");
++            return false;
++        }
++        if (!(cond = LLVMBuildAnd(comp_ctx->builder, is_ro, len_nz,
++                                  "ro_store_trap"))) {
++            aot_set_last_error("llvm build and failed");
++            return false;
++        }
++    }
++    if (!(store_ok = LLVMAppendBasicBlockInContext(
++              comp_ctx->context, func_ctx->func, "shared_heap_store_ok"))) {
++        aot_set_last_error("llvm add basic block failed");
++        return false;
++    }
++    /* cond true -> out-of-bounds trap; false -> continue in store_ok */
++    if (!aot_emit_exception(comp_ctx, func_ctx,
++                            EXCE_OUT_OF_BOUNDS_MEMORY_ACCESS, true, cond,
++                            store_ok))
++        return false;
++    return true;
++}
++
+ /*
+  * Check for memory overflow in shared heap for normal memory access.
+  *
+@@ -387,11 +447,12 @@ aot_check_shared_heap_memory_overflow(
+     LLVMBasicBlockRef block_curr, LLVMBasicBlockRef block_maddr_phi,
+     LLVMValueRef maddr_phi, LLVMValueRef start_offset,
+     LLVMValueRef mem_base_addr, uint32 bytes_u32, bool is_memory64,
+-    bool is_target_64bit, bool enable_segue)
++    bool is_target_64bit, bool enable_segue, bool is_store)
+ {
+     LLVMBasicBlockRef app_addr_in_cache_shared_heap, app_addr_in_linear_mem;
+     LLVMBasicBlockRef app_addr_in_shared_heap_chain = NULL,
+                       check_shared_heap_chain = NULL;
++    LLVMBasicBlockRef maddr_incoming_block;
+     LLVMValueRef cmp, cmp1, cmp2, shared_heap_start_off, shared_heap_end_off,
+         shared_heap_check_bound, maddr = NULL;
+     /* On 64/32-bit target, the offset is 64/32-bit */
+@@ -439,6 +500,10 @@ aot_check_shared_heap_memory_overflow(
+         goto fail;
+ 
+     SET_BUILD_POS(app_addr_in_cache_shared_heap);
++    /* Hull ext: read-only store trap dominates native-address formation. */
++    if (is_store
++        && !build_shared_heap_store_ro_trap(comp_ctx, func_ctx, NULL))
++        goto fail;
+     if (!build_get_maddr_in_cache_shared_heap(comp_ctx, func_ctx, start_offset,
+                                               &maddr))
+         goto fail;
+@@ -467,7 +532,11 @@ aot_check_shared_heap_memory_overflow(
+         }
+     }
+ 
+-    LLVMAddIncoming(maddr_phi, &maddr, &app_addr_in_cache_shared_heap, 1);
++    /* Hull ext: maddr may now be formed in the store-permitted block created by
++     * the read-only trap, so the phi incoming is the CURRENT block, not
++     * app_addr_in_cache_shared_heap. */
++    maddr_incoming_block = LLVMGetInsertBlock(comp_ctx->builder);
++    LLVMAddIncoming(maddr_phi, &maddr, &maddr_incoming_block, 1);
+     BUILD_BR(block_maddr_phi);
+     SET_BUILD_POS(app_addr_in_linear_mem);
+ 
+@@ -496,11 +565,12 @@ aot_check_bulk_memory_shared_heap_memory_overflow(
+     LLVMBasicBlockRef block_curr, LLVMBasicBlockRef block_maddr_phi,
+     LLVMBasicBlockRef check_succ, LLVMValueRef maddr_phi,
+     LLVMValueRef start_offset, LLVMValueRef max_addr, LLVMValueRef bytes,
+-    bool is_memory64, bool is_target_64bit)
++    bool is_memory64, bool is_target_64bit, bool is_store)
+ {
+     LLVMBasicBlockRef app_addr_in_cache_shared_heap, app_addr_in_linear_mem;
+     LLVMBasicBlockRef app_addr_in_shared_heap_chain = NULL,
+                       check_shared_heap_chain = NULL;
++    LLVMBasicBlockRef maddr_incoming_block;
+     LLVMValueRef cmp, cmp1, cmp2, shared_heap_start_off, shared_heap_end_off,
+         maddr = NULL, max_offset;
+     /* On 64/32-bit target, the offset is 64/32-bit */
+@@ -543,11 +613,17 @@ aot_check_bulk_memory_shared_heap_memory_overflow(
+         goto fail;
+ 
+     SET_BUILD_POS(app_addr_in_cache_shared_heap);
++    /* Hull ext: read-only store trap (bulk dest); `bytes` gates a zero-length op
++     * out of the trap. Dominates native-address formation. */
++    if (is_store
++        && !build_shared_heap_store_ro_trap(comp_ctx, func_ctx, bytes))
++        goto fail;
+     if (!build_get_maddr_in_cache_shared_heap(comp_ctx, func_ctx, start_offset,
+                                               &maddr))
+         goto fail;
+ 
+-    LLVMAddIncoming(maddr_phi, &maddr, &app_addr_in_cache_shared_heap, 1);
++    maddr_incoming_block = LLVMGetInsertBlock(comp_ctx->builder);
++    LLVMAddIncoming(maddr_phi, &maddr, &maddr_incoming_block, 1);
+     BUILD_BR(block_maddr_phi);
+     SET_BUILD_POS(app_addr_in_linear_mem);
+ 
+@@ -560,7 +636,7 @@ fail:
+ LLVMValueRef
+ aot_check_memory_overflow(AOTCompContext *comp_ctx, AOTFuncContext *func_ctx,
+                           mem_offset_t offset, uint32 bytes, bool enable_segue,
+-                          unsigned int *alignp)
++                          bool is_store, unsigned int *alignp)
+ {
+     LLVMValueRef offset_const =
+         MEMORY64_COND_VALUE(I64_CONST(offset), I32_CONST(offset));
+@@ -768,7 +844,7 @@ aot_check_memory_overflow(AOTCompContext *comp_ctx, AOTFuncContext *func_ctx,
+         if (!aot_check_shared_heap_memory_overflow(
+                 comp_ctx, func_ctx, block_curr, block_maddr_phi, maddr_phi,
+                 offset1, mem_base_addr, bytes, is_memory64, is_target_64bit,
+-                enable_segue)) {
++                enable_segue, is_store)) {
+             goto fail;
+         }
+     }
+@@ -1000,7 +1076,7 @@ aot_compile_op_i32_load(AOTCompContext *comp_ctx, AOTFuncContext *func_ctx,
+ 
+     unsigned int known_align;
+     if (!(maddr = aot_check_memory_overflow(comp_ctx, func_ctx, offset, bytes,
+-                                            enable_segue, &known_align)))
++                                            enable_segue, false, &known_align)))
+         return false;
+ 
+     switch (bytes) {
+@@ -1071,7 +1147,7 @@ aot_compile_op_i64_load(AOTCompContext *comp_ctx, AOTFuncContext *func_ctx,
+ 
+     unsigned int known_align;
+     if (!(maddr = aot_check_memory_overflow(comp_ctx, func_ctx, offset, bytes,
+-                                            enable_segue, &known_align)))
++                                            enable_segue, false, &known_align)))
+         return false;
+ 
+     switch (bytes) {
+@@ -1148,7 +1224,7 @@ aot_compile_op_f32_load(AOTCompContext *comp_ctx, AOTFuncContext *func_ctx,
+ 
+     unsigned int known_align;
+     if (!(maddr = aot_check_memory_overflow(comp_ctx, func_ctx, offset, 4,
+-                                            enable_segue, &known_align)))
++                                            enable_segue, false, &known_align)))
+         return false;
+ 
+     if (!enable_segue)
+@@ -1172,7 +1248,7 @@ aot_compile_op_f64_load(AOTCompContext *comp_ctx, AOTFuncContext *func_ctx,
+ 
+     unsigned int known_align;
+     if (!(maddr = aot_check_memory_overflow(comp_ctx, func_ctx, offset, 8,
+-                                            enable_segue, &known_align)))
++                                            enable_segue, false, &known_align)))
+         return false;
+ 
+     if (!enable_segue)
+@@ -1199,7 +1275,7 @@ aot_compile_op_i32_store(AOTCompContext *comp_ctx, AOTFuncContext *func_ctx,
+ 
+     unsigned int known_align;
+     if (!(maddr = aot_check_memory_overflow(comp_ctx, func_ctx, offset, bytes,
+-                                            enable_segue, &known_align)))
++                                            enable_segue, true, &known_align)))
+         return false;
+ 
+     switch (bytes) {
+@@ -1251,7 +1327,7 @@ aot_compile_op_i64_store(AOTCompContext *comp_ctx, AOTFuncContext *func_ctx,
+ 
+     unsigned int known_align;
+     if (!(maddr = aot_check_memory_overflow(comp_ctx, func_ctx, offset, bytes,
+-                                            enable_segue, &known_align)))
++                                            enable_segue, true, &known_align)))
+         return false;
+ 
+     switch (bytes) {
+@@ -1309,7 +1385,7 @@ aot_compile_op_f32_store(AOTCompContext *comp_ctx, AOTFuncContext *func_ctx,
+ 
+     unsigned int known_align;
+     if (!(maddr = aot_check_memory_overflow(comp_ctx, func_ctx, offset, 4,
+-                                            enable_segue, &known_align)))
++                                            enable_segue, true, &known_align)))
+         return false;
+ 
+     if (!enable_segue)
+@@ -1333,7 +1409,7 @@ aot_compile_op_f64_store(AOTCompContext *comp_ctx, AOTFuncContext *func_ctx,
+ 
+     unsigned int known_align;
+     if (!(maddr = aot_check_memory_overflow(comp_ctx, func_ctx, offset, 8,
+-                                            enable_segue, &known_align)))
++                                            enable_segue, true, &known_align)))
+         return false;
+ 
+     if (!enable_segue)
+@@ -1484,7 +1560,7 @@ fail:
+ #if WASM_ENABLE_BULK_MEMORY_OPT != 0 || WASM_ENABLE_STRINGREF != 0
+ LLVMValueRef
+ check_bulk_memory_overflow(AOTCompContext *comp_ctx, AOTFuncContext *func_ctx,
+-                           LLVMValueRef offset, LLVMValueRef bytes)
++                           LLVMValueRef offset, LLVMValueRef bytes, bool is_store)
+ {
+     LLVMValueRef maddr, max_addr, cmp, cmp1, offset1;
+     LLVMValueRef mem_base_addr;
+@@ -1626,7 +1702,7 @@ check_bulk_memory_overflow(AOTCompContext *comp_ctx, AOTFuncContext *func_ctx,
+         if (!aot_check_bulk_memory_shared_heap_memory_overflow(
+                 comp_ctx, func_ctx, block_curr, block_maddr_phi, check_succ,
+                 maddr_phi, offset, max_addr, bytes, is_memory64,
+-                is_target_64bit)) {
++                is_target_64bit, is_store)) {
+             goto fail;
+         }
+     }
+@@ -1792,10 +1868,10 @@ aot_compile_op_memory_copy(AOTCompContext *comp_ctx, AOTFuncContext *func_ctx)
+     POP_MEM_OFFSET(src);
+     POP_MEM_OFFSET(dst);
+ 
+-    if (!(src_addr = check_bulk_memory_overflow(comp_ctx, func_ctx, src, len)))
++    if (!(src_addr = check_bulk_memory_overflow(comp_ctx, func_ctx, src, len, false)))
+         return false;
+ 
+-    if (!(dst_addr = check_bulk_memory_overflow(comp_ctx, func_ctx, dst, len)))
++    if (!(dst_addr = check_bulk_memory_overflow(comp_ctx, func_ctx, dst, len, true)))
+         return false;
+ 
+     if (!zero_extend_u64(comp_ctx, &len, "len64")) {
+@@ -1881,7 +1957,7 @@ aot_compile_op_memory_fill(AOTCompContext *comp_ctx, AOTFuncContext *func_ctx)
+     POP_I32(val);
+     POP_MEM_OFFSET(dst);
+ 
+-    if (!(dst_addr = check_bulk_memory_overflow(comp_ctx, func_ctx, dst, len)))
++    if (!(dst_addr = check_bulk_memory_overflow(comp_ctx, func_ctx, dst, len, true)))
+         return false;
+ 
+     if (!zero_extend_u64(comp_ctx, &len, "len64")) {
+@@ -1964,7 +2040,7 @@ aot_compile_op_atomic_rmw(AOTCompContext *comp_ctx, AOTFuncContext *func_ctx,
+         POP_I64(value);
+ 
+     if (!(maddr = aot_check_memory_overflow(comp_ctx, func_ctx, offset, bytes,
+-                                            enable_segue, NULL)))
++                                            enable_segue, true, NULL)))
+         return false;
+ 
+     if (!check_memory_alignment(comp_ctx, func_ctx, maddr, align))
+@@ -2054,7 +2130,7 @@ aot_compile_op_atomic_cmpxchg(AOTCompContext *comp_ctx,
+     }
+ 
+     if (!(maddr = aot_check_memory_overflow(comp_ctx, func_ctx, offset, bytes,
+-                                            enable_segue, NULL)))
++                                            enable_segue, true, NULL)))
+         return false;
+ 
+     if (!check_memory_alignment(comp_ctx, func_ctx, maddr, align))
+@@ -2167,7 +2243,7 @@ aot_compile_op_atomic_wait(AOTCompContext *comp_ctx, AOTFuncContext *func_ctx,
+     CHECK_LLVM_CONST(is_wait64);
+ 
+     if (!(maddr = aot_check_memory_overflow(comp_ctx, func_ctx, offset, bytes,
+-                                            false, NULL)))
++                                            false, false, NULL)))
+         return false;
+ 
+     if (!check_memory_alignment(comp_ctx, func_ctx, maddr, align))
+@@ -2241,7 +2317,7 @@ aot_compiler_op_atomic_notify(AOTCompContext *comp_ctx,
+     POP_I32(count);
+ 
+     if (!(maddr = aot_check_memory_overflow(comp_ctx, func_ctx, offset, bytes,
+-                                            false, NULL)))
++                                            false, false, NULL)))
+         return false;
+ 
+     if (!check_memory_alignment(comp_ctx, func_ctx, maddr, align))
+diff --git a/core/iwasm/compilation/aot_emit_memory.h b/core/iwasm/compilation/aot_emit_memory.h
+index 5b87377b..2f6d5bb9 100644
+--- a/core/iwasm/compilation/aot_emit_memory.h
++++ b/core/iwasm/compilation/aot_emit_memory.h
+@@ -54,7 +54,7 @@ aot_compile_op_f64_store(AOTCompContext *comp_ctx, AOTFuncContext *func_ctx,
+ LLVMValueRef
+ aot_check_memory_overflow(AOTCompContext *comp_ctx, AOTFuncContext *func_ctx,
+                           mem_offset_t offset, uint32 bytes, bool enable_segue,
+-                          unsigned int *alignp);
++                          bool is_store, unsigned int *alignp);
+ 
+ bool
+ aot_compile_op_memory_size(AOTCompContext *comp_ctx, AOTFuncContext *func_ctx);
+@@ -68,7 +68,8 @@ check_memory_alignment(AOTCompContext *comp_ctx, AOTFuncContext *func_ctx,
+ 
+ LLVMValueRef
+ check_bulk_memory_overflow(AOTCompContext *comp_ctx, AOTFuncContext *func_ctx,
+-                           LLVMValueRef offset, LLVMValueRef bytes);
++                           LLVMValueRef offset, LLVMValueRef bytes,
++                           bool is_store);
+ 
+ #if WASM_ENABLE_BULK_MEMORY != 0
+ bool
+diff --git a/core/iwasm/compilation/aot_emit_stringref.c b/core/iwasm/compilation/aot_emit_stringref.c
+index 1642cee0..3c016200 100644
+--- a/core/iwasm/compilation/aot_emit_stringref.c
++++ b/core/iwasm/compilation/aot_emit_stringref.c
+@@ -388,7 +388,7 @@ aot_compile_op_string_new(AOTCompContext *comp_ctx, AOTFuncContext *func_ctx,
+     POP_I32(offset);
+ 
+     if (!(maddr = check_bulk_memory_overflow(comp_ctx, func_ctx, offset,
+-                                             byte_length)))
++                                             byte_length, false)))
+         goto fail;
+ 
+     param_types[0] = INT8_PTR_TYPE;
+@@ -517,7 +517,7 @@ aot_compile_op_string_encode(AOTCompContext *comp_ctx, AOTFuncContext *func_ctx,
+     }
+ 
+     if (!(maddr =
+-              check_bulk_memory_overflow(comp_ctx, func_ctx, offset, length)))
++              check_bulk_memory_overflow(comp_ctx, func_ctx, offset, length, true)))
+         goto fail;
+ 
+     param_types[0] = INT8_PTR_TYPE;
+@@ -769,7 +769,7 @@ aot_compile_op_stringview_wtf8_encode(AOTCompContext *comp_ctx,
+     }
+ 
+     if (!(maddr =
+-              check_bulk_memory_overflow(comp_ctx, func_ctx, offset, bytes)))
++              check_bulk_memory_overflow(comp_ctx, func_ctx, offset, bytes, true)))
+         goto fail;
+ 
+     POP_GC_REF(stringref_obj);
+@@ -986,7 +986,7 @@ aot_compile_op_stringview_wtf16_encode(AOTCompContext *comp_ctx,
+ 
+     if (!(maddr = check_bulk_memory_overflow(
+               comp_ctx, func_ctx, offset,
+-              LLVMBuildMul(comp_ctx->builder, len, I32_CONST(2), "wtf16_len"))))
++              LLVMBuildMul(comp_ctx->builder, len, I32_CONST(2), "wtf16_len"), true)))
+         goto fail;
+ 
+     POP_GC_REF(stringref_obj);
+diff --git a/core/iwasm/compilation/aot_llvm.c b/core/iwasm/compilation/aot_llvm.c
+index 4e8fd2cf..fd14c6ec 100644
+--- a/core/iwasm/compilation/aot_llvm.c
++++ b/core/iwasm/compilation/aot_llvm.c
+@@ -1588,6 +1588,10 @@ create_shared_heap_info(AOTCompContext *comp_ctx, AOTFuncContext *func_ctx)
+                                        shared_heap_offset_type);
+     LOAD_MODULE_EXTRA_FIELD_AND_ALLOCA(shared_heap_end_off,
+                                        shared_heap_offset_type);
++    /* Hull ext: cache the read-only permission of the last-used shared heap so
++     * a store into a read-only span can trap before native-address formation.
++     * Loaded from the deterministic offset 40 (see AOTModuleInstanceExtra). */
++    LOAD_MODULE_EXTRA_FIELD_AND_ALLOCA(shared_heap_read_only, INT8_TYPE);
+ 
+     /* Shared Heap head start off won't be updated, no need to alloca */
+     get_module_extra_field_offset(shared_heap);
+diff --git a/core/iwasm/compilation/aot_llvm.h b/core/iwasm/compilation/aot_llvm.h
+index 5bd75a38..ed0dc5c1 100644
+--- a/core/iwasm/compilation/aot_llvm.h
++++ b/core/iwasm/compilation/aot_llvm.h
+@@ -258,6 +258,10 @@ typedef struct AOTFuncContext {
+     LLVMValueRef shared_heap_base_addr_adj;
+     LLVMValueRef shared_heap_start_off;
+     LLVMValueRef shared_heap_end_off;
++    /* Hull ext: read-only permission of the last accessed shared heap; updated
++     * together with base_addr_adj/start_off/end_off so it always belongs to the
++     * heap whose base_addr_adj forms the native address (i8 local). */
++    LLVMValueRef shared_heap_read_only;
+     /* The start offset of the head of shared heap chain */
+     LLVMValueRef shared_heap_head_start_off;
+ 
+diff --git a/core/iwasm/compilation/simd/simd_load_store.c b/core/iwasm/compilation/simd/simd_load_store.c
+index d3bbcc96..1235e930 100644
+--- a/core/iwasm/compilation/simd/simd_load_store.c
++++ b/core/iwasm/compilation/simd/simd_load_store.c
+@@ -19,7 +19,7 @@ simd_load(AOTCompContext *comp_ctx, AOTFuncContext *func_ctx, uint32 align,
+     LLVMValueRef maddr, data;
+ 
+     if (!(maddr = aot_check_memory_overflow(comp_ctx, func_ctx, offset,
+-                                            data_length, enable_segue, NULL))) {
++                                            data_length, enable_segue, false, NULL))) {
+         HANDLE_FAILURE("aot_check_memory_overflow");
+         return NULL;
+     }
+@@ -287,7 +287,7 @@ simd_store(AOTCompContext *comp_ctx, AOTFuncContext *func_ctx, uint32 align,
+     LLVMValueRef maddr, result;
+ 
+     if (!(maddr = aot_check_memory_overflow(comp_ctx, func_ctx, offset,
+-                                            data_length, enable_segue, NULL)))
++                                            data_length, enable_segue, true, NULL)))
+         return false;
+ 
+     if (!(maddr = LLVMBuildBitCast(comp_ctx->builder, maddr, value_ptr_type,
+diff --git a/core/iwasm/include/wasm_export.h b/core/iwasm/include/wasm_export.h
+index 86f7c22b..ea4005c7 100644
+--- a/core/iwasm/include/wasm_export.h
++++ b/core/iwasm/include/wasm_export.h
+@@ -352,6 +352,9 @@ typedef enum {
+ typedef struct SharedHeapInitArgs {
+     uint32_t size;
+     void *pre_allocated_addr;
++    /* Hull ext: read-only (file-backed) heap. Default 0 = writable so every
++     * existing user is unchanged. Only honored for a pre_allocated_addr heap. */
++    bool read_only;
+ } SharedHeapInitArgs;
+ 
+ /**
+diff --git a/core/iwasm/interpreter/wasm_interp_fast.c b/core/iwasm/interpreter/wasm_interp_fast.c
+index 1368cf03..33fb2771 100644
+--- a/core/iwasm/interpreter/wasm_interp_fast.c
++++ b/core/iwasm/interpreter/wasm_interp_fast.c
+@@ -66,6 +66,29 @@ typedef float64 CellType_F64;
+         else                                                                   \
+             goto out_of_bounds;                                                \
+     } while (0)
++
++/* Hull ext: store variants. Identical to the load macros above except the
++ * shared-heap branch traps on a read-only heap (write into read-only mapped
++ * span). Used by every store opcode; loads keep the non-_STORE macros. */
++#define CHECK_MEMORY_OVERFLOW_STORE(bytes)                                     \
++    do {                                                                       \
++        uint64 offset1 = (uint64)offset + (uint64)addr;                        \
++        CHECK_SHARED_HEAP_STORE_OVERFLOW(offset1, bytes, maddr)                \
++        if (disable_bounds_checks || offset1 + bytes <= get_linear_mem_size()) \
++            maddr = memory->memory_data + offset1;                             \
++        else                                                                   \
++            goto out_of_bounds;                                                \
++    } while (0)
++
++#define CHECK_BULK_MEMORY_OVERFLOW_STORE(start, bytes, maddr)                  \
++    do {                                                                       \
++        uint64 offset1 = (uint32)(start);                                      \
++        CHECK_SHARED_HEAP_STORE_OVERFLOW(offset1, bytes, maddr)                \
++        if (disable_bounds_checks || offset1 + bytes <= get_linear_mem_size()) \
++            maddr = memory->memory_data + offset1;                             \
++        else                                                                   \
++            goto out_of_bounds;                                                \
++    } while (0)
+ #else
+ #define CHECK_MEMORY_OVERFLOW(bytes)                      \
+     do {                                                  \
+@@ -80,6 +103,21 @@ typedef float64 CellType_F64;
+         CHECK_SHARED_HEAP_OVERFLOW(offset1, bytes, maddr) \
+         maddr = memory->memory_data + offset1;            \
+     } while (0)
++
++/* Hull ext: store variants (HW-bound-check path). */
++#define CHECK_MEMORY_OVERFLOW_STORE(bytes)                      \
++    do {                                                        \
++        uint64 offset1 = (uint64)offset + (uint64)addr;         \
++        CHECK_SHARED_HEAP_STORE_OVERFLOW(offset1, bytes, maddr) \
++        maddr = memory->memory_data + offset1;                  \
++    } while (0)
++
++#define CHECK_BULK_MEMORY_OVERFLOW_STORE(start, bytes, maddr)   \
++    do {                                                        \
++        uint64 offset1 = (uint32)(start);                       \
++        CHECK_SHARED_HEAP_STORE_OVERFLOW(offset1, bytes, maddr) \
++        maddr = memory->memory_data + offset1;                  \
++    } while (0)
+ #endif /* !defined(OS_ENABLE_HW_BOUND_CHECK) \
+           || WASM_CPU_SUPPORTS_UNALIGNED_ADDR_ACCESS == 0 */
+ 
+@@ -3888,7 +3926,7 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
+                 sval = GET_OPERAND(uint32, I32, 0);
+                 addr = GET_OPERAND(uint32, I32, 2);
+                 frame_ip += 4;
+-                CHECK_MEMORY_OVERFLOW(4);
++                CHECK_MEMORY_OVERFLOW_STORE(4);
+                 STORE_U32(maddr, sval);
+                 HANDLE_OP_END();
+             }
+@@ -3901,7 +3939,7 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
+                 sval = GET_OPERAND(uint32, I32, 0);
+                 addr = GET_OPERAND(uint32, I32, 2);
+                 frame_ip += 4;
+-                CHECK_MEMORY_OVERFLOW(1);
++                CHECK_MEMORY_OVERFLOW_STORE(1);
+                 STORE_U8(maddr, (uint8_t)sval);
+                 HANDLE_OP_END();
+             }
+@@ -3914,7 +3952,7 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
+                 sval = GET_OPERAND(uint32, I32, 0);
+                 addr = GET_OPERAND(uint32, I32, 2);
+                 frame_ip += 4;
+-                CHECK_MEMORY_OVERFLOW(2);
++                CHECK_MEMORY_OVERFLOW_STORE(2);
+                 STORE_U16(maddr, (uint16)sval);
+                 HANDLE_OP_END();
+             }
+@@ -3927,7 +3965,7 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
+                 sval = GET_OPERAND(uint64, I64, 0);
+                 addr = GET_OPERAND(uint32, I32, 2);
+                 frame_ip += 4;
+-                CHECK_MEMORY_OVERFLOW(8);
++                CHECK_MEMORY_OVERFLOW_STORE(8);
+                 STORE_I64(maddr, sval);
+                 HANDLE_OP_END();
+             }
+@@ -3940,7 +3978,7 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
+                 sval = GET_OPERAND(uint64, I64, 0);
+                 addr = GET_OPERAND(uint32, I32, 2);
+                 frame_ip += 4;
+-                CHECK_MEMORY_OVERFLOW(1);
++                CHECK_MEMORY_OVERFLOW_STORE(1);
+                 *(uint8 *)maddr = (uint8)sval;
+                 HANDLE_OP_END();
+             }
+@@ -3953,7 +3991,7 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
+                 sval = GET_OPERAND(uint64, I64, 0);
+                 addr = GET_OPERAND(uint32, I32, 2);
+                 frame_ip += 4;
+-                CHECK_MEMORY_OVERFLOW(2);
++                CHECK_MEMORY_OVERFLOW_STORE(2);
+                 STORE_U16(maddr, (uint16)sval);
+                 HANDLE_OP_END();
+             }
+@@ -3966,7 +4004,7 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
+                 sval = GET_OPERAND(uint64, I64, 0);
+                 addr = GET_OPERAND(uint32, I32, 2);
+                 frame_ip += 4;
+-                CHECK_MEMORY_OVERFLOW(4);
++                CHECK_MEMORY_OVERFLOW_STORE(4);
+                 STORE_U32(maddr, (uint32)sval);
+                 HANDLE_OP_END();
+             }
+@@ -5162,13 +5200,18 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
+ #endif
+ 
+ #ifndef OS_ENABLE_HW_BOUND_CHECK
+-                        CHECK_BULK_MEMORY_OVERFLOW(addr, bytes, maddr);
++                        CHECK_BULK_MEMORY_OVERFLOW_STORE(addr, bytes, maddr);
+ #else
+ #if WASM_ENABLE_SHARED_HEAP != 0
+                         if (app_addr_in_shared_heap((uint64)(uint32)addr,
+-                                                    bytes))
++                                                    bytes)) {
++                            /* Hull ext: memory.init into a read-only shared-heap
++                             * destination traps (HW-bound-check path). */
++                            if ((bytes) != 0 && module->e->shared_heap_read_only)
++                                goto out_of_bounds;
+                             shared_heap_addr_app_to_native((uint64)(uint32)addr,
+                                                            maddr);
++                        }
+                         else
+ #endif
+                         {
+@@ -5221,7 +5264,7 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
+ 
+ #ifndef OS_ENABLE_HW_BOUND_CHECK
+                         CHECK_BULK_MEMORY_OVERFLOW(src, len, msrc);
+-                        CHECK_BULK_MEMORY_OVERFLOW(dst, len, mdst);
++                        CHECK_BULK_MEMORY_OVERFLOW_STORE(dst, len, mdst);
+ #else /* else of OS_ENABLE_HW_BOUND_CHECK */
+ #if WASM_ENABLE_SHARED_HEAP != 0
+                         if (app_addr_in_shared_heap((uint64)src, len))
+@@ -5236,6 +5279,12 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
+ 
+ #if WASM_ENABLE_SHARED_HEAP != 0
+                         if (app_addr_in_shared_heap((uint64)dst, len)) {
++                            /* Hull ext: read-only shared-heap destination traps
++                             * (HW-bound-check path). The memory.copy source
++                             * above stays a plain read, so a read-only source is
++                             * permitted; only the destination is rejected. */
++                            if ((len) != 0 && module->e->shared_heap_read_only)
++                                goto out_of_bounds;
+                             shared_heap_addr_app_to_native((uint64)dst, mdst);
+                         }
+                         else
+@@ -5278,12 +5327,17 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
+ #endif
+ 
+ #ifndef OS_ENABLE_HW_BOUND_CHECK
+-                        CHECK_BULK_MEMORY_OVERFLOW(dst, len, mdst);
++                        CHECK_BULK_MEMORY_OVERFLOW_STORE(dst, len, mdst);
+ #else
+ #if WASM_ENABLE_SHARED_HEAP != 0
+-                        if (app_addr_in_shared_heap((uint64)(uint32)dst, len))
++                        if (app_addr_in_shared_heap((uint64)(uint32)dst, len)) {
++                            /* Hull ext: memory.fill into a read-only shared-heap
++                             * destination traps (HW-bound-check path). */
++                            if ((len) != 0 && module->e->shared_heap_read_only)
++                                goto out_of_bounds;
+                             shared_heap_addr_app_to_native((uint64)(uint32)dst,
+                                                            mdst);
++                        }
+                         else
+ #endif
+                         {
+@@ -5988,7 +6042,7 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
+                         V128 data = POP_V128();
+                         addr = POP_I32();
+ 
+-                        CHECK_MEMORY_OVERFLOW(16);
++                        CHECK_MEMORY_OVERFLOW_STORE(16);
+                         STORE_V128(maddr, data);
+                         break;
+                     }
+@@ -6574,7 +6628,7 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
+         addr = POP_I32();                                 \
+         int lane = *frame_ip++;                           \
+         SIMD_LANE_HANDLE_UNALIGNED_ACCESS();              \
+-        CHECK_MEMORY_OVERFLOW(width / 8);                 \
++        CHECK_MEMORY_OVERFLOW_STORE(width / 8);                 \
+         if (width == 64) {                                \
+             STORE_I64(maddr, vec.register[lane]);         \
+         }                                                 \
+diff --git a/core/iwasm/interpreter/wasm_runtime.h b/core/iwasm/interpreter/wasm_runtime.h
+index 98913e9f..97ebba2a 100644
+--- a/core/iwasm/interpreter/wasm_runtime.h
++++ b/core/iwasm/interpreter/wasm_runtime.h
+@@ -108,6 +108,9 @@ typedef struct WASMSharedHeap {
+     /* The number of wasm apps it attached to, for a shared heap chain, only the
+      * list head need to maintain the valid attached_count */
+     uint8 attached_count;
++    /* Hull ext: 1 = read-only mapped region; a WASM store into it traps
++     * instead of writing. Only set for pre-allocated heaps. Default 0. */
++    bool read_only;
+ } WASMSharedHeap;
+ 
+ struct WASMMemoryInstance {
+@@ -384,6 +387,8 @@ typedef struct WASMModuleInstanceExtra {
+     uint8 *shared_heap_base_addr_adj;
+     MemBound shared_heap_start_off;
+     MemBound shared_heap_end_off;
++    /* Hull ext: read_only of the last-used shared heap (write-path RO check) */
++    uint8 shared_heap_read_only;
+     WASMSharedHeap *shared_heap;
+ #endif
+ 
+diff --git a/tests/unit/shared-heap/CMakeLists.txt b/tests/unit/shared-heap/CMakeLists.txt
+index b7403692..beaa2a47 100644
+--- a/tests/unit/shared-heap/CMakeLists.txt
++++ b/tests/unit/shared-heap/CMakeLists.txt
+@@ -14,6 +14,10 @@ set(WAMR_BUILD_FAST_INTERP 1)
+ set(WAMR_BUILD_JIT 0)
+ set(WAMR_BUILD_MEMORY64 0)
+ set(WAMR_BUILD_SHARED_HEAP 1)
++# Hull ext: enable SIMD so the read-only matrix can validate v128 store/lane
++# enforcement (Hull ships WASM_ENABLE_SIMD=1). Without it the runtime rejects a
++# module containing v128, so the SIMD store families could not be exercised.
++set(WAMR_BUILD_SIMD 1)
+ 
+ # Compile wasm modules
+ if(NOT WASI_SDK_DIR)
+@@ -66,4 +70,40 @@ add_executable(shared_heap_test ${unit_test_sources})
+ 
+ target_link_libraries(shared_heap_test gtest_main)
+ 
++# Hull ext: regenerate the read-only matrix fixture from its checked-in .wat when
++# a PINNED wat2wasm is supplied explicitly (-DWAT2WASM_BIN=<path to WABT 1.0.37>).
++# Deliberately no find_program() fallback: we never depend on an ambient
++# wat2wasm. Without WAT2WASM_BIN the committed test_readonly.wasm is used as-is.
++# memory.init needs a passive data segment C cannot express, so this fixture is
++# WAT, not a WASI-SDK C build. See docs/wamr_patches.md.
++if(WAT2WASM_BIN)
++  add_custom_command(
++    OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/test_readonly.wasm
++    COMMAND ${WAT2WASM_BIN}
++            ${CMAKE_CURRENT_SOURCE_DIR}/wasm-apps/test_readonly.wat
++            -o ${CMAKE_CURRENT_BINARY_DIR}/test_readonly.wasm
++    DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/wasm-apps/test_readonly.wat
++    COMMENT "Generating test_readonly.wasm via pinned wat2wasm")
++  add_custom_target(gen_test_readonly_wasm ALL
++    DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/test_readonly.wasm)
++  add_dependencies(shared_heap_test gen_test_readonly_wasm)
++endif()
++
++# Hull ext: canonical, deterministic AOT-fixture generation. When a wamrc path is
++# supplied (-DWAMRC_BIN=<path>), regenerate EVERY shared-heap .aot through the
++# checked script (explicit paths, exit-status/size/magic/version/duplicate
++# checks, sha256+version manifest) instead of ad-hoc looped wamrc calls, which
++# silently produced stale/mismatched artifacts when wamrc drifted from the
++# runtime. The script asserts AOT version 7 on every output. Identical locally
++# and in CI. See docs/wamr_patches.md.
++if(WAMRC_BIN)
++  add_custom_target(gen_ro_aot_fixtures ALL
++    COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/gen_readonly_fixtures.sh
++            ${WAMRC_BIN} ${CMAKE_CURRENT_BINARY_DIR}
++            ${CMAKE_CURRENT_BINARY_DIR} 7
++    DEPENDS shared_heap_test
++    COMMENT "Generating version-7 AOT fixtures via gen_readonly_fixtures.sh"
++    VERBATIM)
++endif()
++
+ gtest_discover_tests(shared_heap_test)
+diff --git a/tests/unit/shared-heap/gen_readonly_fixtures.sh b/tests/unit/shared-heap/gen_readonly_fixtures.sh
+new file mode 100755
+index 00000000..23b8c17a
+--- /dev/null
++++ b/tests/unit/shared-heap/gen_readonly_fixtures.sh
+@@ -0,0 +1,68 @@
++#!/bin/sh
++# Hull ext: deterministic AOT fixture generator for the shared-heap read-only
++# matrix (and the baseline shared-heap fixtures). Replaces ad-hoc manual/looped
++# wamrc invocations, which silently produced stale/mismatched artifacts when the
++# wamrc build drifted from the runtime. This rule:
++#   - invokes wamrc with EXPLICIT input/output paths,
++#   - checks every exit status,
++#   - rejects a missing, zero-length, or wrong-AOT-version output,
++#   - rejects a duplicate output path within one run,
++#   - records sha256 + AOT version per artifact into fixtures.manifest,
++# and behaves identically locally and in CI (POSIX sh, no bashisms, no loops that
++# could partial-fail silently -- every wamrc call is a checked function call).
++#
++# Usage: gen_readonly_fixtures.sh <wamrc> <src_dir> <out_dir> [expected_version]
++# SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
++set -eu
++
++WAMRC="${1:?wamrc path required}"
++SRC="${2:?source .wasm dir required}"
++OUT="${3:?output dir required}"
++WANT_VER="${4:-7}"
++
++[ -x "$WAMRC" ] || { echo "FATAL: wamrc not executable: $WAMRC" >&2; exit 1; }
++[ -d "$SRC" ] || { echo "FATAL: src dir missing: $SRC" >&2; exit 1; }
++mkdir -p "$OUT"
++MANIFEST="$OUT/fixtures.manifest"
++: > "$MANIFEST"
++SEEN=""
++
++H_FLAGS="--opt-level=3 --bounds-checks=1 --enable-shared-heap"
++C_FLAGS="--opt-level=3 --bounds-checks=1 --enable-shared-chain"
++
++# Read the little-endian uint32 AOT version (bytes 4..7) of an .aot file.
++aot_version() {
++    od -An -tu1 -j4 -N4 "$1" 2>/dev/null \
++        | awk 'NF>=4{print $1 + $2*256 + $3*65536 + $4*16777216; exit}'
++}
++
++emit() { # emit <flags> <in.wasm> <out.aot>
++    _in="$SRC/$2"; _out="$OUT/$3"
++    [ -f "$_in" ] || { echo "FATAL: missing input $_in" >&2; exit 1; }
++    case " $SEEN " in *" $3 "*) echo "FATAL: duplicate output $3" >&2; exit 1;; esac
++    SEEN="$SEEN $3"
++    # shellcheck disable=SC2086
++    "$WAMRC" $1 -o "$_out" "$_in" >/dev/null 2>&1 \
++        || { echo "FATAL: wamrc failed for $3" >&2; exit 1; }
++    [ -s "$_out" ] || { echo "FATAL: $3 missing or zero-length" >&2; exit 1; }
++    _magic=$(od -An -tx1 -N4 "$_out" | tr -d ' \n')
++    [ "$_magic" = "00616f74" ] || { echo "FATAL: $3 bad AOT magic ($_magic)" >&2; exit 1; }
++    _ver=$(aot_version "$_out")
++    [ "$_ver" = "$WANT_VER" ] || { echo "FATAL: $3 AOT version $_ver != $WANT_VER" >&2; exit 1; }
++    _sha=$(shasum -a 256 "$_out" 2>/dev/null | awk '{print $1}')
++    [ -n "$_sha" ] || _sha=$(sha256sum "$_out" | awk '{print $1}')
++    printf '%s  v%s  %s\n' "$_sha" "$_ver" "$3" >> "$MANIFEST"
++}
++
++# Baseline shared-heap fixtures + the read-only matrix fixture, both modes.
++emit "$H_FLAGS" test.wasm                test.aot
++emit "$C_FLAGS" test.wasm                test_chain.aot
++emit "$H_FLAGS" test_addr_conv.wasm      test_addr_conv.aot
++emit "$C_FLAGS" test_addr_conv.wasm      test_addr_conv_chain.aot
++emit "$H_FLAGS" test_bulk_memory.wasm    test_bulk_memory.aot
++emit "$C_FLAGS" test_bulk_memory.wasm    test_bulk_memory_chain.aot
++emit "$H_FLAGS" test_readonly.wasm       test_readonly.aot
++emit "$C_FLAGS" test_readonly.wasm       test_readonly_chain.aot
++
++_n=$(wc -l < "$MANIFEST" | tr -d ' ')
++echo "OK: generated $_n AOT fixtures (all version $WANT_VER) -> $MANIFEST"
+diff --git a/tests/unit/shared-heap/shared_heap_test.cc b/tests/unit/shared-heap/shared_heap_test.cc
+index a66cfc68..9f437901 100644
+--- a/tests/unit/shared-heap/shared_heap_test.cc
++++ b/tests/unit/shared-heap/shared_heap_test.cc
+@@ -1372,3 +1372,570 @@ TEST_F(shared_heap_test, test_shared_heap_chain_addr_conv_oob)
+                                              "test_preallocated", 1, argv),
+                             "Exception: out of bounds memory access");
+ }
++
++/*
++ * Hull ext (read-only shared-heap enforcement, interpreter).
++ *
++ * A read-only shared heap models a host-mmap'd PROT_READ span. Because Hull's
++ * interpreter build uses software bounds checks (no signal handler), a store
++ * into such a span would otherwise crash the host; the CHECK_*_STORE macros
++ * turn it into a recoverable WASM trap. These cases assert the trap fires for
++ * every write family reachable from the existing fixtures, that reads still
++ * succeed, that a writable heap is unaffected, and that a trapped invocation
++ * leaves the process able to run another. (SIMD stores, memory.copy src/dst,
++ * memory.init, explicit load-only, zero-length and boundary-crossing cases are
++ * covered by test_readonly.wasm below.)
++ */
++
++static WASMSharedHeap *
++create_readonly_heap(std::vector<uint8> &backing)
++{
++    SharedHeapInitArgs args = {};
++    args.pre_allocated_addr = backing.data();
++    args.size = (uint32)backing.size();
++    args.read_only = true;
++    return wasm_runtime_create_shared_heap(&args);
++}
++
++TEST_F(shared_heap_test, test_readonly_requires_preallocated)
++{
++    /* Detail 2: read_only is only coherent for a caller-owned pre-allocated
++     * buffer; a runtime-managed heap must stay writable. The request is
++     * rejected, not silently downgraded. */
++    SharedHeapInitArgs args = {};
++    args.size = os_getpagesize();
++    args.read_only = true; /* but no pre_allocated_addr */
++    EXPECT_EQ(nullptr, wasm_runtime_create_shared_heap(&args));
++}
++
++TEST_F(shared_heap_test, test_readonly_rejects_scalar_store_and_fill)
++{
++    uint32 BUF_SIZE = os_getpagesize();
++    std::vector<uint8> ro_buf(BUF_SIZE, 0);
++    WASMSharedHeap *ro_heap = create_readonly_heap(ro_buf);
++    ASSERT_NE(ro_heap, nullptr) << "read-only pre-allocated heap should create";
++
++    uint32 start = UINT32_MAX - BUF_SIZE + 1;
++    uint32 argv[3] = {};
++
++    /* i32.store8 into a read-only heap traps. read_modify_write_8 LOADS *addr
++     * first (which must succeed) and only then STORES, so a trap here also
++     * proves the read path is unaffected. */
++    argv[0] = start;
++    argv[1] = 42;
++    EXPECT_NONFATAL_FAILURE(
++        test_shared_heap(ro_heap, "test.wasm", "read_modify_write_8", 2, argv),
++        "out of bounds memory access");
++    EXPECT_EQ(ro_buf[0], 0) << "i32.store8 mutated a read-only heap";
++
++    /* i32.store16 into a read-only heap traps. */
++    argv[0] = start;
++    argv[1] = 4242;
++    EXPECT_NONFATAL_FAILURE(
++        test_shared_heap(ro_heap, "test.wasm", "read_modify_write_16", 2, argv),
++        "out of bounds memory access");
++    EXPECT_EQ(ro_buf[0], 0) << "i32.store16 mutated a read-only heap";
++
++    /* memory.fill into a read-only destination traps. */
++    argv[0] = start;
++    argv[1] = 7;
++    argv[2] = 4;
++    EXPECT_NONFATAL_FAILURE(test_shared_heap(ro_heap, "test_bulk_memory.wasm",
++                                             "memory_fill_test", 3, argv),
++                            "out of bounds memory access");
++    EXPECT_EQ(ro_buf[0], 0) << "memory.fill mutated a read-only heap";
++}
++
++TEST_F(shared_heap_test, test_readonly_trap_recovers_writable_unaffected)
++{
++    uint32 BUF_SIZE = os_getpagesize();
++    uint32 start = UINT32_MAX - BUF_SIZE + 1;
++    uint32 argv[2] = {};
++
++    /* A store into a read-only heap traps... */
++    std::vector<uint8> ro_buf(BUF_SIZE, 0);
++    WASMSharedHeap *ro_heap = create_readonly_heap(ro_buf);
++    ASSERT_NE(ro_heap, nullptr);
++    argv[0] = start;
++    argv[1] = 99;
++    EXPECT_NONFATAL_FAILURE(
++        test_shared_heap(ro_heap, "test.wasm", "read_modify_write_8", 2, argv),
++        "out of bounds memory access");
++
++    /* ...and the same process then runs another invocation to completion on a
++     * writable pre-allocated heap: the store succeeds and mutates the buffer,
++     * proving the earlier trap was recoverable and writable heaps are
++     * unaffected by the read-only path. */
++    std::vector<uint8> rw_buf(BUF_SIZE, 0);
++    SharedHeapInitArgs rw_args = {};
++    rw_args.pre_allocated_addr = rw_buf.data();
++    rw_args.size = BUF_SIZE; /* read_only defaults false */
++    WASMSharedHeap *rw_heap = wasm_runtime_create_shared_heap(&rw_args);
++    ASSERT_NE(rw_heap, nullptr);
++
++    argv[0] = start;
++    argv[1] = 77;
++    test_shared_heap(rw_heap, "test.wasm", "read_modify_write_8", 2, argv);
++    EXPECT_EQ(0u, argv[0]); /* rmw returns the original value (0) */
++    EXPECT_EQ(rw_buf[0], 77); /* the store landed */
++}
++
++/*
++ * Hull ext: the FULL interpreter read-only matrix, driven by test_readonly.wasm
++ * (built from a checked-in .wat by pinned WABT 1.0.37; see docs/wamr_patches.md).
++ * Covers every enabled store family, memory.copy/fill/init dst+src permutations,
++ * explicit load-only, zero-length semantics, and boundary/overflow fail-closed.
++ * Compiled and run in BOTH bound-check configurations (this file is built once
++ * per config: HW-bound-check default and Hull's WAMR_DISABLE_HW_BOUND_CHECK).
++ */
++#define RO_WASM "test_readonly.wasm"
++#define OOB "out of bounds memory access"
++
++static const char *const kScalarStores[] = {
++    "store_i32",    "store_i32_8",  "store_i32_16", "store_i64",   "store_i64_8",
++    "store_i64_16", "store_i64_32", "store_f32",    "store_f64",
++};
++static const char *const kSimdStores[] = {
++    "store_v128",        "store_v128_8_lane",  "store_v128_16_lane",
++    "store_v128_32_lane", "store_v128_64_lane",
++};
++
++/* Recovery probe: after a trap, a fresh module instance runs a load against the
++ * read-only heap to completion (loads are permitted), proving the process
++ * survived and another module can still be invoked. */
++static void
++recover_after_trap(WASMSharedHeap *heap, uint32 addr)
++{
++    uint32 argv[1] = { addr };
++    test_shared_heap(heap, RO_WASM, "load_i32", 1, argv);
++}
++
++static bool
++all_zero(const std::vector<uint8> &b)
++{
++    for (uint8 v : b)
++        if (v != 0)
++            return false;
++    return true;
++}
++
++TEST_F(shared_heap_test, test_readonly_scalar_store_families_trap)
++{
++    uint32 BUF_SIZE = os_getpagesize();
++    std::vector<uint8> ro_buf(BUF_SIZE, 0);
++    WASMSharedHeap *ro = create_readonly_heap(ro_buf);
++    ASSERT_NE(ro, nullptr);
++    uint32 mid = UINT32_MAX - BUF_SIZE + 1 + 64;
++
++    for (const char *fn : kScalarStores) {
++        SCOPED_TRACE(fn);
++        uint32 argv[1] = { mid };
++        EXPECT_NONFATAL_FAILURE(test_shared_heap(ro, RO_WASM, fn, 1, argv), OOB);
++    }
++    EXPECT_TRUE(all_zero(ro_buf)) << "a scalar store mutated the read-only heap";
++    /* another module runs to completion after the scalar-trap class */
++    recover_after_trap(ro, mid);
++}
++
++TEST_F(shared_heap_test, test_readonly_simd_store_families_trap)
++{
++    uint32 BUF_SIZE = os_getpagesize();
++    std::vector<uint8> ro_buf(BUF_SIZE, 0);
++    WASMSharedHeap *ro = create_readonly_heap(ro_buf);
++    ASSERT_NE(ro, nullptr);
++    uint32 mid = UINT32_MAX - BUF_SIZE + 1 + 64;
++
++    for (const char *fn : kSimdStores) {
++        SCOPED_TRACE(fn);
++        uint32 argv[1] = { mid };
++        EXPECT_NONFATAL_FAILURE(test_shared_heap(ro, RO_WASM, fn, 1, argv), OOB);
++    }
++    EXPECT_TRUE(all_zero(ro_buf)) << "a SIMD store mutated the read-only heap";
++    recover_after_trap(ro, mid);
++}
++
++TEST_F(shared_heap_test, test_readonly_loads_succeed_and_return_value)
++{
++    uint32 BUF_SIZE = os_getpagesize();
++    std::vector<uint8> ro_buf(BUF_SIZE, 0);
++    /* seed a known little-endian pattern at offset 64 */
++    ro_buf[64] = 0x11;
++    ro_buf[65] = 0x22;
++    ro_buf[66] = 0x33;
++    ro_buf[67] = 0x44;
++    WASMSharedHeap *ro = create_readonly_heap(ro_buf);
++    ASSERT_NE(ro, nullptr);
++    uint32 mid = UINT32_MAX - BUF_SIZE + 1 + 64;
++
++    uint32 argv[1] = { mid };
++    test_shared_heap(ro, RO_WASM, "load_i32", 1, argv); /* must not trap */
++    EXPECT_EQ(argv[0], 0x44332211u) << "read-only load returned wrong value";
++}
++
++TEST_F(shared_heap_test, test_readonly_memory_copy_source_vs_dest)
++{
++    uint32 BUF_SIZE = os_getpagesize();
++    std::vector<uint8> ro_buf(BUF_SIZE, 0);
++    ro_buf[64] = 0xAB; /* something to read from the RO source */
++    WASMSharedHeap *ro = create_readonly_heap(ro_buf);
++    ASSERT_NE(ro, nullptr);
++    uint32 start = UINT32_MAX - BUF_SIZE + 1;
++    uint32 mid = start + 64;
++
++    /* read-only SOURCE is permitted: copy heap -> linear memory succeeds. */
++    {
++        uint32 argv[3] = { 0 /*dst: linear*/, mid /*src: RO heap*/, 8 };
++        test_shared_heap(ro, RO_WASM, "mem_copy", 3, argv); /* must not trap */
++    }
++    /* read-only DESTINATION is rejected: copy linear -> heap traps. */
++    {
++        uint32 argv[3] = { mid /*dst: RO heap*/, 0 /*src: linear*/, 8 };
++        EXPECT_NONFATAL_FAILURE(test_shared_heap(ro, RO_WASM, "mem_copy", 3, argv),
++                                OOB);
++    }
++    EXPECT_TRUE(all_zero(ro_buf) || ro_buf[64] == 0xAB)
++        << "memory.copy mutated the read-only destination";
++    /* precise: nothing past the seeded byte changed */
++    for (uint32 i = 0; i < BUF_SIZE; i++)
++        if (i != 64)
++            ASSERT_EQ(ro_buf[i], 0) << "copy mutated read-only byte " << i;
++    recover_after_trap(ro, mid);
++}
++
++TEST_F(shared_heap_test, test_readonly_memory_fill_and_init_trap)
++{
++    uint32 BUF_SIZE = os_getpagesize();
++    std::vector<uint8> ro_buf(BUF_SIZE, 0);
++    WASMSharedHeap *ro = create_readonly_heap(ro_buf);
++    ASSERT_NE(ro, nullptr);
++    uint32 mid = UINT32_MAX - BUF_SIZE + 1 + 64;
++
++    { /* memory.fill into RO dest traps */
++        uint32 argv[2] = { mid, 8 };
++        EXPECT_NONFATAL_FAILURE(test_shared_heap(ro, RO_WASM, "mem_fill", 2, argv),
++                                OOB);
++    }
++    { /* memory.init into RO dest traps */
++        uint32 argv[3] = { mid, 0, 8 };
++        EXPECT_NONFATAL_FAILURE(test_shared_heap(ro, RO_WASM, "mem_init", 3, argv),
++                                OOB);
++    }
++    EXPECT_TRUE(all_zero(ro_buf)) << "fill/init mutated the read-only heap";
++    recover_after_trap(ro, mid);
++}
++
++TEST_F(shared_heap_test, test_readonly_zero_length_semantics)
++{
++    uint32 BUF_SIZE = os_getpagesize();
++    std::vector<uint8> ro_buf(BUF_SIZE, 0);
++    WASMSharedHeap *ro = create_readonly_heap(ro_buf);
++    ASSERT_NE(ro, nullptr);
++    uint32 mid = UINT32_MAX - BUF_SIZE + 1 + 64;
++
++    /* zero-length at a VALID read-only address writes nothing: read-only
++     * permission alone must NOT trap (WASM bounds semantics). */
++    { uint32 a[2] = { mid, 0 };    test_shared_heap(ro, RO_WASM, "mem_fill", 2, a); }
++    { uint32 a[3] = { mid, 0, 0 }; test_shared_heap(ro, RO_WASM, "mem_copy", 3, a); }
++    { uint32 a[3] = { mid, 0, 0 }; test_shared_heap(ro, RO_WASM, "mem_init", 3, a); }
++    EXPECT_TRUE(all_zero(ro_buf)) << "zero-length op mutated the heap";
++
++    /* zero-length at an INVALID address still traps per spec (d > mem size). */
++    {
++        uint32 bad = 0x00100000; /* well past the 1-page linear memory */
++        uint32 a[2] = { bad, 0 };
++        EXPECT_NONFATAL_FAILURE(test_shared_heap(ro, RO_WASM, "mem_fill", 2, a), OOB);
++    }
++    recover_after_trap(ro, mid);
++}
++
++TEST_F(shared_heap_test, test_readonly_boundary_and_overflow_fail_closed)
++{
++    uint32 BUF_SIZE = os_getpagesize();
++    std::vector<uint8> ro_buf(BUF_SIZE, 0);
++    WASMSharedHeap *ro = create_readonly_heap(ro_buf);
++    ASSERT_NE(ro, nullptr);
++    uint32 start = UINT32_MAX - BUF_SIZE + 1;
++
++    /* store straddling the START boundary (partly below the heap): 4-byte store
++     * at start-2 spans start-2..start+1 -> whole range not in heap -> trap. */
++    { uint32 a[1] = { start - 2 };
++      EXPECT_NONFATAL_FAILURE(test_shared_heap(ro, RO_WASM, "store_i32", 1, a), OOB); }
++    /* store straddling the END boundary (overflow past UINT32_MAX): 8-byte store
++     * at UINT32_MAX-3 -> range overflows -> trap. */
++    { uint32 a[1] = { UINT32_MAX - 3 };
++      EXPECT_NONFATAL_FAILURE(test_shared_heap(ro, RO_WASM, "store_i64", 1, a), OOB); }
++    /* bulk range that overflows uint32: fill 0x20 bytes at 0xFFFFFFF8 -> trap. */
++    { uint32 a[2] = { 0xFFFFFFF8u, 0x20 };
++      EXPECT_NONFATAL_FAILURE(test_shared_heap(ro, RO_WASM, "mem_fill", 2, a), OOB); }
++
++    EXPECT_TRUE(all_zero(ro_buf)) << "a boundary/overflow store mutated backing";
++    recover_after_trap(ro, start + 64);
++}
++
++TEST_F(shared_heap_test, test_writable_all_operation_classes)
++{
++    uint32 BUF_SIZE = os_getpagesize();
++    std::vector<uint8> rw_buf(BUF_SIZE, 0);
++    SharedHeapInitArgs args = {};
++    args.pre_allocated_addr = rw_buf.data();
++    args.size = BUF_SIZE; /* writable (read_only defaults false) */
++    WASMSharedHeap *rw = wasm_runtime_create_shared_heap(&args);
++    ASSERT_NE(rw, nullptr);
++    uint32 start = UINT32_MAX - BUF_SIZE + 1;
++    uint32 mid = start + 64;
++
++    /* every scalar + SIMD store class runs to completion on a writable heap */
++    for (const char *fn : kScalarStores) {
++        SCOPED_TRACE(fn);
++        uint32 a[1] = { mid };
++        test_shared_heap(rw, RO_WASM, fn, 1, a);
++    }
++    for (const char *fn : kSimdStores) {
++        SCOPED_TRACE(fn);
++        uint32 a[1] = { mid };
++        test_shared_heap(rw, RO_WASM, fn, 1, a);
++    }
++    /* spot-check a store landed: store_i32 writes 0x11223344 (LE) at mid */
++    { uint32 a[1] = { mid }; test_shared_heap(rw, RO_WASM, "store_i32", 1, a); }
++    EXPECT_EQ(rw_buf[64], 0x44);
++    EXPECT_EQ(rw_buf[65], 0x33);
++
++    /* bulk classes on a writable heap all succeed */
++    { uint32 a[2] = { mid, 8 };    test_shared_heap(rw, RO_WASM, "mem_fill", 2, a); }
++    EXPECT_EQ(rw_buf[64], 0x55) << "writable memory.fill did not land";
++    { uint32 a[3] = { mid, 0, 8 }; test_shared_heap(rw, RO_WASM, "mem_copy", 3, a); }
++    { uint32 a[3] = { mid, 0, 8 }; test_shared_heap(rw, RO_WASM, "mem_init", 3, a); }
++    EXPECT_EQ(rw_buf[64], 'A') << "writable memory.init did not land";
++}
++
++/*
++ * Hull ext: prove the AOT version bump (6 -> 7) is enforced. A version-7
++ * artifact (the shifted AOTModuleInstanceExtra layout) loads; the SAME bytes
++ * with the version field patched back to 6 are REJECTED by this runtime -- so a
++ * stale/mismatched-layout artifact can never be executed against the new struct.
++ */
++TEST_F(shared_heap_test, test_aot_version7_enforced_version6_rejected)
++{
++    unsigned int sz = 0;
++    unsigned char *buf =
++        (unsigned char *)bh_read_file_to_buffer("test_readonly.aot", &sz);
++    ASSERT_NE(buf, nullptr);
++    ASSERT_GT(sz, 8u);
++    /* AOT file: magic (bytes 0..3) + little-endian version (bytes 4..7) */
++    ASSERT_EQ(buf[4], 7) << "fixture is not AOT version 7";
++
++    char err[192] = {};
++    /* positive control: the unpatched version-7 artifact loads */
++    wasm_module_t m7 = wasm_runtime_load(buf, sz, err, sizeof(err));
++    EXPECT_NE(m7, nullptr) << "version-7 artifact failed to load: " << err;
++    if (m7)
++        wasm_runtime_unload(m7);
++
++    /* patch version 7 -> 6 and confirm the runtime refuses it */
++    buf[4] = 6;
++    err[0] = '\0';
++    wasm_module_t m6 = wasm_runtime_load(buf, sz, err, sizeof(err));
++    EXPECT_EQ(m6, nullptr) << "a version-6 artifact was NOT rejected";
++    if (m6)
++        wasm_runtime_unload(m6);
++    else
++        EXPECT_NE(std::string(err).find("version"), std::string::npos)
++            << "rejection was not a version error: " << err;
++
++    wasm_runtime_free(buf);
++}
++
++/*
++ * Hull ext: the AOT read-only matrix, mirroring the interpreter matrix but
++ * driven by test_readonly.aot (compiled by the patched, version-7 wamrc). The
++ * AOT enforcement emits the permission branch inside app_addr_in_cache_shared_heap
++ * (reached by both cache-hit and chain-hit), dominating native-address formation.
++ */
++#define AOT_RO "test_readonly.aot"
++
++TEST_F(shared_heap_test, test_readonly_aot_scalar_simd_store_families_trap)
++{
++    uint32 BUF = os_getpagesize();
++    std::vector<uint8> ro(BUF, 0);
++    WASMSharedHeap *h = create_readonly_heap(ro);
++    ASSERT_NE(h, nullptr);
++    uint32 mid = UINT32_MAX - BUF + 1 + 64;
++
++    for (const char *fn : kScalarStores) {
++        SCOPED_TRACE(fn);
++        uint32 a[1] = { mid };
++        EXPECT_NONFATAL_FAILURE(test_shared_heap(h, AOT_RO, fn, 1, a), OOB);
++    }
++    for (const char *fn : kSimdStores) {
++        SCOPED_TRACE(fn);
++        uint32 a[1] = { mid };
++        EXPECT_NONFATAL_FAILURE(test_shared_heap(h, AOT_RO, fn, 1, a), OOB);
++    }
++    EXPECT_TRUE(all_zero(ro)) << "an AOT store mutated the read-only heap";
++    /* another module runs to completion after the trap class */
++    uint32 a[1] = { mid };
++    test_shared_heap(h, AOT_RO, "load_i32", 1, a);
++}
++
++TEST_F(shared_heap_test, test_readonly_aot_loads_copy_fill_init)
++{
++    uint32 BUF = os_getpagesize();
++    std::vector<uint8> ro(BUF, 0);
++    ro[64] = 0x11;
++    ro[65] = 0x22;
++    ro[66] = 0x33;
++    ro[67] = 0x44;
++    WASMSharedHeap *h = create_readonly_heap(ro);
++    ASSERT_NE(h, nullptr);
++    uint32 mid = UINT32_MAX - BUF + 1 + 64;
++
++    /* load returns the correct value (reads unaffected) */
++    {
++        uint32 a[1] = { mid };
++        test_shared_heap(h, AOT_RO, "load_i32", 1, a);
++        EXPECT_EQ(a[0], 0x44332211u);
++    }
++    /* memory.copy read-only SOURCE permitted (heap -> linear) */
++    {
++        uint32 a[3] = { 0, mid, 8 };
++        test_shared_heap(h, AOT_RO, "mem_copy", 3, a);
++    }
++    /* memory.copy read-only DEST trap */
++    {
++        uint32 a[3] = { mid, 0, 8 };
++        EXPECT_NONFATAL_FAILURE(test_shared_heap(h, AOT_RO, "mem_copy", 3, a),
++                                OOB);
++    }
++    /* memory.fill read-only dest trap */
++    {
++        uint32 a[2] = { mid, 8 };
++        EXPECT_NONFATAL_FAILURE(test_shared_heap(h, AOT_RO, "mem_fill", 2, a),
++                                OOB);
++    }
++    /* memory.init read-only dest trap */
++    {
++        uint32 a[3] = { mid, 0, 8 };
++        EXPECT_NONFATAL_FAILURE(test_shared_heap(h, AOT_RO, "mem_init", 3, a),
++                                OOB);
++    }
++    for (uint32 i = 0; i < BUF; i++)
++        if (i < 64 || i > 67)
++            ASSERT_EQ(ro[i], 0) << "AOT bulk mutated read-only byte " << i;
++}
++
++TEST_F(shared_heap_test, test_readonly_aot_zero_length_and_boundary)
++{
++    uint32 BUF = os_getpagesize();
++    std::vector<uint8> ro(BUF, 0);
++    WASMSharedHeap *h = create_readonly_heap(ro);
++    ASSERT_NE(h, nullptr);
++    uint32 start = UINT32_MAX - BUF + 1, mid = start + 64;
++
++    /* zero-length at a valid read-only address must NOT trap */
++    { uint32 a[2] = { mid, 0 };    test_shared_heap(h, AOT_RO, "mem_fill", 2, a); }
++    { uint32 a[3] = { mid, 0, 0 }; test_shared_heap(h, AOT_RO, "mem_copy", 3, a); }
++    { uint32 a[3] = { mid, 0, 0 }; test_shared_heap(h, AOT_RO, "mem_init", 3, a); }
++    EXPECT_TRUE(all_zero(ro)) << "zero-length AOT op mutated the heap";
++
++    /* boundary straddle + uint32 overflow fail closed, backing unchanged */
++    { uint32 a[1] = { start - 2 };
++      EXPECT_NONFATAL_FAILURE(test_shared_heap(h, AOT_RO, "store_i32", 1, a), OOB); }
++    { uint32 a[1] = { UINT32_MAX - 3 };
++      EXPECT_NONFATAL_FAILURE(test_shared_heap(h, AOT_RO, "store_i64", 1, a), OOB); }
++    { uint32 a[2] = { 0xFFFFFFF8u, 0x20 };
++      EXPECT_NONFATAL_FAILURE(test_shared_heap(h, AOT_RO, "mem_fill", 2, a), OOB); }
++    EXPECT_TRUE(all_zero(ro)) << "AOT boundary/overflow store mutated backing";
++}
++
++TEST_F(shared_heap_test, test_readonly_aot_writable_all_classes)
++{
++    uint32 BUF = os_getpagesize();
++    std::vector<uint8> rw(BUF, 0);
++    SharedHeapInitArgs args = {};
++    args.pre_allocated_addr = rw.data();
++    args.size = BUF; /* writable */
++    WASMSharedHeap *h = wasm_runtime_create_shared_heap(&args);
++    ASSERT_NE(h, nullptr);
++    uint32 mid = UINT32_MAX - BUF + 1 + 64;
++
++    for (const char *fn : kScalarStores) {
++        SCOPED_TRACE(fn);
++        uint32 a[1] = { mid };
++        test_shared_heap(h, AOT_RO, fn, 1, a);
++    }
++    for (const char *fn : kSimdStores) {
++        SCOPED_TRACE(fn);
++        uint32 a[1] = { mid };
++        test_shared_heap(h, AOT_RO, fn, 1, a);
++    }
++    { uint32 a[1] = { mid }; test_shared_heap(h, AOT_RO, "store_i32", 1, a); }
++    EXPECT_EQ(rw[64], 0x44);
++    EXPECT_EQ(rw[65], 0x33);
++    { uint32 a[2] = { mid, 8 }; test_shared_heap(h, AOT_RO, "mem_fill", 2, a); }
++    EXPECT_EQ(rw[64], 0x55) << "AOT writable memory.fill did not land";
++    { uint32 a[3] = { mid, 0, 8 }; test_shared_heap(h, AOT_RO, "mem_copy", 3, a); }
++    { uint32 a[3] = { mid, 0, 8 }; test_shared_heap(h, AOT_RO, "mem_init", 3, a); }
++    EXPECT_EQ(rw[64], 'A') << "AOT writable memory.init did not land";
++}
++
++/*
++ * Alternating writable/read-only heaps in ONE invocation, BOTH cache directions.
++ * A chain of [writable head, read-only body]; load_then_store(rd, wr) reads rd
++ * (caching rd's heap permission) then stores to wr. If the permission cache were
++ * not updated to the STORE heap, one direction would be wrong:
++ *  - writable-cached -> read-only store MUST trap (stale writable perm would let
++ *    a read-only write through);
++ *  - read-only-cached -> writable store MUST succeed (stale read-only perm would
++ *    wrongly block a writable write).
++ */
++static void
++run_alternating_heaps(const char *fixture)
++{
++    uint32 BUF = os_getpagesize();
++    std::vector<uint8> rw(BUF, 0), ro(BUF, 0);
++    SharedHeapInitArgs a1 = {};
++    a1.pre_allocated_addr = rw.data();
++    a1.size = BUF; /* writable head */
++    WASMSharedHeap *h_rw = wasm_runtime_create_shared_heap(&a1);
++    SharedHeapInitArgs a2 = {};
++    a2.pre_allocated_addr = ro.data();
++    a2.size = BUF;
++    a2.read_only = true; /* read-only body */
++    WASMSharedHeap *h_ro = wasm_runtime_create_shared_heap(&a2);
++    ASSERT_NE(h_rw, nullptr);
++    ASSERT_NE(h_ro, nullptr);
++    WASMSharedHeap *chain = wasm_runtime_chain_shared_heaps(h_rw, h_ro);
++    ASSERT_NE(chain, nullptr);
++    uint32 rw_addr = UINT32_MAX - 2 * BUF + 1 + 64; /* head (lower) range */
++    uint32 ro_addr = UINT32_MAX - BUF + 1 + 64;     /* body (upper) range */
++
++    /* writable-cached -> read-only store: traps */
++    {
++        uint32 a[2] = { rw_addr, ro_addr };
++        EXPECT_NONFATAL_FAILURE(
++            test_shared_heap(chain, fixture, "load_then_store", 2, a), OOB);
++    }
++    EXPECT_TRUE(all_zero(ro)) << fixture << ": read-only heap mutated (w->ro)";
++
++    /* read-only-cached -> writable store: succeeds (stale read-only would block) */
++    {
++        uint32 a[2] = { ro_addr, rw_addr };
++        test_shared_heap(chain, fixture, "load_then_store", 2, a);
++    }
++    EXPECT_EQ(rw[64], 0x5a)
++        << fixture << ": writable store wrongly blocked after read-only (ro->w)";
++    EXPECT_TRUE(all_zero(ro)) << fixture << ": read-only heap mutated (ro->w)";
++}
++
++TEST_F(shared_heap_test, test_readonly_alternating_heaps_aot)
++{
++    run_alternating_heaps("test_readonly_chain.aot");
++}
++TEST_F(shared_heap_test, test_readonly_alternating_heaps_interp)
++{
++    run_alternating_heaps("test_readonly.wasm");
++}
++
++#undef AOT_RO
++#undef RO_WASM
++#undef OOB
+diff --git a/tests/unit/shared-heap/wasm-apps/test_readonly.wat b/tests/unit/shared-heap/wasm-apps/test_readonly.wat
+new file mode 100644
+index 00000000..6f2cd150
+--- /dev/null
++++ b/tests/unit/shared-heap/wasm-apps/test_readonly.wat
+@@ -0,0 +1,69 @@
++;; Hull ext: comprehensive read-only shared-heap enforcement fixture.
++;;
++;; Every write family the interpreter enforcement covers, plus a load-only
++;; export and the three bulk ops (so the test can drive read-only source vs
++;; destination, zero-length, and boundary permutations). Functions take only
++;; i32 address/length params (clean argv encoding across wasm_runtime_call_wasm)
++;; and use constant store values, since the trap depends on the destination
++;; address, not the value. Built by pinned wat2wasm (WABT 1.0.37); see
++;; docs/wamr_patches.md.
++(module
++  (memory (export "memory") 1)
++
++  ;; Passive data segment for memory.init (8 bytes).
++  (data $seg "ABCDEFGH")
++
++  ;; ---- scalar stores (full width + narrow) ----
++  (func (export "store_i32") (param $p i32)
++    local.get $p (i32.const 0x11223344) i32.store)
++  (func (export "store_i32_8") (param $p i32)
++    local.get $p (i32.const 0x55) i32.store8)
++  (func (export "store_i32_16") (param $p i32)
++    local.get $p (i32.const 0x6677) i32.store16)
++  (func (export "store_i64") (param $p i32)
++    local.get $p (i64.const 0x1122334455667788) i64.store)
++  (func (export "store_i64_8") (param $p i32)
++    local.get $p (i64.const 0x99) i64.store8)
++  (func (export "store_i64_16") (param $p i32)
++    local.get $p (i64.const 0xaabb) i64.store16)
++  (func (export "store_i64_32") (param $p i32)
++    local.get $p (i64.const 0xccddeeff) i64.store32)
++  (func (export "store_f32") (param $p i32)
++    local.get $p (f32.const 1.5) f32.store)
++  (func (export "store_f64") (param $p i32)
++    local.get $p (f64.const 2.5) f64.store)
++
++  ;; ---- load-only (must succeed against a read-only heap) ----
++  (func (export "load_i32") (param $p i32) (result i32)
++    local.get $p i32.load)
++  (func (export "load_i64") (param $p i32) (result i64)
++    local.get $p i64.load)
++
++  ;; ---- read one address, then store to another: exercises the shared-heap
++  ;; permission cache in BOTH directions within one invocation (a load caches
++  ;; the read heap's permission; the following store must use the STORE heap's
++  ;; permission, not the stale cached one). ----
++  (func (export "load_then_store") (param $rd i32) (param $wr i32)
++    local.get $rd i32.load drop
++    local.get $wr (i32.const 0x5a5a5a5a) i32.store)
++
++  ;; ---- SIMD stores (full vector + every lane width) ----
++  (func (export "store_v128") (param $p i32)
++    local.get $p (v128.const i32x4 1 2 3 4) v128.store)
++  (func (export "store_v128_8_lane") (param $p i32)
++    local.get $p (v128.const i32x4 1 2 3 4) (v128.store8_lane 0))
++  (func (export "store_v128_16_lane") (param $p i32)
++    local.get $p (v128.const i32x4 1 2 3 4) (v128.store16_lane 0))
++  (func (export "store_v128_32_lane") (param $p i32)
++    local.get $p (v128.const i32x4 1 2 3 4) (v128.store32_lane 0))
++  (func (export "store_v128_64_lane") (param $p i32)
++    local.get $p (v128.const i32x4 1 2 3 4) (v128.store64_lane 0))
++
++  ;; ---- bulk ops (dst, [src], len) ----
++  (func (export "mem_fill") (param $dst i32) (param $len i32)
++    local.get $dst (i32.const 0x55) local.get $len memory.fill)
++  (func (export "mem_copy") (param $dst i32) (param $src i32) (param $len i32)
++    local.get $dst local.get $src local.get $len memory.copy)
++  (func (export "mem_init") (param $dst i32) (param $src_off i32) (param $len i32)
++    local.get $dst local.get $src_off local.get $len (memory.init $seg))
++)

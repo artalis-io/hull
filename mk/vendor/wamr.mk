@@ -28,8 +28,65 @@ ifneq ($(HL_WASM_MAX_IO_MB),)
 CFLAGS += '-DHL_WASM_MAX_IO_SIZE=((uint32_t)$(HL_WASM_MAX_IO_MB)*1024*1024)'
 endif
 
-WAMR_DIR     := $(VENDDIR)/wamr
+# WAMR source tree Hull compiles. By DEFAULT this is the staged tree with the
+# read-only shared-heap patches applied, so a clean `make` (and CI) automatically
+# builds the enforced runtime. vendor/wamr (the pinned submodule) is IMMUTABLE and
+# never compiled directly unless explicitly overridden (WAMR_DIR=vendor/wamr).
+# The apply is deterministic (verify-base, stale-hash, offset, reverse-check,
+# unexpected-source audit); see scripts/wamr_apply_patches.sh.
+WAMR_SRC_DIR := $(VENDDIR)/wamr
+WAMR_DIR     ?= $(BUILDDIR)/wamr-patched
 WAMR_CORE    := $(WAMR_DIR)/core
+
+# When compiling from the patched staged tree (the default), the apply is a
+# STAMPED, LOCKED PREREQUISITE -- never parse-time -- so it runs only when
+# something is actually compiled, and NEVER for read-only goals (make help,
+# make clean, the registry checks: none of them pull $(BUILDDIR)).
+#
+#  - $(WAMR_APPLIED) is the stamp; its recipe runs the apply under a mkdir lock
+#    (scripts/wamr_apply_patches.sh serialises concurrent applies), then touches
+#    the stamp. It re-runs only when the patches or the script change.
+#  - $(BUILDDIR) gains the stamp as a prerequisite. Since EVERY object carries
+#    `| $(BUILDDIR)` (order-only), the first compile applies the patches before
+#    any Hull source (which includes the patched WAMR headers) is compiled --
+#    the global bootstrap, without touching every object rule.
+#  - The generated WAMR SOURCE files gain the stamp as a prerequisite too (via an
+#    EXPLICIT file list, defined once $(WAMR_SRCS) is known, near WAMR_OBJS below).
+#    On a fresh tree a WAMR object's normal prereq `build/wamr-patched/foo.c` does
+#    not exist yet; the stamp rule gives make a way to create it (run the apply)
+#    instead of erroring "no rule to make target". It is an EXPLICIT list, NOT a
+#    `$(WAMR_DIR)/%.c` pattern: a match-anything pattern also matches phantom names
+#    like `invoke_native.d.c`, which lets make's implicit-chaining synthesize a
+#    bogus `.d.c -> .d.o` intermediate while remaking the `-include`d `.d` deps
+#    (harmless but noisy clang errors on every incremental WAMR build).
+# vendor/wamr (the immutable submodule) is never mutated: the apply stages into
+# build/wamr-patched only. `WAMR_DIR=vendor/wamr` opts out (dev escape hatch).
+#
+# WAMR_DIR=vendor/wamr is a DEVELOPMENT escape hatch ONLY (bisecting an upstream
+# regression against the pristine tree). Phase 0 tolerates it because a shared
+# heap without a read-only span is still memory-safe on the unpatched runtime.
+# A FUTURE mapped-spans layer (read-only zero-copy spans) MUST refuse to build
+# against an unpatched runtime: with WAMR_DIR=vendor/wamr the write-trap
+# enforcement is absent, so a read-only span would be silently writable -- a
+# security regression, not merely a missing optimisation. When that layer lands,
+# gate it on the patched tree (error out of this ifeq's `else` branch when a
+# spans-enabled build is requested). See docs/wamr_patches.md.
+ifeq ($(WAMR_DIR),$(BUILDDIR)/wamr-patched)
+WAMR_APPLIED := $(WAMR_DIR)/.wamr-applied
+WAMR_PATCH_PREREQ := $(WAMR_APPLIED)
+$(WAMR_APPLIED): $(wildcard patches/wamr/*.patch) scripts/wamr_apply_patches.sh
+	@WAMR_STAGE_DIR='$(WAMR_DIR)' scripts/wamr_apply_patches.sh
+	@touch $@
+$(BUILDDIR): $(WAMR_APPLIED)
+else
+WAMR_PATCH_PREREQ :=
+endif
+
+.PHONY: wamr-patch wamr-patch-check
+wamr-patch:                                 ## apply the WAMR read-only patches -> build/wamr-patched
+	@scripts/wamr_apply_patches.sh
+wamr-patch-check:                           ## CI gate: deterministic dry-run of the patch carriage
+	@scripts/wamr_apply_patches.sh --dry-run
 WAMR_IWASM   := $(WAMR_CORE)/iwasm
 WAMR_SHARED  := $(WAMR_CORE)/shared
 
@@ -145,6 +202,14 @@ else
   WAMR_INVOKE_SRC := $(WAMR_IWASM)/common/arch/invokeNative_general.c
 endif
 WAMR_OBJS += $(WAMR_INVOKE_OBJ)
+
+# Patched-tree only: tie the REAL WAMR sources to the apply stamp (explicit list,
+# never a `%` pattern -- see the WAMR_APPLIED block above for why). This gives a
+# fresh build a rule to create `build/wamr-patched/<src>` (run the apply) so the
+# WAMR object rules don't error "no rule to make target" before the stage runs.
+ifneq ($(WAMR_PATCH_PREREQ),)
+$(WAMR_SRCS) $(WAMR_INVOKE_SRC) $(WAMR_INVOKE_SRC_ARM64): $(WAMR_PATCH_PREREQ)
+endif
 
 WAMR_CFLAGS := -std=c11 -O2 -w $(WAMR_ARCH_DEFS) \
 	-DWASM_ENABLE_INTERP=1 \

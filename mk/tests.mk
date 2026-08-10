@@ -161,6 +161,26 @@ $(BUILDDIR)/test_%: $(TESTDIR)/hull/cap/test_%.c $(TUI_CAP_TEST_OBJS) $(TEST_COM
 $(BUILDDIR)/test_%: $(TESTDIR)/hull/cap/test_%.c $(TEST_COMMON_DEPS) | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< $(TEST_COMMON_LIBS) $(LDFLAGS)
 
+# Read-only shared-heap C-API test: build-time AOT fixture. Generate an .aot from
+# the embedded .wasm via the Hull-built wamrc when present (arch + OS correct);
+# otherwise a zero-length stub so the test compiles and SKIPS the AOT case
+# (interp + e2e-compute + the WAMR-unit AOT matrix still cover AOT). The test is
+# picked up by the generic rule above; here it just gains the generated header on
+# its include path + as a prerequisite.
+$(BUILDDIR)/gen_ro_heap_aot.h: $(TESTDIR)/hull/fixtures/ro_heap.wasm | $(BUILDDIR)
+	@w="$(BUILDDIR)/wamrc"; [ -x "$$w" ] || w="$(BUILDDIR)/wamrc-build/wamrc"; \
+	if [ -x "$$w" ] && "$$w" --opt-level=3 --bounds-checks=1 --enable-shared-heap \
+	        -o $(BUILDDIR)/ro_heap.aot $< >/dev/null 2>&1; then \
+	    (cd $(BUILDDIR) && xxd -i ro_heap.aot) \
+	      | sed -E 's/unsigned char.*\[\]/static const unsigned char ro_heap_aot[]/; s/unsigned int.*_len/static const unsigned int ro_heap_aot_len/' > $@; \
+	    echo "  [ro-heap] embedded wamrc-built .aot fixture ($$("$$w" --version 2>/dev/null | head -1))"; \
+	else \
+	    printf 'static const unsigned char ro_heap_aot[1] = {0};\nstatic const unsigned int ro_heap_aot_len = 0;\n' > $@; \
+	    echo "  [ro-heap] wamrc not built; AOT sub-case will skip"; \
+	fi
+$(BUILDDIR)/test_wasm_readonly_heap: INCLUDES += -I$(BUILDDIR)
+$(BUILDDIR)/test_wasm_readonly_heap: $(BUILDDIR)/gen_ro_heap_aot.h
+
 # Top-level tests (tests/hull/)
 $(BUILDDIR)/test_parse_size: $(TESTDIR)/hull/test_parse_size.c $(TEST_COMMON_DEPS) | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< $(TEST_COMMON_LIBS)
