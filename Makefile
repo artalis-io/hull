@@ -2391,7 +2391,7 @@ platform-cosmo:
 
 WAMRC_BUILD_DIR := $(BUILDDIR)/wamrc-build
 
-wamrc: | $(BUILDDIR)
+wamrc: $(WAMR_PATCH_PREREQ) | $(BUILDDIR)
 	@echo "=== Building wamrc AOT compiler ==="
 	@mkdir -p $(WAMRC_BUILD_DIR)
 	@cd $(WAMRC_BUILD_DIR) && cmake $(CURDIR)/$(WAMR_DIR)/wamr-compiler \

@@ -1,0 +1,45 @@
+diff --git a/tests/unit/custom-section/CMakeLists.txt b/tests/unit/custom-section/CMakeLists.txt
+index b57fb8bf..8180adc5 100644
+--- a/tests/unit/custom-section/CMakeLists.txt
++++ b/tests/unit/custom-section/CMakeLists.txt
+@@ -4,7 +4,9 @@
+ cmake_minimum_required(VERSION 3.14)
+ project (test-custom-section)
+ 
+-set(WASI_SDK_DIR "/opt/wasi-sdk")
++if(NOT WASI_SDK_DIR)
++  set(WASI_SDK_DIR "/opt/wasi-sdk")
++endif()
+ set(WASISDK_TOOLCHAIN "${WASI_SDK_DIR}/share/cmake/wasi-sdk.cmake")
+ 
+ include(ExternalProject)
+diff --git a/tests/unit/running-modes/CMakeLists.txt b/tests/unit/running-modes/CMakeLists.txt
+index d7ebaed0..afa788a1 100644
+--- a/tests/unit/running-modes/CMakeLists.txt
++++ b/tests/unit/running-modes/CMakeLists.txt
+@@ -5,7 +5,9 @@ cmake_minimum_required(VERSION 3.14)
+ 
+ project(test-running-modes)
+ 
+-set(WASI_SDK_DIR "/opt/wasi-sdk")
++if(NOT WASI_SDK_DIR)
++  set(WASI_SDK_DIR "/opt/wasi-sdk")
++endif()
+ set(WASISDK_TOOLCHAIN "${WASI_SDK_DIR}/share/cmake/wasi-sdk.cmake")
+ 
+ include(ExternalProject)
+diff --git a/tests/unit/shared-heap/CMakeLists.txt b/tests/unit/shared-heap/CMakeLists.txt
+index 5de15b44..b7403692 100644
+--- a/tests/unit/shared-heap/CMakeLists.txt
++++ b/tests/unit/shared-heap/CMakeLists.txt
+@@ -16,7 +16,9 @@ set(WAMR_BUILD_MEMORY64 0)
+ set(WAMR_BUILD_SHARED_HEAP 1)
+ 
+ # Compile wasm modules
+-set(WASI_SDK_DIR "/opt/wasi-sdk")
++if(NOT WASI_SDK_DIR)
++  set(WASI_SDK_DIR "/opt/wasi-sdk")
++endif()
+ set(WASISDK_TOOLCHAIN "${WASI_SDK_DIR}/share/cmake/wasi-sdk.cmake")
+ 
+ include(ExternalProject)

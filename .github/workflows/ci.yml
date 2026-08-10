@@ -64,6 +64,13 @@ jobs:
       - name: Tool registry consistency (tools_install.c vs release.yml)
         run: make check-tools-registry
 
+      # WAMR out-of-tree read-only patch carriage: deterministic dry-run that
+      # fails on a drifted base commit, a stale patch hash, an apply offset, a
+      # reverse-check mismatch, or any changed/new file the patches do not
+      # declare. Keeps patches/wamr/* in lockstep with the pinned submodule.
+      - name: WAMR patch carriage dry-run (base/stale/offset/unexpected-source)
+        run: make wamr-patch-check
+
       - name: Build
         run: make
 
@@ -315,6 +322,52 @@ jobs:
       - name: hull test (examples)
         timeout-minutes: 2
         run: make hull-test-examples
+
+  # Read-only shared-heap enforcement (Phase 0): prove the AOT write-trap path
+  # THROUGH HULL'S OWN BUILD, not just the interpreter or the WAMR unit config.
+  # The `build` job's `make test` runs test_wasm_readonly_heap too, but with no
+  # wamrc there it takes the AOT skip path (interp case only). This job installs
+  # LLVM-18, builds Hull's wamrc (which forces the WAMR patch carriage), then
+  # builds + runs the C-API test with a real wamrc-emitted .aot fixture and FAILS
+  # if the AOT sub-case is SKIPPED. That closes the "AOT is dormant in CI" gap.
+  wasm-readonly-heap-aot:
+    name: Read-only shared-heap AOT C-API test
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          submodules: true
+
+      - name: Install LLVM + cmake
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y llvm-18-dev cmake
+
+      - name: Build wamrc (applies the WAMR read-only patch carriage)
+        timeout-minutes: 12
+        run: |
+          if command -v llvm-config-18 >/dev/null 2>&1; then
+            llvm_cmakedir=$(llvm-config-18 --cmakedir)
+            export WAMRC_CMAKE_FLAGS="-DLLVM_DIR=${llvm_cmakedir}"
+          fi
+          make wamrc
+
+      - name: Build + run the AOT C-API case (must NOT skip)
+        timeout-minutes: 6
+        run: |
+          # Regenerate the fixture header now that wamrc exists, then build + run.
+          rm -f build/gen_ro_heap_aot.h
+          make build/test_wasm_readonly_heap
+          set -o pipefail
+          ./build/test_wasm_readonly_heap 2>&1 | tee ro_heap.log
+          rc=${PIPESTATUS[0]}
+          [ "$rc" -eq 0 ] || { echo "::error::test_wasm_readonly_heap failed (rc=$rc)"; exit "$rc"; }
+          if grep -qE 'SKIPPED.*wasm_readonly_heap\.aot' ro_heap.log; then
+            echo "::error::AOT C-API case took the wamrc-unavailable skip path"; exit 1
+          fi
+          grep -qE 'OK[^A-Za-z].*wasm_readonly_heap\.aot' ro_heap.log \
+            || { echo "::error::AOT C-API case did not run to OK"; exit 1; }
+          echo "AOT read-only-heap C-API case ran against a real wamrc .aot and passed."
 
   # Reproducibility gate. Three properties tested independently on
   # both Linux and macOS via matrix strategy:
