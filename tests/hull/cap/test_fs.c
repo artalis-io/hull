@@ -321,4 +321,270 @@ UTEST(hl_cap_fs, mmap_null_safe)
     hl_cap_fs_munmap(NULL); /* should not crash */
 }
 
+/* ── Windowed mmap: pure geometry (mapped-spans cut 1) ──────────────────
+ * hl_cap_fs_mmap_window_geometry is filesystem-free, so overflow / boundary
+ * cases near UINT64_MAX are tested directly without giant files. */
+
+UTEST(hl_cap_fs, mmap_geometry_offset_zero)
+{
+    uint64_t off, len, slop, eff; const char *err = NULL;
+    ASSERT_EQ(hl_cap_fs_mmap_window_geometry(0, 100, 1000, 4096,
+                                             &off, &len, &slop, &eff, &err), 0);
+    ASSERT_EQ((int)off, 0);
+    ASSERT_EQ((int)slop, 0);
+    ASSERT_EQ((int)len, 4096);   /* round_up(0 + 100) */
+    ASSERT_EQ((int)eff, 100);
+}
+
+UTEST(hl_cap_fs, mmap_geometry_cross_page_slop)
+{
+    uint64_t off, len, slop, eff; const char *err = NULL;
+    /* offset 5000 with a 4096 page: base page 4096, slop 904, map spans two
+     * pages to cover [5000,5100). */
+    ASSERT_EQ(hl_cap_fs_mmap_window_geometry(5000, 100, 10000, 4096,
+                                             &off, &len, &slop, &eff, &err), 0);
+    ASSERT_EQ((int)off, 4096);
+    ASSERT_EQ((int)slop, 904);
+    ASSERT_EQ((int)eff, 100);
+    ASSERT_EQ((int)len, 4096);   /* round_up(904 + 100 = 1004) */
+}
+
+UTEST(hl_cap_fs, mmap_geometry_page_multiple_offset)
+{
+    uint64_t off, len, slop, eff; const char *err = NULL;
+    ASSERT_EQ(hl_cap_fs_mmap_window_geometry(8192, 5000, 20000, 4096,
+                                             &off, &len, &slop, &eff, &err), 0);
+    ASSERT_EQ((int)off, 8192);   /* already page-aligned */
+    ASSERT_EQ((int)slop, 0);
+    ASSERT_EQ((int)eff, 5000);
+    ASSERT_EQ((int)len, 8192);   /* round_up(5000) = 2 pages */
+}
+
+UTEST(hl_cap_fs, mmap_geometry_eof_clamp)
+{
+    uint64_t off, len, slop, eff; const char *err = NULL;
+    /* window runs past EOF: eff_len clamps to file_size - offset. */
+    ASSERT_EQ(hl_cap_fs_mmap_window_geometry(900, 500, 1000, 4096,
+                                             &off, &len, &slop, &eff, &err), 0);
+    ASSERT_EQ((int)eff, 100);    /* 1000 - 900 */
+    ASSERT_EQ((int)off, 0);
+    ASSERT_EQ((int)slop, 900);
+    ASSERT_EQ((int)len, 4096);   /* round_up(900 + 100 = 1000) */
+}
+
+UTEST(hl_cap_fs, mmap_geometry_rejections)
+{
+    uint64_t off, len, slop, eff; const char *err;
+    /* empty window */
+    err = NULL;
+    ASSERT_EQ(hl_cap_fs_mmap_window_geometry(0, 0, 1000, 4096,
+                                             &off, &len, &slop, &eff, &err), -1);
+    ASSERT_STREQ(err, "empty_window");
+    /* over the per-window cap */
+    err = NULL;
+    ASSERT_EQ(hl_cap_fs_mmap_window_geometry(0, HL_FS_MMAP_MAX_WINDOW_BYTES + 1,
+                                             (uint64_t)1 << 40, 4096,
+                                             &off, &len, &slop, &eff, &err), -1);
+    ASSERT_STREQ(err, "window_too_large");
+    /* offset at/after EOF maps nothing */
+    err = NULL;
+    ASSERT_EQ(hl_cap_fs_mmap_window_geometry(1000, 10, 1000, 4096,
+                                             &off, &len, &slop, &eff, &err), -1);
+    ASSERT_STREQ(err, "offset_past_eof");
+    /* zero page size */
+    err = NULL;
+    ASSERT_EQ(hl_cap_fs_mmap_window_geometry(0, 10, 1000, 0,
+                                             &off, &len, &slop, &eff, &err), -1);
+    ASSERT_STREQ(err, "bad_page_size");
+}
+
+/* The geometry makes no power-of-two assumption: an exotic page size computes
+ * correctly via modulo/division rather than being rejected. */
+UTEST(hl_cap_fs, mmap_geometry_non_power_of_two_page)
+{
+    uint64_t off, len, slop, eff; const char *err = NULL;
+    /* page 1000: offset 2500 -> base 2000, slop 500, need 500+100=600 -> 1 page. */
+    ASSERT_EQ(hl_cap_fs_mmap_window_geometry(2500, 100, 10000, 1000,
+                                             &off, &len, &slop, &eff, &err), 0);
+    ASSERT_EQ((int)off, 2000);
+    ASSERT_EQ((int)slop, 500);
+    ASSERT_EQ((int)eff, 100);
+    ASSERT_EQ((int)len, 1000);
+    /* a window that spans two 1000-byte pages rounds up to 2000. */
+    ASSERT_EQ(hl_cap_fs_mmap_window_geometry(2500, 700, 10000, 1000,
+                                             &off, &len, &slop, &eff, &err), 0);
+    ASSERT_EQ((int)len, 2000);   /* round_up(500 + 700 = 1200) */
+}
+
+/* The EOF clamp bottoms out at 1 byte, never 0: a request at the last byte with
+ * a huge length still maps a non-empty (one-page) region. */
+UTEST(hl_cap_fs, mmap_geometry_eof_min_one_byte)
+{
+    uint64_t off, len, slop, eff; const char *err = NULL;
+    ASSERT_EQ(hl_cap_fs_mmap_window_geometry(4999, 1000000, 5000, 4096,
+                                             &off, &len, &slop, &eff, &err), 0);
+    ASSERT_EQ((int)eff, 1);       /* 5000 - 4999, clamped */
+    ASSERT_TRUE(len >= 4096);     /* non-zero mapping */
+    ASSERT_TRUE(eff >= 1);
+}
+
+UTEST(hl_cap_fs, mmap_geometry_overflow_near_uint64_max)
+{
+    uint64_t off, len, slop, eff; const char *err = NULL;
+    /* offset just below UINT64_MAX with a maximal file_size: eff_len clamps to
+     * the few remaining bytes, but the page-rounded mapping's base+len wraps the
+     * 64-bit address space -> must fail closed, not silently overflow. */
+    uint64_t huge = UINT64_MAX;
+    ASSERT_EQ(hl_cap_fs_mmap_window_geometry(huge - 10, 1000, huge, 4096,
+                                             &off, &len, &slop, &eff, &err), -1);
+    ASSERT_STREQ(err, "align_overflow");
+}
+
+/* ── Windowed mmap: real files (mapped-spans cut 1) ─────────────────────── */
+
+/* Write `n` bytes where byte i == (i & 0xff), so a window at `off` is verifiable
+ * against the deterministic pattern. */
+static int write_pattern(const char *name, size_t n)
+{
+    unsigned char *p = (unsigned char *)malloc(n);
+    if (!p) return -1;
+    for (size_t i = 0; i < n; i++) p[i] = (unsigned char)(i & 0xff);
+    int rc = hl_cap_fs_write(&test_cfg, name, (const char *)p, n, NULL);
+    free(p);
+    return rc;
+}
+
+static void assert_window_invariants(int *utest_result, HlMappedBuffer *buf,
+                                     uint64_t offset, size_t eff_len)
+{
+    long pg = sysconf(_SC_PAGESIZE);
+    if (pg <= 0) pg = 4096;
+    uint64_t pagemask = (uint64_t)pg - 1;
+
+    ASSERT_NE(buf, NULL);
+    ASSERT_EQ(buf->foffset, offset);
+    ASSERT_EQ(buf->len, eff_len);
+    ASSERT_EQ(buf->closed, 0);
+    /* the mmap base is page-aligned; the window sits `slop` bytes into it */
+    ASSERT_EQ((uint64_t)(uintptr_t)buf->map_base & pagemask, (uint64_t)0);
+    uint64_t slop = offset - (offset & ~pagemask);
+    ASSERT_EQ((size_t)((char *)buf->addr - (char *)buf->map_base), (size_t)slop);
+    /* the window lies wholly inside the page-aligned mapping */
+    ASSERT_TRUE((char *)buf->addr >= (char *)buf->map_base);
+    ASSERT_TRUE((char *)buf->addr + buf->len
+                <= (char *)buf->map_base + buf->map_len);
+    /* the bytes are exactly the file's window (pattern: byte k == k & 0xff) */
+    const unsigned char *w = (const unsigned char *)buf->addr;
+    for (size_t j = 0; j < eff_len; j++)
+        ASSERT_EQ((int)w[j], (int)((offset + j) & 0xff));
+}
+
+UTEST(hl_cap_fs, mmap_window_cross_page)
+{
+    setup_fs();
+    ASSERT_EQ(write_pattern("win_cross.bin", 40000), 0);
+    /* offset 20000 forces a non-zero page-aligned base on both 4K and 16K
+     * pages (20000 & ~4095 == 20000 & ~16383 == 16384). */
+    HlMappedBuffer *buf =
+        hl_cap_fs_mmap_window(&test_cfg, "win_cross.bin", 20000, 100, NULL, NULL);
+    assert_window_invariants(utest_result, buf, 20000, 100);
+    hl_cap_fs_munmap(buf);
+    teardown_fs();
+}
+
+UTEST(hl_cap_fs, mmap_window_offset_zero)
+{
+    setup_fs();
+    ASSERT_EQ(write_pattern("win_zero.bin", 8192), 0);
+    HlMappedBuffer *buf =
+        hl_cap_fs_mmap_window(&test_cfg, "win_zero.bin", 0, 256, NULL, NULL);
+    assert_window_invariants(utest_result, buf, 0, 256);
+    hl_cap_fs_munmap(buf);
+    teardown_fs();
+}
+
+UTEST(hl_cap_fs, mmap_window_eof_clamp)
+{
+    setup_fs();
+    ASSERT_EQ(write_pattern("win_eof.bin", 5000), 0);
+    /* ask for 4000 bytes starting at 4000; only 1000 remain -> clamp to 1000,
+     * and reading the whole (clamped) window must not SIGBUS. */
+    HlMappedBuffer *buf =
+        hl_cap_fs_mmap_window(&test_cfg, "win_eof.bin", 4000, 4000, NULL, NULL);
+    assert_window_invariants(utest_result, buf, 4000, 1000);
+    hl_cap_fs_munmap(buf);
+    teardown_fs();
+}
+
+UTEST(hl_cap_fs, mmap_window_borrow_defers_close)
+{
+    setup_fs();
+    ASSERT_EQ(write_pattern("win_borrow.bin", 40000), 0);
+    HlMappedBuffer *buf =
+        hl_cap_fs_mmap_window(&test_cfg, "win_borrow.bin", 20000, 100, NULL, NULL);
+    ASSERT_NE(buf, NULL);
+    void *map_base = buf->map_base; /* teardown must unmap THIS, not addr */
+
+    hl_cap_fs_mmap_borrow(buf);
+    ASSERT_EQ(buf->borrow_count, 1);
+    hl_cap_fs_munmap(buf);            /* deferred while borrowed */
+    ASSERT_EQ(buf->pending_free, 1);
+    ASSERT_EQ(buf->closed, 0);
+    ASSERT_EQ((int)((const unsigned char *)buf->addr)[0], (int)(20000 & 0xff));
+    ASSERT_EQ(buf->map_base, map_base);
+
+    hl_cap_fs_mmap_release(buf);      /* last release -> real munmap(map_base) + free */
+    teardown_fs();
+}
+
+UTEST(hl_cap_fs, mmap_window_rejections)
+{
+    setup_fs();
+    ASSERT_EQ(write_pattern("win_rej.bin", 4096), 0);
+    const char *err;
+    /* offset past EOF */
+    err = NULL;
+    ASSERT_EQ(hl_cap_fs_mmap_window(&test_cfg, "win_rej.bin", 4096, 10, NULL, &err),
+              NULL);
+    ASSERT_STREQ(err, "offset_past_eof");
+    /* empty window */
+    err = NULL;
+    ASSERT_EQ(hl_cap_fs_mmap_window(&test_cfg, "win_rej.bin", 0, 0, NULL, &err),
+              NULL);
+    ASSERT_STREQ(err, "empty_window");
+    /* over the per-window cap */
+    err = NULL;
+    ASSERT_EQ(hl_cap_fs_mmap_window(&test_cfg, "win_rej.bin", 0,
+                                    HL_FS_MMAP_MAX_WINDOW_BYTES + 1, NULL, &err),
+              NULL);
+    ASSERT_STREQ(err, "window_too_large");
+    teardown_fs();
+}
+
+UTEST(hl_cap_fs, mmap_window_path_traversal)
+{
+    setup_fs();
+    ASSERT_EQ(hl_cap_fs_mmap_window(&test_cfg, "../etc/passwd", 0, 10, NULL, NULL),
+              NULL);
+    ASSERT_EQ(hl_cap_fs_mmap_window(&test_cfg, "/etc/passwd", 0, 10, NULL, NULL),
+              NULL);
+    teardown_fs();
+}
+
+/* Whole-file mmap must keep the window fields self-consistent so the shared
+ * munmap/borrow path is uniform: map_base==addr, map_len==len, foffset==0. */
+UTEST(hl_cap_fs, mmap_whole_file_window_fields)
+{
+    setup_fs();
+    const char *data = "whole file window fields";
+    ASSERT_EQ(hl_cap_fs_write(&test_cfg, "whole.txt", data, strlen(data), NULL), 0);
+    HlMappedBuffer *buf = hl_cap_fs_mmap(&test_cfg, "whole.txt", NULL, NULL);
+    ASSERT_NE(buf, NULL);
+    ASSERT_EQ(buf->map_base, buf->addr);
+    ASSERT_EQ(buf->map_len, buf->len);
+    ASSERT_EQ(buf->foffset, (uint64_t)0);
+    hl_cap_fs_munmap(buf);
+    teardown_fs();
+}
+
 UTEST_MAIN();

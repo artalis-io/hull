@@ -345,11 +345,173 @@ HlMappedBuffer *hl_cap_fs_mmap(const HlFsConfig *cfg, const char *path,
     buf->alloc = alloc;
     buf->borrow_count = 0;
     buf->pending_free = 0;
+    /* Whole-file mmap: the window IS the whole mapping. */
+    buf->map_base = addr;
+    buf->map_len = (size_t)st.st_size;
+    buf->foffset = 0;
 
 audit:
     {
         ShJsonWriter w = hl_audit_begin("fs.mmap");
         sh_json_write_kv_string(&w, "path", path);
+        sh_json_write_kv_int(&w, "size", buf ? (int64_t)buf->len : -1);
+        hl_audit_end(&w);
+    }
+    return buf;
+}
+
+int hl_cap_fs_mmap_window_geometry(uint64_t offset, uint64_t length,
+                                   uint64_t file_size, uint64_t page_size,
+                                   uint64_t *out_map_off, uint64_t *out_map_len,
+                                   uint64_t *out_slop, uint64_t *out_eff_len,
+                                   const char **err)
+{
+    /* page_size need only be > 0. The modulo/division arithmetic below makes NO
+     * power-of-two assumption (POSIX page sizes are powers of two, but we do not
+     * rely on it -- so an exotic page size neither misbehaves nor is rejected). */
+    if (page_size == 0) {
+        if (err) *err = "bad_page_size";
+        return -1;
+    }
+    if (length == 0) {
+        if (err) *err = "empty_window";
+        return -1;
+    }
+    /* The cap is on the LOGICAL requested window length; see the header note. */
+    if (length > HL_FS_MMAP_MAX_WINDOW_BYTES) {
+        if (err) *err = "window_too_large";
+        return -1;
+    }
+    /* offset must be strictly inside the file; offset == file_size maps nothing. */
+    if (offset >= file_size) {
+        if (err) *err = "offset_past_eof";
+        return -1;
+    }
+
+    /* Clamp the window to end-of-file (a short final window is normal when
+     * scanning a large file in fixed windows). offset < file_size, so avail >= 1
+     * and eff_len >= 1: the EOF clamp can NEVER produce a zero-length mapping. */
+    uint64_t avail = file_size - offset;
+    uint64_t eff_len = length < avail ? length : avail;
+
+    uint64_t slop = offset % page_size;   /* 0 <= slop < page_size */
+    uint64_t map_off = offset - slop;     /* page-aligned; no underflow (slop<=offset) */
+
+    /* need = slop + eff_len, then round UP to a whole number of pages, with fully
+     * overflow-safe arithmetic (never `a + b <= LIMIT`, never an a*b that wraps). */
+    if (slop > UINT64_MAX - eff_len) {
+        if (err) *err = "align_overflow";
+        return -1;
+    }
+    uint64_t need = slop + eff_len;
+    uint64_t pages = need / page_size;
+    if (need % page_size != 0) {
+        if (pages == UINT64_MAX) { if (err) *err = "align_overflow"; return -1; }
+        pages += 1;
+    }
+    if (pages > UINT64_MAX / page_size) {
+        if (err) *err = "align_overflow";
+        return -1;
+    }
+    uint64_t map_len = pages * page_size;
+
+    /* The mmap region must not wrap the address space and its LENGTH must fit
+     * size_t (the mmap/munmap length type) on this host. map_off's off_t
+     * representability is enforced by the caller (see hl_cap_fs_mmap_window). */
+    if (map_off > UINT64_MAX - map_len || map_len > (uint64_t)SIZE_MAX) {
+        if (err) *err = "align_overflow";
+        return -1;
+    }
+
+    if (out_map_off) *out_map_off = map_off;
+    if (out_map_len) *out_map_len = map_len;
+    if (out_slop) *out_slop = slop;
+    if (out_eff_len) *out_eff_len = eff_len;
+    return 0;
+}
+
+HlMappedBuffer *hl_cap_fs_mmap_window(const HlFsConfig *cfg, const char *path,
+                                      uint64_t offset, uint64_t length,
+                                      HlAllocator *alloc, const char **err_msg)
+{
+    HlMappedBuffer *buf = NULL;
+    uint64_t map_off = 0, map_len = 0, slop = 0, eff_len = 0;
+
+    char full[PATH_MAX];
+    if (build_path(cfg, path, full, sizeof(full), err_msg) != 0)
+        goto audit;
+
+    int fd = open(full, O_RDONLY);
+    if (fd < 0) {
+        if (err_msg) *err_msg = "open_failed";
+        goto audit;
+    }
+
+    struct stat st;
+    if (fstat(fd, &st) != 0) {
+        close(fd);
+        if (err_msg) *err_msg = "mmap_failed";
+        goto audit;
+    }
+    if (st.st_size <= 0) {
+        close(fd);
+        if (err_msg) *err_msg = st.st_size == 0 ? "empty_file" : "mmap_failed";
+        goto audit;
+    }
+
+    long pg = sysconf(_SC_PAGESIZE);
+    if (pg <= 0) pg = 4096;
+
+    if (hl_cap_fs_mmap_window_geometry(offset, length, (uint64_t)st.st_size,
+                                       (uint64_t)pg, &map_off, &map_len, &slop,
+                                       &eff_len, err_msg) != 0) {
+        close(fd);
+        goto audit;
+    }
+
+    /* Reject before the narrowing (off_t)map_off cast. map_off <= offset <
+     * file_size == st.st_size, itself a valid non-negative off_t, so this cannot
+     * fire on a file-derived size; the explicit guard documents the invariant and
+     * fails closed should a future change ever break it. (map_len's size_t fit is
+     * enforced inside the geometry helper.) */
+    off_t off_t_max =
+        (off_t)((((uintmax_t)1) << (sizeof(off_t) * CHAR_BIT - 1)) - 1);
+    if (map_off > (uint64_t)off_t_max) {
+        close(fd);
+        if (err_msg) *err_msg = "window_too_large";
+        goto audit;
+    }
+
+    void *base = mmap(NULL, (size_t)map_len, PROT_READ, MAP_PRIVATE, fd,
+                      (off_t)map_off);
+    close(fd); /* mapping survives close */
+    if (base == MAP_FAILED) {
+        if (err_msg) *err_msg = "mmap_failed";
+        goto audit;
+    }
+
+    buf = hl_alloc_malloc(alloc, sizeof(HlMappedBuffer));
+    if (!buf) {
+        munmap(base, (size_t)map_len);
+        if (err_msg) *err_msg = "mmap_failed";
+        goto audit;
+    }
+
+    buf->map_base = base;
+    buf->map_len = (size_t)map_len;
+    buf->addr = (char *)base + slop;
+    buf->len = (size_t)eff_len;
+    buf->foffset = offset;
+    buf->closed = 0;
+    buf->alloc = alloc;
+    buf->borrow_count = 0;
+    buf->pending_free = 0;
+
+audit:
+    {
+        ShJsonWriter w = hl_audit_begin("fs.mmap_window");
+        sh_json_write_kv_string(&w, "path", path);
+        sh_json_write_kv_int(&w, "offset", (int64_t)offset);
         sh_json_write_kv_int(&w, "size", buf ? (int64_t)buf->len : -1);
         hl_audit_end(&w);
     }
@@ -367,8 +529,10 @@ void hl_cap_fs_munmap(HlMappedBuffer *buf)
         buf->pending_free = 1;
         return;
     }
-    if (!buf->closed && buf->addr) {
-        munmap(buf->addr, buf->len);
+    /* Unmap the PAGE-ALIGNED mapping (map_base/map_len), never the caller window
+     * (addr/len) -- for a windowed buffer addr is offset into map_base. */
+    if (!buf->closed && buf->map_base) {
+        munmap(buf->map_base, buf->map_len);
         buf->closed = 1;
     }
     hl_alloc_free(buf->alloc, buf, sizeof(HlMappedBuffer));
@@ -385,8 +549,9 @@ void hl_cap_fs_mmap_release(void *p)
     if (!buf) return;
     if (buf->borrow_count > 0) buf->borrow_count--;
     if (buf->borrow_count == 0 && buf->pending_free) {
-        if (!buf->closed && buf->addr) {
-            munmap(buf->addr, buf->len);
+        /* Unmap the page-aligned mapping, not the caller window (see munmap). */
+        if (!buf->closed && buf->map_base) {
+            munmap(buf->map_base, buf->map_len);
             buf->closed = 1;
         }
         hl_alloc_free(buf->alloc, buf, sizeof(HlMappedBuffer));
