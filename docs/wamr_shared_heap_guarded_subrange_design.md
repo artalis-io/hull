@@ -6,6 +6,54 @@ shared-heap enforcement), 0002 (`read_only` flag), and 0003
 un-blocking the mapped-spans public API; it is written against Hull's vendored
 WAMR (2.4.1-218-gc3a78cd1) and must be reviewed before any production change.
 
+## 0. Decision (final): Design B is selected; Design A is rejected
+
+For a hardened runtime, defense in depth outweighs the smaller one-sided guard.
+Design A (native base = `addr`) is correct ONLY if every current and future
+access path applies the valid bound; a single missed path reaches into the
+reserved tail, which can be UNMAPPED, and crashes the host with SIGBUS. Under
+Design B (native base = `map_base`, reserved = `map_len`) the reserved range
+always sits inside the mapped pages, so a missed guard degrades to in-mapping
+data overexposure, never an unmapped access. B is selected; A is retained below
+only as the explicitly rejected alternative. Arbitrary file offsets are
+preserved (the public contract is NOT narrowed to page-aligned offsets).
+
+Selected parameterisation (per span):
+
+    Native backing base   = map_base                 (page-aligned; fits mmap exactly)
+    Reserved size         = map_len                  (page-rounded; drives placement)
+    Valid offset          = addr - map_base          (= slop, 0 <= slop < page)
+    Valid length          = len                      (the logical window)
+    Guest metadata base   = reserved_wasm_base + valid_offset
+    Guest access interval = [valid_offset, valid_offset + valid_length)
+                            heap-relative; absolute
+                            [start_off + valid_offset, start_off + valid_offset + len)
+    Placement / overlap   = full reserved map_len   (chain slots stack by reserved size)
+    Accounting cap        = logical len (1 GiB aggregate); mapped/reserved bytes
+                            tracked separately from the logical cap
+
+Compatibility (enforced in `create`, fail closed):
+
+- `valid_size == 0` means the FULL reserved heap with `valid_offset == 0`
+  (back-compat: every zero-initialised caller keeps full-heap access).
+- reject a nonzero `valid_offset` combined with default/full-size semantics
+  (an offset is meaningless without an explicit sub-size).
+- reject `valid_offset + valid_size > reserved_size` and all overflow.
+- runtime-managed (legacy / writable) heaps remain `{valid_offset = 0,
+  valid_size = reserved_size}` and are byte-for-byte unchanged.
+
+Why B needs no more codegen than A: WAMR's interpreter and AOT fast paths
+already bound-check BOTH sides -- `app_off >= shared_heap_start_off` AND
+`app_off <= shared_heap_end_off - bytes + 1` (AOT: `aot_emit_memory.c`
+`LLVMIntUGE` + `LLVMIntULE`; interp: `CHECK_SHARED_HEAP_OVERFLOW`). B is
+realised purely by the per-instance cache values: `update_last_used_shared_heap`
+sets the cached lower bound to `start_off + valid_offset`, the cached upper
+bound to `start_off + valid_offset + valid_size - 1`, and
+`base_addr_adj = base_addr - start_off` (decoupled from the RAISED lower bound,
+so the window base still maps to `addr = map_base + valid_offset`). No emitted
+instruction changes and no `AOTModuleInstanceExtra` field is added, so the AOT
+format version is unaffected (sections 5 / 5.1 hold for B).
+
 ## 1. Problem
 
 Mapped spans attach a windowed `HlMappedBuffer` to a WASM instance as a
@@ -56,7 +104,13 @@ WAMR does NOT require a page-aligned native base pointer. The earlier review
 overstated this: only the pre-allocated SIZE is page-checked (lines 262-266).
 The base is pure arithmetic. This is what makes design A (below) viable.
 
-## 3. Design A (preferred): base = addr, upper-bound guard at valid_len
+## 3. Design A (REJECTED alternative): base = addr, upper-bound guard at valid_len
+
+REJECTED (see section 0). Retained for the record because its access-path audit
+(3.1a) and the reserved-vs-valid separation apply equally to B; only B's base /
+offset bookkeeping differs. The fatal property is 3.2: A's reserved tail can be
+unmapped, so a missed guard path is a host crash rather than an over-read.
+
 
 Pass the LOGICAL window base as the native backing base, reserve a page-rounded
 WASM range for it, and store a separate logical length that bounds guest access.
@@ -204,47 +258,76 @@ len in {1, page-1, page, page+1, 2*page-1}; for each assert the last valid byte
 valid_len`) traps, a multi-byte / v128 access straddling the boundary traps, and
 no access (permitted or trapped) raises SIGBUS, including an EOF-tail window.
 
-## 4. Design B (fallback): base = map_base, two-sided sub-window
+## 4. Design B (SELECTED): base = map_base, two-sided sub-window
 
-If a shipped architecture or a future WAMR path genuinely requires an aligned
-native base (none found in 2.4.1), fall back to keeping `base_addr = map_base`
-(page-aligned, `reserved_size = map_len`, always fits the mmap) and expressing
-the window as a sub-range:
+Keep `base_addr = map_base` (page-aligned, `reserved_size = map_len`, always
+fits the mmap) and express the window as a sub-range of the reserved slot:
 
-    valid_lo = slop
-    valid_hi = slop + len
+    valid_offset = addr - map_base = slop      (0 <= slop < page)
+    valid_size   = len
 
-Guest access permitted only for app_off in `[start_off + valid_lo,
-start_off + valid_lo + len)`; metadata returns `wasm_reserved_base + slop` as
-the window base. This needs a two-sided guard (raise the LOWER bound by `slop`
-in addition to lowering the upper bound), a slightly larger WAMR change than A's
-single upper-bound tighten, but every reserved byte stays inside the live
-mapping (no reserved-past-mapping obligation). Design A is preferred because it
-gives the guest a base exactly at the logical offset and needs only the
-one-sided tighten; B is the safety net.
+Guest access permitted only for app_off in
+`[start_off + valid_offset, start_off + valid_offset + valid_size)`; the guest's
+window base (metadata) is `start_off + valid_offset`, which maps natively to
+`base_addr + valid_offset = map_base + slop = addr`. Two bounds move: the LOWER
+bound rises by `valid_offset` (blocking the slop prefix) and the UPPER bound
+falls to the window end (blocking the page-rounding suffix). Every reserved byte
+stays inside the live mapping (`reserved_size = map_len`), so no
+reserved-past-mapping obligation and no unmapped-access failure mode.
 
-Do NOT narrow the public contract to page-aligned offsets unless BOTH A and B
-prove infeasible.
+### 4.1 WAMR changes (B)
 
-## 4a. A vs B: recommendation (review round 2)
+1. `WASMSharedHeap` gains `uint64 valid_offset` and `uint64 valid_size` (host
+   struct; NOT the AOT ABI). Default `{0, 0}` == full heap
+   (`valid_offset = 0`, effective `valid_size = size`).
+2. `SharedHeapInitArgs` gains `uint64 valid_offset` + `uint64 valid_size`,
+   validated in `create` per the section-0 compatibility rules (0/0 => full;
+   reject nonzero offset with full size; reject `valid_offset + valid_size >
+   size`; overflow; runtime-managed forced to `{0, size}`).
+3. `update_last_used_shared_heap` (wasm_memory.c:507-537, INTERP + AOT arms),
+   with `rstart = heap->start_off_mem{32,64}`, `voff = heap->valid_offset`,
+   `vsize = heap->valid_size ? heap->valid_size : heap->size`:
 
-Both are functionally correct; the probe proved A viable (non-aligned base
-works). The decision is a robustness trade-off:
+       shared_heap_start_off = rstart + voff;                 // raised lower bound
+       shared_heap_end_off   = rstart + voff + vsize - 1;     // lowered upper bound
+       shared_heap_base_addr_adj = base_addr - rstart;        // DECOUPLED from the raised start
 
-- A (base = addr): cleaner metadata (guest base == logical offset), single
-  upper-bound tighten, ONE new field. But the reserved tail can exceed the
-  mapping (3.2), so a missed guard path is an UNMAPPED access (SIGBUS / OOB).
+   The base_addr_adj MUST derive from `rstart` (reserved), not the raised cached
+   start, so `app_off = rstart + voff` maps to `base_addr + voff = addr`.
+4. `is_app_addr_in_shared_heap` chain-walk (wasm_memory.c:726-734): match the
+   owning heap by its RESERVED slot `[rstart, rstart + size)` (placement), then
+   admit only if `app_off` is within the VALID sub-window
+   `[rstart + voff, rstart + voff + vsize)`; an address in the slot's slop
+   prefix or suffix margin matches no valid window and traps.
+5. `is_native_addr_in_shared_heap` (wasm_memory.c:753-770): validate against the
+   VALID native sub-range `[base_addr + voff, base_addr + voff + vsize)`.
+6. `reset_shared_heap_chain` memset (wasm_memory.c:409): zero
+   `[base_addr + voff, +vsize)` (defensive; never hit for RO spans).
+7. Placement / chaining (`:255-256`, `:344-345`) unchanged: they use `size`
+   (reserved), so slots stack contiguously and stay disjoint independent of
+   slop. The reserved-vs-valid audit (3.1a) applies with `size` for placement
+   and the valid sub-window for access.
+
+The public contract is NOT narrowed to page-aligned offsets: `valid_offset`
+carries the arbitrary intra-page slop, so any file offset is supported.
+
+## 4a. A vs B: decision record (resolved)
+
+Both are functionally correct (the probe proved A's non-aligned base works). The
+decision is a robustness trade-off and is now RESOLVED in favour of B:
+
+- A (base = addr): cleaner metadata, single upper-bound tighten, but the
+  reserved tail can exceed the mapping (3.2) so a missed guard path is an
+  UNMAPPED access (host SIGBUS / OOB).
 - B (base = map_base): reserved == map_len always fits the mapping, so a missed
-  guard path degrades to an in-mapping over-read. Cost: a two-sided guard
-  (raise the lower bound by slop) and slop-carrying metadata.
+  guard path degrades to an in-mapping over-read (data overexposure, no crash).
+  Cost: a two-sided guard and slop-carrying metadata, which WAMR's existing
+  both-sides bound check absorbs for free (section 0).
 
-Recommendation: proceed with A (as preferred), CONTINGENT on (i) all four
-access sites in 3.1a switched to `valid_size`, (ii) the mandatory boundary +
-arch test matrix green, and (iii) a hard `assert(valid_size <= size)` plus a
-release-time check. If the implementation cannot make the path audit
-exhaustive with confidence, fall back to B, whose failure mode is strictly
-milder. This is the one open design choice for the reviewer; everything else is
-determined.
+DECISION: B, for defense in depth in a hardened runtime. A missed or
+future-added access path must not be able to crash the host; under B it cannot.
+See section 0 for the selected parameterisation and section 4.1 for the WAMR
+changes.
 
 ## 5. AOT format version and code generation
 
@@ -375,25 +458,30 @@ instruction or struct offset. (Interpreter proven here directly; the AOT
 equivalent is to be re-confirmed with `wamrc` when patch 0004 is prototyped,
 since `wamrc` is not built in this environment.)
 
-Residual for implementation: the reserved-past-mapping obligation (section 3.2)
-still holds -- with base = addr and a page-rounded reserved size, the reserved
-tail can extend past the live mmap, so the guard (not merely the reservation)
-is what guarantees no SIGBUS; the probe's P3 accesses stayed within the mapping
-by construction and the EOF-tail case (section 6) must be exercised explicitly
-in the 0004 test matrix.
+BEARING ON THE SELECTED DESIGN (B): the probe validated the WAMR mechanism the
+guard rides on (create/attach at a non-aligned base; per-heap-derived bound
+enforced by the fast path). Under B this mechanism is used with `base_addr =
+map_base` and the two cache bounds raised/lowered per section 4.1; because
+`reserved_size = map_len`, the reserved-past-mapping obligation of A does NOT
+apply to B (no unmapped tail). The probe's P1 finding (non-aligned base works)
+is what made A even plausible; B does not depend on it (its base is page-aligned)
+but inherits the same "bound is a re-derived per-heap value, not a one-shot cache
+poke" conclusion, which is why B's lower+upper bounds must be set in
+`update_last_used_shared_heap`, not written once. AOT re-confirmation with
+`wamrc` remains a build-and-run check of already-emitted code.
 
 ## 9. Sequencing
 
-1. This note reviewed.
-2. Throwaway probe run; section 8 filled; assumptions confirmed or the design
-   revised.
-3. Patch 0004 implemented into `build/wamr-patched` (vendor stays immutable),
-   carried by `scripts/wamr_apply_patches.sh` with a SHA, documented in
-   `docs/wamr_patches.md`, with the full section-6 matrix and a WAMR-instrumented
-   TSan/ASan pass.
+1. This note reviewed; Design B selected (section 0). DONE.
+2. Throwaway probe run; section 8 filled; WAMR mechanism confirmed. DONE.
+3. Patch 0004 (Design B) implemented into `build/wamr-patched` (vendor stays
+   immutable), carried by `scripts/wamr_apply_patches.sh` with a SHA, documented
+   in `docs/wamr_patches.md`, with the full section-6 matrix (interpreter + AOT,
+   HW + SW bounds, scalar + SIMD + bulk, arm64 + Linux x86_64, prefix + suffix,
+   EOF-tail, multi-span, host-survival) and a WAMR-instrumented TSan/ASan pass.
 4. Patch 0004 reviewed and merged.
-5. Rebase checkpoint 2 (#309) onto it: pass `addr` + `valid_size` from the span
-   layer, drop any reliance on `map_base`/`map_len` for guest exposure, add the
+5. Rebase checkpoint 2 (#309) onto it: pass `map_base` + `valid_offset` (= slop)
+   + `valid_size` (= len) from the span layer per section 0, add the
    unaligned-offset / out-of-window exposure tests, AND fix the destroy-failure
-   borrow-retention plus the missing lifecycle tests. No temporary aligned-offset
+   borrow-retention plus the missing lifecycle tests. No aligned-offset
    restriction is introduced at any point.
