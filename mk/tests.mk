@@ -181,10 +181,11 @@ $(BUILDDIR)/gen_ro_heap_aot.h: $(TESTDIR)/hull/fixtures/ro_heap.wasm | $(BUILDDI
 $(BUILDDIR)/test_wasm_readonly_heap: INCLUDES += -I$(BUILDDIR)
 $(BUILDDIR)/test_wasm_readonly_heap: $(BUILDDIR)/gen_ro_heap_aot.h
 
-# Guarded-subrange shared-heap test (WAMR patch 0004). Two build-generated AOT
-# fixtures from the same .wasm: SW-bound (--bounds-checks=1) and HW-bound
-# (--bounds-checks=0), so the matrix runs on interp + AOT-SW + AOT-HW. Both skip
-# (empty fixture) when wamrc is absent; the interpreter case always runs.
+# Guarded-subrange shared-heap test (WAMR patch 0004). A build-generated
+# SW-bound (--bounds-checks=1) AOT fixture from the .wasm, so the matrix runs on
+# interp + AOT-SW. Skips (empty fixture) when wamrc is absent; the interpreter
+# case always runs. HW-bound OOB-to-trap needs the full runtime (e2e-compute);
+# the guard is bound-mode-independent, so SW-bound proves it deterministically.
 define GEN_GSUB_AOT
 	@w="$(BUILDDIR)/wamrc"; [ -x "$$w" ] || w="$(BUILDDIR)/wamrc-build/wamrc"; \
 	if [ -x "$$w" ] && "$$w" --opt-level=3 $(2) --enable-shared-heap \
@@ -199,10 +200,8 @@ define GEN_GSUB_AOT
 endef
 $(BUILDDIR)/gen_gsub_aot_sw.h: $(TESTDIR)/hull/fixtures/gsub.wasm | $(BUILDDIR)
 	$(call GEN_GSUB_AOT,$@,--bounds-checks=1,gsub_aot_sw)
-$(BUILDDIR)/gen_gsub_aot_hw.h: $(TESTDIR)/hull/fixtures/gsub.wasm | $(BUILDDIR)
-	$(call GEN_GSUB_AOT,$@,--bounds-checks=0,gsub_aot_hw)
 $(BUILDDIR)/test_wasm_guarded_subrange: INCLUDES += -I$(BUILDDIR)
-$(BUILDDIR)/test_wasm_guarded_subrange: $(BUILDDIR)/gen_gsub_aot_sw.h $(BUILDDIR)/gen_gsub_aot_hw.h
+$(BUILDDIR)/test_wasm_guarded_subrange: $(BUILDDIR)/gen_gsub_aot_sw.h
 
 # Top-level tests (tests/hull/)
 $(BUILDDIR)/test_parse_size: $(TESTDIR)/hull/test_parse_size.c $(TEST_COMMON_DEPS) | $(BUILDDIR)
