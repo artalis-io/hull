@@ -713,6 +713,30 @@ jobs:
         timeout-minutes: 15
         run: make CC=clang tsan
 
+  # WAMR patch 0003 is race-sensitive (shared_heap_list + attached_count under
+  # shared_heap_list_lock). The worker-pool TSan job above leaves WAMR
+  # uninstrumented, so this dedicated job builds the staged WAMR TUs WITH
+  # ThreadSanitizer (WAMR_TSAN=1) and runs the 8-case shared-heap-destroy matrix,
+  # so a race inside the destroy/attach/detach lifecycle is caught in CI, not
+  # only locally. Isolated from the worker-pool job so instrumenting WAMR does
+  # not perturb that signal.
+  tsan-shared-heap:
+    name: TSan (WAMR shared-heap destroy)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          submodules: true
+
+      - name: Install clang
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang
+
+      - name: WAMR-instrumented TSan destroy matrix (8 cases)
+        timeout-minutes: 20
+        run: make CC=clang tsan-shared-heap
+
   fuzz:
     name: Fuzz Testing
     runs-on: ubuntu-24.04

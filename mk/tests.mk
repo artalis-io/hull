@@ -528,6 +528,25 @@ tsan:
 		TSAN_OPTIONS="halt_on_error=1" $(BUILDDIR)/$$t || exit 1; \
 	done
 
+# ── TSan with the staged WAMR instrumented (WAMR patch 0003) ─────────
+# The `tsan` target above leaves vendored WAMR uninstrumented, so a race INSIDE
+# a WAMR patch is invisible to it. This target adds WAMR_TSAN=1 so the staged
+# WAMR TUs (incl. wasm_memory.c: shared_heap_list + attached_count) are
+# ThreadSanitizer-instrumented, then runs the 8-case shared-heap-destroy matrix
+# (double-destroy / attach-vs-destroy / chain-unchain-vs-destroy / churn races).
+# Kept SEPARATE from `tsan` so instrumenting WAMR does not change the worker-pool
+# job's signal. Fails on any TSan report (halt_on_error=1) and asserts WAMR was
+# actually instrumented (guards against a silent no-coverage run).
+.PHONY: tsan-shared-heap
+tsan-shared-heap:
+	$(MAKE) clean
+	$(MAKE) TSAN=1 WAMR_TSAN=1 $(BUILDDIR)/test_wasm_shared_heap_destroy
+	@nm $(BUILDDIR)/wamr_core/iwasm/common/wasm_memory.o 2>/dev/null | grep -q '__tsan' \
+		|| { echo "FAIL: wasm_memory.o is NOT TSan-instrumented (WAMR_TSAN not applied)"; exit 1; }
+	@echo "── TSan (WAMR-instrumented): shared-heap destroy 8-case matrix ──"
+	TSAN_OPTIONS="halt_on_error=1 second_deadlock_stack=1" \
+		$(BUILDDIR)/test_wasm_shared_heap_destroy
+
 # ── Fuzzing (libFuzzer + ASan/UBSan) ────────────────────────────────
 # Mirrors vendor/keel/fuzz. Requires clang with the libFuzzer runtime.
 #   Linux: make fuzz CC=clang
