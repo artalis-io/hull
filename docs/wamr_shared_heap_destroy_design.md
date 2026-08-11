@@ -190,6 +190,19 @@ negligible for segments (startup) and bounded for spans (the list stays small
 because destroy reclaims). Valid heaps are always members, so behavior for every
 existing caller is unchanged.
 
+**Implementation note (no recursive lock).** `attach_internal` today takes
+`shared_heap_list_lock` a SECOND time, inside the body, only around
+`attached_count++` (`wasm_memory.c:623-625`). `shared_heap_list_lock` is a plain
+non-recursive `korp_mutex`, so the patch must **subsume** that inner
+lock/unlock into the single top-level critical section (take the lock once at the
+top through `attached_count++` at the bottom), not nest a second acquire - nesting
+would self-deadlock. The body between (overlap check via `wasm_get_default_memory`,
+`e->shared_heap` set, `update_last_used_shared_heap`) touches only instance-local
+`e->` fields and takes no other lock, so widening the critical section introduces
+no new lock-ordering edge. `detach` needs no such change: it is not gated on
+membership (an already-detached instance is a no-op) and keeps its existing
+single lock around `attached_count--`.
+
 ## 4. Exact return / error behavior (every failure is total: false, no free, no mutation)
 
 The API returns `bool` (`true` only when a descriptor was actually unlinked and
