@@ -331,7 +331,7 @@ jobs:
   # builds + runs the C-API test with a real wamrc-emitted .aot fixture and FAILS
   # if the AOT sub-case is SKIPPED. That closes the "AOT is dormant in CI" gap.
   wasm-readonly-heap-aot:
-    name: Read-only shared-heap AOT C-API test
+    name: WAMR AOT C-API tests (readonly + guarded, x86_64)
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
@@ -368,6 +368,74 @@ jobs:
           grep -qE 'OK[^A-Za-z].*wasm_readonly_heap\.aot' ro_heap.log \
             || { echo "::error::AOT C-API case did not run to OK"; exit 1; }
           echo "AOT read-only-heap C-API case ran against a real wamrc .aot and passed."
+
+      - name: Build + run the guarded-subrange AOT cases (must NOT skip)
+        timeout-minutes: 6
+        run: |
+          # patch 0004: regenerate the SW- and HW-bound AOT fixtures now that
+          # wamrc exists, then run the guarded matrix. FAIL if either AOT case
+          # takes the wamrc-unavailable skip path (closes "AOT dormant in CI").
+          rm -f build/gen_gsub_aot_sw.h build/gen_gsub_aot_hw.h
+          make build/test_wasm_guarded_subrange
+          set -o pipefail
+          ./build/test_wasm_guarded_subrange 2>&1 | tee gsub.log
+          rc=${PIPESTATUS[0]}
+          [ "$rc" -eq 0 ] || { echo "::error::test_wasm_guarded_subrange failed (rc=$rc)"; exit "$rc"; }
+          for c in aot_sw_bounds aot_hw_bounds; do
+            if grep -qE "SKIPPED.*wasm_guarded\.$c" gsub.log; then
+              echo "::error::guarded AOT case $c took the wamrc-unavailable skip path"; exit 1
+            fi
+            grep -qE "OK[^A-Za-z].*wasm_guarded\.$c" gsub.log \
+              || { echo "::error::guarded AOT case $c did not run to OK"; exit 1; }
+          done
+          echo "guarded-subrange AOT cases (SW + HW bound) ran against real wamrc .aot and passed."
+
+  # patch 0004 arm64 AOT gate. The x86_64 job above proves the guarded-subrange
+  # AOT path on x86_64; this runs the same non-skipped AOT matrix on arm64, where
+  # WAMR sets the emitted load/store alignment to the WASM hint and a span whose
+  # data starts at a non-N-aligned FILE offset yields a native-misaligned access.
+  # arm64 tolerates that in hardware, but the design mandates confirming it on the
+  # shipped arch rather than assuming it. Interp coverage on arm64 comes from the
+  # aarch64 build job's `make test`; this closes the arm64 AOT leg.
+  wasm-guarded-aot-arm64:
+    name: Guarded-subrange AOT C-API test (arm64)
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          submodules: true
+
+      - name: Install LLVM + cmake
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y llvm-18-dev cmake
+
+      - name: Build wamrc (applies the WAMR patch carriage)
+        timeout-minutes: 12
+        run: |
+          if command -v llvm-config-18 >/dev/null 2>&1; then
+            llvm_cmakedir=$(llvm-config-18 --cmakedir)
+            export WAMRC_CMAKE_FLAGS="-DLLVM_DIR=${llvm_cmakedir}"
+          fi
+          make wamrc
+
+      - name: Build + run the guarded-subrange AOT cases (arm64, must NOT skip)
+        timeout-minutes: 6
+        run: |
+          rm -f build/gen_gsub_aot_sw.h build/gen_gsub_aot_hw.h
+          make build/test_wasm_guarded_subrange
+          set -o pipefail
+          ./build/test_wasm_guarded_subrange 2>&1 | tee gsub.log
+          rc=${PIPESTATUS[0]}
+          [ "$rc" -eq 0 ] || { echo "::error::test_wasm_guarded_subrange failed (rc=$rc)"; exit "$rc"; }
+          for c in aot_sw_bounds aot_hw_bounds; do
+            if grep -qE "SKIPPED.*wasm_guarded\.$c" gsub.log; then
+              echo "::error::guarded AOT case $c took the wamrc-unavailable skip path"; exit 1
+            fi
+            grep -qE "OK[^A-Za-z].*wasm_guarded\.$c" gsub.log \
+              || { echo "::error::guarded AOT case $c did not run to OK"; exit 1; }
+          done
+          echo "arm64 guarded-subrange AOT cases (SW + HW bound) ran against real wamrc .aot and passed."
 
   # Reproducibility gate. Three properties tested independently on
   # both Linux and macOS via matrix strategy:
