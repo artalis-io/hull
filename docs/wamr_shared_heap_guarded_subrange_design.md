@@ -82,9 +82,22 @@ no prefix is ever addressable.
    For every existing (non-span) heap `valid_size == size`, so behavior is
    unchanged unless a caller sets it.
 
-2. `SharedHeapInitArgs` gains an optional `uint64 valid_size` (0 => "= size",
-   preserving the current API for all existing callers). `create` stores it,
-   clamped to `size`.
+2. `SharedHeapInitArgs` gains an optional `uint64 valid_size`. Semantics and
+   validation, enforced in `create` (all fail closed):
+   - `valid_size == 0` means "= size" (FULL heap). This is the ONLY back-compat
+     path: every existing caller zero-initialises the args struct, so a zero
+     field must preserve full-heap access byte for byte. An intentionally EMPTY
+     span is never expressed as `valid_size == 0`; Hull's `hl_wasm_span_set_add`
+     rejects a `len == 0` window BEFORE create, so 0 always and only means full.
+   - reject `valid_size > size` (a window can never exceed its reserved range).
+   - overflow-free by construction: `start_off = ADDR_CEIL - size + 1` and
+     `end_off = start_off - 1 + valid_size`; with `valid_size <= size <=
+     APP_HEAP_SIZE_MAX (1 GiB)` the sum is `<= ADDR_CEIL`, no wrap on mem32 or
+     mem64.
+   - a sub-full `valid_size < size` is permitted ONLY on a PRE-ALLOCATED heap
+     (`pre_allocated_addr != NULL`, `heap_handle == NULL`). A runtime-managed
+     heap (`heap_handle != NULL`) allocates across its whole range, so `create`
+     forces `valid_size = size` for it; the two are mutually exclusive.
 
 3. The per-instance cache builder `update_last_used_shared_heap`
    (wasm_memory.c:507-537, both INTERP and AOT arms) computes the fast-path
@@ -110,6 +123,32 @@ no prefix is ever addressable.
    the zeroed length off `valid_size` too, but Hull never calls reset on a
    read-only span (it would fault), so this is defensive only.
 
+### 3.1a Reserved vs valid: complete audit of every start_off / size use
+
+Placement and overlap MUST use the page-rounded reserved `size`; guest access
+checks and the per-instance cache MUST use `valid_size`. Reusing one bound for
+both would let a later heap's slot be computed from a shortened range and
+overlap the prior heap's reserved suffix. Audited against `wasm_memory.c`:
+
+| Site | Purpose | Uses |
+|------|---------|------|
+| `:255-256` start_off = CEIL - size + 1 | PLACEMENT (heap's high-address slot) | `size` |
+| `:344-345` chain: head.start_off = body.start_off - head.size | PLACEMENT (stacks slots contiguously; disjoint by construction) | `size` |
+| `:371-372` reset re-derives start_off | PLACEMENT | `size` |
+| `:175-220` runtime-managed mmap/munmap | PLACEMENT (runtime-owned only; N/A to spans) | `size` |
+| `:507-535` update_last_used -> end_off | ACCESS (interp + AOT fast-path cache) | -> `valid_size` |
+| `:729` is_app_addr_in_shared_heap chain-hit | ACCESS (which heap owns app_off; suffix gap must match NONE) | -> `valid_size` |
+| `:765` is_native_addr_in_shared_heap | ACCESS (host native-pointer validation) | -> `valid_size` |
+| `:409` reset memset length | WRITE (defensive; never hit for RO spans) | -> `valid_size` |
+
+Because chaining stacks slots by `size` (`:344-345`), slots are contiguous with
+NO inter-slot gap; the only gap is the within-slot suffix `[start_off +
+valid_size, start_off + size)`. With `:729` switched to `valid_size`, an
+app_offset in that suffix matches no heap in the chain walk and traps. Slot
+placement is independent of `slop` (slop feeds only `base_addr`, never
+`start_off`/`size`), so multiple spans with different slop have disjoint
+reserved slots and independent valid bounds (point 7, confirmed).
+
 ### 3.2 The reserved-past-mapping proof obligation
 
 With `base_addr = addr` and `reserved_size = round_up(len, page)`, the RESERVED
@@ -131,11 +170,39 @@ reserved_size)`:
   `heap_handle == NULL`, `shared_heap_malloc/free` bail out; `reset` is never
   called by Hull. The reserved suffix is address arithmetic only.
 
-The span layer MUST additionally assert, before create, that the mapping
-contains at least `round_up(valid_len, page)` bytes reachable from `addr`
-without faulting UP TO `addr + valid_len` (guaranteed by the inequality above);
-the reserved tail beyond `valid_len` is never dereferenced. The design note for
-the Hull side records this invariant; the WAMR guard enforces it for the guest.
+CORRECTION (review round 2). The provable invariant is the WEAKER one on the
+ACCESSIBLE range, not the reserved range:
+
+    [addr, addr + valid_len) is contained in [map_base, map_base + map_len)
+    proof: addr + valid_len = map_base + slop + len
+                           <= map_base + round_up(slop + len, page)
+                            = map_base + map_len       (since slop + len <= map_len)
+    holds for EVERY slop in [0, page) and every len >= 1.
+
+The STRONGER claim "[addr, addr + round_up(valid_len, page)) is within the
+mapping" is FALSE. Counterexample: `slop = page-1, len = 1`. Then
+`round_up(len, page) = page`, `addr + round_up(len,page) = map_base + (page-1) +
+page = map_base + 2*page - 1`, but `map_len = round_up(page-1+1, page) = page`,
+so the reserved range ends `page - 1` bytes PAST the mapping. So design A's
+RESERVED range can exceed the live mmap and CANNOT be proven within it; only the
+VALID range is provably within it.
+
+Safety therefore rests on the GUARD, not on the reservation fitting: the guest
+cannot reach `[addr + valid_len, addr + reserved_size)` (end_off = valid), and
+WAMR never dereferences a pre-allocated heap's bytes (`heap_handle == NULL` ->
+malloc/free bail; reset never called). This is a real design-A property, not a
+gap, but it means EVERY access path must use `valid_size` (3.1a): a single path
+left on `size` would let the guest reach the reserved tail, which may be
+UNMAPPED (SIGBUS) rather than merely adjacent-in-file. Design B has no such tail
+(reserved = map_len, always fits), so a missed guard path there degrades to an
+in-mapping over-read, never an unmapped access. This asymmetry is the core A-vs-B
+trade-off (see section 4a).
+
+Boundary tests (mandatory for 0004): slop in {0, 1, page/2, page-1} crossed with
+len in {1, page-1, page, page+1, 2*page-1}; for each assert the last valid byte
+(`start_off + valid_len - 1`) reads, the first suffix byte (`start_off +
+valid_len`) traps, a multi-byte / v128 access straddling the boundary traps, and
+no access (permitted or trapped) raises SIGBUS, including an EOF-tail window.
 
 ## 4. Design B (fallback): base = map_base, two-sided sub-window
 
@@ -159,23 +226,73 @@ one-sided tighten; B is the safety net.
 Do NOT narrow the public contract to page-aligned offsets unless BOTH A and B
 prove infeasible.
 
-## 5. AOT format version
+## 4a. A vs B: recommendation (review round 2)
 
-Likely NOT required. The AOT fast path loads `shared_heap_end_off` from
-`AOTModuleInstanceExtra` at runtime (static-asserted offset 24,
-`aot_runtime.c:63`); it is not a compile-time constant baked into the AOT text.
-Lowering the stored value changes no emitted instruction and no struct offset.
-A version bump (7 -> 8) is needed ONLY if implementation forces either:
+Both are functionally correct; the probe proved A viable (non-aligned base
+works). The decision is a robustness trade-off:
 
-- a new field inserted BEFORE `shared_heap_end_off` in `AOTModuleInstanceExtra`
-  (breaks the offset-24 static assert and the AOT ABI), or
-- a change to the emitted bound-check shape.
+- A (base = addr): cleaner metadata (guest base == logical offset), single
+  upper-bound tighten, ONE new field. But the reserved tail can exceed the
+  mapping (3.2), so a missed guard path is an UNMAPPED access (SIGBUS / OOB).
+- B (base = map_base): reserved == map_len always fits the mapping, so a missed
+  guard path degrades to an in-mapping over-read. Cost: a two-sided guard
+  (raise the lower bound by slop) and slop-carrying metadata.
 
-The design keeps `valid_size` on the host-side `WASMSharedHeap` (not the AOT
-ABI struct) and reuses the existing `end_off` field, so neither trigger fires.
-The probe (section 7) must confirm this empirically on an AOT module before we
-commit to "no bump"; if the probe shows an AOT path that reads `size`
-independently of the cached `end_off`, the note is revised and the bump taken.
+Recommendation: proceed with A (as preferred), CONTINGENT on (i) all four
+access sites in 3.1a switched to `valid_size`, (ii) the mandatory boundary +
+arch test matrix green, and (iii) a hard `assert(valid_size <= size)` plus a
+release-time check. If the implementation cannot make the path audit
+exhaustive with confidence, fall back to B, whose failure mode is strictly
+milder. This is the one open design choice for the reviewer; everything else is
+determined.
+
+## 5. AOT format version and code generation
+
+DECISION: NOT required. This is settled on generated code + layout, not the
+interpreter probe. Evidence in the AOT compiler and runtime:
+
+- The AOT emits the shared-heap bound check by passing `func_ctx->
+  shared_heap_end_off` (a value LOADED from `AOTModuleInstanceExtra` at run
+  time, `aot_emit_memory.c:191`) to `wasm_runtime_check_and_update_last_used_
+  shared_heap` / the inline compare. The reserved `size` is NEVER emitted as an
+  immediate; the bound is a runtime field read.
+- That field sits at the static-asserted offset 24 in `AOTModuleInstanceExtra`
+  (`aot_runtime.c:63`), with `start_off` at 16 and `base_addr_adj` at 8. Patch
+  0004 adds `valid_size` to the HOST `WASMSharedHeap` (runtime state, not the
+  AOT ABI struct) and changes only the VALUE written to the existing `end_off`
+  field via `update_last_used_shared_heap`. No field is inserted, no offset
+  moves, no emitted instruction changes.
+
+Therefore the AOT format version is unaffected. A bump (7 -> 8) becomes
+necessary ONLY if the implementation deviates by adding a field to
+`AOTModuleInstanceExtra` or altering the emitted check shape; the design forbids
+both. AOT re-confirmation with `wamrc` (not built in the probe environment) is a
+build-and-run check of the SAME already-emitted code, expected to match the
+interpreter, not a version question.
+
+### 5.1 HW-bound vs SW-bound, and unaligned native bases under AOT
+
+- HW/SW modes: the AOT emits the shared-heap software check under
+  `if (comp_ctx->enable_shared_heap)` (`aot_emit_memory.c:247, 323`),
+  INDEPENDENT of the linear-memory bounds mode. The shared heap lives in the
+  high address range OUTSIDE the linear-memory guard-page region, so it is
+  always software-checked; the `valid_size` guard therefore applies in BOTH
+  HW-bound and SW-bound builds. (A guest that reaches a shared-heap address in
+  HW-bound mode still runs the emitted software compare against `end_off`.)
+- Unaligned native base under AOT: WAMR sets the LLVM load/store alignment to
+  the WASM instruction's declared alignment hint, `LLVMSetAlignment(1 << align)`
+  (`aot_emit_memory.c:971, 986`). A span whose logical data starts at a non-N-
+  aligned FILE offset produces a native address whose low bits equal `slop mod
+  N` for an N-aligned WASM access. This is the SAME situation WAMR already
+  handles for unaligned linear-memory accesses (the align field is a hint, not
+  a guarantee; x86_64 and arm64 tolerate misaligned scalar loads/stores;
+  strict-alignment targets take the runtime `check_memory_alignment` path). It
+  is IDENTICAL under designs A and B, because the misalignment comes from the
+  file offset (`slop`), not from the choice of base. Conclusion: not a new
+  hazard and not a fix; it is a MUST-TEST on AOT for BOTH arm64 and Linux
+  x86_64 with odd/2-mod/`page-1` slop and scalar + v128 accesses, to confirm the
+  shipped targets behave as expected. Unaligned WASM accesses must remain valid
+  (they are legal by spec).
 
 ## 6. Test matrix (patch 0004)
 
@@ -191,14 +308,21 @@ SIMD (v128) / bulk (memory.copy, memory.fill):
 - Zero-length bulk (memory.copy / fill with len 0) at the boundary: defined
   no-op, no trap.
 - memory.copy with SOURCE crossing and DESTINATION crossing the valid_len
-  boundary independently.
+  boundary independently; memory.init with a shared-heap DESTINATION crossing
+  the boundary (writes are separately blocked on RO spans by patch 0002, but the
+  address bound must still be valid-based). memory.fill likewise.
 - EOF-tail mapping (window ends mid-page at end of file): reads within
   valid_len succeed with no SIGBUS; the guard blocks the past-EOF page.
-- Multiple spans with DIFFERENT slop values chained on one instance: each
-  guarded independently.
+- Multiple spans with DIFFERENT slop values chained on one instance: disjoint
+  reserved slots (placement by size) with independent valid bounds; an address
+  in one span's suffix gap traps, does not spill into the neighbor.
+- AOT on BOTH arm64 and Linux x86_64 (not only fast-interp): the full matrix
+  above, to confirm the runtime-field `end_off` guard and the unaligned-base
+  behavior on the shipped targets.
 - Host survival: `is_native_addr_in_shared_heap` / string APIs respect
   valid_size. Writable (non-read-only) shared-heap compatibility: valid_size
-  defaulting to size leaves existing writable heaps byte-for-byte unchanged.
+  defaulting to size (and forced = size on runtime-managed heaps) leaves every
+  existing writable / dynamic shared heap byte-for-byte unchanged.
 
 ## 7. Throwaway probe (before production code)
 
