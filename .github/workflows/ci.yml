@@ -375,20 +375,20 @@ jobs:
           # patch 0004: regenerate the SW- and HW-bound AOT fixtures now that
           # wamrc exists, then run the guarded matrix. FAIL if either AOT case
           # takes the wamrc-unavailable skip path (closes "AOT dormant in CI").
-          rm -f build/gen_gsub_aot_sw.h build/gen_gsub_aot_hw.h
+          rm -f build/gen_gsub_aot_sw.h
           make build/test_wasm_guarded_subrange
           set -o pipefail
           ./build/test_wasm_guarded_subrange 2>&1 | tee gsub.log
           rc=${PIPESTATUS[0]}
           [ "$rc" -eq 0 ] || { echo "::error::test_wasm_guarded_subrange failed (rc=$rc)"; exit "$rc"; }
-          for c in aot_sw_bounds aot_hw_bounds; do
+          for c in aot_sw_bounds; do
             if grep -qE "SKIPPED.*wasm_guarded\.$c" gsub.log; then
               echo "::error::guarded AOT case $c took the wamrc-unavailable skip path"; exit 1
             fi
             grep -qE "OK[^A-Za-z].*wasm_guarded\.$c" gsub.log \
               || { echo "::error::guarded AOT case $c did not run to OK"; exit 1; }
           done
-          echo "guarded-subrange AOT cases (SW + HW bound) ran against real wamrc .aot and passed."
+          echo "guarded-subrange AOT case (SW-bound) ran against a real wamrc .aot and passed."
 
   # patch 0004 arm64 AOT gate. The x86_64 job above proves the guarded-subrange
   # AOT path on x86_64; this runs the same non-skipped AOT matrix on arm64, where
@@ -422,20 +422,20 @@ jobs:
       - name: Build + run the guarded-subrange AOT cases (arm64, must NOT skip)
         timeout-minutes: 6
         run: |
-          rm -f build/gen_gsub_aot_sw.h build/gen_gsub_aot_hw.h
+          rm -f build/gen_gsub_aot_sw.h
           make build/test_wasm_guarded_subrange
           set -o pipefail
           ./build/test_wasm_guarded_subrange 2>&1 | tee gsub.log
           rc=${PIPESTATUS[0]}
           [ "$rc" -eq 0 ] || { echo "::error::test_wasm_guarded_subrange failed (rc=$rc)"; exit "$rc"; }
-          for c in aot_sw_bounds aot_hw_bounds; do
+          for c in aot_sw_bounds; do
             if grep -qE "SKIPPED.*wasm_guarded\.$c" gsub.log; then
               echo "::error::guarded AOT case $c took the wamrc-unavailable skip path"; exit 1
             fi
             grep -qE "OK[^A-Za-z].*wasm_guarded\.$c" gsub.log \
               || { echo "::error::guarded AOT case $c did not run to OK"; exit 1; }
           done
-          echo "arm64 guarded-subrange AOT cases (SW + HW bound) ran against real wamrc .aot and passed."
+          echo "arm64 guarded-subrange AOT case (SW-bound) ran against a real wamrc .aot and passed."
 
   # Reproducibility gate. Three properties tested independently on
   # both Linux and macOS via matrix strategy:

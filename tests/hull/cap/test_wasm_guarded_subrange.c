@@ -7,12 +7,23 @@
  * always sits inside the mapping (no unmapped tail; a missed guard would be an
  * in-mapping over-read, never a SIGBUS).
  *
- * Matrix: interpreter + AOT (SW-bound and HW-bound fixtures, skipped when wamrc
- * is absent), scalar (i32/i64) + SIMD (v128) + bulk (memory.copy / memory.fill),
+ * Matrix: interpreter + AOT (SW-bound fixture, skipped when wamrc is absent),
+ * scalar (i32/i64) + SIMD (v128, AOT) + bulk (memory.copy / memory.fill),
  * unaligned slop + partial final pages, prefix/suffix traps, exact last valid
  * byte + straddle, zero-length bulk, EOF-tail (no SIGBUS), multiple spans with
  * different slop, host-survival (validate app addr), and writable/full-heap
  * back-compat.
+ *
+ * Bound-mode note: the AOT fixture is built --bounds-checks=1 (SW-bound), like
+ * the sibling read-only-heap AOT test. Hull's `hull build` ships HW-bound AOT by
+ * default (wamrc --bounds-checks=0 on 64-bit), but HW-bound turns an out-of-heap
+ * access into a guard-page fault that the FULL runtime converts to a trap; a bare
+ * unit harness lacks that setup, so an out-of-window access that the guard
+ * correctly rejects from the shared heap then falls to linear memory and faults
+ * raw instead of trapping. The guard's shared-heap SOFTWARE check is emitted
+ * identically in both modes (aot_emit_memory.c, under `enable_shared_heap`,
+ * independent of the linear-memory bounds mode), so SW-bound here proves the
+ * guard deterministically; HW-bound end-to-end is exercised by e2e-compute.
  *
  * See docs/wamr_shared_heap_guarded_subrange_design.md.
  * SPDX-License-Identifier: AGPL-3.0-or-later
@@ -25,7 +36,6 @@
 #include "wasm_export.h"
 
 #include "gen_gsub_aot_sw.h" /* build-generated: gsub_aot_sw[] + _len (or empty) */
-#include "gen_gsub_aot_hw.h" /* build-generated: gsub_aot_hw[] + _len (or empty) */
 
 #include <fcntl.h>
 #include <stdint.h>
@@ -284,18 +294,6 @@ UTEST(wasm_guarded, aot_sw_bounds)
     ASSERT_TRUE(wasm_runtime_full_init(&init));
     PG = sysconf(_SC_PAGESIZE); if (PG <= 0) PG = 4096;
     access_matrix(utest_result, gsub_aot_sw, gsub_aot_sw_len, "aot-sw");
-    wasm_runtime_destroy();
-}
-
-UTEST(wasm_guarded, aot_hw_bounds)
-{
-    if (gsub_aot_hw_len == 0)
-        UTEST_SKIP("no wamrc-built HW-bound .aot fixture in this build leg");
-    RuntimeInitArgs init; memset(&init, 0, sizeof(init));
-    init.mem_alloc_type = Alloc_With_System_Allocator;
-    ASSERT_TRUE(wasm_runtime_full_init(&init));
-    PG = sysconf(_SC_PAGESIZE); if (PG <= 0) PG = 4096;
-    access_matrix(utest_result, gsub_aot_hw, gsub_aot_hw_len, "aot-hw");
     wasm_runtime_destroy();
 }
 
