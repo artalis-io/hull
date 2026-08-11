@@ -16,7 +16,8 @@
 # compute BINDING (mod_compute) moves into libhull_feature-wasm-<rt>.a. The base
 # keeps the wasm_weakstub.c weak defaults (Phase 0) so a compute-less app links.
 FEATURE_WASM_OBJS := $(BUILDDIR)/cap_wasm.o $(BUILDDIR)/cap_wasm_buffer.o \
-                     $(BUILDDIR)/cap_wasm_data.o $(BUILDDIR)/cap_wasm_stream.o
+                     $(BUILDDIR)/cap_wasm_data.o $(BUILDDIR)/cap_wasm_stream.o \
+                     $(BUILDDIR)/cap_wasm_spans.o
 
 # libhull_feature-wasm.a: the runtime-agnostic WASM CORE (docs/wasm_feature.md,
 # Phase 1). Bundles the wasm caps + worker_wasm + the vendored WAMR objects

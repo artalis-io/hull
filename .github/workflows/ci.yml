@@ -388,7 +388,25 @@ jobs:
             grep -qE "OK[^A-Za-z].*wasm_guarded\.$c" gsub.log \
               || { echo "::error::guarded AOT case $c did not run to OK"; exit 1; }
           done
-          echo "guarded-subrange AOT case (SW-bound) ran against a real wamrc .aot and passed."
+          echo " guarded-subrange AOT case (SW-bound) ran against a real wamrc .aot and passed."
+
+      - name: Build + run the mapped-span AOT lifecycle case (must NOT skip)
+        timeout-minutes: 6
+        run: |
+          # checkpoint 2: the span lifecycle + Design B window under a real AOT
+          # instance. FAIL if the AOT case takes the wamrc-unavailable skip path.
+          rm -f build/gen_ro_heap_span_aot.h
+          make build/test_wasm_spans
+          set -o pipefail
+          ./build/test_wasm_spans 2>&1 | tee spans.log
+          rc=${PIPESTATUS[0]}
+          [ "$rc" -eq 0 ] || { echo "::error::test_wasm_spans failed (rc=$rc)"; exit "$rc"; }
+          if grep -qE "SKIPPED.*wasm_spans\\.aot_span_lifecycle" spans.log; then
+            echo "::error::span AOT lifecycle case took the wamrc-unavailable skip path"; exit 1
+          fi
+          grep -qE "OK[^A-Za-z].*wasm_spans\\.aot_span_lifecycle" spans.log \
+            || { echo "::error::span AOT lifecycle case did not run to OK"; exit 1; }
+          echo "mapped-span AOT lifecycle case ran against a real wamrc .aot and passed."
 
   # patch 0004 arm64 AOT gate. The x86_64 job above proves the guarded-subrange
   # AOT path on x86_64; this runs the same non-skipped AOT matrix on arm64, where
@@ -436,6 +454,24 @@ jobs:
               || { echo "::error::guarded AOT case $c did not run to OK"; exit 1; }
           done
           echo "arm64 guarded-subrange AOT case (SW-bound) ran against a real wamrc .aot and passed."
+
+      - name: Build + run the mapped-span AOT lifecycle case (arm64, must NOT skip)
+        timeout-minutes: 6
+        run: |
+          # checkpoint 2: the span lifecycle + Design B window under a real AOT
+          # instance. FAIL if the AOT case takes the wamrc-unavailable skip path.
+          rm -f build/gen_ro_heap_span_aot.h
+          make build/test_wasm_spans
+          set -o pipefail
+          ./build/test_wasm_spans 2>&1 | tee spans.log
+          rc=${PIPESTATUS[0]}
+          [ "$rc" -eq 0 ] || { echo "::error::test_wasm_spans failed (rc=$rc)"; exit "$rc"; }
+          if grep -qE "SKIPPED.*wasm_spans\\.aot_span_lifecycle" spans.log; then
+            echo "::error::span AOT lifecycle case took the wamrc-unavailable skip path"; exit 1
+          fi
+          grep -qE "OK[^A-Za-z].*wasm_spans\\.aot_span_lifecycle" spans.log \
+            || { echo "::error::span AOT lifecycle case did not run to OK"; exit 1; }
+          echo "arm64 mapped-span AOT lifecycle case ran against a real wamrc .aot and passed."
 
   # Reproducibility gate. Three properties tested independently on
   # both Linux and macOS via matrix strategy:
@@ -781,15 +817,17 @@ jobs:
         timeout-minutes: 15
         run: make CC=clang tsan
 
-  # WAMR patch 0003 is race-sensitive (shared_heap_list + attached_count under
-  # shared_heap_list_lock). The worker-pool TSan job above leaves WAMR
+  # The WAMR shared-heap lifecycle is race-sensitive (shared_heap_list +
+  # attached_count under shared_heap_list_lock, patch 0003; the mapped-span
+  # attachment layer built on it). The worker-pool TSan job above leaves WAMR
   # uninstrumented, so this dedicated job builds the staged WAMR TUs WITH
-  # ThreadSanitizer (WAMR_TSAN=1) and runs the 8-case shared-heap-destroy matrix,
-  # so a race inside the destroy/attach/detach lifecycle is caught in CI, not
-  # only locally. Isolated from the worker-pool job so instrumenting WAMR does
-  # not perturb that signal.
+  # ThreadSanitizer (WAMR_TSAN=1) and runs BOTH the shared-heap-destroy matrix and
+  # the mapped-span attachment-lifecycle test, so a race inside destroy / attach /
+  # detach / chain / span-set teardown is caught in CI, not only locally.
+  # Isolated from the worker-pool job so instrumenting WAMR does not perturb that
+  # signal.
   tsan-shared-heap:
-    name: TSan (WAMR shared-heap destroy + guarded subrange)
+    name: TSan (WAMR shared-heap destroy + guarded subrange + spans)
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
@@ -801,7 +839,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y clang
 
-      - name: WAMR-instrumented TSan (destroy matrix + guarded-subrange matrix)
+      - name: WAMR-instrumented TSan (destroy + guarded-subrange + span lifecycle)
         timeout-minutes: 20
         run: make CC=clang tsan-shared-heap
 
