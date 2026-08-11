@@ -133,13 +133,101 @@ int hl_cap_fs_delete(const HlFsConfig *cfg, const char *path,
  * "HlBufferView").
  */
 typedef struct HlMappedBuffer {
-    void         *addr;   /**< mmap'd region. Read-only on the kernel side. */
-    size_t        len;    /**< Mapping length in bytes. */
+    void         *addr;   /**< Start of the caller-visible window. For a whole-file
+                               mmap this equals @ref map_base; for a windowed mmap
+                               it is @ref map_base plus the intra-page slop. */
+    size_t        len;    /**< Caller-visible window length in bytes. */
     int           closed; /**< `1` iff already munmap'd; further `_munmap` is a no-op. */
     HlAllocator  *alloc;  /**< Tracked allocator (NULL = raw malloc). */
     int           borrow_count;  /**< Live zero-copy borrowers (e.g. images). */
     int           pending_free;  /**< close()/gc was deferred while borrowed. */
+    /* Windowing (mapped-spans cut 1). For a whole-file mmap, @ref map_base ==
+     * @ref addr, @ref map_len == @ref len, and @ref foffset == 0. For a windowed
+     * mmap the mmap is page-aligned: @ref map_base / @ref map_len are the actual
+     * `mmap`/`munmap` region (page-aligned base + page-rounded length), while
+     * @ref addr / @ref len are the caller's requested sub-window inside it.
+     * @ref munmap MUST use @ref map_base / @ref map_len, never @ref addr / @ref len. */
+    void         *map_base;  /**< Page-aligned mmap base (the `munmap` address). */
+    size_t        map_len;   /**< Page-rounded mmap length (the `munmap` length). */
+    uint64_t      foffset;   /**< 64-bit logical file offset of the window's first byte. */
 } HlMappedBuffer;
+
+/**
+ * @brief Upper bound on a single windowed mapping's LOGICAL length, in bytes
+ *        (1 GiB).
+ *
+ * `hl_cap_fs_mmap_window` rejects a requested `length` above this. The cap is on
+ * the caller's LOGICAL window length (the `length` argument), NOT on the
+ * page-aligned mapped size: the actual `mmap` region (`map_len`) may exceed this
+ * by up to the intra-page slop plus one page of rounding (`< 2 * page_size`).
+ * Per the mapped-spans design (docs/wasm_mapped_spans_design.md §3.6) the SAME
+ * conservative cap applies on wasm32 and Memory64; the per-invocation TOTAL
+ * across multiple spans is a separate (not-yet-implemented) accounting layer.
+ */
+#define HL_FS_MMAP_MAX_WINDOW_BYTES ((uint64_t)1 << 30)
+
+/**
+ * @brief Pure, filesystem-free geometry for a page-aligned windowed mmap.
+ *
+ * Computes, with fully overflow-safe arithmetic, the `mmap` parameters for a
+ * caller window `[offset, offset+length)` over a file of `file_size` bytes with
+ * the given `page_size` (a power of two). The window is clamped to end-of-file
+ * (a short final window is normal when scanning a large file in fixed windows).
+ * No filesystem access, so overflow / boundary cases near `UINT64_MAX` are
+ * directly unit-testable.
+ *
+ * @param offset        Caller's logical file offset of the window's first byte.
+ * @param length        Caller's requested window length (bytes). Must be > 0.
+ * @param file_size     Total file size in bytes.
+ * @param page_size     System page size (power of two, > 0).
+ * @param out_map_off   Out: page-aligned file offset to pass to `mmap`.
+ * @param out_map_len   Out: page-rounded length to pass to `mmap` / `munmap`.
+ * @param out_slop      Out: `offset - *out_map_off` (0 <= slop < page_size);
+ *                      the caller window begins this many bytes into the mmap.
+ * @param out_eff_len   Out: effective (EOF-clamped) caller window length.
+ * @param err           Out: static reason string on failure; may be NULL.
+ *
+ * @return 0 on success; -1 on any out-of-range / overflow (with `*err` set):
+ *         "bad_page_size", "empty_window", "window_too_large",
+ *         "offset_past_eof", or "align_overflow".
+ */
+int hl_cap_fs_mmap_window_geometry(uint64_t offset, uint64_t length,
+                                   uint64_t file_size, uint64_t page_size,
+                                   uint64_t *out_map_off, uint64_t *out_map_len,
+                                   uint64_t *out_slop, uint64_t *out_eff_len,
+                                   const char **err);
+
+/**
+ * @brief Memory-map a fixed, page-aligned WINDOW of a file for read-only access.
+ *
+ * Like @ref hl_cap_fs_mmap but maps only `[offset, offset+length)` (clamped to
+ * end-of-file). The alignment/overflow math is @ref hl_cap_fs_mmap_window_geometry;
+ * the returned buffer's `addr`/`len` are the caller's window while `map_base`/
+ * `map_len` hold the page-aligned mapping that teardown unmaps. `foffset` carries
+ * the 64-bit logical position so a windowing caller knows where the window sits.
+ *
+ * @param cfg      Filesystem config.
+ * @param path     Relative path; validated.
+ * @param offset   Logical file offset of the window's first byte.
+ * @param length   Requested window length in bytes (> 0, <= @ref
+ *                 HL_FS_MMAP_MAX_WINDOW_BYTES); the effective length is clamped
+ *                 to end-of-file.
+ * @param alloc    Allocator for the wrapper struct. NULL = raw malloc.
+ * @param err_msg  Out-parameter for error description; may be NULL.
+ *
+ * @return Heap-allocated @ref HlMappedBuffer (free via @ref hl_cap_fs_munmap),
+ *         or NULL on failure.
+ *
+ * @note Truncation-after-map is the standard `mmap` limitation, NOT made safe
+ *       here: if the underlying file is truncated (or otherwise shrunk) AFTER the
+ *       window is mapped, touching a mapped page that is now wholly beyond the
+ *       new end-of-file raises `SIGBUS` on access. This is identical to
+ *       @ref hl_cap_fs_mmap and to POSIX `mmap` in general; the EOF clamp only
+ *       bounds the window at map time, it cannot track later size changes.
+ */
+HlMappedBuffer *hl_cap_fs_mmap_window(const HlFsConfig *cfg, const char *path,
+                                      uint64_t offset, uint64_t length,
+                                      HlAllocator *alloc, const char **err_msg);
 
 /**
  * @brief Memory-map a file for read-only access.
