@@ -422,21 +422,33 @@ changes no generated offset -- it is a pure versioned layout change.
 ## Patch series (against the pinned base)
 
 Extracted into `patches/wamr/`. Base commit
-`c3a78cd159e59c86ac4543308bd676ff78d30a93`. Applying 0001 then 0002 to a fresh
-checkout of the base yields a tree byte-identical to the validated staged source
-(proven by `scripts/wamr_apply_patches.sh` reverse-check + changed-file-set
+`c3a78cd159e59c86ac4543308bd676ff78d30a93`. Applying 0001 then 0002 then 0003 to
+a fresh checkout of the base yields a tree byte-identical to the validated staged
+source (proven by `scripts/wamr_apply_patches.sh` reverse-check + changed-file-set
 audit). Deterministic apply/verify + CI dry-run live in that script.
 
 | # | file | bytes | purpose | patch sha-256 |
 |---|------|------:|---------|---------------|
 | 0001 | `0001-tests-unit-wasi-sdk-dir-overridable.patch` | 1528 | TEST-HARNESS ONLY: wrap the hard-coded `set(WASI_SDK_DIR "/opt/wasi-sdk")` in `tests/unit/{custom-section,running-modes,shared-heap}/CMakeLists.txt` with `if(NOT WASI_SDK_DIR)` so a cached/env `WASI_SDK_DIR` overrides it. No test source/fixture/flag/assertion change. | `423beeae0e94454381ce0d805e9985c5cd94e14e511981c629af186676411698` |
 | 0002 | `0002-shared-heap-readonly-permission.patch` | 81832 | Read-only shared-heap permission: metadata (`SharedHeapInitArgs.read_only`, `WASMSharedHeap.read_only`, interp/AOT extra caches), AOT ABI versioning (`AOT_CURRENT_VERSION` 6->7 + deterministic offset 40 + asserts), interpreter enforcement (`wasm_interp_fast.c`), AOT enforcement (`aot_emit_memory.{c,h}`, `aot_llvm.{c,h}`, `simd/simd_load_store.c`, `aot_emit_stringref.c`, `aot_runtime.c` memory.init), the deterministic fixture generator, the `test_readonly.wat` fixture source, and the full trap/matrix tests. | `310706eb6a36ae33756c85997b6599b4855d279e350ba7dae7c5b0353a6c8177` |
+| 0003 | `0003-shared-heap-destroy.patch` | 10293 | Per-heap shared-heap destruction (design: `docs/wamr_shared_heap_destroy_design.md`). Adds `wasm_runtime_destroy_shared_heap` (fail-closed: identity-search before deref, then detached + unchained + pre-allocated under `shared_heap_list_lock`, unlink+free in one critical section), the MANDATORY registration check in `attach_shared_heap_internal` (membership confirmed before any deref/mutation; the former inner `attached_count++` lock is subsumed into the single top-level critical section), the one-line `read_only` reset in `detach_shared_heap_internal`, and a TEST-ONLY `wasm_runtime_shared_heap_count` list-length probe. Two files: `core/iwasm/common/wasm_memory.c`, `core/iwasm/include/wasm_export.h`. Orthogonal to 0002's interp/AOT store-gate sites. | `e8f3362cfef0dccc975c3e687390429f06a0d0c63d73f3959be7a5c36f1f1d2c` |
 
-The two patches are kept SEPARATE so the test-harness portability change (0001)
-and the security change (0002) are independently reviewable. Generated `.wasm`/
-`.aot` fixtures are NOT in the patches (they are produced deterministically at
-build time from `test_readonly.wat` by pinned WABT + wamrc via the CMake wiring /
-`gen_readonly_fixtures.sh`).
+The three patches are kept SEPARATE so the test-harness portability change (0001),
+the read-only enforcement (0002), and the lifecycle/reclamation change (0003) are
+independently reviewable. Generated `.wasm`/`.aot` fixtures are NOT in the patches
+(they are produced deterministically at build time from `test_readonly.wat` by
+pinned WABT + wamrc via the CMake wiring / `gen_readonly_fixtures.sh`).
+
+**Patch 0003 test coverage.** The #307 unit/race/fail-closed matrix is exercised
+by a Hull-tree C-API test, `tests/hull/cap/test_wasm_shared_heap_destroy.c`,
+rather than the WAMR cmake unit harness: it runs directly under Hull's normal /
+ASan+UBSan / MSan / TSan builds (the cmake harness would need a separate
+sanitizer-instrumented build plus the WASI-SDK fixture toolchain), covering
+no-list-growth (via the count probe), the fail-closed matrix, chained head/body
+rejection + destroy-after-unchain, attach-with-a-destroyed-pointer, the detach
+`read_only` reset, concurrent create/destroy churn, and a same-pointer
+double-destroy race. Adding upstream-style WAMR-unit `TEST_F`s is a follow-up if
+0003 is offered upstream.
 
 **Files touched by 0002 (16 WAMR source files + 2 test files + 2 new fixtures):**
 `core/config.h`; `core/iwasm/include/wasm_export.h`;

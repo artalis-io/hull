@@ -255,6 +255,17 @@ WAMR_INC := -I$(WAMR_IWASM)/include
 
 WAMR_CFLAGS += $(DEPFLAGS)
 
+# Opt-in: instrument the vendored WAMR TUs with ThreadSanitizer. OFF by default
+# (the standard `make tsan` / CI TSan job instruments only Hull's TUs; WAMR is
+# left uninstrumented so TSan sees only Hull's worker-pool threading). Set
+# WAMR_TSAN=1 alongside TSAN=1 to also instrument WAMR, so a data race INSIDE a
+# WAMR patch -- e.g. the shared_heap_list + attached_count in patch 0003 -- is
+# actually observable. Assembly invokers (.s) are unaffected. Used to validate
+# the shared-heap-destroy lifecycle; see tests/hull/cap/test_wasm_shared_heap_destroy.c.
+ifeq ($(WAMR_TSAN),1)
+WAMR_CFLAGS += -fsanitize=thread -fno-omit-frame-pointer
+endif
+
 else
 # WASM disabled
 WAMR_OBJS :=

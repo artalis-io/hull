@@ -1,0 +1,234 @@
+diff --git a/core/iwasm/common/wasm_memory.c b/core/iwasm/common/wasm_memory.c
+index 4e42f49..613f588 100644
+--- a/core/iwasm/common/wasm_memory.c
++++ b/core/iwasm/common/wasm_memory.c
+@@ -424,6 +424,98 @@ wasm_runtime_reset_shared_heap_chain(WASMSharedHeap *shared_heap)
+     return true;
+ }
+ 
++/* Hull ext (0003): destroy a single pre-allocated shared heap.
++ *
++ * WAMR is otherwise create-only (create prepends to the process-global
++ * shared_heap_list, reclaimed only at wasm_runtime_destroy). A per-invocation
++ * span lifecycle needs to reclaim heaps, so this frees ONE descriptor, fail-
++ * closed, under shared_heap_list_lock, proving in a single pass that the pointer
++ * is (a) a live registered node -- by pointer identity, BEFORE dereferencing any
++ * field, so a double-destroy never touches freed memory -- and (b) detached
++ * (attached_count == 0) and (c) not part of any chain (no OUTGOING chain_next and
++ * no INCOMING chain_next from any node: attached_count is head-only, so the
++ * incoming-edge scan is what proves a body heap is unreferenced). Only WAMR's
++ * descriptor is freed; a pre-allocated backing buffer is the caller's and is left
++ * untouched. Runtime-managed heaps (heap_handle != NULL) are out of scope. */
++bool
++wasm_runtime_destroy_shared_heap(WASMSharedHeap *heap)
++{
++    WASMSharedHeap *cur, *pred = NULL;
++    bool found = false, has_incoming = false;
++
++    if (!heap)
++        return false;
++
++    os_mutex_lock(&shared_heap_list_lock);
++
++    /* (a) identity search: compare pointers only, never deref `heap`. Also find
++     * the unlink predecessor and any incoming chain edge in the same pass. */
++    for (cur = shared_heap_list; cur; cur = cur->next) {
++        if (cur == heap) {
++            found = true;
++            continue;
++        }
++        if (cur->next == heap)
++            pred = cur;
++        if (cur->chain_next == heap)
++            has_incoming = true;
++    }
++    if (!found) {
++        os_mutex_unlock(&shared_heap_list_lock);
++        LOG_WARNING("Shared heap to destroy is not a registered shared heap");
++        return false;
++    }
++
++    /* `heap` is a proven-live registered node -> safe to read its fields now. */
++    if (heap->heap_handle != NULL) {
++        os_mutex_unlock(&shared_heap_list_lock);
++        LOG_WARNING("Cannot destroy a runtime-managed shared heap");
++        return false;
++    }
++    if (heap->attached_count != 0) {
++        os_mutex_unlock(&shared_heap_list_lock);
++        LOG_WARNING("Cannot destroy a shared heap that is still attached");
++        return false;
++    }
++    if (heap->chain_next != NULL || has_incoming) {
++        os_mutex_unlock(&shared_heap_list_lock);
++        LOG_WARNING("Cannot destroy a shared heap that is still part of a chain");
++        return false;
++    }
++
++    /* (c) unlink + free, all before releasing the lock: there is no window where
++     * the descriptor is both eligible and still reachable via the list. */
++    if (pred)
++        pred->next = heap->next;
++    else
++        shared_heap_list = heap->next; /* heap was the list head */
++    heap->next = NULL;
++    heap->chain_next = NULL;
++    heap->base_addr = NULL;
++    heap->size = 0;
++    wasm_runtime_free(heap);
++
++    os_mutex_unlock(&shared_heap_list_lock);
++    return true;
++}
++
++/* Hull ext (0003): TEST-ONLY probe -- current shared_heap_list length. Lets a
++ * test prove reclamation keeps the list (and hence chain_shared_heaps' O(list)
++ * cost) bounded across many create/destroy cycles, rather than only checking
++ * memory at process exit. */
++uint32
++wasm_runtime_shared_heap_count(void)
++{
++    WASMSharedHeap *cur;
++    uint32 n = 0;
++
++    os_mutex_lock(&shared_heap_list_lock);
++    for (cur = shared_heap_list; cur; cur = cur->next)
++        n++;
++    os_mutex_unlock(&shared_heap_list_lock);
++    return n;
++}
++
+ static uint8 *
+ get_last_used_shared_heap_base_addr_adj(WASMModuleInstanceCommon *module_inst)
+ {
+@@ -582,16 +674,42 @@ wasm_runtime_attach_shared_heap_internal(WASMModuleInstanceCommon *module_inst,
+     WASMMemoryInstance *memory =
+         wasm_get_default_memory((WASMModuleInstance *)module_inst);
+     uint64 linear_mem_size;
++    /* Hull ext (0003): mandatory registration check + subsumed single lock. */
++    WASMSharedHeap *cur;
++    bool registered = false;
+ 
+     if (!memory)
+         return false;
+ 
++    /* Hull ext (0003): confirm `shared_heap` is a LIVE registered descriptor
++     * BEFORE reading or mutating any of its fields, so an attach that races or
++     * follows a wasm_runtime_destroy_shared_heap of the same pointer fails closed
++     * instead of touching freed memory. The ENTIRE attach runs under
++     * shared_heap_list_lock (taken ONCE -- the former inner lock around
++     * attached_count++ is subsumed here, never nested: it is a non-recursive
++     * mutex), so a concurrent destroy cannot unlink+free between this check and
++     * the writes below. The widened section touches only instance-local e->
++     * fields and takes no other lock, so no new lock-ordering edge is added. */
++    os_mutex_lock(&shared_heap_list_lock);
++    for (cur = shared_heap_list; cur; cur = cur->next) {
++        if (cur == shared_heap) {
++            registered = true;
++            break;
++        }
++    }
++    if (!registered) {
++        os_mutex_unlock(&shared_heap_list_lock);
++        LOG_WARNING("Shared heap to attach is not a registered shared heap");
++        return false;
++    }
++
+     linear_mem_size = memory->memory_data_size;
+ 
+     /* check if linear memory and shared heap are overlapped */
+     if ((memory->is_memory64 && linear_mem_size > shared_heap->start_off_mem64)
+         || (!memory->is_memory64
+             && linear_mem_size > shared_heap->start_off_mem32)) {
++        os_mutex_unlock(&shared_heap_list_lock);
+         LOG_WARNING("Linear memory address is overlapped with shared heap");
+         return false;
+     }
+@@ -601,6 +719,7 @@ wasm_runtime_attach_shared_heap_internal(WASMModuleInstanceCommon *module_inst,
+         WASMModuleInstanceExtra *e =
+             (WASMModuleInstanceExtra *)((WASMModuleInstance *)module_inst)->e;
+         if (e->shared_heap) {
++            os_mutex_unlock(&shared_heap_list_lock);
+             LOG_WARNING("A shared heap is already attached");
+             return false;
+         }
+@@ -612,6 +731,7 @@ wasm_runtime_attach_shared_heap_internal(WASMModuleInstanceCommon *module_inst,
+         AOTModuleInstanceExtra *e =
+             (AOTModuleInstanceExtra *)((AOTModuleInstance *)module_inst)->e;
+         if (e->shared_heap) {
++            os_mutex_unlock(&shared_heap_list_lock);
+             LOG_WARNING("A shared heap is already attached");
+             return false;
+         }
+@@ -620,7 +740,6 @@ wasm_runtime_attach_shared_heap_internal(WASMModuleInstanceCommon *module_inst,
+ #endif /* end of WASM_ENABLE_AOT != 0 */
+     update_last_used_shared_heap(module_inst, shared_heap, memory->is_memory64);
+ 
+-    os_mutex_lock(&shared_heap_list_lock);
+     shared_heap->attached_count++;
+     os_mutex_unlock(&shared_heap_list_lock);
+     LOG_VERBOSE("Shared heap %p is attached to module instance %p", shared_heap,
+@@ -664,6 +783,11 @@ wasm_runtime_detach_shared_heap_internal(WASMModuleInstanceCommon *module_inst)
+         e->shared_heap_end_off.u32[0] = UINT32_MAX - 1;
+ #endif
+         e->shared_heap_base_addr_adj = NULL;
++        /* Hull ext (0003): also reset the read-only cache flag so detach leaves
++         * NO stale shared-heap state (pointer, offsets, base-addr-adj, and the
++         * read_only gate) -- makes the destroy precondition's reliance on detach
++         * airtight and is strictly correct hygiene. */
++        e->shared_heap_read_only = false;
+     }
+ #endif /* end of WASM_ENABLE_INTERP != 0 */
+ #if WASM_ENABLE_AOT != 0
+@@ -684,6 +808,11 @@ wasm_runtime_detach_shared_heap_internal(WASMModuleInstanceCommon *module_inst)
+         e->shared_heap_end_off.u32[0] = UINT32_MAX - 1;
+ #endif
+         e->shared_heap_base_addr_adj = NULL;
++        /* Hull ext (0003): also reset the read-only cache flag so detach leaves
++         * NO stale shared-heap state (pointer, offsets, base-addr-adj, and the
++         * read_only gate) -- makes the destroy precondition's reliance on detach
++         * airtight and is strictly correct hygiene. */
++        e->shared_heap_read_only = false;
+     }
+ #endif /* end of WASM_ENABLE_AOT != 0 */
+     LOG_VERBOSE("Shared heap is detached from module instance %p", module_inst);
+diff --git a/core/iwasm/include/wasm_export.h b/core/iwasm/include/wasm_export.h
+index ea4005c..43452ec 100644
+--- a/core/iwasm/include/wasm_export.h
++++ b/core/iwasm/include/wasm_export.h
+@@ -2451,6 +2451,35 @@ wasm_runtime_unchain_shared_heaps(wasm_shared_heap_t head, bool entire_chain);
+ WASM_RUNTIME_API_EXTERN bool
+ wasm_runtime_reset_shared_heap_chain(wasm_shared_heap_t shared_heap);
+ 
++/**
++ * Hull ext (0003): Destroy a single pre-allocated shared heap created by
++ * wasm_runtime_create_shared_heap, reclaiming WAMR's descriptor.
++ *
++ * The heap MUST be fully detached (attached to no module instance) and NOT part
++ * of any chain (neither a head with a chained body, nor a body referenced by
++ * another heap). Frees ONLY WAMR's descriptor; a pre-allocated backing buffer is
++ * owned by the caller and is left untouched. Runtime-managed heaps are not
++ * supported.
++ *
++ * @param heap the shared heap to destroy
++ * @return true iff the descriptor was unlinked and freed; false (fail-closed, no
++ *         free, no state change) if `heap` is NULL, not a currently-registered
++ *         heap (double-destroy / foreign pointer), still attached, still chained,
++ *         or runtime-managed.
++ */
++WASM_RUNTIME_API_EXTERN bool
++wasm_runtime_destroy_shared_heap(wasm_shared_heap_t heap);
++
++/**
++ * Hull ext (0003): TEST-ONLY. Return the current number of shared heaps on the
++ * process-global shared-heap list. Intended for reclamation tests (assert the
++ * list does not grow across create/destroy cycles); not part of the stable API.
++ *
++ * @return the shared-heap list length
++ */
++WASM_RUNTIME_API_EXTERN uint32_t
++wasm_runtime_shared_heap_count(void);
++
+ /**
+  * Attach a shared heap, it can be the head of shared heap chain, in that case,
+  * attach the shared heap chain, to a module instance
