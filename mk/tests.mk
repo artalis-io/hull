@@ -181,6 +181,29 @@ $(BUILDDIR)/gen_ro_heap_aot.h: $(TESTDIR)/hull/fixtures/ro_heap.wasm | $(BUILDDI
 $(BUILDDIR)/test_wasm_readonly_heap: INCLUDES += -I$(BUILDDIR)
 $(BUILDDIR)/test_wasm_readonly_heap: $(BUILDDIR)/gen_ro_heap_aot.h
 
+# Guarded-subrange shared-heap test (WAMR patch 0004). Two build-generated AOT
+# fixtures from the same .wasm: SW-bound (--bounds-checks=1) and HW-bound
+# (--bounds-checks=0), so the matrix runs on interp + AOT-SW + AOT-HW. Both skip
+# (empty fixture) when wamrc is absent; the interpreter case always runs.
+define GEN_GSUB_AOT
+	@w="$(BUILDDIR)/wamrc"; [ -x "$$w" ] || w="$(BUILDDIR)/wamrc-build/wamrc"; \
+	if [ -x "$$w" ] && "$$w" --opt-level=3 $(2) --enable-shared-heap \
+	        -o $(BUILDDIR)/$(3).aot $< >/dev/null 2>&1; then \
+	    (cd $(BUILDDIR) && xxd -i $(3).aot) \
+	      | sed -E 's/unsigned char.*\[\]/static const unsigned char $(3)[]/; s/unsigned int.*_len/static const unsigned int $(3)_len/' > $(1); \
+	    echo "  [gsub] embedded wamrc-built $(3) fixture"; \
+	else \
+	    printf 'static const unsigned char $(3)[1] = {0};\nstatic const unsigned int $(3)_len = 0;\n' > $(1); \
+	    echo "  [gsub] wamrc not built; $(3) sub-case will skip"; \
+	fi
+endef
+$(BUILDDIR)/gen_gsub_aot_sw.h: $(TESTDIR)/hull/fixtures/gsub.wasm | $(BUILDDIR)
+	$(call GEN_GSUB_AOT,$@,--bounds-checks=1,gsub_aot_sw)
+$(BUILDDIR)/gen_gsub_aot_hw.h: $(TESTDIR)/hull/fixtures/gsub.wasm | $(BUILDDIR)
+	$(call GEN_GSUB_AOT,$@,--bounds-checks=0,gsub_aot_hw)
+$(BUILDDIR)/test_wasm_guarded_subrange: INCLUDES += -I$(BUILDDIR)
+$(BUILDDIR)/test_wasm_guarded_subrange: $(BUILDDIR)/gen_gsub_aot_sw.h $(BUILDDIR)/gen_gsub_aot_hw.h
+
 # Top-level tests (tests/hull/)
 $(BUILDDIR)/test_parse_size: $(TESTDIR)/hull/test_parse_size.c $(TEST_COMMON_DEPS) | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< $(TEST_COMMON_LIBS)
@@ -540,12 +563,16 @@ tsan:
 .PHONY: tsan-shared-heap
 tsan-shared-heap:
 	$(MAKE) clean
-	$(MAKE) TSAN=1 WAMR_TSAN=1 $(BUILDDIR)/test_wasm_shared_heap_destroy
+	$(MAKE) TSAN=1 WAMR_TSAN=1 $(BUILDDIR)/test_wasm_shared_heap_destroy \
+		$(BUILDDIR)/test_wasm_guarded_subrange
 	@nm $(BUILDDIR)/wamr_core/iwasm/common/wasm_memory.o 2>/dev/null | grep -q '__tsan' \
 		|| { echo "FAIL: wasm_memory.o is NOT TSan-instrumented (WAMR_TSAN not applied)"; exit 1; }
 	@echo "── TSan (WAMR-instrumented): shared-heap destroy 8-case matrix ──"
 	TSAN_OPTIONS="halt_on_error=1 second_deadlock_stack=1" \
 		$(BUILDDIR)/test_wasm_shared_heap_destroy
+	@echo "── TSan (WAMR-instrumented): guarded-subrange access matrix (patch 0004) ──"
+	TSAN_OPTIONS="halt_on_error=1 second_deadlock_stack=1" \
+		$(BUILDDIR)/test_wasm_guarded_subrange
 
 # ── Fuzzing (libFuzzer + ASan/UBSan) ────────────────────────────────
 # Mirrors vendor/keel/fuzz. Requires clang with the libFuzzer runtime.
