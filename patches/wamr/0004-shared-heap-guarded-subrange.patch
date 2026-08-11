@@ -1,0 +1,266 @@
+Subject: [PATCH 0004] shared heap: guarded-subrange read-only spans (Design B)
+
+Hull extension. Adds a per-heap valid sub-window (valid_offset, valid_size) to a
+pre-allocated shared heap so the guest can access only [valid_offset,
+valid_offset + valid_size) inside the reserved [0, size) region, while native
+backing = map_base and reserved size = map_len keep the whole reserved range
+inside the live mmap. Placement/overlap stay keyed off the reserved size; only
+the access bound moves. valid_size == 0 preserves full-heap behavior for every
+existing (and runtime-managed) caller. See docs/wamr_shared_heap_guarded_subrange_design.md.
+
+Files: core/iwasm/interpreter/wasm_runtime.h (WASMSharedHeap fields),
+core/iwasm/include/wasm_export.h (SharedHeapInitArgs fields),
+core/iwasm/common/wasm_memory.c (create validation, update_last_used bounds,
+is_app_addr / is_native_addr valid sub-range, reset memset).
+---
+--- a/core/iwasm/interpreter/wasm_runtime.h
++++ b/core/iwasm/interpreter/wasm_runtime.h
+@@ -111,6 +111,13 @@
+     /* Hull ext: 1 = read-only mapped region; a WASM store into it traps
+      * instead of writing. Only set for pre-allocated heaps. Default 0. */
+     bool read_only;
++    /* Hull ext (0004): guarded subrange (Design B). The GUEST-accessible window
++     * is the valid sub-range [valid_offset, valid_offset + valid_size) inside
++     * the reserved [0, size) region; the slop prefix and page-rounding suffix
++     * are inaccessible. valid_size == 0 means the full heap (valid_offset == 0),
++     * so every existing / runtime-managed heap is unchanged. */
++    uint64 valid_offset;
++    uint64 valid_size;
+ } WASMSharedHeap;
+ 
+ struct WASMMemoryInstance {
+--- a/core/iwasm/include/wasm_export.h
++++ b/core/iwasm/include/wasm_export.h
+@@ -355,6 +355,13 @@
+     /* Hull ext: read-only (file-backed) heap. Default 0 = writable so every
+      * existing user is unchanged. Only honored for a pre_allocated_addr heap. */
+     bool read_only;
++    /* Hull ext (0004): guarded subrange (Design B). valid_size == 0 means the
++     * full reserved heap (valid_offset must be 0). A pre-allocated span sets
++     * valid_offset = addr - map_base and valid_size = len so the guest sees only
++     * [valid_offset, valid_offset + valid_size). Only honored for a
++     * pre_allocated_addr heap. */
++    uint64_t valid_offset;
++    uint64_t valid_size;
+ } SharedHeapInitArgs;
+ 
+ /**
+--- a/core/iwasm/common/wasm_memory.c
++++ b/core/iwasm/common/wasm_memory.c
+@@ -244,6 +244,15 @@
+         goto fail1;
+     }
+ 
++    /* Hull ext (0004): a valid sub-window (valid_offset/valid_size) is only
++     * coherent for a pre-allocated span; a runtime-managed heap spans its whole
++     * range. Reject an incoherent request rather than silently widening it. */
++    if ((init_args->valid_offset || init_args->valid_size)
++        && !init_args->pre_allocated_addr) {
++        LOG_WARNING("valid window requires a pre-allocated shared heap");
++        goto fail1;
++    }
++
+     if (!(heap = runtime_malloc(heap_struct_size))) {
+         goto fail1;
+     }
+@@ -264,6 +273,8 @@
+     heap->start_off_mem32 = UINT32_MAX - heap->size + 1;
+     heap->attached_count = 0;
+     heap->read_only = false; /* Hull ext: writable by default */
++    heap->valid_offset = 0;  /* Hull ext (0004): full heap by default */
++    heap->valid_size = 0;    /* 0 => valid_size == size (full) */
+ 
+     if (init_args->pre_allocated_addr != NULL) {
+         /* Create shared heap from a pre allocated buffer, its size need to
+@@ -277,6 +288,26 @@
+         heap->heap_handle = NULL;
+         heap->base_addr = init_args->pre_allocated_addr;
+         heap->read_only = init_args->read_only; /* Hull ext: RO only for pre-alloc */
++        /* Hull ext (0004): carve the accessible window. valid_size 0 => full;
++         * a nonzero offset with no size is meaningless; reject overflow and any
++         * window that exceeds the reserved [0, size) region. */
++        if (init_args->valid_size == 0) {
++            if (init_args->valid_offset != 0) {
++                LOG_WARNING("valid_offset requires an explicit valid_size");
++                goto fail2;
++            }
++        }
++        else {
++            uint64 voff = init_args->valid_offset;
++            uint64 vsize = init_args->valid_size;
++            if (voff > (uint64)size || vsize > (uint64)size
++                || voff + vsize > (uint64)size) {
++                LOG_WARNING("valid window exceeds reserved shared heap size");
++                goto fail2;
++            }
++            heap->valid_offset = voff;
++            heap->valid_size = vsize;
++        }
+         LOG_VERBOSE("Create preallocated shared heap %p with size %u",
+                     heap->base_addr, size);
+     }
+@@ -416,7 +447,12 @@
+             }
+         }
+         else {
+-            memset(cur->base_addr, 0, (size_t)cur->size);
++            /* Hull ext (0004): zero only the valid window (defensive; Hull
++             * never resets a read-only span). valid_size 0 => full. */
++            memset(cur->base_addr
++                       + (size_t)(cur->valid_size ? cur->valid_offset : 0),
++                   0,
++                   (size_t)(cur->valid_size ? cur->valid_size : cur->size));
+         }
+     }
+ 
+@@ -622,21 +658,35 @@
+         WASMModuleInstanceExtra *e =
+             (WASMModuleInstanceExtra *)((WASMModuleInstance *)module_inst)->e;
+ #if UINTPTR_MAX == UINT64_MAX
+-        if (is_memory64)
+-            e->shared_heap_start_off.u64 = shared_heap->start_off_mem64;
+-        else
+-            e->shared_heap_start_off.u64 = shared_heap->start_off_mem32;
+-        e->shared_heap_end_off.u64 =
+-            e->shared_heap_start_off.u64 - 1 + shared_heap->size;
+-        e->shared_heap_base_addr_adj =
+-            shared_heap->base_addr - e->shared_heap_start_off.u64;
++        {
++            /* Hull ext (0004): guarded subrange. The reserved start drives
++             * base_addr_adj and placement; the ACCESS window is the valid
++             * sub-range. valid_size 0 => full heap. base_addr_adj stays keyed
++             * off the reserved start so app_off = rstart + voff maps to
++             * base_addr + voff = addr. */
++            uint64 rstart = is_memory64 ? shared_heap->start_off_mem64
++                                        : shared_heap->start_off_mem32;
++            uint64 voff = shared_heap->valid_offset;
++            uint64 vsize =
++                shared_heap->valid_size ? shared_heap->valid_size : shared_heap->size;
++            e->shared_heap_start_off.u64 = rstart + voff;
++            e->shared_heap_end_off.u64 = rstart + voff + vsize - 1;
++            e->shared_heap_base_addr_adj = shared_heap->base_addr - rstart;
++        }
+         e->shared_heap_read_only = shared_heap->read_only;
+ #else
+-        e->shared_heap_start_off.u32[0] = (uint32)shared_heap->start_off_mem32;
+-        e->shared_heap_end_off.u32[0] =
+-            e->shared_heap_start_off.u32[0] - 1 + shared_heap->size;
+-        e->shared_heap_base_addr_adj =
+-            shared_heap->base_addr - e->shared_heap_start_off.u32[0];
++        {
++            /* Hull ext (0004): guarded subrange (32-bit host). See the 64-bit
++             * arm above. */
++            uint32 rstart = (uint32)shared_heap->start_off_mem32;
++            uint32 voff = (uint32)shared_heap->valid_offset;
++            uint32 vsize = shared_heap->valid_size
++                               ? (uint32)shared_heap->valid_size
++                               : (uint32)shared_heap->size;
++            e->shared_heap_start_off.u32[0] = rstart + voff;
++            e->shared_heap_end_off.u32[0] = rstart + voff + vsize - 1;
++            e->shared_heap_base_addr_adj = shared_heap->base_addr - rstart;
++        }
+         e->shared_heap_read_only = shared_heap->read_only;
+ #endif
+     }
+@@ -646,21 +696,35 @@
+         AOTModuleInstanceExtra *e =
+             (AOTModuleInstanceExtra *)((AOTModuleInstance *)module_inst)->e;
+ #if UINTPTR_MAX == UINT64_MAX
+-        if (is_memory64)
+-            e->shared_heap_start_off.u64 = shared_heap->start_off_mem64;
+-        else
+-            e->shared_heap_start_off.u64 = shared_heap->start_off_mem32;
+-        e->shared_heap_end_off.u64 =
+-            e->shared_heap_start_off.u64 - 1 + shared_heap->size;
+-        e->shared_heap_base_addr_adj =
+-            shared_heap->base_addr - e->shared_heap_start_off.u64;
++        {
++            /* Hull ext (0004): guarded subrange. The reserved start drives
++             * base_addr_adj and placement; the ACCESS window is the valid
++             * sub-range. valid_size 0 => full heap. base_addr_adj stays keyed
++             * off the reserved start so app_off = rstart + voff maps to
++             * base_addr + voff = addr. */
++            uint64 rstart = is_memory64 ? shared_heap->start_off_mem64
++                                        : shared_heap->start_off_mem32;
++            uint64 voff = shared_heap->valid_offset;
++            uint64 vsize =
++                shared_heap->valid_size ? shared_heap->valid_size : shared_heap->size;
++            e->shared_heap_start_off.u64 = rstart + voff;
++            e->shared_heap_end_off.u64 = rstart + voff + vsize - 1;
++            e->shared_heap_base_addr_adj = shared_heap->base_addr - rstart;
++        }
+         e->shared_heap_read_only = shared_heap->read_only;
+ #else
+-        e->shared_heap_start_off.u32[0] = (uint32)shared_heap->start_off_mem32;
+-        e->shared_heap_end_off.u32[0] =
+-            e->shared_heap_start_off.u32[0] - 1 + shared_heap->size;
+-        e->shared_heap_base_addr_adj =
+-            shared_heap->base_addr - e->shared_heap_start_off.u32[0];
++        {
++            /* Hull ext (0004): guarded subrange (32-bit host). See the 64-bit
++             * arm above. */
++            uint32 rstart = (uint32)shared_heap->start_off_mem32;
++            uint32 voff = (uint32)shared_heap->valid_offset;
++            uint32 vsize = shared_heap->valid_size
++                               ? (uint32)shared_heap->valid_size
++                               : (uint32)shared_heap->size;
++            e->shared_heap_start_off.u32[0] = rstart + voff;
++            e->shared_heap_end_off.u32[0] = rstart + voff + vsize - 1;
++            e->shared_heap_base_addr_adj = shared_heap->base_addr - rstart;
++        }
+         e->shared_heap_read_only = shared_heap->read_only;
+ #endif
+     }
+@@ -888,13 +952,23 @@
+     /* Find the exact shared heap that app addr is in, and update last used
+      * shared heap info in module inst extra */
+     for (cur = heap; cur; cur = cur->chain_next) {
+-        shared_heap_start =
++        uint64 rstart =
+             is_memory64 ? cur->start_off_mem64 : cur->start_off_mem32;
+-        shared_heap_end = shared_heap_start - 1 + cur->size;
+-        if (bytes - 1 <= shared_heap_end && app_offset >= shared_heap_start
+-            && app_offset <= shared_heap_end - bytes + 1) {
+-            update_last_used_shared_heap(module_inst, cur, is_memory64);
+-            return true;
++        uint64 rend = rstart - 1 + cur->size; /* reserved slot (placement) */
++        if (app_offset >= rstart && app_offset <= rend) {
++            /* Hull ext (0004): this heap owns the reserved slot; admit only
++             * within its valid sub-window, else the access is in the slop
++             * prefix or page-rounding suffix and must trap. */
++            uint64 voff = cur->valid_offset;
++            uint64 vsize = cur->valid_size ? cur->valid_size : cur->size;
++            shared_heap_start = rstart + voff;
++            shared_heap_end = shared_heap_start - 1 + vsize;
++            if (bytes - 1 <= shared_heap_end && app_offset >= shared_heap_start
++                && app_offset <= shared_heap_end - bytes + 1) {
++                update_last_used_shared_heap(module_inst, cur, is_memory64);
++                return true;
++            }
++            goto fail;
+         }
+     }
+ 
+@@ -942,7 +1016,12 @@
+     /* Iterate through shared heap chain to find whether native addr in one of
+      * shared heap */
+     for (cur = heap; cur != NULL; cur = cur->chain_next) {
+-        base_addr = (uintptr_t)cur->base_addr;
++        /* Hull ext (0004): validate against the VALID native sub-range
++         * [base_addr + valid_offset, + valid_size), not the whole reserved
++         * region. valid_size 0 => full. */
++        uint64 voff = cur->valid_offset;
++        uint64 vsize = cur->valid_size ? cur->valid_size : cur->size;
++        base_addr = (uintptr_t)cur->base_addr + (uintptr_t)voff;
+         addr_int = (uintptr_t)addr;
+         if (addr_int < base_addr)
+             continue;
+@@ -952,7 +1031,7 @@
+         if (end_addr <= addr_int)
+             continue;
+ 
+-        if (end_addr > base_addr + cur->size)
++        if (end_addr > base_addr + (uintptr_t)vsize)
+             continue;
+ 
+         update_last_used_shared_heap(module_inst, cur, is_memory64);
