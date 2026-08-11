@@ -122,35 +122,73 @@ Point-by-point:
   `654-656`; read under the lock by `chain`/`unchain`/`reset`). Reading it in (b)
   under the same lock is therefore consistent - it is a lock-protected read, not
   an unsynchronized precondition. No atomics are introduced.
-- **`attached_count == 0` does NOT by itself prove non-retention.** Per the
-  `WASMSharedHeap` comment, *only the chain head maintains a valid
-  `attached_count`*; a chain **body** keeps `attached_count == 0` even while the
-  chain is attached and reachable (an instance's `e->shared_heap` is the head,
-  and `is_app_addr_in_shared_heap` walks `chain_next` into the body). Detach +
-  `attached_count == 0` alone would let a still-referenced body be freed.
-  Therefore the **unchained** check in (b) is INDEPENDENTLY necessary: `heap` may
-  be destroyed only when it is neither a head with `chain_next` set nor any
-  node's `chain_next`. The correct proof of non-retention is
-  `attached_count == 0` (head detached) **AND** fully unchained (this node is a
-  standalone list entry). Hull's teardown therefore always runs detach -> unchain
-  -> destroy (§7); after `unchain` every member is a standalone heap with
-  `attached_count == 0` and `chain_next == NULL`.
+- **"Fully unchained" is proven MECHANICALLY, never by a caller assertion
+  (§3.1).** Per the `WASMSharedHeap` comment, *only the chain head maintains a
+  valid `attached_count`*; a chain **body** keeps `attached_count == 0` even while
+  the chain is attached and reachable (an instance's `e->shared_heap` is the head,
+  and `is_app_addr_in_shared_heap` walks `chain_next` into the body). So
+  `attached_count == 0` alone would let a still-referenced body be freed. The
+  destroy API therefore MUST prove, itself, that no chain edge references `heap` -
+  it may not trust the caller to have unchained. The chosen mechanism is the
+  registry traversal below (§3.1); non-retention is proven only when
+  `attached_count == 0` (head detached) **AND** the traversal shows zero chain
+  edges into or out of `heap`.
 - **Unlink + free under the lock (no post-eligibility attachment).** Unlink and
   free happen in the SAME critical section as the eligibility read - there is no
   moment where the descriptor is both "eligible" and still reachable. `chain`
-  (the only other global-list reader) is serialized by the same lock, so it can
-  never re-discover a half-destroyed node.
-- **`attach` is NOT gated by the global list (caller contract).** `attach`
-  (`wasm_memory.c:578-628`) does not walk `shared_heap_list`; it takes the lock
-  only to bump `attached_count` on a caller-supplied pointer. So unlinking does
-  NOT prevent a concurrent/subsequent `attach` on the same raw pointer - that is
-  a use-after-destroy and is prevented by the CALLER, exactly as use-after-free
-  is: Hull serializes attach/detach/chain/destroy for a module's heaps under
-  `mod->mutex` (as segments do today) and never reuses a destroyed pointer. If we
-  later want WAMR-level enforcement, `attach` would need to verify the heap is
-  still registered (an added O(list) walk); the initial patch documents the
-  caller contract rather than paying that cost. This is called out so the
-  reviewer decides explicitly.
+  and (with the §3.2 change) `attach` are the other global-list readers; both are
+  serialized by the same lock, so neither can re-discover or re-reference a
+  half-destroyed node.
+
+### 3.1 Mechanical proof that no chain retains the descriptor
+
+Because every live descriptor is on `shared_heap_list`, walking that list
+enumerates every possible chain edge. The single destroy walk (§3a) therefore
+proves non-retention with **no added data structure**, in one pass under the lock:
+
+- `heap->chain_next == NULL` -> `heap` is not a head/interior node (no OUTGOING edge).
+- No node `cur` on `shared_heap_list` has `cur->chain_next == heap` -> `heap` is not
+  any chain's body (no INCOMING edge).
+- Together with `attached_count == 0`, `heap` is provably a standalone,
+  unreferenced descriptor. This is a **concrete registry traversal**, not a
+  caller assertion.
+
+The incoming-edge scan is free: the walk already visits every node to find the
+unlink predecessor and to prove registration, so checking `cur->chain_next` in the
+same pass is O(1) extra per node. This is why the traversal is preferred over the
+alternative **incoming-chain reference count** (a `uint incoming_chain_ref` on
+`WASMSharedHeap`, `+1`/`-1` by `chain`/`unchain` under the lock, destroy gated on
+`attached_count == 0 && incoming_chain_ref == 0`): the refcount is O(1) at destroy
+but adds mutable state that `chain`/`unchain` must keep perfectly consistent
+(another invariant to get wrong), whereas the traversal derives the same fact from
+the authoritative list with no new state. Since `attach` already pays an O(list)
+membership walk (§3.2), an O(list) destroy walk is consistent and the refcount buys
+nothing. **We specify the traversal.**
+
+### 3.2 Mandatory registration check in `attach` (not a caller contract)
+
+`attach` (`wasm_runtime_attach_shared_heap_internal`, `wasm_memory.c:578-628`)
+today dereferences `shared_heap->start_off_*` at line 591 and mutates
+`e->shared_heap` / `attached_count` **without ever confirming the pointer is a
+live registered heap** - it takes `shared_heap_list_lock` only to bump the count.
+An `attach` that races or follows a `destroy` of the same raw pointer would read
+and write freed memory. `mod->mutex` is a Hull-side discipline and is NOT
+sufficient: the WAMR API itself must not dereference a stale descriptor.
+
+**The patch makes the membership check mandatory.** `attach_internal` takes
+`shared_heap_list_lock` at the TOP and, before reading or mutating any `heap`
+field (before the `start_off_*` overlap read, before setting `e->shared_heap`,
+before `attached_count++`), walks `shared_heap_list` to confirm `shared_heap` is a
+member. If it is not, it unlocks and returns `false` (fail closed, no deref, no
+mutation). The existing overlap check, `e->shared_heap` set, cache update, and
+`attached_count++` then all run **inside that same critical section**, so a
+concurrent `destroy` cannot unlink+free the descriptor between the membership
+proof and the dereference. This closes the attach-after/racing-destroy
+use-after-free at the WAMR API boundary; Hull's `mod->mutex` remains as
+defense-in-depth, not the primary guarantee. Cost: one O(list) walk per attach -
+negligible for segments (startup) and bounded for spans (the list stays small
+because destroy reclaims). Valid heaps are always members, so behavior for every
+existing caller is unchanged.
 
 ## 4. Exact return / error behavior (every failure is total: false, no free, no mutation)
 
@@ -274,30 +312,40 @@ under the lock):
   node count `chain_shared_heaps` walks, and show it does not grow with the round
   index. A leaking list would make round K's chain walk O(K).
 
-Race and fail-closed cases (TSan for the races):
+Required correctness cases (the four the reviewer named, plus the matrix):
 
-- **Destroy vs attach:** one thread `attach`es a heap while another `destroy`s it.
-  Because Hull forbids this (mod->mutex), the WAMR-unit test asserts the caller
-  contract by construction (serialized) AND documents that an unserialized race is
-  a use-after-destroy; if we adopt the optional attach-time registration check, add
-  a test that the racing attach then fails closed.
-- **Destroy vs chain:** concurrent `chain` (walks the list) and `destroy` (unlinks)
-  leave a consistent list; no crash, no lost/duplicated node (TSan).
+- **Attach using a previously destroyed pointer (§3.2).** create -> attach ->
+  detach -> unchain(n/a) -> destroy(heap), then `attach(inst, heap)` on the same
+  raw pointer: attach's mandatory membership check misses -> returns `false`, reads
+  and mutates nothing (ASan proves no access to the freed descriptor).
+- **Destroying a body heap still referenced by a chain (§3.1).** create A, B;
+  `chain(A, B)`; `destroy(B)` -> `false` (B is A's `chain_next`, an incoming edge);
+  `destroy(A)` -> `false` (A has `chain_next != NULL`, outgoing). Nothing freed.
+- **Destroy after the final unchain.** `unchain(A, entire_chain=true)` (A and B
+  become standalone, `chain_next == NULL`, `attached_count == 0`); `destroy(A)` and
+  `destroy(B)` both -> `true`, list length drops by two, ASan-clean.
+- **Chain / unchain racing destroy (TSan).** one thread runs `chain`/`unchain`
+  (both walk/mutate the list under the lock) while another runs `destroy`
+  (identity-search + unlink under the same lock): the list stays consistent, no
+  node lost or double-freed, TSan-clean.
+
+Additional cases:
+
 - **Destroy vs a second destroy:** two threads destroy the same pointer; exactly
-  one returns true (frees once), the other returns false (identity search misses).
+  one returns `true` (frees once), the other returns `false` (identity search
+  misses) - no double free (TSan/ASan).
 - **Destroy vs teardown:** a destroy that begins before `wasm_runtime_destroy`
   either completes first (node gone; teardown frees the rest) or finds the list
-  already nulled and returns false - and Hull's ordering invariant (§7) means
-  destroy is never *initiated* after teardown starts; the test exercises the
-  in-window race, ASan-clean, no double free.
+  already nulled and returns `false`; Hull's ordering invariant (§7) means destroy
+  is never *initiated* after teardown starts. ASan-clean, no double free.
 - **Fail-closed matrix (§4):** NULL, unknown/already-destroyed, `heap_handle != NULL`,
-  still-attached, still-chained - each returns false, frees nothing, mutates nothing.
+  still-attached, still-chained - each returns `false`, frees nothing, mutates nothing.
 - **Stale-address rejection:** after destroy, an instance that retained the old
   WASM address range traps on access (its cache was cleared at detach; the range is
   unattached) - host survives.
-- **read_only cache clear:** with the §5 detach change, assert a detached
-  instance's `shared_heap_read_only` is reset (a white-box or behavioral check that
-  a re-attach of a *writable* heap into the same instance is not treated read-only).
+- **read_only cache clear (§5):** with the detach change, a detached instance's
+  `shared_heap_read_only` is reset (behavioral check: re-attaching a *writable* heap
+  into the same instance is not treated read-only).
 
 Hull-level: exercised transitively by the checkpoint-2 lifecycle suite; this
 patch's own gate is the WAMR-unit set above plus **ASan / MSan / TSan
@@ -320,11 +368,13 @@ green.
   (read-only permission) with the same verify-base / stale-hash / offset /
   reverse-check / unexpected-source gates. It touches the same two files 0002
   does - `core/iwasm/common/wasm_memory.c` (the new `destroy_shared_heap`, the
-  test-only length probe, and the one-line `read_only` reset in
+  mandatory registration check in `attach_shared_heap_internal`, the test-only
+  length probe, and the one-line `read_only` reset in
   `detach_shared_heap_internal`) and `core/iwasm/include/wasm_export.h` (the
   prototype) - plus the shared-heap unit test dir. It is orthogonal to 0002's
-  interp/AOT store-gate enforcement sites, so the two apply independently and
-  cleanly.
+  interp/AOT store-gate enforcement sites (0002 gates stores inside
+  `is_app_addr_in_shared_heap` / the AOT codegen; 0003 touches create/attach/
+  detach/teardown lifecycle), so the two apply independently and cleanly.
 
 ## 11. Non-goals
 
