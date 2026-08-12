@@ -1026,7 +1026,7 @@ int hl_cap_wasm_call_buf(HlWasmCache *cache, const char *name,
      * on the zero-copy path) or releasing the instance -- teardown precedes any
      * ownership transfer or pool release. Covers the zero-copy, copied, and
      * zero-length output paths that all follow. */
-    if (spans_active) { hl_wasm_span_set_teardown(&span_set); spans_active = 0; }
+    if (spans_active) hl_wasm_span_set_teardown(&span_set); /* terminal: no re-read */
 
     /* Create output buffer */
     if (result > 0 && (uint32_t)result <= max_output) {
@@ -1059,7 +1059,7 @@ int hl_cap_wasm_call_buf(HlWasmCache *cache, const char *name,
 
 cleanup_bufs_err:
     tl_host_ctx = saved_ctx;   /* restores (clears) tl_host_ctx.spans before teardown */
-    if (spans_active) { hl_wasm_span_set_teardown(&span_set); spans_active = 0; }
+    if (spans_active) hl_wasm_span_set_teardown(&span_set); /* terminal: no re-read */
     if (wasm_in_ptr)  wasm_runtime_module_free(inst, wasm_in_ptr);
     if (wasm_out_ptr) wasm_runtime_module_free(inst, wasm_out_ptr);
     hl_wasm_pool_release(cache, mod, inst, exec_env, process_fn,
@@ -1414,7 +1414,7 @@ static int instance_call_buf_impl(HlWasmInstance *pi,
     /* Spans back the INPUT (now consumed): detach + tear the set down so the
      * persistent instance is chain-free for the next call. Output is always
      * copied (create_owned), so no instance-checked-out ordering concern. */
-    if (spans_active) { hl_wasm_span_set_teardown(&span_set); spans_active = 0; }
+    if (spans_active) hl_wasm_span_set_teardown(&span_set); /* terminal: no re-read */
 
     if (result > 0 && (uint32_t)result <= max_output) {
         *output_buf = hl_wasm_buffer_create_owned(native_out, (size_t)result, alloc);
@@ -1428,7 +1428,7 @@ static int instance_call_buf_impl(HlWasmInstance *pi,
 
 cleanup_bufs_err:
     tl_host_ctx = saved_ctx;   /* restores (clears) tl_host_ctx.spans before teardown */
-    if (spans_active) { hl_wasm_span_set_teardown(&span_set); spans_active = 0; }
+    if (spans_active) hl_wasm_span_set_teardown(&span_set); /* terminal: no re-read */
     if (wasm_in_ptr)  wasm_runtime_module_free(inst, wasm_in_ptr);
     if (wasm_out_ptr) wasm_runtime_module_free(inst, wasm_out_ptr);
     return ret;
