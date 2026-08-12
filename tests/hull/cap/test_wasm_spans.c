@@ -633,6 +633,62 @@ UTEST(wasm_spans, name_validation)
     teardown_dir();
 }
 
+/* ── malformed span request guard (item D consumption entry): a request whose
+ *    spans/span_count disagree is rejected "bad_spans" BEFORE module lookup /
+ *    buffer borrow / instance acquisition, with NO heap / borrow / module-cache
+ *    state change. Scripts can't build this (the binding sets both or neither);
+ *    this drives it directly through the C API. ──────────────────────────────── */
+UTEST(wasm_spans, guard_malformed_span_request)
+{
+    setup();
+    HlWasmCache cache; ASSERT_EQ(hl_cap_wasm_init(&cache), 0);
+    uint32_t base = wasm_runtime_shared_heap_count();
+    ASSERT_EQ(write_file("a.bin", 40000), 0);
+    HlMappedBuffer *buf = hl_cap_fs_mmap_window(&cfg, "a.bin", 0, 4096, NULL, NULL);
+    ASSERT_TRUE(buf != NULL);
+    HlWasmSpanReq req = { .name = "src", .buf = buf };
+
+    struct { const char *label; const HlWasmSpanReq *spans; int count; } cases[] = {
+        { "spans set, count 0",   &req, 0 },
+        { "spans NULL, count 1",  NULL, 1 },
+        { "count negative",       &req, -1 },
+    };
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        HlWasmCallOpts opts = {0};
+        opts.spans = cases[i].spans;
+        opts.span_count = cases[i].count;
+        void *out = (void *)0x1;
+        size_t out_len = 99;
+        const char *err = NULL;
+        int rc = hl_cap_wasm_call(&cache, "nomod", "x", 1, &out, &out_len,
+                                  &opts, NULL, NULL, NULL, NULL, NULL, &err);
+        ASSERT_NE(rc, HL_WASM_OK);                 /* rejected */
+        ASSERT_TRUE(err != NULL);
+        ASSERT_STREQ(err, "bad_spans");
+        ASSERT_TRUE(out == NULL);                  /* no output produced */
+        ASSERT_EQ(out_len, (size_t)0);
+        ASSERT_EQ(wasm_runtime_shared_heap_count(), base); /* no heap created */
+        ASSERT_EQ(buf->borrow_count, 0);           /* no borrow taken */
+        ASSERT_EQ(cache.count, 0);                 /* no module loaded/acquired */
+    }
+
+    /* a well-formed request passes the guard (then fails module lookup): proves
+     * the guard rejects ONLY the malformed shapes. */
+    HlWasmCallOpts ok_opts = {0};
+    ok_opts.spans = &req;
+    ok_opts.span_count = 1;
+    void *out = NULL; size_t out_len = 0; const char *err = NULL;
+    int rc = hl_cap_wasm_call(&cache, "nomod", "x", 1, &out, &out_len,
+                              &ok_opts, NULL, NULL, NULL, NULL, NULL, &err);
+    ASSERT_NE(rc, HL_WASM_OK);
+    ASSERT_STREQ(err, "not_found");                /* past the guard, into lookup */
+    ASSERT_EQ(buf->borrow_count, 0);
+
+    hl_cap_fs_munmap(buf);
+    hl_cap_wasm_destroy(&cache);
+    teardown_dir();
+}
+
 /* ── concurrent invocations: N threads each drive their OWN instance + span-set
  *    build/attach/teardown, racing on the shared heap list. Validated under the
  *    WAMR-instrumented TSan (make tsan-spans). Final count returns to baseline. ─ */

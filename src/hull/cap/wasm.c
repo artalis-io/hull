@@ -658,6 +658,25 @@ int hl_cap_wasm_load(HlWasmCache *cache, const char *name,
     return 0;
 }
 
+/* Malformed per-invocation span request: `spans` and `span_count` must agree
+ * (spans != NULL iff span_count > 0, and span_count >= 0). Scripts cannot
+ * construct this -- the bindings set both or neither (mapped-spans item C) -- but
+ * a C embedder could, so the C consumption path (item D) fails closed on it
+ * before any module lookup, buffer borrow, or instance acquisition. Returns 1 if
+ * malformed, 0 otherwise (and 0 for a NULL opts). */
+static int spans_req_malformed(const HlWasmCallOpts *opts)
+{
+    if (!opts)
+        return 0;
+    if (opts->span_count < 0)
+        return 1;
+    if (opts->spans && opts->span_count <= 0)
+        return 1;
+    if (!opts->spans && opts->span_count > 0)
+        return 1;
+    return 0;
+}
+
 /* ── Call module (thin wrapper over call_buf) ──────────────────────── */
 
 int hl_cap_wasm_call(HlWasmCache *cache, const char *name,
@@ -721,6 +740,14 @@ int hl_cap_wasm_call_buf(HlWasmCache *cache, const char *name,
 
     if (!cache || !cache->initialized || !name || !output_buf) {
         if (err_msg) *err_msg = err_internal;
+        return HL_WASM_ERR_INTERNAL;
+    }
+
+    /* Malformed span request: reject BEFORE module lookup / buffer borrow /
+     * instance acquisition, fail closed with no state change (item D). */
+    if (spans_req_malformed(opts)) {
+        *output_buf = NULL;
+        if (err_msg) *err_msg = "bad_spans";
         return HL_WASM_ERR_INTERNAL;
     }
 
@@ -1123,6 +1150,13 @@ int hl_cap_wasm_instance_call_buf(HlWasmInstance *pi,
         return HL_WASM_ERR_INTERNAL;
     }
     *output_buf = NULL;
+
+    /* Malformed span request: reject BEFORE instance acquisition / buffer borrow,
+     * fail closed with no state change (item D). */
+    if (spans_req_malformed(opts)) {
+        if (err_msg) *err_msg = "bad_spans";
+        return HL_WASM_ERR_INTERNAL;
+    }
 
     if (pi->closed) {
         if (err_msg) *err_msg = err_closed;
