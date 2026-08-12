@@ -98,6 +98,22 @@ static void store_u32le(uint8_t *p, uint32_t v)
 static void store_u64le(uint8_t *p, uint64_t v)
 { for (int i = 0; i < 8; i++) p[i] = (uint8_t)(v >> (8 * i)); }
 
+/* A failed wasm_runtime_validate_app_addr sets an "out of bounds memory access"
+ * exception on the instance. Native calls (host_call) are only dispatched during
+ * live wasm execution -- WAMR halts and unwinds on any trap/exception and never
+ * calls further imports -- so there is NEVER a pending exception when the handler
+ * is entered. Thus the only exception present after our validate is the one WE
+ * caused; clearing it returns the instance to its pre-call (clean) state so a
+ * bad-pointer query returns a clean -1 instead of trapping the whole call. We
+ * additionally match the exact "out of bounds" text and clear ONLY that, so a
+ * (theoretically impossible) pre-existing exception is never erased. */
+static void clear_validate_oob_exception(wasm_module_inst_t inst)
+{
+    const char *e = wasm_runtime_get_exception(inst);
+    if (e && strstr(e, "out of bounds"))
+        wasm_runtime_set_exception(inst, NULL);
+}
+
 /* ── host_call native implementation ───────────────────────────────── */
 
 static int32_t host_call_handler(wasm_exec_env_t exec_env,
@@ -193,7 +209,7 @@ static int32_t host_call_handler(wasm_exec_env_t exec_env,
          * instance; clear it so a bad-pointer query returns a clean -1 rather than
          * poisoning the guest's call. */
         if (!wasm_runtime_validate_app_addr(inst, app, 4)) {
-            wasm_runtime_set_exception(inst, NULL);
+            clear_validate_oob_exception(inst);
             return -1;
         }
         uint8_t *p = wasm_runtime_addr_app_to_native(inst, app);
@@ -204,7 +220,7 @@ static int32_t host_call_handler(wasm_exec_env_t exec_env,
         if (cap < 4 || cap > 4096)
             return -1;
         if (!wasm_runtime_validate_app_addr(inst, app, (uint64_t)cap)) {
-            wasm_runtime_set_exception(inst, NULL);
+            clear_validate_oob_exception(inst);
             return -1;
         }
         p = wasm_runtime_addr_app_to_native(inst, app);
