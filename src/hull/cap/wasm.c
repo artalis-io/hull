@@ -88,6 +88,16 @@ typedef struct {
 
 static _Thread_local HlHostCallCtx tl_host_ctx;
 
+/* Little-endian field stores for the wire record (host endianness may differ from
+ * WASM's LE; write byte-explicit so the guest's offset decode is correct on any
+ * host). */
+static void store_u16le(uint8_t *p, uint16_t v)
+{ p[0] = (uint8_t)v; p[1] = (uint8_t)(v >> 8); }
+static void store_u32le(uint8_t *p, uint32_t v)
+{ for (int i = 0; i < 4; i++) p[i] = (uint8_t)(v >> (8 * i)); }
+static void store_u64le(uint8_t *p, uint64_t v)
+{ for (int i = 0; i < 8; i++) p[i] = (uint8_t)(v >> (8 * i)); }
+
 /* ── host_call native implementation ───────────────────────────────── */
 
 static int32_t host_call_handler(wasm_exec_env_t exec_env,
@@ -163,6 +173,61 @@ static int32_t host_call_handler(wasm_exec_env_t exec_env,
         if (len == 3)
             return (int32_t)(uint32_t)(sd->segments[ptr].size >> 32);
         return -1;
+    }
+
+    if (opcode == HL_WASM_OP_SPAN_INFO) {
+        /* Mapped-span metadata query (item E). `ptr` = dest record app offset,
+         * `len` = span index (-1 => count query). See cap/wasm.h. */
+        const HlWasmSpanSet *set = tl_host_ctx.spans;
+        int count = set ? set->count : 0;
+        if (len == -1)                       /* count query; ptr ignored */
+            return (int32_t)count;
+        if (len < 0 || len >= count)         /* out of range / no active set */
+            return 0;
+
+        /* `ptr` is an UNSIGNED 32-bit app offset (no sign extension). Read the
+         * caller's advertised capacity from struct_size (offset 2, u16) first,
+         * bound it, then validate the whole dest before writing. */
+        uint64_t app = (uint64_t)(uint32_t)ptr;
+        /* A failed validate sets a pending "out of bounds" exception on the
+         * instance; clear it so a bad-pointer query returns a clean -1 rather than
+         * poisoning the guest's call. */
+        if (!wasm_runtime_validate_app_addr(inst, app, 4)) {
+            wasm_runtime_set_exception(inst, NULL);
+            return -1;
+        }
+        uint8_t *p = wasm_runtime_addr_app_to_native(inst, app);
+        if (!p)
+            return -1;
+        uint32_t cap = (uint32_t)p[HL_SPAN_META_OFF_STRUCTSZ]
+                     | ((uint32_t)p[HL_SPAN_META_OFF_STRUCTSZ + 1] << 8);
+        if (cap < 4 || cap > 4096)
+            return -1;
+        if (!wasm_runtime_validate_app_addr(inst, app, (uint64_t)cap)) {
+            wasm_runtime_set_exception(inst, NULL);
+            return -1;
+        }
+        p = wasm_runtime_addr_app_to_native(inst, app);
+        if (!p)
+            return -1;
+
+        /* Build the v1 record LE in a local buffer, then write min(cap, size). */
+        const HlWasmSpan *s = &set->spans[len];
+        uint8_t rec[HL_SPAN_META_V1_SIZE];
+        memset(rec, 0, sizeof(rec));
+        store_u16le(rec + HL_SPAN_META_OFF_VERSION, 1);
+        store_u16le(rec + HL_SPAN_META_OFF_STRUCTSZ, HL_SPAN_META_V1_SIZE);
+        store_u32le(rec + HL_SPAN_META_OFF_FLAGS, HL_SPAN_META_FLAG_RO);
+        size_t nl = strnlen(s->name, sizeof(s->name) - 1);
+        memcpy(rec + HL_SPAN_META_OFF_NAME, s->name, nl); /* rest stays NUL */
+        store_u64le(rec + HL_SPAN_META_OFF_BASE, s->wasm_addr);
+        store_u64le(rec + HL_SPAN_META_OFF_LEN,
+                    s->buf ? (uint64_t)s->buf->len : 0);
+        store_u64le(rec + HL_SPAN_META_OFF_FOFFSET,
+                    s->buf ? s->buf->foffset : 0);
+        size_t n = cap < HL_SPAN_META_V1_SIZE ? cap : HL_SPAN_META_V1_SIZE;
+        memcpy(p, rec, n);
+        return HL_SPAN_META_V1_SIZE; /* full required struct_size */
     }
 
     if (opcode == HL_WASM_OP_STREAM) {
