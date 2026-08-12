@@ -1156,7 +1156,7 @@ Outputs:
 
 | Feature | Status | Notes |
 |---------|--------|-------|
-| WASM compute plugins (WAMR) | **Done** | Sandboxed, gas-metered, no I/O. Sync + async + streaming + persistent instances + shared data segments + SIMD128 + Memory64 + AOT |
+| WASM compute plugins (WAMR) | **Done** | Sandboxed, gas-metered, no I/O. Sync + async + streaming + persistent instances + shared data segments + SIMD128 + AOT. (Memory64: engine-ready but the cap-layer dispatch is compiled out in the shipped build — [#318](https://github.com/artalis-io/hull/issues/318).) |
 | GPU compute shaders (wgpu-native) | **Done** | dispatch + pipeline + persistent buffers + textures + fire-and-forget + async + buffer copy |
 | User-defined SQL functions | **Done** | Lua/JS callbacks + WASM-backed UDFs with gas metering |
 | Image processing | **Done** | stb_image decode/encode, raw pixel buffers, GPU texture interop |
@@ -1174,7 +1174,7 @@ Outputs:
 
 ### WASM / GPU Compute. Remaining Work
 
-(Merged in from the former `roadmap_wasm_compute.md`. The shipped phases (SIMD128, memory limits, Memory64, GPU/WebGPU, instance pooling, WasmBuffer protocol, persistent instances, shared data segments, GPU textures, streaming I/O, SQLite UDFs) are listed in the "Done" sections above.)
+(Merged in from the former `roadmap_wasm_compute.md`. The shipped phases (SIMD128, memory limits, GPU/WebGPU, instance pooling, WasmBuffer protocol, persistent instances, shared data segments, GPU textures, streaming I/O, SQLite UDFs) are listed in the "Done" sections above. Memory64 landed in the WAMR engine + `wamrc` but its Hull cap-layer dispatch is currently compiled out — see [#318](https://github.com/artalis-io/hull/issues/318).)
 
 | Item | Status | Notes |
 |------|--------|-------|

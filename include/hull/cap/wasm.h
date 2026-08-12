@@ -202,9 +202,14 @@ typedef int (*HlWasmCallbackFn)(int id, const void *in, size_t in_len,
  *   - invalid `ptr` (fails linear-memory validation for the advertised capacity)
  *     or malformed cap -> returns -1.
  *
- * `ptr` is an UNSIGNED 32-bit app offset (no sign extension); a Memory64 guest
- * must place its scratch record below 4 GiB. The record is 96 bytes, little-
- * endian, packed; decode BY OFFSET (do not cast). */
+ * `ptr` is an UNSIGNED 32-bit app offset (no sign extension). This is a fixed
+ * property of the (i32,i32,i32)->i32 host_call ABI, NOT a host-side high-address
+ * rejection: an address at or above UINT32_MAX is simply unrepresentable in the
+ * operand, so a Memory64 guest MUST place its scratch record below 4 GiB. The
+ * eventual 3b SDK is responsible for rejecting/trapping BEFORE narrowing a
+ * scratch pointer above UINT32_MAX (that behaviour belongs in 3b's Memory64
+ * tests). The record is 96 bytes, little-endian, packed; decode BY OFFSET (do
+ * not cast). */
 #define HL_SPAN_META_V1_SIZE      96
 #define HL_SPAN_META_OFF_VERSION   0  /* u16, = 1 */
 #define HL_SPAN_META_OFF_STRUCTSZ  2  /* u16, = 96 (also the caller's advertised cap) */
