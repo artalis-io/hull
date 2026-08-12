@@ -1230,6 +1230,22 @@ int hl_cap_wasm_instance_call_buf(HlWasmInstance *pi,
         return HL_WASM_ERR_INTERNAL;
     }
 
+    /* D1 (mapped-spans): a spans call is mutually exclusive with module segments.
+     * A persistent instance attaches its segment chain at creation, so a span
+     * chain cannot also be attached (WAMR one-chain-per-instance). Decide under
+     * pi->module->mutex BEFORE any span borrow / heap creation; a rejection leaves
+     * the instance untouched. */
+    int have_spans = (opts && opts->spans && opts->span_count > 0);
+    if (have_spans && pi->module) {
+        pthread_mutex_lock(&pi->module->mutex);
+        int has_segments = (pi->module->shared_data != NULL);
+        pthread_mutex_unlock(&pi->module->mutex);
+        if (has_segments) {
+            if (err_msg) *err_msg = "spans_with_segments";
+            return HL_WASM_ERR_INTERNAL;
+        }
+    }
+
     /* Resolve per-call opts → instance defaults → global defaults */
     uint64_t max_input  = opts && opts->max_input  ? opts->max_input
                         : pi->default_max_input    ? pi->default_max_input
@@ -1269,6 +1285,32 @@ int hl_cap_wasm_instance_call_buf(HlWasmInstance *pi,
         wasm_runtime_set_instruction_count_limit(exec_env, gas_int);
     }
 
+    /* Build + attach the per-invocation span set to the persistent instance, on
+     * the executing thread. On any add/attach failure, roll the partial set back
+     * and return -- the instance is left as it was (no chain leaked). Detached
+     * again on every exit below so the next call starts chain-free. */
+    HlWasmSpanSet span_set;
+    int spans_active = 0;
+    if (have_spans) {
+        hl_wasm_span_set_init(&span_set,
+                              pi->module ? pi->module->is_memory64 : 0);
+        const char *span_err = NULL;
+        int failed = 0;
+        for (int i = 0; i < opts->span_count && !failed; i++) {
+            if (hl_wasm_span_set_add(&span_set, opts->spans[i].buf,
+                                     opts->spans[i].name, &span_err) != 0)
+                failed = 1;
+        }
+        if (!failed && hl_wasm_span_set_attach(&span_set, inst, &span_err) != 0)
+            failed = 1;
+        if (failed) {
+            hl_wasm_span_set_teardown(&span_set);
+            if (err_msg) *err_msg = span_err ? span_err : "span_attach_failed";
+            return HL_WASM_ERR_INTERNAL;
+        }
+        spans_active = 1;
+    }
+
     int ret = HL_WASM_ERR_INTERNAL;
 
     /* Allocate I/O in WASM linear memory */
@@ -1278,6 +1320,7 @@ int hl_cap_wasm_instance_call_buf(HlWasmInstance *pi,
         wasm_in_ptr = wasm_runtime_module_malloc(inst, (uint64_t)input_len, &native_in);
         if (!wasm_in_ptr || !native_in) {
             if (err_msg) *err_msg = err_internal;
+            if (spans_active) hl_wasm_span_set_teardown(&span_set);
             return HL_WASM_ERR_INTERNAL;
         }
         memcpy(native_in, input, input_len);
@@ -1290,6 +1333,7 @@ int hl_cap_wasm_instance_call_buf(HlWasmInstance *pi,
         if (!wasm_out_ptr || !native_out) {
             if (err_msg) *err_msg = err_internal;
             if (wasm_in_ptr) wasm_runtime_module_free(inst, wasm_in_ptr);
+            if (spans_active) hl_wasm_span_set_teardown(&span_set);
             return HL_WASM_ERR_INTERNAL;
         }
     }
@@ -1307,6 +1351,7 @@ int hl_cap_wasm_instance_call_buf(HlWasmInstance *pi,
         pthread_mutex_unlock(&pi->module->mutex);
     }
     tl_host_ctx.shared_data = pi_sd;
+    tl_host_ctx.spans = spans_active ? &span_set : NULL;
 
     int is_mem64 = pi->module ? pi->module->is_memory64 : 0;
     uint32_t argv[9];
@@ -1353,8 +1398,13 @@ int hl_cap_wasm_instance_call_buf(HlWasmInstance *pi,
     }
 
     /* Success — free input, create OWNED output buffer */
-    tl_host_ctx = saved_ctx;
+    tl_host_ctx = saved_ctx;   /* restores (clears) tl_host_ctx.spans before teardown */
     if (wasm_in_ptr) wasm_runtime_module_free(inst, wasm_in_ptr);
+
+    /* Spans back the INPUT (now consumed): detach + tear the set down so the
+     * persistent instance is chain-free for the next call. Output is always
+     * copied (create_owned), so no instance-checked-out ordering concern. */
+    if (spans_active) { hl_wasm_span_set_teardown(&span_set); spans_active = 0; }
 
     if (result > 0 && (uint32_t)result <= max_output) {
         *output_buf = hl_wasm_buffer_create_owned(native_out, (size_t)result, alloc);
@@ -1367,7 +1417,8 @@ int hl_cap_wasm_instance_call_buf(HlWasmInstance *pi,
     return (*output_buf) ? HL_WASM_OK : HL_WASM_ERR_INTERNAL;
 
 cleanup_bufs_err:
-    tl_host_ctx = saved_ctx;
+    tl_host_ctx = saved_ctx;   /* restores (clears) tl_host_ctx.spans before teardown */
+    if (spans_active) { hl_wasm_span_set_teardown(&span_set); spans_active = 0; }
     if (wasm_in_ptr)  wasm_runtime_module_free(inst, wasm_in_ptr);
     if (wasm_out_ptr) wasm_runtime_module_free(inst, wasm_out_ptr);
     return ret;

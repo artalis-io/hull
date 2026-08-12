@@ -39,6 +39,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <stdatomic.h>
 #include <pthread.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -991,6 +992,232 @@ UTEST(wasm_spans, d2_segment_race_concurrency)
     for (int i = 0; i < D2R_NTHREAD; i++) ASSERT_EQ(args[i].ok, 1);
     (void)base;
 
+    hl_cap_wasm_destroy(&cache);
+    teardown_dir();
+}
+
+/* ══ D.3: persistent instance:call span consumption (hl_cap_wasm_instance_call) ══
+ * Same cleanup guarantees as D.2, but the instance persists across calls: each
+ * call attaches its span set and detaches on every exit so the instance is
+ * chain-free for the next call. Output is always copied (no zero-copy path).    */
+
+/* one-shot: call a persistent instance with a single span attached. */
+static int call_inst_with_span(HlWasmInstance *pi, HlMappedBuffer *buf,
+                               const char *sname, const void *input, size_t in_len,
+                               HlWasmCallOpts *extra, void **out, size_t *out_len,
+                               const char **err)
+{
+    HlWasmSpanReq req = { .name = sname, .buf = buf };
+    HlWasmCallOpts opts = {0};
+    if (extra) opts = *extra;
+    opts.spans = &req; opts.span_count = 1;
+    return hl_cap_wasm_instance_call(pi, input, in_len, out, out_len,
+                                     &opts, NULL, NULL, NULL, err);
+}
+
+/* ── repeated calls with changing / no spans: each attaches + detaches, so the
+ *    persistent instance returns to baseline (chain-free, borrow released) every
+ *    call regardless of whether that call had a span. ────────────────────────── */
+UTEST(wasm_spans, d3_repeated_changing_spans)
+{
+    setup();
+    HlWasmCache cache; ASSERT_EQ(hl_cap_wasm_init(&cache), 0);
+    HlVfs vfs; hl_vfs_init(&vfs, span_call_entries, NULL);
+    ASSERT_EQ(write_file("a.bin", 40000), 0);
+    const char *err = NULL;
+    HlWasmInstance *pi = hl_cap_wasm_instance_create(&cache, "echo", NULL,
+                                                     &vfs, NULL, NULL, &err);
+    ASSERT_TRUE(pi != NULL);
+    uint32_t base = wasm_runtime_shared_heap_count(); /* after create (no segs) */
+
+    for (int i = 0; i < 20; i++) {
+        void *out = NULL; size_t out_len = 0; err = NULL;
+        if (i % 3 == 2) {
+            /* a plain call (no spans) on the same instance */
+            int rc = hl_cap_wasm_instance_call(pi, "plain", 5, &out, &out_len,
+                                               NULL, NULL, NULL, NULL, &err);
+            ASSERT_EQ(rc, HL_WASM_OK);
+            ASSERT_EQ(out_len, (size_t)5);
+            free(out);
+            ASSERT_EQ(wasm_runtime_shared_heap_count(), base); /* unchanged */
+        } else {
+            /* a span call: fresh window each time (changing span) */
+            HlMappedBuffer *b = hl_cap_fs_mmap_window(&cfg, "a.bin",
+                                                      (uint64_t)(i * 4096) % 32768,
+                                                      4096, NULL, NULL);
+            ASSERT_TRUE(b != NULL);
+            int rc = call_inst_with_span(pi, b, "src", "abcd", 4, NULL,
+                                         &out, &out_len, &err);
+            ASSERT_EQ(rc, HL_WASM_OK);
+            ASSERT_EQ(out_len, (size_t)4);
+            free(out);
+            ASSERT_EQ(b->borrow_count, 0);                      /* detached */
+            ASSERT_EQ(wasm_runtime_shared_heap_count(), base);  /* baseline */
+            hl_cap_fs_munmap(b);
+        }
+    }
+
+    hl_cap_wasm_instance_destroy(pi);
+    hl_cap_wasm_destroy(&cache);
+    teardown_dir();
+}
+
+/* ── busy: a span call on an instance with an async call "in flight" (busy=1) is
+ *    rejected before any span borrow / heap creation. ────────────────────────── */
+UTEST(wasm_spans, d3_busy_rejection)
+{
+    setup();
+    HlWasmCache cache; ASSERT_EQ(hl_cap_wasm_init(&cache), 0);
+    HlVfs vfs; hl_vfs_init(&vfs, span_call_entries, NULL);
+    ASSERT_EQ(write_file("a.bin", 40000), 0);
+    const char *err = NULL;
+    HlWasmInstance *pi = hl_cap_wasm_instance_create(&cache, "echo", NULL,
+                                                     &vfs, NULL, NULL, &err);
+    ASSERT_TRUE(pi != NULL);
+    uint32_t base = wasm_runtime_shared_heap_count();
+    HlMappedBuffer *b = hl_cap_fs_mmap_window(&cfg, "a.bin", 0, 4096, NULL, NULL);
+    ASSERT_TRUE(b != NULL);
+
+    atomic_store(&pi->busy, 1);                 /* simulate async call in flight */
+    void *out = (void *)0x1; size_t out_len = 9; err = NULL;
+    int rc = call_inst_with_span(pi, b, "src", "x", 1, NULL, &out, &out_len, &err);
+    ASSERT_NE(rc, HL_WASM_OK);
+    ASSERT_STREQ(err, "instance_busy");
+    ASSERT_TRUE(out == NULL);
+    ASSERT_EQ(b->borrow_count, 0);              /* no borrow taken */
+    ASSERT_EQ(wasm_runtime_shared_heap_count(), base);
+    atomic_store(&pi->busy, 0);
+
+    /* once no longer busy the same call succeeds. */
+    out = NULL; out_len = 0; err = NULL;
+    rc = call_inst_with_span(pi, b, "src", "x", 1, NULL, &out, &out_len, &err);
+    ASSERT_EQ(rc, HL_WASM_OK);
+    free(out);
+    ASSERT_EQ(b->borrow_count, 0);
+    ASSERT_EQ(wasm_runtime_shared_heap_count(), base);
+
+    hl_cap_fs_munmap(b);
+    hl_cap_wasm_instance_destroy(pi);
+    hl_cap_wasm_destroy(&cache);
+    teardown_dir();
+}
+
+/* ── D1 on a persistent instance: a segment on the module rejects a span call. ─ */
+UTEST(wasm_spans, d3_d1_rejection)
+{
+    setup();
+    HlWasmCache cache; ASSERT_EQ(hl_cap_wasm_init(&cache), 0);
+    HlVfs vfs; hl_vfs_init(&vfs, span_call_entries, NULL);
+    ASSERT_EQ(write_file("a.bin", 40000), 0);
+    /* install a segment BEFORE creating the instance (so it attaches the chain). */
+    const char *derr = NULL;
+    static const unsigned char seg[16] = { 1, 2, 3, 4 };
+    ASSERT_EQ(hl_cap_wasm_load(&cache, "echo", &vfs, NULL), 0);
+    ASSERT_EQ(hl_cap_wasm_data_load(&cache, "echo", "graph", seg, sizeof(seg),
+                                    NULL, &vfs, NULL, &derr), 0);
+    const char *err = NULL;
+    HlWasmInstance *pi = hl_cap_wasm_instance_create(&cache, "echo", NULL,
+                                                     &vfs, NULL, NULL, &err);
+    ASSERT_TRUE(pi != NULL);
+    uint32_t before = wasm_runtime_shared_heap_count();
+    HlMappedBuffer *b = hl_cap_fs_mmap_window(&cfg, "a.bin", 0, 4096, NULL, NULL);
+    ASSERT_TRUE(b != NULL);
+
+    void *out = (void *)0x1; size_t out_len = 9; err = NULL;
+    int rc = call_inst_with_span(pi, b, "src", "x", 1, NULL, &out, &out_len, &err);
+    ASSERT_NE(rc, HL_WASM_OK);
+    ASSERT_STREQ(err, "spans_with_segments");
+    ASSERT_TRUE(out == NULL);
+    ASSERT_EQ(b->borrow_count, 0);
+    ASSERT_EQ(wasm_runtime_shared_heap_count(), before); /* no span heap */
+
+    hl_cap_fs_munmap(b);
+    hl_cap_wasm_instance_destroy(pi);
+    hl_cap_wasm_destroy(&cache);
+    teardown_dir();
+}
+
+/* ── gas trap on a persistent instance tears the span down; the instance stays
+ *    usable for the next (successful) call. ──────────────────────────────────── */
+UTEST(wasm_spans, d3_gas_cleanup_reusable)
+{
+    setup();
+    HlWasmCache cache; ASSERT_EQ(hl_cap_wasm_init(&cache), 0);
+    HlVfs vfs; hl_vfs_init(&vfs, span_call_entries, NULL);
+    ASSERT_EQ(write_file("a.bin", 40000), 0);
+    const char *err = NULL;
+    HlWasmInstance *pi = hl_cap_wasm_instance_create(&cache, "echo", NULL,
+                                                     &vfs, NULL, NULL, &err);
+    ASSERT_TRUE(pi != NULL);
+    uint32_t base = wasm_runtime_shared_heap_count();
+    HlMappedBuffer *b = hl_cap_fs_mmap_window(&cfg, "a.bin", 0, 4096, NULL, NULL);
+    ASSERT_TRUE(b != NULL);
+
+    HlWasmCallOpts extra = {0};
+    extra.gas = 1;                              /* trap */
+    void *out = NULL; size_t out_len = 0; err = NULL;
+    int rc = call_inst_with_span(pi, b, "src", "hello", 5, &extra,
+                                 &out, &out_len, &err);
+    ASSERT_NE(rc, HL_WASM_OK);                   /* trapped */
+    ASSERT_EQ(b->borrow_count, 0);               /* span torn down */
+    ASSERT_EQ(wasm_runtime_shared_heap_count(), base);
+
+    /* instance is reusable: a normal span call now succeeds. */
+    out = NULL; out_len = 0; err = NULL;
+    rc = call_inst_with_span(pi, b, "src", "hey", 3, NULL, &out, &out_len, &err);
+    ASSERT_EQ(rc, HL_WASM_OK);
+    ASSERT_EQ(out_len, (size_t)3);
+    free(out);
+    ASSERT_EQ(b->borrow_count, 0);
+    ASSERT_EQ(wasm_runtime_shared_heap_count(), base);
+
+    hl_cap_fs_munmap(b);
+    hl_cap_wasm_instance_destroy(pi);
+    hl_cap_wasm_destroy(&cache);
+    teardown_dir();
+}
+
+/* ── reentrancy proxy: if the instance already has a chain attached (as a
+ *    re-entrant call from inside host_call would find), a span call's attach
+ *    fails closed -- the call errors and its span borrow is released, leaving the
+ *    pre-existing chain intact. ─────────────────────────────────────────────── */
+UTEST(wasm_spans, d3_reentrancy_double_attach_fails_closed)
+{
+    setup();
+    HlWasmCache cache; ASSERT_EQ(hl_cap_wasm_init(&cache), 0);
+    HlVfs vfs; hl_vfs_init(&vfs, span_call_entries, NULL);
+    ASSERT_EQ(write_file("a.bin", 40000), 0);
+    const char *err = NULL;
+    HlWasmInstance *pi = hl_cap_wasm_instance_create(&cache, "echo", NULL,
+                                                     &vfs, NULL, NULL, &err);
+    ASSERT_TRUE(pi != NULL);
+
+    /* manually attach a span set to the instance (simulating a chain already
+     * present when a re-entrant call arrives). */
+    HlMappedBuffer *held = hl_cap_fs_mmap_window(&cfg, "a.bin", 0, 4096, NULL, NULL);
+    ASSERT_TRUE(held != NULL);
+    HlWasmSpanSet manual; err = NULL;
+    hl_wasm_span_set_init(&manual, 0);
+    ASSERT_EQ(hl_wasm_span_set_add(&manual, held, "held", &err), 0);
+    ASSERT_EQ(hl_wasm_span_set_attach(&manual, pi->instance, &err), 0);
+    uint32_t with_manual = wasm_runtime_shared_heap_count();
+
+    /* a span call now finds the instance already chained -> its attach fails. */
+    HlMappedBuffer *b = hl_cap_fs_mmap_window(&cfg, "a.bin", 8192, 4096, NULL, NULL);
+    ASSERT_TRUE(b != NULL);
+    void *out = (void *)0x1; size_t out_len = 9; err = NULL;
+    int rc = call_inst_with_span(pi, b, "src", "x", 1, NULL, &out, &out_len, &err);
+    ASSERT_NE(rc, HL_WASM_OK);                   /* attach failed, closed */
+    ASSERT_EQ(b->borrow_count, 0);               /* the call's span was rolled back */
+    ASSERT_EQ(wasm_runtime_shared_heap_count(), with_manual); /* manual chain intact */
+    ASSERT_EQ(held->borrow_count, 1);            /* manual borrow untouched */
+
+    /* tear the manual set down; the instance is chain-free again. */
+    ASSERT_EQ(hl_wasm_span_set_teardown(&manual), 0);
+    ASSERT_EQ(held->borrow_count, 0);
+
+    hl_cap_fs_munmap(b); hl_cap_fs_munmap(held);
+    hl_cap_wasm_instance_destroy(pi);
     hl_cap_wasm_destroy(&cache);
     teardown_dir();
 }
