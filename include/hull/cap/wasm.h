@@ -388,6 +388,27 @@ int hl_cap_wasm_instance_call_buf(HlWasmInstance *inst,
                                    HlAllocator *alloc, const char **err_msg);
 
 /**
+ * Async-worker variants of the two calls above. Identical semantics EXCEPT the
+ * busy REJECT is bypassed: the async submission (compute.async / inst.async:call)
+ * set pi->busy = 1 to reserve the instance BEFORE the worker runs, so the worker
+ * -- which owns that reservation -- must not reject itself. done_fn/cancel_fn
+ * clear busy exactly once. Only worker_wasm.c should call these; synchronous
+ * callers must use the checking variants above so an in-flight async is rejected.
+ */
+int hl_cap_wasm_instance_call_async(HlWasmInstance *inst,
+                                     const void *input, size_t input_len,
+                                     void **output, size_t *output_len,
+                                     const HlWasmCallOpts *opts,
+                                     HlWasmCallbackFn cb_fn, void *cb_ctx,
+                                     HlAllocator *alloc, const char **err_msg);
+int hl_cap_wasm_instance_call_buf_async(HlWasmInstance *inst,
+                                         const void *input, size_t input_len,
+                                         struct HlWasmBuffer **output_buf,
+                                         const HlWasmCallOpts *opts,
+                                         HlWasmCallbackFn cb_fn, void *cb_ctx,
+                                         HlAllocator *alloc, const char **err_msg);
+
+/**
  * Destroy a persistent instance. NULL-safe, idempotent (closed flag).
  * If busy (async in-flight), logs a warning and does not destroy.
  */

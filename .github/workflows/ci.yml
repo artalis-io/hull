@@ -307,6 +307,10 @@ jobs:
         timeout-minutes: 2
         run: make e2e-spans-async
 
+      - name: Persistent-instance async E2E tests
+        timeout-minutes: 2
+        run: make e2e-persistent-async
+
       - name: Named-connection async/udf E2E tests
         timeout-minutes: 2
         run: make e2e-named-connections

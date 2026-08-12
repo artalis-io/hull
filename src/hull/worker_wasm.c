@@ -36,15 +36,18 @@ static void wasm_work_fn(void *ud)
     int rc;
 
     if (op->persistent_inst) {
-        /* Persistent instance mode */
+        /* Persistent instance mode. The submission set pi->busy = 1 to reserve
+         * this instance; the worker OWNS that reservation, so it uses the _async
+         * entries that bypass the busy reject (a synchronous call would still be
+         * rejected). done_fn/cancel_fn clear busy. */
         if (op->want_buffer) {
-            rc = hl_cap_wasm_instance_call_buf(op->persistent_inst,
+            rc = hl_cap_wasm_instance_call_buf_async(op->persistent_inst,
                                                 op->input, op->input_len,
                                                 &op->output_buf, &op->opts,
                                                 NULL, NULL,
                                                 op->alloc, &err_msg);
         } else {
-            rc = hl_cap_wasm_instance_call(op->persistent_inst,
+            rc = hl_cap_wasm_instance_call_async(op->persistent_inst,
                                             op->input, op->input_len,
                                             &op->output, &op->output_len,
                                             &op->opts, NULL, NULL,

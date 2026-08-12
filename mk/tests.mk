@@ -902,6 +902,11 @@ e2e-spans-bind: $(BUILDDIR)/hull
 e2e-spans-async: $(BUILDDIR)/hull
 	sh tests/e2e_spans_async.sh
 
+# Persistent-instance async baseline, Lua + JS (issue #316 busy-guard fix).
+.PHONY: e2e-persistent-async
+e2e-persistent-async: $(BUILDDIR)/hull
+	sh tests/e2e_persistent_async.sh
+
 e2e-compute-dev: $(BUILDDIR)/hull
 	sh tests/e2e_compute_dev.sh
 

@@ -1193,12 +1193,20 @@ HlWasmInstance *hl_cap_wasm_instance_create(HlWasmCache *cache,
 
 /* ── Persistent instance: call_buf ─────────────────────────────────── */
 
-int hl_cap_wasm_instance_call_buf(HlWasmInstance *pi,
+/* Core persistent-instance call. `busy_owned` = 1 means the caller already owns
+ * the instance's busy reservation (the async worker, whose submission set busy=1);
+ * it then bypasses the busy REJECT so it can run the in-flight call. `busy_owned`
+ * = 0 is the synchronous path, which rejects when a call is already in flight. The
+ * busy flag itself is owned by the async submission lifecycle (binding sets it at
+ * submit; done_fn/cancel_fn clear it exactly once); this function never mutates
+ * it. See hl_cap_wasm_instance_call_buf / _async below. */
+static int instance_call_buf_impl(HlWasmInstance *pi,
                                    const void *input, size_t input_len,
                                    HlWasmBuffer **output_buf,
                                    const HlWasmCallOpts *opts,
                                    HlWasmCallbackFn callback_fn, void *callback_ctx,
-                                   HlAllocator *alloc, const char **err_msg)
+                                   HlAllocator *alloc, const char **err_msg,
+                                   int busy_owned)
 {
     static const char *err_internal  = "internal_error";
     static const char *err_gas       = "gas_exhausted";
@@ -1225,7 +1233,9 @@ int hl_cap_wasm_instance_call_buf(HlWasmInstance *pi,
         if (err_msg) *err_msg = err_closed;
         return HL_WASM_ERR_INTERNAL;
     }
-    if (atomic_load(&pi->busy)) {
+    /* Synchronous callers reject when a call is in flight; the async worker owns
+     * the reservation and runs through it. */
+    if (!busy_owned && atomic_load(&pi->busy)) {
         if (err_msg) *err_msg = err_busy;
         return HL_WASM_ERR_INTERNAL;
     }
@@ -1424,14 +1434,40 @@ cleanup_bufs_err:
     return ret;
 }
 
+/* Public synchronous entry: rejects when a call is in flight (busy). */
+int hl_cap_wasm_instance_call_buf(HlWasmInstance *pi,
+                                   const void *input, size_t input_len,
+                                   HlWasmBuffer **output_buf,
+                                   const HlWasmCallOpts *opts,
+                                   HlWasmCallbackFn cb_fn, void *cb_ctx,
+                                   HlAllocator *alloc, const char **err_msg)
+{
+    return instance_call_buf_impl(pi, input, input_len, output_buf, opts,
+                                  cb_fn, cb_ctx, alloc, err_msg, 0 /*busy check*/);
+}
+
+/* Async-worker entry: the submission already set busy=1 (this call owns it), so
+ * the busy REJECT is bypassed. Only worker_wasm.c should call this. */
+int hl_cap_wasm_instance_call_buf_async(HlWasmInstance *pi,
+                                        const void *input, size_t input_len,
+                                        HlWasmBuffer **output_buf,
+                                        const HlWasmCallOpts *opts,
+                                        HlWasmCallbackFn cb_fn, void *cb_ctx,
+                                        HlAllocator *alloc, const char **err_msg)
+{
+    return instance_call_buf_impl(pi, input, input_len, output_buf, opts,
+                                  cb_fn, cb_ctx, alloc, err_msg, 1 /*busy owned*/);
+}
+
 /* ── Persistent instance: call (thin wrapper) ──────────────────────── */
 
-int hl_cap_wasm_instance_call(HlWasmInstance *pi,
-                               const void *input, size_t input_len,
-                               void **output, size_t *output_len,
-                               const HlWasmCallOpts *opts,
-                               HlWasmCallbackFn cb_fn, void *cb_ctx,
-                               HlAllocator *alloc, const char **err_msg)
+static int instance_call_impl(HlWasmInstance *pi,
+                              const void *input, size_t input_len,
+                              void **output, size_t *output_len,
+                              const HlWasmCallOpts *opts,
+                              HlWasmCallbackFn cb_fn, void *cb_ctx,
+                              HlAllocator *alloc, const char **err_msg,
+                              int busy_owned)
 {
     if (!output || !output_len) {
         if (err_msg) *err_msg = "internal_error";
@@ -1441,9 +1477,9 @@ int hl_cap_wasm_instance_call(HlWasmInstance *pi,
     *output_len = 0;
 
     HlWasmBuffer *buf = NULL;
-    int rc = hl_cap_wasm_instance_call_buf(pi, input, input_len,
-                                            &buf, opts, cb_fn, cb_ctx,
-                                            alloc, err_msg);
+    int rc = instance_call_buf_impl(pi, input, input_len,
+                                    &buf, opts, cb_fn, cb_ctx,
+                                    alloc, err_msg, busy_owned);
     if (rc != HL_WASM_OK)
         return rc;
 
@@ -1463,6 +1499,30 @@ int hl_cap_wasm_instance_call(HlWasmInstance *pi,
         }
     }
     return HL_WASM_OK;
+}
+
+/* Public synchronous wrapper (rejects when busy). */
+int hl_cap_wasm_instance_call(HlWasmInstance *pi,
+                               const void *input, size_t input_len,
+                               void **output, size_t *output_len,
+                               const HlWasmCallOpts *opts,
+                               HlWasmCallbackFn cb_fn, void *cb_ctx,
+                               HlAllocator *alloc, const char **err_msg)
+{
+    return instance_call_impl(pi, input, input_len, output, output_len, opts,
+                              cb_fn, cb_ctx, alloc, err_msg, 0 /*busy check*/);
+}
+
+/* Async-worker wrapper (busy owned by the submission; bypasses the reject). */
+int hl_cap_wasm_instance_call_async(HlWasmInstance *pi,
+                                     const void *input, size_t input_len,
+                                     void **output, size_t *output_len,
+                                     const HlWasmCallOpts *opts,
+                                     HlWasmCallbackFn cb_fn, void *cb_ctx,
+                                     HlAllocator *alloc, const char **err_msg)
+{
+    return instance_call_impl(pi, input, input_len, output, output_len, opts,
+                              cb_fn, cb_ctx, alloc, err_msg, 1 /*busy owned*/);
 }
 
 /* ── Persistent instance: destroy ──────────────────────────────────── */
