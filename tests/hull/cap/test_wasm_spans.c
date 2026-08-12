@@ -465,6 +465,116 @@ UTEST(wasm_spans, cross_instance_isolation)
     teardown_dir();
 }
 
+/* ── cross-instance isolation, PROVEN BY EXECUTION: instance i1 cannot LOAD from
+ *    an address that is a valid span only in i0. i0 gets two spans (so its lower
+ *    slot sits below i1's single top slot); i1 has only the top slot. A guest load
+ *    in i1 at i0's lower-span address is out of every range i1 has attached and
+ *    TRAPS, while i1's own span and i0's own load of the same address both succeed
+ *    -- so the trap is isolation, not a bogus address. ─────────────────────────── */
+UTEST(wasm_spans, cross_instance_execution_isolation)
+{
+    setup();
+    HlWasmCache cache; ASSERT_EQ(hl_cap_wasm_init(&cache), 0);
+    ASSERT_EQ(write_file("a.bin", 40000), 0);
+    wasm_module_t m0, m1; uint8_t *bb0, *bb1;
+    wasm_module_inst_t i0 = make_instance(&m0, &bb0);
+    wasm_module_inst_t i1 = make_instance(&m1, &bb1);
+    ASSERT_TRUE(i0 && i1);
+    wasm_exec_env_t e0 = wasm_runtime_create_exec_env(i0, 16 * 1024);
+    wasm_exec_env_t e1 = wasm_runtime_create_exec_env(i1, 16 * 1024);
+    ASSERT_TRUE(e0 && e1);
+
+    /* i0 owns TWO page-aligned windows -> two chained slots (top + one below). */
+    HlMappedBuffer *s0a = hl_cap_fs_mmap_window(&cfg, "a.bin", 0, 4096, NULL, NULL);
+    HlMappedBuffer *s0b = hl_cap_fs_mmap_window(&cfg, "a.bin", 8192, 4096, NULL, NULL);
+    /* i1 owns ONE window -> a single slot at the top of the address space. */
+    HlMappedBuffer *s1 = hl_cap_fs_mmap_window(&cfg, "a.bin", 16384, 4096, NULL, NULL);
+    ASSERT_TRUE(s0a && s0b && s1);
+
+    HlWasmSpanSet set0, set1; const char *err = NULL;
+    hl_wasm_span_set_init(&set0, 0);
+    hl_wasm_span_set_init(&set1, 0);
+    ASSERT_EQ(hl_wasm_span_set_add(&set0, s0a, &err), 0);
+    ASSERT_EQ(hl_wasm_span_set_add(&set0, s0b, &err), 0);
+    ASSERT_EQ(hl_wasm_span_set_add(&set1, s1, &err), 0);
+    ASSERT_EQ(hl_wasm_span_set_attach(&set0, i0, &err), 0);
+    ASSERT_EQ(hl_wasm_span_set_attach(&set1, i1, &err), 0);
+
+    /* s0a is i0's LOWER slot; with only a single (top) slot attached, that address
+     * is not in any range i1 can reach. Confirm it is a real, reachable address in
+     * i0 first, then that the SAME address traps in i1 -- pure isolation. */
+    uint64_t s0a_addr = set0.spans[0].wasm_addr;
+    uint32_t v = 0;
+    ASSERT_TRUE(guest_load(i0, e0, s0a_addr, &v));            /* i0 owns it */
+    ASSERT_FALSE(guest_load(i1, e1, s0a_addr, &v));           /* i1 cannot reach it */
+    ASSERT_TRUE(guest_load(i1, e1, set1.spans[0].wasm_addr, &v)); /* i1's own span ok */
+
+    hl_wasm_span_set_teardown(&set0);
+    hl_wasm_span_set_teardown(&set1);
+    wasm_runtime_destroy_exec_env(e0);
+    wasm_runtime_destroy_exec_env(e1);
+    hl_cap_fs_munmap(s0a); hl_cap_fs_munmap(s0b); hl_cap_fs_munmap(s1);
+    free_instance(i0, m0, bb0);
+    free_instance(i1, m1, bb1);
+    hl_cap_wasm_destroy(&cache);
+    teardown_dir();
+}
+
+/* ── distinct-buffer native-backing rejection: two DIFFERENT HlMappedBuffers that
+ *    alias the same native mapping (or whose native ranges overlap) are rejected,
+ *    exercising the map_base-equality and ranges_overlap arms of the duplicate
+ *    check that the same-pointer case (duplicate_rejected) does not reach. The
+ *    real windowed constructor never produces aliasing mappings (independent mmaps
+ *    are disjoint), so a synthetic alias drives these defense-in-depth arms. The
+ *    alias is rejected BEFORE any borrow/heap-create, so it is never pinned and
+ *    needs no teardown. ──────────────────────────────────────────────────────── */
+UTEST(wasm_spans, distinct_buffer_overlap_rejected)
+{
+    setup();
+    HlWasmCache cache; ASSERT_EQ(hl_cap_wasm_init(&cache), 0);
+    uint32_t base = wasm_runtime_shared_heap_count();
+    ASSERT_EQ(write_file("a.bin", 40000), 0);
+    HlMappedBuffer *b0 = hl_cap_fs_mmap_window(&cfg, "a.bin", 0, 4096, NULL, NULL);
+    ASSERT_TRUE(b0 != NULL);
+
+    HlWasmSpanSet set; const char *err = NULL;
+    hl_wasm_span_set_init(&set, 0);
+    ASSERT_EQ(hl_wasm_span_set_add(&set, b0, &err), 0);
+    ASSERT_EQ(wasm_runtime_shared_heap_count(), base + 1);
+
+    /* (a) distinct buffer, SAME native base -> map_base-equality arm. */
+    HlMappedBuffer alias; memset(&alias, 0, sizeof(alias));
+    alias.map_base = b0->map_base;
+    alias.map_len = b0->map_len;
+    alias.addr = b0->map_base;   /* voff = 0 */
+    alias.len = 256;
+    ASSERT_TRUE(&alias != b0);
+    err = NULL;
+    ASSERT_EQ(hl_wasm_span_set_add(&set, &alias, &err), -1);
+    ASSERT_STREQ(err, "duplicate_span");
+
+    /* (b) distinct buffer, DISTINCT base but OVERLAPPING native range -> the
+     * ranges_overlap arm. Base is offset into b0's mapping so the ranges meet. */
+    HlMappedBuffer overlap; memset(&overlap, 0, sizeof(overlap));
+    overlap.map_base = (char *)b0->map_base + 2048; /* != b0->map_base, overlaps */
+    overlap.map_len = b0->map_len;
+    overlap.addr = overlap.map_base;
+    overlap.len = 256;
+    err = NULL;
+    ASSERT_EQ(hl_wasm_span_set_add(&set, &overlap, &err), -1);
+    ASSERT_STREQ(err, "duplicate_span");
+
+    /* neither synthetic alias was pinned or created a heap. */
+    ASSERT_EQ(set.count, 1);
+    ASSERT_EQ(wasm_runtime_shared_heap_count(), base + 1);
+
+    hl_wasm_span_set_teardown(&set);
+    ASSERT_EQ(wasm_runtime_shared_heap_count(), base);
+    hl_cap_fs_munmap(b0);
+    hl_cap_wasm_destroy(&cache);
+    teardown_dir();
+}
+
 /* ── concurrent invocations: N threads each drive their OWN instance + span-set
  *    build/attach/teardown, racing on the shared heap list. Validated under the
  *    WAMR-instrumented TSan (make tsan-spans). Final count returns to baseline. ─ */
