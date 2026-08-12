@@ -175,7 +175,7 @@ UTEST(wasm_spans, lifecycle_basic)
 
     HlWasmSpanSet set; const char *err = NULL;
     hl_wasm_span_set_init(&set, 0 /* wasm32 */);
-    ASSERT_EQ(hl_wasm_span_set_add(&set, buf, &err), 0);
+    ASSERT_EQ(hl_wasm_span_set_add(&set, buf, "buf", &err), 0);
     ASSERT_EQ(set.count, 1);
     ASSERT_EQ(wasm_runtime_shared_heap_count(), base + 1);   /* heap created */
     ASSERT_EQ(hl_wasm_span_set_attach(&set, inst, &err), 0);
@@ -212,9 +212,9 @@ UTEST(wasm_spans, multiple_spans)
 
     HlWasmSpanSet set; const char *err = NULL;
     hl_wasm_span_set_init(&set, 0);
-    ASSERT_EQ(hl_wasm_span_set_add(&set, b0, &err), 0);
-    ASSERT_EQ(hl_wasm_span_set_add(&set, b1, &err), 0);
-    ASSERT_EQ(hl_wasm_span_set_add(&set, b2, &err), 0);
+    ASSERT_EQ(hl_wasm_span_set_add(&set, b0, "b0", &err), 0);
+    ASSERT_EQ(hl_wasm_span_set_add(&set, b1, "b1", &err), 0);
+    ASSERT_EQ(hl_wasm_span_set_add(&set, b2, "b2", &err), 0);
     ASSERT_EQ(set.count, 3);
     ASSERT_EQ(wasm_runtime_shared_heap_count(), base + 3);
     ASSERT_EQ(hl_wasm_span_set_attach(&set, inst, &err), 0);
@@ -252,10 +252,11 @@ UTEST(wasm_spans, duplicate_rejected)
 
     HlWasmSpanSet set; const char *err = NULL;
     hl_wasm_span_set_init(&set, 0);
-    ASSERT_EQ(hl_wasm_span_set_add(&set, buf, &err), 0);
-    /* same buffer again -> duplicate backing, no second heap, no second borrow. */
+    ASSERT_EQ(hl_wasm_span_set_add(&set, buf, "buf", &err), 0);
+    /* same buffer again (distinct NAME, so it reaches the backing check rather
+     * than the name-uniqueness check) -> duplicate backing, no second heap/borrow. */
     err = NULL;
-    ASSERT_EQ(hl_wasm_span_set_add(&set, buf, &err), -1);
+    ASSERT_EQ(hl_wasm_span_set_add(&set, buf, "buf_again", &err), -1);
     ASSERT_STREQ(err, "duplicate_span");
     ASSERT_EQ(set.count, 1);
     ASSERT_EQ(wasm_runtime_shared_heap_count(), base + 1);   /* only one heap */
@@ -287,9 +288,9 @@ UTEST(wasm_spans, cap_enforced)
 
     HlWasmSpanSet set; const char *err = NULL;
     hl_wasm_span_set_init(&set, 0);
-    ASSERT_EQ(hl_wasm_span_set_add(&set, big, &err), 0);   /* total == 1 GiB */
+    ASSERT_EQ(hl_wasm_span_set_add(&set, big, "big", &err), 0);   /* total == 1 GiB */
     err = NULL;
-    ASSERT_EQ(hl_wasm_span_set_add(&set, small, &err), -1); /* would exceed cap */
+    ASSERT_EQ(hl_wasm_span_set_add(&set, small, "small", &err), -1); /* would exceed cap */
     ASSERT_STREQ(err, "span_cap");
     ASSERT_EQ(set.count, 1);
 
@@ -311,7 +312,7 @@ UTEST(wasm_spans, close_while_borrowed)
 
     HlWasmSpanSet set; const char *err = NULL;
     hl_wasm_span_set_init(&set, 0);
-    ASSERT_EQ(hl_wasm_span_set_add(&set, buf, &err), 0);   /* pins buf */
+    ASSERT_EQ(hl_wasm_span_set_add(&set, buf, "buf", &err), 0);   /* pins buf */
     ASSERT_EQ(buf->borrow_count, 1);
 
     /* close the buffer while the span borrows it: munmap is deferred. */
@@ -344,12 +345,12 @@ UTEST(wasm_spans, partial_attach_failure)
 
     HlWasmSpanSet a, b; const char *err = NULL;
     hl_wasm_span_set_init(&a, 0);
-    ASSERT_EQ(hl_wasm_span_set_add(&a, b0, &err), 0);
+    ASSERT_EQ(hl_wasm_span_set_add(&a, b0, "b0", &err), 0);
     ASSERT_EQ(hl_wasm_span_set_attach(&a, inst, &err), 0);   /* inst now has a heap */
 
     /* set B built (heap created, borrowed), attach FAILS (inst already attached). */
     hl_wasm_span_set_init(&b, 0);
-    ASSERT_EQ(hl_wasm_span_set_add(&b, b1, &err), 0);
+    ASSERT_EQ(hl_wasm_span_set_add(&b, b1, "b1", &err), 0);
     ASSERT_EQ(wasm_runtime_shared_heap_count(), base + 2);
     err = NULL;
     ASSERT_EQ(hl_wasm_span_set_attach(&b, inst, &err), -1);
@@ -373,7 +374,7 @@ static void *wt_worker(void *p)
 {
     struct wt_arg *a = (struct wt_arg *)p;
     const char *err = NULL;
-    a->add_rc = hl_wasm_span_set_add(a->set, a->buf, &err); /* wrong thread */
+    a->add_rc = hl_wasm_span_set_add(a->set, a->buf, "a->buf", &err); /* wrong thread */
     return NULL;
 }
 UTEST(wasm_spans, owning_thread_enforced)
@@ -415,8 +416,8 @@ UTEST(wasm_spans, repeated_invocations_baseline)
         ASSERT_TRUE(b0 && b1);
         HlWasmSpanSet set; const char *err = NULL;
         hl_wasm_span_set_init(&set, 0);
-        ASSERT_EQ(hl_wasm_span_set_add(&set, b0, &err), 0);
-        ASSERT_EQ(hl_wasm_span_set_add(&set, b1, &err), 0);
+        ASSERT_EQ(hl_wasm_span_set_add(&set, b0, "b0", &err), 0);
+        ASSERT_EQ(hl_wasm_span_set_add(&set, b1, "b1", &err), 0);
         ASSERT_EQ(hl_wasm_span_set_attach(&set, inst, &err), 0);
         hl_wasm_span_set_teardown(&set);
         hl_cap_fs_munmap(b0); hl_cap_fs_munmap(b1);
@@ -447,8 +448,8 @@ UTEST(wasm_spans, cross_instance_isolation)
     HlWasmSpanSet set0, set1; const char *err = NULL;
     hl_wasm_span_set_init(&set0, 0);
     hl_wasm_span_set_init(&set1, 0);
-    ASSERT_EQ(hl_wasm_span_set_add(&set0, s0, &err), 0);
-    ASSERT_EQ(hl_wasm_span_set_add(&set1, s1, &err), 0);
+    ASSERT_EQ(hl_wasm_span_set_add(&set0, s0, "s0", &err), 0);
+    ASSERT_EQ(hl_wasm_span_set_add(&set1, s1, "s1", &err), 0);
     ASSERT_EQ(hl_wasm_span_set_attach(&set0, i0, &err), 0);
     ASSERT_EQ(hl_wasm_span_set_attach(&set1, i1, &err), 0);   /* independent */
 
@@ -494,9 +495,9 @@ UTEST(wasm_spans, cross_instance_execution_isolation)
     HlWasmSpanSet set0, set1; const char *err = NULL;
     hl_wasm_span_set_init(&set0, 0);
     hl_wasm_span_set_init(&set1, 0);
-    ASSERT_EQ(hl_wasm_span_set_add(&set0, s0a, &err), 0);
-    ASSERT_EQ(hl_wasm_span_set_add(&set0, s0b, &err), 0);
-    ASSERT_EQ(hl_wasm_span_set_add(&set1, s1, &err), 0);
+    ASSERT_EQ(hl_wasm_span_set_add(&set0, s0a, "s0a", &err), 0);
+    ASSERT_EQ(hl_wasm_span_set_add(&set0, s0b, "s0b", &err), 0);
+    ASSERT_EQ(hl_wasm_span_set_add(&set1, s1, "s1", &err), 0);
     ASSERT_EQ(hl_wasm_span_set_attach(&set0, i0, &err), 0);
     ASSERT_EQ(hl_wasm_span_set_attach(&set1, i1, &err), 0);
 
@@ -539,7 +540,7 @@ UTEST(wasm_spans, distinct_buffer_overlap_rejected)
 
     HlWasmSpanSet set; const char *err = NULL;
     hl_wasm_span_set_init(&set, 0);
-    ASSERT_EQ(hl_wasm_span_set_add(&set, b0, &err), 0);
+    ASSERT_EQ(hl_wasm_span_set_add(&set, b0, "b0", &err), 0);
     ASSERT_EQ(wasm_runtime_shared_heap_count(), base + 1);
 
     /* (a) distinct buffer, SAME native base -> map_base-equality arm. */
@@ -550,7 +551,7 @@ UTEST(wasm_spans, distinct_buffer_overlap_rejected)
     alias.len = 256;
     ASSERT_TRUE(&alias != b0);
     err = NULL;
-    ASSERT_EQ(hl_wasm_span_set_add(&set, &alias, &err), -1);
+    ASSERT_EQ(hl_wasm_span_set_add(&set, &alias, "alias", &err), -1);
     ASSERT_STREQ(err, "duplicate_span");
 
     /* (b) distinct buffer, DISTINCT base but OVERLAPPING native range -> the
@@ -561,7 +562,7 @@ UTEST(wasm_spans, distinct_buffer_overlap_rejected)
     overlap.addr = overlap.map_base;
     overlap.len = 256;
     err = NULL;
-    ASSERT_EQ(hl_wasm_span_set_add(&set, &overlap, &err), -1);
+    ASSERT_EQ(hl_wasm_span_set_add(&set, &overlap, "overlap", &err), -1);
     ASSERT_STREQ(err, "duplicate_span");
 
     /* neither synthetic alias was pinned or created a heap. */
@@ -571,6 +572,63 @@ UTEST(wasm_spans, distinct_buffer_overlap_rejected)
     hl_wasm_span_set_teardown(&set);
     ASSERT_EQ(wasm_runtime_shared_heap_count(), base);
     hl_cap_fs_munmap(b0);
+    hl_cap_wasm_destroy(&cache);
+    teardown_dir();
+}
+
+/* ── span name validation: NULL / empty / overlong rejected ("bad_name"), and a
+ *    distinct buffer with a DUPLICATE name rejected ("duplicate_name", distinct
+ *    from the same-backing "duplicate_span"). Each rejection happens before any
+ *    borrow/heap-create, so no heap/borrow leaks. ─────────────────────────────── */
+UTEST(wasm_spans, name_validation)
+{
+    setup();
+    HlWasmCache cache; ASSERT_EQ(hl_cap_wasm_init(&cache), 0);
+    uint32_t base = wasm_runtime_shared_heap_count();
+    ASSERT_EQ(write_file("a.bin", 40000), 0);
+    HlMappedBuffer *b0 = hl_cap_fs_mmap_window(&cfg, "a.bin", 0, 4096, NULL, NULL);
+    HlMappedBuffer *b1 = hl_cap_fs_mmap_window(&cfg, "a.bin", 8192, 4096, NULL, NULL);
+    ASSERT_TRUE(b0 && b1);
+
+    HlWasmSpanSet set; const char *err = NULL;
+    hl_wasm_span_set_init(&set, 0);
+
+    /* NULL name -> internal_error (defensive; the binding never passes NULL). */
+    err = NULL;
+    ASSERT_EQ(hl_wasm_span_set_add(&set, b0, NULL, &err), -1);
+    ASSERT_STREQ(err, "internal_error");
+    /* empty name -> bad_name. */
+    err = NULL;
+    ASSERT_EQ(hl_wasm_span_set_add(&set, b0, "", &err), -1);
+    ASSERT_STREQ(err, "bad_name");
+    /* 64-byte name (>= sizeof name[64], no room for the NUL) -> bad_name. */
+    char overlong[65];
+    memset(overlong, 'x', 64);
+    overlong[64] = '\0';
+    err = NULL;
+    ASSERT_EQ(hl_wasm_span_set_add(&set, b0, overlong, &err), -1);
+    ASSERT_STREQ(err, "bad_name");
+    /* 63-byte name is the max accepted. */
+    char maxname[64];
+    memset(maxname, 'y', 63);
+    maxname[63] = '\0';
+    err = NULL;
+    ASSERT_EQ(hl_wasm_span_set_add(&set, b0, maxname, &err), 0);
+    ASSERT_EQ(set.count, 1);
+    ASSERT_STREQ(set.spans[0].name, maxname);
+
+    /* a DISTINCT buffer with the SAME name -> duplicate_name (not duplicate_span:
+     * different backing, colliding name). */
+    err = NULL;
+    ASSERT_EQ(hl_wasm_span_set_add(&set, b1, maxname, &err), -1);
+    ASSERT_STREQ(err, "duplicate_name");
+    ASSERT_EQ(set.count, 1);
+    ASSERT_EQ(b1->borrow_count, 0);   /* the rejected add never borrowed */
+
+    ASSERT_EQ(hl_wasm_span_set_teardown(&set), 0);
+    ASSERT_EQ(wasm_runtime_shared_heap_count(), base);
+    ASSERT_EQ(b0->borrow_count, 0);
+    hl_cap_fs_munmap(b0); hl_cap_fs_munmap(b1);
     hl_cap_wasm_destroy(&cache);
     teardown_dir();
 }
@@ -595,8 +653,8 @@ static void *ci_worker(void *p)
         if (!b0 || !b1) { a->ok = 0; if (b0) hl_cap_fs_munmap(b0); if (b1) hl_cap_fs_munmap(b1); break; }
         HlWasmSpanSet set; const char *err = NULL;
         hl_wasm_span_set_init(&set, 0);
-        if (hl_wasm_span_set_add(&set, b0, &err) != 0
-            || hl_wasm_span_set_add(&set, b1, &err) != 0
+        if (hl_wasm_span_set_add(&set, b0, "b0", &err) != 0
+            || hl_wasm_span_set_add(&set, b1, "b1", &err) != 0
             || hl_wasm_span_set_attach(&set, a->inst, &err) != 0)
             a->ok = 0;
         hl_wasm_span_set_teardown(&set);
@@ -675,12 +733,14 @@ UTEST(wasm_spans, max_spans)
 
     HlWasmSpanSet set; const char *err = NULL;
     hl_wasm_span_set_init(&set, 0);
-    for (int i = 0; i < HL_WASM_MAX_SPANS; i++)
-        ASSERT_EQ(hl_wasm_span_set_add(&set, bufs[i], &err), 0);
+    for (int i = 0; i < HL_WASM_MAX_SPANS; i++) {
+        char nm[16]; snprintf(nm, sizeof(nm), "s%d", i);
+        ASSERT_EQ(hl_wasm_span_set_add(&set, bufs[i], nm, &err), 0);
+    }
     ASSERT_EQ(set.count, HL_WASM_MAX_SPANS);
     /* the (max+1)-th add is rejected; no heap/borrow leaks. */
     err = NULL;
-    ASSERT_EQ(hl_wasm_span_set_add(&set, bufs[HL_WASM_MAX_SPANS], &err), -1);
+    ASSERT_EQ(hl_wasm_span_set_add(&set, bufs[HL_WASM_MAX_SPANS], "over", &err), -1);
     ASSERT_STREQ(err, "too_many_spans");
     ASSERT_EQ(set.count, HL_WASM_MAX_SPANS);
     ASSERT_EQ(wasm_runtime_shared_heap_count(), base + HL_WASM_MAX_SPANS);
@@ -715,8 +775,8 @@ UTEST(wasm_spans, chain_failure_rollback)
 
     HlWasmSpanSet set; const char *err = NULL;
     hl_wasm_span_set_init(&set, 0);
-    ASSERT_EQ(hl_wasm_span_set_add(&set, b0, &err), 0);
-    ASSERT_EQ(hl_wasm_span_set_add(&set, b1, &err), 0);
+    ASSERT_EQ(hl_wasm_span_set_add(&set, b0, "b0", &err), 0);
+    ASSERT_EQ(hl_wasm_span_set_add(&set, b1, "b1", &err), 0);
     ASSERT_EQ(wasm_runtime_shared_heap_count(), base + 2);
 
     /* pin span0's heap onto the helper so the internal chain(span0, span1) fails. */
@@ -762,7 +822,7 @@ UTEST(wasm_spans, unaligned_window)
 
     HlWasmSpanSet set; const char *err = NULL;
     hl_wasm_span_set_init(&set, 0);
-    ASSERT_EQ(hl_wasm_span_set_add(&set, buf, &err), 0);
+    ASSERT_EQ(hl_wasm_span_set_add(&set, buf, "buf", &err), 0);
     ASSERT_EQ(hl_wasm_span_set_attach(&set, inst, &err), 0);
 
     /* logical base reads file bytes [off..off+4) (pattern byte i == i&0xff). */
@@ -800,7 +860,7 @@ UTEST(wasm_spans, guest_prefix_suffix_reject)
 
     HlWasmSpanSet set; const char *err = NULL;
     hl_wasm_span_set_init(&set, 0);
-    ASSERT_EQ(hl_wasm_span_set_add(&set, buf, &err), 0);
+    ASSERT_EQ(hl_wasm_span_set_add(&set, buf, "buf", &err), 0);
     ASSERT_EQ(hl_wasm_span_set_attach(&set, inst, &err), 0);
     uint64_t win = set.spans[0].wasm_addr;   /* guest logical base */
     uint32_t v = 0;
@@ -839,7 +899,7 @@ UTEST(wasm_spans, eof_tail)
 
     HlWasmSpanSet set; const char *err = NULL;
     hl_wasm_span_set_init(&set, 0);
-    ASSERT_EQ(hl_wasm_span_set_add(&set, buf, &err), 0);
+    ASSERT_EQ(hl_wasm_span_set_add(&set, buf, "buf", &err), 0);
     ASSERT_EQ(hl_wasm_span_set_attach(&set, inst, &err), 0);
     uint64_t win = set.spans[0].wasm_addr;
     uint32_t v = 0;
@@ -877,7 +937,7 @@ UTEST(wasm_spans, destroy_failure_retry)
 
     HlWasmSpanSet set; const char *err = NULL;
     hl_wasm_span_set_init(&set, 0);
-    ASSERT_EQ(hl_wasm_span_set_add(&set, buf, &err), 0);
+    ASSERT_EQ(hl_wasm_span_set_add(&set, buf, "buf", &err), 0);
     ASSERT_EQ(buf->borrow_count, 1);            /* pinned by add */
 
     /* pin the span's heap onto the helper -> its attached_count != 0 makes destroy
@@ -922,8 +982,8 @@ UTEST(wasm_spans, addr_accounting_wasm32)
 
     HlWasmSpanSet set; const char *err = NULL;
     hl_wasm_span_set_init(&set, 0 /* wasm32 */);
-    ASSERT_EQ(hl_wasm_span_set_add(&set, b0, &err), 0);
-    ASSERT_EQ(hl_wasm_span_set_add(&set, b1, &err), 0);
+    ASSERT_EQ(hl_wasm_span_set_add(&set, b0, "b0", &err), 0);
+    ASSERT_EQ(hl_wasm_span_set_add(&set, b1, "b1", &err), 0);
     ASSERT_EQ(set.total_reserved,
               (uint64_t)b0->map_len + (uint64_t)b1->map_len);
     ASSERT_TRUE(set.total_logical < set.total_reserved
@@ -965,8 +1025,8 @@ UTEST(wasm_spans, addr_accounting_memory64)
     HlWasmSpanSet set; const char *err = NULL;
     hl_wasm_span_set_init(&set, 1 /* memory64 */);
     ASSERT_EQ(set.is_memory64, 1);
-    ASSERT_EQ(hl_wasm_span_set_add(&set, b0, &err), 0);
-    ASSERT_EQ(hl_wasm_span_set_add(&set, b1, &err), 0);
+    ASSERT_EQ(hl_wasm_span_set_add(&set, b0, "b0", &err), 0);
+    ASSERT_EQ(hl_wasm_span_set_add(&set, b1, "b1", &err), 0);
     /* reserved accounting is width-independent. */
     ASSERT_EQ(set.total_reserved,
               (uint64_t)b0->map_len + (uint64_t)b1->map_len);
@@ -1012,7 +1072,7 @@ UTEST(wasm_spans, aot_span_lifecycle)
 
     HlWasmSpanSet set; const char *err = NULL;
     hl_wasm_span_set_init(&set, 0);
-    ASSERT_EQ(hl_wasm_span_set_add(&set, buf, &err), 0);
+    ASSERT_EQ(hl_wasm_span_set_add(&set, buf, "buf", &err), 0);
     ASSERT_EQ(hl_wasm_span_set_attach(&set, inst, &err), 0);
     uint64_t win = set.spans[0].wasm_addr;
     uint32_t v = 0;

@@ -48,9 +48,10 @@ hl_wasm_span_set_init(HlWasmSpanSet *set, int is_memory64)
 }
 
 int
-hl_wasm_span_set_add(HlWasmSpanSet *set, HlMappedBuffer *buf, const char **err)
+hl_wasm_span_set_add(HlWasmSpanSet *set, HlMappedBuffer *buf, const char *name,
+                     const char **err)
 {
-    if (!set || !buf) {
+    if (!set || !buf || !name) {
         if (err) *err = "internal_error";
         return -1;
     }
@@ -65,6 +66,21 @@ hl_wasm_span_set_add(HlWasmSpanSet *set, HlMappedBuffer *buf, const char **err)
     if (set->count >= HL_WASM_MAX_SPANS) {
         if (err) *err = "too_many_spans";
         return -1;
+    }
+
+    /* name: NUL-terminated, 1..63 bytes (fits name[64] with the terminator).
+     * The binding rejects an embedded NUL before this; here `name` is a C string
+     * so its length is strlen. */
+    size_t nlen = strlen(name);
+    if (nlen == 0 || nlen >= sizeof(set->spans[0].name)) {
+        if (err) *err = "bad_name";
+        return -1;
+    }
+    for (int i = 0; i < set->count; i++) {
+        if (strcmp(set->spans[i].name, name) == 0) {
+            if (err) *err = "duplicate_name";
+            return -1;
+        }
     }
 
     /* the buffer must be a live, page-aligned window usable as a shared heap.
@@ -147,6 +163,7 @@ hl_wasm_span_set_add(HlWasmSpanSet *set, HlMappedBuffer *buf, const char **err)
     set->spans[set->count].buf = buf;
     set->spans[set->count].shared_heap = heap;
     set->spans[set->count].wasm_addr = 0; /* computed on attach */
+    memcpy(set->spans[set->count].name, name, nlen + 1); /* incl. NUL (nlen<64) */
     set->count++;
     set->total_logical += (uint64_t)buf->len;
     set->total_reserved += (uint64_t)buf->map_len;
