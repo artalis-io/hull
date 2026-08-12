@@ -897,6 +897,11 @@ e2e-spans-mmap: $(BUILDDIR)/hull
 e2e-spans-bind: $(BUILDDIR)/hull
 	sh tests/e2e_spans_bind.sh
 
+# Async span forwarding: pooled compute.async.call with spans, Lua + JS (item D.4).
+.PHONY: e2e-spans-async
+e2e-spans-async: $(BUILDDIR)/hull
+	sh tests/e2e_spans_async.sh
+
 e2e-compute-dev: $(BUILDDIR)/hull
 	sh tests/e2e_compute_dev.sh
 

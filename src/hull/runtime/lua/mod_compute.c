@@ -445,13 +445,14 @@ static int lua_compute_async_call(lua_State *L)
         lua_pop(L, 1);
     }
 
-    /* async: validate spans for a consistent error surface, but do NOT retain the
-     * borrowed names/array -- the deep-copy + pin before submit lands in item D.
-     * Execution of spans on an async call is unavailable until then. */
-    if (lua_istable(L, 3)) {
-        HlWasmSpanReq span_reqs[HL_WASM_MAX_SPANS];
-        (void)lua_parse_spans(L, 3, span_reqs);
-    }
+    /* Parse + validate spans (raises on bad input, BEFORE any op allocation). The
+     * reqs borrow Lua strings; they are DEEP-COPIED and the buffers submission-
+     * pinned into the op below (hl_worker_wasm_adopt_spans), so nothing Lua-managed
+     * crosses submit. Empty/absent -> a plain async call. */
+    HlWasmSpanReq parsed_spans[HL_WASM_MAX_SPANS];
+    int span_count = 0;
+    if (lua_istable(L, 3))
+        span_count = lua_parse_spans(L, 3, parsed_spans);
 
     wasm_clamp_opts(&opts, &lua->base);
 
@@ -489,6 +490,11 @@ static int lua_compute_async_call(lua_State *L)
         memcpy(op->input, input, input_len);
     }
     op->input_len = input_len;
+
+    /* Deep-copy + submission-pin the spans into the op. Any failure after this
+     * (ctx / continuation / submit) frees the op via hl_worker_wasm_op_free, which
+     * releases these pins. Nothing Lua-managed is retained. */
+    hl_worker_wasm_adopt_spans(op, parsed_spans, span_count);
 
     /* Create async ctx */
     HlAsyncCtx *ctx = hl_async_ctx_create(lua->server, lua->base.net_ctx, lua->base.alloc);
@@ -699,11 +705,12 @@ static int lua_wasm_inst_async_call(lua_State *L)
         if (lua_toboolean(L, -1)) want_buffer = 1;
         lua_pop(L, 1);
     }
-    /* async instance call: validate only; do NOT retain (deep-copy + pin is item D). */
-    if (lua_istable(L, 3)) {
-        HlWasmSpanReq span_reqs[HL_WASM_MAX_SPANS];
-        (void)lua_parse_spans(L, 3, span_reqs);
-    }
+    /* parse + validate spans (raises before op alloc); deep-copied + pinned into
+     * the op below. Empty/absent -> a plain async call. */
+    HlWasmSpanReq parsed_spans[HL_WASM_MAX_SPANS];
+    int span_count = 0;
+    if (lua_istable(L, 3))
+        span_count = lua_parse_spans(L, 3, parsed_spans);
     wasm_clamp_opts(&opts, &lua->base);
 
     /* Allocate worker op */
@@ -728,6 +735,10 @@ static int lua_wasm_inst_async_call(lua_State *L)
         memcpy(op->input, input, input_len);
     }
     op->input_len = input_len;
+
+    /* Deep-copy + submission-pin the spans into the op (released by
+     * hl_worker_wasm_op_free on any exit). */
+    hl_worker_wasm_adopt_spans(op, parsed_spans, span_count);
 
     /* Set busy before dispatch (event loop thread) */
     atomic_store(&pi->busy, 1);

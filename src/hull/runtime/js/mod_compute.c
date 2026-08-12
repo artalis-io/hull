@@ -513,15 +513,6 @@ static JSValue js_compute_async_call(JSContext *ctx, JSValueConst this_val,
         JS_FreeValue(ctx, val);
     }
 
-    /* async: validate spans for a consistent error surface, but do NOT retain the
-     * borrowed names/array -- deep-copy + pin before submit lands in item D. */
-    if (argc > 2 && JS_IsObject(argv[2])) {
-        HlWasmSpanReq span_reqs[HL_WASM_MAX_SPANS];
-        int sn = js_parse_spans(ctx, argv[2], span_reqs);
-        if (sn < 0) return JS_EXCEPTION;
-        js_free_span_names(ctx, span_reqs, sn);
-    }
-
     js_wasm_clamp_opts(&opts, &js->base);
 
     /* Pre-load module on event loop thread (cache writes are not thread-safe) */
@@ -567,6 +558,22 @@ static JSValue js_compute_async_call(JSContext *ctx, JSValueConst this_val,
 
     if (input_is_string) JS_FreeCString(ctx, (const char *)input);
     JS_FreeCString(ctx, name);
+
+    /* Parse + validate spans (owned name copies), deep-copy + submission-pin them
+     * into the op, then free the parse copies. On bad input free the op (releasing
+     * any pins) and throw. Empty/absent -> a plain async call. Every failure path
+     * below (ctx / promise / cont / submit) frees the op, releasing the pins. */
+    if (argc > 2 && JS_IsObject(argv[2])) {
+        HlWasmSpanReq parsed[HL_WASM_MAX_SPANS];
+        int sn = js_parse_spans(ctx, argv[2], parsed);
+        if (sn < 0) {
+            hl_worker_wasm_op_free(op);
+            free(op);
+            return JS_EXCEPTION;
+        }
+        hl_worker_wasm_adopt_spans(op, parsed, sn);
+        js_free_span_names(ctx, parsed, sn);
+    }
 
     /* Create async ctx */
     HlAsyncCtx *actx = hl_async_ctx_create(js->server, js->base.net_ctx, js->base.alloc);
@@ -883,14 +890,6 @@ static JSValue js_wasm_inst_async_call(JSContext *ctx, JSValueConst this_val,
         if (JS_ToBool(ctx, val)) want_buffer = 1;
         JS_FreeValue(ctx, val);
     }
-    /* async instance call: validate only; do NOT retain (deep-copy + pin is item D). */
-    if (argc > 1 && JS_IsObject(argv[1])) {
-        HlWasmSpanReq span_reqs[HL_WASM_MAX_SPANS];
-        int sn = js_parse_spans(ctx, argv[1], span_reqs);
-        if (sn < 0) return JS_EXCEPTION;
-        js_free_span_names(ctx, span_reqs, sn);
-    }
-
     js_wasm_clamp_opts(&opts, &js->base);
 
     /* Allocate op */
@@ -920,6 +919,20 @@ static JSValue js_wasm_inst_async_call(JSContext *ctx, JSValueConst this_val,
     op->input_len = input_len;
 
     if (input_is_string) JS_FreeCString(ctx, (const char *)input);
+
+    /* Parse + validate spans, deep-copy + submission-pin into the op, free the
+     * parse copies. On bad input free the op (busy not yet set) and throw. */
+    if (argc > 1 && JS_IsObject(argv[1])) {
+        HlWasmSpanReq parsed[HL_WASM_MAX_SPANS];
+        int sn = js_parse_spans(ctx, argv[1], parsed);
+        if (sn < 0) {
+            hl_worker_wasm_op_free(op);
+            free(op);
+            return JS_EXCEPTION;
+        }
+        hl_worker_wasm_adopt_spans(op, parsed, sn);
+        js_free_span_names(ctx, parsed, sn);
+    }
 
     /* Set busy before dispatch */
     atomic_store(&pi->busy, 1);

@@ -30,6 +30,7 @@
 #include "hull/cap/wasm_spans.h"
 #include "hull/cap/wasm_buffer.h"
 #include "hull/cap/wasm_data.h"
+#include "hull/worker_wasm.h"
 #include "hull/cap/fs.h"
 #include "hull/vfs.h"
 #include "hull/utils/alloc.h"
@@ -1219,6 +1220,128 @@ UTEST(wasm_spans, d3_reentrancy_double_attach_fails_closed)
     hl_cap_fs_munmap(b); hl_cap_fs_munmap(held);
     hl_cap_wasm_instance_destroy(pi);
     hl_cap_wasm_destroy(&cache);
+    teardown_dir();
+}
+
+/* ══ D.4: async submission-pin ownership (HlWorkerWasmOp) ═══════════════════════
+ * The binding deep-copies names + submission-pins buffers into the op before
+ * submit (hl_worker_wasm_adopt_spans); the pins release in hl_worker_wasm_op_free
+ * -- reached on completion, cancel-before-start, and cancel-during. These drive
+ * that op-level lifecycle directly (deterministic, no event loop needed).       */
+
+/* ── adopt pins + deep-copies; op_free releases. No Lua/JS pointer retained. ──── */
+UTEST(wasm_spans, d4_op_pin_lifecycle)
+{
+    setup();
+    ASSERT_EQ(write_file("a.bin", 40000), 0);
+    HlMappedBuffer *b0 = hl_cap_fs_mmap_window(&cfg, "a.bin", 0, 4096, NULL, NULL);
+    HlMappedBuffer *b1 = hl_cap_fs_mmap_window(&cfg, "a.bin", 8192, 4096, NULL, NULL);
+    ASSERT_TRUE(b0 && b1);
+
+    /* names on a scratch buffer that we clobber after adopt, proving the op OWNS
+     * its copy (no pointer into caller memory survives). */
+    char nm0[64], nm1[64];
+    snprintf(nm0, sizeof(nm0), "source");
+    snprintf(nm1, sizeof(nm1), "landmarks");
+    HlWasmSpanReq reqs[2] = { { nm0, b0 }, { nm1, b1 } };
+
+    HlWorkerWasmOp *op = calloc(1, sizeof(HlWorkerWasmOp));
+    ASSERT_TRUE(op != NULL);
+    hl_worker_wasm_adopt_spans(op, reqs, 2);
+
+    ASSERT_EQ(op->span_pins, 2);
+    ASSERT_EQ(b0->borrow_count, 1);          /* submission-pinned */
+    ASSERT_EQ(b1->borrow_count, 1);
+    ASSERT_EQ(op->opts.span_count, 2);
+    ASSERT_TRUE(op->opts.spans == op->span_reqs);      /* op-owned array */
+    ASSERT_TRUE(op->span_reqs[0].name == op->span_names[0]); /* op-owned name */
+    ASSERT_STREQ(op->span_names[0], "source");
+    ASSERT_STREQ(op->span_names[1], "landmarks");
+    ASSERT_TRUE(op->span_reqs[0].buf == b0);
+
+    /* clobber the caller's name storage: the op copy is unaffected. */
+    memset(nm0, 'Z', sizeof(nm0)); memset(nm1, 'Z', sizeof(nm1));
+    ASSERT_STREQ(op->span_names[0], "source");
+
+    hl_worker_wasm_op_free(op);
+    ASSERT_EQ(op->span_pins, 0);
+    ASSERT_TRUE(op->opts.spans == NULL);
+    ASSERT_EQ(op->opts.span_count, 0);
+    ASSERT_EQ(b0->borrow_count, 0);          /* released */
+    ASSERT_EQ(b1->borrow_count, 0);
+    free(op);
+
+    hl_cap_fs_munmap(b0); hl_cap_fs_munmap(b1);
+    teardown_dir();
+}
+
+/* ── empty list -> a plain call: no pins, opts.spans stays NULL. ─────────────── */
+UTEST(wasm_spans, d4_op_empty_no_pins)
+{
+    setup();
+    HlWorkerWasmOp *op = calloc(1, sizeof(HlWorkerWasmOp));
+    ASSERT_TRUE(op != NULL);
+    hl_worker_wasm_adopt_spans(op, NULL, 0);
+    ASSERT_EQ(op->span_pins, 0);
+    ASSERT_TRUE(op->opts.spans == NULL);
+    ASSERT_EQ(op->opts.span_count, 0);
+    hl_worker_wasm_op_free(op);
+    free(op);
+    teardown_dir();
+}
+
+/* ── closing/GC'ing the buffer immediately after submission is safe: the pin
+ *    defers munmap until op_free (queued-worker race at the op level). ────────── */
+UTEST(wasm_spans, d4_op_close_after_submit_defers_munmap)
+{
+    setup();
+    ASSERT_EQ(write_file("a.bin", 40000), 0);
+    HlMappedBuffer *b = hl_cap_fs_mmap_window(&cfg, "a.bin", 8192, 256, NULL, NULL);
+    ASSERT_TRUE(b != NULL);
+    char nm[64]; snprintf(nm, sizeof(nm), "src");
+    HlWasmSpanReq req = { nm, b };
+
+    HlWorkerWasmOp *op = calloc(1, sizeof(HlWorkerWasmOp));
+    ASSERT_TRUE(op != NULL);
+    hl_worker_wasm_adopt_spans(op, &req, 1);
+    ASSERT_EQ(b->borrow_count, 1);
+
+    /* close the buffer while the op holds it (as a handler might right after
+     * compute.async.call): munmap is deferred, the bytes stay readable. */
+    hl_cap_fs_munmap(b);
+    ASSERT_EQ(b->pending_free, 1);
+    ASSERT_EQ(b->closed, 0);
+    ASSERT_EQ((int)((const unsigned char *)b->addr)[0], (int)(8192 & 0xff));
+
+    hl_worker_wasm_op_free(op);   /* releases the last pin -> deferred munmap runs */
+    free(op);
+    teardown_dir();
+}
+
+/* ── two concurrent ops may share the same read-only buffer: pins stack, each
+ *    op_free releases one, back to baseline. ─────────────────────────────────── */
+UTEST(wasm_spans, d4_op_concurrent_shared_buffer)
+{
+    setup();
+    ASSERT_EQ(write_file("a.bin", 40000), 0);
+    HlMappedBuffer *b = hl_cap_fs_mmap_window(&cfg, "a.bin", 0, 4096, NULL, NULL);
+    ASSERT_TRUE(b != NULL);
+    char nm[64]; snprintf(nm, sizeof(nm), "shared");
+    HlWasmSpanReq req = { nm, b };
+
+    HlWorkerWasmOp *op1 = calloc(1, sizeof(HlWorkerWasmOp));
+    HlWorkerWasmOp *op2 = calloc(1, sizeof(HlWorkerWasmOp));
+    ASSERT_TRUE(op1 && op2);
+    hl_worker_wasm_adopt_spans(op1, &req, 1);
+    hl_worker_wasm_adopt_spans(op2, &req, 1);
+    ASSERT_EQ(b->borrow_count, 2);           /* both pin the same RO buffer */
+
+    hl_worker_wasm_op_free(op1); free(op1);
+    ASSERT_EQ(b->borrow_count, 1);
+    hl_worker_wasm_op_free(op2); free(op2);
+    ASSERT_EQ(b->borrow_count, 0);
+
+    hl_cap_fs_munmap(b);
     teardown_dir();
 }
 

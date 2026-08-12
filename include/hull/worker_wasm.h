@@ -14,6 +14,7 @@
 
 #include "hull/cap/wasm.h"
 #include "hull/cap/wasm_buffer.h"
+#include "hull/cap/wasm_spans.h" /* HL_WASM_MAX_SPANS */
 #include "hull/limits/core.h"  /* HL_WORKER_ERR_SIZE */
 #include <stdatomic.h>
 #include <stddef.h>
@@ -64,7 +65,25 @@ typedef struct HlWorkerWasmOp {
     int            error_code;    /* HL_WASM_ERR_* */
     char           error_msg[HL_WORKER_ERR_SIZE];
     atomic_int     cancelled;
+
+    /* Per-invocation mapped spans (mapped-spans item D.4). Deep-copied +
+     * submission-pinned at the binding (event loop) before submit: span_names
+     * OWNS the name bytes, span_reqs[i].name points into span_names[i], and each
+     * span_reqs[i].buf is borrow-pinned (span_pins counts how many). opts.spans
+     * points at span_reqs (op-owned), so no Lua/JS-managed pointer crosses
+     * submission. The pins are released in hl_worker_wasm_op_free -- AFTER the
+     * worker call's own span-set teardown -- on success, trap, and cancellation. */
+    HlWasmSpanReq span_reqs[HL_WASM_MAX_SPANS];
+    char          span_names[HL_WASM_MAX_SPANS][64];
+    int           span_pins;
 } HlWorkerWasmOp;
+
+/* Adopt validated span requests into the op: deep-copy each name into the op,
+ * point span_reqs at the owned names + the caller's buffers, submission-pin every
+ * buffer, and set opts.spans/opts.span_count. Runs on the event loop, after op
+ * allocation, before submit. n == 0 leaves the op a plain (no-spans) call. The
+ * pins are released by hl_worker_wasm_op_free. */
+void hl_worker_wasm_adopt_spans(HlWorkerWasmOp *op, const HlWasmSpanReq *reqs, int n);
 
 /* Submit a compute.async.call operation to the thread pool.
  * Returns 0 on success, -1 on error (pool full or NULL). */
