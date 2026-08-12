@@ -203,6 +203,16 @@ $(BUILDDIR)/gen_gsub_aot_sw.h: $(TESTDIR)/hull/fixtures/gsub.wasm | $(BUILDDIR)
 $(BUILDDIR)/test_wasm_guarded_subrange: INCLUDES += -I$(BUILDDIR)
 $(BUILDDIR)/test_wasm_guarded_subrange: $(BUILDDIR)/gen_gsub_aot_sw.h
 
+# Mapped-span lifecycle (checkpoint 2). SW-bound AOT fixture of the same
+# store_i32/load_i32 module the test embeds, so the span lifecycle + Design B
+# guest-window checks run under AOT too (skipped when wamrc is absent; the
+# wasm-readonly-heap-aot CI job builds wamrc and asserts the AOT case is NOT
+# skipped).
+$(BUILDDIR)/gen_ro_heap_span_aot.h: $(TESTDIR)/hull/fixtures/ro_heap.wasm | $(BUILDDIR)
+	$(call GEN_GSUB_AOT,$@,--bounds-checks=1,ro_heap_span_aot)
+$(BUILDDIR)/test_wasm_spans: INCLUDES += -I$(BUILDDIR)
+$(BUILDDIR)/test_wasm_spans: $(BUILDDIR)/gen_ro_heap_span_aot.h
+
 # Top-level tests (tests/hull/)
 $(BUILDDIR)/test_parse_size: $(TESTDIR)/hull/test_parse_size.c $(TEST_COMMON_DEPS) | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< $(TEST_COMMON_LIBS)
@@ -563,7 +573,8 @@ tsan:
 tsan-shared-heap:
 	$(MAKE) clean
 	$(MAKE) TSAN=1 WAMR_TSAN=1 $(BUILDDIR)/test_wasm_shared_heap_destroy \
-		$(BUILDDIR)/test_wasm_guarded_subrange
+		$(BUILDDIR)/test_wasm_guarded_subrange \
+		$(BUILDDIR)/test_wasm_spans
 	@nm $(BUILDDIR)/wamr_core/iwasm/common/wasm_memory.o 2>/dev/null | grep -q '__tsan' \
 		|| { echo "FAIL: wasm_memory.o is NOT TSan-instrumented (WAMR_TSAN not applied)"; exit 1; }
 	@echo "── TSan (WAMR-instrumented): shared-heap destroy 8-case matrix ──"
@@ -572,6 +583,9 @@ tsan-shared-heap:
 	@echo "── TSan (WAMR-instrumented): guarded-subrange access matrix (patch 0004) ──"
 	TSAN_OPTIONS="halt_on_error=1 second_deadlock_stack=1" \
 		$(BUILDDIR)/test_wasm_guarded_subrange
+	@echo "── TSan (WAMR-instrumented): mapped-span attachment lifecycle ──"
+	TSAN_OPTIONS="halt_on_error=1 second_deadlock_stack=1" \
+		$(BUILDDIR)/test_wasm_spans
 
 # ── Fuzzing (libFuzzer + ASan/UBSan) ────────────────────────────────
 # Mirrors vendor/keel/fuzz. Requires clang with the libFuzzer runtime.
