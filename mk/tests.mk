@@ -892,6 +892,11 @@ e2e-compute: $(BUILDDIR)/hull
 e2e-spans-mmap: $(BUILDDIR)/hull
 	sh tests/e2e_spans_mmap.sh
 
+# compute.call({spans=...}) parse + validation, Lua + JS (mapped-spans 3a, item C).
+.PHONY: e2e-spans-bind
+e2e-spans-bind: $(BUILDDIR)/hull
+	sh tests/e2e_spans_bind.sh
+
 e2e-compute-dev: $(BUILDDIR)/hull
 	sh tests/e2e_compute_dev.sh
 
