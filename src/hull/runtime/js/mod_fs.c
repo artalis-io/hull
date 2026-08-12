@@ -146,9 +146,39 @@ static JSValue js_fs_mmap(JSContext *ctx, JSValueConst this_val,
     const char *path = JS_ToCString(ctx, argv[0]);
     if (!path) return JS_EXCEPTION;
 
+    /* Optional second arg { offset, length } selects a windowed, page-aligned
+     * mapping (mapped-spans). A bare path stays whole-file. */
     const char *err_msg = NULL;
-    HlMappedBuffer *buf = hl_cap_fs_mmap(js->base.fs_cfg, path,
-                                          js->base.alloc, &err_msg);
+    HlMappedBuffer *buf;
+    if (argc >= 2 && JS_IsObject(argv[1])) {
+        int64_t off = 0, length = 0;
+        JSValue vo = JS_GetPropertyStr(ctx, argv[1], "offset");
+        if (!JS_IsUndefined(vo) && JS_ToInt64(ctx, &off, vo) < 0) {
+            JS_FreeValue(ctx, vo); JS_FreeCString(ctx, path);
+            return JS_EXCEPTION;
+        }
+        JS_FreeValue(ctx, vo);
+        JSValue vl = JS_GetPropertyStr(ctx, argv[1], "length");
+        if (JS_IsUndefined(vl)) {
+            JS_FreeCString(ctx, path);
+            return JS_ThrowTypeError(ctx, "fs.mmap: window requires a length");
+        }
+        if (JS_ToInt64(ctx, &length, vl) < 0) {
+            JS_FreeValue(ctx, vl); JS_FreeCString(ctx, path);
+            return JS_EXCEPTION;
+        }
+        JS_FreeValue(ctx, vl);
+        if (off < 0 || length <= 0) {
+            JS_FreeCString(ctx, path);
+            return JS_ThrowRangeError(ctx,
+                "fs.mmap: offset must be >= 0 and length > 0");
+        }
+        buf = hl_cap_fs_mmap_window(js->base.fs_cfg, path,
+                                    (uint64_t)off, (uint64_t)length,
+                                    js->base.alloc, &err_msg);
+    } else {
+        buf = hl_cap_fs_mmap(js->base.fs_cfg, path, js->base.alloc, &err_msg);
+    }
     JS_FreeCString(ctx, path);
 
     if (!buf)
@@ -174,7 +204,7 @@ static int js_fs_module_init(JSContext *ctx, JSModuleDef *m)
     JS_SetPropertyStr(ctx, fs, "write",
                       JS_NewCFunction(ctx, js_fs_write, "write", 2));
     JS_SetPropertyStr(ctx, fs, "mmap",
-                      JS_NewCFunction(ctx, js_fs_mmap, "mmap", 1));
+                      JS_NewCFunction(ctx, js_fs_mmap, "mmap", 2));
     JS_SetModuleExport(ctx, m, "fs", fs);
     return 0;
 }

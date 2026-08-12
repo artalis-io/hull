@@ -111,9 +111,30 @@ static int lua_fs_mmap(lua_State *L)
 
     const char *path = luaL_checkstring(L, 1);
 
+    /* Optional second arg { offset = N, length = M } selects a windowed,
+     * page-aligned mapping (mapped-spans). A bare path stays whole-file. */
     const char *err_msg = NULL;
-    HlMappedBuffer *buf = hl_cap_fs_mmap(lua->base.fs_cfg, path,
-                                          lua->base.alloc, &err_msg);
+    HlMappedBuffer *buf;
+    if (lua_type(L, 2) == LUA_TTABLE) {
+        lua_getfield(L, 2, "offset");
+        lua_Integer off = luaL_optinteger(L, -1, 0);
+        lua_pop(L, 1);
+        lua_getfield(L, 2, "length");
+        if (lua_isnil(L, -1)) {
+            lua_pop(L, 1);
+            return luaL_error(L, "fs.mmap: window requires a length");
+        }
+        lua_Integer length = lua_tointeger(L, -1);
+        lua_pop(L, 1);
+        if (off < 0 || length <= 0)
+            return luaL_error(L, "fs.mmap: offset must be >= 0 and length > 0");
+        buf = hl_cap_fs_mmap_window(lua->base.fs_cfg, path,
+                                    (uint64_t)off, (uint64_t)length,
+                                    lua->base.alloc, &err_msg);
+    } else {
+        buf = hl_cap_fs_mmap(lua->base.fs_cfg, path,
+                             lua->base.alloc, &err_msg);
+    }
     if (!buf) {
         lua_pushnil(L);
         lua_pushstring(L, err_msg ? err_msg : "mmap failed");

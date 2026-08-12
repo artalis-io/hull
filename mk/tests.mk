@@ -887,6 +887,11 @@ e2e-agent-api: $(BUILDDIR)/hull
 e2e-compute: $(BUILDDIR)/hull
 	sh tests/e2e_compute.sh
 
+# Windowed fs.mmap({offset,length}) binding (mapped-spans checkpoint 3a, item A).
+.PHONY: e2e-spans-mmap
+e2e-spans-mmap: $(BUILDDIR)/hull
+	sh tests/e2e_spans_mmap.sh
+
 e2e-compute-dev: $(BUILDDIR)/hull
 	sh tests/e2e_compute_dev.sh
 
