@@ -111,14 +111,40 @@ host-side `struct __attribute__((packed))` and a guest-side offset decoder agree
   each query and validates `version`/`struct_size` on the result.
 - **Out-of-range index (`idx >= count`, `idx < -1`):** returns `0` (no write). `0`
   is unambiguous vs. a successful write (which returns `struct_size >= 96`).
-- **Invalid pointer / undersized destination / malformed query:** returns a
-  **distinct negative** error (`-1`). "Invalid pointer" = `wasm_runtime_validate_app_addr(inst,
-  ptr, sizeof(HlSpanMetaV1))` fails; "undersized" is subsumed by that validate
-  (the dest must admit a full record); "malformed" = any other unexpected arg
-  combination.
+- **Invalid pointer / malformed query:** returns `-1` (**distinct negative**). This
+  is ONLY: the initial `[ptr, ptr+4)` validate fails; OR the advertised `cap` is
+  outside `[4, 4096]`; OR the `[ptr, ptr+cap)` validate fails. **There is no
+  "undersized destination" error** — a `cap < 96` is a LEGAL prefix write (the
+  cbSize rule above): the host writes `min(cap, required)` bytes and returns the
+  full required size, never requiring 96 writable bytes. (The single validation
+  rule is: validate 4 bytes → read `cap` → bound `cap` → validate exactly `cap`
+  bytes → write `min(cap, required)`. The host NEVER validates or writes
+  `sizeof(HlSpanMetaV1)` bytes unconditionally; that was an earlier contradictory
+  draft and is removed.) Forward-compatible truncation is the SDK's job: the SDK
+  MAY require the returned prefix to cover every v1 field it consumes, and errors
+  if `struct_size` or the written length is short of that.
 - **No active span set:** `tl_host_ctx.spans == NULL` → the count query returns `0`
   and any index returns `0` (indistinguishable from an empty set — correct: there
   is nothing to report).
+
+**Pointer width — the destination record must live below 4 GiB (Memory64, cut 1).**
+`host_call` is `(i32,i32,i32)->i32`; the C handler receives `int32_t ptr`. The
+record's 64-bit `base`/`len`/`foffset` fields solve span-ADDRESS representation, but
+NOT the address of the DESTINATION record itself. So for cut 1, with the fixed
+signature retained:
+- `ptr` is defined as an **unsigned 32-bit app offset**: the handler treats it as
+  `(uint32_t)ptr` with **no sign extension**, and validates against linear memory as
+  a 32-bit offset. A "negative" `int32_t` is simply a high unsigned offset and is
+  rejected by the `validate_app_addr` gate like any other out-of-range offset — it
+  is never sign-extended into a 64-bit address.
+- A **Memory64 guest MUST place its `HlSpanMetaV1` scratch record below 4 GiB**;
+  a destination at or above `UINT32_MAX` is unreachable through this opcode and is
+  a documented cut-1 limitation (span DATA can sit anywhere in the 64-bit space;
+  only the tiny metadata scratch is constrained). The span `base` reported IN the
+  record is still full 64-bit, so a Memory64 plugin addresses its window normally.
+- Tests: an AOT Memory64 case with a low (`< 4 GiB`) destination that succeeds AND a
+  high-address destination that is cleanly rejected (`-1`, no sign-extension, no
+  host crash).
 
 **LOCKED set-build + lifecycle invariants (checkpoint 3a wiring, tied to §3.5/§3.7):**
 
@@ -171,23 +197,89 @@ around the existing `max_input`/`heap`/`gas` parse ~line 185) and the JS paralle
 `HlMappedBuffer*`). Accepted by `compute.call`, `compute.async.call`, and
 `instance:call`.
 
-**D. Lifecycle integration in `cap/wasm.c` (§3.5).** In `hl_cap_wasm_call_buf` (+
-the async and persistent-instance variants — three call sites): when `opts->spans`
-present →
-- enforce **D1** (reject if `mod->shared_data` active → `"spans_with_segments"`);
-- `hl_wasm_span_set_init(&set, mod->is_memory64)` on the executing thread
-  (event-loop for sync, the worker for async, the owner for persistent — matches
-  the checkpoint-2 owner model + the async borrow-pin);
-- add each requested span (validated name → borrow + RO heap), `attach` to the
-  instance; on any add/attach failure, teardown-rollback and return;
-- `tl_host_ctx.spans = &set` (snapshot);
-- run `hull_process`;
+**LOCKED public-option contract (validated in the binding, before any C-layer
+work):**
+- **`span_count` bounds + consistency.** `0 <= span_count <= HL_WASM_MAX_SPANS`
+  (16). `spans == NULL` iff `span_count == 0` (a NULL array with a positive count,
+  or a non-NULL array with count 0, is an internal error). A `span_count < 0` or
+  `> 16` is rejected in the binding.
+- **`spans={}` (empty or absent) is a PLAIN call**, not a `no_spans` error: no span
+  set is created and the call runs exactly as today. `no_spans` is only the
+  internal `hl_wasm_span_set_attach`-on-empty guard (unreachable from the public
+  path, which never attaches an empty set).
+- **Per-entry validation in the binding:** each entry must have a non-empty, valid
+  name (see D2 name rules — `1..63` bytes, no embedded NUL, unique) and a live
+  `MappedBuffer`. A **NULL entry**, a **closed buffer** (`buf->closed`), or a
+  **whole-file mapping whose `map_len` is not page-aligned** is rejected with a
+  clear error before submission. (The checkpoint-2 `hl_wasm_span_set_add` already
+  fails `bad_buffer` on a non-page-aligned `map_len` / closed buffer; the binding
+  rejects earlier with a user-facing message so the failure names the offending
+  span.) A windowed `fs.mmap({offset,length})` always yields a page-aligned
+  `map_len`; a whole-file `fs.mmap(path)` is only valid as a span when the file's
+  length is already a page multiple — otherwise the caller must window it.
+
+**D. Lifecycle integration in `cap/wasm.c` (§3.5).** Three call sites: sync
+`hl_cap_wasm_call_buf`, the async worker path, and `instance:call`.
+
+**D1 is checked ATOMICALLY against segment mutation.** The `mod->shared_data`
+check and the span attach happen under `mod->mutex` in the same window that
+`pool_acquire` already takes (it snapshots `shared_data`/`chain_head` under
+`mod->mutex`). `compute.segment` mutation drains the pool + rewrites
+`shared_data` under the SAME `mod->mutex`, so reading "no active segments" and
+committing to a span attach cannot race a concurrent `compute.segment`. (The
+attach itself and the WASM call run after the snapshot, as segments do today; D1
+only needs the *decision* to be atomic with the segment presence it reads.)
+
+**Sync + persistent path** (executing thread owns everything):
+- under `mod->mutex`: enforce **D1** (reject if `mod->shared_data` active →
+  `"spans_with_segments"`);
+- `hl_wasm_span_set_init(&set, mod->is_memory64)` on the executing thread;
+- add each requested span (validated name → borrow + RO heap), `attach`; on any
+  add/attach failure, teardown-rollback and return;
+- `tl_host_ctx.spans = &set` (snapshot); run `hull_process`;
 - clear `tl_host_ctx.spans`, then **teardown on ALL exit paths** (success
   poolable/non-poolable, gas, trap, error) **before** `hl_wasm_pool_release`,
   including immediately after the call on the zero-copy poolable path (spans back
   the *input*, consumed by the call; the output buffer wraps linear memory with its
-  own lifetime). Async teardown runs on the worker at job completion (success or
-  trap); the borrow-pin defers `munmap` across a mid-flight `buffer:close()`.
+  own lifetime).
+
+**Async path — submission-time ownership model (finding: the queued-worker race).**
+`HlWasmCallOpts` is value-copied into the worker op, but a `HlWasmSpanReq` array
+holds **borrowed** `name`/`HlMappedBuffer*` pointers, and the span set (its first
+borrow) is created LATER on the worker. Between submission and worker execution,
+Lua/JS can `close()` or GC the mapped buffer — invalidating the mapping AND the
+pointer. So the binding must take ownership AT SUBMISSION, on the event-loop
+thread, before the job is queued:
+
+1. **Deep-copy** the request array into `HlWorkerWasmOp`: fixed `char
+   names[HL_WASM_MAX_SPANS][64]` (copied, not borrowed) + `HlMappedBuffer
+   *bufs[HL_WASM_MAX_SPANS]` + `int span_count`. No pointer into Lua/JS-owned
+   memory survives submission.
+2. **Submission pin:** `hl_cap_fs_mmap_borrow(buf)` on every buffer **before**
+   `pool_submit`. The checkpoint-1 borrow refcount defers BOTH `munmap` AND the
+   `HlMappedBuffer` free (`pending_free` + `borrow_count`): the struct and its
+   mapping both stay alive while pinned, so a mid-flight `buffer:close()`/GC is
+   safe. This is what keeps "the allocation itself alive, not merely its mapping."
+3. **Rollback on any submission-time failure** (parse, deep-copy, op alloc, or
+   `pool_submit` returns error): release every submission pin taken so far and free
+   the op — no buffer left pinned, no partial submission.
+4. **Worker span set:** the worker calls `hl_wasm_span_set_init` (owner = the
+   worker thread) and `add`s each `bufs[i]` — this takes the **span-set's own**
+   borrow (a SECOND, independent pin), attaches, runs, and tears down on every exit
+   (success/trap), releasing the span-set borrows. The two pin layers are kept
+   **separate and balanced**: submission pins are the event-loop's; span-set
+   borrows are the worker's.
+5. **Release submission pins after worker teardown** — on the event loop when the
+   job is reaped, on BOTH success and **cancellation** (a cancelled job that never
+   ran the worker span set still releases its submission pins). `tl_host_ctx.spans`
+   is cleared before the worker teardown as in the sync path.
+
+Net: a buffer is pinned continuously from submission → reap (submission layer),
+with the span-set borrow nested inside worker execution; no window exists in which
+the buffer can be unmapped/freed while the op references it. Test: a **queued
+worker whose buffer is `close()`d/GC'd before execution starts** still runs and
+reads correct bytes (the pre-worker race the plain `buffer:close()` mid-flight test
+would miss).
 
 **E. Metadata host-call (§3.3).** `HL_WASM_OP_SPAN_INFO = 0x04` in
 `host_call_handler` (`cap/wasm.c`), writing `HlSpanMetaV1` per the D2 wire ABI via
@@ -197,36 +289,102 @@ LOG/CALLBACK paths). Invocation-scoped and fail-closed per the D2 semantics.
 **F. SDK header `hull/wasm/span.h` (§3.2, §3.3).** Overflow-safe, alignment-safe
 inline accessors (`__builtin_memcpy` into a local; `off <= len && w <= len - off`),
 explicit-byte-order (`u/i/f{8,16,32,64}`, `le/be{16,32,64}`); the
-`HullSpan{base,len,foffset,flags}` type; `HL_SPAN_META_V1_SIZE = 96`; a
-`hull_span_setup()` that issues the §3.3 query once per span (count query, then one
-record per index), validates `version`/`struct_size`, caches into `HullSpan`, and
-builds the name→index map — no host calls in the scan loop. Compiles **natively**
-over an `HlBufferView` for differential tests. Shipped as a sibling of the
-per-module `hull_compute.h`, refreshable via `hull compute refresh-header`.
+`HullSpan{base,len,foffset,flags}` type; `HL_SPAN_META_V1_SIZE = 96`.
+
+**LOCKED SDK ownership + API (freestanding — no malloc, caller-provided storage):**
+- **`hull_span_setup()` discovers ALL spans in one pass**, not one requested name:
+  it issues the count query `(0x04,0,-1)` once, then one record query per index,
+  validates `version`/`struct_size`, and fills a caller-provided `HullSpan` array.
+  Name resolution is a separate, cheap lookup over the cached array (below). This
+  keeps "no host calls in the scan loop": setup runs once at plugin start; every
+  subsequent access is pure inline check + native read.
+- **Signature (caller-owned fixed-capacity storage):**
+  ```c
+  /* Fills out[0..min(count,out_cap)); returns the TRUE span count (>= 0),
+   * or a negative HULL_SPAN_ERR_* on a version/struct_size/query failure.
+   * A return value > out_cap means the caller's array was too small -- the
+   * first out_cap spans are valid; the caller sized it too small. */
+  int hull_span_setup(HullSpan *out, int out_cap);
+  ```
+  The plugin declares `HullSpan spans[HL_WASM_MAX_SPANS];` (or its own smaller
+  cap) on its stack/bss and passes it in. The header allocates nothing.
+- **More spans than capacity:** `hull_span_setup` writes the first `out_cap` and
+  returns the true `count`; `count > out_cap` is the caller's signal it
+  under-sized. No overflow, no truncation-in-silence.
+- **Name lookup is a linear scan** over the (≤16) cached `HullSpan` records
+  (`hull_span_find(const HullSpan *spans, int n, const char *name)` → index, or
+  `-1` for an **unknown name**). ≤16 entries → a real hash map is unwarranted;
+  linear is simpler in a freestanding header and the array is read once at setup.
+  Each record carries its `name` (the D2 wire field), so the scan needs no extra
+  host calls.
+- **Per-query capacity handshake:** `hull_span_setup` sets `struct_size =
+  HL_SPAN_META_V1_SIZE` in each scratch record before the query (the cbSize
+  convention), checks the returned `struct_size` covers every v1 field it reads,
+  and errors (`HULL_SPAN_ERR_VERSION`) otherwise.
+
+Compiles **natively** over an `HlBufferView` for differential tests. Shipped as a
+sibling of the per-module `hull_compute.h`, refreshable via `hull compute
+refresh-header`.
 
 ## 2. Test plan (§5)
 
-- **C-level (`test_wasm_spans.c` / new `test_wasm_spans_call.c`):**
-  `HlWasmCallOpts.spans` plumbing end-to-end through `hl_cap_wasm_call_buf`;
-  metadata query — count via `(0x04,0,-1)`; a valid index writes exactly a record
-  and returns `struct_size`; out-of-range index returns `0`; invalid/undersized
-  dest returns `-1`; version/struct_size the SDK checks; **post-detach /
-  `spans==NULL` query returns 0** (proving `tl_host_ctx.spans` is cleared before
-  teardown); D1 `"spans_with_segments"` rejection; duplicate-name rejection;
-  async pinning across `buffer:close()`; reentrancy rejection (spans on an
-  in-flight instance). The isolation / rollback / borrow-baseline invariants are
-  already covered by checkpoint 2.
-- **`fs.mmap` window binding:** offset/length parse, EOF clamp, `> 1 GiB` rejected,
-  non-page-aligned offset (Lua + JS).
-- **e2e (`tests/e2e_spans.sh`, both runtimes, interp + AOT):** a real plugin using
-  `hull/wasm/span.h` maps a file window via `spans={}`, reads/verifies bytes, reads
-  one past the window (traps → structured error), scans a `> 4 GiB` file as
-  repeated windows checking `foffset`. Reuse the wamrc-AOT CI leg that already gates
-  the span AOT case.
-- **Differential:** the same `span.h` accessors native vs. WASM over identical
-  bytes.
-- **Sanitizers/fuzz:** ASan/UBSan on the call path; fuzz the metadata-record offset
-  math and the SDK bounds check.
+**Metadata host-call (`test_wasm_spans_call.c`), the D2 semantics:**
+- count via `(0x04,0,-1)`; valid index writes a record and returns `struct_size`;
+  out-of-range index returns `0`; **no active set / post-detach / `spans==NULL`
+  query returns `0`** (proving `tl_host_ctx.spans` is cleared before teardown).
+- **cbSize matrix:** advertised `cap` ∈ `{4, 8, 72, 95, 96, 128}` each writes
+  `min(cap, 96)` bytes and returns `96` (a `cap<96` prefix write is legal, NOT an
+  error); malformed `cap` (`<4`, `>4096`) → `-1`; a dest buffer **ending exactly at
+  the linear-memory bound** (both the 4-byte pre-read and the `cap`-byte write at
+  the boundary) — in-bounds succeeds, one past → `-1`, no host read/write OOB.
+- **Memory64 dest width:** an AOT Memory64 case with a low (`<4 GiB`) destination
+  succeeds; a high-address (`≥UINT32_MAX`) destination is cleanly rejected (`-1`,
+  no sign-extension, host survives).
+- **Metadata isolation across CONCURRENT calls** (not only post-detach): two
+  in-flight invocations on two instances each see only their own spans by index +
+  name; neither can query the other's set.
+
+**Public option + set-build validation (binding + `hl_wasm_span_set_add`):**
+- `spans={}` / absent → plain call (no set, no `no_spans`); `span_count` `<0`/`>16`
+  rejected; `spans==NULL` with `count>0` (and vice versa) rejected.
+- NULL entry, closed buffer, non-page-aligned whole-file mapping each rejected with
+  the offending span named.
+- **Names:** empty, `>63` bytes (overlong), **embedded NUL**, and duplicate-in-set
+  all rejected; a valid unique set accepted.
+- **Empty and maximum-sized (16) span lists**; the 17th rejected.
+- **D1 atomicity:** a spans call racing a `compute.segment` mutation is
+  deterministically either accepted (no segments) or `"spans_with_segments"`
+  (segments present) — the decision taken under `mod->mutex`, never a torn read.
+
+**Async ownership (the finding-1 core — `test_wasm_spans_async.c`):**
+- **queued-worker race:** buffer `close()`/GC'd **before worker execution starts**
+  → the call still runs and reads correct bytes (submission pin held).
+- **two concurrent async calls sharing the SAME mapped buffer** → both read
+  correctly; borrow count returns to baseline after both reap.
+- **cancellation before worker start** AND **during execution** → submission pins
+  released on both, no leak, no double-release, mapping freed only after reap.
+- **partial async pinning failure** (Nth buffer fails to pin) and **submission
+  failure** (`pool_submit` error) → all prior submission pins rolled back, op
+  freed, buffers back to baseline.
+- span-set borrow (worker) and submission pin (event loop) are **separately
+  balanced** — assert `borrow_count` at each phase (submitted=1, executing=2,
+  post-teardown=1, post-reap=0).
+
+**`fs.mmap` window binding:** offset/length parse, EOF clamp, `>1 GiB` rejected,
+non-page-aligned offset (Lua + JS).
+
+**e2e (`tests/e2e_spans.sh`, both runtimes, interp + AOT):** a real plugin using
+`hull/wasm/span.h` maps a file window via `spans={}`, `hull_span_setup` discovers
+all spans, reads/verifies bytes, reads one past the window (traps → structured
+error), `hull_span_find` on an unknown name → `-1`, and scans a `>4 GiB` file as
+repeated windows checking `foffset`. Reuse the wamrc-AOT CI leg that already gates
+the span AOT case.
+
+**Differential:** the same `span.h` accessors native vs. WASM over identical bytes.
+
+**Sanitizers/fuzz:** ASan/UBSan on the sync + async call paths; TSan on the two
+concurrent-async cases; fuzz the metadata-record offset/cbSize math and the SDK
+bounds check.
 
 ## 3. Sequencing (two cuts, each its own PR)
 
