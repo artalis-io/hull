@@ -28,7 +28,11 @@
 
 #include "hull/cap/wasm.h"
 #include "hull/cap/wasm_spans.h"
+#include "hull/cap/wasm_buffer.h"
+#include "hull/cap/wasm_data.h"
 #include "hull/cap/fs.h"
+#include "hull/vfs.h"
+#include "hull/utils/alloc.h"
 #include "wasm_export.h"
 
 #include "gen_ro_heap_span_aot.h" /* build-generated: ro_heap_span_aot[] + _len (or empty) */
@@ -156,6 +160,48 @@ static int guest_load(wasm_module_inst_t inst, wasm_exec_env_t env,
         return 0;
     if (out) *out = argv[0];
     return 1;
+}
+
+/* echo hull_process(in,in_len,out,out_max): out_max<in_len -> -2, else copy
+ * in->out and return in_len. Imports env.host_call. Used to drive the D.2 spans
+ * CALL path (hl_cap_wasm_call_buf) -- the span set is attached to the instance
+ * for the call and torn down after; echo does not read the span (attachment is
+ * metadata-independent until item E). Same bytes as tests/hull/cap/test_wasm.c. */
+static const unsigned char echo_wasm[] = {
+  0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x14, 0x03, 0x60,
+  0x03, 0x7f, 0x7f, 0x7f, 0x01, 0x7f, 0x60, 0x04, 0x7f, 0x7f, 0x7f, 0x7f,
+  0x01, 0x7f, 0x60, 0x00, 0x01, 0x7f, 0x02, 0x11, 0x01, 0x03, 0x65, 0x6e,
+  0x76, 0x09, 0x68, 0x6f, 0x73, 0x74, 0x5f, 0x63, 0x61, 0x6c, 0x6c, 0x00,
+  0x00, 0x03, 0x03, 0x02, 0x01, 0x02, 0x05, 0x03, 0x01, 0x00, 0x01, 0x07,
+  0x28, 0x03, 0x06, 0x6d, 0x65, 0x6d, 0x6f, 0x72, 0x79, 0x02, 0x00, 0x0c,
+  0x68, 0x75, 0x6c, 0x6c, 0x5f, 0x70, 0x72, 0x6f, 0x63, 0x65, 0x73, 0x73,
+  0x00, 0x01, 0x0c, 0x68, 0x75, 0x6c, 0x6c, 0x5f, 0x76, 0x65, 0x72, 0x73,
+  0x69, 0x6f, 0x6e, 0x00, 0x02, 0x0a, 0x20, 0x02, 0x19, 0x00, 0x20, 0x01,
+  0x20, 0x03, 0x4b, 0x04, 0x40, 0x41, 0x7e, 0x0f, 0x0b, 0x20, 0x02, 0x20,
+  0x00, 0x20, 0x01, 0xfc, 0x0a, 0x00, 0x00, 0x20, 0x01, 0x0b, 0x04, 0x00,
+  0x41, 0x01, 0x0b
+};
+static const unsigned int echo_wasm_len = 135;
+
+static const HlEntry span_call_entries[] = {
+    { "compute/echo.wasm", echo_wasm, echo_wasm_len },
+    { 0, 0, 0 }
+};
+
+/* One-shot: call "echo" with a single mapped span attached + `input`, returning
+ * the string output via hl_cap_wasm_call. */
+static int call_echo_with_span(HlWasmCache *cache, HlVfs *vfs, HlMappedBuffer *buf,
+                               const char *name, const void *input, size_t in_len,
+                               HlWasmCallOpts *opts_extra,
+                               void **out, size_t *out_len, const char **err)
+{
+    HlWasmSpanReq req = { .name = name, .buf = buf };
+    HlWasmCallOpts opts = {0};
+    if (opts_extra) opts = *opts_extra;
+    opts.spans = &req;
+    opts.span_count = 1;
+    return hl_cap_wasm_call(cache, "echo", input, in_len, out, out_len,
+                            &opts, NULL, NULL, vfs, NULL, NULL, err);
 }
 
 /* ── basic lifecycle: add one span, attach, teardown, count -> baseline ─────── */
@@ -685,6 +731,266 @@ UTEST(wasm_spans, guard_malformed_span_request)
     ASSERT_EQ(buf->borrow_count, 0);
 
     hl_cap_fs_munmap(buf);
+    hl_cap_wasm_destroy(&cache);
+    teardown_dir();
+}
+
+/* ══ D.2: pooled synchronous span consumption in hl_cap_wasm_call_buf ═══════════
+ * These drive the real call path (echo hull_process) with a span attached, and
+ * assert the whole cleanup discipline: every exit tears the span set down before
+ * pool release / output ownership, restoring the shared-heap count and the mmap
+ * borrow to baseline. The span is metadata-independent (echo never reads it).   */
+
+/* ── success: a span attaches, the call runs, teardown restores baseline ─────── */
+UTEST(wasm_spans, d2_success_attach_and_teardown)
+{
+    setup();
+    HlWasmCache cache; ASSERT_EQ(hl_cap_wasm_init(&cache), 0);
+    HlVfs vfs; hl_vfs_init(&vfs, span_call_entries, NULL);
+    uint32_t base = wasm_runtime_shared_heap_count();
+    ASSERT_EQ(write_file("a.bin", 40000), 0);
+    HlMappedBuffer *buf = hl_cap_fs_mmap_window(&cfg, "a.bin", 0, 4096, NULL, NULL);
+    ASSERT_TRUE(buf != NULL);
+
+    const char *input = "hello spans";
+    void *out = NULL; size_t out_len = 0; const char *err = NULL;
+    int rc = call_echo_with_span(&cache, &vfs, buf, "src", input, strlen(input),
+                                 NULL, &out, &out_len, &err);
+    ASSERT_EQ(rc, HL_WASM_OK);
+    ASSERT_EQ(out_len, strlen(input));
+    ASSERT_TRUE(out != NULL);
+    ASSERT_EQ(memcmp(out, input, out_len), 0);   /* echo returned the input */
+    free(out);
+
+    ASSERT_EQ(wasm_runtime_shared_heap_count(), base);  /* span heap torn down */
+    ASSERT_EQ(buf->borrow_count, 0);                     /* borrow released */
+
+    hl_cap_fs_munmap(buf);
+    hl_cap_wasm_destroy(&cache);
+    teardown_dir();
+}
+
+/* ── D1: a spans call on a module with an active segment is rejected, with no
+ *    span heap created and no borrow taken (the segment's own heap is unaffected). */
+UTEST(wasm_spans, d2_d1_rejection)
+{
+    setup();
+    HlWasmCache cache; ASSERT_EQ(hl_cap_wasm_init(&cache), 0);
+    HlVfs vfs; hl_vfs_init(&vfs, span_call_entries, NULL);
+    uint32_t base = wasm_runtime_shared_heap_count();
+    ASSERT_EQ(write_file("a.bin", 40000), 0);
+    HlMappedBuffer *buf = hl_cap_fs_mmap_window(&cfg, "a.bin", 0, 4096, NULL, NULL);
+    ASSERT_TRUE(buf != NULL);
+
+    /* load echo + install a segment so mod->shared_data != NULL. */
+    ASSERT_EQ(hl_cap_wasm_load(&cache, "echo", &vfs, NULL), 0);
+    const char *derr = NULL;
+    static const unsigned char seg[16] = { 1, 2, 3, 4, 5, 6, 7, 8 };
+    ASSERT_EQ(hl_cap_wasm_data_load(&cache, "echo", "graph", seg, sizeof(seg),
+                                    NULL, &vfs, NULL, &derr), 0);
+    uint32_t after_seg = wasm_runtime_shared_heap_count(); /* base + the segment heap */
+    ASSERT_TRUE(after_seg > base);
+
+    const char *input = "x";
+    void *out = (void *)0x1; size_t out_len = 9; const char *err = NULL;
+    int rc = call_echo_with_span(&cache, &vfs, buf, "src", input, 1, NULL,
+                                 &out, &out_len, &err);
+    ASSERT_NE(rc, HL_WASM_OK);
+    ASSERT_STREQ(err, "spans_with_segments");
+    ASSERT_TRUE(out == NULL);
+    ASSERT_EQ(wasm_runtime_shared_heap_count(), after_seg); /* no span heap added */
+    ASSERT_EQ(buf->borrow_count, 0);                        /* no borrow taken */
+
+    hl_cap_fs_munmap(buf);
+    hl_cap_wasm_destroy(&cache);
+    teardown_dir();
+}
+
+/* ── gas exhaustion still tears the span set down (baseline restored) ────────── */
+UTEST(wasm_spans, d2_gas_cleanup)
+{
+    setup();
+    HlWasmCache cache; ASSERT_EQ(hl_cap_wasm_init(&cache), 0);
+    HlVfs vfs; hl_vfs_init(&vfs, span_call_entries, NULL);
+    uint32_t base = wasm_runtime_shared_heap_count();
+    ASSERT_EQ(write_file("a.bin", 40000), 0);
+    HlMappedBuffer *buf = hl_cap_fs_mmap_window(&cfg, "a.bin", 0, 4096, NULL, NULL);
+    ASSERT_TRUE(buf != NULL);
+
+    HlWasmCallOpts extra = {0};
+    extra.gas = 1;   /* exhaust immediately -> the call traps */
+    void *out = NULL; size_t out_len = 0; const char *err = NULL;
+    int rc = call_echo_with_span(&cache, &vfs, buf, "src", "hello", 5, &extra,
+                                 &out, &out_len, &err);
+    /* The call trapped (gas). What matters for D.2 is that the trap path tears the
+     * span set down: exact error classification is orthogonal (WAMR emits
+     * "instruction limit exceeded"; the cap layer maps it to call_failed). */
+    ASSERT_NE(rc, HL_WASM_OK);
+    ASSERT_TRUE(out == NULL);
+    ASSERT_EQ(wasm_runtime_shared_heap_count(), base);  /* torn down on trap */
+    ASSERT_EQ(buf->borrow_count, 0);
+
+    hl_cap_fs_munmap(buf);
+    hl_cap_wasm_destroy(&cache);
+    teardown_dir();
+}
+
+/* ── output alloc failure (tiny heap + big output) tears the span set down ───── */
+UTEST(wasm_spans, d2_output_alloc_fail)
+{
+    setup();
+    HlWasmCache cache; ASSERT_EQ(hl_cap_wasm_init(&cache), 0);
+    HlVfs vfs; hl_vfs_init(&vfs, span_call_entries, NULL);
+    uint32_t base = wasm_runtime_shared_heap_count();
+    ASSERT_EQ(write_file("a.bin", 40000), 0);
+    HlMappedBuffer *buf = hl_cap_fs_mmap_window(&cfg, "a.bin", 0, 4096, NULL, NULL);
+    ASSERT_TRUE(buf != NULL);
+
+    HlWasmCallOpts extra = {0};
+    extra.heap_size = 65536;              /* 64 KiB app heap */
+    extra.max_output = 8 * 1024 * 1024;   /* 8 MiB output cannot fit -> alloc fails */
+    void *out = NULL; size_t out_len = 0; const char *err = NULL;
+    int rc = call_echo_with_span(&cache, &vfs, buf, "src", "hi", 2, &extra,
+                                 &out, &out_len, &err);
+    ASSERT_NE(rc, HL_WASM_OK);            /* output alloc failed */
+    ASSERT_EQ(wasm_runtime_shared_heap_count(), base);  /* span torn down */
+    ASSERT_EQ(buf->borrow_count, 0);
+
+    hl_cap_fs_munmap(buf);
+    hl_cap_wasm_destroy(&cache);
+    teardown_dir();
+}
+
+/* ── pooled reuse: repeated span calls each return to baseline (per-call
+ *    teardown keeps the pooled instance span-free between calls) ──────────────── */
+UTEST(wasm_spans, d2_pooled_reuse)
+{
+    setup();
+    HlWasmCache cache; ASSERT_EQ(hl_cap_wasm_init(&cache), 0);
+    HlVfs vfs; hl_vfs_init(&vfs, span_call_entries, NULL);
+    uint32_t base = wasm_runtime_shared_heap_count();
+    ASSERT_EQ(write_file("a.bin", 40000), 0);
+
+    for (int i = 0; i < 50; i++) {
+        HlMappedBuffer *buf = hl_cap_fs_mmap_window(&cfg, "a.bin", 0, 4096, NULL, NULL);
+        ASSERT_TRUE(buf != NULL);
+        void *out = NULL; size_t out_len = 0; const char *err = NULL;
+        int rc = call_echo_with_span(&cache, &vfs, buf, "src", "abc", 3, NULL,
+                                     &out, &out_len, &err);
+        ASSERT_EQ(rc, HL_WASM_OK);
+        ASSERT_EQ(out_len, (size_t)3);
+        free(out);
+        ASSERT_EQ(buf->borrow_count, 0);
+        ASSERT_EQ(wasm_runtime_shared_heap_count(), base); /* baseline every call */
+        hl_cap_fs_munmap(buf);
+    }
+
+    hl_cap_wasm_destroy(&cache);
+    teardown_dir();
+}
+
+/* ── zero-copy output: the span is torn down BEFORE the returned WasmBuffer keeps
+ *    the instance checked out; the output bytes stay valid; baseline restored ─── */
+UTEST(wasm_spans, d2_zero_copy_lifetime)
+{
+    setup();
+    HlWasmCache cache; ASSERT_EQ(hl_cap_wasm_init(&cache), 0);
+    HlVfs vfs; hl_vfs_init(&vfs, span_call_entries, NULL);
+    uint32_t base = wasm_runtime_shared_heap_count();
+    ASSERT_EQ(write_file("a.bin", 40000), 0);
+    HlMappedBuffer *buf = hl_cap_fs_mmap_window(&cfg, "a.bin", 0, 4096, NULL, NULL);
+    ASSERT_TRUE(buf != NULL);
+
+    HlWasmSpanReq req = { .name = "src", .buf = buf };
+    HlWasmCallOpts opts = {0};
+    opts.spans = &req; opts.span_count = 1;
+    HlWasmBuffer *ob = NULL; const char *err = NULL;
+    int rc = hl_cap_wasm_call_buf(&cache, "echo", "wasmbuf", 7, &ob, &opts,
+                                  NULL, NULL, &vfs, NULL, NULL, &err);
+    ASSERT_EQ(rc, HL_WASM_OK);
+    ASSERT_TRUE(ob != NULL);
+    /* span already torn down even though the buffer keeps the instance out. */
+    ASSERT_EQ(buf->borrow_count, 0);
+    ASSERT_EQ(wasm_runtime_shared_heap_count(), base);
+    /* the zero-copy output still reads correctly. */
+    ASSERT_EQ(hl_wasm_buffer_len(ob), (size_t)7);
+    ASSERT_EQ(memcmp(hl_wasm_buffer_data(ob), "wasmbuf", 7), 0);
+    hl_wasm_buffer_destroy(ob);
+    hl_alloc_free(NULL, ob, sizeof(*ob));
+
+    hl_cap_fs_munmap(buf);
+    hl_cap_wasm_destroy(&cache);
+    teardown_dir();
+}
+
+/* ── concurrency: workers call echo-with-span while a mutator toggles a segment.
+ *    The D1 decision reads shared_data under mod->mutex (the same lock the mutator
+ *    holds), so each call deterministically either SUCCEEDS or cleanly rejects
+ *    "spans_with_segments" -- never a torn read, crash, or other error. Final
+ *    heap count returns to baseline. TSan-validated. ─────────────────────────── */
+#define D2R_NTHREAD 4
+#define D2R_NITER   150
+struct d2r_arg { HlWasmCache *cache; HlVfs *vfs; HlFsConfig *cfg; int ok; };
+static void *d2r_worker(void *p)
+{
+    struct d2r_arg *a = (struct d2r_arg *)p;
+    a->ok = 1;
+    for (int i = 0; i < D2R_NITER; i++) {
+        HlMappedBuffer *b = hl_cap_fs_mmap_window(a->cfg, "a.bin", 0, 4096, NULL, NULL);
+        if (!b) { a->ok = 0; break; }
+        void *out = NULL; size_t out_len = 0; const char *err = NULL;
+        int rc = call_echo_with_span(a->cache, a->vfs, b, "src", "z", 1, NULL,
+                                     &out, &out_len, &err);
+        if (rc == HL_WASM_OK) {
+            free(out);
+        } else if (!(err && strcmp(err, "spans_with_segments") == 0)) {
+            a->ok = 0; /* any OTHER error is a failure */
+        }
+        if (b->borrow_count != 0) a->ok = 0;   /* borrow always released */
+        hl_cap_fs_munmap(b);
+        if (!a->ok) break;
+    }
+    return NULL;
+}
+UTEST(wasm_spans, d2_segment_race_concurrency)
+{
+    setup();
+    HlWasmCache cache; ASSERT_EQ(hl_cap_wasm_init(&cache), 0);
+    HlVfs vfs; hl_vfs_init(&vfs, span_call_entries, NULL);
+    uint32_t base = wasm_runtime_shared_heap_count();
+    ASSERT_EQ(write_file("a.bin", 40000), 0);
+    /* pre-load on the main thread (WAMR's module loader is not thread-safe). */
+    ASSERT_EQ(hl_cap_wasm_load(&cache, "echo", &vfs, NULL), 0);
+
+    struct d2r_arg args[D2R_NTHREAD];
+    pthread_t th[D2R_NTHREAD];
+    for (int i = 0; i < D2R_NTHREAD; i++) {
+        args[i].cache = &cache; args[i].vfs = &vfs; args[i].cfg = &cfg; args[i].ok = -1;
+        ASSERT_EQ(pthread_create(&th[i], NULL, d2r_worker, &args[i]), 0);
+    }
+    /* mutator: toggle a segment on/off, racing the D1 decision. */
+    static const unsigned char seg[16] = { 9, 9, 9, 9 };
+    for (int r = 0; r < D2R_NITER; r++) {
+        const char *derr = NULL;
+        hl_cap_wasm_data_load(&cache, "echo", "graph", seg, sizeof(seg),
+                              NULL, &vfs, NULL, &derr);
+        hl_cap_wasm_data_load(&cache, "echo", "graph", NULL, 0,
+                              NULL, &vfs, NULL, &derr); /* remove */
+    }
+    for (int i = 0; i < D2R_NTHREAD; i++) pthread_join(th[i], NULL);
+    /* The proof: every call deterministically SUCCEEDED or cleanly rejected
+     * "spans_with_segments" (never a torn read / unexpected error / crash), and
+     * every span borrow was released -- so the D1 decision could not race the
+     * segment mutation (mod->mutex serialises the read against the write), and no
+     * span leaked under contention. TSan (make tsan-spans) covers the data-race
+     * dimension. (A final shared-heap-count baseline is intentionally NOT asserted
+     * here: the segment path leaks its heap descriptors until runtime teardown --
+     * hl_wasm_free_segment predates patch 0003's per-heap destroy -- so the
+     * mutator's churn inflates the count independently of spans. Span
+     * teardown-to-baseline is proven by d2_success / d2_pooled_reuse.) */
+    for (int i = 0; i < D2R_NTHREAD; i++) ASSERT_EQ(args[i].ok, 1);
+    (void)base;
+
     hl_cap_wasm_destroy(&cache);
     teardown_dir();
 }

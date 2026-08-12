@@ -12,6 +12,7 @@
 #include "hull/cap/wasm.h"
 #include "hull/cap/wasm_buffer.h"
 #include "hull/cap/wasm_data.h"
+#include "hull/cap/wasm_spans.h"
 #include "hull/utils/alloc.h"
 #include "hull/cap/audit.h"
 #include "hull/limits/wasm.h"
@@ -77,6 +78,9 @@ typedef struct {
     void            *ctx;
     /* Shared data segments visible to current call */
     const HlWasmSharedData *shared_data;  /* NULL = no shared data */
+    /* Per-invocation mapped-span set visible to the current call (metadata query,
+     * mapped-spans item E). Set for the call, cleared before span teardown. */
+    const HlWasmSpanSet *spans;           /* NULL = no spans this call */
     /* Streaming I/O metadata (set by wasm_stream.c via set/clear helpers) */
     uint32_t stream_flags;       /* 0 when not streaming */
     uint32_t stream_chunk_index;
@@ -822,6 +826,23 @@ int hl_cap_wasm_call_buf(HlWasmCache *cache, const char *name,
     }
     (void)max_input; /* used only for validation at line 614; narrowing preserved for consistency */
 
+    /* D1 (mapped-spans): a per-invocation spans call is mutually exclusive with
+     * module segments (compute.segment) for cut 1 -- WAMR attaches one shared-heap
+     * chain per instance. Decide under mod->mutex (the same lock compute.segment
+     * mutates shared_data under) BEFORE instance acquisition / span borrow / heap
+     * creation, so the decision cannot race a concurrent segment mutation and a
+     * rejection leaves the pool / borrows / heaps untouched. */
+    int have_spans = (opts && opts->spans && opts->span_count > 0);
+    if (have_spans) {
+        pthread_mutex_lock(&mod->mutex);
+        int has_segments = (mod->shared_data != NULL);
+        pthread_mutex_unlock(&mod->mutex);
+        if (has_segments) {
+            if (err_msg) *err_msg = "spans_with_segments";
+            return HL_WASM_ERR_INTERNAL;
+        }
+    }
+
     /* Try to acquire from instance pool.
      * Shared data is snapshotted under the mutex for thread safety. */
     wasm_module_inst_t inst = NULL;
@@ -861,8 +882,39 @@ int hl_cap_wasm_call_buf(HlWasmCache *cache, const char *name,
         }
     }
 
-    /* Attach shared data (snapshotted under mutex) */
-    hl_wasm_attach_shared_heap(inst, chain_head_snapshot);
+    /* Attach shared data (snapshotted under mutex). For a spans call the segment
+     * chain is NOT attached (D1 guaranteed no segments at decision time; a
+     * raced-in segment set applies to future calls, never this one) -- only the
+     * span chain is attached below, preserving WAMR's one-chain-per-instance
+     * rule. A no-spans call is byte-for-byte the existing segment path. */
+    if (!have_spans)
+        hl_wasm_attach_shared_heap(inst, chain_head_snapshot);
+
+    /* Build + attach the per-invocation span set on the executing thread, AFTER
+     * instance acquisition. On any add/attach failure, roll the partial set back
+     * (teardown), release the instance, and return -- no heap/borrow left behind. */
+    HlWasmSpanSet span_set;
+    int spans_active = 0;
+    if (have_spans) {
+        hl_wasm_span_set_init(&span_set, mod->is_memory64);
+        const char *span_err = NULL;
+        int failed = 0;
+        for (int i = 0; i < opts->span_count && !failed; i++) {
+            if (hl_wasm_span_set_add(&span_set, opts->spans[i].buf,
+                                     opts->spans[i].name, &span_err) != 0)
+                failed = 1;
+        }
+        if (!failed && hl_wasm_span_set_attach(&span_set, inst, &span_err) != 0)
+            failed = 1;
+        if (failed) {
+            hl_wasm_span_set_teardown(&span_set);
+            if (err_msg) *err_msg = span_err ? span_err : "span_attach_failed";
+            hl_wasm_pool_release(cache, mod, inst, exec_env, process_fn,
+                                 heap_size, stack_size, 0);
+            return HL_WASM_ERR_INTERNAL;
+        }
+        spans_active = 1;
+    }
 
     int ret = HL_WASM_ERR_INTERNAL;
 
@@ -882,6 +934,7 @@ int hl_cap_wasm_call_buf(HlWasmCache *cache, const char *name,
         if (!wasm_in_ptr || !native_in) {
             log_error("[wasm] failed to allocate input buffer (%zu bytes)", input_len);
             if (err_msg) *err_msg = err_internal;
+            if (spans_active) hl_wasm_span_set_teardown(&span_set);
             hl_wasm_pool_release(cache, mod, inst, exec_env, process_fn,
                          heap_size, stack_size, 0);
             return HL_WASM_ERR_INTERNAL;
@@ -898,6 +951,7 @@ int hl_cap_wasm_call_buf(HlWasmCache *cache, const char *name,
             log_error("[wasm] failed to allocate output buffer (%" PRIu64 " bytes)", max_output);
             if (err_msg) *err_msg = err_internal;
             if (wasm_in_ptr) wasm_runtime_module_free(inst, wasm_in_ptr);
+            if (spans_active) hl_wasm_span_set_teardown(&span_set);
             hl_wasm_pool_release(cache, mod, inst, exec_env, process_fn,
                          heap_size, stack_size, 0);
             return HL_WASM_ERR_INTERNAL;
@@ -909,6 +963,7 @@ int hl_cap_wasm_call_buf(HlWasmCache *cache, const char *name,
     tl_host_ctx.fn = callback_fn;
     tl_host_ctx.ctx = callback_ctx;
     tl_host_ctx.shared_data = sd_snapshot;
+    tl_host_ctx.spans = spans_active ? &span_set : NULL;
 
     /* Call hull_process with the appropriate ABI.
      * WASM32: hull_process(i32, i32, i32, i32) -> i32 = 4 argv cells
@@ -963,8 +1018,15 @@ int hl_cap_wasm_call_buf(HlWasmCache *cache, const char *name,
     }
 
     /* Free input allocation — no longer needed */
-    tl_host_ctx = saved_ctx;
+    tl_host_ctx = saved_ctx;   /* restores (clears) tl_host_ctx.spans before teardown */
     if (wasm_in_ptr) wasm_runtime_module_free(inst, wasm_in_ptr);
+
+    /* Spans back the INPUT (now consumed by the call): tear the set down HERE,
+     * before creating the output buffer (which may keep the instance checked out
+     * on the zero-copy path) or releasing the instance -- teardown precedes any
+     * ownership transfer or pool release. Covers the zero-copy, copied, and
+     * zero-length output paths that all follow. */
+    if (spans_active) { hl_wasm_span_set_teardown(&span_set); spans_active = 0; }
 
     /* Create output buffer */
     if (result > 0 && (uint32_t)result <= max_output) {
@@ -996,7 +1058,8 @@ int hl_cap_wasm_call_buf(HlWasmCache *cache, const char *name,
     return ok ? HL_WASM_OK : HL_WASM_ERR_INTERNAL;
 
 cleanup_bufs_err:
-    tl_host_ctx = saved_ctx;
+    tl_host_ctx = saved_ctx;   /* restores (clears) tl_host_ctx.spans before teardown */
+    if (spans_active) { hl_wasm_span_set_teardown(&span_set); spans_active = 0; }
     if (wasm_in_ptr)  wasm_runtime_module_free(inst, wasm_in_ptr);
     if (wasm_out_ptr) wasm_runtime_module_free(inst, wasm_out_ptr);
     hl_wasm_pool_release(cache, mod, inst, exec_env, process_fn,
