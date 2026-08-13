@@ -8,6 +8,7 @@
 
 #include "mod_buffer.h"
 #include "hull/cap/wasm.h"
+#include "hull/cap/wasm_spans.h" /* HL_WASM_MAX_SPANS */
 #include "hull/cap/wasm_buffer.h"
 #include "hull/cap/wasm_stream.h"
 #include "hull/cap/fs.h"
@@ -141,6 +142,103 @@ static void js_wasm_clamp_opts(HlWasmCallOpts *opts, const HlRuntime *base)
         base->wasm_config.gas);
 }
 
+/* Free the OWNED (JS_ToCString) name copies in reqs[0..n). Idempotent. */
+static void js_free_span_names(JSContext *ctx, HlWasmSpanReq *reqs, int n)
+{
+    for (int i = 0; i < n; i++)
+        if (reqs[i].name) { JS_FreeCString(ctx, reqs[i].name); reqs[i].name = NULL; }
+}
+
+/* Parse opts.spans = [{name, buffer:<MappedBuffer>}, ...] into reqs[] (cap
+ * HL_WASM_MAX_SPANS), per the public-option contract. Returns the count (0 when
+ * spans is absent/empty => a plain call), or -1 with a pending JS exception on any
+ * malformed entry: not an array, > HL_WASM_MAX_SPANS entries, a non-object entry,
+ * a name that is not a string / empty / > 63 bytes / has an embedded NUL / is a
+ * duplicate within the request, or a buffer that is not a live MappedBuffer.
+ *
+ * On success reqs[i].name is an OWNED C string; the caller frees the set with
+ * js_free_span_names (after a synchronous call, or immediately when only
+ * validating). reqs[i].buf is a borrowed MappedBuffer pointer. On -1 every name
+ * allocated so far is freed. An ASYNC caller must deep-copy names into non-JS
+ * storage and pin each buffer before submit (item D); it must NOT retain these. */
+static int js_parse_spans(JSContext *ctx, JSValueConst opts, HlWasmSpanReq *reqs)
+{
+    JSValue arr = JS_GetPropertyStr(ctx, opts, "spans");
+    if (JS_IsUndefined(arr) || JS_IsNull(arr)) { JS_FreeValue(ctx, arr); return 0; }
+    if (!JS_IsArray(ctx, arr)) {
+        JS_FreeValue(ctx, arr);
+        JS_ThrowTypeError(ctx, "compute: spans must be an array");
+        return -1;
+    }
+    JSValue lenv = JS_GetPropertyStr(ctx, arr, "length");
+    uint32_t n = 0;
+    JS_ToUint32(ctx, &n, lenv);
+    JS_FreeValue(ctx, lenv);
+    if (n > (uint32_t)HL_WASM_MAX_SPANS) {
+        JS_FreeValue(ctx, arr);
+        JS_ThrowRangeError(ctx, "compute: at most %d spans (got %u)",
+                           HL_WASM_MAX_SPANS, n);
+        return -1;
+    }
+    int count = 0;
+    for (uint32_t i = 0; i < n; i++) {
+        JSValue entry = JS_GetPropertyUint32(ctx, arr, i);
+        if (!JS_IsObject(entry)) {
+            JS_FreeValue(ctx, entry);
+            JS_ThrowTypeError(ctx, "compute: spans[%u] must be an object", i);
+            goto fail;
+        }
+        JSValue nv = JS_GetPropertyStr(ctx, entry, "name");
+        if (!JS_IsString(nv)) {
+            JS_FreeValue(ctx, nv); JS_FreeValue(ctx, entry);
+            JS_ThrowTypeError(ctx, "compute: spans[%u].name must be a string", i);
+            goto fail;
+        }
+        size_t nlen = 0;
+        const char *nm = JS_ToCStringLen(ctx, &nlen, nv);
+        JS_FreeValue(ctx, nv);
+        if (!nm || nlen == 0 || nlen >= 64 || strlen(nm) != nlen) {
+            if (nm) JS_FreeCString(ctx, nm);
+            JS_FreeValue(ctx, entry);
+            JS_ThrowTypeError(ctx,
+                "compute: spans[%u].name must be 1..63 bytes with no embedded NUL", i);
+            goto fail;
+        }
+        for (int j = 0; j < count; j++) {
+            if (strcmp(reqs[j].name, nm) == 0) {
+                JS_FreeCString(ctx, nm); JS_FreeValue(ctx, entry);
+                JS_ThrowTypeError(ctx, "compute: duplicate span name '%s'", reqs[j].name);
+                goto fail;
+            }
+        }
+        JSValue bv = JS_GetPropertyStr(ctx, entry, "buffer");
+        HlMappedBuffer *mb = JS_GetOpaque2(ctx, bv, js_mmap_class_id);
+        JS_FreeValue(ctx, bv);
+        JS_FreeValue(ctx, entry);
+        if (!mb) {
+            JS_FreeCString(ctx, nm);
+            /* JS_GetOpaque2 set a class exception; replace with a clearer message. */
+            JS_ThrowTypeError(ctx, "compute: spans[%u].buffer must be a MappedBuffer", i);
+            goto fail;
+        }
+        if (mb->closed) {
+            JS_FreeCString(ctx, nm);
+            JS_ThrowTypeError(ctx, "compute: spans[%u].buffer is closed", i);
+            goto fail;
+        }
+        reqs[count].name = nm;   /* owned */
+        reqs[count].buf = mb;
+        count++;
+    }
+    JS_FreeValue(ctx, arr);
+    return count;
+
+fail:
+    JS_FreeValue(ctx, arr);
+    js_free_span_names(ctx, reqs, count);
+    return -1;
+}
+
 static JSValue js_compute_call(JSContext *ctx, JSValueConst this_val,
                                int argc, JSValueConst *argv)
 {
@@ -226,6 +324,16 @@ static JSValue js_compute_call(JSContext *ctx, JSValueConst this_val,
         val = JS_GetPropertyStr(ctx, argv[2], "buffer");
         if (JS_ToBool(ctx, val)) want_buffer = 1;
         JS_FreeValue(ctx, val);
+    }
+
+    /* per-invocation mapped spans (item C: parse + validate only; opts.spans
+     * forwarding + the sync-borrow / async-deep-copy+pin ownership is item D).
+     * Execution of spans is unavailable until then. */
+    if (argc > 2 && JS_IsObject(argv[2])) {
+        HlWasmSpanReq span_reqs[HL_WASM_MAX_SPANS];
+        int sn = js_parse_spans(ctx, argv[2], span_reqs);
+        if (sn < 0) return JS_EXCEPTION;
+        js_free_span_names(ctx, span_reqs, sn); /* validate only; not retained */
     }
 
     js_wasm_clamp_opts(&opts, &js->base);
@@ -451,6 +559,22 @@ static JSValue js_compute_async_call(JSContext *ctx, JSValueConst this_val,
     if (input_is_string) JS_FreeCString(ctx, (const char *)input);
     JS_FreeCString(ctx, name);
 
+    /* Parse + validate spans (owned name copies), deep-copy + submission-pin them
+     * into the op, then free the parse copies. On bad input free the op (releasing
+     * any pins) and throw. Empty/absent -> a plain async call. Every failure path
+     * below (ctx / promise / cont / submit) frees the op, releasing the pins. */
+    if (argc > 2 && JS_IsObject(argv[2])) {
+        HlWasmSpanReq parsed[HL_WASM_MAX_SPANS];
+        int sn = js_parse_spans(ctx, argv[2], parsed);
+        if (sn < 0) {
+            hl_worker_wasm_op_free(op);
+            free(op);
+            return JS_EXCEPTION;
+        }
+        hl_worker_wasm_adopt_spans(op, parsed, sn);
+        js_free_span_names(ctx, parsed, sn);
+    }
+
     /* Create async ctx */
     HlAsyncCtx *actx = hl_async_ctx_create(js->server, js->base.net_ctx, js->base.alloc);
     if (!actx) {
@@ -593,6 +717,14 @@ static JSValue js_wasm_inst_call(JSContext *ctx, JSValueConst this_val,
         val = JS_GetPropertyStr(ctx, argv[1], "buffer");
         if (JS_ToBool(ctx, val)) want_buffer = 1;
         JS_FreeValue(ctx, val);
+    }
+
+    /* inst:call spans (item C: parse + validate only; forwarding is item D). */
+    if (argc > 1 && JS_IsObject(argv[1])) {
+        HlWasmSpanReq span_reqs[HL_WASM_MAX_SPANS];
+        int sn = js_parse_spans(ctx, argv[1], span_reqs);
+        if (sn < 0) return JS_EXCEPTION;
+        js_free_span_names(ctx, span_reqs, sn);
     }
 
     if (js) js_wasm_clamp_opts(&opts, &js->base);
@@ -787,6 +919,20 @@ static JSValue js_wasm_inst_async_call(JSContext *ctx, JSValueConst this_val,
     op->input_len = input_len;
 
     if (input_is_string) JS_FreeCString(ctx, (const char *)input);
+
+    /* Parse + validate spans, deep-copy + submission-pin into the op, free the
+     * parse copies. On bad input free the op (busy not yet set) and throw. */
+    if (argc > 1 && JS_IsObject(argv[1])) {
+        HlWasmSpanReq parsed[HL_WASM_MAX_SPANS];
+        int sn = js_parse_spans(ctx, argv[1], parsed);
+        if (sn < 0) {
+            hl_worker_wasm_op_free(op);
+            free(op);
+            return JS_EXCEPTION;
+        }
+        hl_worker_wasm_adopt_spans(op, parsed, sn);
+        js_free_span_names(ctx, parsed, sn);
+    }
 
     /* Set busy before dispatch */
     atomic_store(&pi->busy, 1);

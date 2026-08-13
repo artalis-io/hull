@@ -887,6 +887,26 @@ e2e-agent-api: $(BUILDDIR)/hull
 e2e-compute: $(BUILDDIR)/hull
 	sh tests/e2e_compute.sh
 
+# Windowed fs.mmap({offset,length}) binding (mapped-spans checkpoint 3a, item A).
+.PHONY: e2e-spans-mmap
+e2e-spans-mmap: $(BUILDDIR)/hull
+	sh tests/e2e_spans_mmap.sh
+
+# compute.call({spans=...}) parse + validation, Lua + JS (mapped-spans 3a, item C).
+.PHONY: e2e-spans-bind
+e2e-spans-bind: $(BUILDDIR)/hull
+	sh tests/e2e_spans_bind.sh
+
+# Async span forwarding: pooled compute.async.call with spans, Lua + JS (item D.4).
+.PHONY: e2e-spans-async
+e2e-spans-async: $(BUILDDIR)/hull
+	sh tests/e2e_spans_async.sh
+
+# Persistent-instance async baseline, Lua + JS (issue #316 busy-guard fix).
+.PHONY: e2e-persistent-async
+e2e-persistent-async: $(BUILDDIR)/hull
+	sh tests/e2e_persistent_async.sh
+
 # Lua compute.async worker-trap surfacing (issue #317): a trap must raise/500,
 # not hang the request. Live-server (curl) because the bug is in the async
 # resume of a suspended connection.

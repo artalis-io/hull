@@ -295,6 +295,22 @@ jobs:
         timeout-minutes: 2
         run: make e2e-compute
 
+      - name: Windowed fs.mmap binding E2E tests
+        timeout-minutes: 2
+        run: make e2e-spans-mmap
+
+      - name: Mapped-span binding parse E2E tests
+        timeout-minutes: 2
+        run: make e2e-spans-bind
+
+      - name: Mapped-span async forwarding E2E tests
+        timeout-minutes: 2
+        run: make e2e-spans-async
+
+      - name: Persistent-instance async E2E tests
+        timeout-minutes: 2
+        run: make e2e-persistent-async
+
       - name: Async-trap surfacing E2E (Lua #317 + JS #319, cross-consumer)
         timeout-minutes: 2
         run: make e2e-compute-async-trap

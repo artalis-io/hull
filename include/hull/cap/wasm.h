@@ -130,6 +130,24 @@ typedef struct HlWasmCache {
 
 /* ── Call options ──────────────────────────────────────────────────── */
 
+struct HlMappedBuffer; /* fwd decl (include/hull/cap/fs.h) — avoids a heavy include */
+
+/* One requested per-invocation mapped span (the public `spans={}` API,
+ * mapped-spans checkpoint 3). The binding resolves each entry to a windowed
+ * HlMappedBuffer and a validated name; the C layer attaches them read-only for
+ * one invocation (cap/wasm_spans.c) and detaches on every exit.
+ *
+ * Ownership: `name`/`buf` are BORROWED. For a SYNC call the array + names may
+ * live on the binding stack (valid for the whole synchronous call). For an ASYNC
+ * call the binding MUST deep-copy the names and array and pin each buffer before
+ * submit (mapped-spans checkpoint 3, item D) -- an async op must never retain a
+ * runtime-managed (Lua/JS) name or array pointer. */
+typedef struct HlWasmSpanReq {
+    const char            *name;   /* span name: 1..63 bytes, no embedded NUL,
+                                      unique within the request. */
+    struct HlMappedBuffer *buf;    /* windowed mapping to attach read-only. */
+} HlWasmSpanReq;
+
 typedef struct {
     uint64_t max_input;     /* default: 1 MB, max: 16 GB (Memory64) / 256 MB (WASM32) */
     uint64_t max_output;    /* default: 1 MB, max: 16 GB (Memory64) / 256 MB (WASM32) */
@@ -138,6 +156,12 @@ typedef struct {
     int64_t  gas;           /* default: 10M, max: 100B instructions.
                              * WAMR's API takes int, so values > INT_MAX
                              * (~2.1B) are clamped with a log warning. */
+    /* Per-invocation mapped spans (checkpoint 3). NULL/0 => a plain call (no span
+     * set). Invariant: spans != NULL iff span_count > 0, and
+     * 0 <= span_count <= HL_WASM_MAX_SPANS. Consumed by the C call layer in item
+     * D; parsed + validated by the binding in item C. */
+    const HlWasmSpanReq *spans;
+    int                  span_count;
 } HlWasmCallOpts;
 
 /* Clamp call options to configured maximums (CLI > manifest > defaults).
@@ -160,7 +184,41 @@ typedef int (*HlWasmCallbackFn)(int id, const void *in, size_t in_len,
 #define HL_WASM_OP_LOG       0x01
 #define HL_WASM_OP_DATA_INFO 0x02
 #define HL_WASM_OP_STREAM    0x03
+#define HL_WASM_OP_SPAN_INFO 0x04
 #define HL_WASM_OP_CALLBACK  0x10
+
+/* ── Mapped-span metadata query (host_call SPAN_INFO, mapped-spans item E) ──────
+ *
+ * host_call(HL_WASM_OP_SPAN_INFO, ptr, idx):
+ *   - idx == -1  -> returns the span count for the current invocation (>= 0);
+ *     `ptr` is ignored. No active span set => 0.
+ *   - 0 <= idx < count -> writes the span's HlSpanMetaV1 record into guest linear
+ *     memory at `ptr` and returns the FULL required struct_size (96). cbSize
+ *     convention: the caller pre-writes its buffer capacity into the record's
+ *     struct_size field (offset 2, u16) BEFORE the call; the host reads it, bounds
+ *     it to [4, 4096], and writes min(cap, 96) bytes (a short cap is a legal
+ *     prefix write, never an error). Forward-compatible truncation.
+ *   - idx >= count (or idx < -1) -> returns 0 (no write).
+ *   - invalid `ptr` (fails linear-memory validation for the advertised capacity)
+ *     or malformed cap -> returns -1.
+ *
+ * `ptr` is an UNSIGNED 32-bit app offset (no sign extension). This is a fixed
+ * property of the (i32,i32,i32)->i32 host_call ABI, NOT a host-side high-address
+ * rejection: an address at or above UINT32_MAX is simply unrepresentable in the
+ * operand, so a Memory64 guest MUST place its scratch record below 4 GiB. The
+ * eventual 3b SDK is responsible for rejecting/trapping BEFORE narrowing a
+ * scratch pointer above UINT32_MAX (that behaviour belongs in 3b's Memory64
+ * tests). The record is 96 bytes, little-endian, packed; decode BY OFFSET (do
+ * not cast). */
+#define HL_SPAN_META_V1_SIZE      96
+#define HL_SPAN_META_OFF_VERSION   0  /* u16, = 1 */
+#define HL_SPAN_META_OFF_STRUCTSZ  2  /* u16, = 96 (also the caller's advertised cap) */
+#define HL_SPAN_META_OFF_FLAGS     4  /* u32, bit0 = read-only */
+#define HL_SPAN_META_OFF_NAME      8  /* char[64], NUL-terminated */
+#define HL_SPAN_META_OFF_BASE     72  /* u64, guest WASM address of window[0] */
+#define HL_SPAN_META_OFF_LEN      80  /* u64, window length in bytes */
+#define HL_SPAN_META_OFF_FOFFSET  88  /* u64, 64-bit logical file offset of window[0] */
+#define HL_SPAN_META_FLAG_RO       0x1
 
 /* Stream metadata sub-queries (len parameter to host_call) */
 #define HL_WASM_STREAM_FLAGS        0
@@ -362,6 +420,27 @@ int hl_cap_wasm_instance_call_buf(HlWasmInstance *inst,
                                    const HlWasmCallOpts *opts,
                                    HlWasmCallbackFn cb_fn, void *cb_ctx,
                                    HlAllocator *alloc, const char **err_msg);
+
+/**
+ * Async-worker variants of the two calls above. Identical semantics EXCEPT the
+ * busy REJECT is bypassed: the async submission (compute.async / inst.async:call)
+ * set pi->busy = 1 to reserve the instance BEFORE the worker runs, so the worker
+ * -- which owns that reservation -- must not reject itself. done_fn/cancel_fn
+ * clear busy exactly once. Only worker_wasm.c should call these; synchronous
+ * callers must use the checking variants above so an in-flight async is rejected.
+ */
+int hl_cap_wasm_instance_call_async(HlWasmInstance *inst,
+                                     const void *input, size_t input_len,
+                                     void **output, size_t *output_len,
+                                     const HlWasmCallOpts *opts,
+                                     HlWasmCallbackFn cb_fn, void *cb_ctx,
+                                     HlAllocator *alloc, const char **err_msg);
+int hl_cap_wasm_instance_call_buf_async(HlWasmInstance *inst,
+                                         const void *input, size_t input_len,
+                                         struct HlWasmBuffer **output_buf,
+                                         const HlWasmCallOpts *opts,
+                                         HlWasmCallbackFn cb_fn, void *cb_ctx,
+                                         HlAllocator *alloc, const char **err_msg);
 
 /**
  * Destroy a persistent instance. NULL-safe, idempotent (closed flag).

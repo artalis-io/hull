@@ -13,6 +13,7 @@
 
 #include "hull/worker_wasm.h"
 #include "hull/cap/wasm_buffer.h"
+#include "hull/cap/fs.h"        /* hl_cap_fs_mmap_borrow / _release */
 #include "hull/utils/alloc.h"
 #include "hull/shared/thread_affinity.h"
 #include "hull/shared/async.h"
@@ -35,15 +36,18 @@ static void wasm_work_fn(void *ud)
     int rc;
 
     if (op->persistent_inst) {
-        /* Persistent instance mode */
+        /* Persistent instance mode. The submission set pi->busy = 1 to reserve
+         * this instance; the worker OWNS that reservation, so it uses the _async
+         * entries that bypass the busy reject (a synchronous call would still be
+         * rejected). done_fn/cancel_fn clear busy. */
         if (op->want_buffer) {
-            rc = hl_cap_wasm_instance_call_buf(op->persistent_inst,
+            rc = hl_cap_wasm_instance_call_buf_async(op->persistent_inst,
                                                 op->input, op->input_len,
                                                 &op->output_buf, &op->opts,
                                                 NULL, NULL,
                                                 op->alloc, &err_msg);
         } else {
-            rc = hl_cap_wasm_instance_call(op->persistent_inst,
+            rc = hl_cap_wasm_instance_call_async(op->persistent_inst,
                                             op->input, op->input_len,
                                             &op->output, &op->output_len,
                                             &op->opts, NULL, NULL,
@@ -163,9 +167,33 @@ int hl_worker_wasm_submit(HlAsyncBackendPool *pool, HlWorkerWasmOp *op)
     return rc;
 }
 
+void hl_worker_wasm_adopt_spans(HlWorkerWasmOp *op, const HlWasmSpanReq *reqs, int n)
+{
+    if (!op || n <= 0) return;
+    if (n > HL_WASM_MAX_SPANS) n = HL_WASM_MAX_SPANS; /* validated upstream; belt */
+    for (int i = 0; i < n; i++) {
+        snprintf(op->span_names[i], sizeof(op->span_names[i]), "%s", reqs[i].name);
+        op->span_reqs[i].name = op->span_names[i];       /* op-owned name */
+        op->span_reqs[i].buf = reqs[i].buf;
+        hl_cap_fs_mmap_borrow(reqs[i].buf);              /* submission pin */
+        op->span_pins++;
+    }
+    op->opts.spans = op->span_reqs;                      /* op-owned array */
+    op->opts.span_count = n;
+}
+
 void hl_worker_wasm_op_free(HlWorkerWasmOp *op)
 {
     if (!op) return;
+    /* Release the submission pins taken by hl_worker_wasm_adopt_spans. Reached on
+     * completion (op_free_all at ctx destroy), cancel-before-start (cancel_fn),
+     * and cancel-during-execution (done_fn cancelled) -- always AFTER the worker
+     * call's own span-set teardown, so the buffer stays mapped for the whole op. */
+    for (int i = 0; i < op->span_pins; i++)
+        hl_cap_fs_mmap_release(op->span_reqs[i].buf);
+    op->span_pins = 0;
+    op->opts.spans = NULL;
+    op->opts.span_count = 0;
     free(op->input);
     hl_alloc_free(op->alloc, op->output, op->output_len);
     if (op->output_buf) {

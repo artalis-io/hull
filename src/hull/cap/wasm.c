@@ -12,6 +12,7 @@
 #include "hull/cap/wasm.h"
 #include "hull/cap/wasm_buffer.h"
 #include "hull/cap/wasm_data.h"
+#include "hull/cap/wasm_spans.h"
 #include "hull/utils/alloc.h"
 #include "hull/cap/audit.h"
 #include "hull/limits/wasm.h"
@@ -90,12 +91,41 @@ typedef struct {
     void            *ctx;
     /* Shared data segments visible to current call */
     const HlWasmSharedData *shared_data;  /* NULL = no shared data */
+    /* Per-invocation mapped-span set visible to the current call (metadata query,
+     * mapped-spans item E). Set for the call, cleared before span teardown. */
+    const HlWasmSpanSet *spans;           /* NULL = no spans this call */
     /* Streaming I/O metadata (set by wasm_stream.c via set/clear helpers) */
     uint32_t stream_flags;       /* 0 when not streaming */
     uint32_t stream_chunk_index;
 } HlHostCallCtx;
 
 static _Thread_local HlHostCallCtx tl_host_ctx;
+
+/* Little-endian field stores for the wire record (host endianness may differ from
+ * WASM's LE; write byte-explicit so the guest's offset decode is correct on any
+ * host). */
+static void store_u16le(uint8_t *p, uint16_t v)
+{ p[0] = (uint8_t)v; p[1] = (uint8_t)(v >> 8); }
+static void store_u32le(uint8_t *p, uint32_t v)
+{ for (int i = 0; i < 4; i++) p[i] = (uint8_t)(v >> (8 * i)); }
+static void store_u64le(uint8_t *p, uint64_t v)
+{ for (int i = 0; i < 8; i++) p[i] = (uint8_t)(v >> (8 * i)); }
+
+/* A failed wasm_runtime_validate_app_addr sets an "out of bounds memory access"
+ * exception on the instance. Native calls (host_call) are only dispatched during
+ * live wasm execution -- WAMR halts and unwinds on any trap/exception and never
+ * calls further imports -- so there is NEVER a pending exception when the handler
+ * is entered. Thus the only exception present after our validate is the one WE
+ * caused; clearing it returns the instance to its pre-call (clean) state so a
+ * bad-pointer query returns a clean -1 instead of trapping the whole call. We
+ * additionally match the exact "out of bounds" text and clear ONLY that, so a
+ * (theoretically impossible) pre-existing exception is never erased. */
+static void clear_validate_oob_exception(wasm_module_inst_t inst)
+{
+    const char *e = wasm_runtime_get_exception(inst);
+    if (e && strstr(e, "out of bounds"))
+        wasm_runtime_set_exception(inst, NULL);
+}
 
 /* ── host_call native implementation ───────────────────────────────── */
 
@@ -172,6 +202,61 @@ static int32_t host_call_handler(wasm_exec_env_t exec_env,
         if (len == 3)
             return (int32_t)(uint32_t)(sd->segments[ptr].size >> 32);
         return -1;
+    }
+
+    if (opcode == HL_WASM_OP_SPAN_INFO) {
+        /* Mapped-span metadata query (item E). `ptr` = dest record app offset,
+         * `len` = span index (-1 => count query). See cap/wasm.h. */
+        const HlWasmSpanSet *set = tl_host_ctx.spans;
+        int count = set ? set->count : 0;
+        if (len == -1)                       /* count query; ptr ignored */
+            return (int32_t)count;
+        if (len < 0 || len >= count)         /* out of range / no active set */
+            return 0;
+
+        /* `ptr` is an UNSIGNED 32-bit app offset (no sign extension). Read the
+         * caller's advertised capacity from struct_size (offset 2, u16) first,
+         * bound it, then validate the whole dest before writing. */
+        uint64_t app = (uint64_t)(uint32_t)ptr;
+        /* A failed validate sets a pending "out of bounds" exception on the
+         * instance; clear it so a bad-pointer query returns a clean -1 rather than
+         * poisoning the guest's call. */
+        if (!wasm_runtime_validate_app_addr(inst, app, 4)) {
+            clear_validate_oob_exception(inst);
+            return -1;
+        }
+        uint8_t *p = wasm_runtime_addr_app_to_native(inst, app);
+        if (!p)
+            return -1;
+        uint32_t cap = (uint32_t)p[HL_SPAN_META_OFF_STRUCTSZ]
+                     | ((uint32_t)p[HL_SPAN_META_OFF_STRUCTSZ + 1] << 8);
+        if (cap < 4 || cap > 4096)
+            return -1;
+        if (!wasm_runtime_validate_app_addr(inst, app, (uint64_t)cap)) {
+            clear_validate_oob_exception(inst);
+            return -1;
+        }
+        p = wasm_runtime_addr_app_to_native(inst, app);
+        if (!p)
+            return -1;
+
+        /* Build the v1 record LE in a local buffer, then write min(cap, size). */
+        const HlWasmSpan *s = &set->spans[len];
+        uint8_t rec[HL_SPAN_META_V1_SIZE];
+        memset(rec, 0, sizeof(rec));
+        store_u16le(rec + HL_SPAN_META_OFF_VERSION, 1);
+        store_u16le(rec + HL_SPAN_META_OFF_STRUCTSZ, HL_SPAN_META_V1_SIZE);
+        store_u32le(rec + HL_SPAN_META_OFF_FLAGS, HL_SPAN_META_FLAG_RO);
+        size_t nl = strnlen(s->name, sizeof(s->name) - 1);
+        memcpy(rec + HL_SPAN_META_OFF_NAME, s->name, nl); /* rest stays NUL */
+        store_u64le(rec + HL_SPAN_META_OFF_BASE, s->wasm_addr);
+        store_u64le(rec + HL_SPAN_META_OFF_LEN,
+                    s->buf ? (uint64_t)s->buf->len : 0);
+        store_u64le(rec + HL_SPAN_META_OFF_FOFFSET,
+                    s->buf ? s->buf->foffset : 0);
+        size_t n = cap < HL_SPAN_META_V1_SIZE ? cap : HL_SPAN_META_V1_SIZE;
+        memcpy(p, rec, n);
+        return HL_SPAN_META_V1_SIZE; /* full required struct_size */
     }
 
     if (opcode == HL_WASM_OP_STREAM) {
@@ -671,6 +756,25 @@ int hl_cap_wasm_load(HlWasmCache *cache, const char *name,
     return 0;
 }
 
+/* Malformed per-invocation span request: `spans` and `span_count` must agree
+ * (spans != NULL iff span_count > 0, and span_count >= 0). Scripts cannot
+ * construct this -- the bindings set both or neither (mapped-spans item C) -- but
+ * a C embedder could, so the C consumption path (item D) fails closed on it
+ * before any module lookup, buffer borrow, or instance acquisition. Returns 1 if
+ * malformed, 0 otherwise (and 0 for a NULL opts). */
+static int spans_req_malformed(const HlWasmCallOpts *opts)
+{
+    if (!opts)
+        return 0;
+    if (opts->span_count < 0)
+        return 1;
+    if (opts->spans && opts->span_count <= 0)
+        return 1;
+    if (!opts->spans && opts->span_count > 0)
+        return 1;
+    return 0;
+}
+
 /* ── Call module (thin wrapper over call_buf) ──────────────────────── */
 
 int hl_cap_wasm_call(HlWasmCache *cache, const char *name,
@@ -734,6 +838,14 @@ int hl_cap_wasm_call_buf(HlWasmCache *cache, const char *name,
 
     if (!cache || !cache->initialized || !name || !output_buf) {
         if (err_msg) *err_msg = err_internal;
+        return HL_WASM_ERR_INTERNAL;
+    }
+
+    /* Malformed span request: reject BEFORE module lookup / buffer borrow /
+     * instance acquisition, fail closed with no state change (item D). */
+    if (spans_req_malformed(opts)) {
+        *output_buf = NULL;
+        if (err_msg) *err_msg = "bad_spans";
         return HL_WASM_ERR_INTERNAL;
     }
 
@@ -808,6 +920,23 @@ int hl_cap_wasm_call_buf(HlWasmCache *cache, const char *name,
     }
     (void)max_input; /* used only for validation at line 614; narrowing preserved for consistency */
 
+    /* D1 (mapped-spans): a per-invocation spans call is mutually exclusive with
+     * module segments (compute.segment) for cut 1 -- WAMR attaches one shared-heap
+     * chain per instance. Decide under mod->mutex (the same lock compute.segment
+     * mutates shared_data under) BEFORE instance acquisition / span borrow / heap
+     * creation, so the decision cannot race a concurrent segment mutation and a
+     * rejection leaves the pool / borrows / heaps untouched. */
+    int have_spans = (opts && opts->spans && opts->span_count > 0);
+    if (have_spans) {
+        pthread_mutex_lock(&mod->mutex);
+        int has_segments = (mod->shared_data != NULL);
+        pthread_mutex_unlock(&mod->mutex);
+        if (has_segments) {
+            if (err_msg) *err_msg = "spans_with_segments";
+            return HL_WASM_ERR_INTERNAL;
+        }
+    }
+
     /* Try to acquire from instance pool.
      * Shared data is snapshotted under the mutex for thread safety. */
     wasm_module_inst_t inst = NULL;
@@ -847,8 +976,39 @@ int hl_cap_wasm_call_buf(HlWasmCache *cache, const char *name,
         }
     }
 
-    /* Attach shared data (snapshotted under mutex) */
-    hl_wasm_attach_shared_heap(inst, chain_head_snapshot);
+    /* Attach shared data (snapshotted under mutex). For a spans call the segment
+     * chain is NOT attached (D1 guaranteed no segments at decision time; a
+     * raced-in segment set applies to future calls, never this one) -- only the
+     * span chain is attached below, preserving WAMR's one-chain-per-instance
+     * rule. A no-spans call is byte-for-byte the existing segment path. */
+    if (!have_spans)
+        hl_wasm_attach_shared_heap(inst, chain_head_snapshot);
+
+    /* Build + attach the per-invocation span set on the executing thread, AFTER
+     * instance acquisition. On any add/attach failure, roll the partial set back
+     * (teardown), release the instance, and return -- no heap/borrow left behind. */
+    HlWasmSpanSet span_set;
+    int spans_active = 0;
+    if (have_spans) {
+        hl_wasm_span_set_init(&span_set, mod->is_memory64);
+        const char *span_err = NULL;
+        int failed = 0;
+        for (int i = 0; i < opts->span_count && !failed; i++) {
+            if (hl_wasm_span_set_add(&span_set, opts->spans[i].buf,
+                                     opts->spans[i].name, &span_err) != 0)
+                failed = 1;
+        }
+        if (!failed && hl_wasm_span_set_attach(&span_set, inst, &span_err) != 0)
+            failed = 1;
+        if (failed) {
+            hl_wasm_span_set_teardown(&span_set);
+            if (err_msg) *err_msg = span_err ? span_err : "span_attach_failed";
+            hl_wasm_pool_release(cache, mod, inst, exec_env, process_fn,
+                                 heap_size, stack_size, 0);
+            return HL_WASM_ERR_INTERNAL;
+        }
+        spans_active = 1;
+    }
 
     int ret = HL_WASM_ERR_INTERNAL;
 
@@ -868,6 +1028,7 @@ int hl_cap_wasm_call_buf(HlWasmCache *cache, const char *name,
         if (!wasm_in_ptr || !native_in) {
             log_error("[wasm] failed to allocate input buffer (%zu bytes)", input_len);
             if (err_msg) *err_msg = err_internal;
+            if (spans_active) hl_wasm_span_set_teardown(&span_set);
             hl_wasm_pool_release(cache, mod, inst, exec_env, process_fn,
                          heap_size, stack_size, 0);
             return HL_WASM_ERR_INTERNAL;
@@ -884,6 +1045,7 @@ int hl_cap_wasm_call_buf(HlWasmCache *cache, const char *name,
             log_error("[wasm] failed to allocate output buffer (%" PRIu64 " bytes)", max_output);
             if (err_msg) *err_msg = err_internal;
             if (wasm_in_ptr) wasm_runtime_module_free(inst, wasm_in_ptr);
+            if (spans_active) hl_wasm_span_set_teardown(&span_set);
             hl_wasm_pool_release(cache, mod, inst, exec_env, process_fn,
                          heap_size, stack_size, 0);
             return HL_WASM_ERR_INTERNAL;
@@ -895,6 +1057,7 @@ int hl_cap_wasm_call_buf(HlWasmCache *cache, const char *name,
     tl_host_ctx.fn = callback_fn;
     tl_host_ctx.ctx = callback_ctx;
     tl_host_ctx.shared_data = sd_snapshot;
+    tl_host_ctx.spans = spans_active ? &span_set : NULL;
 
     /* Call hull_process with the appropriate ABI.
      * WASM32: hull_process(i32, i32, i32, i32) -> i32 = 4 argv cells
@@ -949,8 +1112,15 @@ int hl_cap_wasm_call_buf(HlWasmCache *cache, const char *name,
     }
 
     /* Free input allocation — no longer needed */
-    tl_host_ctx = saved_ctx;
+    tl_host_ctx = saved_ctx;   /* restores (clears) tl_host_ctx.spans before teardown */
     if (wasm_in_ptr) wasm_runtime_module_free(inst, wasm_in_ptr);
+
+    /* Spans back the INPUT (now consumed by the call): tear the set down HERE,
+     * before creating the output buffer (which may keep the instance checked out
+     * on the zero-copy path) or releasing the instance -- teardown precedes any
+     * ownership transfer or pool release. Covers the zero-copy, copied, and
+     * zero-length output paths that all follow. */
+    if (spans_active) hl_wasm_span_set_teardown(&span_set); /* terminal: no re-read */
 
     /* Create output buffer */
     if (result > 0 && (uint32_t)result <= max_output) {
@@ -982,7 +1152,8 @@ int hl_cap_wasm_call_buf(HlWasmCache *cache, const char *name,
     return ok ? HL_WASM_OK : HL_WASM_ERR_INTERNAL;
 
 cleanup_bufs_err:
-    tl_host_ctx = saved_ctx;
+    tl_host_ctx = saved_ctx;   /* restores (clears) tl_host_ctx.spans before teardown */
+    if (spans_active) hl_wasm_span_set_teardown(&span_set); /* terminal: no re-read */
     if (wasm_in_ptr)  wasm_runtime_module_free(inst, wasm_in_ptr);
     if (wasm_out_ptr) wasm_runtime_module_free(inst, wasm_out_ptr);
     hl_wasm_pool_release(cache, mod, inst, exec_env, process_fn,
@@ -1116,12 +1287,20 @@ HlWasmInstance *hl_cap_wasm_instance_create(HlWasmCache *cache,
 
 /* ── Persistent instance: call_buf ─────────────────────────────────── */
 
-int hl_cap_wasm_instance_call_buf(HlWasmInstance *pi,
+/* Core persistent-instance call. `busy_owned` = 1 means the caller already owns
+ * the instance's busy reservation (the async worker, whose submission set busy=1);
+ * it then bypasses the busy REJECT so it can run the in-flight call. `busy_owned`
+ * = 0 is the synchronous path, which rejects when a call is already in flight. The
+ * busy flag itself is owned by the async submission lifecycle (binding sets it at
+ * submit; done_fn/cancel_fn clear it exactly once); this function never mutates
+ * it. See hl_cap_wasm_instance_call_buf / _async below. */
+static int instance_call_buf_impl(HlWasmInstance *pi,
                                    const void *input, size_t input_len,
                                    HlWasmBuffer **output_buf,
                                    const HlWasmCallOpts *opts,
                                    HlWasmCallbackFn callback_fn, void *callback_ctx,
-                                   HlAllocator *alloc, const char **err_msg)
+                                   HlAllocator *alloc, const char **err_msg,
+                                   int busy_owned)
 {
     static const char *err_internal  = "internal_error";
     static const char *err_gas       = "gas_exhausted";
@@ -1137,13 +1316,38 @@ int hl_cap_wasm_instance_call_buf(HlWasmInstance *pi,
     }
     *output_buf = NULL;
 
+    /* Malformed span request: reject BEFORE instance acquisition / buffer borrow,
+     * fail closed with no state change (item D). */
+    if (spans_req_malformed(opts)) {
+        if (err_msg) *err_msg = "bad_spans";
+        return HL_WASM_ERR_INTERNAL;
+    }
+
     if (pi->closed) {
         if (err_msg) *err_msg = err_closed;
         return HL_WASM_ERR_INTERNAL;
     }
-    if (atomic_load(&pi->busy)) {
+    /* Synchronous callers reject when a call is in flight; the async worker owns
+     * the reservation and runs through it. */
+    if (!busy_owned && atomic_load(&pi->busy)) {
         if (err_msg) *err_msg = err_busy;
         return HL_WASM_ERR_INTERNAL;
+    }
+
+    /* D1 (mapped-spans): a spans call is mutually exclusive with module segments.
+     * A persistent instance attaches its segment chain at creation, so a span
+     * chain cannot also be attached (WAMR one-chain-per-instance). Decide under
+     * pi->module->mutex BEFORE any span borrow / heap creation; a rejection leaves
+     * the instance untouched. */
+    int have_spans = (opts && opts->spans && opts->span_count > 0);
+    if (have_spans && pi->module) {
+        pthread_mutex_lock(&pi->module->mutex);
+        int has_segments = (pi->module->shared_data != NULL);
+        pthread_mutex_unlock(&pi->module->mutex);
+        if (has_segments) {
+            if (err_msg) *err_msg = "spans_with_segments";
+            return HL_WASM_ERR_INTERNAL;
+        }
     }
 
     /* Resolve per-call opts → instance defaults → global defaults */
@@ -1185,6 +1389,32 @@ int hl_cap_wasm_instance_call_buf(HlWasmInstance *pi,
         wasm_runtime_set_instruction_count_limit(exec_env, gas_int);
     }
 
+    /* Build + attach the per-invocation span set to the persistent instance, on
+     * the executing thread. On any add/attach failure, roll the partial set back
+     * and return -- the instance is left as it was (no chain leaked). Detached
+     * again on every exit below so the next call starts chain-free. */
+    HlWasmSpanSet span_set;
+    int spans_active = 0;
+    if (have_spans) {
+        hl_wasm_span_set_init(&span_set,
+                              pi->module ? pi->module->is_memory64 : 0);
+        const char *span_err = NULL;
+        int failed = 0;
+        for (int i = 0; i < opts->span_count && !failed; i++) {
+            if (hl_wasm_span_set_add(&span_set, opts->spans[i].buf,
+                                     opts->spans[i].name, &span_err) != 0)
+                failed = 1;
+        }
+        if (!failed && hl_wasm_span_set_attach(&span_set, inst, &span_err) != 0)
+            failed = 1;
+        if (failed) {
+            hl_wasm_span_set_teardown(&span_set);
+            if (err_msg) *err_msg = span_err ? span_err : "span_attach_failed";
+            return HL_WASM_ERR_INTERNAL;
+        }
+        spans_active = 1;
+    }
+
     int ret = HL_WASM_ERR_INTERNAL;
 
     /* Allocate I/O in WASM linear memory */
@@ -1194,6 +1424,7 @@ int hl_cap_wasm_instance_call_buf(HlWasmInstance *pi,
         wasm_in_ptr = wasm_runtime_module_malloc(inst, (uint64_t)input_len, &native_in);
         if (!wasm_in_ptr || !native_in) {
             if (err_msg) *err_msg = err_internal;
+            if (spans_active) hl_wasm_span_set_teardown(&span_set);
             return HL_WASM_ERR_INTERNAL;
         }
         memcpy(native_in, input, input_len);
@@ -1206,6 +1437,7 @@ int hl_cap_wasm_instance_call_buf(HlWasmInstance *pi,
         if (!wasm_out_ptr || !native_out) {
             if (err_msg) *err_msg = err_internal;
             if (wasm_in_ptr) wasm_runtime_module_free(inst, wasm_in_ptr);
+            if (spans_active) hl_wasm_span_set_teardown(&span_set);
             return HL_WASM_ERR_INTERNAL;
         }
     }
@@ -1223,6 +1455,7 @@ int hl_cap_wasm_instance_call_buf(HlWasmInstance *pi,
         pthread_mutex_unlock(&pi->module->mutex);
     }
     tl_host_ctx.shared_data = pi_sd;
+    tl_host_ctx.spans = spans_active ? &span_set : NULL;
 
     int is_mem64 = pi->module ? pi->module->is_memory64 : 0;
     uint32_t argv[9];
@@ -1269,8 +1502,13 @@ int hl_cap_wasm_instance_call_buf(HlWasmInstance *pi,
     }
 
     /* Success — free input, create OWNED output buffer */
-    tl_host_ctx = saved_ctx;
+    tl_host_ctx = saved_ctx;   /* restores (clears) tl_host_ctx.spans before teardown */
     if (wasm_in_ptr) wasm_runtime_module_free(inst, wasm_in_ptr);
+
+    /* Spans back the INPUT (now consumed): detach + tear the set down so the
+     * persistent instance is chain-free for the next call. Output is always
+     * copied (create_owned), so no instance-checked-out ordering concern. */
+    if (spans_active) hl_wasm_span_set_teardown(&span_set); /* terminal: no re-read */
 
     if (result > 0 && (uint32_t)result <= max_output) {
         *output_buf = hl_wasm_buffer_create_owned(native_out, (size_t)result, alloc);
@@ -1283,20 +1521,47 @@ int hl_cap_wasm_instance_call_buf(HlWasmInstance *pi,
     return (*output_buf) ? HL_WASM_OK : HL_WASM_ERR_INTERNAL;
 
 cleanup_bufs_err:
-    tl_host_ctx = saved_ctx;
+    tl_host_ctx = saved_ctx;   /* restores (clears) tl_host_ctx.spans before teardown */
+    if (spans_active) hl_wasm_span_set_teardown(&span_set); /* terminal: no re-read */
     if (wasm_in_ptr)  wasm_runtime_module_free(inst, wasm_in_ptr);
     if (wasm_out_ptr) wasm_runtime_module_free(inst, wasm_out_ptr);
     return ret;
 }
 
+/* Public synchronous entry: rejects when a call is in flight (busy). */
+int hl_cap_wasm_instance_call_buf(HlWasmInstance *pi,
+                                   const void *input, size_t input_len,
+                                   HlWasmBuffer **output_buf,
+                                   const HlWasmCallOpts *opts,
+                                   HlWasmCallbackFn cb_fn, void *cb_ctx,
+                                   HlAllocator *alloc, const char **err_msg)
+{
+    return instance_call_buf_impl(pi, input, input_len, output_buf, opts,
+                                  cb_fn, cb_ctx, alloc, err_msg, 0 /*busy check*/);
+}
+
+/* Async-worker entry: the submission already set busy=1 (this call owns it), so
+ * the busy REJECT is bypassed. Only worker_wasm.c should call this. */
+int hl_cap_wasm_instance_call_buf_async(HlWasmInstance *pi,
+                                        const void *input, size_t input_len,
+                                        HlWasmBuffer **output_buf,
+                                        const HlWasmCallOpts *opts,
+                                        HlWasmCallbackFn cb_fn, void *cb_ctx,
+                                        HlAllocator *alloc, const char **err_msg)
+{
+    return instance_call_buf_impl(pi, input, input_len, output_buf, opts,
+                                  cb_fn, cb_ctx, alloc, err_msg, 1 /*busy owned*/);
+}
+
 /* ── Persistent instance: call (thin wrapper) ──────────────────────── */
 
-int hl_cap_wasm_instance_call(HlWasmInstance *pi,
-                               const void *input, size_t input_len,
-                               void **output, size_t *output_len,
-                               const HlWasmCallOpts *opts,
-                               HlWasmCallbackFn cb_fn, void *cb_ctx,
-                               HlAllocator *alloc, const char **err_msg)
+static int instance_call_impl(HlWasmInstance *pi,
+                              const void *input, size_t input_len,
+                              void **output, size_t *output_len,
+                              const HlWasmCallOpts *opts,
+                              HlWasmCallbackFn cb_fn, void *cb_ctx,
+                              HlAllocator *alloc, const char **err_msg,
+                              int busy_owned)
 {
     if (!output || !output_len) {
         if (err_msg) *err_msg = "internal_error";
@@ -1306,9 +1571,9 @@ int hl_cap_wasm_instance_call(HlWasmInstance *pi,
     *output_len = 0;
 
     HlWasmBuffer *buf = NULL;
-    int rc = hl_cap_wasm_instance_call_buf(pi, input, input_len,
-                                            &buf, opts, cb_fn, cb_ctx,
-                                            alloc, err_msg);
+    int rc = instance_call_buf_impl(pi, input, input_len,
+                                    &buf, opts, cb_fn, cb_ctx,
+                                    alloc, err_msg, busy_owned);
     if (rc != HL_WASM_OK)
         return rc;
 
@@ -1328,6 +1593,30 @@ int hl_cap_wasm_instance_call(HlWasmInstance *pi,
         }
     }
     return HL_WASM_OK;
+}
+
+/* Public synchronous wrapper (rejects when busy). */
+int hl_cap_wasm_instance_call(HlWasmInstance *pi,
+                               const void *input, size_t input_len,
+                               void **output, size_t *output_len,
+                               const HlWasmCallOpts *opts,
+                               HlWasmCallbackFn cb_fn, void *cb_ctx,
+                               HlAllocator *alloc, const char **err_msg)
+{
+    return instance_call_impl(pi, input, input_len, output, output_len, opts,
+                              cb_fn, cb_ctx, alloc, err_msg, 0 /*busy check*/);
+}
+
+/* Async-worker wrapper (busy owned by the submission; bypasses the reject). */
+int hl_cap_wasm_instance_call_async(HlWasmInstance *pi,
+                                     const void *input, size_t input_len,
+                                     void **output, size_t *output_len,
+                                     const HlWasmCallOpts *opts,
+                                     HlWasmCallbackFn cb_fn, void *cb_ctx,
+                                     HlAllocator *alloc, const char **err_msg)
+{
+    return instance_call_impl(pi, input, input_len, output, output_len, opts,
+                              cb_fn, cb_ctx, alloc, err_msg, 1 /*busy owned*/);
 }
 
 /* ── Persistent instance: destroy ──────────────────────────────────── */

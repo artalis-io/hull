@@ -28,13 +28,19 @@
 
 #include "hull/cap/wasm.h"
 #include "hull/cap/wasm_spans.h"
+#include "hull/cap/wasm_buffer.h"
+#include "hull/cap/wasm_data.h"
+#include "hull/worker_wasm.h"
 #include "hull/cap/fs.h"
+#include "hull/vfs.h"
+#include "hull/utils/alloc.h"
 #include "wasm_export.h"
 
 #include "gen_ro_heap_span_aot.h" /* build-generated: ro_heap_span_aot[] + _len (or empty) */
 
 #include <errno.h>
 #include <fcntl.h>
+#include <stdatomic.h>
 #include <pthread.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -158,6 +164,129 @@ static int guest_load(wasm_module_inst_t inst, wasm_exec_env_t env,
     return 1;
 }
 
+/* echo hull_process(in,in_len,out,out_max): out_max<in_len -> -2, else copy
+ * in->out and return in_len. Imports env.host_call. Used to drive the D.2 spans
+ * CALL path (hl_cap_wasm_call_buf) -- the span set is attached to the instance
+ * for the call and torn down after; echo does not read the span (attachment is
+ * metadata-independent until item E). Same bytes as tests/hull/cap/test_wasm.c. */
+static const unsigned char echo_wasm[] = {
+  0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x14, 0x03, 0x60,
+  0x03, 0x7f, 0x7f, 0x7f, 0x01, 0x7f, 0x60, 0x04, 0x7f, 0x7f, 0x7f, 0x7f,
+  0x01, 0x7f, 0x60, 0x00, 0x01, 0x7f, 0x02, 0x11, 0x01, 0x03, 0x65, 0x6e,
+  0x76, 0x09, 0x68, 0x6f, 0x73, 0x74, 0x5f, 0x63, 0x61, 0x6c, 0x6c, 0x00,
+  0x00, 0x03, 0x03, 0x02, 0x01, 0x02, 0x05, 0x03, 0x01, 0x00, 0x01, 0x07,
+  0x28, 0x03, 0x06, 0x6d, 0x65, 0x6d, 0x6f, 0x72, 0x79, 0x02, 0x00, 0x0c,
+  0x68, 0x75, 0x6c, 0x6c, 0x5f, 0x70, 0x72, 0x6f, 0x63, 0x65, 0x73, 0x73,
+  0x00, 0x01, 0x0c, 0x68, 0x75, 0x6c, 0x6c, 0x5f, 0x76, 0x65, 0x72, 0x73,
+  0x69, 0x6f, 0x6e, 0x00, 0x02, 0x0a, 0x20, 0x02, 0x19, 0x00, 0x20, 0x01,
+  0x20, 0x03, 0x4b, 0x04, 0x40, 0x41, 0x7e, 0x0f, 0x0b, 0x20, 0x02, 0x20,
+  0x00, 0x20, 0x01, 0xfc, 0x0a, 0x00, 0x00, 0x20, 0x01, 0x0b, 0x04, 0x00,
+  0x41, 0x01, 0x0b
+};
+static const unsigned int echo_wasm_len = 135;
+
+/* spanprobe.wasm: a compute plugin that exercises host_call(SPAN_INFO). Compiled
+ * from a small C source with clang --target=wasm32 (see the E commit message).
+ * hull_process queries the span count + span[0]'s HlSpanMetaV1 record + reads the
+ * window's first byte via the reported base, and packs the results (7 LE u32) into
+ * out for the host to verify. */
+static const unsigned char spanprobe_wasm[] = {
+  0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x10, 0x02, 0x60,
+  0x03, 0x7f, 0x7f, 0x7f, 0x01, 0x7f, 0x60, 0x04, 0x7f, 0x7f, 0x7f, 0x7f,
+  0x01, 0x7f, 0x02, 0x11, 0x01, 0x03, 0x65, 0x6e, 0x76, 0x09, 0x68, 0x6f,
+  0x73, 0x74, 0x5f, 0x63, 0x61, 0x6c, 0x6c, 0x00, 0x00, 0x03, 0x02, 0x01,
+  0x01, 0x04, 0x05, 0x01, 0x70, 0x01, 0x01, 0x01, 0x05, 0x03, 0x01, 0x00,
+  0x02, 0x06, 0x08, 0x01, 0x7f, 0x01, 0x41, 0x80, 0x80, 0x04, 0x0b, 0x07,
+  0x19, 0x02, 0x06, 0x6d, 0x65, 0x6d, 0x6f, 0x72, 0x79, 0x02, 0x00, 0x0c,
+  0x68, 0x75, 0x6c, 0x6c, 0x5f, 0x70, 0x72, 0x6f, 0x63, 0x65, 0x73, 0x73,
+  0x00, 0x01, 0x0a, 0xdc, 0x03, 0x01, 0xd9, 0x03, 0x01, 0x05, 0x7f, 0x41,
+  0x7e, 0x21, 0x04, 0x02, 0x40, 0x20, 0x01, 0x41, 0x0d, 0x48, 0x0d, 0x00,
+  0x20, 0x03, 0x41, 0x8c, 0x01, 0x48, 0x0d, 0x00, 0x20, 0x00, 0x28, 0x00,
+  0x04, 0x21, 0x05, 0x20, 0x00, 0x2d, 0x00, 0x00, 0x21, 0x03, 0x20, 0x00,
+  0x2d, 0x00, 0x01, 0x21, 0x06, 0x20, 0x00, 0x28, 0x00, 0x08, 0x21, 0x01,
+  0x41, 0x80, 0x80, 0x84, 0x80, 0x00, 0x21, 0x04, 0x41, 0x80, 0x80, 0x84,
+  0x80, 0x00, 0x20, 0x00, 0x2d, 0x00, 0x0c, 0x41, 0x80, 0x01, 0xfc, 0x0b,
+  0x00, 0x20, 0x03, 0x20, 0x06, 0x41, 0x08, 0x74, 0x72, 0x21, 0x07, 0x3f,
+  0x00, 0x41, 0x10, 0x74, 0x21, 0x08, 0x41, 0xf0, 0xff, 0xff, 0xff, 0x07,
+  0x21, 0x00, 0x02, 0x40, 0x02, 0x40, 0x02, 0x40, 0x02, 0x40, 0x02, 0x40,
+  0x20, 0x01, 0x41, 0x7f, 0x6a, 0x0e, 0x04, 0x04, 0x00, 0x01, 0x02, 0x03,
+  0x0b, 0x41, 0x80, 0x80, 0x80, 0x80, 0x78, 0x21, 0x00, 0x0c, 0x03, 0x0b,
+  0x20, 0x08, 0x20, 0x07, 0x41, 0xff, 0xff, 0x03, 0x71, 0x6b, 0x21, 0x04,
+  0x0c, 0x01, 0x0b, 0x20, 0x08, 0x20, 0x07, 0x41, 0xff, 0xff, 0x03, 0x71,
+  0x6b, 0x41, 0x01, 0x6a, 0x21, 0x04, 0x0b, 0x20, 0x04, 0x20, 0x06, 0x3a,
+  0x00, 0x03, 0x20, 0x04, 0x20, 0x03, 0x3a, 0x00, 0x02, 0x20, 0x04, 0x21,
+  0x00, 0x0b, 0x41, 0x00, 0x21, 0x03, 0x41, 0x04, 0x41, 0x00, 0x41, 0x7f,
+  0x10, 0x80, 0x80, 0x80, 0x80, 0x00, 0x21, 0x04, 0x41, 0x04, 0x20, 0x00,
+  0x20, 0x05, 0x10, 0x80, 0x80, 0x80, 0x80, 0x00, 0x21, 0x00, 0x02, 0x40,
+  0x20, 0x01, 0x0d, 0x00, 0x20, 0x07, 0x41, 0xff, 0xff, 0x03, 0x71, 0x41,
+  0xd0, 0x00, 0x49, 0x0d, 0x00, 0x20, 0x00, 0x41, 0xe0, 0x00, 0x47, 0x0d,
+  0x00, 0x41, 0x00, 0x28, 0x02, 0xc8, 0x80, 0x84, 0x80, 0x00, 0x2d, 0x00,
+  0x00, 0x21, 0x03, 0x0b, 0x20, 0x02, 0x20, 0x00, 0x3a, 0x00, 0x04, 0x20,
+  0x02, 0x20, 0x04, 0x3a, 0x00, 0x00, 0x20, 0x02, 0x20, 0x00, 0x41, 0x18,
+  0x76, 0x3a, 0x00, 0x07, 0x20, 0x02, 0x20, 0x00, 0x41, 0x10, 0x76, 0x3a,
+  0x00, 0x06, 0x20, 0x02, 0x20, 0x00, 0x41, 0x08, 0x76, 0x3a, 0x00, 0x05,
+  0x20, 0x02, 0x20, 0x04, 0x41, 0x18, 0x76, 0x3a, 0x00, 0x03, 0x20, 0x02,
+  0x20, 0x04, 0x41, 0x10, 0x76, 0x3a, 0x00, 0x02, 0x20, 0x02, 0x20, 0x04,
+  0x41, 0x08, 0x76, 0x3a, 0x00, 0x01, 0x41, 0x80, 0x7f, 0x21, 0x00, 0x03,
+  0x40, 0x20, 0x02, 0x20, 0x00, 0x6a, 0x22, 0x04, 0x41, 0x88, 0x01, 0x6a,
+  0x20, 0x00, 0x41, 0x80, 0x81, 0x84, 0x80, 0x00, 0x6a, 0x2d, 0x00, 0x00,
+  0x3a, 0x00, 0x00, 0x20, 0x04, 0x41, 0x89, 0x01, 0x6a, 0x20, 0x00, 0x41,
+  0x81, 0x81, 0x84, 0x80, 0x00, 0x6a, 0x2d, 0x00, 0x00, 0x3a, 0x00, 0x00,
+  0x20, 0x04, 0x41, 0x8a, 0x01, 0x6a, 0x20, 0x00, 0x41, 0x82, 0x81, 0x84,
+  0x80, 0x00, 0x6a, 0x2d, 0x00, 0x00, 0x3a, 0x00, 0x00, 0x20, 0x04, 0x41,
+  0x8b, 0x01, 0x6a, 0x20, 0x00, 0x41, 0x83, 0x81, 0x84, 0x80, 0x00, 0x6a,
+  0x2d, 0x00, 0x00, 0x3a, 0x00, 0x00, 0x20, 0x00, 0x41, 0x04, 0x6a, 0x22,
+  0x00, 0x0d, 0x00, 0x0b, 0x20, 0x02, 0x41, 0x00, 0x3a, 0x00, 0x8b, 0x01,
+  0x20, 0x02, 0x41, 0x00, 0x3b, 0x00, 0x89, 0x01, 0x20, 0x02, 0x20, 0x03,
+  0x3a, 0x00, 0x88, 0x01, 0x41, 0x8c, 0x01, 0x21, 0x04, 0x0b, 0x20, 0x04,
+  0x0b, 0x00, 0x46, 0x04, 0x6e, 0x61, 0x6d, 0x65, 0x00, 0x0f, 0x0e, 0x73,
+  0x70, 0x61, 0x6e, 0x70, 0x72, 0x6f, 0x62, 0x65, 0x2e, 0x77, 0x61, 0x73,
+  0x6d, 0x01, 0x1a, 0x02, 0x00, 0x09, 0x68, 0x6f, 0x73, 0x74, 0x5f, 0x63,
+  0x61, 0x6c, 0x6c, 0x01, 0x0c, 0x68, 0x75, 0x6c, 0x6c, 0x5f, 0x70, 0x72,
+  0x6f, 0x63, 0x65, 0x73, 0x73, 0x07, 0x12, 0x01, 0x00, 0x0f, 0x5f, 0x5f,
+  0x73, 0x74, 0x61, 0x63, 0x6b, 0x5f, 0x70, 0x6f, 0x69, 0x6e, 0x74, 0x65,
+  0x72, 0x00, 0x2f, 0x09, 0x70, 0x72, 0x6f, 0x64, 0x75, 0x63, 0x65, 0x72,
+  0x73, 0x01, 0x0c, 0x70, 0x72, 0x6f, 0x63, 0x65, 0x73, 0x73, 0x65, 0x64,
+  0x2d, 0x62, 0x79, 0x01, 0x0e, 0x48, 0x6f, 0x6d, 0x65, 0x62, 0x72, 0x65,
+  0x77, 0x20, 0x63, 0x6c, 0x61, 0x6e, 0x67, 0x06, 0x32, 0x32, 0x2e, 0x31,
+  0x2e, 0x38, 0x00, 0x94, 0x01, 0x0f, 0x74, 0x61, 0x72, 0x67, 0x65, 0x74,
+  0x5f, 0x66, 0x65, 0x61, 0x74, 0x75, 0x72, 0x65, 0x73, 0x08, 0x2b, 0x0b,
+  0x62, 0x75, 0x6c, 0x6b, 0x2d, 0x6d, 0x65, 0x6d, 0x6f, 0x72, 0x79, 0x2b,
+  0x0f, 0x62, 0x75, 0x6c, 0x6b, 0x2d, 0x6d, 0x65, 0x6d, 0x6f, 0x72, 0x79,
+  0x2d, 0x6f, 0x70, 0x74, 0x2b, 0x16, 0x63, 0x61, 0x6c, 0x6c, 0x2d, 0x69,
+  0x6e, 0x64, 0x69, 0x72, 0x65, 0x63, 0x74, 0x2d, 0x6f, 0x76, 0x65, 0x72,
+  0x6c, 0x6f, 0x6e, 0x67, 0x2b, 0x0a, 0x6d, 0x75, 0x6c, 0x74, 0x69, 0x76,
+  0x61, 0x6c, 0x75, 0x65, 0x2b, 0x0f, 0x6d, 0x75, 0x74, 0x61, 0x62, 0x6c,
+  0x65, 0x2d, 0x67, 0x6c, 0x6f, 0x62, 0x61, 0x6c, 0x73, 0x2b, 0x13, 0x6e,
+  0x6f, 0x6e, 0x74, 0x72, 0x61, 0x70, 0x70, 0x69, 0x6e, 0x67, 0x2d, 0x66,
+  0x70, 0x74, 0x6f, 0x69, 0x6e, 0x74, 0x2b, 0x0f, 0x72, 0x65, 0x66, 0x65,
+  0x72, 0x65, 0x6e, 0x63, 0x65, 0x2d, 0x74, 0x79, 0x70, 0x65, 0x73, 0x2b,
+  0x08, 0x73, 0x69, 0x67, 0x6e, 0x2d, 0x65, 0x78, 0x74
+};
+static const unsigned int spanprobe_wasm_len = 849;
+
+static const HlEntry span_call_entries[] = {
+    { "compute/echo.wasm", echo_wasm, echo_wasm_len },
+    { "compute/spanprobe.wasm", spanprobe_wasm, spanprobe_wasm_len },
+    { 0, 0, 0 }
+};
+
+/* One-shot: call "echo" with a single mapped span attached + `input`, returning
+ * the string output via hl_cap_wasm_call. */
+static int call_echo_with_span(HlWasmCache *cache, HlVfs *vfs, HlMappedBuffer *buf,
+                               const char *name, const void *input, size_t in_len,
+                               HlWasmCallOpts *opts_extra,
+                               void **out, size_t *out_len, const char **err)
+{
+    HlWasmSpanReq req = { .name = name, .buf = buf };
+    HlWasmCallOpts opts = {0};
+    if (opts_extra) opts = *opts_extra;
+    opts.spans = &req;
+    opts.span_count = 1;
+    return hl_cap_wasm_call(cache, "echo", input, in_len, out, out_len,
+                            &opts, NULL, NULL, vfs, NULL, NULL, err);
+}
+
 /* ── basic lifecycle: add one span, attach, teardown, count -> baseline ─────── */
 UTEST(wasm_spans, lifecycle_basic)
 {
@@ -175,7 +304,7 @@ UTEST(wasm_spans, lifecycle_basic)
 
     HlWasmSpanSet set; const char *err = NULL;
     hl_wasm_span_set_init(&set, 0 /* wasm32 */);
-    ASSERT_EQ(hl_wasm_span_set_add(&set, buf, &err), 0);
+    ASSERT_EQ(hl_wasm_span_set_add(&set, buf, "buf", &err), 0);
     ASSERT_EQ(set.count, 1);
     ASSERT_EQ(wasm_runtime_shared_heap_count(), base + 1);   /* heap created */
     ASSERT_EQ(hl_wasm_span_set_attach(&set, inst, &err), 0);
@@ -212,9 +341,9 @@ UTEST(wasm_spans, multiple_spans)
 
     HlWasmSpanSet set; const char *err = NULL;
     hl_wasm_span_set_init(&set, 0);
-    ASSERT_EQ(hl_wasm_span_set_add(&set, b0, &err), 0);
-    ASSERT_EQ(hl_wasm_span_set_add(&set, b1, &err), 0);
-    ASSERT_EQ(hl_wasm_span_set_add(&set, b2, &err), 0);
+    ASSERT_EQ(hl_wasm_span_set_add(&set, b0, "b0", &err), 0);
+    ASSERT_EQ(hl_wasm_span_set_add(&set, b1, "b1", &err), 0);
+    ASSERT_EQ(hl_wasm_span_set_add(&set, b2, "b2", &err), 0);
     ASSERT_EQ(set.count, 3);
     ASSERT_EQ(wasm_runtime_shared_heap_count(), base + 3);
     ASSERT_EQ(hl_wasm_span_set_attach(&set, inst, &err), 0);
@@ -252,10 +381,11 @@ UTEST(wasm_spans, duplicate_rejected)
 
     HlWasmSpanSet set; const char *err = NULL;
     hl_wasm_span_set_init(&set, 0);
-    ASSERT_EQ(hl_wasm_span_set_add(&set, buf, &err), 0);
-    /* same buffer again -> duplicate backing, no second heap, no second borrow. */
+    ASSERT_EQ(hl_wasm_span_set_add(&set, buf, "buf", &err), 0);
+    /* same buffer again (distinct NAME, so it reaches the backing check rather
+     * than the name-uniqueness check) -> duplicate backing, no second heap/borrow. */
     err = NULL;
-    ASSERT_EQ(hl_wasm_span_set_add(&set, buf, &err), -1);
+    ASSERT_EQ(hl_wasm_span_set_add(&set, buf, "buf_again", &err), -1);
     ASSERT_STREQ(err, "duplicate_span");
     ASSERT_EQ(set.count, 1);
     ASSERT_EQ(wasm_runtime_shared_heap_count(), base + 1);   /* only one heap */
@@ -287,9 +417,9 @@ UTEST(wasm_spans, cap_enforced)
 
     HlWasmSpanSet set; const char *err = NULL;
     hl_wasm_span_set_init(&set, 0);
-    ASSERT_EQ(hl_wasm_span_set_add(&set, big, &err), 0);   /* total == 1 GiB */
+    ASSERT_EQ(hl_wasm_span_set_add(&set, big, "big", &err), 0);   /* total == 1 GiB */
     err = NULL;
-    ASSERT_EQ(hl_wasm_span_set_add(&set, small, &err), -1); /* would exceed cap */
+    ASSERT_EQ(hl_wasm_span_set_add(&set, small, "small", &err), -1); /* would exceed cap */
     ASSERT_STREQ(err, "span_cap");
     ASSERT_EQ(set.count, 1);
 
@@ -311,7 +441,7 @@ UTEST(wasm_spans, close_while_borrowed)
 
     HlWasmSpanSet set; const char *err = NULL;
     hl_wasm_span_set_init(&set, 0);
-    ASSERT_EQ(hl_wasm_span_set_add(&set, buf, &err), 0);   /* pins buf */
+    ASSERT_EQ(hl_wasm_span_set_add(&set, buf, "buf", &err), 0);   /* pins buf */
     ASSERT_EQ(buf->borrow_count, 1);
 
     /* close the buffer while the span borrows it: munmap is deferred. */
@@ -344,12 +474,12 @@ UTEST(wasm_spans, partial_attach_failure)
 
     HlWasmSpanSet a, b; const char *err = NULL;
     hl_wasm_span_set_init(&a, 0);
-    ASSERT_EQ(hl_wasm_span_set_add(&a, b0, &err), 0);
+    ASSERT_EQ(hl_wasm_span_set_add(&a, b0, "b0", &err), 0);
     ASSERT_EQ(hl_wasm_span_set_attach(&a, inst, &err), 0);   /* inst now has a heap */
 
     /* set B built (heap created, borrowed), attach FAILS (inst already attached). */
     hl_wasm_span_set_init(&b, 0);
-    ASSERT_EQ(hl_wasm_span_set_add(&b, b1, &err), 0);
+    ASSERT_EQ(hl_wasm_span_set_add(&b, b1, "b1", &err), 0);
     ASSERT_EQ(wasm_runtime_shared_heap_count(), base + 2);
     err = NULL;
     ASSERT_EQ(hl_wasm_span_set_attach(&b, inst, &err), -1);
@@ -373,7 +503,7 @@ static void *wt_worker(void *p)
 {
     struct wt_arg *a = (struct wt_arg *)p;
     const char *err = NULL;
-    a->add_rc = hl_wasm_span_set_add(a->set, a->buf, &err); /* wrong thread */
+    a->add_rc = hl_wasm_span_set_add(a->set, a->buf, "a->buf", &err); /* wrong thread */
     return NULL;
 }
 UTEST(wasm_spans, owning_thread_enforced)
@@ -415,8 +545,8 @@ UTEST(wasm_spans, repeated_invocations_baseline)
         ASSERT_TRUE(b0 && b1);
         HlWasmSpanSet set; const char *err = NULL;
         hl_wasm_span_set_init(&set, 0);
-        ASSERT_EQ(hl_wasm_span_set_add(&set, b0, &err), 0);
-        ASSERT_EQ(hl_wasm_span_set_add(&set, b1, &err), 0);
+        ASSERT_EQ(hl_wasm_span_set_add(&set, b0, "b0", &err), 0);
+        ASSERT_EQ(hl_wasm_span_set_add(&set, b1, "b1", &err), 0);
         ASSERT_EQ(hl_wasm_span_set_attach(&set, inst, &err), 0);
         hl_wasm_span_set_teardown(&set);
         hl_cap_fs_munmap(b0); hl_cap_fs_munmap(b1);
@@ -447,8 +577,8 @@ UTEST(wasm_spans, cross_instance_isolation)
     HlWasmSpanSet set0, set1; const char *err = NULL;
     hl_wasm_span_set_init(&set0, 0);
     hl_wasm_span_set_init(&set1, 0);
-    ASSERT_EQ(hl_wasm_span_set_add(&set0, s0, &err), 0);
-    ASSERT_EQ(hl_wasm_span_set_add(&set1, s1, &err), 0);
+    ASSERT_EQ(hl_wasm_span_set_add(&set0, s0, "s0", &err), 0);
+    ASSERT_EQ(hl_wasm_span_set_add(&set1, s1, "s1", &err), 0);
     ASSERT_EQ(hl_wasm_span_set_attach(&set0, i0, &err), 0);
     ASSERT_EQ(hl_wasm_span_set_attach(&set1, i1, &err), 0);   /* independent */
 
@@ -494,9 +624,9 @@ UTEST(wasm_spans, cross_instance_execution_isolation)
     HlWasmSpanSet set0, set1; const char *err = NULL;
     hl_wasm_span_set_init(&set0, 0);
     hl_wasm_span_set_init(&set1, 0);
-    ASSERT_EQ(hl_wasm_span_set_add(&set0, s0a, &err), 0);
-    ASSERT_EQ(hl_wasm_span_set_add(&set0, s0b, &err), 0);
-    ASSERT_EQ(hl_wasm_span_set_add(&set1, s1, &err), 0);
+    ASSERT_EQ(hl_wasm_span_set_add(&set0, s0a, "s0a", &err), 0);
+    ASSERT_EQ(hl_wasm_span_set_add(&set0, s0b, "s0b", &err), 0);
+    ASSERT_EQ(hl_wasm_span_set_add(&set1, s1, "s1", &err), 0);
     ASSERT_EQ(hl_wasm_span_set_attach(&set0, i0, &err), 0);
     ASSERT_EQ(hl_wasm_span_set_attach(&set1, i1, &err), 0);
 
@@ -539,7 +669,7 @@ UTEST(wasm_spans, distinct_buffer_overlap_rejected)
 
     HlWasmSpanSet set; const char *err = NULL;
     hl_wasm_span_set_init(&set, 0);
-    ASSERT_EQ(hl_wasm_span_set_add(&set, b0, &err), 0);
+    ASSERT_EQ(hl_wasm_span_set_add(&set, b0, "b0", &err), 0);
     ASSERT_EQ(wasm_runtime_shared_heap_count(), base + 1);
 
     /* (a) distinct buffer, SAME native base -> map_base-equality arm. */
@@ -550,7 +680,7 @@ UTEST(wasm_spans, distinct_buffer_overlap_rejected)
     alias.len = 256;
     ASSERT_TRUE(&alias != b0);
     err = NULL;
-    ASSERT_EQ(hl_wasm_span_set_add(&set, &alias, &err), -1);
+    ASSERT_EQ(hl_wasm_span_set_add(&set, &alias, "alias", &err), -1);
     ASSERT_STREQ(err, "duplicate_span");
 
     /* (b) distinct buffer, DISTINCT base but OVERLAPPING native range -> the
@@ -561,7 +691,7 @@ UTEST(wasm_spans, distinct_buffer_overlap_rejected)
     overlap.addr = overlap.map_base;
     overlap.len = 256;
     err = NULL;
-    ASSERT_EQ(hl_wasm_span_set_add(&set, &overlap, &err), -1);
+    ASSERT_EQ(hl_wasm_span_set_add(&set, &overlap, "overlap", &err), -1);
     ASSERT_STREQ(err, "duplicate_span");
 
     /* neither synthetic alias was pinned or created a heap. */
@@ -571,6 +701,1034 @@ UTEST(wasm_spans, distinct_buffer_overlap_rejected)
     hl_wasm_span_set_teardown(&set);
     ASSERT_EQ(wasm_runtime_shared_heap_count(), base);
     hl_cap_fs_munmap(b0);
+    hl_cap_wasm_destroy(&cache);
+    teardown_dir();
+}
+
+/* ── span name validation: NULL / empty / overlong rejected ("bad_name"), and a
+ *    distinct buffer with a DUPLICATE name rejected ("duplicate_name", distinct
+ *    from the same-backing "duplicate_span"). Each rejection happens before any
+ *    borrow/heap-create, so no heap/borrow leaks. ─────────────────────────────── */
+UTEST(wasm_spans, name_validation)
+{
+    setup();
+    HlWasmCache cache; ASSERT_EQ(hl_cap_wasm_init(&cache), 0);
+    uint32_t base = wasm_runtime_shared_heap_count();
+    ASSERT_EQ(write_file("a.bin", 40000), 0);
+    HlMappedBuffer *b0 = hl_cap_fs_mmap_window(&cfg, "a.bin", 0, 4096, NULL, NULL);
+    HlMappedBuffer *b1 = hl_cap_fs_mmap_window(&cfg, "a.bin", 8192, 4096, NULL, NULL);
+    ASSERT_TRUE(b0 && b1);
+
+    HlWasmSpanSet set; const char *err = NULL;
+    hl_wasm_span_set_init(&set, 0);
+
+    /* NULL name -> internal_error (defensive; the binding never passes NULL). */
+    err = NULL;
+    ASSERT_EQ(hl_wasm_span_set_add(&set, b0, NULL, &err), -1);
+    ASSERT_STREQ(err, "internal_error");
+    /* empty name -> bad_name. */
+    err = NULL;
+    ASSERT_EQ(hl_wasm_span_set_add(&set, b0, "", &err), -1);
+    ASSERT_STREQ(err, "bad_name");
+    /* 64-byte name (>= sizeof name[64], no room for the NUL) -> bad_name. */
+    char overlong[65];
+    memset(overlong, 'x', 64);
+    overlong[64] = '\0';
+    err = NULL;
+    ASSERT_EQ(hl_wasm_span_set_add(&set, b0, overlong, &err), -1);
+    ASSERT_STREQ(err, "bad_name");
+    /* 63-byte name is the max accepted. */
+    char maxname[64];
+    memset(maxname, 'y', 63);
+    maxname[63] = '\0';
+    err = NULL;
+    ASSERT_EQ(hl_wasm_span_set_add(&set, b0, maxname, &err), 0);
+    ASSERT_EQ(set.count, 1);
+    ASSERT_STREQ(set.spans[0].name, maxname);
+
+    /* a DISTINCT buffer with the SAME name -> duplicate_name (not duplicate_span:
+     * different backing, colliding name). */
+    err = NULL;
+    ASSERT_EQ(hl_wasm_span_set_add(&set, b1, maxname, &err), -1);
+    ASSERT_STREQ(err, "duplicate_name");
+    ASSERT_EQ(set.count, 1);
+    ASSERT_EQ(b1->borrow_count, 0);   /* the rejected add never borrowed */
+
+    ASSERT_EQ(hl_wasm_span_set_teardown(&set), 0);
+    ASSERT_EQ(wasm_runtime_shared_heap_count(), base);
+    ASSERT_EQ(b0->borrow_count, 0);
+    hl_cap_fs_munmap(b0); hl_cap_fs_munmap(b1);
+    hl_cap_wasm_destroy(&cache);
+    teardown_dir();
+}
+
+/* ── malformed span request guard (item D consumption entry): a request whose
+ *    spans/span_count disagree is rejected "bad_spans" BEFORE module lookup /
+ *    buffer borrow / instance acquisition, with NO heap / borrow / module-cache
+ *    state change. Scripts can't build this (the binding sets both or neither);
+ *    this drives it directly through the C API. ──────────────────────────────── */
+UTEST(wasm_spans, guard_malformed_span_request)
+{
+    setup();
+    HlWasmCache cache; ASSERT_EQ(hl_cap_wasm_init(&cache), 0);
+    uint32_t base = wasm_runtime_shared_heap_count();
+    ASSERT_EQ(write_file("a.bin", 40000), 0);
+    HlMappedBuffer *buf = hl_cap_fs_mmap_window(&cfg, "a.bin", 0, 4096, NULL, NULL);
+    ASSERT_TRUE(buf != NULL);
+    HlWasmSpanReq req = { .name = "src", .buf = buf };
+
+    struct { const char *label; const HlWasmSpanReq *spans; int count; } cases[] = {
+        { "spans set, count 0",   &req, 0 },
+        { "spans NULL, count 1",  NULL, 1 },
+        { "count negative",       &req, -1 },
+    };
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        HlWasmCallOpts opts = {0};
+        opts.spans = cases[i].spans;
+        opts.span_count = cases[i].count;
+        void *out = (void *)0x1;
+        size_t out_len = 99;
+        const char *err = NULL;
+        int rc = hl_cap_wasm_call(&cache, "nomod", "x", 1, &out, &out_len,
+                                  &opts, NULL, NULL, NULL, NULL, NULL, &err);
+        ASSERT_NE(rc, HL_WASM_OK);                 /* rejected */
+        ASSERT_TRUE(err != NULL);
+        ASSERT_STREQ(err, "bad_spans");
+        ASSERT_TRUE(out == NULL);                  /* no output produced */
+        ASSERT_EQ(out_len, (size_t)0);
+        ASSERT_EQ(wasm_runtime_shared_heap_count(), base); /* no heap created */
+        ASSERT_EQ(buf->borrow_count, 0);           /* no borrow taken */
+        ASSERT_EQ(cache.count, 0);                 /* no module loaded/acquired */
+    }
+
+    /* a well-formed request passes the guard (then fails module lookup): proves
+     * the guard rejects ONLY the malformed shapes. */
+    HlWasmCallOpts ok_opts = {0};
+    ok_opts.spans = &req;
+    ok_opts.span_count = 1;
+    void *out = NULL; size_t out_len = 0; const char *err = NULL;
+    int rc = hl_cap_wasm_call(&cache, "nomod", "x", 1, &out, &out_len,
+                              &ok_opts, NULL, NULL, NULL, NULL, NULL, &err);
+    ASSERT_NE(rc, HL_WASM_OK);
+    ASSERT_STREQ(err, "not_found");                /* past the guard, into lookup */
+    ASSERT_EQ(buf->borrow_count, 0);
+
+    hl_cap_fs_munmap(buf);
+    hl_cap_wasm_destroy(&cache);
+    teardown_dir();
+}
+
+/* ══ D.2: pooled synchronous span consumption in hl_cap_wasm_call_buf ═══════════
+ * These drive the real call path (echo hull_process) with a span attached, and
+ * assert the whole cleanup discipline: every exit tears the span set down before
+ * pool release / output ownership, restoring the shared-heap count and the mmap
+ * borrow to baseline. The span is metadata-independent (echo never reads it).   */
+
+/* ── success: a span attaches, the call runs, teardown restores baseline ─────── */
+UTEST(wasm_spans, d2_success_attach_and_teardown)
+{
+    setup();
+    HlWasmCache cache; ASSERT_EQ(hl_cap_wasm_init(&cache), 0);
+    HlVfs vfs; hl_vfs_init(&vfs, span_call_entries, NULL);
+    uint32_t base = wasm_runtime_shared_heap_count();
+    ASSERT_EQ(write_file("a.bin", 40000), 0);
+    HlMappedBuffer *buf = hl_cap_fs_mmap_window(&cfg, "a.bin", 0, 4096, NULL, NULL);
+    ASSERT_TRUE(buf != NULL);
+
+    const char *input = "hello spans";
+    void *out = NULL; size_t out_len = 0; const char *err = NULL;
+    int rc = call_echo_with_span(&cache, &vfs, buf, "src", input, strlen(input),
+                                 NULL, &out, &out_len, &err);
+    ASSERT_EQ(rc, HL_WASM_OK);
+    ASSERT_EQ(out_len, strlen(input));
+    ASSERT_TRUE(out != NULL);
+    ASSERT_EQ(memcmp(out, input, out_len), 0);   /* echo returned the input */
+    free(out);
+
+    ASSERT_EQ(wasm_runtime_shared_heap_count(), base);  /* span heap torn down */
+    ASSERT_EQ(buf->borrow_count, 0);                     /* borrow released */
+
+    hl_cap_fs_munmap(buf);
+    hl_cap_wasm_destroy(&cache);
+    teardown_dir();
+}
+
+/* ── D1: a spans call on a module with an active segment is rejected, with no
+ *    span heap created and no borrow taken (the segment's own heap is unaffected). */
+UTEST(wasm_spans, d2_d1_rejection)
+{
+    setup();
+    HlWasmCache cache; ASSERT_EQ(hl_cap_wasm_init(&cache), 0);
+    HlVfs vfs; hl_vfs_init(&vfs, span_call_entries, NULL);
+    uint32_t base = wasm_runtime_shared_heap_count();
+    ASSERT_EQ(write_file("a.bin", 40000), 0);
+    HlMappedBuffer *buf = hl_cap_fs_mmap_window(&cfg, "a.bin", 0, 4096, NULL, NULL);
+    ASSERT_TRUE(buf != NULL);
+
+    /* load echo + install a segment so mod->shared_data != NULL. */
+    ASSERT_EQ(hl_cap_wasm_load(&cache, "echo", &vfs, NULL), 0);
+    const char *derr = NULL;
+    static const unsigned char seg[16] = { 1, 2, 3, 4, 5, 6, 7, 8 };
+    ASSERT_EQ(hl_cap_wasm_data_load(&cache, "echo", "graph", seg, sizeof(seg),
+                                    NULL, &vfs, NULL, &derr), 0);
+    uint32_t after_seg = wasm_runtime_shared_heap_count(); /* base + the segment heap */
+    ASSERT_TRUE(after_seg > base);
+
+    const char *input = "x";
+    void *out = (void *)0x1; size_t out_len = 9; const char *err = NULL;
+    int rc = call_echo_with_span(&cache, &vfs, buf, "src", input, 1, NULL,
+                                 &out, &out_len, &err);
+    ASSERT_NE(rc, HL_WASM_OK);
+    ASSERT_STREQ(err, "spans_with_segments");
+    ASSERT_TRUE(out == NULL);
+    ASSERT_EQ(wasm_runtime_shared_heap_count(), after_seg); /* no span heap added */
+    ASSERT_EQ(buf->borrow_count, 0);                        /* no borrow taken */
+
+    hl_cap_fs_munmap(buf);
+    hl_cap_wasm_destroy(&cache);
+    teardown_dir();
+}
+
+/* ── gas exhaustion still tears the span set down (baseline restored) ────────── */
+UTEST(wasm_spans, d2_gas_cleanup)
+{
+    setup();
+    HlWasmCache cache; ASSERT_EQ(hl_cap_wasm_init(&cache), 0);
+    HlVfs vfs; hl_vfs_init(&vfs, span_call_entries, NULL);
+    uint32_t base = wasm_runtime_shared_heap_count();
+    ASSERT_EQ(write_file("a.bin", 40000), 0);
+    HlMappedBuffer *buf = hl_cap_fs_mmap_window(&cfg, "a.bin", 0, 4096, NULL, NULL);
+    ASSERT_TRUE(buf != NULL);
+
+    HlWasmCallOpts extra = {0};
+    extra.gas = 1;   /* exhaust immediately -> the call traps */
+    void *out = NULL; size_t out_len = 0; const char *err = NULL;
+    int rc = call_echo_with_span(&cache, &vfs, buf, "src", "hello", 5, &extra,
+                                 &out, &out_len, &err);
+    /* The call trapped (gas). What matters for D.2 is that the trap path tears the
+     * span set down: exact error classification is orthogonal (WAMR emits
+     * "instruction limit exceeded"; the cap layer maps it to call_failed). */
+    ASSERT_NE(rc, HL_WASM_OK);
+    ASSERT_TRUE(out == NULL);
+    ASSERT_EQ(wasm_runtime_shared_heap_count(), base);  /* torn down on trap */
+    ASSERT_EQ(buf->borrow_count, 0);
+
+    hl_cap_fs_munmap(buf);
+    hl_cap_wasm_destroy(&cache);
+    teardown_dir();
+}
+
+/* ── output alloc failure (tiny heap + big output) tears the span set down ───── */
+UTEST(wasm_spans, d2_output_alloc_fail)
+{
+    setup();
+    HlWasmCache cache; ASSERT_EQ(hl_cap_wasm_init(&cache), 0);
+    HlVfs vfs; hl_vfs_init(&vfs, span_call_entries, NULL);
+    uint32_t base = wasm_runtime_shared_heap_count();
+    ASSERT_EQ(write_file("a.bin", 40000), 0);
+    HlMappedBuffer *buf = hl_cap_fs_mmap_window(&cfg, "a.bin", 0, 4096, NULL, NULL);
+    ASSERT_TRUE(buf != NULL);
+
+    HlWasmCallOpts extra = {0};
+    extra.heap_size = 65536;              /* 64 KiB app heap */
+    extra.max_output = 8 * 1024 * 1024;   /* 8 MiB output cannot fit -> alloc fails */
+    void *out = NULL; size_t out_len = 0; const char *err = NULL;
+    int rc = call_echo_with_span(&cache, &vfs, buf, "src", "hi", 2, &extra,
+                                 &out, &out_len, &err);
+    ASSERT_NE(rc, HL_WASM_OK);            /* output alloc failed */
+    ASSERT_EQ(wasm_runtime_shared_heap_count(), base);  /* span torn down */
+    ASSERT_EQ(buf->borrow_count, 0);
+
+    hl_cap_fs_munmap(buf);
+    hl_cap_wasm_destroy(&cache);
+    teardown_dir();
+}
+
+/* ── pooled reuse: repeated span calls each return to baseline (per-call
+ *    teardown keeps the pooled instance span-free between calls) ──────────────── */
+UTEST(wasm_spans, d2_pooled_reuse)
+{
+    setup();
+    HlWasmCache cache; ASSERT_EQ(hl_cap_wasm_init(&cache), 0);
+    HlVfs vfs; hl_vfs_init(&vfs, span_call_entries, NULL);
+    uint32_t base = wasm_runtime_shared_heap_count();
+    ASSERT_EQ(write_file("a.bin", 40000), 0);
+
+    for (int i = 0; i < 50; i++) {
+        HlMappedBuffer *buf = hl_cap_fs_mmap_window(&cfg, "a.bin", 0, 4096, NULL, NULL);
+        ASSERT_TRUE(buf != NULL);
+        void *out = NULL; size_t out_len = 0; const char *err = NULL;
+        int rc = call_echo_with_span(&cache, &vfs, buf, "src", "abc", 3, NULL,
+                                     &out, &out_len, &err);
+        ASSERT_EQ(rc, HL_WASM_OK);
+        ASSERT_EQ(out_len, (size_t)3);
+        free(out);
+        ASSERT_EQ(buf->borrow_count, 0);
+        ASSERT_EQ(wasm_runtime_shared_heap_count(), base); /* baseline every call */
+        hl_cap_fs_munmap(buf);
+    }
+
+    hl_cap_wasm_destroy(&cache);
+    teardown_dir();
+}
+
+/* ── zero-copy output: the span is torn down BEFORE the returned WasmBuffer keeps
+ *    the instance checked out; the output bytes stay valid; baseline restored ─── */
+UTEST(wasm_spans, d2_zero_copy_lifetime)
+{
+    setup();
+    HlWasmCache cache; ASSERT_EQ(hl_cap_wasm_init(&cache), 0);
+    HlVfs vfs; hl_vfs_init(&vfs, span_call_entries, NULL);
+    uint32_t base = wasm_runtime_shared_heap_count();
+    ASSERT_EQ(write_file("a.bin", 40000), 0);
+    HlMappedBuffer *buf = hl_cap_fs_mmap_window(&cfg, "a.bin", 0, 4096, NULL, NULL);
+    ASSERT_TRUE(buf != NULL);
+
+    HlWasmSpanReq req = { .name = "src", .buf = buf };
+    HlWasmCallOpts opts = {0};
+    opts.spans = &req; opts.span_count = 1;
+    HlWasmBuffer *ob = NULL; const char *err = NULL;
+    int rc = hl_cap_wasm_call_buf(&cache, "echo", "wasmbuf", 7, &ob, &opts,
+                                  NULL, NULL, &vfs, NULL, NULL, &err);
+    ASSERT_EQ(rc, HL_WASM_OK);
+    ASSERT_TRUE(ob != NULL);
+    /* span already torn down even though the buffer keeps the instance out. */
+    ASSERT_EQ(buf->borrow_count, 0);
+    ASSERT_EQ(wasm_runtime_shared_heap_count(), base);
+    /* the zero-copy output still reads correctly. */
+    ASSERT_EQ(hl_wasm_buffer_len(ob), (size_t)7);
+    ASSERT_EQ(memcmp(hl_wasm_buffer_data(ob), "wasmbuf", 7), 0);
+    hl_wasm_buffer_destroy(ob);
+    hl_alloc_free(NULL, ob, sizeof(*ob));
+
+    hl_cap_fs_munmap(buf);
+    hl_cap_wasm_destroy(&cache);
+    teardown_dir();
+}
+
+/* ── concurrency: workers call echo-with-span while a mutator toggles a segment.
+ *    The D1 decision reads shared_data under mod->mutex (the same lock the mutator
+ *    holds), so each call deterministically either SUCCEEDS or cleanly rejects
+ *    "spans_with_segments" -- never a torn read, crash, or other error. Final
+ *    heap count returns to baseline. TSan-validated. ─────────────────────────── */
+#define D2R_NTHREAD 4
+#define D2R_NITER   150
+struct d2r_arg { HlWasmCache *cache; HlVfs *vfs; HlFsConfig *cfg; int ok; };
+static void *d2r_worker(void *p)
+{
+    struct d2r_arg *a = (struct d2r_arg *)p;
+    a->ok = 1;
+    for (int i = 0; i < D2R_NITER; i++) {
+        HlMappedBuffer *b = hl_cap_fs_mmap_window(a->cfg, "a.bin", 0, 4096, NULL, NULL);
+        if (!b) { a->ok = 0; break; }
+        void *out = NULL; size_t out_len = 0; const char *err = NULL;
+        int rc = call_echo_with_span(a->cache, a->vfs, b, "src", "z", 1, NULL,
+                                     &out, &out_len, &err);
+        if (rc == HL_WASM_OK) {
+            free(out);
+        } else if (!(err && strcmp(err, "spans_with_segments") == 0)) {
+            a->ok = 0; /* any OTHER error is a failure */
+        }
+        if (b->borrow_count != 0) a->ok = 0;   /* borrow always released */
+        hl_cap_fs_munmap(b);
+        if (!a->ok) break;
+    }
+    return NULL;
+}
+UTEST(wasm_spans, d2_segment_race_concurrency)
+{
+    setup();
+    HlWasmCache cache; ASSERT_EQ(hl_cap_wasm_init(&cache), 0);
+    HlVfs vfs; hl_vfs_init(&vfs, span_call_entries, NULL);
+    uint32_t base = wasm_runtime_shared_heap_count();
+    ASSERT_EQ(write_file("a.bin", 40000), 0);
+    /* pre-load on the main thread (WAMR's module loader is not thread-safe). */
+    ASSERT_EQ(hl_cap_wasm_load(&cache, "echo", &vfs, NULL), 0);
+
+    struct d2r_arg args[D2R_NTHREAD];
+    pthread_t th[D2R_NTHREAD];
+    for (int i = 0; i < D2R_NTHREAD; i++) {
+        args[i].cache = &cache; args[i].vfs = &vfs; args[i].cfg = &cfg; args[i].ok = -1;
+        ASSERT_EQ(pthread_create(&th[i], NULL, d2r_worker, &args[i]), 0);
+    }
+    /* mutator: toggle a segment on/off, racing the D1 decision. */
+    static const unsigned char seg[16] = { 9, 9, 9, 9 };
+    for (int r = 0; r < D2R_NITER; r++) {
+        const char *derr = NULL;
+        hl_cap_wasm_data_load(&cache, "echo", "graph", seg, sizeof(seg),
+                              NULL, &vfs, NULL, &derr);
+        hl_cap_wasm_data_load(&cache, "echo", "graph", NULL, 0,
+                              NULL, &vfs, NULL, &derr); /* remove */
+    }
+    for (int i = 0; i < D2R_NTHREAD; i++) pthread_join(th[i], NULL);
+    /* The proof: every call deterministically SUCCEEDED or cleanly rejected
+     * "spans_with_segments" (never a torn read / unexpected error / crash), and
+     * every span borrow was released -- so the D1 decision could not race the
+     * segment mutation (mod->mutex serialises the read against the write), and no
+     * span leaked under contention. TSan (make tsan-spans) covers the data-race
+     * dimension. (A final shared-heap-count baseline is intentionally NOT asserted
+     * here: the segment path leaks its heap descriptors until runtime teardown --
+     * hl_wasm_free_segment predates patch 0003's per-heap destroy -- so the
+     * mutator's churn inflates the count independently of spans. Span
+     * teardown-to-baseline is proven by d2_success / d2_pooled_reuse.) */
+    for (int i = 0; i < D2R_NTHREAD; i++) ASSERT_EQ(args[i].ok, 1);
+    (void)base;
+
+    hl_cap_wasm_destroy(&cache);
+    teardown_dir();
+}
+
+/* ══ D.3: persistent instance:call span consumption (hl_cap_wasm_instance_call) ══
+ * Same cleanup guarantees as D.2, but the instance persists across calls: each
+ * call attaches its span set and detaches on every exit so the instance is
+ * chain-free for the next call. Output is always copied (no zero-copy path).    */
+
+/* one-shot: call a persistent instance with a single span attached. */
+static int call_inst_with_span(HlWasmInstance *pi, HlMappedBuffer *buf,
+                               const char *sname, const void *input, size_t in_len,
+                               HlWasmCallOpts *extra, void **out, size_t *out_len,
+                               const char **err)
+{
+    HlWasmSpanReq req = { .name = sname, .buf = buf };
+    HlWasmCallOpts opts = {0};
+    if (extra) opts = *extra;
+    opts.spans = &req; opts.span_count = 1;
+    return hl_cap_wasm_instance_call(pi, input, in_len, out, out_len,
+                                     &opts, NULL, NULL, NULL, err);
+}
+
+/* ── repeated calls with changing / no spans: each attaches + detaches, so the
+ *    persistent instance returns to baseline (chain-free, borrow released) every
+ *    call regardless of whether that call had a span. ────────────────────────── */
+UTEST(wasm_spans, d3_repeated_changing_spans)
+{
+    setup();
+    HlWasmCache cache; ASSERT_EQ(hl_cap_wasm_init(&cache), 0);
+    HlVfs vfs; hl_vfs_init(&vfs, span_call_entries, NULL);
+    ASSERT_EQ(write_file("a.bin", 40000), 0);
+    const char *err = NULL;
+    HlWasmInstance *pi = hl_cap_wasm_instance_create(&cache, "echo", NULL,
+                                                     &vfs, NULL, NULL, &err);
+    ASSERT_TRUE(pi != NULL);
+    uint32_t base = wasm_runtime_shared_heap_count(); /* after create (no segs) */
+
+    for (int i = 0; i < 20; i++) {
+        void *out = NULL; size_t out_len = 0; err = NULL;
+        if (i % 3 == 2) {
+            /* a plain call (no spans) on the same instance */
+            int rc = hl_cap_wasm_instance_call(pi, "plain", 5, &out, &out_len,
+                                               NULL, NULL, NULL, NULL, &err);
+            ASSERT_EQ(rc, HL_WASM_OK);
+            ASSERT_EQ(out_len, (size_t)5);
+            free(out);
+            ASSERT_EQ(wasm_runtime_shared_heap_count(), base); /* unchanged */
+        } else {
+            /* a span call: fresh window each time (changing span) */
+            HlMappedBuffer *b = hl_cap_fs_mmap_window(&cfg, "a.bin",
+                                                      (uint64_t)(i * 4096) % 32768,
+                                                      4096, NULL, NULL);
+            ASSERT_TRUE(b != NULL);
+            int rc = call_inst_with_span(pi, b, "src", "abcd", 4, NULL,
+                                         &out, &out_len, &err);
+            ASSERT_EQ(rc, HL_WASM_OK);
+            ASSERT_EQ(out_len, (size_t)4);
+            free(out);
+            ASSERT_EQ(b->borrow_count, 0);                      /* detached */
+            ASSERT_EQ(wasm_runtime_shared_heap_count(), base);  /* baseline */
+            hl_cap_fs_munmap(b);
+        }
+    }
+
+    hl_cap_wasm_instance_destroy(pi);
+    hl_cap_wasm_destroy(&cache);
+    teardown_dir();
+}
+
+/* ── busy: a span call on an instance with an async call "in flight" (busy=1) is
+ *    rejected before any span borrow / heap creation. ────────────────────────── */
+UTEST(wasm_spans, d3_busy_rejection)
+{
+    setup();
+    HlWasmCache cache; ASSERT_EQ(hl_cap_wasm_init(&cache), 0);
+    HlVfs vfs; hl_vfs_init(&vfs, span_call_entries, NULL);
+    ASSERT_EQ(write_file("a.bin", 40000), 0);
+    const char *err = NULL;
+    HlWasmInstance *pi = hl_cap_wasm_instance_create(&cache, "echo", NULL,
+                                                     &vfs, NULL, NULL, &err);
+    ASSERT_TRUE(pi != NULL);
+    uint32_t base = wasm_runtime_shared_heap_count();
+    HlMappedBuffer *b = hl_cap_fs_mmap_window(&cfg, "a.bin", 0, 4096, NULL, NULL);
+    ASSERT_TRUE(b != NULL);
+
+    atomic_store(&pi->busy, 1);                 /* simulate async call in flight */
+    void *out = (void *)0x1; size_t out_len = 9; err = NULL;
+    int rc = call_inst_with_span(pi, b, "src", "x", 1, NULL, &out, &out_len, &err);
+    ASSERT_NE(rc, HL_WASM_OK);
+    ASSERT_STREQ(err, "instance_busy");
+    ASSERT_TRUE(out == NULL);
+    ASSERT_EQ(b->borrow_count, 0);              /* no borrow taken */
+    ASSERT_EQ(wasm_runtime_shared_heap_count(), base);
+    atomic_store(&pi->busy, 0);
+
+    /* once no longer busy the same call succeeds. */
+    out = NULL; out_len = 0; err = NULL;
+    rc = call_inst_with_span(pi, b, "src", "x", 1, NULL, &out, &out_len, &err);
+    ASSERT_EQ(rc, HL_WASM_OK);
+    free(out);
+    ASSERT_EQ(b->borrow_count, 0);
+    ASSERT_EQ(wasm_runtime_shared_heap_count(), base);
+
+    hl_cap_fs_munmap(b);
+    hl_cap_wasm_instance_destroy(pi);
+    hl_cap_wasm_destroy(&cache);
+    teardown_dir();
+}
+
+/* ── D1 on a persistent instance: a segment on the module rejects a span call. ─ */
+UTEST(wasm_spans, d3_d1_rejection)
+{
+    setup();
+    HlWasmCache cache; ASSERT_EQ(hl_cap_wasm_init(&cache), 0);
+    HlVfs vfs; hl_vfs_init(&vfs, span_call_entries, NULL);
+    ASSERT_EQ(write_file("a.bin", 40000), 0);
+    /* install a segment BEFORE creating the instance (so it attaches the chain). */
+    const char *derr = NULL;
+    static const unsigned char seg[16] = { 1, 2, 3, 4 };
+    ASSERT_EQ(hl_cap_wasm_load(&cache, "echo", &vfs, NULL), 0);
+    ASSERT_EQ(hl_cap_wasm_data_load(&cache, "echo", "graph", seg, sizeof(seg),
+                                    NULL, &vfs, NULL, &derr), 0);
+    const char *err = NULL;
+    HlWasmInstance *pi = hl_cap_wasm_instance_create(&cache, "echo", NULL,
+                                                     &vfs, NULL, NULL, &err);
+    ASSERT_TRUE(pi != NULL);
+    uint32_t before = wasm_runtime_shared_heap_count();
+    HlMappedBuffer *b = hl_cap_fs_mmap_window(&cfg, "a.bin", 0, 4096, NULL, NULL);
+    ASSERT_TRUE(b != NULL);
+
+    void *out = (void *)0x1; size_t out_len = 9; err = NULL;
+    int rc = call_inst_with_span(pi, b, "src", "x", 1, NULL, &out, &out_len, &err);
+    ASSERT_NE(rc, HL_WASM_OK);
+    ASSERT_STREQ(err, "spans_with_segments");
+    ASSERT_TRUE(out == NULL);
+    ASSERT_EQ(b->borrow_count, 0);
+    ASSERT_EQ(wasm_runtime_shared_heap_count(), before); /* no span heap */
+
+    hl_cap_fs_munmap(b);
+    hl_cap_wasm_instance_destroy(pi);
+    hl_cap_wasm_destroy(&cache);
+    teardown_dir();
+}
+
+/* ── gas trap on a persistent instance tears the span down; the instance stays
+ *    usable for the next (successful) call. ──────────────────────────────────── */
+UTEST(wasm_spans, d3_gas_cleanup_reusable)
+{
+    setup();
+    HlWasmCache cache; ASSERT_EQ(hl_cap_wasm_init(&cache), 0);
+    HlVfs vfs; hl_vfs_init(&vfs, span_call_entries, NULL);
+    ASSERT_EQ(write_file("a.bin", 40000), 0);
+    const char *err = NULL;
+    HlWasmInstance *pi = hl_cap_wasm_instance_create(&cache, "echo", NULL,
+                                                     &vfs, NULL, NULL, &err);
+    ASSERT_TRUE(pi != NULL);
+    uint32_t base = wasm_runtime_shared_heap_count();
+    HlMappedBuffer *b = hl_cap_fs_mmap_window(&cfg, "a.bin", 0, 4096, NULL, NULL);
+    ASSERT_TRUE(b != NULL);
+
+    HlWasmCallOpts extra = {0};
+    extra.gas = 1;                              /* trap */
+    void *out = NULL; size_t out_len = 0; err = NULL;
+    int rc = call_inst_with_span(pi, b, "src", "hello", 5, &extra,
+                                 &out, &out_len, &err);
+    ASSERT_NE(rc, HL_WASM_OK);                   /* trapped */
+    ASSERT_EQ(b->borrow_count, 0);               /* span torn down */
+    ASSERT_EQ(wasm_runtime_shared_heap_count(), base);
+
+    /* instance is reusable: a normal span call now succeeds. */
+    out = NULL; out_len = 0; err = NULL;
+    rc = call_inst_with_span(pi, b, "src", "hey", 3, NULL, &out, &out_len, &err);
+    ASSERT_EQ(rc, HL_WASM_OK);
+    ASSERT_EQ(out_len, (size_t)3);
+    free(out);
+    ASSERT_EQ(b->borrow_count, 0);
+    ASSERT_EQ(wasm_runtime_shared_heap_count(), base);
+
+    hl_cap_fs_munmap(b);
+    hl_cap_wasm_instance_destroy(pi);
+    hl_cap_wasm_destroy(&cache);
+    teardown_dir();
+}
+
+/* ── reentrancy proxy: if the instance already has a chain attached (as a
+ *    re-entrant call from inside host_call would find), a span call's attach
+ *    fails closed -- the call errors and its span borrow is released, leaving the
+ *    pre-existing chain intact. ─────────────────────────────────────────────── */
+UTEST(wasm_spans, d3_reentrancy_double_attach_fails_closed)
+{
+    setup();
+    HlWasmCache cache; ASSERT_EQ(hl_cap_wasm_init(&cache), 0);
+    HlVfs vfs; hl_vfs_init(&vfs, span_call_entries, NULL);
+    ASSERT_EQ(write_file("a.bin", 40000), 0);
+    const char *err = NULL;
+    HlWasmInstance *pi = hl_cap_wasm_instance_create(&cache, "echo", NULL,
+                                                     &vfs, NULL, NULL, &err);
+    ASSERT_TRUE(pi != NULL);
+
+    /* manually attach a span set to the instance (simulating a chain already
+     * present when a re-entrant call arrives). */
+    HlMappedBuffer *held = hl_cap_fs_mmap_window(&cfg, "a.bin", 0, 4096, NULL, NULL);
+    ASSERT_TRUE(held != NULL);
+    HlWasmSpanSet manual; err = NULL;
+    hl_wasm_span_set_init(&manual, 0);
+    ASSERT_EQ(hl_wasm_span_set_add(&manual, held, "held", &err), 0);
+    ASSERT_EQ(hl_wasm_span_set_attach(&manual, pi->instance, &err), 0);
+    uint32_t with_manual = wasm_runtime_shared_heap_count();
+
+    /* a span call now finds the instance already chained -> its attach fails. */
+    HlMappedBuffer *b = hl_cap_fs_mmap_window(&cfg, "a.bin", 8192, 4096, NULL, NULL);
+    ASSERT_TRUE(b != NULL);
+    void *out = (void *)0x1; size_t out_len = 9; err = NULL;
+    int rc = call_inst_with_span(pi, b, "src", "x", 1, NULL, &out, &out_len, &err);
+    ASSERT_NE(rc, HL_WASM_OK);                   /* attach failed, closed */
+    ASSERT_EQ(b->borrow_count, 0);               /* the call's span was rolled back */
+    ASSERT_EQ(wasm_runtime_shared_heap_count(), with_manual); /* manual chain intact */
+    ASSERT_EQ(held->borrow_count, 1);            /* manual borrow untouched */
+
+    /* tear the manual set down; the instance is chain-free again. */
+    ASSERT_EQ(hl_wasm_span_set_teardown(&manual), 0);
+    ASSERT_EQ(held->borrow_count, 0);
+
+    hl_cap_fs_munmap(b); hl_cap_fs_munmap(held);
+    hl_cap_wasm_instance_destroy(pi);
+    hl_cap_wasm_destroy(&cache);
+    teardown_dir();
+}
+
+/* ══ D.4: async submission-pin ownership (HlWorkerWasmOp) ═══════════════════════
+ * The binding deep-copies names + submission-pins buffers into the op before
+ * submit (hl_worker_wasm_adopt_spans); the pins release in hl_worker_wasm_op_free
+ * -- reached on completion, cancel-before-start, and cancel-during. These drive
+ * that op-level lifecycle directly (deterministic, no event loop needed).       */
+
+/* ── adopt pins + deep-copies; op_free releases. No Lua/JS pointer retained. ──── */
+UTEST(wasm_spans, d4_op_pin_lifecycle)
+{
+    setup();
+    ASSERT_EQ(write_file("a.bin", 40000), 0);
+    HlMappedBuffer *b0 = hl_cap_fs_mmap_window(&cfg, "a.bin", 0, 4096, NULL, NULL);
+    HlMappedBuffer *b1 = hl_cap_fs_mmap_window(&cfg, "a.bin", 8192, 4096, NULL, NULL);
+    ASSERT_TRUE(b0 && b1);
+
+    /* names on a scratch buffer that we clobber after adopt, proving the op OWNS
+     * its copy (no pointer into caller memory survives). */
+    char nm0[64], nm1[64];
+    snprintf(nm0, sizeof(nm0), "source");
+    snprintf(nm1, sizeof(nm1), "landmarks");
+    HlWasmSpanReq reqs[2] = { { nm0, b0 }, { nm1, b1 } };
+
+    HlWorkerWasmOp *op = calloc(1, sizeof(HlWorkerWasmOp));
+    ASSERT_TRUE(op != NULL);
+    hl_worker_wasm_adopt_spans(op, reqs, 2);
+
+    ASSERT_EQ(op->span_pins, 2);
+    ASSERT_EQ(b0->borrow_count, 1);          /* submission-pinned */
+    ASSERT_EQ(b1->borrow_count, 1);
+    ASSERT_EQ(op->opts.span_count, 2);
+    ASSERT_TRUE(op->opts.spans == op->span_reqs);      /* op-owned array */
+    ASSERT_TRUE(op->span_reqs[0].name == op->span_names[0]); /* op-owned name */
+    ASSERT_STREQ(op->span_names[0], "source");
+    ASSERT_STREQ(op->span_names[1], "landmarks");
+    ASSERT_TRUE(op->span_reqs[0].buf == b0);
+
+    /* clobber the caller's name storage: the op copy is unaffected. */
+    memset(nm0, 'Z', sizeof(nm0)); memset(nm1, 'Z', sizeof(nm1));
+    ASSERT_STREQ(op->span_names[0], "source");
+
+    hl_worker_wasm_op_free(op);
+    ASSERT_EQ(op->span_pins, 0);
+    ASSERT_TRUE(op->opts.spans == NULL);
+    ASSERT_EQ(op->opts.span_count, 0);
+    ASSERT_EQ(b0->borrow_count, 0);          /* released */
+    ASSERT_EQ(b1->borrow_count, 0);
+    free(op);
+
+    hl_cap_fs_munmap(b0); hl_cap_fs_munmap(b1);
+    teardown_dir();
+}
+
+/* ── empty list -> a plain call: no pins, opts.spans stays NULL. ─────────────── */
+UTEST(wasm_spans, d4_op_empty_no_pins)
+{
+    setup();
+    HlWorkerWasmOp *op = calloc(1, sizeof(HlWorkerWasmOp));
+    ASSERT_TRUE(op != NULL);
+    hl_worker_wasm_adopt_spans(op, NULL, 0);
+    ASSERT_EQ(op->span_pins, 0);
+    ASSERT_TRUE(op->opts.spans == NULL);
+    ASSERT_EQ(op->opts.span_count, 0);
+    hl_worker_wasm_op_free(op);
+    free(op);
+    teardown_dir();
+}
+
+/* ── closing/GC'ing the buffer immediately after submission is safe: the pin
+ *    defers munmap until op_free (queued-worker race at the op level). ────────── */
+UTEST(wasm_spans, d4_op_close_after_submit_defers_munmap)
+{
+    setup();
+    ASSERT_EQ(write_file("a.bin", 40000), 0);
+    HlMappedBuffer *b = hl_cap_fs_mmap_window(&cfg, "a.bin", 8192, 256, NULL, NULL);
+    ASSERT_TRUE(b != NULL);
+    char nm[64]; snprintf(nm, sizeof(nm), "src");
+    HlWasmSpanReq req = { nm, b };
+
+    HlWorkerWasmOp *op = calloc(1, sizeof(HlWorkerWasmOp));
+    ASSERT_TRUE(op != NULL);
+    hl_worker_wasm_adopt_spans(op, &req, 1);
+    ASSERT_EQ(b->borrow_count, 1);
+
+    /* close the buffer while the op holds it (as a handler might right after
+     * compute.async.call): munmap is deferred, the bytes stay readable. */
+    hl_cap_fs_munmap(b);
+    ASSERT_EQ(b->pending_free, 1);
+    ASSERT_EQ(b->closed, 0);
+    ASSERT_EQ((int)((const unsigned char *)b->addr)[0], (int)(8192 & 0xff));
+
+    hl_worker_wasm_op_free(op);   /* releases the last pin -> deferred munmap runs */
+    free(op);
+    teardown_dir();
+}
+
+/* ── two concurrent ops may share the same read-only buffer: pins stack, each
+ *    op_free releases one, back to baseline. ─────────────────────────────────── */
+UTEST(wasm_spans, d4_op_concurrent_shared_buffer)
+{
+    setup();
+    ASSERT_EQ(write_file("a.bin", 40000), 0);
+    HlMappedBuffer *b = hl_cap_fs_mmap_window(&cfg, "a.bin", 0, 4096, NULL, NULL);
+    ASSERT_TRUE(b != NULL);
+    char nm[64]; snprintf(nm, sizeof(nm), "shared");
+    HlWasmSpanReq req = { nm, b };
+
+    HlWorkerWasmOp *op1 = calloc(1, sizeof(HlWorkerWasmOp));
+    HlWorkerWasmOp *op2 = calloc(1, sizeof(HlWorkerWasmOp));
+    ASSERT_TRUE(op1 && op2);
+    hl_worker_wasm_adopt_spans(op1, &req, 1);
+    hl_worker_wasm_adopt_spans(op2, &req, 1);
+    ASSERT_EQ(b->borrow_count, 2);           /* both pin the same RO buffer */
+
+    hl_worker_wasm_op_free(op1); free(op1);
+    ASSERT_EQ(b->borrow_count, 1);
+    hl_worker_wasm_op_free(op2); free(op2);
+    ASSERT_EQ(b->borrow_count, 0);
+
+    hl_cap_fs_munmap(b);
+    teardown_dir();
+}
+
+/* ══ E: HL_WASM_OP_SPAN_INFO metadata query, driven from a real WASM guest ══════
+ * spanprobe.wasm (compiled from C) is a PARAMETERISED driver: its input selects
+ * the advertised cbSize capacity, the span index, the destination mode (scratch /
+ * bad ptr / linear-memory boundary), and a scratch sentinel; its output returns
+ * the count query, the index-query return code, the full 128-byte scratch (so the
+ * host can check exact bytes written + untouched suffix), and the window's first
+ * byte read THROUGH the reported base. This drives the whole D2 semantics matrix
+ * from the guest side. */
+static uint32_t rd32le(const unsigned char *p)
+{ return (uint32_t)p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16
+       | (uint32_t)p[3] << 24; }
+static uint64_t rd64le(const unsigned char *p)
+{ uint64_t v = 0; for (int i = 0; i < 8; i++) v |= (uint64_t)p[i] << (8 * i); return v; }
+
+/* Drive spanprobe once. reqs/nreq are the attached spans (nreq 0 => plain call).
+ * Fills *count (count query), *rc (index-query return), scratch128 (the 128-byte
+ * record buffer), *first (window byte via base). Returns the hl_cap_wasm_call rc. */
+static int span_drive(HlWasmCache *cache, HlVfs *vfs,
+                      const HlWasmSpanReq *reqs, int nreq,
+                      uint16_t cap, int32_t idx, uint32_t mode, uint8_t sentinel,
+                      int32_t *count, int32_t *rc, unsigned char scratch128[128],
+                      uint32_t *first)
+{
+    unsigned char in[13];
+    memset(in, 0, sizeof(in));
+    in[0] = (unsigned char)(cap & 0xff);   in[1] = (unsigned char)(cap >> 8);
+    in[4] = (unsigned char)(idx & 0xff);   in[5] = (unsigned char)((idx >> 8) & 0xff);
+    in[6] = (unsigned char)((idx >> 16) & 0xff); in[7] = (unsigned char)(((uint32_t)idx >> 24) & 0xff);
+    in[8] = (unsigned char)(mode & 0xff);  in[9] = (unsigned char)((mode >> 8) & 0xff);
+    in[10] = (unsigned char)((mode >> 16) & 0xff); in[11] = (unsigned char)((mode >> 24) & 0xff);
+    in[12] = sentinel;
+    HlWasmCallOpts opts = {0};
+    if (nreq > 0) { opts.spans = reqs; opts.span_count = nreq; }
+    void *out = NULL; size_t out_len = 0; const char *err = NULL;
+    int r = hl_cap_wasm_call(cache, "spanprobe", in, sizeof(in), &out, &out_len,
+                             &opts, NULL, NULL, vfs, NULL, NULL, &err);
+    if (r != HL_WASM_OK) { if (out) free(out); return r; }
+    if (out_len != 140) { free(out); return -100; } /* driver contract */
+    const unsigned char *o = (const unsigned char *)out;
+    if (count) *count = (int32_t)rd32le(o + 0);
+    if (rc) *rc = (int32_t)rd32le(o + 4);
+    if (scratch128) memcpy(scratch128, o + 8, 128);
+    if (first) *first = rd32le(o + 136);
+    free(out);
+    return HL_WASM_OK;
+}
+
+/* ── full record + read via base: count, struct_size, flags, name, len, foffset,
+ *    and the window's first byte reached through the reported base. ──────────── */
+UTEST(wasm_spans, e_span_info_record)
+{
+    setup();
+    HlWasmCache cache; ASSERT_EQ(hl_cap_wasm_init(&cache), 0);
+    HlVfs vfs; hl_vfs_init(&vfs, span_call_entries, NULL);
+    ASSERT_EQ(write_file("a.bin", 40000), 0);
+    const uint64_t off = 8195, wlen = 4096;
+    HlMappedBuffer *buf = hl_cap_fs_mmap_window(&cfg, "a.bin", off, wlen, NULL, NULL);
+    ASSERT_TRUE(buf != NULL);
+    HlWasmSpanReq req = { .name = "source", .buf = buf };
+
+    int32_t count = -9, rc = -9; unsigned char rec[128]; uint32_t first = 0;
+    ASSERT_EQ(span_drive(&cache, &vfs, &req, 1, 96, 0, 0, 0xAA,
+                         &count, &rc, rec, &first), HL_WASM_OK);
+    ASSERT_EQ(count, 1);
+    ASSERT_EQ(rc, HL_SPAN_META_V1_SIZE);
+    ASSERT_EQ((uint32_t)(rec[0] | rec[1] << 8), (uint32_t)1);          /* version */
+    ASSERT_EQ((uint32_t)(rec[2] | rec[3] << 8), (uint32_t)HL_SPAN_META_V1_SIZE);
+    ASSERT_EQ(rd32le(rec + 4), (uint32_t)HL_SPAN_META_FLAG_RO);         /* flags RO */
+    ASSERT_STREQ((const char *)(rec + 8), "source");                   /* name */
+    ASSERT_TRUE(rd64le(rec + 72) != 0);                                /* base set */
+    ASSERT_EQ(rd64le(rec + 80), (uint64_t)wlen);                       /* len */
+    ASSERT_EQ(rd64le(rec + 88), off);                                  /* foffset */
+    ASSERT_EQ(first, (uint32_t)(off & 0xff));                          /* read via base */
+
+    hl_cap_fs_munmap(buf);
+    hl_cap_wasm_destroy(&cache);
+    teardown_dir();
+}
+
+/* ── cbSize capacity matrix: for each advertised cap the host writes min(cap, 96)
+ *    bytes (a prefix), returns the full 96, and leaves the suffix untouched. ──── */
+UTEST(wasm_spans, e_span_info_capacity_matrix)
+{
+    setup();
+    HlWasmCache cache; ASSERT_EQ(hl_cap_wasm_init(&cache), 0);
+    HlVfs vfs; hl_vfs_init(&vfs, span_call_entries, NULL);
+    ASSERT_EQ(write_file("a.bin", 40000), 0);
+    HlMappedBuffer *buf = hl_cap_fs_mmap_window(&cfg, "a.bin", 4096, 4096, NULL, NULL);
+    ASSERT_TRUE(buf != NULL);
+    HlWasmSpanReq req = { .name = "src", .buf = buf };
+
+    /* reference: the full 96-byte record (cap = 96). */
+    unsigned char ref[128]; int32_t rc = 0;
+    ASSERT_EQ(span_drive(&cache, &vfs, &req, 1, 96, 0, 0, 0xAA, NULL, &rc, ref, NULL),
+              HL_WASM_OK);
+    ASSERT_EQ(rc, 96);
+
+    const uint16_t caps[] = { 4, 8, 72, 95, 96, 128 };
+    for (size_t k = 0; k < sizeof(caps) / sizeof(caps[0]); k++) {
+        uint16_t cap = caps[k];
+        unsigned char rec[128]; rc = -9;
+        ASSERT_EQ(span_drive(&cache, &vfs, &req, 1, cap, 0, 0, 0x5C,
+                             NULL, &rc, rec, NULL), HL_WASM_OK);
+        ASSERT_EQ(rc, 96);                       /* always returns full struct_size */
+        size_t n = cap < 96 ? cap : 96;
+        ASSERT_EQ(memcmp(rec, ref, n), 0);       /* exact bytes written */
+        for (size_t i = n; i < 128; i++)         /* suffix untouched (sentinel) */
+            ASSERT_EQ((int)rec[i], 0x5C);
+    }
+
+    hl_cap_fs_munmap(buf);
+    hl_cap_wasm_destroy(&cache);
+    teardown_dir();
+}
+
+/* ── malformed capacities (both sides): 0..3 and > 4096 all reject -1 with no
+ *    record written. ──────────────────────────────────────────────────────────── */
+UTEST(wasm_spans, e_span_info_malformed_cap)
+{
+    setup();
+    HlWasmCache cache; ASSERT_EQ(hl_cap_wasm_init(&cache), 0);
+    HlVfs vfs; hl_vfs_init(&vfs, span_call_entries, NULL);
+    ASSERT_EQ(write_file("a.bin", 40000), 0);
+    HlMappedBuffer *buf = hl_cap_fs_mmap_window(&cfg, "a.bin", 0, 4096, NULL, NULL);
+    ASSERT_TRUE(buf != NULL);
+    HlWasmSpanReq req = { .name = "src", .buf = buf };
+
+    const uint16_t bad[] = { 0, 1, 2, 3, 4097, 8192, 65535 };
+    for (size_t k = 0; k < sizeof(bad) / sizeof(bad[0]); k++) {
+        int32_t rc = -9, count = -9; unsigned char rec[128];
+        ASSERT_EQ(span_drive(&cache, &vfs, &req, 1, bad[k], 0, 0, 0xAA,
+                             &count, &rc, rec, NULL), HL_WASM_OK);
+        ASSERT_EQ(count, 1);       /* the count query still worked */
+        ASSERT_EQ(rc, -1);          /* malformed cap */
+        for (int i = 8; i < 128; i++) ASSERT_EQ((int)rec[i], 0xAA); /* no record written */
+    }
+
+    hl_cap_fs_munmap(buf);
+    hl_cap_wasm_destroy(&cache);
+    teardown_dir();
+}
+
+/* ── invalid destination offsets (high / would-wrap-if-sign-extended) reject -1
+ *    WITHOUT poisoning the guest's call. ──────────────────────────────────────── */
+UTEST(wasm_spans, e_span_info_bad_dest)
+{
+    setup();
+    HlWasmCache cache; ASSERT_EQ(hl_cap_wasm_init(&cache), 0);
+    HlVfs vfs; hl_vfs_init(&vfs, span_call_entries, NULL);
+    ASSERT_EQ(write_file("a.bin", 40000), 0);
+    HlMappedBuffer *buf = hl_cap_fs_mmap_window(&cfg, "a.bin", 0, 4096, NULL, NULL);
+    ASSERT_TRUE(buf != NULL);
+    HlWasmSpanReq req = { .name = "src", .buf = buf };
+
+    const uint32_t modes[] = { 1 /* 0x7ffffff0 */, 2 /* 0x80000000 */ };
+    for (size_t k = 0; k < sizeof(modes) / sizeof(modes[0]); k++) {
+        int32_t rc = -9, count = -9;
+        /* the call returns cleanly (guest not trapped) with rc = -1. */
+        ASSERT_EQ(span_drive(&cache, &vfs, &req, 1, 96, 0, modes[k], 0xAA,
+                             &count, &rc, NULL, NULL), HL_WASM_OK);
+        ASSERT_EQ(count, 1);
+        ASSERT_EQ(rc, -1);
+    }
+
+    hl_cap_fs_munmap(buf);
+    hl_cap_wasm_destroy(&cache);
+    teardown_dir();
+}
+
+/* ── destination ending exactly at the linear-memory boundary succeeds; one past
+ *    is rejected. ──────────────────────────────────────────────────────────────── */
+UTEST(wasm_spans, e_span_info_boundary)
+{
+    setup();
+    HlWasmCache cache; ASSERT_EQ(hl_cap_wasm_init(&cache), 0);
+    HlVfs vfs; hl_vfs_init(&vfs, span_call_entries, NULL);
+    ASSERT_EQ(write_file("a.bin", 40000), 0);
+    HlMappedBuffer *buf = hl_cap_fs_mmap_window(&cfg, "a.bin", 0, 4096, NULL, NULL);
+    ASSERT_TRUE(buf != NULL);
+    HlWasmSpanReq req = { .name = "src", .buf = buf };
+
+    int32_t rc = -9;
+    ASSERT_EQ(span_drive(&cache, &vfs, &req, 1, 96, 0, 3 /* end-96 */, 0xAA,
+                         NULL, &rc, NULL, NULL), HL_WASM_OK);
+    ASSERT_EQ(rc, 96);                          /* [end-96, end) in bounds */
+    rc = -9;
+    ASSERT_EQ(span_drive(&cache, &vfs, &req, 1, 96, 0, 4 /* end-96+1 */, 0xAA,
+                         NULL, &rc, NULL, NULL), HL_WASM_OK);
+    ASSERT_EQ(rc, -1);                          /* one past end -> reject */
+
+    hl_cap_fs_munmap(buf);
+    hl_cap_wasm_destroy(&cache);
+    teardown_dir();
+}
+
+/* ── out-of-range index returns 0. ─────────────────────────────────────────────── */
+UTEST(wasm_spans, e_span_info_out_of_range)
+{
+    setup();
+    HlWasmCache cache; ASSERT_EQ(hl_cap_wasm_init(&cache), 0);
+    HlVfs vfs; hl_vfs_init(&vfs, span_call_entries, NULL);
+    ASSERT_EQ(write_file("a.bin", 40000), 0);
+    HlMappedBuffer *buf = hl_cap_fs_mmap_window(&cfg, "a.bin", 0, 4096, NULL, NULL);
+    ASSERT_TRUE(buf != NULL);
+    HlWasmSpanReq req = { .name = "src", .buf = buf };
+
+    const int32_t idxs[] = { 1, 2, 99, -2 };   /* count == 1 */
+    for (size_t k = 0; k < sizeof(idxs) / sizeof(idxs[0]); k++) {
+        int32_t rc = -9, count = -9;
+        ASSERT_EQ(span_drive(&cache, &vfs, &req, 1, 96, idxs[k], 0, 0xAA,
+                             &count, &rc, NULL, NULL), HL_WASM_OK);
+        ASSERT_EQ(count, 1);
+        ASSERT_EQ(rc, 0);                       /* out of range -> 0 */
+    }
+
+    hl_cap_fs_munmap(buf);
+    hl_cap_wasm_destroy(&cache);
+    teardown_dir();
+}
+
+/* ── no active set (plain call) AND post-detach: a spans call sees count 1, and a
+ *    SUBSEQUENT plain call on the same cache sees count 0 (tl_host_ctx.spans was
+ *    cleared, not left dangling) -- distinct from a call that never had spans. ── */
+UTEST(wasm_spans, e_span_info_no_set_and_post_detach)
+{
+    setup();
+    HlWasmCache cache; ASSERT_EQ(hl_cap_wasm_init(&cache), 0);
+    HlVfs vfs; hl_vfs_init(&vfs, span_call_entries, NULL);
+    ASSERT_EQ(write_file("a.bin", 40000), 0);
+    HlMappedBuffer *buf = hl_cap_fs_mmap_window(&cfg, "a.bin", 0, 4096, NULL, NULL);
+    ASSERT_TRUE(buf != NULL);
+    HlWasmSpanReq req = { .name = "src", .buf = buf };
+
+    /* plain call, never had spans. */
+    int32_t count = -9, rc = -9;
+    ASSERT_EQ(span_drive(&cache, &vfs, NULL, 0, 96, 0, 0, 0xAA, &count, &rc, NULL, NULL),
+              HL_WASM_OK);
+    ASSERT_EQ(count, 0);
+    ASSERT_EQ(rc, 0);
+
+    /* a spans call -> count 1. */
+    count = -9;
+    ASSERT_EQ(span_drive(&cache, &vfs, &req, 1, 96, 0, 0, 0xAA, &count, &rc, NULL, NULL),
+              HL_WASM_OK);
+    ASSERT_EQ(count, 1);
+
+    /* the NEXT plain call on the same cache -> count 0 (post-detach, not stale). */
+    count = -9;
+    ASSERT_EQ(span_drive(&cache, &vfs, NULL, 0, 96, 0, 0, 0xAA, &count, &rc, NULL, NULL),
+              HL_WASM_OK);
+    ASSERT_EQ(count, 0);
+    ASSERT_EQ(rc, 0);
+
+    hl_cap_fs_munmap(buf);
+    hl_cap_wasm_destroy(&cache);
+    teardown_dir();
+}
+
+/* ── concurrent invocations each see ONLY their own span's metadata (tl_host_ctx
+ *    is thread-local). N workers each attach a span at a distinct file offset and
+ *    assert the record's foffset is their own. TSan covers the race. ──────────── */
+#define ESI_NTHREAD 4
+#define ESI_NITER   120
+struct esi_arg { HlWasmCache *cache; HlVfs *vfs; HlFsConfig *cfg; uint64_t off; int ok; };
+static void *esi_worker(void *p)
+{
+    struct esi_arg *a = (struct esi_arg *)p;
+    a->ok = 1;
+    for (int r = 0; r < ESI_NITER && a->ok; r++) {
+        HlMappedBuffer *b = hl_cap_fs_mmap_window(a->cfg, "a.bin", a->off, 4096, NULL, NULL);
+        if (!b) { a->ok = 0; break; }
+        HlWasmSpanReq req = { .name = "src", .buf = b };
+        int32_t count = -9, rc = -9; unsigned char rec[128];
+        int cr = span_drive(a->cache, a->vfs, &req, 1, 96, 0, 0, 0xAA,
+                            &count, &rc, rec, NULL);
+        if (cr != HL_WASM_OK || count != 1 || rc != 96
+            || rd64le(rec + 88) != a->off)          /* MUST see its OWN foffset */
+            a->ok = 0;
+        if (b->borrow_count != 0) a->ok = 0;
+        hl_cap_fs_munmap(b);
+    }
+    return NULL;
+}
+UTEST(wasm_spans, e_span_info_concurrent_isolation)
+{
+    setup();
+    HlWasmCache cache; ASSERT_EQ(hl_cap_wasm_init(&cache), 0);
+    HlVfs vfs; hl_vfs_init(&vfs, span_call_entries, NULL);
+    ASSERT_EQ(write_file("a.bin", 40000), 0);
+    /* pre-load on the main thread (WAMR's module loader is not thread-safe). */
+    ASSERT_EQ(hl_cap_wasm_load(&cache, "spanprobe", &vfs, NULL), 0);
+
+    struct esi_arg args[ESI_NTHREAD];
+    pthread_t th[ESI_NTHREAD];
+    for (int i = 0; i < ESI_NTHREAD; i++) {
+        args[i].cache = &cache; args[i].vfs = &vfs; args[i].cfg = &cfg;
+        args[i].off = (uint64_t)(4096 * (i + 1)) + i; /* distinct per worker */
+        args[i].ok = -1;
+        ASSERT_EQ(pthread_create(&th[i], NULL, esi_worker, &args[i]), 0);
+    }
+    for (int i = 0; i < ESI_NTHREAD; i++) pthread_join(th[i], NULL);
+    for (int i = 0; i < ESI_NTHREAD; i++) ASSERT_EQ(args[i].ok, 1);
+
     hl_cap_wasm_destroy(&cache);
     teardown_dir();
 }
@@ -595,8 +1753,8 @@ static void *ci_worker(void *p)
         if (!b0 || !b1) { a->ok = 0; if (b0) hl_cap_fs_munmap(b0); if (b1) hl_cap_fs_munmap(b1); break; }
         HlWasmSpanSet set; const char *err = NULL;
         hl_wasm_span_set_init(&set, 0);
-        if (hl_wasm_span_set_add(&set, b0, &err) != 0
-            || hl_wasm_span_set_add(&set, b1, &err) != 0
+        if (hl_wasm_span_set_add(&set, b0, "b0", &err) != 0
+            || hl_wasm_span_set_add(&set, b1, "b1", &err) != 0
             || hl_wasm_span_set_attach(&set, a->inst, &err) != 0)
             a->ok = 0;
         hl_wasm_span_set_teardown(&set);
@@ -675,12 +1833,14 @@ UTEST(wasm_spans, max_spans)
 
     HlWasmSpanSet set; const char *err = NULL;
     hl_wasm_span_set_init(&set, 0);
-    for (int i = 0; i < HL_WASM_MAX_SPANS; i++)
-        ASSERT_EQ(hl_wasm_span_set_add(&set, bufs[i], &err), 0);
+    for (int i = 0; i < HL_WASM_MAX_SPANS; i++) {
+        char nm[16]; snprintf(nm, sizeof(nm), "s%d", i);
+        ASSERT_EQ(hl_wasm_span_set_add(&set, bufs[i], nm, &err), 0);
+    }
     ASSERT_EQ(set.count, HL_WASM_MAX_SPANS);
     /* the (max+1)-th add is rejected; no heap/borrow leaks. */
     err = NULL;
-    ASSERT_EQ(hl_wasm_span_set_add(&set, bufs[HL_WASM_MAX_SPANS], &err), -1);
+    ASSERT_EQ(hl_wasm_span_set_add(&set, bufs[HL_WASM_MAX_SPANS], "over", &err), -1);
     ASSERT_STREQ(err, "too_many_spans");
     ASSERT_EQ(set.count, HL_WASM_MAX_SPANS);
     ASSERT_EQ(wasm_runtime_shared_heap_count(), base + HL_WASM_MAX_SPANS);
@@ -715,8 +1875,8 @@ UTEST(wasm_spans, chain_failure_rollback)
 
     HlWasmSpanSet set; const char *err = NULL;
     hl_wasm_span_set_init(&set, 0);
-    ASSERT_EQ(hl_wasm_span_set_add(&set, b0, &err), 0);
-    ASSERT_EQ(hl_wasm_span_set_add(&set, b1, &err), 0);
+    ASSERT_EQ(hl_wasm_span_set_add(&set, b0, "b0", &err), 0);
+    ASSERT_EQ(hl_wasm_span_set_add(&set, b1, "b1", &err), 0);
     ASSERT_EQ(wasm_runtime_shared_heap_count(), base + 2);
 
     /* pin span0's heap onto the helper so the internal chain(span0, span1) fails. */
@@ -762,7 +1922,7 @@ UTEST(wasm_spans, unaligned_window)
 
     HlWasmSpanSet set; const char *err = NULL;
     hl_wasm_span_set_init(&set, 0);
-    ASSERT_EQ(hl_wasm_span_set_add(&set, buf, &err), 0);
+    ASSERT_EQ(hl_wasm_span_set_add(&set, buf, "buf", &err), 0);
     ASSERT_EQ(hl_wasm_span_set_attach(&set, inst, &err), 0);
 
     /* logical base reads file bytes [off..off+4) (pattern byte i == i&0xff). */
@@ -800,7 +1960,7 @@ UTEST(wasm_spans, guest_prefix_suffix_reject)
 
     HlWasmSpanSet set; const char *err = NULL;
     hl_wasm_span_set_init(&set, 0);
-    ASSERT_EQ(hl_wasm_span_set_add(&set, buf, &err), 0);
+    ASSERT_EQ(hl_wasm_span_set_add(&set, buf, "buf", &err), 0);
     ASSERT_EQ(hl_wasm_span_set_attach(&set, inst, &err), 0);
     uint64_t win = set.spans[0].wasm_addr;   /* guest logical base */
     uint32_t v = 0;
@@ -839,7 +1999,7 @@ UTEST(wasm_spans, eof_tail)
 
     HlWasmSpanSet set; const char *err = NULL;
     hl_wasm_span_set_init(&set, 0);
-    ASSERT_EQ(hl_wasm_span_set_add(&set, buf, &err), 0);
+    ASSERT_EQ(hl_wasm_span_set_add(&set, buf, "buf", &err), 0);
     ASSERT_EQ(hl_wasm_span_set_attach(&set, inst, &err), 0);
     uint64_t win = set.spans[0].wasm_addr;
     uint32_t v = 0;
@@ -877,7 +2037,7 @@ UTEST(wasm_spans, destroy_failure_retry)
 
     HlWasmSpanSet set; const char *err = NULL;
     hl_wasm_span_set_init(&set, 0);
-    ASSERT_EQ(hl_wasm_span_set_add(&set, buf, &err), 0);
+    ASSERT_EQ(hl_wasm_span_set_add(&set, buf, "buf", &err), 0);
     ASSERT_EQ(buf->borrow_count, 1);            /* pinned by add */
 
     /* pin the span's heap onto the helper -> its attached_count != 0 makes destroy
@@ -922,8 +2082,8 @@ UTEST(wasm_spans, addr_accounting_wasm32)
 
     HlWasmSpanSet set; const char *err = NULL;
     hl_wasm_span_set_init(&set, 0 /* wasm32 */);
-    ASSERT_EQ(hl_wasm_span_set_add(&set, b0, &err), 0);
-    ASSERT_EQ(hl_wasm_span_set_add(&set, b1, &err), 0);
+    ASSERT_EQ(hl_wasm_span_set_add(&set, b0, "b0", &err), 0);
+    ASSERT_EQ(hl_wasm_span_set_add(&set, b1, "b1", &err), 0);
     ASSERT_EQ(set.total_reserved,
               (uint64_t)b0->map_len + (uint64_t)b1->map_len);
     ASSERT_TRUE(set.total_logical < set.total_reserved
@@ -965,8 +2125,8 @@ UTEST(wasm_spans, addr_accounting_memory64)
     HlWasmSpanSet set; const char *err = NULL;
     hl_wasm_span_set_init(&set, 1 /* memory64 */);
     ASSERT_EQ(set.is_memory64, 1);
-    ASSERT_EQ(hl_wasm_span_set_add(&set, b0, &err), 0);
-    ASSERT_EQ(hl_wasm_span_set_add(&set, b1, &err), 0);
+    ASSERT_EQ(hl_wasm_span_set_add(&set, b0, "b0", &err), 0);
+    ASSERT_EQ(hl_wasm_span_set_add(&set, b1, "b1", &err), 0);
     /* reserved accounting is width-independent. */
     ASSERT_EQ(set.total_reserved,
               (uint64_t)b0->map_len + (uint64_t)b1->map_len);
@@ -1012,7 +2172,7 @@ UTEST(wasm_spans, aot_span_lifecycle)
 
     HlWasmSpanSet set; const char *err = NULL;
     hl_wasm_span_set_init(&set, 0);
-    ASSERT_EQ(hl_wasm_span_set_add(&set, buf, &err), 0);
+    ASSERT_EQ(hl_wasm_span_set_add(&set, buf, "buf", &err), 0);
     ASSERT_EQ(hl_wasm_span_set_attach(&set, inst, &err), 0);
     uint64_t win = set.spans[0].wasm_addr;
     uint32_t v = 0;

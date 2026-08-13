@@ -52,8 +52,11 @@ typedef struct HlWasmSpan {
                                       page-aligned [map_base, map_base+map_len). */
     uint64_t        wasm_addr;   /**< Guest LOGICAL window base = the heap's
                                       reserved WASM base + valid_offset (slop), so
-                                      it maps natively to buf->addr. Metadata for a
-                                      later cut. */
+                                      it maps natively to buf->addr. Reported to the
+                                      guest as the span's `base` (metadata query). */
+    char            name[64];    /**< Span name, NUL-terminated (1..63 bytes,
+                                      unique within the set). Identifies the span to
+                                      the guest metadata query (checkpoint 3). */
 } HlWasmSpan;
 
 /* An invocation-scoped set of spans. Zero-initialised by hl_wasm_span_set_init;
@@ -82,25 +85,29 @@ typedef struct HlWasmSpanSet {
 void hl_wasm_span_set_init(HlWasmSpanSet *set, int is_memory64);
 
 /**
- * @brief Add one read-only span backed by `buf` (a windowed HlMappedBuffer).
+ * @brief Add one read-only span named `name`, backed by `buf` (a windowed
+ *        HlMappedBuffer).
  *
  * Validates, then borrows the buffer and creates its read-only shared heap:
  *  - count < HL_WASM_MAX_SPANS (else "too_many_spans");
+ *  - `name` non-NULL, 1..63 bytes (strlen), and unique within the set (else
+ *    "bad_name" / "duplicate_name"). `name` is a NUL-terminated C string; the
+ *    binding layer rejects an embedded NUL before calling here;
  *  - overflow-safe aggregate: total_logical + buf->len <= 1 GiB (else "span_cap");
  *  - no duplicate backing: `buf` / buf->map_base not already in the set, and no
  *    native byte-range overlap with an existing span (else "duplicate_span");
  *  - buf->map_len page-aligned and <= UINT32_MAX (a windowed buffer; else the
  *    heap create fails -> "heap_create").
  *
- * On success the buffer is pinned (borrow) and its RO heap is recorded.
- * On failure NOTHING for this span is left behind (no borrow, no heap); prior
- * spans remain -- the caller rolls the whole set back with
- * hl_wasm_span_set_teardown. Owning-thread only.
+ * On success the buffer is pinned (borrow), its RO heap is recorded, and `name`
+ * is copied into the span. On failure NOTHING for this span is left behind (no
+ * borrow, no heap); prior spans remain -- the caller rolls the whole set back
+ * with hl_wasm_span_set_teardown. Owning-thread only.
  *
  * @return 0 on success; -1 with *err set on failure.
  */
 int hl_wasm_span_set_add(HlWasmSpanSet *set, HlMappedBuffer *buf,
-                         const char **err);
+                         const char *name, const char **err);
 
 /**
  * @brief Transactionally chain the added spans and attach them to `inst`.

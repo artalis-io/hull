@@ -7,6 +7,7 @@
 
 #include "mod_buffer.h"
 #include "hull/cap/wasm.h"
+#include "hull/cap/wasm_spans.h" /* HL_WASM_MAX_SPANS */
 #include "hull/cap/wasm_buffer.h"
 #include "hull/cap/wasm_stream.h"
 #include "hull/cap/fs.h"
@@ -150,6 +151,65 @@ static void wasm_clamp_opts(HlWasmCallOpts *opts, const HlRuntime *base)
         base->wasm_config.gas);
 }
 
+/* Parse opts.spans = { {name=, buffer=<MappedBuffer>}, ... } into reqs[] (cap
+ * HL_WASM_MAX_SPANS), per the public-option contract. Returns the count (0 when
+ * spans is absent/empty => a plain call), or raises a Lua error on any malformed
+ * entry: not an array, > HL_WASM_MAX_SPANS entries, an entry that is not a table,
+ * a name that is not a string / is empty / > 63 bytes / has an embedded NUL / is
+ * a duplicate within the request, or a buffer that is not a live MappedBuffer.
+ *
+ * reqs entries BORROW the Lua string names + MappedBuffer pointers. They are
+ * valid for a SYNCHRONOUS call (the opts table stays on the stack, so the names
+ * stay reachable). An ASYNC caller must deep-copy names + array and pin each
+ * buffer before submit (item D); it must NOT forward these borrowed pointers into
+ * a worker op. */
+static int lua_parse_spans(lua_State *L, int opts_idx, HlWasmSpanReq *reqs)
+{
+    lua_getfield(L, opts_idx, "spans");
+    if (lua_isnil(L, -1)) { lua_pop(L, 1); return 0; }
+    if (!lua_istable(L, -1))
+        return luaL_error(L, "compute: spans must be an array");
+    int spans_tbl = lua_gettop(L);
+    lua_Integer n = (lua_Integer)lua_rawlen(L, spans_tbl);
+    if (n < 0 || n > HL_WASM_MAX_SPANS)
+        return luaL_error(L, "compute: at most %d spans (got %d)",
+                          HL_WASM_MAX_SPANS, (int)n);
+    for (lua_Integer i = 1; i <= n; i++) {
+        lua_rawgeti(L, spans_tbl, i);
+        if (!lua_istable(L, -1))
+            return luaL_error(L, "compute: spans[%d] must be a table", (int)i);
+        int entry = lua_gettop(L);
+
+        lua_getfield(L, entry, "name");
+        if (lua_type(L, -1) != LUA_TSTRING)
+            return luaL_error(L, "compute: spans[%d].name must be a string", (int)i);
+        size_t nlen = 0;
+        const char *nm = lua_tolstring(L, -1, &nlen);
+        if (!nm || nlen == 0 || nlen >= 64 || strlen(nm) != nlen)
+            return luaL_error(L,
+                "compute: spans[%d].name must be 1..63 bytes with no embedded NUL",
+                (int)i);
+        for (lua_Integer j = 0; j < i - 1; j++)
+            if (strcmp(reqs[j].name, nm) == 0)
+                return luaL_error(L, "compute: duplicate span name '%s'", nm);
+
+        lua_getfield(L, entry, "buffer");
+        HlMappedBuffer **pp = luaL_testudata(L, -1, HL_MMAP_MT);
+        if (!pp || !*pp)
+            return luaL_error(L,
+                "compute: spans[%d].buffer must be a MappedBuffer", (int)i);
+        if ((*pp)->closed)
+            return luaL_error(L, "compute: spans[%d].buffer is closed", (int)i);
+
+        reqs[i - 1].name = nm;   /* borrowed (reachable via the opts table) */
+        reqs[i - 1].buf = *pp;
+        lua_pop(L, 2);  /* buffer, name */
+        lua_pop(L, 1);  /* entry */
+    }
+    lua_pop(L, 1);      /* spans table */
+    return (int)n;
+}
+
 /* compute.call(name, input, opts?) -> output_string | nil, error_string | nil */
 static int lua_compute_call(lua_State *L)
 {
@@ -213,6 +273,15 @@ static int lua_compute_call(lua_State *L)
         if (lua_toboolean(L, -1))
             want_buffer = 1;
         lua_pop(L, 1);
+    }
+
+    /* per-invocation mapped spans (item C: parse + validate only). Forwarding
+     * into opts.spans + attach is item D, where the sync path consumes the
+     * borrowed array synchronously and the async path deep-copies + pins before
+     * submit. Execution of spans is unavailable until then. */
+    if (lua_istable(L, 3)) {
+        HlWasmSpanReq span_reqs[HL_WASM_MAX_SPANS];
+        (void)lua_parse_spans(L, 3, span_reqs);
     }
 
     wasm_clamp_opts(&opts, &lua->base);
@@ -395,6 +464,15 @@ static int lua_compute_async_call(lua_State *L)
         lua_pop(L, 1);
     }
 
+    /* Parse + validate spans (raises on bad input, BEFORE any op allocation). The
+     * reqs borrow Lua strings; they are DEEP-COPIED and the buffers submission-
+     * pinned into the op below (hl_worker_wasm_adopt_spans), so nothing Lua-managed
+     * crosses submit. Empty/absent -> a plain async call. */
+    HlWasmSpanReq parsed_spans[HL_WASM_MAX_SPANS];
+    int span_count = 0;
+    if (lua_istable(L, 3))
+        span_count = lua_parse_spans(L, 3, parsed_spans);
+
     wasm_clamp_opts(&opts, &lua->base);
 
     /* Pre-load module on event loop thread (cache writes are not thread-safe) */
@@ -431,6 +509,11 @@ static int lua_compute_async_call(lua_State *L)
         memcpy(op->input, input, input_len);
     }
     op->input_len = input_len;
+
+    /* Deep-copy + submission-pin the spans into the op. Any failure after this
+     * (ctx / continuation / submit) frees the op via hl_worker_wasm_op_free, which
+     * releases these pins. Nothing Lua-managed is retained. */
+    hl_worker_wasm_adopt_spans(op, parsed_spans, span_count);
 
     /* Create async ctx */
     HlAsyncCtx *ctx = hl_async_ctx_create(lua->server, lua->base.net_ctx, lua->base.alloc);
@@ -544,6 +627,13 @@ static int lua_wasm_inst_call(lua_State *L)
         lua_pop(L, 1);
     }
 
+    /* per-invocation mapped spans (item C: parse + validate only; forwarding is
+     * item D). inst:call is synchronous; D consumes the borrowed array directly. */
+    if (lua_istable(L, 3)) {
+        HlWasmSpanReq span_reqs[HL_WASM_MAX_SPANS];
+        (void)lua_parse_spans(L, 3, span_reqs);
+    }
+
     if (lua) wasm_clamp_opts(&opts, &lua->base);
 
     if (want_buffer) {
@@ -634,6 +724,12 @@ static int lua_wasm_inst_async_call(lua_State *L)
         if (lua_toboolean(L, -1)) want_buffer = 1;
         lua_pop(L, 1);
     }
+    /* parse + validate spans (raises before op alloc); deep-copied + pinned into
+     * the op below. Empty/absent -> a plain async call. */
+    HlWasmSpanReq parsed_spans[HL_WASM_MAX_SPANS];
+    int span_count = 0;
+    if (lua_istable(L, 3))
+        span_count = lua_parse_spans(L, 3, parsed_spans);
     wasm_clamp_opts(&opts, &lua->base);
 
     /* Allocate worker op */
@@ -658,6 +754,10 @@ static int lua_wasm_inst_async_call(lua_State *L)
         memcpy(op->input, input, input_len);
     }
     op->input_len = input_len;
+
+    /* Deep-copy + submission-pin the spans into the op (released by
+     * hl_worker_wasm_op_free on any exit). */
+    hl_worker_wasm_adopt_spans(op, parsed_spans, span_count);
 
     /* Set busy before dispatch (event loop thread) */
     atomic_store(&pi->busy, 1);
