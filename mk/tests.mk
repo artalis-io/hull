@@ -887,6 +887,12 @@ e2e-agent-api: $(BUILDDIR)/hull
 e2e-compute: $(BUILDDIR)/hull
 	sh tests/e2e_compute.sh
 
+# Lua compute.async worker-trap surfacing (issue #317): a trap must raise/500,
+# not hang the request. Live-server (curl) because the bug is in the async
+# resume of a suspended connection.
+e2e-compute-async-trap: $(BUILDDIR)/hull
+	sh tests/e2e_compute_async_trap.sh
+
 e2e-compute-dev: $(BUILDDIR)/hull
 	sh tests/e2e_compute_dev.sh
 
