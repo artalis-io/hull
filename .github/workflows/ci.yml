@@ -295,7 +295,7 @@ jobs:
         timeout-minutes: 2
         run: make e2e-compute
 
-      - name: Compute async-trap surfacing E2E (Lua, #317)
+      - name: Async-trap surfacing E2E (Lua #317 + JS #319, cross-consumer)
         timeout-minutes: 2
         run: make e2e-compute-async-trap
 
