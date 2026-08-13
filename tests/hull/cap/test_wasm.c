@@ -398,8 +398,13 @@ UTEST(hl_cap_wasm, gas_exhaustion)
                                &output, &output_len,
                                &opts, NULL, NULL,
                                &vfs, NULL, NULL, &err);
-    /* Gas exhaustion should cause a call failure */
-    ASSERT_NE(rc, 0);
+    /* Gas exhaustion must classify as HL_WASM_ERR_GAS + "gas_exhausted", not a
+     * generic call failure. Regression for #314: WAMR 2.4.1 emits "instruction
+     * limit exceeded" (older builds said "instruction count"); the classifier
+     * must match either. */
+    ASSERT_EQ(rc, HL_WASM_ERR_GAS);
+    ASSERT_TRUE(err != NULL);
+    ASSERT_STREQ(err, "gas_exhausted");
 
     free(output);
     hl_cap_wasm_destroy(&cache);
@@ -1376,7 +1381,10 @@ UTEST(hl_cap_wasm, instance_gas_recovery)
     int rc = hl_cap_wasm_instance_call(pi, "x", 1,
                                         &output, &output_len,
                                         &low_gas, NULL, NULL, NULL, &err);
-    ASSERT_NE(rc, HL_WASM_OK);
+    /* Instance path must classify gas exhaustion the same way (#314). */
+    ASSERT_EQ(rc, HL_WASM_ERR_GAS);
+    ASSERT_TRUE(err != NULL);
+    ASSERT_STREQ(err, "gas_exhausted");
 
     /* Now with normal gas — should succeed (instance reusable) */
     HlWasmCallOpts normal_gas = {0};

@@ -70,6 +70,19 @@ static const char *wasm_arch_suffix(void)
 #endif
 }
 
+/* Classify a WAMR call exception as gas exhaustion. WAMR surfaces the
+ * instruction-metering trap as an exception string, and the wording has drifted
+ * across versions: the vendored WAMR (2.4.1) emits "instruction limit exceeded",
+ * older builds used "instruction count". Match either token so a gas trap maps
+ * to HL_WASM_ERR_GAS regardless of wording (WAMR exposes no gas-specific error
+ * enum to key off instead). Both call paths route through here so the two stay
+ * in lockstep. */
+static int wasm_is_gas_exception(const char *exc)
+{
+    return exc && (strstr(exc, "instruction limit") ||
+                   strstr(exc, "instruction count"));
+}
+
 /* ── Thread-local callback context for host_call ───────────────────── */
 
 typedef struct {
@@ -909,7 +922,7 @@ int hl_cap_wasm_call_buf(HlWasmCache *cache, const char *name,
 
     if (!wasm_runtime_call_wasm(exec_env, process_fn, (uint32_t)argc, argv)) {
         const char *exception = wasm_runtime_get_exception(inst);
-        if (exception && strstr(exception, "instruction count")) {
+        if (wasm_is_gas_exception(exception)) {
             log_warn("[wasm] gas exhausted for '%s'", name);
             if (err_msg) *err_msg = err_gas;
             ret = HL_WASM_ERR_GAS;
@@ -1234,7 +1247,7 @@ int hl_cap_wasm_instance_call_buf(HlWasmInstance *pi,
 
     if (!wasm_runtime_call_wasm(exec_env, process_fn, (uint32_t)argc_call, argv)) {
         const char *exception = wasm_runtime_get_exception(inst);
-        if (exception && strstr(exception, "instruction count")) {
+        if (wasm_is_gas_exception(exception)) {
             if (err_msg) *err_msg = err_gas;
             ret = HL_WASM_ERR_GAS;
         } else {
