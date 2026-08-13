@@ -239,6 +239,12 @@ $(BUILDDIR)/test_cfi: $(TESTDIR)/hull/test_cfi.c | $(BUILDDIR)
 $(BUILDDIR)/test_csp: $(TESTDIR)/hull/test_csp.c $(CSP_OBJ) | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< $(CSP_OBJ)
 
+# Mapped-spans SDK header (templates/hull_span.h, checkpoint 3b) — native decoder
+# / name-lookup / scratch-narrow tests. Freestanding header; the only extra
+# include path is -Itemplates for hull_span.h. No deps beyond libc.
+$(BUILDDIR)/test_span_sdk: $(TESTDIR)/hull/test_span_sdk.c templates/hull_span.h | $(BUILDDIR)
+	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -Itemplates -o $@ $< $(LDFLAGS)
+
 # Embedding ABI — links the whole libhull.a the way a native host does,
 # so this also link-tests the archive on every `make test`. Only the
 # non-sealing surface runs in-process; the sealed path is embed-c-smoke.
