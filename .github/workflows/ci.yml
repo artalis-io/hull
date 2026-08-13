@@ -319,6 +319,10 @@ jobs:
         timeout-minutes: 2
         run: make e2e-sync-spans
 
+      - name: Compute header install/refresh E2E (hull_compute.h + hull_span.h, 3b)
+        timeout-minutes: 2
+        run: make e2e-compute-headers
+
       - name: Named-connection async/udf E2E tests
         timeout-minutes: 2
         run: make e2e-named-connections

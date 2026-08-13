@@ -949,6 +949,11 @@ e2e-compute-aot-shared-heap:
 e2e-sync-spans: $(BUILDDIR)/hull
 	sh tests/e2e_sync_spans.sh
 
+# hull compute new / refresh-header install+refresh both Hull-owned headers
+# (hull_compute.h + hull_span.h) atomically (mapped-spans 3b slice 1).
+e2e-compute-headers: $(BUILDDIR)/hull
+	sh tests/e2e_compute_headers.sh
+
 e2e-compute-dev: $(BUILDDIR)/hull
 	sh tests/e2e_compute_dev.sh
 
