@@ -83,11 +83,31 @@ static void hl_js_async_resume(HlAsyncCont *self, void *driver)
      * (e.g., another http.async.get) can find the active connection */
     js->active_conn = conn;
 
-    /* Resolve the inner promise with the driver result */
+    /* Settle the inner promise with the driver result.
+     *
+     * A push_result may signal a driver-side error two ways:
+     *   1. by THROWING — returning JS_EXCEPTION with a pending exception on ctx
+     *      (compute / db / gpu async: `return JS_ThrowInternalError(...)`), or
+     *   2. by RETURNING an ordinary value that encodes the error
+     *      (worker async resolves with `{ error: msg }`; http/tui resolve with
+     *      undefined/null on their own terms).
+     * Case 2 is the callback's own contract and must reach `resolve` unchanged.
+     * Case 1 must reach `reject`: routing a JS_EXCEPTION through `resolve` FULFILLS
+     * the promise with undefined and silently swallows the error (#319). Detect
+     * the thrown case by the returned value and reject with the real exception so
+     * `await` throws — catchable by the handler, else its promise rejects and the
+     * REJECTED branch below writes a 500. Exactly one of resolve/reject fires. */
     if (driver && jc->push_result) {
         JSValue result = jc->push_result(ctx, driver);
-        JSValue ret = JS_Call(ctx, jc->resolve, JS_UNDEFINED, 1, &result);
-        JS_FreeValue(ctx, ret);
+        if (JS_IsException(result)) {
+            JSValue exc = JS_GetException(ctx); /* retrieve + clear pending */
+            JSValue ret = JS_Call(ctx, jc->reject, JS_UNDEFINED, 1, &exc);
+            JS_FreeValue(ctx, ret);
+            JS_FreeValue(ctx, exc);
+        } else {
+            JSValue ret = JS_Call(ctx, jc->resolve, JS_UNDEFINED, 1, &result);
+            JS_FreeValue(ctx, ret);
+        }
         JS_FreeValue(ctx, result);
     } else {
         JSValue ret = JS_Call(ctx, jc->resolve, JS_UNDEFINED, 0, NULL);
