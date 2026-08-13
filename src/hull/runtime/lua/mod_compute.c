@@ -360,19 +360,22 @@ static int lua_compute_load(lua_State *L)
 
 /* ── compute.async.call ─────────────────────────────────────────────── */
 
-/* push_result callback: convert HlWorkerWasmOp result to Lua value.
- * On error, raises a Lua error (propagates through the coroutine resume
- * as a regular failure). On success, returns the output directly:
+/* push_result callback: convert HlWorkerWasmOp result to a Lua value pushed onto
+ * the resumed coroutine's stack (exactly ONE value — the shared resume delivers
+ * nargs=1). This runs from hl_lua_async_resume BEFORE lua_resume, so it must NOT
+ * raise: a longjmp here escapes the resume and strands the suspended connection
+ * (issue #317). On a worker-side error we push a nil placeholder and defer the
+ * actual raise to lua_compute_async_k, which runs INSIDE lua_resume. On success:
  *   - buffer mode → WasmBuffer userdata
- *   - normal mode → output string
- * Matches db.async / http.async / gpu.async error-throwing convention. */
+ *   - normal mode → output string */
 static void lua_push_worker_wasm_result(lua_State *L, void *driver)
 {
     HlWorkerWasmOp *op = (HlWorkerWasmOp *)driver;
 
     if (op->error) {
-        luaL_error(L, "compute.async: %s", op->error_msg);
-        return; /* unreachable */
+        /* Placeholder; lua_compute_async_k raises the real error from op. */
+        lua_pushnil(L);
+        return;
     }
     if (op->output_buf) {
         /* Buffer mode: push WasmBuffer userdata, transfer ownership */
@@ -384,6 +387,22 @@ static void lua_push_worker_wasm_result(lua_State *L, void *driver)
         lua_pushlstring(L, (const char *)op->output, op->output_len);
     else
         lua_pushlstring(L, "", 0);
+}
+
+/* Continuation for compute.async.call / WasmInstance:async_call. Invoked when the
+ * yielded coroutine is resumed — and, crucially, INSIDE lua_resume, so a raise
+ * here is a proper coroutine error (catchable by pcall, else a 500), mirroring
+ * JS's promise reject. The op is passed as the yield's KContext and is still
+ * alive: hl_async_ctx_resume* frees the driver only AFTER cont->resume returns.
+ * On success the single value pushed by lua_push_worker_wasm_result is on top;
+ * we return it unchanged. */
+static int lua_compute_async_k(lua_State *L, int status, lua_KContext kctx)
+{
+    (void)status;
+    HlWorkerWasmOp *op = (HlWorkerWasmOp *)kctx;
+    if (op && op->error)
+        return luaL_error(L, "compute.async: %s", op->error_msg);
+    return 1;
 }
 
 static int lua_compute_async_call(lua_State *L)
@@ -550,7 +569,7 @@ static int lua_compute_async_call(lua_State *L)
         }
     }
 
-    return lua_yieldk(L, 0, 0, NULL);
+    return lua_yieldk(L, 0, (lua_KContext)op, lua_compute_async_k);
 }
 
 /* ── WasmInstance metatable ─────────────────────────────────────────── */
@@ -791,7 +810,7 @@ static int lua_wasm_inst_async_call(lua_State *L)
         return luaL_error(L, "WasmInstance:async_call: failed to suspend");
     }
 
-    return lua_yieldk(L, 0, 0, NULL);
+    return lua_yieldk(L, 0, (lua_KContext)op, lua_compute_async_k);
 }
 
 static int lua_wasm_inst_close(lua_State *L)

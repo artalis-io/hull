@@ -311,6 +311,10 @@ jobs:
         timeout-minutes: 2
         run: make e2e-persistent-async
 
+      - name: Async-trap surfacing E2E (Lua #317 + JS #319, cross-consumer)
+        timeout-minutes: 2
+        run: make e2e-compute-async-trap
+
       - name: Named-connection async/udf E2E tests
         timeout-minutes: 2
         run: make e2e-named-connections
