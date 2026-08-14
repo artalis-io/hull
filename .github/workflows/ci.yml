@@ -613,6 +613,49 @@ jobs:
             || { echo "::error::spans example e2e did not run its 22 checks to pass"; exit 1; }
           echo "mapped_spans example: public SDK read correct on interp + AOT, both runtimes."
 
+  # Multiple named spans (3b final slice): declaration-order discovery + per-name
+  # lookup (+ unknown -1), Lua AND JS, interpreter AND AOT via the production
+  # `hull build` path. Needs a wasm clang + wamrc + an embedded hull; non-skippable.
+  spans-multi:
+    name: mapped spans — multiple named spans, Lua + JS, interp + AOT
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          submodules: true
+
+      - name: Install clang + lld + LLVM + cmake
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang lld llvm-18-dev cmake
+
+      - name: Build embedded hull (platform lib) + wamrc
+        timeout-minutes: 15
+        run: |
+          make platform
+          if command -v llvm-config-18 >/dev/null 2>&1; then
+            export WAMRC_CMAKE_FLAGS="-DLLVM_DIR=$(llvm-config-18 --cmakedir)"
+          fi
+          make wamrc
+          # Embed LAST: a later bare `make` would clobber the embedding
+          # (EMBED_PLATFORM is not in the config sentinel), and the e2e needs it.
+          make EMBED_PLATFORM=1
+
+      - name: Multiple-named-spans E2E (Lua + JS, interp + AOT, must NOT skip)
+        timeout-minutes: 12
+        run: |
+          set -o pipefail
+          sh tests/ci_ensure_wamrc.sh
+          sh tests/e2e_spans_multi.sh 2>&1 | tee spans_multi.log
+          rc=${PIPESTATUS[0]}
+          [ "$rc" -eq 0 ] || { echo "::error::spans-multi e2e failed (rc=$rc)"; exit "$rc"; }
+          if grep -qE '\bSKIP\b' spans_multi.log; then
+            echo "::error::spans-multi e2e skipped (no clang / no embedded hull / no wamrc)"; exit 1
+          fi
+          grep -qE "spans-multi: 22 passed, 0 failed" spans_multi.log \
+            || { echo "::error::spans-multi e2e did not run its 22 checks to pass"; exit 1; }
+          echo "multiple named spans: declaration-order discovery + lookup on interp + AOT, both runtimes."
+
   # patch 0004 arm64 AOT gate. The x86_64 job above proves the guarded-subrange
   # AOT path on x86_64; this runs the same non-skipped AOT matrix on arm64, where
   # WAMR sets the emitted load/store alignment to the WASM hint and a span whose

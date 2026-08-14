@@ -974,6 +974,12 @@ e2e-compute-headers: $(BUILDDIR)/hull
 e2e-spans-example: $(BUILDDIR)/hull
 	sh tests/e2e_spans_example.sh
 
+# Multiple named spans: declaration-order discovery + name lookup (+ unknown -1),
+# Lua+JS on interpreter + (with wamrc) AOT, public hull_span.h SDK (3b final slice).
+.PHONY: e2e-spans-multi
+e2e-spans-multi: $(BUILDDIR)/hull
+	sh tests/e2e_spans_multi.sh
+
 e2e-compute-dev: $(BUILDDIR)/hull
 	sh tests/e2e_compute_dev.sh
 
