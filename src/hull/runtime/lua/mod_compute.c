@@ -275,13 +275,18 @@ static int lua_compute_call(lua_State *L)
         lua_pop(L, 1);
     }
 
-    /* per-invocation mapped spans (item C: parse + validate only). Forwarding
-     * into opts.spans + attach is item D, where the sync path consumes the
-     * borrowed array synchronously and the async path deep-copies + pins before
-     * submit. Execution of spans is unavailable until then. */
-    if (lua_istable(L, 3)) {
-        HlWasmSpanReq span_reqs[HL_WASM_MAX_SPANS];
-        (void)lua_parse_spans(L, 3, span_reqs);
+    /* per-invocation mapped spans. The sync path consumes the BORROWED request
+     * array directly: hl_cap_wasm_call attaches the spans, runs, and tears them
+     * down within this single non-yielding call, so the arg-3 table (and the name
+     * strings + MappedBuffers it references) stays GC-reachable on the Lua stack
+     * throughout. Empty/absent -> a plain call (span_count 0). */
+    HlWasmSpanReq span_reqs[HL_WASM_MAX_SPANS];
+    int span_count = 0;
+    if (lua_istable(L, 3))
+        span_count = lua_parse_spans(L, 3, span_reqs);  /* raises on invalid input */
+    if (span_count > 0) {
+        opts.spans = span_reqs;
+        opts.span_count = span_count;
     }
 
     wasm_clamp_opts(&opts, &lua->base);
@@ -627,11 +632,17 @@ static int lua_wasm_inst_call(lua_State *L)
         lua_pop(L, 1);
     }
 
-    /* per-invocation mapped spans (item C: parse + validate only; forwarding is
-     * item D). inst:call is synchronous; D consumes the borrowed array directly. */
-    if (lua_istable(L, 3)) {
-        HlWasmSpanReq span_reqs[HL_WASM_MAX_SPANS];
-        (void)lua_parse_spans(L, 3, span_reqs);
+    /* per-invocation mapped spans. inst:call is synchronous, so it consumes the
+     * BORROWED request array directly: hl_cap_wasm_instance_call attaches, runs,
+     * and tears the spans down within this call while the arg-3 table stays on the
+     * Lua stack. Empty/absent -> a plain call (span_count 0). */
+    HlWasmSpanReq span_reqs[HL_WASM_MAX_SPANS];
+    int span_count = 0;
+    if (lua_istable(L, 3))
+        span_count = lua_parse_spans(L, 3, span_reqs);
+    if (span_count > 0) {
+        opts.spans = span_reqs;
+        opts.span_count = span_count;
     }
 
     if (lua) wasm_clamp_opts(&opts, &lua->base);
