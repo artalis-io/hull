@@ -16,13 +16,18 @@
 #include <stdint.h>
 #include <string.h>
 
-/* Mock host_call so hull_span_setup links. On a 64-bit host the setup scratch is
- * >= 4 GiB and is rejected before this is ever called; it returns an empty set so
- * a (hypothetical) low-address host stays harmless. */
+/* Mock host_call so hull_span_setup links, with an invocation counter so a test
+ * can prove the count-only query issues exactly one host call (the count query)
+ * and no record queries. The count query (idx == -1) reports 3 attached spans; a
+ * record query (idx >= 0) reports an empty record (unreached on a 64-bit host,
+ * where the scratch narrow rejects before any record query). */
+static int g_hostcalls = 0;
 static int32_t host_call(int32_t op, int32_t ptr, int32_t idx)
 {
-    (void)op; (void)ptr; (void)idx;
-    return 0; /* count = 0 */
+    (void)op; (void)ptr;
+    g_hostcalls++;
+    if (idx == -1) return 3;   /* count query -> 3 spans */
+    return 0;                  /* record query -> empty (low-address host only) */
 }
 
 #include "hull_span.h"
@@ -147,45 +152,50 @@ UTEST(span_sdk, narrow_guard)
     }
 }
 
-/* ── setup: on a 64-bit host the scratch record is >= 4 GiB, so setup rejects
- *    via the ABI guard before any host_call (documents the wasm32-only limit).
- *    On the (unlikely) low-scratch case the mock returns count 0. ───────────── */
-UTEST(span_sdk, setup_rejects_high_scratch)
-{
-    HullSpan out[HULL_SPAN_MAX];
-    int r = hull_span_setup(out, HULL_SPAN_MAX);
-    if (sizeof(void *) > 4)
-        ASSERT_EQ(r, HULL_SPAN_ERR_ADDR);
-    else
-        ASSERT_EQ(r, 0);
-}
-
-/* ── setup argument validation (checked BEFORE any host call). ─────────────── */
+/* ── setup argument validation: rejected BEFORE any host call. ─────────────── */
 UTEST(span_sdk, setup_rejects_null_dest_positive_cap)
 {
-    /* out == NULL with a positive capacity would write through NULL — reject. */
+    /* out == NULL with a positive capacity would write through NULL — reject,
+     * without issuing any host call. */
+    g_hostcalls = 0;
     ASSERT_EQ(hull_span_setup((HullSpan *)0, 5), HULL_SPAN_ERR_ARG);
+    ASSERT_EQ(g_hostcalls, 0);
 }
 
 UTEST(span_sdk, setup_rejects_negative_cap)
 {
     HullSpan out[HULL_SPAN_MAX];
+    g_hostcalls = 0;
     ASSERT_EQ(hull_span_setup(out, -1), HULL_SPAN_ERR_ARG);
     ASSERT_EQ(hull_span_setup((HullSpan *)0, -1), HULL_SPAN_ERR_ARG);
+    ASSERT_EQ(g_hostcalls, 0);
 }
 
-UTEST(span_sdk, setup_null_zero_cap_is_valid_args)
+/* ── count-only query: NULL + out_cap 0 issues ONLY the count query (no scratch
+ *    narrowing) and returns the count EXACTLY, on every target. ─────────────── */
+UTEST(span_sdk, setup_null_zero_cap_returns_count)
 {
-    /* NULL + out_cap 0 is the valid count-only query, NOT an argument error. On
-     * this 64-bit host the scratch is unreachable via the i32 ABI so it returns
-     * ERR_ADDR (documented wasm32-only limit) — the point is it is NOT ERR_ARG,
-     * i.e. the validation does not wrongly reject a legitimate count query. */
+    g_hostcalls = 0;
     int r = hull_span_setup((HullSpan *)0, 0);
-    ASSERT_NE(r, HULL_SPAN_ERR_ARG);
-    if (sizeof(void *) > 4)
+    ASSERT_EQ(r, 3);              /* exact mock count */
+    ASSERT_EQ(g_hostcalls, 1);    /* exactly one host call: the count query */
+}
+
+/* ── record fetch: the scratch record must be narrowed to the i32 ABI. On a
+ *    64-bit host the address is >= 4 GiB and is rejected with ERR_ADDR -- AFTER
+ *    the count query (g_hostcalls == 1), BEFORE any record query. ───────────── */
+UTEST(span_sdk, setup_high_scratch_rejects_after_count)
+{
+    HullSpan out[HULL_SPAN_MAX];
+    g_hostcalls = 0;
+    int r = hull_span_setup(out, HULL_SPAN_MAX);
+    if (sizeof(void *) > 4) {
         ASSERT_EQ(r, HULL_SPAN_ERR_ADDR);
-    else
-        ASSERT_EQ(r, 0);   /* low-scratch host: mock count = 0 */
+        ASSERT_EQ(g_hostcalls, 1);   /* count query only; no record query issued */
+    } else {
+        /* low-address host: record query runs; the mock reports empty -> QUERY */
+        ASSERT_EQ(r, HULL_SPAN_ERR_QUERY);
+    }
 }
 
 UTEST_MAIN()

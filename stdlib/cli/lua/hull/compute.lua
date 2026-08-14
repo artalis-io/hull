@@ -484,32 +484,49 @@ static inline int hull_span__narrow(hull_span_uptr p, hull_span_i32 *out)
  *
  * Preconditions (validated before any host call): out_cap must be >= 0, and a
  * positive out_cap requires out != NULL. `hull_span_setup(NULL, 0)` is a valid
- * count-only query (returns the count, writes nothing). Otherwise returns
+ * count-only query: it issues ONLY the count query and returns the count on
+ * every target (writing nothing, allocating no scratch). Otherwise returns
  * HULL_SPAN_ERR_ARG.
  *
- * Issues one count query then one record query per index (the cbSize handshake:
- * advertise our capacity in struct_size, validate the returned size covers v1).
- * No host calls happen after setup — every later access is a pure inline read. */
+ * The count query comes first (it needs no scratch); a metadata scratch record
+ * is allocated and narrowed to the i32 ABI only when records are actually
+ * fetched (out_cap > 0 && count > 0). HULL_SPAN_ERR_ADDR (a >= 4 GiB scratch on
+ * Memory64 / 64-bit native) can therefore only occur on a record-fetching call,
+ * never on the count-only query. Each record uses the cbSize handshake (advertise
+ * our capacity in struct_size, validate the returned size covers v1). No host
+ * calls happen after setup — every later access is a pure inline read. */
 static inline int hull_span_setup(HullSpan *out, int out_cap)
 {
-    /* Argument preconditions (checked before any host call): a negative capacity
-     * is invalid, and a positive capacity requires a non-NULL destination.
+    /* 1. Argument preconditions (checked before any host call): a negative
+     * capacity is invalid, and a positive capacity requires a non-NULL dest.
      * out == NULL with out_cap == 0 is the valid count-only query. */
     if (out_cap < 0)
         return HULL_SPAN_ERR_ARG;
     if (out_cap > 0 && !out)
         return HULL_SPAN_ERR_ARG;
 
-    hull_span_u8   rec[HULL_SPAN_META_V1_SIZE];
-    hull_span_i32  rec_ptr;
-    if (hull_span__narrow((hull_span_uptr)(void *)rec, &rec_ptr) != 0)
-        return HULL_SPAN_ERR_ADDR;                 /* scratch unreachable via the i32 ABI */
-
+    /* 2. Count query. It passes ptr = 0, so it needs no metadata scratch and
+     * therefore works on every target (including a 64-bit native / Memory64
+     * context where a stack address is >= 4 GiB). */
     hull_span_i32 count = HULL_SPAN_HOST_CALL(HULL_OP_SPAN_INFO, 0, -1);
     if (count < 0)
         return HULL_SPAN_ERR_QUERY;
 
+    /* 3. Nothing to fill (a count-only query, out_cap == 0, or count == 0):
+     * return the count immediately without touching the scratch record. */
     int n = ((int)count < out_cap) ? (int)count : out_cap;
+    if (n <= 0)
+        return (int)count;
+
+    /* 4. Only now, with records to fetch, allocate + narrow the scratch record
+     * whose address must fit the (i32,i32,i32) host_call ABI. On Memory64 / a
+     * 64-bit native scratch above UINT32_MAX this rejects with ERR_ADDR -- but
+     * only when records are actually requested, never for the count query. */
+    hull_span_u8   rec[HULL_SPAN_META_V1_SIZE];
+    hull_span_i32  rec_ptr;
+    if (hull_span__narrow((hull_span_uptr)(void *)rec, &rec_ptr) != 0)
+        return HULL_SPAN_ERR_ADDR;
+
     for (int i = 0; i < n; i++) {
         /* cbSize: advertise our record capacity in the dest's struct_size field. */
         rec[HULL_SPAN_OFF_STRUCTSZ]     = (hull_span_u8)(HULL_SPAN_META_V1_SIZE & 0xff);
