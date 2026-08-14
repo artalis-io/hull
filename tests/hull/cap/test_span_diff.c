@@ -105,6 +105,20 @@ static void put16(uint8_t *b, uint16_t v) { b[0] = (uint8_t)v; b[1] = (uint8_t)(
 static void put32(uint8_t *b, uint32_t v) { for (int i = 0; i < 4; i++) b[i] = (uint8_t)(v >> (8 * i)); }
 static void put64(uint8_t *b, uint64_t v) { for (int i = 0; i < 8; i++) b[i] = (uint8_t)(v >> (8 * i)); }
 
+/* Build an OP_READ fixture: [op][kind][endian][off u64][len u64][window]. */
+static uint32_t mk_read(uint8_t *in, uint8_t kind, uint8_t endian, uint64_t off,
+                        uint64_t len, const uint8_t *win, uint32_t win_n)
+{
+    in[0] = SPANDIFF_OP_READ; in[1] = kind; in[2] = endian;
+    put64(in + 3, off); put64(in + 11, len);
+    if (win_n) memcpy(in + 19, win, win_n);
+    return 19 + win_n;
+}
+/* Oracle: a successful read returns [status 0][value 8]; the value is the typed
+ * result i64/u64-extended, or a float's raw bits. */
+static void exp_ok(uint8_t *exp, uint64_t val) { put32(exp, 0); put64(exp + 4, val); }
+static void exp_range(uint8_t *exp) { put32(exp, (uint32_t)(int32_t)(-4) /* HULL_SPAN_ERR_RANGE */); }
+
 /* One differential fixture: run native + interp (+AOT) and require parity;
  * when exp_len >= 0, also require the native result matches the oracle bytes. */
 static void diff_case(int *utest_result, wasm_exec_env_t aot_env, wasm_module_inst_t aot_inst,
@@ -277,6 +291,71 @@ UTEST(hull_span_diff, native_vs_wasm_interp_aot)
       const char *q = "nope"; memcpy(in + base, q, strlen(q) + 1);
       put32(exp, (uint32_t)(int32_t)(-1));
       diff_case(utest_result, aot_env, aot_inst, "find_miss", in, base + (uint32_t)strlen(q) + 1, exp, 4); }
+
+    /* ══ bounded typed accessors: BE / signed / float, + reject paths ══════════
+     * Window W (16 bytes) with distinctive low + high-bit bytes. */
+    static const uint8_t W[16] = { 0x01,0x02,0x03,0x04,0x05,0x06,0x07,0x08,
+                                   0x80,0x90,0xA0,0xB0,0xC0,0xD0,0xE0,0xF0 };
+    uint32_t n;
+
+    /* ── big-endian accessors (independent LE-differs oracles) ── */
+    n = mk_read(in, SPANDIFF_K_U16, 1, 0, 16, W, 16); exp_ok(exp, 0x0102ull);
+    diff_case(utest_result, aot_env, aot_inst, "read_be16", in, n, exp, 12);
+    n = mk_read(in, SPANDIFF_K_U32, 1, 0, 16, W, 16); exp_ok(exp, 0x01020304ull);
+    diff_case(utest_result, aot_env, aot_inst, "read_be32", in, n, exp, 12);
+    n = mk_read(in, SPANDIFF_K_U64, 1, 0, 16, W, 16); exp_ok(exp, 0x0102030405060708ull);
+    diff_case(utest_result, aot_env, aot_inst, "read_be64", in, n, exp, 12);
+
+    /* ── signed 8/16/32/64 (negative / high-bit) ── */
+    n = mk_read(in, SPANDIFF_K_I8, 0, 8, 16, W, 16);  exp_ok(exp, (uint64_t)(int64_t)-128);
+    diff_case(utest_result, aot_env, aot_inst, "read_i8_neg", in, n, exp, 12);
+    n = mk_read(in, SPANDIFF_K_I8, 0, 0, 16, W, 16);  exp_ok(exp, 1ull);
+    diff_case(utest_result, aot_env, aot_inst, "read_i8_pos", in, n, exp, 12);
+    n = mk_read(in, SPANDIFF_K_I16, 0, 8, 16, W, 16); exp_ok(exp, (uint64_t)(int64_t)(int16_t)0x9080);
+    diff_case(utest_result, aot_env, aot_inst, "read_i16le_neg", in, n, exp, 12);
+    n = mk_read(in, SPANDIFF_K_I32, 0, 8, 16, W, 16); exp_ok(exp, (uint64_t)(int64_t)(int32_t)0xB0A09080u);
+    diff_case(utest_result, aot_env, aot_inst, "read_i32le_neg", in, n, exp, 12);
+    n = mk_read(in, SPANDIFF_K_I64, 0, 8, 16, W, 16); exp_ok(exp, 0xF0E0D0C0B0A09080ull);
+    diff_case(utest_result, aot_env, aot_inst, "read_i64le_neg", in, n, exp, 12);
+    n = mk_read(in, SPANDIFF_K_U8, 0, 8, 16, W, 16);  exp_ok(exp, 0x80ull);
+    diff_case(utest_result, aot_env, aot_inst, "read_u8_high", in, n, exp, 12);
+
+    /* ── float accessors: special-value bit patterns, incl. misaligned ── */
+    { uint8_t wf[5] = { 0xFF, 0x00, 0x00, 0xC0, 0x7F };   /* NaN 0x7FC00000 LE at off 1 */
+      n = mk_read(in, SPANDIFF_K_F32, 0, 1, 5, wf, 5); exp_ok(exp, 0x7FC00000ull);
+      diff_case(utest_result, aot_env, aot_inst, "read_f32le_nan_off1", in, n, exp, 12); }
+    { uint8_t wf[4] = { 0x00, 0x00, 0x00, 0x80 };         /* -0.0f 0x80000000 LE */
+      n = mk_read(in, SPANDIFF_K_F32, 0, 0, 4, wf, 4); exp_ok(exp, 0x80000000ull);
+      diff_case(utest_result, aot_env, aot_inst, "read_f32le_negzero", in, n, exp, 12); }
+    { uint8_t wf[4] = { 0x3F, 0x80, 0x00, 0x00 };         /* 1.0f 0x3F800000 BE */
+      n = mk_read(in, SPANDIFF_K_F32, 1, 0, 4, wf, 4); exp_ok(exp, 0x3F800000ull);
+      diff_case(utest_result, aot_env, aot_inst, "read_f32be_one", in, n, exp, 12); }
+    { uint8_t wf[8] = { 0,0,0,0,0,0,0xF0,0x7F };          /* +Inf f64 0x7FF0.. LE */
+      n = mk_read(in, SPANDIFF_K_F64, 0, 0, 8, wf, 8); exp_ok(exp, 0x7FF0000000000000ull);
+      diff_case(utest_result, aot_env, aot_inst, "read_f64le_inf", in, n, exp, 12); }
+    { uint8_t wf[8] = { 0xFF,0xF0,0,0,0,0,0,0 };          /* -Inf f64 0xFFF0.. BE */
+      n = mk_read(in, SPANDIFF_K_F64, 1, 0, 8, wf, 8); exp_ok(exp, 0xFFF0000000000000ull);
+      diff_case(utest_result, aot_env, aot_inst, "read_f64be_neginf", in, n, exp, 12); }
+
+    /* ── one-past + width-straddling rejection for every accessor width ── */
+    exp_range(exp);
+    n = mk_read(in, SPANDIFF_K_U8,  0, 16, 16, W, 16); diff_case(utest_result, aot_env, aot_inst, "read_u8_onepast",   in, n, exp, 4);
+    n = mk_read(in, SPANDIFF_K_U16, 0, 15, 16, W, 16); diff_case(utest_result, aot_env, aot_inst, "read_u16_straddle", in, n, exp, 4);
+    n = mk_read(in, SPANDIFF_K_U16, 0, 16, 16, W, 16); diff_case(utest_result, aot_env, aot_inst, "read_u16_onepast",  in, n, exp, 4);
+    n = mk_read(in, SPANDIFF_K_U32, 0, 13, 16, W, 16); diff_case(utest_result, aot_env, aot_inst, "read_u32_straddle", in, n, exp, 4);
+    n = mk_read(in, SPANDIFF_K_U32, 0, 16, 16, W, 16); diff_case(utest_result, aot_env, aot_inst, "read_u32_onepast",  in, n, exp, 4);
+    n = mk_read(in, SPANDIFF_K_U64, 0,  9, 16, W, 16); diff_case(utest_result, aot_env, aot_inst, "read_u64_straddle", in, n, exp, 4);
+    n = mk_read(in, SPANDIFF_K_U64, 0, 16, 16, W, 16); diff_case(utest_result, aot_env, aot_inst, "read_u64_onepast",  in, n, exp, 4);
+    n = mk_read(in, SPANDIFF_K_F32, 1, 13, 16, W, 16); diff_case(utest_result, aot_env, aot_inst, "read_f32_straddle", in, n, exp, 4);
+    n = mk_read(in, SPANDIFF_K_F64, 0,  9, 16, W, 16); diff_case(utest_result, aot_env, aot_inst, "read_f64_straddle", in, n, exp, 4);
+
+    /* ── overflow offsets near UINT64_MAX (off+width would wrap): must reject ── */
+    n = mk_read(in, SPANDIFF_K_U16, 0, 0xFFFFFFFFFFFFFFFFull, 16, W, 16);
+    diff_case(utest_result, aot_env, aot_inst, "read_u16_off_uint64max", in, n, exp, 4);
+    n = mk_read(in, SPANDIFF_K_U32, 0, 0xFFFFFFFFFFFFFFFEull, 16, W, 16);
+    diff_case(utest_result, aot_env, aot_inst, "read_u32_off_near_max", in, n, exp, 4);
+    n = mk_read(in, SPANDIFF_K_U64, 0, 0xFFFFFFFFFFFFFFF8ull, 16, W, 16);
+    diff_case(utest_result, aot_env, aot_inst, "read_u64_off_near_max", in, n, exp, 4);
 
     /* Report AOT coverage so CI can assert the AOT diff was actually exercised
      * (mirrors the guarded-subrange SKIPPED convention). */

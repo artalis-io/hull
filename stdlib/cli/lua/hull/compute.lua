@@ -306,7 +306,10 @@ typedef __UINT8_TYPE__   hull_span_u8;
 typedef __UINT16_TYPE__  hull_span_u16;
 typedef __UINT32_TYPE__  hull_span_u32;
 typedef __UINT64_TYPE__  hull_span_u64;
+typedef __INT8_TYPE__    hull_span_i8;
+typedef __INT16_TYPE__   hull_span_i16;
 typedef __INT32_TYPE__   hull_span_i32;
+typedef __INT64_TYPE__   hull_span_i64;
 typedef __UINTPTR_TYPE__ hull_span_uptr;
 
 /* ── Host-call opcode + wire ABI (guest copy of include/hull/cap/wasm.h) ──────
@@ -333,6 +336,8 @@ typedef __UINTPTR_TYPE__ hull_span_uptr;
 #define HULL_SPAN_ERR_VERSION (-2)  /* version/struct_size mismatch, or the host record is short   */
 #define HULL_SPAN_ERR_ADDR    (-3)  /* scratch record address >= 4 GiB: unrepresentable in the      */
                                     /* (i32,i32,i32) host_call ABI (Memory64 / 64-bit native).      */
+#define HULL_SPAN_ERR_RANGE   (-4)  /* a bounded read would fall outside [0, len) (one-past /       */
+                                    /* width-straddling / an offset that would overflow).           */
 
 /* ── Public span descriptor (decoded, host-independent) ──────────────────────── */
 typedef struct {
@@ -359,6 +364,77 @@ static inline hull_span_u32 hull_span__rd32(const hull_span_u8 *p)
 
 static inline hull_span_u64 hull_span__rd64(const hull_span_u8 *p)
 { hull_span_u64 v = 0; for (int i = 0; i < 8; i++) v |= (hull_span_u64)p[i] << (8 * i); return v; }
+
+/* ── Big-endian byte readers (window contents may be BE: PNG, network formats). ── */
+static inline hull_span_u16 hull_span__rd16be(const hull_span_u8 *p)
+{ return (hull_span_u16)(((hull_span_u16)p[0] << 8) | (hull_span_u16)p[1]); }
+
+static inline hull_span_u32 hull_span__rd32be(const hull_span_u8 *p)
+{ return ((hull_span_u32)p[0] << 24) | ((hull_span_u32)p[1] << 16)
+       | ((hull_span_u32)p[2] << 8) | (hull_span_u32)p[3]; }
+
+static inline hull_span_u64 hull_span__rd64be(const hull_span_u8 *p)
+{ hull_span_u64 v = 0; for (int i = 0; i < 8; i++) v = (v << 8) | (hull_span_u64)p[i]; return v; }
+
+/* ── Bit-cast raw bits to a float, preserving special-value patterns (NaN/Inf/
+ * signed zero) exactly — no arithmetic. Union punning is well-defined in C. ──── */
+static inline float hull_span__bits_f32(hull_span_u32 b)
+{ union { hull_span_u32 u; float f; } x; x.u = b; return x.f; }
+static inline double hull_span__bits_f64(hull_span_u64 b)
+{ union { hull_span_u64 u; double d; } x; x.u = b; return x.d; }
+
+/* ── Overflow-safe range check: is [off, off+width) fully within [0, len)?
+ * `len - off` is evaluated only after `off <= len`, so an off near UINT64_MAX is
+ * rejected, never wrapped. width is 1..8. ───────────────────────────────────── */
+static inline int hull_span__fits(hull_span_u64 off, hull_span_u64 width, hull_span_u64 len)
+{ return off <= len && width <= (len - off); }
+
+/* ── Bounded, typed window reads. `w` is the window base, `len` its length; each
+ * reads `width` bytes at `off`, returning 0 + setting *out on success or
+ * HULL_SPAN_ERR_RANGE (leaving *out untouched) on a one-past / width-straddling /
+ * overflowing offset. LE + BE for each width > 1 byte; signed variants
+ * reinterpret the same bytes; float variants bit-cast. A plugin passes a window
+ * as `(const void *)(hull_span_uptr)span.base, span.len`. ────────────────────── */
+static inline int hull_span_read_u8(const void *w, hull_span_u64 len, hull_span_u64 off, hull_span_u8 *out)
+{ const hull_span_u8 *b = (const hull_span_u8 *)w; if (!hull_span__fits(off, 1, len)) return HULL_SPAN_ERR_RANGE; *out = b[off]; return 0; }
+static inline int hull_span_read_i8(const void *w, hull_span_u64 len, hull_span_u64 off, hull_span_i8 *out)
+{ hull_span_u8 v; int r = hull_span_read_u8(w, len, off, &v); if (r) return r; *out = (hull_span_i8)v; return 0; }
+
+static inline int hull_span_read_u16le(const void *w, hull_span_u64 len, hull_span_u64 off, hull_span_u16 *out)
+{ const hull_span_u8 *b = (const hull_span_u8 *)w; if (!hull_span__fits(off, 2, len)) return HULL_SPAN_ERR_RANGE; *out = hull_span__rd16(b + off); return 0; }
+static inline int hull_span_read_u16be(const void *w, hull_span_u64 len, hull_span_u64 off, hull_span_u16 *out)
+{ const hull_span_u8 *b = (const hull_span_u8 *)w; if (!hull_span__fits(off, 2, len)) return HULL_SPAN_ERR_RANGE; *out = hull_span__rd16be(b + off); return 0; }
+static inline int hull_span_read_i16le(const void *w, hull_span_u64 len, hull_span_u64 off, hull_span_i16 *out)
+{ hull_span_u16 v; int r = hull_span_read_u16le(w, len, off, &v); if (r) return r; *out = (hull_span_i16)v; return 0; }
+static inline int hull_span_read_i16be(const void *w, hull_span_u64 len, hull_span_u64 off, hull_span_i16 *out)
+{ hull_span_u16 v; int r = hull_span_read_u16be(w, len, off, &v); if (r) return r; *out = (hull_span_i16)v; return 0; }
+
+static inline int hull_span_read_u32le(const void *w, hull_span_u64 len, hull_span_u64 off, hull_span_u32 *out)
+{ const hull_span_u8 *b = (const hull_span_u8 *)w; if (!hull_span__fits(off, 4, len)) return HULL_SPAN_ERR_RANGE; *out = hull_span__rd32(b + off); return 0; }
+static inline int hull_span_read_u32be(const void *w, hull_span_u64 len, hull_span_u64 off, hull_span_u32 *out)
+{ const hull_span_u8 *b = (const hull_span_u8 *)w; if (!hull_span__fits(off, 4, len)) return HULL_SPAN_ERR_RANGE; *out = hull_span__rd32be(b + off); return 0; }
+static inline int hull_span_read_i32le(const void *w, hull_span_u64 len, hull_span_u64 off, hull_span_i32 *out)
+{ hull_span_u32 v; int r = hull_span_read_u32le(w, len, off, &v); if (r) return r; *out = (hull_span_i32)v; return 0; }
+static inline int hull_span_read_i32be(const void *w, hull_span_u64 len, hull_span_u64 off, hull_span_i32 *out)
+{ hull_span_u32 v; int r = hull_span_read_u32be(w, len, off, &v); if (r) return r; *out = (hull_span_i32)v; return 0; }
+
+static inline int hull_span_read_u64le(const void *w, hull_span_u64 len, hull_span_u64 off, hull_span_u64 *out)
+{ const hull_span_u8 *b = (const hull_span_u8 *)w; if (!hull_span__fits(off, 8, len)) return HULL_SPAN_ERR_RANGE; *out = hull_span__rd64(b + off); return 0; }
+static inline int hull_span_read_u64be(const void *w, hull_span_u64 len, hull_span_u64 off, hull_span_u64 *out)
+{ const hull_span_u8 *b = (const hull_span_u8 *)w; if (!hull_span__fits(off, 8, len)) return HULL_SPAN_ERR_RANGE; *out = hull_span__rd64be(b + off); return 0; }
+static inline int hull_span_read_i64le(const void *w, hull_span_u64 len, hull_span_u64 off, hull_span_i64 *out)
+{ hull_span_u64 v; int r = hull_span_read_u64le(w, len, off, &v); if (r) return r; *out = (hull_span_i64)v; return 0; }
+static inline int hull_span_read_i64be(const void *w, hull_span_u64 len, hull_span_u64 off, hull_span_i64 *out)
+{ hull_span_u64 v; int r = hull_span_read_u64be(w, len, off, &v); if (r) return r; *out = (hull_span_i64)v; return 0; }
+
+static inline int hull_span_read_f32le(const void *w, hull_span_u64 len, hull_span_u64 off, float *out)
+{ hull_span_u32 v; int r = hull_span_read_u32le(w, len, off, &v); if (r) return r; *out = hull_span__bits_f32(v); return 0; }
+static inline int hull_span_read_f32be(const void *w, hull_span_u64 len, hull_span_u64 off, float *out)
+{ hull_span_u32 v; int r = hull_span_read_u32be(w, len, off, &v); if (r) return r; *out = hull_span__bits_f32(v); return 0; }
+static inline int hull_span_read_f64le(const void *w, hull_span_u64 len, hull_span_u64 off, double *out)
+{ hull_span_u64 v; int r = hull_span_read_u64le(w, len, off, &v); if (r) return r; *out = hull_span__bits_f64(v); return 0; }
+static inline int hull_span_read_f64be(const void *w, hull_span_u64 len, hull_span_u64 off, double *out)
+{ hull_span_u64 v; int r = hull_span_read_u64be(w, len, off, &v); if (r) return r; *out = hull_span__bits_f64(v); return 0; }
 
 /* ── Decode a raw HlSpanMetaV1 record.
  * `rec_len` is the number of valid bytes the host wrote (min(cap, struct_size)).

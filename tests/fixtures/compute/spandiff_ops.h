@@ -26,6 +26,19 @@
 #define SPANDIFF_OP_DECODE 4
 #define SPANDIFF_OP_NARROW 5
 #define SPANDIFF_OP_FIND   6
+#define SPANDIFF_OP_READ   7   /* bounded typed window read (BE/LE, signed, float) */
+
+/* OP_READ kinds. */
+#define SPANDIFF_K_U8  0
+#define SPANDIFF_K_I8  1
+#define SPANDIFF_K_U16 2
+#define SPANDIFF_K_I16 3
+#define SPANDIFF_K_U32 4
+#define SPANDIFF_K_I32 5
+#define SPANDIFF_K_U64 6
+#define SPANDIFF_K_I64 7
+#define SPANDIFF_K_F32 8
+#define SPANDIFF_K_F64 9
 
 #define SPANDIFF_ERR (-100)   /* malformed fixture (distinct from SDK error codes) */
 
@@ -35,6 +48,14 @@ static void spandiff__wr32(hull_span_u8 *o, hull_span_u32 v)
 { for (int i = 0; i < 4; i++) o[i] = (hull_span_u8)(v >> (8 * i)); }
 static void spandiff__wr64(hull_span_u8 *o, hull_span_u64 v)
 { for (int i = 0; i < 8; i++) o[i] = (hull_span_u8)(v >> (8 * i)); }
+
+/* Reverse bit-casts (float value -> raw bits) so a float accessor's result is
+ * compared by BITS — preserving NaN/Inf/signed-zero, which value-compare would
+ * mangle. */
+static hull_span_u32 spandiff__f32_bits(float f)
+{ union { float f; hull_span_u32 u; } x; x.f = f; return x.u; }
+static hull_span_u64 spandiff__f64_bits(double d)
+{ union { double d; hull_span_u64 u; } x; x.d = d; return x.u; }
 
 /* Run one fixture. Returns output length (>= 0) or a negative error. */
 static int spandiff_run(const hull_span_u8 *in, hull_span_u32 in_len,
@@ -109,6 +130,39 @@ static int spandiff_run(const hull_span_u8 *in, hull_span_u32 in_len,
         int idx = hull_span_find(spans, count, query);
         spandiff__wr32(out, (hull_span_u32)(hull_span_i32)idx);
         return 4;
+    }
+    case SPANDIFF_OP_READ: {
+        /* [op][kind][endian][off u64][len u64][window bytes...] */
+        if (in_len < 18 || out_max < 12) return SPANDIFF_ERR;
+        hull_span_u8  kind   = in[1];
+        hull_span_u8  endian = in[2];          /* 0 = LE, 1 = BE (ignored for 8-bit) */
+        hull_span_u64 off    = hull_span__rd64(in + 3);
+        hull_span_u64 len    = hull_span__rd64(in + 11);
+        const hull_span_u8 *w = in + 19;
+        hull_span_u32 avail = in_len - 19;
+        if (len > avail) return SPANDIFF_ERR;  /* fixture must ship the declared window */
+
+        int st = SPANDIFF_ERR;
+        hull_span_u64 val = 0;                 /* integer: (i64/u64)-extended; float: raw bits */
+
+        switch (kind) {
+        case SPANDIFF_K_U8:  { hull_span_u8  v; st = hull_span_read_u8 (w, len, off, &v); val = (hull_span_u64)v; break; }
+        case SPANDIFF_K_I8:  { hull_span_i8  v; st = hull_span_read_i8 (w, len, off, &v); val = (hull_span_u64)(hull_span_i64)v; break; }
+        case SPANDIFF_K_U16: { hull_span_u16 v; st = endian ? hull_span_read_u16be(w, len, off, &v) : hull_span_read_u16le(w, len, off, &v); val = (hull_span_u64)v; break; }
+        case SPANDIFF_K_I16: { hull_span_i16 v; st = endian ? hull_span_read_i16be(w, len, off, &v) : hull_span_read_i16le(w, len, off, &v); val = (hull_span_u64)(hull_span_i64)v; break; }
+        case SPANDIFF_K_U32: { hull_span_u32 v; st = endian ? hull_span_read_u32be(w, len, off, &v) : hull_span_read_u32le(w, len, off, &v); val = (hull_span_u64)v; break; }
+        case SPANDIFF_K_I32: { hull_span_i32 v; st = endian ? hull_span_read_i32be(w, len, off, &v) : hull_span_read_i32le(w, len, off, &v); val = (hull_span_u64)(hull_span_i64)v; break; }
+        case SPANDIFF_K_U64: { hull_span_u64 v; st = endian ? hull_span_read_u64be(w, len, off, &v) : hull_span_read_u64le(w, len, off, &v); val = v; break; }
+        case SPANDIFF_K_I64: { hull_span_i64 v; st = endian ? hull_span_read_i64be(w, len, off, &v) : hull_span_read_i64le(w, len, off, &v); val = (hull_span_u64)v; break; }
+        case SPANDIFF_K_F32: { float  v; st = endian ? hull_span_read_f32be(w, len, off, &v) : hull_span_read_f32le(w, len, off, &v); val = (hull_span_u64)spandiff__f32_bits(v); break; }
+        case SPANDIFF_K_F64: { double v; st = endian ? hull_span_read_f64be(w, len, off, &v) : hull_span_read_f64le(w, len, off, &v); val = spandiff__f64_bits(v); break; }
+        default: return SPANDIFF_ERR;
+        }
+
+        spandiff__wr32(out, (hull_span_u32)(hull_span_i32)st);
+        if (st != 0) return 4;
+        spandiff__wr64(out + 4, val);
+        return 12;
     }
     default:
         return SPANDIFF_ERR;
