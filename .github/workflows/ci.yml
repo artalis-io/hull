@@ -694,8 +694,8 @@ jobs:
           if grep -qE '\bSKIP\b' spans_huge.log; then
             echo "::error::spans-hugefile e2e skipped (no clang / no embedded hull / no wamrc / no python3)"; exit 1
           fi
-          grep -qE "spans-hugefile: 30 passed, 0 failed" spans_huge.log \
-            || { echo "::error::spans-hugefile e2e did not run its 30 checks to pass"; exit 1; }
+          grep -qE "spans-hugefile: 34 passed, 0 failed" spans_huge.log \
+            || { echo "::error::spans-hugefile e2e did not run its 34 checks to pass"; exit 1; }
           echo ">4GiB foffset + hull_span_setup capacity + bounded reads: interp + AOT, both runtimes."
 
   # patch 0004 arm64 AOT gate. The x86_64 job above proves the guarded-subrange

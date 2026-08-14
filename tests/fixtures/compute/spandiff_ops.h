@@ -128,15 +128,23 @@ static int spandiff_run(const hull_span_u8 *in, hull_span_u32 in_len,
             for (int j = 0; j < 63; j++) spans[i].name[j] = (char)nm[j];
             spans[i].name[63] = '\0';
         }
-        /* query is the remaining NUL-terminated bytes after the name table */
+        /* The query is the remaining bytes after the name table. hull_span_find
+         * scans it as a C string, so it MUST be NUL-terminated within the input;
+         * otherwise it would read past `in`. Validate termination first. */
         const char *query = (const char *)(in + need);
+        hull_span_u32 qmax = in_len - need;   /* >= 1 by the need >= in_len guard */
+        hull_span_u32 qi = 0;
+        while (qi < qmax && query[qi] != 0) qi++;
+        if (qi == qmax) return SPANDIFF_ERR;  /* no NUL terminator within the input */
         int idx = hull_span_find(spans, count, query);
         spandiff__wr32(out, (hull_span_u32)(hull_span_i32)idx);
         return 4;
     }
     case SPANDIFF_OP_READ: {
-        /* [op][kind][endian][off u64][len u64][window bytes...] */
-        if (in_len < 18 || out_max < 12) return SPANDIFF_ERR;
+        /* [op][kind][endian][off u64][len u64][window bytes...] — a 19-byte
+         * header. in_len must cover it fully (18 would over-read off/len by one
+         * and underflow `avail = in_len - 19`). */
+        if (in_len < 19 || out_max < 12) return SPANDIFF_ERR;
         hull_span_u8  kind   = in[1];
         hull_span_u8  endian = in[2];          /* 0 = LE, 1 = BE (ignored for 8-bit) */
         hull_span_u64 off    = hull_span__rd64(in + 3);

@@ -338,6 +338,8 @@ typedef __UINTPTR_TYPE__ hull_span_uptr;
                                     /* (i32,i32,i32) host_call ABI (Memory64 / 64-bit native).      */
 #define HULL_SPAN_ERR_RANGE   (-4)  /* a bounded read would fall outside [0, len) (one-past /       */
                                     /* width-straddling / an offset that would overflow).           */
+#define HULL_SPAN_ERR_ARG     (-5)  /* invalid argument: out_cap < 0, or out_cap > 0 with out ==    */
+                                    /* NULL. (out == NULL with out_cap == 0 is a valid count query.) */
 
 /* ── Public span descriptor (decoded, host-independent) ──────────────────────── */
 typedef struct {
@@ -476,14 +478,28 @@ static inline int hull_span__narrow(hull_span_uptr p, hull_span_i32 *out)
 
 /* ── Discover every attached span in one pass.
  * Fills out[0 .. min(count, out_cap)) and returns the TRUE span count (>= 0), or
- * a negative HULL_SPAN_ERR_* on a query / version / address failure. A return
- * value > out_cap means the caller's array was too small: the first out_cap
- * entries are valid, and the caller under-sized it. Issues one count query then
- * one record query per index (the cbSize handshake: advertise our capacity in
- * struct_size, validate the returned size covers v1). No host calls happen after
- * setup — every later access is a pure inline read. ─────────────────────────── */
+ * a negative HULL_SPAN_ERR_* on an argument / query / version / address failure.
+ * A return value > out_cap means the caller's array was too small: the first
+ * out_cap entries are valid, and the caller under-sized it.
+ *
+ * Preconditions (validated before any host call): out_cap must be >= 0, and a
+ * positive out_cap requires out != NULL. `hull_span_setup(NULL, 0)` is a valid
+ * count-only query (returns the count, writes nothing). Otherwise returns
+ * HULL_SPAN_ERR_ARG.
+ *
+ * Issues one count query then one record query per index (the cbSize handshake:
+ * advertise our capacity in struct_size, validate the returned size covers v1).
+ * No host calls happen after setup — every later access is a pure inline read. */
 static inline int hull_span_setup(HullSpan *out, int out_cap)
 {
+    /* Argument preconditions (checked before any host call): a negative capacity
+     * is invalid, and a positive capacity requires a non-NULL destination.
+     * out == NULL with out_cap == 0 is the valid count-only query. */
+    if (out_cap < 0)
+        return HULL_SPAN_ERR_ARG;
+    if (out_cap > 0 && !out)
+        return HULL_SPAN_ERR_ARG;
+
     hull_span_u8   rec[HULL_SPAN_META_V1_SIZE];
     hull_span_i32  rec_ptr;
     if (hull_span__narrow((hull_span_uptr)(void *)rec, &rec_ptr) != 0)
@@ -680,13 +696,17 @@ local HULL_HEADERS = {
     { name = "hull_span.h",    body = HULL_SPAN_H },
 }
 
--- Atomically install/update every Hull-owned header into `dir`
--- (both-or-neither). Stage all headers to temp files FIRST, so a staging
--- failure touches no real file; then rename each into place, backing up any
--- existing original and restoring it on a later failure. The directory can
--- therefore never be left with a mismatched hull_compute.h / hull_span.h pair.
--- Returns true on success, or false, err on failure with every real file
--- restored to its pre-call state. Idempotent (identical bytes re-installed).
+-- Install/update every Hull-owned header into `dir` (both-or-neither) with
+-- rollback ON A REPORTED OPERATION FAILURE. Stage all headers to temp files
+-- FIRST, so a staging failure touches no real file; then rename each into place,
+-- backing up any existing original and restoring it if a later rename reports
+-- failure. Returns true on success, or false, err on failure with every real
+-- file restored to its pre-call state. Idempotent (identical bytes re-installed).
+--
+-- NOTE: this is failure-atomic, NOT crash-atomic. A process crash / power loss
+-- BETWEEN the individual renames can leave a mismatched pair plus leftover
+-- .hull-tmp / .hull-bak files; recovery is to re-run `hull compute refresh-header`.
+-- (Crash-atomicity would need a journal or a single directory swap, not renames.)
 local function install_headers(dir)
     local items = {}
     for _, h in ipairs(HULL_HEADERS) do

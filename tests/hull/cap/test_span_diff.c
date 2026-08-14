@@ -325,6 +325,43 @@ UTEST(hull_span_diff, native_vs_wasm_interp_aot)
           ASSERT_EQ(al, SPANDIFF_ERR);
       } }
 
+    /* OP_FIND with a query that has NO terminating NUL within the input must be
+     * rejected (else hull_span_find scans past the buffer). Regression for the
+     * NUL-termination check in spandiff_ops.h. */
+    { memset(in, 0, 2 + 64);
+      in[0] = SPANDIFF_OP_FIND; in[1] = 1; memcpy(in + 2, "only", 4);
+      uint32_t base = 2u + 64u;
+      in[base] = 'x'; in[base + 1] = 'y'; in[base + 2] = 'z'; in[base + 3] = 'w'; /* 4 bytes, NO NUL */
+      uint32_t total = base + 4u;
+      uint8_t no[OUT_CAP];
+      ASSERT_EQ(spandiff_run((const hull_span_u8 *)in, total, (hull_span_u8 *)no, OUT_CAP), SPANDIFF_ERR);
+      uint8_t go[OUT_CAP];
+      ASSERT_EQ(run_guest(g_inst, g_env, in, total, go), SPANDIFF_ERR);
+      if (spandiff_aot_len > 0 && aot_inst) {
+          uint8_t ao[OUT_CAP];
+          ASSERT_EQ(run_guest(aot_inst, aot_env, in, total, ao), SPANDIFF_ERR);
+      } }
+
+    /* OP_READ malformed-header boundary: the header is 19 bytes, so in_len == 18
+     * must be REJECTED (an 18-byte input would over-read off/len and underflow
+     * avail). in_len == 19 (header only, len == 0) is the minimal VALID input and
+     * a read at any offset returns HULL_SPAN_ERR_RANGE. Regression for the
+     * `in_len < 19` guard in spandiff_ops.h. */
+    { memset(in, 0, 19);
+      in[0] = SPANDIFF_OP_READ; in[1] = SPANDIFF_K_U8; in[2] = 0; /* off=0, len=0 */
+      uint8_t no[OUT_CAP];
+      /* 18 bytes → malformed → SPANDIFF_ERR on native + interp + AOT */
+      ASSERT_EQ(spandiff_run((const hull_span_u8 *)in, 18, (hull_span_u8 *)no, OUT_CAP), SPANDIFF_ERR);
+      uint8_t go[OUT_CAP];
+      ASSERT_EQ(run_guest(g_inst, g_env, in, 18, go), SPANDIFF_ERR);
+      if (spandiff_aot_len > 0 && aot_inst) {
+          uint8_t ao[OUT_CAP];
+          ASSERT_EQ(run_guest(aot_inst, aot_env, in, 18, ao), SPANDIFF_ERR);
+      }
+      /* 19 bytes (len=0) → valid input, read rejected as out-of-range */
+      exp_range(exp);
+      diff_case(utest_result, aot_env, aot_inst, "read_hdr19_lenzero", in, 19, exp, 4); }
+
     /* ══ bounded typed accessors: BE / signed / float, + reject paths ══════════
      * Window W (16 bytes) with distinctive low + high-bit bytes. */
     static const uint8_t W[16] = { 0x01,0x02,0x03,0x04,0x05,0x06,0x07,0x08,

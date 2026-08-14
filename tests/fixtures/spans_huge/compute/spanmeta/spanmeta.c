@@ -36,7 +36,25 @@ HULL_EXPORT
 int32_t hull_process(const void *in, int32_t in_len, void *out, int32_t out_max)
 {
     char *o = (char *)out;
-    int cap = (in_len >= 1) ? ((const unsigned char *)in)[0] : HULL_SPAN_MAX;
+    int raw = (in_len >= 1) ? ((const unsigned char *)in)[0] : 0;
+
+    /* Sentinel 17 (just above HULL_SPAN_MAX; ASCII-safe so it survives JS string
+     * encoding): probe hull_span_setup() argument validation from inside a real
+     * guest (out_cap>0 + NULL, negative out_cap, and the NULL+0 count-only
+     * query). Output "argnull=<>;argneg=<>;argzero=<>". */
+    if (raw == 17) {
+        HullSpan sp[HULL_SPAN_MAX];
+        int r_null = hull_span_setup((HullSpan *)0, 5);
+        int r_neg  = hull_span_setup(sp, -1);
+        int r_zero = hull_span_setup((HullSpan *)0, 0);
+        int q = 0;
+        q = put_s(o, q, out_max, "argnull=");  q = put_i(o, q, out_max, r_null);
+        q = put_s(o, q, out_max, ";argneg=");  q = put_i(o, q, out_max, r_neg);
+        q = put_s(o, q, out_max, ";argzero="); q = put_i(o, q, out_max, r_zero);
+        return q;
+    }
+
+    int cap = raw;
     if (cap <= 0 || cap > HULL_SPAN_MAX) cap = HULL_SPAN_MAX;
 
     HullSpan spans[HULL_SPAN_MAX];

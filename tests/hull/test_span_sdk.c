@@ -160,4 +160,32 @@ UTEST(span_sdk, setup_rejects_high_scratch)
         ASSERT_EQ(r, 0);
 }
 
+/* ── setup argument validation (checked BEFORE any host call). ─────────────── */
+UTEST(span_sdk, setup_rejects_null_dest_positive_cap)
+{
+    /* out == NULL with a positive capacity would write through NULL — reject. */
+    ASSERT_EQ(hull_span_setup((HullSpan *)0, 5), HULL_SPAN_ERR_ARG);
+}
+
+UTEST(span_sdk, setup_rejects_negative_cap)
+{
+    HullSpan out[HULL_SPAN_MAX];
+    ASSERT_EQ(hull_span_setup(out, -1), HULL_SPAN_ERR_ARG);
+    ASSERT_EQ(hull_span_setup((HullSpan *)0, -1), HULL_SPAN_ERR_ARG);
+}
+
+UTEST(span_sdk, setup_null_zero_cap_is_valid_args)
+{
+    /* NULL + out_cap 0 is the valid count-only query, NOT an argument error. On
+     * this 64-bit host the scratch is unreachable via the i32 ABI so it returns
+     * ERR_ADDR (documented wasm32-only limit) — the point is it is NOT ERR_ARG,
+     * i.e. the validation does not wrongly reject a legitimate count query. */
+    int r = hull_span_setup((HullSpan *)0, 0);
+    ASSERT_NE(r, HULL_SPAN_ERR_ARG);
+    if (sizeof(void *) > 4)
+        ASSERT_EQ(r, HULL_SPAN_ERR_ADDR);
+    else
+        ASSERT_EQ(r, 0);   /* low-scratch host: mock count = 0 */
+}
+
 UTEST_MAIN()
