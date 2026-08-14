@@ -240,6 +240,20 @@ UTEST(hull_span_diff, native_vs_wasm_interp_aot)
       memcpy(exp + 32, "big", 3);
       diff_case(utest_result, aot_env, aot_inst, "decode_bigstruct", in, 3 + 96, exp, 96); }
 
+    /* ── metadata decode: exact 64-bit base/len/foffset (all > UINT32_MAX) ── */
+    { uint8_t rec[96]; build_record(rec, 1, 96, 0, "huge",
+                                    0x1122334455667788ull,       /* base    */
+                                    0x0000000100000000ull,       /* len = 4 GiB */
+                                    0x0000000100000003ull);      /* foffset > 4 GiB */
+      in[0] = SPANDIFF_OP_DECODE; put16(in + 1, 96); memcpy(in + 3, rec, 96);
+      memset(exp, 0, sizeof(exp));
+      put32(exp, 0); put32(exp + 4, 0);
+      put64(exp + 8, 0x1122334455667788ull);
+      put64(exp + 16, 0x0000000100000000ull);
+      put64(exp + 24, 0x0000000100000003ull);
+      memcpy(exp + 32, "huge", 4);
+      diff_case(utest_result, aot_env, aot_inst, "decode_64bit_fields", in, 3 + 96, exp, 96); }
+
     /* ── metadata decode: rejection paths (overflow / one-past / bad version) ── */
     { uint8_t rec[96]; build_record(rec, 1, 96, 0, "x", 0, 0, 0);
       in[0] = SPANDIFF_OP_DECODE; put16(in + 1, 95); memcpy(in + 3, rec, 96);  /* rec_len one short */

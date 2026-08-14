@@ -610,7 +610,7 @@ jobs:
             echo "::error::spans example e2e skipped (no clang / no embedded hull / no wamrc)"; exit 1
           fi
           grep -qE "spans-example: 22 passed, 0 failed" spans_ex.log \
-            || { echo "::error::spans example e2e did not run its 22 checks to pass"; exit 1; }
+            || { echo "::error::spans example e2e did not run its 18 checks to pass"; exit 1; }
           echo "mapped_spans example: public SDK read correct on interp + AOT, both runtimes."
 
   # Multiple named spans (3b final slice): declaration-order discovery + per-name
@@ -653,8 +653,50 @@ jobs:
             echo "::error::spans-multi e2e skipped (no clang / no embedded hull / no wamrc)"; exit 1
           fi
           grep -qE "spans-multi: 22 passed, 0 failed" spans_multi.log \
-            || { echo "::error::spans-multi e2e did not run its 22 checks to pass"; exit 1; }
+            || { echo "::error::spans-multi e2e did not run its 18 checks to pass"; exit 1; }
           echo "multiple named spans: declaration-order discovery + lookup on interp + AOT, both runtimes."
+
+  # Sparse > 4 GiB window (exact 64-bit foffset) + hull_span_setup() capacity
+  # (exact/excess/insufficient + true count) + real-window bounded reads
+  # (first/exact-end/one-past/straddle), Lua + JS, interpreter + AOT (3b
+  # completion). Uses a SPARSE 5 GiB file (no real disk) so it runs anywhere.
+  spans-hugefile:
+    name: mapped spans — >4GiB foffset + setup capacity, Lua + JS, interp + AOT
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          submodules: true
+
+      - name: Install clang + lld + LLVM + cmake
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang lld llvm-18-dev cmake
+
+      - name: Build embedded hull (platform lib) + wamrc
+        timeout-minutes: 15
+        run: |
+          make platform
+          if command -v llvm-config-18 >/dev/null 2>&1; then
+            export WAMRC_CMAKE_FLAGS="-DLLVM_DIR=$(llvm-config-18 --cmakedir)"
+          fi
+          make wamrc
+          make EMBED_PLATFORM=1
+
+      - name: Huge-file / setup-capacity E2E (Lua + JS, interp + AOT, must NOT skip)
+        timeout-minutes: 12
+        run: |
+          set -o pipefail
+          sh tests/ci_ensure_wamrc.sh
+          sh tests/e2e_spans_hugefile.sh 2>&1 | tee spans_huge.log
+          rc=${PIPESTATUS[0]}
+          [ "$rc" -eq 0 ] || { echo "::error::spans-hugefile e2e failed (rc=$rc)"; exit "$rc"; }
+          if grep -qE '\bSKIP\b' spans_huge.log; then
+            echo "::error::spans-hugefile e2e skipped (no clang / no embedded hull / no wamrc / no python3)"; exit 1
+          fi
+          grep -qE "spans-hugefile: 18 passed, 0 failed" spans_huge.log \
+            || { echo "::error::spans-hugefile e2e did not run its 18 checks to pass"; exit 1; }
+          echo ">4GiB foffset + hull_span_setup capacity + bounded reads: interp + AOT, both runtimes."
 
   # patch 0004 arm64 AOT gate. The x86_64 job above proves the guarded-subrange
   # AOT path on x86_64; this runs the same non-skipped AOT matrix on arm64, where

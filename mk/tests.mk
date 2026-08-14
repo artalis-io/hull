@@ -980,6 +980,12 @@ e2e-spans-example: $(BUILDDIR)/hull
 e2e-spans-multi: $(BUILDDIR)/hull
 	sh tests/e2e_spans_multi.sh
 
+# Sparse > 4 GiB window (exact 64-bit foffset) + hull_span_setup capacity + real-
+# window bounded reads, Lua+JS interp + AOT, public hull_span.h SDK (3b completion).
+.PHONY: e2e-spans-hugefile
+e2e-spans-hugefile: $(BUILDDIR)/hull
+	sh tests/e2e_spans_hugefile.sh
+
 e2e-compute-dev: $(BUILDDIR)/hull
 	sh tests/e2e_compute_dev.sh
 
