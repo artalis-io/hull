@@ -954,6 +954,12 @@ e2e-sync-spans: $(BUILDDIR)/hull
 e2e-compute-headers: $(BUILDDIR)/hull
 	sh tests/e2e_compute_headers.sh
 
+# mapped_spans reference plugin driven from Lua+JS, interp + (with wamrc) AOT,
+# over a non-page-aligned window using only the public hull_span.h SDK (3b slice 2).
+.PHONY: e2e-spans-example
+e2e-spans-example: $(BUILDDIR)/hull
+	sh tests/e2e_spans_example.sh
+
 e2e-compute-dev: $(BUILDDIR)/hull
 	sh tests/e2e_compute_dev.sh
 

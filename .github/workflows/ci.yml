@@ -546,6 +546,53 @@ jobs:
             || { echo "::error::memops e2e did not run its 7 checks to pass"; exit 1; }
           echo "freestanding memcpy/memset/memmove: no import, correct under interp + AOT."
 
+  # mapped_spans reference example (3b slice 2). The spanreader plugin uses only
+  # the public hull_span.h SDK and reads a NON-page-aligned mapped-span window;
+  # driven from Lua AND JS, on the interpreter and under AOT via the PRODUCTION
+  # `hull build` path (--enable-shared-heap). Needs a wasm clang + wamrc + an
+  # embedded hull; runs non-skippably here.
+  spans-example:
+    name: mapped_spans example — Lua + JS, interp + AOT (public SDK)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          submodules: true
+
+      - name: Install clang + lld + LLVM + cmake
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang lld llvm-18-dev cmake
+
+      - name: Build embedded hull (platform lib) + wamrc
+        timeout-minutes: 15
+        run: |
+          make platform
+          if command -v llvm-config-18 >/dev/null 2>&1; then
+            export WAMRC_CMAKE_FLAGS="-DLLVM_DIR=$(llvm-config-18 --cmakedir)"
+          fi
+          make wamrc
+          # Embed LAST: a later bare `make` would clobber the embedding
+          # (EMBED_PLATFORM is not in the config sentinel), and the e2e needs it.
+          make EMBED_PLATFORM=1
+
+      - name: mapped_spans example E2E (Lua + JS, interp + AOT, must NOT skip)
+        timeout-minutes: 12
+        run: |
+          set -o pipefail
+          # Precondition: guarantee an executable wamrc for the non-skippable AOT
+          # leg rather than trusting mutable build/ state (see the helper header).
+          sh tests/ci_ensure_wamrc.sh
+          sh tests/e2e_spans_example.sh 2>&1 | tee spans_ex.log
+          rc=${PIPESTATUS[0]}
+          [ "$rc" -eq 0 ] || { echo "::error::spans example e2e failed (rc=$rc)"; exit "$rc"; }
+          if grep -qE '\bSKIP\b' spans_ex.log; then
+            echo "::error::spans example e2e skipped (no clang / no embedded hull / no wamrc)"; exit 1
+          fi
+          grep -qE "spans-example: 22 passed, 0 failed" spans_ex.log \
+            || { echo "::error::spans example e2e did not run its 22 checks to pass"; exit 1; }
+          echo "mapped_spans example: public SDK read correct on interp + AOT, both runtimes."
+
   # patch 0004 arm64 AOT gate. The x86_64 job above proves the guarded-subrange
   # AOT path on x86_64; this runs the same non-skipped AOT matrix on arm64, where
   # WAMR sets the emitted load/store alignment to the WASM hint and a span whose
