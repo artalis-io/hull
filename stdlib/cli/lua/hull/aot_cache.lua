@@ -45,6 +45,17 @@ local M = {}
 
 local CACHE_KIND = "compute-aot"
 
+-- Shared-heap AOT compatibility token (a VERSION token, not a boolean). It is
+-- folded into the cache key so cached .aot artifacts built under one shared-heap
+-- AOT contract are never reused under another. BUMP IT DELIBERATELY (v1 -> v2 …)
+-- whenever the shared-heap AOT contract changes in a way that makes older .aot
+-- artifacts incompatible or wrong -- e.g. a new/changed wamrc flag, a different
+-- shared-heap ABI, or a WAMR shared-heap semantics change -- EVEN IF
+-- --enable-shared-heap itself stays enabled. v1 introduced --enable-shared-heap
+-- for compute AOT (#326); it also invalidates all pre-#326 entries, which had no
+-- shared-heap component at all.
+local SHARED_HEAP_AOT_COMPAT = "v1"
+
 local function disabled()
     -- hull_cache_disabled("AOT") already checks HULL_NO_CACHE first
     -- (cache_dir.c:198 short-circuits before the per-kind check),
@@ -95,6 +106,7 @@ end
 --   wasm_sha    — content hash of the .wasm input
 --   arch        — wamrc target arch tag (x86_64, aarch64)
 --   mem64_flag  — 1 if --enable-memory64 will be passed
+--   sh_aot      — shared-heap AOT compatibility token (SHARED_HEAP_AOT_COMPAT)
 --   wamrc_id    — version banner + binary mtime
 --
 -- Folded into a single SHA-256, hex-encoded — the blob_store keyed
@@ -108,8 +120,8 @@ function M.key(wasm_path, arch, mem64, wamrc_version)
         wasm_sha,
         "|arch=", arch,
         "|mem64=", mem64 and "1" or "0",
-        "|shared_heap=1",   -- compute AOT is always built with --enable-shared-heap
-                            -- (spans + compute.segment); invalidates pre-fix entries
+        "|sh_aot=", SHARED_HEAP_AOT_COMPAT,   -- shared-heap AOT compat token (bump on
+                                              -- any shared-heap AOT contract change)
         "|wamrc=", wamrc_version or "unknown",
     })
     return crypto.sha256(payload)
