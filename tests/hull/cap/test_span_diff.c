@@ -306,6 +306,25 @@ UTEST(hull_span_diff, native_vs_wasm_interp_aot)
       put32(exp, (uint32_t)(int32_t)(-1));
       diff_case(utest_result, aot_env, aot_inst, "find_miss", in, base + (uint32_t)strlen(q) + 1, exp, 4); }
 
+    /* OP_FIND exact boundary: need == in_len (the name table consumes the whole
+     * input, no query bytes) must be REJECTED, not read one-past the buffer.
+     * Regression for the `need >= in_len` guard in spandiff_ops.h. Returns a
+     * negative SPANDIFF_ERR, so assert it directly on native + interp (+ AOT). */
+    { memset(in, 0, 2 + 64);
+      in[0] = SPANDIFF_OP_FIND; in[1] = 1; memcpy(in + 2, "only", 4);
+      uint32_t need = 2u + 64u;   /* names table only; NO query bytes appended */
+      uint8_t no[OUT_CAP];
+      int nl = spandiff_run((const hull_span_u8 *)in, need, (hull_span_u8 *)no, OUT_CAP);
+      ASSERT_EQ(nl, SPANDIFF_ERR);
+      uint8_t go[OUT_CAP];
+      int gl = run_guest(g_inst, g_env, in, need, go);
+      ASSERT_EQ(gl, SPANDIFF_ERR);
+      if (spandiff_aot_len > 0 && aot_inst) {
+          uint8_t ao[OUT_CAP];
+          int al = run_guest(aot_inst, aot_env, in, need, ao);
+          ASSERT_EQ(al, SPANDIFF_ERR);
+      } }
+
     /* ══ bounded typed accessors: BE / signed / float, + reject paths ══════════
      * Window W (16 bytes) with distinctive low + high-bit bytes. */
     static const uint8_t W[16] = { 0x01,0x02,0x03,0x04,0x05,0x06,0x07,0x08,

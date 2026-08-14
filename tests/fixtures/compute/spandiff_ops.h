@@ -118,7 +118,10 @@ static int spandiff_run(const hull_span_u8 *in, hull_span_u32 in_len,
         int count = in[1];
         if (count < 0 || count > HULL_SPAN_MAX) return SPANDIFF_ERR;
         hull_span_u32 need = 2u + (hull_span_u32)count * 64u;
-        if (need > in_len) return SPANDIFF_ERR;
+        /* need == in_len means the name table consumes the whole input with NO
+         * query bytes left; the query pointer would then be one-past-the-end.
+         * Reject that exact boundary (a query needs at least its NUL byte). */
+        if (need >= in_len) return SPANDIFF_ERR;
         HullSpan spans[HULL_SPAN_MAX];
         for (int i = 0; i < count; i++) {
             const hull_span_u8 *nm = in + 2 + (hull_span_u32)i * 64u;

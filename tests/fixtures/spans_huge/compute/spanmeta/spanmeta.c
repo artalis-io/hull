@@ -48,6 +48,24 @@ int32_t hull_process(const void *in, int32_t in_len, void *out, int32_t out_max)
     if (ret < 0) return p;
 
     int filled = ret < cap ? ret : cap;
+
+    /* Optional query name after the cap byte: resolve it over the FILLED entries
+     * only (hull_span_find(spans, filled, ...)), so a name that exists as a real
+     * span BEYOND out_cap is NOT found -- the insufficient-capacity lookup case.
+     * Output: "ret=<true>;filled=<f>;find=<idx>". */
+    int qn = (in_len > 1) ? (in_len - 1) : 0;
+    if (qn > 63) qn = 63;
+    if (qn > 0) {
+        char q[64];
+        for (int i = 0; i < qn; i++) q[i] = ((const char *)in)[1 + i];
+        q[qn] = '\0';
+        p = put_s(o, p, out_max, ";filled=");
+        p = put_i(o, p, out_max, filled);
+        p = put_s(o, p, out_max, ";find=");
+        p = put_i(o, p, out_max, hull_span_find(spans, filled, q));
+        return p;
+    }
+
     p = put_s(o, p, out_max, ";filled=");
     p = put_i(o, p, out_max, filled);
     p = put_s(o, p, out_max, ";names=");

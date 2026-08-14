@@ -72,6 +72,10 @@ check() {  # label, workdir, launch argv...
     c3=$(curl -s --max-time 6 "http://127.0.0.1:$PORT/meta?cap=3")
     c5=$(curl -s --max-time 6 "http://127.0.0.1:$PORT/meta?cap=5")
     c2=$(curl -s --max-time 6 "http://127.0.0.1:$PORT/meta?cap=2")
+    # insufficient-capacity lookup: find over the entries setup populated.
+    f3=$(curl -s --max-time 6 "http://127.0.0.1:$PORT/meta?cap=3&find=big2")
+    f2hit=$(curl -s --max-time 6 "http://127.0.0.1:$PORT/meta?cap=2&find=big1")
+    f2miss=$(curl -s --max-time 6 "http://127.0.0.1:$PORT/meta?cap=2&find=big2")
     is_aot=0
     grep -qE "cached module 'spanmeta' \(abi=[0-9]+, aot=1" "$TMP/srv.log" && is_aot=1
     kill $PID 2>/dev/null; wait $PID 2>/dev/null
@@ -84,6 +88,15 @@ check() {  # label, workdir, launch argv...
     [ "$c2" = "$INSUF2" ] \
         && pass "$label: setup out_cap insufficient (2): ret=3 (true count), 2 foffsets filled" \
         || fail "$label: cap2 (got: $c2)"
+    [ "$f3" = "ret=3;filled=3;find=2" ] \
+        && pass "$label: lookup over full cap finds big2 (find=2)" \
+        || fail "$label: find cap3 (got: $f3)"
+    [ "$f2hit" = "ret=3;filled=2;find=1" ] \
+        && pass "$label: insufficient-cap lookup finds a filled name (big1 -> 1)" \
+        || fail "$label: find cap2 hit (got: $f2hit)"
+    [ "$f2miss" = "ret=3;filled=2;find=-1" ] \
+        && pass "$label: insufficient-cap lookup does NOT find an unfilled real span (big2 -> -1)" \
+        || fail "$label: find cap2 miss (got: $f2miss)"
     case "$label" in
         *aot) [ "$is_aot" = "1" ] && pass "$label: ran against a real AOT module (aot=1)" || fail "$label: AOT not loaded";;
     esac

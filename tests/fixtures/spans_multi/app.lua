@@ -15,7 +15,9 @@ app.get("/list", function(req, res)
     local w2 = fs.mmap("data.bin", { offset = 8195, length = 4096 })   -- non-page-aligned
     local w3 = fs.mmap("data.bin", { offset = 1000, length = 100 })
     local query = req.query.name or "alpha"
-    local out, err = compute.call("spanlist", query, {
+    -- pcall so all mapped buffers are closed even if compute.call raises; a
+    -- returned error still flows through `err` exactly as before.
+    local ok, out, err = pcall(compute.call, "spanlist", query, {
         spans = {
             { name = "alpha", buffer = w1 },
             { name = "beta",  buffer = w2 },
@@ -23,5 +25,7 @@ app.get("/list", function(req, res)
         },
     })
     w1:close(); w2:close(); w3:close()
-    if err then res:text("ERR " .. tostring(err), 500) else res:text(out) end
+    if not ok then res:text("ERR " .. tostring(out), 500)
+    elseif err then res:text("ERR " .. tostring(err), 500)
+    else res:text(out) end
 end)

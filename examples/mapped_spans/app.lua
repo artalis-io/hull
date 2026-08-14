@@ -29,9 +29,13 @@ app.get("/read", function(req, res)
     if req.query.off then
         input = name .. "\0" .. u32le(tonumber(req.query.off) or 0)
     end
-    local out, err = compute.call("spanreader", input, {
+    -- pcall so the mapped buffer is closed even if compute.call raises; a
+    -- returned error still flows through `err` exactly as before.
+    local ok, out, err = pcall(compute.call, "spanreader", input, {
         spans = { { name = "source", buffer = w } },
     })
     w:close()
-    if err then res:text("ERR " .. tostring(err), 500) else res:text(out) end
+    if not ok then res:text("ERR " .. tostring(out), 500)
+    elseif err then res:text("ERR " .. tostring(err), 500)
+    else res:text(out) end
 end)

@@ -610,7 +610,7 @@ jobs:
             echo "::error::spans example e2e skipped (no clang / no embedded hull / no wamrc)"; exit 1
           fi
           grep -qE "spans-example: 22 passed, 0 failed" spans_ex.log \
-            || { echo "::error::spans example e2e did not run its 18 checks to pass"; exit 1; }
+            || { echo "::error::spans example e2e did not run its 22 checks to pass"; exit 1; }
           echo "mapped_spans example: public SDK read correct on interp + AOT, both runtimes."
 
   # Multiple named spans (3b final slice): declaration-order discovery + per-name
@@ -653,7 +653,7 @@ jobs:
             echo "::error::spans-multi e2e skipped (no clang / no embedded hull / no wamrc)"; exit 1
           fi
           grep -qE "spans-multi: 22 passed, 0 failed" spans_multi.log \
-            || { echo "::error::spans-multi e2e did not run its 18 checks to pass"; exit 1; }
+            || { echo "::error::spans-multi e2e did not run its 22 checks to pass"; exit 1; }
           echo "multiple named spans: declaration-order discovery + lookup on interp + AOT, both runtimes."
 
   # Sparse > 4 GiB window (exact 64-bit foffset) + hull_span_setup() capacity
@@ -694,8 +694,8 @@ jobs:
           if grep -qE '\bSKIP\b' spans_huge.log; then
             echo "::error::spans-hugefile e2e skipped (no clang / no embedded hull / no wamrc / no python3)"; exit 1
           fi
-          grep -qE "spans-hugefile: 18 passed, 0 failed" spans_huge.log \
-            || { echo "::error::spans-hugefile e2e did not run its 18 checks to pass"; exit 1; }
+          grep -qE "spans-hugefile: 30 passed, 0 failed" spans_huge.log \
+            || { echo "::error::spans-hugefile e2e did not run its 30 checks to pass"; exit 1; }
           echo ">4GiB foffset + hull_span_setup capacity + bounded reads: interp + AOT, both runtimes."
 
   # patch 0004 arm64 AOT gate. The x86_64 job above proves the guarded-subrange

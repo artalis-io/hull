@@ -23,12 +23,16 @@ function dec(buf) {
 
 app.get("/meta", (req, res) => {
     const cap = Number.parseInt(req.query.cap, 10) || 16;
+    // input byte 0 = requested out_cap; optional query name follows (find over
+    // the entries setup actually populated).
+    let input = String.fromCharCode(cap % 256);
+    if (req.query.find) input += req.query.find;
     const w0 = fs.mmap("huge.bin", { offset: OFF[0], length: 256 });
     const w1 = fs.mmap("huge.bin", { offset: OFF[1], length: 256 });
     const w2 = fs.mmap("huge.bin", { offset: OFF[2], length: 256 });
     let out;
     try {
-        out = compute.call("spanmeta", String.fromCharCode(cap % 256), {
+        out = compute.call("spanmeta", input, {
             spans: [
                 { name: "big0", buffer: w0 },
                 { name: "big1", buffer: w1 },

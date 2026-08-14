@@ -17,10 +17,16 @@ local OFF = { 4294967299, 4563402757, 5100273671 }
 
 app.get("/meta", function(req, res)
     local cap = tonumber(req.query.cap) or 16
+    -- input byte 0 = requested out_cap; optional query name follows (find over the
+    -- entries setup actually populated, so a name beyond `filled` is NOT found).
+    local input = string.char(cap % 256)
+    if req.query.find then input = input .. req.query.find end
     local w0 = fs.mmap("huge.bin", { offset = OFF[1], length = 256 })
     local w1 = fs.mmap("huge.bin", { offset = OFF[2], length = 256 })
     local w2 = fs.mmap("huge.bin", { offset = OFF[3], length = 256 })
-    local out, err = compute.call("spanmeta", string.char(cap % 256), {
+    -- pcall so all mapped buffers are closed even if compute.call raises; a
+    -- returned error still flows through `err` exactly as before.
+    local ok, out, err = pcall(compute.call, "spanmeta", input, {
         spans = {
             { name = "big0", buffer = w0 },
             { name = "big1", buffer = w1 },
@@ -28,5 +34,7 @@ app.get("/meta", function(req, res)
         },
     })
     w0:close(); w1:close(); w2:close()
-    if err then res:text("ERR " .. tostring(err), 500) else res:text(out) end
+    if not ok then res:text("ERR " .. tostring(out), 500)
+    elseif err then res:text("ERR " .. tostring(err), 500)
+    else res:text(out) end
 end)

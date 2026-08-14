@@ -41,15 +41,20 @@ int32_t hull_process(const void *in, int32_t in_len, void *out, int32_t out_max)
     for (int i = 0; i < qn; i++) q[i] = ((const char *)in)[i];
     q[qn] = '\0';
 
+    /* Scan only the entries setup actually populated: filled = min(count, cap).
+     * hull_span_setup was called with cap = HULL_SPAN_MAX, so filled is bounded
+     * by the stack array size regardless of the host-reported true count. */
+    int filled = count < HULL_SPAN_MAX ? count : HULL_SPAN_MAX;
+
     int p = 0;
     p = put_s(o, p, out_max, "count=");
     p = put_i(o, p, out_max, count);
     p = put_s(o, p, out_max, ";order=");
-    for (int i = 0; i < count && i < HULL_SPAN_MAX; i++) {
+    for (int i = 0; i < filled; i++) {
         if (i) p = put_s(o, p, out_max, ",");
         p = put_s(o, p, out_max, spans[i].name);
     }
     p = put_s(o, p, out_max, ";find=");
-    p = put_i(o, p, out_max, hull_span_find(spans, count, q));
+    p = put_i(o, p, out_max, hull_span_find(spans, filled, q));
     return p;
 }
