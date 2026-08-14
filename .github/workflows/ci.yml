@@ -454,17 +454,22 @@ jobs:
         timeout-minutes: 15
         run: |
           make platform
-          make EMBED_PLATFORM=1
           if command -v llvm-config-18 >/dev/null 2>&1; then
             export WAMRC_CMAKE_FLAGS="-DLLVM_DIR=$(llvm-config-18 --cmakedir)"
           fi
           make wamrc
+          # Embed LAST: a later bare `make` would clobber the embedding
+          # (EMBED_PLATFORM is not in the config sentinel), and the e2e needs it.
+          make EMBED_PLATFORM=1
 
       - name: Compute AOT shared-heap E2E (spans + segments, must NOT skip)
         timeout-minutes: 5
         run: |
           set -o pipefail
-          make e2e-compute-aot-shared-heap 2>&1 | tee aotsh.log
+          # Run the script DIRECTLY, not `make ...`: any `make` invocation without
+          # EMBED_PLATFORM=1 trips the config sentinel and clobbers the embedded
+          # build/hull, which would make the e2e skip.
+          sh tests/e2e_compute_aot_shared_heap.sh 2>&1 | tee aotsh.log
           rc=${PIPESTATUS[0]}
           [ "$rc" -eq 0 ] || { echo "::error::compute AOT shared-heap e2e failed (rc=$rc)"; exit "$rc"; }
           if grep -qE '\bSKIP\b' aotsh.log; then
