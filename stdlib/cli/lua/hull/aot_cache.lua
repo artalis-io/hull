@@ -108,6 +108,8 @@ function M.key(wasm_path, arch, mem64, wamrc_version)
         wasm_sha,
         "|arch=", arch,
         "|mem64=", mem64 and "1" or "0",
+        "|shared_heap=1",   -- compute AOT is always built with --enable-shared-heap
+                            -- (spans + compute.segment); invalidates pre-fix entries
         "|wamrc=", wamrc_version or "unknown",
     })
     return crypto.sha256(payload)
