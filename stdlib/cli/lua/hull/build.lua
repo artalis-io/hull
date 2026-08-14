@@ -1872,7 +1872,14 @@ local function main()
                                   " [cache hit]")
                             ok = true
                         else
+                            -- --enable-shared-heap: compute plugins that read a
+                            -- mapped span or a compute.segment access a WAMR
+                            -- shared heap at runtime; without it the AOT cannot
+                            -- attach one and those reads come back as zeros
+                            -- (the interpreter is unaffected). Safe for plugins
+                            -- that use neither.
                             local wamrc_args = {wamrc, "--target=" .. arch,
+                                                "--enable-shared-heap",
                                                 "-o", aot_path, wasm_path}
                             if mem64 then
                                 table.insert(wamrc_args, 3, "--enable-memory64")

@@ -913,6 +913,19 @@ e2e-persistent-async: $(BUILDDIR)/hull
 e2e-compute-async-trap: $(BUILDDIR)/hull
 	sh tests/e2e_compute_async_trap.sh
 
+# Compute AOT reads shared-heap bytes (spans + compute.segment) via the real
+# hull build path (--enable-shared-heap). Needs an embedded hull + wamrc; skips
+# cleanly otherwise (a dedicated CI job provides both, non-skippable). (#326)
+# NB: this test needs an EMBEDDED hull (make EMBED_PLATFORM=1). Any bare `make`
+# without EMBED_PLATFORM=1 trips the config sentinel and clobbers the embedded
+# build/hull back to non-embedded -- so invoking this target as a plain
+# `make e2e-compute-aot-shared-heap` would delete the very hull it needs. Run it
+# as `make EMBED_PLATFORM=1 e2e-compute-aot-shared-heap`, or run the script
+# directly (as CI does): `sh tests/e2e_compute_aot_shared_heap.sh`.
+.PHONY: e2e-compute-aot-shared-heap
+e2e-compute-aot-shared-heap:
+	sh tests/e2e_compute_aot_shared_heap.sh
+
 # Synchronous compute.call / instance:call forward attached spans (#325).
 .PHONY: e2e-sync-spans
 e2e-sync-spans: $(BUILDDIR)/hull
