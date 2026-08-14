@@ -213,6 +213,18 @@ $(BUILDDIR)/gen_ro_heap_span_aot.h: $(TESTDIR)/hull/fixtures/ro_heap.wasm | $(BU
 $(BUILDDIR)/test_wasm_spans: INCLUDES += -I$(BUILDDIR)
 $(BUILDDIR)/test_wasm_spans: $(BUILDDIR)/gen_ro_heap_span_aot.h
 
+# Freestanding-libc fixture (#327). Embed memops.wasm as a C byte array so the
+# unit test's bytes never drift from the committed fixture (which build_memops.sh
+# rebuilds from the canonical hull_compute.h). No wamrc: interpreter-only here;
+# the AOT leg + the real-`hull compute build` objdump import scan are in
+# tests/e2e_compute_memops.sh.
+$(BUILDDIR)/gen_memops_wasm.h: $(TESTDIR)/fixtures/compute/memops.wasm | $(BUILDDIR)
+	@cp $< $(BUILDDIR)/memops.wasm
+	@(cd $(BUILDDIR) && xxd -i memops.wasm) \
+	  | sed -E 's/unsigned char.*\[\]/static const unsigned char memops_wasm[]/; s/unsigned int.*_len/static const unsigned int memops_wasm_len/' > $@
+$(BUILDDIR)/test_wasm_memops: INCLUDES += -I$(BUILDDIR)
+$(BUILDDIR)/test_wasm_memops: $(BUILDDIR)/gen_memops_wasm.h
+
 # Top-level tests (tests/hull/)
 $(BUILDDIR)/test_parse_size: $(TESTDIR)/hull/test_parse_size.c $(TEST_COMMON_DEPS) | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< $(TEST_COMMON_LIBS)
