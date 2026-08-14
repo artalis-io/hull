@@ -225,6 +225,20 @@ $(BUILDDIR)/gen_memops_wasm.h: $(TESTDIR)/fixtures/compute/memops.wasm | $(BUILD
 $(BUILDDIR)/test_wasm_memops: INCLUDES += -I$(BUILDDIR)
 $(BUILDDIR)/test_wasm_memops: $(BUILDDIR)/gen_memops_wasm.h
 
+# hull_span.h native-vs-WASM differential (#324 3b). Embed the self-contained
+# guest as a byte array (interpreter) + build an AOT fixture from the same .wasm
+# when wamrc is present (skips to an empty fixture otherwise; the CI AOT job
+# builds wamrc and asserts the AOT diff sub-case is NOT skipped). The test also
+# needs templates/ (hull_span.h) and the shared spandiff_ops.h on its include path.
+$(BUILDDIR)/gen_spandiff_wasm.h: $(TESTDIR)/fixtures/compute/spandiff.wasm | $(BUILDDIR)
+	@cp $< $(BUILDDIR)/spandiff.wasm
+	@(cd $(BUILDDIR) && xxd -i spandiff.wasm) \
+	  | sed -E 's/unsigned char.*\[\]/static const unsigned char spandiff_wasm[]/; s/unsigned int.*_len/static const unsigned int spandiff_wasm_len/' > $@
+$(BUILDDIR)/gen_spandiff_aot.h: $(TESTDIR)/fixtures/compute/spandiff.wasm | $(BUILDDIR)
+	$(call GEN_GSUB_AOT,$@,,spandiff_aot)
+$(BUILDDIR)/test_span_diff: INCLUDES += -I$(BUILDDIR) -Itemplates -I$(TESTDIR)/fixtures/compute
+$(BUILDDIR)/test_span_diff: $(BUILDDIR)/gen_spandiff_wasm.h $(BUILDDIR)/gen_spandiff_aot.h
+
 # Top-level tests (tests/hull/)
 $(BUILDDIR)/test_parse_size: $(TESTDIR)/hull/test_parse_size.c $(TEST_COMMON_DEPS) | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< $(TEST_COMMON_LIBS)

@@ -445,6 +445,26 @@ jobs:
             || { echo "::error::span AOT lifecycle case did not run to OK"; exit 1; }
           echo "mapped-span AOT lifecycle case ran against a real wamrc .aot and passed."
 
+      - name: Build + run the hull_span.h native-vs-WASM differential (must NOT skip)
+        timeout-minutes: 12
+        run: |
+          # 3b: identical fixtures through the native SDK and a real wasm guest on
+          # interpreter AND AOT must agree byte-for-byte. FAIL if the AOT diff
+          # sub-case takes the wamrc-unavailable skip path.
+          sh tests/ci_ensure_wamrc.sh
+          rm -f build/gen_spandiff_aot.h
+          make build/test_span_diff
+          set -o pipefail
+          ./build/test_span_diff 2>&1 | tee spandiff.log
+          rc=${PIPESTATUS[0]}
+          [ "$rc" -eq 0 ] || { echo "::error::test_span_diff failed (rc=$rc)"; exit "$rc"; }
+          if grep -qE "SKIPPED spandiff\.aot_diff" spandiff.log; then
+            echo "::error::span diff AOT sub-case took the wamrc-unavailable skip path"; exit 1
+          fi
+          grep -qE "spandiff\.aot_diff ran" spandiff.log \
+            || { echo "::error::span diff AOT sub-case did not run"; exit 1; }
+          echo "hull_span.h decodes identically native vs wasm (interp + AOT)."
+
   # Compute AOT shared-heap reads (#326): `hull build` must pass
   # --enable-shared-heap so a plugin that reads a mapped SPAN or a compute.SEGMENT
   # (both WAMR shared heaps) reads correct nonzero bytes under AOT, not zeros.
@@ -663,6 +683,23 @@ jobs:
           grep -qE "OK[^A-Za-z].*wasm_spans\\.aot_span_lifecycle" spans.log \
             || { echo "::error::span AOT lifecycle case did not run to OK"; exit 1; }
           echo "arm64 mapped-span AOT lifecycle case ran against a real wamrc .aot and passed."
+
+      - name: Build + run the hull_span.h native-vs-WASM differential (arm64, must NOT skip)
+        timeout-minutes: 12
+        run: |
+          sh tests/ci_ensure_wamrc.sh
+          rm -f build/gen_spandiff_aot.h
+          make build/test_span_diff
+          set -o pipefail
+          ./build/test_span_diff 2>&1 | tee spandiff.log
+          rc=${PIPESTATUS[0]}
+          [ "$rc" -eq 0 ] || { echo "::error::test_span_diff failed (rc=$rc)"; exit "$rc"; }
+          if grep -qE "SKIPPED spandiff\.aot_diff" spandiff.log; then
+            echo "::error::span diff AOT sub-case took the wamrc-unavailable skip path"; exit 1
+          fi
+          grep -qE "spandiff\.aot_diff ran" spandiff.log \
+            || { echo "::error::span diff AOT sub-case did not run"; exit 1; }
+          echo "arm64 hull_span.h decodes identically native vs wasm (interp + AOT)."
 
   # Reproducibility gate. Three properties tested independently on
   # both Linux and macOS via matrix strategy:
