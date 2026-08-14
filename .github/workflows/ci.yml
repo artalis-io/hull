@@ -377,8 +377,11 @@ jobs:
           make wamrc
 
       - name: Build + run the AOT C-API case (must NOT skip)
-        timeout-minutes: 6
+        timeout-minutes: 12
         run: |
+          # Precondition: guarantee THIS step's own executable wamrc rather than
+          # trusting a prior step's mutable build/ state (see the helper header).
+          sh tests/ci_ensure_wamrc.sh
           # Regenerate the fixture header now that wamrc exists, then build + run.
           rm -f build/gen_ro_heap_aot.h
           make build/test_wasm_readonly_heap
@@ -394,8 +397,11 @@ jobs:
           echo "AOT read-only-heap C-API case ran against a real wamrc .aot and passed."
 
       - name: Build + run the guarded-subrange AOT cases (must NOT skip)
-        timeout-minutes: 6
+        timeout-minutes: 12
         run: |
+          # Precondition: guarantee THIS step's own executable wamrc rather than
+          # trusting a prior step's mutable build/ state (see the helper header).
+          sh tests/ci_ensure_wamrc.sh
           # patch 0004: regenerate the SW- and HW-bound AOT fixtures now that
           # wamrc exists, then run the guarded matrix. FAIL if either AOT case
           # takes the wamrc-unavailable skip path (closes "AOT dormant in CI").
@@ -415,8 +421,11 @@ jobs:
           echo " guarded-subrange AOT case (SW-bound) ran against a real wamrc .aot and passed."
 
       - name: Build + run the mapped-span AOT lifecycle case (must NOT skip)
-        timeout-minutes: 6
+        timeout-minutes: 12
         run: |
+          # Precondition: guarantee THIS step's own executable wamrc rather than
+          # trusting a prior step's mutable build/ state (see the helper header).
+          sh tests/ci_ensure_wamrc.sh
           # checkpoint 2: the span lifecycle + Design B window under a real AOT
           # instance. FAIL if the AOT case takes the wamrc-unavailable skip path.
           rm -f build/gen_ro_heap_span_aot.h
@@ -463,9 +472,12 @@ jobs:
           make EMBED_PLATFORM=1
 
       - name: Compute AOT shared-heap E2E (spans + segments, must NOT skip)
-        timeout-minutes: 5
+        timeout-minutes: 12
         run: |
           set -o pipefail
+          # Precondition: guarantee an executable wamrc so `hull build`'s AOT runs
+          # and the e2e cannot take the no-wamrc skip path (see the helper header).
+          sh tests/ci_ensure_wamrc.sh
           # Run the script DIRECTLY, not `make ...`: any `make` invocation without
           # EMBED_PLATFORM=1 trips the config sentinel and clobbers the embedded
           # build/hull, which would make the e2e skip.
@@ -509,8 +521,11 @@ jobs:
           make wamrc
 
       - name: Build + run the guarded-subrange AOT cases (arm64, must NOT skip)
-        timeout-minutes: 6
+        timeout-minutes: 12
         run: |
+          # Precondition: guarantee THIS step's own executable wamrc rather than
+          # trusting a prior step's mutable build/ state (see the helper header).
+          sh tests/ci_ensure_wamrc.sh
           rm -f build/gen_gsub_aot_sw.h
           make build/test_wasm_guarded_subrange
           set -o pipefail
@@ -527,8 +542,11 @@ jobs:
           echo "arm64 guarded-subrange AOT case (SW-bound) ran against a real wamrc .aot and passed."
 
       - name: Build + run the mapped-span AOT lifecycle case (arm64, must NOT skip)
-        timeout-minutes: 6
+        timeout-minutes: 12
         run: |
+          # Precondition: guarantee THIS step's own executable wamrc rather than
+          # trusting a prior step's mutable build/ state (see the helper header).
+          sh tests/ci_ensure_wamrc.sh
           # checkpoint 2: the span lifecycle + Design B window under a real AOT
           # instance. FAIL if the AOT case takes the wamrc-unavailable skip path.
           rm -f build/gen_ro_heap_span_aot.h
