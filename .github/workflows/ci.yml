@@ -315,6 +315,10 @@ jobs:
         timeout-minutes: 2
         run: make e2e-compute-async-trap
 
+      - name: Sync span forwarding E2E (compute.call + instance:call, #325)
+        timeout-minutes: 2
+        run: make e2e-sync-spans
+
       - name: Named-connection async/udf E2E tests
         timeout-minutes: 2
         run: make e2e-named-connections

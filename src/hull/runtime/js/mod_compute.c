@@ -326,14 +326,20 @@ static JSValue js_compute_call(JSContext *ctx, JSValueConst this_val,
         JS_FreeValue(ctx, val);
     }
 
-    /* per-invocation mapped spans (item C: parse + validate only; opts.spans
-     * forwarding + the sync-borrow / async-deep-copy+pin ownership is item D).
-     * Execution of spans is unavailable until then. */
+    /* per-invocation mapped spans. The sync path consumes the BORROWED request
+     * array directly: hl_cap_wasm_call attaches, runs, and tears the spans down
+     * within this single call. js_parse_spans JS_ToCString's the names, so they
+     * outlive the call and are freed right after it (js_free_span_names, below).
+     * Empty/absent -> a plain call (span_count 0). */
+    HlWasmSpanReq span_reqs[HL_WASM_MAX_SPANS];
+    int span_count = 0;
     if (argc > 2 && JS_IsObject(argv[2])) {
-        HlWasmSpanReq span_reqs[HL_WASM_MAX_SPANS];
-        int sn = js_parse_spans(ctx, argv[2], span_reqs);
-        if (sn < 0) return JS_EXCEPTION;
-        js_free_span_names(ctx, span_reqs, sn); /* validate only; not retained */
+        span_count = js_parse_spans(ctx, argv[2], span_reqs);
+        if (span_count < 0) return JS_EXCEPTION;
+    }
+    if (span_count > 0) {
+        opts.spans = span_reqs;
+        opts.span_count = span_count;
     }
 
     js_wasm_clamp_opts(&opts, &js->base);
@@ -351,6 +357,7 @@ static JSValue js_compute_call(JSContext *ctx, JSValueConst this_val,
 
         if (input_is_string) JS_FreeCString(ctx, (const char *)input);
         JS_FreeCString(ctx, name);
+        js_free_span_names(ctx, span_reqs, span_count);
 
         if (rc != 0)
             return JS_ThrowInternalError(ctx, "compute.call: %s",
@@ -375,6 +382,7 @@ static JSValue js_compute_call(JSContext *ctx, JSValueConst this_val,
     if (input_is_string)
         JS_FreeCString(ctx, (const char *)input);
     JS_FreeCString(ctx, name);
+    js_free_span_names(ctx, span_reqs, span_count);
 
     if (rc != 0)
         return JS_ThrowInternalError(ctx, "compute.call: %s",
@@ -719,12 +727,18 @@ static JSValue js_wasm_inst_call(JSContext *ctx, JSValueConst this_val,
         JS_FreeValue(ctx, val);
     }
 
-    /* inst:call spans (item C: parse + validate only; forwarding is item D). */
+    /* inst:call spans. Synchronous: consume the BORROWED request array directly
+     * (hl_cap_wasm_instance_call attaches + tears down within this call). The
+     * JS_ToCString'd names outlive the call and are freed right after it. */
+    HlWasmSpanReq span_reqs[HL_WASM_MAX_SPANS];
+    int span_count = 0;
     if (argc > 1 && JS_IsObject(argv[1])) {
-        HlWasmSpanReq span_reqs[HL_WASM_MAX_SPANS];
-        int sn = js_parse_spans(ctx, argv[1], span_reqs);
-        if (sn < 0) return JS_EXCEPTION;
-        js_free_span_names(ctx, span_reqs, sn);
+        span_count = js_parse_spans(ctx, argv[1], span_reqs);
+        if (span_count < 0) return JS_EXCEPTION;
+    }
+    if (span_count > 0) {
+        opts.spans = span_reqs;
+        opts.span_count = span_count;
     }
 
     if (js) js_wasm_clamp_opts(&opts, &js->base);
@@ -736,6 +750,7 @@ static JSValue js_wasm_inst_call(JSContext *ctx, JSValueConst this_val,
                                                 &out_buf, &opts, NULL, NULL,
                                                 js ? js->base.alloc : NULL, &err_msg);
         if (input_is_string) JS_FreeCString(ctx, (const char *)input);
+        js_free_span_names(ctx, span_reqs, span_count);
         if (rc != 0)
             return JS_ThrowInternalError(ctx, "WasmInstance.call: %s",
                                          err_msg ? err_msg : "unknown error");
@@ -750,6 +765,7 @@ static JSValue js_wasm_inst_call(JSContext *ctx, JSValueConst this_val,
                                         &opts, NULL, NULL,
                                         js ? js->base.alloc : NULL, &err_msg);
     if (input_is_string) JS_FreeCString(ctx, (const char *)input);
+    js_free_span_names(ctx, span_reqs, span_count);
 
     if (rc != 0)
         return JS_ThrowInternalError(ctx, "WasmInstance.call: %s",

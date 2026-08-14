@@ -913,6 +913,11 @@ e2e-persistent-async: $(BUILDDIR)/hull
 e2e-compute-async-trap: $(BUILDDIR)/hull
 	sh tests/e2e_compute_async_trap.sh
 
+# Synchronous compute.call / instance:call forward attached spans (#325).
+.PHONY: e2e-sync-spans
+e2e-sync-spans: $(BUILDDIR)/hull
+	sh tests/e2e_sync_spans.sh
+
 e2e-compute-dev: $(BUILDDIR)/hull
 	sh tests/e2e_compute_dev.sh
 
