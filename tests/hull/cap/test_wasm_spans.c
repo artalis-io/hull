@@ -1066,13 +1066,203 @@ UTEST(wasm_spans, d2_segment_race_concurrency)
      * every span borrow was released -- so the D1 decision could not race the
      * segment mutation (mod->mutex serialises the read against the write), and no
      * span leaked under contention. TSan (make tsan-spans) covers the data-race
-     * dimension. (A final shared-heap-count baseline is intentionally NOT asserted
-     * here: the segment path leaks its heap descriptors until runtime teardown --
-     * hl_wasm_free_segment predates patch 0003's per-heap destroy -- so the
-     * mutator's churn inflates the count independently of spans. Span
-     * teardown-to-baseline is proven by d2_success / d2_pooled_reuse.) */
+     * dimension. The mutator loop ends on a "remove", and all worker threads are
+     * joined, so the runtime is quiescent with no segment installed and no span in
+     * flight: since #315 the segment path also destroys its heap descriptors
+     * (hl_wasm_free_segment via the drain-detach ordering), so the shared-heap
+     * count is back to baseline -- the churn no longer leaks. */
     for (int i = 0; i < D2R_NTHREAD; i++) ASSERT_EQ(args[i].ok, 1);
-    (void)base;
+    ASSERT_EQ(wasm_runtime_shared_heap_count(), base);
+
+    hl_cap_wasm_destroy(&cache);
+    teardown_dir();
+}
+
+/* ── #315: the compute.segment path destroys its shared-heap descriptors on every
+ *    teardown path, so the shared-heap-list count returns to baseline across
+ *    load / remove / replace / remove-all / unload -- including after a call has
+ *    attached the chain to a (now drained + detached) pooled instance. Purely
+ *    single-threaded + deterministic, unlike d2_segment_race_concurrency. ─────── */
+UTEST(wasm_spans, segment_lifecycle_baseline)
+{
+    setup();
+    HlWasmCache cache; ASSERT_EQ(hl_cap_wasm_init(&cache), 0);
+    HlVfs vfs; hl_vfs_init(&vfs, span_call_entries, NULL);
+    ASSERT_EQ(hl_cap_wasm_load(&cache, "echo", &vfs, NULL), 0);
+    uint32_t base = wasm_runtime_shared_heap_count();
+    static const unsigned char seg[16]  = { 1, 2, 3, 4, 5, 6, 7, 8 };
+    static const unsigned char seg2[16] = { 9, 8, 7, 6, 5, 4, 3, 2 };
+    const char *derr = NULL;
+
+    /* A. load one segment, run a plain call (attaches the chain to a pooled
+     *    instance), then remove -> the drain detaches and free destroys. */
+    ASSERT_EQ(hl_cap_wasm_data_load(&cache, "echo", "graph", seg, sizeof(seg),
+                                    NULL, &vfs, NULL, &derr), 0);
+    ASSERT_EQ(wasm_runtime_shared_heap_count(), base + 1);
+    {
+        void *out = NULL; size_t out_len = 0; const char *err = NULL;
+        int rc = hl_cap_wasm_call(&cache, "echo", "x", 1, &out, &out_len,
+                                  NULL, NULL, NULL, &vfs, NULL, NULL, &err);
+        ASSERT_EQ(rc, HL_WASM_OK);
+        free(out);
+    }
+    ASSERT_EQ(wasm_runtime_shared_heap_count(), base + 1); /* call did not leak */
+    ASSERT_EQ(hl_cap_wasm_data_load(&cache, "echo", "graph", NULL, 0,
+                                    NULL, &vfs, NULL, &derr), 0);
+    ASSERT_EQ(wasm_runtime_shared_heap_count(), base);     /* descriptor reclaimed */
+
+    /* B. load / remove churn: back to baseline every cycle (no monotonic growth). */
+    for (int i = 0; i < 10; i++) {
+        ASSERT_EQ(hl_cap_wasm_data_load(&cache, "echo", "g", seg, sizeof(seg),
+                                        NULL, &vfs, NULL, &derr), 0);
+        ASSERT_EQ(wasm_runtime_shared_heap_count(), base + 1);
+        ASSERT_EQ(hl_cap_wasm_data_load(&cache, "echo", "g", NULL, 0,
+                                        NULL, &vfs, NULL, &derr), 0);
+        ASSERT_EQ(wasm_runtime_shared_heap_count(), base);
+    }
+
+    /* C. replace (same name, new data): the old heap is destroyed, one new heap
+     *    created -> net +1, never +2. */
+    ASSERT_EQ(hl_cap_wasm_data_load(&cache, "echo", "graph", seg, sizeof(seg),
+                                    NULL, &vfs, NULL, &derr), 0);
+    ASSERT_EQ(hl_cap_wasm_data_load(&cache, "echo", "graph", seg2, sizeof(seg2),
+                                    NULL, &vfs, NULL, &derr), 0);
+    ASSERT_EQ(wasm_runtime_shared_heap_count(), base + 1); /* replaced, not doubled */
+    ASSERT_EQ(hl_cap_wasm_data_load(&cache, "echo", "graph", NULL, 0,
+                                    NULL, &vfs, NULL, &derr), 0);
+    ASSERT_EQ(wasm_runtime_shared_heap_count(), base);
+
+    /* D. three segments (a chain), a call to attach the chain head, then
+     *    remove-all (segment_name==NULL && data==NULL) -> unchain + destroy all. */
+    ASSERT_EQ(hl_cap_wasm_data_load(&cache, "echo", "a", seg, sizeof(seg),
+                                    NULL, &vfs, NULL, &derr), 0);
+    ASSERT_EQ(hl_cap_wasm_data_load(&cache, "echo", "b", seg, sizeof(seg),
+                                    NULL, &vfs, NULL, &derr), 0);
+    ASSERT_EQ(hl_cap_wasm_data_load(&cache, "echo", "c", seg, sizeof(seg),
+                                    NULL, &vfs, NULL, &derr), 0);
+    ASSERT_EQ(wasm_runtime_shared_heap_count(), base + 3);
+    {
+        void *out = NULL; size_t out_len = 0; const char *err = NULL;
+        int rc = hl_cap_wasm_call(&cache, "echo", "x", 1, &out, &out_len,
+                                  NULL, NULL, NULL, &vfs, NULL, NULL, &err);
+        ASSERT_EQ(rc, HL_WASM_OK);
+        free(out);
+    }
+    ASSERT_EQ(hl_cap_wasm_data_load(&cache, "echo", NULL, NULL, 0,
+                                    NULL, &vfs, NULL, &derr), 0);
+    ASSERT_EQ(wasm_runtime_shared_heap_count(), base);     /* whole chain reclaimed */
+
+    /* E. reload a chain, then unload the module's shared data (hl_cap_wasm_data_unload)
+     *    -> same drain + free_shared_data path -> baseline. */
+    ASSERT_EQ(hl_cap_wasm_data_load(&cache, "echo", "a", seg, sizeof(seg),
+                                    NULL, &vfs, NULL, &derr), 0);
+    ASSERT_EQ(hl_cap_wasm_data_load(&cache, "echo", "b", seg, sizeof(seg),
+                                    NULL, &vfs, NULL, &derr), 0);
+    ASSERT_EQ(wasm_runtime_shared_heap_count(), base + 2);
+    hl_cap_wasm_data_unload(&cache, "echo");
+    ASSERT_EQ(wasm_runtime_shared_heap_count(), base);
+
+    hl_cap_wasm_destroy(&cache);
+    teardown_dir();
+}
+
+/* ── #315: the destroy-FAILURE branch of the segment teardown. Pin a segment's
+ *    heap onto a helper instance so wasm_runtime_destroy_shared_heap fails; the
+ *    remove then RETAINS the descriptor + backing (never munmaps behind a live
+ *    descriptor) and reports failure so the binding keeps its MappedBuffer pin.
+ *    Clearing the block lets a retry finish cleanly, back to baseline. This is the
+ *    path the normal/TSan/ASan matrix does not otherwise exercise. ────────────── */
+UTEST(wasm_spans, segment_destroy_failure_retain)
+{
+    setup();
+    HlWasmCache cache; ASSERT_EQ(hl_cap_wasm_init(&cache), 0);
+    HlVfs vfs; hl_vfs_init(&vfs, span_call_entries, NULL);
+    ASSERT_EQ(hl_cap_wasm_load(&cache, "echo", &vfs, NULL), 0);
+    uint32_t base = wasm_runtime_shared_heap_count();
+
+    wasm_module_t hmod; uint8_t *hmb;
+    wasm_module_inst_t helper = make_instance(&hmod, &hmb);
+    ASSERT_TRUE(helper != NULL);
+
+    static const unsigned char seg[16] = { 1, 2, 3, 4, 5, 6, 7, 8 };
+    const char *derr = NULL;
+    ASSERT_EQ(hl_cap_wasm_data_load(&cache, "echo", "graph", seg, sizeof(seg),
+                                    NULL, &vfs, NULL, &derr), 0);
+    ASSERT_EQ(wasm_runtime_shared_heap_count(), base + 1);
+
+    /* Reach the segment's heap and pin it onto the helper -> attached_count != 0
+     * makes the patch-0003 destroy fail-closed. */
+    HlWasmModule *m = hl_cap_wasm_module_lookup(&cache, "echo");
+    ASSERT_TRUE(m != NULL && m->shared_data != NULL && m->shared_data->count == 1);
+    wasm_shared_heap_t sh =
+        (wasm_shared_heap_t)m->shared_data->segments[0].shared_heap;
+    ASSERT_TRUE(sh != NULL);
+    ASSERT_TRUE(wasm_runtime_attach_shared_heap(helper, sh));
+
+    /* Remove cannot destroy the still-attached heap: reports failure and RETAINS
+     * the segment (descriptor still on the list, slot kept, backing not freed). */
+    derr = NULL;
+    int rc = hl_cap_wasm_data_load(&cache, "echo", "graph", NULL, 0,
+                                   NULL, &vfs, NULL, &derr);
+    ASSERT_NE(rc, 0);
+    ASSERT_EQ(wasm_runtime_shared_heap_count(), base + 1);  /* retained, not leaked-dangling */
+    m = hl_cap_wasm_module_lookup(&cache, "echo");
+    ASSERT_TRUE(m->shared_data != NULL && m->shared_data->count == 1); /* slot kept */
+    ASSERT_TRUE(m->shared_data->segments[0].shared_heap == (void *)sh); /* same heap */
+
+    /* Clear the block and retry: destroy now succeeds -> clean removal, baseline. */
+    wasm_runtime_detach_shared_heap(helper);
+    derr = NULL;
+    ASSERT_EQ(hl_cap_wasm_data_load(&cache, "echo", "graph", NULL, 0,
+                                    NULL, &vfs, NULL, &derr), 0);
+    ASSERT_EQ(wasm_runtime_shared_heap_count(), base);
+    m = hl_cap_wasm_module_lookup(&cache, "echo");
+    ASSERT_TRUE(m->shared_data == NULL);
+
+    free_instance(helper, hmod, hmb);
+    hl_cap_wasm_destroy(&cache);
+    teardown_dir();
+}
+
+/* ── #315: a PERSISTENT instance attaches the segment chain at creation and, like
+ *    a pooled instance, is not auto-detached by deinstantiate. Destroying it must
+ *    detach so the segment's descriptor can later be reclaimed. Without the detach
+ *    the heap stays attached, the subsequent remove's destroy fails, and both the
+ *    shared_heap_count AND the HlWasmSharedData leak -- the latter only visible to
+ *    LeakSanitizer (Linux), but the count assertion here catches it everywhere.
+ *    Guards the d3_d1_rejection regression this fix first tripped in CI. ───────── */
+UTEST(wasm_spans, segment_persistent_instance_baseline)
+{
+    setup();
+    HlWasmCache cache; ASSERT_EQ(hl_cap_wasm_init(&cache), 0);
+    HlVfs vfs; hl_vfs_init(&vfs, span_call_entries, NULL);
+    ASSERT_EQ(hl_cap_wasm_load(&cache, "echo", &vfs, NULL), 0);
+    uint32_t base = wasm_runtime_shared_heap_count();
+
+    static const unsigned char seg[16] = { 1, 2, 3, 4, 5, 6, 7, 8 };
+    const char *derr = NULL;
+    ASSERT_EQ(hl_cap_wasm_data_load(&cache, "echo", "graph", seg, sizeof(seg),
+                                    NULL, &vfs, NULL, &derr), 0);
+    ASSERT_EQ(wasm_runtime_shared_heap_count(), base + 1);
+
+    /* Persistent instance attaches the chain at creation; a plain call exercises it. */
+    const char *err = NULL;
+    HlWasmInstance *pi = hl_cap_wasm_instance_create(&cache, "echo", NULL,
+                                                     &vfs, NULL, NULL, &err);
+    ASSERT_TRUE(pi != NULL);
+    void *out = NULL; size_t out_len = 0; err = NULL;
+    ASSERT_EQ(hl_cap_wasm_instance_call(pi, "x", 1, &out, &out_len,
+                                        NULL, NULL, NULL, NULL, &err), HL_WASM_OK);
+    free(out);
+
+    /* Destroy the instance (must detach), then remove the segment: the descriptor
+     * is now reclaimable, so the count returns to baseline and shared_data frees. */
+    hl_cap_wasm_instance_destroy(pi);
+    ASSERT_EQ(hl_cap_wasm_data_load(&cache, "echo", "graph", NULL, 0,
+                                    NULL, &vfs, NULL, &derr), 0);
+    ASSERT_EQ(wasm_runtime_shared_heap_count(), base);
+    HlWasmModule *m = hl_cap_wasm_module_lookup(&cache, "echo");
+    ASSERT_TRUE(m->shared_data == NULL);
 
     hl_cap_wasm_destroy(&cache);
     teardown_dir();

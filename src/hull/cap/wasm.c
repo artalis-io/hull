@@ -329,6 +329,17 @@ void hl_wasm_pool_drain(HlWasmPool *pool)
 {
     for (int i = 0; i < pool->count; i++) {
         HlWasmPoolEntry *e = &pool->entries[i];
+        /* Detach any attached shared heap (the module's segment chain) BEFORE
+         * deinstantiate. WAMR's deinstantiate does NOT auto-detach, so the
+         * chain-head heap's attached_count would otherwise stay inflated by every
+         * drained-but-attached instance -- and both wasm_runtime_unchain_shared_heaps
+         * and the patch-0003 wasm_runtime_destroy_shared_heap require
+         * attached_count == 0. Detaching here makes the count return to 0 whenever a
+         * segment mutation drains the pool, so the teardown in
+         * hl_wasm_free_segment / hl_wasm_free_shared_data can actually reclaim the
+         * descriptor. No-op for instances with nothing attached (fresh, or a
+         * span instance already detached by its per-call teardown). */
+        wasm_runtime_detach_shared_heap((wasm_module_inst_t)e->instance);
         wasm_runtime_destroy_exec_env((wasm_exec_env_t)e->exec_env);
         wasm_runtime_deinstantiate((wasm_module_inst_t)e->instance);
     }
@@ -1259,6 +1270,8 @@ HlWasmInstance *hl_cap_wasm_instance_create(HlWasmCache *cache,
     if (!pi) {
         if (err_msg) *err_msg = err_internal;
         wasm_runtime_destroy_exec_env(exec_env);
+        /* detach the chain attached just above before tearing the instance down */
+        wasm_runtime_detach_shared_heap(inst);
         wasm_runtime_deinstantiate(inst);
         return NULL;
     }
@@ -1635,8 +1648,17 @@ void hl_cap_wasm_instance_destroy(HlWasmInstance *pi)
 
     if (pi->exec_env)
         wasm_runtime_destroy_exec_env((wasm_exec_env_t)pi->exec_env);
-    if (pi->instance)
+    if (pi->instance) {
+        /* Detach any attached shared heap (the module's segment chain) BEFORE
+         * deinstantiate -- a persistent instance attaches the chain at creation
+         * and, like a pooled instance, is never auto-detached by deinstantiate.
+         * Leaving it attached keeps the chain head's attached_count > 0, which
+         * makes the later hl_wasm_free_shared_data destroy fail and RETAIN the
+         * whole HlWasmSharedData (a leak). Mirrors hl_wasm_pool_drain. No-op when
+         * nothing is attached. */
+        wasm_runtime_detach_shared_heap((wasm_module_inst_t)pi->instance);
         wasm_runtime_deinstantiate((wasm_module_inst_t)pi->instance);
+    }
 
     pi->exec_env   = NULL;
     pi->instance   = NULL;

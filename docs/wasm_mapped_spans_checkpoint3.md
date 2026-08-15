@@ -1,14 +1,20 @@
 # Mapped spans — checkpoint 3 plan (public API, metadata delivery, SDK header)
 
-**Status:** PLAN. Turns the reviewed internal lifecycle (checkpoint 2 —
-`cap/wasm_spans.c` `HlWasmSpanSet` + WAMR patch 0004 guarded-subrange RO shared
-heaps, PR #309) into a usable feature: `compute.call(..., {spans={...}})` lets a
-WASM plugin read host-mapped file windows at native speed, learning each window's
-address via a versioned host-call query, with a safe SDK header.
+**Status:** DONE (cut 1). This document was the plan; both cuts have shipped.
+3a (windowed `fs.mmap`, named spans, `spans={}` bindings, invocation lifecycle
+integration, the `SPAN_INFO` host-call — the D1/D2 locks below) merged via #313 /
+#324 / #325 / #327 / #330 / #332 and the shared-heap AOT enablement (#326/#329);
+3b (the `hull/wasm/span.h` SDK header shipped as `templates/hull_span.h`, the
+`spanreader` example, header install/refresh, the interp+AOT e2e legs, and the
+native-vs-WASM differential) merged via #324 and the follow-ups. The AOT span
+lifecycle + differential are CI must-not-skip gates. Deferred, tracked, non-goals:
+spans+segments composition in one call (D0.1 below), Memory64 span-metadata
+dispatch (blocked on #318), and the orthogonal segment shared-heap descriptor leak
+(#315, fixed separately). The turns-the-lifecycle-into-a-feature framing below is
+retained as the design record.
 
-**Blocked on:** PR #309 (checkpoint 2) green + merged. No checkpoint-3 code lands
-before that. This document locks the two design decisions (§0) so 3a can start the
-instant #309 merges.
+**Was blocked on (resolved):** PR #309 (checkpoint 2) green + merged. This document
+locked the two design decisions (§0) so 3a could start the instant #309 merged.
 
 Reference: `docs/wasm_mapped_spans_design.md` (the WHAT — §§3.3, 3.5, 3.7),
 `docs/wamr_shared_heap_guarded_subrange_design.md` (Design B / patch 0004),
