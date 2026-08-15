@@ -23,8 +23,21 @@ done
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
 cp -r "$ROOT/tests/fixtures/stream_meta" "$TMP/app"
 
-if cmp -s "$TMP/app/compute/streamprobe/hull_compute.h" "$ROOT/tests/fixtures/stream_meta/compute/streamprobe/hull_compute.h"; then
-    pass "streamprobe uses the committed canonical hull_compute.h"
+# Assert the fixture's hull_compute.h is byte-identical to the CANONICAL embedded
+# source (the HULL_COMPUTE_H literal in compute.lua) — independently extracted,
+# not compared against the copy it was made from. This is the same canonical the
+# repo-wide check enforces, verified here against the exact header the stream
+# helpers are exercised through.
+CANON_C="$TMP/canon_hull_compute.h"
+awk '
+    index($0, "local HULL_COMPUTE_H = [[") == 1 { f = 1; sub(/^local [A-Z_]+ = \[\[/, ""); }
+    f { print }
+    /^\]\]$/ { if (f) exit }
+' "$ROOT/stdlib/cli/lua/hull/compute.lua" | sed '$d' > "$CANON_C"
+if [ -s "$CANON_C" ] && cmp -s "$TMP/app/compute/streamprobe/hull_compute.h" "$CANON_C"; then
+    pass "streamprobe hull_compute.h is byte-identical to the canonical embedded header"
+else
+    fail "streamprobe hull_compute.h drifted from the canonical embedded header"
 fi
 
 if ( cd "$TMP/app" && "$HULL" compute build streamprobe ) >"$TMP/build.log" 2>&1 && [ -f "$TMP/app/compute/streamprobe.wasm" ]; then
