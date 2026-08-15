@@ -2202,10 +2202,12 @@ UTEST(hl_cap_wasm, memory64_detection)
     HlVfs vfs;
     hl_vfs_init(&vfs, test_entries, NULL);
 
-    int rc = hl_cap_wasm_load(&cache, "echo64", &vfs, NULL);
-#if WASM_ENABLE_MEMORY64 != 0
-    /* With Memory64 enabled, module loads and is_memory64 is detected */
-    ASSERT_EQ(rc, 0);
+    /* Detection runs through the public accessor wasm_runtime_memory_is_memory64
+     * (patch 0005), independent of any WAMR compile-time macro in this TU, so the
+     * assertion is unconditional (was #if WASM_ENABLE_MEMORY64 gated / #else no-op
+     * before #318). echo64 loads as interpreter (no .aot embedded); the Memory64
+     * flag is still detected at load. */
+    ASSERT_EQ(hl_cap_wasm_load(&cache, "echo64", &vfs, NULL), 0);
 
     pthread_mutex_lock(&cache.pool_mutex);
     HlWasmModule *mod = NULL;
@@ -2220,10 +2222,6 @@ UTEST(hl_cap_wasm, memory64_detection)
     ASSERT_NE(mod, NULL);
     ASSERT_EQ(mod->is_memory64, 1);
     ASSERT_EQ(mod->is_aot, 0);
-#else
-    /* Without Memory64, loader may reject the module */
-    (void)rc;
-#endif
 
     hl_cap_wasm_destroy(&cache);
 }
@@ -2237,7 +2235,8 @@ UTEST(hl_cap_wasm, memory64_rejects_interpreter)
     HlVfs vfs;
     hl_vfs_init(&vfs, test_entries, NULL);
 
-#if WASM_ENABLE_MEMORY64 != 0
+    /* A non-AOT Memory64 module is rejected at call time by Hull's own guard
+     * (cap/wasm.c: is_memory64 && !is_aot), now that detection is live (#318). */
     void *output = NULL;
     size_t output_len = 0;
     const char *err = NULL;
@@ -2249,7 +2248,6 @@ UTEST(hl_cap_wasm, memory64_rejects_interpreter)
     ASSERT_NE(err, NULL);
     ASSERT_STREQ(err, "memory64_requires_aot");
     free(output);
-#endif
 
     hl_cap_wasm_destroy(&cache);
 }

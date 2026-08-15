@@ -1,7 +1,7 @@
 #!/bin/sh
 # Hull ext: deterministic carriage for the out-of-tree WAMR patches.
 #
-# Applies patches/wamr/0001 + 0002 + 0003 + 0004 onto a CLEAN checkout of the pinned base into
+# Applies patches/wamr/0001 + 0002 + 0003 + 0004 + 0005 onto a CLEAN checkout of the pinned base into
 # an isolated staged tree that Hull builds against (WAMR_DIR=build/wamr-patched).
 # vendor/wamr is NEVER mutated. The step fails loudly on:
 #   - vendor/wamr not at the pinned base commit, or dirty      (verify-base)
@@ -26,10 +26,12 @@ P1=$PATCHDIR/0001-tests-unit-wasi-sdk-dir-overridable.patch
 P2=$PATCHDIR/0002-shared-heap-readonly-permission.patch
 P3=$PATCHDIR/0003-shared-heap-destroy.patch
 P4=$PATCHDIR/0004-shared-heap-guarded-subrange.patch
+P5=$PATCHDIR/0005-memory64-public-accessor.patch
 SHA1=423beeae0e94454381ce0d805e9985c5cd94e14e511981c629af186676411698
 SHA2=310706eb6a36ae33756c85997b6599b4855d279e350ba7dae7c5b0353a6c8177
 SHA3=e8f3362cfef0dccc975c3e687390429f06a0d0c63d73f3959be7a5c36f1f1d2c
 SHA4=e5bf6e04b89d878745198421ad9cbf94ac567edf07297887354b35d98b7f4dbd
+SHA5=b7d211638ebb9fc44602819134111709fe88c0f89a2533aac776ce0b002f9924
 
 DRY_RUN=0
 [ "${1:-}" = "--dry-run" ] && DRY_RUN=1
@@ -132,10 +134,12 @@ stage_base_into() {
 [ -f "$P2" ] || fail "missing $P2"
 [ -f "$P3" ] || fail "missing $P3"
 [ -f "$P4" ] || fail "missing $P4"
+[ -f "$P5" ] || fail "missing $P5"
 g1=$(sha256 "$P1"); [ "$g1" = "$SHA1" ] || fail "0001 sha256 $g1 != recorded $SHA1 (stale patch)"
 g2=$(sha256 "$P2"); [ "$g2" = "$SHA2" ] || fail "0002 sha256 $g2 != recorded $SHA2 (stale patch)"
 g3=$(sha256 "$P3"); [ "$g3" = "$SHA3" ] || fail "0003 sha256 $g3 != recorded $SHA3 (stale patch)"
 g4=$(sha256 "$P4"); [ "$g4" = "$SHA4" ] || fail "0004 sha256 $g4 != recorded $SHA4 (stale patch)"
+g5=$(sha256 "$P5"); [ "$g5" = "$SHA5" ] || fail "0005 sha256 $g5 != recorded $SHA5 (stale patch)"
 
 # --- staged-copy (clean checkout of the base; vendor/wamr untouched) ----------
 rm -rf "$STAGED"; mkdir -p "$STAGED"
@@ -157,19 +161,23 @@ git -C "$STAGED" apply --whitespace=nowarn "$ROOT/$P3"
 git -C "$STAGED" apply --check --whitespace=nowarn "$ROOT/$P4" \
     || fail "0004 does not apply cleanly (offset/stale vs base+0001+0002+0003)"
 git -C "$STAGED" apply --whitespace=nowarn "$ROOT/$P4"
+git -C "$STAGED" apply --check --whitespace=nowarn "$ROOT/$P5" \
+    || fail "0005 does not apply cleanly (offset/stale vs base+0001+0002+0003+0004)"
+git -C "$STAGED" apply --whitespace=nowarn "$ROOT/$P5"
 
 # --- tamper check: the applied tree must revert cleanly to the TOP patch -------
-# 0004 is the top of the stack (it edits wasm_memory.c which 0002/0003 also
-# touch, so the reverse check must target 0004). Reversing the top patch proves
-# the staged tree carries exactly 0004's content; lower patches are covered by their
-# exact-context forward --check above plus the unexpected-source audit below.
-git -C "$STAGED" apply --reverse --check --whitespace=nowarn "$ROOT/$P4" \
-    || fail "applied tree does not reverse-match 0004 (tampered/extra content)"
+# 0005 is the top of the stack (it edits wasm_memory.c + wasm_export.h, which
+# 0002/0003/0004 also touch, so the reverse check must target 0005). Reversing the
+# top patch proves the staged tree carries exactly 0005's content; lower patches are
+# covered by their exact-context forward --check above plus the unexpected-source
+# audit below.
+git -C "$STAGED" apply --reverse --check --whitespace=nowarn "$ROOT/$P5" \
+    || fail "applied tree does not reverse-match 0005 (tampered/extra content)"
 
 # --- unexpected-source audit: changed/new file SET must equal the patch set ---
 declared=$(mktemp); actual=$(mktemp)
 CLEAN_TMP="$declared $actual"   # picked up by the single cleanup() trap
-{ grep -E '^\+\+\+ b/' "$ROOT/$P1" "$ROOT/$P2" "$ROOT/$P3" "$ROOT/$P4"; } \
+{ grep -E '^\+\+\+ b/' "$ROOT/$P1" "$ROOT/$P2" "$ROOT/$P3" "$ROOT/$P4" "$ROOT/$P5"; } \
     | sed -E 's/^.*\+\+\+ b\///' | sort -u > "$declared"
 # every declared file exists in the staged tree
 while IFS= read -r f; do
@@ -197,7 +205,7 @@ fi
 # Drop the scratch .git so the staged tree is a plain source dir for the build.
 rm -rf "$STAGED/.git"
 
-echo "OK: pinned base $BASE + 0001 + 0002 + 0003 + 0004 -> $STAGED"
+echo "OK: pinned base $BASE + 0001 + 0002 + 0003 + 0004 + 0005 -> $STAGED"
 echo "     $(wc -l < "$declared" | tr -d ' ') changed/new files, all declared; reverse-check clean."
 [ "$DRY_RUN" -eq 1 ] && echo "     (dry-run: staged tree discarded)"
 exit 0
