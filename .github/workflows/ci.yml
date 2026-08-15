@@ -1755,6 +1755,12 @@ jobs:
       - name: JS lint
         run: make lint-js
 
+      - name: Compute-SDK header canonical-copy check (#331)
+        run: make check-sdk-headers
+
+      - name: Compute-SDK header check self-test (negative) (#331)
+        run: make check-sdk-headers-selftest
+
   htmx-browser:
     name: HTMX browser tests (${{ matrix.name }})
     strategy:
