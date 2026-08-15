@@ -15,6 +15,7 @@
 #include "hull/shared/log_lock.h"
 #include "hull/vfs.h"
 #include "hull/entry.h"
+#include "gen_echo64_aot.h" /* build-generated: echo64_aot[] + _len (0 if no wamrc) */
 #include <limits.h>
 #include <pthread.h>
 #include <stdatomic.h>
@@ -2275,6 +2276,65 @@ UTEST(hl_cap_wasm, wasm32_not_memory64)
 
     ASSERT_NE(mod, NULL);
     ASSERT_EQ(mod->is_memory64, 0);
+
+    hl_cap_wasm_destroy(&cache);
+}
+
+/* #318 D4.3: the crux -- a real Memory64 AOT module run through hl_cap_wasm_call,
+ * exercising the 8-cell hull_process(i64,i64,i64,i64) argv marshalling and the
+ * output readback (the path that was dead while detection was compiled out).
+ * echo64 AOT-compiled by wamrc (which auto-detects Memory64 from the module --
+ * there is no --enable-memory64 flag) loads as AOT + Memory64; the call
+ * echoes its input. Skips when wamrc is unavailable (e.g. an LLVM too new for the
+ * vendored WAMR compiler); the memory64-aot CI job builds wamrc and asserts this
+ * case is NOT skipped. */
+UTEST(hl_cap_wasm, memory64_aot_dispatch)
+{
+    if (echo64_aot_len == 0)
+        UTEST_SKIP("no wamrc-built echo64 .aot in this build leg");
+
+    /* The VFS AOT key must match hl_cap_wasm_load's compute/<name>.aot.<arch>. */
+#if defined(__x86_64__) || defined(_M_X64) || defined(__amd64__)
+    static const char *aot_key = "compute/echo64.aot.x86_64";
+#elif defined(__aarch64__) || defined(_M_ARM64)
+    static const char *aot_key = "compute/echo64.aot.aarch64";
+#else
+    UTEST_SKIP("unsupported arch for the Memory64 AOT dispatch test");
+#endif
+
+    HlWasmCache cache;
+    ASSERT_EQ(hl_cap_wasm_init(&cache), 0);
+
+    HlEntry entries[] = { { aot_key, echo64_aot, echo64_aot_len } };
+    HlVfs vfs;
+    hl_vfs_init(&vfs, entries, NULL);
+
+    ASSERT_EQ(hl_cap_wasm_load(&cache, "echo64", &vfs, NULL), 0);
+
+    pthread_mutex_lock(&cache.pool_mutex);
+    HlWasmModule *mod = NULL;
+    for (int i = 0; i < cache.count; i++) {
+        if (strcmp(cache.modules[i].name, "echo64") == 0) {
+            mod = &cache.modules[i];
+            break;
+        }
+    }
+    pthread_mutex_unlock(&cache.pool_mutex);
+    ASSERT_NE(mod, NULL);
+    ASSERT_EQ(mod->is_memory64, 1);   /* detected */
+    ASSERT_EQ(mod->is_aot, 1);        /* loaded as AOT (so the mem64 guard passes) */
+
+    /* 8-cell dispatch + readback: echo64 copies input -> output. */
+    void *output = NULL;
+    size_t output_len = 0;
+    const char *err = NULL;
+    int rc = hl_cap_wasm_call(&cache, "echo64", "hello64", 7, &output, &output_len,
+                              NULL, NULL, NULL, &vfs, NULL, NULL, &err);
+    ASSERT_EQ(rc, HL_WASM_OK);
+    ASSERT_EQ(output_len, (size_t)7);
+    ASSERT_NE(output, NULL);
+    ASSERT_EQ(memcmp(output, "hello64", 7), 0);
+    free(output);
 
     hl_cap_wasm_destroy(&cache);
 }

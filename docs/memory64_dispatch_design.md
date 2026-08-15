@@ -1,6 +1,7 @@
 # Memory64 cap-layer dispatch — decision record (#318)
 
-**Status:** DECISION LOCKED, pre-implementation. Scope: activate Hull's already-written
+**Status:** IMPLEMENTED (#318, PR #335). D4.1–D4.3 landed; D4.4 + the `hull build`
+mem64 path deferred to #334. Scope: activate Hull's already-written
 Memory64 dispatch by making detection work, via a public WAMR accessor rather than
 by exposing WAMR internals to Hull TUs. One standalone PR on #318.
 
@@ -76,13 +77,18 @@ if (mem && wasm_runtime_memory_is_memory64(mem))                    /* public (0
 
 ## D3 (LOCKED) — fixture + wamrc requirement
 
-- Fixture: a `(memory i64 …)` module exporting `hull_process` with the
-  `(i64,i64,i64,i64)->i32` ABI and `hull_version`. Authored as `.wat`/`.wasm` under
-  `tests/hull/fixtures/` (or `tests/fixtures/compute/` for the SPAN_INFO leg).
+- Fixture: the committed `(memory i64)` module `tests/fixtures/compute/echo64.wasm`
+  (echoes input to output) exporting `hull_process` with the `(i64,i64,i64,i64)->i32`
+  ABI and `hull_version`.
 - **Memory64 requires AOT** (fast interp cannot load it), so the fixture is embedded as
-  an `.aot` built through the existing `GEN_GSUB_AOT` machinery (`mk/tests.mk`), which
-  drives the build `wamrc` with **`--enable-memory64`** added for this fixture. The
-  vendored `wamrc` already supports the flag; no toolchain change.
+  an `.aot`. **There is NO `--enable-memory64` flag** in the vendored `wamrc` — it
+  **auto-detects** Memory64 from the module's `(memory i64)` type (passing the flag
+  prints usage and fails). A dedicated `GEN_MEM64_AOT` macro (`mk/tests.mk`) drives
+  the build `wamrc` with just `--opt-level=3 --bounds-checks=1` and surfaces its
+  stderr on failure. **Do NOT pass `--enable-shared-heap`** for the mem64 fixture: a
+  shared-heap-codegen AOT run with no heap attached **segfaults** on a Memory64
+  module (confirmed in CI — the dispatch crashed with the flag, passed once it was
+  dropped; wasm32 AOTs are unaffected), and echo64 uses no shared heap.
 - The `.wasm` is retained only to prove the interp-rejection leg (D4.2).
 
 ## D4 (LOCKED) — non-skippable CI legs
@@ -90,8 +96,10 @@ if (mem && wasm_runtime_memory_is_memory64(mem))                    /* public (0
 Each mirrors the existing span "must NOT skip" gate in `.github/workflows/ci.yml`
 (fail the job if the wamrc-unavailable skip path is taken):
 
-1. **Detection** — load the Memory64 AOT fixture → `is_memory64 == 1`; load a wasm32
-   module → `is_memory64 == 0` (through the same accessor).
+1. **Detection** — load the Memory64 module as the **interpreter** `echo64.wasm`
+   (detection reads the flag at load, no AOT needed) → `is_memory64 == 1`; load a
+   wasm32 module → `is_memory64 == 0` (through the same accessor). Runs unconditionally
+   (no wamrc dependency); only legs 3–4 need the AOT fixture.
 2. **AOT enforcement** — present a Memory64 module to the interpreter path →
    `memory64_requires_aot`, clean rejection, no dispatch.
 3. **8-cell dispatch + readback** — call `hull_process` on the Memory64 AOT fixture with
@@ -109,8 +117,20 @@ Each mirrors the existing span "must NOT skip" gate in `.github/workflows/ci.yml
    - **Returned span `base`** (the window's guest address, in the record): **64-bit.**
      Under Memory64 it must be exercised **above `UINT32_MAX`** — a span whose window
      sits in the high 64-bit space, read back correctly through the record's 64-bit
-     `base`. Landed in this PR if the fixture supports a >4 GiB window cheaply;
-     otherwise a clearly tracked follow-up on #318 (noted in the PR, not dropped).
+     `base`.
+
+   **DEFERRED to [#334](https://github.com/artalis-io/hull/issues/334).** D4.1–D4.3
+   landed in the #318 PR (detection, `memory64_requires_aot` enforcement, and the
+   8-cell dispatch/readback on the `echo64` AOT fixture). SPAN_INFO-under-Memory64
+   needs a NEW `(memory i64)` span-reading fixture (the existing span fixtures are
+   all wasm32) — materially more than the echo64 dispatch — so it is a tracked
+   follow-up, not part of #318. Until #334 lands, Memory64 **mapped spans** are NOT
+   described as fully validated anywhere. The scratch-below-4-GiB vs 64-bit-`base`
+   distinction above is carried verbatim into #334. #334 ALSO covers the `hull build`
+   AOT path for a Memory64 compute plugin (`build.lua` still passes the bogus
+   `--enable-memory64` flag and would compile `--enable-shared-heap` onto a mem64
+   AOT); #318 proves the runtime dispatch by loading a hand-compiled `echo64.aot`
+   directly via `hl_cap_wasm_load`, bypassing `build.lua`.
 
 Convert `test_wasm.c::memory64_detection` and `memory64_rejects_interpreter` from
 their `#if WASM_ENABLE_MEMORY64` `#else` (disabled) form to the live assertions above;
