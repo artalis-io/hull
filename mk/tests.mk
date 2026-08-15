@@ -225,6 +225,20 @@ $(BUILDDIR)/gen_memops_wasm.h: $(TESTDIR)/fixtures/compute/memops.wasm | $(BUILD
 $(BUILDDIR)/test_wasm_memops: INCLUDES += -I$(BUILDDIR)
 $(BUILDDIR)/test_wasm_memops: $(BUILDDIR)/gen_memops_wasm.h
 
+# hull_span.h native-vs-WASM differential (#324 3b). Embed the self-contained
+# guest as a byte array (interpreter) + build an AOT fixture from the same .wasm
+# when wamrc is present (skips to an empty fixture otherwise; the CI AOT job
+# builds wamrc and asserts the AOT diff sub-case is NOT skipped). The test also
+# needs templates/ (hull_span.h) and the shared spandiff_ops.h on its include path.
+$(BUILDDIR)/gen_spandiff_wasm.h: $(TESTDIR)/fixtures/compute/spandiff.wasm | $(BUILDDIR)
+	@cp $< $(BUILDDIR)/spandiff.wasm
+	@(cd $(BUILDDIR) && xxd -i spandiff.wasm) \
+	  | sed -E 's/unsigned char.*\[\]/static const unsigned char spandiff_wasm[]/; s/unsigned int.*_len/static const unsigned int spandiff_wasm_len/' > $@
+$(BUILDDIR)/gen_spandiff_aot.h: $(TESTDIR)/fixtures/compute/spandiff.wasm | $(BUILDDIR)
+	$(call GEN_GSUB_AOT,$@,,spandiff_aot)
+$(BUILDDIR)/test_span_diff: INCLUDES += -I$(BUILDDIR) -Itemplates -I$(TESTDIR)/fixtures/compute
+$(BUILDDIR)/test_span_diff: $(BUILDDIR)/gen_spandiff_wasm.h $(BUILDDIR)/gen_spandiff_aot.h
+
 # Top-level tests (tests/hull/)
 $(BUILDDIR)/test_parse_size: $(TESTDIR)/hull/test_parse_size.c $(TEST_COMMON_DEPS) | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< $(TEST_COMMON_LIBS)
@@ -238,6 +252,12 @@ $(BUILDDIR)/test_cfi: $(TESTDIR)/hull/test_cfi.c | $(BUILDDIR)
 # CSP preset registry — tiny, no deps beyond <string.h>.
 $(BUILDDIR)/test_csp: $(TESTDIR)/hull/test_csp.c $(CSP_OBJ) | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< $(CSP_OBJ)
+
+# Mapped-spans SDK header (templates/hull_span.h, checkpoint 3b) — native decoder
+# / name-lookup / scratch-narrow tests. Freestanding header; the only extra
+# include path is -Itemplates for hull_span.h. No deps beyond libc.
+$(BUILDDIR)/test_span_sdk: $(TESTDIR)/hull/test_span_sdk.c templates/hull_span.h | $(BUILDDIR)
+	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -Itemplates -o $@ $< $(LDFLAGS)
 
 # Embedding ABI — links the whole libhull.a the way a native host does,
 # so this also link-tests the archive on every `make test`. Only the
@@ -942,6 +962,29 @@ e2e-compute-aot-shared-heap:
 .PHONY: e2e-sync-spans
 e2e-sync-spans: $(BUILDDIR)/hull
 	sh tests/e2e_sync_spans.sh
+
+# hull compute new / refresh-header install+refresh both Hull-owned headers
+# (hull_compute.h + hull_span.h) atomically (mapped-spans 3b slice 1).
+e2e-compute-headers: $(BUILDDIR)/hull
+	sh tests/e2e_compute_headers.sh
+
+# mapped_spans reference plugin driven from Lua+JS, interp + (with wamrc) AOT,
+# over a non-page-aligned window using only the public hull_span.h SDK (3b slice 2).
+.PHONY: e2e-spans-example
+e2e-spans-example: $(BUILDDIR)/hull
+	sh tests/e2e_spans_example.sh
+
+# Multiple named spans: declaration-order discovery + name lookup (+ unknown -1),
+# Lua+JS on interpreter + (with wamrc) AOT, public hull_span.h SDK (3b final slice).
+.PHONY: e2e-spans-multi
+e2e-spans-multi: $(BUILDDIR)/hull
+	sh tests/e2e_spans_multi.sh
+
+# Sparse > 4 GiB window (exact 64-bit foffset) + hull_span_setup capacity + real-
+# window bounded reads, Lua+JS interp + AOT, public hull_span.h SDK (3b completion).
+.PHONY: e2e-spans-hugefile
+e2e-spans-hugefile: $(BUILDDIR)/hull
+	sh tests/e2e_spans_hugefile.sh
 
 e2e-compute-dev: $(BUILDDIR)/hull
 	sh tests/e2e_compute_dev.sh

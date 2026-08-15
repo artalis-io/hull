@@ -319,6 +319,10 @@ jobs:
         timeout-minutes: 2
         run: make e2e-sync-spans
 
+      - name: Compute header install/refresh E2E (hull_compute.h + hull_span.h, 3b)
+        timeout-minutes: 2
+        run: make e2e-compute-headers
+
       - name: Named-connection async/udf E2E tests
         timeout-minutes: 2
         run: make e2e-named-connections
@@ -441,6 +445,26 @@ jobs:
             || { echo "::error::span AOT lifecycle case did not run to OK"; exit 1; }
           echo "mapped-span AOT lifecycle case ran against a real wamrc .aot and passed."
 
+      - name: Build + run the hull_span.h native-vs-WASM differential (must NOT skip)
+        timeout-minutes: 12
+        run: |
+          # 3b: identical fixtures through the native SDK and a real wasm guest on
+          # interpreter AND AOT must agree byte-for-byte. FAIL if the AOT diff
+          # sub-case takes the wamrc-unavailable skip path.
+          sh tests/ci_ensure_wamrc.sh
+          rm -f build/gen_spandiff_aot.h
+          make build/test_span_diff
+          set -o pipefail
+          ./build/test_span_diff 2>&1 | tee spandiff.log
+          rc=${PIPESTATUS[0]}
+          [ "$rc" -eq 0 ] || { echo "::error::test_span_diff failed (rc=$rc)"; exit "$rc"; }
+          if grep -qE "SKIPPED spandiff\.aot_diff" spandiff.log; then
+            echo "::error::span diff AOT sub-case took the wamrc-unavailable skip path"; exit 1
+          fi
+          grep -qE "spandiff\.aot_diff ran" spandiff.log \
+            || { echo "::error::span diff AOT sub-case did not run"; exit 1; }
+          echo "hull_span.h decodes identically native vs wasm (interp + AOT)."
+
   # Compute AOT shared-heap reads (#326): `hull build` must pass
   # --enable-shared-heap so a plugin that reads a mapped SPAN or a compute.SEGMENT
   # (both WAMR shared heaps) reads correct nonzero bytes under AOT, not zeros.
@@ -542,6 +566,138 @@ jobs:
             || { echo "::error::memops e2e did not run its 7 checks to pass"; exit 1; }
           echo "freestanding memcpy/memset/memmove: no import, correct under interp + AOT."
 
+  # mapped_spans reference example (3b slice 2). The spanreader plugin uses only
+  # the public hull_span.h SDK and reads a NON-page-aligned mapped-span window;
+  # driven from Lua AND JS, on the interpreter and under AOT via the PRODUCTION
+  # `hull build` path (--enable-shared-heap). Needs a wasm clang + wamrc + an
+  # embedded hull; runs non-skippably here.
+  spans-example:
+    name: mapped_spans example — Lua + JS, interp + AOT (public SDK)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          submodules: true
+
+      - name: Install clang + lld + LLVM + cmake
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang lld llvm-18-dev cmake
+
+      - name: Build embedded hull (platform lib) + wamrc
+        timeout-minutes: 15
+        run: |
+          make platform
+          if command -v llvm-config-18 >/dev/null 2>&1; then
+            export WAMRC_CMAKE_FLAGS="-DLLVM_DIR=$(llvm-config-18 --cmakedir)"
+          fi
+          make wamrc
+          # Embed LAST: a later bare `make` would clobber the embedding
+          # (EMBED_PLATFORM is not in the config sentinel), and the e2e needs it.
+          make EMBED_PLATFORM=1
+
+      - name: mapped_spans example E2E (Lua + JS, interp + AOT, must NOT skip)
+        timeout-minutes: 12
+        run: |
+          set -o pipefail
+          # Precondition: guarantee an executable wamrc for the non-skippable AOT
+          # leg rather than trusting mutable build/ state (see the helper header).
+          sh tests/ci_ensure_wamrc.sh
+          sh tests/e2e_spans_example.sh 2>&1 | tee spans_ex.log
+          rc=${PIPESTATUS[0]}
+          [ "$rc" -eq 0 ] || { echo "::error::spans example e2e failed (rc=$rc)"; exit "$rc"; }
+          if grep -qE '\bSKIP\b' spans_ex.log; then
+            echo "::error::spans example e2e skipped (no clang / no embedded hull / no wamrc)"; exit 1
+          fi
+          grep -qE "spans-example: 22 passed, 0 failed" spans_ex.log \
+            || { echo "::error::spans example e2e did not run its 22 checks to pass"; exit 1; }
+          echo "mapped_spans example: public SDK read correct on interp + AOT, both runtimes."
+
+  # Multiple named spans (3b final slice): declaration-order discovery + per-name
+  # lookup (+ unknown -1), Lua AND JS, interpreter AND AOT via the production
+  # `hull build` path. Needs a wasm clang + wamrc + an embedded hull; non-skippable.
+  spans-multi:
+    name: mapped spans — multiple named spans, Lua + JS, interp + AOT
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          submodules: true
+
+      - name: Install clang + lld + LLVM + cmake
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang lld llvm-18-dev cmake
+
+      - name: Build embedded hull (platform lib) + wamrc
+        timeout-minutes: 15
+        run: |
+          make platform
+          if command -v llvm-config-18 >/dev/null 2>&1; then
+            export WAMRC_CMAKE_FLAGS="-DLLVM_DIR=$(llvm-config-18 --cmakedir)"
+          fi
+          make wamrc
+          # Embed LAST: a later bare `make` would clobber the embedding
+          # (EMBED_PLATFORM is not in the config sentinel), and the e2e needs it.
+          make EMBED_PLATFORM=1
+
+      - name: Multiple-named-spans E2E (Lua + JS, interp + AOT, must NOT skip)
+        timeout-minutes: 12
+        run: |
+          set -o pipefail
+          sh tests/ci_ensure_wamrc.sh
+          sh tests/e2e_spans_multi.sh 2>&1 | tee spans_multi.log
+          rc=${PIPESTATUS[0]}
+          [ "$rc" -eq 0 ] || { echo "::error::spans-multi e2e failed (rc=$rc)"; exit "$rc"; }
+          if grep -qE '\bSKIP\b' spans_multi.log; then
+            echo "::error::spans-multi e2e skipped (no clang / no embedded hull / no wamrc)"; exit 1
+          fi
+          grep -qE "spans-multi: 22 passed, 0 failed" spans_multi.log \
+            || { echo "::error::spans-multi e2e did not run its 22 checks to pass"; exit 1; }
+          echo "multiple named spans: declaration-order discovery + lookup on interp + AOT, both runtimes."
+
+  # Sparse > 4 GiB window (exact 64-bit foffset) + hull_span_setup() capacity
+  # (exact/excess/insufficient + true count) + real-window bounded reads
+  # (first/exact-end/one-past/straddle), Lua + JS, interpreter + AOT (3b
+  # completion). Uses a SPARSE 5 GiB file (no real disk) so it runs anywhere.
+  spans-hugefile:
+    name: mapped spans — >4GiB foffset + setup capacity, Lua + JS, interp + AOT
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          submodules: true
+
+      - name: Install clang + lld + LLVM + cmake
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang lld llvm-18-dev cmake
+
+      - name: Build embedded hull (platform lib) + wamrc
+        timeout-minutes: 15
+        run: |
+          make platform
+          if command -v llvm-config-18 >/dev/null 2>&1; then
+            export WAMRC_CMAKE_FLAGS="-DLLVM_DIR=$(llvm-config-18 --cmakedir)"
+          fi
+          make wamrc
+          make EMBED_PLATFORM=1
+
+      - name: Huge-file / setup-capacity E2E (Lua + JS, interp + AOT, must NOT skip)
+        timeout-minutes: 12
+        run: |
+          set -o pipefail
+          sh tests/ci_ensure_wamrc.sh
+          sh tests/e2e_spans_hugefile.sh 2>&1 | tee spans_huge.log
+          rc=${PIPESTATUS[0]}
+          [ "$rc" -eq 0 ] || { echo "::error::spans-hugefile e2e failed (rc=$rc)"; exit "$rc"; }
+          if grep -qE '\bSKIP\b' spans_huge.log; then
+            echo "::error::spans-hugefile e2e skipped (no clang / no embedded hull / no wamrc / no python3)"; exit 1
+          fi
+          grep -qE "spans-hugefile: 34 passed, 0 failed" spans_huge.log \
+            || { echo "::error::spans-hugefile e2e did not run its 34 checks to pass"; exit 1; }
+          echo ">4GiB foffset + hull_span_setup capacity + bounded reads: interp + AOT, both runtimes."
+
   # patch 0004 arm64 AOT gate. The x86_64 job above proves the guarded-subrange
   # AOT path on x86_64; this runs the same non-skipped AOT matrix on arm64, where
   # WAMR sets the emitted load/store alignment to the WASM hint and a span whose
@@ -612,6 +768,23 @@ jobs:
           grep -qE "OK[^A-Za-z].*wasm_spans\\.aot_span_lifecycle" spans.log \
             || { echo "::error::span AOT lifecycle case did not run to OK"; exit 1; }
           echo "arm64 mapped-span AOT lifecycle case ran against a real wamrc .aot and passed."
+
+      - name: Build + run the hull_span.h native-vs-WASM differential (arm64, must NOT skip)
+        timeout-minutes: 12
+        run: |
+          sh tests/ci_ensure_wamrc.sh
+          rm -f build/gen_spandiff_aot.h
+          make build/test_span_diff
+          set -o pipefail
+          ./build/test_span_diff 2>&1 | tee spandiff.log
+          rc=${PIPESTATUS[0]}
+          [ "$rc" -eq 0 ] || { echo "::error::test_span_diff failed (rc=$rc)"; exit "$rc"; }
+          if grep -qE "SKIPPED spandiff\.aot_diff" spandiff.log; then
+            echo "::error::span diff AOT sub-case took the wamrc-unavailable skip path"; exit 1
+          fi
+          grep -qE "spandiff\.aot_diff ran" spandiff.log \
+            || { echo "::error::span diff AOT sub-case did not run"; exit 1; }
+          echo "arm64 hull_span.h decodes identically native vs wasm (interp + AOT)."
 
   # Reproducibility gate. Three properties tested independently on
   # both Linux and macOS via matrix strategy:
