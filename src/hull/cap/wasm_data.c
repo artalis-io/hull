@@ -109,42 +109,85 @@ int hl_wasm_rebuild_chain(HlWasmModule *mod)
     return 0;
 }
 
-void hl_wasm_free_segment(HlWasmDataSegment *seg)
+int hl_wasm_free_segment(HlWasmDataSegment *seg)
 {
+    /* Reclaim WAMR's shared-heap descriptor (patch 0003,
+     * wasm_runtime_destroy_shared_heap) FIRST, then release the backing -- the
+     * ORDER matters. Its preconditions (detached, attached_count == 0, and
+     * unchained) are established by the callers: every segment teardown path
+     * drains the pool first (hl_wasm_pool_drain detaches) and unchains a
+     * multi-segment chain before calling this.
+     *
+     * On destroy FAILURE (unexpected after detach + unchain) RETAIN EVERYTHING and
+     * return -1: the descriptor stays on WAMR's list, and it still references the
+     * backing, so the backing MUST NOT be freed -- unmapping it (or, for is_mmap
+     * backing, letting the caller drop its MappedBuffer pin) would leave a live
+     * descriptor pointing at freed/unmapped memory (a UAF). This mirrors the span
+     * teardown's retain-on-destroy-failure rule (cap/wasm_spans.c): keep the heap
+     * handle AND the backing so cleanup can be retried, or deferred to
+     * wasm_runtime_destroy(). The caller propagates the -1 (keeps the slot + the
+     * MappedBuffer pin). Only a SUCCESSFUL destroy releases the backing. */
+    if (seg->shared_heap) {
+        if (!wasm_runtime_destroy_shared_heap(
+                (wasm_shared_heap_t)seg->shared_heap)) {
+            log_error("[wasm] segment shared-heap destroy failed; retaining "
+                      "descriptor + backing (deferred to runtime teardown)");
+            return -1; /* retain descriptor, backing, and metadata */
+        }
+        seg->shared_heap = NULL;
+    }
+
+    /* Descriptor reclaimed (or was never created) -> safe to release the backing.
+     * Only Hull-owned (copied) backing is unmapped here; zero-copy pre_alloc'd
+     * (is_mmap) backing is the caller's MappedBuffer, whose pin the binding drops
+     * once this returns 0. */
     if (!seg->is_mmap && seg->host_addr) {
         munmap(seg->host_addr, seg->alloc_size);
         seg->host_addr = NULL;
     }
-    /* WAMR has no public API to destroy individual shared heaps.
-     * The WASMSharedHeap struct (~64 bytes) is freed globally on
-     * wasm_runtime_destroy(). For pre-allocated heaps (our case),
-     * WAMR does not own the backing memory — we freed it above. */
-    seg->shared_heap = NULL;
     seg->size = 0;
     seg->wasm_addr = 0;
     seg->name[0] = '\0';
+    return 0;
 }
 
-void hl_wasm_free_shared_data(HlWasmModule *mod)
+int hl_wasm_free_shared_data(HlWasmModule *mod)
 {
     if (!mod->shared_data)
-        return;
+        return 0;
 
     HlWasmSharedData *sd = mod->shared_data;
 
-    /* Unchain all heaps first */
+    /* Unchain all heaps first (so every heap is standalone -> destroyable). */
     if (sd->chain_head && sd->count > 1) {
         wasm_runtime_unchain_shared_heaps(
             (wasm_shared_heap_t)sd->chain_head, true);
     }
-
-    for (int i = 0; i < sd->count; i++)
-        hl_wasm_free_segment(&sd->segments[i]);
-
-    sd->count = 0;
     sd->chain_head = NULL;
-    free(sd);
-    mod->shared_data = NULL;
+
+    /* Destroy each. RETAIN (compact to the front) any segment whose descriptor
+     * could not be destroyed, so its still-live descriptor keeps referencing
+     * backing that stays mapped/pinned -- never a dangling descriptor. */
+    int w = 0;
+    for (int i = 0; i < sd->count; i++) {
+        if (hl_wasm_free_segment(&sd->segments[i]) != 0) {
+            if (w != i)
+                sd->segments[w] = sd->segments[i];
+            w++;
+        }
+    }
+    for (int i = w; i < sd->count; i++)
+        memset(&sd->segments[i], 0, sizeof(sd->segments[i]));
+    sd->count = w;
+
+    if (w == 0) {
+        free(sd);
+        mod->shared_data = NULL;
+        return 0;
+    }
+    /* Some retained: keep shared_data alive (segments + their pins survive) so a
+     * later teardown can retry; wasm_runtime_destroy() reclaims the rest. */
+    return -1;
 }
 
 void hl_wasm_attach_shared_heap(void *inst, void *chain_head)
@@ -248,8 +291,15 @@ int hl_cap_wasm_data_load(HlWasmCache *cache, const char *module_name,
     /* Case 1: segment_name==NULL && data==NULL → remove all segments */
     if (!segment_name && !data) {
         hl_wasm_pool_drain(&mod->pool);
-        hl_wasm_free_shared_data(mod);
+        int frc = hl_wasm_free_shared_data(mod);
         pthread_mutex_unlock(&mod->mutex);
+        if (frc != 0) {
+            /* One or more descriptors could not be destroyed; retained (with their
+             * backing/pins) rather than left dangling. Report failure so a
+             * MappedBuffer-backed segment keeps its binding pin. */
+            if (err_msg) *err_msg = err_internal;
+            return -1;
+        }
         log_debug("[wasm] removed all shared data for '%s'", module_name);
         return 0;
     }
@@ -274,20 +324,29 @@ int hl_cap_wasm_data_load(HlWasmCache *cache, const char *module_name,
             HlWasmSharedData *sd = mod->shared_data;
             for (int i = 0; i < sd->count; i++) {
                 if (strcmp(sd->segments[i].name, segment_name) == 0) {
-                    /* Unchain before removing */
+                    /* Drain FIRST so the chain is detached (attached_count -> 0),
+                     * a precondition for both the unchain and the per-heap destroy
+                     * below. Then unchain (a multi-segment chain) so every heap is
+                     * standalone, then free (which destroys the removed heap). */
+                    hl_wasm_pool_drain(&mod->pool);
                     if (sd->chain_head && sd->count > 1) {
                         wasm_runtime_unchain_shared_heaps(
                             (wasm_shared_heap_t)sd->chain_head, true);
                         sd->chain_head = NULL;
                     }
-                    hl_wasm_free_segment(&sd->segments[i]);
-                    /* Compact: shift remaining segments */
-                    for (int j = i; j < sd->count - 1; j++)
-                        sd->segments[j] = sd->segments[j + 1];
-                    sd->count--;
-                    memset(&sd->segments[sd->count], 0, sizeof(HlWasmDataSegment));
-
-                    hl_wasm_pool_drain(&mod->pool);
+                    int frc = hl_wasm_free_segment(&sd->segments[i]);
+                    if (frc == 0) {
+                        /* Compact: shift remaining segments */
+                        for (int j = i; j < sd->count - 1; j++)
+                            sd->segments[j] = sd->segments[j + 1];
+                        sd->count--;
+                        memset(&sd->segments[sd->count], 0,
+                               sizeof(HlWasmDataSegment));
+                    }
+                    /* Rebuild the chain over whatever segments remain. On a retained
+                     * destroy failure the target stays LIVE in the array (its
+                     * descriptor + backing are intact), so it is re-chained too --
+                     * never dropped while its descriptor is on WAMR's list. */
                     if (sd->count > 0)
                         hl_wasm_rebuild_chain(mod);
                     else {
@@ -295,6 +354,12 @@ int hl_cap_wasm_data_load(HlWasmCache *cache, const char *module_name,
                         mod->shared_data = NULL;
                     }
                     pthread_mutex_unlock(&mod->mutex);
+                    if (frc != 0) {
+                        /* Descriptor retained (backing + MappedBuffer pin kept).
+                         * Report failure so the binding does not drop the pin. */
+                        if (err_msg) *err_msg = err_internal;
+                        return -1;
+                    }
                     log_debug("[wasm] removed segment '%s' from '%s'",
                               segment_name, module_name);
                     return 0;
@@ -355,6 +420,12 @@ int hl_cap_wasm_data_load(HlWasmCache *cache, const char *module_name,
         return -1;
     }
 
+    /* Drain the pool FIRST: it detaches the current chain (attached_count -> 0),
+     * a precondition for the unchain and for destroying the replaced slot's heap
+     * below. Held under mod->mutex, so the pool stays empty through the rebuild
+     * (no call can acquire), making the later re-drain unnecessary. */
+    hl_wasm_pool_drain(&mod->pool);
+
     /* Unchain existing chain before modifying */
     if (sd->chain_head && sd->count > 1) {
         wasm_runtime_unchain_shared_heaps(
@@ -362,9 +433,19 @@ int hl_cap_wasm_data_load(HlWasmCache *cache, const char *module_name,
         sd->chain_head = NULL;
     }
 
-    /* Free old segment at slot if replacing */
-    if (slot < sd->count && sd->segments[slot].shared_heap)
-        hl_wasm_free_segment(&sd->segments[slot]);
+    /* Free old segment at slot if replacing (destroys its heap; detached above).
+     * If the descriptor cannot be destroyed it is RETAINED live -- abort the
+     * replace rather than overwrite the slot, which would strand the old
+     * descriptor on WAMR's list pointing at soon-to-be-freed backing. Re-chain the
+     * retained segments and report failure so the binding keeps the old pin. */
+    if (slot < sd->count && sd->segments[slot].shared_heap) {
+        if (hl_wasm_free_segment(&sd->segments[slot]) != 0) {
+            hl_wasm_rebuild_chain(mod);
+            pthread_mutex_unlock(&mod->mutex);
+            if (err_msg) *err_msg = err_internal;
+            return -1;
+        }
+    }
 
     /* Create backing memory.
      * WAMR requires pre_allocated_addr regions to be page-aligned in size.
@@ -440,18 +521,21 @@ int hl_cap_wasm_data_load(HlWasmCache *cache, const char *module_name,
     if (slot == sd->count)
         sd->count++;
 
-    /* Rebuild chain and drain pool */
-    hl_wasm_pool_drain(&mod->pool);
+    /* Rebuild chain (pool already drained above, still empty under mod->mutex) */
     int chain_rc = hl_wasm_rebuild_chain(mod);
 
     if (chain_rc != 0) {
-        /* Rollback: remove the segment we just added */
-        hl_wasm_free_segment(seg);
-        if (slot == sd->count - 1)
-            sd->count--;
-        if (sd->count == 0) {
-            free(sd);
-            mod->shared_data = NULL;
+        /* Rollback: destroy the segment we just added. If its descriptor cannot be
+         * destroyed (retained -> non-zero), keep the slot so nothing frees the
+         * backing the live descriptor still references; only drop the slot on a
+         * clean destroy. */
+        if (hl_wasm_free_segment(seg) == 0) {
+            if (slot == sd->count - 1)
+                sd->count--;
+            if (sd->count == 0) {
+                free(sd);
+                mod->shared_data = NULL;
+            }
         }
         pthread_mutex_unlock(&mod->mutex);
         if (err_msg) *err_msg = err_internal;
