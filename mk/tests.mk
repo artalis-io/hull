@@ -989,6 +989,12 @@ e2e-spans-hugefile: $(BUILDDIR)/hull
 e2e-compute-dev: $(BUILDDIR)/hull
 	sh tests/e2e_compute_dev.sh
 
+# Stream chunk-metadata SDK helpers (hull_stream_is_first/is_last/chunk_index),
+# restored to the canonical hull_compute.h; Lua+JS interp + AOT (#331).
+.PHONY: e2e-stream-meta
+e2e-stream-meta: $(BUILDDIR)/hull
+	sh tests/e2e_stream_meta.sh
+
 # AOT artifact cache (requires wamrc — skipped cleanly when absent).
 e2e-aot-cache: $(BUILDDIR)/hull
 	sh tests/e2e_aot_cache.sh

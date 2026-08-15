@@ -4,7 +4,10 @@
  * Freestanding header for Hull compute plugins. Provides:
  *   - Type definitions (no stdlib dependency)
  *   - Host call interface (logging, data segments)
- *   - Minimal libc replacements (memcpy, memset, memcmp, strlen)
+ *   - Stream chunk metadata (hull_stream_is_first/is_last/chunk_index)
+ *   - hull_* libc helpers (hull_memcpy/memset/memcmp/strlen)
+ *   - bare memcpy/memset/memmove so compiler-emitted calls (struct
+ *     copies, block init, runtime-length loops) resolve, not trap
  *   - 64KB bump allocator
  *   - Error codes and export macros
  *
@@ -85,6 +88,10 @@ static inline int32_t hull_segment_size(int32_t seg_id)
 
 /* ── Stream chunk info ────────────────────────────────────────────── */
 
+/* When a module is driven by compute.stream, the host exposes per-chunk
+ * metadata via host_call(HULL_OP_STREAM, 0, selector). Ordinary (non-stream)
+ * calls report flags 0 and chunk index 0. Constants mirror the host
+ * (include/hull/cap/wasm.h: HL_WASM_OP_STREAM / HL_WASM_STREAM_*). */
 #define HULL_OP_STREAM          0x03
 #define HULL_STREAM_FLAGS       0
 #define HULL_STREAM_CHUNK_INDEX 1
@@ -145,6 +152,82 @@ static inline size_t hull_strlen(const char *s)
     while (s[len]) len++;
     return len;
 }
+
+/* ── Compiler-emitted libc (memcpy / memset / memmove) ─────────────── */
+
+/*
+ * Even under -nostdlib, clang lowers struct copies, block initializers,
+ * and runtime-length byte loops to *implicit* calls to the standard
+ * symbols memcpy / memset / memmove. Without definitions those become
+ * undefined wasm imports that trap on first call ("failed to call
+ * unlinked import function (env, memcpy)"). Provide them so the
+ * compiler-generated calls resolve inside the module.
+ *
+ *   - External linkage (not static): the emitted calls bind to these.
+ *   - __SIZE_TYPE__ params: match the builtin's ABI exactly on wasm32,
+ *     regardless of the header's own size_t typedef.
+ *   - no_builtin(...) is load-bearing: at -O2 clang would otherwise
+ *     recognize each body's own loop as its namesake and replace it with
+ *     a self-call (infinite recursion). The attribute keeps it a loop.
+ *   - Guarded to __wasm__ so a native compile of this header (host-side
+ *     test) keeps using the platform libc's memcpy/memset/memmove.
+ *
+ * The hull_* helpers above stay for source compatibility; their loops
+ * may now lower to these same definitions, which is correct and cheap.
+ *
+ * memcpy keeps the STANDARD contract: the regions must not overlap
+ * (undefined otherwise, exactly like libc). Use memmove for overlap.
+ *
+ * Linkage model: these are external, so multiple translation units that
+ * each include this header and are then linked together would collide.
+ * Hull compiles exactly ONE translation unit per compute module
+ * (compute/<name>/<name>.c -> one .wasm); multi-source-per-module is not
+ * a supported build model, so a single definition per module never
+ * collides. If you build a module from several objects yourself, make
+ * these `weak` or keep them in a single TU.
+ */
+#if defined(__wasm__)
+
+/* These definitions require clang (the compiler Hull's wasm32 toolchain
+ * uses): without no_builtin the bodies would self-recurse. Fail loudly on
+ * a toolchain that cannot honor it rather than emit a recursive memcpy. */
+#if !defined(__has_attribute) || !__has_attribute(no_builtin)
+#  error "hull_compute.h needs a compiler supporting __attribute__((no_builtin)) (clang) to define freestanding memcpy/memset/memmove safely"
+#endif
+
+__attribute__((no_builtin("memcpy")))
+void *memcpy(void *dst, const void *src, __SIZE_TYPE__ n)
+{
+    uint8_t *d = (uint8_t *)dst;
+    const uint8_t *s = (const uint8_t *)src;
+    while (n--) *d++ = *s++;
+    return dst;
+}
+
+__attribute__((no_builtin("memmove")))
+void *memmove(void *dst, const void *src, __SIZE_TYPE__ n)
+{
+    uint8_t *d = (uint8_t *)dst;
+    const uint8_t *s = (const uint8_t *)src;
+    if (d < s) {
+        while (n--) *d++ = *s++;
+    } else {
+        d += n;
+        s += n;
+        while (n--) *--d = *--s;
+    }
+    return dst;
+}
+
+__attribute__((no_builtin("memset")))
+void *memset(void *dst, int c, __SIZE_TYPE__ n)
+{
+    uint8_t *d = (uint8_t *)dst;
+    while (n--) *d++ = (uint8_t)c;
+    return dst;
+}
+
+#endif /* __wasm__ */
 
 /* ── Bump allocator (64KB arena) ──────────────────────────────────── */
 
