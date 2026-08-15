@@ -21,6 +21,7 @@ local HULL_COMPUTE_H = [[/*
  * Freestanding header for Hull compute plugins. Provides:
  *   - Type definitions (no stdlib dependency)
  *   - Host call interface (logging, data segments)
+ *   - Stream chunk metadata (hull_stream_is_first/is_last/chunk_index)
  *   - hull_* libc helpers (hull_memcpy/memset/memcmp/strlen)
  *   - bare memcpy/memset/memmove so compiler-emitted calls (struct
  *     copies, block init, runtime-length loops) resolve, not trap
@@ -100,6 +101,38 @@ static inline void *hull_segment_addr(int32_t seg_id)
 static inline int32_t hull_segment_size(int32_t seg_id)
 {
     return host_call(HULL_OP_DATA_INFO, seg_id, 1);
+}
+
+/* ── Stream chunk info ────────────────────────────────────────────── */
+
+/* When a module is driven by compute.stream, the host exposes per-chunk
+ * metadata via host_call(HULL_OP_STREAM, 0, selector). Ordinary (non-stream)
+ * calls report flags 0 and chunk index 0. Constants mirror the host
+ * (include/hull/cap/wasm.h: HL_WASM_OP_STREAM / HL_WASM_STREAM_*). */
+#define HULL_OP_STREAM          0x03
+#define HULL_STREAM_FLAGS       0
+#define HULL_STREAM_CHUNK_INDEX 1
+#define HULL_STREAM_FLAG_FIRST  0x02
+#define HULL_STREAM_FLAG_LAST   0x01
+
+static inline int hull_stream_flags(void)
+{
+    return host_call(HULL_OP_STREAM, 0, HULL_STREAM_FLAGS);
+}
+
+static inline int hull_stream_is_first(void)
+{
+    return (hull_stream_flags() & HULL_STREAM_FLAG_FIRST) != 0;
+}
+
+static inline int hull_stream_is_last(void)
+{
+    return (hull_stream_flags() & HULL_STREAM_FLAG_LAST) != 0;
+}
+
+static inline int hull_stream_chunk_index(void)
+{
+    return host_call(HULL_OP_STREAM, 0, HULL_STREAM_CHUNK_INDEX);
 }
 
 /* ── Minimal libc ─────────────────────────────────────────────────── */

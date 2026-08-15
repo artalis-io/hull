@@ -566,6 +566,47 @@ jobs:
             || { echo "::error::memops e2e did not run its 7 checks to pass"; exit 1; }
           echo "freestanding memcpy/memset/memmove: no import, correct under interp + AOT."
 
+  # Stream chunk-metadata SDK helpers restored to the canonical hull_compute.h
+  # (#331): hull_stream_is_first/is_last/chunk_index over a real 3-chunk
+  # compute.stream, Lua + JS, interpreter + AOT. Needs clang + wamrc + embedded hull.
+  stream-meta:
+    name: compute stream metadata helpers — Lua + JS, interp + AOT
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          submodules: true
+
+      - name: Install clang + lld + LLVM + cmake
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang lld llvm-18-dev cmake
+
+      - name: Build embedded hull (platform lib) + wamrc
+        timeout-minutes: 15
+        run: |
+          make platform
+          if command -v llvm-config-18 >/dev/null 2>&1; then
+            export WAMRC_CMAKE_FLAGS="-DLLVM_DIR=$(llvm-config-18 --cmakedir)"
+          fi
+          make wamrc
+          make EMBED_PLATFORM=1
+
+      - name: Stream-metadata E2E (Lua + JS, interp + AOT, must NOT skip)
+        timeout-minutes: 12
+        run: |
+          set -o pipefail
+          sh tests/ci_ensure_wamrc.sh
+          sh tests/e2e_stream_meta.sh 2>&1 | tee stream_meta.log
+          rc=${PIPESTATUS[0]}
+          [ "$rc" -eq 0 ] || { echo "::error::stream-meta e2e failed (rc=$rc)"; exit "$rc"; }
+          if grep -qE '\bSKIP\b' stream_meta.log; then
+            echo "::error::stream-meta e2e skipped (no clang / no embedded hull / no wamrc)"; exit 1
+          fi
+          grep -qE "stream-meta: 14 passed, 0 failed" stream_meta.log \
+            || { echo "::error::stream-meta e2e did not run its 14 checks to pass"; exit 1; }
+          echo "stream metadata helpers: first/middle/last + chunk-index + non-stream default, both runtimes, interp + AOT."
+
   # mapped_spans reference example (3b slice 2). The spanreader plugin uses only
   # the public hull_span.h SDK and reads a NON-page-aligned mapped-span window;
   # driven from Lua AND JS, on the interpreter and under AOT via the PRODUCTION
