@@ -1,0 +1,65 @@
+name: Mapped-span benchmark (1 GiB, manual)
+
+# Manually-triggered controlled run of the mapped-span benchmark at a large
+# dataset (default 1 GiB). NOT part of required PR CI -- the 96 MiB job in ci.yml
+# is. This exercises the shipped large-file mechanism at scale and demonstrates
+# the copy-once "not representable within the configured linear-memory limit"
+# finding (a 1 GiB dataset exceeds the wasm32 256 MB I/O ceiling, so the copy-once
+# baseline reports not-representable while the HullSpan zero-copy window still
+# reads it at native speed). The span window cap is exactly 1 GiB
+# (HL_FS_MMAP_MAX_WINDOW_BYTES), so 1024 is the max dataset here.
+# See docs/mapped_span_benchmark_design.md (D11).
+
+on:
+  workflow_dispatch:
+    inputs:
+      dataset_mb:
+        description: "Dataset size in MiB (max 1024 -- the span window cap)"
+        required: false
+        default: "1024"
+      cache:
+        description: "Cache state: warm or cold"
+        required: false
+        default: "warm"
+
+jobs:
+  mapped-span-bench-1g:
+    name: Mapped-span benchmark (${{ github.event.inputs.dataset_mb }} MiB)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          submodules: true
+
+      - name: Install LLVM + cmake + wabt
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y llvm-18-dev cmake wabt
+
+      - name: Build wamrc
+        timeout-minutes: 12
+        run: |
+          if command -v llvm-config-18 >/dev/null 2>&1; then
+            export WAMRC_CMAKE_FLAGS="-DLLVM_DIR=$(llvm-config-18 --cmakedir)"
+          fi
+          make wamrc
+
+      - name: Run mapped-span benchmark at scale (must NOT skip AOT)
+        timeout-minutes: 40
+        env:
+          DATASET_MB: ${{ github.event.inputs.dataset_mb }}
+          CACHE: ${{ github.event.inputs.cache }}
+          ITERS: "11"
+          WARMUPS: "3"
+          REPS_K: "16"
+        run: |
+          sh tests/ci_ensure_wamrc.sh
+          rm -f build/gen_bench_span_aot.h
+          sh tests/bench_mapped_span.sh
+
+      - name: Upload benchmark JSON
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        with:
+          name: mapped-span-bench-${{ github.event.inputs.dataset_mb }}m-${{ github.event.inputs.cache }}
+          path: build/bench_mapped_span.json
