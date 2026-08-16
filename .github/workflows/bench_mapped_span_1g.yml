@@ -31,10 +31,10 @@ jobs:
         with:
           submodules: true
 
-      - name: Install LLVM + cmake + wabt
+      - name: Install LLVM + cmake + wabt + clang/lld
         run: |
           sudo apt-get update
-          sudo apt-get install -y llvm-18-dev cmake wabt
+          sudo apt-get install -y llvm-18-dev cmake wabt clang lld
 
       - name: Build wamrc
         timeout-minutes: 12
