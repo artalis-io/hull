@@ -1,0 +1,47 @@
+diff --git a/core/iwasm/common/wasm_memory.c b/core/iwasm/common/wasm_memory.c
+index fe5a2bf..81b9cf2 100644
+--- a/core/iwasm/common/wasm_memory.c
++++ b/core/iwasm/common/wasm_memory.c
+@@ -2214,6 +2214,16 @@ wasm_memory_get_shared(WASMMemoryInstance *memory)
+     return memory->is_shared_memory;
+ }
+ 
++/* Hull ext (0005): public read of the internal is_memory64 flag. Compiled with
++ * WAMR's own config (WASM_ENABLE_MEMORY64=1 + the internal include set), so the
++ * WASMMemoryInstance layout matches the rest of the runtime -- the caller never
++ * sees the struct. Null-safe (fail-closed): a NULL memory is not Memory64. */
++bool
++wasm_runtime_memory_is_memory64(WASMMemoryInstance *memory)
++{
++    return memory != NULL && memory->is_memory64;
++}
++
+ void *
+ wasm_memory_get_base_address(WASMMemoryInstance *memory)
+ {
+diff --git a/core/iwasm/include/wasm_export.h b/core/iwasm/include/wasm_export.h
+index ad02f95..dccc6cf 100644
+--- a/core/iwasm/include/wasm_export.h
++++ b/core/iwasm/include/wasm_export.h
+@@ -1163,6 +1163,21 @@ wasm_memory_get_bytes_per_page(const wasm_memory_inst_t memory_inst);
+ WASM_RUNTIME_API_EXTERN bool
+ wasm_memory_get_shared(const wasm_memory_inst_t memory_inst);
+ 
++/**
++ * Hull ext (0005): report whether a memory instance is a Memory64 (i64-indexed)
++ * linear memory. WAMR exposes no public accessor for the internal
++ * WASMMemoryInstance::is_memory64 flag, so Hull's cap layer would otherwise have
++ * to include WAMR-internal headers (and replicate WAMR's compile-time config to
++ * keep the struct layout in sync) just to read one field. This accessor keeps the
++ * flag readable through the stable public ABI instead.
++ *
++ * @param memory_inst the memory instance (may be NULL)
++ * @return true iff memory_inst is non-NULL and is a Memory64 linear memory; false
++ *         for NULL or a wasm32 (i32-indexed) memory. Fail-closed on NULL.
++ */
++WASM_RUNTIME_API_EXTERN bool
++wasm_runtime_memory_is_memory64(const wasm_memory_inst_t memory_inst);
++
+ /**
+  * @brief Get the base address for a memory instance
+  *

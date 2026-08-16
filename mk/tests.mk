@@ -213,6 +213,46 @@ $(BUILDDIR)/gen_ro_heap_span_aot.h: $(TESTDIR)/hull/fixtures/ro_heap.wasm | $(BU
 $(BUILDDIR)/test_wasm_spans: INCLUDES += -I$(BUILDDIR)
 $(BUILDDIR)/test_wasm_spans: $(BUILDDIR)/gen_ro_heap_span_aot.h
 
+# Memory64 AOT fixture (#318, D4.3). There is NO --enable-memory64 wamrc flag in the
+# vendored WAMR -- wamrc AUTO-DETECTS Memory64 from the module's (memory i64) type
+# (its --bounds-checks help even refers to "when memory64 is enabled" as a module
+# property). Compiled WITHOUT --enable-shared-heap: echo64 uses no shared heap and
+# the dispatch attaches none, and a shared-heap-codegen AOT run with no heap
+# attached segfaults (the ro_heap/gsub fixtures use --enable-shared-heap only
+# because their tests DO attach one). On a wamrc FAILURE (present but the compile
+# errored) the stderr is surfaced (CI ::warning) before falling back to an empty
+# fixture, so the cause is visible rather than silently swallowed.
+# $(1)=out header, $(2)=array stem.
+define GEN_MEM64_AOT
+	@w="$(BUILDDIR)/wamrc"; [ -x "$$w" ] || w="$(BUILDDIR)/wamrc-build/wamrc"; \
+	if [ -x "$$w" ]; then \
+	    if "$$w" --opt-level=3 --bounds-checks=1 \
+	            -o $(BUILDDIR)/$(2).aot $< 2>$(BUILDDIR)/$(2).wamrc.err; then \
+	        (cd $(BUILDDIR) && xxd -i $(2).aot) \
+	          | sed -E 's/unsigned char.*\[\]/static const unsigned char $(2)[]/; s/unsigned int.*_len/static const unsigned int $(2)_len/' > $(1); \
+	        echo "  [mem64] embedded wamrc-built $(2) fixture"; \
+	    else \
+	        echo "::warning::wamrc failed to AOT-compile $(2):"; \
+	        cat $(BUILDDIR)/$(2).wamrc.err || :; \
+	        printf 'static const unsigned char $(2)[1] = {0};\nstatic const unsigned int $(2)_len = 0;\n' > $(1); \
+	        echo "  [mem64] wamrc failed; $(2) sub-case will skip"; \
+	    fi; \
+	else \
+	    printf 'static const unsigned char $(2)[1] = {0};\nstatic const unsigned int $(2)_len = 0;\n' > $(1); \
+	    echo "  [mem64] wamrc not built; $(2) sub-case will skip"; \
+	fi
+endef
+
+# echo64.wasm is a (memory i64) module that cannot run under the fast interpreter,
+# so wamrc AOT-compiles it (auto-detecting Memory64 from the module). The embedded
+# .aot lets test_wasm load echo64 as AOT + Memory64 and exercise the 8-cell
+# hull_process dispatch + readback. Skips (empty fixture) when wamrc is absent; the
+# wasm-readonly-heap-aot CI job builds wamrc and asserts the case is NOT skipped.
+$(BUILDDIR)/gen_echo64_aot.h: $(TESTDIR)/fixtures/compute/echo64.wasm | $(BUILDDIR)
+	$(call GEN_MEM64_AOT,$@,echo64_aot)
+$(BUILDDIR)/test_wasm: INCLUDES += -I$(BUILDDIR)
+$(BUILDDIR)/test_wasm: $(BUILDDIR)/gen_echo64_aot.h
+
 # Freestanding-libc fixture (#327). Embed memops.wasm as a C byte array so the
 # unit test's bytes never drift from the committed fixture (which build_memops.sh
 # rebuilds from the canonical hull_compute.h). No wamrc: interpreter-only here;

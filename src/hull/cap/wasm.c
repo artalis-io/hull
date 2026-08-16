@@ -21,13 +21,10 @@
 #include "hull/vfs.h"
 #include "log.h"
 #include "wasm_export.h"
-
-/* Internal WAMR header for Memory64 detection (is_memory64 on WASMMemoryInstance).
- * Not part of the public API but needed to detect 64-bit memory modules.
- * Path is relative to -I$(WAMR_IWASM)/include set in Makefile. */
-#if WASM_ENABLE_MEMORY64 != 0
-#include "../interpreter/wasm_runtime.h"
-#endif
+/* Memory64 detection goes through the public accessor wasm_runtime_memory_is_memory64
+ * (WAMR patch 0005), so this TU needs NO WAMR-internal header and NO WAMR
+ * compile-time config (WASM_ENABLE_MEMORY64 etc.) -- the struct layout stays
+ * entirely inside WAMR. See docs/memory64_dispatch_design.md (#318). */
 
 #include <assert.h>
 #include <inttypes.h>
@@ -694,13 +691,12 @@ int hl_cap_wasm_load(HlWasmCache *cache, const char *name,
                     wasm_runtime_destroy_exec_env(env);
                 }
             }
-#if WASM_ENABLE_MEMORY64 != 0
-            /* Detect Memory64 via internal WAMR API */
-            WASMMemoryInstance *mem = wasm_get_default_memory(
-                (WASMModuleInstance *)tmp_inst);
-            if (mem && mem->is_memory64)
+            /* Detect Memory64 through the public accessor (patch 0005): no
+             * WAMR-internal header, no config-macro coupling. Returns false for a
+             * wasm32 module or a NULL memory. */
+            wasm_memory_inst_t mem = wasm_runtime_get_default_memory(tmp_inst);
+            if (wasm_runtime_memory_is_memory64(mem))
                 detected_memory64 = 1;
-#endif
             wasm_runtime_deinstantiate(tmp_inst);
         }
     }

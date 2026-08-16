@@ -465,6 +465,33 @@ jobs:
             || { echo "::error::span diff AOT sub-case did not run"; exit 1; }
           echo "hull_span.h decodes identically native vs wasm (interp + AOT)."
 
+      - name: Build + run the Memory64 8-cell AOT dispatch (must NOT skip)
+        timeout-minutes: 12
+        run: |
+          # #318 D4.3: a real (memory i64) module (echo64) AOT-compiled by wamrc
+          # (which auto-detects Memory64 from the module -- there is no
+          # --enable-memory64 flag), loaded as AOT + Memory64, run through
+          # hl_cap_wasm_call -- exercising the 8-cell hull_process(i64,i64,i64,i64)
+          # argv marshalling and the output readback (the dispatch path that was
+          # dead while Memory64 detection was compiled out). FAIL if it takes the
+          # wamrc-unavailable skip path.
+          sh tests/ci_ensure_wamrc.sh
+          rm -f build/gen_echo64_aot.h
+          make build/test_wasm
+          set -o pipefail
+          # Run the dispatch case in ISOLATION (utest --filter) so its result is
+          # unambiguous -- a crash can't hide in the buffered full-suite output (the
+          # full test_wasm regression is covered by the normal + ASan CI jobs).
+          ./build/test_wasm --filter='*memory64_aot_dispatch' 2>&1 | tee m64.log
+          rc=${PIPESTATUS[0]}
+          [ "$rc" -eq 0 ] || { echo "::error::memory64_aot_dispatch crashed/failed (rc=$rc)"; exit "$rc"; }
+          if grep -qE "SKIPPED.*hl_cap_wasm\\.memory64_aot_dispatch" m64.log; then
+            echo "::error::Memory64 AOT dispatch case took the wamrc-unavailable skip path"; exit 1
+          fi
+          grep -qE "OK[^A-Za-z].*hl_cap_wasm\\.memory64_aot_dispatch" m64.log \
+            || { echo "::error::Memory64 AOT dispatch case did not run to OK"; exit 1; }
+          echo "Memory64 8-cell AOT dispatch ran against a real wamrc .aot and passed."
+
   # Compute AOT shared-heap reads (#326): `hull build` must pass
   # --enable-shared-heap so a plugin that reads a mapped SPAN or a compute.SEGMENT
   # (both WAMR shared heaps) reads correct nonzero bytes under AOT, not zeros.
