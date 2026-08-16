@@ -30,6 +30,7 @@
 #include <inttypes.h>
 #include <limits.h>
 #include <pthread.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -126,9 +127,21 @@ static void clear_validate_oob_exception(wasm_module_inst_t inst)
 
 /* ── host_call native implementation ───────────────────────────────── */
 
+/* Process-global count of host_call boundary crossings from WASM. A single relaxed
+ * add on an already-slow crossing (negligible). Used by the mapped-span benchmark
+ * to prove, at runtime, that a hot scan loop makes ZERO host calls (only the
+ * per-call SPAN_INFO setup does) -- see docs/mapped_span_benchmark_design.md D9. */
+static _Atomic uint64_t hl_wasm_host_call_count = 0;
+
+uint64_t hl_cap_wasm_host_call_count(void)
+{
+    return atomic_load_explicit(&hl_wasm_host_call_count, memory_order_relaxed);
+}
+
 static int32_t host_call_handler(wasm_exec_env_t exec_env,
                                  int32_t opcode, int32_t ptr, int32_t len)
 {
+    atomic_fetch_add_explicit(&hl_wasm_host_call_count, 1, memory_order_relaxed);
     wasm_module_inst_t inst = wasm_runtime_get_module_inst(exec_env);
 
     if (opcode == HL_WASM_OP_LOG) {

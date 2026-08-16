@@ -1925,7 +1925,7 @@ $(shell test "$$(cat $(BUILD_CONFIG_FILE) 2>/dev/null)" = "$(BUILD_FINGERPRINT)"
 
 # ── Targets ─────────────────────────────────────────────────────────
 
-.PHONY: all clean test debug msan tsan tsan-shared-heap fuzz fuzz-run e2e e2e-build e2e-postgres e2e-mysql e2e-valkey e2e-feature-valkey e2e-http e2e-sandbox e2e-examples e2e-cli e2e-migrate e2e-templates e2e-agent e2e-context e2e-mcp e2e-agent-api e2e-compute e2e-stream-meta e2e-compute-async-trap e2e-sync-spans e2e-compute-aot-shared-heap e2e-compute-memory64 e2e-compute-headers e2e-spans-example e2e-spans-multi e2e-spans-hugefile e2e-compute-dev e2e-aot-cache e2e-cache e2e-cache-concurrent e2e-cache-cosmo e2e-named-connections e2e-dynamic-connections e2e-compiler-free e2e-linker e2e-linker-zig e2e-cross-build e2e-musl e2e-musl-cross floor-musl e2e-build-flavor e2e-install e2e-ca-bundle e2e-update e2e-tools e2e-multipart e2e-attachment e2e-blob e2e-test-harness e2e-jobs e2e-hypermedia-photos-upload e2e-jwt-asym hull-test-examples self-build check analyze cppcheck bench bench-template bench-wasm bench-gpu bench-bytecode-cache wamrc coverage lint-lua lint-js lint check-sdk-headers check-sdk-headers-selftest platform platform-cosmo hardening check-hardening
+.PHONY: all clean test debug msan tsan tsan-shared-heap fuzz fuzz-run e2e e2e-build e2e-postgres e2e-mysql e2e-valkey e2e-feature-valkey e2e-http e2e-sandbox e2e-examples e2e-cli e2e-migrate e2e-templates e2e-agent e2e-context e2e-mcp e2e-agent-api e2e-compute e2e-stream-meta e2e-compute-async-trap e2e-sync-spans e2e-compute-aot-shared-heap e2e-compute-memory64 e2e-compute-headers e2e-spans-example e2e-spans-multi e2e-spans-hugefile e2e-compute-dev e2e-aot-cache e2e-cache e2e-cache-concurrent e2e-cache-cosmo e2e-named-connections e2e-dynamic-connections e2e-compiler-free e2e-linker e2e-linker-zig e2e-cross-build e2e-musl e2e-musl-cross floor-musl e2e-build-flavor e2e-install e2e-ca-bundle e2e-update e2e-tools e2e-multipart e2e-attachment e2e-blob e2e-test-harness e2e-jobs e2e-hypermedia-photos-upload e2e-jwt-asym hull-test-examples self-build check analyze cppcheck bench bench-template bench-wasm bench-mapped-span bench-gpu bench-bytecode-cache wamrc coverage lint-lua lint-js lint check-sdk-headers check-sdk-headers-selftest platform platform-cosmo hardening check-hardening
 
 all: $(BUILDDIR)/hull
 
@@ -3032,6 +3032,23 @@ $(BUILDDIR)/bench_wasm: $(BENCH_WASM_SRCS) $(TEST_COMMON_DEPS) | $(BUILDDIR)
 
 bench-wasm: $(BUILDDIR)/bench_wasm
 	$(BUILDDIR)/bench_wasm
+
+# Mapped-span performance benchmark (#337 follow-up): host-mmap'd file window read
+# by an AOT wasm32 guest via a HullSpan, vs native mmap + copy-once baselines.
+# The guest is AOT-compiled WITH --enable-shared-heap (a mapped span IS a shared
+# heap and IS attached for the call). Reuses the generic wamrc-AOT-to-header
+# emitter GEN_MEM64_AOT (the guest is wasm32, not Memory64, but the emitter only
+# runs wamrc + xxd). Empty fixture when wamrc is absent => the bench prints SKIP
+# and exits 0; the CI job builds wamrc and asserts NOT-skipped (must-not-skip).
+$(BUILDDIR)/gen_bench_span_aot.h: bench/wasm/bench_span_guest.wasm | $(BUILDDIR)
+	$(call GEN_MEM64_AOT,$@,bench_span_aot,--enable-shared-heap)
+
+$(BUILDDIR)/bench_mapped_span: bench/wasm/bench_mapped_span.c $(TEST_COMMON_DEPS) $(BUILDDIR)/gen_bench_span_aot.h | $(BUILDDIR)
+	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -Ibench/wasm -Itemplates -I$(BUILDDIR) -o $@ \
+		bench/wasm/bench_mapped_span.c $(TEST_COMMON_LIBS)
+
+bench-mapped-span: $(BUILDDIR)/bench_mapped_span
+	$(BUILDDIR)/bench_mapped_span
 
 # Blob storage R/W throughput benchmark (cap-layer; bypasses bindings)
 $(BUILDDIR)/bench_blob: bench/blob/bench_blob.c $(TEST_COMMON_DEPS) | $(BUILDDIR)
