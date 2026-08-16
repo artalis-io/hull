@@ -567,6 +567,24 @@ jobs:
             || { echo "::error::AOT shared-heap e2e did not run its 5 checks to pass"; exit 1; }
           echo "compute AOT read spans + segments correctly under a real wamrc .aot."
 
+      - name: hull build of a Memory64 compute plugin E2E (#336, must NOT skip)
+        timeout-minutes: 12
+        run: |
+          set -o pipefail
+          # #336: the PRODUCTION pipeline for a Memory64 plugin -- Case A is the
+          # heap-less-shared-heap confirmation of F1/F2/F3 through `hull build`, on
+          # this job's arch. Same embedded-hull + wamrc preconditions as above.
+          sh tests/ci_ensure_wamrc.sh
+          sh tests/e2e_compute_memory64.sh 2>&1 | tee m64e2e.log
+          rc=${PIPESTATUS[0]}
+          [ "$rc" -eq 0 ] || { echo "::error::Memory64 hull build e2e failed (rc=$rc)"; exit "$rc"; }
+          if grep -qE '\bSKIP\b' m64e2e.log; then
+            echo "::error::Memory64 hull build e2e skipped (no embedded hull / no wamrc)"; exit 1
+          fi
+          grep -qE "compute-memory64: 6 passed, 0 failed" m64e2e.log \
+            || { echo "::error::Memory64 hull build e2e did not run its 6 checks to pass"; exit 1; }
+          echo "hull build produced a working Memory64 plugin binary (heap-less + span)."
+
   # Freestanding libc on the real toolchain (#327). A compute plugin whose
   # clang-lowered struct copies / runtime-length loops emit implicit
   # memcpy/memset/memmove must build via `hull compute build` with NO undefined
@@ -861,6 +879,34 @@ jobs:
           grep -qE "OK[^A-Za-z].*wasm_spans\\.aot_span_lifecycle" spans.log \
             || { echo "::error::span AOT lifecycle case did not run to OK"; exit 1; }
           echo "arm64 mapped-span AOT lifecycle case ran against a real wamrc .aot and passed."
+          # #334 Case B on arm64: the mem64 span readback runs in the same
+          # test_wasm_spans invocation above; assert it did NOT take the skip path.
+          if grep -qE "SKIPPED.*wasm_spans\\.memory64_span_readback" spans.log; then
+            echo "::error::arm64 Memory64 span readback took the wamrc-unavailable skip path"; exit 1
+          fi
+          grep -qE "OK[^A-Za-z].*wasm_spans\\.memory64_span_readback" spans.log \
+            || { echo "::error::arm64 Memory64 span readback did not run to OK"; exit 1; }
+          echo "arm64 Memory64 span readback ran against a real wamrc .aot and passed."
+
+      - name: Build + run the Memory64 8-cell AOT dispatch (arm64, must NOT skip)
+        timeout-minutes: 12
+        run: |
+          # #336 Case A on arm64: the heap-less Memory64 dispatch (echo64, no spans/
+          # segments) must run correctly on aarch64 too -- the permanent aarch64
+          # half of the transparent-policy confirmation.
+          sh tests/ci_ensure_wamrc.sh
+          rm -f build/gen_echo64_aot.h
+          make build/test_wasm
+          set -o pipefail
+          ./build/test_wasm --filter='*memory64_aot_dispatch' 2>&1 | tee m64arm.log
+          rc=${PIPESTATUS[0]}
+          [ "$rc" -eq 0 ] || { echo "::error::arm64 memory64_aot_dispatch crashed/failed (rc=$rc)"; exit "$rc"; }
+          if grep -qE "SKIPPED.*hl_cap_wasm\\.memory64_aot_dispatch" m64arm.log; then
+            echo "::error::arm64 Memory64 AOT dispatch took the wamrc-unavailable skip path"; exit 1
+          fi
+          grep -qE "OK[^A-Za-z].*hl_cap_wasm\\.memory64_aot_dispatch" m64arm.log \
+            || { echo "::error::arm64 Memory64 AOT dispatch did not run to OK"; exit 1; }
+          echo "arm64 heap-less Memory64 8-cell AOT dispatch ran against a real wamrc .aot and passed."
 
       - name: Build + run the hull_span.h native-vs-WASM differential (arm64, must NOT skip)
         timeout-minutes: 12
@@ -1984,3 +2030,4 @@ jobs:
 
       - name: Build + emit/run E2E under musl (Docker Alpine)
         run: sh tests/e2e_musl.sh
+

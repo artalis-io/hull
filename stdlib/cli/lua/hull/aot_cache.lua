@@ -105,7 +105,10 @@ end
 -- Components:
 --   wasm_sha    — content hash of the .wasm input
 --   arch        — wamrc target arch tag (x86_64, aarch64)
---   mem64_flag  — 1 if --enable-memory64 will be passed
+--   mem64_flag  — 1 if the module is Memory64 (wamrc auto-detects it from the
+--                 module's (memory i64) type and emits different AOT code; there
+--                 is no --enable-memory64 wamrc flag). Redundant with wasm_sha
+--                 but kept explicit for clarity.
 --   sh_aot      — shared-heap AOT compatibility token (SHARED_HEAP_AOT_COMPAT)
 --   wamrc_id    — version banner + binary mtime
 --

@@ -85,10 +85,13 @@ if (mem && wasm_runtime_memory_is_memory64(mem))                    /* public (0
   **auto-detects** Memory64 from the module's `(memory i64)` type (passing the flag
   prints usage and fails). A dedicated `GEN_MEM64_AOT` macro (`mk/tests.mk`) drives
   the build `wamrc` with just `--opt-level=3 --bounds-checks=1` and surfaces its
-  stderr on failure. **Do NOT pass `--enable-shared-heap`** for the mem64 fixture: a
-  shared-heap-codegen AOT run with no heap attached **segfaults** on a Memory64
-  module (confirmed in CI — the dispatch crashed with the flag, passed once it was
-  dropped; wasm32 AOTs are unaffected), and echo64 uses no shared heap.
+  stderr on failure. echo64 is compiled without `--enable-shared-heap` simply
+  because it uses no shared heap (leaner codegen). **CORRECTION (#336):** an earlier
+  draft here claimed a heap-less `--enable-shared-heap` mem64 AOT *segfaults*; #336's
+  controlled isolation experiment disproved that on Hull's 64-bit targets (x86_64 +
+  aarch64) — it was an unisolated #318 mis-attribution. WAMR's `aot_runtime.c:2134`
+  sets the safe `UINT64_MAX` sentinel on 64-bit targets by design; the real bug is
+  32-bit-target-only, which Hull never AOT-targets. See `docs/memory64_build_design.md`.
 - The `.wasm` is retained only to prove the interp-rejection leg (D4.2).
 
 ## D4 (LOCKED) — non-skippable CI legs
