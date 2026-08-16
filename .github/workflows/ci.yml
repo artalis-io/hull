@@ -517,6 +517,58 @@ jobs:
             || { echo "::error::Memory64 SPAN_INFO readback did not run to OK"; exit 1; }
           echo "Memory64 SPAN_INFO readback ran against a real wamrc .aot and passed."
 
+  # Mapped-span performance benchmark (#337 follow-up). Builds wamrc, then runs
+  # the controlled bench at the required CI dataset size (96 MiB) through the real
+  # cap layer + a wamrc-built AOT guest, enforcing the methodology gates: G1 drift
+  # (guest wasm reproduces from source), G2 must-not-skip (every workload ran AOT
+  # + span), G3 in-process correctness (every wasm checksum == native AND the
+  # per-scan host-call delta == 0 BEFORE timing is trusted), G4 static bytecode
+  # inspection (host_call only in the 2 setup sites). The steady-state overhead
+  # (HullSpan vs native mmap) is REPORTED as an artifact, NOT gated, until per-arch
+  # baselines stabilize (docs/mapped_span_benchmark_design.md D11). A 1 GiB
+  # controlled run is the separate manually-triggered bench_mapped_span_1g.yml.
+  mapped-span-bench:
+    name: Mapped-span benchmark (96 MiB, x86_64)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          submodules: true
+
+      - name: Install LLVM + cmake + wabt + clang/lld
+        run: |
+          sudo apt-get update
+          # clang + lld give the G1 drift guard a real wasm32 toolchain (wasm-ld);
+          # wabt provides wasm-objdump for the G4 static bytecode gate.
+          sudo apt-get install -y llvm-18-dev cmake wabt clang lld
+
+      - name: Build wamrc
+        timeout-minutes: 12
+        run: |
+          if command -v llvm-config-18 >/dev/null 2>&1; then
+            export WAMRC_CMAKE_FLAGS="-DLLVM_DIR=$(llvm-config-18 --cmakedir)"
+          fi
+          make wamrc
+
+      - name: Run mapped-span benchmark (must NOT skip AOT)
+        timeout-minutes: 30
+        env:
+          DATASET_MB: "96"
+          ITERS: "15"
+          WARMUPS: "3"
+        run: |
+          # Guarantee this step's own executable wamrc, then regen the AOT header.
+          sh tests/ci_ensure_wamrc.sh
+          rm -f build/gen_bench_span_aot.h
+          sh tests/bench_mapped_span.sh
+
+      - name: Upload benchmark JSON
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        with:
+          name: mapped-span-bench-96m
+          path: build/bench_mapped_span.json
+
   # Compute AOT shared-heap reads (#326): `hull build` must pass
   # --enable-shared-heap so a plugin that reads a mapped SPAN or a compute.SEGMENT
   # (both WAMR shared heaps) reads correct nonzero bytes under AOT, not zeros.

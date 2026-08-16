@@ -302,6 +302,15 @@ int hl_cap_wasm_load(HlWasmCache *cache, const char *name,
  */
 HlWasmModule *hl_cap_wasm_module_lookup(HlWasmCache *cache, const char *name);
 
+/* Process-global count of host_call crossings from WASM. NOT a production API:
+ * only declared + defined when HL_WASM_HOST_CALL_COUNTER is set (the mapped-span
+ * benchmark's private cap_wasm object). The bench samples it around a timed scan
+ * to prove the hot loop makes zero host calls (only per-invocation SPAN_INFO setup
+ * does). Production builds carry neither this symbol nor the atomic. */
+#ifdef HL_WASM_HOST_CALL_COUNTER
+uint64_t hl_cap_wasm_host_call_count(void);
+#endif
+
 /**
  * Call a WASM compute module.
  *

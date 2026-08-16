@@ -20,7 +20,17 @@ is proven complete against all enumerated write paths.**
 
 ## 0. What already exists vs what is new
 
-Hull already maps a file zero-copy and lets WASM read it at native speed:
+> **Performance note (measured; see §3.8 and
+> [docs/mapped_span_benchmark_design.md](mapped_span_benchmark_design.md)).** The
+> proven properties are **zero-copy** (no dataset copy) and **no per-access host
+> call** (after one metadata setup call). Throughput is NOT universally
+> near-native: it is workload- and codegen-dependent, ranging from faster than the
+> checked native baseline to materially slower (especially parser-like access).
+> The "native speed" phrasing below refers to the codegen SHAPE (a bounds-checked
+> native load, no host trap per access), not a throughput guarantee.
+
+Hull already maps a file zero-copy and lets WASM read it in place with no
+per-access host call:
 
 - `fs.mmap(path)` -> `HlMappedBuffer {addr,len,closed,alloc,borrow_count,pending_free}`
   (`cap/fs.c:299`, `include/hull/cap/fs.h:135`) with a refcounted borrow-pin
@@ -373,18 +383,47 @@ claims are stated against raw instruction behavior, never against the header.
   another invocation's spans. Tests: query an unknown name (rejected); query after
   detach (rejected); two concurrent invocations each see only their own spans.
 
-### 3.8 Benchmark: cold first-touch faults measured separately from warm scans
+### 3.8 Benchmark and the performance claim (MEASURED — claim corrected)
 
-Demand-paging latency must not be misattributed to compute overhead. The harness
-reports COLD (first touch of a freshly-mapped window; page faults dominate) and
-WARM (pages resident; steady-state throughput) as SEPARATE numbers, for each of the
-four baselines (fread-into-linear-mem / chunked native->WASM memcpy / HullSpan /
-native mmap) and each workload (sequential byte scan, sequential u32/u64 scan,
-random reads, a PBF-like binary parser). The performance target
-(<= 10-15% over native mmap, AOT) is judged on the WARM scan; the COLD number is
-reported for demand-paging behavior, not gated. A separate RSS test maps a large
-sparse/real file, touches a small region, and asserts RSS grows ~ with touched
-pages, not logical file size (documented, not a hard CI number).
+The benchmark is built and CI-published; see
+[docs/mapped_span_benchmark_design.md](mapped_span_benchmark_design.md) for the
+methodology, gates, and the recorded results. It compares four implementations
+(native mmap / HullSpan AOT / copy-once / chunked-copy) across four workloads
+(sequential bytes, sequential u32/u64, deterministic random access, parser-like
+scan), with a warm setup-only-control steady-state, a correctness gate (identical
+checksums), and a runtime proof of zero host calls in the scan loop.
+
+**The original blanket target ("<= 10-15% over native mmap") is NOT supported and
+has been removed.** Replacing it:
+
+> HullSpan eliminates dataset copies and performs ordinary bounds-checked WASM
+> loads after one metadata setup call. Performance is workload- and
+> codegen-dependent: current AOT measurements range from faster than the checked
+> native baseline to materially slower, especially for parser-like access. Its
+> clearest advantage is large or random-access datasets where whole-file copying
+> is impossible or chunking causes substantial amplification.
+
+Explicitly:
+
+- **Zero-copy and no per-access host calls are PROVEN properties** (the correctness
+  gate + the runtime host-call counter + `wasm-objdump` bytecode inspection).
+- **Near-native throughput is NOT a universal proven property.** The span-vs-native
+  gap swings by access pattern (e.g. faster for wide/multi-pass reads, slower for
+  record parsing, vectorization-sensitive for byte scans).
+- **Shared-runner timings are INFORMATIONAL.** Cross-run variance on GitHub's
+  shared runners is too high for a pass/fail verdict (the native baseline alone has
+  swung ~2x between runs), so the threshold is published, never gated.
+- **The native CHECKED-ACCESSOR baseline is the semantic comparand** (both sides run
+  the same bounds-checked `hull_span_*` accessors so checksums match). A raw-pointer
+  native row is a future HARDWARE/COMPILER CEILING to add alongside it, NOT a
+  substitute for the semantic comparand.
+
+No performance gate is added yet. Tracked follow-ups: (1) pinned/dedicated-runner
+per-architecture baselines + regression bands; (2) raw-pointer native ceiling
+measurements; (3) optional AOT/codegen investigation for the sequential-byte and
+parser workloads. Cold first-touch / RSS validation was scoped OUT of the initial
+benchmark (the earlier cold path never actually measured cold) and is part of the
+same follow-up set.
 
 ## 4. The WAMR patch (isolated, enumerated, upstream-tested)
 

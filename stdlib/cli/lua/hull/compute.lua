@@ -301,7 +301,7 @@ local HULL_SPAN_H = [[/*
  *
  * Freestanding, dual-target header for Hull compute plugins that attach
  * host-mapped file windows via `compute.call(..., {spans={...}})` and read them
- * at native speed. It turns the raw `host_call(HL_WASM_OP_SPAN_INFO, ...)`
+ * in place, with no per-access host call. It turns the raw `host_call(HL_WASM_OP_SPAN_INFO, ...)`
  * metadata query into typed, overflow-/alignment-safe accessors.
  *
  * Usage in a plugin (include AFTER hull_compute.h, which declares host_call):
