@@ -101,15 +101,16 @@ span-call drivers.
 
 ## D3 (LOCKED) — AOT + shared-heap: required, and EXPECTED (not proven) to work when a heap is attached
 
-#318 found that a `--enable-shared-heap` AOT run with **no heap attached** segfaults
-on mem64. That crash condition does **not** apply here (the span mechanism **is** a
-shared heap and **is** attached for the call), so `spanread64.aot` is compiled
-**with** `--enable-shared-heap` — spans require it, exactly like the wasm32
-`ro_heap`/`spandiff` AOT fixtures. Whether a `--enable-shared-heap` mem64 AOT runs
-correctly **with** a heap attached is a **hypothesis this test validates, not an
-established fact** — it is the same unknown as §1 (WAMR shared-heap addressing under
-mem64 AOT). If it still crashes or misreads with a heap attached, that is precisely
-the WAMR result §1 anticipates, recorded as a finding rather than papered over.
+`spanread64.aot` is compiled **with** `--enable-shared-heap` — spans require it,
+exactly like the wasm32 `ro_heap`/`spandiff` AOT fixtures. Whether a
+`--enable-shared-heap` mem64 AOT runs correctly **with** a heap attached was, at
+design time, a **hypothesis this test validates** (the same unknown as §1, WAMR
+shared-heap addressing under mem64 AOT). **It is now proven:** this test (green in
+CI) confirms the with-heap path, and #336's isolation experiment separately
+confirmed the *heap-less* `--enable-shared-heap` path is also safe on Hull's 64-bit
+targets — so the earlier #318 "segfaults with no heap" claim was an unisolated
+mis-attribution (see `docs/memory64_build_design.md` F1–F3), not a real crash on
+x86_64/aarch64.
 
 A dedicated `mk/tests.mk` gen rule (mirroring `GEN_GSUB_AOT`, which already adds
 `--enable-shared-heap`; wamrc auto-detects mem64 — there is **no** `--enable-memory64`

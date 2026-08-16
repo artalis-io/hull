@@ -1877,13 +1877,19 @@ local function main()
                             -- shared heap at runtime; without it the AOT cannot
                             -- attach one and those reads come back as zeros
                             -- (the interpreter is unaffected). Safe for plugins
-                            -- that use neither.
+                            -- that use neither -- including Memory64 plugins on
+                            -- Hull's 64-bit AOT targets: a heap-less shared-heap
+                            -- mem64 AOT is safe (WAMR sets the UINT64_MAX sentinel
+                            -- on 64-bit targets), confirmed by #336's isolation
+                            -- experiment. So the SAME transparent flag applies to
+                            -- wasm32 and mem64 alike.
+                            -- Memory64 needs NO wamrc flag: wamrc auto-detects it
+                            -- from the module's (memory i64) type. (There is no
+                            -- --enable-memory64 flag in the vendored WAMR; passing
+                            -- it prints usage and fails -- the #336 bug this fixes.)
                             local wamrc_args = {wamrc, "--target=" .. arch,
                                                 "--enable-shared-heap",
                                                 "-o", aot_path, wasm_path}
-                            if mem64 then
-                                table.insert(wamrc_args, 3, "--enable-memory64")
-                            end
                             print("hull build: AOT " .. rel ..
                                   " -> " .. arch ..
                                   (mem64 and " (memory64)" or ""))

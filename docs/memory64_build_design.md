@@ -60,8 +60,27 @@ design (F1)**. It was most likely a full-suite artifact or mis-attribution.
 
 **Net:** the transparent policy Hull already wants — compile every plugin with
 shared-heap support, attach a real heap only when a call requests spans/segments —
-is expected to be **safe on Hull's 64-bit targets with NO WAMR patch, NO empty-heap
-runtime shim, and NO manifest opt-in**.
+is **safe on Hull's 64-bit targets with NO WAMR patch, NO empty-heap runtime shim,
+and NO manifest opt-in**.
+
+### F3 — CONFIRMED by a controlled single-variable experiment
+
+Before locking, an isolated repro varied **only** `--enable-shared-heap` on the
+heap-less path (same `echo64.wasm`, same `memory64_aot_dispatch` test, same
+leading-only-wildcard filter — no fixture/filter/suite change), on both 64-bit AOT
+targets (temporary CI job `mem64-sharedheap-repro`, reverted after):
+
+| arch    | wamrc flags                                   | heap-less mem64 dispatch | exit |
+|---------|-----------------------------------------------|--------------------------|------|
+| x86_64  | `--opt-level=3 --bounds-checks=1`             | `[ OK ]` (600 µs)        | 0    |
+| x86_64  | `--opt-level=3 --bounds-checks=1 --enable-shared-heap` | `[ OK ]` (650 µs) | 0 |
+| aarch64 | `--opt-level=3 --bounds-checks=1`             | `[ OK ]` (446 µs)        | 0    |
+| aarch64 | `--opt-level=3 --bounds-checks=1 --enable-shared-heap` | `[ OK ]` (398 µs) | 0 |
+
+`--enable-shared-heap` on a heap-less Memory64 AOT **passes on both x86_64 and
+aarch64** — no segfault. This confirms F1/F2: the #318 exit-139 was NOT caused by
+`--enable-shared-heap` on a 64-bit target (it was an unisolated full-suite
+artifact). The transparent policy is **locked with no WAMR patch**.
 
 ## 1. Options, in the order requested — and the outcome
 

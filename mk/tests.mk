@@ -217,9 +217,11 @@ $(BUILDDIR)/test_wasm_spans: $(BUILDDIR)/gen_ro_heap_span_aot.h
 # vendored WAMR -- wamrc AUTO-DETECTS Memory64 from the module's (memory i64) type
 # (its --bounds-checks help even refers to "when memory64 is enabled" as a module
 # property). $(3) carries any extra wamrc flags: echo64 passes NONE (it uses no
-# shared heap and the dispatch attaches none -- a shared-heap-codegen AOT run with
-# no heap attached segfaults, #318); spanread64 passes --enable-shared-heap (its
-# test DOES attach a span heap, #334). On a wamrc FAILURE (present but the compile
+# shared heap, so shared-heap codegen is just dead weight -- NOT for safety: #336's
+# isolation experiment confirmed a heap-less --enable-shared-heap mem64 AOT is safe
+# on Hull's 64-bit targets, correcting an earlier #318 mis-attribution); spanread64
+# passes --enable-shared-heap (its test DOES attach a span heap, #334). On a wamrc
+# FAILURE (present but the compile
 # errored) the stderr is surfaced (CI ::warning) before falling back to an empty
 # fixture, so the cause is visible rather than silently swallowed.
 # $(1)=out header, $(2)=array stem, $(3)=extra wamrc flags.
@@ -1006,6 +1008,13 @@ e2e-compute-async-trap: $(BUILDDIR)/hull
 .PHONY: e2e-compute-aot-shared-heap
 e2e-compute-aot-shared-heap:
 	sh tests/e2e_compute_aot_shared_heap.sh
+
+# #336: `hull build` of a Memory64 compute plugin (needs an embedded hull + wamrc,
+# same as the shared-heap E2E above). Run directly (as CI does):
+# `sh tests/e2e_compute_memory64.sh`, or `make EMBED_PLATFORM=1 e2e-compute-memory64`.
+.PHONY: e2e-compute-memory64
+e2e-compute-memory64:
+	sh tests/e2e_compute_memory64.sh
 
 # Synchronous compute.call / instance:call forward attached spans (#325).
 .PHONY: e2e-sync-spans
