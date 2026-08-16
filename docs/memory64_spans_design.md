@@ -1,6 +1,10 @@
 # SPAN_INFO under Memory64 — decision record (#334)
 
-**Status:** DESIGN, pre-implementation. Follow-up to #318 (which shipped Memory64
+**Status:** IMPLEMENTED (#334, PR #337). The `memory64_span_readback` CI gate is
+green — WAMR's guarded-subrange RO shared-heap addressing IS memory64-correct under
+AOT (the §1 risk did not materialise), so a `(memory i64)` guest reads a span window
+above `UINT32_MAX` through the record's 64-bit `base`. The `hull build` mem64 plugin
+path stays split to #336. Follow-up to #318 (which shipped Memory64
 detection + `memory64_requires_aot` + the 8-cell AOT dispatch). This closes the
 deferred D4.4 leg: prove the mapped-span `SPAN_INFO` metadata path works on a
 `(memory i64)` guest under AOT — specifically that a span whose window sits **above
