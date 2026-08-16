@@ -1,6 +1,11 @@
 # `hull build` for Memory64 compute plugins — decision record (#336)
 
-**Status:** DESIGN, pre-implementation. Split from #334. Owns the production
+**Status:** IMPLEMENTED (#336, PR #338). The transparent policy is locked with no
+WAMR patch: D1 (bogus flag removed), D2 (transparent shared-heap), D3 (`hull build`
+E2E `tests/e2e_compute_memory64.sh`, must-not-skip on x86_64 + aarch64), D4 (no
+interp/lifecycle change) all landed and green. Case A (heap-less mem64 plugin
+through the real `hull build`) passes on both 64-bit targets — F1/F2/F3 confirmed
+end-to-end. Split from #334. Owns the production
 `hull build` / `stdlib/cli/lua/hull/build.lua` AOT path for Memory64 compute
 plugins. #318 shipped the runtime dispatch; #334 shipped runtime mapped spans;
 this issue makes `hull build` of a Memory64 *plugin* actually work.
