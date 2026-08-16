@@ -54,7 +54,7 @@ loop). The ops body is identical → checksums identical by construction.
 |------|--------|-------|
 | **native mmap** (baseline) | `mmap(file, PROT_READ, MAP_PRIVATE)` pointer, native C | the target to beat; no wasm |
 | **HullSpan AOT** (under test) | the span window base (a wasm-domain address; WAMR shared-heap-translated) | `hl_cap_wasm_call` with `opts.spans` on the AOT guest |
-| **copy-once into linear memory** (baseline) | a linear-memory buffer the host filled once from the file | needs a wasm heap ≥ dataset (part of WHY spans win) |
+| **copy-once into linear memory** (baseline) | a linear-memory buffer the host filled once from the file | guest heap SIZED to the configured dataset; its setup/copy cost is reported separately. If the dataset exceeds the configured linear-memory limit the row reports **"not representable within configured linear-memory limit"** — a finding (spans have no such ceiling), NOT a benchmark failure |
 | **chunked-copy** (baseline) | a fixed linear-memory chunk buffer, host re-fills native→wasm per chunk | the outer copy loop is the measured cost |
 
 Guest (`bench/wasm/bench_span_guest.c`, AOT): one `hull_process` with a workload +
@@ -62,17 +62,33 @@ mode selector in its input; `mode=span` reads via the attached span, `mode=linea
 reads the host-provided linear-memory buffer. Native baseline runs the same ops
 body in-process over the mmap. Chunked drives the guest per chunk from the host.
 
-## D3 (LOCKED) — setup vs steady-state; the target applies to steady-state
+## D3 (LOCKED) — steady-state is amortized, NOT end-to-end call time renamed
 
-Each `(impl, workload)` reports TWO numbers, never conflated:
-- **setup** — map / attach (span set init+attach) / allocate+copy (copy-once) /
-  per-chunk copy amortized (chunked). Reported for all.
-- **steady-state** — the scan/parse loop only, the span already attached and its
-  first-touch faults already taken (see D5 warm protocol).
+A single `hl_cap_wasm_call` includes span attach + dispatch + teardown + the scan;
+calling that "steady-state" would smuggle one-time cost into the per-scan number.
+So the guest (and the native baseline) run the workload **`k` times internally over
+the already-attached window**, and steady-state is derived by **two-point
+amortization**:
 
-**The ≤10–15% threshold applies to `steady-state(HullSpan AOT)` vs
-`steady-state(native mmap)`, per workload.** copy-once/chunked are context (they
-show the copy cost spans avoid), not the pass/fail comparand.
+```
+t(k) = fixed + k · steady            (fixed = attach + dispatch + first-touch;
+steady = (t(K) - t(1)) / (K - 1)      steady = the marginal per-scan cost)
+```
+
+Measure `t(1)` and `t(K)` (K default 32) for every impl; the internal rep count is
+the SAME across impls (native runs the ops body `k` times in-process). This
+subtracts the fixed per-call cost exactly, leaving the pure scan.
+
+Each `(impl, workload)` therefore reports, in the JSON:
+- **raw end-to-end** — `t(1)`, the full call incl. attach/dispatch (honest
+  top-line), plus the measured **setup** sub-cost (map / span init+attach /
+  allocate+copy / per-chunk copy).
+- **steady-state** — the amortized `steady` above.
+
+**The ≤10–15% threshold applies to `steady(HullSpan AOT)` vs `steady(native mmap)`,
+per workload** — the defensible marginal comparison. Raw end-to-end and setup are
+retained in the JSON but are NOT the pass/fail comparand. copy-once/chunked steady
++ setup are context (the copy cost spans avoid), not the comparand.
 
 ## D4 (LOCKED) — identical dataset, order, checksum, byte-order, bounds
 
@@ -121,21 +137,38 @@ differs from the native-mmap checksum, the bench prints the mismatch and **abort
 with a non-zero exit before emitting a single timing number**. No performance claim
 is ever made over semantically-divergent implementations.
 
-## D9 (LOCKED) — generated-code inspection of the hot HullSpan loop
+## D9 (LOCKED) — hot-loop inspection: WASM-bytecode + a runtime host-call counter (accurately labelled)
 
-Two checks, both HARD (architecture invariants, not noisy perf):
-- **No per-access host call:** `wasm-objdump -j Import` on the bench guest asserts
-  the module imports only `env.host_call` (used once, in setup), and a
-  `wasm-objdump -d` scan of the hot workload functions asserts NO `call` to the
-  host_call import inside the loop body. (If wabt is absent, this sub-check skips
-  with a notice; CI provides it.)
-- **No accidental copy:** the HullSpan path asserts (at the C level) that no
-  dataset-sized `module_malloc` / linear-memory buffer is allocated for the span
-  read — the span is read in place. (copy-once/chunked DO allocate, by design.)
+The goal is to prove the hot loop makes no per-access host call and no copy. Three
+checks, at three levels of the stack, **each labelled for exactly what it proves**:
 
-Best-effort AOT native-disassembly of the hot loop (objdump of the loaded `.aot`
-text) is emitted to the output for human inspection but is not a gate (AOT symbol
-mapping is fragile across wamrc versions).
+1. **WASM bytecode (HARD gate; proves the GUEST BYTECODE, not native code):**
+   `wasm-objdump -j Import` asserts the guest imports only `env.host_call`, and a
+   `wasm-objdump -d` scan of the hot workload functions asserts NO `call` to that
+   import inside the loop body. Output label: *"WASM bytecode contains no
+   per-access host_call"* — this does **not** claim anything about what WAMR AOT
+   emitted. (Skips with a notice if wabt is absent; CI provides it.)
+2. **Runtime host-call counter (HARD gate; proves the ACTUAL AOT EXECUTION):** a
+   process-global `_Atomic uint64_t` incremented in `host_call_handler`
+   (`cap/wasm.c`) — a single relaxed add on an already-slow boundary crossing,
+   exposed via `hl_cap_wasm_host_call_count()`. The bench samples it around the
+   timed steady-state region and asserts the delta is **0** (the SPAN_INFO calls
+   happen in setup, before the region). This is the direct, execution-level proof
+   that the AOT hot loop crosses the boundary zero times — stronger than the static
+   bytecode scan and independent of disassembly.
+3. **AOT/native disassembly (NOT a gate; emitted for humans):** a best-effort
+   objdump of the loaded `.aot` text for the hot loop is written to the output,
+   explicitly labelled *"native codegen, human inspection only — not asserted"*
+   (AOT symbol mapping is fragile across wamrc versions). No performance or safety
+   claim rests on it.
+
+Plus **no accidental copy (HARD gate, C level):** the HullSpan path asserts no
+dataset-sized `module_malloc` / linear-memory buffer is allocated for the span read
+— the span is read in place. (copy-once/chunked DO allocate, by design.)
+
+The honest summary the JSON records: bytecode-clean (check 1) + zero runtime
+host-calls in the scan (check 2) together establish "no per-access host call in the
+executed hot loop"; native machine-code quality is shown but not asserted (check 3).
 
 ## D10 (LOCKED) — reproducible output, not a PR comment
 
@@ -146,13 +179,17 @@ printed to stdout. The JSON is the artifact of record.
 
 ## D11 (LOCKED) — CI: controlled job, publish-not-gate initially
 
-- A dedicated **controlled benchmark job** (its own CI job, `runs-on` a fixed
-  runner) builds wamrc + the AOT guest and runs the bench on a **small deterministic
-  dataset** (CI-bounded, e.g. 64–128 MiB; the ≥1 GiB run is for a local/controlled
-  invocation, `DATASET_MB=1024`).
-- **Hard gates in CI:** (a) the correctness gate D8; (b) AOT **must-not-skip** (fail
-  if the span path took the interpreter/no-wamrc path — the whole point is AOT
-  codegen); (c) D9's no-host-call-in-loop inspection.
+- **Required PR job:** a dedicated controlled benchmark job builds wamrc + the AOT
+  guest and runs the bench on a **64–128 MiB** deterministic dataset (CI-bounded).
+- **Manually-triggered 1 GiB job (added now):** a `workflow_dispatch` job (its own
+  workflow, or a gated input on this one) runs `DATASET_MB=1024` on a fixed runner.
+  The ≥1 GiB result is **necessary before claiming the large-data acceptance
+  criterion is measured**, but it does not burden every commit and is not scheduled
+  — it is invoked on demand and its JSON artifact is the large-data evidence.
+- **Hard gates (both jobs):** (a) the correctness gate D8; (b) AOT **must-not-skip**
+  (fail if the span path took the interpreter/no-wamrc path — the whole point is AOT
+  codegen); (c) D9 check 1 (WASM bytecode clean) + check 2 (zero runtime host-calls
+  in the scan).
 - **NOT a hard gate initially:** the ≤10–15% steady-state threshold. CI **publishes**
   the measured overhead (artifact + summary) but does not fail on it, per the
   requirement to avoid a noisy perf gate before per-architecture baselines are
