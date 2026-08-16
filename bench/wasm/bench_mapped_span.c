@@ -74,6 +74,23 @@ static inline uint64_t hl_wasm_hostcalls(void) { return hl_cap_wasm_host_call_co
 static inline uint64_t hl_wasm_hostcalls(void) { return 0; }
 #endif
 
+/* Fail-fast allocation for this dev benchmark: an OOM NULL becomes a clean
+ * diagnostic exit instead of a silent deref crash (and xrealloc doesn't leak the
+ * old block on failure). Not production code; a benchmark that can't allocate its
+ * timing arrays has nothing useful to measure. */
+static void *xmalloc(size_t n)
+{
+    void *p = malloc(n);
+    if (!p) { fprintf(stderr, "bench-mapped-span: out of memory (%zu bytes)\n", n); exit(1); }
+    return p;
+}
+static void *xrealloc(void *p, size_t n)
+{
+    void *q = realloc(p, n);
+    if (!q) { free(p); fprintf(stderr, "bench-mapped-span: out of memory (%zu bytes)\n", n); exit(1); }
+    return q;
+}
+
 static int cmp_u64(const void *a, const void *b)
 {
     uint64_t x = *(const uint64_t *)a, y = *(const uint64_t *)b;
@@ -87,7 +104,7 @@ static void stats(uint64_t *a, int n, uint64_t *med, uint64_t *mad,
     qsort(a, n, sizeof(a[0]), cmp_u64);
     *lo = a[0]; *hi = a[n - 1];
     *med = a[n / 2];
-    uint64_t *dev = malloc(sizeof(uint64_t) * n);
+    uint64_t *dev = xmalloc(sizeof(uint64_t) * n);
     for (int i = 0; i < n; i++)
         dev[i] = a[i] > *med ? a[i] - *med : *med - a[i];
     qsort(dev, n, sizeof(dev[0]), cmp_u64);
@@ -179,7 +196,7 @@ static Row measure_native(int workload, const char *path, uint64_t len)
     r.checksum = bench_run(workload, m, len);       /* correctness value */
 
     /* native has no dispatch, so t(0 scans) is ~0; steady == one in-process scan. */
-    uint64_t *scan = malloc(sizeof(uint64_t) * g_iters);
+    uint64_t *scan = xmalloc(sizeof(uint64_t) * g_iters);
     for (int i = 0; i < g_warmups; i++) (void)bench_run(workload, m, len);
     RUsnap b = ru_now();
     for (int i = 0; i < g_iters; i++) {
@@ -215,14 +232,14 @@ static Row measure_wasm(HlWasmCache *cache, HlVfs *vfs, const HlFsConfig *cfg,
          * configured linear-memory limit" (a reported finding, not a failure). */
         if (len + BENCH_HDR > HL_WASM_MAX_IO_SIZE) { r.representable = 0; return r; }
         in_len = (size_t)(len + BENCH_HDR);
-        input = malloc(in_len);
+        input = xmalloc(in_len);          /* xmalloc never returns NULL */
         int fd = open(fullpath, O_RDONLY);
-        if (!input || fd < 0 || read(fd, input + BENCH_HDR, (size_t)len) != (ssize_t)len) {
+        if (fd < 0 || read(fd, input + BENCH_HDR, (size_t)len) != (ssize_t)len) {
             r.representable = -1; free(input); if (fd >= 0) close(fd); return r;
         }
         close(fd);
     } else {
-        in_len = BENCH_HDR; input = malloc(in_len);
+        in_len = BENCH_HDR; input = xmalloc(in_len);
     }
     input[0] = (unsigned char)workload; input[1] = (unsigned char)mode;
 
@@ -270,8 +287,8 @@ static Row measure_wasm(HlWasmCache *cache, HlVfs *vfs, const HlFsConfig *cfg,
     /* setup-only control: t(0 scans) = attach + dispatch + teardown, no scan;
      * t(1 scan) adds exactly one whole-file scan. steady = scan - setup. */
     uint64_t hc_b0 = hl_wasm_hostcalls();
-    uint64_t *t0 = malloc(sizeof(uint64_t) * g_iters);
-    uint64_t *t1 = malloc(sizeof(uint64_t) * g_iters);
+    uint64_t *t0 = xmalloc(sizeof(uint64_t) * g_iters);
+    uint64_t *t1 = xmalloc(sizeof(uint64_t) * g_iters);
     RUsnap b = ru_now();
     for (int i = 0; i < g_iters; i++) { uint64_t c, ns; ONE_CALL(0, c, ns); t0[i] = ns; }
     uint64_t hc_a0 = hl_wasm_hostcalls();
@@ -322,7 +339,9 @@ static int chunk_plan(int workload, const unsigned char *src, uint64_t len,
                       Chunk **out)
 {
     Chunk *ch = NULL; int n = 0, cap = 0;
-    #define PUSH(o,l) do { if (n==cap){cap=cap?cap*2:64; ch=realloc(ch,cap*sizeof(Chunk));} \
+    #define PUSH(o,l) do { if (n==cap){ int _nc = cap ? cap*2 : 64; \
+                               if (_nc <= cap) { fprintf(stderr, "bench-mapped-span: chunk count overflow\n"); exit(1); } \
+                               cap=_nc; ch=xrealloc(ch,(size_t)cap*sizeof(Chunk)); } \
                            ch[n].off=(o); ch[n].clen=(l); n++; } while(0)
     if (workload == BW_PARSER) {
         /* replicate bench_run's parser walk EXACTLY to find record boundaries */
@@ -366,7 +385,7 @@ static Row measure_chunked(HlWasmCache *cache, HlVfs *vfs,
 
     /* input = header + up to one chunk (parser chunks <= BENCH_CHUNK + one record). */
     size_t cap = (size_t)BENCH_CHUNK + 128;
-    unsigned char *input = malloc(cap + BENCH_HDR);
+    unsigned char *input = xmalloc(cap + BENCH_HDR);
     input[0] = (unsigned char)workload; input[1] = 1;   /* LINEAR */
 
     HlWasmCallOpts o = {0};
@@ -395,8 +414,8 @@ static Row measure_chunked(HlWasmCache *cache, HlVfs *vfs,
     ONE_PASS(1, r.checksum);                             /* correctness value */
 
     uint64_t hc_b0 = hl_wasm_hostcalls();
-    uint64_t *t0 = malloc(sizeof(uint64_t) * g_iters);
-    uint64_t *t1 = malloc(sizeof(uint64_t) * g_iters);
+    uint64_t *t0 = xmalloc(sizeof(uint64_t) * g_iters);
+    uint64_t *t1 = xmalloc(sizeof(uint64_t) * g_iters);
     RUsnap b = ru_now();
     for (int i = 0; i < g_iters; i++) { uint64_t c; uint64_t s = now_ns(); ONE_PASS(0, c); t0[i] = now_ns() - s; }
     uint64_t hc_a0 = hl_wasm_hostcalls();
@@ -469,14 +488,14 @@ static Row measure_chunked_random(const char *fullpath, uint64_t len)
     uint64_t span = (len >= 4) ? (len - 3) : 1;
     uint64_t n = len / 64; if (n == 0) n = 1;
     if (n > BENCH_RANDOM_MAX_READS) n = BENCH_RANDOM_MAX_READS;   /* == bench_random_n */
-    unsigned char *page = malloc(BENCH_RPAGE);
+    unsigned char *page = xmalloc(BENCH_RPAGE);
 
     uint64_t loads, hits, bytes;
     for (int i = 0; i < g_warmups; i++) (void)chunked_random_pass(src, len, span, n, page, &loads, &hits, &bytes);
     r.checksum = chunked_random_pass(src, len, span, n, page, &loads, &hits, &bytes);
     r.chunk_loads = loads; r.cache_hits = hits; r.bytes_copied = bytes;
 
-    uint64_t *t = malloc(sizeof(uint64_t) * g_iters);
+    uint64_t *t = xmalloc(sizeof(uint64_t) * g_iters);
     RUsnap b = ru_now();
     for (int i = 0; i < g_iters; i++) {
         uint64_t s = now_ns();
