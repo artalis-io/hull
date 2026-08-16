@@ -505,6 +505,11 @@ int main(int argc, char **argv)
     if ((e = getenv("ITERS")))   g_iters   = atoi(e);
     if ((e = getenv("WARMUPS"))) g_warmups = atoi(e);
     if ((e = getenv("OUT")))     g_out     = e;
+    /* Clamp to sane floors: a bad env value (ITERS=0/negative) would otherwise
+     * make stats() read a[-1]/a[0] of an empty array and size the timing mallocs
+     * from a negative int -> huge size_t. g_iters must be >= 1; warmups >= 0. */
+    if (g_iters   < 1) g_iters   = 1;
+    if (g_warmups < 0) g_warmups = 0;
 
     /* Two embedded guests. The committed .wasm (interpreter fallback) is ALWAYS
      * present, so the wasm impls + the correctness gate run without wamrc (e.g.
