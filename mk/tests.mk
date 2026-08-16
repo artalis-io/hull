@@ -216,17 +216,17 @@ $(BUILDDIR)/test_wasm_spans: $(BUILDDIR)/gen_ro_heap_span_aot.h
 # Memory64 AOT fixture (#318, D4.3). There is NO --enable-memory64 wamrc flag in the
 # vendored WAMR -- wamrc AUTO-DETECTS Memory64 from the module's (memory i64) type
 # (its --bounds-checks help even refers to "when memory64 is enabled" as a module
-# property). Compiled WITHOUT --enable-shared-heap: echo64 uses no shared heap and
-# the dispatch attaches none, and a shared-heap-codegen AOT run with no heap
-# attached segfaults (the ro_heap/gsub fixtures use --enable-shared-heap only
-# because their tests DO attach one). On a wamrc FAILURE (present but the compile
+# property). $(3) carries any extra wamrc flags: echo64 passes NONE (it uses no
+# shared heap and the dispatch attaches none -- a shared-heap-codegen AOT run with
+# no heap attached segfaults, #318); spanread64 passes --enable-shared-heap (its
+# test DOES attach a span heap, #334). On a wamrc FAILURE (present but the compile
 # errored) the stderr is surfaced (CI ::warning) before falling back to an empty
 # fixture, so the cause is visible rather than silently swallowed.
-# $(1)=out header, $(2)=array stem.
+# $(1)=out header, $(2)=array stem, $(3)=extra wamrc flags.
 define GEN_MEM64_AOT
 	@w="$(BUILDDIR)/wamrc"; [ -x "$$w" ] || w="$(BUILDDIR)/wamrc-build/wamrc"; \
 	if [ -x "$$w" ]; then \
-	    if "$$w" --opt-level=3 --bounds-checks=1 \
+	    if "$$w" --opt-level=3 --bounds-checks=1 $(3) \
 	            -o $(BUILDDIR)/$(2).aot $< 2>$(BUILDDIR)/$(2).wamrc.err; then \
 	        (cd $(BUILDDIR) && xxd -i $(2).aot) \
 	          | sed -E 's/unsigned char.*\[\]/static const unsigned char $(2)[]/; s/unsigned int.*_len/static const unsigned int $(2)_len/' > $(1); \
@@ -249,9 +249,18 @@ endef
 # hull_process dispatch + readback. Skips (empty fixture) when wamrc is absent; the
 # wasm-readonly-heap-aot CI job builds wamrc and asserts the case is NOT skipped.
 $(BUILDDIR)/gen_echo64_aot.h: $(TESTDIR)/fixtures/compute/echo64.wasm | $(BUILDDIR)
-	$(call GEN_MEM64_AOT,$@,echo64_aot)
+	$(call GEN_MEM64_AOT,$@,echo64_aot,)
 $(BUILDDIR)/test_wasm: INCLUDES += -I$(BUILDDIR)
 $(BUILDDIR)/test_wasm: $(BUILDDIR)/gen_echo64_aot.h
+
+# spanread64.wasm (#334): a (memory i64) mapped-span reader. AOT-compiled WITH
+# --enable-shared-heap (spans ARE a shared heap and ARE attached for the call --
+# whether a shared-heap mem64 AOT runs correctly WITH a heap attached is what the
+# memory64_span_readback test validates). Skips when wamrc is absent; the
+# wasm-readonly-heap-aot CI job asserts the case is NOT skipped.
+$(BUILDDIR)/gen_spanread64_aot.h: $(TESTDIR)/fixtures/compute/spanread64.wasm | $(BUILDDIR)
+	$(call GEN_MEM64_AOT,$@,spanread64_aot,--enable-shared-heap)
+$(BUILDDIR)/test_wasm_spans: $(BUILDDIR)/gen_spanread64_aot.h
 
 # Freestanding-libc fixture (#327). Embed memops.wasm as a C byte array so the
 # unit test's bytes never drift from the committed fixture (which build_memops.sh

@@ -492,6 +492,31 @@ jobs:
             || { echo "::error::Memory64 AOT dispatch case did not run to OK"; exit 1; }
           echo "Memory64 8-cell AOT dispatch ran against a real wamrc .aot and passed."
 
+      - name: Build + run the Memory64 SPAN_INFO readback (must NOT skip)
+        timeout-minutes: 12
+        run: |
+          # #334: a (memory i64) guest (spanread64) AOT-compiled by wamrc with
+          # --enable-shared-heap, with ONE mapped span attached, reads window[0]
+          # through the record's 64-bit `base` (a window placed above UINT32_MAX
+          # under mem64) -- validating the SPAN_INFO-under-Memory64-AOT path incl.
+          # WAMR's guarded-subrange RO shared-heap addressing. FAIL if it takes the
+          # wamrc-unavailable skip path.
+          sh tests/ci_ensure_wamrc.sh
+          rm -f build/gen_spanread64_aot.h
+          make build/test_wasm_spans
+          set -o pipefail
+          # Isolated (utest --filter, leading-only wildcard) so the result is
+          # unambiguous; the full test_wasm_spans regression is covered elsewhere.
+          ./build/test_wasm_spans --filter='*memory64_span_readback' 2>&1 | tee m64span.log
+          rc=${PIPESTATUS[0]}
+          [ "$rc" -eq 0 ] || { echo "::error::memory64_span_readback crashed/failed (rc=$rc)"; exit "$rc"; }
+          if grep -qE "SKIPPED.*wasm_spans\\.memory64_span_readback" m64span.log; then
+            echo "::error::Memory64 SPAN_INFO readback took the wamrc-unavailable skip path"; exit 1
+          fi
+          grep -qE "OK[^A-Za-z].*wasm_spans\\.memory64_span_readback" m64span.log \
+            || { echo "::error::Memory64 SPAN_INFO readback did not run to OK"; exit 1; }
+          echo "Memory64 SPAN_INFO readback ran against a real wamrc .aot and passed."
+
   # Compute AOT shared-heap reads (#326): `hull build` must pass
   # --enable-shared-heap so a plugin that reads a mapped SPAN or a compute.SEGMENT
   # (both WAMR shared heaps) reads correct nonzero bytes under AOT, not zeros.
@@ -1775,6 +1800,14 @@ jobs:
 
       - name: Lua lint
         run: make lint-lua
+
+      # #334: guard the hand-authored (memory i64) span fixture against silent
+      # drift -- recompile spanread64.wat with wat2wasm --enable-memory64 and
+      # verify its SHA-256 matches the committed spanread64.wasm + the pin in the
+      # build script. A .wat edit without regenerating (or a wat2wasm encoding
+      # change) fails here loudly.
+      - name: Memory64 span fixture drift check
+        run: sudo apt-get install -y wabt && sh tests/fixtures/compute/build_spanread64.sh
 
       - name: Install Biome
         run: npm install -g @biomejs/biome@1.9.4
