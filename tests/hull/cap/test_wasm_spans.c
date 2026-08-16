@@ -37,6 +37,7 @@
 #include "wasm_export.h"
 
 #include "gen_ro_heap_span_aot.h" /* build-generated: ro_heap_span_aot[] + _len (or empty) */
+#include "gen_spanread64_aot.h"   /* build-generated: spanread64_aot[] + _len (0 if no wamrc) */
 
 #include <errno.h>
 #include <fcntl.h>
@@ -2382,6 +2383,77 @@ UTEST(wasm_spans, aot_span_lifecycle)
     wasm_runtime_destroy_exec_env(env);
     hl_cap_fs_munmap(buf);
     free_instance(inst, mod, mb);
+    hl_cap_wasm_destroy(&cache);
+    teardown_dir();
+}
+
+/* #334: SPAN_INFO metadata under Memory64 AOT -- the substantive follow-up leg.
+ * Load spanread64 (a (memory i64) module) as AOT, attach ONE windowed span, and
+ * drive it through hl_cap_wasm_call. Because the module is mem64,
+ * hl_wasm_span_set_init places the window near UINT64_MAX, so the record's `base`
+ * is > UINT32_MAX; the guest reads window[0] through that 64-bit base. This
+ * validates the whole path end-to-end, INCLUDING whether WAMR's guarded-subrange
+ * RO shared-heap addressing is memory64-correct under AOT (the open risk -- if it
+ * is not, this test fails and that is the finding, not a Hull cap-layer bug).
+ * Skips without wamrc; the wasm-readonly-heap-aot CI leg asserts it is NOT skipped. */
+UTEST(wasm_spans, memory64_span_readback)
+{
+    if (spanread64_aot_len == 0)
+        UTEST_SKIP("no wamrc-built spanread64 .aot in this build leg");
+
+    /* VFS AOT key must match hl_cap_wasm_load's compute/<name>.aot.<arch>. */
+#if defined(__x86_64__) || defined(_M_X64) || defined(__amd64__)
+    static const char *aot_key = "compute/spanread64.aot.x86_64";
+#elif defined(__aarch64__) || defined(_M_ARM64)
+    static const char *aot_key = "compute/spanread64.aot.aarch64";
+#else
+    UTEST_SKIP("unsupported arch for the Memory64 span readback test");
+#endif
+
+    setup();
+    HlWasmCache cache; ASSERT_EQ(hl_cap_wasm_init(&cache), 0);
+    HlEntry entries[] = { { aot_key, spanread64_aot, spanread64_aot_len } };
+    HlVfs vfs; hl_vfs_init(&vfs, entries, NULL);
+
+    ASSERT_EQ(hl_cap_wasm_load(&cache, "spanread64", &vfs, NULL), 0);
+    HlWasmModule *m = hl_cap_wasm_module_lookup(&cache, "spanread64");
+    ASSERT_TRUE(m != NULL);
+    ASSERT_EQ(m->is_aot, 1);         /* loaded as AOT (mem64 requires it) */
+    ASSERT_EQ(m->is_memory64, 1);    /* detected */
+
+    /* A file window with a KNOWN, nonzero first byte (write_file fills i&0xff;
+     * offset 12345 -> byte 0x39). Read the ground truth straight from the mapping. */
+    ASSERT_EQ(write_file("a.bin", 40000), 0);
+    HlMappedBuffer *buf = hl_cap_fs_mmap_window(&cfg, "a.bin", 12345, 4096, NULL, NULL);
+    ASSERT_TRUE(buf != NULL);
+    unsigned char expect_w0 = ((const unsigned char *)buf->addr)[0];
+    ASSERT_NE(expect_w0, 0);         /* a genuine read, distinguishable from "not read" */
+
+    /* input >= 96 bytes: the guest reuses it as the SPAN_INFO scratch record. */
+    unsigned char input[128];
+    memset(input, 0, sizeof(input));
+    HlWasmSpanReq req = { .name = "src", .buf = buf };
+    HlWasmCallOpts opts = {0};
+    opts.spans = &req;
+    opts.span_count = 1;
+    void *out = NULL; size_t out_len = 0; const char *err = NULL;
+    int rc = hl_cap_wasm_call(&cache, "spanread64", input, sizeof(input),
+                              &out, &out_len, &opts, NULL, NULL, &vfs, NULL, NULL, &err);
+    ASSERT_EQ(rc, HL_WASM_OK);
+    ASSERT_EQ(out_len, (size_t)12);
+    const unsigned char *o = (const unsigned char *)out;
+
+    ASSERT_EQ(o[0], (unsigned char)1);          /* [0] span count == 1 */
+    ASSERT_EQ(o[1], expect_w0);                 /* [1] window[0] via the 64-bit base */
+    ASSERT_EQ(o[2], (unsigned char)1);          /* [2] the 0xfffffff0 scratch got -1 */
+    uint64_t base = 0;                          /* [3..10] base, LE u64 */
+    for (int i = 0; i < 8; i++)
+        base |= (uint64_t)o[3 + i] << (8 * i);
+    ASSERT_TRUE(base > (uint64_t)UINT32_MAX);   /* window sits above 4 GiB (mem64) */
+    ASSERT_EQ(o[11], (unsigned char)1);         /* [11] record query returned 96 */
+    free(out);
+
+    hl_cap_fs_munmap(buf);
     hl_cap_wasm_destroy(&cache);
     teardown_dir();
 }

@@ -119,18 +119,18 @@ Each mirrors the existing span "must NOT skip" gate in `.github/workflows/ci.yml
      sits in the high 64-bit space, read back correctly through the record's 64-bit
      `base`.
 
-   **DEFERRED to [#334](https://github.com/artalis-io/hull/issues/334).** D4.1–D4.3
-   landed in the #318 PR (detection, `memory64_requires_aot` enforcement, and the
-   8-cell dispatch/readback on the `echo64` AOT fixture). SPAN_INFO-under-Memory64
-   needs a NEW `(memory i64)` span-reading fixture (the existing span fixtures are
-   all wasm32) — materially more than the echo64 dispatch — so it is a tracked
-   follow-up, not part of #318. Until #334 lands, Memory64 **mapped spans** are NOT
-   described as fully validated anywhere. The scratch-below-4-GiB vs 64-bit-`base`
-   distinction above is carried verbatim into #334. #334 ALSO covers the `hull build`
-   AOT path for a Memory64 compute plugin (`build.lua` still passes the bogus
-   `--enable-memory64` flag and would compile `--enable-shared-heap` onto a mem64
-   AOT); #318 proves the runtime dispatch by loading a hand-compiled `echo64.aot`
-   directly via `hl_cap_wasm_load`, bypassing `build.lua`.
+   **DONE via [#334](https://github.com/artalis-io/hull/issues/334)** (D4.1–D4.3
+   landed here in #318; D4.4 landed in #334). #334 added a hand-authored `(memory i64)`
+   span-reading fixture (`spanread64`) and the CI-gated `memory64_span_readback` test:
+   a span window placed above `UINT32_MAX` is read back through the record's 64-bit
+   `base` under mem64 AOT — confirming WAMR's guarded-subrange RO shared-heap
+   addressing is memory64-correct under AOT. The scratch-below-4-GiB vs 64-bit-`base`
+   distinction was carried verbatim into #334. The `hull build` AOT path for a
+   Memory64 compute *plugin* (`build.lua`'s bogus `--enable-memory64` + the
+   shared-heap codegen policy) was SPLIT to
+   [#336](https://github.com/artalis-io/hull/issues/336) and is NOT yet supported;
+   #318/#334 prove the runtime dispatch + mapped spans by loading a hand-compiled
+   `.aot` directly via `hl_cap_wasm_load`, bypassing `build.lua`.
 
 Convert `test_wasm.c::memory64_detection` and `memory64_rejects_interpreter` from
 their `#if WASM_ENABLE_MEMORY64` `#else` (disabled) form to the live assertions above;
