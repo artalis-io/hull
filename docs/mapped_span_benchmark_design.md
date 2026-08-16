@@ -258,3 +258,47 @@ printed to stdout. The JSON is the artifact of record.
 controlled runner: correctness + AOT-must-not-skip + codegen inspection + JSON), and
 a CI job that publishes the artifact. Docs: this record + a results section in
 `docs/wamr_architecture.md` once the first numbers land.
+
+## Results (first CI runs, x86_64 Linux, AOT) — PRELIMINARY
+
+Two required-CI runs of the 96 MiB job (`engine=aot`, all correctness gates green:
+4-impl checksums == native, zero host-call-in-scan, chunked-random thrash). Steady
+= warm marginal scan (setup-only control). Within a run the dispersion is small
+(MAD 0.5-2.6%); BETWEEN runs the shared-runner CPU varies substantially.
+
+| workload | run 1 native→span (overhead) | run 2 native→span (overhead) |
+|----------|------------------------------|------------------------------|
+| seq_bytes | 29.1→51.0 ms (+75%) | 62.9→43.8 ms (-30%) |
+| seq_words | 65.9→29.9 ms (-55%) | 80.9→33.9 ms (-58%) |
+| random    | 6.2→8.0 ms (+28%)   | 0.52→0.56 ms (+8%) |
+| parser    | 54.6→81.8 ms (+50%) | 50.6→80.4 ms (+59%) |
+
+chunked-random (both runs): ~131k page loads, ~512 MiB copied to read ~512 KiB
+(~1000x amplification) — the quantified cost of serving random access without a span.
+
+**What this shows, honestly:**
+
+1. **The "HullSpan read approaches native mmap within 10-15%" claim is NOT
+   supported as a blanket statement.** The span-vs-native gap is strongly
+   workload- and codegen-dependent: span is consistently FASTER for the
+   wider/multi-pass read (`seq_words`, -55/-58%), consistently SLOWER for record
+   parsing (`parser`, +50/+59%), and vectorization-sensitive for scalar byte
+   scanning (`seq_bytes`, swinging +75%/-30%). The driver is that native `-O2`
+   auto-vectorizes simple scalar loops while WAMR AOT does not, so native wins
+   where it vectorizes and loses where it can't.
+2. **The absolute overhead is not run-to-run stable on shared GitHub runners**
+   (native `seq_bytes` alone swung 29↔63 ms). So a single CI number cannot be a
+   ≤10-15% pass/fail verdict — which is precisely why D11 keeps the threshold
+   REPORTED, not gated, until stable per-arch baselines exist. A defensible
+   verdict needs a dedicated/pinned runner (tracked follow-up).
+3. **Fairness caveat.** To keep checksums identical, the native baseline reads
+   through the same bounds-checked `hull_span_*` accessors as the guest, not raw
+   pointers. For `seq_bytes` this is nearly free (predictable branch + native
+   vectorization), but a raw-pointer native baseline is a worthwhile future
+   variant to bound the accessor's own cost.
+
+Net: the benchmark did its job — it MEASURED an unvalidated claim and found it is
+more nuanced than "approaches native." The mapped-spans value proposition holds
+where it matters most (zero-copy random access over huge files: the copy-once
+ceiling + the chunked-random ~1000x amplification make that concrete), but the
+per-scan "near-native" phrasing should be qualified by access pattern.
