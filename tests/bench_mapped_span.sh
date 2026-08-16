@@ -35,6 +35,20 @@ export DATASET_MB OUT
 
 fail() { echo "bench-mapped-span: FAIL: $*" >&2; exit 1; }
 
+sha256_of() { shasum -a256 "$1" 2>/dev/null | cut -d' ' -f1 || sha256sum "$1" 2>/dev/null | cut -d' ' -f1; }
+
+# ── G1a provenance SHA hard-check: the committed .wasm must match the sha256
+# recorded in its provenance sidecar, so the authoritative binary cannot change
+# independently of the documented provenance. ──────────────────────────────
+PROV="$BW/bench_span_guest.wasm.prov"
+[ -f "$PROV" ] || fail "G1a: missing provenance sidecar $PROV"
+prov_sha=$(sed -n 's/^# sha256: *//p' "$PROV" | tr -d '[:space:]')
+have_sha=$(sha256_of "$BW/bench_span_guest.wasm")
+[ -n "$prov_sha" ] || fail "G1a: no sha256 line in $PROV"
+[ "$prov_sha" = "$have_sha" ] \
+    || fail "G1a: committed bench_span_guest.wasm sha256=$have_sha != provenance $prov_sha (binary changed without updating .prov)"
+echo "bench-mapped-span: G1a OK (committed guest matches provenance sha256)"
+
 # ── G1 provenance / repro guard ─────────────────────────────────────────────
 # The committed guest .wasm must still COMPILE from the current source + SDK
 # headers (catches source rot / a hand-edited binary). Byte-identity to the
@@ -81,12 +95,15 @@ if [ "${BENCH_EXPLORATORY:-0}" = "1" ]; then
 else
     rep_span=$(grep -c '"impl": "hullspan_aot", "representable": 1' "$OUT" || true)
     [ "$rep_span" -ge 4 ] || fail "G2 must-not-skip: only $rep_span/4 representable hullspan_aot rows"
-    # chunked-copy is representable for the 3 chunk-decomposable workloads (random is N/A).
+    # chunked-copy is representable for ALL FOUR workloads: seq_bytes/seq_words/parser
+    # stream through a bounded chunk buffer; random uses a bounded one-page cache
+    # (thrashing, but representable). Fill the whole workload x baseline matrix.
     rep_chunk=$(grep -c '"impl": "chunked_copy", "representable": 1' "$OUT" || true)
-    [ "$rep_chunk" -ge 3 ] || fail "G2: only $rep_chunk/3 representable chunked_copy rows (expected seq_bytes/seq_words/parser)"
-    grep -q '"workload": "random", "impl": "chunked_copy", "representable": -4' "$OUT" \
-        || fail "G2: chunked_copy for random must be representable=-4 (not-applicable finding)"
-    echo "bench-mapped-span: G2 OK (engine=aot; $rep_span/4 span rows, $rep_chunk/3 chunked rows, chunked-random=n/a)"
+    [ "$rep_chunk" -ge 4 ] || fail "G2: only $rep_chunk/4 representable chunked_copy rows"
+    # the chunked-random thrash must be REAL: bytes_copied >> the bytes actually read.
+    grep -q '"workload": "random", "impl": "chunked_copy"[^}]*"bytes_copied": [1-9]' "$OUT" \
+        || fail "G2: chunked-random must report nonzero bytes_copied (the thrash metric)"
+    echo "bench-mapped-span: G2 OK (engine=aot; $rep_span/4 span rows, $rep_chunk/4 chunked rows incl random-thrash)"
 fi
 echo "bench-mapped-span: G3 OK (bench exited 0 -- 4-impl checksum + host-call in-process gate passed)"
 

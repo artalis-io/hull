@@ -4,14 +4,16 @@
  * wasm32 guest via a HullSpan, vs the native-mmap baseline and the two copy-based
  * baselines. Methodology is locked in docs/mapped_span_benchmark_design.md:
  *   - 4 workloads (bench_span_ops.h), same body native + wasm;
- *   - 4 impls: native mmap / HullSpan / copy-once linear / chunked-copy (chunked
- *     is N/A for the random workload -- a random walk cannot be served from a
- *     chunk already discarded, the finding that motivates spans);
- *   - steady-state via two-point (t(1), t(K)) amortization of attach/dispatch;
- *   - correctness gate (identical checksums) BEFORE any timing;
+ *   - 4 impls: native mmap / HullSpan / copy-once linear / chunked-copy. For
+ *     random, chunked is a bounded ONE-PAGE-cache reader that (re)loads the page
+ *     containing each scattered offset -- representable but thrashing (the useful
+ *     comparison), with load/hit/bytes-copied metrics;
+ *   - WARM steady-state via a setup-only control: t(1 scan) - t(0 scans), which
+ *     stays under WAMR's INT_MAX instruction-gas ceiling at any dataset size;
+ *   - correctness gate (identical checksums across all four impls) BEFORE timing;
  *   - getrusage page-fault + RSS capture; medians + MAD over iters;
  *   - runtime host-call-counter proof the scan loop makes zero host calls;
- *   - reproducible JSON.
+ *   - reproducible JSON. (#339 is warm-only; cold/RSS validation is a follow-up.)
  *
  * Two embedded guests: the committed .wasm (interpreter fallback, always present,
  * so the wasm impls + correctness gate run WITHOUT wamrc) and the wamrc-built .aot
@@ -53,7 +55,7 @@ int32_t host_call(int32_t op, int32_t a, int32_t b);
 static uint64_t g_dataset_bytes;      /* DATASET_MB * 1MiB */
 static int g_iters   = 15;            /* timed iterations (ITERS) */
 static int g_warmups = 3;             /* discarded warmups (WARMUPS) */
-static const char *g_cache = "warm";  /* CACHE = warm|cold */
+static const char *g_cache = "warm";  /* #339 is warm-only; cold is a tracked follow-up */
 static const char *g_out = "build/bench_mapped_span.json";
 
 static uint64_t now_ns(void)
@@ -142,8 +144,10 @@ typedef struct {
     uint64_t steady_ns;               /* scan_med - setup_med = one marginal scan */
     uint64_t raw_med, raw_mad, raw_lo, raw_hi;   /* raw end-to-end = t(1 scan) */
     long majflt, minflt, maxrss_kb;
-    int representable;                /* 0 => "not representable" (copy-once ceiling) */
+    int representable;                /* 0 => "not representable" (copy-once ceiling); -5 gas-limited */
     uint64_t hostcall_delta;          /* hostcalls(1 scan) - hostcalls(0 scans); must be 0 */
+    /* chunked-random bounded-reader metrics (0 for other rows): */
+    uint64_t chunk_loads, cache_hits, bytes_copied;
 } Row;
 
 static uint64_t derive_steady(uint64_t scan, uint64_t setup)
@@ -151,21 +155,17 @@ static uint64_t derive_steady(uint64_t scan, uint64_t setup)
     return (scan > setup) ? (scan - setup) : scan;   /* degenerate: fall back to raw */
 }
 
-/* Pre-fault (warm) or best-effort evict (cold) a mapping, per D5. */
-static void cache_prep(void *addr, uint64_t len, int fd)
+/* Pre-fault a mapping so the timed WARM scan measures CPU + address translation,
+ * not first-touch page faults. #339 is scoped to WARM steady-state only: a real
+ * per-iteration COLD protocol (evict both the native AND the span mapping every
+ * iteration, with verified major-fault evidence) is a separate effort tracked in
+ * the follow-up, since the previous "cold" path faulted pages back in before
+ * timing and only touched the native mapping -- it never measured cold. */
+static void prefault_warm(void *addr, uint64_t len)
 {
-    (void)fd;
-    if (strcmp(g_cache, "cold") == 0) {
-#ifdef POSIX_FADV_DONTNEED
-        if (fd >= 0) posix_fadvise(fd, 0, (off_t)len, POSIX_FADV_DONTNEED);
-#endif
-        (void)madvise(addr, (size_t)len, MADV_DONTNEED);
-    } else {
-        /* warm: touch every page so steady-state measures CPU + translation. */
-        volatile uint64_t s = 0;
-        for (uint64_t o = 0; o < len; o += 4096) s += ((volatile unsigned char *)addr)[o];
-        (void)s;
-    }
+    volatile uint64_t s = 0;
+    for (uint64_t o = 0; o < len; o += 4096) s += ((volatile unsigned char *)addr)[o];
+    (void)s;
 }
 
 /* ── native mmap baseline (runs bench_span_ops.h in-process) ──────────── */
@@ -175,7 +175,7 @@ static Row measure_native(int workload, const char *path, uint64_t len)
     int fd = open(path, O_RDONLY);
     void *m = mmap(NULL, (size_t)len, PROT_READ, MAP_PRIVATE, fd, 0);
     if (m == MAP_FAILED) { r.representable = -1; close(fd); return r; }
-    cache_prep(m, len, fd);
+    prefault_warm(m, len);
     r.checksum = bench_run(workload, m, len);       /* correctness value */
 
     /* native has no dispatch, so t(0 scans) is ~0; steady == one in-process scan. */
@@ -421,6 +421,79 @@ static Row measure_chunked(HlWasmCache *cache, HlVfs *vfs,
     #undef ONE_PASS
 }
 
+/* ── chunked-random: a bounded reader that serves the fixed-LCG random offsets
+ * from a ONE-PAGE (4 KiB) cache -- the honest "page in the chunk containing each
+ * scattered offset" model. It IS representable (a whole-file copy at scale is
+ * not), it just THRASHES: a random walk almost never re-hits the cached page, so
+ * it (re)loads ~4 KiB per 4-byte read (bytes_copied >> bytes_used) -- the useful
+ * comparison vs a span that reads 4 bytes in place. No wasm dispatch: scattered
+ * access is not a guest scan; the read is host-side and its checksum matches
+ * native by construction (same seed/LCG/offsets/u32le assembly). */
+#define BENCH_RPAGE 4096u
+
+static uint64_t chunked_random_pass(const unsigned char *src, uint64_t len, uint64_t span,
+                                    uint64_t n, unsigned char *page,
+                                    uint64_t *loads, uint64_t *hits, uint64_t *bytes)
+{
+    int64_t cur = -1;
+    uint64_t x = BENCH_RANDOM_SEED, sum = 0;
+    *loads = *hits = *bytes = 0;
+    for (uint64_t i = 0; i < n; i++) {
+        x = x * 6364136223846793005ULL + 1442695040888963407ULL;   /* same LCG as bench_run */
+        uint64_t off = (x >> 11) % span;
+        uint32_t v = 0;
+        for (int k = 0; k < 4; k++) {                              /* le u32 at off, byte by byte */
+            uint64_t o = off + (uint64_t)k;
+            int64_t pg = (int64_t)(o >> 12);                       /* page index (/4096) */
+            if (pg != cur) {                                       /* miss: (re)load the page */
+                uint64_t base = (uint64_t)pg << 12;
+                uint64_t clen = (len - base < BENCH_RPAGE) ? (len - base) : BENCH_RPAGE;
+                memcpy(page, src + base, (size_t)clen);
+                cur = pg; (*loads)++; *bytes += clen;
+            } else (*hits)++;
+            v |= (uint32_t)page[o & 4095u] << (8 * k);
+        }
+        sum += v;
+    }
+    return sum;
+}
+
+static Row measure_chunked_random(const char *fullpath, uint64_t len)
+{
+    Row r; memset(&r, 0, sizeof(r)); r.representable = 1;
+    int fd = open(fullpath, O_RDONLY);
+    if (fd < 0) { r.representable = -1; return r; }
+    unsigned char *src = mmap(NULL, (size_t)len, PROT_READ, MAP_PRIVATE, fd, 0);
+    if (src == MAP_FAILED) { r.representable = -1; close(fd); return r; }
+
+    uint64_t span = (len >= 4) ? (len - 3) : 1;
+    uint64_t n = len / 64; if (n == 0) n = 1;
+    if (n > BENCH_RANDOM_MAX_READS) n = BENCH_RANDOM_MAX_READS;   /* == bench_random_n */
+    unsigned char *page = malloc(BENCH_RPAGE);
+
+    uint64_t loads, hits, bytes;
+    for (int i = 0; i < g_warmups; i++) (void)chunked_random_pass(src, len, span, n, page, &loads, &hits, &bytes);
+    r.checksum = chunked_random_pass(src, len, span, n, page, &loads, &hits, &bytes);
+    r.chunk_loads = loads; r.cache_hits = hits; r.bytes_copied = bytes;
+
+    uint64_t *t = malloc(sizeof(uint64_t) * g_iters);
+    RUsnap b = ru_now();
+    for (int i = 0; i < g_iters; i++) {
+        uint64_t s = now_ns();
+        (void)chunked_random_pass(src, len, span, n, page, &loads, &hits, &bytes);
+        t[i] = now_ns() - s;
+    }
+    RUsnap a = ru_now();
+    uint64_t mad, lo, hi;
+    stats(t, g_iters, &r.raw_med, &mad, &lo, &hi);
+    r.raw_mad = mad; r.raw_lo = lo; r.raw_hi = hi;
+    r.scan_med = r.raw_med; r.setup_med = 0; r.steady_ns = r.scan_med;   /* host-side: no dispatch to subtract */
+    r.minflt = a.minflt - b.minflt; r.majflt = a.majflt - b.majflt; r.maxrss_kb = a.maxrss;
+
+    free(t); free(page); munmap(src, (size_t)len); close(fd);
+    return r;
+}
+
 static const char *WL[] = { "seq_bytes", "seq_words", "random", "parser" };
 
 int main(int argc, char **argv)
@@ -431,7 +504,6 @@ int main(int argc, char **argv)
     else g_dataset_bytes = 96ull * 1024 * 1024;   /* CI default */
     if ((e = getenv("ITERS")))   g_iters   = atoi(e);
     if ((e = getenv("WARMUPS"))) g_warmups = atoi(e);
-    if ((e = getenv("CACHE")))   g_cache   = e;
     if ((e = getenv("OUT")))     g_out     = e;
 
     /* Two embedded guests. The committed .wasm (interpreter fallback) is ALWAYS
@@ -486,7 +558,8 @@ int main(int argc, char **argv)
         Row nat = measure_native(wl, path, g_dataset_bytes);
         Row spn = measure_wasm(&cache, &vfs, &cfg, wl, 0, "data.bin", path, g_dataset_bytes);
         Row cp1 = measure_wasm(&cache, &vfs, &cfg, wl, 1, "data.bin", path, g_dataset_bytes);
-        Row chk = measure_chunked(&cache, &vfs, wl, path, g_dataset_bytes);
+        Row chk = (wl == BW_RANDOM) ? measure_chunked_random(path, g_dataset_bytes)
+                                    : measure_chunked(&cache, &vfs, wl, path, g_dataset_bytes);
 
         /* correctness gate: every REPRESENTABLE impl must match native BEFORE any
          * timing is trusted. Non-representable rows (copy-once above the wasm32
@@ -506,27 +579,31 @@ int main(int argc, char **argv)
 
         double overhead = (spn.representable == 1 && nat.steady_ns)
             ? (100.0 * ((double)spn.steady_ns - (double)nat.steady_ns) / (double)nat.steady_ns) : 0.0;
+        const char *chunk_s = (chk.representable == 1)
+            ? (wl == BW_RANDOM ? "ok(thrash)" : "ok")
+            : (chk.representable == 0 ? "not-representable" : "err");
+        const char *copy_s = cp1.representable == 1 ? "ok"
+            : (cp1.representable == 0 ? "not-representable" : (cp1.representable == -5 ? "gas-limited" : "err"));
         if (spn.representable == 1)
             printf("%-10s  native=%8lluns  span=%8lluns  overhead=%+.1f%%  copy1=%-17s chunked=%s\n",
                    WL[wl], (unsigned long long)nat.steady_ns, (unsigned long long)spn.steady_ns, overhead,
-                   cp1.representable == 1 ? "ok" : (cp1.representable == 0 ? "not-representable" : "err"),
-                   chk.representable == 1 ? "ok" : (chk.representable == -4 ? "n/a(random)" : "err"));
+                   copy_s, chunk_s);
         else
             printf("%-10s  native=%8lluns  span=%-14s copy1=%-17s chunked=%s\n",
                    WL[wl], (unsigned long long)nat.steady_ns,
-                   spn.representable == -5 ? "gas-limited" : "err",
-                   cp1.representable == 1 ? "ok" : (cp1.representable == 0 ? "not-representable" : "err"),
-                   chk.representable == 1 ? "ok" : (chk.representable == -4 ? "n/a(random)" : "err"));
+                   spn.representable == -5 ? "gas-limited" : "err", copy_s, chunk_s);
 
         #define ROWJSON(nm, R) do { \
             fprintf(jf, "%s    {\"workload\": \"%s\", \"impl\": \"%s\", \"representable\": %d, " \
                 "\"checksum\": %llu, \"steady_ns\": %llu, \"raw_med_ns\": %llu, \"raw_mad_ns\": %llu, " \
                 "\"raw_lo_ns\": %llu, \"raw_hi_ns\": %llu, \"setup_ns\": %llu, \"minflt\": %ld, " \
-                "\"majflt\": %ld, \"maxrss_kb\": %ld, \"hostcall_scan_delta\": %llu}", \
+                "\"majflt\": %ld, \"maxrss_kb\": %ld, \"hostcall_scan_delta\": %llu, " \
+                "\"chunk_loads\": %llu, \"cache_hits\": %llu, \"bytes_copied\": %llu}", \
                 first ? "" : ",\n", WL[wl], nm, (R).representable, (unsigned long long)(R).checksum, \
                 (unsigned long long)(R).steady_ns, (unsigned long long)(R).raw_med, (unsigned long long)(R).raw_mad, \
                 (unsigned long long)(R).raw_lo, (unsigned long long)(R).raw_hi, (unsigned long long)(R).setup_med, \
-                (R).minflt, (R).majflt, (R).maxrss_kb, (unsigned long long)(R).hostcall_delta); \
+                (R).minflt, (R).majflt, (R).maxrss_kb, (unsigned long long)(R).hostcall_delta, \
+                (unsigned long long)(R).chunk_loads, (unsigned long long)(R).cache_hits, (unsigned long long)(R).bytes_copied); \
             first = 0; } while (0)
         ROWJSON("native_mmap", nat);
         ROWJSON("hullspan_aot", spn);

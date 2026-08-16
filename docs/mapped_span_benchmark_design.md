@@ -63,18 +63,30 @@ reads the host-provided linear-memory buffer. Native baseline runs the same ops
 body in-process over the mmap. Chunked drives the guest per chunk from the host,
 accumulating the per-chunk checksums.
 
-**Chunked decomposability (AMENDED — measured, with one principled N/A).** "Checksums
-identical by construction" holds for chunked ONLY where the workload is a single
-forward pass decomposable at the chunk cuts: **seq_bytes** (any cut; byte sum is
-associative), **seq_words** (8-aligned cuts; the u32/u64 strides never straddle),
-**parser** (record-aligned cuts; a chunk holds whole records). It does NOT hold for
-**random**: a fixed-seed random walk touches offsets across the whole file, so it
-cannot be served from a chunk already discarded without holding the whole file
-resident — which is exactly the capability a mapped span provides and a bounded
-chunked copy cannot. So chunked-random is reported `representable=-4`
-(not-applicable) — a genuine finding that motivates spans, NOT a silent gap. The
-harness genuinely measures chunked for the other three workloads and the
-correctness gate compares their checksums to native.
+**Chunked is measured for ALL FOUR workloads (AMENDED).** For the three streamable
+workloads it re-fills a bounded chunk buffer and the guest scans it: **seq_bytes**
+(any cut; byte sum is associative), **seq_words** (8-aligned cuts; the u32/u64
+strides never straddle), **parser** (record-aligned cuts; a chunk holds whole
+records) — sum of per-chunk `bench_run` == whole-file `bench_run`, and the
+correctness gate proves it. **Random is ALSO representable**, not N/A: a bounded
+reader serves the fixed-LCG offsets from a ONE-PAGE (4 KiB) cache, (re)loading the
+page containing each scattered read (`chunked_random_pass`). It works — its checksum
+matches native by construction (same seed/LCG/offsets/u32le assembly) — it just
+THRASHES: a random walk almost never re-hits the cached page, so it copies ~4 KiB
+per 4-byte read. The harness reports `chunk_loads`, `cache_hits`, and `bytes_copied`
+(empirically ~512 MiB copied to read ~512 KiB at the 131072-read cap: a ~1000×
+amplification), which is the useful quantitative comparison vs a span reading 4
+bytes in place. The random read count is capped (`BENCH_RANDOM_MAX_READS`, applied
+identically to native/span/chunked so checksums stay matched) so the reload volume
+is bounded rather than terabytes. This fills the whole workload × baseline matrix.
+
+**Cache state (AMENDED — warm-only scope).** #339 measures WARM steady-state only:
+every impl is pre-faulted / warmed before timing. The earlier `cache="cold"` path
+was removed because it did not actually measure cold — it faulted the mapping back
+in before the timed scan and only touched the native mapping, not the span. A real
+per-iteration cold protocol (evict BOTH the native and the span mapping each
+iteration, with verified major-fault evidence) plus RSS/high-water validation is a
+tracked follow-up, not part of this benchmark's claims.
 
 ## D3 (LOCKED) — steady-state is amortized, NOT end-to-end call time renamed
 

@@ -14,10 +14,25 @@
 enum {
     BW_SEQ_BYTES = 0,   /* sum every u8                        */
     BW_SEQ_WORDS = 1,   /* sum le u32 stride, then le u64 stride */
-    BW_RANDOM    = 2,   /* fixed-LCG walk of len/64 offsets    */
+    BW_RANDOM    = 2,   /* fixed-LCG walk of min(len/64, CAP) offsets */
     BW_PARSER    = 3,   /* length-prefixed record walk         */
     BW_COUNT     = 4
 };
+
+/* Random-read count is CAPPED so a real chunked-copy random reader (which must
+ * (re)load the chunk containing each scattered offset, one-chunk cache) is
+ * feasible instead of copying terabytes. Applied identically in bench_run (native
+ * + span guest) and in the host-side chunked-random reader, so all four impls walk
+ * the SAME offsets and their checksums match. */
+#define BENCH_RANDOM_MAX_READS 131072u
+
+static inline hull_span_u64 bench_random_n(hull_span_u64 len)
+{
+    hull_span_u64 n = len / 64; if (n == 0) n = 1;
+    if (n > BENCH_RANDOM_MAX_READS) n = BENCH_RANDOM_MAX_READS;
+    return n;
+}
+#define BENCH_RANDOM_SEED 0x2545F4914F6CDD1DULL
 
 /* One deterministic pass over [w, w+len); returns a u64 checksum. No host imports. */
 static inline hull_span_u64 bench_run(int workload, const void *w, hull_span_u64 len)
@@ -46,9 +61,9 @@ static inline hull_span_u64 bench_run(int workload, const void *w, hull_span_u64
     }
     else if (workload == BW_RANDOM) {
         /* Fixed LCG => identical offset sequence on every run and every impl. */
-        hull_span_u64 x = 0x2545F4914F6CDD1DULL;      /* constant seed */
+        hull_span_u64 x = BENCH_RANDOM_SEED;          /* constant seed */
         hull_span_u64 span = (len >= 4) ? (len - 3) : 1;
-        hull_span_u64 n = len / 64; if (n == 0) n = 1;
+        hull_span_u64 n = bench_random_n(len);
         for (hull_span_u64 i = 0; i < n; i++) {
             x = x * 6364136223846793005ULL + 1442695040888963407ULL;
             hull_span_u64 off = (x >> 11) % span;
