@@ -738,7 +738,20 @@ fuzz/fuzz_mysqlwire: fuzz/fuzz_mysqlwire.c $(SRCDIR)/hull/cap/mysqlwire.c
 fuzz/fuzz_mysql_dsn: fuzz/fuzz_mysql_dsn.c $(SRCDIR)/hull/cap/mysql_conn.c
 	$(CC) $(FUZZ_CFLAGS) -DHL_MY_NO_AUTH -o $@ $^
 
-fuzz: fuzz/fuzz_sh_json fuzz/fuzz_path_normalize fuzz/fuzz_mime_sniff fuzz/fuzz_host_match fuzz/fuzz_pgwire fuzz/fuzz_pg_dsn fuzz/fuzz_pg_rewrite fuzz/fuzz_mysqlwire fuzz/fuzz_mysql_dsn fuzz/fuzz_respwire fuzz/fuzz_valkey_dsn
+# Mapped-span guest SDK math (templates/hull_span.h): the attacker-controlled
+# span-metadata decode + window-read offset arithmetic. Header-only (freestanding
+# SDK), so no Hull link deps -- just -Itemplates.
+fuzz/fuzz_span_sdk: fuzz/fuzz_span_sdk.c
+	$(CC) $(FUZZ_CFLAGS) -Itemplates -o $@ $^
+
+# Mapped-WINDOW geometry math (hl_cap_fs_mmap_window_geometry): page-align + EOF
+# clamp + overflow-safe rounding. The fuzzed function is a pure arithmetic leaf,
+# but cap/fs.c as a whole pulls alloc + audit (sh_json); link that small chain so
+# the fuzzer resolves without dragging in mmap/Keel. mmap/open/realpath are libc.
+fuzz/fuzz_span_window: fuzz/fuzz_span_window.c $(SRCDIR)/hull/cap/fs.c $(SRCDIR)/hull/cap/audit.c $(SRCDIR)/hull/utils/alloc.c $(SH_JSON_DIR)/sh_json.c $(SH_ARENA_DIR)/sh_arena.c
+	$(CC) $(FUZZ_CFLAGS) -Ivendor/keel/include -o $@ $^
+
+fuzz: fuzz/fuzz_sh_json fuzz/fuzz_path_normalize fuzz/fuzz_mime_sniff fuzz/fuzz_host_match fuzz/fuzz_pgwire fuzz/fuzz_pg_dsn fuzz/fuzz_pg_rewrite fuzz/fuzz_mysqlwire fuzz/fuzz_mysql_dsn fuzz/fuzz_respwire fuzz/fuzz_valkey_dsn fuzz/fuzz_span_sdk fuzz/fuzz_span_window
 
 # Time-boxed run over the seed corpora (what CI runs). FUZZ_TIME overrides.
 fuzz-run: fuzz
@@ -753,6 +766,8 @@ fuzz-run: fuzz
 	./fuzz/fuzz_mysql_dsn fuzz/corpus_mysql_dsn/ -max_total_time=$(FUZZ_TIME)
 	./fuzz/fuzz_respwire fuzz/corpus_respwire/ -max_total_time=$(FUZZ_TIME)
 	./fuzz/fuzz_valkey_dsn fuzz/corpus_valkey_dsn/ -max_total_time=$(FUZZ_TIME)
+	./fuzz/fuzz_span_sdk fuzz/corpus_span_sdk/ -max_total_time=$(FUZZ_TIME)
+	./fuzz/fuzz_span_window fuzz/corpus_span_window/ -max_total_time=$(FUZZ_TIME)
 
 # ── E2E tests ──────────────────────────────────────────────────────
 
