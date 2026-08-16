@@ -55,12 +55,26 @@ loop). The ops body is identical → checksums identical by construction.
 | **native mmap** (baseline) | `mmap(file, PROT_READ, MAP_PRIVATE)` pointer, native C | the target to beat; no wasm |
 | **HullSpan AOT** (under test) | the span window base (a wasm-domain address; WAMR shared-heap-translated) | `hl_cap_wasm_call` with `opts.spans` on the AOT guest |
 | **copy-once into linear memory** (baseline) | a linear-memory buffer the host filled once from the file | guest heap SIZED to the configured dataset; its setup/copy cost is reported separately. If the dataset exceeds the configured linear-memory limit the row reports **"not representable within configured linear-memory limit"** — a finding (spans have no such ceiling), NOT a benchmark failure |
-| **chunked-copy** (baseline) | a fixed linear-memory chunk buffer, host re-fills native→wasm per chunk | the outer copy loop is the measured cost |
+| **chunked-copy** (baseline) | a fixed BOUNDED linear-memory chunk buffer, host re-fills native→wasm per chunk (guest LINEAR mode, one scan per chunk) | the per-chunk copy is the setup cost; representable even far above the copy-once ceiling |
 
 Guest (`bench/wasm/bench_span_guest.c`, AOT): one `hull_process` with a workload +
 mode selector in its input; `mode=span` reads via the attached span, `mode=linear`
 reads the host-provided linear-memory buffer. Native baseline runs the same ops
-body in-process over the mmap. Chunked drives the guest per chunk from the host.
+body in-process over the mmap. Chunked drives the guest per chunk from the host,
+accumulating the per-chunk checksums.
+
+**Chunked decomposability (AMENDED — measured, with one principled N/A).** "Checksums
+identical by construction" holds for chunked ONLY where the workload is a single
+forward pass decomposable at the chunk cuts: **seq_bytes** (any cut; byte sum is
+associative), **seq_words** (8-aligned cuts; the u32/u64 strides never straddle),
+**parser** (record-aligned cuts; a chunk holds whole records). It does NOT hold for
+**random**: a fixed-seed random walk touches offsets across the whole file, so it
+cannot be served from a chunk already discarded without holding the whole file
+resident — which is exactly the capability a mapped span provides and a bounded
+chunked copy cannot. So chunked-random is reported `representable=-4`
+(not-applicable) — a genuine finding that motivates spans, NOT a silent gap. The
+harness genuinely measures chunked for the other three workloads and the
+correctness gate compares their checksums to native.
 
 ## D3 (LOCKED) — steady-state is amortized, NOT end-to-end call time renamed
 
@@ -78,6 +92,23 @@ steady = (t(K) - t(1)) / (K - 1)      steady = the marginal per-scan cost)
 Measure `t(1)` and `t(K)` (K default 32) for every impl; the internal rep count is
 the SAME across impls (native runs the ops body `k` times in-process). This
 subtracts the fixed per-call cost exactly, leaving the pure scan.
+
+**AMENDED (implementation) — setup-only control, not K internal reps.** WAMR meters
+AOT execution against an instruction-gas limit whose hard ceiling is `INT_MAX`
+(~2.1e9 instructions per call; larger requested gas is clamped). A single whole-file
+scan of a 64–128 MiB dataset is already several hundred million instructions, so `K`
+internal reps in ONE call (K·scan) blows the ceiling and the `t(K)` call fails with
+GAS at exactly the mandated dataset size. D3 explicitly permitted the alternative it
+listed — "measure an empty/setup-only control and report both" — so the harness uses
+that: it measures `t(0 scans)` (the guest attaches the span / receives the copied
+buffer and returns WITHOUT scanning) and `t(1 scan)`, and derives
+`steady = median(t(1 scan)) - median(t(0 scans))`. Each timed call runs AT MOST ONE
+scan, so it never approaches the gas ceiling at any dataset size. `t(0 scans)`
+captures the fixed per-call cost (span attach + dispatch + teardown; or, for
+copy-once/chunked, the linear-memory / per-chunk copy), so subtracting it leaves the
+marginal scan — the same quantity the two-point sought, obtained gas-safely. The JSON
+records `method: "setup-control"`, `steady_ns`, `setup_ns` (= `t(0 scans)`), and the
+raw end-to-end `t(1 scan)`.
 
 Each `(impl, workload)` therefore reports, in the JSON:
 - **raw end-to-end** — `t(1)`, the full call incl. attach/dispatch (honest

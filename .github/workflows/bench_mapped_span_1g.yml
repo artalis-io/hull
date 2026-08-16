@@ -51,7 +51,10 @@ jobs:
           CACHE: ${{ github.event.inputs.cache }}
           ITERS: "11"
           WARMUPS: "3"
-          REPS_K: "16"
+          # At 1 GiB, copy-once is not-representable (>256 MB wasm32 ceiling) and a
+          # whole-file span scan is gas-limited (> INT_MAX instructions) BY DESIGN;
+          # publish those as findings rather than failing the strict representability gate.
+          BENCH_EXPLORATORY: "1"
         run: |
           sh tests/ci_ensure_wamrc.sh
           rm -f build/gen_bench_span_aot.h

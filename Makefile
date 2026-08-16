@@ -3034,18 +3034,36 @@ bench-wasm: $(BUILDDIR)/bench_wasm
 	$(BUILDDIR)/bench_wasm
 
 # Mapped-span performance benchmark (#337 follow-up): host-mmap'd file window read
-# by an AOT wasm32 guest via a HullSpan, vs native mmap + copy-once baselines.
-# The guest is AOT-compiled WITH --enable-shared-heap (a mapped span IS a shared
-# heap and IS attached for the call). Reuses the generic wamrc-AOT-to-header
-# emitter GEN_MEM64_AOT (the guest is wasm32, not Memory64, but the emitter only
-# runs wamrc + xxd). Empty fixture when wamrc is absent => the bench prints SKIP
-# and exits 0; the CI job builds wamrc and asserts NOT-skipped (must-not-skip).
+# by a wasm32 guest via a HullSpan, vs native mmap + copy-once + chunked-copy.
+# Two embedded guests: the committed .wasm (interpreter fallback -- lets the wasm
+# impls + the correctness gate run WITHOUT wamrc, e.g. locally) and the wamrc-built
+# .aot (preferred at runtime; the perf comparand). The AOT is emitted WITH
+# --enable-shared-heap (a mapped span IS a shared heap and IS attached for the
+# call) via the generic wamrc-AOT-to-header emitter GEN_MEM64_AOT (the guest is
+# wasm32, not Memory64, but the emitter only runs wamrc + xxd). Empty AOT fixture
+# when wamrc is absent => the bench runs under the interpreter and reports
+# engine=interp; the CI job builds wamrc and asserts engine=aot (must-not-skip).
 $(BUILDDIR)/gen_bench_span_aot.h: bench/wasm/bench_span_guest.wasm | $(BUILDDIR)
 	$(call GEN_MEM64_AOT,$@,bench_span_aot,--enable-shared-heap)
 
-$(BUILDDIR)/bench_mapped_span: bench/wasm/bench_mapped_span.c $(TEST_COMMON_DEPS) $(BUILDDIR)/gen_bench_span_aot.h | $(BUILDDIR)
-	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -Ibench/wasm -Itemplates -I$(BUILDDIR) -o $@ \
-		bench/wasm/bench_mapped_span.c $(TEST_COMMON_LIBS)
+# Committed guest .wasm embedded as a C array (interpreter fallback, always present).
+$(BUILDDIR)/gen_bench_span_wasm.h: bench/wasm/bench_span_guest.wasm | $(BUILDDIR)
+	@(cd $(dir $<) && xxd -i $(notdir $<)) \
+	  | sed -E 's/unsigned char.*\[\]/static const unsigned char bench_span_wasm[]/; s/unsigned int.*_len/static const unsigned int bench_span_wasm_len/' > $@
+	@echo "  [bench-span] embedded interpreter-fallback guest .wasm"
+
+# Bench-private cap_wasm object: the ONLY object compiled with the host-call
+# counter (production's shared build/cap_wasm.o stays counter-free -- zero cost).
+$(BUILDDIR)/bench_cap_wasm.o: $(SRCDIR)/hull/cap/wasm.c | $(BUILDDIR)
+	$(CC) $(CFLAGS) -DHL_WASM_HOST_CALL_COUNTER $(INCLUDES) -c -o $@ $<
+
+# Link the bench against the counter-instrumented cap_wasm, not the shared one.
+BENCH_SPAN_LIBS := $(filter-out $(BUILDDIR)/cap_wasm.o,$(TEST_COMMON_LIBS)) $(BUILDDIR)/bench_cap_wasm.o
+BENCH_SPAN_DEPS := $(filter-out $(BUILDDIR)/cap_wasm.o,$(TEST_COMMON_DEPS)) $(BUILDDIR)/bench_cap_wasm.o
+
+$(BUILDDIR)/bench_mapped_span: bench/wasm/bench_mapped_span.c $(BENCH_SPAN_DEPS) $(BUILDDIR)/gen_bench_span_aot.h $(BUILDDIR)/gen_bench_span_wasm.h | $(BUILDDIR)
+	$(CC) $(CFLAGS) -DHL_WASM_HOST_CALL_COUNTER $(INCLUDES) -I$(VENDDIR) -Ibench/wasm -Itemplates -I$(BUILDDIR) -o $@ \
+		bench/wasm/bench_mapped_span.c $(BENCH_SPAN_LIBS)
 
 bench-mapped-span: $(BUILDDIR)/bench_mapped_span
 	$(BUILDDIR)/bench_mapped_span

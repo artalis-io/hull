@@ -556,7 +556,6 @@ jobs:
           DATASET_MB: "96"
           ITERS: "15"
           WARMUPS: "3"
-          REPS_K: "32"
         run: |
           # Guarantee this step's own executable wamrc, then regen the AOT header.
           sh tests/ci_ensure_wamrc.sh

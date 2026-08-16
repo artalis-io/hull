@@ -1,0 +1,12 @@
+# Provenance for the committed bench_span_guest.wasm (mapped-span benchmark).
+#
+# The committed binary is the AUTHORITATIVE guest: CI AOT-compiles it with wamrc
+# and the bench validates its checksums against native (the functional gate G3).
+# WASM codegen is not byte-reproducible across clang/lld versions, so
+# tests/bench_mapped_span.sh (G1) treats a cross-toolchain byte difference as a
+# WARN, not a failure -- it only hard-fails if the source no longer compiles.
+#
+# Rebuild:  sh bench/wasm/build_bench_span_guest.sh   (CLANG=... to override)
+#
+# Built with: Homebrew clang version 22.1.8
+# sha256:     fe4fb1299cf774c800dff99cf548a7ffb58e613386509aa0936e5eb5eb6ce558
