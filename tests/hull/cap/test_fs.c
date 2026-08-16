@@ -20,10 +20,12 @@
 #include "utest.h"
 #include "hull/cap/fs.h"
 #include <errno.h>
+#include <fcntl.h>
 #include <ftw.h>
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <sys/resource.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -249,6 +251,73 @@ UTEST(hl_cap_fs, mmap_basic)
     ASSERT_EQ(memcmp(buf->addr, data, strlen(data)), 0);
 
     hl_cap_fs_munmap(buf);
+    teardown_fs();
+}
+
+/* Demand paging: mapping a large (2 GiB) SPARSE file as a 512 MiB window and
+ * touching only a handful of pages must NOT make the file/window resident — the
+ * whole point of zero-copy mapped spans over huge files ("opening a 50 GB file
+ * must not allocate 50 GB of RAM"). Coarse per the spec (no exact RSS numbers):
+ * we assert peak RSS stays FAR below the window size, with GiB-scale margin that
+ * dwarfs any MB-scale ru_maxrss pollution from sibling tests in this binary.
+ * A few real pages are written into the sparse file so the touched reads fault
+ * genuine data (and read back correctly), while the rest stay holes. */
+UTEST(hl_cap_fs, mmap_window_demand_paging)
+{
+    setup_fs();
+
+    const uint64_t LOGICAL = (uint64_t)2 << 30;   /* 2 GiB sparse file */
+    const uint64_t WINDOW  = (uint64_t)512 << 20; /* 512 MiB mapped window (< 1 GiB cap) */
+    const long     PAGE    = sysconf(_SC_PAGESIZE);
+
+    char path[512];
+    snprintf(path, sizeof(path), "%s/huge.bin", test_dir);
+    int fd = open(path, O_RDWR | O_CREAT | O_TRUNC, 0644);
+    ASSERT_NE(fd, -1);
+    if (ftruncate(fd, (off_t)LOGICAL) != 0) {      /* CI FS may refuse a 2 GiB logical file */
+        close(fd); unlink(path); teardown_fs();
+        UTEST_SKIP("filesystem cannot create a 2 GiB sparse file");
+    }
+    /* Write real pages at scattered offsets INSIDE the window so touching them
+     * faults genuine (non-hole) data. Marker byte = (offset / PAGE) & 0xff. */
+    uint64_t real_offs[8];
+    for (int i = 0; i < 8; i++) {
+        uint64_t off = (uint64_t)i * (WINDOW / 8) + (uint64_t)PAGE * 3;
+        real_offs[i] = off;
+        unsigned char b = (unsigned char)((off / (uint64_t)PAGE) & 0xff);
+        ASSERT_EQ(pwrite(fd, &b, 1, (off_t)off), (ssize_t)1);
+    }
+    close(fd);
+
+    HlMappedBuffer *buf = hl_cap_fs_mmap_window(&test_cfg, "huge.bin", 0, WINDOW, NULL, NULL);
+    ASSERT_NE(buf, NULL);
+    ASSERT_EQ((uint64_t)buf->len, WINDOW);
+
+    const unsigned char *w = (const unsigned char *)buf->addr;
+    /* Touch the 8 real pages (must read back the marker) + 8 hole pages (must be
+     * 0). ~16 pages resident at most, not 512 MiB. */
+    volatile uint64_t sink = 0;
+    for (int i = 0; i < 8; i++) {
+        ASSERT_EQ(w[real_offs[i]], (unsigned char)((real_offs[i] / (uint64_t)PAGE) & 0xff));
+        uint64_t hole = (uint64_t)i * (WINDOW / 8) + (uint64_t)PAGE * 100;  /* an untouched hole */
+        ASSERT_EQ(w[hole], 0);
+        sink += w[real_offs[i]] + w[hole];
+    }
+    (void)sink;
+
+    struct rusage ru;
+    ASSERT_EQ(getrusage(RUSAGE_SELF, &ru), 0);
+    long rss_kb = ru.ru_maxrss;
+#ifdef __APPLE__
+    rss_kb /= 1024;               /* macOS/BSD report ru_maxrss in bytes, Linux in KiB */
+#endif
+    /* Touched ~16 pages of a 512 MiB window over a 2 GiB file. Peak RSS must be
+     * nowhere near either. 256 MiB is half the window and 1/8 the file: a coarse
+     * ceiling with enormous headroom over real demand-paged residency. */
+    ASSERT_LT(rss_kb, (long)(256 * 1024));
+
+    hl_cap_fs_munmap(buf);
+    unlink(path);
     teardown_fs();
 }
 

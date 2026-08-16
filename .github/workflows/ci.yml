@@ -1434,6 +1434,21 @@ jobs:
         timeout-minutes: 3
         run: ./fuzz/fuzz_valkey_dsn fuzz/corpus_valkey_dsn/ -max_total_time=60
 
+      - name: Fuzz span SDK (60s)
+        # Mapped-span guest SDK math (templates/hull_span.h): the attacker-
+        # controlled span-metadata decode + window-read offset arithmetic a WASM
+        # plugin runs. Adversarial offsets over a truthful window under ASan prove
+        # hull_span__fits() never lets an OOB / width-straddling read through.
+        timeout-minutes: 3
+        run: ./fuzz/fuzz_span_sdk fuzz/corpus_span_sdk/ -max_total_time=60
+
+      - name: Fuzz span window geometry (60s)
+        # Mapped-window geometry (hl_cap_fs_mmap_window_geometry): page-align +
+        # EOF-clamp + overflow-safe page-rounding of an (offset,length) request.
+        # UBSan + invariant asserts catch any overflow or logically-wrong mapping.
+        timeout-minutes: 3
+        run: ./fuzz/fuzz_span_window fuzz/corpus_span_window/ -max_total_time=60
+
   # End-to-end against a real PostgreSQL 16 (started in Docker by the script).
   # Exercises the whole path the unit tests can't: DSN -> SCRAM-SHA-256 auth
   # (plaintext + TLS via a self-signed cert) -> parameterized query + typed
