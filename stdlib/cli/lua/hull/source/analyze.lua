@@ -71,6 +71,13 @@ local function usage_error(msg)
     tool.exit(2)
 end
 
+-- Operational / discovery failure: exit 2, stderr only (JSON stdout stays pure). Used
+-- to FAIL CLOSED -- never a fallback to lexical containment or a reduced scan.
+local function op_fail(msg)
+    tool.stderr("hull analyze: " .. msg .. "\n")
+    tool.exit(2)
+end
+
 local function parse_args()
     local o = { json = false, quiet = false, positionals = {} }
     for i = 1, #arg do
@@ -105,8 +112,11 @@ end
 local function discover(root)
     -- exclude_dirs prunes DURING traversal (a large build/ tree is never walked);
     -- find_files already returns sorted/regular/no-symlink. excluded() is a belt.
+    -- A discovery error (OOM / access) is an OPERATIONAL failure, not an empty scan.
+    local files, err = tool.find_files(root, "*.lua", { exclude_dirs = EXCLUDE_LIST })
+    if err then op_fail("discovery failed: " .. tostring(err)) end
     local out, seen = {}, {}
-    for _, p in ipairs(tool.find_files(root, "*.lua", { exclude_dirs = EXCLUDE_LIST })) do
+    for _, p in ipairs(files) do
         local n = normalize(p)
         if not excluded(n) and not seen[n] then
             seen[n] = true; out[#out + 1] = n
@@ -184,7 +194,10 @@ local function run()
         -- checked on the REAL location: a symlink whose spelling is inside the root but
         -- which resolves outside must be rejected. The user-facing LOGICAL path is kept
         -- for diagnostics; dedup is by canonical path (or logical when it doesn't resolve).
-        local canon_root = tool.realpath(inp.root) or root_norm
+        -- Root canonicalization failure is an OPERATIONAL error, never a fallback to
+        -- lexical containment (which would let a symlink escape the root).
+        local canon_root = tool.realpath(inp.root)
+        if not canon_root then op_fail("cannot resolve app root: " .. inp.root) end
         local seen = {}
         for _, raw in ipairs(inp.targets) do
             local logical = normalize(join(inp.root, raw))

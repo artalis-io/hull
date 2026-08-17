@@ -83,6 +83,17 @@ top-level `build/` and `site/build/`), plus a cheap post-filter belt. The result
 sorted, de-duplicated list of regular `.lua` files. If the root is not a readable
 directory, that is a discovery failure (exit 2), not an empty scan.
 
+**Fail closed (no silent degradation).** `tool.find_files` returns `(files, err)`; any
+allocation or traversal failure in the C walk — or a failure to build the exclusion
+list — propagates as `err` (never a partial or UNPRUNED result masquerading as
+success), and `analyze` turns it into an operational failure (exit 2). The C side
+mirrors this: `find_files_recurse` returns `-1` on any `strdup`/`realloc` failure,
+`hl_tool_find_files_ex` frees and returns `NULL` on that `-1` (and on a failed final
+grow — the old `final = results` fallback wrote one past the array), and
+`l_tool_find_files` fails closed if `exclude_dirs` was requested but could not be
+built. Likewise, **root canonicalization failure is operational (exit 2), never a
+fallback to lexical containment** (which would let a symlink escape the root).
+
 ## 4. What it does (pipeline)
 
 1. **Resolve inputs** (positional rule, §3). Walk mode → filtered `tool.find_files`.

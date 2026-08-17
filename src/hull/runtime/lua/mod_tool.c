@@ -203,36 +203,54 @@ static int l_tool_find_files(lua_State *L)
     const char *dir = luaL_checkstring(L, 1);
     const char *pattern = luaL_checkstring(L, 2);
     int include_vendor = 0;
-    char **extra = NULL;                  /* NULL-terminated, C-owned dir names to prune */
+    char **extra = NULL;                  /* NULL-terminated (calloc-zeroed), C-owned */
+    int exclude_requested = 0, exclude_ok = 1;
     if (lua_type(L, 3) == LUA_TTABLE) {
         lua_getfield(L, 3, "include_vendor");
         include_vendor = lua_toboolean(L, -1);
         lua_pop(L, 1);
         lua_getfield(L, 3, "exclude_dirs");
         if (lua_type(L, -1) == LUA_TTABLE) {
+            exclude_requested = 1;
             size_t n = lua_rawlen(L, -1);
-            extra = calloc(n + 1, sizeof(char *));
-            if (extra) {
+            extra = calloc(n + 1, sizeof(char *));   /* zeroed -> NULL-terminated at any k */
+            if (!extra) {
+                exclude_ok = 0;
+            } else {
                 size_t k = 0;
                 for (size_t i = 1; i <= n; i++) {
                     lua_rawgeti(L, -1, (lua_Integer)i);
                     const char *s = lua_tostring(L, -1);
-                    if (s) { char *dup = strdup(s); if (dup) extra[k++] = dup; }
                     lua_pop(L, 1);
+                    if (!s) continue;
+                    char *dup = strdup(s);
+                    if (!dup) { exclude_ok = 0; break; }   /* fail closed: no unpruned run */
+                    extra[k++] = dup;
                 }
-                extra[k] = NULL;
             }
         }
         lua_pop(L, 1);                    /* pop exclude_dirs (table or nil) */
     }
+
+    /* Exclusions requested but not buildable -> fail closed rather than run an UNPRUNED
+     * discovery the caller would treat as authoritative. */
+    if (exclude_requested && !exclude_ok) {
+        if (extra) { for (char **e = extra; *e; e++) free(*e); free(extra); }
+        lua_newtable(L);
+        lua_pushstring(L, "find_files: could not build exclusion list (out of memory)");
+        return 2;
+    }
+
     HlToolUnveilCtx *ctx = get_unveil_ctx(L);
 
     char **files = hl_tool_find_files_ex(dir, pattern, ctx, include_vendor,
                                          (const char *const *)extra);
     if (extra) { for (char **e = extra; *e; e++) free(*e); free(extra); }
-    if (!files) {
+
+    if (!files) {                        /* NULL = error (OOM / access denied), NOT empty */
         lua_newtable(L);
-        return 1;
+        lua_pushstring(L, "find_files: discovery failed (out of memory or access denied)");
+        return 2;
     }
 
     lua_newtable(L);

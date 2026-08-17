@@ -752,8 +752,13 @@ static int find_files_recurse(const char *dir, const char *pattern,
         if (lstat(path, &st) != 0) continue;
 
         if (S_ISDIR(st.st_mode)) {
-            find_files_recurse(path, pattern, results, count, cap,
-                               include_vendor, extra);
+            /* Propagate an allocation failure from a subdirectory: never return a
+             * partial "success" under memory pressure. */
+            if (find_files_recurse(path, pattern, results, count, cap,
+                                   include_vendor, extra) < 0) {
+                closedir(d);
+                return -1;
+            }
         } else if (S_ISREG(st.st_mode)) {
             if (fnmatch(pattern, ent->d_name, 0) == 0) {
                 /* Add to results */
@@ -765,9 +770,9 @@ static int find_files_recurse(const char *dir, const char *pattern,
                     *results = nr;
                     *cap = newcap;
                 }
-                (*results)[*count] = strdup(path);
-                if ((*results)[*count])
-                    (*count)++;
+                char *dup = strdup(path);
+                if (!dup) { closedir(d); return -1; }   /* fail closed, not a silent drop */
+                (*results)[(*count)++] = dup;
             }
         }
     }
@@ -796,15 +801,27 @@ char **hl_tool_find_files_ex(const char *dir, const char *pattern,
     char **results = malloc(cap * sizeof(char *));
     if (!results) return NULL;
 
-    find_files_recurse(dir, pattern, &results, &count, &cap, include_vendor, extra);
+    /* An allocation failure anywhere in the walk returns NULL (an error), never a
+     * partial or unpruned "success" -- callers must fail closed on NULL. */
+    if (find_files_recurse(dir, pattern, &results, &count, &cap,
+                           include_vendor, extra) < 0) {
+        for (size_t i = 0; i < count; i++) free(results[i]);
+        free(results);
+        return NULL;
+    }
 
     /* Sort alphabetically for deterministic ordering */
     if (count > 1)
         qsort(results, count, sizeof(char *), str_compare);
 
-    /* NULL-terminate */
+    /* NULL-terminate (a failed grow here would leave the array one short, so the
+     * old `final = results` fallback wrote past its end -- treat it as an error). */
     char **final = realloc(results, (count + 1) * sizeof(char *));
-    if (!final) final = results;
+    if (!final) {
+        for (size_t i = 0; i < count; i++) free(results[i]);
+        free(results);
+        return NULL;
+    }
     final[count] = NULL;
 
     return final;
