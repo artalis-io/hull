@@ -72,10 +72,10 @@ do
     }
     for _, src in ipairs(bodies) do
         local node, all = parse_expr(src)
-        eq(node.kind, "function_expr", "skip: function_expr for " .. src)
-        eq(n_diag(all, "lua.syntax"), 0, "skip: no spurious 'unterminated' for " .. src)
-        eq(n_diag(all, "lua.unsupported"), 1, "skip: one deferred-body notice for " .. src)
-        eq(slice(src, node), src, "skip: full range for " .. src)
+        eq(node.kind, "function_expr", "body: function_expr for " .. src)
+        eq(n_diag(all, "lua.syntax"), 0, "body: no spurious 'unterminated' for " .. src)
+        eq(n_diag(all, "lua.unsupported"), 0, "body: parses (no deferred notice) for " .. src)
+        eq(slice(src, node), src, "body: full range for " .. src)
     end
 end
 
@@ -168,8 +168,10 @@ do
     local body, ball = parse_expr("function(x, y) return x end")
     eq(body.kind, "function_expr", "func: with params kind")
     eq(#body.params, 2, "func: 2 params"); eq(body.params[1].name, "x", "func: param name")
-    eq(n_diag(ball, "lua.unsupported"), 1, "func: non-empty body -> lua.unsupported (slice 3)")
-    eq(slice("function(x, y) return x end", body), "function(x, y) return x end", "func: full range incl skipped body")
+    eq(n_diag(ball, "lua.unsupported"), 0, "func: non-empty body parses (slice 3)")
+    eq(n_diag(ball, "lua.syntax"), 0, "func: body clean")
+    ok(type(body.body) == "table" and body.body[1].kind == "return", "func: parsed body has return")
+    eq(slice("function(x, y) return x end", body), "function(x, y) return x end", "func: full range")
 end
 
 -- ── errors: diagnostics, never a raise; no partial garbage ────────────
