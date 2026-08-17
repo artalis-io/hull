@@ -44,11 +44,13 @@ local DECLARATION_KINDS = {
 }
 
 -- Parse one comment into an annotation record, or nil when it is not a `---@`
--- annotation. Only LINE comments qualify, and only with THREE-or-more leading
--- hyphens then `@` (Lua's `--@x` two-hyphen form is an ordinary comment, matching
--- the LuaCATS convention).
+-- annotation. Line comments qualify (only with THREE-or-more leading hyphens then
+-- `@` -- Lua's `--@x` two-hyphen form is an ordinary comment, matching the LuaCATS
+-- convention); a comment already retagged kind "annotation" by a prior attach()
+-- also qualifies, so re-parsing / re-attaching is idempotent. Long comments never.
 function M.parse_comment(comment)
-    if type(comment) ~= "table" or comment.kind ~= "line" then return nil end
+    if type(comment) ~= "table" then return nil end
+    if comment.kind ~= "line" and comment.kind ~= "annotation" then return nil end
     local body = comment.text:match("^%-%-%-+%s*@%s*(.+)$")
     if not body then return nil end
     local name = body:match("^([%a_][%w_]*)")
@@ -68,9 +70,10 @@ function M.parse_comment(comment)
     return { name = name, args = args, text = text, raw = comment.text, range = comment.range }
 end
 
--- Attach annotation runs to declaration nodes on unit.ast. Idempotent-ish: it
--- overwrites annotation_list / annotations on the nodes it touches. Returns the
--- unit. Best-effort: a malformed unit (no ast / comments) is a silent no-op.
+-- Attach annotation runs to declaration nodes on unit.ast. Idempotent: attachment
+-- is deterministic and parse_comment re-recognizes already-retagged comments, so a
+-- second call reproduces the same annotation_list / annotations. Returns the unit.
+-- Best-effort: a malformed unit (no ast / comments) is a silent no-op.
 function M.attach(unit)
     if type(unit) ~= "table" then return unit end
     local ast, comments, src = unit.ast, unit.comments, unit.source

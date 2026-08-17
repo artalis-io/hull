@@ -73,9 +73,9 @@ function P:err(message, tok)
     return { kind = "error", range = { start = tok.range.start, stop = tok.range.stop } }
 end
 
-function P:unsupported(message, s, e)
-    self:emit(diag.error("lua.unsupported", message, self.path, { start = s, stop = e }))
-end
+-- Note: `lua.unsupported` stays a reserved code in the diagnostic vocabulary (for a
+-- future "valid syntax not yet represented" notice), but nothing emits it today --
+-- the whole statement grammar parses, so there is no P:unsupported helper.
 
 -- Consume `text` op/kw or emit a diagnostic; returns the token or nil.
 function P:expect_op(text)
@@ -563,8 +563,10 @@ function P:exprstat()
 end
 
 -- ── public: parse a single expression from source (slice-2 surface) ───
--- Returns (node, diagnostics). The lexer must be run by the caller (lua.lua) or
--- via M.parse_expression which does both.
+-- Returns (node, diagnostics). CONTRACT: `tokens` must be a lexer token stream
+-- terminated by an `eof` token (as hull.source.lexer always produces); the parser
+-- relies on that sentinel and does not defend against an empty / eof-less array.
+-- lua.parse() is the production caller and additionally wraps this in pcall.
 function M.parse_expression(tokens, source, opts)
     opts = opts or {}
     local st = new_state(tokens, source, opts)
@@ -577,6 +579,8 @@ end
 
 -- ── public: parse a whole chunk (the full source AST) ────────────────
 -- chunk := block. Returns (ast, diagnostics). This is what lua.parse() drives.
+-- CONTRACT: same as parse_expression -- `tokens` must be an eof-terminated lexer
+-- stream.
 function M.parse_chunk(tokens, source, opts)
     opts = opts or {}
     local st = new_state(tokens, source, opts)
