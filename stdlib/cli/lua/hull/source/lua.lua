@@ -37,24 +37,54 @@ function Unit:text(x)
 end
 
 -- 1-based (line, col) for a byte offset; col is a byte column within the line.
+-- Offsets outside [1, #source + 1] are CLAMPED to that valid range (a byte past
+-- end-of-source resolves to #source+1, the position after the last byte) so a
+-- caller passing a stray offset gets a meaningful boundary position, never a
+-- meaningless column.
 function Unit:position(off)
+    local maxoff = #self.source + 1
+    if type(off) ~= "number" then off = 1 end
+    if off < 1 then off = 1 elseif off > maxoff then off = maxoff end
     return range.position(self._linestarts, off)
 end
 
 -- (start_line, start_col, end_line, end_col) for a range. end_col is resolved at
--- the exclusive `stop` (one past the last byte).
+-- the exclusive `stop` (one past the last byte). Routes through :position so the
+-- same clamping applies.
 function Unit:line_col(r)
     r = r.range or r
-    local sl, sc = range.position(self._linestarts, r.start)
-    local el, ec = range.position(self._linestarts, r.stop)
+    local sl, sc = self:position(r.start)
+    local el, ec = self:position(r.stop)
     return sl, sc, el, ec
 end
+
+-- Limit keys validated at the boundary (each, if present, must be a non-negative
+-- integer). Invalid opts/limits are API MISUSE -> a clear (nil, err) BEFORE the
+-- lexer runs, not a lua.internal failure surfacing through the pcall.
+local LIMIT_KEYS = { "max_bytes", "max_tokens", "max_comments", "max_diagnostics", "max_depth" }
 
 function M.parse(source, opts)
     if type(source) ~= "string" then
         return nil, "hull.source.lua: source must be a string, got " .. type(source)
     end
+    if opts ~= nil and type(opts) ~= "table" then
+        return nil, "hull.source.lua: opts must be a table or nil, got " .. type(opts)
+    end
     opts = opts or {}
+    if opts.path ~= nil and type(opts.path) ~= "string" then
+        return nil, "hull.source.lua: opts.path must be a string or nil, got " .. type(opts.path)
+    end
+    if opts.limits ~= nil then
+        if type(opts.limits) ~= "table" then
+            return nil, "hull.source.lua: opts.limits must be a table or nil, got " .. type(opts.limits)
+        end
+        for _, k in ipairs(LIMIT_KEYS) do
+            local v = opts.limits[k]
+            if v ~= nil and (type(v) ~= "number" or math.type(v) ~= "integer" or v < 0) then
+                return nil, "hull.source.lua: opts.limits." .. k .. " must be a non-negative integer"
+            end
+        end
+    end
 
     -- Defense in depth: the lexer is written not to raise, but a bug must still
     -- surface as `err`, never as a raw error crossing parse().

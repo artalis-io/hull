@@ -189,5 +189,64 @@ do
     ok(okc2 and u2 == nil and e2 ~= nil, "boundary: nil source -> (nil, err)")
 end
 
+-- ── 9. escaped newline (LF / CR / CRLF / LFCR) is ONE escape sequence ─
+do
+    local cases = { { "\n", "LF" }, { "\r", "CR" }, { "\r\n", "CRLF" }, { "\n\r", "LFCR" } }
+    for _, c in ipairs(cases) do
+        local src = 'local s = "a\\' .. c[1] .. 'b"'   -- string with a backslash-escaped newline
+        local u = assert(lua.parse(src))
+        eq(#u.diagnostics, 0, "esc-nl " .. c[2] .. ": no diagnostic")
+        local st
+        for _, k in ipairs(u.tokens) do if k.kind == "string" then st = k end end
+        ok(st ~= nil and not st.malformed, "esc-nl " .. c[2] .. ": one clean string token")
+        eq(u:text(st), '"a\\' .. c[1] .. 'b"', "esc-nl " .. c[2] .. ": lossless range")
+    end
+end
+
+-- ── 10. comments are bounded (max_comments) ───────────────────────────
+do
+    local many = string.rep("--c\n", 50)
+    local u = assert(lua.parse(many, { limits = { max_comments = 5 } }))
+    local hit = false
+    for _, d in ipairs(u.diagnostics) do if d.code == "lua.limit.max_comments" then hit = true end end
+    ok(hit, "limit: max_comments trips")
+end
+
+-- ── 11. terminal limit diagnostic always emits (even max_diagnostics=0) ─
+do
+    local u = assert(lua.parse("a b c d e", { limits = { max_tokens = 2, max_diagnostics = 0 } }))
+    local hit = false
+    for _, d in ipairs(u.diagnostics) do if d.code == "lua.limit.max_tokens" then hit = true end end
+    ok(hit, "limit: terminal diagnostic survives max_diagnostics=0")
+    local u2 = assert(lua.parse("@ @ @", { limits = { max_diagnostics = 0 } }))
+    eq(#u2.diagnostics, 0, "limit: max_diagnostics=0 suppresses NORMAL diagnostics")
+end
+
+-- ── 12. opts / limits validated at the boundary (API misuse -> err) ───
+do
+    local function misuse(fn, name)
+        local u, e = fn()
+        ok(u == nil and type(e) == "string", "opts-validate: " .. name)
+    end
+    misuse(function() return lua.parse("x", "notatable") end, "opts non-table")
+    misuse(function() return lua.parse("x", { limits = "notatable" }) end, "limits non-table")
+    misuse(function() return lua.parse("x", { limits = { max_bytes = -1 } }) end, "limit negative")
+    misuse(function() return lua.parse("x", { limits = { max_tokens = 1.5 } }) end, "limit non-integer")
+    misuse(function() return lua.parse("x", { path = 123 }) end, "path non-string")
+    local u = assert(lua.parse("x", { path = "f.lua", limits = { max_tokens = 10 } }))
+    ok(u ~= nil, "opts-validate: valid opts accepted")
+end
+
+-- ── 13. unit:position clamps offsets outside [1, #source+1] ────────────
+do
+    local u = assert(lua.parse("ab\ncd"))                 -- #source = 5, last line = 2
+    eq(select(1, u:position(1)), 1, "pos: byte 1 -> line 1")
+    eq(select(2, u:position(1)), 1, "pos: byte 1 -> col 1")
+    eq(select(1, u:position(0)), 1, "pos: off<1 clamps to line 1")
+    eq(select(1, u:position(9999)), 2, "pos: huge off clamps to last line")
+    eq(select(1, u:position(6)), 2, "pos: #source+1 is valid")
+    eq(select(1, u:position("x")), 1, "pos: non-number off is safe")
+end
+
 print(string.format("test_lexer: %d passed, %d failed", pass, fail))
 return { pass = pass, fail = fail, failures = failures }

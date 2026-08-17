@@ -25,10 +25,15 @@ local diag = require("hull.source.diagnostic")
 
 local M = {}
 
+-- Defaults bound work AND memory on adversarial build input. Every lexical item
+-- (token or comment) is a small Lua table with a range subtable; millions of them
+-- exhaust the tool VM even within the byte limit, so token/comment counts are
+-- capped well below the byte limit's theoretical maximum.
 M.DEFAULT_LIMITS = {
     max_bytes = 4 * 1024 * 1024,   -- 4 MiB of source
-    max_tokens = 2000000,
-    max_diagnostics = 200,
+    max_tokens = 500000,           -- ~a 500k-token file is already pathological at build time
+    max_comments = 200000,         -- comments have their own table, bounded separately
+    max_diagnostics = 200,         -- caps NORMAL diagnostics; terminal limit diags always emit
     max_depth = 400,               -- parser-side; carried through for the full contract
 }
 
@@ -64,9 +69,17 @@ function M.tokenize(source, opts)
             diag.error(code, message, path, { start = s, stop = e })
     end
 
+    -- Terminal (limit) diagnostics ALWAYS record, bypassing max_diagnostics, so a
+    -- full diagnostic list or max_diagnostics == 0 can never silently suppress the
+    -- reason lexing stopped.
+    local function emit_terminal(code, message, s, e)
+        diagnostics[#diagnostics + 1] =
+            diag.error(code, message, path, { start = s, stop = e })
+    end
+
     -- Source-size guard: refuse an oversized source up front (bounded work).
     if n > limits.max_bytes then
-        emit_diag("lua.limit.max_bytes",
+        emit_terminal("lua.limit.max_bytes",
             "source exceeds max_bytes (" .. n .. " > " .. limits.max_bytes .. ")", 1, 1)
         tokens[#tokens + 1] = { kind = "eof", range = { start = 1, stop = 1 }, text = "" }
         return { tokens = tokens, comments = comments, diagnostics = diagnostics }
@@ -112,7 +125,13 @@ function M.tokenize(source, opts)
     local function scan_escape(p)
         local e = at(p + 1)
         if e == "" then emit_diag("lua.syntax", "unfinished escape sequence", p, p + 1); return p + 1 end
-        if e:match("[abfnrtv\\\"'\n\r]") then return p + 2 end       -- simple + \<newline>
+        if e == "\n" or e == "\r" then                              -- \<newline>: LF, CR, CRLF, or LFCR = ONE sequence
+            local q = p + 2
+            local nxt = at(q)
+            if (e == "\r" and nxt == "\n") or (e == "\n" and nxt == "\r") then q = q + 1 end
+            return q
+        end
+        if e:match("[abfnrtv\\\"']") then return p + 2 end          -- simple escapes
         if e == "z" then                                            -- \z: skip following whitespace
             local q = p + 2
             while q <= n and is_space(at(q)) do q = q + 1 end
@@ -262,8 +281,13 @@ function M.tokenize(source, opts)
         end
 
         if #tokens > limits.max_tokens then
-            emit_diag("lua.limit.max_tokens",
+            emit_terminal("lua.limit.max_tokens",
                 "token count exceeds max_tokens (" .. limits.max_tokens .. ")", pos, pos)
+            break
+        end
+        if #comments > limits.max_comments then
+            emit_terminal("lua.limit.max_comments",
+                "comment count exceeds max_comments (" .. limits.max_comments .. ")", pos, pos)
             break
         end
     end
