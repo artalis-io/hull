@@ -718,7 +718,9 @@ hull v0.10.0  &middot;  ca-bundle: embedded  &middot;  platform: embedded  &midd
           <h3 class="text-paper-50 font-medium">Compute in WASM and WebGPU</h3>
           <p class="mt-2 text-sm text-mute-400 leading-relaxed">
             Pure-function WASM via WAMR. No I/O imports,
-            gas-metered. Parallel workloads dispatch to WebGPU
+            gas-metered. Zero-copy reads of memory-mapped files
+            larger than WASM's address space, with no per-access
+            host calls. Parallel workloads dispatch to WebGPU
             shaders via wgpu-native (Vulkan, Metal, DX12) through the
             same capability boundary.
           </p>
