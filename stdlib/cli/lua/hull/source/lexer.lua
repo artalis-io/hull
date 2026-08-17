@@ -110,8 +110,10 @@ function M.tokenize(source, opts)
     local function is_space(c) return c == " " or c == "\t" or c == "\r"
         or c == "\n" or c == "\v" or c == "\f" end
 
-    -- ── shebang: a leading '#' line (Lua's loader skips it) ───────────
-    if at(1) == "#" then
+    -- ── shebang: a leading '#!' line (Lua's file loader skips it). Only "#!",
+    -- NOT a bare '#', so a chunk/expression beginning with the length operator
+    -- (e.g. `#t`) lexes '#' as an operator rather than eating the line. ─────
+    if at(1) == "#" and at(2) == "!" then
         local e = source:find("\n", 1, true)
         local stop = e and (e + 1) or (n + 1)   -- include the newline if present
         comments[#comments + 1] =
