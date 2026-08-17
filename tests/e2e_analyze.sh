@@ -172,6 +172,22 @@ if [ "$rc" = "2" ] && [ -z "$out" ] && grep -q "unknown flag" "$TMP/err.txt"; th
     pass "unknown flag → exit 2, empty stdout, stderr message"
 else fail "usage error (rc=$rc, out=[$out])"; fi
 
+# ── Test 16: unreadable NON-excluded discovered subdir → fail closed (exit 2) ─
+if [ "$(id -u)" = "0" ]; then
+    pass "unreadable subdir fail-closed (skipped: running as root)"
+else
+    UNR="$TMP/unreadable"
+    mkdir -p "$UNR/sub"
+    printf 'app.main(function() return 0 end)\n' > "$UNR/app.lua"
+    printf 'x = 1\n' > "$UNR/sub/ok.lua"
+    chmod 000 "$UNR/sub"
+    rc=0; out=$("$HULL" analyze "$UNR" 2>"$TMP/unr_err.txt") || rc=$?
+    chmod 755 "$UNR/sub"
+    if [ "$rc" = "2" ] && [ -z "$out" ] && grep -q "discovery failed" "$TMP/unr_err.txt"; then
+        pass "unreadable discovered subdir → exit 2 + discovery failed (fail closed)"
+    else fail "unreadable subdir (rc=$rc, out=[$out], err=$(cat "$TMP/unr_err.txt"))"; fi
+fi
+
 # ── summary ───────────────────────────────────────────────────────────
 echo ""
 echo "=== hull analyze E2E: $PASS passed, $FAIL failed ==="

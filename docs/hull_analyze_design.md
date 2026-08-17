@@ -84,9 +84,14 @@ sorted, de-duplicated list of regular `.lua` files. If the root is not a readabl
 directory, that is a discovery failure (exit 2), not an empty scan.
 
 **Fail closed (no silent degradation).** `tool.find_files` returns `(files, err)`; any
-allocation or traversal failure in the C walk — or a failure to build the exclusion
-list — propagates as `err` (never a partial or UNPRUNED result masquerading as
-success), and `analyze` turns it into an operational failure (exit 2). The C side
+allocation or **filesystem traversal** failure in the C walk — or a failure to build
+the exclusion list — propagates as `err` (never a partial or UNPRUNED result
+masquerading as success), and `analyze` turns it into an operational failure (exit 2).
+Traversal failures are classified: `opendir`/`lstat` returning **`ENOENT`** (a dir or
+entry that does not exist / raced away between `readdir` and use) is an
+explicitly-classified benign skip; **any other** `opendir`/`lstat` failure (notably
+`EACCES` — an unreadable directory, at the root or nested) and a **`readdir` error**
+(distinguished from end-of-dir via `errno`) propagate `-1`. The C side
 mirrors this: `find_files_recurse` returns `-1` on any `strdup`/`realloc` failure,
 `hl_tool_find_files_ex` frees and returns `NULL` on that `-1` (and on a failed final
 grow — the old `final = results` fallback wrote one past the array), and

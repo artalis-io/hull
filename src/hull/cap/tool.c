@@ -733,10 +733,19 @@ static int find_files_recurse(const char *dir, const char *pattern,
                                int include_vendor, const char *const *extra)
 {
     DIR *d = opendir(dir);
-    if (!d) return 0; /* skip unreadable dirs */
+    if (!d) {
+        /* ENOENT = the directory does not exist / raced away: an explicitly-classified
+         * benign skip (also lets callers probe an optional dir). Any other failure --
+         * notably EACCES (an unreadable dir), at the root or nested -- is a real
+         * traversal error and must fail closed, never a partial "clean" scan. */
+        return (errno == ENOENT) ? 0 : -1;
+    }
 
-    struct dirent *ent;
-    while ((ent = readdir(d)) != NULL) {
+    int rc = 0;
+    for (;;) {
+        errno = 0;
+        struct dirent *ent = readdir(d);
+        if (!ent) break;                    /* end-of-dir (errno 0) OR a readdir error */
         if (should_skip_dir(ent->d_name, include_vendor, extra)) continue;
 
         /* Build full path */
@@ -749,36 +758,39 @@ static int find_files_recurse(const char *dir, const char *pattern,
         if (pn < 0 || (size_t)pn >= sizeof(path)) continue;
 
         struct stat st;
-        if (lstat(path, &st) != 0) continue;
+        if (lstat(path, &st) != 0) {
+            if (errno == ENOENT) continue;  /* entry raced away after readdir: benign */
+            rc = -1; break;                 /* a real lstat failure -> fail closed */
+        }
 
         if (S_ISDIR(st.st_mode)) {
-            /* Propagate an allocation failure from a subdirectory: never return a
-             * partial "success" under memory pressure. */
+            /* Propagate a subdirectory failure (traversal OR allocation): never return
+             * a partial "success". */
             if (find_files_recurse(path, pattern, results, count, cap,
-                                   include_vendor, extra) < 0) {
-                closedir(d);
-                return -1;
-            }
+                                   include_vendor, extra) < 0) { rc = -1; break; }
         } else if (S_ISREG(st.st_mode)) {
             if (fnmatch(pattern, ent->d_name, 0) == 0) {
                 /* Add to results */
                 if (*count >= *cap) {
-                    if (*cap > SIZE_MAX / (2 * sizeof(char *))) { closedir(d); return -1; }
+                    if (*cap > SIZE_MAX / (2 * sizeof(char *))) { rc = -1; break; }
                     size_t newcap = *cap * 2;
                     char **nr = realloc(*results, newcap * sizeof(char *));
-                    if (!nr) { closedir(d); return -1; }
+                    if (!nr) { rc = -1; break; }
                     *results = nr;
                     *cap = newcap;
                 }
                 char *dup = strdup(path);
-                if (!dup) { closedir(d); return -1; }   /* fail closed, not a silent drop */
+                if (!dup) { rc = -1; break; }   /* fail closed, not a silent drop */
                 (*results)[(*count)++] = dup;
             }
         }
     }
+    /* readdir() returns NULL at end-of-dir AND on error; distinguish via errno (reset
+     * before each call above). Only meaningful when the loop ended normally (rc == 0). */
+    if (rc == 0 && errno != 0) rc = -1;
 
     closedir(d);
-    return 0;
+    return rc;
 }
 
 /* String comparison for qsort */
