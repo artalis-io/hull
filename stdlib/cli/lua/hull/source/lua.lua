@@ -22,6 +22,7 @@
 --
 
 local lexer = require("hull.source.lexer")
+local parser = require("hull.source.parser")
 local range = require("hull.source.range")
 local diag = require("hull.source.diagnostic")
 
@@ -86,26 +87,78 @@ function M.parse(source, opts)
         end
     end
 
-    -- Defense in depth: the lexer is written not to raise, but a bug must still
-    -- surface as `err`, never as a raw error crossing parse().
-    local ok, res = pcall(lexer.tokenize, source, opts)
+    -- Defense in depth: the lexer/parser are written not to raise, but a bug must
+    -- still surface as `err`, never as a raw error crossing parse().
+    local ok, res = pcall(function()
+        local lx = lexer.tokenize(source, opts)
+        local ast, pdiags = parser.parse_chunk(lx.tokens, source, opts)
+        return { lx = lx, ast = ast, pdiags = pdiags }
+    end)
     if not ok then
         return nil, diag.error("lua.internal",
-            "internal lexer failure: " .. tostring(res), opts.path, nil)
+            "internal parse failure: " .. tostring(res), opts.path, nil)
     end
+
+    -- Combine lexer + parser diagnostics with the SourceUnit-level max_diagnostics
+    -- as the AUTHORITATIVE bound: keep EVERY terminal limit diagnostic (lua.limit.*)
+    -- but cap the ORDINARY diagnostics across both phases at max_diagnostics total,
+    -- in source order (lexer then parser).
+    local max_d = (opts.limits and opts.limits.max_diagnostics) or 200
+    local diagnostics = {}
+    local ordinary = 0
+    local function absorb(list)
+        for _, d in ipairs(list) do
+            if d.code and d.code:match("^lua%.limit%.") then
+                diagnostics[#diagnostics + 1] = d           -- terminal: always kept
+            elseif ordinary < max_d then
+                diagnostics[#diagnostics + 1] = d; ordinary = ordinary + 1
+            end
+        end
+    end
+    absorb(res.lx.diagnostics)
+    absorb(res.pdiags)
 
     local unit = setmetatable({
         path = opts.path,
         language = "lua",
         source = source,
-        ast = nil,                       -- slice 3
-        tokens = res.tokens,             -- slice-1 surface; the parser consumes these
-        comments = res.comments,
-        diagnostics = res.diagnostics,
+        ast = res.ast,                   -- the chunk node (slice 3)
+        tokens = res.lx.tokens,          -- convenience; not part of the SourceUnit contract
+        comments = res.lx.comments,
+        diagnostics = diagnostics,
         _linestarts = range.linemap(source),
     }, Unit)
 
     return unit, nil
+end
+
+-- ── AST traversal (§18) + kind test (§19) ─────────────────────────────
+-- Collect the immediate child NODES of `v` (descending through structural
+-- wrappers like if-clauses / name lists, stopping at each kind-bearing node).
+local function collect(v, out)
+    if type(v) ~= "table" then return end
+    if v.kind then out[#out + 1] = v; return end
+    for k, e in pairs(v) do if k ~= "range" then collect(e, out) end end
+end
+
+-- Deterministic depth-first (pre-order) walk in SOURCE order: fn is called on
+-- `node` then on each descendant, children visited by ascending range.
+function M.walk(node, fn)
+    if type(node) ~= "table" or not node.kind then return end
+    fn(node)
+    local children = {}
+    for k, v in pairs(node) do
+        if k ~= "range" and k ~= "kind" then collect(v, children) end
+    end
+    table.sort(children, function(a, b)
+        if a.range.start ~= b.range.start then return a.range.start < b.range.start end
+        return a.range.stop < b.range.stop
+    end)
+    for _, c in ipairs(children) do M.walk(c, fn) end
+end
+
+function M.is(node, kind)
+    return type(node) == "table" and node.kind == kind
 end
 
 return M

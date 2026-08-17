@@ -1,17 +1,18 @@
 --
--- hull.source.parser — recursive-descent Lua 5.4 parser (slice 2: expressions).
+-- hull.source.parser — recursive-descent Lua 5.4 parser (expressions + statements).
 --
--- Consumes the lexer token stream and builds Hull AST expression nodes with EXACT
--- half-open byte ranges (see range.lua). Statements/declarations land in slice 3;
--- a function EXPRESSION's body is a statement block, so in slice 2 the body is
--- skipped (balanced to its `end`) and a `lua.unsupported` diagnostic is emitted
--- (a non-empty body is valid syntax this slice does not yet represent -- an
--- explicit diagnostic, never a silently malformed AST). Slice 3 replaces the skip
--- with the real block parser.
---
--- The parser NEVER raises: a parse error emits a diagnostic and returns an
--- { kind = "error" } node (best-effort). Node vocabulary (expressions) matches
+-- Consumes the lexer token stream and builds the Hull AST (expressions AND
+-- statements) with EXACT half-open byte ranges (see range.lua). M.parse_chunk()
+-- returns the whole-source { kind="chunk", body, range }; M.parse_expression()
+-- parses a single expression. Node vocabulary matches
 -- docs/lua_source_analysis_design.md §5.
+--
+-- The parser NEVER raises: a parse error emits a lua.syntax diagnostic and returns
+-- an { kind = "error" } node (best-effort recovery -- a stall guard in block() and
+-- a token-consuming primary() keep the chunk parsing past a bad construct).
+-- Expression and block nesting share one max_depth budget (a terminal
+-- lua.limit.max_depth diagnostic, no stack overflow); ordinary diagnostics respect
+-- max_diagnostics while terminal ones always record.
 --
 -- SPDX-License-Identifier: AGPL-3.0-or-later
 --
@@ -138,9 +139,6 @@ function P:subexpr(limit)
     return e
 end
 
-function M.parse_expression_state(st)
-    return st:subexpr(0)
-end
 
 -- ── simple expressions ────────────────────────────────────────────────
 function P:simple()
@@ -278,42 +276,9 @@ function P:table_constructor()
     return self:finish({ kind = "table", fields = fields }, start)
 end
 
--- ── function expression (params now; body skipped until slice 3) ──────
--- Balanced skip to the matching `end`. The `end`-terminated openers are
--- `function`, `if`, `for`, `while`, and a STANDALONE `do`. A `for`/`while` opens
--- ONE block whose `do` is a syntactic marker, not a second `end`-taker -- so its
--- `do` is absorbed (tracked by `pending_do`, a count, which stays correct even
--- when a nested function literal appears inside a loop header). `repeat ... until`
--- is NOT `end`-terminated and is ignored for the `end` count. Replaced by the real
--- block parser in slice 3.
-function P:skip_block_to_end()
-    local open = 1              -- the function's own `end`
-    local pending_do = 0        -- for/while opened but awaiting their `do`
-    while not self:at_eof() do
-        local t = self:cur()
-        if t.kind == "keyword" then
-            local k = t.text
-            if k == "function" or k == "if" then
-                open = open + 1
-            elseif k == "for" or k == "while" then
-                open = open + 1; pending_do = pending_do + 1
-            elseif k == "do" then
-                if pending_do > 0 then pending_do = pending_do - 1 else open = open + 1 end
-            elseif k == "end" then
-                open = open - 1
-                if open == 0 then return self:advance() end
-            end
-            -- repeat / until are not end-terminated: ignored for `open`.
-        end
-        self:advance()
-    end
-    self:err("'end' expected (unterminated function)")
-    return nil
-end
-
-function P:function_expr()
-    local start = self:cur().range.start
-    self:advance()                              -- 'function'
+-- ── function parameters / body (shared by function_expr, function decl) ─
+-- funcparams := '(' [ Name {',' Name} [',' '...'] | '...' ] ')'
+function P:funcparams()
     self:expect_op("(")
     local params, is_vararg = {}, false
     if not self:is_op(")") then
@@ -332,17 +297,269 @@ function P:function_expr()
         end
     end
     self:expect_op(")")
-    -- body: slice 3. Empty body (immediate `end`) is fine; a non-empty one is
-    -- valid syntax not yet represented -> explicit diagnostic + balanced skip.
-    local body_start = self:cur().range.start
-    if not self:is_kw("end") then
-        self:skip_block_to_end()
-        self:unsupported("function body is parsed in a later slice", body_start,
-            (self.prev and self.prev.range.stop) or body_start)
-    else
-        self:advance()                          -- 'end'
+    return params, is_vararg
+end
+
+-- funcbody := '(' params ')' block 'end'   (the real block parser -- slice 3)
+function P:funcbody()
+    local params, is_vararg = self:funcparams()
+    local body = self:block()
+    self:expect_kw("end")
+    return params, is_vararg, body
+end
+
+function P:function_expr()
+    local start = self:cur().range.start
+    self:advance()                              -- 'function'
+    local params, is_vararg, body = self:funcbody()
+    return self:finish({ kind = "function_expr", params = params, is_vararg = is_vararg, body = body }, start)
+end
+
+-- ── statements ────────────────────────────────────────────────────────
+local BLOCK_FOLLOW = { ["end"] = true, ["else"] = true, ["elseif"] = true, ["until"] = true }
+
+function P:block_follow()
+    local t = self:cur()
+    return t.kind == "eof" or (t.kind == "keyword" and BLOCK_FOLLOW[t.text] == true)
+end
+
+-- block := {stat} [retstat]
+function P:block()
+    self.depth = self.depth + 1                         -- bound statement nesting too (shared budget)
+    if self.depth > self.max_depth then
+        if not self.aborted then
+            self.aborted = true
+            self:emit_terminal(diag.error("lua.limit.max_depth",
+                "block nesting exceeds max_depth (" .. self.max_depth .. ")", self.path, self:cur().range))
+        end
+        self.depth = self.depth - 1
+        return {}
     end
-    return self:finish({ kind = "function_expr", params = params, is_vararg = is_vararg, body = nil }, start)
+    local stmts = {}
+    while not self:block_follow() and not self.aborted do
+        if self:is_kw("return") then
+            stmts[#stmts + 1] = self:return_stat()
+            break                                       -- return is the block's last statement
+        end
+        local before = self.pos
+        local s = self:statement()
+        if s then stmts[#stmts + 1] = s end
+        if self.pos == before then self:advance() end   -- stall guard: always make progress
+    end
+    self.depth = self.depth - 1
+    return stmts
+end
+
+function P:explist()
+    local list = { self:subexpr(0) }
+    while self:is_op(",") do self:advance(); list[#list + 1] = self:subexpr(0) end
+    return list
+end
+
+function P:statement()
+    local start = self:cur().range.start
+    if self:is_op(";") then self:advance(); return nil
+    elseif self:is_kw("if") then return self:if_stat()
+    elseif self:is_kw("while") then return self:while_stat()
+    elseif self:is_kw("do") then
+        self:advance(); local body = self:block(); self:expect_kw("end")
+        return self:finish({ kind = "do", body = body }, start)
+    elseif self:is_kw("for") then return self:for_stat()
+    elseif self:is_kw("repeat") then return self:repeat_stat()
+    elseif self:is_kw("function") then return self:function_decl()
+    elseif self:is_kw("local") then return self:local_stat()
+    elseif self:is_kw("break") then self:advance(); return self:finish({ kind = "break" }, start)
+    elseif self:is_kw("goto") then
+        self:advance()
+        local nm = self:cur(); local label = nil
+        if nm.kind == "name" then self:advance(); label = nm.text else self:err("<name> expected after 'goto'") end
+        return self:finish({ kind = "goto", label = label }, start)
+    elseif self:is_op("::") then return self:label_stat()
+    else return self:exprstat()
+    end
+end
+
+function P:label_stat()
+    local start = self:cur().range.start
+    self:advance()                                      -- '::'
+    local nm = self:cur(); local name = nil
+    if nm.kind == "name" then self:advance(); name = nm.text else self:err("<name> expected in label") end
+    self:expect_op("::")
+    return self:finish({ kind = "label", name = name }, start)
+end
+
+function P:return_stat()
+    local start = self:cur().range.start
+    self:advance()                                      -- 'return'
+    local values = {}
+    if not self:block_follow() and not self:is_op(";") then values = self:explist() end
+    if self:is_op(";") then self:advance() end
+    return self:finish({ kind = "return", values = values }, start)
+end
+
+function P:if_stat()
+    local start = self:cur().range.start
+    self:advance()                                      -- 'if'
+    local clauses = {}
+    local cond = self:subexpr(0); self:expect_kw("then")
+    clauses[#clauses + 1] = { cond = cond, body = self:block() }
+    while self:is_kw("elseif") do
+        self:advance()
+        local c = self:subexpr(0); self:expect_kw("then")
+        clauses[#clauses + 1] = { cond = c, body = self:block() }
+    end
+    if self:is_kw("else") then
+        self:advance()
+        clauses[#clauses + 1] = { cond = nil, body = self:block() }   -- else clause: no cond
+    end
+    self:expect_kw("end")
+    return self:finish({ kind = "if", clauses = clauses }, start)
+end
+
+function P:while_stat()
+    local start = self:cur().range.start
+    self:advance()                                      -- 'while'
+    local cond = self:subexpr(0); self:expect_kw("do")
+    local body = self:block(); self:expect_kw("end")
+    return self:finish({ kind = "while", cond = cond, body = body }, start)
+end
+
+function P:repeat_stat()
+    local start = self:cur().range.start
+    self:advance()                                      -- 'repeat'
+    local body = self:block(); self:expect_kw("until")
+    local cond = self:subexpr(0)
+    return self:finish({ kind = "repeat", body = body, cond = cond }, start)
+end
+
+function P:for_stat()
+    local start = self:cur().range.start
+    self:advance()                                      -- 'for'
+    if self:cur().kind ~= "name" then
+        self:err("<name> expected after 'for'")
+        return self:finish({ kind = "error" }, start)
+    end
+    local n2 = self.tokens[self.pos + 1]
+    if n2 and n2.kind == "op" and n2.text == "=" then   -- numeric for
+        local nm = self:advance(); self:advance()       -- name, '='
+        local from = self:subexpr(0); self:expect_op(",")
+        local to = self:subexpr(0)
+        local step = nil
+        if self:is_op(",") then self:advance(); step = self:subexpr(0) end
+        self:expect_kw("do"); local body = self:block(); self:expect_kw("end")
+        return self:finish({ kind = "numeric_for", var = { name = nm.text, range = nm.range },
+            from = from, to = to, step = step, body = body }, start)
+    else                                                -- generic for
+        local names = {}
+        while true do
+            local nm = self:cur()
+            if nm.kind == "name" then self:advance(); names[#names + 1] = { name = nm.text, range = nm.range }
+            else self:err("<name> expected in 'for'"); break end
+            if self:is_op(",") then self:advance() else break end
+        end
+        self:expect_kw("in"); local exprs = self:explist()
+        self:expect_kw("do"); local body = self:block(); self:expect_kw("end")
+        return self:finish({ kind = "generic_for", names = names, exprs = exprs, body = body }, start)
+    end
+end
+
+-- funcname := Name {'.' Name} [':' Name] -> (name-path node, is_method)
+function P:funcname()
+    local start = self:cur().range.start
+    local nm = self:cur()
+    if nm.kind ~= "name" then return self:err("<name> expected in function name"), false end
+    self:advance()
+    local node = self:finish({ kind = "name", name = nm.text }, start)
+    while self:is_op(".") do
+        self:advance()
+        local f = self:cur()
+        if f.kind ~= "name" then self:err("<name> expected after '.'"); break end
+        self:advance(); node = self:finish({ kind = "field", obj = node, name = f.text }, start)
+    end
+    local is_method = false
+    if self:is_op(":") then
+        self:advance()
+        local m = self:cur()
+        if m.kind == "name" then
+            self:advance(); node = self:finish({ kind = "field", obj = node, name = m.text }, start); is_method = true
+        else self:err("<name> expected after ':'") end
+    end
+    return node, is_method
+end
+
+function P:function_decl()
+    local start = self:cur().range.start
+    self:advance()                                      -- 'function'
+    local name, is_method = self:funcname()
+    local params, is_vararg, body = self:funcbody()
+    return self:finish({ kind = "function_declaration", name = name, is_local = false,
+        is_method = is_method, params = params, is_vararg = is_vararg, body = body }, start)
+end
+
+function P:local_stat()
+    local start = self:cur().range.start
+    self:advance()                                      -- 'local'
+    if self:is_kw("function") then
+        self:advance()                                  -- 'function'
+        local nm = self:cur(); local name = nil
+        if nm.kind == "name" then self:advance(); name = self:finish({ kind = "name", name = nm.text }, nm.range.start)
+        else self:err("<name> expected in 'local function'") end
+        local params, is_vararg, body = self:funcbody()
+        return self:finish({ kind = "function_declaration", name = name, is_local = true,
+            is_method = false, params = params, is_vararg = is_vararg, body = body }, start)
+    end
+    local names = {}
+    while true do
+        local nm = self:cur()
+        if nm.kind ~= "name" then self:err("<name> expected in local declaration"); break end
+        self:advance()
+        local attrib = nil
+        if self:is_op("<") then                         -- <const> / <close> only
+            self:advance()
+            local a = self:cur()
+            if a.kind == "name" then
+                self:advance(); attrib = a.text         -- preserve the text for source fidelity
+                if attrib ~= "const" and attrib ~= "close" then
+                    self:err("unknown attribute '" .. attrib .. "' (expected 'const' or 'close')", a)
+                end
+            else
+                self:err("<name> expected in attribute")
+            end
+            self:expect_op(">")
+        end
+        names[#names + 1] = { name = nm.text, attrib = attrib, range = nm.range }
+        if self:is_op(",") then self:advance() else break end
+    end
+    local values = {}
+    if self:is_op("=") then self:advance(); values = self:explist() end
+    return self:finish({ kind = "local_declaration", names = names, values = values }, start)
+end
+
+-- exprstat := varlist '=' explist | functioncall
+function P:exprstat()
+    local start = self:cur().range.start
+    local e = self:suffixed()
+    if self:is_op("=") or self:is_op(",") then
+        local targets = { e }
+        while self:is_op(",") do self:advance(); targets[#targets + 1] = self:suffixed() end
+        -- Each target must END as a name / field / index lvalue. A call inside a
+        -- target is fine (f().x = 1); a call/literal/paren/etc. AS the target is
+        -- not. Diagnose each invalid target but keep the node for recovery.
+        for _, tg in ipairs(targets) do
+            if tg.kind ~= "name" and tg.kind ~= "field" and tg.kind ~= "index" then
+                self:err("cannot assign to this expression (target must be a name, field, or index)",
+                    { range = tg.range })
+            end
+        end
+        self:expect_op("=")
+        local values = self:explist()
+        return self:finish({ kind = "assignment", targets = targets, values = values }, start)
+    elseif e.kind == "call" or e.kind == "method_call" then
+        return self:finish({ kind = "call_statement", call = e }, start)
+    else
+        self:err("syntax error (expected assignment or function call)")
+        return self:finish({ kind = "error", expr = e }, start)
+    end
 end
 
 -- ── public: parse a single expression from source (slice-2 surface) ───
@@ -356,6 +573,20 @@ function M.parse_expression(tokens, source, opts)
         st:err("unexpected trailing tokens after expression")
     end
     return node, st.diagnostics
+end
+
+-- ── public: parse a whole chunk (the full source AST) ────────────────
+-- chunk := block. Returns (ast, diagnostics). This is what lua.parse() drives.
+function M.parse_chunk(tokens, source, opts)
+    opts = opts or {}
+    local st = new_state(tokens, source, opts)
+    local body = st:block()
+    if not st:at_eof() then
+        st:err("'<eof>' expected (unexpected token '" .. (st:cur().text or "") .. "')")
+    end
+    local ast = { kind = "chunk", body = body,
+        range = { start = 1, stop = (source and (#source + 1)) or 1 } }
+    return ast, st.diagnostics
 end
 
 M.new_state = new_state
