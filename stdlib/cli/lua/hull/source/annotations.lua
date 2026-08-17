@@ -31,14 +31,16 @@
 
 local M = {}
 
--- Statement / declaration kinds that can carry leading annotations. A
--- function_EXPR is not a statement (it appears as a value); the enclosing
--- local_declaration / assignment / function_declaration is the attach target.
-local STATEMENT_KINDS = {
-    local_declaration = true, assignment = true, call_statement = true,
-    ["do"] = true, ["while"] = true, ["repeat"] = true, ["if"] = true,
-    numeric_for = true, generic_for = true, function_declaration = true,
-    ["return"] = true, ["break"] = true, ["goto"] = true, label = true,
+-- DECLARATION kinds that can carry leading annotations. The contract (docs §8)
+-- attaches annotations to DECLARATIONS only: `local x = ...` / `local function` and
+-- global `function name() ... end`. Every other statement (assignments, calls,
+-- loops, conditionals, returns, break/goto/labels) does NOT carry annotations, so a
+-- `---@` run above one attaches to the nearest following declaration instead, or to
+-- nothing. A function_EXPR is a value, not a statement; the enclosing
+-- local_declaration / function_declaration is the attach target.
+local DECLARATION_KINDS = {
+    local_declaration = true,
+    function_declaration = true,
 }
 
 -- Parse one comment into an annotation record, or nil when it is not a `---@`
@@ -98,12 +100,12 @@ function M.attach(unit)
         end
     end
 
-    -- Collect every declaration/statement node (any nesting), in source order.
-    local stmts = {}
+    -- Collect every DECLARATION node (any nesting), in source order.
+    local decls = {}
     local function collect(node)
         if type(node) ~= "table" then return end
-        if node.kind and STATEMENT_KINDS[node.kind] and node.range then
-            stmts[#stmts + 1] = node
+        if node.kind and DECLARATION_KINDS[node.kind] and node.range then
+            decls[#decls + 1] = node
         end
         for k, v in pairs(node) do
             if k ~= "range" and type(v) == "table" then collect(v) end
@@ -111,7 +113,7 @@ function M.attach(unit)
     end
     collect(ast)
 
-    for _, stmt in ipairs(stmts) do
+    for _, stmt in ipairs(decls) do
         local sl = unit:position(stmt.range.start)
         -- Walk contiguous leading comment lines upward from the line above.
         local run = {}

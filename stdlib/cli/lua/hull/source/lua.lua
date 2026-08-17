@@ -135,9 +135,17 @@ function M.parse(source, opts)
         _linestarts = range.linemap(source),
     }, Unit)
 
-    -- Attach `---@` annotation runs to declaration nodes (slice 4). Best-effort:
-    -- a bug here must degrade to "no annotations", never fail a clean parse.
-    pcall(annotations.attach, unit)
+    -- Attach `---@` annotation runs to declaration nodes (slice 4). Attachment is
+    -- part of the parse contract, so a failure is NOT silently swallowed: attach is
+    -- written not to raise, but if it ever does, an explicit lua.internal diagnostic
+    -- is appended so `#unit.diagnostics == 0` reflects the degraded state (a clean
+    -- unit with annotations silently missing would be the worst outcome for
+    -- query/codegen consumers). The valid AST is still returned.
+    local aok, aerr = pcall(annotations.attach, unit)
+    if not aok then
+        unit.diagnostics[#unit.diagnostics + 1] = diag.error("lua.internal",
+            "annotation attachment failed: " .. tostring(aerr), opts.path, nil)
+    end
 
     return unit, nil
 end

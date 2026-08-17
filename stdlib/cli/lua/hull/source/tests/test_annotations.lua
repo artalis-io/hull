@@ -176,6 +176,59 @@ do
     eq(active.annotation_list[1].name, "query", "acceptance: @query on active")
 end
 
+-- ── scope: annotations attach to DECLARATIONS only (docs §8) ──────────
+do
+    -- above a non-declaration statement the run does not attach to that statement.
+    local u = lua.parse("local function f()\n  ---@note\n  return 1\nend\n", { path = "t.lua" })
+    local ret
+    lua.walk(u.ast, function(n) if lua.is(n, "return") then ret = n end end)
+    ok(ret ~= nil, "scope: found the return")
+    ok(ret.annotation_list == nil, "scope: annotation does NOT attach to a return")
+
+    local u2 = lua.parse("---@note\ng()\n", { path = "t.lua" })
+    ok(u2.ast.body[1].annotation_list == nil, "scope: annotation does NOT attach to a call statement")
+
+    local u3 = lua.parse("---@note\nx = 1\n", { path = "t.lua" })
+    eq(u3.ast.body[1].kind, "assignment", "scope: bare x=1 is an assignment (not a declaration)")
+    ok(u3.ast.body[1].annotation_list == nil, "scope: annotation does NOT attach to an assignment")
+    -- retag still happens even when the annotation attaches to nothing
+    eq(u3.comments[1].kind, "annotation", "scope: unattached annotation comment is still retagged")
+end
+
+-- ── contiguous block: plain comments participate; code/blank/trailing break ─
+do
+    -- a plain `--` line ABOVE the annotation stays in the contiguous block
+    local a = lua.parse("-- header\n---@compute\nlocal function f() end\n", { path = "t.lua" })
+    ok(lua.annotation(a.ast.body[1], "compute") ~= nil, "block: plain comment above the annotation -> still attaches")
+    -- a plain `--` line BELOW the annotation (still contiguous) stays in the block
+    local b = lua.parse("---@compute\n-- interstitial note\nlocal function g() end\n", { path = "t.lua" })
+    ok(lua.annotation(b.ast.body[1], "compute") ~= nil, "block: plain comment below the annotation -> still attaches")
+    -- a --[[ ]] block line likewise participates, contributing no annotation
+    local c = lua.parse("---@compute\n--[[ note ]]\nlocal function h() end\n", { path = "t.lua" })
+    ok(lua.annotation(c.ast.body[1], "compute") ~= nil, "block: long comment participates in the run")
+
+    -- intervening CODE breaks the run: @compute leads the NEAREST following decl
+    local d = lua.parse("---@compute\nlocal q = 1\nlocal function f() end\n", { path = "t.lua" })
+    ok(lua.annotation(d.ast.body[1], "compute") ~= nil, "block: code-between -> attaches to the nearer decl (q)")
+    ok(d.ast.body[2].annotation_list == nil, "block: intervening code breaks attachment to the later decl (f)")
+
+    -- a blank line breaks even a plain+annotation block
+    local e = lua.parse("-- header\n---@compute\n\nlocal function f() end\n", { path = "t.lua" })
+    ok(e.ast.body[1].annotation_list == nil, "block: blank line breaks the whole leading block")
+end
+
+-- ── fix 1: an attachment failure surfaces as a lua.internal diagnostic ─
+do
+    local orig = annotations.attach
+    annotations.attach = function() error("boom") end   -- same module table lua.lua holds
+    local u = lua.parse("local x = 1", { path = "t.lua" })
+    annotations.attach = orig
+    ok(u ~= nil, "internal: unit still returned on attach failure")
+    local hit = false
+    for _, d in ipairs(u.diagnostics) do if d.code == "lua.internal" then hit = true end end
+    ok(hit, "internal: attach failure -> lua.internal diagnostic (never silently swallowed)")
+end
+
 -- ── boundary: attachment never raises on nasty / annotation-only input ─
 do
     local nasty = {
