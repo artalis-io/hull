@@ -1,17 +1,18 @@
 --
--- hull.source.parser — recursive-descent Lua 5.4 parser (slice 2: expressions).
+-- hull.source.parser — recursive-descent Lua 5.4 parser (expressions + statements).
 --
--- Consumes the lexer token stream and builds Hull AST expression nodes with EXACT
--- half-open byte ranges (see range.lua). Statements/declarations land in slice 3;
--- a function EXPRESSION's body is a statement block, so in slice 2 the body is
--- skipped (balanced to its `end`) and a `lua.unsupported` diagnostic is emitted
--- (a non-empty body is valid syntax this slice does not yet represent -- an
--- explicit diagnostic, never a silently malformed AST). Slice 3 replaces the skip
--- with the real block parser.
---
--- The parser NEVER raises: a parse error emits a diagnostic and returns an
--- { kind = "error" } node (best-effort). Node vocabulary (expressions) matches
+-- Consumes the lexer token stream and builds the Hull AST (expressions AND
+-- statements) with EXACT half-open byte ranges (see range.lua). M.parse_chunk()
+-- returns the whole-source { kind="chunk", body, range }; M.parse_expression()
+-- parses a single expression. Node vocabulary matches
 -- docs/lua_source_analysis_design.md §5.
+--
+-- The parser NEVER raises: a parse error emits a lua.syntax diagnostic and returns
+-- an { kind = "error" } node (best-effort recovery -- a stall guard in block() and
+-- a token-consuming primary() keep the chunk parsing past a bad construct).
+-- Expression and block nesting share one max_depth budget (a terminal
+-- lua.limit.max_depth diagnostic, no stack overflow); ordinary diagnostics respect
+-- max_diagnostics while terminal ones always record.
 --
 -- SPDX-License-Identifier: AGPL-3.0-or-later
 --
@@ -446,7 +447,8 @@ function P:for_stat()
         local step = nil
         if self:is_op(",") then self:advance(); step = self:subexpr(0) end
         self:expect_kw("do"); local body = self:block(); self:expect_kw("end")
-        return self:finish({ kind = "numeric_for", var = nm.text, from = from, to = to, step = step, body = body }, start)
+        return self:finish({ kind = "numeric_for", var = { name = nm.text, range = nm.range },
+            from = from, to = to, step = step, body = body }, start)
     else                                                -- generic for
         local names = {}
         while true do
@@ -512,10 +514,17 @@ function P:local_stat()
         if nm.kind ~= "name" then self:err("<name> expected in local declaration"); break end
         self:advance()
         local attrib = nil
-        if self:is_op("<") then                         -- <const> / <close>
+        if self:is_op("<") then                         -- <const> / <close> only
             self:advance()
             local a = self:cur()
-            if a.kind == "name" then self:advance(); attrib = a.text else self:err("<name> expected in attribute") end
+            if a.kind == "name" then
+                self:advance(); attrib = a.text         -- preserve the text for source fidelity
+                if attrib ~= "const" and attrib ~= "close" then
+                    self:err("unknown attribute '" .. attrib .. "' (expected 'const' or 'close')", a)
+                end
+            else
+                self:err("<name> expected in attribute")
+            end
             self:expect_op(">")
         end
         names[#names + 1] = { name = nm.text, attrib = attrib, range = nm.range }
@@ -533,6 +542,15 @@ function P:exprstat()
     if self:is_op("=") or self:is_op(",") then
         local targets = { e }
         while self:is_op(",") do self:advance(); targets[#targets + 1] = self:suffixed() end
+        -- Each target must END as a name / field / index lvalue. A call inside a
+        -- target is fine (f().x = 1); a call/literal/paren/etc. AS the target is
+        -- not. Diagnose each invalid target but keep the node for recovery.
+        for _, tg in ipairs(targets) do
+            if tg.kind ~= "name" and tg.kind ~= "field" and tg.kind ~= "index" then
+                self:err("cannot assign to this expression (target must be a name, field, or index)",
+                    { range = tg.range })
+            end
+        end
         self:expect_op("=")
         local values = self:explist()
         return self:finish({ kind = "assignment", targets = targets, values = values }, start)

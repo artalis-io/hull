@@ -99,11 +99,24 @@ function M.parse(source, opts)
             "internal parse failure: " .. tostring(res), opts.path, nil)
     end
 
-    -- Combine lexer + parser diagnostics (each phase is independently capped by
-    -- max_diagnostics; the union is bounded by 2x that).
+    -- Combine lexer + parser diagnostics with the SourceUnit-level max_diagnostics
+    -- as the AUTHORITATIVE bound: keep EVERY terminal limit diagnostic (lua.limit.*)
+    -- but cap the ORDINARY diagnostics across both phases at max_diagnostics total,
+    -- in source order (lexer then parser).
+    local max_d = (opts.limits and opts.limits.max_diagnostics) or 200
     local diagnostics = {}
-    for _, d in ipairs(res.lx.diagnostics) do diagnostics[#diagnostics + 1] = d end
-    for _, d in ipairs(res.pdiags) do diagnostics[#diagnostics + 1] = d end
+    local ordinary = 0
+    local function absorb(list)
+        for _, d in ipairs(list) do
+            if d.code and d.code:match("^lua%.limit%.") then
+                diagnostics[#diagnostics + 1] = d           -- terminal: always kept
+            elseif ordinary < max_d then
+                diagnostics[#diagnostics + 1] = d; ordinary = ordinary + 1
+            end
+        end
+    end
+    absorb(res.lx.diagnostics)
+    absorb(res.pdiags)
 
     local unit = setmetatable({
         path = opts.path,

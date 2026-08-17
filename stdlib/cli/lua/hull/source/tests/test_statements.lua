@@ -79,7 +79,9 @@ do
     eq(r.kind, "repeat", "repeat: kind"); ok(r.cond ~= nil, "repeat: cond")
 
     local nf = first("for i = 1, 10, 2 do f(i) end")
-    eq(nf.kind, "numeric_for", "numfor: kind"); eq(nf.var, "i", "numfor: var")
+    eq(nf.kind, "numeric_for", "numfor: kind")
+    eq(nf.var.name, "i", "numfor: var.name (range-bearing record)")
+    ok(nf.var.range ~= nil and nf.var.range.start ~= nil, "numfor: var.range present")
     ok(nf.from and nf.to and nf.step, "numfor: from/to/step")
     local gf = first("for k, v in pairs(t) do end")
     eq(gf.kind, "generic_for", "genfor: kind"); eq(#gf.names, 2, "genfor: 2 names")
@@ -169,6 +171,47 @@ do
     -- deep statement nesting is bounded (no stack overflow)
     local u = parse(string.rep("do ", 100) .. "return" .. string.rep(" end", 100))
     ok(u ~= nil, "boundary: deep nesting parses within default max_depth")
+end
+
+-- ── assignment target validation ──────────────────────────────────────
+do
+    for _, s in ipairs({ "x = 1", "a.b = 1", "a[b] = 1", "f().x = 1", "a().b[c] = 1" }) do
+        eq(#parse(s).diagnostics, 0, "target valid (name/field/index): " .. s)
+    end
+    for _, s in ipairs({ "f() = 1", "a, g() = 1, 2", "1 = 2", "(x) = 1" }) do
+        local u = lua.parse(s, { path = "t.lua" })
+        local hit = false
+        for _, d in ipairs(u.diagnostics) do if d.code == "lua.syntax" then hit = true end end
+        ok(hit, "target invalid -> lua.syntax: " .. s)
+        local has_assign = false
+        lua.walk(u.ast, function(n) if lua.is(n, "assignment") then has_assign = true end end)
+        ok(has_assign, "target invalid: assignment node retained for recovery: " .. s)
+    end
+end
+
+-- ── local attribute must be const/close (text preserved either way) ────
+do
+    eq(first("local x <const> = 1").names[1].attrib, "const", "attr: const")
+    eq(first("local x <close> = f()").names[1].attrib, "close", "attr: close")
+    eq(#parse("local x <const> = 1").diagnostics, 0, "attr: valid -> no diagnostic")
+    local u = lua.parse("local x <other> = 1", { path = "t.lua" })
+    eq(u.ast.body[1].names[1].attrib, "other", "attr: text preserved for invalid")
+    local hit = false
+    for _, d in ipairs(u.diagnostics) do if d.code == "lua.syntax" then hit = true end end
+    ok(hit, "attr: invalid attribute -> lua.syntax")
+end
+
+-- ── max_diagnostics is an AUTHORITATIVE total bound (ordinary) ─────────
+do
+    local u = lua.parse("@ @ @ @ @\nf() = 1\ng() = 2\nh() = 3", { path = "t.lua", limits = { max_diagnostics = 3 } })
+    local ordinary = 0
+    for _, d in ipairs(u.diagnostics) do if not d.code:match("^lua%.limit%.") then ordinary = ordinary + 1 end end
+    ok(ordinary <= 3, "budget: total ordinary diagnostics <= max_diagnostics (" .. ordinary .. ")")
+    -- terminal limit diagnostics always survive, even at max_diagnostics = 0
+    local u2 = lua.parse("a b c d e", { path = "t.lua", limits = { max_tokens = 2, max_diagnostics = 0 } })
+    local has_terminal = false
+    for _, d in ipairs(u2.diagnostics) do if d.code:match("^lua%.limit%.") then has_terminal = true end end
+    ok(has_terminal, "budget: terminal limit diagnostic kept at max_diagnostics=0")
 end
 
 print(string.format("test_statements: %d passed, %d failed", pass, fail))
