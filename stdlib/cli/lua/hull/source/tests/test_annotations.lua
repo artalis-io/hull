@@ -229,6 +229,19 @@ do
     ok(hit, "internal: attach failure -> lua.internal diagnostic (never silently swallowed)")
 end
 
+-- ── I2: attach is idempotent (re-running reproduces the same annotations) ─
+do
+    local u = lua.parse("---@compute\n---@pure\nlocal function f() end\n", { path = "t.lua" })
+    local f = u.ast.body[1]
+    eq(#f.annotation_list, 2, "idempotent: first attach set 2 annotations")
+    -- comments are now retagged kind "annotation"; a second attach must not drop them
+    annotations.attach(u)
+    eq(#f.annotation_list, 2, "idempotent: second attach preserves annotation_list")
+    eq(lua.annotation(f, "compute").name, "compute", "idempotent: annotations[name] stable")
+    ok(annotations.parse_comment(u.comments[1]) ~= nil,
+        "idempotent: parse_comment re-recognizes a retagged annotation comment")
+end
+
 -- ── boundary: attachment never raises on nasty / annotation-only input ─
 do
     local nasty = {
