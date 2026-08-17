@@ -42,14 +42,22 @@ local P = {}
 P.__index = P
 
 local function new_state(tokens, source, opts)
+    local limits = opts.limits or {}
     return setmetatable({
         tokens = tokens, source = source, path = opts.path,
         diagnostics = {}, pos = 1,
         prev = nil,                         -- last consumed token (for node end offsets)
-        depth = 0, max_depth = (opts.limits and opts.limits.max_depth) or 400,
+        depth = 0, max_depth = limits.max_depth or 400,
+        max_diagnostics = limits.max_diagnostics or 200,
         aborted = false,
     }, P)
 end
+
+-- Normal diagnostics respect max_diagnostics; terminal (limit) diagnostics always
+-- record, mirroring the lexer's policy so the reason parsing stopped is never
+-- suppressed.
+function P:emit(d) if #self.diagnostics < self.max_diagnostics then self.diagnostics[#self.diagnostics + 1] = d end end
+function P:emit_terminal(d) self.diagnostics[#self.diagnostics + 1] = d end
 
 function P:cur() return self.tokens[self.pos] end
 function P:advance() local t = self.tokens[self.pos]; self.prev = t; self.pos = self.pos + 1; return t end
@@ -60,16 +68,12 @@ function P:is_kw(text) local t = self:cur(); return t.kind == "keyword" and t.te
 
 function P:err(message, tok)
     tok = tok or self:cur()
-    if #self.diagnostics < 200 then
-        self.diagnostics[#self.diagnostics + 1] =
-            diag.error("lua.syntax", message, self.path, tok.range)
-    end
+    self:emit(diag.error("lua.syntax", message, self.path, tok.range))
     return { kind = "error", range = { start = tok.range.start, stop = tok.range.stop } }
 end
 
 function P:unsupported(message, s, e)
-    self.diagnostics[#self.diagnostics + 1] =
-        diag.error("lua.unsupported", message, self.path, { start = s, stop = e })
+    self:emit(diag.error("lua.unsupported", message, self.path, { start = s, stop = e }))
 end
 
 -- Consume `text` op/kw or emit a diagnostic; returns the token or nil.
@@ -102,9 +106,9 @@ function P:subexpr(limit)
     if self.depth > self.max_depth then
         if not self.aborted then
             self.aborted = true
-            self.diagnostics[#self.diagnostics + 1] =
-                diag.error("lua.limit.max_depth", "expression nesting exceeds max_depth (" ..
-                    self.max_depth .. ")", self.path, self:cur().range)
+            self:emit_terminal(diag.error("lua.limit.max_depth",
+                "expression nesting exceeds max_depth (" .. self.max_depth .. ")",
+                self.path, self:cur().range))
         end
         self.depth = self.depth - 1
         return { kind = "error", range = self:cur().range }
@@ -151,8 +155,13 @@ function P:simple()
         return self:finish({ kind = "literal", subtype = "string", text = t.text, malformed = t.malformed }, start)
     elseif t.kind == "keyword" and (t.text == "nil" or t.text == "true" or t.text == "false") then
         self:advance()
-        local subtype = (t.text == "nil") and "nil" or "boolean"
-        return self:finish({ kind = "literal", subtype = subtype, value = t.text }, start)
+        -- CONVENTION: every literal carries `text` = its exact lexeme. Booleans
+        -- ADDITIONALLY expose the actual boolean `value`; nil carries no `value`.
+        if t.text == "nil" then
+            return self:finish({ kind = "literal", subtype = "nil", text = t.text }, start)
+        end
+        return self:finish({ kind = "literal", subtype = "boolean", text = t.text,
+                             value = (t.text == "true") }, start)
     elseif self:is_op("...") then
         self:advance()
         return self:finish({ kind = "vararg" }, start)
@@ -178,7 +187,9 @@ function P:primary()
         self:advance()
         return self:finish({ kind = "name", name = t.text }, start)
     else
-        return self:err("unexpected symbol")
+        local e = self:err("unexpected symbol")
+        if not self:at_eof() then self:advance() end   -- consume to progress (avoid stalls)
+        return e
     end
 end
 
@@ -268,19 +279,31 @@ function P:table_constructor()
 end
 
 -- ── function expression (params now; body skipped until slice 3) ──────
--- Balanced skip to the matching `end` (nested block openers counted). repeat/until
--- is a distinct pair and does not consume an `end`.
+-- Balanced skip to the matching `end`. The `end`-terminated openers are
+-- `function`, `if`, `for`, `while`, and a STANDALONE `do`. A `for`/`while` opens
+-- ONE block whose `do` is a syntactic marker, not a second `end`-taker -- so its
+-- `do` is absorbed (tracked by `pending_do`, a count, which stays correct even
+-- when a nested function literal appears inside a loop header). `repeat ... until`
+-- is NOT `end`-terminated and is ignored for the `end` count. Replaced by the real
+-- block parser in slice 3.
 function P:skip_block_to_end()
-    local open = 1
+    local open = 1              -- the function's own `end`
+    local pending_do = 0        -- for/while opened but awaiting their `do`
     while not self:at_eof() do
         local t = self:cur()
         if t.kind == "keyword" then
-            if t.text == "function" or t.text == "if" or t.text == "do" or t.text == "for" or t.text == "while" then
+            local k = t.text
+            if k == "function" or k == "if" then
                 open = open + 1
-            elseif t.text == "end" then
+            elseif k == "for" or k == "while" then
+                open = open + 1; pending_do = pending_do + 1
+            elseif k == "do" then
+                if pending_do > 0 then pending_do = pending_do - 1 else open = open + 1 end
+            elseif k == "end" then
                 open = open - 1
                 if open == 0 then return self:advance() end
             end
+            -- repeat / until are not end-terminated: ignored for `open`.
         end
         self:advance()
     end

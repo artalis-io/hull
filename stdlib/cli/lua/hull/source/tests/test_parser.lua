@@ -49,6 +49,40 @@ do
     end
     local v = parse_expr("...")
     eq(v.kind, "vararg", "vararg kind")
+
+    -- LOCKED literal shapes: every literal has `text`; booleans add boolean
+    -- `value`; nil carries NO value.
+    local num = parse_expr("42");   eq(num.text, "42", "num.text"); ok(num.value == nil, "num: no value field")
+    local str = parse_expr('"hi"'); eq(str.text, '"hi"', "str.text")
+    local nl = parse_expr("nil");   eq(nl.subtype, "nil", "nil.subtype"); eq(nl.text, "nil", "nil.text"); ok(nl.value == nil, "nil: no value")
+    local tr = parse_expr("true");  eq(tr.subtype, "boolean", "true.subtype"); eq(tr.text, "true", "true.text"); eq(tr.value, true, "true.value")
+    local fa = parse_expr("false"); eq(fa.text, "false", "false.text"); eq(fa.value, false, "false.value")
+end
+
+-- ── function-body balanced skip: nested constructs, one `end` each ────
+do
+    local bodies = {
+        "function() for i = 1, 3 do f(i) end end",             -- for + its do = one end
+        "function() if x then a() else b() end end",           -- if/elseif/else = one end
+        "function() while c do g() end end",                   -- while + its do = one end
+        "function() do local x = 1 end end",                   -- STANDALONE do
+        "function() repeat h() until done end",                -- repeat/until (no end)
+        "function() local f = function() return 1 end; return f end", -- nested function
+        "function() for a in pairs(t) do if a then break end end end", -- nested if in for
+    }
+    for _, src in ipairs(bodies) do
+        local node, all = parse_expr(src)
+        eq(node.kind, "function_expr", "skip: function_expr for " .. src)
+        eq(n_diag(all, "lua.syntax"), 0, "skip: no spurious 'unterminated' for " .. src)
+        eq(n_diag(all, "lua.unsupported"), 1, "skip: one deferred-body notice for " .. src)
+        eq(slice(src, node), src, "skip: full range for " .. src)
+    end
+end
+
+-- ── parser diagnostics respect the configured max_diagnostics ─────────
+do
+    local _, all = parse_expr("f(+, +, +, +, +)", { limits = { max_diagnostics = 2 } })
+    ok(#all <= 2, "parser: max_diagnostics caps normal diagnostics (" .. #all .. ")")
 end
 
 -- ── names / field / index / call / method / call-forms ────────────────
