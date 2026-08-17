@@ -30,9 +30,11 @@ For each input `data[0..size)` treated as Lua source, `lua.parse(data, { limits 
 2. **Return a valid shape** — either a `unit` table with a `diagnostics` array (and an
    `ast`), or `(nil, err)` with a diagnostic-shaped/`string` `err`. Anything else →
    abort.
-3. **Respect its bounds** — run with the DEFAULT limits; the parser's
-   `max_bytes`/`max_tokens`/`max_depth` must bound work so no input hangs (libFuzzer
-   `-timeout` catches a regression) or OOMs (a memory cap catches unbounded growth).
+3. **Respect its bounds** — run with the DEFAULT limits; `max_bytes`/`max_tokens`/
+   `max_depth` bound work so no input hangs (libFuzzer `-timeout` catches a regression).
+   A per-input **bounded allocator** (§3.1) caps memory: exceeding it raises an EXPECTED
+   `LUA_ERRMEM` (classified as resource exhaustion, not a never-raise breach), catching
+   unbounded growth without an ambiguous RSS kill.
 4. **Structural range sanity** (cheap post-check on a returned unit) — walk the AST and
    assert every node's range is in `[1, #src+1]`, non-inverted, and `unit:text(node)`
    slices without error. A violation → abort. (Reuses the conformance harness's range
@@ -57,29 +59,50 @@ the pure-C codec fuzzers — pgwire, sh_json — this one drives a `lua_State`.)
   `package.path` to `stdlib/cli/lua/?.lua`, `require("hull.source.lua")`, and stash the
   `M.parse` function + a small Lua driver in the registry. Reusing one state across
   inputs is essential for throughput (a fresh state per input would dominate runtime).
-- **`LLVMFuzzerTestOneInput(data, size)`**:
-  1. push the driver + the input string (`lua_pushlstring`, binary-safe) and `lua_pcall`
-     it;
-  2. the **Lua driver** does `local u, e = parse(input, LIMITS)`, then the shape +
-     range checks (§2.2, §2.4), and returns a status; a check failure is signalled back
-     to C (a distinguished return / a raised error) → C `abort()`s with a message;
-  3. after the call, reset the stack (`lua_settop`) and periodically
-     `lua_gc(L, LUA_GCCOLLECT)` (every N inputs) so accumulated per-parse tables don't
-     grow memory unboundedly across the run.
-- **Memory cap**: install a Lua allocator (or use Hull's tracking allocator) with a hard
-  ceiling so a pathological input that tries to allocate unboundedly fails the parse
-  (returned as a diagnostic / `(nil,err)`) rather than OOM-killing the fuzzer — turning
-  "unbounded growth" into a catchable contract check rather than an ambiguous OOM.
+- **`LLVMFuzzerTestOneInput(data, size)`** — one input, one bounded parse:
+  1. arm the per-input allocator allowance (§3.1): ceiling = `baseline + PER_INPUT_BYTES`;
+  2. push the driver + input string (`lua_pushlstring`, binary-safe) and `lua_pcall` it;
+  3. **classify the `pcall` result**:
+     - `LUA_OK` → run the shape + range checks (§2.2/§2.4) via the driver's return; a
+       check FAILURE is the only in-band way to `abort()` (a real robustness bug);
+     - `LUA_ERRMEM` (from the bounded allocator) → **expected resource exhaustion, NOT a
+       never-raise violation**: the per-input allowance was exceeded. Tolerated and
+       counted — because an allocation failure can prevent `parse()` from even
+       constructing its normal `(nil, err)` result, so its own `pcall` may re-raise
+       `LUA_ERRMEM`. Not a crash.
+     - **any other** Lua error (`LUA_ERRRUN`, `LUA_ERRERR`, …) → a raised error escaped
+       `parse()` → `abort()` (a never-raise breach).
+  4. **always**: reset the stack (`lua_settop(L, base)`) and force a full collection
+     (`lua_gc(L, LUA_GCCOLLECT)`) BEFORE the next input, so per-parse garbage never bleeds
+     across inputs and each input's allowance is measured from a clean baseline.
+
+### 3.1 The bounded-allocator contract
+A custom Lua allocator wrapping Hull's tracking allocator, with a hard ceiling:
+- **Baseline**: captured ONCE, right after `LLVMFuzzerInitialize` finishes (state +
+  `openlibs` + `require("hull.source.lua")` loaded), so the standing VM footprint is
+  never charged against an input. The ceiling is `baseline + PER_INPUT_BYTES`.
+- **Per-input allowance** (`PER_INPUT_BYTES`): a fixed budget — comfortably above any
+  legitimate parse of a bounded input, low enough to catch runaway growth. Effectively
+  reset each input by step 4's forced GC (which returns live memory toward baseline).
+- **On exhaustion**: the allocator returns `NULL` → Lua raises `LUA_ERRMEM`, caught by
+  the `pcall` and classified **expected** (step 3). This turns "unbounded growth" into a
+  clean, catchable resource-exhaustion signal — not an ambiguous RSS kill, and never
+  mislabeled a never-raise violation.
 
 The Lua driver lives inline in the C file as a string (or a tiny co-located
 `fuzz_driver.lua`), keeping the "what to assert" in Lua next to `lua.parse` while C owns
-the fuzz loop.
+the fuzz loop + the allocator.
 
 ## 4. Corpus + dictionary
 
-- **Seed corpus**: the repo's own `.lua` (the conformance corpus) + the parser/lexer
-  test snippets, under `fuzz/corpus/lua_source/`. Seeding from valid Lua gives
-  coverage-guided mutation a strong start.
+- **Checked-in seed (small + curated)**: a SMALL set of `.lua` snippets under
+  `fuzz/corpus/lua_source/` covering tricky lexer/parser/annotation edge cases —
+  **not** a duplicated snapshot of every repository `.lua` file.
+- **Full corpus staged at run time**: the fuzz runner stages the repo's own `.lua` (the
+  conformance corpus) DETERMINISTICALLY into a TEMPORARY corpus dir (e.g. copied under
+  `build/fuzz-corpus/lua_source/`), unioned with the checked-in seed, and points
+  libFuzzer there. The broad coverage seed is thus always fresh + in sync with the tree,
+  with zero duplication committed to git.
 - **Dictionary** (`fuzz/lua_source.dict`): Lua keywords, operators, long-bracket
   forms (`[[`, `]==]`), string escapes (`\u{`, `\x`, `\z`), numeral forms (`0x`, `p`,
   `..`), and `---@` so the mutator reaches annotation + edge lexer paths quickly.
@@ -117,19 +140,17 @@ Mirror the existing fuzz targets (`mk/tests.mk`, `FUZZ_CFLAGS`, `FUZZ_TIME ?= 60
 - **Not a `make test` gate** — it is a continuous CI job (like the other fuzzers), not a
   unit test (the conformance gate is the in-`make test` robustness check).
 
-## 8. Open decisions (for ratification)
+## 8. Decisions (ratified)
 
-1. **Range post-check in the hot loop.** Include the per-node range sanity check on
-   every returned unit (§2.4) — a small constant cost that catches range bugs the
-   never-raise check alone would miss — vs. never-raise + shape only for max throughput.
-   Recommendation: **include it** (cheap, high-value; it's the same checker the gate
-   uses).
-2. **Memory cap mechanism.** A custom bounded Lua allocator in the harness vs. relying
-   on libFuzzer's `-rss_limit_mb`. Recommendation: **a bounded allocator** — it turns
-   "unbounded growth" into a clean, catchable `(nil, err)`/diagnostic contract check
-   rather than an ambiguous RSS kill, and it exercises the parser's own OOM paths.
-3. **Corpus location + size.** Seed from the full repo `.lua` corpus vs. a curated small
-   set. Recommendation: **full corpus** (matches the conformance seed; more coverage),
-   gitignored generated crash artifacts.
-4. **CI time budget.** 60s (matches the other fuzzers) vs. longer. Recommendation:
-   **60s** for parity; a nightly longer run is a later add.
+1. **Range post-check IN the hot loop** — every returned unit gets the per-node range
+   sanity check (§2.4); cheap, high-value, reuses the gate's checker.
+2. **Bounded allocator** (over `-rss_limit_mb`), with the §3.1 contract: post-init
+   baseline, per-input allowance, forced GC + stack reset between inputs, and
+   **`LUA_ERRMEM` classified as EXPECTED resource exhaustion** — any OTHER escaping Lua
+   error is a crash (the distinction matters because allocation failure can prevent
+   `parse()` from building its normal `(nil, err)`).
+3. **Corpus**: a SMALL curated seed set + dictionary checked in; the FULL repo `.lua`
+   corpus staged DETERMINISTICALLY into a temporary dir at run time — no duplicated
+   snapshot committed to git. Generated crash artifacts are gitignored.
+4. **60s CI budget** (`FUZZ_TIME`), matching the other fuzzers; a nightly longer run is
+   a later add.

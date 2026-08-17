@@ -103,7 +103,7 @@ A **rule** is a small declarative record:
 | id | severity | needs | flags |
 |---|---|---|---|
 | `unused-local` | warning | scope | a `local` never read (excludes a leading `_`-named local — the idiomatic "ignore") |
-| `unused-param` | warning | scope | a function parameter never read (excludes `_`, `self`, and (config) a trailing run of unused params, since Lua callbacks often ignore tail args) |
+| `unused-param` | warning | scope | a function parameter never read. Exempt ONLY: `_`, any underscore-prefixed name (`_x`), and the implicit method `self`. **No trailing-unused-run suppression by default** — suppressing a trailing run would hide every unused parameter in a function and gut the rule. Broader callback suppression is a later add, gated on evidence or explicit config. |
 | `shadowed-local` | warning | scope | a `local`/param that hides an outer binding of the same name in an enclosing scope |
 | `undefined-global` | warning (default OFF) | scope | a global read that is not a known Lua/Hull global (needs a global allowlist → off by default until the allowlist is curated) |
 | `empty-block` | warning | — | an `if`/`elseif`/`else`/`while`/`for`/`do` body with zero statements |
@@ -186,15 +186,16 @@ is the explicit signal that lint data may be present.
 Each slice is a design-first → ratify → implement → green → merge cycle, matching how
 the layer itself was built.
 
-## 11. Open decisions (for ratification)
+## 11. Decisions (ratified)
 
-1. **Scope now vs later.** Include the scope pass + scope rules in v2 (slices 2–3), or
-   ship structural-only first (slice 1) and treat scope as v2.1? Recommendation:
-   **commit to all three slices** — `shadowed-local` / `unused-local` are the rules with
-   real value and were explicitly requested; slice 1 alone is thin.
-2. **Initial rule set** (the §5 table). Recommendation: as tabled, with
-   `undefined-global` **off by default** (needs the global allowlist).
-3. **`--strict` default.** Warnings advisory by default (exit 0), `--strict` to gate.
-   Recommendation: **advisory by default** (standard; non-breaking for CI that runs
-   `hull analyze` today expecting exit 0 on warning-free syntax).
-4. **Schema bump to 2.** Recommendation: **yes** — explicit signal, backward-compatible.
+1. **All three slices** — engine + structural rules, the `hull.source.scope` pass, and
+   the scope rules (`unused-local` / `unused-param` / `shadowed-local` /
+   `undefined-global`).
+2. **Rule set as tabled**, with `undefined-global` **off by default** (needs the global
+   allowlist). `unused-param` exempts ONLY `_`, underscore-prefixed names, and the
+   implicit method `self` — **no trailing-unused-run suppression by default** (it would
+   hide every unused param; broader callback suppression is a later, evidence/config-
+   gated add).
+3. **`--strict` advisory-by-default** — warnings/infos do not affect the exit code
+   unless `--strict` (non-breaking for CI running `hull analyze` today).
+4. **JSON `schema_version: 2`** — backward-compatible superset.
