@@ -161,6 +161,14 @@ $(BUILDDIR)/test_%: $(TESTDIR)/hull/cap/test_%.c $(TUI_CAP_TEST_OBJS) $(TEST_COM
 $(BUILDDIR)/test_%: $(TESTDIR)/hull/cap/test_%.c $(TEST_COMMON_DEPS) | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< $(TEST_COMMON_LIBS) $(LDFLAGS)
 
+# hull.source.lua (pure-Lua source-analysis layer): a vanilla lua_State harness
+# linking ONLY the vendored Lua 5.4 objects (no Hull sandbox / cap layer). The
+# test .c lives under tests/hull/source/, so it is not matched by the cap/ pattern
+# rule above -- explicit recipe. It runs the co-located Lua test scripts from the
+# repo-root source tree via package.path.
+$(BUILDDIR)/test_lua_source: $(TESTDIR)/hull/source/test_lua_source.c $(LUA_OBJS) | $(BUILDDIR)
+	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -Ivendor/lua -o $@ $< $(LUA_OBJS) -lm $(LDFLAGS)
+
 # Read-only shared-heap C-API test: build-time AOT fixture. Generate an .aot from
 # the embedded .wasm via the Hull-built wamrc when present (arch + OS correct);
 # otherwise a zero-length stub so the test compiles and SKIPS the AOT case
