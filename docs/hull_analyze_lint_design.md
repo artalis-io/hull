@@ -1,0 +1,200 @@
+# `hull analyze` v2 — lint rules (design)
+
+Status: DESIGN (pre-implementation). Extends the shipped `hull analyze` (syntax-only,
+[hull_analyze_design.md](hull_analyze_design.md)) with a **rule-based linter** over the
+AST + comments + a light lexical **scope** pass — still without running or building the
+app. This is the "AST/annotation lint rules" follow-up named in §10 of the v1 design.
+
+## 1. Goal
+
+Turn `hull analyze` from a syntax checker into a real linter: flag likely bugs and
+dead code that are valid syntax but wrong or wasteful — `unused-local`,
+`shadowed-local`, `unused-param`, `empty-block`, duplicate table keys, `TODO`/`FIXME`
+markers — each a small **rule** over `lua.walk` + a scope model + `unit.comments`,
+behind a **rule registry** with per-rule enable/disable and a `--strict` gate. The
+infrastructure (registry, severities, config surface, JSON) is designed so new rules
+are ~20 lines each.
+
+Why it matters: these are the errors a syntax check can't see — a `local cfg` that's
+never read (a typo'd later reference), a loop var that shadows an outer one, an
+`if ... then end` with an empty body. Caught statically, across the whole tree, in one
+shot.
+
+## 2. Scope + boundaries
+
+- **Per-file rules** in v2. Cross-file rules (e.g. a `---@deprecated` function called
+  from another module) need a project-wide symbol graph — a later version.
+- **NOT `undeclared-import` / `unused-require`** — that is DECLARATION analysis
+  (require/import vs `manifest.modules`), already shipped as `hull modules analyze`
+  (module `hull.analyze`). v2 is orthogonal: syntactic / scope / comment rules. The two
+  compose; they do not overlap. (A future `hull analyze` could *surface* modules-analyze
+  findings, but it will not re-implement them.)
+- **NOT type inference, NOT control-flow/data-flow** beyond simple reachability. Lua
+  makes `return`/`break` block-terminating at the syntax level already, so
+  "unreachable after return" is a *syntax* error, not a lint.
+- **NOT auto-fix** (unchanged from v1).
+
+## 3. The scope pass — `hull.source.scope` (the motivated Step B)
+
+The high-value rules (`unused-local`, `shadowed-local`, `unused-param`,
+`undefined-global`) all need **name resolution**: which declaration each `name`
+reference binds to. This is the "semantic/binding pass" the roadmap deferred "only if a
+consumer needs it" — the linter is that consumer. It ships as a new, reusable
+source-layer module `hull.source.scope` (future codegen consumers may want it too).
+
+`scope.resolve(unit)` walks `unit.ast` and produces a **scope model** with Lua 5.4
+scoping semantics:
+- **Lexical scopes**: the chunk, and each block that introduces bindings — function
+  bodies (params + locals), `do`, `while`/`repeat` bodies, `if` clause bodies, numeric-
+  and generic-`for` bodies (loop vars scoped to the body).
+- **Declaration visibility**: a `local x = ...` is visible only to statements **after**
+  it in its block (Lua's "a local is in scope from *after* its declaration"), so
+  `local x = x` binds the RHS `x` to an *outer* `x`. `local function f` is visible
+  **inside its own body** (recursion) — distinct from `local f = function() end`.
+- **Resolution**: every `name` node resolves to (a) a specific local/param declaration
+  in an enclosing scope (nearest wins — this is where **shadowing** is observed), or
+  (b) an **upvalue** (a local from an enclosing *function*, across a function boundary),
+  or (c) a **global** (no binding found). `self` in a `function a:m()` method is an
+  implicit first param.
+- **Per-declaration usage**: each local/param records whether it is ever **read**
+  (a `name` reference that isn't the assignment target of its own declaration). Powers
+  `unused-*`. (An assignment to a local — `x = 1` where `x` is local — counts as a
+  write, not a read; `unused-local` flags a local written/declared but never read.)
+
+Output shape (attached to the unit, or returned):
+```
+scope = {
+  bindings = { <decl>, ... },     -- every local/param declaration
+  -- <decl> = { name, kind = "local"|"param"|"localfunc"|"loopvar",
+  --            range, scope_id, reads = <int>, writes = <int>,
+  --            shadows = <decl|nil> }   -- the outer decl it hides, if any
+  ref_of = <map: name-node -> decl | "global" | "upvalue-decl">,
+}
+```
+The pass NEVER raises (best-effort over a possibly error-bearing AST); an `error` node
+or a missing field degrades to "unresolved", never a crash. It is conformance-adjacent:
+a dedicated test suite pins resolution on hand-built cases (shadowing, recursion,
+`local x = x`, loop-var scope, method `self`, upvalues).
+
+## 4. Rule engine + registry
+
+A **rule** is a small declarative record:
+```
+{ id = "unused-local",
+  severity = "warning",          -- "error" | "warning" | "info"
+  default = true,                -- on unless --disable'd
+  needs = { "scope" },           -- "scope" pass required? (else AST/comments only)
+  describe = "a local variable that is never read",
+  check = function(unit, scope, emit)
+      -- walk / inspect; emit { code, message, range } per finding
+  end }
+```
+- **Registry**: a sorted table `RULES` in `hull.source.lint` (the new rule module). One
+  row per rule; `check` is pure (no I/O, no cross-file state). Adding a rule is one row.
+- **Codes**: each finding's `code` is `lua.lint.<id>` (namespaced, distinct from
+  `lua.syntax` / `lua.limit.*` / `analyze.*`). Deterministic: findings sorted by
+  `(path, range.start, code)` like v1.
+- **Engine**: for each file's `unit`, run `scope.resolve(unit)` once (only if any active
+  rule `needs` it), then invoke each active rule's `check`, collecting findings. The
+  scope pass is computed at most once per file.
+
+## 5. Curated v2 rule set
+
+| id | severity | needs | flags |
+|---|---|---|---|
+| `unused-local` | warning | scope | a `local` never read (excludes a leading `_`-named local — the idiomatic "ignore") |
+| `unused-param` | warning | scope | a function parameter never read (excludes `_`, `self`, and (config) a trailing run of unused params, since Lua callbacks often ignore tail args) |
+| `shadowed-local` | warning | scope | a `local`/param that hides an outer binding of the same name in an enclosing scope |
+| `undefined-global` | warning (default OFF) | scope | a global read that is not a known Lua/Hull global (needs a global allowlist → off by default until the allowlist is curated) |
+| `empty-block` | warning | — | an `if`/`elseif`/`else`/`while`/`for`/`do` body with zero statements |
+| `duplicate-table-key` | warning | — | a table constructor with two `field_name`/`field_expr` entries for the same literal key |
+| `todo-comment` | info | — | a comment containing `TODO`/`FIXME`/`XXX` (surfaced, never fails a build) |
+
+`undefined-global` ships **off by default** (it needs a curated global allowlist — Lua
+intrinsics + Hull's injected globals like `app`, `db`, `http`, `tool`… — to avoid false
+positives); it's enabled with `--enable=undefined-global` and hardened over time.
+
+## 6. CLI surface (additions)
+
+```
+hull analyze [app_dir] [files...] [--json] [--quiet]
+             [--strict] [--rules=a,b] [--disable=c,d] [--enable=e] [--list-rules] [--max-depth=N]
+```
+- `--list-rules` → print every rule (`id`, severity, default, one-line describe), exit 0
+  (human) or a `{ rules: [...] }` JSON with `--json`.
+- `--rules=<ids>` → run ONLY these rules (comma-separated) — overrides defaults.
+- `--disable=<ids>` / `--enable=<ids>` → adjust the default set (compose: defaults −
+  disabled + enabled). An unknown id is a usage error (exit 2).
+- `--strict` → treat **warnings** as failures (they contribute to exit 1). Without it,
+  warnings/infos are advisory (exit 0 if there are no errors).
+- Syntax analysis (v1) always runs first; lint rules run on the `complete` files. An
+  `incomplete`/`internal` file is NOT linted (its AST is unreliable) — it already
+  drives exit 1 from v1.
+
+## 7. Exit codes + severities (extends v1 honestly)
+
+v1's contract is preserved: **error**-severity diagnostics (`lua.syntax`,
+`lua.unsupported`, `lua.internal`, `lua.limit.*`, `analyze.*` targets) drive exit 1.
+Lint findings add **warning** and **info** severities:
+- `0` — no error-severity diagnostics, and (no warnings OR `--strict` not set).
+- `1` — any error-severity diagnostic, OR (`--strict` AND ≥1 warning).
+- `2` — usage / operational failure (unknown flag/rule, discovery failure) — unchanged.
+
+`info` (e.g. `todo-comment`) never affects the exit code. This matches the ubiquitous
+linter convention (warnings advisory, `-Werror`/`--strict` to gate).
+
+## 8. JSON schema evolution → `schema_version: 2`
+
+Backward-compatible superset of v1 (same top-level keys; new codes + severities +
+counts). Bumped to `2` to signal the lint capability:
+- `diagnostics[].severity` gains `"warning"` / `"info"`; `code` gains `lua.lint.<id>`.
+- `summary` gains `warnings`, `infos` (alongside `errors`, `incomplete`, `internal`);
+  `clean` stays "exit 0". A new `summary.by_rule` map (`{ "unused-local": 3, ... }`)
+  gives per-rule counts for dashboards.
+- `--list-rules --json` emits `{ "schema_version": 2, "rules": [ { id, severity,
+  default, description } ] }`.
+A v1 consumer still parses a v2 document (it just sees new codes/severities); the bump
+is the explicit signal that lint data may be present.
+
+## 9. Architecture + files
+
+- **`stdlib/cli/lua/hull/source/scope.lua`** — `hull.source.scope`, the binding pass
+  (§3). Pure Lua over the AST; no new C.
+- **`stdlib/cli/lua/hull/source/lint.lua`** — `hull.source.lint`: the `RULES` registry,
+  the engine (`lint.run(unit, scope, opts) -> findings`), and the rule `check`
+  functions. Pure Lua.
+- **`analyze.lua`** — extended: parse args (new flags), after a `complete` parse run
+  `scope.resolve` + `lint.run`, merge lint findings into the diagnostics list, apply the
+  `--strict` exit logic, add `--list-rules`.
+- **Tests**: `test_scope.lua` (resolution cases via the vanilla-`lua_State` harness, a
+  new `UTEST(lua_source, scope)` leg) + `test_lint.lua` (each rule: a positive fixture
+  that fires and a negative that must not) + `tests/e2e_analyze.sh` additions (a
+  `--strict` run flips exit 0→1; `--list-rules`; `unused-local`/`shadowed-local`/
+  `todo-comment` end to end; `--rules=`/`--disable=` selection; JSON `schema_version:2`
+  + `lua.lint.*` codes + `summary.warnings`). No new C.
+
+## 10. Slice plan
+
+1. **Engine + structural rules** — `lint.lua` registry/engine + `empty-block`,
+   `duplicate-table-key`, `todo-comment` (no scope), the CLI flags (`--strict`,
+   `--rules`/`--disable`/`--enable`/`--list-rules`), JSON `schema_version: 2`. Ships the
+   infrastructure with immediately-useful rules.
+2. **Scope pass** — `hull.source.scope` + `test_scope.lua` (the reusable Step B).
+3. **Scope rules** — `unused-local`, `unused-param`, `shadowed-local`, and
+   `undefined-global` (off by default) on top of the pass.
+
+Each slice is a design-first → ratify → implement → green → merge cycle, matching how
+the layer itself was built.
+
+## 11. Open decisions (for ratification)
+
+1. **Scope now vs later.** Include the scope pass + scope rules in v2 (slices 2–3), or
+   ship structural-only first (slice 1) and treat scope as v2.1? Recommendation:
+   **commit to all three slices** — `shadowed-local` / `unused-local` are the rules with
+   real value and were explicitly requested; slice 1 alone is thin.
+2. **Initial rule set** (the §5 table). Recommendation: as tabled, with
+   `undefined-global` **off by default** (needs the global allowlist).
+3. **`--strict` default.** Warnings advisory by default (exit 0), `--strict` to gate.
+   Recommendation: **advisory by default** (standard; non-breaking for CI that runs
+   `hull analyze` today expecting exit 0 on warning-free syntax).
+4. **Schema bump to 2.** Recommendation: **yes** — explicit signal, backward-compatible.
