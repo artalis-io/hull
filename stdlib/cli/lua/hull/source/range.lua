@@ -28,19 +28,23 @@ function M.slice(source, r)
 end
 
 -- Build the line-start index: byte offset (1-based) of the first byte of each
--- line. Line 1 starts at offset 1; every byte immediately after a '\n' starts a
--- new line. CRLF ends its line at the '\n' (the '\r' is the line's trailing byte);
--- a final line without a trailing newline has no extra entry. Lone '\r' (classic
--- Mac) is NOT treated as a line terminator.
+-- line. Line 1 starts at offset 1. A newline is '\n' OR '\r', and a '\r\n' / '\n\r'
+-- pair counts as ONE break -- matching Lua's own lexer (llex.c inclinenumber), so
+-- reported line numbers agree with real Lua on every line-ending style (LF, CRLF,
+-- lone CR, LFCR). A final line without a trailing newline has no extra entry.
 function M.linemap(source)
     local starts = { 1 }
-    local i = 1
     local n = #source
+    local i = 1
     while i <= n do
-        local nl = source:find("\n", i, true)
+        local nl = source:find("[\r\n]", i)
         if not nl then break end
-        starts[#starts + 1] = nl + 1
-        i = nl + 1
+        local c = source:sub(nl, nl)
+        local j = nl + 1
+        local d = source:sub(j, j)
+        if (c == "\r" and d == "\n") or (c == "\n" and d == "\r") then j = j + 1 end
+        starts[#starts + 1] = j
+        i = j
     end
     return starts
 end

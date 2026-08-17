@@ -74,6 +74,23 @@ do
     eq(toks(u3)[1].text, "local", "shebang: first token is local")
 end
 
+-- ── 2b. lone '\r' terminates a short comment (Lua llex currIsNewline) ─
+do
+    -- code after a lone CR is CODE, not comment (matches real Lua 5.4)
+    local u = assert(lua.parse("-- c\rx = 1"))
+    eq(#u.diagnostics, 0, "cr-comment: clean")
+    eq(u:text(find(u, "x")), "x", "cr-comment: 'x' after CR is a real token")
+    eq(select(1, u:position(find(u, "x").range.start)), 2, "cr-comment: 'x' on line 2")
+    -- a stray symbol after the CR is a syntax error (the comment did not swallow it)
+    local u2 = assert(lua.parse("-- c\r@"))
+    local ns = 0
+    for _, d in ipairs(u2.diagnostics) do if d.code == "lua.syntax" then ns = ns + 1 end end
+    ok(ns >= 1, "cr-comment: stray '@' after CR is a syntax error")
+    -- CRLF still ends the comment as ONE break (no phantom empty line)
+    local u3 = assert(lua.parse("-- c\r\ny = 2"))
+    eq(select(1, u3:position(find(u3, "y").range.start)), 2, "crlf-comment: 'y' on line 2")
+end
+
 -- ── 3. long-bracket strings/comments at multiple = levels ─────────────
 do
     local u = assert(lua.parse("local s = [==[ hi ]] there ]==]"))
