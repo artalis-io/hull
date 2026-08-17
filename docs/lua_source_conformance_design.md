@@ -1,6 +1,7 @@
-# Lua source-analysis conformance harness (design)
+# Lua source-analysis conformance harness
 
-Status: DESIGN (pre-implementation). Companion to
+Status: IMPLEMENTED (`tests/hull/source/test_lua_source.c` +
+`stdlib/cli/lua/hull/source/tests/test_conformance.lua`). Companion to
 [lua_source_analysis_design.md](lua_source_analysis_design.md). This is step **A**
 of the post-build-plan roadmap: validate `hull.source.lua` against real Lua 5.4 as
 ground truth, systematically, before any consumer (`hull analyze`, `hull.query`,
@@ -41,44 +42,68 @@ Hull targets — not "some Lua," the same one. Properties that make it ideal:
 
 `hull.source.lua` is a **syntactic recognizer**. Real Lua's `load()` is syntactic
 **plus a thin layer of static-semantic checks** that a pure parser deliberately does
-not perform. So the invariant is directional:
+not perform.
 
-- **If the parser rejects (≥1 `lua.syntax`), `load()` MUST reject.** A parser reject
-  on load-accepted input is a **false-reject bug** (fail). This is the direction we
-  most want to nail down, because real code lives here.
-- **If the parser accepts (0 syntax diagnostics), `load()` USUALLY accepts** — but
-  may reject for a **semantic** reason the parser intentionally ignores. Those are
-  *expected divergences*, not bugs. A load-reject with a genuinely *syntactic*
-  message on parser-accepted input is a **false-accept bug** (fail).
+**Hull's result is THREE-STATE, not two.** `hull_state(unit)` returns:
+- **`reject`** — ≥1 `lua.syntax` / `lua.unsupported` diagnostic.
+- **`clean`** — zero syntax diagnostics AND zero `lua.internal` / `lua.limit.*`.
+- **`indeterminate`** — any `lua.internal` or `lua.limit.*` marker.
+
+An internal/limit marker is **never** a clean parse and **never** enters semantic
+classification (the locked guardrail). In this *required* gate an `indeterminate`
+result **fails with a harness diagnostic** (raise the limits, or fix the never-raise
+/ internal bug) — it is not silently read as acceptance. So the directional invariant
+is over `reject` vs `clean` only:
+
+- **`reject` ⟹ `load()` MUST reject.** A `reject` on load-accepted input is a
+  **false-reject bug** (fail). This is the direction we most want to nail down.
+- **`clean` USUALLY means `load()` accepts** — but `load()` may reject for a
+  **semantic** reason the parser intentionally ignores. Those are *expected
+  divergences*. A `load()` reject with a genuinely *syntactic* message on a `clean`
+  parse is a **false-accept bug** (fail).
 
 ### 3.1 The semantic-exception set (expected `accept` / `load`-reject)
 
-These constructs are syntactically valid (parser accepts) but statically rejected by
-`load()`. They are pinned as EXPECTED divergences, matched by a stable substring of
-Lua 5.4's error message:
+These constructs are syntactically valid (parser is `clean`) but statically rejected
+by `load()`. They are pinned as EXPECTED divergences, each matched by a **precise**
+Lua 5.4 message fragment (`SEMANTIC_REJECTS`):
 
 | Construct | Example | Lua 5.4 message fragment |
 |---|---|---|
-| `break` outside a loop | `break` | `outside a loop` |
-| `goto` to an undefined / out-of-scope label | `goto x` | `no visible label`, `jumps into the scope` |
+| `break` outside a loop | `break` | `break outside loop` |
+| `goto` to an undefined label | `goto x` | `no visible label` |
+| `goto` into a local's scope | `goto s; local x=1; ::s:: return x` | `jumps into the scope` |
 | `...` outside a vararg function | `function f() return ... end` | `cannot use '...' outside a vararg` |
-| assign to a `<const>` / `<close>` | `local x <const> = 1; x = 2` | `attempt to assign to const` |
-| bad attribute name | `local x <bad> = 1` | `unknown attribute` |
-| compiler limits | deeply nested / huge | `too many `, `constant overflow`, `control structure too long` |
+| assign to a `<const>` / `<close>` | `local x <const> = 1; x = 2` | `attempt to assign to const variable` |
+| too many locals (compiler limit) | 260 `local`s | `too many local variables` |
 
-The classifier is a small, documented allowlist of fragments (`SEMANTIC_REJECTS`)
-anchored to the vendored Lua 5.4 error text. If `load()` rejects with a message
-matching one, the divergence is expected. Lua 5.4's static-check messages are stable
-within the version Hull vendors, and the set is closed (Lua adds these checks
-rarely).
+**Matching is honest SUBSTRING matching against the NORMALIZED message body** — the
+`chunkname:line: ` prefix is stripped first (`normalize`) so a fragment matches the
+semantic body, not an accidental chunkname/path — not full anchoring. Each fragment
+is a precise vendored-Lua string and is pinned by a direct test (§5).
+
+**Deliberately NOT in the allowlist:**
+- **unknown attribute** (`local x <bad> = 1`). Hull validates attribute names itself
+  (emits `lua.syntax` for anything but `const`/`close`), so an unknown attribute is a
+  Hull **`reject`** that must AGREE with `load()`'s reject. If Hull ever parsed one
+  `clean`, that is a **false-accept** and must fail — never be classified away. A
+  direct test pins this (Hull `reject` + not classified).
+- **broad `too many` / `constant overflow` / `control structure too long`.** The bare
+  `too many` fragment could mask unrelated failures; only the precise, directly-
+  testable `too many local variables` is kept. Upvalue/constant/control-structure
+  limits need pathological inputs a mutation of a small file cannot reach, so they are
+  omitted (a real occurrence would surface as a false-accept, correctly).
+
+The set is small, closed, and each entry has a direct test.
 
 **Guardrails (the classifier must not become a catch-all):**
 - It applies in **exactly one situation**: Hull parses **cleanly** (0 syntax /
   unsupported diagnostics) **and** `load()` rejects. It is consulted nowhere else.
-- It **never** excuses: (a) a Hull diagnostic on `load()`-**accepted** input (that is
-  a false-reject, always a failure); (b) a curated syntactic-negative mismatch (§5);
-  (c) a `lua.internal` or `lua.limit.*` diagnostic (those are excluded from the
-  accept/reject signal entirely — a limit/internal marker is never a "clean parse").
+- It **never** excuses: (a) a Hull `reject` on `load()`-**accepted** input (that is a
+  false-reject, always a failure); (b) a curated syntactic-negative mismatch (§5);
+  (c) an `indeterminate` result — a `lua.internal` or `lua.limit.*` marker is not a
+  `clean` parse, so the classifier is never even reached; an `indeterminate` in this
+  gate is its own failure.
 - Every allowed divergence is **reported by category and count** in the suite output,
   so an over-broad fragment surfaces as an anomalous tally instead of hiding.
 - **Direct classifier tests** accompany the allowlist: for each fragment, a snippet
@@ -88,10 +113,11 @@ rarely).
   each fragment recognizes only its semantic case and does not bleed onto adjacent
   syntax errors.
 
-Note the `<bad>` attribute case: the parser ALSO emits its own `lua.syntax`
-("unknown attribute…") there — so both reject and it is not even a divergence. It is
-listed only because a mutation could produce the attribute form without the parser's
-own guard firing; the classifier keeps that from reading as a false-accept.
+The `<bad>` attribute case is NOT a divergence: Hull emits its own `lua.syntax`
+("unknown attribute…"), so it is a Hull `reject` that agrees with `load()`'s reject.
+It is deliberately absent from the allowlist, and a direct test asserts Hull rejects
+it (and that `classify()` does not match it) — a `clean` parse of an unknown attribute
+would be a false-accept and must fail.
 
 ## 4. Input normalization (exactly one)
 
@@ -122,12 +148,14 @@ uniformly:
   fixture is surfaced, never silently passed.
 
 ### Part 2 — Range round-trip integrity
-For every accepted corpus file, walk the AST (`lua.walk`) and assert, for every node:
+For every `clean` + load-accepted corpus file, walk the AST and assert, for every node:
 - `1 <= range.start <= range.stop <= #src + 1` (in-bounds, non-inverted),
-- `unit:text(node)` is a byte-exact slice (`src:sub(start, stop-1)`), non-empty for
-  any node that spans a real construct,
-- each **AST child node**'s range is **nested within** its parent's `[start, stop)`
-  (structural sanity).
+- **exact slice**: `unit:text(node) == src:sub(range.start, range.stop - 1)` (the
+  round-trip actually holds, not just by construction),
+- **non-empty for real constructs**: `range.stop > range.start` for every node
+  EXCEPT the empty-source **chunk** root (an empty file's chunk is legitimately
+  `[1, 1)`); a zero-width node of any other kind is a bug,
+- each **AST child node**'s range is **nested within** its parent's `[start, stop)`.
 
 **Nesting covers AST child nodes ONLY.** Attached annotations
 (`node.annotation_list` / `node.annotations`) are *not* AST children and their ranges
@@ -137,21 +165,23 @@ children skips the `annotation_list` / `annotations` fields (and only kind-beari
 tables are children, which annotation records are not, so `lua.walk` never visits
 them anyway). Independent of accept/reject — catches range / `finish()` bugs directly.
 
-### Part 3 — Curated negatives + seeded mutation fuzz
-- **Curated syntactic negatives**: a table of *syntactically* invalid snippets
-  (`"1 +"`, `"function f("`, `"a.b."`, `"{,}"`, `"if then end"`, `"local = 1"`, `"::"`,
-  `"return return"`, …). Assert BOTH `load()` rejects AND the parser emits ≥1
-  `lua.syntax`. Anti-false-accept for known shapes.
-- **Pinned semantic divergences**: the §3.1 constructs, asserted as *parser accepts +
-  `load()` rejects with a semantic fragment* — so if either side's behavior shifts
-  we notice.
-- **Seeded mutation fuzz** (deterministic): with a FIXED `math.randomseed`, take each
-  accepted corpus file, apply N small mutations (delete / insert / duplicate one byte
-  or token), and for each mutant run both oracles and assert the directional
-  invariant from §3: never-raise; no false-reject; no false-accept (a parser-accept
-  with a *syntactic* load-reject). Budget is bounded (≈N=20 per seed file, capped
-  total) so it stays sub-second inside `make test`. Continuous/unbounded fuzzing is
-  the follow-up in §8.
+### Part 3 — Curated negatives + classifier tests + seeded mutation fuzz
+- **Curated syntactic negatives**: syntactically invalid snippets (`"1 +"`,
+  `"function f("`, `"a.b."`, `"{,}"`, `"::"`, `"return return"`, …). Assert `load()`
+  rejects AND Hull's verdict is `reject`.
+- **Pinned semantic divergences**: the §3.1 constructs, asserted as `load()` rejects +
+  Hull `clean` + `classify()` returns the expected category — so a behavior shift on
+  either side is noticed.
+- **Unknown-attribute guardrail**: `local x <bad> = 1` asserted as `load()` rejects +
+  Hull `reject` + `classify()` returns nil (it must NOT be classified away).
+- **Direct classifier tests** (§3.1 guardrail): each fragment's own good/bad pair.
+- **Seeded mutation fuzz** (deterministic): FIXED `math.randomseed`, N small byte
+  mutations (delete / duplicate / insert) per selected seed, each mutant run through
+  both oracles asserting the §3 directional invariant with the three-state verdict:
+  never-raise; `indeterminate` fails; no false-reject (`reject` + load-accept); no
+  false-accept (`clean` + a *non-semantic* load-reject). Bounded (N=20/seed, 4000
+  cap) so it stays sub-second in `make test`. Continuous/unbounded fuzzing is the §8
+  follow-up.
 
 ## 6. Corpus enumeration (C-side, hermetic, deterministic)
 
@@ -166,6 +196,18 @@ builds `HULL_LUA_CORPUS = { { path = <rel>, source = <bytes> }, … }`. Rational
 second filesystem pass, and — critically — the **oracle (`load()`) and the Hull
 parser receive the identical bytes** C read (a re-open could race or resolve
 differently). The script is pure compute over an injected table.
+
+**Fail-closed (a gate must not silently degrade):**
+- **Allocation failures propagate.** `sl_push` latches an `oom` flag on any
+  `realloc`/`strdup` failure and **never inserts a NULL** (which would crash the
+  sort); the runner aborts the whole leg (`return -1`) rather than test a truncated
+  corpus.
+- **`strdup` is validated** (a NULL result latches `oom`).
+- **Full reads required.** `read_all` returns NULL on open/seek/alloc failure OR a
+  short read (`fread` count ≠ file size); an enumerated file that fails to read
+  **aborts the leg** — it is not skipped.
+- **Counts reported.** The runner prints `enumerated N, read N`; because every
+  enumerated file must read fully, `read == enumerated` always holds at success.
 
 **Determinism (required for CI reproducibility):**
 - **Regular files only.** Include an entry iff `lstat` reports `S_ISREG` and the name
@@ -185,10 +227,12 @@ The corpus is Hull's own committed Lua — always in sync, never embedded / stal
 
 ## 7. Resource limits, determinism, CI
 
-- Run the corpus with **generous limits** (raise `max_bytes` / `max_tokens` /
-  `max_depth`) so `lua.limit.*` never trips on legitimate files; `lua.limit.*` and
-  `lua.internal` are **excluded** from the accept/reject signal in every part (they
-  are Hull-side bounds / internal-error markers, not syntax verdicts).
+- Run the corpus with **generous limits** (raised `max_bytes` / `max_tokens` /
+  `max_depth`) so `lua.limit.*` never trips on legitimate files. A `lua.limit.*` /
+  `lua.internal` marker yields the `indeterminate` verdict (§3), which **fails the
+  gate with a harness diagnostic** — it is never read as `clean`. A tripped limit on
+  a legit file means "raise the limit"; a `lua.internal` means "fix a never-raise
+  breach."
 - **Deterministic**: one fixed seed, index-derived mutation choices, bounded budget —
   a CI failure reproduces exactly.
 - Runs inside `make test` as a new UTEST leg (fast: low-thousands of parses,

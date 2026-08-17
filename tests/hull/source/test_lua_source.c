@@ -77,17 +77,22 @@ static int run_lua_test(const char *script_path, long long *pass_out, long long 
  * the oracle (load()) and the Hull parser see the identical bytes. Deterministic:
  * regular .lua files only, symlinks skipped (no traversal loops), paths sorted. */
 
-typedef struct { char **items; size_t count, cap; } StrList;
+/* Fail-closed: any allocation failure latches `oom`; the runner then aborts the
+ * whole conformance leg rather than testing a silently-truncated corpus. */
+typedef struct { char **items; size_t count, cap; int oom; } StrList;
 
 static void sl_push(StrList *l, const char *s)
 {
+    if (l->oom) return;
     if (l->count == l->cap) {
         size_t nc = l->cap ? l->cap * 2 : 64;
         char **ni = realloc(l->items, nc * sizeof(char *));
-        if (!ni) return;                 /* best-effort; a short corpus still tests */
+        if (!ni) { l->oom = 1; return; }
         l->items = ni; l->cap = nc;
     }
-    l->items[l->count++] = strdup(s);
+    char *dup = strdup(s);
+    if (!dup) { l->oom = 1; return; }    /* never insert NULL (would crash qsort) */
+    l->items[l->count++] = dup;
 }
 
 static void sl_free(StrList *l)
@@ -129,6 +134,8 @@ static void walk_lua(const char *root, StrList *out, int depth)
     closedir(d);
 }
 
+/* Read the whole file, or NULL on ANY failure (open, seek, alloc, OR a short read).
+ * A short read of a regular file is an error here, not a truncated-but-ok corpus. */
 static char *read_all(const char *path, size_t *out_len)
 {
     FILE *f = fopen(path, "rb");
@@ -141,6 +148,7 @@ static char *read_all(const char *path, size_t *out_len)
     if (!buf) { fclose(f); return NULL; }
     size_t rd = fread(buf, 1, (size_t)sz, f);
     fclose(f);
+    if (rd != (size_t)sz) { free(buf); return NULL; }    /* short read -> fail closed */
     buf[rd] = '\0';
     *out_len = rd;
     return buf;
@@ -167,24 +175,33 @@ static int run_lua_conformance(const char *script_path, long long *pass_out, lon
     static const char *const roots[] = {
         "stdlib/lua", "stdlib/cli/lua", "examples", "tests/fixtures",
     };
-    StrList files = { NULL, 0, 0 };
+    StrList files = { NULL, 0, 0, 0 };
     for (size_t i = 0; i < sizeof roots / sizeof roots[0]; i++)
         walk_lua(roots[i], &files, 0);
+    if (files.oom) {                       /* fail closed: never test a truncated corpus */
+        fprintf(stderr, "conformance: corpus enumeration ran out of memory\n");
+        sl_free(&files); lua_close(L); return -1;
+    }
     qsort(files.items, files.count, sizeof(char *), cmp_cstr);
 
     lua_createtable(L, (int)files.count, 0);
-    int n = 0;
+    size_t read_ok = 0;
     for (size_t i = 0; i < files.count; i++) {
         size_t len = 0;
         char *src = read_all(files.items[i], &len);
-        if (!src) continue;
+        if (!src) {                        /* an enumerated file MUST read fully */
+            fprintf(stderr, "conformance: failed to read corpus file '%s'\n", files.items[i]);
+            sl_free(&files); lua_close(L); return -1;
+        }
         lua_createtable(L, 0, 2);
         lua_pushstring(L, files.items[i]); lua_setfield(L, -2, "path");
         lua_pushlstring(L, src, len);      lua_setfield(L, -2, "source");
         free(src);
-        lua_rawseti(L, -2, ++n);
+        lua_rawseti(L, -2, (int)(++read_ok));
     }
     lua_setglobal(L, "HULL_LUA_CORPUS");
+    fprintf(stderr, "  conformance: enumerated %zu, read %zu .lua files\n",
+            files.count, read_ok);
     sl_free(&files);
 
     if (luaL_dofile(L, script_path) != LUA_OK) {
