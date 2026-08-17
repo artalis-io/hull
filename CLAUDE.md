@@ -2463,7 +2463,7 @@ differential tests + the benchmark:
 #include "hull_compute.h"
 #include "hull_span.h"
 HullSpan spans[HULL_SPAN_MAX];
-int n = hull_span_setup(spans, HULL_SPAN_MAX);      // ONE SPAN_INFO host_call (0x04), at start
+int n = hull_span_setup(spans, HULL_SPAN_MAX);      // SPAN_INFO setup only: one count query + one query per span
 int i = hull_span_find(spans, n, "source");
 const void *w = (const void *)(hull_span_uptr)spans[i].base;
 uint32_t v; hull_span_read_u32le(w, spans[i].len, off, &v);   // bounds-checked, inlineable
