@@ -14,9 +14,9 @@
 --     pure API misuse). No raw Lua error() ever crosses this boundary.
 --   * Never prints. Diagnostics are data.
 --
--- SLICE 1 (this file): lexer + ranges + line map. `unit.ast` is nil until the
--- statement slice lands; `unit.tokens`/`unit.comments`/`unit.diagnostics` and the
--- unit:text/position/line_col helpers are live now.
+-- Live surface: unit.tokens / unit.comments / unit.diagnostics, unit.ast (the
+-- chunk node), the unit:text/position/line_col helpers, M.walk / M.is, and the
+-- `---@` annotation layer (attached to declaration nodes; M.annotation reads it).
 --
 -- SPDX-License-Identifier: AGPL-3.0-or-later
 --
@@ -25,6 +25,7 @@ local lexer = require("hull.source.lexer")
 local parser = require("hull.source.parser")
 local range = require("hull.source.range")
 local diag = require("hull.source.diagnostic")
+local annotations = require("hull.source.annotations")
 
 local M = {}
 
@@ -57,6 +58,11 @@ function Unit:line_col(r)
     local sl, sc = self:position(r.start)
     local el, ec = self:position(r.stop)
     return sl, sc, el, ec
+end
+
+-- Ordered list of `---@` annotations attached to `node` (empty when none).
+function Unit:annotations_for(node)
+    return (type(node) == "table" and node.annotation_list) or {}
 end
 
 -- Limit keys validated at the boundary (each, if present, must be a non-negative
@@ -129,7 +135,25 @@ function M.parse(source, opts)
         _linestarts = range.linemap(source),
     }, Unit)
 
+    -- Attach `---@` annotation runs to declaration nodes (slice 4). Attachment is
+    -- part of the parse contract, so a failure is NOT silently swallowed: attach is
+    -- written not to raise, but if it ever does, an explicit lua.internal diagnostic
+    -- is appended so `#unit.diagnostics == 0` reflects the degraded state (a clean
+    -- unit with annotations silently missing would be the worst outcome for
+    -- query/codegen consumers). The valid AST is still returned.
+    local aok, aerr = pcall(annotations.attach, unit)
+    if not aok then
+        unit.diagnostics[#unit.diagnostics + 1] = diag.error("lua.internal",
+            "annotation attachment failed: " .. tostring(aerr), opts.path, nil)
+    end
+
     return unit, nil
+end
+
+-- The FIRST `---@<name>` annotation attached to `node` (see hull.source.annotations),
+-- or nil. Repeat tags (e.g. @param) keep every copy in node.annotation_list.
+function M.annotation(node, name)
+    return annotations.get(node, name)
 end
 
 -- ── AST traversal (§18) + kind test (§19) ─────────────────────────────

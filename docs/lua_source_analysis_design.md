@@ -164,17 +164,26 @@ tracked explicitly (no unbounded native Lua recursion).
   annotation`, in `unit.comments` (source order).
 - **Annotations are Hull's own scanner over comment text — no known-tag
   whitelist.** Any `---@name`, optional `(args)`, optional trailing text becomes
-  `{ name, args = <string?>, raw = <full comment>, range }`. Arbitrary
-  `---@query`, `---@compute`, `---@derive(json)`, `---@some_future_plugin(a,b)`
-  all survive generically. Known LuaDoc tags (`@param/@return/@field/@class`)
-  MAY additionally expose parsed fields, but the generic form is always present.
+  `{ name, args = <string?>, text = <string?>, raw = <full comment>, range }`.
+  Arbitrary `---@query`, `---@compute`, `---@derive(json)`,
+  `---@some_future_plugin(a,b)` all survive generically. Known LuaDoc tags
+  (`@param/@return/@field/@class`) MAY additionally expose parsed fields, but the
+  generic form is always present.
 - **Attachment rule (deterministic, documented):** a **contiguous run** of
-  comment lines (`--` line comments and `--[[ ]]` blocks) immediately preceding a
-  statement, with **no blank line** between the run and the statement, attaches to
-  that statement's node (`node.annotations` / `node.annotation_list`). A blank
-  line, code, or a different statement breaks the run. Trailing/inline comments do
-  not attach. `unit:annotations_for(node)` and `lua.annotation(node, name)` read
-  them. Comments that attach to nothing remain in `unit.comments` only.
+  comment lines (`--` line comments and `--[[ ]]` blocks — plain comments
+  participate in the run, contributing no annotation) immediately preceding a
+  **declaration**, with **no blank line** between the run and the declaration,
+  attaches to that declaration's node (`node.annotations` /
+  `node.annotation_list`). Attachment is **declaration-scoped** (the smaller, safer
+  surface): only `local_declaration` and `function_declaration` (both `local` and
+  global `function name() ... end`) carry annotations. A `---@` run above any other
+  statement (assignment, call, loop, conditional, return, break/goto/label)
+  attaches to the **nearest following declaration** instead, or to nothing. A blank
+  line, intervening code, or a different declaration breaks the run.
+  Trailing/inline comments do not attach. `unit:annotations_for(node)` and
+  `lua.annotation(node, name)` read them. Every `---@` comment is retagged
+  `kind = "annotation"` in `unit.comments` whether or not it attaches; comments
+  that attach to nothing remain in `unit.comments` only.
 
 ## 9. Diagnostics (§12/§13) + recovery
 
