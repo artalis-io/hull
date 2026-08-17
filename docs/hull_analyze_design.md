@@ -1,6 +1,9 @@
-# `hull analyze` (design)
+# `hull analyze`
 
-Status: DESIGN (pre-implementation). The FIRST production consumer of the
+Status: IMPLEMENTED (`src/hull/commands/analyze.{c,h}`,
+`stdlib/cli/lua/hull/source/analyze.lua`, `tests/e2e_analyze.sh`; the
+`tool.path_kind` + `tool.stdout` bindings in `src/hull/runtime/lua/mod_tool.c`). The
+FIRST production consumer of the
 `hull.source.lua` analysis layer (see
 [lua_source_analysis_design.md](lua_source_analysis_design.md) and
 [lua_source_conformance_design.md](lua_source_conformance_design.md)). Step **C** of
@@ -187,6 +190,11 @@ forward-compat contract for agent/editor consumers.
   `analyze` is complementary — pure static syntax over the whole tree, no load, no
   tests. They can compose later (`check` could run `analyze` first), but v1 keeps them
   independent.
+- **`hull modules analyze`** (the existing `hull.analyze` module) statically compares
+  an app's `require`/`import` sites against its `manifest.modules` (undeclared / unused
+  modules). That is DECLARATION analysis; `hull analyze` is SOURCE SYNTAX analysis.
+  Different questions, different modules — the names are deliberately kept distinct
+  (this command's module is `hull.source.analyze`).
 - **`hull agent`** exposes JSON introspection for AI agents. `hull analyze --json`
   fits that world directly; a thin `hull agent analyze` alias is a possible later
   convenience, but v1 ships the `--json` flag on the top-level command.
@@ -197,33 +205,42 @@ A tool-mode command (the analyzer is Lua consuming a Lua module — the natural 
 same as `hull build` / `hull init` / `hull deploy`):
 
 - **C**: `src/hull/commands/analyze.{c,h}` — `hl_cmd_analyze` is ~15 lines:
-  `return hull_tool("hull.analyze", argc, argv, env->hull_exe);`. One row in the
-  `dispatch.c` table; grouped under "Develop & test" in `help.c`. **No build-flag
-  gate** — analyze needs no HTTP/DB/WASM, so it is present in every flavor (including
-  pure-compute); it runs in the tool VM, which is always built.
-- **Lua**: `stdlib/cli/lua/hull/analyze.lua` — reads the standard `arg` global,
+  `return hull_tool("hull.source.analyze", argc, argv, env->hull_exe);`. One row in the
+  `dispatch.c` table; grouped under "Diagnostics" in `help.c` (next to `check`). **No
+  build-flag gate** — analyze needs no HTTP/DB/WASM, so it is present in every flavor
+  (including pure-compute); it runs in the tool VM, which is always built.
+- **Module name**: `hull.source.analyze` (the source-analysis CLI, living with the
+  layer), NOT `hull.analyze` — that name already backs `hull modules analyze`
+  (import-vs-manifest declaration analysis, a distinct check; see §7). No collision.
+- **Lua**: `stdlib/cli/lua/hull/source/analyze.lua` — reads the standard `arg` global,
   `require("hull.source.lua")`, and uses `tool.find_files` / `tool.read_file` /
   `tool.path_kind` / `tool.stderr` / `tool.exit` / `hull.json`. The source layer is
   already embedded in the platform VFS (under `stdlib/cli/lua/hull/source/`), so the
   tool VM `require`s it with no new wiring. (Verify at implementation:
   `require("hull.source.lua")` resolves in the tool VM.)
-- **One new tool binding**: `tool.path_kind(path)` → `"dir" | "file" | "other" | nil`
-  (via `stat`, missing → nil). Needed for the positional rule (§3, "resolves to a
-  directory") and explicit-target regular-file validation (§4). `file_exists` is
-  `access(F_OK)` and cannot distinguish a directory; no stat binding exists today.
-  ~12 lines in `src/hull/runtime/lua/mod_tool.c`. Discovery still uses `find_files`
-  (which `lstat`s and excludes symlinks); `path_kind` `stat`s (follows) because an
-  explicitly-named root/target may legitimately be a symlink.
+- **Two new tool bindings** (both small, in `src/hull/runtime/lua/mod_tool.c`):
+  - `tool.path_kind(path)` → `"dir" | "file" | "other" | nil` (via `stat`, missing →
+    nil). Needed for the positional rule (§3) and explicit-target regular-file checks
+    (§4); `file_exists` is `access(F_OK)` and cannot distinguish a directory.
+    Discovery still uses `find_files` (which `lstat`s and excludes symlinks);
+    `path_kind` `stat`s (follows) because an explicitly-named root/target may
+    legitimately be a symlink.
+  - `tool.stdout(str)` → write verbatim to **stdout** (and flush). Hull routes `print`
+    to **stderr** in every Lua VM (`hl_lua_print`), so a command whose primary output
+    is DATA needs an explicit stdout channel to satisfy JSON purity (§6). `analyze`'s
+    real output (human diagnostics + JSON) goes through `tool.stdout`; `print` /
+    `tool.stderr` carry only operational messages.
 
-Net new C surface: the ~15-line dispatcher + one table row + one help line + the
-~12-line `tool.path_kind` binding. Everything else is Lua over the shipped layer.
+Net new C surface: the ~15-line dispatcher + one table row + one help line + the two
+small `tool.*` bindings. Everything else is Lua over the shipped layer.
 
 ## 9. Testing
 
 The parser is already conformance-tested; `analyze` is discovery + validation +
 formatting + exit codes, best covered end to end via **`tests/e2e_analyze.sh`**
-(+ `make e2e-analyze`) over tiny fixtures (`tests/fixtures/analyze_clean/`,
-`tests/fixtures/analyze_broken/`). Required cases:
+(+ `make e2e-analyze`). Fixtures are built in a **TMPDIR** at runtime (self-contained,
+and deliberately NOT committed — an intentionally-broken `.lua` under `tests/fixtures/`
+would otherwise enter the conformance corpus). Required cases:
 
 - **Clean app** → exit 0, "no issues".
 - **Syntax error in a NON-entry module** (`routes/*.lua`) → exit 1; the error's

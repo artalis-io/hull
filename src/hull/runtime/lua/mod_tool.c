@@ -427,6 +427,34 @@ static int l_tool_file_exists(lua_State *L)
     return 1;
 }
 
+/* ── tool.path_kind(path) → "dir"|"file"|"other"|nil ───────────────────
+ * stat() (follows symlinks): an explicitly-named root/target may legitimately be a
+ * symlink; directory discovery uses find_files (which lstat's + skips symlinks). Used
+ * by hull analyze for positional resolution + explicit-target regular-file checks;
+ * file_exists is access(F_OK) only and cannot distinguish a directory. */
+static int l_tool_path_kind(lua_State *L)
+{
+    const char *path = luaL_checkstring(L, 1);
+    HlToolUnveilCtx *ctx = get_unveil_ctx(L);
+
+    if (ctx && hl_tool_unveil_check(ctx, path, 'r') != 0) {
+        lua_pushnil(L);
+        return 1;
+    }
+
+    struct stat st;
+    if (stat(path, &st) != 0) {
+        lua_pushnil(L);
+    } else if (S_ISDIR(st.st_mode)) {
+        lua_pushstring(L, "dir");
+    } else if (S_ISREG(st.st_mode)) {
+        lua_pushstring(L, "file");
+    } else {
+        lua_pushstring(L, "other");
+    }
+    return 1;
+}
+
 /* ── tool.file_mtime(path) → number|nil ────────────────────────────── */
 
 static int l_tool_file_mtime(lua_State *L)
@@ -455,6 +483,18 @@ static int l_tool_stderr(lua_State *L)
 {
     const char *msg = luaL_checkstring(L, 1);
     fprintf(stderr, "%s", msg);
+    return 0;
+}
+
+/* tool.stdout(str): write verbatim to STDOUT (and flush). `print` in every Hull Lua
+ * VM is routed to stderr (hl_lua_print), so a command whose primary output is DATA
+ * (e.g. hull analyze --json, which must keep stdout pure JSON) writes it here. */
+static int l_tool_stdout(lua_State *L)
+{
+    size_t len = 0;
+    const char *msg = luaL_checklstring(L, 1, &len);
+    fwrite(msg, 1, len, stdout);
+    fflush(stdout);
     return 0;
 }
 
@@ -1489,8 +1529,10 @@ static const luaL_Reg tool_funcs[] = {
     { "read_file",              l_tool_read_file },
     { "write_file",             l_tool_write_file },
     { "file_exists",            l_tool_file_exists },
+    { "path_kind",              l_tool_path_kind },
     { "file_mtime",             l_tool_file_mtime },
     { "stderr",                 l_tool_stderr },
+    { "stdout",                 l_tool_stdout },
     { "loadfile",               l_tool_loadfile },
     { "extract_manifest_js",    l_tool_extract_manifest_js },
     { "extract_platform",       l_tool_extract_platform },
