@@ -229,7 +229,10 @@ function M.tokenize(source, opts)
                     { kind = "long", range = { start = start, stop = stop }, text = sub(source, start, stop - 1) }
                 pos = stop
             else
-                local e = source:find("\n", pos, true)
+                -- Lua ends a short comment at '\n' OR '\r' (llex.c currIsNewline), not
+                -- just '\n' -- a lone '\r' terminates the comment and exposes the rest
+                -- of the line as code. Stop at whichever newline byte comes first.
+                local e = source:find("[\r\n]", pos)
                 local stop = e or (n + 1)                           -- line comment excludes the newline
                 comments[#comments + 1] =
                     { kind = "line", range = { start = start, stop = stop }, text = sub(source, start, stop - 1) }
