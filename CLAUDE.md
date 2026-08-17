@@ -2441,7 +2441,45 @@ WASM plugins query segments via `host_call(0x02, segment_id, sub)`:
 
 Segments are page-aligned mmap regions in the high end of WASM32 address space. Up to 16 segments per module, 3 GB total. Adding/removing segments drains the instance pool.
 
-**Plugin ABI:** Plugins must export `hull_process(in_ptr, in_len, out_ptr, out_max) -> bytes_written` and optionally `hull_version() -> int`. Single import: `env.host_call(opcode, ptr, len) -> int` (LOG=0x01, DATA_INFO=0x02, CALLBACK=0x10).
+**Mapped spans (per-invocation, zero-copy host-backed file windows).** Where `compute.segment` is module-scoped shared data, a **mapped span** attaches a host-`mmap`'d file window read-only to **ONE** `compute.call` and detaches on every exit path. It lets a WASM plugin scan/parse a very large file (OSM PBF, Parquet, raster, model blob) with **zero copy into linear memory** and kernel demand paging, reading it in place through ordinary bounds-checked loads with **no per-access host call**. Design: [docs/wasm_mapped_spans_design.md](docs/wasm_mapped_spans_design.md); WAMR patch: [docs/wamr_patches.md](docs/wamr_patches.md); worked example: `examples/mapped_spans/`.
+
+Host side (Lua; JS is the camelCase parallel):
+```lua
+local fs, compute = require("hull.fs"), require("hull.compute")
+-- fs.mmap(path) maps the whole file; {offset,length} maps a WINDOW (page
+-- alignment handled internally, non-page-aligned offsets OK).
+local w = fs.mmap("data.bin", { offset = 8195, length = 4096 })
+local out, err = compute.call("spanreader", input, {
+    spans = { { name = "source", buffer = w } },   -- attach RO for THIS call only
+})
+w:close()   -- refcounted borrow; safe to close while a borrower (image/gpu) lives
+```
+
+Guest side — the shipped SDK header `hull/wasm/span.h` (canonical
+`templates/hull_span.h`, byte-synced to every example/fixture copy via
+`tests/check_sdk_headers.sh`). The **same** source compiles natively for
+differential tests + the benchmark:
+```c
+#include "hull_compute.h"
+#include "hull_span.h"
+HullSpan spans[HULL_SPAN_MAX];
+int n = hull_span_setup(spans, HULL_SPAN_MAX);      // ONE SPAN_INFO host_call (0x04), at start
+int i = hull_span_find(spans, n, "source");
+const void *w = (const void *)(hull_span_uptr)spans[i].base;
+uint32_t v; hull_span_read_u32le(w, spans[i].len, off, &v);   // bounds-checked, inlineable
+```
+Typed accessors are read-only and cover `u8/i8`, `u16/u32/u64` + signed + `f32/f64`, each in LE and BE (`hull_span_read_*`); every read is overflow-safe (`hull_span__fits`) and returns `HULL_SPAN_ERR_RANGE` rather than reading OOB. **Store accessors / writable spans are a deliberately-deferred follow-up** — the initial cut is read-only.
+
+Guarantees (all tested; see `tests/hull/cap/test_wasm_spans.c`, `tests/hull/test_span_sdk.c`, the `fuzz_span_sdk`/`fuzz_span_window` harnesses, and `tests/hull/cap/test_fs.c::mmap_window_demand_paging`):
+- **No raw native pointer** reaches WASM: `spans[i].base` is a guest-domain address the WAMR guarded-subrange shared heap translates + bounds-checks; under AOT the read lowers to a cached-range check + a native load, no host trap per access.
+- **Strict per-instance isolation**: a module can only address spans explicitly passed to its own invocation; it cannot manufacture an address reaching Hull memory, another module's private/mapped memory, or unrelated mappings. Cross-instance isolation is CI-gated.
+- **Read-only at metadata AND OS page level**; a guest write to the mapped region traps recoverably (call fails), never crashes the host.
+- **wasm32 windowing**: a `HullSpan` carries a 64-bit logical `foffset`, so a parser moves a window (≤ 1 GiB per window, `HL_FS_MMAP_MAX_WINDOW_BYTES`) through a file far larger than the 4 GiB WASM space without copying. **Memory64** allows whole-file spans (validated: `memory64_span_readback`).
+- **Lifetime**: the `MappedBuffer` owns the mapping; a span borrows it. `buf:close()` while a borrower is alive defers the `munmap` (refcounted); a span never outlives its mapping (use-after-unmap is impossible). The detach-before-destroy ordering holds on all instance paths.
+
+**Performance (measured, honest).** The **proven** properties are zero-copy and no-per-access-host-call. Throughput is **workload- and codegen-dependent, NOT universally near-native** — faster than the checked native baseline for wide/multi-pass reads, slower for record parsing, vectorization-sensitive for byte scans; shared-runner timings are informational (cross-run variance too high to gate). See the four-workload × four-impl benchmark ([docs/mapped_span_benchmark_design.md](docs/mapped_span_benchmark_design.md), `make bench-mapped-span`) for the recorded numbers and the corrected claim.
+
+**Plugin ABI:** Plugins must export `hull_process(in_ptr, in_len, out_ptr, out_max) -> bytes_written` and optionally `hull_version() -> int`. Single import: `env.host_call(opcode, ptr, len) -> int` (LOG=0x01, DATA_INFO=0x02, SPAN_INFO=0x04, CALLBACK=0x10).
 
 **Build & AOT:** `hull build` embeds `compute/*.wasm` files and auto-compiles them to AOT if `wamrc` is available. AOT modules are embedded alongside `.wasm` files; at runtime, AOT is preferred over interpreter.
 
