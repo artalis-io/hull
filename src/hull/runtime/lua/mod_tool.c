@@ -203,14 +203,33 @@ static int l_tool_find_files(lua_State *L)
     const char *dir = luaL_checkstring(L, 1);
     const char *pattern = luaL_checkstring(L, 2);
     int include_vendor = 0;
+    char **extra = NULL;                  /* NULL-terminated, C-owned dir names to prune */
     if (lua_type(L, 3) == LUA_TTABLE) {
         lua_getfield(L, 3, "include_vendor");
         include_vendor = lua_toboolean(L, -1);
         lua_pop(L, 1);
+        lua_getfield(L, 3, "exclude_dirs");
+        if (lua_type(L, -1) == LUA_TTABLE) {
+            size_t n = lua_rawlen(L, -1);
+            extra = calloc(n + 1, sizeof(char *));
+            if (extra) {
+                size_t k = 0;
+                for (size_t i = 1; i <= n; i++) {
+                    lua_rawgeti(L, -1, (lua_Integer)i);
+                    const char *s = lua_tostring(L, -1);
+                    if (s) { char *dup = strdup(s); if (dup) extra[k++] = dup; }
+                    lua_pop(L, 1);
+                }
+                extra[k] = NULL;
+            }
+        }
+        lua_pop(L, 1);                    /* pop exclude_dirs (table or nil) */
     }
     HlToolUnveilCtx *ctx = get_unveil_ctx(L);
 
-    char **files = hl_tool_find_files_ex(dir, pattern, ctx, include_vendor);
+    char **files = hl_tool_find_files_ex(dir, pattern, ctx, include_vendor,
+                                         (const char *const *)extra);
+    if (extra) { for (char **e = extra; *e; e++) free(*e); free(extra); }
     if (!files) {
         lua_newtable(L);
         return 1;
@@ -452,6 +471,34 @@ static int l_tool_path_kind(lua_State *L)
     } else {
         lua_pushstring(L, "other");
     }
+    return 1;
+}
+
+/* tool.realpath(path) -> canonical_abs | (nil, "missing"|"denied"|"error").
+ * Resolves symlinks + . / .. to a canonical absolute path. Used by hull analyze to
+ * enforce containment on the REAL location of an explicit target (a symlink whose
+ * spelling is inside the root but which resolves outside must be rejected), and to
+ * distinguish a missing target (ENOENT) from an inaccessible one (EACCES). */
+static int l_tool_realpath(lua_State *L)
+{
+    const char *path = luaL_checkstring(L, 1);
+    HlToolUnveilCtx *ctx = get_unveil_ctx(L);
+
+    if (ctx && hl_tool_unveil_check(ctx, path, 'r') != 0) {
+        lua_pushnil(L);
+        lua_pushstring(L, "denied");
+        return 2;
+    }
+
+    char buf[PATH_MAX];
+    if (realpath(path, buf) == NULL) {
+        int e = errno;
+        lua_pushnil(L);
+        lua_pushstring(L, (e == ENOENT || e == ENOTDIR) ? "missing"
+                          : (e == EACCES ? "denied" : "error"));
+        return 2;
+    }
+    lua_pushstring(L, buf);
     return 1;
 }
 
@@ -1530,6 +1577,7 @@ static const luaL_Reg tool_funcs[] = {
     { "write_file",             l_tool_write_file },
     { "file_exists",            l_tool_file_exists },
     { "path_kind",              l_tool_path_kind },
+    { "realpath",               l_tool_realpath },
     { "file_mtime",             l_tool_file_mtime },
     { "stderr",                 l_tool_stderr },
     { "stdout",                 l_tool_stdout },

@@ -713,25 +713,31 @@ char *hl_tool_spawn_read(const char *const argv[], size_t *out_len)
  * vendor-skip default (which is correct for source walks but
  * wrong for `static/vendor/`, where apps legitimately put
  * vendored CSS/JS that must be embedded). */
-static int should_skip_dir(const char *name, int include_vendor)
+/* `extra`: an optional NULL-terminated list of directory names to prune DURING
+ * traversal (in addition to the built-in dot/vendor/node_modules skips), so a large
+ * excluded tree (e.g. build/) is never walked. */
+static int should_skip_dir(const char *name, int include_vendor,
+                           const char *const *extra)
 {
     if (name[0] == '.') return 1;
     if (strcmp(name, "node_modules") == 0) return 1;
     if (!include_vendor && strcmp(name, "vendor") == 0) return 1;
+    for (const char *const *e = extra; e && *e; e++)
+        if (strcmp(name, *e) == 0) return 1;
     return 0;
 }
 
 /* Recursive helper for find_files */
 static int find_files_recurse(const char *dir, const char *pattern,
                                char ***results, size_t *count, size_t *cap,
-                               int include_vendor)
+                               int include_vendor, const char *const *extra)
 {
     DIR *d = opendir(dir);
     if (!d) return 0; /* skip unreadable dirs */
 
     struct dirent *ent;
     while ((ent = readdir(d)) != NULL) {
-        if (should_skip_dir(ent->d_name, include_vendor)) continue;
+        if (should_skip_dir(ent->d_name, include_vendor, extra)) continue;
 
         /* Build full path */
         size_t dlen = strlen(dir);
@@ -747,7 +753,7 @@ static int find_files_recurse(const char *dir, const char *pattern,
 
         if (S_ISDIR(st.st_mode)) {
             find_files_recurse(path, pattern, results, count, cap,
-                               include_vendor);
+                               include_vendor, extra);
         } else if (S_ISREG(st.st_mode)) {
             if (fnmatch(pattern, ent->d_name, 0) == 0) {
                 /* Add to results */
@@ -778,7 +784,7 @@ static int str_compare(const void *a, const void *b)
 
 char **hl_tool_find_files_ex(const char *dir, const char *pattern,
                              const HlToolUnveilCtx *ctx,
-                             int include_vendor)
+                             int include_vendor, const char *const *extra)
 {
     if (!dir || !pattern) return NULL;
 
@@ -790,7 +796,7 @@ char **hl_tool_find_files_ex(const char *dir, const char *pattern,
     char **results = malloc(cap * sizeof(char *));
     if (!results) return NULL;
 
-    find_files_recurse(dir, pattern, &results, &count, &cap, include_vendor);
+    find_files_recurse(dir, pattern, &results, &count, &cap, include_vendor, extra);
 
     /* Sort alphabetically for deterministic ordering */
     if (count > 1)
@@ -811,7 +817,7 @@ char **hl_tool_find_files(const char *dir, const char *pattern,
      * source walks, where vendor/ is third-party noise). New
      * callers that need vendor included use hl_tool_find_files_ex
      * with include_vendor=1. */
-    return hl_tool_find_files_ex(dir, pattern, ctx, 0);
+    return hl_tool_find_files_ex(dir, pattern, ctx, 0, NULL);
 }
 
 /* ── File copy ─────────────────────────────────────────────────────── */

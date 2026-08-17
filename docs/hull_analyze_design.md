@@ -53,9 +53,12 @@ app root is `.` and ALL positionals are explicit files relative to `.`. So:
 
 **Flags.**
 - `--json` → machine output (one JSON object on stdout, §6).
-- `--quiet` → human-mode only: suppress the per-file "ok" chatter, print diagnostics +
-  summary. In `--json` mode `--quiet` is a **no-op** (JSON overrides it; stdout stays
-  pure JSON) — documented, not an error.
+- `--quiet` → human-mode only: suppress the summary chatter, print diagnostics. In
+  `--json` mode `--quiet` is a **no-op** (JSON overrides it; stdout stays pure JSON) —
+  documented, not an error.
+- `--max-depth=N` → cap parse nesting (default 2000); a deeper file is reported
+  `incomplete`. A knob for the rare huge/generated file and for controlled testing of
+  the incomplete state (the first of the §10 `--max-*` knobs).
 
 **Exit codes.**
 - `0` — analysis ran to completion on every input and found **zero** diagnostics.
@@ -69,13 +72,15 @@ app root is `.` and ALL positionals are explicit files relative to `.`. So:
 
 ## Discovery (walk mode) — deterministic + bounded
 
-`tool.find_files(root, "*.lua")` already returns **sorted**, **regular-file-only**,
-**no-symlink-traversal** results (it `lstat`s each entry and never descends a
-symlinked dir) and skips dotdirs (`.git`, `.hull`), `node_modules`, and `vendor`.
-`analyze` adds a Lua post-filter dropping any path with a segment in the explicit
-exclusion set `{.git, .hull, build, vendor, node_modules}` — the `build` segment
-covers both top-level `build/` and `site/build/`. The result is a sorted, de-duplicated
-list of regular `.lua` files under the root. If the root itself is not a readable
+`tool.find_files(root, "*.lua", { exclude_dirs = {...} })` returns **sorted**,
+**regular-file-only**, **no-symlink-traversal** results (it `lstat`s each entry and
+never descends a symlinked dir), skips dotdirs (`.git`, `.hull`), `node_modules`, and
+`vendor` — and, via the new `exclude_dirs` option, **prunes the excluded set DURING
+traversal** so a large `build/` (or `vendor/`, `node_modules/`) tree is never walked
+(post-filtering alone would still traverse it). `analyze` passes
+`{.git, .hull, build, vendor, node_modules}` (the `build` segment covers both
+top-level `build/` and `site/build/`), plus a cheap post-filter belt. The result is a
+sorted, de-duplicated list of regular `.lua` files. If the root is not a readable
 directory, that is a discovery failure (exit 2), not an empty scan.
 
 ## 4. What it does (pipeline)
@@ -90,13 +95,25 @@ directory, that is a discovery failure (exit 2), not an empty scan.
    diagnostic reports `line/col = null`.
 4. **Aggregate + report** (human or JSON), set the exit code.
 
-**Explicit-target validation (no silent skips).** For each explicit file, `analyze`
-resolves it under the app root and emits a per-target error diagnostic (not a skip)
-for any of: **outside the root** (`analyze.outside_root`), **missing**
-(`analyze.not_found`), **not a regular file** (`analyze.not_regular`, e.g. a directory
-or device via `tool.path_kind`), **unreadable** (`analyze.unreadable`), or **not
-`.lua`** (`analyze.not_lua`). Each marks that target's analysis state `internal` and
-drives exit 1. Duplicated paths (after normalization) are analyzed once.
+**Explicit-target validation (no silent skips, CANONICAL containment).** Containment
+is checked on the **canonical** path (`tool.realpath`, symlinks resolved), NOT the
+lexical spelling — a symlink whose spelling is inside the root but which resolves
+OUTSIDE must be rejected (a lexical check would let it through while `path_kind`
+follows the link). The root and each target are canonicalized for the containment
+comparison; the user-facing **logical** path is preserved for diagnostics; dedup is by
+canonical path (two spellings of one file → analyzed once). Symlinked app roots/files
+are thus intentionally supported (they canonicalize to their target). The containment
+prefix handles the `/` root correctly (prefix `/`, not `//`). For each target,
+`analyze` emits a per-target error diagnostic (never a skip), in order:
+- `tool.realpath` fails → **missing** (`analyze.not_found`, `errno` ENOENT/ENOTDIR) vs
+  **inaccessible** (`analyze.unreadable`, EACCES) — distinguished honestly, not
+  collapsed;
+- canonical target not under the canonical root → `analyze.outside_root`;
+- not a regular file (`tool.path_kind` on the resolved path is `dir`/`other`) →
+  `analyze.not_regular`;
+- logical name not `.lua` → `analyze.not_lua`;
+- read fails despite being a regular file → `analyze.unreadable`.
+Each marks that target's analysis state `internal` and drives exit 1.
 
 `lua.parse` never raises and returns diagnostics as data, so `analyze` is pure glue +
 formatting over the already-conformance-tested layer.
@@ -218,21 +235,24 @@ same as `hull build` / `hull init` / `hull deploy`):
   already embedded in the platform VFS (under `stdlib/cli/lua/hull/source/`), so the
   tool VM `require`s it with no new wiring. (Verify at implementation:
   `require("hull.source.lua")` resolves in the tool VM.)
-- **Two new tool bindings** (both small, in `src/hull/runtime/lua/mod_tool.c`):
-  - `tool.path_kind(path)` → `"dir" | "file" | "other" | nil` (via `stat`, missing →
-    nil). Needed for the positional rule (§3) and explicit-target regular-file checks
-    (§4); `file_exists` is `access(F_OK)` and cannot distinguish a directory.
-    Discovery still uses `find_files` (which `lstat`s and excludes symlinks);
-    `path_kind` `stat`s (follows) because an explicitly-named root/target may
-    legitimately be a symlink.
+- **Three small tool bindings** (in `src/hull/runtime/lua/mod_tool.c`) + a
+  `find_files` option:
+  - `tool.path_kind(path)` → `"dir" | "file" | "other" | nil` (via `stat`). For the
+    positional rule (§3) and the regular-file check on a resolved target (§4).
+  - `tool.realpath(path)` → canonical absolute path, or `(nil, "missing"|"denied"|
+    "error")` from `errno`. The canonicalization + missing-vs-inaccessible oracle for
+    explicit-target containment (§4).
   - `tool.stdout(str)` → write verbatim to **stdout** (and flush). Hull routes `print`
-    to **stderr** in every Lua VM (`hl_lua_print`), so a command whose primary output
-    is DATA needs an explicit stdout channel to satisfy JSON purity (§6). `analyze`'s
-    real output (human diagnostics + JSON) goes through `tool.stdout`; `print` /
-    `tool.stderr` carry only operational messages.
+    to **stderr** in every Lua VM (`hl_lua_print`), so DATA output needs an explicit
+    stdout channel for JSON purity (§6).
+  - `tool.find_files(dir, pattern, { exclude_dirs = {...} })` — the `exclude_dirs`
+    option prunes those directory names during traversal (`cap/tool.c`
+    `should_skip_dir`/`find_files_recurse` thread a NULL-terminated list), so discovery
+    is bounded by the exclusion policy, not merely post-filtered.
 
-Net new C surface: the ~15-line dispatcher + one table row + one help line + the two
-small `tool.*` bindings. Everything else is Lua over the shipped layer.
+Net new C surface: the ~15-line dispatcher + one table row + one help line + the three
+small `tool.*` bindings + the `find_files` `exclude_dirs` thread. Everything else is
+Lua over the shipped layer.
 
 ## 9. Testing
 
@@ -242,27 +262,33 @@ formatting + exit codes, best covered end to end via **`tests/e2e_analyze.sh`**
 and deliberately NOT committed — an intentionally-broken `.lua` under `tests/fixtures/`
 would otherwise enter the conformance corpus). Required cases:
 
+15 cases, all passing:
 - **Clean app** → exit 0, "no issues".
 - **Syntax error in a NON-entry module** (`routes/*.lua`) → exit 1; the error's
   path/line/col/code present in BOTH human and `--json` output (proves whole-tree
   discovery, not just the entry).
-- **Deterministic ordering** → the diagnostics/files order is identical across two
-  runs and matches the documented sort.
-- **Explicit files**: a valid file (analyzed), a **missing** file, an **unreadable**
-  file, a **non-Lua** file, and a path **outside the root** → each yields its
-  `analyze.*` diagnostic (never a silent skip) and exit 1.
-- **Exclusions**: a `.lua` planted under `build/` (and `site/build/`, `vendor/`,
-  `.git/`) is NOT scanned; one outside the excluded dirs IS.
-- **JSON purity + schema**: `--json` stdout parses as one object, matches
-  `schema_version: 1` with all required keys, and carries NO non-JSON bytes; a usage
-  error (exit 2) writes to stderr with EMPTY stdout.
-- **Quiet**: `--quiet` suppresses human "ok" chatter but still prints diagnostics; with
-  `--json` it is a no-op (stdout stays pure JSON).
-- **All three exit codes** exercised (0 clean, 1 diagnostics/targets, 2 usage/discovery
-  failure such as a non-existent app root).
+- **Deterministic ordering** → two `--json` runs are byte-identical.
+- **JSON purity + schema** → `--json` stdout is one object, `schema_version: 1` with
+  all required keys, no non-JSON bytes.
+- **Explicit target errors** → **missing** (`not_found`), **non-Lua** (`not_lua`),
+  **non-regular** (a directory → `not_regular`), and **unreadable** (chmod 000, EXISTS)
+  vs **missing** as DISTINCT codes (skipped as root, where perms are bypassed).
+- **Duplicate explicit targets** → analyzed once.
+- **Symlink inside the app pointing OUTSIDE** → rejected by canonical containment
+  (exit 1, an `analyze.*` error, the outside file's content NOT followed).
+- **Symlinked app ROOT** → supported (resolved, analyzed).
+- **Exclusions pruned during traversal** → broken `.lua` under `build/`, `site/build/`,
+  `vendor/`, `.git/`, `.hull/`, `node_modules/` is NOT scanned (exit 0).
+- **`--quiet`** → clean silent; broken shows diagnostics without the summary.
+- **`--json --quiet`** → JSON overrides quiet, stdout stays pure JSON.
+- **Incomplete state** → a `--max-depth=5` limit trip yields JSON `state: "incomplete"`
+  + `lua.limit.max_depth` + exit 1 (the same non-`complete` path an `internal` state
+  takes).
+- **Exit code 2** → unknown flag, empty stdout, stderr message.
 
-The pure aggregation/format/sort helpers may additionally be factored into functions
-unit-tested via the vanilla-`lua_State` harness style if the e2e proves too coarse.
+Fixtures are TMPDIR-built (self-contained; keeps broken `.lua` out of the conformance
+corpus). The pure aggregation/format/sort helpers may additionally be unit-tested via
+the vanilla-`lua_State` harness if the e2e proves too coarse.
 
 ## 10. Extension path (documented, NOT v1)
 
