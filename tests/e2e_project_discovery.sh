@@ -297,6 +297,13 @@ assert_py "truncated later in the document -> standalone (envelope invalid)" "$O
 printf '{"schema_version":1,"source":"dev","generation":7,"session_pid":%s,"declarations":[]}\n' "$$" > "$MAL/.hull/discovery.json"
 OUTM6=$("$HULL" agent inspect "$MAL" 2>/dev/null)
 assert_py "complete valid doc + live matching PID IS served (source=dev)" "$OUTM6" 'd["source"]=="dev" and d["generation"]==7'
+# (f) valid JSON with a matching PID, then an embedded NUL + trailing garbage: the COMPLETE
+#     on-disk document is invalid -> standalone (must parse/emit the exact byte length, not
+#     stop at the NUL via strlen/fputs)
+{ printf '{"schema_version":1,"source":"dev","generation":8,"session_pid":%s,"declarations":[]}' "$$"; printf '\000trailing-garbage'; } > "$MAL/.hull/discovery.json"
+OUTM7=$("$HULL" agent inspect "$MAL" 2>/dev/null)
+assert_py "embedded NUL + trailing garbage -> standalone (byte-length validation)" "$OUTM7" \
+    'd["source"]=="standalone"'
 
 echo ""
 echo "=== hull agent inspect E2E: $PASS passed, $FAIL failed ==="

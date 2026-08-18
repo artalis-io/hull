@@ -493,8 +493,10 @@ attribution, no em-dashes.
     Lua-side validation. Sidecar reads demand a complete read (short read /
     `ferror` → reject) and a positive in-range integer `session_pid` token, AND
     the discovery document must parse as COMPLETE valid JSON via the repo's parser
-    (`sh_json_parse`) before it is streamed -- so a truncated/corrupt sidecar whose
-    `session_pid` token alone matches a live PID is NOT emitted. Any
+    (`sh_json_parse`) before it is streamed -- validated + emitted over the EXACT
+    byte length (not `strlen`/`fputs`), so an embedded NUL cannot hide trailing
+    bytes and a truncated/corrupt sidecar whose `session_pid` token alone matches a
+    live PID is NOT emitted. Any
     malformed/truncated/stale/crashed-session sidecar falls back to a standalone
     analysis. Liveness (`kill`) stays in the main process, not the tool sandbox.
     Scope: the non-TUI `--agent` loop; publishing from `hull dev --tui` is a

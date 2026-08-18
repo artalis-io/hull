@@ -770,8 +770,9 @@ static long json_int_field(const char *buf, const char *key)
 
 /* Read a whole file into a NUL-terminated malloc'd buffer (cap-bounded), or NULL. Requires
  * a COMPLETE read (short read / read error -> NULL) so a truncated sidecar is rejected
- * rather than parsed. */
-static char *read_whole_file(const char *path, size_t cap)
+ * rather than parsed. On success `*out_len` (if non-NULL) is the exact byte length -- pass
+ * it (not strlen) to the parser + emitter so an embedded NUL cannot hide trailing bytes. */
+static char *read_whole_file(const char *path, size_t cap, size_t *out_len)
 {
     FILE *f = fopen(path, "rb");
     if (!f) return NULL;
@@ -786,6 +787,7 @@ static char *read_whole_file(const char *path, size_t cap)
     fclose(f);
     if (bad) { free(buf); return NULL; }
     buf[got] = '\0';
+    if (out_len) *out_len = got;
     return buf;
 }
 
@@ -817,24 +819,26 @@ static int agent_inspect_stream_live(const char *app_dir)
     if (a < 0 || (size_t)a >= sizeof(disc_path) || b < 0 || (size_t)b >= sizeof(dev_path))
         return -1;
 
-    char *dev = read_whole_file(dev_path, 64 * 1024);
+    char *dev = read_whole_file(dev_path, 64 * 1024, NULL);
     if (!dev) return -1;
     long sp_dev = json_int_field(dev, "session_pid");
     free(dev);
     if (sp_dev <= 0) return -1;
 
-    char *disc = read_whole_file(disc_path, 64 * 1024 * 1024);   /* 64 MB cap */
+    size_t disc_len = 0;
+    char *disc = read_whole_file(disc_path, 64 * 1024 * 1024, &disc_len);   /* 64 MB cap */
     if (!disc) return -1;
     long sp_disc = json_int_field(disc, "session_pid");
 
     /* Bind the published generation to a specific live dev session. */
     if (sp_disc != sp_dev || kill((pid_t)sp_disc, 0) != 0) { free(disc); return -1; }
 
-    /* Only emit a COMPLETE, well-formed document: a truncated/corrupt discovery.json (even
-     * with a matching live session_pid token) falls back to standalone. */
-    if (!json_document_valid(disc, strlen(disc))) { free(disc); return -1; }
+    /* Only emit a COMPLETE, well-formed document. Validate + emit over the EXACT byte
+     * length (not strlen): an embedded NUL must not hide trailing bytes, so `{valid}\0junk`
+     * -- whose complete on-disk document is invalid -- falls back to standalone. */
+    if (!json_document_valid(disc, disc_len)) { free(disc); return -1; }
 
-    fputs(disc, stdout);
+    fwrite(disc, 1, disc_len, stdout);
     free(disc);
     return 0;
 }
