@@ -14,6 +14,8 @@
 -- SPDX-License-Identifier: AGPL-3.0-or-later
 --
 
+local diag = require("hull.source.diagnostic")
+
 local M = {}
 
 -- The core traversal, in a fresh local state per call (reentrant). Returns the scope
@@ -56,19 +58,25 @@ local function do_resolve(unit)
     end
 
     -- Resolve a `name` node: nearest enclosing binding wins (local if in the current
-    -- function, else upvalue); no binding -> global. Counts a read or a write.
+    -- function, else upvalue); no binding -> global. Records the access MODE too, so a
+    -- consumer can tell a global read (undefined-global) from a global write.
     local function resolve_ref(node, is_write)
+        local access = is_write and "write" or "read"
         local name = node.name
         for i = #scopes, 1, -1 do
             local decl = scopes[i].vars[name]
             if decl then
                 if is_write then decl.writes = decl.writes + 1
                 else decl.reads = decl.reads + 1 end
-                ref_of[node] = { decl = decl, kind = (decl.func_id == cur_func()) and "local" or "upvalue" }
+                ref_of[node] = {
+                    decl = decl,
+                    kind = (decl.func_id == cur_func()) and "local" or "upvalue",
+                    access = access,
+                }
                 return
             end
         end
-        ref_of[node] = { kind = "global" }
+        ref_of[node] = { kind = "global", access = access }
     end
 
     local visit_expr, visit_stat, visit_block, visit_function
@@ -191,11 +199,17 @@ local function do_resolve(unit)
 end
 
 -- Public boundary: (scope, err). err ~= nil (and scope == nil) ONLY on an internal
--- resolver failure -- a recovered/error-bearing AST degrades locally, not here.
+-- resolver failure -- a recovered/error-bearing AST degrades locally, not here. The
+-- error is a proper diagnostic (severity/code/path/range) via hull.source.diagnostic,
+-- so the analyzer surfaces it on the shared contract before skipping scope rules.
 function M.resolve(unit)
     local ok, result = pcall(do_resolve, unit)
     if not ok then
-        return nil, { code = "lua.internal", message = "scope resolver failed: " .. tostring(result) }
+        local path = (type(unit) == "table") and unit.path or nil
+        local range = ((type(unit) == "table") and type(unit.ast) == "table" and unit.ast.range)
+            or { start = 1, stop = 1 }
+        return nil, diag.error("lua.internal",
+            "scope resolver failed: " .. tostring(result), path, range)
     end
     return result, nil
 end

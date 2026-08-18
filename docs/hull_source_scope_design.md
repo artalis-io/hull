@@ -80,7 +80,9 @@ scope = {
 --   reads = <int>, writes = <int>,
 --   shadows = <decl|nil>,-- the binding it hides (§5), if any
 -- }
--- resolution = { decl = <decl>, kind = "local"|"upvalue" } | { kind = "global" }
+-- resolution = { decl = <decl>?, kind = "local"|"upvalue"|"global",
+--                access = "read"|"write" }   -- access is on EVERY resolution, so a
+--                consumer can tell a global READ (undefined-global) from a global write
 ```
 `ref_of` is keyed by the `name` node table identity, so a consumer walking the AST can
 ask "what does this name resolve to?". `bindings` drives the `unused-*` rules;

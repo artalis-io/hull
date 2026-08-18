@@ -137,15 +137,40 @@ do
     ok(xb.writes >= 1, "x has a write (the assignment)")
 end
 
--- ── robustness: never-raises on a recovered AST; internal failure -> err ─
+-- ── ref_of access mode: read vs write (undefined-global is over READS) ─
+do
+    -- ordinary assignment to a global -> write; a plain reference -> read
+    local u, sc = analyze("y = 1")
+    eq(first_ref(u, sc, "y").kind, "global", "y = 1: y is global")
+    eq(first_ref(u, sc, "y").access, "write", "y = 1: global WRITE")
+
+    local u2, sc2 = analyze("return z")
+    eq(first_ref(u2, sc2, "z").access, "read", "return z: global read")
+
+    -- a simple function declaration is a write to the resolved binding
+    local u3, sc3 = analyze("function g() end")
+    eq(first_ref(u3, sc3, "g").access, "write", "function g(): a WRITE (not a read)")
+
+    -- local read vs local write
+    local u4, sc4 = analyze("local a = 1\nreturn a")
+    eq(first_ref(u4, sc4, "a").access, "read", "return a: local read")
+    local u5, sc5 = analyze("local x = 1\nx = 2")
+    eq(first_ref(u5, sc5, "x").access, "write", "x = 2: local write")
+end
+
+-- ── robustness: never-raises on a recovered AST; internal failure -> diagnostic ─
 do
     local u = lua.parse("local x = (", { path = "t.lua" })     -- broken: recovered AST
     local sc, err = scope.resolve(u)
     ok(sc ~= nil and err == nil, "resolve degrades locally on a recovered AST (no raise)")
 
-    local bad, berr = scope.resolve({ ast = { body = 42 } })   -- forces ipairs(42) to raise
-    ok(bad == nil and type(berr) == "table" and berr.code == "lua.internal",
-        "internal resolver failure -> (nil, lua.internal), never a silent partial")
+    -- forces ipairs(42) to raise; err must be a PROPER diagnostic (severity/code/path/range)
+    local bad, berr = scope.resolve({ ast = { body = 42, range = { start = 1, stop = 2 } }, path = "x.lua" })
+    ok(bad == nil and type(berr) == "table", "internal failure -> (nil, err)")
+    eq(berr and berr.code, "lua.internal", "internal error code")
+    eq(berr and berr.severity, "error", "internal error is diagnostic-shaped (severity)")
+    eq(berr and berr.path, "x.lua", "internal error carries unit.path")
+    ok(berr and type(berr.range) == "table" and berr.range.start ~= nil, "internal error carries a range")
 end
 
 print(string.format("test_scope: %d passed, %d failed", pass, fail))
