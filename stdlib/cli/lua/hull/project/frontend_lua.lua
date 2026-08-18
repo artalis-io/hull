@@ -184,8 +184,17 @@ function M.declaration_semantics(d)
         if n.kind ~= "local_declaration" then
             return nil, sem_err("node/kind mismatch: expected local_declaration, got '" .. tostring(n.kind) .. "'")
         end
-        if math.type(d._name_index) ~= "integer" or d._name_index < 1 then
-            return nil, sem_err("missing or invalid name index")
+        if type(n.names) ~= "table" then
+            return nil, sem_err("malformed local declaration (names not a list)")
+        end
+        if math.type(d._name_index) ~= "integer" or d._name_index < 1 or d._name_index > #n.names then
+            return nil, sem_err("name index does not identify a declared name")
+        end
+        -- The retained index must point at THIS declaration's recorded name (guards against a
+        -- desynced node/index pair producing plausible-but-wrong semantics).
+        local nm = n.names[d._name_index]
+        if type(nm) ~= "table" or nm.name ~= d._name then
+            return nil, sem_err("name index does not match the recorded declaration name")
         end
         if type(n.values) ~= "table" then
             return nil, sem_err("malformed local declaration (values not a list)")

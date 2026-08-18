@@ -258,11 +258,13 @@ One accessor extends the contract (KISS: one semantic-resolution path):
 `declaration_semantics(d) -> (sem, err)`. Reached ONLY via `resolve_handle(disc, h) ->
 {frontend, unit, declaration}`; `sem` is a small **frontend-specific** record over the
 retained node (opaque to the neutral model — a Lua-specific lowering step inspects it):
-- a `local` → `{ form="value", name_index, value }`, where `value` is the initializer
-  **expression** for THIS name by position (nil when there is no initializer at that
-  index — a **legitimate** nil, `err` also nil). The node carries the parser's **exact**
-  `.kind` (call / method_call / literal / name / field / …) and byte `.range` — no ranges
-  are synthesized, so a lowerer can diagnose against the original source.
+- a `local` → `{ form="value", name_index, values, positional_value }`. `values` is the
+  **complete** right-hand-side expression list; `name_index` is this name's position.
+  `positional_value = values[name_index]` is a **convenience** for the common 1:1 case and
+  is legitimately nil for a name past the RHS length (see the multi-return note below). RHS
+  expression nodes carry the parser's **exact** `.kind` (call / method_call / literal /
+  name / field / …) and byte `.range` — no ranges are synthesized, so a lowerer can diagnose
+  against the original source.
 - a `local_function` / `function` → `{ form="function", is_method, is_vararg, params,
   body }` (the parser's exact param/statement subtrees).
 

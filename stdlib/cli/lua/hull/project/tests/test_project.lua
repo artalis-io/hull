@@ -509,15 +509,23 @@ do
         ok(bad == nil and berr and berr.severity == "error" and berr.code == "lua.internal",
             "corrupt decl -> structured lua.internal diagnostic: " .. why)
     end
+    -- a well-formed 1-name local_declaration node the tests perturb one field at a time
+    local function lnode(names, values) return { kind = "local_declaration", names = names, values = values } end
     corrupt({ _kind = "local" }, "missing _node")
-    corrupt({ _kind = "local", _node = { kind = "local_declaration", values = {} } }, "missing name index")
-    corrupt({ _kind = "local", _node = { kind = "local_declaration", values = {} }, _name_index = "x" },
-        "non-integer name index")
-    corrupt({ _kind = "local", _node = { kind = "local_declaration", values = {} }, _name_index = 0 },
-        "name index < 1")
-    corrupt({ _kind = "local", _node = { kind = "function_declaration" }, _name_index = 1 },
+    corrupt({ _kind = "local", _name = "q", _node = { kind = "function_declaration" }, _name_index = 1 },
         "local decl but node kind is function_declaration (mismatch)")
-    corrupt({ _kind = "local", _node = { kind = "local_declaration", values = "oops" }, _name_index = 1 },
+    corrupt({ _kind = "local", _name = "q", _node = { kind = "local_declaration", values = {} }, _name_index = 1 },
+        "names not a list")
+    corrupt({ _kind = "local", _name = "q", _node = lnode({ { name = "q" } }, {}) }, "missing name index")
+    corrupt({ _kind = "local", _name = "q", _node = lnode({ { name = "q" } }, {}), _name_index = "x" },
+        "non-integer name index")
+    corrupt({ _kind = "local", _name = "q", _node = lnode({ { name = "q" } }, {}), _name_index = 0 },
+        "name index < 1")
+    corrupt({ _kind = "local", _name = "q", _node = lnode({ { name = "q" } }, {}), _name_index = 999 },
+        "name index OUT OF RANGE (past #names)")
+    corrupt({ _kind = "local", _name = "q", _node = lnode({ { name = "other" } }, {}), _name_index = 1 },
+        "name index identifies a DIFFERENT name than recorded")
+    corrupt({ _kind = "local", _name = "v", _node = lnode({ { name = "v" } }, "oops"), _name_index = 1 },
         "malformed values (not a list)")
     corrupt({ _kind = "function", _node = { kind = "local_declaration", params = {}, body = {} } },
         "function decl but node kind is local_declaration (mismatch)")
