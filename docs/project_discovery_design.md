@@ -268,6 +268,15 @@ retained node (opaque to the neutral model — a Lua-specific lowering step insp
 - a `local_function` / `function` → `{ form="function", is_method, is_vararg, params,
   body }` (the parser's exact param/statement subtrees).
 
+**Read-only contract.** `values` / `positional_value` / `params` / `body` are **live
+references** into that generation's parsed AST — deliberately not deep-copied, so byte
+ranges stay exact and nothing is duplicated. A consumer **must treat them read-only**:
+mutating a returned subtree corrupts the generation's AST (and any sibling declaration that
+shares the same node — every name of a multi-name `local` shares one node). This is
+trusted-consumer discipline (app code never reaches `resolve_handle`; only in-process
+build/tool lowerers do, and each analysis re-parses fresh), so no copy/freeze is imposed on
+the hot path.
+
 For a `local`, the record carries the **complete** RHS expression list (`values`) plus
 `name_index`, with `positional_value = values[name_index]` as a convenience for the common
 1:1 case. This is deliberate: Lua multiple assignment is **not positional** when the final
