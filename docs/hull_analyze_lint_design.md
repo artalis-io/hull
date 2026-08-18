@@ -1,6 +1,8 @@
 # `hull analyze` v2 — lint rules (design)
 
-Status: DESIGN (pre-implementation). Extends the shipped `hull analyze` (syntax-only,
+Status: SLICE 1 IMPLEMENTED (engine + structural rules + CLI + schema 2);
+slices 2-3 (scope pass + scope rules) pending. Extends the shipped `hull analyze`
+(syntax-only,
 [hull_analyze_design.md](hull_analyze_design.md)) with a **rule-based linter** over the
 AST + comments + a light lexical **scope** pass — still without running or building the
 app. This is the "AST/annotation lint rules" follow-up named in §10 of the v1 design.
@@ -175,10 +177,12 @@ is the explicit signal that lint data may be present.
 
 ## 10. Slice plan
 
-1. **Engine + structural rules** — `lint.lua` registry/engine + `empty-block`,
-   `duplicate-table-key`, `todo-comment` (no scope), the CLI flags (`--strict`,
-   `--rules`/`--disable`/`--enable`/`--list-rules`), JSON `schema_version: 2`. Ships the
-   infrastructure with immediately-useful rules.
+1. **Engine + structural rules** — DONE. `hull.source.lint` registry/engine +
+   `empty-block`, `duplicate-table-key`, `todo-comment` (no scope), the CLI flags
+   (`--strict`, `--rules`/`--disable`/`--enable`/`--list-rules`), per-diagnostic
+   severities, `lua.lint.<id>` codes, JSON `schema_version: 2` (+ `summary.warnings`/
+   `infos`/`by_rule`). `test_lint.lua` + `tests/e2e_analyze.sh` (23 cases). Lint runs
+   only on a CLEANLY-parsed file (complete + no syntax errors).
 2. **Scope pass** — `hull.source.scope` + `test_scope.lua` (the reusable Step B).
 3. **Scope rules** — `unused-local`, `unused-param`, `shadowed-local`, and
    `undefined-global` (off by default) on top of the pass.

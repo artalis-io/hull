@@ -68,10 +68,10 @@ if [ "$a" = "$b" ] && [ -n "$a" ]; then pass "deterministic --json output"; else
 lines=$(wc -l < "$TMP/j.txt" | tr -d ' ')
 first=$(head -c1 "$TMP/j.txt"); last=$(tail -c2 "$TMP/j.txt" | head -c1)
 if [ "$lines" = "1" ] && [ "$first" = "{" ] && [ "$last" = "}" ] \
-   && grep -q '"schema_version":1' "$TMP/j.txt" && grep -q '"root":' "$TMP/j.txt" \
+   && grep -q '"schema_version":2' "$TMP/j.txt" && grep -q '"root":' "$TMP/j.txt" \
    && grep -q '"code":"lua.syntax"' "$TMP/j.txt" && grep -q '"files_scanned":' "$TMP/j.txt" \
    && grep -q '"summary":' "$TMP/j.txt"; then
-    pass "JSON stdout pure (1 line, {…}) + schema_version 1 + required keys"
+    pass "JSON stdout pure (1 line, {…}) + schema_version 2 + required keys"
 else fail "JSON purity/schema (lines=$lines first=$first last=$last)"; fi
 
 # ── Test 5: explicit target errors — missing + non-Lua (outside-root is
@@ -150,7 +150,7 @@ else fail "--quiet (qc=[$qc])"; fi
 
 # ── Test 13: --json overrides --quiet (stdout stays pure JSON) ─────────
 jq=$("$HULL" analyze "$APP" --json --quiet 2>/dev/null || true)
-if [ -n "$jq" ] && [ "$(printf '%s' "$jq" | head -c1)" = "{" ] && echo "$jq" | grep -q '"schema_version":1'; then
+if [ -n "$jq" ] && [ "$(printf '%s' "$jq" | head -c1)" = "{" ] && echo "$jq" | grep -q '"schema_version":2'; then
     pass "--json --quiet → JSON overrides quiet, pure JSON stdout"
 else fail "--json --quiet override (jq=$jq)"; fi
 
@@ -187,6 +187,61 @@ else
         pass "unreadable discovered subdir → exit 2 + discovery failed (fail closed)"
     else fail "unreadable subdir (rc=$rc, out=[$out], err=$(cat "$TMP/unr_err.txt"))"; fi
 fi
+
+# ── lint (v2) fixture: a duplicate table key, an empty block, a TODO ──
+LINT="$TMP/lint"
+mkdir -p "$LINT"
+printf -- '-- TODO: finish this\napp.main(function()\n  local t = { a = 1, a = 2 }\n  if t.a then end\n  return 0\nend)\n' > "$LINT/app.lua"
+
+# ── Test 17: lint warnings are advisory (exit 0), findings still printed ─
+rc=0; out=$("$HULL" analyze "$LINT" 2>/dev/null) || rc=$?
+if [ "$rc" = "0" ] && echo "$out" | grep -q "lua.lint.duplicate-table-key" \
+   && echo "$out" | grep -q "lua.lint.empty-block" && echo "$out" | grep -q "lua.lint.todo-comment"; then
+    pass "lint findings advisory (exit 0) with dup-key + empty-block + todo"
+else fail "lint advisory (rc=$rc, out=$out)"; fi
+
+# ── Test 18: --strict makes warnings fail (exit 1) ────────────────────
+rc=0; "$HULL" analyze "$LINT" --strict >/dev/null 2>&1 || rc=$?
+if [ "$rc" = "1" ]; then pass "--strict: warnings fail (exit 1)"; else fail "--strict (rc=$rc)"; fi
+
+# ── Test 19: --list-rules enumerates the registry ─────────────────────
+lr=$("$HULL" analyze --list-rules 2>/dev/null || true)
+if echo "$lr" | grep -q "duplicate-table-key" && echo "$lr" | grep -q "empty-block" \
+   && echo "$lr" | grep -q "todo-comment"; then
+    pass "--list-rules lists the rules"
+else fail "--list-rules ($lr)"; fi
+
+# ── Test 20: --disable / --rules selection ────────────────────────────
+d=$("$HULL" analyze "$LINT" --disable=empty-block,todo-comment 2>/dev/null || true)
+r=$("$HULL" analyze "$LINT" --rules=todo-comment 2>/dev/null || true)
+if ! echo "$d" | grep -q "empty-block" && echo "$d" | grep -q "duplicate-table-key" \
+   && echo "$r" | grep -q "todo-comment" && ! echo "$r" | grep -q "empty-block"; then
+    pass "--disable / --rules select the active rules"
+else fail "rule selection (d=$d)(r=$r)"; fi
+
+# ── Test 21: unknown rule → exit 2 ────────────────────────────────────
+rc=0; out=$("$HULL" analyze "$LINT" --rules=nope 2>"$TMP/lr.txt") || rc=$?
+if [ "$rc" = "2" ] && [ -z "$out" ] && grep -q "unknown lint rule" "$TMP/lr.txt"; then
+    pass "unknown lint rule → exit 2, stderr message"
+else fail "unknown rule (rc=$rc)"; fi
+
+# ── Test 22: JSON v2 schema — lint codes + severities + summary counts ─
+"$HULL" analyze "$LINT" --json 2>/dev/null > "$TMP/lint.json" || true
+if grep -q '"schema_version":2' "$TMP/lint.json" \
+   && grep -q '"code":"lua.lint.duplicate-table-key"' "$TMP/lint.json" \
+   && grep -q '"severity":"warning"' "$TMP/lint.json" && grep -q '"severity":"info"' "$TMP/lint.json" \
+   && grep -q '"warnings":' "$TMP/lint.json" && grep -q '"by_rule":' "$TMP/lint.json"; then
+    pass "JSON v2: lua.lint.* codes + warning/info severities + summary.warnings/by_rule"
+else fail "lint JSON schema"; fi
+
+# ── Test 23: a syntax-broken file is NOT linted (no spurious lint) ────
+printf 'local t = { a = ) }\n' > "$LINT/oops.lua"
+n=$("$HULL" analyze "$LINT" oops.lua --json 2>/dev/null | grep -c 'lua.lint' || true)
+rc=0; "$HULL" analyze "$LINT" oops.lua >/dev/null 2>&1 || rc=$?
+if [ "$n" = "0" ] && [ "$rc" = "1" ]; then
+    pass "syntax-broken file: no spurious lint, exit 1 from the syntax error"
+else fail "broken-not-linted (n=$n, rc=$rc)"; fi
+rm -f "$LINT/oops.lua"
 
 # ── summary ───────────────────────────────────────────────────────────
 echo ""

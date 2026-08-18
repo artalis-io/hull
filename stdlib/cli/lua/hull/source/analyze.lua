@@ -12,6 +12,7 @@
 --
 
 local lua = require("hull.source.lua")
+local lint = require("hull.source.lint")
 local json = require("hull.json")
 
 -- Generous limits so lua.limit.* only trips on genuinely pathological input; a trip is
@@ -78,18 +79,51 @@ local function op_fail(msg)
     tool.exit(2)
 end
 
+local function split_csv(s)
+    local out = {}
+    for part in s:gmatch("[^,]+") do out[#out + 1] = part end
+    return out
+end
+
 local function parse_args()
-    local o = { json = false, quiet = false, positionals = {} }
+    local o = { json = false, quiet = false, strict = false, positionals = {} }
     for i = 1, #arg do
         local a = arg[i]
         if a == "--json" then o.json = true
         elseif a == "--quiet" then o.quiet = true
+        elseif a == "--strict" then o.strict = true
+        elseif a == "--list-rules" then o.list_rules = true
         elseif a == "-h" or a == "--help" then o.help = true
         elseif a:match("^%-%-max%-depth=%d+$") then o.max_depth = tonumber(a:match("=(%d+)"))
+        elseif a:match("^%-%-rules=.+$") then o.rules = split_csv(a:match("=(.+)$"))
+        elseif a:match("^%-%-disable=.+$") then o.disable = split_csv(a:match("=(.+)$"))
+        elseif a:match("^%-%-enable=.+$") then o.enable = split_csv(a:match("=(.+)$"))
         elseif a:sub(1, 1) == "-" and a ~= "-" then usage_error("unknown flag: " .. a)
         else o.positionals[#o.positionals + 1] = a end
     end
     return o
+end
+
+-- Resolve the active lint-rule set from --rules / --disable / --enable, validating
+-- every referenced id (an unknown rule is a usage error). --rules restricts to exactly
+-- that set; otherwise the default-on set minus --disable plus --enable.
+local function resolve_rules(o)
+    local function check_ids(list)
+        for _, id in ipairs(list or {}) do
+            if not lint.exists(id) then usage_error("unknown lint rule: " .. id) end
+        end
+    end
+    check_ids(o.rules); check_ids(o.disable); check_ids(o.enable)
+    local enabled
+    if o.rules then
+        enabled = {}
+        for _, id in ipairs(o.rules) do enabled[id] = true end
+    else
+        enabled = lint.default_enabled()
+        for _, id in ipairs(o.disable or {}) do enabled[id] = nil end
+        for _, id in ipairs(o.enable or {}) do enabled[id] = true end
+    end
+    return enabled
 end
 
 -- ── resolve inputs into { root, mode, targets? } ──
@@ -127,39 +161,82 @@ local function discover(root)
 end
 
 -- ── analyze one readable Lua file: returns (state, diagnostics[]) ──
-local function analyze_source(path, src)
+-- Syntax diagnostics are severity "error"; lint findings (only on a CLEANLY-parsed
+-- file) carry their rule's severity (warning / info).
+local function analyze_source(path, src, enabled)
     local unit, err = lua.parse(src, { path = path, limits = LIMITS })
     if unit == nil then                                      -- (nil, err): API/internal failure
         local msg = (type(err) == "table" and err.message) or tostring(err)
         local code = (type(err) == "table" and err.code) or "lua.internal"
-        return "internal", { { code = code, message = msg } }
+        return "internal", { { code = code, severity = "error", message = msg } }
     end
-    local diags, has_limit, has_internal = {}, false, false
+    local diags, has_limit, has_internal, has_syntax = {}, false, false, false
     for _, d in ipairs(unit.diagnostics) do
         local code = d.code or ""
         if code:find("^lua%.limit%.") then has_limit = true
-        elseif code == "lua.internal" then has_internal = true end
+        elseif code == "lua.internal" then has_internal = true
+        else has_syntax = true end                           -- lua.syntax / lua.unsupported
         local line, col
         if d.range then line, col = unit:line_col(d.range) end
         diags[#diags + 1] = {
-            code = code, message = d.message or "",
+            code = code, severity = "error", message = d.message or "",
             range = d.range and { start = d.range.start, stop = d.range.stop } or nil,
             line = line, col = col,
         }
     end
     local state = has_internal and "internal" or (has_limit and "incomplete") or "complete"
+
+    -- Lint only a cleanly-parsed file (complete + no syntax errors): a recovered,
+    -- error-bearing AST would yield spurious lint findings.
+    if state == "complete" and not has_syntax and enabled and next(enabled) then
+        for _, f in ipairs(lint.run(unit, enabled)) do
+            local line, col
+            if f.range then line, col = unit:line_col(f.range) end
+            diags[#diags + 1] = {
+                code = f.code, severity = f.severity, message = f.message, rule = f.rule,
+                range = f.range and { start = f.range.start, stop = f.range.stop } or nil,
+                line = line, col = col,
+            }
+        end
+    end
     return state, diags
+end
+
+-- ── --list-rules: enumerate the lint registry, then exit ──
+local function list_rules(o)
+    if o.json then
+        local rules = {}
+        for _, r in ipairs(lint.RULES) do
+            rules[#rules + 1] = { id = r.id, severity = r.severity, default = r.default, description = r.describe }
+        end
+        tool.stdout(json.encode({ schema_version = 2, rules = rules }) .. "\n")
+    else
+        local out = {}
+        for _, r in ipairs(lint.RULES) do
+            out[#out + 1] = string.format("%-22s %-8s %-4s %s",
+                r.id, r.severity, r.default and "on" or "off", r.describe)
+        end
+        tool.stdout(table.concat(out, "\n") .. "\n")
+    end
+    tool.exit(0)
 end
 
 -- ── build the result set: files[] + diagnostics[] + summary ──
 local function run()
     local o = parse_args()
     if o.help then
-        tool.stdout("usage: hull analyze [app_dir] [files...] [--json] [--quiet] [--max-depth=N]\n" ..
-            "  static syntax analysis of an app's Lua source (parses, never runs).\n" ..
+        tool.stdout(
+            "usage: hull analyze [app_dir] [files...] [--json] [--quiet] [--strict]\n" ..
+            "                    [--rules=a,b] [--disable=c,d] [--enable=e] [--list-rules] [--max-depth=N]\n" ..
+            "  static analysis of an app's Lua source (parses, never runs): syntax + lint rules.\n" ..
+            "  --strict        warnings fail the run (exit 1); advisory by default.\n" ..
+            "  --rules=a,b     run ONLY these lint rules;  --disable / --enable adjust the default set.\n" ..
+            "  --list-rules    list the lint rules and exit.\n" ..
             "  --max-depth=N   cap parse nesting (default 2000); a deeper file is reported incomplete.\n")
         tool.exit(0)
     end
+    if o.list_rules then list_rules(o) end
+    local enabled = resolve_rules(o)                         -- validates --rules/--disable/--enable
     if o.max_depth then LIMITS.max_depth = o.max_depth end   -- controlled low limit (testing / huge files)
     local inp = resolve_inputs(o)
     local root_norm = normalize(inp.root)
@@ -171,12 +248,12 @@ local function run()
     local function record(path, state, diags)
         files[#files + 1] = { path = path, state = state }
         for _, d in ipairs(diags) do
-            d.path = path; d.severity = "error"; d.state = state
+            d.path = path; d.state = state                   -- severity is set per-diag already
             diagnostics[#diagnostics + 1] = d
         end
     end
     local function target_error(path, code, message)
-        record(path, "internal", { { code = code, message = message } })
+        record(path, "internal", { { code = code, severity = "error", message = message } })
     end
 
     if inp.mode == "walk" then
@@ -186,7 +263,7 @@ local function run()
             if not src then                                  -- fail closed: never a silent skip
                 target_error(path, "analyze.unreadable", "cannot read file")
             else
-                record(path, analyze_source(path, src))
+                record(path, analyze_source(path, src, enabled))
             end
         end
     else                                                     -- explicit files
@@ -225,7 +302,7 @@ local function run()
                     if not src then
                         target_error(logical, "analyze.unreadable", "cannot read file")
                     else
-                        record(logical, analyze_source(logical, src))
+                        record(logical, analyze_source(logical, src, enabled))
                     end
                 end
             end
@@ -242,29 +319,37 @@ local function run()
         return a.code < b.code
     end)
 
-    -- summary
-    local errors, incomplete, internal, with_issues = 0, 0, 0, 0
-    local seen_issue = {}
+    -- summary (per-severity; warnings are advisory unless --strict)
+    local errors, warnings, infos, incomplete, internal, with_issues = 0, 0, 0, 0, 0, 0
+    local by_rule, seen_issue = {}, {}
     for _, f in ipairs(files) do
         if f.state == "incomplete" then incomplete = incomplete + 1 end
         if f.state == "internal" then internal = internal + 1 end
     end
     for _, d in ipairs(diagnostics) do
-        errors = errors + 1
+        if d.severity == "error" then errors = errors + 1
+        elseif d.severity == "warning" then warnings = warnings + 1
+        elseif d.severity == "info" then infos = infos + 1 end
+        if d.rule then by_rule[d.rule] = (by_rule[d.rule] or 0) + 1 end
         if not seen_issue[d.path] then seen_issue[d.path] = true; with_issues = with_issues + 1 end
     end
-    local clean = (errors == 0 and incomplete == 0 and internal == 0)
+    -- exit 0 iff no errors / incomplete / internal, and (warnings advisory unless --strict)
+    local exit_ok = (errors == 0 and incomplete == 0 and internal == 0
+                     and (not o.strict or warnings == 0))
+    local no_findings = (#diagnostics == 0 and incomplete == 0 and internal == 0)
 
     return o, inp, root_norm, files, diagnostics, {
-        errors = errors, files_with_issues = with_issues,
-        incomplete = incomplete, internal = internal, clean = clean,
-    }
+        errors = errors, warnings = warnings, infos = infos,
+        incomplete = incomplete, internal = internal,
+        files_with_issues = with_issues, by_rule = by_rule,
+        clean = exit_ok,                                     -- clean == exit 0 (design §8)
+    }, no_findings
 end
 
 -- ── output (real output on STDOUT via tool.stdout; print is routed to stderr) ──
 local function emit_json(root_norm, files, diagnostics, summary)
     tool.stdout(json.encode({
-        schema_version = 1,
+        schema_version = 2,                                  -- v2: lint findings + severities
         root = (root_norm == "") and "." or root_norm,
         files_scanned = #files,
         files = files,
@@ -273,33 +358,38 @@ local function emit_json(root_norm, files, diagnostics, summary)
     }) .. "\n")
 end
 
-local function emit_human(o, files, diagnostics, summary)
+local function pluralize(n, word)
+    return n .. " " .. word .. (n == 1 and "" or "s")
+end
+
+local function emit_human(o, files, diagnostics, summary, no_findings)
     local out = {}
     for _, d in ipairs(diagnostics) do
         local pos = (d.line and d.col) and (d.line .. ":" .. d.col) or "?:?"
         out[#out + 1] = string.format("%s:%s: %s: %s [%s]", d.path, pos, d.severity, d.message, d.code)
     end
     if not o.quiet then                                      -- --quiet drops the summary chatter
-        if summary.clean then
+        if no_findings then
             out[#out + 1] = string.format("hull analyze: no issues (%d files scanned)", #files)
         else
-            local parts = { summary.errors .. " error" .. (summary.errors == 1 and "" or "s") ..
-                            " in " .. summary.files_with_issues .. " file" ..
-                            (summary.files_with_issues == 1 and "" or "s") }
+            local parts = {}
+            if summary.errors > 0 then parts[#parts + 1] = pluralize(summary.errors, "error") end
+            if summary.warnings > 0 then parts[#parts + 1] = pluralize(summary.warnings, "warning") end
+            if summary.infos > 0 then parts[#parts + 1] = summary.infos .. " info" end
             if summary.incomplete > 0 then parts[#parts + 1] = summary.incomplete .. " incomplete" end
             if summary.internal > 0 then parts[#parts + 1] = summary.internal .. " internal" end
             if #diagnostics > 0 then out[#out + 1] = "" end
-            out[#out + 1] = string.format("hull analyze: %s (%d files scanned)",
-                table.concat(parts, ", "), #files)
+            out[#out + 1] = string.format("hull analyze: %s in %s (%d files scanned)",
+                table.concat(parts, ", "), pluralize(summary.files_with_issues, "file"), #files)
         end
     end
     if #out > 0 then tool.stdout(table.concat(out, "\n") .. "\n") end
 end
 
-local o, _, root_norm, files, diagnostics, summary = run()
+local o, _, root_norm, files, diagnostics, summary, no_findings = run()
 if o.json then
     emit_json(root_norm, files, diagnostics, summary)        -- JSON overrides --quiet; stdout is pure JSON
 else
-    emit_human(o, files, diagnostics, summary)
+    emit_human(o, files, diagnostics, summary, no_findings)
 end
 tool.exit(summary.clean and 0 or 1)
