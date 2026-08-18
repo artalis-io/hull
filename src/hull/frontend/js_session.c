@@ -130,22 +130,28 @@ static int fail_indeterminate(char **out_json, size_t *out_len, const char *code
     return -1;
 }
 
+/* Convert an arbitrary JSValue to a best-effort heap C string. If JS_ToCString itself fails
+ * (typically OOM while stringifying) it returns NULL AND raises a SECONDARY pending
+ * exception; this helper clears that exception so it can't contaminate the next invocation
+ * on a reused session. Returns a malloc'd string (caller frees), or NULL only on strdup OOM.
+ * Shared by the pending-exception path and the rejected-promise-value path. */
+static char *jsvalue_to_message(JSContext *ctx, JSValueConst val, const char *fallback)
+{
+    const char *cs = JS_ToCString(ctx, val);
+    if (cs) {
+        char *out = strdup(cs);
+        JS_FreeCString(ctx, cs);
+        return out;
+    }
+    JS_FreeValue(ctx, JS_GetException(ctx));   /* clear the secondary conversion exception */
+    return strdup(fallback);
+}
+
 /* Pull the pending JS exception into a heap C string (best-effort). */
 static char *take_exception_message(JSContext *ctx)
 {
     JSValue exc = JS_GetException(ctx);
-    const char *cs = JS_ToCString(ctx, exc);
-    char *out;
-    if (cs) {
-        out = strdup(cs);
-        JS_FreeCString(ctx, cs);
-    } else {
-        /* JS_ToCString itself failed (typically OOM while stringifying the exception) and
-         * raised a SECONDARY pending exception. Clear it, or it would contaminate the next
-         * invocation on this reused session. */
-        JS_FreeValue(ctx, JS_GetException(ctx));
-        out = strdup("unknown tooling exception");
-    }
+    char *out = jsvalue_to_message(ctx, exc, "unknown tooling exception");
     JS_FreeValue(ctx, exc);
     return out;
 }
@@ -332,9 +338,7 @@ static int ensure_entry_loaded(HlJsSession *s, const char *module, char **out_js
     }
     if (JS_IsObject(v) && JS_PromiseState(s->ctx, v) == JS_PROMISE_REJECTED) {
         JSValue res = JS_PromiseResult(s->ctx, v);
-        const char *cs = JS_ToCString(s->ctx, res);
-        char *msg = cs ? strdup(cs) : strdup("tooling entry rejected");
-        if (cs) JS_FreeCString(s->ctx, cs);
+        char *msg = jsvalue_to_message(s->ctx, res, "tooling entry rejected");
         JS_FreeValue(s->ctx, res);
         JS_FreeValue(s->ctx, v);
         int rc = fail_indeterminate(out_json, out_len, "js.internal", msg);

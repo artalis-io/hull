@@ -373,6 +373,30 @@ UTEST(js_session, reuse_after_heap_failure)
     hl_js_session_destroy(s);
 }
 
+/* An entry module that rejects on load (top-level await) fails via the rejected-promise
+ * branch as js.internal, and the session stays usable afterward (no contaminating exception
+ * from converting the rejection value to a message). */
+UTEST(js_session, entry_rejection_and_reuse)
+{
+    HlJsSession *s = hl_js_session_create(NULL);
+    ASSERT_TRUE(s != NULL);
+    char *out = NULL; size_t out_len = 0;
+    int rc = hl_js_session_analyze(s, "hull:_probe_reject", "analyze", (const uint8_t *)"x", 1, "a.js",
+                                   NULL, 0, &out, &out_len);
+    ASSERT_EQ(rc, -1);
+    EXPECT_TRUE(has(out, "\"status\":\"indeterminate\""));
+    EXPECT_TRUE(has(out, "\"code\":\"js.internal\""));
+    free(out); out = NULL;
+    /* Reuse with the good entry: must succeed. */
+    rc = hl_js_session_analyze(s, "hull:probe", "analyze", (const uint8_t *)"ok", 2, "a.js",
+                               NULL, 0, &out, &out_len);
+    ASSERT_EQ(rc, 0);
+    EXPECT_TRUE(has(out, "\"status\":\"ok\""));
+    EXPECT_TRUE(has(out, "\"byte_length\":2"));
+    free(out);
+    hl_js_session_destroy(s);
+}
+
 /* An oversize result is rejected -> js.limit.result. */
 UTEST(js_session, limit_result_size)
 {
