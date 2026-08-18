@@ -14,6 +14,7 @@
 local lua = require("hull.source.lua")
 local lint = require("hull.source.lint")
 local scope = require("hull.source.scope")
+local discover_mod = require("hull.source.discover")   -- the shared hardened walker (D2)
 local json = require("hull.json")
 
 -- Generous limits so lua.limit.* only trips on genuinely pathological input; a trip is
@@ -21,48 +22,11 @@ local json = require("hull.json")
 local LIMITS = { max_bytes = 64 * 1024 * 1024, max_tokens = 5000000,
                  max_comments = 5000000, max_depth = 2000 }
 
--- generated / dependency dirs (build covers site/build). EXCLUDE_LIST prunes them
--- DURING traversal (tool.find_files exclude_dirs); EXCLUDE_SEGMENT is a cheap belt on
--- the returned paths.
-local EXCLUDE_LIST = { ".git", ".hull", "build", "vendor", "node_modules" }
-local EXCLUDE_SEGMENT = {}
-for _, s in ipairs(EXCLUDE_LIST) do EXCLUDE_SEGMENT[s] = true end
-
--- ── small path helpers (pure Lua; no path-normalize binding in the tool VM) ──
-local function normalize(p)
-    local absolute = p:sub(1, 1) == "/"
-    local segs = {}
-    for seg in p:gmatch("[^/]+") do
-        if seg == ".." then
-            if #segs > 0 and segs[#segs] ~= ".." then table.remove(segs)
-            elseif not absolute then segs[#segs + 1] = ".." end   -- absolute: .. at root stays root
-        elseif seg ~= "." then                               -- "." is dropped
-            segs[#segs + 1] = seg
-        end
-    end
-    return (absolute and "/" or "") .. table.concat(segs, "/")
-end
-
-local function join(root, rel)
-    if rel:sub(1, 1) == "/" then return rel end              -- absolute stays absolute
-    if root == "" or root == "." then return rel end
-    return root .. "/" .. rel
-end
-
--- Containment on CANONICAL absolute paths (from tool.realpath, symlinks resolved).
--- Handles the `/` root correctly (prefix is "/", not "//").
-local function inside_root(canon_root, canon_target)
-    if canon_root == canon_target then return true end
-    local prefix = (canon_root == "/") and "/" or (canon_root .. "/")
-    return canon_target:sub(1, #prefix) == prefix
-end
-
-local function excluded(path)
-    for seg in path:gmatch("[^/]+") do
-        if EXCLUDE_SEGMENT[seg] then return true end
-    end
-    return false
-end
+-- Path helpers + the exclusion set now live in the shared hardened walker
+-- (hull.source.discover, D2); alias the ones the files-mode path still uses.
+local normalize   = discover_mod.normalize
+local join        = discover_mod.join
+local inside_root = discover_mod.inside_root
 
 local function ends_lua(path) return path:sub(-4) == ".lua" end
 
@@ -143,22 +107,13 @@ local function resolve_inputs(o)
     return { root = ".", mode = "files", targets = pos }     -- all positionals are files under .
 end
 
--- ── discovery (walk mode): sorted, regular .lua, no symlink, exclusions ──
+-- ── discovery (walk mode): the shared hardened walker, .lua only for `hull analyze` ──
+-- A discovery error (OOM / access) is an OPERATIONAL failure (op_fail exit 2), not an
+-- empty scan -- the shared module returns (nil, err) and this CLI decides fail-closed.
 local function discover(root)
-    -- exclude_dirs prunes DURING traversal (a large build/ tree is never walked);
-    -- find_files already returns sorted/regular/no-symlink. excluded() is a belt.
-    -- A discovery error (OOM / access) is an OPERATIONAL failure, not an empty scan.
-    local files, err = tool.find_files(root, "*.lua", { exclude_dirs = EXCLUDE_LIST })
+    local files, err = discover_mod.discover(root)           -- default ext {"lua"}, DEFAULT_EXCLUDE
     if err then op_fail("discovery failed: " .. tostring(err)) end
-    local out, seen = {}, {}
-    for _, p in ipairs(files) do
-        local n = normalize(p)
-        if not excluded(n) and not seen[n] then
-            seen[n] = true; out[#out + 1] = n
-        end
-    end
-    table.sort(out)
-    return out
+    return files
 end
 
 -- ── analyze one readable Lua file: returns (state, diagnostics[]) ──
