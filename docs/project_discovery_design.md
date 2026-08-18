@@ -266,15 +266,29 @@ retained node (opaque to the neutral model — a Lua-specific lowering step insp
 - a `local_function` / `function` → `{ form="function", is_method, is_vararg, params,
   body }` (the parser's exact param/statement subtrees).
 
-`err` (Diagnostic-shaped) is returned ONLY for an impossible/corrupt state (missing
-`_node`, unsupported kind) — never for an ordinary "no initializer", and never for an
-unsupported *lowering* construct (that is the future domain lowerer's concern, not a
-discovery error). Handles stay **generation-local** (an out-of-range handle → nil; each
-analysis owns its own handle table — no cross-generation identity). JavaScript, a reserved
-non-analyzable frontend, ships no `semantics` (it produces no declarations to resolve). The
-commonality across languages begins at the **domain IR**, not this source-level semantic
-record. Covered by `test_project.lua` (a "hypothetical Lua lowerer" reaches a `@query`
-initializer + a `@compute` function through the boundary while the projection leaks no AST).
+For a `local`, the record carries the **complete** RHS expression list (`values`) plus
+`name_index`, with `positional_value = values[name_index]` as a convenience for the common
+1:1 case. This is deliberate: Lua multiple assignment is **not positional** when the final
+RHS expression can return multiple values (`local a, b = f()` binds BOTH `a` and `b` from
+`f()`), so a lowerer must read `values` + `name_index`, not treat `positional_value` as the
+sole source of a name (it is legitimately nil for a name past the RHS length).
+
+`err` (Diagnostic-shaped) is returned for ANY impossible/corrupt state — missing `_node`, a
+node whose `.kind` does not match the declaration kind, a bad `_name_index`, a malformed
+`values`/`params`/`body`, or an unsupported kind — never for an ordinary "no initializer",
+and never for an unsupported *lowering* construct (that is the future domain lowerer's
+concern, not a discovery error). Handles stay **generation-local** (an out-of-range handle →
+nil; each analysis owns its own handle table — no cross-generation identity).
+
+**`declaration_semantics` is the COMMON accessor name; its returned record is
+FRONTEND-SPECIFIC.** A future JavaScript frontend implements `declaration_semantics` too but
+need NOT return the same source-semantic shape (JS initializer/function forms differ from
+Lua's). JavaScript is a reserved non-analyzable frontend today and ships no `semantics` (it
+produces no declarations to resolve). Lua/JS **convergence begins at the domain IR**, not at
+this source-level record. Covered by `test_project.lua` (a "hypothetical Lua lowerer" reaches
+a `@query` initializer — including the non-positional multi-return case — and a `@compute`
+function through the boundary, with full corrupt-state validation, while the projection leaks
+no AST).
 
 ### D4 — Multi-name Lua declaration + annotation semantics → **per-name facts with a shared `group_id`; annotations carry `target_group_id`; annotated-only public retention** [RATIFIED: 4a]
 

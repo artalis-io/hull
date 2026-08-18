@@ -431,6 +431,7 @@ do
     _G.tool = make_tool({ ["s/app.lua"] =
         "---@query\nlocal q = orders_where()\n" ..
         "---@query\nlocal a, r, c = 41, foo(), \"z\"\n" ..            -- distinguishable kinds by index
+        "---@query\nlocal first, second = query()\n" ..               -- multi-return RHS (not positional)
         "---@compute\nlocal function dot(a, b) return a + b end\n" ..
         "---@compute\nfunction pipeline.step(x) return x end\n" ..
         "---@note\nlocal u\n" ..                                       -- no initializer (legit nil)
@@ -454,14 +455,26 @@ do
     -- 1. @query local: the initializer expression is recovered with its exact Lua kind + range
     local qsem, qres = sem_of("q")
     ok(qsem and qsem.form == "value", "@query local q -> value form")
-    ok(qsem.value and qsem.value.kind == "call", "q initializer is a call expression (Lua-specific kind)")
-    eq(qres.unit:text(qsem.value), "orders_where()", "initializer maps to the EXACT original source text")
+    ok(qsem.positional_value and qsem.positional_value.kind == "call", "q initializer is a call expr (Lua kind)")
+    ok(#qsem.values == 1, "q value list carries the single RHS expression")
+    eq(qres.unit:text(qsem.positional_value), "orders_where()", "initializer maps to the EXACT original source text")
 
-    -- 2. multi-name: each name recovers ITS OWN initializer by index
+    -- 2. positional multi-name: each name recovers ITS OWN initializer by index (1:1 RHS)
     local asem = sem_of("a"); local rsem = sem_of("r"); local csem = sem_of("c")
-    eq(asem.name_index, 1, "a is name_index 1"); ok(asem.value.kind == "literal", "a initializer is a literal (41)")
-    eq(rsem.name_index, 2, "r is name_index 2"); ok(rsem.value.kind == "call", "r initializer is the call foo()")
-    eq(csem.name_index, 3, "c is name_index 3"); ok(csem.value.kind == "literal", "c initializer is a literal (\"z\")")
+    eq(asem.name_index, 1, "a is name_index 1"); ok(asem.positional_value.kind == "literal", "a initializer is a literal (41)")
+    eq(rsem.name_index, 2, "r is name_index 2"); ok(rsem.positional_value.kind == "call", "r initializer is the call foo()")
+    eq(csem.name_index, 3, "c is name_index 3"); ok(csem.positional_value.kind == "literal", "c initializer is a literal (\"z\")")
+    ok(#asem.values == 3 and #rsem.values == 3, "each multi-name member carries the FULL RHS list")
+
+    -- 2b. NON-positional multi-return RHS: `local first, second = query()` -- BOTH derive from
+    --     query(); the full RHS list is preserved so `second` is not misrepresented as nil-sourced.
+    local fsem = sem_of("first"); local ssem = sem_of("second")
+    eq(fsem.name_index, 1, "first is name_index 1")
+    eq(ssem.name_index, 2, "second is name_index 2")
+    ok(#fsem.values == 1 and fsem.values[1].kind == "call", "RHS is a single call query() shared by both names")
+    ok(#ssem.values == 1 and ssem.values[1].kind == "call", "second retains the SAME complete RHS list (query())")
+    ok(fsem.positional_value and fsem.positional_value.kind == "call", "first's positional value is query()")
+    ok(ssem.positional_value == nil, "second has no POSITIONAL value (it is the 2nd return of query()), but the RHS is retained")
 
     -- 3. @compute local function: params + body recovered
     local dsem = sem_of("dot")
@@ -475,11 +488,11 @@ do
     ok(psem and psem.form == "function" and #psem.params == 1 and psem.params[1].name == "x",
         "global function pipeline.step semantics recovered (param x)")
 
-    -- 5. a legitimate no-initializer local -> value nil, NO error (a non-nil `usem` proves
-    --    no error was returned: a corrupt state returns nil, err instead).
+    -- 5. a legitimate no-initializer local -> empty RHS + nil positional value, NO error (a
+    --    non-nil `usem` proves no error was returned: a corrupt state returns nil, err instead).
     local usem = sem_of("u")
-    ok(usem and usem.form == "value" and usem.value == nil,
-        "local with no initializer -> value nil (legit, not an error)")
+    ok(usem and usem.form == "value" and usem.positional_value == nil and #usem.values == 0,
+        "local with no initializer -> empty values + nil positional (legit, not an error)")
 
     -- annotations still attach to each name of the multi-name group (unchanged semantics)
     for _, nm in ipairs({ "a", "r", "c" }) do
@@ -489,10 +502,29 @@ do
             "@query still attached to multi-name member: " .. nm)
     end
 
-    -- 6. impossible/corrupt frontend state -> STRUCTURED error, never a silent nil
-    local bad, berr = frontend.declaration_semantics({ _kind = "local" })   -- no _node
-    ok(bad == nil and berr and berr.severity == "error" and berr.code == "lua.internal",
-        "corrupt declaration (missing node) -> structured diagnostic, not silent nil")
+    -- 6. impossible/corrupt frontend state -> STRUCTURED error, never a silent nil or a
+    --    plausible-looking record. Every retained-declaration invariant is validated.
+    local function corrupt(d, why)
+        local bad, berr = frontend.declaration_semantics(d)
+        ok(bad == nil and berr and berr.severity == "error" and berr.code == "lua.internal",
+            "corrupt decl -> structured lua.internal diagnostic: " .. why)
+    end
+    corrupt({ _kind = "local" }, "missing _node")
+    corrupt({ _kind = "local", _node = { kind = "local_declaration", values = {} } }, "missing name index")
+    corrupt({ _kind = "local", _node = { kind = "local_declaration", values = {} }, _name_index = "x" },
+        "non-integer name index")
+    corrupt({ _kind = "local", _node = { kind = "local_declaration", values = {} }, _name_index = 0 },
+        "name index < 1")
+    corrupt({ _kind = "local", _node = { kind = "function_declaration" }, _name_index = 1 },
+        "local decl but node kind is function_declaration (mismatch)")
+    corrupt({ _kind = "local", _node = { kind = "local_declaration", values = "oops" }, _name_index = 1 },
+        "malformed values (not a list)")
+    corrupt({ _kind = "function", _node = { kind = "local_declaration", params = {}, body = {} } },
+        "function decl but node kind is local_declaration (mismatch)")
+    corrupt({ _kind = "function", _node = { kind = "function_declaration", params = "x", body = {} } },
+        "malformed function params (not a list)")
+    corrupt({ _kind = "function", _node = { kind = "function_declaration", params = {}, body = 7 } },
+        "malformed function body (not a list)")
 
     -- 7. the semantics + AST stay PRIVATE: the public projection carries no frontend node
     local p = projection.project(disc)

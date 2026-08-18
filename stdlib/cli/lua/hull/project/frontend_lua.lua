@@ -159,27 +159,48 @@ end
 -- ONLY via M.resolve_handle -> {frontend, unit, declaration}; the neutral ProjectDiscovery
 -- never carries this. `sem` is a small frontend-SPECIFIC record over the retained AST node
 -- (opaque to the neutral model; a Lua lowerer inspects it, the wire never sees it):
---   * a `local` decl -> { form="value", name_index, value } where `value` is the initializer
---     EXPRESSION associated with THIS declared name by position (nil when the declaration has
---     no initializer at that index -- a LEGITIMATE nil, err is also nil). The expression node
---     carries an exact `.kind` (call / method_call / literal / name / field / …) and byte
---     `.range` from the parser -- no ranges are synthesized.
+--   * a `local` decl -> { form="value", name_index, values, positional_value }. `values` is
+--     the COMPLETE right-hand-side expression list; `name_index` is this name's position.
+--     `positional_value` is `values[name_index]` -- a CONVENIENCE for the common 1:1 case,
+--     which is nil for a name that has no positional initializer. Lua multiple assignment is
+--     NOT positional when the final RHS expression can return multiple values
+--     (`local a, b = f()` binds both a AND b from f()), so the full `values` + `name_index`
+--     preserve the real semantics -- a lowerer must not read `positional_value` as "the only
+--     source of this name". Expression nodes carry an exact `.kind` + byte `.range` from the
+--     parser (no ranges synthesized).
 --   * a `local_function` / `function` decl -> { form="function", is_method, is_vararg,
 --     params, body } where `params`/`body` are the parser's exact param/statement subtrees.
--- `err` (a Diagnostic-shaped table) is returned ONLY for an impossible/corrupt frontend
--- state (missing `_node`, unsupported kind) -- never for an ordinary "no initializer" and
--- never for an unsupported LOWERING construct (that belongs to the future domain lowerer).
+-- `err` (a Diagnostic-shaped table) is returned for any impossible/corrupt frontend state
+-- (missing `_node`, a node whose `.kind` does not match the declaration kind, a bad
+-- `_name_index`, a malformed values/params/body, or an unsupported kind) -- never for an
+-- ordinary "no initializer", and never for an unsupported LOWERING construct (that belongs
+-- to the future domain lowerer, not to discovery).
 function M.declaration_semantics(d)
     if type(d) ~= "table" or type(d._node) ~= "table" then
         return nil, sem_err("declaration is missing its frontend AST node")
     end
     local n, kind = d._node, d._kind
     if kind == "local" then
-        local values = n.values or {}
-        return { form = "value", name_index = d._name_index, value = values[d._name_index] }
+        if n.kind ~= "local_declaration" then
+            return nil, sem_err("node/kind mismatch: expected local_declaration, got '" .. tostring(n.kind) .. "'")
+        end
+        if math.type(d._name_index) ~= "integer" or d._name_index < 1 then
+            return nil, sem_err("missing or invalid name index")
+        end
+        if type(n.values) ~= "table" then
+            return nil, sem_err("malformed local declaration (values not a list)")
+        end
+        return { form = "value", name_index = d._name_index, values = n.values,
+                 positional_value = n.values[d._name_index] }
     elseif kind == "local_function" or kind == "function" then
+        if n.kind ~= "function_declaration" then
+            return nil, sem_err("node/kind mismatch: expected function_declaration, got '" .. tostring(n.kind) .. "'")
+        end
+        if type(n.params) ~= "table" or type(n.body) ~= "table" then
+            return nil, sem_err("malformed function declaration (params/body not lists)")
+        end
         return { form = "function", is_method = d._is_method == true, is_vararg = n.is_vararg == true,
-                 params = n.params or {}, body = n.body or {} }
+                 params = n.params, body = n.body }
     end
     return nil, sem_err("unsupported declaration kind '" .. tostring(kind) .. "'")
 end
