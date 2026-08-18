@@ -13,6 +13,7 @@
 
 local lua = require("hull.source.lua")
 local lint = require("hull.source.lint")
+local scope = require("hull.source.scope")
 local json = require("hull.json")
 
 -- Generous limits so lua.limit.* only trips on genuinely pathological input; a trip is
@@ -189,7 +190,24 @@ local function analyze_source(path, src, enabled)
     -- Lint only a cleanly-parsed file (complete + no syntax errors): a recovered,
     -- error-bearing AST would yield spurious lint findings.
     if state == "complete" and not has_syntax and enabled and next(enabled) then
-        for _, f in ipairs(lint.run(unit, enabled)) do
+        local sc = nil
+        if lint.needs_scope(enabled) then
+            local resolved, serr = scope.resolve(unit)
+            if serr then
+                -- resolver internal failure: surface it, and SKIP scope-backed rules
+                -- (sc stays nil) -- structural rules still run.
+                local line, col
+                if serr.range then line, col = unit:line_col(serr.range) end
+                diags[#diags + 1] = {
+                    code = serr.code, severity = serr.severity or "error", message = serr.message,
+                    range = serr.range and { start = serr.range.start, stop = serr.range.stop } or nil,
+                    line = line, col = col,
+                }
+            else
+                sc = resolved
+            end
+        end
+        for _, f in ipairs(lint.run(unit, enabled, sc)) do
             local line, col
             if f.range then line, col = unit:line_col(f.range) end
             diags[#diags + 1] = {

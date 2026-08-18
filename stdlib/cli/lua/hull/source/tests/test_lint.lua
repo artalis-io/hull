@@ -9,6 +9,7 @@
 
 local lua = require("hull.source.lua")
 local lint = require("hull.source.lint")
+local scope = require("hull.source.scope")
 
 local pass, fail, failures = 0, 0, {}
 local function ok(cond, name)
@@ -19,12 +20,16 @@ local function eq(a, b, name)
     ok(a == b, name .. " (expected " .. tostring(b) .. ", got " .. tostring(a) .. ")")
 end
 
--- count of findings for a given rule id in `src` (all rules enabled unless given)
+-- count of findings for a given rule id in `src` (all default rules unless given).
+-- Computes the scope model when a needs_scope rule is active.
 local function count(src, ruleid, enabled)
     local u = lua.parse(src, { path = "t.lua" })
     ok(u ~= nil and #u.diagnostics == 0, "lint fixture parses clean: " .. src:gsub("%s+", " "):sub(1, 40))
+    local en = enabled or lint.default_enabled()
+    local sc = nil
+    if lint.needs_scope(en) then sc = (scope.resolve(u)) end
     local n = 0
-    for _, f in ipairs(lint.run(u, enabled or lint.default_enabled())) do
+    for _, f in ipairs(lint.run(u, en, sc)) do
         if f.rule == ruleid then
             n = n + 1
             -- every finding carries a namespaced code, severity, and a range
@@ -82,6 +87,55 @@ do
     local de = lint.default_enabled()
     ok(de["empty-block"] and de["duplicate-table-key"] and de["todo-comment"],
         "default_enabled has all slice-1 rules on")
+end
+
+-- ── unused-local (local + localfunc; loop vars / params excluded; _ exempt) ─
+do
+    ok(count("local x = 1\nreturn 0", "unused-local") == 1, "unused local fires")
+    ok(count("local function f() end\nreturn 0", "unused-local") == 1, "unused local function fires")
+    ok(count("local x = 1\nreturn x", "unused-local") == 0, "used local clean")
+    ok(count("local _ = 1\nreturn 0", "unused-local") == 0, "_ exempt from unused-local")
+    ok(count("for i = 1, 3 do print(0) end", "unused-local") == 0, "loop var not flagged by unused-local")
+    ok(count("local function f(a) return 0 end\nreturn f", "unused-param") == 1, "unused-local does not double-flag a param")
+end
+
+-- ── unused-param (_ / implicit self exempt) ───────────────────────────
+do
+    ok(count("local function f(a, b) return a end\nreturn f", "unused-param") == 1, "unused param b fires")
+    ok(count("local function f(a) return a end\nreturn f", "unused-param") == 0, "used param clean")
+    ok(count("local function f(_a) return 1 end\nreturn f", "unused-param") == 0, "_-prefixed param exempt")
+    ok(count("local o = {}\nfunction o:m() return 1 end\nreturn o", "unused-param") == 0, "implicit self exempt")
+end
+
+-- ── shadowed-local (_ / implicit exempt) ──────────────────────────────
+do
+    ok(count("local x = 1\ndo local x = 2\nprint(x) end\nreturn x", "shadowed-local") == 1, "shadowing fires")
+    ok(count("local x = 1\nreturn x", "shadowed-local") == 0, "no shadow -> clean")
+    ok(count("local _ = 1\nlocal _ = 2\nreturn 0", "shadowed-local") == 0, "_ shadowing exempt")
+end
+
+-- ── undefined-global: OFF by default; evidence-based allowlist; reads only ─
+do
+    local en = lint.default_enabled(); en["undefined-global"] = true
+    for _, g in ipairs({ "pairs", "string", "app", "hull", "require", "print", "math", "test", "coroutine" }) do
+        ok(count("return " .. g, "undefined-global", en) == 0, "allowed global NOT flagged: " .. g)
+    end
+    for _, g in ipairs({ "db", "req", "res", "json", "os", "io", "load", "tool", "arg", "debug", "package" }) do
+        ok(count("return " .. g, "undefined-global", en) == 1, "undefined global flagged: " .. g)
+    end
+    ok(count("return db", "undefined-global") == 0, "undefined-global OFF by default")
+    ok(count("undefinedthing = 1", "undefined-global", en) == 0, "a global WRITE is not flagged (reads only)")
+end
+
+-- ── engine: a scope-backed rule is SKIPPED when scope is nil (resolver failed) ─
+do
+    local u = lua.parse("local x = 1\nreturn 0", { path = "t.lua" })
+    eq(#lint.run(u, { ["unused-local"] = true }, nil), 0, "needs_scope rule skipped when scope is nil")
+    ok(lint.needs_scope({ ["unused-local"] = true }), "needs_scope true for a scope rule")
+    ok(not lint.needs_scope({ ["todo-comment"] = true }), "needs_scope false for structural-only")
+    -- structural rules still run without scope
+    ok(#lint.run(lua.parse("if x then end", { path = "t.lua" }), { ["empty-block"] = true }, nil) == 1,
+        "structural rule still runs without scope")
 end
 
 print(string.format("test_lint: %d passed, %d failed", pass, fail))
