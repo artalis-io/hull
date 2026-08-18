@@ -305,6 +305,13 @@ OUTM7=$("$HULL" agent inspect "$MAL" 2>/dev/null)
 assert_py "embedded NUL + trailing garbage -> standalone (byte-length validation)" "$OUTM7" \
     'd["source"]=="standalone"'
 
+# ── build-readiness (Slice 4): the analyzer runs on a REAL repository example tree ──
+if [ -d examples/hello ]; then
+    OUTE=$("$HULL" agent inspect examples/hello 2>/dev/null)
+    assert_py "analyzes a real example app tree (valid, >=1 Lua source analyzed)" "$OUTE" \
+        'd["valid"] is True and d["summary"]["sources_analyzed"] >= 1'
+fi
+
 echo ""
 echo "=== hull agent inspect E2E: $PASS passed, $FAIL failed ==="
 [ "$FAIL" -eq 0 ]

@@ -1,7 +1,7 @@
 # Project Source Discovery — design record
 
-Status: **RATIFIED (with amendments). Slices 1-2 MERGED (#356, #357); Slice 3
-implemented; Slice 4 pending.**
+Status: **RATIFIED (with amendments). COMPLETE — Slices 1-3 MERGED (#356, #357,
+#358); Slice 4 implemented (build seam documented + tested, no `build.lua` change).**
 Author: (design-first, per the story's required cadence)
 Related: `docs/lua_source_analysis_design.md`, `docs/hull_source_scope_design.md`,
 `docs/hull_analyze_design.md`, `docs/hull_analyze_lint_design.md`.
@@ -414,6 +414,34 @@ and records this exact insertion point, without rewriting the build pipeline or
 adding a dormant per-build cost. (Slice 4 therefore documents + tests the
 abstraction and the seam; it does not modify `build.lua`.)
 
+**The seam recipe (for the first lowering consumer).** When a Query/Compute IR
+codegen step lands, it wires into `stdlib/cli/lua/hull/build.lua`'s `main()` at
+the one marked point — **after `parse_args()` (so `opts.app_dir` is resolved) and
+before `discover()` (so the produced sources can be emitted)** — like:
+
+```lua
+-- (future) only when a lowering consumer is present:
+local project = require("hull.project.analyze")
+local discovery = project.analyze(opts.app_dir)        -- the canonical model, once
+if not discovery.valid then error("project analysis failed: see diagnostics") end
+for _, id in ipairs(discovery.indexes.by_annotation["query"] or {}) do
+    local decl = discovery.indexes.by_id[id]           -- name/kind/range/annotations
+    local ctx = project.resolve_handle(discovery, decl.handle)  -- {frontend, unit, declaration}
+    -- ctx.frontend.scope(ctx.unit) etc. -> frontend semantics THROUGH the boundary
+    emit_query_ir(decl, ctx)                            -- the codegen step (a separate story)
+end
+```
+
+The consumer reaches everything it needs — annotated declarations by annotation
+name, the normalized decl facts, and frontend-specific semantics via the opaque
+handle + the frontend contract — **without traversing any AST and without
+`build.lua` owning discovery**. `hull.project.analyze` is the sole entry; the
+build step is a consumer. This whole consumer path (`by_annotation` → `by_id` →
+`resolve_handle` → `frontend.scope`) is exercised by a `test_project.lua` case so
+the abstraction is proven build-ready before any codegen exists, and
+`e2e_project_discovery.sh` runs the analyzer over a real repository example app
+tree. **Nothing in `build.lua` changes in this story.**
+
 ### D11 — JavaScript honest behavior → **known language, `analyzable=false`, no parse, honest per-file diagnostic, and it makes the generation `complete=false`** [RATIFIED, amended]
 
 The registry knows `javascript` (`.js/.mjs/.cjs`) with `capabilities={}` and
@@ -509,12 +537,15 @@ attribution, no em-dashes.
     after exit → standalone; and dead-session / malformed / truncated sidecars →
     standalone.
 
-- **Slice 4 — build seam (D10), abstraction-only.**
-  - Ship + test `hull.project.analyze` as the host abstraction a build consumer
-    would call; document the exact `build.lua main()` insertion point for the
-    first lowering consumer. **`build.lua` is not modified** and no per-build
-    parse is added. A test asserts the abstraction returns the same
-    `ProjectDiscovery` a build consumer would receive; the doc records the seam.
+- **Slice 4 — build seam (D10), abstraction-only. DONE.**
+  - `hull.project.analyze` is the host abstraction a build consumer calls; the
+    exact `build.lua main()` insertion point (after `parse_args()`, before
+    `discover()`) + a consumer recipe are documented in D10. **`build.lua` is NOT
+    modified** and no per-build parse is added. A `test_project.lua` case exercises
+    the full consumer path (`by_annotation` → `by_id` → `resolve_handle` →
+    `frontend.scope`) proving the abstraction is build-ready before any codegen
+    exists; `e2e_project_discovery.sh` runs the analyzer over a real repository
+    example app tree.
 
 **Acceptance (mapped to the story's list):** deterministic output (S1/S2);
 annotations discovered without execution (S1/S2); unknown annotations survive
