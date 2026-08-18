@@ -183,7 +183,9 @@ is the explicit signal that lint data may be present.
    severities, `lua.lint.<id>` codes, JSON `schema_version: 2` (+ `summary.warnings`/
    `infos`/`by_rule`). `test_lint.lua` + `tests/e2e_analyze.sh` (23 cases). Lint runs
    only on a CLEANLY-parsed file (complete + no syntax errors).
-2. **Scope pass** — `hull.source.scope` + `test_scope.lua` (the reusable Step B).
+2. **Scope pass** — DONE. `hull.source.scope` (`resolve -> scope, err`; pcall-guarded)
+   + `test_scope.lua`. The reusable Step B; not yet wired into a rule (slice 3).
+   Design: [hull_source_scope_design.md](hull_source_scope_design.md).
 3. **Scope rules** — `unused-local`, `unused-param`, `shadowed-local`, and
    `undefined-global` (off by default) on top of the pass.
 

@@ -279,4 +279,13 @@ UTEST(lua_source, lint_slice1)
     EXPECT_GT(pass, 0LL);
 }
 
+UTEST(lua_source, scope_slice2)
+{
+    long long pass = 0, fail = -1;
+    int rc = run_lua_test("stdlib/cli/lua/hull/source/tests/test_scope.lua", &pass, &fail);
+    ASSERT_EQ(rc, 0);
+    EXPECT_EQ(fail, 0LL);
+    EXPECT_GT(pass, 0LL);
+}
+
 UTEST_MAIN()

@@ -1,6 +1,7 @@
-# `hull.source.scope` — lexical binding pass (design)
+# `hull.source.scope` — lexical binding pass
 
-Status: DESIGN (pre-implementation). Slice 2 of `hull analyze` v2
+Status: IMPLEMENTED (`stdlib/cli/lua/hull/source/scope.lua`, `test_scope.lua`). Not yet
+wired into any rule (slice 3 consumes it). Slice 2 of `hull analyze` v2
 ([hull_analyze_lint_design.md](hull_analyze_lint_design.md) §3) — the light lexical
 scope / name-resolution pass the scope-backed lint rules (slice 3: `unused-local`,
 `unused-param`, `shadowed-local`, `undefined-global`) need. It is the "semantic /
