@@ -92,8 +92,8 @@ assert_py "totals retain all 4 declarations; 2 annotated" "$OUT" \
     'd["summary"]["declarations_total"]==4 and d["summary"]["declarations_annotated"]==2'
 assert_py "JS frontend honest: analyzable=false, 0 capabilities" "$OUT" \
     'any(f["language"]=="javascript" and f["analyzable"] is False and len(f["capabilities"])==0 for f in d["frontends"])'
-assert_py "Lua frontend reports 4 shipped capabilities" "$OUT" \
-    'any(f["language"]=="lua" and f["analyzable"] is True and len(f["capabilities"])==4 for f in d["frontends"])'
+assert_py "Lua frontend reports 5 shipped capabilities (incl. semantics)" "$OUT" \
+    'any(f["language"]=="lua" and f["analyzable"] is True and len(f["capabilities"])==5 and "semantics" in f["capabilities"] for f in d["frontends"])'
 assert_py "unsupported-frontend diagnostic present (warning)" "$OUT" \
     'any(x["code"]=="project.frontend.unsupported" and x["severity"]=="warning" for x in d["diagnostics"])'
 

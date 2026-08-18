@@ -222,7 +222,7 @@ helpers. `hull.source.analyze` refactors to call it (its **existing 25-case
 same module. **No second walker.** Placing it under `hull.source.*` keeps the
 dependency direction clean (`project` depends on `source`, never the reverse).
 
-### D3 — Frontend registry + capability vocabulary → **plain table registry; 4-capability vocabulary**
+### D3 — Frontend registry + capability vocabulary → **plain table registry; 5-capability vocabulary**
 
 - Registry `hull.project.registry`: a sorted table mapping extension →
   `{language, frontend_module, capabilities, analyzable}`. One canonical map.
@@ -236,11 +236,45 @@ dependency direction clean (`project` depends on `source`, never the reverse).
   opaque** value (an integer index into that generation's frontend table) — not
   a pointer, not serialized, not stable across generations.
 - Capability **vocabulary** (smallest justified by real consumers):
-  `declarations`, `annotations`, `source_ranges`, `scope`. **Not**
-  `bindings`/`semantic_analysis`/`lowering` — no consumer yet; advertising them
-  would violate "do not advertise capabilities that are not implemented." Lua
-  reports all four (scope ships). *Consumers talk only to this contract, never
-  to Lua AST field layouts.*
+  `declarations`, `annotations`, `source_ranges`, `scope`, `semantics`. **Not**
+  `bindings`/`lowering` — no consumer yet; advertising them would violate "do not
+  advertise capabilities that are not implemented." Lua reports all five (scope +
+  semantics ship). *The neutral discovery consumers (model / projection / analyze)
+  talk only to this contract, never to Lua AST field layouts.*
+
+### D3.1 — Frontend semantic recovery (`declaration_semantics`) [added]
+
+A future IR lowerer needs the **source semantics** of a discovered declaration — the
+initializer expression of a `local`, or the params/body of a function — which the
+frontend-neutral `ProjectDiscovery` deliberately does NOT carry. The Lua frontend
+therefore retains, on each opaque decl object, **private** state read only by the
+semantic accessor and **never serialized**: `_node` (the declaration AST node) and, for
+a multi-name `local`, `_name_index` (this name's 1-based position). The neutral model
+builds its facts from the `decl_*` accessors (not from this object), and the handle table
+that holds the object is not on the wire — so no AST reaches `ProjectDiscovery` / `hull
+agent inspect` / the sidecars / JSON.
+
+One accessor extends the contract (KISS: one semantic-resolution path):
+`declaration_semantics(d) -> (sem, err)`. Reached ONLY via `resolve_handle(disc, h) ->
+{frontend, unit, declaration}`; `sem` is a small **frontend-specific** record over the
+retained node (opaque to the neutral model — a Lua-specific lowering step inspects it):
+- a `local` → `{ form="value", name_index, value }`, where `value` is the initializer
+  **expression** for THIS name by position (nil when there is no initializer at that
+  index — a **legitimate** nil, `err` also nil). The node carries the parser's **exact**
+  `.kind` (call / method_call / literal / name / field / …) and byte `.range` — no ranges
+  are synthesized, so a lowerer can diagnose against the original source.
+- a `local_function` / `function` → `{ form="function", is_method, is_vararg, params,
+  body }` (the parser's exact param/statement subtrees).
+
+`err` (Diagnostic-shaped) is returned ONLY for an impossible/corrupt state (missing
+`_node`, unsupported kind) — never for an ordinary "no initializer", and never for an
+unsupported *lowering* construct (that is the future domain lowerer's concern, not a
+discovery error). Handles stay **generation-local** (an out-of-range handle → nil; each
+analysis owns its own handle table — no cross-generation identity). JavaScript, a reserved
+non-analyzable frontend, ships no `semantics` (it produces no declarations to resolve). The
+commonality across languages begins at the **domain IR**, not this source-level semantic
+record. Covered by `test_project.lua` (a "hypothetical Lua lowerer" reaches a `@query`
+initializer + a `@compute` function through the boundary while the projection leaks no AST).
 
 ### D4 — Multi-name Lua declaration + annotation semantics → **per-name facts with a shared `group_id`; annotations carry `target_group_id`; annotated-only public retention** [RATIFIED: 4a]
 

@@ -155,7 +155,9 @@ do
     for _, e in ipairs(fr) do
         if e.language == "lua" then lua_e = e elseif e.language == "javascript" then js_e = e end
     end
-    ok(lua_e and lua_e.analyzable and #lua_e.capabilities == 4, "lua frontend reports its 4 shipped capabilities")
+    ok(lua_e and lua_e.analyzable and #lua_e.capabilities == 5, "lua frontend reports its 5 shipped capabilities")
+    local caps = {}; for _, c in ipairs(lua_e.capabilities) do caps[c] = true end
+    ok(caps["semantics"], "lua frontend advertises the 'semantics' capability")
     ok(js_e and not js_e.analyzable and #js_e.capabilities == 0, "javascript reserved: analyzable=false, no capabilities")
 end
 
@@ -416,6 +418,102 @@ do
     ok(sc and sc.bindings, "consumer reaches scope via the frontend boundary")
     -- distinct domains stay separable for distinct lowerers
     ok(disc.indexes.by_annotation["compute"], "a @compute lowerer finds its own decls independently")
+end
+
+-- ── frontend semantic recovery: initializer / function semantics via resolve_handle ──
+-- Simulates a future Lua-specific lowerer: find an annotated decl -> resolve its handle ->
+-- ask the frontend for the declaration's SOURCE semantics (initializer expr / function
+-- params+body) -- all WITHOUT the neutral model or the wire carrying any AST.
+do
+    local analyze    = require("hull.project.analyze")
+    local projection = require("hull.project.projection")
+    local json       = require("hull.json")
+    _G.tool = make_tool({ ["s/app.lua"] =
+        "---@query\nlocal q = orders_where()\n" ..
+        "---@query\nlocal a, r, c = 41, foo(), \"z\"\n" ..            -- distinguishable kinds by index
+        "---@compute\nlocal function dot(a, b) return a + b end\n" ..
+        "---@compute\nfunction pipeline.step(x) return x end\n" ..
+        "---@note\nlocal u\n" ..                                       -- no initializer (legit nil)
+        "return q, r, dot\n" })
+    local disc = analyze.analyze("s")
+    _G.tool = nil
+
+    -- resolve an annotated decl by name to (semantics, resolved-handle)
+    local function sem_of(name)
+        for _, d in ipairs(disc.declarations) do
+            if d.name == name then
+                local res = analyze.resolve_handle(disc, d.handle)
+                ok(res and res.frontend and res.unit and res.declaration,
+                    "resolve_handle -> {frontend, unit, declaration}: " .. name)
+                return res.frontend.declaration_semantics(res.declaration), res
+            end
+        end
+        return nil, nil
+    end
+
+    -- 1. @query local: the initializer expression is recovered with its exact Lua kind + range
+    local qsem, qres = sem_of("q")
+    ok(qsem and qsem.form == "value", "@query local q -> value form")
+    ok(qsem.value and qsem.value.kind == "call", "q initializer is a call expression (Lua-specific kind)")
+    eq(qres.unit:text(qsem.value), "orders_where()", "initializer maps to the EXACT original source text")
+
+    -- 2. multi-name: each name recovers ITS OWN initializer by index
+    local asem = sem_of("a"); local rsem = sem_of("r"); local csem = sem_of("c")
+    eq(asem.name_index, 1, "a is name_index 1"); ok(asem.value.kind == "literal", "a initializer is a literal (41)")
+    eq(rsem.name_index, 2, "r is name_index 2"); ok(rsem.value.kind == "call", "r initializer is the call foo()")
+    eq(csem.name_index, 3, "c is name_index 3"); ok(csem.value.kind == "literal", "c initializer is a literal (\"z\")")
+
+    -- 3. @compute local function: params + body recovered
+    local dsem = sem_of("dot")
+    ok(dsem and dsem.form == "function", "@compute local function dot -> function form")
+    ok(#dsem.params == 2 and dsem.params[1].name == "a" and dsem.params[2].name == "b", "dot params recovered (a, b)")
+    ok(type(dsem.body) == "table" and #dsem.body >= 1, "dot function body available to the frontend")
+    ok(not dsem.is_method and not dsem.is_vararg, "dot is a plain (non-method, non-vararg) function")
+
+    -- 4. @compute global (dotted) function
+    local psem = sem_of("pipeline.step")
+    ok(psem and psem.form == "function" and #psem.params == 1 and psem.params[1].name == "x",
+        "global function pipeline.step semantics recovered (param x)")
+
+    -- 5. a legitimate no-initializer local -> value nil, NO error (a non-nil `usem` proves
+    --    no error was returned: a corrupt state returns nil, err instead).
+    local usem = sem_of("u")
+    ok(usem and usem.form == "value" and usem.value == nil,
+        "local with no initializer -> value nil (legit, not an error)")
+
+    -- annotations still attach to each name of the multi-name group (unchanged semantics)
+    for _, nm in ipairs({ "a", "r", "c" }) do
+        local d
+        for _, x in ipairs(disc.declarations) do if x.name == nm then d = x end end
+        ok(d and d.annotations[1] and d.annotations[1].name == "query",
+            "@query still attached to multi-name member: " .. nm)
+    end
+
+    -- 6. impossible/corrupt frontend state -> STRUCTURED error, never a silent nil
+    local bad, berr = frontend.declaration_semantics({ _kind = "local" })   -- no _node
+    ok(bad == nil and berr and berr.severity == "error" and berr.code == "lua.internal",
+        "corrupt declaration (missing node) -> structured diagnostic, not silent nil")
+
+    -- 7. the semantics + AST stay PRIVATE: the public projection carries no frontend node
+    local p = projection.project(disc)
+    local leaked = false
+    for _, d in ipairs(p.declarations) do
+        if d._node ~= nil or d._name_index ~= nil then leaked = true end
+    end
+    ok(not leaked, "public projection declarations carry no frontend AST node / private index")
+    local blob = json.encode(p)
+    ok(not blob:find("_node", 1, true) and not blob:find("local_declaration", 1, true)
+        and not blob:find("function_expr", 1, true) and not blob:find("method_call", 1, true)
+        and not blob:find("orders_where", 1, true),
+        "serialized projection contains NO raw AST markers or initializer source")
+
+    -- 8. handles are generation-local: out-of-range -> nil; a fresh analysis has its own table
+    local hmax = 0
+    for _, d in ipairs(disc.declarations) do if d.handle > hmax then hmax = d.handle end end
+    ok(analyze.resolve_handle(disc, hmax + 1000) == nil, "an out-of-range handle -> nil (generation-local)")
+    _G.tool = make_tool({ ["s/app.lua"] = "---@query\nlocal q = foo()\nreturn q\n" })
+    local discB = analyze.analyze("s"); _G.tool = nil
+    ok(disc._handles ~= discB._handles, "each generation owns a distinct handle table (no cross-generation identity)")
 end
 
 print(string.format("test_project: %d passed, %d failed", pass, fail))
