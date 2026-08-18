@@ -1,7 +1,7 @@
 # Project Source Discovery — design record
 
-Status: **RATIFIED (with amendments). Slice 1 MERGED (#356); Slice 2 implemented
-(#357); Slices 3-4 pending.**
+Status: **RATIFIED (with amendments). Slices 1-2 MERGED (#356, #357); Slice 3
+implemented; Slice 4 pending.**
 Author: (design-first, per the story's required cadence)
 Related: `docs/lua_source_analysis_design.md`, `docs/hull_source_scope_design.md`,
 `docs/hull_analyze_design.md`, `docs/hull_analyze_lint_design.md`.
@@ -471,11 +471,24 @@ attribution, no em-dashes.
     pruned; capability reporting; and a leak check that no generation-internal
     state reaches the wire.
 
-- **Slice 3 — `hull dev` integration (D7/D9).**
-  - Publish `.hull/discovery.json` per generation in `--agent`; `hull agent
-    <inspect>` reads the published generation when dev is live.
-  - Gate (e2e): `hull dev --agent` publishes a generation; modify a source +
-    reload → a new generation; standalone vs published schema equivalence.
+- **Slice 3 — `hull dev` integration (D7/D9). DONE.**
+  - `hull dev --agent` publishes `.hull/discovery.json` per (re)spawn with a
+    monotonic `generation`, by spawning `hull agent inspect <app_dir> --out=…
+    --generation=N --session-pid=<supervisor>` (fresh analysis, `source="dev"`,
+    projected via the shared `hull.project.projection`, written atomically
+    tmp+rename). `dev.json` gains `session_pid` (the supervisor PID, stable across
+    reloads) and is itself written atomically; both sidecars are removed on dev
+    exit. `hull agent inspect` (C `cmd_inspect`) streams the published generation
+    only when `discovery.json`/`dev.json` `session_pid` match AND `kill(pid,0)`
+    confirms the supervisor is live (rejects a stale/crashed-session sidecar);
+    otherwise it delegates to the tool VM for a standalone analysis. Publish is
+    the fresh-analysis path (never reads a published generation → no recursion).
+    Scope: the non-TUI `--agent` loop (the agent-facing path); publishing from the
+    `hull dev --tui` reload path is a documented follow-up.
+  - Gate (e2e, in `e2e_project_discovery.sh`): dev publishes a generation; the
+    session_pid matches across both sidecars; a source change → reload → a new
+    generation (1→2); sidecars removed on exit; after exit → standalone; and a
+    dead-`session_pid` sidecar is ignored → fresh standalone analysis.
 
 - **Slice 4 — build seam (D10), abstraction-only.**
   - Ship + test `hull.project.analyze` as the host abstraction a build consumer

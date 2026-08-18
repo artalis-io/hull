@@ -32,6 +32,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <signal.h>
+#include <limits.h>
 
 /* ── Output helper ─────────────────────────────────────────────────── */
 
@@ -734,6 +736,100 @@ static void agent_usage(void)
         "All output is JSON to stdout.\n");
 }
 
+/* ── hull agent inspect ────────────────────────────────────────────────
+ *
+ * Read a text field's integer value from a small JSON blob (crude, matching
+ * hl_agent_status's dev.json port parse): "<key>"<ws>:<ws><digits>. Returns -1 if absent.
+ */
+static long json_int_field(const char *buf, const char *key)
+{
+    char needle[64];
+    int n = snprintf(needle, sizeof(needle), "\"%s\"", key);
+    if (n < 0 || (size_t)n >= sizeof(needle)) return -1;
+    const char *p = strstr(buf, needle);
+    if (!p) return -1;
+    p += n;
+    while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r') p++;
+    if (*p != ':') return -1;
+    p++;
+    while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r') p++;
+    return strtol(p, NULL, 10);
+}
+
+/* Read a whole file into a NUL-terminated malloc'd buffer (cap-bounded), or NULL. */
+static char *read_whole_file(const char *path, size_t cap)
+{
+    FILE *f = fopen(path, "rb");
+    if (!f) return NULL;
+    if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return NULL; }
+    long sz = ftell(f);
+    if (sz < 0 || (size_t)sz > cap) { fclose(f); return NULL; }
+    if (fseek(f, 0, SEEK_SET) != 0) { fclose(f); return NULL; }
+    char *buf = malloc((size_t)sz + 1);
+    if (!buf) { fclose(f); return NULL; }
+    size_t got = fread(buf, 1, (size_t)sz, f);
+    fclose(f);
+    buf[got] = '\0';
+    return buf;
+}
+
+/* If a LIVE dev session has published a discovery generation for `app_dir`, stream it to
+ * stdout and return 0. "Live" (D9): both .hull/discovery.json and .hull/dev.json exist,
+ * their session_pid values match, and that supervisor PID is still alive (kill(pid,0)).
+ * Any mismatch / dead session / missing file -> -1 (caller falls back to standalone).
+ * This rejects a stale or cross-reload sidecar left by a prior/killed dev session. */
+static int agent_inspect_stream_live(const char *app_dir)
+{
+    char disc_path[PATH_MAX], dev_path[PATH_MAX];
+    int a = snprintf(disc_path, sizeof(disc_path), "%s/.hull/discovery.json", app_dir);
+    int b = snprintf(dev_path, sizeof(dev_path), "%s/.hull/dev.json", app_dir);
+    if (a < 0 || (size_t)a >= sizeof(disc_path) || b < 0 || (size_t)b >= sizeof(dev_path))
+        return -1;
+
+    char *dev = read_whole_file(dev_path, 64 * 1024);
+    if (!dev) return -1;
+    long sp_dev = json_int_field(dev, "session_pid");
+    free(dev);
+    if (sp_dev <= 0) return -1;
+
+    char *disc = read_whole_file(disc_path, 64 * 1024 * 1024);   /* 64 MB cap */
+    if (!disc) return -1;
+    long sp_disc = json_int_field(disc, "session_pid");
+
+    /* Bind the published generation to a specific live dev session. */
+    if (sp_disc != sp_dev || kill((pid_t)sp_disc, 0) != 0) { free(disc); return -1; }
+
+    fputs(disc, stdout);
+    free(disc);
+    return 0;
+}
+
+/* `hull agent inspect [app_dir] [--out=... --generation=N --session-pid=P]`.
+ * Without publish flags and with a live published generation, streams that generation
+ * (D9). Otherwise delegates to the tool VM (hull.project.inspect): standalone stdout, or
+ * -- when --out is present (used by `hull dev`) -- a fresh publish write. `argv` is
+ * hl_cmd_agent's own (argv[1]=="inspect"), so argv+1 keeps arg[0]="inspect" in the VM. */
+static int cmd_inspect(int argc, char **argv, const HlCommandEnv *env)
+{
+    const char *app_dir = ".";
+    int has_publish_flag = 0;
+    for (int i = 2; i < argc; i++) {          /* argv[1]=="inspect"; args start at 2 */
+        const char *a = argv[i];
+        if (strncmp(a, "--out=", 6) == 0 || strncmp(a, "--generation=", 13) == 0 ||
+            strncmp(a, "--session-pid=", 14) == 0) {
+            has_publish_flag = 1;
+        } else if (a[0] != '-') {
+            app_dir = a;                       /* first positional; multi-positional -> Lua rejects */
+        }
+    }
+
+    if (!has_publish_flag && agent_inspect_stream_live(app_dir) == 0)
+        return 0;                              /* served the live published generation */
+
+    return hull_tool("hull.project.inspect", argc - 1, argv + 1,
+                     env ? env->hull_exe : NULL);
+}
+
 /* ── Command entry point ──────────────────────────────────────────── */
 
 int hl_cmd_agent(int argc, char **argv, const HlCommandEnv *env)
@@ -800,11 +896,10 @@ int hl_cmd_agent(int argc, char **argv, const HlCommandEnv *env)
     /* Composite project summary — one call to orient an agent. */
     if (strcmp(sub, "overview") == 0)     return cmd_overview(sub_argc, sub_argv);
     /* Project source discovery — the canonical analyzed project model (annotated
-     * declarations) as versioned JSON. Delegates to the Lua tool VM (hull.project.inspect
-     * -> hull.project.analyze). argv+1 keeps arg[0]="inspect", arg[1..]=args in the VM. */
+     * declarations) as versioned JSON. A live dev session's published generation is
+     * streamed directly (D9); otherwise the tool VM analyzes (standalone / publish). */
     if (strcmp(sub, "inspect") == 0)
-        return hull_tool("hull.project.inspect", argc - 1, argv + 1,
-                         env ? env->hull_exe : NULL);
+        return cmd_inspect(argc, argv, env);
 #ifdef HL_ENABLE_DB
     if (strcmp(sub, "schema-diff") == 0)  return cmd_schema_diff(sub_argc, sub_argv);
     if (strcmp(sub, "sql") == 0)          return cmd_sql(sub_argc, sub_argv);

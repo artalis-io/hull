@@ -10,7 +10,10 @@
 # frontend capabilities are accurate; static/ browser assets are pruned while application
 # .js is honestly unsupported (never parsed as Lua) -> complete=false; a missing root is
 # an invalid+incomplete discovery; and the public JSON leaks NO generation-internal state
-# (handle / _by_source / _handles / by_id).
+# (handle / _by_source / _handles / by_id). Slice 3 also drives a live `hull dev --agent`:
+# it publishes a discovery.json generation per reload (session_pid-bound), inspect serves
+# the LIVE generation, a source change bumps the generation, and a dead/stale session
+# sidecar is ignored (falls back to standalone).
 #
 # SPDX-License-Identifier: AGPL-3.0-or-later
 
@@ -32,8 +35,9 @@ fi
 fail() { echo "  FAIL: $1"; FAIL=$((FAIL + 1)); }
 pass() { echo "  PASS: $1"; PASS=$((PASS + 1)); }
 
+DEV_PID=""
 TMP=$(mktemp -d)
-trap 'chmod -R u+rwx "$TMP" 2>/dev/null; rm -rf "$TMP"' EXIT
+trap '[ -n "$DEV_PID" ] && kill "$DEV_PID" 2>/dev/null; chmod -R u+rwx "$TMP" 2>/dev/null; rm -rf "$TMP"' EXIT
 
 # assert_py "<name>" "<json>" "<python expr over d>": pass iff the expr is truthy.
 assert_py() {
@@ -152,6 +156,68 @@ RCS=0; "$HULL" agent inspect "$OK" >/dev/null 2>&1 || RCS=$?
 # an unknown flag is a usage error too
 RCF=0; "$HULL" agent inspect --bogus >/dev/null 2>&1 || RCF=$?
 [ "$RCF" = "2" ] && pass "unknown flag -> usage error (exit 2)" || fail "unknown-flag exit ($RCF, want 2)"
+
+# ── Slice 3: hull dev --agent publishes generations; inspect reads the LIVE one ──
+DEVAPP="$TMP/devapp"
+mkdir -p "$DEVAPP"
+cat > "$DEVAPP/app.lua" <<'EOF'
+---@route GET /
+local function home() end
+return home
+EOF
+"$HULL" dev --agent -p 39811 "$DEVAPP/app.lua" >/dev/null 2>&1 &
+DEV_PID=$!
+# wait for the first published generation (up to ~10s)
+i=0; while [ "$i" -lt 20 ] && [ ! -f "$DEVAPP/.hull/discovery.json" ]; do sleep 0.5; i=$((i + 1)); done
+
+if [ -f "$DEVAPP/.hull/discovery.json" ]; then
+    OUTD=$("$HULL" agent inspect "$DEVAPP" 2>/dev/null)
+    assert_py "dev running -> published generation served (source=dev, generation>=1)" "$OUTD" \
+        'd["source"]=="dev" and d["generation"]>=1'
+    assert_py "published generation carries a session_pid" "$OUTD" 'd.get("session_pid") is not None'
+    SP_DISC=$(grep -o '"session_pid":[0-9]*' "$DEVAPP/.hull/discovery.json" | head -1)
+    SP_DEV=$(grep -o '"session_pid":[0-9]*' "$DEVAPP/.hull/dev.json" | head -1)
+    { [ -n "$SP_DISC" ] && [ "$SP_DISC" = "$SP_DEV" ]; } \
+        && pass "discovery.json + dev.json session_pid match" || fail "session_pid mismatch ($SP_DISC vs $SP_DEV)"
+
+    GEN1=$(printf '%s' "$OUTD" | python3 -c 'import json,sys;print(json.load(sys.stdin)["generation"])' 2>/dev/null || echo 0)
+    # a source change triggers a reload -> a NEW generation
+    printf '\n---@added\nlocal x = 1\nreturn home, x\n' >> "$DEVAPP/app.lua"
+    NEWGEN=0; i=0
+    while [ "$i" -lt 30 ]; do
+        G=$("$HULL" agent inspect "$DEVAPP" 2>/dev/null | python3 -c 'import json,sys;print(json.load(sys.stdin).get("generation",0))' 2>/dev/null || echo 0)
+        if [ "$G" -gt "$GEN1" ] 2>/dev/null; then NEWGEN=$G; break; fi
+        sleep 0.5; i=$((i + 1))
+    done
+    { [ "$NEWGEN" -gt "$GEN1" ]; } 2>/dev/null \
+        && pass "source change -> reload -> new generation ($GEN1 -> $NEWGEN)" \
+        || fail "no new generation after reload (gen1=$GEN1, newgen=$NEWGEN)"
+
+    kill "$DEV_PID" 2>/dev/null || true; wait "$DEV_PID" 2>/dev/null || true; DEV_PID=""
+    { [ ! -f "$DEVAPP/.hull/discovery.json" ] && [ ! -f "$DEVAPP/.hull/dev.json" ]; } \
+        && pass "sidecars removed on dev exit" || fail "sidecars linger after dev exit"
+    OUTS=$("$HULL" agent inspect "$DEVAPP" 2>/dev/null)
+    assert_py "after dev stops -> standalone (generation 0)" "$OUTS" \
+        'd["source"]=="standalone" and d["generation"]==0'
+else
+    fail "dev did not publish discovery.json within timeout"
+    kill "$DEV_PID" 2>/dev/null || true; wait "$DEV_PID" 2>/dev/null || true; DEV_PID=""
+fi
+
+# ── stale/crashed-session robustness: sidecars with a DEAD session_pid -> standalone ──
+STALE="$TMP/stale"
+mkdir -p "$STALE/.hull"
+cat > "$STALE/app.lua" <<'EOF'
+---@main
+local function m() end
+return m
+EOF
+DEADPID=2147480000   # far above any real pid -> kill(pid,0) fails -> not live
+printf '{"port":1,"pid":1,"session_pid":%s,"started_at":1}\n' "$DEADPID" > "$STALE/.hull/dev.json"
+printf '{"schema_version":1,"source":"dev","generation":9,"session_pid":%s,"declarations":[]}\n' "$DEADPID" > "$STALE/.hull/discovery.json"
+OUTST=$("$HULL" agent inspect "$STALE" 2>/dev/null)
+assert_py "dead-session sidecar ignored -> fresh standalone analysis" "$OUTST" \
+    'd["source"]=="standalone" and any(x["name"]=="m" for x in d["declarations"])'
 
 echo ""
 echo "=== hull agent inspect E2E: $PASS passed, $FAIL failed ==="
