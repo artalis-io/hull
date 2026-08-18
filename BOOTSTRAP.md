@@ -184,6 +184,7 @@ from the CLI:
 | What does the manifest resolve to | `hull agent manifest` |
 | Is my app ready to deploy | `hull agent deploy` |
 | Run a request without booting the full server | `hull agent endpoint POST /items` |
+| What `---@`-annotated declarations does my Lua source define (analyzed statically, no execution) | `hull agent inspect` |
 
 There are dozens of `hull agent` subcommands - see [README.md § Using Hull
 with AI Agents](README.md#using-hull-with-ai-agents) for the full

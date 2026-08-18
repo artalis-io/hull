@@ -19,6 +19,7 @@ hull agent db schema .                 # show database tables and columns
 hull agent request GET /health         # HTTP request to the running server
 hull agent status .                    # check if dev server is running
 hull agent test .                      # run tests with JSON output
+hull agent inspect .                   # analyzed project model: annotated declarations
 ```
 
 ## Architecture Overview
@@ -276,6 +277,26 @@ Eighteen additional subcommands close the iterative-edit loop. All JSON to stdou
 #### `hull agent overview [app_dir]`
 
 One-shot snapshot. Composes manifest + modules + capabilities + routes + compute/gpu inventory + cache state into a single JSON document. Cheaper than calling each subcommand individually when an agent just wants "what's this app's overall shape".
+
+#### `hull agent inspect [app_dir]`
+
+The **project source-discovery** model as versioned JSON: a static analysis of the app's Lua source (parsed by the pure-Lua `hull.source.*` layer, **without executing app code**) that reports the **annotated declarations** — `---@name` annotations attached to `local` / `local function` / `function` declarations — with exact ranges, deterministic IDs, and `by_annotation` / `by_source` / `by_language` / `by_id` indexes.
+
+- Top-level fields: `schema_version`, `generation`, `source` (`"standalone"` | `"dev"`), `project_root`, `valid` (no source rejected/failed), `complete` (every application source had an analyzable frontend), `sources[]`, `frontends[]`, `declarations[]` (annotated-only), `diagnostics[]`, `summary`, `indexes`.
+- Runs **standalone**, or — when a live `hull dev --agent` session has published a generation — serves that live `.hull/discovery.json` generation (same schema; `source: "dev"`, `generation >= 1`).
+- Exit 0 whenever a discovery is produced (validity is data: read `valid` / `complete`); exit 2 only on a usage error (e.g. a second positional root).
+- JavaScript is a reserved-but-not-yet-analyzable frontend: an application `.js` is reported `status: "unsupported"` and sets `complete: false`, and is **never parsed as Lua**; `static/*.js` browser assets are pruned.
+- CLI-only (not exposed via `hull mcp`). Foundation for a future codegen step (Query/Compute IR). Design: [docs/project_discovery_design.md](docs/project_discovery_design.md).
+
+```json
+{"schema_version":1,"generation":0,"source":"standalone","project_root":"myapp",
+ "valid":true,"complete":true,
+ "declarations":[{"id":"lua:app.lua:local_function:home:32-36","kind":"local_function",
+   "name":"home","path":"app.lua","range":{"start":32,"stop":36,"line":3,"col":16},
+   "annotations":[{"name":"route","value":"GET /","frontend":"lua",
+     "target_group_id":"lua:app.lua:local_function:g20-45"}]}],
+ "indexes":{"by_annotation":{"route":["lua:app.lua:local_function:home:32-36"]}}}
+```
 
 #### `hull agent auth-status [app_dir]` (v0.3.0)
 

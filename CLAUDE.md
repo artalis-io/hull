@@ -843,6 +843,13 @@ stdlib/                 # Embedded standard library
                         #   what apps can import. `hull new`'s modular
                         #   templates (templates_rest.lua, etc.) also live
                         #   here. They're embedded scaffolds, not user code.
+    source/             #     Pure-Lua Lua-5.4 source analysis (lexer/parser/
+                        #     ranges/diagnostics/annotations/scope/lint/discover)
+                        #     + hull.source.analyze (`hull analyze`). Never load().
+    project/            #     Frontend-neutral project source discovery on top of
+                        #     source/: registry, frontend_lua, model, analyze,
+                        #     projection, inspect, publish (`hull agent inspect`,
+                        #     `hull dev --agent` generations). See docs/project_discovery_design.md
 vendor/                 # Vendored libraries (do not modify)
 tests/                  # Unit tests (test_*.c) and E2E scripts (e2e_*.sh)
   fixtures/             #   Test fixtures (null_app, etc.)
@@ -1168,6 +1175,48 @@ The naming pattern is `HULL_NO_<KIND>_CACHE` where `<KIND>` is the registry's `e
 
 **`hull agent overview [app_dir]`**. Single-shot composite project summary an agent can read when dropped into an unfamiliar app dir. Composes runtime detection, route stats (count + methods + ws/sse flags), compute modules + AOT readiness + wamrc state, GPU shaders, migrations, declared modules, tests, and a `build_ready` flag. No DB connection; agents needing pending-migration counts call `hull agent migrate` separately.
 
+**`hull agent inspect [app_dir]`**. Emit the **project source-discovery** model (annotated declarations) as versioned JSON. Delegates to the Lua tool VM (`hull.project.inspect` → `hull.project.analyze`) — the one canonical, host-owned analyzer; it never re-scans or parses source itself. Standalone by default; when a live `hull dev --agent` session has published a generation, the C dispatcher (`cmd_inspect`) streams that generation instead (bound to the session by `session_pid` + `kill(pid,0)` liveness + a full `sh_json_parse` envelope validation). At most one positional root (`inspect a b` → exit 2). Exit 0 whenever a discovery is produced — validity is data in the JSON (`valid` / `complete`). This is a CLI-only agent subcommand (not MCP-wired). See "Project source discovery" below and [docs/project_discovery_design.md](docs/project_discovery_design.md).
+
+### Project source discovery (`hull.source.*` + `hull.project.*`)
+
+Hull statically analyzes an app's **Lua source WITHOUT executing it**, producing a canonical
+representation of annotated declarations that a future codegen step (Query/Compute IR) can
+consume. Two layers, both **pure Lua in the sandboxed tool VM** (the whole analysis brain is
+zero C):
+
+- **`hull.source.*`** (`stdlib/cli/lua/hull/source/`) — the language-analysis layer: a
+  pure-Lua recursive-descent Lua 5.4 lexer/parser (NEVER `load()`), half-open byte ranges,
+  diagnostics, the generic `---@` annotation attach (to `local_declaration` /
+  `function_declaration` only), a scope/binding resolver, and the `hull analyze` lint engine.
+  Public contract `hull.source.lua` (`parse(source, {path?}) -> (unit, err)`, never raises).
+  `hull.source.discover` is the shared hardened bounded walker (extracted from `hull analyze`;
+  exclude-dirs pruned during traversal, canonical containment, deterministic/regular/no-symlink)
+  — the ONE recursive source walker in Hull. Design: [docs/lua_source_analysis_design.md](docs/lua_source_analysis_design.md), [docs/hull_analyze_design.md](docs/hull_analyze_design.md).
+- **`hull.project.*`** (`stdlib/cli/lua/hull/project/`) — the frontend-neutral project layer
+  on top: `registry` (extension → frontend map; Lua analyzable, `js/mjs/cjs` reserved +
+  `analyzable=false`, never parsed as Lua), `frontend_lua` (the ONLY module that knows Lua AST
+  layouts), `model` (the `ProjectDiscovery` — deterministic textual IDs, per-name facts sharing
+  a `group_id` with each annotation carrying `target_group_id` + `frontend`, annotated-only
+  public `declarations[]`, independent `valid` / `complete` axes, `by_annotation`/`by_source`/
+  `by_language`/`by_id`/`annotated` indexes), `analyze` (the single canonical host analyzer:
+  root canonicalization, a `pcall` boundary that converts any internal defect into a
+  `project.internal` invalid discovery, a generation-unique handle table + `resolve_handle`),
+  `projection` (the one side-effect-free wire-schema, dropping all generation-internal state),
+  `inspect` (the `hull agent inspect` read/standalone entry), and `publish` (the internal
+  dev-generation publisher). Design: [docs/project_discovery_design.md](docs/project_discovery_design.md).
+
+`hull dev --agent` publishes a `.hull/discovery.json` **generation** per (re)spawn (fresh
+analysis, atomic tmp+rename, tagged with the supervisor `session_pid`); `hull agent inspect`
+serves that live generation or, absent a live session, runs one standalone analysis — same
+schema either way (`source: "dev"` vs `"standalone"`). The build seam is documented + tested
+but **abstraction-only**: `build.lua` is unchanged and does no per-build parse; a future
+lowering consumer calls `hull.project.analyze(app_dir)` in `main()` (after `parse_args()`,
+before `discover()`). ~180 lines of hardened C (in `agent.c` + `dev.c`) handle only the
+live-read/sidecar/publish glue; all source parsing stays in Lua. Tests:
+`stdlib/cli/lua/hull/project/tests/test_project.lua` (UTEST leg `project_discovery`) +
+`tests/e2e_project_discovery.sh` (`make e2e-project-discovery`, incl. a live backgrounded
+`hull dev --agent`).
+
 **`hull sign-release <manifest> --key <secret_key>`**. Sign a release manifest (typically `hull.sha256`) with an Ed25519 secret key. Writes `<manifest>.sig` (128 hex chars). Used by the GitHub Actions release workflow; never invoked by end users. See [docs/release_signing.md](docs/release_signing.md).
 
 **`hull verify-release <manifest> <signature> [--pubkey <hex>]`**. Verify an Ed25519 signature over a release manifest using the embedded release public key (or an explicit override). Exit 0 = valid, 1 = invalid / placeholder. For offline auditing of a downloaded release.
@@ -1207,6 +1256,7 @@ hull agent test [app_dir]                # run tests with JSON output
 hull agent context --task=T --level=L    # task-relevant documentation
 hull agent migrate [app_dir] [-d path]   # migration status
 hull agent deploy [app_dir]              # deployment readiness analysis
+hull agent inspect [app_dir]             # analyzed project model: annotated declarations (JSON)
 ```
 
 `hull dev --agent` enables sidecar files: `.hull/dev.json` (port, PID) on start, `.hull/last_error.json` on load failure. See [AGENTS.md](AGENTS.md) for the full agent development guide.
