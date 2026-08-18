@@ -1449,6 +1449,16 @@ jobs:
         timeout-minutes: 3
         run: ./fuzz/fuzz_span_window fuzz/corpus_span_window/ -max_total_time=60
 
+      - name: Fuzz lua source parser (60s)
+        # hull.source.lua: adversarial bytes -> lua.parse() over a bounded lua_State.
+        # Intrinsic invariants (never-raise / valid shape / range sanity / bounded via
+        # a per-input allocator, with LUA_ERRMEM classified as expected exhaustion) +
+        # ASan/UBSan on the instrumented Lua VM. `make fuzz-lua-source` stages the full
+        # repo .lua corpus deterministically first (from the repo root, so package.path
+        # resolves). Complements the differential conformance gate.
+        timeout-minutes: 3
+        run: make fuzz-lua-source CC=clang FUZZ_TIME=60
+
   # End-to-end against a real PostgreSQL 16 (started in Docker by the script).
   # Exercises the whole path the unit tests can't: DSN -> SCRAM-SHA-256 auth
   # (plaintext + TLS via a self-signed cert) -> parameterized query + typed

@@ -759,7 +759,26 @@ fuzz/fuzz_span_sdk: fuzz/fuzz_span_sdk.c
 fuzz/fuzz_span_window: fuzz/fuzz_span_window.c $(SRCDIR)/hull/cap/fs.c $(SRCDIR)/hull/cap/audit.c $(SRCDIR)/hull/utils/alloc.c $(SH_JSON_DIR)/sh_json.c $(SH_ARENA_DIR)/sh_arena.c
 	$(CC) $(FUZZ_CFLAGS) -Ivendor/keel/include -o $@ $^
 
-fuzz: fuzz/fuzz_sh_json fuzz/fuzz_path_normalize fuzz/fuzz_mime_sniff fuzz/fuzz_host_match fuzz/fuzz_pgwire fuzz/fuzz_pg_dsn fuzz/fuzz_pg_rewrite fuzz/fuzz_mysqlwire fuzz/fuzz_mysql_dsn fuzz/fuzz_respwire fuzz/fuzz_valkey_dsn fuzz/fuzz_span_sdk fuzz/fuzz_span_window
+# hull.source.lua parser: adversarial bytes -> lua.parse() over a bounded lua_State.
+# Instruments the vendored Lua VM (excluding the standalone lua.c/luac.c mains) so
+# ASan/UBSan cover the whole parse path. Unlike the pure-C codec fuzzers this drives a
+# lua_State and must run from the repo root (package.path resolves stdlib/cli/lua).
+LUA_FUZZ_SRCS := $(filter-out vendor/lua/lua.c vendor/lua/luac.c,$(wildcard vendor/lua/*.c))
+fuzz/fuzz_lua_source: fuzz/fuzz_lua_source.c $(LUA_FUZZ_SRCS)
+	$(CC) $(FUZZ_CFLAGS) -Ivendor/lua -o $@ $^ -lm
+
+# Stage the FULL repo .lua corpus (deterministically, path-mangled names) + the small
+# checked-in seed into a temp dir at run time -- no duplicated snapshot committed.
+build/fuzz-corpus/lua_source: fuzz/corpus_lua_source
+	@mkdir -p $@
+	@cp fuzz/corpus_lua_source/* $@/ 2>/dev/null || true
+	@find stdlib/lua stdlib/cli/lua examples tests/fixtures -name '*.lua' 2>/dev/null | \
+	  while read f; do cp "$$f" "$@/$$(printf '%s' "$$f" | tr '/.' '__')"; done
+.PHONY: fuzz-lua-source
+fuzz-lua-source: fuzz/fuzz_lua_source build/fuzz-corpus/lua_source
+	./fuzz/fuzz_lua_source build/fuzz-corpus/lua_source/ -dict=fuzz/lua_source.dict -max_len=16384 -max_total_time=$(FUZZ_TIME)
+
+fuzz: fuzz/fuzz_sh_json fuzz/fuzz_path_normalize fuzz/fuzz_mime_sniff fuzz/fuzz_host_match fuzz/fuzz_pgwire fuzz/fuzz_pg_dsn fuzz/fuzz_pg_rewrite fuzz/fuzz_mysqlwire fuzz/fuzz_mysql_dsn fuzz/fuzz_respwire fuzz/fuzz_valkey_dsn fuzz/fuzz_span_sdk fuzz/fuzz_span_window fuzz/fuzz_lua_source
 
 # Time-boxed run over the seed corpora (what CI runs). FUZZ_TIME overrides.
 fuzz-run: fuzz
@@ -776,6 +795,7 @@ fuzz-run: fuzz
 	./fuzz/fuzz_valkey_dsn fuzz/corpus_valkey_dsn/ -max_total_time=$(FUZZ_TIME)
 	./fuzz/fuzz_span_sdk fuzz/corpus_span_sdk/ -max_total_time=$(FUZZ_TIME)
 	./fuzz/fuzz_span_window fuzz/corpus_span_window/ -max_total_time=$(FUZZ_TIME)
+	$(MAKE) fuzz-lua-source FUZZ_TIME=$(FUZZ_TIME)   # stages the full .lua corpus first
 
 # ── E2E tests ──────────────────────────────────────────────────────
 

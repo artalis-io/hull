@@ -56,3 +56,9 @@ examples/embed_rust/Cargo.lock
 
 # Local planning / assessment scratch, not part of the repo.
 asset_inventory_assessment.md
+
+# libFuzzer crash / leak / timeout reproducers (written to CWD on a finding)
+crash-*
+leak-*
+timeout-*
+oom-*
