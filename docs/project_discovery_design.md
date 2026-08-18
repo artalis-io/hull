@@ -1,6 +1,7 @@
 # Project Source Discovery — design record
 
-Status: **RATIFIED (with amendments). Slice 1 in progress.**
+Status: **RATIFIED (with amendments). Slice 1 MERGED (#356); Slice 2 implemented
+(#357); Slices 3-4 pending.**
 Author: (design-first, per the story's required cadence)
 Related: `docs/lua_source_analysis_design.md`, `docs/hull_source_scope_design.md`,
 `docs/hull_analyze_design.md`, `docs/hull_analyze_lint_design.md`.
@@ -453,12 +454,16 @@ attribution, no em-dashes.
 
 - **Slice 2 — standalone agent inspection (D8/D9/D11). DONE.**
   - `hull agent inspect [app_dir]` (C dispatch in `agent.c` → `hull_tool(
-    "hull.project.inspect")` → `hull.project.analyze`). `hull.project.inspect`
-    emits an EXPLICIT, `schema_version`'d JSON projection to stdout that DROPS
-    every generation-internal value (per-decl `handle`, `_by_source`, `_handles`,
-    and the `by_id` decl map). Exit 0 when a discovery was produced (validity is
-    data: `valid`/`complete`); exit 2 on a usage error. Standalone only (the
-    dev-running published-generation path is Slice 3).
+    "hull.project.inspect")` → `hull.project.analyze`). The wire schema lives in a
+    SINGLE side-effect-free module `hull.project.projection` (`M.project(disc) ->
+    plain table`) that DROPS every generation-internal value (per-decl `handle`,
+    `_by_source`, `_handles`, the `by_id` decl map); both standalone inspection and
+    Slice 3's `discovery.json` publication call it, so there is one wire-schema
+    definition. `hull.project.inspect` follows the tool-module convention (`return
+    main`; the dispatcher invokes it only as the entry command -- requiring it
+    never runs the CLI). At most one positional root (`inspect a b` → exit 2). Exit
+    0 when a discovery was produced (validity is data: `valid`/`complete`); exit 2
+    on a usage error. Standalone only (the dev-running path is Slice 3).
   - Gate: `tests/e2e_project_discovery.sh` (25 assertions, wired into CI) over the
     REAL tool VM — deterministic output; annotations discovered without execution;
     unknown annotations survive; malformed → `valid=false` + diagnostics; `.js`

@@ -142,6 +142,17 @@ assert_py "missing root emits project.discovery_failed" "$OUTM" \
     'any(x["code"]=="project.discovery_failed" for x in d["diagnostics"])'
 [ "$RCM" = "0" ] && pass "missing root still exits 0 (validity is in the JSON)" || fail "missing-root exit ($RCM)"
 
+# ── usage: multiple positional roots is an error (exit 2), not "use the last" ──
+# (|| RC=$? captures the non-zero exit without tripping `set -e`.)
+RCU=0; "$HULL" agent inspect "$OK" "$BAD" >/dev/null 2>&1 || RCU=$?
+[ "$RCU" = "2" ] && pass "two positional roots -> usage error (exit 2)" || fail "multi-positional exit ($RCU, want 2)"
+# a single positional still works (exit 0)
+RCS=0; "$HULL" agent inspect "$OK" >/dev/null 2>&1 || RCS=$?
+[ "$RCS" = "0" ] && pass "single positional root still exits 0" || fail "single-positional exit ($RCS)"
+# an unknown flag is a usage error too
+RCF=0; "$HULL" agent inspect --bogus >/dev/null 2>&1 || RCF=$?
+[ "$RCF" = "2" ] && pass "unknown flag -> usage error (exit 2)" || fail "unknown-flag exit ($RCF, want 2)"
+
 echo ""
 echo "=== hull agent inspect E2E: $PASS passed, $FAIL failed ==="
 [ "$FAIL" -eq 0 ]
