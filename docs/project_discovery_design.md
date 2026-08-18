@@ -506,3 +506,27 @@ All decisions ratified with amendments (folded into D1-D12 above):
    walker into `hull.source.discover` and refactor `hull analyze` onto it.
 
 Implementation proceeds per §5, Slice 1 first.
+
+### 6.1 Slice 1 review fixes (folded in)
+
+Four core-contract fixes from the Slice 1 review, all in the shipped code + tests:
+
+- **Root validation/canonicalization.** `hull.project.analyze` requires
+  `tool.realpath(root)` + `path_kind == "dir"` and uses the CANONICAL root for
+  containment + relative paths (covers symlinked roots and `/`). A missing /
+  non-directory root is a `project.discovery_failed` generation
+  (`valid=false, complete=false`), never a valid, complete, empty project (which
+  the ENOENT-benign `find_files` would otherwise produce).
+- **Protected public boundary.** `M.analyze` wraps the unprotected analysis in
+  `pcall`; any frontend/adapter/model defect becomes an INVALID discovery with a
+  structured `project.internal` diagnostic — honoring "never raises."
+- **Generation-unique, resolvable handles.** The per-file adapter index is gone.
+  The analyzer (the generation owner) assigns a **generation-unique** integer per
+  declaration and retains `{frontend, unit, declaration}` in an internal
+  `disc._handles` table; `M.resolve_handle(disc, h)` is the controlled lookup a
+  future lowerer uses to reach frontend-specific semantics through the boundary.
+  Handles are generation-internal and excluded from the serialized projection.
+- **Scope is callable through the boundary.** The advertised `scope` capability is
+  now a real contract method `frontend.scope(unit) -> (scope, err)` (a protected
+  wrapper around `hull.source.scope.resolve`), so a consumer never bypasses the
+  adapter. (Had it not been made callable, the capability would have been removed.)

@@ -19,9 +19,12 @@ local model    = require("hull.project.model")
 
 local M = { SCHEMA_VERSION = model.SCHEMA_VERSION }
 
--- Project-relative path: strip the root prefix so `path` + IDs are stable + portable.
+
+-- Project-relative path: strip the CANONICAL root prefix so `path` + IDs are stable +
+-- portable. Handles "/" (prefix is just "/") and "." (already relative).
 local function rel_path(root, path)
     if root == "." or root == "" then return path end
+    if root == "/" then return (path:sub(1, 1) == "/") and path:sub(2) or path end
     local prefix = root .. "/"
     if path:sub(1, #prefix) == prefix then return path:sub(#prefix + 1) end
     return path
@@ -37,10 +40,16 @@ local function stamp_path(diags, rel)
     return diags
 end
 
--- Build per-source declaration facts via the frontend CONTRACT (never the AST).
-local function collect_decls(fe, unit, language, rel)
+-- Build per-source declaration facts via the frontend CONTRACT (never the AST). Each
+-- decl is registered in the GENERATION handle table (`handles`) with a generation-unique
+-- integer key retaining { frontend, unit, declaration } for a future lowerer to resolve
+-- through the frontend boundary (M.resolve_handle). Handles are generation-internal and
+-- excluded from the serialized/public projection.
+local function collect_decls(fe, unit, language, rel, handles)
     local out = {}
     for _, d in ipairs(fe.declarations(unit)) do
+        handles.n = handles.n + 1
+        handles.map[handles.n] = { frontend = fe, unit = unit, declaration = d }
         out[#out + 1] = {
             language    = language,
             path        = rel,
@@ -49,22 +58,43 @@ local function collect_decls(fe, unit, language, rel)
             range       = fe.decl_range(d),
             group_range = fe.decl_group_range(d),
             is_method   = fe.decl_is_method(d),
-            handle      = fe.decl_handle(d),
+            handle      = handles.n,          -- generation-unique (not the per-file index)
             annotations = fe.decl_annotations(d),
         }
     end
     return out
 end
 
--- analyze(root, opts?) -> ProjectDiscovery.
---   opts.generation  : the dev generation counter (default 0 = standalone).
---   opts.source_kind : "standalone" (default) | "dev" provenance marker.
--- Discovers APPLICATION source (known-language extensions, static/ pruned so browser
--- assets never count -- D6), dispatches each to its frontend, and assembles the model.
-function M.analyze(root, opts)
-    opts = opts or {}
-    root = discover.normalize(root or ".")
+-- The UNPROTECTED analysis: root validation/canonicalization + discovery + per-file
+-- frontend dispatch + model assembly. May raise on a frontend/adapter/model defect; the
+-- public M.analyze wraps this in a protected boundary (D1: "never raises").
+local function analyze_unprotected(root_in, opts)
+    local root_disp = tostring(root_in or ".")
+    local gen        = opts.generation or 0
+    local source_kind = opts.source_kind or "standalone"
 
+    -- Root validation + canonicalization (symlinks resolved). A missing / non-directory
+    -- root is a project.discovery_failed generation (invalid AND incomplete), never a
+    -- valid, complete, empty project. Containment + relative paths use the CANONICAL root.
+    local canon, reason = tool.realpath(discover.normalize(root_disp))
+    if not canon then
+        local d = model.build(root_disp, gen, {}, { { severity = "error",
+            code = "project.discovery_failed",
+            message = "cannot resolve project root '" .. root_disp .. "' (" .. tostring(reason) .. ")",
+            path = root_disp } }, source_kind)
+        d.complete = false
+        return d
+    end
+    if tool.path_kind(canon) ~= "dir" then
+        local d = model.build(canon, gen, {}, { { severity = "error",
+            code = "project.discovery_failed",
+            message = "project root is not a directory: " .. canon, path = canon } }, source_kind)
+        d.complete = false
+        return d
+    end
+    local root = canon
+
+    local handles = { n = 0, map = {} }
     local per_source, op_diags = {}, {}
     local files, derr = discover.discover(root, { ext = registry.known_exts(), extra_exclude = { "static" } })
     if derr then
@@ -93,7 +123,7 @@ function M.analyze(root, opts)
                     else
                         per_source[#per_source + 1] = { path = rel, language = row.language, role = "app",
                             status = any_error(diags) and "error" or "analyzed",
-                            declarations = collect_decls(fe, unit, row.language, rel),
+                            declarations = collect_decls(fe, unit, row.language, rel, handles),
                             diagnostics = diags }
                     end
                 end
@@ -111,7 +141,35 @@ function M.analyze(root, opts)
         end
     end
 
-    return model.build(root, opts.generation or 0, per_source, op_diags, opts.source_kind or "standalone")
+    local disc = model.build(root, gen, per_source, op_diags, source_kind)
+    disc._handles = handles.map            -- generation-internal; NOT serialized (D6)
+    return disc
+end
+
+-- analyze(root, opts?) -> ProjectDiscovery. PROTECTED public boundary: any internal
+-- frontend/adapter/model failure is converted into an INVALID discovery with a structured
+-- project.internal diagnostic (never a raised error, never a clean generation).
+--   opts.generation  : the dev generation counter (default 0 = standalone).
+--   opts.source_kind : "standalone" (default) | "dev" provenance marker.
+function M.analyze(root, opts)
+    opts = opts or {}
+    local ok, result = pcall(analyze_unprotected, root, opts)
+    if ok then return result end
+    local root_disp = tostring(root or ".")
+    local d = model.build(root_disp, opts.generation or 0, {}, { { severity = "error",
+        code = "project.internal",
+        message = "internal analyzer failure: " .. tostring(result), path = root_disp } },
+        opts.source_kind or "standalone")
+    d.complete = false
+    return d
+end
+
+-- Controlled generation-internal handle lookup: resolve an opaque declaration handle to
+-- { frontend, unit, declaration } so a future lowerer can invoke frontend-specific
+-- semantics (e.g. frontend.scope(unit)) THROUGH the adapter boundary. Handles are unique
+-- within one generation and are not stable across generations/processes.
+function M.resolve_handle(disc, handle)
+    return disc and disc._handles and disc._handles[handle] or nil
 end
 
 return M

@@ -161,7 +161,15 @@ end
 
 -- ── orchestrator end-to-end (stubbed tool over an in-memory tree) ────
 -- A minimal fake filesystem so analyze() runs its full discovery + dispatch path.
+-- Fixture paths are treated as already-canonical (realpath is identity for anything that
+-- "exists"; path_kind reports dir for a prefix-of-some-file, file for an exact file).
 local function make_tool(fs)
+    local function is_file(p) return fs[p] ~= nil end
+    local function is_dir(p)
+        if p == "." or p == "" then return true end
+        for path in pairs(fs) do if path:sub(1, #p + 1) == p .. "/" then return true end end
+        return false
+    end
     return {
         find_files = function(root, pat, opts)
             local ext = pat:match("%*%.(.+)$")
@@ -180,6 +188,14 @@ local function make_tool(fs)
             return out
         end,
         read_file = function(path) return fs[path] end,
+        realpath  = function(p)
+            if is_file(p) or is_dir(p) then return p end
+            return nil, "missing"
+        end,
+        path_kind = function(p)
+            if is_file(p) then return "file" elseif is_dir(p) then return "dir" end
+            return nil
+        end,
     }
 end
 
@@ -244,6 +260,73 @@ do
     for _, x in ipairs(d1.declarations) do ids1[#ids1 + 1] = x.id end
     for _, x in ipairs(d2.declarations) do ids2[#ids2 + 1] = x.id end
     eq(table.concat(ids1, "|"), table.concat(ids2, "|"), "analyze() is deterministic across runs")
+end
+
+-- ── root validation: a missing / non-directory root is NOT a clean empty project ──
+do
+    local analyze = require("hull.project.analyze")
+    _G.tool = make_tool({ ["real/app.lua"] = "return 1\n" })
+    local missing = analyze.analyze("nope")        -- root does not exist
+    local afile   = analyze.analyze("real/app.lua") -- root is a FILE, not a dir
+    _G.tool = nil
+    ok(not missing.valid and not missing.complete, "missing root -> invalid + incomplete")
+    ok(#missing.sources == 0, "missing root -> no sources (never a valid empty scan)")
+    local found = false
+    for _, d in ipairs(missing.diagnostics) do if d.code == "project.discovery_failed" then found = true end end
+    ok(found, "missing root emits project.discovery_failed")
+    ok(not afile.valid, "a file (non-directory) root is invalid too")
+end
+
+-- ── protected boundary: an internal frontend failure -> project.internal, not a raise ──
+do
+    local analyze = require("hull.project.analyze")
+    local orig = frontend.declarations
+    frontend.declarations = function() error("injected frontend defect") end   -- luacheck: ignore
+    _G.tool = make_tool({ ["x/app.lua"] = "local a = 1\nreturn a\n" })
+    local ok_call, disc = pcall(analyze.analyze, "x")     -- must NOT raise
+    _G.tool = nil
+    frontend.declarations = orig
+    ok(ok_call, "analyze never raises on an internal frontend defect")
+    ok(disc and not disc.valid, "internal defect -> invalid discovery")
+    local found = false
+    for _, d in ipairs(disc.diagnostics or {}) do if d.code == "project.internal" then found = true end end
+    ok(found, "internal defect surfaces a structured project.internal diagnostic")
+end
+
+-- ── handles: generation-unique across sources + resolvable to {frontend, unit, decl} ──
+do
+    local analyze = require("hull.project.analyze")
+    _G.tool = make_tool({
+        ["h/a.lua"] = "local a = 1\nlocal b = 2\nreturn a, b\n",   -- 2 decls
+        ["h/b.lua"] = "local c = 3\nreturn c\n",                    -- 1 decl
+    })
+    local disc = analyze.analyze("h")
+    _G.tool = nil
+    -- collect every handle across both sources from the internal per-source data
+    local seen, count = {}, 0
+    for _, decls in pairs(disc._by_source) do
+        for _, d in ipairs(decls) do
+            count = count + 1
+            ok(d.handle ~= nil and not seen[d.handle], "handle is generation-unique: " .. tostring(d.handle))
+            seen[d.handle] = true
+        end
+    end
+    eq(count, 3, "three declarations across two sources")
+    -- resolve one handle back through the controlled lookup
+    local any_handle = next(seen)
+    local resolved = analyze.resolve_handle(disc, any_handle)
+    ok(resolved and resolved.frontend and resolved.unit and resolved.declaration,
+        "resolve_handle returns {frontend, unit, declaration}")
+    ok(analyze.resolve_handle(disc, 99999) == nil, "an unknown handle resolves to nil")
+end
+
+-- ── scope capability is callable THROUGH the frontend boundary ──────
+do
+    local unit = frontend.parse("local x = 1\nreturn x\n", "t.lua")
+    ok(type(frontend.scope) == "function", "frontend exposes a scope operation (advertised capability is callable)")
+    local sc, serr = frontend.scope(unit)
+    ok(sc ~= nil and serr == nil, "frontend.scope(unit) resolves a scope model")
+    ok(sc.bindings ~= nil, "scope model carries bindings")
 end
 
 print(string.format("test_project: %d passed, %d failed", pass, fail))

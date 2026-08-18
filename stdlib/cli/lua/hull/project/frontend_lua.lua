@@ -20,11 +20,14 @@
 --
 
 local lua = require("hull.source.lua")
+local scope = require("hull.source.scope")
 
 local M = {
     language     = "lua",
     extensions   = { "lua" },
-    -- Only capabilities Lua actually SHIPS (D3). Not bindings/semantic_analysis/lowering.
+    -- Only capabilities Lua actually SHIPS (D3), and each is callable THROUGH this
+    -- contract (declarations/annotations/source_ranges via decl_*; scope via M.scope).
+    -- Nothing unimplemented is advertised.
     capabilities = { "declarations", "annotations", "source_ranges", "scope" },
     analyzable   = true,
 }
@@ -105,21 +108,21 @@ end
 
 -- declarations(result) -> decl[]. ONE decl per declared NAME (D4): a multi-name
 -- `local a, b` yields two decls sharing the declaration NODE's group range; each carries
--- its own name range + the node's annotations. Handles are generation-local indices.
+-- its own name range + the node's annotations. The GENERATION-unique handle is assigned
+-- by the analyzer (which owns the generation), not here -- this returns opaque decl
+-- objects the analyzer retains behind its handle table.
 function M.declarations(unit)
-    local out, idx = {}, 0
+    local out = {}
     lua.walk(unit.ast, function(n)
         if n.kind == "local_declaration" then
             local anns, grp = norm_annotations(unit, n), mkrange(unit, n.range)
             for _, nm in ipairs(n.names or {}) do
-                idx = idx + 1
                 out[#out + 1] = { _kind = "local", _name = nm.name, _range = mkrange(unit, nm.range),
-                                  _group = grp, _is_method = false, _anns = anns, _index = idx }
+                                  _group = grp, _is_method = false, _anns = anns }
             end
         elseif n.kind == "function_declaration" then
             local name = flatten_fnname(n.name, n.is_method)
             if name then
-                idx = idx + 1
                 out[#out + 1] = {
                     _kind = n.is_local and "local_function" or "function",
                     _name = name,
@@ -127,7 +130,6 @@ function M.declarations(unit)
                     _group = mkrange(unit, n.range),
                     _is_method = n.is_method == true,
                     _anns = norm_annotations(unit, n),
-                    _index = idx,
                 }
             end
         end
@@ -141,6 +143,18 @@ function M.decl_range(d)       return d._range end
 function M.decl_group_range(d) return d._group end
 function M.decl_annotations(d) return d._anns end
 function M.decl_is_method(d)   return d._is_method == true end
-function M.decl_handle(d)      return d._index end      -- generation-local; never serialized as-is
+
+-- scope(result) -> (scope, err): the advertised "scope" capability, callable THROUGH the
+-- adapter (D-scope fix). Protected wrapper around hull.source.scope.resolve so a consumer
+-- (e.g. a future lowerer, via M.resolve_handle -> {frontend, unit, ...}) never bypasses
+-- the frontend boundary or sees a raised error. `err` is a Diagnostic-shaped table.
+function M.scope(unit)
+    local ok, sc, err = pcall(scope.resolve, unit)
+    if not ok then
+        return nil, { severity = "error", code = "lua.internal",
+                      message = "scope resolution failed: " .. tostring(sc) }
+    end
+    return sc, err
+end
 
 return M
