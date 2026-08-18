@@ -19,9 +19,12 @@ local json = require("hull.json")
 local LIMITS = { max_bytes = 64 * 1024 * 1024, max_tokens = 5000000,
                  max_comments = 5000000, max_depth = 2000 }
 
-local EXCLUDE_SEGMENT = {   -- generated / dependency dirs (build covers site/build)
-    [".git"] = true, [".hull"] = true, build = true, vendor = true, node_modules = true,
-}
+-- generated / dependency dirs (build covers site/build). EXCLUDE_LIST prunes them
+-- DURING traversal (tool.find_files exclude_dirs); EXCLUDE_SEGMENT is a cheap belt on
+-- the returned paths.
+local EXCLUDE_LIST = { ".git", ".hull", "build", "vendor", "node_modules" }
+local EXCLUDE_SEGMENT = {}
+for _, s in ipairs(EXCLUDE_LIST) do EXCLUDE_SEGMENT[s] = true end
 
 -- ── small path helpers (pure Lua; no path-normalize binding in the tool VM) ──
 local function normalize(p)
@@ -44,11 +47,12 @@ local function join(root, rel)
     return root .. "/" .. rel
 end
 
--- Is `target_norm` inside `root_norm`? (root_norm "" means cwd.)
-local function inside_root(root_norm, target_norm)
-    if target_norm == ".." or target_norm:sub(1, 3) == "../" then return false end
-    if root_norm == "" then return target_norm:sub(1, 1) ~= "/" end
-    return target_norm == root_norm or target_norm:sub(1, #root_norm + 1) == root_norm .. "/"
+-- Containment on CANONICAL absolute paths (from tool.realpath, symlinks resolved).
+-- Handles the `/` root correctly (prefix is "/", not "//").
+local function inside_root(canon_root, canon_target)
+    if canon_root == canon_target then return true end
+    local prefix = (canon_root == "/") and "/" or (canon_root .. "/")
+    return canon_target:sub(1, #prefix) == prefix
 end
 
 local function excluded(path)
@@ -67,6 +71,13 @@ local function usage_error(msg)
     tool.exit(2)
 end
 
+-- Operational / discovery failure: exit 2, stderr only (JSON stdout stays pure). Used
+-- to FAIL CLOSED -- never a fallback to lexical containment or a reduced scan.
+local function op_fail(msg)
+    tool.stderr("hull analyze: " .. msg .. "\n")
+    tool.exit(2)
+end
+
 local function parse_args()
     local o = { json = false, quiet = false, positionals = {} }
     for i = 1, #arg do
@@ -74,6 +85,7 @@ local function parse_args()
         if a == "--json" then o.json = true
         elseif a == "--quiet" then o.quiet = true
         elseif a == "-h" or a == "--help" then o.help = true
+        elseif a:match("^%-%-max%-depth=%d+$") then o.max_depth = tonumber(a:match("=(%d+)"))
         elseif a:sub(1, 1) == "-" and a ~= "-" then usage_error("unknown flag: " .. a)
         else o.positionals[#o.positionals + 1] = a end
     end
@@ -98,8 +110,13 @@ end
 
 -- ── discovery (walk mode): sorted, regular .lua, no symlink, exclusions ──
 local function discover(root)
+    -- exclude_dirs prunes DURING traversal (a large build/ tree is never walked);
+    -- find_files already returns sorted/regular/no-symlink. excluded() is a belt.
+    -- A discovery error (OOM / access) is an OPERATIONAL failure, not an empty scan.
+    local files, err = tool.find_files(root, "*.lua", { exclude_dirs = EXCLUDE_LIST })
+    if err then op_fail("discovery failed: " .. tostring(err)) end
     local out, seen = {}, {}
-    for _, p in ipairs(tool.find_files(root, "*.lua")) do    -- already sorted/regular/no-symlink
+    for _, p in ipairs(files) do
         local n = normalize(p)
         if not excluded(n) and not seen[n] then
             seen[n] = true; out[#out + 1] = n
@@ -138,10 +155,12 @@ end
 local function run()
     local o = parse_args()
     if o.help then
-        tool.stdout("usage: hull analyze [app_dir] [files...] [--json] [--quiet]\n" ..
-            "  static syntax analysis of an app's Lua source (parses, never runs).\n")
+        tool.stdout("usage: hull analyze [app_dir] [files...] [--json] [--quiet] [--max-depth=N]\n" ..
+            "  static syntax analysis of an app's Lua source (parses, never runs).\n" ..
+            "  --max-depth=N   cap parse nesting (default 2000); a deeper file is reported incomplete.\n")
         tool.exit(0)
     end
+    if o.max_depth then LIMITS.max_depth = o.max_depth end   -- controlled low limit (testing / huge files)
     local inp = resolve_inputs(o)
     local root_norm = normalize(inp.root)
 
@@ -171,27 +190,42 @@ local function run()
             end
         end
     else                                                     -- explicit files
+        -- Canonicalize the root and each target (symlinks resolved) so containment is
+        -- checked on the REAL location: a symlink whose spelling is inside the root but
+        -- which resolves outside must be rejected. The user-facing LOGICAL path is kept
+        -- for diagnostics; dedup is by canonical path (or logical when it doesn't resolve).
+        -- Root canonicalization failure is an OPERATIONAL error, never a fallback to
+        -- lexical containment (which would let a symlink escape the root).
+        local canon_root = tool.realpath(inp.root)
+        if not canon_root then op_fail("cannot resolve app root: " .. inp.root) end
         local seen = {}
         for _, raw in ipairs(inp.targets) do
-            local path = normalize(join(inp.root, raw))
-            if seen[path] then goto continue end
-            seen[path] = true
-            if not inside_root(root_norm, path) then
-                target_error(path, "analyze.outside_root", "path is outside the app root")
-            else
-                local kind = tool.path_kind(path)
-                if kind == nil then
-                    target_error(path, "analyze.not_found", "no such file")
-                elseif kind ~= "file" then
-                    target_error(path, "analyze.not_regular", "not a regular file (" .. kind .. ")")
-                elseif not ends_lua(path) then
-                    target_error(path, "analyze.not_lua", "not a Lua (.lua) file")
+            local logical = normalize(join(inp.root, raw))
+            local canon, reason = tool.realpath(logical)
+            local key = canon or logical
+            if seen[key] then goto continue end
+            seen[key] = true
+            if canon == nil then                             -- distinguish missing vs inaccessible
+                if reason == "missing" then
+                    target_error(logical, "analyze.not_found", "no such file")
                 else
-                    local src = tool.read_file(path)
+                    target_error(logical, "analyze.unreadable",
+                        "cannot access file (" .. tostring(reason) .. ")")
+                end
+            elseif not inside_root(canon_root, canon) then
+                target_error(logical, "analyze.outside_root", "path resolves outside the app root")
+            else
+                local kind = tool.path_kind(canon)           -- canon exists -> dir/file/other
+                if kind ~= "file" then
+                    target_error(logical, "analyze.not_regular", "not a regular file (" .. tostring(kind) .. ")")
+                elseif not ends_lua(logical) then
+                    target_error(logical, "analyze.not_lua", "not a Lua (.lua) file")
+                else
+                    local src = tool.read_file(canon)
                     if not src then
-                        target_error(path, "analyze.unreadable", "cannot read file")
+                        target_error(logical, "analyze.unreadable", "cannot read file")
                     else
-                        record(path, analyze_source(path, src))
+                        record(logical, analyze_source(logical, src))
                     end
                 end
             end

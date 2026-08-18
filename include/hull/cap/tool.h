@@ -165,10 +165,15 @@ char **hl_tool_find_files(const char *dir, const char *pattern,
  * `static/vendor/htmx.min.js` is a legitimate vendored asset that
  * MUST be embedded. node_modules / dotfiles are still skipped
  * unconditionally (no legitimate reason to recurse into them).
+ *
+ * `extra`: an optional NULL-terminated list of directory names to
+ * prune DURING traversal (in addition to the built-in skips), or NULL.
+ * Lets a caller bound discovery by its own exclusion policy (e.g.
+ * `hull analyze` excluding `build/`) without walking the excluded tree.
  */
 char **hl_tool_find_files_ex(const char *dir, const char *pattern,
                              const HlToolUnveilCtx *ctx,
-                             int include_vendor);
+                             int include_vendor, const char *const *extra);
 
 /*
  * Copy a file (binary-safe).

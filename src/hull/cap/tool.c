@@ -713,25 +713,40 @@ char *hl_tool_spawn_read(const char *const argv[], size_t *out_len)
  * vendor-skip default (which is correct for source walks but
  * wrong for `static/vendor/`, where apps legitimately put
  * vendored CSS/JS that must be embedded). */
-static int should_skip_dir(const char *name, int include_vendor)
+/* `extra`: an optional NULL-terminated list of directory names to prune DURING
+ * traversal (in addition to the built-in dot/vendor/node_modules skips), so a large
+ * excluded tree (e.g. build/) is never walked. */
+static int should_skip_dir(const char *name, int include_vendor,
+                           const char *const *extra)
 {
     if (name[0] == '.') return 1;
     if (strcmp(name, "node_modules") == 0) return 1;
     if (!include_vendor && strcmp(name, "vendor") == 0) return 1;
+    for (const char *const *e = extra; e && *e; e++)
+        if (strcmp(name, *e) == 0) return 1;
     return 0;
 }
 
 /* Recursive helper for find_files */
 static int find_files_recurse(const char *dir, const char *pattern,
                                char ***results, size_t *count, size_t *cap,
-                               int include_vendor)
+                               int include_vendor, const char *const *extra)
 {
     DIR *d = opendir(dir);
-    if (!d) return 0; /* skip unreadable dirs */
+    if (!d) {
+        /* ENOENT = the directory does not exist / raced away: an explicitly-classified
+         * benign skip (also lets callers probe an optional dir). Any other failure --
+         * notably EACCES (an unreadable dir), at the root or nested -- is a real
+         * traversal error and must fail closed, never a partial "clean" scan. */
+        return (errno == ENOENT) ? 0 : -1;
+    }
 
-    struct dirent *ent;
-    while ((ent = readdir(d)) != NULL) {
-        if (should_skip_dir(ent->d_name, include_vendor)) continue;
+    int rc = 0;
+    for (;;) {
+        errno = 0;
+        struct dirent *ent = readdir(d);
+        if (!ent) break;                    /* end-of-dir (errno 0) OR a readdir error */
+        if (should_skip_dir(ent->d_name, include_vendor, extra)) continue;
 
         /* Build full path */
         size_t dlen = strlen(dir);
@@ -743,31 +758,39 @@ static int find_files_recurse(const char *dir, const char *pattern,
         if (pn < 0 || (size_t)pn >= sizeof(path)) continue;
 
         struct stat st;
-        if (lstat(path, &st) != 0) continue;
+        if (lstat(path, &st) != 0) {
+            if (errno == ENOENT) continue;  /* entry raced away after readdir: benign */
+            rc = -1; break;                 /* a real lstat failure -> fail closed */
+        }
 
         if (S_ISDIR(st.st_mode)) {
-            find_files_recurse(path, pattern, results, count, cap,
-                               include_vendor);
+            /* Propagate a subdirectory failure (traversal OR allocation): never return
+             * a partial "success". */
+            if (find_files_recurse(path, pattern, results, count, cap,
+                                   include_vendor, extra) < 0) { rc = -1; break; }
         } else if (S_ISREG(st.st_mode)) {
             if (fnmatch(pattern, ent->d_name, 0) == 0) {
                 /* Add to results */
                 if (*count >= *cap) {
-                    if (*cap > SIZE_MAX / (2 * sizeof(char *))) { closedir(d); return -1; }
+                    if (*cap > SIZE_MAX / (2 * sizeof(char *))) { rc = -1; break; }
                     size_t newcap = *cap * 2;
                     char **nr = realloc(*results, newcap * sizeof(char *));
-                    if (!nr) { closedir(d); return -1; }
+                    if (!nr) { rc = -1; break; }
                     *results = nr;
                     *cap = newcap;
                 }
-                (*results)[*count] = strdup(path);
-                if ((*results)[*count])
-                    (*count)++;
+                char *dup = strdup(path);
+                if (!dup) { rc = -1; break; }   /* fail closed, not a silent drop */
+                (*results)[(*count)++] = dup;
             }
         }
     }
+    /* readdir() returns NULL at end-of-dir AND on error; distinguish via errno (reset
+     * before each call above). Only meaningful when the loop ended normally (rc == 0). */
+    if (rc == 0 && errno != 0) rc = -1;
 
     closedir(d);
-    return 0;
+    return rc;
 }
 
 /* String comparison for qsort */
@@ -778,7 +801,7 @@ static int str_compare(const void *a, const void *b)
 
 char **hl_tool_find_files_ex(const char *dir, const char *pattern,
                              const HlToolUnveilCtx *ctx,
-                             int include_vendor)
+                             int include_vendor, const char *const *extra)
 {
     if (!dir || !pattern) return NULL;
 
@@ -790,15 +813,27 @@ char **hl_tool_find_files_ex(const char *dir, const char *pattern,
     char **results = malloc(cap * sizeof(char *));
     if (!results) return NULL;
 
-    find_files_recurse(dir, pattern, &results, &count, &cap, include_vendor);
+    /* An allocation failure anywhere in the walk returns NULL (an error), never a
+     * partial or unpruned "success" -- callers must fail closed on NULL. */
+    if (find_files_recurse(dir, pattern, &results, &count, &cap,
+                           include_vendor, extra) < 0) {
+        for (size_t i = 0; i < count; i++) free(results[i]);
+        free(results);
+        return NULL;
+    }
 
     /* Sort alphabetically for deterministic ordering */
     if (count > 1)
         qsort(results, count, sizeof(char *), str_compare);
 
-    /* NULL-terminate */
+    /* NULL-terminate (a failed grow here would leave the array one short, so the
+     * old `final = results` fallback wrote past its end -- treat it as an error). */
     char **final = realloc(results, (count + 1) * sizeof(char *));
-    if (!final) final = results;
+    if (!final) {
+        for (size_t i = 0; i < count; i++) free(results[i]);
+        free(results);
+        return NULL;
+    }
     final[count] = NULL;
 
     return final;
@@ -811,7 +846,7 @@ char **hl_tool_find_files(const char *dir, const char *pattern,
      * source walks, where vendor/ is third-party noise). New
      * callers that need vendor included use hl_tool_find_files_ex
      * with include_vendor=1. */
-    return hl_tool_find_files_ex(dir, pattern, ctx, 0);
+    return hl_tool_find_files_ex(dir, pattern, ctx, 0, NULL);
 }
 
 /* ── File copy ─────────────────────────────────────────────────────── */
