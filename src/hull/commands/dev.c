@@ -40,23 +40,73 @@ static void agent_ensure_dir(const char *app_dir)
 
 static void agent_write_dev_json(const char *app_dir, int port, pid_t pid)
 {
-    char path[PATH_MAX];
+    char path[PATH_MAX], tmp[PATH_MAX];
     int n = snprintf(path, sizeof(path), "%s/.hull/dev.json", app_dir);
     if (n < 0 || (size_t)n >= sizeof(path)) return;
+    int m = snprintf(tmp, sizeof(tmp), "%s/.hull/dev.json.tmp", app_dir);
+    if (m < 0 || (size_t)m >= sizeof(tmp)) return;
 
-    FILE *f = fopen(path, "w");
+    FILE *f = fopen(tmp, "w");
     if (!f) return;
-    fprintf(f, "{\"port\":%d,\"pid\":%d,\"started_at\":%ld}\n",
-            port, (int)pid, (long)time(NULL));
+    /* session_pid = the dev SUPERVISOR pid (stable across reloads); pid = the served
+     * child (changes each reload). The supervisor identity lets `hull agent inspect` bind
+     * a published discovery generation to THIS live dev session. */
+    fprintf(f, "{\"port\":%d,\"pid\":%d,\"session_pid\":%d,\"started_at\":%ld}\n",
+            port, (int)pid, (int)getpid(), (long)time(NULL));
     fclose(f);
+    if (rename(tmp, path) != 0) unlink(tmp);   /* atomic publish (tmp + rename) */
 }
 
-static void agent_remove_dev_json(const char *app_dir)
+static void agent_remove_discovery(const char *app_dir)
+{
+    char path[PATH_MAX];
+    int n = snprintf(path, sizeof(path), "%s/.hull/discovery.json", app_dir);
+    if (n > 0 && (size_t)n < sizeof(path)) unlink(path);
+}
+
+/* Publish a fresh discovery generation for the current dev session by spawning
+ * `hull agent inspect <app_dir> --generation=N --session-pid=<supervisor>` (the C
+ * dispatcher routes the publish flags to the internal hull.project.publish module, which
+ * writes the canonical <app_dir>/.hull/discovery.json atomically). Synchronous (analysis
+ * is fast, reloads are human-paced); child output silenced. Agent-mode only.
+ *
+ * On ANY failure (fork / exec / non-zero exit) the previous same-session discovery sidecar
+ * is REMOVED so `hull agent inspect` falls back to a standalone analysis rather than
+ * serving a stale generation as current. */
+static void agent_publish_discovery(const char *hull_exe, const char *app_dir, long generation)
+{
+    char gen_arg[64], sp_arg[64];
+    snprintf(gen_arg, sizeof(gen_arg), "--generation=%ld", generation);
+    snprintf(sp_arg, sizeof(sp_arg), "--session-pid=%d", (int)getpid());
+
+    pid_t pid = fork();
+    if (pid < 0) { agent_remove_discovery(app_dir); return; }
+    if (pid == 0) {
+        signal(SIGINT, SIG_DFL);
+        signal(SIGTERM, SIG_DFL);
+        int devnull = open("/dev/null", O_WRONLY);
+        if (devnull >= 0) {
+            dup2(devnull, STDOUT_FILENO);
+            dup2(devnull, STDERR_FILENO);
+            if (devnull > 2) close(devnull);
+        }
+        const char *pargv[] = { hull_exe, "agent", "inspect",
+                                app_dir, gen_arg, sp_arg, NULL };
+        execvp(hull_exe, (char *const *)(uintptr_t)pargv);   /* POSIX execvp does not modify argv */
+        _exit(127);
+    }
+    int status = 0;
+    if (waitpid(pid, &status, 0) < 0 || !WIFEXITED(status) || WEXITSTATUS(status) != 0)
+        agent_remove_discovery(app_dir);
+}
+
+static void agent_remove_sidecars(const char *app_dir)
 {
     char path[PATH_MAX];
     int n = snprintf(path, sizeof(path), "%s/.hull/dev.json", app_dir);
-    if (n < 0 || (size_t)n >= sizeof(path)) return;
-    unlink(path);
+    if (n > 0 && (size_t)n < sizeof(path)) unlink(path);
+    n = snprintf(path, sizeof(path), "%s/.hull/discovery.json", app_dir);
+    if (n > 0 && (size_t)n < sizeof(path)) unlink(path);
 }
 
 /* ── Signal handling ──────────────────────────────────────────────── */
@@ -495,6 +545,7 @@ int hl_cmd_dev(int argc, char **argv, const HlCommandEnv *env)
         agent_ensure_dir(app_dir);
 
     int ret = 0;
+    long generation = 0;   /* incremented per (re)spawn; published to .hull/discovery.json */
 
     for (;;) {
         if (dev_got_signal) {
@@ -520,8 +571,13 @@ int hl_cmd_dev(int argc, char **argv, const HlCommandEnv *env)
 
         dev_child_pid = pid;
 
-        if (agent_mode)
+        if (agent_mode) {
             agent_write_dev_json(app_dir, port, pid);
+            /* Publish a new discovery generation for this (re)spawn. A full deterministic
+             * reanalysis each time (no incremental in this story). */
+            generation++;
+            agent_publish_discovery(hull_exe, app_dir, generation);
+        }
 
         /* Record baseline mtime */
         time_t baseline = scan_mtime(app_dir);
@@ -578,7 +634,7 @@ int hl_cmd_dev(int argc, char **argv, const HlCommandEnv *env)
     }
 
     if (agent_mode)
-        agent_remove_dev_json(app_dir);
+        agent_remove_sidecars(app_dir);
 
     free(child_argv);
     return ret;

@@ -35,7 +35,7 @@ local function main()
         if a == "-h" or a == "--help" then
             tool.stdout("usage: hull agent inspect [app_dir]\n"); tool.exit(0)
         elseif a:sub(1, 1) == "-" and a ~= "-" then
-            -- `--json` is the default + only format, accepted for symmetry; any other flag errors.
+            -- `--json` is the default + only format, accepted for symmetry; else error.
             if a ~= "--json" then usage_error("unknown flag: " .. a) end
         else
             positionals[#positionals + 1] = a
@@ -49,8 +49,10 @@ local function main()
     end
     local app_dir = positionals[1] or "."
 
-    -- The canonical analyzer never raises: it always returns a discovery (an invalid one
-    -- on a bad root / internal defect). The command therefore succeeds (exit 0); the
+    -- Read/STANDALONE only. Publication is a SEPARATE internal module (hull.project.publish);
+    -- the live-published read fast path is handled in C before this module is reached (see
+    -- cmd_inspect in commands/agent.c). The canonical analyzer never raises: it always
+    -- returns a discovery (an invalid one on a bad root / internal defect). Exit 0; the
     -- consumer reads `valid` / `complete` from the JSON.
     local disc = analyze.analyze(app_dir, { source_kind = "standalone" })
     tool.stdout(json.encode(projection.project(disc)) .. "\n")

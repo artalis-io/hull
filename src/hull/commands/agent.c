@@ -32,6 +32,11 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <signal.h>
+#include <limits.h>
+#include <errno.h>
+#include <sh_json.h>
+#include <sh_arena.h>
 
 /* ── Output helper ─────────────────────────────────────────────────── */
 
@@ -734,6 +739,147 @@ static void agent_usage(void)
         "All output is JSON to stdout.\n");
 }
 
+/* ── hull agent inspect ────────────────────────────────────────────────
+ *
+ * Read a text field's integer value from a small JSON blob (crude, matching
+ * hl_agent_status's dev.json port parse): "<key>"<ws>:<ws><digits>. Returns -1 if absent.
+ */
+static long json_int_field(const char *buf, const char *key)
+{
+    char needle[64];
+    int n = snprintf(needle, sizeof(needle), "\"%s\"", key);
+    if (n < 0 || (size_t)n >= sizeof(needle)) return -1;
+    const char *p = strstr(buf, needle);
+    if (!p) return -1;
+    p += n;
+    while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r') p++;
+    if (*p != ':') return -1;
+    p++;
+    while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r') p++;
+    if (*p < '0' || *p > '9') return -1;              /* must start with a digit (no sign / garbage) */
+    errno = 0;
+    char *end = NULL;
+    long v = strtol(p, &end, 10);
+    if (errno != 0 || end == p) return -1;            /* overflow / no digits consumed */
+    /* the numeric token must terminate on a valid JSON boundary (not e.g. "12x") */
+    if (*end != ',' && *end != '}' && *end != ' ' && *end != '\t' &&
+        *end != '\n' && *end != '\r' && *end != '\0') return -1;
+    if (v <= 0 || v > INT_MAX) return -1;             /* a pid fits in a positive int */
+    return v;
+}
+
+/* Read a whole file into a NUL-terminated malloc'd buffer (cap-bounded), or NULL. Requires
+ * a COMPLETE read (short read / read error -> NULL) so a truncated sidecar is rejected
+ * rather than parsed. On success `*out_len` (if non-NULL) is the exact byte length -- pass
+ * it (not strlen) to the parser + emitter so an embedded NUL cannot hide trailing bytes. */
+static char *read_whole_file(const char *path, size_t cap, size_t *out_len)
+{
+    FILE *f = fopen(path, "rb");
+    if (!f) return NULL;
+    if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return NULL; }
+    long sz = ftell(f);
+    if (sz < 0 || (size_t)sz > cap) { fclose(f); return NULL; }
+    if (fseek(f, 0, SEEK_SET) != 0) { fclose(f); return NULL; }
+    char *buf = malloc((size_t)sz + 1);
+    if (!buf) { fclose(f); return NULL; }
+    size_t got = fread(buf, 1, (size_t)sz, f);
+    int bad = (got != (size_t)sz) || ferror(f);       /* demand the full file, no read error */
+    fclose(f);
+    if (bad) { free(buf); return NULL; }
+    buf[got] = '\0';
+    if (out_len) *out_len = got;
+    return buf;
+}
+
+/* Validate that `buf` (of `len` bytes) is a COMPLETE, well-formed JSON document via the
+ * repo's parser. A truncated / corrupt discovery.json -- even one whose session_pid token
+ * happens to match a live PID -- must never be streamed. Returns 1 iff the whole document
+ * parses; 0 otherwise (incl. OOM, which fails closed to a standalone re-analysis). */
+static int json_document_valid(const char *buf, size_t len)
+{
+    SHArena *arena = sh_arena_create(len * 8 + 4096);   /* generous; a parse failure only costs a fresh analysis */
+    if (!arena) return 0;
+    ShJsonValue *root = NULL;
+    int ok = (sh_json_parse(buf, len, arena, &root) == SH_JSON_OK) && root != NULL;
+    sh_arena_free(arena);
+    return ok;
+}
+
+/* If a LIVE dev session has published a discovery generation for `app_dir`, stream it to
+ * stdout and return 0. "Live" (D9): both .hull/discovery.json and .hull/dev.json exist,
+ * their session_pid values match, that supervisor PID is still alive (kill(pid,0)), AND
+ * the discovery document parses as complete valid JSON. Any mismatch / dead session /
+ * missing file / malformed-or-truncated document -> -1 (caller falls back to standalone).
+ * This rejects a stale/cross-reload sidecar and a corrupt/partial one. */
+static int agent_inspect_stream_live(const char *app_dir)
+{
+    char disc_path[PATH_MAX], dev_path[PATH_MAX];
+    int a = snprintf(disc_path, sizeof(disc_path), "%s/.hull/discovery.json", app_dir);
+    int b = snprintf(dev_path, sizeof(dev_path), "%s/.hull/dev.json", app_dir);
+    if (a < 0 || (size_t)a >= sizeof(disc_path) || b < 0 || (size_t)b >= sizeof(dev_path))
+        return -1;
+
+    char *dev = read_whole_file(dev_path, 64 * 1024, NULL);
+    if (!dev) return -1;
+    long sp_dev = json_int_field(dev, "session_pid");
+    free(dev);
+    if (sp_dev <= 0) return -1;
+
+    size_t disc_len = 0;
+    char *disc = read_whole_file(disc_path, 64 * 1024 * 1024, &disc_len);   /* 64 MB cap */
+    if (!disc) return -1;
+    long sp_disc = json_int_field(disc, "session_pid");
+
+    /* Bind the published generation to a specific live dev session. */
+    if (sp_disc != sp_dev || kill((pid_t)sp_disc, 0) != 0) { free(disc); return -1; }
+
+    /* Only emit a COMPLETE, well-formed document. Validate + emit over the EXACT byte
+     * length (not strlen): an embedded NUL must not hide trailing bytes, so `{valid}\0junk`
+     * -- whose complete on-disk document is invalid -- falls back to standalone. */
+    if (!json_document_valid(disc, disc_len)) { free(disc); return -1; }
+
+    fwrite(disc, 1, disc_len, stdout);
+    free(disc);
+    return 0;
+}
+
+/* `hull agent inspect [app_dir]` (+ the INTERNAL publish flags used by `hull dev`).
+ * The live-published fast path (D9) is taken ONLY for a fully-valid public read
+ * invocation -- at most one positional, no flag other than --json. Any invalid or
+ * non-read form (a second root, an unknown flag, --help) is NOT fast-pathed; it is
+ * delegated to hull.project.inspect so the Lua boundary does the full validation (exit 2 /
+ * usage). The internal `--generation`/`--session-pid` publish flags route to the SEPARATE
+ * hull.project.publish module. `argv` is hl_cmd_agent's own (argv[1]=="inspect"), so
+ * argv+1 keeps arg[0]="inspect" in the VM. */
+static int cmd_inspect(int argc, char **argv, const HlCommandEnv *env)
+{
+    const char *app_dir = ".";
+    int positionals = 0, has_publish = 0, clean_read = 1;
+    for (int i = 2; i < argc; i++) {          /* argv[1]=="inspect"; args start at 2 */
+        const char *a = argv[i];
+        if (strncmp(a, "--generation=", 13) == 0 || strncmp(a, "--session-pid=", 14) == 0) {
+            has_publish = 1; clean_read = 0;
+        } else if (strcmp(a, "--json") == 0) {
+            /* accepted read format; stays a clean read */
+        } else if (a[0] == '-' && strcmp(a, "-") != 0) {
+            clean_read = 0;                    /* --help / unknown flag -> let Lua handle it */
+        } else {
+            positionals++; app_dir = a;
+        }
+    }
+    if (positionals > 1) clean_read = 0;       /* extra roots -> Lua rejects (exit 2) */
+
+    if (has_publish)
+        return hull_tool("hull.project.publish", argc - 1, argv + 1,
+                         env ? env->hull_exe : NULL);
+
+    if (clean_read && agent_inspect_stream_live(app_dir) == 0)
+        return 0;                              /* served the live published generation */
+
+    return hull_tool("hull.project.inspect", argc - 1, argv + 1,
+                     env ? env->hull_exe : NULL);
+}
+
 /* ── Command entry point ──────────────────────────────────────────── */
 
 int hl_cmd_agent(int argc, char **argv, const HlCommandEnv *env)
@@ -800,11 +946,10 @@ int hl_cmd_agent(int argc, char **argv, const HlCommandEnv *env)
     /* Composite project summary — one call to orient an agent. */
     if (strcmp(sub, "overview") == 0)     return cmd_overview(sub_argc, sub_argv);
     /* Project source discovery — the canonical analyzed project model (annotated
-     * declarations) as versioned JSON. Delegates to the Lua tool VM (hull.project.inspect
-     * -> hull.project.analyze). argv+1 keeps arg[0]="inspect", arg[1..]=args in the VM. */
+     * declarations) as versioned JSON. A live dev session's published generation is
+     * streamed directly (D9); otherwise the tool VM analyzes (standalone / publish). */
     if (strcmp(sub, "inspect") == 0)
-        return hull_tool("hull.project.inspect", argc - 1, argv + 1,
-                         env ? env->hull_exe : NULL);
+        return cmd_inspect(argc, argv, env);
 #ifdef HL_ENABLE_DB
     if (strcmp(sub, "schema-diff") == 0)  return cmd_schema_diff(sub_argc, sub_argv);
     if (strcmp(sub, "sql") == 0)          return cmd_sql(sub_argc, sub_argv);

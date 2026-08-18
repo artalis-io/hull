@@ -10,7 +10,10 @@
 # frontend capabilities are accurate; static/ browser assets are pruned while application
 # .js is honestly unsupported (never parsed as Lua) -> complete=false; a missing root is
 # an invalid+incomplete discovery; and the public JSON leaks NO generation-internal state
-# (handle / _by_source / _handles / by_id).
+# (handle / _by_source / _handles / by_id). Slice 3 also drives a live `hull dev --agent`:
+# it publishes a discovery.json generation per reload (session_pid-bound), inspect serves
+# the LIVE generation, a source change bumps the generation, and a dead/stale session
+# sidecar is ignored (falls back to standalone).
 #
 # SPDX-License-Identifier: AGPL-3.0-or-later
 
@@ -32,8 +35,9 @@ fi
 fail() { echo "  FAIL: $1"; FAIL=$((FAIL + 1)); }
 pass() { echo "  PASS: $1"; PASS=$((PASS + 1)); }
 
+DEV_PID=""
 TMP=$(mktemp -d)
-trap 'chmod -R u+rwx "$TMP" 2>/dev/null; rm -rf "$TMP"' EXIT
+trap '[ -n "$DEV_PID" ] && kill "$DEV_PID" 2>/dev/null; chmod -R u+rwx "$TMP" 2>/dev/null; rm -rf "$TMP"' EXIT
 
 # assert_py "<name>" "<json>" "<python expr over d>": pass iff the expr is truthy.
 assert_py() {
@@ -152,6 +156,154 @@ RCS=0; "$HULL" agent inspect "$OK" >/dev/null 2>&1 || RCS=$?
 # an unknown flag is a usage error too
 RCF=0; "$HULL" agent inspect --bogus >/dev/null 2>&1 || RCF=$?
 [ "$RCF" = "2" ] && pass "unknown flag -> usage error (exit 2)" || fail "unknown-flag exit ($RCF, want 2)"
+
+# ── internal publish flags require BOTH --generation and --session-pid (all-or-none) ──
+RCP=0; "$HULL" agent inspect "$OK" --generation=5 >/dev/null 2>&1 || RCP=$?
+[ "$RCP" = "2" ] && pass "publish: --generation without --session-pid -> exit 2" || fail "partial publish exit ($RCP, want 2)"
+RCP=0; "$HULL" agent inspect "$OK" --session-pid=5 >/dev/null 2>&1 || RCP=$?
+[ "$RCP" = "2" ] && pass "publish: --session-pid without --generation -> exit 2" || fail "partial publish exit ($RCP, want 2)"
+# a full publish writes the CANONICAL <app_dir>/.hull/discovery.json (no caller path), tagged dev
+rm -f "$OK/.hull/discovery.json" 2>/dev/null || true
+"$HULL" agent inspect "$OK" --generation=3 --session-pid="$$" >/dev/null 2>&1 || true
+if [ -f "$OK/.hull/discovery.json" ]; then
+    pass "publish writes the canonical .hull/discovery.json"
+    assert_py "published file tagged source=dev, generation=3, session_pid" "$(cat "$OK/.hull/discovery.json")" \
+        "d['source']=='dev' and d['generation']==3 and d.get('session_pid')==$$"
+else fail "publish did not write the canonical discovery.json"; fi
+rm -rf "$OK/.hull" 2>/dev/null || true
+
+# ── Slice 3: hull dev --agent publishes generations; inspect reads the LIVE one ──
+DEVAPP="$TMP/devapp"
+mkdir -p "$DEVAPP"
+cat > "$DEVAPP/app.lua" <<'EOF'
+---@route GET /
+local function home() end
+return home
+EOF
+"$HULL" dev --agent -p 39811 "$DEVAPP/app.lua" >/dev/null 2>&1 &
+DEV_PID=$!
+# wait for the first published generation (up to ~10s)
+i=0; while [ "$i" -lt 20 ] && [ ! -f "$DEVAPP/.hull/discovery.json" ]; do sleep 0.5; i=$((i + 1)); done
+
+if [ -f "$DEVAPP/.hull/discovery.json" ]; then
+    OUTD=$("$HULL" agent inspect "$DEVAPP" 2>/dev/null)
+    assert_py "dev running -> published generation served (source=dev, generation>=1)" "$OUTD" \
+        'd["source"]=="dev" and d["generation"]>=1'
+    assert_py "published generation carries a session_pid" "$OUTD" 'd.get("session_pid") is not None'
+    SP_DISC=$(grep -o '"session_pid":[0-9]*' "$DEVAPP/.hull/discovery.json" | head -1)
+    SP_DEV=$(grep -o '"session_pid":[0-9]*' "$DEVAPP/.hull/dev.json" | head -1)
+    { [ -n "$SP_DISC" ] && [ "$SP_DISC" = "$SP_DEV" ]; } \
+        && pass "discovery.json + dev.json session_pid match" || fail "session_pid mismatch ($SP_DISC vs $SP_DEV)"
+
+    # invalid public CLI forms MUST NOT bypass validation via the live fast path
+    RCX=0; "$HULL" agent inspect "$DEVAPP" extra >/dev/null 2>&1 || RCX=$?
+    [ "$RCX" = "2" ] && pass "live: extra positional -> exit 2 (not streamed)" || fail "live extra-positional exit ($RCX, want 2)"
+    RCX=0; "$HULL" agent inspect "$DEVAPP" --bogus >/dev/null 2>&1 || RCX=$?
+    [ "$RCX" = "2" ] && pass "live: unknown flag -> exit 2 (not streamed)" || fail "live unknown-flag exit ($RCX, want 2)"
+    HOUT=$("$HULL" agent inspect "$DEVAPP" --help 2>/dev/null || true)
+    { echo "$HOUT" | grep -q "usage:" && ! echo "$HOUT" | grep -q '"source"'; } \
+        && pass "live: --help prints usage (not streamed)" || fail "live --help did not print usage"
+
+    GEN1=$(printf '%s' "$OUTD" | python3 -c 'import json,sys;print(json.load(sys.stdin)["generation"])' 2>/dev/null || echo 0)
+    # a source change triggers a reload -> a NEW generation
+    printf '\n---@added\nlocal x = 1\nreturn home, x\n' >> "$DEVAPP/app.lua"
+    NEWGEN=0; i=0
+    while [ "$i" -lt 30 ]; do
+        G=$("$HULL" agent inspect "$DEVAPP" 2>/dev/null | python3 -c 'import json,sys;print(json.load(sys.stdin).get("generation",0))' 2>/dev/null || echo 0)
+        if [ "$G" -gt "$GEN1" ] 2>/dev/null; then NEWGEN=$G; break; fi
+        sleep 0.5; i=$((i + 1))
+    done
+    { [ "$NEWGEN" -gt "$GEN1" ]; } 2>/dev/null \
+        && pass "source change -> reload -> new generation ($GEN1 -> $NEWGEN)" \
+        || fail "no new generation after reload (gen1=$GEN1, newgen=$NEWGEN)"
+
+    # publisher FAILURE: break the atomic write target (a dir where the .tmp file goes) so
+    # the next reload's publish fails. The prior same-session generation must be REMOVED
+    # (dev.c) so inspect falls back to standalone rather than serving a stale generation.
+    mkdir "$DEVAPP/.hull/discovery.json.tmp"
+    printf '\n-- force another reload\n' >> "$DEVAPP/app.lua"
+    STANDALONE=0; i=0
+    while [ "$i" -lt 30 ]; do
+        S=$("$HULL" agent inspect "$DEVAPP" 2>/dev/null | python3 -c 'import json,sys;print(json.load(sys.stdin)["source"])' 2>/dev/null || echo "")
+        if [ "$S" = "standalone" ]; then STANDALONE=1; break; fi
+        sleep 0.5; i=$((i + 1))
+    done
+    [ "$STANDALONE" = "1" ] \
+        && pass "publisher failure -> stale generation removed -> standalone" \
+        || fail "stale generation still served after publisher failure"
+    rmdir "$DEVAPP/.hull/discovery.json.tmp" 2>/dev/null || true
+
+    kill "$DEV_PID" 2>/dev/null || true; wait "$DEV_PID" 2>/dev/null || true; DEV_PID=""
+    { [ ! -f "$DEVAPP/.hull/discovery.json" ] && [ ! -f "$DEVAPP/.hull/dev.json" ]; } \
+        && pass "sidecars removed on dev exit" || fail "sidecars linger after dev exit"
+    OUTS=$("$HULL" agent inspect "$DEVAPP" 2>/dev/null)
+    assert_py "after dev stops -> standalone (generation 0)" "$OUTS" \
+        'd["source"]=="standalone" and d["generation"]==0'
+else
+    fail "dev did not publish discovery.json within timeout"
+    kill "$DEV_PID" 2>/dev/null || true; wait "$DEV_PID" 2>/dev/null || true; DEV_PID=""
+fi
+
+# ── stale/crashed-session robustness: sidecars with a DEAD session_pid -> standalone ──
+STALE="$TMP/stale"
+mkdir -p "$STALE/.hull"
+cat > "$STALE/app.lua" <<'EOF'
+---@main
+local function m() end
+return m
+EOF
+DEADPID=2147480000   # far above any real pid -> kill(pid,0) fails -> not live
+printf '{"port":1,"pid":1,"session_pid":%s,"started_at":1}\n' "$DEADPID" > "$STALE/.hull/dev.json"
+printf '{"schema_version":1,"source":"dev","generation":9,"session_pid":%s,"declarations":[]}\n' "$DEADPID" > "$STALE/.hull/discovery.json"
+OUTST=$("$HULL" agent inspect "$STALE" 2>/dev/null)
+assert_py "dead-session sidecar ignored -> fresh standalone analysis" "$OUTST" \
+    'd["source"]=="standalone" and any(x["name"]=="m" for x in d["declarations"])'
+
+# ── malformed / truncated sidecars -> standalone (a LIVE session_pid so ONLY the
+#    malformation, not liveness, drives the fallback; $$ = this shell, alive) ──
+MAL="$TMP/malformed"
+mkdir -p "$MAL/.hull"
+cat > "$MAL/app.lua" <<'EOF'
+---@main
+local function m() end
+return m
+EOF
+# (a) discovery.json session_pid is a non-integer token
+printf '{"port":1,"pid":1,"session_pid":%s,"started_at":1}\n' "$$" > "$MAL/.hull/dev.json"
+printf '{"schema_version":1,"source":"dev","generation":9,"session_pid":"12x3","declarations":[]}\n' > "$MAL/.hull/discovery.json"
+OUTM1=$("$HULL" agent inspect "$MAL" 2>/dev/null)
+assert_py "malformed discovery session_pid -> standalone" "$OUTM1" 'd["source"]=="standalone"'
+# (b) dev.json session_pid malformed
+printf '{"port":1,"pid":1,"session_pid":"nan","started_at":1}\n' > "$MAL/.hull/dev.json"
+printf '{"schema_version":1,"source":"dev","generation":9,"session_pid":%s,"declarations":[]}\n' "$$" > "$MAL/.hull/discovery.json"
+OUTM2=$("$HULL" agent inspect "$MAL" 2>/dev/null)
+assert_py "malformed dev session_pid -> standalone" "$OUTM2" 'd["source"]=="standalone"'
+# (c) discovery.json truncated BEFORE the session_pid field
+printf '{"port":1,"pid":1,"session_pid":%s,"started_at":1}\n' "$$" > "$MAL/.hull/dev.json"
+printf '{"schema_version":1,"source":"dev","generat' > "$MAL/.hull/discovery.json"
+OUTM3=$("$HULL" agent inspect "$MAL" 2>/dev/null)
+assert_py "truncated (before PID) discovery sidecar -> standalone" "$OUTM3" 'd["source"]=="standalone"'
+# (d) discovery.json truncated IMMEDIATELY AFTER a valid matching session_pid (no closing
+#     brace) -- the session_pid token alone would match, but the DOCUMENT is incomplete
+printf '{"session_pid":%s' "$$" > "$MAL/.hull/discovery.json"
+OUTM4=$("$HULL" agent inspect "$MAL" 2>/dev/null)
+assert_py "truncated right after a matching PID -> standalone (envelope invalid)" "$OUTM4" 'd["source"]=="standalone"'
+# (e) discovery.json truncated LATER in the document (valid PID, then cut mid-structure)
+printf '{"session_pid":%s,"declarations":[{"id":"x","annota' "$$" > "$MAL/.hull/discovery.json"
+OUTM5=$("$HULL" agent inspect "$MAL" 2>/dev/null)
+assert_py "truncated later in the document -> standalone (envelope invalid)" "$OUTM5" 'd["source"]=="standalone"'
+# sanity: a COMPLETE valid doc with a matching live PID IS served (proves the gate isn't
+# rejecting everything)
+printf '{"schema_version":1,"source":"dev","generation":7,"session_pid":%s,"declarations":[]}\n' "$$" > "$MAL/.hull/discovery.json"
+OUTM6=$("$HULL" agent inspect "$MAL" 2>/dev/null)
+assert_py "complete valid doc + live matching PID IS served (source=dev)" "$OUTM6" 'd["source"]=="dev" and d["generation"]==7'
+# (f) valid JSON with a matching PID, then an embedded NUL + trailing garbage: the COMPLETE
+#     on-disk document is invalid -> standalone (must parse/emit the exact byte length, not
+#     stop at the NUL via strlen/fputs)
+{ printf '{"schema_version":1,"source":"dev","generation":8,"session_pid":%s,"declarations":[]}' "$$"; printf '\000trailing-garbage'; } > "$MAL/.hull/discovery.json"
+OUTM7=$("$HULL" agent inspect "$MAL" 2>/dev/null)
+assert_py "embedded NUL + trailing garbage -> standalone (byte-length validation)" "$OUTM7" \
+    'd["source"]=="standalone"'
 
 echo ""
 echo "=== hull agent inspect E2E: $PASS passed, $FAIL failed ==="
