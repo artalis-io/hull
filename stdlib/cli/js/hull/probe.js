@@ -1,9 +1,12 @@
-// hull:probe — the Slice-1 crossing / security / lifecycle probe for the restricted
-// QuickJS tooling runtime. NOT a parser: it proves (1) source bytes cross C -> QuickJS
-// length-aware + NUL-safe, (2) a multi-module bundle loads from the cli-js VFS, (3) the
-// tooling VM is stripped of every application authority, and (4) the C bridge can invoke a
-// bundled entry and read back a validated JSON result. Slice 2 replaces this with the real
-// frontend. Trusted, bundled, tooling-only.
+// hull:probe - Slice 1 crossing / security / limit probe (NOT a parser).
+//
+// Proves the restricted QuickJS tooling runtime end to end without any parser:
+// the raw-byte source crossing (length-aware + NUL-safe), multi-module loading
+// (it imports hull:_probe_util), the empty application-authority surface,
+// options transport, the adversarial dynamic-code block, and every advertised
+// limit. Throwaway scaffolding; Slice 2 replaces it with the real lexer/parser.
+// Application JavaScript is never run here - only this trusted, audited,
+// embedded bundle.
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { marker } from "hull:_probe_util";
 
@@ -39,6 +42,51 @@ function analyze(srcBuf, path, opts) {
     };
 }
 
+// probeDynamic(): adversarial proof that dynamic code is unreachable, INCLUDING the
+// prototype-reachable constructors that survive deleting the global eval / Function
+// bindings. Every attempt must be blocked -- each dynamic-compile path funnels through
+// the runtime's eval hook, which is never enabled in this session.
+function probeDynamic() {
+    const attempts = {};
+    function tryIt(label, fn) {
+        try { fn(); attempts[label] = "RAN"; }
+        catch (_e) { attempts[label] = "blocked"; }
+    }
+    tryIt("global_eval", () => globalThis.eval("1 + 1"));
+    tryIt("global_Function", () => globalThis.Function("return 1")());
+    tryIt("object_ctor_ctor", () => ({}).constructor.constructor("return 1")());
+    tryIt("fn_ctor", () => (function () {}).constructor("return 1")());
+    tryIt("async_ctor", () => (async function () {}).constructor("return 1")());
+    const labels = Object.keys(attempts);
+    return {
+        schema_version: 1,
+        status: "ok",
+        dynamic_attempts: attempts,
+        all_blocked: labels.every((k) => attempts[k] === "blocked"),
+    };
+}
+
+// Limit-exercising methods (the Slice-1 limit-contract tests drive these).
+function spin() { for (;;) { /* burn the instruction budget */ } }
+function recurse(n) { return recurse((n || 0) + 1); }          // stack budget
+function hog() {                                               // heap budget
+    const a = [];
+    for (;;) { a.push(new Array(100000).fill(7)); }
+}
+function bigResult(opts) {                                     // result-size budget
+    const n = (opts && opts.size) || 1000000;
+    return { schema_version: 1, status: "ok", blob: "x".repeat(n) };
+}
+function boom() { throw new Error("probe boom"); }            // ordinary tooling throw
+
 // Trusted tooling entries register on globalThis so the C bridge can reach them without
 // module-namespace APIs (this VM is single-purpose + VFS-isolated).
-globalThis.__hull_frontend = { analyze: analyze };
+globalThis.__hull_frontend = {
+    analyze: analyze,
+    probeDynamic: probeDynamic,
+    spin: spin,
+    recurse: recurse,
+    hog: hog,
+    bigResult: bigResult,
+    boom: boom,
+};

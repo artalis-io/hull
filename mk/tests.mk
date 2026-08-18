@@ -174,8 +174,8 @@ $(BUILDDIR)/test_lua_source: $(TESTDIR)/hull/source/test_lua_source.c $(LUA_OBJS
 # + the cli-js registry + vendored QuickJS. Proves the runtime / byte transport / module
 # loading / limits / exception-conversion / lifecycle independently of any parser. Lives
 # under tests/hull/frontend/, so it needs an explicit recipe (not the cap/ pattern rule).
-$(BUILDDIR)/test_js_session: $(TESTDIR)/hull/frontend/test_js_session.c $(FRONTEND_JS_SESSION_OBJ) $(STDLIB_JS_CLI_REGISTRY_O) $(VFS_OBJ) $(PATH_NORM_OBJ) $(SH_SEAL_ARENA_OBJ) $(QJS_OBJS) | $(BUILDDIR)
-	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -Ivendor/quickjs -o $@ $< $(FRONTEND_JS_SESSION_OBJ) $(STDLIB_JS_CLI_REGISTRY_O) $(VFS_OBJ) $(PATH_NORM_OBJ) $(SH_SEAL_ARENA_OBJ) $(QJS_OBJS) -lm -lpthread $(LDFLAGS)
+$(BUILDDIR)/test_js_session: $(TESTDIR)/hull/frontend/test_js_session.c $(FRONTEND_JS_SESSION_OBJ) $(STDLIB_JS_CLI_REGISTRY_O) $(QJS_OBJS) | $(BUILDDIR)
+	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -Ivendor/quickjs -o $@ $< $(FRONTEND_JS_SESSION_OBJ) $(STDLIB_JS_CLI_REGISTRY_O) $(QJS_OBJS) -lm -lpthread $(LDFLAGS)
 
 # Read-only shared-heap C-API test: build-time AOT fixture. Generate an .aot from
 # the embedded .wasm via the Hull-built wamrc when present (arch + OS correct);
