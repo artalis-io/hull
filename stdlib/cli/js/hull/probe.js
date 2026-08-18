@@ -78,6 +78,7 @@ function bigResult(opts) {                                     // result-size bu
     return { schema_version: 1, status: "ok", blob: "x".repeat(n) };
 }
 function boom() { throw new Error("probe boom"); }            // ordinary tooling throw
+function returnsUndefined() { return undefined; }             // non-JSON result (stringify -> undefined)
 
 // Trusted tooling entries register on globalThis so the C bridge can reach them without
 // module-namespace APIs (this VM is single-purpose + VFS-isolated).
@@ -89,4 +90,5 @@ globalThis.__hull_frontend = {
     hog: hog,
     bigResult: bigResult,
     boom: boom,
+    returnsUndefined: returnsUndefined,
 };

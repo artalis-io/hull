@@ -154,6 +154,21 @@ UTEST(js_session, options_embedded_nul_fails_closed)
     hl_js_session_destroy(s);
 }
 
+/* A NULL options pointer with a nonzero length is a transport mismatch (would read past
+ * the placeholder buffer), rejected like the source case. */
+UTEST(js_session, options_null_ptr_with_len_rejected)
+{
+    HlJsSession *s = hl_js_session_create(NULL);
+    ASSERT_TRUE(s != NULL);
+    char *out = NULL; size_t out_len = 0;
+    int rc = hl_js_session_analyze(s, "hull:probe", "analyze", (const uint8_t *)"x", 1, "a.js",
+                                   NULL, 8, &out, &out_len);
+    ASSERT_EQ(rc, -1);
+    EXPECT_TRUE(has(out, "\"code\":\"js.transport\""));
+    free(out);
+    hl_js_session_destroy(s);
+}
+
 /* Options with trailing garbage after a valid value -> fail closed. */
 UTEST(js_session, options_trailing_garbage_fails_closed)
 {
@@ -291,6 +306,47 @@ UTEST(js_session, limit_heap)
     int rc = analyze(s, "hog", (const uint8_t *)"x", 1, "a.js", &out, &out_len);
     ASSERT_EQ(rc, -1);
     EXPECT_TRUE(has(out, "\"code\":\"js.limit.heap\""));
+    free(out);
+    hl_js_session_destroy(s);
+}
+
+/* A large valid source that cannot fit the configured heap trips js.limit.heap during
+ * argument construction (ArrayBuffer copy) -- NOT js.transport. */
+UTEST(js_session, limit_heap_large_source)
+{
+    HlJsSessionLimits lim = HL_JS_SESSION_LIMITS_DEFAULT;
+    lim.max_source_bytes = (size_t)32 * 1024 * 1024;   /* allow a big source through */
+    lim.max_heap_bytes   = (size_t)8 * 1024 * 1024;    /* but the heap can't hold it */
+    HlJsSession *s = hl_js_session_create(&lim);
+    ASSERT_TRUE(s != NULL);
+    size_t big = (size_t)16 * 1024 * 1024;             /* 16 MiB source > 8 MiB heap */
+    uint8_t *buf = malloc(big);
+    ASSERT_TRUE(buf != NULL);
+    memset(buf, 'a', big);
+    char *out = NULL; size_t out_len = 0;
+    int rc = analyze(s, "analyze", buf, big, "a.js", &out, &out_len);
+    free(buf);
+    ASSERT_EQ(rc, -1);
+    ASSERT_TRUE(out != NULL);
+    EXPECT_TRUE(has(out, "\"code\":\"js.limit.heap\""));   /* heap, not transport */
+    EXPECT_FALSE(has(out, "js.transport"));
+    free(out);
+    hl_js_session_destroy(s);
+}
+
+/* A method returning `undefined` (JSON.stringify -> undefined, not a string) is NOT
+ * emitted as the literal bytes "undefined"; the boundary fails closed. */
+UTEST(js_session, result_undefined_is_indeterminate)
+{
+    HlJsSession *s = hl_js_session_create(NULL);
+    ASSERT_TRUE(s != NULL);
+    char *out = NULL; size_t out_len = 0;
+    int rc = analyze(s, "returnsUndefined", (const uint8_t *)"x", 1, "a.js", &out, &out_len);
+    ASSERT_EQ(rc, -1);
+    ASSERT_TRUE(out != NULL);
+    EXPECT_TRUE(has(out, "\"status\":\"indeterminate\""));
+    EXPECT_TRUE(has(out, "\"code\":\"js.internal\""));
+    EXPECT_FALSE(has(out, "undefined\"}"));   /* never the raw bytes `undefined` as the result */
     free(out);
     hl_js_session_destroy(s);
 }

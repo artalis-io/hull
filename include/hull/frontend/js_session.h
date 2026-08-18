@@ -77,19 +77,27 @@ HlJsSession *hl_js_session_create(const HlJsSessionLimits *limits);
  * malformed / NUL-bearing / trailing-garbage input FAILS CLOSED (js.transport) rather than
  * being silently truncated or nulled.
  *
+ * The result MUST be valid JSON: JSON.stringify returning a non-string (e.g. a method that
+ * returns `undefined` / a function) FAILS CLOSED as js.internal rather than emitting the
+ * bytes "undefined". A single fresh work budget covers the WHOLE invocation (one-time entry
+ * load, options parse, argument construction, the call, module jobs, serialization), and a
+ * resource breach in ANY phase is classified consistently (a valid source that cannot fit
+ * the heap during ArrayBuffer construction is js.limit.heap, not transport).
+ *
  * On success returns 0 and sets *out_json to a malloc'd NUL-terminated JSON string (caller
  * frees) of the method's return value, *out_len to its byte length. On ANY failure returns
  * -1 and sets *out_json to a structured INDETERMINATE diagnostic JSON:
  *   {"status":"indeterminate","diagnostics":[{"severity":"error","code":CODE,"message":...}]}
  * where CODE is one of:
- *   js.transport            - bad input transport (null src + nonzero len, malformed options,
- *                             failed argument construction)
+ *   js.transport            - bad input transport (a NULL src/options pointer with a nonzero
+ *                             length, or malformed / NUL-bearing / trailing-garbage options)
  *   js.limit.bytes          - source exceeds max_source_bytes
- *   js.limit.instructions   - interrupt budget exhausted
- *   js.limit.heap           - QuickJS heap limit hit
- *   js.limit.stack          - QuickJS stack limit hit
+ *   js.limit.instructions   - interrupt budget exhausted (any phase)
+ *   js.limit.heap           - QuickJS heap limit hit (any phase, incl. argument construction)
+ *   js.limit.stack          - QuickJS stack limit hit (any phase)
  *   js.limit.result         - result JSON exceeds max_result_bytes
- *   js.internal             - an ordinary tooling exception or other internal failure
+ *   js.internal             - an ordinary tooling exception, a non-JSON result, or other
+ *                             internal failure
  * Never raises a QuickJS exception across this boundary; never crashes. If `out_json` is
  * NULL the diagnostic is discarded (no leak); the return value still reflects success. */
 int hl_js_session_analyze(HlJsSession *s, const char *module, const char *method,

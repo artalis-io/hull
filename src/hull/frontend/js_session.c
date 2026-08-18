@@ -141,18 +141,25 @@ static char *take_exception_message(JSContext *ctx)
     return out;
 }
 
-/* Classify a JS_Call failure into the advertised code taxonomy. Instruction-budget breach
- * is authoritative (the interrupt error is uncatchable); heap / stack exhaustion is
- * recognized from the QuickJS message; anything else is an ordinary tooling exception. */
-static const char *classify_exception(HlJsSession *s, const char *msg)
+/* Consume the pending QuickJS exception and fail the invocation with the correctly
+ * classified code. Used at EVERY phase (options parse, argument construction, module-job
+ * draining, JS_Call, JS_JSONStringify, JS_ToCStringLen) so a resource breach is reported
+ * as the same js.limit.* code regardless of which phase tripped it. The instruction-budget
+ * breach is authoritative (the interrupt error is uncatchable); heap / stack exhaustion is
+ * recognized from the preserved QuickJS message; otherwise the caller's `fallback` applies
+ * (js.transport for malformed input, js.internal for an ordinary tooling fault). */
+static int fail_from_exception(HlJsSession *s, JSContext *ctx,
+                               char **out_json, size_t *out_len, const char *fallback)
 {
-    if (s->instr_limit > 0 && s->instr_count > s->instr_limit)
-        return "js.limit.instructions";
-    if (msg) {
-        if (strstr(msg, "out of memory")) return "js.limit.heap";
-        if (strstr(msg, "stack overflow")) return "js.limit.stack";
-    }
-    return "js.internal";
+    char *msg = take_exception_message(ctx);   /* reads + clears the pending exception */
+    const char *code;
+    if (s->instr_limit > 0 && s->instr_count > s->instr_limit)      code = "js.limit.instructions";
+    else if (msg && strstr(msg, "out of memory"))                  code = "js.limit.heap";
+    else if (msg && strstr(msg, "stack overflow"))                 code = "js.limit.stack";
+    else                                                            code = fallback;
+    int rc = fail_indeterminate(out_json, out_len, code, msg);
+    free(msg);
+    return rc;
 }
 
 /* ── bundle precompile (throwaway eval-enabled context) ─────────────────── */
@@ -289,30 +296,22 @@ static int ensure_entry_loaded(HlJsSession *s, const char *module, char **out_js
     const HlJsBcModule *m = find_module(s, module);
     if (!m) return fail_indeterminate(out_json, out_len, "js.internal", "tooling entry module not found");
 
-    s->instr_count = 0;
+    /* The instruction budget is reset ONCE at invocation entry (in hl_js_session_analyze),
+     * so the one-time entry load counts against the same fresh budget as everything else. */
     JSValue mod = JS_ReadObject(s->ctx, m->bc, m->bc_len, JS_READ_OBJ_BYTECODE);
     if (JS_IsException(mod)) {
-        char *msg = take_exception_message(s->ctx);
         JS_FreeValue(s->ctx, mod);
-        int rc = fail_indeterminate(out_json, out_len, "js.internal", msg);
-        free(msg);
-        return rc;
+        return fail_from_exception(s, s->ctx, out_json, out_len, "js.internal");
     }
     /* Resolve the entry's imports (triggers the loader for each dep) before evaluating. */
     if (JS_ResolveModule(s->ctx, mod) < 0) {
-        char *msg = take_exception_message(s->ctx);
         JS_FreeValue(s->ctx, mod);
-        int rc = fail_indeterminate(out_json, out_len, "js.internal", msg);
-        free(msg);
-        return rc;
+        return fail_from_exception(s, s->ctx, out_json, out_len, "js.internal");
     }
     JSValue v = JS_EvalFunction(s->ctx, mod);   /* consumes `mod` */
     if (JS_IsException(v)) {
-        char *msg = take_exception_message(s->ctx);
         JS_FreeValue(s->ctx, v);
-        int rc = fail_indeterminate(out_json, out_len, "js.internal", msg);
-        free(msg);
-        return rc;
+        return fail_from_exception(s, s->ctx, out_json, out_len, "js.internal");
     }
     /* Module eval yields a promise; run its jobs and check it fulfilled. */
     int drained = drain_jobs(s);
@@ -328,12 +327,8 @@ static int ensure_entry_loaded(HlJsSession *s, const char *module, char **out_js
         return rc;
     }
     JS_FreeValue(s->ctx, v);
-    if (drained != 0) {
-        char *msg = take_exception_message(s->ctx);
-        int rc = fail_indeterminate(out_json, out_len, "js.internal", msg);
-        free(msg);
-        return rc;
-    }
+    if (drained != 0)
+        return fail_from_exception(s, s->ctx, out_json, out_len, "js.internal");
     snprintf(s->entry_name, sizeof(s->entry_name), "%s", module);
     return 0;
 }
@@ -348,12 +343,19 @@ int hl_js_session_analyze(HlJsSession *s, const char *module, const char *method
     if (out_len) *out_len = 0;
     if (!s || !module || !method)
         return fail_indeterminate(out_json, out_len, "js.internal", "invalid arguments");
-    /* Fail-closed transport: a NULL source with a nonzero length would read past the
-     * placeholder buffer. Reject before entering QuickJS. */
+    /* Fail-closed transport: a NULL pointer with a nonzero length (source OR options) would
+     * read past the placeholder buffer. Reject both before entering QuickJS. */
     if (src_len > 0 && !src)
         return fail_indeterminate(out_json, out_len, "js.transport", "null source with nonzero length");
+    if (options_len > 0 && !options_json)
+        return fail_indeterminate(out_json, out_len, "js.transport", "null options with nonzero length");
     if (src_len > s->limits.max_source_bytes)
         return fail_indeterminate(out_json, out_len, "js.limit.bytes", "source exceeds max_source_bytes");
+
+    /* One fresh work budget for the WHOLE invocation: the one-time entry load, options
+     * parsing, argument construction, the call, module jobs, and result serialization all
+     * count against this single reset (not just JS_Call). */
+    s->instr_count = 0;
 
     if (ensure_entry_loaded(s, module, out_json, out_len) != 0) return -1;
 
@@ -380,9 +382,10 @@ int hl_js_session_analyze(HlJsSession *s, const char *module, const char *method
         arg_opts = JS_ParseJSON(ctx, options_json, options_len, "<options>");
         if (JS_IsException(arg_opts)) {
             JS_FreeValue(ctx, arg_opts);
-            JS_FreeValue(ctx, JS_GetException(ctx));   /* clear the pending parse error */
             JS_FreeValue(ctx, fn); JS_FreeValue(ctx, fe);
-            return fail_indeterminate(out_json, out_len, "js.transport", "malformed options JSON");
+            /* Ordinary malformed input is js.transport; a resource breach during the parse
+             * (heap/instructions) is classified as the matching js.limit.*. */
+            return fail_from_exception(s, ctx, out_json, out_len, "js.transport");
         }
     }
 
@@ -390,28 +393,23 @@ int hl_js_session_analyze(HlJsSession *s, const char *module, const char *method
      * src_len > 0 (checked above); for a zero-length source a placeholder ptr is fine. */
     JSValue arg_src = JS_NewArrayBufferCopy(ctx, src ? src : (const uint8_t *)"", src_len);
     JSValue arg_path = JS_NewStringLen(ctx, path ? path : "", path ? strlen(path) : 0);
-    /* Argument construction can fail under memory pressure; surface that as transport
-     * failure instead of passing exception values into JS_Call. */
+    /* Argument construction fails only under memory pressure. A valid source that does not
+     * fit the configured heap is js.limit.heap (classified from the preserved exception),
+     * NOT malformed transport. */
     if (JS_IsException(arg_src) || JS_IsException(arg_path)) {
         JS_FreeValue(ctx, arg_src); JS_FreeValue(ctx, arg_path); JS_FreeValue(ctx, arg_opts);
         JS_FreeValue(ctx, fn); JS_FreeValue(ctx, fe);
-        JS_FreeValue(ctx, JS_GetException(ctx));
-        return fail_indeterminate(out_json, out_len, "js.transport", "failed to construct call arguments");
+        return fail_from_exception(s, ctx, out_json, out_len, "js.internal");
     }
     JSValue argv[3] = { arg_src, arg_path, arg_opts };
 
-    s->instr_count = 0;
     JSValue result = JS_Call(ctx, fn, JS_UNDEFINED, 3, argv);
     JS_FreeValue(ctx, argv[0]); JS_FreeValue(ctx, argv[1]); JS_FreeValue(ctx, argv[2]);
     JS_FreeValue(ctx, fn); JS_FreeValue(ctx, fe);
 
     if (JS_IsException(result)) {
         JS_FreeValue(ctx, result);
-        char *msg = take_exception_message(ctx);
-        const char *code = classify_exception(s, msg);
-        int rc = fail_indeterminate(out_json, out_len, code, msg);
-        free(msg);
-        return rc;
+        return fail_from_exception(s, ctx, out_json, out_len, "js.internal");
     }
 
     /* Serialize the frontend-neutral facts. AST/session state never crosses here. */
@@ -419,16 +417,22 @@ int hl_js_session_analyze(HlJsSession *s, const char *module, const char *method
     JS_FreeValue(ctx, result);
     if (JS_IsException(json)) {
         JS_FreeValue(ctx, json);
-        char *msg = take_exception_message(ctx);
-        int rc = fail_indeterminate(out_json, out_len, "js.internal", msg);
-        free(msg);
-        return rc;
+        return fail_from_exception(s, ctx, out_json, out_len, "js.internal");
+    }
+    /* The boundary contract is VALIDATED JSON. JSON.stringify(undefined) (a method that
+     * returns undefined / a function / a bare symbol) yields the JS value `undefined`, NOT
+     * a string -- JS_ToCStringLen would then emit the bytes "undefined". Require a string
+     * and fail closed otherwise, so Slice 1 never knowingly emits non-JSON. */
+    if (!JS_IsString(json)) {
+        JS_FreeValue(ctx, json);
+        return fail_indeterminate(out_json, out_len, "js.internal",
+                                  "tooling result was not JSON (JSON.stringify returned a non-string)");
     }
     size_t jlen = 0;
     const char *js = JS_ToCStringLen(ctx, &jlen, json);
     if (!js) {
         JS_FreeValue(ctx, json);
-        return fail_indeterminate(out_json, out_len, "js.internal", "result is not serializable");
+        return fail_from_exception(s, ctx, out_json, out_len, "js.internal");
     }
     if (jlen > s->limits.max_result_bytes) {
         JS_FreeCString(ctx, js);
