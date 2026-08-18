@@ -384,5 +384,39 @@ do
         "projection keeps public decl id + annotations")
 end
 
+-- ── build seam (D10): the abstraction is consumable by a future lowering consumer ──
+-- Simulates what a Query/Compute IR lowerer does through the PUBLIC model + the frontend
+-- boundary -- annotation-name -> ids -> decl -> handle -> frontend semantics -- with no
+-- AST traversal and no build.lua involvement.
+do
+    local analyze = require("hull.project.analyze")
+    _G.tool = make_tool({
+        ["q/app.lua"] =
+            "---@query users\nlocal function list_users() end\n" ..
+            "---@compute score\nlocal function score() end\nreturn list_users, score\n",
+    })
+    local disc = analyze.analyze("q")   -- exactly what a build consumer would call
+    _G.tool = nil
+
+    ok(disc.valid and disc.complete, "a build-ready project analyzes valid + complete")
+    -- 1. reach annotated decls by annotation NAME (no per-frontend AST walk)
+    ok(disc.indexes.by_annotation["query"] and #disc.indexes.by_annotation["query"] == 1,
+        "consumer finds @query-annotated decls by annotation name")
+    -- 2. resolve the id to the normalized decl fact
+    local qid = disc.indexes.by_annotation["query"][1]
+    local qdecl = disc.indexes.by_id[qid]
+    ok(qdecl and qdecl.name == "list_users" and qdecl.kind == "local_function",
+        "consumer resolves the @query decl (name + kind) via by_id")
+    -- 3. reach FRONTEND-specific semantics THROUGH the boundary via the handle
+    local resolved = analyze.resolve_handle(disc, qdecl.handle)
+    ok(resolved and resolved.frontend and resolved.unit and resolved.declaration,
+        "consumer resolves the decl handle to {frontend, unit, declaration}")
+    -- 4. the frontend exposes scope through the contract (consumer never touches the AST)
+    local sc = resolved.frontend.scope(resolved.unit)
+    ok(sc and sc.bindings, "consumer reaches scope via the frontend boundary")
+    -- distinct domains stay separable for distinct lowerers
+    ok(disc.indexes.by_annotation["compute"], "a @compute lowerer finds its own decls independently")
+end
+
 print(string.format("test_project: %d passed, %d failed", pass, fail))
 return { pass = pass, fail = fail, failures = failures }
