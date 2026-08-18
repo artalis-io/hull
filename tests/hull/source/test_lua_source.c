@@ -42,9 +42,12 @@ static int run_lua_test(const char *script_path, long long *pass_out, long long 
     if (!L) return -1;
     luaL_openlibs(L);
 
-    /* Resolve require("hull.source.X") from the source tree (repo-root relative). */
+    /* Resolve require("hull.source.X") from the source tree (repo-root relative).
+     * stdlib/lua is also on the path so hull.source.analyze can pull in hull.json
+     * (the tool VM resolves it via the embedded VFS; the harness has no VFS). */
     if (luaL_dostring(L,
-            "package.path = 'stdlib/cli/lua/?.lua;stdlib/cli/lua/?/init.lua;' .. package.path")
+            "package.path = 'stdlib/cli/lua/?.lua;stdlib/cli/lua/?/init.lua;"
+            "stdlib/lua/?.lua;stdlib/lua/?/init.lua;' .. package.path")
         != LUA_OK) {
         fprintf(stderr, "package.path setup failed: %s\n", lua_tostring(L, -1));
         lua_close(L);
@@ -283,6 +286,16 @@ UTEST(lua_source, scope_slice2)
 {
     long long pass = 0, fail = -1;
     int rc = run_lua_test("stdlib/cli/lua/hull/source/tests/test_scope.lua", &pass, &fail);
+    ASSERT_EQ(rc, 0);
+    EXPECT_EQ(fail, 0LL);
+    EXPECT_GT(pass, 0LL);
+}
+
+/* analyze_source's three-state contract, incl. an injected resolver failure. */
+UTEST(lua_source, analyze_core)
+{
+    long long pass = 0, fail = -1;
+    int rc = run_lua_test("stdlib/cli/lua/hull/source/tests/test_analyze.lua", &pass, &fail);
     ASSERT_EQ(rc, 0);
     EXPECT_EQ(fail, 0LL);
     EXPECT_GT(pass, 0LL);

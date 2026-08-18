@@ -104,17 +104,39 @@ A **rule** is a small declarative record:
 
 | id | severity | needs | flags |
 |---|---|---|---|
-| `unused-local` | warning | scope | a `local` never read (excludes a leading `_`-named local — the idiomatic "ignore") |
-| `unused-param` | warning | scope | a function parameter never read. Exempt ONLY: `_`, any underscore-prefixed name (`_x`), and the implicit method `self`. **No trailing-unused-run suppression by default** — suppressing a trailing run would hide every unused parameter in a function and gut the rule. Broader callback suppression is a later add, gated on evidence or explicit config. |
-| `shadowed-local` | warning | scope | a `local`/param that hides an outer binding of the same name in an enclosing scope |
-| `undefined-global` | warning (default OFF) | scope | a global read that is not a known Lua/Hull global (needs a global allowlist → off by default until the allowlist is curated) |
+| `unused-local` | warning | scope | a `local` or `local function` (`kind` local/localfunc) never READ. Loop vars (own concern, deferred) and params (→ `unused-param`) are excluded; a leading-`_` name is exempt. |
+| `unused-param` | warning | scope | a parameter never read. Exempt ONLY: `_`, any underscore-prefixed name (`_x`), and the implicit method `self`. **No trailing-unused-run suppression by default** — it would hide every unused parameter in a function; broader callback suppression is a later add, evidence/config-gated. |
+| `shadowed-local` | warning | scope | a declaration whose `shadows ~= nil` (same-function shadowing; §3/scope). Exempt: `_`/underscore names and the implicit `self`. |
+| `undefined-global` | warning (default OFF) | scope | a global READ not in the evidence-based app allowlist (above). Off by default; over reads only. |
 | `empty-block` | warning | — | an `if`/`elseif`/`else`/`while`/`for`/`do` body with zero statements |
 | `duplicate-table-key` | warning | — | a table constructor with two `field_name`/`field_expr` entries for the same literal key |
 | `todo-comment` | info | — | a comment containing `TODO`/`FIXME`/`XXX` (surfaced, never fails a build) |
 
-`undefined-global` ships **off by default** (it needs a curated global allowlist — Lua
-intrinsics + Hull's injected globals like `app`, `db`, `http`, `tool`… — to avoid false
-positives); it's enabled with `--enable=undefined-global` and hardened over time.
+`undefined-global` ships **off by default** and reads over global **reads** only
+(`access == "read"`), enabled with `--enable=undefined-global`.
+
+**The allowlist is EVIDENCE-BASED, derived from Hull's app-runtime sandbox +
+registration, NOT guessed.** It contains exactly:
+- **Lua base globals surviving the sandbox.** `hl_lua_sandbox` (`runtime/lua/runtime.c`)
+  removes `io, os, load, loadfile, dofile, package, debug`; the rest of Lua 5.4's base
+  library remains: `assert, collectgarbage, error, getmetatable, ipairs, next, pairs,
+  pcall, print, rawequal, rawget, rawlen, rawset, select, setmetatable, tonumber,
+  tostring, type, warn, xpcall, _G, _VERSION`, plus the surviving library tables
+  `coroutine, math, string, table, utf8`. `_ENV` is also allowlisted: Lua 5.4 supplies
+  it as the implicit environment upvalue (valid code may reference it directly), and the
+  lightweight scope pass does not synthesize that binding, so without the allowlist entry
+  a direct `_ENV` read is a false positive.
+- **Hull-injected app/test globals**: `app` + `hull` (`runtime/lua/modules.c`),
+  `require` (`mod_fs.c`), `test` (`mod_test.c`).
+
+Deliberately **NOT** in the app allowlist (so they correctly trigger when read as a
+global): `req` / `res` are handler **parameters**; `db, fs, http, json, log, crypto,
+compute, gpu, …` are **imported locals** (`require("hull.X")`); `io, os, load, loadfile,
+dofile, package, debug` are **sandbox-removed**; `tool` / `arg` and promoted short
+module names belong to the **tool VM** (`mod_tool.c`), not app code. A later explicit
+`--tool-mode` profile can add the tool-VM globals without weakening app analysis. The
+list is locked with positive tests (allowed globals do NOT fire) AND negative tests
+(`db`, `req`, `os`, `json` DO fire when read globally).
 
 ## 6. CLI surface (additions)
 
@@ -186,8 +208,17 @@ is the explicit signal that lint data may be present.
 2. **Scope pass** — DONE. `hull.source.scope` (`resolve -> scope, err`; pcall-guarded)
    + `test_scope.lua`. The reusable Step B; not yet wired into a rule (slice 3).
    Design: [hull_source_scope_design.md](hull_source_scope_design.md).
-3. **Scope rules** — `unused-local`, `unused-param`, `shadowed-local`, and
-   `undefined-global` (off by default) on top of the pass.
+3. **Scope rules** — DONE. `unused-local` (local/localfunc, `_`-exempt),
+   `unused-param` (`_`/implicit-`self`-exempt), `shadowed-local` (same-function,
+   `_`/implicit-exempt), and `undefined-global` (OFF by default, evidence-based app
+   allowlist, reads only) on top of `hull.source.scope`. The engine gains `needs_scope`
+   (rules declare it; skipped when scope is unavailable); `analyze.lua` computes the
+   scope once per clean file and, on a resolver failure, DOWNGRADES the file to state
+   `internal` (so JSON `files[].state` + `summary.internal` stay consistent with exit 1),
+   surfaces the internal diagnostic, and skips scope-backed rules (structural rules still
+   run). `analyze_source` is exported (module return, CLI entry guarded on `tool`) so the
+   three-state contract is unit-tested with an injected resolver failure. test_lint (177)
+   + test_analyze (9) + e2e (25).
 
 Each slice is a design-first → ratify → implement → green → merge cycle, matching how
 the layer itself was built.

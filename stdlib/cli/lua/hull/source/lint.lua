@@ -45,12 +45,34 @@ local function table_key(field)
     return nil
 end
 
+-- An idiomatic "ignore" name (`_`, `_x`) is exempt from unused/shadow rules.
+local function is_ignored(name) return type(name) == "string" and name:sub(1, 1) == "_" end
+
+-- EVIDENCE-BASED app-runtime global allowlist for undefined-global (design §5).
+-- Derived from Hull's sandbox + registration, NOT guessed:
+--   * Lua base globals surviving hl_lua_sandbox (runtime/lua/runtime.c removes
+--     io/os/load/loadfile/dofile/package/debug) + surviving library tables;
+--   * Hull app/test globals: app + hull (modules.c), require (mod_fs.c), test (mod_test.c).
+-- Deliberately absent (so they correctly fire): req/res (params), db/fs/http/json/log/
+-- crypto/compute/gpu (imported locals), the sandbox-removed names, and tool/arg
+-- (tool VM). A future --tool-mode profile adds the tool-VM globals.
+local GLOBAL_ALLOWLIST = {}
+for _, g in ipairs({
+    "assert", "collectgarbage", "error", "getmetatable", "ipairs", "next", "pairs",
+    "pcall", "print", "rawequal", "rawget", "rawlen", "rawset", "select", "setmetatable",
+    "tonumber", "tostring", "type", "warn", "xpcall", "_G", "_VERSION", "_ENV",
+    "coroutine", "math", "string", "table", "utf8",
+    "app", "hull", "require", "test",
+}) do GLOBAL_ALLOWLIST[g] = true end
+
 -- ── rules (sorted by id; the registry order is deterministic) ─────────
+-- check(unit, scope, emit): `scope` is the hull.source.scope model (nil for a rule that
+-- does not need it, or when resolution failed -- a needs_scope rule is then skipped).
 M.RULES = {
     {
         id = "duplicate-table-key", severity = "warning", default = true,
         describe = "a table constructor with a repeated literal key",
-        check = function(unit, emit)
+        check = function(unit, _scope, emit)
             lua.walk(unit.ast, function(n)
                 if n.kind ~= "table" then return end
                 local seen = {}
@@ -67,7 +89,7 @@ M.RULES = {
     {
         id = "empty-block", severity = "warning", default = true,
         describe = "a control-flow block with an empty body",
-        check = function(unit, emit)
+        check = function(unit, _scope, emit)
             lua.walk(unit.ast, function(n)
                 local k = n.kind
                 if (k == "do" or k == "while" or k == "repeat"
@@ -85,15 +107,62 @@ M.RULES = {
         end,
     },
     {
+        id = "shadowed-local", severity = "warning", default = true, needs_scope = true,
+        describe = "a declaration that shadows an enclosing binding of the same name",
+        check = function(_unit, scope, emit)
+            for _, d in ipairs(scope.bindings) do
+                if d.shadows and not d.implicit and not is_ignored(d.name) then
+                    emit({ range = d.range, message = "'" .. d.name .. "' shadows an outer declaration" })
+                end
+            end
+        end,
+    },
+    {
         id = "todo-comment", severity = "info", default = true,
         describe = "a comment containing TODO / FIXME / XXX",
-        check = function(unit, emit)
+        check = function(unit, _scope, emit)
             for _, c in ipairs(unit.comments or {}) do
                 local text = c.text or ""
                 for _, m in ipairs({ "TODO", "FIXME", "XXX" }) do
                     if text:find(m, 1, true) then
                         emit({ range = c.range, message = m .. " comment" }); break
                     end
+                end
+            end
+        end,
+    },
+    {
+        id = "undefined-global", severity = "warning", default = false, needs_scope = true,
+        describe = "a read of a global not in Hull's app-runtime allowlist",
+        check = function(_unit, scope, emit)
+            for node, res in pairs(scope.ref_of) do
+                if res.kind == "global" and res.access == "read"
+                    and not GLOBAL_ALLOWLIST[node.name] then
+                    emit({ range = node.range, message = "undefined global '" .. node.name .. "'" })
+                end
+            end
+        end,
+    },
+    {
+        id = "unused-local", severity = "warning", default = true, needs_scope = true,
+        describe = "a local (or local function) that is never read",
+        check = function(_unit, scope, emit)
+            for _, d in ipairs(scope.bindings) do
+                if (d.kind == "local" or d.kind == "localfunc") and d.reads == 0
+                    and not is_ignored(d.name) then
+                    emit({ range = d.range, message = "unused local '" .. d.name .. "'" })
+                end
+            end
+        end,
+    },
+    {
+        id = "unused-param", severity = "warning", default = true, needs_scope = true,
+        describe = "a function parameter that is never read",
+        check = function(_unit, scope, emit)
+            for _, d in ipairs(scope.bindings) do
+                if d.kind == "param" and d.reads == 0 and not d.implicit
+                    and not is_ignored(d.name) then
+                    emit({ range = d.range, message = "unused parameter '" .. d.name .. "'" })
                 end
             end
         end,
@@ -114,13 +183,23 @@ function M.default_enabled()
     return e
 end
 
--- Run the enabled rules over a (cleanly-parsed) unit -> findings[] with each finding's
--- { code = "lua.lint.<id>", severity, rule = <id>, range, message }.
-function M.run(unit, enabled)
+-- Does any enabled rule require the scope model? (drives whether the analyzer computes
+-- it; a needs_scope rule is skipped if scope is unavailable.)
+function M.needs_scope(enabled)
+    for _, rule in ipairs(M.RULES) do
+        if enabled[rule.id] and rule.needs_scope then return true end
+    end
+    return false
+end
+
+-- Run the enabled rules over a (cleanly-parsed) unit -> findings[], each with
+-- { code = "lua.lint.<id>", severity, rule = <id>, range, message }. `scope` is the
+-- hull.source.scope model (or nil); a needs_scope rule is skipped when scope is nil.
+function M.run(unit, enabled, scope)
     local findings = {}
     for _, rule in ipairs(M.RULES) do          -- registry order = deterministic
-        if enabled[rule.id] then
-            rule.check(unit, function(f)
+        if enabled[rule.id] and (not rule.needs_scope or scope) then
+            rule.check(unit, scope, function(f)
                 f.code = "lua.lint." .. rule.id
                 f.severity = rule.severity
                 f.rule = rule.id

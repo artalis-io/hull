@@ -13,6 +13,7 @@
 
 local lua = require("hull.source.lua")
 local lint = require("hull.source.lint")
+local scope = require("hull.source.scope")
 local json = require("hull.json")
 
 -- Generous limits so lua.limit.* only trips on genuinely pathological input; a trip is
@@ -189,7 +190,27 @@ local function analyze_source(path, src, enabled)
     -- Lint only a cleanly-parsed file (complete + no syntax errors): a recovered,
     -- error-bearing AST would yield spurious lint findings.
     if state == "complete" and not has_syntax and enabled and next(enabled) then
-        for _, f in ipairs(lint.run(unit, enabled)) do
+        local sc = nil
+        if lint.needs_scope(enabled) then
+            local resolved, serr = scope.resolve(unit)
+            if serr then
+                -- resolver internal failure: surface it, downgrade the file to "internal"
+                -- (so JSON files[].state + summary.internal stay consistent with the exit
+                -- code), and SKIP scope-backed rules (sc stays nil). Structural rules,
+                -- already independent of scope, still run below.
+                state = "internal"
+                local line, col
+                if serr.range then line, col = unit:line_col(serr.range) end
+                diags[#diags + 1] = {
+                    code = serr.code, severity = serr.severity or "error", message = serr.message,
+                    range = serr.range and { start = serr.range.start, stop = serr.range.stop } or nil,
+                    line = line, col = col,
+                }
+            else
+                sc = resolved
+            end
+        end
+        for _, f in ipairs(lint.run(unit, enabled, sc)) do
             local line, col
             if f.range then line, col = unit:line_col(f.range) end
             diags[#diags + 1] = {
@@ -386,10 +407,20 @@ local function emit_human(o, files, diagnostics, summary, no_findings)
     if #out > 0 then tool.stdout(table.concat(out, "\n") .. "\n") end
 end
 
-local o, _, root_norm, files, diagnostics, summary, no_findings = run()
-if o.json then
-    emit_json(root_norm, files, diagnostics, summary)        -- JSON overrides --quiet; stdout is pure JSON
-else
-    emit_human(o, files, diagnostics, summary, no_findings)
+-- `analyze_source` is the pure core (parse + lint, no I/O). Expose it so the test
+-- harness can drive the three-state contract (incl. an injected resolver failure)
+-- without the CLI shell. The CLI entry runs ONLY in the tool VM, where `tool` is a
+-- global; a plain `require` (test env, no `tool`) returns the module without exiting.
+local M = { analyze_source = analyze_source }
+
+if tool then
+    local o, _, root_norm, files, diagnostics, summary, no_findings = run()
+    if o.json then
+        emit_json(root_norm, files, diagnostics, summary)    -- JSON overrides --quiet; stdout is pure JSON
+    else
+        emit_human(o, files, diagnostics, summary, no_findings)
+    end
+    tool.exit(summary.clean and 0 or 1)
 end
-tool.exit(summary.clean and 0 or 1)
+
+return M

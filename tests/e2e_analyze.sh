@@ -38,7 +38,7 @@ echo "=== E2E: hull analyze ==="
 APP="$TMP/clean"
 mkdir -p "$APP/routes" "$APP/lib"
 printf 'app.manifest({ modules = {} })\napp.main(function() return 0 end)\n' > "$APP/app.lua"
-printf 'local M = {}\nfunction M.register(app) app.get("/u", function(req, res) res:json({ ok = true }) end) end\nreturn M\n' > "$APP/routes/users.lua"
+printf 'local M = {}\nfunction M.register(app) app.get("/u", function(req, res) res:json({ path = req.path }) end) end\nreturn M\n' > "$APP/routes/users.lua"
 printf 'local M = {}\nfunction M.add(a, b) return a + b end\nreturn M\n' > "$APP/lib/util.lua"
 
 # ── a broken app: a syntax error in a NON-entry module ────────────────
@@ -242,6 +242,26 @@ if [ "$n" = "0" ] && [ "$rc" = "1" ]; then
     pass "syntax-broken file: no spurious lint, exit 1 from the syntax error"
 else fail "broken-not-linted (n=$n, rc=$rc)"; fi
 rm -f "$LINT/oops.lua"
+
+# ── slice-3 scope-backed rules fixture ────────────────────────────────
+SCOPEAPP="$TMP/scopeapp"
+mkdir -p "$SCOPEAPP"
+printf 'local unused_var = 1\nlocal shadowed = 2\nlocal function helper(a, b)\n  return a + shadowed\nend\ndo\n  local shadowed = 3\n  helper(shadowed, 0)\nend\nreturn os.time()\n' > "$SCOPEAPP/app.lua"
+
+# ── Test 24: unused-local / unused-param / shadowed-local fire ─────────
+out=$("$HULL" analyze "$SCOPEAPP" 2>/dev/null || true)
+if echo "$out" | grep -q "lua.lint.unused-local" && echo "$out" | grep -q "lua.lint.unused-param" \
+   && echo "$out" | grep -q "lua.lint.shadowed-local"; then
+    pass "scope rules: unused-local + unused-param + shadowed-local fire"
+else fail "scope rules ($out)"; fi
+
+# ── Test 25: undefined-global OFF by default, --enable fires (os), allowed silent ─
+off=$("$HULL" analyze "$SCOPEAPP" 2>/dev/null || true)
+on=$("$HULL" analyze "$SCOPEAPP" --enable=undefined-global 2>/dev/null || true)
+if ! echo "$off" | grep -q "undefined-global" && echo "$on" | grep -q "undefined global 'os'" \
+   && ! echo "$on" | grep -q "undefined global 'string'"; then
+    pass "undefined-global: OFF by default, --enable fires os, allowlisted globals silent"
+else fail "undefined-global (on=$on)"; fi
 
 # ── summary ───────────────────────────────────────────────────────────
 echo ""
