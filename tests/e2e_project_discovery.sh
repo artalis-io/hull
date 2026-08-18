@@ -278,11 +278,25 @@ printf '{"port":1,"pid":1,"session_pid":"nan","started_at":1}\n' > "$MAL/.hull/d
 printf '{"schema_version":1,"source":"dev","generation":9,"session_pid":%s,"declarations":[]}\n' "$$" > "$MAL/.hull/discovery.json"
 OUTM2=$("$HULL" agent inspect "$MAL" 2>/dev/null)
 assert_py "malformed dev session_pid -> standalone" "$OUTM2" 'd["source"]=="standalone"'
-# (c) discovery.json truncated before the session_pid field
+# (c) discovery.json truncated BEFORE the session_pid field
 printf '{"port":1,"pid":1,"session_pid":%s,"started_at":1}\n' "$$" > "$MAL/.hull/dev.json"
 printf '{"schema_version":1,"source":"dev","generat' > "$MAL/.hull/discovery.json"
 OUTM3=$("$HULL" agent inspect "$MAL" 2>/dev/null)
-assert_py "truncated discovery sidecar -> standalone" "$OUTM3" 'd["source"]=="standalone"'
+assert_py "truncated (before PID) discovery sidecar -> standalone" "$OUTM3" 'd["source"]=="standalone"'
+# (d) discovery.json truncated IMMEDIATELY AFTER a valid matching session_pid (no closing
+#     brace) -- the session_pid token alone would match, but the DOCUMENT is incomplete
+printf '{"session_pid":%s' "$$" > "$MAL/.hull/discovery.json"
+OUTM4=$("$HULL" agent inspect "$MAL" 2>/dev/null)
+assert_py "truncated right after a matching PID -> standalone (envelope invalid)" "$OUTM4" 'd["source"]=="standalone"'
+# (e) discovery.json truncated LATER in the document (valid PID, then cut mid-structure)
+printf '{"session_pid":%s,"declarations":[{"id":"x","annota' "$$" > "$MAL/.hull/discovery.json"
+OUTM5=$("$HULL" agent inspect "$MAL" 2>/dev/null)
+assert_py "truncated later in the document -> standalone (envelope invalid)" "$OUTM5" 'd["source"]=="standalone"'
+# sanity: a COMPLETE valid doc with a matching live PID IS served (proves the gate isn't
+# rejecting everything)
+printf '{"schema_version":1,"source":"dev","generation":7,"session_pid":%s,"declarations":[]}\n' "$$" > "$MAL/.hull/discovery.json"
+OUTM6=$("$HULL" agent inspect "$MAL" 2>/dev/null)
+assert_py "complete valid doc + live matching PID IS served (source=dev)" "$OUTM6" 'd["source"]=="dev" and d["generation"]==7'
 
 echo ""
 echo "=== hull agent inspect E2E: $PASS passed, $FAIL failed ==="

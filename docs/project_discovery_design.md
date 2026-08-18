@@ -490,8 +490,11 @@ attribution, no em-dashes.
     when `discovery.json`/`dev.json` `session_pid` match AND `kill(pid,0)` confirms
     the supervisor is live. Any invalid CLI form (extra root, unknown flag,
     `--help`) is NOT fast-pathed → delegated to `hull.project.inspect` for full
-    Lua-side validation. Sidecar parsing demands a complete read (short read /
-    `ferror` → reject) and a positive in-range integer `session_pid` token; a
+    Lua-side validation. Sidecar reads demand a complete read (short read /
+    `ferror` → reject) and a positive in-range integer `session_pid` token, AND
+    the discovery document must parse as COMPLETE valid JSON via the repo's parser
+    (`sh_json_parse`) before it is streamed -- so a truncated/corrupt sidecar whose
+    `session_pid` token alone matches a live PID is NOT emitted. Any
     malformed/truncated/stale/crashed-session sidecar falls back to a standalone
     analysis. Liveness (`kill`) stays in the main process, not the tool sandbox.
     Scope: the non-TUI `--agent` loop; publishing from `hull dev --tui` is a

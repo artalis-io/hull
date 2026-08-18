@@ -35,6 +35,8 @@
 #include <signal.h>
 #include <limits.h>
 #include <errno.h>
+#include <sh_json.h>
+#include <sh_arena.h>
 
 /* ── Output helper ─────────────────────────────────────────────────── */
 
@@ -787,11 +789,26 @@ static char *read_whole_file(const char *path, size_t cap)
     return buf;
 }
 
+/* Validate that `buf` (of `len` bytes) is a COMPLETE, well-formed JSON document via the
+ * repo's parser. A truncated / corrupt discovery.json -- even one whose session_pid token
+ * happens to match a live PID -- must never be streamed. Returns 1 iff the whole document
+ * parses; 0 otherwise (incl. OOM, which fails closed to a standalone re-analysis). */
+static int json_document_valid(const char *buf, size_t len)
+{
+    SHArena *arena = sh_arena_create(len * 8 + 4096);   /* generous; a parse failure only costs a fresh analysis */
+    if (!arena) return 0;
+    ShJsonValue *root = NULL;
+    int ok = (sh_json_parse(buf, len, arena, &root) == SH_JSON_OK) && root != NULL;
+    sh_arena_free(arena);
+    return ok;
+}
+
 /* If a LIVE dev session has published a discovery generation for `app_dir`, stream it to
  * stdout and return 0. "Live" (D9): both .hull/discovery.json and .hull/dev.json exist,
- * their session_pid values match, and that supervisor PID is still alive (kill(pid,0)).
- * Any mismatch / dead session / missing file -> -1 (caller falls back to standalone).
- * This rejects a stale or cross-reload sidecar left by a prior/killed dev session. */
+ * their session_pid values match, that supervisor PID is still alive (kill(pid,0)), AND
+ * the discovery document parses as complete valid JSON. Any mismatch / dead session /
+ * missing file / malformed-or-truncated document -> -1 (caller falls back to standalone).
+ * This rejects a stale/cross-reload sidecar and a corrupt/partial one. */
 static int agent_inspect_stream_live(const char *app_dir)
 {
     char disc_path[PATH_MAX], dev_path[PATH_MAX];
@@ -812,6 +829,10 @@ static int agent_inspect_stream_live(const char *app_dir)
 
     /* Bind the published generation to a specific live dev session. */
     if (sp_disc != sp_dev || kill((pid_t)sp_disc, 0) != 0) { free(disc); return -1; }
+
+    /* Only emit a COMPLETE, well-formed document: a truncated/corrupt discovery.json (even
+     * with a matching live session_pid token) falls back to standalone. */
+    if (!json_document_valid(disc, strlen(disc))) { free(disc); return -1; }
 
     fputs(disc, stdout);
     free(disc);
