@@ -155,7 +155,9 @@ do
     for _, e in ipairs(fr) do
         if e.language == "lua" then lua_e = e elseif e.language == "javascript" then js_e = e end
     end
-    ok(lua_e and lua_e.analyzable and #lua_e.capabilities == 4, "lua frontend reports its 4 shipped capabilities")
+    ok(lua_e and lua_e.analyzable and #lua_e.capabilities == 5, "lua frontend reports its 5 shipped capabilities")
+    local caps = {}; for _, c in ipairs(lua_e.capabilities) do caps[c] = true end
+    ok(caps["semantics"], "lua frontend advertises the 'semantics' capability")
     ok(js_e and not js_e.analyzable and #js_e.capabilities == 0, "javascript reserved: analyzable=false, no capabilities")
 end
 
@@ -416,6 +418,142 @@ do
     ok(sc and sc.bindings, "consumer reaches scope via the frontend boundary")
     -- distinct domains stay separable for distinct lowerers
     ok(disc.indexes.by_annotation["compute"], "a @compute lowerer finds its own decls independently")
+end
+
+-- ── frontend semantic recovery: initializer / function semantics via resolve_handle ──
+-- Simulates a future Lua-specific lowerer: find an annotated decl -> resolve its handle ->
+-- ask the frontend for the declaration's SOURCE semantics (initializer expr / function
+-- params+body) -- all WITHOUT the neutral model or the wire carrying any AST.
+do
+    local analyze    = require("hull.project.analyze")
+    local projection = require("hull.project.projection")
+    local json       = require("hull.json")
+    _G.tool = make_tool({ ["s/app.lua"] =
+        "---@query\nlocal q = orders_where()\n" ..
+        "---@query\nlocal a, r, c = 41, foo(), \"z\"\n" ..            -- distinguishable kinds by index
+        "---@query\nlocal first, second = query()\n" ..               -- multi-return RHS (not positional)
+        "---@compute\nlocal function dot(a, b) return a + b end\n" ..
+        "---@compute\nfunction pipeline.step(x) return x end\n" ..
+        "---@note\nlocal u\n" ..                                       -- no initializer (legit nil)
+        "return q, r, dot\n" })
+    local disc = analyze.analyze("s")
+    _G.tool = nil
+
+    -- resolve an annotated decl by name to (semantics, resolved-handle)
+    local function sem_of(name)
+        for _, d in ipairs(disc.declarations) do
+            if d.name == name then
+                local res = analyze.resolve_handle(disc, d.handle)
+                ok(res and res.frontend and res.unit and res.declaration,
+                    "resolve_handle -> {frontend, unit, declaration}: " .. name)
+                return res.frontend.declaration_semantics(res.declaration), res
+            end
+        end
+        return nil, nil
+    end
+
+    -- 1. @query local: the initializer expression is recovered with its exact Lua kind + range
+    local qsem, qres = sem_of("q")
+    ok(qsem and qsem.form == "value", "@query local q -> value form")
+    ok(qsem.positional_value and qsem.positional_value.kind == "call", "q initializer is a call expr (Lua kind)")
+    ok(#qsem.values == 1, "q value list carries the single RHS expression")
+    eq(qres.unit:text(qsem.positional_value), "orders_where()", "initializer maps to the EXACT original source text")
+
+    -- 2. positional multi-name: each name recovers ITS OWN initializer by index (1:1 RHS)
+    local asem = sem_of("a"); local rsem = sem_of("r"); local csem = sem_of("c")
+    eq(asem.name_index, 1, "a is name_index 1"); ok(asem.positional_value.kind == "literal", "a initializer is a literal (41)")
+    eq(rsem.name_index, 2, "r is name_index 2"); ok(rsem.positional_value.kind == "call", "r initializer is the call foo()")
+    eq(csem.name_index, 3, "c is name_index 3"); ok(csem.positional_value.kind == "literal", "c initializer is a literal (\"z\")")
+    ok(#asem.values == 3 and #rsem.values == 3, "each multi-name member carries the FULL RHS list")
+
+    -- 2b. NON-positional multi-return RHS: `local first, second = query()` -- BOTH derive from
+    --     query(); the full RHS list is preserved so `second` is not misrepresented as nil-sourced.
+    local fsem = sem_of("first"); local ssem = sem_of("second")
+    eq(fsem.name_index, 1, "first is name_index 1")
+    eq(ssem.name_index, 2, "second is name_index 2")
+    ok(#fsem.values == 1 and fsem.values[1].kind == "call", "RHS is a single call query() shared by both names")
+    ok(#ssem.values == 1 and ssem.values[1].kind == "call", "second retains the SAME complete RHS list (query())")
+    ok(fsem.positional_value and fsem.positional_value.kind == "call", "first's positional value is query()")
+    ok(ssem.positional_value == nil, "second has no POSITIONAL value (it is the 2nd return of query()), but the RHS is retained")
+
+    -- 3. @compute local function: params + body recovered
+    local dsem = sem_of("dot")
+    ok(dsem and dsem.form == "function", "@compute local function dot -> function form")
+    ok(#dsem.params == 2 and dsem.params[1].name == "a" and dsem.params[2].name == "b", "dot params recovered (a, b)")
+    ok(type(dsem.body) == "table" and #dsem.body >= 1, "dot function body available to the frontend")
+    ok(not dsem.is_method and not dsem.is_vararg, "dot is a plain (non-method, non-vararg) function")
+
+    -- 4. @compute global (dotted) function
+    local psem = sem_of("pipeline.step")
+    ok(psem and psem.form == "function" and #psem.params == 1 and psem.params[1].name == "x",
+        "global function pipeline.step semantics recovered (param x)")
+
+    -- 5. a legitimate no-initializer local -> empty RHS + nil positional value, NO error (a
+    --    non-nil `usem` proves no error was returned: a corrupt state returns nil, err instead).
+    local usem = sem_of("u")
+    ok(usem and usem.form == "value" and usem.positional_value == nil and #usem.values == 0,
+        "local with no initializer -> empty values + nil positional (legit, not an error)")
+
+    -- annotations still attach to each name of the multi-name group (unchanged semantics)
+    for _, nm in ipairs({ "a", "r", "c" }) do
+        local d
+        for _, x in ipairs(disc.declarations) do if x.name == nm then d = x end end
+        ok(d and d.annotations[1] and d.annotations[1].name == "query",
+            "@query still attached to multi-name member: " .. nm)
+    end
+
+    -- 6. impossible/corrupt frontend state -> STRUCTURED error, never a silent nil or a
+    --    plausible-looking record. Every retained-declaration invariant is validated.
+    local function corrupt(d, why)
+        local bad, berr = frontend.declaration_semantics(d)
+        ok(bad == nil and berr and berr.severity == "error" and berr.code == "lua.internal",
+            "corrupt decl -> structured lua.internal diagnostic: " .. why)
+    end
+    -- a well-formed 1-name local_declaration node the tests perturb one field at a time
+    local function lnode(names, values) return { kind = "local_declaration", names = names, values = values } end
+    corrupt({ _kind = "local" }, "missing _node")
+    corrupt({ _kind = "local", _name = "q", _node = { kind = "function_declaration" }, _name_index = 1 },
+        "local decl but node kind is function_declaration (mismatch)")
+    corrupt({ _kind = "local", _name = "q", _node = { kind = "local_declaration", values = {} }, _name_index = 1 },
+        "names not a list")
+    corrupt({ _kind = "local", _name = "q", _node = lnode({ { name = "q" } }, {}) }, "missing name index")
+    corrupt({ _kind = "local", _name = "q", _node = lnode({ { name = "q" } }, {}), _name_index = "x" },
+        "non-integer name index")
+    corrupt({ _kind = "local", _name = "q", _node = lnode({ { name = "q" } }, {}), _name_index = 0 },
+        "name index < 1")
+    corrupt({ _kind = "local", _name = "q", _node = lnode({ { name = "q" } }, {}), _name_index = 999 },
+        "name index OUT OF RANGE (past #names)")
+    corrupt({ _kind = "local", _name = "q", _node = lnode({ { name = "other" } }, {}), _name_index = 1 },
+        "name index identifies a DIFFERENT name than recorded")
+    corrupt({ _kind = "local", _name = "v", _node = lnode({ { name = "v" } }, "oops"), _name_index = 1 },
+        "malformed values (not a list)")
+    corrupt({ _kind = "function", _node = { kind = "local_declaration", params = {}, body = {} } },
+        "function decl but node kind is local_declaration (mismatch)")
+    corrupt({ _kind = "function", _node = { kind = "function_declaration", params = "x", body = {} } },
+        "malformed function params (not a list)")
+    corrupt({ _kind = "function", _node = { kind = "function_declaration", params = {}, body = 7 } },
+        "malformed function body (not a list)")
+
+    -- 7. the semantics + AST stay PRIVATE: the public projection carries no frontend node
+    local p = projection.project(disc)
+    local leaked = false
+    for _, d in ipairs(p.declarations) do
+        if d._node ~= nil or d._name_index ~= nil then leaked = true end
+    end
+    ok(not leaked, "public projection declarations carry no frontend AST node / private index")
+    local blob = json.encode(p)
+    ok(not blob:find("_node", 1, true) and not blob:find("local_declaration", 1, true)
+        and not blob:find("function_expr", 1, true) and not blob:find("method_call", 1, true)
+        and not blob:find("orders_where", 1, true),
+        "serialized projection contains NO raw AST markers or initializer source")
+
+    -- 8. handles are generation-local: out-of-range -> nil; a fresh analysis has its own table
+    local hmax = 0
+    for _, d in ipairs(disc.declarations) do if d.handle > hmax then hmax = d.handle end end
+    ok(analyze.resolve_handle(disc, hmax + 1000) == nil, "an out-of-range handle -> nil (generation-local)")
+    _G.tool = make_tool({ ["s/app.lua"] = "---@query\nlocal q = foo()\nreturn q\n" })
+    local discB = analyze.analyze("s"); _G.tool = nil
+    ok(disc._handles ~= discB._handles, "each generation owns a distinct handle table (no cross-generation identity)")
 end
 
 print(string.format("test_project: %d passed, %d failed", pass, fail))

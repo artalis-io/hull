@@ -26,9 +26,9 @@ local M = {
     language     = "lua",
     extensions   = { "lua" },
     -- Only capabilities Lua actually SHIPS (D3), and each is callable THROUGH this
-    -- contract (declarations/annotations/source_ranges via decl_*; scope via M.scope).
-    -- Nothing unimplemented is advertised.
-    capabilities = { "declarations", "annotations", "source_ranges", "scope" },
+    -- contract (declarations/annotations/source_ranges via decl_*; scope via M.scope;
+    -- semantics via M.declaration_semantics). Nothing unimplemented is advertised.
+    capabilities = { "declarations", "annotations", "source_ranges", "scope", "semantics" },
     analyzable   = true,
 }
 
@@ -116,9 +116,14 @@ function M.declarations(unit)
     lua.walk(unit.ast, function(n)
         if n.kind == "local_declaration" then
             local anns, grp = norm_annotations(unit, n), mkrange(unit, n.range)
-            for _, nm in ipairs(n.names or {}) do
+            for idx, nm in ipairs(n.names or {}) do
+                -- `_node` (the declaration AST node) + `_name_index` (this name's position)
+                -- are PRIVATE frontend state -- read only by M.declaration_semantics, never
+                -- serialized (the neutral model builds facts from the accessors, not from
+                -- this object; the handle table that holds it is not on the wire).
                 out[#out + 1] = { _kind = "local", _name = nm.name, _range = mkrange(unit, nm.range),
-                                  _group = grp, _is_method = false, _anns = anns }
+                                  _group = grp, _is_method = false, _anns = anns,
+                                  _node = n, _name_index = idx }
             end
         elseif n.kind == "function_declaration" then
             local name = flatten_fnname(n.name, n.is_method)
@@ -130,6 +135,7 @@ function M.declarations(unit)
                     _group = mkrange(unit, n.range),
                     _is_method = n.is_method == true,
                     _anns = norm_annotations(unit, n),
+                    _node = n,                       -- private frontend state (see above)
                 }
             end
         end
@@ -143,6 +149,70 @@ function M.decl_range(d)       return d._range end
 function M.decl_group_range(d) return d._group end
 function M.decl_annotations(d) return d._anns end
 function M.decl_is_method(d)   return d._is_method == true end
+
+local function sem_err(msg)
+    return { severity = "error", code = "lua.internal", message = "declaration_semantics: " .. msg }
+end
+
+-- declaration_semantics(decl) -> (sem, err): recover the Lua-frontend SOURCE SEMANTICS of a
+-- discovered declaration for a future Lua-specific lowering step (Query / Compute). Reached
+-- ONLY via M.resolve_handle -> {frontend, unit, declaration}; the neutral ProjectDiscovery
+-- never carries this. `sem` is a small frontend-SPECIFIC record over the retained AST node
+-- (opaque to the neutral model; a Lua lowerer inspects it, the wire never sees it):
+--   * a `local` decl -> { form="value", name_index, values, positional_value }. `values` is
+--     the COMPLETE right-hand-side expression list; `name_index` is this name's position.
+--     `positional_value` is `values[name_index]` -- a CONVENIENCE for the common 1:1 case,
+--     which is nil for a name that has no positional initializer. Lua multiple assignment is
+--     NOT positional when the final RHS expression can return multiple values
+--     (`local a, b = f()` binds both a AND b from f()), so the full `values` + `name_index`
+--     preserve the real semantics -- a lowerer must not read `positional_value` as "the only
+--     source of this name". Expression nodes carry an exact `.kind` + byte `.range` from the
+--     parser (no ranges synthesized).
+--   * a `local_function` / `function` decl -> { form="function", is_method, is_vararg,
+--     params, body } where `params`/`body` are the parser's exact param/statement subtrees.
+-- `err` (a Diagnostic-shaped table) is returned for any impossible/corrupt frontend state
+-- (missing `_node`, a node whose `.kind` does not match the declaration kind, a bad
+-- `_name_index`, a malformed values/params/body, or an unsupported kind) -- never for an
+-- ordinary "no initializer", and never for an unsupported LOWERING construct (that belongs
+-- to the future domain lowerer, not to discovery).
+function M.declaration_semantics(d)
+    if type(d) ~= "table" or type(d._node) ~= "table" then
+        return nil, sem_err("declaration is missing its frontend AST node")
+    end
+    local n, kind = d._node, d._kind
+    if kind == "local" then
+        if n.kind ~= "local_declaration" then
+            return nil, sem_err("node/kind mismatch: expected local_declaration, got '" .. tostring(n.kind) .. "'")
+        end
+        if type(n.names) ~= "table" then
+            return nil, sem_err("malformed local declaration (names not a list)")
+        end
+        if math.type(d._name_index) ~= "integer" or d._name_index < 1 or d._name_index > #n.names then
+            return nil, sem_err("name index does not identify a declared name")
+        end
+        -- The retained index must point at THIS declaration's recorded name (guards against a
+        -- desynced node/index pair producing plausible-but-wrong semantics).
+        local nm = n.names[d._name_index]
+        if type(nm) ~= "table" or nm.name ~= d._name then
+            return nil, sem_err("name index does not match the recorded declaration name")
+        end
+        if type(n.values) ~= "table" then
+            return nil, sem_err("malformed local declaration (values not a list)")
+        end
+        return { form = "value", name_index = d._name_index, values = n.values,
+                 positional_value = n.values[d._name_index] }
+    elseif kind == "local_function" or kind == "function" then
+        if n.kind ~= "function_declaration" then
+            return nil, sem_err("node/kind mismatch: expected function_declaration, got '" .. tostring(n.kind) .. "'")
+        end
+        if type(n.params) ~= "table" or type(n.body) ~= "table" then
+            return nil, sem_err("malformed function declaration (params/body not lists)")
+        end
+        return { form = "function", is_method = d._is_method == true, is_vararg = n.is_vararg == true,
+                 params = n.params, body = n.body }
+    end
+    return nil, sem_err("unsupported declaration kind '" .. tostring(kind) .. "'")
+end
 
 -- scope(result) -> (scope, err): the advertised "scope" capability, callable THROUGH the
 -- adapter (D-scope fix). Protected wrapper around hull.source.scope.resolve so a consumer
