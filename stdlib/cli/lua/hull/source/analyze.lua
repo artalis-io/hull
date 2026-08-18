@@ -194,8 +194,11 @@ local function analyze_source(path, src, enabled)
         if lint.needs_scope(enabled) then
             local resolved, serr = scope.resolve(unit)
             if serr then
-                -- resolver internal failure: surface it, and SKIP scope-backed rules
-                -- (sc stays nil) -- structural rules still run.
+                -- resolver internal failure: surface it, downgrade the file to "internal"
+                -- (so JSON files[].state + summary.internal stay consistent with the exit
+                -- code), and SKIP scope-backed rules (sc stays nil). Structural rules,
+                -- already independent of scope, still run below.
+                state = "internal"
                 local line, col
                 if serr.range then line, col = unit:line_col(serr.range) end
                 diags[#diags + 1] = {
@@ -404,10 +407,20 @@ local function emit_human(o, files, diagnostics, summary, no_findings)
     if #out > 0 then tool.stdout(table.concat(out, "\n") .. "\n") end
 end
 
-local o, _, root_norm, files, diagnostics, summary, no_findings = run()
-if o.json then
-    emit_json(root_norm, files, diagnostics, summary)        -- JSON overrides --quiet; stdout is pure JSON
-else
-    emit_human(o, files, diagnostics, summary, no_findings)
+-- `analyze_source` is the pure core (parse + lint, no I/O). Expose it so the test
+-- harness can drive the three-state contract (incl. an injected resolver failure)
+-- without the CLI shell. The CLI entry runs ONLY in the tool VM, where `tool` is a
+-- global; a plain `require` (test env, no `tool`) returns the module without exiting.
+local M = { analyze_source = analyze_source }
+
+if tool then
+    local o, _, root_norm, files, diagnostics, summary, no_findings = run()
+    if o.json then
+        emit_json(root_norm, files, diagnostics, summary)    -- JSON overrides --quiet; stdout is pure JSON
+    else
+        emit_human(o, files, diagnostics, summary, no_findings)
+    end
+    tool.exit(summary.clean and 0 or 1)
 end
-tool.exit(summary.clean and 0 or 1)
+
+return M

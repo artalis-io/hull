@@ -60,7 +60,7 @@ local GLOBAL_ALLOWLIST = {}
 for _, g in ipairs({
     "assert", "collectgarbage", "error", "getmetatable", "ipairs", "next", "pairs",
     "pcall", "print", "rawequal", "rawget", "rawlen", "rawset", "select", "setmetatable",
-    "tonumber", "tostring", "type", "warn", "xpcall", "_G", "_VERSION",
+    "tonumber", "tostring", "type", "warn", "xpcall", "_G", "_VERSION", "_ENV",
     "coroutine", "math", "string", "table", "utf8",
     "app", "hull", "require", "test",
 }) do GLOBAL_ALLOWLIST[g] = true end

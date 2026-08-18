@@ -117,7 +117,8 @@ end
 -- ── undefined-global: OFF by default; evidence-based allowlist; reads only ─
 do
     local en = lint.default_enabled(); en["undefined-global"] = true
-    for _, g in ipairs({ "pairs", "string", "app", "hull", "require", "print", "math", "test", "coroutine" }) do
+    for _, g in ipairs({ "pairs", "string", "app", "hull", "require", "print", "math",
+                         "test", "coroutine", "_ENV", "_G" }) do
         ok(count("return " .. g, "undefined-global", en) == 0, "allowed global NOT flagged: " .. g)
     end
     for _, g in ipairs({ "db", "req", "res", "json", "os", "io", "load", "tool", "arg", "debug", "package" }) do

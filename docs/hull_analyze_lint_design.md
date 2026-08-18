@@ -122,7 +122,10 @@ registration, NOT guessed.** It contains exactly:
   library remains: `assert, collectgarbage, error, getmetatable, ipairs, next, pairs,
   pcall, print, rawequal, rawget, rawlen, rawset, select, setmetatable, tonumber,
   tostring, type, warn, xpcall, _G, _VERSION`, plus the surviving library tables
-  `coroutine, math, string, table, utf8`.
+  `coroutine, math, string, table, utf8`. `_ENV` is also allowlisted: Lua 5.4 supplies
+  it as the implicit environment upvalue (valid code may reference it directly), and the
+  lightweight scope pass does not synthesize that binding, so without the allowlist entry
+  a direct `_ENV` read is a false positive.
 - **Hull-injected app/test globals**: `app` + `hull` (`runtime/lua/modules.c`),
   `require` (`mod_fs.c`), `test` (`mod_test.c`).
 
@@ -210,9 +213,12 @@ is the explicit signal that lint data may be present.
    `_`/implicit-exempt), and `undefined-global` (OFF by default, evidence-based app
    allowlist, reads only) on top of `hull.source.scope`. The engine gains `needs_scope`
    (rules declare it; skipped when scope is unavailable); `analyze.lua` computes the
-   scope once per clean file and, on a resolver failure, surfaces the internal
-   diagnostic + skips scope-backed rules (structural rules still run). test_lint.lua
-   (173) + e2e (25).
+   scope once per clean file and, on a resolver failure, DOWNGRADES the file to state
+   `internal` (so JSON `files[].state` + `summary.internal` stay consistent with exit 1),
+   surfaces the internal diagnostic, and skips scope-backed rules (structural rules still
+   run). `analyze_source` is exported (module return, CLI entry guarded on `tool`) so the
+   three-state contract is unit-tested with an injected resolver failure. test_lint (177)
+   + test_analyze (9) + e2e (25).
 
 Each slice is a design-first → ratify → implement → green → merge cycle, matching how
 the layer itself was built.
