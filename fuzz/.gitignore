@@ -8,6 +8,11 @@ fuzz_pg_dsn
 fuzz_pg_rewrite
 fuzz_mysqlwire
 fuzz_mysql_dsn
+fuzz_respwire
+fuzz_valkey_dsn
+fuzz_span_sdk
+fuzz_span_window
+fuzz_lua_source
 # Debug symbol bundles (macOS)
 *.dSYM/
 # libFuzzer artifacts

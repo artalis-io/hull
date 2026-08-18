@@ -1,6 +1,8 @@
-# `hull.source.lua` continuous libFuzzer harness (design)
+# `hull.source.lua` continuous libFuzzer harness
 
-Status: DESIGN (pre-implementation). The documented follow-up to the differential
+Status: IMPLEMENTED (`fuzz/fuzz_lua_source.c`, `fuzz/lua_source.dict`,
+`fuzz/corpus_lua_source/`; `make fuzz-lua-source`; CI "Fuzz lua source parser (60s)").
+The documented follow-up to the differential
 conformance gate ([lua_source_conformance_design.md](lua_source_conformance_design.md)
 §8): a continuous **libFuzzer** harness that feeds arbitrary bytes to `lua.parse` and
 asserts the parser's INTRINSIC invariants under sanitizers, mirroring Hull's existing
