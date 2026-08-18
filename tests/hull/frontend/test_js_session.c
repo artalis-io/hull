@@ -351,6 +351,28 @@ UTEST(js_session, result_undefined_is_indeterminate)
     hl_js_session_destroy(s);
 }
 
+/* After a heap failure, the session must stay usable: no secondary/stale pending exception
+ * (e.g. from a failed exception-message conversion) may contaminate the next invocation. */
+UTEST(js_session, reuse_after_heap_failure)
+{
+    HlJsSessionLimits lim = HL_JS_SESSION_LIMITS_DEFAULT;
+    lim.max_heap_bytes = 8 * 1024 * 1024;
+    HlJsSession *s = hl_js_session_create(&lim);
+    ASSERT_TRUE(s != NULL);
+    char *out = NULL; size_t out_len = 0;
+    int rc = analyze(s, "hog", (const uint8_t *)"x", 1, "a.js", &out, &out_len);
+    ASSERT_EQ(rc, -1);
+    EXPECT_TRUE(has(out, "\"code\":\"js.limit.heap\""));
+    free(out); out = NULL;
+    /* Reuse: a normal call must still succeed. */
+    rc = analyze(s, "analyze", (const uint8_t *)"ok", 2, "a.js", &out, &out_len);
+    ASSERT_EQ(rc, 0);
+    EXPECT_TRUE(has(out, "\"status\":\"ok\""));
+    EXPECT_TRUE(has(out, "\"byte_length\":2"));
+    free(out);
+    hl_js_session_destroy(s);
+}
+
 /* An oversize result is rejected -> js.limit.result. */
 UTEST(js_session, limit_result_size)
 {

@@ -135,8 +135,17 @@ static char *take_exception_message(JSContext *ctx)
 {
     JSValue exc = JS_GetException(ctx);
     const char *cs = JS_ToCString(ctx, exc);
-    char *out = cs ? strdup(cs) : strdup("unknown tooling exception");
-    if (cs) JS_FreeCString(ctx, cs);
+    char *out;
+    if (cs) {
+        out = strdup(cs);
+        JS_FreeCString(ctx, cs);
+    } else {
+        /* JS_ToCString itself failed (typically OOM while stringifying the exception) and
+         * raised a SECONDARY pending exception. Clear it, or it would contaminate the next
+         * invocation on this reused session. */
+        JS_FreeValue(ctx, JS_GetException(ctx));
+        out = strdup("unknown tooling exception");
+    }
     JS_FreeValue(ctx, exc);
     return out;
 }
@@ -313,8 +322,14 @@ static int ensure_entry_loaded(HlJsSession *s, const char *module, char **out_js
         JS_FreeValue(s->ctx, v);
         return fail_from_exception(s, s->ctx, out_json, out_len, "js.internal");
     }
-    /* Module eval yields a promise; run its jobs and check it fulfilled. */
+    /* Module eval yields a promise; run its jobs and check it fulfilled. A job that failed
+     * on a resource breach (interrupt / heap / stack) has a pending exception -- classify it
+     * uniformly FIRST, before inspecting an ordinary promise rejection. */
     int drained = drain_jobs(s);
+    if (drained != 0) {
+        JS_FreeValue(s->ctx, v);
+        return fail_from_exception(s, s->ctx, out_json, out_len, "js.internal");
+    }
     if (JS_IsObject(v) && JS_PromiseState(s->ctx, v) == JS_PROMISE_REJECTED) {
         JSValue res = JS_PromiseResult(s->ctx, v);
         const char *cs = JS_ToCString(s->ctx, res);
@@ -327,8 +342,6 @@ static int ensure_entry_loaded(HlJsSession *s, const char *module, char **out_js
         return rc;
     }
     JS_FreeValue(s->ctx, v);
-    if (drained != 0)
-        return fail_from_exception(s, s->ctx, out_json, out_len, "js.internal");
     snprintf(s->entry_name, sizeof(s->entry_name), "%s", module);
     return 0;
 }
@@ -361,15 +374,25 @@ int hl_js_session_analyze(HlJsSession *s, const char *module, const char *method
 
     JSContext *ctx = s->ctx;
 
-    /* Reach the trusted entry object + method. */
+    /* Reach the trusted entry object + method. A property read can itself throw (e.g. OOM);
+     * route that through the unified classifier so no exception is left pending, rather than
+     * misreading it as "entry missing" / "method not a function". */
     JSValue g = JS_GetGlobalObject(ctx);
     JSValue fe = JS_GetPropertyStr(ctx, g, "__hull_frontend");
     JS_FreeValue(ctx, g);
+    if (JS_IsException(fe)) {
+        JS_FreeValue(ctx, fe);
+        return fail_from_exception(s, ctx, out_json, out_len, "js.internal");
+    }
     if (!JS_IsObject(fe)) {
         JS_FreeValue(ctx, fe);
         return fail_indeterminate(out_json, out_len, "js.internal", "entry did not register __hull_frontend");
     }
     JSValue fn = JS_GetPropertyStr(ctx, fe, method);
+    if (JS_IsException(fn)) {
+        JS_FreeValue(ctx, fn); JS_FreeValue(ctx, fe);
+        return fail_from_exception(s, ctx, out_json, out_len, "js.internal");
+    }
     if (!JS_IsFunction(ctx, fn)) {
         JS_FreeValue(ctx, fn); JS_FreeValue(ctx, fe);
         return fail_indeterminate(out_json, out_len, "js.internal", "entry method is not a function");
