@@ -1293,12 +1293,16 @@ jobs:
           sudo apt-get install -y clang
 
       - name: MSan test
-        # Bumped from 10 → 15 min in round-8. The crypto-heavy auth-
-        # stack unit tests (TOTP enrollment / PBKDF2 verify) plus the
-        # round-8 additions push the total MSan runtime past 10 min on
-        # GitHub's shared runners. Bumping the cap is cheaper than
-        # cutting test coverage; PBKDF2 isn't going to get faster.
-        timeout-minutes: 15
+        # Raised 15 -> 30 min. The crypto-heavy auth-stack unit tests
+        # (TOTP enrollment / PBKDF2 verify) dominate MSan runtime and
+        # were tipping the whole suite past the 15 min cap on GitHub's
+        # shared runners, timing out in js_stdlib.totp_brute_force_lockout.
+        # PBKDF2 under MSan instrumentation is inherently slow and its work
+        # must NOT be reduced (that would weaken coverage of the real auth
+        # path), so raising the honest wall-clock cap is the correct fix.
+        # If total runtime keeps growing, split the MSan suite into parallel
+        # jobs rather than cutting work.
+        timeout-minutes: 30
         run: make msan
 
   tsan:
