@@ -301,4 +301,14 @@ UTEST(lua_source, analyze_core)
     EXPECT_GT(pass, 0LL);
 }
 
+/* Project source-discovery layer: Lua frontend adapter + model + registry + orchestrator. */
+UTEST(lua_source, project_discovery)
+{
+    long long pass = 0, fail = -1;
+    int rc = run_lua_test("stdlib/cli/lua/hull/project/tests/test_project.lua", &pass, &fail);
+    ASSERT_EQ(rc, 0);
+    EXPECT_EQ(fail, 0LL);
+    EXPECT_GT(pass, 0LL);
+}
+
 UTEST_MAIN()
