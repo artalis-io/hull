@@ -329,5 +329,39 @@ do
     ok(sc.bindings ~= nil, "scope model carries bindings")
 end
 
+-- ── recovery path: a model.build defect must NOT re-raise outside the pcall ──
+do
+    local analyze = require("hull.project.analyze")
+    local orig = model.build
+    model.build = function() error("injected model.build defect") end   -- luacheck: ignore
+    _G.tool = make_tool({ ["m/app.lua"] = "local a = 1\nreturn a\n" })
+    -- also pass numeric opts: the recovery path must not deref a non-table either
+    local ok_call, disc = pcall(analyze.analyze, "m", 5)
+    _G.tool = nil
+    model.build = orig
+    ok(ok_call, "analyze never raises even when model.build ITSELF fails")
+    ok(disc and not disc.valid and not disc.complete, "model.build defect -> invalid + incomplete")
+    local found = false
+    for _, d in ipairs(disc.diagnostics or {}) do if d.code == "project.internal" then found = true end end
+    ok(found, "model.build defect surfaces project.internal (recovery uses the literal constructor)")
+    ok(disc.schema_version == 1 and disc.indexes and disc.summary and disc._handles ~= nil,
+        "the emergency model is structurally complete + consumable")
+end
+
+-- ── malformed opts: never raises, wrong-typed fields normalized to defaults ──
+do
+    local analyze = require("hull.project.analyze")
+    _G.tool = make_tool({ ["o/app.lua"] = "local a = 1\nreturn a\n" })
+    local ok1 = pcall(analyze.analyze, "o", 5)               -- numeric opts
+    local ok2 = pcall(analyze.analyze, "o", "nope")          -- string opts
+    local ok3, d3 = pcall(analyze.analyze, "o", { generation = "x", source_kind = 7 })
+    _G.tool = nil
+    ok(ok1, "analyze never raises on numeric opts")
+    ok(ok2, "analyze never raises on string opts")
+    ok(ok3, "analyze never raises on wrong-typed opts fields")
+    ok(d3 and d3.generation == 0 and d3.source == "standalone",
+        "wrong-typed opts.generation / opts.source_kind normalized to defaults")
+end
+
 print(string.format("test_project: %d passed, %d failed", pass, fail))
 return { pass = pass, fail = fail, failures = failures }

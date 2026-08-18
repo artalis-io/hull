@@ -146,22 +146,49 @@ local function analyze_unprotected(root_in, opts)
     return disc
 end
 
+-- Emergency INVALID discovery built as a LITERAL, with no call into model.build /
+-- registry (which is where the failure being recovered from may itself live). Used only
+-- on the protected-boundary failure path, so recovery can never re-raise the same defect.
+local function minimal_invalid(root, gen, source_kind, code, message)
+    return {
+        schema_version = model.SCHEMA_VERSION,   -- a constant, not a call
+        generation     = gen,
+        source         = source_kind,
+        project_root   = root,
+        valid          = false,
+        complete       = false,
+        sources        = {},
+        declarations   = {},
+        diagnostics    = { { severity = "error", code = code, message = message, path = root } },
+        frontends      = {},                     -- literal: no registry call on the failure path
+        indexes        = { by_annotation = {}, by_source = {}, by_language = {},
+                           by_id = {}, annotated = {} },
+        summary        = { sources_total = 0, sources_analyzed = 0, sources_unsupported = 0,
+                           declarations_total = 0, declarations_annotated = 0, by_language = {} },
+        _by_source     = {},
+        _handles       = {},
+    }
+end
+
 -- analyze(root, opts?) -> ProjectDiscovery. PROTECTED public boundary: any internal
 -- frontend/adapter/model failure is converted into an INVALID discovery with a structured
 -- project.internal diagnostic (never a raised error, never a clean generation).
 --   opts.generation  : the dev generation counter (default 0 = standalone).
 --   opts.source_kind : "standalone" (default) | "dev" provenance marker.
 function M.analyze(root, opts)
-    opts = opts or {}
-    local ok, result = pcall(analyze_unprotected, root, opts)
+    -- Normalize + validate opts ONCE, up front, so neither the normal nor the recovery
+    -- path ever dereferences a non-table / wrong-typed opts.
+    if type(opts) ~= "table" then opts = {} end
+    local gen         = (type(opts.generation) == "number") and opts.generation or 0
+    local source_kind = (type(opts.source_kind) == "string") and opts.source_kind or "standalone"
+    local root_disp   = tostring(root or ".")
+
+    local ok, result = pcall(analyze_unprotected, root, { generation = gen, source_kind = source_kind })
     if ok then return result end
-    local root_disp = tostring(root or ".")
-    local d = model.build(root_disp, opts.generation or 0, {}, { { severity = "error",
-        code = "project.internal",
-        message = "internal analyzer failure: " .. tostring(result), path = root_disp } },
-        opts.source_kind or "standalone")
-    d.complete = false
-    return d
+    -- Recovery uses the literal constructor -- if model.build was the defect, calling it
+    -- again here would re-raise the same error OUTSIDE the pcall.
+    return minimal_invalid(root_disp, gen, source_kind, "project.internal",
+        "internal analyzer failure: " .. tostring(result))
 end
 
 -- Controlled generation-internal handle lookup: resolve an opaque declaration handle to
