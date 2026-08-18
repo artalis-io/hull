@@ -49,6 +49,21 @@ sys.exit(0 if ('"$_expr"') else 1)
 ' 2>/dev/null; then pass "$_name"; else fail "$_name"; fi
 }
 
+# inspect <args...>: run `hull agent inspect <args>`, capturing stdout in OUT and the exit
+# code in RC, WITHOUT tripping `set -e` (the `OUT=$(...); RC=$?` form aborts the whole script
+# on a non-zero exit before RC can be read -- true in every shell, see the `|| RC=$?` idiom
+# already used below). `hull agent inspect` is contracted to exit 0 whenever a discovery is
+# produced (validity is data in the JSON), so a non-zero exit is a genuine defect; capture
+# its stderr and DIAG-dump it so CI surfaces the real cause instead of a bare `Error 1`.
+INSPECT_ERR="$TMP/inspect.stderr"
+inspect() {
+    OUT=$("$HULL" agent inspect "$@" 2>"$INSPECT_ERR") && RC=0 || RC=$?
+    if [ "$RC" != 0 ]; then
+        echo "  DIAG: 'hull agent inspect $*' exited $RC; stderr follows:"
+        sed 's/^/    | /' "$INSPECT_ERR" 2>/dev/null || true
+    fi
+}
+
 echo ""
 echo "=== E2E: hull agent inspect (project source discovery) ==="
 
@@ -70,7 +85,7 @@ EOF
 printf 'window.x = 1;\n' > "$APP/static/vendor.js"   # browser asset -> pruned
 printf 'export const q = 1;\n' > "$APP/client.js"    # application JS -> unsupported
 
-OUT=$("$HULL" agent inspect "$APP" 2>/dev/null); RC=$?
+inspect "$APP"
 [ "$RC" = "0" ] && pass "exit 0 (a discovery was produced)" || fail "exit code ($RC)"
 
 assert_py "schema_version + standalone provenance" "$OUT" 'd["schema_version"]==1 and d["source"]=="standalone" and d["generation"]==0'
@@ -139,7 +154,7 @@ assert_py "clean all-Lua project -> valid AND complete" "$OUTC" 'd["valid"] is T
 assert_py "both annotated Lua declarations public" "$OUTC" 'sorted(x["name"] for x in d["declarations"])==["main","u"]'
 
 # ── missing root -> invalid + incomplete, project.discovery_failed, still exit 0 ──
-OUTM=$("$HULL" agent inspect "$TMP/does-not-exist" 2>/dev/null); RCM=$?
+inspect "$TMP/does-not-exist"; OUTM="$OUT"; RCM="$RC"
 assert_py "missing root -> invalid + incomplete + no sources" "$OUTM" \
     'd["valid"] is False and d["complete"] is False and len(d["sources"])==0'
 assert_py "missing root emits project.discovery_failed" "$OUTM" \
