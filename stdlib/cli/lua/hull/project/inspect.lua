@@ -28,33 +28,14 @@ local function usage_error(msg)
     tool.exit(2)
 end
 
-local function dirname(p) return p:match("^(.*)/[^/]*$") or "." end
-
--- Atomic publish: write a temp sibling then rename over the target (a reader never sees a
--- half-written discovery.json). Design D7. Returns true, or false + reason.
-local function atomic_write(path, data)
-    tool.mkdir(dirname(path))                         -- best-effort; fine if it exists
-    local tmp = path .. ".tmp"
-    if not tool.write_file(tmp, data) then return false, "write failed: " .. tmp end
-    if not tool.rename(tmp, path) then tool.remove_file(tmp); return false, "rename failed" end
-    return true
-end
-
 local function main()
     local positionals = {}
-    local out_path, generation, session_pid = nil, 0, nil
     for i = 1, #arg do
         local a = arg[i]
         if a == "-h" or a == "--help" then
             tool.stdout("usage: hull agent inspect [app_dir]\n"); tool.exit(0)
-        elseif a:match("^%-%-out=") then
-            out_path = a:match("^%-%-out=(.+)$")
-        elseif a:match("^%-%-generation=%d+$") then
-            generation = tonumber(a:match("=(%d+)$"))
-        elseif a:match("^%-%-session%-pid=%d+$") then
-            session_pid = tonumber(a:match("=(%d+)$"))
         elseif a:sub(1, 1) == "-" and a ~= "-" then
-            -- `--json` is the default + only stdout format, accepted for symmetry; else error.
+            -- `--json` is the default + only format, accepted for symmetry; else error.
             if a ~= "--json" then usage_error("unknown flag: " .. a) end
         else
             positionals[#positionals + 1] = a
@@ -68,23 +49,11 @@ local function main()
     end
     local app_dir = positionals[1] or "."
 
-    -- PUBLISH mode (`--out`, used by `hull dev`): a FRESH analysis (never the read path),
-    -- projected + tagged with the dev generation + session identity, written atomically.
-    if out_path then
-        local disc = analyze.analyze(app_dir, { generation = generation, source_kind = "dev" })
-        local p = projection.project(disc)
-        p.session_pid = session_pid                   -- dev-session identity (D7); absent on standalone
-        local okw, reason = atomic_write(out_path, json.encode(p) .. "\n")
-        if not okw then
-            tool.stderr("hull agent inspect: publish " .. tostring(reason) .. "\n"); tool.exit(2)
-        end
-        tool.exit(0)
-    end
-
-    -- STANDALONE mode. The canonical analyzer never raises: it always returns a discovery
-    -- (an invalid one on a bad root / internal defect). Exit 0; the consumer reads
-    -- `valid` / `complete` from the JSON. (The live-published read fast path is handled in
-    -- C before this module is reached -- see cmd_inspect in commands/agent.c.)
+    -- Read/STANDALONE only. Publication is a SEPARATE internal module (hull.project.publish);
+    -- the live-published read fast path is handled in C before this module is reached (see
+    -- cmd_inspect in commands/agent.c). The canonical analyzer never raises: it always
+    -- returns a discovery (an invalid one on a bad root / internal defect). Exit 0; the
+    -- consumer reads `valid` / `complete` from the JSON.
     local disc = analyze.analyze(app_dir, { source_kind = "standalone" })
     tool.stdout(json.encode(projection.project(disc)) .. "\n")
     tool.exit(0)

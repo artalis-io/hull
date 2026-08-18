@@ -57,20 +57,30 @@ static void agent_write_dev_json(const char *app_dir, int port, pid_t pid)
     if (rename(tmp, path) != 0) unlink(tmp);   /* atomic publish (tmp + rename) */
 }
 
+static void agent_remove_discovery(const char *app_dir)
+{
+    char path[PATH_MAX];
+    int n = snprintf(path, sizeof(path), "%s/.hull/discovery.json", app_dir);
+    if (n > 0 && (size_t)n < sizeof(path)) unlink(path);
+}
+
 /* Publish a fresh discovery generation for the current dev session by spawning
- * `hull agent inspect <app_dir> --out=<.hull/discovery.json> --generation=N
- * --session-pid=<supervisor>`. Synchronous (analysis is fast, reloads are human-paced);
- * child output silenced. Agent-mode only. */
+ * `hull agent inspect <app_dir> --generation=N --session-pid=<supervisor>` (the C
+ * dispatcher routes the publish flags to the internal hull.project.publish module, which
+ * writes the canonical <app_dir>/.hull/discovery.json atomically). Synchronous (analysis
+ * is fast, reloads are human-paced); child output silenced. Agent-mode only.
+ *
+ * On ANY failure (fork / exec / non-zero exit) the previous same-session discovery sidecar
+ * is REMOVED so `hull agent inspect` falls back to a standalone analysis rather than
+ * serving a stale generation as current. */
 static void agent_publish_discovery(const char *hull_exe, const char *app_dir, long generation)
 {
-    char out_arg[PATH_MAX + 16], gen_arg[64], sp_arg[64];
-    int n = snprintf(out_arg, sizeof(out_arg), "--out=%s/.hull/discovery.json", app_dir);
-    if (n < 0 || (size_t)n >= sizeof(out_arg)) return;
+    char gen_arg[64], sp_arg[64];
     snprintf(gen_arg, sizeof(gen_arg), "--generation=%ld", generation);
     snprintf(sp_arg, sizeof(sp_arg), "--session-pid=%d", (int)getpid());
 
     pid_t pid = fork();
-    if (pid < 0) return;
+    if (pid < 0) { agent_remove_discovery(app_dir); return; }
     if (pid == 0) {
         signal(SIGINT, SIG_DFL);
         signal(SIGTERM, SIG_DFL);
@@ -81,11 +91,13 @@ static void agent_publish_discovery(const char *hull_exe, const char *app_dir, l
             if (devnull > 2) close(devnull);
         }
         const char *pargv[] = { hull_exe, "agent", "inspect",
-                                app_dir, out_arg, gen_arg, sp_arg, NULL };
+                                app_dir, gen_arg, sp_arg, NULL };
         execvp(hull_exe, (char *const *)(uintptr_t)pargv);   /* POSIX execvp does not modify argv */
         _exit(127);
     }
-    waitpid(pid, NULL, 0);
+    int status = 0;
+    if (waitpid(pid, &status, 0) < 0 || !WIFEXITED(status) || WEXITSTATUS(status) != 0)
+        agent_remove_discovery(app_dir);
 }
 
 static void agent_remove_sidecars(const char *app_dir)

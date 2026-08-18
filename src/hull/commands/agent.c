@@ -34,6 +34,7 @@
 #include <unistd.h>
 #include <signal.h>
 #include <limits.h>
+#include <errno.h>
 
 /* ── Output helper ─────────────────────────────────────────────────── */
 
@@ -753,10 +754,21 @@ static long json_int_field(const char *buf, const char *key)
     if (*p != ':') return -1;
     p++;
     while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r') p++;
-    return strtol(p, NULL, 10);
+    if (*p < '0' || *p > '9') return -1;              /* must start with a digit (no sign / garbage) */
+    errno = 0;
+    char *end = NULL;
+    long v = strtol(p, &end, 10);
+    if (errno != 0 || end == p) return -1;            /* overflow / no digits consumed */
+    /* the numeric token must terminate on a valid JSON boundary (not e.g. "12x") */
+    if (*end != ',' && *end != '}' && *end != ' ' && *end != '\t' &&
+        *end != '\n' && *end != '\r' && *end != '\0') return -1;
+    if (v <= 0 || v > INT_MAX) return -1;             /* a pid fits in a positive int */
+    return v;
 }
 
-/* Read a whole file into a NUL-terminated malloc'd buffer (cap-bounded), or NULL. */
+/* Read a whole file into a NUL-terminated malloc'd buffer (cap-bounded), or NULL. Requires
+ * a COMPLETE read (short read / read error -> NULL) so a truncated sidecar is rejected
+ * rather than parsed. */
 static char *read_whole_file(const char *path, size_t cap)
 {
     FILE *f = fopen(path, "rb");
@@ -768,7 +780,9 @@ static char *read_whole_file(const char *path, size_t cap)
     char *buf = malloc((size_t)sz + 1);
     if (!buf) { fclose(f); return NULL; }
     size_t got = fread(buf, 1, (size_t)sz, f);
+    int bad = (got != (size_t)sz) || ferror(f);       /* demand the full file, no read error */
     fclose(f);
+    if (bad) { free(buf); return NULL; }
     buf[got] = '\0';
     return buf;
 }
@@ -804,26 +818,37 @@ static int agent_inspect_stream_live(const char *app_dir)
     return 0;
 }
 
-/* `hull agent inspect [app_dir] [--out=... --generation=N --session-pid=P]`.
- * Without publish flags and with a live published generation, streams that generation
- * (D9). Otherwise delegates to the tool VM (hull.project.inspect): standalone stdout, or
- * -- when --out is present (used by `hull dev`) -- a fresh publish write. `argv` is
- * hl_cmd_agent's own (argv[1]=="inspect"), so argv+1 keeps arg[0]="inspect" in the VM. */
+/* `hull agent inspect [app_dir]` (+ the INTERNAL publish flags used by `hull dev`).
+ * The live-published fast path (D9) is taken ONLY for a fully-valid public read
+ * invocation -- at most one positional, no flag other than --json. Any invalid or
+ * non-read form (a second root, an unknown flag, --help) is NOT fast-pathed; it is
+ * delegated to hull.project.inspect so the Lua boundary does the full validation (exit 2 /
+ * usage). The internal `--generation`/`--session-pid` publish flags route to the SEPARATE
+ * hull.project.publish module. `argv` is hl_cmd_agent's own (argv[1]=="inspect"), so
+ * argv+1 keeps arg[0]="inspect" in the VM. */
 static int cmd_inspect(int argc, char **argv, const HlCommandEnv *env)
 {
     const char *app_dir = ".";
-    int has_publish_flag = 0;
+    int positionals = 0, has_publish = 0, clean_read = 1;
     for (int i = 2; i < argc; i++) {          /* argv[1]=="inspect"; args start at 2 */
         const char *a = argv[i];
-        if (strncmp(a, "--out=", 6) == 0 || strncmp(a, "--generation=", 13) == 0 ||
-            strncmp(a, "--session-pid=", 14) == 0) {
-            has_publish_flag = 1;
-        } else if (a[0] != '-') {
-            app_dir = a;                       /* first positional; multi-positional -> Lua rejects */
+        if (strncmp(a, "--generation=", 13) == 0 || strncmp(a, "--session-pid=", 14) == 0) {
+            has_publish = 1; clean_read = 0;
+        } else if (strcmp(a, "--json") == 0) {
+            /* accepted read format; stays a clean read */
+        } else if (a[0] == '-' && strcmp(a, "-") != 0) {
+            clean_read = 0;                    /* --help / unknown flag -> let Lua handle it */
+        } else {
+            positionals++; app_dir = a;
         }
     }
+    if (positionals > 1) clean_read = 0;       /* extra roots -> Lua rejects (exit 2) */
 
-    if (!has_publish_flag && agent_inspect_stream_live(app_dir) == 0)
+    if (has_publish)
+        return hull_tool("hull.project.publish", argc - 1, argv + 1,
+                         env ? env->hull_exe : NULL);
+
+    if (clean_read && agent_inspect_stream_live(app_dir) == 0)
         return 0;                              /* served the live published generation */
 
     return hull_tool("hull.project.inspect", argc - 1, argv + 1,

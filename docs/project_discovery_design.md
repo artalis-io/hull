@@ -473,22 +473,36 @@ attribution, no em-dashes.
 
 - **Slice 3 — `hull dev` integration (D7/D9). DONE.**
   - `hull dev --agent` publishes `.hull/discovery.json` per (re)spawn with a
-    monotonic `generation`, by spawning `hull agent inspect <app_dir> --out=…
-    --generation=N --session-pid=<supervisor>` (fresh analysis, `source="dev"`,
-    projected via the shared `hull.project.projection`, written atomically
-    tmp+rename). `dev.json` gains `session_pid` (the supervisor PID, stable across
-    reloads) and is itself written atomically; both sidecars are removed on dev
-    exit. `hull agent inspect` (C `cmd_inspect`) streams the published generation
-    only when `discovery.json`/`dev.json` `session_pid` match AND `kill(pid,0)`
-    confirms the supervisor is live (rejects a stale/crashed-session sidecar);
-    otherwise it delegates to the tool VM for a standalone analysis. Publish is
-    the fresh-analysis path (never reads a published generation → no recursion).
-    Scope: the non-TUI `--agent` loop (the agent-facing path); publishing from the
-    `hull dev --tui` reload path is a documented follow-up.
-  - Gate (e2e, in `e2e_project_discovery.sh`): dev publishes a generation; the
+    monotonic `generation` by spawning `hull agent inspect <app_dir>
+    --generation=N --session-pid=<supervisor>`. The C dispatcher routes those
+    INTERNAL publish flags to a SEPARATE module `hull.project.publish` (not a
+    read-command flag): it requires `--generation` + `--session-pid` TOGETHER
+    (partial combos → exit 2), runs a fresh analysis (`source="dev"`), projects it
+    via the shared `hull.project.projection`, tags it with the generation +
+    session identity, and writes it to the CANONICAL `<app_dir>/.hull/discovery.json`
+    (never a caller-supplied path) ATOMICALLY (tmp+rename). `dev.json` gains
+    `session_pid` (the supervisor PID, stable across reloads) and is itself written
+    atomically; both sidecars are removed on dev exit. If publication fails
+    (fork/exec/non-zero exit) the previous same-session generation is REMOVED so a
+    stale generation is never served.
+  - `hull agent inspect` (C `cmd_inspect`) streams the published generation only on
+    a FULLY-VALID public read invocation (≤1 positional, no flag but `--json`) AND
+    when `discovery.json`/`dev.json` `session_pid` match AND `kill(pid,0)` confirms
+    the supervisor is live. Any invalid CLI form (extra root, unknown flag,
+    `--help`) is NOT fast-pathed → delegated to `hull.project.inspect` for full
+    Lua-side validation. Sidecar parsing demands a complete read (short read /
+    `ferror` → reject) and a positive in-range integer `session_pid` token; a
+    malformed/truncated/stale/crashed-session sidecar falls back to a standalone
+    analysis. Liveness (`kill`) stays in the main process, not the tool sandbox.
+    Scope: the non-TUI `--agent` loop; publishing from `hull dev --tui` is a
+    documented follow-up.
+  - Gate (e2e, in `e2e_project_discovery.sh`): dev publishes a generation;
     session_pid matches across both sidecars; a source change → reload → a new
-    generation (1→2); sidecars removed on exit; after exit → standalone; and a
-    dead-`session_pid` sidecar is ignored → fresh standalone analysis.
+    generation (1→2); publisher failure → stale generation removed → standalone;
+    invalid CLI while live is not streamed (exit 2 / usage); publish flags require
+    both (partial → exit 2) and write the canonical path; sidecars removed on exit;
+    after exit → standalone; and dead-session / malformed / truncated sidecars →
+    standalone.
 
 - **Slice 4 — build seam (D10), abstraction-only.**
   - Ship + test `hull.project.analyze` as the host abstraction a build consumer
