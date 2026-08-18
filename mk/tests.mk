@@ -915,6 +915,10 @@ e2e-migrate: $(BUILDDIR)/hull
 e2e-analyze: $(BUILDDIR)/hull
 	sh tests/e2e_analyze.sh
 
+.PHONY: e2e-project-discovery
+e2e-project-discovery: $(BUILDDIR)/hull
+	sh tests/e2e_project_discovery.sh
+
 # PostgreSQL backend end-to-end (needs Docker; builds its own POSTGRES hull).
 e2e-postgres:
 	sh tests/e2e_postgres.sh

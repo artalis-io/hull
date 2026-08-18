@@ -347,6 +347,10 @@ jobs:
         timeout-minutes: 2
         run: make e2e-update
 
+      - name: Project source-discovery E2E tests (hull agent inspect)
+        timeout-minutes: 2
+        run: make e2e-project-discovery
+
       - name: hull test (examples)
         timeout-minutes: 2
         run: make hull-test-examples

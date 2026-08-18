@@ -363,5 +363,26 @@ do
         "wrong-typed opts.generation / opts.source_kind normalized to defaults")
 end
 
+-- ── shared projection: public fields kept, generation-internal state dropped ──
+do
+    local projection = require("hull.project.projection")
+    local analyze = require("hull.project.analyze")
+    _G.tool = make_tool({ ["pj/app.lua"] = "---@x\nlocal a = 1\nreturn a\n" })
+    local disc = analyze.analyze("pj")
+    _G.tool = nil
+    -- the in-memory model carries internal state...
+    ok(disc._handles ~= nil and disc._by_source ~= nil, "in-memory model retains internal state")
+    ok(disc.declarations[1].handle ~= nil, "in-memory decl carries a handle")
+    -- ...the projection drops ALL of it, keeps the public fields
+    local p = projection.project(disc)
+    ok(p._handles == nil and p._by_source == nil, "projection drops _handles / _by_source")
+    ok(p.indexes.by_id == nil, "projection drops the by_id decl map")
+    ok(p.declarations[1].handle == nil, "projection drops per-decl handle")
+    ok(p.schema_version == 1 and p.valid ~= nil and p.complete ~= nil and p.summary ~= nil,
+        "projection keeps the public wire fields")
+    ok(p.declarations[1].id ~= nil and p.declarations[1].annotations[1].name == "x",
+        "projection keeps public decl id + annotations")
+end
+
 print(string.format("test_project: %d passed, %d failed", pass, fail))
 return { pass = pass, fail = fail, failures = failures }
