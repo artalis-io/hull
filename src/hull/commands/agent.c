@@ -729,6 +729,7 @@ static void agent_usage(void)
         "  sql named <qname> [--params J] [dir]  Run a named query from queries.json\n"
         "  tools                          Side-loaded tool registry + install state\n"
         "  overview [app_dir]             Composite project summary (one shot)\n"
+        "  inspect [app_dir]              Analyzed project model: annotated declarations (JSON)\n"
         "\n"
         "All output is JSON to stdout.\n");
 }
@@ -798,6 +799,12 @@ int hl_cmd_agent(int argc, char **argv, const HlCommandEnv *env)
     }
     /* Composite project summary — one call to orient an agent. */
     if (strcmp(sub, "overview") == 0)     return cmd_overview(sub_argc, sub_argv);
+    /* Project source discovery — the canonical analyzed project model (annotated
+     * declarations) as versioned JSON. Delegates to the Lua tool VM (hull.project.inspect
+     * -> hull.project.analyze). argv+1 keeps arg[0]="inspect", arg[1..]=args in the VM. */
+    if (strcmp(sub, "inspect") == 0)
+        return hull_tool("hull.project.inspect", argc - 1, argv + 1,
+                         env ? env->hull_exe : NULL);
 #ifdef HL_ENABLE_DB
     if (strcmp(sub, "schema-diff") == 0)  return cmd_schema_diff(sub_argc, sub_argv);
     if (strcmp(sub, "sql") == 0)          return cmd_sql(sub_argc, sub_argv);

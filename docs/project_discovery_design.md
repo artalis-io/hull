@@ -451,13 +451,20 @@ attribution, no em-dashes.
   - Gate: `make test`, the source UTEST suite, `luacheck`, and **`e2e_analyze.sh`
     green** (proves the walker extraction is behavior-preserving).
 
-- **Slice 2 — standalone agent inspection (D8/D9/D11).**
-  - `hull agent <inspect>` standalone path; `schema_version`'d JSON; JS honest
-    handling.
-  - Gate: `tests/e2e_project_discovery.sh` — deterministic output on fixtures;
-    annotated Lua discovered without execution; unknown annotations survive;
-    malformed → invalid; `.js` present but not falsely analyzed; exclusions +
-    containment reuse the hardened behavior.
+- **Slice 2 — standalone agent inspection (D8/D9/D11). DONE.**
+  - `hull agent inspect [app_dir]` (C dispatch in `agent.c` → `hull_tool(
+    "hull.project.inspect")` → `hull.project.analyze`). `hull.project.inspect`
+    emits an EXPLICIT, `schema_version`'d JSON projection to stdout that DROPS
+    every generation-internal value (per-decl `handle`, `_by_source`, `_handles`,
+    and the `by_id` decl map). Exit 0 when a discovery was produced (validity is
+    data: `valid`/`complete`); exit 2 on a usage error. Standalone only (the
+    dev-running published-generation path is Slice 3).
+  - Gate: `tests/e2e_project_discovery.sh` (25 assertions, wired into CI) over the
+    REAL tool VM — deterministic output; annotations discovered without execution;
+    unknown annotations survive; malformed → `valid=false` + diagnostics; `.js`
+    present but not falsely analyzed (→ `complete=false`) while `static/*.js` is
+    pruned; capability reporting; and a leak check that no generation-internal
+    state reaches the wire.
 
 - **Slice 3 — `hull dev` integration (D7/D9).**
   - Publish `.hull/discovery.json` per generation in `--agent`; `hull agent
