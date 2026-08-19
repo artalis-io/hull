@@ -916,7 +916,15 @@ e2e-analyze: $(BUILDDIR)/hull
 	sh tests/e2e_analyze.sh
 
 .PHONY: e2e-project-discovery
-e2e-project-discovery: $(BUILDDIR)/hull
+# This E2E runs late in the CI job, after many steps that churn the shared build/ tree
+# with config-sentinel flag flips (feature/flavor/cross-build tests). Those can leave
+# build/hull stale/incomplete (observed: a hull missing the `inspect` subcommand), and the
+# plain $(BUILDDIR)/hull prerequisite treats a stale-but-present binary as up-to-date. Force
+# a clean rebuild of the binary (and cmd_agent.o, which carries the `inspect` dispatch) from
+# current source, matching the "don't trust mutable build/ state" convention used elsewhere.
+e2e-project-discovery:
+	rm -f $(BUILDDIR)/hull $(BUILDDIR)/cmd_agent.o
+	$(MAKE) $(BUILDDIR)/hull
 	sh tests/e2e_project_discovery.sh
 
 # PostgreSQL backend end-to-end (needs Docker; builds its own POSTGRES hull).

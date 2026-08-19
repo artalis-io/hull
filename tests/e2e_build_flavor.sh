@@ -86,8 +86,12 @@ m=$(nm "$WORK/pc/slim" 2>/dev/null | grep -cE ' [Tt] _?mbedtls_ssl_handshake' ||
 [ "$m" = 0 ] || fail "compute app on the TLS-less base should carry no mbedTLS (got $m)"
 rc=0; "$WORK/pc/slim" >/dev/null 2>&1 || rc=$?
 [ "$rc" = 7 ] || fail "the Keel/TLS-less pure-compute app should still exit 7, got $rc"
-# leave build/ as a full base again for any following target
-make -C "$ROOT" platform >/dev/null 2>&1 || true
+# Leave build/ as a full base again for any following target. This flag flip back to
+# the default config makes the sentinel purge build/hull; `make platform` alone rebuilds
+# only the platform LIB, not the binary, leaving following targets (e2e-ca-bundle,
+# e2e-project-discovery, ...) to relink a stale/incomplete build/hull from the mutable
+# tree. Build the DEFAULT target so build/hull is fully rebuilt + correct.
+make -C "$ROOT" >/dev/null 2>&1 || true
 pass "compute app on a Keel+TLS-less base drops Keel + mbedTLS entirely (0/0) + runs"
 
 echo "PASS: e2e_build_flavor"
