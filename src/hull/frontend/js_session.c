@@ -178,6 +178,34 @@ static int fail_from_exception(HlJsSession *s, JSContext *ctx,
 }
 
 /* ── bundle precompile (throwaway eval-enabled context) ─────────────────── */
+/* The compiler context needs a module loader so a module's `import`s resolve while it is
+ * COMPILE_ONLY-compiled: QuickJS resolves import specifiers against the loader on demand
+ * (recursively compiling dependencies from source), so the bundle compiles regardless of the
+ * (alphabetical) registry order -- a module may import a sibling that sorts after it. */
+static char *precompile_module_normalize(JSContext *ctx, const char *base_name,
+                                         const char *name, void *opaque)
+{
+    (void)base_name; (void)opaque;
+    return js_strdup(ctx, name);      /* absolute `hull:*` specifiers -- identity */
+}
+
+static JSModuleDef *precompile_module_loader(JSContext *ctx, const char *module_name, void *opaque)
+{
+    (void)opaque;
+    for (const HlEntry *e = hl_stdlib_js_cli_entries; e->name; e++) {
+        if (strcmp(e->name, module_name) == 0) {
+            JSValue f = JS_Eval(ctx, (const char *)e->data, e->len, module_name,
+                                JS_EVAL_TYPE_MODULE | JS_EVAL_FLAG_COMPILE_ONLY);
+            if (JS_IsException(f)) return NULL;   /* pending exception is the syntax error */
+            JSModuleDef *md = (JSModuleDef *)JS_VALUE_GET_PTR(f);
+            JS_FreeValue(ctx, f);
+            return md;
+        }
+    }
+    JS_ThrowReferenceError(ctx, "tooling module not found: %s", module_name);
+    return NULL;
+}
+
 /* Compile every cli-js tooling module to bytecode so the session can load them WITHOUT
  * enabling its own eval hook. Runs in a separate runtime/context that IS eval-enabled but
  * only ever sees the trusted, embedded bundle. Returns 0 on success, -1 on any failure
@@ -203,6 +231,8 @@ static int precompile_bundle(HlJsSession *s)
     JS_AddIntrinsicEval(cctx);            /* needed to COMPILE source -> bytecode */
     JS_AddIntrinsicRegExpCompiler(cctx);  /* module source may carry regex literals */
     JS_AddIntrinsicRegExp(cctx);
+    /* Resolve inter-module imports from the registry on demand (order-independent). */
+    JS_SetModuleLoaderFunc(crt, precompile_module_normalize, precompile_module_loader, NULL);
 
     int rc = 0;
     for (const HlEntry *e = hl_stdlib_js_cli_entries; e->name; e++) {

@@ -17,8 +17,9 @@ TEST_SRCS := $(shell find $(TESTDIR)/hull -name 'test_*.c')
 ifeq ($(RUNTIME),js)
   TEST_SRCS := $(filter-out %/test_lua.c,$(TEST_SRCS))
 else ifeq ($(RUNTIME),lua)
-  # test_js_session (the JS tooling runtime) needs QuickJS, absent in a lua-only build.
-  TEST_SRCS := $(filter-out %/test_js.c %/test_js_session.c,$(TEST_SRCS))
+  # test_js_session + test_js_lexer (the JS tooling runtime + frontend) need QuickJS,
+  # absent in a lua-only build.
+  TEST_SRCS := $(filter-out %/test_js.c %/test_js_session.c %/test_js_lexer.c,$(TEST_SRCS))
 endif
 
 # Drop DB-dependent tests in pure-compute builds.
@@ -175,6 +176,11 @@ $(BUILDDIR)/test_lua_source: $(TESTDIR)/hull/source/test_lua_source.c $(LUA_OBJS
 # loading / limits / exception-conversion / lifecycle independently of any parser. Lives
 # under tests/hull/frontend/, so it needs an explicit recipe (not the cap/ pattern rule).
 $(BUILDDIR)/test_js_session: $(TESTDIR)/hull/frontend/test_js_session.c $(FRONTEND_JS_SESSION_OBJ) $(STDLIB_JS_CLI_REGISTRY_O) $(QJS_OBJS) | $(BUILDDIR)
+	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -Ivendor/quickjs -o $@ $< $(FRONTEND_JS_SESSION_OBJ) $(STDLIB_JS_CLI_REGISTRY_O) $(QJS_OBJS) -lm -lpthread $(LDFLAGS)
+
+# hull.frontend JS lexer (Slice 2): same tooling-session link, drives hull:source:lexer via
+# the embedded hull:source:lextest driver. Explicit recipe (tests/hull/frontend/).
+$(BUILDDIR)/test_js_lexer: $(TESTDIR)/hull/frontend/test_js_lexer.c $(FRONTEND_JS_SESSION_OBJ) $(STDLIB_JS_CLI_REGISTRY_O) $(QJS_OBJS) | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -Ivendor/quickjs -o $@ $< $(FRONTEND_JS_SESSION_OBJ) $(STDLIB_JS_CLI_REGISTRY_O) $(QJS_OBJS) -lm -lpthread $(LDFLAGS)
 
 # Read-only shared-heap C-API test: build-time AOT fixture. Generate an .aot from
