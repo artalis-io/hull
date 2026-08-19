@@ -23,6 +23,7 @@
 
 import { createTokenizer } from "hull:source:lexer";
 import { newDiagnostic, makeBudget } from "hull:source:diagnostic";
+import { attach as attachAnnotations } from "hull:source:annotations";
 
 // Reserved words that may NOT be a binding/identifier reference.
 const RESERVED = new Set([
@@ -970,6 +971,11 @@ function parseInternal(bytes, opts, inject) {
     }
 
     const ast = parseProgram();
+    // Scan JSDoc @tags and attach leading runs to declaration targets (Slice 3). Mirrors
+    // lua.parse calling annotations.attach. Best-effort + hardened: an internal defect emits
+    // js.internal through the SAME budget (so diagnostics-empty guarantees attachment succeeded),
+    // malformed tag content does not. The tokenizer's linemap is already computed.
+    attachAnnotations(ast, tk.comments, bytes, tk.linemap, budget, path);
     // Lexical + parser diagnostics already share ONE budget list (tk.diagnostics === budget.list),
     // so it is a single authoritative sequence -- no merge, no double-counting.
     const allDiags = budget.list;
