@@ -265,4 +265,114 @@ UTEST(js_parser, automatic_semicolon_insertion)
     hl_js_session_destroy(s);
 }
 
+/* Non-destructive speculation: valid forms where a keyword-like token is actually a name /
+ * call, and the tokenizer must NOT desynchronize after a failed arrow/modifier guess. */
+UTEST(js_parser, speculation_valid_forms)
+{
+    HlJsSession *s = hl_js_session_create(NULL);
+    ASSERT_TRUE(s != NULL);
+    /* async(x) is a call, not an arrow; and the `/ 2` after it must survive the failed
+     * arrow speculation as a division (tokenizer not desynchronized). */
+    char *o = parse_str(s, "async(x) / 2");
+    EXPECT_TRUE(has(o, "\"type\":\"BinaryExpression\",\"start\":1") || has(o, "\"operator\":\"/\""));
+    EXPECT_TRUE(has(o, "\"type\":\"CallExpression\""));
+    EXPECT_TRUE(has(o, "\"name\":\"async\""));
+    EXPECT_FALSE(has(o, "\"type\":\"ArrowFunctionExpression\""));
+    EXPECT_FALSE(has(o, "\"regex\""));
+    EXPECT_TRUE(has(o, "\"valid\":true"));
+    free(o); o = NULL;
+    /* { async: 1 } and { get: 1 } -- async/get are property keys, not modifiers */
+    o = parse_str(s, "const o = { async: 1, get: 2, set: 3 };");
+    EXPECT_TRUE(has(o, "\"type\":\"ObjectExpression\""));
+    EXPECT_TRUE(has(o, "\"name\":\"async\""));
+    EXPECT_TRUE(has(o, "\"name\":\"get\""));
+    EXPECT_TRUE(has(o, "\"valid\":true"));
+    free(o); o = NULL;
+    /* { async() {} } -- a method literally named `async` */
+    o = parse_str(s, "const m = { async() { return 1; } };");
+    EXPECT_TRUE(has(o, "\"name\":\"async\""));
+    EXPECT_TRUE(has(o, "\"valid\":true"));
+    free(o); o = NULL;
+    /* a class field named `static` */
+    o = parse_str(s, "class C { static = 1; m() {} }");
+    EXPECT_TRUE(has(o, "\"type\":\"PropertyDefinition\""));
+    EXPECT_TRUE(has(o, "\"name\":\"static\""));
+    EXPECT_TRUE(has(o, "\"valid\":true"));
+    free(o);
+    hl_js_session_destroy(s);
+}
+
+/* async function DECLARATION (not an expression statement), plus async arrows. */
+UTEST(js_parser, async_declaration_and_arrows)
+{
+    HlJsSession *s = hl_js_session_create(NULL);
+    ASSERT_TRUE(s != NULL);
+    char *o = parse_str(s, "async function run() { return 1; }");
+    EXPECT_TRUE(has(o, "\"type\":\"FunctionDeclaration\""));
+    EXPECT_TRUE(has(o, "\"async\":true"));
+    EXPECT_FALSE(has(o, "\"type\":\"ExpressionStatement\""));
+    EXPECT_TRUE(has(o, "\"name\":\"run\""));
+    EXPECT_TRUE(has(o, "\"valid\":true"));
+    free(o); o = NULL;
+    o = parse_str(s, "const f = async x => await x;");
+    EXPECT_TRUE(has(o, "\"type\":\"ArrowFunctionExpression\""));
+    EXPECT_TRUE(has(o, "\"async\":true"));
+    EXPECT_TRUE(has(o, "\"type\":\"AwaitExpression\""));
+    free(o); o = NULL;
+    o = parse_str(s, "const g = async (a, b) => a + b;");
+    EXPECT_TRUE(has(o, "\"type\":\"ArrowFunctionExpression\""));
+    EXPECT_TRUE(has(o, "\"async\":true"));
+    EXPECT_TRUE(has(o, "\"valid\":true"));
+    free(o); o = NULL;
+    /* `async` as an ordinary identifier reference */
+    o = parse_str(s, "const h = async + 1;");
+    EXPECT_TRUE(has(o, "\"name\":\"async\""));
+    EXPECT_TRUE(has(o, "\"valid\":true"));
+    free(o);
+    hl_js_session_destroy(s);
+}
+
+/* Combined diagnostic budget (tokenizer + parser) is authoritative; maxDiagnostics=0 keeps
+ * only the terminal marker. */
+UTEST(js_parser, combined_diagnostic_budget)
+{
+    HlJsSession *s = hl_js_session_create(NULL);
+    ASSERT_TRUE(s != NULL);
+    char *out = NULL; size_t out_len = 0;
+    /* several parser syntax errors, budget 0 -> only js.limit.diagnostics terminal(s) */
+    int rc = hl_js_session_analyze(s, "hull:source:lextest", "parse",
+                                   (const uint8_t *)"const a = ; const b = ; const c = ;", 35, "t.js",
+                                   "{\"maxDiagnostics\":0}", 20, &out, &out_len);
+    (void)rc;
+    EXPECT_EQ(count(out, "\"code\":\"js.syntax\""), 0);            /* no ordinary parser diags kept */
+    EXPECT_TRUE(has(out, "\"code\":\"js.limit.diagnostics\""));   /* terminal retained */
+    free(out); out = NULL;
+    /* budget 2 over many parser errors -> exactly 2 ordinary + terminal */
+    rc = hl_js_session_analyze(s, "hull:source:lextest", "parse",
+                               (const uint8_t *)"const a = ; const b = ; const c = ; const d = ;", 47, "t.js",
+                               "{\"maxDiagnostics\":2}", 20, &out, &out_len);
+    EXPECT_EQ(count(out, "\"code\":\"js.syntax\""), 2);
+    EXPECT_TRUE(has(out, "\"code\":\"js.limit.diagnostics\""));
+    free(out);
+    hl_js_session_destroy(s);
+}
+
+/* The public "never raises" contract: an injected internal defect yields a SourceUnit with a
+ * structured js.internal diagnostic (rc 0), not a session-level failure. */
+UTEST(js_parser, internal_failure_is_contained)
+{
+    HlJsSession *s = hl_js_session_create(NULL);
+    ASSERT_TRUE(s != NULL);
+    char *out = NULL; size_t out_len = 0;
+    int rc = hl_js_session_analyze(s, "hull:source:lextest", "parse",
+                                   (const uint8_t *)"const x = 1;", 12, "t.js",
+                                   "{\"_throwInternal\":true}", 23, &out, &out_len);
+    ASSERT_EQ(rc, 0);                                  /* the boundary produced a result, not an exception */
+    EXPECT_TRUE(has(out, "\"status\":\"ok\""));
+    EXPECT_TRUE(has(out, "\"code\":\"js.internal\""));
+    EXPECT_TRUE(has(out, "\"valid\":false"));
+    free(out);
+    hl_js_session_destroy(s);
+}
+
 UTEST_MAIN()

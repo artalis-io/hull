@@ -33,6 +33,8 @@ function runDirected(srcBuf, path, opts) {
 function runParse(srcBuf, path, opts) {
     const o = { path: path || "test.js" };
     if (opts && opts.maxDepth !== undefined) o.maxDepth = opts.maxDepth;
+    if (opts && opts.maxDiagnostics !== undefined) o.maxDiagnostics = opts.maxDiagnostics;
+    if (opts && opts._throwInternal) o._throwInternal = true;   // test hook: inject an internal defect
     const u = parse(new Uint8Array(srcBuf), o);
     return { schema_version: 1, status: "ok", ast: u.ast, comments: u.comments, diagnostics: u.diagnostics, valid: u.valid };
 }

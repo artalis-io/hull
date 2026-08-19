@@ -44,15 +44,42 @@ const BINPREC = {
     "+": 10, "-": 10, "*": 11, "/": 11, "%": 11, "**": 12,
 };
 
+// A validated nonnegative-integer option, else the default.
+function nnInt(x, dflt) { return (typeof x === "number" && isFinite(x) && x >= 0 && Math.floor(x) === x) ? x : dflt; }
+
+// Public entry: a THIN protected wrapper around parseInternal so the "never raises" contract
+// is ENFORCED, not merely asserted. An internal defect (an unexpected JS exception) becomes a
+// SourceUnit with a structured js.internal diagnostic; a QuickJS resource interrupt
+// (stack/heap/instruction) is re-thrown so the host session classifies it (js.limit.*).
 export function parse(bytes, opts) {
+    try {
+        return parseInternal(bytes, opts);
+    } catch (e) {
+        const msg = (e && e.message !== undefined) ? String(e.message) : String(e);
+        if (msg.indexOf("out of memory") >= 0 || msg.indexOf("stack overflow") >= 0 || msg.indexOf("interrupted") >= 0) throw e;
+        const p = (opts && opts.path) || null;
+        return {
+            ast: { type: "Program", start: 1, stop: 1, body: [] },
+            comments: [], linemap: [1], valid: false,
+            diagnostics: [newDiagnostic("error", "js.internal", "internal parser error: " + msg, p, null)],
+        };
+    }
+}
+
+function parseInternal(bytes, opts) {
     opts = opts || {};
     const path = opts.path || null;
     const maxDepth = (typeof opts.maxDepth === "number" && opts.maxDepth > 0) ? Math.floor(opts.maxDepth) : 1000;
+    const maxDiagnostics = nnInt(opts.maxDiagnostics, 4096);
+
+    if (opts._throwInternal) throw new Error("injected internal failure");   // test hook (never set in production)
 
     const tk = createTokenizer(bytes, opts);
     const diagnostics = [];
+    const la = [];                   // lookahead buffer of tokens AFTER cur (non-destructive peek)
     let depth = 0;
     let errored = false;             // rate-limit cascading recovery within one statement
+    let parserOrdinary = 0, diagCapNoted = false;
 
     // cur/prev tokens. The goal used to READ cur was decided when we advanced past prev.
     let cur = tk.next(true);         // first token is at statement (operand) position
@@ -61,14 +88,35 @@ export function parse(bytes, opts) {
     // advance past cur, reading the next token with an explicit grammatical slash goal:
     //   regexAllowed=true  -> the next token is at an operand/statement position
     //   regexAllowed=false -> the next token is at an operator/continuation position
-    function advance(regexAllowed) { prev = cur; cur = tk.next(regexAllowed === false ? false : true); return prev; }
+    // A buffered lookahead token (already lexed) is consumed as-is; the goal only applies to a
+    // fresh read from the tokenizer.
+    function advance(regexAllowed) {
+        prev = cur;
+        cur = la.length > 0 ? la.shift() : tk.next(regexAllowed === false ? false : true);
+        return prev;
+    }
+    // Non-destructive lookahead: the k-th token AFTER cur (1-based). Newly read tokens use
+    // `goal` for their slash decision; the disambiguation sites only peek non-slash positions.
+    function peekTok(k, goal) { while (la.length < k) la.push(tk.next(goal === false ? false : true)); return la[k - 1]; }
+    function peekIsP(k, v) { const t = peekTok(k, false); return t.type === "punctuator" && t.value === v; }
 
     function atEof() { return cur.type === "eof"; }
     function isP(v) { return cur.type === "punctuator" && cur.value === v; }
     function isKw(v) { return cur.type === "identifier" && cur.value === v; }
     function nl() { return cur.nlBefore; }
 
+    function isTerminalCode(code) { return code.lastIndexOf("js.limit.", 0) === 0; }
+    function ordinaryCount(list) { let c = 0; for (let i = 0; i < list.length; i++) if (!isTerminalCode(list[i].code)) c++; return c; }
+    // Authoritative combined diagnostic budget across the WHOLE SourceUnit (tokenizer + parser).
+    // Terminal js.limit.* diagnostics are always kept.
     function diag(sev, code, message, start, stop) {
+        if (!isTerminalCode(code)) {
+            if (ordinaryCount(tk.diagnostics) + parserOrdinary >= maxDiagnostics) {
+                if (!diagCapNoted) { diagCapNoted = true; diagnostics.push(newDiagnostic("error", "js.limit.diagnostics", "diagnostic limit exceeded (" + maxDiagnostics + ")", path, { start: start, stop: stop })); }
+                return;
+            }
+            parserOrdinary++;
+        }
         diagnostics.push(newDiagnostic(sev, code, message, path, { start: start, stop: stop }));
     }
     function synErr(message, tok) { const t = tok || cur; diag("error", "js.syntax", message, t.start, t.stop); }
@@ -327,13 +375,19 @@ export function parse(bytes, opts) {
 
     // -- functions / classes --
     function maybeAsyncFunctionDecl() {
-        // `async function ...` declaration; otherwise `async` is an identifier expression.
-        // One-token lookahead is not available, so treat via expression statement fallback.
+        // `async function ...` declaration (no LineTerminator between `async` and `function`);
+        // otherwise `async` is an ordinary identifier -> expression statement.
+        const start = cur.start;
+        const nx = peekTok(1, true);
+        if (nx.type === "identifier" && nx.value === "function" && !nx.nlBefore) {
+            advance(true);                          // consume `async` -> cur is `function`
+            return parseFunctionDeclaration(true, start);
+        }
         return parseExpressionStatement();
     }
 
-    function parseFunctionDeclaration(isAsync) {
-        const f = mk("FunctionDeclaration", cur.start);
+    function parseFunctionDeclaration(isAsync, start) {
+        const f = mk("FunctionDeclaration", start !== undefined ? start : cur.start);
         f.async = isAsync === true;
         advance(true);                              // past `function`
         f.generator = eatP("*", true);
@@ -344,8 +398,8 @@ export function parse(bytes, opts) {
         return fin(f);
     }
 
-    function parseFunctionExpr(isAsync) {
-        const f = mk("FunctionExpression", cur.start);
+    function parseFunctionExpr(isAsync, start) {
+        const f = mk("FunctionExpression", start !== undefined ? start : cur.start);
         f.async = isAsync === true;
         advance(true);
         f.generator = eatP("*", true);
@@ -407,18 +461,17 @@ export function parse(bytes, opts) {
     function parseClassMember() {
         const start = cur.start;
         if (cur.type === "punctuator" && cur.value === "#") { unsupported("private class members are not supported"); advance(true); return errNode(start); }
+        // Non-destructive one-token lookahead decides whether a keyword-like token is a
+        // modifier or the member NAME (e.g. a field named `static` / `async` / `get`).
         let isStatic = false;
-        if (isKw("static") && !RESERVED.has("static")) {
-            // `static` method/field unless it is the member name itself.
-            const save = cur;
-            advance(true);
-            if (isP("(") || isP("=") || isP(";")) { /* `static` was the name */ cur = save; }
-            else isStatic = true;
+        if (isKw("static")) {
+            const nx = peekTok(1, false);
+            if (!(nx.type === "punctuator" && (nx.value === "(" || nx.value === "=" || nx.value === ";"))) { isStatic = true; advance(true); }
         }
         let kind = "method", isAsync = false, isGen = false;
-        if (isKw("async")) { const save = cur; advance(true); if (!isP("(") && !isP("=")) isAsync = true; else cur = save; }
+        if (isKw("async")) { const nx = peekTok(1, false); if (!(nx.type === "punctuator" && (nx.value === "(" || nx.value === "=" || nx.value === ";")) && !nx.nlBefore) { isAsync = true; advance(true); } }
         if (isP("*")) { isGen = true; unsupported("generator methods are not supported"); advance(true); }
-        if ((isKw("get") || isKw("set"))) { const g = cur.value; const save = cur; advance(true); if (!isP("(") && !isP("=") && !isP(";")) kind = g; else cur = save; }
+        if (isKw("get") || isKw("set")) { const nx = peekTok(1, false); if (!(nx.type === "punctuator" && (nx.value === "(" || nx.value === "=" || nx.value === ";"))) { kind = cur.value; advance(true); } }
         const key = parsePropertyKey();
         const m = mk("MethodDefinition", start); m.static = isStatic; m.kind = kind; m.key = key; m.async = isAsync; m.generator = isGen;
         if (isP("(")) {
@@ -542,7 +595,7 @@ export function parse(bytes, opts) {
             const v = cur.value;
             if (UNARY.has(v)) { const node = mk("UnaryExpression", cur.start); node.operator = v; node.prefix = true; advance(true); node.argument = parseUnary(); return fin(node); }
             if (v === "++" || v === "--") { const node = mk("UpdateExpression", cur.start); node.operator = v; node.prefix = true; advance(true); node.argument = parseUnary(); return fin(node); }
-            if (v === "await") { const save = cur; advance(true); if (isExprStart()) { const node = mk("AwaitExpression", save.start); node.argument = parseUnary(); return fin(node); } cur = save; }
+            if (v === "await") { if (isExprStartTok(peekTok(1, true))) { const start = cur.start; advance(true); const node = mk("AwaitExpression", start); node.argument = parseUnary(); return fin(node); } }
             if (v === "yield") { unsupported("yield is not supported"); advance(true); return errNode(prev.start); }
         }
         let e = parsePostfix();
@@ -605,12 +658,28 @@ export function parse(bytes, opts) {
         return args;
     }
 
-    function isExprStart() {
-        if (atEof()) return false;
-        if (cur.type === "number" || cur.type === "string" || cur.type === "template" || cur.type === "regex") return true;
-        if (cur.type === "identifier") return true;
-        if (cur.type === "punctuator") return cur.value === "(" || cur.value === "[" || cur.value === "{" || cur.value === "!" || cur.value === "~" || cur.value === "+" || cur.value === "-" || cur.value === "++" || cur.value === "--" || cur.value === "...";
+    function isExprStartTok(t) {
+        if (!t || t.type === "eof") return false;
+        if (t.type === "number" || t.type === "string" || t.type === "template" || t.type === "regex") return true;
+        if (t.type === "identifier") return true;
+        if (t.type === "punctuator") return t.value === "(" || t.value === "[" || t.value === "{" || t.value === "!" || t.value === "~" || t.value === "+" || t.value === "-" || t.value === "++" || t.value === "--" || t.value === "...";
         return false;
+    }
+    // A punctuator that means "the identifier just seen is a property key/name, not a modifier".
+    function isKeyBoundary(t) { return t.type === "punctuator" && (t.value === ":" || t.value === "," || t.value === "}" || t.value === "(" || t.value === "="); }
+    // peekTok(openK) is `(`; return the token after its matching `)` (read with a division goal
+    // so a following `/` in the non-arrow case is buffered as division, not a regex).
+    function peekAfterMatchingParen(openK) {
+        let depth = 0, k = openK;
+        for (;;) {
+            const t = peekTok(k, true);
+            if (t.type === "eof") return t;
+            if (t.type === "punctuator") {
+                if (t.value === "(") depth++;
+                else if (t.value === ")") { depth--; if (depth === 0) return peekTok(k + 1, false); }
+            }
+            k++;
+        }
     }
 
     function parsePrimary() {
@@ -643,14 +712,26 @@ export function parse(bytes, opts) {
         if (v === "new") return parseNew();
         if (v === "import") { advance(false); if (isP("(")) { const ie = mk("ImportExpression", start); ie.arguments = parseArguments(); return fin(ie); } if (isP(".")) { advance(false); const meta = mk("MetaProperty", start); meta.meta = "import"; meta.property = (cur.type === "identifier" ? cur.value : ""); advance(false); return fin(meta); } synErr("unexpected 'import'"); return errNode(start); }
         if (v === "async") {
-            const save = cur; advance(false);
-            if (isKw("function") && !prev.nlBefore) return parseFunctionExpr(true);
-            // `async ident =>` or `async (params) =>`
-            if ((cur.type === "identifier" || isP("(")) && !cur.nlBefore) {
-                const maybe = tryArrow(save.start, true);
-                if (maybe) return maybe;
+            const nx = peekTok(1, true);
+            if (nx.type === "identifier" && nx.value === "function" && !nx.nlBefore) { advance(true); return parseFunctionExpr(true, start); }
+            if (!nx.nlBefore) {
+                // `async ident =>`
+                if (nx.type === "identifier" && !RESERVED.has(nx.value) && peekIsP(2, "=>")) {
+                    advance(true);                  // consume `async` -> cur is the param ident
+                    const id = parseIdentifier();
+                    return finishArrow(start, [id], true);
+                }
+                // `async ( ... ) =>`
+                if (nx.type === "punctuator" && nx.value === "(") {
+                    const after = peekAfterMatchingParen(1);
+                    if (after.type === "punctuator" && after.value === "=>") {
+                        advance(true);              // consume `async` -> cur is `(`
+                        const params = parseParams();
+                        return finishArrow(start, params, true);
+                    }
+                }
             }
-            cur = save;                             // plain identifier `async`
+            // otherwise `async` is an ordinary identifier -> fall through
         }
         // `ident =>` arrow
         const id = parseIdentifier();
@@ -676,16 +757,6 @@ export function parse(bytes, opts) {
         if (sawRest) { synErr("rest element outside arrow parameters"); }
         if (items.length === 1) return items[0];
         const seq = mk("SequenceExpression", start); seq.expressions = items; return fin(seq);
-    }
-
-    function tryArrow(start, isAsync) {
-        // Called after consuming `async`; cur is an identifier or `(`.
-        if (cur.type === "identifier") { const id = parseIdentifier(); if (isP("=>") && !nl()) return finishArrow(start, [id], isAsync); return null; }
-        if (isP("(")) {
-            const p = parseParams();
-            if (isP("=>") && !nl()) { const a = mk("ArrowFunctionExpression", start); a.async = isAsync; a.params = p; advance(true); a.body = parseArrowBody(); return fin(a); }
-        }
-        return null;
     }
 
     function finishArrow(start, params, isAsync) {
@@ -727,9 +798,9 @@ export function parse(bytes, opts) {
     function parseObjectMember() {
         const start = cur.start;
         let isAsync = false, isGen = false, kind = "init";
-        if (isKw("async")) { const save = cur; advance(false); if (!isP(":") && !isP(",") && !isP("}") && !isP("(")) isAsync = true; else cur = save; }
+        if (isKw("async")) { const nx = peekTok(1, false); if (!isKeyBoundary(nx) && !nx.nlBefore) { isAsync = true; advance(true); } }
         if (isP("*")) { isGen = true; unsupported("generator methods are not supported"); advance(true); }
-        if ((isKw("get") || isKw("set"))) { const g = cur.value; const save = cur; advance(false); if (!isP(":") && !isP(",") && !isP("}") && !isP("(")) kind = g; else cur = save; }
+        if (isKw("get") || isKw("set")) { const nx = peekTok(1, false); if (!isKeyBoundary(nx)) { kind = cur.value; advance(true); } }
         const computed = isP("[");
         const key = parsePropertyKey();
         const pr = mk("Property", start); pr.computed = computed; pr.key = key; pr.kind = kind === "init" ? "init" : kind;
