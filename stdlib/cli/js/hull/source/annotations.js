@@ -198,20 +198,24 @@ export function attach(ast, comments, bytes, linemap, budget, path) {
         }
         sorted.sort(function (a, b) { return a.start - b.start; });
 
-        // A physical line is a COMMENT LINE iff it has at least one comment byte and no CODE byte
-        // (a non-whitespace byte outside every comment). The terminator is excluded (U+2028/9,
-        // CRLF). A blank line has no comment byte -> not a comment line -> breaks a run.
+        // A physical line is a COMMENT LINE iff a comment covers it and it has no CODE byte (a
+        // non-whitespace byte OUTSIDE every comment). Coverage is classified BEFORE whitespace, so
+        // a whitespace-only interior line of a spanning block comment (a blank margin line, or a
+        // ` * ` line) still counts: its bytes are inside the comment. A truly empty content line
+        // (only its stripped terminator) is a comment line iff a comment spans the line interval.
+        // The terminator is excluded (U+2028/9, CRLF). An ordinary blank line outside all comments
+        // has no covered byte -> not a comment line -> breaks a run.
         function isCommentLine(L) {
             const ls = linemap[L - 1];
             const ce = lineContentEnd(L, linemap, bytes, n);
             let hasComment = false;
             for (let p1 = ls; p1 < ce; p1++) {
-                const b = bytes[p1 - 1];
-                if (isWs(b)) continue;
-                if (coveringComment(p1, sorted) >= 0) hasComment = true;
-                else return false;                            // a code byte -> not a comment line
+                if (coveringComment(p1, sorted) >= 0) { hasComment = true; continue; }   // covered (ws or not)
+                if (isWs(bytes[p1 - 1])) continue;            // uncovered whitespace -> harmless
+                return false;                                 // uncovered non-whitespace -> code
             }
-            return hasComment;
+            if (hasComment) return true;
+            return coveringComment(ls, sorted) >= 0;          // empty content line spanned by a block comment
         }
 
         // 3. walk the AST; attach the leading comment-only run to each recognized declaration.

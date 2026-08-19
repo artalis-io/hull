@@ -294,6 +294,41 @@ UTEST(js_annotations, same_line_comment_group)
     hl_js_session_destroy(s);
 }
 
+/* A whitespace-only or physically empty INTERIOR line of a spanning multi-line JSDoc is part of
+ * the comment (coverage is classified before whitespace), so it does not break the run; but the
+ * same blank line OUTSIDE the comment does break it. */
+UTEST(js_annotations, blank_interior_line)
+{
+    HlJsSession *s = hl_js_session_create(NULL);
+    ASSERT_TRUE(s != NULL);
+    /* truly empty interior line */
+    char *o = parse_str(s, "/** @query\n\n */\nconst q = 1;");
+    EXPECT_EQ(name_count(o, "query"), 3);
+    free(o); o = NULL;
+    /* spaces-only interior line (no star margin) */
+    o = parse_str(s, "/** @query\n   \n */\nconst q = 1;");
+    EXPECT_EQ(name_count(o, "query"), 3);
+    free(o); o = NULL;
+    /* margin-only interior line */
+    o = parse_str(s, "/** @query\n *\n */\nconst q = 1;");
+    EXPECT_EQ(name_count(o, "query"), 3);
+    free(o); o = NULL;
+    /* tags on either side of an empty interior line both attach */
+    o = parse_str(s, "/** @a\n\n * @b\n */\nconst q = 1;");
+    EXPECT_EQ(name_count(o, "a"), 3);
+    EXPECT_EQ(name_count(o, "b"), 3);
+    free(o); o = NULL;
+    /* the SAME empty line OUTSIDE the comment breaks attachment */
+    o = parse_str(s, "/** @query */\n\nconst q = 1;");
+    EXPECT_EQ(name_count(o, "query"), 1);
+    free(o); o = NULL;
+    /* a spaces-only line outside the comment also breaks it */
+    o = parse_str(s, "/** @query */\n   \nconst q = 1;");
+    EXPECT_EQ(name_count(o, "query"), 1);
+    free(o);
+    hl_js_session_destroy(s);
+}
+
 /* U+2028 / U+2029 / CR / CRLF between the JSDoc and the declaration are line terminators, so the
  * declaration attaches (the terminator bytes are not treated as code, and do not leak into
  * ranges/text). */

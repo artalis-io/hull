@@ -194,11 +194,17 @@ comments), independent of the token stream. Consequences:
 Attachment walk (region-based, so MULTIPLE comments sharing one physical line are all
 collected, not just one):
 
-1. Define a COMMENT LINE as a physical line that has at least one comment byte AND no
-   code byte (a non-whitespace byte outside every comment). Its line terminator is
-   excluded from the scan (see below), so a trailing CR / CRLF / U+2028 / U+2029 is
-   never mistaken for content. A blank line has no comment byte, so it is NOT a comment
-   line; a code line has a code byte, so it is not either.
+1. Define a COMMENT LINE as a physical line that a comment covers AND that has no code
+   byte (a non-whitespace byte OUTSIDE every comment). Coverage is classified BEFORE
+   whitespace: a byte inside a comment's [start, stop) counts as a comment byte whether
+   or not it is whitespace, so a whitespace-only interior line of a spanning block
+   comment (a blank margin line, or a ` * ` line) is still a comment line - it does not
+   break the run. A physically empty content line (only its stripped terminator) is a
+   comment line iff a comment spans the line interval. The line terminator is excluded
+   from the scan (see below), so a trailing CR / CRLF / U+2028 / U+2029 is never mistaken
+   for content. An ordinary blank line OUTSIDE all comments has no covered byte, so it is
+   NOT a comment line and breaks the run; a code line has a code byte, so it is not one
+   either.
 2. For each target declaration, let L be the line of its effective start (section 6).
    Walk upward while line L-1, L-2, ... is a comment line; the maximal contiguous run of
    comment lines immediately above the declaration is the region [top, L-1].
