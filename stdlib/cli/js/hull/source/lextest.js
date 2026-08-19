@@ -10,6 +10,7 @@ import { parse, __parseWithInjection } from "hull:source:parser";
 import { attach as attachAnnotations } from "hull:source:annotations";
 import { makeBudget } from "hull:source:diagnostic";
 import { resolve as resolveScopeModel } from "hull:source:scope";
+import { analyze as feAnalyze, declarationSemantics as feSemantics, scope as feScope } from "hull:source:frontend_javascript";
 
 // Structural-default lexing (the standalone convenience path).
 function run(srcBuf, path, opts) {
@@ -120,4 +121,19 @@ function runResolveScope(srcBuf, path, opts) {
     return { schema_version: 1, status: "ok", ok: m.ok, bindings: m.bindings, refs: m.refs, error: m.error };
 }
 
-globalThis.__hull_frontend = { lex: run, lexDirected: runDirected, parse: runParse, parseInject: runParseInject, reattach: runReattach, attachCorrupt: runAttachCorrupt, resolveScope: runResolveScope };
+// Frontend-adapter drivers: analyze returns the facts; semantics/scope read the bridge-private
+// id from opts (declId / unitId) and exercise the RETAINED session state.
+function runFrontendAnalyze(srcBuf, path, opts) {
+    const r = feAnalyze(new Uint8Array(srcBuf), path || "test.js", opts || {});
+    return { schema_version: 1, status: "ok", result: r };
+}
+function runFrontendSemantics(srcBuf, path, opts) {
+    const r = feSemantics(opts && opts.declId);
+    return { schema_version: 1, status: "ok", result: r };
+}
+function runFrontendScope(srcBuf, path, opts) {
+    const r = feScope(opts && opts.unitId);
+    return { schema_version: 1, status: "ok", result: r };
+}
+
+globalThis.__hull_frontend = { lex: run, lexDirected: runDirected, parse: runParse, parseInject: runParseInject, reattach: runReattach, attachCorrupt: runAttachCorrupt, resolveScope: runResolveScope, frontendAnalyze: runFrontendAnalyze, frontendSemantics: runFrontendSemantics, frontendScope: runFrontendScope };
