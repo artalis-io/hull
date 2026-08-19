@@ -42,6 +42,18 @@ static char *fe_call(HlJsSession *s, const char *method, int id, const char *key
 }
 static char *fe_sem(HlJsSession *s, int declId) { return fe_call(s, "frontendSemantics", declId, "declId"); }
 static char *fe_scope(HlJsSession *s, int unitId) { return fe_call(s, "frontendScope", unitId, "unitId"); }
+static char *fe_analyze_fail(HlJsSession *s, const char *src) {
+    char *out = NULL; size_t out_len = 0;
+    hl_js_session_analyze(s, "hull:source:lextest", "frontendAnalyzeFail",
+                          (const uint8_t *)src, strlen(src), "a.js", NULL, 0, &out, &out_len);
+    return out;
+}
+static char *fe_mutate(HlJsSession *s, const char *spec) {
+    char *out = NULL; size_t out_len = 0;
+    hl_js_session_analyze(s, "hull:source:lextest", "frontendMutate",
+                          (const uint8_t *)"", 0, "a.js", spec, strlen(spec), &out, &out_len);
+    return out;
+}
 
 /* The facts shape: status, unit_id, diagnostics, and the exact Decl shape with normalized ranges;
  * every facts range is { start, stop, line, col }. */
@@ -248,15 +260,71 @@ UTEST(js_frontend, semantics_function_class)
     hl_js_session_destroy(s2);
 }
 
-/* Corrupt-state: an unknown declId yields a js.internal error, never a wrong record. */
-UTEST(js_frontend, semantics_corrupt_state)
+/* analyze() is TRANSACTIONAL: a forced mid-collection failure returns unit_id:-1 + js.internal,
+ * leaves NO partial unit_id/decl_id resolvable, and keeps counters monotonic (ids not reused). */
+UTEST(js_frontend, analyze_transactional)
 {
     HlJsSession *s = hl_js_session_create(NULL);
     ASSERT_TRUE(s != NULL);
-    char *o = fe_sem(s, 9999);                             /* never issued */
-    EXPECT_TRUE(has(o, "\"error\""));
+    char *f = fe_analyze_fail(s, "const a = 1; const b = 2;");
+    EXPECT_TRUE(has(f, "\"status\":\"error\""));
+    EXPECT_TRUE(has(f, "\"unit_id\":-1"));
+    EXPECT_TRUE(has(f, "\"code\":\"js.internal\""));
+    free(f);
+    /* the rolled-back unit/decl (would have been unit_id 1 / decl_id 1) is NOT resolvable */
+    char *sd = fe_sem(s, 1);   EXPECT_TRUE(has(sd, "\"error\""));    free(sd);
+    char *su = fe_scope(s, 1); EXPECT_TRUE(has(su, "\"ok\":false")); free(su);
+    /* counters stayed monotonic: the next successful analyze gets a HIGHER unit_id (not the reused 1) */
+    char *o = fe_analyze(s, "const z = 1;");
+    EXPECT_TRUE(has(o, "\"unit_id\":2"));
+    EXPECT_FALSE(has(o, "\"unit_id\":1"));
+    free(o);
+    hl_js_session_destroy(s);
+}
+
+/* Corrupt-state: an unknown id, and every ISOLATED retained-identity mutation, returns exactly one
+ * js.internal error and NO plausible semantic record. */
+UTEST(js_frontend, semantics_corrupt_state)
+{
+    HlJsSession *s0 = hl_js_session_create(NULL);
+    ASSERT_TRUE(s0 != NULL);
+    char *o = fe_sem(s0, 9999);                            /* never issued */
     EXPECT_TRUE(has(o, "\"code\":\"js.internal\""));
     free(o);
+    hl_js_session_destroy(s0);
+
+    /* each: fresh session (decl_id 1), analyze, mutate the retained state, then semantics(1) */
+    struct { const char *label; const char *src; const char *spec; } cases[] = {
+        { "kind mismatch",       "const a = 1;",   "{\"declId\":1,\"declField\":\"kind\",\"declValue\":\"let\"}" },
+        { "name mismatch",       "const a = 1;",   "{\"declId\":1,\"declField\":\"name\",\"declValue\":\"wrong\"}" },
+        { "bad declarator idx",  "const a = 1;",   "{\"declId\":1,\"declField\":\"declarator_index\",\"declValue\":999}" },
+        { "bad binding path",    "const [a] = x;", "{\"declId\":1,\"declField\":\"binding_path\",\"declValue\":[{\"array_index\":99}]}" },
+        { "malformed fn body",   "function f(){}", "{\"declId\":1,\"nodeField\":\"body\",\"nodeValue\":null}" },
+        { "malformed class body","class C {}",     "{\"declId\":1,\"nodeField\":\"body\",\"nodeValue\":null}" },
+    };
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        HlJsSession *s = hl_js_session_create(NULL);
+        ASSERT_TRUE_MSG(s != NULL, cases[i].label);
+        char *a = fe_analyze(s, cases[i].src); free(a);
+        char *m = fe_mutate(s, cases[i].spec); free(m);
+        char *sem = fe_sem(s, 1);
+        EXPECT_EQ_MSG(count(sem, "\"code\":\"js.internal\""), 1, cases[i].label);   /* exactly one error */
+        EXPECT_FALSE_MSG(has(sem, "\"form\":"), cases[i].label);                     /* no live record */
+        free(sem);
+        hl_js_session_destroy(s);
+    }
+
+    /* node from ANOTHER retained unit: analyze two units, point decl_id 1's unit_id at unit 2 (its
+     * node belongs to unit 1) -> the ownership check rejects it. */
+    HlJsSession *s = hl_js_session_create(NULL);
+    ASSERT_TRUE(s != NULL);
+    char *u1 = fe_analyze(s, "const a = 1;"); free(u1);   /* unit 1, decl 1 */
+    char *u2 = fe_analyze(s, "const b = 2;"); free(u2);   /* unit 2 */
+    char *m = fe_mutate(s, "{\"declId\":1,\"declField\":\"unit_id\",\"declValue\":2}"); free(m);
+    char *sem = fe_sem(s, 1);
+    EXPECT_EQ(count(sem, "\"code\":\"js.internal\""), 1);
+    EXPECT_FALSE(has(sem, "\"form\":"));
+    free(sem);
     hl_js_session_destroy(s);
 }
 
@@ -280,10 +348,11 @@ UTEST(js_frontend, scope_capability)
     hl_js_session_destroy(s);
 }
 
-/* Bridge-private ids + lifetime: unit_id/decl_id are integers; the facts carry no AST/JSValue; a
- * fresh analyze issues fresh ids; a stale-generation id (from a closed session) does not resolve
- * against a new session. */
-UTEST(js_frontend, handles_and_lifetime)
+/* Bridge-private ids: unit_id/decl_id are integers; the facts carry no AST/JSValue; a fresh
+ * analyze issues fresh ids. NOTE: a bare decl_id is SESSION-RELATIVE (a fresh session re-issues 1),
+ * so this only proves per-session state isolation, not stale-generation (ABA) safety - the full
+ * stale guarantee is the C-owned { session_token, unit_id, decl_id } tuple, tested in Slice 6. */
+UTEST(js_frontend, handles_and_session_isolation)
 {
     HlJsSession *s = hl_js_session_create(NULL);
     ASSERT_TRUE(s != NULL);
@@ -295,16 +364,13 @@ UTEST(js_frontend, handles_and_lifetime)
     free(o);
     hl_js_session_destroy(s);
 
-    /* stale generation: analyze in session A, resolve decl_id 1 in a FRESH session B -> fails */
-    HlJsSession *a = hl_js_session_create(NULL);
-    char *oa = fe_analyze(a, "const z = 1;");
-    free(oa);
-    hl_js_session_destroy(a);                              /* closed generation */
+    /* per-session state isolation: a decl_id never issued in a fresh session is not resolvable
+     * (each session has its own module state). Full ABA stale-generation safety is Slice 6. */
     HlJsSession *b = hl_js_session_create(NULL);
-    char *stale = fe_sem(b, 1);
-    EXPECT_TRUE(has(stale, "\"error\""));                  /* fresh session: decl_id 1 not resolvable */
-    EXPECT_FALSE(has(stale, "\"form\":"));                 /* never a live record */
-    free(stale);
+    char *fresh = fe_sem(b, 1);                            /* nothing analyzed in b yet */
+    EXPECT_TRUE(has(fresh, "\"error\""));
+    EXPECT_FALSE(has(fresh, "\"form\":"));
+    free(fresh);
     hl_js_session_destroy(b);
 }
 

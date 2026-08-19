@@ -90,6 +90,12 @@ NO AST, NO JSValue, NO QuickJS pointer ever crosses. `annotations` are the Slice
 `text` renamed to `value` (matching `frontend_lua.norm_annotations`); `args`/`value` are omitted
 when absent.
 
+**`analyze` is TRANSACTIONAL.** It snapshots the id counters at entry; on ANY internal failure
+(a normalization/collection fault) it DELETES every unit/declaration this invocation added, does
+NOT reuse the issued ids (counters stay monotonic), and returns the structured js.internal result
+(`unit_id: -1`). So a partial analysis never leaves a resolvable `unit_id`/`decl_id` behind, and a
+later analysis gets strictly higher ids.
+
 ### 3a. Range normalization
 
 The parser/annotations/scope layers emit byte-only `{ start, stop }`. The ADAPTER normalizes
@@ -193,11 +199,19 @@ Records by kind:
 - **class** (`class` decl): `{ form: "class", super_class, body }` - `super_class` the extends
   expression node or null; `body` the member array.
 
-**Corrupt-state -> a Diagnostic (js.internal), never a wrong answer.** An error is returned for
-any impossible/corrupt frontend state - a missing retained node, a node whose `.type` does not
-match the declaration kind, a `declarator_index` out of range, a `binding_path` that does not
-resolve to the recorded name, a malformed params/body - never for an ordinary "no initializer",
-and never for an unsupported LOWERING construct (that belongs to the future lowerer).
+**Corrupt-state -> a Diagnostic (js.internal), never a wrong answer.** The FULL retained identity
+is re-validated (not just the structural type/path). An error is returned for any impossible/
+corrupt frontend state, never for an ordinary "no initializer" and never for an unsupported
+LOWERING construct (that belongs to the future lowerer):
+- OWNERSHIP: the retained node must belong to `r.unit_id` - each unit keeps a Set of the
+  declaration nodes retained during its own successful collection, and the node must be in THAT
+  set (not merely "some unit with that id exists").
+- value: `r.kind` in {const, let, var} AND `r.kind === node.kind`; node is a `VariableDeclaration`;
+  `declarator_index` in range; the `binding_path` resolves to the recorded name.
+- function: `r.kind === "function"`; node is a `FunctionDeclaration`; `node.id.name === r.name`;
+  `params` an array; `body` a `BlockStatement`.
+- class: `r.kind === "class"`; node is a `ClassDeclaration`; `node.id.name === r.name`; `body` an
+  ARRAY (a malformed body is an error, never silently coerced to `[]`).
 Revalidation FOLLOWS the exact `binding_path` pattern EDGES from the declarator's id
 (array_index -> `elements[i]`; property_index -> `properties[j]`, continuing into `.value` for a
 Property or remaining at a RestElement; rest -> the RestElement's `.argument`; assignment -> the
@@ -244,6 +258,15 @@ deterministic STALE diagnostic - it never dereferences freed QuickJS state and n
 dead id as live. WITHIN a live session, an unknown/never-issued `decl_id`/`unit_id` (a desync)
 yields a js.internal-shaped error from the adapter (fail closed). The adapter never frees its own
 state mid-session.
+
+**Stale safety is the WHOLE tuple, not a bare `decl_id`.** A bare `decl_id`/`unit_id` is
+session-RELATIVE: a fresh session re-issues `1`, `2`, ... So the JS adapter alone can only prove
+per-session STATE ISOLATION (an id never issued in THIS session is unresolvable). True
+stale-generation (ABA) safety - session A issues `decl_id 1`, A is destroyed, session B reuses the
+same counter and also issues `decl_id 1`, and a resolution carrying A's old token + `1` must be
+REJECTED - is a property of the full C-owned `{ session_token, unit_id, decl_id }` tuple with a
+MONOTONIC / generation-tagged `session_token` (above). That ABA case is tested in Slice 6, where
+the tuple + the session manager exist; Slice 5 tests only the per-session isolation it owns.
 
 ## 7. Transport validation (reaffirmed; enforced by the session)
 
@@ -317,14 +340,20 @@ A new test_js_frontend suite driving the adapter through the driver:
   -> a `[{property_index:0}]` and rest `[{property_index:1},{rest:true}]`; a NESTED/default object
   rest revalidates through the exact edges; all names in one declarator share its initializer.
 - **declaration_semantics function/class**: params/body / super_class/body recovered exactly.
-- **corrupt-state**: an unknown declId, a desynced node/kind, a bad declarator_index -> a
-  js.internal-shaped error, never a wrong record; never an error for "no initializer".
+- **transactional analyze**: a forced mid-collection failure returns unit_id:-1 + js.internal,
+  leaves no partial unit_id/decl_id resolvable, and keeps counters monotonic (the next analyze
+  gets a higher unit_id).
+- **corrupt-state**: an unknown declId, and each ISOLATED retained-identity mutation - kind
+  mismatch, name mismatch, bad declarator_index, bad binding_path, a node from another retained
+  unit, a malformed function body, a malformed class body - each returns exactly one js.internal
+  and no live record; never an error for "no initializer".
 - **scope capability**: `scope(unitId)` returns the Slice-4 model for a valid unit; an unknown
   unitId -> an error.
-- **handles / lifetime**: decl_id/unit_id are integers; the facts carry no AST/handle-to-JSValue;
-  a fresh analyze issues fresh ids; a stale/unknown id fails closed; a STALE-GENERATION resolution
-  (a decl_id/unit_id of a closed session) deterministically reports stale, never live (the two
-  handle layers stay separate - decl_id is never the model handle).
+- **handles / session isolation**: decl_id/unit_id are integers; the facts carry no
+  AST/handle-to-JSValue; a fresh analyze issues fresh ids; an id never issued in THIS session fails
+  closed. (The two handle layers stay separate - decl_id is never the model handle. The full
+  stale-generation ABA test lives in Slice 6, where the C session_token tuple exists - see
+  section 6.)
 - **transport / never-raise**: a recovered syntax-error source yields status:"error" + partial
   declarations (no js.internal); a forced internal defect yields a js.internal result; the
   return is always JSON.

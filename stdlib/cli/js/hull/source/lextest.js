@@ -10,7 +10,8 @@ import { parse, __parseWithInjection } from "hull:source:parser";
 import { attach as attachAnnotations } from "hull:source:annotations";
 import { makeBudget } from "hull:source:diagnostic";
 import { resolve as resolveScopeModel } from "hull:source:scope";
-import { analyze as feAnalyze, declarationSemantics as feSemantics, scope as feScope } from "hull:source:frontend_javascript";
+import { analyze as feAnalyze, declarationSemantics as feSemantics, scope as feScope,
+         __analyzeWithFailure as feAnalyzeFail, __mutate as feMutate } from "hull:source:frontend_javascript";
 
 // Structural-default lexing (the standalone convenience path).
 function run(srcBuf, path, opts) {
@@ -135,5 +136,14 @@ function runFrontendScope(srcBuf, path, opts) {
     const r = feScope(opts && opts.unitId);
     return { schema_version: 1, status: "ok", result: r };
 }
+// Test-only: force a mid-collection analyze failure (transactional-rollback proof).
+function runFrontendAnalyzeFail(srcBuf, path, opts) {
+    const r = feAnalyzeFail(new Uint8Array(srcBuf), path || "test.js", opts || {});
+    return { schema_version: 1, status: "ok", result: r };
+}
+// Test-only: mutate a retained declaration's state (corrupt-state boundary proof).
+function runFrontendMutate(srcBuf, path, opts) {
+    return { schema_version: 1, status: "ok", result: feMutate(opts || {}) };
+}
 
-globalThis.__hull_frontend = { lex: run, lexDirected: runDirected, parse: runParse, parseInject: runParseInject, reattach: runReattach, attachCorrupt: runAttachCorrupt, resolveScope: runResolveScope, frontendAnalyze: runFrontendAnalyze, frontendSemantics: runFrontendSemantics, frontendScope: runFrontendScope };
+globalThis.__hull_frontend = { lex: run, lexDirected: runDirected, parse: runParse, parseInject: runParseInject, reattach: runReattach, attachCorrupt: runAttachCorrupt, resolveScope: runResolveScope, frontendAnalyze: runFrontendAnalyze, frontendSemantics: runFrontendSemantics, frontendScope: runFrontendScope, frontendAnalyzeFail: runFrontendAnalyzeFail, frontendMutate: runFrontendMutate };
