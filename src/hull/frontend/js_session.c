@@ -189,13 +189,28 @@ static char *precompile_module_normalize(JSContext *ctx, const char *base_name,
     return js_strdup(ctx, name);      /* absolute `hull:*` specifiers -- identity */
 }
 
+/* COMPILE_ONLY-eval a module's embedded source. QuickJS's tokenizer reads ONE byte past the
+ * given length expecting a NUL sentinel; the xxd-embedded arrays are exactly `len` bytes with
+ * NO terminator, so copy into a NUL-terminated buffer first -- otherwise the parser reads the
+ * adjacent .rodata symbol (undefined; manifests as a bogus "unexpected character" at EOF). */
+static JSValue eval_module_compile_only(JSContext *ctx, const char *name,
+                                        const unsigned char *data, unsigned int len)
+{
+    char *buf = malloc((size_t)len + 1);
+    if (!buf) return JS_ThrowOutOfMemory(ctx);
+    memcpy(buf, data, len);
+    buf[len] = '\0';
+    JSValue f = JS_Eval(ctx, buf, len, name, JS_EVAL_TYPE_MODULE | JS_EVAL_FLAG_COMPILE_ONLY);
+    free(buf);
+    return f;
+}
+
 static JSModuleDef *precompile_module_loader(JSContext *ctx, const char *module_name, void *opaque)
 {
     (void)opaque;
     for (const HlEntry *e = hl_stdlib_js_cli_entries; e->name; e++) {
         if (strcmp(e->name, module_name) == 0) {
-            JSValue f = JS_Eval(ctx, (const char *)e->data, e->len, module_name,
-                                JS_EVAL_TYPE_MODULE | JS_EVAL_FLAG_COMPILE_ONLY);
+            JSValue f = eval_module_compile_only(ctx, module_name, e->data, e->len);
             if (JS_IsException(f)) return NULL;   /* pending exception is the syntax error */
             JSModuleDef *md = (JSModuleDef *)JS_VALUE_GET_PTR(f);
             JS_FreeValue(ctx, f);
@@ -218,13 +233,16 @@ static int precompile_bundle(HlJsSession *s)
     if (!s->mods) return -1;
     s->mod_count = 0;
 
-    /* The compiler context uses generous DEFAULT limits, decoupled from the (possibly
-     * tiny, test-chosen) session limits, so precompiling the bundle never trips them. */
+    /* The compiler context uses generous limits, decoupled from the (possibly tiny,
+     * test-chosen) session limits, so precompiling the trusted bundle never trips them. The
+     * stack is set above the session default because precompile runs from a deep C stack
+     * (create <- caller) and COMPILE_ONLY-parses the whole bundle recursively; a bounded but
+     * roomy 4 MiB is safe on the main / tool-VM thread. */
     JSRuntime *crt = JS_NewRuntime();
     if (!crt) return -1;
     HlJsSessionLimits def = HL_JS_SESSION_LIMITS_DEFAULT;
     JS_SetMemoryLimit(crt, def.max_heap_bytes);
-    JS_SetMaxStackSize(crt, def.max_stack_bytes);
+    JS_SetMaxStackSize(crt, (size_t)4 * 1024 * 1024);
     JSContext *cctx = JS_NewContextRaw(crt);
     if (!cctx) { JS_FreeRuntime(crt); return -1; }
     JS_AddIntrinsicBaseObjects(cctx);
@@ -236,8 +254,7 @@ static int precompile_bundle(HlJsSession *s)
 
     int rc = 0;
     for (const HlEntry *e = hl_stdlib_js_cli_entries; e->name; e++) {
-        JSValue f = JS_Eval(cctx, (const char *)e->data, e->len, e->name,
-                            JS_EVAL_TYPE_MODULE | JS_EVAL_FLAG_COMPILE_ONLY);
+        JSValue f = eval_module_compile_only(cctx, e->name, e->data, e->len);
         if (JS_IsException(f)) {
             JS_FreeValue(cctx, JS_GetException(cctx));
             JS_FreeValue(cctx, f);

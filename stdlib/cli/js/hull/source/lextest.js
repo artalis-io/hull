@@ -6,6 +6,7 @@
 // entry in a later slice.
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { lex, createTokenizer } from "hull:source:lexer";
+import { parse } from "hull:source:parser";
 
 // Structural-default lexing (the standalone convenience path).
 function run(srcBuf, path, opts) {
@@ -28,4 +29,12 @@ function runDirected(srcBuf, path, opts) {
     return { schema_version: 1, status: "ok", tokens: tokens, comments: tk.comments, diagnostics: tk.diagnostics };
 }
 
-globalThis.__hull_frontend = { lex: run, lexDirected: runDirected };
+// Parse to a SourceUnit (drives createTokenizer with grammatical slash goals).
+function runParse(srcBuf, path, opts) {
+    const o = { path: path || "test.js" };
+    if (opts && opts.maxDepth !== undefined) o.maxDepth = opts.maxDepth;
+    const u = parse(new Uint8Array(srcBuf), o);
+    return { schema_version: 1, status: "ok", ast: u.ast, comments: u.comments, diagnostics: u.diagnostics, valid: u.valid };
+}
+
+globalThis.__hull_frontend = { lex: run, lexDirected: runDirected, parse: runParse };
