@@ -286,7 +286,12 @@ static int walk(const char *dir, PathVec *out)
     if (!d) return -1;
     struct dirent *e;
     int rc = 0;
-    while ((e = readdir(d)) != NULL) {
+    for (;;) {
+        /* readdir returns NULL for BOTH end-of-directory and error; reset errno first so the
+         * two are distinguishable. A NULL with errno != 0 is a traversal failure -> fail closed. */
+        errno = 0;
+        e = readdir(d);
+        if (!e) { if (errno != 0) rc = -1; break; }
         if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
         char path[4096];
         int k = snprintf(path, sizeof(path), "%s/%s", dir, e->d_name);
@@ -301,7 +306,8 @@ static int walk(const char *dir, PathVec *out)
             if (pv_push(out, path) != 0) { rc = -1; break; }
         }
     }
-    closedir(d);
+    /* Propagate a close failure only if the walk itself was otherwise clean. */
+    if (closedir(d) != 0 && rc == 0) rc = -1;
     return rc;
 }
 
@@ -327,6 +333,31 @@ static char *read_full(const char *path, size_t *out_len)
     if (got != n) { free(buf); return NULL; }                    /* short read -> fail */
     buf[n] = '\0'; *out_len = n;
     return buf;
+}
+
+/* The enumeration MUST fail closed, never report a partial success as a clean walk. This
+ * exercises the reachable failure modes directly: opendir on a missing path, opendir on a
+ * regular file (ENOTDIR), and opendir on an unreadable directory (EACCES). A mid-iteration
+ * readdir() error (EIO / ENOMEM) cannot be injected on a real directory without a syscall-level
+ * mock (LD_PRELOAD / FUSE), which is unavailable in this unit harness; walk() resets errno
+ * before each readdir and returns -1 on a NULL-with-errno, resolving the end-of-directory vs
+ * error ambiguity, and propagates a closedir() failure when the walk was otherwise clean. */
+UTEST(js_conformance, enumeration_fail_closed)
+{
+    PathVec pv = {0};
+    EXPECT_EQ(walk("stdlib/js/hull/does-not-exist-xyz-123", &pv), -1);   /* opendir ENOENT */
+    EXPECT_EQ(walk("stdlib/js/hull/template.js", &pv), -1);              /* opendir ENOTDIR (a file) */
+    if (geteuid() != 0) {                                                /* root bypasses perms */
+        const char *nd = "build/.conf_noperm_dir";
+        rmdir(nd);
+        if (mkdir(nd, 0700) == 0 && chmod(nd, 0) == 0) {
+            EXPECT_EQ(walk(nd, &pv), -1);                                /* opendir EACCES */
+            chmod(nd, 0700);
+        }
+        rmdir(nd);
+    }
+    EXPECT_EQ((int)pv.len, 0);                                           /* no partial results banked */
+    pv_free(&pv);
 }
 
 UTEST(js_conformance, repo_corpus)
