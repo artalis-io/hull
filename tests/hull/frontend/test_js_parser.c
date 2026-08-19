@@ -402,54 +402,62 @@ UTEST(js_parser, interleaved_diagnostic_budget)
     hl_js_session_destroy(s);
 }
 
-/* Blocker #3 -- an ORDINARY frontend exception whose message merely CONTAINS a resource phrase
- * is contained as js.internal (rc 0). Classification is by error TYPE, not message text. */
-UTEST(js_parser, ordinary_exception_with_resource_text_is_contained)
+/* Blocker #3 -- resource-ness is NON-FORGEABLE. No JS-observable property of the thrown error
+ * (its .name or its .message) can promote an internal defect to a resource limit. Every spoof
+ * -- an ordinary Error / TypeError whose message contains a resource phrase, AND a MANUALLY
+ * RENAMED error whose .name is exactly "InternalError" (the type QuickJS uses for genuine
+ * breaches) -- is contained as js.internal (rc 0), never js.limit.*. */
+UTEST(js_parser, spoofed_resource_errors_are_contained)
 {
     HlJsSession *s = hl_js_session_create(NULL);
     ASSERT_TRUE(s != NULL);
-    const char *specs[] = { "{\"inject\":\"error-out of memory\"}",
-                            "{\"inject\":\"type-stack overflow\"}",
-                            "{\"inject\":\"error-interrupted\"}" };
-    for (int i = 0; i < 3; i++) {
+    const char *specs[] = {
+        "{\"inject\":\"error-out of memory\"}",     /* arbitrary resource phrase, ordinary Error */
+        "{\"inject\":\"type-stack overflow\"}",      /* arbitrary resource phrase, TypeError */
+        "{\"inject\":\"error-interrupted\"}",        /* arbitrary resource phrase */
+        "{\"inject\":\"internal-out of memory\"}",   /* .name spoofed to "InternalError" + heap phrase */
+        "{\"inject\":\"internal-stack overflow\"}",  /* .name spoofed to "InternalError" + stack phrase */
+    };
+    for (int i = 0; i < 5; i++) {
         char *out = NULL;
         int rc = analyze_opts(s, "parseInject", "const x = 1;", specs[i], &out);
-        ASSERT_EQ(rc, 0);                                 /* contained: a SourceUnit, not an exception */
+        ASSERT_EQ(rc, 0);                                 /* contained: a SourceUnit, not host failure */
         EXPECT_TRUE(has(out, "\"status\":\"ok\""));
         EXPECT_TRUE(has(out, "\"code\":\"js.internal\""));
-        EXPECT_FALSE(has(out, "\"code\":\"js.limit."));    /* NOT mis-classified as a resource limit */
+        EXPECT_FALSE(has(out, "\"code\":\"js.limit."));    /* NEVER promoted to a resource limit */
         EXPECT_TRUE(has(out, "\"valid\":false"));
         free(out);
     }
     hl_js_session_destroy(s);
 }
 
-/* Blocker #3 -- a HOST resource error (InternalError-typed, as QuickJS raises) is re-thrown by
- * the wrapper and host-classified as js.limit.* (rc -1), never swallowed as js.internal. */
-UTEST(js_parser, host_resource_error_is_rethrown)
-{
-    HlJsSession *s = hl_js_session_create(NULL);
-    ASSERT_TRUE(s != NULL);
-    char *out = NULL;
-    int rc = analyze_opts(s, "parseInject", "const x = 1;", "{\"inject\":\"internal-out of memory\"}", &out);
-    ASSERT_EQ(rc, -1);                                    /* propagated to the host, indeterminate */
-    EXPECT_TRUE(has(out, "\"code\":\"js.limit.heap\""));
-    EXPECT_FALSE(has(out, "\"code\":\"js.internal\""));
-    free(out); out = NULL;
-    rc = analyze_opts(s, "parseInject", "const x = 1;", "{\"inject\":\"internal-stack overflow\"}", &out);
-    ASSERT_EQ(rc, -1);
-    EXPECT_TRUE(has(out, "\"code\":\"js.limit.stack\""));
-    free(out);
-    hl_js_session_destroy(s);
-}
-
-/* Blocker #3 -- GENUINE resource breaches DURING parsing stay host-classified through the real
- * wrapper: a real stack overflow (tiny stack + deep nesting, depth guard raised) surfaces as
- * js.limit.stack; a real interrupt (tiny instruction budget) as js.limit.instructions. */
+/* Blocker #3 -- GENUINE resource breaches DURING parsing stay host-classified from AUTHORITATIVE
+ * session state (self-enforcing allocator / stack guard / interrupt counter), not the error
+ * object: a real heap breach (small heap + large source) -> js.limit.heap; a real stack overflow
+ * (deep nesting, depth guard lifted) -> js.limit.stack; a real interrupt (tiny budget) ->
+ * js.limit.instructions. */
 UTEST(js_parser, genuine_resource_breach_stays_host_classified)
 {
-    /* genuine stack overflow: 128 KiB stack, ~20k nested parens, parser depth guard lifted so
-     * the native stack (not maxDepth) is what gives way. */
+    /* genuine heap breach: an 8 MiB heap loads the parser but cannot hold the AST for a large
+     * source, so the self-enforcing allocator refuses -> oom_hit -> js.limit.heap. */
+    HlJsSessionLimits hlim = (HlJsSessionLimits)HL_JS_SESSION_LIMITS_DEFAULT;
+    hlim.max_heap_bytes = (size_t)8 * 1024 * 1024;
+    HlJsSession *sh = hl_js_session_create(&hlim);
+    ASSERT_TRUE(sh != NULL);
+    const int decls = 80000;
+    char *hsrc = (char *)malloc((size_t)decls * 48 + 16);   /* "const w79999 = [79999,...];\n" ~= 42 bytes */
+    ASSERT_TRUE(hsrc != NULL);
+    { int k = 0; for (int i = 0; i < decls; i++) k += sprintf(hsrc + k, "const w%d = [%d,%d,%d];\n", i, i, i, i); hsrc[k] = '\0'; }
+    char *oh = NULL;
+    int rch = analyze_opts(sh, "parse", hsrc, NULL, &oh);
+    free(hsrc);
+    ASSERT_EQ(rch, -1);
+    EXPECT_TRUE(has(oh, "\"code\":\"js.limit.heap\""));
+    free(oh);
+    hl_js_session_destroy(sh);
+
+    /* genuine stack overflow: 128 KiB stack guard, ~20k nested parens, parser depth guard lifted
+     * so the machine stack (not maxDepth) is what gives way. */
     HlJsSessionLimits lim = (HlJsSessionLimits)HL_JS_SESSION_LIMITS_DEFAULT;
     lim.max_stack_bytes = (size_t)128 * 1024;
     HlJsSession *s = hl_js_session_create(&lim);
@@ -475,7 +483,7 @@ UTEST(js_parser, genuine_resource_breach_stays_host_classified)
     HlJsSession *s2 = hl_js_session_create(&lim2);
     ASSERT_TRUE(s2 != NULL);
     const int stmts = 1000;
-    char *big = (char *)malloc((size_t)stmts * 24 + 16);
+    char *big = (char *)malloc((size_t)stmts * 32 + 16);   /* "const v999 = 999;\n" ~= 18 bytes */
     ASSERT_TRUE(big != NULL);
     { int k = 0; for (int i = 0; i < stmts; i++) k += sprintf(big + k, "const v%d = %d;\n", i, i); big[k] = '\0'; }
     char *out2 = NULL;

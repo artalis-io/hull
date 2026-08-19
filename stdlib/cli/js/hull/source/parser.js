@@ -47,24 +47,22 @@ const BINPREC = {
 // A validated nonnegative-integer option, else the default.
 function nnInt(x, dflt) { return (typeof x === "number" && isFinite(x) && x >= 0 && Math.floor(x) === x) ? x : dflt; }
 
-// Whether a caught exception is a HOST resource termination that must stay host-classified
-// (js.limit.*) rather than being contained as an internal defect. QuickJS raises genuine
-// stack-overflow / out-of-memory as an InternalError (verified: e.name === "InternalError");
-// the instruction-limit interrupt is uncatchable and never reaches this catch at all. We key on
-// the error TYPE, not the message text, so an ordinary frontend exception whose message merely
-// contains "stack overflow" / "out of memory" is still contained.
-function isHostResourceError(e) {
-    return e !== null && e !== undefined && e.name === "InternalError";
-}
-
 // The protected boundary shared by parse() and the test-only probe. Runs `body()` (which
-// produces a SourceUnit) and ENFORCES "never raises": an internal defect becomes a SourceUnit
-// with a js.internal diagnostic; a host resource termination is re-thrown for the host session.
+// produces a SourceUnit) and ENFORCES "never raises" by containing EVERY catchable exception as
+// a SourceUnit with a js.internal diagnostic.
+//
+// It deliberately does NOT inspect e.name / e.message to decide "is this a resource breach?" --
+// that signal is forgeable (any script can name an error "InternalError" and write "out of
+// memory" into its .message). Resource discrimination is HOST-owned and authoritative: the
+// session refuses over-limit allocations in its own allocator (recording heap / machine-stack
+// markers) and raises an uncatchable error when the instruction budget is spent. A spoofed
+// error is an ordinary CATCHABLE throw this handler contains as js.internal; a genuine breach
+// is either uncatchable (never reaches here) or, having tripped a host marker, is re-classified
+// js.limit.* by the session AFTER this returns -- from its markers, never from the error object.
 function protectedParse(body, opts) {
     try {
         return body();
     } catch (e) {
-        if (isHostResourceError(e)) throw e;                 // host-classified, indeterminate
         const msg = (e && e.message !== undefined) ? String(e.message) : String(e);
         const p = (opts && opts.path) || null;
         return {
