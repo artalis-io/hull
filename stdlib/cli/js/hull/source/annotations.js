@@ -37,6 +37,21 @@ function lineOf(starts, off) {
     return lo + 1;
 }
 
+// 1-based exclusive CONTENT end of physical line L: linemap's next-line-start minus the trailing
+// line terminator, so U+2028/U+2029 (which linemap recognizes but isWs does not) and CR/CRLF are
+// never treated as content bytes for margin/trailing-whitespace/comment-only processing.
+function lineContentEnd(L, linemap, bytes, n) {
+    const ls = linemap[L - 1];
+    const le = (L < linemap.length ? linemap[L] : n + 1);   // 1-based exclusive, past the terminator
+    if (le <= ls) return le;
+    const last = le - 2;                                     // 0-based index of the span's last byte
+    const b = bytes[last];
+    if (b === 0x0a) { return (last - 1 >= ls - 1 && bytes[last - 1] === 0x0d) ? le - 2 : le - 1; }   // CRLF / LF
+    if (b === 0x0d) { return le - 1; }                      // lone CR
+    if ((b === 0xa8 || b === 0xa9) && last - 2 >= ls - 1 && bytes[last - 1] === 0x80 && bytes[last - 2] === 0xe2) return le - 3;   // U+2028 / U+2029
+    return le;                                               // last line, no terminator
+}
+
 // Decode a [start1, stop1) 1-based byte span to a string (UTF-8, ASCII fast path; an invalid
 // sequence yields U+FFFD, matching the lexer). Ranges are byte offsets, never derived from this.
 function decodeSpan(bytes, start1, stop1) {
@@ -104,7 +119,7 @@ export function scanBlock(comment, bytes, linemap) {
     const lines = [];
     for (let L = firstLine; L <= lastLine; L++) {
         let ls = linemap[L - 1];
-        let le = (L < linemap.length ? linemap[L] : n + 1);
+        let le = lineContentEnd(L, linemap, bytes, n);       // terminator-stripped (handles U+2028/9, CRLF)
         if (ls < intStart) ls = intStart;
         if (le > intEnd) le = intEnd;
         if (ls >= le) { lines.push({ open: false, at: ls, end: ls }); continue; }
@@ -139,76 +154,80 @@ export function scanBlock(comment, bytes, linemap) {
     return out;
 }
 
-// True iff every physical line in [sLine, eLine] is COMMENT-ONLY: each non-whitespace byte is
-// inside some comment's [start, stop). `sorted` is the comments sorted by start (non-overlapping).
-function insideAnyComment(p1, sorted) {
+// The 1-based comment covering byte p1, or -1, via binary search over `sorted` (comments sorted
+// by start, non-overlapping). Returns the index for reuse; caller checks p1 < sorted[idx].stop.
+function coveringComment(p1, sorted) {
     let lo = 0, hi = sorted.length - 1, idx = -1;
     while (lo <= hi) { const mid = (lo + hi) >> 1; if (sorted[mid].start <= p1) { idx = mid; lo = mid + 1; } else hi = mid - 1; }
-    return idx >= 0 && p1 < sorted[idx].stop;
-}
-function linesAreCommentOnly(sLine, eLine, sorted, bytes, linemap, n) {
-    for (let L = sLine; L <= eLine; L++) {
-        const ls = linemap[L - 1];
-        const le = (L < linemap.length ? linemap[L] : n + 1);
-        for (let p1 = ls; p1 < le; p1++) {
-            const b = bytes[p1 - 1];
-            if (isWs(b)) continue;
-            if (!insideAnyComment(p1, sorted)) return false;
-        }
-    }
-    return true;
+    return (idx >= 0 && p1 < sorted[idx].stop) ? idx : -1;
 }
 
 // Scan every jsdoc comment into comment.annotationList, then attach leading runs to declaration
-// targets. Best-effort + hardened: an internal defect emits js.internal via `budget` (keeps the
-// AST); malformed tag content never does.
+// targets. Best-effort + hardened: the FIRST internal defect (a rejected declaration/comment
+// range or an attach exception) emits EXACTLY ONE js.internal via `budget`, keeps the AST, and
+// ABORTS the rest of attachment (a latch + a sentinel throw). Malformed tag content never does.
 export function attach(ast, comments, bytes, linemap, budget, path) {
     const n = bytes.length;
-    // `where` is any object carrying a flat start/stop (an AST node or a comment); null if absent.
-    function emitInternal(msg, where) {
-        const r = (where && typeof where.start === "number" && typeof where.stop === "number") ? { start: where.start, stop: where.stop } : null;
-        budget.push("error", "js.internal", "annotation attachment: " + msg, r);
+    let failed = false;                                       // single-internal latch
+    const ABORT = {};                                         // sentinel: an already-emitted abort
+    function fail(msg, where) {
+        if (!failed) {
+            failed = true;
+            const r = (where && typeof where.start === "number" && typeof where.stop === "number") ? { start: where.start, stop: where.stop } : null;
+            budget.push("error", "js.internal", "annotation attachment: " + msg, r);
+        }
+        throw ABORT;
     }
     try {
         if (!ast || typeof ast !== "object" || !Array.isArray(comments)) return;   // non-target shape: skip
 
-        // 1. scan jsdoc comments; a broken lexer range on a jsdoc comment is an internal defect.
+        // 1. scan jsdoc comments into their own annotationList. A broken lexer range is an
+        //    internal defect: abort WITHOUT indexing the rejected comment.
         for (let i = 0; i < comments.length; i++) {
             const c = comments[i];
             if (!c || c.kind !== "jsdoc") continue;
-            if (typeof c.start !== "number" || typeof c.stop !== "number" || c.start < 1 || c.stop < c.start || c.stop > n + 1) {
-                emitInternal("jsdoc comment has invalid range", c);
-                c.annotationList = [];
-                continue;
-            }
+            if (typeof c.start !== "number" || typeof c.stop !== "number" || c.start < 1 || c.stop < c.start || c.stop > n + 1) fail("jsdoc comment has invalid range", c);
             c.annotationList = scanBlock(c, bytes, linemap);
         }
 
-        // 2. index participating comments (all their lines comment-only) by end line.
+        // 2. comments sorted by start (non-overlapping), for coverage + source-order collection.
         const sorted = [];
         for (let i = 0; i < comments.length; i++) {
             const c = comments[i];
-            if (c && typeof c.start === "number" && typeof c.stop === "number" && c.start >= 1 && c.stop >= c.start) sorted.push(c);
+            if (c && typeof c.start === "number" && typeof c.stop === "number" && c.start >= 1 && c.stop >= c.start && c.stop <= n + 1) sorted.push(c);
         }
         sorted.sort(function (a, b) { return a.start - b.start; });
-        const byEndLine = new Map();
-        for (let i = 0; i < sorted.length; i++) {
-            const c = sorted[i];
-            const sLine = lineOf(linemap, c.start);
-            const eLine = lineOf(linemap, c.stop - 1);
-            if (linesAreCommentOnly(sLine, eLine, sorted, bytes, linemap, n)) byEndLine.set(eLine, { startLine: sLine, comment: c });
+
+        // A physical line is a COMMENT LINE iff it has at least one comment byte and no CODE byte
+        // (a non-whitespace byte outside every comment). The terminator is excluded (U+2028/9,
+        // CRLF). A blank line has no comment byte -> not a comment line -> breaks a run.
+        function isCommentLine(L) {
+            const ls = linemap[L - 1];
+            const ce = lineContentEnd(L, linemap, bytes, n);
+            let hasComment = false;
+            for (let p1 = ls; p1 < ce; p1++) {
+                const b = bytes[p1 - 1];
+                if (isWs(b)) continue;
+                if (coveringComment(p1, sorted) >= 0) hasComment = true;
+                else return false;                            // a code byte -> not a comment line
+            }
+            return hasComment;
         }
 
-        // 3. walk the AST; attach a leading run to each recognized declaration target.
+        // 3. walk the AST; attach the leading comment-only run to each recognized declaration.
         function attachRun(node, effStart) {
             const declLine = lineOf(linemap, effStart);
-            const run = [];
-            let target = declLine - 1;
-            while (byEndLine.has(target)) { const info = byEndLine.get(target); run.push(info.comment); target = info.startLine - 1; }
-            if (run.length === 0) return;
+            let top = declLine;
+            while (top - 1 >= 1 && isCommentLine(top - 1)) top--;   // maximal contiguous comment region above
+            if (top === declLine) return;
+            // Every comment that STARTS in [top, declLine-1] contributes, in source order; ALL
+            // comments on a shared line are collected (fixes same-line comment-group loss).
             const list = [], byName = {};
-            for (let i = run.length - 1; i >= 0; i--) {           // top comment first
-                const c = run[i];
+            for (let i = 0; i < sorted.length; i++) {
+                const c = sorted[i];
+                const sl = lineOf(linemap, c.start);
+                if (sl < top) continue;
+                if (sl > declLine - 1) break;                 // sorted by start -> no later comment qualifies
                 const tags = (c.kind === "jsdoc" && Array.isArray(c.annotationList)) ? c.annotationList : [];
                 for (let t = 0; t < tags.length; t++) { const a = tags[t]; list.push(a); if (byName[a.name] === undefined) byName[a.name] = a; }
             }
@@ -224,13 +243,10 @@ export function attach(ast, comments, bytes, linemap, budget, path) {
             if (!node || typeof node !== "object") return;
             const t = node.type;
             if (isTarget(t)) {
-                if (badRange(node)) {
-                    emitInternal("declaration target has invalid range", node);        // recognized target must satisfy the invariant
-                } else {
-                    const isExportInner = parent && (parent.type === "ExportNamedDeclaration" || parent.type === "ExportDefaultDeclaration")
-                        && parent.declaration === node && typeof parent.start === "number";
-                    attachRun(node, isExportInner ? parent.start : node.start);
-                }
+                if (badRange(node)) fail("declaration target has invalid range", node);   // recognized target must satisfy the invariant
+                const isExportInner = parent && (parent.type === "ExportNamedDeclaration" || parent.type === "ExportDefaultDeclaration")
+                    && parent.declaration === node && typeof parent.start === "number";
+                attachRun(node, isExportInner ? parent.start : node.start);
             }
             for (const kk in node) {
                 if (kk === "start" || kk === "stop" || kk === "annotations" || kk === "annotationList") continue;
@@ -241,7 +257,7 @@ export function attach(ast, comments, bytes, linemap, budget, path) {
         }
         walk(ast, null);
     } catch (e) {
-        const msg = (e && e.message !== undefined) ? String(e.message) : String(e);
-        budget.push("error", "js.internal", "annotation attachment failed: " + msg, null);
+        if (e === ABORT) return;                              // already emitted exactly one js.internal
+        if (!failed) { failed = true; const msg = (e && e.message !== undefined) ? String(e.message) : String(e); budget.push("error", "js.internal", "annotation attachment failed: " + msg, null); }
     }
 }

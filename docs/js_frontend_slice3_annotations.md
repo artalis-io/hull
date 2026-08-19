@@ -191,20 +191,35 @@ comments), independent of the token stream. Consequences:
 - `x = 1; /** @n */` : the line has the code `x = 1;`, so the JSDoc does not participate
   (a trailing comment never attaches).
 
-Attachment walk, mirroring annotations.lua:119-143 with the strengthened predicate:
+Attachment walk (region-based, so MULTIPLE comments sharing one physical line are all
+collected, not just one):
 
-1. Index every PARTICIPATING comment (all its lines comment-only) by the line its end
-   (`*/`) falls on.
+1. Define a COMMENT LINE as a physical line that has at least one comment byte AND no
+   code byte (a non-whitespace byte outside every comment). Its line terminator is
+   excluded from the scan (see below), so a trailing CR / CRLF / U+2028 / U+2029 is
+   never mistaken for content. A blank line has no comment byte, so it is NOT a comment
+   line; a code line has a code byte, so it is not either.
 2. For each target declaration, let L be the line of its effective start (section 6).
-   Walk upward: while a participating comment ENDS on line L-1, include it and continue
-   from that comment's START line minus one. Stop at the first line with no
-   participating comment ending on it.
-3. The run's jsdoc comments contribute their @tags (source order, top comment first,
-   top tag first) to annotationList; annotations indexes first-by-name.
+   Walk upward while line L-1, L-2, ... is a comment line; the maximal contiguous run of
+   comment lines immediately above the declaration is the region [top, L-1].
+3. Every comment that STARTS in [top, L-1] contributes, in source order (comments are
+   sorted by start); its jsdoc tags go to annotationList (top comment first, top tag
+   first), annotations indexes first-by-name. Because collection is by "starts in the
+   region" rather than "the one comment ending on a line", two JSDoc blocks, or a JSDoc
+   plus an ordinary comment, sharing one line are all collected.
 
-A blank line breaks the run (step 2 stops), and a code line breaks the run (its line is
-not comment-only, so no participating comment ends there). Both follow from "the
-immediately-preceding line must carry a participating comment".
+A blank line breaks the run (it is not a comment line, so the upward walk stops), and a
+code line breaks it (`/** @foo */ doThing();` makes that line a code line, so it is not
+in any region).
+
+**Line terminators.** The linemap recognizes LF / CR / CRLF and U+2028 / U+2029 as line
+breaks, but a byte-level whitespace test only knows ASCII. So each physical line's
+CONTENT end is computed as the linemap's next-line-start MINUS the trailing terminator
+(1 byte for LF / CR, 2 for CRLF, 3 for the U+2028 / U+2029 UTF-8 sequence). Every
+margin / trailing-whitespace / comment-only scan (both the run detection above and the
+per-line scan in scanBlock) runs over the terminator-stripped content, so a U+2028
+between the JSDoc and the declaration is a clean break (not code), and a terminator
+inside a block never leaks into a tag's range / raw / text.
 
 ## 6. Exports - wrapper attachment
 
@@ -334,13 +349,15 @@ Two distinct failure classes:
   the block, a prose @): NOT an internal failure. Handled by the deterministic,
   documented fallbacks in section 3.2 (retain the whole raw tag; unmatched group -> text;
   invalid UTF-8 already js.syntax from the lexer). No js.internal.
-- An UNEXPECTED INTERNAL defect: an AST node of an unexpected shape, an invalid range
-  (start > stop, or outside [1, n+1]), or any exception thrown inside attach. This is a
-  frontend bug, not malformed input. attach runs inside a guard that, on ANY such
-  defect, emits a single js.internal diagnostic through the shared budget (the same
-  budget the tokenizer + parser use) and stops attaching further (already-attached nodes
-  are kept, so the SourceUnit still carries its AST plus the js.internal). The parse's
-  valid becomes false and diagnostics is non-empty.
+- An UNEXPECTED INTERNAL defect: a recognized declaration target with an invalid range
+  (start > stop, or outside [1, n+1]), a jsdoc comment with an invalid lexer range, or
+  any exception thrown inside attach. This is a frontend bug, not malformed input. A
+  single-internal LATCH guarantees EXACTLY ONE js.internal: the first such defect emits
+  one js.internal through the shared budget and ABORTS the rest of attachment (via a
+  latch flag plus a sentinel throw the outer guard swallows), and a jsdoc comment whose
+  range was rejected is NOT indexed. Already-attached nodes are kept, so the SourceUnit
+  still carries its AST plus the single js.internal; valid becomes false. Even multiple
+  independent corruptions in one unit yield exactly one js.internal.
 
 Because attach emits js.internal on an internal defect rather than swallowing it,
 `unit.diagnostics.length == 0` guarantees attachment ran to completion without an

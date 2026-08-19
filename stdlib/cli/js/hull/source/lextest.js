@@ -7,6 +7,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { lex, createTokenizer } from "hull:source:lexer";
 import { parse, __parseWithInjection } from "hull:source:parser";
+import { attach as attachAnnotations } from "hull:source:annotations";
+import { makeBudget } from "hull:source:diagnostic";
 
 // Structural-default lexing (the standalone convenience path).
 function run(srcBuf, path, opts) {
@@ -57,4 +59,56 @@ function runParseInject(srcBuf, path, opts) {
     return { schema_version: 1, status: "ok", ast: u.ast, comments: u.comments, diagnostics: u.diagnostics, valid: u.valid };
 }
 
-globalThis.__hull_frontend = { lex: run, lexDirected: runDirected, parse: runParse, parseInject: runParseInject };
+// Idempotency probe: parse once (attachment runs during parseInternal), snapshot the AST, then
+// invoke attach() AGAIN on the SAME ast/comments/bytes, and report whether the projection is
+// byte-identical. This exercises re-attachment on one unit (not two fresh parses).
+function runReattach(srcBuf, path) {
+    const p = path || "test.js";
+    const bytes = new Uint8Array(srcBuf);
+    const u = parse(bytes, { path: p });                    // first attach, inside the parser
+    const before = JSON.stringify(u.ast);
+    const commentsBefore = JSON.stringify(u.comments);
+    const budget = makeBudget(4096, p);
+    attachAnnotations(u.ast, u.comments, bytes, u.linemap, budget, p);   // second attach, same unit
+    const after = JSON.stringify(u.ast);
+    const commentsAfter = JSON.stringify(u.comments);
+    return { schema_version: 1, status: "ok",
+             ast_identical: before === after, comments_identical: commentsBefore === commentsAfter,
+             reattach_diagnostics: budget.list.length };
+}
+
+// Latch probe: run attach() on a SYNTHETIC unit carrying MULTIPLE invalid ranges (the parser
+// never produces these, so they are only reachable via a hand-built unit). Mode is the first
+// source byte: 'd' = several declaration targets with invalid ranges; anything else = several
+// jsdoc comments with invalid ranges (plus a bad declaration). Either way the latch must yield
+// EXACTLY ONE js.internal and abort. Returns the internal count so the test can lock it to 1.
+function runAttachCorrupt(srcBuf, path) {
+    const p = path || "test.js";
+    const u8 = new Uint8Array(srcBuf);
+    const mode = u8.length ? String.fromCharCode(u8[0]) : "c";
+    const bytes = new Uint8Array(16);                       // n = 16; valid ranges are [1, 17]
+    const linemap = [1];
+    let comments, ast;
+    if (mode === "d") {
+        comments = [];
+        ast = { type: "Program", start: 1, stop: 1, body: [
+            { type: "VariableDeclaration", start: 999, stop: 1, kind: "const", declarations: [] },   // stop < start
+            { type: "FunctionDeclaration", start: 5, stop: 99999, id: null, params: [], body: null }, // stop > n+1
+        ] };
+    } else {
+        comments = [
+            { kind: "jsdoc", start: 100, stop: 50 },        // stop < start
+            { kind: "jsdoc", start: -5, stop: 3 },          // start < 1
+        ];
+        ast = { type: "Program", start: 1, stop: 1, body: [
+            { type: "VariableDeclaration", start: 999, stop: 2000, kind: "const", declarations: [] },
+        ] };
+    }
+    const budget = makeBudget(4096, p);
+    attachAnnotations(ast, comments, bytes, linemap, budget, p);
+    let internal = 0;
+    for (let i = 0; i < budget.list.length; i++) if (budget.list[i].code === "js.internal") internal++;
+    return { schema_version: 1, status: "ok", total: budget.list.length, internal_count: internal };
+}
+
+globalThis.__hull_frontend = { lex: run, lexDirected: runDirected, parse: runParse, parseInject: runParseInject, reattach: runReattach, attachCorrupt: runAttachCorrupt };

@@ -272,18 +272,88 @@ UTEST(js_annotations, no_false_matches)
     hl_js_session_destroy(s);
 }
 
-/* Idempotency: parsing the same source twice yields byte-identical SourceUnits (attachment is a
- * pure function of ast/comments/bytes). */
-UTEST(js_annotations, idempotent)
+/* Multiple comments ending on one physical line are all collected as a group (source order),
+ * mixed jsdoc/ordinary in either order: the run is not collapsed to a single comment. */
+UTEST(js_annotations, same_line_comment_group)
 {
     HlJsSession *s = hl_js_session_create(NULL);
     ASSERT_TRUE(s != NULL);
-    const char *src = "/**\n * @query users\n * @param x\n */\nexport const q = 1;";
-    char *a = parse_str(s, src);
-    char *b = parse_str(s, src);
-    ASSERT_TRUE(a != NULL && b != NULL);
-    EXPECT_STREQ(a, b);
-    free(a); free(b);
+    /* jsdoc then ordinary on one comment-only line -> the jsdoc still attaches */
+    char *o = parse_str(s, "/** @query */ /* ordinary note */\nconst q = 1;");
+    EXPECT_EQ(name_count(o, "query"), 3);
+    free(o); o = NULL;
+    /* ordinary then jsdoc */
+    o = parse_str(s, "/* ordinary note */ /** @query */\nconst q = 1;");
+    EXPECT_EQ(name_count(o, "query"), 3);
+    free(o); o = NULL;
+    /* two jsdoc blocks on one line -> BOTH attach, in source order */
+    o = parse_str(s, "/** @a */ /** @b */\nconst q = 1;");
+    EXPECT_EQ(name_count(o, "a"), 3);
+    EXPECT_EQ(name_count(o, "b"), 3);
+    free(o);
+    hl_js_session_destroy(s);
+}
+
+/* U+2028 / U+2029 / CR / CRLF between the JSDoc and the declaration are line terminators, so the
+ * declaration attaches (the terminator bytes are not treated as code, and do not leak into
+ * ranges/text). */
+UTEST(js_annotations, line_terminators)
+{
+    HlJsSession *s = hl_js_session_create(NULL);
+    ASSERT_TRUE(s != NULL);
+    char *o = parse_str(s, "/** @foo */\r\nconst x = 1;");            /* CRLF */
+    EXPECT_EQ(name_count(o, "foo"), 3);
+    free(o); o = NULL;
+    o = parse_str(s, "/** @foo */\rconst x = 1;");                    /* lone CR */
+    EXPECT_EQ(name_count(o, "foo"), 3);
+    free(o); o = NULL;
+    o = parse_str(s, "/** @foo */\xe2\x80\xa8" "const x = 1;");       /* U+2028 */
+    EXPECT_EQ(name_count(o, "foo"), 3);
+    free(o); o = NULL;
+    o = parse_str(s, "/** @foo */\xe2\x80\xa9" "const x = 1;");       /* U+2029 */
+    EXPECT_EQ(name_count(o, "foo"), 3);
+    free(o); o = NULL;
+    /* a U+2028 line terminator inside the block does not leak into a tag range/raw */
+    o = parse_str(s, "/**\xe2\x80\xa8 * @foo bar\xe2\x80\xa8 */\nconst x = 1;");
+    EXPECT_TRUE(has(o, "\"name\":\"foo\",\"text\":\"bar\",\"raw\":\"@foo bar\""));
+    free(o);
+    hl_js_session_destroy(s);
+}
+
+/* Single-internal latch (docs 9.1): multiple invalid ranges in one unit produce EXACTLY ONE
+ * js.internal and abort. Exercised via a synthetic unit (the parser never emits bad ranges). */
+UTEST(js_annotations, single_internal_latch)
+{
+    HlJsSession *s = hl_js_session_create(NULL);
+    ASSERT_TRUE(s != NULL);
+    char *out = NULL; size_t out_len = 0;
+    /* mode 'c': several jsdoc comments with invalid ranges + a bad declaration */
+    hl_js_session_analyze(s, "hull:source:lextest", "attachCorrupt",
+                          (const uint8_t *)"c", 1, "a.js", NULL, 0, &out, &out_len);
+    EXPECT_TRUE(has(out, "\"internal_count\":1"));
+    free(out); out = NULL;
+    /* mode 'd': several declaration targets with invalid ranges */
+    hl_js_session_analyze(s, "hull:source:lextest", "attachCorrupt",
+                          (const uint8_t *)"d", 1, "a.js", NULL, 0, &out, &out_len);
+    EXPECT_TRUE(has(out, "\"internal_count\":1"));
+    free(out);
+    hl_js_session_destroy(s);
+}
+
+/* Idempotency (the REAL test): parse once, then invoke attach() AGAIN on the SAME ast/comments,
+ * and assert the projection is byte-identical (no duplicated node/comment annotations). */
+UTEST(js_annotations, idempotent_reattach)
+{
+    HlJsSession *s = hl_js_session_create(NULL);
+    ASSERT_TRUE(s != NULL);
+    char *out = NULL; size_t out_len = 0;
+    const char *src = "/** @a */ /** @b */\nexport const q = 1, r = 2;\n/** @c */\nfunction f() {}";
+    hl_js_session_analyze(s, "hull:source:lextest", "reattach",
+                          (const uint8_t *)src, strlen(src), "a.js", NULL, 0, &out, &out_len);
+    EXPECT_TRUE(has(out, "\"ast_identical\":true"));
+    EXPECT_TRUE(has(out, "\"comments_identical\":true"));
+    EXPECT_TRUE(has(out, "\"reattach_diagnostics\":0"));     /* the second attach found no internal fault */
+    free(out);
     hl_js_session_destroy(s);
 }
 
