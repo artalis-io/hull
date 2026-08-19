@@ -289,36 +289,30 @@ function parseInternal(bytes, opts, inject) {
         semicolon();
         return errNode(start);
     }
-    // `for ( <binding> in <expr> ) <body>` -- consumed cleanly after the js.unsupported.
-    function declineForIn(s) {
-        unsupported("for-in statement is not supported");
-        advance(true);                              // past `in`
-        parseExpression();                          // the iterated object
-        expectP(")", true);
-        parseStatement();                           // the loop body
-        return errNode(s.start);
-    }
 
     function parseFor() {
         const s = mk("ForStatement", cur.start);
-        advance(true); expectP("(", true);
-        // for-in is unsupported; for-of + C-style for are supported.
+        advance(true);                              // past `for`
+        let isAwait = false;
+        if (isKw("await")) { isAwait = true; advance(true); }   // `for await (x of y)` (async iteration)
+        expectP("(", true);
+        // for-of / for-in / for-await-of / C-style for are all supported.
         let init = null;
         if (isP(";")) { /* empty init */ }
         else if ((isKw("var") || isKw("let") || isKw("const"))) {
             const kind = cur.value; const vd = mk("VariableDeclaration", cur.start); vd.kind = kind; vd.declarations = [];
             advance(true);
             const decl = mk("VariableDeclarator", cur.start); decl.id = parseBindingTarget(); decl.init = null;
-            if (isKw("of")) { return finishForOf(s, fin2(vd, decl)); }
-            if (isKw("in")) return declineForIn(s);
+            if (isKw("of")) { return finishForOf(s, fin2(vd, decl), isAwait); }
+            if (isKw("in")) return finishForIn(s, fin2(vd, decl));
             if (eatP("=", true)) decl.init = parseAssignment();
             vd.declarations.push(fin(decl));
             while (eatP(",", true)) { const d2 = mk("VariableDeclarator", cur.start); d2.id = parseBindingTarget(); d2.init = null; if (eatP("=", true)) d2.init = parseAssignment(); vd.declarations.push(fin(d2)); }
             init = fin(vd);
         } else {
             init = parseExpression();
-            if (isKw("of")) { return finishForOf(s, init); }
-            if (isKw("in")) return declineForIn(s);
+            if (isKw("of")) { return finishForOf(s, init, isAwait); }
+            if (isKw("in")) return finishForIn(s, init);
         }
         s.init = init;
         expectP(";", true);
@@ -330,10 +324,18 @@ function parseInternal(bytes, opts, inject) {
         return fin(s);
     }
     function fin2(vd, decl) { vd.declarations = [fin(decl)]; return fin(vd); }
-    function finishForOf(s, left) {
-        s.type = "ForOfStatement"; s.left = left;
+    function finishForOf(s, left, isAwait) {
+        s.type = "ForOfStatement"; s.left = left; s.await = isAwait === true;
         advance(true);                              // past `of`
         s.right = parseAssignment();
+        expectP(")", true);
+        s.body = parseStatement();
+        return fin(s);
+    }
+    function finishForIn(s, left) {
+        s.type = "ForInStatement"; s.left = left;
+        advance(true);                              // past `in`
+        s.right = parseExpression();
         expectP(")", true);
         s.body = parseStatement();
         return fin(s);

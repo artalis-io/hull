@@ -204,16 +204,30 @@ UTEST(js_parser, unsupported_constructs)
 {
     HlJsSession *s = hl_js_session_create(NULL);
     ASSERT_TRUE(s != NULL);
-    char *o = parse_str(s, "for (const k in obj) { use(k); }");
-    EXPECT_TRUE(has(o, "\"code\":\"js.unsupported\""));
-    EXPECT_TRUE(has(o, "for-in"));
-    free(o); o = NULL;
-    o = parse_str(s, "do { x(); } while (c);");
+    char *o = parse_str(s, "do { x(); } while (c);");
     EXPECT_TRUE(has(o, "\"code\":\"js.unsupported\""));
     free(o); o = NULL;
     o = parse_str(s, "function* gen() { yield 1; }");
     EXPECT_TRUE(has(o, "\"code\":\"js.unsupported\""));
     EXPECT_TRUE(has(o, "generator"));
+    free(o);
+    hl_js_session_destroy(s);
+}
+
+/* for-in and for-await-of are SUPPORTED (the committed corpus uses both). */
+UTEST(js_parser, for_in_and_for_await_of)
+{
+    HlJsSession *s = hl_js_session_create(NULL);
+    ASSERT_TRUE(s != NULL);
+    char *o = parse_str(s, "for (const k in obj) { use(k); }");
+    EXPECT_TRUE(has(o, "\"type\":\"ForInStatement\""));
+    EXPECT_FALSE(has(o, "\"code\":\"js.unsupported\""));
+    EXPECT_TRUE(has(o, "\"valid\":true"));
+    free(o); o = NULL;
+    o = parse_str(s, "async function fa() { for await (const x of xs) { use(x); } }");
+    EXPECT_TRUE(has(o, "\"type\":\"ForOfStatement\""));
+    EXPECT_TRUE(has(o, "\"await\":true"));
+    EXPECT_TRUE(has(o, "\"valid\":true"));
     free(o);
     hl_js_session_destroy(s);
 }
