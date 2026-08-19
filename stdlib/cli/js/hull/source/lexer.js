@@ -6,8 +6,15 @@
 // indices. The lexer NEVER throws: lexical problems become js.syntax / js.unsupported /
 // js.limit.* diagnostics and it recovers so a full token stream is always returned.
 //
-// Public: lex(bytes, opts?) -> { tokens, comments, diagnostics, linemap }
-//   opts: { path?, maxTokens?, maxDiagnostics? }
+// Public:
+//   createTokenizer(bytes, opts?) -> { next(regexAllowed?), comments, diagnostics, linemap }
+//       INCREMENTAL. The parser calls next(regexAllowed) with the grammar-directed lexical
+//       goal so it controls regex-vs-division at a `/` (the token stream alone cannot tell
+//       `if (ok) {} /re/` from `const f = function(){} / 2`).
+//   lex(bytes, opts?) -> { tokens, comments, diagnostics, linemap }
+//       Convenience: drives createTokenizer to EOF with a structural-default slash goal.
+//   opts: { path?, maxTokens?, maxDiagnostics? }  (maxDiagnostics accepts 0 = no ordinary
+//       diagnostics; terminal js.limit.* stay visible)
 //
 // Token shape (the stable contract the parser depends on):
 //   { type, start, stop, nlBefore, ...typed }
@@ -73,18 +80,30 @@ function isIdStartAscii(b) { return (b >= 0x41 && b <= 0x5a) || (b >= 0x61 && b 
 function isIdContinueAscii(b) { return isIdStartAscii(b) || isDigit(b); }
 function isSpaceAscii(b) { return b === 0x20 || b === 0x09 || b === 0x0b || b === 0x0c; }
 
-export function lex(bytes, opts) {
+// isNonNegInt(x): a validated nonnegative integer option, else the default.
+function nnInt(x, dflt) {
+    return (typeof x === "number" && isFinite(x) && x >= 0 && Math.floor(x) === x) ? x : dflt;
+}
+
+// createTokenizer(bytes, opts) -> an INCREMENTAL tokenizer. `next(regexAllowed)` returns the
+// next token; `regexAllowed` (a boolean) is the PARSER-DIRECTED lexical goal for a `/` at the
+// current position -- pass it so the parser controls regex-vs-division from grammar (the token
+// stream alone cannot: `if (ok) {} /re/` vs `const f = function(){} / 2`). If `regexAllowed`
+// is omitted, a structural default is used (adequate for standalone lexing / tests, not for a
+// real parser). `comments`, `diagnostics`, `linemap` accumulate on the returned object.
+export function createTokenizer(bytes, opts) {
     opts = opts || {};
     const path = opts.path || null;
-    const maxTokens = (typeof opts.maxTokens === "number" && opts.maxTokens > 0) ? Math.floor(opts.maxTokens) : 1000000;
-    const maxDiagnostics = (typeof opts.maxDiagnostics === "number" && opts.maxDiagnostics > 0) ? Math.floor(opts.maxDiagnostics) : 4096;
+    const maxTokens = nnInt(opts.maxTokens, 1000000);
+    const maxDiagnostics = nnInt(opts.maxDiagnostics, 4096);   // 0 = keep no ordinary diagnostics
 
     const n = bytes.length;
     let p = 0;
-    const tokens = [];
     const comments = [];
     const diagnostics = [];
-    let limited = false;
+    let tokenCount = 0;
+    let lastToken = null;
+    let done = false;
     let ordinaryDiags = 0;
     let diagCapNoted = false;
 
@@ -170,16 +189,15 @@ export function lex(bytes, opts) {
         }
     }
 
+    // Finalize a freshly scanned token: attach ASI metadata, advance the before-expr state,
+    // record it as the last token. (maxTokens is enforced in next().)
     function push(tok) {
         tok.nlBefore = nlPending;
         nlPending = false;
-        tokens.push(tok);
         if (tok.type !== "eof") prev = tok;
         afterToken(tok);
-        if (tokens.length >= maxTokens && !limited) {
-            limited = true;
-            diag("js.limit.tokens", "token limit exceeded (" + maxTokens + ")", tok.start, tok.stop);
-        }
+        lastToken = tok;
+        tokenCount++;
     }
 
     // -- whitespace + comments --
@@ -314,24 +332,39 @@ export function lex(bytes, opts) {
 
     function scanNumber() {
         const sp = p;
-        let bigint = false;
+        let bigint = false, hasDot = false, hasExp = false, legacyLeadingZero = false;
         if (bytes[p] === 0x30 && p + 1 < n) {
             const c = bytes[p + 1] | 0x20;
-            if (c === 0x78 || c === 0x6f || c === 0x62) {
+            if (c === 0x78 || c === 0x6f || c === 0x62) {          // 0x / 0o / 0b
                 p += 2;
                 const pred = c === 0x78 ? isHex : (c === 0x6f ? isOctal : isBinary);
                 if (consumeDigits(pred) === 0) diag("js.syntax", "missing digits in numeric literal", sp + 1, p + 1);
                 if (p < n && bytes[p] === 0x6e) { bigint = true; p += 1; }
                 return finishNumber(sp, bigint);
             }
+            if (isDigit(bytes[p + 1]) || bytes[p + 1] === 0x5f) {   // legacy leading zero (01, 0123, 08, 0_1)
+                legacyLeadingZero = true;
+                p += 1;
+                while (p < n && (isDigit(bytes[p]) || bytes[p] === 0x5f)) {
+                    if (bytes[p] === 0x5f) diag("js.syntax", "numeric separator not allowed in legacy octal literal", p + 1, p + 2);
+                    p += 1;
+                }
+                // fall through to allow a following . / e (08.5) below.
+            }
         }
-        consumeDigits(isDigit);                                   // integer part (empty for .5)
-        if (p < n && bytes[p] === 0x2e) { p += 1; consumeDigits(isDigit); }   // fraction
-        if (p < n && (bytes[p] === 0x65 || bytes[p] === 0x45)) {  // exponent
-            p += 1;
+        if (!legacyLeadingZero) consumeDigits(isDigit);            // integer part (empty for .5)
+        if (p < n && bytes[p] === 0x2e) { hasDot = true; p += 1; consumeDigits(isDigit); }   // fraction
+        if (p < n && (bytes[p] === 0x65 || bytes[p] === 0x45)) {   // exponent
+            hasExp = true; p += 1;
             if (p < n && (bytes[p] === 0x2b || bytes[p] === 0x2d)) p += 1;
             if (consumeDigits(isDigit) === 0) diag("js.syntax", "missing exponent in numeric literal", sp + 1, p + 1);
-        } else if (p < n && bytes[p] === 0x6e) { bigint = true; p += 1; }
+        }
+        if (p < n && bytes[p] === 0x6e) {                          // BigInt suffix
+            if (hasDot || hasExp || legacyLeadingZero) {
+                diag("js.syntax", "invalid BigInt literal (no fraction, exponent, or leading zero)", sp + 1, p + 2);
+            }
+            bigint = true; p += 1;
+        }
         return finishNumber(sp, bigint);
     }
     function finishNumber(sp, bigint) {
@@ -380,7 +413,7 @@ export function lex(bytes, opts) {
             default: {
                 if (b < 0x80) { p += 1; return String.fromCharCode(b); }
                 const d = decode(p);
-                if (d.err) { p += d.len; return ""; }
+                if (d.err) { diag("js.syntax", "invalid UTF-8 in escape sequence", p + 1, p + d.len + 1); p += d.len; return ""; }
                 p += d.len; return String.fromCodePoint(d.cp);
             }
         }
@@ -524,34 +557,58 @@ export function lex(bytes, opts) {
     function adv(k, v, sp) { p += k; return emit(v, sp); }
     function emit(v, sp) { push({ type: "punctuator", value: v, start: sp + 1, stop: p + 1 }); return true; }
 
-    // -- main loop --
-    while (!limited) {
-        skipTrivia();
-        if (p >= n) break;
-        const b = bytes[p];
-        if (b === 0x22 || b === 0x27) { scanString(b); continue; }
-        if (b === 0x60) { scanTemplate(0x60); continue; }
-        if (isDigit(b)) { scanNumber(); continue; }
-        if (b === 0x2e && p + 1 < n && isDigit(bytes[p + 1])) { scanNumber(); continue; }
-        if (b === 0x2f && (p + 1 >= n || (bytes[p + 1] !== 0x2f && bytes[p + 1] !== 0x2a)) && exprAllowed) { scanRegex(); continue; }
-        if (b === 0x5c || isIdStartAscii(b)) {
-            const before = p;
-            scanIdentifier();
-            if (p === before) { diag("js.syntax", "invalid escape", p + 1, p + 2); p += 1; }   // progress guard
-            continue;
+    // Scan exactly one token at the current cursor. `rx` = whether a leading `/` is a regex
+    // (the parser-directed goal). Returns true iff a token was pushed; false iff only a
+    // diagnostic was emitted (cursor advanced, no token) -- next() loops in that case.
+    function scanDispatch(b, rx) {
+        const before = tokenCount;
+        if (b === 0x22 || b === 0x27) scanString(b);
+        else if (b === 0x60) scanTemplate(0x60);
+        else if (isDigit(b)) scanNumber();
+        else if (b === 0x2e && p + 1 < n && isDigit(bytes[p + 1])) scanNumber();
+        else if (b === 0x2f && (p + 1 >= n || (bytes[p + 1] !== 0x2f && bytes[p + 1] !== 0x2a)) && rx) scanRegex();
+        else if (b === 0x5c || isIdStartAscii(b)) {
+            const bp = p; scanIdentifier();
+            if (p === bp) { diag("js.syntax", "invalid escape", p + 1, p + 2); p += 1; }   // progress guard
         }
-        if (b >= 0x80) {
+        else if (b >= 0x80) {
             const d = decode(p);
-            if (d.err) { diag("js.syntax", "invalid UTF-8", p + 1, p + d.len + 1); p += d.len; continue; }
-            if (isIdStartCp(d.cp)) { const before = p; scanIdentifier(); if (p === before) p += d.len; continue; }
-            diag("js.syntax", "unexpected character U+" + d.cp.toString(16).toUpperCase(), p + 1, p + d.len + 1);
-            p += d.len; continue;
+            if (d.err) { diag("js.syntax", "invalid UTF-8", p + 1, p + d.len + 1); p += d.len; }
+            else if (isIdStartCp(d.cp)) { const bp = p; scanIdentifier(); if (p === bp) p += d.len; }
+            else { diag("js.syntax", "unexpected character U+" + d.cp.toString(16).toUpperCase(), p + 1, p + d.len + 1); p += d.len; }
         }
-        if (scanPunctuator()) continue;
-        diag("js.syntax", "unexpected character", p + 1, p + 2);
-        p += 1;
+        else if (!scanPunctuator()) { diag("js.syntax", "unexpected character", p + 1, p + 2); p += 1; }
+        return tokenCount > before;
     }
 
-    push({ type: "eof", start: p + 1, stop: p + 1 });
-    return { tokens: tokens, comments: comments, diagnostics: diagnostics, linemap: buildLinemap(bytes) };
+    // Return the next token. `regexAllowed` (boolean) is the parser-directed lexical goal for
+    // a `/`; omit it to use the structural default. After EOF, keeps returning the EOF token.
+    function next(regexAllowed) {
+        if (done) return lastToken;
+        for (;;) {
+            if (tokenCount >= maxTokens) {
+                diag("js.limit.tokens", "token limit exceeded (" + maxTokens + ")", p + 1, p + 1);
+                push({ type: "eof", start: p + 1, stop: p + 1 }); done = true; break;
+            }
+            skipTrivia();
+            if (p >= n) { push({ type: "eof", start: p + 1, stop: p + 1 }); done = true; break; }
+            const rx = (regexAllowed === true || regexAllowed === false) ? regexAllowed : exprAllowed;
+            if (scanDispatch(bytes[p], rx)) break;   // a token was produced
+            // otherwise a diagnostic was emitted + the cursor advanced; loop for the next token
+        }
+        return lastToken;
+    }
+
+    const _linemap = buildLinemap(bytes);
+    return { next: next, comments: comments, diagnostics: diagnostics, linemap: _linemap };
+}
+
+// lex(bytes, opts) -> { tokens, comments, diagnostics, linemap }. Convenience that drives the
+// incremental tokenizer to completion with the STRUCTURAL default slash goal. The real parser
+// drives createTokenizer(...).next(regexAllowed) with a grammar-directed goal instead.
+export function lex(bytes, opts) {
+    const tk = createTokenizer(bytes, opts);
+    const tokens = [];
+    for (;;) { const t = tk.next(); tokens.push(t); if (t.type === "eof") break; }
+    return { tokens: tokens, comments: tk.comments, diagnostics: tk.diagnostics, linemap: tk.linemap };
 }

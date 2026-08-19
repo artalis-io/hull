@@ -17,6 +17,14 @@
 
 static int has(const char *hay, const char *needle) { return hay && strstr(hay, needle) != NULL; }
 
+/* count non-overlapping occurrences of `needle` in `hay`. */
+static int count(const char *hay, const char *needle) {
+    int c = 0; size_t nl = strlen(needle);
+    if (!hay || nl == 0) return 0;
+    for (const char *q = hay; (q = strstr(q, needle)) != NULL; q += nl) c++;
+    return c;
+}
+
 /* Lex `src` (len bytes) and return the malloc'd JSON result (caller frees). */
 static char *lex_json(HlJsSession *s, const uint8_t *src, size_t len)
 {
@@ -436,6 +444,91 @@ UTEST(js_lexer, imports_and_hull_scheme_strings)
     EXPECT_TRUE(has(o, "\"type\":\"identifier\",\"value\":\"import\""));
     EXPECT_TRUE(has(o, "\"type\":\"string\",\"value\":\"hull:db\""));
     free(o);
+    hl_js_session_destroy(s);
+}
+
+/* Parser-directed slash: the parser controls regex-vs-division for braces the token stream
+ * alone cannot disambiguate. Driven through hull:source:lexDirected with a forced goal. */
+UTEST(js_lexer, parser_directed_slash)
+{
+    HlJsSession *s = hl_js_session_create(NULL);
+    ASSERT_TRUE(s != NULL);
+    char *out = NULL; size_t out_len = 0;
+    /* `if (ok) {} /re/.test(s)` : after a statement block, the parser allows a regex. */
+    int rc = hl_js_session_analyze(s, "hull:source:lextest", "lexDirected",
+                                   (const uint8_t *)"if (ok) {} /re/.test(s)", 23, "t.js",
+                                   "{\"forceRegex\":true}", 19, &out, &out_len);
+    (void)rc;
+    EXPECT_TRUE(has(out, "\"type\":\"regex\",\"pattern\":\"re\""));
+    free(out); out = NULL;
+    /* `const f = function() {} / 2` : after a function EXPRESSION, `/` is division. */
+    rc = hl_js_session_analyze(s, "hull:source:lextest", "lexDirected",
+                               (const uint8_t *)"const f = function() {} / 2", 27, "t.js",
+                               "{\"forceRegex\":false}", 20, &out, &out_len);
+    EXPECT_TRUE(has(out, "\"type\":\"punctuator\",\"value\":\"/\""));
+    EXPECT_FALSE(has(out, "\"type\":\"regex\""));
+    free(out);
+    hl_js_session_destroy(s);
+}
+
+/* Invalid BigInt + legacy-leading-zero numeric forms. */
+UTEST(js_lexer, bigint_and_legacy_numeric)
+{
+    HlJsSession *s = hl_js_session_create(NULL);
+    ASSERT_TRUE(s != NULL);
+    /* valid BigInts */
+    char *o = lex_str(s, "10n + 0xFFn");
+    EXPECT_FALSE(has(o, "js.syntax"));
+    free(o); o = NULL;
+    o = lex_str(s, "1.0n");   EXPECT_TRUE(has(o, "js.syntax")); EXPECT_TRUE(has(o, "invalid BigInt")); free(o); o = NULL;
+    o = lex_str(s, ".5n");    EXPECT_TRUE(has(o, "js.syntax")); EXPECT_TRUE(has(o, "invalid BigInt")); free(o); o = NULL;
+    o = lex_str(s, "1e5n");   EXPECT_TRUE(has(o, "js.syntax")); free(o); o = NULL;   /* exponent + n */
+    o = lex_str(s, "0_1");    EXPECT_TRUE(has(o, "js.syntax")); EXPECT_TRUE(has(o, "legacy octal")); free(o); o = NULL;
+    hl_js_session_destroy(s);
+}
+
+/* Invalid UTF-8 immediately after a backslash escape, in a string and in a template. */
+UTEST(js_lexer, escaped_invalid_utf8)
+{
+    HlJsSession *s = hl_js_session_create(NULL);
+    ASSERT_TRUE(s != NULL);
+    /* "a\<0xFF>" : the byte after the backslash is invalid UTF-8 */
+    const uint8_t str[] = { 0x22, 'a', 0x5c, 0xff, 0x22 };
+    char *o = lex_json(s, str, sizeof(str));
+    EXPECT_TRUE(has(o, "\"code\":\"js.syntax\""));
+    EXPECT_TRUE(has(o, "invalid UTF-8 in escape"));
+    free(o); o = NULL;
+    /* `a\<0xFF>` : same, inside a template */
+    const uint8_t tpl[] = { 0x60, 'a', 0x5c, 0xff, 0x60 };
+    o = lex_json(s, tpl, sizeof(tpl));
+    EXPECT_TRUE(has(o, "invalid UTF-8 in escape"));
+    free(o);
+    hl_js_session_destroy(s);
+}
+
+/* maxDiagnostics=0: retain NO ordinary diagnostics, but the terminal js.limit.diagnostics
+ * stays visible. Assert exact diagnostic counts, not just presence. */
+UTEST(js_lexer, diagnostic_budget_zero)
+{
+    HlJsSession *s = hl_js_session_create(NULL);
+    ASSERT_TRUE(s != NULL);
+    char *out = NULL; size_t out_len = 0;
+    /* 4 stray '@' -> would be 4 ordinary js.syntax; with budget 0, only the terminal remains */
+    int rc = hl_js_session_analyze(s, "hull:source:lextest", "lex",
+                                   (const uint8_t *)"@@@@", 4, "t.js",
+                                   "{\"maxDiagnostics\":0}", 20, &out, &out_len);
+    (void)rc;
+    EXPECT_EQ(count(out, "\"code\":"), 1);                       /* exactly one diagnostic */
+    EXPECT_TRUE(has(out, "\"code\":\"js.limit.diagnostics\""));  /* and it is the terminal */
+    free(out); out = NULL;
+    /* budget 2 over 5 stray chars -> 2 ordinary + 1 terminal = 3 diagnostics */
+    rc = hl_js_session_analyze(s, "hull:source:lextest", "lex",
+                               (const uint8_t *)"@@@@@", 5, "t.js",
+                               "{\"maxDiagnostics\":2}", 20, &out, &out_len);
+    EXPECT_EQ(count(out, "\"code\":"), 3);
+    EXPECT_EQ(count(out, "\"code\":\"js.syntax\""), 2);
+    EXPECT_EQ(count(out, "\"code\":\"js.limit.diagnostics\""), 1);
+    free(out);
     hl_js_session_destroy(s);
 }
 
