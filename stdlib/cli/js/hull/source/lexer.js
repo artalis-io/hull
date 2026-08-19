@@ -539,6 +539,7 @@ export function createTokenizer(bytes, opts) {
             case 0x2c: return adv(1, ",", sp);
             case 0x3a: return adv(1, ":", sp);
             case 0x7e: return adv(1, "~", sp);
+            case 0x23: return adv(1, "#", sp);   // private-name sigil; the parser declines #members
             default: return false;
         }
     }

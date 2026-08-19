@@ -19,7 +19,7 @@ ifeq ($(RUNTIME),js)
 else ifeq ($(RUNTIME),lua)
   # test_js_session + test_js_lexer + test_js_parser (the JS tooling runtime + frontend) need
   # QuickJS, absent in a lua-only build.
-  TEST_SRCS := $(filter-out %/test_js.c %/test_js_session.c %/test_js_lexer.c %/test_js_parser.c,$(TEST_SRCS))
+  TEST_SRCS := $(filter-out %/test_js.c %/test_js_session.c %/test_js_lexer.c %/test_js_parser.c %/test_js_conformance.c,$(TEST_SRCS))
 endif
 
 # Drop DB-dependent tests in pure-compute builds.
@@ -186,6 +186,11 @@ $(BUILDDIR)/test_js_lexer: $(TESTDIR)/hull/frontend/test_js_lexer.c $(FRONTEND_J
 # hull.frontend JS parser (Slice 2): same tooling-session link, drives hull:source:parser via
 # the embedded hull:source:parse driver. Explicit recipe (tests/hull/frontend/).
 $(BUILDDIR)/test_js_parser: $(TESTDIR)/hull/frontend/test_js_parser.c $(FRONTEND_JS_SESSION_OBJ) $(STDLIB_JS_CLI_REGISTRY_O) $(QJS_OBJS) | $(BUILDDIR)
+	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -Ivendor/quickjs -o $@ $< $(FRONTEND_JS_SESSION_OBJ) $(STDLIB_JS_CLI_REGISTRY_O) $(QJS_OBJS) -lm -lpthread $(LDFLAGS)
+
+# hull.frontend JS conformance (Slice 2): runs the corpus through the session parser AND a
+# QuickJS compile-only oracle, so it links both the session and QuickJS. Explicit recipe.
+$(BUILDDIR)/test_js_conformance: $(TESTDIR)/hull/frontend/test_js_conformance.c $(FRONTEND_JS_SESSION_OBJ) $(STDLIB_JS_CLI_REGISTRY_O) $(QJS_OBJS) | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -Ivendor/quickjs -o $@ $< $(FRONTEND_JS_SESSION_OBJ) $(STDLIB_JS_CLI_REGISTRY_O) $(QJS_OBJS) -lm -lpthread $(LDFLAGS)
 
 # Read-only shared-heap C-API test: build-time AOT fixture. Generate an .aot from

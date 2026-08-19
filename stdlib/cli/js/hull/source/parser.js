@@ -213,7 +213,7 @@ function parseInternal(bytes, opts, inject) {
                 case "continue": st = parseBreakContinue("ContinueStatement"); break;
                 case "import": st = parseImport(); break;
                 case "export": st = parseExport(); break;
-                case "with": unsupported("with statement is not supported"); st = errNode(cur.start); synchronize(); break;
+                case "with": { const ws = cur.start; unsupported("with statement is not supported"); advance(true); expectP("(", true); parseExpression(); expectP(")", true); parseStatement(); st = errNode(ws); break; }
                 case "debugger": { st = mk("DebuggerStatement", cur.start); advance(true); semicolon(); st = fin(st); break; }
                 default: st = parseExpressionStatement();
             }
@@ -277,9 +277,26 @@ function parseInternal(bytes, opts, inject) {
         return fin(s);
     }
 
+    // A declined-but-valid construct emits js.unsupported ONCE and is CONSUMED cleanly (its full
+    // grammar is parsed and discarded), so it never also emits js.syntax -- "unsupported" stays a
+    // clean, first-class outcome distinct from "malformed".
     function parseDoWhile() {
+        const start = cur.start;
         unsupported("do-while statement is not supported");
-        const s = errNode(cur.start); synchronize(); return s;
+        advance(true);                              // past `do`
+        parseStatement();                           // the loop body
+        if (isKw("while")) { advance(true); expectP("(", true); parseExpression(); expectP(")", true); }
+        semicolon();
+        return errNode(start);
+    }
+    // `for ( <binding> in <expr> ) <body>` -- consumed cleanly after the js.unsupported.
+    function declineForIn(s) {
+        unsupported("for-in statement is not supported");
+        advance(true);                              // past `in`
+        parseExpression();                          // the iterated object
+        expectP(")", true);
+        parseStatement();                           // the loop body
+        return errNode(s.start);
     }
 
     function parseFor() {
@@ -293,7 +310,7 @@ function parseInternal(bytes, opts, inject) {
             advance(true);
             const decl = mk("VariableDeclarator", cur.start); decl.id = parseBindingTarget(); decl.init = null;
             if (isKw("of")) { return finishForOf(s, fin2(vd, decl)); }
-            if (isKw("in")) { unsupported("for-in statement is not supported"); synchronize(); return errNode(s.start); }
+            if (isKw("in")) return declineForIn(s);
             if (eatP("=", true)) decl.init = parseAssignment();
             vd.declarations.push(fin(decl));
             while (eatP(",", true)) { const d2 = mk("VariableDeclarator", cur.start); d2.id = parseBindingTarget(); d2.init = null; if (eatP("=", true)) d2.init = parseAssignment(); vd.declarations.push(fin(d2)); }
@@ -301,7 +318,7 @@ function parseInternal(bytes, opts, inject) {
         } else {
             init = parseExpression();
             if (isKw("of")) { return finishForOf(s, init); }
-            if (isKw("in")) { unsupported("for-in statement is not supported"); synchronize(); return errNode(s.start); }
+            if (isKw("in")) return declineForIn(s);
         }
         s.init = init;
         expectP(";", true);
@@ -482,7 +499,14 @@ function parseInternal(bytes, opts, inject) {
 
     function parseClassMember() {
         const start = cur.start;
-        if (cur.type === "punctuator" && cur.value === "#") { unsupported("private class members are not supported"); advance(true); return errNode(start); }
+        if (cur.type === "punctuator" && cur.value === "#") {
+            unsupported("private class members are not supported");
+            advance(true);                          // past `#`
+            if (cur.type === "identifier") advance(true);   // the private name
+            if (isP("(")) { parseParams(); parseFunctionBody(false); }   // a private method
+            else { if (eatP("=", true)) parseAssignment(); semicolon(); } // a private field
+            return errNode(start);
+        }
         // Non-destructive one-token lookahead decides whether a keyword-like token is a
         // modifier or the member NAME (e.g. a field named `static` / `async` / `get`).
         let isStatic = false;
@@ -618,7 +642,14 @@ function parseInternal(bytes, opts, inject) {
             if (UNARY.has(v)) { const node = mk("UnaryExpression", cur.start); node.operator = v; node.prefix = true; advance(true); node.argument = parseUnary(); return fin(node); }
             if (v === "++" || v === "--") { const node = mk("UpdateExpression", cur.start); node.operator = v; node.prefix = true; advance(true); node.argument = parseUnary(); return fin(node); }
             if (v === "await") { if (isExprStartTok(peekTok(1, true))) { const start = cur.start; advance(true); const node = mk("AwaitExpression", start); node.argument = parseUnary(); return fin(node); } }
-            if (v === "yield") { unsupported("yield is not supported"); advance(true); return errNode(prev.start); }
+            if (v === "yield") {
+                const ys = cur.start;
+                unsupported("yield is not supported");
+                advance(true);                      // past `yield`
+                eatP("*", true);                    // optional `yield*`
+                if (!nl() && isExprStartTok(cur)) parseAssignment();   // consume the operand cleanly
+                return errNode(ys);
+            }
         }
         let e = parsePostfix();
         return e;
@@ -651,7 +682,15 @@ function parseInternal(bytes, opts, inject) {
 
     function parseCallMemberTail(e, allowCall) {
         for (;;) {
-            if (isP(".")) { advance(false); const m = mk("MemberExpression", e.start); m.object = e; m.computed = false; m.optional = false; m.property = parseIdentifierName(); e = fin(m); continue; }
+            if (isP(".")) {
+                advance(false);
+                if (isP("#")) {   // a private member access (obj.#name) -- declined, consumed cleanly
+                    unsupported("private member access is not supported");
+                    advance(false); if (cur.type === "identifier") advance(false);
+                    e = errNode(e.start); continue;
+                }
+                const m = mk("MemberExpression", e.start); m.object = e; m.computed = false; m.optional = false; m.property = parseIdentifierName(); e = fin(m); continue;
+            }
             if (isP("?.")) {
                 advance(false);
                 if (isP("(") && allowCall) { const c = mk("CallExpression", e.start); c.callee = e; c.optional = true; c.arguments = parseArguments(); e = fin(c); continue; }
@@ -898,7 +937,14 @@ function parseInternal(bytes, opts, inject) {
             else { s.declaration = parseAssignment(); semicolon(); }
             return fin(s);
         }
-        if (isP("*")) { unsupported("export * is not supported"); synchronize(); return errNode(s.start); }
+        if (isP("*")) {
+            unsupported("export * is not supported");
+            advance(true);                          // past `*`
+            if (isKw("as")) { advance(true); parseIdentifierName(); }   // `export * as ns`
+            if (isKw("from")) { advance(true); if (cur.type === "string") advance(false); }
+            semicolon();
+            return errNode(s.start);
+        }
         if (isP("{")) {
             s.specifiers = []; s.declaration = null; advance(true);
             while (!isP("}") && !atEof()) {
