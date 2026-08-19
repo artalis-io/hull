@@ -24,6 +24,19 @@ C-bridge call returning the IDENTICAL facts shape (Slice 5) and builds JS `unit`
 handle objects with the same accessor contract. Both feed the unchanged `model.build`, and the
 `_handles` payload shape is identical for both (section 5).
 
+**Unified lifecycle invariant (symmetric across frontends).**
+
+> ProjectDiscovery metadata is frontend-neutral. Frontend semantics are generation-scoped
+> capabilities available only on a RETAINED, OPEN discovery, independent of the frontend's
+> physical runtime lifetime.
+
+So `declaration_semantics` / `scope` are NEVER a function of "does the underlying AST/session
+happen to still exist." A DEFAULT discovery exposes normalized metadata only - semantic access is
+rejected for BOTH Lua and JavaScript. A `retain_frontend = true` discovery makes semantics + scope
+resolvable for BOTH, until `analyze.close(disc)`. The gate is an analyzer-owned generation lease
+(section 7), NOT the incidental fact that a Lua AST lives in the tool VM while a JS session was
+closed.
+
 Out of scope: the end-to-end mixed-language ProjectDiscovery through `hull dev` /
 `hull dev --agent` / `hull agent inspect`, the generation publish/read lifecycle, and the full
 security-boundary validation (Slice 7). This slice delivers the plumbing + a direct integration
@@ -168,7 +181,9 @@ handle table, and the lazy-open failure latch (section 8).
 `collect_decls` stays unchanged in structure (it consumes `fe` + `unit` + the `declaration`
 objects through the accessors). The two handle layers stay separate: the bridge-private ids live
 only inside the retained handle objects; the public declaration carries the model `handle`; the
-projection drops `_handles` (D6).
+projection drops `_handles` (D6). Semantic access to those handles is NOT via
+`resolve_handle().frontend.*` (internal only) but via the lifecycle-gated
+`analyze.declaration_semantics` / `analyze.scope` (section 7.2).
 
 ## 6. Registry activation
 
@@ -197,31 +212,83 @@ reports JavaScript's `analyzable` flag + capabilities the same way. `known_exts`
 
 ## 7. Explicit teardown (per generation)
 
-The analyzer OWNS open + close of the one JS session; consumers NEVER call `tool.frontend_close`
-or touch a token. `retain_frontend` is normalized to a STRICT boolean (`opts.retain_frontend ==
-true`; anything else is false).
+The analyzer OWNS the whole semantic lifecycle through a FRONTEND-NEUTRAL generation LEASE and
+analyzer-controlled semantic APIs; consumers NEVER call `tool.frontend_close`, touch a token, or
+resolve a handle's frontend directly. `retain_frontend` is normalized to a STRICT boolean
+(`opts.retain_frontend == true`; anything else is false).
 
-- OPEN lazily on the first JS file (section 5), so a Lua-only project opens no session.
-- DEFAULT (inspection) mode: in `analyze_unprotected`, AFTER `model.build` and BEFORE returning
-  the discovery, if a JS session was opened, close it (`tool.frontend_close("javascript",
-  ctx.js_token)`). Projection does NOT require a live session - the facts are already extracted -
-  so the returned discovery's JS handles are intentionally DEAD/unresolvable, and the projection
-  drops `_handles` anyway.
-- RETAINED (`retain_frontend = true`) mode: the live session LEASE is attached to the discovery
-  INTERNALLY (`disc._frontend_lease = { js_token = ctx.js_token }`, generation-internal, never
-  serialized). The analyzer exposes ONE idempotent close operation:
+### 7.1 The generation lease (all frontends)
 
-  ```
-  analyze.close(disc)   -- closes disc._frontend_lease's session if any; safe to call twice.
-  ```
+Every discovery carries a private, generation-internal, never-serialized lease (following Hull's
+existing `_`-prefixed model-internal convention), conceptually:
 
-  A consumer that used semantics/scope calls `analyze.close(disc)` when finished. It is the ONLY
-  public way to release the lease; `analyze.close` on a discovery with no lease, or a second call,
-  is a no-op (double-close safe). Consumers must not reach for a token.
-- FAILURE: the PUBLIC protected boundary (`M.analyze`) closes the session on EVERY failure path -
-  a `pcall`-guarded cleanup that closes `ctx.js_token` if it was opened and no lease was handed
-  out (or, in retain mode, still closes on a mid-analysis fault so a crash never leaks a live
-  QuickJS session). `analyze.close` remains valid and idempotent afterward.
+```
+disc._frontend_lease = {
+    retained = true | false,     -- was this discovery created with retain_frontend?
+    open     = true | false,     -- is semantic resolution still allowed?
+    sessions = { javascript = <session_token>, ... },   -- live per-language runtime leases (JS only today)
+}
+```
+
+The lease is FRONTEND-NEUTRAL: `retained`/`open` gate BOTH Lua and JavaScript semantics. `sessions`
+holds only the per-language RUNTIME leases that need an explicit close (today just the JS token;
+Lua needs none - its AST lives in the tool VM). A Lua-only project has an empty `sessions` but the
+SAME `retained`/`open` flags.
+
+- **Default discovery** (`retain_frontend` false): `analyze_one` opens the JS session lazily as
+  needed for FACTS; after `model.build`, the analyzer closes any JS session and sets the lease
+  `{ retained = false, open = false, sessions = {} }`. The Lua AST physically remains in
+  `_handles`, but the lease says NOT retained, so the analyzer semantic API rejects Lua and JS
+  identically. Projection needs no live runtime.
+- **Retained discovery** (`retain_frontend = true`): the JS session stays open; the lease is
+  `{ retained = true, open = true, sessions = { javascript = token } }` (or empty `sessions` for a
+  Lua-only project). Semantics + scope resolve for BOTH languages until `analyze.close`.
+
+### 7.2 Analyzer-controlled semantic APIs (the ONLY public lowering path)
+
+`resolve_handle(disc, handle)` stays INTERNAL (tests / lower-level implementation); it is NO
+LONGER the public semantic path. A consumer must not do
+`resolve_handle(disc, h).frontend.declaration_semantics(...)` - that would bypass the lifecycle
+gate. Instead the analyzer exposes:
+
+```
+analyze.declaration_semantics(disc, handle) -> (record, nil) | (nil, diagnostic)
+analyze.scope(disc, handle)                 -> (model, nil)  | (nil, diagnostic)
+```
+
+Each, uniformly for every frontend, and NEVER raising:
+1. validate `disc` + `handle` (a well-formed discovery with a `_frontend_lease` and an integer
+   handle in `_handles`);
+2. require `lease.retained == true` (else `project.frontend_not_retained`);
+3. require `lease.open == true` (else `project.frontend_closed`);
+4. resolve the frontend-neutral handle payload via the internal `resolve_handle`
+   (else `project.handle_invalid`);
+5. call the frontend adapter (`resolved.frontend.declaration_semantics(resolved.declaration)` /
+   `resolved.frontend.scope(resolved.unit)`);
+6. return the frontend's `(record/model, nil)` or `(nil, frontend_diagnostic)` - a
+   frontend-specific error (`lua.internal` / `js.internal` / `js.limit.*`) is only reachable AFTER
+   the lifecycle check passes.
+
+So the SAME lifecycle condition yields the SAME frontend-neutral code regardless of language, and
+a default Lua discovery is rejected by the same API, with the same code, as a default JS discovery.
+
+### 7.3 analyze.close + failure cleanup
+
+```
+analyze.close(disc)   -- frontend-neutral, idempotent
+```
+
+Closes any live per-language runtime in `lease.sessions` (today `tool.frontend_close("javascript",
+token)`), sets `lease.open = false`, and clears `lease.sessions`. It is SAFE on a default /
+non-retained discovery (a no-op), safe to call TWICE (the second finds `open == false`), and is
+SUFFICIENT to invalidate BOTH Lua and JavaScript semantic access logically (via `open = false`).
+After close, neither frontend resolves semantics/scope through the analyzer API.
+
+FAILURE: the PUBLIC protected boundary (`M.analyze`) closes any opened JS session on EVERY failure
+path (a `pcall`-guarded cleanup) and returns a discovery whose lease is `{ retained=false,
+open=false }`, so a mid-analysis fault never leaves a live QuickJS session AND the (failed)
+discovery is not semantically live for Lua or JavaScript. `analyze.close` stays valid + idempotent
+afterward.
 
 ## 8. Transport validation (reaffirmed at the boundary)
 
@@ -252,6 +319,19 @@ unavailable or `open` returned 0), the analyzer records the failure ONCE in `ctx
 Each JS source in that generation is then reported with an honest per-source diagnostic
 (`status:"error"`, `code:"javascript.internal"` / `project.frontend.unsupported` as appropriate),
 so the discovery is honestly incomplete rather than silently empty or repeatedly retrying.
+
+**Frontend-neutral LIFECYCLE diagnostics (analyzer-level).** The analyzer semantic APIs
+(section 7.2) return one frontend-neutral code per lifecycle condition, IDENTICAL whether the
+handle is Lua or JavaScript:
+
+- `project.frontend_not_retained` - the discovery was not created with `retain_frontend = true`.
+- `project.frontend_closed`       - the lease has been closed (`analyze.close`), or the analysis
+                                    failed.
+- `project.handle_invalid`        - the handle is malformed / not in `_handles`.
+
+A FRONTEND-SPECIFIC failure returned AFTER a successful lifecycle check keeps its own code
+(`lua.internal`, `js.internal`, `js.limit.*`) - those are reachable only once retained + open +
+resolved.
 
 ## 9. The stale-token ABA test (the Slice-5 deferral, now testable)
 
@@ -289,11 +369,22 @@ distinguishes generations even under slot reuse.
 - **registry activation**: `for_ext("js")` is analyzable with engine "javascript" WHEN available;
   `registry.frontends()` reports JavaScript analyzable with the proxy capabilities; a `.js` file
   is analyzed, not unsupported.
-- **retained-generation ownership**: a DEFAULT discovery returns dead/unresolvable JS handles
-  (semantics/scope through resolve_handle report stale); a RETAINED (`retain_frontend=true`)
-  discovery resolves semantics + scope; `analyze.close(disc)` then invalidates them; a SECOND
-  `analyze.close(disc)` is a safe no-op; a forced mid-analysis failure still closes the session
-  (no leak); `retain_frontend` is a strict boolean.
+- **lifecycle SYMMETRY (both languages, via the analyzer semantic API)**:
+  1. default LUA discovery -> normalized facts available; `analyze.declaration_semantics` rejected
+     `project.frontend_not_retained`.
+  2. default JAVASCRIPT discovery -> normalized facts available; rejected with the SAME
+     `project.frontend_not_retained` code.
+  3. retained MIXED discovery (`retain_frontend=true`) -> Lua semantics resolve, JS semantics
+     resolve, `analyze.scope` resolves for both.
+  4. after `analyze.close(disc)` -> Lua semantics rejected, JS semantics rejected, scope rejected
+     for both (`project.frontend_closed`); a repeated `analyze.close` succeeds safely.
+  5. invalid handle -> rejected through the analyzer boundary with `project.handle_invalid`, same
+     code regardless of language.
+  6. internal-payload bypass -> the public projection contains no handles, leases, session tokens,
+     unit_ids, decl_ids, or AST data.
+  7. failure cleanup -> a mid-analysis failure closes any JS session; the discovery is not
+     semantically live (both Lua and JS rejected through the analyzer API); no leak.
+  8. `retain_frontend` is a strict boolean (a truthy non-`true` value is NOT retained).
 - **lazy-open failure latch**: with the engine forced unavailable, a project with several JS files
   reports each honestly (`status:"error"`/unsupported) and opens (attempts) at most once.
 - **analyze_one integration (the plumbing end to end)**: analyze a directory with a `.js` file
