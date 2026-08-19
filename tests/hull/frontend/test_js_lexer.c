@@ -182,8 +182,136 @@ UTEST(js_lexer, comments_and_asi)
     o = lex_str(s, "a // trailing\nb");     /* line comment */
     EXPECT_TRUE(has(o, "\"value\":\"b\",\"escaped\":false"));
     EXPECT_TRUE(has(o, ",\"nlBefore\":true"));
-    EXPECT_FALSE(has(o, "trailing"));       /* comment text is not a token */
+    EXPECT_TRUE(has(o, "\"kind\":\"line\""));   /* the comment is collected, with its text */
+    EXPECT_TRUE(has(o, "\"text\":\" trailing\""));
     free(o);
+    hl_js_session_destroy(s);
+}
+
+/* Comments are returned as a collection with exact ranges, raw/text, and kind. */
+UTEST(js_lexer, comment_collection)
+{
+    HlJsSession *s = hl_js_session_create(NULL);
+    ASSERT_TRUE(s != NULL);
+    char *o = lex_str(s, "// line\n/* block */\n/** jsdoc */\nx");
+    EXPECT_TRUE(has(o, "\"kind\":\"line\",\"start\":1,\"stop\":8,\"raw\":\"// line\",\"text\":\" line\""));
+    EXPECT_TRUE(has(o, "\"kind\":\"block\""));
+    EXPECT_TRUE(has(o, "\"kind\":\"jsdoc\",\"start\":21,\"stop\":33"));   // the /** ... */ jsdoc block
+    EXPECT_TRUE(has(o, "\"text\":\"* jsdoc \""));   // raw inner content (leading * kept; Slice 3 strips it)
+    // an empty jsdoc-looking block is a plain block, not jsdoc
+    free(o); o = NULL;
+    o = lex_str(s, "/**/x");
+    EXPECT_TRUE(has(o, "\"kind\":\"block\",\"start\":1,\"stop\":5"));
+    EXPECT_FALSE(has(o, "\"kind\":\"jsdoc\""));
+    free(o); o = NULL;
+    /* CRLF inside a block comment + a trailing (unterminated) comment */
+    o = lex_str(s, "a /*x\r\ny*/ b /* nope");
+    EXPECT_TRUE(has(o, "\"kind\":\"block\""));
+    EXPECT_TRUE(has(o, "unterminated block comment"));
+    free(o);
+    hl_js_session_destroy(s);
+}
+
+/* Regex-vs-division must be correct for supported control flow (structural context model). */
+UTEST(js_lexer, regex_vs_division_control_flow)
+{
+    HlJsSession *s = hl_js_session_create(NULL);
+    ASSERT_TRUE(s != NULL);
+    /* regex after a control-flow `)` */
+    char *o = lex_str(s, "if (ok) /x/.test(s);");
+    EXPECT_TRUE(has(o, "\"type\":\"regex\",\"pattern\":\"x\""));
+    free(o); o = NULL;
+    /* division after a call `)` */
+    o = lex_str(s, "f(a) / b");
+    EXPECT_TRUE(has(o, "\"type\":\"punctuator\",\"value\":\"/\""));
+    EXPECT_FALSE(has(o, "\"type\":\"regex\""));
+    free(o); o = NULL;
+    /* division after an object-literal `}` value */
+    o = lex_str(s, "const x = {}; x / y;");
+    EXPECT_TRUE(has(o, "\"type\":\"punctuator\",\"value\":\"/\""));
+    EXPECT_FALSE(has(o, "\"type\":\"regex\""));
+    free(o); o = NULL;
+    /* regex after a block `}` (statement position) */
+    o = lex_str(s, "function f(){} /re/.test(x)");
+    EXPECT_TRUE(has(o, "\"type\":\"regex\",\"pattern\":\"re\""));
+    free(o);
+    hl_js_session_destroy(s);
+}
+
+/* Identifier start/continue validation, including escaped code points. */
+UTEST(js_lexer, identifier_validation)
+{
+    HlJsSession *s = hl_js_session_create(NULL);
+    ASSERT_TRUE(s != NULL);
+    /* abc == abc (valid) */
+    char *o = lex_str(s, "\\u0061bc");
+    EXPECT_TRUE(has(o, "\"type\":\"identifier\",\"value\":\"abc\",\"escaped\":true"));
+    EXPECT_FALSE(has(o, "js.syntax"));
+    free(o); o = NULL;
+    /* 0abc: escaped start is '0' (a digit) -> invalid identifier start */
+    o = lex_str(s, "\\u0030abc");
+    EXPECT_TRUE(has(o, "\"code\":\"js.syntax\""));
+    EXPECT_TRUE(has(o, "invalid escaped identifier start"));
+    free(o); o = NULL;
+    /* café (U+00E9 is a valid ID_Continue) -> clean identifier */
+    const uint8_t cafe[] = { 'c','a','f',0xc3,0xa9 };
+    o = lex_json(s, cafe, sizeof(cafe));
+    EXPECT_TRUE(has(o, "\"type\":\"identifier\""));
+    EXPECT_FALSE(has(o, "js.syntax"));
+    free(o); o = NULL;
+    /* an emoji (U+1F600) is NOT a valid identifier char -> unexpected character */
+    const uint8_t emoji[] = { 0xf0, 0x9f, 0x98, 0x80 };
+    o = lex_json(s, emoji, sizeof(emoji));
+    EXPECT_TRUE(has(o, "\"code\":\"js.syntax\""));
+    EXPECT_TRUE(has(o, "unexpected character"));
+    EXPECT_FALSE(has(o, "\"type\":\"identifier\""));
+    free(o);
+    hl_js_session_destroy(s);
+}
+
+/* Numeric separator validation matrix. */
+UTEST(js_lexer, numeric_separators)
+{
+    HlJsSession *s = hl_js_session_create(NULL);
+    ASSERT_TRUE(s != NULL);
+    /* valid: 1_000, 0xFF_FF */
+    char *o = lex_str(s, "1_000 + 0xFF_FF");
+    EXPECT_FALSE(has(o, "js.syntax"));
+    free(o); o = NULL;
+    o = lex_str(s, "1__2");   EXPECT_TRUE(has(o, "js.syntax")); free(o); o = NULL;   /* doubled */
+    o = lex_str(s, "1_");     EXPECT_TRUE(has(o, "js.syntax")); free(o); o = NULL;   /* trailing */
+    o = lex_str(s, "0x_FF");  EXPECT_TRUE(has(o, "js.syntax")); free(o); o = NULL;   /* leading in hex */
+    o = lex_str(s, "1_.5");   EXPECT_TRUE(has(o, "js.syntax")); free(o); o = NULL;   /* before '.' */
+    o = lex_str(s, "1e_5");   EXPECT_TRUE(has(o, "js.syntax")); free(o); o = NULL;   /* after 'e' */
+    hl_js_session_destroy(s);
+}
+
+/* U+2028 / U+2029 terminate a regex literal (unterminated). */
+UTEST(js_lexer, regex_line_separators)
+{
+    HlJsSession *s = hl_js_session_create(NULL);
+    ASSERT_TRUE(s != NULL);
+    /* x = /ab<U+2028>c/  -> the LS terminates the regex */
+    const uint8_t src[] = { 'x',' ','=',' ','/','a','b', 0xe2,0x80,0xa8, 'c','/' };
+    char *o = lex_json(s, src, sizeof(src));
+    EXPECT_TRUE(has(o, "unterminated regular expression"));
+    free(o);
+    hl_js_session_destroy(s);
+}
+
+/* maxDiagnostics caps ordinary diagnostics but retains terminal js.limit.* diagnostics. */
+UTEST(js_lexer, diagnostic_budget)
+{
+    HlJsSession *s = hl_js_session_create(NULL);
+    ASSERT_TRUE(s != NULL);
+    char *out = NULL; size_t out_len = 0;
+    /* many stray '@' chars, each an ordinary js.syntax, capped at maxDiagnostics=2 */
+    int rc = hl_js_session_analyze(s, "hull:source:lextest", "lex",
+                                   (const uint8_t *)"@@@@@@@@", 8, "t.js",
+                                   "{\"maxDiagnostics\":2}", 20, &out, &out_len);
+    (void)rc;
+    EXPECT_TRUE(has(out, "\"code\":\"js.limit.diagnostics\""));   /* terminal cap diagnostic retained */
+    free(out);
     hl_js_session_destroy(s);
 }
 
