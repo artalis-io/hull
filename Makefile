@@ -669,20 +669,25 @@ HULL_HAS_TUI := 0
 endif
 
 ifeq ($(HL_TUI_TOOLCHAIN),1)
-# The cap core lives in libhull_feature-tui.a; the per-runtime bridges are now
-# separate archives (issue #114, Phase D). hull links both runtime VMs, so
-# force-load all three (cap core + both bridges) for its own --tui commands.
-TUI_TOOLCHAIN_ARCHIVE := $(BUILDDIR)/libhull_feature-tui.a \
-                         $(BUILDDIR)/libhull_feature-tui-lua.a \
-                         $(BUILDDIR)/libhull_feature-tui-js.a
+# The cap core lives in libhull_feature-tui.a; the per-runtime bridges are separate
+# archives (issue #114, Phase D). Force-load the cap core + ONLY the per-runtime
+# bridge(s) whose VM this build actually links (the js bridge references QuickJS, so
+# a lua-only hull that omits QuickJS must NOT force-load it -- it would not link).
+# Mirrors the runtime VM selection (RUNTIME=all links both; lua/js link one).
+TUI_TOOLCHAIN_RT_LIBS :=
+ifneq ($(RUNTIME),js)
+TUI_TOOLCHAIN_RT_LIBS += $(BUILDDIR)/libhull_feature-tui-lua.a
+endif
+ifneq ($(RUNTIME),lua)
+TUI_TOOLCHAIN_RT_LIBS += $(BUILDDIR)/libhull_feature-tui-js.a
+endif
+TUI_TOOLCHAIN_ARCHIVE := $(BUILDDIR)/libhull_feature-tui.a $(TUI_TOOLCHAIN_RT_LIBS)
 ifeq ($(UNAME_S),Darwin)
 TUI_TOOLCHAIN_LDFLAGS := -Wl,-force_load,$(BUILDDIR)/libhull_feature-tui.a \
-                         -Wl,-force_load,$(BUILDDIR)/libhull_feature-tui-lua.a \
-                         -Wl,-force_load,$(BUILDDIR)/libhull_feature-tui-js.a
+                         $(foreach lib,$(TUI_TOOLCHAIN_RT_LIBS),-Wl,-force_load,$(lib))
 else
 TUI_TOOLCHAIN_LDFLAGS := -Wl,--whole-archive $(BUILDDIR)/libhull_feature-tui.a \
-                         $(BUILDDIR)/libhull_feature-tui-lua.a \
-                         $(BUILDDIR)/libhull_feature-tui-js.a -Wl,--no-whole-archive
+                         $(TUI_TOOLCHAIN_RT_LIBS) -Wl,--no-whole-archive
 endif
 else
 TUI_TOOLCHAIN_ARCHIVE :=
