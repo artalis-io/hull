@@ -9,6 +9,7 @@ import { lex, createTokenizer } from "hull:source:lexer";
 import { parse, __parseWithInjection } from "hull:source:parser";
 import { attach as attachAnnotations } from "hull:source:annotations";
 import { makeBudget } from "hull:source:diagnostic";
+import { resolve as resolveScopeModel } from "hull:source:scope";
 
 // Structural-default lexing (the standalone convenience path).
 function run(srcBuf, path, opts) {
@@ -111,4 +112,12 @@ function runAttachCorrupt(srcBuf, path) {
     return { schema_version: 1, status: "ok", total: budget.list.length, internal_count: internal };
 }
 
-globalThis.__hull_frontend = { lex: run, lexDirected: runDirected, parse: runParse, parseInject: runParseInject, reattach: runReattach, attachCorrupt: runAttachCorrupt };
+// Scope resolver driver: parse then resolve, returning the scope model as JSON.
+function runResolveScope(srcBuf, path, opts) {
+    const u = parse(new Uint8Array(srcBuf), { path: path || "test.js" });
+    if (opts && opts.corruptAst) u.ast = { type: "Program", get body() { throw new Error("injected internal defect"); } };
+    const m = resolveScopeModel(u);
+    return { schema_version: 1, status: "ok", ok: m.ok, bindings: m.bindings, refs: m.refs, error: m.error };
+}
+
+globalThis.__hull_frontend = { lex: run, lexDirected: runDirected, parse: runParse, parseInject: runParseInject, reattach: runReattach, attachCorrupt: runAttachCorrupt, resolveScope: runResolveScope };
