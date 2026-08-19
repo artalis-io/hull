@@ -17,7 +17,8 @@ TEST_SRCS := $(shell find $(TESTDIR)/hull -name 'test_*.c')
 ifeq ($(RUNTIME),js)
   TEST_SRCS := $(filter-out %/test_lua.c,$(TEST_SRCS))
 else ifeq ($(RUNTIME),lua)
-  TEST_SRCS := $(filter-out %/test_js.c,$(TEST_SRCS))
+  # test_js_session (the JS tooling runtime) needs QuickJS, absent in a lua-only build.
+  TEST_SRCS := $(filter-out %/test_js.c %/test_js_session.c,$(TEST_SRCS))
 endif
 
 # Drop DB-dependent tests in pure-compute builds.
@@ -168,6 +169,13 @@ $(BUILDDIR)/test_%: $(TESTDIR)/hull/cap/test_%.c $(TEST_COMMON_DEPS) | $(BUILDDI
 # repo-root source tree via package.path.
 $(BUILDDIR)/test_lua_source: $(TESTDIR)/hull/source/test_lua_source.c $(LUA_OBJS) | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -Ivendor/lua -o $@ $< $(LUA_OBJS) -lm $(LDFLAGS)
+
+# hull.frontend JS tooling runtime (Slice 1): links the restricted QuickJS tooling session
+# + the cli-js registry + vendored QuickJS. Proves the runtime / byte transport / module
+# loading / limits / exception-conversion / lifecycle independently of any parser. Lives
+# under tests/hull/frontend/, so it needs an explicit recipe (not the cap/ pattern rule).
+$(BUILDDIR)/test_js_session: $(TESTDIR)/hull/frontend/test_js_session.c $(FRONTEND_JS_SESSION_OBJ) $(STDLIB_JS_CLI_REGISTRY_O) $(QJS_OBJS) | $(BUILDDIR)
+	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -Ivendor/quickjs -o $@ $< $(FRONTEND_JS_SESSION_OBJ) $(STDLIB_JS_CLI_REGISTRY_O) $(QJS_OBJS) -lm -lpthread $(LDFLAGS)
 
 # Read-only shared-heap C-API test: build-time AOT fixture. Generate an .aot from
 # the embedded .wasm via the Hull-built wamrc when present (arch + OS correct);

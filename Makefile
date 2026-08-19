@@ -1444,6 +1444,42 @@ $(foreach f,$(STDLIB_JS_FILES),$(eval $(call STDLIB_JS_RULE,$(f))))
 
 STDLIB_JS_XXD_HDRS := $(STDLIB_JS_HDRS)
 
+# ── cli-js tooling embedding (the restricted-QuickJS JS source frontend) ──────
+# stdlib/cli/js/** are TRUSTED, tooling-only JS modules loaded ONLY into the restricted
+# QuickJS tooling runtime (src/hull/frontend/js_session.c) -- never the application JS
+# runtime. Names strip stdlib/cli/js/: stdlib/cli/js/hull/probe.js -> hull:probe.
+STDLIB_JS_CLI_FILES := $(shell find stdlib/cli/js -name '*.js' -not -path '*/tests/*' 2>/dev/null)
+stdlib_js_cli_hdr = $(BUILDDIR)/$(subst /,_,$(patsubst stdlib/%.js,stdlib_%.h,$(1)))
+STDLIB_JS_CLI_HDRS := $(foreach f,$(STDLIB_JS_CLI_FILES),$(call stdlib_js_cli_hdr,$(f)))
+define STDLIB_JS_CLI_RULE
+$(call stdlib_js_cli_hdr,$(1)): $(1) | $(BUILDDIR)
+	xxd -i $$< > $$@ && $(XXD_CONST_SEAL) $$@ && rm -f $$@.bak
+endef
+$(foreach f,$(STDLIB_JS_CLI_FILES),$(eval $(call STDLIB_JS_CLI_RULE,$(f))))
+
+STDLIB_JS_CLI_REGISTRY_C := $(BUILDDIR)/stdlib_js_cli_registry.c
+STDLIB_JS_CLI_REGISTRY_O := $(BUILDDIR)/stdlib_js_cli_registry.o
+$(STDLIB_JS_CLI_REGISTRY_C): $(STDLIB_JS_CLI_HDRS) | $(BUILDDIR)
+	@echo "/* Auto-generated cli-js tooling registry - do not edit */" > $@
+	@( for hdr in $(STDLIB_JS_CLI_HDRS); do echo "#include \"$$(basename $$hdr)\""; done ) | LC_ALL=C sort >> $@
+	@echo "" >> $@
+	@echo "#include \"hull/entry.h\"" >> $@
+	@echo "const HlEntry hl_stdlib_js_cli_entries[] = {" >> $@
+	@( for f in $(STDLIB_JS_CLI_FILES); do \
+		varname=$$(echo "$$f" | sed 's/[\/.\-]/_/g'); \
+		modname=$$(echo "$$f" | sed 's|^stdlib/cli/js/||; s|\.js$$||; s|/|:|g'); \
+		echo "$$modname	    { \"$$modname\", $${varname}, sizeof($${varname}) },"; \
+	done ) | LC_ALL=C sort | cut -f2- >> $@
+	@echo "    { 0, 0, 0 }" >> $@
+	@echo "};" >> $@
+$(STDLIB_JS_CLI_REGISTRY_O): $(STDLIB_JS_CLI_REGISTRY_C) | $(BUILDDIR)
+	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
+
+# The restricted QuickJS tooling runtime (needs QuickJS; lives in the hull binary only).
+FRONTEND_JS_SESSION_OBJ := $(BUILDDIR)/frontend_js_session.o
+$(FRONTEND_JS_SESSION_OBJ): $(SRCDIR)/hull/frontend/js_session.c | $(BUILDDIR)
+	$(CC) $(CFLAGS) $(INCLUDES) -Ivendor/quickjs -c -o $@ $<
+
 # ── Context doc embedding (xxd) ───────────────────────────────────────
 #
 # Markdown docs in stdlib/context/*.md are embedded for hull agent context.
@@ -2493,6 +2529,12 @@ endif
 # with each list's distinct ones, so a shared-core extraction would REORDER the
 # link line and risk weak/strong seam resolution — see docs/build_arc_audit.md.)
 HULL_LINK_OBJS := $(CAP_OBJS) $(CAP_TOOL_OBJ) $(CAP_TEST_OBJ) $(CMD_OBJS) $(RT_OBJS) $(ALLOC_OBJ) $(ASYNC_OBJ) $(COMPRESS_OBJ) $(MINIZ_OBJ) $(WORKER_DB_OBJ) $(WORKER_WASM_OBJ) $(WORKER_GPU_OBJ) $(MANIFEST_OBJ) $(MODULE_OBJ) $(ASYNC_BACKEND_OBJS) $(NET_BACKEND_OBJS) $(SANDBOX_OBJ) $(SANDBOX_TOOL_OBJ) $(SIG_OBJ) $(RELEASE_OBJ) $(RELEASE_IO_OBJ) $(TOOLS_INSTALL_OBJ) $(PLATFORM_SIG_OBJ) $(EMBEDDED_PLATFORM_SIG_OBJ) $(TEST_RUNNER_OBJ) $(RUNTIME_FACTORY_OBJ) $(STATIC_OBJ) $(MIGRATE_OBJ) $(VFS_OBJ) $(PATH_NORM_OBJ) $(THREAD_AFFINITY_OBJ) $(CACHE_DIR_OBJ) $(FS_UTIL_OBJ) $(BLOB_STORE_OBJ) $(CACHE_REGISTRY_OBJ) $(CACERT_OBJ) $(TLS_CLIENT_OBJ) $(TLS_TRANSPORT_OBJ) $(TLS_TRANSPORT_STUB_OBJ) $(CSP_OBJ) $(SH_SEAL_ARENA_OBJ) $(SBOM_OBJ) $(STDLIB_FEATURE_OBJ) $(APP_CONTEXT_OBJ) $(APP_CONTEXT_RT_OBJ) $(AGENT_LIB_OBJ) $(AGENT_API_OBJ) $(TOOL_OBJ) $(BUILD_ASSET_OBJ) $(COMPILER_OBJ) $(OBJ_EMIT_OBJ) $(LINKER_SYSTEM_OBJ) $(LINKER_LLD_OBJ) $(LINKER_ZIG_OBJ) $(BUNDLED_OBJS_OBJ) $(MAIN_OBJ) $(SERVE_OBJ) $(ENTRY_OBJ) $(APP_EXTRA_OBJS) $(STDLIB_REGISTRY_O) $(STDLIB_RT_REGISTRY_OBJS) $(STDLIB_TOOLCHAIN_REGISTRY_O) $(RUNTIME_TOOLCHAIN_REGISTRY_O) $(WAMR_OBJS) $(VEND_OBJS) $(MBEDTLS_OBJS) $(SQLITE_OBJ) $(LOG_OBJ) $(LOG_LOCK_OBJ) $(SH_ARENA_OBJ) $(SH_JSON_OBJ) $(TWEETNACL_OBJ) $(STB_OBJ) $(PLEDGE_OBJS)
+
+# The JS source-frontend tooling runtime needs QuickJS -> linked into the hull binary only
+# when this build links QuickJS (RUNTIME=js or the default both; NOT a lua-only hull).
+ifneq ($(RUNTIME),lua)
+  HULL_LINK_OBJS += $(FRONTEND_JS_SESSION_OBJ) $(STDLIB_JS_CLI_REGISTRY_O)
+endif
 
 $(BUILDDIR)/hull: $(HULL_LINK_OBJS) $(KEEL_LIB) $(TUI_TOOLCHAIN_ARCHIVE) | $(RUNTIME_FEATURE_LIBS)
 	$(CC) $(LDFLAGS) -o $@ $(HULL_LINK_OBJS) $(KEEL_LIB) $(TUI_TOOLCHAIN_LDFLAGS) $(WGPU_LIB) $(WGPU_FRAMEWORKS) $(DUCKDB_LIBS) -lm -lpthread
