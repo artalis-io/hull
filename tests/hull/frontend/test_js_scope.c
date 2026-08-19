@@ -243,6 +243,68 @@ UTEST(js_scope, imports_and_exports)
     hl_js_session_destroy(s);
 }
 
+/* Export-wrapped declarations are predeclared (self/references resolve, not global); anonymous
+ * defaults produce no binding; export { x } reads local x but export { x } from "m" is a
+ * re-export (no reference); a default function body is traversed exactly once. */
+UTEST(js_scope, exports)
+{
+    HlJsSession *s = hl_js_session_create(NULL);
+    ASSERT_TRUE(s != NULL);
+    /* export const/let/var each bind at module scope */
+    char *o = scope_of(s, "export const x = 1; export let y = 2; export var z = 3; x; y; z;");
+    EXPECT_TRUE(has(o, "\"name\":\"x\",\"kind\":\"const\",\"scope\":\"module\""));
+    EXPECT_TRUE(has(o, "\"name\":\"y\",\"kind\":\"let\",\"scope\":\"module\""));
+    EXPECT_TRUE(has(o, "\"name\":\"z\",\"kind\":\"var\",\"scope\":\"module\""));
+    EXPECT_FALSE(has(o, "\"kind\":\"global\""));               /* x/y/z all resolve locally */
+    free(o); o = NULL;
+    /* named exported function recursion: f bound, the body self-ref resolves (not global) */
+    o = scope_of(s, "export function f() { return f; }");
+    EXPECT_TRUE(has(o, "\"name\":\"f\",\"kind\":\"function\",\"scope\":\"module\""));
+    EXPECT_TRUE(has(o, "\"access\":\"read\",\"declRange\":{\"start\":17,\"stop\":18}"));   /* f resolves to its binding */
+    EXPECT_FALSE(has(o, "\"kind\":\"global\""));
+    free(o); o = NULL;
+    /* named default function recursion: g bound at module scope, body self-ref resolves */
+    o = scope_of(s, "export default function g() { return g; }");
+    EXPECT_TRUE(has(o, "\"name\":\"g\",\"kind\":\"function\",\"scope\":\"module\""));
+    EXPECT_TRUE(has(o, "\"access\":\"read\",\"declRange\":{\"start\":25,\"stop\":26}"));
+    EXPECT_FALSE(has(o, "\"kind\":\"global\""));
+    free(o); o = NULL;
+    /* exported class binding used from a method */
+    o = scope_of(s, "export class C { m() { return C; } }");
+    EXPECT_TRUE(has(o, "\"name\":\"C\",\"kind\":\"class\",\"scope\":\"module\""));
+    EXPECT_TRUE(has(o, "\"access\":\"read\",\"declRange\":{\"start\":14,\"stop\":15}"));
+    free(o); o = NULL;
+    /* anonymous default function/class produce NO declaration binding */
+    o = scope_of(s, "export default function () { return 1; }");
+    EXPECT_TRUE(has(o, "\"bindings\":[]"));
+    free(o); o = NULL;
+    o = scope_of(s, "export default class {};");
+    EXPECT_TRUE(has(o, "\"bindings\":[]"));
+    free(o); o = NULL;
+    /* local export { y } reads y (at 7-8); re-export export { z } from "m" creates NO reference */
+    o = scope_of(s, "const y = 1; export { y }; export { z } from \"m\";");
+    EXPECT_TRUE(has(o, "\"access\":\"read\",\"declRange\":{\"start\":7,\"stop\":8}"));   /* export { y } read */
+    EXPECT_FALSE(has(o, "\"name\":\"z\""));                     /* re-export: z is NOT a reference */
+    free(o);
+    hl_js_session_destroy(s);
+}
+
+/* A default-exported function body is traversed EXACTLY ONCE: its nested binding + self-ref each
+ * appear once (double traversal would double them). */
+UTEST(js_scope, default_function_single_traversal)
+{
+    HlJsSession *s = hl_js_session_create(NULL);
+    ASSERT_TRUE(s != NULL);
+    char *o = scope_of(s, "export default function g() { let inner = 1; return g + inner; }");
+    /* single traversal: the body block is entered once, so `inner` is declared once (double
+     * traversal would re-enter and declare it twice). */
+    EXPECT_EQ(count(o, "\"name\":\"inner\",\"kind\":\"let\""), 1);  /* exactly one binding record */
+    EXPECT_EQ(count(o, "\"name\":\"inner\""), 2);                  /* the binding + its single ref (double -> 4) */
+    EXPECT_EQ(count(o, "\"name\":\"g\""), 2);                      /* g binding + its single ref (double -> 3) */
+    free(o);
+    hl_js_session_destroy(s);
+}
+
 /* Shadowing: an inner block binding shadows an outer, with the shadow range pointing at the outer. */
 UTEST(js_scope, shadowing)
 {

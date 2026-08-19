@@ -134,9 +134,19 @@ function patternReads(st, pat) {
 
 // ---- function-wide var + top-level function collection (stops at nested functions) ----
 function isFn(t) { return t === "FunctionDeclaration" || t === "FunctionExpression" || t === "ArrowFunctionExpression"; }
+// A declaration-bearing export wrapper's inner declaration, else the statement itself. Module
+// declarations commonly appear as `export function f(){}` / `export const x` / `export default
+// function g(){}`; predeclaration must see through the wrapper to give the inner declaration its
+// normal module binding. An anonymous `export default function(){}` / `class{}` has no id and
+// therefore no binding.
+function exportInner(s) {
+    if (s && (s.type === "ExportNamedDeclaration" || s.type === "ExportDefaultDeclaration") && s.declaration) return s.declaration;
+    return s;
+}
 function declareVarsAndTopFns(st, bodyStmts, varScope) {
-    for (const s of bodyStmts) if (s && s.type === "FunctionDeclaration" && s.id) declare(st, varScope, s.id.name, "function", s.id, true);
+    for (const s of bodyStmts) { const d = exportInner(s); if (d && d.type === "FunctionDeclaration" && d.id) declare(st, varScope, d.id.name, "function", d.id, true); }
     // recursive var collection over the whole body subtree, stopping at nested function boundaries
+    // (descends through export wrappers, so `export var x` is collected).
     function rec(node) {
         if (!node || typeof node !== "object") return;
         if (isFn(node.type)) return;                                        // do not descend into nested functions
@@ -152,16 +162,17 @@ function declareVarsAndTopFns(st, bodyStmts, varScope) {
     }
     for (const s of bodyStmts) rec(s);
 }
-// Predeclare a block's DIRECT lexical children. includeFns=true for a nested block (block-level
-// function declarations are block-scoped); false for a function body (its top-level functions
-// already went to the function scope).
+// Predeclare a block's DIRECT lexical children, unwrapping declaration-bearing export wrappers.
+// includeFns=true for a nested block (block-level function declarations are block-scoped); false
+// for a function/module body (its top-level functions already went to the variable scope).
 function declareBlockLexical(st, stmts, blockScope, includeFns) {
-    for (const s of stmts) {
+    for (const s0 of stmts) {
+        const s = exportInner(s0);
         if (!s || typeof s !== "object") continue;
         if (s.type === "VariableDeclaration" && (s.kind === "let" || s.kind === "const")) {
             for (const d of s.declarations || []) patternNames(d.id, function (nm, idn) { declare(st, blockScope, nm, s.kind, idn, false); });
         } else if (s.type === "ClassDeclaration" && s.id) {
-            declare(st, blockScope, s.id.name, "class", s.id, false);
+            declare(st, blockScope, s.id.name, "class", s.id, false);      // incl. `export default class C`
         } else if (includeFns && s.type === "FunctionDeclaration" && s.id) {
             declare(st, blockScope, s.id.name, "function", s.id, false);
         }
@@ -254,11 +265,15 @@ function resolveStmt(st, s) {
         case "ImportDeclaration": return;                                  // bindings predeclared
         case "ExportNamedDeclaration":
             if (s.declaration) resolveStmt(st, s.declaration);
-            else for (const sp of s.specifiers || []) { const loc = sp.local; if (loc && loc.type === "Identifier") resolveRef(st, loc, "read"); }
+            // `export { x }` reads the local x; `export { x } from "m"` is a re-export (source set)
+            // and creates NO local/global reference.
+            else if (s.source == null) for (const sp of s.specifiers || []) { const loc = sp.local; if (loc && loc.type === "Identifier") resolveRef(st, loc, "read"); }
             return;
         case "ExportDefaultDeclaration":
-            if (s.declaration && s.declaration.type === "FunctionDeclaration") resolveFunction(st, s.declaration, null);
-            else if (s.declaration && s.declaration.type === "ClassDeclaration") resolveClass(st, s.declaration, false);
+            // ONE traversal: a function/class declaration goes through resolveStmt (which calls
+            // resolveFunction/resolveClass exactly once; the name is already predeclared); an
+            // expression default goes through resolveExpr.
+            if (s.declaration && (s.declaration.type === "FunctionDeclaration" || s.declaration.type === "ClassDeclaration")) resolveStmt(st, s.declaration);
             else if (s.declaration) resolveExpr(st, s.declaration);
             return;
         // BreakStatement / ContinueStatement / EmptyStatement / Error / DebuggerStatement: nothing

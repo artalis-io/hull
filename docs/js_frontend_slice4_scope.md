@@ -218,9 +218,21 @@ order (the read first). The binding's `reads` and `writes` counters each increme
   `e` and `v` are references.
 - Object/array BINDING patterns (in a declaration/param/catch): the bound names are
   BINDINGS, not references; their default-value expressions and computed keys are reads.
-- `import` specifiers: the imported names are BINDINGS, not references. `export { a }`: the
-  local name `a` is a **read** reference (it must resolve to a binding). `export default
-  <expr>`: the expression is read normally.
+- `import` specifiers: the imported names are BINDINGS, not references. `export { a }` (no
+  `from`): the local name `a` is a **read** reference (it must resolve to a binding).
+  `export { a } from "m"` (a re-export, `source` set): `a` is NOT a local/global reference -
+  it names an export of the other module, so it is ignored. `export default <expr>`: the
+  expression is read normally.
+
+**Export-wrapped declarations.** A module declaration commonly appears inside an
+`ExportNamedDeclaration` / `ExportDefaultDeclaration` wrapper (`export function f(){}`,
+`export const x = 1`, `export default function g(){}`, `export default class C {}`). The
+PREDECLARE pass unwraps the wrapper and gives the inner declaration its normal module
+binding (so a self-reference like `export function f(){ return f; }` resolves, not global);
+a NAMED default function/class binds its name, an ANONYMOUS default (`export default
+function(){}` / `class{}`) has no name and no binding. The RESOLVE pass traverses the inner
+declaration EXACTLY ONCE (one path through `resolveStmt`), so a default function's body /
+refs / nested bindings are counted a single time.
 - Labels (`break outer`, `continue loop`, `outer:`) are a SEPARATE namespace - not variable
   references; they are ignored by the resolver.
 - A `function f(){}` DECLARATION name is a binding, not a write reference (contrast Lua's
@@ -336,6 +348,10 @@ A new test_js_scope suite driving the `resolveScope` driver, covering the locked
   EXPRESSION name is body-only; `extends B` is a read.
 - **imports**: default/named/aliased/namespace bind in module scope; a ref from a function
   is a `closure` to an `import` binding; `export { a }` reads the binding.
+- **exports**: export const/let/var bind at module scope; a named exported/default function
+  or class binds (self-references resolve); an anonymous default binds nothing; `export { x }`
+  reads local x while `export { x } from "m"` (re-export) creates no reference; a default
+  function body is traversed exactly once.
 - **catch/loop**: catch param scoped to the catch block; `for (let x of ...)` scoped to the
   loop; `for (var i ...)` hoisted; loop-head self-visibility - `for (let x of x)` and
   `for (let x = x; ...)` resolve the RHS/initializer `x` to the loop binding (TDZ omitted).
