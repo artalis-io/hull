@@ -15,15 +15,30 @@
 
 local M = {}
 
--- Extension (no dot) -> registry row. `frontend_module` present + analyzable => a real
--- frontend to require; analyzable=false => a reserved, known-but-unanalyzable language.
+-- Extension (no dot) -> registry row. `engine` selects HOW analyze_one reaches the frontend
+-- ("lua" = in-process; "javascript" = the C bridge). A JS row's analyzability is CONDITIONAL on
+-- the tooling engine being compiled in (see `for_ext`): the QuickJS frontend session is not linked
+-- in a lua-only hull, so JavaScript is analyzable only when tool.frontend_available("javascript").
 local FRONTENDS = {
-    lua = { language = "lua",        frontend_module = "hull.project.frontend_lua",
-            analyzable = true,  extra_capabilities = nil },
-    js  = { language = "javascript", analyzable = false, extra_capabilities = {} },
-    mjs = { language = "javascript", analyzable = false, extra_capabilities = {} },
-    cjs = { language = "javascript", analyzable = false, extra_capabilities = {} },
+    lua = { language = "lua",        engine = "lua",        frontend_module = "hull.project.frontend_lua",
+            extra_capabilities = nil },
+    js  = { language = "javascript", engine = "javascript", frontend_module = "hull.project.frontend_javascript",
+            extra_capabilities = {} },
+    mjs = { language = "javascript", engine = "javascript", frontend_module = "hull.project.frontend_javascript",
+            extra_capabilities = {} },
+    cjs = { language = "javascript", engine = "javascript", frontend_module = "hull.project.frontend_javascript",
+            extra_capabilities = {} },
 }
+
+-- True iff the tooling engine for a row is compiled into this hull. Lua is always in; JavaScript
+-- needs the QuickJS frontend session (tool.frontend_available). Queried each time (the binding is
+-- a cheap constant in production; not memoized, so a test that swaps the tool stub sees the change).
+local function engine_available(engine)
+    if engine == "lua" then return true end
+    if engine == nil then return false end
+    local ok, v = pcall(function() return tool.frontend_available(engine) end)
+    return ok and v == true
+end
 
 -- Every known-language extension (sorted). These are the extensions the project scan
 -- collects as candidate APPLICATION source; analyzable ones get a frontend, the rest are
@@ -35,8 +50,17 @@ function M.known_exts()
     return out
 end
 
--- The registry row for an extension (no dot), or nil if the extension is not known.
-function M.for_ext(ext) return FRONTENDS[ext] end
+-- The registry row for an extension (no dot), or nil if unknown. Returns a COPY whose
+-- `analyzable` is computed at query time from engine availability (so a JS-less hull reports
+-- JavaScript known-but-unanalyzable, exactly as before this frontend shipped).
+function M.for_ext(ext)
+    local row = FRONTENDS[ext]
+    if not row then return nil end
+    local r = {}
+    for k, v in pairs(row) do r[k] = v end
+    r.analyzable = engine_available(row.engine)
+    return r
+end
 
 -- Load (require) the frontend module for an analyzable row. Returns the frontend table,
 -- or nil for a non-analyzable / unknown row.
@@ -51,7 +75,7 @@ end
 function M.frontends()
     local by_lang = {}
     for _, ext in ipairs(M.known_exts()) do
-        local row = FRONTENDS[ext]
+        local row = M.for_ext(ext)                 -- computed analyzable (engine availability)
         local e = by_lang[row.language]
         if not e then
             local caps = {}

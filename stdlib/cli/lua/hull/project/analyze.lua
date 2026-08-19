@@ -65,6 +65,56 @@ local function collect_decls(fe, unit, language, rel, handles)
     return out
 end
 
+local function diag(code, message, path)
+    return { severity = "error", code = code, message = message, path = path }
+end
+
+-- The uniform per-file seam: dispatch on the row's engine. `ctx` carries the generation's JS
+-- session token (opened lazily, latched on failure). Returns a per_source entry. Lua runs the
+-- in-process frontend; JavaScript makes one C-bridge call, both producing the identical facts
+-- shape and the SAME { frontend, unit, declaration } handle payload (via collect_decls).
+local function analyze_one(fe, row, src, rel, handles, ctx)
+    if row.engine == "javascript" then
+        if ctx.js_open_failed then
+            return { path = rel, language = row.language, role = "app", status = "error", declarations = {},
+                     diagnostics = { diag("javascript.internal",
+                         "JavaScript frontend session unavailable: " .. tostring(ctx.js_open_reason), rel) } }
+        end
+        if not ctx.js_token then                                   -- lazy open, once per generation
+            local token, oerr = tool.frontend_open("javascript")
+            if not token then
+                ctx.js_open_failed = true
+                ctx.js_open_reason = oerr or "frontend session open failed"
+                return { path = rel, language = row.language, role = "app", status = "error", declarations = {},
+                         diagnostics = { diag("javascript.internal",
+                             "JavaScript frontend session unavailable: " .. tostring(ctx.js_open_reason), rel) } }
+            end
+            ctx.js_token = token
+        end
+        local unit, _decls, diags = fe.analyze_source(ctx.js_token, rel, src)
+        stamp_path(diags, rel)
+        if unit == nil then
+            return { path = rel, language = row.language, role = "app", status = "error",
+                     declarations = {}, diagnostics = diags }
+        end
+        return { path = rel, language = row.language, role = "app",
+                 status = any_error(diags) and "error" or "analyzed",
+                 declarations = collect_decls(fe, unit, row.language, rel, handles),
+                 diagnostics = diags }
+    end
+    -- lua (in-process)
+    local unit, diags = fe.parse(src, rel)
+    stamp_path(diags, rel)
+    if unit == nil then
+        return { path = rel, language = row.language, role = "app", status = "error",
+                 declarations = {}, diagnostics = diags }
+    end
+    return { path = rel, language = row.language, role = "app",
+             status = any_error(diags) and "error" or "analyzed",
+             declarations = collect_decls(fe, unit, row.language, rel, handles),
+             diagnostics = diags }
+end
+
 -- The UNPROTECTED analysis: root validation/canonicalization + discovery + per-file
 -- frontend dispatch + model assembly. May raise on a frontend/adapter/model defect; the
 -- public M.analyze wraps this in a protected boundary (D1: "never raises").
@@ -94,55 +144,64 @@ local function analyze_unprotected(root_in, opts)
     end
     local root = canon
 
+    local retain = (opts.retain_frontend == true)     -- strict boolean; only `true` retains
+    local ctx = { js_token = nil, js_open_failed = false }
     local handles = { n = 0, map = {} }
-    local per_source, op_diags = {}, {}
-    local files, derr = discover.discover(root, { ext = registry.known_exts(), extra_exclude = { "static" } })
-    if derr then
-        -- Operational discovery failure: an invalid generation, never an empty clean scan.
-        op_diags[#op_diags + 1] = { severity = "error", code = "project.discovery_failed",
-                                    message = "source discovery failed: " .. tostring(derr), path = root }
-    else
-        for _, path in ipairs(files) do
-            local ext = path:match("%.([%w]+)$")
-            local row = ext and registry.for_ext(ext)
-            local rel = rel_path(root, path)
-            if row and row.analyzable then
-                local fe = registry.load(row)
-                local src = tool.read_file(path)
-                if not src then
-                    per_source[#per_source + 1] = { path = rel, language = row.language, role = "app",
-                        status = "error", declarations = {},
-                        diagnostics = { { severity = "error", code = "project.unreadable",
-                                          message = "cannot read source file", path = rel } } }
-                else
-                    local unit, diags = fe.parse(src, rel)
-                    stamp_path(diags, rel)
-                    if unit == nil then                          -- frontend internal / API failure
+
+    -- The per-file loop + model.build run under a pcall so the generation's JS session is ALWAYS
+    -- closed on a fault (finally-style), then the fault is re-raised for M.analyze's boundary.
+    local okb, disc = pcall(function()
+        local per_source, op_diags = {}, {}
+        local files, derr = discover.discover(root, { ext = registry.known_exts(), extra_exclude = { "static" } })
+        if derr then
+            op_diags[#op_diags + 1] = { severity = "error", code = "project.discovery_failed",
+                                        message = "source discovery failed: " .. tostring(derr), path = root }
+        else
+            for _, path in ipairs(files) do
+                local ext = path:match("%.([%w]+)$")
+                local row = ext and registry.for_ext(ext)
+                local rel = rel_path(root, path)
+                if row and row.analyzable then
+                    local fe = registry.load(row)
+                    local src = tool.read_file(path)
+                    if not src then
                         per_source[#per_source + 1] = { path = rel, language = row.language, role = "app",
-                            status = "error", declarations = {}, diagnostics = diags }
+                            status = "error", declarations = {},
+                            diagnostics = { diag("project.unreadable", "cannot read source file", rel) } }
                     else
-                        per_source[#per_source + 1] = { path = rel, language = row.language, role = "app",
-                            status = any_error(diags) and "error" or "analyzed",
-                            declarations = collect_decls(fe, unit, row.language, rel, handles),
-                            diagnostics = diags }
+                        per_source[#per_source + 1] = analyze_one(fe, row, src, rel, handles, ctx)
                     end
+                elseif row then
+                    -- Known but NON-analyzable language (e.g. JavaScript with the engine not
+                    -- compiled in): honest unsupported app source -> complete=false (D11).
+                    per_source[#per_source + 1] = { path = rel, language = row.language, role = "app",
+                        status = "unsupported",
+                        diagnostics = { { severity = "warning", code = "project.frontend.unsupported",
+                            message = "no analyzable frontend for language '" .. row.language .. "'",
+                            path = rel, language = row.language } } }
                 end
-            elseif row then
-                -- Known but NON-analyzable language (JavaScript): honest unsupported app
-                -- source -> the generation is complete=false (D11). Never parsed as Lua.
-                per_source[#per_source + 1] = { path = rel, language = row.language, role = "app",
-                    status = "unsupported",
-                    diagnostics = { { severity = "warning", code = "project.frontend.unsupported",
-                        message = "no analyzable frontend for language '" .. row.language .. "'",
-                        path = rel, language = row.language } } }
             end
-            -- An extension not in the registry is not project source; the scan never
-            -- returns it (discover restricts to known_exts), so there is no else branch.
         end
+        local d = model.build(root, gen, per_source, op_diags, source_kind)
+        d._handles = handles.map            -- generation-internal; NOT serialized (D6)
+        return d
+    end)
+
+    if not okb then
+        if ctx.js_token then pcall(function() tool.frontend_close("javascript", ctx.js_token) end) end
+        error(disc, 0)                      -- re-raise; M.analyze converts to a minimal invalid
     end
 
-    local disc = model.build(root, gen, per_source, op_diags, source_kind)
-    disc._handles = handles.map            -- generation-internal; NOT serialized (D6)
+    -- Attach the FRONTEND-NEUTRAL generation lease (docs 7.1). Default: close the JS session now
+    -- (metadata-only discovery). Retained: keep it open until analyze.close(disc). Both gate Lua
+    -- AND JavaScript semantics identically -- physical AST/session lifetime never leaks out.
+    if retain then
+        disc._frontend_lease = { retained = true, open = true,
+                                 sessions = ctx.js_token and { javascript = ctx.js_token } or {} }
+    else
+        if ctx.js_token then pcall(function() tool.frontend_close("javascript", ctx.js_token) end) end
+        disc._frontend_lease = { retained = false, open = false, sessions = {} }
+    end
     return disc
 end
 
@@ -167,6 +226,7 @@ local function minimal_invalid(root, gen, source_kind, code, message)
                            declarations_total = 0, declarations_annotated = 0, by_language = {} },
         _by_source     = {},
         _handles       = {},
+        _frontend_lease = { retained = false, open = false, sessions = {} },  -- not semantically live
     }
 end
 
@@ -183,7 +243,9 @@ function M.analyze(root, opts)
     local source_kind = (type(opts.source_kind) == "string") and opts.source_kind or "standalone"
     local root_disp   = tostring(root or ".")
 
-    local ok, result = pcall(analyze_unprotected, root, { generation = gen, source_kind = source_kind })
+    local retain = (opts.retain_frontend == true)      -- strict boolean; threaded to the analysis
+    local ok, result = pcall(analyze_unprotected, root,
+        { generation = gen, source_kind = source_kind, retain_frontend = retain })
     if ok then return result end
     -- Recovery uses the literal constructor -- if model.build was the defect, calling it
     -- again here would re-raise the same error OUTSIDE the pcall.
@@ -191,12 +253,71 @@ function M.analyze(root, opts)
         "internal analyzer failure: " .. tostring(result))
 end
 
--- Controlled generation-internal handle lookup: resolve an opaque declaration handle to
--- { frontend, unit, declaration } so a future lowerer can invoke frontend-specific
--- semantics (e.g. frontend.scope(unit)) THROUGH the adapter boundary. Handles are unique
--- within one generation and are not stable across generations/processes.
+-- INTERNAL generation-handle lookup: resolve an opaque declaration handle to
+-- { frontend, unit, declaration }. This is NO LONGER the public semantic path (it bypasses the
+-- lifecycle gate); the supported path is M.declaration_semantics / M.scope below. Kept for
+-- lower-level use / tests. Handles are unique within one generation, not stable across
+-- generations/processes.
 function M.resolve_handle(disc, handle)
     return disc and disc._handles and disc._handles[handle] or nil
+end
+
+-- The frontend-neutral generation-lease gate: semantics/scope are available ONLY on a retained,
+-- OPEN discovery, identically for every frontend (docs 7). Returns (true) or (nil, Diagnostic).
+local function lease_check(disc)
+    local lease = type(disc) == "table" and disc._frontend_lease or nil
+    if type(lease) ~= "table" or lease.retained ~= true then
+        return nil, diag("project.frontend_not_retained",
+            "frontend semantics are available only on a discovery created with retain_frontend = true")
+    end
+    if lease.open ~= true then
+        return nil, diag("project.frontend_closed", "the frontend generation has been closed")
+    end
+    return true
+end
+
+-- analyze.declaration_semantics(disc, handle) -> (record, nil) | (nil, Diagnostic). The SOLE
+-- supported semantic-lowering path: validate the lease (frontend-neutral lifecycle codes), resolve
+-- the neutral handle, then call the frontend adapter. Never raises.
+function M.declaration_semantics(disc, handle)
+    local ok, err = lease_check(disc)
+    if not ok then return nil, err end
+    local resolved = M.resolve_handle(disc, handle)
+    if type(resolved) ~= "table" or type(resolved.frontend) ~= "table" or resolved.declaration == nil then
+        return nil, diag("project.handle_invalid", "declaration handle does not resolve in this discovery")
+    end
+    local ok2, rec, ferr = pcall(resolved.frontend.declaration_semantics, resolved.declaration)
+    if not ok2 then return nil, diag("project.internal", "frontend declaration_semantics raised: " .. tostring(rec)) end
+    return rec, ferr
+end
+
+-- analyze.scope(disc, handle) -> (model, nil) | (nil, Diagnostic). Same lifecycle gate + boundary.
+function M.scope(disc, handle)
+    local ok, err = lease_check(disc)
+    if not ok then return nil, err end
+    local resolved = M.resolve_handle(disc, handle)
+    if type(resolved) ~= "table" or type(resolved.frontend) ~= "table" or resolved.unit == nil then
+        return nil, diag("project.handle_invalid", "handle does not resolve to a unit in this discovery")
+    end
+    local ok2, model_or_nil, ferr = pcall(resolved.frontend.scope, resolved.unit)
+    if not ok2 then return nil, diag("project.internal", "frontend scope raised: " .. tostring(model_or_nil)) end
+    return model_or_nil, ferr
+end
+
+-- analyze.close(disc): frontend-neutral, idempotent generation teardown. Closes any live
+-- per-language runtime lease, marks the lease closed, and logically invalidates BOTH Lua and
+-- JavaScript semantic access (via open=false). Safe on a default/non-retained discovery and safe
+-- to call twice.
+function M.close(disc)
+    local lease = type(disc) == "table" and disc._frontend_lease or nil
+    if type(lease) ~= "table" then return end
+    if lease.open == true and type(lease.sessions) == "table" then
+        for langname, token in pairs(lease.sessions) do
+            pcall(function() tool.frontend_close(langname, token) end)
+        end
+    end
+    lease.open = false
+    lease.sessions = {}
 end
 
 return M

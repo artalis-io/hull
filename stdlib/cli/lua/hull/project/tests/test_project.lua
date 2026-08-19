@@ -556,5 +556,121 @@ do
     ok(disc._handles ~= discB._handles, "each generation owns a distinct handle table (no cross-generation identity)")
 end
 
+-- ── Slice 6: symmetric semantic-handle lifecycle through the analyzer APIs ──
+-- The JS bridge (tool.frontend_*) is MOCKED here (the real QuickJS manager is C-tested); this
+-- proves the analyzer's lease + analyze.declaration_semantics / analyze.scope / analyze.close gate
+-- Lua and JavaScript IDENTICALLY, through the public APIs (never proxy internals).
+do
+    local analyze    = require("hull.project.analyze")
+    local projection = require("hull.project.projection")
+    local json       = require("hull.json")
+
+    -- A tool stub over a mixed FS with a MOCK JS frontend bridge. Tracks open/close.
+    local function make_mixed_tool(fs, track)
+        local t = make_tool(fs)
+        t.frontend_available = function(lang) return lang == "javascript" end
+        t.frontend_open = function(lang) track.opened = (track.opened or 0) + 1; return 1 end
+        t.frontend_close = function(lang, token) track.closed = (track.closed or 0) + 1 end
+        t.frontend_analyze = function(lang, token, path, src)
+            return json.encode({ schema_version = 1, status = "analyzed", unit_id = 1, diagnostics = {},
+                declarations = { {
+                    kind = "function", name = "jsfn",
+                    range = { start = 1, stop = 5, line = 1, col = 1 },
+                    group_range = { start = 1, stop = 10, line = 1, col = 1 },
+                    is_method = false, decl_id = 1,
+                    annotations = { { name = "route", raw = "@route", range = { start = 1, stop = 7, line = 1, col = 1 } } },
+                } } })
+        end
+        t.frontend_declaration_semantics = function(lang, token, id)
+            return json.encode({ form = "function", is_async = false, params = {}, body = { type = "BlockStatement" } })
+        end
+        t.frontend_scope = function(lang, token, uid)
+            return json.encode({ ok = true, bindings = {}, refs = {} })
+        end
+        return t
+    end
+    local FS = {
+        ["m/app.js"]  = "/** @route */\nexport function jsfn() { return 1; }\n",
+        ["m/lib.lua"] = "---@query\nlocal function q() return 1 end\nreturn q\n",
+    }
+    -- Find a declaration's handle by language (annotated public decls carry both).
+    local function handle_for(disc, lang)
+        for _, d in ipairs(disc.declarations) do if d.language == lang then return d.handle end end
+        return nil
+    end
+
+    -- 1+2. DEFAULT discovery: metadata available for both; semantics rejected NOT-retained (same code).
+    local trk = {}
+    _G.tool = make_mixed_tool(FS, trk)
+    local dflt = analyze.analyze("m")
+    _G.tool = nil
+    eq(#dflt.sources, 2, "default: both sources present")
+    local lua_h = handle_for(dflt, "lua")
+    local js_h  = handle_for(dflt, "javascript")
+    ok(lua_h ~= nil and js_h ~= nil, "default: both an annotated Lua and JS handle exist")
+    local _, l_err = analyze.declaration_semantics(dflt, lua_h)
+    local _, j_err = analyze.declaration_semantics(dflt, js_h)
+    eq(l_err and l_err.code, "project.frontend_not_retained", "default LUA semantics rejected not-retained")
+    eq(j_err and j_err.code, "project.frontend_not_retained", "default JS semantics rejected (SAME code)")
+    ok((trk.closed or 0) >= 1, "default: the JS session was closed after build (no leak)")
+
+    -- 3. RETAINED mixed discovery: Lua + JS semantics + scope resolve.
+    local trk2 = {}
+    _G.tool = make_mixed_tool(FS, trk2)
+    local ret = analyze.analyze("m", { retain_frontend = true })
+    local lh, jh = handle_for(ret, "lua"), handle_for(ret, "javascript")
+    local lrec, le = analyze.declaration_semantics(ret, lh)
+    local jrec, je = analyze.declaration_semantics(ret, jh)
+    ok(lrec ~= nil and le == nil, "retained: LUA declaration_semantics resolves")
+    ok(jrec ~= nil and je == nil, "retained: JS declaration_semantics resolves")
+    local lsc = analyze.scope(ret, lh)
+    local jsc = analyze.scope(ret, jh)
+    ok(lsc ~= nil, "retained: LUA scope resolves")
+    ok(jsc ~= nil, "retained: JS scope resolves")
+
+    -- 5. Invalid handle through the analyzer boundary: same code regardless of language.
+    local _, ih = analyze.declaration_semantics(ret, 999999)
+    eq(ih and ih.code, "project.handle_invalid", "invalid handle -> project.handle_invalid")
+
+    -- 4. After analyze.close: Lua + JS semantics + scope all rejected; repeat close is safe.
+    analyze.close(ret)
+    _G.tool = nil
+    ok((trk2.closed or 0) >= 1, "retained: analyze.close closed the JS session")
+    local _, lc = analyze.declaration_semantics(ret, lh)
+    local _, jc = analyze.declaration_semantics(ret, jh)
+    local _, sc = analyze.scope(ret, jh)
+    eq(lc and lc.code, "project.frontend_closed", "post-close LUA semantics rejected")
+    eq(jc and jc.code, "project.frontend_closed", "post-close JS semantics rejected (SAME code)")
+    eq(sc and sc.code, "project.frontend_closed", "post-close scope rejected")
+    local ok_close2 = pcall(analyze.close, ret)
+    ok(ok_close2, "repeated analyze.close is a safe no-op")
+
+    -- 6. Public projection exposes no lease/handles/tokens/ids/AST.
+    _G.tool = make_mixed_tool(FS, {})
+    local pdisc = analyze.analyze("m", { retain_frontend = true })
+    _G.tool = nil
+    local blob = json.encode(projection.project(pdisc))
+    local leaked = false
+    for _, bad in ipairs({ "_frontend_lease", "_handles", "_by_source", "session", "decl_id",
+                           "unit_id", "_session", "_unit_id", "_decl_id", "BlockStatement" }) do
+        if blob:find(bad, 1, true) then leaked = true; break end
+    end
+    ok(not leaked, "public projection exposes no lease / handle / token / unit_id / decl_id / AST")
+    analyze.close(pdisc)
+
+    -- 7. Failure cleanup: a mid-analysis fault closes the JS session AND leaves the discovery not
+    -- semantically live (rejected through the analyzer API, same as any non-retained discovery).
+    local trk3 = {}
+    _G.tool = make_mixed_tool(FS, trk3)
+    _G.tool.frontend_analyze = function() error("injected mid-analysis fault") end   -- force a raise
+    local okf, dfail = pcall(analyze.analyze, "m", { retain_frontend = true })
+    _G.tool = nil
+    ok(okf, "a mid-analysis fault does not raise out of analyze (protected boundary)")
+    ok((trk3.closed or 0) >= 1, "failure cleanup: the JS session was closed on the fault path")
+    local _, fe2 = analyze.declaration_semantics(dfail, 1)
+    ok(fe2 ~= nil and (fe2.code == "project.frontend_not_retained" or fe2.code == "project.handle_invalid"),
+        "a failed discovery is not semantically live")
+end
+
 print(string.format("test_project: %d passed, %d failed", pass, fail))
 return { pass = pass, fail = fail, failures = failures }

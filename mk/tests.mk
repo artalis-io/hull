@@ -19,7 +19,7 @@ ifeq ($(RUNTIME),js)
 else ifeq ($(RUNTIME),lua)
   # test_js_session + test_js_lexer + test_js_parser (the JS tooling runtime + frontend) need
   # QuickJS, absent in a lua-only build.
-  TEST_SRCS := $(filter-out %/test_js.c %/test_js_session.c %/test_js_lexer.c %/test_js_parser.c %/test_js_conformance.c %/test_js_annotations.c %/test_js_scope.c %/test_js_frontend.c,$(TEST_SRCS))
+  TEST_SRCS := $(filter-out %/test_js.c %/test_js_session.c %/test_js_lexer.c %/test_js_parser.c %/test_js_conformance.c %/test_js_annotations.c %/test_js_scope.c %/test_js_frontend.c %/test_js_generation.c,$(TEST_SRCS))
 endif
 
 # Drop DB-dependent tests in pure-compute builds.
@@ -207,6 +207,11 @@ $(BUILDDIR)/test_js_scope: $(TESTDIR)/hull/frontend/test_js_scope.c $(FRONTEND_J
 # and asserts on the normalized facts + semantics + handle lifetime. Explicit recipe.
 $(BUILDDIR)/test_js_frontend: $(TESTDIR)/hull/frontend/test_js_frontend.c $(FRONTEND_JS_SESSION_OBJ) $(STDLIB_JS_CLI_REGISTRY_O) $(QJS_OBJS) | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -Ivendor/quickjs -o $@ $< $(FRONTEND_JS_SESSION_OBJ) $(STDLIB_JS_CLI_REGISTRY_O) $(QJS_OBJS) -lm -lpthread $(LDFLAGS)
+
+# hull.frontend JS generation manager (Slice 6): the C-owned session/token manager; links the
+# manager + the session + registry + QuickJS. Explicit recipe.
+$(BUILDDIR)/test_js_generation: $(TESTDIR)/hull/frontend/test_js_generation.c $(FRONTEND_JS_GEN_OBJ) $(FRONTEND_JS_SESSION_OBJ) $(STDLIB_JS_CLI_REGISTRY_O) $(QJS_OBJS) | $(BUILDDIR)
+	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -Ivendor/quickjs -o $@ $< $(FRONTEND_JS_GEN_OBJ) $(FRONTEND_JS_SESSION_OBJ) $(STDLIB_JS_CLI_REGISTRY_O) $(QJS_OBJS) -lm -lpthread $(LDFLAGS)
 
 # Read-only shared-heap C-API test: build-time AOT fixture. Generate an .aot from
 # the embedded .wasm via the Hull-built wamrc when present (arch + OS correct);

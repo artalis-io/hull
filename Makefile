@@ -1485,6 +1485,12 @@ FRONTEND_JS_SESSION_OBJ := $(BUILDDIR)/frontend_js_session.o
 $(FRONTEND_JS_SESSION_OBJ): $(SRCDIR)/hull/frontend/js_session.c | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -Ivendor/quickjs -c -o $@ $<
 
+# The JS source-frontend generation/session manager (wraps js_session; C-owned lifetime +
+# monotonic tokens). Linked into hull only when QuickJS is linked (NOT a lua-only build).
+FRONTEND_JS_GEN_OBJ := $(BUILDDIR)/frontend_js_generation.o
+$(FRONTEND_JS_GEN_OBJ): $(SRCDIR)/hull/frontend/js_generation.c | $(BUILDDIR)
+	$(CC) $(CFLAGS) $(INCLUDES) -Ivendor/quickjs -c -o $@ $<
+
 # ── Context doc embedding (xxd) ───────────────────────────────────────
 #
 # Markdown docs in stdlib/context/*.md are embedded for hull agent context.
@@ -2536,9 +2542,12 @@ endif
 HULL_LINK_OBJS := $(CAP_OBJS) $(CAP_TOOL_OBJ) $(CAP_TEST_OBJ) $(CMD_OBJS) $(RT_OBJS) $(ALLOC_OBJ) $(ASYNC_OBJ) $(COMPRESS_OBJ) $(MINIZ_OBJ) $(WORKER_DB_OBJ) $(WORKER_WASM_OBJ) $(WORKER_GPU_OBJ) $(MANIFEST_OBJ) $(MODULE_OBJ) $(ASYNC_BACKEND_OBJS) $(NET_BACKEND_OBJS) $(SANDBOX_OBJ) $(SANDBOX_TOOL_OBJ) $(SIG_OBJ) $(RELEASE_OBJ) $(RELEASE_IO_OBJ) $(TOOLS_INSTALL_OBJ) $(PLATFORM_SIG_OBJ) $(EMBEDDED_PLATFORM_SIG_OBJ) $(TEST_RUNNER_OBJ) $(RUNTIME_FACTORY_OBJ) $(STATIC_OBJ) $(MIGRATE_OBJ) $(VFS_OBJ) $(PATH_NORM_OBJ) $(THREAD_AFFINITY_OBJ) $(CACHE_DIR_OBJ) $(FS_UTIL_OBJ) $(BLOB_STORE_OBJ) $(CACHE_REGISTRY_OBJ) $(CACERT_OBJ) $(TLS_CLIENT_OBJ) $(TLS_TRANSPORT_OBJ) $(TLS_TRANSPORT_STUB_OBJ) $(CSP_OBJ) $(SH_SEAL_ARENA_OBJ) $(SBOM_OBJ) $(STDLIB_FEATURE_OBJ) $(APP_CONTEXT_OBJ) $(APP_CONTEXT_RT_OBJ) $(AGENT_LIB_OBJ) $(AGENT_API_OBJ) $(TOOL_OBJ) $(BUILD_ASSET_OBJ) $(COMPILER_OBJ) $(OBJ_EMIT_OBJ) $(LINKER_SYSTEM_OBJ) $(LINKER_LLD_OBJ) $(LINKER_ZIG_OBJ) $(BUNDLED_OBJS_OBJ) $(MAIN_OBJ) $(SERVE_OBJ) $(ENTRY_OBJ) $(APP_EXTRA_OBJS) $(STDLIB_REGISTRY_O) $(STDLIB_RT_REGISTRY_OBJS) $(STDLIB_TOOLCHAIN_REGISTRY_O) $(RUNTIME_TOOLCHAIN_REGISTRY_O) $(WAMR_OBJS) $(VEND_OBJS) $(MBEDTLS_OBJS) $(SQLITE_OBJ) $(LOG_OBJ) $(LOG_LOCK_OBJ) $(SH_ARENA_OBJ) $(SH_JSON_OBJ) $(TWEETNACL_OBJ) $(STB_OBJ) $(PLEDGE_OBJS)
 
 # The JS source-frontend tooling runtime needs QuickJS -> linked into the hull binary only
-# when this build links QuickJS (RUNTIME=js or the default both; NOT a lua-only hull).
+# when this build links QuickJS (RUNTIME=js or the default both; NOT a lua-only hull). The
+# generation manager rides with it, and HL_FRONTEND_JS enables the tool-VM bridge bindings
+# (mod_tool.c stays compilable in a lua-only build; the bindings then report unavailable).
 ifneq ($(RUNTIME),lua)
-  HULL_LINK_OBJS += $(FRONTEND_JS_SESSION_OBJ) $(STDLIB_JS_CLI_REGISTRY_O)
+  HULL_LINK_OBJS += $(FRONTEND_JS_SESSION_OBJ) $(FRONTEND_JS_GEN_OBJ) $(STDLIB_JS_CLI_REGISTRY_O)
+  CFLAGS += -DHL_FRONTEND_JS
 endif
 
 $(BUILDDIR)/hull: $(HULL_LINK_OBJS) $(KEEL_LIB) $(TUI_TOOLCHAIN_ARCHIVE) | $(RUNTIME_FEATURE_LIBS)
