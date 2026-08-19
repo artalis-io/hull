@@ -13,6 +13,7 @@
 
 #include <string.h>
 #include <stdlib.h>
+#include <stdio.h>
 
 static int has(const char *hay, const char *needle) { return hay && strstr(hay, needle) != NULL; }
 static int count(const char *hay, const char *needle) {
@@ -332,47 +333,158 @@ UTEST(js_parser, async_declaration_and_arrows)
     hl_js_session_destroy(s);
 }
 
-/* Combined diagnostic budget (tokenizer + parser) is authoritative; maxDiagnostics=0 keeps
- * only the terminal marker. */
-UTEST(js_parser, combined_diagnostic_budget)
+/* analyze `src` with an options JSON; returns rc and sets *out (caller frees). */
+static int analyze_opts(HlJsSession *s, const char *method, const char *src, const char *opts, char **out)
+{
+    size_t out_len = 0; *out = NULL;
+    return hl_js_session_analyze(s, "hull:source:lextest", method,
+                                 (const uint8_t *)src, strlen(src), "t.js",
+                                 opts, opts ? strlen(opts) : 0, out, &out_len);
+}
+
+/* Blocker #1 -- async-arrow parameter DEFAULTS may hold a division OR a regex; the speculative
+ * parse must lex each with the correct grammatical slash goal (real parse, not a one-goal
+ * pre-scan), and a failed arrow guess must fully rewind so a call re-lexes correctly. */
+UTEST(js_parser, async_arrow_slash_defaults)
 {
     HlJsSession *s = hl_js_session_create(NULL);
     ASSERT_TRUE(s != NULL);
-    char *out = NULL; size_t out_len = 0;
-    /* several parser syntax errors, budget 0 -> only js.limit.diagnostics terminal(s) */
-    int rc = hl_js_session_analyze(s, "hull:source:lextest", "parse",
-                                   (const uint8_t *)"const a = ; const b = ; const c = ;", 35, "t.js",
-                                   "{\"maxDiagnostics\":0}", 20, &out, &out_len);
-    (void)rc;
-    EXPECT_EQ(count(out, "\"code\":\"js.syntax\""), 0);            /* no ordinary parser diags kept */
-    EXPECT_TRUE(has(out, "\"code\":\"js.limit.diagnostics\""));   /* terminal retained */
+    /* arrow whose default uses DIVISION: `a / b` after an operand -> BinaryExpression `/` */
+    char *o = parse_str(s, "const f = async (x = a / b) => x;");
+    EXPECT_TRUE(has(o, "\"type\":\"ArrowFunctionExpression\""));
+    EXPECT_TRUE(has(o, "\"type\":\"BinaryExpression\""));
+    EXPECT_FALSE(has(o, "\"regex\""));
+    EXPECT_TRUE(has(o, "\"valid\":true"));
+    free(o); o = NULL;
+    /* arrow whose default is a REGEX with inner parens: `/a(b)/` after `=` -> regex Literal */
+    o = parse_str(s, "const g = async (y = /a(b)/) => y;");
+    EXPECT_TRUE(has(o, "\"type\":\"ArrowFunctionExpression\""));
+    EXPECT_TRUE(has(o, "\"regex\""));
+    EXPECT_TRUE(has(o, "\"valid\":true"));
+    free(o); o = NULL;
+    /* NOT an arrow: `async(z = /p/)` with no `=>` -> a CALL; the failed arrow guess rewound, and
+     * the regex default still lexes correctly on the call re-parse (no desynchronization). */
+    o = parse_str(s, "const r = async(z = /p/);");
+    EXPECT_TRUE(has(o, "\"type\":\"CallExpression\""));
+    EXPECT_TRUE(has(o, "\"regex\""));
+    EXPECT_FALSE(has(o, "\"type\":\"ArrowFunctionExpression\""));
+    EXPECT_TRUE(has(o, "\"valid\":true"));
+    free(o);
+    hl_js_session_destroy(s);
+}
+
+/* Blocker #2 -- the combined budget is authoritative across BOTH producers even when a lexical
+ * diagnostic is emitted AFTER a parser one: `const a = ;` (parser) then `@` (late lexer) then
+ * `const b = ;` (parser). Budgets 0/1/2 keep exactly 0/1/2 ordinary diagnostics + a terminal. */
+UTEST(js_parser, interleaved_diagnostic_budget)
+{
+    HlJsSession *s = hl_js_session_create(NULL);
+    ASSERT_TRUE(s != NULL);
+    const char *src = "const a = ;@const b = ;";
+    char *out = NULL;
+    /* unbudgeted: at least three ordinary diagnostics exist (so budget 2 genuinely truncates,
+     * and the late lexer `@` is one of them). */
+    analyze_opts(s, "parse", src, NULL, &out);
+    EXPECT_TRUE(count(out, "\"code\":\"js.syntax\"") >= 3);
     free(out); out = NULL;
-    /* budget 2 over many parser errors -> exactly 2 ordinary + terminal */
-    rc = hl_js_session_analyze(s, "hull:source:lextest", "parse",
-                               (const uint8_t *)"const a = ; const b = ; const c = ; const d = ;", 47, "t.js",
-                               "{\"maxDiagnostics\":2}", 20, &out, &out_len);
+    analyze_opts(s, "parse", src, "{\"maxDiagnostics\":0}", &out);
+    EXPECT_EQ(count(out, "\"code\":\"js.syntax\""), 0);
+    EXPECT_TRUE(has(out, "\"code\":\"js.limit.diagnostics\""));
+    free(out); out = NULL;
+    analyze_opts(s, "parse", src, "{\"maxDiagnostics\":1}", &out);
+    EXPECT_EQ(count(out, "\"code\":\"js.syntax\""), 1);   /* the late lexer diag did NOT bust the cap */
+    EXPECT_TRUE(has(out, "\"code\":\"js.limit.diagnostics\""));
+    free(out); out = NULL;
+    analyze_opts(s, "parse", src, "{\"maxDiagnostics\":2}", &out);
     EXPECT_EQ(count(out, "\"code\":\"js.syntax\""), 2);
     EXPECT_TRUE(has(out, "\"code\":\"js.limit.diagnostics\""));
     free(out);
     hl_js_session_destroy(s);
 }
 
-/* The public "never raises" contract: an injected internal defect yields a SourceUnit with a
- * structured js.internal diagnostic (rc 0), not a session-level failure. */
-UTEST(js_parser, internal_failure_is_contained)
+/* Blocker #3 -- an ORDINARY frontend exception whose message merely CONTAINS a resource phrase
+ * is contained as js.internal (rc 0). Classification is by error TYPE, not message text. */
+UTEST(js_parser, ordinary_exception_with_resource_text_is_contained)
 {
     HlJsSession *s = hl_js_session_create(NULL);
     ASSERT_TRUE(s != NULL);
-    char *out = NULL; size_t out_len = 0;
-    int rc = hl_js_session_analyze(s, "hull:source:lextest", "parse",
-                                   (const uint8_t *)"const x = 1;", 12, "t.js",
-                                   "{\"_throwInternal\":true}", 23, &out, &out_len);
-    ASSERT_EQ(rc, 0);                                  /* the boundary produced a result, not an exception */
-    EXPECT_TRUE(has(out, "\"status\":\"ok\""));
-    EXPECT_TRUE(has(out, "\"code\":\"js.internal\""));
-    EXPECT_TRUE(has(out, "\"valid\":false"));
+    const char *specs[] = { "{\"inject\":\"error-out of memory\"}",
+                            "{\"inject\":\"type-stack overflow\"}",
+                            "{\"inject\":\"error-interrupted\"}" };
+    for (int i = 0; i < 3; i++) {
+        char *out = NULL;
+        int rc = analyze_opts(s, "parseInject", "const x = 1;", specs[i], &out);
+        ASSERT_EQ(rc, 0);                                 /* contained: a SourceUnit, not an exception */
+        EXPECT_TRUE(has(out, "\"status\":\"ok\""));
+        EXPECT_TRUE(has(out, "\"code\":\"js.internal\""));
+        EXPECT_FALSE(has(out, "\"code\":\"js.limit."));    /* NOT mis-classified as a resource limit */
+        EXPECT_TRUE(has(out, "\"valid\":false"));
+        free(out);
+    }
+    hl_js_session_destroy(s);
+}
+
+/* Blocker #3 -- a HOST resource error (InternalError-typed, as QuickJS raises) is re-thrown by
+ * the wrapper and host-classified as js.limit.* (rc -1), never swallowed as js.internal. */
+UTEST(js_parser, host_resource_error_is_rethrown)
+{
+    HlJsSession *s = hl_js_session_create(NULL);
+    ASSERT_TRUE(s != NULL);
+    char *out = NULL;
+    int rc = analyze_opts(s, "parseInject", "const x = 1;", "{\"inject\":\"internal-out of memory\"}", &out);
+    ASSERT_EQ(rc, -1);                                    /* propagated to the host, indeterminate */
+    EXPECT_TRUE(has(out, "\"code\":\"js.limit.heap\""));
+    EXPECT_FALSE(has(out, "\"code\":\"js.internal\""));
+    free(out); out = NULL;
+    rc = analyze_opts(s, "parseInject", "const x = 1;", "{\"inject\":\"internal-stack overflow\"}", &out);
+    ASSERT_EQ(rc, -1);
+    EXPECT_TRUE(has(out, "\"code\":\"js.limit.stack\""));
     free(out);
     hl_js_session_destroy(s);
+}
+
+/* Blocker #3 -- GENUINE resource breaches DURING parsing stay host-classified through the real
+ * wrapper: a real stack overflow (tiny stack + deep nesting, depth guard raised) surfaces as
+ * js.limit.stack; a real interrupt (tiny instruction budget) as js.limit.instructions. */
+UTEST(js_parser, genuine_resource_breach_stays_host_classified)
+{
+    /* genuine stack overflow: 128 KiB stack, ~20k nested parens, parser depth guard lifted so
+     * the native stack (not maxDepth) is what gives way. */
+    HlJsSessionLimits lim = (HlJsSessionLimits)HL_JS_SESSION_LIMITS_DEFAULT;
+    lim.max_stack_bytes = (size_t)128 * 1024;
+    HlJsSession *s = hl_js_session_create(&lim);
+    ASSERT_TRUE(s != NULL);
+    const int nest = 20000;
+    char *deep = (char *)malloc((size_t)nest * 2 + 8);
+    ASSERT_TRUE(deep != NULL);
+    { int k = 0; for (int i = 0; i < nest; i++) deep[k++] = '('; for (int i = 0; i < nest; i++) deep[k++] = ')'; deep[k] = '\0'; }
+    char *out = NULL;
+    int rc = analyze_opts(s, "parse", deep, "{\"maxDepth\":100000000}", &out);
+    free(deep);
+    ASSERT_EQ(rc, -1);
+    EXPECT_TRUE(has(out, "\"code\":\"js.limit.stack\""));
+    free(out);
+    hl_js_session_destroy(s);
+
+    /* genuine instruction breach: a tiny interrupt budget trips during parsing. The interrupt
+     * error is uncatchable, so it bypasses the wrapper's catch entirely and is host-classified.
+     * QuickJS invokes the interrupt handler only periodically, so the source must be large enough
+     * to run the parser through at least one interrupt tick (~500 statements is comfortably so). */
+    HlJsSessionLimits lim2 = (HlJsSessionLimits)HL_JS_SESSION_LIMITS_DEFAULT;
+    lim2.max_instructions = 1;
+    HlJsSession *s2 = hl_js_session_create(&lim2);
+    ASSERT_TRUE(s2 != NULL);
+    const int stmts = 1000;
+    char *big = (char *)malloc((size_t)stmts * 24 + 16);
+    ASSERT_TRUE(big != NULL);
+    { int k = 0; for (int i = 0; i < stmts; i++) k += sprintf(big + k, "const v%d = %d;\n", i, i); big[k] = '\0'; }
+    char *out2 = NULL;
+    int rc2 = analyze_opts(s2, "parse", big, NULL, &out2);
+    free(big);
+    ASSERT_EQ(rc2, -1);
+    EXPECT_TRUE(has(out2, "\"code\":\"js.limit.instructions\""));
+    free(out2);
+    hl_js_session_destroy(s2);
 }
 
 UTEST_MAIN()

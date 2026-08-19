@@ -39,7 +39,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 import { linemap as buildLinemap } from "hull:source:range";
-import { error as diagError } from "hull:source:diagnostic";
+import { makeBudget } from "hull:source:diagnostic";
 
 // Correct Unicode identifier classification via the engine's own tables (u-mode property
 // escapes). Built with `new RegExp` and cached lazily on first non-ASCII code point, so the
@@ -95,17 +95,16 @@ export function createTokenizer(bytes, opts) {
     opts = opts || {};
     const path = opts.path || null;
     const maxTokens = nnInt(opts.maxTokens, 1000000);
-    const maxDiagnostics = nnInt(opts.maxDiagnostics, 4096);   // 0 = keep no ordinary diagnostics
+    // A shared budget (from the parser) makes maxDiagnostics authoritative across the whole
+    // SourceUnit; a standalone tokenizer owns its own budget.
+    const budget = opts.diagBudget || makeBudget(nnInt(opts.maxDiagnostics, 4096), path);
 
     const n = bytes.length;
     let p = 0;
     const comments = [];
-    const diagnostics = [];
     let tokenCount = 0;
     let lastToken = null;
     let done = false;
-    let ordinaryDiags = 0;
-    let diagCapNoted = false;
 
     // Context stack for ( { ${ resolving regex/division. Each entry: { t, afterClose }.
     // afterClose = the exprAllowed value to restore when this `(`/`{` closes.
@@ -128,18 +127,7 @@ export function createTokenizer(bytes, opts) {
         const hi = n + 1;
         if (start < 1) start = 1; if (start > hi) start = hi;
         if (stop < start) stop = start; if (stop > hi) stop = hi;
-        const terminal = code.lastIndexOf("js.limit.", 0) === 0;
-        if (!terminal) {
-            if (ordinaryDiags >= maxDiagnostics) {
-                if (!diagCapNoted) {
-                    diagCapNoted = true;
-                    diagnostics.push(diagError("js.limit.diagnostics", "diagnostic limit exceeded (" + maxDiagnostics + ")", path, { start: start, stop: stop }));
-                }
-                return;
-            }
-            ordinaryDiags++;
-        }
-        diagnostics.push(diagError(code, message, path, { start: start, stop: stop }));
+        budget.push("error", code, message, { start: start, stop: stop });
     }
 
     function decode(i) {
@@ -599,8 +587,22 @@ export function createTokenizer(bytes, opts) {
         return lastToken;
     }
 
+    // Checkpoint/restore the tokenizer's full lexical state so the parser can SPECULATIVELY parse
+    // arbitrary content (e.g. arrow parameters that may contain a regex or a division) with real
+    // grammatical slash goals and rewind on a wrong guess. Comments accumulated during a rewound
+    // speculation are dropped (truncated back to the saved length); diagnostics are owned by the
+    // shared budget and rolled back by the parser via budget.mark/reset.
+    function checkpoint() {
+        return { p: p, exprAllowed: exprAllowed, prev: prev, nlPending: nlPending, tokenCount: tokenCount, done: done, lastToken: lastToken, ctx: ctx.slice(), commentsLen: comments.length };
+    }
+    function restore(cp) {
+        p = cp.p; exprAllowed = cp.exprAllowed; prev = cp.prev; nlPending = cp.nlPending; tokenCount = cp.tokenCount; done = cp.done; lastToken = cp.lastToken;
+        ctx.length = 0; for (let i = 0; i < cp.ctx.length; i++) ctx.push(cp.ctx[i]);
+        comments.length = cp.commentsLen;
+    }
+
     const _linemap = buildLinemap(bytes);
-    return { next: next, comments: comments, diagnostics: diagnostics, linemap: _linemap };
+    return { next: next, comments: comments, diagnostics: budget.list, linemap: _linemap, checkpoint: checkpoint, restore: restore };
 }
 
 // lex(bytes, opts) -> { tokens, comments, diagnostics, linemap }. Convenience that drives the

@@ -22,7 +22,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 import { createTokenizer } from "hull:source:lexer";
-import { newDiagnostic } from "hull:source:diagnostic";
+import { newDiagnostic, makeBudget } from "hull:source:diagnostic";
 
 // Reserved words that may NOT be a binding/identifier reference.
 const RESERVED = new Set([
@@ -47,16 +47,25 @@ const BINPREC = {
 // A validated nonnegative-integer option, else the default.
 function nnInt(x, dflt) { return (typeof x === "number" && isFinite(x) && x >= 0 && Math.floor(x) === x) ? x : dflt; }
 
-// Public entry: a THIN protected wrapper around parseInternal so the "never raises" contract
-// is ENFORCED, not merely asserted. An internal defect (an unexpected JS exception) becomes a
-// SourceUnit with a structured js.internal diagnostic; a QuickJS resource interrupt
-// (stack/heap/instruction) is re-thrown so the host session classifies it (js.limit.*).
-export function parse(bytes, opts) {
+// Whether a caught exception is a HOST resource termination that must stay host-classified
+// (js.limit.*) rather than being contained as an internal defect. QuickJS raises genuine
+// stack-overflow / out-of-memory as an InternalError (verified: e.name === "InternalError");
+// the instruction-limit interrupt is uncatchable and never reaches this catch at all. We key on
+// the error TYPE, not the message text, so an ordinary frontend exception whose message merely
+// contains "stack overflow" / "out of memory" is still contained.
+function isHostResourceError(e) {
+    return e !== null && e !== undefined && e.name === "InternalError";
+}
+
+// The protected boundary shared by parse() and the test-only probe. Runs `body()` (which
+// produces a SourceUnit) and ENFORCES "never raises": an internal defect becomes a SourceUnit
+// with a js.internal diagnostic; a host resource termination is re-thrown for the host session.
+function protectedParse(body, opts) {
     try {
-        return parseInternal(bytes, opts);
+        return body();
     } catch (e) {
+        if (isHostResourceError(e)) throw e;                 // host-classified, indeterminate
         const msg = (e && e.message !== undefined) ? String(e.message) : String(e);
-        if (msg.indexOf("out of memory") >= 0 || msg.indexOf("stack overflow") >= 0 || msg.indexOf("interrupted") >= 0) throw e;
         const p = (opts && opts.path) || null;
         return {
             ast: { type: "Program", start: 1, stop: 1, body: [] },
@@ -66,20 +75,35 @@ export function parse(bytes, opts) {
     }
 }
 
-function parseInternal(bytes, opts) {
+// Public entry: parse a byte source into a SourceUnit. Never raises (see protectedParse).
+export function parse(bytes, opts) {
+    return protectedParse(function () { return parseInternal(bytes, opts, null); }, opts);
+}
+
+// Test-only probe: run the SAME protected boundary but force parseInternal to throw `inject()`
+// first, proving the boundary contains ordinary exceptions and re-throws host resource ones.
+// Not part of the production surface (no production caller passes an injector).
+export function __parseWithInjection(bytes, opts, inject) {
+    return protectedParse(function () { return parseInternal(bytes, opts, inject); }, opts);
+}
+
+function parseInternal(bytes, opts, inject) {
     opts = opts || {};
     const path = opts.path || null;
     const maxDepth = (typeof opts.maxDepth === "number" && opts.maxDepth > 0) ? Math.floor(opts.maxDepth) : 1000;
     const maxDiagnostics = nnInt(opts.maxDiagnostics, 4096);
 
-    if (opts._throwInternal) throw new Error("injected internal failure");   // test hook (never set in production)
+    if (inject) inject();            // test-only: fault the parser to exercise protectedParse
 
-    const tk = createTokenizer(bytes, opts);
-    const diagnostics = [];
+    // ONE budget owner shared with the tokenizer -> maxDiagnostics is authoritative across the
+    // whole SourceUnit (tokenizer + parser), and both producers stay memory-bounded.
+    const budget = makeBudget(maxDiagnostics, path);
+    const topts = { path: path, diagBudget: budget };
+    if (opts.maxTokens !== undefined) topts.maxTokens = opts.maxTokens;
+    const tk = createTokenizer(bytes, topts);
     const la = [];                   // lookahead buffer of tokens AFTER cur (non-destructive peek)
     let depth = 0;
     let errored = false;             // rate-limit cascading recovery within one statement
-    let parserOrdinary = 0, diagCapNoted = false;
 
     // cur/prev tokens. The goal used to READ cur was decided when we advanced past prev.
     let cur = tk.next(true);         // first token is at statement (operand) position
@@ -105,20 +129,20 @@ function parseInternal(bytes, opts) {
     function isKw(v) { return cur.type === "identifier" && cur.value === v; }
     function nl() { return cur.nlBefore; }
 
-    function isTerminalCode(code) { return code.lastIndexOf("js.limit.", 0) === 0; }
-    function ordinaryCount(list) { let c = 0; for (let i = 0; i < list.length; i++) if (!isTerminalCode(list[i].code)) c++; return c; }
-    // Authoritative combined diagnostic budget across the WHOLE SourceUnit (tokenizer + parser).
-    // Terminal js.limit.* diagnostics are always kept.
-    function diag(sev, code, message, start, stop) {
-        if (!isTerminalCode(code)) {
-            if (ordinaryCount(tk.diagnostics) + parserOrdinary >= maxDiagnostics) {
-                if (!diagCapNoted) { diagCapNoted = true; diagnostics.push(newDiagnostic("error", "js.limit.diagnostics", "diagnostic limit exceeded (" + maxDiagnostics + ")", path, { start: start, stop: stop })); }
-                return;
-            }
-            parserOrdinary++;
-        }
-        diagnostics.push(newDiagnostic(sev, code, message, path, { start: start, stop: stop }));
+    // Full speculative-parse checkpoint: the tokenizer's lexical state + the parser's token
+    // window (cur/prev/lookahead) + the shared diagnostic budget. Restoring rewinds EVERY
+    // producer, so a failed speculative parse (e.g. an arrow guess) leaves no lexical
+    // disagreement or stray diagnostic, no matter what content it lexed.
+    function saveState() { return { tk: tk.checkpoint(), cur: cur, prev: prev, la: la.slice(), budget: budget.mark(), depth: depth, errored: errored }; }
+    function restoreState(st) {
+        tk.restore(st.tk); cur = st.cur; prev = st.prev;
+        la.length = 0; for (let i = 0; i < st.la.length; i++) la.push(st.la[i]);
+        budget.reset(st.budget); depth = st.depth; errored = st.errored;
     }
+
+    // Every parser diagnostic flows through the ONE shared budget so the combined tokenizer +
+    // parser ordinary count can never exceed maxDiagnostics; terminal js.limit.* are always kept.
+    function diag(sev, code, message, start, stop) { budget.push(sev, code, message, { start: start, stop: stop }); }
     function synErr(message, tok) { const t = tok || cur; diag("error", "js.syntax", message, t.start, t.stop); }
     function unsupported(message, tok) { const t = tok || cur; diag("error", "js.unsupported", message, t.start, t.stop); }
 
@@ -667,20 +691,6 @@ function parseInternal(bytes, opts) {
     }
     // A punctuator that means "the identifier just seen is a property key/name, not a modifier".
     function isKeyBoundary(t) { return t.type === "punctuator" && (t.value === ":" || t.value === "," || t.value === "}" || t.value === "(" || t.value === "="); }
-    // peekTok(openK) is `(`; return the token after its matching `)` (read with a division goal
-    // so a following `/` in the non-arrow case is buffered as division, not a regex).
-    function peekAfterMatchingParen(openK) {
-        let depth = 0, k = openK;
-        for (;;) {
-            const t = peekTok(k, true);
-            if (t.type === "eof") return t;
-            if (t.type === "punctuator") {
-                if (t.value === "(") depth++;
-                else if (t.value === ")") { depth--; if (depth === 0) return peekTok(k + 1, false); }
-            }
-            k++;
-        }
-    }
 
     function parsePrimary() {
         const start = cur.start;
@@ -721,14 +731,17 @@ function parseInternal(bytes, opts) {
                     const id = parseIdentifier();
                     return finishArrow(start, [id], true);
                 }
-                // `async ( ... ) =>`
+                // `async ( ... ) =>` -- the parenthesized content may hold default expressions
+                // with a regex OR a division, so it cannot be pre-scanned with one slash goal.
+                // SPECULATIVELY parse the params with real grammar (correct goals per token); if
+                // no `=>` follows, fully rewind the tokenizer + parser and parse `async(...)` as a
+                // call. This is a tokenizer-checkpoint speculation, not a lookahead pre-lex.
                 if (nx.type === "punctuator" && nx.value === "(") {
-                    const after = peekAfterMatchingParen(1);
-                    if (after.type === "punctuator" && after.value === "=>") {
-                        advance(true);              // consume `async` -> cur is `(`
-                        const params = parseParams();
-                        return finishArrow(start, params, true);
-                    }
+                    const st = saveState();
+                    advance(true);                  // consume `async` -> cur is `(`
+                    const params = parseParams();
+                    if (isP("=>") && !nl()) return finishArrow(start, params, true);
+                    restoreState(st);               // not an arrow -> rewind; parse as a call below
                 }
             }
             // otherwise `async` is an ordinary identifier -> fall through
@@ -911,9 +924,9 @@ function parseInternal(bytes, opts) {
     }
 
     const ast = parseProgram();
-    // Merge lexical diagnostics (from the tokenizer, driven to EOF) with parser diagnostics,
-    // preserving both even though recovery continued.
-    const allDiags = tk.diagnostics.concat(diagnostics);
+    // Lexical + parser diagnostics already share ONE budget list (tk.diagnostics === budget.list),
+    // so it is a single authoritative sequence -- no merge, no double-counting.
+    const allDiags = budget.list;
     const valid = allDiags.every(function (d) { return d.severity !== "error"; });
     return { ast: ast, comments: tk.comments, diagnostics: allDiags, linemap: tk.linemap, valid: valid };
 }

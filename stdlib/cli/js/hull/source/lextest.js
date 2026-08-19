@@ -6,7 +6,7 @@
 // entry in a later slice.
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { lex, createTokenizer } from "hull:source:lexer";
-import { parse } from "hull:source:parser";
+import { parse, __parseWithInjection } from "hull:source:parser";
 
 // Structural-default lexing (the standalone convenience path).
 function run(srcBuf, path, opts) {
@@ -34,9 +34,27 @@ function runParse(srcBuf, path, opts) {
     const o = { path: path || "test.js" };
     if (opts && opts.maxDepth !== undefined) o.maxDepth = opts.maxDepth;
     if (opts && opts.maxDiagnostics !== undefined) o.maxDiagnostics = opts.maxDiagnostics;
-    if (opts && opts._throwInternal) o._throwInternal = true;   // test hook: inject an internal defect
     const u = parse(new Uint8Array(srcBuf), o);
     return { schema_version: 1, status: "ok", ast: u.ast, comments: u.comments, diagnostics: u.diagnostics, valid: u.valid };
 }
 
-globalThis.__hull_frontend = { lex: run, lexDirected: runDirected, parse: runParse };
+// Drive the protected boundary with an INJECTED exception (test-only) to prove containment vs.
+// re-throw. opts.inject selects the thrown value:
+//   "error-<phrase>"    -> new Error(phrase)      (ordinary; must be CONTAINED as js.internal)
+//   "type-<phrase>"     -> new TypeError(phrase)  (ordinary; must be CONTAINED as js.internal)
+//   "internal-<phrase>" -> an InternalError-named error (HOST resource; must be RE-THROWN)
+// A re-thrown error propagates out of this method to the C session, which host-classifies it.
+function runParseInject(srcBuf, path, opts) {
+    const spec = (opts && opts.inject) || "error-boom";
+    const dash = spec.indexOf("-");
+    const kind = spec.substring(0, dash), phrase = spec.substring(dash + 1);
+    const inject = function () {
+        if (kind === "type") throw new TypeError(phrase);
+        if (kind === "internal") { const e = new Error(phrase); e.name = "InternalError"; throw e; }
+        throw new Error(phrase);
+    };
+    const u = __parseWithInjection(new Uint8Array(srcBuf), { path: path || "test.js" }, inject);
+    return { schema_version: 1, status: "ok", ast: u.ast, comments: u.comments, diagnostics: u.diagnostics, valid: u.valid };
+}
+
+globalThis.__hull_frontend = { lex: run, lexDirected: runDirected, parse: runParse, parseInject: runParseInject };
