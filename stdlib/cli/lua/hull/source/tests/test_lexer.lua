@@ -123,6 +123,30 @@ do
         local u = assert(lua.parse("local n = " .. bad))
         ok(#u.diagnostics >= 1, "number malformed -> diagnostic: " .. bad)
     end
+    -- hex-literal exponent radix (regression, official Lua 5.4.7 math.lua): in a hex literal
+    -- 'e'/'E' are DIGITS and only 'p'/'P' introduces an exponent, so `0xE+1` is `0xE + 1`
+    -- (three tokens), not one malformed number. Decimal `0E+1` stays a single number.
+    do
+        local u = assert(lua.parse("return 0xE+1"))
+        eq(#u.diagnostics, 0, "hex adj: 0xE+1 clean")
+        local t = toks(u)   -- return, 0xE, +, 1
+        eq(#t, 4, "hex adj: 0xE+1 -> 4 tokens")
+        eq(t[2].kind, "number", "hex adj: 0xE is a number"); eq(t[2].text, "0xE", "hex adj: 0xE text")
+        ok(not t[2].malformed, "hex adj: 0xE not malformed")
+        eq(t[3].text, "+", "hex adj: + is a separate op")
+        eq(t[4].text, "1", "hex adj: trailing 1")
+        local u2 = assert(lua.parse("return 0xe-1"))
+        eq(#u2.diagnostics, 0, "hex adj: 0xe-1 clean")
+        eq(#toks(u2), 4, "hex adj: 0xe-1 -> 4 tokens")
+        -- a hex FLOAT with a real p-exponent stays one number
+        local u3 = assert(lua.parse("return 0x.ABCDEFp+24"))
+        eq(#u3.diagnostics, 0, "hex adj: hex float p-exponent clean")
+        eq(find(u3, "0x.ABCDEFp+24").kind, "number", "hex adj: hex float is one number")
+        -- decimal exponent unaffected
+        local u4 = assert(lua.parse("return 0E+1"))
+        eq(#u4.diagnostics, 0, "hex adj: decimal 0E+1 clean")
+        eq(find(u4, "0E+1").kind, "number", "hex adj: 0E+1 one decimal number")
+    end
     -- escapes: all valid forms, no diagnostics
     local u = assert(lua.parse([[local s = "\n\t\\\"\x41\65\u{1F600}\z   x"]]))
     eq(#u.diagnostics, 0, "escapes: valid forms clean")
