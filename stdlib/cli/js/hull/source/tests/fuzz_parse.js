@@ -64,7 +64,8 @@ function fuzz(srcBuf, path, opts) {
     var u = parse(bytes, { path: path || "f.js", maxDiagnostics: maxDiagnostics });
 
     // -- diagnostics: classification + budget (4.5, 4.6) --
-    var ordinary = 0, sawInternal = false, terminalDiag = false, hasSyntax = false;
+    var ordinary = 0, sawInternal = false, terminalDiag = false;
+    var hasSyntax = false, hasDepth = false, hasTokens = false;
     var diags = u.diagnostics || [];
     for (var di = 0; di < diags.length; di++) {
         var d = diags[di];
@@ -73,15 +74,42 @@ function fuzz(srcBuf, path, opts) {
         if (e) return { schema_version: 1, ok: false, reason: e };
         if (typeof code !== "string") return { schema_version: 1, ok: false, reason: "diagnostic: missing code" };
         if (code === "js.internal") sawInternal = true;                 // 4.6: internal is a FAILURE
-        else if (code.lastIndexOf("js.limit.", 0) === 0) { if (code === "js.limit.diagnostics") terminalDiag = true; }
-        else { if (code === "js.syntax") hasSyntax = true; ordinary++; } // js.syntax / js.unsupported / other ordinary
+        else if (code.lastIndexOf("js.limit.", 0) === 0) {              // parser-level bounded outcomes
+            if (code === "js.limit.diagnostics") terminalDiag = true;
+            else if (code === "js.limit.depth") hasDepth = true;
+            else if (code === "js.limit.tokens") hasTokens = true;
+        } else { if (code === "js.syntax") hasSyntax = true; ordinary++; }  // js.syntax / js.unsupported / other
     }
-    // Whether this unit underwent SYNTAX recovery. The recovery-marker nesting exemption below is
-    // gated on this: a clean OR unsupported-only unit gets STRICT nesting for every child. A
-    // budget hit (js.limit.diagnostics) means ordinary diagnostics -- including js.syntax -- were
-    // dropped, so we cannot rule out recovery and treat it as recovery (safe: escaping markers
-    // only arise from syntax recovery; an unsupported construct is consumed cleanly with none).
-    var recovery = hasSyntax || terminalDiag;
+
+    // Recovery classification -- gates the nesting exemption below. js.limit.diagnostics is NOT
+    // by itself evidence of SYNTAX recovery: with maxDiagnostics small, a valid-but-UNSUPPORTED
+    // input emits only js.unsupported, which is suppressed and replaced by js.limit.diagnostics.
+    //   - js.syntax present -> recovery.
+    //   - js.limit.depth / js.limit.tokens (an incomplete/truncated AST) -> recovery/incomplete.
+    //   - js.limit.diagnostics WITHOUT visible js.syntax -> REPARSE once with a generous budget
+    //     (2n+64) SOLELY to reveal whether the suppressed diagnostics included js.syntax:
+    //       reparse has js.syntax                 -> recovery;
+    //       reparse is unsupported-only / clean   -> STRICT;
+    //       reparse still budget-exhausted        -> INDETERMINATE -> bounded (recovery) path,
+    //                                                never silently "clean". (Practically
+    //                                                unreachable: needs >2n+64 diagnostics.)
+    // The reparse fires only on budget exhaustion, so it does not materially cost throughput.
+    var recovery;
+    if (hasSyntax || hasDepth || hasTokens) {
+        recovery = true;
+    } else if (terminalDiag) {
+        var u2 = parse(bytes, { path: path || "f.js", maxDiagnostics: 2 * n + 64 });
+        var r2syntax = false, r2budget = false, r2incomplete = false, d2 = u2.diagnostics || [];
+        for (var j = 0; j < d2.length; j++) {
+            var c2 = d2[j] && d2[j].code;
+            if (c2 === "js.syntax") r2syntax = true;
+            else if (c2 === "js.limit.diagnostics") r2budget = true;
+            else if (c2 === "js.limit.depth" || c2 === "js.limit.tokens") r2incomplete = true;
+        }
+        recovery = r2syntax || r2incomplete || r2budget;   // r2budget => indeterminate -> bounded path
+    } else {
+        recovery = false;                                  // clean or unsupported-only -> STRICT
+    }
     if (sawInternal) return { schema_version: 1, ok: false, reason: "js.internal in SourceUnit" };
     if (ordinary > maxDiagnostics) return { schema_version: 1, ok: false, reason: "ordinary diagnostics " + ordinary + " exceed maxDiagnostics " + maxDiagnostics };
     // when the budget was hit, the terminal js.limit.diagnostics must remain visible
@@ -179,7 +207,10 @@ function fuzz(srcBuf, path, opts) {
         }
     }
 
-    return { schema_version: 1, ok: true };
+    // `recovery` is surfaced (test-only entry) so a regression can assert the classification --
+    // e.g. valid-but-unsupported input at maxDiagnostics=0 must be recovery:false (STRICT). The
+    // fuzzer harness ignores it (checks only ok).
+    return { schema_version: 1, ok: true, recovery: recovery };
 }
 
 globalThis.__hull_frontend = { fuzz: function (srcBuf, path, opts) { return fuzz(srcBuf, path, opts || {}); } };

@@ -19,7 +19,7 @@ ifeq ($(RUNTIME),js)
 else ifeq ($(RUNTIME),lua)
   # test_js_session + test_js_lexer + test_js_parser (the JS tooling runtime + frontend) need
   # QuickJS, absent in a lua-only build.
-  TEST_SRCS := $(filter-out %/test_js.c %/test_js_session.c %/test_js_lexer.c %/test_js_parser.c %/test_js_conformance.c %/test_js_annotations.c %/test_js_scope.c %/test_js_frontend.c %/test_js_generation.c,$(TEST_SRCS))
+  TEST_SRCS := $(filter-out %/test_js.c %/test_js_session.c %/test_js_lexer.c %/test_js_parser.c %/test_js_conformance.c %/test_js_annotations.c %/test_js_scope.c %/test_js_frontend.c %/test_js_generation.c %/test_js_fuzz_entry.c,$(TEST_SRCS))
 endif
 
 # Drop DB-dependent tests in pure-compute builds.
@@ -221,6 +221,13 @@ $(BUILDDIR)/test_js_scope: $(TESTDIR)/hull/frontend/test_js_scope.c $(FRONTEND_J
 # and asserts on the normalized facts + semantics + handle lifetime. Explicit recipe.
 $(BUILDDIR)/test_js_frontend: $(TESTDIR)/hull/frontend/test_js_frontend.c $(FRONTEND_JS_SESSION_OBJ) $(STDLIB_JS_CLI_REGISTRY_O) $(QJS_OBJS) | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -Ivendor/quickjs -o $@ $< $(FRONTEND_JS_SESSION_OBJ) $(STDLIB_JS_CLI_REGISTRY_O) $(QJS_OBJS) -lm -lpthread $(LDFLAGS)
+
+# Regression for the libFuzzer test entry hull:source:tests:fuzz_parse recovery classification
+# (docs/js_source_fuzz_design.md 4.2). Links the TEST cli-js registry (carries fuzz_parse), the
+# session, and QuickJS -- like test_js_generation but without the manager. Drives the entry
+# through precompiled bytecode (no raw JS_Eval), so it stays in the MSan run.
+$(BUILDDIR)/test_js_fuzz_entry: $(TESTDIR)/hull/frontend/test_js_fuzz_entry.c $(FRONTEND_JS_SESSION_OBJ) $(STDLIB_JS_CLI_TEST_REGISTRY_O) $(QJS_OBJS) | $(BUILDDIR)
+	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -Ivendor/quickjs -o $@ $< $(FRONTEND_JS_SESSION_OBJ) $(STDLIB_JS_CLI_TEST_REGISTRY_O) $(QJS_OBJS) -lm -lpthread $(LDFLAGS)
 
 # hull.frontend JS generation manager (Slice 6/7): the C-owned session/token manager; links the
 # manager + the session + registry + QuickJS. The manager SOURCE is compiled directly here with

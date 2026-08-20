@@ -86,12 +86,24 @@ Each AST child node's range must nest within its parent's: `child.start >= paren
   `ArrayPattern`'s missing element. They still pass the 4.1 in-bounds check. The exemption is
   COUNTED and bounded (`<= 2n + 64`) so recovery cannot mint unbounded synthetic escaping nodes.
 
-The "recovery" signal is `js.syntax present OR js.limit.diagnostics present`: a diagnostic-
-budget hit drops ordinary diagnostics (including `js.syntax`), so it is treated as possible
-recovery -- safe, since escaping markers arise ONLY from syntax recovery. This gating prevents
-a future clean-parse range bug from hiding behind a broad "all zero-width nodes are exempt"
-rule while preserving the faithful recovery behavior. (The fuzzer found this while shaking out
-the parser; it also found and motivated a real fix -- see below.)
+The "recovery" classification is precise (`js.limit.diagnostics` is NOT by itself evidence of
+SYNTAX recovery -- with a small budget a valid-but-UNSUPPORTED input's `js.unsupported` is
+suppressed and replaced by `js.limit.diagnostics`):
+- `js.syntax` present -> recovery.
+- `js.limit.depth` / `js.limit.tokens` (a truncated / incomplete AST) -> recovery.
+- `js.limit.diagnostics` WITHOUT visible `js.syntax` -> REPARSE once with a generous budget
+  (`2n+64`) SOLELY to reveal whether the suppressed diagnostics included `js.syntax`: reparse
+  has `js.syntax` -> recovery; reparse is unsupported-only / clean -> STRICT; reparse still
+  budget-exhausted -> INDETERMINATE -> bounded (recovery) path, never silently "clean"
+  (practically unreachable: needs `>2n+64` diagnostics). The reparse fires only on budget
+  exhaustion, so it does not materially cost fuzz throughput.
+
+This gating prevents a future clean-parse range bug from hiding behind a broad "all zero-width
+nodes are exempt" rule while keeping the locked "unsupported-only units stay strict". The
+test-only entry surfaces its `recovery` verdict so the classification is directly asserted by
+`tests/hull/frontend/test_js_fuzz_entry.c` (valid unsupported syntax at `maxDiagnostics=0` takes
+the STRICT path; a real syntax error takes recovery). (The fuzzer found the nesting reality
+while shaking out the parser; it also found and motivated a real fix -- see below.)
 
 ### 4.2b Parser fix the fuzzer motivated (landed in this slice)
 The fuzzer found an INVERTED range (`stop < start`) emitted by `fin()` / `fin2n()` on an
