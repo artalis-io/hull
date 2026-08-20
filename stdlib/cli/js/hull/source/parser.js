@@ -32,6 +32,18 @@ const RESERVED = new Set([
     "instanceof", "new", "return", "super", "switch", "this", "throw", "try", "typeof", "var",
     "void", "while", "with", "enum",
 ]);
+// Hull parses MODULE code, which is always strict. These are reserved as BOTH a BindingIdentifier
+// and an IdentifierReference (and a LabelIdentifier) in strict/module code: the strict
+// FutureReservedWords plus the always-reserved `await`/`yield` (a genuine YieldExpression only
+// occurs inside a generator, which Hull declines, so a `yield` reaching an identifier context is
+// always a reserved-word misuse). Checked in parseIdentifier -> covers references, bindings,
+// class/function names, and labels. Property keys go through parseIdentifierName and are exempt.
+const STRICT_RESERVED = new Set([
+    "implements", "interface", "let", "package", "private", "protected", "public", "static",
+    "yield", "await",
+]);
+// Restricted as a BINDING target only (a reference/call `eval(x)` / `arguments` stays legal).
+const BINDING_RESTRICTED = new Set(["eval", "arguments"]);
 // Unary operators (prefix).
 const UNARY = new Set(["+", "-", "!", "~", "typeof", "void", "delete"]);
 // Assignment operators.
@@ -123,11 +135,17 @@ function parseInternal(bytes, opts, inject) {
     // the nearest non-arrow function through any number of arrow frames. At module top level (no
     // frame) and in a top-level arrow (only arrow frames) it is a syntax error. Matches QuickJS.
     function newTargetAllowed() { for (let i = 0; i < ctxStack.length; i++) if (!ctxStack[i].arrow) return true; return false; }
+    // `yield` binds to the nearest enclosing NON-ARROW function; it is a keyword only when that
+    // function is a generator. Hull DECLINES generators (js.unsupported at `function*`) but still
+    // parses their bodies for recovery, so a yield inside a declined generator must stay quiet
+    // (no second diagnostic), while a `yield` in any non-generator function or at module top level
+    // is a reserved-word syntax error.
+    function inGenerator() { for (let i = ctxStack.length - 1; i >= 0; i--) if (!ctxStack[i].arrow) return ctxStack[i].gen === true; return false; }
     // Run `fn` while parsing a NESTED statement (import/export illegal there).
     function nested(fn) { const t = atModuleItem; atModuleItem = false; const r = fn(); atModuleItem = t; return r; }
     // Parse a function's params then body under a pushed context frame; restored on return.
-    function withFn(kind, doParams, doBody) {
-        ctxStack.push({ kind: kind, region: "params", arrow: false });
+    function withFn(kind, doParams, doBody, gen) {
+        ctxStack.push({ kind: kind, region: "params", arrow: false, gen: gen === true });
         const params = doParams();
         ctxStack[ctxStack.length - 1].region = "body";
         const body = nested(doBody);
@@ -168,7 +186,7 @@ function parseInternal(bytes, opts, inject) {
     // producer, so a failed speculative parse (e.g. an arrow guess) leaves no lexical
     // disagreement or stray diagnostic, no matter what content it lexed.
     function saveState() { return { tk: tk.checkpoint(), cur: cur, prev: prev, la: la.slice(), budget: budget.mark(), depth: depth, errored: errored,
-        ctx: ctxStack.map(function (f) { return { kind: f.kind, region: f.region, arrow: f.arrow }; }), atModuleItem: atModuleItem }; }
+        ctx: ctxStack.map(function (f) { return { kind: f.kind, region: f.region, arrow: f.arrow, gen: f.gen }; }), atModuleItem: atModuleItem }; }
     function restoreState(st) {
         tk.restore(st.tk); cur = st.cur; prev = st.prev;
         la.length = 0; for (let i = 0; i < st.la.length; i++) la.push(st.la[i]);
@@ -517,7 +535,7 @@ function parseInternal(bytes, opts, inject) {
         f.generator = eatP("*", true);
         if (f.generator) { unsupported("generator functions are not supported", prev); }
         f.id = (cur.type === "identifier" && !RESERVED.has(cur.value)) ? parseIdentifier() : null;
-        const r = withFn(f.async ? "async" : "regular", parseParams, function () { return parseFunctionBody(true); });
+        const r = withFn(f.async ? "async" : "regular", parseParams, function () { return parseFunctionBody(true); }, f.generator);
         f.params = r.params; f.body = r.body;       // declaration body `}` -> statement follows
         return fin(f);
     }
@@ -529,7 +547,7 @@ function parseInternal(bytes, opts, inject) {
         f.generator = eatP("*", true);
         if (f.generator) unsupported("generator functions are not supported", prev);
         f.id = (cur.type === "identifier" && !RESERVED.has(cur.value)) ? parseIdentifier() : null;
-        const r = withFn(f.async ? "async" : "regular", parseParams, function () { return parseFunctionBody(false); });
+        const r = withFn(f.async ? "async" : "regular", parseParams, function () { return parseFunctionBody(false); }, f.generator);
         f.params = r.params; f.body = r.body;       // expression body `}` -> a value (division)
         return fin(f);
     }
@@ -610,7 +628,7 @@ function parseInternal(bytes, opts, inject) {
         const m = mk("MethodDefinition", start); m.static = isStatic; m.kind = kind; m.key = key; m.async = isAsync; m.generator = isGen;
         if (isP("(")) {
             const fe = mk("FunctionExpression", cur.start); fe.async = isAsync; fe.generator = isGen; fe.id = null;
-            const fr = withFn(fe.async ? "async" : "regular", parseParams, function () { return parseFunctionBody(false); }); fe.params = fr.params; fe.body = fr.body;
+            const fr = withFn(fe.async ? "async" : "regular", parseParams, function () { return parseFunctionBody(false); }, fe.generator); fe.params = fr.params; fe.body = fr.body;
             m.value = fin(fe);
             return fin(m);
         }
@@ -635,7 +653,9 @@ function parseInternal(bytes, opts, inject) {
     }
     function parseBindingIdentifier() {
         if (cur.type !== "identifier" || RESERVED.has(cur.value)) { synErr("expected a binding name"); return errNode(cur.start); }
-        return parseIdentifier();
+        // `eval` / `arguments` are legal references but illegal as a BINDING target in strict code.
+        if (BINDING_RESTRICTED.has(cur.value)) { synErr("'" + cur.value + "' may not be a binding name in module code"); advance(false); return errNode(cur.start); }
+        return parseIdentifier();       // also rejects the STRICT_RESERVED words
     }
     function parseArrayPattern() {
         const n = mk("ArrayPattern", cur.start); n.elements = [];
@@ -783,13 +803,19 @@ function parseInternal(bytes, opts, inject) {
                 node.argument = isExprStartTok(cur) ? parseUnary() : null;
                 return fin(node);
             }
-            if (v === "yield") {
+            if (v === "yield" && !cur.escaped) {
                 const ys = cur.start;
-                unsupported("yield is not supported");
-                advance(true);                      // past `yield`
-                eatP("*", true);                    // optional `yield*`
-                if (!nl() && isExprStartTok(cur)) parseAssignment();   // consume the operand cleanly
-                return errNode(ys);
+                if (inGenerator()) {
+                    // Inside a generator Hull already declined at `function*`; consume the yield
+                    // operator quietly (a clean YieldExpression, no second diagnostic).
+                    advance(true);                  // past `yield`
+                    const node = mk("YieldExpression", ys); node.delegate = eatP("*", true);
+                    node.argument = (!nl() && isExprStartTok(cur)) ? parseAssignment() : null;
+                    return fin(node);
+                }
+                // Outside a generator, `yield` is a reserved word in module code -> a grammar
+                // error (js.syntax), agreeing with QuickJS. It falls through to the reserved
+                // identifier path below.
             }
         }
         let e = parsePostfix();
@@ -1004,7 +1030,7 @@ function parseInternal(bytes, opts, inject) {
         const pr = mk("Property", start); pr.computed = computed; pr.key = key; pr.kind = kind === "init" ? "init" : kind;
         if (isP("(")) {   // method
             const fe = mk("FunctionExpression", cur.start); fe.async = isAsync; fe.generator = isGen; fe.id = null;
-            const fr = withFn(fe.async ? "async" : "regular", parseParams, function () { return parseFunctionBody(false); }); fe.params = fr.params; fe.body = fr.body;
+            const fr = withFn(fe.async ? "async" : "regular", parseParams, function () { return parseFunctionBody(false); }, fe.generator); fe.params = fr.params; fe.body = fr.body;
             pr.value = fin(fe); pr.method = true; pr.shorthand = false;
             return fin(pr);
         }
@@ -1040,11 +1066,11 @@ function parseInternal(bytes, opts, inject) {
         return fin(n);
     }
     function parseIdentifier() {
-        // Hull parses MODULE code, which is always strict and where `await` is a reserved word:
-        // it may not be a BindingIdentifier, IdentifierReference, or LabelIdentifier (an
-        // AwaitExpression is intercepted earlier in parseUnary, so a bare `await` reaching here is
-        // always a reserved-word misuse). An escaped spelling (await) is likewise reserved.
-        if (cur.value === "await") { synErr("'await' is reserved in module code"); advance(false); return errNode(cur.start); }
+        // Strict/module reserved words (STRICT_RESERVED, incl. await/yield) may not be a
+        // BindingIdentifier, IdentifierReference, or LabelIdentifier. An AwaitExpression /
+        // YieldExpression is intercepted earlier in parseUnary, so a reserved word reaching here is
+        // always a reserved-word misuse. An escaped spelling is equally reserved (same word).
+        if (STRICT_RESERVED.has(cur.value)) { synErr("'" + cur.value + "' is reserved in module code"); advance(false); return errNode(cur.start); }
         const n = mk("Identifier", cur.start); n.name = cur.value; n.escaped = cur.escaped === true; advance(false); return fin(n);
     }
     // an identifier name where keywords are allowed (property names, member access).
@@ -1073,6 +1099,11 @@ function parseInternal(bytes, opts, inject) {
             while (!isP("}") && !atEof()) {
                 const spec = mk("ImportSpecifier", cur.start); spec.imported = parseIdentifierName(); spec.local = spec.imported;
                 if (isKw("as")) { advance(true); spec.local = parseBindingIdentifier(); }
+                // Without `as`, the imported name IS the local binding, so it must be a valid
+                // binding identifier (`import { eval }` / `import { public }` are invalid).
+                else if (spec.imported && spec.imported.name !== undefined &&
+                         (RESERVED.has(spec.imported.name) || STRICT_RESERVED.has(spec.imported.name) || BINDING_RESTRICTED.has(spec.imported.name)))
+                    synErr("'" + spec.imported.name + "' may not be a binding name in module code", spec.imported);
                 s.specifiers.push(fin(spec));
                 if (!eatP(",", true)) break;
             }

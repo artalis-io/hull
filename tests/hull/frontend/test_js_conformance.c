@@ -177,6 +177,11 @@ static const Case VALID[] = {
     { "new.target in param",   "function fnp(x = new.target) { return x; }" },
     { "new.target nested arrow","function fna() { const a = () => new.target; return a; }" },
     { "new.target in method",  "class Cnt { m() { return new.target; } }" },
+    /* Reserved-word exemptions: eval/arguments are legal references, and strict-reserved words
+     * stay legal as property keys / member names (only bindings + references reject). */
+    { "eval as reference",     "eval(1);" },
+    { "arguments reference",   "const ar = [arguments];" },
+    { "reserved as prop key",  "const o = { public: 1, static: 2 }; o.public;" },
 };
 
 /* Malformed source the parser REJECTS (js.syntax) -- invalid in both strict and sloppy. */
@@ -219,6 +224,12 @@ static const Case MALFORMED[] = {
     { "meta for-of target",    "for (import.meta of null) ;" },             /* invalid for-of left */
     { "new.target top level",  "new.target;" },                             /* no enclosing function */
     { "new.target top arrow",  "const gnt = () => new.target;" },           /* top-level arrow: no non-arrow frame */
+    /* Strict/module reserved words as bindings, and bare yield outside a generator. */
+    { "strict-reserved bind",  "var public;" },                             /* FutureReservedWord binding */
+    { "var interface",         "var interface;" },
+    { "import-as reserved",    "import { x as eval } from \"m\";" },         /* eval illegal binding target */
+    { "import local reserved", "import { eval } from \"m\";" },             /* no-`as` local must be bindable */
+    { "bare yield in module",  "yield;" },                                  /* reserved outside a generator */
 };
 
 /* Recognized, VALID ECMAScript that Hull deliberately declines with js.unsupported (never a
