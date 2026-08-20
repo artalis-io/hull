@@ -204,8 +204,8 @@ $(BUILDDIR)/test_js_parser: $(TESTDIR)/hull/frontend/test_js_parser.c $(FRONTEND
 
 # hull.frontend JS conformance (Slice 2): runs the corpus through the session parser AND a
 # QuickJS compile-only oracle, so it links both the session and QuickJS. Explicit recipe.
-$(BUILDDIR)/test_js_conformance: $(TESTDIR)/hull/frontend/test_js_conformance.c $(FRONTEND_JS_SESSION_OBJ) $(STDLIB_JS_CLI_REGISTRY_O) $(QJS_OBJS) | $(BUILDDIR)
-	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -Ivendor/quickjs -o $@ $< $(FRONTEND_JS_SESSION_OBJ) $(STDLIB_JS_CLI_REGISTRY_O) $(QJS_OBJS) -lm -lpthread $(LDFLAGS)
+$(BUILDDIR)/test_js_conformance: $(TESTDIR)/hull/frontend/test_js_conformance.c $(FRONTEND_JS_SESSION_OBJ) $(STDLIB_JS_CLI_REGISTRY_O) $(QJS_OBJS) $(SH_JSON_OBJ) $(SH_ARENA_OBJ) | $(BUILDDIR)
+	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -Ivendor/quickjs -o $@ $< $(FRONTEND_JS_SESSION_OBJ) $(STDLIB_JS_CLI_REGISTRY_O) $(QJS_OBJS) $(SH_JSON_OBJ) $(SH_ARENA_OBJ) -lm -lpthread $(LDFLAGS)
 
 # hull.frontend JS annotations (Slice 3): drives hull:source:parse and asserts on attached JSDoc
 # annotations. Same tooling-session link. Explicit recipe (tests/hull/frontend/).

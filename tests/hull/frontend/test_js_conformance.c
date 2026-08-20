@@ -33,10 +33,13 @@
 #include "utest.h"
 #include "hull/frontend/js_session.h"
 #include "quickjs.h"
+#include "sh_json.h"
+#include "sh_arena.h"
 
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
+#include <stdint.h>
 #include <dirent.h>
 #include <fcntl.h>
 #include <unistd.h>
@@ -344,7 +347,8 @@ static int walk(const char *dir, PathVec *out)
         if (lstat(path, &st) != 0) { rc = -1; break; }
         if (S_ISLNK(st.st_mode)) continue;                       /* no symlinks */
         if (S_ISDIR(st.st_mode)) {
-            if (e->d_name[0] == '.' || !strcmp(e->d_name, "static") || !strcmp(e->d_name, "node_modules")) continue;
+            /* `test262` is the pinned conformance corpus (its own leg), NOT application source. */
+            if (e->d_name[0] == '.' || !strcmp(e->d_name, "static") || !strcmp(e->d_name, "node_modules") || !strcmp(e->d_name, "test262")) continue;
             if (walk(path, out) != 0) { rc = -1; break; }
         } else if (S_ISREG(st.st_mode) && has_js_ext(e->d_name)) {
             if (pv_push(out, path) != 0) { rc = -1; break; }
@@ -454,6 +458,285 @@ UTEST(js_conformance, repo_corpus)
     EXPECT_EQ(fail, 0);                  /* every QuickJS-accepted file parsed cleanly; no false-accept */
 
     pv_free(&pv);
+    JS_FreeContext(octx); JS_FreeRuntime(ort);
+    hl_js_session_destroy(s);
+}
+
+/* -- leg 3: the pinned, module-only Test262 subset (docs/js_test262_design.md) --
+ *
+ * Runs the committed corpus (tests/fixtures/test262) through a THREE-way oracle: Test262 metadata
+ * (positive | parse-negative), the QuickJS compile-only MODULE verdict, and the Hull parser. CI is
+ * completely OFFLINE: it consumes only the committed subset; scripts/fetch_test262.sh is refresh
+ * tooling and is NEVER invoked here. The leg is closed both ways -- an unlisted non-agree outcome
+ * fails, and a stale expectation / unused inventory key fails. */
+
+#define T262_DIR      "tests/fixtures/test262"
+#define T262_CASES    T262_DIR "/cases"
+#define T262_MANIFEST T262_DIR "/manifest.json"
+#define T262_MANHASH  T262_DIR "/MANIFEST.sha256"
+#define T262_EXPECT   T262_DIR "/expectations.json"
+#define T262_PINNED_SHA "3655e7464de3d52643ecddd4b5f9f4f3e7f62398"
+#define T262_SCHEMA 1
+#define T262_SELECTION_RULES 2
+
+/* Minimal SHA-256 (self-contained; corpus integrity only -- no crypto-cap link dependency). */
+typedef struct { uint32_t s[8]; uint64_t n; uint8_t b[64]; size_t bl; } Sha256;
+static const uint32_t T262_K[64] = {
+    0x428a2f98,0x71374491,0xb5c0fbcf,0xe9b5dba5,0x3956c25b,0x59f111f1,0x923f82a4,0xab1c5ed5,
+    0xd807aa98,0x12835b01,0x243185be,0x550c7dc3,0x72be5d74,0x80deb1fe,0x9bdc06a7,0xc19bf174,
+    0xe49b69c1,0xefbe4786,0x0fc19dc6,0x240ca1cc,0x2de92c6f,0x4a7484aa,0x5cb0a9dc,0x76f988da,
+    0x983e5152,0xa831c66d,0xb00327c8,0xbf597fc7,0xc6e00bf3,0xd5a79147,0x06ca6351,0x14292967,
+    0x27b70a85,0x2e1b2138,0x4d2c6dfc,0x53380d13,0x650a7354,0x766a0abb,0x81c2c92e,0x92722c85,
+    0xa2bfe8a1,0xa81a664b,0xc24b8b70,0xc76c51a3,0xd192e819,0xd6990624,0xf40e3585,0x106aa070,
+    0x19a4c116,0x1e376c08,0x2748774c,0x34b0bcb5,0x391c0cb3,0x4ed8aa4a,0x5b9cca4f,0x682e6ff3,
+    0x748f82ee,0x78a5636f,0x84c87814,0x8cc70208,0x90befffa,0xa4506ceb,0xbef9a3f7,0xc67178f2 };
+static uint32_t t262_ror(uint32_t x, int n) { return (x >> n) | (x << (32 - n)); }
+static void t262_block(Sha256 *c, const uint8_t *p) {
+    uint32_t w[64], a, b_, cc, d, e, f, g, h, i, t1, t2;
+    for (i = 0; i < 16; i++) w[i] = (uint32_t)p[i*4]<<24 | (uint32_t)p[i*4+1]<<16 | (uint32_t)p[i*4+2]<<8 | p[i*4+3];
+    for (i = 16; i < 64; i++) {
+        uint32_t s0 = t262_ror(w[i-15],7)^t262_ror(w[i-15],18)^(w[i-15]>>3);
+        uint32_t s1 = t262_ror(w[i-2],17)^t262_ror(w[i-2],19)^(w[i-2]>>10);
+        w[i] = w[i-16]+s0+w[i-7]+s1;
+    }
+    a=c->s[0];b_=c->s[1];cc=c->s[2];d=c->s[3];e=c->s[4];f=c->s[5];g=c->s[6];h=c->s[7];
+    for (i = 0; i < 64; i++) {
+        uint32_t S1=t262_ror(e,6)^t262_ror(e,11)^t262_ror(e,25), ch=(e&f)^(~e&g);
+        t1=h+S1+ch+T262_K[i]+w[i];
+        uint32_t S0=t262_ror(a,2)^t262_ror(a,13)^t262_ror(a,22), mj=(a&b_)^(a&cc)^(b_&cc);
+        t2=S0+mj; h=g;g=f;f=e;e=d+t1;d=cc;cc=b_;b_=a;a=t1+t2;
+    }
+    c->s[0]+=a;c->s[1]+=b_;c->s[2]+=cc;c->s[3]+=d;c->s[4]+=e;c->s[5]+=f;c->s[6]+=g;c->s[7]+=h;
+}
+static void t262_sha_hex(const void *data, size_t len, char out[65]) {
+    Sha256 c; c.s[0]=0x6a09e667;c.s[1]=0xbb67ae85;c.s[2]=0x3c6ef372;c.s[3]=0xa54ff53a;
+    c.s[4]=0x510e527f;c.s[5]=0x9b05688c;c.s[6]=0x1f83d9ab;c.s[7]=0x5be0cd19;c.n=0;c.bl=0;
+    const uint8_t *p = (const uint8_t *)data; size_t rem = len;
+    while (rem) { size_t k = 64 - c.bl; if (k > rem) k = rem; memcpy(c.b + c.bl, p, k); c.bl += k; p += k; rem -= k;
+        if (c.bl == 64) { t262_block(&c, c.b); c.bl = 0; } }
+    c.n = (uint64_t)len * 8;
+    uint8_t pad = 0x80; size_t z = (c.bl < 56) ? (56 - c.bl) : (120 - c.bl);
+    Sha256 *cp = &c;
+    { const uint8_t one = 0x80; (void)pad; memcpy(cp->b + cp->bl, &one, 1); cp->bl++; z--; if (cp->bl==64){t262_block(cp,cp->b);cp->bl=0;} }
+    while (z) { cp->b[cp->bl++] = 0; z--; if (cp->bl==64){t262_block(cp,cp->b);cp->bl=0;} }
+    for (int i = 7; i >= 0; i--) { cp->b[cp->bl++] = (uint8_t)(cp->n >> (i*8)); if (cp->bl==64){t262_block(cp,cp->b);cp->bl=0;} }
+    static const char hx[] = "0123456789abcdef";
+    for (int i = 0; i < 8; i++) for (int j = 3; j >= 0; j--) {
+        uint8_t byte = (uint8_t)(c.s[i] >> (j*8));
+        *out++ = hx[byte >> 4]; *out++ = hx[byte & 15];
+    }
+    *out = '\0';
+}
+
+/* A committed case path must be relative, canonical, and contain no `.`/`..`/empty component,
+ * no backslash, no `//`, and no leading/trailing slash. */
+static int t262_path_ok(const char *p) {
+    if (!p || !*p || p[0] == '/') return 0;
+    if (strchr(p, '\\') || strstr(p, "//")) return 0;
+    size_t n = strlen(p);
+    if (p[n-1] == '/') return 0;
+    const char *seg = p;
+    for (size_t i = 0; ; i++) {
+        if (p[i] == '/' || p[i] == '\0') {
+            size_t sl = (size_t)(&p[i] - seg);
+            if (sl == 0) return 0;
+            if (sl == 1 && seg[0] == '.') return 0;
+            if (sl == 2 && seg[0] == '.' && seg[1] == '.') return 0;
+            if (p[i] == '\0') break;
+            seg = &p[i+1];
+        }
+    }
+    return 1;
+}
+
+/* js.unsupported message -> closed inventory key (the same 4 keys expectations.json declares). */
+static const char *t262_inv_key(const char *raw) {
+    if (strstr(raw, "generator functions are not supported")) return "generators";
+    if (strstr(raw, "do-while statement is not supported")) return "do-while";
+    if (strstr(raw, "private class members are not supported")) return "private-class-members";
+    if (strstr(raw, "private member access is not supported")) return "private-member-access";
+    return NULL;
+}
+
+UTEST(js_conformance, test262)
+{
+    /* ---- read + integrity-check the manifest and its hash ---- */
+    size_t man_len = 0; char *man_bytes = read_full(T262_MANIFEST, &man_len);
+    ASSERT_TRUE_MSG(man_bytes != NULL, "manifest.json must be readable");
+    size_t mh_len = 0; char *mh = read_full(T262_MANHASH, &mh_len);
+    ASSERT_TRUE_MSG(mh != NULL, "MANIFEST.sha256 must be readable");
+    char man_hex[65]; t262_sha_hex(man_bytes, man_len, man_hex);
+    ASSERT_TRUE_MSG(strncmp(mh, man_hex, 64) == 0, "MANIFEST.sha256 must equal sha256(manifest.json)");
+    free(mh);
+
+    SHArena *arena = sh_arena_create(8 * 1024 * 1024);
+    ASSERT_TRUE(arena != NULL);
+    ShJsonValue *mroot = NULL;
+    ASSERT_EQ_MSG(sh_json_parse(man_bytes, man_len, arena, &mroot), SH_JSON_OK, "manifest.json parse");
+    ASSERT_EQ(sh_json_as_int(sh_json_get(mroot, "schema_version"), -1), T262_SCHEMA);
+    ASSERT_EQ(sh_json_as_int(sh_json_get(mroot, "selection_rules_version"), -1), T262_SELECTION_RULES);
+    ASSERT_TRUE_MSG(strcmp(sh_json_as_string(sh_json_get(mroot, "upstream_sha"), ""), T262_PINNED_SHA) == 0, "pinned SHA");
+    ShJsonValue *cases = sh_json_get(mroot, "cases");
+    ASSERT_TRUE(cases && sh_json_type(cases) == SH_JSON_ARRAY);
+    int count = sh_json_as_int(sh_json_get(mroot, "count"), -1);
+    ASSERT_EQ_MSG(count, (int)sh_json_array_len(cases), "manifest count == cases length");
+
+    /* ---- read + parse expectations.json ---- */
+    size_t exp_len = 0; char *exp_bytes = read_full(T262_EXPECT, &exp_len);
+    ASSERT_TRUE_MSG(exp_bytes != NULL, "expectations.json must be readable");
+    ShJsonValue *eroot = NULL;
+    ASSERT_EQ_MSG(sh_json_parse(exp_bytes, exp_len, arena, &eroot), SH_JSON_OK, "expectations.json parse");
+    ASSERT_EQ(sh_json_as_int(sh_json_get(eroot, "schema_version"), -1), T262_SCHEMA);
+    ShJsonValue *exp_obj = sh_json_get(eroot, "expectations");
+    ShJsonValue *inv_obj = sh_json_get(eroot, "unsupported_inventory");
+    ASSERT_TRUE(exp_obj && sh_json_type(exp_obj) == SH_JSON_OBJECT);
+    ASSERT_TRUE(inv_obj && sh_json_type(inv_obj) == SH_JSON_OBJECT);
+    size_t exp_n = exp_obj->u.object_val.count;
+    size_t inv_n = inv_obj->u.object_val.count;
+    int *exp_used = (int *)calloc(exp_n ? exp_n : 1, sizeof(int));
+    int *inv_used = (int *)calloc(inv_n ? inv_n : 1, sizeof(int));
+    ASSERT_TRUE(exp_used && inv_used);
+
+    /* ---- enumerate cases/ on disk (fail-closed) and require a bijection with the manifest ---- */
+    PathVec disk = {0};
+    ASSERT_EQ_MSG(walk(T262_CASES, &disk), 0, "cases/ enumeration must not fail-open");
+    /* only .js (walk already filters to .js/.mjs/.cjs; the corpus is .js) */
+
+    HlJsSession *s = hl_js_session_create(NULL); ASSERT_TRUE(s != NULL);
+    JSRuntime *ort = JS_NewRuntime(); ASSERT_TRUE(ort != NULL);
+    JSContext *octx = JS_NewContext(ort); ASSERT_TRUE(octx != NULL);
+    JS_SetModuleLoaderFunc(ort, NULL, oracle_module_loader, NULL);   /* permissive: resolution never becomes a parser verdict */
+
+    int enumerated = (int)disk.len, read_ok = 0, hashed = 0, analyzed = 0;
+    int positive = 0, parse_negative = 0;
+    int agree = 0, false_reject = 0, false_accept = 0, unsupported = 0, unsup_reject = 0, divergence = 0, indeterminate = 0;
+    int fails = 0;
+
+    for (size_t i = 0; i < sh_json_array_len(cases); i++) {
+        ShJsonValue *c = sh_json_array_get(cases, i);
+        const char *path = sh_json_as_string(sh_json_get(c, "path"), NULL);
+        const char *shash = sh_json_as_string(sh_json_get(c, "source_hash"), NULL);
+        ASSERT_TRUE_MSG(path && shash, "case entry needs path + source_hash");
+        if (!t262_path_ok(path)) { fprintf(stderr, "[t262 bad path] %s\n", path); fails++; continue; }
+        /* no duplicate path (manifest is sorted; adjacent compare) */
+        if (i > 0) {
+            const char *prev = sh_json_as_string(sh_json_get(sh_json_array_get(cases, i-1), "path"), "");
+            if (strcmp(prev, path) >= 0) { fprintf(stderr, "[t262 unsorted/dup] %s\n", path); fails++; }
+        }
+        char full[4096];
+        int k = snprintf(full, sizeof(full), "%s/%s", T262_CASES, path);
+        ASSERT_TRUE(k > 0 && (size_t)k < sizeof(full));
+        struct stat st;
+        ASSERT_EQ_MSG(lstat(full, &st), 0, path);
+        ASSERT_TRUE_MSG(S_ISREG(st.st_mode) && !S_ISLNK(st.st_mode), "case must be a regular file, no symlink");
+        size_t len = 0; char *bytes = read_full(full, &len);
+        ASSERT_TRUE_MSG(bytes != NULL, full);
+        read_ok++;
+        char hex[65]; t262_sha_hex(bytes, len, hex);
+        ASSERT_TRUE_MSG(strcmp(hex, shash) == 0, path);   /* exact committed bytes */
+        hashed++;
+
+        ShJsonValue *neg = sh_json_get(c, "negative");
+        int is_neg = neg && sh_json_type(neg) == SH_JSON_OBJECT;   /* selection kept only phase:parse */
+        if (is_neg) parse_negative++; else positive++;
+
+        char *raw = NULL;
+        Verdict P = parser_verdict(s, bytes, len, &raw);
+        Verdict O = oracle_verdict(octx, bytes, len, path);
+        Verdict E = is_neg ? V_REJECT : V_ACCEPT;
+        analyzed++;
+        free(bytes);
+
+        /* three-way bucketing (docs/js_test262_design.md section 7) */
+        if (P == V_INDETERMINATE) { indeterminate++; fails++; fprintf(stderr, "[t262 indeterminate] %s\n", path); }
+        else if (E != O) { divergence++; fails++; fprintf(stderr, "[t262 divergence] %s (meta=%s oracle=%s)\n", path, E==V_REJECT?"neg":"pos", vname(O)); }
+        else if (P == V_UNSUPPORTED) {
+            const char *key = t262_inv_key(raw ? raw : "");
+            if (!key) { fprintf(stderr, "[t262 unknown unsupported key] %s :: %.180s\n", path, raw ? raw : ""); fails++; }
+            else {
+                /* the key must be declared in the closed inventory (else unexpected unsupported) */
+                int found = -1;
+                for (size_t m = 0; m < inv_n; m++) if (!strcmp(inv_obj->u.object_val.members[m].key, key)) { found = (int)m; break; }
+                if (found < 0) { fprintf(stderr, "[t262 unexpected unsupported] %s key=%s\n", path, key); fails++; }
+                else inv_used[found]++;
+            }
+            if (O == V_ACCEPT) unsupported++;
+            else {
+                /* unsupported-reject: needs an exact-path reviewed expectation */
+                unsup_reject++;
+                int found = -1;
+                for (size_t m = 0; m < exp_n; m++) if (!strcmp(exp_obj->u.object_val.members[m].key, path)) { found = (int)m; break; }
+                if (found < 0) { fprintf(stderr, "[t262 unexpected unsupported-reject] %s\n", path); fails++; }
+                else {
+                    ShJsonValue *ent = exp_obj->u.object_val.members[found].value;
+                    const char *cat = sh_json_as_string(sh_json_get(ent, "category"), "");
+                    if (strcmp(cat, "unsupported-reject") != 0) { fprintf(stderr, "[t262 wrong category] %s\n", path); fails++; }
+                    else exp_used[found]++;
+                }
+            }
+        }
+        else if (P == V_ACCEPT && O == V_REJECT) {
+            /* false-accept: allowed ONLY with an exact-path static-semantic-omission expectation */
+            false_accept++;
+            int found = -1;
+            for (size_t m = 0; m < exp_n; m++) if (!strcmp(exp_obj->u.object_val.members[m].key, path)) { found = (int)m; break; }
+            if (found < 0) { fprintf(stderr, "[t262 UNEXPECTED false-accept] %s\n", path); fails++; }
+            else {
+                ShJsonValue *ent = exp_obj->u.object_val.members[found].value;
+                const char *cat = sh_json_as_string(sh_json_get(ent, "category"), "");
+                if (strcmp(cat, "static-semantic-omission") != 0) { fprintf(stderr, "[t262 wrong category] %s\n", path); fails++; }
+                else exp_used[found]++;
+            }
+        }
+        else if (P == V_REJECT && O == V_ACCEPT) { false_reject++; fails++; fprintf(stderr, "[t262 false-reject] %s :: %.180s\n", path, raw ? raw : ""); }
+        else agree++;
+        free(raw);
+    }
+
+    /* ---- bijection: every disk .js is in the manifest, and vice versa ---- */
+    /* build a sorted manifest-path vector to compare against the sorted disk vector */
+    PathVec mpaths = {0};
+    for (size_t i = 0; i < sh_json_array_len(cases); i++) {
+        const char *path = sh_json_as_string(sh_json_get(sh_json_array_get(cases, i), "path"), "");
+        char full[4096]; snprintf(full, sizeof(full), "%s/%s", T262_CASES, path);
+        pv_push(&mpaths, full);
+    }
+    qsort(disk.items, disk.len, sizeof(char *), cmp_str);
+    qsort(mpaths.items, mpaths.len, sizeof(char *), cmp_str);
+    ASSERT_EQ_MSG((int)disk.len, (int)mpaths.len, "disk .js count == manifest count (bijection)");
+    for (size_t i = 0; i < disk.len && i < mpaths.len; i++)
+        ASSERT_TRUE_MSG(strcmp(disk.items[i], mpaths.items[i]) == 0, "every disk .js appears in the manifest and vice versa");
+
+    /* ---- closed both ways: no stale expectation, no unused inventory key ---- */
+    int stale = 0;
+    for (size_t m = 0; m < exp_n; m++)
+        if (exp_used[m] != 1) { stale++; fprintf(stderr, "[t262 stale/unexercised expectation] %s (used=%d)\n", exp_obj->u.object_val.members[m].key, exp_used[m]); }
+    int unused_inv = 0;
+    for (size_t m = 0; m < inv_n; m++)
+        if (inv_used[m] == 0) { unused_inv++; fprintf(stderr, "[t262 unused inventory key] %s\n", inv_obj->u.object_val.members[m].key); }
+
+    fprintf(stderr, "\ntest262: enumerated=%d read=%d hashed=%d analyzed=%d positive=%d parse-negative=%d\n"
+            "test262: agree=%d false-reject=%d false-accept=%d unsupported=%d unsup-reject=%d divergence=%d indeterminate=%d\n"
+            "test262: expectations=%d (all exercised once: %s) inventory=%d (all exercised: %s)\n",
+            enumerated, read_ok, hashed, analyzed, positive, parse_negative,
+            agree, false_reject, false_accept, unsupported, unsup_reject, divergence, indeterminate,
+            (int)exp_n, stale ? "NO" : "yes", (int)inv_n, unused_inv ? "NO" : "yes");
+
+    /* ---- gates ---- */
+    EXPECT_EQ(read_ok, enumerated);
+    EXPECT_EQ(hashed, enumerated);
+    EXPECT_EQ(analyzed, enumerated);
+    EXPECT_EQ(analyzed, count);                 /* every manifest case analyzed */
+    EXPECT_EQ(false_reject, 0);
+    EXPECT_EQ(indeterminate, 0);
+    EXPECT_EQ(divergence, 0);
+    EXPECT_EQ(stale, 0);
+    EXPECT_EQ(unused_inv, 0);
+    EXPECT_EQ(fails, 0);                         /* every unexpected false-accept/unsupported/unsupported-reject */
+
+    free(exp_used); free(inv_used); free(man_bytes); free(exp_bytes);
+    pv_free(&disk); pv_free(&mpaths);
+    sh_arena_free(arena);
     JS_FreeContext(octx); JS_FreeRuntime(ort);
     hl_js_session_destroy(s);
 }
