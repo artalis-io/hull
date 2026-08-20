@@ -1048,10 +1048,22 @@ self-trust caveat (§8) — governance stays with CODEOWNERS/branch protection.
   full_all; empty component (docs//x, trailing docs/) also rejected; spaces/tabs/newlines inside a path are valid), with pure-Python
   classify() fixtures AND subprocess/CLI tests of the byte decoder. 67/67
   fixtures green. Stops for review before Slice 2.
-- **Slice 2:** always-triggered orchestrator + `ci-success` gate (`if: always()`,
-  static `needs` all jobs, repo-owned result-validation script) + `main`/
-  schedule/force-full=full + branch-protection migration doc. Preserve job
-  contents.
+- **Slice 2 (DONE, this change):** a `classify` orchestrator job (runs the
+  classifier + `check_gate_completeness.py` + all fixture self-tests, then
+  classifies the merge-base diff) + an applicability-aware `ci-success` gate
+  (`if: always()`, static `needs` on EVERY job, repo-owned
+  `scripts/ci/ci_gate.py`: success required, only a declared-inapplicable skip
+  - the push-only `benchmark` on a PR - is permitted; failure / cancellation /
+  disallowed-skip / missing / unknown fail closed; a matrix job's aggregate
+  result is handled). Adds `workflow_dispatch` with a `force_full` input (§15).
+  **PRESERVES current job execution** - no expensive job is classifier-skipped
+  yet, `paths-ignore` is retained, and `ci-success` is NOT yet a required check.
+  Proven by `test_ci_gate.py` (success / failure / cancellation / legit + illegit
+  skip / missing-required / unknown / matrix-aggregate). The branch-protection
+  cutover (make `ci-success` required, likely alongside DCO) is a SEPARATE,
+  explicitly authorized step - `main` currently has NO protection/rulesets/
+  required checks, so it is a clean, reversible addition, not a migration.
+  Stops for review before Slice 3.
 - **Slices 3-6:** focused tooling jobs; domain/native mapping; cache+matrix
   (wamrc cache, kill the 9x rebuild); nightly (schedule) + rollout. Each stops
   for review.
