@@ -206,7 +206,12 @@ function parseInternal(bytes, opts, inject) {
     // (prev is still the token before `start`), clamp to a zero-width span [start, start] rather
     // than emit an inverted range. Keeps the AST range invariant start <= stop <= n+1.
     function fin(node) { const s = prev ? prev.stop : node.start; node.stop = s < node.start ? node.start : s; return node; }
-    function errNode(start) { const e = mk("Error", start); e.stop = cur.start < start ? start : cur.start; return e; }
+    // An Error recovery node spans [start, end-of-CONSUMED-input] = prev.stop -- NOT cur.start
+    // (the next, not-yet-consumed token, which lies past any trailing trivia). Using prev.stop
+    // mirrors fin() so an Error child can never escape its enclosing node's range (also fin'd to
+    // prev.stop): `import\n;` must not yield an Error that overshoots into the next line. Clamp
+    // to >= start for the zero-width case (nothing consumed after `start`).
+    function errNode(start) { const e = mk("Error", start); const s = prev ? prev.stop : start; e.stop = s < start ? start : s; return e; }
 
     // Consume a specific punctuator (operator/operand goal after). Returns true if consumed.
     function eatP(v, regexAllowedAfter) { if (isP(v)) { advance(regexAllowedAfter); return true; } return false; }
