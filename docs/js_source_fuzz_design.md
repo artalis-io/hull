@@ -69,21 +69,29 @@ Every range on every AST node, comment, annotation, and diagnostic: `start` and 
 integers, `1 <= start <= stop <= n+1` (`n` = input byte length). A `null` diagnostic range
 is allowed (a whole-unit diagnostic). Non-integral, inverted, or out-of-bounds -> breach.
 
-### 4.2 Child nesting
-Each SUBSTANTIVE AST child node's range is nested within its parent's:
-`child.start >= parent.start` and `child.stop <= parent.stop`. A child escaping its parent's
-span -> breach. TWO recovery-artifact classes are EXEMPT because they intentionally anchor at
-the FAILURE FRONTIER (the current, not-yet-consumed token, `cur.start`) rather than the
-parent's last CONSUMED token (`prev.stop`), so they can legitimately sit just past a parent's
-finalized stop:
-- `Error` recovery nodes (any width -- `errNode` uses `cur.start`);
-- zero-width empty markers (`start === stop`), e.g. an `if`'s empty-consequent
-  `ExpressionStatement` or an unterminated `ArrayPattern`'s missing element.
+### 4.2 Child nesting (SYNTAX-GATED exemption)
+Each AST child node's range must nest within its parent's: `child.start >= parent.start` and
+`child.stop <= parent.stop`. An escape is a BREACH, with ONE narrowly-scoped exemption:
 
-Both still pass the 4.1 in-bounds check. This refinement is the faithful reading of "children
-nest within their parent" for a parser WITH error recovery: the clean syntax tree nests; the
-frontier-anchored recovery markers do not. (The fuzzer found this while shaking out the parser;
-it also found and motivated a real fix -- see below.)
+- **Clean unit** (no `js.syntax` diagnostic): STRICT nesting for EVERY child, including
+  zero-width nodes. A clean-parse range bug cannot hide.
+- **Unsupported-only unit** (`js.unsupported` but no `js.syntax`): STRICT nesting -- an
+  unsupported construct is consumed cleanly and produces no frontier markers.
+- **Syntax-recovery unit** (contains a `js.syntax` diagnostic): non-empty, non-`Error`
+  children must still nest; two recovery-artifact classes are EXEMPT because they intentionally
+  anchor at the FAILURE FRONTIER (`cur.start`, the current not-yet-consumed token) rather than
+  the parent's last CONSUMED token (`prev.stop`), so they can legitimately sit just past a
+  parent's finalized stop -- `Error` recovery nodes (any width) and zero-width empty markers
+  (`start === stop`), e.g. an `if`'s empty-consequent `ExpressionStatement` or an unterminated
+  `ArrayPattern`'s missing element. They still pass the 4.1 in-bounds check. The exemption is
+  COUNTED and bounded (`<= 2n + 64`) so recovery cannot mint unbounded synthetic escaping nodes.
+
+The "recovery" signal is `js.syntax present OR js.limit.diagnostics present`: a diagnostic-
+budget hit drops ordinary diagnostics (including `js.syntax`), so it is treated as possible
+recovery -- safe, since escaping markers arise ONLY from syntax recovery. This gating prevents
+a future clean-parse range bug from hiding behind a broad "all zero-width nodes are exempt"
+rule while preserving the faithful recovery behavior. (The fuzzer found this while shaking out
+the parser; it also found and motivated a real fix -- see below.)
 
 ### 4.2b Parser fix the fuzzer motivated (landed in this slice)
 The fuzzer found an INVERTED range (`stop < start`) emitted by `fin()` / `fin2n()` on an

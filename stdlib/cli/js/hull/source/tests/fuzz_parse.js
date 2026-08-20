@@ -64,7 +64,7 @@ function fuzz(srcBuf, path, opts) {
     var u = parse(bytes, { path: path || "f.js", maxDiagnostics: maxDiagnostics });
 
     // -- diagnostics: classification + budget (4.5, 4.6) --
-    var ordinary = 0, sawInternal = false, terminalDiag = false;
+    var ordinary = 0, sawInternal = false, terminalDiag = false, hasSyntax = false;
     var diags = u.diagnostics || [];
     for (var di = 0; di < diags.length; di++) {
         var d = diags[di];
@@ -74,8 +74,14 @@ function fuzz(srcBuf, path, opts) {
         if (typeof code !== "string") return { schema_version: 1, ok: false, reason: "diagnostic: missing code" };
         if (code === "js.internal") sawInternal = true;                 // 4.6: internal is a FAILURE
         else if (code.lastIndexOf("js.limit.", 0) === 0) { if (code === "js.limit.diagnostics") terminalDiag = true; }
-        else ordinary++;                                                 // js.syntax / js.unsupported / other ordinary
+        else { if (code === "js.syntax") hasSyntax = true; ordinary++; } // js.syntax / js.unsupported / other ordinary
     }
+    // Whether this unit underwent SYNTAX recovery. The recovery-marker nesting exemption below is
+    // gated on this: a clean OR unsupported-only unit gets STRICT nesting for every child. A
+    // budget hit (js.limit.diagnostics) means ordinary diagnostics -- including js.syntax -- were
+    // dropped, so we cannot rule out recovery and treat it as recovery (safe: escaping markers
+    // only arise from syntax recovery; an unsupported construct is consumed cleanly with none).
+    var recovery = hasSyntax || terminalDiag;
     if (sawInternal) return { schema_version: 1, ok: false, reason: "js.internal in SourceUnit" };
     if (ordinary > maxDiagnostics) return { schema_version: 1, ok: false, reason: "ordinary diagnostics " + ordinary + " exceed maxDiagnostics " + maxDiagnostics };
     // when the budget was hit, the terminal js.limit.diagnostics must remain visible
@@ -98,6 +104,8 @@ function fuzz(srcBuf, path, opts) {
     //         paths (a legitimate DAG -- e.g. a shorthand Property whose key and value are the
     //         SAME Identifier) is fine. A global visited set would wrongly flag that sharing. --
     var MAX_NODES = 8 * n + 64;
+    var MAX_EXEMPT = 2 * n + 64;           // bound on frontier-marker nesting exemptions (below)
+    var exemptEscapes = 0;
     var ancestors = new Set();
     var count = 0;
     // frame = { node, parent, kids:null|Array, idx }
@@ -114,19 +122,26 @@ function fuzz(srcBuf, path, opts) {
             if (node.start !== undefined || node.stop !== undefined) {
                 var nr = checkRange({ start: node.start, stop: node.stop }, n, "ast node");
                 if (nr) return { schema_version: 1, ok: false, reason: nr + " @" + node.type + " [" + node.start + "," + node.stop + "] n=" + n };
-                // 4.2 nesting within the parent, checked for every SUBSTANTIVE node -- a node
-                // that COVERS bytes and is part of the clean syntax tree. Two recovery-artifact
-                // classes are exempt because they intentionally anchor at the FAILURE FRONTIER
-                // (the current, not-yet-consumed token) rather than the parent's last CONSUMED
-                // token, so they can sit just past a parent's finalized stop:
-                //   - "Error" recovery nodes (errNode uses cur.start), any width; and
-                //   - zero-width empty markers (start === stop), e.g. an if's empty consequent.
-                // Both still pass the in-bounds range check above. Every other (non-empty,
-                // non-Error) node MUST nest within its parent.
-                var exempt = (node.type === "Error") || (node.stop === node.start);
-                if (!exempt && parent && parent.start !== undefined && parent.stop !== undefined &&
-                    (node.start < parent.start || node.stop > parent.stop))
-                    return { schema_version: 1, ok: false, reason: "AST child escapes parent range: " + node.type + "[" + node.start + "," + node.stop + "] in " + parent.type + "[" + parent.start + "," + parent.stop + "]" };
+                // 4.2 nesting within the parent. An escape is a BREACH unless it is a
+                // frontier-anchored recovery MARKER in a unit that actually underwent syntax
+                // recovery. The marker classes -- "Error" recovery nodes (errNode uses cur.start,
+                // any width) and zero-width empty markers (start === stop) -- anchor at the
+                // failure frontier, which can sit just past a parent finalized to its last
+                // CONSUMED token. The exemption is GATED on `recovery` (so a clean or
+                // unsupported-only unit gets STRICT nesting for EVERY child, catching a
+                // clean-parse range bug) and COUNTED against MAX_EXEMPT (so recovery cannot mint
+                // unbounded synthetic escaping nodes). Every substantive child of a clean tree
+                // must nest.
+                if (parent && parent.start !== undefined && parent.stop !== undefined &&
+                    (node.start < parent.start || node.stop > parent.stop)) {
+                    var marker = (node.type === "Error") || (node.stop === node.start);
+                    if (recovery && marker) {
+                        if (++exemptEscapes > MAX_EXEMPT)
+                            return { schema_version: 1, ok: false, reason: "recovery markers escaping parent exceed 2n+64 (" + exemptEscapes + ")" };
+                    } else {
+                        return { schema_version: 1, ok: false, reason: "AST child escapes parent range: " + node.type + "[" + node.start + "," + node.stop + "] in " + parent.type + "[" + parent.start + "," + parent.stop + "] recovery=" + recovery };
+                    }
+                }
             }
 
             // 4.1/4.3 attached annotations (on declaration nodes): range + raw slice equality.
