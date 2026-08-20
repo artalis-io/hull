@@ -142,8 +142,8 @@ UTEST(js_generation, shutdown_reaps_leaked_session_and_preserves_token)
 }
 
 /* Slice 7 amendment 1 (C3b): the tooling runtime has minimal authority, measured THROUGH a
- * real manager session. No eval / Function / capability global leaks; a fake application-module
- * import is not a synchronous capability load; a stale token still fails closed, never crashes. */
+ * real manager session. No eval / Function / capability global leaks; a stale token still fails
+ * closed, never crashes. */
 UTEST(js_generation, authority_probe_minimal)
 {
     int64_t t = hl_js_gen_open();
@@ -154,7 +154,6 @@ UTEST(js_generation, authority_probe_minimal)
     ASSERT_TRUE(o != NULL);
     EXPECT_TRUE(has(o, "\"forbidden_present\":[]"));     /* no eval/Function/db/fs/http/... leaked */
     EXPECT_TRUE(has(o, "\"global_is_object\":true"));    /* probe ran against the real global */
-    EXPECT_FALSE(has(o, "\"import_outcome\":\"value\"")); /* fake app import is not a sync load */
     free(o);
     hl_js_gen_close(t);
 
@@ -163,6 +162,36 @@ UTEST(js_generation, authority_probe_minimal)
     EXPECT_EQ(rc2, -1);
     EXPECT_TRUE(has(s, "javascript.internal"));           /* stale, fail-closed */
     free(s);
+}
+
+/* Slice 7 amendment 1 (C3b, second claim): tooling code cannot import an application module.
+ * The tooling loader must REJECT a fake application-module name with its definitive
+ * "tooling entry module not found" -- and the test fails if that name ever RESOLVES (a resolved
+ * module yields a DIFFERENT message, so the substring check would not match). The real probe
+ * module loading proves the mechanism is not simply always-failing. */
+UTEST(js_generation, tooling_loader_rejects_application_module)
+{
+    int64_t t = hl_js_gen_open();
+    ASSERT_TRUE(t > 0);
+
+    /* A fake application-module name the tooling registry does not carry. */
+    char *o = NULL; size_t l = 0;
+    int rc = hl_js_gen_probe_import(t, "hull:app:__fake_application_module__", &o, &l);
+    EXPECT_NE(rc, 0);                                    /* NOT resolved */
+    ASSERT_TRUE(o != NULL);
+    /* Definitive not-found. A resolved-but-wrong module would say "did not register
+     * __hull_frontend" or "method is not a function" instead -- this asserts the loader
+     * refused to resolve it at all. */
+    EXPECT_TRUE(has(o, "tooling entry module not found"));
+    free(o);
+
+    /* Sanity: the real (test-registry-only) probe module DOES load through the same path. */
+    char *o2 = NULL; size_t l2 = 0;
+    int rc2 = hl_js_gen_probe_import(t, "hull:source:tests:frontend_probe", &o2, &l2);
+    EXPECT_EQ(rc2, 0);
+    EXPECT_TRUE(has(o2, "\"forbidden_present\":[]"));
+    free(o2);
+    hl_js_gen_close(t);
 }
 #endif /* HL_JS_GEN_TESTING */
 

@@ -54,11 +54,17 @@ void hl_js_gen_shutdown(void);
  * leaves zero; shutdown reaps a leaked session) without reaching manager internals. */
 int hl_js_gen_live_count(void);
 
-/* Run the test-only authority probe (hull:source:frontend_probe) in the session bound to
+/* Run the test-only authority probe (hull:source:tests:frontend_probe) in the session bound to
  * `token`, routing the minimal-authority claim THROUGH the real manager session. Success ->
  * 0 and *out_json (malloc'd, caller frees) is the probe report; a stale token yields the
  * facts-shaped stale JSON (rc -1). */
 int hl_js_gen_probe(int64_t token, char **out_json, size_t *out_len);
+
+/* Attempt to load `module` as the entry in the session bound to `token` (routes through the
+ * tooling module loader). A name the loader does not resolve fails rc -1 with the loader's
+ * "tooling entry module not found" message in *out_json -- how the test proves a fake
+ * application module is REJECTED, not resolved. */
+int hl_js_gen_probe_import(int64_t token, const char *module, char **out_json, size_t *out_len);
 #endif /* HL_JS_GEN_TESTING */
 
 #endif /* HULL_FRONTEND_JS_GENERATION_H */

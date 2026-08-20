@@ -118,6 +118,16 @@ if [ -n "$HULL_E2E_EXPECT_JS" ]; then
     fi
 fi
 
+# The test-only authority-probe module must NOT be embedded in a shipped binary (it lives under
+# stdlib/cli/js/hull/source/tests/, pruned from the production registry). Assert NO probe-module
+# variant is present in $HULL's embedded strings (holds for BOTH the full and lua-only binary;
+# the broad `frontend_probe` match also catches a stale pre-move registry embedding the old name).
+if grep -a -q 'frontend_probe' "$HULL" 2>/dev/null; then
+    fail "shipped binary embeds a test-only probe module (grep 'frontend_probe' matched)"
+else
+    pass "test-only probe module absent from the shipped binary"
+fi
+
 # ── a mixed modular app: annotated Lua, nested source, browser asset, app JS ──
 APP="$TMP/app"
 mkdir -p "$APP/routes" "$APP/static"
@@ -434,6 +444,30 @@ if [ "$JS_ANALYZABLE" = "1" ]; then
         assert_py "mixed live gen: JS handler + Lua home both public" "$LIVE" \
             'sorted(x["name"] for x in d["declarations"])==["handler","home"]'
         assert_no_leaked_keys "mixed live gen: no generation-internal key on the wire" "$LIVE"
+
+        # C5 re-proven with JS present (amendment 3): EDIT client.js and require a strictly
+        # higher generation whose live document carries the CHANGED JS declaration/annotation.
+        GEN_MIX=$(printf '%s' "$LIVE" | python3 -c 'import json,sys;print(json.load(sys.stdin)["generation"])' 2>/dev/null || echo 0)
+        cat > "$MIX/client.js" <<'EOF'
+/** @route GET /js */
+export function handler() { return 1; }
+/** @route GET /js2 */
+export function handler2() { return 2; }
+EOF
+        NEWGEN_MIX=0; i=0
+        while [ "$i" -lt 30 ]; do
+            L=$("$HULL" agent inspect "$MIX" 2>/dev/null)
+            G=$(printf '%s' "$L" | python3 -c 'import json,sys;print(json.load(sys.stdin).get("generation",0))' 2>/dev/null || echo 0)
+            if [ "$G" -gt "$GEN_MIX" ] 2>/dev/null; then NEWGEN_MIX=$G; LIVE="$L"; break; fi
+            sleep 0.5; i=$((i + 1))
+        done
+        { [ "$NEWGEN_MIX" -gt "$GEN_MIX" ]; } 2>/dev/null \
+            && pass "JS edit -> reload -> strictly higher generation ($GEN_MIX -> $NEWGEN_MIX)" \
+            || fail "no new generation after JS edit (gen=$GEN_MIX, newgen=$NEWGEN_MIX)"
+        assert_py "changed JS declaration handler2 appears in the new live generation" "$LIVE" \
+            'any(x["name"]=="handler2" and x["path"].endswith("client.js") for x in d["declarations"])'
+        assert_py "both JS @route annotations present after the edit (handler + handler2)" "$LIVE" \
+            'sum(1 for x in d["declarations"] if x["path"].endswith("client.js") for a in x["annotations"] if a["name"]=="route")==2'
         printf '%s' "$LIVE" > "$MIX/live.json"
 
         # STOP dev so the standalone read CANNOT take the C live-sidecar fast path (amendment 3).

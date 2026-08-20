@@ -1480,6 +1480,34 @@ $(STDLIB_JS_CLI_REGISTRY_C): $(STDLIB_JS_CLI_HDRS) | $(BUILDDIR)
 $(STDLIB_JS_CLI_REGISTRY_O): $(STDLIB_JS_CLI_REGISTRY_C) | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
 
+# TEST-ONLY cli-js registry: the production files PLUS the */tests/* tooling modules (the
+# authority probe). Same array symbol as the production registry, so a test that links THIS
+# object -- NEVER both -- sees the extra module while the shipped registry stays free of it.
+# Only test_js_generation links it (see mk/tests.mk). This is what keeps hull:source:tests:*
+# absent from every shipped binary while remaining reachable to the manager authority test.
+STDLIB_JS_CLI_TEST_ONLY_FILES := $(shell find stdlib/cli/js -name '*.js' -path '*/tests/*' 2>/dev/null)
+STDLIB_JS_CLI_TEST_ONLY_HDRS := $(foreach f,$(STDLIB_JS_CLI_TEST_ONLY_FILES),$(call stdlib_js_cli_hdr,$(f)))
+$(foreach f,$(STDLIB_JS_CLI_TEST_ONLY_FILES),$(eval $(call STDLIB_JS_CLI_RULE,$(f))))
+STDLIB_JS_CLI_TEST_FILES := $(STDLIB_JS_CLI_FILES) $(STDLIB_JS_CLI_TEST_ONLY_FILES)
+
+STDLIB_JS_CLI_TEST_REGISTRY_C := $(BUILDDIR)/stdlib_js_cli_test_registry.c
+STDLIB_JS_CLI_TEST_REGISTRY_O := $(BUILDDIR)/stdlib_js_cli_test_registry.o
+$(STDLIB_JS_CLI_TEST_REGISTRY_C): $(STDLIB_JS_CLI_HDRS) $(STDLIB_JS_CLI_TEST_ONLY_HDRS) | $(BUILDDIR)
+	@echo "/* Auto-generated TEST cli-js tooling registry - do not edit */" > $@
+	@( for hdr in $(STDLIB_JS_CLI_HDRS) $(STDLIB_JS_CLI_TEST_ONLY_HDRS); do echo "#include \"$$(basename $$hdr)\""; done ) | LC_ALL=C sort >> $@
+	@echo "" >> $@
+	@echo "#include \"hull/entry.h\"" >> $@
+	@echo "const HlEntry hl_stdlib_js_cli_entries[] = {" >> $@
+	@( for f in $(STDLIB_JS_CLI_TEST_FILES); do \
+		varname=$$(echo "$$f" | sed 's/[\/.\-]/_/g'); \
+		modname=$$(echo "$$f" | sed 's|^stdlib/cli/js/||; s|\.js$$||; s|/|:|g'); \
+		echo "$$modname	    { \"$$modname\", $${varname}, sizeof($${varname}) },"; \
+	done ) | LC_ALL=C sort | cut -f2- >> $@
+	@echo "    { 0, 0, 0 }" >> $@
+	@echo "};" >> $@
+$(STDLIB_JS_CLI_TEST_REGISTRY_O): $(STDLIB_JS_CLI_TEST_REGISTRY_C) | $(BUILDDIR)
+	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
+
 # The restricted QuickJS tooling runtime (needs QuickJS; lives in the hull binary only).
 FRONTEND_JS_SESSION_OBJ := $(BUILDDIR)/frontend_js_session.o
 $(FRONTEND_JS_SESSION_OBJ): $(SRCDIR)/hull/frontend/js_session.c | $(BUILDDIR)

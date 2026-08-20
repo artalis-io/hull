@@ -212,8 +212,11 @@ $(BUILDDIR)/test_js_frontend: $(TESTDIR)/hull/frontend/test_js_frontend.c $(FRON
 # manager + the session + registry + QuickJS. The manager SOURCE is compiled directly here with
 # -DHL_JS_GEN_TESTING (not the prebuilt non-testing obj) so the test-only introspection entries
 # (hl_js_gen_live_count / hl_js_gen_probe) are present for the Slice 7 ownership + authority proofs.
-$(BUILDDIR)/test_js_generation: $(TESTDIR)/hull/frontend/test_js_generation.c $(SRCDIR)/hull/frontend/js_generation.c $(FRONTEND_JS_SESSION_OBJ) $(STDLIB_JS_CLI_REGISTRY_O) $(QJS_OBJS) | $(BUILDDIR)
-	$(CC) $(CFLAGS) -DHL_JS_GEN_TESTING $(INCLUDES) -I$(VENDDIR) -Ivendor/quickjs -o $@ $(TESTDIR)/hull/frontend/test_js_generation.c $(SRCDIR)/hull/frontend/js_generation.c $(FRONTEND_JS_SESSION_OBJ) $(STDLIB_JS_CLI_REGISTRY_O) $(QJS_OBJS) -lm -lpthread $(LDFLAGS)
+# Links the TEST cli-js registry (STDLIB_JS_CLI_TEST_REGISTRY_O), which includes the tests/-only
+# authority probe module; the production registry (STDLIB_JS_CLI_REGISTRY_O, in the shipped hull)
+# does not carry it.
+$(BUILDDIR)/test_js_generation: $(TESTDIR)/hull/frontend/test_js_generation.c $(SRCDIR)/hull/frontend/js_generation.c $(FRONTEND_JS_SESSION_OBJ) $(STDLIB_JS_CLI_TEST_REGISTRY_O) $(QJS_OBJS) | $(BUILDDIR)
+	$(CC) $(CFLAGS) -DHL_JS_GEN_TESTING $(INCLUDES) -I$(VENDDIR) -Ivendor/quickjs -o $@ $(TESTDIR)/hull/frontend/test_js_generation.c $(SRCDIR)/hull/frontend/js_generation.c $(FRONTEND_JS_SESSION_OBJ) $(STDLIB_JS_CLI_TEST_REGISTRY_O) $(QJS_OBJS) -lm -lpthread $(LDFLAGS)
 
 # Read-only shared-heap C-API test: build-time AOT fixture. Generate an .aot from
 # the embedded .wasm via the Hull-built wamrc when present (arch + OS correct);
@@ -983,6 +986,10 @@ e2e-project-discovery-lua:
 	$(MAKE) clean
 	$(MAKE) RUNTIME=lua $(BUILDDIR)/hull
 	cp $(BUILDDIR)/hull $(BUILDDIR)/hull-lua-only
+	@echo "assert: the lua-only binary carries ZERO QuickJS / JS-frontend symbols"
+	@if nm $(BUILDDIR)/hull-lua-only 2>/dev/null | grep -E 'hl_js_gen_|JS_NewRuntime|JS_NewContext|JS_Eval'; then \
+		echo "FAIL: JS_* / hl_js_gen_ symbols present in the lua-only hull"; exit 1; \
+	else echo "ok: no hl_js_gen_ / QuickJS symbols"; fi
 	HULL=$(BUILDDIR)/hull-lua-only HULL_E2E_EXPECT_JS=0 sh tests/e2e_project_discovery.sh
 
 # PostgreSQL backend end-to-end (needs Docker; builds its own POSTGRES hull).

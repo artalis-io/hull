@@ -129,8 +129,10 @@ void hl_js_gen_shutdown(void)
 }
 
 #ifdef HL_JS_GEN_TESTING
-/* The test-only authority-probe entry module (registers globalThis.__hull_frontend.probe). */
-static const char *PROBE_MODULE = "hull:source:frontend_probe";
+/* The test-only authority-probe entry module. Lives under stdlib/cli/js/hull/source/tests/, so
+ * the production registry (whose glob prunes any tests directory) never embeds it; only the
+ * test registry does. Its name reflects the tests path segment. */
+static const char *PROBE_MODULE = "hull:source:tests:frontend_probe";
 
 int hl_js_gen_live_count(void)
 {
@@ -140,13 +142,24 @@ int hl_js_gen_live_count(void)
     return n;
 }
 
-int hl_js_gen_probe(int64_t token, char **out_json, size_t *out_len)
+/* Load `module` as the entry in the session bound to `token` and invoke its "probe" method.
+ * Routes the load THROUGH the real tooling module loader, so a name the loader does not
+ * resolve fails with the loader's definitive "tooling entry module not found" (rc -1). This
+ * is how the "no application module can be imported by tooling code" claim is proven: a fake
+ * application module name must fail to load, never resolve. */
+int hl_js_gen_probe_import(int64_t token, const char *module, char **out_json, size_t *out_len)
 {
-    pthread_mutex_lock(&G.mu);                   /* same lock discipline as analyze (close-safe) */
+    pthread_mutex_lock(&G.mu);
     HlGenSlot *slot = find_locked(token);
     if (!slot) { pthread_mutex_unlock(&G.mu); return emit_stale(STALE_ANALYZE, out_json, out_len); }
-    int rc = hl_js_session_analyze(slot->session, PROBE_MODULE, "probe", (const uint8_t *)"", 0, NULL, NULL, 0, out_json, out_len);
+    int rc = hl_js_session_analyze(slot->session, module, "probe", (const uint8_t *)"", 0, NULL, NULL, 0, out_json, out_len);
     pthread_mutex_unlock(&G.mu);
     return rc;
+}
+
+/* Run the authority probe (the real test probe module). Thin wrapper over probe_import. */
+int hl_js_gen_probe(int64_t token, char **out_json, size_t *out_len)
+{
+    return hl_js_gen_probe_import(token, PROBE_MODULE, out_json, out_len);
 }
 #endif /* HL_JS_GEN_TESTING */
