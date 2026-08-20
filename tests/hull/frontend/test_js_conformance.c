@@ -173,6 +173,10 @@ static const Case VALID[] = {
     { "await in async body",   "async function af2() { return await x; }" },
     { "dyn import in fn",      "function fdi() { return import(\"m\"); }" },
     { "dyn import in block",   "{ const bdi = import(\"m\"); }" },
+    { "new.target in fn",      "function fnt() { return new.target; }" },
+    { "new.target in param",   "function fnp(x = new.target) { return x; }" },
+    { "new.target nested arrow","function fna() { const a = () => new.target; return a; }" },
+    { "new.target in method",  "class Cnt { m() { return new.target; } }" },
 };
 
 /* Malformed source the parser REJECTS (js.syntax) -- invalid in both strict and sloppy. */
@@ -213,6 +217,8 @@ static const Case MALFORMED[] = {
     { "escaped import kw",     "im\\u0070ort.meta;" },                      /* import may not be escaped */
     { "meta update target",    "import.meta++;" },                          /* MetaProperty is not an update target */
     { "meta for-of target",    "for (import.meta of null) ;" },             /* invalid for-of left */
+    { "new.target top level",  "new.target;" },                             /* no enclosing function */
+    { "new.target top arrow",  "const gnt = () => new.target;" },           /* top-level arrow: no non-arrow frame */
 };
 
 /* Recognized, VALID ECMAScript that Hull deliberately declines with js.unsupported (never a

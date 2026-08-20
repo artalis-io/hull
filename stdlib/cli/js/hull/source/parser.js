@@ -111,18 +111,23 @@ function parseInternal(bytes, opts, inject) {
     // is unaffected. Save/restore snapshots this state so speculation cannot leak a context
     // mutation; every recovery path restores it structurally (frames are pushed/popped in the
     // same function that parses the construct).
-    const ctxStack = [];             // frames: { kind: "regular"|"async", region: "params"|"body" }
+    const ctxStack = [];             // frames: { kind: "regular"|"async", region: "params"|"body", arrow: bool }
     let atModuleItem = true;         // parsing a DIRECT module body item -> import/export legal
     function curFn() { return ctxStack.length ? ctxStack[ctxStack.length - 1] : null; }
     // `await` is an AwaitExpression only at module top level (no function frame) or in an ASYNC
     // function BODY. In parameters (even async) and in any regular function it is not.
     function awaitIsExpr() { const f = curFn(); return f ? (f.kind === "async" && f.region === "body") : true; }
     function inFunction() { return ctxStack.length > 0; }
+    // `new.target` is valid iff there is an enclosing NON-ARROW function frame (params or body
+    // both count, methods count); arrows are transparent and inherit it, so a NEW.target reaches
+    // the nearest non-arrow function through any number of arrow frames. At module top level (no
+    // frame) and in a top-level arrow (only arrow frames) it is a syntax error. Matches QuickJS.
+    function newTargetAllowed() { for (let i = 0; i < ctxStack.length; i++) if (!ctxStack[i].arrow) return true; return false; }
     // Run `fn` while parsing a NESTED statement (import/export illegal there).
     function nested(fn) { const t = atModuleItem; atModuleItem = false; const r = fn(); atModuleItem = t; return r; }
     // Parse a function's params then body under a pushed context frame; restored on return.
     function withFn(kind, doParams, doBody) {
-        ctxStack.push({ kind: kind, region: "params" });
+        ctxStack.push({ kind: kind, region: "params", arrow: false });
         const params = doParams();
         ctxStack[ctxStack.length - 1].region = "body";
         const body = nested(doBody);
@@ -163,7 +168,7 @@ function parseInternal(bytes, opts, inject) {
     // producer, so a failed speculative parse (e.g. an arrow guess) leaves no lexical
     // disagreement or stray diagnostic, no matter what content it lexed.
     function saveState() { return { tk: tk.checkpoint(), cur: cur, prev: prev, la: la.slice(), budget: budget.mark(), depth: depth, errored: errored,
-        ctx: ctxStack.map(function (f) { return { kind: f.kind, region: f.region }; }), atModuleItem: atModuleItem }; }
+        ctx: ctxStack.map(function (f) { return { kind: f.kind, region: f.region, arrow: f.arrow }; }), atModuleItem: atModuleItem }; }
     function restoreState(st) {
         tk.restore(st.tk); cur = st.cur; prev = st.prev;
         la.length = 0; for (let i = 0; i < st.la.length; i++) la.push(st.la[i]);
@@ -811,7 +816,7 @@ function parseInternal(bytes, opts, inject) {
 
     function parseNew() {
         const start = cur.start; advance(true);
-        if (isP(".")) { advance(false); const meta = mk("MetaProperty", start); meta.meta = "new"; if (cur.type === "identifier" && cur.value === "target" && !cur.escaped) { meta.property = "target"; advance(false); return parseCallMemberTail(fin(meta), true); } synErr("the only valid meta-property for 'new' is 'new.target'"); return errNode(start); }
+        if (isP(".")) { advance(false); const meta = mk("MetaProperty", start); meta.meta = "new"; if (cur.type === "identifier" && cur.value === "target" && !cur.escaped) { meta.property = "target"; advance(false); if (!newTargetAllowed()) synErr("'new.target' is only valid inside a function", meta); return parseCallMemberTail(fin(meta), true); } synErr("the only valid meta-property for 'new' is 'new.target'"); return errNode(start); }
         let callee = isKw("new") ? parseNew() : parsePrimary();
         callee = parseCallMemberTail(callee, false);   // member tail but no call
         const node = mk("NewExpression", start); node.callee = callee; node.arguments = [];
@@ -953,7 +958,7 @@ function parseInternal(bytes, opts, inject) {
         expectP("=>", true);
         // Arrow params were already parsed (as a parenthesized expression) under the enclosing
         // context; the body gets its own frame so `await` in an async arrow body is valid.
-        ctxStack.push({ kind: a.async ? "async" : "regular", region: "body" });
+        ctxStack.push({ kind: a.async ? "async" : "regular", region: "body", arrow: true });
         a.body = nested(parseArrowBody);
         ctxStack.pop();
         return fin(a);
