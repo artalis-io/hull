@@ -380,6 +380,7 @@ function parseInternal(bytes, opts, inject) {
             // the equivalent for-in shape rather than falling through to the C-style `;` error.
             if (init && init.type === "BinaryExpression" && init.operator === "in") {
                 s.type = "ForInStatement"; s.left = init.left; s.right = init.right;
+                checkForHeadTarget(init.left);
                 expectP(")", true); s.body = nested(parseStatement); return fin(s);
             }
         }
@@ -395,14 +396,21 @@ function parseInternal(bytes, opts, inject) {
     function fin2(vd, decl) { vd.declarations = [fin(decl)]; return fin(vd); }
     function finishForOf(s, left, isAwait) {
         s.type = "ForOfStatement"; s.left = left; s.await = isAwait === true;
+        checkForHeadTarget(left);
         advance(true);                              // past `of`
         s.right = parseAssignment();
         expectP(")", true);
         s.body = nested(parseStatement);
         return fin(s);
     }
+    // A for-in/for-of head whose left is an EXPRESSION (not a `var`/`let`/`const` declaration)
+    // must be a valid assignment target; e.g. `for (import.meta of x)` is invalid.
+    function checkForHeadTarget(left) {
+        if (left && left.type !== "VariableDeclaration" && !isAssignTarget(left)) synErr("invalid left-hand side in for-loop", left);
+    }
     function finishForIn(s, left) {
         s.type = "ForInStatement"; s.left = left;
+        checkForHeadTarget(left);
         advance(true);                              // past `in`
         s.right = parseExpression();
         expectP(")", true);
@@ -753,8 +761,8 @@ function parseInternal(bytes, opts, inject) {
         if (cur.type === "punctuator" || cur.type === "identifier") {
             const v = cur.value;
             if (UNARY.has(v)) { const node = mk("UnaryExpression", cur.start); node.operator = v; node.prefix = true; advance(true); node.argument = parseUnary(); return fin(node); }
-            if (v === "++" || v === "--") { const node = mk("UpdateExpression", cur.start); node.operator = v; node.prefix = true; advance(true); node.argument = parseUnary(); return fin(node); }
-            if (v === "await") {
+            if (v === "++" || v === "--") { const node = mk("UpdateExpression", cur.start); node.operator = v; node.prefix = true; advance(true); node.argument = parseUnary(); if (!isSimpleTarget(node.argument)) synErr("invalid target for update expression", node.argument); return fin(node); }
+            if (v === "await" && !cur.escaped) {   // an escaped spelling is not the keyword -> falls through to a (reserved) identifier
                 const astart = cur.start;
                 if (awaitIsExpr()) {
                     // AwaitExpression : await UnaryExpression -- an operand is REQUIRED.
@@ -786,6 +794,9 @@ function parseInternal(bytes, opts, inject) {
     function parsePostfix() {
         let e = parseLeftHandSide(true);
         if ((isP("++") || isP("--")) && !nl()) {
+            // Postfix ++/-- requires a simple assignment target (an Identifier or member access);
+            // e.g. `import.meta++` (a MetaProperty) is an invalid update target.
+            if (!isSimpleTarget(e)) synErr("invalid target for update expression", e);
             const node = mk("UpdateExpression", e.start); node.operator = cur.value; node.prefix = false; node.argument = e; advance(false); return fin(node);
         }
         return e;
@@ -885,7 +896,7 @@ function parseInternal(bytes, opts, inject) {
         if (v === "true" || v === "false") { const n = mk("Literal", start); n.value = (v === "true"); n.raw = v; advance(false); return fin(n); }
         if (v === "null") { const n = mk("Literal", start); n.value = null; n.raw = "null"; advance(false); return fin(n); }
         if (v === "new") return parseNew();
-        if (v === "import") { advance(false); if (isP("(")) { const ie = mk("ImportExpression", start); ie.arguments = parseArguments(); return fin(ie); } if (isP(".")) { advance(false); const meta = mk("MetaProperty", start); meta.meta = "import"; if (cur.type === "identifier" && cur.value === "meta" && !cur.escaped) { meta.property = "meta"; advance(false); return fin(meta); } synErr("the only valid meta-property for 'import' is 'import.meta'"); return errNode(start); } synErr("unexpected 'import'"); return errNode(start); }
+        if (v === "import") { if (cur.escaped) { synErr("'import' is a reserved word and may not be escaped"); advance(false); return errNode(start); } advance(false); if (isP("(")) { const ie = mk("ImportExpression", start); ie.arguments = parseArguments(); return fin(ie); } if (isP(".")) { advance(false); const meta = mk("MetaProperty", start); meta.meta = "import"; if (cur.type === "identifier" && cur.value === "meta" && !cur.escaped) { meta.property = "meta"; advance(false); return fin(meta); } synErr("the only valid meta-property for 'import' is 'import.meta'"); return errNode(start); } synErr("unexpected 'import'"); return errNode(start); }
         if (v === "async") {
             const nx = peekTok(1, true);
             if (nx.type === "identifier" && nx.value === "function" && !nx.nlBefore) { advance(true); return parseFunctionExpr(true, start); }
@@ -1024,6 +1035,11 @@ function parseInternal(bytes, opts, inject) {
         return fin(n);
     }
     function parseIdentifier() {
+        // Hull parses MODULE code, which is always strict and where `await` is a reserved word:
+        // it may not be a BindingIdentifier, IdentifierReference, or LabelIdentifier (an
+        // AwaitExpression is intercepted earlier in parseUnary, so a bare `await` reaching here is
+        // always a reserved-word misuse). An escaped spelling (await) is likewise reserved.
+        if (cur.value === "await") { synErr("'await' is reserved in module code"); advance(false); return errNode(cur.start); }
         const n = mk("Identifier", cur.start); n.name = cur.value; n.escaped = cur.escaped === true; advance(false); return fin(n);
     }
     // an identifier name where keywords are allowed (property names, member access).

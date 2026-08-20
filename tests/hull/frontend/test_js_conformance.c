@@ -205,6 +205,14 @@ static const Case MALFORMED[] = {
     { "export in block",       "{ export const q = 1; }" },                 /* export is module-top-level only */
     { "export in fn",          "function m2() { export default 1; }" },
     { "escaped import.meta",   "const y = import.m\\u0065ta;" },            /* meta must be exact + unescaped */
+    /* Reserved-word + invalid-assignment-target grammar rejects (both reject). */
+    { "await as binding",      "var await;" },                              /* await reserved in module code */
+    { "await as class name",   "class await {}" },
+    { "await as label",        "await: 1;" },
+    { "escaped await ident",   "\\u0061wait 0;" },                          /* escaped keyword is a reserved ident */
+    { "escaped import kw",     "im\\u0070ort.meta;" },                      /* import may not be escaped */
+    { "meta update target",    "import.meta++;" },                          /* MetaProperty is not an update target */
+    { "meta for-of target",    "for (import.meta of null) ;" },             /* invalid for-of left */
 };
 
 /* Recognized, VALID ECMAScript that Hull deliberately declines with js.unsupported (never a
