@@ -32,6 +32,18 @@ const RESERVED = new Set([
     "instanceof", "new", "return", "super", "switch", "this", "throw", "try", "typeof", "var",
     "void", "while", "with", "enum",
 ]);
+// Hull parses MODULE code, which is always strict. These are reserved as BOTH a BindingIdentifier
+// and an IdentifierReference (and a LabelIdentifier) in strict/module code: the strict
+// FutureReservedWords plus the always-reserved `await`/`yield` (a genuine YieldExpression only
+// occurs inside a generator, which Hull declines, so a `yield` reaching an identifier context is
+// always a reserved-word misuse). Checked in parseIdentifier -> covers references, bindings,
+// class/function names, and labels. Property keys go through parseIdentifierName and are exempt.
+const STRICT_RESERVED = new Set([
+    "implements", "interface", "let", "package", "private", "protected", "public", "static",
+    "yield", "await",
+]);
+// Restricted as a BINDING target only (a reference/call `eval(x)` / `arguments` stays legal).
+const BINDING_RESTRICTED = new Set(["eval", "arguments"]);
 // Unary operators (prefix).
 const UNARY = new Set(["+", "-", "!", "~", "typeof", "void", "delete"]);
 // Assignment operators.
@@ -104,6 +116,43 @@ function parseInternal(bytes, opts, inject) {
     let depth = 0;
     let errored = false;             // rate-limit cascading recovery within one statement
 
+    // Module-grammar context (docs/js_test262_design.md). An explicit function-context stack
+    // plus a module-item-position flag drive the position-sensitive rules: `await` interpretation
+    // (module top level / async body only, never in parameters), `return` (function-only), and
+    // import/export declarations (module-top-level only). Dynamic import() is an expression and
+    // is unaffected. Save/restore snapshots this state so speculation cannot leak a context
+    // mutation; every recovery path restores it structurally (frames are pushed/popped in the
+    // same function that parses the construct).
+    const ctxStack = [];             // frames: { kind: "regular"|"async", region: "params"|"body", arrow: bool }
+    let atModuleItem = true;         // parsing a DIRECT module body item -> import/export legal
+    function curFn() { return ctxStack.length ? ctxStack[ctxStack.length - 1] : null; }
+    // `await` is an AwaitExpression only at module top level (no function frame) or in an ASYNC
+    // function BODY. In parameters (even async) and in any regular function it is not.
+    function awaitIsExpr() { const f = curFn(); return f ? (f.kind === "async" && f.region === "body") : true; }
+    function inFunction() { return ctxStack.length > 0; }
+    // `new.target` is valid iff there is an enclosing NON-ARROW function frame (params or body
+    // both count, methods count); arrows are transparent and inherit it, so a NEW.target reaches
+    // the nearest non-arrow function through any number of arrow frames. At module top level (no
+    // frame) and in a top-level arrow (only arrow frames) it is a syntax error. Matches QuickJS.
+    function newTargetAllowed() { for (let i = 0; i < ctxStack.length; i++) if (!ctxStack[i].arrow) return true; return false; }
+    // `yield` binds to the nearest enclosing NON-ARROW function; it is a keyword only when that
+    // function is a generator. Hull DECLINES generators (js.unsupported at `function*`) but still
+    // parses their bodies for recovery, so a yield inside a declined generator must stay quiet
+    // (no second diagnostic), while a `yield` in any non-generator function or at module top level
+    // is a reserved-word syntax error.
+    function inGenerator() { for (let i = ctxStack.length - 1; i >= 0; i--) if (!ctxStack[i].arrow) return ctxStack[i].gen === true; return false; }
+    // Run `fn` while parsing a NESTED statement (import/export illegal there).
+    function nested(fn) { const t = atModuleItem; atModuleItem = false; const r = fn(); atModuleItem = t; return r; }
+    // Parse a function's params then body under a pushed context frame; restored on return.
+    function withFn(kind, doParams, doBody, gen) {
+        ctxStack.push({ kind: kind, region: "params", arrow: false, gen: gen === true });
+        const params = doParams();
+        ctxStack[ctxStack.length - 1].region = "body";
+        const body = nested(doBody);
+        ctxStack.pop();
+        return { params: params, body: body };
+    }
+
     // cur/prev tokens. The goal used to READ cur was decided when we advanced past prev.
     let cur = tk.next(true);         // first token is at statement (operand) position
     let prev = null;
@@ -125,18 +174,24 @@ function parseInternal(bytes, opts, inject) {
 
     function atEof() { return cur.type === "eof"; }
     function isP(v) { return cur.type === "punctuator" && cur.value === v; }
-    function isKw(v) { return cur.type === "identifier" && cur.value === v; }
+    // A contextual/reserved keyword match at a KEYWORD position: an escaped identifier
+    // (`as`) is NOT the keyword (a UnicodeEscapeSequence in a ReservedWord/contextual
+    // keyword is an early error). Reserved words stay usable as property names / specifiers
+    // because those read through parseIdentifierName / parsePropertyKey, not isKw.
+    function isKw(v) { return cur.type === "identifier" && cur.value === v && !cur.escaped; }
     function nl() { return cur.nlBefore; }
 
     // Full speculative-parse checkpoint: the tokenizer's lexical state + the parser's token
     // window (cur/prev/lookahead) + the shared diagnostic budget. Restoring rewinds EVERY
     // producer, so a failed speculative parse (e.g. an arrow guess) leaves no lexical
     // disagreement or stray diagnostic, no matter what content it lexed.
-    function saveState() { return { tk: tk.checkpoint(), cur: cur, prev: prev, la: la.slice(), budget: budget.mark(), depth: depth, errored: errored }; }
+    function saveState() { return { tk: tk.checkpoint(), cur: cur, prev: prev, la: la.slice(), budget: budget.mark(), depth: depth, errored: errored,
+        ctx: ctxStack.map(function (f) { return { kind: f.kind, region: f.region, arrow: f.arrow, gen: f.gen }; }), atModuleItem: atModuleItem }; }
     function restoreState(st) {
         tk.restore(st.tk); cur = st.cur; prev = st.prev;
         la.length = 0; for (let i = 0; i < st.la.length; i++) la.push(st.la[i]);
         budget.reset(st.budget); depth = st.depth; errored = st.errored;
+        ctxStack.length = 0; for (let i = 0; i < st.ctx.length; i++) ctxStack.push(st.ctx[i]); atModuleItem = st.atModuleItem;
     }
 
     // Every parser diagnostic flows through the ONE shared budget so the combined tokenizer +
@@ -151,7 +206,12 @@ function parseInternal(bytes, opts, inject) {
     // (prev is still the token before `start`), clamp to a zero-width span [start, start] rather
     // than emit an inverted range. Keeps the AST range invariant start <= stop <= n+1.
     function fin(node) { const s = prev ? prev.stop : node.start; node.stop = s < node.start ? node.start : s; return node; }
-    function errNode(start) { const e = mk("Error", start); e.stop = cur.start < start ? start : cur.start; return e; }
+    // An Error recovery node spans [start, end-of-CONSUMED-input] = prev.stop -- NOT cur.start
+    // (the next, not-yet-consumed token, which lies past any trailing trivia). Using prev.stop
+    // mirrors fin() so an Error child can never escape its enclosing node's range (also fin'd to
+    // prev.stop): `import\n;` must not yield an Error that overshoots into the next line. Clamp
+    // to >= start for the zero-width case (nothing consumed after `start`).
+    function errNode(start) { const e = mk("Error", start); const s = prev ? prev.stop : start; e.stop = s < start ? start : s; return e; }
 
     // Consume a specific punctuator (operator/operand goal after). Returns true if consumed.
     function eatP(v, regexAllowedAfter) { if (isP(v)) { advance(regexAllowedAfter); return true; } return false; }
@@ -182,6 +242,7 @@ function parseInternal(bytes, opts, inject) {
         prog.body = [];
         while (!atEof()) {
             const before = cur.start;
+            atModuleItem = true;                        // direct module body item: import/export legal
             const st = parseStatement();
             if (st) prog.body.push(st);
             if (cur.start === before && !atEof()) advance(true);   // stall guard
@@ -201,6 +262,21 @@ function parseInternal(bytes, opts, inject) {
             else if (cur.value === ";") { st = mk("EmptyStatement", cur.start); advance(true); st = fin(st); }
             else st = parseExpressionStatement();
         } else if (cur.type === "identifier" && !cur.escaped) {
+            // LabeledStatement: LabelIdentifier `:` Statement (`outer: for (...) ...`,
+            // `label: { ... }`). Peeking the token after the identifier can lex a following `/`
+            // under the WRONG slash goal (e.g. `await /re/` -> `/` as division, cached), which
+            // would then corrupt the real parse. Guard the peek with save/restore: on a
+            // non-label, restore rewinds the tokenizer + lookahead so the real parse re-lexes.
+            const _lblState = saveState();
+            const lblNext = peekTok(1, false);
+            const isLabel = (lblNext.type === "punctuator" && lblNext.value === ":");
+            if (!isLabel) restoreState(_lblState);
+            if (isLabel) {
+                const lbl = mk("LabeledStatement", cur.start);
+                lbl.label = parseIdentifier(); advance(true);   // label, then past `:`
+                lbl.body = nested(parseStatement);
+                st = fin(lbl);
+            } else
             switch (cur.value) {
                 case "var": case "let": case "const": st = parseVarDeclaration(); break;
                 case "function": st = parseFunctionDeclaration(false); break;
@@ -216,9 +292,17 @@ function parseInternal(bytes, opts, inject) {
                 case "throw": st = parseReturnLike("ThrowStatement", false); break;
                 case "break": st = parseBreakContinue("BreakStatement"); break;
                 case "continue": st = parseBreakContinue("ContinueStatement"); break;
-                case "import": st = parseImport(); break;
+                case "import": {
+                    // `import` at statement position is an ImportDeclaration UNLESS it is a
+                    // dynamic import CALL `import(...)` or the `import.meta` meta-property, which
+                    // are EXPRESSIONS -> parse an expression statement (parsePrimary handles both).
+                    const nx = peekTok(1, false);
+                    if (nx.type === "punctuator" && (nx.value === "(" || nx.value === ".")) st = parseExpressionStatement();
+                    else st = parseImport();
+                    break;
+                }
                 case "export": st = parseExport(); break;
-                case "with": { const ws = cur.start; unsupported("with statement is not supported"); advance(true); expectP("(", true); parseExpression(); expectP(")", true); parseStatement(); st = errNode(ws); break; }
+                case "with": { const ws = cur.start; unsupported("with statement is not supported"); advance(true); expectP("(", true); parseExpression(); expectP(")", true); nested(parseStatement); st = errNode(ws); break; }
                 case "debugger": { st = mk("DebuggerStatement", cur.start); advance(true); semicolon(); st = fin(st); break; }
                 default: st = parseExpressionStatement();
             }
@@ -235,7 +319,7 @@ function parseInternal(bytes, opts, inject) {
         advance(true);                              // past `{` -> statement position
         while (!isP("}") && !atEof()) {
             const before = cur.start;
-            const s = parseStatement();
+            const s = nested(parseStatement);
             if (s) b.body.push(s);
             if (cur.start === before && !atEof() && !isP("}")) advance(true);
             errored = false;
@@ -267,9 +351,9 @@ function parseInternal(bytes, opts, inject) {
         expectP("(", true);
         s.test = parseExpression();
         expectP(")", true);                         // control-flow head -> a statement follows (regex ok)
-        s.consequent = parseStatement();
+        s.consequent = nested(parseStatement);
         s.alternate = null;
-        if (isKw("else")) { advance(true); s.alternate = parseStatement(); }
+        if (isKw("else")) { advance(true); s.alternate = nested(parseStatement); }
         return fin(s);
     }
 
@@ -278,7 +362,7 @@ function parseInternal(bytes, opts, inject) {
         advance(true); expectP("(", true);
         s.test = parseExpression();
         expectP(")", true);
-        s.body = parseStatement();
+        s.body = nested(parseStatement);
         return fin(s);
     }
 
@@ -289,7 +373,7 @@ function parseInternal(bytes, opts, inject) {
         const start = cur.start;
         unsupported("do-while statement is not supported");
         advance(true);                              // past `do`
-        parseStatement();                           // the loop body
+        nested(parseStatement);                     // the loop body
         if (isKw("while")) { advance(true); expectP("(", true); parseExpression(); expectP(")", true); }
         semicolon();
         return errNode(start);
@@ -318,6 +402,15 @@ function parseInternal(bytes, opts, inject) {
             init = parseExpression();
             if (isKw("of")) { return finishForOf(s, init, isAwait); }
             if (isKw("in")) return finishForIn(s, init);
+            // The ES for-head init is Expression[~In] (NoIn) so a top-level `in` reads as the
+            // for-in keyword, not the binary operator. parseExpression() has no NoIn mode, so a
+            // `for (LHS in EXPR)` head arrives here as a top-level BinaryExpression(in). Recover
+            // the equivalent for-in shape rather than falling through to the C-style `;` error.
+            if (init && init.type === "BinaryExpression" && init.operator === "in") {
+                s.type = "ForInStatement"; s.left = init.left; s.right = init.right;
+                checkForHeadTarget(init.left);
+                expectP(")", true); s.body = nested(parseStatement); return fin(s);
+            }
         }
         s.init = init;
         expectP(";", true);
@@ -325,24 +418,31 @@ function parseInternal(bytes, opts, inject) {
         expectP(";", true);
         s.update = isP(")") ? null : parseExpression();
         expectP(")", true);
-        s.body = parseStatement();
+        s.body = nested(parseStatement);
         return fin(s);
     }
     function fin2(vd, decl) { vd.declarations = [fin(decl)]; return fin(vd); }
     function finishForOf(s, left, isAwait) {
         s.type = "ForOfStatement"; s.left = left; s.await = isAwait === true;
+        checkForHeadTarget(left);
         advance(true);                              // past `of`
         s.right = parseAssignment();
         expectP(")", true);
-        s.body = parseStatement();
+        s.body = nested(parseStatement);
         return fin(s);
+    }
+    // A for-in/for-of head whose left is an EXPRESSION (not a `var`/`let`/`const` declaration)
+    // must be a valid assignment target; e.g. `for (import.meta of x)` is invalid.
+    function checkForHeadTarget(left) {
+        if (left && left.type !== "VariableDeclaration" && !isAssignTarget(left)) synErr("invalid left-hand side in for-loop", left);
     }
     function finishForIn(s, left) {
         s.type = "ForInStatement"; s.left = left;
+        checkForHeadTarget(left);
         advance(true);                              // past `in`
         s.right = parseExpression();
         expectP(")", true);
-        s.body = parseStatement();
+        s.body = nested(parseStatement);
         return fin(s);
     }
 
@@ -360,7 +460,7 @@ function parseInternal(bytes, opts, inject) {
             else { synErr("expected 'case' or 'default'"); advance(true); continue; }
             expectP(":", true);
             while (!isP("}") && !isKw("case") && !isKw("default") && !atEof()) {
-                const before = cur.start; const st = parseStatement(); if (st) c.consequent.push(st);
+                const before = cur.start; const st = nested(parseStatement); if (st) c.consequent.push(st);
                 if (cur.start === before && !atEof()) advance(true);
             }
             s.cases.push(fin(c));
@@ -388,6 +488,7 @@ function parseInternal(bytes, opts, inject) {
 
     function parseReturnLike(type, allowEmpty) {
         const s = mk(type, cur.start);
+        if (type === "ReturnStatement" && !inFunction()) synErr("return outside of a function");
         advance(true);
         s.argument = null;
         if (allowEmpty && (isP(";") || isP("}") || atEof() || nl())) { /* empty */ }
@@ -439,8 +540,8 @@ function parseInternal(bytes, opts, inject) {
         f.generator = eatP("*", true);
         if (f.generator) { unsupported("generator functions are not supported", prev); }
         f.id = (cur.type === "identifier" && !RESERVED.has(cur.value)) ? parseIdentifier() : null;
-        f.params = parseParams();
-        f.body = parseFunctionBody(true);           // declaration body `}` -> statement follows
+        const r = withFn(f.async ? "async" : "regular", parseParams, function () { return parseFunctionBody(true); }, f.generator);
+        f.params = r.params; f.body = r.body;       // declaration body `}` -> statement follows
         return fin(f);
     }
 
@@ -451,8 +552,8 @@ function parseInternal(bytes, opts, inject) {
         f.generator = eatP("*", true);
         if (f.generator) unsupported("generator functions are not supported", prev);
         f.id = (cur.type === "identifier" && !RESERVED.has(cur.value)) ? parseIdentifier() : null;
-        f.params = parseParams();
-        f.body = parseFunctionBody(false);          // expression body `}` -> a value (division)
+        const r = withFn(f.async ? "async" : "regular", parseParams, function () { return parseFunctionBody(false); }, f.generator);
+        f.params = r.params; f.body = r.body;       // expression body `}` -> a value (division)
         return fin(f);
     }
 
@@ -491,7 +592,10 @@ function parseInternal(bytes, opts, inject) {
         advance(true);                              // past `class`
         c.id = (cur.type === "identifier" && !RESERVED.has(cur.value)) ? parseIdentifier() : null;
         c.superClass = null;
-        if (isKw("extends")) { advance(true); c.superClass = parseLeftHandSide(false); }
+        // ClassHeritage : extends LeftHandSideExpression -- which INCLUDES call expressions
+        // (`class C extends fn(x) {}` is valid), so allow calls. (Passing false left the call
+        // arguments unconsumed, which drove non-terminating error recovery -> heap blowup.)
+        if (isKw("extends")) { advance(true); c.superClass = parseLeftHandSide(true); }
         c.body = [];
         expectP("{", true);
         while (!isP("}") && !atEof()) {
@@ -510,7 +614,7 @@ function parseInternal(bytes, opts, inject) {
             unsupported("private class members are not supported");
             advance(true);                          // past `#`
             if (cur.type === "identifier") advance(true);   // the private name
-            if (isP("(")) { parseParams(); parseFunctionBody(false); }   // a private method
+            if (isP("(")) { withFn("regular", parseParams, function () { return parseFunctionBody(false); }); }   // a private method (consumed under a function frame so its body parses)
             else { if (eatP("=", true)) parseAssignment(); semicolon(); } // a private field
             return errNode(start);
         }
@@ -529,7 +633,7 @@ function parseInternal(bytes, opts, inject) {
         const m = mk("MethodDefinition", start); m.static = isStatic; m.kind = kind; m.key = key; m.async = isAsync; m.generator = isGen;
         if (isP("(")) {
             const fe = mk("FunctionExpression", cur.start); fe.async = isAsync; fe.generator = isGen; fe.id = null;
-            fe.params = parseParams(); fe.body = parseFunctionBody(false);
+            const fr = withFn(fe.async ? "async" : "regular", parseParams, function () { return parseFunctionBody(false); }, fe.generator); fe.params = fr.params; fe.body = fr.body;
             m.value = fin(fe);
             return fin(m);
         }
@@ -554,7 +658,9 @@ function parseInternal(bytes, opts, inject) {
     }
     function parseBindingIdentifier() {
         if (cur.type !== "identifier" || RESERVED.has(cur.value)) { synErr("expected a binding name"); return errNode(cur.start); }
-        return parseIdentifier();
+        // `eval` / `arguments` are legal references but illegal as a BINDING target in strict code.
+        if (BINDING_RESTRICTED.has(cur.value)) { synErr("'" + cur.value + "' may not be a binding name in module code"); advance(false); return errNode(cur.start); }
+        return parseIdentifier();       // also rejects the STRICT_RESERVED words
     }
     function parseArrayPattern() {
         const n = mk("ArrayPattern", cur.start); n.elements = [];
@@ -598,14 +704,52 @@ function parseInternal(bytes, opts, inject) {
         return e;
     }
 
+    // Assignment-target (lvalue) validation. A SIMPLE target is an Identifier or a
+    // MemberExpression; `=` additionally accepts a destructuring pattern (an array/object literal
+    // reinterpreted, recursively), while a COMPOUND assignment (`+=` etc.) requires a simple
+    // target. This rejects calls, literals, `import.meta`, `this`, parenthesized binary
+    // expressions, etc. as targets (the AssignmentTargetType early error), including nested
+    // (`[import.meta] = []`). Mirrors the Lua parser's lvalue check.
+    function isSimpleTarget(n) { return !!n && (n.type === "Identifier" || n.type === "MemberExpression"); }
+    function isAssignTarget(n) {
+        if (!n) return false;
+        if (isSimpleTarget(n)) return true;
+        if (n.type === "ArrayExpression") {
+            for (let i = 0; i < n.elements.length; i++) {
+                const el = n.elements[i];
+                if (el === null) continue;                                   // elision hole
+                if (el.type === "SpreadElement") { if (!isAssignTarget(el.argument)) return false; continue; }
+                if (el.type === "AssignmentExpression" && el.operator === "=") { if (!isAssignTarget(el.left)) return false; continue; }
+                if (!isAssignTarget(el)) return false;
+            }
+            return true;
+        }
+        if (n.type === "ObjectExpression") {
+            for (let i = 0; i < n.properties.length; i++) {
+                const pr = n.properties[i];
+                if (pr.type === "SpreadElement") { if (!isSimpleTarget(pr.argument)) return false; continue; }
+                if (pr.method || pr.kind === "get" || pr.kind === "set") return false;   // not a target
+                let v = pr.value;
+                if (v && v.type === "AssignmentPattern") v = v.left;         // { a = default }
+                if (!isAssignTarget(v)) return false;
+            }
+            return true;
+        }
+        return false;
+    }
+
     function parseAssignment() {
         if (!guard()) { unguard(); return errNode(cur.start); }
         // arrow-function detection is limited without arbitrary lookahead; handled in primary
         // for `(params) =>` and `ident =>`.
         const left = parseConditional();
         if (cur.type === "punctuator" && ASSIGN.has(cur.value)) {
+            const op = cur.value;
+            // Reject an invalid assignment target (still build the node + consume the RHS so
+            // recovery continues; the js.syntax makes the unit invalid).
+            if (op === "=" ? !isAssignTarget(left) : !isSimpleTarget(left)) synErr("invalid assignment target", left);
             const node = mk("AssignmentExpression", left.start);
-            node.operator = cur.value; node.left = left; advance(true);
+            node.operator = op; node.left = left; advance(true);
             node.right = parseAssignment();
             unguard();
             return fin(node);
@@ -647,15 +791,36 @@ function parseInternal(bytes, opts, inject) {
         if (cur.type === "punctuator" || cur.type === "identifier") {
             const v = cur.value;
             if (UNARY.has(v)) { const node = mk("UnaryExpression", cur.start); node.operator = v; node.prefix = true; advance(true); node.argument = parseUnary(); return fin(node); }
-            if (v === "++" || v === "--") { const node = mk("UpdateExpression", cur.start); node.operator = v; node.prefix = true; advance(true); node.argument = parseUnary(); return fin(node); }
-            if (v === "await") { if (isExprStartTok(peekTok(1, true))) { const start = cur.start; advance(true); const node = mk("AwaitExpression", start); node.argument = parseUnary(); return fin(node); } }
-            if (v === "yield") {
+            if (v === "++" || v === "--") { const node = mk("UpdateExpression", cur.start); node.operator = v; node.prefix = true; advance(true); node.argument = parseUnary(); if (!isSimpleTarget(node.argument)) synErr("invalid target for update expression", node.argument); return fin(node); }
+            if (v === "await" && !cur.escaped) {   // an escaped spelling is not the keyword -> falls through to a (reserved) identifier
+                const astart = cur.start;
+                if (awaitIsExpr()) {
+                    // AwaitExpression : await UnaryExpression -- an operand is REQUIRED.
+                    if (isExprStartTok(peekTok(1, true))) { advance(true); const node = mk("AwaitExpression", astart); node.argument = parseUnary(); return fin(node); }
+                    synErr("await requires an operand");
+                    advance(true); return fin(mk("AwaitExpression", astart));
+                }
+                // Not an async body / module top level (a regular function, or ANY parameter
+                // region incl. async-function params): `await` is reserved in module code here.
+                synErr("await is only valid at module top level or in an async function body");
+                advance(true);
+                const node = mk("AwaitExpression", astart);
+                node.argument = isExprStartTok(cur) ? parseUnary() : null;
+                return fin(node);
+            }
+            if (v === "yield" && !cur.escaped) {
                 const ys = cur.start;
-                unsupported("yield is not supported");
-                advance(true);                      // past `yield`
-                eatP("*", true);                    // optional `yield*`
-                if (!nl() && isExprStartTok(cur)) parseAssignment();   // consume the operand cleanly
-                return errNode(ys);
+                if (inGenerator()) {
+                    // Inside a generator Hull already declined at `function*`; consume the yield
+                    // operator quietly (a clean YieldExpression, no second diagnostic).
+                    advance(true);                  // past `yield`
+                    const node = mk("YieldExpression", ys); node.delegate = eatP("*", true);
+                    node.argument = (!nl() && isExprStartTok(cur)) ? parseAssignment() : null;
+                    return fin(node);
+                }
+                // Outside a generator, `yield` is a reserved word in module code -> a grammar
+                // error (js.syntax), agreeing with QuickJS. It falls through to the reserved
+                // identifier path below.
             }
         }
         let e = parsePostfix();
@@ -665,6 +830,9 @@ function parseInternal(bytes, opts, inject) {
     function parsePostfix() {
         let e = parseLeftHandSide(true);
         if ((isP("++") || isP("--")) && !nl()) {
+            // Postfix ++/-- requires a simple assignment target (an Identifier or member access);
+            // e.g. `import.meta++` (a MetaProperty) is an invalid update target.
+            if (!isSimpleTarget(e)) synErr("invalid target for update expression", e);
             const node = mk("UpdateExpression", e.start); node.operator = cur.value; node.prefix = false; node.argument = e; advance(false); return fin(node);
         }
         return e;
@@ -679,7 +847,7 @@ function parseInternal(bytes, opts, inject) {
 
     function parseNew() {
         const start = cur.start; advance(true);
-        if (isP(".")) { advance(false); const meta = mk("MetaProperty", start); meta.meta = "new"; meta.property = (cur.type === "identifier" ? cur.value : ""); advance(false); return parseCallMemberTail(fin(meta), true); }
+        if (isP(".")) { advance(false); const meta = mk("MetaProperty", start); meta.meta = "new"; if (cur.type === "identifier" && cur.value === "target" && !cur.escaped) { meta.property = "target"; advance(false); if (!newTargetAllowed()) synErr("'new.target' is only valid inside a function", meta); return parseCallMemberTail(fin(meta), true); } synErr("the only valid meta-property for 'new' is 'new.target'"); return errNode(start); }
         let callee = isKw("new") ? parseNew() : parsePrimary();
         callee = parseCallMemberTail(callee, false);   // member tail but no call
         const node = mk("NewExpression", start); node.callee = callee; node.arguments = [];
@@ -764,7 +932,7 @@ function parseInternal(bytes, opts, inject) {
         if (v === "true" || v === "false") { const n = mk("Literal", start); n.value = (v === "true"); n.raw = v; advance(false); return fin(n); }
         if (v === "null") { const n = mk("Literal", start); n.value = null; n.raw = "null"; advance(false); return fin(n); }
         if (v === "new") return parseNew();
-        if (v === "import") { advance(false); if (isP("(")) { const ie = mk("ImportExpression", start); ie.arguments = parseArguments(); return fin(ie); } if (isP(".")) { advance(false); const meta = mk("MetaProperty", start); meta.meta = "import"; meta.property = (cur.type === "identifier" ? cur.value : ""); advance(false); return fin(meta); } synErr("unexpected 'import'"); return errNode(start); }
+        if (v === "import") { if (cur.escaped) { synErr("'import' is a reserved word and may not be escaped"); advance(false); return errNode(start); } advance(false); if (isP("(")) { const ie = mk("ImportExpression", start); ie.arguments = parseArguments(); return fin(ie); } if (isP(".")) { advance(false); const meta = mk("MetaProperty", start); meta.meta = "import"; if (cur.type === "identifier" && cur.value === "meta" && !cur.escaped) { meta.property = "meta"; advance(false); return fin(meta); } synErr("the only valid meta-property for 'import' is 'import.meta'"); return errNode(start); } synErr("unexpected 'import'"); return errNode(start); }
         if (v === "async") {
             const nx = peekTok(1, true);
             if (nx.type === "identifier" && nx.value === "function" && !nx.nlBefore) { advance(true); return parseFunctionExpr(true, start); }
@@ -819,7 +987,11 @@ function parseInternal(bytes, opts, inject) {
     function finishArrow(start, params, isAsync) {
         const a = mk("ArrowFunctionExpression", start); a.async = isAsync === true; a.params = params;
         expectP("=>", true);
-        a.body = parseArrowBody();
+        // Arrow params were already parsed (as a parenthesized expression) under the enclosing
+        // context; the body gets its own frame so `await` in an async arrow body is valid.
+        ctxStack.push({ kind: a.async ? "async" : "regular", region: "body", arrow: true });
+        a.body = nested(parseArrowBody);
+        ctxStack.pop();
         return fin(a);
     }
     function parseArrowBody() {
@@ -863,7 +1035,7 @@ function parseInternal(bytes, opts, inject) {
         const pr = mk("Property", start); pr.computed = computed; pr.key = key; pr.kind = kind === "init" ? "init" : kind;
         if (isP("(")) {   // method
             const fe = mk("FunctionExpression", cur.start); fe.async = isAsync; fe.generator = isGen; fe.id = null;
-            fe.params = parseParams(); fe.body = parseFunctionBody(false);
+            const fr = withFn(fe.async ? "async" : "regular", parseParams, function () { return parseFunctionBody(false); }, fe.generator); fe.params = fr.params; fe.body = fr.body;
             pr.value = fin(fe); pr.method = true; pr.shorthand = false;
             return fin(pr);
         }
@@ -899,6 +1071,11 @@ function parseInternal(bytes, opts, inject) {
         return fin(n);
     }
     function parseIdentifier() {
+        // Strict/module reserved words (STRICT_RESERVED, incl. await/yield) may not be a
+        // BindingIdentifier, IdentifierReference, or LabelIdentifier. An AwaitExpression /
+        // YieldExpression is intercepted earlier in parseUnary, so a reserved word reaching here is
+        // always a reserved-word misuse. An escaped spelling is equally reserved (same word).
+        if (STRICT_RESERVED.has(cur.value)) { synErr("'" + cur.value + "' is reserved in module code"); advance(false); return errNode(cur.start); }
         const n = mk("Identifier", cur.start); n.name = cur.value; n.escaped = cur.escaped === true; advance(false); return fin(n);
     }
     // an identifier name where keywords are allowed (property names, member access).
@@ -910,6 +1087,10 @@ function parseInternal(bytes, opts, inject) {
     // -- modules --
     function parseImport() {
         const s = mk("ImportDeclaration", cur.start);
+        // A static ImportDeclaration is a module ITEM: legal only at the module top level, never
+        // inside a block, function, or other nested statement (dynamic import() reaches
+        // parseExpressionStatement, not here, so it stays legal everywhere).
+        if (!atModuleItem) synErr("import declarations may only appear at the top level of a module");
         advance(true);
         s.specifiers = [];
         if (cur.type === "string") { s.source = parseLiteral(); semicolon(); return fin(s); }   // side-effect import
@@ -923,6 +1104,11 @@ function parseInternal(bytes, opts, inject) {
             while (!isP("}") && !atEof()) {
                 const spec = mk("ImportSpecifier", cur.start); spec.imported = parseIdentifierName(); spec.local = spec.imported;
                 if (isKw("as")) { advance(true); spec.local = parseBindingIdentifier(); }
+                // Without `as`, the imported name IS the local binding, so it must be a valid
+                // binding identifier (`import { eval }` / `import { public }` are invalid).
+                else if (spec.imported && spec.imported.name !== undefined &&
+                         (RESERVED.has(spec.imported.name) || STRICT_RESERVED.has(spec.imported.name) || BINDING_RESTRICTED.has(spec.imported.name)))
+                    synErr("'" + spec.imported.name + "' may not be a binding name in module code", spec.imported);
                 s.specifiers.push(fin(spec));
                 if (!eatP(",", true)) break;
             }
@@ -936,6 +1122,8 @@ function parseInternal(bytes, opts, inject) {
 
     function parseExport() {
         const s = mk("ExportNamedDeclaration", cur.start);
+        // Every export form is a module ITEM: legal only at the module top level.
+        if (!atModuleItem) synErr("export declarations may only appear at the top level of a module");
         advance(true);
         if (isKw("default")) {
             s.type = "ExportDefaultDeclaration"; advance(true);
@@ -945,12 +1133,22 @@ function parseInternal(bytes, opts, inject) {
             return fin(s);
         }
         if (isP("*")) {
-            unsupported("export * is not supported");
+            // ExportAllDeclaration: `export * from "m"` and `export * as ns from "m"`. A re-export
+            // creates NO local binding/reference (the scope resolver's exportInner only binds a
+            // wrapped declaration, which this has none of). `from` is mandatory.
+            const ea = mk("ExportAllDeclaration", s.start);
             advance(true);                          // past `*`
-            if (isKw("as")) { advance(true); parseIdentifierName(); }   // `export * as ns`
-            if (isKw("from")) { advance(true); if (cur.type === "string") advance(false); }
+            ea.exported = null;
+            if (isKw("as")) { advance(true); ea.exported = parseIdentifierName(); }   // `as ns`
+            ea.source = null;
+            if (isKw("from")) {
+                advance(true);
+                ea.source = (cur.type === "string") ? parseLiteral() : (synErr("expected module specifier"), errNode(cur.start));
+            } else {
+                synErr("expected 'from'");           // `export *` / `export * as ns` require `from`
+            }
             semicolon();
-            return errNode(s.start);
+            return fin(ea);
         }
         if (isP("{")) {
             s.specifiers = []; s.declaration = null; advance(true);
