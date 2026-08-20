@@ -168,6 +168,11 @@ static const Case VALID[] = {
     { "import.meta",           "const im = import.meta;" },
     { "unary + update",        "const u = -a + +b - --c + typeof d;" },
     { "member/call chain",     "obj.a.b().c[d].e();" },
+    /* Module-grammar context rules (docs/js_test262_design.md), VALID side -- oracle ACCEPTs. */
+    { "top-level await",       "const twa = await p;" },
+    { "await in async body",   "async function af2() { return await x; }" },
+    { "dyn import in fn",      "function fdi() { return import(\"m\"); }" },
+    { "dyn import in block",   "{ const bdi = import(\"m\"); }" },
 };
 
 /* Malformed source the parser REJECTS (js.syntax) -- invalid in both strict and sloppy. */
@@ -189,6 +194,17 @@ static const Case MALFORMED[] = {
     { "case no test",          "switch (x) { case: break; }" },
     { "unclosed object",       "x = {" },
     { "double comma call",     "f(1,, 2);" },
+    /* Module-grammar context rules (docs/js_test262_design.md), INVALID side -- both reject.
+     * These exercise the parser's explicit function-context stack + module-item-position flag. */
+    { "await in regular fn",   "function g() { return await x; }" },        /* await not an expr here */
+    { "await in async params", "async function h(x = await 1) {}" },        /* params region rejects await */
+    { "bare await no operand", "const z = await;" },                        /* TLA requires an operand */
+    { "return at top level",   "return 1;" },                               /* return needs a function */
+    { "static import in block","{ import x from \"m\"; }" },                 /* import is module-top-level only */
+    { "static import in fn",   "function k() { import y from \"m\"; }" },
+    { "export in block",       "{ export const q = 1; }" },                 /* export is module-top-level only */
+    { "export in fn",          "function m2() { export default 1; }" },
+    { "escaped import.meta",   "const y = import.m\\u0065ta;" },            /* meta must be exact + unescaped */
 };
 
 /* Recognized, VALID ECMAScript that Hull deliberately declines with js.unsupported (never a

@@ -272,7 +272,10 @@ UTEST(js_parser, automatic_semicolon_insertion)
 {
     HlJsSession *s = hl_js_session_create(NULL);
     ASSERT_TRUE(s != NULL);
-    char *o = parse_str(s, "const a = 1\nconst b = 2\nreturn a + b");
+    /* Three newline-separated statements, no explicit semicolons. All valid at module top
+     * level (a bare `return` is a module-grammar error, so ASI is exercised with a trailing
+     * expression statement instead). */
+    char *o = parse_str(s, "const a = 1\nconst b = 2\na + b");
     EXPECT_TRUE(has(o, "\"name\":\"a\""));
     EXPECT_TRUE(has(o, "\"name\":\"b\""));
     EXPECT_TRUE(has(o, "\"valid\":true"));
