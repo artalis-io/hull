@@ -196,14 +196,15 @@ new compiler-specific acceptance test.
 
 ## 6. Canonical repository-owned classifier
 
-Introduce one classifier implementation, for example:
+Introduce one classifier implementation. Ratified choice (Slice 1):
 
 ```text
-scripts/ci/classify_changes.sh
+scripts/ci/classify_changes.py   (Python 3)
 ```
 
-Choose the implementation language that keeps the result portable and easily
-testable in Hull's existing CI images.
+Python 3 keeps the result portable and easily testable in Hull's existing CI
+images, and - unlike POSIX `sh`, whose `read` cannot reliably consume
+NUL-delimited paths - it parses the NUL-safe diff and emits deterministic JSON.
 
 Do not duplicate path rules across job `if:` expressions. Do not add an
 unpinned third-party path-filter action.
@@ -977,18 +978,27 @@ raw material for the classifier→plan mapping (Appendix B); it is a PROPOSAL.
 This is the DESIGN to ratify. No code written yet. Slice 1 (section 24) is
 classifier + fixtures ONLY; it does not yet skip any job.
 
-## B.1 Classifier shape
+## B.1 Classifier shape (RATIFIED; implemented in Slice 1)
 
-- `scripts/ci/classify_changes.sh` (POSIX sh; portable, testable in Hull's
-  existing ubuntu-24.04 image; no third-party path-filter action).
+- `scripts/ci/classify_changes.py` (**Python 3**, not POSIX sh: POSIX `read`
+  cannot reliably consume NUL-delimited paths, and Python gives deterministic
+  JSON + adversarial-path fixtures). Portable, testable in the ubuntu-24.04
+  image; no third-party path-filter action.
 - Input: NUL-delimited changed paths from the real merge base
-  (`git diff -z --name-only --no-renames $(git merge-base origin/main HEAD)..HEAD`
+  (`git diff --name-only -z --no-renames $(git merge-base origin/main HEAD)..HEAD`
   with sufficient fetch depth; NOT `HEAD^`; NOT the paginated API file list).
-- Output: deterministic JSON + `$GITHUB_OUTPUT` booleans for both the facts
-  (section 5) and the derived plan + `required.*` flags (section 16).
-- Fail-closed: unknown path → core-sensitive; empty/ambiguous diff, diff error,
-  or rule error → `full_all=true`. `main`/schedule/force-full → `full_all=true`
-  directly (no path classification).
+  **`--no-renames` is deliberate**: a rename shows as delete(old)+add(new), so
+  BOTH paths classify and the broader plan wins - a rename across a trust
+  boundary can never escape into a narrower plan (fixture-proven).
+- Output: deterministic JSON (stdout) + `$GITHUB_OUTPUT` flat `facts_*` /
+  `plan_*` booleans + a compact `plan_json` for the Slice-2 orchestrator.
+- Fail-closed: unknown path → core-sensitive (`full_core`); empty/ambiguous diff,
+  read failure, or rule error → `full_all`; `--event push_main`/`schedule` or
+  `--force-full` → `full_all` directly (no path classification).
+- Tests: `scripts/ci/test_classify_changes.py` (pure Python, no GitHub Actions)
+  covers the section-19 matrix + fail-closed + the cross-trust-boundary rename
+  cases. The ci-success GATE cases (required/allowed-job skipped, cancellation,
+  matrix aggregates) belong to the Slice-2 gate, not the classifier.
 
 ## B.2 Fact → plan derivation (initial rules, conservative)
 
@@ -1023,11 +1033,13 @@ self-trust caveat (§8) — governance stays with CODEOWNERS/branch protection.
 
 ## B.4 Proposed slice ordering (matches §24, with this repo's specifics)
 
-- **Slice 1 (next, on approval):** `scripts/ci/classify_changes.sh` + NUL-safe
-  merge-base diff + fixture tests (§19 cases incl. this repo's `js_session.c`,
-  `parser.js`, `parser.lua`, `fuzz_js_source.c`, `mk/**`, docs-only, mixed). NO
-  job skipping yet. Add `.github/actions`/`scripts/ci/**` to the core path set so
-  the classifier's own changes force full_all.
+- **Slice 1 (DONE, this change):** `scripts/ci/classify_changes.py` + NUL-safe
+  merge-base diff + `scripts/ci/test_classify_changes.py` fixtures (§19 cases
+  incl. this repo's `js_session.c`, `parser.js`, `parser.lua`, `fuzz_js_source.c`,
+  `mk/**`, docs-only, mixed, plus cross-trust-boundary renames). NO job skipping
+  yet. `.github/workflows/**`, `.github/actions/**`, `scripts/ci/**` are in the
+  self-trust set so the classifier's own changes force full_all. 38/38 fixtures
+  green. Stops for review before Slice 2.
 - **Slice 2:** always-triggered orchestrator + `ci-success` gate (`if: always()`,
   static `needs` all jobs, repo-owned result-validation script) + `main`/
   schedule/force-full=full + branch-protection migration doc. Preserve job
