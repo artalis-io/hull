@@ -57,11 +57,13 @@ int64_t hl_js_gen_open(void)
 /* A malloc'd copy of a constant stale-JSON string (caller frees), for a dead/unknown token. */
 static int emit_stale(const char *json, char **out_json, size_t *out_len)
 {
+    if (out_len) *out_len = 0;
+    if (!out_json) return -1;            /* nowhere to hand the copy: don't allocate (no leak) */
     size_t n = strlen(json);
     char *c = (char *)malloc(n + 1);
-    if (!c) { if (out_json) *out_json = NULL; if (out_len) *out_len = 0; return -1; }
+    if (!c) { *out_json = NULL; return -1; }
     memcpy(c, json, n + 1);
-    if (out_json) *out_json = c;
+    *out_json = c;
     if (out_len) *out_len = n;
     return -1;
 }

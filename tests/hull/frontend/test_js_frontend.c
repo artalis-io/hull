@@ -204,7 +204,7 @@ UTEST(js_frontend, semantics_binding_paths)
 
     /* {q: r} -> r=1 [{property_index:0}] */
     HlJsSession *s2 = hl_js_session_create(NULL);
-    fe_analyze(s2, "const {q: r} = o;");
+    free(fe_analyze(s2, "const {q: r} = o;"));
     char *sem2 = fe_sem(s2, 1);
     EXPECT_TRUE(has(sem2, "\"binding_path\":[{\"property_index\":0}]"));
     free(sem2);
@@ -212,7 +212,7 @@ UTEST(js_frontend, semantics_binding_paths)
 
     /* {a, ...rest} -> a=1 [{property_index:0}]; rest=2 [{property_index:1},{rest:true}] */
     HlJsSession *s3 = hl_js_session_create(NULL);
-    fe_analyze(s3, "const {a, ...rest} = o;");
+    free(fe_analyze(s3, "const {a, ...rest} = o;"));
     char *sa = fe_sem(s3, 1);
     EXPECT_TRUE(has(sa, "\"binding_path\":[{\"property_index\":0}]"));
     free(sa);
@@ -223,14 +223,14 @@ UTEST(js_frontend, semantics_binding_paths)
 
     /* {x = 1} default -> [{property_index:0},{assignment:true}]; [...r] -> [{array_index:0},{rest:true}] */
     HlJsSession *s4 = hl_js_session_create(NULL);
-    fe_analyze(s4, "const {x = 1} = o;");
+    free(fe_analyze(s4, "const {x = 1} = o;"));
     char *sd = fe_sem(s4, 1);
     EXPECT_TRUE(has(sd, "\"binding_path\":[{\"property_index\":0},{\"assignment\":true}]"));
     free(sd);
     hl_js_session_destroy(s4);
 
     HlJsSession *s5 = hl_js_session_create(NULL);
-    fe_analyze(s5, "const [...r] = xs;");
+    free(fe_analyze(s5, "const [...r] = xs;"));
     char *se = fe_sem(s5, 1);
     EXPECT_TRUE(has(se, "\"binding_path\":[{\"array_index\":0},{\"rest\":true}]"));
     free(se);
@@ -242,7 +242,7 @@ UTEST(js_frontend, semantics_function_class)
 {
     HlJsSession *s = hl_js_session_create(NULL);
     ASSERT_TRUE(s != NULL);
-    fe_analyze(s, "async function g(p, q) { return p; }");
+    free(fe_analyze(s, "async function g(p, q) { return p; }"));
     char *sf = fe_sem(s, 1);
     EXPECT_TRUE(has(sf, "\"form\":\"function\",\"is_async\":true,\"is_generator\":false"));
     EXPECT_TRUE(has(sf, "\"params\":["));
@@ -251,7 +251,7 @@ UTEST(js_frontend, semantics_function_class)
     hl_js_session_destroy(s);
 
     HlJsSession *s2 = hl_js_session_create(NULL);
-    fe_analyze(s2, "class C extends B { m() {} }");
+    free(fe_analyze(s2, "class C extends B { m() {} }"));
     char *sc = fe_sem(s2, 1);
     EXPECT_TRUE(has(sc, "\"form\":\"class\""));
     EXPECT_TRUE(has(sc, "\"super_class\":{\"type\":\"Identifier\""));
