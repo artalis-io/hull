@@ -201,6 +201,21 @@ function parseInternal(bytes, opts, inject) {
             else if (cur.value === ";") { st = mk("EmptyStatement", cur.start); advance(true); st = fin(st); }
             else st = parseExpressionStatement();
         } else if (cur.type === "identifier" && !cur.escaped) {
+            // LabeledStatement: LabelIdentifier `:` Statement (`outer: for (...) ...`,
+            // `label: { ... }`). Peeking the token after the identifier can lex a following `/`
+            // under the WRONG slash goal (e.g. `await /re/` -> `/` as division, cached), which
+            // would then corrupt the real parse. Guard the peek with save/restore: on a
+            // non-label, restore rewinds the tokenizer + lookahead so the real parse re-lexes.
+            const _lblState = saveState();
+            const lblNext = peekTok(1, false);
+            const isLabel = (lblNext.type === "punctuator" && lblNext.value === ":");
+            if (!isLabel) restoreState(_lblState);
+            if (isLabel) {
+                const lbl = mk("LabeledStatement", cur.start);
+                lbl.label = parseIdentifier(); advance(true);   // label, then past `:`
+                lbl.body = parseStatement();
+                st = fin(lbl);
+            } else
             switch (cur.value) {
                 case "var": case "let": case "const": st = parseVarDeclaration(); break;
                 case "function": st = parseFunctionDeclaration(false); break;
@@ -216,7 +231,15 @@ function parseInternal(bytes, opts, inject) {
                 case "throw": st = parseReturnLike("ThrowStatement", false); break;
                 case "break": st = parseBreakContinue("BreakStatement"); break;
                 case "continue": st = parseBreakContinue("ContinueStatement"); break;
-                case "import": st = parseImport(); break;
+                case "import": {
+                    // `import` at statement position is an ImportDeclaration UNLESS it is a
+                    // dynamic import CALL `import(...)` or the `import.meta` meta-property, which
+                    // are EXPRESSIONS -> parse an expression statement (parsePrimary handles both).
+                    const nx = peekTok(1, false);
+                    if (nx.type === "punctuator" && (nx.value === "(" || nx.value === ".")) st = parseExpressionStatement();
+                    else st = parseImport();
+                    break;
+                }
                 case "export": st = parseExport(); break;
                 case "with": { const ws = cur.start; unsupported("with statement is not supported"); advance(true); expectP("(", true); parseExpression(); expectP(")", true); parseStatement(); st = errNode(ws); break; }
                 case "debugger": { st = mk("DebuggerStatement", cur.start); advance(true); semicolon(); st = fin(st); break; }
@@ -318,6 +341,14 @@ function parseInternal(bytes, opts, inject) {
             init = parseExpression();
             if (isKw("of")) { return finishForOf(s, init, isAwait); }
             if (isKw("in")) return finishForIn(s, init);
+            // The ES for-head init is Expression[~In] (NoIn) so a top-level `in` reads as the
+            // for-in keyword, not the binary operator. parseExpression() has no NoIn mode, so a
+            // `for (LHS in EXPR)` head arrives here as a top-level BinaryExpression(in). Recover
+            // the equivalent for-in shape rather than falling through to the C-style `;` error.
+            if (init && init.type === "BinaryExpression" && init.operator === "in") {
+                s.type = "ForInStatement"; s.left = init.left; s.right = init.right;
+                expectP(")", true); s.body = parseStatement(); return fin(s);
+            }
         }
         s.init = init;
         expectP(";", true);
@@ -491,7 +522,10 @@ function parseInternal(bytes, opts, inject) {
         advance(true);                              // past `class`
         c.id = (cur.type === "identifier" && !RESERVED.has(cur.value)) ? parseIdentifier() : null;
         c.superClass = null;
-        if (isKw("extends")) { advance(true); c.superClass = parseLeftHandSide(false); }
+        // ClassHeritage : extends LeftHandSideExpression -- which INCLUDES call expressions
+        // (`class C extends fn(x) {}` is valid), so allow calls. (Passing false left the call
+        // arguments unconsumed, which drove non-terminating error recovery -> heap blowup.)
+        if (isKw("extends")) { advance(true); c.superClass = parseLeftHandSide(true); }
         c.body = [];
         expectP("{", true);
         while (!isP("}") && !atEof()) {
