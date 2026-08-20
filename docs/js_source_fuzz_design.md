@@ -70,9 +70,27 @@ integers, `1 <= start <= stop <= n+1` (`n` = input byte length). A `null` diagno
 is allowed (a whole-unit diagnostic). Non-integral, inverted, or out-of-bounds -> breach.
 
 ### 4.2 Child nesting
-Each AST child node's range is nested within its parent's: `child.start >= parent.start`
-and `child.stop <= parent.stop`. (`Error` recovery nodes included.) A child escaping its
-parent's span -> breach.
+Each SUBSTANTIVE AST child node's range is nested within its parent's:
+`child.start >= parent.start` and `child.stop <= parent.stop`. A child escaping its parent's
+span -> breach. TWO recovery-artifact classes are EXEMPT because they intentionally anchor at
+the FAILURE FRONTIER (the current, not-yet-consumed token, `cur.start`) rather than the
+parent's last CONSUMED token (`prev.stop`), so they can legitimately sit just past a parent's
+finalized stop:
+- `Error` recovery nodes (any width -- `errNode` uses `cur.start`);
+- zero-width empty markers (`start === stop`), e.g. an `if`'s empty-consequent
+  `ExpressionStatement` or an unterminated `ArrayPattern`'s missing element.
+
+Both still pass the 4.1 in-bounds check. This refinement is the faithful reading of "children
+nest within their parent" for a parser WITH error recovery: the clean syntax tree nests; the
+frontier-anchored recovery markers do not. (The fuzzer found this while shaking out the parser;
+it also found and motivated a real fix -- see below.)
+
+### 4.2b Parser fix the fuzzer motivated (landed in this slice)
+The fuzzer found an INVERTED range (`stop < start`) emitted by `fin()` / `fin2n()` on an
+error-recovery path that consumed nothing after a node began (`prev.stop < node.start`).
+`fin()`/`fin2n()`/`errNode()` now clamp `stop >= start` (a zero-width span when no progress),
+preserving the 4.1 range invariant. Existing JS parser/frontend/conformance suites are
+unaffected.
 
 ### 4.3 raw slice equality (non-tautological)
 For every comment and every attached annotation, `raw` must EXACTLY equal the byte slice

@@ -1467,6 +1467,17 @@ jobs:
         timeout-minutes: 3
         run: make fuzz-lua-source CC=clang FUZZ_TIME=60
 
+      - name: Fuzz JS source parser (60s)
+        # hull:source:parser (JS): adversarial bytes -> parse() through the restricted QuickJS
+        # session, via the test-only compact entry hull:source:tests:fuzz_parse. Intrinsic
+        # invariants (never-raise / valid SourceUnit shape / range + nesting + raw-slice + no
+        # cycles / diagnostic-budget / js.internal aborts / active session-reuse proof after
+        # host js.limit.*). Sanitizer split keeps UBSan off vendored QuickJS (fuzzer-no-link,
+        # address) while retaining coverage + ASan; full sanitizers on Hull code.
+        # `make fuzz-js-source` stages the full repo .js/.mjs/.cjs corpus first.
+        timeout-minutes: 3
+        run: make fuzz-js-source CC=clang FUZZ_TIME=60
+
   # End-to-end against a real PostgreSQL 16 (started in Docker by the script).
   # Exercises the whole path the unit tests can't: DSN -> SCRAM-SHA-256 auth
   # (plaintext + TLS via a self-signed cert) -> parameterized query + typed

@@ -1,0 +1,73 @@
+# libFuzzer dictionary for the JS parser (hull:source:parser).
+# Keywords, punctuators, and comment/annotation/regex edge tokens so the mutator
+# reaches deep constructs fast. Format: name="token".
+
+# keywords
+kw_const="const"
+kw_let="let"
+kw_var="var"
+kw_function="function"
+kw_class="class"
+kw_extends="extends"
+kw_return="return"
+kw_import="import"
+kw_export="export"
+kw_default="default"
+kw_from="from"
+kw_async="async"
+kw_await="await"
+kw_yield="yield"
+kw_if="if"
+kw_else="else"
+kw_for="for"
+kw_while="while"
+kw_do="do"
+kw_switch="switch"
+kw_case="case"
+kw_try="try"
+kw_catch="catch"
+kw_finally="finally"
+kw_throw="throw"
+kw_new="new"
+kw_typeof="typeof"
+kw_in="in"
+kw_of="of"
+kw_with="with"
+
+# punctuators
+p_arrow="=>"
+p_spread="..."
+p_optchain="?."
+p_nullish="??"
+p_eqs="==="
+p_neq="!=="
+p_inc="++"
+p_shl="<<"
+p_exp="**"
+p_brace="{}"
+p_brack="[]"
+p_paren="()"
+p_semi=";"
+p_comma=","
+p_colon=":"
+p_tmpl_open="${"
+p_backtick="`"
+
+# comments + annotations
+c_line="//"
+c_block_open="/*"
+c_block_close="*/"
+c_jsdoc="/**"
+a_tag="@param"
+a_tag2="@query"
+a_tag3="@route"
+
+# regex / division ambiguity
+r_slash="/"
+r_regex="/x/g"
+
+# literals
+l_num="0x1p3"
+l_bignum="123n"
+l_str="'s'"
+l_tmpl="`t${x}`"

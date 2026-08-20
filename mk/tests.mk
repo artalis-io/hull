@@ -841,7 +841,38 @@ build/fuzz-corpus/lua_source: fuzz/corpus_lua_source
 fuzz-lua-source: fuzz/fuzz_lua_source build/fuzz-corpus/lua_source
 	./fuzz/fuzz_lua_source build/fuzz-corpus/lua_source/ -dict=fuzz/lua_source.dict -max_len=16384 -max_total_time=$(FUZZ_TIME)
 
-fuzz: fuzz/fuzz_sh_json fuzz/fuzz_path_normalize fuzz/fuzz_mime_sniff fuzz/fuzz_host_match fuzz/fuzz_pgwire fuzz/fuzz_pg_dsn fuzz/fuzz_pg_rewrite fuzz/fuzz_mysqlwire fuzz/fuzz_mysql_dsn fuzz/fuzz_respwire fuzz/fuzz_valkey_dsn fuzz/fuzz_span_sdk fuzz/fuzz_span_window fuzz/fuzz_lua_source
+# hull:source:parser (JS): adversarial bytes -> parse() through the restricted QuickJS session,
+# via the TEST-ONLY compact entry hull:source:tests:fuzz_parse (in the test cli-js registry, not
+# the shipped one). Sanitizer SPLIT (the vendored-QuickJS exception): the harness + js_session.c
+# + the generated registry .c get fuzzer,address,undefined (Hull-owned); the vendored QuickJS TUs
+# get fuzzer-no-link,address WITHOUT UBSan (its "technically-UB-but-works" function-pointer casts
+# would otherwise trip -fsanitize=undefined) while keeping libFuzzer coverage + ASan; the final
+# link is fuzzer,address,undefined. Design: docs/js_source_fuzz_design.md.
+QJS_FUZZ_DIR  := $(BUILDDIR)/fuzz-qjs
+QJS_FUZZ_OBJS := $(patsubst $(QJS_DIR)/%.c,$(QJS_FUZZ_DIR)/qjs_%.o,$(QJS_SRCS))
+$(QJS_FUZZ_DIR):
+	@mkdir -p $@
+$(QJS_FUZZ_DIR)/qjs_%.o: $(QJS_DIR)/%.c | $(QJS_FUZZ_DIR)
+	$(CC) -std=c11 -O1 -g -w -fsanitize=fuzzer-no-link,address -fno-omit-frame-pointer \
+	      -DCONFIG_VERSION=\"$(QJS_VERSION)\" -DCONFIG_BIGNUM -D_GNU_SOURCE -I$(QJS_DIR) -c -o $@ $<
+
+fuzz/fuzz_js_source: fuzz/fuzz_js_source.c $(SRCDIR)/hull/frontend/js_session.c $(STDLIB_JS_CLI_TEST_REGISTRY_C) $(QJS_FUZZ_OBJS)
+	$(CC) $(FUZZ_CFLAGS) -Ivendor/quickjs -Ibuild -o $@ \
+	      fuzz/fuzz_js_source.c $(SRCDIR)/hull/frontend/js_session.c $(STDLIB_JS_CLI_TEST_REGISTRY_C) \
+	      $(QJS_FUZZ_OBJS) -lm -lpthread
+
+# Stage the FULL repo .js/.mjs/.cjs corpus (deterministic, path-mangled names) + the small
+# checked-in adversarial seed into a temp dir at run time -- no duplicated snapshot committed.
+build/fuzz-corpus/js_source: fuzz/corpus_js_source
+	@mkdir -p $@
+	@cp fuzz/corpus_js_source/* $@/ 2>/dev/null || true
+	@find stdlib/js stdlib/cli/js examples tests/fixtures \( -name '*.js' -o -name '*.mjs' -o -name '*.cjs' \) 2>/dev/null | \
+	  while read f; do cp "$$f" "$@/$$(printf '%s' "$$f" | tr '/.' '__')"; done
+.PHONY: fuzz-js-source
+fuzz-js-source: fuzz/fuzz_js_source build/fuzz-corpus/js_source
+	./fuzz/fuzz_js_source build/fuzz-corpus/js_source/ -dict=fuzz/js_source.dict -max_len=16384 -max_total_time=$(FUZZ_TIME)
+
+fuzz: fuzz/fuzz_sh_json fuzz/fuzz_path_normalize fuzz/fuzz_mime_sniff fuzz/fuzz_host_match fuzz/fuzz_pgwire fuzz/fuzz_pg_dsn fuzz/fuzz_pg_rewrite fuzz/fuzz_mysqlwire fuzz/fuzz_mysql_dsn fuzz/fuzz_respwire fuzz/fuzz_valkey_dsn fuzz/fuzz_span_sdk fuzz/fuzz_span_window fuzz/fuzz_lua_source fuzz/fuzz_js_source
 
 # Time-boxed run over the seed corpora (what CI runs). FUZZ_TIME overrides.
 fuzz-run: fuzz
@@ -859,6 +890,7 @@ fuzz-run: fuzz
 	./fuzz/fuzz_span_sdk fuzz/corpus_span_sdk/ -max_total_time=$(FUZZ_TIME)
 	./fuzz/fuzz_span_window fuzz/corpus_span_window/ -max_total_time=$(FUZZ_TIME)
 	$(MAKE) fuzz-lua-source FUZZ_TIME=$(FUZZ_TIME)   # stages the full .lua corpus first
+	$(MAKE) fuzz-js-source FUZZ_TIME=$(FUZZ_TIME)    # stages the full .js corpus first
 
 # ── E2E tests ──────────────────────────────────────────────────────
 
