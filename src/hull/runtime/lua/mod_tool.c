@@ -37,6 +37,9 @@
 #include "hull/cap/crypto.h"
 #include "hull/signature.h"  /* HL_PLATFORM_PUBKEY_HEX */
 #include "hull/manifest_extract_file.h"  /* extract_manifest_js helper */
+#ifdef HL_FRONTEND_JS
+#include "hull/frontend/js_generation.h"  /* JS source-frontend generation/session manager */
+#endif
 
 #include <signal.h>
 #include <sys/wait.h>
@@ -1562,7 +1565,98 @@ static int l_tool_sha256_file(lua_State *L)
     return 1;
 }
 
+/* ── JS source-frontend dispatcher (language-neutral; always present) ─────── */
+#ifdef HL_FRONTEND_JS
+static int frontend_lang_is_js(lua_State *L, int idx) { return strcmp(luaL_checkstring(L, idx), "javascript") == 0; }
+static int frontend_push_json(lua_State *L, char *out, size_t len)
+{
+    if (!out) { lua_pushnil(L); lua_pushstring(L, "frontend bridge produced no result"); return 2; }
+    lua_pushlstring(L, out, len);
+    free(out);
+    return 1;
+}
+#endif
+static int l_tool_frontend_available(lua_State *L)
+{
+#ifdef HL_FRONTEND_JS
+    lua_pushboolean(L, frontend_lang_is_js(L, 1) && hl_js_gen_available());
+#else
+    (void)luaL_checkstring(L, 1);
+    lua_pushboolean(L, 0);
+#endif
+    return 1;
+}
+static int l_tool_frontend_open(lua_State *L)
+{
+#ifdef HL_FRONTEND_JS
+    if (!frontend_lang_is_js(L, 1)) { lua_pushnil(L); lua_pushstring(L, "unknown frontend language"); return 2; }
+    int64_t t = hl_js_gen_open();
+    if (t <= 0) { lua_pushnil(L); lua_pushstring(L, "frontend session open failed"); return 2; }
+    lua_pushinteger(L, (lua_Integer)t);
+    return 1;
+#else
+    (void)luaL_checkstring(L, 1);
+    lua_pushnil(L); lua_pushstring(L, "javascript frontend engine not available");
+    return 2;
+#endif
+}
+static int l_tool_frontend_analyze(lua_State *L)
+{
+#ifdef HL_FRONTEND_JS
+    if (!frontend_lang_is_js(L, 1)) return luaL_error(L, "unknown frontend language");
+    int64_t token = (int64_t)luaL_checkinteger(L, 2);
+    const char *path = luaL_optstring(L, 3, NULL);
+    size_t slen = 0; const char *src = luaL_checklstring(L, 4, &slen);
+    char *out = NULL; size_t olen = 0;
+    hl_js_gen_analyze(token, (const uint8_t *)src, slen, path, &out, &olen);
+    return frontend_push_json(L, out, olen);
+#else
+    return luaL_error(L, "javascript frontend engine not available");
+#endif
+}
+static int l_tool_frontend_declaration_semantics(lua_State *L)
+{
+#ifdef HL_FRONTEND_JS
+    if (!frontend_lang_is_js(L, 1)) return luaL_error(L, "unknown frontend language");
+    int64_t token = (int64_t)luaL_checkinteger(L, 2);
+    int64_t decl_id = (int64_t)luaL_checkinteger(L, 3);
+    char *out = NULL; size_t olen = 0;
+    hl_js_gen_declaration_semantics(token, decl_id, &out, &olen);
+    return frontend_push_json(L, out, olen);
+#else
+    return luaL_error(L, "javascript frontend engine not available");
+#endif
+}
+static int l_tool_frontend_scope(lua_State *L)
+{
+#ifdef HL_FRONTEND_JS
+    if (!frontend_lang_is_js(L, 1)) return luaL_error(L, "unknown frontend language");
+    int64_t token = (int64_t)luaL_checkinteger(L, 2);
+    int64_t unit_id = (int64_t)luaL_checkinteger(L, 3);
+    char *out = NULL; size_t olen = 0;
+    hl_js_gen_scope(token, unit_id, &out, &olen);
+    return frontend_push_json(L, out, olen);
+#else
+    return luaL_error(L, "javascript frontend engine not available");
+#endif
+}
+static int l_tool_frontend_close(lua_State *L)
+{
+#ifdef HL_FRONTEND_JS
+    if (frontend_lang_is_js(L, 1)) hl_js_gen_close((int64_t)luaL_checkinteger(L, 2));
+#else
+    (void)luaL_checkstring(L, 1);
+#endif
+    return 0;
+}
+
 static const luaL_Reg tool_funcs[] = {
+    { "frontend_available",          l_tool_frontend_available },
+    { "frontend_open",               l_tool_frontend_open },
+    { "frontend_analyze",            l_tool_frontend_analyze },
+    { "frontend_declaration_semantics", l_tool_frontend_declaration_semantics },
+    { "frontend_scope",              l_tool_frontend_scope },
+    { "frontend_close",              l_tool_frontend_close },
     { "spawn",                       l_tool_spawn },
     { "sha256_file",                 l_tool_sha256_file },
     { "emit_app_registry",           l_emit_app_registry },

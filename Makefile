@@ -1480,9 +1480,43 @@ $(STDLIB_JS_CLI_REGISTRY_C): $(STDLIB_JS_CLI_HDRS) | $(BUILDDIR)
 $(STDLIB_JS_CLI_REGISTRY_O): $(STDLIB_JS_CLI_REGISTRY_C) | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
 
+# TEST-ONLY cli-js registry: the production files PLUS the */tests/* tooling modules (the
+# authority probe). Same array symbol as the production registry, so a test that links THIS
+# object -- NEVER both -- sees the extra module while the shipped registry stays free of it.
+# Only test_js_generation links it (see mk/tests.mk). This is what keeps hull:source:tests:*
+# absent from every shipped binary while remaining reachable to the manager authority test.
+STDLIB_JS_CLI_TEST_ONLY_FILES := $(shell find stdlib/cli/js -name '*.js' -path '*/tests/*' 2>/dev/null)
+STDLIB_JS_CLI_TEST_ONLY_HDRS := $(foreach f,$(STDLIB_JS_CLI_TEST_ONLY_FILES),$(call stdlib_js_cli_hdr,$(f)))
+$(foreach f,$(STDLIB_JS_CLI_TEST_ONLY_FILES),$(eval $(call STDLIB_JS_CLI_RULE,$(f))))
+STDLIB_JS_CLI_TEST_FILES := $(STDLIB_JS_CLI_FILES) $(STDLIB_JS_CLI_TEST_ONLY_FILES)
+
+STDLIB_JS_CLI_TEST_REGISTRY_C := $(BUILDDIR)/stdlib_js_cli_test_registry.c
+STDLIB_JS_CLI_TEST_REGISTRY_O := $(BUILDDIR)/stdlib_js_cli_test_registry.o
+$(STDLIB_JS_CLI_TEST_REGISTRY_C): $(STDLIB_JS_CLI_HDRS) $(STDLIB_JS_CLI_TEST_ONLY_HDRS) | $(BUILDDIR)
+	@echo "/* Auto-generated TEST cli-js tooling registry - do not edit */" > $@
+	@( for hdr in $(STDLIB_JS_CLI_HDRS) $(STDLIB_JS_CLI_TEST_ONLY_HDRS); do echo "#include \"$$(basename $$hdr)\""; done ) | LC_ALL=C sort >> $@
+	@echo "" >> $@
+	@echo "#include \"hull/entry.h\"" >> $@
+	@echo "const HlEntry hl_stdlib_js_cli_entries[] = {" >> $@
+	@( for f in $(STDLIB_JS_CLI_TEST_FILES); do \
+		varname=$$(echo "$$f" | sed 's/[\/.\-]/_/g'); \
+		modname=$$(echo "$$f" | sed 's|^stdlib/cli/js/||; s|\.js$$||; s|/|:|g'); \
+		echo "$$modname	    { \"$$modname\", $${varname}, sizeof($${varname}) },"; \
+	done ) | LC_ALL=C sort | cut -f2- >> $@
+	@echo "    { 0, 0, 0 }" >> $@
+	@echo "};" >> $@
+$(STDLIB_JS_CLI_TEST_REGISTRY_O): $(STDLIB_JS_CLI_TEST_REGISTRY_C) | $(BUILDDIR)
+	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
+
 # The restricted QuickJS tooling runtime (needs QuickJS; lives in the hull binary only).
 FRONTEND_JS_SESSION_OBJ := $(BUILDDIR)/frontend_js_session.o
 $(FRONTEND_JS_SESSION_OBJ): $(SRCDIR)/hull/frontend/js_session.c | $(BUILDDIR)
+	$(CC) $(CFLAGS) $(INCLUDES) -Ivendor/quickjs -c -o $@ $<
+
+# The JS source-frontend generation/session manager (wraps js_session; C-owned lifetime +
+# monotonic tokens). Linked into hull only when QuickJS is linked (NOT a lua-only build).
+FRONTEND_JS_GEN_OBJ := $(BUILDDIR)/frontend_js_generation.o
+$(FRONTEND_JS_GEN_OBJ): $(SRCDIR)/hull/frontend/js_generation.c | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -Ivendor/quickjs -c -o $@ $<
 
 # ── Context doc embedding (xxd) ───────────────────────────────────────
@@ -2536,9 +2570,16 @@ endif
 HULL_LINK_OBJS := $(CAP_OBJS) $(CAP_TOOL_OBJ) $(CAP_TEST_OBJ) $(CMD_OBJS) $(RT_OBJS) $(ALLOC_OBJ) $(ASYNC_OBJ) $(COMPRESS_OBJ) $(MINIZ_OBJ) $(WORKER_DB_OBJ) $(WORKER_WASM_OBJ) $(WORKER_GPU_OBJ) $(MANIFEST_OBJ) $(MODULE_OBJ) $(ASYNC_BACKEND_OBJS) $(NET_BACKEND_OBJS) $(SANDBOX_OBJ) $(SANDBOX_TOOL_OBJ) $(SIG_OBJ) $(RELEASE_OBJ) $(RELEASE_IO_OBJ) $(TOOLS_INSTALL_OBJ) $(PLATFORM_SIG_OBJ) $(EMBEDDED_PLATFORM_SIG_OBJ) $(TEST_RUNNER_OBJ) $(RUNTIME_FACTORY_OBJ) $(STATIC_OBJ) $(MIGRATE_OBJ) $(VFS_OBJ) $(PATH_NORM_OBJ) $(THREAD_AFFINITY_OBJ) $(CACHE_DIR_OBJ) $(FS_UTIL_OBJ) $(BLOB_STORE_OBJ) $(CACHE_REGISTRY_OBJ) $(CACERT_OBJ) $(TLS_CLIENT_OBJ) $(TLS_TRANSPORT_OBJ) $(TLS_TRANSPORT_STUB_OBJ) $(CSP_OBJ) $(SH_SEAL_ARENA_OBJ) $(SBOM_OBJ) $(STDLIB_FEATURE_OBJ) $(APP_CONTEXT_OBJ) $(APP_CONTEXT_RT_OBJ) $(AGENT_LIB_OBJ) $(AGENT_API_OBJ) $(TOOL_OBJ) $(BUILD_ASSET_OBJ) $(COMPILER_OBJ) $(OBJ_EMIT_OBJ) $(LINKER_SYSTEM_OBJ) $(LINKER_LLD_OBJ) $(LINKER_ZIG_OBJ) $(BUNDLED_OBJS_OBJ) $(MAIN_OBJ) $(SERVE_OBJ) $(ENTRY_OBJ) $(APP_EXTRA_OBJS) $(STDLIB_REGISTRY_O) $(STDLIB_RT_REGISTRY_OBJS) $(STDLIB_TOOLCHAIN_REGISTRY_O) $(RUNTIME_TOOLCHAIN_REGISTRY_O) $(WAMR_OBJS) $(VEND_OBJS) $(MBEDTLS_OBJS) $(SQLITE_OBJ) $(LOG_OBJ) $(LOG_LOCK_OBJ) $(SH_ARENA_OBJ) $(SH_JSON_OBJ) $(TWEETNACL_OBJ) $(STB_OBJ) $(PLEDGE_OBJS)
 
 # The JS source-frontend tooling runtime needs QuickJS -> linked into the hull binary only
-# when this build links QuickJS (RUNTIME=js or the default both; NOT a lua-only hull).
+# when this build links QuickJS (RUNTIME=js or the default both; NOT a lua-only hull). The
+# generation manager rides with it, and HL_FRONTEND_JS enables the tool-VM bridge bindings
+# (mod_tool.c stays compilable in a lua-only build; the bindings then report unavailable).
 ifneq ($(RUNTIME),lua)
-  HULL_LINK_OBJS += $(FRONTEND_JS_SESSION_OBJ) $(STDLIB_JS_CLI_REGISTRY_O)
+  HULL_LINK_OBJS += $(FRONTEND_JS_SESSION_OBJ) $(FRONTEND_JS_GEN_OBJ) $(STDLIB_JS_CLI_REGISTRY_O)
+  CFLAGS += -DHL_FRONTEND_JS
+  # Same objects a test binary needs when it links the tool bindings (lua_rt_mod_tool.o's
+  # frontend bridge) or the tool-VM teardown (tool.o's hl_js_gen_shutdown). Empty on a
+  # lua-only build, where those references are #ifdef'd out. Consumed by mk/tests.mk.
+  FRONTEND_JS_LINK_OBJS := $(FRONTEND_JS_SESSION_OBJ) $(FRONTEND_JS_GEN_OBJ) $(STDLIB_JS_CLI_REGISTRY_O)
 endif
 
 $(BUILDDIR)/hull: $(HULL_LINK_OBJS) $(KEEL_LIB) $(TUI_TOOLCHAIN_ARCHIVE) | $(RUNTIME_FEATURE_LIBS)

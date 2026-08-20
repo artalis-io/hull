@@ -280,9 +280,10 @@ corpus` = absent from Hull's application source; deferred. `js.syntax` = malform
 | top-level `await` (module) | **supported** | one fixture uses `await import` |
 | generators / `yield`, async generators | **not-in-corpus → js.unsupported** | none found |
 | private class fields `#x`, static members | **not-in-corpus → js.unsupported** | none found |
-| `for…in`, `do…while`, labeled statements | **not-in-corpus → js.unsupported** | none found |
-| tagged templates | **not-in-corpus → js.unsupported** | none found |
-| optional catch binding `catch {}` | **not-in-corpus → js.unsupported** | none found |
+| `for…in`, **`for await…of`** | **supported** [Slice-2 conformance] | corpus grew to use both (`template.js`, `irc_chat`, `multipart_upload`, several `web/middleware/*`); the corpus is the target, so they are parsed to `ForInStatement` / `ForOfStatement{await:true}` |
+| `do…while`, labeled statements | **not-in-corpus → js.unsupported** | none found |
+| tagged templates | **supported** [Slice-2] | trivially fell out of the member/call tail |
+| optional catch binding `catch {}` | **supported** [Slice-2] | |
 | rest/spread `...` (array/obj literals, params, call args) | **supported** [ratified D4] | absent as formal syntax in source, but idiomatic + spans several grammar contexts; supported structurally in Slice 2 rather than temporary exclusions |
 | `export` re-export / `export *` | **not-in-corpus → js.unsupported** | none found |
 | BigInt / Symbol / Proxy / Reflect literals-or-syntax | **n/a** | not syntax the analyzer must recognize specially |

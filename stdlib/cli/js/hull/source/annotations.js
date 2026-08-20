@@ -1,0 +1,267 @@
+// hull:source:annotations - the generic JSDoc @tag scanner + declaration attachment.
+//
+// Turns each @tag inside a JSDoc block comment (/** ... */) into a structured annotation
+// record and attaches contiguous leading runs of them to the declaration they document.
+// Deliberately WHITELIST-FREE: `name` is whatever follows @, so an app's own @query /
+// @compute / @route is captured with the same fidelity as a standard @param / @returns.
+// Consumers give names meaning; this layer only records them, with exact byte ranges.
+//
+// Annotation record (mirrors the Lua parse layer, docs/js_frontend_slice3_annotations.md 3.3):
+//   { name: "param",             // identifier after @
+//     args: "a, b" | undefined,  // raw text inside a balanced (...) group after the name
+//     text: "x f64" | undefined, // trailing free text after name/(...), cleaned + trimmed
+//     raw:  "@param x f64",      // exact source bytes of the tag (verbatim)
+//     range: { start, stop } }   // half-open 1-based byte range of the tag itself
+//
+// On a jsdoc comment: comment.annotationList = its own tags (array, possibly empty).
+// On a declaration target: node.annotationList (flattened run, top->down) + node.annotations
+// (name -> first). Attachment targets are VariableDeclaration / FunctionDeclaration /
+// ClassDeclaration (and the inner declaration of an export wrapper).
+//
+// NEVER raises. Malformed tag CONTENT is handled by deterministic, metadata-preserving
+// fallbacks (never js.internal). An unexpected internal defect (a recognized declaration
+// target with an invalid range, or an attach exception) emits js.internal through the shared
+// budget and keeps the AST, so `diagnostics empty` guarantees attachment did not internally
+// fail. See docs/js_frontend_slice3_annotations.md 9.1.
+//
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+function isWs(b) { return b === 0x09 || b === 0x0a || b === 0x0b || b === 0x0c || b === 0x0d || b === 0x20; }
+function isNameStart(b) { return (b >= 0x41 && b <= 0x5a) || (b >= 0x61 && b <= 0x7a) || b === 0x5f; }
+
+// 1-based line of a 1-based byte offset (binary search over linemap starts).
+function lineOf(starts, off) {
+    if (off < 1) off = 1;
+    let lo = 0, hi = starts.length - 1;
+    while (lo < hi) { const mid = (lo + hi + 1) >> 1; if (starts[mid] <= off) lo = mid; else hi = mid - 1; }
+    return lo + 1;
+}
+
+// 1-based exclusive CONTENT end of physical line L: linemap's next-line-start minus the trailing
+// line terminator, so U+2028/U+2029 (which linemap recognizes but isWs does not) and CR/CRLF are
+// never treated as content bytes for margin/trailing-whitespace/comment-only processing.
+function lineContentEnd(L, linemap, bytes, n) {
+    const ls = linemap[L - 1];
+    const le = (L < linemap.length ? linemap[L] : n + 1);   // 1-based exclusive, past the terminator
+    if (le <= ls) return le;
+    const last = le - 2;                                     // 0-based index of the span's last byte
+    const b = bytes[last];
+    if (b === 0x0a) { return (last - 1 >= ls - 1 && bytes[last - 1] === 0x0d) ? le - 2 : le - 1; }   // CRLF / LF
+    if (b === 0x0d) { return le - 1; }                      // lone CR
+    if ((b === 0xa8 || b === 0xa9) && last - 2 >= ls - 1 && bytes[last - 1] === 0x80 && bytes[last - 2] === 0xe2) return le - 3;   // U+2028 / U+2029
+    return le;                                               // last line, no terminator
+}
+
+// Decode a [start1, stop1) 1-based byte span to a string (UTF-8, ASCII fast path; an invalid
+// sequence yields U+FFFD, matching the lexer). Ranges are byte offsets, never derived from this.
+function decodeSpan(bytes, start1, stop1) {
+    let s = "";
+    for (let i = start1 - 1; i < stop1 - 1; i++) {
+        const c = bytes[i];
+        if (c < 0x80) { s += String.fromCharCode(c); continue; }
+        let cp, len;
+        if ((c & 0xe0) === 0xc0) { cp = c & 0x1f; len = 2; }
+        else if ((c & 0xf0) === 0xe0) { cp = c & 0x0f; len = 3; }
+        else if ((c & 0xf8) === 0xf0) { cp = c & 0x07; len = 4; }
+        else { s += "\uFFFD"; continue; }
+        let ok = true;
+        for (let k = 1; k < len; k++) { const cc = bytes[i + k]; if (cc === undefined || (cc & 0xc0) !== 0x80) { ok = false; break; } cp = (cp << 6) | (cc & 0x3f); }
+        if (!ok) { s += "\uFFFD"; continue; }
+        s += String.fromCodePoint(cp);
+        i += len - 1;
+    }
+    return s;
+}
+
+// Parse one tag's already-margin-stripped content lines into a record. `raw` is the verbatim
+// source span [start1, stop1); the joined body drives name/args/text. Malformed groups fall
+// back deterministically (docs 3.2): an unmatched ( becomes text, a balanced-but-quote-agnostic
+// ) closes the group early. Returns null only when there is no name (defensive).
+export function parseTag(parts, start1, stop1, bytes) {
+    const raw = decodeSpan(bytes, start1, stop1);
+    const body = parts.join(" ");                          // margin-stripped, single-space joined
+    const m = body.match(/^@([A-Za-z_][A-Za-z0-9_]*)/);
+    if (!m) return null;
+    const name = m[1];
+    let rest = body.slice(m[0].length).replace(/^\s+/, "");
+    let args, text;
+    if (rest.charCodeAt(0) === 0x28) {                     // '('
+        let depth = 0, end = -1;
+        for (let i = 0; i < rest.length; i++) {
+            const ch = rest.charCodeAt(i);
+            if (ch === 0x28) depth++;
+            else if (ch === 0x29) { depth--; if (depth === 0) { end = i; break; } }
+        }
+        if (end < 0) { text = rest; }                     // unmatched ( -> whole remainder is text
+        else { args = rest.slice(1, end); text = rest.slice(end + 1).replace(/^\s+|\s+$/g, ""); }
+    } else {
+        text = rest.replace(/\s+$/, "");
+    }
+    if (text === "") text = undefined;
+    return { name: name, args: args, text: text, raw: raw, range: { start: start1, stop: stop1 } };
+}
+
+// Scan one jsdoc comment's interior into an ordered array of annotation records. A tag opens at
+// a line-leading @ (after optional whitespace + optional single star margin + whitespace) and
+// extends over continuation lines until the next tag or the block end.
+export function scanBlock(comment, bytes, linemap) {
+    const out = [];
+    const n = bytes.length;
+    const intStart = comment.start + 3;                   // after /**
+    const intEnd = comment.stop - 2;                      // before */ (1-based exclusive)
+    if (intEnd <= intStart) return out;
+
+    const firstLine = lineOf(linemap, intStart);
+    const lastLine = lineOf(linemap, intEnd - 1);
+
+    // Per interior line: content start (after margin), content end (trailing ws trimmed), and
+    // whether it opens a tag (line-leading @ + name-start).
+    const lines = [];
+    for (let L = firstLine; L <= lastLine; L++) {
+        let ls = linemap[L - 1];
+        let le = lineContentEnd(L, linemap, bytes, n);       // terminator-stripped (handles U+2028/9, CRLF)
+        if (ls < intStart) ls = intStart;
+        if (le > intEnd) le = intEnd;
+        if (ls >= le) { lines.push({ open: false, at: ls, end: ls }); continue; }
+        let j = ls;
+        while (j < le && isWs(bytes[j - 1])) j++;
+        if (j < le && bytes[j - 1] === 0x2a) j++;         // one star margin
+        while (j < le && isWs(bytes[j - 1])) j++;
+        let end = le;
+        while (end > j && isWs(bytes[end - 2])) end--;
+        const opensTag = j < end && bytes[j - 1] === 0x40 && isNameStart(bytes[j]);   // @ + name-start
+        lines.push({ open: opensTag, at: j, end: end });
+    }
+
+    // Group: a tag = an opening line plus subsequent non-opening (continuation) lines.
+    let k = 0;
+    while (k < lines.length) {
+        if (!lines[k].open) { k++; continue; }
+        const tagStart = lines[k].at;                     // the @
+        const parts = [];
+        let lastEnd = lines[k].end;
+        if (lines[k].end > tagStart) parts.push(decodeSpan(bytes, tagStart, lines[k].end));
+        let m = k + 1;
+        while (m < lines.length && !lines[m].open) {
+            if (lines[m].end > lines[m].at) { parts.push(decodeSpan(bytes, lines[m].at, lines[m].end)); lastEnd = lines[m].end; }
+            m++;
+        }
+        if (lastEnd < tagStart) lastEnd = tagStart;
+        const rec = parseTag(parts, tagStart, lastEnd, bytes);
+        if (rec) out.push(rec);
+        k = m;
+    }
+    return out;
+}
+
+// The 1-based comment covering byte p1, or -1, via binary search over `sorted` (comments sorted
+// by start, non-overlapping). Returns the index for reuse; caller checks p1 < sorted[idx].stop.
+function coveringComment(p1, sorted) {
+    let lo = 0, hi = sorted.length - 1, idx = -1;
+    while (lo <= hi) { const mid = (lo + hi) >> 1; if (sorted[mid].start <= p1) { idx = mid; lo = mid + 1; } else hi = mid - 1; }
+    return (idx >= 0 && p1 < sorted[idx].stop) ? idx : -1;
+}
+
+// Scan every jsdoc comment into comment.annotationList, then attach leading runs to declaration
+// targets. Best-effort + hardened: the FIRST internal defect (a rejected declaration/comment
+// range or an attach exception) emits EXACTLY ONE js.internal via `budget`, keeps the AST, and
+// ABORTS the rest of attachment (a latch + a sentinel throw). Malformed tag content never does.
+export function attach(ast, comments, bytes, linemap, budget, path) {
+    const n = bytes.length;
+    let failed = false;                                       // single-internal latch
+    const ABORT = {};                                         // sentinel: an already-emitted abort
+    function fail(msg, where) {
+        if (!failed) {
+            failed = true;
+            const r = (where && typeof where.start === "number" && typeof where.stop === "number") ? { start: where.start, stop: where.stop } : null;
+            budget.push("error", "js.internal", "annotation attachment: " + msg, r);
+        }
+        throw ABORT;
+    }
+    try {
+        if (!ast || typeof ast !== "object" || !Array.isArray(comments)) return;   // non-target shape: skip
+
+        // 1. scan jsdoc comments into their own annotationList. A broken lexer range is an
+        //    internal defect: abort WITHOUT indexing the rejected comment.
+        for (let i = 0; i < comments.length; i++) {
+            const c = comments[i];
+            if (!c || c.kind !== "jsdoc") continue;
+            if (typeof c.start !== "number" || typeof c.stop !== "number" || c.start < 1 || c.stop < c.start || c.stop > n + 1) fail("jsdoc comment has invalid range", c);
+            c.annotationList = scanBlock(c, bytes, linemap);
+        }
+
+        // 2. comments sorted by start (non-overlapping), for coverage + source-order collection.
+        const sorted = [];
+        for (let i = 0; i < comments.length; i++) {
+            const c = comments[i];
+            if (c && typeof c.start === "number" && typeof c.stop === "number" && c.start >= 1 && c.stop >= c.start && c.stop <= n + 1) sorted.push(c);
+        }
+        sorted.sort(function (a, b) { return a.start - b.start; });
+
+        // A physical line is a COMMENT LINE iff a comment covers it and it has no CODE byte (a
+        // non-whitespace byte OUTSIDE every comment). Coverage is classified BEFORE whitespace, so
+        // a whitespace-only interior line of a spanning block comment (a blank margin line, or a
+        // ` * ` line) still counts: its bytes are inside the comment. A truly empty content line
+        // (only its stripped terminator) is a comment line iff a comment spans the line interval.
+        // The terminator is excluded (U+2028/9, CRLF). An ordinary blank line outside all comments
+        // has no covered byte -> not a comment line -> breaks a run.
+        function isCommentLine(L) {
+            const ls = linemap[L - 1];
+            const ce = lineContentEnd(L, linemap, bytes, n);
+            let hasComment = false;
+            for (let p1 = ls; p1 < ce; p1++) {
+                if (coveringComment(p1, sorted) >= 0) { hasComment = true; continue; }   // covered (ws or not)
+                if (isWs(bytes[p1 - 1])) continue;            // uncovered whitespace -> harmless
+                return false;                                 // uncovered non-whitespace -> code
+            }
+            if (hasComment) return true;
+            return coveringComment(ls, sorted) >= 0;          // empty content line spanned by a block comment
+        }
+
+        // 3. walk the AST; attach the leading comment-only run to each recognized declaration.
+        function attachRun(node, effStart) {
+            const declLine = lineOf(linemap, effStart);
+            let top = declLine;
+            while (top - 1 >= 1 && isCommentLine(top - 1)) top--;   // maximal contiguous comment region above
+            if (top === declLine) return;
+            // Every comment that STARTS in [top, declLine-1] contributes, in source order; ALL
+            // comments on a shared line are collected (fixes same-line comment-group loss).
+            const list = [], byName = {};
+            for (let i = 0; i < sorted.length; i++) {
+                const c = sorted[i];
+                const sl = lineOf(linemap, c.start);
+                if (sl < top) continue;
+                if (sl > declLine - 1) break;                 // sorted by start -> no later comment qualifies
+                const tags = (c.kind === "jsdoc" && Array.isArray(c.annotationList)) ? c.annotationList : [];
+                for (let t = 0; t < tags.length; t++) { const a = tags[t]; list.push(a); if (byName[a.name] === undefined) byName[a.name] = a; }
+            }
+            if (list.length > 0) { node.annotationList = list; node.annotations = byName; }
+        }
+        function isTarget(t) { return t === "VariableDeclaration" || t === "FunctionDeclaration" || t === "ClassDeclaration"; }
+        // Nodes carry FLAT start/stop (1-based byte offsets); this half-open pair IS the range.
+        function badRange(node) {
+            return typeof node.start !== "number" || typeof node.stop !== "number"
+                || node.start < 1 || node.stop < node.start || node.stop > n + 1;
+        }
+        function walk(node, parent) {
+            if (!node || typeof node !== "object") return;
+            const t = node.type;
+            if (isTarget(t)) {
+                if (badRange(node)) fail("declaration target has invalid range", node);   // recognized target must satisfy the invariant
+                const isExportInner = parent && (parent.type === "ExportNamedDeclaration" || parent.type === "ExportDefaultDeclaration")
+                    && parent.declaration === node && typeof parent.start === "number";
+                attachRun(node, isExportInner ? parent.start : node.start);
+            }
+            for (const kk in node) {
+                if (kk === "start" || kk === "stop" || kk === "annotations" || kk === "annotationList") continue;
+                const v = node[kk];
+                if (Array.isArray(v)) { for (let a = 0; a < v.length; a++) walk(v[a], node); }
+                else if (v && typeof v === "object") walk(v, node);
+            }
+        }
+        walk(ast, null);
+    } catch (e) {
+        if (e === ABORT) return;                              // already emitted exactly one js.internal
+        if (!failed) { failed = true; const msg = (e && e.message !== undefined) ? String(e.message) : String(e); budget.push("error", "js.internal", "annotation attachment failed: " + msg, null); }
+    }
+}

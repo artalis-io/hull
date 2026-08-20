@@ -17,8 +17,9 @@ TEST_SRCS := $(shell find $(TESTDIR)/hull -name 'test_*.c')
 ifeq ($(RUNTIME),js)
   TEST_SRCS := $(filter-out %/test_lua.c,$(TEST_SRCS))
 else ifeq ($(RUNTIME),lua)
-  # test_js_session (the JS tooling runtime) needs QuickJS, absent in a lua-only build.
-  TEST_SRCS := $(filter-out %/test_js.c %/test_js_session.c,$(TEST_SRCS))
+  # test_js_session + test_js_lexer + test_js_parser (the JS tooling runtime + frontend) need
+  # QuickJS, absent in a lua-only build.
+  TEST_SRCS := $(filter-out %/test_js.c %/test_js_session.c %/test_js_lexer.c %/test_js_parser.c %/test_js_conformance.c %/test_js_annotations.c %/test_js_scope.c %/test_js_frontend.c %/test_js_generation.c,$(TEST_SRCS))
 endif
 
 # Drop DB-dependent tests in pure-compute builds.
@@ -37,6 +38,20 @@ endif
 # exercises hl_cap_image_* / stb directly and would fail to link.
 ifeq ($(HL_ENABLE_IMAGE),0)
   TEST_SRCS := $(filter-out %/test_image.c,$(TEST_SRCS))
+endif
+
+# Under MSan, drop test_js_conformance. Its oracle calls raw JS_Eval on arbitrary JS
+# snippets (including destructuring) to get a ground-truth verdict, which trips a
+# use-of-uninitialized-value INSIDE vendored quickjs.c's js_parse_destructuring_element --
+# a QuickJS parser-internal quirk (the value is a QuickJS local, never returned to Hull, so
+# it does not escape into Hull code). QuickJS IS MSan-instrumented (see the QJS_CFLAGS block
+# below), so this is a real read in the vendored interpreter, not a shadow gap. The Hull
+# tooling-session path (precompiled bytecode, no runtime parse) stays fully MSan-covered via
+# test_js_session / _frontend / _scope / _annotations. Mirrors the project's UBSan-dropped
+# stance for vendored interpreters (see the MSAN comment below). MSAN is set on the make
+# command line (msan target), so it is defined here during TEST_SRCS filtering.
+ifdef MSAN
+  TEST_SRCS := $(filter-out %/test_js_conformance.c,$(TEST_SRCS))
 endif
 
 # Flatten test paths to build/ binaries: tests/hull/cap/test_body.c → build/test_body
@@ -176,6 +191,46 @@ $(BUILDDIR)/test_lua_source: $(TESTDIR)/hull/source/test_lua_source.c $(LUA_OBJS
 # under tests/hull/frontend/, so it needs an explicit recipe (not the cap/ pattern rule).
 $(BUILDDIR)/test_js_session: $(TESTDIR)/hull/frontend/test_js_session.c $(FRONTEND_JS_SESSION_OBJ) $(STDLIB_JS_CLI_REGISTRY_O) $(QJS_OBJS) | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -Ivendor/quickjs -o $@ $< $(FRONTEND_JS_SESSION_OBJ) $(STDLIB_JS_CLI_REGISTRY_O) $(QJS_OBJS) -lm -lpthread $(LDFLAGS)
+
+# hull.frontend JS lexer (Slice 2): same tooling-session link, drives hull:source:lexer via
+# the embedded hull:source:lextest driver. Explicit recipe (tests/hull/frontend/).
+$(BUILDDIR)/test_js_lexer: $(TESTDIR)/hull/frontend/test_js_lexer.c $(FRONTEND_JS_SESSION_OBJ) $(STDLIB_JS_CLI_REGISTRY_O) $(QJS_OBJS) | $(BUILDDIR)
+	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -Ivendor/quickjs -o $@ $< $(FRONTEND_JS_SESSION_OBJ) $(STDLIB_JS_CLI_REGISTRY_O) $(QJS_OBJS) -lm -lpthread $(LDFLAGS)
+
+# hull.frontend JS parser (Slice 2): same tooling-session link, drives hull:source:parser via
+# the embedded hull:source:parse driver. Explicit recipe (tests/hull/frontend/).
+$(BUILDDIR)/test_js_parser: $(TESTDIR)/hull/frontend/test_js_parser.c $(FRONTEND_JS_SESSION_OBJ) $(STDLIB_JS_CLI_REGISTRY_O) $(QJS_OBJS) | $(BUILDDIR)
+	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -Ivendor/quickjs -o $@ $< $(FRONTEND_JS_SESSION_OBJ) $(STDLIB_JS_CLI_REGISTRY_O) $(QJS_OBJS) -lm -lpthread $(LDFLAGS)
+
+# hull.frontend JS conformance (Slice 2): runs the corpus through the session parser AND a
+# QuickJS compile-only oracle, so it links both the session and QuickJS. Explicit recipe.
+$(BUILDDIR)/test_js_conformance: $(TESTDIR)/hull/frontend/test_js_conformance.c $(FRONTEND_JS_SESSION_OBJ) $(STDLIB_JS_CLI_REGISTRY_O) $(QJS_OBJS) | $(BUILDDIR)
+	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -Ivendor/quickjs -o $@ $< $(FRONTEND_JS_SESSION_OBJ) $(STDLIB_JS_CLI_REGISTRY_O) $(QJS_OBJS) -lm -lpthread $(LDFLAGS)
+
+# hull.frontend JS annotations (Slice 3): drives hull:source:parse and asserts on attached JSDoc
+# annotations. Same tooling-session link. Explicit recipe (tests/hull/frontend/).
+$(BUILDDIR)/test_js_annotations: $(TESTDIR)/hull/frontend/test_js_annotations.c $(FRONTEND_JS_SESSION_OBJ) $(STDLIB_JS_CLI_REGISTRY_O) $(QJS_OBJS) | $(BUILDDIR)
+	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -Ivendor/quickjs -o $@ $< $(FRONTEND_JS_SESSION_OBJ) $(STDLIB_JS_CLI_REGISTRY_O) $(QJS_OBJS) -lm -lpthread $(LDFLAGS)
+
+# hull.frontend JS scope (Slice 4): drives hull:source:resolveScope and asserts on the binding /
+# reference model. Same tooling-session link. Explicit recipe (tests/hull/frontend/).
+$(BUILDDIR)/test_js_scope: $(TESTDIR)/hull/frontend/test_js_scope.c $(FRONTEND_JS_SESSION_OBJ) $(STDLIB_JS_CLI_REGISTRY_O) $(QJS_OBJS) | $(BUILDDIR)
+	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -Ivendor/quickjs -o $@ $< $(FRONTEND_JS_SESSION_OBJ) $(STDLIB_JS_CLI_REGISTRY_O) $(QJS_OBJS) -lm -lpthread $(LDFLAGS)
+
+# hull.frontend JS adapter (Slice 5): drives frontendAnalyze / frontendSemantics / frontendScope
+# and asserts on the normalized facts + semantics + handle lifetime. Explicit recipe.
+$(BUILDDIR)/test_js_frontend: $(TESTDIR)/hull/frontend/test_js_frontend.c $(FRONTEND_JS_SESSION_OBJ) $(STDLIB_JS_CLI_REGISTRY_O) $(QJS_OBJS) | $(BUILDDIR)
+	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -Ivendor/quickjs -o $@ $< $(FRONTEND_JS_SESSION_OBJ) $(STDLIB_JS_CLI_REGISTRY_O) $(QJS_OBJS) -lm -lpthread $(LDFLAGS)
+
+# hull.frontend JS generation manager (Slice 6/7): the C-owned session/token manager; links the
+# manager + the session + registry + QuickJS. The manager SOURCE is compiled directly here with
+# -DHL_JS_GEN_TESTING (not the prebuilt non-testing obj) so the test-only introspection entries
+# (hl_js_gen_live_count / hl_js_gen_probe) are present for the Slice 7 ownership + authority proofs.
+# Links the TEST cli-js registry (STDLIB_JS_CLI_TEST_REGISTRY_O), which includes the tests/-only
+# authority probe module; the production registry (STDLIB_JS_CLI_REGISTRY_O, in the shipped hull)
+# does not carry it.
+$(BUILDDIR)/test_js_generation: $(TESTDIR)/hull/frontend/test_js_generation.c $(SRCDIR)/hull/frontend/js_generation.c $(FRONTEND_JS_SESSION_OBJ) $(STDLIB_JS_CLI_TEST_REGISTRY_O) $(QJS_OBJS) | $(BUILDDIR)
+	$(CC) $(CFLAGS) -DHL_JS_GEN_TESTING $(INCLUDES) -I$(VENDDIR) -Ivendor/quickjs -o $@ $(TESTDIR)/hull/frontend/test_js_generation.c $(SRCDIR)/hull/frontend/js_generation.c $(FRONTEND_JS_SESSION_OBJ) $(STDLIB_JS_CLI_TEST_REGISTRY_O) $(QJS_OBJS) -lm -lpthread $(LDFLAGS)
 
 # Read-only shared-heap C-API test: build-time AOT fixture. Generate an .aot from
 # the embedded .wasm via the Hull-built wamrc when present (arch + OS correct);
@@ -365,10 +420,10 @@ $(BUILDDIR)/test_js: $(TESTDIR)/hull/runtime/js/test_js.c $(TEST_COMMON_DEPS) $(
 		$(KEEL_LIB) $(MBEDTLS_OBJS) $(SQLITE_OBJ) $(LOG_OBJ) $(LOG_LOCK_OBJ) $(SH_ARENA_OBJ) $(SH_JSON_OBJ) $(TWEETNACL_OBJ) $(STB_OBJ) $(WGPU_LIB) $(WGPU_FRAMEWORKS) -lm -lpthread
 
 # Lua runtime test — needs Lua + Lua runtime objects + manifest (Lua-only) + cap_tool + build_assets
-$(BUILDDIR)/test_lua: $(TESTDIR)/hull/runtime/lua/test_lua.c $(TEST_COMMON_DEPS) $(CAP_TOOL_OBJ) $(CAP_TEST_LUA_OBJ) $(BUILD_ASSET_OBJ) $(BUILDDIR)/cmd_doctor.o $(BUILDDIR)/cmd_dev.o $(BUILDDIR)/compiler.o $(OBJ_EMIT_OBJ) $(LINKER_SYSTEM_OBJ) $(LINKER_LLD_OBJ) $(LINKER_ZIG_OBJ) $(BUNDLED_OBJS_OBJ) $(BUILDDIR)/tool.o $(BUILDDIR)/tool_orchestration.o $(BUILDDIR)/sandbox.o $(BUILDDIR)/sandbox_tool.o $(AGENT_LIB_OBJ) $(AGENT_API_OBJ) $(STDLIB_FEATURE_OBJ) $(APP_CONTEXT_OBJ) $(APP_CONTEXT_RT_OBJ) $(MIGRATE_OBJ) $(MANIFEST_OBJ) $(MODULE_OBJ) $(APP_ENTRIES_DEFAULT_OBJ) $(STDLIB_REGISTRY_O) $(STDLIB_RT_REGISTRY_OBJS) $(STDLIB_TOOLCHAIN_REGISTRY_O) $(VFS_OBJ) $(PATH_NORM_OBJ) $(THREAD_AFFINITY_OBJ) $(CACHE_DIR_OBJ) $(FS_UTIL_OBJ) $(BLOB_STORE_OBJ) $(CACHE_REGISTRY_OBJ) $(RUNTIME_CACHE_COMMON_OBJ) $(LUA_RT_OBJS) $(JS_RT_OBJS) $(LUA_OBJS) $(QJS_OBJS) $(RUNTIME_FACTORY_OBJ) $(RUNTIME_FACTORY_NONE_OBJ) $(STATIC_OBJ) $(TEST_RUNNER_OBJ) $(TOOLS_INSTALL_OBJ) $(PLATFORM_SIG_OBJ) $(EMBEDDED_PLATFORM_SIG_OBJ) $(RELEASE_OBJ) $(RELEASE_IO_OBJ) $(CACERT_OBJ) $(PLEDGE_OBJS) | $(BUILDDIR)
+$(BUILDDIR)/test_lua: $(TESTDIR)/hull/runtime/lua/test_lua.c $(TEST_COMMON_DEPS) $(CAP_TOOL_OBJ) $(CAP_TEST_LUA_OBJ) $(BUILD_ASSET_OBJ) $(BUILDDIR)/cmd_doctor.o $(BUILDDIR)/cmd_dev.o $(BUILDDIR)/compiler.o $(OBJ_EMIT_OBJ) $(LINKER_SYSTEM_OBJ) $(LINKER_LLD_OBJ) $(LINKER_ZIG_OBJ) $(BUNDLED_OBJS_OBJ) $(BUILDDIR)/tool.o $(BUILDDIR)/tool_orchestration.o $(BUILDDIR)/sandbox.o $(BUILDDIR)/sandbox_tool.o $(AGENT_LIB_OBJ) $(AGENT_API_OBJ) $(STDLIB_FEATURE_OBJ) $(APP_CONTEXT_OBJ) $(APP_CONTEXT_RT_OBJ) $(MIGRATE_OBJ) $(MANIFEST_OBJ) $(MODULE_OBJ) $(APP_ENTRIES_DEFAULT_OBJ) $(STDLIB_REGISTRY_O) $(STDLIB_RT_REGISTRY_OBJS) $(STDLIB_TOOLCHAIN_REGISTRY_O) $(VFS_OBJ) $(PATH_NORM_OBJ) $(THREAD_AFFINITY_OBJ) $(CACHE_DIR_OBJ) $(FS_UTIL_OBJ) $(BLOB_STORE_OBJ) $(CACHE_REGISTRY_OBJ) $(RUNTIME_CACHE_COMMON_OBJ) $(LUA_RT_OBJS) $(JS_RT_OBJS) $(LUA_OBJS) $(QJS_OBJS) $(RUNTIME_FACTORY_OBJ) $(RUNTIME_FACTORY_NONE_OBJ) $(STATIC_OBJ) $(TEST_RUNNER_OBJ) $(TOOLS_INSTALL_OBJ) $(PLATFORM_SIG_OBJ) $(EMBEDDED_PLATFORM_SIG_OBJ) $(RELEASE_OBJ) $(RELEASE_IO_OBJ) $(CACERT_OBJ) $(FRONTEND_JS_LINK_OBJS) $(PLEDGE_OBJS) | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< \
 		$(TEST_CAP_OBJS) $(CAP_TOOL_OBJ) $(CAP_TEST_LUA_OBJ) $(BUILD_ASSET_OBJ) $(BUILDDIR)/cmd_doctor.o $(BUILDDIR)/cmd_dev.o $(BUILDDIR)/compiler.o $(OBJ_EMIT_OBJ) $(LINKER_SYSTEM_OBJ) $(LINKER_LLD_OBJ) $(LINKER_ZIG_OBJ) $(BUNDLED_OBJS_OBJ) $(BUILDDIR)/tool.o $(BUILDDIR)/tool_orchestration.o $(BUILDDIR)/sandbox.o $(BUILDDIR)/sandbox_tool.o $(BUILDDIR)/cacert.o $(TLS_CLIENT_OBJ) $(TOOLS_INSTALL_OBJ) $(PLATFORM_SIG_OBJ) $(EMBEDDED_PLATFORM_SIG_OBJ) $(RELEASE_OBJ) $(RELEASE_IO_OBJ) $(TLS_TRANSPORT_OBJ) $(TLS_TRANSPORT_STUB_OBJ) $(AGENT_LIB_OBJ) $(AGENT_API_OBJ) $(STDLIB_FEATURE_OBJ) $(APP_CONTEXT_OBJ) $(APP_CONTEXT_RT_OBJ) $(MIGRATE_OBJ) $(LUA_RT_OBJS) $(JS_RT_OBJS) $(MANIFEST_OBJ) $(MODULE_OBJ) $(APP_ENTRIES_DEFAULT_OBJ) $(STDLIB_REGISTRY_O) $(STDLIB_RT_REGISTRY_OBJS) $(STDLIB_TOOLCHAIN_REGISTRY_O) $(VFS_OBJ) $(PATH_NORM_OBJ) $(THREAD_AFFINITY_OBJ) $(CACHE_DIR_OBJ) $(FS_UTIL_OBJ) $(BLOB_STORE_OBJ) $(CACHE_REGISTRY_OBJ) $(RUNTIME_CACHE_COMMON_OBJ) $(RUNTIME_FACTORY_OBJ) $(RUNTIME_FACTORY_NONE_OBJ) $(STATIC_OBJ) $(TEST_RUNNER_OBJ) $(ALLOC_OBJ) $(ASYNC_OBJ) $(ASYNC_BACKEND_OBJS) $(NET_BACKEND_OBJS) $(COMPRESS_OBJ) $(MINIZ_OBJ) $(WORKER_DB_OBJ) $(WORKER_WASM_OBJ) $(WORKER_GPU_OBJ) $(WAMR_OBJS) $(LUA_OBJS) $(QJS_OBJS) \
-		$(KEEL_LIB) $(MBEDTLS_OBJS) $(SQLITE_OBJ) $(LOG_OBJ) $(LOG_LOCK_OBJ) $(SH_ARENA_OBJ) $(SH_JSON_OBJ) $(TWEETNACL_OBJ) $(STB_OBJ) $(WGPU_LIB) $(WGPU_FRAMEWORKS) $(PLEDGE_OBJS) -lm -lpthread
+		$(KEEL_LIB) $(MBEDTLS_OBJS) $(SQLITE_OBJ) $(LOG_OBJ) $(LOG_LOCK_OBJ) $(SH_ARENA_OBJ) $(SH_JSON_OBJ) $(TWEETNACL_OBJ) $(STB_OBJ) $(WGPU_LIB) $(WGPU_FRAMEWORKS) $(FRONTEND_JS_LINK_OBJS) $(PLEDGE_OBJS) -lm -lpthread
 
 # Tool hardening test — cap/tool.c compiled without runtime flags (self-contained C functions)
 CAP_TOOL_NONE_OBJ := $(BUILDDIR)/cap_tool_none.o
@@ -391,11 +446,11 @@ $(BUILDDIR)/test_compiler: $(TESTDIR)/hull/compiler/test_compiler.c $(COMPILER_O
 		$(BUILDDIR)/cap_audit.o $(SH_JSON_OBJ) $(SH_ARENA_OBJ) -lm
 
 # Command dispatcher test — needs full command set (symbol resolution for command table)
-$(BUILDDIR)/test_dispatch: $(TESTDIR)/hull/commands/test_dispatch.c $(CMD_OBJS) $(SERVE_OBJ) $(CAP_TOOL_OBJ) $(CAP_TEST_OBJ) $(TOOL_OBJ) $(SANDBOX_OBJ) $(SANDBOX_TOOL_OBJ) $(SIG_OBJ) $(RELEASE_OBJ) $(RELEASE_IO_OBJ) $(TOOLS_INSTALL_OBJ) $(PLATFORM_SIG_OBJ) $(EMBEDDED_PLATFORM_SIG_OBJ) $(TEST_RUNNER_OBJ) $(RUNTIME_FACTORY_OBJ) $(RUNTIME_FACTORY_NONE_OBJ) $(STATIC_OBJ) $(MIGRATE_OBJ) $(VFS_OBJ) $(PATH_NORM_OBJ) $(THREAD_AFFINITY_OBJ) $(CACHE_DIR_OBJ) $(FS_UTIL_OBJ) $(BLOB_STORE_OBJ) $(CACHE_REGISTRY_OBJ) $(CACERT_OBJ) $(TLS_CLIENT_OBJ) $(TLS_TRANSPORT_OBJ) $(TLS_TRANSPORT_STUB_OBJ) $(CSP_OBJ) $(SBOM_OBJ) $(STDLIB_FEATURE_OBJ) $(APP_CONTEXT_OBJ) $(APP_CONTEXT_RT_OBJ) $(AGENT_LIB_OBJ) $(AGENT_API_OBJ) $(TEST_COMMON_DEPS) $(RT_OBJS) $(VEND_OBJS) $(MBEDTLS_OBJS) $(MANIFEST_OBJ) $(MODULE_OBJ) $(BUILD_ASSET_OBJ) $(COMPILER_OBJ) $(OBJ_EMIT_OBJ) $(LINKER_SYSTEM_OBJ) $(LINKER_LLD_OBJ) $(LINKER_ZIG_OBJ) $(BUNDLED_OBJS_OBJ) $(APP_ENTRIES_DEFAULT_OBJ) $(STDLIB_REGISTRY_O) $(STDLIB_RT_REGISTRY_OBJS) $(STDLIB_TOOLCHAIN_REGISTRY_O) $(PLEDGE_OBJS) | $(BUILDDIR)
+$(BUILDDIR)/test_dispatch: $(TESTDIR)/hull/commands/test_dispatch.c $(CMD_OBJS) $(SERVE_OBJ) $(CAP_TOOL_OBJ) $(CAP_TEST_OBJ) $(TOOL_OBJ) $(SANDBOX_OBJ) $(SANDBOX_TOOL_OBJ) $(SIG_OBJ) $(RELEASE_OBJ) $(RELEASE_IO_OBJ) $(TOOLS_INSTALL_OBJ) $(PLATFORM_SIG_OBJ) $(EMBEDDED_PLATFORM_SIG_OBJ) $(TEST_RUNNER_OBJ) $(RUNTIME_FACTORY_OBJ) $(RUNTIME_FACTORY_NONE_OBJ) $(STATIC_OBJ) $(MIGRATE_OBJ) $(VFS_OBJ) $(PATH_NORM_OBJ) $(THREAD_AFFINITY_OBJ) $(CACHE_DIR_OBJ) $(FS_UTIL_OBJ) $(BLOB_STORE_OBJ) $(CACHE_REGISTRY_OBJ) $(CACERT_OBJ) $(TLS_CLIENT_OBJ) $(TLS_TRANSPORT_OBJ) $(TLS_TRANSPORT_STUB_OBJ) $(CSP_OBJ) $(SBOM_OBJ) $(STDLIB_FEATURE_OBJ) $(APP_CONTEXT_OBJ) $(APP_CONTEXT_RT_OBJ) $(AGENT_LIB_OBJ) $(AGENT_API_OBJ) $(TEST_COMMON_DEPS) $(RT_OBJS) $(VEND_OBJS) $(MBEDTLS_OBJS) $(MANIFEST_OBJ) $(MODULE_OBJ) $(BUILD_ASSET_OBJ) $(COMPILER_OBJ) $(OBJ_EMIT_OBJ) $(LINKER_SYSTEM_OBJ) $(LINKER_LLD_OBJ) $(LINKER_ZIG_OBJ) $(BUNDLED_OBJS_OBJ) $(APP_ENTRIES_DEFAULT_OBJ) $(STDLIB_REGISTRY_O) $(STDLIB_RT_REGISTRY_OBJS) $(STDLIB_TOOLCHAIN_REGISTRY_O) $(FRONTEND_JS_LINK_OBJS) $(PLEDGE_OBJS) | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< \
 		$(CMD_OBJS) $(SERVE_OBJ) $(CAP_TOOL_OBJ) $(CAP_TEST_OBJ) $(TOOL_OBJ) $(SANDBOX_OBJ) $(SANDBOX_TOOL_OBJ) $(SIG_OBJ) $(RELEASE_OBJ) $(RELEASE_IO_OBJ) $(TOOLS_INSTALL_OBJ) $(PLATFORM_SIG_OBJ) $(EMBEDDED_PLATFORM_SIG_OBJ) $(TEST_RUNNER_OBJ) $(RUNTIME_FACTORY_OBJ) $(RUNTIME_FACTORY_NONE_OBJ) $(STATIC_OBJ) $(MIGRATE_OBJ) $(VFS_OBJ) $(PATH_NORM_OBJ) $(THREAD_AFFINITY_OBJ) $(CACHE_DIR_OBJ) $(FS_UTIL_OBJ) $(BLOB_STORE_OBJ) $(CACHE_REGISTRY_OBJ) $(CACERT_OBJ) $(TLS_CLIENT_OBJ) $(TLS_TRANSPORT_OBJ) $(TLS_TRANSPORT_STUB_OBJ) $(CSP_OBJ) $(SBOM_OBJ) $(STDLIB_FEATURE_OBJ) $(APP_CONTEXT_OBJ) $(APP_CONTEXT_RT_OBJ) $(AGENT_LIB_OBJ) $(AGENT_API_OBJ) \
 		$(TEST_CAP_OBJS) $(RT_OBJS) $(MANIFEST_OBJ) $(MODULE_OBJ) $(BUILD_ASSET_OBJ) $(COMPILER_OBJ) $(OBJ_EMIT_OBJ) $(LINKER_SYSTEM_OBJ) $(LINKER_LLD_OBJ) $(LINKER_ZIG_OBJ) $(BUNDLED_OBJS_OBJ) $(APP_ENTRIES_DEFAULT_OBJ) $(STDLIB_REGISTRY_O) $(STDLIB_RT_REGISTRY_OBJS) $(STDLIB_TOOLCHAIN_REGISTRY_O) $(ALLOC_OBJ) $(ASYNC_OBJ) $(ASYNC_BACKEND_OBJS) $(NET_BACKEND_OBJS) $(COMPRESS_OBJ) $(MINIZ_OBJ) $(WORKER_DB_OBJ) $(WORKER_WASM_OBJ) $(WORKER_GPU_OBJ) $(WAMR_OBJS) $(VEND_OBJS) \
-		$(KEEL_LIB) $(MBEDTLS_OBJS) $(SQLITE_OBJ) $(LOG_OBJ) $(LOG_LOCK_OBJ) $(SH_ARENA_OBJ) $(SH_JSON_OBJ) $(TWEETNACL_OBJ) $(STB_OBJ) $(PLEDGE_OBJS) $(WGPU_LIB) $(WGPU_FRAMEWORKS) -lm -lpthread
+		$(KEEL_LIB) $(MBEDTLS_OBJS) $(SQLITE_OBJ) $(LOG_OBJ) $(LOG_LOCK_OBJ) $(SH_ARENA_OBJ) $(SH_JSON_OBJ) $(TWEETNACL_OBJ) $(STB_OBJ) $(FRONTEND_JS_LINK_OBJS) $(PLEDGE_OBJS) $(WGPU_LIB) $(WGPU_FRAMEWORKS) -lm -lpthread
 
 # Signature verification test — needs crypto + app_entries_default + vfs.
 # Override HL_PLATFORM_PUBKEY_HEX to the all-zeros placeholder for this
@@ -933,7 +988,23 @@ e2e-analyze: $(BUILDDIR)/hull
 e2e-project-discovery:
 	rm -f $(BUILDDIR)/hull $(BUILDDIR)/cmd_agent.o
 	$(MAKE) $(BUILDDIR)/hull
-	sh tests/e2e_project_discovery.sh
+	HULL_E2E_EXPECT_JS=1 sh tests/e2e_project_discovery.sh
+
+.PHONY: e2e-project-discovery-lua
+# Slice 7 amendment 4: the JS-less side of the SAME lifecycle, PINNED so it can never silently
+# run the analyzable branch. A clean RUNTIME=lua build drops QuickJS + the JS frontend
+# (HL_FRONTEND_JS unset), so the JS frontend is honestly unavailable. This recipe does its own
+# clean rebuild into an isolated binary (guards the #365 stale-build failure class) and asserts
+# HULL_E2E_EXPECT_JS=0 (a mismatch is a hard fail). Runs as its own CI job (it clobbers build/).
+e2e-project-discovery-lua:
+	$(MAKE) clean
+	$(MAKE) RUNTIME=lua $(BUILDDIR)/hull
+	cp $(BUILDDIR)/hull $(BUILDDIR)/hull-lua-only
+	@echo "assert: the lua-only binary carries ZERO QuickJS / JS-frontend symbols"
+	@if nm $(BUILDDIR)/hull-lua-only 2>/dev/null | grep -E 'hl_js_gen_|JS_NewRuntime|JS_NewContext|JS_Eval'; then \
+		echo "FAIL: JS_* / hl_js_gen_ symbols present in the lua-only hull"; exit 1; \
+	else echo "ok: no hl_js_gen_ / QuickJS symbols"; fi
+	HULL=$(BUILDDIR)/hull-lua-only HULL_E2E_EXPECT_JS=0 sh tests/e2e_project_discovery.sh
 
 # PostgreSQL backend end-to-end (needs Docker; builds its own POSTGRES hull).
 e2e-postgres:

@@ -1,0 +1,198 @@
+/*
+ * test_js_generation.c - Slice 6: the C-owned JS frontend generation/session manager.
+ * Proves monotonic tokens, operation-specific stale shapes, the old-token/new-session ABA case,
+ * and shutdown-preserves-next_token. See docs/js_frontend_slice6_dispatcher.md.
+ *
+ * SPDX-License-Identifier: AGPL-3.0-or-later
+ */
+#include "utest.h"
+#include "hull/frontend/js_generation.h"
+
+#include <string.h>
+#include <stdlib.h>
+#include <inttypes.h>
+
+static int has(const char *hay, const char *needle) { return hay && strstr(hay, needle) != NULL; }
+static char *an(int64_t t, const char *src) { char *o = NULL; size_t l = 0; hl_js_gen_analyze(t, (const uint8_t *)src, strlen(src), "a.js", &o, &l); return o; }
+static char *sem(int64_t t, int64_t d) { char *o = NULL; size_t l = 0; hl_js_gen_declaration_semantics(t, d, &o, &l); return o; }
+static char *scp(int64_t t, int64_t u) { char *o = NULL; size_t l = 0; hl_js_gen_scope(t, u, &o, &l); return o; }
+
+UTEST(js_generation, available) { EXPECT_TRUE(hl_js_gen_available()); }
+
+/* Open issues a positive token; analyze/semantics/scope on it work; close destroys it. */
+UTEST(js_generation, open_analyze_close)
+{
+    int64_t t = hl_js_gen_open();
+    ASSERT_TRUE(t > 0);
+    char *a = an(t, "const q = bar();");
+    EXPECT_TRUE(has(a, "\"status\":\"analyzed\""));
+    EXPECT_TRUE(has(a, "\"name\":\"q\""));
+    free(a);
+    char *s = sem(t, 1);
+    EXPECT_TRUE(has(s, "\"form\":\"value\""));
+    free(s);
+    char *sc = scp(t, 1);
+    EXPECT_TRUE(has(sc, "\"ok\":true"));
+    free(sc);
+    hl_js_gen_close(t);
+}
+
+/* Tokens are strictly monotonic across open/close. */
+UTEST(js_generation, monotonic_tokens)
+{
+    int64_t a = hl_js_gen_open(); int64_t b = hl_js_gen_open();
+    EXPECT_TRUE(b > a);
+    hl_js_gen_close(a);
+    int64_t c = hl_js_gen_open();
+    EXPECT_TRUE(c > b);                 /* the closed token a is NOT reissued */
+    hl_js_gen_close(b);
+    hl_js_gen_close(c);
+}
+
+/* A stale/unknown/<=0 token yields the OPERATION-SPECIFIC stale shape, never a crash. */
+UTEST(js_generation, stale_shapes)
+{
+    char *a = an(999999, "const x = 1;");
+    EXPECT_TRUE(has(a, "\"status\":\"error\"") && has(a, "\"unit_id\":-1") && has(a, "stale frontend session"));
+    free(a);
+    char *s = sem(999999, 1);
+    EXPECT_TRUE(has(s, "\"error\":{") && has(s, "stale frontend session"));
+    EXPECT_FALSE(has(s, "\"form\":"));
+    free(s);
+    char *sc = scp(999999, 1);
+    EXPECT_TRUE(has(sc, "\"ok\":false") && has(sc, "\"error\":{"));
+    free(sc);
+    char *z = an(0, "const x = 1;");    /* token 0 always invalid */
+    EXPECT_TRUE(has(z, "stale frontend session"));
+    free(z);
+    char *neg = sem(-5, 1);
+    EXPECT_TRUE(has(neg, "stale frontend session"));
+    free(neg);
+}
+
+/* The old-token/new-session ABA case: session A issues decl_id 1; A closed; session B reuses the
+ * (session-relative) decl_id 1; the OLD token + 1 is rejected as stale, the LIVE token resolves. */
+UTEST(js_generation, aba_old_token_rejected)
+{
+    int64_t A = hl_js_gen_open();
+    ASSERT_TRUE(A > 0);
+    char *a = an(A, "const z = 1;"); free(a);       /* A: decl_id 1 */
+    hl_js_gen_close(A);
+    int64_t B = hl_js_gen_open();
+    ASSERT_TRUE(B > A);                              /* B strictly higher, may reuse A's heap slot */
+    char *b = an(B, "const w = 2;"); free(b);        /* B: decl_id 1 (session-relative) */
+    char *staleA = sem(A, 1);                        /* OLD token + reused decl_id -> STALE */
+    EXPECT_TRUE(has(staleA, "stale frontend session"));
+    EXPECT_FALSE(has(staleA, "\"form\":"));
+    free(staleA);
+    char *liveB = sem(B, 1);                         /* LIVE token -> resolves */
+    EXPECT_TRUE(has(liveB, "\"form\":\"value\""));
+    free(liveB);
+    hl_js_gen_close(B);
+}
+
+/* Shutdown destroys live sessions but MUST NOT reset next_token (else ABA within the process). */
+UTEST(js_generation, shutdown_preserves_next_token)
+{
+    int64_t a = hl_js_gen_open();       /* intentionally NOT closed - shutdown must reap it */
+    ASSERT_TRUE(a > 0);
+    hl_js_gen_shutdown();
+    int64_t b = hl_js_gen_open();
+    EXPECT_TRUE(b > a);                 /* counter preserved across shutdown */
+    hl_js_gen_close(b);
+}
+
+/* The concurrent-generation cap fails closed. */
+UTEST(js_generation, concurrency_cap)
+{
+    int64_t held[16]; int n = 0;
+    for (int i = 0; i < 16; i++) { int64_t t = hl_js_gen_open(); if (t > 0) held[n++] = t; else break; }
+    EXPECT_TRUE(n >= 1 && n <= 8);      /* capped at HL_JS_GEN_MAX (8) */
+    int64_t over = hl_js_gen_open();
+    EXPECT_TRUE(over == 0);             /* one past the cap fails closed */
+    for (int i = 0; i < n; i++) hl_js_gen_close(held[i]);
+}
+
+#ifdef HL_JS_GEN_TESTING
+/* Slice 7 amendment 2, proof 1: a normal open -> analyze -> close leaves zero net sessions. */
+UTEST(js_generation, default_analysis_leaves_zero_sessions)
+{
+    int base = hl_js_gen_live_count();
+    int64_t t = hl_js_gen_open();
+    ASSERT_TRUE(t > 0);
+    EXPECT_EQ(hl_js_gen_live_count(), base + 1);
+    char *o = an(t, "export const x = 1;");   /* default (metadata-only) analysis */
+    free(o);
+    hl_js_gen_close(t);
+    EXPECT_EQ(hl_js_gen_live_count(), base);   /* the session is gone; no leak */
+}
+
+/* Slice 7 amendment 2, proofs 2 + 3: shutdown defensively reaps a retained-but-unclosed
+ * session (live_count -> 0) AND does not reset next_token (a later open is strictly greater). */
+UTEST(js_generation, shutdown_reaps_leaked_session_and_preserves_token)
+{
+    int64_t a = hl_js_gen_open();              /* intentionally leaked (no close) */
+    ASSERT_TRUE(a > 0);
+    EXPECT_TRUE(hl_js_gen_live_count() >= 1);
+    hl_js_gen_shutdown();                       /* defensive destroy of all live sessions */
+    EXPECT_EQ(hl_js_gen_live_count(), 0);
+    int64_t b = hl_js_gen_open();
+    EXPECT_TRUE(b > a);                          /* monotonic counter preserved across shutdown */
+    hl_js_gen_close(b);
+}
+
+/* Slice 7 amendment 1 (C3b): the tooling runtime has minimal authority, measured THROUGH a
+ * real manager session. No eval / Function / capability global leaks; a stale token still fails
+ * closed, never crashes. */
+UTEST(js_generation, authority_probe_minimal)
+{
+    int64_t t = hl_js_gen_open();
+    ASSERT_TRUE(t > 0);
+    char *o = NULL; size_t l = 0;
+    int rc = hl_js_gen_probe(t, &o, &l);
+    ASSERT_EQ(rc, 0);
+    ASSERT_TRUE(o != NULL);
+    EXPECT_TRUE(has(o, "\"forbidden_present\":[]"));     /* no eval/Function/db/fs/http/... leaked */
+    EXPECT_TRUE(has(o, "\"global_is_object\":true"));    /* probe ran against the real global */
+    free(o);
+    hl_js_gen_close(t);
+
+    char *s = NULL; size_t sl = 0;
+    int rc2 = hl_js_gen_probe(t, &s, &sl);               /* t is now closed */
+    EXPECT_EQ(rc2, -1);
+    EXPECT_TRUE(has(s, "javascript.internal"));           /* stale, fail-closed */
+    free(s);
+}
+
+/* Slice 7 amendment 1 (C3b, second claim): tooling code cannot import an application module.
+ * The tooling loader must REJECT a fake application-module name with its definitive
+ * "tooling entry module not found" -- and the test fails if that name ever RESOLVES (a resolved
+ * module yields a DIFFERENT message, so the substring check would not match). The real probe
+ * module loading proves the mechanism is not simply always-failing. */
+UTEST(js_generation, tooling_loader_rejects_application_module)
+{
+    int64_t t = hl_js_gen_open();
+    ASSERT_TRUE(t > 0);
+
+    /* A fake application-module name the tooling registry does not carry. */
+    char *o = NULL; size_t l = 0;
+    int rc = hl_js_gen_probe_import(t, "hull:app:__fake_application_module__", &o, &l);
+    EXPECT_NE(rc, 0);                                    /* NOT resolved */
+    ASSERT_TRUE(o != NULL);
+    /* Definitive not-found. A resolved-but-wrong module would say "did not register
+     * __hull_frontend" or "method is not a function" instead -- this asserts the loader
+     * refused to resolve it at all. */
+    EXPECT_TRUE(has(o, "tooling entry module not found"));
+    free(o);
+
+    /* Sanity: the real (test-registry-only) probe module DOES load through the same path. */
+    char *o2 = NULL; size_t l2 = 0;
+    int rc2 = hl_js_gen_probe_import(t, "hull:source:tests:frontend_probe", &o2, &l2);
+    EXPECT_EQ(rc2, 0);
+    EXPECT_TRUE(has(o2, "\"forbidden_present\":[]"));
+    free(o2);
+    hl_js_gen_close(t);
+}
+#endif /* HL_JS_GEN_TESTING */
+
+UTEST_MAIN()
