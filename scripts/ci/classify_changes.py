@@ -304,8 +304,11 @@ def parse_nul_paths(raw):
         if p.startswith("/"):
             return None, "absolute path: %r" % p
         comps = p.split("/")
-        if "." in comps or ".." in comps:
-            return None, "dot/dotdot path component: %r" % p
+        # Reject any noncanonical component: empty (`docs//x.md`, a trailing
+        # `docs/`), `.`, or `..`. `git diff` emits canonical repo-relative paths,
+        # so anything else is a malformed/untrusted stream -> fail closed.
+        if "" in comps or "." in comps or ".." in comps:
+            return None, "noncanonical path component: %r" % p
         paths.append(p)
     return paths, None
 

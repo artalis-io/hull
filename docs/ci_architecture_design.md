@@ -1045,8 +1045,8 @@ self-trust caveat (§8) — governance stays with CODEOWNERS/branch protection.
   source/**`, `tests/fixtures/{test262,lua54-tests}/**`, the discovery E2E, the
   js/lua fuzz seeds) take the focused route. The NUL stream is byte-validated
   (missing terminal NUL / empty interior / absolute / `.`/`..` component ->
-  full_all; spaces/tabs/newlines inside a path are valid), with pure-Python
-  classify() fixtures AND subprocess/CLI tests of the byte decoder. 65/65
+  full_all; empty component (docs//x, trailing docs/) also rejected; spaces/tabs/newlines inside a path are valid), with pure-Python
+  classify() fixtures AND subprocess/CLI tests of the byte decoder. 67/67
   fixtures green. Stops for review before Slice 2.
 - **Slice 2:** always-triggered orchestrator + `ci-success` gate (`if: always()`,
   static `needs` all jobs, repo-owned result-validation script) + `main`/

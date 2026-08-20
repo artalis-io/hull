@@ -271,6 +271,10 @@ check_cli("cli: dotdot component -> full_all", b"src/../secret.c\x00",
           want_true=["full_all"])
 check_cli("cli: leading ./ component -> full_all", b"./src/a.c\x00",
           want_true=["full_all"])
+check_cli("cli: empty interior component (docs//x) -> full_all", b"docs//x.md\x00",
+          want_true=["full_all"], want_false=["docs_only"])
+check_cli("cli: trailing slash (docs/) -> full_all", b"docs/\x00",
+          want_true=["full_all"], want_false=["docs_only"])
 
 # spaces / tabs / newlines inside a path are VALID (why -z is used) - accepted,
 # NOT split, NOT rejected. A newline-bearing single path stays one path.
