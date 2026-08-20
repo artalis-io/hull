@@ -146,8 +146,12 @@ function parseInternal(bytes, opts, inject) {
     function unsupported(message, tok) { const t = tok || cur; diag("error", "js.unsupported", message, t.start, t.stop); }
 
     function mk(type, start) { return { type: type, start: start, stop: start }; }
-    function fin(node) { node.stop = prev ? prev.stop : node.start; return node; }
-    function errNode(start) { const e = mk("Error", start); e.stop = cur.start; return e; }
+    // Finalize a node's half-open range. stop = the last consumed token's stop, but NEVER before
+    // the node's own start: on an error-recovery path that consumed nothing after the node began
+    // (prev is still the token before `start`), clamp to a zero-width span [start, start] rather
+    // than emit an inverted range. Keeps the AST range invariant start <= stop <= n+1.
+    function fin(node) { const s = prev ? prev.stop : node.start; node.stop = s < node.start ? node.start : s; return node; }
+    function errNode(start) { const e = mk("Error", start); e.stop = cur.start < start ? start : cur.start; return e; }
 
     // Consume a specific punctuator (operator/operand goal after). Returns true if consumed.
     function eatP(v, regexAllowedAfter) { if (isP(v)) { advance(regexAllowedAfter); return true; } return false; }
@@ -791,7 +795,7 @@ function parseInternal(bytes, opts, inject) {
         if (isP("=>") && !nl()) return finishArrow(id.start, [id], false);
         return id;
     }
-    function fin2n(type, start) { const n = mk(type, start); n.stop = prev.stop; return n; }
+    function fin2n(type, start) { const n = mk(type, start); n.stop = prev.stop < start ? start : prev.stop; return n; }
 
     function parseParenOrArrow() {
         // Parse a parenthesized expression; if followed by `=>`, reinterpret as arrow params.
