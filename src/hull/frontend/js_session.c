@@ -28,7 +28,10 @@
 #  define HL_JS_MALLOC_OVERHEAD 0
 #elif defined(__GLIBC__) || defined(__linux__) || defined(__COSMOPOLITAN__)
 #  include <malloc.h>
-#  define HL_JS_USABLE_SIZE(p) malloc_usable_size((void *)(p))
+   /* glibc malloc_usable_size takes void*; launder the const through uintptr_t (read-only
+    * size accounting, never a write) so -Werror=cast-qual accepts it. macOS malloc_size above
+    * already takes const void*, so only this path needs the launder. */
+#  define HL_JS_USABLE_SIZE(p) malloc_usable_size((void *)(uintptr_t)(p))
 #  define HL_JS_MALLOC_OVERHEAD 8
 #else
 #  define HL_JS_USABLE_SIZE(p) 0   /* accounting is approximate; the limit still enforces */
