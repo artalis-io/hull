@@ -1,0 +1,1037 @@
+# Change-Aware CI Architecture - design prompt
+
+Status: **DRAFT - DESIGN HARD STOP. NOT YET RATIFIED OR IMPLEMENTED.**
+
+## 0. Purpose
+
+You are working in the Hull repository.
+
+Rework GitHub Actions so tooling, frontend, and domain-compiler pull requests do
+not pay the complete trusted-core CI cost unless they touch C, native runtime,
+build-composition, ABI, or other core-sensitive surfaces.
+
+The goal is not weaker CI. The goal is:
+
+> Run the strongest tests relevant to the changed subsystem on pull requests,
+> while preserving complete trusted-core verification when core-sensitive code
+> changes and on every push to `main` and every scheduled maximal run.
+
+The target flow is:
+
+```text
+                         pull request
+                              |
+                     fail-closed classifier
+                              |
+          +-------------------+-------------------+
+          |                   |                   |
+          v                   v                   v
+       tooling              domain               core
+          |                   |                   |
+     focused tests       focused compiler      full matrix
+     + fresh host          integrations
+          +-------------------+-------------------+
+                              |
+                              v
+                  applicability-aware CI gate
+```
+
+For `main`, schedule, or explicit force-full dispatch:
+
+```text
+full tooling + domain + core verification
+```
+
+Path classification is a pull-request optimization, not Hull's final
+correctness oracle.
+
+## 1. Required design cadence
+
+CI is part of Hull's security, release, and trusted-runtime boundary. Do not
+rewrite workflows immediately.
+
+Before implementation:
+
+1. Inspect all workflows, Make targets, test scripts, matrices, caches, and
+   branch-check names.
+2. Measure representative recent workflow runs where access permits.
+3. Produce a job/path/coverage/runtime mapping.
+4. Write verified findings and the proposed execution plans into this document.
+5. Present the design for ratification.
+6. Stop.
+
+Implement only after approval, using the review-gated slices in section 24.
+
+The first implementation slice is classifier plus classifier tests only. It
+must not simultaneously rewrite the full workflow.
+
+## 2. Current repository facts to preserve
+
+Repository inspection must verify and update these observations:
+
+- `.github/workflows/ci.yml` is a large multi-job workflow with native platform
+  builds, many E2Es, sanitizers, fuzzing, native integrations, reproducibility,
+  feature builds, browser tests, coverage, and lint.
+- It currently has top-level documentation `paths-ignore` entries for both PRs
+  and pushes to `main`.
+- Lua and JavaScript tooling under `stdlib/cli/**` is embedded into the Hull
+  executable through generated registries.
+- A changed embedded parser/tool module is not present in an old cached Hull
+  binary.
+- Separate workflows exist for DCO, release, site deployment, and specialized
+  Cosmopolitan/Windows probes.
+- The current fuzz job combines many native protocol fuzzers with Lua and JS
+  parser fuzzers.
+- Release workflows and reproducibility checks must not consume selectively
+  verified or untrusted cached build products.
+
+Do not duplicate or accidentally remove current coverage without accounting for
+it explicitly.
+
+## 3. Important GitHub Actions model
+
+Do not solve required CI using top-level `paths:` or `paths-ignore:` filters on
+the required orchestrator. A skipped required workflow can produce confusing or
+pending branch-protection behavior.
+
+Use:
+
+```text
+one always-triggered orchestrator
+    -> classifier
+    -> conditional jobs
+    -> one always-evaluated required gate
+```
+
+Individual expensive jobs may use `if:`. The required workflow itself always
+starts.
+
+The orchestrator must trigger on:
+
+```yaml
+pull_request:
+push:
+  branches: [main]
+schedule:
+workflow_dispatch:
+```
+
+For `push` to `main`, `schedule`, and force-full dispatch, do not use path
+classification to skip normal critical suites.
+
+## 4. Embedded tooling requires a fresh Hull link
+
+This is a load-bearing Hull-specific rule.
+
+Changes under:
+
+```text
+stdlib/cli/lua/**
+stdlib/cli/js/**
+```
+
+alter bytes embedded in the Hull executable. Tooling-only CI therefore may not
+restore an old complete Hull binary and claim it tested the changed tooling.
+
+At minimum it must:
+
+```text
+regenerate affected tooling registries
+compile/embed changed Lua or JS tooling
+link a fresh Hull executable
+run focused tests through that executable
+```
+
+V1 should use one clean representative Linux host build. The primary saving
+comes from not launching unrelated platform/native jobs.
+
+A future optimization may cache native core objects/archives and relink them
+with fresh tooling registries only if ABI, flags, architecture, compiler, and
+composition inputs are keyed exactly. Do not implement stale full-host reuse.
+
+## 5. Classification is overlapping, not exclusive
+
+Do not assign each PR exactly one of `tooling`, `domain`, or `core`. A change can
+affect several surfaces simultaneously.
+
+The classifier emits overlapping facts, conceptually:
+
+```text
+tooling_changed
+lua_frontend_changed
+js_frontend_changed
+project_discovery_changed
+agent_dev_changed
+domain_changed
+query_changed
+compute_changed
+production_core_changed
+build_composition_changed
+native_db_changed
+wasm_changed
+gpu_changed
+tls_network_changed
+ci_changed
+docs_only
+```
+
+It then derives an explicit execution plan:
+
+```text
+focused_tooling
+focused_lua_frontend
+focused_js_frontend
+focused_query
+focused_compute
+focused_db
+focused_wasm
+focused_gpu
+full_core
+full_all
+```
+
+If core and tooling/domain both change, run the full core plan plus the relevant
+focused tests. Do not assume the broad native matrix necessarily includes every
+new compiler-specific acceptance test.
+
+## 6. Canonical repository-owned classifier
+
+Introduce one classifier implementation, for example:
+
+```text
+scripts/ci/classify_changes.sh
+```
+
+Choose the implementation language that keeps the result portable and easily
+testable in Hull's existing CI images.
+
+Do not duplicate path rules across job `if:` expressions. Do not add an
+unpinned third-party path-filter action.
+
+The classifier must:
+
+- accept changed paths in a binary-safe form, preferably NUL-delimited;
+- handle spaces, tabs, newlines, deletions, copies, and renames;
+- produce deterministic JSON and/or documented GitHub outputs;
+- classify unknown paths as core-sensitive;
+- fail closed to `full_all` on parsing, diff, or rule failure;
+- fail closed on an empty or ambiguous PR diff;
+- keep all path rules in one reviewed source;
+- expose both facts and the derived required-job plan;
+- have direct fixture tests independent of GitHub Actions.
+
+For pull requests, calculate changes from the real merge base:
+
+```text
+base SHA ... head SHA
+```
+
+Fetch enough history. Do not use only `HEAD^`. Avoid API-based file lists that
+can silently truncate due to pagination.
+
+For `main`, schedules, and force-full dispatch, set `full_all=true` directly.
+
+## 7. Conservative path rules
+
+### 7.1 Production core
+
+At minimum classify these as core-sensitive after reconciling actual paths:
+
+```text
+src/**
+include/**
+production native C/C++
+shared native headers
+platform/runtime/Keel code
+vendor/** and submodule/dependency revisions
+Makefile and mk/**
+compiler/linker flags and composition
+generated native registry/build glue
+C frontend/QuickJS bridge/session/generation code
+WAMR integration
+native GPU integration
+native database adapters
+TLS/network adapters
+.github/workflows/**
+scripts/ci/**
+classifier fixtures
+```
+
+Unknown production/native/shared paths are core-sensitive. Workflow, classifier,
+and shared build changes force broad/full verification.
+
+### 7.2 Test-only C is not automatically production core
+
+Do not classify every `.c` file as trusted runtime code.
+
+Examples such as:
+
+```text
+tests/hull/frontend/**
+fuzz/fuzz_js_source.c
+fuzz/fuzz_lua_source.c
+```
+
+may remain focused test surfaces when they do not alter production code or
+shared build configuration.
+
+Rules:
+
+- production C/public header: core;
+- frontend C bridge/session/manager: core plus focused frontend tests;
+- test-only frontend C harness: focused frontend verification;
+- native Make/build recipe change: core;
+- unknown C path: core.
+
+### 7.3 Tooling
+
+Likely tooling paths include:
+
+```text
+stdlib/cli/lua/**
+stdlib/cli/js/**
+source parsers/annotations/scope/bindings
+ProjectDiscovery
+agent inspection and dev tooling
+tool-only tests/fixtures
+```
+
+Shared ProjectDiscovery or projection changes should run both frontend and mixed
+discovery acceptance even when only one source file changed.
+
+### 7.4 Domain compilers
+
+Reserve stable directories/classes for Query, Compute, and future domain code.
+Classify by architectural role, not filename substrings.
+
+Examples:
+
+```text
+pure Query IR/types/validator
+    -> focused Query tests
+
+Lua/JS Query adapters
+    -> Query + relevant frontend/discovery tests
+
+SQLite Query backend
+    -> Query + SQLite integration
+
+runtime binding generation
+    -> build pipeline + Lua/JS runtime E2E
+
+production C db artifact support
+    -> full core + DB/runtime tests
+
+Compute IR
+    -> focused Compute tests
+
+WASM backend
+    -> Compute + WAMR integration
+
+GPU backend
+    -> Compute + GPU integration
+```
+
+### 7.5 Documentation
+
+`docs_only=true` only when every changed path is in the explicitly safe
+documentation set. Verify that no such files are embedded or used as generated
+build inputs. Files such as `stdlib/context/*.md` are not ordinary docs merely
+because they end in `.md` if they are embedded into Hull.
+
+Unknown Markdown/build-document inputs fail closed rather than being assumed
+safe.
+
+## 8. CI changes and classifier self-trust
+
+Any change to workflow YAML, classifier logic, classifier tests, shared workflow
+helpers, Makefiles, or build configuration forces full verification.
+
+A PR can modify the workflow/classifier that evaluates that PR. CI cannot make
+modified workflow code intrinsically trustworthy. Preserve repository review,
+CODEOWNERS, and branch controls for workflow changes. Document this governance
+boundary rather than claiming the classifier protects itself.
+
+## 9. Pull-request plans
+
+### 9.1 Focused JS frontend
+
+For a parser/frontend-sensitive JS change, run at least:
+
+```text
+lint/format checks applicable to JS tooling
+one clean Linux Hull build with the changed JS registry embedded
+JS session/lexer/parser/annotations/scope/frontend tests
+JS conformance tests
+JS parser fuzz smoke when parser/fuzzer-sensitive paths changed
+ProjectDiscovery tests
+mixed Lua/JS discovery E2E
+hull dev --agent lifecycle
+hull agent inspect live + standalone
+required gate
+```
+
+Do not run unrelated TLS, networking, WAMR, GPU, every DB, every platform,
+reproducibility, or native-protocol fuzz matrix.
+
+### 9.2 Focused Lua frontend
+
+For Lua parser/frontend changes, run at least:
+
+```text
+Lua lint
+one clean Linux Hull build with changed Lua tooling embedded
+Lua lexer/parser/statements/annotations/scope/conformance
+Lua parser fuzz smoke when parser/fuzzer-sensitive paths changed
+ProjectDiscovery tests
+mixed-language discovery E2E
+hull dev --agent
+hull agent inspect
+required gate
+```
+
+### 9.3 General tooling
+
+Choose focused unit/E2E targets based on the affected tool surface, plus one
+fresh representative host build where embedded tooling changes. Do not run
+parser fuzzing for unrelated agent/help/template changes.
+
+### 9.4 Domain
+
+Run relevant frontend/discovery, domain IR/lowering/validator tests, selected
+runtime integration, one representative build, and dev/agent acceptance.
+
+Do not trigger unrelated native suites. Production C changes independently
+elevate the plan to core.
+
+### 9.5 Core
+
+Preserve the existing trusted-core coverage, including the actual supported
+platforms and jobs: Linux variants, macOS, aarch64, Cosmopolitan, musl,
+sanitizers, native integrations, reproducibility, build/package/feature tests,
+and specialized acceptance where relevant.
+
+Do not invent a generic Windows native matrix if Hull currently validates
+Windows only through specialized Cosmopolitan workflows.
+
+## 10. Main and scheduled behavior
+
+Every push to `main` runs full normal tooling, domain, and core verification,
+regardless of changed paths. Remove the current required-orchestrator
+`paths-ignore` behavior that skips docs pushes if this policy is ratified.
+
+Scheduled CI runs the full normal suite plus maximal/slow verification. Suitable
+nightly work includes longer fuzzing, extended parser/Test262 conformance, rare
+configuration permutations, slow sanitizers, optional integrations, and long
+compatibility tests.
+
+Document whether benchmarks are gating correctness checks or informational.
+They need not block the required gate unless that is an explicit existing
+policy.
+
+## 11. Fuzzing and conformance split
+
+The current combined fuzz job prevents useful path-aware selection. Split it at
+least into:
+
+```text
+fuzz-native-security
+fuzz-lua-source
+fuzz-js-source
+```
+
+Split native groups further only when measured runtime and ownership justify it.
+
+PR behavior:
+
+- Lua parser/fuzzer change: Lua conformance and fuzz smoke;
+- JS parser/fuzzer change: JS conformance and fuzz smoke;
+- native protocol/security primitive change: relevant native fuzz targets;
+- unrelated tooling/docs: no parser/native fuzz;
+- main: all normal fuzz jobs;
+- nightly: all extended campaigns.
+
+Focused parser jobs retain their sanitizer instrumentation. A frontend-only PR
+does not need the entire native sanitizer matrix, but it must still test its VM,
+bridge where relevant, and parser harness under the intended sanitizers.
+
+## 12. Native integration triggers
+
+Map expensive integrations to actual invalidation surfaces:
+
+```text
+TLS/network code       -> TLS/network suites
+native DB adapter      -> corresponding DB suite
+WAMR/compute runtime   -> WASM/WAMR suites
+GPU integration        -> GPU suites
+Keel/platform core     -> networking/platform suites
+shared core abstraction -> broad/full core
+```
+
+False positives cost time; false negatives can miss trusted-core regressions.
+When uncertain, select core.
+
+## 13. Parallelism and matrix reduction
+
+Parallelize independent jobs when runner availability permits. Avoid dependency
+chains used only to share a checkout or cache.
+
+For selective PRs, distinguish representative coverage from exhaustive
+compatibility coverage. Do not form unnecessary Cartesian products such as:
+
+```text
+OS x compiler x TLS x DB x sanitizer
+```
+
+Prefer orthogonal jobs that each test a meaningful boundary. Preserve exhaustive
+or broad matrices for core changes, main, nightly, and release workflows.
+
+## 14. Cache strategy
+
+Audit every existing cache and record ownership, key inputs, hit/miss behavior,
+size, and trust boundary.
+
+Prioritize caching:
+
+1. immutable downloaded toolchains/dependencies;
+2. browser assets;
+3. generated external dependency builds with exact keys;
+4. only later, Hull native objects through carefully keyed archives or
+   `ccache`/`sccache` if justified.
+
+Keys for compiled/native content include:
+
+```text
+OS and architecture
+compiler identity/version
+sanitizer/build mode
+runtime/features
+all relevant flags
+source/header/build-config hashes
+submodule revisions
+```
+
+A JS parser edit must not invalidate WAMR, DuckDB, or unrelated native
+dependency caches. Conversely, incompatible compiler/flag/config combinations
+must never share compiled artifacts.
+
+Do not allow an untrusted PR cache to become a trusted release artifact. Main
+core/reproducibility/release jobs continue to perform clean verification builds
+where required.
+
+## 15. Force-full mechanism
+
+Add a documented strengthening mechanism, at minimum:
+
+```yaml
+workflow_dispatch:
+  inputs:
+    force_full:
+      type: boolean
+```
+
+A reviewer label or commit marker is optional only if secure and deterministic.
+The mechanism may add coverage but never suppress required work.
+
+## 16. Applicability-aware required gate
+
+Create a stable final job such as `ci-success`, subject to the branch-protection
+migration in section 17.
+
+It uses `if: always()` and statically `needs` all orchestrated jobs. It must not
+merely accept every `skipped` result.
+
+The classifier emits which jobs are required:
+
+```text
+required.tooling_js=true
+required.query=false
+required.full_core=false
+```
+
+The final gate verifies:
+
+- classifier completed successfully;
+- every required job has result `success`;
+- a required job with `skipped`, missing, failure, or cancellation fails;
+- only jobs declared inapplicable may be skipped;
+- unexpected failure or cancellation fails;
+- unknown result/state fails closed.
+
+Use a repository-owned result-validation script rather than a fragile, duplicated
+long expression if that improves testability. Matrix jobs expose aggregate
+results to dependent jobs; account for this explicitly.
+
+`if: always()` only makes the gate evaluate. It does not itself turn failures
+into success.
+
+## 17. Branch-protection migration
+
+Adding `ci-success` does not update GitHub branch protection automatically.
+
+The design must record:
+
+- current required check names;
+- intended new required check;
+- temporary overlap/transition plan;
+- repository-admin action required;
+- rollback procedure;
+- which separate workflows remain independently required.
+
+Do not remove old required check identities before branch protection accepts the
+replacement. DCO, release, site deployment, and specialized on-demand/path
+workflows may remain separate; document whether the final gate aggregates them.
+
+## 18. Separate workflows and release safety
+
+Inspect every PR-triggered workflow, not only `ci.yml`. Avoid leaving expensive
+duplicate PR workflows outside the classifier unintentionally.
+
+Specialized path-triggered diagnostic workflows can remain separate when they
+are intentionally non-required and narrowly scoped. Release workflows must use
+fully verified clean artifacts and must not depend on selective PR-only output.
+
+Preserve existing raw Make/test commands and artifacts consumed by other
+automation.
+
+## 19. Classifier and gate tests
+
+Add direct fixtures for at least:
+
+### JS frontend only
+
+```text
+stdlib/cli/js/hull/source/parser.js
+```
+
+Expected: JS tooling/frontend plan, no full core, fresh representative host.
+
+### Lua frontend only
+
+```text
+stdlib/cli/lua/hull/source/parser.lua
+```
+
+Expected: Lua tooling/frontend plan.
+
+### Query compiler only
+
+Expected: focused Query/domain plan without unrelated native suites.
+
+### Test-only JS fuzzer C
+
+```text
+fuzz/fuzz_js_source.c
+```
+
+Expected: focused JS fuzz/frontend plan, not production core unless shared build
+configuration also changes.
+
+### C frontend bridge
+
+```text
+src/hull/frontend/js_session.c
+```
+
+Expected: full core plus focused JS frontend verification.
+
+### Shared native header
+
+Expected: full core.
+
+### Workflow/classifier/Makefile edit
+
+Expected: full all.
+
+### True docs only
+
+Expected: lightweight PR plan and successful required gate.
+
+### Embedded Markdown/tooling data
+
+Expected: appropriate tooling/core plan, not docs-only.
+
+### Mixed tooling and core
+
+Expected: full core plus relevant tooling tests.
+
+Also test renames, deletions, unknown paths, malformed input, empty diff,
+classifier failure, required-job skipped, allowed-job skipped, cancellation, and
+matrix aggregate outcomes.
+
+## 20. Hull-facing acceptance
+
+Focused tooling and domain CI must validate Hull through its real interfaces,
+not unit tests alone:
+
+```text
+hull dev
+hull dev --agent
+hull agent inspect
+```
+
+Use one representative Linux environment unless platform-specific behavior is
+under test. Do not duplicate these expensive E2Es in every matrix member.
+
+For source frontend/discovery changes, prove that the freshly linked Hull
+contains and uses the changed embedded tooling.
+
+## 21. Metrics and assessment
+
+Before restructuring, record where measurable:
+
+```text
+critical-path duration
+slowest jobs
+job count on a representative tooling PR
+cache hit/miss behavior
+duplicated builds/tests
+```
+
+Afterward, report plans for tooling-only, domain-only, core, main, and nightly.
+Do not invent runtime savings. Report verifiable structural changes, such as:
+
+```text
+tooling PR previously launched N native jobs; now launches M
+```
+
+Record remaining expensive bottlenecks and deliberate conservative
+over-triggering.
+
+## 22. Main safety and limitations
+
+Selective PR CI can allow a cross-subsystem regression to be discovered by the
+full `main` run after merge rather than before it. Mitigate this by conservative
+classification, focused integration tests, full CI for shared/unknown changes,
+and reviewer force-full capability. State this tradeoff honestly.
+
+Path classification supplements semantic review; it cannot prove a source file
+has no wider effect.
+
+## 23. Documentation deliverable
+
+Update this document after implementation with:
+
+- CI goals and verified current inventory;
+- change facts and path rules;
+- PR/main/nightly plans;
+- required gate semantics;
+- cache/trust strategy;
+- native integration triggers;
+- why the orchestrator is never path-skipped;
+- how to add a future subsystem;
+- force-full procedure;
+- branch-protection migration;
+- debugging classification mistakes;
+- metrics and remaining bottlenecks.
+
+## 24. Review-gated implementation slices
+
+### Slice 1: inventory and classifier
+
+- verified job/runtime/coverage/cache map;
+- repository-owned classifier;
+- overlapping facts and derived plans;
+- merge-base diff collection;
+- fixtures and fail-closed behavior;
+- no expensive-job skipping yet.
+
+Stop for review.
+
+### Slice 2: orchestration and final gate
+
+- always-triggered orchestrator;
+- conditional existing jobs;
+- applicability-aware result gate;
+- main/schedule/force-full behavior;
+- branch-protection migration plan;
+- initially preserve job contents.
+
+Stop for review.
+
+### Slice 3: focused tooling jobs
+
+- clean representative embedded-host build;
+- Lua/JS frontend targets;
+- mixed discovery/dev/agent E2E;
+- separated parser fuzzing/conformance;
+- focused tooling plans.
+
+Stop for review.
+
+### Slice 4: domain and native integration mapping
+
+- stable Query/Compute path classes;
+- DB/WAMR/GPU focused triggers;
+- domain plans;
+- mixed domain/core behavior.
+
+Stop for review.
+
+### Slice 5: cache and matrix optimization
+
+- cache audit and exact keys;
+- safe dependency/tool caches;
+- remove unnecessary Cartesian products;
+- parallelize independent work;
+- preserve clean reproducibility/release verification.
+
+Stop for review.
+
+### Slice 6: nightly and rollout
+
+- scheduled maximal suite;
+- extended fuzz/conformance;
+- branch-protection transition;
+- before/after metrics;
+- operational documentation.
+
+Stop for final review.
+
+## 25. Explicit safety requirements
+
+Never skip full core CI for changes to production native sources, shared headers,
+build composition, compiler/linker flags, platform abstractions, C frontend
+bridges, QuickJS embedding/session code, dependency versions, generated native
+glue, or workflow/classifier logic.
+
+When uncertain, classify as core. False positives cost CI time; false negatives
+can miss trusted-core regressions.
+
+## 26. Success criteria
+
+A change confined to:
+
+```text
+stdlib/cli/js/hull/source/**
+```
+
+does not launch the complete native/platform/integration matrix, but does run:
+
+```text
+fresh Hull relink containing changed JS tooling
+JS frontend/parser/conformance verification
+relevant JS fuzz smoke
+ProjectDiscovery and mixed-language tests
+hull dev --agent
+hull agent inspect
+lint and required gate
+```
+
+A change to production `src/**`, public `include/**`, native build/runtime
+configuration, or shared composition triggers the complete trusted-core plan.
+
+Every push to `main` receives full normal verification. Scheduled CI preserves
+or strengthens exhaustive testing. Required checks never remain pending because
+an entire required workflow was path-skipped.
+
+The optimization is:
+
+> Avoid reproving unchanged trusted-core properties on every frontend/tooling
+> pull request while preserving strong subsystem proof, frequent full proof, and
+> fail-closed classification.
+
+## 27. Completion report
+
+At completion report:
+
+- workflow and support files changed;
+- jobs added, removed, split, or reorganized;
+- classifier facts, path rules, and fail-closed behavior;
+- required gate applicability logic;
+- branch-protection migration status;
+- cache and matrix changes;
+- tooling, domain, core, main, and nightly plans;
+- fresh embedded-host verification;
+- dev/agent acceptance coverage;
+- compatibility/release considerations;
+- measured structural reductions;
+- remaining bottlenecks and conservative over-triggering.
+
+---
+
+# Appendix A. Discovery findings — verified current inventory (2026-08-20)
+
+Status of this appendix: **DISCOVERY COMPLETE (Slice-1 inventory half). Awaiting
+ratification. No workflow changes made.** Produced per the section-1 cadence
+steps 1-3; the proposed plans (Appendix B) are for ratification before any
+implementation (section 24, Slice 1 = classifier + tests only).
+
+## A.1 Workflow triggers (verified)
+
+`ci.yml` `on:`:
+```yaml
+push:         { branches: [main], paths-ignore: [site/**, docs/**, **.md, CHANGELOG.md, README.md, CONTRIBUTING.md, LICENSE, LICENSING.md] }
+pull_request: { branches: [main], paths-ignore: [ ...identical... ] }
+```
+- **No `schedule`, no `workflow_dispatch`.** No top-level `paths:` allowlist (only `paths-ignore`).
+- Every job runs on BOTH pull_request-to-main and push-to-main, EXCEPT `benchmark`
+  (`if: github.event_name == 'push'`, push-only).
+- **No final aggregation / required-gate job exists** (the only `needs:` is the
+  narrow `reproducibility-cosmo-compare` -> `reproducibility-cosmo` artifact diff).
+  This is the single biggest gap vs the target architecture (section 16).
+
+## A.2 ci.yml job inventory — 41 jobs, grouped by coverage
+
+| Group | Jobs (job-id) | Runner / matrix | Notes |
+|---|---|---|---|
+| **Core build+e2e (long pole)** | `build` (matrix: Linux, Linux-clang, Linux-aarch64, macOS = 4) | ubuntu-24.04 / -arm / macos-15 | each runs full `make` + `test` + `e2e` + ~60 `e2e-*` steps + registry/hardening checks. THE critical path. |
+| **Build pipeline** | `build-pipeline` (Linux, macOS = 2) | | `make e2e-build` (platform/app/sign/self-build) |
+| **Flavors** | `flavors` (8 include entries: DB=0, HTTP=0, POSTGRES, postgres-only, MYSQL, mysql-only, IMAGE=0, …) | ubuntu-24.04 | link-flavor smokes |
+| **Sanitizers** | `sanitizers` (ASan+UBSan), `msan` (30m), `tsan`, `tsan-shared-heap` | ubuntu-24.04 | msan is a slow long-pole |
+| **WASM/AOT (redundant wamrc)** | `wasm-readonly-heap-aot`, `compute-aot-shared-heap`, `compute-memops-freestanding`, `stream-meta`, `spans-example`, `spans-multi`, `spans-hugefile`, `wasm-guarded-aot-arm64`, `mapped-span-bench` | ubuntu-24.04 (+ 1 arm) | **8-9 jobs each rebuild `wamrc` (LLVM) from scratch, no cache** — the largest redundant cost. |
+| **Fuzz (combined)** | `fuzz` | ubuntu-24.04 | one job runs 13 native fuzzers + `fuzz-lua-source` + `fuzz-js-source`. Must be SPLIT (section 11). |
+| **DB (real engines)** | `postgres` (PG16), `mysql` (MySQL8), `valkey` (redis), `duckdb` | ubuntu-24.04 | Docker/apt engines |
+| **Composable features** | `duckdb-feature`, `gpu-feature`, `tui-feature`, `postgres-feature`, `mysql-feature` | ubuntu-24.04 | `e2e_feature_*.sh` |
+| **Reproducibility** | `reproducibility` (Linux, macOS=2), `reproducibility-container`, `reproducibility-container-interleave`, `reproducibility-cosmo` (a,b=2), `reproducibility-cosmo-compare` | ubuntu-24.04 + macos + containers | build-twice+cmp; **deliberately un-cached** (a build cache would defeat the byte-identical check). |
+| **Cosmo** | `cosmo` | ubuntu-24.04 | fetch cosmocc + platform-cosmo + full test/e2e under APE |
+| **GPU** | `gpu` (macOS Metal) | macos-15 | fetch-wgpu, GPU=1 test/e2e |
+| **Browser** | `htmx-browser` (Linux, macOS=2) | | Playwright/Chromium, dev+build modes. **Only cached job.** |
+| **Coverage / static** | `coverage` (lcov), `analyze` (scan-build), `cppcheck` (inside analyze) | ubuntu-24.04 | heavy |
+| **Lint** | `lint` | ubuntu-24.04 | luacheck + Biome + sdk-header checks |
+| **Embedders** | `embed-rust`, `embed-zig` | ubuntu-24.04 | `hl_embed_*` ABI smokes |
+| **musl** | `musl` | ubuntu-24.04 (alpine docker) | |
+| **Discovery** | `project-discovery-lua` | ubuntu-24.04 | `e2e-project-discovery-lua` |
+| **Bench (push-only)** | `benchmark` (lua, js=2) | ubuntu-24.04 | informational; not on PRs |
+
+**Key structural finding:** the JS/Lua frontend + conformance + fuzz-entry unit
+suites currently run INSIDE the monolithic `build` job's `make test` — there is
+**no independently-addressable "frontend tests only" job today**. A focused
+tooling plan (section 9) therefore REQUIRES a new focused job (Slice 3) that does
+a fresh embedded-host Linux build + targeted test binaries + the
+discovery/dev/agent E2Es; it cannot be assembled from existing jobs by `if:`
+alone.
+
+## A.3 Other PR-relevant workflows (verified)
+
+| Workflow | Trigger | PR? | Required? | Disposition for the classifier |
+|---|---|---|---|---|
+| `dco.yml` (DCO / Sign-off) | pull_request [opened,synchronize,reopened], no paths | yes (every PR) | **yes** | KEEP SEPARATE + always-required. Cheap, universal. Not classifier-gated. |
+| `cosmocc-windows-e2e.yml` | workflow_dispatch + pull_request `paths:` (cosmocc/tool/tar/fs/sandbox/build.lua) | yes (path-scoped) | no ("non-required / on demand") | Expensive (incl. Windows). Already self-limited by paths; candidate to fold under the classifier or leave as-is (non-required). |
+| `cosmocc-bbox-probe.yml` | workflow_dispatch + pull_request `paths:` (only itself) | yes (self-scoped) | no | Trivially scoped; leave. |
+| `bench_mapped_span_1g.yml` | workflow_dispatch only | no | no | Manual; leave. |
+| `windows-cosmocc.yml` | workflow_dispatch only | no | no | Manual investigation; leave. |
+| `deploy-site.yml` | push [main] `paths:` (site/**, install.sh, minisig, itself) | no | no | Deploy. Trust-bearing (minisign-verifies install.sh). Must NOT consume PR caches. |
+| `release.yml` | push tags `v*` | no | no | **Trust anchor** — signs the platform manifest, reproducible-container builds, `TRUST_PLATFORM_LIB`/`TRUST_FEATURE_LIBS` embed exact signed bytes. **Must NEVER consume selective/PR caches** (section 14). |
+
+## A.4 Cache audit (verified)
+
+- **The ONLY `actions/cache` in the entire repo** is `htmx-browser`'s
+  `playwright-${{ runner.os }}-v1.48.0` (Chromium bundle, ~150 MB). Key is a
+  hardcoded version literal (not lockfile-hashed) — can drift from the pin in
+  `e2e_htmx_playwright.sh`; low risk (Playwright re-fetches on mismatch).
+- **No native-object / built-artifact caching anywhere.** Every toolchain/dep
+  (cosmocc, wgpu, DuckDB, zig, LLVM/wamrc, WAMR submodule) is fetched fresh per
+  job (`make fetch-*`, SHA-verified) or apt/curl. Cross-job data uses
+  `upload/download-artifact` (within-run only), not `cache`.
+- Consequence: **no existing cache can cross a trust boundary into a signed
+  release** (the section-14 risk is purely forward-looking). Reproducibility jobs
+  intentionally avoid caching so the byte-identical `cmp` stays honest.
+
+## A.5 Measurements (verified where access permitted)
+
+- Recent `ci.yml` wall-clock (from `gh run list`, run-created→updated):
+  - PR runs: ~24m21s, ~25m22s, ~28m42s (feat branches).
+  - push-main runs: ~22m30s, ~22m38s, ~23m48s.
+- Representative **tooling PR (this session's #369/#370/#371) launched ALL ~41
+  ci.yml jobs + DCO** — including the entire native/AOT/sanitizer/repro/cosmo/
+  gpu/db/browser matrix — despite touching only `stdlib/cli/**`, `src/hull/
+  source` Lua/JS, test harnesses, and fixtures. This is the exact waste the
+  redesign targets: e.g. #371 (a 2-line dead-code deletion in a test file) ran
+  the full ~41-job matrix.
+- **ACCESS LIMIT (honest):** `GET /repos/artalis-io/hull/branches/main/
+  protection/required_status_checks` returned empty/!authorized with the
+  available token — I could NOT authoritatively enumerate the current required
+  status-check names. This is required for the section-17 branch-protection
+  migration and must be obtained by a repo admin before Slice 2. Inferred (from
+  job display names + DCO) but UNVERIFIED required set: the `ci.yml` job display
+  names (e.g. "ASan + UBSan", "MSan + UBSan", "Cosmopolitan (APE)", "Build
+  Pipeline (Linux/macOS)", …), "DCO", and "Sign-off check". Slice 2 must not
+  proceed on the inferred list.
+
+## A.6 Per-job "invalidation surface" (proposed mapping, for ratification)
+
+Which change-facts (section 5) should trigger each existing job. This is the
+raw material for the classifier→plan mapping (Appendix B); it is a PROPOSAL.
+
+| Existing job(s) | Should run when (fact) | On tooling/docs-only PR? |
+|---|---|---|
+| `build` (full 4-matrix) | production_core_changed OR build_composition_changed OR full_all | NO (replace with 1 focused embedded-host Linux build for tooling) |
+| `sanitizers`/`msan`/`tsan`/`tsan-shared-heap` | production_core_changed, wasm_changed (tsan-shared-heap) | NO |
+| WASM/AOT cluster (9 jobs) | wasm_changed OR compute_changed OR production_core_changed | NO |
+| `fuzz` (after split) | native security/protocol (native-security), lua_frontend (lua fuzz), js_frontend (js fuzz) | only the matching split target |
+| `postgres`/`mysql`/`valkey`/`duckdb` + `*-feature` | native_db_changed / matching backend / build_composition | NO |
+| `gpu`/`gpu-feature` | gpu_changed | NO |
+| `cosmo`/`reproducibility*` | production_core_changed OR build_composition_changed | NO |
+| `htmx-browser` | web stdlib / http-server / template / htmx examples changed | NO (unless those change) |
+| `coverage`/`analyze` | core; or nightly | NO (nightly candidate) |
+| `lint` | ALWAYS (cheap) | YES |
+| `project-discovery-lua` + (new) JS/mixed discovery | lua_frontend / js_frontend / project_discovery_changed | YES (matching) |
+| `embed-rust`/`embed-zig` | libhull ABI / production_core | NO |
+| `musl` | production_core / build_composition | NO |
+
+---
+
+# Appendix B. Proposed classifier facts → plan mapping (for ratification)
+
+This is the DESIGN to ratify. No code written yet. Slice 1 (section 24) is
+classifier + fixtures ONLY; it does not yet skip any job.
+
+## B.1 Classifier shape
+
+- `scripts/ci/classify_changes.sh` (POSIX sh; portable, testable in Hull's
+  existing ubuntu-24.04 image; no third-party path-filter action).
+- Input: NUL-delimited changed paths from the real merge base
+  (`git diff -z --name-only --no-renames $(git merge-base origin/main HEAD)..HEAD`
+  with sufficient fetch depth; NOT `HEAD^`; NOT the paginated API file list).
+- Output: deterministic JSON + `$GITHUB_OUTPUT` booleans for both the facts
+  (section 5) and the derived plan + `required.*` flags (section 16).
+- Fail-closed: unknown path → core-sensitive; empty/ambiguous diff, diff error,
+  or rule error → `full_all=true`. `main`/schedule/force-full → `full_all=true`
+  directly (no path classification).
+
+## B.2 Fact → plan derivation (initial rules, conservative)
+
+| Fact (from path rules §7) | Adds to plan |
+|---|---|
+| `docs_only` (every path in the safe docs set, none embedded) | lint + required gate only |
+| `js_frontend_changed` (`stdlib/cli/js/hull/source/**`) | focused_js_frontend (§9.1) |
+| `lua_frontend_changed` (`stdlib/cli/lua/hull/source/**`) | focused_lua_frontend (§9.2) |
+| `project_discovery_changed` (`stdlib/cli/**/project/**`, projection) | both frontends + mixed discovery E2E |
+| `tooling_changed` (other `stdlib/cli/**`) | focused tooling + 1 embedded-host build |
+| `js/lua parser or fuzz harness` (`fuzz/fuzz_{js,lua}_source.c`, parser files) | + matching fuzz-smoke |
+| `compute_changed` / `wasm_changed` / `gpu_changed` / `native_db_changed` / `tls_network_changed` | matching focused native integration (§12) |
+| `production_core_changed` / `build_composition_changed` / `ci_changed` / unknown | **full_core / full_all** (§7.1, §8, §25) |
+
+Overlap is additive (§5): core + tooling ⇒ full_core PLUS the focused tooling
+tests. `ci_changed` (any workflow/classifier/Makefile/`mk/**`) ⇒ full_all and
+self-trust caveat (§8) — governance stays with CODEOWNERS/branch protection.
+
+## B.3 Immediate prerequisites this discovery surfaced
+
+1. **Add a final `ci-success` gate job** (§16) — none exists today; required
+   before any `if:`-gating so branch protection can point at ONE stable check.
+2. **Carve focused frontend/tooling test jobs** — the JS/Lua frontend suites are
+   trapped inside `build`'s `make test`; Slice 3 must expose them as a focused
+   embedded-host job (§4, §20).
+3. **Split `fuzz`** into `fuzz-native-security` / `fuzz-lua-source` /
+   `fuzz-js-source` (§11).
+4. **Obtain the authoritative required-check list** (repo admin) before Slice 2
+   (§17) — currently access-limited.
+5. **wamrc redundancy** (9 jobs rebuild it) is the top cache-optimization target
+   for Slice 5 (immutable keyed toolchain cache), independent of classification.
+
+## B.4 Proposed slice ordering (matches §24, with this repo's specifics)
+
+- **Slice 1 (next, on approval):** `scripts/ci/classify_changes.sh` + NUL-safe
+  merge-base diff + fixture tests (§19 cases incl. this repo's `js_session.c`,
+  `parser.js`, `parser.lua`, `fuzz_js_source.c`, `mk/**`, docs-only, mixed). NO
+  job skipping yet. Add `.github/actions`/`scripts/ci/**` to the core path set so
+  the classifier's own changes force full_all.
+- **Slice 2:** always-triggered orchestrator + `ci-success` gate (`if: always()`,
+  static `needs` all jobs, repo-owned result-validation script) + `main`/
+  schedule/force-full=full + branch-protection migration doc. Preserve job
+  contents.
+- **Slices 3-6:** focused tooling jobs; domain/native mapping; cache+matrix
+  (wamrc cache, kill the 9x rebuild); nightly (schedule) + rollout. Each stops
+  for review.
