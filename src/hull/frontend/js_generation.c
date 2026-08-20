@@ -127,3 +127,26 @@ void hl_js_gen_shutdown(void)
     /* CRITICAL: do NOT reset G.next_token - monotonic for the whole process (ABA safety). */
     pthread_mutex_unlock(&G.mu);
 }
+
+#ifdef HL_JS_GEN_TESTING
+/* The test-only authority-probe entry module (registers globalThis.__hull_frontend.probe). */
+static const char *PROBE_MODULE = "hull:source:frontend_probe";
+
+int hl_js_gen_live_count(void)
+{
+    pthread_mutex_lock(&G.mu);
+    int n = G.live_count;
+    pthread_mutex_unlock(&G.mu);
+    return n;
+}
+
+int hl_js_gen_probe(int64_t token, char **out_json, size_t *out_len)
+{
+    pthread_mutex_lock(&G.mu);                   /* same lock discipline as analyze (close-safe) */
+    HlGenSlot *slot = find_locked(token);
+    if (!slot) { pthread_mutex_unlock(&G.mu); return emit_stale(STALE_ANALYZE, out_json, out_len); }
+    int rc = hl_js_session_analyze(slot->session, PROBE_MODULE, "probe", (const uint8_t *)"", 0, NULL, NULL, 0, out_json, out_len);
+    pthread_mutex_unlock(&G.mu);
+    return rc;
+}
+#endif /* HL_JS_GEN_TESTING */

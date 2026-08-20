@@ -2548,6 +2548,10 @@ HULL_LINK_OBJS := $(CAP_OBJS) $(CAP_TOOL_OBJ) $(CAP_TEST_OBJ) $(CMD_OBJS) $(RT_O
 ifneq ($(RUNTIME),lua)
   HULL_LINK_OBJS += $(FRONTEND_JS_SESSION_OBJ) $(FRONTEND_JS_GEN_OBJ) $(STDLIB_JS_CLI_REGISTRY_O)
   CFLAGS += -DHL_FRONTEND_JS
+  # Same objects a test binary needs when it links the tool bindings (lua_rt_mod_tool.o's
+  # frontend bridge) or the tool-VM teardown (tool.o's hl_js_gen_shutdown). Empty on a
+  # lua-only build, where those references are #ifdef'd out. Consumed by mk/tests.mk.
+  FRONTEND_JS_LINK_OBJS := $(FRONTEND_JS_SESSION_OBJ) $(FRONTEND_JS_GEN_OBJ) $(STDLIB_JS_CLI_REGISTRY_O)
 endif
 
 $(BUILDDIR)/hull: $(HULL_LINK_OBJS) $(KEEL_LIB) $(TUI_TOOLCHAIN_ARCHIVE) | $(RUNTIME_FEATURE_LIBS)
