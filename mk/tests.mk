@@ -182,8 +182,8 @@ $(BUILDDIR)/test_%: $(TESTDIR)/hull/cap/test_%.c $(TEST_COMMON_DEPS) | $(BUILDDI
 # test .c lives under tests/hull/source/, so it is not matched by the cap/ pattern
 # rule above -- explicit recipe. It runs the co-located Lua test scripts from the
 # repo-root source tree via package.path.
-$(BUILDDIR)/test_lua_source: $(TESTDIR)/hull/source/test_lua_source.c $(LUA_OBJS) | $(BUILDDIR)
-	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -Ivendor/lua -o $@ $< $(LUA_OBJS) -lm $(LDFLAGS)
+$(BUILDDIR)/test_lua_source: $(TESTDIR)/hull/source/test_lua_source.c $(LUA_OBJS) $(SH_JSON_OBJ) $(SH_ARENA_OBJ) | $(BUILDDIR)
+	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -Ivendor/lua -o $@ $< $(LUA_OBJS) $(SH_JSON_OBJ) $(SH_ARENA_OBJ) -lm $(LDFLAGS)
 
 # hull.frontend JS tooling runtime (Slice 1): links the restricted QuickJS tooling session
 # + the cli-js registry + vendored QuickJS. Proves the runtime / byte transport / module

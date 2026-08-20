@@ -194,11 +194,16 @@ function M.tokenize(source, opts)
     -- ── number (maximal munch, validated with tonumber) ──────────────
     local function scan_number(start)
         local p = start
+        -- In a HEX literal (0x/0X) the exponent marker is 'p'/'P' and 'e'/'E' are hex DIGITS;
+        -- in a decimal literal it is 'e'/'E'. So an exponent sign is only consumed after the
+        -- radix-appropriate marker: `0xE+1` is `0xE + 1` (three tokens), not a malformed number.
+        local is_hex = at(start) == "0" and (at(start + 1) == "x" or at(start + 1) == "X")
+        local expmark = is_hex and "[pP]" or "[eE]"
         while true do
             local c = at(p)
             if c:match("[%w.]") then
                 p = p + 1
-            elseif (c == "+" or c == "-") and at(p - 1):match("[eEpP]") then
+            elseif (c == "+" or c == "-") and at(p - 1):match(expmark) then
                 p = p + 1                                            -- exponent sign
             else
                 break

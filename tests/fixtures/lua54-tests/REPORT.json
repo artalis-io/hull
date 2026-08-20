@@ -1,0 +1,7 @@
+{
+  "archive_sha256": "8a4898ffe4c7613c8009327a0722db7a41ef861d526c77c5b46114e59ebf811e",
+  "lua_version": "5.4.7",
+  "manifest_sha256": "3563eb75f5c77a84129eee80eef35f8b813fc45bb0165db8848f199081b09635",
+  "selected_cases": 33,
+  "total_case_bytes": 444773
+}
