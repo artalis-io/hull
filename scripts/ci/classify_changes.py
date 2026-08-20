@@ -91,8 +91,10 @@ def classify_path(path):
     p = path
 
     # -- self-trust / composition: force full verification (docs section 8) --
-    if p.startswith(".github/workflows/") or p.startswith(".github/actions/") \
-            or p.startswith("scripts/ci/") or p == ".gitmodules":
+    # ALL of .github/** (workflows, actions, CODEOWNERS, dependabot, issue
+    # templates, governance) -> ci_changed -> full_all. A governance file must
+    # not fall through to unknown/core.
+    if p.startswith(".github/") or p.startswith("scripts/ci/") or p == ".gitmodules":
         return {"ci_changed"}
     if p == "Makefile" or p.startswith("mk/") or p.endswith(".mk"):
         return {"build_composition_changed"}
@@ -139,19 +141,32 @@ def classify_path(path):
     if p.startswith("stdlib/"):
         return {"tooling_changed"}
 
-    # -- test-only fuzz harnesses (not production core; docs section 7.2) --
-    if p == "fuzz/fuzz_js_source.c":
+    # -- test-only fuzz harnesses + their seed corpora (not production core;
+    # docs section 7.2). A source-parser fuzzer / seed change runs the matching
+    # FOCUSED source fuzz, not the generic native fuzz. --
+    if p == "fuzz/fuzz_js_source.c" or p.startswith("fuzz/corpus_js_source/") or p == "fuzz/js_source.dict":
         return {"js_frontend_changed", "js_fuzz_changed"}
-    if p == "fuzz/fuzz_lua_source.c":
+    if p == "fuzz/fuzz_lua_source.c" or p.startswith("fuzz/corpus_lua_source/") or p == "fuzz/lua_source.dict":
         return {"lua_frontend_changed", "lua_fuzz_changed"}
     if p.startswith("fuzz/"):
         return {"native_fuzz_changed"}
 
-    # -- test-only surfaces (docs section 7.2: test C is not automatically core) --
+    # -- test-only surfaces (docs section 7.2: test C is not automatically core).
+    # KNOWN frontend / discovery test + fixture paths map to the FOCUSED frontend
+    # plan so the changed tests are RUN (not skipped, not merely lint). Everything
+    # else under tests/ falls to `tests_changed`, which fails closed to full_core
+    # (derive_plan) until a focused generic-test job exists - a generic test
+    # change must never skip the tests it modifies. --
+    if p.startswith("tests/fixtures/test262/"):
+        return {"js_frontend_changed"}
+    if p.startswith("tests/fixtures/lua54-tests/"):
+        return {"lua_frontend_changed"}
     if p.startswith("tests/hull/frontend/"):
-        return {"js_frontend_changed", "tests_changed"}
+        return {"js_frontend_changed"}
     if p.startswith("tests/hull/source/"):
-        return {"lua_frontend_changed", "tests_changed"}
+        return {"lua_frontend_changed"}
+    if p == "tests/e2e_project_discovery.sh":
+        return {"project_discovery_changed"}
     if p.startswith("tests/"):
         return {"tests_changed"}
 
@@ -183,6 +198,14 @@ def derive_plan(facts):
         plan["full_all"] = True
 
     if facts.get("production_core_changed") or facts.get("unknown"):
+        plan["full_core"] = True
+
+    # No focused generic-test or examples job exists yet, so a generic tests/**
+    # or examples/** change FAILS CLOSED to full_core - a change to a test or an
+    # example must never skip the very tests it modifies (docs section 7.2 rule:
+    # recognize-without-a-plan is unsafe). Known frontend test/fixture paths took
+    # the focused route above and never set these facts.
+    if facts.get("tests_changed") or facts.get("examples_changed"):
         plan["full_core"] = True
 
     if facts.get("js_frontend_changed"):
@@ -259,6 +282,34 @@ def classify(paths, event="pull_request", force_full=False):
             "plan": plan, "reason": "paths classified"}
 
 
+def parse_nul_paths(raw):
+    """Validate + decode a NUL-delimited path stream (git diff --name-only -z).
+    Returns (paths, None) on success or (None, reason) if the stream is MALFORMED,
+    in which case the caller fails closed to full_all. `git diff -z` terminates
+    EVERY path (including the last) with a NUL and emits repo-relative, canonical
+    paths, so a well-formed stream: ends in NUL, has no empty interior token, and
+    no absolute or `.`/`..`-component path. Spaces, tabs, and newlines inside a
+    path are VALID (that is exactly why -z is used) and are accepted."""
+    if raw == b"":
+        return [], None                          # empty stream -> empty diff (full_all downstream)
+    if not raw.endswith(b"\x00"):
+        return None, "stream not NUL-terminated (truncated diff?)"
+    tokens = raw.split(b"\x00")
+    tokens.pop()                                 # drop the trailing empty from the terminal NUL
+    paths = []
+    for tok in tokens:
+        if tok == b"":
+            return None, "empty interior path"
+        p = tok.decode("utf-8", "surrogateescape")
+        if p.startswith("/"):
+            return None, "absolute path: %r" % p
+        comps = p.split("/")
+        if "." in comps or ".." in comps:
+            return None, "dot/dotdot path component: %r" % p
+        paths.append(p)
+    return paths, None
+
+
 def _fail_closed(reason):
     facts = {k: False for k in FACTS}
     plan = {k: False for k in PLAN}
@@ -297,26 +348,34 @@ def main(argv):
                     help="read NUL-delimited paths from this file instead of stdin.")
     args = ap.parse_args(argv)
 
+    # main push / schedule / force-full -> full_all directly; the diff is
+    # irrelevant, so do not even read (let alone trust) the path stream.
+    if args.event in ("push_main", "schedule") or args.force_full:
+        result = classify([], event=args.event, force_full=args.force_full)
+        print(json.dumps(result, sort_keys=True, indent=2))
+        _emit_github_output(result)
+        return 0
+
     try:
         if args.paths_from:
             with open(args.paths_from, "rb") as f:
                 raw = f.read()
         else:
             raw = sys.stdin.buffer.read()
-        # NUL-delimited (git diff -z). Decode each token; a non-UTF8 path is kept
-        # as a surrogate-escaped string so it still classifies (as unknown->core)
-        # rather than crashing.
-        paths = [tok.decode("utf-8", "surrogateescape") for tok in raw.split(b"\x00") if tok]
-    except Exception as e:   # any read/parse failure -> fail closed.
+    except Exception as e:   # any read failure -> fail closed.
         result = _fail_closed("input read failure: %s -> full_all" % e)
         print(json.dumps(result, sort_keys=True, indent=2))
         _emit_github_output(result)
         return 0
 
-    try:
-        result = classify(paths, event=args.event, force_full=args.force_full)
-    except Exception as e:   # any rule failure -> fail closed.
-        result = _fail_closed("classifier error: %s -> full_all" % e)
+    paths, perr = parse_nul_paths(raw)
+    if perr is not None:     # malformed stream -> fail closed.
+        result = _fail_closed("malformed diff stream: %s -> full_all" % perr)
+    else:
+        try:
+            result = classify(paths, event=args.event, force_full=args.force_full)
+        except Exception as e:   # any rule failure -> fail closed.
+            result = _fail_closed("classifier error: %s -> full_all" % e)
 
     print(json.dumps(result, sort_keys=True, indent=2))
     _emit_github_output(result)

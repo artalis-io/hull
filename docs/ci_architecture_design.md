@@ -1037,9 +1037,17 @@ self-trust caveat (§8) — governance stays with CODEOWNERS/branch protection.
   merge-base diff + `scripts/ci/test_classify_changes.py` fixtures (§19 cases
   incl. this repo's `js_session.c`, `parser.js`, `parser.lua`, `fuzz_js_source.c`,
   `mk/**`, docs-only, mixed, plus cross-trust-boundary renames). NO job skipping
-  yet. `.github/workflows/**`, `.github/actions/**`, `scripts/ci/**` are in the
-  self-trust set so the classifier's own changes force full_all. 38/38 fixtures
-  green. Stops for review before Slice 2.
+  yet. **All `.github/**`** (workflows, actions, CODEOWNERS, governance) +
+  `scripts/ci/**` + `Makefile`/`mk/**` are in the self-trust set so those changes
+  force full_all. Generic `tests/**` / `examples/**` FAIL CLOSED to full_core
+  (no focused generic-test job yet - a test change must not skip its own tests);
+  known frontend test/fixture paths (`tests/hull/frontend/**`, `tests/hull/
+  source/**`, `tests/fixtures/{test262,lua54-tests}/**`, the discovery E2E, the
+  js/lua fuzz seeds) take the focused route. The NUL stream is byte-validated
+  (missing terminal NUL / empty interior / absolute / `.`/`..` component ->
+  full_all; spaces/tabs/newlines inside a path are valid), with pure-Python
+  classify() fixtures AND subprocess/CLI tests of the byte decoder. 65/65
+  fixtures green. Stops for review before Slice 2.
 - **Slice 2:** always-triggered orchestrator + `ci-success` gate (`if: always()`,
   static `needs` all jobs, repo-owned result-validation script) + `main`/
   schedule/force-full=full + branch-protection migration doc. Preserve job

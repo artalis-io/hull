@@ -13,6 +13,7 @@
 #
 # SPDX-License-Identifier: AGPL-3.0-or-later
 
+import json
 import os
 import sys
 
@@ -174,6 +175,122 @@ check("schedule -> full_all regardless of paths",
 check("force_full -> full_all regardless of paths",
       ["docs/only.md"], force_full=True,
       want_true=["full_all", "full_core"], want_false=["docs_only"])
+
+# ---- Gap 1: generic tests/examples fail closed to full_core, known frontend
+#      test/fixture paths take the focused route (never lint-only) ----
+
+check("generic unit test -> full_core", ["tests/test_arena.c"],
+      want_true=["full_core"], want_false=["full_all", "docs_only"])
+
+check("generic cap test -> full_core", ["tests/hull/cap/test_db.c"],
+      want_true=["full_core"], want_false=["full_all", "docs_only"])
+
+check("generic e2e script -> full_core", ["tests/e2e_http.sh"],
+      want_true=["full_core"], want_false=["full_all", "docs_only"])
+
+check("example app -> full_core", ["examples/todo/app.lua"],
+      want_true=["full_core"], want_false=["full_all", "docs_only"])
+
+check("frontend C test -> focused js (not full_core)",
+      ["tests/hull/frontend/test_js_conformance.c"],
+      want_true=["focused_js_frontend"], want_false=["full_core", "full_all"])
+
+check("lua source C test -> focused lua (not full_core)",
+      ["tests/hull/source/test_lua_source.c"],
+      want_true=["focused_lua_frontend"], want_false=["full_core", "full_all"])
+
+check("test262 fixture -> focused js (not full_core)",
+      ["tests/fixtures/test262/manifest.json"],
+      want_true=["focused_js_frontend"], want_false=["full_core", "full_all"])
+
+check("lua54 fixture -> focused lua (not full_core)",
+      ["tests/fixtures/lua54-tests/cases/math.lua"],
+      want_true=["focused_lua_frontend"], want_false=["full_core", "full_all"])
+
+check("discovery E2E -> focused discovery (not full_core)",
+      ["tests/e2e_project_discovery.sh"],
+      want_true=["focused_project_discovery", "focused_js_frontend", "focused_lua_frontend"],
+      want_false=["full_core", "full_all"])
+
+check("js fuzz seed -> focused js fuzz", ["fuzz/corpus_js_source/abc"],
+      want_true=["focused_js_frontend", "focused_js_fuzz"], want_false=["full_core", "full_all"])
+
+check("governance .github file -> full_all", [".github/CODEOWNERS"],
+      want_true=["full_all", "full_core"])
+
+check(".github issue template -> full_all", [".github/ISSUE_TEMPLATE/bug.md"],
+      want_true=["full_all", "full_core"])
+
+# ---- Gap 2: byte-decoder / CLI validation via subprocess ----
+
+import subprocess  # noqa: E402
+
+_CLI = os.path.join(os.path.dirname(os.path.abspath(__file__)), "classify_changes.py")
+
+
+def run_cli(raw_bytes, event="pull_request", extra=()):
+    proc = subprocess.run([sys.executable, _CLI, "--event", event, *extra],
+                          input=raw_bytes, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    return json.loads(proc.stdout.decode("utf-8"))
+
+
+def check_cli(name, raw, want_true=(), want_false=(), event="pull_request", extra=()):
+    global _pass, _fail
+    r = run_cli(raw, event=event, extra=extra)
+    plan = r["plan"]
+    problems = []
+    for k in want_true:
+        if not plan.get(k):
+            problems.append("expected plan.%s=True" % k)
+    for k in want_false:
+        if plan.get(k):
+            problems.append("expected plan.%s=False" % k)
+    if problems:
+        _fail += 1
+        print("FAIL(cli): %s :: %s :: reason=%s" % (name, "; ".join(problems), r.get("reason")))
+    else:
+        _pass += 1
+
+
+# well-formed NUL streams classify normally through the real byte path
+check_cli("cli: js frontend", b"stdlib/cli/js/hull/source/parser.js\x00",
+          want_true=["focused_js_frontend"], want_false=["full_core", "full_all"])
+check_cli("cli: docs only", b"docs/x.md\x00",
+          want_true=["docs_only"], want_false=["full_core", "full_all"])
+check_cli("cli: two paths", b"docs/x.md\x00src/hull/a.c\x00",
+          want_true=["full_core"], want_false=["docs_only"])
+
+# malformed streams fail closed to full_all
+check_cli("cli: missing terminal NUL -> full_all", b"src/hull/x.c",
+          want_true=["full_all", "full_core"])
+check_cli("cli: empty interior path -> full_all", b"a.c\x00\x00b.c\x00",
+          want_true=["full_all", "full_core"])
+check_cli("cli: absolute path -> full_all", b"/etc/passwd\x00",
+          want_true=["full_all"])
+check_cli("cli: dotdot component -> full_all", b"src/../secret.c\x00",
+          want_true=["full_all"])
+check_cli("cli: leading ./ component -> full_all", b"./src/a.c\x00",
+          want_true=["full_all"])
+
+# spaces / tabs / newlines inside a path are VALID (why -z is used) - accepted,
+# NOT split, NOT rejected. A newline-bearing single path stays one path.
+check_cli("cli: space in path accepted", b"my sneaky file.md\x00",
+          want_true=["full_core"], want_false=["full_all", "docs_only"])
+check_cli("cli: tab in path accepted", b"src/a\tb.c\x00",
+          want_true=["full_core"], want_false=["full_all"])
+check_cli("cli: newline in path is one path (NUL-only split)",
+          b"src/weird\nname.c\x00", want_true=["full_core"], want_false=["full_all"])
+
+# empty stream -> empty diff -> full_all; read failure -> full_all
+check_cli("cli: empty stream -> full_all", b"", want_true=["full_all"])
+check_cli("cli: read failure (missing --paths-from) -> full_all", b"",
+          want_true=["full_all"], extra=("--paths-from", "/nonexistent/xyz/does-not-exist"))
+
+# event overrides ignore the stream entirely
+check_cli("cli: push_main ignores stream -> full_all", b"docs/only.md\x00",
+          event="push_main", want_true=["full_all"], want_false=["docs_only"])
+check_cli("cli: force-full ignores stream -> full_all", b"docs/only.md\x00",
+          extra=("--force-full",), want_true=["full_all"], want_false=["docs_only"])
 
 # ---- determinism: same input -> identical result ----
 
