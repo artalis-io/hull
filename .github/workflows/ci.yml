@@ -74,9 +74,13 @@ jobs:
           if [ "$EVENT" = "pull_request" ]; then
             git fetch -q --no-tags origin "$BASE_SHA" "$HEAD_SHA" 2>/dev/null || true
             MB="$(git merge-base "$BASE_SHA" "$HEAD_SHA" 2>/dev/null || echo '')"
-            if [ -n "$MB" ]; then
-              git diff --name-only -z --no-renames "$MB" "$HEAD_SHA" 2>/dev/null \
-                | python3 scripts/ci/classify_changes.py --event pull_request
+            PATHS_FILE="$(mktemp)"
+            # Stage the diff into a file: a FAILING `git diff` falls back to
+            # --force-full (full_all) rather than leaving the pipeline nonzero and
+            # reddening the step. A diff failure EXPANDS coverage; it does not fail
+            # classification.
+            if [ -n "$MB" ] && git diff --name-only -z --no-renames "$MB" "$HEAD_SHA" > "$PATHS_FILE" 2>/dev/null; then
+              python3 scripts/ci/classify_changes.py --event pull_request --paths-from "$PATHS_FILE"
             else
               python3 scripts/ci/classify_changes.py --event pull_request --force-full < /dev/null
             fi
@@ -2263,11 +2267,15 @@ jobs:
         env:
           # A matrix job exposes ONE aggregate result here; ci_gate.py handles it.
           NEEDS_JSON: ${{ toJSON(needs) }}
+          EVENT: ${{ github.event_name }}
         run: |
           printf '%s' "$NEEDS_JSON" > needs.json
-          # `benchmark` is push-only, so it is legitimately skipped on a PR /
-          # workflow_dispatch. Everything else must succeed. `classify` must be
-          # present AND succeed (its self-tests guard the classifier + gate).
+          # `benchmark` is push-only: it may legitimately skip on a PR /
+          # workflow_dispatch, but on a PUSH to main it IS applicable and must
+          # succeed - a mistakenly skipped benchmark on main must not pass.
+          if [ "$EVENT" = "push" ]; then ALLOW=""; else ALLOW="benchmark"; fi
+          # `classify` must be present AND succeed (its self-tests guard the
+          # classifier + gate).
           python3 scripts/ci/ci_gate.py --needs needs.json \
-            --allow-skip benchmark --require-present classify
+            --allow-skip "$ALLOW" --require-present classify
 

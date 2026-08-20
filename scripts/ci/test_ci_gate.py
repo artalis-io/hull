@@ -54,6 +54,12 @@ expect("legit skip (benchmark on PR)",
        R(classify="success", build="success", benchmark="skipped", lint="success"),
        allow_skip=("benchmark",), should_pass=True)
 
+# benchmark is push-only: on a PUSH plan it IS applicable (allow_skip empty), so a
+# skipped benchmark must FAIL - a mistakenly skipped benchmark on main must not pass.
+expect("benchmark skipped on push plan -> fail",
+       R(classify="success", build="success", benchmark="skipped", lint="success"),
+       allow_skip=(), should_pass=False)
+
 # a job in allow_skip that actually ran and succeeded -> still pass
 expect("allow_skip job succeeded (push)",
        R(classify="success", build="success", benchmark="success"),
