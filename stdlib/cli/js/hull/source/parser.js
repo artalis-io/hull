@@ -125,7 +125,11 @@ function parseInternal(bytes, opts, inject) {
 
     function atEof() { return cur.type === "eof"; }
     function isP(v) { return cur.type === "punctuator" && cur.value === v; }
-    function isKw(v) { return cur.type === "identifier" && cur.value === v; }
+    // A contextual/reserved keyword match at a KEYWORD position: an escaped identifier
+    // (`as`) is NOT the keyword (a UnicodeEscapeSequence in a ReservedWord/contextual
+    // keyword is an early error). Reserved words stay usable as property names / specifiers
+    // because those read through parseIdentifierName / parsePropertyKey, not isKw.
+    function isKw(v) { return cur.type === "identifier" && cur.value === v && !cur.escaped; }
     function nl() { return cur.nlBefore; }
 
     // Full speculative-parse checkpoint: the tokenizer's lexical state + the parser's token
@@ -632,14 +636,52 @@ function parseInternal(bytes, opts, inject) {
         return e;
     }
 
+    // Assignment-target (lvalue) validation. A SIMPLE target is an Identifier or a
+    // MemberExpression; `=` additionally accepts a destructuring pattern (an array/object literal
+    // reinterpreted, recursively), while a COMPOUND assignment (`+=` etc.) requires a simple
+    // target. This rejects calls, literals, `import.meta`, `this`, parenthesized binary
+    // expressions, etc. as targets (the AssignmentTargetType early error), including nested
+    // (`[import.meta] = []`). Mirrors the Lua parser's lvalue check.
+    function isSimpleTarget(n) { return !!n && (n.type === "Identifier" || n.type === "MemberExpression"); }
+    function isAssignTarget(n) {
+        if (!n) return false;
+        if (isSimpleTarget(n)) return true;
+        if (n.type === "ArrayExpression") {
+            for (let i = 0; i < n.elements.length; i++) {
+                const el = n.elements[i];
+                if (el === null) continue;                                   // elision hole
+                if (el.type === "SpreadElement") { if (!isAssignTarget(el.argument)) return false; continue; }
+                if (el.type === "AssignmentExpression" && el.operator === "=") { if (!isAssignTarget(el.left)) return false; continue; }
+                if (!isAssignTarget(el)) return false;
+            }
+            return true;
+        }
+        if (n.type === "ObjectExpression") {
+            for (let i = 0; i < n.properties.length; i++) {
+                const pr = n.properties[i];
+                if (pr.type === "SpreadElement") { if (!isSimpleTarget(pr.argument)) return false; continue; }
+                if (pr.method || pr.kind === "get" || pr.kind === "set") return false;   // not a target
+                let v = pr.value;
+                if (v && v.type === "AssignmentPattern") v = v.left;         // { a = default }
+                if (!isAssignTarget(v)) return false;
+            }
+            return true;
+        }
+        return false;
+    }
+
     function parseAssignment() {
         if (!guard()) { unguard(); return errNode(cur.start); }
         // arrow-function detection is limited without arbitrary lookahead; handled in primary
         // for `(params) =>` and `ident =>`.
         const left = parseConditional();
         if (cur.type === "punctuator" && ASSIGN.has(cur.value)) {
+            const op = cur.value;
+            // Reject an invalid assignment target (still build the node + consume the RHS so
+            // recovery continues; the js.syntax makes the unit invalid).
+            if (op === "=" ? !isAssignTarget(left) : !isSimpleTarget(left)) synErr("invalid assignment target", left);
             const node = mk("AssignmentExpression", left.start);
-            node.operator = cur.value; node.left = left; advance(true);
+            node.operator = op; node.left = left; advance(true);
             node.right = parseAssignment();
             unguard();
             return fin(node);
@@ -979,12 +1021,22 @@ function parseInternal(bytes, opts, inject) {
             return fin(s);
         }
         if (isP("*")) {
-            unsupported("export * is not supported");
+            // ExportAllDeclaration: `export * from "m"` and `export * as ns from "m"`. A re-export
+            // creates NO local binding/reference (the scope resolver's exportInner only binds a
+            // wrapped declaration, which this has none of). `from` is mandatory.
+            const ea = mk("ExportAllDeclaration", s.start);
             advance(true);                          // past `*`
-            if (isKw("as")) { advance(true); parseIdentifierName(); }   // `export * as ns`
-            if (isKw("from")) { advance(true); if (cur.type === "string") advance(false); }
+            ea.exported = null;
+            if (isKw("as")) { advance(true); ea.exported = parseIdentifierName(); }   // `as ns`
+            ea.source = null;
+            if (isKw("from")) {
+                advance(true);
+                ea.source = (cur.type === "string") ? parseLiteral() : (synErr("expected module specifier"), errNode(cur.start));
+            } else {
+                synErr("expected 'from'");           // `export *` / `export * as ns` require `from`
+            }
             semicolon();
-            return errNode(s.start);
+            return fin(ea);
         }
         if (isP("{")) {
             s.specifiers = []; s.declaration = null; advance(true);

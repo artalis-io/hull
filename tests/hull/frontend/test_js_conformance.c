@@ -127,6 +127,10 @@ static const Case VALID[] = {
     { "arrow block body",      "const g2 = (x) => { return x; };" },
     { "async arrow await",     "const h = async (x) => await x;" },
     { "async function decl",   "async function af() { return 1; }" },
+    { "export all",            "export * from \"m\";" },
+    { "export all as ns",      "export * as ns from \"m\";" },
+    { "labeled statement",     "outer: for (;;) break outer;" },
+    { "for-in no-decl",        "for (x in obj) { break; }" },
     { "for await of",          "async function fa() { for await (const x of xs) { use(x); } }" },
     { "class full",            "class C extends B { constructor() { super(); } get x() { return 1; } set x(v) {} static s() {} m() {} }" },
     { "if/elseif/else",        "if (a) { b(); } else if (c) { d(); } else { e(); }" },
@@ -195,7 +199,6 @@ static const Case UNSUPPORTED_VALID[] = {
     { "generator expr",        "const ge = function*() { yield 1; };" },
     { "async generator",       "async function* ag() { yield 1; }" },
     { "private field",         "class P { #priv = 1; #m() { return this.#priv; } }" },
-    { "export all",            "export * from \"m\";" },
 };
 
 /* Expected, DOCUMENTED divergences -- the structural parser and QuickJS legitimately differ:
@@ -247,7 +250,7 @@ UTEST(js_conformance, curated_matrix)
     EXPECT_EQ(t.unsup_reject, 0);
     EXPECT_EQ(t.indeterminate, 0);
     EXPECT_EQ(t.divergence, (int)(sizeof(DIVERGENCE)/sizeof(DIVERGENCE[0])));  /* every allowlisted case diverged */
-    EXPECT_TRUE(t.unsupported >= 6);
+    EXPECT_TRUE(t.unsupported >= 5);
     EXPECT_TRUE(t.agree > 30);
 
     JS_FreeContext(octx); JS_FreeRuntime(ort);
