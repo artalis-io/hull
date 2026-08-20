@@ -515,9 +515,9 @@ static void t262_sha_hex(const void *data, size_t len, char out[65]) {
     while (rem) { size_t k = 64 - c.bl; if (k > rem) k = rem; memcpy(c.b + c.bl, p, k); c.bl += k; p += k; rem -= k;
         if (c.bl == 64) { t262_block(&c, c.b); c.bl = 0; } }
     c.n = (uint64_t)len * 8;
-    uint8_t pad = 0x80; size_t z = (c.bl < 56) ? (56 - c.bl) : (120 - c.bl);
+    size_t z = (c.bl < 56) ? (56 - c.bl) : (120 - c.bl);
     Sha256 *cp = &c;
-    { const uint8_t one = 0x80; (void)pad; memcpy(cp->b + cp->bl, &one, 1); cp->bl++; z--; if (cp->bl==64){t262_block(cp,cp->b);cp->bl=0;} }
+    { const uint8_t one = 0x80; memcpy(cp->b + cp->bl, &one, 1); cp->bl++; z--; if (cp->bl==64){t262_block(cp,cp->b);cp->bl=0;} }
     while (z) { cp->b[cp->bl++] = 0; z--; if (cp->bl==64){t262_block(cp,cp->b);cp->bl=0;} }
     for (int i = 7; i >= 0; i--) { cp->b[cp->bl++] = (uint8_t)(cp->n >> (i*8)); if (cp->bl==64){t262_block(cp,cp->b);cp->bl=0;} }
     static const char hx[] = "0123456789abcdef";
