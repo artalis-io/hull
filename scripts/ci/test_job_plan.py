@@ -10,7 +10,7 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from classify_changes import classify  # noqa: E402
+from classify_changes import classify, PLAN  # noqa: E402
 import job_plan  # noqa: E402
 
 ALL_JOBS = sorted(job_plan.GROUP.keys())
@@ -20,6 +20,17 @@ _fail = 0
 
 def plan_for(paths, event="pull_request", force_full=False):
     return classify(list(paths), event=event, force_full=force_full)["plan"]
+
+
+def full_plan(**overrides):
+    """A COMPLETE canonical plan (the exact PLAN schema, all-False + lint) with
+    overrides applied. Hand-built partial dicts are now rejected as malformed
+    (_well_formed_plan requires the exact schema), so narrow-positive fixtures
+    must build a full plan the way the classifier does."""
+    p = {k: False for k in PLAN}
+    p["lint"] = True
+    p.update(overrides)
+    return p
 
 
 def check(name, cond):
@@ -128,11 +139,11 @@ check("int-valued flag -> broad", is_broad({"lint": True, "focused_js_frontend":
 check("lint-only (no narrow selector) -> broad", is_broad({"lint": True}))
 check("full_all present -> broad", is_broad({"lint": True, "full_all": True}))
 check("full_core present -> broad", is_broad({"lint": True, "full_core": True}))
-# a genuinely-approved narrow plan still narrows (positive path still works)
-check("approved narrow (docs_only) -> not broad", not is_broad({"lint": True, "docs_only": True}))
+# a genuinely-approved COMPLETE narrow plan still narrows (positive path works)
+check("approved narrow (docs_only) -> not broad", not is_broad(full_plan(docs_only=True)))
 check("approved narrow (js) -> focused-js only, no core-common",
-      job_plan.run_flags({"lint": True, "focused_js_frontend": True})["run_focused_js"]
-      and not job_plan.run_flags({"lint": True, "focused_js_frontend": True})["run_core_common"])
+      job_plan.run_flags(full_plan(focused_js_frontend=True))["run_focused_js"]
+      and not job_plan.run_flags(full_plan(focused_js_frontend=True))["run_core_common"])
 
 # ---- Slice 4 checkpoint 3: native narrowing ACTIVE (skipping on) -------------
 # An isolated native change is now NARROW: it runs the core-common floor + its
@@ -208,16 +219,46 @@ check("backend + generic test -> broad",
       is_broad(plan_for(["src/hull/cap/db_postgres.c", "tests/hull/cap/test_db.c"])))
 check("backend + example -> broad",
       is_broad(plan_for(["src/hull/cap/db_postgres.c", "examples/todo/app.lua"])))
-# plan-level: focused_query / focused_tls / a future unknown flag mixed with a
-# native selector -> broad (these have no classifier path yet, so assert directly).
+# plan-level: a COMPLETE, COHERENT plan whose native selector is mixed with a
+# non-approved known flag (focused_query / focused_tls / focused_native_fuzz) ->
+# broad because of the non-approved flag (not because of a schema defect).
 check("plan: backend + focused_query -> broad",
-      is_broad({"lint": True, "focused_db": True, "focused_db_postgres": True, "focused_query": True}))
+      is_broad(full_plan(focused_db=True, focused_db_postgres=True, focused_query=True)))
 check("plan: backend + focused_tls -> broad",
-      is_broad({"lint": True, "focused_db": True, "focused_db_postgres": True, "focused_tls": True}))
+      is_broad(full_plan(focused_db=True, focused_db_postgres=True, focused_tls=True)))
 check("plan: backend + focused_native_fuzz -> broad",
-      is_broad({"lint": True, "focused_db": True, "focused_native_fuzz": True}))
-check("plan: backend + FUTURE unknown flag -> broad",
-      is_broad({"lint": True, "focused_db": True, "focused_db_postgres": True, "future_flag": True}))
+      is_broad(full_plan(focused_db=True, focused_db_postgres=True, focused_native_fuzz=True)))
+# a FUTURE/unknown selector = an EXTRA key beyond the schema -> broad (exact-schema).
+_future = full_plan(focused_db=True, focused_db_postgres=True)
+_future["future_flag"] = True
+check("plan: backend + FUTURE unknown flag -> broad", is_broad(_future))
+
+# ---- CP3 fail-closed: exact schema + native-selector coherence ---------------
+# A syntactically-valid but INCOMPLETE/INCOHERENT plan must go BROAD, never narrow
+# to a partial subsystem set.
+# valid-looking PARTIAL plan (coherent, but missing keys) -> broad.
+check("partial plan (missing keys) -> broad",
+      is_broad({"lint": True, "focused_db": True, "focused_db_postgres": True}))
+# focused_db with NO backend selector -> incoherent -> broad.
+check("focused_db without a backend -> broad", is_broad(full_plan(focused_db=True)))
+# a backend selector with focused_db=False -> incoherent -> broad.
+check("backend without focused_db -> broad", is_broad(full_plan(focused_db_postgres=True)))
+# mismatched compute/wasm pairing -> broad (both directions).
+check("focused_compute without focused_wasm -> broad", is_broad(full_plan(focused_compute=True)))
+check("focused_wasm without focused_compute -> broad", is_broad(full_plan(focused_wasm=True)))
+# the COMPLETE canonical plans continue to narrow correctly (positive path).
+check("canonical docs_only narrows", not is_broad(full_plan(docs_only=True)))
+check("canonical single-backend narrows",
+      not is_broad(full_plan(focused_db=True, focused_db_postgres=True)))
+check("canonical shared-db narrows",
+      not is_broad(full_plan(focused_db=True, focused_db_postgres=True, focused_db_mysql=True,
+                             focused_db_valkey=True, focused_db_duckdb=True)))
+check("canonical compute (paired wasm+compute) narrows",
+      not is_broad(full_plan(focused_compute=True, focused_wasm=True)))
+check("canonical gpu narrows", not is_broad(full_plan(focused_gpu=True)))
+# and the real classifier output for these paths still narrows (schema always exact).
+check("classifier db_postgres plan still narrows", not is_broad(plan_for(["src/hull/cap/db_postgres.c"])))
+check("classifier wasm plan still narrows", not is_broad(plan_for(["src/hull/cap/wasm.c"])))
 
 # ---- CP3 constraint 2: native + approved frontend -> ADDITIVE ----------------
 # core-common + native subsystem + the matching frontend/fuzzer groups; frontend

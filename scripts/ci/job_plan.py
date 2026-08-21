@@ -196,15 +196,34 @@ NATIVE_SUBSYSTEM_GROUPS = frozenset({
 
 
 def _well_formed_plan(plan):
-    """A well-formed plan is a dict whose values are ALL bool, whose keys are ALL
-    known, and that carries the always-on `lint`. An empty `{}`, a list, an unknown
-    key, or a non-bool value is malformed (-> fail closed to broad)."""
+    """A well-formed plan is a coherent CANONICAL plan: the EXACT plan schema (no
+    missing, extra, or unknown key), every value boolean, the always-on `lint`
+    set, AND the classifier's native-selector coherence invariants. Anything
+    else - a partial subset, a syntactically-valid-but-incomplete plan, or an
+    incoherent selector combination - is malformed and fails closed to BROAD (it
+    must not be allowed to narrow to a partial subsystem set). The coherence
+    invariants mirror derive_plan()'s contract:
+      - focused_db is set IFF at least one backend selector is set;
+      - focused_compute and focused_wasm are always paired (set together)."""
     if not isinstance(plan, dict):
         return False
-    for k, v in plan.items():
-        if not isinstance(v, bool) or k not in KNOWN_PLAN_KEYS:
-            return False
-    return bool(plan.get("lint"))
+    if set(plan.keys()) != KNOWN_PLAN_KEYS:
+        return False                                # not the exact plan schema
+    for v in plan.values():
+        if not isinstance(v, bool):
+            return False                            # non-boolean field
+    if not plan["lint"]:
+        return False                                # a real plan always runs lint
+    # native-selector coherence (derive_plan contract): a backend selector without
+    # focused_db, or focused_db without any backend selector, is incoherent.
+    any_backend = (plan["focused_db_postgres"] or plan["focused_db_mysql"]
+                   or plan["focused_db_valkey"] or plan["focused_db_duckdb"])
+    if plan["focused_db"] != any_backend:
+        return False
+    # the classifier always pairs focused_compute + focused_wasm.
+    if plan["focused_compute"] != plan["focused_wasm"]:
+        return False
+    return True
 
 
 def _is_broad_plan(plan):
