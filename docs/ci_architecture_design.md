@@ -1095,5 +1095,177 @@ self-trust caveat (§8) — governance stays with CODEOWNERS/branch protection.
     `ci_gate` plan-derived path. Branch protection UNCHANGED (`ci-success` still
     not required). Proven live: a pure-frontend PR skips ~43 jobs while the gate
     passes; an unexpected skip of an applicable job fails the gate.
-- **Slices 4-6:** domain/native mapping; cache+matrix (wamrc cache, kill the 9x
-  rebuild); nightly (schedule) + rollout. Each stops for review.
+- **Slice 4 (DESIGN in Appendix C; awaiting review):** DB/GPU/compute
+  native-integration triggers - carve the expensive per-subsystem integrations
+  out of an always-run core-common floor. Three checkpoints: design -> additive
+  proof -> skip activation. NOT implemented.
+- **Slices 5-6:** cache+matrix (wamrc cache, kill the 9x rebuild); nightly
+  (schedule) + rollout. Each stops for review.
+
+---
+
+# Appendix C. Slice 4 design - DB / GPU / compute native-integration triggers
+
+Status: **DESIGN (awaiting review). NOT implemented.** First of Slice 4's three
+review checkpoints: **design -> additive proof -> skip activation.** No
+implementation and no branch-protection change until the design is ratified.
+
+## C.0 Locked constraints (ratified)
+
+1. Every production C change still runs a **core-common floor**: representative
+   builds, sanitizers / static analysis, reproducibility, lint, and applicable
+   platform checks.
+2. Classification follows **actual compilation / link / dependency closure**, not
+   filename intuition.
+3. **Shared DB code fans out to every DB backend;** backend-specific code selects
+   that backend plus core-common.
+4. **Shared runtime, public headers (`include/**`), vendor changes, `Makefile` /
+   `mk/**`, feature composition, unknown paths, `main`, and force-full remain
+   fully broad.**
+5. Per-subsystem plans are **additive**: a DB + GPU change runs both sets; a
+   shared/core change runs all.
+6. Include **matching protocol fuzzers** where relevant.
+7. Keep the existing **four-platform `make test` build as part of core-common**
+   for now; Slice 4 only removes redundant *secondary integrations*.
+8. **TLS and generic tooling remain broad** (no proven isolated suite yet).
+9. **No skipping** is permitted until each mapping is proven additively (see C.7).
+
+## C.1 Classification method (dependency closure, not filenames)
+
+A source file narrows to a subsystem ONLY if its compilation/link closure is
+confined to that subsystem. The closure is read from the Makefile / `mk/**` and
+the `HL_ENABLE_*` gating, NOT from the filename:
+
+- A **backend `.c`** (e.g. `cap/db_postgres.c`, `cap/pgwire.c`, `cap/pg_conn.c`)
+  compiles only into the `HL_ENABLE_POSTGRES` build + its unit tests
+  (`test_pgwire`, `test_pg_conn`) + its protocol fuzzers (`fuzz_pgwire`,
+  `fuzz_pg_dsn`, `fuzz_pg_rewrite`). It does not enter the MySQL/GPU/WASM closures
+  -> it may narrow to the `db-postgres` subsystem.
+- The **shared DB selector** `cap/db_select.c` `#include`s every backend header
+  and populates `BACKENDS[]`; `cap/db.c` / `db_common.c` / `db_registry.c` /
+  `db_dynamic.c` / `db_udf.c` are on every backend's link path. Their closure is
+  ALL DB backends -> they fan out to the whole `db` subsystem (constraint 3).
+- **Any public header** (`include/**`) is on an unbounded consumer closure -> broad
+  (constraint 4), even a `cap/db_postgres.h`.
+- The curated isolated-file allowlist (C.3) is **verified against the actual
+  compile targets** during the checkpoint-1 implementation; a file whose closure
+  cannot be confirmed subsystem-local stays broad (fail closed).
+
+## C.2 Job buckets - core-common vs each subsystem (exact, with rationale)
+
+The current single `full-matrix` group is split into **core-common + native
+subsystems**. Unit coverage stays FULL for every production-C change (core-common
+runs `build` = `make test` = all ~90 unit binaries on 4 platforms); only the
+expensive *secondary integrations* of the untouched subsystems are skipped.
+
+**always** (unchanged): `classify`, `lint`, `ci-success`.
+
+**core-common** (runs for every production-C change AND every broad run) - the
+subsystem-AGNOSTIC floor:
+| job | why core-common |
+|---|---|
+| `build` (Linux/clang/aarch64/macOS) | `make test` runs ALL unit tests (incl. `test_db*`, `test_wasm*`, `test_gpu`, `test_js_*`) on 4 platforms - constraint 7 |
+| `build-pipeline` (Linux/macOS) | platform+package build path |
+| `flavors` | link-flavor floor (DB=0/HTTP=0/IMAGE=0/…) |
+| `sanitizers` (ASan+UBSan), `msan`, `tsan` | memory/UB/data-race floor - constraint 1 |
+| `analyze` (scan-build + cppcheck) | static-analysis floor |
+| `coverage` | metric floor |
+| `reproducibility`, `reproducibility-container`, `-interleave`, `-cosmo`, `-cosmo-compare` | byte-reproducibility floor - constraint 1 |
+| `cosmo`, `musl` | applicable platform checks - constraint 1 |
+| `embed-rust`, `embed-zig` | libhull ABI floor |
+| `fuzz-core-security` (NEW - see C.4) | net/fs/config security fuzzers (sh_json, path_normalize, mime_sniff, host_match) |
+| `benchmark` | push-only; core-common on push |
+
+**db** subsystem (secondary integrations; sub-grouped per backend so a
+backend-specific change selects only its backend - constraint 3):
+| sub-group | jobs | source closure |
+|---|---|---|
+| `db-postgres` | `postgres` (real PG16), `postgres-feature`, `fuzz-db-wire` (pg part) | `cap/db_postgres.c`, `cap/pgwire.c`, `cap/pg_conn.c` |
+| `db-mysql` | `mysql` (real MySQL8), `mysql-feature`, `fuzz-db-wire` (mysql part) | `cap/db_mysql.c`, `cap/mysqlwire.c`, `cap/mysql_conn.c` |
+| `db-valkey` | `valkey` (redis + feature), `fuzz-db-wire` (resp part) | `cap/valkey.c`, `cap/valkey_conn.c`, `cap/valkey_register.c`, `cap/respwire.c` |
+| `db-duckdb` | `duckdb`, `duckdb-feature` | `cap/db_duckdb.c` |
+| `db-shared` -> ALL of the above | | `cap/db.c`, `db_common.c`, `db_registry.c`, `db_select.c`, `db_dynamic.c`, `db_udf.c`, `kv.c`, `kv_dynamic.c`, `kv_feature.c` |
+
+(SQLite has no separate integration job - it is the default backend, exercised by
+`make test` in core-common - so `cap/db_sqlite.c` maps to core-common only.)
+
+**gpu** subsystem: `gpu` (macOS Metal), `gpu-feature` (Linux). Source:
+`cap/gpu_wgpu.c`, `cap/gpu_feature.c`, and the base dispatch `cap/gpu.c`.
+
+**compute** subsystem: the AOT cluster + shared-heap TSan + the compute fuzzer -
+`wasm-readonly-heap-aot`, `mapped-span-bench`, `compute-aot-shared-heap`,
+`compute-memops-freestanding`, `stream-meta`, `spans-example`, `spans-multi`,
+`spans-hugefile`, `wasm-guarded-aot-arm64`, `tsan-shared-heap`, `fuzz-compute-span`
+(NEW). Source: `cap/wasm.c`, `wasm_buffer.c`, `wasm_data.c`, `wasm_spans.c`,
+`wasm_stream.c`, `worker_wasm.c`, `runtime/{lua,js}/mod_compute.c`.
+
+**frontend/web** subsystem (from Slice 3b, extended): `focused-js-frontend`,
+`focused-lua-frontend`, `fuzz-js-source`, `fuzz-lua-source`, `htmx-browser`,
+`project-discovery-lua`. A **native** (DB/GPU/compute) change does NOT touch the
+frontend/web integrations, so they skip (their unit coverage still runs via
+core-common `make test`); a broad change runs them.
+
+## C.3 Path classification (curated isolated allowlist + fail-closed default)
+
+`classify_changes.py` gains, for `src/**`, a POSITIVE isolated-subsystem allowlist
+(the C.2 backend/gpu/compute `.c` sets). A matched file emits ONLY its subsystem
+fact (`native_db_changed` + a per-backend fact / `gpu_changed` / `compute_changed`)
+- NOT `production_core_changed`. **Every other `src/**` path, and all of
+`include/**`, `vendor/**`, `Makefile`, `mk/**`, feature composition, and unknown
+paths, keep emitting `production_core_changed` / `build_composition_changed` ->
+BROAD** (constraint 4). Shared-DB files emit `native_db_changed` with ALL per-backend
+facts (constraint 3). Anything ambiguous stays broad (fail closed).
+
+## C.4 Fuzz split (matching protocol fuzzers - constraint 6)
+
+`fuzz-native-security` (today one job of 13 fuzzers) splits into three, mirroring
+Slice 3b's parser-fuzz split, so a subsystem change runs its own protocol fuzzers:
+- `fuzz-core-security` (core-common): `sh_json`, `path_normalize`, `mime_sniff`, `host_match`.
+- `fuzz-db-wire` (db subsystem): `pgwire`, `pg_dsn`, `pg_rewrite`, `mysqlwire`, `mysql_dsn`, `respwire`, `valkey_dsn`.
+- `fuzz-compute-span` (compute subsystem): `span_sdk`, `span_window`.
+
+## C.5 Applicability-map extension (`job_plan.py`)
+
+New groups (`core-common`, `db-postgres`, `db-mysql`, `db-valkey`, `db-duckdb`,
+`gpu`, `compute`, `fuzz-core-security`, `fuzz-db-wire`, `fuzz-compute-span`) added
+to the SAME single map that drives both job `if:` and the gate allow-skip.
+Applicable-groups derivation (fail-closed positive allowlist, mirroring 3b):
+- `full_all` / `full_core` / `build_composition` / unknown -> **every** group (broad).
+- narrow native (an isolated subsystem fact set, no `production_core`) ->
+  `always` + `core-common` + the specific subsystem group(s). **Additive**
+  (DB+GPU -> both).
+- narrow frontend / docs (Slice 3b) -> unchanged (no core-common).
+- `benchmark` stays push-only.
+Every job DEFAULTS applicable (unmapped -> `always`); `check_job_plan_consistency.py`
+continues to require each job's `if:` to reference EXACTLY its group flag.
+
+## C.6 Non-scope (explicit)
+
+- **No `make test` split.** The 4-platform `build`/`make test` stays core-common
+  and runs for every production-C change (constraint 7). Slice 4 removes only the
+  redundant *secondary integrations* (real engines, GPU hardware, wamrc AOT,
+  browser, feature composes) of untouched subsystems.
+- **TLS and generic tooling remain broad** (constraint 8) - no isolated suite.
+- No new narrow class for web/tooling; the frontend/web jobs only *skip for
+  native changes*, they are not a new PR-narrow selector.
+- No branch-protection change; `ci-success` stays reported-but-not-required.
+
+## C.7 Proof plan + review checkpoints
+
+**Checkpoint 1 - design (this section).** Stop for review.
+
+**Checkpoint 2 - additive proof (no skipping yet).** Land the classification +
+map + fuzz split with the new subsystem jobs, but with NOTHING skipped (jobs still
+`if: true`-equivalent), and prove additively via fixtures + a live run:
+- broad change -> all subsystems applicable;
+- backend-specific: `cap/db_postgres.c` -> `db-postgres` only (not mysql/valkey/duckdb/gpu/compute); likewise a `cap/gpu_wgpu.c`-only and a `cap/wasm.c`-only case;
+- mixed-subsystem: a DB + GPU change -> both sets;
+- shared-change: `cap/db_select.c` -> ALL db backends; `Makefile`/`include/**`/`vendor/**` -> broad;
+- malformed-plan -> broad;
+- unexpected-skip -> gate fails.
+Stop for review.
+
+**Checkpoint 3 - skip activation.** Turn on the `if:` skipping + gate allow-skip
+for the proven subsystem groups, and prove live: a backend-specific PR skips the
+other subsystems' integrations while core-common + its subsystem run and the gate
+passes; a shared/broad PR runs everything. Stop for review.
