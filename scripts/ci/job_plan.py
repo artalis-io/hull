@@ -101,7 +101,10 @@ GROUP = {
     # -- gpu subsystem --
     "gpu": "gpu",
     "gpu-feature": "gpu",
-    # -- compute subsystem (AOT cluster + shared-heap TSan + span fuzzer) --
+    # -- compute subsystem (AOT cluster + shared-heap TSan + span fuzzer +
+    # the Slice-5A wamrc producer/verify) --
+    "wamrc-x86_64": "compute",
+    "wamrc-artifact-verify": "compute",
     "wasm-readonly-heap-aot": "compute",
     "mapped-span-bench": "compute",
     "compute-aot-shared-heap": "compute",

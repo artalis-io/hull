@@ -102,5 +102,62 @@ expect("realistic PR (benchmark skipped, rest success)",
          cosmo="success", lint="success", benchmark="skipped"),
        allow_skip=("benchmark",), should_pass=True)
 
+# -- Slice 5A: the wamrc producer/verify are compute-grouped. On a compute-
+#    applicable plan they are NOT allowed skips, so a producer failure (which
+#    skips its consumer via `needs`) and a consumer verification failure BOTH
+#    reach a RED gate; on a non-compute plan they legitimately skip. The allow-skip
+#    set is DERIVED from the shared map (not a hand list), so the gate and the job
+#    `if:` conditions cannot disagree.
+import job_plan  # noqa: E402
+from classify_changes import classify  # noqa: E402
+
+_ALL5 = sorted(job_plan.GROUP.keys())
+_compute_plan = classify(["src/hull/cap/wasm.c"])["plan"]   # narrow compute -> compute applicable
+_allow5 = job_plan.allow_skip_jobs(_compute_plan, _ALL5, "pull_request")
+_docs_plan = classify(["docs/x.md"])["plan"]
+_allow_docs = job_plan.allow_skip_jobs(_docs_plan, _ALL5, "pull_request")
+
+
+def _ck(name, cond):
+    global _pass, _fail
+    if cond:
+        _pass += 1
+    else:
+        _fail += 1
+        print("FAIL:", name)
+
+
+_ck("5A: producer NOT an allowed skip on a compute plan", "wamrc-x86_64" not in _allow5)
+_ck("5A: verify NOT an allowed skip on a compute plan", "wamrc-artifact-verify" not in _allow5)
+_ck("5A: producer IS an allowed skip on a docs plan", "wamrc-x86_64" in _allow_docs)
+_ck("5A: verify IS an allowed skip on a docs plan", "wamrc-artifact-verify" in _allow_docs)
+
+# producer failure -> its consumer is skipped by `needs`; on a compute plan that
+# applicable skip is DISALLOWED -> gate FAIL (the producer failure also fails it).
+expect("5A: producer failure + consumer skipped -> gate FAIL",
+       R(classify="success", build="success",
+         **{"wamrc-x86_64": "failure", "wamrc-artifact-verify": "skipped"}),
+       allow_skip=_allow5, should_pass=False)
+# a consumer verification failure -> gate FAIL (never silently rebuilt).
+expect("5A: consumer verify failure -> gate FAIL",
+       R(classify="success", build="success",
+         **{"wamrc-x86_64": "success", "wamrc-artifact-verify": "failure"}),
+       allow_skip=_allow5, should_pass=False)
+# the missing-artifact case surfaces as the consumer FAILING (not skipping) -> FAIL.
+expect("5A: missing-artifact consumer failure -> gate FAIL",
+       R(classify="success", build="success",
+         **{"wamrc-x86_64": "success", "wamrc-artifact-verify": "failure"}),
+       allow_skip=_allow5, should_pass=False)
+# happy path -> pass.
+expect("5A: producer + verify success -> gate pass",
+       R(classify="success", build="success",
+         **{"wamrc-x86_64": "success", "wamrc-artifact-verify": "success"}),
+       allow_skip=_allow5, should_pass=True)
+# on a non-compute (docs) plan they legitimately skip -> pass.
+expect("5A: producer+verify skipped on docs plan -> gate pass",
+       R(classify="success", lint="success",
+         **{"wamrc-x86_64": "skipped", "wamrc-artifact-verify": "skipped"}),
+       allow_skip=_allow_docs, should_pass=True)
+
 print("ci_gate fixtures: %d passed, %d failed" % (_pass, _fail))
 sys.exit(1 if _fail else 0)
