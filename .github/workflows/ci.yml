@@ -566,7 +566,7 @@ jobs:
   # builds + runs the C-API test with a real wamrc-emitted .aot fixture and FAILS
   # if the AOT sub-case is SKIPPED. That closes the "AOT is dormant in CI" gap.
   wasm-readonly-heap-aot:
-    needs: [classify]
+    needs: [classify, wamrc-x86_64]
     if: needs.classify.outputs.run_compute == 'true'
     name: WAMR AOT C-API tests (readonly + guarded, x86_64)
     runs-on: ubuntu-24.04
@@ -580,14 +580,20 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y llvm-18-dev cmake
 
-      - name: Build wamrc (applies the WAMR read-only patch carriage)
+      - name: Download verified wamrc artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
+        with:
+          name: wamrc-x86_64
+          path: artifact
+
+      - name: Consume verified wamrc artifact (cold-verify, no build)
         timeout-minutes: 12
         run: |
           if command -v llvm-config-18 >/dev/null 2>&1; then
             llvm_cmakedir=$(llvm-config-18 --cmakedir)
             export WAMRC_CMAKE_FLAGS="-DLLVM_DIR=${llvm_cmakedir}"
           fi
-          make wamrc
+          sh tests/ci_wamrc_consume.sh
 
       - name: Build + run the AOT C-API case (must NOT skip)
         timeout-minutes: 12
@@ -737,7 +743,7 @@ jobs:
   # baselines stabilize (docs/mapped_span_benchmark_design.md D11). A 1 GiB
   # controlled run is the separate manually-triggered bench_mapped_span_1g.yml.
   mapped-span-bench:
-    needs: [classify]
+    needs: [classify, wamrc-x86_64]
     if: needs.classify.outputs.run_compute == 'true'
     name: Mapped-span benchmark (96 MiB, x86_64)
     runs-on: ubuntu-24.04
@@ -753,13 +759,19 @@ jobs:
           # wabt provides wasm-objdump for the G4 static bytecode gate.
           sudo apt-get install -y llvm-18-dev cmake wabt clang lld
 
-      - name: Build wamrc
+      - name: Download verified wamrc artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
+        with:
+          name: wamrc-x86_64
+          path: artifact
+
+      - name: Consume verified wamrc artifact (cold-verify, no build)
         timeout-minutes: 12
         run: |
           if command -v llvm-config-18 >/dev/null 2>&1; then
             export WAMRC_CMAKE_FLAGS="-DLLVM_DIR=$(llvm-config-18 --cmakedir)"
           fi
-          make wamrc
+          sh tests/ci_wamrc_consume.sh
 
       - name: Run mapped-span benchmark (must NOT skip AOT)
         timeout-minutes: 30
@@ -786,7 +798,7 @@ jobs:
   # Drives the REAL production `hull build` path (embedded hull + wamrc), so the
   # AOT is exercised non-skippably.
   compute-aot-shared-heap:
-    needs: [classify]
+    needs: [classify, wamrc-x86_64]
     if: needs.classify.outputs.run_compute == 'true'
     name: Compute AOT shared-heap reads (spans + segments)
     runs-on: ubuntu-24.04
@@ -800,14 +812,20 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y llvm-18-dev cmake
 
-      - name: Build embedded hull (platform lib) + wamrc
+      - name: Download verified wamrc artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
+        with:
+          name: wamrc-x86_64
+          path: artifact
+
+      - name: Build embedded hull (platform lib) + consume verified wamrc
         timeout-minutes: 15
         run: |
           make platform
           if command -v llvm-config-18 >/dev/null 2>&1; then
             export WAMRC_CMAKE_FLAGS="-DLLVM_DIR=$(llvm-config-18 --cmakedir)"
           fi
-          make wamrc
+          sh tests/ci_wamrc_consume.sh
           # Embed LAST: a later bare `make` would clobber the embedding
           # (EMBED_PLATFORM is not in the config sentinel), and the e2e needs it.
           make EMBED_PLATFORM=1
@@ -857,7 +875,7 @@ jobs:
   # Drives the real driver (needs a wasm clang + wasm-ld), so this job installs
   # clang + lld; the AOT leg needs an embedded hull + wamrc.
   compute-memops-freestanding:
-    needs: [classify]
+    needs: [classify, wamrc-x86_64]
     if: needs.classify.outputs.run_compute == 'true'
     name: Freestanding libc (memcpy/memset/memmove) — interp + AOT
     runs-on: ubuntu-24.04
@@ -874,14 +892,20 @@ jobs:
           # are for building wamrc.
           sudo apt-get install -y clang lld wabt llvm-18-dev cmake
 
-      - name: Build embedded hull (platform lib) + wamrc
+      - name: Download verified wamrc artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
+        with:
+          name: wamrc-x86_64
+          path: artifact
+
+      - name: Build embedded hull (platform lib) + consume verified wamrc
         timeout-minutes: 15
         run: |
           make platform
           if command -v llvm-config-18 >/dev/null 2>&1; then
             export WAMRC_CMAKE_FLAGS="-DLLVM_DIR=$(llvm-config-18 --cmakedir)"
           fi
-          make wamrc
+          sh tests/ci_wamrc_consume.sh
           # Embed LAST: a later bare `make` would clobber the embedding
           # (EMBED_PLATFORM is not in the config sentinel), and the e2e needs it.
           make EMBED_PLATFORM=1
@@ -907,7 +931,7 @@ jobs:
   # (#331): hull_stream_is_first/is_last/chunk_index over a real 3-chunk
   # compute.stream, Lua + JS, interpreter + AOT. Needs clang + wamrc + embedded hull.
   stream-meta:
-    needs: [classify]
+    needs: [classify, wamrc-x86_64]
     if: needs.classify.outputs.run_compute == 'true'
     name: compute stream metadata helpers — Lua + JS, interp + AOT
     runs-on: ubuntu-24.04
@@ -921,14 +945,20 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y clang lld llvm-18-dev cmake
 
-      - name: Build embedded hull (platform lib) + wamrc
+      - name: Download verified wamrc artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
+        with:
+          name: wamrc-x86_64
+          path: artifact
+
+      - name: Build embedded hull (platform lib) + consume verified wamrc
         timeout-minutes: 15
         run: |
           make platform
           if command -v llvm-config-18 >/dev/null 2>&1; then
             export WAMRC_CMAKE_FLAGS="-DLLVM_DIR=$(llvm-config-18 --cmakedir)"
           fi
-          make wamrc
+          sh tests/ci_wamrc_consume.sh
           make EMBED_PLATFORM=1
 
       - name: Stream-metadata E2E (Lua + JS, interp + AOT, must NOT skip)
@@ -952,7 +982,7 @@ jobs:
   # `hull build` path (--enable-shared-heap). Needs a wasm clang + wamrc + an
   # embedded hull; runs non-skippably here.
   spans-example:
-    needs: [classify]
+    needs: [classify, wamrc-x86_64]
     if: needs.classify.outputs.run_compute == 'true'
     name: mapped_spans example — Lua + JS, interp + AOT (public SDK)
     runs-on: ubuntu-24.04
@@ -966,14 +996,20 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y clang lld llvm-18-dev cmake
 
-      - name: Build embedded hull (platform lib) + wamrc
+      - name: Download verified wamrc artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
+        with:
+          name: wamrc-x86_64
+          path: artifact
+
+      - name: Build embedded hull (platform lib) + consume verified wamrc
         timeout-minutes: 15
         run: |
           make platform
           if command -v llvm-config-18 >/dev/null 2>&1; then
             export WAMRC_CMAKE_FLAGS="-DLLVM_DIR=$(llvm-config-18 --cmakedir)"
           fi
-          make wamrc
+          sh tests/ci_wamrc_consume.sh
           # Embed LAST: a later bare `make` would clobber the embedding
           # (EMBED_PLATFORM is not in the config sentinel), and the e2e needs it.
           make EMBED_PLATFORM=1
@@ -999,7 +1035,7 @@ jobs:
   # lookup (+ unknown -1), Lua AND JS, interpreter AND AOT via the production
   # `hull build` path. Needs a wasm clang + wamrc + an embedded hull; non-skippable.
   spans-multi:
-    needs: [classify]
+    needs: [classify, wamrc-x86_64]
     if: needs.classify.outputs.run_compute == 'true'
     name: mapped spans — multiple named spans, Lua + JS, interp + AOT
     runs-on: ubuntu-24.04
@@ -1013,14 +1049,20 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y clang lld llvm-18-dev cmake
 
-      - name: Build embedded hull (platform lib) + wamrc
+      - name: Download verified wamrc artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
+        with:
+          name: wamrc-x86_64
+          path: artifact
+
+      - name: Build embedded hull (platform lib) + consume verified wamrc
         timeout-minutes: 15
         run: |
           make platform
           if command -v llvm-config-18 >/dev/null 2>&1; then
             export WAMRC_CMAKE_FLAGS="-DLLVM_DIR=$(llvm-config-18 --cmakedir)"
           fi
-          make wamrc
+          sh tests/ci_wamrc_consume.sh
           # Embed LAST: a later bare `make` would clobber the embedding
           # (EMBED_PLATFORM is not in the config sentinel), and the e2e needs it.
           make EMBED_PLATFORM=1
@@ -1045,7 +1087,7 @@ jobs:
   # (first/exact-end/one-past/straddle), Lua + JS, interpreter + AOT (3b
   # completion). Uses a SPARSE 5 GiB file (no real disk) so it runs anywhere.
   spans-hugefile:
-    needs: [classify]
+    needs: [classify, wamrc-x86_64]
     if: needs.classify.outputs.run_compute == 'true'
     name: mapped spans — >4GiB foffset + setup capacity, Lua + JS, interp + AOT
     runs-on: ubuntu-24.04
@@ -1059,14 +1101,20 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y clang lld llvm-18-dev cmake
 
-      - name: Build embedded hull (platform lib) + wamrc
+      - name: Download verified wamrc artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
+        with:
+          name: wamrc-x86_64
+          path: artifact
+
+      - name: Build embedded hull (platform lib) + consume verified wamrc
         timeout-minutes: 15
         run: |
           make platform
           if command -v llvm-config-18 >/dev/null 2>&1; then
             export WAMRC_CMAKE_FLAGS="-DLLVM_DIR=$(llvm-config-18 --cmakedir)"
           fi
-          make wamrc
+          sh tests/ci_wamrc_consume.sh
           make EMBED_PLATFORM=1
 
       - name: Huge-file / setup-capacity E2E (Lua + JS, interp + AOT, must NOT skip)
