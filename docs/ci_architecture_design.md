@@ -1100,10 +1100,15 @@ self-trust caveat (§8) — governance stays with CODEOWNERS/branch protection.
   integrations are carved out of an always-run core-common floor. Live-proven:
   an isolated backend change runs core-common + its subsystem and skips the rest;
   shared/mixed-unapproved/malformed changes expand to broad.
-- **Slice 5 (DESIGN in Appendix D; awaiting review):** 5A wamrc/toolchain reuse
-  (producer -> immutable workflow artifact -> AOT consumers, killing the 9x
-  redundant wamrc build) and 5B matrix reduction (dimension->property inventory +
-  equivalence proof). Separate checkpoints; NOT implemented.
+- **Slice 5A (COMPLETE; #382 design / #383 additive / #384 reliance-flip):** wamrc
+  reuse - a producer builds wamrc once, an immutable run-scoped artifact, 8 x86_64
+  AOT consumers cold-verify + consume it (arm64 self-builds, canary retained).
+  ~2 runner-min saved, no critical-path regression.
+- **Slice 5B (CLOSED; audit in Appendix E, #385):** matrix dimension->property
+  inventory + equivalence proposals. Outcome: "audited; no worthwhile safe
+  reduction found" - the matrix is already lean, every leg proves a distinct
+  property, and the one candidate (flavors subsystem-split) was declined as
+  too-low-value for another permanent classification boundary. No 5B.2 activation.
 - **Slice 6:** nightly (schedule) + rollout. Stops for review.
 
 ---
@@ -1606,3 +1611,171 @@ scoped by Slice 4; 5B only asks whether a narrow native path needs every
 **Non-scope for all of Slice 5:** no branch-protection change, no nightly /
 schedule, no release cache trust change. `release.yml` and the reproducibility
 jobs stay independent and from-source.
+
+# Appendix E. Slice 5B.1 - matrix dimension -> property audit + reduction proposals
+
+Status: **AUDIT ONLY - reviewed; Slice 5B CLOSED (no reduction adopted). NOTHING
+changed.** No job matrix, applicability, branch protection, scheduling, cache, or
+release-trust change. This is the FINAL 5B deliverable (D.2): the dimension ->
+property inventory + equivalence-backed proposals. The one candidate (P1) was
+declined at review (E.3/E.5); there is no 5B.2 activation.
+
+## E.0 Method
+
+Every matrix leg / platform / flavor is listed with the UNIQUE property it proves
+(read from what it compiles + runs, and the `HL_ENABLE_*` gating in `mk/flags.mk`,
+not from "looks similar"). A leg is a reduction candidate ONLY if a surviving
+config proves the same property; each proposal carries a `removed | property |
+replacement` row. The exhaustive-behavior invariants (E.4) are never candidates.
+
+## E.1 Dimension -> property inventory
+
+**`build` matrix (4 legs, the four-platform `make test` = every unit binary).**
+Each leg proves a DISTINCT toolchain/OS/arch property; none is redundant:
+| leg | runs-on | unique property |
+|---|---|---|
+| Linux | ubuntu-24.04 (gcc, x86_64) | gcc x86_64 codegen + the default glibc build; the baseline every other job's toolchain is compared against |
+| Linux (clang) | ubuntu-24.04 (clang, x86_64) | clang-only diagnostics/UB + `-Werror` classes gcc does not emit (and vice versa) |
+| Linux (aarch64) | ubuntu-24.04-arm (gcc, aarch64) | arch-specific behavior: SIMD/NEON, alignment, 64-bit codegen, AOT/span pointer width on real aarch64 |
+| macOS | macos-15 (clang, arm64) | BSD libc, Seatbelt sandbox, kqueue event loop, ld64 linker, Mach-O - none exercised on Linux |
+
+**Sanitizer / analysis floor (all ubuntu-24.04 x86_64) - each catches a DIFFERENT
+bug class:** `sanitizers` (ASan+UBSan: heap/stack/UB), `msan` (uninitialized
+reads), `tsan` (data races, worker pool), `tsan-shared-heap` (races on the WAMR
+shared-heap destroy/guarded-subrange path), `analyze` (scan-build + cppcheck
+static), `coverage` (metric). No two prove the same property.
+
+**Reproducibility (release-verification invariant - E.4):** `reproducibility`
+{Linux runner, macOS runner} (byte-repro on the GH host image), `reproducibility
+-container` (pinned-toolchain Linux container - the STRONGER repro), `-interleave`
+(host-interleave ordering), `reproducibility-cosmo` {a,b} (two independent cosmo
+builds) + `-cosmo-compare` (asserts a == b). Each proves repro on a distinct
+build surface; all are release-trust anchors.
+
+**Platform/link floor (all distinct):** `cosmo` (APE fat-binary build + sandbox),
+`musl` (Alpine static-libc floor), `build-pipeline` {Linux, macOS} (the
+platform+package build path, distinct from `build`'s unit-test path),
+`embed-rust` / `embed-zig` (the libhull no-runtime C-ABI embedder for two host
+toolchains).
+
+**`flavors` matrix (7 legs, ubuntu-24.04, LINK-only - no tests).** Each proves ONE
+`HL_ENABLE_*` link composes; grouped by the subsystem whose code it links (E.3):
+| leg | flag | links / proves | affected by |
+|---|---|---|---|
+| compute-only | `HL_ENABLE_DB=0` | DB fully dropped (no sqlite/pg/mysql, no migrate/session) | core/runtime only - NO db backend file is compiled here |
+| pure-compute | `HL_ENABLE_HTTP=0` | mbedTLS dropped; crypto SHA/HMAC fall back to in-tree | core/crypto/http gating |
+| image-less | `HL_ENABLE_IMAGE=0` | cap/image + stb fully unlinked; mod_gpu image paths gated | core/image only |
+| sqlite + postgres | `HL_ENABLE_POSTGRES=1` | pgwire/pg_conn/db_postgres + shared TLS link on top of sqlite | db-postgres + shared-db + sqlite + core |
+| postgres-only | `SQLITE=0 POSTGRES=1` | pg link with sqlite dropped (SQLite-gating holds) | db-postgres + shared-db + core |
+| sqlite + mysql | `HL_ENABLE_MYSQL=1` | mysqlwire/mysql_conn/db_mysql + TLS link | db-mysql + shared-db + sqlite + core |
+| mysql-only | `SQLITE=0 MYSQL=1` | mysql link with sqlite dropped | db-mysql + shared-db + core |
+
+**Native subsystem integrations (Slice-4 grouped):** DB engines `postgres` /
+`mysql` / `valkey` / `duckdb` (+ `*-feature`) each prove a DISTINCT engine over the
+real wire protocol; `gpu` (macOS Metal backend) + `gpu-feature` (Linux vulkan
+backend) prove TWO distinct GPU backends; the compute cluster (`wasm-readonly-heap
+-aot`, `compute-aot-shared-heap`, `compute-memops-freestanding`, `stream-meta`,
+`spans-example` / `-multi` / `-hugefile`, `mapped-span-bench`, `wasm-guarded-aot
+-arm64`, `tsan-shared-heap`, `fuzz-compute-span`, + the 5A `wamrc-x86_64` /
+`wamrc-artifact-verify`) each prove a distinct AOT/span scenario; `fuzz-db-wire`
+(all DB wire fuzzers). `wasm-guarded-aot-arm64` is the ONLY aarch64 compute leg
+(distinct arch). None duplicates another.
+
+**Frontend/web + benchmark:** `focused-js-frontend` / `focused-lua-frontend`
+(embedded-host frontend), `fuzz-js-source` / `fuzz-lua-source` (parser fuzz),
+`htmx-browser` {Linux, macOS} (Chromium widget behavior + WCAG),
+`project-discovery-lua` (discovery tooling), `benchmark` {lua, js} (push-only,
+informational).
+
+## E.2 Which platform/compiler legs actually compile each backend (constraint)
+
+Read from `mk/flags.mk`: `HL_ENABLE_POSTGRES` / `MYSQL` / `DUCKDB` all default `0`,
+so the `build` matrix (`make test`, default flags) does NOT compile the pg / mysql
+/ duckdb wire backends on ANY platform. Those TUs compile ONLY where the flag is
+forced - the `flavors` legs, the `*-feature` builds, and the e2e jobs - **all of
+which run on `ubuntu-24.04` (Linux x86_64 gcc)**. Therefore:
+
+- **The DB wire backends (pg / mysql / valkey / duckdb) are Linux-x86_64-only by
+  construction.** A backend-specific native change (Slice-4-scoped to its db
+  subsystem) already runs its jobs on the only platform that compiles it; there is
+  NO macOS / aarch64 / clang leg of that backend to reduce. The "retain the
+  platform/compiler combos that compile the backend" rule is **already satisfied by
+  Slice 4** - no 5B action needed for DB platforms.
+- **GPU compiles on TWO platforms** - macOS (`HL_ENABLE_GPU=1`, Metal) and Linux
+  (`make feature-gpu`, vulkan). A gpu-narrow change must keep BOTH; Slice 4's `gpu`
+  group already does. Not reducible.
+
+## E.3 Concrete reduction proposals (each with an equivalence row)
+
+**Proposal P1 (considered - DECLINED at review): PR-scope the `flavors` legs by
+subsystem.** Today `flavors` is one 7-leg matrix in `core-common`, so a
+narrow-native DB change runs all 7 - including the 4 legs whose linked code it
+cannot affect. One could split the mapping so each flavor leg is applicable only to
+the subsystem whose code it links (E.1 table): the 3 non-DB legs (`DB=0`, `HTTP=0`,
+`IMAGE=0`) stay `core-common`; the 2 pg legs move to `db-postgres`; the 2 mysql
+legs move to `db-mysql`.
+
+**Decision: NOT adopted.** The saving (a narrow DB PR skips ~2 link-only,
+parallel, seconds-each legs, off the critical path) is too small to justify another
+PERMANENT classification boundary. A flavor leg's true applicability depends on
+build composition, generated registries, shared DB infrastructure, and eventually
+build-plugin feature inference - NOT merely the backend translation units - so the
+`removed | property | replacement` equivalence below, while sound for the TU
+dimension, would under-approximate the real invalidation surface and make CI harder
+to reason about for negligible gain. **All seven flavor legs stay in
+`core-common`.** The equivalence table is retained for the record only:
+
+| configuration removed (on a narrow PR) | property it proved | new config proving that property |
+|---|---|---|
+| the 2 mysql flavor legs, on a **postgres-only** PR | "the `HL_ENABLE_MYSQL` link composes" | the same 2 mysql legs, which still run on every mysql-narrow / shared-db / build-composition / main / broad change (a pg-only change cannot compile or break the mysql TUs, so it cannot regress that link) |
+| the 2 pg flavor legs, on a **mysql-only** PR | "the `HL_ENABLE_POSTGRES` link composes" | the same 2 pg legs, on every pg-narrow / shared-db / broad change |
+| the 4 DB flavor legs, on a **gpu/compute-only** PR | "the DB backend links compose" | all 4, on every db-narrow / shared-db / broad change |
+
+Equivalence basis: a flavor leg proves a LINK, and a link can only regress if a TU
+compiled INTO it changes; the DB backend TUs compile into only their own
+`POSTGRES=1` / `MYSQL=1` legs (E.2). Shared-db (`db_select.c` registry etc.) fans
+to ALL db backends (Slice 4), so it still runs every DB flavor leg. **Value is
+low** (flavors are link-only, run in parallel, ~seconds each; a narrow DB PR skips
+~2 legs), and it needs either per-leg jobs or a classify-driven dynamic matrix -
+so this is a DEFENSIBLE but OPTIONAL reduction. Recommend deferring unless bundled
+with other flavor work.
+
+**Candidate C1 (considered - recommend KEEP): `htmx-browser` macOS leg.** The
+browser widget behavior it asserts is Chromium-driven and platform-independent, so
+one could argue the macOS leg duplicates the Linux one. But its non-redundant
+property is "the built app SERVES the widgets correctly ON macOS through a real
+browser" - a macOS static-serve / build-embed path that `build` macOS (unit tests)
+and `build-pipeline` macOS (package build) do NOT exercise end to end via a
+browser. No surviving config proves that exact property, so **keep it**.
+
+**Candidate C2 (considered - recommend KEEP): `reproducibility` macOS leg.** Falls
+under the release/reproducibility invariant (E.4) - not a candidate.
+
+## E.4 Exhaustive-behavior invariants (never reduced) + non-scope
+
+The FULL matrix always runs for: **main**; **force-full**; **build/composition
+changes** (`Makefile`/`mk/**`/feature composition); **shared headers**
+(`include/**`); **native core** (non-allowlisted `src/**`); and
+**release/reproducibility verification** (every `reproducibility*` + `cosmo*` leg).
+The four-platform `make test` (`build`) stays `core-common` (Slice-4 constraint 7).
+No cross-run cache, no scheduling, no branch-protection, no release-trust change.
+
+## E.5 Audit conclusion - Slice 5B CLOSED (audited; no worthwhile safe reduction)
+
+The broad matrix is **already lean and well-justified**: every leg proves a
+distinct toolchain / arch / sanitizer / link / engine / repro property, and Slice 4
+already confines each native subsystem to the platform(s) that compile it (E.2).
+The single concrete PR-scoped reduction found (P1, flavors subsystem-split) was
+**declined at review** (E.3): its savings are too small to justify another
+permanent classification boundary whose real applicability depends on build
+composition / generated registries / shared DB infra / build-plugin inference, not
+just the backend TUs. The multi-platform legs (`build`, `reproducibility`,
+`build-pipeline`, `htmx-browser`, `gpu`) each prove a non-redundant property and
+are KEPT. All seven flavor link-legs stay in `core-common`.
+
+**Slice 5B is CLOSED as "audited; no worthwhile safe reduction found" - a
+successful audit outcome, not unfinished optimization. There is NO 5B.2 activation
+checkpoint.** Slices 1-5 have removed the defensible CI waste; further matrix
+slicing now would trade negligible savings for harder-to-reason-about CI. The next
+CI work is Slice 6 (scheduling / nightly), or - preferably - the Build Plugin /
+BuildArtifact product architecture, rather than continuing to shave the PR matrix.
