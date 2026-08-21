@@ -1383,53 +1383,104 @@ and use it. This is **same-run sharing** - the artifact lives and dies with the
 run, so there is no cross-run trust surface. GitHub's mutable cross-run
 `actions/cache` is **explicitly deferred**: it is a possible later sub-step,
 justified only if D.0-style measurement shows the producer's own ~34 s build is
-worth caching across runs. The producer preserves the `run_compute` gate (it runs
-iff the compute group is applicable), so a non-compute narrow PR builds no wamrc
-at all.
+worth caching across runs.
 
-### D.1.2 Artifact identity (the reuse key) - LOCKED
+**Producer wiring (required, enforced by the existing guards).** The producer is
+a first-class member of the `compute` applicability group:
+- it is added to `job_plan.GROUP` under group `compute` -> it gates on
+  `if: needs.classify.outputs.run_compute == 'true'` exactly like the AOT
+  consumers, so it runs **iff the compute plan is applicable** and skips
+  **legitimately only when compute is inapplicable** (a non-compute narrow PR or a
+  frontend/docs plan builds no wamrc at all);
+- it is added to `ci-success.needs` (so the gate observes its result) and is
+  therefore covered by BOTH standing guards - `check_gate_completeness.py`
+  (ci-success depends on every job) and `check_job_plan_consistency.py` (its `if:`
+  references EXACTLY the `run_compute` flag);
+- because it is `compute`-grouped, the gate's applicability map treats it as
+  applicable whenever compute is active, so it can NEVER be an allowed skip on a
+  compute-applicable run (this is what makes producer failure a red gate - D.1.3).
 
-The producer computes and records (in the artifact's metadata sidecar) a key that
-hashes ALL of:
+### D.1.2 Artifact identity + provenance metadata - LOCKED
 
-1. **OS + arch** - the runner image (`ubuntu-24.04` / `ubuntu-24.04-arm`).
-2. **Compiler identity** - `cc --version` / the cmake C/C++ toolchain that builds
-   wamrc.
-3. **LLVM version** - `llvm-config-18 --version` (exact), plus the resolved
-   `LLVM_DIR`.
-4. **WAMR source revision** - the `vendor/wamr` submodule pin (today
-   `c3a78cd1`, WAMR-2.4.1-218-gc3a78cd1).
-5. **Hull WAMR patches** - a hash of the patch carriage (`WAMR_PATCH_PREREQ` /
+The producer emits a **metadata sidecar** (a JSON manifest, with a `schema_version`
+so the consumer can reject an unknown shape) recording BOTH the reuse-identity
+inputs AND same-run provenance. The consumer recomputes/inspects every field and
+refuses the artifact on any mismatch (D.1.3).
+
+**Reuse-identity inputs** (a change to any yields a different key -> no reuse):
+1. **OS + arch + runner image** - not just `ubuntu-24.04`: the concrete runner
+   image identity AND version (`ImageOS` / `ImageVersion` from the runner
+   environment, e.g. `ubuntu24`/`<image-version>`), plus `uname -m`.
+2. **Actual CMake compilers** - the resolved C and C++ compiler **paths** and
+   **versions** that cmake used to build wamrc (from `CMakeCache.txt`
+   `CMAKE_C_COMPILER` / `CMAKE_CXX_COMPILER` + each `--version`), not a generic
+   `cc`.
+3. **LLVM version + resolved library dependencies** - `llvm-config-18 --version`,
+   the resolved `LLVM_DIR`, AND the actual libLLVM shared objects wamrc links
+   (see D.1.3 `ldd`).
+4. **WAMR source revision** - the `vendor/wamr` submodule pin (today `c3a78cd1`,
+   WAMR-2.4.1-218-gc3a78cd1).
+5. **Hull WAMR patch hash** - a hash of the patch carriage (`WAMR_PATCH_PREREQ` /
    `wamr-patch-check` inputs; docs/wamr_patches.md).
 6. **Build flags** - `WAMRC_CMAKE_FLAGS` + the `wamrc:` make recipe body.
-7. **Relevant Makefile/scripts** - a hash of the `wamrc` rule region of the
-   Makefile and `tests/ci_ensure_wamrc.sh`.
+7. **Build-script hash** - a hash of the `wamrc` rule region of the Makefile and
+   `tests/ci_ensure_wamrc.sh`.
+8. **Artifact checksum** - `sha256(build/wamrc)`.
 
-Any change to any input yields a different key -> no reuse -> explicit rebuild.
-The key travels in the artifact metadata so a consumer can compare.
+**Same-run provenance** (proves the artifact belongs to THIS run, not a stray):
+9. **commit SHA** (`GITHUB_SHA` / the PR head sha);
+10. **workflow run ID + attempt** (`GITHUB_RUN_ID`, `GITHUB_RUN_ATTEMPT`);
+11. **producer job / profile identity** (the producer job name + the arch profile
+    it built for).
 
-### D.1.3 Consumer verification (fail-safe, never silent)
+The consumer asserts 9-11 equal its own run's values, so an artifact from a
+different run/attempt/commit is rejected (belt-and-braces on top of run-scoped
+artifact storage). `schema_version` gates the whole manifest.
+
+### D.1.3 Consumer verification - FAIL CI, do NOT silently rebuild
 
 Before trusting the downloaded wamrc, each consumer checks, in order:
 
-- **(a) checksum** - `sha256(wamrc)` equals the producer-recorded digest;
-- **(b) identity match** - the artifact's recorded key equals the consumer's own
-  recomputed identity (same OS/arch/LLVM/WAMR/patches/flags/scripts);
-- **(c) architecture** - the artifact arch equals the runner arch (an x86_64
-  wamrc is refused on an arm64 runner, and vice versa);
-- **(d) wamrc usability** - the consumer EXECUTES the tool (`wamrc --version` and
-  a trivial AOT compile of a fixture module) and confirms it runs to success.
-  This is the backstop for the dynamic-linkage question: wamrc built against
-  `llvm-18-dev` most likely dynamically links `libLLVM-18` (cf. the lld/libLLVM
-  finding in the toolchain-free-linker work), so the consumer must either keep a
-  lightweight `libllvm-18` runtime install or the artifact must bundle the needed
-  shared lib; the usability probe catches a mismatch regardless of which is
-  chosen at implementation.
+- **(a) provenance** - the manifest's `schema_version` is known, and its commit
+  SHA / run ID / run attempt / producer identity equal this run's values;
+- **(b) checksum** - `sha256(wamrc)` equals the manifest digest;
+- **(c) identity match** - the manifest's reuse-identity key equals the consumer's
+  own recomputed identity (runner image + version, CMake compiler paths/versions,
+  LLVM version, WAMR rev, patch hash, flags, build-script hash);
+- **(d) architecture** - the manifest arch equals `uname -m` (an x86_64 wamrc is
+  refused on an arm64 runner, and vice versa);
+- **(e) linkage + usability** - the consumer runs `ldd build/wamrc` (or the
+  platform equivalent), confirms every resolved dependency is present, and
+  **installs ONLY the exact runtime libraries wamrc requires** (e.g. the
+  `libLLVM-18` runtime package, NOT `llvm-18-dev` + cmake), then EXECUTES the tool
+  (`wamrc --version` + a trivial AOT compile of a fixture module) and confirms it
+  runs to success. wamrc built against `llvm-18-dev` most likely dynamically links
+  `libLLVM-18` (cf. the lld/libLLVM finding in the toolchain-free-linker work).
+  **libLLVM is NOT bundled into the artifact without first measuring the artifact
+  -size and transfer cost** vs. a lightweight runtime-lib install; the default is
+  to ship only the wamrc binary + manifest and install the runtime lib on the
+  consumer, revisited only if measurement favors bundling.
 
-**Any** failure (missing artifact, checksum mismatch, identity/arch mismatch,
-tool won't run) fails **safe**: the consumer **explicitly rebuilds wamrc from
-source** (today's `make wamrc` path via `ci_ensure_wamrc.sh`) or fails the job
-with a clear error - it NEVER silently uses an incompatible or unverifiable tool.
+**Failure semantics (amendment: fail CI, never silently rebuild).** The same-run
+artifact is *supposed* to be immutable and present whenever the compute plan is
+applicable, so a failure must surface as RED, not be papered over:
+
+- **Producer failed / never ran** (on a compute-applicable plan): the consumers'
+  `needs: [wamrc-x86_64]` are unmet, so GitHub SKIPS them. Those consumers are in
+  the applicable `compute` group, so they are NOT allowed skips - `ci_gate.py`
+  reports "required job was SKIPPED" and the gate FAILS. The producer's own
+  `failure` also fails the gate directly. Either way -> red.
+- **Verification (a)-(e) fails AFTER a successful producer** (missing or
+  mismatched manifest, bad checksum, identity/arch/provenance mismatch, missing
+  linkage, tool won't run): the consumer **exits non-zero and FAILS the job**
+  explicitly. It does NOT rebuild from source - an automatic rebuild would mask
+  broken producer/upload wiring and let the optimization silently disappear.
+
+Automatic from-source rebuild is reserved for **local execution** (no artifact
+infrastructure) and a **future OPTIONAL cross-run cache** miss - never for the
+mandatory same-run artifact. `ci_ensure_wamrc.sh`'s build-from-source path stays
+for those cases; the CI consumer path treats a same-run verification failure as
+fatal.
 
 ### D.1.4 Trust separation - PR artifacts never touch release/signing
 
@@ -1450,14 +1501,26 @@ artifact-wamrc and a from-source-wamrc produce **byte-identical `.aot`** on
 representative modules (the readonly-heap fixture + a Memory64 module) - before
 any consumer RELIES on the artifact. The proof set:
 
-- **hit** - a consumer finds a valid same-run artifact and uses it;
-- **miss** - no artifact present -> consumer rebuilds from source (fail-safe);
+- **hit** - a consumer finds a valid same-run artifact, verifies it, and uses it;
+- **producer failure -> red gate** - a producer that fails (or never runs on a
+  compute-applicable plan) skips its consumers via `needs`; those applicable
+  skips are DISALLOWED -> `ci-success` FAILS (fixture: an applicable `compute`
+  consumer with result `skipped` and producer `failure` -> gate red);
+- **missing artifact -> consumer fails** - after a successful producer, a consumer
+  that cannot download/find the artifact FAILS the job (does not rebuild);
 - **invalidation** - bumping the WAMR rev / a patch / a build flag changes the
-  key -> the artifact is not reused -> explicit rebuild;
+  identity key -> the recomputed identity no longer matches the manifest -> the
+  consumer FAILS (the producer, being broad-classified, also rebuilt);
 - **corruption rejection** - a tampered/truncated artifact fails the checksum ->
-  rebuild-or-fail, never used;
+  the consumer FAILS, never uses it;
 - **output equivalence** - artifact-wamrc `.aot` == fresh-wamrc `.aot`, byte for
   byte, on the representative jobs.
+
+**Gate fixtures (added to `test_ci_gate.py` at checkpoint 5A.2):** producer
+`failure` + consumer `skipped` on a compute-applicable plan -> gate FAIL; a
+consumer `failure` (verification rejected) -> gate FAIL; the all-success
+compute-applicable case -> gate pass. These prove producer/upload/verification
+breakage reaches a RED gate rather than silently degrading.
 
 Only after that proof (a separate review stop) do consumers drop the redundant
 from-source build and rely on the artifact.
@@ -1466,10 +1529,13 @@ from-source build and rely on the artifact.
 
 A change to `vendor/wamr` (submodule), the patch carriage, the `wamrc` build rule,
 the compiler, the LLVM version, or `WAMRC_CMAKE_FLAGS` changes the identity key
-(D.1.2) -> no reuse. These inputs ALREADY classify **broad** in Slice 4
-(`vendor/**` and `Makefile`/`mk/**` -> `full_all`), so such a change already runs
-the full suite; Slice 5A additionally guarantees it rebuilds wamrc rather than
-reusing a stale artifact.
+(D.1.2). In the same-run model the producer ALWAYS builds wamrc fresh within the
+run, so there is no stale artifact to serve; the identity key's job here is
+consumer VERIFICATION (a consumer whose recomputed identity does not match the
+manifest FAILS - D.1.3) and, later, correctness of the deferred cross-run cache.
+These inputs ALREADY classify **broad** in Slice 4 (`vendor/**` and
+`Makefile`/`mk/**` -> `full_all`), so such a change already runs the full suite
+and rebuilds the producer.
 
 ## D.2 Slice 5B - matrix reduction (a SEPARATE safety checkpoint)
 
@@ -1512,10 +1578,14 @@ the release path - none of them is a candidate for reduction.
 Reduction is acceptable ONLY on PR narrow paths, and ONLY where representative
 configurations preserve the affected subsystem's coverage. A **backend-specific
 native change retains the platform/compiler combinations that actually compile
-that backend** - e.g. a Postgres-only change keeps the Linux+clang and macOS legs
-that build the pgwire backend; a leg may be dropped from that narrow path ONLY
-with a documented equivalence row (D.2.2) showing another retained leg proves the
-same property. Backend integration jobs (real PG/MySQL/Valkey/DuckDB) are already
+that backend**. Exactly WHICH legs compile a given backend is NOT asserted here -
+it is an OUTPUT of the checkpoint-5B.1 dimension/property audit (D.2.1), read from
+the build flags / `HL_ENABLE_*` gating that determine where each backend is
+compiled, not from intuition. So (conditionally, pending that audit): a
+Postgres-only change retains **whichever** platform/compiler legs the audit proves
+compile the pgwire backend, and a leg is dropped from that narrow path ONLY with a
+documented equivalence row (D.2.2) showing a retained leg proves the same
+property. Backend integration jobs (real PG/MySQL/Valkey/DuckDB) are already
 scoped by Slice 4; 5B only asks whether a narrow native path needs every
 *platform* leg of its own subsystem, never whether the subsystem runs at all.
 
