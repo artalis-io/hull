@@ -1184,3 +1184,5 @@ function parseInternal(bytes, opts, inject) {
     const valid = allDiags.every(function (d) { return d.severity !== "error"; });
     return { ast: ast, comments: tk.comments, diagnostics: allDiags, linemap: tk.linemap, valid: valid };
 }
+
+// slice3b skip proof (throwaway).
