@@ -579,6 +579,29 @@ $(BUILDDIR)/test_cacert: $(TESTDIR)/hull/test_cacert.c $(CACERT_OBJ) $(MBEDTLS_O
 	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< \
 		$(CACERT_OBJ) $(MBEDTLS_OBJS)
 
+# ── Focused source-frontend test groups (docs/ci_architecture_design.md sections 4, 9) ──
+# Build the frontend test binaries FRESH (they embed the current stdlib registry
+# via STDLIB_JS_CLI_REGISTRY_O / LUA_OBJS) and run them - the "fresh embedded
+# host" a tooling/frontend PR needs, without the full platform matrix. Used by
+# the focused CI jobs; runnable locally too.
+JS_FRONTEND_TEST_BINS := $(addprefix $(BUILDDIR)/,\
+	test_js_session test_js_lexer test_js_parser test_js_conformance \
+	test_js_annotations test_js_scope test_js_frontend test_js_generation test_js_fuzz_entry)
+
+.PHONY: test-js-frontend
+test-js-frontend: $(JS_FRONTEND_TEST_BINS)
+	@pass=0; fail=0; \
+	for t in $(JS_FRONTEND_TEST_BINS); do \
+		echo "=== $$(basename $$t) ==="; \
+		if HULL_QUIET_AOT=1 $$t; then pass=$$((pass+1)); else fail=$$((fail+1)); fi; \
+	done; \
+	echo "test-js-frontend: $$pass ok, $$fail failed"; \
+	[ $$fail -eq 0 ]
+
+.PHONY: test-lua-frontend
+test-lua-frontend: $(BUILDDIR)/test_lua_source
+	$(BUILDDIR)/test_lua_source
+
 test: $(TEST_BINS)
 	@echo "Running tests..."
 	@pass=0; fail=0; total=0; \

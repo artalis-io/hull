@@ -1064,6 +1064,18 @@ self-trust caveat (§8) — governance stays with CODEOWNERS/branch protection.
   explicitly authorized step - `main` currently has NO protection/rulesets/
   required checks, so it is a clean, reversible addition, not a migration.
   Stops for review before Slice 3.
-- **Slices 3-6:** focused tooling jobs; domain/native mapping; cache+matrix
-  (wamrc cache, kill the 9x rebuild); nightly (schedule) + rollout. Each stops
-  for review.
+- **Slice 3 (IN PROGRESS):** two review checkpoints.
+  - **Checkpoint 3a (DONE, this change):** ADD + prove, preserving all existing
+    execution. Split the combined `fuzz` job into `fuzz-native-security` /
+    `fuzz-lua-source` / `fuzz-js-source` (§11), and add `focused-js-frontend` /
+    `focused-lua-frontend` jobs (a FRESH embedded-host build via the new
+    `make test-js-frontend` / `test-lua-frontend` targets + the discovery /
+    dev-agent / inspect lifecycle, §4/§9/§20). These run on EVERY PR/push
+    alongside the full matrix (nothing skipped); `ci-success.needs` updated
+    (48 jobs, 47 gated). No classifier skipping, no branch-protection change.
+  - **Checkpoint 3b (NEXT):** ONLY after coverage equivalence is demonstrated -
+    wire classifier-based skipping of the redundant full-matrix jobs for
+    tooling/frontend PRs and update `ci-success` applicability (the plan-derived
+    allow-skip set), removing `paths-ignore` so the orchestrator always runs.
+- **Slices 4-6:** domain/native mapping; cache+matrix (wamrc cache, kill the 9x
+  rebuild); nightly (schedule) + rollout. Each stops for review.
