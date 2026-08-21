@@ -585,10 +585,15 @@ static int hl_parse_serve_args(int argc, char **argv, HlServeConfig *cfg)
 
 /* ── Manifest processing ──────────────────────────────────────────── */
 
+/* Gated as a WHOLE: the only call site (hl_serve_wire_caps) is itself inside
+ * `#ifdef HL_ENABLE_WASM`, so on a WASM-less build the definition must ALSO be
+ * compiled out - otherwise it is defined-but-unused (-Werror=unused-function).
+ * Surfaced by the nightly rare-configs job (HL_ENABLE_WASM=0), a combo the normal
+ * CI matrix does not build. */
+#ifdef HL_ENABLE_WASM
 static void hl_resolve_wasm_config(HlRuntime *rt, const HlManifest *manifest,
                                     const HlServeConfig *cfg)
 {
-#ifdef HL_ENABLE_WASM
     uint32_t wh = manifest->wasm_heap;
     uint32_t ws = manifest->wasm_stack;
     int64_t  wg = manifest->wasm_gas;
@@ -614,10 +619,8 @@ static void hl_resolve_wasm_config(HlRuntime *rt, const HlManifest *manifest,
     rt->wasm_config.gas        = wg;
     rt->wasm_config.max_input  = wi;
     rt->wasm_config.max_output = wo;
-#else
-    (void)rt; (void)manifest; (void)cfg;
-#endif
 }
+#endif
 
 /* ── Server state (persists for server lifetime) ──────────────────── */
 
