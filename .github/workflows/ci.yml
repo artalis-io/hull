@@ -1461,10 +1461,16 @@ jobs:
   # security fuzzers, the Lua source parser fuzzer, and the JS source parser
   # fuzzer as INDEPENDENT jobs so path-aware selection can run only the relevant
   # target. Each keeps its sanitizer instrumentation + 60s libFuzzer budget. --
-  fuzz-native-security:
+  # Slice 4 checkpoint 2: the former single `fuzz-native-security` job is split
+  # into three atomic jobs owning a FIXED target subset each (core / db-wire /
+  # compute). The UNION of the three equals the former 13-target set (asserted by
+  # scripts/ci/test_job_plan.py :: fuzz_union). In checkpoint 2 all three gate on
+  # the SAME run_fuzz_native flag, so they run/skip exactly as the one job did (no
+  # new skipping); checkpoint 3 regroups them (core-common / db-any / compute).
+  fuzz-core-security:
     needs: [classify]
     if: needs.classify.outputs.run_fuzz_native == 'true'
-    name: Fuzz (native security)
+    name: Fuzz (core security)
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
@@ -1472,19 +1478,65 @@ jobs:
           submodules: true
       - name: Install clang
         run: sudo apt-get update && sudo apt-get install -y clang
-      - name: Build native fuzz targets
+      - name: Build core fuzz targets
         run: |
           make CC=clang \
             fuzz/fuzz_sh_json fuzz/fuzz_path_normalize fuzz/fuzz_mime_sniff \
-            fuzz/fuzz_host_match fuzz/fuzz_pgwire fuzz/fuzz_pg_dsn fuzz/fuzz_pg_rewrite \
-            fuzz/fuzz_mysqlwire fuzz/fuzz_mysql_dsn fuzz/fuzz_respwire \
-            fuzz/fuzz_valkey_dsn fuzz/fuzz_span_sdk fuzz/fuzz_span_window
-      - name: Run native fuzzers (60s each)
-        timeout-minutes: 20
+            fuzz/fuzz_host_match
+      - name: Run core fuzzers (60s each)
+        timeout-minutes: 10
         run: |
           set -e
-          for f in sh_json path_normalize mime_sniff host_match pgwire pg_dsn \
-                   pg_rewrite mysqlwire mysql_dsn respwire valkey_dsn span_sdk span_window; do
+          for f in sh_json path_normalize mime_sniff host_match; do
+            echo "== fuzz $f =="
+            ./fuzz/fuzz_$f fuzz/corpus_$f/ -max_total_time=60
+          done
+
+  fuzz-db-wire:
+    needs: [classify]
+    if: needs.classify.outputs.run_fuzz_native == 'true'
+    name: Fuzz (DB wire protocols)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          submodules: true
+      - name: Install clang
+        run: sudo apt-get update && sudo apt-get install -y clang
+      - name: Build DB wire fuzz targets
+        run: |
+          make CC=clang \
+            fuzz/fuzz_pgwire fuzz/fuzz_pg_dsn fuzz/fuzz_pg_rewrite \
+            fuzz/fuzz_mysqlwire fuzz/fuzz_mysql_dsn fuzz/fuzz_respwire \
+            fuzz/fuzz_valkey_dsn
+      - name: Run DB wire fuzzers (60s each)
+        timeout-minutes: 15
+        run: |
+          set -e
+          for f in pgwire pg_dsn pg_rewrite mysqlwire mysql_dsn respwire valkey_dsn; do
+            echo "== fuzz $f =="
+            ./fuzz/fuzz_$f fuzz/corpus_$f/ -max_total_time=60
+          done
+
+  fuzz-compute-span:
+    needs: [classify]
+    if: needs.classify.outputs.run_fuzz_native == 'true'
+    name: Fuzz (compute mapped-span SDK)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          submodules: true
+      - name: Install clang
+        run: sudo apt-get update && sudo apt-get install -y clang
+      - name: Build compute fuzz targets
+        run: |
+          make CC=clang fuzz/fuzz_span_sdk fuzz/fuzz_span_window
+      - name: Run compute fuzzers (60s each)
+        timeout-minutes: 10
+        run: |
+          set -e
+          for f in span_sdk span_window; do
             echo "== fuzz $f =="
             ./fuzz/fuzz_$f fuzz/corpus_$f/ -max_total_time=60
           done
@@ -2294,7 +2346,9 @@ jobs:
       - msan
       - tsan
       - tsan-shared-heap
-      - fuzz-native-security
+      - fuzz-core-security
+      - fuzz-db-wire
+      - fuzz-compute-span
       - fuzz-lua-source
       - fuzz-js-source
       - focused-js-frontend

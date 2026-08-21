@@ -45,6 +45,12 @@ FACTS = [
     "wasm_changed",
     "gpu_changed",
     "native_db_changed",
+    # per-backend DB facts (Slice 4 / Appendix C): an isolated backend `.c`
+    # narrows to its own backend; a shared-DB `.c` sets ALL FOUR (fan-out).
+    "db_postgres_changed",
+    "db_mysql_changed",
+    "db_valkey_changed",
+    "db_duckdb_changed",
     "tls_network_changed",
     "production_core_changed",
     "build_composition_changed",
@@ -69,6 +75,10 @@ PLAN = [
     "focused_query",
     "focused_compute",
     "focused_db",
+    "focused_db_postgres",
+    "focused_db_mysql",
+    "focused_db_valkey",
+    "focused_db_duckdb",
     "focused_wasm",
     "focused_gpu",
     "focused_tls",
@@ -78,6 +88,52 @@ PLAN = [
     "docs_only",
     "lint",
 ]
+
+
+# -- Slice 4 isolated-subsystem allowlist (Appendix C.2/C.3) -----------------
+# A CURATED, EXACT-PATH positive allowlist of production `.c` files whose
+# compile/link/dependency closure is confined to ONE native subsystem. A matched
+# file emits ONLY its subsystem fact(s), NOT production_core; every OTHER src/**
+# path stays production_core (broad, fail closed). The allowlist is layered OVER
+# the broad default, so a renamed/deleted entry loses its narrow route and reverts
+# to broad - it can never mis-narrow. Every path here is machine-verified to exist
+# (test_classify_changes.py :: allowlist_files_exist).
+#
+# IMPORTANT (checkpoint 2, additive/no-skip): none of the focused_* flags these
+# facts drive are in job_plan.APPROVED_NARROW, so a plan carrying them still
+# evaluates BROAD - the classifier narrows the FACTS but NOTHING skips yet. Skip
+# activation (adding the native narrow class + regrouping the matrix) is
+# checkpoint 3.
+DB_POSTGRES_FILES = frozenset({
+    "src/hull/cap/db_postgres.c", "src/hull/cap/pgwire.c", "src/hull/cap/pg_conn.c",
+})
+DB_MYSQL_FILES = frozenset({
+    "src/hull/cap/db_mysql.c", "src/hull/cap/mysqlwire.c", "src/hull/cap/mysql_conn.c",
+})
+DB_VALKEY_FILES = frozenset({
+    "src/hull/cap/valkey.c", "src/hull/cap/valkey_conn.c",
+    "src/hull/cap/valkey_register.c", "src/hull/cap/respwire.c",
+})
+DB_DUCKDB_FILES = frozenset({"src/hull/cap/db_duckdb.c"})
+# Shared DB core: on EVERY backend's link path (the db_select.c BACKENDS[] registry
+# + the shared cap/registry/dynamic/udf/kv files). A change here fans out to ALL
+# backends (constraint 3).
+DB_SHARED_FILES = frozenset({
+    "src/hull/cap/db.c", "src/hull/cap/db_common.c", "src/hull/cap/db_registry.c",
+    "src/hull/cap/db_select.c", "src/hull/cap/db_dynamic.c", "src/hull/cap/db_udf.c",
+    "src/hull/cap/kv.c", "src/hull/cap/kv_dynamic.c", "src/hull/cap/kv_feature.c",
+})
+GPU_FILES = frozenset({
+    "src/hull/cap/gpu_wgpu.c", "src/hull/cap/gpu_feature.c", "src/hull/cap/gpu.c",
+})
+COMPUTE_FILES = frozenset({
+    "src/hull/cap/wasm.c", "src/hull/cap/wasm_buffer.c", "src/hull/cap/wasm_data.c",
+    "src/hull/cap/wasm_spans.c", "src/hull/cap/wasm_stream.c", "src/hull/worker_wasm.c",
+    "src/hull/runtime/lua/mod_compute.c", "src/hull/runtime/js/mod_compute.c",
+})
+_ALL_DB_BACKEND_FACTS = frozenset({
+    "db_postgres_changed", "db_mysql_changed", "db_valkey_changed", "db_duckdb_changed",
+})
 
 
 def _has_component(path, name):
@@ -115,6 +171,26 @@ def classify_path(path):
         # tests (docs section 7.2).
         if p.startswith("src/hull/frontend/"):
             return {"production_core_changed", "js_frontend_changed", "lua_frontend_changed"}
+        # Slice 4 isolated-subsystem allowlist (Appendix C): an EXACT match narrows
+        # to its subsystem fact(s) and does NOT set production_core. A shared-DB
+        # file fans out to all four backends (constraint 3). Anything NOT on the
+        # allowlist stays production_core -> broad (fail closed). Because these
+        # focused_* flags are not APPROVED_NARROW, the live plan is still broad
+        # (checkpoint 2: narrow the facts, skip nothing).
+        if p in DB_POSTGRES_FILES:
+            return {"native_db_changed", "db_postgres_changed"}
+        if p in DB_MYSQL_FILES:
+            return {"native_db_changed", "db_mysql_changed"}
+        if p in DB_VALKEY_FILES:
+            return {"native_db_changed", "db_valkey_changed"}
+        if p in DB_DUCKDB_FILES:
+            return {"native_db_changed", "db_duckdb_changed"}
+        if p in DB_SHARED_FILES:
+            return {"native_db_changed"} | set(_ALL_DB_BACKEND_FACTS)
+        if p in GPU_FILES:
+            return {"gpu_changed"}
+        if p in COMPUTE_FILES:
+            return {"compute_changed"}
         return {"production_core_changed"}
 
     # -- embedded tooling (alters bytes linked into hull -> needs fresh host) --
@@ -228,6 +304,17 @@ def derive_plan(facts):
         plan["focused_gpu"] = True
     if facts.get("native_db_changed"):
         plan["focused_db"] = True
+    # per-backend narrowing (Appendix C): a shared-DB change set all four backend
+    # facts above, so it lights every focused_db_<backend>; an isolated backend
+    # change lights only its own.
+    if facts.get("db_postgres_changed"):
+        plan["focused_db_postgres"] = True
+    if facts.get("db_mysql_changed"):
+        plan["focused_db_mysql"] = True
+    if facts.get("db_valkey_changed"):
+        plan["focused_db_valkey"] = True
+    if facts.get("db_duckdb_changed"):
+        plan["focused_db_duckdb"] = True
     if facts.get("tls_network_changed"):
         plan["focused_tls"] = True
     if facts.get("js_fuzz_changed"):
