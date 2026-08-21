@@ -1,31 +1,16 @@
 name: CI
 
 on:
+  # NO paths-ignore (docs/ci_architecture_design.md sections 3, 10): the
+  # orchestrator must ALWAYS run so `classify` + `ci-success` always appear as
+  # checks and can never leave a required check pending because the whole
+  # workflow was path-skipped. A docs-only change now runs `classify` (-> the
+  # docs-only plan) + `lint` + `ci-success` and skips everything else via the
+  # classifier, instead of skipping the entire workflow.
   push:
     branches: [main]
-    # Site / docs / changelog updates don't touch any C, Lua, JS, Makefile,
-    # or workflow surface that CI validates — skip the full build matrix
-    # for those. deploy-site.yml handles site/** independently.
-    paths-ignore:
-      - 'site/**'
-      - 'docs/**'
-      - 'CHANGELOG.md'
-      - 'README.md'
-      - 'CONTRIBUTING.md'
-      - 'LICENSE'
-      - 'LICENSING.md'
-      - '**.md'
   pull_request:
     branches: [main]
-    paths-ignore:
-      - 'site/**'
-      - 'docs/**'
-      - 'CHANGELOG.md'
-      - 'README.md'
-      - 'CONTRIBUTING.md'
-      - 'LICENSE'
-      - 'LICENSING.md'
-      - '**.md'
   # Manual force-full trigger (docs/ci_architecture_design.md section 15). The
   # mechanism may ADD coverage, never suppress required work.
   workflow_dispatch:
@@ -35,34 +20,41 @@ on:
         type: boolean
         default: false
 
-# CI-architecture Slice 2 (docs/ci_architecture_design.md): a `classify`
-# orchestrator job + an applicability-aware `ci-success` gate are added at the
-# top and bottom of `jobs:`. They PRESERVE current job execution - no expensive
-# job is skipped yet (classifier-based skipping is a later slice) - and
-# `ci-success` is NOT yet a required check (the branch-protection cutover is a
-# separate, explicitly authorized step). `paths-ignore` above is retained for now
-# to preserve today's behavior (docs-only changes skip the whole workflow); it is
-# removed only at the enforcement cutover, together with classifier skipping, so
-# the orchestrator can always run without exploding docs-only cost.
+# CI-architecture Slice 3b (docs/ci_architecture_design.md): the `classify`
+# orchestrator emits per-group run-flags from the change plan; each expensive job
+# gates on its flag (`if: needs.classify.outputs.run_*`), and the `ci-success`
+# gate derives its allow-skip from the SAME job-applicability map
+# (scripts/ci/job_plan.py, enforced by check_job_plan_consistency.py). Only the
+# PROVEN narrow classes skip - docs-only, JS frontend/fuzz, Lua frontend/fuzz -
+# every other plan (core, tooling, domain, examples, generic tests, unknown,
+# main/full/force-full) runs the broad suite. `ci-success` is still NOT a
+# required check; branch protection is unchanged.
 jobs:
-  # -- orchestrator: classify the change + run the classifier/gate self-tests --
+  # -- orchestrator: classify the change, self-test the classifier/gate/map, then
+  # emit the per-group run-flags every expensive job gates on. --
   classify:
     name: Classify changes
     runs-on: ubuntu-24.04
     outputs:
       plan_json: ${{ steps.run.outputs.plan_json }}
-      plan_full_all: ${{ steps.run.outputs.plan_full_all }}
-      plan_full_core: ${{ steps.run.outputs.plan_full_core }}
+      run_full_matrix: ${{ steps.flags.outputs.run_full_matrix }}
+      run_focused_js: ${{ steps.flags.outputs.run_focused_js }}
+      run_focused_lua: ${{ steps.flags.outputs.run_focused_lua }}
+      run_fuzz_js: ${{ steps.flags.outputs.run_fuzz_js }}
+      run_fuzz_lua: ${{ steps.flags.outputs.run_fuzz_lua }}
+      run_fuzz_native: ${{ steps.flags.outputs.run_fuzz_native }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
         with:
           fetch-depth: 0
-      - name: Classifier + gate self-tests
+      - name: Classifier + gate + applicability self-tests
         run: |
           python3 scripts/ci/test_classify_changes.py
           python3 scripts/ci/test_ci_gate.py
+          python3 scripts/ci/test_job_plan.py
           python3 scripts/ci/check_gate_completeness.py
-      - name: Classify the change (informational in Slice 2; drives no skipping yet)
+          python3 scripts/ci/check_job_plan_consistency.py
+      - name: Classify the change (merge-base diff -> plan)
         id: run
         env:
           EVENT: ${{ github.event_name }}
@@ -91,8 +83,15 @@ jobs:
           else
             python3 scripts/ci/classify_changes.py --event pull_request --force-full < /dev/null
           fi
+      - name: Emit per-group run-flags (the single map the job `if:` conditions use)
+        id: flags
+        run: python3 scripts/ci/job_plan.py --plan "$PLAN"
+        env:
+          PLAN: ${{ steps.run.outputs.plan_json }}
 
   build:
+    needs: [classify]
+    if: needs.classify.outputs.run_full_matrix == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -427,6 +426,8 @@ jobs:
   # builds + runs the C-API test with a real wamrc-emitted .aot fixture and FAILS
   # if the AOT sub-case is SKIPPED. That closes the "AOT is dormant in CI" gap.
   wasm-readonly-heap-aot:
+    needs: [classify]
+    if: needs.classify.outputs.run_full_matrix == 'true'
     name: WAMR AOT C-API tests (readonly + guarded, x86_64)
     runs-on: ubuntu-24.04
     steps:
@@ -596,6 +597,8 @@ jobs:
   # baselines stabilize (docs/mapped_span_benchmark_design.md D11). A 1 GiB
   # controlled run is the separate manually-triggered bench_mapped_span_1g.yml.
   mapped-span-bench:
+    needs: [classify]
+    if: needs.classify.outputs.run_full_matrix == 'true'
     name: Mapped-span benchmark (96 MiB, x86_64)
     runs-on: ubuntu-24.04
     steps:
@@ -643,6 +646,8 @@ jobs:
   # Drives the REAL production `hull build` path (embedded hull + wamrc), so the
   # AOT is exercised non-skippably.
   compute-aot-shared-heap:
+    needs: [classify]
+    if: needs.classify.outputs.run_full_matrix == 'true'
     name: Compute AOT shared-heap reads (spans + segments)
     runs-on: ubuntu-24.04
     steps:
@@ -712,6 +717,8 @@ jobs:
   # Drives the real driver (needs a wasm clang + wasm-ld), so this job installs
   # clang + lld; the AOT leg needs an embedded hull + wamrc.
   compute-memops-freestanding:
+    needs: [classify]
+    if: needs.classify.outputs.run_full_matrix == 'true'
     name: Freestanding libc (memcpy/memset/memmove) — interp + AOT
     runs-on: ubuntu-24.04
     steps:
@@ -760,6 +767,8 @@ jobs:
   # (#331): hull_stream_is_first/is_last/chunk_index over a real 3-chunk
   # compute.stream, Lua + JS, interpreter + AOT. Needs clang + wamrc + embedded hull.
   stream-meta:
+    needs: [classify]
+    if: needs.classify.outputs.run_full_matrix == 'true'
     name: compute stream metadata helpers — Lua + JS, interp + AOT
     runs-on: ubuntu-24.04
     steps:
@@ -803,6 +812,8 @@ jobs:
   # `hull build` path (--enable-shared-heap). Needs a wasm clang + wamrc + an
   # embedded hull; runs non-skippably here.
   spans-example:
+    needs: [classify]
+    if: needs.classify.outputs.run_full_matrix == 'true'
     name: mapped_spans example — Lua + JS, interp + AOT (public SDK)
     runs-on: ubuntu-24.04
     steps:
@@ -848,6 +859,8 @@ jobs:
   # lookup (+ unknown -1), Lua AND JS, interpreter AND AOT via the production
   # `hull build` path. Needs a wasm clang + wamrc + an embedded hull; non-skippable.
   spans-multi:
+    needs: [classify]
+    if: needs.classify.outputs.run_full_matrix == 'true'
     name: mapped spans — multiple named spans, Lua + JS, interp + AOT
     runs-on: ubuntu-24.04
     steps:
@@ -892,6 +905,8 @@ jobs:
   # (first/exact-end/one-past/straddle), Lua + JS, interpreter + AOT (3b
   # completion). Uses a SPARSE 5 GiB file (no real disk) so it runs anywhere.
   spans-hugefile:
+    needs: [classify]
+    if: needs.classify.outputs.run_full_matrix == 'true'
     name: mapped spans — >4GiB foffset + setup capacity, Lua + JS, interp + AOT
     runs-on: ubuntu-24.04
     steps:
@@ -937,6 +952,8 @@ jobs:
   # shipped arch rather than assuming it. Interp coverage on arm64 comes from the
   # aarch64 build job's `make test`; this closes the arm64 AOT leg.
   wasm-guarded-aot-arm64:
+    needs: [classify]
+    if: needs.classify.outputs.run_full_matrix == 'true'
     name: Guarded-subrange AOT C-API test (arm64)
     runs-on: ubuntu-24.04-arm
     steps:
@@ -1070,6 +1087,8 @@ jobs:
   # / client-only were removed as products in #114; the HTTP axis is now full vs
   # pure-compute, and pure-compute exercises both HTTP halves off at once.)
   flavors:
+    needs: [classify]
+    if: needs.classify.outputs.run_full_matrix == 'true'
     name: Build flavor (${{ matrix.name }})
     runs-on: ubuntu-24.04
     strategy:
@@ -1147,6 +1166,8 @@ jobs:
           fi
 
   reproducibility:
+    needs: [classify]
+    if: needs.classify.outputs.run_full_matrix == 'true'
     name: Reproducible build (${{ matrix.name }})
     strategy:
       fail-fast: false
@@ -1195,6 +1216,8 @@ jobs:
   # the macos-15 Xcode runner. See docs/security.md "Build-environment
   # immutability" and .github/docker/README.md.
   reproducibility-container:
+    needs: [classify]
+    if: needs.classify.outputs.run_full_matrix == 'true'
     name: Reproducible build (Linux container)
     runs-on: ubuntu-24.04
     steps:
@@ -1224,6 +1247,8 @@ jobs:
   # hull), and release.yml is tag-only so it cannot be exercised on a PR. This
   # job is the PR-validatable proxy for that ownership + run path. Roadmap 0.3.1.
   reproducibility-container-interleave:
+    needs: [classify]
+    if: needs.classify.outputs.run_full_matrix == 'true'
     name: Reproducible build (Linux container, host interleave)
     runs-on: ubuntu-24.04
     steps:
@@ -1254,6 +1279,8 @@ jobs:
   # "Cosmopolitan produces deterministic output" claim (docs/security.md) for
   # the hull-cosmo release binary itself.
   reproducibility-cosmo:
+    needs: [classify]
+    if: needs.classify.outputs.run_full_matrix == 'true'
     name: Reproducible build (Cosmo ${{ matrix.n }})
     strategy:
       fail-fast: false
@@ -1282,8 +1309,9 @@ jobs:
           if-no-files-found: error
 
   reproducibility-cosmo-compare:
+    if: needs.classify.outputs.run_full_matrix == 'true'
     name: Reproducible build (Cosmo compare)
-    needs: reproducibility-cosmo
+    needs: [reproducibility-cosmo, classify]
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
@@ -1306,6 +1334,8 @@ jobs:
           fi
 
   build-pipeline:
+    needs: [classify]
+    if: needs.classify.outputs.run_full_matrix == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -1328,6 +1358,8 @@ jobs:
         run: make e2e-build
 
   sanitizers:
+    needs: [classify]
+    if: needs.classify.outputs.run_full_matrix == 'true'
     name: ASan + UBSan
     runs-on: ubuntu-24.04
 
@@ -1343,6 +1375,8 @@ jobs:
           make DEBUG=1 test
 
   msan:
+    needs: [classify]
+    if: needs.classify.outputs.run_full_matrix == 'true'
     name: MSan + UBSan
     runs-on: ubuntu-24.04
 
@@ -1370,6 +1404,8 @@ jobs:
         run: make msan
 
   tsan:
+    needs: [classify]
+    if: needs.classify.outputs.run_full_matrix == 'true'
     name: TSan (worker pool)
     runs-on: ubuntu-24.04
 
@@ -1403,6 +1439,8 @@ jobs:
   # Isolated from the worker-pool job so instrumenting WAMR does not perturb that
   # signal.
   tsan-shared-heap:
+    needs: [classify]
+    if: needs.classify.outputs.run_full_matrix == 'true'
     name: TSan (WAMR shared-heap destroy + guarded subrange + spans)
     runs-on: ubuntu-24.04
     steps:
@@ -1424,6 +1462,8 @@ jobs:
   # fuzzer as INDEPENDENT jobs so path-aware selection can run only the relevant
   # target. Each keeps its sanitizer instrumentation + 60s libFuzzer budget. --
   fuzz-native-security:
+    needs: [classify]
+    if: needs.classify.outputs.run_fuzz_native == 'true'
     name: Fuzz (native security)
     runs-on: ubuntu-24.04
     steps:
@@ -1450,6 +1490,8 @@ jobs:
           done
 
   fuzz-lua-source:
+    needs: [classify]
+    if: needs.classify.outputs.run_fuzz_lua == 'true'
     name: Fuzz (Lua source parser)
     runs-on: ubuntu-24.04
     steps:
@@ -1465,6 +1507,8 @@ jobs:
         run: make fuzz-lua-source CC=clang FUZZ_TIME=60
 
   fuzz-js-source:
+    needs: [classify]
+    if: needs.classify.outputs.run_fuzz_js == 'true'
     name: Fuzz (JS source parser)
     runs-on: ubuntu-24.04
     steps:
@@ -1486,6 +1530,8 @@ jobs:
   # full build for tooling PRs is the next checkpoint, gated on coverage
   # equivalence. --
   focused-js-frontend:
+    needs: [classify]
+    if: needs.classify.outputs.run_focused_js == 'true'
     name: Focused JS frontend (fresh embedded host)
     runs-on: ubuntu-24.04
     steps:
@@ -1499,6 +1545,8 @@ jobs:
         run: make e2e-project-discovery
 
   focused-lua-frontend:
+    needs: [classify]
+    if: needs.classify.outputs.run_focused_lua == 'true'
     name: Focused Lua frontend (fresh embedded host)
     runs-on: ubuntu-24.04
     steps:
@@ -1519,6 +1567,8 @@ jobs:
   # / auth-health) on Postgres. The script self-builds with
   # HL_ENABLE_POSTGRES=1 and skips cleanly if Docker is unavailable.
   postgres:
+    needs: [classify]
+    if: needs.classify.outputs.run_full_matrix == 'true'
     name: PostgreSQL e2e
     runs-on: ubuntu-24.04
 
@@ -1538,6 +1588,8 @@ jobs:
   # / insert_if_absent) on the MySQL dialect; and caching_sha2 full-auth over
   # TLS. Self-builds with HL_ENABLE_MYSQL=1; skips cleanly without Docker.
   mysql:
+    needs: [classify]
+    if: needs.classify.outputs.run_full_matrix == 'true'
     name: MySQL e2e
     runs-on: ubuntu-24.04
 
@@ -1558,6 +1610,8 @@ jobs:
   # network_outbound sandbox grant (e2e-feature-valkey builds its own base).
   # redis-server from apt (no Docker); the e2e scripts also fall back to Docker.
   valkey:
+    needs: [classify]
+    if: needs.classify.outputs.run_full_matrix == 'true'
     name: Valkey/Redis e2e
     runs-on: ubuntu-24.04
 
@@ -1586,6 +1640,8 @@ jobs:
         run: make e2e-feature-valkey
 
   analyze:
+    needs: [classify]
+    if: needs.classify.outputs.run_full_matrix == 'true'
     name: Static Analysis
     runs-on: ubuntu-24.04
 
@@ -1606,6 +1662,8 @@ jobs:
         run: make cppcheck
 
   cosmo:
+    needs: [classify]
+    if: needs.classify.outputs.run_full_matrix == 'true'
     name: Cosmopolitan (APE)
     runs-on: ubuntu-24.04
 
@@ -1706,6 +1764,8 @@ jobs:
       # `make e2e-build-flavor`.)
 
   gpu:
+    needs: [classify]
+    if: needs.classify.outputs.run_full_matrix == 'true'
     name: GPU Compute (macOS Metal)
     runs-on: macos-15
 
@@ -1733,6 +1793,8 @@ jobs:
         run: make e2e-compute HL_ENABLE_GPU=1
 
   duckdb:
+    needs: [classify]
+    if: needs.classify.outputs.run_full_matrix == 'true'
     name: DuckDB backend (Linux)
     runs-on: ubuntu-24.04
 
@@ -1868,6 +1930,8 @@ jobs:
   # archive, then `hull build --with=duckdb` an app and runs it. Must not share a
   # tree with the HL_ENABLE_DUCKDB=1 job above (flag-flip object staleness).
   duckdb-feature:
+    needs: [classify]
+    if: needs.classify.outputs.run_full_matrix == 'true'
     name: DuckDB feature build (Linux)
     runs-on: ubuntu-24.04
     steps:
@@ -1888,6 +1952,8 @@ jobs:
   # library and pulls in the runtime loader (libvulkan1) so it boots with 0
   # devices. See docs/features_and_flavors.md.
   gpu-feature:
+    needs: [classify]
+    if: needs.classify.outputs.run_full_matrix == 'true'
     name: GPU feature build (Linux)
     runs-on: ubuntu-24.04
     steps:
@@ -1907,6 +1973,8 @@ jobs:
   # `hull build --with=tui` an app and boots it (asserts hull.tui registered).
   # Pure C, no vendored lib and no extra link libs, so no install step.
   tui-feature:
+    needs: [classify]
+    if: needs.classify.outputs.run_full_matrix == 'true'
     name: TUI feature build (Linux)
     runs-on: ubuntu-24.04
     steps:
@@ -1918,6 +1986,8 @@ jobs:
         run: sh tests/e2e_feature_tui.sh
 
   postgres-feature:
+    needs: [classify]
+    if: needs.classify.outputs.run_full_matrix == 'true'
     name: Postgres feature build (Linux)
     runs-on: ubuntu-24.04
     steps:
@@ -1929,6 +1999,8 @@ jobs:
         run: sh tests/e2e_feature_postgres.sh
 
   mysql-feature:
+    needs: [classify]
+    if: needs.classify.outputs.run_full_matrix == 'true'
     name: MySQL feature build (Linux)
     runs-on: ubuntu-24.04
     steps:
@@ -1944,6 +2016,8 @@ jobs:
   # so this job FAILS if JavaScript is somehow analyzable here - the JS-less branch can never
   # silently skip. The analyzable side is pinned (EXPECT_JS=1) in the main `build` job's step.
   project-discovery-lua:
+    needs: [classify]
+    if: needs.classify.outputs.run_full_matrix == 'true'
     name: Project source-discovery E2E (lua-only, JS unavailable)
     runs-on: ubuntu-24.04
     steps:
@@ -1955,6 +2029,8 @@ jobs:
         run: make e2e-project-discovery-lua
 
   coverage:
+    needs: [classify]
+    if: needs.classify.outputs.run_full_matrix == 'true'
     name: Code Coverage
     runs-on: ubuntu-24.04
 
@@ -2012,6 +2088,8 @@ jobs:
         run: make check-sdk-headers-selftest
 
   htmx-browser:
+    needs: [classify]
+    if: needs.classify.outputs.run_full_matrix == 'true'
     name: HTMX browser tests (${{ matrix.name }})
     strategy:
       fail-fast: false
@@ -2080,9 +2158,10 @@ jobs:
           if-no-files-found: ignore
 
   benchmark:
+    needs: [classify]
     name: Benchmark (${{ matrix.runtime }})
     runs-on: ubuntu-24.04
-    if: github.event_name == 'push'
+    if: github.event_name == 'push' && needs.classify.outputs.run_full_matrix == 'true'
 
     strategy:
       matrix:
@@ -2113,6 +2192,8 @@ jobs:
   # The make target skips when the toolchain is absent, so we assert it actually
   # ran (grep for the OK line) rather than silently pass.
   embed-rust:
+    needs: [classify]
+    if: needs.classify.outputs.run_full_matrix == 'true'
     name: libhull embedder (Rust)
     runs-on: ubuntu-24.04
 
@@ -2131,6 +2212,8 @@ jobs:
             || { echo "::error::embed_rust did not run to completion"; exit 1; }
 
   embed-zig:
+    needs: [classify]
+    if: needs.classify.outputs.run_full_matrix == 'true'
     name: libhull embedder (Zig)
     runs-on: ubuntu-24.04
 
@@ -2161,6 +2244,8 @@ jobs:
             || { echo "::error::embed_zig did not run to completion"; exit 1; }
 
   musl:
+    needs: [classify]
+    if: needs.classify.outputs.run_full_matrix == 'true'
     name: musl (Alpine)
     runs-on: ubuntu-24.04
     # A plain ubuntu runner (not container: alpine) so actions/checkout keeps
@@ -2240,15 +2325,15 @@ jobs:
         env:
           # A matrix job exposes ONE aggregate result here; ci_gate.py handles it.
           NEEDS_JSON: ${{ toJSON(needs) }}
+          PLAN: ${{ needs.classify.outputs.plan_json }}
           EVENT: ${{ github.event_name }}
         run: |
           printf '%s' "$NEEDS_JSON" > needs.json
-          # `benchmark` is push-only: it may legitimately skip on a PR /
-          # workflow_dispatch, but on a PUSH to main it IS applicable and must
-          # succeed - a mistakenly skipped benchmark on main must not pass.
-          if [ "$EVENT" = "push" ]; then ALLOW=""; else ALLOW="benchmark"; fi
-          # `classify` must be present AND succeed (its self-tests guard the
-          # classifier + gate).
+          # Allow-skip is DERIVED from the classifier plan via scripts/ci/job_plan.py
+          # - the SAME map the job `if:` conditions use, so the gate and the skips
+          # cannot disagree. A job whose group is inapplicable may skip; everything
+          # else (and `classify`) must succeed. benchmark (push-only) may skip on
+          # non-push.
           python3 scripts/ci/ci_gate.py --needs needs.json \
-            --allow-skip "$ALLOW" --require-present classify
+            --plan "$PLAN" --event "$EVENT" --require-present classify
 
