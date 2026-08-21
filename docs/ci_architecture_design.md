@@ -1109,7 +1109,11 @@ self-trust caveat (§8) — governance stays with CODEOWNERS/branch protection.
   reduction found" - the matrix is already lean, every leg proves a distinct
   property, and the one candidate (flavors subsystem-split) was declined as
   too-low-value for another permanent classification boundary. No 5B.2 activation.
-- **Slice 6:** nightly (schedule) + rollout. Stops for review.
+- **Slice 6 (DESIGN in Appendix F; awaiting review):** nightly/scheduled exhaustive
+  CI - a separate `nightly.yml` (deep fuzzing, broad conformance, rare configs,
+  version/compat), independent of the PR path. Narrow: scheduling + exhaustive-test
+  placement only. Checkpoints: design -> additive (workflow_dispatch-only proof) ->
+  activation (enable cron). NOT implemented.
 
 ---
 
@@ -1779,3 +1783,96 @@ checkpoint.** Slices 1-5 have removed the defensible CI waste; further matrix
 slicing now would trade negligible savings for harder-to-reason-about CI. The next
 CI work is Slice 6 (scheduling / nightly), or - preferably - the Build Plugin /
 BuildArtifact product architecture, rather than continuing to shave the PR matrix.
+
+# Appendix F. Slice 6 design - nightly / scheduled exhaustive CI
+
+Status: **DESIGN (awaiting review). NOT implemented.** Slice 6 is deliberately
+NARROW: scheduling + exhaustive-test PLACEMENT only. No branch-protection, no
+cross-run cache, no release-trust change, no further matrix reduction, and NO
+change to the change-aware PR path (`ci.yml`, the classifier, the applicability
+map, or the `ci-success` gate). Same review-gated checkpoints as 4/5A:
+design -> additive proof -> activation.
+
+## F.0 Why nightly completes the safety model
+
+Selective PR CI is only sound if the coverage it defers is run SOMEWHERE on a
+cadence. The three tiers:
+- **PR** - change-aware focused verification (Slices 1-4): the strongest tests for
+  the changed subsystem.
+- **`main` push** - the complete normal matrix (`full_all`): every unit/platform/
+  sanitizer/link/engine/repro job, every push.
+- **Nightly (schedule)** - the SLOW + EXHAUSTIVE tier that is too costly to run per
+  push: deep fuzzing, broad conformance, rare build configurations, and
+  version/compatibility drift. This is the backstop that makes deferring rare
+  coverage off the PR/main path acceptable.
+
+Nightly is a DIFFERENT tier, not a re-run of the normal matrix (`main` already
+covers that on every push).
+
+## F.1 Mechanism - a separate `nightly.yml` workflow
+
+Slice 6 adds ONE new workflow file, `.github/workflows/nightly.yml`, independent of
+`ci.yml`:
+- **Triggers:** `schedule:` (a daily cron, e.g. `0 7 * * *` UTC) + `workflow_dispatch:`
+  (manual, with an optional `only:` input to run a single category).
+- **Its own simple gate:** a `nightly-success` job (`if: always()`, `needs:` every
+  nightly job) that fails if any nightly job failed/was-cancelled - mirroring
+  `ci-success` but WITHOUT the applicability map (every nightly job simply always
+  runs on a nightly trigger, so no classifier / allow-skip logic is needed).
+- **Concurrency:** a `concurrency: { group: nightly, cancel-in-progress: true }` so
+  a manual dispatch supersedes an overlapping run.
+
+**Why a separate workflow (not `schedule:` inside `ci.yml`).** It is the NARROWEST
+option: it touches nothing on the required PR path - no new `on:` trigger on the
+required orchestrator, no schedule-applicability class in `job_plan.py`, no extra
+"skipped" nightly jobs cluttering every PR's check list, and zero risk of an
+exhaustive job ever gating a PR. It matches the repo's existing pattern of
+standalone workflows (`bench_mapped_span_1g.yml`, `cosmocc-*.yml`, `release.yml`).
+The classifier already maps `event=schedule -> full_all` (unused by `ci.yml` today);
+if a scheduled FULL-MATRIX re-run is ever wanted as belt-and-braces, that is a
+one-line `schedule:` add to `ci.yml` later - explicitly OUT of Slice 6's scope.
+
+## F.2 Exhaustive-test placement (what moves/extends to nightly)
+
+Each category names a test whose PR/main scope is a deliberately-bounded SMOKE, and
+the nightly scope is the exhaustive version. Nothing is REMOVED from PR/main; the
+nightly jobs are the deep counterparts.
+
+| category | PR/main scope today | nightly (exhaustive) scope | why nightly-only |
+|---|---|---|---|
+| native protocol fuzzing | `fuzz-core-security` / `fuzz-db-wire` / `fuzz-compute-span`, `-max_total_time=60` (60 s) each | the SAME targets at a long budget (e.g. 15-30 min each, or an hour total), seeded from the committed corpora | 60 s is a regression smoke; real bug-finding needs minutes-to-hours - far too slow for every push |
+| parser fuzzing | `fuzz-js-source` / `fuzz-lua-source`, 60 s | same targets, long budget | idem |
+| JS conformance | Test262 parser-scoped 614-case pinned subset | a BROADER Test262 slice (more chapters / the full parser-relevant corpus) | the full corpus is large + slow; the 614-case subset is the PR smoke |
+| Lua conformance | Lua 5.4 33-case pinned subset | a broader Lua 5.4 corpus | idem |
+| rare build configs | the 7-leg `flavors` matrix + the default build | uncommon `HL_ENABLE_*` COMBINATIONS not in the normal matrix (e.g. minimal `DB=0 HTTP=0 TUI=0 IMAGE=0`; all-features-on; `GPU=1 IMAGE=0`; each single-backend-only perm) | combinatorial blow-up; a daily sweep suffices, per-push does not |
+| version / compatibility | single LLVM-18 (wamrc), single pinned engine versions | multiple LLVM versions for wamrc; multiple REAL engine versions (PG 14/15/16, MySQL 5.7/8 + MariaDB); an older base image | version drift is slow-moving; a daily check is the right cadence |
+
+The exhaustive corpora/version-lists (bigger Test262/Lua sets, the concrete config
++ engine-version matrices) are FINALIZED at the additive-proof checkpoint; some
+need corpus/data prep. This design fixes the PLACEMENT + mechanism, not the exact
+case lists.
+
+## F.3 Failure visibility
+
+A failed scheduled run surfaces as a red `nightly-success` on the workflow's
+Actions page and in the repo's scheduled-workflow status. Richer notification
+(issue-on-failure, chat webhook) is a possible follow-up but is OUT of Slice 6's
+narrow scope (it is not "scheduling or exhaustive-test placement").
+
+## F.4 Review-gated checkpoints
+
+1. **Design** (this appendix) - STOP for review.
+2. **Additive proof** - add `nightly.yml` triggered by **`workflow_dispatch` ONLY**
+   (NO `schedule:` cron yet, so it can never fire on its own), containing the
+   nightly jobs + the `nightly-success` gate. Prove it green via a manual dispatch;
+   confirm the PR path (`ci.yml`, classifier, gate, applicability) is byte-unchanged
+   and no PR shows new jobs. STOP for review.
+3. **Activation** - add the `schedule:` cron trigger to `nightly.yml`. Confirm the
+   first scheduled run fires + is green. STOP.
+
+## F.5 Non-scope (reaffirmed)
+
+No branch-protection change; no cross-run cache; no release-trust change; no matrix
+reduction; the change-aware PR `ci.yml` + classifier + `job_plan.py` + `ci-success`
+are untouched. After Slice 6, the change-aware CI architecture effort is CLOSED and
+the next work is the Build Plugin / BuildArtifact product architecture.
