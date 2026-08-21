@@ -1109,7 +1109,11 @@ self-trust caveat (§8) — governance stays with CODEOWNERS/branch protection.
   reduction found" - the matrix is already lean, every leg proves a distinct
   property, and the one candidate (flavors subsystem-split) was declined as
   too-low-value for another permanent classification boundary. No 5B.2 activation.
-- **Slice 6:** nightly (schedule) + rollout. Stops for review.
+- **Slice 6 (DESIGN in Appendix F; awaiting review):** nightly/scheduled exhaustive
+  CI - a separate `nightly.yml` (deep fuzzing, broad conformance, rare configs,
+  version/compat), independent of the PR path. Narrow: scheduling + exhaustive-test
+  placement only. Checkpoints: design -> additive (workflow_dispatch-only proof) ->
+  activation (enable cron). NOT implemented.
 
 ---
 
@@ -1779,3 +1783,160 @@ checkpoint.** Slices 1-5 have removed the defensible CI waste; further matrix
 slicing now would trade negligible savings for harder-to-reason-about CI. The next
 CI work is Slice 6 (scheduling / nightly), or - preferably - the Build Plugin /
 BuildArtifact product architecture, rather than continuing to shave the PR matrix.
+
+# Appendix F. Slice 6 design - nightly / scheduled exhaustive CI
+
+Status: **DESIGN (reviewed + amended; approved to proceed to the additive
+checkpoint). NOT yet implemented.** Incorporates the four review amendments
+(offline+pinned conformance; inventory-before-workflow; fail-closed
+`nightly-success` completeness; explicit operations) and the scope correction
+(expanded Test262 / Lua runtime suite are separate stories - slot only). Slice 6 is
+deliberately NARROW: scheduling + exhaustive-test PLACEMENT only. No branch-protection, no
+cross-run cache, no release-trust change, no further matrix reduction, and NO
+change to the change-aware PR path (`ci.yml`, the classifier, the applicability
+map, or the `ci-success` gate). Same review-gated checkpoints as 4/5A:
+design -> additive proof -> activation.
+
+## F.0 Why nightly completes the safety model
+
+Selective PR CI is only sound if the coverage it defers is run SOMEWHERE on a
+cadence. The three tiers:
+- **PR** - change-aware focused verification (Slices 1-4): the strongest tests for
+  the changed subsystem.
+- **`main` push** - the complete normal matrix (`full_all`): every unit/platform/
+  sanitizer/link/engine/repro job, every push.
+- **Nightly (schedule)** - the SLOW + EXHAUSTIVE tier that is too costly to run per
+  push: deep fuzzing, broad conformance, rare build configurations, and
+  version/compatibility drift. This is the backstop that makes deferring rare
+  coverage off the PR/main path acceptable.
+
+Nightly is a DIFFERENT tier, not a re-run of the normal matrix (`main` already
+covers that on every push).
+
+## F.1 Mechanism - a separate `nightly.yml` workflow
+
+Slice 6 adds ONE new workflow file, `.github/workflows/nightly.yml`, independent of
+`ci.yml`:
+- **Triggers:** `schedule:` (a daily cron, e.g. `0 7 * * *` UTC) + `workflow_dispatch:`
+  (manual, with an optional `only:` input to run a single category).
+- **Its own simple gate:** a `nightly-success` job (`if: always()`, `needs:` every
+  nightly job) that fails if any nightly job failed/was-cancelled - mirroring
+  `ci-success` but WITHOUT the applicability map (every nightly job simply always
+  runs on a nightly trigger, so no classifier / allow-skip logic is needed).
+- **Concurrency:** a `concurrency: { group: nightly, cancel-in-progress: true }` so
+  a manual dispatch supersedes an overlapping run.
+
+**Why a separate workflow (not `schedule:` inside `ci.yml`).** It is the NARROWEST
+option: it touches nothing on the required PR path - no new `on:` trigger on the
+required orchestrator, no schedule-applicability class in `job_plan.py`, no extra
+"skipped" nightly jobs cluttering every PR's check list, and zero risk of an
+exhaustive job ever gating a PR. It matches the repo's existing pattern of
+standalone workflows (`bench_mapped_span_1g.yml`, `cosmocc-*.yml`, `release.yml`).
+The classifier already maps `event=schedule -> full_all` (unused by `ci.yml` today);
+if a scheduled FULL-MATRIX re-run is ever wanted as belt-and-braces, that is a
+one-line `schedule:` add to `ci.yml` later - explicitly OUT of Slice 6's scope.
+
+## F.2 Exhaustive-test placement + conformance scope boundary
+
+Each category names a test whose PR/main scope is a deliberately-bounded SMOKE; the
+nightly job is the deep counterpart. Nothing is REMOVED from PR/main.
+
+**Conformance stays OFFLINE + PINNED (amendment 1 + scope correction).** "Broader
+corpora" must NOT mean downloading upstream during CI. **Expanded Test262 and the
+upstream Lua RUNTIME suite are SEPARATE conformance stories** - each needs its own
+reviewed pin, manifest, license, size gate, and expectations - and Slice 6 does NOT
+broaden any corpus or run the Lua runtime suite. Slice 6 leaves a documented SLOT
+for those jobs (F.2b), filled ONLY when their own design lands. Any nightly
+conformance runs the ALREADY-COMMITTED corpora (Test262 614-case / Lua 33-case),
+never a fetch.
+
+| category | PR/main today | nightly | offline & pinned |
+|---|---|---|---|
+| native + parser fuzzing | 60 s smoke on the committed corpora | SAME targets + SAME committed corpora at a long budget | yes (in-repo corpora) |
+| rare build configs | the 7-leg `flavors` matrix | CONCRETE uncommon `HL_ENABLE_*` combinations (F.2b), link + smoke | yes |
+| version / compatibility | single LLVM-18, single pinned engine version | multiple PINNED LLVM + pinned real engine versions (F.2b) | yes (pinned pkgs/digests) |
+| conformance-corpus expansion | 614 / 33-case pinned subsets (in `make test`) | **SLOT ONLY** - deferred to its own reviewed design; Slice 6 does not broaden it | n/a |
+
+## F.2b Additive job inventory (defined BEFORE writing the workflow - amendment 2)
+
+The additive checkpoint BEGINS by recording, per nightly job: exact command;
+timeout + fuzz budget; pinned compiler/service versions; expected failure
+artifacts; the property BEYOND normal main CI; approximate runner cost. No
+placeholder "rare combinations" jobs - every row names concrete targets/configs
+(exact flags/image digests pinned when the workflow is authored):
+
+| job | command (targets) | timeout / budget | pinned versions | failure artifacts | property beyond main | ~cost |
+|---|---|---|---|---|---|---|
+| `nightly-fuzz-core` | sh_json, path_normalize, mime_sniff, host_match @ `-max_total_time=300` | 40 min / 300 s×4 | clang (ubuntu-24.04) | `crash-*` inputs + corpus dir | deep coverage vs the 60 s smoke | ~20 min |
+| `nightly-fuzz-db-wire` | pgwire, pg_dsn, pg_rewrite, mysqlwire, mysql_dsn, respwire, valkey_dsn @ 180 s | 40 min / 180 s×7 | clang | `crash-*` inputs | deep DB-wire coverage | ~21 min |
+| `nightly-fuzz-compute` | span_sdk, span_window @ 300 s | 25 min | clang | `crash-*` inputs | deep span coverage | ~10 min |
+| `nightly-fuzz-js` | fuzz_js_source @ 600 s | 20 min | clang | `crash-*` inputs | deep JS-parser coverage | ~10 min |
+| `nightly-fuzz-lua` | fuzz_lua_source @ 600 s | 20 min | clang | `crash-*` inputs | deep Lua-parser coverage | ~10 min |
+| `nightly-rare-configs` | link + `hull version` + `app.main` smoke for (a) `DB=0 HTTP=0 WASM=0 IMAGE=0` minimal; (b) `POSTGRES=1 MYSQL=1` (both wire backends); (c) `SQLITE=0 POSTGRES=1 MYSQL=1`; (d) `IMAGE=0 WASM=0` | 30 min | gcc (ubuntu-24.04) | build/link log | uncommon link combos NOT in the 7-leg matrix | ~10 min |
+| `nightly-compat-llvm` | build `wamrc` against llvm-17 AND llvm-18; AOT smoke each | 30 min | llvm-17, llvm-18 | wamrc build log | wamrc builds across LLVM versions | ~10 min |
+| `nightly-compat-db` | `e2e_postgres` vs pinned `postgres` 15 & 16; `e2e_mysql` vs pinned `mysql:8.0` + `mariadb` | 40 min | pinned image DIGESTS | e2e logs | wire compat across engine versions | ~25 min |
+
+Conformance is intentionally absent: running the committed corpora under ASan/MSan
+is ALREADY covered by main's `sanitizers` + `msan` jobs (no property beyond main);
+a deeper conformance story is the deferred SLOT above.
+
+## F.3 Failure visibility + diagnostics (amendment 4)
+
+On failure, each nightly job uploads the relevant diagnostics via
+`actions/upload-artifact` (pinned SHA, `if: failure()`): fuzz `crash-*` reproducers
++ the seed corpus for a fuzz job, sanitizer/build logs for a config/compat job, and
+e2e logs for a compat-db job. A failed scheduled run also surfaces as a red
+`nightly-success` on the Actions page. Richer notification (issue-on-failure / chat)
+is OUT of Slice 6's narrow scope.
+
+## F.3b `nightly-success` gate - fail-closed completeness (amendment 3)
+
+`nightly-success` gets the SAME fail-closed guarantee as `ci-success`:
+- `if: always()`, `needs:` EVERY nightly job; it evaluates `toJSON(needs)` through
+  the existing `scripts/ci/ci_gate.py` `evaluate()` with `allow_skip=()` (nothing
+  may skip on a nightly trigger) - so failure, cancellation, a missing/unknown
+  result, or ANY skip fails the gate;
+- a nightly-specific completeness guard: `check_gate_completeness.py` is
+  parameterized to accept a workflow path + gate-job name (default stays
+  `ci.yml` / `ci-success`) and is ALSO run against `nightly.yml` /
+  `nightly-success`, asserting the gate `needs` every nightly job. This is the
+  "add a nightly-specific completeness test" the amendment requires, reusing the
+  proven checker rather than a parallel one.
+
+## F.4 Operations (amendment 4)
+
+`nightly.yml` pins:
+- **Permissions:** top-level `permissions: { contents: read }` (minimal; no write
+  scopes) - nightly neither pushes nor comments.
+- **Timeouts:** every job carries an explicit `timeout-minutes` (F.2b column) so a
+  hung fuzzer/e2e cannot run away.
+- **Concurrency (no-cancel):** `concurrency: { group: nightly, cancel-in-progress:
+  false }` - a new trigger while a nightly is running QUEUES (does not cancel the
+  active nightly), preventing overlap without discarding in-flight exhaustive work.
+- **Schedule timezone:** GitHub cron is **UTC**; the cron (`0 7 * * *` = 07:00 UTC)
+  is documented as UTC in the workflow.
+- **Default-branch only:** GitHub runs `schedule:` only on the default branch by
+  design; additionally the nightly jobs guard `if: github.ref ==
+  'refs/heads/main'` so a `workflow_dispatch` from a feature branch is a no-op -
+  scheduled + real runs execute only from `main`.
+
+## F.5 Review-gated checkpoints
+
+1. **Design** (this appendix, as amended) - STOP for review.
+2. **Additive proof** - FIRST finalize the F.2b inventory (exact flags/digests),
+   THEN add `nightly.yml` triggered by **`workflow_dispatch` ONLY** (NO `schedule:`
+   cron yet, so it can never fire on its own), with the jobs + failure-artifact
+   uploads + the fail-closed `nightly-success` gate + the parameterized completeness
+   check. Prove green via a manual dispatch; confirm the PR path (`ci.yml`,
+   classifier, `job_plan.py`, `ci-success`) is BYTE-UNCHANGED and no PR shows new
+   jobs. STOP for review.
+3. **Activation** - add the `schedule:` cron trigger. Confirm the first scheduled
+   run fires + is green. STOP.
+
+## F.6 Non-scope (reaffirmed)
+
+No branch-protection change; no cross-run cache; no release-trust change; no matrix
+reduction; no conformance-corpus broadening and no Lua runtime suite (their own
+stories); the change-aware PR `ci.yml` + classifier + `job_plan.py` + `ci-success`
+are untouched. After Slice 6, the change-aware CI architecture effort is CLOSED and
+the next work is the Build Plugin / BuildArtifact product architecture.
