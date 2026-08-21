@@ -209,20 +209,24 @@ jobs:
       - name: Build + smoke ${{ matrix.label }}
         env:
           FLAGS: ${{ matrix.flags }}
+          LOG: nightly-rare-config-${{ strategy.job-index }}.log
         run: |
-          set -e
+          cat > /tmp/rareconfig.sh <<'SCRIPT'
+          set -euo pipefail
           make $FLAGS
           ./build/hull version
           printf 'app.main(function() return 0 end)\n' > /tmp/nightly_smoke.lua
           ./build/hull /tmp/nightly_smoke.lua
-          echo "config links + runs: ${{ matrix.label }}"
+          echo "config links + runs"
+          SCRIPT
+          bash tests/ci_run_logged.sh "$LOG" bash /tmp/rareconfig.sh
       - name: Upload build log on failure
         if: failure()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
         with:
-          name: nightly-rare-configs-${{ strategy.job-index }}
-          path: build/*.log
-          if-no-files-found: ignore
+          name: nightly-rare-config-${{ strategy.job-index }}-log
+          path: nightly-rare-config-${{ strategy.job-index }}.log
+          if-no-files-found: error
           retention-days: 14
 
   # -- version / compat: wamrc across LLVM versions. --
@@ -243,15 +247,29 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y llvm-${{ matrix.llvm }}-dev cmake
       - name: Build wamrc against LLVM ${{ matrix.llvm }} + AOT smoke
         timeout-minutes: 20
+        env:
+          LLVM: ${{ matrix.llvm }}
+          LOG: nightly-compat-llvm-${{ matrix.llvm }}.log
         run: |
-          set -e
-          if command -v llvm-config-${{ matrix.llvm }} >/dev/null 2>&1; then
-            export WAMRC_CMAKE_FLAGS="-DLLVM_DIR=$(llvm-config-${{ matrix.llvm }} --cmakedir)"
+          cat > /tmp/compat_llvm.sh <<'SCRIPT'
+          set -euo pipefail
+          if command -v "llvm-config-$LLVM" >/dev/null 2>&1; then
+            export WAMRC_CMAKE_FLAGS="-DLLVM_DIR=$(llvm-config-$LLVM --cmakedir)"
           fi
           make wamrc
           build/wamrc -o /tmp/echo.aot tests/fixtures/compute/echo.wasm
           test -s /tmp/echo.aot
-          echo "wamrc builds + AOT-compiles against LLVM ${{ matrix.llvm }}"
+          echo "wamrc builds + AOT-compiles against LLVM $LLVM"
+          SCRIPT
+          bash tests/ci_run_logged.sh "$LOG" bash /tmp/compat_llvm.sh
+      - name: Upload build log on failure
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        with:
+          name: nightly-compat-llvm-${{ matrix.llvm }}-log
+          path: nightly-compat-llvm-${{ matrix.llvm }}.log
+          if-no-files-found: error
+          retention-days: 14
 
   # -- version / compat: the DB wire clients against multiple engine versions.
   #    SUPPORTED nightly set: PostgreSQL 15/16 + MySQL 8.0 (what the e2e harness
@@ -283,11 +301,25 @@ jobs:
           IMG_ENV: ${{ matrix.img_env }}
           IMAGE: ${{ matrix.image }}
           TARGET: ${{ matrix.target }}
+          LOG: nightly-compat-db-${{ strategy.job-index }}.log
         run: |
-          set -e
+          cat > /tmp/compat_db.sh <<'SCRIPT'
+          set -euo pipefail
           export "${IMG_ENV}=${IMAGE}"
           echo "== ${TARGET} against ${IMAGE} =="
           make "$TARGET"
+          SCRIPT
+          # the e2e harness dumps `docker logs` on failure, so the captured LOG
+          # includes the engine's own container startup output.
+          bash tests/ci_run_logged.sh "$LOG" bash /tmp/compat_db.sh
+      - name: Upload e2e + container log on failure
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        with:
+          name: nightly-compat-db-${{ strategy.job-index }}-log
+          path: nightly-compat-db-${{ strategy.job-index }}.log
+          if-no-files-found: error
+          retention-days: 14
 
   # -- fail-closed gate (amendment 3): mirrors ci-success. `needs` EVERY nightly
   #    job; a failure / cancellation / missing result / unexpected skip fails it.
@@ -318,6 +350,11 @@ jobs:
       # 8.4 / MariaDB (the pending slot) are re-added without the harness work.
       - name: Compat-db version inventory pin
         run: python3 scripts/ci/test_nightly_matrix.py
+      # Validate the durable-log wrapper: exit-status preservation (a failed
+      # command still fails the job) + artifact-path coverage (the promised log is
+      # created with combined stdout+stderr).
+      - name: Logging wrapper self-test
+        run: bash tests/ci_run_logged_selftest.sh
       - name: Evaluate nightly results (fail-closed; nothing may skip)
         if: always()
         env:

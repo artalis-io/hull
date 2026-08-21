@@ -22,6 +22,16 @@ DSN="mysql://hull:s3cretpw@127.0.0.1:${MYPORT}/hulldb?sslmode=disable"
 DSN_TLS="mysql://hull:s3cretpw@127.0.0.1:${MYPORT}/hulldb?sslmode=require"
 
 cleanup() {
+    rc=$?
+    # On failure, dump the DB container's own logs (bounded) BEFORE removing it,
+    # so an unattended nightly captures WHY the engine never became ready (e.g. a
+    # removed startup option on a newer version). Startup/init output only - no
+    # secrets echoed.
+    if [ "$rc" -ne 0 ]; then
+        echo "=== docker logs $CONTAINER (tail 200; e2e failed rc=$rc) ==="
+        docker logs --tail 200 "$CONTAINER" 2>&1 || true
+        echo "=== end docker logs $CONTAINER ==="
+    fi
     [ -n "${SVR:-}" ] && kill "$SVR" 2>/dev/null || true
     docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
     [ -n "${APPDIR:-}" ] && rm -rf "$APPDIR"
