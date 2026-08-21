@@ -559,3 +559,5 @@ const HlDbBackend hl_db_backend_postgres = {
 };
 
 #endif /* HL_ENABLE_POSTGRES */
+
+/* CI Slice 4 checkpoint-3 narrow-native live demo: throwaway, do not merge. */
