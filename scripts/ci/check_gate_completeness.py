@@ -9,6 +9,7 @@
 #
 # SPDX-License-Identifier: AGPL-3.0-or-later
 
+import argparse
 import re
 import sys
 
@@ -16,7 +17,7 @@ WORKFLOW = ".github/workflows/ci.yml"
 GATE = "ci-success"
 
 
-def parse(path):
+def parse(path, GATE):
     lines = open(path, encoding="utf-8").read().splitlines()
     # locate the top-level `jobs:` block
     n = len(lines)
@@ -66,29 +67,34 @@ def parse_needs(lines, start, n):
     return None
 
 
-def main():
-    job_ids, gate_needs = parse(WORKFLOW)
-    if GATE not in job_ids:
-        print("check-gate: no %r job found in %s" % (GATE, WORKFLOW)); return 1
-    if gate_needs is None:
-        print("check-gate: %r has no parseable `needs:`" % GATE); return 1
+def main(argv):
+    ap = argparse.ArgumentParser(description="Assert a workflow's gate needs every job.")
+    ap.add_argument("--workflow", default=WORKFLOW, help="the workflow file to check.")
+    ap.add_argument("--gate", default=GATE, help="the gate job id (needs every other job).")
+    args = ap.parse_args(argv)
 
-    expected = set(job_ids) - {GATE}
+    job_ids, gate_needs = parse(args.workflow, args.gate)
+    if args.gate not in job_ids:
+        print("check-gate: no %r job found in %s" % (args.gate, args.workflow)); return 1
+    if gate_needs is None:
+        print("check-gate: %r has no parseable `needs:`" % args.gate); return 1
+
+    expected = set(job_ids) - {args.gate}
     missing = expected - gate_needs               # a job not gated
     extra = gate_needs - set(job_ids)             # a needs entry that is not a real job
     problems = []
     if missing:
-        problems.append("jobs NOT in %s.needs (ungated): %s" % (GATE, sorted(missing)))
+        problems.append("jobs NOT in %s.needs (ungated): %s" % (args.gate, sorted(missing)))
     if extra:
-        problems.append("%s.needs references unknown jobs: %s" % (GATE, sorted(extra)))
-    print("check-gate: %d jobs, %d gated." % (len(job_ids), len(gate_needs)))
+        problems.append("%s.needs references unknown jobs: %s" % (args.gate, sorted(extra)))
+    print("check-gate: %s: %d jobs, %d gated." % (args.workflow, len(job_ids), len(gate_needs)))
     if problems:
         for p in problems:
             print("  FAIL:", p)
         return 1
-    print("check-gate: ci-success depends on every job. OK.")
+    print("check-gate: %s depends on every job. OK." % args.gate)
     return 0
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(main(sys.argv[1:]))

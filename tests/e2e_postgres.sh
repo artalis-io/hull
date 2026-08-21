@@ -68,7 +68,7 @@ docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
 docker run -d --name "$CONTAINER" \
     -e POSTGRES_USER=hull -e POSTGRES_DB=hulldb \
     -e POSTGRES_PASSWORD=s3cretpw \
-    -p "${PGPORT}:5432" postgres:16-alpine >/dev/null
+    -p "${PGPORT}:5432" "${PG_IMAGE:-postgres:16-alpine}" >/dev/null
 
 echo "=== waiting for postgres (real TCP + SCRAM connection, as the app connects) ==="
 # postgres:16 runs initdb on first start, briefly bringing PG up on a local

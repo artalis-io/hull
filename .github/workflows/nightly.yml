@@ -1,0 +1,321 @@
+name: Nightly
+
+# Slice 6 (docs/ci_architecture_design.md Appendix F): the SLOW / EXHAUSTIVE CI
+# tier that is too costly to run per push - deep fuzzing, rare build
+# configurations, and version / compatibility drift. It is INDEPENDENT of the
+# change-aware PR workflow (ci.yml) and touches NOTHING on the required PR path.
+#
+# ADDITIVE checkpoint: this is `workflow_dispatch` ONLY - there is NO `schedule:`
+# cron yet, so it can never fire on its own. The daily cron is added at the
+# activation checkpoint (GitHub cron is UTC; schedule runs only on the default
+# branch by design).
+
+on:
+  workflow_dispatch:
+    inputs:
+      fuzz_seconds:
+        description: "libFuzzer -max_total_time per target (production nightly = 300)."
+        default: "300"
+
+# Minimal permissions: nightly reads the repo; it never pushes / comments / writes.
+permissions:
+  contents: read
+
+# Prevent overlapping nightly runs WITHOUT cancelling an active one: a new trigger
+# QUEUES until the running nightly finishes (does not discard in-flight work).
+concurrency:
+  group: nightly
+  cancel-in-progress: false
+
+jobs:
+  # -- deep fuzzing: the same targets + committed corpora as ci.yml's 60s smoke,
+  #    at a long budget (real bug-finding needs minutes, not seconds). --
+  nightly-fuzz-core:
+    if: github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
+    name: Nightly fuzz (core security, deep)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    env:
+      FUZZ_SECONDS: ${{ github.event.inputs.fuzz_seconds || '300' }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          submodules: true
+      - name: Install clang
+        run: sudo apt-get update && sudo apt-get install -y clang
+      - name: Build core fuzz targets
+        run: |
+          make CC=clang \
+            fuzz/fuzz_sh_json fuzz/fuzz_path_normalize fuzz/fuzz_mime_sniff fuzz/fuzz_host_match
+      - name: Run core fuzzers (deep)
+        run: |
+          set -e
+          for f in sh_json path_normalize mime_sniff host_match; do
+            echo "== fuzz $f (${FUZZ_SECONDS}s) =="
+            ./fuzz/fuzz_$f fuzz/corpus_$f/ -max_total_time="$FUZZ_SECONDS"
+          done
+      - name: Upload crashers + corpus on failure
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        with:
+          name: nightly-fuzz-core-crashers
+          path: |
+            crash-*
+            fuzz/corpus_sh_json/
+            fuzz/corpus_path_normalize/
+            fuzz/corpus_mime_sniff/
+            fuzz/corpus_host_match/
+          if-no-files-found: ignore
+          retention-days: 14
+
+  nightly-fuzz-db-wire:
+    if: github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
+    name: Nightly fuzz (DB wire, deep)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    env:
+      FUZZ_SECONDS: ${{ github.event.inputs.fuzz_seconds || '180' }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          submodules: true
+      - name: Install clang
+        run: sudo apt-get update && sudo apt-get install -y clang
+      - name: Build DB wire fuzz targets
+        run: |
+          make CC=clang \
+            fuzz/fuzz_pgwire fuzz/fuzz_pg_dsn fuzz/fuzz_pg_rewrite \
+            fuzz/fuzz_mysqlwire fuzz/fuzz_mysql_dsn fuzz/fuzz_respwire fuzz/fuzz_valkey_dsn
+      - name: Run DB wire fuzzers (deep)
+        run: |
+          set -e
+          for f in pgwire pg_dsn pg_rewrite mysqlwire mysql_dsn respwire valkey_dsn; do
+            echo "== fuzz $f (${FUZZ_SECONDS}s) =="
+            ./fuzz/fuzz_$f fuzz/corpus_$f/ -max_total_time="$FUZZ_SECONDS"
+          done
+      - name: Upload crashers on failure
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        with:
+          name: nightly-fuzz-db-wire-crashers
+          path: crash-*
+          if-no-files-found: ignore
+          retention-days: 14
+
+  nightly-fuzz-compute:
+    if: github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
+    name: Nightly fuzz (compute spans, deep)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      FUZZ_SECONDS: ${{ github.event.inputs.fuzz_seconds || '300' }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          submodules: true
+      - name: Install clang
+        run: sudo apt-get update && sudo apt-get install -y clang
+      - name: Build compute fuzz targets
+        run: make CC=clang fuzz/fuzz_span_sdk fuzz/fuzz_span_window
+      - name: Run compute fuzzers (deep)
+        run: |
+          set -e
+          for f in span_sdk span_window; do
+            echo "== fuzz $f (${FUZZ_SECONDS}s) =="
+            ./fuzz/fuzz_$f fuzz/corpus_$f/ -max_total_time="$FUZZ_SECONDS"
+          done
+      - name: Upload crashers on failure
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        with:
+          name: nightly-fuzz-compute-crashers
+          path: crash-*
+          if-no-files-found: ignore
+          retention-days: 14
+
+  nightly-fuzz-js:
+    if: github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
+    name: Nightly fuzz (JS source parser, deep)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      FUZZ_SECONDS: ${{ github.event.inputs.fuzz_seconds || '600' }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          submodules: true
+      - name: Install clang
+        run: sudo apt-get update && sudo apt-get install -y clang
+      - name: Build + run the JS source fuzzer (deep)
+        run: |
+          set -e
+          make CC=clang fuzz/fuzz_js_source
+          ./fuzz/fuzz_js_source fuzz/corpus_js_source/ -max_total_time="$FUZZ_SECONDS"
+      - name: Upload crashers on failure
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        with:
+          name: nightly-fuzz-js-crashers
+          path: crash-*
+          if-no-files-found: ignore
+          retention-days: 14
+
+  nightly-fuzz-lua:
+    if: github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
+    name: Nightly fuzz (Lua source parser, deep)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      FUZZ_SECONDS: ${{ github.event.inputs.fuzz_seconds || '600' }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          submodules: true
+      - name: Install clang
+        run: sudo apt-get update && sudo apt-get install -y clang
+      - name: Build + run the Lua source fuzzer (deep)
+        run: |
+          set -e
+          make CC=clang fuzz/fuzz_lua_source
+          ./fuzz/fuzz_lua_source fuzz/corpus_lua_source/ -max_total_time="$FUZZ_SECONDS"
+      - name: Upload crashers on failure
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        with:
+          name: nightly-fuzz-lua-crashers
+          path: crash-*
+          if-no-files-found: ignore
+          retention-days: 14
+
+  # -- rare build configs: uncommon HL_ENABLE_* combinations NOT in the 7-leg
+  #    flavors matrix; link + `hull version` + an app.main exit smoke. --
+  nightly-rare-configs:
+    if: github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
+    name: Nightly rare build configs (${{ matrix.label }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { label: "minimal (DB=0 HTTP=0 WASM=0 IMAGE=0)", flags: "HL_ENABLE_DB=0 HL_ENABLE_HTTP=0 HL_ENABLE_WASM=0 HL_ENABLE_IMAGE=0" }
+          - { label: "both wire backends (POSTGRES=1 MYSQL=1)", flags: "HL_ENABLE_POSTGRES=1 HL_ENABLE_MYSQL=1" }
+          - { label: "both wire, no sqlite (SQLITE=0 POSTGRES=1 MYSQL=1)", flags: "HL_ENABLE_SQLITE=0 HL_ENABLE_POSTGRES=1 HL_ENABLE_MYSQL=1" }
+          - { label: "no image, no compute (IMAGE=0 WASM=0)", flags: "HL_ENABLE_IMAGE=0 HL_ENABLE_WASM=0" }
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          submodules: true
+      - name: Build + smoke ${{ matrix.label }}
+        env:
+          FLAGS: ${{ matrix.flags }}
+        run: |
+          set -e
+          make $FLAGS
+          ./build/hull version
+          printf 'app.main(function() return 0 end)\n' > /tmp/nightly_smoke.lua
+          ./build/hull /tmp/nightly_smoke.lua
+          echo "config links + runs: ${{ matrix.label }}"
+      - name: Upload build log on failure
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        with:
+          name: nightly-rare-configs-${{ strategy.job-index }}
+          path: build/*.log
+          if-no-files-found: ignore
+          retention-days: 14
+
+  # -- version / compat: wamrc across LLVM versions. --
+  nightly-compat-llvm:
+    if: github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
+    name: Nightly compat (wamrc x LLVM ${{ matrix.llvm }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        llvm: ["17", "18"]
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          submodules: true
+      - name: Install LLVM ${{ matrix.llvm }} + cmake
+        run: sudo apt-get update && sudo apt-get install -y llvm-${{ matrix.llvm }}-dev cmake
+      - name: Build wamrc against LLVM ${{ matrix.llvm }} + AOT smoke
+        timeout-minutes: 20
+        run: |
+          set -e
+          if command -v llvm-config-${{ matrix.llvm }} >/dev/null 2>&1; then
+            export WAMRC_CMAKE_FLAGS="-DLLVM_DIR=$(llvm-config-${{ matrix.llvm }} --cmakedir)"
+          fi
+          make wamrc
+          build/wamrc -o /tmp/echo.aot tests/fixtures/compute/echo.wasm
+          test -s /tmp/echo.aot
+          echo "wamrc builds + AOT-compiles against LLVM ${{ matrix.llvm }}"
+
+  # -- version / compat: the DB wire clients against multiple engine versions
+  #    (main tests only PG 16 / MySQL 8.0; nightly adds the neighbours). --
+  nightly-compat-db:
+    if: github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
+    name: Nightly compat (${{ matrix.label }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { label: "PostgreSQL 15", target: e2e-postgres, img_env: PG_IMAGE, image: "postgres:15-alpine" }
+          - { label: "PostgreSQL 16", target: e2e-postgres, img_env: PG_IMAGE, image: "postgres:16-alpine" }
+          - { label: "MySQL 8.0", target: e2e-mysql, img_env: MYSQL_IMAGE, image: "mysql:8.0" }
+          - { label: "MySQL 8.4", target: e2e-mysql, img_env: MYSQL_IMAGE, image: "mysql:8.4" }
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          submodules: true
+      - name: ${{ matrix.label }} e2e (pinned engine image)
+        env:
+          IMG_ENV: ${{ matrix.img_env }}
+          IMAGE: ${{ matrix.image }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -e
+          export "${IMG_ENV}=${IMAGE}"
+          echo "== ${TARGET} against ${IMAGE} =="
+          make "$TARGET"
+
+  # -- fail-closed gate (amendment 3): mirrors ci-success. `needs` EVERY nightly
+  #    job; a failure / cancellation / missing result / unexpected skip fails it.
+  #    check_gate_completeness.py (parameterized) asserts this `needs` is complete.
+  nightly-success:
+    if: always()
+    name: Nightly success (fail-closed gate)
+    runs-on: ubuntu-24.04
+    needs:
+      - nightly-fuzz-core
+      - nightly-fuzz-db-wire
+      - nightly-fuzz-compute
+      - nightly-fuzz-js
+      - nightly-fuzz-lua
+      - nightly-rare-configs
+      - nightly-compat-llvm
+      - nightly-compat-db
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+      # Completeness (amendment 3): assert this gate `needs` EVERY nightly job, so
+      # no nightly job can be added without wiring it into the gate. Runs here
+      # (inside nightly.yml) rather than in ci.yml, keeping the PR path unchanged.
+      - name: Gate completeness (nightly-success needs every nightly job)
+        run: |
+          python3 scripts/ci/check_gate_completeness.py \
+            --workflow .github/workflows/nightly.yml --gate nightly-success
+      - name: Evaluate nightly results (fail-closed; nothing may skip)
+        if: always()
+        env:
+          NEEDS_JSON: ${{ toJSON(needs) }}
+          EVENT: ${{ github.event_name }}
+        run: |
+          printf '%s' "$NEEDS_JSON" > /tmp/nightly_needs.json
+          # allow_skip is EMPTY (no --plan, no --allow-skip): every nightly job
+          # must succeed. require-present empty (nightly has no classify job).
+          python3 scripts/ci/ci_gate.py --needs /tmp/nightly_needs.json \
+            --event "$EVENT" --require-present ""
