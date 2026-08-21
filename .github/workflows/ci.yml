@@ -10,7 +10,7 @@ on:
   push:
     branches: [main]
   pull_request:
-    branches: [main]
+    branches: [main, demo-cp3-base]
   # Manual force-full trigger (docs/ci_architecture_design.md section 15). The
   # mechanism may ADD coverage, never suppress required work.
   workflow_dispatch:
