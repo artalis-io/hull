@@ -77,8 +77,11 @@ def main():
         flag = job_plan.GROUP_FLAG.get(grp)
         if flag is None:
             problems.append("group %r for job %r has no run-flag" % (grp, j))
-        elif flag not in refs:
-            problems.append("job %r (group %s) must gate on %s; if=%r" % (j, grp, flag, iftext))
+        elif refs != {flag}:
+            # the `if:` must reference EXACTLY this group's flag - no more, no
+            # fewer - so a job cannot gate on a different / additional run-flag.
+            problems.append("job %r (group %s) must gate on EXACTLY {%s}; found %s in if=%r"
+                            % (j, grp, flag, sorted(refs), iftext))
 
     print("check-job-plan: %d jobs, %d mapped groups." % (len(jobs), len(job_plan.GROUP)))
     if problems:

@@ -1082,7 +1082,11 @@ self-trust caveat (§8) — governance stays with CODEOWNERS/branch protection.
     conditions and the map never drift. Only PROVEN narrow classes skip -
     docs-only, JS frontend/fuzz, Lua frontend/fuzz; every other plan (core,
     tooling, project-discovery, query, compute, db, gpu, tls, examples, generic
-    tests, unknown) and every main/full/force-full run the broad suite. Every job
+    tests, unknown) and every main/full/force-full run the broad suite. Narrowness is a POSITIVE, fail-closed allowlist: a plan may skip the broad
+    matrix only when it is a well-formed plan dict whose true flags all lie in
+    the approved narrow set (docs_only / focused_js/lua_frontend / _fuzz + lint)
+    and include a real selector - an empty/unknown/non-boolean/newly-added or
+    otherwise non-approved flag (e.g. focused_wasm) yields BROAD. Every job
     DEFAULTS applicable (an unmapped job -> `always` -> never skips); mixed
     core+frontend runs full core PLUS focused; `benchmark` stays push-only.
     `paths-ignore` removed so `classify` + `ci-success` always appear. Fixtures:

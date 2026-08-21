@@ -25,6 +25,9 @@ import json
 import os
 import sys
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import classify_changes as _classify  # noqa: E402  (the canonical plan schema)
+
 # Each GROUP has a run-flag emitted by the classify job; the ci.yml job `if:`
 # references exactly this flag. `always` has no flag (never skips).
 GROUP_FLAG = {
@@ -90,29 +93,54 @@ GROUP = {
     "benchmark": "full-matrix",
 }
 
-# A plan is NARROW (broad matrix may skip) only if it carries NONE of these.
-BROAD_FLAGS = (
-    "full_all", "full_core", "focused_tooling", "focused_project_discovery",
-    "focused_query", "focused_compute", "focused_db", "focused_gpu",
-    "focused_tls", "focused_native_fuzz",
-)
+# POSITIVE narrow allowlist (fail closed). A plan is NARROW - and may skip the
+# broad matrix - ONLY when it is a well-formed plan dict whose TRUE flags ALL lie
+# within APPROVED_NARROW and include at least one real narrow SELECTOR (beyond the
+# always-on lint). An empty plan, a non-dict, a non-boolean field, an unknown
+# field, a true flag outside the approved set (a newly added plan flag, or
+# focused_wasm, ...), or lint-only -> BROAD. This is a positive allowlist, NOT
+# "absence of known broad flags", so a new/unknown/malformed flag can NEVER open
+# a skip.
+APPROVED_NARROW = frozenset({
+    "lint", "docs_only",
+    "focused_js_frontend", "focused_js_fuzz",
+    "focused_lua_frontend", "focused_lua_fuzz",
+})
+NARROW_SELECTORS = APPROVED_NARROW - {"lint"}      # at least one of these must be set
+KNOWN_PLAN_KEYS = frozenset(_classify.PLAN)        # the canonical plan schema (classify_changes)
+
+
+def _is_narrow(plan):
+    """True iff `plan` is a well-formed plan dict that positively qualifies to
+    skip the broad matrix (APPROVED_NARROW). Anything else -> False -> broad."""
+    if not isinstance(plan, dict):
+        return False
+    for k, v in plan.items():
+        if not isinstance(v, bool):
+            return False                            # non-boolean field -> broad
+        if k not in KNOWN_PLAN_KEYS:
+            return False                            # unknown field -> broad
+    true_flags = {k for k, v in plan.items() if v}
+    if not true_flags <= APPROVED_NARROW:
+        return False                                # a true flag outside the approved set -> broad
+    if not (true_flags & NARROW_SELECTORS):
+        return False                                # lint-only / no real narrow selector -> broad
+    return True
 
 
 def applicable_groups(plan):
-    """The set of groups that MUST run for this plan. `always` is always in it.
-    A non-narrow plan makes every group applicable (broad). A narrow plan
-    (docs-only or pure JS/Lua frontend/fuzz) makes only the matching focused +
-    parser-fuzz groups applicable."""
+    """The set of groups that MUST run. `always` is always applicable. A plan is
+    only NARROW under the positive allowlist; anything else is BROAD (every group
+    applicable). A narrow plan enables just the matching focused + parser-fuzz
+    groups."""
     groups = {"always"}
-    is_narrow = not any(plan.get(f) for f in BROAD_FLAGS)
-    if not is_narrow:
+    if not _is_narrow(plan):
         groups |= set(GROUP_FLAG.keys())
         return groups
     if plan.get("focused_js_frontend") or plan.get("focused_js_fuzz"):
         groups |= {"focused-js", "fuzz-js"}
     if plan.get("focused_lua_frontend") or plan.get("focused_lua_fuzz"):
         groups |= {"focused-lua", "fuzz-lua"}
-    # docs-only alone -> only `always` (lint + classify + gate).
     return groups
 
 

@@ -115,5 +115,24 @@ check("benchmark skippable on PR (broad plan)",
 check("benchmark NOT skippable on push",
       "benchmark" not in job_plan.allow_skip_jobs(plan_for([], event="push_main"), ALL_JOBS, "push"))
 
+# -- fail-closed: the positive narrow allowlist. Anything not positively narrow
+#    (empty, non-dict, non-boolean, unknown, or a non-approved true flag) -> BROAD --
+def is_broad(plan):
+    return all(job_plan.run_flags(plan).values())
+
+check("empty plan {} -> broad", is_broad({}))
+check("non-dict (list) plan -> broad", is_broad([]))
+check("unknown true flag -> broad", is_broad({"lint": True, "focused_js_frontend": True, "bogus_flag": True}))
+check("string-valued flag -> broad", is_broad({"lint": True, "focused_js_frontend": "true"}))
+check("int-valued flag -> broad", is_broad({"lint": True, "focused_js_frontend": 1}))
+check("existing non-narrow flag alone (focused_wasm) -> broad", is_broad({"lint": True, "focused_wasm": True}))
+check("lint-only (no narrow selector) -> broad", is_broad({"lint": True}))
+check("full_all present -> broad", is_broad({"lint": True, "full_all": True}))
+# a genuinely-approved narrow plan still narrows (positive path still works)
+check("approved narrow (docs_only) -> not broad", not is_broad({"lint": True, "docs_only": True}))
+check("approved narrow (js) -> focused-js only",
+      job_plan.run_flags({"lint": True, "focused_js_frontend": True})["run_focused_js"]
+      and not job_plan.run_flags({"lint": True, "focused_js_frontend": True})["run_full_matrix"])
+
 print("job_plan fixtures: %d passed, %d failed" % (_pass, _fail))
 sys.exit(1 if _fail else 0)
