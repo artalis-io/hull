@@ -64,6 +64,7 @@ jobs:
           python3 scripts/ci/test_classify_changes.py
           python3 scripts/ci/test_ci_gate.py
           python3 scripts/ci/test_job_plan.py
+          python3 scripts/ci/test_wamrc_artifact.py
           python3 scripts/ci/check_gate_completeness.py
           python3 scripts/ci/check_job_plan_consistency.py
       - name: Classify the change (merge-base diff -> plan)
@@ -429,6 +430,116 @@ jobs:
       - name: hull test (examples)
         timeout-minutes: 2
         run: make hull-test-examples
+
+  # Slice 5A (docs/ci_architecture_design.md Appendix D): the wamrc PRODUCER.
+  # Builds wamrc ONCE (LLVM-18 + the WAMR patch carriage), emits an identity +
+  # provenance manifest, and uploads an immutable, run-scoped artifact. In this
+  # ADDITIVE checkpoint the artifact is proven by the verify job below; the 8
+  # x86_64 AOT consumers still build their own wamrc (unchanged) until a later
+  # checkpoint flips them to rely on it. Compute-group gated (run_compute), so a
+  # non-compute plan builds no wamrc.
+  wamrc-x86_64:
+    needs: [classify]
+    if: needs.classify.outputs.run_compute == 'true'
+    name: wamrc producer (x86_64)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          submodules: true
+      - name: Install LLVM + cmake
+        run: sudo apt-get update && sudo apt-get install -y llvm-18-dev cmake
+      - name: Build wamrc (the WAMR patch carriage)
+        timeout-minutes: 12
+        run: |
+          if command -v llvm-config-18 >/dev/null 2>&1; then
+            export WAMRC_CMAKE_FLAGS="-DLLVM_DIR=$(llvm-config-18 --cmakedir)"
+          fi
+          make wamrc
+      - name: Emit provenance manifest
+        run: |
+          if command -v llvm-config-18 >/dev/null 2>&1; then
+            export WAMRC_CMAKE_FLAGS="-DLLVM_DIR=$(llvm-config-18 --cmakedir)"
+          fi
+          python3 scripts/ci/wamrc_artifact.py manifest \
+            --wamrc build/wamrc --producer wamrc-x86_64 > build/wamrc.manifest.json
+          cat build/wamrc.manifest.json
+      - name: Upload wamrc artifact (run-scoped, immutable)
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        with:
+          name: wamrc-x86_64
+          path: |
+            build/wamrc
+            build/wamrc.manifest.json
+          retention-days: 1
+          if-no-files-found: error
+
+  # Slice 5A: the verify + equivalence CONSUMER (representative). Downloads the
+  # producer artifact, verifies identity + provenance + checksum + arch + linkage
+  # + usability (FAILS the job on any mismatch - it never rebuilds and pretends),
+  # then byte-compares the artifact-wamrc .aot against a FRESH-built wamrc .aot on
+  # a wasm32 + a Memory64 fixture, and asserts a corrupted artifact is rejected.
+  wamrc-artifact-verify:
+    needs: [classify, wamrc-x86_64]
+    if: needs.classify.outputs.run_compute == 'true'
+    name: wamrc artifact verify + equivalence (x86_64)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          submodules: true
+      - name: Install LLVM + cmake
+        run: sudo apt-get update && sudo apt-get install -y llvm-18-dev cmake
+      - name: Download wamrc artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
+        with:
+          name: wamrc-x86_64
+          path: artifact
+      - name: Verify artifact identity + provenance + checksum (FAIL, never rebuild)
+        timeout-minutes: 12
+        run: |
+          set -e
+          if command -v llvm-config-18 >/dev/null 2>&1; then
+            export WAMRC_CMAKE_FLAGS="-DLLVM_DIR=$(llvm-config-18 --cmakedir)"
+          fi
+          chmod +x artifact/wamrc
+          # build a FRESH wamrc so gather_local() sees the local CMakeCache
+          # compilers (and so equivalence has a from-source baseline).
+          make wamrc
+          python3 scripts/ci/wamrc_artifact.py verify \
+            --manifest artifact/wamrc.manifest.json --wamrc artifact/wamrc --producer wamrc-x86_64
+      - name: Linkage (ldd) + usability probe
+        run: |
+          echo "== ldd artifact/wamrc =="; ldd artifact/wamrc || true
+          # usability: the tool must RUN (no-arg wamrc prints usage + exits nonzero,
+          # which still proves it loaded its libLLVM); the hard proof is the .aot
+          # compile in the next step.
+          artifact/wamrc --help >/dev/null 2>&1 || artifact/wamrc >/dev/null 2>&1 || true
+      - name: Output equivalence (artifact-wamrc .aot == fresh-wamrc .aot)
+        run: |
+          set -e
+          for w in tests/fixtures/compute/echo.wasm tests/fixtures/compute/echo64.wasm; do
+            artifact/wamrc -o /tmp/a.aot "$w"
+            build/wamrc     -o /tmp/b.aot "$w"
+            if ! cmp -s /tmp/a.aot /tmp/b.aot; then
+              echo "::error::AOT output differs between artifact-wamrc and fresh-wamrc for $w"
+              exit 1
+            fi
+            echo "equivalence OK (byte-identical .aot): $w"
+          done
+      - name: Corruption rejection (negative)
+        run: |
+          set -e
+          cp artifact/wamrc /tmp/wamrc.corrupt
+          printf '\xff' | dd of=/tmp/wamrc.corrupt bs=1 seek=64 count=1 conv=notrunc status=none
+          if command -v llvm-config-18 >/dev/null 2>&1; then
+            export WAMRC_CMAKE_FLAGS="-DLLVM_DIR=$(llvm-config-18 --cmakedir)"
+          fi
+          if python3 scripts/ci/wamrc_artifact.py verify \
+               --manifest artifact/wamrc.manifest.json --wamrc /tmp/wamrc.corrupt --producer wamrc-x86_64; then
+            echo "::error::a corrupted wamrc was NOT rejected"; exit 1
+          fi
+          echo "corruption correctly rejected (checksum mismatch -> job would FAIL)"
 
   # Read-only shared-heap enforcement (Phase 0): prove the AOT write-trap path
   # THROUGH HULL'S OWN BUILD, not just the interpreter or the WAMR unit config.
@@ -2338,6 +2449,8 @@ jobs:
     needs:
       - classify
       - build
+      - wamrc-x86_64
+      - wamrc-artifact-verify
       - wasm-readonly-heap-aot
       - mapped-span-bench
       - compute-aot-shared-heap

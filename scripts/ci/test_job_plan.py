@@ -292,6 +292,15 @@ check("fuzz-db-wire skips on gpu-only", "fuzz-db-wire" in skips(["src/hull/cap/g
 check("fuzz-compute-span runs on compute change", "fuzz-compute-span" not in skips(["src/hull/cap/wasm.c"]))
 check("fuzz-compute-span skips on db-only", "fuzz-compute-span" in skips(["src/hull/cap/db_postgres.c"]))
 
+# Slice 5A: the wamrc producer + verify jobs are compute-grouped - they run on a
+# compute-applicable plan and skip (legitimately) only when compute is inapplicable.
+for _j in ("wamrc-x86_64", "wamrc-artifact-verify"):
+    check("5A %s in compute group" % _j, job_plan.GROUP.get(_j) == "compute")
+    check("5A %s runs on compute change" % _j, _j not in skips(["src/hull/cap/wasm.c"]))
+    check("5A %s runs on broad" % _j, _j not in skips(["src/hull/serve.c"]))
+    check("5A %s skips on db-only (not compute)" % _j, _j in skips(["src/hull/cap/db_postgres.c"]))
+    check("5A %s skips on docs-only" % _j, _j in skips(["docs/x.md"]))
+
 # fuzz coverage-equivalence: the union of the three jobs' build targets in ci.yml
 # equals the former single fuzz-native-security set (no target dropped in the split).
 import re  # noqa: E402
