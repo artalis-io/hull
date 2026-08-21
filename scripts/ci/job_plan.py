@@ -30,13 +30,26 @@ import classify_changes as _classify  # noqa: E402  (the canonical plan schema)
 
 # Each GROUP has a run-flag emitted by the classify job; the ci.yml job `if:`
 # references exactly this flag. `always` has no flag (never skips).
+#
+# Slice 4 checkpoint 3: the monolithic `full-matrix` + `fuzz-native` groups are
+# split into the always-run `core-common` floor + the native subsystem groups
+# (db-* / db-any umbrella / gpu / compute) + the broad-only `web` bucket
+# (htmx-browser, project-discovery-lua) that a native change does not touch. The
+# frontend groups (focused/fuzz js/lua) are unchanged.
 GROUP_FLAG = {
-    "full-matrix": "run_full_matrix",
+    "core-common": "run_core_common",
+    "web": "run_web",
+    "db-postgres": "run_db_postgres",
+    "db-mysql": "run_db_mysql",
+    "db-valkey": "run_db_valkey",
+    "db-duckdb": "run_db_duckdb",
+    "db-any": "run_db_any",
+    "gpu": "run_gpu",
+    "compute": "run_compute",
     "focused-js": "run_focused_js",
     "focused-lua": "run_focused_lua",
     "fuzz-js": "run_fuzz_js",
     "fuzz-lua": "run_fuzz_lua",
-    "fuzz-native": "run_fuzz_native",
 }
 
 # job -> group. Explicit for every gated job. `check_job_plan_consistency.py`
@@ -49,70 +62,86 @@ GROUP = {
     "focused-lua-frontend": "focused-lua",
     "fuzz-js-source": "fuzz-js",
     "fuzz-lua-source": "fuzz-lua",
-    # Slice 4 checkpoint 2: the single fuzz-native-security job is SPLIT into three
-    # atomic jobs (core / db-wire / compute). In checkpoint 2 they stay in the
-    # SAME `fuzz-native` group and gate on the SAME run_fuzz_native flag, so they
-    # run/skip exactly as the one job did (no new skipping). Checkpoint 3 reassigns
-    # them to their final groups (core-common / db-any / compute).
-    "fuzz-core-security": "fuzz-native",
-    "fuzz-db-wire": "fuzz-native",
-    "fuzz-compute-span": "fuzz-native",
-    # everything else = the broad matrix.
-    "build": "full-matrix",
-    "wasm-readonly-heap-aot": "full-matrix",
-    "mapped-span-bench": "full-matrix",
-    "compute-aot-shared-heap": "full-matrix",
-    "compute-memops-freestanding": "full-matrix",
-    "stream-meta": "full-matrix",
-    "spans-example": "full-matrix",
-    "spans-multi": "full-matrix",
-    "spans-hugefile": "full-matrix",
-    "wasm-guarded-aot-arm64": "full-matrix",
-    "flavors": "full-matrix",
-    "reproducibility": "full-matrix",
-    "reproducibility-container": "full-matrix",
-    "reproducibility-container-interleave": "full-matrix",
-    "reproducibility-cosmo": "full-matrix",
-    "reproducibility-cosmo-compare": "full-matrix",
-    "build-pipeline": "full-matrix",
-    "sanitizers": "full-matrix",
-    "msan": "full-matrix",
-    "tsan": "full-matrix",
-    "tsan-shared-heap": "full-matrix",
-    "postgres": "full-matrix",
-    "mysql": "full-matrix",
-    "valkey": "full-matrix",
-    "analyze": "full-matrix",
-    "cosmo": "full-matrix",
-    "gpu": "full-matrix",
-    "duckdb": "full-matrix",
-    "duckdb-feature": "full-matrix",
-    "gpu-feature": "full-matrix",
-    "tui-feature": "full-matrix",
-    "postgres-feature": "full-matrix",
-    "mysql-feature": "full-matrix",
-    "project-discovery-lua": "full-matrix",
-    "coverage": "full-matrix",
-    "htmx-browser": "full-matrix",
-    "embed-rust": "full-matrix",
-    "embed-zig": "full-matrix",
-    "musl": "full-matrix",
-    "benchmark": "full-matrix",
+    # -- core-common: the subsystem-AGNOSTIC floor. Runs for EVERY production-C /
+    # native change AND every broad run (constraint 1). Includes the four-platform
+    # `make test` (all unit binaries), build/link/repro/platform checks, the
+    # sanitizer + static-analysis floor, and the core security fuzzers. Slice 4
+    # checkpoint 3 assigns fuzz-core-security here (was the shared fuzz-native).
+    "build": "core-common",
+    "build-pipeline": "core-common",
+    "flavors": "core-common",
+    "sanitizers": "core-common",
+    "msan": "core-common",
+    "tsan": "core-common",
+    "analyze": "core-common",
+    "coverage": "core-common",
+    "reproducibility": "core-common",
+    "reproducibility-container": "core-common",
+    "reproducibility-container-interleave": "core-common",
+    "reproducibility-cosmo": "core-common",
+    "reproducibility-cosmo-compare": "core-common",
+    "cosmo": "core-common",
+    "musl": "core-common",
+    "embed-rust": "core-common",
+    "embed-zig": "core-common",
+    "tui-feature": "core-common",
+    "fuzz-core-security": "core-common",
+    "benchmark": "core-common",          # push-only (extra event guard in its if:)
+    # -- db subsystem (per-backend integrations) --
+    "postgres": "db-postgres",
+    "postgres-feature": "db-postgres",
+    "mysql": "db-mysql",
+    "mysql-feature": "db-mysql",
+    "valkey": "db-valkey",
+    "duckdb": "db-duckdb",
+    "duckdb-feature": "db-duckdb",
+    # the fuzz-db-wire umbrella (Amendment 1): one atomic job, group db-any =
+    # applicable iff ANY db backend is touched (or broad).
+    "fuzz-db-wire": "db-any",
+    # -- gpu subsystem --
+    "gpu": "gpu",
+    "gpu-feature": "gpu",
+    # -- compute subsystem (AOT cluster + shared-heap TSan + span fuzzer) --
+    "wasm-readonly-heap-aot": "compute",
+    "mapped-span-bench": "compute",
+    "compute-aot-shared-heap": "compute",
+    "compute-memops-freestanding": "compute",
+    "stream-meta": "compute",
+    "spans-example": "compute",
+    "spans-multi": "compute",
+    "spans-hugefile": "compute",
+    "wasm-guarded-aot-arm64": "compute",
+    "tsan-shared-heap": "compute",
+    "fuzz-compute-span": "compute",
+    # -- web/integration (broad-only): a native (db/gpu/compute) change does not
+    # touch these, so a narrow-native plan skips them; a broad plan runs them. --
+    "htmx-browser": "web",
+    "project-discovery-lua": "web",
 }
 
-# POSITIVE narrow allowlist (fail closed). A plan is NARROW - and may skip the
-# broad matrix - ONLY when it is a well-formed plan dict whose TRUE flags ALL lie
-# within APPROVED_NARROW and include at least one real narrow SELECTOR (beyond the
-# always-on lint). An empty plan, a non-dict, a non-boolean field, an unknown
-# field, a true flag outside the approved set (a newly added plan flag, or
-# focused_wasm, ...), or lint-only -> BROAD. This is a positive allowlist, NOT
-# "absence of known broad flags", so a new/unknown/malformed flag can NEVER open
-# a skip.
-APPROVED_NARROW = frozenset({
-    "lint", "docs_only",
+# POSITIVE narrow allowlist (fail closed). A plan may skip the broad matrix ONLY
+# when it is a well-formed plan dict whose TRUE flags ALL lie within
+# APPROVED_NARROW and include at least one real narrow SELECTOR (beyond the
+# always-on lint). Slice 4 checkpoint 3 EXTENDS the allowlist from the frontend
+# classes to the native subsystem selectors. Its OWN positive set is the union of:
+#   - {lint, docs_only}
+#   - FRONTEND_SELECTORS  (the proven source-frontend/parser classes)
+#   - NATIVE_SELECTORS    (the DB backend / gpu / compute classes)
+# A native change MIXED with any NON-approved true flag (focused_tooling,
+# focused_project_discovery, focused_query, focused_tls, focused_native_fuzz,
+# tests/examples -> full_core, or ANY future/unknown/non-boolean field) falls
+# outside the set -> BROAD (constraint: fail closed). This is a positive
+# allowlist, NOT "absence of known broad flags", so a new/unknown/malformed flag
+# can NEVER open a skip.
+FRONTEND_SELECTORS = frozenset({
     "focused_js_frontend", "focused_js_fuzz",
     "focused_lua_frontend", "focused_lua_fuzz",
 })
+NATIVE_SELECTORS = frozenset({
+    "focused_db", "focused_db_postgres", "focused_db_mysql", "focused_db_valkey",
+    "focused_db_duckdb", "focused_gpu", "focused_compute", "focused_wasm",
+})
+APPROVED_NARROW = frozenset({"lint", "docs_only"}) | FRONTEND_SELECTORS | NATIVE_SELECTORS
 NARROW_SELECTORS = APPROVED_NARROW - {"lint"}      # at least one of these must be set
 KNOWN_PLAN_KEYS = frozenset(_classify.PLAN)        # the canonical plan schema (classify_changes)
 
@@ -120,13 +149,10 @@ KNOWN_PLAN_KEYS = frozenset(_classify.PLAN)        # the canonical plan schema (
 def _is_narrow(plan):
     """True iff `plan` is a well-formed plan dict that positively qualifies to
     skip the broad matrix (APPROVED_NARROW). Anything else -> False -> broad."""
-    if not isinstance(plan, dict):
-        return False
-    for k, v in plan.items():
-        if not isinstance(v, bool):
-            return False                            # non-boolean field -> broad
-        if k not in KNOWN_PLAN_KEYS:
-            return False                            # unknown field -> broad
+    if not _well_formed_plan(plan):
+        return False                                # malformed / empty / lint-missing -> broad
+    if plan.get("full_all") or plan.get("full_core"):
+        return False                                # a broad plan -> broad
     true_flags = {k for k, v in plan.items() if v}
     if not true_flags <= APPROVED_NARROW:
         return False                                # a true flag outside the approved set -> broad
@@ -138,29 +164,31 @@ def _is_narrow(plan):
 def applicable_groups(plan):
     """The set of groups that MUST run. `always` is always applicable. A plan is
     only NARROW under the positive allowlist; anything else is BROAD (every group
-    applicable). A narrow plan enables just the matching focused + parser-fuzz
-    groups."""
+    applicable). A narrow plan is ADDITIVE: the matching source-frontend + parser
+    -fuzz groups (from FRONTEND_SELECTORS) PLUS the native subsystem groups (from
+    native_groups(): the core-common floor + the touched db/gpu/compute groups +
+    the db-any umbrella). A native+frontend change therefore runs core-common +
+    its subsystem + the frontend/fuzzer groups; the broad-only `web` group is
+    never added by a narrow plan (a native/frontend change does not touch it)."""
     groups = {"always"}
     if not _is_narrow(plan):
-        groups |= set(GROUP_FLAG.keys())
+        groups |= set(GROUP_FLAG.keys())            # broad: every group applicable
         return groups
     if plan.get("focused_js_frontend") or plan.get("focused_js_fuzz"):
         groups |= {"focused-js", "fuzz-js"}
     if plan.get("focused_lua_frontend") or plan.get("focused_lua_fuzz"):
         groups |= {"focused-lua", "fuzz-lua"}
+    groups |= native_groups(plan)                   # {} for a pure frontend/docs plan
     return groups
 
 
-# -- Slice 4 native-subsystem group scaffolding (Appendix C.2/C.5) ------------
-# The INTENDED checkpoint-3 mapping from a plan to native subsystem groups.
-# core-common is the always-run floor for ANY production-C / native change
-# (constraint 1). db-any is the SINGLE umbrella group whose sole member is the
-# fuzz-db-wire job = the union of the db sub-groups (Amendment 1), keyed off
-# focused_db (set whenever any db file changed, backend or shared). This is INERT
-# in checkpoint 2: proven by fixtures (test_job_plan.py :: native_groups.*) but NOT
-# consulted by applicable_groups - a native plan is not APPROVED_NARROW, so it
-# still evaluates BROAD and NOTHING skips. Checkpoint 3 wires this in AND regroups
-# the current `full-matrix` jobs into `core-common` + these subsystem groups.
+# -- Slice 4 native-subsystem groups (Appendix C.2/C.5) -----------------------
+# The mapping from a plan to native subsystem groups, CONSULTED by
+# applicable_groups (checkpoint 3 - skipping is active). core-common is the
+# always-run floor for ANY production-C / native change (constraint 1). db-any is
+# the SINGLE umbrella group whose sole member is the fuzz-db-wire job = the union
+# of the db sub-groups (Amendment 1), keyed off focused_db (set whenever any db
+# file changed, backend or shared).
 NATIVE_SUBSYSTEM_GROUPS = frozenset({
     "core-common", "db-postgres", "db-mysql", "db-valkey", "db-duckdb", "db-any",
     "gpu", "compute",
@@ -192,8 +220,8 @@ def native_groups(plan):
     """The native subsystem groups a plan selects UNDER the checkpoint-3 mapping.
     Broad/malformed -> every native group. A narrow-native plan -> the always-run
     `core-common` floor plus the specific subsystem group(s), and the `db-any`
-    umbrella iff any db backend is touched (via focused_db). Inert scaffolding in
-    checkpoint 2 (fixture-proven, not yet consulted by applicable_groups)."""
+    umbrella iff any db backend is touched (via focused_db). Returns {} for a plan
+    with no native selector (a pure frontend/docs narrow)."""
     if _is_broad_plan(plan):
         return set(NATIVE_SUBSYSTEM_GROUPS)
     g = set()

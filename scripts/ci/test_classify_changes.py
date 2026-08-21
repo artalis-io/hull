@@ -383,5 +383,32 @@ check("rename under force-full -> full_all",
       ["src/hull/cap/db_postgres.c", "src/hull/cap/db_postgres_v2.c"],
       want_true=["full_all"], force_full=True)
 
+# 6. EVERY tracked src/** file is classified correctly (Slice 4 checkpoint 3,
+#    constraint 4): an allowlisted file -> EXACTLY its subsystem facts; the
+#    deliberate C frontend bridge -> production_core PLUS the js/lua frontend
+#    facts; every OTHER tracked source -> a set INCLUDING production_core_changed
+#    (so an unrecognized/new production file always runs the broad suite).
+import subprocess  # noqa: E402
+_ALLOW_MAP = {}
+for _files, _want in _ALLOWLIST_EXPECT:
+    for _f in _files:
+        _ALLOW_MAP[_f] = _want
+try:
+    _tracked = subprocess.run(["git", "-C", _REPO, "ls-files", "src"],
+                              capture_output=True, text=True, check=True).stdout.split()
+except Exception as _e:                                   # pragma: no cover
+    _tracked = []
+    ck("git ls-files src succeeded", False)
+ck("git ls-files src returned files", len(_tracked) > 0)
+_FRONTEND_BRIDGE = {"production_core_changed", "js_frontend_changed", "lua_frontend_changed"}
+for _f in _tracked:
+    facts = _cc.classify_path(_f)
+    if _f in _ALLOW_MAP:
+        ck("tracked allowlisted exact: %s" % _f, facts == _ALLOW_MAP[_f])
+    elif _f.startswith("src/hull/frontend/"):
+        ck("tracked frontend bridge keeps frontend facts: %s" % _f, facts == _FRONTEND_BRIDGE)
+    else:
+        ck("tracked src includes production_core: %s" % _f, "production_core_changed" in facts)
+
 print("classify_changes fixtures: %d passed, %d failed" % (_pass, _fail))
 sys.exit(1 if _fail else 0)
