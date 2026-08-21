@@ -45,7 +45,7 @@ check("docs-only: no group runs", not any(f.values()))
 s = skips(["docs/x.md"])
 check("docs-only: build may skip", "build" in s)
 check("docs-only: focused-js may skip", "focused-js-frontend" in s)
-check("docs-only: fuzz-native may skip", "fuzz-native-security" in s)
+check("docs-only: fuzz-core-security may skip", "fuzz-core-security" in s)
 check("docs-only: lint never skips", "lint" not in s)
 check("docs-only: classify never skips", "classify" not in s)
 
@@ -58,7 +58,7 @@ check("pure-js: NOT run_focused_lua", not f["run_focused_lua"])
 s = skips(["stdlib/cli/js/hull/source/parser.js"])
 check("pure-js: build may skip", "build" in s)
 check("pure-js: focused-lua may skip", "focused-lua-frontend" in s)
-check("pure-js: fuzz-native may skip", "fuzz-native-security" in s)
+check("pure-js: fuzz-core-security may skip", "fuzz-core-security" in s)
 check("pure-js: focused-js NOT skippable", "focused-js-frontend" not in s)
 check("pure-js: fuzz-js NOT skippable", "fuzz-js-source" not in s)
 
@@ -133,6 +133,91 @@ check("approved narrow (docs_only) -> not broad", not is_broad({"lint": True, "d
 check("approved narrow (js) -> focused-js only",
       job_plan.run_flags({"lint": True, "focused_js_frontend": True})["run_focused_js"]
       and not job_plan.run_flags({"lint": True, "focused_js_frontend": True})["run_full_matrix"])
+
+# ---- Slice 4 checkpoint 2: native-subsystem map + fuzz split (Appendix C) ----
+# All ADDITIVE / no-skip: an isolated native change still evaluates BROAD live
+# (nothing skips); the native_groups() helper proves the intended checkpoint-3
+# mapping; the three split fuzz jobs share the fuzz-native group and their target
+# union equals the former single job.
+
+# no-skip invariant: an isolated backend/gpu/compute change is still BROAD live.
+for _paths in (["src/hull/cap/db_postgres.c"], ["src/hull/cap/gpu_wgpu.c"],
+               ["src/hull/cap/wasm.c"], ["src/hull/cap/db_select.c"]):
+    check("native change still BROAD live (no skip): %s" % _paths[0],
+          all(job_plan.run_flags(plan_for(_paths)).values()))
+    check("native change: only benchmark force-skippable (PR): %s" % _paths[0],
+          skips(_paths) == {"benchmark"})
+
+# native_groups() intended checkpoint-3 mapping (inert scaffolding, fixture-proven).
+def ng(paths):
+    return job_plan.native_groups(plan_for(paths))
+
+check("ng db_postgres -> core-common + db-postgres + db-any",
+      ng(["src/hull/cap/db_postgres.c"]) == {"core-common", "db-postgres", "db-any"})
+check("ng gpu -> core-common + gpu",
+      ng(["src/hull/cap/gpu_wgpu.c"]) == {"core-common", "gpu"})
+check("ng wasm -> core-common + compute",
+      ng(["src/hull/cap/wasm.c"]) == {"core-common", "compute"})
+check("ng shared-db -> core-common + all four sub-groups + db-any",
+      ng(["src/hull/cap/db_select.c"]) ==
+      {"core-common", "db-postgres", "db-mysql", "db-valkey", "db-duckdb", "db-any"})
+# additive: DB + GPU -> both sets.
+check("ng additive (gpu + db_postgres)",
+      ng(["src/hull/cap/gpu.c", "src/hull/cap/db_postgres.c"]) ==
+      {"core-common", "db-postgres", "db-any", "gpu"})
+# two backends -> both sub-groups + ONE db-any umbrella (Amendment 1).
+check("ng two-backend -> both sub-groups + single db-any",
+      ng(["src/hull/cap/db_postgres.c", "src/hull/cap/db_mysql.c"]) ==
+      {"core-common", "db-postgres", "db-mysql", "db-any"})
+# broad / malformed / docs -> fail closed / empty appropriately.
+check("ng broad (core file) -> every native group",
+      ng(["src/hull/serve.c"]) == set(job_plan.NATIVE_SUBSYSTEM_GROUPS))
+check("ng malformed plan -> every native group (fail closed)",
+      job_plan.native_groups({}) == set(job_plan.NATIVE_SUBSYSTEM_GROUPS)
+      and job_plan.native_groups([]) == set(job_plan.NATIVE_SUBSYSTEM_GROUPS))
+check("ng docs-only -> no native group",
+      ng(["docs/x.md"]) == set())
+
+# the three split fuzz jobs share the fuzz-native group and skip/run together.
+for _j in ("fuzz-core-security", "fuzz-db-wire", "fuzz-compute-span"):
+    check("fuzz split %s in fuzz-native group" % _j, job_plan.GROUP.get(_j) == "fuzz-native")
+    check("fuzz split %s skippable on docs-only" % _j, _j in skips(["docs/x.md"]))
+    check("fuzz split %s runs on broad (not skippable)" % _j,
+          _j not in skips(["src/hull/serve.c"]))
+
+# fuzz coverage-equivalence: the union of the three jobs' build targets in ci.yml
+# equals the former single fuzz-native-security set (no target dropped in the split).
+import re  # noqa: E402
+CANONICAL_FUZZ = {
+    "sh_json", "path_normalize", "mime_sniff", "host_match",          # core
+    "pgwire", "pg_dsn", "pg_rewrite", "mysqlwire", "mysql_dsn", "respwire", "valkey_dsn",  # db wire
+    "span_sdk", "span_window",                                        # compute
+}
+_WF = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+                   ".github", "workflows", "ci.yml")
+_wf_lines = open(_WF, encoding="utf-8").read().splitlines()
+
+
+def _job_slice(job):
+    out, cur = [], False
+    for ln in _wf_lines:
+        m = re.match(r"^  ([A-Za-z0-9_-]+):\s*$", ln)
+        if m:
+            cur = (m.group(1) == job)
+            continue
+        if cur:
+            out.append(ln)
+    return "\n".join(out)
+
+
+_split_targets, _overlap = set(), []
+for _j in ("fuzz-core-security", "fuzz-db-wire", "fuzz-compute-span"):
+    _t = set(re.findall(r"fuzz/fuzz_([a-z0-9_]+)", _job_slice(_j)))
+    if _split_targets & _t:
+        _overlap.append(_j)
+    _split_targets |= _t
+check("fuzz_union: split targets == canonical set", _split_targets == CANONICAL_FUZZ)
+check("fuzz_union: sub-jobs are disjoint (no target in two jobs)", not _overlap)
 
 print("job_plan fixtures: %d passed, %d failed" % (_pass, _fail))
 sys.exit(1 if _fail else 0)

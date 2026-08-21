@@ -49,7 +49,14 @@ GROUP = {
     "focused-lua-frontend": "focused-lua",
     "fuzz-js-source": "fuzz-js",
     "fuzz-lua-source": "fuzz-lua",
-    "fuzz-native-security": "fuzz-native",
+    # Slice 4 checkpoint 2: the single fuzz-native-security job is SPLIT into three
+    # atomic jobs (core / db-wire / compute). In checkpoint 2 they stay in the
+    # SAME `fuzz-native` group and gate on the SAME run_fuzz_native flag, so they
+    # run/skip exactly as the one job did (no new skipping). Checkpoint 3 reassigns
+    # them to their final groups (core-common / db-any / compute).
+    "fuzz-core-security": "fuzz-native",
+    "fuzz-db-wire": "fuzz-native",
+    "fuzz-compute-span": "fuzz-native",
     # everything else = the broad matrix.
     "build": "full-matrix",
     "wasm-readonly-heap-aot": "full-matrix",
@@ -142,6 +149,71 @@ def applicable_groups(plan):
     if plan.get("focused_lua_frontend") or plan.get("focused_lua_fuzz"):
         groups |= {"focused-lua", "fuzz-lua"}
     return groups
+
+
+# -- Slice 4 native-subsystem group scaffolding (Appendix C.2/C.5) ------------
+# The INTENDED checkpoint-3 mapping from a plan to native subsystem groups.
+# core-common is the always-run floor for ANY production-C / native change
+# (constraint 1). db-any is the SINGLE umbrella group whose sole member is the
+# fuzz-db-wire job = the union of the db sub-groups (Amendment 1), keyed off
+# focused_db (set whenever any db file changed, backend or shared). This is INERT
+# in checkpoint 2: proven by fixtures (test_job_plan.py :: native_groups.*) but NOT
+# consulted by applicable_groups - a native plan is not APPROVED_NARROW, so it
+# still evaluates BROAD and NOTHING skips. Checkpoint 3 wires this in AND regroups
+# the current `full-matrix` jobs into `core-common` + these subsystem groups.
+NATIVE_SUBSYSTEM_GROUPS = frozenset({
+    "core-common", "db-postgres", "db-mysql", "db-valkey", "db-duckdb", "db-any",
+    "gpu", "compute",
+})
+
+
+def _well_formed_plan(plan):
+    """A well-formed plan is a dict whose values are ALL bool, whose keys are ALL
+    known, and that carries the always-on `lint`. An empty `{}`, a list, an unknown
+    key, or a non-bool value is malformed (-> fail closed to broad)."""
+    if not isinstance(plan, dict):
+        return False
+    for k, v in plan.items():
+        if not isinstance(v, bool) or k not in KNOWN_PLAN_KEYS:
+            return False
+    return bool(plan.get("lint"))
+
+
+def _is_broad_plan(plan):
+    """A plan that runs the whole suite: a shared/core/composition/main/force-full
+    change (full_all / full_core), OR anything malformed (fail closed). Native
+    narrowing only applies to a well-formed, non-broad, native-fact plan."""
+    if not _well_formed_plan(plan):
+        return True
+    return bool(plan.get("full_all") or plan.get("full_core"))
+
+
+def native_groups(plan):
+    """The native subsystem groups a plan selects UNDER the checkpoint-3 mapping.
+    Broad/malformed -> every native group. A narrow-native plan -> the always-run
+    `core-common` floor plus the specific subsystem group(s), and the `db-any`
+    umbrella iff any db backend is touched (via focused_db). Inert scaffolding in
+    checkpoint 2 (fixture-proven, not yet consulted by applicable_groups)."""
+    if _is_broad_plan(plan):
+        return set(NATIVE_SUBSYSTEM_GROUPS)
+    g = set()
+    if plan.get("focused_db_postgres"):
+        g.add("db-postgres")
+    if plan.get("focused_db_mysql"):
+        g.add("db-mysql")
+    if plan.get("focused_db_valkey"):
+        g.add("db-valkey")
+    if plan.get("focused_db_duckdb"):
+        g.add("db-duckdb")
+    if plan.get("focused_db"):
+        g.add("db-any")                        # the fuzz-db-wire umbrella
+    if plan.get("focused_gpu"):
+        g.add("gpu")
+    if plan.get("focused_compute") or plan.get("focused_wasm"):
+        g.add("compute")
+    if g:
+        g.add("core-common")                   # the always-run floor for any native change
+    return g
 
 
 def run_flags(plan):
