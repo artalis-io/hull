@@ -72,7 +72,7 @@ docker run -d --name "$CONTAINER" \
     -e MYSQL_ROOT_PASSWORD=rootpw \
     -e MYSQL_DATABASE=hulldb \
     -e MYSQL_USER=hull -e MYSQL_PASSWORD=s3cretpw \
-    -p "${MYPORT}:3306" mysql:8.0 \
+    -p "${MYPORT}:3306" "${MYSQL_IMAGE:-mysql:8.0}" \
     --default-authentication-plugin=mysql_native_password >/dev/null
 
 echo "=== waiting for mysql ==="
