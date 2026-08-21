@@ -2000,7 +2000,7 @@ $(shell test "$$(cat $(BUILD_CONFIG_FILE) 2>/dev/null)" = "$(BUILD_FINGERPRINT)"
 
 # ── Targets ─────────────────────────────────────────────────────────
 
-.PHONY: all clean test debug msan tsan tsan-shared-heap fuzz fuzz-run e2e e2e-build e2e-postgres e2e-mysql e2e-valkey e2e-feature-valkey e2e-http e2e-sandbox e2e-examples e2e-cli e2e-migrate e2e-templates e2e-agent e2e-context e2e-mcp e2e-agent-api e2e-compute e2e-stream-meta e2e-compute-async-trap e2e-sync-spans e2e-compute-aot-shared-heap e2e-compute-memory64 e2e-compute-headers e2e-spans-example e2e-spans-multi e2e-spans-hugefile e2e-compute-dev e2e-aot-cache e2e-cache e2e-cache-concurrent e2e-cache-cosmo e2e-named-connections e2e-dynamic-connections e2e-compiler-free e2e-linker e2e-linker-zig e2e-cross-build e2e-musl e2e-musl-cross floor-musl e2e-build-flavor e2e-install e2e-ca-bundle e2e-update e2e-tools e2e-multipart e2e-attachment e2e-blob e2e-test-harness e2e-jobs e2e-hypermedia-photos-upload e2e-jwt-asym hull-test-examples self-build check analyze cppcheck bench bench-template bench-wasm bench-mapped-span bench-gpu bench-bytecode-cache wamrc coverage lint-lua lint-js lint check-sdk-headers check-sdk-headers-selftest platform platform-cosmo hardening check-hardening
+.PHONY: all clean test debug msan tsan tsan-shared-heap fuzz fuzz-run e2e e2e-build e2e-postgres e2e-mysql e2e-valkey e2e-feature-valkey e2e-http e2e-sandbox e2e-examples e2e-cli e2e-migrate e2e-templates e2e-agent e2e-context e2e-mcp e2e-agent-api e2e-compute e2e-stream-meta e2e-compute-async-trap e2e-sync-spans e2e-compute-aot-shared-heap e2e-compute-memory64 e2e-compute-headers e2e-spans-example e2e-spans-multi e2e-spans-hugefile e2e-compute-dev e2e-aot-cache e2e-cache e2e-cache-concurrent e2e-cache-cosmo e2e-named-connections e2e-dynamic-connections e2e-compiler-free e2e-linker e2e-linker-zig e2e-cross-build e2e-musl e2e-musl-cross floor-musl e2e-build-flavor e2e-install e2e-ca-bundle e2e-update e2e-tools e2e-multipart e2e-attachment e2e-blob e2e-test-harness e2e-jobs e2e-hypermedia-photos-upload e2e-jwt-asym hull-test-examples self-build check analyze cppcheck bench bench-template bench-wasm bench-mapped-span bench-gpu bench-bytecode-cache wamrc wamrc-configure coverage lint-lua lint-js lint check-sdk-headers check-sdk-headers-selftest platform platform-cosmo hardening check-hardening
 
 all: $(BUILDDIR)/hull
 
@@ -2466,14 +2466,22 @@ platform-cosmo:
 
 WAMRC_BUILD_DIR := $(BUILDDIR)/wamrc-build
 
-wamrc: $(WAMR_PATCH_PREREQ) | $(BUILDDIR)
-	@echo "=== Building wamrc AOT compiler ==="
+# Configure-only: generate the CMake build tree (incl. CMakeCache.txt, which
+# records the resolved C/C++ compiler paths + LLVM) WITHOUT compiling wamrc. The
+# Slice-5A artifact CONSUMER runs this to reproduce the producer's toolchain
+# identity for cold artifact verification - i.e. verifying BEFORE (and without)
+# building wamrc from source (docs/ci_architecture_design.md D.1.3).
+wamrc-configure: $(WAMR_PATCH_PREREQ) | $(BUILDDIR)
+	@echo "=== Configuring wamrc build tree (no compile) ==="
 	@mkdir -p $(WAMRC_BUILD_DIR)
 	@cd $(WAMRC_BUILD_DIR) && cmake $(CURDIR)/$(WAMR_DIR)/wamr-compiler \
 		-DCMAKE_BUILD_TYPE=Release \
 		-DWAMR_BUILD_WITH_CUSTOM_LLVM=1 \
 		-DWASM_ENABLE_INSTRUCTION_METERING=1 \
 		$(WAMRC_CMAKE_FLAGS) 2>&1 | tail -5
+
+wamrc: wamrc-configure | $(BUILDDIR)
+	@echo "=== Building wamrc AOT compiler ==="
 	@$(MAKE) -C $(WAMRC_BUILD_DIR) -j$$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4) 2>&1 | tail -3
 	@cp $(WAMRC_BUILD_DIR)/wamrc $(BUILDDIR)/wamrc
 	@echo "=== wamrc built: $(BUILDDIR)/wamrc ==="

@@ -44,13 +44,32 @@ CHECKSUM_FIELD = "artifact_sha256"
 
 ALL_FIELDS = IDENTITY_FIELDS + PROVENANCE_FIELDS + [CHECKSUM_FIELD]
 
+# Sentinels a probe emits when a value could not be determined. In this CI profile
+# EVERY field must be concrete: a manifest carrying any of these (or an empty
+# string, e.g. an empty WAMRC_CMAKE_FLAGS, or an absent Makefile-rule / script /
+# patch input) is REJECTED at creation rather than shipped with a hollow identity.
+INVALID_VALUES = frozenset({"", "unknown", "MISSING", "none", "None"})
+
+
+def _invalid_fields(fields):
+    """Return the fields whose value is absent/unavailable/hollow."""
+    bad = []
+    for k in ALL_FIELDS:
+        v = fields.get(k, None)
+        if v is None or str(v).strip() in INVALID_VALUES:
+            bad.append(k)
+    return bad
+
 
 def build_manifest(fields):
     """Wrap gathered fields into a schema-versioned manifest. Raises if any
-    required field is absent (a producer that cannot describe itself must fail)."""
-    missing = [k for k in ALL_FIELDS if k not in fields]
-    if missing:
-        raise ValueError("manifest missing required fields: %s" % ", ".join(missing))
+    required field is absent OR unavailable/hollow (a producer that cannot fully
+    describe its toolchain identity must FAIL, not ship a manifest with `unknown`
+    / `MISSING` / empty fields that a consumer could never reproduce)."""
+    bad = _invalid_fields(fields)
+    if bad:
+        raise ValueError("cannot build manifest; unavailable/invalid fields: %s"
+                         % ", ".join("%s=%r" % (k, fields.get(k)) for k in bad))
     m = {"schema_version": SCHEMA_VERSION}
     for k in ALL_FIELDS:
         m[k] = str(fields[k])
@@ -75,19 +94,39 @@ def verify(manifest, local):
             problems.append("manifest missing field %s" % k)
         if k not in local:
             problems.append("local missing field %s" % k)
+    # The consumer's OWN identity must be fully determined; a hollow local field
+    # (e.g. `cc_path=unknown` because a cold consumer verified WITHOUT first
+    # configuring the wamrc toolchain) is a verification failure, not a silent
+    # mismatch.
+    for k in _invalid_fields(local):
+        problems.append("local field %s is unavailable/invalid: %r" % (k, local.get(k)))
     for k in ALL_FIELDS:
         if k in manifest and k in local and str(manifest[k]) != str(local[k]):
             problems.append("%s mismatch: manifest=%r local=%r" % (k, manifest[k], local[k]))
     return problems
 
 
-# -- environment probing (impure; not unit-tested, kept thin) -----------------
+# -- environment probing (impure; kept thin) ---------------------------------
 
 def _run(cmd):
+    """Run a command; return its stripped stdout on SUCCESS (exit 0), or None on a
+    nonzero exit or spawn failure. A nonzero command is a REJECTED probe (its field
+    becomes unavailable and the manifest fails), NOT an accepted empty string."""
     try:
-        return subprocess.run(cmd, capture_output=True, text=True).stdout.strip()
+        r = subprocess.run(cmd, capture_output=True, text=True)
     except Exception:
-        return ""
+        return None
+    if r.returncode != 0:
+        return None
+    return r.stdout.strip()
+
+
+def _first_line(cmd):
+    out = _run(cmd)
+    if not out:
+        return None
+    lines = out.splitlines()
+    return lines[0] if lines else None
 
 
 def _sha256_file(path):
@@ -98,59 +137,82 @@ def _sha256_file(path):
     return h.hexdigest()
 
 
+def cmake_compiler_paths(cache_path):
+    """Read (cc_path, cxx_path) from a CMakeCache.txt. This is the COLD-verify seam:
+    it works off a configure-only cache (no compiled wamrc), so a consumer can
+    reproduce the producer's compiler identity without building wamrc. Returns
+    ('MISSING', 'MISSING') if the cache is absent, and leaves a compiler 'MISSING'
+    if its line is not present. Pure file parse (fixture-tested)."""
+    cc = cxx = "MISSING"
+    if not os.path.exists(cache_path):
+        return cc, cxx
+    for ln in open(cache_path, encoding="utf-8", errors="replace"):
+        if ln.startswith("CMAKE_C_COMPILER:"):
+            cc = ln.split("=", 1)[1].strip() or "MISSING"
+        elif ln.startswith("CMAKE_CXX_COMPILER:"):
+            cxx = ln.split("=", 1)[1].strip() or "MISSING"
+    return cc, cxx
+
+
 def gather_local(wamrc_path, producer_job, root):
     """Probe the current environment for every identity + provenance field, and
-    compute the sha256 of `wamrc_path` (the local or downloaded wamrc)."""
+    compute the sha256 of `wamrc_path`. Every probe that cannot determine a value
+    yields a `MISSING`/`unknown` sentinel so build_manifest / verify fail closed
+    (an absent patch set, an unmatched Makefile rule, a missing script, an empty
+    WAMRC_CMAKE_FLAGS, or a compiler the CMakeCache did not record)."""
     env = os.environ
     runner_image = "%s-%s" % (env.get("ImageOS", "unknown"), env.get("ImageVersion", "unknown"))
-    llvm_version = _run(["llvm-config-18", "--version"]) or "unknown"
-    wamr_rev = _run(["git", "-C", os.path.join(root, "vendor", "wamr"), "rev-parse", "HEAD"]) or "unknown"
 
     ph = hashlib.sha256()
-    for p in sorted(glob.glob(os.path.join(root, "patches", "wamr", "*.patch"))):
-        with open(p, "rb") as f:
-            ph.update(f.read())
-    patch_hash = ph.hexdigest()
+    patches = sorted(glob.glob(os.path.join(root, "patches", "wamr", "*.patch")))
+    if patches:
+        for p in patches:
+            with open(p, "rb") as f:
+                ph.update(f.read())
+        patch_hash = ph.hexdigest()
+    else:
+        patch_hash = "MISSING"        # no expected patch inputs -> reject
 
+    # build-script hash: the wamrc-configure + wamrc make-rule region AND
+    # ci_ensure_wamrc.sh. A missing rule match or missing script -> MISSING.
     bh = hashlib.sha256()
+    rule_ok = script_ok = False
     try:
         mk = open(os.path.join(root, "Makefile"), encoding="utf-8").read()
-        m = re.search(r"(?ms)^wamrc:.*?wamrc built.*?$", mk)
-        bh.update((m.group(0) if m else "").encode("utf-8"))
+        m = re.search(r"(?ms)^wamrc-configure:.*?wamrc built.*?$", mk)
+        if m:
+            bh.update(m.group(0).encode("utf-8"))
+            rule_ok = True
     except Exception:
         pass
     try:
         with open(os.path.join(root, "tests", "ci_ensure_wamrc.sh"), "rb") as f:
             bh.update(f.read())
+        script_ok = True
     except Exception:
         pass
-    build_script_hash = bh.hexdigest()
+    build_script_hash = bh.hexdigest() if (rule_ok and script_ok) else "MISSING"
 
-    cc_path = cxx_path = "unknown"
     cache = os.path.join(root, "build", "wamrc-build", "CMakeCache.txt")
-    if os.path.exists(cache):
-        for ln in open(cache, encoding="utf-8", errors="replace"):
-            if ln.startswith("CMAKE_C_COMPILER:"):
-                cc_path = ln.split("=", 1)[1].strip()
-            elif ln.startswith("CMAKE_CXX_COMPILER:"):
-                cxx_path = ln.split("=", 1)[1].strip()
-    cc_version = (_run([cc_path, "--version"]).splitlines() or ["unknown"])[0] if cc_path != "unknown" else "unknown"
-    cxx_version = (_run([cxx_path, "--version"]).splitlines() or ["unknown"])[0] if cxx_path != "unknown" else "unknown"
-
-    artifact_sha256 = _sha256_file(wamrc_path) if os.path.exists(wamrc_path) else "MISSING"
+    cc_path, cxx_path = cmake_compiler_paths(cache)
+    cc_version = _first_line([cc_path, "--version"]) if cc_path not in INVALID_VALUES else None
+    cxx_version = _first_line([cxx_path, "--version"]) if cxx_path not in INVALID_VALUES else None
 
     return {
-        "runner_image": runner_image, "arch": _run(["uname", "-m"]) or "unknown",
-        "cc_path": cc_path, "cc_version": cc_version,
-        "cxx_path": cxx_path, "cxx_version": cxx_version,
-        "llvm_version": llvm_version, "wamr_rev": wamr_rev, "patch_hash": patch_hash,
-        "wamrc_flags": env.get("WAMRC_CMAKE_FLAGS", ""),
+        "runner_image": runner_image,
+        "arch": _run(["uname", "-m"]) or "unknown",
+        "cc_path": cc_path, "cc_version": cc_version or "unknown",
+        "cxx_path": cxx_path, "cxx_version": cxx_version or "unknown",
+        "llvm_version": _run(["llvm-config-18", "--version"]) or "unknown",
+        "wamr_rev": _run(["git", "-C", os.path.join(root, "vendor", "wamr"), "rev-parse", "HEAD"]) or "unknown",
+        "patch_hash": patch_hash,
+        "wamrc_flags": env.get("WAMRC_CMAKE_FLAGS", ""),   # empty -> invalid (rejected)
         "build_script_hash": build_script_hash,
         "commit_sha": env.get("GITHUB_SHA", "unknown"),
         "run_id": env.get("GITHUB_RUN_ID", "unknown"),
         "run_attempt": env.get("GITHUB_RUN_ATTEMPT", "unknown"),
         "producer_job": producer_job,
-        "artifact_sha256": artifact_sha256,
+        "artifact_sha256": _sha256_file(wamrc_path) if os.path.exists(wamrc_path) else "MISSING",
     }
 
 

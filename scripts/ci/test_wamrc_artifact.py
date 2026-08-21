@@ -94,5 +94,49 @@ _partial = dict(GOOD)
 del _partial["llvm_version"]
 check("local missing a field rejected", len(wa.verify(m, _partial)) >= 1)
 
+# -- hardening: build_manifest rejects hollow / unavailable / empty fields --
+for field, bad in [("cc_path", "unknown"), ("cxx_path", "MISSING"),
+                   ("cc_version", "unknown"), ("llvm_version", "MISSING"),
+                   ("patch_hash", "MISSING"), ("build_script_hash", "MISSING"),
+                   ("wamr_rev", "unknown"), ("artifact_sha256", "MISSING"),
+                   ("wamrc_flags", ""), ("runner_image", "unknown")]:
+    try:
+        wa.build_manifest(local(**{field: bad}))
+        check("build_manifest rejects hollow %s=%r" % (field, bad), False)
+    except ValueError:
+        check("build_manifest rejects hollow %s=%r" % (field, bad), True)
+# None-valued field -> rejected
+try:
+    wa.build_manifest(local(llvm_version=None))
+    check("build_manifest rejects None field", False)
+except ValueError:
+    check("build_manifest rejects None field", True)
+
+# -- hardening: verify rejects a HOLLOW LOCAL field (a cold consumer that
+#    verified WITHOUT first configuring the wamrc toolchain -> cc_path unknown) --
+check("verify rejects local cc_path=unknown (cold, no configure)",
+      any("cc_path" in p for p in wa.verify(m, local(cc_path="unknown"))))
+check("verify rejects local llvm_version=MISSING",
+      len(wa.verify(m, local(llvm_version="MISSING"))) >= 1)
+check("verify rejects local wamrc_flags='' (empty)",
+      len(wa.verify(m, local(wamrc_flags=""))) >= 1)
+
+# -- cold-verify seam: cmake_compiler_paths reads a CONFIGURE-ONLY cache (no
+#    compiled wamrc), proving a consumer can reproduce the producer's compiler
+#    identity without building wamrc first (the reliance-flip precondition) --
+import tempfile  # noqa: E402
+with tempfile.TemporaryDirectory() as d:
+    cache = os.path.join(d, "CMakeCache.txt")
+    with open(cache, "w") as f:
+        f.write("//comment\nCMAKE_C_COMPILER:FILEPATH=/usr/bin/cc\n"
+                "CMAKE_CXX_COMPILER:FILEPATH=/usr/bin/c++\nOTHER:STRING=x\n")
+    cc, cxx = wa.cmake_compiler_paths(cache)
+    check("cold cache: cc_path read from configure-only cache", cc == "/usr/bin/cc")
+    check("cold cache: cxx_path read from configure-only cache", cxx == "/usr/bin/c++")
+    check("cold cache: NO wamrc binary needed to read identity",
+          not os.path.exists(os.path.join(d, "wamrc")))
+check("absent cache -> MISSING paths (fail closed)",
+      wa.cmake_compiler_paths("/no/such/CMakeCache.txt") == ("MISSING", "MISSING"))
+
 print("wamrc_artifact fixtures: %d passed, %d failed" % (_pass, _fail))
 sys.exit(1 if _fail else 0)

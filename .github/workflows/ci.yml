@@ -495,29 +495,46 @@ jobs:
         with:
           name: wamrc-x86_64
           path: artifact
-      - name: Verify artifact identity + provenance + checksum (FAIL, never rebuild)
-        timeout-minutes: 12
+      # COLD verification: configure the wamrc toolchain (generate CMakeCache.txt
+      # with the resolved compilers) WITHOUT compiling wamrc, then verify. This is
+      # the reliance-flip precondition - a real consumer will NOT build wamrc, so
+      # the identity must reproduce from configure alone. `make wamrc-configure`
+      # must NOT leave an executable build/wamrc.
+      - name: Configure toolchain (no compile) + COLD verify (before any build)
+        timeout-minutes: 6
         run: |
           set -e
           if command -v llvm-config-18 >/dev/null 2>&1; then
             export WAMRC_CMAKE_FLAGS="-DLLVM_DIR=$(llvm-config-18 --cmakedir)"
           fi
           chmod +x artifact/wamrc
-          # build a FRESH wamrc so gather_local() sees the local CMakeCache
-          # compilers (and so equivalence has a from-source baseline).
-          make wamrc
+          make wamrc-configure
+          if [ -x build/wamrc ]; then
+            echo "::error::wamrc was built during configure - cold verify is not cold"; exit 1
+          fi
           python3 scripts/ci/wamrc_artifact.py verify \
             --manifest artifact/wamrc.manifest.json --wamrc artifact/wamrc --producer wamrc-x86_64
-      - name: Linkage (ldd) + usability probe
-        run: |
-          echo "== ldd artifact/wamrc =="; ldd artifact/wamrc || true
-          # usability: the tool must RUN (no-arg wamrc prints usage + exits nonzero,
-          # which still proves it loaded its libLLVM); the hard proof is the .aot
-          # compile in the next step.
-          artifact/wamrc --help >/dev/null 2>&1 || artifact/wamrc >/dev/null 2>&1 || true
-      - name: Output equivalence (artifact-wamrc .aot == fresh-wamrc .aot)
+      - name: Linkage (ldd, HARD) + usability (AOT compile with the artifact wamrc)
         run: |
           set -e
+          LDD_OUT="$(ldd artifact/wamrc 2>&1 || true)"
+          echo "== ldd artifact/wamrc =="; echo "$LDD_OUT"
+          if printf '%s' "$LDD_OUT" | grep -qi 'not found'; then
+            echo "::error::artifact/wamrc has UNRESOLVED dynamic dependencies"; exit 1
+          fi
+          # usability: the ARTIFACT wamrc (no fresh build yet) must run + emit a
+          # non-empty .aot; a wamrc that cannot load its libLLVM fails HERE.
+          artifact/wamrc -o /tmp/probe.aot tests/fixtures/compute/echo.wasm
+          test -s /tmp/probe.aot
+          echo "artifact wamrc runnable (emitted $(wc -c < /tmp/probe.aot)-byte .aot)"
+      - name: Output equivalence (NOW build fresh wamrc, compare .aot byte-for-byte)
+        timeout-minutes: 12
+        run: |
+          set -e
+          if command -v llvm-config-18 >/dev/null 2>&1; then
+            export WAMRC_CMAKE_FLAGS="-DLLVM_DIR=$(llvm-config-18 --cmakedir)"
+          fi
+          make wamrc          # the from-source baseline (only needed for equivalence)
           for w in tests/fixtures/compute/echo.wasm tests/fixtures/compute/echo64.wasm; do
             artifact/wamrc -o /tmp/a.aot "$w"
             build/wamrc     -o /tmp/b.aot "$w"
