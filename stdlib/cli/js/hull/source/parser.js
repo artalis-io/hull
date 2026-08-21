@@ -1184,3 +1184,6 @@ function parseInternal(bytes, opts, inject) {
     const valid = allDiags.every(function (d) { return d.severity !== "error"; });
     return { ast: ast, comments: tk.comments, diagnostics: allDiags, linemap: tk.linemap, valid: valid };
 }
+
+// ci-slice3b skip demo: a pure JS-frontend change (comment only) to show the
+// classifier skip the full matrix down to the focused JS jobs. Reverted after proof.
