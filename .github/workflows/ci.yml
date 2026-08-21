@@ -1419,128 +1419,97 @@ jobs:
         timeout-minutes: 20
         run: make CC=clang tsan-shared-heap
 
-  fuzz:
-    name: Fuzz Testing
+  # -- fuzz split (docs/ci_architecture_design.md section 11): native protocol /
+  # security fuzzers, the Lua source parser fuzzer, and the JS source parser
+  # fuzzer as INDEPENDENT jobs so path-aware selection can run only the relevant
+  # target. Each keeps its sanitizer instrumentation + 60s libFuzzer budget. --
+  fuzz-native-security:
+    name: Fuzz (native security)
     runs-on: ubuntu-24.04
-
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
         with:
           submodules: true
-
       - name: Install clang
+        run: sudo apt-get update && sudo apt-get install -y clang
+      - name: Build native fuzz targets
         run: |
-          sudo apt-get update
-          sudo apt-get install -y clang
+          make CC=clang \
+            fuzz/fuzz_sh_json fuzz/fuzz_path_normalize fuzz/fuzz_mime_sniff \
+            fuzz/fuzz_host_match fuzz/fuzz_pgwire fuzz/fuzz_pg_dsn fuzz/fuzz_pg_rewrite \
+            fuzz/fuzz_mysqlwire fuzz/fuzz_mysql_dsn fuzz/fuzz_respwire \
+            fuzz/fuzz_valkey_dsn fuzz/fuzz_span_sdk fuzz/fuzz_span_window
+      - name: Run native fuzzers (60s each)
+        timeout-minutes: 20
+        run: |
+          set -e
+          for f in sh_json path_normalize mime_sniff host_match pgwire pg_dsn \
+                   pg_rewrite mysqlwire mysql_dsn respwire valkey_dsn span_sdk span_window; do
+            echo "== fuzz $f =="
+            ./fuzz/fuzz_$f fuzz/corpus_$f/ -max_total_time=60
+          done
 
-      - name: Build fuzz targets
-        run: make fuzz CC=clang
-
-      - name: Fuzz sh_json (60s)
-        # Parses untrusted request-body / config JSON. ASan + UBSan over
-        # 60s of libFuzzer; a crash writes crash-<sha> and fails the job.
-        timeout-minutes: 3
-        run: ./fuzz/fuzz_sh_json fuzz/corpus_sh_json/ -max_total_time=60
-
-      - name: Fuzz path_normalize (60s)
-        # require()/import() path canonicaliser — a .. escape or OOB write
-        # is a sandbox-traversal primitive.
-        timeout-minutes: 3
-        run: ./fuzz/fuzz_path_normalize fuzz/corpus_path_normalize/ -max_total_time=60
-
-      - name: Fuzz mime_sniff (60s)
-        # Magic-byte / shape sniffer over the first ~4 KiB of untrusted stored
-        # upload bytes — an over-read past len is a crash / info-leak.
-        timeout-minutes: 3
-        run: ./fuzz/fuzz_mime_sniff fuzz/corpus_mime_sniff/ -max_total_time=60
-
-      - name: Fuzz host_match (60s)
-        # Host-allowlist matcher: glob + CIDR (inet_pton / bit compare) over
-        # attacker-influenced allowlist patterns and hosts (dynamic DB conns).
-        timeout-minutes: 3
-        run: ./fuzz/fuzz_host_match fuzz/corpus_host_match/ -max_total_time=60
-
-      - name: Fuzz pgwire (60s)
-        # PostgreSQL v3 wire-protocol reader over untrusted server bytes. The
-        # bounds-checked framing / cursor is the trust boundary for a
-        # malicious or MITM'd Postgres; an OOB read is an info-leak / crash.
-        timeout-minutes: 3
-        run: ./fuzz/fuzz_pgwire fuzz/corpus_pgwire/ -max_total_time=60
-
-      - name: Fuzz pg_dsn (60s)
-        # DSN parser: percent-decoding + bounded field splitting over a
-        # user-supplied connection string.
-        timeout-minutes: 3
-        run: ./fuzz/fuzz_pg_dsn fuzz/corpus_pg_dsn/ -max_total_time=60
-
-      - name: Fuzz pg_rewrite (60s)
-        # ?-to-$n placeholder rewriter: literal / comment / dollar-quote-aware
-        # SQL scan. A miscount or OOB write here corrupts the parameterized
-        # query the app sends.
-        timeout-minutes: 3
-        run: ./fuzz/fuzz_pg_rewrite fuzz/corpus_pg_rewrite/ -max_total_time=60
-
-      - name: Fuzz mysqlwire (60s)
-        # MySQL/MariaDB wire reader over untrusted server bytes: bounds-checked
-        # framing + length-encoded int/string cursor is the trust boundary for a
-        # malicious or MITM'd MySQL. An OOB read is an info-leak / crash.
-        timeout-minutes: 3
-        run: ./fuzz/fuzz_mysqlwire fuzz/corpus_mysqlwire/ -max_total_time=60
-
-      - name: Fuzz mysql_dsn (60s)
-        # MySQL/MariaDB DSN parser: percent-decoding + bounded field splitting
-        # over a user-supplied connection string.
-        timeout-minutes: 3
-        run: ./fuzz/fuzz_mysql_dsn fuzz/corpus_mysql_dsn/ -max_total_time=60
-
-      - name: Fuzz respwire (60s)
-        # RESP2/3 reply parser over untrusted server bytes: bounds-checked,
-        # depth-capped decode is the trust boundary for a malicious / MITM'd
-        # Valkey/Redis. An OOB read or unbounded recursion is a crash / DoS.
-        timeout-minutes: 3
-        run: ./fuzz/fuzz_respwire fuzz/corpus_respwire/ -max_total_time=60
-
-      - name: Fuzz valkey_dsn (60s)
-        # Valkey/Redis DSN parser: percent-decoding + bounded field splitting
-        # over a user-supplied connection string.
-        timeout-minutes: 3
-        run: ./fuzz/fuzz_valkey_dsn fuzz/corpus_valkey_dsn/ -max_total_time=60
-
-      - name: Fuzz span SDK (60s)
-        # Mapped-span guest SDK math (templates/hull_span.h): the attacker-
-        # controlled span-metadata decode + window-read offset arithmetic a WASM
-        # plugin runs. Adversarial offsets over a truthful window under ASan prove
-        # hull_span__fits() never lets an OOB / width-straddling read through.
-        timeout-minutes: 3
-        run: ./fuzz/fuzz_span_sdk fuzz/corpus_span_sdk/ -max_total_time=60
-
-      - name: Fuzz span window geometry (60s)
-        # Mapped-window geometry (hl_cap_fs_mmap_window_geometry): page-align +
-        # EOF-clamp + overflow-safe page-rounding of an (offset,length) request.
-        # UBSan + invariant asserts catch any overflow or logically-wrong mapping.
-        timeout-minutes: 3
-        run: ./fuzz/fuzz_span_window fuzz/corpus_span_window/ -max_total_time=60
-
-      - name: Fuzz lua source parser (60s)
-        # hull.source.lua: adversarial bytes -> lua.parse() over a bounded lua_State.
-        # Intrinsic invariants (never-raise / valid shape / range sanity / bounded via
-        # a per-input allocator, with LUA_ERRMEM classified as expected exhaustion) +
-        # ASan/UBSan on the instrumented Lua VM. `make fuzz-lua-source` stages the full
-        # repo .lua corpus deterministically first (from the repo root, so package.path
-        # resolves). Complements the differential conformance gate.
-        timeout-minutes: 3
+  fuzz-lua-source:
+    name: Fuzz (Lua source parser)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          submodules: true
+      - name: Install clang
+        run: sudo apt-get update && sudo apt-get install -y clang
+      - name: Fuzz Lua source parser (60s)
+        # hull.source.lua: adversarial bytes -> lua.parse() over a bounded lua_State,
+        # ASan/UBSan on the instrumented VM; corpus staged from the repo root.
+        timeout-minutes: 5
         run: make fuzz-lua-source CC=clang FUZZ_TIME=60
 
+  fuzz-js-source:
+    name: Fuzz (JS source parser)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          submodules: true
+      - name: Install clang
+        run: sudo apt-get update && sudo apt-get install -y clang
       - name: Fuzz JS source parser (60s)
-        # hull:source:parser (JS): adversarial bytes -> parse() through the restricted QuickJS
-        # session, via the test-only compact entry hull:source:tests:fuzz_parse. Intrinsic
-        # invariants (never-raise / valid SourceUnit shape / range + nesting + raw-slice + no
-        # cycles / diagnostic-budget / js.internal aborts / active session-reuse proof after
-        # host js.limit.*). Sanitizer split keeps UBSan off vendored QuickJS (fuzzer-no-link,
-        # address) while retaining coverage + ASan; full sanitizers on Hull code.
-        # `make fuzz-js-source` stages the full repo .js/.mjs/.cjs corpus first.
-        timeout-minutes: 3
+        # hull:source:parser through the restricted QuickJS session (fuzz_parse entry);
+        # sanitizer split keeps UBSan off vendored QuickJS. Corpus staged first.
+        timeout-minutes: 5
         run: make fuzz-js-source CC=clang FUZZ_TIME=60
+
+  # -- focused source-frontend jobs (docs/ci_architecture_design.md sections 4, 9):
+  # a FRESH embedded-host build + the frontend unit suite + the discovery /
+  # dev-agent / inspect lifecycle. ADDITIVE in this checkpoint (they run on every
+  # PR/push alongside the full matrix); classifier-based skipping of the redundant
+  # full build for tooling PRs is the next checkpoint, gated on coverage
+  # equivalence. --
+  focused-js-frontend:
+    name: Focused JS frontend (fresh embedded host)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          submodules: recursive
+      - name: JS frontend tests (fresh registry embed)
+        run: make test-js-frontend
+      - name: Project source-discovery lifecycle (hull dev --agent -> inspect, JS)
+        timeout-minutes: 6
+        run: make e2e-project-discovery
+
+  focused-lua-frontend:
+    name: Focused Lua frontend (fresh embedded host)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          submodules: recursive
+      - name: Lua source + frontend tests (fresh registry embed)
+        run: make test-lua-frontend
+      - name: Project source-discovery lifecycle (lua-only)
+        timeout-minutes: 6
+        run: make e2e-project-discovery-lua
 
   # End-to-end against a real PostgreSQL 16 (started in Docker by the script).
   # Exercises the whole path the unit tests can't: DSN -> SCRAM-SHA-256 auth
@@ -2240,7 +2209,11 @@ jobs:
       - msan
       - tsan
       - tsan-shared-heap
-      - fuzz
+      - fuzz-native-security
+      - fuzz-lua-source
+      - fuzz-js-source
+      - focused-js-frontend
+      - focused-lua-frontend
       - postgres
       - mysql
       - valkey
