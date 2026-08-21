@@ -1104,10 +1104,11 @@ self-trust caveat (§8) — governance stays with CODEOWNERS/branch protection.
   reuse - a producer builds wamrc once, an immutable run-scoped artifact, 8 x86_64
   AOT consumers cold-verify + consume it (arm64 self-builds, canary retained).
   ~2 runner-min saved, no critical-path regression.
-- **Slice 5B.1 (AUDIT in Appendix E; awaiting review):** matrix dimension->property
-  inventory + equivalence proposals. Finding: the matrix is already lean; the one
-  concrete PR-scoped reduction (flavors subsystem-split) is low-value/optional.
-  Design-only; NOT implemented.
+- **Slice 5B (CLOSED; audit in Appendix E, #385):** matrix dimension->property
+  inventory + equivalence proposals. Outcome: "audited; no worthwhile safe
+  reduction found" - the matrix is already lean, every leg proves a distinct
+  property, and the one candidate (flavors subsystem-split) was declined as
+  too-low-value for another permanent classification boundary. No 5B.2 activation.
 - **Slice 6:** nightly (schedule) + rollout. Stops for review.
 
 ---
@@ -1613,11 +1614,11 @@ jobs stay independent and from-source.
 
 # Appendix E. Slice 5B.1 - matrix dimension -> property audit + reduction proposals
 
-Status: **DESIGN / AUDIT ONLY (awaiting review). NOTHING changed.** No job matrix,
-applicability, branch protection, scheduling, cache, or release-trust change. This
-is the first 5B deliverable (D.2): the dimension -> property inventory and concrete
-equivalence-backed reduction PROPOSALS for review. Activation, if any, is a
-separate later checkpoint.
+Status: **AUDIT ONLY - reviewed; Slice 5B CLOSED (no reduction adopted). NOTHING
+changed.** No job matrix, applicability, branch protection, scheduling, cache, or
+release-trust change. This is the FINAL 5B deliverable (D.2): the dimension ->
+property inventory + equivalence-backed proposals. The one candidate (P1) was
+declined at review (E.3/E.5); there is no 5B.2 activation.
 
 ## E.0 Method
 
@@ -1706,12 +1707,23 @@ which run on `ubuntu-24.04` (Linux x86_64 gcc)**. Therefore:
 
 ## E.3 Concrete reduction proposals (each with an equivalence row)
 
-**Proposal P1 (recommended, low value): PR-scope the `flavors` legs by subsystem.**
-Today `flavors` is one 7-leg matrix in `core-common`, so a narrow-native DB change
-runs all 7 - including the 4 legs whose linked code it cannot affect. Split the
-mapping so each flavor leg is applicable only to the subsystem whose code it links
-(E.1 table): the 3 non-DB legs (`DB=0`, `HTTP=0`, `IMAGE=0`) stay `core-common`;
-the 2 pg legs move to `db-postgres`; the 2 mysql legs move to `db-mysql`.
+**Proposal P1 (considered - DECLINED at review): PR-scope the `flavors` legs by
+subsystem.** Today `flavors` is one 7-leg matrix in `core-common`, so a
+narrow-native DB change runs all 7 - including the 4 legs whose linked code it
+cannot affect. One could split the mapping so each flavor leg is applicable only to
+the subsystem whose code it links (E.1 table): the 3 non-DB legs (`DB=0`, `HTTP=0`,
+`IMAGE=0`) stay `core-common`; the 2 pg legs move to `db-postgres`; the 2 mysql
+legs move to `db-mysql`.
+
+**Decision: NOT adopted.** The saving (a narrow DB PR skips ~2 link-only,
+parallel, seconds-each legs, off the critical path) is too small to justify another
+PERMANENT classification boundary. A flavor leg's true applicability depends on
+build composition, generated registries, shared DB infrastructure, and eventually
+build-plugin feature inference - NOT merely the backend translation units - so the
+`removed | property | replacement` equivalence below, while sound for the TU
+dimension, would under-approximate the real invalidation surface and make CI harder
+to reason about for negligible gain. **All seven flavor legs stay in
+`core-common`.** The equivalence table is retained for the record only:
 
 | configuration removed (on a narrow PR) | property it proved | new config proving that property |
 |---|---|---|
@@ -1748,14 +1760,22 @@ changes** (`Makefile`/`mk/**`/feature composition); **shared headers**
 The four-platform `make test` (`build`) stays `core-common` (Slice-4 constraint 7).
 No cross-run cache, no scheduling, no branch-protection, no release-trust change.
 
-## E.5 Audit conclusion
+## E.5 Audit conclusion - Slice 5B CLOSED (audited; no worthwhile safe reduction)
 
 The broad matrix is **already lean and well-justified**: every leg proves a
 distinct toolchain / arch / sanitizer / link / engine / repro property, and Slice 4
 already confines each native subsystem to the platform(s) that compile it (E.2).
-The single concrete PR-scoped reduction found is **P1 (flavors subsystem-split)**,
-which is low-value and optional; the multi-platform legs (`build`, `reproducibility`,
+The single concrete PR-scoped reduction found (P1, flavors subsystem-split) was
+**declined at review** (E.3): its savings are too small to justify another
+permanent classification boundary whose real applicability depends on build
+composition / generated registries / shared DB infra / build-plugin inference, not
+just the backend TUs. The multi-platform legs (`build`, `reproducibility`,
 `build-pipeline`, `htmx-browser`, `gpu`) each prove a non-redundant property and
-are recommended to KEEP. A 5B.2 activation checkpoint is therefore OPTIONAL - the
-honest finding is that there is little safe matrix waste left to cut beyond what
-Slice 4 already achieved.
+are KEPT. All seven flavor link-legs stay in `core-common`.
+
+**Slice 5B is CLOSED as "audited; no worthwhile safe reduction found" - a
+successful audit outcome, not unfinished optimization. There is NO 5B.2 activation
+checkpoint.** Slices 1-5 have removed the defensible CI waste; further matrix
+slicing now would trade negligible savings for harder-to-reason-about CI. The next
+CI work is Slice 6 (scheduling / nightly), or - preferably - the Build Plugin /
+BuildArtifact product architecture, rather than continuing to shave the PR matrix.
