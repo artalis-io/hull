@@ -253,8 +253,15 @@ jobs:
           test -s /tmp/echo.aot
           echo "wamrc builds + AOT-compiles against LLVM ${{ matrix.llvm }}"
 
-  # -- version / compat: the DB wire clients against multiple engine versions
-  #    (main tests only PG 16 / MySQL 8.0; nightly adds the neighbours). --
+  # -- version / compat: the DB wire clients against multiple engine versions.
+  #    SUPPORTED nightly set: PostgreSQL 15/16 + MySQL 8.0 (what the e2e harness
+  #    can reach today). MySQL 8.4 and MariaDB are a PENDING SLOT, NOT executed
+  #    here (Appendix F): 8.4 removed the `--default-authentication-plugin` startup
+  #    option, disables `mysql_native_password` by default, and defaults to
+  #    caching_sha2_password whose full-auth Hull only does over TLS - none of
+  #    which the current harness sets up. The pin scripts/ci/test_nightly_matrix.py
+  #    fails if this image set drifts, so 8.4/MariaDB cannot be casually re-added
+  #    without the real caching_sha2/TLS + version-aware-container harness work. --
   nightly-compat-db:
     if: github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
     name: Nightly compat (${{ matrix.label }})
@@ -267,7 +274,6 @@ jobs:
           - { label: "PostgreSQL 15", target: e2e-postgres, img_env: PG_IMAGE, image: "postgres:15-alpine" }
           - { label: "PostgreSQL 16", target: e2e-postgres, img_env: PG_IMAGE, image: "postgres:16-alpine" }
           - { label: "MySQL 8.0", target: e2e-mysql, img_env: MYSQL_IMAGE, image: "mysql:8.0" }
-          - { label: "MySQL 8.4", target: e2e-mysql, img_env: MYSQL_IMAGE, image: "mysql:8.4" }
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
         with:
@@ -308,6 +314,10 @@ jobs:
         run: |
           python3 scripts/ci/check_gate_completeness.py \
             --workflow .github/workflows/nightly.yml --gate nightly-success
+      # Pin the compat-db engine inventory (PG 15/16 + MySQL 8.0). Fails if MySQL
+      # 8.4 / MariaDB (the pending slot) are re-added without the harness work.
+      - name: Compat-db version inventory pin
+        run: python3 scripts/ci/test_nightly_matrix.py
       - name: Evaluate nightly results (fail-closed; nothing may skip)
         if: always()
         env:

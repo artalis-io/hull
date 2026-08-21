@@ -1854,7 +1854,7 @@ never a fetch.
 |---|---|---|---|
 | native + parser fuzzing | 60 s smoke on the committed corpora | SAME targets + SAME committed corpora at a long budget | yes (in-repo corpora) |
 | rare build configs | the 7-leg `flavors` matrix | CONCRETE uncommon `HL_ENABLE_*` combinations (F.2b), link + smoke | yes |
-| version / compatibility | single LLVM-18, single pinned engine version | multiple PINNED LLVM + pinned real engine versions (F.2b) | yes (pinned pkgs/digests) |
+| version / compatibility | single LLVM-18, single pinned engine version | pinned LLVM 17 + 18; pinned PostgreSQL 15/16 + MySQL 8.0 (F.2b; MySQL 8.4 + MariaDB are a pending slot) | yes (pinned pkgs/images) |
 | conformance-corpus expansion | 614 / 33-case pinned subsets (in `make test`) | **SLOT ONLY** - deferred to its own reviewed design; Slice 6 does not broaden it | n/a |
 
 ## F.2b Additive job inventory (defined BEFORE writing the workflow - amendment 2)
@@ -1874,7 +1874,26 @@ placeholder "rare combinations" jobs - every row names concrete targets/configs
 | `nightly-fuzz-lua` | fuzz_lua_source @ 600 s | 20 min | clang | `crash-*` inputs | deep Lua-parser coverage | ~10 min |
 | `nightly-rare-configs` | link + `hull version` + `app.main` smoke for (a) `DB=0 HTTP=0 WASM=0 IMAGE=0` minimal; (b) `POSTGRES=1 MYSQL=1` (both wire backends); (c) `SQLITE=0 POSTGRES=1 MYSQL=1`; (d) `IMAGE=0 WASM=0` | 30 min | gcc (ubuntu-24.04) | build/link log | uncommon link combos NOT in the 7-leg matrix | ~10 min |
 | `nightly-compat-llvm` | build `wamrc` against llvm-17 AND llvm-18; AOT smoke each | 30 min | llvm-17, llvm-18 | wamrc build log | wamrc builds across LLVM versions | ~10 min |
-| `nightly-compat-db` | `e2e_postgres` vs pinned `postgres` 15 & 16; `e2e_mysql` vs pinned `mysql:8.0` + `mariadb` | 40 min | pinned image DIGESTS | e2e logs | wire compat across engine versions | ~25 min |
+| `nightly-compat-db` | `e2e_postgres` vs pinned `postgres:15` & `16`; `e2e_mysql` vs pinned `mysql:8.0` | 40 min | pinned images | e2e logs | wire compat across engine versions | ~20 min |
+
+**Supported nightly DB-compat set: PostgreSQL 15/16 + MySQL 8.0.** This is what the
+e2e harness can reach today; it is machine-pinned by
+`scripts/ci/test_nightly_matrix.py` (run inside `nightly-success`), which fails if
+the `nightly-compat-db` image inventory drifts.
+
+**PENDING SLOT (NOT executed): MySQL 8.4 + MariaDB.** The first nightly dispatch
+proved WHY these are not yet valid nightly tests: MySQL **8.4** removed the
+`--default-authentication-plugin` startup option the harness uses, **disables
+`mysql_native_password` by default**, and defaults to `caching_sha2_password` -
+whose full-auth Hull performs only over **TLS**, which the harness does not set up.
+So `mysql:8.4` never reaches the Hull client (the container fails to start). Merely
+forcing legacy `mysql_native_password` would test a compatibility escape hatch, not
+Hull's intended 8.4 path, so 8.4 is NOT re-added that way. The follow-up
+compatibility story must implement the REAL path: **TLS-enabled
+`caching_sha2_password` full-auth, version-aware container configuration, and
+MariaDB's distinct authentication behavior** - and is out of Slice 6's scope
+(parallel to the deferred conformance-expansion slot). The version pin above blocks
+a casual re-add of 8.4 / MariaDB without that work.
 
 Conformance is intentionally absent: running the committed corpora under ASan/MSan
 is ALREADY covered by main's `sanitizers` + `msan` jobs (no property beyond main);
