@@ -22,7 +22,11 @@
 
 import argparse
 import json
+import os
 import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import job_plan  # noqa: E402  (the SINGLE applicability map, shared with the job `if:` conditions)
 
 
 def evaluate(needs, allow_skip=None, require_present=()):
@@ -56,7 +60,11 @@ def evaluate(needs, allow_skip=None, require_present=()):
 def main(argv):
     ap = argparse.ArgumentParser(description="Applicability-aware CI result gate.")
     ap.add_argument("--needs", required=True, help="path to a file holding toJSON(needs).")
-    ap.add_argument("--allow-skip", default="", help="comma-separated jobs that may be skipped.")
+    ap.add_argument("--plan", default="", help="the classifier plan_json; allow-skip is derived "
+                    "from job_plan (the SAME map the job `if:` conditions use).")
+    ap.add_argument("--event", default="pull_request", help="the CI event (push/pull_request/...).")
+    ap.add_argument("--allow-skip", default="", help="explicit comma-separated jobs that may skip "
+                    "(fallback when --plan is not given).")
     ap.add_argument("--require-present", default="classify",
                     help="comma-separated jobs that must be present AND success.")
     args = ap.parse_args(argv)
@@ -68,7 +76,18 @@ def main(argv):
         print("ci-gate: cannot read needs (%s) -> FAIL closed" % e)
         return 1
 
-    allow = [s for s in args.allow_skip.split(",") if s]
+    # Allow-skip is DERIVED from the plan via the shared job-applicability map, so
+    # the gate and the job `if:` conditions can never disagree. A missing/malformed
+    # plan fails CLOSED to broad (allow_skip = only push-only benchmark on non-push,
+    # i.e. every real job must run/succeed).
+    if args.plan:
+        try:
+            plan = json.loads(args.plan)
+        except Exception:
+            plan = {"full_all": True}
+        allow = job_plan.allow_skip_jobs(plan, list(needs.keys()) if isinstance(needs, dict) else [], args.event)
+    else:
+        allow = [s for s in args.allow_skip.split(",") if s]
     reqp = [s for s in args.require_present.split(",") if s]
     problems = evaluate(needs, allow_skip=allow, require_present=reqp)
 

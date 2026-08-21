@@ -1073,9 +1073,23 @@ self-trust caveat (§8) — governance stays with CODEOWNERS/branch protection.
     dev-agent / inspect lifecycle, §4/§9/§20). These run on EVERY PR/push
     alongside the full matrix (nothing skipped); `ci-success.needs` updated
     (48 jobs, 47 gated). No classifier skipping, no branch-protection change.
-  - **Checkpoint 3b (NEXT):** ONLY after coverage equivalence is demonstrated -
-    wire classifier-based skipping of the redundant full-matrix jobs for
-    tooling/frontend PRs and update `ci-success` applicability (the plan-derived
-    allow-skip set), removing `paths-ignore` so the orchestrator always runs.
+  - **Checkpoint 3b (DONE, this change):** classifier-based skipping, driven by a
+    SINGLE job-applicability map (`scripts/ci/job_plan.py`). The `classify` job
+    emits per-group run-flags; each expensive job gates on
+    `if: needs.classify.outputs.run_*`; the `ci-success` gate derives its
+    allow-skip from the SAME map (`ci_gate.py --plan`), and
+    `check_job_plan_consistency.py` (run in `classify`) proves the `if:`
+    conditions and the map never drift. Only PROVEN narrow classes skip -
+    docs-only, JS frontend/fuzz, Lua frontend/fuzz; every other plan (core,
+    tooling, project-discovery, query, compute, db, gpu, tls, examples, generic
+    tests, unknown) and every main/full/force-full run the broad suite. Every job
+    DEFAULTS applicable (an unmapped job -> `always` -> never skips); mixed
+    core+frontend runs full core PLUS focused; `benchmark` stays push-only.
+    `paths-ignore` removed so `classify` + `ci-success` always appear. Fixtures:
+    `test_job_plan.py` (docs-only / pure-JS / pure-Lua / fuzz-only / core / mixed
+    / main / force-full / unexpected-skip / missing-applicability) + updated
+    `ci_gate` plan-derived path. Branch protection UNCHANGED (`ci-success` still
+    not required). Proven live: a pure-frontend PR skips ~43 jobs while the gate
+    passes; an unexpected skip of an applicable job fails the gate.
 - **Slices 4-6:** domain/native mapping; cache+matrix (wamrc cache, kill the 9x
   rebuild); nightly (schedule) + rollout. Each stops for review.
