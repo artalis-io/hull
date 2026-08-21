@@ -1095,12 +1095,16 @@ self-trust caveat (§8) — governance stays with CODEOWNERS/branch protection.
     `ci_gate` plan-derived path. Branch protection UNCHANGED (`ci-success` still
     not required). Proven live: a pure-frontend PR skips ~43 jobs while the gate
     passes; an unexpected skip of an applicable job fails the gate.
-- **Slice 4 (DESIGN in Appendix C; awaiting review):** DB/GPU/compute
-  native-integration triggers - carve the expensive per-subsystem integrations
-  out of an always-run core-common floor. Three checkpoints: design -> additive
-  proof -> skip activation. NOT implemented.
-- **Slices 5-6:** cache+matrix (wamrc cache, kill the 9x rebuild); nightly
-  (schedule) + rollout. Each stops for review.
+- **Slice 4 (COMPLETE; #378 design / #379 additive / #380 skip-activation):**
+  DB/GPU/compute native-integration triggers - the expensive per-subsystem
+  integrations are carved out of an always-run core-common floor. Live-proven:
+  an isolated backend change runs core-common + its subsystem and skips the rest;
+  shared/mixed-unapproved/malformed changes expand to broad.
+- **Slice 5 (DESIGN in Appendix D; awaiting review):** 5A wamrc/toolchain reuse
+  (producer -> immutable workflow artifact -> AOT consumers, killing the 9x
+  redundant wamrc build) and 5B matrix reduction (dimension->property inventory +
+  equivalence proof). Separate checkpoints; NOT implemented.
+- **Slice 6:** nightly (schedule) + rollout. Stops for review.
 
 ---
 
@@ -1336,3 +1340,199 @@ Stop for review.
 for the proven subsystem groups, and prove live: a backend-specific PR skips the
 other subsystems' integrations while core-common + its subsystem run and the gate
 passes; a shared/broad PR runs everything. Stop for review.
+
+# Appendix D. Slice 5 design - wamrc/toolchain reuse (5A) + matrix reduction (5B)
+
+Status: **DESIGN (awaiting review). NOT implemented.** Two internally-separate
+sub-slices, each with its own review-gated checkpoint chain (D.3). Slice 5 does
+NOT change branch protection, nightly scheduling, or release cache trust.
+
+## D.0 Measurement (verified on run 32494900285, the green CP3 broad run)
+
+- **9 jobs build `wamrc` independently**, all in the Slice-4 `compute` group.
+  Each installs `llvm-18-dev` + `cmake`, then `make wamrc` (builds the WAMR AOT
+  compiler against LLVM-18, applying Hull's WAMR patch carriage):
+  - **8 on `ubuntu-24.04` (x86_64):** `wasm-readonly-heap-aot`, `mapped-span-bench`,
+    `compute-aot-shared-heap`, `compute-memops-freestanding`, `stream-meta`,
+    `spans-example`, `spans-multi`, `spans-hugefile`.
+  - **1 on `ubuntu-24.04-arm` (aarch64):** `wasm-guarded-aot-arm64`.
+- **Per-job step cost** (measured on `wasm-readonly-heap-aot`): install LLVM+cmake
+  ~10 s (varies 10-60 s by apt cache), **`make wamrc` ~34 s**, then the AOT test
+  cases. So the redundant wamrc compile is ~34 s x 8 (x86_64) ~= **~4.5 min of
+  duplicated build** per broad run, plus 8 redundant LLVM installs.
+- **These jobs are parallel and OFF the critical path.** The compute group
+  finishes in ~3.5 min; the broad run's 21.6 min wall is set by `MSan` (18.6),
+  `Linux (clang)` (14.4), `Reproducible build (Cosmo a)` (13.3), `Cosmo APE`
+  (12.0), `macOS` (11.9) - all core-common.
+- **Honest conclusion.** The waste is **runner-minutes / cost** (8 redundant
+  x86_64 wamrc builds + LLVM installs), NOT wall-clock. Slice 5A must not regress
+  wall-clock; introducing a producer serializes consumers behind it (~ +0.5-1 min
+  to the compute group), which stays hidden under the 21.6 min critical path. The
+  single arm64 consumer has nothing to share with in-run, so it is out of scope
+  for 5A (stays self-building) until a second arm64 AOT consumer exists.
+
+## D.1 Slice 5A - wamrc producer -> immutable artifact -> AOT consumers
+
+### D.1.1 Shape: same-run artifact FIRST, cross-run cache DEFERRED
+
+One **producer** job builds `wamrc` once per arch that has >=2 consumers (today:
+x86_64 only) and uploads it as an **immutable, run-scoped workflow artifact**
+(`actions/upload-artifact`). The 8 x86_64 AOT jobs become **consumers**
+(`needs: [wamrc-x86_64, classify]`), download the artifact, verify it (D.1.3),
+and use it. This is **same-run sharing** - the artifact lives and dies with the
+run, so there is no cross-run trust surface. GitHub's mutable cross-run
+`actions/cache` is **explicitly deferred**: it is a possible later sub-step,
+justified only if D.0-style measurement shows the producer's own ~34 s build is
+worth caching across runs. The producer preserves the `run_compute` gate (it runs
+iff the compute group is applicable), so a non-compute narrow PR builds no wamrc
+at all.
+
+### D.1.2 Artifact identity (the reuse key) - LOCKED
+
+The producer computes and records (in the artifact's metadata sidecar) a key that
+hashes ALL of:
+
+1. **OS + arch** - the runner image (`ubuntu-24.04` / `ubuntu-24.04-arm`).
+2. **Compiler identity** - `cc --version` / the cmake C/C++ toolchain that builds
+   wamrc.
+3. **LLVM version** - `llvm-config-18 --version` (exact), plus the resolved
+   `LLVM_DIR`.
+4. **WAMR source revision** - the `vendor/wamr` submodule pin (today
+   `c3a78cd1`, WAMR-2.4.1-218-gc3a78cd1).
+5. **Hull WAMR patches** - a hash of the patch carriage (`WAMR_PATCH_PREREQ` /
+   `wamr-patch-check` inputs; docs/wamr_patches.md).
+6. **Build flags** - `WAMRC_CMAKE_FLAGS` + the `wamrc:` make recipe body.
+7. **Relevant Makefile/scripts** - a hash of the `wamrc` rule region of the
+   Makefile and `tests/ci_ensure_wamrc.sh`.
+
+Any change to any input yields a different key -> no reuse -> explicit rebuild.
+The key travels in the artifact metadata so a consumer can compare.
+
+### D.1.3 Consumer verification (fail-safe, never silent)
+
+Before trusting the downloaded wamrc, each consumer checks, in order:
+
+- **(a) checksum** - `sha256(wamrc)` equals the producer-recorded digest;
+- **(b) identity match** - the artifact's recorded key equals the consumer's own
+  recomputed identity (same OS/arch/LLVM/WAMR/patches/flags/scripts);
+- **(c) architecture** - the artifact arch equals the runner arch (an x86_64
+  wamrc is refused on an arm64 runner, and vice versa);
+- **(d) wamrc usability** - the consumer EXECUTES the tool (`wamrc --version` and
+  a trivial AOT compile of a fixture module) and confirms it runs to success.
+  This is the backstop for the dynamic-linkage question: wamrc built against
+  `llvm-18-dev` most likely dynamically links `libLLVM-18` (cf. the lld/libLLVM
+  finding in the toolchain-free-linker work), so the consumer must either keep a
+  lightweight `libllvm-18` runtime install or the artifact must bundle the needed
+  shared lib; the usability probe catches a mismatch regardless of which is
+  chosen at implementation.
+
+**Any** failure (missing artifact, checksum mismatch, identity/arch mismatch,
+tool won't run) fails **safe**: the consumer **explicitly rebuilds wamrc from
+source** (today's `make wamrc` path via `ci_ensure_wamrc.sh`) or fails the job
+with a clear error - it NEVER silently uses an incompatible or unverifiable tool.
+
+### D.1.4 Trust separation - PR artifacts never touch release/signing
+
+- A PR-produced wamrc artifact is **run-scoped and CI-internal** (test AOT
+  compilation only). It can NEVER enter a release or signing trust path: it is
+  not consumable by `release.yml`, and it produces no shipped/signed artifact.
+- `release.yml` and `bench_mapped_span_1g.yml` **keep building their own wamrc
+  independently** - Slice 5A does not touch them. Release AOT and the
+  reproducibility jobs stay clean and independent (their trust is anchored by
+  their own from-source builds, per the ratified constraint). Release cache trust
+  is out of scope for all of Slice 5.
+
+### D.1.5 Additive rollout + retained fresh-comparison path
+
+Checkpoint 5A.2 lands the producer + upload **additively**: consumers still build
+their own wamrc AND download the artifact, then **compare** - assert the
+artifact-wamrc and a from-source-wamrc produce **byte-identical `.aot`** on
+representative modules (the readonly-heap fixture + a Memory64 module) - before
+any consumer RELIES on the artifact. The proof set:
+
+- **hit** - a consumer finds a valid same-run artifact and uses it;
+- **miss** - no artifact present -> consumer rebuilds from source (fail-safe);
+- **invalidation** - bumping the WAMR rev / a patch / a build flag changes the
+  key -> the artifact is not reused -> explicit rebuild;
+- **corruption rejection** - a tampered/truncated artifact fails the checksum ->
+  rebuild-or-fail, never used;
+- **output equivalence** - artifact-wamrc `.aot` == fresh-wamrc `.aot`, byte for
+  byte, on the representative jobs.
+
+Only after that proof (a separate review stop) do consumers drop the redundant
+from-source build and rely on the artifact.
+
+### D.1.6 Invalidation triggers (already broad in Slice 4)
+
+A change to `vendor/wamr` (submodule), the patch carriage, the `wamrc` build rule,
+the compiler, the LLVM version, or `WAMRC_CMAKE_FLAGS` changes the identity key
+(D.1.2) -> no reuse. These inputs ALREADY classify **broad** in Slice 4
+(`vendor/**` and `Makefile`/`mk/**` -> `full_all`), so such a change already runs
+the full suite; Slice 5A additionally guarantees it rebuilds wamrc rather than
+reusing a stale artifact.
+
+## D.2 Slice 5B - matrix reduction (a SEPARATE safety checkpoint)
+
+Treated as its own checkpoint AFTER 5A is proven. **No job or configuration is
+removed because another build "looks similar."**
+
+### D.2.1 Method - dimension -> property inventory
+
+Deliverable #1 is an audit table documenting EVERY current matrix dimension and
+the **unique property it proves**. The matrix dimensions in play (to be
+enumerated exhaustively at checkpoint 5B.1): the `build` platform legs (Linux gcc,
+Linux clang, Linux aarch64, macOS), the sanitizer legs (ASan+UBSan, MSan, TSan,
+tsan-shared-heap), the reproducibility legs (container, container-interleave,
+cosmo a/b, cosmo-compare), the flavor/composition legs (`flavors`), the feature
+builds (duckdb/gpu/tui/postgres/mysql x their platforms), the cosmo/musl legs,
+the embedder legs (rust/zig), and the DB engine legs (real PG/MySQL/Valkey/DuckDB
+x platform). Each row: `dimension | unique property proved`.
+
+### D.2.2 Per-reduction equivalence table
+
+Deliverable #2: for EACH proposed reduction, a row of
+
+```
+configuration removed | property it previously proved | new job/config proving that property
+```
+
+If no surviving configuration proves the property, the configuration is **NOT
+removed**. This table is reviewed BEFORE any activation.
+
+### D.2.3 Exhaustive-behavior invariants (never reduced)
+
+The FULL matrix always runs for: **main**; **force-full**; **build/composition
+changes** (`Makefile`/`mk/**`/feature composition); **shared headers**
+(`include/**`); **native core** (non-allowlisted `src/**`); and
+**release/reproducibility verification**. These are the Slice-4 broad classes plus
+the release path - none of them is a candidate for reduction.
+
+### D.2.4 PR-scoped reduction only, subsystem-faithful
+
+Reduction is acceptable ONLY on PR narrow paths, and ONLY where representative
+configurations preserve the affected subsystem's coverage. A **backend-specific
+native change retains the platform/compiler combinations that actually compile
+that backend** - e.g. a Postgres-only change keeps the Linux+clang and macOS legs
+that build the pgwire backend; a leg may be dropped from that narrow path ONLY
+with a documented equivalence row (D.2.2) showing another retained leg proves the
+same property. Backend integration jobs (real PG/MySQL/Valkey/DuckDB) are already
+scoped by Slice 4; 5B only asks whether a narrow native path needs every
+*platform* leg of its own subsystem, never whether the subsystem runs at all.
+
+## D.3 Cadence + review checkpoints (mirrors the ratified 9-step)
+
+1. **Measure** WAMR duplication + critical path (D.0) - DONE.
+2. **Design** the cache/artifact + matrix-equivalence model (this appendix) -
+   **STOP for review (here).**
+3. Implement **5A** wamrc reuse **additively**; consumers retain the fresh
+   from-source comparison path (D.1.5).
+4. Prove **hit / miss / invalidation / corruption rejection / output
+   equivalence** (D.1.5) - **STOP for review.**
+5. Only THEN propose **5B** reductions: the dimension->property inventory
+   (D.2.1) + per-reduction equivalence tables (D.2.2) - **STOP for review.**
+6. Activate 5B reductions; prove **narrow / broad / main / force-full** behavior
+   - **STOP again.**
+
+**Non-scope for all of Slice 5:** no branch-protection change, no nightly /
+schedule, no release cache trust change. `release.yml` and the reproducibility
+jobs stay independent and from-source.
