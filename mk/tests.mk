@@ -626,12 +626,8 @@ test: $(TEST_BINS)
 #  2. Shell double-escaping mangling the CONFIG_VERSION string
 
 ifdef MSAN
-# INVESTIGATION (investigate/msan-wamr-c1, throwaway): -fsanitize-memory-track-origins=2
-# captures the allocation origin of the WAMR uninit. WAMR builds with $(CFLAGS)
-# (Makefile:2660), so this covers the suspect allocation site. Revert after.
 CFLAGS   := -std=c11 -Wall -Wextra -Wpedantic -Wshadow -Wformat=2 \
-            -g -O1 -fsanitize=memory,undefined -fsanitize-memory-track-origins=2 \
-            -fno-omit-frame-pointer \
+            -g -O1 -fsanitize=memory,undefined -fno-omit-frame-pointer \
             -D_DEFAULT_SOURCE -DHL_THREAD_AFFINITY_CHECKS
 LDFLAGS  := -fsanitize=memory,undefined
 # Vendor TUs: keep MSan (we still want shadow tracking for uninitialized
