@@ -3,13 +3,12 @@
 #
 # hull.path is PURE lexical name manipulation (no filesystem authority). This
 # runs the required case matrix (normalize/join/dirname/basename/extension/stem/
-# is_absolute/relative/is_within), the algebraic invariants
-# (normalize(normalize(x))==normalize(x); normalize(join(a,relative(a,b)))==
-# normalize(b)), and the security-boundary cases (component-aware containment;
-# normalize-before-contain) through BOTH runtimes, using an IDENTICAL expected
-# vector in each app - so the two implementations cannot silently diverge, and a
-# self-check failure in either runtime fails the job. Both apps then print a
-# fingerprint that must match byte-for-byte across runtimes.
+# is_absolute/relative/is_within), the algebraic invariants, and the
+# security-boundary cases through BOTH runtimes with an IDENTICAL expected vector
+# per app (so the two implementations cannot silently diverge). Each app then
+# prints a COMPREHENSIVE fingerprint that exercises EVERY operation; the two
+# fingerprints must match byte-for-byte AND equal the golden vector, so the
+# parity claim covers all nine ops, not just those with duplicated asserts.
 #
 # SPDX-License-Identifier: AGPL-3.0-or-later
 set -eu
@@ -19,7 +18,7 @@ HULL="${HULL:-./build/hull}"
 WD=$(mktemp -d)
 trap 'rm -rf "$WD"' EXIT
 
-# ── Lua app: self-checks the required semantics, prints a fingerprint ──────────
+# ── Lua app ───────────────────────────────────────────────────────────────────
 cat > "$WD/p.lua" <<'LUA'
 local path = require("hull.path")
 app.manifest({ modules = { "hull/path@1" } })
@@ -47,13 +46,16 @@ app.main(function(ctx)
     eq(path.normalize("foo/.."), ".", "n11")
     eq(path.normalize(".."), "..", "n12")
     eq(path.normalize("/foo/../bar"), "/bar", "n13")
-    -- join
+    -- join (absolute component RESETS the accumulator)
     eq(path.join("foo", "bar"), "foo/bar", "j1")
     eq(path.join("foo/", "bar"), "foo/bar", "j2")
     eq(path.join("foo", ".", "bar"), "foo/bar", "j3")
     eq(path.join("src", "plugins", "foo.lua"), "src/plugins/foo.lua", "j4")
     eq(path.join(), ".", "j5 empty")
     eq(path.join("", "foo", ""), "foo", "j6 empties")
+    eq(path.join("a", "/b"), "/b", "j7 abs-reset")
+    eq(path.join("/a", "/b"), "/b", "j8 abs-reset2")
+    eq(path.join("a", "b/", "/c/d"), "/c/d", "j9 abs-reset-mid")
     -- dirname
     eq(path.dirname("/foo/bar.txt"), "/foo", "d1")
     eq(path.dirname("/foo"), "/", "d2")
@@ -91,6 +93,11 @@ app.main(function(ctx)
     eq(b(path.is_within("/workspace", "/workspace/a/../../etc")), "F", "w6 escape-normd")
     eq(b(path.is_within("a", "a/b")), "T", "w7 rel")
     eq(b(path.is_within("a", "../a")), "F", "w8 rel-up")
+    -- is_within: a relative candidate with MORE leading `..` than base escapes
+    eq(b(path.is_within(".", "../x")), "F", "w9 dot-escape")
+    eq(b(path.is_within("", "../../x")), "F", "w10 empty-escape")
+    eq(b(path.is_within(".", "x")), "T", "w11 dot-child")
+    eq(b(path.is_within("..", "../x")), "T", "w12 dotdot-child")
     -- invariants
     for _, x in ipairs({ "foo/./bar", "/a/../../b", "../../foo", "foo//bar/", "./x", "/a/b/../c" }) do
         eq(path.normalize(path.normalize(x)), path.normalize(x), "idem " .. x)
@@ -99,22 +106,30 @@ app.main(function(ctx)
         eq(path.normalize(path.join(pr[1], path.relative(pr[1], pr[2]))), path.normalize(pr[2]), "cmp")
     end
     -- type error is raised, not coerced
-    local ok = pcall(function() return path.normalize(42) end)
-    eq(b(ok), "F", "typeerr")
+    eq(b(pcall(function() return path.normalize(42) end)), "F", "typeerr")
 
     if #fails > 0 then
         ctx.stderr:write("LUA FAIL:\n" .. table.concat(fails, "\n") .. "\n"); return 1
     end
-    -- fingerprint: a stable transform of a shared matrix (cross-runtime compare)
+
+    -- COMPREHENSIVE fingerprint: every op over a shared matrix.
+    local FP_PATHS = { "a/b/../c", "/x//y/./z/..", "../p/q", "f.tar.gz", "/", ".gitignore", "foo/", "/a/../../b", "" }
+    local FP_JOIN = { { "a", "/b" }, { "/a", "/b" }, { "foo/", "bar" }, { "src", "p", "f.lua" }, { "x", ".", "y" } }
+    local FP_REL = { { "/a/b", "/a/c/x" }, { "src", "src/p/f" }, { "/a", "/a" } }
+    local FP_WITHIN = { { ".", "../x" }, { "..", "../x" }, { "/a", "/a/b" }, { "/a", "/ab" } }
     local fp = {}
-    for _, x in ipairs({ "a/b/../c", "/x//y/./z/..", "../p/q", "f.tar.gz", "/" }) do
-        fp[#fp + 1] = path.normalize(x) .. ":" .. path.basename(x) .. ":" .. path.extension(x)
+    for _, x in ipairs(FP_PATHS) do
+        fp[#fp + 1] = table.concat({ path.normalize(x), path.basename(x), path.dirname(x),
+            path.extension(x), path.stem(x), b(path.is_absolute(x)) }, ":")
     end
+    for _, j in ipairs(FP_JOIN) do fp[#fp + 1] = path.join(table.unpack(j)) end
+    for _, r in ipairs(FP_REL) do fp[#fp + 1] = path.relative(r[1], r[2]) end
+    for _, w in ipairs(FP_WITHIN) do fp[#fp + 1] = b(path.is_within(w[1], w[2])) end
     ctx.stdout:write(table.concat(fp, "|") .. "\n"); return 0
 end)
 LUA
 
-# ── JS app: identical semantics + fingerprint (camelCase for the two names) ────
+# ── JS app (identical semantics; camelCase for the two multi-word names) ───────
 cat > "$WD/p.js" <<'JS'
 import { app } from "hull:app";
 import { path } from "hull:path";
@@ -144,6 +159,9 @@ app.main((ctx) => {
     eq(path.join("src", "plugins", "foo.lua"), "src/plugins/foo.lua", "j4");
     eq(path.join(), ".", "j5");
     eq(path.join("", "foo", ""), "foo", "j6");
+    eq(path.join("a", "/b"), "/b", "j7");
+    eq(path.join("/a", "/b"), "/b", "j8");
+    eq(path.join("a", "b/", "/c/d"), "/c/d", "j9");
     eq(path.dirname("/foo/bar.txt"), "/foo", "d1");
     eq(path.dirname("/foo"), "/", "d2");
     eq(path.dirname("foo"), ".", "d3");
@@ -174,6 +192,10 @@ app.main((ctx) => {
     eq(b(path.isWithin("/workspace", "/workspace/a/../../etc")), "F", "w6");
     eq(b(path.isWithin("a", "a/b")), "T", "w7");
     eq(b(path.isWithin("a", "../a")), "F", "w8");
+    eq(b(path.isWithin(".", "../x")), "F", "w9");
+    eq(b(path.isWithin("", "../../x")), "F", "w10");
+    eq(b(path.isWithin(".", "x")), "T", "w11");
+    eq(b(path.isWithin("..", "../x")), "T", "w12");
     for (const x of ["foo/./bar", "/a/../../b", "../../foo", "foo//bar/", "./x", "/a/b/../c"]) {
         eq(path.normalize(path.normalize(x)), path.normalize(x), "idem " + x);
     }
@@ -185,33 +207,40 @@ app.main((ctx) => {
     eq(b(threw), "T", "typeerr");
 
     if (fails.length > 0) { ctx.stderr.write("JS FAIL:\n" + fails.join("\n") + "\n"); return 1; }
+
+    const FP_PATHS = ["a/b/../c", "/x//y/./z/..", "../p/q", "f.tar.gz", "/", ".gitignore", "foo/", "/a/../../b", ""];
+    const FP_JOIN = [["a", "/b"], ["/a", "/b"], ["foo/", "bar"], ["src", "p", "f.lua"], ["x", ".", "y"]];
+    const FP_REL = [["/a/b", "/a/c/x"], ["src", "src/p/f"], ["/a", "/a"]];
+    const FP_WITHIN = [[".", "../x"], ["..", "../x"], ["/a", "/a/b"], ["/a", "/ab"]];
     const fp = [];
-    for (const x of ["a/b/../c", "/x//y/./z/..", "../p/q", "f.tar.gz", "/"]) {
-        fp.push(path.normalize(x) + ":" + path.basename(x) + ":" + path.extension(x));
+    for (const x of FP_PATHS) {
+        fp.push([path.normalize(x), path.basename(x), path.dirname(x),
+            path.extension(x), path.stem(x), b(path.isAbsolute(x))].join(":"));
     }
+    for (const j of FP_JOIN) fp.push(path.join(...j));
+    for (const r of FP_REL) fp.push(path.relative(r[0], r[1]));
+    for (const w of FP_WITHIN) fp.push(b(path.isWithin(w[0], w[1])));
     ctx.stdout.write(fp.join("|") + "\n"); return 0;
 });
 JS
 
-echo "== hull.path: Lua self-check + fingerprint =="
+echo "== hull.path: Lua self-check + comprehensive fingerprint =="
 LUA_OUT=$("$HULL" "$WD/p.lua") || { echo "LUA app FAILED"; exit 1; }
 echo "  lua fp: $LUA_OUT"
-echo "== hull.path: JS self-check + fingerprint =="
+echo "== hull.path: JS self-check + comprehensive fingerprint =="
 JS_OUT=$("$HULL" "$WD/p.js") || { echo "JS app FAILED"; exit 1; }
 echo "  js  fp: $JS_OUT"
 
 if [ "$LUA_OUT" != "$JS_OUT" ]; then
     echo "PARITY FAIL: Lua and JS hull.path fingerprints differ"
-    echo "  lua: $LUA_OUT"
-    echo "  js : $JS_OUT"
     exit 1
 fi
-# correctness anchor for the fingerprint (matches the lexical algorithm)
-EXPECT="a/c:c:|/x/y:y:|../p/q:q:|f.tar.gz:f.tar.gz:.gz|/:/:"
+# golden: the exact lexical algorithm over every op (see the comment above).
+EXPECT="a/c:c:a::c:F|/x/y:y:/x::y:T|../p/q:q:../p::q:F|f.tar.gz:f.tar.gz:.:.gz:f.tar:F|/:/:/::/:T|.gitignore:.gitignore:.::.gitignore:F|foo:foo:.::foo:F|/b:b:/::b:T|.:.:.::.:F|/b|/b|foo/bar|src/p/f.lua|x/y|../c/x|p/f|.|F|T|T|F"
 if [ "$LUA_OUT" != "$EXPECT" ]; then
     echo "GOLDEN FAIL: fingerprint != expected"
     echo "  got:  $LUA_OUT"
     echo "  want: $EXPECT"
     exit 1
 fi
-echo "hull.path parity + semantics OK (Lua == JS == golden)"
+echo "hull.path parity + semantics OK (Lua == JS == golden; all 9 ops in the fingerprint)"

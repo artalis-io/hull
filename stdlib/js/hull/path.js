@@ -70,10 +70,13 @@ function normalize(p) {
 
 /** Join components with `/` and normalize; empty components ignored. */
 function join(...parts) {
-    const buf = [];
+    let buf = [];
     for (const c of parts) {
         checkString(c, "join");
-        if (c !== "") buf.push(c);
+        if (c !== "") {
+            if (c.charAt(0) === "/") buf = [c];   // an absolute component RESETS the accumulator
+            else buf.push(c);
+        }
     }
     if (buf.length === 0) return ".";
     return normalize(buf.join("/"));
@@ -162,6 +165,10 @@ function isWithin(base, candidate) {
     for (let i = 0; i < b.segs.length; i++) {
         if (b.segs[i] !== c.segs[i]) return false;
     }
+    // A candidate component immediately after the base prefix that is ".." escapes
+    // ABOVE base (relative paths only, where normalize keeps leading ".."):
+    // isWithin(".", "../x") / isWithin("..", "../../x"). Reject it.
+    if (c.segs.length > b.segs.length && c.segs[b.segs.length] === "..") return false;
     return true;
 }
 
