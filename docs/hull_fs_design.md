@@ -29,8 +29,13 @@ tested §7); (2) virtual-root is NOT behavior-preserving for ABSOLUTE symlink
 targets - now documented as an intentional compatibility change with a migration
 note (§2/§5/§9), not "unchanged behavior"; (3) path authorization must follow the
 RESOLVED path, not the caller path (`allowed/link -> ../secret`) - realized by
-rooting resolution at each authorized root so confinement IS authorization,
-race-free (§3/§6, tested §7).
+rooting resolution at the authorized grant so confinement IS authorization,
+race-free (§3/§6, tested §7). Round 3: a manifest grant is not necessarily an
+existing directory (Hull grants exact files and not-yet-existing write targets),
+so §6 now compiles grants into AUTHORIZATION ENTRIES (held anchor dir fd + a
+`SUBTREE`/`EXACT`/`CREATE` constraint), with deterministic most-specific selection,
+independent read/write sets, and an explicit symlink rule so an exact-file grant
+never becomes sibling-directory authority.
 
 ## 1. Inventory - the CURRENT application `hull.fs` (verified, not assumed)
 
@@ -160,12 +165,15 @@ re-resolved from a path string, so there is no leaf race. `WRITE` carries
 `O_TRUNC` because today's `fopen("wb")` truncates: overwriting `abcdef` with `xy`
 must yield `xy`, not `xycdef` (a shorter-replacement test is mandatory, §7).
 
-**The resolver is rooted at the AUTHORIZED ROOT, not always `base_dir`.** The root
-dirfd (`root_dfd` below) is the authorized `fs.read` / `fs.write` root that the
-caller path falls under (§6); when the app declares no granular roots, the
-authorized root IS `base_dir` (= today's confinement). Rooting resolution at the
-authorized root is what makes authorization race-free (§6): a symlink can only
-ever reach targets WITHIN the same root.
+**The resolver is rooted at the SELECTED grant's anchor, not always `base_dir`.**
+`root_dfd` below is the held ANCHOR fd of the compiled authorization entry the
+caller path selects (§6) - an existing-directory grant's own fd (`SUBTREE`), an
+exact-file grant's PARENT fd (`EXACT`, terminal-name-constrained), or a
+not-yet-existing target's nearest-existing-ancestor fd (`CREATE`, component-
+constrained). When the app declares no granular grants, the anchor IS `base_dir`
+(= today's confinement). Rooting resolution at the anchor + applying the entry's
+constraint is what makes authorization race-free (§6). The mode table below
+describes the terminal op; §6 defines which anchor/constraint applies.
 
 **Implementations:**
 - **Linux >= 5.6:** `openat2(root_dfd, subpath, { flags, resolve: RESOLVE_IN_ROOT
@@ -330,35 +338,65 @@ manifest `fs.read` / `fs.write` roots; `HlFsConfig` / `hl_cap_fs_validate` do NO
 carry or check per-path lists (§1.3).
 
 **The rule (chosen): authority follows the RESOLVED path, enforced by
-CONFINEMENT.** A lexical check on the CALLER path is insufficient - consider
-`allowed/link -> ../secret` where `allowed/` is a declared read root and `secret`
-is not: authorizing on the caller path `allowed/link` would grant an object
-OUTSIDE the read root. So authorization must bind the RESOLVED target, race-free.
-The design achieves that WITHOUT a separate (racy) resolved-path re-check by
-**modelling each authorized root as a resolver root** (§3): open each declared
-`fs.read` / `fs.write` root once as a held `root_dfd` at config time, and resolve
-an op's caller path WITHIN the root it falls under. Then virtual-root confinement
-makes the resolved object structurally unable to leave that root -
-`allowed/link -> ../secret` CLAMPS to `allowed/secret` (never `secret`), so the
-symlink cannot smuggle authority out. Selecting WHICH root a caller path falls
-under is a lexical prefix match (that only picks the root; the resolution then
-enforces it); a path under no authorized root -> `permission`.
+CONFINEMENT** - but a manifest grant is NOT necessarily an existing directory, so
+"each authorized root is a dirfd" is too narrow. Hull grants exact files
+(`fs.read = {"data.bin"}`, `{"huge.bin"}`) and write targets that do not exist yet
+(`fs.write` may name `out/result.bin` with `out/` absent, which `write` must
+create). Each grant is therefore COMPILED at config time into an
+**authorization entry** = a HELD anchor dir fd (always an EXISTING directory) plus
+a CONSTRAINT. Three entry kinds:
 
-This is the user-recommended option (authority-follows-resolved-path) realized via
-the one-call `openat2(root_dfd, ...)` / rooted manual walk - the resolver root IS
-the policy evidence, so the cap layer has INDEPENDENT, race-free authorization.
-Consequences:
-- **`stat` / `list` respect the READ roots, not merely `base_dir`** - they resolve
-  within a read root like `read` does, so metadata / directory entries inside
-  `base_dir` but outside the declared read roots are never exposed.
-- The explicit policy object is the SET OF ROOT DIRFDS (an extended `HlFsConfig`
-  or a separate `HlFsPolicy`; implementation detail at checkpoint 2), NOT a list of
-  path strings re-checked per call.
-- The KERNEL SANDBOX remains as defense-in-depth BENEATH this, but is no longer the
+| grant | compiled entry | permits |
+|---|---|---|
+| **existing directory** (`data/`) | `anchor_fd = open(data, O_DIRECTORY\|O_NOFOLLOW)`; constraint = `SUBTREE` | virtual-root resolution rooted at `anchor_fd`; any descendant. Symlinks clamp WITHIN the subtree (§3/§5), so they cannot leave it. |
+| **exact file** (`data.bin`) | `anchor_fd = open(dirname, O_DIRECTORY)`; constraint = `EXACT("data.bin")` | ONLY `openat(anchor_fd, "data.bin", ...)` - the one leaf. Siblings are unreachable (no subtree traversal is granted; the exact leaf name is a literal). |
+| **not-yet-existing target** (`out/result.bin`, `out/` absent) | anchor at the NEAREST EXISTING ANCESTOR (`open(".", O_DIRECTORY)`) + constraint = `CREATE(["out","result.bin"], kind)` where kind is exact-file or subtree | `mkdirat` ONLY the constrained intermediate components (`out`) relative to `anchor_fd`, then create the terminal (`result.bin`, `O_TRUNC`). `out/other.bin` is denied (terminal is exactly `result.bin`). |
+
+**Selection is deterministic and component-aware.** `fs.read` and `fs.write`
+compile to two INDEPENDENT entry sets (a readable path need not be writable, and
+vice versa) - a `read`/`mmap`/`stat`/`list` op selects from the READ set, a
+`write` op from the WRITE set. When a caller path matches several entries, the
+MOST SPECIFIC (deepest component-prefix) wins - grants `data/` and `data/private/`
+select `data/private/` for a path beneath it. Matching is component-aware
+(`data` never matches `database`). A caller path matching NO entry in the relevant
+set -> `permission`. Because the terminal syscall is issued relative to the held
+anchor fd (§3 mode table), selection + confinement are race-free with no separate
+resolved-path re-check.
+
+**Symlinks never widen a non-subtree grant.** Under an `EXACT` (or `CREATE`) entry
+there is no granted subtree to clamp within, so a symlink at the exact target does
+NOT inherit that entry's authority: its resolved target is RE-EVALUATED against the
+full policy and permitted only if it independently matches some grant (resolved
+within THAT grant). `link.bin -> secret.bin` under an exact grant for `link.bin`
+CANNOT reach `secret.bin` unless `secret.bin` is itself granted - an exact-file
+grant never becomes sibling-directory authority. (Under a `SUBTREE` entry the
+symlink instead clamps within the subtree per §5, which already cannot escape.)
+
+**Acceptance cases (must pass, checkpoint 2):**
+```
+read grant  data.bin:            data.bin -> allowed;  sibling.bin -> denied
+write grant out/result.bin (out/ absent):
+                                 out/ created;  result.bin created+truncated;
+                                 out/other.bin -> denied
+grants      data/ and data/private/:   most-specific (data/private/) selected
+exact grant link.bin -> secret.bin:    secret.bin unreachable unless independently granted
+```
+
+This is the user-recommended option (authority-follows-resolved-path) generalized
+to Hull's real manifest contract. Consequences:
+- **`stat` / `list` respect the READ set, not merely `base_dir`** - they select +
+  resolve within a read entry like `read` does, so metadata / directory entries
+  inside `base_dir` but outside the granted read paths are never exposed.
+- The explicit policy object is the two SETS OF COMPILED ENTRIES (anchor fd +
+  constraint), held on an extended `HlFsConfig` or a separate `HlFsPolicy`
+  (implementation detail, checkpoint 2) - NOT a list of path strings re-checked per
+  call, and NOT an assumption that grants are directories.
+- The KERNEL SANDBOX remains defense-in-depth BENEATH this, but is no longer the
   sole authorization gate for the new surface.
-- The rejected alternative - "a symlink under an authorized root conveys authority
-  to its contained target" - is NOT adopted: authority is bound to the root, and a
-  link that would resolve outside it is clamped, not honored.
+- **Anchoring edge cases** (checkpoint 2): a `CREATE` anchor whose nearest existing
+  ancestor is removed/replaced between config and op fails closed; an intermediate
+  component that exists but is a non-directory or an unexpected symlink under a
+  `CREATE`/`EXACT` entry is refused, never traversed.
 
 **Error model (proposed, stable tokens).** Uniform `(nil, err)` (Lua) / `throw`
 (JS): `"invalid_path"` (caller path absolute or containing `..` - lexical
@@ -382,7 +420,12 @@ with `..`, a `symlink_loop` cycle bounded identically, a WRITE that OVERWRITES
 longer content with shorter (`abcdef` -> `xy` yields `xy`, proving `O_TRUNC`,
 correction 1), and the authorization case `allowed/link -> ../secret` resolving to
 `allowed/secret` / `not_found` rather than reaching an unauthorized `secret`
-(correction 3). A dedicated resolver unit test proves virtual-root parity between
+(correction 3), and the §6 authorization-entry acceptance cases (exact-file grant
+allows the file but denies a sibling; a `CREATE` write grant creates `out/` +
+truncates `result.bin` but denies `out/other.bin`; overlapping `data/` +
+`data/private/` select most-specific; an exact grant `link.bin -> secret.bin`
+cannot reach `secret.bin` unless independently granted). A dedicated resolver unit
+test proves virtual-root parity between
 the `openat2` and manual-walk paths on the same fixture tree (Linux runs BOTH to
 catch drift), and covers a swapped-component TOCTOU by construction (held-fd walk)
 with a deterministic case where testable.
@@ -413,16 +456,21 @@ most-used surface rather than proving it first on a new, less-exercised one.
 
 Ratified ordering:
 1. **Land the resolver and migrate existing `read`/`write`/`mmap` first** - onto
-   the §3 virtual-root resolver (write keeps implicit parent creation, now
-   `mkdirat`-based, and `O_TRUNC`). No new app ops yet; this is the TOCTOU fix +
+   the §3 virtual-root resolver, anchored at `base_dir` (the no-granular-grants
+   case), so today's authorization model (base_dir confinement + kernel sandbox) is
+   PRESERVED. Write keeps implicit parent creation (now `mkdirat`-based) and
+   `O_TRUNC`. No new app ops, no compiled-entry policy yet; this is the TOCTOU fix +
    migration, behavior-preserving EXCEPT the intentional absolute-symlink
-   re-rooting (§5), which ships with the migration note + an absolute-symlink
-   audit.
+   re-rooting (§5), which ships with the migration note + an absolute-symlink audit.
 2. **STOP and prove** platform parity (`openat2` path == manual walk) AND
    race-resistant symlink behavior (virtual-root follow, re-root, clamp, loop
    bound) on the fixture tree + resolver unit tests.
-3. **Add application `stat` / `list`** (with the §6 path-authorization policy so
-   they respect READ roots, not merely `base_dir`) - Lua/JS parity - STOP.
+3. **Add the §6 compiled-entry authorization policy + application `stat` / `list`.**
+   The policy (SUBTREE/EXACT/CREATE entries, independent read/write sets,
+   most-specific selection, exact-file symlink rule) lands HERE, because `stat`/
+   `list` are the new metadata-leak surface that requires it; `read`/`write`/`mmap`
+   adopt the same per-grant anchoring at this point. Lua/JS parity; the §6
+   acceptance cases pass - STOP.
 4. **Then `BuildContext.inputs` and `BuildContext.outputs`** on the proven
    primitive. Then Build Plugin / BuildArtifact. **Not Query IR yet.**
 
@@ -440,6 +488,8 @@ Checkpoints mirror the §9 ratified ordering; every arrow is a STOP-for-review:
    implicit parents preserved; the one intentional change = absolute-symlink
    re-rooting, §5, shipped with a migration note) - STOP.
 2. Prove platform parity + race-resistant symlink behavior - STOP.
-3. Add `stat`/`list` + the path-authorization policy (§6), Lua/JS parity - STOP.
+3. Add the §6 compiled-entry authorization policy (SUBTREE/EXACT/CREATE,
+   independent read/write sets, most-specific selection, exact-file symlink rule)
+   + `stat`/`list`, Lua/JS parity, §6 acceptance cases pass - STOP.
 4. `BuildContext.inputs` then `BuildContext.outputs` - STOP. Then Build Plugin /
    BuildArtifact. **Not Query IR yet.**
