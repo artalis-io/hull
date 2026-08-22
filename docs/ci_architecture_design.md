@@ -1786,12 +1786,18 @@ BuildArtifact product architecture, rather than continuing to shave the PR matri
 
 # Appendix F. Slice 6 design - nightly / scheduled exhaustive CI
 
-Status: **DESIGN (reviewed + amended; approved to proceed to the additive
-checkpoint). NOT yet implemented.** Incorporates the four review amendments
-(offline+pinned conformance; inventory-before-workflow; fail-closed
-`nightly-success` completeness; explicit operations) and the scope correction
-(expanded Test262 / Lua runtime suite are separate stories - slot only). Slice 6 is
-deliberately NARROW: scheduling + exhaustive-test PLACEMENT only. No branch-protection, no
+Status: **IMPLEMENTED + ACTIVATED.** `nightly.yml` is live (PRs #386 design, #387
+additive, #388 the WASM=0 build-bug fix it FOUND, #389 MySQL-scope + version pin,
+#390 durable logs, #391 cron activation). It runs on a **`0 7 * * *` (07:00 UTC)
+daily `schedule:`** plus `workflow_dispatch`. **Estimated budget ~2 runner-hours/
+night** (8 parallel jobs: deep-fuzz families ~20-40 min at the production
+300/180/600 s budgets, rare-configs / compat ~10-25 min). Incorporates the four
+review amendments (offline+pinned conformance; inventory-before-workflow;
+fail-closed `nightly-success` completeness; explicit operations) and the scope
+correction (expanded Test262 / Lua runtime suite + MySQL 8.4/MariaDB are separate
+stories - slot only). Slice 6 is deliberately NARROW: scheduling + exhaustive-test
+PLACEMENT only. ci.yml stayed byte-identical to the pre-Slice-6 baseline
+throughout. No branch-protection, no
 cross-run cache, no release-trust change, no further matrix reduction, and NO
 change to the change-aware PR path (`ci.yml`, the classifier, the applicability
 map, or the `ci-success` gate). Same review-gated checkpoints as 4/5A:
@@ -1939,18 +1945,20 @@ is OUT of Slice 6's narrow scope.
   'refs/heads/main'` so a `workflow_dispatch` from a feature branch is a no-op -
   scheduled + real runs execute only from `main`.
 
-## F.5 Review-gated checkpoints
+## F.5 Review-gated checkpoints (ALL COMPLETE)
 
-1. **Design** (this appendix, as amended) - STOP for review.
-2. **Additive proof** - FIRST finalize the F.2b inventory (exact flags/digests),
-   THEN add `nightly.yml` triggered by **`workflow_dispatch` ONLY** (NO `schedule:`
-   cron yet, so it can never fire on its own), with the jobs + failure-artifact
-   uploads + the fail-closed `nightly-success` gate + the parameterized completeness
-   check. Prove green via a manual dispatch; confirm the PR path (`ci.yml`,
-   classifier, `job_plan.py`, `ci-success`) is BYTE-UNCHANGED and no PR shows new
-   jobs. STOP for review.
-3. **Activation** - add the `schedule:` cron trigger. Confirm the first scheduled
-   run fires + is green. STOP.
+1. **Design** (this appendix, as amended) - DONE (#386).
+2. **Additive proof** - `nightly.yml` (`workflow_dispatch` only, no cron) with the
+   F.2b inventory + failure-artifact uploads + the fail-closed `nightly-success`
+   gate + the parameterized completeness check; proven green via manual dispatch;
+   PR path BYTE-UNCHANGED. DONE (#387; the run FOUND a real WASM=0 build bug fixed
+   in #388, and the MySQL 8.4 harness gap scoped in #389). **Operational
+   hardening** (durable failure logs: the tested `ci_run_logged.sh` wrapper +
+   `docker logs` capture + `if-no-files-found: error` uploads) - DONE (#390).
+3. **Activation** - add the `schedule:` cron (`0 7 * * *` UTC) alongside
+   `workflow_dispatch`; record the ~2 runner-hours/night budget (status block).
+   DONE (#391). The FIRST actual scheduled run is confirmed separately when it
+   occurs (a manual production-equivalent dispatch stands in until 07:00 UTC).
 
 ## F.6 Non-scope (reaffirmed)
 
