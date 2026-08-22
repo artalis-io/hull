@@ -1151,6 +1151,10 @@ e2e-csrf-cookie-fallback: $(BUILDDIR)/hull
 e2e-validate-parity: $(BUILDDIR)/hull
 	sh tests/e2e_validate_parity.sh
 
+.PHONY: e2e-path-parity
+e2e-path-parity: $(BUILDDIR)/hull
+	sh tests/e2e_path_parity.sh
+
 .PHONY: e2e-token-interop
 e2e-token-interop: $(BUILDDIR)/hull
 	sh tests/e2e_token_interop.sh

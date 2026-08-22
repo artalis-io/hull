@@ -249,6 +249,10 @@ jobs:
         timeout-minutes: 2
         run: make e2e-validate-parity
 
+      - name: Path Lua/JS parity E2E test
+        timeout-minutes: 2
+        run: make e2e-path-parity
+
       - name: Token wire-format interop E2E test (jwt/envelope/csrf mint<->verify)
         timeout-minutes: 2
         run: make e2e-token-interop
