@@ -11,6 +11,12 @@ name: Nightly
 # branch by design).
 
 on:
+  # 07:00 UTC daily (GitHub cron is ALWAYS UTC). GitHub runs `schedule:` only on
+  # the default branch, and the per-job guard below re-asserts refs/heads/main.
+  # Estimated budget ~2 runner-hours/night (Appendix F). `workflow_dispatch` stays
+  # available for manual/production-equivalent runs.
+  schedule:
+    - cron: "0 7 * * *"
   workflow_dispatch:
     inputs:
       fuzz_seconds:
