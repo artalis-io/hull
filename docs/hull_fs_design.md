@@ -34,8 +34,11 @@ race-free (§3/§6, tested §7). Round 3: a manifest grant is not necessarily an
 existing directory (Hull grants exact files and not-yet-existing write targets),
 so §6 now compiles grants into AUTHORIZATION ENTRIES (held anchor dir fd + a
 `SUBTREE`/`EXACT`/`CREATE` constraint), with deterministic most-specific selection,
-independent read/write sets, and an explicit symlink rule so an exact-file grant
-never becomes sibling-directory authority.
+independent read/write sets, and a per-kind symlink rule: `SUBTREE` follows
+symlinks (virtual-root confined), `EXACT`/`CREATE` REFUSE any symlink
+(`symlink_denied`) - so an exact-file grant never becomes sibling-directory
+authority and needs no race-prone cross-policy symlink resolution. An independently
+granted target is reached via its own grant, not through an exact-file alias.
 
 ## 1. Inventory - the CURRENT application `hull.fs` (verified, not assumed)
 
@@ -158,6 +161,10 @@ and each mode's terminal syscall is issued relative to a held fd:
 | `WRITE` | mkdir-p parents (contained) + open leaf `O_WRONLY\|O_CREAT\|O_TRUNC` | leaf fd | FOLLOWED (contained) |
 | `STAT` | `fstatat(parent_fd, leaf, AT_SYMLINK_NOFOLLOW)` | stat record | NOT followed (link-own) |
 | `LIST` | open dir `O_DIRECTORY` | dir fd | FOLLOWED (contained) |
+
+The "leaf symlink FOLLOWED" column applies under a `SUBTREE` grant (§6). Under an
+`EXACT` or `CREATE` grant, an intermediate or terminal symlink is REFUSED
+(`symlink_denied`), never followed - see §6.
 
 For `WRITE` and `STAT` the resolver walks to the leaf's PARENT fd (contained) and
 issues the create/stat relative to that held fd - the final component is never
@@ -363,14 +370,24 @@ set -> `permission`. Because the terminal syscall is issued relative to the held
 anchor fd (§3 mode table), selection + confinement are race-free with no separate
 resolved-path re-check.
 
-**Symlinks never widen a non-subtree grant.** Under an `EXACT` (or `CREATE`) entry
-there is no granted subtree to clamp within, so a symlink at the exact target does
-NOT inherit that entry's authority: its resolved target is RE-EVALUATED against the
-full policy and permitted only if it independently matches some grant (resolved
-within THAT grant). `link.bin -> secret.bin` under an exact grant for `link.bin`
-CANNOT reach `secret.bin` unless `secret.bin` is itself granted - an exact-file
-grant never becomes sibling-directory authority. (Under a `SUBTREE` entry the
-symlink instead clamps within the subtree per §5, which already cannot escape.)
+**Symlink rule per entry kind (definitive):**
+- **`SUBTREE`**: symlinks are FOLLOWED with virtual-root confinement (§3/§5) - they
+  clamp within the granted subtree and cannot escape it.
+- **`EXACT` and `CREATE`**: an intermediate OR terminal symlink is **REFUSED**
+  (`symlink_denied`), never followed. There is no granted subtree to clamp within,
+  and following the leaf would require re-selecting another grant AFTER the leaf is
+  opened - which the one-call `openat2` cannot do (it resolves the leaf inside the
+  exact entry's parent first), and which a manual `readlinkat` + reselect cannot do
+  race-free (component-replacement race) without a stable symlink handle the
+  platform does not provide. So an exact/create grant follows NO symlink at all.
+  This keeps authorization race-free with the documented resolver (no cross-policy
+  symlink-resolution protocol).
+- An INDEPENDENTLY authorized target stays reachable through ITS OWN granted path,
+  NOT through an exact-file alias: `link.bin -> secret.bin` under an exact grant for
+  `link.bin` is DENIED (the symlink is refused) even if `secret.bin` is separately
+  granted - read `secret.bin` via its own grant instead. An exact-file grant never
+  becomes sibling-directory authority. (Following exact-file aliases could be a
+  later, explicitly-designed extension if a real need appears; it is NOT v1.)
 
 **Acceptance cases (must pass, checkpoint 2):**
 ```
@@ -379,7 +396,9 @@ write grant out/result.bin (out/ absent):
                                  out/ created;  result.bin created+truncated;
                                  out/other.bin -> denied
 grants      data/ and data/private/:   most-specific (data/private/) selected
-exact grant link.bin -> secret.bin:    secret.bin unreachable unless independently granted
+exact grant link.bin -> secret.bin:    DENIED through link.bin (symlink refused under EXACT),
+                                       even if secret.bin is separately granted; reach
+                                       secret.bin only via its own grant
 ```
 
 This is the user-recommended option (authority-follows-resolved-path) generalized
@@ -395,15 +414,18 @@ to Hull's real manifest contract. Consequences:
   sole authorization gate for the new surface.
 - **Anchoring edge cases** (checkpoint 2): a `CREATE` anchor whose nearest existing
   ancestor is removed/replaced between config and op fails closed; an intermediate
-  component that exists but is a non-directory or an unexpected symlink under a
-  `CREATE`/`EXACT` entry is refused, never traversed.
+  component that exists but is a non-directory is refused; any symlink component
+  under a `CREATE`/`EXACT` entry is refused (`symlink_denied`), never traversed -
+  consistent with the per-kind symlink rule above.
 
 **Error model (proposed, stable tokens).** Uniform `(nil, err)` (Lua) / `throw`
 (JS): `"invalid_path"` (caller path absolute or containing `..` - lexical
 pre-check), `"not_found"`, `"permission"` (path-authorization policy or file
 mode), `"not_a_directory"`, `"is_a_directory"`, `"symlink_loop"` (expansion bound
-exceeded), `"too_large"`, `"io_error"`. **No `outside_root` token** - resolution
-cannot escape (§5, virtual-root); an escape is impossible, not an error. (Exact
+exceeded), `"symlink_denied"` (a symlink under an `EXACT`/`CREATE` entry, which
+never follows symlinks - §6), `"too_large"`, `"io_error"`. **No `outside_root`
+token** - resolution cannot escape (§5, virtual-root); an escape is impossible, not
+an error. (Exact
 tokens confirmed at implementation; today's messages are not a stable contract.)
 
 ## 7. Lua/JS parity
@@ -423,8 +445,9 @@ correction 1), and the authorization case `allowed/link -> ../secret` resolving 
 (correction 3), and the §6 authorization-entry acceptance cases (exact-file grant
 allows the file but denies a sibling; a `CREATE` write grant creates `out/` +
 truncates `result.bin` but denies `out/other.bin`; overlapping `data/` +
-`data/private/` select most-specific; an exact grant `link.bin -> secret.bin`
-cannot reach `secret.bin` unless independently granted). A dedicated resolver unit
+`data/private/` select most-specific; an exact grant `link.bin -> secret.bin` is
+DENIED through `link.bin` with `symlink_denied` even when `secret.bin` is separately
+granted - `secret.bin` reachable only via its own grant). A dedicated resolver unit
 test proves virtual-root parity between
 the `openat2` and manual-walk paths on the same fixture tree (Linux runs BOTH to
 catch drift), and covers a swapped-component TOCTOU by construction (held-fd walk)
