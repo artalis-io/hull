@@ -627,7 +627,8 @@ test: $(TEST_BINS)
 
 ifdef MSAN
 CFLAGS   := -std=c11 -Wall -Wextra -Wpedantic -Wshadow -Wformat=2 \
-            -g -O1 -fsanitize=memory,undefined -fno-omit-frame-pointer \
+            -g -O1 -fsanitize=memory,undefined -fsanitize-memory-track-origins=2 \
+            -fno-omit-frame-pointer \
             -D_DEFAULT_SOURCE -DHL_THREAD_AFFINITY_CHECKS
 LDFLAGS  := -fsanitize=memory,undefined
 # Vendor TUs: keep MSan (we still want shadow tracking for uninitialized
