@@ -270,6 +270,18 @@ static const HlModuleSpec REGISTRY[] = {
         .api_major = 1, .intrinsic = 0, .pure = 1,
         .required_caps = 0, .deps = {0},
     },
+    {
+        /* Pure LEXICAL path-name manipulation (normalize/join/dirname/
+         * basename/extension/stem/is_absolute/relative/is_within). No
+         * filesystem authority whatsoever - it manipulates NAMES, not
+         * objects; `hull/fs` exercises the filesystem boundary. Never a
+         * security check (lexical containment is not authorization). The
+         * lexical layer the upcoming Build Plugin / BuildArtifact work
+         * builds on. Pure - no caps, no deps. */
+        .name = "hull/path",
+        .api_major = 1, .intrinsic = 0, .pure = 1,
+        .required_caps = 0, .deps = {0},
+    },
 
     /* ── Pure stdlib + remaining side-effect ─────────────────────── */
     {
