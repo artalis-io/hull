@@ -1,0 +1,244 @@
+# hull.fs application design (design-only)
+
+Status: **DESIGN (awaiting review). NOTHING implemented.** This is the dedicated
+design of the APPLICATION-facing `hull.fs` capability - the general filesystem
+surface an app author uses. It is a peer of, and a PREREQUISITE for, the
+BuildContext audit ([hull_fs_buildcontext_audit.md](hull_fs_buildcontext_audit.md),
+PR #393): BuildContext is the narrower, Hull-owned plugin surface built ON the
+hardened primitives designed here - so `hull.fs` is designed first.
+
+Design rule carried in from `hull.path` (#392, #394): **`hull.path` manipulates
+NAMES lexically; `hull.fs` exercises AUTHORITY.** `hull.fs` is where real
+filesystem containment is enforced against the RESOLVED object - never by lexical
+checks alone.
+
+Two DECISIONS-FOR-REVIEW are flagged inline (§5, §9). They are the load-bearing
+choices; the review is their decision forum. Everything else is a recommendation
+with rationale.
+
+## 1. Inventory - the CURRENT application `hull.fs` (verified, not assumed)
+
+### 1.1 What app code can actually call today
+
+Both runtimes expose EXACTLY three operations plus the mapped-buffer methods:
+
+| app op | Lua | JS | backing cap |
+|---|---|---|---|
+| read a file | `fs.read(path)` | `fs.read(path)` | `hl_cap_fs_read` |
+| write a file | `fs.write(path, bytes)` | `fs.write(path, bytes)` | `hl_cap_fs_write` |
+| memory-map (zero-copy RO window) | `fs.mmap(path[, {offset,length}])` | `fs.mmap(path[, {offset,length}])` | `hl_cap_fs_mmap` / `_mmap_window` |
+| mapped-buffer size / release | `buf:len()` / `buf:close()` | `buf.len()` / `buf.close()` | `_munmap` / `_borrow` / `_release` |
+
+Bindings: `src/hull/runtime/lua/mod_fs.c` (the `luaL_Reg` is `read`/`write`/`mmap`
++ `len`/`close`), `src/hull/runtime/js/mod_fs.c` (`read`/`write`/`mmap`).
+
+### 1.2 Correction to the BuildContext audit's inventory
+
+The audit (§1.2) listed the app surface as "read, write, exists, delete, mmap."
+That is the **cap layer**, not the app surface. `hl_cap_fs_exists` and
+`hl_cap_fs_delete` DO exist in `include/hull/cap/fs.h`, but **neither is exposed
+as an app binding** in either runtime today. So the real application surface is
+even smaller: **read / write / mmap only.** There is NO enumeration, NO
+stat/metadata, NO exists probe, NO delete, NO rename/copy/mkdir at the app level.
+
+### 1.3 Authority model (unchanged, still correct)
+
+Two independent gates: a build-time module gate (`hull/fs@1`) and a per-call
+capability gate. `hl_cap_fs_validate` enforces the manifest `fs.read` / `fs.write`
+allowlists + containment under `base_dir`.
+
+### 1.4 The load-bearing finding (same as the audit): resolution is TOCTOU-susceptible
+
+`hl_cap_fs_validate` resolves with **`realpath()`** (three call sites in
+`src/hull/cap/fs.c`) and the actual `open`/`read`/`write` happens later:
+`realpath -> check -> open`. Between the check and the open a path component can be
+swapped (a directory replaced by a symlink), so the check does not bind the
+`open` target. In-tree precedent for the fix already exists:
+`src/hull/shared/blob_store.c` opens with `O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC`.
+
+## 2. Design goals
+
+1. **Race-resistant resolution** - replace `realpath -> check -> open` with a
+   descriptor-relative walk so the authority check binds the object actually
+   opened.
+2. **Deterministic enumeration + metadata** - add `list` and `stat`, the minimum
+   an app (or later a build) needs to discover and describe files.
+3. **Explicit, safe symlink policy** (DECISION, §5).
+4. **Keep the surface deliberately SMALL** - Hull's convention is to reach for
+   stdlib / composition before widening a C capability. Conveniences
+   (copy/rename/mkdir/atomic-write/tempfile) are enumerated as candidates in §4.3
+   but are NOT added by default; several belong to the Hull-owned BuildContext,
+   not app `hull.fs`.
+5. **Lua/JS parity** across the whole app surface (the `hull.path` bar: mirrored
+   semantics, snake_case vs camelCase only).
+6. **Backward-compatible semantics** - `read`/`write`/`mmap` keep their contracts;
+   only the resolution MECHANISM hardens and the symlink behavior tightens (§5),
+   both documented.
+
+## 3. Resolution model (the shared foundation)
+
+A single descriptor-relative resolver underpins every `hull.fs` op AND (later)
+BuildContext:
+
+- Lexically pre-validate the caller's path with `hull.path` (reject absolute,
+  reject any `..`) BEFORE touching the disk. This is a fast fail, NOT the
+  authority.
+- Open the configured `base_dir` once as a directory fd (`O_DIRECTORY |
+  O_NOFOLLOW | O_CLOEXEC`).
+- Walk the relative path ONE COMPONENT at a time: interior components with
+  `openat(dfd, comp, O_NOFOLLOW | O_DIRECTORY | O_CLOEXEC)`; the leaf with
+  `openat(dfd, leaf, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)` (or
+  `O_WRONLY | O_CREAT | O_NOFOLLOW` for writes). Because each step is relative to
+  a fd itself opened `O_NOFOLLOW`, containment is enforced against the object
+  actually opened - there is no resolve-then-open window, and a swapped or
+  symlinked component is REFUSED, not silently followed.
+- The manifest `fs.read` / `fs.write` allowlist is still enforced, now against the
+  lexically-normalized relative path (which the descriptor walk proves is the real
+  target), not a pre-open `realpath` string.
+
+**Platform notes** (resolve at implementation, same as the audit): `openat` /
+`O_NOFOLLOW` / `O_DIRECTORY` are POSIX (Linux, macOS, Cosmopolitan shim). macOS
+`O_NOFOLLOW` fails only on a TRAILING symlink - the component-wise walk makes
+every component a trailing check, so the guarantee holds uniformly. A native
+Windows target (not today's cosmo APE) needs the reparse-point-aware equivalent;
+scope that when such a target exists. Where a platform cannot offer a
+race-resistant primitive, the op **fails closed** - it must never downgrade to
+`realpath`.
+
+## 4. Operations
+
+### 4.1 Existing, hardened (no signature change)
+- `fs.read(path)` -> bytes | (nil,err) / throw. Now resolved per §3; `fs.read`
+  authority.
+- `fs.write(path, bytes)` -> true | (nil,err) / throw. Resolved per §3; `fs.write`
+  authority. (Parent-dir creation is NOT implicit - see §4.3 `mkdir`.)
+- `fs.mmap(path[, window])` -> MappedBuffer. Resolved per §3 for the initial open;
+  the mapping's lifetime semantics are unchanged (refcounted borrow, `close`
+  defers `munmap` while a borrower is alive).
+
+### 4.2 New (the minimal additions this design proposes)
+
+**`fs.stat(path)` -> metadata | nil**
+- Returns `{ type, size, mode, mtime }` where `type` is one of `"file"`,
+  `"dir"`, `"symlink"`, `"other"`. `mode` is the permission bits; `mtime` is
+  exposed but carries a policy note: reproducible builds MUST NOT key on it (that
+  is the BuildContext content-hash policy, audit §3.4). Returns `nil` (Lua) /
+  `null` (JS) for a non-existent path - so `stat(p) ~= nil` SUBSUMES a separate
+  `exists` probe.
+- Implemented with `fstatat(parent_dfd, leaf, AT_SYMLINK_NOFOLLOW)` off the §3
+  walk, so it reports a symlink AS a symlink WITHOUT following it (`lstat`
+  semantics). Requires `fs.read` authority over the target.
+
+**`fs.list(dir)` -> entries**
+- Returns a **deterministically ordered** (byte-wise sort of `name`) array of
+  `{ name, type, size }`. `.` and `..` are omitted; no entry escapes `dir`.
+  `fdopendir` on a `dirfd` opened per §3. **Non-recursive** by design - an app
+  composes recursion with `hull.path.join` + `fs.list`; a recursive walker is
+  stdlib/BuildContext territory, not a C primitive. Requires `fs.read` authority
+  over `dir`.
+
+`exists` is deliberately NOT added as a distinct op - `stat(p) ~= nil` covers it
+without a second cap surface that could disagree with `stat` about symlinks.
+
+### 4.3 Candidates DEFERRED (enumerated, with rationale - none added in v1)
+
+| candidate | why deferred |
+|---|---|
+| `delete` | Exists at the cap layer, unexposed today. A mutation with real blast radius; add only when a concrete app need appears, and gate on `fs.write`. Not needed for enumeration/hardening. |
+| `mkdir` | App authors rarely need directory creation; when they do it is usually part of a WRITE that BuildContext should own transactionally. Keep `write` non-implicit-mkdir for now. |
+| `copy` / `rename` / `move` | `rename` is the ATOMIC-PUBLISH primitive - it belongs to the Hull-owned BuildContext.outputs (audit §3.5), NOT general app `hull.fs`, precisely so staging/publication authority stays separate. |
+| `atomic write` / `tempfile` | Same: transactional staging + atomic publication is a BuildContext concern by the audit's HARD boundary; exposing it on app `hull.fs` would blur the two authorities. |
+
+The through-line: `hull.fs` gets read-side hardening + discovery (stat/list); the
+WRITE-side transactional machinery stays in BuildContext.
+
+## 5. DECISION-FOR-REVIEW #1: symlink policy on the APP surface
+
+Today's `realpath`-based validate **follows** symlinks and then checks the
+resolved target is under `base_dir` - so an in-sandbox symlink pointing to
+another in-sandbox file is transparently followed. The §3 descriptor walk
+(`O_NOFOLLOW` every component) **refuses any symlink anywhere in the path**. That
+is a behavior change for existing apps.
+
+- **Recommended: deny-all (tighten).** Refuse a symlink at any component;
+  `stat`/`list` report symlinks by type without following. Rationale: it makes
+  the app surface and the plugin BuildContext share ONE symlink rule, it is the
+  strictly safer default, and it removes an entire class of confused-deputy /
+  swap-during-resolution risk. Document it as an intentional tightening; add an
+  explicit opt-in follow ONLY if a concrete app need surfaces (default deny).
+- **Alternative: preserve follow-within-base.** Keep today's "follow, then
+  require the resolved object under `base_dir`" semantics, but implement it
+  race-resistantly (resolve each symlink target via a fresh descriptor walk and
+  re-verify containment at each hop). More code, keeps back-compat, weaker
+  invariant.
+
+This is the review's call because it trades a (likely small) back-compat surface
+for a materially simpler and safer model.
+
+## 6. Capability + manifest integration
+
+Gates unchanged in shape: build-time `hull/fs@1` module gate + per-call
+allowlist. New ops require `fs.read` authority over their target (`stat` and
+`list` are reads of metadata / directory contents). No new manifest section.
+
+**Error model (proposed, stable tokens).** Uniform `(nil, err)` (Lua) / `throw`
+(JS) with a small closed set of tokens so app code can branch:
+`"not_found"`, `"permission"` (allowlist / mode), `"not_a_directory"`,
+`"is_a_directory"`, `"symlink_refused"`, `"outside_root"`, `"too_large"`,
+`"io_error"`. (The exact tokens are confirmed at implementation; today's messages
+are not a stable contract.)
+
+## 7. Lua/JS parity
+
+Every application op has both bindings, mirrored semantics, snake_case (Lua) /
+camelCase (JS) only. `read`/`write`/`mmap` already parity; `stat`/`list` land in
+both at once. A parity E2E (the `tests/e2e_path_parity.sh` model, but over a real
+fixture tree because fs needs files) asserts Lua == JS for: `list` ordering +
+per-entry metadata, `stat` fields + symlink typing, `symlink_refused` on a
+symlinked component, and `outside_root` on an escaping path. Where a
+swapped-component TOCTOU is testable deterministically it is asserted; where it is
+inherently racy it is covered by construction (the `O_NOFOLLOW` walk) plus a
+unit test on the resolver.
+
+## 8. Relationship to BuildContext (#393)
+
+Same descriptor-relative resolver + `stat`/`list` primitives underpin both
+surfaces; this design PROVIDES them.
+
+| surface | who | authority | ops |
+|---|---|---|---|
+| **application `hull.fs`** | app code | manifest `fs.read`/`fs.write` + `base_dir` | read / write / mmap / stat / list |
+| **plugin `BuildContext`** | Hull-owned, handed to a plugin | declared input roots + a private staging root; NARROWER | inputs: read / stat / list (recorded + hashed); outputs: staged write + atomic publish |
+
+BuildContext.inputs reuses this design's resolver + `stat`/`list`, adds read
+RECORDING + content hashing, and drops write. BuildContext.outputs adds the
+staging + atomic-publish (`rename`/`fsync`) that app `hull.fs` deliberately does
+NOT expose (§4.3). A build plugin never receives the general `hull.fs`.
+
+## 9. DECISION-FOR-REVIEW #2: resolver-migration sequencing
+
+The audit (§6) said the app-`hull.fs` migration to the descriptor-relative
+resolver is a follow-up sequenced AFTER BuildContext proves the primitive.
+Designing `hull.fs` first inverts that emphasis:
+
+- **Recommended: resolver lands as the app-fs foundation FIRST.** Harden
+  `read`/`write`/`mmap` + add `stat`/`list` on the descriptor-relative resolver as
+  checkpoint 1; BuildContext (checkpoints 3-4) then builds on a primitive already
+  proven in production by the app surface. This SUPERSEDES the audit's ordering.
+- **Alternative: keep the audit's order.** Implement the resolver inside
+  BuildContext first, migrate app `hull.fs` afterward. Keeps the app surface
+  untouched longer, but ships the same TOCTOU one release longer and duplicates
+  validation.
+
+## 10. Non-scope + checkpoints
+
+Design only. No code, no binding changes, no resolver, no `stat`/`list`, no
+BuildContext, no plugin loader, no Query IR.
+
+1. **This design + the BuildContext audit (#393)** - STOP for review (resolve
+   DECISIONS #1 and #2).
+2. Implement the descriptor-relative resolver + harden `read`/`write`/`mmap` + add
+   `stat`/`list`, with Lua/JS parity tests - STOP.
+3. `BuildContext.inputs` (declared reads + dependency hashing) - STOP.
+4. `BuildContext.outputs` (transactional staging + atomic publish) - STOP. Then
+   Build Plugin / BuildArtifact. **Not Query IR yet.**
