@@ -1,5 +1,16 @@
 # hull.fs + BuildContext filesystem audit / design
 
+> **PARTIALLY SUPERSEDED by [hull_fs_design.md](hull_fs_design.md) (PR #396).**
+> The dedicated application `hull.fs` design (#396) is the AUTHORITATIVE record for
+> the application filesystem surface, the resolver, the symlink policy, and the
+> implementation sequencing. Where this audit and #396 disagree, **#396 wins.**
+> Specifically superseded here: §1.2 (app-surface inventory), §3.1 (resolution
+> model), §3.6 (symlink behavior), and §6-§7 (sequencing) - each marked inline
+> below. This document remains the authoritative record ONLY for the BuildContext
+> parts not yet re-designed: §2 (BuildArtifact needs), §3.2-§3.5 (enumeration,
+> declared-input reads, dependency hashing, transactional staging/publication),
+> and §4 (the two-surface split). Those stand.
+
 Status: **AUDIT + DESIGN (awaiting review). NOTHING implemented.** This is the
 design/audit checkpoint that must precede any `hull.fs` change and the Build
 Plugin / BuildArtifact work. Per the review scope it FIRST inventories the current
@@ -25,8 +36,17 @@ re-use of the application `hull.fs`.
 | `hl_cap_fs_mmap` / `_mmap_window` / `_munmap` / `_borrow` / `_release` | zero-copy read-only file windows (the compute mapped-span path) |
 
 `HlFsConfig` carries `base_dir` + the manifest `fs.read` / `fs.write` allowlists.
+> **CORRECTED by #396 §1.3:** `HlFsConfig` carries ONLY `base_dir` (+ `base_len`).
+> It does NOT carry the `fs.read` / `fs.write` path lists, and the cap layer does
+> not check them - those roots are materialized by the KERNEL SANDBOX. See #396 §6
+> for the root-confinement-vs-path-authorization split.
 
 ### 1.2 Application surface (Lua `hull.fs` / JS `hull:fs`)
+
+> **SUPERSEDED by #396 §1.1-§1.2.** The real app surface is `read` / `write` /
+> `mmap` ONLY (+ `close`/`len`). `exists` and `delete` exist in the CAP layer but
+> are NOT exposed as app bindings in either runtime. The rest of this note (no
+> enumeration / stat / staging / hash) stands.
 
 Deliberately SMALL: `read`, `write`, `exists`, `delete`, `mmap` (+ `close`/`len`
 on the mapped buffer). **There is NO enumeration (list/readdir), NO stat/metadata,
@@ -69,6 +89,14 @@ None of (2)-(4) exists today; (1) and (5) exist only via the TOCTOU-susceptible
 ## 3. Design proposals (minimal additions)
 
 ### 3.1 Descriptor-relative, race-resistant resolution (NOT realpath->check->open)
+
+> **SUPERSEDED by #396 §3/§5.** This section's `O_NOFOLLOW`-every-component walk
+> REFUSES symlinks. That is NOT the chosen model: #396 §5 decided in-sandbox
+> symlinks are FOLLOWED under **virtual-root** (`RESOLVE_IN_ROOT` / a rooted manual
+> walk) - absolute targets re-root, excess `..` clamps, nothing escapes, and the
+> resolver is rooted at the AUTHORIZED root (not just `base_dir`) so confinement is
+> also authorization. The core insight here (descriptor-relative, no
+> resolve-then-open) stands; the symlink-refusal specifics do not.
 
 Introduce a resolver that, from a **base directory FILE DESCRIPTOR** (`dirfd`),
 walks the path ONE COMPONENT at a time with `openat(dfd, comp, O_NOFOLLOW |
@@ -130,6 +158,13 @@ authorities are distinct surfaces, not one surface with flags.
 
 ### 3.6 Explicit symlink behavior
 
+> **SUPERSEDED by #396 §5.** The application-surface symlink model is FOLLOW under
+> virtual-root, not refuse (see §3.1 note above). Whether a plugin BuildContext
+> should follow OR refuse symlinks is re-opened when BuildContext is designed (it
+> may legitimately differ from the app surface); the "refuse" wording below is no
+> longer a settled decision for either surface. The app-`hull.fs` "migrated later"
+> claim is also superseded - #396 §9 sequences the resolver FIRST.
+
 Stated, not implicit: within a plugin BuildContext, symlink components are
 **refused** during resolution (`O_NOFOLLOW` at every step, 3.1); a symlink is
 never transparently followed out of a declared root. The application `hull.fs`
@@ -141,7 +176,7 @@ tracked but out of THIS checkpoint.
 
 | surface | who | authority | operations |
 |---|---|---|---|
-| **application `hull.fs`** | app code | manifest `fs.read`/`fs.write` allowlists, `base_dir` | read/write/exists/delete/mmap (today) + (later) descriptor-relative resolution + enumeration where the app API exposes it |
+| **application `hull.fs`** | app code | root confinement (`base_dir`) + path-authz policy + kernel sandbox (see #396 §6; the "manifest allowlists in the cap layer" phrasing is corrected there) | read/write/mmap (today; NOT exists/delete - #396 §1.1) + (per #396 §9, FIRST) descriptor-relative virtual-root resolution + `stat`/`list` |
 | **plugin `BuildContext`** | Hull-owned, handed to a build plugin | declared input roots + a private staging root; NARROWER | inputs: read/stat/list (recorded); outputs: staged write + atomic publish |
 
 Build plugins do NOT receive `hull.fs` "because it exists." They receive a
@@ -158,6 +193,12 @@ with Lua/JS parity on `hull.fs`; provide BuildContext to plugins without duplica
 a second public user-facing fs module.
 
 ## 6. Non-scope (this checkpoint)
+
+> **SEQUENCING SUPERSEDED by #396 §9.** The last sentence below (app-`hull.fs`
+> migration sequenced AFTER BuildContext) is REVERSED: #396 ratified
+> resolver-FIRST - land the resolver and migrate `read`/`write`/`mmap` (fixing the
+> existing TOCTOU) BEFORE any BuildContext work, then `stat`/`list`, then
+> BuildContext.inputs/outputs. The rest (design-only, no implementation) stands.
 
 Design only. No implementation. No change to application `hull.fs` behavior yet, no
 BuildContext code, no plugin loader, no dependency-hash wiring, no Query IR. The
