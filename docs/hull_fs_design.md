@@ -12,10 +12,16 @@ NAMES lexically; `hull.fs` exercises AUTHORITY.** `hull.fs` is where real
 filesystem containment is enforced against the RESOLVED object - never by lexical
 checks alone.
 
-Symlink policy (§5) has been DECIDED during review: **in-sandbox symlinks are
-followed, with `base_dir` a hard containment ceiling.** One DECISION-FOR-REVIEW
-remains (§9, resolver-migration sequencing). Everything else is a recommendation
-with rationale.
+Both load-bearing decisions are SETTLED during review: symlink policy (§5) =
+**virtual-root follow** (in-sandbox symlinks followed; absolute targets re-rooted,
+excess `..` clamped, `base_dir` a hard ceiling - NO "escape" error, because a
+virtual root makes escape impossible, not rejected); sequencing (§9) =
+**resolver-first** (fix the existing `realpath` TOCTOU + migrate the current
+surface before any plugin work). Everything else is a recommendation with
+rationale. This revision also corrects four review findings: the
+`RESOLVE_IN_ROOT`/`outside_root` contradiction (§3, §5, §6), the over-stated
+allowlist claim (§1.3, §6), the `write` implicit-parent-creation back-compat (§1.4,
+§4.1), and under-specified resolver result shapes (§3 mode table).
 
 ## 1. Inventory - the CURRENT application `hull.fs` (verified, not assumed)
 
@@ -42,20 +48,36 @@ as an app binding** in either runtime today. So the real application surface is
 even smaller: **read / write / mmap only.** There is NO enumeration, NO
 stat/metadata, NO exists probe, NO delete, NO rename/copy/mkdir at the app level.
 
-### 1.3 Authority model (unchanged, still correct)
+### 1.3 Authority model (corrected - the cap layer confines, it does not authorize paths)
 
-Two independent gates: a build-time module gate (`hull/fs@1`) and a per-call
-capability gate. `hl_cap_fs_validate` enforces the manifest `fs.read` / `fs.write`
-allowlists + containment under `base_dir`.
+Gates: a build-time module gate (`hull/fs@1`) and a per-call capability gate. But
+the per-call gate is NARROWER than the audit implied. `HlFsConfig`
+(`include/hull/cap/fs.h`) carries ONLY `base_dir` + `base_len` - it does NOT carry
+the manifest's individual `fs.read` / `fs.write` path lists, and
+`hl_cap_fs_validate` checks ONLY containment under `base_dir` (via `realpath`
+prefix), NOT a per-path allowlist. The manifest's read/write path restrictions are
+materialized primarily by the KERNEL SANDBOX (unveil / seatbelt), not by the cap
+layer. So today there are effectively two separable things already: ROOT
+CONFINEMENT (cap layer, `base_dir`) and PATH AUTHORIZATION (kernel sandbox). §6
+makes that split explicit for the new resolver + `stat`/`list`.
 
-### 1.4 The load-bearing finding (same as the audit): resolution is TOCTOU-susceptible
+### 1.4 The load-bearing findings
 
-`hl_cap_fs_validate` resolves with **`realpath()`** (three call sites in
-`src/hull/cap/fs.c`) and the actual `open`/`read`/`write` happens later:
-`realpath -> check -> open`. Between the check and the open a path component can be
-swapped (a directory replaced by a symlink), so the check does not bind the
-`open` target. In-tree precedent for the fix already exists:
+**(a) Resolution is TOCTOU-susceptible.** `hl_cap_fs_validate` resolves with
+**`realpath()`** (three call sites in `src/hull/cap/fs.c`) and the actual
+`open`/`read`/`write` happens later: `realpath -> check -> open`. Between the check
+and the open a path component can be swapped (a directory replaced by a symlink),
+so the check does not bind the `open` target. In-tree precedent for the fix:
 `src/hull/shared/blob_store.c` opens with `O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC`.
+
+**(b) `write` creates parent directories** - `hl_cap_fs_write` mkdir-p's the
+leaf's parents (a `mkdir()` loop over reconstructed absolute path prefixes). This
+is EXISTING behavior the design must preserve (§4.1), and the absolute-path
+`mkdir()` is itself part of the TOCTOU surface to move descriptor-relative.
+
+**(c) `write` is NOT atomic** - it `fopen(full, "wb")` + `fwrite`, truncating in
+place. Any header/comment implying atomicity is stale. Atomic write is a possible
+FUTURE API change (§4.3), not part of this prerequisite.
 
 ## 2. Design goals
 
@@ -73,63 +95,104 @@ swapped (a directory replaced by a symlink), so the check does not bind the
    not app `hull.fs`.
 5. **Lua/JS parity** across the whole app surface (the `hull.path` bar: mirrored
    semantics, snake_case vs camelCase only).
-6. **Backward-compatible semantics** - `read`/`write`/`mmap` keep their contracts;
-   only the resolution MECHANISM hardens and the symlink behavior tightens (§5),
-   both documented.
+6. **Backward-compatible semantics** - `read`/`write`/`mmap` keep their contracts
+   AND their observable behavior (symlink follow-within-base preserved, §5; `write`
+   still creates parent dirs, §4.1). Only the resolution MECHANISM hardens
+   (descriptor-relative instead of `realpath`).
+7. **Two distinct authorities** - ROOT CONFINEMENT (descriptor resolver keeps every
+   op under `base_dir`) is separate from OPERATION/PATH AUTHORIZATION (which paths
+   an app may read/write). The resolver provides the first; the second is an
+   explicit policy + the kernel sandbox (§6). Conflating them is the current gap
+   this design must not repeat.
 
-## 3. Resolution model (the shared foundation) - follow within base, contained
+## 3. Resolution model (the shared foundation) - virtual-root, contained
 
-A single resolver underpins every `hull.fs` op AND (later) BuildContext. It
-**follows symlinks that resolve within `base_dir`** and **refuses any resolution
-that would escape it** (via `..` chains or an out-of-base target), with NO
-resolve-then-open (TOCTOU) window. `base_dir` is a hard ceiling - the sandbox root
-IS the root for resolution purposes.
+A single resolver underpins every `hull.fs` op AND (later) BuildContext. Its
+contract is **true virtual-root (chroot-like) semantics**: `base_dir` is the
+resolution ROOT, symlinks are followed, and NOTHING can escape - with NO
+resolve-then-open (TOCTOU) window.
 
-- **Lexical pre-check** with `hull.path` (reject an absolute caller path, reject
-  `..` in the CALLER-supplied path) - a fast fail, NOT the authority. (Symlink
-  targets encountered DURING resolution are handled below, not by this check.)
+**Semantic contract (this is the whole point of §5's decision).** Within
+resolution:
+- an ABSOLUTE symlink target is RE-ROOTED at `base_dir` (`foo -> /etc/x` resolves
+  to `base_dir/etc/x`);
+- excess `..` is CLAMPED at `base_dir` (`foo -> ../../../x` resolves to
+  `base_dir/x`);
+- these are NOT errors - a virtual root does not "reject escapes," it makes escape
+  impossible by construction. There is therefore **no `outside_root` outcome for
+  symlink targets or `..` encountered during resolution** (this is the correction
+  to the earlier draft: `RESOLVE_IN_ROOT` clamps, it does not reject, and the
+  manual fallback clamps identically - so the two cannot disagree).
+
+The only rejection is a LEXICAL pre-check on the CALLER-supplied path (reject an
+absolute path, reject `..` components) via `hull.path` - an API input contract
+(`invalid_path`), distinct from resolution. The caller declares clean relative
+paths; symlink DATA discovered on disk is virtual-rooted, not errored.
+
+**The resolver performs the TERMINAL operation itself (no returned re-openable
+path).** A single "opened object fd" is insufficient and would let the manual
+fallback reintroduce a final-component race, so the resolver is MODE-parameterized
+and each mode's terminal syscall is issued relative to a held fd:
+
+| mode | terminal op | result | leaf symlink |
+|---|---|---|---|
+| `READ` / `MMAP` | open leaf `O_RDONLY` | leaf fd | FOLLOWED (contained) |
+| `WRITE` | mkdir-p parents (contained) + open leaf `O_WRONLY\|O_CREAT` | leaf fd | FOLLOWED (contained) |
+| `STAT` | `fstatat(parent_fd, leaf, AT_SYMLINK_NOFOLLOW)` | stat record | NOT followed (link-own) |
+| `LIST` | open dir `O_DIRECTORY` | dir fd | FOLLOWED (contained) |
+
+For `WRITE` and `STAT` the resolver walks to the leaf's PARENT fd (contained) and
+issues the create/stat relative to that held fd - the final component is never
+re-resolved from a path string, so there is no leaf race.
+
+**Implementations:**
 - **Linux >= 5.6:** `openat2(base_dfd, relpath, { flags, resolve: RESOLVE_IN_ROOT
-  | RESOLVE_NO_MAGICLINKS })`. `RESOLVE_IN_ROOT` makes `base_dfd` the root for the
-  ENTIRE resolution: interior and leaf symlinks - even absolute ones, even ones
-  containing `..` - are followed but can NEVER escape `base_dir`; the kernel
-  enforces containment race-free in one syscall, and the returned fd IS the opened
-  object (no separate check to race). `RESOLVE_NO_MAGICLINKS` blocks
-  `/proc`-style magic-symlink escapes.
+  | RESOLVE_NO_MAGICLINKS })` for `READ`/`WRITE`/`LIST` leaf/dir opens (one
+  race-free syscall; the returned fd IS the object). `WRITE` first mkdir-p's the
+  parents (each `mkdirat` relative to a held, contained fd); `STAT` uses the
+  contained parent fd + `fstatat(...AT_SYMLINK_NOFOLLOW)`. `RESOLVE_NO_MAGICLINKS`
+  blocks `/proc` magic-symlink escapes.
 - **Platforms without `openat2` (macOS, older Linux, cosmo where unavailable):** a
-  manual component-wise walk that REPRODUCES `RESOLVE_IN_ROOT`. Hold a STACK of
-  directory fds rooted at `base_dfd`; for each component `openat(top, comp,
-  O_NOFOLLOW | O_DIRECTORY | O_CLOEXEC)`; when a component is a symlink (detected
-  via `O_NOFOLLOW`'s `ELOOP` or an `fstatat` probe), `readlinkat` its target and
-  SPLICE the target's components into the walk (an ABSOLUTE target restarts at
-  `base_dfd` = re-root; a RELATIVE target continues from the current dir). A `..`
-  component POPS the fd stack and is CLAMPED at `base_dfd` - it is never passed to
-  the kernel as `openat(dfd, "..")`, so the walk can never ascend above the base.
-  Bound total symlink expansions (e.g. 40, matching the kernel `ELOOP` limit) to
-  stop loops. Because every step is relative to a HELD fd (never a re-resolved
-  path string), there is no TOCTOU window and containment is structural.
-- The manifest `fs.read` / `fs.write` allowlist is still enforced, against the
-  lexically-normalized relative caller path.
+  manual walk reproducing `RESOLVE_IN_ROOT` EXACTLY. Hold a STACK of directory fds
+  rooted at `base_dfd`; each component `openat(top, comp, O_NOFOLLOW | O_DIRECTORY
+  | O_CLOEXEC)`; when a component is a symlink (`ELOOP` / `fstatat` probe),
+  `readlinkat` and SPLICE its target into the walk (ABSOLUTE target restarts at
+  `base_dfd` = re-root; RELATIVE continues from the current dir); a `..` component
+  POPS the fd stack, CLAMPED at `base_dfd` (never `openat(dfd, "..")`). Bound total
+  symlink expansions (e.g. 40, the kernel `ELOOP` limit) -> `symlink_loop`. Every
+  step is relative to a HELD fd, so containment is structural and there is no
+  TOCTOU window. The leaf is just the terminal component, handled per the mode
+  table above.
 - **Fail closed** where a platform offers neither primitive - never downgrade to
   `realpath`.
 
 This is the userspace equivalent of what container runtimes settled on
-(`RESOLVE_IN_ROOT` / Go's `securejoin`): symlinks are followed, but the sandbox
-root is a hard ceiling.
+(`RESOLVE_IN_ROOT` / Go's `securejoin`): a hard virtual root, symlinks followed
+inside it.
+
+**Root confinement is NOT operation authorization.** The resolver guarantees only
+that every op stays under `base_dir`. WHICH paths an app may read/write is a
+separate policy (§6) - the resolver does not consult the manifest allowlist.
 
 **Platform notes** (resolve at implementation): `openat2` is Linux-only (>= 5.6);
 confirm whether the Cosmopolitan target exposes it (raw syscall) or must use the
-manual walk on its Linux host. `openat` / `O_NOFOLLOW` / `readlinkat` / `fstatat`
-are POSIX (Linux, macOS, cosmo shim). A native Windows target (not today's cosmo
-APE) needs the reparse-point-aware equivalent; scope that when such a target
-exists.
+manual walk on its Linux host. `openat` / `O_NOFOLLOW` / `readlinkat` / `fstatat` /
+`mkdirat` are POSIX (Linux, macOS, cosmo shim). A native Windows target (not
+today's cosmo APE) needs the reparse-point-aware equivalent; scope that when such a
+target exists.
 
 ## 4. Operations
 
 ### 4.1 Existing, hardened (no signature change)
 - `fs.read(path)` -> bytes | (nil,err) / throw. Now resolved per §3; `fs.read`
   authority.
-- `fs.write(path, bytes)` -> true | (nil,err) / throw. Resolved per §3; `fs.write`
-  authority. (Parent-dir creation is NOT implicit - see §4.3 `mkdir`.)
+- `fs.write(path, bytes)` -> true | (nil,err) / throw. Resolved per §3 (`WRITE`
+  mode); `fs.write` authority. **Preserves today's implicit parent-directory
+  creation** (the current `hl_cap_fs_write` mkdir-p's parents) - now done
+  descriptor-relatively with `mkdirat` under the contained walk instead of
+  `mkdir()` on reconstructed absolute paths. Behavior unchanged; only the
+  mechanism hardens. Whether writes should become ATOMIC (they are NOT today -
+  see §1.4) is a SEPARATE API decision, out of this prerequisite scope.
 - `fs.mmap(path[, window])` -> MappedBuffer. Resolved per §3 for the initial open;
   the mapping's lifetime semantics are unchanged (refcounted borrow, `close`
   defers `munmap` while a borrower is alive).
@@ -163,12 +226,13 @@ without a second cap surface that could disagree with `stat` about symlinks.
 | candidate | why deferred |
 |---|---|
 | `delete` | Exists at the cap layer, unexposed today. A mutation with real blast radius; add only when a concrete app need appears, and gate on `fs.write`. Not needed for enumeration/hardening. |
-| `mkdir` | App authors rarely need directory creation; when they do it is usually part of a WRITE that BuildContext should own transactionally. Keep `write` non-implicit-mkdir for now. |
+| explicit `mkdir` | `write` ALREADY creates parents implicitly (§1.4b, §4.1) and that is preserved; a STANDALONE `mkdir(path)` op (create an empty dir with no write) is rarely needed and deferred until a concrete case appears. |
 | `copy` / `rename` / `move` | `rename` is the ATOMIC-PUBLISH primitive - it belongs to the Hull-owned BuildContext.outputs (audit §3.5), NOT general app `hull.fs`, precisely so staging/publication authority stays separate. |
-| `atomic write` / `tempfile` | Same: transactional staging + atomic publication is a BuildContext concern by the audit's HARD boundary; exposing it on app `hull.fs` would blur the two authorities. |
+| ATOMIC `write` / `tempfile` | Today's `write` is non-atomic truncate-in-place (§1.4c); making it atomic (tmp + `rename`) is a SEPARATE API decision. The transactional staging + atomic PUBLICATION machinery specifically is a BuildContext.outputs concern by the audit's HARD boundary; exposing it on app `hull.fs` would blur the two authorities. |
 
-The through-line: `hull.fs` gets read-side hardening + discovery (stat/list); the
-WRITE-side transactional machinery stays in BuildContext.
+The through-line: `hull.fs` gets its EXISTING contracts hardened
+(`read`/`write`-with-implicit-parents/`mmap`) + discovery (`stat`/`list`); the
+transactional staging + atomic-publication machinery stays in BuildContext.
 
 ## 5. DECIDED: in-sandbox symlinks are FOLLOWED (contained), not refused
 
@@ -179,37 +243,65 @@ refusing them would break legitimate layouts. The prior draft's deny-all
 recommendation is REJECTED. Preserving today's follow-within-base BEHAVIOR while
 fixing the TOCTOU (via §3, not `realpath`) is the chosen path.
 
-Semantics (the `RESOLVE_IN_ROOT` model of §3):
-- A symlink whose recursively-resolved target stays under `base_dir` is FOLLOWED
-  transparently, for `read` / `write` / `mmap`.
-- An ABSOLUTE symlink target is RE-ROOTED at `base_dir` (the sandbox root is the
-  resolution root), so `foo -> /bar` resolves to `base_dir/bar` - followed, still
-  contained.
-- Any resolution that would ESCAPE `base_dir` (a `..` chain or an out-of-base
-  target) is REFUSED with `outside_root`. The ceiling is hard and kernel-enforced
-  (Linux) / structurally enforced (manual walk).
+Semantics = the **true virtual-root** model of §3 (chosen deliberately over a
+reject-escapes / `RESOLVE_BENEATH` model, which would conflict with re-rooting
+absolute targets and could not use the one-call `RESOLVE_IN_ROOT` implementation):
+- A symlink whose target resolves within `base_dir` is FOLLOWED transparently for
+  `read` / `write` / `mmap`.
+- An ABSOLUTE symlink target is RE-ROOTED at `base_dir` (`foo -> /bar` ->
+  `base_dir/bar`); excess `..` in a target is CLAMPED at `base_dir`.
+- Re-rooting and clamping are **not errors** - a virtual root makes escape
+  impossible by construction, so there is **no `outside_root` outcome** for a
+  symlink target or `..` met during resolution. (This is the correction to the
+  earlier draft, which wrongly promised both re-rooting AND `outside_root`:
+  `RESOLVE_IN_ROOT` clamps rather than rejects, and the manual fallback clamps
+  identically, so the contract is virtual-root, single and consistent.)
+- The only rejection is the LEXICAL caller-path pre-check (absolute path or `..`
+  in the app-supplied path -> `invalid_path`), an input contract, NOT a resolution
+  outcome.
 - `stat` / `list` report a symlink's OWN type WITHOUT following (`lstat`
   semantics), so an app can enumerate links as links; only path RESOLUTION for
-  read/write/mmap follows.
+  `read`/`write`/`mmap` follows.
 - Guarantee vs today: SAME "follow within base" behavior, now enforced race-free
   (no `realpath -> check -> open` window).
 
-Still NOT a lexical check - `hull.path` never authorizes; the `openat2` /
-descriptor walk is the authority.
+Still NOT a lexical authorization - `hull.path` never authorizes; the `openat2` /
+descriptor walk is the confinement authority.
 
-## 6. Capability + manifest integration
+## 6. Two authorities: root confinement vs path authorization
 
-Gates unchanged in shape: build-time `hull/fs@1` module gate + per-call
-allowlist. New ops require `fs.read` authority over their target (`stat` and
-`list` are reads of metadata / directory contents). No new manifest section.
+The audit and the earlier draft conflated these; they are separate and this
+design keeps them separate (goal §2.7).
+
+**(a) Root confinement** - every op stays under `base_dir`. Provided entirely by
+the §3 descriptor resolver (virtual-root), for every op including `stat`/`list`.
+No manifest input.
+
+**(b) Operation / path authorization** - WHICH paths an app may read vs write.
+Today this is materialized by the KERNEL SANDBOX (unveil / seatbelt) from the
+manifest `fs.read` / `fs.write` roots; `HlFsConfig` / `hl_cap_fs_validate` do NOT
+carry or check per-path lists (§1.3). Two design implications:
+
+- **`stat` / `list` must respect the READ roots, not merely `base_dir`.** A file
+  inside `base_dir` but OUTSIDE the declared `fs.read` roots must not have its
+  metadata or directory entries exposed - otherwise the new ops leak more than
+  `read` does. Since the cap layer has no path policy today, this design must add
+  an EXPLICIT policy object (the resolved `fs.read` / `fs.write` root sets) that
+  `stat`/`list`/`read`/`write` consult at the cap layer, layered ON TOP of root
+  confinement. Whether the policy lives in an extended `HlFsConfig` or a separate
+  `HlFsPolicy` is an implementation detail resolved at checkpoint 2; the design
+  REQUIREMENT is that path authorization is an explicit, cap-layer-checked policy,
+  not an accident of what the kernel sandbox happens to block.
+- Kernel-sandbox enforcement remains as defense-in-depth beneath the explicit
+  policy, not the sole gate for the new read-side surface.
 
 **Error model (proposed, stable tokens).** Uniform `(nil, err)` (Lua) / `throw`
-(JS) with a small closed set of tokens so app code can branch:
-`"not_found"`, `"permission"` (allowlist / mode), `"not_a_directory"`,
-`"is_a_directory"`, `"outside_root"` (a symlink or `..` chain that would escape
-`base_dir`), `"symlink_loop"` (expansion bound exceeded), `"too_large"`,
-`"io_error"`. (The exact tokens are confirmed at implementation; today's messages
-are not a stable contract.)
+(JS): `"invalid_path"` (caller path absolute or containing `..` - lexical
+pre-check), `"not_found"`, `"permission"` (path-authorization policy or file
+mode), `"not_a_directory"`, `"is_a_directory"`, `"symlink_loop"` (expansion bound
+exceeded), `"too_large"`, `"io_error"`. **No `outside_root` token** - resolution
+cannot escape (§5, virtual-root); an escape is impossible, not an error. (Exact
+tokens confirmed at implementation; today's messages are not a stable contract.)
 
 ## 7. Lua/JS parity
 
@@ -217,12 +309,15 @@ Every application op has both bindings, mirrored semantics, snake_case (Lua) /
 camelCase (JS) only. `read`/`write`/`mmap` already parity; `stat`/`list` land in
 both at once. A parity E2E (the `tests/e2e_path_parity.sh` model, but over a real
 fixture tree because fs needs files) asserts Lua == JS for: `list` ordering +
-per-entry metadata, `stat` fields + symlink typing, an in-base symlink FOLLOWED
-identically for `read`, an absolute in-base symlink target re-rooted the same way,
-and `outside_root` on a symlink (or `..` chain) whose target escapes `base_dir`.
-Where a swapped-component TOCTOU is testable deterministically it is asserted;
-where it is inherently racy it is covered by construction (`openat2
-RESOLVE_IN_ROOT` / the held-fd walk) plus a unit test on the resolver.
+per-entry metadata, `stat` fields + symlink typing (link reported as link), an
+in-base symlink FOLLOWED identically for `read`, an absolute symlink target
+RE-ROOTED at `base_dir` the same way, a `foo -> ../../../x` target CLAMPED to
+`base_dir/x` the same way (NOT an error, per §5), `invalid_path` on a caller path
+with `..`, and a `symlink_loop` cycle bounded identically. A dedicated resolver
+unit test proves virtual-root parity between the `openat2` and manual-walk paths
+on the same fixture tree (Linux runs BOTH to catch drift), and covers a
+swapped-component TOCTOU by construction (held-fd walk) with a deterministic case
+where testable.
 
 ## 8. Relationship to BuildContext (#393)
 
@@ -231,7 +326,7 @@ surfaces; this design PROVIDES them.
 
 | surface | who | authority | ops |
 |---|---|---|---|
-| **application `hull.fs`** | app code | manifest `fs.read`/`fs.write` + `base_dir` | read / write / mmap / stat / list |
+| **application `hull.fs`** | app code | root confinement (`base_dir`, resolver) + path-authorization policy (`fs.read`/`fs.write` roots, §6) + kernel sandbox | read / write / mmap / stat / list |
 | **plugin `BuildContext`** | Hull-owned, handed to a plugin | declared input roots + a private staging root; NARROWER | inputs: read / stat / list (recorded + hashed); outputs: staged write + atomic publish |
 
 BuildContext.inputs reuses this design's resolver + `stat`/`list`, adds read
@@ -239,31 +334,41 @@ RECORDING + content hashing, and drops write. BuildContext.outputs adds the
 staging + atomic-publish (`rename`/`fsync`) that app `hull.fs` deliberately does
 NOT expose (§4.3). A build plugin never receives the general `hull.fs`.
 
-## 9. DECISION-FOR-REVIEW (sole remaining): resolver-migration sequencing
+## 9. DECIDED: resolver-first (migrate the existing surface before building plugins)
 
-The audit (§6) said the app-`hull.fs` migration to the descriptor-relative
-resolver is a follow-up sequenced AFTER BuildContext proves the primitive.
-Designing `hull.fs` first inverts that emphasis:
+**Decision (owner: user, during review): resolver-FIRST.** The audit (§6) had the
+app-`hull.fs` migration sequenced AFTER BuildContext; that is REVERSED. Rationale:
+it fixes the EXISTING security defect (the `realpath` TOCTOU, §1.4a) before any
+plugin work, and it validates the foundational resolver through the primary,
+most-used surface rather than proving it first on a new, less-exercised one.
+`RESOLVE_BENEATH` / reject-escape is also rejected in favor of virtual-root (§5).
 
-- **Recommended: resolver lands as the app-fs foundation FIRST.** Harden
-  `read`/`write`/`mmap` + add `stat`/`list` on the descriptor-relative resolver as
-  checkpoint 1; BuildContext (checkpoints 3-4) then builds on a primitive already
-  proven in production by the app surface. This SUPERSEDES the audit's ordering.
-- **Alternative: keep the audit's order.** Implement the resolver inside
-  BuildContext first, migrate app `hull.fs` afterward. Keeps the app surface
-  untouched longer, but ships the same TOCTOU one release longer and duplicates
-  validation.
+Ratified ordering:
+1. **Land the resolver and migrate existing `read`/`write`/`mmap` first** - onto
+   the §3 virtual-root resolver (write keeps implicit parent creation, now
+   `mkdirat`-based). No new app ops yet; this is purely the TOCTOU fix +
+   behavior-preserving migration.
+2. **STOP and prove** platform parity (`openat2` path == manual walk) AND
+   race-resistant symlink behavior (virtual-root follow, re-root, clamp, loop
+   bound) on the fixture tree + resolver unit tests.
+3. **Add application `stat` / `list`** (with the §6 path-authorization policy so
+   they respect READ roots, not merely `base_dir`) - Lua/JS parity - STOP.
+4. **Then `BuildContext.inputs` and `BuildContext.outputs`** on the proven
+   primitive. Then Build Plugin / BuildArtifact. **Not Query IR yet.**
 
 ## 10. Non-scope + checkpoints
 
 Design only. No code, no binding changes, no resolver, no `stat`/`list`, no
 BuildContext, no plugin loader, no Query IR.
 
-1. **This design + the BuildContext audit (#393)** - STOP for review. Symlink
-   policy (§5) is DECIDED (follow within base, contained); the sole remaining
-   decision is resolver-migration sequencing (§9).
-2. Implement the descriptor-relative resolver + harden `read`/`write`/`mmap` + add
-   `stat`/`list`, with Lua/JS parity tests - STOP.
-3. `BuildContext.inputs` (declared reads + dependency hashing) - STOP.
-4. `BuildContext.outputs` (transactional staging + atomic publish) - STOP. Then
-   Build Plugin / BuildArtifact. **Not Query IR yet.**
+Checkpoints mirror the §9 ratified ordering; every arrow is a STOP-for-review:
+
+0. **This design + the BuildContext audit (#393)** - STOP for review. Both
+   decisions are now settled: symlink policy = virtual-root follow (§5),
+   sequencing = resolver-first (§9). Nothing else is open.
+1. Land the resolver + migrate `read`/`write`/`mmap` (TOCTOU fix, behavior
+   preserved) - STOP.
+2. Prove platform parity + race-resistant symlink behavior - STOP.
+3. Add `stat`/`list` + the path-authorization policy (§6), Lua/JS parity - STOP.
+4. `BuildContext.inputs` then `BuildContext.outputs` - STOP. Then Build Plugin /
+   BuildArtifact. **Not Query IR yet.**
