@@ -33,10 +33,9 @@ local function split(p)
     local absolute = p:sub(1, 1) == "/"
     local segs = {}
     local n = 0
+    -- gmatch("[^/]+") already skips empty segments (collapses `//`).
     for seg in p:gmatch("[^/]+") do
-        if seg == "." then
-            -- drop
-        elseif seg == ".." then
+        if seg == ".." then
             if n > 0 and segs[n] ~= ".." then
                 segs[n] = nil
                 n = n - 1
@@ -45,7 +44,7 @@ local function split(p)
                 segs[n] = ".."
             end
             -- absolute + nothing to pop: discard (clamp at root)
-        else
+        elseif seg ~= "." then      -- `.` falls through (dropped)
             n = n + 1
             segs[n] = seg
         end
