@@ -12,8 +12,9 @@ NAMES lexically; `hull.fs` exercises AUTHORITY.** `hull.fs` is where real
 filesystem containment is enforced against the RESOLVED object - never by lexical
 checks alone.
 
-Two DECISIONS-FOR-REVIEW are flagged inline (§5, §9). They are the load-bearing
-choices; the review is their decision forum. Everything else is a recommendation
+Symlink policy (§5) has been DECIDED during review: **in-sandbox symlinks are
+followed, with `base_dir` a hard containment ceiling.** One DECISION-FOR-REVIEW
+remains (§9, resolver-migration sequencing). Everything else is a recommendation
 with rationale.
 
 ## 1. Inventory - the CURRENT application `hull.fs` (verified, not assumed)
@@ -63,7 +64,8 @@ swapped (a directory replaced by a symlink), so the check does not bind the
    opened.
 2. **Deterministic enumeration + metadata** - add `list` and `stat`, the minimum
    an app (or later a build) needs to discover and describe files.
-3. **Explicit, safe symlink policy** (DECISION, §5).
+3. **Follow in-sandbox symlinks, contained race-free** - `base_dir` is a hard
+   ceiling (§5, DECIDED).
 4. **Keep the surface deliberately SMALL** - Hull's convention is to reach for
    stdlib / composition before widening a C capability. Conveniences
    (copy/rename/mkdir/atomic-write/tempfile) are enumerated as candidates in §4.3
@@ -75,35 +77,51 @@ swapped (a directory replaced by a symlink), so the check does not bind the
    only the resolution MECHANISM hardens and the symlink behavior tightens (§5),
    both documented.
 
-## 3. Resolution model (the shared foundation)
+## 3. Resolution model (the shared foundation) - follow within base, contained
 
-A single descriptor-relative resolver underpins every `hull.fs` op AND (later)
-BuildContext:
+A single resolver underpins every `hull.fs` op AND (later) BuildContext. It
+**follows symlinks that resolve within `base_dir`** and **refuses any resolution
+that would escape it** (via `..` chains or an out-of-base target), with NO
+resolve-then-open (TOCTOU) window. `base_dir` is a hard ceiling - the sandbox root
+IS the root for resolution purposes.
 
-- Lexically pre-validate the caller's path with `hull.path` (reject absolute,
-  reject any `..`) BEFORE touching the disk. This is a fast fail, NOT the
-  authority.
-- Open the configured `base_dir` once as a directory fd (`O_DIRECTORY |
-  O_NOFOLLOW | O_CLOEXEC`).
-- Walk the relative path ONE COMPONENT at a time: interior components with
-  `openat(dfd, comp, O_NOFOLLOW | O_DIRECTORY | O_CLOEXEC)`; the leaf with
-  `openat(dfd, leaf, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)` (or
-  `O_WRONLY | O_CREAT | O_NOFOLLOW` for writes). Because each step is relative to
-  a fd itself opened `O_NOFOLLOW`, containment is enforced against the object
-  actually opened - there is no resolve-then-open window, and a swapped or
-  symlinked component is REFUSED, not silently followed.
-- The manifest `fs.read` / `fs.write` allowlist is still enforced, now against the
-  lexically-normalized relative path (which the descriptor walk proves is the real
-  target), not a pre-open `realpath` string.
+- **Lexical pre-check** with `hull.path` (reject an absolute caller path, reject
+  `..` in the CALLER-supplied path) - a fast fail, NOT the authority. (Symlink
+  targets encountered DURING resolution are handled below, not by this check.)
+- **Linux >= 5.6:** `openat2(base_dfd, relpath, { flags, resolve: RESOLVE_IN_ROOT
+  | RESOLVE_NO_MAGICLINKS })`. `RESOLVE_IN_ROOT` makes `base_dfd` the root for the
+  ENTIRE resolution: interior and leaf symlinks - even absolute ones, even ones
+  containing `..` - are followed but can NEVER escape `base_dir`; the kernel
+  enforces containment race-free in one syscall, and the returned fd IS the opened
+  object (no separate check to race). `RESOLVE_NO_MAGICLINKS` blocks
+  `/proc`-style magic-symlink escapes.
+- **Platforms without `openat2` (macOS, older Linux, cosmo where unavailable):** a
+  manual component-wise walk that REPRODUCES `RESOLVE_IN_ROOT`. Hold a STACK of
+  directory fds rooted at `base_dfd`; for each component `openat(top, comp,
+  O_NOFOLLOW | O_DIRECTORY | O_CLOEXEC)`; when a component is a symlink (detected
+  via `O_NOFOLLOW`'s `ELOOP` or an `fstatat` probe), `readlinkat` its target and
+  SPLICE the target's components into the walk (an ABSOLUTE target restarts at
+  `base_dfd` = re-root; a RELATIVE target continues from the current dir). A `..`
+  component POPS the fd stack and is CLAMPED at `base_dfd` - it is never passed to
+  the kernel as `openat(dfd, "..")`, so the walk can never ascend above the base.
+  Bound total symlink expansions (e.g. 40, matching the kernel `ELOOP` limit) to
+  stop loops. Because every step is relative to a HELD fd (never a re-resolved
+  path string), there is no TOCTOU window and containment is structural.
+- The manifest `fs.read` / `fs.write` allowlist is still enforced, against the
+  lexically-normalized relative caller path.
+- **Fail closed** where a platform offers neither primitive - never downgrade to
+  `realpath`.
 
-**Platform notes** (resolve at implementation, same as the audit): `openat` /
-`O_NOFOLLOW` / `O_DIRECTORY` are POSIX (Linux, macOS, Cosmopolitan shim). macOS
-`O_NOFOLLOW` fails only on a TRAILING symlink - the component-wise walk makes
-every component a trailing check, so the guarantee holds uniformly. A native
-Windows target (not today's cosmo APE) needs the reparse-point-aware equivalent;
-scope that when such a target exists. Where a platform cannot offer a
-race-resistant primitive, the op **fails closed** - it must never downgrade to
-`realpath`.
+This is the userspace equivalent of what container runtimes settled on
+(`RESOLVE_IN_ROOT` / Go's `securejoin`): symlinks are followed, but the sandbox
+root is a hard ceiling.
+
+**Platform notes** (resolve at implementation): `openat2` is Linux-only (>= 5.6);
+confirm whether the Cosmopolitan target exposes it (raw syscall) or must use the
+manual walk on its Linux host. `openat` / `O_NOFOLLOW` / `readlinkat` / `fstatat`
+are POSIX (Linux, macOS, cosmo shim). A native Windows target (not today's cosmo
+APE) needs the reparse-point-aware equivalent; scope that when such a target
+exists.
 
 ## 4. Operations
 
@@ -152,28 +170,32 @@ without a second cap surface that could disagree with `stat` about symlinks.
 The through-line: `hull.fs` gets read-side hardening + discovery (stat/list); the
 WRITE-side transactional machinery stays in BuildContext.
 
-## 5. DECISION-FOR-REVIEW #1: symlink policy on the APP surface
+## 5. DECIDED: in-sandbox symlinks are FOLLOWED (contained), not refused
 
-Today's `realpath`-based validate **follows** symlinks and then checks the
-resolved target is under `base_dir` - so an in-sandbox symlink pointing to
-another in-sandbox file is transparently followed. The §3 descriptor walk
-(`O_NOFOLLOW` every component) **refuses any symlink anywhere in the path**. That
-is a behavior change for existing apps.
+**Decision (owner: user, during review): the app surface MUST follow symlinks
+that resolve within `base_dir`.** Real apps rely on in-sandbox symlinks -
+atomic-deploy `current -> releases/N`, asset trees, config indirection - so
+refusing them would break legitimate layouts. The prior draft's deny-all
+recommendation is REJECTED. Preserving today's follow-within-base BEHAVIOR while
+fixing the TOCTOU (via §3, not `realpath`) is the chosen path.
 
-- **Recommended: deny-all (tighten).** Refuse a symlink at any component;
-  `stat`/`list` report symlinks by type without following. Rationale: it makes
-  the app surface and the plugin BuildContext share ONE symlink rule, it is the
-  strictly safer default, and it removes an entire class of confused-deputy /
-  swap-during-resolution risk. Document it as an intentional tightening; add an
-  explicit opt-in follow ONLY if a concrete app need surfaces (default deny).
-- **Alternative: preserve follow-within-base.** Keep today's "follow, then
-  require the resolved object under `base_dir`" semantics, but implement it
-  race-resistantly (resolve each symlink target via a fresh descriptor walk and
-  re-verify containment at each hop). More code, keeps back-compat, weaker
-  invariant.
+Semantics (the `RESOLVE_IN_ROOT` model of §3):
+- A symlink whose recursively-resolved target stays under `base_dir` is FOLLOWED
+  transparently, for `read` / `write` / `mmap`.
+- An ABSOLUTE symlink target is RE-ROOTED at `base_dir` (the sandbox root is the
+  resolution root), so `foo -> /bar` resolves to `base_dir/bar` - followed, still
+  contained.
+- Any resolution that would ESCAPE `base_dir` (a `..` chain or an out-of-base
+  target) is REFUSED with `outside_root`. The ceiling is hard and kernel-enforced
+  (Linux) / structurally enforced (manual walk).
+- `stat` / `list` report a symlink's OWN type WITHOUT following (`lstat`
+  semantics), so an app can enumerate links as links; only path RESOLUTION for
+  read/write/mmap follows.
+- Guarantee vs today: SAME "follow within base" behavior, now enforced race-free
+  (no `realpath -> check -> open` window).
 
-This is the review's call because it trades a (likely small) back-compat surface
-for a materially simpler and safer model.
+Still NOT a lexical check - `hull.path` never authorizes; the `openat2` /
+descriptor walk is the authority.
 
 ## 6. Capability + manifest integration
 
@@ -184,7 +206,8 @@ allowlist. New ops require `fs.read` authority over their target (`stat` and
 **Error model (proposed, stable tokens).** Uniform `(nil, err)` (Lua) / `throw`
 (JS) with a small closed set of tokens so app code can branch:
 `"not_found"`, `"permission"` (allowlist / mode), `"not_a_directory"`,
-`"is_a_directory"`, `"symlink_refused"`, `"outside_root"`, `"too_large"`,
+`"is_a_directory"`, `"outside_root"` (a symlink or `..` chain that would escape
+`base_dir`), `"symlink_loop"` (expansion bound exceeded), `"too_large"`,
 `"io_error"`. (The exact tokens are confirmed at implementation; today's messages
 are not a stable contract.)
 
@@ -194,11 +217,12 @@ Every application op has both bindings, mirrored semantics, snake_case (Lua) /
 camelCase (JS) only. `read`/`write`/`mmap` already parity; `stat`/`list` land in
 both at once. A parity E2E (the `tests/e2e_path_parity.sh` model, but over a real
 fixture tree because fs needs files) asserts Lua == JS for: `list` ordering +
-per-entry metadata, `stat` fields + symlink typing, `symlink_refused` on a
-symlinked component, and `outside_root` on an escaping path. Where a
-swapped-component TOCTOU is testable deterministically it is asserted; where it is
-inherently racy it is covered by construction (the `O_NOFOLLOW` walk) plus a
-unit test on the resolver.
+per-entry metadata, `stat` fields + symlink typing, an in-base symlink FOLLOWED
+identically for `read`, an absolute in-base symlink target re-rooted the same way,
+and `outside_root` on a symlink (or `..` chain) whose target escapes `base_dir`.
+Where a swapped-component TOCTOU is testable deterministically it is asserted;
+where it is inherently racy it is covered by construction (`openat2
+RESOLVE_IN_ROOT` / the held-fd walk) plus a unit test on the resolver.
 
 ## 8. Relationship to BuildContext (#393)
 
@@ -215,7 +239,7 @@ RECORDING + content hashing, and drops write. BuildContext.outputs adds the
 staging + atomic-publish (`rename`/`fsync`) that app `hull.fs` deliberately does
 NOT expose (§4.3). A build plugin never receives the general `hull.fs`.
 
-## 9. DECISION-FOR-REVIEW #2: resolver-migration sequencing
+## 9. DECISION-FOR-REVIEW (sole remaining): resolver-migration sequencing
 
 The audit (§6) said the app-`hull.fs` migration to the descriptor-relative
 resolver is a follow-up sequenced AFTER BuildContext proves the primitive.
@@ -235,8 +259,9 @@ Designing `hull.fs` first inverts that emphasis:
 Design only. No code, no binding changes, no resolver, no `stat`/`list`, no
 BuildContext, no plugin loader, no Query IR.
 
-1. **This design + the BuildContext audit (#393)** - STOP for review (resolve
-   DECISIONS #1 and #2).
+1. **This design + the BuildContext audit (#393)** - STOP for review. Symlink
+   policy (§5) is DECIDED (follow within base, contained); the sole remaining
+   decision is resolver-migration sequencing (§9).
 2. Implement the descriptor-relative resolver + harden `read`/`write`/`mmap` + add
    `stat`/`list`, with Lua/JS parity tests - STOP.
 3. `BuildContext.inputs` (declared reads + dependency hashing) - STOP.
