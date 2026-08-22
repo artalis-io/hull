@@ -630,6 +630,14 @@ CFLAGS   := -std=c11 -Wall -Wextra -Wpedantic -Wshadow -Wformat=2 \
             -g -O1 -fsanitize=memory,undefined -fno-omit-frame-pointer \
             -D_DEFAULT_SOURCE -DHL_THREAD_AFFINITY_CHECKS
 LDFLAGS  := -fsanitize=memory,undefined
+# WAMR objects are intentionally NOT -fsanitize=memory-instrumented (see
+# mk/vendor/wamr.mk: WAMR_CFLAGS is a fixed base, and sanitizer instrumentation is
+# an explicit WAMR_TSAN=1 opt-in with NO MSan analog). So __has_feature(memory_sanitizer)
+# is false inside WAMR TUs even in an MSan build. Pass HL_MSAN so WAMR patch 0006's
+# targeted __msan_unpoison (which annotates a known shadow-gap false positive at the
+# uninstrumented-WAMR / MSan-intercepted-strcmp boundary) compiles in. WAMR_CFLAGS is
+# already defined here (mk/vendor/wamr.mk is included at Makefile:426, before this).
+WAMR_CFLAGS += -DHL_MSAN
 # Vendor TUs: keep MSan (we still want shadow tracking for uninitialized
 # reads escaping into Hull code) but drop UBSan. The vendored crypto and
 # JS interpreters have well-known "technically UB but works on every

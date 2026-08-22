@@ -1582,6 +1582,14 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y clang
 
+      - name: WAMR MSan shadow-gap annotation policy fixture (patch 0006)
+        # Asserts (against the actual compile commands, not comments) that WAMR
+        # stays uninstrumented under MSan, that -DHL_MSAN is passed so patch 0006's
+        # targeted __msan_unpoison compiles in, that normal builds carry neither,
+        # and that the annotation stays scoped to the signature buffer + placed
+        # before the intercepted comparison. Runs before `make msan` (which cleans).
+        run: make check-wamr-msan-annotation
+
       - name: MSan test
         # Raised 15 -> 30 min. The crypto-heavy auth-stack unit tests
         # (TOTP enrollment / PBKDF2 verify) dominate MSan runtime and

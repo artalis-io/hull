@@ -1,0 +1,37 @@
+diff --git a/core/iwasm/common/wasm_native.c b/core/iwasm/common/wasm_native.c
+index ef482284..d478b6fd 100644
+--- a/core/iwasm/common/wasm_native.c
++++ b/core/iwasm/common/wasm_native.c
+@@ -6,6 +6,15 @@
+ #include "wasm_native.h"
+ #include "wasm_runtime_common.h"
+ #include "bh_log.h"
++/* Hull ext (patch 0006): MemorySanitizer interface for the false-positive
++ * un-poison below. Guarded on Hull's build-level HL_MSAN (set by the msan
++ * target) rather than __has_feature(memory_sanitizer): WAMR objects are
++ * intentionally NOT -fsanitize=memory-instrumented (mk/vendor/wamr.mk), so
++ * __has_feature is false in this TU even in an MSan build. The MSan runtime is
++ * still linked (Hull TUs are instrumented), so __msan_unpoison resolves. */
++#if defined(HL_MSAN)
++#include <sanitizer/msan_interface.h>
++#endif
+ #if WASM_ENABLE_INTERP != 0
+ #include "../interpreter/wasm_runtime.h"
+ #endif
+@@ -1558,6 +1567,16 @@ wasm_native_lookup_quick_aot_entry(const WASMFuncType *func_type)
+             return NULL;
+     }
+ 
++    /* Hull ext (patch 0006): suppress a MemorySanitizer FALSE POSITIVE on the
++     * strcmp/bsearch below. `signature[16] = {0}` initializes the whole buffer in
++     * conforming C (no UB), but WAMR is uninstrumented under MSan, so the
++     * intercepted strcmp reads shadow this TU never maintained and MSan reports it
++     * uninitialized. Un-poison the COMPLETE fixed-size buffer to state that it is
++     * fully initialized (which it is). HL_MSAN-only; a strict no-op otherwise. */
++#if defined(HL_MSAN)
++    bh_assert(j < sizeof(signature));
++    __msan_unpoison(signature, sizeof(signature));
++#endif
+     key.signature = signature;
+     if ((quick_aot_entry =
+              bsearch(&key, quick_aot_entries,
