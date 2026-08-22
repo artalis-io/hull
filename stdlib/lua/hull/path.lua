@@ -85,15 +85,20 @@ end
 -- @treturn string
 function path.join(...)
     local parts = { ... }
-    local buf = {}
+    local buf, n = {}, 0
     for i = 1, select("#", ...) do
         local c = parts[i]
         checktype(c, "join")
         if c ~= "" then
-            buf[#buf + 1] = c
+            if c:sub(1, 1) == "/" then    -- an absolute component RESETS the accumulator
+                buf, n = { c }, 1
+            else
+                n = n + 1
+                buf[n] = c
+            end
         end
     end
-    if #buf == 0 then
+    if n == 0 then
         return "."
     end
     return path.normalize(table.concat(buf, "/"))
@@ -233,6 +238,13 @@ function path.is_within(base, candidate)
         if bsegs[i] ~= csegs[i] then
             return false
         end
+    end
+    -- A candidate component immediately after the base prefix that is ".." escapes
+    -- ABOVE base (only possible for relative paths, where normalize keeps leading
+    -- ".."): e.g. is_within(".", "../x") or is_within("..", "../../x"). Lexical
+    -- containment must reject it - matching the base prefix is not enough.
+    if #csegs > #bsegs and csegs[#bsegs + 1] == ".." then
+        return false
     end
     return true
 end

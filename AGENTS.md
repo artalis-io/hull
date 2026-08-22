@@ -708,6 +708,7 @@ Every module except the intrinsic core must be listed in `manifest.modules`. The
 | `cookie` | `require("hull.web.cookie")` | `import { cookie } from "hull:web:cookie"` | `"hull/web/cookie@1"` | Cookie helpers |
 | `jwt` | `require("hull.jwt")` | `import { jwt } from "hull:jwt"` | `"hull/jwt@1"` | JWT sign/verify (deps: `crypto`) |
 | `csv` | `require("hull.csv")` | `import { csv } from "hull:csv"` | `"hull/csv@1"` | CSV parse/encode |
+| `path` | `require("hull.path")` | `import { path } from "hull:path"` | `"hull/path@1"` | Pure LEXICAL path-name manipulation (`normalize`/`join`/`dirname`/`basename`/`extension`/`stem`/`is_absolute`/`relative`/`is_within`). No fs authority; NOT a security boundary (use `hull.fs` for containment against the resolved object) |
 | `search` | `require("hull.search")` | `import { search } from "hull:search"` | `"hull/search@1"` | FTS5 search (deps: `db`) |
 | `rbac` | `require("hull.web.middleware.rbac")` | `import { rbac } from "hull:web:middleware:rbac"` | `"hull/web/middleware/rbac@1"` | RBAC (deps: `db`) |
 | `i18n` | `require("hull.i18n")` | `import { i18n } from "hull:i18n"` | `"hull/i18n@1"` | Translations |
