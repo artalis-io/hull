@@ -137,8 +137,15 @@ static int build_path(const HlFsConfig *cfg, const char *path,
  * read/write/mmap resolve through the virtual-root resolver (fs_resolve.c)
  * instead of realpath->check->open (docs/hull_fs_design.md §3). base_dir-anchored:
  * open base_dir as a dirfd, resolve `path` under it (symlinks followed but
- * confined), and return the leaf fd. No resolve-then-open window. exists/delete
- * still use build_path() until they gain a resolver mode (a later checkpoint). */
+ * confined), and return the leaf fd. No resolve-then-open window.
+ *
+ * SCOPE (checkpoint 1): only read/write/mmap resolve through fs_resolve_fd().
+ * hl_cap_fs_exists, hl_cap_fs_delete, and any direct hl_cap_fs_validate consumer
+ * still use the OLD build_path()/realpath -> operation path and remain
+ * TOCTOU-susceptible. The cap layer is therefore NOT fully TOCTOU-free yet; those
+ * consumers migrate to a descriptor-relative resolver mode in a later checkpoint
+ * (they need a parent-fd + leaf-name result shape the current READ/WRITE fd modes
+ * don't provide). Tracked follow-up. */
 static int fs_resolve_fd(const HlFsConfig *cfg, const char *path,
                          HlFsOpenMode mode, mode_t cmode, const char **err_msg)
 {

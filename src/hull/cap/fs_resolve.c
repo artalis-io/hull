@@ -16,6 +16,7 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <errno.h>
 #include <limits.h>
@@ -25,7 +26,8 @@
 #define HL_FS_PATH_MAX 4096
 #endif
 #define HL_FS_SYMLINK_MAX 40   /* matches the kernel ELOOP budget */
-#define HL_FS_MAX_DEPTH   256  /* directory-fd stack bound */
+/* HL_FS_MAX_DEPTH is the public component-depth limit (fs_resolve.h); it also
+ * bounds the manual walk's directory-fd stack. */
 
 static void map_errno(int e, const char **err)
 {
@@ -41,10 +43,20 @@ static void map_errno(int e, const char **err)
     }
 }
 
-/* ── caller-path lexical pre-check (docs §3/§5): relative, no ".." ─────────── */
+/* ── caller-path lexical pre-check (docs §3/§5) ────────────────────────────────
+ * Relative, no "..", and no TRAILING slash. The trailing-slash rejection is a
+ * cross-platform PARITY guard: a directory-shaped path like "file/" must not open
+ * a regular file. `openat2` rejects it (ENOTDIR for a file leaf); the manual walk,
+ * left to itself, would strip the trailing slash and open "file" as a leaf (and
+ * under WRITE could even create/truncate a regular file at a directory-shaped
+ * path). Rejecting it here — BEFORE either implementation runs — makes both agree.
+ * READ/WRITE are leaf-file modes, so a trailing slash is never valid for them;
+ * directory modes (stat/list, a later checkpoint) will pre-check differently. */
 static int caller_path_ok(const char *p)
 {
     if (!p || p[0] == '\0' || p[0] == '/') return 0;   /* empty or absolute */
+    size_t len = strlen(p);
+    if (p[len - 1] == '/') return 0;                   /* trailing slash (dir-shaped) */
     const char *c = p;
     while (*c) {
         if (c[0] == '.' && c[1] == '.' && (c[2] == '/' || c[2] == '\0'))
@@ -55,6 +67,39 @@ static int caller_path_ok(const char *p)
     }
     return 1;
 }
+
+/* Count the resolvable components of a caller path (non-empty, non-"." segments;
+ * "." adds no depth, "..") is already rejected). Used to enforce the public
+ * HL_FS_MAX_DEPTH bound BEFORE both implementations so `openat2` (which has no
+ * component-count limit of its own) and the manual walk (whose held-fd stack is
+ * bounded) accept/reject the same caller paths. */
+static size_t caller_component_count(const char *p)
+{
+    size_t n = 0;
+    const char *c = p;
+    while (*c) {
+        while (*c == '/') c++;
+        if (*c == '\0') break;
+        const char *s = strchr(c, '/');
+        size_t l = s ? (size_t)(s - c) : strlen(c);
+        if (!(l == 1 && c[0] == '.')) n++;   /* skip "." segments (zero depth) */
+        if (!s) break;
+        c = s;
+    }
+    return n;
+}
+
+/* Test/diagnostic hook: HL_FS_FORCE_MANUAL forces the portable manual walk even on
+ * Linux, so the parity tests can exercise both implementations on one platform.
+ * NOT a security downgrade — both implement the same virtual-root contract. Read
+ * per call (negligible next to the resolution syscalls) so a test can toggle it at
+ * runtime. Only meaningful where the openat2 fast path exists. */
+#if defined(__linux__) && !defined(__COSMOPOLITAN__)
+static int force_manual(void)
+{
+    return getenv("HL_FS_FORCE_MANUAL") != NULL;
+}
+#endif
 
 /* ── Linux openat2 fast-path ──────────────────────────────────────────────── */
 /* Cosmopolitan (fat APE) uses the portable manual walk, not a Linux raw syscall. */
@@ -164,7 +209,7 @@ static int resolve_manual(int root_fd, const char *relpath, HlFsOpenMode mode,
             int fd = openat(stack[depth - 1], comp,
                             O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
             if (fd >= 0) {
-                if (depth >= HL_FS_MAX_DEPTH) { close(fd); *err = "invalid_path"; goto fail; }
+                if (depth >= HL_FS_MAX_DEPTH) { close(fd); *err = "path_too_deep"; goto fail; }
                 stack[depth++] = fd;
                 cur = rest;
                 continue;
@@ -177,7 +222,7 @@ static int resolve_manual(int root_fd, const char *relpath, HlFsOpenMode mode,
                 fd = openat(stack[depth - 1], comp,
                             O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
                 if (fd < 0) { map_errno(errno, err); goto fail; }
-                if (depth >= HL_FS_MAX_DEPTH) { close(fd); *err = "invalid_path"; goto fail; }
+                if (depth >= HL_FS_MAX_DEPTH) { close(fd); *err = "path_too_deep"; goto fail; }
                 stack[depth++] = fd;
                 cur = rest;
                 continue;
@@ -240,11 +285,19 @@ int hl_fs_open_at(int root_fd, const char *relpath, HlFsOpenMode mode,
     const char *e = "io_error";
     if (root_fd < 0 || !relpath) { if (err) *err = "invalid_args"; return -1; }
     if (!caller_path_ok(relpath)) { if (err) *err = "invalid_path"; return -1; }
+    /* Public depth bound, enforced BEFORE either implementation so both accept /
+     * reject the same caller paths (openat2 has no component-count limit; the
+     * manual walk's held-fd stack does). See HL_FS_MAX_DEPTH in fs_resolve.h. */
+    if (caller_component_count(relpath) > HL_FS_MAX_DEPTH) {
+        if (err) *err = "path_too_deep";
+        return -1;
+    }
 
 #if defined(__linux__) && !defined(__COSMOPOLITAN__)
     /* openat2 does not create intermediate dirs, so WRITE always uses the manual
-     * walk (which does the contained mkdir-p). READ takes the one-call fast path. */
-    if (mode == HL_FS_OPEN_READ) {
+     * walk (which does the contained mkdir-p). READ takes the one-call fast path,
+     * unless HL_FS_FORCE_MANUAL is set (parity testing). */
+    if (mode == HL_FS_OPEN_READ && !force_manual()) {
         int fd = try_openat2(root_fd, relpath, O_RDONLY | O_CLOEXEC, 0, &e);
         if (fd >= 0) return fd;
         if (fd == -1) { if (err) *err = e; return -1; }

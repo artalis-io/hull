@@ -222,4 +222,134 @@ UTEST(fs_resolve, symlink_loop_bounded)
     teardown();
 }
 
+/* Select the resolver implementation for a pass: 0 = default (openat2 fast path on
+ * Linux, manual elsewhere), 1 = forced manual on every platform. force_manual()
+ * re-reads the env, so this switches paths at runtime for parity testing. */
+static void select_path(int pass)
+{
+    if (pass == 0) unsetenv("HL_FS_FORCE_MANUAL");
+    else setenv("HL_FS_FORCE_MANUAL", "1", 1);
+}
+
+/* ── Fix 1: trailing-slash caller paths are rejected for READ/WRITE leaf modes,
+ * identically on openat2 and the manual walk (a dir-shaped path must not open a
+ * regular file, and WRITE must not create/truncate one). ──────────────────── */
+UTEST(fs_resolve, trailing_slash_regular_file)
+{
+    setup();
+    wfile("rf", "x");
+    const char *err = NULL;
+    int root = hl_fs_open_base(base, &err);
+    for (int pass = 0; pass < 2; pass++) {
+        select_path(pass);
+        err = NULL;
+        int fd = hl_fs_open_at(root, "rf/", HL_FS_OPEN_READ, 0, &err);
+        ASSERT_EQ(fd, -1);
+        ASSERT_STREQ("invalid_path", err);
+    }
+    unsetenv("HL_FS_FORCE_MANUAL");
+    close(root); teardown();
+}
+UTEST(fs_resolve, trailing_slash_directory)
+{
+    setup();
+    mkdirp_host("d");
+    const char *err = NULL;
+    int root = hl_fs_open_base(base, &err);
+    for (int pass = 0; pass < 2; pass++) {
+        select_path(pass);
+        err = NULL;
+        int fd = hl_fs_open_at(root, "d/", HL_FS_OPEN_READ, 0, &err);
+        ASSERT_EQ(fd, -1);              /* dir-shaped path rejected on both */
+        ASSERT_STREQ("invalid_path", err);
+    }
+    unsetenv("HL_FS_FORCE_MANUAL");
+    close(root); teardown();
+}
+UTEST(fs_resolve, trailing_slash_symlink_to_file)
+{
+    setup();
+    wfile("real", "x");
+    symln("real", "l2f");               /* symlink to a regular file */
+    const char *err = NULL;
+    int root = hl_fs_open_base(base, &err);
+    for (int pass = 0; pass < 2; pass++) {
+        select_path(pass);
+        err = NULL;
+        int fd = hl_fs_open_at(root, "l2f/", HL_FS_OPEN_READ, 0, &err);
+        ASSERT_EQ(fd, -1);
+        ASSERT_STREQ("invalid_path", err);
+    }
+    unsetenv("HL_FS_FORCE_MANUAL");
+    close(root); teardown();
+}
+UTEST(fs_resolve, trailing_slash_write_target)
+{
+    setup();
+    const char *err = NULL;
+    int root = hl_fs_open_base(base, &err);
+    for (int pass = 0; pass < 2; pass++) {
+        select_path(pass);
+        err = NULL;
+        int fd = hl_fs_open_at(root, "wt/", HL_FS_OPEN_WRITE, 0644, &err);
+        ASSERT_EQ(fd, -1);              /* must NOT create/truncate a file at "wt/" */
+        ASSERT_STREQ("invalid_path", err);
+    }
+    unsetenv("HL_FS_FORCE_MANUAL");
+    /* and no stray file was created at "wt" */
+    char pth[512]; snprintf(pth, sizeof(pth), "%s/wt", base);
+    struct stat st; ASSERT_NE(0, stat(pth, &st));
+    close(root); teardown();
+}
+
+/* ── Fix 2: the HL_FS_MAX_DEPTH component limit is enforced BEFORE both
+ * implementations, so openat2 and the manual walk agree at the boundary. ──── */
+static char *deep_path(int n)   /* "c/c/.../c" with n components (caller owns) */
+{
+    char *b = (char *)malloc((size_t)n * 2 + 1);
+    int o = 0;
+    for (int i = 0; i < n; i++) { if (i) b[o++] = '/'; b[o++] = 'c'; }
+    b[o] = '\0';
+    return b;
+}
+UTEST(fs_resolve, depth_at_limit_accepted)
+{
+    setup();
+    const char *err = NULL;
+    int root = hl_fs_open_base(base, &err);
+    char *p = deep_path(HL_FS_MAX_DEPTH);         /* exactly at the limit */
+    for (int pass = 0; pass < 2; pass++) {
+        select_path(pass);
+        err = NULL;
+        /* WRITE creates the parents + leaf; must NOT be rejected as too deep */
+        int fd = hl_fs_open_at(root, p, HL_FS_OPEN_WRITE, 0644, &err);
+        if (fd < 0) ASSERT_STRNE("path_too_deep", err ? err : "");
+        else close(fd);
+        err = NULL;
+        int rfd = hl_fs_open_at(root, p, HL_FS_OPEN_READ, 0, &err);  /* also openat2 */
+        if (rfd < 0) ASSERT_STRNE("path_too_deep", err ? err : "");
+        else close(rfd);
+    }
+    unsetenv("HL_FS_FORCE_MANUAL");
+    free(p); close(root); teardown();
+}
+UTEST(fs_resolve, depth_over_limit_rejected)
+{
+    setup();
+    const char *err = NULL;
+    int root = hl_fs_open_base(base, &err);
+    char *p = deep_path(HL_FS_MAX_DEPTH + 1);      /* boundary + 1 */
+    for (int pass = 0; pass < 2; pass++) {
+        select_path(pass);
+        err = NULL;
+        ASSERT_EQ(-1, hl_fs_open_at(root, p, HL_FS_OPEN_READ, 0, &err));
+        ASSERT_STREQ("path_too_deep", err);        /* identical on both paths */
+        err = NULL;
+        ASSERT_EQ(-1, hl_fs_open_at(root, p, HL_FS_OPEN_WRITE, 0644, &err));
+        ASSERT_STREQ("path_too_deep", err);
+    }
+    unsetenv("HL_FS_FORCE_MANUAL");
+    free(p); close(root); teardown();
+}
+
 UTEST_MAIN();

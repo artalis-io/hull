@@ -21,6 +21,19 @@
 
 #include <sys/types.h>
 
+/*
+ * Public, deterministic path-component-depth limit. A caller path with more than
+ * this many resolvable components is rejected ("path_too_deep") BEFORE either
+ * implementation runs, so `openat2` (which has no component-count limit) and the
+ * manual held-fd-stack walk (which is bounded by open-fd count) accept/reject the
+ * same caller paths — a documented common limit, not platform-dependent behavior.
+ * The manual walk additionally enforces the same bound on the fully-resolved path
+ * (post-symlink-expansion); `openat2`'s in-kernel resolution stays within the
+ * kernel's own PATH_MAX/ELOOP bounds. Kept well under RLIMIT_NOFILE so the manual
+ * walk never exhausts descriptors.
+ */
+#define HL_FS_MAX_DEPTH 256
+
 typedef enum {
     HL_FS_OPEN_READ,  /* open an existing leaf O_RDONLY (symlinks followed, contained) */
     HL_FS_OPEN_WRITE, /* mkdir-p parents (contained) + open leaf O_WRONLY|O_CREAT|O_TRUNC */
@@ -41,13 +54,15 @@ int hl_fs_open_base(const char *base_dir, const char **err);
  *   HL_FS_OPEN_WRITE -> creates missing parent dirs (contained, mkdirat) and
  *                       returns an O_WRONLY|O_CREAT|O_TRUNC fd to the leaf.
  *
- * `relpath` MUST be relative and MUST NOT contain ".." components (the caller
- * performs that lexical pre-check; a violation returns "invalid_path"). Symlink
- * targets ENCOUNTERED on disk MAY be absolute or contain "..": those are
- * virtual-rooted (re-root / clamp at `root_fd`), never an escape.
+ * `relpath` MUST be relative, MUST NOT contain ".." components, MUST NOT end in a
+ * trailing slash (directory-shaped; these are leaf-file modes), and MUST have at
+ * most HL_FS_MAX_DEPTH components (the caller-path lexical pre-check; violations
+ * return "invalid_path" / "path_too_deep"). Symlink targets ENCOUNTERED on disk
+ * MAY be absolute or contain "..": those are virtual-rooted (re-root / clamp at
+ * `root_fd`), never an escape.
  *
  * Returns an open fd (caller closes) or -1 with *err set to a stable token:
- * "invalid_path", "not_found", "permission", "not_a_directory",
+ * "invalid_path", "path_too_deep", "not_found", "permission", "not_a_directory",
  * "is_a_directory", "symlink_loop", "io_error".
  */
 int hl_fs_open_at(int root_fd, const char *relpath, HlFsOpenMode mode,
