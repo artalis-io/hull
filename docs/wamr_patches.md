@@ -433,6 +433,8 @@ audit). Deterministic apply/verify + CI dry-run live in that script.
 | 0002 | `0002-shared-heap-readonly-permission.patch` | 81832 | Read-only shared-heap permission: metadata (`SharedHeapInitArgs.read_only`, `WASMSharedHeap.read_only`, interp/AOT extra caches), AOT ABI versioning (`AOT_CURRENT_VERSION` 6->7 + deterministic offset 40 + asserts), interpreter enforcement (`wasm_interp_fast.c`), AOT enforcement (`aot_emit_memory.{c,h}`, `aot_llvm.{c,h}`, `simd/simd_load_store.c`, `aot_emit_stringref.c`, `aot_runtime.c` memory.init), the deterministic fixture generator, the `test_readonly.wat` fixture source, and the full trap/matrix tests. | `310706eb6a36ae33756c85997b6599b4855d279e350ba7dae7c5b0353a6c8177` |
 | 0003 | `0003-shared-heap-destroy.patch` | 10293 | Per-heap shared-heap destruction (design: `docs/wamr_shared_heap_destroy_design.md`). Adds `wasm_runtime_destroy_shared_heap` (fail-closed: identity-search before deref, then detached + unchained + pre-allocated under `shared_heap_list_lock`, unlink+free in one critical section), the MANDATORY registration check in `attach_shared_heap_internal` (membership confirmed before any deref/mutation; the former inner `attached_count++` lock is subsumed into the single top-level critical section), the one-line `read_only` reset in `detach_shared_heap_internal`, and a TEST-ONLY `wasm_runtime_shared_heap_count` list-length probe. Two files: `core/iwasm/common/wasm_memory.c`, `core/iwasm/include/wasm_export.h`. Orthogonal to 0002's interp/AOT store-gate sites. | `e8f3362cfef0dccc975c3e687390429f06a0d0c63d73f3959be7a5c36f1f1d2c` |
 | 0004 | `0004-shared-heap-guarded-subrange.patch` | 12856 | Guarded-subrange read-only spans (Design B; design: `docs/wamr_shared_heap_guarded_subrange_design.md`). Adds a per-heap valid sub-window (`WASMSharedHeap.valid_offset`/`valid_size`, `SharedHeapInitArgs.valid_offset`/`valid_size`) so a pre-allocated heap exposes only `[valid_offset, valid_offset+valid_size)` inside the reserved `[0, size)` region; native base = `map_base`, reserved size = `map_len`, so the reserved range always sits inside the mmap (a missed guard is an in-mapping over-read, never SIGBUS). Placement/overlap keep the reserved `size` (`start_off`, chaining); only the access bound moves: `update_last_used_shared_heap` derives the cached lower bound `start_off+valid_offset` and upper bound `+valid_size-1` (interp + AOT read them as runtime fields, so NO emitted-code change and NO AOT version bump), plus the `is_app_addr`/`is_native_addr` chain-walk valid sub-window and the reset memset. `valid_size==0` => full heap (back-compat; runtime-managed forced full). `create` rejects nonzero-offset-with-full-size, `valid_offset+valid_size>size`, overflow, and a sub-window on a non-pre-allocated heap. Three files: `core/iwasm/interpreter/wasm_runtime.h`, `core/iwasm/include/wasm_export.h`, `core/iwasm/common/wasm_memory.c`. | `e5bf6e04b89d878745198421ad9cbf94ac567edf07297887354b35d98b7f4dbd` |
+| 0005 | `0005-memory64-public-accessor.patch` | 2053 | Public read of the internal `is_memory64` flag (`wasm_runtime_memory_is_memory64`), so `cap/wasm.c` detects Memory64 without a WAMR-internal header. `core/iwasm/common/wasm_memory.c`, `core/iwasm/include/wasm_export.h`. | `b7d211638ebb9fc44602819134111709fe88c0f89a2533aac776ce0b002f9924` |
+| 0006 | `0006-quick-aot-signature-msan-unpoison.patch` | ~1.7K | **MSan shadow-gap false-positive suppression (NOT a C uninitialized-read defect).** `wasm_native_lookup_quick_aot_entry` builds `char signature[16] = {0}` via indexed writes and `strcmp`s it (through `bsearch`). `= {0}` zero-initializes all 16 bytes → **no UB**. WAMR objects are **intentionally not `-fsanitize=memory`-instrumented** (mk/vendor/wamr.mk; sanitizer instrumentation is an explicit `WAMR_TSAN=1` opt-in with no MSan analog - proven by the actual compile command, not comments), so the MSan-intercepted `strcmp` reads shadow this TU never maintained and reports it uninitialized - a **shadow-gap false positive**. (An explicit terminator AND an `__has_feature`-guarded un-poison were both tried and proved ineffective - the former is redundant, the latter compiles out because `__has_feature(memory_sanitizer)` is false in the uninstrumented WAMR TU.) Fix: pass a build-level `-DHL_MSAN` to WAMR under the msan target (`mk/tests.mk`) and, guarded on `#if defined(HL_MSAN)`, `__msan_unpoison(signature, sizeof(signature))` the complete buffer immediately before `bsearch` (the MSan runtime is linked because Hull TUs are instrumented). Keeps `test_wasm_spans` under MSan; **zero** in normal builds (verified: no `__msan_unpoison` symbol). Two hunks (guarded include + call) + the `mk/tests.mk` define. See "Patch 0006" below. | `a9b72f211084737317d39a5872161db27d799f09a59cd4d1c16acc4bb53379d2` |
 
 The three patches are kept SEPARATE so the test-harness portability change (0001),
 the read-only enforcement (0002), and the lifecycle/reclamation change (0003) are
@@ -460,3 +462,101 @@ double-destroy race. Adding upstream-style WAMR-unit `TEST_F`s is a follow-up if
 `tests/unit/shared-heap/{CMakeLists.txt, shared_heap_test.cc}`; new
 `tests/unit/shared-heap/gen_readonly_fixtures.sh` and
 `tests/unit/shared-heap/wasm-apps/test_readonly.wat`.
+
+## Patch 0006 - quick-AOT signature MSan false-positive un-poison
+
+**Surfaced by** the hull.fs checkpoint-1 resolver work (#397): its MSan job failed
+inside vendored WAMR, unrelated to the resolver's logic. Investigated as a real
+sanitizer finding (not excluded).
+
+### Not a C uninitialized-read defect
+`wasm_native_lookup_quick_aot_entry` (`core/iwasm/common/wasm_native.c`) computes a
+function-type signature string:
+```c
+char signature[16] = { 0 };
+...
+signature[j++] = '(';
+for (params) signature[j++] = 'i'|'I';
+signature[j++] = ')';
+signature[j++] = (result_count == 0) ? 'v' : ('i'|'I');
+key.signature = signature;
+bsearch(&key, quick_aot_entries, ..., quick_aot_entry_cmp);  /* -> strcmp */
+```
+**`char signature[16] = { 0 }` initializes all 16 bytes to zero** (guaranteed by C),
+so the string is well-terminated after the indexed writes and there is **no
+undefined behavior** - WAMR is not relying on indeterminate storage. A conforming
+optimizer may elide physical zeroing only while preserving that observable
+initialization.
+
+The mechanism is a **shadow gap, not a program defect**. WAMR objects are
+**intentionally not `-fsanitize=memory`-instrumented** - proven by the actual
+compile command, not comments: `mk/vendor/wamr.mk` sets `WAMR_CFLAGS :=` to a fixed
+`-O2 -w` base and adds a sanitizer only under the explicit `WAMR_TSAN=1` opt-in
+(no MSan analog), and `make MSAN=1 -n` on `build/wamr_core/iwasm/common/wasm_native.o`
+deterministically shows `-O2 -w` with no `-fsanitize=memory`. Because `wasm_native.c`
+is uninstrumented, its stores to `signature` do not update MSan's shadow, so MSan's
+`strcmp` interceptor (always active) reads stale/poisoned shadow left on the stack
+by previously-executed instrumented code and reports a false positive. It is
+layout-sensitive (the shadow is usually clean; the checkpoint-1 change's footprint
+makes it poisoned). The bytes read do not affect the comparison, so the read cannot
+affect behavior.
+
+### Two prior attempts, and why they failed
+1. **Explicit terminator** (`signature[j] = '\0';`): semantically redundant (the
+   `= {0}` already initializes the buffer), so it changed nothing; the composed MSan
+   validation still failed with the identical frame.
+2. **`__has_feature(memory_sanitizer)`-guarded un-poison:** compiled **out** - since
+   WAMR is uninstrumented, `__has_feature(memory_sanitizer)` is false inside
+   `wasm_native.c` even in an MSan build, so the annotation never reached the object.
+   The composed validation again failed identically.
+
+### The change (build-level HL_MSAN un-poison)
+The finding is at an **uninstrumented-WAMR / MSan-intercepted-`strcmp` boundary**, so
+the guard must reflect the OVERALL build being MSan, not this TU's own instrumentation.
+`mk/tests.mk`'s MSan block passes `WAMR_CFLAGS += -DHL_MSAN`; the patch then, guarded
+on `#if defined(HL_MSAN)`, un-poisons the complete buffer immediately before the
+`bsearch`:
+```c
+#if defined(HL_MSAN)
+    bh_assert(j < sizeof(signature));
+    __msan_unpoison(signature, sizeof(signature));
+#endif
+    key.signature = signature;
+```
+plus a matching `#if defined(HL_MSAN)`-guarded `#include <sanitizer/msan_interface.h>`
+at file scope. The MSan runtime is linked (Hull's own TUs are instrumented), so
+`__msan_unpoison` resolves from an uninstrumented TU. This annotates exactly the
+known false-positive shadow state on the complete object, keeps `test_wasm_spans` (and
+the rest of `wasm_native.c`) under MSan, and is a strict no-op in every non-MSan build.
+**Verified deterministically (fixtures, not comments):** `make MSAN=1 -n` shows
+`-DHL_MSAN` on the `wasm_native.o` command; a normal build's `wasm_native.o` references
+no `__msan_unpoison` symbol. Not a whole-test exclusion.
+
+### Investigation record (checkpoint-1 MSan, WAMR base c3a78cd1 / 2.4.1-218)
+- **Read site** `wasm_native.c:1525` `wasm_native_lookup_quick_aot_entry`; **inlined
+  into** `load_from_sections` (`wasm_loader.c`), reached from `wasm_runtime_load`
+  at `tests/hull/cap/test_wasm_spans.c:120` (module load - BEFORE any Hull-fs code
+  runs, so the resolver logic is not on the stack).
+- **Stage-2 checklist (all clear):** the module's two func types are `(i32)->()`
+  and `(i32)->(i32)`; `WASMFuncType.types[]` is a flexible-array member sized
+  `param_count+result_count`, allocated by `loader_malloc` (non-zeroing) and each
+  entry written (`wasm_loader.c:1829`/`1847`). The lookup reads only written indices
+  (`types[0..param_count]`) - **no over-read, no unwritten `types[]` index, no
+  struct-padding read**. The flagged value is NOT in `types[]`; it is the
+  `signature` stack buffer's terminator region, which `= {0}` initializes. So the
+  checklist finds no genuine uninitialized read - consistent with an
+  optimizer/instrumentation false positive.
+- **Layout sensitivity:** clean `main` and a control (`main` + a comparably-placed
+  dummy cap TU) both PASS MSan; #397 fails. The false positive is exposed by the
+  change's binary-layout/heap footprint, not by any resolver logic (which is not on
+  the stack). `track_origins=2` reproduced on the #397 config (did NOT mask it) and
+  produced the stack origin above.
+- **Upstream:** there is no bug to fix upstream (`= {0}` is sufficient in conforming
+  C). The `__msan_unpoison` annotation is a Hull-local sanitizer accommodation for a
+  toolchain false positive, kept as an out-of-tree patch rather than pushed upstream
+  (WAMR does not carry MSan annotations in this path). If a future clang/MSan no
+  longer mis-instruments the optimized `strcmp`, this patch can simply be dropped.
+
+Covered by the existing `test_wasm_spans` / `test_wasm` suites under the MSan CI
+leg (the false positive manifests there); the change turns that leg green on the
+composed resolver branch without reducing coverage.
