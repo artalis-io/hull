@@ -76,16 +76,24 @@ tracked path; until then this asymmetry is ratified as above.
 ## Race resistance
 
 `component_swap_race_stays_contained` spawns a thread that continuously flips an
-interior path component (`a/mid`) between a real directory and a symlink to `/`
-(which would escape the sandbox if followed as a raw host path), while the main
-thread resolves `a/mid/f` thousands of times through **both** implementations. The
-invariant asserted on every iteration:
+interior path component (`a/mid`) between a real directory and a **symlink to an
+external sentinel directory** (outside `base_dir`, containing a file `f` with
+contents `SECRET-SENTINEL`), while the main thread resolves `a/mid/f` up to 8000
+iterations through **both** implementations. The invariants, asserted with enough
+context to reproduce a failure (the swapper seed, the first failing iteration, and
+which implementation):
 
-- a successful resolve returns **only** the in-base file's content (never anything
-  outside `base_dir`);
-- a failed resolve returns **only** a known contained token
-  (`not_found` / `not_a_directory` / `symlink_loop` / `permission` / `io_error` /
-  `path_too_deep` / `invalid_path`).
+- **no iteration ever reads the external sentinel** — a successful resolve returns
+  **only** the in-base file's content (`inbase`); reading `SECRET-SENTINEL` would
+  mean containment failed and the escaping symlink was followed as a raw host path;
+- a failed resolve returns **only** a known *contained* token (`not_found` /
+  `not_a_directory` / `symlink_loop` / `permission` / `io_error` / `path_too_deep`
+  / `invalid_path`) — transient failures during a swap are distinguished from any
+  unexpected error;
+- the loop is **bounded** (8000 iterations and a 60 s wall-clock cap);
+- **file-descriptor count is bounded** — the process's open-fd count is sampled
+  before and after and must not grow, proving the resolver leaks no descriptors
+  across the run.
 
 This holds structurally: each component is opened `O_NOFOLLOW` relative to a held
 fd, so a component swapped **after** it is opened binds the already-held inode, and
@@ -93,6 +101,18 @@ a component swapped **to a symlink before** it is opened is caught by `O_NOFOLLO
 and re-rooted/clamped by the virtual-root splice — never followed as a raw host
 path. openat2 gets the same guarantee from `RESOLVE_IN_ROOT` in-kernel. The test
 makes that structural property observable under real concurrent mutation.
+
+**Sanitizers.** The harness runs under ASan + MSan via the normal test discovery,
+and is added to the TSan suite (`TSAN_TESTS`) so the thread race itself is checked:
+the only shared memory is an `atomic_int` stop flag (not `volatile`), and the
+concurrency is filesystem-level (mkdir/symlink/unlink vs `openat` resolution),
+which TSan tolerates.
+
+**Exercised, not dormant.** The ratified divergence probes `openat2` availability
+(`__NR_openat2`); where openat2 is present (Linux CI) the test REQUIRES the
+divergence to actually occur (openat2 succeeds while the manual walk rejects) rather
+than passing vacuously — so a regression that silently stops using openat2 fails the
+assertion instead of hiding.
 
 ## Scope
 

@@ -743,7 +743,12 @@ msan:
 # single-threaded so they add no race coverage. TSAN=1 appends
 # -fsanitize=thread to Hull's own TUs; vendor objects (WAMR, mbedTLS,
 # keel.a) stay uninstrumented, which TSan tolerates.
-TSAN_TESTS := test_wasm test_async_backend test_async_backend_poll
+#   - test_fs_resolve_parity : the fs resolver's component-swap RACE harness
+#     (a swapper thread mutates the tree while the resolver runs). The only
+#     shared memory is the atomic stop flag; the concurrency is filesystem-level
+#     (mkdir/symlink/unlink vs openat resolution), which TSan tolerates. Proves
+#     the resolver's containment holds under a real thread race.
+TSAN_TESTS := test_wasm test_async_backend test_async_backend_poll test_fs_resolve_parity
 tsan:
 	$(MAKE) clean
 	$(MAKE) TSAN=1 $(addprefix $(BUILDDIR)/,$(TSAN_TESTS))
