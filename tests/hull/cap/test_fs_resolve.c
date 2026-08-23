@@ -18,6 +18,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <ftw.h>
+#include <signal.h>
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -161,6 +162,20 @@ UTEST(fs_resolve, symlink_in_base_followed)
     int fd = hl_fs_open_at(root, "link", HL_FS_OPEN_READ, 0, &err);
     ASSERT_GE(fd, 0);
     char b[64]; ASSERT_STREQ("payload", slurp(fd, b, sizeof(b)));
+    close(fd); close(root);
+    teardown();
+}
+
+UTEST(fs_resolve, symlink_interior_component_followed)
+{
+    setup();
+    mkdirp_host("realdir"); wfile("realdir/leaf", "viaint");
+    symln("realdir", "dsym");             /* symlink used as a NON-final component */
+    const char *err = NULL;
+    int root = hl_fs_open_base(base, &err);
+    int fd = hl_fs_open_at(root, "dsym/leaf", HL_FS_OPEN_READ, 0, &err);
+    ASSERT_GE(fd, 0);                      /* must follow the interior symlink, not ENOTDIR */
+    char b[64]; ASSERT_STREQ("viaint", slurp(fd, b, sizeof(b)));
     close(fd); close(root);
     teardown();
 }
@@ -350,6 +365,87 @@ UTEST(fs_resolve, depth_over_limit_rejected)
     }
     unsetenv("HL_FS_FORCE_MANUAL");
     free(p); close(root); teardown();
+}
+
+/* ── Fix 3 (checkpoint-2 review): a non-directory INTERIOR component is CLASSIFIED
+ * (fstatat) before being opened, so it is rejected as "not_a_directory" WITHOUT
+ * being opened. This closes a resolution-hang DoS: opening an attacker-planted
+ * interior FIFO O_RDONLY (no O_NONBLOCK) blocks forever. A bounded SIGALRM
+ * watchdog proves resolution returns promptly instead of blocking. Rejected
+ * identically by openat2 (ENOTDIR in-kernel) and the manual walk (fstatat).
+ * The interior-symlink regression (symlink_interior_component_followed) above
+ * proves a symlink is still followed, not misclassified.
+ *
+ * The FIFO watchdog test is compiled out on Cosmopolitan: cosmo's headers do
+ * not declare mkfifo under the feature level Hull's tests use (the project sets
+ * no feature macro for cosmo, per tests/sandbox_violation.c), and no other Hull
+ * code needs it. The manual held-fd walk is identical C on every platform and
+ * is no-block-proven here on macOS + Linux-forced-manual; interior_regular_file
+ * _rejected (below, unguarded) still exercises the classify-before-open path on
+ * cosmo. ──────────────────────────────────────────────────────────────────── */
+#if !defined(__COSMOPOLITAN__)
+static void on_resolve_timeout(int sig)
+{
+    (void)sig;
+    static const char m[] =
+        "FATAL: fs resolve BLOCKED on a non-directory interior component\n";
+    ssize_t n = write(2, m, sizeof(m) - 1); (void)n;
+    _exit(97);   /* fail the whole test binary loudly if the resolver ever hangs */
+}
+
+UTEST(fs_resolve, interior_fifo_rejected_without_blocking)
+{
+    setup();
+    char fp[512]; snprintf(fp, sizeof(fp), "%s/fifo", base);
+    ASSERT_EQ(0, mkfifo(fp, 0644));            /* interior FIFO, no writer -> would hang */
+    const char *err = NULL;
+    int root = hl_fs_open_base(base, &err);
+    ASSERT_GE(root, 0);
+
+    struct sigaction sa; memset(&sa, 0, sizeof(sa));
+    sa.sa_handler = on_resolve_timeout;
+    sigaction(SIGALRM, &sa, NULL);
+
+    for (int pass = 0; pass < 2; pass++) {     /* openat2 fast path + forced manual */
+        select_path(pass);
+        err = NULL;
+        alarm(5);                              /* watchdog: fires only if resolve blocks */
+        int fd = hl_fs_open_at(root, "fifo/leaf", HL_FS_OPEN_READ, 0, &err);
+        alarm(0);                              /* completed promptly -> cancel */
+        ASSERT_EQ(fd, -1);
+        ASSERT_STREQ("not_a_directory", err);  /* classified, never opened */
+    }
+    /* WRITE mode (always the manual walk) must likewise classify, not block. */
+    select_path(1);
+    err = NULL;
+    alarm(5);
+    int wfd = hl_fs_open_at(root, "fifo/leaf", HL_FS_OPEN_WRITE, 0644, &err);
+    alarm(0);
+    ASSERT_EQ(wfd, -1);
+    ASSERT_STREQ("not_a_directory", err);
+
+    signal(SIGALRM, SIG_DFL);
+    unsetenv("HL_FS_FORCE_MANUAL");
+    close(root); teardown();
+}
+#endif  /* !__COSMOPOLITAN__ (mkfifo undeclared on cosmo) */
+
+UTEST(fs_resolve, interior_regular_file_rejected)
+{
+    setup();
+    wfile("rf", "x");                          /* interior regular file */
+    const char *err = NULL;
+    int root = hl_fs_open_base(base, &err);
+    ASSERT_GE(root, 0);
+    for (int pass = 0; pass < 2; pass++) {
+        select_path(pass);
+        err = NULL;
+        int fd = hl_fs_open_at(root, "rf/leaf", HL_FS_OPEN_READ, 0, &err);
+        ASSERT_EQ(fd, -1);
+        ASSERT_STREQ("not_a_directory", err);  /* rejected without opening */
+    }
+    unsetenv("HL_FS_FORCE_MANUAL");
+    close(root); teardown();
 }
 
 UTEST_MAIN();

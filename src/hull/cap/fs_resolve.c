@@ -26,6 +26,7 @@
 #define HL_FS_PATH_MAX 4096
 #endif
 #define HL_FS_SYMLINK_MAX 40   /* matches the kernel ELOOP budget */
+#define HL_FS_RECLASSIFY_MAX 64 /* bound interior classify<->open TOCTOU retries */
 /* HL_FS_MAX_DEPTH is the public component-depth limit (fs_resolve.h); it also
  * bounds the manual walk's directory-fd stack. */
 
@@ -205,30 +206,64 @@ static int resolve_manual(int root_fd, const char *relpath, HlFsOpenMode mode,
         int last = (*tail == '\0');
 
         if (!last) {
-            /* interior: descend into a directory, following a symlink if present */
-            int fd = openat(stack[depth - 1], comp,
-                            O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
-            if (fd >= 0) {
-                if (depth >= HL_FS_MAX_DEPTH) { close(fd); *err = "path_too_deep"; goto fail; }
-                stack[depth++] = fd;
-                cur = rest;
-                continue;
-            }
-            if (errno == ELOOP || errno == EMLINK) goto symlink;
-            if (errno == ENOENT && mode == HL_FS_OPEN_WRITE) {
-                if (mkdirat(stack[depth - 1], comp, 0755) < 0 && errno != EEXIST) {
+            /* INTERIOR component: descend into a directory.
+             *
+             * CLASSIFY BEFORE OPENING. Opening an arbitrary interior inode merely
+             * to learn its type is unsafe: an attacker-planted FIFO opened O_RDONLY
+             * without O_NONBLOCK blocks resolution indefinitely, and device nodes
+             * can carry open-time side effects. fstatat(AT_SYMLINK_NOFOLLOW) is an
+             * lstat - it never blocks and never triggers device semantics:
+             *   - a symlink     -> expand via readlinkat (below); never opened.
+             *   - not a dir     -> "not_a_directory"; never opened (FIFO/dev/reg).
+             *   - a directory   -> open it O_RDONLY|O_DIRECTORY|O_NOFOLLOW.
+             * O_DIRECTORY keeps the FIFO-hang closed even against a TOCTOU swap (the
+             * kernel rejects a non-dir with ENOTDIR before any blocking open) and
+             * O_NOFOLLOW rejects a swap-to-symlink (ELOOP). A component that changed
+             * between classify and open is re-classified (bounded by
+             * HL_FS_RECLASSIFY_MAX); the flags are NEVER relaxed. This also removes
+             * the old macOS ELOOP-vs-ENOTDIR ambiguity: an interior symlink is now
+             * recognised by the lstat, not by interpreting an open error. */
+            int reclass = 0;
+            for (;;) {
+                struct stat lst;
+                if (fstatat(stack[depth - 1], comp, &lst, AT_SYMLINK_NOFOLLOW) != 0) {
+                    if (errno == ENOENT && mode == HL_FS_OPEN_WRITE) {
+                        if (mkdirat(stack[depth - 1], comp, 0755) != 0 && errno != EEXIST) {
+                            map_errno(errno, err); goto fail;
+                        }
+                        if (++reclass > HL_FS_RECLASSIFY_MAX) { *err = "io_error"; goto fail; }
+                        continue;                       /* re-classify the created dir */
+                    }
                     map_errno(errno, err); goto fail;
                 }
-                fd = openat(stack[depth - 1], comp,
-                            O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
-                if (fd < 0) { map_errno(errno, err); goto fail; }
+                if (S_ISLNK(lst.st_mode)) goto symlink;             /* expand; no open */
+                if (!S_ISDIR(lst.st_mode)) { *err = "not_a_directory"; goto fail; }
+
+                int fd = openat(stack[depth - 1], comp,
+                                O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+                if (fd < 0) {
+                    /* TOCTOU: the component changed between classify and open.
+                     * Re-classify (bounded); never relax O_DIRECTORY/O_NOFOLLOW. */
+                    if (errno == ELOOP || errno == EMLINK || errno == ENOTDIR ||
+                        errno == ENOENT) {
+                        /* Exhausting the bound is itself a (pathological) contained
+                         * failure: report ONE stable token (io_error) on every path,
+                         * not whichever transient errno happened to be last. Matches
+                         * the WRITE mkdirat re-classification path above. */
+                        if (++reclass > HL_FS_RECLASSIFY_MAX) { *err = "io_error"; goto fail; }
+                        continue;
+                    }
+                    map_errno(errno, err); goto fail;
+                }
+                struct stat st;
+                if (fstat(fd, &st) != 0) { close(fd); map_errno(errno, err); goto fail; }
+                if (!S_ISDIR(st.st_mode)) { close(fd); *err = "not_a_directory"; goto fail; }
                 if (depth >= HL_FS_MAX_DEPTH) { close(fd); *err = "path_too_deep"; goto fail; }
                 stack[depth++] = fd;
-                cur = rest;
-                continue;
+                break;
             }
-            map_errno(errno, err);
-            goto fail;
+            cur = rest;
+            continue;
         } else {
             /* terminal component */
             int flags = (mode == HL_FS_OPEN_READ)
