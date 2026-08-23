@@ -374,7 +374,16 @@ UTEST(fs_resolve, depth_over_limit_rejected)
  * watchdog proves resolution returns promptly instead of blocking. Rejected
  * identically by openat2 (ENOTDIR in-kernel) and the manual walk (fstatat).
  * The interior-symlink regression (symlink_interior_component_followed) above
- * proves a symlink is still followed, not misclassified. ──────────────────── */
+ * proves a symlink is still followed, not misclassified.
+ *
+ * The FIFO watchdog test is compiled out on Cosmopolitan: cosmo's headers do
+ * not declare mkfifo under the feature level Hull's tests use (the project sets
+ * no feature macro for cosmo, per tests/sandbox_violation.c), and no other Hull
+ * code needs it. The manual held-fd walk is identical C on every platform and
+ * is no-block-proven here on macOS + Linux-forced-manual; interior_regular_file
+ * _rejected (below, unguarded) still exercises the classify-before-open path on
+ * cosmo. ──────────────────────────────────────────────────────────────────── */
+#if !defined(__COSMOPOLITAN__)
 static void on_resolve_timeout(int sig)
 {
     (void)sig;
@@ -419,6 +428,7 @@ UTEST(fs_resolve, interior_fifo_rejected_without_blocking)
     unsetenv("HL_FS_FORCE_MANUAL");
     close(root); teardown();
 }
+#endif  /* !__COSMOPOLITAN__ (mkfifo undeclared on cosmo) */
 
 UTEST(fs_resolve, interior_regular_file_rejected)
 {
