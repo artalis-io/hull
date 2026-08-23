@@ -102,8 +102,8 @@ route is registered.
 
 | Field          | Type                                  | Description |
 |----------------|---------------------------------------|-------------|
-| `fs.read`      | `string[]`                            | Allowed read paths (relative, glob-ish). |
-| `fs.write`     | `string[]`                            | Allowed write paths. |
+| `fs.read`      | `string[]`                            | Read grants: a directory, an exact file, or a single-`*` component pattern. See [Filesystem grants](#filesystem-grants). |
+| `fs.write`     | `string[]`                            | Write grants (may create missing parents + the target). Same forms as `fs.read`. |
 | `hosts`        | `string[]`                            | Outbound HTTP host allowlist for `http.*` / `ws.connect`. Supports `*.domain.com`. |
 | `env`          | `string[]`                            | Env var names that `env.get` is permitted to read. Max 32 entries. |
 | `gpu`          | `boolean` or `table{ devices = … }`   | Enable `gpu.*` global. `false` (default) hides it. |
@@ -125,6 +125,35 @@ app.manifest({
     gpu = true,
 })
 ```
+
+#### Filesystem grants
+
+Each `fs.read` / `fs.write` entry is one of four forms, resolved relative to the
+app root and confined to it (a symlink target that points outside the root is
+re-rooted or clamped, never followed out):
+
+| Grant | Example | Authorizes |
+|-------|---------|------------|
+| Directory | `data/` or `data` | that directory and any descendant; in-root symlinks under it are followed, contained |
+| Exact file | `config.json` | only that file; siblings are not reachable; a symlink at that name is refused |
+| Write target (absent) | `out/result.bin` | creates the missing parent dirs and the file (`fs.write` only) |
+| Pattern | `data/*.csv` | files whose name matches, **per component** |
+
+**Pattern rules (v1):** `*` matches zero or more bytes **within a single path
+component** and never crosses `/`. Only `*` is supported; `?`, `[`, `]`, `{`, `}`,
+`\`, and `**` are rejected with a manifest error. So `data/*.csv` allows
+`data/a.csv` and `data/.csv`, but denies `data/a.txt`, `data/sub/a.csv` (the `*`
+does not cross `/`), and `data/a.csv/x`. Multiple patterned components are allowed
+(`logs/*/*.txt`). A pattern grant refuses symlinks in its matched portion (a
+`data/link.csv` symlink is denied even if it matches), so a matching name cannot
+alias a non-matching target.
+
+**Security note:** the pattern is **enforced per file**. Before this, a
+`data/*.csv` grant exposed the *entire* `data/` directory (only the kernel sandbox
+enforced the grant, coarsely, at directory granularity). An app that was relying on
+reading non-matching files under such a directory must now widen its manifest
+(add the directory or the specific files); that access was unintended
+over-authority, not a supported contract.
 
 ---
 
