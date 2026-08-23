@@ -364,4 +364,77 @@ UTEST(fs_policy, error_paths_and_free_idempotent)
     teardown();
 }
 
+/* ── SUBTREE via a symlinked directory grant is FOLLOWED (contained), not refused ─
+ * The ratified design (sec. 6): a SUBTREE follows in-root symlinks. `linkdir` is a
+ * symlink to the real `data` dir, so the grant loads and anchors at the target. */
+UTEST(fs_policy, subtree_via_symlink_dir)
+{
+    setup(); build_tree();      /* linkdir -> data (a real dir) */
+    HlAllocator a; hl_alloc_init(&a, 0);
+    HlFsPolicy p = HL_FS_POLICY_INIT; const char *err = NULL;
+    const char *rd[] = { "linkdir" };
+    ASSERT_EQ(0, build_policy(&a, rd, 1, NULL, 0, &p, &err));
+    ASSERT_EQ((size_t)1, p.read_n);
+    ASSERT_EQ((int)HL_FS_ENTRY_SUBTREE, (int)p.read[0].kind);   /* followed to a dir */
+
+    char sc[256];
+    HlFsSelection s = hl_fs_policy_select(&p, "linkdir/a.csv", HL_FS_OPEN_READ, sc, sizeof(sc));
+    ASSERT_TRUE(s.entry != NULL); ASSERT_STREQ("a.csv", s.residual);
+
+    hl_fs_policy_free(&p);
+    ASSERT_EQ((size_t)0, hl_alloc_used(&a));
+    teardown();
+}
+
+/* ── every RETAINED policy fd is close-on-exec (base + all anchors) ──────────── */
+UTEST(fs_policy, retained_fds_cloexec)
+{
+    setup(); build_tree();
+    HlAllocator a; hl_alloc_init(&a, 0);
+    HlFsPolicy p = HL_FS_POLICY_INIT; const char *err = NULL;
+    /* "data.bin" is a root-level EXACT -> its anchor IS the dup'd base fd (the
+     * F_DUPFD_CLOEXEC path); include SUBTREE / PATTERN / CREATE too. */
+    const char *rd[] = { "data.bin", "data", "data/*.csv" };
+    const char *wr[] = { "out/result.bin" };
+    ASSERT_EQ(0, build_policy(&a, rd, 3, wr, 1, &p, &err));
+
+    ASSERT_TRUE((fcntl(p.base_fd, F_GETFD) & FD_CLOEXEC) != 0);
+    for (size_t i = 0; i < p.read_n; i++)
+        ASSERT_TRUE((fcntl(p.read[i].anchor_fd, F_GETFD) & FD_CLOEXEC) != 0);
+    for (size_t i = 0; i < p.write_n; i++)
+        ASSERT_TRUE((fcntl(p.write[i].anchor_fd, F_GETFD) & FD_CLOEXEC) != 0);
+
+    hl_fs_policy_free(&p);
+    ASSERT_EQ((size_t)0, hl_alloc_used(&a));
+    teardown();
+}
+
+/* ── allocation-failure injection: every capped-alloc failure leaks nothing ──── */
+UTEST(fs_policy, alloc_failure_no_leak)
+{
+    setup(); build_tree();
+    const char *rd[] = { "x/y/z/w.bin" };   /* CREATE: 4 components deep-copied */
+    const char *err = NULL;
+
+    /* full footprint (uncapped) */
+    HlAllocator a0; hl_alloc_init(&a0, 0);
+    HlFsPolicy p0 = HL_FS_POLICY_INIT;
+    ASSERT_EQ(0, build_policy(&a0, rd, 1, NULL, 0, &p0, &err));
+    size_t peak = hl_alloc_peak(&a0);
+    hl_fs_policy_free(&p0);
+    ASSERT_EQ((size_t)0, hl_alloc_used(&a0));
+
+    /* Sweep every cap below the footprint: alloc fails at each position in turn
+     * (entries array, grant array, and every component string). Each MUST either
+     * succeed and free cleanly or fail with zero bytes retained. */
+    for (size_t lim = 1; lim <= peak + 16; lim++) {
+        HlAllocator a; hl_alloc_init(&a, lim);
+        HlFsPolicy p = HL_FS_POLICY_INIT;
+        int rc = build_policy(&a, rd, 1, NULL, 0, &p, &err);
+        if (rc == 0) hl_fs_policy_free(&p);
+        ASSERT_EQ_MSG((size_t)0, hl_alloc_used(&a), "capped-alloc failure leaked bytes");
+    }
+    teardown();
+}
+
 UTEST_MAIN();

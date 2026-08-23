@@ -63,12 +63,13 @@ typedef struct HlAllocator HlAllocator;   /* Hull's tracked allocator (utils/all
 /*
  * The four entry kinds (sec. 6 + PATTERN). The kind fixes both the anchor and the
  * per-kind symlink rule enforced later by the resolver (Slice B):
- *   - SUBTREE: anchor is the granted directory itself, reached at COMPILE by an
- *     O_NOFOLLOW descriptor walk (a symlink IN the grant's own path is refused -
- *     a narrow, documented change from the old realpath grant resolution that pins
- *     the anchor to a real directory). Any descendant is permitted; at RUNTIME
- *     descendant symlinks are FOLLOWED with virtual-root confinement (clamp within
- *     the subtree, cannot escape it).
+ *   - SUBTREE: anchor is the granted directory. Per the approved design (sec. 6),
+ *     a SUBTREE FOLLOWS in-root symlinks with virtual-root confinement, so the
+ *     anchor is obtained at COMPILE by a CONTAINED-FOLLOW resolution
+ *     (HL_FS_OPEN_DIR: each component O_NOFOLLOW + a contained readlink splice), so
+ *     a symlinked grant directory still loads and its target cannot escape the
+ *     root. Any descendant is permitted; at RUNTIME descendant symlinks are
+ *     likewise FOLLOWED, clamped within the subtree.
  *   - EXACT:   anchor is the granted file's PARENT dir; ONLY the one literal leaf
  *     name is permitted (siblings unreachable); a symlink (intermediate or
  *     terminal) is REFUSED ("symlink_denied"), never followed.
@@ -250,16 +251,19 @@ void hl_fs_grant_free(HlFsGrant *grant);
  * cannot be inferred from the grants).
  *
  * `base_dir` is the app root, opened via hl_fs_open_base() - the trusted root is
- * followed ONCE (checkpoint-1 semantics), NOT O_NOFOLLOW. Every grant then reaches
- * its anchor by a UNIFORM descriptor-bound walk of the EXISTING literal components
- * from base_fd, never reconstructing a host path: each component
- * openat(O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC) + fstat-confirm a directory, with a
- * classify/open swap re-classified within a bound. A symlink in the grant's own
- * literal path is REFUSED ("symlink_denied") for ALL kinds - a narrow documented
- * compatibility change from realpath-based grant resolution that pins every anchor
- * to a real directory. (SUBTREE runtime DESCENDANTS still follow in-root symlinks
- * contained via the Slice-B resolver; EXACT/CREATE/PATTERN also refuse symlinks in
- * their constrained portion at runtime.)
+ * followed ONCE (checkpoint-1 semantics), NOT O_NOFOLLOW. Grants are classified by
+ * a descriptor-bound walk from base_fd, never reconstructing a host path, with
+ * PER-KIND symlink semantics (design sec. 6):
+ *   - SUBTREE: the grant directory is resolved with a CONTAINED-FOLLOW
+ *     (HL_FS_OPEN_DIR) - in-root symlinks in the grant path are followed and
+ *     clamped within the root, so a symlinked grant directory still loads (this
+ *     preserves the pre-checkpoint-3 behavior; the target cannot escape the root
+ *     and the held fd pins the inode).
+ *   - EXACT / CREATE / PATTERN: the existing literal prefix is walked
+ *     openat(O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC) + fstat-confirm a directory (a
+ *     classify/open swap re-classified within a bound); ANY symlink in that path
+ *     is REFUSED ("symlink_denied"), never followed - so a symlink cannot alias an
+ *     exact/pattern/create target.
  * Classification:
  *   all literal comps exist, terminal is a dir      -> SUBTREE (or PATTERN if the
  *                                                      grant carries patterns)

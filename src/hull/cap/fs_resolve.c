@@ -174,9 +174,10 @@ static int resolve_manual(int root_fd, const char *relpath, HlFsOpenMode mode,
         while (*cur == '/') cur++;
         if (*cur == '\0') {
             /* Consumed everything without a terminal leaf (path was "." etc.).
-             * READ opens the current directory; WRITE has no leaf to create. */
-            if (mode == HL_FS_OPEN_READ) {
-                result_fd = openat(stack[depth - 1], ".", O_RDONLY | O_CLOEXEC);
+             * READ/DIR open the current directory; WRITE has no leaf to create. */
+            if (mode == HL_FS_OPEN_READ || mode == HL_FS_OPEN_DIR) {
+                int of = O_RDONLY | O_CLOEXEC | (mode == HL_FS_OPEN_DIR ? O_DIRECTORY : 0);
+                result_fd = openat(stack[depth - 1], ".", of);
                 if (result_fd < 0) { map_errno(errno, err); goto fail; }
                 goto done;
             }
@@ -264,8 +265,29 @@ static int resolve_manual(int root_fd, const char *relpath, HlFsOpenMode mode,
             }
             cur = rest;
             continue;
+        } else if (mode == HL_FS_OPEN_DIR) {
+            /* Terminal in DIR mode: this component IS the result but must be a
+             * directory, following a symlink (contained). CLASSIFY first (like an
+             * interior component): a terminal FIFO opened O_RDONLY would block, and
+             * O_DIRECTORY|O_NOFOLLOW on a symlink returns ENOTDIR on macOS (not
+             * ELOOP), which would misread a symlinked dir as not_a_directory. */
+            struct stat lst;
+            if (fstatat(stack[depth - 1], comp, &lst, AT_SYMLINK_NOFOLLOW) != 0) {
+                map_errno(errno, err); goto fail;
+            }
+            if (S_ISLNK(lst.st_mode)) goto symlink;                 /* follow the symlink */
+            if (!S_ISDIR(lst.st_mode)) { *err = "not_a_directory"; goto fail; }
+            int fd = openat(stack[depth - 1], comp,
+                            O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+            if (fd < 0) {
+                if (errno == ELOOP || errno == EMLINK) goto symlink;   /* swapped to a symlink */
+                if (errno == ENOTDIR) { *err = "not_a_directory"; goto fail; }
+                map_errno(errno, err); goto fail;
+            }
+            result_fd = fd;
+            goto done;
         } else {
-            /* terminal component */
+            /* terminal component (READ / WRITE leaf) */
             int flags = (mode == HL_FS_OPEN_READ)
                           ? (O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
                           : (O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW | O_CLOEXEC);
@@ -330,10 +352,11 @@ int hl_fs_open_at(int root_fd, const char *relpath, HlFsOpenMode mode,
 
 #if defined(__linux__) && !defined(__COSMOPOLITAN__)
     /* openat2 does not create intermediate dirs, so WRITE always uses the manual
-     * walk (which does the contained mkdir-p). READ takes the one-call fast path,
-     * unless HL_FS_FORCE_MANUAL is set (parity testing). */
-    if (mode == HL_FS_OPEN_READ && !force_manual()) {
-        int fd = try_openat2(root_fd, relpath, O_RDONLY | O_CLOEXEC, 0, &e);
+     * walk (which does the contained mkdir-p). READ and DIR take the one-call fast
+     * path, unless HL_FS_FORCE_MANUAL is set (parity testing). */
+    if ((mode == HL_FS_OPEN_READ || mode == HL_FS_OPEN_DIR) && !force_manual()) {
+        int of = O_RDONLY | O_CLOEXEC | (mode == HL_FS_OPEN_DIR ? O_DIRECTORY : 0);
+        int fd = try_openat2(root_fd, relpath, of, 0, &e);
         if (fd >= 0) return fd;
         if (fd == -1) { if (err) *err = e; return -1; }
         /* fd == -2: openat2 unavailable -> manual walk */

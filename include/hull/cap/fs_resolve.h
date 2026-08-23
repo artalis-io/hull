@@ -37,6 +37,10 @@
 typedef enum {
     HL_FS_OPEN_READ,  /* open an existing leaf O_RDONLY (symlinks followed, contained) */
     HL_FS_OPEN_WRITE, /* mkdir-p parents (contained) + open leaf O_WRONLY|O_CREAT|O_TRUNC */
+    HL_FS_OPEN_DIR,   /* open an existing DIRECTORY O_RDONLY|O_DIRECTORY (symlinks
+                       * followed, contained); a non-directory target -> not_a_directory.
+                       * Never creates. Used to resolve a SUBTREE grant anchor
+                       * (fs_policy) and, later, stat/list. */
 } HlFsOpenMode;
 
 /*

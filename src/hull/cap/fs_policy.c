@@ -25,6 +25,9 @@
 #ifndef NAME_MAX
 #define NAME_MAX 255
 #endif
+#ifndef HL_FS_PATH_MAX
+#define HL_FS_PATH_MAX 4096     /* buffer for the SUBTREE contained-follow probe path */
+#endif
 #define ANCHOR_RECLASS_MAX 64   /* bound the classify<->open swap retries (compile) */
 
 /* ── small allocation helpers (sizes recovered for the tracked free) ─────────── */
@@ -52,13 +55,37 @@ static void free_comps(HlAllocator *a, char **comp, size_t n)
 
 static char **dup_comps(HlAllocator *a, char *const *src, size_t n)
 {
-    char **out = (char **)hl_alloc_calloc(a, n ? n : 1, sizeof(char *));
+    size_t cap = n ? n : 1;                       /* actual array capacity allocated */
+    char **out = (char **)hl_alloc_calloc(a, cap, sizeof(char *));
     if (!out) return NULL;
     for (size_t i = 0; i < n; i++) {
         out[i] = dup_bytes(a, src[i], strlen(src[i]));
-        if (!out[i]) { free_comps(a, out, i); return NULL; }
+        if (!out[i]) {
+            /* free the strings built so far, then the array at its ALLOCATED
+             * capacity (cap), not the partial count i - otherwise the tracked
+             * allocator keeps (cap - i) pointers of `used` and can later false-OOM. */
+            for (size_t k = 0; k < i; k++) free_str(a, out[k]);
+            hl_alloc_free(a, out, cap * sizeof(char *));
+            return NULL;
+        }
     }
     return out;
+}
+
+/* Join components with '/' into buf (for the SUBTREE contained-follow probe).
+ * Returns 0, or -1 if the joined path does not fit. */
+static int join_path(char *const *comp, size_t n, char *buf, size_t bufsz)
+{
+    size_t pos = 0;
+    for (size_t i = 0; i < n; i++) {
+        size_t l = strlen(comp[i]);
+        if (pos + l + (pos ? 1 : 0) + 1 > bufsz) return -1;
+        if (pos) buf[pos++] = '/';
+        memcpy(buf + pos, comp[i], l);
+        pos += l;
+    }
+    buf[pos] = '\0';
+    return 0;
 }
 
 /* ── component pattern metacharacter validation ──────────────────────────────── */
@@ -232,7 +259,47 @@ static int compile_one(int base_fd, HlAllocator *alloc, const HlFsGrant *g,
 {
     const char *e = "io_error";
     size_t lit = g->first_pattern;          /* literal prefix length */
-    int cur = dup(base_fd);
+
+    /* A pure-literal grant that resolves to a DIRECTORY is a SUBTREE. Per the
+     * approved design (sec. 6), a SUBTREE FOLLOWS in-root symlinks with virtual-root
+     * confinement, so its anchor is obtained by a CONTAINED-FOLLOW resolution (the
+     * HL_FS_OPEN_DIR resolver mode: each component O_NOFOLLOW + a contained readlink
+     * splice, so a symlinked grant directory still loads and cannot escape the
+     * root). If it instead resolves to a non-directory (EXACT) or is missing
+     * (CREATE), fall through to the O_NOFOLLOW refuse walk below, which REFUSES any
+     * symlink for EXACT/CREATE. PATTERN grants (first_pattern < n) skip this probe
+     * and always refuse symlinks. */
+    if (g->first_pattern == g->n) {
+        char path[HL_FS_PATH_MAX];
+        if (join_path(g->comp, g->n, path, sizeof(path)) == 0) {
+            const char *de = "io_error";
+            int dfd = hl_fs_open_at(base_fd, path, HL_FS_OPEN_DIR, 0, &de);
+            if (dfd >= 0) {
+                char **grant = dup_comps(alloc, g->comp, g->n);
+                if (!grant) { close(dfd); *err = "io_error"; return -1; }
+                out->kind = HL_FS_ENTRY_SUBTREE;
+                out->anchor_fd = dfd;
+                out->grant = grant;
+                out->grant_n = g->n;
+                out->anchor_depth = g->n;
+                out->first_pattern = g->first_pattern;
+                out->terminal = HL_FS_TERMINAL_FILE;
+                specificity(g->comp, g->n, &out->literal_components, &out->literal_bytes);
+                return 0;
+            }
+            /* not_a_directory (a file -> EXACT) or not_found (-> CREATE) continue to
+             * the refuse walk; any other token (symlink_loop, permission, ...) is
+             * terminal. */
+            if (strcmp(de, "not_a_directory") != 0 && strcmp(de, "not_found") != 0) {
+                *err = de; return -1;
+            }
+        }
+    }
+
+    /* F_DUPFD_CLOEXEC, not dup(): a plain dup() clears FD_CLOEXEC, and this fd is
+     * RETAINED as the anchor when the grant anchors at base (root-level
+     * EXACT/CREATE/PATTERN) - it must not leak across exec. */
+    int cur = fcntl(base_fd, F_DUPFD_CLOEXEC, 0);
     if (cur < 0) { *err = "io_error"; return -1; }
 
     size_t depth = 0;                        /* existing literal components held by `cur` */

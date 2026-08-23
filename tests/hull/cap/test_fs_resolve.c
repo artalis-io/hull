@@ -448,4 +448,36 @@ UTEST(fs_resolve, interior_regular_file_rejected)
     close(root); teardown();
 }
 
+/* ── HL_FS_OPEN_DIR: resolve a directory, follow a symlinked dir contained, and
+ * reject a non-directory target with not_a_directory (both impls). ───────────── */
+UTEST(fs_resolve, open_dir_mode)
+{
+    setup();
+    mkdirp_host("adir"); wfile("adir/leaf", "x");
+    mkdirp_host("realdir2"); symln("realdir2", "dsym2");   /* symlink -> a real dir */
+    wfile("plainfile", "y");
+    const char *err = NULL;
+    int root = hl_fs_open_base(base, &err);
+    ASSERT_GE(root, 0);
+    for (int pass = 0; pass < 2; pass++) {
+        select_path(pass);
+        err = NULL;
+        int fd = hl_fs_open_at(root, "adir", HL_FS_OPEN_DIR, 0, &err);
+        ASSERT_GE(fd, 0);
+        struct stat st; ASSERT_EQ(0, fstat(fd, &st)); ASSERT_TRUE(S_ISDIR(st.st_mode));
+        close(fd);
+
+        err = NULL;
+        fd = hl_fs_open_at(root, "dsym2", HL_FS_OPEN_DIR, 0, &err);
+        ASSERT_GE(fd, 0);                       /* follows the symlinked dir, contained */
+        close(fd);
+
+        err = NULL;
+        fd = hl_fs_open_at(root, "plainfile", HL_FS_OPEN_DIR, 0, &err);
+        ASSERT_EQ(fd, -1); ASSERT_STREQ("not_a_directory", err);  /* a file is refused */
+    }
+    unsetenv("HL_FS_FORCE_MANUAL");
+    close(root); teardown();
+}
+
 UTEST_MAIN();
