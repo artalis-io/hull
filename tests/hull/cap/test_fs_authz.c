@@ -210,24 +210,44 @@ UTEST(fs_authz, no_policy_denies)
     teardown();
 }
 
-/* ── manifest compile SKIPS unparseable grants (absolute etc.), keeps valid ───── */
-UTEST(fs_authz, manifest_skips_unparseable_grants)
+/* ── manifest compile REJECTS a bad grant with its precise token (no silent skip,
+ * no leak) - a declared capability must not silently become unusable. ─────────── */
+UTEST(fs_authz, manifest_rejects_bad_grants)
 {
     setup(); build_tree();
     HlAllocator a; hl_alloc_init(&a, 0);
     HlFsPolicy p = HL_FS_POLICY_INIT; const char *err = NULL;
-    /* an absolute grant (a kernel-sandbox path, e.g. tui_log_tailer's LOG_FILE) is
-     * SKIPPED so app load never fails; the valid relative grant is kept. */
-    const char *rd[] = { "/tmp/hull-tail.log", "r.txt" };
-    ASSERT_EQ(0, hl_fs_policy_compile_manifest(base, &a, rd, 2, NULL, 0, &p, &err));
-    ASSERT_EQ((size_t)1, p.read_n);            /* only r.txt kept */
+
+    const char *abs_g[] = { "/tmp/hull-tail.log", "r.txt" };   /* absolute -> reject */
+    ASSERT_EQ(-1, hl_fs_policy_compile_manifest(base, &a, abs_g, 2, NULL, 0, &p, &err));
+    ASSERT_STREQ("invalid_path", err);
+
+    const char *pat_g[] = { "data/**", "r.txt" };              /* unsupported pattern -> reject */
+    err = NULL;
+    ASSERT_EQ(-1, hl_fs_policy_compile_manifest(base, &a, pat_g, 2, NULL, 0, &p, &err));
+    ASSERT_STREQ("unsupported_pattern", err);
+
+    ASSERT_EQ((size_t)0, hl_alloc_used(&a));                   /* no leak on the failure path */
+    teardown();
+}
+
+/* ── base-root "." grant authorizes the whole app dir (least-specific SUBTREE) ─── */
+UTEST(fs_authz, base_root_grant)
+{
+    setup(); build_tree();
+    HlAllocator a; hl_alloc_init(&a, 0);
+    HlFsPolicy p = HL_FS_POLICY_INIT; const char *err = NULL;
+    const char *g[] = { "." };                 /* the whole app dir + descendants */
+    ASSERT_EQ(0, build_policy(&a, g, 1, g, 1, &p, &err));
+    ASSERT_EQ((size_t)1, p.read_n);
+    ASSERT_EQ((int)HL_FS_ENTRY_SUBTREE, (int)p.read[0].kind);
+    ASSERT_EQ((size_t)0, p.read[0].grant_n);   /* 0 components == base root */
 
     HlFsConfig c = cfg_with(&p);
-    char buf[8];
-    ASSERT_EQ((int64_t)1, hl_cap_fs_read(&c, "r.txt", buf, sizeof(buf), &err)); /* kept grant works */
-    err = NULL;
-    ASSERT_EQ((int64_t)-1, hl_cap_fs_read(&c, "secret.txt", buf, sizeof(buf), &err)); /* ungranted */
-    ASSERT_STREQ("permission", err);
+    char buf[64];
+    ASSERT_EQ((int64_t)1, hl_cap_fs_read(&c, "r.txt", buf, sizeof(buf), &err));          /* any path */
+    ASSERT_EQ((int64_t)4, hl_cap_fs_read(&c, "data/real.txt", buf, sizeof(buf), &err));  /* nested */
+    ASSERT_EQ(0, hl_cap_fs_write(&c, "created.txt", "N", 1, &err));                       /* create */
 
     hl_fs_policy_free(&p); ASSERT_EQ((size_t)0, hl_alloc_used(&a));
     teardown();

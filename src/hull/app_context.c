@@ -17,6 +17,7 @@
 
 #include "hull/cap/fs.h"          /* HlFsConfig — test/agent fs sandbox wiring
                                    * (unconditional: fs_cfg is not DB-gated) */
+#include "hull/utils/alloc.h"     /* HlAllocator + hl_alloc_init for the fs policy */
 
 #ifdef HL_ENABLE_DB
 #include "hull/cap/db.h"
@@ -69,6 +70,7 @@ struct HlAppContext {
      * allowlist is the kernel sandbox, which the test harness runs without. */
     HlFsConfig     fs_cfg_storage;
     HlFsPolicy     fs_policy_storage; /* compiled fs authorization policy (checkpoint 3) */
+    HlAllocator    fs_alloc;          /* owns the policy's memory (opts->alloc may be NULL) */
 
     /* Resolved module set (opt-in via opts.gate_modules). Lives here so
      * its lifetime matches the runtime — rt->module_set borrows. */
@@ -183,6 +185,7 @@ int hl_app_context_init(HlAppContext **out, const HlAppContextOpts *opts)
     /* fds default -1 so hl_app_context_free never close(0)s stdin on a policy
      * that was never compiled (calloc gives base_fd == 0, a live fd). */
     ctx->fs_policy_storage = HL_FS_POLICY_INIT;
+    hl_alloc_init(&ctx->fs_alloc, 0);   /* the policy needs a non-NULL allocator */
 
     /* Own a stable copy of app_dir for fs_cfg.base_dir (see struct comment). */
     ctx->app_dir_copy = strdup(opts->app_dir);
@@ -347,7 +350,7 @@ int hl_app_context_init(HlAppContext **out, const HlAppContextOpts *opts)
                      * denied. */
                     const char *perr = NULL;
                     if (hl_fs_policy_compile_manifest(
-                            ctx->app_dir_copy, opts->alloc,
+                            ctx->app_dir_copy, &ctx->fs_alloc,
                             m.fs_read,  (size_t)m.fs_read_count,
                             m.fs_write, (size_t)m.fs_write_count,
                             &ctx->fs_policy_storage, &perr) != 0) {

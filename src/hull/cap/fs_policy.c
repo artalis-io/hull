@@ -178,20 +178,27 @@ int hl_fs_grant_parse(const char *raw, size_t raw_len, HlAllocator *alloc,
         n++;
     }
 
-    if (n == 0) { e = "invalid_path"; goto fail; }     /* empty grant ("." / "/") */
+    /* n == 0 is the BASE-ROOT grant ("." / "./" / a bare "/" is rejected earlier as
+     * absolute): it authorizes the app root and every descendant (a SUBTREE at
+     * base_fd). It compiles to a grant with 0 components - the least-specific
+     * entry, shadowed by any narrower grant. directory_intent is meaningless for
+     * the root (always a directory), so it is normalized to 0. */
     if (first_pattern == (size_t)-1) first_pattern = n;
     if (directory_intent && first_pattern < n) {       /* trailing-slash pattern grant */
         e = "unsupported_pattern"; goto fail;
     }
 
-    char **comp = (char **)hl_alloc_calloc(alloc, n, sizeof(char *));
-    if (!comp) { e = "io_error"; goto fail; }
-    memcpy(comp, tmp, n * sizeof(char *));
+    char **comp = NULL;
+    if (n > 0) {
+        comp = (char **)hl_alloc_calloc(alloc, n, sizeof(char *));
+        if (!comp) { e = "io_error"; goto fail; }
+        memcpy(comp, tmp, n * sizeof(char *));
+    }
 
     out->comp = comp;
     out->n = n;
     out->first_pattern = first_pattern;
-    out->directory_intent = directory_intent;
+    out->directory_intent = (n == 0) ? 0 : directory_intent;
     out->alloc = alloc;
     return 0;
 
@@ -259,6 +266,23 @@ static int compile_one(int base_fd, HlAllocator *alloc, const HlFsGrant *g,
 {
     const char *e;                          /* every `goto fail` sets this before use */
     size_t lit = g->first_pattern;          /* literal prefix length */
+
+    /* BASE-ROOT grant (0 components, "."): a SUBTREE anchored at base_fd itself,
+     * matching every caller path. anchor is base (F_DUPFD_CLOEXEC); no walk. */
+    if (g->n == 0) {
+        int afd = fcntl(base_fd, F_DUPFD_CLOEXEC, 0);
+        if (afd < 0) { *err = "io_error"; return -1; }
+        out->kind = HL_FS_ENTRY_SUBTREE;
+        out->anchor_fd = afd;
+        out->grant = NULL;                  /* 0 components; entry_free handles NULL */
+        out->grant_n = 0;
+        out->anchor_depth = 0;
+        out->first_pattern = 0;
+        out->terminal = HL_FS_TERMINAL_FILE;
+        out->literal_components = 0;
+        out->literal_bytes = 0;
+        return 0;
+    }
 
     /* A pure-literal grant that resolves to a DIRECTORY is a SUBTREE. Per the
      * approved design (sec. 6), a SUBTREE FOLLOWS in-root symlinks with virtual-root
@@ -475,7 +499,7 @@ int hl_fs_policy_compile_manifest(const char *base_dir, HlAllocator *alloc,
 {
     const char *e = "io_error";
     HlFsGrant *rg = NULL, *wg = NULL;
-    size_t rk = 0, wk = 0;   /* count of PARSEABLE grants kept */
+    size_t ri = 0, wi = 0;
     int rc = -1;
 
     if (read_n) {
@@ -486,26 +510,21 @@ int hl_fs_policy_compile_manifest(const char *base_dir, HlAllocator *alloc,
         wg = (HlFsGrant *)hl_alloc_calloc(alloc, write_n, sizeof(HlFsGrant));
         if (!wg) { e = "io_error"; goto done; }
     }
-    /* SKIP a grant that fails to PARSE (an absolute path or an unsupported
-     * pattern is not a base-relative policy grant - it feeds only the kernel
-     * sandbox). Skipping preserves app load (the old wiring never validated grant
-     * content) and fails CLOSED: the skipped path is simply not authorized by the
-     * cap-layer policy. A genuine COMPILE error (conflicting intent, a symlink
-     * anchor) below is still a hard failure. */
-    for (size_t i = 0; i < read_n; i++) {
-        const char *pe = NULL;
-        if (hl_fs_grant_parse(read[i], strlen(read[i]), alloc, &rg[rk], &pe) == 0) rk++;
-    }
-    for (size_t i = 0; i < write_n; i++) {
-        const char *pe = NULL;
-        if (hl_fs_grant_parse(write[i], strlen(write[i]), alloc, &wg[wk], &pe) == 0) wk++;
-    }
+    /* A grant that fails to PARSE (absolute, "..", unsupported pattern, malformed,
+     * or an allocation failure) FAILS compilation with its precise token - a
+     * declared capability must not silently become unusable (contract in
+     * fs_policy.h). Absolute / external-root grants are not base-relative policy
+     * grants and are rejected here; an app must use an in-root relative path. */
+    for (ri = 0; ri < read_n; ri++)
+        if (hl_fs_grant_parse(read[ri], strlen(read[ri]), alloc, &rg[ri], &e) != 0) goto done;
+    for (wi = 0; wi < write_n; wi++)
+        if (hl_fs_grant_parse(write[wi], strlen(write[wi]), alloc, &wg[wi], &e) != 0) goto done;
 
-    rc = hl_fs_policy_compile(base_dir, alloc, rg, rk, wg, wk, out, &e);
+    rc = hl_fs_policy_compile(base_dir, alloc, rg, read_n, wg, write_n, out, &e);
 
 done:
-    for (size_t i = 0; i < rk; i++) hl_fs_grant_free(&rg[i]);
-    for (size_t i = 0; i < wk; i++) hl_fs_grant_free(&wg[i]);
+    for (size_t i = 0; i < ri; i++) hl_fs_grant_free(&rg[i]);
+    for (size_t i = 0; i < wi; i++) hl_fs_grant_free(&wg[i]);
     if (rg) hl_alloc_free(alloc, rg, read_n * sizeof(HlFsGrant));
     if (wg) hl_alloc_free(alloc, wg, write_n * sizeof(HlFsGrant));
     if (err) *err = e;

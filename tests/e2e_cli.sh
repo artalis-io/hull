@@ -119,6 +119,47 @@ JS
 run_udf_teardown "lua" "lua"
 run_udf_teardown "js"  "js"
 
+# ── fs round-trip through app.main (checkpoint 3, Slice B) ────────────────────
+# The path-authorization policy is compiled from the manifest's fs grants and
+# wired onto the CLI runtime. A grant of "." authorizes the whole app dir, so a
+# write + read-back must round-trip (before Slice B's wiring fix the CLI denied
+# every fs op). Exit 0 = round-trip OK.
+run_fs_roundtrip() {
+    runtime="$1"; ext="$2"
+    echo "--- fs round-trip via app.main (${runtime}) ---"
+    d=$(mktemp -d)
+    if [ "$ext" = "lua" ]; then
+        cat > "${d}/app.lua" <<'LUA'
+app.manifest({ modules = { "hull/fs@1" }, fs = { read = { "." }, write = { "." } } })
+app.main(function()
+  local fs = require("hull.fs")
+  local wok = fs.write("cli.txt", "cli-roundtrip")
+  local rok, data = pcall(fs.read, "cli.txt")
+  return (wok and rok and data == "cli-roundtrip") and 0 or 3
+end)
+LUA
+    else
+        cat > "${d}/app.js" <<'JS'
+import { app } from "hull:app";
+import { fs } from "hull:fs";
+app.manifest({ modules: ["hull/fs@1"], fs: { read: ["."], write: ["."] } });
+app.main(() => {
+  fs.write("cli.txt", "cli-roundtrip");
+  const buf = fs.read("cli.txt");
+  const len = (buf && buf.byteLength !== undefined) ? buf.byteLength : (buf ? buf.length : 0);
+  return (len === 13) ? 0 : 3;   // "cli-roundtrip" is 13 bytes
+});
+JS
+    fi
+    "${HULL_BIN}" "${d}/app.${ext}" >/dev/null 2>&1
+    rc=$?
+    expect_eq "${runtime} fs round-trip via app.main" "0" "${rc}"
+    rm -rf "${d}"
+}
+
+run_fs_roundtrip "lua" "lua"
+run_fs_roundtrip "js"  "js"
+
 echo
 echo "${PASS}/$((PASS + FAIL)) CLI e2e tests passed"
 [ "${FAIL}" -eq 0 ]

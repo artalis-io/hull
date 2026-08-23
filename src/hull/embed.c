@@ -24,6 +24,7 @@
 #include "hull/sandbox.h"
 #include "hull/manifest.h"
 #include "hull/cap/fs.h"
+#include "hull/utils/alloc.h"
 #include "hull/cap/crypto.h"
 #include "hull/module_registry.h"
 #include "hull/release_io.h"
@@ -41,6 +42,8 @@ enum { HL_EMBED_NEW = 0, HL_EMBED_SEALED = 1 };
 struct HlEmbed {
     char       *app_dir;                          /* owned pre-seal; NULLed after seal */
     HlFsConfig  fs;                               /* base_dir: app_dir pre-seal, sealed copy post-seal */
+    HlFsPolicy  fs_policy;                         /* compiled fs authorization policy (checkpoint 3) */
+    HlAllocator fs_alloc;                          /* owns the compiled policy's memory */
 
     char       *reads[HL_MANIFEST_MAX_PATHS];     /* owned dups; freed at seal or free */
     int         nreads;
@@ -78,6 +81,8 @@ HlEmbed *hl_embed_new(const char *app_dir)
     }
     e->fs.base_dir = e->app_dir;
     e->fs.base_len = strlen(e->app_dir);
+    e->fs_policy = HL_FS_POLICY_INIT;   /* fds -1 so hl_embed_free never closes stdin */
+    hl_alloc_init(&e->fs_alloc, 0);     /* tracking only, no cap */
     e->state = HL_EMBED_NEW;
     return e;
 }
@@ -95,6 +100,10 @@ static void embed_free_heap_policy(HlEmbed *e)
 void hl_embed_free(HlEmbed *e)
 {
     if (!e) return;
+    /* Close the fs policy's held anchor fds (idempotent; INIT if never sealed).
+     * It does not alias the arena (its own raw-malloc storage), so order vs the
+     * arena is free - do it first. */
+    hl_fs_policy_free(&e->fs_policy);
     /* Free heap-owned policy strings first, then destroy the sealed arena
      * LAST — fs.base_dir may alias into it (c-audit §5b: arena destroyed
      * after every consumer). No capability call can run during teardown. */
@@ -208,6 +217,24 @@ int hl_embed_seal(HlEmbed *e, const char *db_path)
     policy.tui              = e->tui;
     policy.wx_enforced      = 1;   /* no runtime dynamic code */
     /* allow_dynamic_code / allow_dynamic_libraries stay 0 (zeroed above). */
+
+    /* 2b. Compile the fs authorization policy (checkpoint 3) from the SAME grants,
+     *     BEFORE the kernel sandbox restricts fs opens (the compile opens each
+     *     grant anchor). A bad grant fails the seal here, before the
+     *     macOS-irreversible sandbox is applied. Raw allocator (NULL); the policy
+     *     deep-copies the grant strings, so the later embed_free_heap_policy is
+     *     safe. Freed in hl_embed_free. */
+    {
+        const char *perr = NULL;
+        if (hl_fs_policy_compile_manifest(
+                e->fs.base_dir, &e->fs_alloc,
+                (const char *const *)e->reads,  (size_t)e->nreads,
+                (const char *const *)e->writes, (size_t)e->nwrites,
+                &e->fs_policy, &perr) != 0) {
+            return -1;             /* fail closed: leave state NEW (fds -1) */
+        }
+        e->fs.policy = &e->fs_policy;
+    }
 
     /* 3. Apply the kernel sandbox against the sealed base_dir. */
     int rc = hl_sandbox_apply(&policy, e->fs.base_dir, db_path,

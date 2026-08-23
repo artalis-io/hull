@@ -226,11 +226,14 @@ typedef struct {
  * LENGTH-BEARING: `raw`/`raw_len` are the exact grant bytes, so an EMBEDDED NUL
  * ("data\0/secret") is detected and REJECTED here rather than silently truncated.
  * Captures directory_intent from a trailing slash BEFORE normalization, splits
- * into components, and locates the first patterned component. Rejects an absolute
- * path, any ".." component, an embedded NUL, an empty grant, an over-deep path
- * (> HL_FS_MAX_DEPTH components), a trailing-slash PATTERN grant, and any
- * unsupported metacharacter ('?', '[', ']', '{', '}', '\\', or "**") with a
- * stable *err ("invalid_path" / "unsupported_pattern"). On success writes *out
+ * into components, and locates the first patterned component. A grant that
+ * normalizes to ZERO components ("." / "./" / "././") is the BASE-ROOT grant: it
+ * authorizes the whole app dir and every descendant (compiled to a 0-component
+ * SUBTREE at base_fd, the least-specific entry). Rejects an absolute path, any
+ * ".." component, an embedded NUL, an over-deep path (> HL_FS_MAX_DEPTH
+ * components), a trailing-slash PATTERN grant, and any unsupported metacharacter
+ * ('?', '[', ']', '{', '}', '\\', or "**") with a stable *err ("invalid_path" /
+ * "unsupported_pattern"). On success writes *out
  * (an owning value; free with hl_fs_grant_free) and returns 0; on failure returns
  * -1 with *err set, and *out is left HL_FS_GRANT_INIT (nothing to free).
  *

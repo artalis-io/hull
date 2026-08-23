@@ -43,7 +43,7 @@ pub fn main() u8 {
     // 2. phase-1 sandbox
     check(c.hl_embed_sandbox_phase1(e) == 0, "phase-1 sandbox applied");
 
-    // 3. policy (app_dir-relative, like a manifest)
+    // 3. policy ("." = base-root grant: the whole app dir + descendants)
     check(c.hl_embed_allow_read(e, ".") == 0, "allow_read(\".\")");
     check(c.hl_embed_allow_write(e, ".") == 0, "allow_write(\".\")");
     c.hl_embed_allow_network(e, 0, 0);

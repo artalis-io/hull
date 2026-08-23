@@ -53,7 +53,9 @@ int main(void)
     /* ── 1. phase-1 sandbox (pledge) ──────────────────────────────── */
     check(hl_embed_sandbox_phase1(e) == 0, "phase-1 sandbox applied");
 
-    /* ── 2. build policy in C (app_dir-relative, like a manifest) ──── */
+    /* ── 2. build policy in C (app_dir-relative, like a manifest) ────
+     * "." is the base-root grant: read/write the whole app dir + descendants
+     * (checkpoint 3, sec. 6). Base-relative, never absolute. */
     check(hl_embed_allow_read(e, ".") == 0,  "allow_read(\".\")");
     check(hl_embed_allow_write(e, ".") == 0, "allow_write(\".\")");
     hl_embed_allow_network(e, 0, 0);
