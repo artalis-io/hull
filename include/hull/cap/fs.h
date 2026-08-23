@@ -21,6 +21,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include "hull/cap/fs_policy.h"   /* HlFsPolicy - path-authorization policy (checkpoint 3) */
 
 /* Forward declaration */
 typedef struct HlAllocator HlAllocator;
@@ -31,10 +32,17 @@ typedef struct HlAllocator HlAllocator;
  * Hull-allocated; the caller owns the lifetime. `base_dir` is the
  * app's working directory. All paths are validated to resolve to a
  * descendant of `base_dir`.
+ *
+ * `policy` is the compiled path-authorization policy (checkpoint 3, sec. 6):
+ * read/mmap select from its READ set, write from its WRITE set, and the op opens
+ * the residual under the selected entry's held anchor fd. When `policy` is NULL
+ * the fs capability is DENIED (fail closed) - the config is only wired when the
+ * app declares fs.read/fs.write grants, so a no-grant app never reaches here.
  */
 typedef struct HlFsConfig {
-    const char *base_dir;   /**< Absolute path of the app's root directory. */
-    size_t      base_len;   /**< `strlen(base_dir)` cached for hot-path prefix checks. */
+    const char        *base_dir;   /**< Absolute path of the app's root directory. */
+    size_t             base_len;   /**< `strlen(base_dir)` cached for hot-path prefix checks. */
+    const HlFsPolicy  *policy;     /**< Compiled read/write authorization policy (may be NULL). */
 } HlFsConfig;
 
 /**

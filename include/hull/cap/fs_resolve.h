@@ -44,6 +44,20 @@ typedef enum {
 } HlFsOpenMode;
 
 /*
+ * Symlink policy for a resolution. Independent of the open mode.
+ *   HL_FS_SYMLINK_FOLLOW - follow in-root symlinks, virtual-root contained
+ *     (re-root / clamp at root_fd). The default and back-compatible behavior;
+ *     used for a SUBTREE grant (descendants follow symlinks within the anchor).
+ *   HL_FS_SYMLINK_REFUSE - ANY symlink component (intermediate or terminal) is
+ *     REFUSED with "symlink_denied", never followed. Used for EXACT/CREATE/PATTERN
+ *     grants so a symlink cannot alias a non-authorized target.
+ */
+typedef enum {
+    HL_FS_SYMLINK_FOLLOW = 0,
+    HL_FS_SYMLINK_REFUSE,
+} HlFsSymlink;
+
+/*
  * Open `base_dir` as a directory fd suitable for hl_fs_open_at(). Returns the fd
  * (caller closes with close()) or -1 with *err set. base_dir is the trusted app
  * root; it is opened O_DIRECTORY|O_CLOEXEC (a symlinked app root is followed once
@@ -73,9 +87,19 @@ int hl_fs_open_base(const char *base_dir, const char **err);
  *
  * Returns an open fd (caller closes) or -1 with *err set to a stable token:
  * "invalid_path", "path_too_deep", "not_found", "permission", "not_a_directory",
- * "is_a_directory", "symlink_loop", "io_error".
+ * "is_a_directory", "symlink_loop", "symlink_denied", "io_error". ("symlink_denied"
+ * only under HL_FS_SYMLINK_REFUSE; see hl_fs_open_at_ex.)
  */
 int hl_fs_open_at(int root_fd, const char *relpath, HlFsOpenMode mode,
                   mode_t create_mode, const char **err);
+
+/*
+ * As hl_fs_open_at, plus an explicit symlink policy. hl_fs_open_at is exactly
+ * hl_fs_open_at_ex(..., HL_FS_SYMLINK_FOLLOW, ...). Under HL_FS_SYMLINK_REFUSE any
+ * symlink component (intermediate or terminal) fails "symlink_denied" and is never
+ * followed - used to open an EXACT/CREATE/PATTERN residual under its grant anchor.
+ */
+int hl_fs_open_at_ex(int root_fd, const char *relpath, HlFsOpenMode mode,
+                     HlFsSymlink symlink, mode_t create_mode, const char **err);
 
 #endif /* HULL_CAP_FS_RESOLVE_H */

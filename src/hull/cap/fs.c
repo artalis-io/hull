@@ -133,19 +133,25 @@ static int build_path(const HlFsConfig *cfg, const char *path,
     return 0;
 }
 
-/* ── Descriptor-relative resolution (checkpoint 1) ──────────────────────
- * read/write/mmap resolve through the virtual-root resolver (fs_resolve.c)
- * instead of realpath->check->open (docs/hull_fs_design.md §3). base_dir-anchored:
- * open base_dir as a dirfd, resolve `path` under it (symlinks followed but
- * confined), and return the leaf fd. No resolve-then-open window.
+#ifndef HL_FS_PATH_MAX
+#define HL_FS_PATH_MAX 4096   /* residual scratch for policy selection */
+#endif
+
+/* ── Descriptor-relative resolution + path authorization (checkpoint 1 + 3) ──
+ * read/write/mmap resolve through the virtual-root resolver (fs_resolve.c) AND
+ * the compiled path-authorization policy (fs_policy.c, docs/hull_fs_design.md
+ * sec. 6). The op SELECTS an authorization entry from the policy for (path, mode)
+ * - read/mmap from the READ set, write from the WRITE set - then opens the
+ * LITERAL residual under the selected entry's HELD anchor fd (never a
+ * reconstructed host path), with a per-kind symlink policy: a SUBTREE follows
+ * in-root symlinks (contained within its anchor), while EXACT/CREATE/PATTERN
+ * REFUSE any symlink so a symlink cannot alias a non-authorized target. No
+ * matching grant -> "permission" (fail closed).
  *
- * SCOPE (checkpoint 1): only read/write/mmap resolve through fs_resolve_fd().
- * hl_cap_fs_exists, hl_cap_fs_delete, and any direct hl_cap_fs_validate consumer
- * still use the OLD build_path()/realpath -> operation path and remain
- * TOCTOU-susceptible. The cap layer is therefore NOT fully TOCTOU-free yet; those
- * consumers migrate to a descriptor-relative resolver mode in a later checkpoint
- * (they need a parent-fd + leaf-name result shape the current READ/WRITE fd modes
- * don't provide). Tracked follow-up. */
+ * SCOPE (checkpoint 3, Slice B): read/write/mmap route through the policy.
+ * hl_cap_fs_exists / hl_cap_fs_delete and any direct hl_cap_fs_validate consumer
+ * still use the OLD build_path()/realpath path and are NOT policy-gated (they
+ * remain base_dir-confined + sandbox-gated). Tracked follow-up. */
 static int fs_resolve_fd(const HlFsConfig *cfg, const char *path,
                          HlFsOpenMode mode, mode_t cmode, const char **err_msg)
 {
@@ -153,14 +159,28 @@ static int fs_resolve_fd(const HlFsConfig *cfg, const char *path,
         if (err_msg) *err_msg = "invalid_args";
         return -1;
     }
-    const char *e = NULL;
-    int root = hl_fs_open_base(cfg->base_dir, &e);
-    if (root < 0) {
-        if (err_msg) *err_msg = e ? e : "open_failed";
+    /* No policy -> deny (fail closed). The config is only wired when the app
+     * declares fs grants, so a no-grant app never gets here with a live cfg. */
+    if (!cfg->policy) {
+        if (err_msg) *err_msg = "permission";
         return -1;
     }
-    int fd = hl_fs_open_at(root, path, mode, cmode, &e);
-    close(root);
+
+    char scratch[HL_FS_PATH_MAX];
+    HlFsSelection sel = hl_fs_policy_select(cfg->policy, path, mode,
+                                            scratch, sizeof(scratch));
+    if (!sel.entry) {
+        if (err_msg) *err_msg = sel.err ? sel.err : "permission";
+        return -1;
+    }
+
+    /* SUBTREE follows in-root symlinks (contained within its anchor);
+     * EXACT/CREATE/PATTERN refuse every symlink. */
+    HlFsSymlink sym = (sel.entry->kind == HL_FS_ENTRY_SUBTREE)
+                          ? HL_FS_SYMLINK_FOLLOW : HL_FS_SYMLINK_REFUSE;
+    const char *e = NULL;
+    int fd = hl_fs_open_at_ex(sel.entry->anchor_fd, sel.residual, mode,
+                              sym, cmode, &e);
     if (fd < 0 && err_msg) *err_msg = e ? e : "open_failed";
     return fd;
 }

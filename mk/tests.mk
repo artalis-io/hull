@@ -860,10 +860,11 @@ fuzz/fuzz_span_sdk: fuzz/fuzz_span_sdk.c
 
 # Mapped-WINDOW geometry math (hl_cap_fs_mmap_window_geometry): page-align + EOF
 # clamp + overflow-safe rounding. The fuzzed function is a pure arithmetic leaf,
-# but cap/fs.c as a whole pulls alloc + audit (sh_json) and now the descriptor-
-# relative resolver (cap/fs_resolve.c, since read/write/mmap resolve through it);
-# link that small chain so the fuzzer resolves without dragging in Keel.
-fuzz/fuzz_span_window: fuzz/fuzz_span_window.c $(SRCDIR)/hull/cap/fs.c $(SRCDIR)/hull/cap/fs_resolve.c $(SRCDIR)/hull/cap/audit.c $(SRCDIR)/hull/utils/alloc.c $(SH_JSON_DIR)/sh_json.c $(SH_ARENA_DIR)/sh_arena.c
+# but cap/fs.c as a whole pulls alloc + audit (sh_json), the descriptor-relative
+# resolver (cap/fs_resolve.c) and the authorization policy (cap/fs_policy.c, since
+# read/write/mmap select through it); link that small chain so the fuzzer resolves
+# without dragging in Keel.
+fuzz/fuzz_span_window: fuzz/fuzz_span_window.c $(SRCDIR)/hull/cap/fs.c $(SRCDIR)/hull/cap/fs_resolve.c $(SRCDIR)/hull/cap/fs_policy.c $(SRCDIR)/hull/cap/audit.c $(SRCDIR)/hull/utils/alloc.c $(SH_JSON_DIR)/sh_json.c $(SH_ARENA_DIR)/sh_arena.c
 	$(CC) $(FUZZ_CFLAGS) -Ivendor/keel/include -o $@ $^
 
 # hull.source.lua parser: adversarial bytes -> lua.parse() over a bounded lua_State.

@@ -260,17 +260,12 @@ int hull_serve(int argc, char **argv)
         log_warn("[hull:cli] manifest extraction failed; running without policy");
     }
 
-    /* Wire per-capability configs from the manifest. serve.c does this
-     * in `wire_caps` for the server build; in CLI mode we do the same
-     * dance inline so capabilities that gate on manifest declarations
-     * (fs.read paths, env allowlist, http hosts + TLS) work out of
-     * app.main. */
-    HlFsConfig fs_cfg = {0};
-    if (manifest.fs_read_count > 0 || manifest.fs_write_count > 0) {
-        fs_cfg.base_dir = app_dir;
-        fs_cfg.base_len = strlen(app_dir);
-        rt->fs_cfg = &fs_cfg;
-    }
+    /* Wire per-capability configs from the manifest. serve.c does this in
+     * `wire_caps` for the server build; in CLI mode we do the same dance inline
+     * for env allowlist + http hosts/TLS below. The FS capability (fs.read/write
+     * grants -> the compiled authorization policy, checkpoint 3) is already wired
+     * onto rt->fs_cfg by hl_app_context_load, so we do NOT overwrite it here (a
+     * base_dir-only HlFsConfig would clobber the policy and deny every op). */
 
     HlEnvConfig env_cfg = {0};
     if (manifest.env_count > 0) {

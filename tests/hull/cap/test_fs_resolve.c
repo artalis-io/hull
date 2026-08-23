@@ -480,4 +480,37 @@ UTEST(fs_resolve, open_dir_mode)
     close(root); teardown();
 }
 
+/* ── HL_FS_SYMLINK_REFUSE: FOLLOW resolves symlinks, REFUSE denies them
+ * (intermediate + terminal), on both openat2 and the forced-manual walk. ─────── */
+UTEST(fs_resolve, symlink_refuse_mode)
+{
+    setup();
+    mkdirp_host("rd"); wfile("rd/f", "x");
+    symln("rd", "dl");            /* symlink -> dir (interior component) */
+    symln("rd/f", "fl");          /* symlink -> file (terminal component) */
+    const char *err = NULL;
+    int root = hl_fs_open_base(base, &err);
+    ASSERT_GE(root, 0);
+    for (int pass = 0; pass < 2; pass++) {
+        select_path(pass);
+        /* FOLLOW (the default) resolves both symlinks */
+        err = NULL;
+        int fd = hl_fs_open_at_ex(root, "dl/f", HL_FS_OPEN_READ, HL_FS_SYMLINK_FOLLOW, 0, &err);
+        ASSERT_GE(fd, 0); close(fd);
+        err = NULL;
+        fd = hl_fs_open_at_ex(root, "fl", HL_FS_OPEN_READ, HL_FS_SYMLINK_FOLLOW, 0, &err);
+        ASSERT_GE(fd, 0); close(fd);
+        /* REFUSE denies an interior symlink... */
+        err = NULL;
+        fd = hl_fs_open_at_ex(root, "dl/f", HL_FS_OPEN_READ, HL_FS_SYMLINK_REFUSE, 0, &err);
+        ASSERT_EQ(fd, -1); ASSERT_STREQ("symlink_denied", err);
+        /* ...and a terminal symlink */
+        err = NULL;
+        fd = hl_fs_open_at_ex(root, "fl", HL_FS_OPEN_READ, HL_FS_SYMLINK_REFUSE, 0, &err);
+        ASSERT_EQ(fd, -1); ASSERT_STREQ("symlink_denied", err);
+    }
+    unsetenv("HL_FS_FORCE_MANUAL");
+    close(root); teardown();
+}
+
 UTEST_MAIN();

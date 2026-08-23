@@ -84,7 +84,7 @@ fn main() {
         // 2. phase-1 sandbox
         check(hl_embed_sandbox_phase1(e) == 0, "phase-1 sandbox applied");
 
-        // 3. policy (app_dir-relative, like a manifest)
+        // 3. policy ("." = base-root grant: the whole app dir + descendants)
         let dot = cstr(".");
         check(hl_embed_allow_read(e, dot.as_ptr()) == 0, "allow_read(\".\")");
         check(hl_embed_allow_write(e, dot.as_ptr()) == 0, "allow_write(\".\")");

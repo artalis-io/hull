@@ -24,6 +24,8 @@
 #include <stdint.h>
 #include "hull/cap/wasm.h"
 #include "hull/cap/fs.h"
+#include "hull/cap/fs_policy.h"
+#include "hull/utils/alloc.h"
 #include "hull/limits/wasm.h"
 #include "hull/vfs.h"
 #include "hull/entry.h"
@@ -554,6 +556,18 @@ int main(int argc, char **argv)
 
     HlFsConfig cfg; memset(&cfg, 0, sizeof(cfg));
     cfg.base_dir = dir; cfg.base_len = strlen(dir);
+    /* checkpoint 3: mmap is policy-gated. This bench mmaps data.bin (read) under
+     * `dir`, so grant the whole dir with a base-root "." read grant. */
+    HlAllocator fs_alloc; hl_alloc_init(&fs_alloc, 0);
+    HlFsPolicy fs_policy = HL_FS_POLICY_INIT;
+    const char *rd_grant[] = { "." };
+    const char *fperr = NULL;
+    if (hl_fs_policy_compile_manifest(dir, &fs_alloc, rd_grant, 1, NULL, 0,
+                                      &fs_policy, &fperr) != 0) {
+        fprintf(stderr, "fs policy compile failed: %s\n", fperr ? fperr : "?");
+        return 1;
+    }
+    cfg.policy = &fs_policy;
     HlWasmCache cache; HlVfs vfs;
     /* VFS entries MUST be sorted by name (binary search). "...aot..." < "...wasm..."
      * (a < w), so the AOT entry precedes the .wasm entry when both are present. */

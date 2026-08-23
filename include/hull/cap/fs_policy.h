@@ -226,11 +226,14 @@ typedef struct {
  * LENGTH-BEARING: `raw`/`raw_len` are the exact grant bytes, so an EMBEDDED NUL
  * ("data\0/secret") is detected and REJECTED here rather than silently truncated.
  * Captures directory_intent from a trailing slash BEFORE normalization, splits
- * into components, and locates the first patterned component. Rejects an absolute
- * path, any ".." component, an embedded NUL, an empty grant, an over-deep path
- * (> HL_FS_MAX_DEPTH components), a trailing-slash PATTERN grant, and any
- * unsupported metacharacter ('?', '[', ']', '{', '}', '\\', or "**") with a
- * stable *err ("invalid_path" / "unsupported_pattern"). On success writes *out
+ * into components, and locates the first patterned component. A grant that
+ * normalizes to ZERO components ("." / "./" / "././") is the BASE-ROOT grant: it
+ * authorizes the whole app dir and every descendant (compiled to a 0-component
+ * SUBTREE at base_fd, the least-specific entry). Rejects an absolute path, any
+ * ".." component, an embedded NUL, an over-deep path (> HL_FS_MAX_DEPTH
+ * components), a trailing-slash PATTERN grant, and any unsupported metacharacter
+ * ('?', '[', ']', '{', '}', '\\', or "**") with a stable *err ("invalid_path" /
+ * "unsupported_pattern"). On success writes *out
  * (an owning value; free with hl_fs_grant_free) and returns 0; on failure returns
  * -1 with *err set, and *out is left HL_FS_GRANT_INIT (nothing to free).
  *
@@ -288,6 +291,19 @@ int hl_fs_policy_compile(const char *base_dir, HlAllocator *alloc,
                          const HlFsGrant *read,  size_t read_n,
                          const HlFsGrant *write, size_t write_n,
                          HlFsPolicy *out, const char **err);
+
+/*
+ * Convenience: parse RAW manifest grant strings (fs.read / fs.write) and compile
+ * them into a policy in one call. Each raw string is parsed with hl_fs_grant_parse
+ * (NUL-terminated, so its length is strlen) and the grants are freed before
+ * returning (hl_fs_policy_compile deep-copies). A parse or compile failure returns
+ * -1 with *err set and *out left HL_FS_POLICY_INIT. *out MUST be HL_FS_POLICY_INIT
+ * on entry; free the result with hl_fs_policy_free.
+ */
+int hl_fs_policy_compile_manifest(const char *base_dir, HlAllocator *alloc,
+                                  const char *const *read,  size_t read_n,
+                                  const char *const *write, size_t write_n,
+                                  HlFsPolicy *out, const char **err);
 
 /*
  * Select the authorizing entry for `caller_path` (relative, no "..", no trailing

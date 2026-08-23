@@ -6,21 +6,23 @@
 -- the main loop awaits keystrokes — same async-yield property the
 -- async_proof demo validates.
 --
--- Run:
---   echo "first line" > /tmp/hull-tail.log
+-- Run (from the app directory):
+--   echo "first line" > watched.log
 --   hull run app.lua
---   # in another terminal:
---   echo "second" >> /tmp/hull-tail.log
+--   # in another terminal, from the same directory:
+--   echo "second" >> watched.log
 --
 -- Keys: q/esc quits.
 --
--- The watched file is hard-coded to /tmp/hull-tail.log so the
--- manifest's fs.read allowlist stays minimal. Adjust to taste.
+-- The watched file is an IN-ROOT relative path (relative to the app
+-- directory) so it matches the manifest's fs.read grant: hull.fs grants
+-- and reads are always relative to the app root, never absolute. Adjust
+-- the name to taste (keep it a relative in-root path).
 
 local tui = require("hull.tui")
 local fs  = require("hull.fs")
 
-local LOG_FILE = "/tmp/hull-tail.log"
+local LOG_FILE = "watched.log"
 
 app.manifest({
     tui = true,
