@@ -190,16 +190,41 @@ UTEST(fs_resolve_parity, ratified_symlink_expanded_depth)
 {
     setup();
     const char *err = NULL;
-    char acc[HL_FS_MAX_DEPTH * 2 + 16] = {0};
-    int ao = 0;
+
+    /* Build HL_FS_MAX_DEPTH nested "c" dirs via DESCRIPTOR-RELATIVE mkdirat/openat.
+     * A 256-component ABSOLUTE path is ~511 chars + the base prefix, which overflows
+     * a PATH-buffer mkdir (mkdirp_host's char[512]) and would silently truncate the
+     * tree short of the depth limit -> the manual walk would hit not_found before
+     * path_too_deep. Held-fd descent has no absolute-path-length limit, so the tree
+     * is truly HL_FS_MAX_DEPTH deep. `leaf` is created at the deepest level (via the
+     * held fd, its absolute path is unrepresentable in a fixed buffer) so the openat2
+     * side can resolve it and the ratified divergence is exercised, not vacuous. */
+    int b = open(base, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    ASSERT_GE(b, 0);
+    int cur = b;
     for (int i = 0; i < HL_FS_MAX_DEPTH; i++) {
-        if (i) acc[ao++] = '/';
-        acc[ao++] = 'c'; acc[ao] = '\0';
-        mkdirp_host(acc);
+        if (mkdirat(cur, "c", 0755) != 0 && errno != EEXIST) {
+            ASSERT_EQ_MSG(0, 1, "mkdirat c");
+        }
+        int nxt = openat(cur, "c", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+        ASSERT_GE(nxt, 0);
+        if (cur != b) close(cur);
+        cur = nxt;
     }
-    char leafrel[HL_FS_MAX_DEPTH * 2 + 24];
-    snprintf(leafrel, sizeof(leafrel), "%s/leaf", acc);
-    wfile(leafrel, "deep");
+    int lf = openat(cur, "leaf", O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+    ASSERT_GE(lf, 0);
+    ssize_t wr = write(lf, "deep", 4);
+    ASSERT_EQ((ssize_t)4, wr);
+    close(lf);
+    if (cur != b) close(cur);
+    close(b);
+
+    /* The symlink target: "c/c/.../c" (HL_FS_MAX_DEPTH components), relative to base
+     * (expand's parent), so it re-roots to the physical deep tree built above. */
+    char acc[HL_FS_MAX_DEPTH * 2 + 16];
+    int ao = 0;
+    for (int i = 0; i < HL_FS_MAX_DEPTH; i++) { if (i) acc[ao++] = '/'; acc[ao++] = 'c'; }
+    acc[ao] = '\0';
     symln(acc, "expand");
 
     int root = hl_fs_open_base(base, &err);
