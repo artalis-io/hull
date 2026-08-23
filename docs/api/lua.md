@@ -134,10 +134,15 @@ re-rooted or clamped, never followed out):
 
 | Grant | Example | Authorizes |
 |-------|---------|------------|
+| Base root | `.` or `./` | the **entire app directory and every descendant** (the broadest grant; use only when the app genuinely needs whole-dir access). Shadowed by any more specific grant. |
 | Directory | `data/` or `data` | that directory and any descendant; in-root symlinks under it are followed, contained |
 | Exact file | `config.json` | only that file; siblings are not reachable; a symlink at that name is refused |
 | Write target (absent) | `out/result.bin` | creates the missing parent dirs and the file (`fs.write` only) |
 | Pattern | `data/*.csv` | files whose name matches, **per component** |
+
+All grant paths are **relative to the app root** and confined to it; an absolute
+path (e.g. `/tmp/x` or `/etc/passwd`) is **rejected** at load — read/write an
+external file by placing it under the app directory (or a bind mount) instead.
 
 **Pattern rules (v1):** `*` matches zero or more bytes **within a single path
 component** and never crosses `/`. Only `*` is supported; `?`, `[`, `]`, `{`, `}`,

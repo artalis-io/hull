@@ -32,6 +32,7 @@
 #include "hull/cap/wasm_data.h"
 #include "hull/worker_wasm.h"
 #include "hull/cap/fs.h"
+#include "hull/cap/fs_policy.h"
 #include "hull/vfs.h"
 #include "hull/utils/alloc.h"
 #include "wasm_export.h"
@@ -53,7 +54,9 @@
 UTEST_MAIN();
 
 static char test_dir[256];
-static HlFsConfig cfg;
+static HlFsConfig  cfg;
+static HlFsPolicy  cfg_policy = HL_FS_POLICY_INIT;
+static HlAllocator cfg_alloc;
 
 static void setup(void)
 {
@@ -61,9 +64,23 @@ static void setup(void)
     mkdir(test_dir, 0755);
     cfg.base_dir = test_dir;
     cfg.base_len = strlen(test_dir);
+
+    /* checkpoint 3: fs read/write/mmap are policy-gated. These tests write files
+     * under test_dir then mmap them, so grant the whole dir (base-root ".") in
+     * BOTH the read and write sets. */
+    hl_alloc_init(&cfg_alloc, 0);
+    cfg_policy = HL_FS_POLICY_INIT;
+    const char *g[] = { "." };
+    const char *perr = NULL;
+    if (hl_fs_policy_compile_manifest(test_dir, &cfg_alloc, g, 1, g, 1,
+                                      &cfg_policy, &perr) != 0)
+        fprintf(stderr, "test_wasm_spans setup: policy: %s\n", perr ? perr : "?");
+    cfg.policy = &cfg_policy;
 }
 static void teardown_dir(void)
 {
+    hl_fs_policy_free(&cfg_policy);   /* close held anchor fds; idempotent */
+    cfg.policy = NULL;
     /* best-effort: unlink the files we create + rmdir. */
     char p[512];
     const char *names[] = { "a.bin", "b.bin", "c.bin", "big.bin", "big2.bin" };
