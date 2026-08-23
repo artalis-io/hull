@@ -54,16 +54,22 @@ int hl_fs_open_base(const char *base_dir, const char **err);
 /*
  * Resolve+open `relpath` under `root_fd` with virtual-root semantics.
  *
- *   HL_FS_OPEN_READ  -> returns an O_RDONLY fd to the leaf.
+ *   HL_FS_OPEN_READ  -> returns an O_RDONLY fd to the leaf (a file).
  *   HL_FS_OPEN_WRITE -> creates missing parent dirs (contained, mkdirat) and
- *                       returns an O_WRONLY|O_CREAT|O_TRUNC fd to the leaf.
+ *                       returns an O_WRONLY|O_CREAT|O_TRUNC fd to the leaf (a file).
+ *   HL_FS_OPEN_DIR   -> returns an O_RDONLY|O_DIRECTORY fd to an existing
+ *                       DIRECTORY; a non-directory target -> "not_a_directory".
+ *                       Never creates. (Used to resolve a SUBTREE grant anchor and,
+ *                       later, stat/list.)
  *
- * `relpath` MUST be relative, MUST NOT contain ".." components, MUST NOT end in a
- * trailing slash (directory-shaped; these are leaf-file modes), and MUST have at
+ * `relpath` MUST be relative, MUST NOT contain ".." components, and MUST have at
  * most HL_FS_MAX_DEPTH components (the caller-path lexical pre-check; violations
- * return "invalid_path" / "path_too_deep"). Symlink targets ENCOUNTERED on disk
- * MAY be absolute or contain "..": those are virtual-rooted (re-root / clamp at
- * `root_fd`), never an escape.
+ * return "invalid_path" / "path_too_deep"). It MUST NOT end in a trailing slash for
+ * ANY mode - READ/WRITE are leaf-file modes, and although DIR opens a directory it
+ * ALSO rejects a trailing slash in v1 (the lexical pre-check is mode-independent);
+ * future stat/list work must not assume a trailing slash is accepted here. Symlink
+ * targets ENCOUNTERED on disk MAY be absolute or contain "..": those are
+ * virtual-rooted (re-root / clamp at `root_fd`), never an escape.
  *
  * Returns an open fd (caller closes) or -1 with *err set to a stable token:
  * "invalid_path", "path_too_deep", "not_found", "permission", "not_a_directory",
