@@ -257,7 +257,7 @@ static void entry_free(HlAllocator *a, HlFsAuthEntry *e)
 static int compile_one(int base_fd, HlAllocator *alloc, const HlFsGrant *g,
                        HlFsAuthEntry *out, const char **err)
 {
-    const char *e = "io_error";
+    const char *e;                          /* every `goto fail` sets this before use */
     size_t lit = g->first_pattern;          /* literal prefix length */
 
     /* A pure-literal grant that resolves to a DIRECTORY is a SUBTREE. Per the
@@ -538,8 +538,12 @@ static int entry_matches(const HlFsAuthEntry *e, const char **ccomp, const size_
         for (size_t i = 0; i < e->grant_n; i++) if (!LIT_EQ(i, i)) return 0;
         return 1;
     }
-    /* PATTERN: exactly grant_n comps; literal prefix exact; pattern tail matched */
+    /* PATTERN: exactly grant_n comps; literal prefix exact; pattern tail matched.
+     * first_pattern <= grant_n == cn always (parse invariant); assert it so the
+     * analyzer can prove ccomp[i]/clen[i] below stay within the caller components
+     * split_caller filled ([0, cn)). */
     if ((size_t)cn != e->grant_n) return 0;
+    if (e->first_pattern > (size_t)cn) return 0;
     for (size_t i = 0; i < e->first_pattern; i++) if (!LIT_EQ(i, i)) return 0;
     for (size_t i = e->first_pattern; i < e->grant_n; i++)
         if (!pat_match(e->grant[i], strlen(e->grant[i]), ccomp[i], clen[i])) return 0;
