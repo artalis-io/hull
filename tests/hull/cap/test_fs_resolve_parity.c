@@ -108,6 +108,7 @@ static int build_tree(void)
     symln("d/g", "rel");
     symln("/d/g", "abs");
     symln("../../../../d/g", "up");
+    symln("d", "dsym");                   /* a symlink used as an INTERIOR component */
     symln("lo", "lo");
     return hl_fs_open_base(base, &err);
 }
@@ -125,6 +126,7 @@ UTEST(fs_resolve_parity, read_battery)
         { "rel", NULL, "nested" },
         { "abs", NULL, "nested" },
         { "up",  NULL, "nested" },
+        { "dsym/g", NULL, "nested" },              /* symlink as an INTERIOR component */
         { "nope", "not_found", NULL },
         { "lo",   "symlink_loop", NULL },
         { "f/",   "invalid_path", NULL },
@@ -226,15 +228,23 @@ static atomic_int g_swap_stop;
 static char g_swap_path[512];    /* interior component flipped by the swapper */
 static char g_ext_dir[256];      /* an EXTERNAL sentinel dir (outside base) */
 
+/* The swapped component "a/mid" flips between: a symlink to "../real" (in-base ->
+ * "a/mid/f" reads base/real/f = "inbase"), a symlink to the external sentinel dir
+ * (absolute, out of base -> re-roots to a non-existent in-base path -> not_found),
+ * and an empty directory (not_found). It NEVER contains the legitimate file, so it
+ * can always be rmdir'd/unlinked, and the only source of "inbase" is base/real/f. */
 static void *swapper(void *arg)
 {
     (void)arg;
     unsigned seed = 0xC0FFEE;
     while (!atomic_load_explicit(&g_swap_stop, memory_order_relaxed)) {
-        rmdir(g_swap_path);
         unlink(g_swap_path);
-        if (rand_r(&seed) & 1) mkdir(g_swap_path, 0755);
-        else                   symlink(g_ext_dir, g_swap_path);  /* absolute, out of base */
+        rmdir(g_swap_path);
+        switch (rand_r(&seed) % 3) {
+        case 0: symlink("../real", g_swap_path); break;   /* in-base -> reads inbase */
+        case 1: symlink(g_ext_dir, g_swap_path); break;   /* escape -> not_found */
+        default: mkdir(g_swap_path, 0755); break;         /* empty dir -> not_found */
+        }
     }
     return NULL;
 }
@@ -244,18 +254,43 @@ UTEST(fs_resolve_parity, component_swap_race_stays_contained)
     setup();
     const char *err = NULL;
     mkdirp_host("a");
-    mkdirp_host("a/mid");
-    wfile("a/mid/f", "inbase");
+    mkdirp_host("real");
+    wfile("real/f", "inbase");                 /* the ONLY source of "inbase" */
     /* external sentinel: if containment ever failed and followed the escaping
-     * symlink as a raw host path, "a/mid/f" would resolve to g_ext_dir/f. */
+     * symlink as a raw host path, "a/mid/f" would resolve to g_ext_dir/f. Content
+     * is PID-unique and distinct from "inbase" so a mistaken read is unambiguous.
+     * Its virtual-root RE-ROOTED path (base + "/tmp/hull_ext_PID") is never created,
+     * so a re-rooted resolve is not_found - not a same-named in-base file that could
+     * make a wrong read look legitimate (asserted below). */
+    char sentinel[64]; snprintf(sentinel, sizeof(sentinel), "SECRET-SENTINEL-%d", (int)getpid());
     snprintf(g_ext_dir, sizeof(g_ext_dir), "/tmp/hull_ext_%d", (int)getpid());
     mkdir(g_ext_dir, 0755);
     char extf[300]; snprintf(extf, sizeof(extf), "%s/f", g_ext_dir);
-    FILE *ef = fopen(extf, "wb"); if (ef) { fputs("SECRET-SENTINEL", ef); fclose(ef); }
+    FILE *ef = fopen(extf, "wb"); if (ef) { fputs(sentinel, ef); fclose(ef); }
     snprintf(g_swap_path, sizeof(g_swap_path), "%s/a/mid", base);
 
     int root = hl_fs_open_base(base, &err);
     ASSERT_GE(root, 0);
+
+    /* Pre-race invariant: with mid AS the escaping symlink, resolving "a/mid/f"
+     * must yield NEITHER "inbase" (no same-named in-root confound) NOR the sentinel
+     * (no escape) - it re-roots to a non-existent in-base path -> not_found. Proven
+     * for BOTH implementations before the race so the loop's "read==inbase => ok"
+     * is sound. */
+    unlink(g_swap_path); rmdir(g_swap_path);
+    ASSERT_EQ(0, symlink(g_ext_dir, g_swap_path));
+    for (int manual = 0; manual < 2; manual++) {
+        const char *tk = NULL;
+        int fd = resolve_via(root, "a/mid/f", HL_FS_OPEN_READ, manual, &tk);
+        if (fd >= 0) {
+            char b[64]; slurp(fd, b, sizeof(b)); close(fd);
+            ASSERT_STRNE_MSG("inbase", b, "escaping-symlink state read a same-named in-root file");
+            ASSERT_STRNE_MSG(sentinel, b, "escaping-symlink state read the external sentinel");
+        } else {
+            ASSERT_STREQ_MSG("not_found", tk, "escaping-symlink state should re-root to not_found");
+        }
+    }
+    unlink(g_swap_path); rmdir(g_swap_path);   /* clean initial state for the race */
 
     int fds_before = count_open_fds();
 

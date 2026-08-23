@@ -205,10 +205,19 @@ static int resolve_manual(int root_fd, const char *relpath, HlFsOpenMode mode,
         int last = (*tail == '\0');
 
         if (!last) {
-            /* interior: descend into a directory, following a symlink if present */
-            int fd = openat(stack[depth - 1], comp,
-                            O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+            /* Interior: descend into a directory, following a symlink if present.
+             * Open O_RDONLY|O_NOFOLLOW *without* O_DIRECTORY, then verify dir-ness
+             * with fstat on the held fd. Using O_DIRECTORY|O_NOFOLLOW here is not
+             * portable: on a SYMLINK component Linux returns ELOOP (detected below)
+             * but macOS returns ENOTDIR, which would misclassify an INTERIOR symlink
+             * as "not_a_directory" instead of following it. Dropping O_DIRECTORY
+             * makes a symlink fail ELOOP uniformly, and the fstat is race-safe (it
+             * inspects the already-opened inode). */
+            int fd = openat(stack[depth - 1], comp, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
             if (fd >= 0) {
+                struct stat st;
+                if (fstat(fd, &st) != 0) { close(fd); map_errno(errno, err); goto fail; }
+                if (!S_ISDIR(st.st_mode)) { close(fd); *err = "not_a_directory"; goto fail; }
                 if (depth >= HL_FS_MAX_DEPTH) { close(fd); *err = "path_too_deep"; goto fail; }
                 stack[depth++] = fd;
                 cur = rest;
@@ -219,9 +228,12 @@ static int resolve_manual(int root_fd, const char *relpath, HlFsOpenMode mode,
                 if (mkdirat(stack[depth - 1], comp, 0755) < 0 && errno != EEXIST) {
                     map_errno(errno, err); goto fail;
                 }
-                fd = openat(stack[depth - 1], comp,
-                            O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+                fd = openat(stack[depth - 1], comp, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
                 if (fd < 0) { map_errno(errno, err); goto fail; }
+                struct stat st;
+                if (fstat(fd, &st) != 0 || !S_ISDIR(st.st_mode)) {
+                    close(fd); *err = "not_a_directory"; goto fail;
+                }
                 if (depth >= HL_FS_MAX_DEPTH) { close(fd); *err = "path_too_deep"; goto fail; }
                 stack[depth++] = fd;
                 cur = rest;

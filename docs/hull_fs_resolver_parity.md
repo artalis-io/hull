@@ -114,6 +114,22 @@ divergence to actually occur (openat2 succeeds while the manual walk rejects) ra
 than passing vacuously — so a regression that silently stops using openat2 fails the
 assertion instead of hiding.
 
+## Defect found and fixed by this harness
+
+The parity/race harness caught a genuine checkpoint-1 bug in the **manual walk** that
+the checkpoint-1 tests missed (they only used symlinks at the *final* component):
+an **interior** symlink (a symlink as a non-final path component, e.g. `mid` in
+`a/mid/f`) was misclassified. The interior descend used
+`openat(..., O_DIRECTORY | O_NOFOLLOW)`, and on a symlink component Linux returns
+`ELOOP` (detected) but **macOS returns `ENOTDIR`**, so the manual walk reported
+`not_a_directory` instead of following the symlink. openat2 resolves it in-kernel,
+so the bug was manual-only (macOS / cosmo). Fixed in `src/hull/cap/fs_resolve.c` by
+opening interior components `O_RDONLY | O_NOFOLLOW` (a symlink then fails `ELOOP`
+uniformly) and verifying dir-ness with `fstat` on the held fd (race-safe).
+Regression-locked by `test_fs_resolve.symlink_interior_component_followed`, the
+`dsym/g` case in `read_battery`, and the race harness (whose swapped component is an
+interior symlink).
+
 ## Scope
 
 Checkpoint 2 is tests + this ratification record only. `stat`/`list`, the §6

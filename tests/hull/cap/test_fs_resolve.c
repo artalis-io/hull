@@ -165,6 +165,20 @@ UTEST(fs_resolve, symlink_in_base_followed)
     teardown();
 }
 
+UTEST(fs_resolve, symlink_interior_component_followed)
+{
+    setup();
+    mkdirp_host("realdir"); wfile("realdir/leaf", "viaint");
+    symln("realdir", "dsym");             /* symlink used as a NON-final component */
+    const char *err = NULL;
+    int root = hl_fs_open_base(base, &err);
+    int fd = hl_fs_open_at(root, "dsym/leaf", HL_FS_OPEN_READ, 0, &err);
+    ASSERT_GE(fd, 0);                      /* must follow the interior symlink, not ENOTDIR */
+    char b[64]; ASSERT_STREQ("viaint", slurp(fd, b, sizeof(b)));
+    close(fd); close(root);
+    teardown();
+}
+
 UTEST(fs_resolve, symlink_absolute_rerooted)
 {
     setup();
