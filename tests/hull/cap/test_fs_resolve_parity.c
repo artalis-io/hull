@@ -258,6 +258,14 @@ static char g_ext_dir[256];      /* an EXTERNAL sentinel dir (outside base) */
  * (absolute, out of base -> re-roots to a non-existent in-base path -> not_found),
  * and an empty directory (not_found). It NEVER contains the legitimate file, so it
  * can always be rmdir'd/unlinked, and the only source of "inbase" is base/real/f. */
+/* Self-contained deterministic PRNG. NOT rand_r: its declaration is gated on
+ * feature-test macros that differ across glibc / BSD / cosmo (this file defines
+ * _XOPEN_SOURCE on Linux, which flips cosmo's libc into strict mode and hides the
+ * non-standard rand_r). A tiny LCG is enough to pick among the three swap states
+ * and keeps the sequence reproducible from the fixed seed on every platform. */
+static unsigned lcg_next(unsigned *s)
+{ *s = *s * 1103515245u + 12345u; return (*s >> 16) & 0x7fffu; }
+
 static void *swapper(void *arg)
 {
     (void)arg;
@@ -265,7 +273,7 @@ static void *swapper(void *arg)
     while (!atomic_load_explicit(&g_swap_stop, memory_order_relaxed)) {
         unlink(g_swap_path);
         rmdir(g_swap_path);
-        switch (rand_r(&seed) % 3) {
+        switch (lcg_next(&seed) % 3) {
         case 0: symlink("../real", g_swap_path); break;   /* in-base -> reads inbase */
         case 1: symlink(g_ext_dir, g_swap_path); break;   /* escape -> not_found */
         default: mkdir(g_swap_path, 0755); break;         /* empty dir -> not_found */
