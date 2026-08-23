@@ -244,9 +244,15 @@ static int resolve_manual(int root_fd, const char *relpath, HlFsOpenMode mode,
                 if (fd < 0) {
                     /* TOCTOU: the component changed between classify and open.
                      * Re-classify (bounded); never relax O_DIRECTORY/O_NOFOLLOW. */
-                    if ((errno == ELOOP || errno == EMLINK || errno == ENOTDIR ||
-                         errno == ENOENT) && ++reclass <= HL_FS_RECLASSIFY_MAX)
+                    if (errno == ELOOP || errno == EMLINK || errno == ENOTDIR ||
+                        errno == ENOENT) {
+                        /* Exhausting the bound is itself a (pathological) contained
+                         * failure: report ONE stable token (io_error) on every path,
+                         * not whichever transient errno happened to be last. Matches
+                         * the WRITE mkdirat re-classification path above. */
+                        if (++reclass > HL_FS_RECLASSIFY_MAX) { *err = "io_error"; goto fail; }
                         continue;
+                    }
                     map_errno(errno, err); goto fail;
                 }
                 struct stat st;
