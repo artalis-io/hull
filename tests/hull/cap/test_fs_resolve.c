@@ -1,0 +1,355 @@
+/*
+ * test_fs_resolve.c — descriptor-relative virtual-root resolver (checkpoint 1).
+ *
+ * Exercises hl_fs_open_at / hl_fs_open_base against a real temp tree: READ,
+ * WRITE (mkdir-p + O_TRUNC), in-base symlink follow, absolute-symlink re-root,
+ * ".." clamp, symlink loop, and the caller-path lexical pre-check. On macOS this
+ * runs the manual held-fd-stack walk; on Linux it exercises the openat2 fast path
+ * for READ + the manual walk for WRITE.
+ *
+ * SPDX-License-Identifier: AGPL-3.0-or-later
+ */
+#if defined(__linux__) && !defined(_XOPEN_SOURCE)
+# define _XOPEN_SOURCE 700
+#endif
+
+#include "utest.h"
+#include "hull/cap/fs_resolve.h"
+#include <errno.h>
+#include <fcntl.h>
+#include <ftw.h>
+#include <string.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
+#include <sys/stat.h>
+
+static char base[256];
+
+static void setup(void)
+{
+    snprintf(base, sizeof(base), "/tmp/hull_res_%d", (int)getpid());
+    mkdir(base, 0755);
+}
+static int rm_entry(const char *p, const struct stat *sb, int t, struct FTW *f)
+{ (void)sb; (void)t; (void)f; return remove(p); }
+static void teardown(void)
+{ if (nftw(base, rm_entry, 16, FTW_DEPTH | FTW_PHYS) != 0 && errno != ENOENT) {} }
+
+/* helpers relative to base (real host paths, for fixture construction) */
+static void wfile(const char *rel, const char *data)
+{
+    char p[512]; snprintf(p, sizeof(p), "%s/%s", base, rel);
+    FILE *f = fopen(p, "wb"); if (f) { fputs(data, f); fclose(f); }
+}
+static void mkdirp_host(const char *rel)
+{ char p[512]; snprintf(p, sizeof(p), "%s/%s", base, rel); mkdir(p, 0755); }
+static void symln(const char *target, const char *rel)
+{ char p[512]; snprintf(p, sizeof(p), "%s/%s", base, rel); unlink(p); symlink(target, p); }
+
+static char *slurp(int fd, char *buf, size_t n)
+{
+    ssize_t r = read(fd, buf, n - 1); if (r < 0) r = 0; buf[r] = '\0'; return buf;
+}
+
+/* ── READ ─────────────────────────────────────────────────────────────── */
+UTEST(fs_resolve, read_basic)
+{
+    setup();
+    wfile("hello.txt", "world");
+    const char *err = NULL;
+    int root = hl_fs_open_base(base, &err);
+    ASSERT_GE(root, 0);
+    int fd = hl_fs_open_at(root, "hello.txt", HL_FS_OPEN_READ, 0, &err);
+    ASSERT_GE(fd, 0);
+    char b[64]; ASSERT_STREQ("world", slurp(fd, b, sizeof(b)));
+    close(fd); close(root);
+    teardown();
+}
+
+UTEST(fs_resolve, read_nested)
+{
+    setup();
+    mkdirp_host("a"); mkdirp_host("a/b"); wfile("a/b/c.txt", "deep");
+    const char *err = NULL;
+    int root = hl_fs_open_base(base, &err);
+    int fd = hl_fs_open_at(root, "a/b/c.txt", HL_FS_OPEN_READ, 0, &err);
+    ASSERT_GE(fd, 0);
+    char b[64]; ASSERT_STREQ("deep", slurp(fd, b, sizeof(b)));
+    close(fd); close(root);
+    teardown();
+}
+
+UTEST(fs_resolve, read_not_found)
+{
+    setup();
+    const char *err = NULL;
+    int root = hl_fs_open_base(base, &err);
+    int fd = hl_fs_open_at(root, "nope.txt", HL_FS_OPEN_READ, 0, &err);
+    ASSERT_EQ(fd, -1);
+    ASSERT_STREQ("not_found", err);
+    close(root);
+    teardown();
+}
+
+/* ── caller-path lexical pre-check ────────────────────────────────────── */
+UTEST(fs_resolve, caller_dotdot_rejected)
+{
+    setup();
+    const char *err = NULL;
+    int root = hl_fs_open_base(base, &err);
+    int fd = hl_fs_open_at(root, "a/../../etc/passwd", HL_FS_OPEN_READ, 0, &err);
+    ASSERT_EQ(fd, -1);
+    ASSERT_STREQ("invalid_path", err);
+    close(root);
+    teardown();
+}
+UTEST(fs_resolve, caller_absolute_rejected)
+{
+    setup();
+    const char *err = NULL;
+    int root = hl_fs_open_base(base, &err);
+    int fd = hl_fs_open_at(root, "/etc/passwd", HL_FS_OPEN_READ, 0, &err);
+    ASSERT_EQ(fd, -1);
+    ASSERT_STREQ("invalid_path", err);
+    close(root);
+    teardown();
+}
+
+/* ── WRITE: mkdir-p + O_TRUNC ─────────────────────────────────────────── */
+UTEST(fs_resolve, write_creates_parents)
+{
+    setup();
+    const char *err = NULL;
+    int root = hl_fs_open_base(base, &err);
+    int fd = hl_fs_open_at(root, "out/deep/result.bin", HL_FS_OPEN_WRITE, 0644, &err);
+    ASSERT_GE(fd, 0);
+    ASSERT_EQ((ssize_t)5, write(fd, "abcde", 5));
+    close(fd);
+    /* verify via READ back through the resolver */
+    fd = hl_fs_open_at(root, "out/deep/result.bin", HL_FS_OPEN_READ, 0, &err);
+    ASSERT_GE(fd, 0);
+    char b[64]; ASSERT_STREQ("abcde", slurp(fd, b, sizeof(b)));
+    close(fd); close(root);
+    teardown();
+}
+
+UTEST(fs_resolve, write_truncates)
+{
+    setup();
+    wfile("f.txt", "abcdef");
+    const char *err = NULL;
+    int root = hl_fs_open_base(base, &err);
+    int fd = hl_fs_open_at(root, "f.txt", HL_FS_OPEN_WRITE, 0644, &err);
+    ASSERT_GE(fd, 0);
+    ASSERT_EQ((ssize_t)2, write(fd, "xy", 2));   /* shorter replacement */
+    close(fd);
+    fd = hl_fs_open_at(root, "f.txt", HL_FS_OPEN_READ, 0, &err);
+    char b[64]; ASSERT_STREQ("xy", slurp(fd, b, sizeof(b)));  /* NOT "xycdef" */
+    close(fd); close(root);
+    teardown();
+}
+
+/* ── symlinks: virtual-root ───────────────────────────────────────────── */
+UTEST(fs_resolve, symlink_in_base_followed)
+{
+    setup();
+    mkdirp_host("real"); wfile("real/data", "payload");
+    symln("real/data", "link");           /* relative, in-base */
+    const char *err = NULL;
+    int root = hl_fs_open_base(base, &err);
+    int fd = hl_fs_open_at(root, "link", HL_FS_OPEN_READ, 0, &err);
+    ASSERT_GE(fd, 0);
+    char b[64]; ASSERT_STREQ("payload", slurp(fd, b, sizeof(b)));
+    close(fd); close(root);
+    teardown();
+}
+
+UTEST(fs_resolve, symlink_absolute_rerooted)
+{
+    setup();
+    /* absolute target /etc/hostname must re-root to base/etc/hostname (absent)
+     * -> not_found, and MUST NOT read the real host /etc/hostname. */
+    symln("/etc/hostname", "abs");
+    const char *err = NULL;
+    int root = hl_fs_open_base(base, &err);
+    int fd = hl_fs_open_at(root, "abs", HL_FS_OPEN_READ, 0, &err);
+    ASSERT_EQ(fd, -1);
+    ASSERT_STREQ("not_found", err);
+    close(root);
+    teardown();
+}
+
+UTEST(fs_resolve, symlink_absolute_rerooted_hits_inbase)
+{
+    setup();
+    mkdirp_host("etc"); wfile("etc/hostname", "sandboxed");
+    symln("/etc/hostname", "abs");        /* re-roots to base/etc/hostname */
+    const char *err = NULL;
+    int root = hl_fs_open_base(base, &err);
+    int fd = hl_fs_open_at(root, "abs", HL_FS_OPEN_READ, 0, &err);
+    ASSERT_GE(fd, 0);
+    char b[64]; ASSERT_STREQ("sandboxed", slurp(fd, b, sizeof(b)));
+    close(fd); close(root);
+    teardown();
+}
+
+UTEST(fs_resolve, symlink_dotdot_clamped)
+{
+    setup();
+    wfile("top", "at-root");
+    mkdirp_host("d");
+    symln("../../../../top", "d/up");     /* excess .. clamps at base -> base/top */
+    const char *err = NULL;
+    int root = hl_fs_open_base(base, &err);
+    int fd = hl_fs_open_at(root, "d/up", HL_FS_OPEN_READ, 0, &err);
+    ASSERT_GE(fd, 0);
+    char b[64]; ASSERT_STREQ("at-root", slurp(fd, b, sizeof(b)));
+    close(fd); close(root);
+    teardown();
+}
+
+UTEST(fs_resolve, symlink_loop_bounded)
+{
+    setup();
+    symln("b", "a"); symln("a", "b");     /* a -> b -> a ... */
+    const char *err = NULL;
+    int root = hl_fs_open_base(base, &err);
+    int fd = hl_fs_open_at(root, "a", HL_FS_OPEN_READ, 0, &err);
+    ASSERT_EQ(fd, -1);
+    ASSERT_STREQ("symlink_loop", err);
+    close(root);
+    teardown();
+}
+
+/* Select the resolver implementation for a pass: 0 = default (openat2 fast path on
+ * Linux, manual elsewhere), 1 = forced manual on every platform. force_manual()
+ * re-reads the env, so this switches paths at runtime for parity testing. */
+static void select_path(int pass)
+{
+    if (pass == 0) unsetenv("HL_FS_FORCE_MANUAL");
+    else setenv("HL_FS_FORCE_MANUAL", "1", 1);
+}
+
+/* ── Fix 1: trailing-slash caller paths are rejected for READ/WRITE leaf modes,
+ * identically on openat2 and the manual walk (a dir-shaped path must not open a
+ * regular file, and WRITE must not create/truncate one). ──────────────────── */
+UTEST(fs_resolve, trailing_slash_regular_file)
+{
+    setup();
+    wfile("rf", "x");
+    const char *err = NULL;
+    int root = hl_fs_open_base(base, &err);
+    for (int pass = 0; pass < 2; pass++) {
+        select_path(pass);
+        err = NULL;
+        int fd = hl_fs_open_at(root, "rf/", HL_FS_OPEN_READ, 0, &err);
+        ASSERT_EQ(fd, -1);
+        ASSERT_STREQ("invalid_path", err);
+    }
+    unsetenv("HL_FS_FORCE_MANUAL");
+    close(root); teardown();
+}
+UTEST(fs_resolve, trailing_slash_directory)
+{
+    setup();
+    mkdirp_host("d");
+    const char *err = NULL;
+    int root = hl_fs_open_base(base, &err);
+    for (int pass = 0; pass < 2; pass++) {
+        select_path(pass);
+        err = NULL;
+        int fd = hl_fs_open_at(root, "d/", HL_FS_OPEN_READ, 0, &err);
+        ASSERT_EQ(fd, -1);              /* dir-shaped path rejected on both */
+        ASSERT_STREQ("invalid_path", err);
+    }
+    unsetenv("HL_FS_FORCE_MANUAL");
+    close(root); teardown();
+}
+UTEST(fs_resolve, trailing_slash_symlink_to_file)
+{
+    setup();
+    wfile("real", "x");
+    symln("real", "l2f");               /* symlink to a regular file */
+    const char *err = NULL;
+    int root = hl_fs_open_base(base, &err);
+    for (int pass = 0; pass < 2; pass++) {
+        select_path(pass);
+        err = NULL;
+        int fd = hl_fs_open_at(root, "l2f/", HL_FS_OPEN_READ, 0, &err);
+        ASSERT_EQ(fd, -1);
+        ASSERT_STREQ("invalid_path", err);
+    }
+    unsetenv("HL_FS_FORCE_MANUAL");
+    close(root); teardown();
+}
+UTEST(fs_resolve, trailing_slash_write_target)
+{
+    setup();
+    const char *err = NULL;
+    int root = hl_fs_open_base(base, &err);
+    for (int pass = 0; pass < 2; pass++) {
+        select_path(pass);
+        err = NULL;
+        int fd = hl_fs_open_at(root, "wt/", HL_FS_OPEN_WRITE, 0644, &err);
+        ASSERT_EQ(fd, -1);              /* must NOT create/truncate a file at "wt/" */
+        ASSERT_STREQ("invalid_path", err);
+    }
+    unsetenv("HL_FS_FORCE_MANUAL");
+    /* and no stray file was created at "wt" */
+    char pth[512]; snprintf(pth, sizeof(pth), "%s/wt", base);
+    struct stat st; ASSERT_NE(0, stat(pth, &st));
+    close(root); teardown();
+}
+
+/* ── Fix 2: the HL_FS_MAX_DEPTH component limit is enforced BEFORE both
+ * implementations, so openat2 and the manual walk agree at the boundary. ──── */
+static char *deep_path(int n)   /* "c/c/.../c" with n components (caller owns) */
+{
+    char *b = (char *)malloc((size_t)n * 2 + 1);
+    int o = 0;
+    for (int i = 0; i < n; i++) { if (i) b[o++] = '/'; b[o++] = 'c'; }
+    b[o] = '\0';
+    return b;
+}
+UTEST(fs_resolve, depth_at_limit_accepted)
+{
+    setup();
+    const char *err = NULL;
+    int root = hl_fs_open_base(base, &err);
+    char *p = deep_path(HL_FS_MAX_DEPTH);         /* exactly at the limit */
+    for (int pass = 0; pass < 2; pass++) {
+        select_path(pass);
+        err = NULL;
+        /* WRITE creates the parents + leaf; must NOT be rejected as too deep */
+        int fd = hl_fs_open_at(root, p, HL_FS_OPEN_WRITE, 0644, &err);
+        if (fd < 0) ASSERT_STRNE("path_too_deep", err ? err : "");
+        else close(fd);
+        err = NULL;
+        int rfd = hl_fs_open_at(root, p, HL_FS_OPEN_READ, 0, &err);  /* also openat2 */
+        if (rfd < 0) ASSERT_STRNE("path_too_deep", err ? err : "");
+        else close(rfd);
+    }
+    unsetenv("HL_FS_FORCE_MANUAL");
+    free(p); close(root); teardown();
+}
+UTEST(fs_resolve, depth_over_limit_rejected)
+{
+    setup();
+    const char *err = NULL;
+    int root = hl_fs_open_base(base, &err);
+    char *p = deep_path(HL_FS_MAX_DEPTH + 1);      /* boundary + 1 */
+    for (int pass = 0; pass < 2; pass++) {
+        select_path(pass);
+        err = NULL;
+        ASSERT_EQ(-1, hl_fs_open_at(root, p, HL_FS_OPEN_READ, 0, &err));
+        ASSERT_STREQ("path_too_deep", err);        /* identical on both paths */
+        err = NULL;
+        ASSERT_EQ(-1, hl_fs_open_at(root, p, HL_FS_OPEN_WRITE, 0644, &err));
+        ASSERT_STREQ("path_too_deep", err);
+    }
+    unsetenv("HL_FS_FORCE_MANUAL");
+    free(p); close(root); teardown();
+}
+
+UTEST_MAIN();

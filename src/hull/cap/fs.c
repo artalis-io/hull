@@ -8,6 +8,7 @@
  */
 
 #include "hull/cap/fs.h"
+#include "hull/cap/fs_resolve.h"
 #include "hull/utils/alloc.h"
 #include "hull/cap/audit.h"
 #include <stdio.h>
@@ -132,6 +133,38 @@ static int build_path(const HlFsConfig *cfg, const char *path,
     return 0;
 }
 
+/* ── Descriptor-relative resolution (checkpoint 1) ──────────────────────
+ * read/write/mmap resolve through the virtual-root resolver (fs_resolve.c)
+ * instead of realpath->check->open (docs/hull_fs_design.md §3). base_dir-anchored:
+ * open base_dir as a dirfd, resolve `path` under it (symlinks followed but
+ * confined), and return the leaf fd. No resolve-then-open window.
+ *
+ * SCOPE (checkpoint 1): only read/write/mmap resolve through fs_resolve_fd().
+ * hl_cap_fs_exists, hl_cap_fs_delete, and any direct hl_cap_fs_validate consumer
+ * still use the OLD build_path()/realpath -> operation path and remain
+ * TOCTOU-susceptible. The cap layer is therefore NOT fully TOCTOU-free yet; those
+ * consumers migrate to a descriptor-relative resolver mode in a later checkpoint
+ * (they need a parent-fd + leaf-name result shape the current READ/WRITE fd modes
+ * don't provide). Tracked follow-up. */
+static int fs_resolve_fd(const HlFsConfig *cfg, const char *path,
+                         HlFsOpenMode mode, mode_t cmode, const char **err_msg)
+{
+    if (!cfg || !path || !cfg->base_dir) {
+        if (err_msg) *err_msg = "invalid_args";
+        return -1;
+    }
+    const char *e = NULL;
+    int root = hl_fs_open_base(cfg->base_dir, &e);
+    if (root < 0) {
+        if (err_msg) *err_msg = e ? e : "open_failed";
+        return -1;
+    }
+    int fd = hl_fs_open_at(root, path, mode, cmode, &e);
+    close(root);
+    if (fd < 0 && err_msg) *err_msg = e ? e : "open_failed";
+    return fd;
+}
+
 /* ── Public API ─────────────────────────────────────────────────────── */
 
 int64_t hl_cap_fs_read(const HlFsConfig *cfg, const char *path,
@@ -140,12 +173,13 @@ int64_t hl_cap_fs_read(const HlFsConfig *cfg, const char *path,
 {
     int64_t result = -1;
 
-    char full[PATH_MAX];
-    if (build_path(cfg, path, full, sizeof(full), err_msg) != 0)
+    int fd = fs_resolve_fd(cfg, path, HL_FS_OPEN_READ, 0, err_msg);
+    if (fd < 0)
         goto audit;
 
-    FILE *f = fopen(full, "rb");
+    FILE *f = fdopen(fd, "rb");
     if (!f) {
+        close(fd);
         if (err_msg) *err_msg = "open_failed";
         goto audit;
     }
@@ -210,26 +244,17 @@ int hl_cap_fs_write(const HlFsConfig *cfg, const char *path,
 {
     int result = -1;
 
-    char full[PATH_MAX];
-    if (build_path(cfg, path, full, sizeof(full), err_msg) != 0)
+    /* WRITE mode: the resolver creates missing parent dirs (contained mkdirat)
+     * and opens the leaf O_WRONLY|O_CREAT|O_TRUNC — same implicit-parents +
+     * truncate behavior as the previous mkdir-p + fopen("wb"), now race-free. */
+    int fd = fs_resolve_fd(cfg, path, HL_FS_OPEN_WRITE, 0644, err_msg);
+    if (fd < 0)
         goto audit;
 
-    /* Create parent directories if needed */
-    char tmp[PATH_MAX];
-    strncpy(tmp, full, sizeof(tmp) - 1);
-    tmp[sizeof(tmp) - 1] = '\0';
-
-    for (char *p = tmp + 1; *p; p++) {
-        if (*p == '/') {
-            *p = '\0';
-            mkdir(tmp, 0755); /* ignore errors — may already exist */
-            *p = '/';
-        }
-    }
-
     {
-        FILE *f = fopen(full, "wb");
+        FILE *f = fdopen(fd, "wb");
         if (!f) {
+            close(fd);
             if (err_msg) *err_msg = "write_failed";
             goto audit;
         }
@@ -301,15 +326,9 @@ HlMappedBuffer *hl_cap_fs_mmap(const HlFsConfig *cfg, const char *path,
 {
     HlMappedBuffer *buf = NULL;
 
-    char full[PATH_MAX];
-    if (build_path(cfg, path, full, sizeof(full), err_msg) != 0)
+    int fd = fs_resolve_fd(cfg, path, HL_FS_OPEN_READ, 0, err_msg);
+    if (fd < 0)
         goto audit;
-
-    int fd = open(full, O_RDONLY);
-    if (fd < 0) {
-        if (err_msg) *err_msg = "open_failed";
-        goto audit;
-    }
 
     struct stat st;
     if (fstat(fd, &st) != 0) {
@@ -437,15 +456,9 @@ HlMappedBuffer *hl_cap_fs_mmap_window(const HlFsConfig *cfg, const char *path,
     HlMappedBuffer *buf = NULL;
     uint64_t map_off = 0, map_len = 0, slop = 0, eff_len = 0;
 
-    char full[PATH_MAX];
-    if (build_path(cfg, path, full, sizeof(full), err_msg) != 0)
+    int fd = fs_resolve_fd(cfg, path, HL_FS_OPEN_READ, 0, err_msg);
+    if (fd < 0)
         goto audit;
-
-    int fd = open(full, O_RDONLY);
-    if (fd < 0) {
-        if (err_msg) *err_msg = "open_failed";
-        goto audit;
-    }
 
     struct stat st;
     if (fstat(fd, &st) != 0) {
