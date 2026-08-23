@@ -468,6 +468,50 @@ fail:
     return -1;
 }
 
+int hl_fs_policy_compile_manifest(const char *base_dir, HlAllocator *alloc,
+                                  const char *const *read, size_t read_n,
+                                  const char *const *write, size_t write_n,
+                                  HlFsPolicy *out, const char **err)
+{
+    const char *e = "io_error";
+    HlFsGrant *rg = NULL, *wg = NULL;
+    size_t rk = 0, wk = 0;   /* count of PARSEABLE grants kept */
+    int rc = -1;
+
+    if (read_n) {
+        rg = (HlFsGrant *)hl_alloc_calloc(alloc, read_n, sizeof(HlFsGrant));
+        if (!rg) { e = "io_error"; goto done; }
+    }
+    if (write_n) {
+        wg = (HlFsGrant *)hl_alloc_calloc(alloc, write_n, sizeof(HlFsGrant));
+        if (!wg) { e = "io_error"; goto done; }
+    }
+    /* SKIP a grant that fails to PARSE (an absolute path or an unsupported
+     * pattern is not a base-relative policy grant - it feeds only the kernel
+     * sandbox). Skipping preserves app load (the old wiring never validated grant
+     * content) and fails CLOSED: the skipped path is simply not authorized by the
+     * cap-layer policy. A genuine COMPILE error (conflicting intent, a symlink
+     * anchor) below is still a hard failure. */
+    for (size_t i = 0; i < read_n; i++) {
+        const char *pe = NULL;
+        if (hl_fs_grant_parse(read[i], strlen(read[i]), alloc, &rg[rk], &pe) == 0) rk++;
+    }
+    for (size_t i = 0; i < write_n; i++) {
+        const char *pe = NULL;
+        if (hl_fs_grant_parse(write[i], strlen(write[i]), alloc, &wg[wk], &pe) == 0) wk++;
+    }
+
+    rc = hl_fs_policy_compile(base_dir, alloc, rg, rk, wg, wk, out, &e);
+
+done:
+    for (size_t i = 0; i < rk; i++) hl_fs_grant_free(&rg[i]);
+    for (size_t i = 0; i < wk; i++) hl_fs_grant_free(&wg[i]);
+    if (rg) hl_alloc_free(alloc, rg, read_n * sizeof(HlFsGrant));
+    if (wg) hl_alloc_free(alloc, wg, write_n * sizeof(HlFsGrant));
+    if (err) *err = e;
+    return rc;
+}
+
 void hl_fs_policy_free(HlFsPolicy *policy)
 {
     if (!policy) return;

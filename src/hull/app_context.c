@@ -68,6 +68,7 @@ struct HlAppContext {
      * cap layer sandboxes to base_dir + rejects traversal; the per-path
      * allowlist is the kernel sandbox, which the test harness runs without. */
     HlFsConfig     fs_cfg_storage;
+    HlFsPolicy     fs_policy_storage; /* compiled fs authorization policy (checkpoint 3) */
 
     /* Resolved module set (opt-in via opts.gate_modules). Lives here so
      * its lifetime matches the runtime — rt->module_set borrows. */
@@ -179,6 +180,9 @@ int hl_app_context_init(HlAppContext **out, const HlAppContextOpts *opts)
 
     HlAppContext *ctx = calloc(1, sizeof(*ctx));
     if (!ctx) return -1;
+    /* fds default -1 so hl_app_context_free never close(0)s stdin on a policy
+     * that was never compiled (calloc gives base_fd == 0, a live fd). */
+    ctx->fs_policy_storage = HL_FS_POLICY_INIT;
 
     /* Own a stable copy of app_dir for fs_cfg.base_dir (see struct comment). */
     ctx->app_dir_copy = strdup(opts->app_dir);
@@ -334,8 +338,28 @@ int hl_app_context_init(HlAppContext **out, const HlAppContextOpts *opts)
                  * sandbox). Keyed on the app declaring fs.read OR fs.write, same
                  * condition as serve. Safe to read m before the free below. */
                 if (m.fs_read_count > 0 || m.fs_write_count > 0) {
+                    /* Compile the fs.read/fs.write grants into the authorization
+                     * policy (checkpoint 3), mirroring serve.c. Must happen BEFORE
+                     * hl_manifest_free(&m) below (compile deep-copies the grant
+                     * strings). The cap layer now enforces the grants here even
+                     * under `hull test`/`hull agent` (which run without the kernel
+                     * sandbox), so a test that reads outside its declared grants is
+                     * denied. */
+                    const char *perr = NULL;
+                    if (hl_fs_policy_compile_manifest(
+                            ctx->app_dir_copy, opts->alloc,
+                            m.fs_read,  (size_t)m.fs_read_count,
+                            m.fs_write, (size_t)m.fs_write_count,
+                            &ctx->fs_policy_storage, &perr) != 0) {
+                        fprintf(stderr, "[app-context] fs policy: %s\n",
+                                perr ? perr : "compile failed");
+                        hl_manifest_free(&m);
+                        hl_app_context_free(ctx);
+                        return -1;
+                    }
                     ctx->fs_cfg_storage.base_dir = ctx->app_dir_copy;
                     ctx->fs_cfg_storage.base_len = strlen(ctx->app_dir_copy);
+                    ctx->fs_cfg_storage.policy   = &ctx->fs_policy_storage;
                     ctx->rt->fs_cfg = &ctx->fs_cfg_storage;
                 }
                 hl_manifest_free(&m);
@@ -426,6 +450,9 @@ void hl_app_context_free(HlAppContext *ctx)
     ctx->platform_vfs_owned = NULL;
     /* rt->fs_cfg borrowed &ctx->fs_cfg_storage, whose base_dir borrowed this;
      * the runtime is already destroyed above, so no live borrow remains. */
+    /* Free the fs authorization policy (closes its held anchor fds; idempotent).
+     * The runtime that borrowed rt->fs_cfg->policy is destroyed above. */
+    hl_fs_policy_free(&ctx->fs_policy_storage);
     free(ctx->app_dir_copy);
     ctx->app_dir_copy = NULL;
     free(ctx);

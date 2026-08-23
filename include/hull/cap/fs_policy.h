@@ -290,6 +290,19 @@ int hl_fs_policy_compile(const char *base_dir, HlAllocator *alloc,
                          HlFsPolicy *out, const char **err);
 
 /*
+ * Convenience: parse RAW manifest grant strings (fs.read / fs.write) and compile
+ * them into a policy in one call. Each raw string is parsed with hl_fs_grant_parse
+ * (NUL-terminated, so its length is strlen) and the grants are freed before
+ * returning (hl_fs_policy_compile deep-copies). A parse or compile failure returns
+ * -1 with *err set and *out left HL_FS_POLICY_INIT. *out MUST be HL_FS_POLICY_INIT
+ * on entry; free the result with hl_fs_policy_free.
+ */
+int hl_fs_policy_compile_manifest(const char *base_dir, HlAllocator *alloc,
+                                  const char *const *read,  size_t read_n,
+                                  const char *const *write, size_t write_n,
+                                  HlFsPolicy *out, const char **err);
+
+/*
  * Select the authorizing entry for `caller_path` (relative, no "..", no trailing
  * slash - the hl_fs_open_at lexical contract) in the set for `mode` (READ set for
  * HL_FS_OPEN_READ, WRITE set for HL_FS_OPEN_WRITE; any other mode value FAILS

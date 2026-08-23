@@ -19,6 +19,8 @@
 
 #include "utest.h"
 #include "hull/cap/fs.h"
+#include "hull/cap/fs_policy.h"
+#include "hull/utils/alloc.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <ftw.h>
@@ -30,7 +32,20 @@
 #include <unistd.h>
 
 static char test_dir[256];
-static HlFsConfig test_cfg;
+static HlFsConfig  test_cfg;
+static HlFsPolicy  test_policy = HL_FS_POLICY_INIT;
+static HlAllocator test_alloc;
+
+/* Checkpoint 3: read/write/mmap are policy-gated. These tests exercise the
+ * read/write/mmap MECHANICS, so setup grants exactly the paths they touch (both
+ * read and write sets); the traversal/absolute cases stay denied by the lexical
+ * pre-check. Policy authorization itself is covered by test_fs_policy.c. */
+static const char *const test_grants[] = {
+    "a/b/c/file.txt", "del.txt", "gone.txt", "here.txt", "huge.bin",
+    "mmap_borrow.txt", "mmap_rel.txt", "mmap_test.txt", "no_such_file.txt",
+    "nope.txt", "size.txt", "test.txt", "whole.txt",
+    "win_borrow.bin", "win_cross.bin", "win_eof.bin", "win_rej.bin", "win_zero.bin",
+};
 
 static void setup_fs(void)
 {
@@ -38,6 +53,18 @@ static void setup_fs(void)
     mkdir(test_dir, 0755);
     test_cfg.base_dir = test_dir;
     test_cfg.base_len = strlen(test_dir);
+
+    hl_alloc_init(&test_alloc, 0);
+    test_policy = HL_FS_POLICY_INIT;
+    size_t n = sizeof(test_grants) / sizeof(test_grants[0]);
+    const char *perr = NULL;
+    if (hl_fs_policy_compile_manifest(test_dir, &test_alloc,
+                                      test_grants, n, test_grants, n,
+                                      &test_policy, &perr) != 0) {
+        fprintf(stderr, "test_fs setup: policy compile failed: %s\n",
+                perr ? perr : "?");
+    }
+    test_cfg.policy = &test_policy;
 }
 
 static int teardown_rm_entry(const char *path, const struct stat *sb,
@@ -49,6 +76,8 @@ static int teardown_rm_entry(const char *path, const struct stat *sb,
 
 static void teardown_fs(void)
 {
+    hl_fs_policy_free(&test_policy);   /* close held anchor fds; idempotent */
+    test_cfg.policy = NULL;
     /* In-process recursive delete via nftw(FTW_DEPTH). Cosmopolitan's
      * toybox rm rejects `-r` ("rm: illegal option -- r"), and
      * `system("rm -rf ...")` leaves the next test hitting EEXIST on

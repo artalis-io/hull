@@ -114,25 +114,31 @@ static int force_manual(void)
 #define RESOLVE_IN_ROOT       0x10
 struct open_how { uint64_t flags; uint64_t mode; uint64_t resolve; };
 #endif
+#ifndef RESOLVE_NO_SYMLINKS
+#define RESOLVE_NO_SYMLINKS   0x04
+#endif
 #ifndef __NR_openat2
 #define __NR_openat2 437
 #endif
 
 /* Returns fd, or -1 with *err set, or -2 meaning "openat2 unavailable, fall
- * back to the manual walk". */
+ * back to the manual walk". Under HL_FS_SYMLINK_REFUSE the kernel refuses every
+ * symlink (RESOLVE_NO_SYMLINKS) and an ELOOP is mapped to "symlink_denied". */
 static int try_openat2(int root_fd, const char *relpath, int flags,
-                       mode_t mode, const char **err)
+                       HlFsSymlink sympol, mode_t mode, const char **err)
 {
     struct open_how how;
     memset(&how, 0, sizeof(how));
     how.flags = (uint64_t)flags;
     how.mode = (flags & O_CREAT) ? (uint64_t)mode : 0;
-    how.resolve = RESOLVE_IN_ROOT | RESOLVE_NO_MAGICLINKS;
+    how.resolve = RESOLVE_IN_ROOT | RESOLVE_NO_MAGICLINKS
+                | (sympol == HL_FS_SYMLINK_REFUSE ? RESOLVE_NO_SYMLINKS : 0);
 
     long r = syscall(__NR_openat2, root_fd, relpath, &how, sizeof(how));
     if (r >= 0) return (int)r;
     if (errno == ENOSYS || errno == EPERM /* seccomp may block it */)
         return -2;
+    if (sympol == HL_FS_SYMLINK_REFUSE && errno == ELOOP) { *err = "symlink_denied"; return -1; }
     map_errno(errno, err);
     return -1;
 }
@@ -155,7 +161,7 @@ static int splice_link(const char *link, const char *rest,
 }
 
 static int resolve_manual(int root_fd, const char *relpath, HlFsOpenMode mode,
-                          mode_t cmode, const char **err)
+                          HlFsSymlink sympol, mode_t cmode, const char **err)
 {
     int stack[HL_FS_MAX_DEPTH];
     int depth = 0;
@@ -299,6 +305,9 @@ static int resolve_manual(int root_fd, const char *relpath, HlFsOpenMode mode,
         }
 
     symlink:
+        /* Every symlink-encounter site jumps here, so one gate enforces the policy:
+         * under REFUSE, any symlink (intermediate or terminal) is denied outright. */
+        if (sympol == HL_FS_SYMLINK_REFUSE) { *err = "symlink_denied"; goto fail; }
         if (++symlinks > HL_FS_SYMLINK_MAX) { *err = "symlink_loop"; goto fail; }
         {
             char link[HL_FS_PATH_MAX];
@@ -339,6 +348,13 @@ int hl_fs_open_base(const char *base_dir, const char **err)
 int hl_fs_open_at(int root_fd, const char *relpath, HlFsOpenMode mode,
                   mode_t create_mode, const char **err)
 {
+    return hl_fs_open_at_ex(root_fd, relpath, mode, HL_FS_SYMLINK_FOLLOW,
+                            create_mode, err);
+}
+
+int hl_fs_open_at_ex(int root_fd, const char *relpath, HlFsOpenMode mode,
+                     HlFsSymlink sympol, mode_t create_mode, const char **err)
+{
     const char *e = "io_error";
     if (root_fd < 0 || !relpath) { if (err) *err = "invalid_args"; return -1; }
     if (!caller_path_ok(relpath)) { if (err) *err = "invalid_path"; return -1; }
@@ -356,14 +372,14 @@ int hl_fs_open_at(int root_fd, const char *relpath, HlFsOpenMode mode,
      * path, unless HL_FS_FORCE_MANUAL is set (parity testing). */
     if ((mode == HL_FS_OPEN_READ || mode == HL_FS_OPEN_DIR) && !force_manual()) {
         int of = O_RDONLY | O_CLOEXEC | (mode == HL_FS_OPEN_DIR ? O_DIRECTORY : 0);
-        int fd = try_openat2(root_fd, relpath, of, 0, &e);
+        int fd = try_openat2(root_fd, relpath, of, sympol, 0, &e);
         if (fd >= 0) return fd;
         if (fd == -1) { if (err) *err = e; return -1; }
         /* fd == -2: openat2 unavailable -> manual walk */
     }
 #endif
 
-    int fd = resolve_manual(root_fd, relpath, mode, create_mode, &e);
+    int fd = resolve_manual(root_fd, relpath, mode, sympol, create_mode, &e);
     if (fd < 0 && err) *err = e;
     return fd;
 }

@@ -689,6 +689,7 @@ typedef struct {
     int                  manifest_sealed; /* 1 after successful seal */
     HlResolvedModuleSet  module_set; /* frozen after resolver; consulted by gating */
     HlFsConfig           fs_cfg_storage;
+    HlFsPolicy           fs_policy_storage; /* compiled fs authorization policy (checkpoint 3) */
     HlEnvConfig          env_cfg_storage;
     HlHttpConfig         http_cfg_storage;
     HlSmtpConfig         smtp_cfg_storage;
@@ -1449,11 +1450,25 @@ static int hl_serve_wire_caps(HlServerState *s)
     }
 
     /* Wire fs_cfg from manifest (if app declares fs.read OR fs.write
-     * paths — both blob.* and fs.mmap need the cfg). */
+     * paths — both blob.* and fs.mmap need the cfg). The fs.read/fs.write grants
+     * are COMPILED into the path-authorization policy (checkpoint 3, sec. 6): the
+     * cap layer selects from it per op and opens under a held anchor. A no-grant
+     * app leaves rt->fs_cfg NULL -> fs denied (unchanged fail-closed behavior). */
     memset(&s->fs_cfg_storage, 0, sizeof(s->fs_cfg_storage));
+    s->fs_policy_storage = HL_FS_POLICY_INIT;
     if (s->manifest.fs_read_count > 0 || s->manifest.fs_write_count > 0) {
+        const char *perr = NULL;
+        if (hl_fs_policy_compile_manifest(
+                s->app_dir, &s->alloc,
+                s->manifest.fs_read,  (size_t)s->manifest.fs_read_count,
+                s->manifest.fs_write, (size_t)s->manifest.fs_write_count,
+                &s->fs_policy_storage, &perr) != 0) {
+            log_error("[hull:c] fs policy compile failed: %s", perr ? perr : "unknown");
+            return -1;
+        }
         s->fs_cfg_storage.base_dir = s->app_dir;
         s->fs_cfg_storage.base_len = strlen(s->app_dir);
+        s->fs_cfg_storage.policy   = &s->fs_policy_storage;
         rt->fs_cfg = &s->fs_cfg_storage;
     }
 
@@ -1559,6 +1574,9 @@ static int hl_serve_wire_caps(HlServerState *s)
 /* Cleanup if a phase fails after wire_caps has succeeded. */
 static void hl_serve_undo_caps(HlServerState *s)
 {
+    /* Close the fs policy's held anchor fds + free its entries (idempotent;
+     * resets to HL_FS_POLICY_INIT). Uses &s->alloc, still live here. */
+    hl_fs_policy_free(&s->fs_policy_storage);
     /* hl_manifest_free is a safe no-op on a sealed manifest (the
      * `sealed` flag short-circuits the per-string free walk). */
     hl_manifest_free(&s->manifest);
@@ -1793,6 +1811,11 @@ static void hl_serve_teardown_after_serve(HlServerState *s)
      * WASM/GPU static caches are external — freed separately below. */
     hl_app_context_free(s->app);
     s->app = NULL;
+
+    /* Free the fs authorization policy AFTER the runtime is gone: the cap layer
+     * (rt->fs_cfg->policy) may touch it during runtime shutdown, so it must
+     * outlive the runtime. Closes the held anchor fds; idempotent. */
+    hl_fs_policy_free(&s->fs_policy_storage);
 
     /* Now unwrap the async-backend wrap — borrowed, doesn't destroy
      * KlServer's KlEventCtx (server's own free does that). */
@@ -2071,6 +2094,9 @@ int hull_serve(int argc, char **argv)
 {
     HlServerState s;
     memset(&s, 0, sizeof(s));
+    /* fds default -1 so a teardown before the policy is compiled never close(0)s
+     * stdin (HL_FS_POLICY_INIT, not the memset's all-zero base_fd == 0). */
+    s.fs_policy_storage = HL_FS_POLICY_INIT;
 
     /* Phase 1: parse CLI args */
     int rc = hl_serve_parse_args(&s, argc, argv);
