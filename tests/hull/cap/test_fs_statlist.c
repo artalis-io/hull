@@ -38,8 +38,12 @@ static void mk_file(const char *rel, const char *data)
   FILE *f = fopen(p, "wb"); if (f) { fputs(data, f); fclose(f); } }
 static void mk_link(const char *target, const char *rel)
 { char p[512]; snprintf(p, sizeof(p), "%s/%s", base, rel); unlink(p); symlink(target, p); }
+/* cosmo does not declare mkfifo under the feature level Hull's tests use (same as
+ * test_fs_resolve.c); the FIFO-reporting checks are compiled out there. */
+#if !defined(__COSMOPOLITAN__)
 static void mk_fifo(const char *rel)
 { char p[512]; snprintf(p, sizeof(p), "%s/%s", base, rel); unlink(p); mkfifo(p, 0644); }
+#endif
 
 /* Compile a policy from raw read/write grant arrays (grants freed here). */
 static int build_policy(HlAllocator *a, const char **rd, size_t rn,
@@ -280,7 +284,10 @@ UTEST(fs_statlist, empty_missing_and_fifo)
 {
     setup();
     mk_dir("empty");
-    mk_dir("data"); mk_file("data/f", "1"); mk_fifo("data/pipe");
+    mk_dir("data"); mk_file("data/f", "1");
+#if !defined(__COSMOPOLITAN__)
+    mk_fifo("data/pipe");
+#endif
     HlAllocator a; hl_alloc_init(&a, 0);
     HlFsPolicy p = HL_FS_POLICY_INIT; const char *err = NULL;
     const char *rd[] = { "." };                 /* base-root: everything readable */
@@ -298,6 +305,7 @@ UTEST(fs_statlist, empty_missing_and_fifo)
     ASSERT_STREQ("not_found", err);
     ASSERT_TRUE(e == NULL); ASSERT_EQ((size_t)0, n);
 
+#if !defined(__COSMOPOLITAN__)
     /* FIFO is REPORTED as "other" via lstat - never opened (would block) */
     err = NULL;
     ASSERT_EQ(0, hl_cap_fs_list(&c, "data", &e, &n, &a, &err));
@@ -309,6 +317,7 @@ UTEST(fs_statlist, empty_missing_and_fifo)
     HlFsStatInfo st; err = NULL;
     ASSERT_EQ(0, hl_cap_fs_stat(&c, "data/pipe", &st, &err));
     ASSERT_EQ((int)HL_FS_NODE_OTHER, (int)st.type);   /* stat lstat's it; no block */
+#endif
 
     hl_fs_policy_free(&p); ASSERT_EQ((size_t)0, hl_alloc_used(&a));
     teardown();

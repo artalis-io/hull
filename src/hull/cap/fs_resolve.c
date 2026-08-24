@@ -420,7 +420,8 @@ int hl_fs_resolve_parent(int root_fd, const char *relpath, HlFsSymlink sympol,
     size_t leaf_len = strlen(leaf);
     if (leaf_len == 0 || leaf_len > NAME_MAX) { if (err) *err = "invalid_path"; return -1; }
     if (strcmp(leaf, ".") == 0 || strcmp(leaf, "..") == 0) {
-        if (err) *err = "invalid_path"; return -1;   /* not a nameable leaf */
+        if (err) *err = "invalid_path";              /* not a nameable leaf */
+        return -1;
     }
 
     int parent_fd;
