@@ -132,6 +132,99 @@ static JSValue js_fs_write(JSContext *ctx, JSValueConst this_val,
     return JS_TRUE;
 }
 
+/* Map the node-type enum to its stable string label (Lua/JS parity). */
+static const char *js_fs_node_type_name(HlFsNodeType t)
+{
+    switch (t) {
+    case HL_FS_NODE_FILE:    return "file";
+    case HL_FS_NODE_DIR:     return "dir";
+    case HL_FS_NODE_SYMLINK: return "symlink";
+    default:                 return "other";
+    }
+}
+
+/* fs.stat(path) -> { type, size, mode, mtime } | null.
+ * Present -> an object; absent -> null (subsumes `exists`); error -> throw.
+ * lstat semantics: a terminal symlink is type "symlink", never followed. */
+static JSValue js_fs_stat(JSContext *ctx, JSValueConst this_val,
+                          int argc, JSValueConst *argv)
+{
+    (void)this_val;
+    HlJS *js = (HlJS *)JS_GetContextOpaque(ctx);
+    if (!js || !js->base.fs_cfg)
+        return JS_ThrowInternalError(ctx,
+            "fs.stat: not available (declare fs.read in manifest)");
+    if (argc < 1)
+        return JS_ThrowTypeError(ctx, "fs.stat requires (path)");
+
+    const char *path = JS_ToCString(ctx, argv[0]);
+    if (!path) return JS_EXCEPTION;
+
+    const char *err = NULL;
+    HlFsStatInfo info;
+    int rc = hl_cap_fs_stat(js->base.fs_cfg, path, &info, &err);
+    JS_FreeCString(ctx, path);
+    if (rc == 1) return JS_NULL;                          /* absent */
+    if (rc != 0)
+        return JS_ThrowInternalError(ctx, "fs.stat: %s", err ? err : "stat_failed");
+
+    JSValue o = JS_NewObject(ctx);
+    if (JS_IsException(o)) return o;
+    JS_SetPropertyStr(ctx, o, "type", JS_NewString(ctx, js_fs_node_type_name(info.type)));
+    JS_SetPropertyStr(ctx, o, "size", JS_NewInt64(ctx, (int64_t)info.size));
+    JS_SetPropertyStr(ctx, o, "mode", JS_NewInt32(ctx, (int32_t)info.mode));
+    JS_SetPropertyStr(ctx, o, "mtime", JS_NewInt64(ctx, (int64_t)info.mtime));
+    return o;
+}
+
+/* fs.list(dir) -> Array<{ name, type, size }>. Deterministic byte-order
+ * (unsigned-byte lexicographic, shorter first). Empty dir -> []; missing or
+ * denied dir -> throw. */
+static JSValue js_fs_list(JSContext *ctx, JSValueConst this_val,
+                          int argc, JSValueConst *argv)
+{
+    (void)this_val;
+    HlJS *js = (HlJS *)JS_GetContextOpaque(ctx);
+    if (!js || !js->base.fs_cfg)
+        return JS_ThrowInternalError(ctx,
+            "fs.list: not available (declare fs.read in manifest)");
+    if (argc < 1)
+        return JS_ThrowTypeError(ctx, "fs.list requires (path)");
+
+    const char *path = JS_ToCString(ctx, argv[0]);
+    if (!path) return JS_EXCEPTION;
+
+    const char *err = NULL;
+    HlFsDirEntry *entries = NULL;
+    size_t count = 0;
+    int rc = hl_cap_fs_list(js->base.fs_cfg, path, &entries, &count,
+                            js->base.alloc, &err);
+    JS_FreeCString(ctx, path);
+    if (rc != 0)
+        return JS_ThrowInternalError(ctx, "fs.list: %s", err ? err : "list_failed");
+
+    JSValue arr = JS_NewArray(ctx);
+    if (JS_IsException(arr)) {
+        hl_cap_fs_list_free(entries, count, js->base.alloc);
+        return arr;
+    }
+    for (size_t i = 0; i < count; i++) {
+        JSValue o = JS_NewObject(ctx);
+        if (JS_IsException(o)) {
+            JS_FreeValue(ctx, arr);
+            hl_cap_fs_list_free(entries, count, js->base.alloc);
+            return JS_EXCEPTION;
+        }
+        JS_SetPropertyStr(ctx, o, "name", JS_NewString(ctx, entries[i].name));
+        JS_SetPropertyStr(ctx, o, "type",
+                          JS_NewString(ctx, js_fs_node_type_name(entries[i].type)));
+        JS_SetPropertyStr(ctx, o, "size", JS_NewInt64(ctx, (int64_t)entries[i].size));
+        JS_SetPropertyUint32(ctx, arr, (uint32_t)i, o);
+    }
+    hl_cap_fs_list_free(entries, count, js->base.alloc);
+    return arr;
+}
+
 static JSValue js_fs_mmap(JSContext *ctx, JSValueConst this_val,
                           int argc, JSValueConst *argv)
 {
@@ -203,6 +296,10 @@ static int js_fs_module_init(JSContext *ctx, JSModuleDef *m)
                       JS_NewCFunction(ctx, js_fs_read, "read", 1));
     JS_SetPropertyStr(ctx, fs, "write",
                       JS_NewCFunction(ctx, js_fs_write, "write", 2));
+    JS_SetPropertyStr(ctx, fs, "stat",
+                      JS_NewCFunction(ctx, js_fs_stat, "stat", 1));
+    JS_SetPropertyStr(ctx, fs, "list",
+                      JS_NewCFunction(ctx, js_fs_list, "list", 1));
     JS_SetPropertyStr(ctx, fs, "mmap",
                       JS_NewCFunction(ctx, js_fs_mmap, "mmap", 2));
     JS_SetModuleExport(ctx, m, "fs", fs);

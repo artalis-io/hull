@@ -547,9 +547,13 @@ void hl_fs_policy_free(HlFsPolicy *policy)
 
 /* Split a validated caller path into components (skipping "."). Returns component
  * count, or -1 with *err on a lexical violation (absolute / ".." / trailing slash
- * / empty / over-deep / over-long component). `comp`/`len` index into `path`. */
+ * / empty / over-deep / over-long component). `comp`/`len` index into `path`.
+ * `allow_empty` = 1 permits a ZERO-component result ("." / "./"): valid only for an
+ * ENUMERATION target (fs.list of the anchor root itself), never for a leaf op
+ * (read/write/stat need a named terminal, so they pass 0 and a 0-component path is
+ * rejected "invalid_path"). */
 static long split_caller(const char *path, const char **comp, size_t *len,
-                         const char **err)
+                         int allow_empty, const char **err)
 {
     if (!path || path[0] == '\0') { *err = "invalid_path"; return -1; }
     if (path[0] == '/' || path[0] == '\\') { *err = "invalid_path"; return -1; }
@@ -571,8 +575,20 @@ static long split_caller(const char *path, const char **comp, size_t *len,
         if (n >= HL_FS_MAX_DEPTH) { *err = "invalid_path"; return -1; }
         comp[n] = s; len[n] = l; n++;
     }
-    if (n == 0) { *err = "invalid_path"; return -1; }
+    if (n == 0 && !allow_empty) { *err = "invalid_path"; return -1; }
     return n;
+}
+
+/* Byte-exact equality of a grant component against a caller component. */
+static int comp_lit_eq(const char *grant_comp, const char *cc, size_t cl)
+{
+    return strlen(grant_comp) == cl && memcmp(grant_comp, cc, cl) == 0;
+}
+
+int hl_fs_pattern_match(const char *pattern, size_t plen, const char *name, size_t nlen)
+{
+    if (!pattern || !name) return 0;
+    return pat_match(pattern, plen, name, nlen);
 }
 
 /* Does the entry authorize caller components ccomp[0..cn)? */
@@ -629,7 +645,7 @@ HlFsSelection hl_fs_policy_select(const HlFsPolicy *policy, const char *caller_p
     const char *ccomp[HL_FS_MAX_DEPTH];
     size_t clen[HL_FS_MAX_DEPTH];
     const char *e = NULL;
-    long cn = split_caller(caller_path, ccomp, clen, &e);
+    long cn = split_caller(caller_path, ccomp, clen, 0 /*leaf op*/, &e);
     if (cn < 0) { sel.err = e; return sel; }
 
     for (size_t i = 0; i < set_n; i++) {                  /* pre-sorted: first match wins */
@@ -653,6 +669,94 @@ HlFsSelection hl_fs_policy_select(const HlFsPolicy *policy, const char *caller_p
 
         sel.entry = ent;
         sel.residual = scratch;
+        sel.err = NULL;
+        return sel;
+    }
+
+    sel.err = "permission";
+    return sel;
+}
+
+/* ── enumeration selection (fs.list) ─────────────────────────────────────────── */
+
+HlFsListSelection hl_fs_policy_select_list(const HlFsPolicy *policy,
+                                           const char *caller_path,
+                                           char *scratch, size_t scratch_len)
+{
+    HlFsListSelection sel = { NULL, NULL, NULL, HL_FS_SYMLINK_FOLLOW, "permission" };
+    if (!policy || !scratch || scratch_len == 0) { sel.err = "invalid_args"; return sel; }
+
+    /* A list target may be the anchor root itself ("."), so 0 components is valid. */
+    const char *ccomp[HL_FS_MAX_DEPTH];
+    size_t clen[HL_FS_MAX_DEPTH];
+    const char *e = NULL;
+    long cn = split_caller(caller_path, ccomp, clen, 1 /*allow_empty*/, &e);
+    if (cn < 0) { sel.err = e; return sel; }
+
+    /* Scan in stored priority order (most-specific first). MOST-SPECIFIC SHADOWING
+     * RUNS BEFORE THE LISTABILITY CHECK: the FIRST entry that GOVERNS `caller_path`
+     * decides, even a governing-but-unlistable one (which denies) - it is never
+     * skipped to fall through to a broader grant. */
+    for (size_t i = 0; i < policy->read_n; i++) {
+        const HlFsAuthEntry *ent = &policy->read[i];
+        int governs = 0, listable = 0;
+        HlFsSymlink sym = HL_FS_SYMLINK_FOLLOW;
+        const char *filter = NULL;
+        size_t residual_end = (size_t)cn;
+
+        if (ent->kind == HL_FS_ENTRY_SUBTREE) {
+            /* Listable at/under the grant directory (all children). */
+            if ((size_t)cn >= ent->grant_n) {
+                int ok = 1;
+                for (size_t k = 0; k < ent->grant_n; k++)
+                    if (!comp_lit_eq(ent->grant[k], ccomp[k], clen[k])) { ok = 0; break; }
+                if (ok) { governs = 1; listable = 1; }   /* FOLLOW, no filter */
+            }
+        } else if (ent->kind == HL_FS_ENTRY_PATTERN) {
+            /* Governs listing ONLY at the grant's literal prefix (caller ==
+             * grant[0 .. first_pattern)). */
+            if ((size_t)cn == ent->first_pattern) {
+                int ok = 1;
+                for (size_t k = 0; k < ent->first_pattern; k++)
+                    if (!comp_lit_eq(ent->grant[k], ccomp[k], clen[k])) { ok = 0; break; }
+                if (ok) {
+                    governs = 1;
+                    /* v1: only a SINGLE terminal pattern component is listable; a
+                     * multi-component pattern governs but is NOT listable (denies). */
+                    if (ent->first_pattern == ent->grant_n - 1) {
+                        listable = 1;
+                        sym = HL_FS_SYMLINK_REFUSE;
+                        filter = ent->grant[ent->first_pattern];
+                    }
+                    residual_end = ent->first_pattern;   /* == cn here */
+                }
+            }
+        }
+        /* EXACT / CREATE never govern a directory listing. */
+
+        if (!governs) continue;
+        if (!listable) { sel.err = "permission"; return sel; }   /* shadow: no fall-through */
+
+        /* residual = caller components [anchor_depth, residual_end) joined by '/',
+         * or "." for the anchor itself. */
+        size_t pos = 0;
+        for (size_t k = ent->anchor_depth; k < residual_end; k++) {
+            size_t need = clen[k] + (pos ? 1 : 0);
+            if (pos + need + 1 > scratch_len) { sel.err = "invalid_args"; return sel; }
+            if (pos) scratch[pos++] = '/';
+            memcpy(scratch + pos, ccomp[k], clen[k]);
+            pos += clen[k];
+        }
+        if (pos == 0) {
+            if (scratch_len < 2) { sel.err = "invalid_args"; return sel; }
+            scratch[pos++] = '.';
+        }
+        scratch[pos] = '\0';
+
+        sel.entry = ent;
+        sel.residual = scratch;
+        sel.filter = filter;
+        sel.sympol = sym;
         sel.err = NULL;
         return sel;
     }

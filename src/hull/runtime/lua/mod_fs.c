@@ -147,6 +147,87 @@ static int lua_fs_mmap(lua_State *L)
     return 1;
 }
 
+/* Map the node-type enum to its stable string label (Lua/JS parity). */
+static const char *fs_node_type_name(HlFsNodeType t)
+{
+    switch (t) {
+    case HL_FS_NODE_FILE:    return "file";
+    case HL_FS_NODE_DIR:     return "dir";
+    case HL_FS_NODE_SYMLINK: return "symlink";
+    default:                 return "other";   /* FIFO, socket, device, ... */
+    }
+}
+
+/* fs.stat(path) -> { type, size, mode, mtime } | nil | (nil, err).
+ * Present -> a metadata table. Absent -> a single nil (subsumes `exists`).
+ * Error   -> (nil, err) with a stable token. lstat semantics: a terminal
+ * symlink is reported as type "symlink", never followed. */
+static int lua_fs_stat(lua_State *L)
+{
+    HlLua *lua = get_hl_lua(L);
+    if (!lua || !lua->base.fs_cfg) {
+        lua_pushnil(L);
+        lua_pushstring(L, "fs.stat: not available (declare fs.read in manifest)");
+        return 2;
+    }
+    const char *path = luaL_checkstring(L, 1);
+
+    const char *err = NULL;
+    HlFsStatInfo info;
+    int rc = hl_cap_fs_stat(lua->base.fs_cfg, path, &info, &err);
+    if (rc == 1) { lua_pushnil(L); return 1; }        /* absent (not an error) */
+    if (rc != 0) {
+        lua_pushnil(L);
+        lua_pushstring(L, err ? err : "stat_failed");
+        return 2;
+    }
+    lua_createtable(L, 0, 4);
+    lua_pushstring(L, fs_node_type_name(info.type)); lua_setfield(L, -2, "type");
+    lua_pushinteger(L, (lua_Integer)info.size);      lua_setfield(L, -2, "size");
+    lua_pushinteger(L, (lua_Integer)info.mode);      lua_setfield(L, -2, "mode");
+    lua_pushinteger(L, (lua_Integer)info.mtime);     lua_setfield(L, -2, "mtime");
+    return 1;
+}
+
+/* fs.list(dir) -> array of { name, type, size } | (nil, err). Deterministic
+ * byte-order (unsigned-byte lexicographic, shorter first). An empty directory
+ * yields an empty array; a missing/denied directory yields (nil, err). */
+static int lua_fs_list(lua_State *L)
+{
+    HlLua *lua = get_hl_lua(L);
+    if (!lua || !lua->base.fs_cfg) {
+        lua_pushnil(L);
+        lua_pushstring(L, "fs.list: not available (declare fs.read in manifest)");
+        return 2;
+    }
+    const char *path = luaL_checkstring(L, 1);
+
+    const char *err = NULL;
+    HlFsDirEntry *entries = NULL;
+    size_t count = 0;
+    int rc = hl_cap_fs_list(lua->base.fs_cfg, path, &entries, &count,
+                            lua->base.alloc, &err);
+    if (rc != 0) {
+        lua_pushnil(L);
+        lua_pushstring(L, err ? err : "list_failed");
+        return 2;
+    }
+    /* count is bounded by HL_FS_LIST_MAX_ENTRIES (fits int). */
+    lua_createtable(L, (int)count, 0);
+    for (size_t i = 0; i < count; i++) {
+        lua_createtable(L, 0, 3);
+        lua_pushstring(L, entries[i].name);
+        lua_setfield(L, -2, "name");
+        lua_pushstring(L, fs_node_type_name(entries[i].type));
+        lua_setfield(L, -2, "type");
+        lua_pushinteger(L, (lua_Integer)entries[i].size);
+        lua_setfield(L, -2, "size");
+        lua_rawseti(L, -2, (lua_Integer)(i + 1));
+    }
+    hl_cap_fs_list_free(entries, count, lua->base.alloc);
+    return 1;
+}
+
 static HlMappedBuffer *check_mmap(lua_State *L, int idx)
 {
     HlMappedBuffer **pp = luaL_checkudata(L, idx, HL_MMAP_MT);
@@ -225,6 +306,8 @@ static void lua_register_mmap_metatable(lua_State *L)
 static const luaL_Reg fs_funcs[] = {
     {"read",  lua_fs_read},
     {"write", lua_fs_write},
+    {"stat",  lua_fs_stat},
+    {"list",  lua_fs_list},
     {"mmap",  lua_fs_mmap},
     {NULL, NULL}
 };

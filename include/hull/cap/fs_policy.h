@@ -18,10 +18,12 @@
  * the kernel sandbox stays as defense-in-depth BENEATH it. An app with no grants
  * authorizes nothing (fails closed).
  *
- * Slice A (this header + fs_policy.c + test_fs_policy.c) is the policy CORE:
- * parse grants, compile grants -> entries (descriptor-bound), and deterministic
- * most-specific selection. It does NOT wire into hl_cap_fs read/write/mmap
- * (Slice B) and does NOT add stat/list (Slice C).
+ * Slice A was the policy CORE: parse grants, compile grants -> entries
+ * (descriptor-bound), and deterministic most-specific file selection
+ * (hl_fs_policy_select). Slice B wired that into hl_cap_fs read/write/mmap. Slice C
+ * adds enumeration selection (hl_fs_policy_select_list) for fs.stat / fs.list; a
+ * SUBTREE lists any descendant directory, a single-terminal PATTERN exposes only
+ * matching names, and EXACT/CREATE are not listable directories.
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
@@ -337,6 +339,81 @@ int hl_fs_policy_compile_manifest(const char *base_dir, HlAllocator *alloc,
  */
 HlFsSelection hl_fs_policy_select(const HlFsPolicy *policy, const char *caller_path,
                                   HlFsOpenMode mode, char *scratch, size_t scratch_len);
+
+/*
+ * The result of selecting an entry to ENUMERATE a directory (fs.list, Slice C).
+ * Distinct from hl_fs_policy_select (which selects a FILE leaf for read/write/stat):
+ * listing targets a DIRECTORY, and a PATTERN grant must expose ONLY matching names.
+ *
+ *   entry    - selected entry, or NULL == denied (err set).
+ *   residual - the directory to enumerate, relative to entry->anchor_fd, written
+ *              INTO scratch ("." for the anchor itself). OWNED BY SCRATCH.
+ *   filter   - NULL for a SUBTREE entry (every child returned). For a PATTERN entry,
+ *              the single terminal pattern component (e.g. "*.csv") that each
+ *              enumerated child NAME must byte-match (component-scoped) to be
+ *              returned. Points into entry->grant (valid for the policy lifetime),
+ *              never into scratch.
+ *   sympol   - HL_FS_SYMLINK_FOLLOW for SUBTREE, HL_FS_SYMLINK_REFUSE for PATTERN,
+ *              applied to the walk that opens `residual` as a directory.
+ */
+typedef struct {
+    const HlFsAuthEntry *entry;
+    const char          *residual;
+    const char          *filter;
+    HlFsSymlink          sympol;
+    const char          *err;
+} HlFsListSelection;
+
+/*
+ * Select the entry authorizing ENUMERATION of directory `caller_path` from the READ
+ * set. Pure (NO filesystem access), deterministic, same specificity order as
+ * hl_fs_policy_select. Per kind:
+ *   - SUBTREE: the caller directory at/under the grant is listable; filter = NULL
+ *     (all children); every descendant directory is enumerable.
+ *   - EXACT / CREATE: a file (or absent) grant is NEVER a listable directory -> no
+ *     match, so a caller can list neither the grant nor its parent nor its siblings.
+ *   - PATTERN: GOVERNS listing of the grant's literal PREFIX directory (grant[0 ..
+ *     first_pattern)) when `caller_path` equals that prefix. It is LISTABLE only for
+ *     a SINGLE-TERMINAL-COMPONENT pattern (v1 restriction: first_pattern ==
+ *     grant_n - 1) -> filter = grant[first_pattern]. A governing MULTI-component
+ *     pattern (first_pattern < grant_n - 1, e.g. `logs`+`*`+`*.txt`) is NOT listable
+ *     in v1 -> "permission": depth-aware pattern enumeration would reveal intermediate
+ *     names matching an earlier '*' that contain no authorized terminal file, a
+ *     metadata-exposure widening that deserves a separate design.
+ *   - EXACT / CREATE: a file (or absent) grant NEVER governs a directory listing.
+ *
+ * MOST-SPECIFIC SHADOWING RUNS BEFORE THE LISTABILITY CHECK (deliberate, tested):
+ * selection scans in stored priority order (specificity DESC, then grant-text ASC)
+ * and the FIRST entry that GOVERNS `caller_path` is chosen; the per-kind listability
+ * decision is then made ON THAT ENTRY. A narrower governing entry therefore SHADOWS
+ * a broader overlapping one and its verdict stands - it is NOT skipped to fall
+ * through to the broader grant. With both `logs/` (SUBTREE) and `logs`+`*`+`*.txt`
+ * (PATTERN), `list("logs")` selects the more-specific multi-component PATTERN and
+ * returns "permission"; it must NOT list via the SUBTREE. Likewise multiple
+ * same-prefix terminal patterns (`data`+`*.csv` and `data`+`*.txt`) resolve to the
+ * single most-specific/lexicographic winner and apply ITS filter alone - this is
+ * deterministic policy selection, NEVER a union of filters. Dedicated tests lock
+ * both cases. (Deeper callers where only the SUBTREE governs - e.g. `list("logs/x")`
+ * - are authorized by the SUBTREE as normal; shadowing bites only at the overlap.)
+ *
+ * Errors (stable tokens, fail closed): no governing entry -> entry == NULL, err =
+ * "permission"; a governing-but-unlistable entry -> entry == NULL, err = "permission";
+ * a lexically invalid caller path (absolute / ".." / trailing slash) -> "invalid_path";
+ * a `scratch` shorter than strlen(caller_path)+2 -> "invalid_args".
+ */
+HlFsListSelection hl_fs_policy_select_list(const HlFsPolicy *policy,
+                                           const char *caller_path,
+                                           char *scratch, size_t scratch_len);
+
+/*
+ * Match ONE path component `name` (nlen bytes) against a v1 grant pattern component
+ * `pattern` (plen bytes; single-component '*' wildcard, byte-exact, bounded - the
+ * SAME matcher compile/select use). Returns 1 on match, 0 otherwise (including any
+ * component or pattern longer than NAME_MAX, or a NULL argument). fs.list uses it to
+ * filter a PATTERN grant's enumeration to the matching names (via the `filter`
+ * returned by hl_fs_policy_select_list).
+ */
+int hl_fs_pattern_match(const char *pattern, size_t plen, const char *name, size_t nlen);
 
 /*
  * Close every owned anchor/base fd and free the entry arrays via policy->alloc.

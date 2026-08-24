@@ -160,6 +160,64 @@ JS
 run_fs_roundtrip "lua" "lua"
 run_fs_roundtrip "js"  "js"
 
+# ── fs.stat + fs.list parity through app.main (checkpoint 3, Slice C) ─────────
+# Proves the Lua and JS bindings return EQUIVALENT values + error tokens for the
+# metadata (stat) and enumeration (list) surface: present -> metadata, absent ->
+# nil/null, deterministic byte-order list, and a "not_found" token on a missing
+# dir (Lua returns (nil, err); JS throws with the token in the message). The app
+# asserts every case internally and returns 0 only when all match.
+run_fs_statlist() {
+    runtime="$1"; ext="$2"
+    echo "--- fs.stat + fs.list parity via app.main (${runtime}) ---"
+    d=$(mktemp -d)
+    if [ "$ext" = "lua" ]; then
+        cat > "${d}/app.lua" <<'LUA'
+app.manifest({ modules = { "hull/fs@1" }, fs = { read = { "." }, write = { "." } } })
+app.main(function()
+  local fs = require("hull.fs")
+  fs.write("data/a.csv", "1"); fs.write("data/b.txt", "1"); fs.write("data/c.csv", "1")
+  local st = fs.stat("data/a.csv")
+  if not (st and st.type == "file" and st.size == 1) then return 2 end
+  if fs.stat("data/nope") ~= nil then return 3 end            -- absent -> nil
+  local es = fs.list("data")
+  if #es ~= 3 then return 4 end
+  if not (es[1].name == "a.csv" and es[2].name == "b.txt" and es[3].name == "c.csv") then return 5 end
+  if es[1].type ~= "file" then return 6 end                    -- deterministic order
+  local l, err = fs.list("data/missingdir")
+  if l ~= nil or err ~= "not_found" then return 7 end          -- error token
+  return 0
+end)
+LUA
+    else
+        cat > "${d}/app.js" <<'JS'
+import { app } from "hull:app";
+import { fs } from "hull:fs";
+app.manifest({ modules: ["hull/fs@1"], fs: { read: ["."], write: ["."] } });
+app.main(() => {
+  fs.write("data/a.csv", "1"); fs.write("data/b.txt", "1"); fs.write("data/c.csv", "1");
+  const st = fs.stat("data/a.csv");
+  if (!(st && st.type === "file" && st.size === 1)) return 2;
+  if (fs.stat("data/nope") !== null) return 3;                 // absent -> null
+  const es = fs.list("data");
+  if (es.length !== 3) return 4;
+  if (!(es[0].name === "a.csv" && es[1].name === "b.txt" && es[2].name === "c.csv")) return 5;
+  if (es[0].type !== "file") return 6;                          // deterministic order
+  let tok = null;
+  try { fs.list("data/missingdir"); } catch (e) { tok = String(e.message || e); }
+  if (tok === null || tok.indexOf("not_found") < 0) return 7;   // error token
+  return 0;
+});
+JS
+    fi
+    "${HULL_BIN}" "${d}/app.${ext}" >/dev/null 2>&1
+    rc=$?
+    expect_eq "${runtime} fs.stat + fs.list parity via app.main" "0" "${rc}"
+    rm -rf "${d}"
+}
+
+run_fs_statlist "lua" "lua"
+run_fs_statlist "js"  "js"
+
 echo
 echo "${PASS}/$((PASS + FAIL)) CLI e2e tests passed"
 [ "${FAIL}" -eq 0 ]

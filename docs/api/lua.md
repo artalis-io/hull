@@ -401,9 +401,65 @@ local rows = db.query("SELECT id, hull_double(score) AS doubled FROM games")
 
 ---
 
-(Continuing through `http`, `fs`, `crypto`, `time`, `env`, `log`, then
+(Continuing through `http`, `crypto`, `time`, `env`, `log`, then
 stdlib modules and middleware. Representative slice complete for
 review.)
+
+---
+
+### `fs.*` table — Filesystem
+
+`require("hull.fs")`. Every path is relative to the app root, resolved through the
+descriptor-relative virtual-root resolver + the compiled authorization policy: an
+op selects from `fs.read` (read / stat / list / mmap) or `fs.write` (write), then
+resolves the literal path under the selected grant's held anchor. Absolute paths
+and `..` are rejected. See [Filesystem grants](#filesystem-grants).
+
+#### `fs.read(path)` / `fs.write(path, bytes)` / `fs.mmap(path[, {offset, length}])`
+
+`read` returns the whole file as a binary-safe string (or `nil, err`); `write`
+creates missing parents + the file and returns `true` (or `nil, err`); `mmap`
+returns a read-only `MappedBuffer` (optionally a page-aligned window).
+
+#### `fs.stat(path)`
+
+Return a metadata table, or `nil` when the path does not exist (so `fs.stat(p) ~=
+nil` subsumes an `exists` check). On a policy / IO error returns `nil, err`.
+**lstat semantics:** a terminal symlink is reported **as a link** (`type =
+"symlink"`), never followed — a metadata op cannot alias a symlink target.
+
+| Field   | Type      | Description |
+|---------|-----------|-------------|
+| `type`  | `string`  | `"file"`, `"dir"`, `"symlink"`, or `"other"` (FIFO / socket / device). |
+| `size`  | `integer` | Size in bytes. |
+| `mode`  | `integer` | Permission bits (`st_mode & 0o777`). |
+| `mtime` | `integer` | Modification time, epoch seconds. Reproducible builds MUST NOT key on it. |
+
+Requires `fs.read` authority over `path`.
+
+#### `fs.list(dir)`
+
+Return a **deterministically ordered** array of `{ name, type, size }` (non-recursive;
+`.` and `..` omitted), or `nil, err`. **Ordering** is unsigned-byte lexicographic,
+shorter-prefix-first — identical on every platform, independent of locale and
+`readdir` order. Each entry's `type` comes from an lstat, so a symlink child is
+reported as `"symlink"`, never followed. An empty directory yields `{}`; a missing
+directory yields `nil, "not_found"`.
+
+Selection is gated by `fs.read`: a **directory** grant lists any descendant
+directory; a single-terminal **pattern** grant (e.g. `data/*.csv`) lists its
+directory exposing **only matching names**; an **exact-file** grant is not a
+listable directory (so it can neither list its parent nor inspect siblings). When
+grants overlap, the **most specific** governs (a narrower grant shadows a broader
+one, and a governing multi-component pattern such as `logs/*/*.txt` denies
+`list("logs")` rather than falling through to a `logs/` subtree grant).
+
+**Error tokens** (Lua returns `nil, token`; JS throws with the token in the
+message): `permission`, `invalid_path`, `not_found`, `not_a_directory`,
+`symlink_denied`, `too_many_entries`, `listing_too_large`, `name_too_long`,
+`size_unrepresentable`, `io_error`. A size beyond `2^53 - 1` errors
+(`size_unrepresentable`) rather than returning a rounded number, so Lua and JS
+agree exactly.
 
 ---
 
