@@ -56,8 +56,7 @@ Comments that *document a past cleanup* (e.g. `agent/template.c` "an earlier
 snprintf snippet builder was dead code; removed per M-2") are NOT dead code; they
 are addressed under comment archaeology (1.4), not deletion.
 
-### 1.2a Hex encoding - real duplication, but consolidation is a LINK-CLOSURE
-### question, not a mechanical merge
+### 1.2a Hex encoding - real duplication, but a link-closure question (not a mechanical merge)
 
 Hex encoding is implemented many times, but there are already (at least) THREE
 DELIBERATE homes at different link boundaries - which is the whole point:
