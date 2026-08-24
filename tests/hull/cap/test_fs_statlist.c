@@ -124,15 +124,17 @@ UTEST(fs_statlist, exact_grant_no_parent_no_sibling)
     err = NULL;
     ASSERT_EQ(0, hl_cap_fs_stat(&c, "data/real.txt", &st, &err));
     ASSERT_EQ((int)HL_FS_NODE_FILE, (int)st.type);
-    /* the parent directory is NOT listable via an exact-file grant */
+    /* the parent directory is NOT authorized via an exact-file grant -> permission */
     HlFsDirEntry *e = NULL; size_t n = 0; err = NULL;
     ASSERT_EQ(-1, hl_cap_fs_list(&c, "data", &e, &n, &a, &err));
     ASSERT_STREQ("permission", err);
     ASSERT_TRUE(e == NULL); ASSERT_EQ((size_t)0, n);
-    /* the exact file itself is not a directory to list */
+    /* the exact path IS authorized but is not a directory -> not_a_directory
+     * (the ratified distinction: authorized-but-wrong-type, not "permission"). */
     err = NULL;
     ASSERT_EQ(-1, hl_cap_fs_list(&c, "data/real.txt", &e, &n, &a, &err));
-    ASSERT_STREQ("permission", err);   /* a file grant is not a listable directory */
+    ASSERT_STREQ("not_a_directory", err);
+    ASSERT_TRUE(e == NULL); ASSERT_EQ((size_t)0, n);
     /* a sibling cannot be stat'd */
     err = NULL;
     ASSERT_EQ(-1, hl_cap_fs_stat(&c, "data/other.txt", &st, &err));
@@ -416,6 +418,91 @@ UTEST(fs_statlist, list_rollback_and_no_fd_leak)
     close(f1);
 
     hl_fs_policy_free(&p); ASSERT_EQ((size_t)0, hl_alloc_used(&pa));
+    teardown();
+}
+
+/* ── a read-set CREATE whose target (or an intermediate) is absent -> stat returns
+ * ABSENT (nil), never (nil, "not_found") (issue 1) ───────────────────────────── */
+UTEST(fs_statlist, stat_read_create_absent_is_nil)
+{
+    setup();
+    HlAllocator a; hl_alloc_init(&a, 0);
+    HlFsPolicy p = HL_FS_POLICY_INIT; const char *err = NULL;
+    const char *rd[] = { "out/result.bin" };   /* out/ absent -> read-set CREATE */
+    ASSERT_EQ(0, build_policy(&a, rd, 1, NULL, 0, &p, &err));
+    HlFsConfig c = cfg_with(&p);
+
+    HlFsStatInfo st;
+    /* the intermediate out/ is missing -> ABSENT, and *err is cleared (issue 2). */
+    err = "stale";
+    ASSERT_EQ(1, hl_cap_fs_stat(&c, "out/result.bin", &st, &err));
+    ASSERT_TRUE(err == NULL);
+    /* out/ exists but the file is still absent -> still ABSENT */
+    mk_dir("out"); err = "stale";
+    ASSERT_EQ(1, hl_cap_fs_stat(&c, "out/result.bin", &st, &err));
+    ASSERT_TRUE(err == NULL);
+    /* create the file -> present */
+    mk_file("out/result.bin", "R"); err = NULL;
+    ASSERT_EQ(0, hl_cap_fs_stat(&c, "out/result.bin", &st, &err));
+    ASSERT_EQ((int)HL_FS_NODE_FILE, (int)st.type);
+
+    hl_fs_policy_free(&p); ASSERT_EQ((size_t)0, hl_alloc_used(&a));
+    teardown();
+}
+
+/* ── a prior error token does not leak into a later ABSENT via a reused pointer
+ * (issue 2) ──────────────────────────────────────────────────────────────────── */
+UTEST(fs_statlist, stat_error_then_absent_same_pointer)
+{
+    setup();
+    mk_dir("data"); mk_file("data/real.txt", "R"); mk_file("secret.txt", "S");
+    HlAllocator a; hl_alloc_init(&a, 0);
+    HlFsPolicy p = HL_FS_POLICY_INIT; const char *err = NULL;
+    const char *rd[] = { "data" };
+    ASSERT_EQ(0, build_policy(&a, rd, 1, NULL, 0, &p, &err));
+    HlFsConfig c = cfg_with(&p);
+
+    HlFsStatInfo st;
+    /* a DENIED path sets the token... */
+    err = NULL;
+    ASSERT_EQ(-1, hl_cap_fs_stat(&c, "secret.txt", &st, &err));
+    ASSERT_STREQ("permission", err);
+    /* ...then the SAME pointer for an ABSENT authorized path clears it. */
+    ASSERT_EQ(1, hl_cap_fs_stat(&c, "data/none.txt", &st, &err));
+    ASSERT_TRUE(err == NULL);
+
+    hl_fs_policy_free(&p); ASSERT_EQ((size_t)0, hl_alloc_used(&a));
+    teardown();
+}
+
+/* ── stat(".") of the app root works under a base-root grant, and is denied
+ * without one (issue 3) ──────────────────────────────────────────────────────── */
+UTEST(fs_statlist, stat_root_via_base_grant)
+{
+    setup();
+    mk_file("f.txt", "1"); mk_dir("data");
+    HlAllocator a; hl_alloc_init(&a, 0);
+
+    HlFsPolicy p = HL_FS_POLICY_INIT; const char *err = NULL;
+    const char *rd[] = { "." };                 /* base-root */
+    ASSERT_EQ(0, build_policy(&a, rd, 1, NULL, 0, &p, &err));
+    HlFsConfig c = cfg_with(&p);
+    HlFsStatInfo st; err = NULL;
+    ASSERT_EQ(0, hl_cap_fs_stat(&c, ".", &st, &err));       /* the root, a directory */
+    ASSERT_EQ((int)HL_FS_NODE_DIR, (int)st.type);
+    hl_fs_policy_free(&p);
+
+    /* a non-root grant does NOT authorize stat(".") */
+    HlFsPolicy p2 = HL_FS_POLICY_INIT;
+    const char *rd2[] = { "data" };
+    ASSERT_EQ(0, build_policy(&a, rd2, 1, NULL, 0, &p2, &err));
+    HlFsConfig c2 = cfg_with(&p2);
+    err = NULL;
+    ASSERT_EQ(-1, hl_cap_fs_stat(&c2, ".", &st, &err));
+    ASSERT_STREQ("permission", err);
+    hl_fs_policy_free(&p2);
+
+    ASSERT_EQ((size_t)0, hl_alloc_used(&a));
     teardown();
 }
 

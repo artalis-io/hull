@@ -630,11 +630,64 @@ static int entry_matches(const HlFsAuthEntry *e, const char **ccomp, const size_
     #undef LIT_EQ
 }
 
+/* Build the residual for a matched entry into scratch and return the selection.
+ * residual = caller components [anchor_depth, residual_end) joined by '/', or "."
+ * for the anchor itself. */
+static HlFsSelection make_selection(const HlFsAuthEntry *ent, const char **ccomp,
+                                    const size_t *clen, size_t residual_end,
+                                    char *scratch, size_t scratch_len)
+{
+    HlFsSelection sel = { NULL, NULL, "permission" };
+    size_t pos = 0;
+    for (size_t k = ent->anchor_depth; k < residual_end; k++) {
+        size_t need = clen[k] + (pos ? 1 : 0);
+        if (pos + need + 1 > scratch_len) { sel.err = "invalid_args"; return sel; }
+        if (pos) scratch[pos++] = '/';
+        memcpy(scratch + pos, ccomp[k], clen[k]);
+        pos += clen[k];
+    }
+    if (pos == 0) {
+        if (scratch_len < 2) { sel.err = "invalid_args"; return sel; }
+        scratch[pos++] = '.';                          /* grant root: "." not "" */
+    }
+    scratch[pos] = '\0';
+    sel.entry = ent;
+    sel.residual = scratch;
+    sel.err = NULL;
+    return sel;
+}
+
+/* Shared leaf/node selector over one entry set. `allow_empty` = 1 permits a
+ * 0-component caller ("." = the app root), which stat uses but read/write/mmap
+ * do not (they need a named leaf). Deterministic: entries are pre-sorted, first
+ * match wins. */
+static HlFsSelection select_in_set(const HlFsAuthEntry *set, size_t set_n,
+                                   const char *caller_path, int allow_empty,
+                                   char *scratch, size_t scratch_len)
+{
+    HlFsSelection sel = { NULL, NULL, "permission" };
+    if (!scratch || scratch_len == 0) { sel.err = "invalid_args"; return sel; }
+
+    const char *ccomp[HL_FS_MAX_DEPTH];
+    size_t clen[HL_FS_MAX_DEPTH];
+    const char *e = NULL;
+    long cn = split_caller(caller_path, ccomp, clen, allow_empty, &e);
+    if (cn < 0) { sel.err = e; return sel; }
+
+    for (size_t i = 0; i < set_n; i++) {                  /* pre-sorted: first match wins */
+        const HlFsAuthEntry *ent = &set[i];
+        if (!entry_matches(ent, ccomp, clen, cn)) continue;
+        return make_selection(ent, ccomp, clen, (size_t)cn, scratch, scratch_len);
+    }
+    sel.err = "permission";
+    return sel;
+}
+
 HlFsSelection hl_fs_policy_select(const HlFsPolicy *policy, const char *caller_path,
                                   HlFsOpenMode mode, char *scratch, size_t scratch_len)
 {
-    HlFsSelection sel = { NULL, NULL, "permission" };
-    if (!policy || !scratch || scratch_len == 0) { sel.err = "invalid_args"; return sel; }
+    HlFsSelection sel = { NULL, NULL, "invalid_args" };
+    if (!policy) return sel;
 
     const HlFsAuthEntry *set;
     size_t set_n;
@@ -642,39 +695,19 @@ HlFsSelection hl_fs_policy_select(const HlFsPolicy *policy, const char *caller_p
     else if (mode == HL_FS_OPEN_WRITE) { set = policy->write; set_n = policy->write_n; }
     else { sel.err = "permission"; return sel; }          /* invalid mode: fail closed */
 
-    const char *ccomp[HL_FS_MAX_DEPTH];
-    size_t clen[HL_FS_MAX_DEPTH];
-    const char *e = NULL;
-    long cn = split_caller(caller_path, ccomp, clen, 0 /*leaf op*/, &e);
-    if (cn < 0) { sel.err = e; return sel; }
+    return select_in_set(set, set_n, caller_path, 0 /*leaf op*/, scratch, scratch_len);
+}
 
-    for (size_t i = 0; i < set_n; i++) {                  /* pre-sorted: first match wins */
-        const HlFsAuthEntry *ent = &set[i];
-        if (!entry_matches(ent, ccomp, clen, cn)) continue;
-
-        /* residual = caller components [anchor_depth, cn) joined by '/', or "." */
-        size_t pos = 0;
-        for (size_t k = ent->anchor_depth; k < (size_t)cn; k++) {
-            size_t need = clen[k] + (pos ? 1 : 0);
-            if (pos + need + 1 > scratch_len) { sel.err = "invalid_args"; return sel; }
-            if (pos) scratch[pos++] = '/';
-            memcpy(scratch + pos, ccomp[k], clen[k]);
-            pos += clen[k];
-        }
-        if (pos == 0) {
-            if (scratch_len < 2) { sel.err = "invalid_args"; return sel; }
-            scratch[pos++] = '.';                          /* grant root: "." not "" */
-        }
-        scratch[pos] = '\0';
-
-        sel.entry = ent;
-        sel.residual = scratch;
-        sel.err = NULL;
-        return sel;
-    }
-
-    sel.err = "permission";
-    return sel;
+HlFsSelection hl_fs_policy_select_stat(const HlFsPolicy *policy, const char *caller_path,
+                                       char *scratch, size_t scratch_len)
+{
+    HlFsSelection sel = { NULL, NULL, "invalid_args" };
+    if (!policy) return sel;
+    /* stat authorizes the same nodes as a read but ALSO permits the app root
+     * itself (0-component "."), when a base-root grant governs it - read/write/mmap
+     * need a named leaf and reject it. */
+    return select_in_set(policy->read, policy->read_n, caller_path, 1 /*allow root*/,
+                         scratch, scratch_len);
 }
 
 /* ── enumeration selection (fs.list) ─────────────────────────────────────────── */
@@ -704,57 +737,44 @@ HlFsListSelection hl_fs_policy_select_list(const HlFsPolicy *policy,
         const char *filter = NULL;
         size_t residual_end = (size_t)cn;
 
-        if (ent->kind == HL_FS_ENTRY_SUBTREE) {
-            /* Listable at/under the grant directory (all children). */
-            if ((size_t)cn >= ent->grant_n) {
-                int ok = 1;
-                for (size_t k = 0; k < ent->grant_n; k++)
-                    if (!comp_lit_eq(ent->grant[k], ccomp[k], clen[k])) { ok = 0; break; }
-                if (ok) { governs = 1; listable = 1; }   /* FOLLOW, no filter */
-            }
-        } else if (ent->kind == HL_FS_ENTRY_PATTERN) {
-            /* Governs listing ONLY at the grant's literal prefix (caller ==
-             * grant[0 .. first_pattern)). */
-            if ((size_t)cn == ent->first_pattern) {
-                int ok = 1;
-                for (size_t k = 0; k < ent->first_pattern; k++)
-                    if (!comp_lit_eq(ent->grant[k], ccomp[k], clen[k])) { ok = 0; break; }
-                if (ok) {
-                    governs = 1;
-                    /* v1: only a SINGLE terminal pattern component is listable; a
-                     * multi-component pattern governs but is NOT listable (denies). */
-                    if (ent->first_pattern == ent->grant_n - 1) {
-                        listable = 1;
-                        sym = HL_FS_SYMLINK_REFUSE;
-                        filter = ent->grant[ent->first_pattern];
-                    }
-                    residual_end = ent->first_pattern;   /* == cn here */
+        if (ent->kind == HL_FS_ENTRY_PATTERN && (size_t)cn == ent->first_pattern) {
+            /* Listing the pattern's literal-prefix DIRECTORY: enumerate + filter. */
+            int ok = 1;
+            for (size_t k = 0; k < ent->first_pattern; k++)
+                if (!comp_lit_eq(ent->grant[k], ccomp[k], clen[k])) { ok = 0; break; }
+            if (ok) {
+                governs = 1;
+                if (ent->first_pattern == ent->grant_n - 1) {   /* single terminal: listable */
+                    listable = 1;
+                    sym = HL_FS_SYMLINK_REFUSE;
+                    filter = ent->grant[ent->first_pattern];
+                    residual_end = ent->first_pattern;          /* == cn here */
                 }
+                /* multi-component pattern: governs but is NOT listable in v1 (deny). */
             }
+        } else if (entry_matches(ent, ccomp, clen, cn)) {
+            /* The caller is an authorized NODE (not a pattern prefix). Govern it and
+             * let the DIR open decide the outcome: a directory (a SUBTREE descendant,
+             * or a created CREATE-subtree) lists; an authorized FILE (an EXACT grant,
+             * a matched PATTERN terminal, a CREATE-file) reports "not_a_directory";
+             * an absent CREATE target reports "not_found". This preserves the ratified
+             * distinction - the exact path is authorized but is not a directory - so
+             * its unauthorized parent / siblings stay "permission" while the path
+             * itself does not. */
+            governs = 1;
+            listable = 1;
+            sym = (ent->kind == HL_FS_ENTRY_SUBTREE) ? HL_FS_SYMLINK_FOLLOW
+                                                     : HL_FS_SYMLINK_REFUSE;
         }
-        /* EXACT / CREATE never govern a directory listing. */
 
         if (!governs) continue;
-        if (!listable) { sel.err = "permission"; return sel; }   /* shadow: no fall-through */
+        if (!listable) { sel.err = "permission"; return sel; }   /* multi-pattern shadow */
 
-        /* residual = caller components [anchor_depth, residual_end) joined by '/',
-         * or "." for the anchor itself. */
-        size_t pos = 0;
-        for (size_t k = ent->anchor_depth; k < residual_end; k++) {
-            size_t need = clen[k] + (pos ? 1 : 0);
-            if (pos + need + 1 > scratch_len) { sel.err = "invalid_args"; return sel; }
-            if (pos) scratch[pos++] = '/';
-            memcpy(scratch + pos, ccomp[k], clen[k]);
-            pos += clen[k];
-        }
-        if (pos == 0) {
-            if (scratch_len < 2) { sel.err = "invalid_args"; return sel; }
-            scratch[pos++] = '.';
-        }
-        scratch[pos] = '\0';
-
-        sel.entry = ent;
-        sel.residual = scratch;
+        HlFsSelection base = make_selection(ent, ccomp, clen, residual_end,
+                                            scratch, scratch_len);
+        if (!base.entry) { sel.err = base.err; return sel; }     /* scratch too small */
+        sel.entry = base.entry;
+        sel.residual = base.residual;
         sel.filter = filter;
         sel.sympol = sym;
         sel.err = NULL;

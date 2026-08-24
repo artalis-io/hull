@@ -355,6 +355,10 @@ int hl_cap_fs_stat(const HlFsConfig *cfg, const char *path,
                    HlFsStatInfo *out, const char **err_msg)
 {
     int result = -1;   /* -1 error, 0 present, 1 absent */
+    /* Clear the caller's error slot up front so an ABSENT result (return 1) leaves
+     * *err_msg == NULL even when the caller reuses a pointer that held a prior
+     * token (contract: absent -> no error). */
+    if (err_msg) *err_msg = NULL;
     if (!cfg || !path || !cfg->base_dir || !out) {
         if (err_msg) *err_msg = "invalid_args";
         return -1;
@@ -362,8 +366,9 @@ int hl_cap_fs_stat(const HlFsConfig *cfg, const char *path,
     if (!cfg->policy) { if (err_msg) *err_msg = "permission"; return -1; }
 
     char scratch[HL_FS_PATH_MAX];
-    HlFsSelection sel = hl_fs_policy_select(cfg->policy, path, HL_FS_OPEN_READ,
-                                            scratch, sizeof(scratch));
+    /* stat selection also authorizes the app root itself ("."). */
+    HlFsSelection sel = hl_fs_policy_select_stat(cfg->policy, path,
+                                                 scratch, sizeof(scratch));
     if (!sel.entry) { if (err_msg) *err_msg = sel.err ? sel.err : "permission"; goto audit; }
 
     {
@@ -374,6 +379,10 @@ int hl_cap_fs_stat(const HlFsConfig *cfg, const char *path,
         HlFsParent pr;
         const char *e = NULL;
         if (hl_fs_resolve_parent(sel.entry->anchor_fd, sel.residual, sym, &pr, &e) != 0) {
+            /* A "not_found" from resolution means an intermediate (e.g. a read-set
+             * CREATE's missing ancestor) does not exist -> the authorized path is
+             * ABSENT, not an error. Any other token is a genuine failure. */
+            if (e && strcmp(e, "not_found") == 0) { result = 1; goto audit; }
             if (err_msg) *err_msg = e ? e : "io_error";
             goto audit;
         }
@@ -465,13 +474,15 @@ int hl_cap_fs_list(const HlFsConfig *cfg, const char *path,
                 (name[1] == '\0' || (name[1] == '.' && name[2] == '\0')))
                 continue;   /* skip "." and ".." */
 
-            size_t nlen = strlen(name);
-            /* A malformed / over-long entry FAILS the op; it is never silently
-             * skipped (contract in fs.h). */
-            if (nlen == 0 || nlen > HL_FS_LIST_MAX_NAME_BYTES) {
-                if (err_msg) *err_msg = "name_too_long";
-                goto fail_mid;
-            }
+            /* BOUNDED name-length check: scan at most HL_FS_LIST_MAX_NAME_BYTES + 1
+             * bytes (<= the struct-dirent d_name field on every platform) for the
+             * terminator. A name with no NUL in that window is malformed / over-long
+             * and FAILS the op - never a silent skip, and never an unbounded strlen
+             * that could read past the entry's name storage. */
+            const void *nul = memchr(name, '\0', HL_FS_LIST_MAX_NAME_BYTES + 1);
+            if (!nul) { if (err_msg) *err_msg = "name_too_long"; goto fail_mid; }
+            size_t nlen = (size_t)((const char *)nul - name);
+            if (nlen == 0) { if (err_msg) *err_msg = "io_error"; goto fail_mid; }
 
             /* PATTERN filter: only the terminal-pattern matches are exposed. A
              * non-match is filtered out (NOT a failure). */

@@ -435,7 +435,10 @@ nil` subsumes an `exists` check). On a policy / IO error returns `nil, err`.
 | `mode`  | `integer` | Permission bits (`st_mode & 0o777`). |
 | `mtime` | `integer` | Modification time, epoch seconds. Reproducible builds MUST NOT key on it. |
 
-Requires `fs.read` authority over `path`.
+Requires `fs.read` authority over `path`. A directory is statable too, including
+the app root itself — `fs.stat(".")` returns `{ type = "dir", ... }` under a
+base-root (`.`) grant. A path that is authorized but does not exist (including a
+grant whose parent directory is still absent) returns `nil`, not an error.
 
 #### `fs.list(dir)`
 
@@ -448,11 +451,13 @@ directory yields `nil, "not_found"`.
 
 Selection is gated by `fs.read`: a **directory** grant lists any descendant
 directory; a single-terminal **pattern** grant (e.g. `data/*.csv`) lists its
-directory exposing **only matching names**; an **exact-file** grant is not a
-listable directory (so it can neither list its parent nor inspect siblings). When
-grants overlap, the **most specific** governs (a narrower grant shadows a broader
-one, and a governing multi-component pattern such as `logs/*/*.txt` denies
-`list("logs")` rather than falling through to a `logs/` subtree grant).
+directory exposing **only matching names**; an **exact-file** grant authorizes
+that path but it is not a directory, so `list` of the exact file returns
+`not_a_directory` while its **parent and siblings** (unauthorized) return
+`permission`. When grants overlap, the **most specific** governs (a narrower grant
+shadows a broader one, and a governing multi-component pattern such as
+`logs/*/*.txt` denies `list("logs")` rather than falling through to a `logs/`
+subtree grant).
 
 **Error tokens** (Lua returns `nil, token`; JS throws with the token in the
 message): `permission`, `invalid_path`, `not_found`, `not_a_directory`,

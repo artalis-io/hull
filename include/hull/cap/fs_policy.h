@@ -341,6 +341,16 @@ HlFsSelection hl_fs_policy_select(const HlFsPolicy *policy, const char *caller_p
                                   HlFsOpenMode mode, char *scratch, size_t scratch_len);
 
 /*
+ * Select the entry authorizing fs.stat of `caller_path` from the READ set. Behaves
+ * exactly like hl_fs_policy_select(HL_FS_OPEN_READ) EXCEPT it also permits the app
+ * ROOT itself (a 0-component "." caller) when a base-root grant governs it - a
+ * metadata op may target a directory, including the root, whereas read/write/mmap
+ * require a named leaf and reject "." with "invalid_path". Same stable error tokens.
+ */
+HlFsSelection hl_fs_policy_select_stat(const HlFsPolicy *policy, const char *caller_path,
+                                       char *scratch, size_t scratch_len);
+
+/*
  * The result of selecting an entry to ENUMERATE a directory (fs.list, Slice C).
  * Distinct from hl_fs_policy_select (which selects a FILE leaf for read/write/stat):
  * listing targets a DIRECTORY, and a PATTERN grant must expose ONLY matching names.
