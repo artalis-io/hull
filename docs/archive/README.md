@@ -36,3 +36,20 @@ For the current state see [`../README.md`](../README.md).
 | [`roadmaps/roadmap_v0_to_v1.md`](roadmaps/roadmap_v0_to_v1.md) | Pre-v0.1.0 release-readiness checklist | Mostly shipped. Remaining items folded into [`../roadmap.md`](../roadmap.md). |
 
 The **current** roadmap is [`../roadmap.md`](../roadmap.md) + [`../roadmap_next.md`](../roadmap_next.md). WASM/GPU compute work is merged into the main roadmap (the former `roadmap_wasm_compute.md` was retired in May 2026 along with `plan_memory64.md` and `keel_audit.md`).
+
+## Concluded design records & spikes (`design_records/`)
+
+Investigations whose verdict was **do not build** (or **built, measured, did not
+ship**). Preserved for the reasoning + measurements; none describes shipped code.
+These had no inbound references from `CLAUDE.md` / `AGENTS.md` / source, so they
+were physically relocated here (2026-08-24); the many *shipped-subsystem* design
+records stay in `docs/` because code comments link to them as rationale (see the
+"Design records" catalog in [`../README.md`](../README.md)).
+
+| Document | Verdict |
+|---|---|
+| [`design_records/cachelib_spike.md`](design_records/cachelib_spike.md) | CacheLib (folly/fbthrift stack) DECLINED — Linux-only, no C ABI, ~15-20 C++ deps. |
+| [`design_records/kvmem_design.md`](design_records/kvmem_design.md) | Native in-process cache store — design ratified, built, **did not ship** (perf/RSS gates failed vs the pure-stdlib `_memstore`). |
+| [`design_records/kvmem_negative_result.md`](design_records/kvmem_negative_result.md) | The `kvmem` negative-result writeup: C-behind-the-scripting-boundary pays a per-call copy `_memstore` skips. |
+| [`design_records/memstore_lru_plan.md`](design_records/memstore_lru_plan.md) | In-stdlib O(1) LRU follow-up — two designs tried, both rejected (eviction-order cost under the instruction hook). |
+| [`design_records/jobs_wasm_replay_spike.md`](design_records/jobs_wasm_replay_spike.md) | WASM-replay for durable-job determinism — rejected in favour of Lua/JS-strict `ctx.*` memoization. |

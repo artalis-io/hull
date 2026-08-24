@@ -1,11 +1,21 @@
-# hull.fs application design (design-only)
+# hull.fs application design
 
-Status: **DESIGN (awaiting review). NOTHING implemented.** This is the dedicated
-design of the APPLICATION-facing `hull.fs` capability - the general filesystem
-surface an app author uses. It is a peer of, and a PREREQUISITE for, the
-BuildContext audit ([hull_fs_buildcontext_audit.md](hull_fs_buildcontext_audit.md),
-PR #393): BuildContext is the narrower, Hull-owned plugin surface built ON the
-hardened primitives designed here - so `hull.fs` is designed first.
+Status: **PARTIALLY IMPLEMENTED.** The application-facing `hull.fs` **resolver,
+compiled path-authorization policy, `stat`, and `list` are SHIPPED** (checkpoints
+1-3, merged: descriptor-relative virtual-root resolver → per-op platform parity +
+race-resistance → compiled SUBTREE/EXACT/CREATE/PATTERN authorization + `stat`/
+`list`). **Checkpoint 4 - BuildContext - is next** (the narrower, Hull-owned plugin
+surface built ON these hardened primitives). Checkpoint sequencing + the shipped
+vs remaining split live in §9 (resolver-first) and §10 (non-scope + checkpoints)
+below, and the parity ratification record
+[hull_fs_resolver_parity.md](hull_fs_resolver_parity.md).
+
+This is the dedicated design of the APPLICATION-facing `hull.fs` capability - the
+general filesystem surface an app author uses. It is a peer of, and a PREREQUISITE
+for, the BuildContext audit
+([hull_fs_buildcontext_audit.md](hull_fs_buildcontext_audit.md), PR #393):
+BuildContext is the narrower, Hull-owned plugin surface built ON the hardened
+primitives designed here - so `hull.fs` was designed first.
 
 Design rule carried in from `hull.path` (#392, #394): **`hull.path` manipulates
 NAMES lexically; `hull.fs` exercises AUTHORITY.** `hull.fs` is where real

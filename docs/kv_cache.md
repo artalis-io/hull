@@ -171,7 +171,7 @@ semantic layer.
   hatch, and cluster / Sentinel / streams / pub-sub / sorted-sets / scripting are
   out of scope and belong in separate future capabilities.
 - **CacheLib**: evaluated and **declined** - see the design spike
-  [docs/cachelib_spike.md](cachelib_spike.md). Meta's CacheLib pulls the full
+  [docs/archive/design_records/cachelib_spike.md](archive/design_records/cachelib_spike.md). Meta's CacheLib pulls the full
   folly/fbthrift/fizz/wangle stack (~15-20 C++ deps, OpenSSL/boost), is Linux-only
   (no macOS/cosmo), has no C ABI, and owns its own allocator + background threads
   + SSD I/O - incompatible with Hull's vendored-only, four-platform, `HlAllocator`
