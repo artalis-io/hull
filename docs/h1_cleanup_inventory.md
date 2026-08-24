@@ -21,8 +21,8 @@ re-established with a recorded command inside that slice.
 **Revision note (review round 1).** Three initial overclaims were corrected in this
 freeze: `include/hull/cap.h` is NOT proven dead (it is internally-unused PUBLIC
 surface - 1.1); hex consolidation must NOT route generic code through the crypto/
-capability object without a link-closure proof (1.2a); and the seven constant-time
-compares are NOT one semantic family (1.2b). The null findings (1.3, and the
+capability object without a link-closure proof (1.2a); and the (eight surveyed)
+constant-time compares are NOT one semantic family (1.2b). The null findings (1.3, and the
 intentional Lua/JS parity duplication) stand.
 
 ---
