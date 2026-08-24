@@ -24,6 +24,7 @@
 
 #include "hull/release_io.h"
 #include "hull/module_resolver.h"   /* HlBuildFlavor / hl_build_flavor_* */
+#include "asset_checksum.h"         /* private installer helper (sibling, not public) */
 
 #include <keel/allocator.h>
 #include <keel/tls_mbedtls.h>
@@ -78,17 +79,6 @@ static int platform_cache_dir(char *out, size_t out_sz)
     return 0;
 }
 
-/* Constant-time compare of two 64-char hex SHA-256 strings. The values are
- * public (manifest checksum + computed digest), so a timing leak reveals
- * nothing; the constant-time form matches the rest of Hull's hash compares. */
-static int ct_hex_eq(const char *a, const char *b)
-{
-    unsigned char diff = 0;
-    for (int i = 0; i < 64; i++)
-        diff |= (unsigned char)(a[i] ^ b[i]);
-    return diff == 0;
-}
-
 /* Build the published asset names for a flavor on this platform.
  * Returns the count (1 native, 2 cosmo); names written into assets[]. */
 static int flavor_assets(const HlBuildFlavor *f, const char *plat,
@@ -140,7 +130,7 @@ static int install_asset(const char *asset, const char *repo, const char *tag,
         kl_free(alloc, body, body_len);
         return -1;
     }
-    if (!ct_hex_eq(expected, actual)) {
+    if (!hl_asset_checksum_eq(expected, actual)) {
         fprintf(stderr, "hull platform: SHA-256 MISMATCH for %s\n"
                         "  expected %s\n  actual   %s\n", asset, expected, actual);
         kl_free(alloc, body, body_len);
