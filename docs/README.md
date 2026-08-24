@@ -95,6 +95,7 @@ specific signature, parameter list, or return value.
 | [`hull_fs_design.md`](hull_fs_design.md) | The application `hull.fs` surface. Resolver + compiled path-authorization policy + `stat`/`list` **shipped** (checkpoints 1-3); **BuildContext is checkpoint 4 (next)**. |
 | [`hull_fs_resolver_parity.md`](hull_fs_resolver_parity.md) | Checkpoint 2 ratification record: `openat2` vs the manual walk parity + the ratified depth divergence. |
 | [`hull_fs_buildcontext_audit.md`](hull_fs_buildcontext_audit.md) | The BuildContext / app-vs-plugin authority-split audit that feeds checkpoint 4. |
+| [`h1_cleanup_inventory.md`](h1_cleanup_inventory.md) | Design-only inventory + freeze for the H1 code-housekeeping cleanup (dead code, redundancy, comment archaeology, em-dashes) that precedes BuildContext. |
 | [`reporting_ir_design.md`](reporting_ir_design.md) | Proposed reporting IR — **deferred** (over-scoped as the immediate next feature). |
 | [`sidecar_design.md`](sidecar_design.md) | Native sidecars — design only (Phase 0), not yet scheduled. |
 
