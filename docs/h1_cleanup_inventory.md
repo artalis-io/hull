@@ -13,71 +13,108 @@ for the mechanical sweeps. EXCLUDED throughout: `vendor/**`, `build/**`,
 `tests/.playwright/**`, `docs/archive/**` (frozen historical snapshots).
 
 Method: read-only static survey (grep + focused code reading). No build or
-behavior was changed to produce this inventory.
+behavior was changed to produce this inventory. Every count records the exact
+command + exclusions used so it is reproducible (see 1.5 for the pattern).
+
+**Revision note (review round 1).** Three initial overclaims were corrected in this
+freeze: `include/hull/cap.h` is NOT proven dead (it is internally-unused PUBLIC
+surface - 1.1); hex consolidation must NOT route generic code through the crypto/
+capability object without a link-closure proof (1.2a); and the seven constant-time
+compares are NOT one semantic family (1.2b). The null findings (1.3, and the
+intentional Lua/JS parity duplication) stand.
 
 ---
 
 ## 1. Findings
 
-### 1.1 Proven-dead code - minimal
+### 1.1 Dead code - minimal; and one "internally-unused public surface"
 
 The `-Werror=unused-function` / `-Werror=unused-variable` floor keeps the tree
 tight, so there is very little genuinely-dead code.
 
 | Item | Evidence | Confidence | Disposition |
 |---|---|---|---|
-| `include/hull/cap.h` | Umbrella header with **zero** inbound includes (every consumer includes the individual `cap/*.h`). | HIGH | **Delete** (S1). |
 | `#if 0` / commented-out code blocks | None found. | - | none |
 | Orphan `src/hull/**/*.c` | None found (every `.c` is in an OBJS list or a test link line). | - | none |
 | Unreachable code / unused statics | None found (compile-time enforced). | - | none |
 | Stale test fixtures / helpers | None found. | - | none |
 
+**`include/hull/cap.h` is NOT dead code - it is internally-unused PUBLIC surface.**
+It is an umbrella header with **zero** *in-repository* includes (every Hull
+consumer includes the individual `cap/*.h`). But `include/hull/**` is documented as
+Hull's PUBLIC C-header surface, so zero in-repo use does not prove it is unused by
+external EMBEDDERS; deleting it may be a source-compatibility break. Disposition
+(S1, audit only - no deletion):
+- classify it as "internally-unused public surface", not dead code;
+- check the release / install / package history and the stability policy
+  ([`stability.md`](stability.md)) for whether it is part of the committed public
+  surface;
+- then either RETAIN it, or DEPRECATE it explicitly (a deprecation note + a
+  release cycle) before any removal - never a silent delete.
+
 Comments that *document a past cleanup* (e.g. `agent/template.c` "an earlier
 snprintf snippet builder was dead code; removed per M-2") are NOT dead code; they
 are addressed under comment archaeology (1.4), not deletion.
 
-### 1.2 Redundancy - two real consolidations
+### 1.2a Hex encoding - real duplication, but consolidation is a LINK-CLOSURE
+### question, not a mechanical merge
 
-**Hex encoding: 11 implementations.** A canonical, validated
-`hl_cap_crypto_hex_encode()` (`include/hull/cap/crypto.h:355`) exists but is used
-only by tests; production re-implements the byte->hex loop inline.
+Hex encoding is implemented many times, but there are already (at least) THREE
+DELIBERATE homes at different link boundaries - which is the whole point:
 
-| Site | Form |
-|---|---|
-| `src/hull/runtime/lua/mod_crypto.c` | ~16 inline `%02x` loops |
-| `src/hull/runtime/js/mod_crypto.c` | ~18 inline `%02x` loops |
-| `src/hull/tool.c:65,82` | `fprintf` hex loops (direct-to-file; may stay) |
-| `src/hull/signature.c:37` | `hex_encode` static (snprintf loop) |
-| `src/hull/sbom.c:72` | `hex_encode_sha256` static (lookup table; SHA-256-specific) |
-| `tests/hull/test_signature.c:22`, `tests/hull/cap/test_crypto.c:14,24,157` | test-only `hex_encode` helpers (3+) |
+| Home | Symbol | Link cost | Callers |
+|---|---|---|---|
+| cap/crypto | `hl_cap_crypto_hex_encode()` (`cap/crypto.h:355`) | pulls the crypto object (mbedTLS/TweetNaCl-adjacent, much more than hex) | tests only, today |
+| runtime/cache | `hl_runtime_cache_hex_encode()` (`runtime/cache_common.h:58`) | dependency-narrow | 5 (bytecode/template caches Lua+JS, `commands/cache.c`) |
+| inline copies | `%02x` loops / local `hex_encode` statics | none | `runtime/{lua,js}/mod_crypto.c` (~16 / ~18), `signature.c:37`, `sbom.c:72`, `tool.c:65,82` (fprintf), 3+ test helpers |
 
-Consolidation target: route the runtime + `signature.c` + test helpers through
-`hl_cap_crypto_hex_encode()`. `tool.c` (writes straight to a `FILE*`) and
-`sbom.c` may keep local forms if the streaming shape matters - decide per site.
+The existing `hl_runtime_cache_hex_encode` duplication is EVIDENCE that ownership
+and link composition already matter here. Routing `signature.c` / `sbom.c` /
+release tooling / build commands through `hl_cap_crypto_hex_encode()` would drag a
+crypto/capability object into otherwise-narrow link configurations and could damage
+Hull's modular build closure (the composable-base + feature-archive story).
 
-**Constant-time compare: 7 implementations** of the XOR-accumulate pattern.
+So hex is **NOT** a mechanical "point everything at the cap helper" merge. Its
+consolidation (S2b) must START with a **caller-by-caller dependency / link-closure
+table** (what each caller already links, what pulling in a shared helper would
+add), then choose the canonical home(s):
+- a **dependency-neutral primitive** - a tiny internal shared helper/header with NO
+  crypto-backend dependency (candidate home for the generic byte->hex loop), or
+- **separate helpers** where build boundaries intentionally require separation.
+`tool.c` (writes straight to a `FILE*`) and `sbom.c` (SHA-256-specific lookup
+table) may keep local forms regardless. No consolidation is ratified until the
+link-closure table is reviewed.
 
-| Site | Note |
-|---|---|
-| `src/hull/commands/feature.c:141` `ct_hex_eq` | **verbatim duplicate** of... |
-| `src/hull/commands/flavor.c:84` `ct_hex_eq` | ...this one |
-| `src/hull/release_io.c:257` `ct_hex_eq` inline | third copy |
-| `src/hull/commands/verify_self.c:298` inline | fourth |
-| `src/hull/runtime/js/mod_crypto.c:1145` `constantTimeEq` | public API, duplicates cap logic |
-| `src/hull/runtime/lua/mod_crypto.c:815` `constant_time_eq` | public API, duplicates cap logic |
-| `src/hull/cap/crypto.c:913` (inside `hl_cap_crypto_hmac_sha256_verify`) | the canonical volatile-accumulate |
+### 1.2b Constant-time compare - 7 sites, NOT one semantic family
 
-Consolidation target: add a small public `hl_cap_crypto_ct_eq()` (or
-`_ct_hex_eq()`) in the cap layer and collapse the command / release_io copies onto
-it; the runtime `constantTimeEq` bindings then wrap the same helper. This is a
-SECURITY-sensitive helper - treat as its own careful slice with tests, not a
-mechanical sweep.
+The seven XOR-accumulate sites look alike but differ in contract - representation,
+fixed-vs-variable length, whether length may leak, and whether the values are
+secret. They must NOT be collapsed into one generic helper.
 
-**Excluded (intentional dual-runtime parity, NOT redundancy):** the Lua/JS
-HTML-escape tables (`template.lua:65` / `template.js:61`) and path
-split/normalize (`path.lua` / `path.js`). These are hand-mirrored by design,
-covered by parity tests, and governed by `stdlib_style.md`. base64url already
-delegates to the cap layer (no duplication). Leave as-is.
+| Site | Compares | Secret? | Length | Timing-resistance actually needed? |
+|---|---|---|---|---|
+| `commands/feature.c:141` `ct_hex_eq` | fixed 64-char public checksums | no | fixed | not required (public value) |
+| `commands/flavor.c:84` `ct_hex_eq` | **verbatim duplicate** of feature.c | no | fixed | not required |
+| `release_io.c:257` `ct_hex_eq` | release manifest checksum | no | fixed | own input-validation / length assumptions |
+| `commands/verify_self.c:298` inline | self-verify checksum | no | fixed | own assumptions |
+| `runtime/js/mod_crypto.c:1145` `constantTimeEq` | attacker-controlled strings | maybe | **variable** (explicit unequal-length contract) | yes |
+| `runtime/lua/mod_crypto.c:815` `constant_time_eq` | attacker-controlled strings | maybe | variable, unequal-length contract | yes |
+| `cap/crypto.c:913` (in `hmac_sha256_verify`) | secret-derived HMAC bytes | yes | fixed | yes |
+| `cap/pg_conn.c:511` (SCRAM) | fixed 32-byte protocol value | protocol | fixed 32 | yes |
+
+Only the **verbatim `feature.c` / `flavor.c` pair** is immediately safe to
+consolidate (identical contract: fixed-length public checksum) - and it belongs in
+their shared release/download layer (both are `hull feature/flavor install`
+verifiers over `hl_release_io_*`), NOT in the cap layer. Any BROADER consolidation
+(S3) requires a **comparison-contract matrix** + tests proving the length- and
+nullability-leak behavior of each merged pair before it is ratified.
+
+### 1.2c Excluded - intentional dual-runtime parity (NOT redundancy)
+
+The Lua/JS HTML-escape tables (`template.lua:65` / `template.js:61`) and path
+split/normalize (`path.lua` / `path.js`) are hand-mirrored by design, covered by
+parity tests, and governed by [`stdlib_style.md`](stdlib_style.md). base64url
+already delegates to the cap layer. Leave as-is - this is the contract, not debt.
 
 ### 1.3 Misplaced ownership - clean (null finding)
 
@@ -105,32 +142,47 @@ These are historical process narration ("Phase 4.3 removed...", "Slice B wired..
 that made sense during the work but is now noise in the trusted core. Keel removed
 this class and added a permanent gate.
 
-Two sub-classes to distinguish at execution time:
-- **Obsolete process narration** (`Phase N` / `Slice N` / `checkpoint N` as a
-  status marker) -> remove or rephrase to describe the CODE, not the milestone.
-- **`#NNNN` PR/issue provenance** (e.g. `#334: guard the mem64 fixture...`) -
-  often genuinely useful as a pointer to rationale. **Decision needed** (1.6):
-  keep meaningful provenance, or strip all issue refs as Keel did.
+Two sub-classes, distinguished at execution time (this REPLACES the earlier
+open decision - the split is now the ratified policy):
+- **Obsolete process narration** -> **GO.** `Phase N` / `Slice N` / `checkpoint N`
+  as a status marker, and bare "Added in PR #123" archaeology. Remove or rephrase
+  to describe the CODE, not the milestone.
+- **Durable `#NNNN` provenance** -> **KEEP.** A PR/issue reference tied to an
+  EXTERNAL bug, a vendor behavior, a security finding, or a CI incident is durable
+  rationale (a pointer to why the code is shaped this way, e.g. a WAMR-patch
+  reference or a CVE). Keep these; they are not archaeology.
 
-### 1.5 Em-dashes - large, mechanical
+The S4 sweep is therefore semantic (human-reviewed per area), never a blanket
+`#NNNN` strip.
 
-~897 first-party files contain U+2014 em-dashes in comment prose (confirmed
-context, e.g. `main.c:2` `* main.c — Hull's ...`). By area:
+### 1.5 Em-dashes - large, mechanical (counts are scope-dependent; command recorded)
 
-| Area | Files |
-|---|---|
-| `src/hull` | 249 |
-| `stdlib` | 205 |
-| `tests` | 166 |
-| `examples` | 142 |
-| `include` | 124 |
-| `mk` | 6 |
-| `scripts` | 2 |
-| `templates` | 3 |
+Em-dash counts move with the scope, so the freeze records the EXACT command as the
+source of truth rather than a bare number. Canonical measurement (living
+first-party; excludes vendored/build/generated, `tests/.playwright/**`, and any
+`fixtures/` tree):
 
-Pure comment/prose; a byte-safe sweep of ` — ` -> ` - ` (or rephrase) is
-mechanical. The project convention is already "no em-dashes in code prose"; this
-is the one-time backlog cleanup that makes the forward gate (1.7) enforceable.
+```sh
+LC_ALL=C grep -rl --binary-files=text $'\xe2\x80\x94' \
+  src include tests stdlib scripts mk Makefile templates examples \
+  | grep -vE '(^|/)(vendor|build|node_modules)/|/\.playwright/|(^|/)fixtures/'
+# files: 865 ; occurrences (same list piped to `grep -o … | wc -l`): 4262
+```
+
+An independent review measurement under a slightly different living-tree scope
+(also excluding `tests/fixtures/**`) reported **867 files / 4046 occurrences** - the
+same order of magnitude; the small delta is scope/method (which trees, how
+occurrences are counted). **S5 pins the exact per-area count with its own recorded
+command at execution time** (the freeze does not depend on a single global number).
+
+Order-of-magnitude by area (from the canonical command, informational):
+`src/hull` ~249 · `stdlib` ~205 · `tests` ~166 · `examples` ~142 · `include` ~124 ·
+`mk` 6 · `templates` 3 · `scripts` 2.
+
+Pure comment/prose (confirmed context, e.g. `main.c:2` `* main.c — Hull's ...`); a
+byte-safe sweep of ` — ` -> ` - ` (or rephrase) is mechanical. The project
+convention is already "no em-dashes in code prose"; this is the one-time backlog
+cleanup that makes the forward gate (§4) enforceable.
 
 ---
 
@@ -149,20 +201,23 @@ Do NOT touch, now or by any gate:
   cleanup) where the RATIONALE is still useful - rephrase, do not blank-delete.
 - **`#PR` provenance** pending the 1.6 decision.
 
-## 3. Proposed execution slices (ratify, then execute one at a time)
+## 3. Proposed execution slices (revised per review; ratify, then execute one at a time)
 
 Each slice is independently reviewable + CI-verified; none mixes mechanical and
-semantic change.
+semantic change. Design-heavy items (cap.h disposition, hex link-closure, the
+comparison-contract matrix) produce a ratified sub-decision BEFORE any code moves.
 
 | Slice | Scope | Risk | Acceptance |
 |---|---|---|---|
-| **S1** | Delete `include/hull/cap.h` (dead header). | trivial | full build + `make test` green; `nm`/grep shows no lost symbol. |
-| **S2** | Route hex encoders through `hl_cap_crypto_hex_encode` (runtime mod_crypto Lua+JS, `signature.c`, test helpers). Leave `tool.c`/`sbom.c` streaming forms unless clean. | low (pure refactor) | byte-identical hex output (existing crypto/signature tests); no behavior change. |
-| **S3** | Add `hl_cap_crypto_ct_eq()` in the cap layer; collapse `feature.c`/`flavor.c`/`release_io.c`/`verify_self.c` copies + wrap the runtime `constantTimeEq`. | medium (security helper) | new unit tests for the helper (equal / unequal / length-mismatch, timing-shape); all signature/feature/flavor/verify e2e green. |
-| **S4** | Comment-archaeology sweep: remove/rephrase `Phase N` / `Slice N` / `checkpoint N` narration per area (one PR per area: cap, runtime, commands, include, tests, stdlib). Semantic - human-reviewed, not sed. | low but broad | no code change (comments only); diff reviewed per area. |
-| **S5** | Em-dash sweep per area (mechanical ` — ` -> ` - ` / rephrase), one PR per area. | low but broad | no code change; `LC_ALL=C grep -rl $'\xe2\x80\x94'` for the area returns 0. |
+| **S1** | **Dead-code EVIDENCE AUDIT only. No `cap.h` deletion.** Determine whether `include/hull/cap.h` is part of the committed public surface (release/install/package history + [`stability.md`](stability.md)); recommend RETAIN or DEPRECATE-then-remove. | none (audit) | a written disposition; zero code change. |
+| **S2a** | Consolidate ONLY the verbatim `feature.c` / `flavor.c` `ct_hex_eq` (identical fixed-length public-checksum contract) into their shared release/download layer (`hl_release_io_*`). | low | byte-identical verify behavior; feature/flavor install e2e green; the two copies gone. |
+| **S2b** | **Hex ownership + link-closure DESIGN.** Produce the caller-by-caller dependency table (1.2a), choose the canonical home(s) - dependency-neutral primitive vs separate helpers - then ratify. No consolidation code until ratified. | design | a reviewed link-closure table + ratified home decision; zero code change in this slice. |
+| **S3** | **Comparison-contract inventory** (the 1.2b matrix): representation / fixed-vs-variable length / length-leak / secrecy per site. Consolidate ONLY genuinely-identical contracts, each with tests proving length + nullability behavior. | medium (security) | the contract matrix + per-merge tests; no over-merge of differing contracts. |
+| **S4** | Comment-archaeology sweep by area (one PR per area: cap, runtime, commands, include, tests, stdlib): remove `Phase/Slice/checkpoint` narration and bare "Added in PR #N"; **keep durable `#NNNN` provenance** (1.4). Semantic - human-reviewed, not sed. | low but broad | comments only; diff reviewed per area. |
+| **S5** | Em-dash sweep by area (mechanical ` — ` -> ` - ` / rephrase), one PR per area; then enable the §4 gates. | low but broad | comments/prose only; the canonical command (1.5) returns 0 for the area. |
 
-Ordering: S1 -> S2 -> S3 (code) then S4 -> S5 (prose). S4/S5 land the one-time
+Ordering: S1 (audit) and S2a (the one safe consolidation) can go first; S2b and S3
+are DESIGN slices that gate their own consolidation; S4 -> S5 land the prose
 backlog that makes the forward gates enforceable.
 
 ## 4. Proposed permanent gates (self-tested, like `check-docs-integrity`)
@@ -173,27 +228,34 @@ backlog slice lands (otherwise they fail on legacy debt):
 - **`check-no-em-dash`** - fail if any living first-party file (the S5 scope, minus
   the freeze list) contains U+2014. Wire after S5.
 - **`check-no-milestone-narration`** - fail on NEW `Phase N` / `Slice N` /
-  `checkpoint N` status comments in first-party `src/include/tests`. Wire after
-  S4. (Scope carefully: this targets process-narration vocabulary, not the words
-  "phase"/"slice" in legitimate technical use - the gate must be self-tested with
-  a negative fixture, and may need an allowlist for genuine domain uses.)
+  `checkpoint N` status comments, and bare "Added in PR #N" archaeology, in
+  first-party `src/include/tests`. **Must NOT flag durable `#NNNN` provenance**
+  (1.4) or the words "phase"/"slice" in legitimate technical use - so the gate
+  needs a carefully-scoped pattern + an allowlist, and a `-selftest` fixture
+  proving it bites on narration while passing durable provenance. Wire after S4.
 
 Each gate ships with a `-selftest` negative fixture proving it bites (the
 `check_docs_integrity_selftest.sh` pattern).
 
-## 5. Open decisions for review
+## 5. Decisions
 
-1. **`#PR` provenance comments** - keep meaningful ones (pointer to rationale), or
-   strip all issue references as Keel did? Affects S4's scope and whether the
-   milestone gate also forbids bare `#NNNN`.
-2. **`tool.c` / `sbom.c` hex** - consolidate onto the cap helper (needs a
-   buffer-returning variant) or leave the streaming/lookup-table forms? (S2 scope.)
-3. **Milestone-narration gate scope** - is a `Phase N` / `Slice N` / `checkpoint N`
-   ban acceptable, given "phase" and "slice" also have legitimate technical
-   meanings? (Gate design for §4.)
+Resolved in review round 1 (folded into the slices above):
+- **`#PR` provenance** - KEEP durable references (external bug / vendor / security
+  / CI incident); strip bare "Added in PR #N" archaeology (1.4, S4, gate §4).
+- **cap.h** - NOT a deletion candidate; audit-then-retain-or-deprecate (1.1, S1).
+- **Hex / constant-time** - no mechanical merge; design-gated by S2b / S3.
+
+Remaining design questions, each resolved WITHIN its slice (not before):
+1. **cap.h final disposition** (retain vs deprecate) - output of S1.
+2. **Hex canonical home(s)** (dependency-neutral primitive vs separate helpers;
+   whether `tool.c` / `sbom.c` participate) - output of S2b's link-closure table.
+3. **Which constant-time contracts are genuinely identical** - output of S3's
+   matrix (only the `feature.c`/`flavor.c` pair is pre-cleared, as S2a).
+4. **Milestone-gate pattern + allowlist** - output of §4 gate design.
 
 ---
 
-**Nothing in this document has been executed.** On ratification (with the §5
-decisions), the slices run in order, each as its own reviewed + CI-green PR;
-BuildContext follows the clean baseline.
+**Nothing in this document has been executed.** On ratification, the slices run in
+order, each as its own reviewed + CI-green PR (the design slices S1/S2b/S3 produce a
+ratified sub-decision before any code moves); BuildContext follows the clean
+baseline.
