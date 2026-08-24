@@ -1,6 +1,28 @@
-# Change-Aware CI Architecture - design prompt
+# Change-Aware CI Architecture
 
-Status: **DRAFT - DESIGN HARD STOP. NOT YET RATIFIED OR IMPLEMENTED.**
+Status: **ACTIVE - IMPLEMENTED.** The change-aware CI (a fail-closed path
+classifier + an applicability-aware required gate + focused per-subsystem jobs) is
+live. The review-gated implementation slices in [§24](#24-review-gated-implementation-slices)
+are all shipped:
+
+| Slice | Scope | Status |
+|---|---|---|
+| 1 | Inventory + repository-owned classifier + fixtures + fail-closed behavior | ✅ implemented |
+| 2 | Orchestration + applicability-aware final gate + main/schedule/force-full | ✅ implemented |
+| 3 | Focused tooling jobs (Lua/JS frontend, discovery/dev/agent E2E, split fuzz/conformance) | ✅ implemented |
+| 4 | Domain + native integration mapping (DB / WAMR / GPU focused triggers) | ✅ implemented |
+| 5 | Cache + matrix optimization | ✅ implemented |
+| 6 | Nightly maximal suite + rollout | ✅ implemented |
+
+**Branch protection remains a separate policy decision.** The applicability-aware
+`ci-success` gate is *reported, not required* until that branch-protection cutover
+is made deliberately (the one item of Slice 6's rollout that is a repository-policy
+change, not code).
+
+Everything below is the ORIGINAL DESIGN PROMPT, preserved as the design-of-record.
+Its "Stop for review" cadences and the §24 slice plan describe the original
+review-gated **intent**, now fully implemented - read them for rationale, not for
+present status (the table above is the present status).
 
 ## 0. Purpose
 
@@ -728,6 +750,12 @@ Update this document after implementation with:
 
 ## 24. Review-gated implementation slices
 
+> **Historical status snapshot.** These are the ORIGINAL review-gated slices; the
+> "Stop for review" cadence below was the planning intent. **All six slices are
+> implemented** (see the status table at the top of this document). The only
+> remaining item is the branch-protection cutover, a separate repository-policy
+> decision.
+
 ### Slice 1: inventory and classifier
 
 - verified job/runtime/coverage/cache map;
@@ -1109,19 +1137,20 @@ self-trust caveat (§8) — governance stays with CODEOWNERS/branch protection.
   reduction found" - the matrix is already lean, every leg proves a distinct
   property, and the one candidate (flavors subsystem-split) was declined as
   too-low-value for another permanent classification boundary. No 5B.2 activation.
-- **Slice 6 (DESIGN in Appendix F; awaiting review):** nightly/scheduled exhaustive
+- **Slice 6 (IMPLEMENTED + ACTIVATED; see Appendix F):** nightly/scheduled exhaustive
   CI - a separate `nightly.yml` (deep fuzzing, broad conformance, rare configs,
   version/compat), independent of the PR path. Narrow: scheduling + exhaustive-test
-  placement only. Checkpoints: design -> additive (workflow_dispatch-only proof) ->
-  activation (enable cron). NOT implemented.
+  placement only. Shipped through its checkpoints (design -> additive
+  workflow_dispatch proof -> cron activation); `nightly.yml` is live.
 
 ---
 
 # Appendix C. Slice 4 design - DB / GPU / compute native-integration triggers
 
-Status: **DESIGN (awaiting review). NOT implemented.** First of Slice 4's three
-review checkpoints: **design -> additive proof -> skip activation.** No
-implementation and no branch-protection change until the design is ratified.
+Status: **IMPLEMENTED (Slice 4 shipped).** *The text below is the ORIGINAL design
+snapshot, preserved for rationale: it describes the pre-implementation "design ->
+additive proof -> skip activation" checkpoint intent. Do not read it as present
+state - see the implementation-status table at the top of this document.*
 
 ## C.0 Locked constraints (ratified)
 
@@ -1352,9 +1381,12 @@ passes; a shared/broad PR runs everything. Stop for review.
 
 # Appendix D. Slice 5 design - wamrc/toolchain reuse (5A) + matrix reduction (5B)
 
-Status: **DESIGN (awaiting review). NOT implemented.** Two internally-separate
-sub-slices, each with its own review-gated checkpoint chain (D.3). Slice 5 does
-NOT change branch protection, nightly scheduling, or release cache trust.
+Status: **IMPLEMENTED (Slice 5 shipped; 5B closed - see Appendix E).** *The text
+below is the ORIGINAL design snapshot, preserved for rationale; do not read it as
+present state - see the implementation-status table at the top of this document.*
+Two internally-separate sub-slices, each with its own review-gated checkpoint
+chain (D.3). Slice 5 does NOT change branch protection, nightly scheduling, or
+release cache trust.
 
 ## D.0 Measurement (verified on run 32494900285, the green CP3 broad run)
 

@@ -54,6 +54,7 @@ specific signature, parameter list, or return value.
 | [`wamr_patches.md`](wamr_patches.md) | The vendored WAMR patch set (numbered, out-of-tree, against the pinned base commit). |
 | [`backend_vtables.md`](backend_vtables.md) | The `HlAsyncBackend` / `HlNetBackend` vtables that make the event loop / networking composable. |
 | [`benchmark.md`](benchmark.md) | Performance methodology + measured reference numbers (HTTP / DB / WASM AOT / GPU). |
+| [`ci_architecture_design.md`](ci_architecture_design.md) | The change-aware CI architecture: fail-closed path classifier + applicability-aware required gate + focused per-subsystem jobs. **Slices 1-6 implemented**; the branch-protection cutover remains a separate policy decision. |
 
 ### Distribution, build & packaging
 
@@ -96,7 +97,6 @@ specific signature, parameter list, or return value.
 | [`hull_fs_buildcontext_audit.md`](hull_fs_buildcontext_audit.md) | The BuildContext / app-vs-plugin authority-split audit that feeds checkpoint 4. |
 | [`reporting_ir_design.md`](reporting_ir_design.md) | Proposed reporting IR — **deferred** (over-scoped as the immediate next feature). |
 | [`sidecar_design.md`](sidecar_design.md) | Native sidecars — design only (Phase 0), not yet scheduled. |
-| [`ci_architecture_design.md`](ci_architecture_design.md) | A CI-architecture design — **not yet ratified or implemented**. |
 
 ### Roadmap
 
