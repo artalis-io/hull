@@ -192,6 +192,36 @@ static int lua_fs_stat(lua_State *L)
 /* fs.list(dir) -> array of { name, type, size } | (nil, err). Deterministic
  * byte-order (unsigned-byte lexicographic, shorter first). An empty directory
  * yields an empty array; a missing/denied directory yields (nil, err). */
+/* A __gc-guarded owner for the C list result, so the C-heap array + names are
+ * freed even if a Lua allocator OOM longjmps out of the table-building loop below
+ * (the array outlives several Lua allocations that can each raise). Mirrors how the
+ * MappedBuffer userdata ties a C resource to Lua GC. */
+#define HL_FS_LIST_GUARD_MT "hull.fs.list.guard"
+
+typedef struct {
+    HlFsDirEntry *entries;
+    size_t        count;
+    HlAllocator  *alloc;
+} HlFsListGuard;
+
+static int lua_fs_list_guard_gc(lua_State *L)
+{
+    HlFsListGuard *g = luaL_checkudata(L, 1, HL_FS_LIST_GUARD_MT);
+    if (g && g->entries) {
+        hl_cap_fs_list_free(g->entries, g->count, g->alloc);
+        g->entries = NULL;   /* idempotent: a later collection is a no-op */
+    }
+    return 0;
+}
+
+static void lua_register_fs_list_guard(lua_State *L)
+{
+    luaL_newmetatable(L, HL_FS_LIST_GUARD_MT);
+    lua_pushcfunction(L, lua_fs_list_guard_gc);
+    lua_setfield(L, -2, "__gc");
+    lua_pop(L, 1);
+}
+
 static int lua_fs_list(lua_State *L)
 {
     HlLua *lua = get_hl_lua(L);
@@ -202,6 +232,14 @@ static int lua_fs_list(lua_State *L)
     }
     const char *path = luaL_checkstring(L, 1);
 
+    /* Create the __gc guard FIRST, while it owns nothing: if this allocation OOMs,
+     * there is no C result yet to leak. Only after the cap call fills `entries`
+     * (with NO intervening Lua allocation) do we hand ownership to the guard, so
+     * there is no window in which a Lua longjmp could strand the C array. */
+    HlFsListGuard *g = (HlFsListGuard *)lua_newuserdatauv(L, sizeof(HlFsListGuard), 0);
+    g->entries = NULL; g->count = 0; g->alloc = NULL;
+    luaL_setmetatable(L, HL_FS_LIST_GUARD_MT);
+
     const char *err = NULL;
     HlFsDirEntry *entries = NULL;
     size_t count = 0;
@@ -210,9 +248,12 @@ static int lua_fs_list(lua_State *L)
     if (rc != 0) {
         lua_pushnil(L);
         lua_pushstring(L, err ? err : "list_failed");
-        return 2;
+        return 2;   /* guard owns nothing; its __gc is a no-op */
     }
-    /* count is bounded by HL_FS_LIST_MAX_ENTRIES (fits int). */
+    g->entries = entries; g->count = count; g->alloc = lua->base.alloc;  /* now owned */
+
+    /* count is bounded by HL_FS_LIST_MAX_ENTRIES (fits int). Any raise below is now
+     * covered by the guard's __gc. */
     lua_createtable(L, (int)count, 0);
     for (size_t i = 0; i < count; i++) {
         lua_createtable(L, 0, 3);
@@ -224,7 +265,11 @@ static int lua_fs_list(lua_State *L)
         lua_setfield(L, -2, "size");
         lua_rawseti(L, -2, (lua_Integer)(i + 1));
     }
-    hl_cap_fs_list_free(entries, count, lua->base.alloc);
+
+    /* Success: free promptly and neutralize the guard (its __gc becomes a no-op).
+     * The result table is on top; the guard sits below and is discarded on return. */
+    hl_cap_fs_list_free(g->entries, g->count, g->alloc);
+    g->entries = NULL;
     return 1;
 }
 
@@ -315,6 +360,7 @@ static const luaL_Reg fs_funcs[] = {
 int luaopen_hull_fs(lua_State *L)
 {
     lua_register_mmap_metatable(L);
+    lua_register_fs_list_guard(L);
     luaL_newlib(L, fs_funcs);
     return 1;
 }

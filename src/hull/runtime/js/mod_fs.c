@@ -215,7 +215,16 @@ static JSValue js_fs_list(JSContext *ctx, JSValueConst this_val,
             hl_cap_fs_list_free(entries, count, js->base.alloc);
             return JS_EXCEPTION;
         }
-        JS_SetPropertyStr(ctx, o, "name", JS_NewString(ctx, entries[i].name));
+        /* The name comes from C-owned bytes; check its creation explicitly so an
+         * allocation failure fails closed instead of setting a bogus property. */
+        JSValue nm = JS_NewString(ctx, entries[i].name);
+        if (JS_IsException(nm)) {
+            JS_FreeValue(ctx, o);
+            JS_FreeValue(ctx, arr);
+            hl_cap_fs_list_free(entries, count, js->base.alloc);
+            return JS_EXCEPTION;
+        }
+        JS_SetPropertyStr(ctx, o, "name", nm);
         JS_SetPropertyStr(ctx, o, "type",
                           JS_NewString(ctx, js_fs_node_type_name(entries[i].type)));
         JS_SetPropertyStr(ctx, o, "size", JS_NewInt64(ctx, (int64_t)entries[i].size));
