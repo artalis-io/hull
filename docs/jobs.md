@@ -422,7 +422,7 @@ const wf = jobs.start("checkout", { orderId: 42, amount: 100 });
   **same** value on every replay. (A direct `time.now` / `math.random` in a
   workflow body is a determinism bug - route it through `ctx.*`. For a
   deterministic heavy *computation*, run a WASM module via `compute.call` inside a
-  step. Rationale: [docs/jobs_wasm_replay_spike.md](jobs_wasm_replay_spike.md).)
+  step. Rationale: [docs/archive/design_records/jobs_wasm_replay_spike.md](archive/design_records/jobs_wasm_replay_spike.md).)
   **In JS these primitives are async** (they memoize through the step store, like
   `ctx.step`), so `await` them: `const id = await ctx.uuid()`. Lua is synchronous.
 - **`jobs.workflow_status(id)`** (`workflowStatus`) → `{ status, name,

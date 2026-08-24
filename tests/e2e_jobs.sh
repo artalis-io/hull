@@ -1617,7 +1617,7 @@ echo "== durable saga (Phase 1d): JS =="; check_saga "js" "js" "$JS_SAGA"
 # ── durable execution (Phase 2): deterministic primitives (replay-stable) ────
 # ctx.now / ctx.random / ctx.uuid memoize via the step store, so a workflow that
 # fails its first attempt and REPLAYS sees byte-identical values -> deterministic
-# replay without WASM. Design: docs/jobs_wasm_replay_spike.md.
+# replay without WASM. Design: docs/archive/design_records/jobs_wasm_replay_spike.md.
 check_deterministic() {
     label="$1"; ext="$2"; app="$3"
     T="$(mktemp -d)"; printf '%s\n' "$app" > "$T/app.$ext"
