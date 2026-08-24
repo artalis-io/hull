@@ -129,6 +129,138 @@ int hl_cap_fs_exists(const HlFsConfig *cfg, const char *path,
 int hl_cap_fs_delete(const HlFsConfig *cfg, const char *path,
                      const char **err_msg);
 
+/* ── Metadata (stat) + enumeration (list): checkpoint 3, Slice C ─────── */
+
+/**
+ * @brief Node type in a stat / list result.
+ *
+ * Reported via `fstatat(..., AT_SYMLINK_NOFOLLOW)` - lstat semantics. A symlink is
+ * #HL_FS_NODE_SYMLINK (its OWN type, NEVER followed), so a metadata op cannot alias
+ * a symlink target. Ratified metadata contract for terminal symlinks (preserving
+ * checkpoint-3 Slice A): an EXACT grant CANNOT name an existing symlink (the policy
+ * refuses it at compile), so a reported #HL_FS_NODE_SYMLINK is only ever reached
+ * through a SUBTREE/PATTERN grant, or when an authorized regular/absent target was
+ * REPLACED by a symlink after compile (TOCTOU) - and even then stat/list only
+ * REPORT the link while read/mmap still refuse it (`symlink_denied`).
+ */
+typedef enum {
+    HL_FS_NODE_FILE = 0,
+    HL_FS_NODE_DIR,
+    HL_FS_NODE_SYMLINK,
+    HL_FS_NODE_OTHER,     /**< FIFO, socket, device, ... - reported, never opened. */
+} HlFsNodeType;
+
+/**
+ * @brief Portable numeric ceiling for a metadata size (2^53 - 1).
+ *
+ * A file whose `st_size` exceeds this makes stat / list FAIL with
+ * `"size_unrepresentable"` rather than return a rounded value, so Lua and JS agree
+ * EXACTLY (Lua could hold int64, but is capped identically for parity). 2^53 - 1 is
+ * JavaScript's exact-integer limit; no real file approaches 8 PiB, so this is a
+ * fail-closed portability guard, never a practical limit.
+ */
+#define HL_FS_SIZE_MAX ((uint64_t)((1ULL << 53) - 1))
+
+/**
+ * @name fs.list resource bounds
+ * Exceeding ANY bound FAILS the whole op (freeing everything, no partial result) -
+ * a listing is never silently truncated, and a malformed / over-long entry is never
+ * silently skipped.
+ * @{
+ */
+#define HL_FS_LIST_MAX_ENTRIES     65536u                /**< over -> "too_many_entries" */
+#define HL_FS_LIST_MAX_NAME_BYTES  255u                  /**< NAME_MAX; over -> "name_too_long" */
+#define HL_FS_LIST_MAX_TOTAL_BYTES (4u * 1024u * 1024u)  /**< sum of names; over -> "listing_too_large" */
+/** @} */
+
+/** @brief Stable metadata schema returned by @ref hl_cap_fs_stat. */
+typedef struct HlFsStatInfo {
+    HlFsNodeType type;
+    uint64_t     size;    /**< bytes (<= #HL_FS_SIZE_MAX, else the op fails). */
+    uint32_t     mode;    /**< permission bits (`st_mode & 0777`). */
+    int64_t      mtime;   /**< modification time, epoch seconds. */
+} HlFsStatInfo;
+
+/** @brief One entry in a @ref hl_cap_fs_list result. */
+typedef struct HlFsDirEntry {
+    char        *name;    /**< NUL-terminated, allocated by the list allocator. */
+    HlFsNodeType type;
+    uint64_t     size;    /**< bytes (<= #HL_FS_SIZE_MAX). */
+} HlFsDirEntry;
+
+/**
+ * @brief Stat a path's metadata (lstat semantics). Requires `fs.read` authority.
+ *
+ * Selects from the policy READ set, resolves the leaf's PARENT under the selected
+ * anchor with the per-kind symlink rule (SUBTREE follows contained; EXACT / CREATE
+ * / PATTERN refuse intermediate symlinks), then `fstatat(parent, leaf,
+ * AT_SYMLINK_NOFOLLOW)` - the leaf is NEVER opened or followed.
+ *
+ * @param cfg      Filesystem config. NULL policy (no grants) -> `-1` "permission".
+ * @param path     Relative path; selected + resolved through the policy.
+ * @param out      Non-NULL; populated only on return 0.
+ * @param err_msg  Out-parameter for a stable error token; may be NULL.
+ *
+ * @return Three-valued:
+ *   - `0`  present: `*out` fully populated.
+ *   - `1`  ABSENT: the authorized path does not exist. `*out` untouched, `*err_msg`
+ *          NULL. (Bindings map this to `nil` / `null`; `stat(p) ~= nil` thus
+ *          subsumes a separate `exists` probe.)
+ *   - `-1` ERROR: `*err_msg` set (`"permission"`, `"invalid_path"`,
+ *          `"symlink_denied"`, `"size_unrepresentable"`, `"io_error"`); `*out`
+ *          untouched.
+ */
+int hl_cap_fs_stat(const HlFsConfig *cfg, const char *path,
+                   HlFsStatInfo *out, const char **err_msg);
+
+/**
+ * @brief List a directory's immediate entries (non-recursive), deterministic order.
+ *        Requires `fs.read` authority.
+ *
+ * Selects from the policy READ set: a SUBTREE grant lists any descendant directory
+ * (all children); a single-terminal PATTERN grant lists its literal-prefix directory
+ * exposing ONLY names matching the pattern; an EXACT / CREATE grant is not a listable
+ * directory (denied). `.` and `..` are omitted. Each entry's type/size come from
+ * `fstatat(dirfd, name, AT_SYMLINK_NOFOLLOW)` - a symlink child is reported as such,
+ * never followed. One held directory fd is used throughout (O(1) open fds).
+ *
+ * ORDERING (documented, cross-platform stable): entries are sorted by `name` in
+ * UNSIGNED-BYTE lexicographic order, shorter-prefix-first (`memcmp` over the shared
+ * length; on a tie the shorter name precedes) - independent of locale and of the
+ * platform `readdir()` order, so Linux / macOS / cosmo return byte-identical lists.
+ *
+ * OWNERSHIP + RETURN CONTRACT:
+ *   - On success returns `0`, sets `*out_entries` (an array the CALLER owns, freed
+ *     with @ref hl_cap_fs_list_free) and `*out_count`. An empty directory yields
+ *     count 0 with `*out_entries == NULL`. Names + array are allocated via `alloc`
+ *     (the tracked allocator; NULL = raw malloc), so the free accounts exactly.
+ *   - On ANY failure returns `-1` with `*err_msg` set, `*out_entries == NULL`,
+ *     `*out_count == 0`. NO PARTIAL RESULT IS EVER OBSERVABLE: a failure midway
+ *     (a bound, a malformed / over-long entry, an allocation failure) frees every
+ *     name and the array before returning.
+ *   - Bounds each FAIL (never truncate): #HL_FS_LIST_MAX_ENTRIES
+ *     (`"too_many_entries"`), #HL_FS_LIST_MAX_TOTAL_BYTES (`"listing_too_large"`),
+ *     #HL_FS_LIST_MAX_NAME_BYTES (`"name_too_long"`), any `st_size` > #HL_FS_SIZE_MAX
+ *     (`"size_unrepresentable"`).
+ *
+ * @return `0` on success, `-1` on failure. Stable tokens: `"permission"`,
+ *         `"invalid_path"`, `"not_found"`, `"not_a_directory"`, `"symlink_denied"`,
+ *         `"too_many_entries"`, `"listing_too_large"`, `"name_too_long"`,
+ *         `"size_unrepresentable"`, `"io_error"`.
+ */
+int hl_cap_fs_list(const HlFsConfig *cfg, const char *path,
+                   HlFsDirEntry **out_entries, size_t *out_count,
+                   HlAllocator *alloc, const char **err_msg);
+
+/**
+ * @brief Free a list returned by @ref hl_cap_fs_list.
+ *
+ * Frees each entry's `name` then the array, via the SAME `alloc` passed to
+ * @ref hl_cap_fs_list (NULL = raw malloc/free). NULL-safe; a count of 0 / NULL
+ * array is a no-op. Discard the pointer after return.
+ */
+void hl_cap_fs_list_free(HlFsDirEntry *entries, size_t count, HlAllocator *alloc);
+
 /* ── Memory-mapped file buffer ─────────────────────────────────────── */
 
 /**

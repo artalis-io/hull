@@ -18,6 +18,7 @@
 #include <sys/stat.h>
 #include <fcntl.h>
 #include <unistd.h>
+#include <dirent.h>
 #include <errno.h>
 #include <limits.h>
 
@@ -337,6 +338,264 @@ audit:
         hl_audit_end(&w);
     }
     return result;
+}
+
+/* ── Metadata (stat) + enumeration (list): checkpoint 3, Slice C ─────── */
+
+/* Map an lstat'd mode to the public node type (symlink reported as a link). */
+static HlFsNodeType fs_node_type(mode_t m)
+{
+    if (S_ISREG(m))  return HL_FS_NODE_FILE;
+    if (S_ISDIR(m))  return HL_FS_NODE_DIR;
+    if (S_ISLNK(m))  return HL_FS_NODE_SYMLINK;
+    return HL_FS_NODE_OTHER;   /* FIFO, socket, device, ... */
+}
+
+int hl_cap_fs_stat(const HlFsConfig *cfg, const char *path,
+                   HlFsStatInfo *out, const char **err_msg)
+{
+    int result = -1;   /* -1 error, 0 present, 1 absent */
+    /* Clear the caller's error slot up front so an ABSENT result (return 1) leaves
+     * *err_msg == NULL even when the caller reuses a pointer that held a prior
+     * token (contract: absent -> no error). */
+    if (err_msg) *err_msg = NULL;
+    if (!cfg || !path || !cfg->base_dir || !out) {
+        if (err_msg) *err_msg = "invalid_args";
+        return -1;
+    }
+    if (!cfg->policy) { if (err_msg) *err_msg = "permission"; return -1; }
+
+    char scratch[HL_FS_PATH_MAX];
+    /* stat selection also authorizes the app root itself ("."). */
+    HlFsSelection sel = hl_fs_policy_select_stat(cfg->policy, path,
+                                                 scratch, sizeof(scratch));
+    if (!sel.entry) { if (err_msg) *err_msg = sel.err ? sel.err : "permission"; goto audit; }
+
+    {
+        /* SUBTREE follows in-root symlinks (intermediates only); EXACT/CREATE/PATTERN
+         * refuse them. The terminal is NEVER followed - lstat reports a link. */
+        HlFsSymlink sym = (sel.entry->kind == HL_FS_ENTRY_SUBTREE)
+                              ? HL_FS_SYMLINK_FOLLOW : HL_FS_SYMLINK_REFUSE;
+        HlFsParent pr;
+        const char *e = NULL;
+        if (hl_fs_resolve_parent(sel.entry->anchor_fd, sel.residual, sym, &pr, &e) != 0) {
+            /* A "not_found" from resolution means an intermediate (e.g. a read-set
+             * CREATE's missing ancestor) does not exist -> the authorized path is
+             * ABSENT, not an error. Any other token is a genuine failure. */
+            if (e && strcmp(e, "not_found") == 0) { result = 1; goto audit; }
+            if (err_msg) *err_msg = e ? e : "io_error";
+            goto audit;
+        }
+
+        struct stat st;
+        int rc = (pr.leaf[0] == '\0')
+                     ? fstat(pr.parent_fd, &st)
+                     : fstatat(pr.parent_fd, pr.leaf, &st, AT_SYMLINK_NOFOLLOW);
+        int saved = errno;
+        close(pr.parent_fd);
+        if (rc != 0) {
+            if (saved == ENOENT) { result = 1; goto audit; }   /* ABSENT (not an error) */
+            if (err_msg)
+                *err_msg = (saved == EACCES || saved == EPERM) ? "permission" : "io_error";
+            goto audit;
+        }
+        if (st.st_size < 0 || (uint64_t)st.st_size > HL_FS_SIZE_MAX) {
+            if (err_msg) *err_msg = "size_unrepresentable";
+            goto audit;
+        }
+        out->type  = fs_node_type(st.st_mode);
+        out->size  = (uint64_t)st.st_size;
+        out->mode  = (uint32_t)(st.st_mode & 0777);
+        out->mtime = (int64_t)st.st_mtime;
+        result = 0;
+    }
+
+audit:
+    {
+        ShJsonWriter w = hl_audit_begin("fs.stat");
+        sh_json_write_kv_string(&w, "path", path);
+        sh_json_write_kv_int(&w, "result", result);
+        hl_audit_end(&w);
+    }
+    return result;
+}
+
+/* Sort comparator: unsigned-byte lexicographic, shorter-prefix-first. */
+static int fs_direntry_cmp(const void *pa, const void *pb)
+{
+    const HlFsDirEntry *a = (const HlFsDirEntry *)pa;
+    const HlFsDirEntry *b = (const HlFsDirEntry *)pb;
+    size_t la = strlen(a->name), lb = strlen(b->name);
+    size_t m = la < lb ? la : lb;
+    int c = memcmp(a->name, b->name, m);   /* memcmp = unsigned-byte comparison */
+    if (c) return c;
+    if (la != lb) return la < lb ? -1 : 1; /* shorter prefix precedes */
+    return 0;
+}
+
+int hl_cap_fs_list(const HlFsConfig *cfg, const char *path,
+                   HlFsDirEntry **out_entries, size_t *out_count,
+                   HlAllocator *alloc, const char **err_msg)
+{
+    if (out_entries) *out_entries = NULL;
+    if (out_count)   *out_count = 0;
+    if (!cfg || !path || !cfg->base_dir || !out_entries || !out_count) {
+        if (err_msg) *err_msg = "invalid_args";
+        return -1;
+    }
+    if (!cfg->policy) { if (err_msg) *err_msg = "permission"; return -1; }
+
+    int result = -1;
+    HlFsDirEntry *arr = NULL;
+    size_t count = 0, cap = 0, total_bytes = 0;
+    DIR *dirp = NULL;
+
+    char scratch[HL_FS_PATH_MAX];
+    HlFsListSelection sel = hl_fs_policy_select_list(cfg->policy, path,
+                                                     scratch, sizeof(scratch));
+    if (!sel.entry) { if (err_msg) *err_msg = sel.err ? sel.err : "permission"; goto audit; }
+
+    {
+        const char *e = NULL;
+        int dfd = hl_fs_open_at_ex(sel.entry->anchor_fd, sel.residual, HL_FS_OPEN_DIR,
+                                   sel.sympol, 0, &e);
+        if (dfd < 0) { if (err_msg) *err_msg = e ? e : "io_error"; goto audit; }
+
+        dirp = fdopendir(dfd);   /* takes ownership of dfd; closedir closes it */
+        if (!dirp) { close(dfd); if (err_msg) *err_msg = "io_error"; goto audit; }
+    }
+
+    {
+        struct dirent *de;
+        errno = 0;
+        while ((de = readdir(dirp)) != NULL) {
+            const char *name = de->d_name;
+            if (name[0] == '.' &&
+                (name[1] == '\0' || (name[1] == '.' && name[2] == '\0')))
+                continue;   /* skip "." and ".." */
+
+            /* BOUNDED name-length check: scan at most HL_FS_LIST_MAX_NAME_BYTES + 1
+             * bytes (<= the struct-dirent d_name field on every platform) for the
+             * terminator. A name with no NUL in that window is malformed / over-long
+             * and FAILS the op - never a silent skip, and never an unbounded strlen
+             * that could read past the entry's name storage. */
+            const void *nul = memchr(name, '\0', HL_FS_LIST_MAX_NAME_BYTES + 1);
+            if (!nul) { if (err_msg) *err_msg = "name_too_long"; goto fail_mid; }
+            size_t nlen = (size_t)((const char *)nul - name);
+            if (nlen == 0) { if (err_msg) *err_msg = "io_error"; goto fail_mid; }
+
+            /* PATTERN filter: only the terminal-pattern matches are exposed. A
+             * non-match is filtered out (NOT a failure). */
+            if (sel.filter &&
+                !hl_fs_pattern_match(sel.filter, strlen(sel.filter), name, nlen))
+                continue;
+
+            if (count >= HL_FS_LIST_MAX_ENTRIES) {
+                if (err_msg) *err_msg = "too_many_entries";
+                goto fail_mid;
+            }
+            if (nlen > HL_FS_LIST_MAX_TOTAL_BYTES - total_bytes) {
+                if (err_msg) *err_msg = "listing_too_large";
+                goto fail_mid;
+            }
+
+            struct stat st;
+            if (fstatat(dirfd(dirp), name, &st, AT_SYMLINK_NOFOLLOW) != 0) {
+                /* An entry that vanished mid-enumeration is a hard failure, not a
+                 * silent skip - the whole list rolls back. */
+                if (err_msg) *err_msg = "io_error";
+                goto fail_mid;
+            }
+            if (st.st_size < 0 || (uint64_t)st.st_size > HL_FS_SIZE_MAX) {
+                if (err_msg) *err_msg = "size_unrepresentable";
+                goto fail_mid;
+            }
+
+            if (count == cap) {
+                size_t ncap = cap ? cap * 2 : 16;
+                HlFsDirEntry *na =
+                    (HlFsDirEntry *)hl_alloc_calloc(alloc, ncap, sizeof(HlFsDirEntry));
+                if (!na) { if (err_msg) *err_msg = "io_error"; goto fail_mid; }
+                if (arr) {
+                    memcpy(na, arr, cap * sizeof(HlFsDirEntry));
+                    hl_alloc_free(alloc, arr, cap * sizeof(HlFsDirEntry));
+                }
+                arr = na;
+                cap = ncap;
+            }
+
+            char *ncopy = (char *)hl_alloc_malloc(alloc, nlen + 1);
+            if (!ncopy) { if (err_msg) *err_msg = "io_error"; goto fail_mid; }
+            memcpy(ncopy, name, nlen);
+            ncopy[nlen] = '\0';
+            arr[count].name = ncopy;
+            arr[count].type = fs_node_type(st.st_mode);
+            arr[count].size = (uint64_t)st.st_size;
+            count++;
+            total_bytes += nlen;
+            errno = 0;
+        }
+        if (errno != 0) {   /* readdir() failure (not end-of-stream) */
+            if (err_msg) *err_msg = "io_error";
+            goto fail_mid;
+        }
+    }
+
+    closedir(dirp);   /* closes the held dir fd */
+    dirp = NULL;
+
+    if (count > 1)
+        qsort(arr, count, sizeof(HlFsDirEntry), fs_direntry_cmp);
+
+    /* Shrink the (doubling-grown) buffer to EXACTLY `count` so the caller's
+     * hl_cap_fs_list_free(entries, count, alloc) frees the exact allocated size -
+     * the tracked allocator requires matching sizes. Past this point `cap` is no
+     * longer read (success falls straight to `audit`), so it is not re-tracked. */
+    if (count > 0 && cap != count) {
+        HlFsDirEntry *shrunk =
+            (HlFsDirEntry *)hl_alloc_calloc(alloc, count, sizeof(HlFsDirEntry));
+        if (!shrunk) { if (err_msg) *err_msg = "io_error"; goto fail_mid; }
+        memcpy(shrunk, arr, count * sizeof(HlFsDirEntry));
+        hl_alloc_free(alloc, arr, cap * sizeof(HlFsDirEntry));
+        arr = shrunk;
+    } else if (count == 0 && arr) {
+        hl_alloc_free(alloc, arr, cap * sizeof(HlFsDirEntry));
+        arr = NULL;
+    }
+
+    *out_entries = arr;
+    *out_count = count;
+    result = 0;
+    goto audit;
+
+fail_mid:
+    /* Complete-result rollback: NO partial result is ever observable. */
+    for (size_t k = 0; k < count; k++)
+        hl_alloc_free(alloc, arr[k].name, strlen(arr[k].name) + 1);
+    if (arr) hl_alloc_free(alloc, arr, cap * sizeof(HlFsDirEntry));
+    if (dirp) closedir(dirp);
+    *out_entries = NULL;
+    *out_count = 0;
+    result = -1;
+
+audit:
+    {
+        ShJsonWriter w = hl_audit_begin("fs.list");
+        sh_json_write_kv_string(&w, "path", path);
+        sh_json_write_kv_int(&w, "entries", result == 0 ? (int64_t)count : -1);
+        sh_json_write_kv_int(&w, "result", result);
+        hl_audit_end(&w);
+    }
+    return result;
+}
+
+void hl_cap_fs_list_free(HlFsDirEntry *entries, size_t count, HlAllocator *alloc)
+{
+    if (!entries) return;
+    for (size_t i = 0; i < count; i++)
+        if (entries[i].name)
+            hl_alloc_free(alloc, entries[i].name, strlen(entries[i].name) + 1);
+    hl_alloc_free(alloc, entries, count * sizeof(HlFsDirEntry));
 }
 
 /* ── Memory-mapped file ────────────────────────────────────────────── */

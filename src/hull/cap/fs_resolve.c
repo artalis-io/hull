@@ -383,3 +383,65 @@ int hl_fs_open_at_ex(int root_fd, const char *relpath, HlFsOpenMode mode,
     if (fd < 0 && err) *err = e;
     return fd;
 }
+
+int hl_fs_resolve_parent(int root_fd, const char *relpath, HlFsSymlink sympol,
+                         HlFsParent *out, const char **err)
+{
+    const char *e = "io_error";
+    if (root_fd < 0 || !relpath || !out) { if (err) *err = "invalid_args"; return -1; }
+    out->parent_fd = -1;
+    out->leaf[0] = '\0';
+    if (!caller_path_ok(relpath)) { if (err) *err = "invalid_path"; return -1; }
+    if (caller_component_count(relpath) > HL_FS_MAX_DEPTH) {
+        if (err) *err = "path_too_deep";
+        return -1;
+    }
+
+    /* Grant root ".": there is no parent-plus-leaf. Hand back a CLOEXEC dup of the
+     * anchor and an EMPTY leaf; the caller fstat()s the anchor directory itself.
+     * (caller_path_ok accepted "." - a bare "." is a valid single "." segment.) */
+    if (relpath[0] == '.' && relpath[1] == '\0') {
+        int fd = fcntl(root_fd, F_DUPFD_CLOEXEC, 0);
+        if (fd < 0) { map_errno(errno, &e); if (err) *err = e; return -1; }
+        out->parent_fd = fd;
+        return 0;
+    }
+
+    /* Split the terminal component off lexically. `relpath` is a clean relative path
+     * (no "..", no trailing slash), so the bytes after the final '/' are the leaf and
+     * everything before it is the parent directory. The leaf is NEVER opened here -
+     * the caller lstat()s it - so a terminal symlink is reported, not followed. */
+    size_t len = strlen(relpath);
+    const char *slash = NULL;
+    for (size_t i = len; i-- > 0; ) {
+        if (relpath[i] == '/') { slash = relpath + i; break; }
+    }
+    const char *leaf = slash ? slash + 1 : relpath;
+    size_t leaf_len = strlen(leaf);
+    if (leaf_len == 0 || leaf_len > NAME_MAX) { if (err) *err = "invalid_path"; return -1; }
+    if (strcmp(leaf, ".") == 0 || strcmp(leaf, "..") == 0) {
+        if (err) *err = "invalid_path";              /* not a nameable leaf */
+        return -1;
+    }
+
+    int parent_fd;
+    if (!slash) {
+        /* Single-component residual: the parent IS the anchor. */
+        parent_fd = fcntl(root_fd, F_DUPFD_CLOEXEC, 0);
+        if (parent_fd < 0) { map_errno(errno, &e); if (err) *err = e; return -1; }
+    } else {
+        char dir[HL_FS_PATH_MAX];
+        size_t dlen = (size_t)(slash - relpath);
+        if (dlen == 0 || dlen >= sizeof(dir)) { if (err) *err = "invalid_path"; return -1; }
+        memcpy(dir, relpath, dlen);
+        dir[dlen] = '\0';
+        /* Walk the intermediates with the per-kind symlink policy; the parent must be
+         * a directory (HL_FS_OPEN_DIR). The leaf stays unopened. */
+        parent_fd = hl_fs_open_at_ex(root_fd, dir, HL_FS_OPEN_DIR, sympol, 0, &e);
+        if (parent_fd < 0) { if (err) *err = e; return -1; }
+    }
+
+    memcpy(out->leaf, leaf, leaf_len + 1);
+    out->parent_fd = parent_fd;
+    return 0;
+}

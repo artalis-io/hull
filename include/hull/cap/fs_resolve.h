@@ -19,6 +19,7 @@
 #ifndef HULL_CAP_FS_RESOLVE_H
 #define HULL_CAP_FS_RESOLVE_H
 
+#include <limits.h>    /* NAME_MAX */
 #include <sys/types.h>
 
 /*
@@ -101,5 +102,39 @@ int hl_fs_open_at(int root_fd, const char *relpath, HlFsOpenMode mode,
  */
 int hl_fs_open_at_ex(int root_fd, const char *relpath, HlFsOpenMode mode,
                      HlFsSymlink symlink, mode_t create_mode, const char **err);
+
+/*
+ * Result of resolving a path to its PARENT directory fd + leaf NAME - for a
+ * METADATA op (stat) that must lstat the terminal WITHOUT opening or following it.
+ *
+ *   parent_fd - a HELD directory fd (the caller closes it with close()), or -1 on
+ *               failure. The terminal is named RELATIVE to this fd, so the caller's
+ *               fstatat(parent_fd, leaf, AT_SYMLINK_NOFOLLOW) is descriptor-relative
+ *               and race-resistant (no host path reconstructed).
+ *   leaf      - the terminal component, NUL-terminated (guaranteed <= NAME_MAX
+ *               bytes; never contains '/'), OR the empty string "" when `relpath`
+ *               is the GRANT ROOT (".") and there is no parent-plus-leaf. On "" the
+ *               caller fstat(parent_fd)s the anchor directory itself.
+ */
+typedef struct {
+    int  parent_fd;
+    char leaf[NAME_MAX + 1];
+} HlFsParent;
+
+/*
+ * Resolve `relpath` under `root_fd` to (parent_fd, leaf) for a NO-FOLLOW metadata
+ * op. Every component EXCEPT the terminal is walked with the `symlink` policy
+ * (HL_FS_SYMLINK_FOLLOW = in-root contained; HL_FS_SYMLINK_REFUSE = "symlink_denied"
+ * on ANY symlink), holding the terminal's PARENT dir fd. The TERMINAL is NEVER
+ * opened or followed - the caller lstat()s it via *out. The residual "." (grant
+ * root) yields parent_fd = a fresh O_CLOEXEC dup of root_fd and leaf = "".
+ *
+ * Same lexical contract + stable error tokens as hl_fs_open_at (relative, no "..",
+ * <= HL_FS_MAX_DEPTH components, no trailing slash). On success returns 0 with *out
+ * populated (caller closes out->parent_fd); on failure returns -1 with *err set and
+ * out->parent_fd == -1 (nothing to close).
+ */
+int hl_fs_resolve_parent(int root_fd, const char *relpath, HlFsSymlink symlink,
+                         HlFsParent *out, const char **err);
 
 #endif /* HULL_CAP_FS_RESOLVE_H */

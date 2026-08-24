@@ -513,4 +513,69 @@ UTEST(fs_resolve, symlink_refuse_mode)
     close(root); teardown();
 }
 
+/* ── hl_fs_resolve_parent: (parent_fd, leaf) for a NO-FOLLOW metadata op ──────── */
+UTEST(fs_resolve, parent_nested_and_root_and_leaf)
+{
+    setup();
+    mkdirp_host("a"); mkdirp_host("a/b"); wfile("a/b/c.txt", "deep");
+    const char *err = NULL;
+    int root = hl_fs_open_base(base, &err);
+    ASSERT_GE(root, 0);
+
+    /* nested: parent walks a/b, leaf = "c.txt"; fstatat off parent_fd finds it. */
+    HlFsParent pr; err = NULL;
+    ASSERT_EQ(0, hl_fs_resolve_parent(root, "a/b/c.txt", HL_FS_SYMLINK_FOLLOW, &pr, &err));
+    ASSERT_GE(pr.parent_fd, 0);
+    ASSERT_STREQ("c.txt", pr.leaf);
+    struct stat st;
+    ASSERT_EQ(0, fstatat(pr.parent_fd, pr.leaf, &st, AT_SYMLINK_NOFOLLOW));
+    ASSERT_TRUE(S_ISREG(st.st_mode));
+    close(pr.parent_fd);
+
+    /* single component: parent IS the anchor (root), leaf is the whole name. */
+    wfile("top.txt", "T"); err = NULL;
+    ASSERT_EQ(0, hl_fs_resolve_parent(root, "top.txt", HL_FS_SYMLINK_FOLLOW, &pr, &err));
+    ASSERT_GE(pr.parent_fd, 0); ASSERT_STREQ("top.txt", pr.leaf);
+    ASSERT_EQ(0, fstatat(pr.parent_fd, pr.leaf, &st, AT_SYMLINK_NOFOLLOW));
+    close(pr.parent_fd);
+
+    /* grant root ".": empty leaf, parent_fd is a dup of the anchor -> fstat the dir. */
+    err = NULL;
+    ASSERT_EQ(0, hl_fs_resolve_parent(root, ".", HL_FS_SYMLINK_FOLLOW, &pr, &err));
+    ASSERT_GE(pr.parent_fd, 0); ASSERT_STREQ("", pr.leaf);
+    ASSERT_EQ(0, fstat(pr.parent_fd, &st));
+    ASSERT_TRUE(S_ISDIR(st.st_mode));
+    close(pr.parent_fd);
+
+    close(root); teardown();
+}
+
+/* ── parent resolution honours the per-kind symlink policy on the WALK, never the
+ * terminal (REFUSE denies a symlinked intermediate; the leaf is never opened) ─── */
+UTEST(fs_resolve, parent_refuses_symlink_intermediate)
+{
+    setup();
+    mkdirp_host("real"); wfile("real/leaf.txt", "L");
+    symln("real", "dl");                        /* dl -> real (dir symlink) */
+    const char *err = NULL;
+    int root = hl_fs_open_base(base, &err);
+    ASSERT_GE(root, 0);
+
+    HlFsParent pr;
+    /* REFUSE: the symlinked intermediate "dl" is denied. */
+    err = NULL;
+    ASSERT_EQ(-1, hl_fs_resolve_parent(root, "dl/leaf.txt", HL_FS_SYMLINK_REFUSE, &pr, &err));
+    ASSERT_STREQ("symlink_denied", err);
+    ASSERT_EQ(-1, pr.parent_fd);
+    /* FOLLOW: the same intermediate is followed contained; leaf resolved off it. */
+    err = NULL;
+    ASSERT_EQ(0, hl_fs_resolve_parent(root, "dl/leaf.txt", HL_FS_SYMLINK_FOLLOW, &pr, &err));
+    ASSERT_GE(pr.parent_fd, 0); ASSERT_STREQ("leaf.txt", pr.leaf);
+    struct stat st;
+    ASSERT_EQ(0, fstatat(pr.parent_fd, pr.leaf, &st, AT_SYMLINK_NOFOLLOW));
+    close(pr.parent_fd);
+
+    close(root); teardown();
+}
+
 UTEST_MAIN();
