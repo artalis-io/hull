@@ -152,7 +152,7 @@ We reserve the right to:
 
 ## Resolved before v0.1.0 (no longer experimental)
 
-The pre-v0.1.0 API review landed these decisions (see `docs/api_review.md`):
+The pre-v0.1.0 API review landed these decisions (see `docs/archive/api_review.md`):
 
 - **Async error convention**. All `*.async.*` APIs throw on error (uniform with sync). `db.async.query`/`db.async.exec`/`compute.async.call` no longer return `{error}` objects.
 - **HTTP route methods**. `app.delete` is canonical; `app.del` is a deprecated alias kept for one release cycle.

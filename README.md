@@ -86,7 +86,7 @@ hull init --profile htmx
 
 This wires up HTMX 2 + Pico CSS, CSRF + per-request CSP nonce, session-backed
 flash messages, pagination, and an idempotency-aware POST cache. See
-[`examples/hypermedia_todo/`](examples/hypermedia_todo/) for the reference
+[`examples/hypermedia_photos/`](examples/hypermedia_photos/) for the reference
 app and [docs/htmx.md](docs/htmx.md) for the integration guide.
 
 ### Shell completions
@@ -1118,7 +1118,7 @@ Example apps in both Lua and JavaScript:
 | [webhooks](examples/webhooks/) | Webhook delivery with HMAC-SHA256 signatures |
 | [templates](examples/templates/) | Template engine: inheritance, includes, filters |
 | [todo](examples/todo/) | Full CRUD todo app with HTML frontend and migrations |
-| [hypermedia_todo](examples/hypermedia_todo/) | HTMX hypermedia todo: search, inline edit, flash, pagination, idempotency-cached POST |
+| [hypermedia_photos](examples/hypermedia_photos/) | HTMX hypermedia app (Pico CSS) scaffolded by `hull init --profile htmx` |
 | [bench_db](examples/bench_db/) | SQLite performance benchmarks with migrations |
 | [async_http](examples/async_http/) | Non-blocking HTTP requests via event loop |
 | [timers](examples/timers/) | Background timers with `app.every()` and self-cancellation |
@@ -1160,8 +1160,11 @@ Full index with start-here guidance by role lives in [`docs/README.md`](docs/REA
 | [docs/known_limitations.md](docs/known_limitations.md) | Compile-time limit constants, override knobs |
 | [docs/benchmark.md](docs/benchmark.md) | Performance methodology and measured numbers |
 | [docs/release_signing.md](docs/release_signing.md) | Three-layer signature flow + release-key handling |
-| [docs/api_review.md](docs/api_review.md) | Pre-v0.1.0 API surface review |
+| [docs/archive/api_review.md](docs/archive/api_review.md) | Pre-v0.1.0 API surface review (archived) |
 | [docs/roadmap.md](docs/roadmap.md) · [docs/roadmap_next.md](docs/roadmap_next.md) | What's built; what's next |
+
+The full, categorized index (active architecture / invariants / historical) is
+[`docs/README.md`](docs/README.md).
 
 **Subsystem deep-dives:**
 
@@ -1169,17 +1172,19 @@ Full index with start-here guidance by role lives in [`docs/README.md`](docs/REA
 |---|---|
 | [docs/wamr_architecture.md](docs/wamr_architecture.md) | WASM compute design. WAMR integration, ABI, pooling, segments, streaming, AOT, Memory64 |
 
-**Audits (current state of record):**
+**Security audits (historical, all findings closed):**
 
 | Document | Scope |
 |---|---|
-| [docs/audit_2026_05_15.md](docs/audit_2026_05_15.md) | Main audit. Phase 5 surface, 49 findings, all closed |
-| [docs/audit_2026_05_15_phase6.md](docs/audit_2026_05_15_phase6.md) | Phase 6 (extended `hull agent` + MCP). 21 findings, all closed |
-| [docs/audit_2026_05_15_phase6_reaudit.md](docs/audit_2026_05_15_phase6_reaudit.md) | Re-audit of the Phase 6 fixes. 3 follow-ups, all closed |
+| [docs/archive/audits/audit_2026_05_15.md](docs/archive/audits/audit_2026_05_15.md) | Main audit. Phase 5 surface, 49 findings, all closed |
+| [docs/archive/audits/audit_2026_05_15_phase6.md](docs/archive/audits/audit_2026_05_15_phase6.md) | Phase 6 (extended `hull agent` + MCP). 21 findings, all closed |
+| [docs/archive/audits/audit_2026_05_15_phase6_reaudit.md](docs/archive/audits/audit_2026_05_15_phase6_reaudit.md) | Re-audit of the Phase 6 fixes. 3 follow-ups, all closed |
+
+To report a vulnerability, see [SECURITY.md](SECURITY.md).
 
 **Strategic / positioning (non-developer audience):**
 
-[docs/MANIFESTO.md](docs/MANIFESTO.md) · [docs/ASSESSMENT.md](docs/ASSESSMENT.md) · [docs/INVESTORS.md](docs/INVESTORS.md) · [docs/PERSONAS.md](docs/PERSONAS.md)
+[docs/MANIFESTO.md](docs/MANIFESTO.md) · [docs/archive/ASSESSMENT.md](docs/archive/ASSESSMENT.md) · [docs/INVESTORS.md](docs/INVESTORS.md) · [docs/PERSONAS.md](docs/PERSONAS.md)
 
 **Archive:** historical audits and completed roadmaps (architecture A–L refactor, db-vtable, WASM-improvement, v0-to-v1) live in [`docs/archive/`](docs/archive/). Preserved for reproducibility, not current state.
 

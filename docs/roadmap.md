@@ -1168,7 +1168,7 @@ Outputs:
 | ETag support | **Done** | `hull.web.middleware.etag`. Compute + compare + 304 Not Modified |
 | PostgreSQL support | Shipped | Pure-C wire client behind the `HlDbBackend` vtable; `postgres://` DSN selects it. Handles-only API (`db.default()` / `db.connect(name)`) |
 | Database encryption at rest | Planned | SQLite SEE or custom VFS |
-| HTTP/2 full support | [Plan](http2_plan.md) | Currently h2c upgrade only |
+| HTTP/2 full support | Planned | Currently h2c upgrade only |
 | PDF document builder | Planned | Report generation |
 | Module/package ecosystem | Planned | `hull add <package>` for sharing middleware and compute plugins |
 

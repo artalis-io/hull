@@ -2339,6 +2339,12 @@ jobs:
       - name: Compute-SDK header check self-test (negative) (#331)
         run: make check-sdk-headers-selftest
 
+      - name: Documentation-integrity gate
+        run: make check-docs-integrity
+
+      - name: Documentation-integrity self-test (negative)
+        run: make check-docs-integrity-selftest
+
   htmx-browser:
     needs: [classify]
     if: needs.classify.outputs.run_web == 'true'

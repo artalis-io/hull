@@ -760,7 +760,7 @@ timer.
 
 `HL_ENABLE_DB=1` (default) embeds SQLite. `HL_ENABLE_DB=0` produces a
 compute-only build (~1.4 MB smaller). See [§14](#14-build) and
-[`docs/audit_2026_05_15.md`](audit_2026_05_15.md) for the full list of
+[`docs/archive/audits/audit_2026_05_15.md`](archive/audits/audit_2026_05_15.md) for the full list of
 modules that require DB.
 
 ### Querying
@@ -1146,7 +1146,7 @@ global branch).
 
 ### Run `/c-audit`, `/js-audit`, `/lua-audit`
 
-Periodic audits live in [`docs/audit_2026_05_15.md`](audit_2026_05_15.md).
+Periodic audits live in [`docs/archive/audits/audit_2026_05_15.md`](archive/audits/audit_2026_05_15.md).
 The audit skills in `.claude/skills/` produce the same reports. Rerun on
 significant changes.
 
