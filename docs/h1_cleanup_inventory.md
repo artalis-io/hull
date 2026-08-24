@@ -12,9 +12,11 @@ Scope: FIRST-PARTY living code only - `src/hull/**`, `include/hull/**`,
 for the mechanical sweeps. EXCLUDED throughout: `vendor/**`, `build/**`,
 `tests/.playwright/**`, `docs/archive/**` (frozen historical snapshots).
 
-Method: read-only static survey (grep + focused code reading). No build or
-behavior was changed to produce this inventory. Every count records the exact
-command + exclusions used so it is reproducible (see 1.5 for the pattern).
+Method: read-only static survey (grep + focused code reading) over a bounded tree
+- NOT a build-closure proof or a coverage analysis. No build or behavior was
+changed. The em-dash count (1.5) records its exact reproducible command; the other
+figures are survey observations, and the counts that gate an execution slice are
+re-established with a recorded command inside that slice.
 
 **Revision note (review round 1).** Three initial overclaims were corrected in this
 freeze: `include/hull/cap.h` is NOT proven dead (it is internally-unused PUBLIC
@@ -32,12 +34,17 @@ intentional Lua/JS parity duplication) stand.
 The `-Werror=unused-function` / `-Werror=unused-variable` floor keeps the tree
 tight, so there is very little genuinely-dead code.
 
-| Item | Evidence | Confidence | Disposition |
-|---|---|---|---|
-| `#if 0` / commented-out code blocks | None found. | - | none |
-| Orphan `src/hull/**/*.c` | None found (every `.c` is in an OBJS list or a test link line). | - | none |
-| Unreachable code / unused statics | None found (compile-time enforced). | - | none |
-| Stale test fixtures / helpers | None found. | - | none |
+These are **survey observations, not proofs** - the bounded grep/reading survey did
+not do a build-manifest closure analysis, does not cover every optional
+composition, and cannot prove exported code is unreachable. Turning any of these
+into a deletion requires the source/build-closure proof, which is **S1's job**.
+
+| Item | Survey observation | Basis / caveat |
+|---|---|---|
+| `#if 0` / commented-out code blocks | None found in the bounded static survey. | grep over first-party trees. |
+| Orphan `src/hull/**/*.c` | None found in the bounded static survey. | Not a build-manifest closure proof; S1 establishes closure. |
+| Unreachable / unused code | None found in the bounded static survey. | `-Werror=unused-function/-variable` proves unused STATICS in COMPILED configs only - NOT unreachable EXPORTED code, nor coverage across every optional composition. |
+| Stale test fixtures / helpers | None found in the bounded static survey. | No fixture-reference closure proof was run; S1 confirms. |
 
 **`include/hull/cap.h` is NOT dead code - it is internally-unused PUBLIC surface.**
 It is an umbrella header with **zero** *in-repository* includes (every Hull
@@ -59,13 +66,21 @@ are addressed under comment archaeology (1.4), not deletion.
 ### 1.2a Hex encoding - real duplication, but a link-closure question (not a mechanical merge)
 
 Hex encoding is implemented many times, but there are already (at least) THREE
-DELIBERATE homes at different link boundaries - which is the whole point:
+DELIBERATE homes at different link boundaries - which is the whole point. **This
+table is REPRESENTATIVE, not the exhaustive duplication inventory** - producing the
+full caller list (and each caller's current link closure) is precisely S2b's job.
 
-| Home | Symbol | Link cost | Callers |
+| Home | Symbol | Link cost | Callers (representative) |
 |---|---|---|---|
-| cap/crypto | `hl_cap_crypto_hex_encode()` (`cap/crypto.h:355`) | pulls the crypto object (mbedTLS/TweetNaCl-adjacent, much more than hex) | tests only, today |
+| cap/crypto | `hl_cap_crypto_hex_encode()` (`cap/crypto.h:355`) | pulls the crypto object (mbedTLS/TweetNaCl-adjacent, much more than hex) | the PUBLIC hex bindings already delegate here (`runtime/lua/mod_crypto.c:903`, `runtime/js/mod_crypto.c:1327`) + tests |
 | runtime/cache | `hl_runtime_cache_hex_encode()` (`runtime/cache_common.h:58`) | dependency-narrow | 5 (bytecode/template caches Lua+JS, `commands/cache.c`) |
-| inline copies | `%02x` loops / local `hex_encode` statics | none | `runtime/{lua,js}/mod_crypto.c` (~16 / ~18), `signature.c:37`, `sbom.c:72`, `tool.c:65,82` (fprintf), 3+ test helpers |
+| local / inline | per-site `hex_encode` statics, lookup-table or byte-loop forms | none | `signature.c`, `sbom.c`, `release.c`, `release_io.c`, `shared/blob_store.c`, `commands/verify_self.c`, `runtime/lua/mod_tool.c`, `tool.c` (fprintf), other internal digest-formatting spots inside the two `mod_crypto.c` files, + test helpers |
+
+Correction (review round 2): the earlier draft mis-stated the two `mod_crypto.c`
+files as pure inline copies - their public `hexEncode` bindings ALREADY delegate to
+`hl_cap_crypto_hex_encode()`; what remains in those files are OTHER local encoders
+used for internal digest formatting. The local/inline row above is a
+representative sample, not a count - S2b enumerates it exhaustively.
 
 The existing `hl_runtime_cache_hex_encode` duplication is EVIDENCE that ownership
 and link composition already matter here. Routing `signature.c` / `sbom.c` /
@@ -84,9 +99,10 @@ add), then choose the canonical home(s):
 table) may keep local forms regardless. No consolidation is ratified until the
 link-closure table is reviewed.
 
-### 1.2b Constant-time compare - 7 sites, NOT one semantic family
+### 1.2b Constant-time compare - eight surveyed sites, NOT one semantic family
 
-The seven XOR-accumulate sites look alike but differ in contract - representation,
+The eight surveyed XOR-accumulate sites (the table below; S3 establishes whether
+that is exhaustive) look alike but differ in contract - representation,
 fixed-vs-variable length, whether length may leak, and whether the values are
 secret. They must NOT be collapsed into one generic helper.
 
@@ -198,7 +214,9 @@ Do NOT touch, now or by any gate:
 - **Weak-symbol stubs** (`*_weakstub.c`, `*_stub.c`) - intentional composition seams.
 - **Comments documenting a decision or invariant** (even if they mention a past
   cleanup) where the RATIONALE is still useful - rephrase, do not blank-delete.
-- **`#PR` provenance** pending the 1.6 decision.
+- **Durable `#NNNN` provenance** - a PR/issue reference tied to an external bug,
+  vendor behavior, security finding, or CI incident is KEPT (settled rule, 1.4);
+  only bare "Added in PR #N" milestone archaeology is removed.
 
 ## 3. Proposed execution slices (revised per review; ratify, then execute one at a time)
 
@@ -208,7 +226,7 @@ comparison-contract matrix) produce a ratified sub-decision BEFORE any code move
 
 | Slice | Scope | Risk | Acceptance |
 |---|---|---|---|
-| **S1** | **Dead-code EVIDENCE AUDIT only. No `cap.h` deletion.** Determine whether `include/hull/cap.h` is part of the committed public surface (release/install/package history + [`stability.md`](stability.md)); recommend RETAIN or DEPRECATE-then-remove. | none (audit) | a written disposition; zero code change. |
+| **S1** | **Dead-code EVIDENCE AUDIT only. No deletion.** (a) Prove the 1.1 survey observations with recorded commands: source/build-manifest closure for `.c` files, fixture-reference closure for test data. (b) Determine whether `include/hull/cap.h` is part of the committed public surface (release/install/package history + [`stability.md`](stability.md)); recommend RETAIN or DEPRECATE-then-remove. | none (audit) | a written disposition + the recorded closure proofs; zero code change. |
 | **S2a** | Consolidate ONLY the verbatim `feature.c` / `flavor.c` `ct_hex_eq` (identical fixed-length public-checksum contract) into their shared release/download layer (`hl_release_io_*`). | low | byte-identical verify behavior; feature/flavor install e2e green; the two copies gone. |
 | **S2b** | **Hex ownership + link-closure DESIGN.** Produce the caller-by-caller dependency table (1.2a), choose the canonical home(s) - dependency-neutral primitive vs separate helpers - then ratify. No consolidation code until ratified. | design | a reviewed link-closure table + ratified home decision; zero code change in this slice. |
 | **S3** | **Comparison-contract inventory** (the 1.2b matrix): representation / fixed-vs-variable length / length-leak / secrecy per site. Consolidate ONLY genuinely-identical contracts, each with tests proving length + nullability behavior. | medium (security) | the contract matrix + per-merge tests; no over-merge of differing contracts. |
