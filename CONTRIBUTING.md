@@ -119,13 +119,24 @@ employer step is needed.
 make            # build clean, zero non-vendor warnings
 make test       # 35+ unit suites
 make e2e        # 22+ end-to-end tests
-make lint-lua   # Lua stdlib lint
-make lint-js    # JS stdlib lint
+make lint       # Lua + JS lint, SDK-header + docs-integrity gates
 make cppcheck   # static analysis
 ```
 
+`make lint` includes `check-docs-integrity` — it verifies that every
+`docs/*.md` is catalogued in `docs/README.md`, that Markdown links resolve,
+that archived docs are not presented as active specs, and that moved historical
+paths cannot silently reappear. If you add or move a doc, update
+`docs/README.md` (and, for a historical doc, `docs/archive/README.md`) or this
+check will fail.
+
 CI runs all of these (plus ASan, MSan, scan-build, and the Cosmopolitan
 build). A green CI run is required to merge.
+
+## Reporting a security vulnerability
+
+Do **not** open a public issue or PR for a security vulnerability. Follow the
+private disclosure process in [SECURITY.md](SECURITY.md).
 
 ## Sign-off mechanics
 
