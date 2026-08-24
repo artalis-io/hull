@@ -28,6 +28,7 @@ for goal in "" "HL_ENABLE_GPU=1 HL_ENABLE_DUCKDB=1 HL_ENABLE_POSTGRES=1 HL_ENABL
   make -pn $goal 2>/dev/null | grep -oE 'src/hull/[A-Za-z0-9_/.-]+\.c'
 done > "$cov"
 for t in feature-duckdb feature-mysql feature-postgres feature-gpu feature-valkey; do
+  make -pn "$t" >/dev/null   # fail closed: same preflight as the runs above
   make -pn "$t" 2>/dev/null | grep -oE 'src/hull/[A-Za-z0-9_/.-]+\.c' >> "$cov"
 done
 comm -23 <(find src/hull -name '*.c' | sort -u) <(sort -u "$cov")   # -> empty
