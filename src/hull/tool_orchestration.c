@@ -229,7 +229,7 @@ static int l_tool_modules_resolve(lua_State *L)
     lua_pushboolean(L, (req_caps & HL_MOD_CAP_HTTP) ? 1 : 0);
     lua_setfield(L, -2, "needs_http");
 
-    /* needs_wasm (S1 of the two-signal gate, docs/wasm_feature.md, Phase 2) =
+    /* needs_wasm (S1 of the two-signal gate, docs/wasm_feature.md) =
      * does the resolved set declare a WASM cap (hull/compute)? Drives `hull
      * build`'s decision to compose the wasm core + the per-runtime compute
      * bridge. This is only S1: an app that runs a WASM-backed db.udf carries no
@@ -238,8 +238,8 @@ static int l_tool_modules_resolve(lua_State *L)
     lua_pushboolean(L, (req_caps & HL_MOD_CAP_WASM) ? 1 : 0);
     lua_setfield(L, -2, "needs_wasm");
 
-    /* needs_sqlite (SQLite as a composable feature, docs/sqlite_feature.md,
-     * Phase C) = does the resolved set use a DB (HL_MOD_CAP_DB)? SQLite is the
+    /* needs_sqlite (SQLite as a composable feature, docs/sqlite_feature.md)
+     * = does the resolved set use a DB (HL_MOD_CAP_DB)? SQLite is the
      * DEFAULT backend, so any DB-using app MIGHT need it. build.lua only acts on
      * this when the target base is actually SQLite-less (else the in-base backend
      * already serves), so composing is a no-op on a SQLite-full base and a

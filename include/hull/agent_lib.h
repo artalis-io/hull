@@ -60,7 +60,7 @@ int hl_agent_status(const char *app_dir, int port, ShJsonBuf *out);
 int hl_agent_errors(const char *app_dir, ShJsonBuf *out);
 int hl_agent_test(const char *app_dir, ShJsonBuf *out);
 
-/* ── Phase 2: Context ──────────────────────────────────────────────── */
+/* ── Context ──────────────────────────────────────────────── */
 
 int hl_agent_context(const char *task, const char *level, ShJsonBuf *out);
 
@@ -77,18 +77,18 @@ int hl_agent_context(const char *task, const char *level, ShJsonBuf *out);
  */
 int hl_agent_context_list(ShJsonBuf *out);
 
-/* ── Phase 4: Lifecycle ────────────────────────────────────────────── */
+/* ── Lifecycle ────────────────────────────────────────────── */
 
 #ifdef HL_ENABLE_DB
 int hl_agent_migrate_status(const char *app_dir, const char *db_path,
                             ShJsonBuf *out);
 #endif
 
-/* ── Phase 5: Deploy ──────────────────────────────────────────────── */
+/* ── Deploy ──────────────────────────────────────────────── */
 
 int hl_agent_deploy(const char *app_dir, ShJsonBuf *out);
 
-/* ── Phase 6: Extended introspection (2026-05-15) ──────────────────── */
+/* ── Extended introspection ──────────────────── */
 
 /*
  * hl_agent_manifest — emit the effective manifest as JSON.

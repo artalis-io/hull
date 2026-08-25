@@ -15,10 +15,9 @@
  * asym symbol would break those links. Each accessor references only its own
  * backend.
  *
- * Phase 1 (this seam) is additive + dormant: the weak default preserves the
- * historical compile-time selection byte-for-byte. Later phases move mbedTLS out
- * of the base and provide the strong override from libhull_feature-tls.a. The
- * asym accessor lands with the asym slice of Phase 1.
+ * This seam's weak default preserves the historical compile-time selection
+ * byte-for-byte; the strong override from libhull_feature-tls.a moves mbedTLS
+ * out of the base.
  *
  * Stability: Tier 3 (internal seam).
  *

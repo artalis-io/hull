@@ -42,7 +42,7 @@ enum { HL_EMBED_NEW = 0, HL_EMBED_SEALED = 1 };
 struct HlEmbed {
     char       *app_dir;                          /* owned pre-seal; NULLed after seal */
     HlFsConfig  fs;                               /* base_dir: app_dir pre-seal, sealed copy post-seal */
-    HlFsPolicy  fs_policy;                         /* compiled fs authorization policy (checkpoint 3) */
+    HlFsPolicy  fs_policy;                         /* compiled fs authorization policy */
     HlAllocator fs_alloc;                          /* owns the compiled policy's memory */
 
     char       *reads[HL_MANIFEST_MAX_PATHS];     /* owned dups; freed at seal or free */
@@ -218,7 +218,7 @@ int hl_embed_seal(HlEmbed *e, const char *db_path)
     policy.wx_enforced      = 1;   /* no runtime dynamic code */
     /* allow_dynamic_code / allow_dynamic_libraries stay 0 (zeroed above). */
 
-    /* 2b. Compile the fs authorization policy (checkpoint 3) from the SAME grants,
+    /* 2b. Compile the fs authorization policy from the SAME grants,
      *     BEFORE the kernel sandbox restricts fs opens (the compile opens each
      *     grant anchor). A bad grant fails the seal here, before the
      *     macOS-irreversible sandbox is applied. Raw allocator (NULL); the policy

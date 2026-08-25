@@ -16,16 +16,16 @@
  * eleven runtime-AGNOSTIC symbols as the core seam; this TU provides weak,
  * fail-closed defaults for them. When libhull_feature-wasm.a is composed it is
  * whole-archived, so the linker takes its strong definitions; when it is NOT
- * composed (a genuinely compute-free app, once the base is flipped in Phase 1)
- * these weak no-ops satisfy the link, `compute.available()` reads false, a
+ * composed (a genuinely compute-free app) these weak no-ops satisfy the link,
+ * `compute.available()` reads false, a
  * WASM-backed `db.udf` fails closed (function UDFs are untouched — they never
  * call these), and no `WasmBuffer` can exist (the other buffer-protocol types
  * are unaffected).
  *
  * This mirrors http_weakstub.c: real prototypes (the base already sees the cap
  * headers) so the definitions are ODR/LTO-clean against the strong ones. It is
- * additive and dormant while WAMR is still compiled into the base (Phase 0):
- * the strong cap definitions win, so behavior is byte-identical.
+ * When WAMR is compiled into the base (e.g. cosmo) the strong cap definitions
+ * win, so behavior is byte-identical.
  *
  * The two per-RUNTIME references the spike found (luaopen_hull_compute from
  * modules.o, lua_push_wasm_buffer from mod_gpu.o, + the JS init twin) do NOT

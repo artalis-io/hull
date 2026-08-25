@@ -1,10 +1,10 @@
 /*
  * http_weakstub.c — weak no-op defaults for the per-runtime HTTP web bindings
- * (issue #114, Phase C).
+ * (issue #114).
  *
- * Phase C splits the per-runtime web bindings (routes / dispatch / the res:*
- * helpers / ws / sse / http-client / smtp / the in-process test harness /
- * timers) out of the runtime feature archive into a separate
+ * The per-runtime web bindings (routes / dispatch / the res:* helpers / ws /
+ * sse / http-client / smtp / the in-process test harness / timers) are split
+ * out of the runtime feature archive into a separate
  * libhull_feature-http-<rt>.a. The *pure* runtime archive still references a
  * few of those symbols from its always-present core objects:
  *
@@ -33,8 +33,8 @@
 /* Present in EVERY native base (not gated on HL_ENABLE_HTTP_SERVER): a reduced
  * flavor (client-only / pure-compute) drops the web bindings but a composed
  * runtime still references these symbols, so the base must carry the weak
- * defaults for the reduced-flavor x runtime compose to link (issue #114,
- * Phase D). Harmless in a full base (the composed web archive's strong defs
+ * defaults for the reduced-flavor x runtime compose to link (issue #114).
+ * Harmless in a full base (the composed web archive's strong defs
  * win) and in cosmo (its in-base strong defs win). */
 
 #ifdef HL_ENABLE_LUA

@@ -69,7 +69,7 @@ struct HlAppContext {
      * cap layer sandboxes to base_dir + rejects traversal; the per-path
      * allowlist is the kernel sandbox, which the test harness runs without. */
     HlFsConfig     fs_cfg_storage;
-    HlFsPolicy     fs_policy_storage; /* compiled fs authorization policy (checkpoint 3) */
+    HlFsPolicy     fs_policy_storage; /* compiled fs authorization policy */
     HlAllocator    fs_alloc;          /* owns the policy's memory (opts->alloc may be NULL) */
 
     /* Resolved module set (opt-in via opts.gate_modules). Lives here so
@@ -342,7 +342,7 @@ int hl_app_context_init(HlAppContext **out, const HlAppContextOpts *opts)
                  * condition as serve. Safe to read m before the free below. */
                 if (m.fs_read_count > 0 || m.fs_write_count > 0) {
                     /* Compile the fs.read/fs.write grants into the authorization
-                     * policy (checkpoint 3), mirroring serve.c. Must happen BEFORE
+                     * policy, mirroring serve.c. Must happen BEFORE
                      * hl_manifest_free(&m) below (compile deep-copies the grant
                      * strings). The cap layer now enforces the grants here even
                      * under `hull test`/`hull agent` (which run without the kernel

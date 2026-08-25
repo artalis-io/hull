@@ -689,7 +689,7 @@ typedef struct {
     int                  manifest_sealed; /* 1 after successful seal */
     HlResolvedModuleSet  module_set; /* frozen after resolver; consulted by gating */
     HlFsConfig           fs_cfg_storage;
-    HlFsPolicy           fs_policy_storage; /* compiled fs authorization policy (checkpoint 3) */
+    HlFsPolicy           fs_policy_storage; /* compiled fs authorization policy */
     HlEnvConfig          env_cfg_storage;
     HlHttpConfig         http_cfg_storage;
     HlSmtpConfig         smtp_cfg_storage;
@@ -1451,7 +1451,7 @@ static int hl_serve_wire_caps(HlServerState *s)
 
     /* Wire fs_cfg from manifest (if app declares fs.read OR fs.write
      * paths — both blob.* and fs.mmap need the cfg). The fs.read/fs.write grants
-     * are COMPILED into the path-authorization policy (checkpoint 3, sec. 6): the
+     * are COMPILED into the path-authorization policy (sec. 6): the
      * cap layer selects from it per op and opens under a held anchor. A no-grant
      * app leaves rt->fs_cfg NULL -> fs denied (unchanged fail-closed behavior). */
     memset(&s->fs_cfg_storage, 0, sizeof(s->fs_cfg_storage));

@@ -48,7 +48,7 @@ int hl_build_extract_feature_http(const char *dir);
 
 /*
  * Extract the embedded per-runtime web-bindings feature archive to
- * `dir/libhull_feature-http-<rt>.a` (rt = "lua" | "js"; issue #114, Phase C).
+ * `dir/libhull_feature-http-<rt>.a` (rt = "lua" | "js"; issue #114).
  * Composed alongside the http core when an app needs HTTP. Returns 0 on
  * success, -1 if not embedded / unknown rt / write error.
  */
@@ -56,7 +56,7 @@ int hl_build_extract_feature_http_rt(const char *dir, const char *rt);
 
 /*
  * Extract the embedded per-runtime tui bridge to `dir/libhull_feature-tui-<rt>.a`
- * (rt = "lua" | "js"; issue #114, Phase D). Composed alongside the tui cap core
+ * (rt = "lua" | "js"; issue #114). Composed alongside the tui cap core
  * when `--with=tui`. Returns 0 on success, -1 if not embedded / unknown rt.
  */
 int hl_build_extract_feature_tui_rt(const char *dir, const char *rt);
@@ -64,7 +64,7 @@ int hl_build_extract_feature_tui_rt(const char *dir, const char *rt);
 /*
  * Extract the embedded WASM core (`dir/libhull_feature-wasm.a`) and per-runtime
  * compute bridge (`dir/libhull_feature-wasm-<rt>.a`, rt = "lua" | "js"), composed
- * for every full-flavor app (docs/wasm_feature.md, Phase 1). Return 0 on success,
+ * for every full-flavor app (docs/wasm_feature.md). Return 0 on success,
  * -1 if not embedded / unknown rt.
  */
 int hl_build_extract_feature_wasm(const char *dir);

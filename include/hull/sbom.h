@@ -97,7 +97,7 @@ const HlSbomEntry *hl_sbom_entries(size_t *count);
 void hl_sbom_set_scope_libhull(int on);
 
 /* Scope the next hl_sbom_format() to a `hull build --flavor` target: report the
- * dependency set that flavor validates for. Since Phase 4.3 a flavor is a
+ * dependency set that flavor validates for. A flavor is a
  * build.lua preset on the composable base (no per-flavor platform lib):
  * "pure-compute" is the preset for an app that declares no HTTP/TLS, so it drops
  * the needs_http components (Keel + mbedTLS); "full" is the whole vendored set.
