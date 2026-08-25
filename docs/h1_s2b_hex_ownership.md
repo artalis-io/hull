@@ -9,6 +9,13 @@ for review; a future execution slice (if approved) must prove zero link-delta
 per composition before landing anything. ("Finding no safe cleanup is a valid
 result.")
 
+**DECISION (ratified):** **Option A** - a private, dependency-neutral
+`src/hull/utils/hex.{c,h}` leaf - is chosen (see 4.A). The consolidation lands
+as a SEPARATE reviewed execution slice under the acceptance in section 5. Scope:
+only the seven verified buffer encoders (P1-P7); the cache helper, the
+`hl_release_io_sha256_hex` hash+hex composite, and the `FILE*`-stream encoder are
+left unchanged unless a later ownership audit justifies moving them.
+
 ## 1. Why this slice is design-only
 
 The freeze deferred hex consolidation specifically because "route the generic
