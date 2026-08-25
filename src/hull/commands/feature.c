@@ -25,6 +25,7 @@
 #ifdef HL_ENABLE_HTTP_CLIENT
 
 #include "hull/release_io.h"
+#include "asset_checksum.h"   /* private installer helper (sibling, not public) */
 
 #include <keel/allocator.h>
 #include <keel/tls_mbedtls.h>
@@ -136,16 +137,6 @@ static int feature_cache_dir(char *out, size_t out_sz)
     return 0;
 }
 
-/* Constant-time compare of two 64-char hex SHA-256 strings (public values;
- * matches the rest of Hull's hash compares). */
-static int ct_hex_eq(const char *a, const char *b)
-{
-    unsigned char diff = 0;
-    for (int i = 0; i < 64; i++)
-        diff |= (unsigned char)(a[i] ^ b[i]);
-    return diff == 0;
-}
-
 static int install_asset(const char *asset, const char *repo, const char *tag,
                          KlAllocator *alloc, KlTlsCtx *tls,
                          const char *manifest, size_t manifest_len,
@@ -180,7 +171,7 @@ static int install_asset(const char *asset, const char *repo, const char *tag,
         kl_free(alloc, body, body_len);
         return -1;
     }
-    if (!ct_hex_eq(expected, actual)) {
+    if (!hl_asset_checksum_eq(expected, actual)) {
         fprintf(stderr, "hull feature: SHA-256 MISMATCH for %s\n"
                         "  expected %s\n  actual   %s\n", asset, expected, actual);
         kl_free(alloc, body, body_len);

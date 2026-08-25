@@ -45,4 +45,19 @@ UTEST(dispatch, entry_point_returns_neg1)
  * the dispatcher correctly falls through for non-command args.
  */
 
+/* The private installer checksum helper (src/hull/commands/asset_checksum.h is not
+ * on the public -Iinclude path, so forward-declare it; the symbol is in CMD_OBJS,
+ * which this test links). H1 S2a de-duplicated feature.c/flavor.c onto it. */
+int hl_asset_checksum_eq(const char a[64], const char b[64]);
+
+UTEST(asset_checksum, fixed64_equal_and_diffs)
+{
+    char a[64], b[64];
+    memset(a, 'a', 64); memset(b, 'a', 64);
+    ASSERT_EQ(hl_asset_checksum_eq(a, b), 1);   /* equal over the 64 */
+    b[0] = 'b';  ASSERT_EQ(hl_asset_checksum_eq(a, b), 0);   /* differ at index 0 */
+    b[0] = 'a';  b[63] = 'b';
+    ASSERT_EQ(hl_asset_checksum_eq(a, b), 0);   /* differ at index 63 */
+}
+
 UTEST_MAIN();
