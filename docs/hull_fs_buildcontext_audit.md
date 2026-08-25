@@ -1,15 +1,21 @@
 # hull.fs + BuildContext filesystem audit / design
 
+> **BUILDCONTEXT PORTIONS SUPERSEDED by
+> [buildcontext_design.md](buildcontext_design.md).** The newer design retains the
+> app-vs-plugin authority split and descriptor-relative filesystem foundation, and
+> refines the unimplemented plugin surface with action transactions, immutable
+> artifact inputs, constrained tools, and the single-pipeline/plugin-parity rules.
+> This file remains the historical audit that established the need; it is no
+> longer the implementation specification for checkpoint 4.
+
 > **PARTIALLY SUPERSEDED by [hull_fs_design.md](hull_fs_design.md) (PR #396).**
 > The dedicated application `hull.fs` design (#396) is the AUTHORITATIVE record for
 > the application filesystem surface, the resolver, the symlink policy, and the
 > implementation sequencing. Where this audit and #396 disagree, **#396 wins.**
 > Specifically superseded here: §1.2 (app-surface inventory), §3.1 (resolution
 > model), §3.6 (symlink behavior), and §6-§7 (sequencing) - each marked inline
-> below. This document remains the authoritative record ONLY for the BuildContext
-> parts not yet re-designed: §2 (BuildArtifact needs), §3.2-§3.5 (enumeration,
-> declared-input reads, dependency hashing, transactional staging/publication),
-> and §4 (the two-surface split). Those stand.
+> below. The BuildContext parts that previously remained authoritative are now
+> superseded by `buildcontext_design.md`.
 
 Status: **AUDIT + DESIGN (awaiting review). NOTHING implemented.** This is the
 design/audit checkpoint that must precede any `hull.fs` change and the Build
