@@ -503,16 +503,16 @@ CRYPTO_TEST_OBJS := $(BUILDDIR)/cap_crypto.o $(BUILDDIR)/cap_crypto_hmac_mbedtls
 # atomic write). Skipped on HL_ENABLE_HTTP_CLIENT=0 builds where the
 # helper module isn't compiled in.
 ifneq ($(HL_ENABLE_HTTP_CLIENT),0)
-$(BUILDDIR)/test_release_io: $(TESTDIR)/hull/test_release_io.c $(RELEASE_IO_OBJ) $(RELEASE_OBJ) $(CACERT_OBJ) $(TLS_TRANSPORT_OBJ) $(TLS_TRANSPORT_STUB_OBJ) $(CRYPTO_TEST_OBJS) $(MBEDTLS_OBJS) $(KEEL_LIB) | $(BUILDDIR)
-	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< $(RELEASE_IO_OBJ) $(RELEASE_OBJ) $(CACERT_OBJ) $(TLS_TRANSPORT_OBJ) $(TLS_TRANSPORT_STUB_OBJ) $(CRYPTO_TEST_OBJS) $(MBEDTLS_OBJS) $(KEEL_LIB) -lm -lpthread
+$(BUILDDIR)/test_release_io: $(TESTDIR)/hull/test_release_io.c $(RELEASE_IO_OBJ) $(RELEASE_OBJ) $(HEX_OBJ) $(CACERT_OBJ) $(TLS_TRANSPORT_OBJ) $(TLS_TRANSPORT_STUB_OBJ) $(CRYPTO_TEST_OBJS) $(MBEDTLS_OBJS) $(KEEL_LIB) | $(BUILDDIR)
+	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< $(RELEASE_IO_OBJ) $(RELEASE_OBJ) $(HEX_OBJ) $(CACERT_OBJ) $(TLS_TRANSPORT_OBJ) $(TLS_TRANSPORT_STUB_OBJ) $(CRYPTO_TEST_OBJS) $(MBEDTLS_OBJS) $(KEEL_LIB) -lm -lpthread
 endif
 
 # Verify-self helpers test. Reuses release_io.{c,h} for asset-name,
 # checksum-line lookup, SHA-256, and self-path resolution. Same link
 # dependencies as test_release_io.
 ifneq ($(HL_ENABLE_HTTP_CLIENT),0)
-$(BUILDDIR)/test_verify_self: $(TESTDIR)/hull/test_verify_self.c $(RELEASE_IO_OBJ) $(RELEASE_OBJ) $(CACERT_OBJ) $(TLS_TRANSPORT_OBJ) $(TLS_TRANSPORT_STUB_OBJ) $(CRYPTO_TEST_OBJS) $(MBEDTLS_OBJS) $(KEEL_LIB) | $(BUILDDIR)
-	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< $(RELEASE_IO_OBJ) $(RELEASE_OBJ) $(CACERT_OBJ) $(TLS_TRANSPORT_OBJ) $(TLS_TRANSPORT_STUB_OBJ) $(CRYPTO_TEST_OBJS) $(MBEDTLS_OBJS) $(KEEL_LIB) -lm -lpthread
+$(BUILDDIR)/test_verify_self: $(TESTDIR)/hull/test_verify_self.c $(RELEASE_IO_OBJ) $(RELEASE_OBJ) $(HEX_OBJ) $(CACERT_OBJ) $(TLS_TRANSPORT_OBJ) $(TLS_TRANSPORT_STUB_OBJ) $(CRYPTO_TEST_OBJS) $(MBEDTLS_OBJS) $(KEEL_LIB) | $(BUILDDIR)
+	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< $(RELEASE_IO_OBJ) $(RELEASE_OBJ) $(HEX_OBJ) $(CACERT_OBJ) $(TLS_TRANSPORT_OBJ) $(TLS_TRANSPORT_STUB_OBJ) $(CRYPTO_TEST_OBJS) $(MBEDTLS_OBJS) $(KEEL_LIB) -lm -lpthread
 endif
 
 # Platform-sig helpers — reuses release.c (sign/verify) +
@@ -542,8 +542,8 @@ $(BUILDDIR)/test_obj_emit: $(TESTDIR)/hull/test_obj_emit.c $(OBJ_EMIT_OBJ) | $(B
 # embedded-blob SHA-256 cache. Links against sbom.o + cacert.o + mbedTLS;
 # nothing else. If SBOM accidentally pulls in other Hull subsystems,
 # this link line will need to grow — that's the orthogonality canary.
-$(BUILDDIR)/test_sbom: $(TESTDIR)/hull/test_sbom.c $(SBOM_OBJ) $(CACERT_OBJ) $(SH_JSON_OBJ) $(SH_ARENA_OBJ) $(CRYPTO_TEST_OBJS) $(MBEDTLS_OBJS) | $(BUILDDIR)
-	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< $(SBOM_OBJ) $(CACERT_OBJ) $(SH_JSON_OBJ) $(SH_ARENA_OBJ) $(CRYPTO_TEST_OBJS) $(MBEDTLS_OBJS)
+$(BUILDDIR)/test_sbom: $(TESTDIR)/hull/test_sbom.c $(SBOM_OBJ) $(HEX_OBJ) $(CACERT_OBJ) $(SH_JSON_OBJ) $(SH_ARENA_OBJ) $(CRYPTO_TEST_OBJS) $(MBEDTLS_OBJS) | $(BUILDDIR)
+	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< $(SBOM_OBJ) $(HEX_OBJ) $(CACERT_OBJ) $(SH_JSON_OBJ) $(SH_ARENA_OBJ) $(CRYPTO_TEST_OBJS) $(MBEDTLS_OBJS)
 
 # Path-normalize test — standalone, exercises hl_path_normalize directly
 # so a regression in the helper is caught here rather than only via the
