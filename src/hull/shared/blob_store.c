@@ -15,6 +15,7 @@
 #include "hull/shared/fs_util.h"
 #include "hull/cap/crypto.h"
 #include "hull/utils/alloc.h"
+#include "../utils/hex.h"
 
 #include <ctype.h>
 #include <dirent.h>
@@ -83,17 +84,9 @@ struct HlBlobStoreReader {
     int          fd;
 };
 
-/* ── Hex helpers ─────────────────────────────────────────────────── */
-
-static void hex_encode(const uint8_t *bytes, size_t len, char *out)
-{
-    static const char HEX[] = "0123456789abcdef";
-    for (size_t i = 0; i < len; i++) {
-        out[i * 2]     = HEX[(bytes[i] >> 4) & 0xF];
-        out[i * 2 + 1] = HEX[bytes[i] & 0xF];
-    }
-    out[len * 2] = '\0';
-}
+/* Hex encoding goes through the shared byte->hex leaf hl_hex_encode
+ * (utils/hex.h). The nibble->shard-directory-name table further down is a
+ * different shape (path construction, not buffer encoding) and stays local. */
 
 /* Validate that `id` is exactly HL_BLOB_STORE_ID_HEX_LEN lowercase
  * hex characters. */
@@ -149,7 +142,7 @@ static int make_tmp_name(char *out, size_t out_cap)
     uint8_t rand_bytes[HL_BLOB_STORE_TMP_RAND_BYTES];
     if (hl_cap_crypto_random(rand_bytes, sizeof(rand_bytes)) != 0) return -1;
     char hex[HL_BLOB_STORE_TMP_RAND_HEX + 1];
-    hex_encode(rand_bytes, sizeof(rand_bytes), hex);
+    hl_hex_encode(rand_bytes, sizeof(rand_bytes), hex, sizeof(hex));
     int n = snprintf(out, out_cap, "%s%s%s",
                      HL_BLOB_STORE_TMP_PREFIX, hex,
                      HL_BLOB_STORE_TMP_SUFFIX);
@@ -349,7 +342,7 @@ int hl_blob_store_writer_finalize(HlBlobStoreWriter *w,
         return -1;
     }
     char id[HL_BLOB_STORE_ID_BUF_SIZE];
-    hex_encode(digest, 32, id);
+    hl_hex_encode(digest, 32, id, sizeof(id));
 
     if (w->durable && fsync(w->fd) < 0) {
         close(w->fd); w->fd = -1;
