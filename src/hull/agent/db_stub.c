@@ -1,17 +1,17 @@
 /*
  * agent/db_stub.c — weak fallbacks for the SQLite-backed agent DB introspection
- * (SQLite as a composable feature, docs/sqlite_feature.md, Phase A).
+ * (SQLite as a composable feature, docs/sqlite_feature.md).
  *
  * The `hull agent db|migrate|sql|schema-diff` entry points are implemented
  * against the raw sqlite3 API in agent/{db,sql,schema_diff}.c, which are
- * SQLite-only. Phase B moves those TUs into libhull_feature-sqlite.a; this TU
+ * SQLite-only and live in libhull_feature-sqlite.a; this TU
  * (always compiled into the base whenever the DB umbrella is on) provides WEAK
  * defaults for every public entry point so the base's agent dispatch, in-process
  * agent API, and MCP server link even when the SQLite backend is not composed.
  *
  * The strong definitions in agent/{db,sql,schema_diff}.c override these when
- * SQLite is present (Phase A: compiled into the base -> byte-identical; Phase B:
- * supplied by the composed feature archive). When absent, each weak stub emits a
+ * SQLite is present (compiled into the base, or supplied by the composed feature
+ * archive). When absent, each weak stub emits a
  * clear `{"error": ...}` and returns -1 (hl_agent_write_error's convention), so
  * `hull agent db schema` on, say, a Postgres-only build fails closed with a
  * useful message instead of the command being compiled out.

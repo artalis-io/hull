@@ -108,7 +108,7 @@ static const char SCHEMA_MIGRATE[] =
 static const char SCHEMA_RELOAD[] =
     "{\"type\":\"object\",\"properties\":{}}";
 
-/* ── Phase 6 (2026-05-15): extended introspection schemas ─────────── */
+/* ── Extended introspection schemas ─────────── */
 
 /* Shared schema for any subcommand whose only param is app_dir. */
 static const char SCHEMA_APP_DIR_ONLY[] =
@@ -197,7 +197,7 @@ static const McpTool mcp_tools[] = {
 #endif
     { "hull_reload",         "Reload application context (after code changes)",
                               SCHEMA_RELOAD },
-    /* Phase 6 extended introspection */
+    /* Extended introspection */
     { "hull_manifest",       "Effective manifest JSON (post-extraction)",
                               SCHEMA_APP_DIR_ONLY },
     { "hull_endpoint",       "Preview which handler+middleware would fire for METHOD PATH",
@@ -491,7 +491,7 @@ static void handle_tools_call(FILE *fp, const ShJsonValue *id,
         sh_json_write_kv_bool(&w, "ok", warm_ctx_ptr && *warm_ctx_ptr);
         sh_json_write_object_end(&w);
 
-    /* ── Phase 6 extended introspection ─────────────────────────── */
+    /* ── Extended introspection ─────────────────────────── */
 
     } else if (strcmp(tool_name, "hull_manifest") == 0) {
         const char *dir = sh_json_as_string(sh_json_get(args, "app_dir"), app_dir);

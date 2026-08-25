@@ -3,7 +3,7 @@
  *
  * Split out of agent/helpers.c so it moves into libhull_feature-sqlite.a with
  * the rest of the SQLite agent code (SQLite as a composable feature,
- * docs/sqlite_feature.md, Phase B). hl_agent_open_app_db is the raw sqlite3
+ * docs/sqlite_feature.md). hl_agent_open_app_db is the raw sqlite3
  * opener the SQLite agent impls (agent/db.c, sql.c, schema_diff.c) call; keeping
  * it here lets a SQLite-less base drop it (the composed feature supplies it)
  * while helpers.c retains the backend-agnostic hl_agent_write_error /

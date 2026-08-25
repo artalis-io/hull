@@ -382,7 +382,7 @@ static int cmd_migrate(int argc, char **argv)
 }
 #endif
 
-/* ── Phase 6 (2026-05-15): Extended introspection subcommands ─────── */
+/* ── Extended introspection subcommands ─────── */
 
 #include "hull/app_context.h"
 
@@ -917,7 +917,7 @@ int hl_cmd_agent(int argc, char **argv, const HlCommandEnv *env)
 #endif
     if (strcmp(sub, "deploy") == 0)
         return cmd_deploy(sub_argc, sub_argv);
-    /* Phase 6 extended introspection */
+    /* Extended introspection */
     if (strcmp(sub, "manifest") == 0)     return cmd_manifest(sub_argc, sub_argv);
     if (strcmp(sub, "vfs") == 0)          return cmd_vfs(sub_argc, sub_argv);
     if (strcmp(sub, "compute") == 0)      return cmd_compute_sub(sub_argc, sub_argv);
