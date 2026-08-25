@@ -98,6 +98,7 @@ specific signature, parameter list, or return value.
 | [`h1_cleanup_inventory.md`](h1_cleanup_inventory.md) | Design-only inventory + freeze for the H1 code-housekeeping cleanup (dead code, redundancy, comment archaeology, em-dashes) that precedes BuildContext. |
 | [`h1_s1_deadcode_audit.md`](h1_s1_deadcode_audit.md) | H1 slice S1: recorded build-system + fixture reference-coverage evidence and the `cap.h` disposition. Result: retain as-is, no deletion. |
 | [`h1_s2b_hex_ownership.md`](h1_s2b_hex_ownership.md) | H1 slice S2b (design-only): exhaustive hex-caller inventory, link-closure/dependency table, and ownership recommendation for the byte->hex encoders. No code change. |
+| [`h1_s3_comparison_contracts.md`](h1_s3_comparison_contracts.md) | H1 slice S3 (design-only): exhaustive comparison/constant-time contract matrix (14 security-relevant sites), threat context, equivalence classes, and per-class recommendation. Result: retain, no consolidation. |
 | [`reporting_ir_design.md`](reporting_ir_design.md) | Proposed reporting IR — **deferred** (over-scoped as the immediate next feature). |
 | [`sidecar_design.md`](sidecar_design.md) | Native sidecars — design only (Phase 0), not yet scheduled. |
 
