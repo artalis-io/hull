@@ -38,6 +38,7 @@
 #define HL_VERIFY_SELF_BINARY_MAX_BYTES (256U * 1024U * 1024U)
 
 #include "hull/cap/crypto.h"
+#include "../utils/hex.h"
 
 static void usage(FILE *fp)
 {
@@ -107,12 +108,7 @@ static int sha256_file_hex(const char *path, char hex_out[HL_SHA256_HEX_BUF])
     free(buf);
     if (rc != 0) return -1;
 
-    static const char hex[] = "0123456789abcdef";
-    for (int i = 0; i < 32; i++) {
-        hex_out[i*2]   = hex[(digest[i] >> 4) & 0xf];
-        hex_out[i*2+1] = hex[digest[i] & 0xf];
-    }
-    hex_out[64] = '\0';
+    hl_hex_encode(digest, 32, hex_out, HL_SHA256_HEX_BUF);
     return 0;
 }
 
