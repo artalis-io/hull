@@ -30,6 +30,7 @@
 #include "hull/obj_emit.h"
 #include "hull/linker.h"
 #include "hull/bundled_objs.h"
+#include "../../utils/hex.h"
 #include "hull/tools_install.h"
 #include "hull/embedded_platform_sig.h"
 #include "hull/platform_sig.h"
@@ -1554,13 +1555,8 @@ static int l_tool_sha256_file(lua_State *L)
         lua_pushstring(L, "hash failed");
         return 2;
     }
-    static const char hexd[] = "0123456789abcdef";
     char hex[65];
-    for (int i = 0; i < 32; i++) {
-        hex[i * 2]     = hexd[digest[i] >> 4];
-        hex[i * 2 + 1] = hexd[digest[i] & 0x0f];
-    }
-    hex[64] = '\0';
+    hl_hex_encode(digest, 32, hex, sizeof(hex));
     lua_pushstring(L, hex);
     return 1;
 }
