@@ -18,7 +18,7 @@
 #   .PHONY: feature-STEM
 #   $(BUILDDIR)/libhull_feature-STEM.a: OBJS | $(BUILDDIR)
 #           $(call AR_FEATURE_LIB,OBJS)
-# proven on the `image` feature (core + both runtime bridges) as the Phase 0
+# proven on the `image` feature (core + both runtime bridges) as the initial
 # PoC (nm object-membership identical before/after).
 define define-feature-archive
 feature-$(1): $$(BUILDDIR)/libhull_feature-$(1).a
@@ -55,7 +55,7 @@ $$(BUILDDIR)/libhull_feature-$(1).a: $(2) $$($(3)) | $$(BUILDDIR)
 	@echo "built $$@ ($$$$(du -h $$@ | cut -f1))"
 endef
 
-# ── Canonical feature registry (single source of truth, Phase 4) ─────
+# ── Canonical feature registry (single source of truth) ─────
 # The one place the feature set is enumerated. release.yml derives its
 # embedded-archive build / upload / sign lists from these (via the
 # feature-embedded aggregate + the print-* targets) so adding a feature is one
@@ -79,7 +79,7 @@ print-feature-embedded-stems: ; @echo $(FEATURE_EMBEDDED_STEMS)
 print-feature-embedded-libs: ; @echo $(FEATURE_EMBEDDED_LIBS)
 print-feature-installable-stems: ; @echo $(FEATURE_INSTALLABLE_STEMS)
 
-# Phase 4c: fail if src/hull/commands/feature.c FEATURES[] (the `hull feature
+# Fail if src/hull/commands/feature.c FEATURES[] (the `hull feature
 # install/list` registry) drifts from this single source of truth. Closes the
 # last of the four-place feature-list duplication; run in CI.
 .PHONY: check-feature-registry

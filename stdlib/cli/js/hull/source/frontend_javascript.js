@@ -1,5 +1,5 @@
 // hull:source:frontend_javascript - the JS frontend adapter (mirror of
-// hull.project.frontend_lua). Turns the Slice 2-4 pipeline (parser + annotations + scope) into
+// hull.project.frontend_lua). Turns the parser + annotations + scope pipeline into
 // the SAME normalized per-source facts hull.project.model consumes, plus declarationSemantics and
 // the scope capability, all over a session-retained AST. Runs INSIDE the QuickJS tooling session.
 //

@@ -1173,7 +1173,7 @@ function parseInternal(bytes, opts, inject) {
     }
 
     const ast = parseProgram();
-    // Scan JSDoc @tags and attach leading runs to declaration targets (Slice 3). Mirrors
+    // Scan JSDoc @tags and attach leading runs to declaration targets. Mirrors
     // lua.parse calling annotations.attach. Best-effort + hardened: an internal defect emits
     // js.internal through the SAME budget (so diagnostics-empty guarantees attachment succeeded),
     // malformed tag content does not. The tokenizer's linemap is already computed.

@@ -15,7 +15,7 @@ local json = require("hull.json")
 local fcompose = require("hull.feature_compose")
 -- The per-feature compose registry (single source of truth): { backend, type,
 -- hook, cxx, base_group, whole_archive, libs } per --with feature. Hoisted out
--- of main() in Phase 3 of the build modularization (docs/build_modularization.md).
+-- of main() during the build modularization (docs/build_modularization.md).
 local FEATURE_SPECS = require("hull.feature_specs")
 
 -- ── Argument parsing ─────────────────────────────────────────────────
@@ -40,7 +40,7 @@ local function parse_args()
                                 -- --no-verify-platform skips it; use for
                                 -- dev hulls (no embedded manifest) or
                                 -- forks signing with their own platform key.
-        no_compiler = true,     -- Compiler-free build (DEFAULT since Phase 3):
+        no_compiler = true,     -- Compiler-free build (DEFAULT):
                                 -- emit app_registry.o (obj_emit) + extract the
                                 -- bundled app_main.o / app_feature_registry-<rt>.o
                                 -- and link, with no C compiler. Auto-falls back
@@ -699,7 +699,7 @@ end
 -- compose_features: resolve + compose every feature archive this app needs -
 -- the --with backends/tui (via FEATURE_SPECS) plus the auto-composed runtime /
 -- http / keel / tls / wasm / sqlite / image archives - into the temp build dir.
--- Extracted verbatim from main() in Phase 3.2 (docs/build_modularization.md).
+-- Extracted verbatim from main() (docs/build_modularization.md).
 -- Inputs: opts (mutated - opts.with sqlite auto-compose), tmpdir, platform_lib,
 -- is_cosmo, compute_files. Returns the four values the link + sign stages read.
 local function compose_features(opts, tmpdir, platform_lib, is_cosmo, compute_files)
@@ -714,7 +714,7 @@ local function compose_features(opts, tmpdir, platform_lib, is_cosmo, compute_fi
     -- flow; a side-effect-free manifest read is a tracked follow-up.)
     -- FEATURE_SPECS (the per-feature compose registry) is required at the top
     -- of this file from hull.feature_specs; that module carries the field docs.
-    -- SQLite auto-compose (docs/sqlite_feature.md, Phase C). SQLite is Hull's
+    -- SQLite auto-compose (docs/sqlite_feature.md). SQLite is Hull's
     -- DEFAULT backend, so a DB-using app auto-composes libhull_feature-sqlite.a
     -- -- but ONLY when the target base is SQLite-less. A stock base carries the
     -- SQLite backend in-lib; composing it there would double-define the backend,
@@ -838,7 +838,7 @@ local function compose_features(opts, tmpdir, platform_lib, is_cosmo, compute_fi
             local asset = plat and ("libhull_feature-" .. fname .. "-" .. plat .. ".a") or nil
             local lib, from
             if fname == "sqlite" then
-                -- Phase D: the SQLite engine ships EMBEDDED in an
+                -- The SQLite engine ships EMBEDDED in an
                 -- HL_APP_BASE_SQLITELESS hull, so resolve it embedded-first (like
                 -- the wasm core). Falls back to the local build dir / installed
                 -- feature cache on a pre-Phase-D hull.
@@ -871,12 +871,12 @@ local function compose_features(opts, tmpdir, platform_lib, is_cosmo, compute_fi
             end
             local from_cache = (from == "cache")
             local dest = tmpdir .. "/" .. libname
-            -- An embedded-resolved engine (Phase D: resolve_sqlite_lib extracts
+            -- An embedded-resolved engine (resolve_sqlite_lib extracts
             -- straight into tmpdir) is already at `dest`; copying a file onto
             -- itself truncates it to 0 bytes, so guard like the wasm compose.
             if lib ~= dest then tool.copy(lib, dest) end
             -- Attestation domain (docs/composed_feature_signing.md): an archive
-            -- resolved EMBEDDED (Phase D: the SQLite engine on an
+            -- resolved EMBEDDED (the SQLite engine on an
             -- HL_APP_BASE_SQLITELESS hull) ships INSIDE hull, so it is attested by
             -- the platform-key manifest (§5c FATAL) under the embedded-asset name
             -- `libhull_feature-<n>.<arch>.a`, exactly like the runtime/wasm cores.
@@ -897,7 +897,7 @@ local function compose_features(opts, tmpdir, platform_lib, is_cosmo, compute_fi
                 for _, f in ipairs(fcompose.whole_archive_flags(dest, is_darwin)) do
                     feature_libs[#feature_libs + 1] = f
                 end
-                -- tui (issue #114, Phase D): the cap core above is runtime-agnostic;
+                -- tui (issue #114): the cap core above is runtime-agnostic;
                 -- the per-runtime bridge (register_lua/_js strong override) lives in
                 -- its own archive so the WRONG runtime's bridge is never pulled onto
                 -- a single-runtime base. Compose the APP's runtime bridge too
@@ -1134,7 +1134,7 @@ end
 
 -- prepare_platform: extract the platform library into the temp build dir (from
 -- the embedded base, a --flavor asset, or the eject dir) and run the platform-sig
--- cross-check. Extracted from main() in Phase 3.2 (docs/build_modularization.md).
+-- cross-check. Extracted from main() (docs/build_modularization.md).
 -- Inputs: opts, tmpdir, cc, is_cosmo, flavor_asset. Returns the platform archive
 -- path, its dir, and the cross-checked sig blob + per-arch hashes (for signing).
 local function prepare_platform(opts, tmpdir, cc, is_cosmo, flavor_asset)
@@ -1448,7 +1448,7 @@ end
 -- discover: find the app’s source/asset files, make the temp build dir, run the
 -- stale compute-AOT rebuild, and detect the compiler + cosmo flavor. Returns a
 -- ctx table of the discovered state main() threads into the later stages.
--- Extracted from main() in Phase 3.2 (docs/build_modularization.md). The internal
+-- Extracted from main() (docs/build_modularization.md). The internal
 -- *_dir path locals stay private; only the 11 fields main uses downstream return.
 local function discover(opts)
     local lua_files = find_lua_files(opts.app_dir)

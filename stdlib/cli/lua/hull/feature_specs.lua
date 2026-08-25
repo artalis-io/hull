@@ -3,7 +3,7 @@
 -- One declarative record per `--with=<name>` feature. `hull build` (compose
 -- step) and any future cross-file consumer derive from this table, so adding a
 -- feature is one row here + a `make feature-<name>` archive + a release-pipeline
--- entry. Extracted from build.lua's main() (Phase 3 of the build modularization,
+-- entry. Extracted from build.lua's main() (build modularization,
 -- docs/build_modularization.md) so the registry is reusable and not buried in a
 -- 1.5k-line function. Pure data: every value is a literal, no runtime state.
 --
@@ -30,7 +30,7 @@ return {
     -- introspection in libhull_feature-sqlite.a (`make feature-sqlite`),
     -- filling the same hl_db_feature_backends hook. Unlike the others,
     -- SQLite is Hull's DEFAULT backend composed onto a SQLite-less DB-core
-    -- base (built HL_SQLITE_FEATURE=1); docs/sqlite_feature.md, Phase B.
+    -- base (built HL_SQLITE_FEATURE=1); docs/sqlite_feature.md.
     -- `base_group = true` because the archive references base symbols
     -- (db_registry, the _hull_* guard, agent write_error, vfs, migrate) and
     -- the base's generated override references the archive's backend, so the

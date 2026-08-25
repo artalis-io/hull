@@ -1,3 +1,3 @@
-/* Phase 0 probe: verifies stdlib static asset discovery + embedding.
+/* probe: verifies stdlib static asset discovery + embedding.
  * Removed once the first real htmx widget ships its own assets. */
 .hull-probe { display: none; }

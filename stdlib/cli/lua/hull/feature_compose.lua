@@ -281,7 +281,7 @@ function M.resolve_keel_lib(tmpdir, ctx)
 end
 
 --- Resolve the per-runtime web-bindings archive (libhull_feature-http-<rt>.a),
---- trying the embedded-in-hull copy first (issue #114, Phase C).
+--- trying the embedded-in-hull copy first (issue #114).
 --
 -- The web bindings (routes/dispatch/res:*/ws/sse/http-client/smtp) live in
 -- their own per-runtime archive so an HTTP-free app links only the pure runtime.
@@ -306,7 +306,7 @@ function M.resolve_http_rt_lib(rt, tmpdir, ctx)
 end
 
 --- Resolve the per-runtime tui bridge (libhull_feature-tui-<rt>.a), embedded
---- first (issue #114, Phase D).
+--- first (issue #114).
 --
 -- The tui cap core stays the single installable feature asset; the tiny
 -- per-runtime bridge is embedded in hull and composed alongside the cap core
@@ -328,7 +328,7 @@ function M.resolve_tui_rt_lib(rt, tmpdir, ctx)
 end
 
 --- Resolve the WASM core feature archive (libhull_feature-wasm.a), embedded
---- first (docs/wasm_feature.md, Phase 1). Mirrors resolve_http_lib: the native
+--- first (docs/wasm_feature.md). Mirrors resolve_http_lib: the native
 --- base is compute-less and the default hull embeds the wasm core, so a
 --- full-flavor app composes it back with no `hull feature install`.
 function M.resolve_wasm_lib(tmpdir, ctx)
@@ -355,7 +355,7 @@ function M.resolve_wasm_rt_lib(rt, tmpdir, ctx)
 end
 
 --- Resolve the SQLite ENGINE archive (libhull_feature-sqlite.a: cap/db_sqlite +
---- vendored sqlite3 + FTS5 + udf cap + sqlite agent), embedded first (Phase D).
+--- vendored sqlite3 + FTS5 + udf cap + sqlite agent), embedded first.
 --- On an HL_APP_BASE_SQLITELESS distributed hull the engine ships embedded, so a
 --- db app auto-composes it with no `hull feature install sqlite`; otherwise this
 --- falls back to the local build dir / installed feature cache (the pre-Phase-D
@@ -388,7 +388,7 @@ end
 --- Resolve the per-runtime SQLite UDF bridge (libhull_feature-sqlite-<rt>.a),
 --- embedded first. Holds mod_db_udf (the db.udf bindings); composed for the
 --- app's runtime whenever the app uses a udf-capable DB, so the runtime archive
---- itself stays SQLite-free (Phase C.2b).
+--- itself stays SQLite-free.
 function M.resolve_sqlite_rt_lib(rt, tmpdir, ctx)
     local libname = "libhull_feature-sqlite-" .. rt .. ".a"
     if tool.extract_feature_sqlite_rt and tool.extract_feature_sqlite_rt(tmpdir, rt)

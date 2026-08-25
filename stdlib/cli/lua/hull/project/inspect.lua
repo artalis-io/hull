@@ -1,11 +1,11 @@
 --
 -- hull.project.inspect — `hull agent inspect [app_dir]`: standalone project discovery.
 --
--- Slice 2 (design: docs/project_discovery_design.md D8/D9/D11). Invokes the ONE canonical
+-- design: docs/project_discovery_design.md D8/D9/D11. Invokes the ONE canonical
 -- analyzer (hull.project.analyze) on the app tree and emits the shared public JSON
 -- projection (hull.project.projection) to stdout. It does NOT re-scan or parse source
 -- itself. This is the standalone path; the dev-running path (read a published generation)
--- lands in Slice 3 and reuses the SAME projection module.
+-- reuses the SAME projection module.
 --
 -- Tool-module convention: this module RETURNS its main entry (like hull.build /
 -- hull.init); the tool dispatcher (src/hull/tool.c) invokes it only when `inspect` is the

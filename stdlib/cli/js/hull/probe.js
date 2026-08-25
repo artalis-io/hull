@@ -1,10 +1,10 @@
-// hull:probe - Slice 1 crossing / security / limit probe (NOT a parser).
+// hull:probe - crossing / security / limit probe (NOT a parser).
 //
 // Proves the restricted QuickJS tooling runtime end to end without any parser:
 // the raw-byte source crossing (length-aware + NUL-safe), multi-module loading
 // (it imports hull:_probe_util), the empty application-authority surface,
 // options transport, the adversarial dynamic-code block, and every advertised
-// limit. Throwaway scaffolding; Slice 2 replaces it with the real lexer/parser.
+// limit. Throwaway scaffolding for the real lexer/parser.
 // Application JavaScript is never run here - only this trusted, audited,
 // embedded bundle.
 // SPDX-License-Identifier: AGPL-3.0-or-later
