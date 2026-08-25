@@ -934,6 +934,14 @@ CAP_OBJS := $(patsubst $(SRCDIR)/hull/cap/%.c,$(BUILDDIR)/cap_%.o,$(CAP_SRCS))
 # where unreferenced (flavors with no db and no http).
 HOST_MATCH_OBJ := $(BUILDDIR)/host_match.o
 CAP_OBJS += $(HOST_MATCH_OBJ)
+# hex is a domain-free leaf util (src/hull/utils/hex.c): the single home for the
+# byte->hex-buffer transform (H1 / S2b, docs/h1_s2b_hex_ownership.md). Like
+# host_match it rides CAP_OBJS, so it reaches the platform lib (base + cosmo),
+# the hull binary, libhull, and every TEST_CAP_OBJS suite with one edit. Harmless
+# where unreferenced. Consumers (signature/release/sbom/blob_store/db_postgres/
+# verify_self/mod_tool) include it by relative path; it is not public API.
+HEX_OBJ := $(BUILDDIR)/hex.o
+CAP_OBJS += $(HEX_OBJ)
 CAP_TOOL_OBJ := $(BUILDDIR)/cap_tool.o
 # cap/test.c is the in-process HTTP test harness — depends on KlRouter
 # and the rest of Keel's request/response machinery. Server-only.
@@ -2926,6 +2934,9 @@ $(CSP_OBJ): $(SRCDIR)/hull/utils/csp.c $(INCDIR)/hull/utils/csp.h | $(BUILDDIR)
 
 # Host allowlist matcher (glob + CIDR), shared by db / http / smtp.
 $(HOST_MATCH_OBJ): $(SRCDIR)/hull/utils/host_match.c $(INCDIR)/hull/host_match.h | $(BUILDDIR)
+	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
+
+$(HEX_OBJ): $(SRCDIR)/hull/utils/hex.c $(SRCDIR)/hull/utils/hex.h | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
 
 # QuickJS sources (relaxed warnings)

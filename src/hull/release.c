@@ -10,6 +10,7 @@
 
 #include "hull/release.h"
 #include "hull/cap/crypto.h"
+#include "utils/hex.h"
 
 #include <ctype.h>
 #include <stdio.h>
@@ -21,17 +22,9 @@
 /* hex decode goes through the canonical hl_cap_crypto_hex_decode (cap/crypto.h):
  * it returns the byte count written (out_size is a capacity), so `rc == N`
  * checks an exact N-byte decode - equivalent to the old local 0/-1 contract
- * that required hex_len == N*2. See signature.c for the rationale. */
-
-static void hex_encode(const uint8_t *data, size_t len, char *out)
-{
-    static const char digits[] = "0123456789abcdef";
-    for (size_t i = 0; i < len; i++) {
-        out[i * 2]     = digits[(data[i] >> 4) & 0xF];
-        out[i * 2 + 1] = digits[data[i] & 0xF];
-    }
-    out[len * 2] = '\0';
-}
+ * that required hex_len == N*2. See signature.c for the rationale.
+ *
+ * hex encode goes through the shared byte->hex leaf hl_hex_encode (utils/hex.h). */
 
 /* Strip trailing whitespace (\n, \r, space, tab). */
 static size_t strip_trailing_ws(const char *buf, size_t len)
@@ -117,7 +110,7 @@ int hl_release_sign_manifest(const void *manifest, size_t manifest_len,
         return -1;
     }
 
-    hex_encode(sig, sizeof(sig), out_sig_hex);
+    hl_hex_encode(sig, sizeof(sig), out_sig_hex, out_sig_hex_size);
     secure_zero(sig, sizeof(sig));
     return 0;
 }

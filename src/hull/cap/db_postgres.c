@@ -18,6 +18,7 @@
 #include "hull/cap/pg_conn.h"
 #include "hull/cap/types.h"
 #include "hull/utils/alloc.h"
+#include "../utils/hex.h"
 
 #include <limits.h>
 #include <stdint.h>
@@ -87,7 +88,6 @@ static HlPgParam *encode_params(const HlValue *params, int n, char ***scratch_ou
     char **scratch = calloc((size_t)n, sizeof *scratch);
     if (!pp || !scratch) { free(pp); free(scratch); return NULL; }
 
-    static const char hex[] = "0123456789abcdef";
     for (int i = 0; i < n; i++) {
         const HlValue *v = &params[i];
         switch (v->type) {
@@ -122,12 +122,8 @@ static HlPgParam *encode_params(const HlValue *params, int n, char ***scratch_ou
             char *b = malloc(hl + 1);
             if (!b) goto oom;
             b[0] = '\\'; b[1] = 'x';
-            const unsigned char *src = (const unsigned char *)v->s;
-            for (size_t j = 0; j < bl; j++) {
-                b[2 + j * 2]     = hex[src[j] >> 4];
-                b[2 + j * 2 + 1] = hex[src[j] & 0xf];
-            }
-            b[hl] = '\0';
+            /* hex chars fill b[2 .. 2+bl*2), NUL at b[hl]; capacity = bl*2+1. */
+            hl_hex_encode((const uint8_t *)v->s, bl, b + 2, bl * 2 + 1);
             scratch[i] = b; pp[i].text = b; pp[i].len = (int32_t)hl;
             break;
         }

@@ -66,17 +66,14 @@
  * (mbedTLS is dropped there). The gate name is retained for back-compat; it
  * now just toggles whether these hashing helpers are compiled at all. */
 #include "hull/cap/crypto.h"
+#include "utils/hex.h"
 
 /* Encode raw SHA-256 bytes as lowercase hex; writes exactly
- * HL_SHA256_HEX_LEN chars plus a NUL terminator into out_hex. */
+ * HL_SHA256_HEX_LEN chars plus a NUL terminator into out_hex. Callers pass a
+ * HL_SHA256_HEX_BUF (65-byte) buffer. Routed through the shared byte->hex leaf. */
 static void hex_encode_sha256(const unsigned char *raw, char *out_hex)
 {
-    static const char hex[] = "0123456789abcdef";
-    for (unsigned i = 0; i < HL_SHA256_DIGEST_BYTES; i++) {
-        out_hex[i*2]   = hex[(raw[i] >> 4) & 0xf];
-        out_hex[i*2+1] = hex[raw[i] & 0xf];
-    }
-    out_hex[HL_SHA256_HEX_LEN] = '\0';
+    hl_hex_encode(raw, HL_SHA256_DIGEST_BYTES, out_hex, HL_SHA256_HEX_BUF);
 }
 
 /* Compute SHA-256 over an in-memory buffer; cache the hex result. */
