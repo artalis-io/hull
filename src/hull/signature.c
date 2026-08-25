@@ -11,6 +11,7 @@
 #include "hull/signature.h"
 #include "hull/cap/crypto.h"
 #include "hull/platform_sig.h"
+#include "utils/hex.h"
 
 #include "log.h"
 
@@ -32,13 +33,9 @@
  * success check is `rc == N` where N is the expected byte count: that requires
  * hex_len/2 == N exactly (a short input returns <N; a long one returns -1 for
  * insufficient capacity), matching the exact-length fail-closed contract these
- * Ed25519 verify paths need. */
-
-static void hex_encode(const uint8_t *data, size_t len, char *out)
-{
-    for (size_t i = 0; i < len; i++)
-        snprintf(out + i * 2, 3, "%02x", data[i]);
-}
+ * Ed25519 verify paths need.
+ *
+ * hex encode goes through the shared byte->hex leaf hl_hex_encode (utils/hex.h). */
 
 /* ── Recursive JSON value serializer ─────────────────────────────── */
 
@@ -463,7 +460,7 @@ int hl_sig_verify_files_embedded(const HlSignature *sig, const HlVfs *vfs)
         if (hl_cap_crypto_sha256(data, data_len, hash) != 0) return -1;
 
         char hash_hex[65];
-        hex_encode(hash, 32, hash_hex);
+        hl_hex_encode(hash, 32, hash_hex, sizeof(hash_hex));
 
         if (strcmp(hash_hex, expected_hash) != 0) {
             log_error("[sig] hash mismatch for %s", sig_name);
@@ -530,7 +527,7 @@ int hl_sig_verify_files_fs(const HlSignature *sig, const char *app_dir)
         free(data);
 
         char hash_hex[65];
-        hex_encode(hash, 32, hash_hex);
+        hl_hex_encode(hash, 32, hash_hex, sizeof(hash_hex));
 
         if (strcmp(hash_hex, expected_hash) != 0) {
             log_error("[sig] hash mismatch: %s (expected %s, got %s)",
