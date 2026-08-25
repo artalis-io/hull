@@ -138,7 +138,7 @@ static int build_path(const HlFsConfig *cfg, const char *path,
 #define HL_FS_PATH_MAX 4096   /* residual scratch for policy selection */
 #endif
 
-/* ── Descriptor-relative resolution + path authorization (checkpoint 1 + 3) ──
+/* ── Descriptor-relative resolution + path authorization ──
  * read/write/mmap resolve through the virtual-root resolver (fs_resolve.c) AND
  * the compiled path-authorization policy (fs_policy.c, docs/hull_fs_design.md
  * sec. 6). The op SELECTS an authorization entry from the policy for (path, mode)
@@ -149,7 +149,7 @@ static int build_path(const HlFsConfig *cfg, const char *path,
  * REFUSE any symlink so a symlink cannot alias a non-authorized target. No
  * matching grant -> "permission" (fail closed).
  *
- * SCOPE (checkpoint 3, Slice B): read/write/mmap route through the policy.
+ * SCOPE: read/write/mmap route through the policy.
  * hl_cap_fs_exists / hl_cap_fs_delete and any direct hl_cap_fs_validate consumer
  * still use the OLD build_path()/realpath path and are NOT policy-gated (they
  * remain base_dir-confined + sandbox-gated). Tracked follow-up. */
@@ -340,7 +340,7 @@ audit:
     return result;
 }
 
-/* ── Metadata (stat) + enumeration (list): checkpoint 3, Slice C ─────── */
+/* ── Metadata (stat) + enumeration (list) ─────── */
 
 /* Map an lstat'd mode to the public node type (symlink reported as a link). */
 static HlFsNodeType fs_node_type(mode_t m)
