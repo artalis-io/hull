@@ -1,11 +1,9 @@
 /*
- * cap/mysql_conn.h: MySQL / MariaDB connection (DSN parse now; socket + auth
- * in later phases)
+ * cap/mysql_conn.h: MySQL / MariaDB connection
  *
- * Phase 1b exposes only the pure DSN parser (fuzzable, no socket). The
- * handshake, auth plugins, TLS, and query protocols land in later phases and
- * are added to cap/mysql_conn.c behind guards so this parser stays linkable
- * standalone by the fuzzers.
+ * The pure DSN parser (fuzzable, no socket) is kept free of socket deps; the
+ * handshake, auth plugins, TLS, and query protocols live in cap/mysql_conn.c
+ * behind guards so this parser stays linkable standalone by the fuzzers.
  *
  * The password is secret material: callers scrub the HlMyDsn after connecting.
  *
@@ -70,7 +68,7 @@ int hl_my_caching_sha2_scramble(const char *password,
                                 const uint8_t nonce[HL_MY_SCRAMBLE_LEN],
                                 uint8_t out[HL_MY_CACHING_SHA2_DIGEST_LEN]);
 
-/* ── Connection (socket + handshake; Phase 2b) ────────────────────── */
+/* ── Connection (socket + handshake) ────────────────────── */
 
 #define HL_MY_ERRMSG_SIZE    256    /* connection error-message buffer */
 #define HL_MY_RECV_BUF_INIT  8192   /* initial receive-buffer capacity */
@@ -97,7 +95,7 @@ typedef struct HlMyConn {
  * Connect to dsn->host:port and run the handshake (mysql_native_password +
  * AuthSwitch to native). On success the connection is authenticated and idle
  * (0). On failure returns -1 with conn->errmsg set and the socket closed.
- * caching_sha2_password / ed25519 land in the TLS/auth phase (§2.10 Phase 5).
+ * caching_sha2_password is handled; client_ed25519 is not yet supported.
  */
 int  hl_my_conn_open(HlMyConn *conn, const HlMyDsn *dsn, int timeout_ms);
 
@@ -129,7 +127,7 @@ typedef int (*HlMyRowCb)(void *ctx, const char *const *values,
 /*
  * Run one text-protocol query (COM_QUERY). The SQL is sent literally (no
  * parameter binding), so callers must pass only trusted / already-safe SQL;
- * parameterized queries use the binary prepared-statement protocol (Phase 3).
+ * parameterized queries use the binary prepared-statement protocol.
  * desc_cb / row_cb may be NULL for a statement with no result set; on an OK
  * response the affected row count is stored in *affected (may be NULL).
  * Returns 0 / -1 with conn->errmsg set.

@@ -6,12 +6,11 @@
  * One backend serves `mysql://` and `mariadb://` (shared protocol; MariaDB is a
  * MySQL fork).
  *
- * Phase 3: connect, COM_QUERY text protocol (param-less), and parameterized
+ * Provides connect, the COM_QUERY text protocol (param-less), and parameterized
  * query / exec via the binary prepared-statement protocol (COM_STMT_PREPARE /
- * EXECUTE / CLOSE). The insert_if_absent / upsert dialect helpers need MySQL's
+ * EXECUTE / CLOSE). The insert_if_absent / upsert dialect helpers use MySQL's
  * INSERT IGNORE / ON DUPLICATE KEY syntax and the information_schema-backed
- * table_columns; both, plus multi-statement exec_script (migrations), land in
- * Phase 4.
+ * table_columns, plus multi-statement exec_script (migrations).
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */

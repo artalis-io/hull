@@ -1,7 +1,7 @@
 /*
  * cap/db_postgres.c: PostgreSQL HlDbBackend vtable
  *
- * Phase 2.4: maps the generic HlDbBackend surface onto the pgwire codec +
+ * Maps the generic HlDbBackend surface onto the pgwire codec +
  * connection (cap/pgwire.c, cap/pg_conn.c). Parameters are bound in text
  * format out-of-band (never spliced into SQL), and result values are decoded
  * from text into HlValue by type OID. db.udf and hull/search stay SQLite-only
@@ -470,7 +470,7 @@ static int pg_table_columns(HlDbHandle *h, const char *table,
         &p, 1, pg_table_columns_row, &fwd, NULL);
 }
 
-/* ── Low-latency LISTEN/NOTIFY wait (Phase 4) ─────────────────────── */
+/* ── Low-latency LISTEN/NOTIFY wait ─────────────────────── */
 
 /* A LISTEN channel is an SQL identifier, not a bind param, so an unsafe name
  * would be an injection vector. The channel IS app-reachable (conn.wait_notify /

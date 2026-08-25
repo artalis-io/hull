@@ -1,11 +1,10 @@
 /*
  * cap/pg_conn.c: PostgreSQL DSN parsing, connect, and startup handshake
  *
- * Phase 2 of the PostgreSQL backend: a blocking, plaintext connection with
- * trust / cleartext-password auth. TLS (via KlTls, mirroring cap/smtp.c) and
- * md5 / SCRAM-SHA-256 auth are Phase 3. The receive path feeds the untrusted
- * pgwire reader; the DSN parser bounds every copy and rejects oversized
- * components rather than truncating.
+ * A blocking connection with trust / cleartext-password / SCRAM-SHA-256 auth
+ * and optional TLS (via KlTls, mirroring cap/smtp.c). The receive path feeds the
+ * untrusted pgwire reader; the DSN parser bounds every copy and rejects
+ * oversized components rather than truncating.
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
@@ -18,7 +17,7 @@
 #ifndef HL_PG_NO_SCRAM
 #include "hull/cap/crypto.h"
 #endif
-/* TLS transport (Phase 3b.2). The pure-parser fuzzers define HL_PG_NO_TLS to
+/* TLS transport. The pure-parser fuzzers define HL_PG_NO_TLS to
  * stay free of Keel; the real build and tests keep raw send/recv when no TLS
  * session is attached. */
 #ifndef HL_PG_NO_TLS

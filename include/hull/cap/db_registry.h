@@ -1,7 +1,7 @@
 /*
  * cap/db_registry.h: Named database connection registry
  *
- * Backs the multi-backend API (§1 Phase 5b): an app declares named
+ * Backs the multi-backend API: an app declares named
  * connections via `manifest.databases`, and db.connect(name) / db.default()
  * resolve them through this registry. Connections open lazily on first use
  * and are cached by name, so an app can mix, e.g., a Postgres primary and a

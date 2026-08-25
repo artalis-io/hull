@@ -2,9 +2,9 @@
  * cap/pg_conn.h: PostgreSQL connection, DSN parsing, and startup handshake
  *
  * Layer above the pgwire codec: parses a postgres:// DSN, opens a blocking
- * TCP connection, and runs the v3 startup handshake (Phase 2: plaintext
- * transport with trust / cleartext-password auth). TLS and SCRAM/md5 auth
- * arrive in Phase 3, slotting in the same way SMTP layers KlTls over its fd.
+ * TCP connection, and runs the v3 startup handshake with trust /
+ * cleartext-password / SCRAM-SHA-256 auth and optional TLS, which layers KlTls
+ * over its fd the same way SMTP does.
  *
  * The receive path drives the untrusted-input pgwire reader; the DSN parser
  * copies into fixed, bounded fields and rejects anything oversized. The DSN
@@ -27,7 +27,7 @@ typedef struct HlPgDsn {
     char user[128];
     char password[256];   /* secret: scrub after use */
     char dbname[128];
-    char sslmode[16];     /* parsed now, enforced in Phase 3 */
+    char sslmode[16];     /* parsed; drives TLS negotiation */
 } HlPgDsn;
 
 /*
@@ -77,9 +77,9 @@ void hl_pg_conn_close(HlPgConn *conn);
 
 /* ── TLS negotiation (SSLRequest / sslmode) ───────────────────────── */
 
-/* DSN sslmode policy. Phase 3b.1 implements the SSLRequest negotiation and
- * the fallback decision; the mbedTLS handshake itself (for USE_TLS) lands in
- * Phase 3b.2 together with linking Keel + mbedTLS under HL_ENABLE_POSTGRES. */
+/* DSN sslmode policy driving the SSLRequest negotiation and the fallback
+ * decision; the mbedTLS handshake (for USE_TLS) links Keel + mbedTLS under
+ * HL_ENABLE_POSTGRES. */
 typedef enum HlPgSslMode {
     HL_PG_SSLMODE_DISABLE = 0,  /* never attempt TLS (no SSLRequest)        */
     HL_PG_SSLMODE_PREFER  = 1,  /* try TLS, fall back to plaintext on 'N'   */
