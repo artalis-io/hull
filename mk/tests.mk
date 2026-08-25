@@ -382,6 +382,9 @@ $(BUILDDIR)/test_cfi: $(TESTDIR)/hull/test_cfi.c | $(BUILDDIR)
 $(BUILDDIR)/test_csp: $(TESTDIR)/hull/test_csp.c $(CSP_OBJ) | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< $(CSP_OBJ)
 
+$(BUILDDIR)/test_hex: $(TESTDIR)/hull/test_hex.c $(HEX_OBJ) | $(BUILDDIR)
+	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< $(HEX_OBJ)
+
 # Mapped-spans SDK header (templates/hull_span.h, checkpoint 3b) — native decoder
 # / name-lookup / scratch-narrow tests. Freestanding header; the only extra
 # include path is -Itemplates for hull_span.h. No deps beyond libc.
