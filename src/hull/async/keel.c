@@ -6,7 +6,7 @@
  * is logically independent of any HTTP server — Keel just happens to
  * provide a convenient implementation today. Future siblings under
  * this directory: async/poll.c (libc poll for HL_ENABLE_HTTP=0
- * builds, Phase 3d-4), and any libuv / io_uring backends that come
+ * builds), and any libuv / io_uring backends that come
  * later.
  *
  * Notes on the op_suspend/op_complete contract:
@@ -18,7 +18,7 @@
  *   timer system to fire on_deadline and on_resume. The actual
  *   connection-bound suspension path stays in cap/http_async.c /
  *   runtime/{lua,js}/dispatch.c, which talk to Keel directly. That
- *   layer migrates onto the vtable in Phase 3d-3 once HlReqHandle
+ *   layer migrates onto the vtable once HlReqHandle
  *   accessors are wired through HlNetBackend.
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
@@ -360,8 +360,8 @@ const HlAsyncBackend hl_async_backend_keel = {
 };
 
 /* Strong override of the weak hl_async_backend() default in async/poll.c: when
- * this TU is linked (any HTTP build today; a composed http feature tomorrow,
- * docs/keel_feature.md, Phase 4), the Keel event loop wins. keel.c is dropped on
+ * this TU is linked (any HTTP build, or the composed http feature -
+ * docs/keel_feature.md), the Keel event loop wins. keel.c is dropped on
  * HL_ENABLE_HTTP=0, so the weak poll default in poll.c stands there instead. This
  * makes the backend choice a LINK fact rather than a compile-time #ifdef, which
  * is what lets Keel move into the http feature. Byte-identical on a full base. */

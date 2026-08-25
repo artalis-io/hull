@@ -8,8 +8,7 @@
  * on the HTTP side of the seam. Compiled only when an HTTP half is enabled; a
  * pure-compute base compiles this to an empty TU and the base weak no-op wins.
  *
- * Phase A: this rides the lua runtime archive (behavior unchanged). Phase C
- * relocates it into the composed `http` feature.
+ * This composes into the `http` feature.
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */

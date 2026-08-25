@@ -1,7 +1,7 @@
 /* mod_db_udf.c — hull.db UDF bindings (SQLite user-defined functions).
  *
  * The per-runtime SQLite UDF bridge, split out of mod_db.c so the base runtime
- * archive (libhull_feature-lua.a) carries ZERO sqlite3_* references (Phase C.2,
+ * archive (libhull_feature-lua.a) carries ZERO sqlite3_* references (
  * docs/sqlite_feature.md). This TU is whole-archived into an app only when the
  * SQLite backend is reachable (libhull_feature-sqlite-lua.a), providing the
  * strong hl_lua_db_attach_udf override that mod_db.c's weak default replaces.

@@ -914,7 +914,7 @@ static JSValue js_db_wait_notify(JSContext *ctx, JSValueConst this_val,
 /* ── db.udf — user-defined SQL functions (JS) ────────────────────────── */
 /* The SQLite UDF bindings live in the composed per-runtime bridge
  * (mod_db_udf.c → libhull_feature-sqlite-js.a) so THIS base runtime archive
- * carries no sqlite3_* references (Phase C.2, docs/sqlite_feature.md). The
+ * carries no sqlite3_* references (docs/sqlite_feature.md). The
  * bridge provides a strong hl_js_db_attach_udf; this weak default (no udf
  * sub-object) stands in when no SQLite backend is composed. */
 __attribute__((weak)) void hl_js_db_attach_udf(JSContext *ctx, JSValue conn,

@@ -2,7 +2,7 @@
  * composed SQLite UDF bridge mod_db_udf.c.
  *
  * The udf bindings live in a separate per-runtime bridge so the base runtime
- * archive (libhull_feature-js.a) carries no sqlite3_* references (Phase C.2,
+ * archive (libhull_feature-js.a) carries no sqlite3_* references (
  * docs/sqlite_feature.md). The bridge reuses these two mod_db.c helpers to
  * resolve the bound handle and build the udf sub-object.
  *

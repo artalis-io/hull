@@ -1,7 +1,7 @@
 /* mod_db_udf.c — hull.db UDF bindings (SQLite user-defined functions, JS).
  *
  * The per-runtime SQLite UDF bridge, split out of mod_db.c so the base runtime
- * archive (libhull_feature-js.a) carries ZERO sqlite3_* references (Phase C.2,
+ * archive (libhull_feature-js.a) carries ZERO sqlite3_* references (
  * docs/sqlite_feature.md). Whole-archived into an app only when the SQLite
  * backend is reachable (libhull_feature-sqlite-js.a); provides the strong
  * hl_js_db_attach_udf override that mod_db.c's weak default replaces. UDFs

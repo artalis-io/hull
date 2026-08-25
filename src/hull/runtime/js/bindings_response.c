@@ -3,8 +3,8 @@
  *
  * Moved out (#114) so the core js_bindings.o holds ZERO Keel-response / compress
  * references (kl_response_*, hl_maybe_compress): those live only here, on the
- * HTTP side of the seam. Phase A: rides the js runtime archive; Phase C
- * relocates it into the composed `http` feature alongside http_register.c.
+ * HTTP side of the seam, composed into the `http` feature alongside
+ * http_register.c.
  * Sibling of the Lua bindings_response.c.
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
