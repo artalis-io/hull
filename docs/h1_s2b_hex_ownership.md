@@ -16,6 +16,17 @@ only the seven verified buffer encoders (P1-P7); the cache helper, the
 `hl_release_io_sha256_hex` hash+hex composite, and the `FILE*`-stream encoder are
 left unchanged unless a later ownership audit justifies moving them.
 
+**EXECUTED:** the consolidation slice landed `src/hull/utils/hex.{c,h}` and
+routed P1-P7 onto it, one TU per commit, under section 5's acceptance. Proof of
+unchanged dependency closure: `hex.o` has zero undefined symbols, so every
+consumer's link closure grows by exactly `hl_hex_encode` and no composition
+gains a crypto/mbedtls reference (`nm` verified per consumer). No material size
+regression: the base binary is 96 bytes SMALLER (seven statics removed, one
+152-byte leaf added). Linked and validated across base (unit tests 91/91),
+pure-compute, libhull (C embedder links), and PostgreSQL; cosmo inclusion is
+structural (`PLATFORM_CAP_OBJS` is the full `CAP_OBJS` on cosmo, which carries
+`hex.o`) and CI-covered.
+
 ## 1. Why this slice is design-only
 
 The freeze deferred hex consolidation specifically because "route the generic
