@@ -145,7 +145,7 @@ static const char *allowed_prefixes[] = {
     "zig",
     /* nm: read-only symbol lister. `hull build` probes the resolved platform lib
      * for hl_db_backend_sqlite to decide whether to auto-compose the SQLite
-     * feature onto a SQLite-less base (docs/sqlite_feature.md, Phase C). */
+     * feature onto a SQLite-less base (docs/sqlite_feature.md). */
     "nm",
     NULL
 };

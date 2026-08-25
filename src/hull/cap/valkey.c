@@ -20,7 +20,7 @@
  *  - No auto-reconnect: a transport failure fails the op and poisons the handle
  *    (the caller reopens). Non-idempotent ops (incr, EXEC) are NEVER replayed.
  *  - Physical keys/prefixes come from the caller and are treated opaquely. The
- *    milestone-1 wiring (Phase 2b) makes them collision-free + glob-free by
+ *    namespace wiring makes them collision-free + glob-free by
  *    hex-encoding the namespace; the SCAN pattern is glob-escaped here so the
  *    backend is safe for ANY prefix bytes it is handed.
  *

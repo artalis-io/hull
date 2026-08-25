@@ -712,14 +712,14 @@ int hl_cap_crypto_random(void *buf, size_t len)
 /* Active HMAC backend, chosen at RUNTIME via the weak hl_crypto_hmac_active_backend()
  * hook (hull/tls_feature.h) instead of the historical compile-time macro, so a
  * future TLS-less base defaults to the portable backend while a composed TLS
- * feature swaps in mbedTLS via a strong override (docs/tls_feature.md, Phase 1).
+ * feature swaps in mbedTLS via a strong override (docs/tls_feature.md).
  *
  * Per-backend accessor (not a combined {hmac,asym} struct) on purpose: the base
  * splits crypto.o from the asym TU (test link sets pull crypto.o + the HMAC TU
  * without the asym TU), so a hook whose default referenced the asym symbol would
  * break those links. Asym gets its own accessor in the asym follow-up.
  *
- * Phase 1 is dormant: this weak default preserves the historical selection
+ * This weak default preserves the historical selection
  * byte-for-byte -- mbedTLS when it is linked (HL_ENABLE_HTTP), portable
  * otherwise. Both symbols always exist today; portable and mbedTLS HMAC produce
  * identical output. */
@@ -736,7 +736,7 @@ const HlCryptoHmacBackend *hl_crypto_hmac_active_backend(void)
     return &hl_crypto_hmac_backend_portable;
 }
 
-/* ── Asymmetric verify backend selection (TLS feature Phase 1b) ─────────
+/* ── Asymmetric verify backend selection (TLS feature) ─────────
  *
  * Base-resident FAIL-CLOSED asym stub + weak accessor. The mbedTLS asym backend
  * (cap/crypto_asym_mbedtls.c) provides a STRONG override of the accessor when it

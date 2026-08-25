@@ -1,9 +1,9 @@
 /*
  * cap/wasm_spans.h - internal per-invocation mapped-span attachment lifecycle.
  *
- * Mapped-spans cut 1, checkpoint 2. This is the C-level lifecycle that attaches
- * a set of read-only mmap windows (HlMappedBuffer, checkpoint 1) to a WASM
- * instance for ONE invocation, then reverse-order tears them down on every exit
+ * This is the C-level lifecycle that attaches a set of read-only mmap windows
+ * (HlMappedBuffer) to a WASM instance for ONE invocation, then reverse-order
+ * tears them down on every exit
  * path. It is DELIBERATELY internal: there is NO public `spans={}` API, NO
  * metadata host_call, NO SDK header, and NO Lua/JS binding here -- those are held
  * until this lifecycle is reviewed. It is distinct from `compute.segment`
@@ -56,7 +56,7 @@ typedef struct HlWasmSpan {
                                       guest as the span's `base` (metadata query). */
     char            name[64];    /**< Span name, NUL-terminated (1..63 bytes,
                                       unique within the set). Identifies the span to
-                                      the guest metadata query (checkpoint 3). */
+                                      the guest metadata query. */
 } HlWasmSpan;
 
 /* An invocation-scoped set of spans. Zero-initialised by hl_wasm_span_set_init;
