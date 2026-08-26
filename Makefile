@@ -2008,7 +2008,7 @@ $(shell test "$$(cat $(BUILD_CONFIG_FILE) 2>/dev/null)" = "$(BUILD_FINGERPRINT)"
 
 # ── Targets ─────────────────────────────────────────────────────────
 
-.PHONY: all clean test debug msan tsan tsan-shared-heap fuzz fuzz-run e2e e2e-build e2e-postgres e2e-mysql e2e-valkey e2e-feature-valkey e2e-http e2e-sandbox e2e-examples e2e-cli e2e-migrate e2e-templates e2e-agent e2e-context e2e-mcp e2e-agent-api e2e-compute e2e-stream-meta e2e-compute-async-trap e2e-sync-spans e2e-compute-aot-shared-heap e2e-compute-memory64 e2e-compute-headers e2e-spans-example e2e-spans-multi e2e-spans-hugefile e2e-compute-dev e2e-aot-cache e2e-cache e2e-cache-concurrent e2e-cache-cosmo e2e-named-connections e2e-dynamic-connections e2e-compiler-free e2e-linker e2e-linker-zig e2e-cross-build e2e-musl e2e-musl-cross floor-musl e2e-build-flavor e2e-install e2e-ca-bundle e2e-update e2e-tools e2e-multipart e2e-attachment e2e-blob e2e-test-harness e2e-jobs e2e-hypermedia-photos-upload e2e-jwt-asym e2e-path-parity hull-test-examples self-build check analyze cppcheck bench bench-template bench-wasm bench-mapped-span bench-gpu bench-bytecode-cache wamrc wamrc-configure coverage lint-lua lint-js lint check-sdk-headers check-sdk-headers-selftest check-wamr-msan-annotation check-docs-integrity check-docs-integrity-selftest platform platform-cosmo hardening check-hardening
+.PHONY: all clean test debug msan tsan tsan-shared-heap fuzz fuzz-run e2e e2e-build e2e-postgres e2e-mysql e2e-valkey e2e-feature-valkey e2e-http e2e-sandbox e2e-examples e2e-cli e2e-migrate e2e-templates e2e-agent e2e-context e2e-mcp e2e-agent-api e2e-compute e2e-stream-meta e2e-compute-async-trap e2e-sync-spans e2e-compute-aot-shared-heap e2e-compute-memory64 e2e-compute-headers e2e-spans-example e2e-spans-multi e2e-spans-hugefile e2e-compute-dev e2e-aot-cache e2e-cache e2e-cache-concurrent e2e-cache-cosmo e2e-named-connections e2e-dynamic-connections e2e-compiler-free e2e-linker e2e-linker-zig e2e-cross-build e2e-musl e2e-musl-cross floor-musl e2e-build-flavor e2e-install e2e-ca-bundle e2e-update e2e-tools e2e-multipart e2e-attachment e2e-blob e2e-test-harness e2e-jobs e2e-hypermedia-photos-upload e2e-jwt-asym e2e-path-parity hull-test-examples self-build check analyze cppcheck bench bench-template bench-wasm bench-mapped-span bench-gpu bench-bytecode-cache wamrc wamrc-configure coverage lint-lua lint-js lint check-sdk-headers check-sdk-headers-selftest check-wamr-msan-annotation check-docs-integrity check-docs-integrity-selftest check-no-emdash check-no-emdash-selftest check-no-milestone-narration check-no-milestone-narration-selftest platform platform-cosmo hardening check-hardening
 
 all: $(BUILDDIR)/hull
 
@@ -3267,7 +3267,24 @@ check-docs-integrity:
 check-docs-integrity-selftest:
 	sh tests/check_docs_integrity_selftest.sh
 
-lint: lint-lua lint-js check-sdk-headers check-docs-integrity
+# No-em-dash gate: no U+2014 in living first-party prose (H1/S5). Scope + the
+# vendor/archive/fixture/LICENSE exclusions are documented in the script.
+check-no-emdash:
+	sh tests/check_no_emdash.sh
+
+check-no-emdash-selftest:
+	sh tests/check_no_emdash_selftest.sh
+
+# No-new-milestone-narration gate: no development-milestone narration shapes in
+# the S4-reviewed code + build surface, with the inventory's exact survivors
+# allowlisted (H1/S5). See tests/check_no_milestone_narration.sh.
+check-no-milestone-narration:
+	sh tests/check_no_milestone_narration.sh
+
+check-no-milestone-narration-selftest:
+	sh tests/check_no_milestone_narration_selftest.sh
+
+lint: lint-lua lint-js check-sdk-headers check-docs-integrity check-no-emdash check-no-milestone-narration
 
 # ── API documentation (two-tier: source comments + generated HTML) ──
 #

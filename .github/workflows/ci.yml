@@ -2345,6 +2345,18 @@ jobs:
       - name: Documentation-integrity self-test (negative)
         run: make check-docs-integrity-selftest
 
+      - name: No-em-dash gate (living prose, H1/S5)
+        run: make check-no-emdash
+
+      - name: No-em-dash self-test (negative)
+        run: make check-no-emdash-selftest
+
+      - name: No-new-milestone-narration gate (H1/S5)
+        run: make check-no-milestone-narration
+
+      - name: No-new-milestone-narration self-test (negative)
+        run: make check-no-milestone-narration-selftest
+
   htmx-browser:
     needs: [classify]
     if: needs.classify.outputs.run_web == 'true'
