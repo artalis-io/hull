@@ -1,4 +1,4 @@
-// test_session.js — Tests for hull:web:middleware:session
+// test_session.js - Tests for hull:web:middleware:session
 //
 // Requires db, crypto, time, json globals (run via hull test harness).
 

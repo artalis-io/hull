@@ -1,5 +1,5 @@
 /*
- * Hull HTMX confirm widget — client runtime.
+ * Hull HTMX confirm widget - client runtime.
  *
  * Intercepts htmx's `htmx:confirm` event and shows a native
  * <dialog> in place of the browser's window.confirm() popup.
@@ -35,7 +35,7 @@
 
     // Single-instance state. When a dialog is open, `pending` holds
     // the htmx event whose issueRequest we'd call on confirm. A new
-    // event overwrites this — the previous request is implicitly
+    // event overwrites this - the previous request is implicitly
     // dropped (its issueRequest never fires).
     var pending = null;
     var dialog  = null;
@@ -48,7 +48,7 @@
         dialog = document.createElement("dialog");
         dialog.id = DIALOG_ID;
         dialog.setAttribute("aria-labelledby", DIALOG_ID + "-title");
-        // STATIC LITERAL ONLY — never interpolate user data here.
+        // STATIC LITERAL ONLY - never interpolate user data here.
         // The only string in this template that varies is the
         // dialog id, which is a compile-time constant. Server-
         // controlled strings (question, custom labels, title) go
@@ -66,7 +66,7 @@
     }
 
     function close(d, reason) {
-        // Capture & clear `pending` BEFORE we resume — otherwise a
+        // Capture & clear `pending` BEFORE we resume - otherwise a
         // synchronous re-entry could lose track of which prompt
         // we're answering.
         var p = pending;
@@ -77,7 +77,7 @@
         // Resume the original request. The obvious choice
         // (p.detail.issueRequest()) is a silent no-op in htmx
         // 2.0.9 for verbs like hx-delete on a standalone <button>
-        // — both sync inside the event AND deferred after the
+        // - both sync inside the event AND deferred after the
         // dialog closes. We instead use htmx.ajax() to issue a
         // fresh request with the same verb / path / target the
         // button would have used. This bypasses the broken
@@ -91,7 +91,7 @@
         if (!verb || !path) return;
 
         // htmx.ajax() fires its own htmx:confirm event for the new
-        // request and re-reads the source element's attributes —
+        // request and re-reads the source element's attributes -
         // including hx-confirm, which would pop our dialog a
         // second time (or htmx's native window.confirm, which
         // auto-rejects in headless). Temporarily strip hx-confirm
@@ -121,7 +121,7 @@
             evt.preventDefault();
             close(d, "cancel");
         });
-        // Backdrop click — clicking outside the dialog content.
+        // Backdrop click - clicking outside the dialog content.
         // The native <dialog> behavior is that clicks on the
         // ::backdrop pseudo-element bubble as clicks on the dialog
         // element itself.
@@ -142,7 +142,7 @@
         var no     = trigger.getAttribute("data-confirm-no")     || "Cancel";
         var danger = trigger.getAttribute("data-confirm-danger") === "true";
 
-        // textContent — never innerHTML — for everything that came
+        // textContent - never innerHTML - for everything that came
         // from a user-controlled attribute. The Lua/JS helper escapes
         // for attribute context; this is defense in depth for hand-
         // written hx-confirm attrs.
@@ -166,7 +166,7 @@
     function handleConfirm(evt) {
         // htmx fires htmx:confirm for EVERY request, not just ones
         // from elements with hx-confirm. Bail out early on requests
-        // that haven't opted in — otherwise the dialog would pop up
+        // that haven't opted in - otherwise the dialog would pop up
         // on every search keystroke, every form submit, every
         // hx-trigger fire. The presence of `evt.detail.question`
         // is htmx's signal that hx-confirm was on the triggering
@@ -186,7 +186,7 @@
         pending = evt;
         applyLabels(d, evt);
         if (!d.open) d.showModal();
-        // Focus cancel by default — safer default for destructive
+        // Focus cancel by default - safer default for destructive
         // confirmations. The yes-button text varies; cancel is
         // always the "do nothing" path.
         var noBtn = d.querySelector(".hull-confirm-no");

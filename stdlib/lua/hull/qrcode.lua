@@ -415,7 +415,7 @@ local function draw_function_patterns(g, f, version, size)
         end
     end
 
-    -- Dark module — always 1 at (4V+9, 8).
+    -- Dark module - always 1 at (4V+9, 8).
     g[4 * version + 9][8] = 1
     f[4 * version + 9][8] = true
 
@@ -570,9 +570,9 @@ local function place_format_info(g, ec_internal, mask, size)
     -- Copy 1: around top-left finder.
     -- Bits 0-5 → col 8, rows 0-5 (top down).
     for i = 0, 5 do g[i][8] = bit(i) end
-    g[7][8] = bit(6)   -- skip row 6 (timing) — bit 6 goes to row 7
+    g[7][8] = bit(6)   -- skip row 6 (timing) - bit 6 goes to row 7
     g[8][8] = bit(7)
-    g[8][7] = bit(8)   -- skip col 6 (timing) — bit 8 goes to col 7
+    g[8][7] = bit(8)   -- skip col 6 (timing) - bit 8 goes to col 7
     -- Bits 9-14 → row 8, cols 5..0 (right to left).
     for i = 9, 14 do g[8][14 - i] = bit(i) end
 

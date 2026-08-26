@@ -1,4 +1,4 @@
-// test_csv.js — Tests for hull:csv
+// test_csv.js - Tests for hull:csv
 //
 // Tests RFC 4180 CSV parsing and encoding.
 

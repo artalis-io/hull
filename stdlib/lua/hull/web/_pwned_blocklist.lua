@@ -1,4 +1,4 @@
--- AUTO-GENERATED — do not edit. Regenerate with scripts/build_pwned_blocklist.sh.
+-- AUTO-GENERATED - do not edit. Regenerate with scripts/build_pwned_blocklist.sh.
 -- Source: SecLists 10K (CC-BY-3.0).
 -- Format: concatenated 8-char uppercase-hex SHA-1 prefixes, sorted, deduped.
 return {

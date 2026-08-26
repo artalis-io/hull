@@ -1,4 +1,4 @@
-// test_auth.js — Tests for hull:web:middleware:auth
+// test_auth.js - Tests for hull:web:middleware:auth
 //
 // Requires db, crypto, time, json globals (run via hull test harness).
 

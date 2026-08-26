@@ -181,7 +181,7 @@ function csv.parse(text, opts)
 
     -- Flush the last field/row if there is pending data
     if state == STATE_FIELD_START then
-        -- We are at field start — only emit a row if we have accumulated
+        -- We are at field start - only emit a row if we have accumulated
         -- fields (handles trailing separator case)
         if #row > 0 then
             row[#row + 1] = ""
@@ -191,7 +191,7 @@ function csv.parse(text, opts)
         row[#row + 1] = table.concat(field)
         rows[#rows + 1] = row
     elseif state == STATE_QUOTED then
-        -- Unterminated quoted field — flush what we have
+        -- Unterminated quoted field - flush what we have
         row[#row + 1] = table.concat(field)
         rows[#rows + 1] = row
     elseif state == STATE_QUOTE_IN_QUOTED then

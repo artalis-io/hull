@@ -1,5 +1,5 @@
 --
--- hull.eject — Export standalone Makefile project
+-- hull.eject - Export standalone Makefile project
 --
 -- Usage: hull eject [app_dir] [-o output_dir]
 --
@@ -160,7 +160,7 @@ local function gen_app_main()
     -- A produced app is an app-runner, not the hull CLI: hl_app_run runs THIS
     -- app (no subcommand dispatch), matching what `hull build` emits. Both
     -- symbols live in the platform lib; hl_app_run is the slim contract.
-    return [[/* app_main.c — Thin entry point (calls hl_app_run from platform lib) */
+    return [[/* app_main.c - Thin entry point (calls hl_app_run from platform lib) */
 #include "entry.h"
 extern int hl_app_run(int argc, char **argv);
 int main(int argc, char **argv) { return hl_app_run(argc, argv); }
@@ -168,7 +168,7 @@ int main(int argc, char **argv) { return hl_app_run(argc, argv); }
 end
 
 local function gen_entry_h()
-    return [[/* entry.h — App entry type definition */
+    return [[/* entry.h - App entry type definition */
 #ifndef HL_ENTRY_H
 #define HL_ENTRY_H
 
@@ -184,7 +184,7 @@ end
 
 local function gen_registry_sh()
     return [[#!/bin/sh
-# gen_registry.sh — Generate app_registry.c from app files
+# gen_registry.sh - Generate app_registry.c from app files
 #
 # Usage: sh scripts/gen_registry.sh <app_dir>
 #
@@ -199,7 +199,7 @@ echo ""
 
 # Find all .lua and .js modules, sorted for deterministic output. Both
 # runtimes are handled: a Lua entry is named "./name" (extension stripped),
-# a JS entry "./name.js" (extension kept) — matching `hull build`'s registry.
+# a JS entry "./name.js" (extension kept) - matching `hull build`'s registry.
 FILES=$(find "$APP_DIR" \( -name '*.lua' -o -name '*.js' \) -not -path '*/.*' | sort)
 
 # Emit byte arrays
@@ -266,13 +266,13 @@ local function main()
     -- Find platform library.
     --
     -- Search order:
-    --   1. Embedded blob — release binaries (built with EMBED_PLATFORM=1)
+    --   1. Embedded blob - release binaries (built with EMBED_PLATFORM=1)
     --      ship the .a inside the hull binary. Extract to a tmpdir;
     --      tmpdir becomes the canonical search-path entry. End-users who
     --      installed via `gethull.dev/install.sh` end up here.
-    --   2. dirname(hull_exe) — adjacent .a from `make platform` or a
+    --   2. dirname(hull_exe) - adjacent .a from `make platform` or a
     --      previous extraction.
-    --   3. ./build/ and ../build/ — Hull source-tree conventional spots.
+    --   3. ./build/ and ../build/ - Hull source-tree conventional spots.
     local platform_lib = nil
     local platform_lib_arm = nil  -- aarch64 cosmo archive (if multi-arch)
     local hull_dir = ""

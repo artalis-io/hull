@@ -1,4 +1,4 @@
---- ETag response helpers — `etag.json`, `etag.text`, `etag.html`.
+--- ETag response helpers - `etag.json`, `etag.text`, `etag.html`.
 --
 -- Not a Keel middleware (no `(req, res) -> int` signature). Instead,
 -- handlers call `etag.json(req, res, data)` in place of `res:json(data)`

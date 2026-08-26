@@ -1,4 +1,4 @@
--- stdlib/lua/hull/agent_context_tui.lua — interactive context picker.
+-- stdlib/lua/hull/agent_context_tui.lua - interactive context picker.
 --
 -- Invoked by `hull agent context --interactive` (or `--tui`). Lists
 -- every task the agent knows about; for each selected task, renders

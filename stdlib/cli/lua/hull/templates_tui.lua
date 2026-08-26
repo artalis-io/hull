@@ -1,5 +1,5 @@
 --
--- hull.templates_tui — `hull new --type tui <name>` scaffolding
+-- hull.templates_tui - `hull new --type tui <name>` scaffolding
 --
 -- Modular TUI layout. app.lua holds the immediate-mode event loop
 -- (via `tui.run({ draw, on_event })`) and a single `state` table.
@@ -7,7 +7,7 @@
 -- and `handle_event(state, ev)` (returns mutation or exit token).
 -- Routing between views is just `state.view = "X"`.
 --
--- Lua-only — Hull's `hull.tui` module is Lua-only today. If a JS TUI
+-- Lua-only - Hull's `hull.tui` module is Lua-only today. If a JS TUI
 -- ever lands, drop in a parallel js_files table here and remove the
 -- runtime check in M.files().
 --
@@ -36,7 +36,7 @@ local tui    = require("hull.tui")
 local state0 = require("./lib/state")
 
 local function load_view(name)
-    -- pcall'd so a typo doesn't crash mid-render — fall back to the
+    -- pcall'd so a typo doesn't crash mid-render - fall back to the
     -- menu so the user has somewhere to go.
     local ok, mod = pcall(require, "./views/" .. name)
     if not ok then return require("./views/menu") end

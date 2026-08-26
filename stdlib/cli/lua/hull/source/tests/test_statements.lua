@@ -1,5 +1,5 @@
 --
--- test_statements.lua — slice-3 tests for hull.source.lua (statements + full AST).
+-- test_statements.lua - slice-3 tests for hull.source.lua (statements + full AST).
 --
 -- Drives the PUBLIC lua.parse() (which now produces unit.ast = a chunk) plus
 -- lua.walk / lua.is. Pure Lua; run by tests/hull/source/test_lua_source.c.

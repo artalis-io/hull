@@ -24,7 +24,7 @@ local rbac = {}
 
 --- Create the four `_hull_*` RBAC tables.
 --
--- Idempotent — safe to call on every boot.
+-- Idempotent - safe to call on every boot.
 --
 -- @function rbac.init
 -- @tparam[opt] table _opts  Reserved for future configuration.

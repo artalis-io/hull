@@ -16,7 +16,7 @@
 --     rbac) follow the same fail-closed pattern.
 --   * **Strong ETag from blob_id.** Because the underlying blob
 --     store is content-addressed by SHA-256, the blob_id IS a
---     genuine cryptographic fingerprint of the bytes — strong
+--     genuine cryptographic fingerprint of the bytes - strong
 --     ETags are correct here (no risk of two attachments with the
 --     same id but different bytes). We use `"<full-64-hex>"`.
 --   * **Content-Disposition (RFC 5987).** Browsers should save
@@ -75,7 +75,7 @@ end
 -- Build the full Content-Disposition header value with both the
 -- ASCII fallback and the RFC 5987 percent-encoded UTF-8 form.
 -- `gsub(".", ...)` is BYTE-WISE (Lua's `.` matches one byte, not one
--- UTF-8 codepoint) — exactly what RFC 5987 wants since it encodes
+-- UTF-8 codepoint) - exactly what RFC 5987 wants since it encodes
 -- raw UTF-8 octets. The JS sibling has to UTF-8-encode the input
 -- string first because JS strings are UTF-16.
 local function content_disposition(name)
@@ -91,7 +91,7 @@ end
 -- @tparam table res
 -- @tparam string id
 -- @tparam[opt] table opts
---   `auth_check` — `function(req, metadata) -> bool`. REQUIRED for
+--   `auth_check` - `function(req, metadata) -> bool`. REQUIRED for
 --     non-403 responses. Receives the live metadata row so the
 --     check can do per-tenant / per-user gating. Omit to deny
 --     unconditionally.

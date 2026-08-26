@@ -6,7 +6,7 @@
 -- Tokens are `tsHex.hmac_hex` where the HMAC covers
 -- `session_id .. ":" .. tsHex` and `tsHex` is the unix timestamp
 -- formatted as compact lowercase hex (e.g. `"664f4f80"`). No DB
--- storage — verification is pure HMAC + age check.
+-- storage - verification is pure HMAC + age check.
 --
 -- The wire format is shared with the JS sibling
 -- (`stdlib/js/hull/web/middleware/csrf.js`); tokens minted by one
@@ -126,7 +126,7 @@ end
 -- form field, verifies it, and sends `403` on failure. Returns `1` on
 -- short-circuit, `0` on success.
 --
--- Body parsing caps: 1 MiB body, 256 form pairs, 4 KiB per pair —
+-- Body parsing caps: 1 MiB body, 256 form pairs, 4 KiB per pair -
 -- bounded work per unsafe request. Large multipart uploads should be
 -- parsed before this middleware runs.
 --

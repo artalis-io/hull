@@ -1,4 +1,4 @@
--- hull.web.middleware.audit-log — append-only sign-in / auth
+-- hull.web.middleware.audit-log - append-only sign-in / auth
 -- event log. Composable with hull/web/auth-flows (emit events
 -- automatically when opts.sign_in_log is set), with the session
 -- module (group sessions by device fingerprint), or standalone
@@ -49,7 +49,7 @@ local _state = {
 --   * `fingerprint_salt` (REQUIRED, string ≥ 8 bytes). Deployment-
 --     private salt prepended to the sha256 input that produces the
 --     device fingerprint. Without a salt, the fingerprint algorithm
---     is universal — an attacker with read access to _hull_audit_log
+--     is universal - an attacker with read access to _hull_audit_log
 --     could rainbow-table common (UA, IP) combinations against the
 --     published normalization to dehash entries. The salt makes the
 --     output deployment-private.
@@ -105,7 +105,7 @@ function audit_log.init(opts)
     -- restart between scheduled fires (deploys, crashes) and
     -- apps in CLI flavor (where the daily timer never fires
     -- because app.main exits before 03:00) still bound their
-    -- _hull_audit_log growth. Cheap — a single DELETE WHERE
+    -- _hull_audit_log growth. Cheap - a single DELETE WHERE
     -- event_at < cutoff over an indexed range. Guarded against
     -- repeated init() calls in the same process (test fixtures,
     -- hot reload) so the DB scan only runs once per startup,
@@ -122,7 +122,7 @@ function audit_log.init(opts)
     -- _hull_audit_log from growing unboundedly for apps that
     -- forget to wire a cleanup timer themselves. Guarded so a
     -- second init() (test fixtures, hot reload) doesn't stack
-    -- timers — schedule once per process. app.daily comes from
+    -- timers - schedule once per process. app.daily comes from
     -- hull/timers, declared as a hard dep in module_registry.
     --
     -- CLI flavor (HL_ENABLE_HTTP_SERVER=0) has no serve loop, so
@@ -151,7 +151,7 @@ function audit_log.init(opts)
     -- opt-out. hull/timers has no unregister API, so the prior
     -- app.daily timer keeps firing alongside the operator's
     -- external cron. cleanup_status() would also lie ("external"
-    -- while the timer is still wired). Warn loud — easier than
+    -- while the timer is still wired). Warn loud - easier than
     -- introducing app.daily_cancel in hull/timers right now.
     if opts.cleanup == false and _state._cleanup_scheduled
        and not _state._cleanup_opted_out then
@@ -202,7 +202,7 @@ local function ip_prefix(ip)
     ip = (ip:match("^([^,]+)") or ip):gsub("^%s+", ""):gsub("%s+$", "")
     local a, b, c = ip:match("^(%d+)%.(%d+)%.(%d+)%.")
     if a then return a .. "." .. b .. "." .. c .. ".0/24" end
-    -- IPv6 — first 4 groups as /64.
+    -- IPv6 - first 4 groups as /64.
     if ip:find(":", 1, true) then
         local parts = {}
         for part in ip:gmatch("[^:]+") do
@@ -230,7 +230,7 @@ end
 -- Hex SHA-256(salt || "|" || normalized_ua || "|" || ip_prefix),
 -- truncated to 16 chars (64 bits). The salt is deployment-private
 -- (from init's fingerprint_salt opt) so the fingerprint output is
--- only meaningful within this deployment — an attacker with read
+-- only meaningful within this deployment - an attacker with read
 -- access to _hull_audit_log can't rainbow-table common (UA, IP)
 -- combinations back to identifying data without also breaching
 -- the app's config.
@@ -287,7 +287,7 @@ function audit_log.record(user_id, kind, req, opts)
 end
 
 --- List recent events for a user, newest first.
--- opts.limit (default 50), opts.kinds (filter — array of kinds).
+-- opts.limit (default 50), opts.kinds (filter - array of kinds).
 function audit_log.list(user_id, opts)
     if type(user_id) ~= "string" or user_id == "" then return {} end
     opts = opts or {}
@@ -326,7 +326,7 @@ end
 
 --- Group recent events by fingerprint into a per-device summary.
 -- Each row: { fingerprint, first_seen, last_seen, count, ip, user_agent }.
--- opts.window_days (default 90) — older events excluded.
+-- opts.window_days (default 90) - older events excluded.
 function audit_log.list_devices(user_id, opts)
     if type(user_id) ~= "string" or user_id == "" then return {} end
     opts = opts or {}
@@ -378,7 +378,7 @@ function audit_log.is_cleanup_scheduled()
     -- Round-12 LOW-3: legacy boolean now also returns true when the
     -- operator opted out via init({cleanup = false}). The semantic
     -- shift is "someone is responsible for cleanup" (auto-daily OR
-    -- external cron) — both are fine. Pre-fix the bool said false
+    -- external cron) - both are fine. Pre-fix the bool said false
     -- for legit opt-outs, contradicting the new cleanup="external"
     -- tri-state in the same probe response. Use cleanup_status()
     -- if you need the three-way distinction; this boolean is kept
@@ -389,13 +389,13 @@ function audit_log.is_cleanup_scheduled()
 end
 
 --- Round-11 MEDIUM-7: tri-state cleanup status. Returns one of:
---   * "scheduled" — auto-daily timer wired (cleanup ~= false; app.daily
+--   * "scheduled" - auto-daily timer wired (cleanup ~= false; app.daily
 --                  available; catchup ran)
---   * "external"  — operator opted out via init({cleanup = false}) and
+--   * "external"  - operator opted out via init({cleanup = false}) and
 --                  is presumed to run cleanup from cron / a separate
 --                  worker. NOT a failure mode; surfaces correctly in
 --                  health probes.
---   * "missing"   — neither path engaged (init never ran with cleanup
+--   * "missing"   - neither path engaged (init never ran with cleanup
 --                  enabled AND no opt-out). This IS the misconfig
 --                  signal operators want to see.
 function audit_log.cleanup_status()
@@ -411,7 +411,7 @@ end
 -- from its stored `ip` + `user_agent` under the current
 -- `fingerprint_salt`. Use ONCE after switching salts (or after
 -- the round-6 mandatory-salt upgrade) to avoid a mass
--- `is_new_device` storm — without this, every active user's next
+-- `is_new_device` storm - without this, every active user's next
 -- sign-in would trigger the new-device path because the new
 -- salted fingerprint doesn't match the old unsalted one.
 --
@@ -460,7 +460,7 @@ function audit_log.recompute_fingerprints()
         -- Round-10 HIGH-2: snapshot the highest id at start. Round-9
         -- MEDIUM-10 broke only on empty page, but under sustained
         -- INSERT load (audit_log.record fires per login) the loop
-        -- never terminates — every SELECT finds new rows past
+        -- never terminates - every SELECT finds new rows past
         -- last_id. The single live caller would hold the writer
         -- transaction periodically and grow page_updates without
         -- bound. Bounding by start_max_id terminates correctly while

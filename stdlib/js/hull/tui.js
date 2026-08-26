@@ -1,7 +1,7 @@
 /**
  * @file hull:tui
  * @module hull:tui
- * @description Terminal UI module — public JS surface.
+ * @description Terminal UI module - public JS surface.
  *
  * Wraps the native bindings (`hull:tui` registered from C) with the
  * canonical `tui.run` immediate-mode loop and helper widgets
@@ -86,7 +86,7 @@ function run(opts) {
     /* The JS run loop is synchronous so callers can write
      *   const picked = tui.list(items);
      * without `await`. Synchronous JS holds the QuickJS thread, so the
-     * native.poll(tickMs) slow path — which returns a Promise — can
+     * native.poll(tickMs) slow path - which returns a Promise - can
      * never resolve from inside this loop (no microtask drain happens
      * until we yield). We instead use native.pollSync(timeoutMs), which
      * blocks the C thread until an event arrives or the timeout
@@ -204,7 +204,7 @@ const SPINNER_FRAMES = ["⠋","⠙","⠹","⠸","⠼","⠴","⠦","⠧","⠇","�
 function spinner(state = 0) {
     /* Return the frame at index `state`, then advance. The previous
      * implementation returned frames[state+1] which meant calling
-     * spinner(0) returned "⠙" — skipping the first glyph "⠋" entirely
+     * spinner(0) returned "⠙" - skipping the first glyph "⠋" entirely
      * and making the state/frame pair feel rotated. */
     const idx = ((state % SPINNER_FRAMES.length) + SPINNER_FRAMES.length)
                 % SPINNER_FRAMES.length;
@@ -245,7 +245,7 @@ function frame(opts, fn) {
 
     let top = b.tl + b.h.repeat(w - 2) + b.tr;
     if (opts.title && w - 5 > 0) {
-        /* Layout: ┌─ title ─...─┐ — the framing reserves five chars
+        /* Layout: ┌─ title ─...─┐ - the framing reserves five chars
          * (tl + h + " " around the title prefix, then " " + tr at the
          * suffix end). The previous w-4 cap overshot by one cell
          * when the title exactly filled the available room. */
@@ -270,7 +270,7 @@ function frame(opts, fn) {
             print(ix, iy, s) {
                 if (ix < 1 || iy < 1 || ix > w - 2 || iy > h - 2) return;
                 /* Truncate by codepoint so a surrogate pair (e.g.
-                 * emoji) isn't split — the cap layer would otherwise
+                 * emoji) isn't split - the cap layer would otherwise
                  * see invalid UTF-16 high surrogate as garbage. */
                 s = truncateByCodepoints(String(s), w - 2 - (ix - 1));
                 native.print(x + ix, y + iy, s);

@@ -3,7 +3,7 @@
 
 Hull serves web apps from a single `app.lua` file with route
 registration via `app.get/post/put/delete/use`. Sandboxed runtime,
-in-process SQLite, hot reload, signed binary build — one command each.
+in-process SQLite, hot reload, signed binary build - one command each.
 
 **For server-rendered apps with partial-page updates (HTMX), prefer
 `hull init --profile htmx`.** It ships a complete starter app with
@@ -217,8 +217,8 @@ Each renders from the manifest. For full deploy patterns see
 - `require("fs")`, `require("http")`, `io.open`, `os.execute` - the
   sandbox rejects these. Use the capability layer: `fs.read`,
   `http.fetch`, etc., after declaring them in `app.manifest`.
-- Direct SQL string concatenation — use `?` parameters always.
-- Module imports outside the first-party stdlib — `manifest.modules`
+- Direct SQL string concatenation - use `?` parameters always.
+- Module imports outside the first-party stdlib - `manifest.modules`
   selects from the canonical registry (`hull modules available`).
 - `eval()` / `loadstring()` - disabled at the C level for both
   runtimes.

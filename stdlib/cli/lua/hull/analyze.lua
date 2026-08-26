@@ -1,5 +1,5 @@
 --
--- hull.analyze — Static import/require analysis for module declarations.
+-- hull.analyze - Static import/require analysis for module declarations.
 --
 -- Usage: hull modules analyze [app_dir]
 --        hull modules analyze --json [app_dir]
@@ -160,7 +160,7 @@ local function scan_js(text)
             end
 
         else
-            -- `import ... from "hull:X"` — capture only the module string.
+            -- `import ... from "hull:X"` - capture only the module string.
             -- Handles `import x from`, `import {x} from`, `import * as x from`.
             local s, e, modname = text:find(
                 "^import[%s%w_${},*]+from%s*[\"']hull:([%w_:]+)[\"']", i)
@@ -184,7 +184,7 @@ end
 -- ── Manifest module collection ──────────────────────────────────────
 
 -- Intrinsic modules are always admitted by the resolver (no declaration
--- needed) — seed them into the "declared" set so the analyzer doesn't
+-- needed) - seed them into the "declared" set so the analyzer doesn't
 -- flag imports of `hull:app` / `hull:log` / `hull:json` as undeclared.
 -- Mirrors hl_module_registry: every entry with intrinsic = 1.
 local INTRINSICS = {
@@ -234,7 +234,7 @@ local function diff_sets(declared, used_by_file)
     end
     local unused = {}
     for name, _ in pairs(declared) do
-        -- Don't surface intrinsics as "unused" — they're always declared
+        -- Don't surface intrinsics as "unused" - they're always declared
         -- automatically regardless of whether the app imports them.
         if not used_anywhere[name] and not INTRINSICS[name] then
             unused[#unused + 1] = name
@@ -269,7 +269,7 @@ local function main()
 
     -- Load app to extract manifest. App load can fail in tool-mode for
     -- legitimate reasons (apps that require relative JSON files via
-    -- `require("./data.json")` — the tool VM lacks the real
+    -- `require("./data.json")` - the tool VM lacks the real
     -- app-context's filesystem-fallback wiring). Treat it as
     -- "skipping analysis" rather than a hard failure so `hull check`
     -- still runs the rest of its pipeline. A genuine import problem

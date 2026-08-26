@@ -1,4 +1,4 @@
--- stdlib/lua/hull/agent_errors_tui.lua — last-reload error scroller.
+-- stdlib/lua/hull/agent_errors_tui.lua - last-reload error scroller.
 --
 -- Invoked by `hull agent errors --tui`. Renders the .hull/last_error.json
 -- structured output as a scrollable list with expandable detail panes.

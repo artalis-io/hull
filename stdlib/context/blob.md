@@ -49,7 +49,7 @@ app.main(() => {
 ```
 
 Two callers putting identical bytes share storage automatically
-(content-addressed dedup is free). No SQLite dependency — works under
+(content-addressed dedup is free). No SQLite dependency - works under
 `HL_ENABLE_DB=0` (compute-only builds).
 
 <!-- compact -->
@@ -81,7 +81,7 @@ freed via GC).
     └── .blob-<random>.tmp  in-flight writes
 ```
 
-- **Filename IS the SHA-256 hex** — self-verifying: `sha256(file) ==
+- **Filename IS the SHA-256 hex** - self-verifying: `sha256(file) ==
   basename(file)` always.
 - Atomic writes: per-write tmp file + `rename(2)`. Readers never see
   partial bytes.
@@ -90,7 +90,7 @@ freed via GC).
 
 ## API reference
 
-### Writes — on-the-fly SHA
+### Writes - on-the-fly SHA
 
 ```lua
 -- Buffer-mode: one-shot
@@ -98,7 +98,7 @@ local id, size = blob.put(bytes)                          -- bytes = string
 local id, size = blob.put_verified(bytes, expected_id)    -- raises on mismatch
 
 -- Streaming: feed bytes through the hasher in lockstep with the
--- temp-file write — never buffered just to hash.
+-- temp-file write - never buffered just to hash.
 local w = blob.writer()                          -- or { expected = sha }
 w:write(chunk1)
 w:write(chunk2)
@@ -164,7 +164,7 @@ for (const { id, size } of blob.iter()) { … }
 blob.count();  blob.totalSize();
 ```
 
-Iter takes a snapshot at call time — adds/deletes during iteration
+Iter takes a snapshot at call time - adds/deletes during iteration
 aren't reflected. Safe under concurrent put/delete.
 
 ### Opt-in eviction (never automatic)
@@ -191,7 +191,7 @@ const stats = blob.cleanup({
 
 Some callers (attachment storage) never want eviction; others (LLM
 artifact cache, compute AOT cache) want LRU. Cleanup is always
-opt-in — never automatic.
+opt-in - never automatic.
 
 <!-- full -->
 ## Layered patterns
@@ -206,7 +206,7 @@ release artifact whose hash was signed in a manifest), pass it as
 local body = http.get("https://github.com/.../hull-darwin-arm64")
 local sha = manifest.entries["hull-darwin-arm64"]   -- from signed manifest
 local id, size = blob.put_verified(body, sha)
--- raises if body doesn't hash to `sha` — caller knows manifest was
+-- raises if body doesn't hash to `sha` - caller knows manifest was
 -- authentic, so a mismatch means transport corruption or MITM.
 ```
 
@@ -280,7 +280,7 @@ sandbox without any hand-mkdir from user code.
 
 ## Non-goal: encryption at rest
 
-Blob does not encrypt stored bytes — encryption-at-rest breaks
+Blob does not encrypt stored bytes - encryption-at-rest breaks
 content-addressing (random-nonce loses dedup; convergent encryption
 introduces confirmation-of-file attacks). Encrypt at the consumer
 layer instead:
@@ -304,7 +304,7 @@ rationale and the recommended consumer-side pattern.
 | `HL_ENABLE_HTTP_CLIENT=0` | No effect - no network |
 | `HL_ENABLE_WASM=0` | No effect |
 
-A compute-only build still gets the full blob primitive — which is
+A compute-only build still gets the full blob primitive - which is
 exactly where the compute AOT cache and Lua bytecode cache live.
 
 ## See also

@@ -1,4 +1,4 @@
-// test_logger.js — Tests for hull:web:middleware:logger
+// test_logger.js - Tests for hull:web:middleware:logger
 //
 // Tests pure-function helpers (no runtime globals needed).
 

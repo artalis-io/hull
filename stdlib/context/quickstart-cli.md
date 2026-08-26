@@ -90,7 +90,7 @@ app.main(function(ctx)
     if err then return 1 end
     log.info("got " .. #res.body .. " bytes")
 
-    -- WASM compute, GPU dispatch, hull.sleep — all valid here
+    -- WASM compute, GPU dispatch, hull.sleep - all valid here
     local out = compute.async.call("transform", res.body)
     log.info(out.result)
     return 0
@@ -138,7 +138,7 @@ end)
 <!-- full -->
 ## Argv parsing
 
-Hull doesn't ship an argparse module — keep it minimal:
+Hull doesn't ship an argparse module - keep it minimal:
 
 ```lua
 app.main(function(ctx)

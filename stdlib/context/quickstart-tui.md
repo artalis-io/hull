@@ -117,7 +117,7 @@ end)
 `tui.async(fn)` spawns a coroutine that runs concurrently with the
 TUI poll loop. Use it for tickers, background fetches, etc. The
 function captures `state` by reference; mutate it freely. No
-synchronization needed — the event loop is single-threaded.
+synchronization needed - the event loop is single-threaded.
 
 ## Iteration tip
 
@@ -160,7 +160,7 @@ tui.run({
 })
 ```
 
-Mouse mode is opt-in — it adds the `?1006h` SGR-extended-mouse
+Mouse mode is opt-in - it adds the `?1006h` SGR-extended-mouse
 escape on first event handler that filters for `type="mouse"`.
 Disable per-frame via `tui.mouse(false)` if you need a paste-friendly
 section.
@@ -178,7 +178,7 @@ t:style({
 t:style({})   -- reset everything
 ```
 
-Hull picks the best representation the terminal supports —
+Hull picks the best representation the terminal supports -
 `0x61AFEF` becomes 24-bit on iTerm/Kitty/modern xterm,
 256-color-quantized on lesser terminals, ignored on dumb terminals
 without warnings.
@@ -232,7 +232,7 @@ end,
 
 ## Testing TUI apps
 
-TUI logic is harder to unit-test than HTTP — there's no in-process
+TUI logic is harder to unit-test than HTTP - there's no in-process
 harness for keystroke sequences. Test the state mutations separately:
 
 ```lua

@@ -1,5 +1,5 @@
 --
--- hull.init — Initialize a Hull project in the current (or specified) directory
+-- hull.init - Initialize a Hull project in the current (or specified) directory
 --
 -- Usage: hull init [dir] [--runtime lua|js] [--cli] [--profile <name>]
 --
@@ -22,7 +22,7 @@
 local templates = {}
 
 templates.lua_app = [[-- Declare every first-party module the app imports.
--- The runtime gate refuses undeclared imports — `hull modules available`
+-- The runtime gate refuses undeclared imports - `hull modules available`
 -- lists the full registry. Add capability sections (fs, hosts, env)
 -- alongside `modules` when a module needs them.
 local log = require("hull.log")
@@ -62,7 +62,7 @@ end)
 ]]
 
 templates.js_app = [[// Declare every first-party module the app imports.
-// The runtime gate refuses undeclared imports — `hull modules available`
+// The runtime gate refuses undeclared imports - `hull modules available`
 // lists the full registry. Add capability sections (fs, hosts, env)
 // alongside `modules` when a module needs them.
 import { app }  from "hull:app";
@@ -102,7 +102,7 @@ test("GET /health returns ok", async () => {
 });
 ]]
 
-templates.lua_cli_app = [[-- CLI app — `hull run app.lua [-- args...]` invokes app.main once and exits.
+templates.lua_cli_app = [[-- CLI app - `hull run app.lua [-- args...]` invokes app.main once and exits.
 -- `app.main` is mutually exclusive with route registration: pick CLI mode
 -- (app.main) or server mode (app.get/etc), not both.
 
@@ -122,7 +122,7 @@ templates.lua_cli_test = [[test("placeholder", function()
 end)
 ]]
 
-templates.js_cli_app = [[// CLI app — `hull run app.js [-- args...]` invokes app.main once and exits.
+templates.js_cli_app = [[// CLI app - `hull run app.js [-- args...]` invokes app.main once and exits.
 import { app } from "hull:app";
 
 app.manifest({
@@ -1581,7 +1581,7 @@ end
 -- ship with the literal `CHANGE-ME-IN-PRODUCTION` placeholder. The
 -- secret is HMAC-key material; SHA-256 of 32 random bytes gives a
 -- canonical 256-bit value with a fixed shape. The warning code in
--- the template stays in place — it now only fires for legacy /
+-- the template stays in place - it now only fires for legacy /
 -- manually-pasted placeholders, not for fresh scaffolds.
 local function fresh_csrf_secret()
     local crypto = require("hull.crypto")
@@ -1590,7 +1590,7 @@ end
 
 -- Replace the FIRST quoted occurrence of "CHANGE-ME-IN-PRODUCTION"
 -- in the template with the generated secret. The second occurrence
--- (the if-condition check) stays — it remains useful if someone
+-- (the if-condition check) stays - it remains useful if someone
 -- copies the placeholder string back in by hand.
 local function inject_csrf_secret(template_str, secret)
     local placeholder = '"CHANGE-ME-IN-PRODUCTION"'

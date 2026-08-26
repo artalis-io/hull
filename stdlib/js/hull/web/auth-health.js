@@ -4,7 +4,7 @@
  * @description Runtime health probes for the auth stack.
  *
  * Mirror of stdlib/lua/hull/web/auth-health.lua. See the Lua module
- * header for the design — what's probed, what's deliberately NOT
+ * header for the design - what's probed, what's deliberately NOT
  * probed (external reachability), and the wiring patterns.
  *
  * @license AGPL-3.0-or-later
@@ -114,7 +114,7 @@ function probeRbac(includeCounts) {
  * Run all probes; return a JSON-ready object.
  * opts.includeCounts (default false) gates enumeration counts
  * (events, sessions, enrolled_users, roles, permissions). Default
- * is FALSE — the endpoint surface is often reachable by anyone with
+ * is FALSE - the endpoint surface is often reachable by anyone with
  * admin access and the counts are recon material.
  */
 function check(opts) {
@@ -137,7 +137,7 @@ function check(opts) {
 
 /**
  * Mount /admin/auth-status (overridable). opts.authCheck(req) is
- * REQUIRED — the endpoint exposes session/enrollment counts and
+ * REQUIRED - the endpoint exposes session/enrollment counts and
  * operational state, recon material if left open. Must return the
  * boolean `true` to admit; any other value (including truthy ones
  * like `1` or `"yes"`) is rejected with 403; throwing returns 401;
@@ -161,7 +161,7 @@ function routes(app, opts) {
         catch (_e) { return res.status(401).json({ error: "forbidden" }); }
         // Round-8 MEDIUM-5: strict-equality the boolean true. An
         // `async authCheck` returns a Promise, which is truthy under
-        // `!allowed` — the gate silently fell open and the handler
+        // `!allowed` - the gate silently fell open and the handler
         // shipped operational state to anonymous callers. Reject any
         // thenable explicitly so the gate-by-async-mistake fails
         // closed AT the gate, not at the wire.

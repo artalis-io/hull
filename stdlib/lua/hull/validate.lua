@@ -16,7 +16,7 @@ local validate = {}
 
 -- Email validation: practical RFC-5322 subset suitable for form-input
 -- screening. Catches obvious garbage (a..b@x, @foo, user@, foo) without
--- aiming for full compliance — apps wanting stricter checks should layer
+-- aiming for full compliance - apps wanting stricter checks should layer
 -- their own validator on top.
 --
 -- Constraints encoded in the pattern:
@@ -29,7 +29,7 @@ local validate = {}
 local EMAIL_PATTERN =
     "^[A-Za-z0-9][A-Za-z0-9._+%-]*@[A-Za-z0-9][A-Za-z0-9.%-]*%.[A-Za-z][A-Za-z]+$"
 
--- Reject "..", trailing ".", and leading "." in local or domain — the
+-- Reject "..", trailing ".", and leading "." in local or domain - the
 -- pattern above doesn't catch these. We do a secondary check at use time.
 local function email_ok(s)
     if type(s) ~= "string" then return false end
@@ -44,19 +44,19 @@ end
 --
 -- Schema is a table mapping field names to rule tables. Recognised rules:
 --
---   - `required` (boolean) — error if absent.
---   - `trim` (boolean) — strip leading/trailing whitespace before other checks.
---   - `type` (string) — `"string"` / `"number"` / `"integer"` / `"boolean"`.
---   - `min` / `max` (number) — string length (for strings) or numeric bound (for numbers).
---   - `pattern` (string) — Lua pattern the value must match.
---   - `oneof` (`{any,...}`) — value must equal one of the listed values.
---   - `email` (boolean) — practical RFC-5322 subset (good for form screening).
---   - `fn` (`function(value) -> boolean`) — custom validator.
---   - `message` (string) — override the default error message.
+--   - `required` (boolean) - error if absent.
+--   - `trim` (boolean) - strip leading/trailing whitespace before other checks.
+--   - `type` (string) - `"string"` / `"number"` / `"integer"` / `"boolean"`.
+--   - `min` / `max` (number) - string length (for strings) or numeric bound (for numbers).
+--   - `pattern` (string) - Lua pattern the value must match.
+--   - `oneof` (`{any,...}`) - value must equal one of the listed values.
+--   - `email` (boolean) - practical RFC-5322 subset (good for form screening).
+--   - `fn` (`function(value) -> boolean`) - custom validator.
+--   - `message` (string) - override the default error message.
 --
 -- @tparam table data    Input. Non-table input is treated as `{}`.
 --   **NOTE:** when any field uses `trim = true`, `data[field]` is
---   replaced with the trimmed value in-place — the caller's table is
+--   replaced with the trimmed value in-place - the caller's table is
 --   mutated. Pass a shallow copy if you need the original preserved.
 -- @tparam table schema  Rules. Non-table input → `true, nil`.
 -- @treturn boolean ok   `true` if all fields pass.
@@ -72,7 +72,7 @@ function validate.check(data, schema)
         local err = nil
         local custom_msg = rules.message
 
-        -- 1. trim (mutates data[field] in-place — caller's table is modified)
+        -- 1. trim (mutates data[field] in-place - caller's table is modified)
         if rules.trim and type(value) == "string" then
             value = value:match("^%s*(.-)%s*$")
             data[field] = value

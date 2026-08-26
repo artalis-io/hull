@@ -1,4 +1,4 @@
-// test_pagination.js — Tests for hull:web:pagination
+// test_pagination.js - Tests for hull:web:pagination
 
 import { pagination } from "hull:web:pagination";
 

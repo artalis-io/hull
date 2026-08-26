@@ -65,7 +65,7 @@
 --     ~50-200ms delta would otherwise leak account existence over
 --     the network). Controlled by `enumeration_safe` (default true).
 --     Set false ONLY in test fixtures that don't care about timing
---     observables — never in production.
+--     observables - never in production.
 --   * Re-verify-on-email-change: changing email puts the new
 --     address in `_hull_auth_pending_email_changes`; the row only
 --     swaps onto the user record after the user clicks the link
@@ -124,24 +124,24 @@ local _state = {
     -- magic-link, password-reset, email-change) is interpolated into a
     -- link inside an outbound email. Pre-round-9, the origin came
     -- straight from req.headers["x-forwarded-host"] / req.headers.host
-    -- with no validation — an attacker submitting password-reset/request
+    -- with no validation - an attacker submitting password-reset/request
     -- for victim's email with `Host: attacker.com` got the victim a
     -- "reset your password" mail pointing at attacker.com/auth/...?token=
     -- whose click leaked a valid action-bound reset token. Trivial
     -- account takeover.
     --
     -- Init now REQUIRES one of:
-    --   * `public_origin = "https://app.example.com"` — single canonical
+    --   * `public_origin = "https://app.example.com"` - single canonical
     --     URL; used as the sole authority for built links. The most
     --     common shape; the right answer for ~every non-multi-tenant app.
-    --   * `trusted_hosts = {"app.example.com", "alt.example.com"}` —
+    --   * `trusted_hosts = {"app.example.com", "alt.example.com"}` -
     --     allowlist. req.headers.host must match (exactly) or the URL
     --     build refuses. Multi-tenant deployments where each customer
     --     has a different domain.
-    --   * `trust_request_host = true` — DEV/TEST escape hatch. Falls
+    --   * `trust_request_host = true` - DEV/TEST escape hatch. Falls
     --     back to the pre-round-9 behaviour: uses req.headers.host
     --     directly. Logs a one-shot warning at init. NEVER pass this
-    --     in production — that's exactly the foot-gun this gate exists
+    --     in production - that's exactly the foot-gun this gate exists
     --     to close. Test fixtures use this because they bind a random
     --     ephemeral port at startup and can't know the host at init.
     -- public_origin (if set) wins; otherwise the host header must
@@ -227,7 +227,7 @@ local _state = {
     -- `function(req,res,user) session.destroy_all(user.id) end`).
     --
     -- LOGIN events and new-device detection are NOT emitted here
-    -- anymore — they move to hull/web/middleware/session's
+    -- anymore - they move to hull/web/middleware/session's
     -- login_handler factory (audit_log + on_new_device opts), so a
     -- single seam covers both password and OAuth logins.
     sign_in_log         = false,
@@ -238,7 +238,7 @@ local _state = {
     -- Login rate limit (opt-in). When login_ratelimit is truthy, an
     -- hull/web/middleware/ratelimit middleware is installed on
     -- POST /auth/login BEFORE the handler. Defaults to 20 requests
-    -- per IP per 5 minutes — tuned to make brute-force impractical
+    -- per IP per 5 minutes - tuned to make brute-force impractical
     -- without blocking power-users with sticky typos. Pass a table
     -- to override: { limit = N, window = SECONDS, key = function|str }.
     -- Apps with their own upstream rate-limiter should leave this off.
@@ -251,7 +251,7 @@ local _state = {
     -- the attacker-chosen-recipient email-storm class on
     -- /auth/email-change, /auth/magic-link, /auth/password-reset/
     -- request, and /auth/verify/resend. login_ratelimit (per-IP) is
-    -- orthogonal — a botnet defeats per-IP but not per-recipient.
+    -- orthogonal - a botnet defeats per-IP but not per-recipient.
     --
     -- Shape: { limit = N, window = SECONDS }. Pass `false` to
     -- disable. In-memory sliding window; resets on restart.
@@ -297,7 +297,7 @@ CREATE INDEX IF NOT EXISTS _hull_auth_pending_email_changes_exp
 
 -- ── Private helpers (bodies TODO) ──────────────────────────────────
 
--- Token actions — opaque tags so a verify-email token can't be
+-- Token actions - opaque tags so a verify-email token can't be
 -- replayed as a password-reset token (the action is in the signed
 -- payload and re-checked at consume time).
 local ACTIONS = {
@@ -471,7 +471,7 @@ local function email_rate_allow(to)
 end
 
 -- Round-9 MEDIUM-6: strict allowlist (round-8's 1-field denylist
--- was the wrong shape — apps with `totp_secret`, `recovery_codes`,
+-- was the wrong shape - apps with `totp_secret`, `recovery_codes`,
 -- `api_key`, `oauth_refresh_token` etc. on their user records
 -- leaked them into on_login + email template ctx.user). Default
 -- allowlist is the canonical auth surface: id, email,
@@ -479,7 +479,7 @@ end
 -- avatar_url, roles, etc.) pass `user_sanitize = function(user)
 -- return {...} end` which gets the raw user and returns what's
 -- safe to surface. Breaking change for apps reading custom user
--- fields in templates / on_login — they must wire user_sanitize.
+-- fields in templates / on_login - they must wire user_sanitize.
 local SAFE_USER_FIELDS = {
     id             = true,
     user_id        = true,  -- legacy callers may use either
@@ -508,7 +508,7 @@ end
 -- Round-9 HIGH-1: build a click-through URL origin from validated
 -- sources only. public_origin (when set) wins unconditionally;
 -- otherwise the request's host header must match a trusted_hosts
--- entry exactly. If neither check admits a value, raise — letting
+-- entry exactly. If neither check admits a value, raise - letting
 -- a request through with a header-derived origin reintroduces the
 -- host-injection class. init.lua already validates that one of
 -- public_origin / trusted_hosts is set, so the raise is only
@@ -522,7 +522,7 @@ local function origin_for(req)
     local host = h["x-forwarded-host"] or h.host
     -- Round-10 MEDIUM-6: normalize before allowlist comparison.
     -- X-Forwarded-Host can be a chain ("a.com, internal-lb") on
-    -- nginx+ALB deployments — take the leftmost (client-facing)
+    -- nginx+ALB deployments - take the leftmost (client-facing)
     -- entry. Then strip an optional :PORT suffix so apps deployed
     -- on non-standard ports without a proxy that strips it match
     -- their bare-hostname allowlist entry.
@@ -597,7 +597,7 @@ local function origin_for(req)
     --
     -- Round-11 LOW-10: one-shot warn the first time this fires.
     -- Pre-fix, a misconfigured trusted_hosts produced 100% silent
-    -- no-mail — operators learned from user complaints. The
+    -- no-mail - operators learned from user complaints. The
     -- enumeration-safe contract means we can't 4xx the request,
     -- but a single log line at startup is enough for ops to spot
     -- the misconfig.
@@ -770,7 +770,7 @@ end
 -- verify). Hands the user off to the app-supplied on_login callback
 -- (typically session.login_handler) with the factors metadata in the
 -- ctx 4th arg. The audit row + new-device hook are now emitted by
--- session.login_handler — see hull/web/middleware/session.lua's
+-- session.login_handler - see hull/web/middleware/session.lua's
 -- audit_log/on_new_device opts. That single seam covers OAuth too.
 --
 -- emit_event (password_reset_completed / email_change_* further
@@ -814,7 +814,7 @@ local function parse_body(req)
 end
 
 -- Trivial email shape check. The actual deliverability is
--- determined by the email provider — we just guard against
+-- determined by the email provider - we just guard against
 -- obviously-garbage input.
 local function is_email_ish(s)
     if type(s) ~= "string" then return false end
@@ -864,7 +864,7 @@ local function handle_register(req, res)
     if not is_email_ish(body.email) then
         return res:status(400):json({ error = "invalid email" })
     end
-    -- 256 char upper bound prevents PBKDF2 amplification DoS — a
+    -- 256 char upper bound prevents PBKDF2 amplification DoS - a
     -- 10 MB submitted password would hash for multiple seconds at
     -- the default 600k iters. 256 covers any realistic passphrase
     -- (bcrypt's hard limit is 72 for comparison).
@@ -874,7 +874,7 @@ local function handle_register(req, res)
     end
     -- Pwned-password check runs BEFORE user_find_by_email so a
     -- breached password is rejected with the same error regardless
-    -- of whether the email already exists — enumeration-safe.
+    -- of whether the email already exists - enumeration-safe.
     if check_pwned(body.password) then
         return res:status(400):json({
             error = "password appears in known data breaches; choose another",
@@ -906,7 +906,7 @@ local function handle_register(req, res)
     res:json({ ok = true })
 end
 
--- POST /auth/verify/resend { email } — re-issue the welcome /
+-- POST /auth/verify/resend { email } - re-issue the welcome /
 -- verify email if the address belongs to an UNVERIFIED user.
 -- Enumeration-safe: always returns {ok:true} regardless of whether
 -- the user exists or is already verified, so an attacker can't
@@ -948,7 +948,7 @@ end
 -- Build the minimal default HTML form rendered when a magic-link
 -- click lands and 2FA is required but the app hasn't configured a
 -- custom `totp_pending_redirect`. The only interpolated value is
--- the pending token (HMAC base64url + hex tag — fixed alphabet),
+-- the pending token (HMAC base64url + hex tag - fixed alphabet),
 -- so no escaping concerns; we keep it ugly-but-functional so apps
 -- that care about UX point totp_pending_redirect at their own
 -- page.
@@ -1004,7 +1004,7 @@ local function handle_login(req, res)
     -- circuit to the SAME 401 + "invalid credentials" that the wrong-
     -- password branch returns. Round-8 HIGH-4: prior code returned
     -- 429 + Retry-After in this branch, which leaked account
-    -- existence — an attacker could deliberately trip a lockout
+    -- existence - an attacker could deliberately trip a lockout
     -- against a candidate address (5 bad guesses) and then enumerate
     -- registered emails by observing 429 vs 401. The locked state is
     -- preserved internally (the counter still ticks, the user still
@@ -1030,7 +1030,7 @@ local function handle_login(req, res)
     if _state.require_verified_email and not user.email_verified then
         return res:status(403):json({ error = "email not verified" })
     end
-    -- Successful auth — clear the failed-attempts row so subsequent
+    -- Successful auth - clear the failed-attempts row so subsequent
     -- typos don't accumulate against a long-standing baseline.
     clear_failed_logins(user_uid(user))
     if _state.enable_totp
@@ -1042,7 +1042,7 @@ end
 
 local function handle_logout(req, res)
     -- We don't know the user_id here without inspecting the
-    -- session — that's the app's responsibility. Apps that want
+    -- session - that's the app's responsibility. Apps that want
     -- a "logout" event in the audit log can call audit_log.record
     -- inside their on_logout callback.
     if _state.on_logout then
@@ -1109,7 +1109,7 @@ local function handle_magic_link_consume(req, res)
     finish_login(req, res, user, "magic_link")
 end
 
--- POST /auth/totp-verify { token, code } — second factor.
+-- POST /auth/totp-verify { token, code } - second factor.
 -- The pending token is NOT consumed on a failed code attempt
 -- (apps must rate-limit this route to bound retry; see the
 -- module header for the recommended ratelimit.middleware
@@ -1154,7 +1154,7 @@ local function handle_totp_verify(req, res)
         return res:status(400):json({ error = "totp token already used" })
     end
     gc_expired()
-    -- 2FA path — record both factors. Apps reading audit logs
+    -- 2FA path - record both factors. Apps reading audit logs
     -- can use this to distinguish "password-only" from "with
     -- 2FA" logins for compliance reporting.
     finish_login(req, res, user, "password+totp")
@@ -1231,7 +1231,7 @@ local function handle_email_change(req, res)
     -- This route assumes the app has authenticated the request
     -- (e.g. via auth.session_middleware) and stashed the user id
     -- on req.ctx.user_id. The module doesn't depend on a specific
-    -- session shape — apps wire this in.
+    -- session shape - apps wire this in.
     local user_id = req.ctx and req.ctx.user_id
     if not user_id then
         return res:status(401):json({ error = "not authenticated" })
@@ -1240,7 +1240,7 @@ local function handle_email_change(req, res)
     if not is_email_ish(body.new_email) then
         return res:status(400):json({ error = "invalid email" })
     end
-    -- Reject if the target email is already taken — reveals
+    -- Reject if the target email is already taken - reveals
     -- existence, but that's a UX call (the alternative is a silent
     -- accept that confuses the user).
     if _state.user_find_by_email(body.new_email) then
@@ -1260,7 +1260,7 @@ local function handle_email_change(req, res)
 
     -- Round-11 MEDIUM-9: reject when a pending email-change for
     -- this user already exists. Pre-fix the upsert silently
-    -- destroyed the prior pending row — when the user (or attacker)
+    -- destroyed the prior pending row - when the user (or attacker)
     -- clicked a stale link, email_change_confirm rejected at the
     -- `new_email` mismatch guard, killing the legitimate flow with
     -- a generic error and no retry path. Force the user to either
@@ -1292,7 +1292,7 @@ local function handle_email_change(req, res)
     local user = _state.user_get(user_id)
     local link = origin .. _state.prefix
                  .. "/email-change/confirm?token=" .. token
-    -- Send to the NEW address — proves the user controls it.
+    -- Send to the NEW address - proves the user controls it.
     send_email(body.new_email, "email_change", {
         user = user, link = link, token = token,
         new_email = body.new_email,
@@ -1317,7 +1317,7 @@ local function handle_email_change(req, res)
     res:json({ ok = true })
 end
 
--- GET /auth/email-change/revoke?token=... — consumed by the
+-- GET /auth/email-change/revoke?token=... - consumed by the
 -- OLD-address holder to cancel a pending email change. Single-use
 -- via the same _hull_auth_used_tokens table; deletes the pending
 -- row and (for paranoia) burns any matching email_change token
@@ -1347,7 +1347,7 @@ local function handle_email_change_confirm(req, res)
         return secure_html(res):status(400):html("email change failed")
     end
     -- Double-check there's a pending row and that the new_email
-    -- in the envelope matches it (defense in depth — the token
+    -- in the envelope matches it (defense in depth - the token
     -- envelope IS the authority but a stale pending row should
     -- still get cleaned up).
     local rows = db.query(
@@ -1430,7 +1430,7 @@ end
 -- single callbacks (opts.user_create wins over opts.users.create)
 -- or skip the adapter entirely.
 --
--- The adapter is **DB-backend-agnostic** — it issues standard
+-- The adapter is **DB-backend-agnostic** - it issues standard
 -- INSERT / UPDATE / SELECT against the `users` table via the
 -- `db` module, no SQLite-specific syntax. Works on whatever
 -- backend `hull/db` is wired to (SQLite today, Postgres planned).
@@ -1446,8 +1446,8 @@ end
 --   )
 --
 -- @tparam ?table opts
---   * `table`   — table name (default `"users"`).
---   * `id_gen`  — `function() -> string` for new ids (default:
+--   * `table`   - table name (default `"users"`).
+--   * `id_gen`  - `function() -> string` for new ids (default:
 --                 32 hex chars from crypto.random(16)).
 -- @treturn table  Six fields: find_by_email, get, create,
 --                 set_password, set_email, set_email_verified.
@@ -1568,7 +1568,7 @@ function M.init(opts)
         -- before comparison, so an entry like "app.com:8080" never
         -- matches and the deployment silently sends zero emails. Catch
         -- the defensive-typo at init. IPv6 bracketed literals
-        -- ([::1]) are allowed — colons inside the brackets are part
+        -- ([::1]) are allowed - colons inside the brackets are part
         -- of the host.
         for _, h in ipairs(opts.trusted_hosts) do
             if type(h) ~= "string" or h == "" then
@@ -1593,7 +1593,7 @@ function M.init(opts)
         "user_set_email_verified",
     }
     -- `opts.users` (typically from M.standard_users(...)) is a
-    -- bulk adapter — its 6 functions become the defaults;
+    -- bulk adapter - its 6 functions become the defaults;
     -- explicit opts.user_X overrides still win. Keeps the
     -- orthogonality of letting apps mix-and-match (e.g. swap
     -- user_create only).
@@ -1646,7 +1646,7 @@ function M.init(opts)
     -- Round-12 MEDIUM-1: reset the one-shot host-mismatch warn so a
     -- hot-reload that fixes / changes the allowlist gets a fresh
     -- diagnostic on the next bad host. Without this, the warn fires
-    -- only once per process — an operator who "fixes" the config
+    -- only once per process - an operator who "fixes" the config
     -- but introduces a new typo wouldn't see the second warn.
     _state.warned_host_mismatch = false
     _state.warned_malformed_ipv6 = false
@@ -1747,14 +1747,14 @@ function M.routes(app)
     register_routes(app)
 end
 
---- Standalone helpers — useful when an app needs to trigger one of
+--- Standalone helpers - useful when an app needs to trigger one of
 --- the flows from outside the standard routes (e.g. an admin
 --- forcing a password reset for a user).
 
 --- Programmatically trigger a verify-email send. Useful for admin
 --- panels resending the link, or wiring this into a "re-send"
 --- button on the app's login page. `verify_url_prefix` is the
---- full origin (`"https://app.example.com"`) — the module can't
+--- full origin (`"https://app.example.com"`) - the module can't
 --- know the public URL the user accesses without a request to
 --- read its `Host`/`X-Forwarded-Host` from.
 function M.send_verify_email(user, verify_url_prefix)

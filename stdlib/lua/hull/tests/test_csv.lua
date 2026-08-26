@@ -1,4 +1,4 @@
--- test_csv.lua — Tests for hull.csv
+-- test_csv.lua - Tests for hull.csv
 --
 -- Tests RFC 4180 CSV parsing and encoding.
 -- Run via: the C test harness (test_lua_runtime.c) loads and executes this.

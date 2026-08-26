@@ -1,4 +1,4 @@
--- test_email.lua — Tests for hull.email
+-- test_email.lua - Tests for hull.email
 --
 -- Tests field validation and provider dispatch (no network I/O).
 -- email.send follows the stdlib error convention: it THROWS a coded error
@@ -79,7 +79,7 @@ expect_code("unknown provider throws",
 test("default provider is smtp", function()
     -- Dispatches to the smtp adapter (which then fails because smtp is not
     -- configured / localhost is unreachable in the test env). The failure must
-    -- NOT be unknown_provider — that would mean it never reached smtp.
+    -- NOT be unknown_provider - that would mean it never reached smtp.
     local ok, err = pcall(email.send, {
         from = "a@b.com", to = "c@d.com",
         subject = "s", body = "b",

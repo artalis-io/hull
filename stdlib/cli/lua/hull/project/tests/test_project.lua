@@ -1,5 +1,5 @@
 --
--- test_project.lua — tests for the project source-discovery layer.
+-- test_project.lua - tests for the project source-discovery layer.
 --
 -- Covers the Lua frontend adapter (declarations/annotations/ranges without executing
 -- app source), the frontend-neutral model (IDs, indexes, valid/complete, annotated-only

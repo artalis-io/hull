@@ -75,7 +75,7 @@ test("two nonces are different (RNG sanity)", function()
     assert_true(n1 ~= n2, "successive nonces must differ")
 end)
 
--- ── csp.htmx() — Pico-compatible profile ─────────────────────────────
+-- ── csp.htmx() - Pico-compatible profile ─────────────────────────────
 
 test("htmx() sets CSP header and exposes nonce in ctx", function()
     local mw = csp.htmx()
@@ -107,7 +107,7 @@ test("htmx() generates a fresh nonce per request", function()
                 "per-request nonces must differ")
 end)
 
--- ── csp.strict() — no inline-style escape ────────────────────────────
+-- ── csp.strict() - no inline-style escape ────────────────────────────
 
 test("strict() omits style-src-attr 'unsafe-inline'", function()
     local mw = csp.strict()

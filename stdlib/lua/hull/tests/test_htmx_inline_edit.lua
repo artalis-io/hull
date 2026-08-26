@@ -49,7 +49,7 @@ test("cell triggers on click, Enter, Space", function()
     local s = inline_edit.cell({ value = "x", edit_url = "/x/edit" })
     assert_match(s, 'click')
     assert_match(s, "Enter")
-    -- Space — the literal char appears in the trigger
+    -- Space - the literal char appears in the trigger
     assert_match(s, "key==' '")
 end)
 

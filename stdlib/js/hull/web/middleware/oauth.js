@@ -35,7 +35,7 @@
  *
  *   - The 4th `ctx` arg passed to onLogin contains
  *     { provider, claims, tokens }. `tokens` is the raw token
- *     response from the IdP — including access_token,
+ *     response from the IdP - including access_token,
  *     refresh_token, and id_token. These are bearer credentials:
  *     anyone with _hull_sessions.data read access could call the
  *     IdP as the user.
@@ -106,7 +106,7 @@ const _state = {
     stateCookieSameSite: "Lax",
     stateTtl:       600,
     providers:      {},  // name -> resolved cfg
-    // findUser(provider, claims) -> user-object — required when
+    // findUser(provider, claims) -> user-object - required when
     // onLogin is set. Lets onLogin use the same (req, res, user)
     // signature as hull/web/auth-flows so a single login handler
     // (typically session.loginHandler(cookie)) works for both
@@ -285,7 +285,7 @@ async function refreshJwks(providerName) {
     const byKid = {};
     for (const k of doc.keys) {
         if (k && k.kid && Array.isArray(k.x5c) && typeof k.x5c[0] === "string") {
-            // Cap-layer base64urlDecodeBytes returns an ArrayBuffer —
+            // Cap-layer base64urlDecodeBytes returns an ArrayBuffer -
             // binary-safe (cert bytes >= 0x80 would corrupt through
             // JS_NewStringLen's UTF-8 validation). Mirrors the Lua
             // sibling's crypto.base64url_decode call.
@@ -502,7 +502,7 @@ async function handleCallback(req, res) {
         res.status(400).html("auth failed"); return;
     }
 
-    // (State cookie was cleared at the top of the handler — every
+    // (State cookie was cleared at the top of the handler - every
     // callback consumes the cookie regardless of outcome.)
 
     // 7. Resolve claims -> app's user via findUser, then hand off

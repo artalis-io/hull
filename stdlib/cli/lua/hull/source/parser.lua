@@ -1,5 +1,5 @@
 --
--- hull.source.parser — recursive-descent Lua 5.4 parser (expressions + statements).
+-- hull.source.parser - recursive-descent Lua 5.4 parser (expressions + statements).
 --
 -- Consumes the lexer token stream and builds the Hull AST (expressions AND
 -- statements) with EXACT half-open byte ranges (see range.lua). M.parse_chunk()

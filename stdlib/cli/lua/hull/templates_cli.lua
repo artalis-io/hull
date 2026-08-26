@@ -1,5 +1,5 @@
 --
--- hull.templates_cli — `hull new --type cli <name>` scaffolding
+-- hull.templates_cli - `hull new --type cli <name>` scaffolding
 --
 -- Modular CLI layout. app.lua's app.main is a dispatcher:
 --   `mytool greet alice`  →  commands/greet.lua's M.run(ctx)
@@ -9,7 +9,7 @@
 -- M.run(ctx) that returns the exit code. Shared helpers (output
 -- formatting, config parsing, etc.) go in lib/.
 --
--- No migrations/ by default — CLI tools rarely need a database. If
+-- No migrations/ by default - CLI tools rarely need a database. If
 -- yours does, mkdir migrations/ and add `"hull/db@1"` to the manifest.
 --
 -- SPDX-License-Identifier: AGPL-3.0-or-later
@@ -74,7 +74,7 @@ app.main(function(ctx)
             usage(ctx.stderr)
             return 1
         end
-        -- A real error inside the command file — propagate it.
+        -- A real error inside the command file - propagate it.
         error(mod, 0)
     end
 
@@ -135,7 +135,7 @@ return M
 
 lua_files["tests/commands/test_greet.lua"] = [[-- Tests use test.run_main to synthesise argv/stdin/env and capture
 -- the exit code + stdout/stderr. As of v0.1.0 the CLI test
--- harness is still being shaped — for now invoke through `hull run`
+-- harness is still being shaped - for now invoke through `hull run`
 -- in the project root.
 
 test("greet: smoke", function()

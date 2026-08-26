@@ -1,4 +1,4 @@
--- test_search.lua — Tests for hull.search
+-- test_search.lua - Tests for hull.search
 --
 -- Tests FTS5 full-text search wrapper.
 -- Requires db global (run via C test harness with caps).

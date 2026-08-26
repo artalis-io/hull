@@ -1,7 +1,7 @@
 <!-- minimal -->
 ## Authentication
 
-**Session-based auth** — cookie sessions backed by SQLite.
+**Session-based auth** - cookie sessions backed by SQLite.
 
 ```lua
 -- Lua
@@ -25,7 +25,7 @@ auth.login(req, res, { userId: 1 });
 auth.logout(req, res);
 ```
 
-**JWT auth** — Bearer token via `Authorization` header.
+**JWT auth** - Bearer token via `Authorization` header.
 
 ```lua
 app.use("*", "/api/*", auth.jwt_middleware({ secret = "my-secret" }))
@@ -47,9 +47,9 @@ app.use("*", "/api/*", auth.jwt_middleware({ secret = "my-secret" }))
 - Reads `Authorization: Bearer <token>` header
 - Sets `req.ctx.user` with decoded payload
 
-**`auth.login(req, res, user_data, opts)`** — creates session, sets `Set-Cookie`. Returns `session_id`.
+**`auth.login(req, res, user_data, opts)`** - creates session, sets `Set-Cookie`. Returns `session_id`.
 
-**`auth.logout(req, res, opts)`** — destroys session, clears cookie.
+**`auth.logout(req, res, opts)`** - destroys session, clears cookie.
 
 **Session management:**
 ```lua

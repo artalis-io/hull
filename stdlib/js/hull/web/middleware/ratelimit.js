@@ -4,7 +4,7 @@
  * @description In-memory rate limiting middleware factory. Lua parity:
  *   `hull.web.middleware.ratelimit`.
  *
- * Sliding-window counter per key. **In-memory only — resets on restart.**
+ * Sliding-window counter per key. **In-memory only - resets on restart.**
  * For multi-instance production rate limiting, layer a DB-backed limiter.
  *
  * The per-key buckets live in a bounded `hull:cache` instance, so memory is
@@ -69,7 +69,7 @@ function check(buckets, key, limit, window, now) {
  * Concurrency: the bucket store is per-process and in-memory. Multi-
  * process deployments (multiple Hull workers behind a load balancer,
  * horizontal scaling) will multiply the effective limit by the
- * worker count — each worker enforces independently. Apps that need
+ * worker count - each worker enforces independently. Apps that need
  * a globally-coherent limit must front this with a shared store
  * (Redis bucket, edge rate-limit at the LB, etc.).
  *

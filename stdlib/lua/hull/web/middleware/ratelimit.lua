@@ -3,7 +3,7 @@
 -- @module hull.web.middleware.ratelimit
 -- @license AGPL-3.0-or-later
 --
--- Sliding-window counter per key. **In-memory only — resets on restart.**
+-- Sliding-window counter per key. **In-memory only - resets on restart.**
 -- For production-grade rate limiting across multiple instances, layer
 -- a DB-backed limiter on top.
 --
@@ -65,7 +65,7 @@ end
 -- Concurrency: the bucket store is per-process and in-memory. Multi-
 -- process deployments (multiple Hull workers behind a load balancer,
 -- horizontal scaling) will multiply the effective limit by the
--- worker count — each worker enforces independently. Apps that need
+-- worker count - each worker enforces independently. Apps that need
 -- a globally-coherent limit must front this with a shared store
 -- (Redis bucket, edge rate-limit at the LB, etc.).
 --

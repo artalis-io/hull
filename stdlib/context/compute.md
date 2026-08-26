@@ -162,7 +162,7 @@ in any language work as long as they export `hull_process` and
 - **C** (`clang --target=wasm32-unknown-unknown -nostdlib`)
 - **Rust** (`wasm32-unknown-unknown` target, `#[no_mangle] extern "C"`)
 - **Zig** (`wasm32-freestanding`)
-- **TinyGo**, **AssemblyScript** — also supported
+- **TinyGo**, **AssemblyScript** - also supported
 
 `--lang=rust` scaffolding is on the roadmap.
 

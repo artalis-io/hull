@@ -1,5 +1,5 @@
 --
--- hull.source.annotations — the generic `---@` scanner + declaration attachment.
+-- hull.source.annotations - the generic `---@` scanner + declaration attachment.
 --
 -- Turns any `---@name`, `---@name(args)`, or `---@name rest` LINE comment into a
 -- structured annotation record and attaches contiguous runs of such comments to

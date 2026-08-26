@@ -17,7 +17,7 @@ local _request = require("hull.web._request")
 local session = {}
 
 -- Module-level TTL (seconds), default 24 hours.
--- Singleton TTL — session.init() must be called exactly once per application.
+-- Singleton TTL - session.init() must be called exactly once per application.
 local _ttl = 86400
 -- Round-8 MEDIUM-8: absolute (hard) TTL. Sliding _ttl extends
 -- expires_at on every hit; absolute caps the session at
@@ -51,7 +51,7 @@ local _trust_proxy = false
 --
 -- @tparam[opt] table opts
 --   * `ttl`           (integer, default 86400). SLIDING lifetime in
---                     seconds — every hit extends expires_at by ttl.
+--                     seconds - every hit extends expires_at by ttl.
 --   * `absolute_ttl`  (integer, default 86400 = 24h, set false to
 --                     disable). HARD upper bound from created_at;
 --                     once a session is older than absolute_ttl it
@@ -78,7 +78,7 @@ function session.init(opts)
     _trust_proxy = opts.trust_proxy == true
     -- absolute_ttl:
     --   * nil    → keep module default (24h).
-    --   * false  → disabled (the canonical opt-out — apps that
+    --   * false  → disabled (the canonical opt-out - apps that
     --              intentionally want forever-sessions stay loud).
     --   * <= 0   → disabled WITH a one-shot warn. Lua 0 is truthy,
     --              so pre-round-9 `0` slipped through and the check
@@ -149,7 +149,7 @@ function session.init(opts)
 
     -- Lazy catchup + auto-schedule daily cleanup. Mirrors the
     -- audit-log pattern: bound _hull_sessions growth even when the
-    -- app forgets to wire a cleanup timer. Cheap — a DELETE WHERE
+    -- app forgets to wire a cleanup timer. Cheap - a DELETE WHERE
     -- expires_at < now over an indexed range. Both passes guarded
     -- against repeated init() calls (test fixtures, hot reload).
     if opts.cleanup ~= false and not _cleanup_catchup_done then
@@ -190,7 +190,7 @@ end
 --- Create a new session.
 --
 -- @tparam[opt] table data  Initial session data. JSON-encoded for storage.
--- @tparam[opt] table opts  `{ ttl = integer }` — override module-level TTL.
+-- @tparam[opt] table opts  `{ ttl = integer }` - override module-level TTL.
 -- @treturn string  Session id (64-char hex). Persist to the client via
 --   a cookie (see @{hull.web.middleware.auth.login}).
 function session.create(data, opts)
@@ -213,7 +213,7 @@ function session.create(data, opts)
         ip = _request.client_ip(opts.req, _trust_proxy)
         ua = h and h["user-agent"]
         -- Real UAs top out around 500 chars; bots and scanners can
-        -- send 100KB UAs. Cap to bound the row size — the value is
+        -- send 100KB UAs. Cap to bound the row size - the value is
         -- only used for the /devices listing display.
         if type(ua) == "string" and #ua > 512 then
             ua = ua:sub(1, 512)
@@ -301,7 +301,7 @@ function session.load(session_id, opts)
 
     local decoded = json.decode(row.data)
     if not decoded then
-        -- Corrupted session data — destroy and return nil
+        -- Corrupted session data - destroy and return nil
         db.exec("DELETE FROM _hull_sessions WHERE id = ?", { session_id })
         return nil
     end
@@ -354,7 +354,7 @@ end
 
 --- Delete all expired sessions.
 --
--- Run periodically — typically `app.every(3600_000, session.cleanup)`.
+-- Run periodically - typically `app.every(3600_000, session.cleanup)`.
 --
 -- @treturn integer  Number of rows deleted.
 function session.cleanup()
@@ -370,7 +370,7 @@ end
 -- Returns rows `{ id, created_at, last_accessed, ip, user_agent }`,
 -- newest-accessed first. Excludes expired rows. The session
 -- DATA blob is NOT included (apps don't typically need it for a
--- device list — they want ip/ua/recency).
+-- device list - they want ip/ua/recency).
 -- @tparam string user_id
 -- @treturn table  Array (possibly empty).
 function session.list_for_user(user_id)
@@ -385,7 +385,7 @@ function session.list_for_user(user_id)
     if _absolute_ttl then
         -- Round-11 HIGH-2: tolerate NULL created_at. Pre-fix
         -- `created_at + N > now` was unknown→false for NULL rows
-        -- (legacy migrations / pre-column rows) — they silently
+        -- (legacy migrations / pre-column rows) - they silently
         -- vanished from the device list while still cookie-loading
         -- (load() correctly skips the cap when created_at is NULL).
         -- Match load()'s NULL tolerance here so list+load agree.
@@ -456,31 +456,31 @@ local DEFAULT_LOGIN_HANDLER_OPTS = {
 --
 -- @tparam table cookie_mod  hull.web.cookie module reference.
 -- @tparam[opt] table opts
---   * `name`        — cookie name (default "hull_session", matching
+--   * `name`        - cookie name (default "hull_session", matching
 --                     hull/web/middleware/auth's session_middleware).
---   * `cookie_opts` — extra opts forwarded to cookie.serialize
+--   * `cookie_opts` - extra opts forwarded to cookie.serialize
 --                     (default { path="/", httponly=true, samesite="Lax" }).
---   * `extract_data(user)` — fields to embed in the session row
+--   * `extract_data(user)` - fields to embed in the session row
 --                     (default `{ user_id = user.id, email = user.email }`).
---   * `respond(res, user, sid)` — write the response body (default
+--   * `respond(res, user, sid)` - write the response body (default
 --                     `res:json({ ok = true, user_id = user.id,
 --                                  email = user.email })`).
---   * `rotate`      — bool, rotate any prior session in the cookie
+--   * `rotate`      - bool, rotate any prior session in the cookie
 --                     (default true; turn off only if your app
 --                     deliberately tracks pre- and post-login
 --                     state in one session).
 -- @treturn function  on_login compatible with auth-flows + oauth.
 --
 -- Additional opts (audit + new-device, shared across all login sources):
---   * `audit_log`      — module ref (e.g. require("hull.web.middleware.audit-log")).
+--   * `audit_log`      - module ref (e.g. require("hull.web.middleware.audit-log")).
 --                        When set, records a login event after the session
 --                        is rotated/created. Off by default.
---   * `audit_kind`     — event kind string (default "login").
---   * `audit_metadata(user, ctx)` — table emitted as the event metadata.
+--   * `audit_kind`     - event kind string (default "login").
+--   * `audit_metadata(user, ctx)` - table emitted as the event metadata.
 --                        Default derives `{ factors = ctx.factors }` (auth-flows)
 --                        or `{ factors = "oauth:" .. ctx.provider }` (oauth)
 --                        or `{ factors = "unknown" }` (no ctx).
---   * `on_new_device(req, res, user)` — called before audit_log.record when
+--   * `on_new_device(req, res, user)` - called before audit_log.record when
 --                        audit_log.is_new_device(user_id, req) returns true.
 --                        Requires audit_log. Wrapped in pcall so callback
 --                        bugs cannot fail the login.
@@ -521,10 +521,10 @@ function session.login_handler(cookie_mod, opts)
     -- on_login's 4th arg, which makes `audit_metadata = function(_,c)
     -- return c end` a one-keystroke leak of access_token /
     -- refresh_token / raw ID-token into _hull_audit_log.metadata
-    -- (where it persists for opts.retain_days — default 365). The
+    -- (where it persists for opts.retain_days - default 365). The
     -- list mirrors the JS half and covers OAuth, password, and TOTP
     -- secret surfaces. If you need to log claim details, pull them
-    -- out by name in a custom audit_metadata — never pass the raw
+    -- out by name in a custom audit_metadata - never pass the raw
     -- ctx through.
     local SCRUB_KEYS = {
         tokens         = true, token        = true,

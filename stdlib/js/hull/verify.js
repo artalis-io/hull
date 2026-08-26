@@ -1,8 +1,8 @@
 /*
- * hull:verify — Verify app signature (dual-layer + v0.1.3 gethull)
+ * hull:verify - Verify app signature (dual-layer + v0.1.3 gethull)
  *
  * NOTE: the CLI `hull verify` always runs the Lua implementation
- * (stdlib/cli/lua/hull/verify.lua) — this JS module is kept for
+ * (stdlib/cli/lua/hull/verify.lua) - this JS module is kept for
  * parity / library use only. The Lua version checks the v0.1.3
  * gethull layer using a tool.platform_pubkey() binding; that
  * binding isn't exposed to the JS tool runtime today, so this
@@ -15,7 +15,7 @@
  *   --gethull-key <file>     gethull.dev pubkey for the v0.1.3 layer.
  *                            OVERRIDE semantics here (since the JS
  *                            runtime can't read the embedded
- *                            HL_PLATFORM_PUBKEY_HEX) — the file's
+ *                            HL_PLATFORM_PUBKEY_HEX) - the file's
  *                            key replaces what would be the embedded
  *                            one. The Lua verifier's same-named flag
  *                            is stricter (cross-check: file MUST
@@ -30,7 +30,7 @@ import { sha256, ed25519Verify } from "hull:crypto";
 
 // All-zeros sentinel: dev hulls / forks built without their own
 // pinned platform pubkey. `hull build` writes this when no real key
-// has been embedded yet — comparing against it lets us silently
+// has been embedded yet - comparing against it lets us silently
 // short-circuit warnings rather than nag the user about a key they
 // never opted into.
 const ZERO_PUBKEY_HEX =

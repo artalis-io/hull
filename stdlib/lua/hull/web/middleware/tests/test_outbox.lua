@@ -1,4 +1,4 @@
--- test_outbox.lua — Tests for hull.web.middleware.outbox
+-- test_outbox.lua - Tests for hull.web.middleware.outbox
 --
 -- Requires db, time, json, http globals (run via hull test harness).
 -- Note: outbound HTTP calls will fail in test mode (no actual server).

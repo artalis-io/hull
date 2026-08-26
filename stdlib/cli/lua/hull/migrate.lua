@@ -1,5 +1,5 @@
 --
--- hull.migrate — Migration scaffolding tool
+-- hull.migrate - Migration scaffolding tool
 --
 -- Handles the 'new' subcommand: creates numbered .sql migration files.
 -- The 'run' and 'status' subcommands are handled in C (commands/migrate.c).

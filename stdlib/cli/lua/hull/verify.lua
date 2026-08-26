@@ -1,10 +1,10 @@
 --
--- hull.verify — Verify app signature (dual-layer + v0.1.3 gethull)
+-- hull.verify - Verify app signature (dual-layer + v0.1.3 gethull)
 --
 -- Usage: hull verify [options] [app_dir]
 --   --platform-key <file|url>   Per-app platform key (the v0.1.2 platforms
 --                               object is signed by the app developer here,
---                               not by gethull.dev — distinct from the
+--                               not by gethull.dev - distinct from the
 --                               gethull layer below)
 --   --developer-key <file|url>  Developer public key for the app layer
 --   --gethull-key <file|url>    Cross-check: the file's pubkey must match
@@ -22,17 +22,17 @@
 --                               with its own key.
 --
 -- Verification layers, in order:
---   1. gethull layer (v0.1.3): package.sig.platform.gethull — the signed
+--   1. gethull layer (v0.1.3): package.sig.platform.gethull - the signed
 --      libhull_platform.a manifest carried forward from the hull binary
 --      that ran `hull build`. Pubkey is the build-time-pinned
 --      HL_PLATFORM_PUBKEY_HEX (queried via tool.platform_pubkey()).
 --   2. app's per-build platform layer (v0.1.2): package.sig.platform.{
---      platforms, public_key, signature} — the JSON object the developer
+--      platforms, public_key, signature} - the JSON object the developer
 --      signed alongside their app.
---   3. app layer: package.sig.{files, signature, public_key} — Ed25519
+--   3. app layer: package.sig.{files, signature, public_key} - Ed25519
 --      over the canonical-JSON payload of {binary_hash, build, files,
 --      manifest, platform, trampoline_hash[, modules_resolved]}.
---   4. file hashes — each path in files{} re-hashed and compared.
+--   4. file hashes - each path in files{} re-hashed and compared.
 --
 -- SPDX-License-Identifier: AGPL-3.0-or-later
 --
@@ -148,7 +148,7 @@ local function main()
     -- This whole block is no-op when:
     --   * --no-verify-platform is set, or
     --   * this verify hull was built with the all-zeros placeholder
-    --     pubkey (dev hulls / forks without their own pinned key) —
+    --     pubkey (dev hulls / forks without their own pinned key) -
     --     we cannot validate anyway, and apps built by such a hull
     --     legitimately have no gethull block.
     --
@@ -211,7 +211,7 @@ local function main()
     -- The developer's `hull sign-platform` step produced this block
     -- with their own platform key. We verify the signature is
     -- self-consistent (covers the platforms object with the embedded
-    -- pubkey) but do NOT pin against any upstream key — that pinning
+    -- pubkey) but do NOT pin against any upstream key - that pinning
     -- moved to the v0.1.3 gethull layer above, which uses a signed
     -- manifest from the gethull release pipeline. --platform-key is
     -- still honored as an explicit override for forks that want to

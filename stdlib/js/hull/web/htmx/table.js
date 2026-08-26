@@ -1,7 +1,7 @@
 /**
  * @file hull:web:htmx:table
  * @module hull:web:htmx:table
- * @description HTMX table widget — schema-driven `<table>`
+ * @description HTMX table widget - schema-driven `<table>`
  * renderer that composes sort + inline-edit per column.
  *
  * The grid pattern of every admin / data UI in one helper. Takes
@@ -11,7 +11,7 @@
  * cells for everything else (HTML-escaped).
  *
  * Apps wire search input + pagination footer around the table
- * separately — this widget owns the grid, not the page layout.
+ * separately - this widget owns the grid, not the page layout.
  *
  * Lua parity: same surface as hull.web.htmx.table.
  */

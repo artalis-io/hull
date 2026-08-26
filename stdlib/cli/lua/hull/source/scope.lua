@@ -1,5 +1,5 @@
 --
--- hull.source.scope — lexical binding / name-resolution pass (lint slice 2).
+-- hull.source.scope - lexical binding / name-resolution pass (lint slice 2).
 --
 -- scope.resolve(unit) -> scope, err : resolves every `name` AST node to its binding
 -- (a local/param/loopvar, an upvalue across a function boundary, or a global) and

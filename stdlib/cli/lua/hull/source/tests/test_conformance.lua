@@ -1,5 +1,5 @@
 --
--- test_conformance.lua — differential conformance of hull.source.lua vs real Lua 5.4.
+-- test_conformance.lua - differential conformance of hull.source.lua vs real Lua 5.4.
 --
 -- Oracle: the harness's vanilla lua_State runs the SAME vendored Lua 5.4 Hull ships,
 -- so its load(src, name, "t") is the exact parser Hull targets (compile-only, no

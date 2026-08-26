@@ -56,7 +56,7 @@
 --
 --   * The 4th `ctx` arg passed to on_login contains
 --     `{ provider, claims, tokens }`. `tokens` is the raw token
---     response from the IdP — including `access_token`,
+--     response from the IdP - including `access_token`,
 --     `refresh_token`, and `id_token`. These are bearer
 --     credentials: anyone with `_hull_sessions.data` read access
 --     could call the IdP as the user.
@@ -141,7 +141,7 @@ local _state = {
     state_cookie_samesite = "Lax",
     state_ttl        = 600,
     providers        = {},
-    -- find_user(provider, claims) -> user-object — required when
+    -- find_user(provider, claims) -> user-object - required when
     -- on_login is wired. Lets on_login use the same (req, res,
     -- user) signature as hull/web/auth-flows so a single login
     -- handler (typically session.login_handler(cookie)) works for
@@ -182,7 +182,7 @@ local PRESETS = {
         -- `organizations` = work/school only.
         --
         -- Round-10 HIGH-3: When using /common the ID token's `iss`
-        -- claim is the tenant id (not "common") — strict iss
+        -- claim is the tenant id (not "common") - strict iss
         -- equality would 100% reject. Multi-tenant presets now emit
         -- an `issuer_pattern` (Lua: gsub-friendly regex) which
         -- handle_callback checks as a fallback when strict `issuer`
@@ -198,7 +198,7 @@ local PRESETS = {
         }
         if tenant == "common" or tenant == "organizations"
            or tenant == "consumers" then
-            -- Lua pattern: matches /{guid or domain}/v2.0 — Microsoft
+            -- Lua pattern: matches /{guid or domain}/v2.0 - Microsoft
             -- emits either a 36-char tenant GUID OR a verified domain.
             cfg.issuer_pattern =
                 "^https://login%.microsoftonline%.com/[%w%-%.]+/v2%.0$"
@@ -534,7 +534,7 @@ local function handle_callback(req, res)
         return res:status(400):html("auth failed")
     end
 
-    -- (State cookie was cleared at the top of the handler — every
+    -- (State cookie was cleared at the top of the handler - every
     -- callback consumes the cookie regardless of outcome.)
 
     -- 7. Resolve claims -> app's user object via find_user, then

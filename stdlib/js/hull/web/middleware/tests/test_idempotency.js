@@ -1,4 +1,4 @@
-// test_idempotency.js — Tests for hull:web:middleware:idempotency
+// test_idempotency.js - Tests for hull:web:middleware:idempotency
 //
 // Requires db, crypto, time, json globals (run via hull test harness).
 

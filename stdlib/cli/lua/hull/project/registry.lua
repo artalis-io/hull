@@ -1,5 +1,5 @@
 --
--- hull.project.registry — the ONE canonical extension -> frontend mapping.
+-- hull.project.registry - the ONE canonical extension -> frontend mapping.
 --
 -- Design: docs/project_discovery_design.md D3/D11. Adding a frontend is one row here;
 -- hull dev / hull agent / build consumers ask the registry and never change. Lua is the

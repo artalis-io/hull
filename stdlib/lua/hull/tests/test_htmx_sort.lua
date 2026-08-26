@@ -169,7 +169,7 @@ test("parse honors opts.default that IS on the allowlist", function()
 end)
 
 test("parse falls back to nil when input + default both rejected", function()
-    -- ?sort=admin not in allowlist, default also not — both rejected.
+    -- ?sort=admin not in allowlist, default also not - both rejected.
     local r = sort.parse(mock_req("admin"), {
         allowed = { "id" }, default = "secret",
     })

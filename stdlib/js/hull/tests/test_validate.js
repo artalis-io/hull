@@ -1,4 +1,4 @@
-// test_validate.js — Tests for hull:validate
+// test_validate.js - Tests for hull:validate
 //
 // Tests pure-function schema validation (no runtime globals needed).
 

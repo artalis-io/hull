@@ -1,5 +1,5 @@
 --
--- test_lexer.lua — slice-1 tests for hull.source.lua (lexer + ranges + line map).
+-- test_lexer.lua - slice-1 tests for hull.source.lua (lexer + ranges + line map).
 --
 -- Pure Lua; run by tests/hull/source/test_lua_source.c (a vanilla lua_State with
 -- package.path pointed at stdlib/cli/lua). Returns { pass, fail, failures } and

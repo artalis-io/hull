@@ -91,7 +91,7 @@ test("show coerces nil message to empty string", function()
 end)
 
 test("shorthand opts override level if provided", function()
-    -- toast.success(res, msg, { level = "error" }) — shorthand wins
+    -- toast.success(res, msg, { level = "error" }) - shorthand wins
     local res = mock_res()
     toast.success(res, "x", { level = "error" })
     assert_eq(decoded(res).toast.level, "success")
@@ -126,7 +126,7 @@ test("toast composes with other HX-Trigger events on the same response", functio
     -- subsequent htmx.trigger call on the same response replaces
     -- the header (Hull's response API is last-write-wins for
     -- headers). The documented composition story is "use the
-    -- multi-event form of htmx.trigger" — verify it works.
+    -- multi-event form of htmx.trigger" - verify it works.
     local htmx = require("hull.web.htmx")
     local res = mock_res()
     toast.success(res, "saved")

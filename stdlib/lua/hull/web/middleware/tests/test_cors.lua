@@ -1,4 +1,4 @@
--- test_cors.lua — Tests for hull.web.middleware.cors
+-- test_cors.lua - Tests for hull.web.middleware.cors
 --
 -- Tests pure-function helpers (no runtime globals needed).
 -- Run via: the C test harness (test_lua_runtime.c) loads and executes this.

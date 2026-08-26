@@ -1,5 +1,5 @@
 --
--- hull.project.publish — the INTERNAL dev-generation publisher (not a user surface).
+-- hull.project.publish - the INTERNAL dev-generation publisher (not a user surface).
 --
 -- Spawned by `hull dev --agent` (via the C dispatcher when the publish flags are present)
 -- to write a fresh discovery generation. Distinct from hull.project.inspect (the

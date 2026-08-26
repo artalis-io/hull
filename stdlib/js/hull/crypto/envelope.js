@@ -3,7 +3,7 @@
  * @module hull:crypto:envelope
  * @description HMAC-signed, JSON-payload, stateless tokens.
  *
- * Mirror of stdlib/lua/hull/crypto/envelope.lua — see the Lua
+ * Mirror of stdlib/lua/hull/crypto/envelope.lua - see the Lua
  * module header for the full design rationale.
  *
  *     base64url(JSON-payload) "." hex(HMAC-SHA256(secret_hex, body))
@@ -35,7 +35,7 @@ function verify(token, secretHex) {
     const body = token.substring(0, dot);
     const tag  = token.substring(dot + 1);
 
-    // crypto.hmacSha256Verify throws on malformed-hex input —
+    // crypto.hmacSha256Verify throws on malformed-hex input -
     // catch so a junk token from the wire returns "bad tag"
     // rather than an unhandled exception in the handler.
     let valid = false;

@@ -1,4 +1,4 @@
---- HTMX search widget — server-side helpers for a debounced
+--- HTMX search widget - server-side helpers for a debounced
 --- search input that posts to a server-rendered results partial.
 --
 -- @module hull.web.htmx.search
@@ -60,24 +60,24 @@ local attr_escape = require("hull.web.htmx").escape
 --- Render the htmx attribute set for a debounced search input.
 --
 -- Required opts:
---   - `url`         string — server endpoint that returns the
+--   - `url`         string - server endpoint that returns the
 --                            results partial.
 --
 -- Optional opts:
---   - `target`      string — CSS selector of the results container.
+--   - `target`      string - CSS selector of the results container.
 --                            Default: `"#hull-search-results"`
 --                            (paired with `results_attrs()` default).
---   - `name`        string — query parameter name. Default: `"q"`.
---   - `delay_ms`    number — debounce window in ms. Default: 300.
---   - `method`      string — `"get"` (default) or `"post"`.
+--   - `name`        string - query parameter name. Default: `"q"`.
+--   - `delay_ms`    number - debounce window in ms. Default: 300.
+--   - `method`      string - `"get"` (default) or `"post"`.
 --                            POST is useful for long query strings
 --                            or sensitive data; otherwise prefer
 --                            GET (bookmarkable, cacheable).
---   - `push_url`    bool   — emit `hx-push-url="true"` so each
+--   - `push_url`    bool   - emit `hx-push-url="true"` so each
 --                            search updates the browser URL bar.
 --                            Default: false (typeahead UX rarely
 --                            wants every keystroke in history).
---   - `indicator`   string — CSS selector for a loading spinner;
+--   - `indicator`   string - CSS selector for a loading spinner;
 --                            emits `hx-indicator="<selector>"`.
 --
 -- Always also emits `type="search"`, `autocomplete="off"`, and a
@@ -120,7 +120,7 @@ end
 --- Render the a11y attribute set for the results container.
 --
 -- Optional opts:
---   - `id`  string — DOM id for the container. Default:
+--   - `id`  string - DOM id for the container. Default:
 --                    `"hull-search-results"` (the default
 --                    `input_attrs` target points here).
 --

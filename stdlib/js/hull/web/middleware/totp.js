@@ -137,7 +137,7 @@ CREATE INDEX IF NOT EXISTS _hull_totp_attempts_by_ip_lf
 // (which crypto.hexEncode uses for strings) UTF-8-inflates
 // code points >= 0x80, which corrupts binary-string round-
 // trips. The cap-layer crypto.hexEncode / crypto.hexDecode
-// are binary-safe for ArrayBuffer/Uint8Array input — use
+// are binary-safe for ArrayBuffer/Uint8Array input - use
 // them when the input is already a typed array.
 import { _hex } from "hull:crypto:_hex";
 const bytesToHex = _hex.toHex;
@@ -150,7 +150,7 @@ function hexToBytes(h) {
     return s;
 }
 
-// RFC 4648 Base32 (no padding) — encode + decode. 20 bytes → 32
+// RFC 4648 Base32 (no padding) - encode + decode. 20 bytes → 32
 // chars; decoder is case-insensitive and tolerates "=" / whitespace.
 const B32_ALPHA = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
 const B32_INV = (() => {
@@ -212,7 +212,7 @@ function totpAtStep(secretBytes, step, digits) {
     /* Use a Uint8Array (via .buffer) so crypto.hmacSha1 takes the
      * raw bytes through js_get_buffer's TypedArray probe. A plain
      * JS string of high-byte chars would UTF-8-inflate at the C
-     * boundary and produce the wrong MAC — silently — for any
+     * boundary and produce the wrong MAC - silently - for any
      * counter byte >= 0x80. */
     const counter = new Uint8Array([
         (hi >>> 24) & 0xff, (hi >>> 16) & 0xff,
@@ -289,7 +289,7 @@ function ctEq(a, b) {
 
 // At-rest encryption: versioned NaCl secretbox. See the matching
 // Lua module's encrypt_secret / decrypt_secret comments for the
-// design — wire format v2 (current) is version(4 BE) || nonce(24) ||
+// design - wire format v2 (current) is version(4 BE) || nonce(24) ||
 // ct; v1 (legacy, pre-rotation) was nonce(24) || ct. Both runtimes
 // produce identical byte sequences for the same key so a Lua↔JS
 // migration on the same DB works without re-enrolling.
@@ -317,7 +317,7 @@ function encryptSecret(secretBytes) {
     const nonce = new Uint8Array(crypto.random(NONCE_LEN));
     let nonceStr = "";
     for (let i = 0; i < NONCE_LEN; i++) nonceStr += String.fromCharCode(nonce[i]);
-    // Pass plaintext as Uint8Array — crypto.secretbox now accepts the
+    // Pass plaintext as Uint8Array - crypto.secretbox now accepts the
     // unified buffer protocol. Passing a JS binary string here would
     // UTF-8-inflate every byte >= 0x80 via JS_ToCStringLen and produce
     // a blob that doesn't round-trip with Lua-encrypted rows.
@@ -400,7 +400,7 @@ function loadSecret(userId) {
         + "FROM _hull_totp WHERE user_id = ?", [userId]);
     if (!rows || rows.length === 0) return null;
     const row = rows[0];
-    // Plain assignment instead of destructuring — QuickJS's
+    // Plain assignment instead of destructuring - QuickJS's
     // js_parse_destructuring_element fails an MSan use-of-uninit
     // check at module-compile time, which fails the MSan + UBSan
     // CI job. Refactored across this module until upstream fixes it.
@@ -439,7 +439,7 @@ function loadPendingSecret(userId) {
 
 // Lazy rekey: called after a successful verify when the stored row
 // is on an older version than current. Re-encrypts the secret under
-// the current key. Best-effort — verify already succeeded; a
+// the current key. Best-effort - verify already succeeded; a
 // transient DB error here doesn't fail the user.
 function rekeyRow(userId, secretBytes) {
     const enc = encryptSecret(secretBytes);
@@ -696,7 +696,7 @@ function init(opts) {
     });
 
     // Rotation-safety check (back-compat shorthand only). See the
-    // matching Lua comment for the threat model — silent data loss
+    // matching Lua comment for the threat model - silent data loss
     // when ops bumps `encryption_key` without using the explicit
     // encryption_keys map for rotation.
     if (opts.encryptionKey != null && opts.encryptionKeys == null
@@ -719,7 +719,7 @@ function init(opts) {
     }
 
     // Mark initialized BEFORE the lazy-catchup block so totp.cleanup
-    // — which guards on checkInitialized — can run from inside
+    // - which guards on checkInitialized - can run from inside
     // init's own cleanup pass. Pre-fix: the catchup catch swallowed
     // "call totp.init(...) before any other function" on every load.
     _state.initialized = true;
@@ -905,7 +905,7 @@ function confirm(userId, code) {
 // you need to know which of the two paths matched.
 //
 // History: this used to return a tuple-as-array `[ok, kind]` which
-// is truthy regardless of `ok` — a foot-gun for callers writing
+// is truthy regardless of `ok` - a foot-gun for callers writing
 // `if (!totp.verify(...)) deny()`. The bare-boolean form is safe
 // by default; the tuple is available behind `verifyWithKind`.
 function verify(userId, code, req) {
@@ -920,7 +920,7 @@ function verifyWithKind(userId, code, req) {
     }
     // Round-9 HIGH-4: per-IP gate runs BEFORE the per-user gate so a
     // noisy IP is cut off before it can lock arbitrary victims. req
-    // is optional — apps that don't pass it keep round-8 behaviour.
+    // is optional - apps that don't pass it keep round-8 behaviour.
     const ip = req ? extractIp(req) : null;
     // Round-10 HIGH-5: reverted the round-9 dummy PBKDF2. See
     // Lua sibling for the CPU-amplifier reasoning.
@@ -1025,7 +1025,7 @@ function rekey() {
 
 /**
  * Read-only count of _hull_totp rows grouped by stored key version.
- * Lets operators plan a rotation without writing — call BEFORE
+ * Lets operators plan a rotation without writing - call BEFORE
  * rekey() to see how many users are on each version. Returns
  * { [versionId]: count, ..., total: N }. version=0 buckets
  * plaintext rows AND undecryptable rows (legacy v1 without
@@ -1101,7 +1101,7 @@ const _test = {
     extractIp,
     xffWarnReset: () => { _xffWarnDone = false; },
     // Test-only: backdate a pending row's created_at so cleanup()
-    // finds it stale. See Lua sibling — must run inside the module
+    // finds it stale. See Lua sibling - must run inside the module
     // so the stdlib-caller check admits the _hull_* write.
     forcePendingStale: (userId) => {
         db.exec("UPDATE _hull_totp_pending SET created_at = ? "

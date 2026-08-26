@@ -93,7 +93,7 @@ function createIndex(name, columns, opts) {
 
     // Only default when `tokenize` was omitted. An explicit "" must
     // fall through to the validator so Lua and JS agree byte-for-byte
-    // — Lua's `or` keeps "" because Lua strings are always truthy.
+    // - Lua's `or` keeps "" because Lua strings are always truthy.
     const tokenize = (o.tokenize === undefined || o.tokenize === null)
         ? "unicode61"
         : o.tokenize;

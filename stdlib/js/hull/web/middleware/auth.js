@@ -180,7 +180,7 @@ function jwtMiddleware(opts) {
     };
 }
 
-// Whitelisted cookie attributes — keep in sync with stdlib/js/hull/web/cookie.js
+// Whitelisted cookie attributes - keep in sync with stdlib/js/hull/web/cookie.js
 const COOKIE_ATTRS = ["path", "domain", "httpOnly", "secure", "sameSite",
                        "maxAge", "expires"];
 
@@ -199,7 +199,7 @@ function copyCookieOpts(src) {
  * Create a session and set the auth cookie.
  *
  * @param {Object} req            (Unused; reserved.)
- * @param {Object} res            Response — `Set-Cookie` is added here.
+ * @param {Object} res            Response - `Set-Cookie` is added here.
  * @param {Object} userData       Session payload, e.g. `{ user_id: 1 }`.
  * @param {Object} [opts]
  * @param {string} [opts.name="hull_session"]  Session cookie name (matches

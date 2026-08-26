@@ -1,5 +1,5 @@
 --
--- hull.deploy — Deployment config generator
+-- hull.deploy - Deployment config generator
 --
 -- Usage: hull deploy <target> [app_dir] [options]
 --
@@ -206,7 +206,7 @@ local function introspect_app(app_dir)
         tool.exit(1)
     end
 
-    -- Try to extract manifest (Lua only — JS needs C runtime)
+    -- Try to extract manifest (Lua only - JS needs C runtime)
     if info.runtime == "lua" then
         local entry_path = app_dir .. "/app.lua"
         local chunk = tool.loadfile(entry_path)

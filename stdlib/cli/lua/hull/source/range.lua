@@ -1,5 +1,5 @@
 --
--- hull.source.range — language-neutral SourceRange + line map.
+-- hull.source.range - language-neutral SourceRange + line map.
 --
 -- A range is a half-open byte interval { start = <int>, stop = <int> } over the
 -- 1-based bytes of the source (Lua string convention). `stop` is one-past-end,

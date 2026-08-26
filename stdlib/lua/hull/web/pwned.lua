@@ -1,11 +1,11 @@
--- hull.web.pwned — k-anonymity pwned-password check via the HIBP
+-- hull.web.pwned - k-anonymity pwned-password check via the HIBP
 -- range API. Uses SHA-1's first 5 hex chars as a query prefix so
 -- the password never crosses the wire; only the prefix and a 35-
 -- char suffix scan happen client-side.
 --
 -- Two-tier check:
 --   1. Embedded local blocklist (SecLists top 10K, ~80KB, binary-
---      searched in-process). A hit short-circuits — no network round-
+--      searched in-process). A hit short-circuits - no network round-
 --      trip needed. Safe for air-gapped deployments: the most
 --      egregious passwords are blocked without HIBP.
 --   2. HIBP range API for the remaining ~half-billion known leaks.
@@ -55,7 +55,7 @@ local _health = {
 local _warned_failopen = false
 
 -- SHA-1 of the password, uppercase hex (HIBP wire format). Delegates
--- to crypto.sha1 — a legacy-interop primitive surfaced specifically
+-- to crypto.sha1 - a legacy-interop primitive surfaced specifically
 -- for protocols like HIBP that hardcode SHA-1. Do NOT use SHA-1
 -- for any new cryptographic purpose.
 local function sha1_hex(msg)

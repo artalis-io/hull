@@ -95,7 +95,7 @@ local function is_replayable_header(name)
     if type(name) ~= "string" or name == "" then return false end
     local lc = name:lower()
     -- Always-deny credential headers (run FIRST so an accidental
-    -- allowlist addition can't override the deny — JS parity).
+    -- allowlist addition can't override the deny - JS parity).
     if lc == "set-cookie" or lc == "authorization" or lc == "cookie" or
        lc == "proxy-authenticate" or lc == "www-authenticate" then
         return false
@@ -120,7 +120,7 @@ local MAX_KEY_LEN = 255
 
 --- Initialize the `_hull_idempotency_keys` SQLite table.
 --
--- Idempotent — safe to call on every boot.
+-- Idempotent - safe to call on every boot.
 --
 -- @function idempotency.init
 -- @tparam[opt] table opts
@@ -185,7 +185,7 @@ function idempotency.middleware(opts)
         return "__anon"
     end
 
-    -- L-3: dropped the leading underscore — Lua convention reserves `_x`
+    -- L-3: dropped the leading underscore - Lua convention reserves `_x`
     -- for unused locals; this counter is actively mutated below.
     local cleanup_counter = 0
     -- `~= nil` (not `or`): a caller's ttl = 0 must override the default, matching
@@ -247,7 +247,7 @@ function idempotency.middleware(opts)
                         { principal_id, key })
             else
                 -- Fingerprint comparison. Fingerprints are SHA-256(public
-                -- inputs) — not secrets — so timing leaks are not exploitable.
+                -- inputs) - not secrets - so timing leaks are not exploitable.
                 -- We still use the C constant-time compare (crypto.constant_time_eq)
                 -- for consistency with jwt.lua/csrf.lua so the comparison contract
                 -- is one audited implementation everywhere in the stdlib.
@@ -270,8 +270,8 @@ function idempotency.middleware(opts)
                 if row.state == "complete" and row.status then
                     res:status(row.status)
                     -- Restore cached headers (M-3: allowlist + CRLF reject).
-                    -- Content-Type is one of these — respond() and
-                    -- respond_html() both stash it in the headers blob —
+                    -- Content-Type is one of these - respond() and
+                    -- respond_html() both stash it in the headers blob -
                     -- so the cached value drives the replayed mime type.
                     local replayed_ct = nil
                     if row.response_headers then

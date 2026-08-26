@@ -1,4 +1,4 @@
---- HTMX toast widget — server-side helper.
+--- HTMX toast widget - server-side helper.
 --
 -- @module hull.web.htmx.toast
 -- @license AGPL-3.0-or-later

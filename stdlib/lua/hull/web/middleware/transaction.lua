@@ -1,6 +1,6 @@
 --- Wrap mutation handlers in a single SQLite transaction.
 --
--- `transaction.middleware()` is a marker — it sets `req.ctx._txn = true`
+-- `transaction.middleware()` is a marker - it sets `req.ctx._txn = true`
 -- so downstream code knows the handler should be wrapped. The real work
 -- happens in `transaction.run(fn)` / `transaction.try(fn)`, which call
 -- `db.batch()` (BEGIN IMMEDIATE → fn → COMMIT, with ROLLBACK on error).

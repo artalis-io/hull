@@ -69,7 +69,7 @@ const _state = {
     // `(req, res, user) => session.destroyAll(user.id)`).
     //
     // LOGIN events and new-device detection are NOT emitted here
-    // anymore — they move to hull/web/middleware/session's
+    // anymore - they move to hull/web/middleware/session's
     // loginHandler factory (auditLog + onNewDevice opts), so a
     // single seam covers both password and OAuth logins.
     signInLog:              false,
@@ -87,7 +87,7 @@ const _state = {
     // attacker-chosen-recipient email-storm class on /auth/email-
     // change, /auth/magic-link, /auth/password-reset/request,
     // /auth/verify/resend, /auth/register. loginRatelimit (per-IP)
-    // is orthogonal — a botnet defeats per-IP but not per-recipient.
+    // is orthogonal - a botnet defeats per-IP but not per-recipient.
     //
     // Shape: { limit: N, window: SECONDS }. Pass false to disable.
     // In-memory sliding window; resets on restart. Bounded to
@@ -246,7 +246,7 @@ function emailRateAllow(to) {
         _emailRl.set(key, bucket);
         const max = _state.emailRateLimitMaxEntries || 10000;
         if (_emailRl.size > max) {
-            // Avoid `for (const [k, b] of _emailRl)` — QuickJS's
+            // Avoid `for (const [k, b] of _emailRl)` - QuickJS's
             // js_parse_destructuring_element has an MSan use-of-
             // uninitialized-value in its destructuring parser that
             // tripped the round-8 MSan job. The forEach form sidesteps
@@ -426,7 +426,7 @@ function emitEvent(uid, kind, req, opts) {
 // Hand off to the app-supplied onLogin (typically
 // session.loginHandler) with the factors metadata in the ctx 4th arg.
 // The audit row + new-device hook are now emitted by
-// session.loginHandler — see hull:web:middleware:session's
+// session.loginHandler - see hull:web:middleware:session's
 // auditLog/onNewDevice opts. That single seam covers OAuth too.
 function finishLogin(req, res, user, factors) {
     // Round-8 LOW-10: scrub password_hash before handing user to
@@ -499,7 +499,7 @@ function userId(user) {
 // Round-9 HIGH-1: build a click-through URL origin from validated
 // sources only. publicOrigin (when set) wins unconditionally;
 // otherwise the request's host header must match a trustedHosts
-// entry exactly. See the Lua sibling for the threat model — a
+// entry exactly. See the Lua sibling for the threat model - a
 // hostile Host header pre-fix rerouted reset/magic-link tokens to
 // a phishing origin. Returns null when no valid origin can be
 // built; callers fall back to a generic-OK response (preserving
@@ -509,9 +509,9 @@ function originFor(req) {
     const headers = (req && req.headers) || {};
     const rawHost = headers["x-forwarded-host"] || headers.host;
     if (typeof rawHost !== "string") return null;
-    // Round-10 MEDIUM-6: normalize for allowlist comparison —
+    // Round-10 MEDIUM-6: normalize for allowlist comparison -
     // strip comma-XFF chain to leftmost, strip :PORT suffix.
-    // Round-11 HIGH-3: IPv6 literals (`[::1]:8080`) — keep the
+    // Round-11 HIGH-3: IPv6 literals (`[::1]:8080`) - keep the
     // bracketed literal whole. See Lua sibling for the bug.
     let firstHost = rawHost;
     const comma = firstHost.indexOf(",");
@@ -575,7 +575,7 @@ async function handleRegister(req, res) {
     if (!isEmailIsh(body.email)) {
         return res.status(400).json({ error: "invalid email" });
     }
-    // 256 char upper bound prevents PBKDF2 amplification DoS — a
+    // 256 char upper bound prevents PBKDF2 amplification DoS - a
     // 10 MB submitted password would hash for multiple seconds at
     // the default 600k iters. 256 covers any realistic passphrase
     // (bcrypt's hard limit is 72 for comparison).
@@ -610,7 +610,7 @@ async function handleRegister(req, res) {
     res.json({ ok: true });
 }
 
-// POST /auth/verify/resend { email } — enumeration-safe re-issue
+// POST /auth/verify/resend { email } - enumeration-safe re-issue
 // of the welcome / verify email for unverified users.
 function handleVerifyResend(req, res) {
     const body = parseBody(req);
@@ -693,8 +693,8 @@ function handleLogin(req, res) {
     // 429 + Retry-After in this branch, leaking account existence
     // via the lockout signal (trip lockout against any candidate to
     // enumerate registered emails). The lockout still applies
-    // internally — the counter ticks, the user still can't log in
-    // until the window expires — but the wire response is now
+    // internally - the counter ticks, the user still can't log in
+    // until the window expires - but the wire response is now
     // indistinguishable from a wrong-password reply.
     const preLocked = user
                       && lockoutRemaining(userId(user)) > 0;
@@ -724,7 +724,7 @@ function handleLogin(req, res) {
 }
 
 function handleLogout(req, res) {
-    // user_id isn't known here without inspecting the session —
+    // user_id isn't known here without inspecting the session -
     // app's responsibility. Apps that want a "logout" event can
     // call auditLog.record inside their onLogout callback.
     if (_state.onLogout) _state.onLogout(req, res);
@@ -776,7 +776,7 @@ function handleMagicLinkConsume(req, res) {
     finishLogin(req, res, user, "magic_link");
 }
 
-// POST /auth/totp-verify { token, code } — second factor.
+// POST /auth/totp-verify { token, code } - second factor.
 // Apps SHOULD rate-limit this route (e.g. ratelimit.middleware
 // keyed on the body's token field) to bound brute-force on the
 // 6-digit code space. The pending token is multi-use within TTL
@@ -894,7 +894,7 @@ function handleEmailChange(req, res) {
     if (!origin) return res.json({ ok: true });
 
     // Round-11 MEDIUM-9: reject when a pending row already exists.
-    // See Lua sibling for the threat model — concurrent submit
+    // See Lua sibling for the threat model - concurrent submit
     // silently destroyed the prior pending change.
     const existing = db.query(
         "SELECT new_email FROM _hull_auth_pending_email_changes "
@@ -941,7 +941,7 @@ function handleEmailChange(req, res) {
     res.json({ ok: true });
 }
 
-// GET /auth/email-change/revoke?token=... — old-address holder
+// GET /auth/email-change/revoke?token=... - old-address holder
 // cancels a pending email change. Single-use via the shared
 // used-tokens table.
 function handleEmailChangeRevoke(req, res) {
@@ -1040,7 +1040,7 @@ function registerRoutes(app) {
  * (opts.userCreate wins over opts.users.create) or skip the
  * adapter.
  *
- * DB-backend-agnostic — issues standard INSERT / UPDATE / SELECT
+ * DB-backend-agnostic - issues standard INSERT / UPDATE / SELECT
  * via the `db` module with no SQLite-specific syntax. Works on
  * whatever backend hull/db is wired to (SQLite today, Postgres
  * planned).
@@ -1186,7 +1186,7 @@ function init(opts) {
     // Derive the short key from the long key by stripping the "user"
     // prefix and lower-casing the next char (camelCase). Mirrors
     // Lua's `k:sub(6)` prefix-strip so adding a new callback only
-    // needs editing requiredUser[] above — the adapter wiring picks
+    // needs editing requiredUser[] above - the adapter wiring picks
     // it up automatically.
     if (opts.users && typeof opts.users === "object") {
         for (let i = 0; i < requiredUser.length; i++) {
@@ -1277,7 +1277,7 @@ function init(opts) {
     }
     _emailRl = new Map();
 
-    // Timing-safe email enumeration defense — see handleLogin. The
+    // Timing-safe email enumeration defense - see handleLogin. The
     // dummy hash is computed once per process and reused per request
     // AND per re-init (test fixtures call init() many times; each
     // PBKDF2 was costing 50-200ms of boot time before this cache).

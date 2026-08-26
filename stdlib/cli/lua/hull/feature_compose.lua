@@ -1,5 +1,5 @@
 --
--- hull.feature_compose — Shared archive-composition helpers
+-- hull.feature_compose - Shared archive-composition helpers
 --
 -- Internal helper module used by:
 --   stdlib/cli/lua/hull/build.lua  (hull build --with=<feature> + the
@@ -119,7 +119,7 @@ end
 --
 -- The embedded-in-hull step differs per caller (the runtime is extracted via
 -- tool.extract_feature_runtime, a --with feature is not), so it is NOT part
--- of this ladder — callers try their own embedded step first, then fall
+-- of this ladder - callers try their own embedded step first, then fall
 -- here.
 --
 -- @param libname string     Local archive name, e.g. "libhull_feature-lua.a".
@@ -436,7 +436,7 @@ end
 -- emits Makefile link flags) need the SAME ordered set. This function is that
 -- single source of truth: it computes the needs-gates + nm-probes ONCE and
 -- returns the resolved, ORDERED descriptor list. Before this, build.lua composed
--- all 8 while eject.lua composed only runtime+http — the exact drift the module
+-- all 8 while eject.lua composed only runtime+http - the exact drift the module
 -- header warns about, one level up (the ladder was shared, the decision to
 -- invoke each rung was not).
 --

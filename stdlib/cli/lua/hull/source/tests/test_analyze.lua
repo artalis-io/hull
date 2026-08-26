@@ -1,5 +1,5 @@
 --
--- test_analyze.lua — the analyze_source three-state contract (state x diagnostics).
+-- test_analyze.lua - the analyze_source three-state contract (state x diagnostics).
 --
 -- Focus: the resolver-failure path. When hull.source.scope.resolve returns (nil, err),
 -- analyze_source must (1) DOWNGRADE the file to state "internal" (so JSON files[].state

@@ -1,5 +1,5 @@
 --
--- test_parser.lua — slice-2 tests for hull.source.parser (expression grammar).
+-- test_parser.lua - slice-2 tests for hull.source.parser (expression grammar).
 --
 -- Lexes then parses a single expression; asserts AST structure, exact half-open
 -- byte ranges, and Lua 5.4 precedence/associativity. Pure Lua; run by

@@ -10,7 +10,7 @@
  * (id, blob_id, original_name, mime, declared_mime, size, uploaded_by,
  * uploaded_at, refcount).
  *
- * Lives flat at hull:attachment (not under hull:web:) — the core API
+ * Lives flat at hull:attachment (not under hull:web:) - the core API
  * (store / read / metadata / delete) is FS + DB only and works in CLI
  * tools. The web-specific auth-gated `serve(req, res, id, { authCheck })`
  * helper lives in the separate hull:web:attachment-serve module.
@@ -49,7 +49,7 @@ let mimeAllowlist = null;    // null = any MIME allowed
  *
  * Re-init semantics: only options explicitly present in the second
  * (or later) call are updated; omitted keys preserve their prior
- * value. Effectively "sticky" — call once with the full config.
+ * value. Effectively "sticky" - call once with the full config.
  */
 function init(opts) {
     const o = opts || {};
@@ -77,7 +77,7 @@ function init(opts) {
     );
 }
 
-// 32 hex chars from 16 random bytes — 128 bits of entropy.
+// 32 hex chars from 16 random bytes - 128 bits of entropy.
 function generateId() {
     const bytes = new Uint8Array(crypto.random(16));
     let id = "";
@@ -91,13 +91,13 @@ function generateId() {
  *
  * Streams the part through `blob.writer()` (content-addressed) and
  * inserts a metadata row with `refcount=1`. The blob layer dedupes
- * on disk automatically — two stores of the same bytes share one
+ * on disk automatically - two stores of the same bytes share one
  * on-disk blob but get distinct attachment ids.
  *
  * Sniffs the MIME type from the first chunk via `mime.sniff()` and
  * validates against the allowlist if `init` set one. The declared
  * `Content-Type` from the part is recorded separately (`declared_mime`)
- * but NOT trusted for allowlist enforcement — clients can spoof it.
+ * but NOT trusted for allowlist enforcement - clients can spoof it.
  *
  * @param {Object} part  A multipart Part from `req.multipart()`. Must
  *   have `filename` (text fields throw).
@@ -112,7 +112,7 @@ function generateId() {
  * chunk only. If the multipart parser delivers the first chunk in
  * fewer than ~8 bytes (rare in practice), the sniffer may not see
  * enough magic to identify the format and will fall back to
- * "application/octet-stream" — which then fails the allowlist if one
+ * "application/octet-stream" - which then fails the allowlist if one
  * is configured. Callers that need bullet-proof sniffing on a very
  * bursty connection should buffer the first 512 bytes themselves
  * before constructing a Part-like object.
@@ -173,7 +173,7 @@ async function store(part, opts) {
     }
 
     // Preserve nil/undefined-vs-empty-string distinction for
-    // uploaded_by — matches Lua's behaviour (Lua binds the value
+    // uploaded_by - matches Lua's behaviour (Lua binds the value
     // directly; nil → SQL NULL, empty string → empty TEXT).
     const uploadedBy = o.uploadedBy !== undefined ? o.uploadedBy : null;
 
@@ -245,7 +245,7 @@ function readToFile(id, dst) {
     // Buffered read + single fs.write. metadata.size is authoritative
     // (verified at store time against blob.writer's own count) so we
     // can allocate the destination buffer once and stream chunks
-    // directly into it — O(file_size) memory instead of the 2x of a
+    // directly into it - O(file_size) memory instead of the 2x of a
     // parts-array + concat scheme.
     const combined = new Uint8Array(meta.size);
     let offset = 0;
@@ -269,7 +269,7 @@ function readToFile(id, dst) {
  * unlinked via blob.delete(). The whole operation runs inside a
  * transaction so a partial failure doesn't leave an orphan or a
  * double-deleted blob. The blob.delete() call happens INSIDE the
- * BEGIN IMMEDIATE write lock — concurrent transactions can't insert
+ * BEGIN IMMEDIATE write lock - concurrent transactions can't insert
  * a new row referencing this blob_id between the SELECT and the
  * unlink. Trade-off: holding the SQLite write lock during the FS
  * unlink, which is fine for typical attachment sizes.

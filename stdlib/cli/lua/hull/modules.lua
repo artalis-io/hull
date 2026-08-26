@@ -1,5 +1,5 @@
 --
--- hull.modules — List the modules an app declares.
+-- hull.modules - List the modules an app declares.
 --
 -- Usage:
 --   hull modules list [app_dir]
@@ -8,7 +8,7 @@
 -- `modules` block. Human-readable by default; `--json` (a global flag,
 -- forwarded as the env var HULL_JSON=1) switches to JSON output.
 --
--- Mirrors hull.manifest's tool layout — both delegate to the Lua tool
+-- Mirrors hull.manifest's tool layout - both delegate to the Lua tool
 -- VM because extracting the manifest requires executing app code.
 --
 -- SPDX-License-Identifier: AGPL-3.0-or-later
@@ -24,7 +24,7 @@ end
 
 local function main()
     -- arg[0] is "list" (the subcommand). Scan the rest for --json and
-    -- the first positional, which is the app dir. Don't break early —
+    -- the first positional, which is the app dir. Don't break early -
     -- --json may appear after the positional.
     local want_json = false
     local app_dir

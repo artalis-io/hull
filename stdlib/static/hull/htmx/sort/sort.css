@@ -1,9 +1,9 @@
 /*
- * Hull HTMX sort widget — structural CSS.
+ * Hull HTMX sort widget - structural CSS.
  *
  * Structural-only: cursor cue on clickable headers, focus
  * preservation, content for the direction indicator (which IS
- * functional — sighted users need to know which way is sorted).
+ * functional - sighted users need to know which way is sorted).
  * No colors, no borders, no animations. Apps style appearance
  * via:
  *
@@ -19,7 +19,7 @@
 }
 
 /* Direction indicator via ::after content. Functional (not
- * cosmetic) — without an indicator, the user has no idea which
+ * cosmetic) - without an indicator, the user has no idea which
  * direction the column is sorted. Apps can override the content
  * to use icon fonts, SVG, or whatever fits their design system. */
 .hull-sort-header.hull-sort-none::after {

@@ -212,7 +212,7 @@ function encodePayload(text, version, ec) {
 
 function buildCodewordStream(data, version, ec) {
     const row = EC_TABLE[ec][version - 1];
-    // Avoid array destructuring — QuickJS's js_parse_destructuring_element
+    // Avoid array destructuring - QuickJS's js_parse_destructuring_element
     // trips a known MSan use-of-uninitialized-value warning (also caught
     // in jwt.js's history). Indexed access is the workaround.
     const ecPerBlock = row[0];

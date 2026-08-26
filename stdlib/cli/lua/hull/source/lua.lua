@@ -1,5 +1,5 @@
 --
--- hull.source.lua — the PUBLIC Lua source-analysis contract.
+-- hull.source.lua - the PUBLIC Lua source-analysis contract.
 --
 --   local lua = require("hull.source.lua")
 --   local unit, err = lua.parse(source, { path = "src/example.lua" })

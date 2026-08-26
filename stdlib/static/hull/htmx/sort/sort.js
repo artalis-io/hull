@@ -1,10 +1,10 @@
 /*
- * Hull HTMX sort widget — client runtime.
+ * Hull HTMX sort widget - client runtime.
  *
  * Adds Enter / Space keyboard activation for sort headers
  * (which use `tabindex="0"` on a `<th>`). Native `<th>`
  * elements don't fire `click` on Enter/Space the way a real
- * `<button>` does — that's this script's job. The widget
+ * `<button>` does - that's this script's job. The widget
  * intentionally does NOT put `role="button"` on the th: that
  * would invalidate `aria-sort` (axe.aria-allowed-attr) AND
  * make screen readers say "Name, button" instead of the more
@@ -14,7 +14,7 @@
  * `keyup[key=='Enter'] from:this`. Those bracket-filter
  * expressions go through `new Function()` inside htmx, which
  * is rejected by the `csp = "htmx"` preset (allowEval:false)
- * — and the whole hx-trigger string fails to register when
+ * - and the whole hx-trigger string fails to register when
  * any filter throws, taking the bare `click` listener down
  * with it. Moving keyboard activation here makes the widget
  * work cleanly under strict CSP.
@@ -40,7 +40,7 @@
         if (key !== "Enter" && key !== " " && key !== "Spacebar") return;
         var el = evt.target;
         if (!isSortHeader(el)) return;
-        // Space scrolls the page by default — that's surprising
+        // Space scrolls the page by default - that's surprising
         // when the user is interacting with a "button-like" header.
         // Enter is harmless to leave un-prevented but we cancel it
         // too for symmetry.

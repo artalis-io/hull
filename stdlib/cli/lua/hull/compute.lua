@@ -1,5 +1,5 @@
 --
--- hull.compute — WASM module developer tooling
+-- hull.compute - WASM module developer tooling
 --
 -- Usage:
 --   hull compute new <name>            Create a new WASM compute module
@@ -16,7 +16,7 @@ local cbuild   = require("hull.compute_build")
 -- ── Embedded hull_compute.h ────────────────────────────────────────────
 
 local HULL_COMPUTE_H = [[/*
- * hull_compute.h — Hull WASM compute module ABI header
+ * hull_compute.h - Hull WASM compute module ABI header
  *
  * Freestanding header for Hull compute plugins. Provides:
  *   - Type definitions (no stdlib dependency)
@@ -297,7 +297,7 @@ static inline uint8_t hull_udf_argc(const void *in)   { return ((const uint8_t *
 -- ── Embedded hull_span.h (canonical: templates/hull_span.h) ────────────
 -- Byte-identical to templates/hull_span.h; enforced by tests/e2e_compute_headers.sh.
 local HULL_SPAN_H = [[/*
- * hull_span.h — Hull mapped-spans SDK (guest side)
+ * hull_span.h - Hull mapped-spans SDK (guest side)
  *
  * Freestanding, dual-target header for Hull compute plugins that attach
  * host-mapped file windows via `compute.call(..., {spans={...}})` and read them
@@ -325,7 +325,7 @@ local HULL_SPAN_H = [[/*
  * natively (for the differential + unit tests). It uses the compiler's builtin
  * fixed-width type macros (no <stdint.h>, and no clash with hull_compute.h's own
  * `int32_t` typedefs) and decodes the wire record BY BYTE OFFSET (never by
- * casting linear memory to a struct — alignment/aliasing UB, and the host writes
+ * casting linear memory to a struct - alignment/aliasing UB, and the host writes
  * the same 64-bit-field layout regardless of guest pointer width).
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
@@ -412,7 +412,7 @@ static inline hull_span_u64 hull_span__rd64be(const hull_span_u8 *p)
 { hull_span_u64 v = 0; for (int i = 0; i < 8; i++) v = (v << 8) | (hull_span_u64)p[i]; return v; }
 
 /* ── Bit-cast raw bits to a float, preserving special-value patterns (NaN/Inf/
- * signed zero) exactly — no arithmetic. Union punning is well-defined in C. ──── */
+ * signed zero) exactly - no arithmetic. Union punning is well-defined in C. ──── */
 static inline float hull_span__bits_f32(hull_span_u32 b)
 { union { hull_span_u32 u; float f; } x; x.u = b; return x.f; }
 static inline double hull_span__bits_f64(hull_span_u64 b)
@@ -527,7 +527,7 @@ static inline int hull_span__narrow(hull_span_uptr p, hull_span_i32 *out)
  * Memory64 / 64-bit native) can therefore only occur on a record-fetching call,
  * never on the count-only query. Each record uses the cbSize handshake (advertise
  * our capacity in struct_size, validate the returned size covers v1). No host
- * calls happen after setup — every later access is a pure inline read. */
+ * calls happen after setup - every later access is a pure inline read. */
 static inline int hull_span_setup(HullSpan *out, int out_cap)
 {
     /* 1. Argument preconditions (checked before any host call): a negative
@@ -597,7 +597,7 @@ static inline int hull_span_find(const HullSpan *spans, int n, const char *name)
 
 local function module_template_c(name)
     return string.format([[/*
- * %s.c — Hull WASM compute module
+ * %s.c - Hull WASM compute module
  *
  * Implement your processing logic in hull_process().
  * Input bytes arrive via in_ptr/in_len, write output to out_ptr (up to out_max).
@@ -612,7 +612,7 @@ local function module_template_c(name)
 HULL_VERSION_EXPORT
 
 /*
- * hull_process — Main entry point
+ * hull_process - Main entry point
  *
  * Computes a simple byte-sum score (0-100) from the input.
  * Replace this with your actual processing logic.

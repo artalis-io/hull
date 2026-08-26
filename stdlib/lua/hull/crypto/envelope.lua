@@ -1,4 +1,4 @@
--- hull.crypto.envelope — HMAC-signed, JSON-payload, stateless tokens.
+-- hull.crypto.envelope - HMAC-signed, JSON-payload, stateless tokens.
 --
 -- One bit of bookkeeping shared by every Hull module that issues
 -- a self-contained token: hull/web/auth-flows (verify-email,
@@ -14,7 +14,7 @@
 -- cookies without escaping.
 --
 -- This module intentionally does NOT enforce semantic checks
--- (action match, expiry, single-use). Those vary per caller —
+-- (action match, expiry, single-use). Those vary per caller -
 -- auth-flows tracks single-use via a SQL table; oauth doesn't.
 -- Each caller checks `payload.exp`, `payload.action`, etc.
 -- itself; the helper here only frames the signature.

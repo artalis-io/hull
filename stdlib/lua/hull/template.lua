@@ -39,7 +39,7 @@ local MAX_INCLUDE_DEPTH  = 16
 local MAX_EXTENDS_DEPTH  = 8
 local MAX_CACHE_SIZE     = 1024
 
--- Native bridge for parse/codegen (private — not in module registry).
+-- Native bridge for parse/codegen (private - not in module registry).
 local json = require("hull.json")
 local _template = require("hull._template")
 
@@ -604,7 +604,7 @@ local function gen_expr(expr_info, escaped, locals_set)
                 end
                 code = "__f." .. f.name .. "(" .. code .. ", " .. arg .. ")"
             else
-                -- It's a variable reference — validated by gen_dot_path
+                -- It's a variable reference - validated by gen_dot_path
                 code = "__f." .. f.name .. "(" .. code .. ", " .. gen_dot_path(arg, nil, locals_set) .. ")"
             end
         else
@@ -763,7 +763,7 @@ local cache_count = 0
 --
 -- @tparam string name  Template path relative to `templates/`
 --   (e.g. `"pages/home.html"`).
--- @treturn function  `function(data) -> string` — renders the template.
+-- @treturn function  `function(data) -> string` - renders the template.
 -- @raise If the template is not found, or has a parse error.
 -- @usage
 -- local home = template.compile("pages/home.html")

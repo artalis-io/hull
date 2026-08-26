@@ -8,7 +8,7 @@ local cors = {}
 --- Check whether an origin is in the allowed list.
 --
 -- Returns true iff `origins` contains `"*"` or an exact match of @{origin}.
--- Wildcard subdomains (`*.example.com`) are not supported — list each
+-- Wildcard subdomains (`*.example.com`) are not supported - list each
 -- explicit origin.
 --
 -- @tparam string origin   Incoming `Origin` header value.
@@ -26,7 +26,7 @@ end
 --
 -- The returned middleware:
 --   - skips requests without an `Origin` header (returns 0, "continue");
---   - rejects with no headers (silently — browser will block) when the
+--   - rejects with no headers (silently - browser will block) when the
 --     origin is not in the allowlist;
 --   - on allowed origins, emits `Access-Control-Allow-Origin` + `Vary`
 --     + (when `opts.credentials`) `Access-Control-Allow-Credentials`;
@@ -34,7 +34,7 @@ end
 --     `204 No Content` (returns 1, "short-circuit").
 --
 -- Phase 6 fail-fast: `error()` is raised at factory time if
--- `credentials = true` is combined with `origins = {"*"}` — that
+-- `credentials = true` is combined with `origins = {"*"}` - that
 -- combination is silently rejected by browsers and a common bug.
 --
 -- @tparam[opt] table opts  Options:

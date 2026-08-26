@@ -38,7 +38,7 @@ const MAX_KEY_LEN = 255;
  * or cache from a previous response. Excludes credential-bearing /
  * session-binding headers; explicitly allowlists common security
  * response headers (HSTS/CSP/etc.) so they aren't silently dropped on
- * replay. NO blanket X-* — the previous version was too permissive
+ * replay. NO blanket X-* - the previous version was too permissive
  * (would replay X-Auth-Token, X-API-Key, X-CSRF-Token, etc.). */
 const REPLAYABLE_HEADERS = {
     "content-type": 1,
@@ -76,7 +76,7 @@ function isReplayableHeader(name) {
     if (typeof name !== "string" || !name) return false;
     const lc = name.toLowerCase();
     // Always-deny credential headers (run FIRST so an accidental
-    // allowlist addition can't override the deny — defense in depth
+    // allowlist addition can't override the deny - defense in depth
     // that actually defends; the previous order made the deny loop
     // dead code because the function fell through to `return false`).
     if (lc === "set-cookie" || lc === "authorization" ||
@@ -223,7 +223,7 @@ function middleware(opts) {
                 // fingerprints are SHA-256 of public inputs (method+path+body),
                 // for consistency with jwt.js / csrf.js.
                 // Hoist `rfp` so the `charCodeAt` call below can't read off a
-                // (theoretically) null row.fingerprint — schema has NOT NULL
+                // (theoretically) null row.fingerprint - schema has NOT NULL
                 // so it's defensive, but explicit > implicit (audit J#3).
                 const rfp = row.fingerprint || "";
                 let diff = rfp.length === fingerprint.length ? 0 : 1;
@@ -260,7 +260,7 @@ function middleware(opts) {
                             for (let i = 0; i < keys.length; i++) {
                                 const k = keys[i];
                                 const v = headers[k];
-                                // M-7: defense-in-depth — drop credential-
+                                // M-7: defense-in-depth - drop credential-
                                 // affecting headers from a replayed response
                                 // (stale Set-Cookie / Authorization could
                                 // outlive a revoked session) and reject any

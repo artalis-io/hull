@@ -32,7 +32,7 @@ const secretToHex = _hex.toHex;
 
 function computeHmac(sessionId, tsHex, secret) {
     // ":" separator deliberately distinct from the wire-format "."
-    // separator — see the wire-format note at the top of this file.
+    // separator - see the wire-format note at the top of this file.
     const msg = sessionId + ":" + tsHex;
     const keyHex = secretToHex(secret);
     return crypto.hmacSha256(msg, keyHex);
@@ -232,7 +232,7 @@ function middleware(opts) {
                         try {
                             token = decodeURIComponent(raw);
                         } catch (_e) {
-                            // Malformed percent-encoding (e.g. "%X") — fall
+                            // Malformed percent-encoding (e.g. "%X") - fall
                             // back to the raw value rather than throwing
                             // URIError out of the middleware (H-1).
                             token = raw;

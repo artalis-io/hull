@@ -16,7 +16,7 @@ hull tools install --all         # install everything for this platform
 ### Why side-load instead of bundle
 
 Bundling `wamrc` into the main binary would add ~150 MB (LLVM
-backend). Most users don't need AOT — modules run via Hull's fast
+backend). Most users don't need AOT - modules run via Hull's fast
 WASM interpreter just fine. AOT is ~50× faster than interpreter for
 compute-heavy workloads, but only matters if you're doing
 compute-heavy work.
@@ -58,7 +58,7 @@ signs the tool binaries.
 
 `hull tools install` always pulls from the SAME release as the
 running hull binary, not "latest". This way `wamrc` stays at the
-WAMR commit hull was compiled against — no ABI / canary / module-
+WAMR commit hull was compiled against - no ABI / canary / module-
 format drift.
 
 Upgrade path:
@@ -109,7 +109,7 @@ You need wamrc if BOTH are true:
 - You have `compute/*.wasm` modules in your app, AND
 - You care about ~50× speedup on hot paths
 
-You DON'T need wamrc for development — the WAMR interpreter is fast
+You DON'T need wamrc for development - the WAMR interpreter is fast
 enough for everything except production-grade compute. `hull build`
 auto-AOT-compiles when wamrc is available and silently skips
 otherwise.
@@ -163,7 +163,7 @@ Three edits required:
    artifacts on each platform, and extend the release job's flatten
    / sha256 / asset list.
 
-3. **Optional: subsystem panel callout** — if the tool serves a
+3. **Optional: subsystem panel callout** - if the tool serves a
    specific subsystem (e.g. wamrc → compute), add a state block to
    that subsystem's `hl_agent_*` reporter so agents see actionable
    hints without separately querying the tool registry.
@@ -178,7 +178,7 @@ traversal vectors.
 - **vs bundling everything**: keeps the base binary lean (~5 MB)
   for the 80% who don't need optional tools.
 - **vs PATH-managed external installs**: tool versions stay locked
-  to the hull binary that wants them — no ABI drift, no "works on
+  to the hull binary that wants them - no ABI drift, no "works on
   my machine".
 - **vs a separate package manager**: reuses the existing release
   trust chain; one signed manifest covers everything.

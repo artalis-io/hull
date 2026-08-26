@@ -1,5 +1,5 @@
 --
--- hull.source.discover — the canonical, hardened, bounded source-file walker.
+-- hull.source.discover - the canonical, hardened, bounded source-file walker.
 --
 -- Extracted from hull.source.analyze so `hull analyze` and the project analyzer
 -- (hull.project.*) share ONE discovery path (design: docs/project_discovery_design.md

@@ -1,4 +1,4 @@
---- HTMX table widget — schema-driven <table> renderer that
+--- HTMX table widget - schema-driven <table> renderer that
 --- composes sort + inline-edit per column.
 --
 -- @module hull.web.htmx.table
@@ -16,7 +16,7 @@
 --
 -- Apps wire the search input + pagination footer around the
 -- table separately using hull/web/htmx/search and
--- hull/web/htmx/pagination — this widget owns the grid, the
+-- hull/web/htmx/pagination - this widget owns the grid, the
 -- header pattern, and the cell rendering, not the page layout.
 --
 -- One helper:
@@ -112,10 +112,10 @@ end
 --                                         is the table itself
 --                                         (the default "closest table"),
 --                                         pass "outerHTML". Omitted
---                                         by default — htmx then
+--                                         by default - htmx then
 --                                         uses its own default,
 --                                         "innerHTML".
--- @tparam[opt] ?table opts.current_sort   Output of sort.parse —
+-- @tparam[opt] ?table opts.current_sort   Output of sort.parse -
 --                                         drives the direction
 --                                         arrows / aria-sort on
 --                                         sortable headers.

@@ -1,7 +1,7 @@
 /**
  * @file hull:web:htmx:confirm
  * @module hull:web:htmx:confirm
- * @description HTMX confirm dialog — server-side helper.
+ * @description HTMX confirm dialog - server-side helper.
  *
  * Replaces htmx's default `window.confirm()` popup with a styled
  * native `<dialog>` element rendered by the shipped client JS at
@@ -10,8 +10,8 @@
  * One helper: `confirm.attrs(question, opts?)`. Returns a pre-
  * formatted, HTML-attribute-escaped string suitable for splicing
  * into a template (use `{{{ ... }}}` or `| raw` depending on engine).
- * Server has nothing functional to do at request time — the dialog
- * flow is entirely client-side — but apps still declare the module
+ * Server has nothing functional to do at request time - the dialog
+ * flow is entirely client-side - but apps still declare the module
  * in their manifest for audit visibility.
  *
  * Lua parity: same surface as `hull.web.htmx.confirm`.
@@ -29,13 +29,13 @@ const attrEscape = htmx.escape;
  * browser's native popup.
  *
  * Optional opts:
- *   - `yes`     string — custom confirm-button label. Default "Confirm".
- *   - `no`      string — custom cancel-button label. Default "Cancel".
- *   - `danger`  bool   — emits `data-confirm-danger="true"` for CSS
+ *   - `yes`     string - custom confirm-button label. Default "Confirm".
+ *   - `no`      string - custom cancel-button label. Default "Cancel".
+ *   - `danger`  bool   - emits `data-confirm-danger="true"` for CSS
  *                        targeting of destructive actions.
- *   - `title`   string — optional heading above the question.
+ *   - `title`   string - optional heading above the question.
  *
- * All values are HTML-attribute-escaped — caller may pass user-
+ * All values are HTML-attribute-escaped - caller may pass user-
  * supplied text safely.
  *
  * @param {string} question  The yes/no prompt.

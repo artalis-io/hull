@@ -1,7 +1,7 @@
 /**
  * @file hull:web:htmx:inline-edit
  * @module hull:web:htmx:inline-edit
- * @description HTMX inline-edit widget — click-to-edit single
+ * @description HTMX inline-edit widget - click-to-edit single
  * field, pure hypermedia (no client JS for the mode switch).
  *
  * Canonical htmx click-to-edit pattern. The cell starts as a
@@ -17,7 +17,7 @@
  *
  * A tiny client JS (~15 LOC) at /static/hull/htmx/inline-edit/
  * inline-edit.js handles input focus after the editor swaps in.
- * Esc-to-cancel is wired via hx-trigger on the Cancel button —
+ * Esc-to-cancel is wired via hx-trigger on the Cancel button -
  * no JS for that.
  *
  * Lua parity: same surface as `hull.web.htmx.inline-edit`. Names

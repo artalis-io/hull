@@ -9,22 +9,22 @@
 -- `_hull_attachments` (id, blob_id, original_name, mime, declared_mime,
 -- size, uploaded_by, uploaded_at, refcount).
 --
--- The attachment id is fresh per upload — refcount tracks how many
+-- The attachment id is fresh per upload - refcount tracks how many
 -- callers own it. `attachment.delete(id)` decrements; at 0, the
 -- metadata row is removed and, if no other row references the same
 -- `blob_id`, the on-disk blob is deleted via `blob.delete()`
--- synchronously (no deferred GC — kept the module small and the
+-- synchronously (no deferred GC - kept the module small and the
 -- behavior obvious; an undo grace period can be added later if a use
 -- case appears).
 --
--- Lives flat at `hull/attachment` rather than under `hull/web/` — the
+-- Lives flat at `hull/attachment` rather than under `hull/web/` - the
 -- core API (store / read / metadata / delete) is FS + DB only, with
 -- no HTTP dependency. The web-specific auth-gated
 -- `serve(req, res, id, { auth_check })` helper lives in the separate
 -- `hull/web/attachment-serve@1` module.
 --
 -- Portable SQL: `?` placeholders, INTEGER timestamps + refcount,
--- TEXT ids, no AUTOINCREMENT, no PRAGMAs — the schema works as-is
+-- TEXT ids, no AUTOINCREMENT, no PRAGMAs - the schema works as-is
 -- on the future Postgres backend.
 
 local blob = require("hull.blob")
@@ -48,15 +48,15 @@ local _mime_allowlist = nil    -- nil = any MIME allowed; otherwise set<string>
 -- initialized separately via `blob.init({ dir = "..." })`.
 --
 -- @tparam[opt] table opts
---   `max_size` — per-attachment byte cap (integer, default unlimited).
---   `mime_allowlist` — array of allowed sniffed-MIME strings
+--   `max_size` - per-attachment byte cap (integer, default unlimited).
+--   `mime_allowlist` - array of allowed sniffed-MIME strings
 --     (default unlimited). Sniffed MIME is checked first; declared
 --     `Content-Type` is recorded separately for audit but NOT trusted
 --     for the allowlist.
 --
 -- Re-init semantics: only options explicitly present in the second
 -- (or later) call are updated; omitted keys preserve their prior
--- value. Effectively "sticky" — call once with the full config.
+-- value. Effectively "sticky" - call once with the full config.
 function attachment.init(opts)
     opts = opts or {}
     if opts.max_size ~= nil then
@@ -89,7 +89,7 @@ function attachment.init(opts)
     ]])
 end
 
--- 32 hex chars from 16 random bytes — 128 bits of entropy. Plenty
+-- 32 hex chars from 16 random bytes - 128 bits of entropy. Plenty
 -- for opaque attachment ids that aren't user-guessable.
 local function generate_id()
     local raw = crypto.random(16)
@@ -104,19 +104,19 @@ end
 --
 -- Streams the part through `blob.writer()` (content-addressed) and
 -- inserts a metadata row with `refcount=1`. The blob layer dedupes
--- on disk automatically — two stores of the same bytes share one
+-- on disk automatically - two stores of the same bytes share one
 -- on-disk blob but get distinct attachment ids.
 --
 -- Sniffs the MIME type from the first chunk via `mime.sniff()` and
 -- validates against the allowlist if `attachment.init` set one. The
 -- declared `Content-Type` from the part is recorded separately
--- (`declared_mime`) but NOT trusted for allowlist enforcement —
+-- (`declared_mime`) but NOT trusted for allowlist enforcement -
 -- clients can spoof it.
 --
 -- @tparam part part  A multipart Part from `req:multipart()`. Must
 --   have `filename` (text fields raise).
 -- @tparam[opt] table opts
---   `uploaded_by` — optional opaque caller identifier (string)
+--   `uploaded_by` - optional opaque caller identifier (string)
 --     persisted to the metadata row for audit. The attachment layer
 --     never interprets it.
 -- @treturn string  The fresh attachment id (32-char hex).
@@ -127,7 +127,7 @@ end
 -- chunk only. If the multipart parser delivers the first chunk in
 -- fewer than ~8 bytes (rare in practice), the sniffer may not see
 -- enough magic to identify the format and will fall back to
--- "application/octet-stream" — which then fails the allowlist if one
+-- "application/octet-stream" - which then fails the allowlist if one
 -- is configured. Callers that need bullet-proof sniffing on a very
 -- bursty connection should buffer the first 512 bytes themselves
 -- before constructing a Part-like object.
@@ -148,7 +148,7 @@ function attachment.store(part, opts)
     -- Wrap the streaming write + finalize in pcall so ANY error path
     -- (chunks() raising, sniff() raising, write() raising, size cap,
     -- MIME allowlist, finalize size mismatch) reliably calls
-    -- writer:abort() — without this, an exception from inside the
+    -- writer:abort() - without this, an exception from inside the
     -- iterator would leak the temp file. We also call blob.delete()
     -- if finalize already committed the blob before the
     -- size-mismatch check fires; the blob is content-addressed so
@@ -185,7 +185,7 @@ function attachment.store(part, opts)
     if not ok then
         -- abort() is a no-op after successful finalize, so this is
         -- safe regardless of which step in the pcall failed. The
-        -- size-mismatch path however IS post-finalize — clean up the
+        -- size-mismatch path however IS post-finalize - clean up the
         -- already-committed blob if we have its id.
         pcall(function() w:abort() end)
         if blob_id then
@@ -234,7 +234,7 @@ end
 -- @treturn[2] nil  When no attachment exists with that id, or the
 --   underlying blob is missing. JS parity: bare nil/null with no
 --   reason (the missing-id-vs-missing-blob distinction isn't
---   actionable to callers and was an unintended divergence — see
+--   actionable to callers and was an unintended divergence - see
 --   PR 1 audit).
 function attachment.read(id)
     local meta = attachment.metadata(id)
@@ -305,7 +305,7 @@ function attachment.delete(id)
         db.exec("DELETE FROM _hull_attachments WHERE id = ?", { id })
 
         -- Other rows still referencing this blob_id? Refcount-by-dedup
-        -- — two attachments uploaded the same bytes share one blob;
+        -- - two attachments uploaded the same bytes share one blob;
         -- only when the LAST attachment row is gone do we unlink.
         local refs = db.query(
             "SELECT 1 FROM _hull_attachments WHERE blob_id = ? LIMIT 1",

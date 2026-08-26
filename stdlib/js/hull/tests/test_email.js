@@ -1,4 +1,4 @@
-// test_email.js — Tests for hull:email
+// test_email.js - Tests for hull:email
 //
 // Tests field validation and provider dispatch (no network I/O).
 // email.send follows the stdlib error convention: it THROWS an Error with a

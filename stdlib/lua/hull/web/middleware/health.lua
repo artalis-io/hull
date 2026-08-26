@@ -2,9 +2,9 @@
 --
 -- `health.middleware()` intercepts `GET /health` and `GET /ready`:
 --
---   - `/health` (liveness) — always returns `200 {status="ok", uptime}`.
+--   - `/health` (liveness) - always returns `200 {status="ok", uptime}`.
 --     Verifies the process is alive; never fails.
---   - `/ready`  (readiness) — runs the DB ping (if enabled) and every
+--   - `/ready`  (readiness) - runs the DB ping (if enabled) and every
 --     check registered via `health.register()`. Returns `200` when all
 --     pass, otherwise `503` with a per-check breakdown.
 --
@@ -37,7 +37,7 @@ local _start_time = nil
 --
 -- @function health.register
 -- @tparam string name  Identifier (appears in `/ready` JSON output).
--- @tparam function fn  `function() -> ok[, msg]` — see contract above.
+-- @tparam function fn  `function() -> ok[, msg]` - see contract above.
 function health.register(name, fn)
     _checks[name] = fn
 end
@@ -76,7 +76,7 @@ function health.run_checks(opts)
 
     -- Custom checks. Contract: fn() returns
     --   true               → ok
-    --   (no return / nil)  → ok (back-compat — common Lua idiom for
+    --   (no return / nil)  → ok (back-compat - common Lua idiom for
     --                        success when an assert-style check passes)
     --   false[, "msg"]     → fail (optional message)
     --   true, "info"       → ok with extra info (ignored)
@@ -92,7 +92,7 @@ function health.run_checks(opts)
         local ok, ret, err_msg = pcall(fn)
         local latency = math.floor((time.clock() - t0) * 10 + 0.5) / 10
         if not ok then
-            -- Check threw — `ret` is the error message.
+            -- Check threw - `ret` is the error message.
             results[name] = { status = "fail",
                               error = type(ret) == "string" and ret or "check threw",
                               latency_ms = latency }
@@ -101,7 +101,7 @@ function health.run_checks(opts)
             -- Success: explicit `true` or implicit (no return value).
             results[name] = { status = "ok", latency_ms = latency }
         else
-            -- ret is false, a string, a number, etc. — treat as failure.
+            -- ret is false, a string, a number, etc. - treat as failure.
             local msg = "check failed"
             if type(err_msg) == "string" then msg = err_msg
             elseif type(ret) == "string" then msg = ret end

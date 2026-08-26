@@ -140,7 +140,7 @@ Handler returns empty body; `hx-swap="delete"` removes the element.
 | `req.ctx.csrf_token` | `req.ctx.csrf_token` | snake_case in both |
 
 Templates use snake_case literals (`{{ csp_nonce }}`, `{{ csrf_token }}`)
-in BOTH runtimes — handlers pass `csp_nonce = req.ctx.csp_nonce` (Lua)
+in BOTH runtimes - handlers pass `csp_nonce = req.ctx.csp_nonce` (Lua)
 or `csp_nonce: req.ctx.csp_nonce` (JS). Same template HTML files work
 for both apps.
 

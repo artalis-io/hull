@@ -107,7 +107,7 @@ end
 -- On failure sends `401 {"error":"..."}` (or returns 0 if
 -- `opts.optional = true`).
 --
--- Unlike `session_middleware`, this one is **stateless** — no DB lookup
+-- Unlike `session_middleware`, this one is **stateless** - no DB lookup
 -- per request. Suitable for API-Bearer workflows; CSRF protection is
 -- NOT needed for Bearer auth (tokens aren't sent automatically by
 -- browsers).
@@ -183,7 +183,7 @@ end
 --- Create a session and set the auth cookie on the response.
 --
 -- @tparam table _req         Request (currently unused; reserved for future use).
--- @tparam table res          Response — `Set-Cookie` is added here.
+-- @tparam table res          Response - `Set-Cookie` is added here.
 -- @tparam table user_data    Data to persist in the session, e.g. `{ user_id = 1 }`.
 -- @tparam[opt] table opts    Options:
 --
@@ -230,8 +230,8 @@ end
 
 --- Destroy the current session and clear the auth cookie.
 --
--- @tparam table req           Request — reads the session cookie.
--- @tparam table res           Response — emits a `Set-Cookie` that clears it.
+-- @tparam table req           Request - reads the session cookie.
+-- @tparam table res           Response - emits a `Set-Cookie` that clears it.
 -- @tparam[opt] table opts     Options:
 --
 --   - `name` (string, default `"hull_session"`; alias: `cookie_name`)

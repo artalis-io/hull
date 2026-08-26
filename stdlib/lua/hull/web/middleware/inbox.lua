@@ -49,7 +49,7 @@ end
 
 --- Initialize the `_hull_inbox_processed` SQLite table.
 --
--- Idempotent — safe to call on every boot.
+-- Idempotent - safe to call on every boot.
 --
 -- @function inbox.init
 -- @tparam[opt] table opts

@@ -1,18 +1,18 @@
 --
--- hull.new — Scaffold a new Hull project
+-- hull.new - Scaffold a new Hull project
 --
 -- Usage: hull new <name> [--runtime lua|js] [--cli] [--type TYPE]
 --
 -- Layout types (--type):
---   flat (default)  — single app.lua + tests/ + migrations/. Best for
+--   flat (default)  - single app.lua + tests/ + migrations/. Best for
 --                     small services, demos, single-file experiments.
---   rest            — modular REST API: app.lua + routes/ + middleware/
+--   rest            - modular REST API: app.lua + routes/ + middleware/
 --                     + models/ + lib/. Best for apps that will grow
 --                     past one resource.
---   cli             — modular CLI tool: app.lua + commands/ + lib/.
---                     (Planned — Stage 2 of the layout work.)
---   tui             — modular TUI app: app.lua + views/ + lib/.
---                     (Planned — Stage 3 of the layout work.)
+--   cli             - modular CLI tool: app.lua + commands/ + lib/.
+--                     (Planned - Stage 2 of the layout work.)
+--   tui             - modular TUI app: app.lua + views/ + lib/.
+--                     (Planned - Stage 3 of the layout work.)
 --
 -- The legacy --cli flag (no --type) remains a flat single-file CLI
 -- and is unchanged. --type takes precedence when both are given.
@@ -25,7 +25,7 @@
 local templates = {}
 
 templates.lua_app = [[-- Declare every first-party module the app imports.
--- The runtime gate refuses undeclared imports — `hull modules available`
+-- The runtime gate refuses undeclared imports - `hull modules available`
 -- lists the full registry. Add capability sections (fs, hosts, env)
 -- alongside `modules` when a module needs them.
 local log = require("hull.log")
@@ -64,7 +64,7 @@ end)
 ]]
 
 templates.js_app = [[// Declare every first-party module the app imports.
-// The runtime gate refuses undeclared imports — `hull modules available`
+// The runtime gate refuses undeclared imports - `hull modules available`
 // lists the full registry. Add capability sections (fs, hosts, env)
 // alongside `modules` when a module needs them.
 import { app }  from "hull:app";
@@ -102,7 +102,7 @@ test("GET /health returns ok", async () => {
 });
 ]]
 
-templates.lua_cli_app = [[-- CLI app — `hull run app.lua [-- args...]` invokes app.main once and exits.
+templates.lua_cli_app = [[-- CLI app - `hull run app.lua [-- args...]` invokes app.main once and exits.
 -- `app.main` is mutually exclusive with route registration: pick CLI mode
 -- (app.main) or server mode (app.get/etc), not both.
 
@@ -130,12 +130,12 @@ templates.lua_cli_test = [[-- CLI tests use test.run_main to synthesize argv/std
 -- lands; for now invoke main directly via `hull run`.
 
 test("greets the named arg", function()
-    -- Placeholder — full CLI test harness lands separately.
+    -- Placeholder - full CLI test harness lands separately.
     test.eq(1, 1)
 end)
 ]]
 
-templates.js_cli_app = [[// CLI app — `hull run app.js [-- args...]` invokes app.main once and exits.
+templates.js_cli_app = [[// CLI app - `hull run app.js [-- args...]` invokes app.main once and exits.
 // `app.main` is mutually exclusive with route registration: pick CLI mode
 // (app.main) or server mode (app.get/etc), not both.
 
@@ -255,8 +255,8 @@ local function main()
 
     -- Modular layouts delegate to a per-type templates module. Each
     -- module's M.files(runtime) returns either:
-    --   (table, nil)  — { ["relative/path"] = "content" } to write
-    --   (nil, "msg")  — runtime not supported (e.g. TUI rejects JS)
+    --   (table, nil)  - { ["relative/path"] = "content" } to write
+    --   (nil, "msg")  - runtime not supported (e.g. TUI rejects JS)
     -- This function creates parent dirs as needed, writes files,
     -- and prints a tree of what was created.
     -- next_step is a function so the entry-extension is plugged in

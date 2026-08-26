@@ -1,4 +1,4 @@
-// test_inbox.js — Tests for hull:web:middleware:inbox
+// test_inbox.js - Tests for hull:web:middleware:inbox
 //
 // Requires db, time globals (run via hull test harness).
 

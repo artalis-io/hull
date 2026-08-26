@@ -14,7 +14,7 @@
  *
  * @param {string} origin       Incoming `Origin` header value.
  * @param {string[]} origins    Allowed origins. Use `"*"` for any (browser-rejected
- *                              when combined with credentials — the factory throws).
+ *                              when combined with credentials - the factory throws).
  * @returns {boolean}
  */
 function isAllowedOrigin(origin, origins) {
@@ -35,7 +35,7 @@ function isAllowedOrigin(origin, origins) {
  * methods/headers/max-age and replies 204 (short-circuit, returns 1).
  *
  * Fail-fast: throws at factory time if `credentials: true` is combined
- * with `origins: ["*"]` — browsers reject that combination and it's a
+ * with `origins: ["*"]` - browsers reject that combination and it's a
  * common bug.
  *
  * @param {Object} [opts]

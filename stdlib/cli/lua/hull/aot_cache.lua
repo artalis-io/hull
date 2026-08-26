@@ -1,5 +1,5 @@
 --
--- hull.aot_cache — Content-addressed AOT artifact cache.
+-- hull.aot_cache - Content-addressed AOT artifact cache.
 --
 -- Memoizes `wamrc` output across `hull build` invocations so the same
 -- (wasm, arch, memory64, wamrc-version) tuple compiles at most once
@@ -7,7 +7,7 @@
 --
 -- Backed by hull/blob_store in keyed mode (see
 -- hl_blob_store_put_keyed in include/hull/blob_store.h). The store
--- lives at $HOME/.hull/blobs/runtime/compute-aot/ — shared
+-- lives at $HOME/.hull/blobs/runtime/compute-aot/ - shared
 -- system-wide across every Hull app on the host, partitioned away
 -- from app blobs by the `runtime/` subtree.
 --
@@ -27,14 +27,14 @@
 --
 --   M.store(key, src_path)
 --     → bool             Read `src_path` into the cache under `key`.
---                        Best-effort — returns false silently on
+--                        Best-effort - returns false silently on
 --                        any failure.
 --
 --   M.wamrc_version(wamrc_bin)
 --     → string|nil       Captures the wamrc identity string for the
 --                        cache key. Memoized per process.
 --
--- Honors HULL_NO_CACHE=1 and HULL_NO_AOT_CACHE=1 — `lookup` and
+-- Honors HULL_NO_CACHE=1 and HULL_NO_AOT_CACHE=1 - `lookup` and
 -- `store` are no-ops when disabled. Callers can additionally pass
 -- `--no-cache` on `hull build` (handled in build.lua, not here).
 --
@@ -63,7 +63,7 @@ local function disabled()
     return tool.hull_cache_disabled("AOT")
 end
 
--- wamrc identity capture — memoized per (binary path, process).
+-- wamrc identity capture - memoized per (binary path, process).
 --
 -- Cache invalidation correctness depends on this being a true
 -- content fingerprint. Two wamrc binaries that produce different
@@ -71,7 +71,7 @@ end
 -- silently serves the wrong artifact for a swapped compiler.
 --
 -- Earlier versions used `wamrc --help`'s first line + binary mtime.
--- That fingerprint failed under realistic operational scenarios —
+-- That fingerprint failed under realistic operational scenarios -
 -- `cp -p`, `rsync --times`, and tar restore-from-backup all
 -- preserve mtime, and wamrc's --help banner has historically been
 -- stable across releases. A swapped binary with preserved mtime
@@ -103,16 +103,16 @@ end
 -- Compose the cache key from inputs that can change the AOT output.
 --
 -- Components:
---   wasm_sha    — content hash of the .wasm input
---   arch        — wamrc target arch tag (x86_64, aarch64)
---   mem64_flag  — 1 if the module is Memory64 (wamrc auto-detects it from the
+--   wasm_sha    - content hash of the .wasm input
+--   arch        - wamrc target arch tag (x86_64, aarch64)
+--   mem64_flag  - 1 if the module is Memory64 (wamrc auto-detects it from the
 --                 module's (memory i64) type and emits different AOT code; there
 --                 is no --enable-memory64 wamrc flag). Redundant with wasm_sha
 --                 but kept explicit for clarity.
---   sh_aot      — shared-heap AOT compatibility token (SHARED_HEAP_AOT_COMPAT)
---   wamrc_id    — version banner + binary mtime
+--   sh_aot      - shared-heap AOT compatibility token (SHARED_HEAP_AOT_COMPAT)
+--   wamrc_id    - version banner + binary mtime
 --
--- Folded into a single SHA-256, hex-encoded — the blob_store keyed
+-- Folded into a single SHA-256, hex-encoded - the blob_store keyed
 -- mode expects a 64-char lowercase hex id.
 function M.key(wasm_path, arch, mem64, wamrc_version)
     if not wasm_path or not arch then return nil end

@@ -1,7 +1,7 @@
 /**
  * @file hull:web:htmx:sort
  * @module hull:web:htmx:sort
- * @description HTMX sort widget — server-side helpers for
+ * @description HTMX sort widget - server-side helpers for
  * sortable column headers driven by `?sort=col[:asc|desc]`.
  *
  * Two pure-function helpers:
@@ -102,7 +102,7 @@ function planToggle(column, current) {
  *                                table + nav + actions (`#grid`),
  *                                pass "innerHTML". When the target
  *                                is the table itself, pass
- *                                "outerHTML". Omitted by default —
+ *                                "outerHTML". Omitted by default -
  *                                htmx falls back to "innerHTML".
  * @param {boolean} [opts.pushUrl] Default true.
  * @returns {string}  Attribute string for unescaped splice into <th>.

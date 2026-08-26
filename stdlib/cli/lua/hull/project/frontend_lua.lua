@@ -1,5 +1,5 @@
 --
--- hull.project.frontend_lua — the production Lua FRONTEND ADAPTER.
+-- hull.project.frontend_lua - the production Lua FRONTEND ADAPTER.
 --
 -- Adapts the shipped hull.source.lua AST into the frontend contract the project
 -- analyzer consumes (design: docs/project_discovery_design.md D3/D4). This is the ONLY

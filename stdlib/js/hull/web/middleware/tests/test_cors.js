@@ -1,4 +1,4 @@
-// test_cors.js — Tests for hull:web:middleware:cors
+// test_cors.js - Tests for hull:web:middleware:cors
 //
 // Tests pure-function helpers (no runtime globals needed).
 
