@@ -378,7 +378,7 @@ static int seatbelt_build_profile(const HlSandboxPolicy *policy,
                                            scratch->fs_write_real[i],
                                            sizeof(scratch->fs_write_real[i])) != 0) {
             log_warn("[sandbox] fs.write path '%s' rejected (absolute "
-                     "or contains '..') — skipping. Fix the manifest.",
+                     "or contains '..') - skipping. Fix the manifest.",
                      wpath);
             continue;
         }
@@ -445,7 +445,7 @@ static int seatbelt_build_profile(const HlSandboxPolicy *policy,
                  "(allow network-inbound network-bind)\n"
                  "(allow system-socket)\n");
     } else if (policy->network_outbound) {
-        SBPL_LIT("; Network (outbound only — CLI mode)\n"
+        SBPL_LIT("; Network (outbound only - CLI mode)\n"
                  "(allow system-socket)\n");
     }
     if (policy->network_outbound) {
@@ -635,18 +635,18 @@ int hl_sandbox_apply(const HlSandboxPolicy *policy, const char *app_dir,
     if (policy->wx_enforced) {
         if (policy->allow_dynamic_code) {
             log_error("[sandbox] manifest requests allow_dynamic_code=true "
-                      "but W^X is enforced — fail-closed. "
+                      "but W^X is enforced - fail-closed. "
                       "Use --no-sandbox to opt out (development only).");
             return -1;
         }
         if (policy->allow_dynamic_libraries) {
             log_error("[sandbox] manifest requests allow_dynamic_libraries=true "
-                      "but W^X is enforced — fail-closed.");
+                      "but W^X is enforced - fail-closed.");
             return -1;
         }
         if (!sb_supported()) {
             log_error("[sandbox] W^X enforcement requested but no kernel "
-                      "sandbox is available on this platform — fail-closed. "
+                      "sandbox is available on this platform - fail-closed. "
                       "Use --no-sandbox to opt out (development only).");
             return -1;
         }
@@ -669,11 +669,11 @@ int hl_sandbox_apply(const HlSandboxPolicy *policy, const char *app_dir,
     if (policy->wx_enforced && !hl_macos_hardened_runtime_active()) {
 #ifdef HL_RELEASE_BUILD
         log_error("[sandbox] Hardened Runtime not active and W^X is enforced "
-                  "— refusing to start. Release binaries must be code-signed "
+                  "- refusing to start. Release binaries must be code-signed "
                   "with --options=runtime and notarized.");
         return -1;
 #else
-        log_warn("[sandbox] Hardened Runtime not active — local/dev build. "
+        log_warn("[sandbox] Hardened Runtime not active - local/dev build. "
                  "Release binaries must be signed with --options=runtime.");
 #endif
     }
@@ -957,7 +957,7 @@ int hl_sandbox_apply(const HlSandboxPolicy *policy, const char *app_dir,
             /* Should never happen — promises[256] vs ~50 bytes total —
              * but fail loud rather than silently drop dns permissions. */
             log_error("[sandbox] pledge promises buffer overflow "
-                      "(need %zu, have %zu) — refusing to start with "
+                      "(need %zu, have %zu) - refusing to start with "
                       "an under-permissioned sandbox", dns_len + 1, remaining);
             return -1;
         }

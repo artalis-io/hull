@@ -229,7 +229,7 @@ static int cache_list_text(void)
 
         const char *status;
         if (!k->env_kind) {
-            status = "n/a";  /* system store — not a cache, no opt-out */
+            status = "n/a";  /* system store - not a cache, no opt-out */
         } else if (global_off) {
             status = "off (all)";
         } else if (hl_hull_cache_disabled(k->env_kind)) {
@@ -874,7 +874,7 @@ static int verify_one_kind(const HlCacheKind *k, int repair,
         sh_json_write_array_start(w);
     } else {
         fprintf(stdout, "  %-12s (%s mode)\n", k->name,
-                k->is_cas ? "CAS — sha-checked" : "keyed — structural only");
+                k->is_cas ? "CAS - sha-checked" : "keyed - structural only");
     }
 
     VerifyCtx v = {

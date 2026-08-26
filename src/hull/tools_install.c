@@ -47,7 +47,7 @@ static const HlToolSpec REGISTRY[] = {
     {
         .name              = "wamrc",
         .description       =
-            "WAMR AOT compiler — produces compute/*.aot.<arch> modules "
+            "WAMR AOT compiler - produces compute/*.aot.<arch> modules "
             "(~50× faster than the interpreter on compute-heavy WASM).",
         .has_linux_x86_64  = 1,
         .has_linux_aarch64 = 1,

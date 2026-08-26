@@ -452,7 +452,7 @@ static int cmd_install(int argc, char **argv, const char *repo)
     KlAllocator alloc = kl_allocator_default();
     KlTlsCtx *tls = hl_release_io_open_tls(&alloc);
     if (!tls) {
-        fprintf(stderr, "hull tools: no CA bundle available — cannot verify HTTPS\n");
+        fprintf(stderr, "hull tools: no CA bundle available - cannot verify HTTPS\n");
         return 1;
     }
 

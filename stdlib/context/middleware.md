@@ -32,8 +32,8 @@ app.usePost("POST", "/api/*", (req, res) => {
 <!-- compact -->
 ## Registration
 
-- **`app.use(method, pattern, fn)`** — pre-body middleware (before request body is read)
-- **`app.use_post(method, pattern, fn)`** / `app.usePost(...)` — post-body middleware (after body is read)
+- **`app.use(method, pattern, fn)`** - pre-body middleware (before request body is read)
+- **`app.use_post(method, pattern, fn)`** / `app.usePost(...)` - post-body middleware (after body is read)
 
 **Method matching:** `"*"` matches any method. `"GET"`, `"POST"`, etc. match specific methods.
 

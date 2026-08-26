@@ -49,11 +49,11 @@ Enqueue side-effects inside a database transaction. If the transaction rolls bac
 **`outbox.init(opts?)`** — creates `_hull_outbox` table. `opts.max_attempts` (default: 5).
 
 **`outbox.enqueue(opts)`:**
-- `kind` — delivery type (e.g., `"webhook"`, `"email"`)
-- `destination` — target URL or address
-- `payload` — payload string (JSON, etc.)
-- `headers` — JSON-encoded headers (optional)
-- `idempotency_key` / `idempotencyKey` — dedup key for delivery (optional)
+- `kind` - delivery type (e.g., `"webhook"`, `"email"`)
+- `destination` - target URL or address
+- `payload` - payload string (JSON, etc.)
+- `headers` - JSON-encoded headers (optional)
+- `idempotency_key` / `idempotencyKey` - dedup key for delivery (optional)
 
 **`outbox.flush(opts?)`** — deliver pending items via HTTP. Exponential backoff on failure (`2^attempt * 10s`, capped at 1hr). Returns count of pending items.
 
@@ -67,10 +67,10 @@ Prevents processing the same incoming webhook twice.
 
 **`inbox.init(opts?)`** — creates `_hull_inbox_processed` table. `opts.ttl` (default: 86400).
 
-- **`inbox.is_duplicate(message_id, source?)`** / `inbox.isDuplicate(...)` — check without marking
-- **`inbox.mark_processed(message_id, source?, opts?)`** / `inbox.markProcessed(...)` — mark as processed
-- **`inbox.check_and_mark(message_id, source?, opts?)`** / `inbox.checkAndMark(...)` — check + mark atomically. Returns `true` if duplicate, `false` if new.
-- **`inbox.cleanup()`** — delete expired records, returns count.
+- **`inbox.is_duplicate(message_id, source?)`** / `inbox.isDuplicate(...)` - check without marking
+- **`inbox.mark_processed(message_id, source?, opts?)`** / `inbox.markProcessed(...)` - mark as processed
+- **`inbox.check_and_mark(message_id, source?, opts?)`** / `inbox.checkAndMark(...)` - check + mark atomically. Returns `true` if duplicate, `false` if new.
+- **`inbox.cleanup()`** - delete expired records, returns count.
 
 ## Idempotency Middleware
 

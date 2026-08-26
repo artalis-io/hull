@@ -49,7 +49,7 @@ Identical to `hull update`:
    embedded Mozilla CA bundle, verifies the manifest signature
    against the embedded `HL_RELEASE_PUBKEY_HEX`, then verifies the
    asset's SHA-256 (constant-time compare) against the manifest.
-4. Atomic install via `rename(2)` — no half-written files.
+4. Atomic install via `rename(2)` - no half-written files.
 
 No new keys, no new ceremonies. Same key that signs `hull` itself
 signs the tool binaries.
@@ -84,9 +84,9 @@ nothing on your `$PATH` is touched. Uninstall is mechanically just
 When hull needs a tool (e.g. `wamrc` for AOT compilation during
 `hull build`):
 
-1. `$HOME/.hull/tools/<name>` — canonical install location
-2. `dirname(hull_exe)/<name>` — for ejected / portable installs
-3. `<name>` on `$PATH` — for users who have it via distro / brew
+1. `$HOME/.hull/tools/<name>` - canonical install location
+2. `dirname(hull_exe)/<name>` - for ejected / portable installs
+3. `<name>` on `$PATH` - for users who have it via distro / brew
 
 The fallbacks mean a system-managed `wamrc` keeps working;
 `$HOME/.hull/tools/` is just the preferred location.
@@ -158,7 +158,7 @@ Three edits required:
    },
    ```
 
-2. **CI matrix** in `.github/workflows/release.yml` — add a
+2. **CI matrix** in `.github/workflows/release.yml` - add a
    `build-your-tool` job that produces `hull-your-tool-<platform>`
    artifacts on each platform, and extend the release job's flatten
    / sha256 / asset list.
@@ -197,7 +197,7 @@ except the actual GitHub download.
 
 ## See also
 
-- `hull agent context --task=compute` — when AOT actually matters
-- `hull agent context --task=build` — `hull build` flags incl. `--no-aot`
-- `docs/tools_install.md` — full design doc
-- `docs/release_signing.md` — the shared trust chain
+- `hull agent context --task=compute` - when AOT actually matters
+- `hull agent context --task=build` - `hull build` flags incl. `--no-aot`
+- `docs/tools_install.md` - full design doc
+- `docs/release_signing.md` - the shared trust chain

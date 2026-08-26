@@ -192,7 +192,7 @@ int hull_serve(int argc, char **argv)
     HlAsyncBackendPool *pool = NULL;
     if (be->pool_create(&pool, async_ctx, 4, 64) != 0) {
         pool = NULL;
-        fprintf(stderr, "[hull:cli] thread pool init failed — async ops unavailable\n");
+        fprintf(stderr, "[hull:cli] thread pool init failed - async ops unavailable\n");
     }
 
     /* Phase 1 sandbox: block exec/proc/fork before loading user code.

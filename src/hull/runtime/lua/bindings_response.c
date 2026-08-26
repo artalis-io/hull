@@ -121,7 +121,7 @@ static int lua_res_json(lua_State *L)
     const char *json_str = lua_tolstring(L, -1, &json_len);
     if (!json_str) {
         lua_pop(L, 2);
-        return luaL_error(L, "res:json — json.encode did not return a string");
+        return luaL_error(L, "res:json - json.encode did not return a string");
     }
     kl_response_header(res, "Content-Type", "application/json");
     hl_maybe_compress(hlua ? hlua->active_req : NULL, res,

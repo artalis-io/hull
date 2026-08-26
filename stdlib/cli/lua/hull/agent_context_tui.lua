@@ -113,7 +113,7 @@ local function render(t, state)
             t:style({ fg = 0x888888, italic = true })
             t:print(right_x, t.rows - 1,
                     "(" .. (#lines - h) .. " more line"
-                    .. ((#lines - h) == 1 and "" or "s") .. " — open with"
+                    .. ((#lines - h) == 1 and "" or "s") .. " - open with"
                     .. " hull agent context --task=" .. state.task ..
                        " --level=full)")
             t:style({})

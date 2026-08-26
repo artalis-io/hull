@@ -113,11 +113,11 @@ if (noVerifyPlatform) {
     if (gethullOk) {
         console.log("gethull layer: VALID (signed by gethull.dev)");
     } else {
-        tool.stderr("gethull layer: FAILED — signature invalid\n");
+        tool.stderr("gethull layer: FAILED - signature invalid\n");
         issues++;
     }
 } else if (!isLegacy) {
-    tool.stderr("gethull layer: MISSING — package.sig has no platform.gethull block\n");
+    tool.stderr("gethull layer: MISSING - package.sig has no platform.gethull block\n");
     issues++;
 }
 
@@ -127,7 +127,7 @@ if (sig.platform?.signature && sig.platform?.public_key) {
     const platformKeyHex = readKey(platformKeySource);
     if (platformKeyHex && platformKeyHex !== ZERO_PUBKEY_HEX &&
         sig.platform.public_key !== platformKeyHex) {
-        tool.stderr("Platform layer: WARNING — key does not match --platform-key\n");
+        tool.stderr("Platform layer: WARNING - key does not match --platform-key\n");
         issues++;
     }
 
@@ -136,7 +136,7 @@ if (sig.platform?.signature && sig.platform?.public_key) {
     if (platOk) {
         console.log("Platform layer: VALID (self-consistent)");
     } else {
-        tool.stderr("Platform layer: FAILED — signature invalid\n");
+        tool.stderr("Platform layer: FAILED - signature invalid\n");
         issues++;
     }
 
@@ -152,7 +152,7 @@ if (sig.platform?.signature && sig.platform?.public_key) {
 // ── App layer verification ─────────────────────────────────────────
 const devKeyHex = readKey(developerKeySource);
 if (devKeyHex && sig.public_key !== devKeyHex) {
-    tool.stderr("App layer: WARNING — developer key mismatch\n");
+    tool.stderr("App layer: WARNING - developer key mismatch\n");
     issues++;
 }
 
@@ -175,7 +175,7 @@ if (sig.binary_hash) {
 
 const ok = ed25519Verify(payload, sig.signature, sig.public_key);
 if (!ok) {
-    tool.stderr("App layer: FAILED — signature is invalid\n");
+    tool.stderr("App layer: FAILED - signature is invalid\n");
     tool.exit(1);
 }
 
@@ -220,10 +220,10 @@ if (mismatches.length > 0) {
 }
 
 if (issues > 0) {
-    tool.stderr(`hull verify: FAILED — ${issues} issue(s) found\n`);
+    tool.stderr(`hull verify: FAILED - ${issues} issue(s) found\n`);
     tool.exit(1);
 }
 
 console.log("App layer: VALID");
 console.log("");
-console.log("hull verify: OK — all checks passed");
+console.log("hull verify: OK - all checks passed");

@@ -939,7 +939,7 @@ static void hl_serve_init_infra(HlServerState *s)
     if (be->pool_create(&s->thread_pool, s->async_ctx,
                          num_workers, queue_capacity) != 0) {
         s->thread_pool = NULL;
-        log_warn("[hull:c] thread pool creation failed — async work unavailable");
+        log_warn("[hull:c] thread pool creation failed - async work unavailable");
     }
     /* thread_pool may be NULL if creation fails — non-fatal, async work
      * will simply be unavailable */
@@ -947,7 +947,7 @@ static void hl_serve_init_infra(HlServerState *s)
     /* Create client connection pool for HTTP keep-alive reuse */
     s->cpool_ok = kl_cpool_init(&s->client_pool, NULL, &s->kl_alloc, &s->server.ev);
     if (s->cpool_ok != 0)
-        log_warn("[hull:c] client pool creation failed — connection reuse disabled");
+        log_warn("[hull:c] client pool creation failed - connection reuse disabled");
 
     /* Create compression context for server responses and client decompression */
     s->comp_ctx = NULL;
@@ -970,7 +970,7 @@ static void hl_serve_init_infra(HlServerState *s)
             s->decompress_cfg.factory =
                 (KlDecompressFactory)kl_decompress_miniz_create;
         } else {
-            log_warn("[hull:c] compression init failed — responses uncompressed");
+            log_warn("[hull:c] compression init failed - responses uncompressed");
         }
     }
 }
@@ -990,7 +990,7 @@ static int hl_serve_init_app_context(HlServerState *s)
         if (wrc == 0)
             wasm_cache_ok = 1;
         else if (wrc < 0)
-            log_warn("[hull:c] WAMR init failed — compute.call() unavailable");
+            log_warn("[hull:c] WAMR init failed - compute.call() unavailable");
         /* wrc > 0 (HL_CAP_WASM_ABSENT): WASM feature not composed — quiet. */
     }
 #endif
@@ -1015,7 +1015,7 @@ static int hl_serve_init_app_context(HlServerState *s)
                 gpu_ctx.default_device = s->cfg.gpu_device;
             gpu_ctx_ok = 1;
         } else if (gpu_be) {
-            log_info("[hull:c] GPU compute unavailable — gpu.* disabled");
+            log_info("[hull:c] GPU compute unavailable - gpu.* disabled");
         }
     }
 
@@ -1060,7 +1060,7 @@ static int hl_serve_load_app(HlServerState *s)
     if (s->cfg.verify_sig_path) {
         if (hl_verify_startup(s->cfg.verify_sig_path, s->entry_point, app_vfs,
                               s->cfg.no_verify_platform) != 0) {
-            log_error("[hull:c] signature verification failed — refusing to start");
+            log_error("[hull:c] signature verification failed - refusing to start");
             return -1;
         }
         log_info("[hull:c] signature verified OK");
@@ -1415,7 +1415,7 @@ static int hl_serve_wire_caps(HlServerState *s)
             admit = !s->manifest.present || s->manifest.compute;
         if (!admit) {
             rt->wasm_cache = NULL;
-            log_info("[hull:c] compute not declared — compute.* disabled");
+            log_info("[hull:c] compute not declared - compute.* disabled");
         }
     }
 
@@ -1432,7 +1432,7 @@ static int hl_serve_wire_caps(HlServerState *s)
             admit = !s->manifest.present || s->manifest.gpu;
         if (!admit) {
             rt->gpu_ctx = NULL;
-            log_info("[hull:c] gpu not declared — gpu.* disabled");
+            log_info("[hull:c] gpu not declared - gpu.* disabled");
         }
     }
     /* Apply per-device allowlist if manifest declares specific devices */
@@ -1992,7 +1992,7 @@ static int hl_serve_wire_and_start(HlServerState *s)
      * server is still correct without the seal; the seal is a
      * hardening measure, not a correctness one. */
     if (kl_server_freeze(&s->server) != 0) {
-        log_warn("[hull:c] kl_server_freeze failed — server unfrozen "
+        log_warn("[hull:c] kl_server_freeze failed - server unfrozen "
                  "(routing tables remain writable, hardening reduced)");
     } else {
         log_debug("[hull:c] router frozen (RO routing tables)");

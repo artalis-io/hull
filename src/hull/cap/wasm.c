@@ -775,7 +775,7 @@ int hl_cap_wasm_load(HlWasmCache *cache, const char *name,
     if (!is_aot && getenv("HULL_QUIET_AOT") == NULL) {
         log_warn("[wasm] module '%s' is running in the fast interpreter "
                  "(no AOT artifact found). Compile with `wamrc` (make wamrc) "
-                 "and rebuild — AOT is typically ~50x faster.",
+                 "and rebuild - AOT is typically ~50x faster.",
                  name);
     }
     return 0;

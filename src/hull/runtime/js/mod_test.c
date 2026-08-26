@@ -88,7 +88,7 @@ static JSValue js_test_call(JSContext *ctx, JSValueConst this_val,
         }
     } else {
         return JS_ThrowTypeError(ctx,
-            "test() requires (desc, fn) or (desc, opts, fn) — "
+            "test() requires (desc, fn) or (desc, opts, fn) - "
             "the last argument must be the test function");
     }
 

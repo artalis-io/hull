@@ -163,7 +163,7 @@ static int cmd_available(int argc, char **argv, const HlCommandEnv *env)
         return 0;
     }
 
-    printf("First-party Hull module registry — %zu entries\n", total);
+    printf("First-party Hull module registry - %zu entries\n", total);
 
     /* Section grouping (v0.2.0): show the namespace shape so a user
      * eyeballing the list sees the web/ cluster as a unit. Registry

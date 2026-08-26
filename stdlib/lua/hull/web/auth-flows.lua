@@ -1546,7 +1546,7 @@ function M.init(opts)
     end
     if trust_request and not (has_origin or has_hosts) then
         local log = require("hull.log")
-        log.warn("auth-flows: trust_request_host = true — falling back to "
+        log.warn("auth-flows: trust_request_host = true - falling back to "
               .. "req.headers.host for URL construction. Vulnerable to "
               .. "host-header injection; use public_origin / trusted_hosts "
               .. "in production.")
@@ -1577,7 +1577,7 @@ function M.init(opts)
             end
             if h:sub(1, 1) ~= "[" and h:find(":", 1, true) then
                 error("auth-flows.init: trusted_hosts entry '" .. h
-                      .. "' contains ':' — entries must be bare host "
+                      .. "' contains ':' - entries must be bare host "
                       .. "names; the URL preserves the request's port "
                       .. "automatically. IPv6 literals must be "
                       .. "bracketed (e.g. \"[::1]\").")

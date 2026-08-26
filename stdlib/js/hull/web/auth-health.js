@@ -149,7 +149,7 @@ function routes(app, opts) {
     if (typeof o.authCheck !== "function") {
         throw new Error("authHealth.routes: opts.authCheck function is "
             + "required. The endpoint exposes session/enrollment counts "
-            + "and operational state — gate it behind your RBAC "
+            + "and operational state - gate it behind your RBAC "
             + "predicate or a token check.");
     }
     const path = o.path || "/admin/auth-status";

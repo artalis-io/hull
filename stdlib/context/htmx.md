@@ -205,13 +205,13 @@ The scaffold ships dev-friendly defaults. Before deploying:
 
 ## See also
 
-- `docs/htmx.md` — long-form pattern guide with flash messages,
+- `docs/htmx.md` - long-form pattern guide with flash messages,
   empty states, `hx-swap-oob`, the security model rationale.
-- `examples/hypermedia_todo/` — the canonical scaffolded app, both
+- `examples/hypermedia_todo/` - the canonical scaffolded app, both
   runtimes, runs under `hull test`.
-- `auth` task context — for replacing the anonymous session
+- `auth` task context - for replacing the anonymous session
   bootstrap with a real login flow.
-- `templates` task context — template syntax, inheritance, filters.
-- `testing` task context — full test framework reference.
+- `templates` task context - template syntax, inheritance, filters.
+- `testing` task context - full test framework reference.
 - HTMX upstream: <https://htmx.org/docs/>.
 - Pico v2 docs: <https://picocss.com/docs/>.

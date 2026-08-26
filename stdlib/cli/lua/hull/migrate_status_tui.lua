@@ -174,7 +174,7 @@ local function render(t)
         t:style({})
     else
         t:style({ fg = pal.warn, bold = true })
-        t:print(right_x, 4, "pending — will run on next `hull migrate`")
+        t:print(right_x, 4, "pending - will run on next `hull migrate`")
         t:style({})
     end
 

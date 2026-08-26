@@ -40,29 +40,29 @@ app.post("/users", (req, res) => {
 <!-- compact -->
 ## Request Object
 
-- **`req.method`** — HTTP method (`"GET"`, `"POST"`, etc.)
-- **`req.path`** — request path (`"/users/42"`)
-- **`req.params`** — route parameters (`{ id = "42" }` for `/users/:id`)
-- **`req.query`** — query string parameters (`{ page = "2" }` for `?page=2`)
-- **`req.headers`** — request headers (lowercase keys)
-- **`req.body`** — parsed request body (JSON object or string)
-- **`req.ctx`** — mutable context table for middleware data passing
+- **`req.method`** - HTTP method (`"GET"`, `"POST"`, etc.)
+- **`req.path`** - request path (`"/users/42"`)
+- **`req.params`** - route parameters (`{ id = "42" }` for `/users/:id`)
+- **`req.query`** - query string parameters (`{ page = "2" }` for `?page=2`)
+- **`req.headers`** - request headers (lowercase keys)
+- **`req.body`** - parsed request body (JSON object or string)
+- **`req.ctx`** - mutable context table for middleware data passing
 
 ## Response Object
 
-- **`res.json(data)`** — send JSON response with `Content-Type: application/json`
-- **`res.text(str)`** — send plain text with `Content-Type: text/plain`
-- **`res.html(str)`** — send HTML with `Content-Type: text/html`
-- **`res.status(code)`** — set status code, chainable: `res.status(201).json(data)`
-- **`res.header(name, value)`** — set response header, chainable
-- **`res.redirect(url)`** — send 302 redirect
-- **`res.redirect(url, code)`** — redirect with custom status (301, 303, etc.)
+- **`res.json(data)`** - send JSON response with `Content-Type: application/json`
+- **`res.text(str)`** - send plain text with `Content-Type: text/plain`
+- **`res.html(str)`** - send HTML with `Content-Type: text/html`
+- **`res.status(code)`** - set status code, chainable: `res.status(201).json(data)`
+- **`res.header(name, value)`** - set response header, chainable
+- **`res.redirect(url)`** - send 302 redirect
+- **`res.redirect(url, code)`** - redirect with custom status (301, 303, etc.)
 
 ## Route Patterns
 
-- `/users` — exact match
-- `/users/:id` — named parameter (matches one segment)
-- `/files/*` — wildcard (matches rest of path)
+- `/users` - exact match
+- `/users/:id` - named parameter (matches one segment)
+- `/files/*` - wildcard (matches rest of path)
 
 Parameters are always strings. Cast manually: `tonumber(req.params.id)` (Lua) / `Number(req.params.id)` (JS).
 

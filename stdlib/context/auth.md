@@ -36,14 +36,14 @@ app.use("*", "/api/*", auth.jwt_middleware({ secret = "my-secret" }))
 ## Options
 
 **`auth.session_middleware(opts)`** / `auth.sessionMiddleware(opts)`
-- `cookie_name` / `cookieName` — session cookie name (default: `"hull_session"`)
-- `optional` — if `true`, continues without session instead of rejecting (default: `false`)
-- `login_path` / `loginPath` — redirect path on failure instead of 401
+- `cookie_name` / `cookieName` - session cookie name (default: `"hull_session"`)
+- `optional` - if `true`, continues without session instead of rejecting (default: `false`)
+- `login_path` / `loginPath` - redirect path on failure instead of 401
 - Sets `req.ctx.session` (data) and `req.ctx.session_id` / `req.ctx.sessionId`
 
 **`auth.jwt_middleware(opts)`** / `auth.jwtMiddleware(opts)`
-- `secret` — HMAC-SHA256 secret (required)
-- `optional` — continue without token (default: `false`)
+- `secret` - HMAC-SHA256 secret (required)
+- `optional` - continue without token (default: `false`)
 - Reads `Authorization: Bearer <token>` header
 - Sets `req.ctx.user` with decoded payload
 

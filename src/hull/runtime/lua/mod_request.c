@@ -192,7 +192,7 @@ static int mp_park_and_yield(lua_State *L, HlMpIter *it,
     KlConn *conn = it->lua->active_conn;
     if (!conn)
         return luaL_error(L,
-            "req:multipart(): no active connection — streaming routes "
+            "req:multipart(): no active connection - streaming routes "
             "require a live server (hull dev / built binary)");
 
     HlAsyncCont *cont = hl_lua_async_cont_create(it->lua, it->alloc, NULL);

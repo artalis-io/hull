@@ -48,13 +48,13 @@ const char *hl_release_io_platform(void)
 #elif defined(__APPLE__) && defined(__aarch64__)
     return "darwin-arm64";
 #elif defined(__APPLE__)
-    return "cosmo"; /* no darwin-x86_64 native artifact — fall back to APE */
+    return "cosmo"; /* no darwin-x86_64 native artifact - fall back to APE */
 #elif defined(__linux__) && defined(__x86_64__)
     return "linux-x86_64";
 #elif defined(__linux__) && (defined(__aarch64__) || defined(__arm64__))
     return "linux-aarch64";
 #elif defined(__linux__)
-    return "cosmo"; /* unknown Linux arch — APE fallback */
+    return "cosmo"; /* unknown Linux arch - APE fallback */
 #else
     return "cosmo";
 #endif

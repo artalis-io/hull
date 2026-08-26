@@ -75,7 +75,7 @@ int hl_cmd_update(int argc, char **argv, const HlCommandEnv *env)
     KlAllocator alloc = kl_allocator_default();
     KlTlsCtx *tls = hl_release_io_open_tls(&alloc);
     if (!tls) {
-        fprintf(stderr, "hull update: no CA bundle available — cannot verify HTTPS\n");
+        fprintf(stderr, "hull update: no CA bundle available - cannot verify HTTPS\n");
         return 1;
     }
 
@@ -182,7 +182,7 @@ int hl_cmd_update(int argc, char **argv, const HlCommandEnv *env)
                               "hull-update") != 0) {
             fprintf(stderr,
                 "hull update: failed to download release signature (hull.sha256.sig)\n"
-                "             — this release is not signed; refusing to install\n");
+                "             - this release is not signed; refusing to install\n");
             kl_free(&alloc, binary, binary_len);
             kl_free(&alloc, manifest, manifest_len);
             kl_tls_mbedtls_ctx_destroy(tls);
@@ -195,7 +195,7 @@ int hl_cmd_update(int argc, char **argv, const HlCommandEnv *env)
         if (sig_rc != 0) {
             fprintf(stderr,
                 "hull update: release signature verification FAILED\n"
-                "             — manifest does not match the embedded release public key\n");
+                "             - manifest does not match the embedded release public key\n");
             kl_free(&alloc, binary, binary_len);
             kl_free(&alloc, manifest, manifest_len);
             kl_tls_mbedtls_ctx_destroy(tls);
@@ -204,7 +204,7 @@ int hl_cmd_update(int argc, char **argv, const HlCommandEnv *env)
         fprintf(stdout, "hull update: release signature verified\n");
     } else {
         fprintf(stderr,
-            "hull update: WARNING — this hull build has no embedded release public key,\n"
+            "hull update: WARNING - this hull build has no embedded release public key,\n"
             "             skipping Ed25519 signature check (SHA-256 only).\n");
     }
 

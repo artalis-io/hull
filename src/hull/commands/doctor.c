@@ -392,7 +392,7 @@ static void print_human(FILE *f, CompilerInfo *ci, int nci,
     /* ── Compute (WASM) ── */
     fprintf(f, "Compute (WASM)  (compute/<name>.wasm modules)\n");
     if (!cmp->wasm_enabled) {
-        fprintf(f, "  runtime     \xe2\x9c\x97  HL_ENABLE_WASM=0 — compute.* unavailable\n");
+        fprintf(f, "  runtime     \xe2\x9c\x97  HL_ENABLE_WASM=0 - compute.* unavailable\n");
     } else {
         fprintf(f, "  runtime     \xe2\x9c\x93  WAMR enabled (interpreter + AOT loader linked in)\n");
 
@@ -415,14 +415,14 @@ static void print_human(FILE *f, CompilerInfo *ci, int nci,
         if (cmp->clang_path[0]) {
             fprintf(f, "  clang       \xe2\x9c\x93  %s\n", cmp->clang_path);
             if (cmp->has_brew_llvm) {
-                fprintf(f, "                (Homebrew llvm — bundles wasm-ld)\n");
+                fprintf(f, "                (Homebrew llvm - bundles wasm-ld)\n");
             } else if (cmp->has_wasm_ld) {
                 fprintf(f, "                (with wasm-ld in PATH)\n");
             } else {
-                fprintf(f, "                \xe2\x9a\xa0  wasm-ld not found — install lld\n");
+                fprintf(f, "                \xe2\x9a\xa0  wasm-ld not found - install lld\n");
             }
         } else {
-            fprintf(f, "  clang       \xe2\x9c\x97  not found — `hull compute build` cannot compile sources\n");
+            fprintf(f, "  clang       \xe2\x9c\x97  not found - `hull compute build` cannot compile sources\n");
             fprintf(f, "                hint: brew install llvm@18 (macOS) / apt install clang lld (Linux)\n");
         }
     }
@@ -447,26 +447,26 @@ static void print_human(FILE *f, CompilerInfo *ci, int nci,
 #ifdef HL_ENABLE_DB
         fprintf(f, "  HL_ENABLE_DB    \xe2\x9c\x93  hull/db, hull/middleware/{session,csrf,auth,...} importable\n");
 #else
-        fprintf(f, "  HL_ENABLE_DB    \xe2\x97\x8b  off — hull/db and DB-dependent middleware will fail to resolve\n");
+        fprintf(f, "  HL_ENABLE_DB    \xe2\x97\x8b  off - hull/db and DB-dependent middleware will fail to resolve\n");
 #endif
 #ifdef HL_ENABLE_WASM
         fprintf(f, "  HL_ENABLE_WASM  \xe2\x9c\x93  hull/compute importable\n");
 #else
-        fprintf(f, "  HL_ENABLE_WASM  \xe2\x97\x8b  off — hull/compute will fail to resolve\n");
+        fprintf(f, "  HL_ENABLE_WASM  \xe2\x97\x8b  off - hull/compute will fail to resolve\n");
 #endif
 #ifdef HL_ENABLE_GPU
         fprintf(f, "  HL_ENABLE_GPU   \xe2\x9c\x93  hull/gpu importable\n");
 #else
-        fprintf(f, "  HL_ENABLE_GPU   \xe2\x97\x8b  off — hull/gpu will fail to resolve\n");
+        fprintf(f, "  HL_ENABLE_GPU   \xe2\x97\x8b  off - hull/gpu will fail to resolve\n");
 #endif
 #ifdef HL_ENABLE_HTTP
         fprintf(f, "  HL_ENABLE_HTTP  \xe2\x9c\x93  hull/http-server, hull/http-client, hull/web/* (ws/sse/middleware) importable\n");
 #else
-        fprintf(f, "  HL_ENABLE_HTTP  \xe2\x97\x8b  off — CLI / compute-only build; hull/http-*, hull/web/ws-*, hull/web/sse, and hull/web/middleware/* will fail to resolve\n");
+        fprintf(f, "  HL_ENABLE_HTTP  \xe2\x97\x8b  off - CLI / compute-only build; hull/http-*, hull/web/ws-*, hull/web/sse, and hull/web/middleware/* will fail to resolve\n");
 #endif
         size_t total = 0;
         (void)hl_module_registry_all(&total);
-        fprintf(f, "  registry        %zu first-party modules — run `hull modules available` for the full list\n",
+        fprintf(f, "  registry        %zu first-party modules - run `hull modules available` for the full list\n",
                 total);
         fprintf(f, "\n");
     }
@@ -555,11 +555,11 @@ static void print_human(FILE *f, CompilerInfo *ci, int nci,
     /* ── Summary ── */
     fprintf(f, "hull build    ");
     if (embed == PLATFORM_NONE) {
-        fprintf(f, "not ready — platform library not embedded\n");
+        fprintf(f, "not ready - platform library not embedded\n");
         fprintf(f, "              hint: make platform && make EMBED_PLATFORM=1\n");
     } else {
         if (!any_compiler) {
-            fprintf(f, "not ready — no C compiler found\n");
+            fprintf(f, "not ready - no C compiler found\n");
             fprintf(f, "              hint: install gcc or clang\n");
         } else {
             fprintf(f, "ready\n");

@@ -132,7 +132,7 @@ function init(opts) {
         } else {
             log.warn("session: app.daily not available "
                 + "(CLI flavor or hull/timers not admitted) "
-                + "— auto-cleanup runs only at init(). "
+                + "- auto-cleanup runs only at init(). "
                 + "Wire your own cron/worker for steady-state.");
         }
     }

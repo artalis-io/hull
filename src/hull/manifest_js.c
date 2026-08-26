@@ -272,11 +272,11 @@ int hl_manifest_extract_js(JSContext *ctx, HlManifest *out, HlAllocator *alloc)
                                 out->modules_count++;
                             }
                         } else {
-                            log_warn("[manifest] modules[%d] = %s — invalid "
+                            log_warn("[manifest] modules[%d] = %s - invalid "
                                      "major version, ignored", (int)i, spec);
                         }
                     } else {
-                        log_warn("[manifest] modules[%d] = %s — expected "
+                        log_warn("[manifest] modules[%d] = %s - expected "
                                  "\"vendor/name@version\", ignored",
                                  (int)i, spec);
                     }
@@ -308,7 +308,7 @@ int hl_manifest_extract_js(JSContext *ctx, HlManifest *out, HlAllocator *alloc)
                         int optional = (speclen > 0 && spec[speclen - 1] == '?');
                         const char *at = strchr(spec, '@');
                         if (!at || at == spec) {
-                            log_warn("[manifest] modules.%s = %s — expected "
+                            log_warn("[manifest] modules.%s = %s - expected "
                                      "\"vendor/name@version\", ignored",
                                      alias, spec);
                         } else {
@@ -318,7 +318,7 @@ int hl_manifest_extract_js(JSContext *ctx, HlManifest *out, HlAllocator *alloc)
                                          (optional && end[0] == '?' && end[1] == '\0');
                             if (end == at + 1 || !end_ok ||
                                 v < 1 || v > 255) {
-                                log_warn("[manifest] modules.%s = %s — invalid "
+                                log_warn("[manifest] modules.%s = %s - invalid "
                                          "major version, ignored", alias, spec);
                             } else {
                                 size_t nlen = (size_t)(at - spec);
@@ -451,7 +451,7 @@ int hl_manifest_extract_js(JSContext *ctx, HlManifest *out, HlAllocator *alloc)
         out->allow_dynamic_code = JS_ToBool(ctx, adc_val);
     JS_FreeValue(ctx, adc_val);
     if (out->allow_dynamic_code)
-        log_warn("[manifest] allowDynamicCode=true — kernel sandbox "
+        log_warn("[manifest] allowDynamicCode=true - kernel sandbox "
                  "will fail closed unless --no-sandbox is set");
 
     /* allowDynamicLibraries: true — opt-in to dlopen() of native libs. */
@@ -464,7 +464,7 @@ int hl_manifest_extract_js(JSContext *ctx, HlManifest *out, HlAllocator *alloc)
         out->allow_dynamic_libraries = JS_ToBool(ctx, adl_val);
     JS_FreeValue(ctx, adl_val);
     if (out->allow_dynamic_libraries)
-        log_warn("[manifest] allowDynamicLibraries=true — kernel sandbox "
+        log_warn("[manifest] allowDynamicLibraries=true - kernel sandbox "
                  "will fail closed unless --no-sandbox is set");
 
     JS_FreeValue(ctx, manifest);

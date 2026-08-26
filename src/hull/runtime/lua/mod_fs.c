@@ -782,7 +782,7 @@ static int hl_lua_require(lua_State *L)
             }
             hint[hpos] = '\0';
             return luaL_error(L,
-                "module not found: %s — did you mean require(\"%s\")?",
+                "module not found: %s - did you mean require(\"%s\")?",
                 name, hint);
         }
     }

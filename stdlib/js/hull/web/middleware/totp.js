@@ -709,7 +709,7 @@ function init(opts) {
             if (!dec[0]) {
                 throw new Error("totp.init: encryptionKey shorthand cannot "
                     + "decrypt existing _hull_totp rows. This is silent "
-                    + "data loss waiting to happen — every enrolled user "
+                    + "data loss waiting to happen - every enrolled user "
                     + "would be locked out of 2FA. To rotate, switch to "
                     + "the explicit `encryptionKeys: {1: OLD, 2: NEW}, "
                     + "current: 2, legacyKeyVersion: 1` API and call "
@@ -743,7 +743,7 @@ function init(opts) {
         } else {
             log.warn("totp: app.daily not available "
                 + "(CLI flavor or hull/timers not admitted) "
-                + "— pending-row prune runs only at init(). "
+                + "- pending-row prune runs only at init(). "
                 + "Wire your own cron/worker for steady-state.");
         }
     }

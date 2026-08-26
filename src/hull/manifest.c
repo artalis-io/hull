@@ -29,7 +29,7 @@ int hl_manifest_csp_is_valid(const char *s)
     if (!s) return 1;
     for (const char *p = s; *p; p++) {
         if (*p == '\r' || *p == '\n') {
-            log_warn("[manifest] CSP string contains CR/LF — rejected");
+            log_warn("[manifest] CSP string contains CR/LF - rejected");
             return 0;
         }
     }

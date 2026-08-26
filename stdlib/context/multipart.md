@@ -3,7 +3,7 @@
 
 Streaming `multipart/form-data` parser. Routes opt in via
 `{ multipart = {...} }`; handlers pull parts from an iterator. No
-`req.body` for these routes — the iterator IS the body.
+`req.body` for these routes - the iterator IS the body.
 
 ```lua
 -- Lua
@@ -35,7 +35,7 @@ app.post("/upload", async (req, res) => {
 }, { multipart: { maxPartSize: 64 * 1024 * 1024 } });
 ```
 
-No `manifest.modules` entry needed — multipart is a routing option, not
+No `manifest.modules` entry needed - multipart is a routing option, not
 a module. `hull/http-server@1` covers it.
 
 <!-- compact -->
@@ -90,13 +90,13 @@ handler is alive when a cap trips inside `on_data`.
 
 ## Part fields + binary safety
 
-- `part.name` — form field name (always set)
-- `part.filename` — `nil`/`null` for text fields, string for file uploads
-- `part.content_type` (Lua) / `part.contentType` (JS) — from
+- `part.name` - form field name (always set)
+- `part.filename` - `nil`/`null` for text fields, string for file uploads
+- `part.content_type` (Lua) / `part.contentType` (JS) - from
   `Content-Type` header
 
 Reads are binary-safe: Lua returns byte-clean strings (`#chunk = bytes`),
-JS returns `ArrayBuffer` (never JS strings — would UTF-8-mangle binary
+JS returns `ArrayBuffer` (never JS strings - would UTF-8-mangle binary
 input). To decode text fields in JS use `new TextDecoder().decode(buf)`
 (QuickJS doesn't bundle it — supply your own polyfill or use a manual
 ASCII loop for known-ASCII fields).
@@ -263,7 +263,7 @@ side contract.
   `req.multipart()` more than once returns iterators that share parser
   state — the first one consumes; the rest see `DONE`.
 - **Auto-drain.** Not reading a part's body (no `:read()` / `.read()`,
-  no `chunks` loop) is fine — the iterator drains pending `PART_DATA`
+  no `chunks` loop) is fine - the iterator drains pending `PART_DATA`
   events before advancing to the next part.
 - **`chunks(n)` hint is advisory.** Each parser event yields one
   chunk; the `n` minimum-bytes hint isn't enforced yet (coalescing is
@@ -279,8 +279,8 @@ status code and the JSON error body.
 
 ## See also
 
-- `docs/multipart.md` — full architecture: parser, parking, dispatch
+- `docs/multipart.md` - full architecture: parser, parking, dispatch
   contract, Keel version trail
-- `examples/multipart_upload/` — runnable Lua + JS demo
-- `crypto.create_sha256` / `crypto.createSha256` — also useful outside
+- `examples/multipart_upload/` - runnable Lua + JS demo
+- `crypto.create_sha256` / `crypto.createSha256` - also useful outside
   multipart for any streaming digest

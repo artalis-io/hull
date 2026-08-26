@@ -89,7 +89,7 @@ int hull_keygen(int argc, char **argv)
         p[i] = 0;
 
     printf("wrote %s (public key)\n", pk_file);
-    printf("wrote %s (secret key — keep safe!)\n", sk_file);
+    printf("wrote %s (secret key - keep safe!)\n", sk_file);
     return 0;
 }
 

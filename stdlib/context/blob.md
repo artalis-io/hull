@@ -55,7 +55,7 @@ Two callers putting identical bytes share storage automatically
 <!-- compact -->
 ## Lifecycle
 
-`blob.init({ dir, shard_depth?, tmp_max_age? })` — required before any
+`blob.init({ dir, shard_depth?, tmp_max_age? })` - required before any
 other call. Validates `dir` against `manifest.fs.write`, creates
 `<dir>/blobs/` + `<dir>/tmp/` if absent, sweeps stale `.blob-*.tmp`
 files older than `tmp_max_age` (default 3600s).
@@ -299,9 +299,9 @@ rationale and the recommended consumer-side pattern.
 
 | Flag | Effect on blob |
 |---|---|
-| `HL_ENABLE_DB=0` | No effect — zero SQLite dependency |
-| `HL_ENABLE_HTTP_SERVER=0` | No effect — callable from `app.main()` |
-| `HL_ENABLE_HTTP_CLIENT=0` | No effect — no network |
+| `HL_ENABLE_DB=0` | No effect - zero SQLite dependency |
+| `HL_ENABLE_HTTP_SERVER=0` | No effect - callable from `app.main()` |
+| `HL_ENABLE_HTTP_CLIENT=0` | No effect - no network |
 | `HL_ENABLE_WASM=0` | No effect |
 
 A compute-only build still gets the full blob primitive — which is
@@ -309,9 +309,9 @@ exactly where the compute AOT cache and Lua bytecode cache live.
 
 ## See also
 
-- `docs/blob.md` — full design (storage layout, invariants, migration
+- `docs/blob.md` - full design (storage layout, invariants, migration
   map for tools/compute AOT/template caches)
-- `hull/web/attachment@1` (planned, §1.5.b-4) — web upload + serve
+- `hull/web/attachment@1` (planned, §1.5.b-4) - web upload + serve
   layer built on top of blob
-- `hull/crypto@1` (`crypto.create_sha256` / `createSha256`) — the
+- `hull/crypto@1` (`crypto.create_sha256` / `createSha256`) - the
   incremental hasher blob uses internally

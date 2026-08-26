@@ -171,10 +171,10 @@ local function main()
         local adc = m.allow_dynamic_code or m.allowDynamicCode
         local adl = m.allow_dynamic_libraries or m.allowDynamicLibraries
         if adc then
-            print("  [!] allow_dynamic_code:      true  (RISKY — JIT / runtime codegen)")
+            print("  [!] allow_dynamic_code:      true  (RISKY - JIT / runtime codegen)")
         end
         if adl then
-            print("  [!] allow_dynamic_libraries: true  (RISKY — dlopen of native libs)")
+            print("  [!] allow_dynamic_libraries: true  (RISKY - dlopen of native libs)")
         end
         print("")
     end
@@ -212,7 +212,7 @@ local function main()
             if override then
                 print("  HULL_CACHE_DIR override active: " .. override)
                 print("  (runtime caches re-rooted for per-app isolation;")
-                print("   `tools` is unaffected — durable signed downloads)")
+                print("   `tools` is unaffected - durable signed downloads)")
             end
             print("  manage via `hull cache list|prune|clear`,")
             print("  opt out with HULL_NO_CACHE=1")

@@ -64,7 +64,7 @@ app.main(function(_ctx)
 end)
 ]]
 
-lua_files["lib/state.lua"] = [[-- lib/state.lua — Initial state factory and shared helpers.
+lua_files["lib/state.lua"] = [[-- lib/state.lua - Initial state factory and shared helpers.
 --
 -- State is a single table threaded through every render/event call.
 -- Keep it serialisable (no closures or userdata) so it's easy to
@@ -83,7 +83,7 @@ end
 return M
 ]]
 
-lua_files["views/menu.lua"] = [[-- views/menu.lua — Top-level menu.
+lua_files["views/menu.lua"] = [[-- views/menu.lua - Top-level menu.
 --
 -- Convention: each view exports render(ctx, state) and
 -- handle_event(state, ev). render is a function of state (no side
@@ -137,7 +137,7 @@ end
 return M
 ]]
 
-lua_files["views/detail.lua"] = [[-- views/detail.lua — Detail view shown when a menu item is picked.
+lua_files["views/detail.lua"] = [[-- views/detail.lua - Detail view shown when a menu item is picked.
 --
 -- Esc / q / Backspace returns to the menu (state.view = "menu").
 

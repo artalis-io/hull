@@ -66,7 +66,7 @@ require("./routes/users").register(app)
 log.info("rest api loaded")
 ]]
 
-lua_files["routes/health.lua"] = [[-- routes/health.lua — liveness + readiness endpoints.
+lua_files["routes/health.lua"] = [[-- routes/health.lua - liveness + readiness endpoints.
 --
 -- The health endpoint is intentionally trivial and unauthenticated:
 -- a loadbalancer or container orchestrator hits it to decide whether
@@ -85,7 +85,7 @@ end
 return M
 ]]
 
-lua_files["routes/users.lua"] = [[-- routes/users.lua — User resource.
+lua_files["routes/users.lua"] = [[-- routes/users.lua - User resource.
 --
 -- Route registration only. The actual DB access lives in models/user.lua
 -- so the routes stay readable and the model can be unit-tested in
@@ -157,7 +157,7 @@ end
 return M
 ]]
 
-lua_files["models/user.lua"] = [[-- models/user.lua — Persistence layer for the User resource.
+lua_files["models/user.lua"] = [[-- models/user.lua - Persistence layer for the User resource.
 --
 -- One file per resource keeps SQL in one place and lets routes/users.lua
 -- stay focused on HTTP concerns. The returned table is the resource's
@@ -210,7 +210,7 @@ end
 return M
 ]]
 
-lua_files["lib/validate_user.lua"] = [[-- lib/validate_user.lua — Schema validation for the User resource.
+lua_files["lib/validate_user.lua"] = [[-- lib/validate_user.lua - Schema validation for the User resource.
 --
 -- Wraps `hull.validate` with per-resource schemas so routes/users.lua
 -- can call `validate.create(body)` instead of inlining the rule table.
@@ -230,7 +230,7 @@ end
 return M
 ]]
 
-lua_files["middleware/require_auth.lua"] = [[-- middleware/require_auth.lua — App-specific auth wrapper.
+lua_files["middleware/require_auth.lua"] = [[-- middleware/require_auth.lua - App-specific auth wrapper.
 --
 -- This is where app-specific authentication policy lives: the stdlib
 -- module `hull.web.middleware.auth` provides the session-cookie / JWT
@@ -346,7 +346,7 @@ registerUsers(app);
 log.info("rest api loaded");
 ]]
 
-js_files["routes/health.js"] = [[// routes/health.js — liveness + readiness endpoints.
+js_files["routes/health.js"] = [[// routes/health.js - liveness + readiness endpoints.
 
 export function register(app) {
     app.get("/health", (_req, res) => {
@@ -355,7 +355,7 @@ export function register(app) {
 }
 ]]
 
-js_files["routes/users.js"] = [[// routes/users.js — User resource.
+js_files["routes/users.js"] = [[// routes/users.js - User resource.
 
 import * as users      from "./../models/user.js";
 import * as userSchema from "./../lib/validate_user.js";
@@ -420,7 +420,7 @@ export function register(app) {
 }
 ]]
 
-js_files["models/user.js"] = [[// models/user.js — Persistence layer for the User resource.
+js_files["models/user.js"] = [[// models/user.js - Persistence layer for the User resource.
 
 import { db }     from "hull:db";
 import { crypto } from "hull:crypto";
@@ -464,7 +464,7 @@ export function deleteById(id) {
 }
 ]]
 
-js_files["lib/validate_user.js"] = [[// lib/validate_user.js — Schema validation for the User resource.
+js_files["lib/validate_user.js"] = [[// lib/validate_user.js - Schema validation for the User resource.
 
 import { validate } from "hull:validate";
 
@@ -476,7 +476,7 @@ export function create(body) {
 }
 ]]
 
-js_files["middleware/require_auth.js"] = [[// middleware/require_auth.js — App-specific auth wrapper.
+js_files["middleware/require_auth.js"] = [[// middleware/require_auth.js - App-specific auth wrapper.
 //
 // Empty by default — uncomment and adapt when you add login.
 

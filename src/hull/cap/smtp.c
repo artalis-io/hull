@@ -577,7 +577,7 @@ int hl_cap_smtp_send(const HlSmtpConfig *cfg, const HlSmtpMessage *msg,
     if (msg->username && msg->password) {
         /* Refuse to send credentials over a plaintext connection */
         if (!tls) {
-            log_warn("smtp: AUTH PLAIN requires TLS — refusing to send "
+            log_warn("smtp: AUTH PLAIN requires TLS - refusing to send "
                      "credentials in plaintext (set use_tls=1 or 2)");
             if (err_msg) *err_msg = "auth_requires_tls";
             goto cleanup;

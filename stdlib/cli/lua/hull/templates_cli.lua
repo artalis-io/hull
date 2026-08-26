@@ -83,7 +83,7 @@ app.main(function(ctx)
 end)
 ]]
 
-lua_files["commands/greet.lua"] = [[-- commands/greet.lua — Print a greeting.
+lua_files["commands/greet.lua"] = [[-- commands/greet.lua - Print a greeting.
 --
 -- Convention: each command file exports a single `run(ctx)` function.
 -- ctx is the same shape app.main receives: args / env / stdin / stdout
@@ -106,7 +106,7 @@ end
 return M
 ]]
 
-lua_files["commands/count.lua"] = [[-- commands/count.lua — Count items passed as arguments.
+lua_files["commands/count.lua"] = [[-- commands/count.lua - Count items passed as arguments.
 
 local M = {}
 
@@ -118,7 +118,7 @@ end
 return M
 ]]
 
-lua_files["lib/fmt.lua"] = [[-- lib/fmt.lua — Shared output-formatting helpers.
+lua_files["lib/fmt.lua"] = [[-- lib/fmt.lua - Shared output-formatting helpers.
 --
 -- Anything reused across commands lives here. Keeping it in `lib/`
 -- (not `commands/`) means it can be required from anywhere without
@@ -214,7 +214,7 @@ app.main(async (ctx) => {
 });
 ]]
 
-js_files["commands/greet.js"] = [[// commands/greet.js — Print a greeting.
+js_files["commands/greet.js"] = [[// commands/greet.js - Print a greeting.
 
 import { greeting } from "./../lib/fmt.js";
 
@@ -229,7 +229,7 @@ export function run(ctx) {
 }
 ]]
 
-js_files["commands/count.js"] = [[// commands/count.js — Count items passed as arguments.
+js_files["commands/count.js"] = [[// commands/count.js - Count items passed as arguments.
 
 export function run(ctx) {
     ctx.stdout.write(String(ctx.args.length) + "\n");
@@ -237,7 +237,7 @@ export function run(ctx) {
 }
 ]]
 
-js_files["lib/fmt.js"] = [[// lib/fmt.js — Shared output-formatting helpers.
+js_files["lib/fmt.js"] = [[// lib/fmt.js - Shared output-formatting helpers.
 
 export function greeting(name) {
     return "hello " + name;

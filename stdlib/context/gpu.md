@@ -37,7 +37,7 @@ end)
 
 | Workload | Use |
 |---|---|
-| < 16K parallel ops | WASM AOT (`compute.call`) — sub-millisecond, no GPU overhead |
+| < 16K parallel ops | WASM AOT (`compute.call`) - sub-millisecond, no GPU overhead |
 | > 16K parallel ops, regular shape | GPU — crossover ~16K vectors on Apple M1 |
 | Sequential, branchy, small input | WASM AOT |
 | Pixel/vertex kernels, matmul, conv | GPU |
@@ -103,7 +103,7 @@ gpu.dispatch("name", {
 })
 ```
 
-`output = false` skips readback (fire-and-forget — persistent buffers
+`output = false` skips readback (fire-and-forget - persistent buffers
 mutate in place, dispatch returns `true`).
 
 ## Persistent buffers
@@ -173,7 +173,7 @@ mapped:close()
 
 `gpu.buffer`, `gpu.dispatch` buffer data, and `gpu.pipeline` buffer
 data all accept `MappedBuffer` (from `fs.mmap`) and `WasmBuffer`
-(from `compute.call(..., {buffer = true})`) — no string round-trip.
+(from `compute.call(..., {buffer = true})`) - no string round-trip.
 See `compute.md` for the unified buffer protocol.
 
 ## Textures
@@ -222,7 +222,7 @@ When `manifest.gpu = true`:
 - Linux: unveils `/dev/dri` (rw) and `/proc/self` (r)
 
 Apps without `gpu = true` in their manifest have NO access to the
-`gpu` global — fail at module-load time.
+`gpu` global - fail at module-load time.
 
 ## Performance reference (Apple M1 Max, cosine similarity, 128-dim)
 
@@ -255,7 +255,7 @@ GPU compute on a portable binary, build native-only.
 
 ## See also
 
-- `hull agent context --task=compute` — WASM compute (`compute.call`)
-- `hull agent context --task=tools` — `hull tools install` (wamrc for AOT)
-- `docs/architecture.md` — full GPU subsystem design
-- `examples/` — search for `gpu.dispatch` for working examples
+- `hull agent context --task=compute` - WASM compute (`compute.call`)
+- `hull agent context --task=tools` - `hull tools install` (wamrc for AOT)
+- `docs/architecture.md` - full GPU subsystem design
+- `examples/` - search for `gpu.dispatch` for working examples

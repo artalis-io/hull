@@ -422,13 +422,13 @@ int hl_module_resolver_resolve_caps(const HlManifest *manifest,
 
             const HlModuleSpec *guess = hl_module_registry_suggest(m->name);
             if (guess) {
-                ERR3("unknown module '%s' in app.manifest.modules — "
+                ERR3("unknown module '%s' in app.manifest.modules - "
                      "did you mean \"%s@%u\"? "
                      "(see `hull modules available` for the full list)",
                      m->name, guess->name, (unsigned)guess->api_major);
                 return -1;
             }
-            ERR1("unknown module '%s' in app.manifest.modules — "
+            ERR1("unknown module '%s' in app.manifest.modules - "
                  "see `hull modules available` for the v1 set",
                  m->name);
             return -1;
@@ -563,7 +563,7 @@ int hl_module_resolver_resolve_caps(const HlManifest *manifest,
                 if ((dep_spec->required_caps & HL_MOD_CAP_TUI)
                         && !manifest->tui) {
                     ERR2("module '%s' transitively requires '%s', which "
-                         "needs the 'tui' capability — add `tui = true` "
+                         "needs the 'tui' capability - add `tui = true` "
                          "to the manifest",
                          spec->name, dep_spec->name);
                     return -1;

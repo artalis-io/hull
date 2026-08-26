@@ -1143,7 +1143,7 @@ function init(opts) {
             + "link to a phishing origin.");
     }
     if (trustReq && !(hasOrigin || hasHosts)) {
-        log.warn("auth-flows: trustRequestHost = true — falling back to "
+        log.warn("auth-flows: trustRequestHost = true - falling back to "
             + "req.headers.host for URL construction. Vulnerable to "
             + "host-header injection; use publicOrigin / trustedHosts "
             + "in production.");
@@ -1167,7 +1167,7 @@ function init(opts) {
             }
             if (h.charAt(0) !== "[" && h.indexOf(":") >= 0) {
                 throw new Error("auth-flows.init: trustedHosts entry '"
-                    + h + "' contains ':' — entries must be bare host "
+                    + h + "' contains ':' - entries must be bare host "
                     + "names; the URL preserves the request's port "
                     + "automatically. IPv6 literals must be bracketed "
                     + "(e.g. \"[::1]\").");

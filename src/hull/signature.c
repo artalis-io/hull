@@ -693,7 +693,7 @@ int hl_verify_startup(const char *pubkey_path, const char *entry_point,
             static int warned_placeholder = 0;
             if (!warned_placeholder) {
                 log_warn("[sig] HL_PLATFORM_PUBKEY_HEX is the all-zeros "
-                         "placeholder — skipping gethull platform-sig check");
+                         "placeholder - skipping gethull platform-sig check");
                 warned_placeholder = 1;
             }
         } else if (!sig.platform.gethull_manifest ||

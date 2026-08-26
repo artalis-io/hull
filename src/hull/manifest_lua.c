@@ -231,7 +231,7 @@ int hl_manifest_extract_lua(lua_State *L, HlManifest *out, HlAllocator *alloc)
                     int optional = (speclen > 0 && spec[speclen - 1] == '?');
                     const char *at   = strchr(spec, '@');
                     if (!at || at == spec) {
-                        log_warn("[manifest] modules[%lld] = %s — expected "
+                        log_warn("[manifest] modules[%lld] = %s - expected "
                                  "\"vendor/name@version\", ignored",
                                  (long long)i, spec);
                     } else {
@@ -241,7 +241,7 @@ int hl_manifest_extract_lua(lua_State *L, HlManifest *out, HlAllocator *alloc)
                                      (optional && end[0] == '?' && end[1] == '\0');
                         if (end == at + 1 || !end_ok ||
                             v < 1 || v > 255) {
-                            log_warn("[manifest] modules[%lld] = %s — "
+                            log_warn("[manifest] modules[%lld] = %s - "
                                      "invalid major version, ignored",
                                      (long long)i, spec);
                         } else {
@@ -283,7 +283,7 @@ int hl_manifest_extract_lua(lua_State *L, HlManifest *out, HlAllocator *alloc)
                     int optional = (speclen > 0 && spec[speclen - 1] == '?');
                     const char *at    = strchr(spec, '@');
                     if (!at || at == spec) {
-                        log_warn("[manifest] modules.%s = %s — expected "
+                        log_warn("[manifest] modules.%s = %s - expected "
                                  "\"vendor/name@version\", ignored",
                                  alias, spec);
                     } else {
@@ -293,7 +293,7 @@ int hl_manifest_extract_lua(lua_State *L, HlManifest *out, HlAllocator *alloc)
                                      (optional && end[0] == '?' && end[1] == '\0');
                         if (end == at + 1 || !end_ok ||
                             v < 1 || v > 255) {
-                            log_warn("[manifest] modules.%s = %s — invalid "
+                            log_warn("[manifest] modules.%s = %s - invalid "
                                      "major version, ignored", alias, spec);
                         } else {
                             size_t nlen = (size_t)(at - spec);
@@ -414,7 +414,7 @@ int hl_manifest_extract_lua(lua_State *L, HlManifest *out, HlAllocator *alloc)
     out->allow_dynamic_code = lua_toboolean(L, -1);
     lua_pop(L, 1);
     if (out->allow_dynamic_code)
-        log_warn("[manifest] allow_dynamic_code=true — kernel sandbox "
+        log_warn("[manifest] allow_dynamic_code=true - kernel sandbox "
                  "will fail closed unless --no-sandbox is set");
 
     /* allow_dynamic_libraries = true — opt-in to dlopen() of native libs.
@@ -423,7 +423,7 @@ int hl_manifest_extract_lua(lua_State *L, HlManifest *out, HlAllocator *alloc)
     out->allow_dynamic_libraries = lua_toboolean(L, -1);
     lua_pop(L, 1);
     if (out->allow_dynamic_libraries)
-        log_warn("[manifest] allow_dynamic_libraries=true — kernel sandbox "
+        log_warn("[manifest] allow_dynamic_libraries=true - kernel sandbox "
                  "will fail closed unless --no-sandbox is set");
 
     lua_pop(L, 1); /* pop manifest table */

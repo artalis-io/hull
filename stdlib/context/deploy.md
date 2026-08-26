@@ -67,9 +67,9 @@ Environment variable overrides: `HULL_AUDIT=1`, `HULL_MAX_INSTRUCTIONS=N`, `PORT
 
 ## Manifest Capabilities
 
-- **`fs`** — filesystem paths the app can read/write (relative to app dir)
-- **`env`** — environment variables the app can read (max 32)
-- **`hosts`** — HTTP hosts the app can make outbound requests to
+- **`fs`** - filesystem paths the app can read/write (relative to app dir)
+- **`env`** - environment variables the app can read (max 32)
+- **`hosts`** - HTTP hosts the app can make outbound requests to
 
 Anything not declared is blocked. Violations cause errors (macOS: EPERM) or process termination (Linux: SIGKILL).
 
@@ -117,7 +117,7 @@ hull build myapp/ --output app
 # Review deploy/install.sh, then run the commands it prints
 ```
 
-The generated service unit includes defense-in-depth hardening: `NoNewPrivileges`, `ProtectSystem=strict`, `PrivateTmp`, `SystemCallFilter=@system-service`, `MemoryDenyWriteExecute`, and more — layered on top of hull's own kernel sandbox.
+The generated service unit includes defense-in-depth hardening: `NoNewPrivileges`, `ProtectSystem=strict`, `PrivateTmp`, `SystemCallFilter=@system-service`, `MemoryDenyWriteExecute`, and more - layered on top of hull's own kernel sandbox.
 
 ### Fly.io
 

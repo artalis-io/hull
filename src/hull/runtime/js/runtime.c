@@ -340,7 +340,7 @@ static JSModuleDef *hl_js_module_loader(JSContext *ctx,
                 }
                 hint[hpos] = '\0';
                 JS_ThrowReferenceError(ctx,
-                    "unknown hull module: %s — did you mean import \"%s\"?",
+                    "unknown hull module: %s - did you mean import \"%s\"?",
                     module_name, hint);
                 return NULL;
             }

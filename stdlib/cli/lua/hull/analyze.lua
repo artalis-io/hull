@@ -277,13 +277,13 @@ local function main()
     local chunk, err = tool.loadfile(entry)
     if not chunk then
         tool.stderr("hull modules analyze: cannot load " .. entry ..
-                    " (" .. tostring(err) .. ") — skipping\n")
+                    " (" .. tostring(err) .. ") - skipping\n")
         return
     end
     local ok, run_err = pcall(chunk)
     if not ok then
         tool.stderr("hull modules analyze: app load error (" ..
-                    tostring(run_err) .. ") — skipping\n")
+                    tostring(run_err) .. ") - skipping\n")
         return
     end
     local manifest = app.get_manifest()
@@ -324,7 +324,7 @@ local function main()
 
     -- Human-readable.
     if #undeclared == 0 and #unused == 0 then
-        print("hull modules analyze: OK — every imported module is declared, " ..
+        print("hull modules analyze: OK - every imported module is declared, " ..
               "no unused declarations.")
         return
     end
@@ -332,7 +332,7 @@ local function main()
     if #undeclared > 0 then
         print("Undeclared imports (will fail at runtime):")
         for _, x in ipairs(undeclared) do
-            print(string.format("  %s — %s", x.path, x.module))
+            print(string.format("  %s - %s", x.path, x.module))
         end
         print("")
         print("Fix: add the missing modules to app.manifest's `modules` array.")

@@ -212,7 +212,7 @@ function auth_health.routes(app, opts)
     if type(opts.auth_check) ~= "function" then
         error("auth_health.routes: opts.auth_check function is required. "
               .. "The endpoint exposes session/enrollment counts and "
-              .. "operational state — gate it behind your RBAC predicate "
+              .. "operational state - gate it behind your RBAC predicate "
               .. "or a token check. Pass auth_check = function(req) "
               .. "return ... end to wire the gate.")
     end
