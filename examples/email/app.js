@@ -1,15 +1,15 @@
-// Email — Hull + QuickJS example
+// Email - Hull + QuickJS example
 //
 // Run: SMTP_HOST=localhost SMTP_PORT=587 hull app.js -p 3000
 // Contact-form / email-sending API with SQLite email log
 //
 // Environment variables:
-//   SMTP_HOST  — SMTP server (default: localhost)
-//   SMTP_PORT  — SMTP port (default: 587)
-//   SMTP_USER  — username (optional, no auth if unset)
-//   SMTP_PASS  — password (optional)
-//   SMTP_FROM  — sender address (default: noreply@example.com)
-//   SMTP_TLS   — "true" for STARTTLS, "false" for plain (default: true)
+//   SMTP_HOST  - SMTP server (default: localhost)
+//   SMTP_PORT  - SMTP port (default: 587)
+//   SMTP_USER  - username (optional, no auth if unset)
+//   SMTP_PASS  - password (optional)
+//   SMTP_FROM  - sender address (default: noreply@example.com)
+//   SMTP_TLS   - "true" for STARTTLS, "false" for plain (default: true)
 
 import { app } from "hull:app";
 import { db as dbModule } from "hull:db";
@@ -33,7 +33,7 @@ app.manifest({
     ],
 });
 
-// ── Config from env (lazy — env.get only works at request time) ──
+// ── Config from env (lazy - env.get only works at request time) ──
 
 function envGet(key, fallback) {
     try {

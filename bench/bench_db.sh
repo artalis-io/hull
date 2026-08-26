@@ -1,5 +1,5 @@
 #!/bin/sh
-# SQLite performance benchmark — measures read, write, and mixed workloads
+# SQLite performance benchmark - measures read, write, and mixed workloads
 #
 # Usage: sh bench/bench_db.sh
 #
@@ -18,7 +18,7 @@ DURATION=${DURATION:-10s}
 PORT=19870
 
 if [ ! -x "$HULL" ]; then
-    echo "bench_db: hull binary not found at $HULL — run 'make' first"
+    echo "bench_db: hull binary not found at $HULL - run 'make' first"
     exit 1
 fi
 
@@ -61,27 +61,27 @@ fi
 # Warmup
 wrk -t2 -c10 -d2s "http://127.0.0.1:$PORT/health" >/dev/null 2>&1
 
-# 1. Baseline — no DB
+# 1. Baseline - no DB
 echo "--- GET /health (no DB baseline) ---"
 wrk -t"$THREADS" -c"$CONNECTIONS" -d"$DURATION" "http://127.0.0.1:$PORT/health"
 echo ""
 
-# 2. Read-heavy — SELECT 20 rows
+# 2. Read-heavy - SELECT 20 rows
 echo "--- GET /read (SELECT 20 rows, indexed) ---"
 wrk -t"$THREADS" -c"$CONNECTIONS" -d"$DURATION" "http://127.0.0.1:$PORT/read"
 echo ""
 
-# 3. Write-heavy — single INSERT per request
+# 3. Write-heavy - single INSERT per request
 echo "--- POST /write (single INSERT) ---"
 wrk -t"$THREADS" -c"$CONNECTIONS" -d"$DURATION" -s bench/bench_post.lua "http://127.0.0.1:$PORT/write"
 echo ""
 
-# 4. Write-batch — 10 INSERTs in a single transaction
+# 4. Write-batch - 10 INSERTs in a single transaction
 echo "--- POST /write-batch (10 INSERTs in txn) ---"
 wrk -t"$THREADS" -c"$CONNECTIONS" -d"$DURATION" -s bench/bench_post.lua "http://127.0.0.1:$PORT/write-batch"
 echo ""
 
-# 5. Mixed — 1 INSERT + 1 SELECT per request
+# 5. Mixed - 1 INSERT + 1 SELECT per request
 echo "--- GET /mixed (INSERT + SELECT 20) ---"
 wrk -t"$THREADS" -c"$CONNECTIONS" -d"$DURATION" "http://127.0.0.1:$PORT/mixed"
 echo ""

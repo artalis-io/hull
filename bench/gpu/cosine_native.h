@@ -1,5 +1,5 @@
 /*
- * cosine_native.h — Native C cosine similarity for benchmark comparison
+ * cosine_native.h - Native C cosine similarity for benchmark comparison
  *
  * Computes cosine similarity between a query vector and N candidate vectors.
  * Input format:  [dimensions:u32] [count:u32] [query: dims×f32] [candidates: count×dims×f32]

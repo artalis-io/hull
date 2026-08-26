@@ -2,7 +2,7 @@
 #
 # Builds the deployable site into build/. `aws s3 sync` does not follow
 # symlinks by default, and site/install.sh is a symlink to the canonical
-# install.sh at the repo root — so we dereference with `cp -L` so the
+# install.sh at the repo root - so we dereference with `cp -L` so the
 # deployed install.sh is a real file with the current contents.
 #
 # Mirrors the otto site Makefile pattern so secrets / workflow steps
@@ -35,7 +35,7 @@ build:
 	@echo "  Files: $$(find $(BUILD_DIR) -type f | wc -l | tr -d ' ')"
 	@find $(BUILD_DIR) -type f -exec ls -l {} \;
 
-# Local preview at http://localhost:8000 — useful when iterating on the
+# Local preview at http://localhost:8000 - useful when iterating on the
 # landing page before pushing.
 serve: build
 	@echo "Serving $(BUILD_DIR)/ at http://localhost:8000"

@@ -1,4 +1,4 @@
-/* bench_span_ops.h — the FOUR mapped-span benchmark workloads, as ONE body compiled
+/* bench_span_ops.h - the FOUR mapped-span benchmark workloads, as ONE body compiled
  * on TWO targets: natively (in the harness TU) and as a wasm32 guest
  * (bench_span_guest.c). Reads go through the shipped hull_span.h accessors so every
  * implementation (native mmap / HullSpan AOT / copy-once / chunked) exercises the

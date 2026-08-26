@@ -1,4 +1,4 @@
-/* bench_span_guest.c — the wasm32 guest for the mapped-span benchmark. Runs a
+/* bench_span_guest.c - the wasm32 guest for the mapped-span benchmark. Runs a
  * chosen workload REPS times over either the attached mapped span (mode SPAN) or a
  * host-provided linear-memory buffer (mode LINEAR, for the copy-once / chunked
  * baselines). The REPS loop makes NO host calls -- hull_span_setup issues its

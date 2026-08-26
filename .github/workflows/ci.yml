@@ -881,7 +881,7 @@ jobs:
   compute-memops-freestanding:
     needs: [classify, wamrc-x86_64]
     if: needs.classify.outputs.run_compute == 'true'
-    name: Freestanding libc (memcpy/memset/memmove) — interp + AOT
+    name: Freestanding libc (memcpy/memset/memmove) - interp + AOT
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
@@ -937,7 +937,7 @@ jobs:
   stream-meta:
     needs: [classify, wamrc-x86_64]
     if: needs.classify.outputs.run_compute == 'true'
-    name: compute stream metadata helpers — Lua + JS, interp + AOT
+    name: compute stream metadata helpers - Lua + JS, interp + AOT
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
@@ -988,7 +988,7 @@ jobs:
   spans-example:
     needs: [classify, wamrc-x86_64]
     if: needs.classify.outputs.run_compute == 'true'
-    name: mapped_spans example — Lua + JS, interp + AOT (public SDK)
+    name: mapped_spans example - Lua + JS, interp + AOT (public SDK)
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
@@ -1041,7 +1041,7 @@ jobs:
   spans-multi:
     needs: [classify, wamrc-x86_64]
     if: needs.classify.outputs.run_compute == 'true'
-    name: mapped spans — multiple named spans, Lua + JS, interp + AOT
+    name: mapped spans - multiple named spans, Lua + JS, interp + AOT
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
@@ -1093,7 +1093,7 @@ jobs:
   spans-hugefile:
     needs: [classify, wamrc-x86_64]
     if: needs.classify.outputs.run_compute == 'true'
-    name: mapped spans — >4GiB foffset + setup capacity, Lua + JS, interp + AOT
+    name: mapped spans - >4GiB foffset + setup capacity, Lua + JS, interp + AOT
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
@@ -2380,7 +2380,7 @@ jobs:
         timeout-minutes: 6
         run: make e2e-htmx-playwright
 
-      # Same suite, but against `hull build` standalone binaries —
+      # Same suite, but against `hull build` standalone binaries -
       # exercises the embedded-VFS code path. Needs hull rebuilt
       # with EMBED_PLATFORM=1, which we do inline so the
       # MODE=dev step above still gets the lighter binary.
@@ -2403,7 +2403,7 @@ jobs:
       # On failure either suite writes playwright traces + final-state
       # screenshots under build/playwright-artifacts/. Upload them so
       # the diff between "test failed in CI" and "test failed for me
-      # locally" disappears — `npx playwright show-trace trace.zip`
+      # locally" disappears - `npx playwright show-trace trace.zip`
       # opens an interactive timeline (network log, DOM snapshots,
       # console events, screenshots per action).
       - name: Upload playwright artifacts

@@ -1,10 +1,10 @@
 /*
- * vector_ops.c — Cosine similarity between two float32 vectors
+ * vector_ops.c - Cosine similarity between two float32 vectors
  *
  * Input format:
- *   4 bytes  — uint32 LE: vector dimension N
- *   N×4 bytes — float32 LE: vector A
- *   N×4 bytes — float32 LE: vector B
+ *   4 bytes  - uint32 LE: vector dimension N
+ *   N×4 bytes - float32 LE: vector A
+ *   N×4 bytes - float32 LE: vector B
  *
  * Output: 4 bytes float32 LE (cosine similarity score)
  *

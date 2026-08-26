@@ -1,4 +1,4 @@
--- TUI chat — split-pane example.
+-- TUI chat - split-pane example.
 --
 -- Two regions: the message log fills the top (with a single-line
 -- border via tui.frame), and a one-line input prompt sits below.
@@ -103,7 +103,7 @@ local function spawn_bot_reply(user_msg)
     pending = pending + 1
     tui.async(function()
         -- 200–500ms "thinking" pause (math.random is available in
-        -- the sandbox; time.now_ms is not — it needs a require).
+        -- the sandbox; time.now_ms is not - it needs a require).
         hull.sleep(200 + math.random(0, 300))
         push("bot", reply_for(user_msg))
         pending = pending - 1

@@ -1,5 +1,5 @@
 /**
- * Template engine example — JavaScript
+ * Template engine example - JavaScript
  *
  * Demonstrates inheritance, includes, filters, loops, and CSP nonce.
  *

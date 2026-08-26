@@ -1,6 +1,6 @@
 {% extends "base.html" %}
 
-{% block title %}Home — Hull Templates{% end %}
+{% block title %}Home - Hull Templates{% end %}
 
 {% block content %}
 <h1>Welcome to {{ site_name | default: "Hull" }}</h1>
@@ -12,7 +12,7 @@
     {% for user in users %}
     <li>
         <strong>{{ user.name | upper }}</strong>
-        {% if user.email %} — {{ user.email }}{% end %}
+        {% if user.email %} - {{ user.email }}{% end %}
     </li>
     {% end %}
 </ul>

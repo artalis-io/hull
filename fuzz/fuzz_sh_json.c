@@ -1,5 +1,5 @@
 /*
- * fuzz_sh_json.c — libFuzzer harness for the sh_json parser + accessors.
+ * fuzz_sh_json.c - libFuzzer harness for the sh_json parser + accessors.
  *
  * sh_json parses untrusted input (request bodies, config), so it is a
  * prime fuzz target. We parse the fuzz bytes, then recursively walk the

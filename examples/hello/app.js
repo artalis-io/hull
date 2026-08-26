@@ -1,4 +1,4 @@
-// Hello World — Hull + QuickJS example
+// Hello World - Hull + QuickJS example
 //
 // Run: hull app.js -p 3000
 // Visit: http://localhost:3000/
@@ -88,4 +88,4 @@ app.post("/greet/:name", (req, res) => {
     });
 });
 
-log.info("Hello app loaded — routes registered");
+log.info("Hello app loaded - routes registered");

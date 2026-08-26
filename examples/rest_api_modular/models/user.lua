@@ -1,4 +1,4 @@
--- models/user.lua — Persistence layer for the User resource.
+-- models/user.lua - Persistence layer for the User resource.
 --
 -- One file per resource keeps SQL in one place and lets routes/users.lua
 -- stay focused on HTTP concerns. The returned table is the resource's

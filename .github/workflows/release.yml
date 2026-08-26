@@ -12,7 +12,7 @@ jobs:
   # them) and the hull-binary build jobs (which embed them). Splitting
   # platform-build out of hull-build avoids the platform .a being
   # rebuilt twice with potentially-different timestamps on different
-  # machines — sign-platform-manifest's manifest hash MUST match the .a
+  # machines - sign-platform-manifest's manifest hash MUST match the .a
   # bytes that build-native/build-cosmo embed, so the only way to
   # guarantee bit-equality is to build the .a once and reuse it via
   # GitHub Actions artifacts.
@@ -64,7 +64,7 @@ jobs:
       # `hull build`; the runtime composed-feature check (signature.c §5c) attests
       # each recorded hash against the signed platform manifest. So the EXACT bytes
       # must be signed by sign-platform-manifest and embedded as-is in stage 3
-      # (TRUST_FEATURE_LIBS=1) — same download+trust discipline as libhull_platform.a
+      # (TRUST_FEATURE_LIBS=1) - same download+trust discipline as libhull_platform.a
       # (macOS isn't byte-reproducible across runners). Cosmo has no embedded
       # feature archives (fat APE), so this is native-only.
       - name: Build embedded feature archives (Linux, reproducible container)
@@ -160,7 +160,7 @@ jobs:
   # Stage 2: build + sign the platform manifest. Generates the
   # `embedded_platform_sig.h` header that gets baked into every hull
   # binary in stage 3. Uses the previous stable hull (v0.1.2) to
-  # invoke `hull sign-release` for the Ed25519 signing — v0.1.2 hull
+  # invoke `hull sign-release` for the Ed25519 signing - v0.1.2 hull
   # is the most recent release; its sign-release subcommand is
   # key-agnostic, so it signs whatever bytes we point it at with
   # whichever secret we supply.
@@ -188,7 +188,7 @@ jobs:
           if [ -z "$HULL_PLATFORM_KEY" ]; then
             echo "::error::HULL_PLATFORM_KEY is empty. v0.1.3+ requires"
             echo "::error::it for the signed platform manifest. The secret"
-            echo "::error::has been provisioned since v0.1.0 — check the"
+            echo "::error::has been provisioned since v0.1.0 - check the"
             echo "::error::repo secrets configuration."
             exit 1
           fi
@@ -212,7 +212,7 @@ jobs:
         # Sort key: arch name (LC_ALL=C, second field). MUST match the
         # arch_entry_cmp order in src/hull/platform_sig.c so the C
         # builder and CI produce byte-identical manifests for the same
-        # input set — otherwise round-tripping through
+        # input set - otherwise round-tripping through
         # hl_platform_sig_build_manifest would yield a different SHA
         # than the embedded blob.
         # Same format as hull.sha256; matches what
@@ -267,7 +267,7 @@ jobs:
           set -eu
           umask 077
           printf '%s\n' "$HULL_PLATFORM_KEY" > /tmp/platform.key
-          # hull sign-release writes <input>.sig — works for any text
+          # hull sign-release writes <input>.sig - works for any text
           # manifest, not just hull.sha256. Same signing primitive.
           /tmp/hull-signer sign-release platform-manifest.txt --key /tmp/platform.key
           rm -f /tmp/platform.key
@@ -298,11 +298,11 @@ jobs:
       - name: Stage signed manifest for upload
         # Co-locate manifest text + .sig + .h so downstream jobs get a
         # single directory with everything they need:
-        #   embedded_platform_sig.h — the C symbol embedded in hull
-        #   platform-manifest.txt   — raw text (one line per arch),
+        #   embedded_platform_sig.h - the C symbol embedded in hull
+        #   platform-manifest.txt   - raw text (one line per arch),
         #                              used by build-* to sha256-verify
         #                              the .a they're about to embed
-        #   platform-manifest.txt.sig — signature for offline audit
+        #   platform-manifest.txt.sig - signature for offline audit
         run: |
           set -eu
           cp platform-manifest.txt platform-manifest.txt.sig build/
@@ -319,7 +319,7 @@ jobs:
   # ────────────────────────────────────────────────────────────────────
   # Stage 3: build hull binaries with the signed manifest embedded.
   # These jobs DOWNLOAD their respective libhull_platform.a from stage
-  # 1's artifacts (rather than rebuilding) — guarantees the embedded .a
+  # 1's artifacts (rather than rebuilding) - guarantees the embedded .a
   # bytes match what sign-platform-manifest hashed. They also download
   # the signed manifest header so HL_EMBED_PLATFORM_SIG gets defined
   # and embedded_platform_sig.c links the real signed blob.
@@ -401,7 +401,7 @@ jobs:
 
       - name: Platform-sig E2E smoke test (SKIPPED for cosmo)
         # v0.1.4 attempted to re-enable this (with widened unveils +
-        # cosmocc auto-detect from §3.1). It still fails — but for a
+        # cosmocc auto-detect from §3.1). It still fails - but for a
         # deeper reason than f3311cd's original diagnosis. The unveils
         # ARE now correct (the sandbox log shows "16 unveiled paths"
         # including /opt where cosmocc lives), but spawning any child
@@ -413,7 +413,7 @@ jobs:
         #   /usr/bin/cc: ... libc.so.6: failed to map segment ...
         #
         # That's mmap(PROT_EXEC) from the child's dynamic linker being
-        # rejected by the parent's seccomp-bpf filter — an mmap-policy
+        # rejected by the parent's seccomp-bpf filter - an mmap-policy
         # restriction in the polyfill itself, NOT an unveil/path issue.
         # Widening the unveil set can't fix it.
         #
@@ -428,7 +428,7 @@ jobs:
         # pledge polyfill that allows child-process PROT_EXEC mmap, or
         # (b) running the cosmo APE without --no-sandbox on a host that
         # ignores cosmo's polyfill (e.g. macOS), or (c) the embedded
-        # TCC path on cosmo (currently unsupported — cosmo .a archives
+        # TCC path on cosmo (currently unsupported - cosmo .a archives
         # need cosmocc to link). All non-trivial; tracked separately.
         run: |
           echo "Platform-sig E2E smoke test: SKIPPED for cosmo build."
@@ -657,7 +657,7 @@ jobs:
 
           # Variant B: full sandbox. Catches any signature-chain code
           # that accidentally needs paths/syscalls the sandbox blocks.
-          # Same myapp binary, same keys — only the sandbox is
+          # Same myapp binary, same keys - only the sandbox is
           # different.
           ./myapp --verify-sig dev.pub -p 19889 ./app.lua &
           SVR=$!
@@ -708,7 +708,7 @@ jobs:
     # Side-loaded `wamrc` (WAMR AOT compiler) shipped as a separate
     # release asset and pulled by `hull tools install wamrc`. See
     # docs/tools_install.md. The trust chain reuses the same
-    # Ed25519-signed hull.sha256 manifest — each wamrc artifact is
+    # Ed25519-signed hull.sha256 manifest - each wamrc artifact is
     # listed in the manifest below.
     #
     # No cosmo wamrc: LLVM doesn't fit cleanly into a cosmocc fat APE
@@ -1150,7 +1150,7 @@ jobs:
   build-feature-postgres:
     # Composable PostgreSQL feature archive (libhull_feature-postgres-<arch>.a),
     # pulled by `hull feature install postgres` -> `hull build --with=postgres`.
-    # A backend feature (fills hl_db_feature_backends, like DuckDB) but pure C —
+    # A backend feature (fills hl_db_feature_backends, like DuckDB) but pure C -
     # the ~4 KB wire client, no vendored engine, no extra link libs. `make
     # feature-postgres` re-invokes make with HL_ENABLE_POSTGRES=1. Native-only.
     name: Build feature postgres (${{ matrix.name }})
@@ -1429,7 +1429,7 @@ jobs:
 
       - name: Compute SHA-256 checksums
         # `hull tools install <name>` looks up entries by exact asset
-        # name in this manifest — keep the file list in sync with the
+        # name in this manifest - keep the file list in sync with the
         # tool registry in src/hull/tools_install.c.
         # SBOM + build-env files included here so they inherit the
         # release signature (Ed25519 + Sigstore + SLSA).
@@ -1534,7 +1534,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          # Build asset list — include hull.sha256.sig only if it was produced.
+          # Build asset list - include hull.sha256.sig only if it was produced.
           assets=(
             dist/hull-cosmo
             dist/hull-linux-x86_64
@@ -1587,7 +1587,7 @@ jobs:
           # Idempotent: if the release already exists (e.g. created manually
           # alongside the tag push), upload assets onto it instead of failing.
           if gh release view "${{ github.ref_name }}" --repo "${{ github.repository }}" >/dev/null 2>&1; then
-            echo "Release ${{ github.ref_name }} already exists — uploading assets with --clobber"
+            echo "Release ${{ github.ref_name }} already exists - uploading assets with --clobber"
             gh release upload "${{ github.ref_name }}" \
               --repo "${{ github.repository }}" \
               --clobber \

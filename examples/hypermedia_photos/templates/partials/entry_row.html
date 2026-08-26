@@ -1,8 +1,8 @@
 <li id="entry-{{ t.id }}" {% if t.done %}class="entry-done"{% end %}>
   {# t.done comes back from SQLite as INTEGER 0/1 in Lua; the row
      hydration helper coerces it to a proper boolean so this template
-     works in both runtimes (Lua treats 0 as truthy — only nil/false
-     are falsy — so a raw `{% if t.done %}` would always render
+     works in both runtimes (Lua treats 0 as truthy - only nil/false
+     are falsy - so a raw `{% if t.done %}` would always render
      `checked`). The engine doesn't support `==` expressions, so the
      coercion has to happen in the handler.
 

@@ -1,5 +1,5 @@
 /*
- * mock_smtp.c — Standalone mock SMTP server for e2e testing
+ * mock_smtp.c - Standalone mock SMTP server for e2e testing
  *
  * Usage: mock_smtp <port_file> <data_file>
  *
@@ -8,7 +8,7 @@
  * 3. Writes captured DATA payload to <data_file>
  * 4. Exits after the connection closes
  *
- * No threading — single connection, foreground process.
+ * No threading - single connection, foreground process.
  * Start in background (&) and read port_file to discover the port.
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
@@ -158,7 +158,7 @@ int main(int argc, char **argv)
             break;
         }
         else {
-            /* Unknown command — respond so client doesn't hang */
+            /* Unknown command - respond so client doesn't hang */
             send_line(client, "500 Unrecognized\r\n");
         }
     }

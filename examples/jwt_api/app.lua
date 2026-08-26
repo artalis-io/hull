@@ -1,4 +1,4 @@
--- JWT API — Hull + Lua example
+-- JWT API - Hull + Lua example
 --
 -- Run: hull app.lua -p 3000
 -- Token-based auth API: register, login, protected routes using Bearer tokens
@@ -32,10 +32,10 @@ app.manifest({
 local _ok, _val = pcall(env.get, "JWT_SECRET")
 local JWT_SECRET = (_ok and _val) or "change-me-in-production"
 if JWT_SECRET == "change-me-in-production" then
-    log.warn("JWT_SECRET not set — using insecure default. Set JWT_SECRET env var in production.")
+    log.warn("JWT_SECRET not set - using insecure default. Set JWT_SECRET env var in production.")
 end
 
--- Middleware: extract and verify JWT on every request (optional — won't block)
+-- Middleware: extract and verify JWT on every request (optional - won't block)
 app.use("*", "/*", function(req, _res)
     local auth_header = req.headers["authorization"]
     if not auth_header then return 0 end
@@ -109,7 +109,7 @@ app.post("/register", function(req, res)
     res:status(201):json({ id = id, email = email, name = name })
 end)
 
--- Login — returns JWT token
+-- Login - returns JWT token
 app.post("/login", function(req, res)
     local decode_ok, body = pcall(json.decode, req.body)
     if not decode_ok or not body then
@@ -137,7 +137,7 @@ app.post("/login", function(req, res)
         return res:status(401):json({ error = "invalid credentials" })
     end
 
-    -- Issue JWT (expires in 1 hour — relative exp < 2e9 is auto-converted)
+    -- Issue JWT (expires in 1 hour - relative exp < 2e9 is auto-converted)
     local token = jwt.sign({
         sub = user.id,
         email = user.email,
@@ -175,4 +175,4 @@ app.post("/refresh", function(req, res)
     res:json({ token = token })
 end)
 
-log.info("JWT API loaded — routes registered")
+log.info("JWT API loaded - routes registered")

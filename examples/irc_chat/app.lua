@@ -1,31 +1,31 @@
--- IRC Chat — Encrypted WebSocket chat with channels
+-- IRC Chat - Encrypted WebSocket chat with channels
 --
 -- Run: hull app.lua -p 3000
 --
 -- E2E encryption: messages are encrypted with per-channel symmetric keys
 -- using crypto.secretbox (XSalsa20-Poly1305). Channel keys are distributed
 -- to members encrypted with crypto.box (Curve25519+XSalsa20+Poly1305).
--- The server relays encrypted ciphertext — it never sees plaintext messages.
+-- The server relays encrypted ciphertext - it never sees plaintext messages.
 --
 -- HTTP endpoints:
---   POST /register            — create user + Curve25519 keypair
---   POST /login               — authenticate, returns keypair
---   POST /logout              — destroy session
---   GET  /me                  — current user info
---   GET  /channels            — list channels
---   POST /channels            — create channel { name, topic? }
---   GET  /channels/:name/members  — list members with public keys
---   GET  /channels/:name/history  — recent encrypted messages
---   GET  /users               — list users with public keys + online status
---   GET  /dm/:username/history — encrypted DM history (session auth)
---   POST /files               — upload encrypted file (session auth)
---   GET  /files/:id           — download encrypted file (session auth)
---   GET  /channels/:name/files    — list channel files
---   GET  /dm/:username/files      — list DM files (session auth)
---   GET  /health              — health check
+--   POST /register            - create user + Curve25519 keypair
+--   POST /login               - authenticate, returns keypair
+--   POST /logout              - destroy session
+--   GET  /me                  - current user info
+--   GET  /channels            - list channels
+--   POST /channels            - create channel { name, topic? }
+--   GET  /channels/:name/members  - list members with public keys
+--   GET  /channels/:name/history  - recent encrypted messages
+--   GET  /users               - list users with public keys + online status
+--   GET  /dm/:username/history - encrypted DM history (session auth)
+--   POST /files               - upload encrypted file (session auth)
+--   GET  /files/:id           - download encrypted file (session auth)
+--   GET  /channels/:name/files    - list channel files
+--   GET  /dm/:username/files      - list DM files (session auth)
+--   GET  /health              - health check
 --
 -- WebSocket:
---   WS /ws — authenticated chat (see protocol below)
+--   WS /ws - authenticated chat (see protocol below)
 
 local crypto   = require("hull.crypto")
 local db       = require("hull.db").default()
@@ -171,7 +171,7 @@ local function fed_check_len(s)
 end
 
 local function handle_federated_message(data)
-    -- Relay federated messages to local /ws clients — never re-relay to other peers
+    -- Relay federated messages to local /ws clients - never re-relay to other peers
     if not data.server or not fed_check_len(data.server) then return end
     if data.type == "fed_msg" then
         if not data.channel or not data.from or not data.encrypted or not data.nonce then return end
@@ -306,7 +306,7 @@ app.post("/login", function(req, res)
         return res:status(401):json({ error = "invalid credentials" })
     end
 
-    -- Store secret key in session (simplified — in production, client holds this)
+    -- Store secret key in session (simplified - in production, client holds this)
     auth.login(req, res, {
         user_id = user.id, username = user.username, public_key = user.public_key,
     })
@@ -476,7 +476,7 @@ local function broadcast_to_channel(channel_name, msg, exclude_conn)
     -- Broadcast via the WS path, but we need to filter by channel membership
     -- Since ws_server.broadcast sends to ALL connections on a path, we use conn.data
     -- to track channel membership and send individually
-    -- This is a simplification — in production you'd want a channel-based pubsub
+    -- This is a simplification - in production you'd want a channel-based pubsub
     local _exclude_id = exclude_conn and exclude_conn:id() or -1 -- luacheck: ignore
     local sent = json.encode(msg)
     -- We rely on the per-connection data to filter
@@ -534,7 +534,7 @@ app.ws("/ws", {
 
         -- All other commands require authentication
         if not conn.data.authenticated then
-            return ws_error(conn, "not authenticated — send login first")
+            return ws_error(conn, "not authenticated - send login first")
         end
 
         if msg.type == "join" then
@@ -1162,7 +1162,7 @@ app.get("/e2e-test", function(req, res)
         end
     end
 
-    -- Step 6: DM test — Alice sends DM to Bob
+    -- Step 6: DM test - Alice sends DM to Bob
     if alice_ready and bob_ready then
         -- Override bob's on_message to also handle DMs
         -- We use a flag approach: send DM and poll for results
@@ -1175,7 +1175,7 @@ app.get("/e2e-test", function(req, res)
         results.dm_sent = true
 
         -- Wait for DM delivery (bob receives) and confirmation (alice receives)
-        -- We need to temporarily listen — but callbacks are already set.
+        -- We need to temporarily listen - but callbacks are already set.
         -- So we re-register bob's handler to catch DMs too.
         -- Since we can't change handlers, we rely on the existing on_message
         -- which doesn't handle DMs. Instead, let's poll the DB.
@@ -1204,7 +1204,7 @@ app.get("/e2e-test", function(req, res)
             end
         end
 
-        -- Step 7: DM history — query via DB
+        -- Step 7: DM history - query via DB
         local alice_id = alice_rows[1].id
         local bob_id = bob_rows[1].id
         local history = db.query([[
@@ -1757,11 +1757,11 @@ end)
 if RETENTION.channel_ttl > 0 or RETENTION.dm_ttl > 0
    or RETENTION.file_ttl > 0 or RETENTION.max_file_storage > 0 then
     app.every(RETENTION.cleanup_interval, cleanup_expired)
-    log.info("retention cleanup enabled — channel_ttl="
+    log.info("retention cleanup enabled - channel_ttl="
              .. tostring(RETENTION.channel_ttl) .. "s dm_ttl="
              .. tostring(RETENTION.dm_ttl) .. "s file_ttl="
              .. tostring(RETENTION.file_ttl) .. "s max_file_storage="
              .. tostring(RETENTION.max_file_storage) .. "B")
 end
 
-log.info("IRC Chat app loaded — routes registered")
+log.info("IRC Chat app loaded - routes registered")

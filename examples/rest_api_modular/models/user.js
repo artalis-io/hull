@@ -1,4 +1,4 @@
-// models/user.js — Persistence layer for the User resource.
+// models/user.js - Persistence layer for the User resource.
 
 import { crypto } from "hull:crypto";
 import { db as dbModule } from "hull:db";

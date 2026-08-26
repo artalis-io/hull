@@ -1,10 +1,10 @@
 /*
- * scoring.c — Feature normalization + weighted scoring
+ * scoring.c - Feature normalization + weighted scoring
  *
  * Input format:
- *   4 bytes           — uint32 LE: number of features N
- *   N×4 bytes         — float32 LE: raw feature values
- *   N×4 bytes         — float32 LE: weights
+ *   4 bytes           - uint32 LE: number of features N
+ *   N×4 bytes         - float32 LE: raw feature values
+ *   N×4 bytes         - float32 LE: weights
  *
  * Output: 4 bytes float32 LE (weighted sum of min-max normalized features)
  *

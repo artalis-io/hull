@@ -66,7 +66,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 if (gpu.available()) {
     gpu.compile("cosine_similarity", SHADER);
 } else {
-    log.warn("GPU not available — search endpoints will return errors");
+    log.warn("GPU not available - search endpoints will return errors");
 }
 
 // Index state

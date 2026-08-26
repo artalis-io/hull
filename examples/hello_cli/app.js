@@ -1,4 +1,4 @@
-// Hello CLI — Hull + JS app.main example
+// Hello CLI - Hull + JS app.main example
 //
 // Run: hull run app.js -- world
 //      hull run app.js -- alice

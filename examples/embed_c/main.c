@@ -1,10 +1,10 @@
 /*
- * embed_c — reference native host for the libhull no-runtime flavor.
+ * embed_c - reference native host for the libhull no-runtime flavor.
  *
  * Links ONLY build/libhull.a (the runtime-free Hull core) plus
  * vendor/keel/libkeel.a. Neither Lua nor QuickJS is linked. The host
  * owns main() and drives the core exclusively through the stable
- * embedding ABI in <hull/embed.h> — it never includes an internal Hull
+ * embedding ABI in <hull/embed.h> - it never includes an internal Hull
  * header. That is the whole point of the ABI: an embedder targets
  * hl_embed_* and is insulated from the internal sandbox / capability
  * struct layout.
@@ -65,7 +65,7 @@ int main(void)
     int pre = hl_embed_fs_exists(e, "note.txt", &pre_err);
     check(pre == -1 && pre_err != NULL, "capabilities fail closed before seal");
 
-    /* ── 3. phase-2 sandbox (default-deny) — MUST check ───────────── */
+    /* ── 3. phase-2 sandbox (default-deny) - MUST check ───────────── */
     int sealed = hl_embed_seal(e, NULL);
     check(sealed == 0, "hl_embed_seal applied sandbox");
     if (sealed != 0) { hl_embed_free(e); return 1; }

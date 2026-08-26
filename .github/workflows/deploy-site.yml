@@ -24,7 +24,7 @@ jobs:
 
     # Promote the CF distribution ID to job-level env so step-level `if:`
     # conditions can read it. (`secrets` context is not allowed in `if:`;
-    # `env` is — but only env set at workflow/job scope, not at the same
+    # `env` is - but only env set at workflow/job scope, not at the same
     # step's env: block since step env is applied AFTER if: evaluates.)
     env:
       CF_DISTRIBUTION_ID: ${{ secrets.CLOUDFRONT_DISTRIBUTION_ID }}

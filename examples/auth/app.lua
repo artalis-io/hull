@@ -1,4 +1,4 @@
--- Auth Example — Hull + Lua
+-- Auth Example - Hull + Lua
 --
 -- Run: hull app.lua -p 3000
 -- Session-based auth API: register, login, logout, protected routes
@@ -29,7 +29,7 @@ app.manifest({
 -- Initialize sessions
 session.init({ ttl = 3600 })
 
--- Load session on every request (optional — won't block unauthenticated)
+-- Load session on every request (optional - won't block unauthenticated)
 app.use("*", "/*", auth.session_middleware({ optional = true }))
 
 -- Helper: require session or respond 401
@@ -150,4 +150,4 @@ app.get("/me", function(req, res)
     res:json(rows[1])
 end)
 
-log.info("Auth app loaded — routes registered")
+log.info("Auth app loaded - routes registered")

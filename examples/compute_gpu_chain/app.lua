@@ -1,4 +1,4 @@
--- WASM → GPU chaining example — zero-copy data flow
+-- WASM → GPU chaining example - zero-copy data flow
 --
 -- Demonstrates the unified buffer protocol: WASM output passes directly
 -- to GPU input without copying through Lua strings.
@@ -47,7 +47,7 @@ app.get("/health", function(req, res)
     })
 end)
 
--- POST /chain — WASM preprocess → GPU compute
+-- POST /chain - WASM preprocess → GPU compute
 -- Body: { "values": [1, 2, 3, ...] }
 app.post("/chain", function(req, res)
     local body = json.decode(req.body)
@@ -64,7 +64,7 @@ app.post("/chain", function(req, res)
     local packed = table.concat(parts)
     local count = #body.values
 
-    -- Step 2: WASM echo (passes through — demonstrates WasmBuffer output)
+    -- Step 2: WASM echo (passes through - demonstrates WasmBuffer output)
     -- In a real app, WASM would do CPU-intensive preprocessing:
     -- normalization, feature extraction, encoding, etc.
     local wasm_out, wasm_err = compute.call("echo", packed, { buffer = true })
@@ -73,7 +73,7 @@ app.post("/chain", function(req, res)
         return
     end
 
-    -- Step 3: GPU dispatch — pass WasmBuffer directly (zero-copy!)
+    -- Step 3: GPU dispatch - pass WasmBuffer directly (zero-copy!)
     -- The WasmBuffer's data pointer goes straight to wgpuQueueWriteBuffer
     -- without copying through a Lua string.
     local gpu_out, gpu_err = gpu.dispatch("double", {
@@ -99,7 +99,7 @@ app.post("/chain", function(req, res)
     })
 end)
 
--- POST /roundtrip — WASM → GPU → WASM (full zero-copy chain)
+-- POST /roundtrip - WASM → GPU → WASM (full zero-copy chain)
 app.post("/roundtrip", function(req, res)
     local body = json.decode(req.body)
     if not body or not body.values then
@@ -139,7 +139,7 @@ app.post("/roundtrip", function(req, res)
     })
 end)
 
--- POST /index — WASM → persistent GPU buffer → dispatch
+-- POST /index - WASM → persistent GPU buffer → dispatch
 -- Demonstrates keeping WASM output on GPU across requests
 app.post("/index", function(req, res)
     local body = json.decode(req.body)

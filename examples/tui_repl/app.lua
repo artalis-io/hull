@@ -1,9 +1,9 @@
--- TUI REPL-style demo — Hull + Lua TUI example.
+-- TUI REPL-style demo - Hull + Lua TUI example.
 --
 -- Demonstrates the tui.input building blocks: single-line editing,
 -- arrow-key history navigation, ctrl+u/k for line kill. The "eval"
 -- here is a tiny safe calculator (numeric expressions with +, -,
--- *, /, parens) — full Lua eval needs `load` which is sandboxed.
+-- *, /, parens) - full Lua eval needs `load` which is sandboxed.
 --
 -- Run: hull run app.lua
 -- Keys (at the input line):

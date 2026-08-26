@@ -1,4 +1,4 @@
-# Hull — fish completion
+# Hull - fish completion
 #
 # Install:
 #   mkdir -p ~/.config/fish/completions

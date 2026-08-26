@@ -1,5 +1,5 @@
 --
--- Todo App — full auth, CSRF, rate limiting, server-side rendered, i18n
+-- Todo App - full auth, CSRF, rate limiting, server-side rendered, i18n
 --
 -- A todo list with user authentication, sessions, CSRF protection,
 -- per-user data isolation, and English/Hungarian language support.
@@ -463,4 +463,4 @@ app.get("/admin", function(req, res)
     }))
 end)
 
-log.info("Todo app loaded — routes registered (en/hu i18n, csv, search, rbac)")
+log.info("Todo app loaded - routes registered (en/hu i18n, csv, search, rbac)")

@@ -1,4 +1,4 @@
--- mapped_spans — reference app for Hull mapped spans (checkpoint 3).
+-- mapped_spans - reference app for Hull mapped spans (checkpoint 3).
 --
 -- Maps a NON-page-aligned window of data.bin (file offset 8195, length 4096),
 -- attaches it read-only as span "source", and asks the spanreader WASM plugin

@@ -1,5 +1,5 @@
 #compdef hull
-# Hull — zsh completion
+# Hull - zsh completion
 #
 # Install:
 #   # System-wide (Homebrew on macOS):
@@ -284,7 +284,7 @@ _hull() {
                                     '--repo=[GitHub repo]:repo:'
                                 ;;
                             install)
-                                # Tool names — keep in sync with REGISTRY
+                                # Tool names - keep in sync with REGISTRY
                                 # in src/hull/tools_install.c.
                                 _arguments \
                                     '--all[Install every published tool]' \

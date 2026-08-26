@@ -1,5 +1,5 @@
 /*
- * bench_wasm.c — WASM compute benchmark: WAMR interpreter vs AOT vs native C
+ * bench_wasm.c - WASM compute benchmark: WAMR interpreter vs AOT vs native C
  *
  * Compares hull_process execution via:
  *   1. Native C (direct function call)
@@ -260,7 +260,7 @@ static void run_workload(const char *workload_name,
         Stats s_aot = {0};
         int have_aot = 0;
         if (aot_module) {
-            /* Pre-load AOT module (idempotent — skips if already cached) */
+            /* Pre-load AOT module (idempotent - skips if already cached) */
             int rc = hl_cap_wasm_load(cache, aot_module, vfs, NULL);
             if (rc == 0) {
                 bench_wasm("WASM/AOT", cache, aot_module,
@@ -280,7 +280,7 @@ static void run_workload(const char *workload_name,
                    s_interp.mean / native_ref,
                    s_aot.mean / native_ref);
         } else {
-            printf("  WASM/AOT:  (not available — build wamrc and run: wamrc -o file.aot file.wasm)\n");
+            printf("  WASM/AOT:  (not available - build wamrc and run: wamrc -o file.aot file.wasm)\n");
             printf("  Overhead:  %.1fx interp  (vs native mean)\n",
                    s_interp.mean / native_ref);
         }
@@ -482,7 +482,7 @@ static void run_simd_workload(const char *workload_name,
     print_stats("Native:", &s_native);
     double native_ref = s_native.mean > 0.1 ? s_native.mean : 0.1;
 
-    /* Scalar WASM interpreter (no SIMD opcodes — works in interpreter) */
+    /* Scalar WASM interpreter (no SIMD opcodes - works in interpreter) */
     bench_wasm_approx("Scalar/interp", cache, scalar_module,
                       input, input_len, iters, samples,
                       ref_output, ref_len, HL_WASM_MAX_GAS, vfs);
@@ -526,7 +526,7 @@ static void run_simd_workload(const char *workload_name,
     if (have_simd_aot)
         printf("  %.1fx simd-AOT", s_simd_aot.mean / native_ref);
     else
-        printf("  (SIMD AOT not available — build with: make -C bench/wasm/workloads aot)");
+        printf("  (SIMD AOT not available - build with: make -C bench/wasm/workloads aot)");
     printf("\n");
 
     if (have_scalar_aot && have_simd_aot && s_scalar_aot.mean > 0.1)
@@ -556,7 +556,7 @@ static void run_simd_workload(const char *workload_name,
     extern const unsigned char name[]; \
     extern const unsigned int name##_len;
 
-/* We'll load from VFS entries instead — simpler and portable */
+/* We'll load from VFS entries instead - simpler and portable */
 
 /* ── Main ──────────────────────────────────────────────────────────── */
 
@@ -665,7 +665,7 @@ int main(int argc, char **argv)
 
     int have_simd = (dot_scalar.data && mat_scalar.data);
     if (!have_simd)
-        printf("Note: SIMD workloads not found — run 'make' in bench/wasm/workloads/\n");
+        printf("Note: SIMD workloads not found - run 'make' in bench/wasm/workloads/\n");
 
     /* ── Build VFS entries ─────────────────────────────────────────── */
 
@@ -678,7 +678,7 @@ int main(int argc, char **argv)
             entries[ei++] = (HlEntry){ (vfs_name), (buf).data, (buf).len }; \
     } while (0)
 
-    /* VFS names for AOT need arch suffix — use static buffers */
+    /* VFS names for AOT need arch suffix - use static buffers */
     static char aot_names[8][80];
     #define ADD_AOT_VFS(base, buf, idx) do { \
         if ((buf).data) { \
@@ -759,7 +759,7 @@ int main(int argc, char **argv)
         if (mat_simd_aot.data)   printf("AOT: matmul SIMD loaded\n");
 
         printf("\n=== SIMD128 Benchmarks ===\n");
-        printf("(SIMD modules require AOT — interpreter only runs scalar variant)\n");
+        printf("(SIMD modules require AOT - interpreter only runs scalar variant)\n");
 
         /* Dot product: vector sizes from 1K to 1M elements.
          * Small sizes are overhead-dominated; large sizes show SIMD benefit. */
@@ -1267,7 +1267,7 @@ int main(int argc, char **argv)
                         /* Load (fresh instance) */
                         hl_cap_wasm_call(&cache, "kv_store", load_msg, load_size,
                                          &out1, &ol1, &opts, NULL, NULL, &vfs, NULL, NULL, &err);
-                        /* Query (another fresh instance — data gone, but measures the cost) */
+                        /* Query (another fresh instance - data gone, but measures the cost) */
                         hl_cap_wasm_call(&cache, "kv_store", get_msg, get_size,
                                          &out2, &ol2, &opts, NULL, NULL, &vfs, NULL, NULL, &err);
                         s_fresh[i] = now_ns() - t0;
@@ -1315,7 +1315,7 @@ int main(int argc, char **argv)
 
 int main(void)
 {
-    fprintf(stderr, "WASM support not compiled — rebuild with HL_ENABLE_WASM=1\n");
+    fprintf(stderr, "WASM support not compiled - rebuild with HL_ENABLE_WASM=1\n");
     return 1;
 }
 

@@ -1,4 +1,4 @@
-// Middleware — Hull + QuickJS example
+// Middleware - Hull + QuickJS example
 //
 // Run: hull app.js -p 3000
 // Demonstrates middleware chaining: request ID, logging, rate limiting, CORS
@@ -57,7 +57,7 @@ app.use("*", "/api/*", cors.middleware({
 }));
 
 // OPTIONS route for CORS preflight (router requires a route to exist
-// so middleware can run — the CORS middleware above handles the response)
+// so middleware can run - the CORS middleware above handles the response)
 app.options("/api/items", (_req, res) => {
     res.status(204).text("");
 });
@@ -68,7 +68,7 @@ app.get("/health", (_req, res) => {
     res.json({ status: "ok" });
 });
 
-// Public route (no rate limit — only /api/* is rate limited)
+// Public route (no rate limit - only /api/* is rate limited)
 app.get("/", (req, res) => {
     res.json({
         message: "Middleware example",
@@ -114,4 +114,4 @@ app.get("/api/stats", (_req, res) => {
     res.json(stats);
 });
 
-log.info("Middleware example loaded — routes registered");
+log.info("Middleware example loaded - routes registered");

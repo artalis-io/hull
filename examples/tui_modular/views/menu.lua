@@ -1,4 +1,4 @@
--- views/menu.lua — Top-level menu.
+-- views/menu.lua - Top-level menu.
 --
 -- Convention: each view exports render(ctx, state) and
 -- handle_event(state, ev). render is a function of state (no side

@@ -1,4 +1,4 @@
-// Tests for todo example (with auth, search, csv, rbac) — JS
+// Tests for todo example (with auth, search, csv, rbac) - JS
 // Run: hull test examples/todo/
 //
 // Note: middleware registered via app.use() does not run during hull test

@@ -1,4 +1,4 @@
--- commands/count.lua — Count items passed as arguments.
+-- commands/count.lua - Count items passed as arguments.
 
 local M = {}
 

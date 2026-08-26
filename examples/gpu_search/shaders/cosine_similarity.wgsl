@@ -1,10 +1,10 @@
 // Cosine similarity: compare a query vector against N candidate vectors.
 //
 // Binding layout (auto-layout, matches Hull gpu.dispatch):
-//   @binding(0) — uniform: Params { dimensions, count }
-//   @binding(1) — storage read: query vector (f32 x dimensions)
-//   @binding(2) — storage read: candidate vectors (f32 x dimensions x count)
-//   @binding(3) — storage read_write: results (f32 x count)
+//   @binding(0) - uniform: Params { dimensions, count }
+//   @binding(1) - storage read: query vector (f32 x dimensions)
+//   @binding(2) - storage read: candidate vectors (f32 x dimensions x count)
+//   @binding(3) - storage read_write: results (f32 x count)
 
 struct Params {
     dimensions: u32,

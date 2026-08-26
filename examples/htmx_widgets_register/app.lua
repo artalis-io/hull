@@ -1,4 +1,4 @@
--- htmx_widgets_register — exercises every widget in §1.5.g (8 widgets)
+-- htmx_widgets_register - exercises every widget in §1.5.g (8 widgets)
 -- in one tiny CRUD app. Doubles as adoption reference AND the manual
 -- UX-test surface (see README.md for the click-through checklist).
 
@@ -153,7 +153,7 @@ local function render_grid(state)
         end,
         empty_label  = state.q ~= ""
             and ('No assets match "' .. state.q .. '".')
-            or "No assets yet — add one below.",
+            or "No assets yet - add one below.",
     })
     local nav_html = hxpag.nav(state.total, {
         page = state.page, per_page = PER_PAGE,
@@ -162,7 +162,7 @@ local function render_grid(state)
 
     -- Per-row delete buttons live next to the table; emit them inline
     -- under each row. Simpler than threading per-cell custom render
-    -- for an "actions" column — the README explains the trade-off.
+    -- for an "actions" column - the README explains the trade-off.
     -- (For Phase 2 widget showcase, a row-level Actions column would
     -- be the next-tier add; keeping the example terse here.)
     local action_html = ''
@@ -312,4 +312,4 @@ app.delete("/assets/:id", function(req, res)
     res:html(render_grid(state))
 end)
 
-log.info("htmx_widgets_register: loaded — visit / for the demo")
+log.info("htmx_widgets_register: loaded - visit / for the demo")

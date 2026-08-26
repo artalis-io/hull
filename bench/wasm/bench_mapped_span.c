@@ -1,4 +1,4 @@
-/* bench_mapped_span.c — the mapped-span performance benchmark harness.
+/* bench_mapped_span.c - the mapped-span performance benchmark harness.
  *
  * Measures the shipped large-file mechanism: a host-mmap'd file window read by a
  * wasm32 guest via a HullSpan, vs the native-mmap baseline and the two copy-based

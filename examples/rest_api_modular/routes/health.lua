@@ -1,4 +1,4 @@
--- routes/health.lua — liveness + readiness endpoints.
+-- routes/health.lua - liveness + readiness endpoints.
 --
 -- The health endpoint is intentionally trivial and unauthenticated:
 -- a loadbalancer or container orchestrator hits it to decide whether

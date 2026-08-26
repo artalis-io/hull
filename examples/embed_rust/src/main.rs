@@ -1,8 +1,8 @@
-//! embed_rust — reference Rust host for the libhull no-runtime flavor.
+//! embed_rust - reference Rust host for the libhull no-runtime flavor.
 //!
 //! Links only libhull.a + Keel (see build.rs); no Lua/QuickJS runtime. Drives
 //! the runtime-free Hull core through the stable C ABI in <hull/embed.h> via a
-//! small `extern "C"` block — the analogue of examples/embed_c, from Rust.
+//! small `extern "C"` block - the analogue of examples/embed_c, from Rust.
 //! Exits non-zero on any capability failure.
 //!
 //! SPDX-License-Identifier: AGPL-3.0-or-later
@@ -98,7 +98,7 @@ fn main() {
             "capabilities fail closed before seal",
         );
 
-        // 4. seal (phase-2 sandbox) — must check
+        // 4. seal (phase-2 sandbox) - must check
         let sealed = hl_embed_seal(e, ptr::null());
         check(sealed == 0, "hl_embed_seal applied sandbox");
         if sealed != 0 {

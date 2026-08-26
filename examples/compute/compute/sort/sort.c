@@ -1,8 +1,8 @@
 /*
- * sort.c — In-place quicksort of int32 array
+ * sort.c - In-place quicksort of int32 array
  *
- * Input:  N×4 bytes — array of int32 LE values
- * Output: N×4 bytes — sorted array of int32 LE values
+ * Input:  N×4 bytes - array of int32 LE values
+ * Output: N×4 bytes - sorted array of int32 LE values
  *
  * Build:  hull compute build sort
  * Test:   hull compute test sort

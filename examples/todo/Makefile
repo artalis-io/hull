@@ -1,4 +1,4 @@
-# examples/todo/Makefile — Build and run the todo example app
+# examples/todo/Makefile - Build and run the todo example app
 #
 # Usage:
 #   make dev                    # dev server with hot reload + HTTPS (Lua)
@@ -33,7 +33,7 @@ dev: certs
 # For cosmo:  make platform-cosmo && make EMBED_PLATFORM=cosmo
 # For native: make platform && make EMBED_PLATFORM=1
 #
-# IMPORTANT: The hull binary is a host tool — always built with the native
+# IMPORTANT: The hull binary is a host tool - always built with the native
 # compiler. CC is only forwarded to `hull build` for the app binary.
 
 ifneq (,$(findstring cosmo,$(CC)))

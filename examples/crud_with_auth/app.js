@@ -1,7 +1,7 @@
-// CRUD with Auth — Hull + QuickJS example
+// CRUD with Auth - Hull + QuickJS example
 //
 // Run: hull app.js -p 3000
-// Tasks API with session-based auth — each user only sees their own tasks
+// Tasks API with session-based auth - each user only sees their own tasks
 
 import { app } from "hull:app";
 import { crypto } from "hull:crypto";
@@ -31,7 +31,7 @@ app.manifest({
 // Initialize sessions
 session.init({ ttl: 3600 });
 
-// Load session on every request (optional — won't block unauthenticated)
+// Load session on every request (optional - won't block unauthenticated)
 app.use("*", "/*", (req, _res) => {
     const header = req.headers.cookie;
     if (!header) return 0;
@@ -242,4 +242,4 @@ app.delete("/tasks/:id", (req, res) => {
     res.json({ ok: true });
 });
 
-log.info("CRUD with Auth loaded — routes registered");
+log.info("CRUD with Auth loaded - routes registered");

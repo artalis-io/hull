@@ -1,9 +1,9 @@
-// routes/users.js — User resource.
+// routes/users.js - User resource.
 
 import * as userSchema from "./../lib/validate_user.js";
 import * as users      from "./../models/user.js";
 
-// req.body is the raw request bytes, not a parsed object — Hull's JS
+// req.body is the raw request bytes, not a parsed object - Hull's JS
 // bindings expose the body as a string. Each route that consumes JSON
 // decodes it here. A real app would put this in lib/req.js and reuse
 // it across resources.
@@ -17,13 +17,13 @@ function parseJsonBody(req) {
 }
 
 export function register(app) {
-    // GET /users — list (paginated via ?limit=)
+    // GET /users - list (paginated via ?limit=)
     app.get("/users", (req, res) => {
         const limit = Number.parseInt(req.query.limit, 10) || 50;
         res.json({ users: users.list({ limit }) });
     });
 
-    // POST /users — create
+    // POST /users - create
     app.post("/users", (req, res) => {
         const [body, perr] = parseJsonBody(req);
         if (perr) { res.status(400).json({ error: perr }); return; }

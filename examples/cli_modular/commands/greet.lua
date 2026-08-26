@@ -1,4 +1,4 @@
--- commands/greet.lua — Print a greeting.
+-- commands/greet.lua - Print a greeting.
 --
 -- Convention: each command file exports a single `run(ctx)` function.
 -- ctx is the same shape app.main receives: args / env / stdin / stdout

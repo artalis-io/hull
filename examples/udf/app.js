@@ -1,4 +1,4 @@
-// User-Defined SQL Functions — Hull + QuickJS example
+// User-Defined SQL Functions - Hull + QuickJS example
 //
 // Run: hull app.js -p 3000
 // Demonstrates scalar and aggregate UDFs registered from JS callbacks.

@@ -1,5 +1,5 @@
 --
--- Template engine example — Lua
+-- Template engine example - Lua
 --
 -- Demonstrates inheritance, includes, filters, loops, and CSP nonce.
 --

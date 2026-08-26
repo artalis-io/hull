@@ -1,5 +1,5 @@
 /*
- * bench_bytecode_cache.c — Cold-vs-warm comparison for hl_lua_load_cached.
+ * bench_bytecode_cache.c - Cold-vs-warm comparison for hl_lua_load_cached.
  *
  * Measures the wall-clock cost of loading every embedded Lua stdlib
  * chunk (~70 modules) twice:
@@ -38,7 +38,7 @@ static double now_sec(void)
 }
 
 /* Stand-in stdlib corpus: synthesize N realistic-sized Lua modules.
- * Each is ~1.5 KB of mixed control flow + table construction — close
+ * Each is ~1.5 KB of mixed control flow + table construction - close
  * to a real stdlib middleware. Held in heap so the bench doesn't
  * depend on any particular Lua file layout. */
 typedef struct {
@@ -101,7 +101,7 @@ static double run_pass(Chunk *chunks, int n)
             fprintf(stderr, "load failed on chunk %d: %s\n", i, lua_tostring(L, -1));
             exit(1);
         }
-        /* Don't run the chunk — we're benching load, not execute. */
+        /* Don't run the chunk - we're benching load, not execute. */
         lua_close(L);
     }
     return now_sec() - t0;
@@ -143,7 +143,7 @@ int main(void)
     printf("WARM (cache hit):    %.3f ms total   %.1f µs/load\n",
             warm * 1000.0, warm * 1.0e6 / N_CHUNKS);
 
-    /* Bypass pass: cache disabled — same as pre-cache baseline. */
+    /* Bypass pass: cache disabled - same as pre-cache baseline. */
     setenv("HULL_NO_LUA_BYTECODE_CACHE", "1", 1);
     double bypass = run_pass(chunks, N_CHUNKS);
     unsetenv("HULL_NO_LUA_BYTECODE_CACHE");

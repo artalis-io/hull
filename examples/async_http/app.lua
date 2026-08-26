@@ -1,4 +1,4 @@
--- Async HTTP Client — Hull + Lua example
+-- Async HTTP Client - Hull + Lua example
 --
 -- Run: hull app.lua -p 3000 --no-sandbox
 -- Test: curl localhost:3000/health
@@ -8,7 +8,7 @@
 --       curl localhost:3000/worker-dispatch
 --
 -- Demonstrates hull.sleep(), http_client.async.get(), db.async.query(),
--- and worker.dispatch() — all yield the coroutine and let the event
+-- and worker.dispatch() - all yield the coroutine and let the event
 -- loop serve other connections while waiting.
 
 local db = require("hull.db").default()
@@ -98,4 +98,4 @@ app.get("/worker-dispatch", function(_req, res)
     res:json(result)
 end)
 
-log.info("Async HTTP example loaded — routes registered")
+log.info("Async HTTP example loaded - routes registered")

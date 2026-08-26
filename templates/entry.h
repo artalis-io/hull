@@ -1,5 +1,5 @@
 /*
- * entry.h — HlEntry type definition for generated registries
+ * entry.h - HlEntry type definition for generated registries
  *
  * Canonical struct for all embedded file arrays: app modules (Lua, JS,
  * JSON), templates, static assets, migrations, and stdlib entries.

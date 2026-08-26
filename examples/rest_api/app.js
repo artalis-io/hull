@@ -1,4 +1,4 @@
-// REST API — Hull + QuickJS example
+// REST API - Hull + QuickJS example
 //
 // Run: hull app.js -p 3000
 // CRUD API for managing tasks with i18n error messages

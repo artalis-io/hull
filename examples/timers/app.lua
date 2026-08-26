@@ -1,11 +1,11 @@
--- Background Timers — Hull + Lua example
+-- Background Timers - Hull + Lua example
 --
 -- Run: hull app.lua -p 3000
 -- Test: curl localhost:3000/health
 --       curl localhost:3000/heartbeats
 --       curl localhost:3000/counter
 --
--- Demonstrates app.every() and app.daily() — background timers
+-- Demonstrates app.every() and app.daily() - background timers
 -- that fire on the event loop thread with full async support.
 
 local db   = require("hull.db").default()
@@ -62,4 +62,4 @@ app.get("/counter", function(_req, res)
     res:json(rows)
 end)
 
-log.info("Timers example loaded — background timers registered")
+log.info("Timers example loaded - background timers registered")

@@ -1,4 +1,4 @@
--- Compute example — WASM compute plugins in Hull
+-- Compute example - WASM compute plugins in Hull
 --
 -- Demonstrates sync compute.call() and async compute.async.call()
 -- for offloading CPU-intensive work to sandboxed WASM modules.

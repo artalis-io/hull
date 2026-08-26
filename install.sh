@@ -104,7 +104,7 @@ detect_platform() {
 # Available assets:
 #   hull-cosmo            (universal APE: linux/darwin/windows/bsd × x86_64/arm64)
 #   hull-linux-x86_64     (native ELF, x86_64)
-#   hull-linux-aarch64    (native ELF, ARM64 — Graviton, DGX, Ampere, Pi 4+)
+#   hull-linux-aarch64    (native ELF, ARM64 - Graviton, DGX, Ampere, Pi 4+)
 #   hull-darwin-arm64     (native Mach-O)
 select_asset() {
     if [ "$HULL_FLAVOR" = "cosmo" ]; then

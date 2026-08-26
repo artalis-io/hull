@@ -8,7 +8,7 @@
 --   user.email_verified  -> flipped to 1 by user_set_email_verified
 --
 -- Real apps almost always add more columns (display name, role,
--- locale, created_by, etc.) — auth-flows doesn't care, just keep
+-- locale, created_by, etc.) - auth-flows doesn't care, just keep
 -- these four.
 CREATE TABLE IF NOT EXISTS users (
     id              TEXT PRIMARY KEY,

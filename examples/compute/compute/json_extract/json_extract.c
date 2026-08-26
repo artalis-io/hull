@@ -1,10 +1,10 @@
 /*
- * json_extract.c — Extract a value by key from JSON-like input
+ * json_extract.c - Extract a value by key from JSON-like input
  *
  * Input format:
- *   1 byte    — uint8: key length
- *   N bytes   — key string (no null terminator)
- *   remaining — JSON object string (e.g. {"name":"alice","age":30})
+ *   1 byte    - uint8: key length
+ *   N bytes   - key string (no null terminator)
+ *   remaining - JSON object string (e.g. {"name":"alice","age":30})
  *
  * Output: the extracted value as a string (without quotes for strings,
  *         raw text for numbers/booleans). Empty output if key not found.
@@ -43,7 +43,7 @@ int32_t hull_process(const void *in_ptr, int32_t in_len,
         if (hull_memcmp(json + i + 1, key, key_len) != 0) continue;
         if (json[i + 1 + (int32_t)key_len] != '"') continue;
 
-        /* Found the key — look for colon */
+        /* Found the key - look for colon */
         int32_t after_key = i + 2 + (int32_t)key_len;
         /* Skip whitespace before colon */
         while (after_key < json_len &&
@@ -60,7 +60,7 @@ int32_t hull_process(const void *in_ptr, int32_t in_len,
         if (val_start >= json_len) return HULL_ERR_INPUT;
 
         if (json[val_start] == '"') {
-            /* String value — find closing quote */
+            /* String value - find closing quote */
             int32_t val_end = val_start + 1;
             while (val_end < json_len && json[val_end] != '"')
                 val_end++;
@@ -70,7 +70,7 @@ int32_t hull_process(const void *in_ptr, int32_t in_len,
             hull_memcpy(out, json + val_start + 1, (size_t)val_len);
             return val_len;
         } else {
-            /* Numeric/bool — read until delimiter */
+            /* Numeric/bool - read until delimiter */
             int32_t val_end = val_start;
             while (val_end < json_len && json[val_end] != ',' &&
                    json[val_end] != '}' && json[val_end] != ' ' &&
@@ -84,6 +84,6 @@ int32_t hull_process(const void *in_ptr, int32_t in_len,
         }
     }
 
-    /* Key not found — zero bytes output */
+    /* Key not found - zero bytes output */
     return 0;
 }

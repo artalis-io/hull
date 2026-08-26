@@ -1,6 +1,6 @@
 /*
  * fuzz_span_window.c: libFuzzer harness for the mapped-WINDOW geometry math
- * (hl_cap_fs_mmap_window_geometry) — the host-side page-alignment + EOF-clamp +
+ * (hl_cap_fs_mmap_window_geometry) - the host-side page-alignment + EOF-clamp +
  * overflow-safe page-rounding of an (offset, length) window request over a file.
  * This is the "mapping/window operations" arithmetic the spec asks to fuzz: the
  * function turns four untrusted-in-the-limit u64s into an mmap offset/length pair,
@@ -10,7 +10,7 @@
  * invariants; UBSan catches any signed/unsigned overflow or UB in the math, and
  * the asserts catch a logically-wrong (but not UB) result. cap/fs.c is compiled
  * with -ffunction-sections + dead-strip in the fuzz rule, so only this pure leaf
- * (which calls nothing external) is linked — no alloc/audit/mmap deps.
+ * (which calls nothing external) is linked - no alloc/audit/mmap deps.
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */

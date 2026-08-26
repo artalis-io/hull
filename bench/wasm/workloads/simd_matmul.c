@@ -1,5 +1,5 @@
 /*
- * simd_matmul.c — WASM SIMD128 matrix multiply benchmark
+ * simd_matmul.c - WASM SIMD128 matrix multiply benchmark
  *
  * Computes C = A × B for square f32 matrices.
  * Input layout: [dim:u32] [A: dim×dim×f32] [B: dim×dim×f32]
@@ -55,7 +55,7 @@ int32_t hull_process(const void *in_ptr, int32_t in_len,
             for (; k < simd_end; k += 4) {
                 /* Load A[i][k..k+3] */
                 v128_t va = wasm_v128_load(&A[i * dim + k]);
-                /* Load B[k..k+3][j] — need to gather (not contiguous) */
+                /* Load B[k..k+3][j] - need to gather (not contiguous) */
                 float bvals[4] = {
                     B[(k + 0) * dim + j],
                     B[(k + 1) * dim + j],

@@ -1,12 +1,12 @@
--- Chat — WebSocket + SSE example
+-- Chat - WebSocket + SSE example
 --
 -- Run: hull app.lua -p 3000
 --
 -- Endpoints:
---   WS  /ws/chat          — WebSocket chat (broadcast messages)
---   SSE /sse/events       — SSE event stream (sends tick every 2s)
---   GET /health           — health check
---   GET /ws/connections   — current WebSocket connection count
+--   WS  /ws/chat          - WebSocket chat (broadcast messages)
+--   SSE /sse/events       - SSE event stream (sends tick every 2s)
+--   GET /health           - health check
+--   GET /ws/connections   - current WebSocket connection count
 
 local time = require("hull.time")
 local ws_server   = require("hull.web.ws-server")
@@ -85,4 +85,4 @@ app.get("/ws/connections", function(_req, res)
     res:json({ count = ws_server.connections("/ws/chat") })
 end)
 
-log.info("Chat app loaded — routes registered")
+log.info("Chat app loaded - routes registered")

@@ -78,7 +78,7 @@ test("plain POST /entries sets session flash; next GET renders it", async () => 
     test.eq(nextGet.status, 200);
     test.ok(nextGet.body.includes("Added: plain post entry"),
             "next render should include flash message");
-    // And the message is one-shot — a SECOND GET should not contain it.
+    // And the message is one-shot - a SECOND GET should not contain it.
     const thirdGet = await test.get("/", {
         middleware: true,
         headers: { "cookie": cookieHdr },

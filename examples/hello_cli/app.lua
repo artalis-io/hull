@@ -1,4 +1,4 @@
--- Hello CLI — Hull + Lua app.main example
+-- Hello CLI - Hull + Lua app.main example
 --
 -- Run: hull run app.lua -- world
 --      hull run app.lua -- alice

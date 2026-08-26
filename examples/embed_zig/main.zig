@@ -1,8 +1,8 @@
-//! embed_zig — reference Zig host for the libhull no-runtime flavor.
+//! embed_zig - reference Zig host for the libhull no-runtime flavor.
 //!
 //! Zig @cImports include/hull/embed.h DIRECTLY (no hand-written bindings) and
 //! links libhull.a + Keel; no Lua/QuickJS runtime. Drives the runtime-free
-//! Hull core through the stable C ABI — the analogue of examples/embed_c, from
+//! Hull core through the stable C ABI - the analogue of examples/embed_c, from
 //! Zig. Because @cImport consumes the header as-is, a clean compile is itself
 //! evidence the ABI header is FFI-consumable. Exits non-zero on any failure.
 //!
@@ -55,7 +55,7 @@ pub fn main() u8 {
         "capabilities fail closed before seal",
     );
 
-    // 4. seal (phase-2 sandbox) — must check
+    // 4. seal (phase-2 sandbox) - must check
     const sealed = c.hl_embed_seal(e, null);
     check(sealed == 0, "hl_embed_seal applied sandbox");
     if (sealed != 0) {

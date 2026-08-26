@@ -1,5 +1,5 @@
 #!/bin/sh
-# Hull benchmark — runs wrk against both Lua and JS runtimes
+# Hull benchmark - runs wrk against both Lua and JS runtimes
 #
 # Usage: sh bench/bench.sh
 #        RUNTIME=lua sh bench/bench.sh   # benchmark Lua only
@@ -20,7 +20,7 @@ DURATION=${DURATION:-10s}
 RUNTIME=${RUNTIME:-all}
 
 if [ ! -x "$HULL" ]; then
-    echo "bench: hull binary not found at $HULL — run 'make' first"
+    echo "bench: hull binary not found at $HULL - run 'make' first"
     exit 1
 fi
 
@@ -72,32 +72,32 @@ run_bench() {
     # Warmup
     wrk -t2 -c10 -d2s "$URL/health" >/dev/null 2>&1
 
-    # GET /health — lightweight JSON (no DB)
+    # GET /health - lightweight JSON (no DB)
     echo "--- GET /health (no DB) ---"
     wrk -t"$THREADS" -c"$CONNECTIONS" -d"$DURATION" "$URL/health"
     echo ""
 
-    # GET / — JSON response with DB write
+    # GET / - JSON response with DB write
     echo "--- GET / (DB write + JSON) ---"
     wrk -t"$THREADS" -c"$CONNECTIONS" -d"$DURATION" "$URL/"
     echo ""
 
-    # GET /greet/World — route param extraction
+    # GET /greet/World - route param extraction
     echo "--- GET /greet/World (route param) ---"
     wrk -t"$THREADS" -c"$CONNECTIONS" -d"$DURATION" "$URL/greet/World"
     echo ""
 
-    # POST /echo — body parsing throughput
+    # POST /echo - body parsing throughput
     echo "--- POST /echo (body parsing) ---"
     wrk -t"$THREADS" -c"$CONNECTIONS" -d"$DURATION" -s bench/bench_post.lua "$URL/echo"
     echo ""
 
-    # GET /visits — DB read (SELECT query)
+    # GET /visits - DB read (SELECT query)
     echo "--- GET /visits (DB read) ---"
     wrk -t"$THREADS" -c"$CONNECTIONS" -d"$DURATION" "$URL/visits"
     echo ""
 
-    # POST /greet/World — route param + body parsing combined
+    # POST /greet/World - route param + body parsing combined
     echo "--- POST /greet/World (route param + body) ---"
     wrk -t"$THREADS" -c"$CONNECTIONS" -d"$DURATION" -s bench/bench_post.lua "$URL/greet/World"
     echo ""
@@ -108,7 +108,7 @@ run_bench() {
     trap - EXIT
 }
 
-# Run for selected runtimes — use different ports to avoid conflicts
+# Run for selected runtimes - use different ports to avoid conflicts
 if [ "$RUNTIME" != "js" ]; then
     run_bench "Lua" 19860 examples/hello/app.lua
 fi

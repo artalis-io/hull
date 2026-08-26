@@ -1,5 +1,5 @@
 #!/bin/sh
-# Template rendering performance benchmark — measures throughput at varying complexity
+# Template rendering performance benchmark - measures throughput at varying complexity
 #
 # Usage: sh bench/bench_template.sh
 #        RUNTIME=lua sh bench/bench_template.sh   # benchmark Lua only
@@ -20,7 +20,7 @@ DURATION=${DURATION:-10s}
 RUNTIME=${RUNTIME:-all}
 
 if [ ! -x "$HULL" ]; then
-    echo "bench_template: hull binary not found at $HULL — run 'make' first"
+    echo "bench_template: hull binary not found at $HULL - run 'make' first"
     exit 1
 fi
 
@@ -68,22 +68,22 @@ run_bench() {
     # Warmup
     wrk -t2 -c10 -d2s "$URL/health" >/dev/null 2>&1
 
-    # 1. Baseline — JSON, no template
+    # 1. Baseline - JSON, no template
     echo "--- GET /health (JSON baseline) ---"
     wrk -t"$THREADS" -c"$CONNECTIONS" -d"$DURATION" "$URL/health"
     echo ""
 
-    # 2. Simple — variable substitution only
+    # 2. Simple - variable substitution only
     echo "--- GET /simple (variable substitution) ---"
     wrk -t"$THREADS" -c"$CONNECTIONS" -d"$DURATION" "$URL/simple"
     echo ""
 
-    # 3. Loop — 50-item loop + conditionals
+    # 3. Loop - 50-item loop + conditionals
     echo "--- GET /loop (50-item loop + conditionals) ---"
     wrk -t"$THREADS" -c"$CONNECTIONS" -d"$DURATION" "$URL/loop"
     echo ""
 
-    # 4. Full — inheritance + include + loop + filters + conditionals
+    # 4. Full - inheritance + include + loop + filters + conditionals
     echo "--- GET /full (inheritance + include + loop + filters) ---"
     wrk -t"$THREADS" -c"$CONNECTIONS" -d"$DURATION" "$URL/full"
     echo ""
@@ -93,7 +93,7 @@ run_bench() {
     trap - EXIT
 }
 
-# Run for selected runtimes — use different ports to avoid conflicts
+# Run for selected runtimes - use different ports to avoid conflicts
 if [ "$RUNTIME" != "js" ]; then
     run_bench "Lua" 19880 examples/bench_template/app.lua
 fi

@@ -40,9 +40,9 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 LUA_OUT="$ROOT/stdlib/lua/hull/web/_pwned_blocklist.lua"
 JS_OUT="$ROOT/stdlib/js/hull/web/_pwned_blocklist.js"
 
-# Generated header — both runtimes.
+# Generated header - both runtimes.
 cat > "$LUA_OUT" <<LUA
--- AUTO-GENERATED — do not edit. Regenerate with scripts/build_pwned_blocklist.sh.
+-- AUTO-GENERATED - do not edit. Regenerate with scripts/build_pwned_blocklist.sh.
 -- Source: SecLists 10K (CC-BY-3.0).
 -- Format: concatenated 8-char uppercase-hex SHA-1 prefixes, sorted, deduped.
 return {
@@ -53,7 +53,7 @@ return {
 LUA
 
 cat > "$JS_OUT" <<JS
-// AUTO-GENERATED — do not edit. Regenerate with scripts/build_pwned_blocklist.sh.
+// AUTO-GENERATED - do not edit. Regenerate with scripts/build_pwned_blocklist.sh.
 // Source: SecLists 10K (CC-BY-3.0).
 // Format: concatenated 8-char uppercase-hex SHA-1 prefixes, sorted, deduped.
 export const blocklist = {

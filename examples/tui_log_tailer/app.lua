@@ -1,9 +1,9 @@
--- TUI log tailer — tail -f style follower over hull.fs.
+-- TUI log tailer - tail -f style follower over hull.fs.
 --
 -- Reads a file from the manifest's fs.read allowlist, polls its
 -- mtime + size on each tick, displays new lines as they appear.
 -- A background tui.async coroutine tracks the file even while
--- the main loop awaits keystrokes — same async-yield property the
+-- the main loop awaits keystrokes - same async-yield property the
 -- async_proof demo validates.
 --
 -- Run (from the app directory):
@@ -72,7 +72,7 @@ end
 --
 -- Polls the file every 200ms even while the main coroutine awaits
 -- a key in tui.poll(-1). Demonstrates that tui.poll yields to the
--- event loop — without this, the file wouldn't be re-read until
+-- event loop - without this, the file wouldn't be re-read until
 -- the user pressed something.
 
 tui.async(function()
@@ -102,7 +102,7 @@ local function render(t)
         t:print(1, 3, "Error: " .. state.error)
         t:style({})
         t:style({ fg = 0x888888, italic = true })
-        t:print(1, 5, "(checked again on next tick — q to quit)")
+        t:print(1, 5, "(checked again on next tick - q to quit)")
         t:style({})
         t:style({ fg = 0x888888 })
         t:print(1, t.rows, "q:quit")

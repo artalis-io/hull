@@ -1,11 +1,11 @@
 /*
- * text.c — Levenshtein edit distance between two strings
+ * text.c - Levenshtein edit distance between two strings
  *
  * Input format:
- *   2 bytes   — uint16 LE: length of string A
- *   len_a bytes — string A
- *   2 bytes   — uint16 LE: length of string B
- *   len_b bytes — string B
+ *   2 bytes   - uint16 LE: length of string A
+ *   len_a bytes - string A
+ *   2 bytes   - uint16 LE: length of string B
+ *   len_b bytes - string B
  *
  * Output: 4 bytes int32 LE (edit distance)
  *

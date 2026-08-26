@@ -1,4 +1,4 @@
-// Auth Example — Hull + QuickJS
+// Auth Example - Hull + QuickJS
 //
 // Run: hull app.js -p 3000
 // Session-based auth API: register, login, logout, protected routes
@@ -31,7 +31,7 @@ app.manifest({
 // Initialize sessions
 session.init({ ttl: 3600 });
 
-// Load session on every request (optional — won't block unauthenticated).
+// Load session on every request (optional - won't block unauthenticated).
 // The JS sessionMiddleware doesn't have an "optional" flag, so we use a
 // lightweight custom middleware that attaches the session when present.
 app.use("*", "/*", (req, _res) => {
@@ -166,4 +166,4 @@ app.get("/me", (req, res) => {
     res.json(rows[0]);
 });
 
-log.info("Auth app loaded — routes registered");
+log.info("Auth app loaded - routes registered");

@@ -1,10 +1,10 @@
-// Streaming multipart uploads — Hull + QuickJS example
+// Streaming multipart uploads - Hull + QuickJS example
 //
 // Run: hull app.js -p 3000
 // Visit: http://localhost:3000/   (HTML form)
 // Or:    curl -F "user=alice" -F "f=@README.md" http://localhost:3000/upload
 //
-// The point of this example is the streaming iterator — bytes pulled
+// The point of this example is the streaming iterator - bytes pulled
 // out of the socket on demand, never the whole body in memory at once.
 // We hash + size each file part as it streams and return a JSON
 // inventory. Persistent storage is intentionally out of scope: see
@@ -71,7 +71,7 @@ app.post("/upload", async (req, res) => {
     for await (const part of req.multipart()) {
         if (part.filename) {
             // File field: stream chunks AND hash incrementally. Bytes
-            // never accumulate — each chunk is fed straight into the
+            // never accumulate - each chunk is fed straight into the
             // hasher and dropped. Memory use stays O(chunk_size) no
             // matter how big the upload.
             const hasher = crypto.createSha256();

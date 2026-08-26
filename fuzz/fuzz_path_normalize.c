@@ -2,7 +2,7 @@
  * libFuzzer harness for hl_path_normalize().
  *
  * hl_path_normalize collapses `.`/`..` segments in place and feeds module
- * require()/import() resolution — a security-relevant path: a bug that let
+ * require()/import() resolution - a security-relevant path: a bug that let
  * `..` escape the root, or an out-of-bounds write into the in-place buffer,
  * is a sandbox-traversal primitive. ASan catches OOB; we just feed it
  * arbitrary NUL-terminated bytes.

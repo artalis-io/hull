@@ -1,4 +1,4 @@
--- views/detail.lua — Detail view shown when a menu item is picked.
+-- views/detail.lua - Detail view shown when a menu item is picked.
 --
 -- Esc / q / Backspace returns to the menu (state.view = "menu").
 

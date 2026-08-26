@@ -1,5 +1,5 @@
 /*
- * bench_js_bytecode_cache.c — Cold-vs-warm comparison for
+ * bench_js_bytecode_cache.c - Cold-vs-warm comparison for
  * hl_js_compile_module_cached. Mirrors the Lua bench
  * (bench_bytecode_cache.c) so the two languages report
  * apples-to-apples timings.

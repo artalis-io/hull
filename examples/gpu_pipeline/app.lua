@@ -1,4 +1,4 @@
--- GPU pipeline example — multi-stage compute in a single GPU submission
+-- GPU pipeline example - multi-stage compute in a single GPU submission
 --
 -- Demonstrates gpu.pipeline() for chaining shaders without round-trips.
 -- A 3-stage scoring pipeline:
@@ -110,7 +110,7 @@ app.get("/health", function(req, res)
     res:json({ ok = true, gpu = gpu.available(), devices = gpu.devices() })
 end)
 
--- POST /score — score items through a 3-stage pipeline
+-- POST /score - score items through a 3-stage pipeline
 -- Body: { "items": [[80,150,3], [60,200,1], [95,50,5]], "weights": [0.5, 0.3, 0.2] }
 app.post("/score", function(req, res)
     local body = json.decode(req.body)
@@ -196,7 +196,7 @@ app.post("/score", function(req, res)
     res:json({ scores = scores })
 end)
 
--- GET /compare — compare pipeline (1 submit) vs 3× dispatch (3 submits)
+-- GET /compare - compare pipeline (1 submit) vs 3× dispatch (3 submits)
 app.get("/compare", function(req, res)
     local items = 1000
     local features = 16

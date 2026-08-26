@@ -1,5 +1,5 @@
 /*
- * bench_gpu.c — GPU vs WASM vs native benchmark
+ * bench_gpu.c - GPU vs WASM vs native benchmark
  *
  * Compares cosine similarity computation across:
  *   1. Native C (direct function call)
@@ -132,7 +132,7 @@ static void bench_native(uint32_t dims, uint32_t count, int iters,
     /* These mallocs look like classic overflow candidates, but `dims` is
      * always #define DIMENSIONS 128 and `count` always comes from the
      * static {64..65536} table in main(); worst case is 32 MB. No I/O,
-     * WASM, or UDF path reaches this benchmark — it's standalone
+     * WASM, or UDF path reaches this benchmark - it's standalone
      * `make bench-gpu`. Not linked into the hull binary. */
     float *query = malloc(dims * 4);
     float *candidates = malloc((size_t)count * dims * 4);
@@ -191,14 +191,14 @@ static void bench_wasm(HlWasmCache *cache, const char *module_name,
     HlWasmCallOpts opts = {0};
     opts.max_input = in_len + 1024;
     opts.max_output = (size_t)count * 4 + 1024;
-    /* Size heap to fit input+output. Pool threshold is 4MB — smaller workloads
+    /* Size heap to fit input+output. Pool threshold is 4MB - smaller workloads
      * get pooled, larger ones pay instance creation cost (realistic). */
     size_t heap_need = in_len + (size_t)count * 4 + 256 * 1024; /* data + 256K overhead */
     if (heap_need < 2 * 1024 * 1024) heap_need = 2 * 1024 * 1024;
     opts.heap_size = (uint32_t)heap_need;
-    opts.gas = 2000000000LL; /* 2B instructions — enough for 64K × 128-dim */
+    opts.gas = 2000000000LL; /* 2B instructions - enough for 64K × 128-dim */
 
-    /* Use dummy VFS — module already cached in wasm_cache */
+    /* Use dummy VFS - module already cached in wasm_cache */
     HlEntry dummy[] = {{ NULL, NULL, 0 }};
     HlVfs dvfs;
     hl_vfs_init(&dvfs, dummy, NULL);
@@ -308,7 +308,7 @@ static void bench_gpu(HlGpuCtx *gpu_ctx, uint32_t dims, uint32_t count,
         for (uint32_t c = 0; c < count && !mismatch; c++) {
             float diff = ref_results[c] - gpu_results[c];
             if (diff < 0) diff = -diff;
-            /* GPU f32 accumulation order differs from scalar C — use generous tolerance */
+            /* GPU f32 accumulation order differs from scalar C - use generous tolerance */
             if (diff > 5e-2f) mismatch = 1;
         }
         if (mismatch)

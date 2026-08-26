@@ -1,5 +1,5 @@
 /*
- * simd_dot_product.c — WASM SIMD128 dot product benchmark
+ * simd_dot_product.c - WASM SIMD128 dot product benchmark
  *
  * Computes dot product of two f32 vectors packed in the input buffer.
  * Input layout: [n:u32] [vec_a: n×f32] [vec_b: n×f32]

@@ -1,4 +1,4 @@
--- Hello World — Hull + Lua example
+-- Hello World - Hull + Lua example
 --
 -- Run: hull app.lua -p 3000
 -- Visit: http://localhost:3000/
@@ -88,4 +88,4 @@ app.post("/greet/:name", function(req, res)
     })
 end)
 
-log.info("Hello app loaded — routes registered")
+log.info("Hello app loaded - routes registered")

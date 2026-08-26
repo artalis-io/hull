@@ -1,4 +1,4 @@
-// async_proof.js — JS counterpart to async_proof.lua.
+// async_proof.js - JS counterpart to async_proof.lua.
 //
 // Proves that tui.poll yields to the event loop in JS too: a
 // background timer increments a counter every ~50ms while the main

@@ -1,4 +1,4 @@
--- User-Defined SQL Functions — Hull + Lua example
+-- User-Defined SQL Functions - Hull + Lua example
 --
 -- Run: hull app.lua -p 3000
 -- Demonstrates scalar and aggregate UDFs registered from Lua callbacks.
