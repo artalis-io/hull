@@ -100,6 +100,7 @@ specific signature, parameter list, or return value.
 | [`h1_s2b_hex_ownership.md`](h1_s2b_hex_ownership.md) | H1 slice S2b (design-only): exhaustive hex-caller inventory, link-closure/dependency table, and ownership recommendation for the byte->hex encoders. No code change. |
 | [`h1_s3_comparison_contracts.md`](h1_s3_comparison_contracts.md) | H1 slice S3 (design-only): exhaustive comparison/constant-time contract matrix (14 security-relevant sites), threat context, equivalence classes, and per-class recommendation. Result: retain, no consolidation. |
 | [`h1_s4_milestone_inventory.md`](h1_s4_milestone_inventory.md) | H1 slice S4 closing record: whole-tree milestone-narration inventory certifying removable narration = 0 and enumerating the intentional survivors (architectural labels / audit provenance / public text) as the precise exception set for S5's gate. |
+| [`h1_s5_emdash_narration_gates.md`](h1_s5_emdash_narration_gates.md) | H1 slice S5 record: em-dash sweep across living first-party prose + the two self-tested gates (no-em-dash, no-milestone-narration) and their exact scope/survivor decisions. |
 | [`reporting_ir_design.md`](reporting_ir_design.md) | Proposed reporting IR - **deferred** (over-scoped as the immediate next feature). |
 | [`sidecar_design.md`](sidecar_design.md) | Native sidecars - design only (Phase 0), not yet scheduled. |
 
