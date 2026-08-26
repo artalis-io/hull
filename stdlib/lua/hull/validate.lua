@@ -14,6 +14,15 @@
 
 local validate = {}
 
+-- Pattern-validation input cap: 8192 bytes. Shared contract with the JS sibling
+-- (stdlib/js/hull/validate.js). Lua strings are byte strings, so `#value` is the
+-- byte count directly. Values over the cap are rejected BEFORE the pattern runs
+-- (never a truncated match), so the accept/reject decision is byte-identical
+-- across runtimes and an anchored rule can't be bypassed with a payload past the
+-- cap. Lua patterns don't backtrack catastrophically like JS regex, but the cap
+-- is enforced anyway for exact parity. Guarded by tests/e2e_validate_parity.sh.
+local PATTERN_MAX_INPUT_BYTES = 8192
+
 -- Email validation: practical RFC-5322 subset suitable for form-input
 -- screening. Catches obvious garbage (a..b@x, @foo, user@, foo) without
 -- aiming for full compliance - apps wanting stricter checks should layer
@@ -152,9 +161,11 @@ function validate.check(data, schema)
 
         if err then goto set_error end
 
-        -- 6. pattern
+        -- 6. pattern. Reject an over-cap value before matching (parity with the
+        -- JS byte cap); `#value` is a byte count.
         if rules.pattern then
-            if type(value) ~= "string" or not value:match(rules.pattern) then
+            if type(value) ~= "string" or #value > PATTERN_MAX_INPUT_BYTES
+               or not value:match(rules.pattern) then
                 err = custom_msg or "does not match the required pattern"
             end
         end

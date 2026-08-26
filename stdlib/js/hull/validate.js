@@ -34,6 +34,34 @@ function emailOk(s) {
     return true;
 }
 
+// Pattern-validation input cap: 8192 UTF-8 BYTES. Shared contract with the Lua
+// sibling (stdlib/lua/hull/validate.lua), where `#value` is a byte count. Values
+// over the cap are rejected BEFORE regex evaluation, and the FULL value is
+// tested (never a truncated prefix), so an anchored allowlist rule cannot be
+// bypassed by appending a payload past the cap and the accept/reject decision is
+// byte-identical across runtimes. Guarded by tests/e2e_validate_parity.sh.
+const PATTERN_MAX_INPUT_BYTES = 8192;
+
+// True iff the UTF-8 encoding of `s` exceeds `cap` bytes. Counts with an early
+// exit and never materializes an encoded copy (no TextEncoder allocation), so a
+// huge input costs at most cap+3 bytes of scanning to be rejected rather than a
+// full proportional encode.
+function utf8ByteLenExceeds(s, cap) {
+    let n = 0;
+    for (let i = 0; i < s.length; i++) {
+        const c = s.charCodeAt(i);
+        if (c < 0x80) n += 1;
+        else if (c < 0x800) n += 2;
+        else if (c >= 0xD800 && c <= 0xDBFF && i + 1 < s.length) {
+            const c2 = s.charCodeAt(i + 1);
+            if (c2 >= 0xDC00 && c2 <= 0xDFFF) { n += 4; i++; }  // surrogate pair -> 4 bytes
+            else n += 3;                                        // lone high surrogate -> U+FFFD
+        } else n += 3;                                          // BMP >= 0x800, or lone surrogate
+        if (n > cap) return true;
+    }
+    return false;
+}
+
 /**
  * Validate a data object against a schema.
  *
@@ -134,11 +162,11 @@ function check(data, schema) {
 
         if (err) { setError(); continue; }
 
-        // 6. pattern. Bound both the pattern (≤ 1024 chars) and the value
-        // (≤ 8192 chars) to make a ReDoS attack via crafted pattern + input
-        // require a very persistent attacker. We don't accept pre-compiled
-        // RegExp objects: their source could contain known-bad backtracking
-        // patterns the string check would catch.
+        // 6. pattern. Bound the pattern (<= 1024 chars) and the value
+        // (<= PATTERN_MAX_INPUT_BYTES UTF-8 bytes) so a ReDoS attack via a
+        // crafted pattern + input requires a very persistent attacker. We don't
+        // accept pre-compiled RegExp objects: their source could contain
+        // known-bad backtracking patterns the string check would catch.
         if (rules.pattern !== undefined && rules.pattern !== null) {
             if (rules.pattern instanceof RegExp)
                 throw new Error("validate: pass pattern as a string, not a RegExp");
@@ -149,7 +177,12 @@ function check(data, schema) {
             let re;
             try { re = new RegExp(rules.pattern); }
             catch (e) { throw new Error("validate: invalid pattern: " + e.message); }
-            if (typeof value !== "string" || !re.test(String(value).substring(0, 8192)))
+            // Reject an over-cap value BEFORE regex evaluation and test the FULL
+            // value (never a truncated prefix), so an anchored rule can't be
+            // bypassed with a payload appended past the cap.
+            if (typeof value !== "string"
+                || utf8ByteLenExceeds(value, PATTERN_MAX_INPUT_BYTES)
+                || !re.test(value))
                 err = customMsg || "does not match the required pattern";
         }
 
