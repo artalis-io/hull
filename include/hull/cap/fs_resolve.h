@@ -36,8 +36,14 @@
 #define HL_FS_MAX_DEPTH 256
 
 typedef enum {
-    HL_FS_OPEN_READ,  /* open an existing leaf O_RDONLY (symlinks followed, contained) */
-    HL_FS_OPEN_WRITE, /* mkdir-p parents (contained) + open leaf O_WRONLY|O_CREAT|O_TRUNC */
+    HL_FS_OPEN_READ,  /* open an existing REGULAR-FILE leaf O_RDONLY (symlinks
+                       * followed, contained). The leaf is opened O_NONBLOCK so a
+                       * special-file target can never block the open, then type-gated
+                       * to a regular file: a FIFO / socket / character-or-block device
+                       * / directory is rejected "not_a_regular_file" (§5a). */
+    HL_FS_OPEN_WRITE, /* mkdir-p parents (contained) + open leaf O_WRONLY|O_CREAT|O_TRUNC,
+                       * O_NONBLOCK + regular-file type gate as for READ (a special-file
+                       * or directory target -> "not_a_regular_file"). */
     HL_FS_OPEN_DIR,   /* open an existing DIRECTORY O_RDONLY|O_DIRECTORY (symlinks
                        * followed, contained); a non-directory target -> not_a_directory.
                        * Never creates. Used to resolve a SUBTREE grant anchor
@@ -88,8 +94,11 @@ int hl_fs_open_base(const char *base_dir, const char **err);
  *
  * Returns an open fd (caller closes) or -1 with *err set to a stable token:
  * "invalid_path", "path_too_deep", "not_found", "permission", "not_a_directory",
- * "is_a_directory", "symlink_loop", "symlink_denied", "io_error". ("symlink_denied"
- * only under HL_FS_SYMLINK_REFUSE; see hl_fs_open_at_ex.)
+ * "is_a_directory", "not_a_regular_file", "symlink_loop", "symlink_denied",
+ * "io_error". "not_a_regular_file" is the single token for a READ/WRITE leaf that
+ * resolves to a FIFO, socket, character/block device, or directory (§5a intentional
+ * tightening). "symlink_denied" only under HL_FS_SYMLINK_REFUSE; see
+ * hl_fs_open_at_ex.
  */
 int hl_fs_open_at(int root_fd, const char *relpath, HlFsOpenMode mode,
                   mode_t create_mode, const char **err);
