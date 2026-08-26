@@ -3,10 +3,10 @@
 Tiny asset-register CRUD app that exercises **every widget** in the
 §1.5.g htmx tier in one screen. Doubles as:
 
-1. **Adoption reference** — read `app.lua` (≈210 lines) to learn the
+1. **Adoption reference** - read `app.lua` (≈210 lines) to learn the
    pattern for composing search + sort + pagination + inline-edit +
    form + confirm + toast into a single page.
-2. **UX-test surface** — spin it up and click through the checklist
+2. **UX-test surface** - spin it up and click through the checklist
    below to verify every widget behaves correctly. Faster than
    running a headless-browser test suite.
 
@@ -30,7 +30,7 @@ clean: `make clean && make dev`.
 |---|---|---|
 | `search` | Top input | Type → debounced fetch → grid swaps. Clear button (X) also clears + refreshes. URL pushes `?q=...` |
 | `sort` | Click any column header | Arrow appears (▲ asc, ▼ desc, ↕ none). Click again → flips direction. Click another column → resets to asc. `?sort=col:dir` in URL |
-| `pagination` | Bottom of grid | Click page numbers / `←` / `→` — grid swaps. Active page has no link. URL pushes `?page=N` |
+| `pagination` | Bottom of grid | Click page numbers / `←` / `→` - grid swaps. Active page has no link. URL pushes `?page=N` |
 | `inline-edit` | Click the **Name** or **Category** cell | Cell becomes an editable input + Save/Cancel. Enter or Save submits PATCH. Esc or Cancel reverts. Editor input is focused + text-selected on swap |
 | `table` | The grid itself | All the above wired together. Custom render for the **Status** column shows colored badges |
 | `form` | "Add asset" section at bottom | Submit empty → server validates → `aria-invalid="true"` on the failing input + inline error span. Submit button shows "Adding…" + `aria-busy` during submission |
@@ -56,14 +56,14 @@ Click through these in order. Each step exercises one widget end-to-end.
 ## Architecture notes (for the code reading)
 
 - **Two SQL columns are editable** (`name`, `category`). The single `/assets/:id/:col/edit` + `PATCH /assets/:id/:col` route pair handles both via the `:col` param, validated against an allowlist (`valid_col`).
-- **Status column** uses the `schema.render` callback to emit `<span class="badge badge-active">active</span>` — shows how to wrap custom HTML around values while keeping the rest of the table-render machinery in play.
+- **Status column** uses the `schema.render` callback to emit `<span class="badge badge-active">active</span>` - shows how to wrap custom HTML around values while keeping the rest of the table-render machinery in play.
 - **Pre-rendered widget strings.** Hull's template engine doesn't support function calls in `{{ }}`; widget helpers run server-side and the strings flow into the template data table. The two static ones (`SEARCH_INPUT_ATTRS`, `DELETE_CONFIRM_ATTRS`) are pre-rendered at module load.
 - **Search preserves through sort/pagination.** When `?q=foo` is active, the `base_url` for sort headers and pagination links is `/search?q=foo`, so toggles stay filtered.
 - **Delete buttons live in an `<div class="action-bar">` below the table**, not in a "Actions" column. This keeps `table.render` focused on the data grid; per-row actions are handled at the page level. (A future "actions column" pattern is possible via `schema.render` returning a button.)
 
 ## Module declarations
 
-The app's manifest declares 17 modules — every widget in the tier
+The app's manifest declares 17 modules - every widget in the tier
 plus its transitive dependencies (Hull's resolver pulls in transitive
 deps automatically when a wider module like `hull/web/htmx/table@1`
 declares them, but the example lists them explicitly for clarity).
@@ -74,7 +74,7 @@ declares them, but the example lists them explicitly for clarity).
   sibling modules (same surface, camelCase names); a parallel
   `app.js` would be a straight transliteration. Add it when there's
   demand.
-- **Not authenticated.** No session/cookie/CSRF — the example focuses
+- **Not authenticated.** No session/cookie/CSRF - the example focuses
   on the widget UX. For an auth-wired hypermedia app see
   `examples/hypermedia_photos/`.
 - **Not internationalized.** Strings are English-only. The widgets

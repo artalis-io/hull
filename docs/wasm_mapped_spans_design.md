@@ -1,4 +1,4 @@
-# Zero-copy host-backed mapped spans for WASM compute — design (DESIGN ONLY)
+# Zero-copy host-backed mapped spans for WASM compute - design (DESIGN ONLY)
 
 **Status:** DESIGN ONLY, for formal review. **Implementation is UNAUTHORIZED until
 this review passes.** No code, SDK header, WAMR patch, or benchmark is written
@@ -52,20 +52,20 @@ per-access host call:
 **New in this feature (the delta):**
 
 1. A **per-invocation** span API (`compute.call(..., {spans={...}})`) that attaches
-   ONLY the passed buffers for ONE call and detaches on every exit path — distinct
+   ONLY the passed buffers for ONE call and detaches on every exit path - distinct
    from `compute.segment`'s module-scoped, shared, persistent lifetime.
 2. **Windowed** `fs.mmap({offset,length})` so a >4 GiB file is processed as
    repeated invocations over fixed windows; `HullSpan.foffset` carries the 64-bit
    logical position.
 3. A tiny SDK header `hull/wasm/span.h` with **overflow-safe, alignment-safe,
-   inline** typed accessors (convenience only — NOT the isolation boundary).
+   inline** typed accessors (convenience only - NOT the isolation boundary).
 4. A **narrow, documented WAMR patch** that makes a read-only mapped region trap a
-   WASM store instead of crashing the host (§3.1) — the security linchpin.
+   WASM store instead of crashing the host (§3.1) - the security linchpin.
 
 ## 1. Cut-1 scope decisions (per reviewer direction)
 
 - **Windowing is IN cut 1, but a window is FIXED for one invocation.** There is
-  NO in-WASM `hull_span_window()` — remapping requires host coordination and would
+  NO in-WASM `hull_span_window()` - remapping requires host coordination and would
   invalidate the attached address mid-execution. The window is chosen host-side by
   `fs.mmap({offset,length})` (page-aligned internally; caller stays
   alignment-agnostic), attached for the call, and immutable during it. A parser
@@ -91,27 +91,27 @@ per-access host call:
 2. **mmap ownership** stays in `HlMappedBuffer` (`cap/fs.c`). A span BORROWS it;
    the invocation pins it (`borrow`/`pending_free`) for the call (and, if async,
    until completion), so a span can never outlive its mapping.
-3. **HullSpan representation** — no raw host pointer, ABI-explicit (§3.3). WASM
+3. **HullSpan representation** - no raw host pointer, ABI-explicit (§3.3). WASM
    obtains `{base,len,foffset}` per named span via a host_call query (extending
    opcode `0x02`), then builds a local `HullSpan` whose `base` is a WASM address of
    the module's own address width.
-4. **WAMR change** — the fast READ path needs NO patch (shared-heap lowering
+4. **WAMR change** - the fast READ path needs NO patch (shared-heap lowering
    already gives bounds-checked native reads). The ONLY WAMR change is the RO-store
    trap (§3.1), kept isolated and documented.
-5. **wasm32 windowing** — §1 and §3.6.
-6. **Isolation invariant** — §3.4/§3.5/§3.7: a module can address only the spans
+5. **wasm32 windowing** - §1 and §3.6.
+6. **Isolation invariant** - §3.4/§3.5/§3.7: a module can address only the spans
    attached to ITS current invocation, enforced by WAMR's registered-range checks,
    not by the SDK header.
 
 ## 3. Security design (the eight required revisions)
 
-### 3.1 Read-only mapping alone does NOT trap safely — a narrow WAMR patch is required
+### 3.1 Read-only mapping alone does NOT trap safely - a narrow WAMR patch is required
 
 **Confirmed gap:** `SharedHeapInitArgs` is `{size, pre_allocated_addr}` (no
 permission field) and `aot_check_shared_heap_memory_overflow` is a pure RANGE
 check. A hostile WASM **store** into a `PROT_READ`-mapped shared-heap region passes
-the range check, becomes a native store into read-only memory, and — because Hull
-uses **software** bounds checks with **no signal handler** — raises a host SIGSEGV,
+the range check, becomes a native store into read-only memory, and - because Hull
+uses **software** bounds checks with **no signal handler** - raises a host SIGSEGV,
 i.e. a **host process crash, not a recoverable trap**. Kernel `PROT_READ` cannot be
 relied on for a controlled trap.
 
@@ -128,7 +128,7 @@ distinction in the shared-heap branch. Concretely:
   the **pre-allocated, `heap_handle==NULL`** heap (Hull's mmap path); the managed
   malloc/free/reset paths require writable and are never marked RO.
 
-**Complete write-path table — EVERY write path, given Hull's actually-shipped
+**Complete write-path table - EVERY write path, given Hull's actually-shipped
 flags (`SIMD=1`, `BULK_MEMORY=1`, `BULK_MEMORY_OPT=1`, `SHARED_MEMORY=0`, `GC=0`,
 `REF_TYPES=0`, `STRINGREF=0`, software bounds checks).** Enumerating all of them
 is the point; missing one is a hole.
@@ -139,7 +139,7 @@ is the point; missing one is a hole.
 | SIMD v128.store, store{8,16,32,64}_lane | yes | `CHECK_MEMORY_OVERFLOW(16 / w/8)` | `simd_store` → `aot_check_memory_overflow` | yes |
 | memory.copy (dst) | yes | `CHECK_BULK_MEMORY_OVERFLOW` src+dst → `memmove` | `check_bulk_memory_overflow` src+dst → memmove | yes (src AND dst translated per-endpoint) |
 | memory.fill (dst) | yes | `CHECK_BULK_MEMORY_OVERFLOW` dst → `memset` | `check_bulk_memory_overflow` dst → memset | yes |
-| **memory.init (dst)** | yes | `CHECK_BULK_MEMORY_OVERFLOW` → `bh_memcpy_s` | **`aot_memory_init` runtime helper → `wasm_runtime_validate_app_addr` + `_addr_app_to_native`** | yes — but via a **DIFFERENT** site (C helpers, not codegen) |
+| **memory.init (dst)** | yes | `CHECK_BULK_MEMORY_OVERFLOW` → `bh_memcpy_s` | **`aot_memory_init` runtime helper → `wasm_runtime_validate_app_addr` + `_addr_app_to_native`** | yes - but via a **DIFFERENT** site (C helpers, not codegen) |
 | atomics: atomic.store/rmw/cmpxchg | **NO** | `#if WASM_ENABLE_SHARED_MEMORY` (off) | same guard | n/a (dead) |
 | table/GC/ref/stringref writes | **NO** | compiled out | compiled out | n/a |
 | memory.grow | yes | grows LINEAR memory only | same | n/a (cannot resize a shared heap) |
@@ -147,7 +147,7 @@ is the point; missing one is a hole.
 Confirmed: **every shipping write funnels through the shared-heap translate; no
 bypass exists** in Hull's configuration. Atomics do not ship.
 
-**The THREE insertion sites (the check must precede native pointer formation —
+**The THREE insertion sites (the check must precede native pointer formation -
 reviewer: RO rejection before translation/dereference).**
 
 1. **Interpreter (fast + classic).** The single chokepoint is
@@ -167,7 +167,7 @@ reviewer: RO rejection before translation/dereference).**
    store call sites (i32/i64/f32/f64 store, `simd_store`, memory.copy **dst**,
    memory.fill **dst**), and branch to the exception block **before** the GEP that
    forms `maddr`. Loads pass a false flag and are unchanged.
-3. **AOT `memory.init` — the DISTINCT site that is easy to miss (blocking).** AOT
+3. **AOT `memory.init` - the DISTINCT site that is easy to miss (blocking).** AOT
    memory.init does NOT go through the codegen chokepoint; it calls the runtime
    helpers `wasm_runtime_validate_app_addr` then `wasm_runtime_addr_app_to_native`
    (`core/iwasm/common/wasm_memory.c`). Because memory.init is ALWAYS a store, add
@@ -193,11 +193,11 @@ pre-allocated RO mmap heaps carry the flag.
 
 **Gating rule.** The implementation PR must FIRST land the permission patch with
 **upstream-style WAMR unit tests** (not only Hull e2e): add `TEST_F`s to
-`vendor/wamr/tests/unit/shared-heap/shared_heap_test.cc` (globbed — no CMake
+`vendor/wamr/tests/unit/shared-heap/shared_heap_test.cc` (globbed - no CMake
 change) plus a write-into-RO-heap fixture in `wasm-apps/test.c`, asserting that a
 scalar store, a `v128.store`, a `memory.copy` dst, a `memory.fill`, AND an AOT
 `memory.init` into a read-only heap each FAULT (recoverable trap, host survives)
-while a LOAD from the same heap succeeds — under BOTH interpreter and AOT. Only
+while a LOAD from the same heap succeeds - under BOTH interpreter and AOT. Only
 after every shipped write path is proven to fail closed does the rest of the
 feature proceed. The patch stays in the enumerated sites, documented in
 `docs/wamr_patches.md` with exact upstream files/functions for upgrade-time
@@ -232,7 +232,7 @@ writable mapping and are compile-time absent for RO spans. The SAME header
 compiles natively (accessors over a plain `HlBufferView`) for differential tests
 and benchmarks.
 
-### 3.3 wasm32 / wasm64 ABI and struct layout — precise, no casual 64->32 casts
+### 3.3 wasm32 / wasm64 ABI and struct layout - precise, no casual 64->32 casts
 
 `HullSpan.base` is a WASM address of the MODULE's pointer width, never a truncated
 host `uint64_t`. Layout is target-explicit:
@@ -252,12 +252,12 @@ typedef struct HullSpan {
 ```
 
 `hull_span_ptr(s, off)` returns `(const uint8_t *)(uintptr_t)(s->base + off)` where
-`base` is already the correct width — no `uint64_t`->wasm32 truncation. The host
+`base` is already the correct width - no `uint64_t`->wasm32 truncation. The host
 validates on wasm32 that `base + len - 1` fits in 32 bits before attaching (else
-the window is rejected — see §3.6). `len`/`foffset` are 64-bit on both targets.
+the window is rejected - see §3.6). `len`/`foffset` are 64-bit on both targets.
 
 **Metadata delivery (reviewer resolution 3): a versioned query once per span,
-written into an ABI-specific struct in linear memory, then cached — NO metadata
+written into an ABI-specific struct in linear memory, then cached - NO metadata
 host calls in the scanning loop.** During invocation SETUP (not the hot loop), the
 SDK calls a **versioned** host-call query ONCE per named span; the host WRITES an
 `HlSpanMeta` record into a caller-provided buffer in ordinary WASM linear memory
@@ -280,7 +280,7 @@ typedef struct HlSpanMetaV1 {
 
 The SDK reads the record once, checks `version`/`struct_size`, and caches
 `{base,len,foffset,flags}` in a local `HullSpan`. Every subsequent `load_*` is a
-pure inline check + native read against the cached `base` — **no host call per
+pure inline check + native read against the cached `base` - **no host call per
 byte/word/element**. The query is invocation-scoped (§3.7): it can only report the
 spans attached to THIS invocation and never a stale or another invocation's entry.
 
@@ -294,12 +294,12 @@ RO attached region is trapped by the §3.1 patch; a raw access into a region NOT
 attached to this invocation is not in range and traps. The design's security
 claims are stated against raw instruction behavior, never against the header.
 
-### 3.5 Attach/detach lifecycle — rollback, traps, reentrancy, async, concurrency, staleness
+### 3.5 Attach/detach lifecycle - rollback, traps, reentrancy, async, concurrency, staleness
 
 - **Detach cannot race active execution, async completion, a trap, or teardown
   (reviewer verification).** The invariant: detach of an instance's spans runs
   ONLY on the thread that owns the instance for that call, and ONLY after the WASM
-  call has returned (normally, by trap, or by gas exhaustion) — never concurrently
+  call has returned (normally, by trap, or by gas exhaustion) - never concurrently
   with the instance executing. For sync calls the owning thread is the event loop;
   for async calls it is the worker thread that ran the job, and detach is part of
   the job's completion (the same code path for success and trap), which happens-
@@ -337,7 +337,7 @@ claims are stated against raw instruction behavior, never against the header.
 ### 3.6 Window size bounded independently of file size; page-alignment near UINT64_MAX
 
 - **Cap (reviewer resolution 2): the SAME conservative default on wasm32 AND
-  Memory64 — `HL_WASM_MAX_SPAN_BYTES_TOTAL = 1 GiB` of attached span bytes PER
+  Memory64 - `HL_WASM_MAX_SPAN_BYTES_TOTAL = 1 GiB` of attached span bytes PER
   INVOCATION, configurable DOWNWARD only.** Memory64 preserves 64-bit addressing
   and 64-bit `len`/`foffset`, but cut 1 does NOT authorize enormous mappings on
   either target; a larger cap requires separate RSS, address-space, latency, and
@@ -363,16 +363,16 @@ claims are stated against raw instruction behavior, never against the header.
   today). **Both** overlap surfaces **fail closed**: (a) overlapping WASM-visible
   ranges are rejected before attach (the chain computes non-overlapping ranges;
   the host asserts the computed ranges are strictly disjoint and aborts the
-  invocation if not), and (b) duplicate / overlapping NATIVE mappings — the same
+  invocation if not), and (b) duplicate / overlapping NATIVE mappings - the same
   `HlMappedBuffer` passed twice, or two windows over the same file whose byte ranges
-  overlap — are rejected at setup (dedupe by backing identity + range). The total
+  overlap - are rejected at setup (dedupe by backing identity + range). The total
   is bounded by the overflow-safe §3.6 accounting.
 - **Intended model:** every span attached to an invocation IS an input to that
   invocation, so a module reaching from span A's `base` into span B's range is NOT
-  a violation — both are its own inputs; it is only defense-in-depth that the SDK
+  a violation - both are its own inputs; it is only defense-in-depth that the SDK
   keeps them separate. What the module must NOT reach is any range NOT attached to
   this invocation (another call's spans, linear memory of another instance, Hull
-  memory) — those are out-of-range and trap. Tests assert BOTH: (a) deliberate
+  memory) - those are out-of-range and trap. Tests assert BOTH: (a) deliberate
   cross-span raw access among the invocation's own spans succeeds (allowed), and
   (b) any access outside all attached ranges traps.
 - **Metadata query is invocation-scoped and cannot leak (reviewer verification).**
@@ -383,7 +383,7 @@ claims are stated against raw instruction behavior, never against the header.
   another invocation's spans. Tests: query an unknown name (rejected); query after
   detach (rejected); two concurrent invocations each see only their own spans.
 
-### 3.8 Benchmark and the performance claim (MEASURED — claim corrected)
+### 3.8 Benchmark and the performance claim (MEASURED - claim corrected)
 
 The benchmark is built and CI-published; see
 [docs/mapped_span_benchmark_design.md](mapped_span_benchmark_design.md) for the
@@ -435,7 +435,7 @@ dedicated `docs/wamr_patches.md` with exact upstream files/functions so a WAMR
 upgrade re-applies cleanly. The patch is covered by **upstream-style WAMR unit
 tests** in `vendor/wamr/tests/unit/shared-heap/shared_heap_test.cc` (a read-only
 heap: store / `v128.store` / `memory.copy` dst / `memory.fill` / AOT `memory.init`
-each fault; a load succeeds) — not only Hull e2e — run under both interp and AOT
+each fault; a load succeeds) - not only Hull e2e - run under both interp and AOT
 in CI. Regression guard: the existing writable shared-heap unit tests (`_rmw*`,
 bulk-into-heap, memory64) must stay green, proving default-writable is preserved.
 
@@ -445,7 +445,7 @@ Lifecycle: map/unmap, zero-length, page-aligned + unaligned offsets, logical
 offsets > 4 GiB, wasm32 windowing, Memory64 window at the 1 GiB cap. Bounds:
 read at end, read one past end (trap), integer overflow in offset math, stale span
 (prior-call address), invalid handle, unmapped buffer, cross-region access outside
-attached ranges (trap), zero-length mapping. **Permission — EVERY enumerated write
+attached ranges (trap), zero-length mapping. **Permission - EVERY enumerated write
 path into an RO span faults (recoverable trap, host survives), under BOTH interp
 and AOT:** scalar `i32/i64/f32/f64.store` (+ store8/16/32), `v128.store` and
 `store*_lane`, `memory.copy` with RO destination, `memory.fill` on an RO span,
@@ -469,10 +469,10 @@ paths, plus the existing writable-heap `_rmw*`/bulk/memory64 cases staying green
 
 No WGPU/CUDA/Vulkan/Metal import, no persistent mmap-backed WASM heaps, no WASI
 mmap, no auto-mmap of every blob, no writable/shared mappings in cut 1 (structure
-allows adding later — the §3.1 permission path becomes the enable point), no
+allows adding later - the §3.1 permission path becomes the enable point), no
 generic shared-memory IPC. **The core feature is GENERIC mapped spans; the PBF
 parser is an OPTIONAL example compute plugin, not Hull core** (reviewer resolution
-4) — it exercises the SDK in `examples/` and is not part of the feature's C surface
+4) - it exercises the SDK in `examples/` and is not part of the feature's C surface
 or the gating benchmark.
 
 ## 7. Resolved decisions (reviewer directives folded in)
@@ -483,9 +483,9 @@ The four prior open questions are now DECIDED and reflected above:
    metadata, access kind threaded through the centralized interp + AOT validation,
    with the COMPLETE write-path enumeration (scalar, SIMD, `memory.copy`/`fill`/
    `init`; atomics confirmed not shipped under `SHARED_MEMORY=0`) and the THREE
-   insertion sites — including the distinct AOT `memory.init` route. Upstream-style
+   insertion sites - including the distinct AOT `memory.init` route. Upstream-style
    WAMR unit tests gate it.
-2. **Window cap (§3.6):** same conservative default on wasm32 and Memory64 — 1 GiB
+2. **Window cap (§3.6):** same conservative default on wasm32 and Memory64 - 1 GiB
    TOTAL attached span bytes per invocation, configurable downward, overflow-safe
    across all spans. Larger caps deferred pending RSS/address-space/latency/platform
    evidence.

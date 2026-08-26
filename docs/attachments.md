@@ -15,8 +15,8 @@ Two modules:
 | `hull/attachment@1` | flat top-level | core storage: store, metadata, read, read_to_file, delete |
 | `hull/web/attachment-serve@1` | `hull/web/*` | auth-gated HTTP response helper (`serve(req, res, id, opts)`) |
 
-The split is deliberate. The core is FS + DB only — no HTTP
-coupling — so CLI tools and batch jobs can use it. Only `serve`
+The split is deliberate. The core is FS + DB only - no HTTP
+coupling - so CLI tools and batch jobs can use it. Only `serve`
 depends on `hull/http-server`.
 
 ## Manifest declaration
@@ -54,7 +54,7 @@ app.manifest({
 ## Initialisation
 
 `blob.init` + `attachment.init` must run AFTER the sandbox wires the
-fs capability — wrap in `app.main`:
+fs capability - wrap in `app.main`:
 
 ```lua
 local attachment = require("hull.attachment")
@@ -135,11 +135,11 @@ through `attachment.metadata(id)` to read it.
 
 `attachment.store` enforces validation via two channels:
 
-1. **Sniffed MIME** — `mime.sniff()` reads the first non-empty
+1. **Sniffed MIME** - `mime.sniff()` reads the first non-empty
    chunk's magic bytes (PNG header `89 50 4E 47`, JPEG SOI `FF D8`,
    etc.). If a `mime_allowlist` is configured, the sniffed value
    must be in it.
-2. **Declared MIME** — the multipart Part's `Content-Type` header.
+2. **Declared MIME** - the multipart Part's `Content-Type` header.
    Recorded as `declared_mime` in the metadata row for audit, but
    **never trusted** for the allowlist gate (clients can spoof it).
 
@@ -149,7 +149,7 @@ Both are stored separately. Apps that need to flag mismatches (e.g.
 
 For very bursty connections where the multipart parser might deliver
 a tiny (<8 byte) first chunk, the sniffer falls back to
-`application/octet-stream` — which fails the allowlist if one is
+`application/octet-stream` - which fails the allowlist if one is
 configured. Callers that need bullet-proof sniffing on those inputs
 should buffer the first 512 bytes themselves before constructing a
 Part-like object for `store`.
@@ -184,7 +184,7 @@ app.get("/files/:id", function(req, res)
     attachment_serve.serve(req, res, req.params.id, {
         auth_check = function(req, meta)
             -- Return true to allow. Anything else (nil, false, missing
-            -- function) responds 403 — fail-closed.
+            -- function) responds 403 - fail-closed.
             return req.ctx.user_id == meta.uploaded_by
         end,
     })
@@ -209,7 +209,7 @@ What `serve` sets on the wire:
     and the UTF-8-percent-encoded form. Browsers save the file
     with the original upload name, including non-ASCII characters
     (Japanese, emoji, accented Latin all work).
-- `ETag: "<full-64-hex-blob-id>"` — strong ETag. Because the blob
+- `ETag: "<full-64-hex-blob-id>"` - strong ETag. Because the blob
   layer is content-addressed by SHA-256, the blob id IS a
   genuine cryptographic fingerprint of the bytes, so strong
   validation (vs `W/"..."` weak) is correct here.
@@ -224,7 +224,7 @@ Response codes:
 | **404** | no metadata row for that id |
 | **410** | metadata says the blob exists but `blob.get` can't find it (signal to caches to drop their copy) |
 
-The `auth_check` function receives `(req, metadata)` — `metadata` is
+The `auth_check` function receives `(req, metadata)` - `metadata` is
 the live row so you can gate on `uploaded_by`, mime, size, etc.
 
 ## Linux Landlock footgun
@@ -232,18 +232,18 @@ the live row so you can gate on `uploaded_by`, mime, size, etc.
 On Linux, `unveil(2)` (via the Landlock polyfill) rejects paths
 that don't exist on disk yet. This means a `fs.write = { "data/" }`
 declaration in your manifest will silently produce an empty write
-allowlist if `./data/` doesn't exist when the sandbox phase fires —
+allowlist if `./data/` doesn't exist when the sandbox phase fires -
 and then `blob.init`'s `mkdir` of `data/blobs/` fails inside the
 sandbox.
 
 macOS Seatbelt is permissive about this; the bug only surfaces on
 Linux. For now the fix is `mkdir -p data` in your deploy script
-before launching hull. The proper fix — having hull's sandbox layer
-mkdir declared `fs.write` paths before unveiling — is tracked as a
+before launching hull. The proper fix - having hull's sandbox layer
+mkdir declared `fs.write` paths before unveiling - is tracked as a
 separate enhancement.
 
 ## See also
 
-- [`docs/htmx.md` § Photo uploads](htmx.md) — client-side upload patterns
-- [`docs/blob.md`](blob.md) — the underlying content-addressed store
-- [`examples/hypermedia_photos`](../examples/hypermedia_photos) — working end-to-end demo
+- [`docs/htmx.md` § Photo uploads](htmx.md) - client-side upload patterns
+- [`docs/blob.md`](blob.md) - the underlying content-addressed store
+- [`examples/hypermedia_photos`](../examples/hypermedia_photos) - working end-to-end demo

@@ -10,7 +10,7 @@ cd hull
 make                    # build hull binary (both Lua + JS runtimes)
 make RUNTIME=lua        # Lua runtime only
 make RUNTIME=js         # JS runtime only
-make CC=cosmocc         # Cosmopolitan C — cross-platform APE binary
+make CC=cosmocc         # Cosmopolitan C - cross-platform APE binary
 ```
 
 The binary is at `build/hull`.
@@ -48,7 +48,7 @@ curl -X POST -d 'payload' http://localhost:3000/echo
 
 ### rest_api
 
-CRUD API for managing tasks — create, read, update, delete with JSON bodies.
+CRUD API for managing tasks - create, read, update, delete with JSON bodies.
 
 ```bash
 ./build/hull -p 3000 examples/rest_api/app.lua
@@ -75,7 +75,7 @@ curl -X DELETE http://localhost:3000/tasks/1
 
 ### bench_db
 
-SQLite performance benchmark endpoints — read-heavy, write-heavy, batch writes, mixed workloads. Seeds 1000 rows on startup.
+SQLite performance benchmark endpoints - read-heavy, write-heavy, batch writes, mixed workloads. Seeds 1000 rows on startup.
 
 ```bash
 ./build/hull -p 3000 examples/bench_db/app.lua
@@ -96,7 +96,7 @@ wrk -t4 -c100 -d10s -s wrk_post.lua http://localhost:3000/write
 
 ### async_http
 
-Async I/O primitives — async HTTP fetch, async database queries, async sleep, and worker dispatch. Demonstrates how `http.async.get()`, `db.async.query()`, `hull.sleep()`, and `worker.dispatch()` yield the coroutine so the event loop serves other connections while waiting.
+Async I/O primitives - async HTTP fetch, async database queries, async sleep, and worker dispatch. Demonstrates how `http.async.get()`, `db.async.query()`, `hull.sleep()`, and `worker.dispatch()` yield the coroutine so the event loop serves other connections while waiting.
 
 ```bash
 ./build/hull -p 3000 --no-sandbox examples/async_http/app.lua
@@ -116,7 +116,7 @@ curl http://localhost:3000/worker-dispatch
 
 ### bench_template
 
-Template rendering performance benchmark — measures variable substitution, loops with conditionals, and full-featured templates (inheritance + includes + filters). Seeds 50 items at startup to isolate template overhead.
+Template rendering performance benchmark - measures variable substitution, loops with conditionals, and full-featured templates (inheritance + includes + filters). Seeds 50 items at startup to isolate template overhead.
 
 ```bash
 ./build/hull -p 3000 examples/bench_template/app.lua
@@ -136,7 +136,7 @@ wrk -t4 -c100 -d10s http://localhost:3000/full
 
 ### auth
 
-Session-based authentication — register, login, logout, protected routes. Uses `crypto.hash_password` (PBKDF2-SHA256) for password hashing and SQLite-backed sessions.
+Session-based authentication - register, login, logout, protected routes. Uses `crypto.hash_password` (PBKDF2-SHA256) for password hashing and SQLite-backed sessions.
 
 ```bash
 ./build/hull -p 3000 examples/auth/app.lua
@@ -163,7 +163,7 @@ curl -X POST http://localhost:3000/logout -b cookies.txt
 
 ### jwt_api
 
-JWT-based authentication — register, login (returns Bearer token), protected routes, token refresh. Stateless alternative to session-based auth.
+JWT-based authentication - register, login (returns Bearer token), protected routes, token refresh. Stateless alternative to session-based auth.
 
 ```bash
 ./build/hull -p 3000 examples/jwt_api/app.lua
@@ -190,7 +190,7 @@ curl -X POST http://localhost:3000/refresh \
 
 ### crud_with_auth
 
-Tasks CRUD API with session-based auth — each user only sees their own tasks. Demonstrates per-user data isolation with foreign key scoping.
+Tasks CRUD API with session-based auth - each user only sees their own tasks. Demonstrates per-user data isolation with foreign key scoping.
 
 ```bash
 ./build/hull -p 3000 examples/crud_with_auth/app.lua
@@ -241,7 +241,7 @@ curl http://localhost:3000/sent/1
 
 ### health_etag
 
-Health check and ETag middleware — demonstrates `hull.web.middleware.health` for liveness/readiness endpoints and `hull.web.middleware.etag` for conditional responses with `304 Not Modified`. Custom health checks, automatic ETag generation for JSON/text/HTML responses.
+Health check and ETag middleware - demonstrates `hull.web.middleware.health` for liveness/readiness endpoints and `hull.web.middleware.etag` for conditional responses with `304 Not Modified`. Custom health checks, automatic ETag generation for JSON/text/HTML responses.
 
 ```bash
 ./build/hull -p 3000 examples/health_etag/app.lua
@@ -266,7 +266,7 @@ curl http://localhost:3000/api/page
 
 ### middleware
 
-Middleware chaining — request ID generation, request logging, rate limiting (60 req/min on `/api/*`), and CORS headers. Shows how middleware composes.
+Middleware chaining - request ID generation, request logging, rate limiting (60 req/min on `/api/*`), and CORS headers. Shows how middleware composes.
 
 ```bash
 ./build/hull -p 3000 examples/middleware/app.lua
@@ -342,18 +342,18 @@ curl http://localhost:3000/ws/connections
 
 # Connect via WebSocket client (e.g. websocat, wscat)
 websocat ws://localhost:3000/ws/chat
-# Type messages — they broadcast to all connected clients
+# Type messages - they broadcast to all connected clients
 
 # SSE event stream (3 ticks, then closes)
 curl http://localhost:3000/sse/events
 ```
 
 **Key features demonstrated:**
-- `app.ws(path, { on_open, on_message, on_close })` — WebSocket endpoint
-- `ws.broadcast(path, data)` — broadcast to all connections on a path
-- `ws.connections(path)` — count active connections
-- `conn:id()`, `conn:send()` — per-connection methods
-- `app.sse(path, handler)` — SSE endpoint
+- `app.ws(path, { on_open, on_message, on_close })` - WebSocket endpoint
+- `ws.broadcast(path, data)` - broadcast to all connections on a path
+- `ws.connections(path)` - count active connections
+- `conn:id()`, `conn:send()` - per-connection methods
+- `app.sse(path, handler)` - SSE endpoint
 - `stream:event(name, data, id)`, `stream:comment()`, `stream:close()`
 
 ### timers
@@ -375,7 +375,7 @@ curl http://localhost:3000/counter
 
 ### templates
 
-Template engine showcase — demonstrates inheritance, includes, filters, loops, conditionals, HTML auto-escaping, and compiled/cached rendering. Renders pages with a base layout, navigation partial, and user data.
+Template engine showcase - demonstrates inheritance, includes, filters, loops, conditionals, HTML auto-escaping, and compiled/cached rendering. Renders pages with a base layout, navigation partial, and user data.
 
 ```bash
 ./build/hull dev examples/templates/app.lua
@@ -392,7 +392,7 @@ curl http://localhost:3000/users
 
 ### compute
 
-WASM compute plugins — offload CPU-intensive work to sandboxed WASM modules. Demonstrates sync `compute.call()` for fast operations and async `compute.async.call()` for expensive computations that yield to the event loop.
+WASM compute plugins - offload CPU-intensive work to sandboxed WASM modules. Demonstrates sync `compute.call()` for fast operations and async `compute.async.call()` for expensive computations that yield to the event loop.
 
 ```bash
 ./build/hull -p 3000 examples/compute/app.lua
@@ -444,14 +444,14 @@ curl -X POST http://localhost:3000/search \
 ```
 
 **Key GPU features demonstrated:**
-- `gpu.compile(name, wgsl)` — compile WGSL shader once at startup
-- `gpu.buffer(name, data)` — persistent GPU buffer for indexed vectors
-- `gpu.dispatch(name, opts)` — dispatch with uniforms, workgroups, readback
-- `app.manifest({ gpu = true })` — capability declaration
+- `gpu.compile(name, wgsl)` - compile WGSL shader once at startup
+- `gpu.buffer(name, data)` - persistent GPU buffer for indexed vectors
+- `gpu.dispatch(name, opts)` - dispatch with uniforms, workgroups, readback
+- `app.manifest({ gpu = true })` - capability declaration
 
 ### gpu_pipeline
 
-Multi-stage GPU compute pipeline — chains normalize → weight → reduce into a single GPU command buffer submission. Demonstrates `gpu.pipeline()` with shared named buffers, per-stage uniforms, fire-and-forget mode, and the performance advantage over multiple `gpu.dispatch()` calls (2.4x speedup for 3-stage pipeline).
+Multi-stage GPU compute pipeline - chains normalize → weight → reduce into a single GPU command buffer submission. Demonstrates `gpu.pipeline()` with shared named buffers, per-stage uniforms, fire-and-forget mode, and the performance advantage over multiple `gpu.dispatch()` calls (2.4x speedup for 3-stage pipeline).
 
 Requires GPU build: `make fetch-wgpu && make HL_ENABLE_GPU=1`
 
@@ -468,16 +468,16 @@ curl http://localhost:3000/compare
 ```
 
 **Key GPU features demonstrated:**
-- `gpu.load(name)` — load WGSL from `shaders/<name>.wgsl` (dev iteration)
-- `gpu.pipeline(stages, opts)` — multi-stage in single submission
-- `gpu.pipeline(stages, { output = false })` — fire-and-forget (in-place update)
+- `gpu.load(name)` - load WGSL from `shaders/<name>.wgsl` (dev iteration)
+- `gpu.pipeline(stages, opts)` - multi-stage in single submission
+- `gpu.pipeline(stages, { output = false })` - fire-and-forget (in-place update)
 - Named buffer sharing across pipeline stages
-- `gpu.buffer_copy(src, dst)` — GPU-side buffer copy without CPU roundtrip
-- `fs.mmap()` → `gpu.buffer()` — zero-copy disk→GPU data loading
+- `gpu.buffer_copy(src, dst)` - GPU-side buffer copy without CPU roundtrip
+- `fs.mmap()` → `gpu.buffer()` - zero-copy disk→GPU data loading
 
 ### gpu_texture
 
-GPU texture processing — load images as GPU textures, process with WGSL compute shaders, read back results. Demonstrates `gpu.texture()`, `gpu.texture_read()`, and dispatch with `textures` array.
+GPU texture processing - load images as GPU textures, process with WGSL compute shaders, read back results. Demonstrates `gpu.texture()`, `gpu.texture_read()`, and dispatch with `textures` array.
 
 Requires GPU build: `make fetch-wgpu && make HL_ENABLE_GPU=1`
 
@@ -489,15 +489,15 @@ curl http://localhost:3000/process
 ```
 
 **Key features demonstrated:**
-- `image.new(w, h, "rgba8", pixels)` — create image from raw pixels
-- `gpu.texture(name, img)` — persistent GPU texture from HlImage
-- `gpu.texture_read(name)` — read back texture as HlImage
-- `gpu.dispatch()` with `textures` array — sampled + storage textures
+- `image.new(w, h, "rgba8", pixels)` - create image from raw pixels
+- `gpu.texture(name, img)` - persistent GPU texture from HlImage
+- `gpu.texture_read(name)` - read back texture as HlImage
+- `gpu.dispatch()` with `textures` array - sampled + storage textures
 - WGSL `texture_2d<f32>` + `texture_storage_2d<rgba8unorm, write>`
 
 ### compute_gpu_chain
 
-WASM→GPU zero-copy data flow — WASM preprocesses data, outputs a WasmBuffer, which passes directly to GPU dispatch without copying through a Lua string. Demonstrates the unified buffer protocol for chaining compute backends.
+WASM→GPU zero-copy data flow - WASM preprocesses data, outputs a WasmBuffer, which passes directly to GPU dispatch without copying through a Lua string. Demonstrates the unified buffer protocol for chaining compute backends.
 
 Requires GPU + WASM build: `make fetch-wgpu && make HL_ENABLE_GPU=1`
 
@@ -518,12 +518,12 @@ curl http://localhost:3000/query
 **Key features demonstrated:**
 - `compute.call(name, input, { buffer = true })` → WasmBuffer output
 - WasmBuffer passed directly to `gpu.dispatch()` and `gpu.buffer()` (unified buffer protocol)
-- `gpu.dispatch({ output = false })` — fire-and-forget in-place update
+- `gpu.dispatch({ output = false })` - fire-and-forget in-place update
 - WASM + GPU in the same app with `app.manifest({ gpu = true, compute = true })`
 
 ### irc_chat
 
-IRC-like encrypted chat server with channels, E2E encryption, and WebSocket real-time messaging. Users register with password (PBKDF2) and receive a Curve25519 keypair. Channel messages are encrypted with XSalsa20-Poly1305 (secretbox) — the server stores and relays ciphertext only.
+IRC-like encrypted chat server with channels, E2E encryption, and WebSocket real-time messaging. Users register with password (PBKDF2) and receive a Curve25519 keypair. Channel messages are encrypted with XSalsa20-Poly1305 (secretbox) - the server stores and relays ciphertext only.
 
 ```bash
 ./build/hull -p 3000 examples/irc_chat/app.lua
@@ -547,10 +547,10 @@ curl http://localhost:3000/channels -b cookies.txt
 ```
 
 **Key features demonstrated:**
-- `app.ws("/ws", handlers)` — authenticated WebSocket with JSON protocol
-- `crypto.box_keypair()` — Curve25519 key generation per user
-- `crypto.secretbox(msg, nonce, key)` — message encryption (XSalsa20-Poly1305)
-- `crypto.box(data, nonce, pk, sk)` — key distribution (per-member encryption)
+- `app.ws("/ws", handlers)` - authenticated WebSocket with JSON protocol
+- `crypto.box_keypair()` - Curve25519 key generation per user
+- `crypto.secretbox(msg, nonce, key)` - message encryption (XSalsa20-Poly1305)
+- `crypto.box(data, nonce, pk, sk)` - key distribution (per-member encryption)
 - Session auth + middleware for HTTP and WebSocket
 - Channel management (create, join, leave, topic, kick, who)
 - Encrypted message history (DB stores ciphertext only)
@@ -558,7 +558,7 @@ curl http://localhost:3000/channels -b cookies.txt
 
 ### image_processing
 
-Image decode/encode — create images from raw pixels, encode to PNG/JPEG, decode from encoded bytes. Demonstrates the `image` module's codec vtable backed by stb_image.
+Image decode/encode - create images from raw pixels, encode to PNG/JPEG, decode from encoded bytes. Demonstrates the `image` module's codec vtable backed by stb_image.
 
 ```bash
 ./build/hull -p 3000 examples/image_processing/app.lua
@@ -569,14 +569,14 @@ curl http://localhost:3000/info
 ```
 
 **Key features demonstrated:**
-- `image.new(w, h, "rgba8", pixels)` — create from raw pixel data
-- `image.encode(img, "png")` — encode to PNG bytes
-- `image.decode(bytes, "png")` — decode from encoded bytes
-- `img:width()`, `img:height()`, `img:format()`, `img:size()` — properties
+- `image.new(w, h, "rgba8", pixels)` - create from raw pixel data
+- `image.encode(img, "png")` - encode to PNG bytes
+- `image.decode(bytes, "png")` - decode from encoded bytes
+- `img:width()`, `img:height()`, `img:format()`, `img:size()` - properties
 
 ### cors_manifest
 
-CORS via `app.manifest()` configuration — no middleware code needed. Keel registers CORS headers automatically. Also demonstrates `server.stats()` for live connection counts.
+CORS via `app.manifest()` configuration - no middleware code needed. Keel registers CORS headers automatically. Also demonstrates `server.stats()` for live connection counts.
 
 ```bash
 ./build/hull -p 3000 examples/cors_manifest/app.lua
@@ -600,7 +600,7 @@ curl -X POST http://localhost:3000/api/data \
 
 ### udf
 
-User-defined SQL functions — register Lua/JS callbacks as SQL functions callable from queries. Demonstrates scalar UDFs, aggregate UDFs with GROUP BY.
+User-defined SQL functions - register Lua/JS callbacks as SQL functions callable from queries. Demonstrates scalar UDFs, aggregate UDFs with GROUP BY.
 
 ```bash
 ./build/hull -p 3000 examples/udf/app.lua
@@ -613,18 +613,18 @@ curl http://localhost:3000/avg-prices
 ```
 
 **Key features demonstrated:**
-- `db.udf.register(name, function, opts)` — Lua/JS scalar UDF
-- `db.udf.register(name, {step, finalize}, opts)` — Lua/JS aggregate UDF
-- `{ deterministic = true }` — enables SQLite query optimization
+- `db.udf.register(name, function, opts)` - Lua/JS scalar UDF
+- `db.udf.register(name, {step, finalize}, opts)` - Lua/JS aggregate UDF
+- `{ deterministic = true }` - enables SQLite query optimization
 - Aggregate UDFs with GROUP BY (per-group state)
 
 ### jobs
 
 Durable, DB-backed background job queue (`hull/jobs@1`). Enqueue work from a
 request, process it out-of-band with retries, exponential backoff, and a
-dead-letter path. Shows both execution models — the in-process `app.every`
+dead-letter path. Shows both execution models - the in-process `app.every`
 poller (`app.lua`/`app.js`) and the dedicated `jobs.run_worker` process
-(`worker.lua`/`worker.js`) — plus the ops surface (`jobs.stats`/`dead`/`retry`/
+(`worker.lua`/`worker.js`) - plus the ops surface (`jobs.stats`/`dead`/`retry`/
 `cleanup`).
 
 ```bash
@@ -638,7 +638,7 @@ hull jobs worker examples/jobs/worker.lua -d ./jobs.db
 ```
 
 **Key features demonstrated:**
-- `jobs.enqueue` / `jobs.handler` / `jobs.default` — enqueue + dispatch
+- `jobs.enqueue` / `jobs.handler` / `jobs.default` - enqueue + dispatch
 - In-process poller (`app.every`) vs. dedicated worker (`jobs.run_worker`)
 - Retry-with-backoff, dead-letter, and the visibility-timeout reaper
 - Ops: `jobs.stats` / `jobs.dead` / `jobs.retry` / `jobs.cleanup`
@@ -687,7 +687,7 @@ Modules can query chunk metadata via `hull_stream_is_first()`, `hull_stream_is_l
 
 ### Unit tests (`hull test`)
 
-Each example has both `tests/test_app.lua` and `tests/test_app.js` that run in-process via Hull's built-in test framework — no TCP, no server startup, in-memory SQLite for isolation. Running `hull test` on an example directory discovers and runs tests for both runtimes:
+Each example has both `tests/test_app.lua` and `tests/test_app.js` that run in-process via Hull's built-in test framework - no TCP, no server startup, in-memory SQLite for isolation. Running `hull test` on an example directory discovers and runs tests for both runtimes:
 
 ```bash
 hull test examples/hello/
@@ -738,7 +738,7 @@ test("description", () => {
 
 `test.get/post/put/delete/patch` return `{ status, body, json }` where `json` is auto-decoded.
 
-**Note:** By default, middleware does not run during `hull test` dispatch — only the matched route handler executes. This means session loading, JWT extraction, rate limiting, and CORS are not active in unit tests. Pass `{ middleware = true }` to test with the full middleware chain:
+**Note:** By default, middleware does not run during `hull test` dispatch - only the matched route handler executes. This means session loading, JWT extraction, rate limiting, and CORS are not active in unit tests. Pass `{ middleware = true }` to test with the full middleware chain:
 
 ```lua
 local res = test.get("/api/items", { middleware = true })
@@ -769,5 +769,5 @@ Every example has both `app.lua` and `app.js`. The APIs are identical except for
 | Method calls | `res:json(data)` (colon syntax) | `res.json(data)` (dot syntax) |
 | Tables/Objects | `{ key = "value" }` | `{ key: "value" }` |
 | Stdlib imports | `require("hull.web.middleware.session")` | `import { session } from "hull:web:middleware:session"` |
-| Naming | `snake_case` — `hash_password` | `camelCase` — `hashPassword` |
-| Arrays | 1-indexed — `rows[1]` | 0-indexed — `rows[0]` |
+| Naming | `snake_case` - `hash_password` | `camelCase` - `hashPassword` |
+| Arrays | 1-indexed - `rows[1]` | 0-indexed - `rows[0]` |

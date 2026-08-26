@@ -32,7 +32,7 @@ work across versions. Pinning the corpus to the vendored VM keeps the oracle
 
 ### 1.2 Two distinct uses (only the first is in scope here)
 
-**(1) Parser-scoped conformance gate — THIS slice.** The suite is NOT executed.
+**(1) Parser-scoped conformance gate - THIS slice.** The suite is NOT executed.
 Each official `.lua` file's exact bytes are fed to two oracles:
 
 ```
@@ -41,7 +41,7 @@ official Lua .lua file bytes
         `-- hull.source.lua parser
 ```
 
-**(2) Optional upstream runtime suite — SEPARATE, future.** The suite is
+**(2) Optional upstream runtime suite - SEPARATE, future.** The suite is
 *designed to execute* and exercises the stdlib, the C API, the filesystem,
 `load`/`dofile`/`os`/`io`, dynamic C libraries, and debug hooks. It must NOT run
 through Hull's restricted application/tool sandbox (wrong contract; needs
@@ -80,7 +80,7 @@ lexer treats `#!` as a shebang comment). The official `main.lua` begins with a
 bare `# testing special comment on first line` (a single `#`, not `#!`). Hull's
 lexer intentionally only skips `#!` (so `#t` length-operator at chunk start
 lexes as an operator), so Hull lexes the bare `#` as the length operator and
-REJECTS `main.lua` — and `load(string)` rejects it identically. It is therefore
+REJECTS `main.lua` - and `load(string)` rejects it identically. It is therefore
 a clean **both-reject agree**, no expectation needed. (This slice does NOT
 change the shebang policy; it reuses the existing `#!`-only normalization.)
 
@@ -110,7 +110,7 @@ tests/fixtures/lua54-tests/
 - never runs in CI.
 
 The C source libs (`libs/*.c`, `ltests/*.c`) and the `libs/` dir are for the
-execution suite (use 2) and are NOT selected — only regular `.lua` files.
+execution suite (use 2) and are NOT selected - only regular `.lua` files.
 
 ## 4. C leg (in the existing Lua conformance harness)
 
@@ -128,7 +128,7 @@ curated negatives, semantic divergences, mutation fuzz). It:
   `check_ranges` round-trip;
 - reports enumerated / read / hashed / analyzed counts and oracle accept/reject;
 - uses **exact-path expectations** for any genuine top-level static-semantic
-  divergence (there are currently NONE — the pinned `SEMANTIC_*` categories are
+  divergence (there are currently NONE - the pinned `SEMANTIC_*` categories are
   not tripped at file top level by this corpus);
 - gates false-reject, indeterminate, unexpected false-accept, and range
   violations at zero, and fails on a stale expectation.
@@ -141,7 +141,7 @@ side runs the two oracles. CI stays completely offline (committed subset only).
 
 Measured locally over the pinned archive (33 `.lua` files, 444,773 bytes):
 
-- oracle: **accept 32, reject 1** (`main.lua`, bare-`#` first line — both reject);
+- oracle: **accept 32, reject 1** (`main.lua`, bare-`#` first line - both reject);
 - Hull buckets: **agree 33, false-reject 0, false-accept 0, unsupported 0,
   indeterminate 0**; semantic divergences: **none**;
 - one genuine Hull lexer bug surfaced and fixed before vendoring: the
@@ -149,7 +149,7 @@ Measured locally over the pinned archive (33 `.lua` files, 444,773 bytes):
   regression.
 
 So the entire official Lua 5.4.7 suite parses in FULL agreement with the
-vendored Lua 5.4.7 `load` oracle — zero expectations required.
+vendored Lua 5.4.7 `load` oracle - zero expectations required.
 
 ## 6. Non-scope
 

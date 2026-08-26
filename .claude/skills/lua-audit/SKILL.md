@@ -25,7 +25,7 @@ Hull Lua code runs inside a sandboxed Lua 5.4 interpreter:
 - **Available libs:** base, table, string, math, utf8, coroutine
 - **Custom `require()`:** resolves only from embedded stdlib registry
 - **Memory limit:** 64 MB (custom allocator)
-- **C capabilities:** `db`, `crypto`, `time`, `env`, `fs`, `http` — accessed through hull globals, NOT Lua standard libs
+- **C capabilities:** `db`, `crypto`, `time`, `env`, `fs`, `http` - accessed through hull globals, NOT Lua standard libs
 
 ## Audit Categories
 
@@ -41,7 +41,7 @@ Hull Lua code runs inside a sandboxed Lua 5.4 interpreter:
 | Debug library | Use of `debug.*` (not loaded, but check for attempts) | Critical |
 | rawget/rawset bypass | Circumventing metatables to access restricted data | Medium |
 
-**Hull-specific:** The template engine's `_template._compile()` uses `luaL_loadbuffer` via C bridge — this is the ONLY allowed code compilation path. Verify no Lua-level code compilation exists.
+**Hull-specific:** The template engine's `_template._compile()` uses `luaL_loadbuffer` via C bridge - this is the ONLY allowed code compilation path. Verify no Lua-level code compilation exists.
 
 ### 2. Input Validation & Injection
 
@@ -210,12 +210,12 @@ When `/lua-audit` is invoked:
    ```
 
 2. **Scan for Critical Issues**
-   - Search for `load(`, `loadstring(`, `dofile(`, `loadfile(` — sandbox escapes
+   - Search for `load(`, `loadstring(`, `dofile(`, `loadfile(` - sandbox escapes
    - Search for string concatenation in SQL: `"SELECT.*"..` or `"INSERT.*"..`
-   - Search for `{{{ ` in template strings — raw output of user data
+   - Search for `{{{ ` in template strings - raw output of user data
    - Search for `==` comparison of secrets, tokens, hashes
    - Search for hardcoded secret strings
-   - Search for `_G.` or `_G[` — global pollution
+   - Search for `_G.` or `_G[` - global pollution
    - Search for missing `local` on function-scoped variables
 
 3. **Review Each Module**

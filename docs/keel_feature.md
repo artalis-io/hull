@@ -1,7 +1,7 @@
-# Keel (the event loop) as a composable feature — Phase 4 of "flavors become presets"
+# Keel (the event loop) as a composable feature - Phase 4 of "flavors become presets"
 
-**Goal.** Make Keel — the HTTP server *and* the event-loop/async backend it
-provides — a **composed** part of the http feature rather than a base-resident
+**Goal.** Make Keel - the HTTP server *and* the event-loop/async backend it
+provides - a **composed** part of the http feature rather than a base-resident
 dependency, so a genuinely HTTP-free app links **zero** Keel. That is the last
 thing standing between the composable base and the endgame: once Keel composes,
 `pure-compute` is just "an app that composes neither HTTP nor TLS" (compose
@@ -26,10 +26,10 @@ shed Keel until Keel itself is composable.
    implementation.** `src/hull/async/poll.c` implements the full `HlAsyncBackend`
    vtable *including* the worker pool (`poll_pool_create` / `poll_pool_free` /
    `poll_pool_submit`, lines ~655-864). So `compute.async` / `db.async` /
-   `gpu.async` / `app.main`'s event loop already have a Keel-free provider — the
+   `gpu.async` / `app.main`'s event loop already have a Keel-free provider - the
    compute data-plane does **not** need Keel. #113 proved this: a
    `HL_ENABLE_HTTP_ANY=0` build selects `async_poll`, drops `async/keel.c`, and
-   does not link `libkeel.a` — it is a real CI flavor (`pure-compute`).
+   does not link `libkeel.a` - it is a real CI flavor (`pure-compute`).
 
 2. **The compute-path Keel coupling is tiny and already optional.** The base TUs
    that a compute app pulls reference almost no Keel: `shared/async.c` →
@@ -44,7 +44,7 @@ shed Keel until Keel itself is composable.
    (`kl_response_file` static serving), `test.c` / `test_runner.c` (the
    in-process HTTP test harness). `body.c` / `http.c` / `http_async.c` /
    `smtp.c` / `ws.c` already moved to the http feature in #114. So finishing the
-   **serve.c/Keel decouple that #114 deferred** is the real work — and it moves
+   **serve.c/Keel decouple that #114 deferred** is the real work - and it moves
    these into the same feature that already owns the HTTP caps.
 
 4. **The selector is one function.** `hl_async_backend()` (poll.c:891) is a
@@ -53,11 +53,11 @@ shed Keel until Keel itself is composable.
    the a2 pattern exactly (`hl_crypto_*_active_backend`), and is dormant /
    byte-identical on a full base.
 
-## Coupling map — base TUs that reference `kl_*`, and their disposition
+## Coupling map - base TUs that reference `kl_*`, and their disposition
 
 | Base TU | Keel use | Disposition |
 |---|---|---|
-| `async/poll.c` | none (the Keel-free backend) | **stays in base** — becomes the default |
+| `async/poll.c` | none (the Keel-free backend) | **stays in base** - becomes the default |
 | `async/keel.c` | the Keel event loop + pool | **→ http feature** (strong `hl_async_backend` override) |
 | `shared/async.c` | `kl_async_complete` | base; route through the backend vtable or a weak shim |
 | `serve_cli.c` | `kl_allocator_default` | base (app.main runner); use a Keel-free allocator default |
@@ -71,14 +71,14 @@ shed Keel until Keel itself is composable.
 
 ## Phase plan
 
-### Phase 4.1 — the async-backend weak seam (dormant)
+### Phase 4.1 - the async-backend weak seam (dormant)
 Turn `hl_async_backend()` into a weak hook: base weak default returns
 `&hl_async_backend_poll`; a strong override returning `&hl_async_backend_keel`
 lives in the http feature's TU. Byte-identical on a full base (the strong
 override always wins there, as today). Mirrors a1's `hl_tls_*` seam. No base
 drop yet. **This is the first PR.**
 
-### Phase 4.2 — move Keel into the http feature; base built Keel-free
+### Phase 4.2 - move Keel into the http feature; base built Keel-free
 - Build the base with `async/poll.c` only (no `async/keel.c`), and **do not
   merge `libkeel.a` into the base platform lib**. Move `async_keel.o` + `serve.c`
   + `static.c` + the HTTP test harness + `libkeel.a` into `libhull_feature-http.a`
@@ -95,7 +95,7 @@ drop yet. **This is the first PR.**
   work is making it **composable** (weak seam + feature archive) rather than a
   separate compile, so ONE base composes Keel back for http apps.
 
-### Phase 4.3 — `pure-compute` becomes a preset; drop the base matrix — **DONE**
+### Phase 4.3 - `pure-compute` becomes a preset; drop the base matrix - **DONE**
 - `--flavor=pure-compute` is now a **preset** in `BUILD_FLAVORS[]` with an EMPTY
   asset stem: it builds on the standard composable base and only validates that
   the app declares no HTTP/TLS caps (rejects any HTTP app at build time). A
@@ -106,7 +106,7 @@ drop yet. **This is the first PR.**
   `build-platform-cosmo-flavors` job, the per-flavor SBOMs), and the
   `hull flavor install pure-compute` fetch path (`flavor.c` treats an empty-asset
   flavor as a preset: "nothing to install / builds on the default base").
-- **Validated:** `e2e_build_flavor.sh` (rewritten) — unknown-flavor rejection,
+- **Validated:** `e2e_build_flavor.sh` (rewritten) - unknown-flavor rejection,
   HTTP-app rejection under the preset, build+run, `--flavor=auto`, and the payoff:
   a compute app on a `HL_KEEL_FEATURE=1 HL_TLS_FEATURE=1` base links **0 `kl_*` +
   0 `mbedtls_ssl_handshake`**. Release-pipeline dry-run (hyphenated pre-release
@@ -121,24 +121,24 @@ presets" is realized.
 
 ## Risks + open questions
 
-- **R1 — the serve.c decouple (#114's deferred piece).** `serve.c` wires
+- **R1 - the serve.c decouple (#114's deferred piece).** `serve.c` wires
   KlServer routing + middleware and is entangled with `app.main`'s lifecycle
   (the serve loop runs after `app.main` returns). The seam must let a compute
   app's `app.main` complete + exit with **no** KlServer reference, while an http
   app composes the serve loop back. This is the largest single piece; the a1
   serve TLS seam ([docs/tls_feature.md](tls_feature.md)) is the template (route
   the few entry points through a weak `hl_serve_*` hook).
-- **R2 — cosmo stays full in-base.** A fat APE can't force-load a native feature
+- **R2 - cosmo stays full in-base.** A fat APE can't force-load a native feature
   archive, so the cosmo base keeps Keel + HTTP + TLS compiled in (as it already
   keeps mbedTLS + sqlite). Native-only, like every other composed feature.
-- **R3 — worker-pool ownership.** `serve_cli.c` creates the pool via the backend
+- **R3 - worker-pool ownership.** `serve_cli.c` creates the pool via the backend
   vtable (`be->pool_create`) *before* the sandbox, and today `be` is
-  `async_keel`. On a Keel-free base it is `async_poll` (which has its own pool) —
+  `async_keel`. On a Keel-free base it is `async_poll` (which has its own pool) -
   verify the pre-sandbox rseq/thread ordering (docs `serve_cli.c` comment) holds
   with the poll pool.
-- **R4 — the `platform_domain` signing.** Keel moving into `libhull_feature-http.a`
+- **R4 - the `platform_domain` signing.** Keel moving into `libhull_feature-http.a`
   changes that archive's bytes; it is already attested in the platform_domain
-  (§5c FATAL), so no new signing surface — the existing `http` stem covers it.
+  (§5c FATAL), so no new signing surface - the existing `http` stem covers it.
 
 See [docs/tls_feature.md](tls_feature.md) for the a2 template this mirrors and
 [docs/composed_feature_signing.md](composed_feature_signing.md) for the trust

@@ -1,4 +1,4 @@
-# IRC Chat Example — Roadmap
+# IRC Chat Example - Roadmap
 
 ## Current (v1)
 
@@ -12,9 +12,9 @@
 - [x] MOTD on WebSocket connect
 - [x] Both Lua and JS implementations
 
-## Current (v2) — Federation
+## Current (v2) - Federation
 
-Relay-only federation: servers connect via `ws.connect()`, authenticate with Ed25519 challenge-response, and relay channel messages + presence between peers. No shared membership DB, no CRDTs — each server owns its users and channels.
+Relay-only federation: servers connect via `ws.connect()`, authenticate with Ed25519 challenge-response, and relay channel messages + presence between peers. No shared membership DB, no CRDTs - each server owns its users and channels.
 
 - [x] Server-to-server WebSocket protocol (`/federation` endpoint)
 - [x] Ed25519 mutual authentication (challenge-response handshake)

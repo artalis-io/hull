@@ -1,9 +1,9 @@
-# embed_rust — Rust host for the libhull no-runtime flavor
+# embed_rust - Rust host for the libhull no-runtime flavor
 
 Reference Rust consumer of the [`hl_embed_*` ABI](../../include/hull/embed.h).
 Links only `libhull.a` + Keel (no Lua/QuickJS runtime) and drives the
-runtime-free Hull core — two-phase sandbox, capability-mediated filesystem
-I/O (incl. traversal rejection), crypto, and identity — via a small
+runtime-free Hull core - two-phase sandbox, capability-mediated filesystem
+I/O (incl. traversal rejection), crypto, and identity - via a small
 `extern "C"` block. The analogue of [`../embed_c`](../embed_c/), from Rust.
 
 ## Run

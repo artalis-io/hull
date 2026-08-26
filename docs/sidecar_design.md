@@ -1,4 +1,4 @@
-# Native Sidecar Services — Design
+# Native Sidecar Services - Design
 
 > **Status: design (Phase 0 complete).** This document is the
 > committed design; implementation lives on the roadmap as §1.6 in
@@ -37,7 +37,7 @@
   service. Each sidecar manages its own internal model load/unload
   and inflight concurrency. Matches how `llama-server` and
   bitnet.c's reference implementation already work.
-- **First production target.** `bitnet-sidecar` — CPU-only,
+- **First production target.** `bitnet-sidecar` - CPU-only,
   statically linked, demonstrates end-to-end against a Hull app
   summarizing asset history on a Trimble HU dev VM. GPU,
   `llama-cpp-sidecar`, and an ergonomic `hull/llm@1` wrapper are
@@ -60,8 +60,8 @@ in-process native plugins explicitly forbidden:
 | 3 | **Native sidecars** | **Isolated native accelerators, out-of-process** | **This document** |
 | 4 | Native in-process plugins | **Forbidden by default** | No `dlopen`, no `dlsym`; trusted/unsafe only via off-roadmap escape hatch |
 
-Native sidecars give Tier-3 ergonomics — call a binary, get a
-result — without collapsing Tier 2 or punching a hole into Tier 0.
+Native sidecars give Tier-3 ergonomics - call a binary, get a
+result - without collapsing Tier 2 or punching a hole into Tier 0.
 Three concrete consequences:
 
 1. **No accelerator source code in Hull's repo.** Not vendored,
@@ -84,7 +84,7 @@ Hull's binary.
 
 ## C) Two-layer split
 
-### Layer A — Hull repo (generic host)
+### Layer A - Hull repo (generic host)
 
 | Component | File | Size | Purpose |
 |---|---|---|---|
@@ -102,7 +102,7 @@ What is **not** in Hull's repo: any LLM-specific code, any model-
 format knowledge, any tokenizer, any prompt-template logic, any
 GPU dispatch code.
 
-### Layer B — Independent repos
+### Layer B - Independent repos
 
 | Repo | What | Trust | Status |
 |---|---|---|---|
@@ -320,7 +320,7 @@ then terminates the sidecar per restart policy.
 5. EXEC
    execve(bitnet-worker, argv, envp).
    Phase-2 sandbox applied to Hull (the parent) AFTER the
-   fork+exec dance is done — Hull's own sandbox is unchanged.
+   fork+exec dance is done - Hull's own sandbox is unchanged.
 
 6. HANDSHAKE
    Hull sends {"jsonrpc":"2.0","method":"rpc.discover","id":1}
@@ -346,7 +346,7 @@ then terminates the sidecar per restart policy.
 
 ## H) Threat model
 
-Native sidecars sit at Tier 3 — lower trust than WASM. They run in
+Native sidecars sit at Tier 3 - lower trust than WASM. They run in
 their own address space, under the strongest OS sandbox available,
 with the smallest possible ambient authority. The execution tiering
 in [`security.md`](security.md) §3.A stays exactly as documented.
@@ -407,7 +407,7 @@ out of the business of curating which sidecars are "blessed."
    side.
 
 Both paths together is the recommended default for production
-sidecars — the vendor pubkey is the fast / offline-friendly check,
+sidecars - the vendor pubkey is the fast / offline-friendly check,
 Sigstore is the auditor's independent confirmation.
 
 ### What this means operationally
@@ -418,7 +418,7 @@ Sigstore is the auditor's independent confirmation.
 - **Auditor's job.** "Show me every sidecar this app trusts" is
   `hull agent services` plus the manifest. No hidden trust.
 - **Forking.** A fork that signs its own sidecars and pins its own
-  pubkeys works out of the box — Hull doesn't enforce any
+  pubkeys works out of the box - Hull doesn't enforce any
   specific signing identity.
 
 ## J) Sandbox backends
@@ -473,35 +473,35 @@ outside Hull.
 
 ## L) Phased plan
 
-- [x] **Phase 0** — design doc (this document) + threat-model
+- [x] **Phase 0** - design doc (this document) + threat-model
       section + ABI lock for the SDK + accepted design decisions
       on trust model, model lifecycle, RPC protocol, and
       concurrency.
-- [ ] **Phase 1** — Hull-core: static `services` pre-extraction +
+- [ ] **Phase 1** - Hull-core: static `services` pre-extraction +
       supervisor + stdio-fd JSON-RPC + `rpc.discover` + `health` +
       sandbox stubs. Local-dev escape hatch `dev_exec` for
       iteration. **1.5 weeks.**
-- [ ] **Phase 2** — Hull-core: binary stream fast-path; resource-
+- [ ] **Phase 2** - Hull-core: binary stream fast-path; resource-
       FD passing (`HULL_RESOURCE_*` env + open FDs); `hull/services
       @1` stdlib with `services.stream` iterator. **1 week.**
-- [ ] **Phase 3** — Hull-core: full lifecycle supervision
+- [ ] **Phase 3** - Hull-core: full lifecycle supervision
       (readiness, restart policy, log capture, graceful shutdown);
       `hull agent services`. **1 week.**
-- [ ] **Phase 4** — Hull-core: Linux seccomp + Landlock backend;
+- [ ] **Phase 4** - Hull-core: Linux seccomp + Landlock backend;
       macOS Seatbelt backend; OpenBSD/Cosmo pledge/unveil backend;
       Windows Job Object backend. **2 weeks.**
-- [ ] **Phase 5** — Hull-core: tool resolver extensions for
+- [ ] **Phase 5** - Hull-core: tool resolver extensions for
       `vendor_pubkey` + `attestation_repo`; `hull tools install`
       verifies both paths. **1 week.**
-- [ ] **Phase 6** — Sidecar side: `hull-sidecar-sdk` repo
+- [ ] **Phase 6** - Sidecar side: `hull-sidecar-sdk` repo
       (independent). Documented ABI. Apache/MIT. **1 week.**
-- [ ] **Phase 7** — Sidecar side: `bitnet-sidecar` repo
+- [ ] **Phase 7** - Sidecar side: `bitnet-sidecar` repo
       (independent). First end-to-end demo: a Hull app summarizing
       asset history via bitnet on a Trimble dev VM. **1.5 weeks.**
-- [ ] **Phase 8** — Hull-core hardening based on Phase 7 findings.
+- [ ] **Phase 8** - Hull-core hardening based on Phase 7 findings.
       Audit pass (parallel-reviewer cadence per `/auth-audit`).
       Document Sigstore attestation flow. **1 week.**
-- [ ] **Phase 9** (deferred) — GPU sandbox design;
+- [ ] **Phase 9** (deferred) - GPU sandbox design;
       `llama-cpp-sidecar`; optional `hull/llm@1` ergonomic
       wrapper. **Unscheduled.**
 
@@ -514,7 +514,7 @@ outside Hull.
   device-file access), and per-platform GPU-driver concerns get
   their own design pass after bitnet ships. `llama-cpp-sidecar`
   cannot ship before this.
-- **`hull/llm@1` high-level stdlib.** Pure orchestration — token
+- **`hull/llm@1` high-level stdlib.** Pure orchestration - token
   iterators, conversation state, prompt templates, chat history.
   Lives entirely above `hull/services@1`. Defer until two
   sidecars exist so the abstraction is informed by real usage,

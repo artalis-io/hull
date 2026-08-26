@@ -149,7 +149,7 @@ SET lock_configuration = true;           -- app SQL can no longer re-enable anyt
   fixed for the connection's life.
 - **Network is off structurally**: httpfs / S3 are never linked or loaded, so
   there is no outbound path even before config. (No `disabled_filesystems` SET
-  is needed — the filesystems simply do not exist in the binary.)
+  is needed - the filesystems simply do not exist in the binary.)
 - **File access reuses `fs.read` / `fs.write`** (no new capability concept):
   serve.c resolves each declared fs path to its absolute containing directory
   (glob tail stripped; the path itself if it is a directory, else its parent),
@@ -161,7 +161,7 @@ SET lock_configuration = true;           -- app SQL can no longer re-enable anyt
   capability surface. (Directory granularity, not per-file `allowed_paths`, in
   this pass: a declared file grants its containing directory.)
 
-**Implementation (status: done) — mode B is a named/dynamic-connection feature.**
+**Implementation (status: done) - mode B is a named/dynamic-connection feature.**
 The policy is computed once at boot from the sealed manifest
 (`hl_serve_install_duckdb_fs_policy` in serve.c, into the sealed policy arena)
 and read by `duck_open` via `hl_db_duckdb_set_fs_policy`. A connection opened
@@ -169,8 +169,8 @@ and read by `duck_open` via `hl_db_duckdb_set_fs_policy`. A connection opened
 mode A. In practice:
 
 - **Named (`db.connect`) and dynamic (`db.open`) connections** open lazily from
-  `app.main` / a handler — after the manifest is sealed and the policy is
-  installed — so they get **mode B**.
+  `app.main` / a handler - after the manifest is sealed and the policy is
+  installed - so they get **mode B**.
 - **The default `-d` connection** is opened during app-context init, *before*
   the app (and thus the manifest) loads, so app top-level code (e.g.
   `session.init()` creating tables) has a live DB. It therefore stays in
@@ -185,7 +185,7 @@ connection mode B would require either opening it before the manifest is known
 capability weakening we chose not to take); a mid-load manifest hook is a
 possible future refinement.
 
-**Sandbox interaction (Linux) — the real blocker was `rseq`, in the pledge
+**Sandbox interaction (Linux) - the real blocker was `rseq`, in the pledge
 layer, not the unveil layer.** A mode-B named connection opens lazily from
 `app.main`, i.e. **after** the sandbox is sealed, and DuckDB spawns its worker
 pool there. glibc >= 2.35 registers `rseq` (restartable sequences) per thread;
@@ -195,7 +195,7 @@ But Hull's vendored `pledge` polyfill historically ENOSYS-stubbed `rseq` (via
 `memfd_create`), and glibc treats a thread whose `rseq` registration returns
 `ENOSYS` *after* an earlier thread succeeded as **fatal**
 (`Fatal glibc error: rseq registration failed`). So the process aborted at
-worker-pool spawn, **before `read_csv` ran** — which for a long time was
+worker-pool spawn, **before `read_csv` ran** - which for a long time was
 misread as a file-I/O / unveil incompatibility (there was no pledge SIGSYS log,
 because `SECCOMP_RET_ERRNO` does not trap). The fix is a one-syscall
 `vendor/pledge` patch: stop ENOSYS-stubbing `rseq` and add it to the always-
@@ -222,25 +222,25 @@ be the actual blocker, a follow-up should test whether they can be dropped (the
 unveils are harmless read-only info paths; the pinned limits are otherwise a
 real ceiling for large OLAP, so a manifest option to tune them is tracked
 regardless). A large scan that spills to a temp dir still needs that dir in the
-sandbox's write set — separate from the read path proven here.
+sandbox's write set - separate from the read path proven here.
 
 **The fs bound is enforced by the kernel unveil.** DuckDB may only open files
 under the unveiled `fs.read` / `fs.write` directories, so an undeclared
 `read_csv('/x')` is blocked at the syscall. DuckDB's `SET allowed_directories`
 is set post-connect as intended defense-in-depth, but it is runtime-SET-only
 (not accepted by `duckdb_set_config` at config time) and does **not** enforce on
-Linux (it does on macOS — a DuckDB platform quirk), so the kernel unveil is the
+Linux (it does on macOS - a DuckDB platform quirk), so the kernel unveil is the
 authoritative bound.
 
-**Known limitation — apps must only read declared paths.** Because
+**Known limitation - apps must only read declared paths.** Because
 `allowed_directories` does not pre-empt the open on Linux, an undeclared read
 reaches the kernel, gets `EACCES`, and DuckDB **aborts the process** (NULL-deref
 on the denied open) instead of returning a catchable error. Security holds (no
-data leaks — the read is blocked), but a read of an undeclared path crashes the
+data leaks - the read is blocked), but a read of an undeclared path crashes the
 DuckDB process rather than erroring. App SQL must therefore reference only
 paths the manifest declares; a path derived from untrusted input is an app bug
 (and a crash, not a leak). Making an undeclared read a clean error would need
-`allowed_directories` to enforce on Linux (an upstream DuckDB fix) — tracked.
+`allowed_directories` to enforce on Linux (an upstream DuckDB fix) - tracked.
 
 ### 3.3 Packaging (side-loaded, on-demand)
 
@@ -267,7 +267,7 @@ signature + SHA-256 against the signed manifest -> install. No rebuild from
 source, no new key or verifier.
 
 **Resolved** (the "distinct `hull-duckdb` binary vs in-place swap" sub-decision
-below is superseded): neither. DuckDB is **not a separate binary** — it's a
+below is superseded): neither. DuckDB is **not a separate binary** - it's a
 per-feature static archive `libhull_feature-duckdb.a` that `hull feature install
 duckdb` fetches into `~/.hull/feature/`, and `hull build --with=duckdb` composes
 into the *app* binary at build time. The lean default `hull` is never disturbed;
@@ -284,7 +284,7 @@ omitting the separate `libduckdb_mbedtls.a` is not enough because the collision
 is inside the core archive. Hull links its own mbedTLS whenever `HL_LINK_TLS=1`
 (any HTTP half, or Postgres, or MySQL).
 
-**Resolution — symbol isolation in `fetch-duckdb`.** After unzip, the fetch
+**Resolution - symbol isolation in `fetch-duckdb`.** After unzip, the fetch
 target runs `objcopy --redefine-syms` (GNU `objcopy` on Linux, `llvm-objcopy`
 on macOS) over `libduckdb_static.a`, renaming every `mbedtls_*` / `psa_*`
 symbol (227 of them) to a DuckDB-private `hlduck_` prefix. Because
@@ -341,23 +341,23 @@ regardless of order. The Makefile wraps the archive set in a group on Linux
 
 ## 6. Open items
 
-- **DuckDB under Hull's Linux sandbox — resolved.** The Linux non-zero exit at
+- **DuckDB under Hull's Linux sandbox - resolved.** The Linux non-zero exit at
   teardown was not a DuckDB-teardown bug: the sandbox was handed the raw DSN as
   the DB path, so `duckdb://:memory:` was mangled (`strrchr('/')` lands inside
   `://`), the unveil failed with a warning, and the resulting bogus fs gating
   broke DuckDB's cleanup. `sandbox_db_path()` (src/hull/serve.c) now normalizes
-  a DSN before the sandbox gates it — a scheme-qualified in-memory or network
-  DSN gates nothing, a file DSN gates the real path — so the `:memory:` engine
+  a DSN before the sandbox gates it - a scheme-qualified in-memory or network
+  DSN gates nothing, a file DSN gates the real path - so the `:memory:` engine
   runs and exits 0 under the full pledge/unveil sandbox (confirmed on Linux CI).
   Remaining smaller item: a large DuckDB query that spills to a temp directory
   needs that directory inside the sandbox's write set (fine for `:memory:` +
   in-core work; revisit when wiring `fs.write` -> DuckDB `temp_directory`).
-- **Manifest-driven `fs.read`/`fs.write` -> `allowed_directories` (mode B) —
+- **Manifest-driven `fs.read`/`fs.write` -> `allowed_directories` (mode B) -
   descoped.** The intent was to let a named / dynamic DuckDB connection read the
   directories an app declares (via `read_csv` / `read_parquet` / `COPY`) while
   everything else stayed locked down. It does not work under Hull's Linux
   sandbox: DuckDB's C++ runtime aborts (internal NULL-deref) on any file read
-  under pledge/unveil even for a **declared, unveiled** path — not a bounded
+  under pledge/unveil even for a **declared, unveiled** path - not a bounded
   allowlist issue but a fundamental DuckDB-runtime vs restrictive-unveil
   incompatibility. Widening unveil to DuckDB's full probed set (`/dev/urandom`,
   `/etc/localtime`, `/sys/devices/system/cpu`, `/sys/fs/cgroup`,

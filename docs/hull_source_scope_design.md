@@ -1,8 +1,8 @@
-# `hull.source.scope` — lexical binding pass
+# `hull.source.scope` - lexical binding pass
 
 Status: IMPLEMENTED (`stdlib/cli/lua/hull/source/scope.lua`, `test_scope.lua`). Not yet
 wired into any rule (slice 3 consumes it). Slice 2 of `hull analyze` v2
-([hull_analyze_lint_design.md](hull_analyze_lint_design.md) §3) — the light lexical
+([hull_analyze_lint_design.md](hull_analyze_lint_design.md) §3) - the light lexical
 scope / name-resolution pass the scope-backed lint rules (slice 3: `unused-local`,
 `unused-param`, `shadowed-local`, `undefined-global`) need. It is the "semantic /
 binding pass" the roadmap deferred "only if a consumer needs it"; the linter is that
@@ -18,7 +18,7 @@ records **per-declaration usage** (was it ever read? written?) and **shadowing**
 it hide a binding of the same name?).
 
 **Two failure modes, distinguished.** A *recovered error node* or a locally-missing
-field degrades **locally** to "unresolved" (never a crash) — the model is still usable.
+field degrades **locally** to "unresolved" (never a crash) - the model is still usable.
 An *internal resolver failure* (a bug that raises) must NOT silently return a partial
 model that suppresses findings: the traversal is `pcall`-guarded and, on a raise,
 `resolve` returns `(nil, err)` where `err` is a diagnostic-shaped table. The analyzer
@@ -33,16 +33,16 @@ These are the subtleties that make a naive walk wrong:
    its block. So in `local x = x`, the RHS `x` binds to an *outer* `x` (or a global),
    NOT the one being declared. Process a `local_declaration`'s **values before** adding
    its names to the scope.
-2. **`local function f` is visible inside its own body** (for recursion) — add the
+2. **`local function f` is visible inside its own body** (for recursion) - add the
    binding **before** descending the function body. `local f = function() ... end` is
    NOT (the name is added after the value, per rule 1).
 3. **Parameters** scope to the function body; a method `function a:m()` has an implicit
    first parameter **`self`**.
 4. **Loop variables** scope to the loop body: numeric-for's `var`, generic-for's
-   `names`. (They are NOT visible in the loop's control expressions — those are
+   `names`. (They are NOT visible in the loop's control expressions - those are
    evaluated in the enclosing scope.)
 5. **`repeat <body> until <cond>`**: the `until` condition is evaluated **in the scope
-   of the body's locals** (a Lua special case — unlike every other loop). A local
+   of the body's locals** (a Lua special case - unlike every other loop). A local
    declared in the repeat body IS visible in the `until` expression.
 6. **Blocks introduce scopes**: the chunk, each function body, `do`, `while`/`repeat`
    bodies, each `if`-clause body, and each for body. A binding leaves scope at the end
@@ -54,7 +54,7 @@ These are the subtleties that make a naive walk wrong:
 ## 3. What is a reference vs a declaration
 
 The parser represents local/param/loop **declaration names as plain string records**
-(`{ name = "x", range }`), NOT `name` AST nodes — so they are never visited as
+(`{ name = "x", range }`), NOT `name` AST nodes - so they are never visited as
 references. A `name` **node** (`{ kind = "name", name, range }`) is always a use:
 - as an **assignment target** (`target.kind == "name"`) → a **write** to the resolved
   binding (or a global write);
@@ -93,7 +93,7 @@ in a known-globals allowlist) drives `undefined-global`.
 
 `shadows` is set when a new declaration hides an enclosing binding **of the same name**.
 The **default** flags shadowing of a binding **in the same function** (an enclosing
-block: an outer `local`, a param, an enclosing loop var) — the genuinely bug-prone
+block: an outer `local`, a param, an enclosing loop var) - the genuinely bug-prone
 case (`local x` in a nested block hiding the function's `local x`). It does **NOT** flag
 shadowing an **upvalue** from an *outer function* by default: a parameter or local
 named the same as something in an enclosing closure is extremely common and idiomatic
@@ -121,7 +121,7 @@ capturing a chunk-level local correctly classifies it as an **upvalue**
 - **`local function`** → add the `localfunc` decl to the current scope **first** (rule
   2), then descend the body (a new function scope).
 - **simple `function f()`** → the declaration name is an **assignment** to the resolved
-  `f` binding: a **local write** if `f` is a local in scope, else a **global write** —
+  `f` binding: a **local write** if `f` is a local in scope, else a **global write** -
   NOT inherently global. (The body is a new function scope.)
 - **dotted/method `function a.b:m()`** → the **base** `a` is a **read** (a `name` node);
   the field keys `b` / `m` are NOT `name` references (they are string keys on the
@@ -136,17 +136,17 @@ capturing a chunk-level local correctly classifies it as an **upvalue**
 - **`assignment`** → resolve values (reads), then each target: a bare `name` target is a
   **write** to its resolution; a `field`/`index` target reads its object/key.
 - **shadowing** → when adding a decl, look up the same name in the current scope **and**
-  the enclosing scopes of the **same function** — the current scope INCLUDED, so a
+  the enclosing scopes of the **same function** - the current scope INCLUDED, so a
   same-block redeclaration (`local x; local x`) and a repeated name within one
   declaration (`local x, x`) both count as shadowing (each added left-to-right, so the
   later one sees the earlier). If found, set `shadows` (§5).
 - **implicit `self`** → a method's `self` param is added as
   `{ name = "self", kind = "param", implicit = true, range = <anchor> }`, where the
-  anchor is the method declaration's name range (a stable, real span) — explicitly
+  anchor is the method declaration's name range (a stable, real span) - explicitly
   marked synthetic, NOT a zero-width fake "real source" decl.
 
 `goto`/labels are ignored for binding purposes (they do not introduce value bindings;
-Lua's goto-scope validation is out of scope for v2 — §7).
+Lua's goto-scope validation is out of scope for v2 - §7).
 
 ## 7. Non-goals
 
@@ -155,7 +155,7 @@ Lua's goto-scope validation is out of scope for v2 — §7).
   as an expected divergence).
 - **No type/flow analysis**; `reads`/`writes` are lexical counts, not reachability.
 - **No cross-file / project symbol graph** (per-file, like the rest of v2).
-- **Not** wired into any rule in slice 2 — this slice ships the pass + its own tests;
+- **Not** wired into any rule in slice 2 - this slice ships the pass + its own tests;
   slice 3 consumes it.
 
 ## 8. Testing
@@ -191,7 +191,7 @@ Lua's goto-scope validation is out of scope for v2 — §7).
 3. **Only reads count as use**; a write with no read is dead (`unused-local` still
    fires).
 4. **`self` / underscore exemptions live in the lint rules** (slice 3), not the reusable
-   pass — the pass records them as ordinary bindings (with `self` marked `implicit`) and
+   pass - the pass records them as ordinary bindings (with `self` marked `implicit`) and
    the rule filters.
 
 Contract tightenings folded in: `resolve -> (scope, err)` with a `pcall`-guarded

@@ -1,4 +1,4 @@
-# Todo Example — Development Guide
+# Todo Example - Development Guide
 
 ## Build Commands
 
@@ -13,11 +13,11 @@ make test                   # run app tests
 
 ## File Structure
 
-- `app.lua` / `app.js` — Dual backends with identical functionality
-- `templates/` — HTML templates (shared by both backends)
-- `static/` — Static assets
-- `tests/` — App tests run via `hull test .`
-- `certs/` — Auto-generated self-signed TLS certs (gitignored)
+- `app.lua` / `app.js` - Dual backends with identical functionality
+- `templates/` - HTML templates (shared by both backends)
+- `static/` - Static assets
+- `tests/` - App tests run via `hull test .`
+- `certs/` - Auto-generated self-signed TLS certs (gitignored)
 
 ## Architecture
 
@@ -28,7 +28,7 @@ make test                   # run app tests
 
 ## Cosmo Builds
 
-Cosmo builds require `~/cosmocc/bin` in PATH (`export PATH="$HOME/cosmocc/bin:$PATH"`) — the root Makefile calls `x86_64-unknown-cosmo-cc` and `aarch64-unknown-cosmo-cc` directly.
+Cosmo builds require `~/cosmocc/bin` in PATH (`export PATH="$HOME/cosmocc/bin:$PATH"`) - the root Makefile calls `x86_64-unknown-cosmo-cc` and `aarch64-unknown-cosmo-cc` directly.
 
 Clean build when switching toolchains (avoids stale objects):
 ```bash

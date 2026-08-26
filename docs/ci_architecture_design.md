@@ -879,7 +879,7 @@ At completion report:
 
 ---
 
-# Appendix A. Discovery findings — verified current inventory (2026-08-20)
+# Appendix A. Discovery findings - verified current inventory (2026-08-20)
 
 Status of this appendix: **DISCOVERY COMPLETE (Slice-1 inventory half). Awaiting
 ratification. No workflow changes made.** Produced per the section-1 cadence
@@ -900,7 +900,7 @@ pull_request: { branches: [main], paths-ignore: [ ...identical... ] }
   narrow `reproducibility-cosmo-compare` -> `reproducibility-cosmo` artifact diff).
   This is the single biggest gap vs the target architecture (section 16).
 
-## A.2 ci.yml job inventory — 41 jobs, grouped by coverage
+## A.2 ci.yml job inventory - 41 jobs, grouped by coverage
 
 | Group | Jobs (job-id) | Runner / matrix | Notes |
 |---|---|---|---|
@@ -908,7 +908,7 @@ pull_request: { branches: [main], paths-ignore: [ ...identical... ] }
 | **Build pipeline** | `build-pipeline` (Linux, macOS = 2) | | `make e2e-build` (platform/app/sign/self-build) |
 | **Flavors** | `flavors` (8 include entries: DB=0, HTTP=0, POSTGRES, postgres-only, MYSQL, mysql-only, IMAGE=0, …) | ubuntu-24.04 | link-flavor smokes |
 | **Sanitizers** | `sanitizers` (ASan+UBSan), `msan` (30m), `tsan`, `tsan-shared-heap` | ubuntu-24.04 | msan is a slow long-pole |
-| **WASM/AOT (redundant wamrc)** | `wasm-readonly-heap-aot`, `compute-aot-shared-heap`, `compute-memops-freestanding`, `stream-meta`, `spans-example`, `spans-multi`, `spans-hugefile`, `wasm-guarded-aot-arm64`, `mapped-span-bench` | ubuntu-24.04 (+ 1 arm) | **8-9 jobs each rebuild `wamrc` (LLVM) from scratch, no cache** — the largest redundant cost. |
+| **WASM/AOT (redundant wamrc)** | `wasm-readonly-heap-aot`, `compute-aot-shared-heap`, `compute-memops-freestanding`, `stream-meta`, `spans-example`, `spans-multi`, `spans-hugefile`, `wasm-guarded-aot-arm64`, `mapped-span-bench` | ubuntu-24.04 (+ 1 arm) | **8-9 jobs each rebuild `wamrc` (LLVM) from scratch, no cache** - the largest redundant cost. |
 | **Fuzz (combined)** | `fuzz` | ubuntu-24.04 | one job runs 13 native fuzzers + `fuzz-lua-source` + `fuzz-js-source`. Must be SPLIT (section 11). |
 | **DB (real engines)** | `postgres` (PG16), `mysql` (MySQL8), `valkey` (redis), `duckdb` | ubuntu-24.04 | Docker/apt engines |
 | **Composable features** | `duckdb-feature`, `gpu-feature`, `tui-feature`, `postgres-feature`, `mysql-feature` | ubuntu-24.04 | `e2e_feature_*.sh` |
@@ -924,7 +924,7 @@ pull_request: { branches: [main], paths-ignore: [ ...identical... ] }
 | **Bench (push-only)** | `benchmark` (lua, js=2) | ubuntu-24.04 | informational; not on PRs |
 
 **Key structural finding:** the JS/Lua frontend + conformance + fuzz-entry unit
-suites currently run INSIDE the monolithic `build` job's `make test` — there is
+suites currently run INSIDE the monolithic `build` job's `make test` - there is
 **no independently-addressable "frontend tests only" job today**. A focused
 tooling plan (section 9) therefore REQUIRES a new focused job (Slice 3) that does
 a fresh embedded-host Linux build + targeted test binaries + the
@@ -941,13 +941,13 @@ alone.
 | `bench_mapped_span_1g.yml` | workflow_dispatch only | no | no | Manual; leave. |
 | `windows-cosmocc.yml` | workflow_dispatch only | no | no | Manual investigation; leave. |
 | `deploy-site.yml` | push [main] `paths:` (site/**, install.sh, minisig, itself) | no | no | Deploy. Trust-bearing (minisign-verifies install.sh). Must NOT consume PR caches. |
-| `release.yml` | push tags `v*` | no | no | **Trust anchor** — signs the platform manifest, reproducible-container builds, `TRUST_PLATFORM_LIB`/`TRUST_FEATURE_LIBS` embed exact signed bytes. **Must NEVER consume selective/PR caches** (section 14). |
+| `release.yml` | push tags `v*` | no | no | **Trust anchor** - signs the platform manifest, reproducible-container builds, `TRUST_PLATFORM_LIB`/`TRUST_FEATURE_LIBS` embed exact signed bytes. **Must NEVER consume selective/PR caches** (section 14). |
 
 ## A.4 Cache audit (verified)
 
 - **The ONLY `actions/cache` in the entire repo** is `htmx-browser`'s
   `playwright-${{ runner.os }}-v1.48.0` (Chromium bundle, ~150 MB). Key is a
-  hardcoded version literal (not lockfile-hashed) — can drift from the pin in
+  hardcoded version literal (not lockfile-hashed) - can drift from the pin in
   `e2e_htmx_playwright.sh`; low risk (Playwright re-fetches on mismatch).
 - **No native-object / built-artifact caching anywhere.** Every toolchain/dep
   (cosmocc, wgpu, DuckDB, zig, LLVM/wamrc, WAMR submodule) is fetched fresh per
@@ -963,14 +963,14 @@ alone.
   - PR runs: ~24m21s, ~25m22s, ~28m42s (feat branches).
   - push-main runs: ~22m30s, ~22m38s, ~23m48s.
 - Representative **tooling PR (this session's #369/#370/#371) launched ALL ~41
-  ci.yml jobs + DCO** — including the entire native/AOT/sanitizer/repro/cosmo/
-  gpu/db/browser matrix — despite touching only `stdlib/cli/**`, `src/hull/
+  ci.yml jobs + DCO** - including the entire native/AOT/sanitizer/repro/cosmo/
+  gpu/db/browser matrix - despite touching only `stdlib/cli/**`, `src/hull/
   source` Lua/JS, test harnesses, and fixtures. This is the exact waste the
   redesign targets: e.g. #371 (a 2-line dead-code deletion in a test file) ran
   the full ~41-job matrix.
 - **ACCESS LIMIT (honest):** `GET /repos/artalis-io/hull/branches/main/
   protection/required_status_checks` returned empty/!authorized with the
-  available token — I could NOT authoritatively enumerate the current required
+  available token - I could NOT authoritatively enumerate the current required
   status-check names. This is required for the section-17 branch-protection
   migration and must be obtained by a repo admin before Slice 2. Inferred (from
   job display names + DCO) but UNVERIFIED required set: the `ci.yml` job display
@@ -1043,19 +1043,19 @@ classifier + fixtures ONLY; it does not yet skip any job.
 
 Overlap is additive (§5): core + tooling ⇒ full_core PLUS the focused tooling
 tests. `ci_changed` (any workflow/classifier/Makefile/`mk/**`) ⇒ full_all and
-self-trust caveat (§8) — governance stays with CODEOWNERS/branch protection.
+self-trust caveat (§8) - governance stays with CODEOWNERS/branch protection.
 
 ## B.3 Immediate prerequisites this discovery surfaced
 
-1. **Add a final `ci-success` gate job** (§16) — none exists today; required
+1. **Add a final `ci-success` gate job** (§16) - none exists today; required
    before any `if:`-gating so branch protection can point at ONE stable check.
-2. **Carve focused frontend/tooling test jobs** — the JS/Lua frontend suites are
+2. **Carve focused frontend/tooling test jobs** - the JS/Lua frontend suites are
    trapped inside `build`'s `make test`; Slice 3 must expose them as a focused
    embedded-host job (§4, §20).
 3. **Split `fuzz`** into `fuzz-native-security` / `fuzz-lua-source` /
    `fuzz-js-source` (§11).
 4. **Obtain the authoritative required-check list** (repo admin) before Slice 2
-   (§17) — currently access-limited.
+   (§17) - currently access-limited.
 5. **wamrc redundancy** (9 jobs rebuild it) is the top cache-optimization target
    for Slice 5 (immutable keyed toolchain cache), independent of classification.
 

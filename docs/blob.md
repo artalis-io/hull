@@ -1,12 +1,12 @@
-# `hull/blob@1` — Content-Addressed Storage
+# `hull/blob@1` - Content-Addressed Storage
 
-**Status:** Design locked — implementation pending (§1.5.b-3.5).
+**Status:** Design locked - implementation pending (§1.5.b-3.5).
 
 > **Operator note.** This document is the design reference for the
 > CAS primitive. If you're here to manage Hull's on-disk caches
 > (`lua-bytecode`, `js-bytecode`, `compute-aot`, `templates`,
-> `js-templates`, `tools`) — environment variables, sizing, isolation,
-> deployment recipes — that's [docs/cache.md](cache.md).
+> `js-templates`, `tools`) - environment variables, sizing, isolation,
+> deployment recipes - that's [docs/cache.md](cache.md).
 
 ## Overview
 
@@ -14,22 +14,22 @@
 bytes (or a stream), get back a SHA-256-keyed ID. Read back by ID.
 That's it.
 
-Other modules layer policy on top — naming, refcounting, auth, MIME
+Other modules layer policy on top - naming, refcounting, auth, MIME
 validation, eviction strategy. blob owns none of those concerns.
 
 ## Goals
 
 - Streaming put with **on-the-fly SHA-256**. Bytes flow through the
-  hasher in lockstep with the temp-file write — never buffered just to
+  hasher in lockstep with the temp-file write - never buffered just to
   compute the hash, never re-read just to hash.
-- Atomic writes via temp + `rename(2)` — readers never see partial bytes.
-- Sharded directory layout — scales to tens of millions of blobs.
-- Self-verifying — filename IS the SHA-256 of the contents; `fsck` is
+- Atomic writes via temp + `rename(2)` - readers never see partial bytes.
+- Sharded directory layout - scales to tens of millions of blobs.
+- Self-verifying - filename IS the SHA-256 of the contents; `fsck` is
   one line of shell.
-- Zero `HL_ENABLE_DB` dependency — works in compute-only builds, which
+- Zero `HL_ENABLE_DB` dependency - works in compute-only builds, which
   is exactly where the compute AOT cache and Lua bytecode cache matter
   most.
-- Idempotent — concurrent puts of identical bytes both succeed; second
+- Idempotent - concurrent puts of identical bytes both succeed; second
   rename is a no-op overwrite of identical bytes; no locking needed.
 
 ## Non-goals
@@ -45,7 +45,7 @@ validation, eviction strategy. blob owns none of those concerns.
 
 ## Non-goal: encryption at rest
 
-Blob does not encrypt stored bytes. The reason is sharper than YAGNI —
+Blob does not encrypt stored bytes. The reason is sharper than YAGNI -
 **encryption-at-rest fundamentally breaks content addressing**, which
 is blob's entire reason to exist.
 
@@ -53,7 +53,7 @@ is blob's entire reason to exist.
 |---|---|
 | **Random-nonce encryption loses dedup.** | `blob.put(bytes)` of identical plaintext from two callers would produce different ciphertexts → different SHA → no shared storage. Content addressing becomes pointless. |
 | **Convergent encryption** (deriving the nonce from the plaintext SHA so identical inputs encrypt identically) preserves dedup but introduces a confirmation-of-file attack: an attacker who can guess the plaintext can encrypt their guess and check whether that ID is stored. Used by Tahoe-LAFS and some backup systems, but the security caveats are non-trivial and the trade-off is only the right call when the application understands them. |
-| **Encryption is data-shaped, not storage-shaped.** | The decision "this file should be encrypted" belongs at the layer that knows what the file IS — `attachment.store()` knows it's a user upload; the compute AOT cache knows it's a public derived artifact. Blob just sees bytes and has no basis to make that call. |
+| **Encryption is data-shaped, not storage-shaped.** | The decision "this file should be encrypted" belongs at the layer that knows what the file IS - `attachment.store()` knows it's a user upload; the compute AOT cache knows it's a public derived artifact. Blob just sees bytes and has no basis to make that call. |
 | **Key management is out of scope for a storage primitive.** | A key-in-env-var is barely better than filesystem ACLs; an HSM / Vault integration belongs in its own module. Either way, not blob's problem. |
 | **Hull's deployment model is single-binary, single-machine.** | The threat that blob-layer encryption uniquely addresses (disk-read without process-read) is unusual: if disk is compromised, RAM usually is too. |
 
@@ -73,7 +73,7 @@ encryption, the pattern is:
 Properties this preserves:
 
 - **App-layer dedup still works.** Two users uploading the same file
-  share a `_hull_attachments` row keyed by `plaintext_sha` — and
+  share a `_hull_attachments` row keyed by `plaintext_sha` - and
   consequently share the same encrypted blob, because the encryption
   is keyed (deterministic on the same key + plaintext) at the
   application boundary.
@@ -108,7 +108,7 @@ requires it; the storage interface beneath doesn't change.
   blobs before any shard hits inode-density issues on common
   filesystems. `shard_depth = 2` opt-in for unusually large stores
   (65K dirs, ~6B blob ceiling).
-- **Filename is the full lowercase hex SHA-256.** Self-verifying —
+- **Filename is the full lowercase hex SHA-256.** Self-verifying -
   `sha256(file) == basename(file)` always.
 - **`tmp/` is a sibling, not under `blobs/`.** Keeps `blob.iter()`
   from seeing in-flight writes; same filesystem as `blobs/` so atomic
@@ -125,7 +125,7 @@ requires it; the storage interface beneath doesn't change.
 ```lua
 local blob = require("hull.blob")
 
--- Initialization — validates dir against manifest fs.write allowlist;
+-- Initialization - validates dir against manifest fs.write allowlist;
 -- sweeps tmp/* older than tmp_max_age; creates shard dirs lazily.
 blob.init({
     dir         = "data/blobs",      -- required
@@ -139,7 +139,7 @@ local id, size = blob.put(bytes, { durable = true })        -- fsync fd+dir
 local id       = blob.put_verified(bytes, expected_id)      -- raises on SHA mismatch
 local id       = blob.put_verified(bytes, expected_id, { durable = true })
 
--- Streaming put (large blobs) — SHA computed incrementally
+-- Streaming put (large blobs) - SHA computed incrementally
 local w = blob.writer()                          -- or { expected = "...", durable = true }
 w:write(chunk1)
 w:write(chunk2)
@@ -238,13 +238,13 @@ to constrain *app* code.
                                  │
                                  ▼
    include/hull/shared/blob_store.h  blob_store.c (low-level)
-     HlBlobStore*                · pure CAS — no policy
+     HlBlobStore*                · pure CAS - no policy
      hl_blob_store_*             · atomic tmp+rename
                                  · sharded shards
                                  · LRU/FIFO cleanup
                                  · NEW: hl_blob_store_put_keyed
                                    (caller-supplied filename,
-                                   bytes NOT content-hashed —
+                                   bytes NOT content-hashed -
                                    for key-value caches)
                                  ▲
                                  │
@@ -268,7 +268,7 @@ checks) without restructuring callers later.
 `sha256(content)`). `hl_blob_store_put_keyed` is caller-keyed
 (filename = caller-supplied 64-hex; bytes aren't hashed). Both
 share the same atomic-rename + sharded layout, but **each store is
-exclusively one or the other** — mixing them in the same root
+exclusively one or the other** - mixing them in the same root
 breaks the "filename IS the SHA" invariant CAS callers rely on.
 
 Apps' blob stores stay CAS. The runtime caches each get a
@@ -286,7 +286,7 @@ void hl_cap_blob_free(HlBlob *b);
 
 /* Write paths. `expected` may be NULL; if non-NULL, finalize fails
  * on SHA mismatch. SHA-256 is computed on the fly during the write
- * loop — bytes flow through the hasher in lockstep with the temp
+ * loop - bytes flow through the hasher in lockstep with the temp
  * file write. */
 int  hl_cap_blob_put(HlBlob *b, const uint8_t *buf, size_t len,
                        const char *expected, char *out_id);
@@ -359,7 +359,7 @@ Blob compiles cleanly under every flavor:
 | `HL_ENABLE_TUI=0` | **No effect.** |
 
 In particular, a `HL_ENABLE_DB=0` compute-only build still gets the
-full blob primitive — which is exactly where the compute AOT cache
+full blob primitive - which is exactly where the compute AOT cache
 and Lua bytecode cache live.
 
 ## Invariants
@@ -375,7 +375,7 @@ and Lua bytecode cache live.
    succeed; second `rename` is a no-op overwrite of identical bytes.
    No locking needed.
 4. **Cross-filesystem fallback.** If `rename` fails with `EXDEV` (rare
-   — only when `dir` straddles a mount), fall back to copy + unlink.
+   - only when `dir` straddles a mount), fall back to copy + unlink.
 5. **Init sweeps stale tmps.** Files in `tmp/` older than `tmp_max_age`
    (default 1h) are deleted on `blob.init()`. Prevents unbounded
    growth from crashed writers.
@@ -401,7 +401,7 @@ own.
 Hull runs the event loop on one thread, so concurrent blob calls from
 within a single Hull process can't happen unless the worker pool
 (`thread_pool`) is used. None of the current binding code dispatches
-blob to the pool — all calls execute on the main thread. If a future
+blob to the pool - all calls execute on the main thread. If a future
 `blob.async.put` lands, it must coordinate via the worker queue (one
 operation in flight per pool slot); blob itself is not reentrant.
 
@@ -413,13 +413,13 @@ the safety properties are:
 
 | Scenario | Behavior |
 |---|---|
-| Concurrent put of identical bytes | Both writers write to distinct tmps (the `.blob-<16-hex>.tmp` suffix is from `crypto.random` — collisions cryptographically impossible). Both finalize: one renames, the other sees `stat(dest) == 0` and drops its tmp. **Safe — content is identical by SHA.** |
+| Concurrent put of identical bytes | Both writers write to distinct tmps (the `.blob-<16-hex>.tmp` suffix is from `crypto.random` - collisions cryptographically impossible). Both finalize: one renames, the other sees `stat(dest) == 0` and drops its tmp. **Safe - content is identical by SHA.** |
 | Concurrent put + read of the same SHA | `rename(2)` is atomic on the same filesystem; the file at the blob path either exists with the full bytes or doesn't exist at all (never a partial-bytes state). Readers see all-or-nothing. |
-| Concurrent delete + read | POSIX semantics: a reader holding an open fd can keep reading even after `unlink` removes the directory entry; the inode lives until the last fd closes. `blob.get`'s open-then-read sequence may see ENOENT if delete races between stat and open — returns -1, caller retries. |
-| Concurrent cleanup + cleanup | Both processes collect snapshots independently and try to unlink the same files; first wins, second gets ENOENT (treated as "already gone", `removed_out` stays accurate). Safe but wasteful — for ops bins where this happens often, serialize via a per-host advisory lock above blob. |
+| Concurrent delete + read | POSIX semantics: a reader holding an open fd can keep reading even after `unlink` removes the directory entry; the inode lives until the last fd closes. `blob.get`'s open-then-read sequence may see ENOENT if delete races between stat and open - returns -1, caller retries. |
+| Concurrent cleanup + cleanup | Both processes collect snapshots independently and try to unlink the same files; first wins, second gets ENOENT (treated as "already gone", `removed_out` stays accurate). Safe but wasteful - for ops bins where this happens often, serialize via a per-host advisory lock above blob. |
 | Concurrent cleanup + put | Cleanup's snapshot is materialized at call time; a put landing after `collect_entries` won't be in the snapshot, so it's never evicted by this pass. The new file is preserved as a side-effect of cleanup's snapshot semantics. |
-| Concurrent cleanup + read | If cleanup unlinks while the reader has an open fd, POSIX keeps the inode alive; subsequent opens of the same id fail ENOENT (caller's problem — likely racing eviction with active use). |
-| `EXDEV` fallback (tmp + final on different filesystems) | Non-atomic: `fopen` dest → loop `fread`/`fwrite` → `fclose` → `unlink` tmp. A crash between fclose and unlink leaves both files; next `blob.init()`'s stale-tmp sweep cleans up. **Practically rare** — init creates `tmp/` and `blobs/` as siblings under `root`, so EXDEV only triggers if `root` straddles a mount, which is unusual. |
+| Concurrent cleanup + read | If cleanup unlinks while the reader has an open fd, POSIX keeps the inode alive; subsequent opens of the same id fail ENOENT (caller's problem - likely racing eviction with active use). |
+| `EXDEV` fallback (tmp + final on different filesystems) | Non-atomic: `fopen` dest → loop `fread`/`fwrite` → `fclose` → `unlink` tmp. A crash between fclose and unlink leaves both files; next `blob.init()`'s stale-tmp sweep cleans up. **Practically rare** - init creates `tmp/` and `blobs/` as siblings under `root`, so EXDEV only triggers if `root` straddles a mount, which is unusual. |
 
 ### Weak spots
 
@@ -436,7 +436,7 @@ the safety properties are:
 
 3. **No cross-process advisory lock for `cleanup`.** Two cleanup
    passes racing the same blob is correct (second unlink gets ENOENT,
-   counts still accurate) but wasteful — twice the directory walks,
+   counts still accurate) but wasteful - twice the directory walks,
    twice the I/O. Blob deliberately doesn't take a lock because:
    (a) the common case is single-process (a daily `app.daily(...)`
    cleanup from one Hull process); (b) cross-process lock semantics
@@ -454,7 +454,7 @@ the safety properties are:
 
 4. **`iter()` snapshot memory is O(N).** ~80 bytes per blob (64-byte
    SHA hex + 8-byte size + 16 bytes of alignment / atime / mtime). At
-   1 M blobs: ~80 MiB. Doesn't bound — a multi-million-blob store can
+   1 M blobs: ~80 MiB. Doesn't bound - a multi-million-blob store can
    exhaust the runtime's memory cap on a single `iter` call. Mitigate
    by capping store size via `cleanup` policy, or by switching ops
    scans to direct `opendir` walks of the shard tree.
@@ -511,7 +511,7 @@ hardware acceleration, `put_verified` short-circuit, durable opt-in,
   exists on disk, blob skips the tmp+hash+write entirely (two syscalls:
   validate_id + stat). 1.9 µs/op vs 196 µs/op. **Use this aggressively
   for verified-install workloads** (`hull tools install`, AOT cache
-  lookups, signed-manifest fetches) — the metadata layer derives the
+  lookups, signed-manifest fetches) - the metadata layer derives the
   expected SHA from the manifest, blob's check becomes a one-stat fast
   path on hit.
 
@@ -522,18 +522,18 @@ hardware acceleration, `put_verified` short-circuit, durable opt-in,
   tripled (140 → 370 MB/s), and 64 KiB put nearly doubled (98 → 181
   MB/s). Three platform paths, runtime-dispatched on first transform
   call (one branch on a cached `int`):
-    * **ARMv8-A FEAT_SHA2** — always-on for `__APPLE__` (Apple
+    * **ARMv8-A FEAT_SHA2** - always-on for `__APPLE__` (Apple
       Silicon guarantees it on every shipped chip), runtime-detected
       via `getauxval(AT_HWCAP) & HWCAP_SHA2` for Linux/Cosmo arm64.
     * **x86_64 SHA Extensions** (Goldmont Plus / Skylake-X /
-      Tiger Lake / Alder Lake / Zen+ and later) — runtime-detected
+      Tiger Lake / Alder Lake / Zen+ and later) - runtime-detected
       via `CPUID.7.0:EBX[29]`.
-    * **Portable C** — fallback for everything else (32-bit ARM,
+    * **Portable C** - fallback for everything else (32-bit ARM,
       RISC-V, older x86 without SHA-NI).
 
 - **Durable put costs ~12% throughput** on APFS (2.9K → 2.6K ops/s for
   64 KiB blobs, with `fsync(fd)` before close + `fsync(dirfd)` after
-  rename). The cost is dominated by fsync(dirfd) — APFS journals
+  rename). The cost is dominated by fsync(dirfd) - APFS journals
   directory entries quickly. Use the durable variant for content that
   can't be cheaply re-derived (user-uploaded files via attachment,
   release-artifact local cache); keep the default non-durable path
@@ -551,7 +551,7 @@ hardware acceleration, `put_verified` short-circuit, durable opt-in,
   (don't buffer multi-MB uploads), buffer mode for code simplicity.
 
 - **Iter scales sub-linearly per entry** at higher N (3.3 µs/entry at
-  100 K, 4 µs/entry at 10 K) — directory readdir amortizes well over
+  100 K, 4 µs/entry at 10 K) - directory readdir amortizes well over
   larger shards. Below ~1000 blobs the per-entry cost rises (~12–30
   µs) because the readdir overhead dominates the per-entry cost.
 
@@ -573,7 +573,7 @@ hardware acceleration, `put_verified` short-circuit, durable opt-in,
 - **Refcount lives at the consumer**: blob doesn't know that
   `hull/web/attachment@1` will track refcounts in
   `_hull_attachments`. Cleanup driven from blob (LRU eviction)
-  won't coordinate with consumer refcounts — never mix
+  won't coordinate with consumer refcounts - never mix
   `blob.cleanup` with refcounted consumers on the same root.
   Use separate blob roots if you need both policies.
 
@@ -587,7 +587,7 @@ The reasoning:
 | Path | Goes in manifest? | Why |
 |---|---|---|
 | `data/uploads/` (app's storage for user files) | **Yes** | App-chosen, app-visible, app-managed |
-| `data/blobs/` (app-managed blob root for `hull/web/attachment@1`) | **Yes** | Same — app declares the dir |
+| `data/blobs/` (app-managed blob root for `hull/web/attachment@1`) | **Yes** | Same - app declares the dir |
 | `~/.hull/blobs/runtime/lua-bytecode/` | **No** | Runtime infrastructure; app didn't ask for the cache |
 | `~/.hull/blobs/runtime/compute-aot/` | **No** | Build-tool artifact cache; runs from `hull build`, not at app runtime |
 | `~/.hull/blobs/runtime/templates/` | **No** | Runtime infrastructure |
@@ -596,13 +596,13 @@ The reasoning:
 The line is **what the app deliberately produces or consumes vs. what
 the runtime decides to cache to make the app faster**. The latter is
 infrastructure, like a JIT cache in a language runtime or a system
-shader cache in a graphics driver — not part of the app's capability
+shader cache in a graphics driver - not part of the app's capability
 surface.
 
 Precedent: Hull's sandbox already auto-allows infrastructure paths
 the app never declared (embedded CA bundle when found, SQLite WAL/SHM
 siblings, `~/.hull/tools/` resolution path). Runtime caches join that
-list — see `src/hull/sandbox.c::wire_caps`.
+list - see `src/hull/sandbox.c::wire_caps`.
 
 Worst-case attack surface: a compromised app filling
 `~/.hull/cache/` with junk → cache miss + re-derive on next use →
@@ -620,8 +620,8 @@ runtime caches live outside the manifest:
 - **`hull doctor`** reports cache locations and their sizes (similar
   to how it reports the CA bundle and tools status today).
 - **`hull inspect`** surfaces "this binary uses caches at:
-  `~/.hull/cache/...`" — informational, not a permission.
-- **Opt-out env vars** — checked on every cache call (not memoized
+  `~/.hull/cache/...`" - informational, not a permission.
+- **Opt-out env vars** - checked on every cache call (not memoized
   at process start), so flipping mid-process takes effect on the
   next access:
 
@@ -687,13 +687,13 @@ docker run -e HULL_CACHE_DIR=/cache -v cache_vol:/cache myapp
 
 Rules:
 
-- **Must be absolute.** Relative paths are rejected — keeps the
+- **Must be absolute.** Relative paths are rejected - keeps the
   resolved location obvious to the sandbox.
 - **The sandbox auto-allows it.** No manifest changes required.
 - **Opt-outs still apply.** `HULL_NO_CACHE=1` etc. work regardless
   of where the cache root resolves.
 - **Tools storage is NOT redirected.** `~/.hull/blobs/tools/`
-  stays at its stable system home — those are signed durable
+  stays at its stable system home - those are signed durable
   downloads, not per-app caches, and `hull tools install` runs
   from the shell at a different time than the apps themselves.
 - **`hull cache list` shows the override active** so users can
@@ -705,9 +705,9 @@ per-app isolation derived from app identity (`HULL_CACHE_PER_APP=1`
 covers the security-critical deployments; auto-isolation is a
 convenience for paranoid defaults.
 
-## Migration map — existing implementations
+## Migration map - existing implementations
 
-### 1. `hull tools install` (`src/hull/tools_install.c`) — **migrate**
+### 1. `hull tools install` (`src/hull/tools_install.c`) - **migrate**
 
 **Today:** Downloads `hull-<tool>-<platform>` from a GitHub release,
 verifies SHA-256 against the signed release manifest, writes to
@@ -734,7 +734,7 @@ scripts, then drop the symlinks.
 
 **Risk:** none beyond the symlink shim's deprecation window.
 
-### 2. Compute AOT cache (`stdlib/lua/hull/compute_build.lua`) — **migrate**
+### 2. Compute AOT cache (`stdlib/lua/hull/compute_build.lua`) - **migrate**
 
 **Today:** `hull build` invokes `wamrc` to compile
 `compute/<name>.wasm` → `compute/<name>.aot.<arch>`. Output lives next
@@ -753,7 +753,7 @@ the same WASM module share the artifact.
 - Identical sources across apps share AOT artifacts.
 - mtime-based staleness → content-based correctness.
 - Iterate on one compute module without re-AOT'ing others.
-- `--no-aot` still works — skips the lookup AND the compile.
+- `--no-aot` still works - skips the lookup AND the compile.
 
 **Compatibility:** `compute/<name>.aot.<arch>` in-app artifacts
 continue to be honored (loaded directly if present). The new cache is
@@ -763,7 +763,7 @@ additive.
 Mitigate with `hull cache prune` subcommand wrapping
 `blob.cleanup({ max_total_size = 1 * 1024^3 })`.
 
-### 3. `hull/web/attachment@1` (§1.5.b-4) — **new, built on blob**
+### 3. `hull/web/attachment@1` (§1.5.b-4) - **new, built on blob**
 
 attachment becomes thin: `_hull_attachments` metadata table (id,
 blob_id, original_name, mime, declared_mime, size, uploaded_by,
@@ -783,24 +783,24 @@ refcount = 0, sets `pending_gc = true`. `attachment.cleanup()` finds
 `pending_gc` rows older than 24h and calls `blob.delete(blob_id)`
 THEN removes the row.
 
-### 4. Lua bytecode cache — **new consumer (v0.1.10+)**
+### 4. Lua bytecode cache - **new consumer (v0.1.10+)**
 
 `string.dump(load(source))` produces bytecode bytes. Cache key =
 `sha256(source)`. Apply when loading large stdlib modules or user
-templates. No sidecar map needed — the cache lookup IS the blob ID
+templates. No sidecar map needed - the cache lookup IS the blob ID
 derived from the source SHA, so just `blob.get(sha256(source))`.
 
 Hot path: pass `{ track_access = false }` to avoid the `utimes`
 syscall on every hot stdlib lookup.
 
-### 5. LLM artifact cache — **new consumer (latent, v0.1.11+)**
+### 5. LLM artifact cache - **new consumer (latent, v0.1.11+)**
 
 Cache key = `sha256(prompt + context + model_id + temperature_str)`.
 TTL via `blob.cleanup({ max_age = 7 * 86400, strategy = "lru" })`
 called from `app.daily(...)`. No sidecar needed if the SHA derivation
 is canonical.
 
-### 6. Template AST cache (dev mode) — **migrate (v0.1.10+)**
+### 6. Template AST cache (dev mode) - **migrate (v0.1.10+)**
 
 **Today:** `stdlib/lua/hull/template.lua` compiles templates to Lua
 source via codegen, caches the compiled function in-process. Cache
@@ -809,10 +809,10 @@ cleared on `hull dev` reload.
 **After migration:** Persist the compiled Lua source (or
 `string.dump()` bytecode) keyed by `sha256(template_source)`.
 Reload-survival; cross-process reuse. The in-process function cache
-stays — blob is the persistence layer underneath it. No sidecar
+stays - blob is the persistence layer underneath it. No sidecar
 (cache key derives from blob ID).
 
-### 7. `hull update` artifact staging — **possible future (v0.1.12+)**
+### 7. `hull update` artifact staging - **possible future (v0.1.12+)**
 
 `hull update` downloads new binaries to `/tmp/hull.new` then atomic-
 renames over the running binary. Could route through blob for safer
@@ -858,9 +858,9 @@ blob is shipped + battle-tested by §1.5.b-4 in v0.1.9.
 
 ## See also
 
-- `docs/multipart.md` — the multipart iterator that produces the
+- `docs/multipart.md` - the multipart iterator that produces the
   `Part` objects attachment consumes
-- `examples/multipart_upload/` — Lua + JS demo of the iterator + the
+- `examples/multipart_upload/` - Lua + JS demo of the iterator + the
   incremental SHA-256 hasher
-- `src/hull/cap/mime.h` — the MIME sniffer attachment uses
-- `docs/roadmap_next.md §1.5.b` — full milestone scope
+- `src/hull/cap/mime.h` - the MIME sniffer attachment uses
+- `docs/roadmap_next.md §1.5.b` - full milestone scope

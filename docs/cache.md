@@ -30,7 +30,7 @@ boots in milliseconds.
 
 The cache is opportunistic and disposable: every entry is re-derivable
 from source code in the application itself. You can `rm -rf ~/.hull/`
-at any time — the next request rebuilds whatever's missing. That
+at any time - the next request rebuilds whatever's missing. That
 property is what makes the cache safe to share, share-isolate, prune,
 or wipe without ceremony.
 
@@ -57,7 +57,7 @@ $HOME/.hull/blobs/
 
 Each kind is one [`hl_blob_store`](blob.md) instance. Filenames are
 sharded one level deep by the first two hex chars of the key (a flat
-directory becomes pathological at ~50K entries — sharding keeps
+directory becomes pathological at ~50K entries - sharding keeps
 `readdir` linear and ext4/HFS+ happy).
 
 ### What each kind caches
@@ -76,7 +76,7 @@ and the same management commands. `tools` is a separate "system store":
 it's content-addressed in the strict sense (filename IS `sha256(contents)`)
 because the install pipeline only writes a file once the sha matches the
 signed manifest. The runtime caches use the same primitive in *keyed
-mode* — the filename is a sha derived from inputs (source + version)
+mode* - the filename is a sha derived from inputs (source + version)
 that doesn't equal `sha256(contents)`, because the contents are
 compiler output that isn't known until after the key is computed.
 
@@ -114,18 +114,18 @@ opt-out-able cache).
 
 Evict entries by total size or by age. With no kind, sweeps every
 runtime cache; `--kind=K` restricts to one. The `tools` store is
-**not** swept by `prune` even without `--kind` — it's durable signed
+**not** swept by `prune` even without `--kind` - it's durable signed
 content. Wipe it via `clear --kind=tools`.
 
-- `--max-size=N` — accepts `K` / `M` / `G` (binary, 1024-based; trailing
+- `--max-size=N` - accepts `K` / `M` / `G` (binary, 1024-based; trailing
   `B` optional). Evict oldest entries until the cache is ≤ N bytes.
-- `--max-age=N` — accepts `s` / `m` / `h` / `d` / `w` / `y` (bare numbers
+- `--max-age=N` - accepts `s` / `m` / `h` / `d` / `w` / `y` (bare numbers
   treated as seconds for back-compat). Evict entries whose mtime is
   older than N.
-- `--strategy=lru` (default) — evicts by least-recently-used (atime).
-- `--strategy=fifo` — evicts by file mtime (when the entry was written).
-- `--dry-run` — print what *would* be evicted without touching disk.
-- `--json` — machine-readable; one result object per kind plus totals.
+- `--strategy=lru` (default) - evicts by least-recently-used (atime).
+- `--strategy=fifo` - evicts by file mtime (when the entry was written).
+- `--dry-run` - print what *would* be evicted without touching disk.
+- `--json` - machine-readable; one result object per kind plus totals.
 
 Example:
 ```
@@ -145,7 +145,7 @@ remove installed tools without going through `hull tools uninstall`.
 ### `hull cache verify [--kind=K] [--repair] [--json]`
 
 Walk every entry and flag corruption. For CAS-mode kinds (`tools`),
-recomputes `sha256(contents)` and compares to the filename — that's
+recomputes `sha256(contents)` and compares to the filename - that's
 the strongest possible integrity check the layer can do without
 re-running the source compile. For keyed-mode kinds (runtime caches),
 the filename doesn't equal `sha256(contents)`, so verify falls back to
@@ -153,10 +153,10 @@ a structural check (file exists, regular file, non-empty, readable).
 
 ```
 $ hull cache verify
-  lua-bytecode (keyed — structural only mode)
+  lua-bytecode (keyed - structural only mode)
     213 checked, 213 ok, 0 corrupt
   ...
-  tools (content-addressed — sha256 check)
+  tools (content-addressed - sha256 check)
     1 checked, 1 ok, 0 corrupt
 
 Total: 218 checked, 218 ok, 0 corrupt
@@ -210,7 +210,7 @@ any non-empty value other than the case-insensitive strings `0`, `false`,
 `=anything` all mean "off"; `=0` / `=false` / `=no` / `=off` / unset
 mean "on (cache active)".
 
-When a cache is disabled at runtime, the application **still works** —
+When a cache is disabled at runtime, the application **still works** -
 it just pays the cold-start cost on every boot. There's no behavioural
 divergence between "cache hit", "cache miss + write", and "cache
 disabled"; the only observable difference is wall-clock time and disk
@@ -236,7 +236,7 @@ When set, every runtime cache lives under `$HULL_CACHE_DIR/<kind>/`
 instead of `$HOME/.hull/blobs/runtime/<kind>/`. The sandbox (Linux
 unveil, macOS Seatbelt) auto-allows the override path so caching keeps
 working under the kernel sandbox. The `tools/` store is **not**
-redirected — it's a signed download cache that benefits from being
+redirected - it's a signed download cache that benefits from being
 shared across all apps, and rotating it per-app would force every app
 to re-download `wamrc` (and pay the verify cost) on first use.
 
@@ -282,7 +282,7 @@ volumes:
     # persistentVolumeClaim: { claimName: hull-cache }  # survives reschedule
 ```
 
-`emptyDir` is right for stateless deployments — the cache is
+`emptyDir` is right for stateless deployments - the cache is
 rebuildable, and per-pod isolation keeps caches from leaking between
 tenant pods on the same node. Use a PVC when cold-start latency
 matters more than isolation.
@@ -293,7 +293,7 @@ Multiple Hull processes can hammer the same cache simultaneously
 without coordination. Writes go through the standard atomic pattern:
 write to `<key>.tmp.<pid>.<rand>` in the same directory, then
 `rename(2)` into place. POSIX guarantees the rename is atomic, so a
-reader either sees the complete file or doesn't see it at all — never
+reader either sees the complete file or doesn't see it at all - never
 a partial write.
 
 The cache is verified concurrency-safe in CI by `tests/e2e_cache_concurrent.sh`,
@@ -304,7 +304,7 @@ on warm replay.
 
 The trade-off: two workers can produce two different writes for the
 same key, with the later `rename` winning. That's harmless for the
-runtime caches — every key derives from inputs that determinise the
+runtime caches - every key derives from inputs that determinise the
 output, so "two different writes" can only mean both wrote the same
 bytes via different code paths.
 
@@ -318,11 +318,11 @@ bytes via different code paths.
 - HTTP server boot under load balancers that recycle backends
 
 **Doesn't matter:**
-- Long-running servers that boot once and stay up — only the first
+- Long-running servers that boot once and stay up - only the first
   request pays the parse cost
 - Tiny apps with one entry point and no templates (cache overhead is
   ~negligible either way)
-- Hot-reload development loops — the parse cost is sub-millisecond
+- Hot-reload development loops - the parse cost is sub-millisecond
   for an app with no `.lua` to load and `hull dev` reloads in tens of
   ms regardless
 
@@ -335,25 +335,25 @@ bytes via different code paths.
   Set `HULL_NO_CACHE=1`.
 
 There's a 256-byte source floor: sources smaller than 256 bytes
-**never** cache — the disk roundtrip is more expensive than the
+**never** cache - the disk roundtrip is more expensive than the
 parse. This is automatic; you don't need to opt in.
 
 ## What's NOT cached
 
 For completeness, here's what Hull does *not* cache on disk:
 
-- **Compiled regexes** — kept in-memory per VM, never persisted
-- **HTTP responses** — that's an application concern (use `hull/middleware/etag`,
+- **Compiled regexes** - kept in-memory per VM, never persisted
+- **HTTP responses** - that's an application concern (use `hull/middleware/etag`,
   ratelimit, Cache-Control headers)
-- **Database query results** — that's SQLite's job (page cache, etc.)
-- **`http.fetch` results** — set `Cache-Control` headers and use a
+- **Database query results** - that's SQLite's job (page cache, etc.)
+- **`http.fetch` results** - set `Cache-Control` headers and use a
   reverse-proxy if you want HTTP caching
-- **TLS handshakes** — mbedTLS owns this
-- **WebGPU compiled shaders** — `gpu.compile()` cache is process-local
+- **TLS handshakes** - mbedTLS owns this
+- **WebGPU compiled shaders** - `gpu.compile()` cache is process-local
   (in-memory map). Compiled shader output is not currently persisted
   across runs. The compile cost is sub-millisecond per shader, so the
   on-disk cache hasn't been worth the bytes.
-- **`compute.wasm` modules** — the `.wasm` file itself is embedded in
+- **`compute.wasm` modules** - the `.wasm` file itself is embedded in
   the binary by `hull build`. Only the *AOT compilation* of those
   modules is cached, not the bytes themselves.
 
@@ -369,7 +369,7 @@ concurrent writes don't cause double-counting in `list` / `prune`.
 
 **Cache registry.** All six kinds are listed in `src/hull/shared/cache_registry.c`
 as a static `HlCacheKind[]` array. Adding a new cache means one row in
-that table — `list`, `prune`, `clear`, `verify`, `doctor`, and
+that table - `list`, `prune`, `clear`, `verify`, `doctor`, and
 `inspect` all iterate the registry, so a new cache automatically
 appears in every CLI surface.
 
@@ -395,7 +395,7 @@ call, so subsequent cache lookups pay one branch instead of one
   (e.g. `$HOME/.hull/cache/lua/`, `$HOME/.hull/aot/`). After the
   X-2 refactor all runtime caches moved under
   `$HOME/.hull/blobs/runtime/<kind>/`. The old paths are not read
-  on upgrade — just leftover bytes; `rm -rf` the stale directories
+  on upgrade - just leftover bytes; `rm -rf` the stale directories
   and let the new layout repopulate.
 - **`HULL_NO_BYTECODE_CACHE`** was renamed to
   `HULL_NO_LUA_BYTECODE_CACHE` for symmetry with the JS opt-out.
@@ -405,13 +405,13 @@ call, so subsequent cache lookups pay one branch instead of one
 
 ## See also
 
-- [docs/blob.md](blob.md) — low-level CAS primitive shared by every
+- [docs/blob.md](blob.md) - low-level CAS primitive shared by every
   cache, plus the `hull/blob@1` application-facing module
-- [docs/wamr_architecture.md](wamr_architecture.md) — WASM AOT
+- [docs/wamr_architecture.md](wamr_architecture.md) - WASM AOT
   compilation and the AOT cache lifecycle
-- [docs/tools_install.md](tools_install.md) — the signed `tools`
+- [docs/tools_install.md](tools_install.md) - the signed `tools`
   store
-- [docs/security.md](security.md) — sandbox interaction with the
+- [docs/security.md](security.md) - sandbox interaction with the
   cache directory
-- [docs/roadmap_next.md](roadmap_next.md) — outstanding cache work
+- [docs/roadmap_next.md](roadmap_next.md) - outstanding cache work
   (LLM response cache, Layer C per-app auto-isolation)

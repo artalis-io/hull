@@ -22,7 +22,7 @@ For completed historical roadmaps see [`archive/roadmaps/`](archive/roadmaps/).
 - ✅ **v0.1.4 batch (§3.1 + §3.2 + §3.3)**. Cosmo APE `hull build` works on Linux (sandbox unveils widened for cosmocc; `hl_compiler_select` auto-detects cosmocc; Makefile WAMR invoker selection reordered). `hull eject` and `hull sign-platform` work on installed binaries via auto-extracted embedded platform library. Platform-sign chain polish: agent JSON output, doctor reporting, four follow-ups. See [`../CHANGELOG.md#014`](../CHANGELOG.md).
 - ✅ **v0.1.5 batch**. `hull sbom` and `hull agent sbom` (four formats: human / JSON / CycloneDX 1.5 / SPDX 2.3), per-build auto-refresh via Makefile-injected submodule SHAs, build-flag-gated entries, runtime SHA-256 over embedded CA bundle. macOS reproducibility CI gate (was Linux-only with "verified locally on macOS" caveat; now `make reproducible-check` matrix-tested on both). `docs/POSITIONING.md` operational messaging guide (153 lines). Canonical thesis ("Code became disposable. Trust is not.") + descriptor unified across every Hull-mentioning surface. Site self-hosted (no third-party CDNs). OG card PNG variant. `LICENSING.md` vendored-dependency table. Em-dash sweep across 1100+ instances in all prose files. See [`../CHANGELOG.md#015`](../CHANGELOG.md).
 - ✅ **v0.1.6 batch (§0.3.4 + §0.3.5 + §0.3.6 + §0.3.8 + §0.3.9 + §0.3.11 + §0.3.15)**. Trust chain end-to-end verifiable three independent ways: (a) the existing Ed25519 chain (gethull keys), (b) Sigstore + Rekor transparency log entry per release (`cosign verify-blob`), (c) SLSA build-provenance attestation per binary (`gh attestation verify`). `hull verify-self` one-command binary verification. Signed SBOM published as release artifacts (`hull.sbom.json` / `.cdx.json` / `.spdx.json`) covered by all three signature layers. `binary_sha256` field in `hull sbom` output. All GitHub Actions invocations SHA-pinned. Fork playbook (`docs/fork_playbook.md`, 259 lines) with substantive "why most organisations shouldn't fork" framing. Closes 7 of 15 trust-chain hardening items in [§0.3](#03-trust-chain-hardening-post-v015-gap-analysis). See [`../CHANGELOG.md#016`](../CHANGELOG.md).
-- ✅ **v0.1.10 batch (§1.4 + §1.5.b-X + §1.5.c)**. Three sections of the v0.1.10 milestone fully shipped: (a) generic web stdlib — `hull/web/flash@1` POST/redirect/GET one-shot notifications with both session-stash and `HX-Trigger` paths, and `hull/web/pagination@1` offset-based paginated lists; (b) hull/blob@1 migrations + runtime-infrastructure caches — `hl_blob_store_*` low-level CAS extraction, four runtime caches (Lua/JS bytecode, Lua/JS template), compute-AOT cache via wamrc memoization, tools install via signed blob_store, `hull cache list|prune|clear|verify` CLI surface, `HULL_CACHE_DIR` per-app isolation, `docs/cache.md` standalone reference; (c) HTMX Tier 1 patterns — search+debounce, inline-edit with `csrf.refresh`, loading-indicator scaffold, form re-population on validation error with `partials/_form_field.html`, idempotency-by-default for POST/PATCH including HTML response replay. §1.5.b-X subsystem audit-closed after four passes ([§1.5.b-X](#15b-x-hullblob1-migrations-target-v0110)).
+- ✅ **v0.1.10 batch (§1.4 + §1.5.b-X + §1.5.c)**. Three sections of the v0.1.10 milestone fully shipped: (a) generic web stdlib - `hull/web/flash@1` POST/redirect/GET one-shot notifications with both session-stash and `HX-Trigger` paths, and `hull/web/pagination@1` offset-based paginated lists; (b) hull/blob@1 migrations + runtime-infrastructure caches - `hl_blob_store_*` low-level CAS extraction, four runtime caches (Lua/JS bytecode, Lua/JS template), compute-AOT cache via wamrc memoization, tools install via signed blob_store, `hull cache list|prune|clear|verify` CLI surface, `HULL_CACHE_DIR` per-app isolation, `docs/cache.md` standalone reference; (c) HTMX Tier 1 patterns - search+debounce, inline-edit with `csrf.refresh`, loading-indicator scaffold, form re-population on validation error with `partials/_form_field.html`, idempotency-by-default for POST/PATCH including HTML response replay. §1.5.b-X subsystem audit-closed after four passes ([§1.5.b-X](#15b-x-hullblob1-migrations-target-v0110)).
 - ✅ **v0.2.0 batch (§1.3 + §1.5.a)**. Hypermedia profile + web stdlib namespace reorganization. `hull init --profile htmx` scaffolds a complete HTMX + Pico app (CSP nonce, CSRF, session, flash, pagination, search-with-debounce, inline edit, loading indicator, form re-population, idempotency). 20 strictly-web stdlib modules moved under `hull/web/*` with fix-it migration hints. See [`../CHANGELOG.md#020`](../CHANGELOG.md).
 - ✅ **v0.3.0 batch (§1.5.b + §1.5.f, items 1–5 + first-party audit-log)**. Production-grade auth stack: `hull/web/auth-flows@1` (registration / verify / login / password-reset / magic-link / email-change / optional TOTP), `hull/web/middleware/totp@1` (RFC 6238 with dual-row enrollment + multi-key rotation + per-user + per-IP lockout), `hull/web/middleware/oauth@1` (OIDC Authorization Code + PKCE; Google + Microsoft Entra presets), `hull/web/middleware/audit-log@1` (append-only with per-device fingerprint + `cleanup_status` tri-state), `hull/web/auth-health@1` (probe + `hull agent auth-status`), `hull/web/pwned@1` (HIBP k-anonymity + 80KB embedded blocklist), `hull/qrcode@1`. Plus streaming multipart upload (`req:multipart()` / `req.multipart()`), `hull/attachment@1` + `hull/blob@1` + `hull/mime@1`, asymmetric crypto (RS256/384/512, PS256, ES256/384), SHA-NI runtime dispatch. **13 iterative security-audit rounds** converged in round 13 (zero findings, three independent reviewers). 132 commits since v0.2.0. See [`../CHANGELOG.md#030`](../CHANGELOG.md).
 - ✅ **v0.4.0 batch (2026-06-17)**. HTMX widget tier complete (8 widgets: toast, confirm, form, search, inline-edit, sort, pagination, table) with browser-driven Playwright E2E coverage. Three production-affecting `hull build` + sandbox fixes (a standalone binary silently broke any app declaring `manifest.fs.write`; `static/vendor/*` assets weren't embedded). See [`../CHANGELOG.md#040`](../CHANGELOG.md).
@@ -149,18 +149,18 @@ macOS as of v0.1.5:
 3. `make self-build` proves hull is self-hostable across all
    platforms (hull builds hull2 builds hull3).
 
-Investigation arc — recorded for posterity because the wrong turns
+Investigation arc - recorded for posterity because the wrong turns
 were instructive:
 
 - Initial assumption: linker-embedded entropy (random LC_UUID on
   macOS, random Build-ID GUID on Linux) was the blocker.
   Wrong on both counts.
-- Tried `-Wl,-no_uuid` on macOS — broke binary (modern dyld
+- Tried `-Wl,-no_uuid` on macOS - broke binary (modern dyld
   REQUIRES LC_UUID, aborts with "missing LC_UUID load command").
-- Tried `-Wl,--build-id=none` in `hull build` link path — broke
+- Tried `-Wl,--build-id=none` in `hull build` link path - broke
   test_compiler's link tests (TCC backend delegates to system
   sys_link).
-- Tried `ZERO_AR_DATE=1` for macOS ar mtimes — made vendored
+- Tried `ZERO_AR_DATE=1` for macOS ar mtimes - made vendored
   archives deterministic, but the final-link delta persisted.
 - Real macOS finding: `ld64` hashes the **output path** into
   LC_UUID. Same input + same output path → same LC_UUID. The
@@ -169,7 +169,7 @@ were instructive:
 - Real Linux finding: `hull build` creates a random tempdir per
   invocation (`/tmp/hull_XXXXXX/`). On Linux, the .o file's
   embedded source-name (STT_FILE symbol) hashes into GNU ld's
-  Build-ID — different tempdir → different .o → different
+  Build-ID - different tempdir → different .o → different
   Build-ID → different binary. Fix: `-ffile-prefix-map=<srcdir>=.`
   in `sys_compile` to strip the tempdir from .o content. Also
   forces `--compiler=system` in the test because TCC doesn't have
@@ -343,12 +343,12 @@ not implementation cost.
   entry table + adds a release-workflow step.
 
 - [ ] **0.3.10. Key rotation and revocation procedure.** **Partial.**
-  Written rotation playbook landed in v0.1.4 — `docs/security.md`
+  Written rotation playbook landed in v0.1.4 - `docs/security.md`
   §"Key rotation" covers scheduled rotation + post-compromise
   procedure for both `HL_PLATFORM_PUBKEY_HEX` and `HL_RELEASE_PUBKEY_HEX`,
   including GitHub-secret update + CHANGELOG note flow. **Remainder:**
   in-binary successor mechanism (hull accepts a successor pubkey
-  announcement signed by the current pubkey) NOT shipped — current
+  announcement signed by the current pubkey) NOT shipped - current
   model is recovery-by-rebuild, not chain-of-trust progression.
   **Effort (remainder):** high for the in-binary successor mechanism.
 
@@ -541,7 +541,7 @@ commit). Apps that mix both must accept eventual consistency.
 
 ## 1.3 Web stdlib namespace reorganization (target v0.2.0)
 
-**Priority:** High. Foundational — `hull/web/*` is the namespace the
+**Priority:** High. Foundational - `hull/web/*` is the namespace the
 §1.4 future helpers (`flash`, `pagination`, `table`) are born under;
 this section moves the *existing* strictly-web modules to match. Done
 once, before the surface grows further.
@@ -570,7 +570,7 @@ precedent and lets `hull modules available` group output meaningfully.
   `BREAKING:` lead and a migration table in the release notes.
 - **`hull/jwt@1` stays flat.** Cross-cutting: API auth, CLI tokens,
   service-to-service. Not strictly web.
-- **`hull/http-server@1` stays flat.** Foundational — the layer
+- **`hull/http-server@1` stays flat.** Foundational - the layer
   `hull/web/*` is built on top of. Convention: `hull/web/*` are
   *consumers* of http-server, not http-server itself.
 - **`hull/template@1` stays flat.** The engine itself is content-type
@@ -614,7 +614,7 @@ precedent and lets `hull modules available` group output meaningfully.
 are already designed for `hull/web/*`. To avoid a two-step migration
 for users (adopt `hull/web/flash@1` in v0.1.10, then re-migrate
 existing modules in v0.2.0), §1.4 and §1.5.c are likely best
-bundled into v0.2.0 itself — one coherent "web stdlib reorganization
+bundled into v0.2.0 itself - one coherent "web stdlib reorganization
 + companion expansion" release. v0.1.9 (multipart) ships under the
 current names; v0.2.0 ships the rename and the new helpers together.
 
@@ -679,7 +679,7 @@ HTMX scaffold (§1.5) wires them in opportunistically.
   declaration, unit tests. Cross-referenced from §1.5 where the
   HTMX scaffold should wire them in.
 - **Namespace: `hull/web/*`.** Matches the existing `hull/middleware/*`
-  precedent — a sub-namespace for "convenience helpers a web app
+  precedent - a sub-namespace for "convenience helpers a web app
   needs on top of the foundational primitives." Foundational
   web modules that predate this convention (`hull/template@1`,
   `hull/cookie@1`, `hull/form@1`, `hull/jwt@1`, etc.) keep their
@@ -714,7 +714,7 @@ HTMX scaffold (§1.5) wires them in opportunistically.
 
 **Future candidates (no target):**
 
-- `hull/web/table@1` — server-rendered sortable/filterable list
+- `hull/web/table@1` - server-rendered sortable/filterable list
   helper. Generic core: parse `?sort=col&dir=asc&filter[k]=v` from
   the query; validate sort/filter columns against an allowlist
   (prevents enumeration + SQL injection); build `ORDER BY` / `WHERE`
@@ -725,7 +725,7 @@ HTMX scaffold (§1.5) wires them in opportunistically.
   do fragment swaps. Same generic-with-HTMX-opt-in shape as
   `hull/web/flash@1`. Pairs with `hull/web/pagination@1` for the
   canonical CRUD list view.
-- `hull/web/seo@1` *(cloud-deployed apps only)* — Open Graph /
+- `hull/web/seo@1` *(cloud-deployed apps only)* - Open Graph /
   Twitter Card / JSON-LD helpers. Template-friendly: `seo.tags({
   title, description, image, type, card = "summary_large_image" })`
   returns the full `<meta>` set for the page `<head>`.
@@ -735,7 +735,7 @@ HTMX scaffold (§1.5) wires them in opportunistically.
   local-first majority (internal tools, CLI utilities, auth-walled
   admin apps don't need any of this); relevant only for the
   public-facing cloud-deployed slice.
-- `hull/web/openapi@1` — Spec generator for the JSON half of
+- `hull/web/openapi@1` - Spec generator for the JSON half of
   HTMX-hybrid apps (HTMX routes returning HTML coexist with
   `/api/*` routes returning JSON). Walks `app.get/post/...`
   registrations, infers params from `:path/:vars`, accepts
@@ -871,10 +871,10 @@ and helpers.
           for users who want to compose their own stack.
       Composition matrix once shipped:
         - `hull new --type flat --profile htmx <name>` (replaces what
-          this item was originally specced as — `hull init --profile
+          this item was originally specced as - `hull init --profile
           htmx`; `hull init` retains the same form for init-in-place)
         - `hull new --type rest --profile htmx <name>` (the modular
-          HTMX app pattern — what the Trimble HU asset-inventory
+          HTMX app pattern - what the Trimble HU asset-inventory
           project needs, and what surfaced this design)
         - `hull new --type rest --profile json <name>` (today's
           `--type rest` default)
@@ -887,7 +887,7 @@ and helpers.
       parsing to `stdlib/cli/lua/hull/new.lua` and to the existing
       `hull init` flow; doc update in `docs/agent_guide.md`.
       **Surfaced 2026-06 by the Trimble HU asset-inventory project**
-      (`asset_inventory_assessment.md` §e.2) — that app is a 50+ route
+      (`asset_inventory_assessment.md` §e.2) - that app is a 50+ route
       HTMX application and bootstrapping it cleanly today requires
       either accepting the JSON-scaffold mismatch or hand-laying the
       whole structure. The orthogonal-axis design avoids forking
@@ -977,7 +977,7 @@ and helpers.
       part buffering. Binary-safe (Lua byte strings, JS `ArrayBuffer`).
       Incremental SHA-256 hasher (`crypto.create_sha256()` Lua /
       `crypto.createSha256()` JS) for streaming digest. Coverage:
-      94 e2e cases in `tests/e2e_multipart.sh` across both runtimes —
+      94 e2e cases in `tests/e2e_multipart.sh` across both runtimes -
       tiny field, 10 fields, small bin, 2 MB bin, 5 MB bin, mixed,
       empty file, 10x keep-alive, max-part-size, skip/auto-drain,
       max_parts cap, max_headers_size cap, max_total_size cap (single-
@@ -985,11 +985,11 @@ and helpers.
       See `docs/multipart.md`.
 - [x] §1.5.b-3. Content-MIME sniffer in `src/hull/cap/mime.c`. Magic-
       byte table for PNG/JPEG/GIF/WebP/PDF/SVG/HTML (HTML added beyond
-      the original scope — same XSS surface as SVG, useful when users
+      the original scope - same XSS surface as SVG, useful when users
       upload reports). UTF-8 plain-text fallback (rejects NUL bytes,
       overlong encodings, UTF-16 surrogates, code points > U+10FFFF).
       JSON / CSV correctly fall through to text/plain (valid UTF-8 text
-      by definition) — callers needing finer discrimination use the
+      by definition) - callers needing finer discrimination use the
       declared Content-Type header. Header `hl_cap_mime_sniff(buf,
       len)` returns canonical MIME or NULL; statically allocated, do
       not free. 45 unit tests: 31 embedded-byte cases covering magic
@@ -1000,10 +1000,10 @@ and helpers.
 - [x] §1.5.b-3.5. `hull/blob@1` module (Lua + JS). Pure content-
       addressed disk storage. Bytes in → SHA-256-keyed ID; bytes out by
       ID. Streaming put with **on-the-fly SHA-256** (hashed in lockstep
-      with the temp-file write — never buffered just to hash). Atomic
+      with the temp-file write - never buffered just to hash). Atomic
       writes via temp + `rename(2)`. Sharded layout (`<dir>/<hash[0:2]>/
       <hash>`); 1-level default, 2-level opt-in. Self-verifying
-      (filename IS the SHA). **Zero SQLite dependency** — compiles and
+      (filename IS the SHA). **Zero SQLite dependency** - compiles and
       runs cleanly under `HL_ENABLE_DB=0`, important because the
       compute AOT cache and Lua bytecode cache are exactly where
       compute-only builds need it most. API: `blob.init({dir,
@@ -1020,7 +1020,7 @@ and helpers.
       below), (2) `hull tools install` migration (JSON sidecar map),
       (3) compute AOT cache migration (JSON sidecar map, system-wide
       `~/.hull/cache/compute/`), (4) Lua bytecode cache (sidecar-less
-      — key IS the SHA), (5) LLM artifact cache (v0.1.11+), (6)
+      - key IS the SHA), (5) LLM artifact cache (v0.1.11+), (6)
       template-AST cache (v0.1.10+). Full design + migration map in
       [docs/blob.md](blob.md). Tests: C-layer (put/get/streaming
       hash correctness/atomic rename/EXDEV fallback/concurrent put/iter/
@@ -1029,7 +1029,7 @@ and helpers.
       battle-tested by attachment in v0.1.9); migrations 3-6 follow.
 - [ ] §1.5.b-4. `hull/web/attachment@1` module (Lua + JS), built on
       `hull/blob@1`. Lives under `hull/web/*` per the v0.2.0
-      reorganization — its primary input is a multipart `Part`, its
+      reorganization - its primary input is a multipart `Part`, its
       primary output is the auth-gated `attachment.serve(req, res, id,
       { auth_check = fn })` route helper, and its `_hull_attachments`
       table mirrors the shape of `_hull_sessions` /
@@ -1068,7 +1068,7 @@ and helpers.
 > "no further work." `commands/cache.c` graded A, runtime cache
 > files graded A-, every other module unchanged at A. Adding a
 > new cache kind is now one registry row + one ~100-LOC file +
-> one Makefile entry — list / prune / clear / verify / doctor /
+> one Makefile entry - list / prune / clear / verify / doctor /
 > inspect / opt-out env var all automatic. The next person who
 > touches this subsystem should be adding a new kind, not
 > refactoring the existing six. See [docs/cache.md](cache.md)
@@ -1076,7 +1076,7 @@ and helpers.
 > the CAS-primitive design. Open audit items at close-of-cycle:
 > two cosmetic Lows (compile_persist_run's `JS_WriteObject` OOM
 > attributed to `JS_EvalFunction`; `verify_one_kind` docstring
-> wording mismatch) — both explicitly recommended NOT to fix
+> wording mismatch) - both explicitly recommended NOT to fix
 > by the auditors (no behaviour change, would-be-DRY-for-DRY
 > territory). Audit history: pass-1 closed real layering
 > issues; pass-2 closed real polish gaps (commits A-E); pass-3
@@ -1086,7 +1086,7 @@ and helpers.
 Six known consumers identified during the §1.5.b-3.5 design. All
 backed by `hull/blob@1`. Four are runtime-infrastructure caches
 that live OUTSIDE `app.manifest.fs` (cache is Hull's decision to
-accelerate the app, not part of the app's I/O surface — see
+accelerate the app, not part of the app's I/O surface - see
 [docs/blob.md §Runtime-infrastructure caches](blob.md) for the full
 manifest-line rationale). One is a build-tool migration; one is a
 new external user-facing feature.
@@ -1097,7 +1097,7 @@ new external user-facing feature.
 - `hull doctor` reports cache locations and their sizes (similar to
   how it reports the CA bundle and tools status today).
 - `hull inspect` surfaces "this binary uses caches at:
-  `~/.hull/cache/...`" — informational, not a permission.
+  `~/.hull/cache/...`" - informational, not a permission.
 - Opt-out env vars: `HULL_NO_CACHE=1` disables all runtime caches;
   `HULL_NO_LUA_BYTECODE_CACHE=1`, `HULL_NO_AOT_CACHE=1`,
   `HULL_NO_TEMPLATE_CACHE=1` for granular control. Always-honored;
@@ -1117,7 +1117,7 @@ Tasks (target v0.1.10):
       unchanged.
       A new `hl_blob_store_put_keyed` variant lets runtime caches
       use the same atomic-rename + sharded layout in keyed-value
-      mode (filename is caller-supplied, not content-derived) —
+      mode (filename is caller-supplied, not content-derived) -
       the bytecode and AOT caches are key-value, not CAS, so this
       bridges the abstraction gap. Per-store discipline: each
       store is exclusively CAS *or* keyed; apps' blob stores stay
@@ -1129,7 +1129,7 @@ Tasks (target v0.1.10):
       `hull cache list` command.
       Verified: 42/42 unit + 23/23 blob unit + 36/36 e2e_blob +
       12/12 e2e_aot_cache + 118/118 e2e build + 18/18 e2e sandbox
-      + 280/280 e2e examples — all behave identically to before.
+      + 280/280 e2e examples - all behave identically to before.
 
 - [x] §1.5.b-X-1. Lua bytecode cache (runtime-infrastructure,
       sidecar-less). **Landed.** Cache key = `sha256(LUA_VERSION ||
@@ -1154,11 +1154,11 @@ Tasks (target v0.1.10):
       (sharded; same blob_store layout as the bytecode cache and
       `hull/blob@1`). Key folds in `sha256(wasm_bytes) || arch ||
       memory64_flag || wamrc_version`, so each unique tuple
-      compiles at most once per machine. Sidecar-less — the
+      compiles at most once per machine. Sidecar-less - the
       filename IS the key. Cross-app dedup falls out naturally
       (two apps using the same `score.wasm` for the same arch
       share one cache entry).
-      No JSON sidecar — the design we sketched is replaced by a
+      No JSON sidecar - the design we sketched is replaced by a
       sidecar-less CAS layout (filename = key). Cleaner: no index
       file to corrupt, atomic via tmp+rename, concurrent build
       processes are benign because identical inputs produce
@@ -1169,16 +1169,16 @@ Tasks (target v0.1.10):
       `stdlib/cli/lua/hull/build.lua`; build summary now reports
       hits + writes (`8 AOT module(s) compiled (8 from cache)`).
       New `tool.*` bindings landed alongside:
-        - `tool.hull_cache_dir([kind])` — resolve cache subdir
-        - `tool.hull_cache_disabled([kind])` — env-opt-out probe
-        - `tool.rename(src, dst)` — POSIX-atomic rename (for CAS)
-        - `tool.remove_file(path)` — gated unlink (tmp cleanup)
+        - `tool.hull_cache_dir([kind])` - resolve cache subdir
+        - `tool.hull_cache_disabled([kind])` - env-opt-out probe
+        - `tool.rename(src, dst)` - POSIX-atomic rename (for CAS)
+        - `tool.remove_file(path)` - gated unlink (tmp cleanup)
       Sandbox auto-allows the cache root in tool mode too (`hull
       build` runs under a tighter sandbox than apps).
       Honors `HULL_NO_AOT_CACHE=1`, `HULL_NO_CACHE=1`, and the new
       `hull build --no-cache` flag.
       Verification: examples/compute (8 modules) on M-series:
-      cold build ~1.0s, warm build ~0.06s — 16× speedup. Warm-
+      cold build ~1.0s, warm build ~0.06s - 16× speedup. Warm-
       cache binary boots and serves requests with `aot=1` log
       confirming AOT path active. 12/12 cases in new
       `tests/e2e_aot_cache.sh` (cold/warm/HULL_NO_AOT_CACHE/
@@ -1188,7 +1188,7 @@ Tasks (target v0.1.10):
       Downloaded tool binaries land at
       `$HOME/.hull/blobs/tools/blobs/<XX>/<sha>` via
       `hl_blob_store_put_durable(s, body, len, expected_sha, ...)`
-      — CAS mode, since we already know the SHA from the signed
+      - CAS mode, since we already know the SHA from the signed
       manifest. The blob_store call replaces the previous
       `hl_release_io_sha256_hex` + `mbedtls_ct_memcmp` + atomic
       write block: blob_store does the SHA verification AND the
@@ -1198,10 +1198,10 @@ Tasks (target v0.1.10):
       symlink to the blob, atomically (re)placed via
       symlink-tmp + rename. Preserves the existing PATH-style
       lookup (`hl_tools_lookup_path` already uses
-      `access(X_OK)` which follows symlinks transparently —
+      `access(X_OK)` which follows symlinks transparently -
       cap/wasm.c's wamrc resolver and `build.lua`'s
       `tool.find_tool` need no changes).
-      Dropped the JSON sidecar from the original sketch — not
+      Dropped the JSON sidecar from the original sketch - not
       needed for a single-active-version-per-tool model. If a
       version-history feature is ever added, the index can land
       then; today's design is simpler and `hull cache list`
@@ -1209,7 +1209,7 @@ Tasks (target v0.1.10):
       `~/.hull/blobs/tools/blobs/`.
       Tool blobs partition into `blobs/tools/` (sibling of
       `blobs/runtime/`) so they're NOT swept by future
-      `hull cache prune` runs — tools are durable signed
+      `hull cache prune` runs - tools are durable signed
       downloads, not re-derivable caches.
       Verified: 23/23 test_tools_install (added
       `lookup_follows_symlink_to_blob`), 42/42 unit suites,
@@ -1226,7 +1226,7 @@ Tasks (target v0.1.10):
       `hl_lua_template_compile_cached`. Cache key =
       `sha256(LUA_VERSION || arch || endian || generated_code)`.
       Cached value = `lua_dump()` of the inner render function
-      (post-pcall) — on a hit we skip BOTH the parse pass and the
+      (post-pcall) - on a hit we skip BOTH the parse pass and the
       pcall to unwrap the outer chunk.
       The in-process function cache (Lua-side, keyed by template
       name) stays in front for the warm path; the blob cache is
@@ -1234,7 +1234,7 @@ Tasks (target v0.1.10):
       Key insight: hashing the *generated* code (post-resolve of
       extends + includes) gives automatic invalidation when any
       referenced template changes. No dependency tracking
-      needed — a different generated code is a different key.
+      needed - a different generated code is a different key.
       Store: `$HOME/.hull/blobs/runtime/templates/blobs/<XX>/<sha>`
       via the same `hl_blob_store_put_keyed` primitive that backs
       the bytecode + AOT caches.
@@ -1255,19 +1255,19 @@ Tasks (target v0.1.10):
       output is byte-identical.
 - [x] §1.5.b-X-5. `hull cache list|prune|clear` subcommand
       **+ per-app cache isolation via `HULL_CACHE_DIR`. Landed.**
-      Registry-driven (`include/hull/cache_registry.h`) — single
+      Registry-driven (`include/hull/cache_registry.h`) - single
       source of truth for cache kinds, used by `cache list`, the
       planned `doctor` cache section (X-6), the planned `inspect`
       disclosure (X-7), and any future consumer.
       Commands:
-        - `cache list [--json]` — one line per registered kind with
+        - `cache list [--json]` - one line per registered kind with
           path, entry count, total size, runtime/system flag.
         - `cache prune [--kind=K] [--max-size=N] [--max-age=N]
-          [--strategy=lru|fifo] [--dry-run]` — runs
+          [--strategy=lru|fifo] [--dry-run]` - runs
           `hl_blob_store_cleanup` over runtime caches (system stores
           like `tools` skipped by default; explicit `--kind=tools`
           still works).
-        - `cache clear [--kind=K] --yes` — iter + delete every entry
+        - `cache clear [--kind=K] --yes` - iter + delete every entry
           (not policy-based; works even on sub-second-old files).
       `--yes` required to prevent accidental wipe.
       **Per-app isolation: `HULL_CACHE_DIR=/abs/path`** overrides
@@ -1277,12 +1277,12 @@ Tasks (target v0.1.10):
       and not see / be seen by another deployment. Must be
       absolute (relative paths rejected). Tools storage
       (`$HOME/.hull/blobs/tools/`) is intentionally NOT redirected
-      — those are signed durable downloads with a stable system
+      - those are signed durable downloads with a stable system
       home. `HULL_NO_CACHE=1` etc. opt-outs still apply.
       Designed so optional layer C (automatic per-app isolation
       derived from app identity) can be added later without
       restructuring: it'd just compose under the same
-      `hl_hull_cache_dir()` resolver — the override stays as the
+      `hl_hull_cache_dir()` resolver - the override stays as the
       explicit / deployment-controlled mode and layer C becomes
       the convenience default for paranoid deployments.
       Files: `include/hull/cache_registry.h`,
@@ -1305,7 +1305,7 @@ Tasks (target v0.1.10):
       JSON variant adds a `"caches": [...]` array (mirroring
       `hull cache list --json`) plus a top-level
       `"hull_cache_dir"` field.
-      Single source of truth via `hl_cache_registry()` —
+      Single source of truth via `hl_cache_registry()` -
       doctor and `hull cache` always agree.
       Files: `src/hull/commands/doctor.c` (+90 LOC for the
       Caches section in both human + JSON renderers, plus
@@ -1314,7 +1314,7 @@ Tasks (target v0.1.10):
       Verified: 32/32 e2e_cache (+8 new doctor assertions),
       42/42 unit, 36/36 e2e_blob, 12/12 e2e_aot_cache, 40/40
       e2e_templates. (`hull doctor --tui` will surface the
-      new fields when its panel renderer is extended — the JSON
+      new fields when its panel renderer is extended - the JSON
       already exposes the data; Lua-side TUI work is separate.)
 - [x] §1.5.b-X-7. `hull inspect` cache disclosure. **Landed.**
       New "Runtime caches (auto-allowed, not in manifest)"
@@ -1352,7 +1352,7 @@ Tasks (target v0.1.10):
       with a one-line swap from `JS_Eval(...)` to the cached
       helper.
       QJS_TAG (currently `"qjs-2024-01-13"`) tracks the
-      vendored snapshot — must bump together with any
+      vendored snapshot - must bump together with any
       `vendor/quickjs/` change to avoid loading stale bytecode
       into an incompatible runtime.
       Auto-registered in `hl_cache_registry()` as `"js-bytecode"`
@@ -1376,7 +1376,7 @@ Tasks (target v0.1.10):
         - COLD:   974 µs/load (parse + serialize + write)
         - WARM:   202 µs/load (read + JS_ReadObject)
         - BYPASS: 262 µs/load (parse, no persist)
-        - Warm speedup: 1.30× — matches the Lua cache exactly.
+        - Warm speedup: 1.30× - matches the Lua cache exactly.
 
 - [ ] §1.5.b-X-8. LLM artifact cache (latent, v0.1.11+). Deferred
       until a real LLM consumer in Hull exists. Key shape:
@@ -1387,7 +1387,7 @@ Tasks (target v0.1.10):
       `hl_js_template_compile_cached` wraps `JS_Eval(MODULE |
       COMPILE_ONLY)` for the template engine's render-function
       compilation step. Initial design tried caching the
-      post-eval render closure via `JS_WriteObject` — QuickJS
+      post-eval render closure via `JS_WriteObject` - QuickJS
       rejects serialization of runtime closures, so the cache
       stores the pre-eval *chunk* and uses `JS_EvalFunction` on
       hit (consumes the chunk reference, no leak). Cache key =
@@ -1418,24 +1418,24 @@ Tasks (target v0.1.10):
       `--json` and emit `{"results":[{kind, removed, freed_bytes,
       skipped_no_store?}], "total_removed":N, "total_freed_bytes":N,
       "dry_run":bool}`. `clear --json` still requires `--yes` to
-      perform the wipe (no behavioural change — just adds a
+      perform the wipe (no behavioural change - just adds a
       structured output format alongside the human one). Verified
       via 7 new e2e cases in `e2e_cache.sh`.
 
 - [x] §1.5.b-X-13. `hull cache verify [--repair] [--json]`.
       **Landed.** Walks every cache entry and flags corruption.
-      For CAS-mode kinds (registry `is_cas=1` — `tools`) it
+      For CAS-mode kinds (registry `is_cas=1` - `tools`) it
       recomputes `sha256(contents)` and compares to filename
       (the strongest possible integrity check). For keyed-mode
       runtime caches it does a structural check (filename shape,
-      regular file, non-empty, readable — a zero-byte runtime
+      regular file, non-empty, readable - a zero-byte runtime
       cache entry is always corrupt since none of the runtime
       kinds write empty blobs). `--repair` unlinks corrupt
-      entries — safe because the next compile/install
+      entries - safe because the next compile/install
       repopulates from source. `--json` emits the same shape as
       prune. Exits 1 if anything is corrupt and `--repair`
       wasn't able to fix it. New `is_cas` field on `HlCacheKind`
-      drives the per-kind dispatch — adding a new cache kind
+      drives the per-kind dispatch - adding a new cache kind
       automatically picks the right verification mode. Files:
       `src/hull/commands/cache.c` (+`cmd_verify`),
       `include/hull/cache_registry.h` (+is_cas field),
@@ -1498,17 +1498,17 @@ section groups the HTMX-specific ones; the generic ones live in §1.4.
 **Cross-references to §1.4** (generic web helpers that the HTMX
 scaffold should also wire in during the same v0.1.10 release):
 
-- §1.4-1 `hull/web/flash@1` — replace the silent POST/redirect/GET
+- §1.4-1 `hull/web/flash@1` - replace the silent POST/redirect/GET
   success in `examples/hypermedia_todo`; document the
   `HX-Trigger: flash` path in `docs/htmx.md`.
-- §1.4-2 `hull/web/pagination@1` — paginate the todo list demo;
+- §1.4-2 `hull/web/pagination@1` - paginate the todo list demo;
   document the fragment-swap pattern for "load more" / page-link
   navigation in `docs/htmx.md`.
 
 **Tasks (v0.1.10, HTMX-specific):**
 
 - [x] §1.5.c-1. Search + debounce snippet pattern. **Landed (commit 447fa77).**
-      NOT a stdlib module — documented `hx-get` +
+      NOT a stdlib module - documented `hx-get` +
       `hx-trigger="keyup changed delay:300ms"` + ratelimit recipe
       in `docs/htmx.md` plus a `/search` route in
       `examples/hypermedia_todo` filtering todos by title. Tests
@@ -1575,7 +1575,7 @@ prioritized.
       runtimes. Tests for the SSE-fragment-swap round trip.
 - [ ] §1.5.d-5. Vendor `htmx-ext-ws.min.js` + HTMX-WS bridge demo.
       SHA-pinned via `make fetch-htmx`. Pair with `app.ws("/chat", ...)`
-      in a separate `examples/hypermedia_chat` (Lua + JS) — the
+      in a separate `examples/hypermedia_chat` (Lua + JS) - the
       bidirectional pattern is distinct enough from todo to warrant its
       own example. Tests.
 - [ ] §1.5.d-6. History / back-button doc section in `docs/htmx.md`.
@@ -1599,7 +1599,7 @@ prioritized.
       rollout to catch nonce regressions. ~50 lines.
 - [ ] §1.5.d-10. Client-side toast renderer for `flash.trigger`. Today
       the trigger path fires `HX-Trigger: {"flash":...}` but the
-      scaffold has no listener — the event is invisible without
+      scaffold has no listener - the event is invisible without
       app-side JS. Ship a ~30-line inline `<script nonce>` snippet in
       the scaffold's `base.html` that listens for the `flash` event
       and appends an `<article>` to `#flash-zone` with a
@@ -1708,11 +1708,11 @@ needs its own design pass + estimate before scheduling. Items marked
       Multi-key at-rest encryption (`encryption_keys = {[1]=OLD, [2]=NEW}`)
       with lazy + batch rekey. Per-user brute-force lockout; per-IP
       lockout opt-in via `trust_xff`. Auto-daily pending-row prune.
-- [x] **Account lockout ✅ Shipped (v0.3.0)** — folded into `auth-flows`
+- [x] **Account lockout ✅ Shipped (v0.3.0)** - folded into `auth-flows`
       (login lockout: `_hull_auth_login_attempts`, default 5 failures
       / 15 min window with proper window-expiry reset) and `totp`
       (per-user + opt-in per-IP). The standalone `auth_lockout@1`
-      module was deliberately *not* shipped — folding into the
+      module was deliberately *not* shipped - folding into the
       modules that need the gate matched the round-8 design decision.
 - [x] **Transactional email flow recipes ✅ Shipped (v0.3.0).**
       `hull/web/auth-flows@1` wires welcome / verify / password-reset
@@ -1749,9 +1749,9 @@ needs its own design pass + estimate before scheduling. Items marked
       max(id)-bounded, in-process mutex). The retention-policy /
       structured-export / tamper-evident-hash-chain version is still
       `[COMMERCIAL]` (above).
-- [ ] **HTMX widgets tier** — promoted to its own sub-section: see
+- [ ] **HTMX widgets tier** - promoted to its own sub-section: see
       **§1.5.g** below (renamed from the earlier "admin-UI
-      primitives tier" framing, which was too narrow — these widgets
+      primitives tier" framing, which was too narrow - these widgets
       serve any data-list-heavy hypermedia app, not just internal
       tools). Absorbs the umbrella conventions originally listed
       here (filter forms, optimistic row replacement, bulk-select
@@ -1773,7 +1773,7 @@ needs its own design pass + estimate before scheduling. Items marked
 
 **Naming note.** Earlier drafts called this "admin-UI primitives"
 (matching §1.5.f's original bullet and the Trimble assessment's
-wording). The frame turned out to be too narrow — the same
+wording). The frame turned out to be too narrow - the same
 primitives are useful for any data-list-heavy hypermedia app
 (customer dashboards, B2B portals, marketplace listings), not
 just internal tools. Renamed to "HTMX widgets" so the tier names
@@ -1787,7 +1787,7 @@ drafts) cover the same problem from different angles: every
 data-list-heavy hypermedia app rebuilds the same five-to-eight htmx
 interaction patterns by hand. The Trimble HU asset-inventory build
 plan (asset_inventory_assessment.md §5.1 item 5) was the forcing
-function — its MVP 1 register page alone needs search + sort +
+function - its MVP 1 register page alone needs search + sort +
 pagination + inline-edit + confirm + toast + form-errors. Promoting
 the bullet to a named tier makes the surface a coherent first-party
 offering rather than example boilerplate.
@@ -1804,7 +1804,7 @@ offering rather than example boilerplate.
 
 **Tasks:**
 
-- [ ] §1.5.g-0. **Phase 0 — platform plumbing (prereq, ~2 days of C/runtime work).**
+- [ ] §1.5.g-0. **Phase 0 - platform plumbing (prereq, ~2 days of C/runtime work).**
   - [ ] Stdlib-shipped static assets. Today `static/*` is app-only;
         platform stdlib needs a second VFS prefix so modules can ship
         CSS/JS files that get auto-served. Convention:
@@ -1864,9 +1864,9 @@ offering rather than example boilerplate.
       columns are sortable / searchable / inline-editable. Wires
       search + sort + pagination + inline-edit into one call.
 - [ ] §1.5.g-9. **Example + docs.**
-      - `examples/htmx_widgets_register/` — tiny employee/asset CRUD
+      - `examples/htmx_widgets_register/` - tiny employee/asset CRUD
         that exercises every module. Both runtimes.
-      - `docs/htmx_widgets.md` — usage guide; cross-reference from
+      - `docs/htmx_widgets.md` - usage guide; cross-reference from
         `docs/htmx.md`.
 - [ ] §1.5.g-10. **Audit pass.** Parallel-reviewer audit using a new
       `/htmx-widgets-audit` skill modeled on `/auth-audit`. Three
@@ -1885,10 +1885,10 @@ surface cost.
 
 | Phase | Items | Estimate |
 |---|---|---|
-| 0 — platform plumbing | §1.5.g-0 | ~2 days |
-| 1 — primitives | §1.5.g-1 → §1.5.g-5 | 2–3 weeks |
-| 2 — composed widgets | §1.5.g-6 → §1.5.g-8 | 1–2 weeks |
-| 3 — example + docs + audit | §1.5.g-9 → §1.5.g-10 | ~1 week |
+| 0 - platform plumbing | §1.5.g-0 | ~2 days |
+| 1 - primitives | §1.5.g-1 → §1.5.g-5 | 2–3 weeks |
+| 2 - composed widgets | §1.5.g-6 → §1.5.g-8 | 1–2 weeks |
+| 3 - example + docs + audit | §1.5.g-9 → §1.5.g-10 | ~1 week |
 | **Total** | | **~4–5 weeks** |
 
 Only Phase 0 touches C / runtime; phases 1–3 are pure stdlib +
@@ -1910,7 +1910,7 @@ examples + docs.
 3. **Bulk-action toolbars** (originally listed in the §1.5.f
    bullet): bundle into §1.5.g-8 (`table@1`) as part of the
    schema, or separate `bulk-action@1` module? Lean toward
-   bundling into `table@1` — the bulk-action selection state
+   bundling into `table@1` - the bulk-action selection state
    couples to the table row state and splitting them invites
    duplication.
 
@@ -2588,7 +2588,7 @@ backends need.
 for the new backends:
 
 - Every backend edits the same function; there is no registration point.
-- **The `else → SQLite` default collides with DuckDB** — both are file /
+- **The `else → SQLite` default collides with DuckDB** - both are file /
   `:memory:` based, so a bare path (`./data.db`, `:memory:`) is ambiguous once
   DuckDB exists. MySQL and MariaDB additionally *share* the `mysql://` scheme.
 
@@ -2619,7 +2619,7 @@ Today the **only** ways to reach a DB are `db.default()` (the `-d` DSN) and
 `db.open(dsn)` for a runtime-computed DSN**, so an app that connects to
 arbitrary SQL endpoints on the fly (DB admin tool, multi-tenant SaaS with
 per-tenant DBs, a "connect to any Postgres" utility) can't be built. Unlike
-`http.fetch`, DB connections aren't gated by `manifest.hosts` at all — the sole
+`http.fetch`, DB connections aren't gated by `manifest.hosts` at all - the sole
 gate is "which names the author enumerated."
 
 **The clean design mirrors HTTP's host allowlist.** `databases` becomes a
@@ -2664,7 +2664,7 @@ ride in the app-provided DSN; the reachable surface stays bounded.
   exact-only check can adopt it later, see §2.8).
 - **Lifetime:** caller-owned handle + `conn:close()` + GC finalizer (each
   `db.open` = a fresh connection); a process-wide concurrent-dynamic cap
-  (default 16, no idle timeout — caller closes). Async still pools per-DSN via
+  (default 16, no idle timeout - caller closes). Async still pools per-DSN via
   the worker pool.
 - **Backends:** network (postgres/mysql) gated by `hosts`; file (sqlite/duckdb/
   bare path) gated by `manifest.fs`.
@@ -2760,14 +2760,14 @@ which breaks for MySQL reserved words used as table/column names.
       `conn.quoteIdentifier` (JS). C unit test in `test_db_backend`; runtime
       binding + reserved-word-table functional check pass both runtimes.
 - [x] **Stdlib retrofit:** `hull/web/auth-flows`'s `standard_users` adapter
-      (Lua + JS) quotes its app-supplied table name — the one genuine
+      (Lua + JS) quotes its app-supplied table name - the one genuine
       multi-backend app-identifier consumer. (`hull/search` was NOT retrofitted:
       it's SQLite-only and already validates identifiers strictly, so quoting is
       redundant there.)
-- [ ] **Deferred — blanket-quote the shared `insert_if_absent` / `upsert` /
+- [ ] **Deferred - blanket-quote the shared `insert_if_absent` / `upsert` /
       `table_columns` helpers.** Not done because always-quoting changes Postgres
       **case-folding** semantics (`FROM Foo` folds to `foo` unquoted, preserves
-      `Foo` quoted) — a behavior change for existing apps. Revisit when a backend
+      `Foo` quoted) - a behavior change for existing apps. Revisit when a backend
       that needs it (MySQL) lands, as an opt-in or with a migration note.
 - [ ] Consider a small capability/dialect struct (booleans/tokens for
       `RETURNING` support, boolean literal form, `LIMIT`/`OFFSET` shape). Still
@@ -3634,7 +3634,7 @@ the design doc's surface.
 landed). The existing transactional outbox + inbox patterns cover
 reliable side-effect delivery for *outgoing* events, and `app.every` /
 `app.daily` timers handle simple schedules. What's missing: durable
-queueing of user-triggered work — image resizing, CSV import, PDF
+queueing of user-triggered work - image resizing, CSV import, PDF
 rendering, sending a batch of emails after a paid plan upgrade,
 scheduled report generation. Any non-trivial web app needs at least
 one of these within the first month.
@@ -3697,7 +3697,7 @@ template pairs and scaffold routes for the universal flows:
 Each ships as a Pico-styled `<table>`-based HTML template + plain-text
 counterpart under `templates/email/`. Scaffolded `app.{lua,js}` wires
 the routes. Email previews via a dev-only route `/__email/preview/<name>`
-that renders the template with sample data (no actual send) — invaluable
+that renders the template with sample data (no actual send) - invaluable
 when iterating.
 
 Pairs with §1.5.f's `hull/web/middleware/auth-flows@1` (the route +
@@ -3734,7 +3734,7 @@ deployment mode. The priorities below reflect that.
 ### 7.1 Structured-JSON request log alongside logfmt
 
 **Priority:** Medium. Useful for ANY deployment that pipes logs to
-an aggregator — that includes some local-first setups (Loki on a
+an aggregator - that includes some local-first setups (Loki on a
 homelab, journald → systemd-cat → jq), so the win isn't strictly
 cloud-only.
 
@@ -3762,7 +3762,7 @@ listener.
 ### 7.3 OpenTelemetry traces (W3C `traceparent` propagation)
 
 **Priority:** Low. Distributed tracing solves "where did this request
-spend its 8s across 5 services?" — which is a problem local-first
+spend its 8s across 5 services?" - which is a problem local-first
 apps don't have (they ARE the whole system). Add when there's an
 explicit user asking; until then the implementation cost (spans,
 context propagation, exporter buffering, batching) isn't worth
@@ -3817,10 +3817,10 @@ seal" below.  Stays on v2.3.3 shallow seal (top-level struct only).
      pointers.
 3. **Pre-warm walker** (`kl_mbed_prewarm_chain`) drives mbedTLS's two
    verify-time lazy caches BEFORE seal:
-   - **RSA**: `ctx->RN` (Montgomery R² mod N) — populated lazily by
+   - **RSA**: `ctx->RN` (Montgomery R² mod N) - populated lazily by
      `mbedtls_mpi_exp_mod`.  Pre-warmed via `mbedtls_rsa_public(rsa,
      zeros, output)` per pubkey.
-   - **ECP**: `grp->T` (precomputed comb table for generator G) —
+   - **ECP**: `grp->T` (precomputed comb table for generator G) -
      populated lazily by `mbedtls_ecp_mul` on first mul-by-G.  Pre-
      warmed via `mbedtls_ecp_mul(grp, R, 1, G, drbg)` per group.
 4. Per-context flag `deep_sealed` on `KlMbedtlsCtx` so destroy can
@@ -3831,7 +3831,7 @@ seal" below.  Stays on v2.3.3 shallow seal (top-level struct only).
 ### Validation that landed v2.5.0
 
 - Keel `test_tls` 20/20 and `test_tls_integration` 3/3 PASS.
-- Hull `make e2e-ca-bundle` 8/8 PASS — real HTTPS handshake to
+- Hull `make e2e-ca-bundle` 8/8 PASS - real HTTPS handshake to
   example.com against the macOS system store (128 CAs, 105 RSA + 23
   EC) AND against the Mozilla bundle (145 CAs, 101 RSA + 44 EC)
   with mbedTLS deep allocations sealed RO.
@@ -3847,7 +3847,7 @@ operation as a documented timing-attack defense (Kocher 1996).  The
 through `ctx->Vi.p` / `ctx->Vf.p`.
 
 `Vi` and `Vf` live INSIDE the rsa_context, which lives inside the
-sealed arena once we deep-seal.  No pre-warm helps — blinding has to
+sealed arena once we deep-seal.  No pre-warm helps - blinding has to
 be fresh per signature.  Skipping blinding would be a security
 regression (the original CVE driver).
 
@@ -3859,7 +3859,7 @@ mutable, which is exactly what blinding needs).
 A future two-arena scheme (seal `conf` + `cert` + `ca_cert` in arena
 A, keep `pkey` in arena B that stays mutable) could close this, but
 requires routing mbedTLS allocations by "which struct does this
-belong to" — not possible through the current
+belong to" - not possible through the current
 `mbedtls_platform_set_calloc_free` API.  Would need an upstream
 patch to add per-call allocator context.  Not pursuing.
 
@@ -3888,8 +3888,8 @@ Measured high-water for the client arena post pre-warm:
 | macOS system store     | 128     | 105 |  23 | 19 MB      |
 | Mozilla bundle (curl)  | 145     | 101 |  44 | 37 MB      |
 
-EC pre-warm dominates (~600 KB per pubkey — comb table + scratch).
-RSA is cheap (~25 KB per pubkey — RR cache).  Virtual address space
+EC pre-warm dominates (~600 KB per pubkey - comb table + scratch).
+RSA is cheap (~25 KB per pubkey - RR cache).  Virtual address space
 is allocated more generously (`ca_len * 300 + 32 MB`) but only
 written pages are physically backed, so the 19 / 37 MB high-water is
 the real RAM cost.
@@ -3929,7 +3929,7 @@ deployments pay nothing additional.
   server-side TLS handshakes through the sealed cert + pkey).
 - Hull HTTPS-out to `example.com` with the small vendored Mozilla
   bundle (`vendor/cacert/cacert.pem`, 226 KB / 145 CAs) PASSED.
-- Arena sizing heuristic was accurate — actual high-water for the
+- Arena sizing heuristic was accurate - actual high-water for the
   full system CA store was 553 KB used out of ~2 MB allocated.
 - All heap-write death tests (the v2.4.0-style fault-on-write
   invariants) would have worked unchanged.
@@ -3966,7 +3966,7 @@ mbedTLS's RSA verify path performs lazy precomputation inside the
 caller-provided `mbedtls_rsa_context`.  Even though
 `mbedtls_ssl_config` is documented as const-after-`mbedtls_ssl_setup`,
 the underlying `pk_ctx` for cert pubkeys (the chain CAs and the leaf
-cert public key) gets MUTATED on first use — Montgomery table
+cert public key) gets MUTATED on first use - Montgomery table
 windows, blinding values, or related precompute state get written
 into the bignum limb storage that lives in our sealed arena.
 
@@ -3982,7 +3982,7 @@ was actually MATCHED for `example.com` verification differs between
 the two stores.  Mozilla curated bundle may have matched an ECDSA
 intermediate first (no RSA precomputation needed); the macOS system
 store may have matched an RSA-rooted chain first.  Either way the
-failure isn't deterministic on bundle content — it's deterministic
+failure isn't deterministic on bundle content - it's deterministic
 on "does verify use RSA on a key inside the sealed arena".
 
 ### Path forward (the multi-week project)
@@ -3998,16 +3998,16 @@ Three approaches, in increasing order of work:
    write, adding the precompute API, upstream PR cycle.  If upstream
    declines, vendor the patch.
 
-2. **Two-arena scheme** — separate "const" arena (cert.raw, asn1
+2. **Two-arena scheme** - separate "const" arena (cert.raw, asn1
    buffers, ssl_config) from "mutable" arena (pk_ctx bignum limbs).
    Routes allocations to one or the other based on call-stack
    classification.  Needs hooking deeper than
-   `mbedtls_platform_set_calloc_free` allows — requires
+   `mbedtls_platform_set_calloc_free` allows - requires
    patching the mbedtls source to thread a "category" through every
    internal `mbedtls_calloc` call.  Estimated 4+ weeks; maintenance
    burden grows with every mbedtls upgrade.
 
-3. **Manual cert-chain deep-copy** — walk every cert post-parse,
+3. **Manual cert-chain deep-copy** - walk every cert post-parse,
    find every `mbedtls_rsa_context` / `mbedtls_ecp_keypair`, swap
    their bignum storage out to heap-resident copies, leave only the
    cert.raw + asn1 buffers in the arena.  Fragile across mbedTLS
@@ -4026,7 +4026,7 @@ there's specific external pressure to close the residual risk.
   of actual high-water for the macOS system CA store.  Page rounding
   to a multiple of 16 KB on Darwin makes the over-provision
   negligible.
-- **No crash from the arena hook or the destroy refactor** —
+- **No crash from the arena hook or the destroy refactor** -
   the bug is purely the seal-vs-runtime-write conflict.  If
   approach 1 above ever lands, only the seal line needs to be
   re-enabled; the rest of the scaffolding is correct.
@@ -4568,7 +4568,7 @@ the whole reason to prefer this over the flavor-lib sketch.
 - [x] Phase 3: Lua as a feature -> runtime-less base; `hull` embeds both archives.
 - [x] Phase 4: publish + wire (`make feature-{lua,js}`, release jobs x3 arches, embed + sign + publish, `--flavor=auto` runtime inference, `e2e_feature_runtime.sh`). Release pipeline dry-run-validated 2026-07-26.
 
-Follow-on (not part of #113): reduced-flavor × runtime and tui × runtime — ✓
+Follow-on (not part of #113): reduced-flavor × runtime and tui × runtime - ✓
 shipped via #114 (HTTP as a composable feature) + #118 (WASM); both compose onto
 pure-compute now. See Status above.
 

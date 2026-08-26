@@ -1,6 +1,6 @@
 # Email Example
 
-Contact-form / email-sending API — accept email requests via HTTP, validate, send via SMTP, and log results to SQLite.
+Contact-form / email-sending API - accept email requests via HTTP, validate, send via SMTP, and log results to SQLite.
 
 ## Routes
 
@@ -32,7 +32,7 @@ curl http://localhost:3000/sent
 To send real email through Gmail:
 
 1. **Enable 2FA** on your Google account at [myaccount.google.com/security](https://myaccount.google.com/security)
-2. **Generate an App Password** at [myaccount.google.com/apppasswords](https://myaccount.google.com/apppasswords) — Google gives you a 16-character code (e.g. `abcd efgh ijkl mnop`)
+2. **Generate an App Password** at [myaccount.google.com/apppasswords](https://myaccount.google.com/apppasswords) - Google gives you a 16-character code (e.g. `abcd efgh ijkl mnop`)
 3. **Run with Gmail SMTP:**
 
 ```bash
@@ -45,7 +45,7 @@ SMTP_FROM=you@gmail.com \
 make dev
 ```
 
-The app uses STARTTLS on port 587 with AUTH PLAIN — the standard Gmail SMTP flow. The App Password acts as a regular password at the SMTP level, bypassing 2FA.
+The app uses STARTTLS on port 587 with AUTH PLAIN - the standard Gmail SMTP flow. The App Password acts as a regular password at the SMTP level, bypassing 2FA.
 
 ## Environment Variables
 
@@ -58,7 +58,7 @@ The app uses STARTTLS on port 587 with AUTH PLAIN — the standard Gmail SMTP fl
 | `SMTP_FROM` | `noreply@example.com` | Sender address |
 | `SMTP_TLS` | `true` | `true` for STARTTLS, `false` for plain TCP |
 
-The manifest declares an allowlist of SMTP hosts: `localhost`, `127.0.0.1`, and `smtp.gmail.com`. To use a different SMTP provider, add its hostname to the `hosts` array in `app.manifest()` — this is Hull's security sandbox preventing arbitrary outbound connections.
+The manifest declares an allowlist of SMTP hosts: `localhost`, `127.0.0.1`, and `smtp.gmail.com`. To use a different SMTP provider, add its hostname to the `hosts` array in `app.manifest()` - this is Hull's security sandbox preventing arbitrary outbound connections.
 
 ## `POST /send` Body
 
@@ -89,7 +89,7 @@ make run                # run the production binary
 make test               # unit tests (both Lua + JS)
 ```
 
-Unit tests run without a real SMTP server — `smtp.send()` fails in test mode but the error is caught, logged to the database, and returned in the response.
+Unit tests run without a real SMTP server - `smtp.send()` fails in test mode but the error is caught, logged to the database, and returned in the response.
 
 ## Mock SMTP Server
 

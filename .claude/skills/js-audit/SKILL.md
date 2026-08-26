@@ -27,7 +27,7 @@ Hull JS code runs inside a sandboxed QuickJS (ES2023) interpreter:
 - **Stack limit:** 1 MB (`JS_SetMaxStackSize`)
 - **Gas metering:** Instruction-count interrupt handler
 - **Module system:** Only `hull:*` modules available via `import`
-- **C capabilities:** `db`, `crypto`, `time`, `env`, `fs`, `http` — accessed through hull module imports
+- **C capabilities:** `db`, `crypto`, `time`, `env`, `fs`, `http` - accessed through hull module imports
 
 ## Audit Categories
 
@@ -43,7 +43,7 @@ Hull JS code runs inside a sandboxed QuickJS (ES2023) interpreter:
 | Symbol abuse | Using `Symbol.toPrimitive` or `Symbol.hasInstance` to bypass checks | Medium |
 | Proxy trap abuse | Using `Proxy` objects to intercept capability calls | High |
 
-**Hull-specific:** The template engine's `_template.compile()` uses `JS_Eval` via C bridge — this is the ONLY allowed code compilation path. Verify no JS-level code compilation exists.
+**Hull-specific:** The template engine's `_template.compile()` uses `JS_Eval` via C bridge - this is the ONLY allowed code compilation path. Verify no JS-level code compilation exists.
 
 ### 2. Input Validation & Injection
 
@@ -136,7 +136,7 @@ const total = `${count} items`
 | Closure leaks | Closures capturing large objects unnecessarily | Medium |
 | String concatenation in loops | `s += chunk` in tight loops | Medium |
 | Large intermediate arrays | Building arrays that could exceed memory limit | Medium |
-| WeakRef/FinalizationRegistry | Not available in QuickJS — don't rely on them | Low |
+| WeakRef/FinalizationRegistry | Not available in QuickJS - don't rely on them | Low |
 
 **Performance patterns:**
 ```javascript
@@ -229,13 +229,13 @@ When `/js-audit` is invoked:
    ```
 
 2. **Scan for Critical Issues**
-   - Search for `eval(`, `Function(`, `new Function(` — sandbox escapes
-   - Search for template literal SQL: `` db.query(`...${` `` or `db.query("..." +` — SQL injection
-   - Search for `{{{ ` in template strings — raw output of user data
+   - Search for `eval(`, `Function(`, `new Function(` - sandbox escapes
+   - Search for template literal SQL: `` db.query(`...${` `` or `db.query("..." +` - SQL injection
+   - Search for `{{{ ` in template strings - raw output of user data
    - Search for `===` comparison of secrets, tokens, hashes
    - Search for hardcoded secret strings
-   - Search for `globalThis.` or `globalThis[` — global pollution
-   - Search for `__proto__`, `constructor.prototype` — prototype pollution
+   - Search for `globalThis.` or `globalThis[` - global pollution
+   - Search for `__proto__`, `constructor.prototype` - prototype pollution
 
 3. **Review Each Module**
    - Check public API functions for input validation

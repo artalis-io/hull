@@ -2,7 +2,7 @@
 
 > **For AI coding agents** (Claude Code, Codex, OpenCode, Cursor, etc.) starting
 > a new Hull application from a product spec. This file is the single canonical
-> entry point — paste it (or its contents) into the agent along with the
+> entry point - paste it (or its contents) into the agent along with the
 > application spec, and the agent will follow the workflow below.
 
 This bootstrap is **app-agnostic**. It assumes you have:
@@ -46,15 +46,15 @@ standalone binaries (`hull build .`). For just developing apps via
 
 It produces, in order:
 
-- **Phase 1 (Discovery)** — agent reads required Hull docs + the spec, then
+- **Phase 1 (Discovery)** - agent reads required Hull docs + the spec, then
   asks the human 5–10 clarifying questions.
-- **Phase 2 (Plan)** — agent writes `PLAN.md` in the new app's repo for
+- **Phase 2 (Plan)** - agent writes `PLAN.md` in the new app's repo for
   human review. **No code yet.**
-- **Phase 3 (Implementation)** — only after the human approves `PLAN.md`.
+- **Phase 3 (Implementation)** - only after the human approves `PLAN.md`.
 
 And, on an ongoing basis:
 
-- **`PLATFORM_GAPS.md`** in the app repo — agent appends here any time it
+- **`PLATFORM_GAPS.md`** in the app repo - agent appends here any time it
   encounters something Hull is missing, instead of coding around it.
 
 ---
@@ -73,10 +73,10 @@ cat BOOTSTRAP.md /path/to/your-spec.md | <your-agent-cli>
 Or, if your agent supports file references / `@`-mentions and can
 read URLs, point it at:
 
-- This file (BOOTSTRAP.md) — local copy OR
+- This file (BOOTSTRAP.md) - local copy OR
   `https://github.com/artalis-io/hull/blob/main/BOOTSTRAP.md`.
 - The product spec.
-- The Hull source docs — either a local clone OR the GitHub URLs
+- The Hull source docs - either a local clone OR the GitHub URLs
   listed in [Phase 1: required reading](#phase-1-required-reading).
 
 The agent needs **read** access to Hull's docs (web or local) and
@@ -89,7 +89,7 @@ need to modify the Hull source tree.
 ## Agent: read this entire file before doing anything else
 
 You are an AI coding agent. You are going to build a Hull application. You
-likely have very little prior knowledge of Hull. **That is fine** — Hull is
+likely have very little prior knowledge of Hull. **That is fine** - Hull is
 self-describing, and this bootstrap will tell you exactly what to read,
 what patterns to follow, and what to avoid.
 
@@ -100,21 +100,21 @@ the spec looks clear, the discovery loop surfaces mismatches between
 the spec author's intent and your reading of it BEFORE they're baked
 into code.
 
-**Phase 0 — Archetype.** Determine what KIND of app this is (web /
+**Phase 0 - Archetype.** Determine what KIND of app this is (web /
 CLI / TUI / API / compute). The answer drives `hull init`'s flags
 and which reading is actually required.
-**Phase 1 — Discovery.** Required reading (archetype-filtered) +
+**Phase 1 - Discovery.** Required reading (archetype-filtered) +
 clarifying questions about the spec.
-**Phase 2 — Plan.** Write `PLAN.md` to the new app's repo. **Stop. Wait
+**Phase 2 - Plan.** Write `PLAN.md` to the new app's repo. **Stop. Wait
 for human approval before writing any code.**
-**Phase 3 — Implement.** Build per `PLAN.md`, in small testable
+**Phase 3 - Implement.** Build per `PLAN.md`, in small testable
 increments.
 
 ### Phase 0: pick the app archetype
 
 Hull scaffolds different shapes via `hull init` flags. **Before
 reading anything else,** identify which archetype the product spec
-implies — then run `hull init` with the matching flag set, so the
+implies - then run `hull init` with the matching flag set, so the
 rest of your work happens on the right skeleton.
 
 If the spec doesn't make the archetype obvious, **ask the human**
@@ -127,7 +127,7 @@ before proceeding. Don't pick by vibe.
 | **CLI tool** | Runs once, does a thing, exits. Pipelines / scripts / one-shot operations. Returns shell exit codes. | `hull init --cli` | `examples/hello_cli`, `examples/cli_modular` |
 | **TUI app** | Interactive terminal UI, "dashboard in the terminal", REPL, log tailer, picker. | `hull init` then add `hull/tui` bindings | `examples/tui_dashboard`, `examples/tui_chat`, `examples/tui_log_tailer`, `examples/tui_modular`, `examples/tui_picker`, `examples/tui_repl`. See `docs/cli_mode.md` for the `app.main` lifecycle TUI apps run on. |
 | **Compute / WASM service** | Pure data transformation, scoring, ML inference, no persistent state. Often run as a sidecar. **Large-file (OSM PBF / Parquet / raster / model) scanning** without copying the file into WASM: map a window with `fs.mmap(path, {offset,length})` and attach it read-only to one call via `compute.call(m, in, {spans={{name,buffer}}})`; the plugin reads it in place through the `hull/wasm/span.h` SDK (zero-copy, no per-access host call, files bigger than WASM's 4 GiB space via windowing). | `hull init` + `compute/` modules; a compute app already links zero HTTP/Keel/TLS/SQLite/WASM it doesn't use (the SLIM base auto-composes), or add `--flavor=pure-compute` to also validate no HTTP/TLS is declared. GPU compute + DuckDB OLAP are opt-in composable features (`hull build --with=gpu\|duckdb`, native-only) - see `docs/features_and_flavors.md` | `examples/compute`, `examples/compute_gpu_chain`, `examples/mapped_spans`. See `docs/wamr_architecture.md`, CLAUDE.md § "WASM Compute Plugins" (→ "Mapped spans"), and `docs/wasm_mapped_spans_design.md`. |
-| **Hybrid (app.main + serve loop)** | App needs startup migrations + a serve loop. App needs to run a one-shot then serve. | `hull init` (default) + register `app.main` alongside routes — both are supported simultaneously, see CLAUDE.md § "App Lifecycle" | Any of the above; the lifecycle page covers patterns. |
+| **Hybrid (app.main + serve loop)** | App needs startup migrations + a serve loop. App needs to run a one-shot then serve. | `hull init` (default) + register `app.main` alongside routes - both are supported simultaneously, see CLAUDE.md § "App Lifecycle" | Any of the above; the lifecycle page covers patterns. |
 
 After picking, run the chosen `hull init` invocation (still in the
 empty app repo). It creates the right `app.lua` / `app.js`, `tests/`,
@@ -195,20 +195,20 @@ yourself reading source to answer a structural question about an app,
 
 Other commands you'll lean on heavily during Phase 3:
 
-- `hull dev` — run with file-watch, auto-reload on save.
-- `hull test` — in-process HTTP test harness against `:memory:` DB
+- `hull dev` - run with file-watch, auto-reload on save.
+- `hull test` - in-process HTTP test harness against `:memory:` DB
   with migrations applied. Fast (sub-second per test). Run after
   every change.
-- `hull check` — validate the manifest before tests fire.
-- `hull migrate [status|new <name>]` — apply / inspect / create
+- `hull check` - validate the manifest before tests fire.
+- `hull migrate [status|new <name>]` - apply / inspect / create
   migrations.
-- `hull build` — ship a standalone binary with everything embedded.
-- `hull doctor` — environment / toolchain sanity check.
+- `hull build` - ship a standalone binary with everything embedded.
+- `hull doctor` - environment / toolchain sanity check.
 
 ### Phase 1: required reading (in this order)
 
 You must read these files before asking questions or writing anything.
-They are listed roughly in dependency order — each builds on the
+They are listed roughly in dependency order - each builds on the
 previous. Paths are relative to the Hull repo root; if you don't have
 a local clone, fetch from
 `https://github.com/artalis-io/hull/blob/main/<path>` (raw form:
@@ -216,10 +216,10 @@ a local clone, fetch from
 
 | # | Path | Why |
 |---|------|-----|
-| 1 | `CLAUDE.md` | The Hull project's own conventions for agents. Read it ALL — it covers build flags, manifest system, capability layer, runtime sandboxes, sub-commands, stdlib middleware, and the WASM/GPU compute story. Long but dense; every section matters. |
+| 1 | `CLAUDE.md` | The Hull project's own conventions for agents. Read it ALL - it covers build flags, manifest system, capability layer, runtime sandboxes, sub-commands, stdlib middleware, and the WASM/GPU compute story. Long but dense; every section matters. |
 | 2 | `README.md` | High-level pitch and feature surface. Read for the worldview. |
 | 3 | `docs/htmx.md` | The hypermedia pattern guide (~700 lines). Architecture, CSP, CSRF, fragment-vs-page rendering, flash, delete confirmation, search + debounce, inline edit, idempotency, empty states, testing. |
-| 4 | `docs/htmx_widgets.md` | The §1.5.g widget tier. Eight widgets that handle the common UI patterns (toast, confirm, form, search, inline-edit, sort, pagination, table). **Read every section** — this is the answer to "should I build my own X?" 90% of the time. |
+| 4 | `docs/htmx_widgets.md` | The §1.5.g widget tier. Eight widgets that handle the common UI patterns (toast, confirm, form, search, inline-edit, sort, pagination, table). **Read every section** - this is the answer to "should I build my own X?" 90% of the time. |
 | 5 | `docs/security.md` | Capability model, sandbox enforcement, manifest gates. Critical for understanding what your app is allowed to do and how. |
 | 6 | `examples/hypermedia_photos/` (Lua AND JS variants) | The reference HTMX app. Read `app.lua` and `app.js` side by side, plus `templates/`, `migrations/`, and `tests/`. This is what a real, production-shaped Hull app looks like. |
 | 7 | `examples/htmx_widgets_register/` | Exercises all 8 widgets in one CRUD page. Use as a recipe for which widget fits which UX need. |
@@ -246,7 +246,7 @@ spec. Good questions:
   multi-tenant? If multi-tenant, is isolation per-database, per-row, or
   per-schema?").
 - Force decisions the spec author may have deferred ("How should
-  out-of-stock items render — separate table, struck-through, hidden?").
+  out-of-stock items render - separate table, struck-through, hidden?").
 - Pick between Hull-supported alternatives ("Sessions: do you want
   sliding TTL (default) or hard 24h absolute? See `session.init` opts.").
 
@@ -266,7 +266,7 @@ After the human answers, write `PLAN.md` in the new app's repo. Suggested
 structure (adapt to the app):
 
 ```
-# <App Name> — Implementation Plan
+# <App Name> - Implementation Plan
 
 ## 1. Scope
 What's in v1, what's explicitly out, what's "v2 maybe".
@@ -277,7 +277,7 @@ reason it's there. Goal: a reader can audit "do we need all of these
 and only these?" in 60 seconds.
 
 ## 3. Manifest (proposed)
-The actual table you'll pass to `app.manifest({...})` — modules, fs,
+The actual table you'll pass to `app.manifest({...})` - modules, fs,
 hosts, env, csp. Include comments for non-obvious entries.
 
 ## 4. Data model
@@ -349,7 +349,7 @@ MySQL backends are opt-in composable features (`--with=`), native-only.
 
 Pick Lua OR JavaScript at startup, not both. The entry file extension
 decides (`app.lua` → Lua, `app.js` → JS). Both runtimes have the same
-stdlib surface — pick on team preference. Most reference apps ship
+stdlib surface - pick on team preference. Most reference apps ship
 both variants side-by-side as a parity check.
 
 ### Capability sandbox
@@ -403,10 +403,10 @@ app.manifest({
 What you put in `modules` declares which stdlib modules the app may
 `require()` / `import`. What you put in `fs` / `hosts` / `env` is
 enforced **at call time** by the cap layer + kernel sandbox. The two
-gates are independent — declaring `http-client` doesn't open the
+gates are independent - declaring `http-client` doesn't open the
 network unless you also list `hosts`.
 
-### Standard library — the parts you'll likely use
+### Standard library - the parts you'll likely use
 
 | Layer | Module | Use |
 |---|---|---|
@@ -442,9 +442,9 @@ network unless you also list `hosts`.
 
 Run `hull modules available --json` for the live, complete list with
 deps + capability requirements. Don't trust this table to be exhaustive
-forever — Hull evolves.
+forever - Hull evolves.
 
-### Tooling — the parts you'll likely use
+### Tooling - the parts you'll likely use
 
 | Command | Use |
 |---|---|
@@ -477,7 +477,7 @@ Do not introduce:
   the URL, or the DB. The browser is a thin renderer.
 
 If the spec implies a SPA (a feature genuinely requires complex
-client state — real-time canvas, in-browser data manipulation),
+client state - real-time canvas, in-browser data manipulation),
 **raise it in Phase 1** as a clarifying question. Don't silently
 build one.
 
@@ -491,11 +491,11 @@ shell out, don't `require("os")` (it's not loaded), don't reinvent.
 | Read a file | `fs.read()` after declaring path in `manifest.fs.read` |
 | Write a file | `fs.write()` after declaring path in `manifest.fs.write` |
 | Make HTTPS calls | `http.fetch()` after declaring host in `manifest.hosts` |
-| Run SQL | `db.query()` / `db.exec()` — ALWAYS parameterized |
+| Run SQL | `db.query()` / `db.exec()` - ALWAYS parameterized |
 | Sign / verify | `crypto.*` (don't bring in another crypto lib) |
 | Hash passwords | `crypto.verify_password()` (PBKDF2, ready to use) |
 | Send email | `hull/smtp` after declaring SMTP host |
-| Generate IDs | `crypto.random(n)` — don't roll a "secure random" yourself |
+| Generate IDs | `crypto.random(n)` - don't roll a "secure random" yourself |
 
 ### Auth: don't roll your own
 
@@ -558,7 +558,7 @@ content, etc.).
 You will sometimes hit a wall: Hull is missing a primitive, an API has
 the wrong shape for your use case, the docs don't cover your scenario,
 or the widget you need doesn't exist. **Do not silently work around
-these.** They are signal — the maintainer wants to know.
+these.** They are signal - the maintainer wants to know.
 
 ### How to recognize a platform gap
 
@@ -581,7 +581,7 @@ Create or append to `PLATFORM_GAPS.md` in the **app's repo** (not
 Hull's). Use this template per entry:
 
 ```markdown
-## YYYY-MM-DD — <one-line title>
+## YYYY-MM-DD - <one-line title>
 
 **Context**: What were you trying to build when this came up? Cite the
 spec section + the relevant Hull doc you were trying to use.
@@ -594,7 +594,7 @@ existed, and the closest existing thing.
 would be wrong / why other apps would benefit.
 
 **Workaround used (if any)**: What you ended up doing in the app, OR
-"none — blocked, asking human".
+"none - blocked, asking human".
 
 **Suggested platform addition**: Be concrete. Function signature,
 manifest schema, capability name, widget API. The maintainer will edit;
@@ -646,7 +646,7 @@ end)
 
 ### Templates live in `templates/`
 
-`{{ var }}` HTML-escaped, `{{{ var }}}` raw (rare — usually you want
+`{{ var }}` HTML-escaped, `{{{ var }}}` raw (rare - usually you want
 the widget helpers' `{{ widget_attrs | raw }}` pattern), `{% if %}` /
 `{% for %}` / `{% include %}` / `{% extends %}` / `{% block %}`.
 
@@ -797,7 +797,7 @@ Or wrap in `hull deploy` for systemd + Dockerfile + fly.toml generation.
    ask hull](#when-in-doubt-ask-hull).
 6. **Hull is opinionated.** When in doubt about whether to use a Hull
    primitive or roll your own: use Hull's. If Hull's doesn't fit,
-   that's a gap — flag it.
+   that's a gap - flag it.
 7. **Tests pass at every step.** `hull test` is fast (in-memory DB);
    run it after every step in Phase 3's sequencing.
 

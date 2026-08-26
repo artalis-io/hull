@@ -6,14 +6,14 @@
 > **For the widget tier** (toast, confirm, form, search, sort,
 > pagination, inline-edit, table) see the separate
 > [HTMX widgets guide](htmx_widgets.md). The page below covers the
-> broader profile — scaffolding, Pico, CSP nonces, htmx core
-> helpers — that the widgets sit on top of.
+> broader profile - scaffolding, Pico, CSP nonces, htmx core
+> helpers - that the widgets sit on top of.
 >
 > **Positioning:** the base `hull/web/htmx` module (htmx request
 > detection + `HX-*` response headers) is frontend-agnostic core, a peer
 > of `csv`/`jwt`/`validate`. The 8 **widgets** are an *optional,
 > opinionated component pack* (they emit HTML/CSS/JS and are inert
-> without htmx on the page) — opt into them only if you're building
+> without htmx on the page) - opt into them only if you're building
 > htmx-first. See the widgets guide's "Positioning" section.
 
 Hypermedia means HTML is the application protocol. Browsers fetch HTML, render it, follow links, submit forms. HTMX (`htmx.org`, v2.x in Hull's profile) extends the HTML vocabulary so any element can issue any HTTP verb and swap the response into the page. The server's job is unchanged: return HTML. There is no JSON state machine, no client-side router, no build step.
@@ -276,15 +276,15 @@ all the work:
 
 What each piece does:
 
-- `hx-trigger="keyup changed delay:300ms, search"` — HTMX waits 300ms
+- `hx-trigger="keyup changed delay:300ms, search"` - HTMX waits 300ms
   after the LAST keystroke before firing. The `changed` qualifier
   means the request only goes out if the value actually changed
   (typing then deleting the same chars is a no-op). The second trigger
   `search` catches the browser's native input-clear button.
-- `hx-target="#entries"` — the response replaces the `<ul id="entries">`
+- `hx-target="#entries"` - the response replaces the `<ul id="entries">`
   inner content. Server returns just the `<li>` rows; no need to
   re-render the wrapper.
-- `autocomplete="off"` — the browser's history dropdown is noise here.
+- `autocomplete="off"` - the browser's history dropdown is noise here.
 
 Server side: a tiny route that runs `LIKE` and returns the row
 fragments. Handle the empty-result case explicitly so the user knows
@@ -338,7 +338,7 @@ app.use("GET", "/search", ratelimit.middleware({
 
 The default 429 JSON response works fine for fetch-based clients; for
 HTMX you can pair this with §1.5.d-3's planned `htmx_response` option
-on the middleware (not yet shipped — until then, returning JSON is
+on the middleware (not yet shipped - until then, returning JSON is
 acceptable because HTMX 429s land in `htmx:responseError` for app
 handling).
 
@@ -371,7 +371,7 @@ The Edit button on the row swaps the whole `<li>` with the edit form:
 ```
 
 The edit form posts via `hx-patch` (HTMX wraps the PATCH verb on a
-form automatically — the browser still sends POST, but HTMX adds the
+form automatically - the browser still sends POST, but HTMX adds the
 right `X-HTTP-Method-Override` semantics):
 
 ```html
@@ -444,7 +444,7 @@ progressive enhancement.
 
 The CSRF middleware's default `max_age = 3600` (1hr) is usually fine
 for single-form submits. Inline edit changes the math: a user might
-open `/entries/123/edit`, leave it open all afternoon, then submit —
+open `/entries/123/edit`, leave it open all afternoon, then submit -
 the token in the form has expired.
 
 Two ways to handle:
@@ -469,7 +469,7 @@ visual feedback feel broken. HTMX has a built-in mechanism:
 
 1. Mark an element as the indicator with `class="htmx-indicator"`.
 2. Reference it via `hx-indicator="#id"` on whichever element fires
-   the request (or on a parent — the attribute inherits to children).
+   the request (or on a parent - the attribute inherits to children).
 3. While a request is in-flight, HTMX adds `class="htmx-request"` to
    the indicator. CSS reveals it.
 
@@ -532,7 +532,7 @@ own form):
 
 The CSS `.htmx-request .htmx-indicator { opacity: 1 }` rule also
 covers the case where the indicator is a child of the triggering
-form — htmx adds `htmx-request` to the form during the request.
+form - htmx adds `htmx-request` to the form during the request.
 
 ### Pico's `aria-busy="true"` alternative
 
@@ -615,7 +615,7 @@ end)
 
 `trim = true` on the rule strips whitespace into the SAME `fields`
 table in-place, so the post-validate `fields.title` is the cleaned
-value — no separate variable needed.
+value - no separate variable needed.
 
 `htmx.retarget(res, "#new-entry") + htmx.reswap(res, "outerHTML")`
 overrides the form's own `hx-target="#entries"` so the validation
@@ -624,7 +624,7 @@ response replaces the form element itself, not the list.
 ### Why not just check `if fields.title == ""`?
 
 Could you. But `hull.validate` already handles trim, length bounds,
-type coercion, regex, allowlist, email, custom function — all
+type coercion, regex, allowlist, email, custom function - all
 declaratively. Mixing one schema for one field with hand-rolled
 checks for another gets messy fast. Use the validator for everything
 and the error block in the template handles each case uniformly.
@@ -732,7 +732,7 @@ double-submit protection opt in:
 Generate the UUID once per render (server-side, in the template
 context). The client sends the same key on every retry of the same
 logical action. The scaffold ships the middleware but does NOT add
-`hx-headers` by default — apps add it on the forms that need it.
+`hx-headers` by default - apps add it on the forms that need it.
 
 ### Semantics
 
@@ -862,7 +862,7 @@ Three knobs vs a normal HTMX form:
 |---|---|
 | `hx-encoding="multipart/form-data"` | Tells HTMX to send `multipart/form-data` instead of the default `application/x-www-form-urlencoded`. Without it, the file's filename + bytes don't make it through. |
 | `hx-trigger="change"` on the `<input type="file">` | Submits as soon as the user picks a file (no separate Submit button needed). Drop this to require an explicit submit. |
-| `accept="image/png,..."` | Native browser file-picker filter. **Not authoritative** — server-side `mime_allowlist` is the real gate (clients can spoof Content-Type). The `accept` is just UX so a phone gallery doesn't show 50 PDFs. |
+| `accept="image/png,..."` | Native browser file-picker filter. **Not authoritative** - server-side `mime_allowlist` is the real gate (clients can spoof Content-Type). The `accept` is just UX so a phone gallery doesn't show 50 PDFs. |
 
 CSRF still has to be wired through. The middleware reads the token
 from the `X-CSRF-Token` header OR the `_csrf` form field; for
@@ -949,7 +949,7 @@ inline without a page reload.
 For more elaborate UX (per-field validation messages, multi-error
 display), use the same `_form_field.html` partial pattern documented
 in the [Form re-population](#form-re-population-on-validation-error)
-section above — pass `errors = { photo = "MIME not allowed" }` to
+section above - pass `errors = { photo = "MIME not allowed" }` to
 the form template and let `_form_field.html` render the error block.
 
 ### Progress events
@@ -1008,7 +1008,7 @@ sets `Content-Disposition` with the original filename, and uses
 images).
 
 `loading="lazy"` on the `<img>` makes the browser only fetch
-attachments as they scroll into view — useful for entry lists with
+attachments as they scroll into view - useful for entry lists with
 many attachments.
 
 ### Working example

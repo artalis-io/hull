@@ -163,7 +163,7 @@ Single line. Always restrained.
 
 ## Typography & character rules
 
-- **No em-dashes (`—`).** Replace with `. ` (period + capitalize next word) for between-clause breaks, parentheses for parentheticals, or colons for elaborations. See git history of commit `6b6f394` for the precedent. Applies to: README, site/, AGENTS.md, CLAUDE.md, release notes. UI placeholders that need a visual "no value" marker use middle dot `·` instead.
+- **No em-dashes (`-`).** Replace with `. ` (period + capitalize next word) for between-clause breaks, parentheses for parentheticals, or colons for elaborations. See git history of commit `6b6f394` for the precedent. Applies to: README, site/, AGENTS.md, CLAUDE.md, release notes. UI placeholders that need a visual "no value" marker use middle dot `·` instead.
 - **Hyphens are fine.** `kernel-enforced`, `capability-secure`, `single-binary`, etc.
 - **En-dashes (`–`) are acceptable for numeric ranges** (`Phase 1–5`, `Lua 5.4`) but not for prose.
 - **Title case for headings; sentence case for subheads.** Match existing site/README style.

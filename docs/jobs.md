@@ -324,7 +324,7 @@ jobs.enqueue("report", data, { concurrencyKey: "tenant-42", concurrency: 2 });
 `jobs.enqueue(type, data, { depends_on = { id1, id2 } })` makes a job **wait
 until those jobs complete**. It starts `blocked` (not claimed) and becomes
 `pending` only once every dependency is `done`. Each dependency's result is
-passed to the handler as **`job.deps`** — an array in declaration order.
+passed to the handler as **`job.deps`** - an array in declaration order.
 
 ```lua
 -- chain: extract -> transform -> load, passing results forward

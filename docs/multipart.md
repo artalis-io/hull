@@ -4,13 +4,13 @@
 `multipart/form-data` request bodies as an iterator over parts. Routes
 opt in at registration; the handler runs **before** the body is fully
 buffered and drives parsing on demand. There is no `req.body` to read
-— bytes are pulled out of the socket as the handler asks for them.
+- bytes are pulled out of the socket as the handler asks for them.
 
 > **Scope.** This document covers the iterator API only. The
 > attachment-storage layer (`hull/attachment@1`: content-addressed
 > dedup, refcount GC, MIME sniffing, manifest-declared write dirs) is
 > a separate stdlib module landing in a later release on top of this
-> primitive — see `docs/roadmap_next.md §1.5.b`. Until then, app code
+> primitive - see `docs/roadmap_next.md §1.5.b`. Until then, app code
 > that wants to persist uploads has to bring its own storage layer
 > (Hull's `fs.*` module doesn't yet expose a user-facing write today;
 > the example here hashes parts in memory and returns metadata).
@@ -24,7 +24,7 @@ Use streaming-multipart routes when:
 - one or more parts is a file, OR the total body could be too large to
   hold in memory.
 
-For everything else — JSON, plain forms, small bodies — the regular
+For everything else - JSON, plain forms, small bodies - the regular
 buffered-body path is simpler: leave `opts.multipart` off and read
 `req.body` as a string.
 
@@ -63,14 +63,14 @@ app.post("/upload", async (req, res) => {
 ```
 
 JS accepts both snake_case and camelCase cap names; snake_case wins if
-both are present. Every cap defaults to `0` (unlimited) when omitted —
+both are present. Every cap defaults to `0` (unlimited) when omitted -
 **always set sensible caps for adversarial input.** Exceeding any cap
 mid-stream raises a parser error which the iterator surfaces to the
 handler (see "Errors" below).
 
 A non-streaming POST/PUT route with no `opts.multipart` declared
 behaves exactly as before: `req.body` is the buffered body string,
-even for multipart content types — the parser is not invoked.
+even for multipart content types - the parser is not invoked.
 
 ## Reading parts
 
@@ -81,7 +81,7 @@ for part in req:multipart() do
     print(part.name, part.filename, part.content_type)
 
     if part.filename then
-        -- File field — stream chunks and hash incrementally
+        -- File field - stream chunks and hash incrementally
         local hasher = crypto.create_sha256()
         local total = 0
         for chunk in part:chunks() do
@@ -91,7 +91,7 @@ for part in req:multipart() do
         log.info(string.format("%s: %d bytes, sha256=%s",
             part.filename, total, hasher:digest()))
     else
-        -- Text field — read the whole body
+        -- Text field - read the whole body
         local value = part:read()
         log.info(part.name .. " = " .. value)
     end
@@ -122,7 +122,7 @@ for await (const part of req.multipart()) {
 ```
 
 > The `crypto.create_sha256()` / `crypto.createSha256()` hasher used above is
-> the incremental SHA-256 API — `update(chunk)` repeatedly, then
+> the incremental SHA-256 API - `update(chunk)` repeatedly, then
 > `digest()` once for the 64-char hex digest. Memory use stays
 > O(chunk_size) regardless of how large the upload is. The one-shot
 > `crypto.sha256(buf)` still exists for when you already have the
@@ -168,7 +168,7 @@ event surfaces as one chunk (coalescing arrives in a follow-up).
 
 ### Binary safety
 
-Both runtimes return raw bytes — no UTF-8 encoding, no truncation,
+Both runtimes return raw bytes - no UTF-8 encoding, no truncation,
 no normalization:
 
 - **Lua** strings are byte arrays. `#chunk` is the byte count.
@@ -183,7 +183,7 @@ Decoding text fields:
 | Runtime | API                                                                |
 |---------|--------------------------------------------------------------------|
 | Lua     | `part:read()` returns a string ready to use.                       |
-| JS      | `new TextDecoder().decode(buf)` (BYOP — QuickJS doesn't bundle it; the manual ASCII loop above is fine for form-encoded text). |
+| JS      | `new TextDecoder().decode(buf)` (BYOP - QuickJS doesn't bundle it; the manual ASCII loop above is fine for form-encoded text). |
 
 ## Auto-drain
 
@@ -206,7 +206,7 @@ end
 **only until the next `iter.next()` call.** The parser is forward-only
 and there is no way to rewind; holding a part across the next iteration
 and then calling `part.read()` or `part.chunks()` on it will read from
-whatever part is current — almost certainly the wrong thing.
+whatever part is current - almost certainly the wrong thing.
 
 In practice this is the natural shape of a `for ... of` loop, so it
 takes effort to misuse. Don't stash the part in an outer-scope
@@ -214,15 +214,15 @@ collection and read it later.
 
 ## Errors
 
-The parser can emit `ERROR` at any time — typically when a per-part or
+The parser can emit `ERROR` at any time - typically when a per-part or
 total-body cap is exceeded, or when the body itself is malformed
 (missing boundary, truncated mid-part).
 
-- **Lua** — `iter.next()` / `part.read()` / `chunks.next()` raises a
+- **Lua** - `iter.next()` / `part.read()` / `chunks.next()` raises a
   Lua error with `req:multipart(): parser error (code N)` where `N` is
   the Keel `KL_MP_ERR_*` code. Bubbles up through your handler unless
   you `pcall` it; dispatch writes a 500 with `Internal Server Error`.
-- **JS** — the awaited Promise is rejected with an `Error` whose
+- **JS** - the awaited Promise is rejected with an `Error` whose
   message is `multipart: parser error`. Catch it with try/catch around
   the `for await` body to send a user-facing 4xx, or let it bubble for
   the default 500.
@@ -240,20 +240,20 @@ Common parser error codes (see `vendor/keel/include/keel/body_reader_multipart.h
 
 ## Manifest interaction
 
-`opts.multipart` is the entire opt-in — no special manifest flag is
+`opts.multipart` is the entire opt-in - no special manifest flag is
 needed. The iterator pulls bytes off the socket; how (or whether) the
 handler persists those bytes is a separate question.
 
-`hull/attachment@1` (a later stdlib module — see
+`hull/attachment@1` (a later stdlib module - see
 [`docs/roadmap_next.md` §1.5.b](roadmap_next.md)) will wrap this
 iterator with content-addressed disk storage, dedup, MIME sniffing,
 and refcount GC, and will own the manifest-allowlisted write path it
 needs. Until it lands, applications that need to persist uploads
-have to bring their own storage layer — Redis, S3, or whatever — and
+have to bring their own storage layer - Redis, S3, or whatever - and
 use the iterator as the
 ingest primitive.
 
-The host allowlist (`manifest.hosts`) is unrelated — inbound HTTP
+The host allowlist (`manifest.hosts`) is unrelated - inbound HTTP
 isn't constrained by host allowlists.
 
 ## Constraints + known limitations
@@ -262,10 +262,10 @@ isn't constrained by host allowlists.
   `NEED_DATA` and resumes from the socket-read callback. The in-process
   test harness (`hull test` / `test.post(...)`) has no socket, so the
   first `NEED_DATA` raises a clear error. End-to-end coverage for these
-  routes lives in `tests/e2e_multipart.sh` — they need to run against a
+  routes lives in `tests/e2e_multipart.sh` - they need to run against a
   real `hull dev` or built binary.
 - **One iterator per request.** Calling `req.multipart()` more than
-  once per request returns iterators that share parser state — the
+  once per request returns iterators that share parser state - the
   first iterator consumes; subsequent iterators see `DONE`.
 - **Mid-stream connection close.** If the client disconnects while
   the handler is awaiting bytes, the parked continuation currently
@@ -281,7 +281,7 @@ isn't constrained by host allowlists.
   immediately; `on_data` then fires with the handler alive, so any
   parser cap (`max_parts`, `max_part_size`, `max_headers_size`,
   `max_total_size`) is caught by a `pcall` / `try-catch` around the
-  iterator and the handler's structured 413 response is delivered —
+  iterator and the handler's structured 413 response is delivered -
   whether the body fits in one socket read or spans many.
 
   Production apps should still set conservative caps and rely on the
@@ -296,7 +296,7 @@ isn't constrained by host allowlists.
 
 ## Worked example
 
-A complete runnable demo lives in `examples/multipart_upload/` —
+A complete runnable demo lives in `examples/multipart_upload/` -
 identical Lua and JS routes that accept text fields and file uploads,
 write files to `data/uploads/`, and respond with a JSON inventory.
 
