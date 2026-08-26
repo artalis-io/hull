@@ -899,7 +899,7 @@ All system access is mediated by C capability functions. Neither runtime touches
 | Module | File | Key Functions |
 |--------|------|---------------|
 | Database | `cap/db.c` | `hl_cap_db_query()`, `hl_cap_db_exec()`, `hl_cap_db_begin/commit/rollback()` |
-| Filesystem | `cap/fs.c` | `hl_cap_fs_read()`, `hl_cap_fs_write()`, `hl_cap_fs_exists()`, `hl_cap_fs_delete()` |
+| Filesystem | `cap/fs.c`, `cap/fs_resolve.c`, `cap/fs_policy.c` | `hl_cap_fs_read()`, `hl_cap_fs_write()`, `hl_cap_fs_mmap()`, `hl_cap_fs_stat()`, `hl_cap_fs_list()`, all through the descriptor-relative virtual-root resolver + compiled `fs.read`/`fs.write` authorization policy; READ/WRITE/MMAP leaves must be regular files (`not_a_regular_file`). `hl_cap_fs_exists()`/`hl_cap_fs_delete()` exist at the cap layer but are NOT app-exposed |
 | Crypto | `cap/crypto.c` | SHA-256/512, HMAC, PBKDF2, Ed25519, secretbox, box, random |
 | HTTP client | `cap/http.c` | `hl_cap_http_request()` with host allowlist |
 | Environment | `cap/env.c` | `hl_cap_env_get()` with manifest allowlist |
@@ -1179,10 +1179,11 @@ The naming pattern is `HULL_NO_<KIND>_CACHE` where `<KIND>` is the registry's `e
 
 ### Project source discovery (`hull.source.*` + `hull.project.*`)
 
-Hull statically analyzes an app's **Lua source WITHOUT executing it**, producing a canonical
+Hull statically analyzes an app's **source WITHOUT executing it**, producing a canonical
 representation of annotated declarations that a future codegen step (Query/Compute IR) can
-consume. Two layers, both **pure Lua in the sandboxed tool VM** (the whole analysis brain is
-zero C):
+consume. Both frontends ship: the Lua analysis brain is pure Lua in the sandboxed tool VM;
+the JavaScript frontend runs in a bundled QuickJS tooling session (it never executes app JS).
+Two layers:
 
 - **`hull.source.*`** (`stdlib/cli/lua/hull/source/`) - the language-analysis layer: a
   pure-Lua recursive-descent Lua 5.4 lexer/parser (NEVER `load()`), half-open byte ranges,
@@ -1193,9 +1194,12 @@ zero C):
   exclude-dirs pruned during traversal, canonical containment, deterministic/regular/no-symlink)
   - the ONE recursive source walker in Hull. Design: [docs/lua_source_analysis_design.md](docs/lua_source_analysis_design.md), [docs/hull_analyze_design.md](docs/hull_analyze_design.md).
 - **`hull.project.*`** (`stdlib/cli/lua/hull/project/`) - the frontend-neutral project layer
-  on top: `registry` (extension → frontend map; Lua analyzable, `js/mjs/cjs` reserved +
-  `analyzable=false`, never parsed as Lua), `frontend_lua` (the ONLY module that knows Lua AST
-  layouts), `model` (the `ProjectDiscovery` - deterministic textual IDs, per-name facts sharing
+  on top: `registry` (extension → frontend map; `lua` and `js`/`mjs`/`cjs` are both analyzable
+  frontends, `analyzable` computed per build from `tool.frontend_available(engine)` - JS is on
+  by default and reported unsupported only on a `RUNTIME=lua` build; a `.js` is never parsed as
+  Lua), `frontend_lua` (knows Lua AST layouts) + the JS frontend (`stdlib/cli/js/hull/source/`,
+  run in a QuickJS tool session via `HL_FRONTEND_JS`), `model` (the `ProjectDiscovery` -
+  deterministic textual IDs, per-name facts sharing
   a `group_id` with each annotation carrying `target_group_id` + `frontend`, annotated-only
   public `declarations[]`, independent `valid` / `complete` axes, `by_annotation`/`by_source`/
   `by_language`/`by_id`/`annotated` indexes), `analyze` (the single canonical host analyzer:
@@ -1212,7 +1216,8 @@ schema either way (`source: "dev"` vs `"standalone"`). The build seam is documen
 but **abstraction-only**: `build.lua` is unchanged and does no per-build parse; a future
 lowering consumer calls `hull.project.analyze(app_dir)` in `main()` (after `parse_args()`,
 before `discover()`). ~180 lines of hardened C (in `agent.c` + `dev.c`) handle only the
-live-read/sidecar/publish glue; all source parsing stays in Lua. Tests:
+live-read/sidecar/publish glue; Lua source parsing stays in Lua and JavaScript parses in the
+bundled QuickJS tool session (never the app runtime), not in C. Tests:
 `stdlib/cli/lua/hull/project/tests/test_project.lua` (UTEST leg `project_discovery`) +
 `tests/e2e_project_discovery.sh` (`make e2e-project-discovery`, incl. a live backgrounded
 `hull dev --agent`).

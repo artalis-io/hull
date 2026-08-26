@@ -180,6 +180,41 @@ import { log } from "hull:log";
 Modules are loaded on first import; subsequent imports return the same
 binding.
 
+### `fs` - Filesystem
+
+Sandboxed, manifest-authorized filesystem. Every path resolves under the app root
+through a descriptor-relative, virtual-root resolver (in-sandbox symlinks followed
+and contained) gated by the compiled `fs.read` / `fs.write` authorization policy.
+This mirrors the Lua `hull.fs` surface exactly (see `docs/api/lua.md` for the full
+semantics).
+
+```javascript
+import { fs } from "hull:fs";
+
+const bytes   = fs.read("config.json");              // ArrayBuffer (throws on error)
+fs.write("uploads/out.bin", bytes);                  // creates parents + truncates; true
+const meta    = fs.stat("data.csv");                 // { type, size, mode, mtime } | null
+const entries = fs.list("uploads");                  // [{ name, type, size }, ...] (ordered)
+const buf     = fs.mmap("big.bin", { offset, length }); // read-only MappedBuffer (optional window)
+```
+
+- `fs.read(path)` -> `ArrayBuffer` (throws on error).
+- `fs.write(path, bytes)` -> `true`; creates missing parents and truncates.
+- `fs.stat(path)` -> `{ type, size, mode, mtime }`, or `null` when the path does not
+  exist (so `fs.stat(p) !== null` subsumes an existence check). `type` is `"file"` /
+  `"dir"` / `"symlink"` / `"other"`; a terminal symlink is reported as a link (lstat),
+  never followed.
+- `fs.list(dir)` -> deterministically-ordered `Array<{ name, type, size }>`
+  (non-recursive; `.` / `..` omitted), gated by `fs.read`. Ordering is unsigned-byte
+  lexicographic, identical on every platform.
+- `fs.mmap(path[, { offset, length }])` -> a read-only `MappedBuffer` (optionally a
+  page-aligned window) for zero-copy input to `compute.*` / `gpu.*`.
+
+`read` / `write` / `mmap` require a **regular-file** leaf: a FIFO, socket,
+character/block device, or directory target throws `not_a_regular_file` and never
+blocks. `exists` and `delete` are NOT part of the app surface. Error tokens match
+Lua (thrown with the token in the message).
+
 ### `db` - Database
 
 Requires `HL_ENABLE_DB=1`. The import fails to resolve in compute-only
