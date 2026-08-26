@@ -1,5 +1,5 @@
 /*
- * test_compiler.c — Tests for HlCompilerVtable (compiler.c)
+ * test_compiler.c - Tests for HlCompilerVtable (compiler.c)
  *
  * Tests the system compiler backend and selection logic.
  *
@@ -59,7 +59,7 @@ static void rm_rf(const char *dir)
      * toybox rm rejects `-r` ("rm: illegal option -- r"), and a leaked
      * tmpdir cascades into the next test failing on mkdir EEXIST.
      * nftw is POSIX and works on Linux, macOS, and cosmo. ENOENT means
-     * the dir's already gone — fine. */
+     * the dir's already gone - fine. */
     if (nftw(dir, rm_rf_entry, 16, FTW_DEPTH | FTW_PHYS) != 0
         && errno != ENOENT) {
         /* Best-effort cleanup; don't mask test failures. */
@@ -135,7 +135,7 @@ UTEST(compiler, compile_hello)
 
     HlCompiler *c = hl_compiler_select(NULL);
     if (!c) {
-        /* No compiler available — skip */
+        /* No compiler available - skip */
         rm_rf(tmpdir); free(tmpdir);
         return;
     }

@@ -1,5 +1,5 @@
 /*
- * test_static.c — Tests for static file serving middleware
+ * test_static.c - Tests for static file serving middleware
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */

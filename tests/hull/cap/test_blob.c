@@ -1,5 +1,5 @@
 /*
- * test_blob.c — Content-addressed blob storage tests.
+ * test_blob.c - Content-addressed blob storage tests.
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
@@ -219,7 +219,7 @@ UTEST(hl_cap_blob, put_verified_short_circuits_when_present)
     /* When `expected` is supplied and the blob already exists on
      * disk, put skips the tmp-write + hash entirely. Verify by:
      *  (a) writing a blob once
-     *  (b) re-putting different bytes claiming the SAME id — the
+     *  (b) re-putting different bytes claiming the SAME id - the
      *      short-circuit accepts (existing file's SHA is trusted)
      *  (c) reading back: bytes are the original, not the "lie" */
     TestEnv e; env_init(&e);
@@ -305,7 +305,7 @@ UTEST(hl_cap_blob, writer_durable_round_trips)
 UTEST(hl_cap_blob, get_empty_returns_null_buffer)
 {
     /* M2 contract: an empty blob is fetched with out_buf=NULL,
-     * out_len=0, and no allocation is made — caller can skip the
+     * out_len=0, and no allocation is made - caller can skip the
      * free entirely. */
     TestEnv e; env_init(&e);
     HlBlob *b = NULL;
@@ -314,12 +314,12 @@ UTEST(hl_cap_blob, get_empty_returns_null_buffer)
     char id[HL_BLOB_ID_BUF_SIZE];
     ASSERT_EQ(hl_cap_blob_put(b, NULL, 0, NULL, id), 0);
 
-    uint8_t *buf = (uint8_t *)0xDEADBEEF;   /* sentinel — must be cleared */
-    size_t   len = 999;                      /* sentinel — must be 0 */
+    uint8_t *buf = (uint8_t *)0xDEADBEEF;   /* sentinel - must be cleared */
+    size_t   len = 999;                      /* sentinel - must be 0 */
     ASSERT_EQ(hl_cap_blob_get(b, id, 0, &buf, &len), 0);
     ASSERT_TRUE(buf == NULL);
     ASSERT_EQ(len, (size_t)0);
-    /* Deliberately no hl_alloc_free here — the contract is "no free
+    /* Deliberately no hl_alloc_free here - the contract is "no free
      * needed for empty blobs". If this leaks, ASan in `make debug`
      * would catch it. */
 
@@ -360,7 +360,7 @@ UTEST(hl_cap_blob, put_verified_rejects_wrong_sha)
     ASSERT_EQ(hl_cap_blob_put(b, (const uint8_t *)msg, strlen(msg),
                                 wrong, id), -1);
 
-    /* No blob file should remain — tmp was unlinked. */
+    /* No blob file should remain - tmp was unlinked. */
     char tmp_dir[512];
     snprintf(tmp_dir, sizeof(tmp_dir), "%s/blobs/tmp", e.base_dir);
     DIR *d = opendir(tmp_dir);
@@ -377,7 +377,7 @@ UTEST(hl_cap_blob, put_verified_rejects_wrong_sha)
     env_free(&e);
 }
 
-/* ── Streaming write — on-the-fly SHA correctness ────────────────── */
+/* ── Streaming write - on-the-fly SHA correctness ────────────────── */
 
 UTEST(hl_cap_blob, streaming_write_hashes_on_the_fly)
 {
@@ -394,7 +394,7 @@ UTEST(hl_cap_blob, streaming_write_hashes_on_the_fly)
     HlBlobWriter *w = NULL;
     ASSERT_EQ(hl_cap_blob_writer_open(b, NULL, &w), 0);
 
-    /* Feed in irregular chunk sizes — exercises the streaming loop. */
+    /* Feed in irregular chunk sizes - exercises the streaming loop. */
     size_t off = 0;
     size_t chunks[] = { 1, 64, 65536, 100, 4096, 1, 0, 13, 8192 };
     for (size_t i = 0; off < total; i++) {
@@ -453,7 +453,7 @@ UTEST(hl_cap_blob, writer_abort_removes_tmp)
     env_free(&e);
 }
 
-/* ── Idempotent put — concurrent / repeated identical writes ─────── */
+/* ── Idempotent put - concurrent / repeated identical writes ─────── */
 
 UTEST(hl_cap_blob, put_twice_same_bytes_is_idempotent)
 {
@@ -544,7 +544,7 @@ UTEST(hl_cap_blob, track_access_false_preserves_atime)
     int64_t before = 0;
     ASSERT_EQ(hl_cap_blob_stat(b, id, NULL, &before), 0);
 
-    /* Read with track_access=0 — atime must NOT be bumped. */
+    /* Read with track_access=0 - atime must NOT be bumped. */
     uint8_t *got = NULL; size_t got_len = 0;
     ASSERT_EQ(hl_cap_blob_get(b, id, 0, &got, &got_len), 0);
     hl_alloc_free(&e.alloc, got, got_len);
@@ -667,7 +667,7 @@ UTEST(hl_cap_blob, cleanup_lru_by_total_size)
                                   { time(NULL) - 3600, 0 }};
     utimes(path, tv_mid);
 
-    /* Cap to 18 bytes — must evict the 9-byte oldest blob. */
+    /* Cap to 18 bytes - must evict the 9-byte oldest blob. */
     HlBlobCleanupOpts opts = {
         .max_total_size = 18, .max_age_sec = 0,
         .strategy = HL_BLOB_LRU, .dry_run = 0,
@@ -751,7 +751,7 @@ UTEST(hl_cap_blob, cleanup_age_only)
 /* ── hl_blob_store_put_keyed (low-level keyed mode) ────────────────
  *
  * Used by the bytecode cache and AOT cache where the cache key is
- * not the content hash. The cap layer never touches put_keyed —
+ * not the content hash. The cap layer never touches put_keyed -
  * these tests exercise the low-level store directly. */
 
 /* Open a store rooted at a tmpdir, bypassing the cap layer. */
@@ -771,11 +771,11 @@ UTEST(hl_blob_store_keyed, put_get_roundtrip)
     HlBlobStore *s = open_keyed_store(tmp);
     ASSERT_TRUE(s != NULL);
 
-    /* Use any 64-char lowercase hex — caller-keyed mode does NOT
+    /* Use any 64-char lowercase hex - caller-keyed mode does NOT
      * verify the content hashes to it. */
     const char *key =
         "0000000000000000000000000000000000000000000000000000000000000001";
-    const char *bytes = "anything at all — content is unrelated to key";
+    const char *bytes = "anything at all - content is unrelated to key";
     size_t len = strlen(bytes);
 
     ASSERT_EQ(hl_blob_store_put_keyed(s, key, (const uint8_t *)bytes, len), 0);
@@ -806,7 +806,7 @@ UTEST(hl_blob_store_keyed, put_is_idempotent_for_same_key)
                                        strlen(bytes)), 0);
     /* Second put with the same key + same bytes is a no-op fast-path
      * (exists check up front). Same key + different bytes also
-     * returns 0 — the existing file wins. The cache's design contract
+     * returns 0 - the existing file wins. The cache's design contract
      * says same key implies same bytes, so the latter is moot in
      * practice. */
     ASSERT_EQ(hl_blob_store_put_keyed(s, key, (const uint8_t *)bytes,
@@ -830,7 +830,7 @@ UTEST(hl_blob_store_keyed, rejects_non_hex_key)
     ASSERT_EQ(hl_blob_store_put_keyed(s,
         "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz",
         (const uint8_t *)"x", 1), -1);
-    /* Uppercase rejected — store keeps filenames canonical lowercase. */
+    /* Uppercase rejected - store keeps filenames canonical lowercase. */
     ASSERT_EQ(hl_blob_store_put_keyed(s,
         "ABCDABCDABCDABCDABCDABCDABCDABCDABCDABCDABCDABCDABCDABCDABCDABCD",
         (const uint8_t *)"x", 1), -1);
@@ -892,7 +892,7 @@ UTEST(hl_blob_store_keyed, reader_refuses_symlink_at_blob_path)
     /* O_NOFOLLOW hardening: a symlink planted at the blob path
      * (e.g. on a multi-user host where the cache root is writable)
      * must not be followed. blob_store legitimately never creates
-     * symlinks itself — only attackers do — so refusing is safe. */
+     * symlinks itself - only attackers do - so refusing is safe. */
     char tmp[256];
     HlBlobStore *s = open_keyed_store(tmp);
     ASSERT_TRUE(s != NULL);
@@ -917,7 +917,7 @@ UTEST(hl_blob_store_keyed, reader_refuses_symlink_at_blob_path)
     snprintf(blob_path, sizeof(blob_path), "%s/%s", shard_dir, key);
     ASSERT_EQ(symlink(target_file, blob_path), 0);
 
-    /* reader_open MUST refuse — O_NOFOLLOW returns ELOOP/EMLINK. */
+    /* reader_open MUST refuse - O_NOFOLLOW returns ELOOP/EMLINK. */
     HlBlobStoreReader *r = NULL;
     ASSERT_NE(hl_blob_store_reader_open(s, key, 0, &r), 0);
     ASSERT_EQ(r, NULL);
@@ -938,7 +938,7 @@ UTEST(hl_blob_store_keyed, get_rejects_huge_stat_size)
      * A normal file that fits passes; we can't easily plant a fake
      * giant file without disk pressure, so this is the no-regression
      * test: ordinary puts/gets still work. The cap itself is
-     * exercised in code review — building a 256 MB file in CI is
+     * exercised in code review - building a 256 MB file in CI is
      * not worth the disk IO. */
     char tmp[256];
     HlBlobStore *s = open_keyed_store(tmp);

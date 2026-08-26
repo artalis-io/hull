@@ -41,7 +41,7 @@ HULL_PID=""
 TMPDIR_WORK=""
 
 if [ ! -x "$HULL" ]; then
-    echo "e2e_auth_flows_2fa: hull binary not found at $HULL — run 'make' first"
+    echo "e2e_auth_flows_2fa: hull binary not found at $HULL - run 'make' first"
     exit 1
 fi
 if ! command -v python3 >/dev/null 2>&1; then
@@ -54,12 +54,12 @@ pass() { echo "  PASS: $1"; PASS=$((PASS + 1)); }
 
 check_status() {
     if [ "$2" = "$3" ]; then pass "$1"
-    else fail "$1 — expected status $3, got $2"
+    else fail "$1 - expected status $3, got $2"
     fi
 }
 check_contains() {
     case "$2" in *"$3"*) pass "$1" ;;
-                 *) fail "$1 — expected '$3' in: $(echo "$2" | head -c 200)" ;;
+                 *) fail "$1 - expected '$3' in: $(echo "$2" | head -c 200)" ;;
     esac
 }
 
@@ -91,7 +91,7 @@ trap cleanup EXIT
 
 TMPDIR_WORK=$(mktemp -d)
 
-# Tiny TOTP helper — same shape as tests/e2e_totp.sh's. Keeps the
+# Tiny TOTP helper - same shape as tests/e2e_totp.sh's. Keeps the
 # Python in this script so the e2e is single-file readable.
 TOTP_PY="$TMPDIR_WORK/totp.py"
 cat >"$TOTP_PY" <<'EOF'
@@ -254,7 +254,7 @@ run_flow() {
         "$BASE/auth/totp-verify")
     check_contains "$_label: recovery code accepted" "$R" '"ok":true'
 
-    # 10. Magic-link path with 2FA — click the link, expect default
+    # 10. Magic-link path with 2FA - click the link, expect default
     #     HTML form. Submit it to /auth/totp-verify with a fresh code.
     : > "$COOKIES"
     curl -sS -X POST "$BASE/_emails/clear" > /dev/null

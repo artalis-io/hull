@@ -1,5 +1,5 @@
 #!/bin/sh
-# e2e_feature_mysql.sh — MySQL/MariaDB as a composable feature, end to end.
+# e2e_feature_mysql.sh - MySQL/MariaDB as a composable feature, end to end.
 #
 # Builds a BASE hull (EMBED_PLATFORM=1, no MySQL compiled in) + the MySQL feature
 # archive, then `hull build --with=mysql` an app and boots it. Proves that
@@ -10,7 +10,7 @@
 #
 # This is a BUILD-only e2e (no live server): the app connects to an unreachable
 # host and asserts the error is a CONNECTION failure, not a "needs the MySQL
-# feature" scheme rejection — i.e. the backend is registered and live. A real
+# feature" scheme rejection - i.e. the backend is registered and live. A real
 # connect + auth + query is covered by the monolithic e2e_mysql.sh job.
 #
 # Runs under the REAL kernel sandbox: the manifest declares a network database

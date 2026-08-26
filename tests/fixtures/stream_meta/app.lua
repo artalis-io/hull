@@ -1,4 +1,4 @@
--- stream_meta — drive the streamprobe plugin (public hull_stream_* SDK) over a
+-- stream_meta - drive the streamprobe plugin (public hull_stream_* SDK) over a
 -- multi-chunk compute.stream and report the per-chunk first/last/index metadata,
 -- plus an ordinary compute.call proving non-stream metadata is zero.
 local compute = require("hull.compute")

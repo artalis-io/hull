@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# e2e_cache_cosmo.sh — verify the cache layer (list / prune / clear /
+# e2e_cache_cosmo.sh - verify the cache layer (list / prune / clear /
 # verify / doctor / inspect / blob_store / sharding / opt-outs)
 # works on a Cosmopolitan-built hull binary.
 #
@@ -45,7 +45,7 @@ file "$HULL" 2>&1 | head -1
 echo ""
 
 # Quick smoke before delegating to the full suite: make sure
-# `cache list` returns a sensible registry on the cosmo build —
+# `cache list` returns a sensible registry on the cosmo build -
 # this confirms the cache_registry compiled in and the doctor
 # subsystem is wired up, before we bring in the slower writes.
 echo "=== Smoke: cache list on cosmo ==="
@@ -56,7 +56,7 @@ if ! HOME="$TMP" "$HULL" cache list >/dev/null 2>&1; then
     exit 1
 fi
 
-# Now run the shared cache suite — every assertion in e2e_cache.sh
+# Now run the shared cache suite - every assertion in e2e_cache.sh
 # runs against the cosmo binary instead of the native one. That
 # covers list / prune / clear / verify / inspect / doctor, plus
 # every env-var opt-out, plus every --json shape check.

@@ -1,5 +1,5 @@
 #!/bin/sh
-# E2E tests — hull mcp serve (MCP JSON-RPC server)
+# E2E tests - hull mcp serve (MCP JSON-RPC server)
 #
 # Tests the MCP stdio server by piping JSON-RPC requests via stdin.
 #
@@ -15,7 +15,7 @@ PASS=0
 FAIL=0
 
 if [ ! -x "$HULL" ]; then
-    echo "e2e_mcp: hull binary not found at $HULL — run 'make' first"
+    echo "e2e_mcp: hull binary not found at $HULL - run 'make' first"
     exit 1
 fi
 
@@ -32,7 +32,7 @@ pass() {
 check_contains() {
     case "$2" in
         *"$3"*) pass "$1" ;;
-        *)      fail "$1 — expected '$3' in: $(echo "$2" | head -c 300)" ;;
+        *)      fail "$1 - expected '$3' in: $(echo "$2" | head -c 300)" ;;
     esac
 }
 

@@ -108,7 +108,7 @@ app.get("/test/nested", function(req, res)
     res:json(check("nested", html, "Alice,Carol,"))
 end)
 
--- Test 14: filters — upper, lower, trim, length
+-- Test 14: filters - upper, lower, trim, length
 app.get("/test/filters", function(req, res)
     local results = {}
     results[#results + 1] = check("upper", template.render_string("{{ x | upper }}", { x = "hello" }), "HELLO")
@@ -164,7 +164,7 @@ app.get("/test/if-for-else", function(req, res)
     res:json(results)
 end)
 
--- Test 20: XSS safety — all {{ }} output is escaped
+-- Test 20: XSS safety - all {{ }} output is escaped
 app.get("/test/xss", function(req, res)
     local html = template.render_string("{{ input }}", { input = '"><img src=x onerror=alert(1)>' })
     local safe = not html:find("<img")

@@ -1,5 +1,5 @@
 #!/bin/sh
-# tests/check_sdk_headers.sh — enforce that every MAINTAINED Hull-owned compute
+# tests/check_sdk_headers.sh - enforce that every MAINTAINED Hull-owned compute
 # SDK header copy is byte-identical to the single canonical source: the embedded
 # HULL_COMPUTE_H / HULL_SPAN_H literals in stdlib/cli/lua/hull/compute.lua.
 #

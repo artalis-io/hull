@@ -1,16 +1,16 @@
 #!/bin/sh
-# tests/e2e_compute_memory64.sh — the PRODUCTION-pipeline proof for #336: `hull
+# tests/e2e_compute_memory64.sh - the PRODUCTION-pipeline proof for #336: `hull
 # build` of a Memory64 compute plugin. Drives the REAL path (`hull build`, whose
 # compute AOT no longer passes the bogus --enable-memory64 flag and keeps the
 # transparent --enable-shared-heap), builds a standalone binary with both mem64
 # AOTs embedded, runs it, and asserts:
 #
-#   Case A — plain Memory64 plugin, HEAP-LESS call (echo64): the production-pipeline
+#   Case A - plain Memory64 plugin, HEAP-LESS call (echo64): the production-pipeline
 #            confirmation of #336 F1/F2/F3 -- a mem64 plugin doing ordinary linear-
 #            memory work, called with no spans/segments, runs correctly (does NOT
 #            segfault) on this arch. If this fails, the transparent policy is unsafe
 #            on a 64-bit target and #336's decision must be revisited.
-#   Case B — Memory64 span consumer (spanread64): the attached-shared-heap mem64
+#   Case B - Memory64 span consumer (spanread64): the attached-shared-heap mem64
 #            path through the built binary (the E2E analogue of #334's unit gate).
 #
 # Both must load as AOT (aot=1) AND Memory64 (mem64=1). Reuses the committed mem64
@@ -61,14 +61,14 @@ end)
 EOF
 
 if [ -z "$WAMRC" ]; then
-    skip "wamrc not found — the CI AOT job builds it so this path is exercised there"
+    skip "wamrc not found - the CI AOT job builds it so this path is exercised there"
     echo ""; echo "compute-memory64: 0 passed, 0 failed (skipped, no wamrc)"; exit 0
 fi
 
 BIN="$TMP/app_bin"
 build_out="$("$HULL" build "$TMP/app" -o "$BIN" --no-verify-platform 2>&1)"
 if printf '%s' "$build_out" | grep -q "platform library not embedded"; then
-    skip "hull is not an embedded build (make EMBED_PLATFORM=1) — CI builds embedded"
+    skip "hull is not an embedded build (make EMBED_PLATFORM=1) - CI builds embedded"
     echo ""; echo "compute-memory64: 0 passed, 0 failed (skipped, not embedded)"; exit 0
 fi
 if [ ! -x "$BIN" ]; then

@@ -1,15 +1,15 @@
 /*
- * sandbox_violation.c — Verify kernel sandbox enforcement
+ * sandbox_violation.c - Verify kernel sandbox enforcement
  *
  * Standalone test program that directly exercises OS-level sandbox
  * mechanisms to prove kernel-level enforcement works.
  * Each test runs in a forked child so sandbox state is isolated.
  *
  * Supports:
- *   OpenBSD      — native pledge/unveil (KILL mode)
- *   Cosmopolitan — pledge/unveil built into cosmo libc (KILL mode)
- *   Linux        — jart/pledge polyfill (RETURN_EPERM mode)
- *   macOS        — Seatbelt sandbox_init_with_parameters
+ *   OpenBSD      - native pledge/unveil (KILL mode)
+ *   Cosmopolitan - pledge/unveil built into cosmo libc (KILL mode)
+ *   Linux        - jart/pledge polyfill (RETURN_EPERM mode)
+ *   macOS        - Seatbelt sandbox_init_with_parameters
  *
  * Compile (Linux):
  *   cc -std=c11 -O2 -o sandbox_test tests/sandbox_violation.c \
@@ -60,7 +60,7 @@ extern int unveil(const char *path, const char *permissions);
 #define HAS_PLEDGE_MODE   1
 #define HAS_SEATBELT      0
 
-/* jart/pledge polyfill — linked from build/ objects */
+/* jart/pledge polyfill - linked from build/ objects */
 extern int pledge(const char *promises, const char *execpromises);
 extern int unveil(const char *path, const char *permissions);
 extern int __pledge_mode;
@@ -133,7 +133,7 @@ static int test_unveil_child(void)
      */
     if (unveil("/tmp", "r") != 0) {
         if (errno == ENOSYS) {
-            /* Kernel too old for Landlock — not an error */
+            /* Kernel too old for Landlock - not an error */
             _exit(77); /* special "skip" code */
         }
         fprintf(stderr, "unveil(\"/tmp\", \"r\") failed: %s\n",
@@ -141,13 +141,13 @@ static int test_unveil_child(void)
         _exit(2);
     }
 
-    /* Seal — no more unveil calls */
+    /* Seal - no more unveil calls */
     if (unveil(NULL, NULL) != 0) {
         fprintf(stderr, "unveil(NULL, NULL) failed: %s\n", strerror(errno));
         _exit(2);
     }
 
-    /* Try to open /etc/hostname — should be blocked */
+    /* Try to open /etc/hostname - should be blocked */
     int fd = open("/etc/hostname", O_RDONLY);
     if (fd >= 0) {
         close(fd);
@@ -158,7 +158,7 @@ static int test_unveil_child(void)
         _exit(0); /* PASS: Landlock blocked access */
     }
 
-    /* Some other error — might be ENOENT if file doesn't exist */
+    /* Some other error - might be ENOENT if file doesn't exist */
     fprintf(stderr, "open(\"/etc/hostname\"): %s (expected EACCES)\n",
             strerror(errno));
     _exit(2);
@@ -185,9 +185,9 @@ static void test_unveil(void)
         if (code == 0) {
             pass("unveil blocked access to /etc/hostname (EACCES)");
         } else if (code == 77) {
-            pass("unveil SKIPPED — Landlock not supported by kernel");
+            pass("unveil SKIPPED - Landlock not supported by kernel");
         } else if (code == 1) {
-            fail("unveil did NOT block access — Landlock not enforcing");
+            fail("unveil did NOT block access - Landlock not enforcing");
         } else {
             fail("unveil test exited with unexpected code");
         }
@@ -235,7 +235,7 @@ static void test_unveil(void)
     if (WIFEXITED(status) && WEXITSTATUS(status) == 0) {
         pass("unveil allowed access to /tmp (permitted path)");
     } else if (WIFEXITED(status) && WEXITSTATUS(status) == 77) {
-        pass("unveil allowed-path SKIPPED — Landlock not supported");
+        pass("unveil allowed-path SKIPPED - Landlock not supported");
     } else {
         fail("unveil blocked access to /tmp (should be allowed)");
     }
@@ -250,9 +250,9 @@ static int test_pledge_child(void)
      * a file (requires "rpath" which we didn't pledge).
      *
      * Linux (polyfill): use RETURN_EPERM mode so the child isn't
-     * killed — we can check errno instead.
+     * killed - we can check errno instead.
      *
-     * Cosmopolitan: uses KILL mode by default — parent detects
+     * Cosmopolitan: uses KILL mode by default - parent detects
      * signal death as enforcement.
      */
 #if HAS_PLEDGE_MODE
@@ -267,7 +267,7 @@ static int test_pledge_child(void)
         _exit(2);
     }
 
-    /* Try to open a file — should fail (needs rpath) */
+    /* Try to open a file - should fail (needs rpath) */
     int fd = open("/etc/hostname", O_RDONLY);
     if (fd >= 0) {
         close(fd);
@@ -304,14 +304,14 @@ static void test_pledge(void)
         if (code == 0) {
             pass("pledge blocked open() without rpath promise");
         } else if (code == 77) {
-            pass("pledge SKIPPED — seccomp not supported");
+            pass("pledge SKIPPED - seccomp not supported");
         } else if (code == 1) {
-            fail("pledge did NOT block open() — seccomp not enforcing");
+            fail("pledge did NOT block open() - seccomp not enforcing");
         } else {
             fail("pledge test exited with unexpected code");
         }
     } else if (WIFSIGNALED(status)) {
-        /* Process was killed — this happens with KILL mode (Cosmopolitan).
+        /* Process was killed - this happens with KILL mode (Cosmopolitan).
          * Treat signal death as a pass (pledge enforced). */
         int sig = WTERMSIG(status);
         char buf[128];
@@ -330,7 +330,7 @@ static int test_pledge_allowed_child(void)
     __pledge_mode = PLEDGE_PENALTY_RETURN_EPERM | PLEDGE_STDERR_LOGGING;
 #endif
 
-    /* Pledge with rpath — reading should work */
+    /* Pledge with rpath - reading should work */
     if (pledge("stdio rpath", NULL) != 0) {
         if (errno == ENOSYS)
             _exit(77);
@@ -343,7 +343,7 @@ static int test_pledge_allowed_child(void)
         _exit(0); /* PASS: rpath allows reading */
     }
 
-    /* ENOENT is fine — file might not exist */
+    /* ENOENT is fine - file might not exist */
     if (errno == ENOENT)
         _exit(0);
 
@@ -373,7 +373,7 @@ static void test_pledge_allowed(void)
         if (code == 0) {
             pass("pledge allowed open() with rpath promise");
         } else if (code == 77) {
-            pass("pledge-allowed SKIPPED — seccomp not supported");
+            pass("pledge-allowed SKIPPED - seccomp not supported");
         } else {
             fail("pledge blocked open() despite rpath promise");
         }
@@ -392,7 +392,7 @@ static void test_pledge_allowed(void)
  *   - execve from the post-pledge child
  * AND that ordinary non-exec memory still works (negative control).
  *
- * Linux polyfill mode: RETURN_EPERM. Cosmopolitan: KILL_PROCESS — so
+ * Linux polyfill mode: RETURN_EPERM. Cosmopolitan: KILL_PROCESS - so
  * the test parent treats either non-zero exit or signal death as PASS.
  */
 
@@ -430,9 +430,9 @@ static void test_wx_mmap_wx(void)
         if (code == 0)
             pass("mmap(PROT_W|PROT_X) denied");
         else if (code == 77)
-            pass("W^X mmap test SKIPPED — seccomp not supported");
+            pass("W^X mmap test SKIPPED - seccomp not supported");
         else if (code == 1)
-            fail("mmap(PROT_W|PROT_X) succeeded — W^X NOT enforced");
+            fail("mmap(PROT_W|PROT_X) succeeded - W^X NOT enforced");
         else
             fail("W^X mmap test exited with unexpected code");
     } else if (WIFSIGNALED(status)) {
@@ -455,11 +455,11 @@ static int test_wx_mprotect_child(void)
     void *p = mmap(NULL, 4096, PROT_READ | PROT_WRITE,
                    MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     if (p == MAP_FAILED) {
-        /* RW mmap itself failed — environment problem, not a W^X test */
+        /* RW mmap itself failed - environment problem, not a W^X test */
         _exit(2);
     }
 
-    /* Now try to promote to executable — must fail */
+    /* Now try to promote to executable - must fail */
     if (mprotect(p, 4096, PROT_READ | PROT_EXEC) == 0) {
         munmap(p, 4096);
         _exit(1); /* FAIL: W→X transition succeeded */
@@ -483,9 +483,9 @@ static void test_wx_mprotect(void)
         if (code == 0)
             pass("mprotect → PROT_EXEC denied (no W→X transition)");
         else if (code == 77)
-            pass("W^X mprotect test SKIPPED — seccomp not supported");
+            pass("W^X mprotect test SKIPPED - seccomp not supported");
         else if (code == 1)
-            fail("mprotect → PROT_EXEC succeeded — W^X NOT enforced");
+            fail("mprotect → PROT_EXEC succeeded - W^X NOT enforced");
         else
             fail("W^X mprotect test exited with unexpected code");
     } else if (WIFSIGNALED(status)) {
@@ -507,7 +507,7 @@ static int test_wx_memfd_child(void)
 
     /* memfd_create is filtered to ENOSYS by the pledge polyfill prefix.
      * Direct syscall avoids glibc memfd_create wrapper missing on old libc.
-     * On arches we don't know the syscall number for, SKIP — falling back
+     * On arches we don't know the syscall number for, SKIP - falling back
      * to syscall(0, ...) would dispatch to `read` on x86_64 (syscall #0)
      * and return 0 success, producing a spurious test failure. */
 #ifndef __NR_memfd_create
@@ -543,9 +543,9 @@ static void test_wx_memfd(void)
         if (code == 0)
             pass("memfd_create denied (ENOSYS / EPERM)");
         else if (code == 77)
-            pass("W^X memfd test SKIPPED — seccomp not supported");
+            pass("W^X memfd test SKIPPED - seccomp not supported");
         else if (code == 1)
-            fail("memfd_create succeeded — bypass available");
+            fail("memfd_create succeeded - bypass available");
         else
             fail("W^X memfd test exited with unexpected code");
     } else if (WIFSIGNALED(status)) {
@@ -588,7 +588,7 @@ static void test_wx_execve(void)
         if (code == 0)
             pass("execve denied without `exec` promise");
         else if (code == 77)
-            pass("W^X execve test SKIPPED — seccomp not supported");
+            pass("W^X execve test SKIPPED - seccomp not supported");
         else
             fail("execve returned unexpected outcome");
     } else if (WIFSIGNALED(status)) {
@@ -599,7 +599,7 @@ static void test_wx_execve(void)
 static int test_wx_anon_rw_child(void)
 {
     /* Negative control: ordinary anonymous read/write mmap must STILL work
-     * after pledge — proves the seccomp filter targets only PROT_EXEC, not
+     * after pledge - proves the seccomp filter targets only PROT_EXEC, not
      * legitimate libc/runtime allocation patterns. */
 #if HAS_PLEDGE_MODE
     __pledge_mode = PLEDGE_PENALTY_RETURN_EPERM | PLEDGE_STDERR_LOGGING;
@@ -631,11 +631,11 @@ static void test_wx_anon_rw(void)
         if (code == 0)
             pass("anon r/w mmap still works post-pledge (filter not over-broad)");
         else if (code == 77)
-            pass("W^X anon-rw control SKIPPED — seccomp not supported");
+            pass("W^X anon-rw control SKIPPED - seccomp not supported");
         else
-            fail("anon r/w mmap broke under pledge — over-broad filter");
+            fail("anon r/w mmap broke under pledge - over-broad filter");
     } else if (WIFSIGNALED(status)) {
-        fail("anon r/w mmap killed — filter over-broad");
+        fail("anon r/w mmap killed - filter over-broad");
     }
 }
 
@@ -667,7 +667,7 @@ static int test_seatbelt_deny_child(void)
         _exit(2);
     }
 
-    /* Try to open /etc/hosts — should be blocked */
+    /* Try to open /etc/hosts - should be blocked */
     int fd = open("/etc/hosts", O_RDONLY);
     if (fd >= 0) {
         close(fd);
@@ -704,7 +704,7 @@ static void test_seatbelt_deny(void)
         if (code == 0) {
             pass("seatbelt blocked access to /etc/hosts");
         } else if (code == 1) {
-            fail("seatbelt did NOT block access — not enforcing");
+            fail("seatbelt did NOT block access - not enforcing");
         } else {
             fail("seatbelt deny test exited with unexpected code");
         }
@@ -751,7 +751,7 @@ static int test_seatbelt_allow_child(void)
     }
 
     /* Create and read a file in /tmp (allowed).
-     * Must use resolved path — Seatbelt resolves symlinks. */
+     * Must use resolved path - Seatbelt resolves symlinks. */
     char test_path[512];
     snprintf(test_path, sizeof(test_path),
              "%s/hull_seatbelt_test.txt", real_tmp);

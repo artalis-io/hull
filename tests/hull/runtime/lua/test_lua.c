@@ -59,7 +59,7 @@ static void *platform_vfs_owned = NULL;
 
 /* Tests use lots of inline Lua snippets that reference modules as
  * globals (`db.exec(...)`, `crypto.sha256(...)`, ...). Phase 2b removes
- * those globals from production runtime — apps must `require` instead.
+ * those globals from production runtime - apps must `require` instead.
  * This helper restores the globals for testing convenience by trying to
  * require each known native module and assigning to `_G`. Modules that
  * aren't available (compile flag off, etc.) are silently skipped. */
@@ -262,7 +262,7 @@ UTEST(lua_runtime, table_works)
 {
     init_lua();
 
-    /* Tables work — basic serialization check */
+    /* Tables work - basic serialization check */
     int result = eval_int("(function() local t = {a=1, b=2}; return t.a + t.b end)()");
     ASSERT_EQ(result, 3);
 
@@ -527,7 +527,7 @@ UTEST(lua_runtime, app_router_chainable)
  *
  * app.every / app.daily are conditionally installed by app.manifest
  * when the manifest's modules array contains "hull/timers@*". Without
- * the declaration the methods literally don't exist on `app` —
+ * the declaration the methods literally don't exist on `app` -
  * calling them raises "attempt to call a nil value". */
 
 UTEST(lua_runtime, app_timers_absent_without_declaration)
@@ -585,7 +585,7 @@ UTEST(lua_runtime, app_timers_register_timer_when_declared)
 
 UTEST(lua_runtime, app_router_empty_prefix)
 {
-    /* app.router() with no prefix should still work — empty prefix
+    /* app.router() with no prefix should still work - empty prefix
      * means routes register at the bare paths. */
     init_lua();
     int rc = luaL_dostring(lua_rt.L,
@@ -916,7 +916,7 @@ UTEST(lua_runtime, require_gated_undeclared_module_fails)
 {
     init_lua();
 
-    /* Wire an empty resolved set (intrinsics only — no crypto/validate). */
+    /* Wire an empty resolved set (intrinsics only - no crypto/validate). */
     HlResolvedModuleSet set;
     hl_module_set_clear(&set);
     lua_rt.base.module_set = &set;
@@ -973,7 +973,7 @@ UTEST(lua_runtime, require_gated_declared_module_succeeds)
 UTEST(lua_runtime, require_gating_skipped_for_user_modules)
 {
     /* Names that don't map to any registry entry fall through to the
-     * normal lookup — gating does NOT intercept user code. */
+     * normal lookup - gating does NOT intercept user code. */
     init_lua();
 
     HlResolvedModuleSet set;
@@ -1035,7 +1035,7 @@ UTEST(lua_runtime, json_module_requireable)
 {
     init_lua();
 
-    /* json is a DECLARED module as of v0.1.0 release — no longer
+    /* json is a DECLARED module as of v0.1.0 release - no longer
      * a global. require("hull.json") returns the table. Wrapped in
      * IIFE since eval_int prefixes "return". */
     int result = eval_int(
@@ -1088,7 +1088,7 @@ UTEST(lua_runtime, error_reporting)
 {
     init_lua();
 
-    /* Trigger an error — should not crash */
+    /* Trigger an error - should not crash */
     int rc = luaL_dostring(lua_rt.L, "error('test error')");
     ASSERT_NE(rc, LUA_OK);
 
@@ -1313,7 +1313,7 @@ UTEST(lua_require_fs, traversal_above_root)
     init_lua_with_appdir(tmpdir);
     ASSERT_TRUE(lua_initialized);
 
-    /* require('../../etc/passwd') should error — escapes above app_dir */
+    /* require('../../etc/passwd') should error - escapes above app_dir */
     int rc = luaL_dostring(lua_rt.L, "require('../../etc/passwd')");
     ASSERT_NE(rc, LUA_OK);
 
@@ -1457,7 +1457,7 @@ UTEST(lua_require_fs, too_large)
     snprintf(path, sizeof(path), "%s/big.lua", tmpdir);
     FILE *f = fopen(path, "w");
     ASSERT_TRUE(f != NULL);
-    /* Write just past the limit — use fseek to create a sparse file */
+    /* Write just past the limit - use fseek to create a sparse file */
     fseek(f, HL_MODULE_MAX_SIZE + 1, SEEK_SET);
     fputc('x', f);
     fclose(f);
@@ -1503,7 +1503,7 @@ UTEST(lua_cap, crypto_sha256)
     init_lua_with_caps();
     ASSERT_TRUE(lua_initialized);
 
-    /* SHA-256 of "hello" — known hash */
+    /* SHA-256 of "hello" - known hash */
     char *hash = eval_str("crypto.sha256('hello')");
     ASSERT_NE(hash, NULL);
     ASSERT_STREQ(hash,
@@ -1575,7 +1575,7 @@ UTEST(lua_cap, log_functions_exist)
     init_lua_with_caps();
     ASSERT_TRUE(lua_initialized);
 
-    /* log is a DECLARED module as of v0.1.0 release — no longer a
+    /* log is a DECLARED module as of v0.1.0 release - no longer a
      * global. Apps must require("hull.log"). The test environment
      * has no manifest, so the require gate is permissive. */
     int result = eval_int(
@@ -1628,7 +1628,7 @@ UTEST(lua_cap, env_get_blocked)
     init_lua_with_caps();
     ASSERT_TRUE(lua_initialized);
 
-    /* PATH is not in the allowlist — should return nil */
+    /* PATH is not in the allowlist - should return nil */
     int result = eval_int("env.get('PATH') == nil and 1 or 0");
     ASSERT_EQ(result, 1);
 
@@ -1640,7 +1640,7 @@ UTEST(lua_cap, env_get_nonexistent)
     init_lua_with_caps();
     ASSERT_TRUE(lua_initialized);
 
-    /* HULL_TEST_VAR is allowed but not set — should return nil */
+    /* HULL_TEST_VAR is allowed but not set - should return nil */
     unsetenv("HULL_TEST_VAR");
     int result = eval_int("env.get('HULL_TEST_VAR') == nil and 1 or 0");
     ASSERT_EQ(result, 1);
@@ -1756,7 +1756,7 @@ UTEST(lua_cap, db_namespace_no_internal_bypass)
     init_lua_with_caps();
     ASSERT_TRUE(lua_initialized);
 
-    /* db._exec and db._query must not exist — no bypass possible */
+    /* db._exec and db._query must not exist - no bypass possible */
     int result = eval_int(
         "(function() "
         "  return (db._exec == nil and db._query == nil) and 1 or 0 "
@@ -2027,7 +2027,7 @@ UTEST(lua_middleware, order_preserved)
     init_lua();
     ASSERT_TRUE(lua_initialized);
 
-    /* Register two middlewares — order should be preserved */
+    /* Register two middlewares - order should be preserved */
     int rc = luaL_dostring(lua_rt.L,
         "app.manifest({modules = {'hull/http-server@1'}})\napp.use('*', '/*', function(req, res) return 0 end)\n"
         "app.use('GET', '/api/*', function(req, res) return 0 end)\n");
@@ -2140,7 +2140,7 @@ UTEST(lua_cap, crypto_hmac_sha1)
      * 3132333435363738393031323334353637383930. Counter 1 encodes
      * to the big-endian 8-byte value 0x0000000000000001.
      *
-     * Build the 8-byte BE counter in Lua via string.pack — proves
+     * Build the 8-byte BE counter in Lua via string.pack - proves
      * the full TOTP-style call sequence works through the binding. */
     char *vec = eval_str(
         "crypto.hmac_sha1(string.pack('>I8', 1), "
@@ -2248,7 +2248,7 @@ UTEST(lua_stdlib, qrcode_auto_mask_and_version)
         "end)()");
     ASSERT_EQ(mask, 2);
 
-    /* Auto version selection — 73-byte URL fits in v5 at EC M. */
+    /* Auto version selection - 73-byte URL fits in v5 at EC M. */
     int version = eval_int(
         "(function() "
         "  local qr = require('hull.qrcode') "
@@ -2291,7 +2291,7 @@ UTEST(lua_stdlib, qrcode_svg)
 
 /* Pure-function RFC vectors: Base32 (RFC 4648) + TOTP step digest
  * (RFC 6238 Appendix B). These exercise the math without the DB
- * round-trip — if these fail, the whole module is broken at the
+ * round-trip - if these fail, the whole module is broken at the
  * foundation. */
 UTEST(lua_stdlib, totp_rfc_vectors)
 {
@@ -2617,7 +2617,7 @@ UTEST(lua_stdlib, totp_encryption_at_rest)
     ASSERT_TRUE(lua_initialized);
 
     /* With encryption_key set, the on-disk secret is a secretbox
-     * blob — round-trip via load_secret should still yield the
+     * blob - round-trip via load_secret should still yield the
      * plaintext, but raw row inspection should NOT show the original
      * 20 bytes. The blob also has to be longer than 20 bytes
      * (nonce=24 + MAC=16 = 40 extra bytes added). */
@@ -2664,7 +2664,7 @@ UTEST(lua_stdlib, totp_key_rotation_lazy_on_verify)
      * same key plus a new v2 + current=2. The on-disk blob is
      * still v1-encrypted; the next successful verify should re-
      * encrypt it under v2 (lazy rekey-on-verify). Proven by calling
-     * rekey() after — if the lazy path worked, rekey reports
+     * rekey() after - if the lazy path worked, rekey reports
      * rekeyed=0 (everything already on current). */
     int ok = eval_int(
         "(function() "
@@ -3398,7 +3398,7 @@ UTEST(lua_stdlib, csrf_wrong_session_rejected)
 }
 
 /* Cross-runtime wire-format fixture. The reference token below was
- * precomputed for session_id="s1", secret="k", tsHex="1" — i.e. the
+ * precomputed for session_id="s1", secret="k", tsHex="1" - i.e. the
  * HMAC of "s1:1" keyed by hex("k")="6b". The same fixture lives in
  * tests/hull/runtime/js/test_js.c; both must accept it byte-for-byte
  * or the Lua and JS sibling middlewares have drifted out of parity. */
@@ -3417,7 +3417,7 @@ UTEST(lua_stdlib, csrf_cross_runtime_reference_token)
         "end)()");
     ASSERT_EQ(ok, 1);
 
-    /* Flip one bit of the MAC — must reject. */
+    /* Flip one bit of the MAC - must reject. */
     int rej = eval_int(
         "(function() "
         "  local csrf = require('hull.web.middleware.csrf') "
@@ -3429,7 +3429,7 @@ UTEST(lua_stdlib, csrf_cross_runtime_reference_token)
     cleanup_lua_caps();
 }
 
-/* ── hull.web.middleware.auth tests (smoke — modules load and expose API) */
+/* ── hull.web.middleware.auth tests (smoke - modules load and expose API) */
 
 UTEST(lua_cap, crypto_hmac_sha256_verify)
 {
@@ -3875,7 +3875,7 @@ UTEST(lua_stdlib, search_remove)
 }
 
 /* Tokenize grammar parity with JS. Must match
- * /^[A-Za-z][A-Za-z0-9_]*( [A-Za-z][A-Za-z0-9_]*)*$/ — leading/trailing/
+ * /^[A-Za-z][A-Za-z0-9_]*( [A-Za-z][A-Za-z0-9_]*)*$/ - leading/trailing/
  * double spaces, leading digits, leading underscores all rejected. */
 UTEST(lua_stdlib, search_tokenize_grammar_parity)
 {
@@ -4115,7 +4115,7 @@ UTEST(lua_bytecode_cache, miss_then_hit_populates_disk)
     ASSERT_EQ(17, (int)lua_tointeger(L, -1));
     lua_pop(L, 1);
 
-    /* Second call: cache hit — function loads, no extra file. */
+    /* Second call: cache hit - function loads, no extra file. */
     rc = hl_lua_load_cached(L, BC_PROBE_SRC, strlen(BC_PROBE_SRC), "=probe");
     ASSERT_EQ(LUA_OK, rc);
     ASSERT_EQ(1, bc_count_luac(tmp));
@@ -4148,7 +4148,7 @@ UTEST(lua_bytecode_cache, opt_out_via_env_skips_disk)
 
 UTEST(lua_bytecode_cache, tiny_source_skips_cache)
 {
-    /* Under 256 bytes — cache shouldn't bother to memoize. */
+    /* Under 256 bytes - cache shouldn't bother to memoize. */
     char tmp[256];
     bc_with_tmp_home(tmp);
 
@@ -4180,7 +4180,7 @@ UTEST(lua_bytecode_cache, parse_error_returns_no_cache_write)
     lua_State *L = luaL_newstate();
     int rc = hl_lua_load_cached(L, bad, strlen(bad), "=bad");
     ASSERT_NE_MSG(rc, LUA_OK, "parse error reported");
-    /* Error string on the stack — matches luaL_loadbuffer contract. */
+    /* Error string on the stack - matches luaL_loadbuffer contract. */
     ASSERT_TRUE(lua_isstring(L, -1));
     ASSERT_EQ(0, bc_count_luac(tmp));
     lua_pop(L, 1);
@@ -4231,13 +4231,13 @@ UTEST(lua_bytecode_cache, corrupt_cache_falls_back_to_source)
     }
     closedir(r);
 
-    /* Reload — must recover, re-compile from source, repopulate cache. */
+    /* Reload - must recover, re-compile from source, repopulate cache. */
     int rc = hl_lua_load_cached(L, BC_PROBE_SRC, strlen(BC_PROBE_SRC), "=probe");
     ASSERT_EQ(LUA_OK, rc);
     ASSERT_EQ(LUA_OK, lua_pcall(L, 0, 1, 0));
     ASSERT_EQ(17, (int)lua_tointeger(L, -1));
     lua_pop(L, 1);
-    /* Still one file — corrupt one evicted, fresh one persisted. */
+    /* Still one file - corrupt one evicted, fresh one persisted. */
     ASSERT_EQ(1, bc_count_luac(tmp));
 
     lua_close(L);
@@ -4315,7 +4315,7 @@ UTEST(lua_template_cache, miss_then_hit_populates_disk)
     ASSERT_EQ_MSG(rc, LUA_OK, "first compile");
     ASSERT_EQ(1, tc_count(tmp));
 
-    /* The cache stores the render function directly — call it with
+    /* The cache stores the render function directly - call it with
      * data and check the result is the right type. */
     lua_newtable(L);
     lua_pushinteger(L, 7);
@@ -4365,7 +4365,7 @@ UTEST(lua_template_cache, generated_code_change_invalidates)
 {
     /* The cache is keyed by the generated code, NOT the template
      * name. Two different code strings produce two different
-     * entries — the natural invalidation that the design relies on
+     * entries - the natural invalidation that the design relies on
      * when extends/include targets change. */
     char tmp[256];
     tc_with_tmp_home(tmp);
@@ -4423,7 +4423,7 @@ UTEST(lua_template_cache, parse_error_returns_no_cache_write)
  * runtime.registration_closed = 1, the app.{get,post,...} / use /
  * use_post / ws / sse / every / daily bindings MUST throw a structured
  * Lua error.  Pre-flag-flip the same calls succeed (covered by the
- * many existing tests above — re-asserted here once for clarity).
+ * many existing tests above - re-asserted here once for clarity).
  *
  * Implementation gate lives in lua_app_reject_if_serving(). */
 

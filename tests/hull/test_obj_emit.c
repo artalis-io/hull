@@ -1,5 +1,5 @@
 /*
- * test_obj_emit.c — unit tests for the compiler-free object emitter (ELF).
+ * test_obj_emit.c - unit tests for the compiler-free object emitter (ELF).
  *
  * Emits app_registry ELF objects and validates them structurally by parsing
  * the bytes back: header, sections, the exported hl_app_entries symbol, the

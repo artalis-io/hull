@@ -1,5 +1,5 @@
 /*
- * test_module_registry.c — Tests for the canonical module registry
+ * test_module_registry.c - Tests for the canonical module registry
  *
  * Standalone: only links against module_registry.o.
  *
@@ -59,7 +59,7 @@ UTEST(module_registry, intrinsic_modules_are_marked)
     /* As of v0.1.0 release, the intrinsic core is just hull/app
      * (registration API; required at bootstrap because the manifest
      * itself is expressed via app.manifest). log and json are
-     * declared modules — apps must put them in manifest.modules. */
+     * declared modules - apps must put them in manifest.modules. */
     const HlModuleSpec *app = hl_module_registry_find("hull/app");
     const HlModuleSpec *log = hl_module_registry_find("hull/log");
     const HlModuleSpec *jsn = hl_module_registry_find("hull/json");
@@ -134,7 +134,7 @@ UTEST(module_registry, compute_requires_compile_wasm)
 UTEST(module_registry, crypto_has_no_capability_requirement)
 {
     /* Crypto exposes randomness/keys internally but does not require
-     * any manifest section. Intentional — declaring crypto is the
+     * any manifest section. Intentional - declaring crypto is the
      * gate; no separate "crypto allowlist" exists. */
     const HlModuleSpec *s = hl_module_registry_find("hull/crypto");
     ASSERT_NE(s, NULL);
@@ -143,7 +143,7 @@ UTEST(module_registry, crypto_has_no_capability_requirement)
 
 /* ── Internal dependencies ────────────────────────────────────────── */
 
-/* Registry deps are checked structurally — order matters because the
+/* Registry deps are checked structurally - order matters because the
  * resolver walks the list in order and the error path used to surface
  * the first missing dep. With auto-admit (May 2026) order is less
  * load-bearing, but keeping the assertions ensures dep lists stay
@@ -262,7 +262,7 @@ UTEST(module_registry, suggest_finds_long_name_typo)
 
 UTEST(module_registry, suggest_returns_null_for_unrelated_input)
 {
-    /* "zzzzzz" has no close match — should yield no suggestion. */
+    /* "zzzzzz" has no close match - should yield no suggestion. */
     ASSERT_EQ(hl_module_registry_suggest("zzzzzz"), NULL);
 }
 
@@ -281,7 +281,7 @@ UTEST(module_registry, suggest_null_safe)
 
 UTEST(module_registry, suggest_finds_exact_match)
 {
-    /* Distance 0 — caller would normally have hit find() first, but
+    /* Distance 0 - caller would normally have hit find() first, but
      * suggest() should still return something sensible if called. */
     const HlModuleSpec *g = hl_module_registry_suggest("crypto");
     ASSERT_NE(g, NULL);

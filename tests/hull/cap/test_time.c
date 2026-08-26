@@ -1,5 +1,5 @@
 /*
- * test_hull_cap_time.c — Tests for shared time capability
+ * test_hull_cap_time.c - Tests for shared time capability
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */

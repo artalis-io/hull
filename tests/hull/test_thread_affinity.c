@@ -1,5 +1,5 @@
 /*
- * test_thread_affinity.c — event-loop thread-affinity assertions.
+ * test_thread_affinity.c - event-loop thread-affinity assertions.
  *
  * Verifies hl_assert_on_event_loop():
  *   - same-thread call after marking is a no-op,

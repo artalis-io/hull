@@ -102,7 +102,7 @@ authflows.init({
     end,
     -- Hardening config.
     max_failed_logins     = 3,    -- tighter for fast tests
-    lockout_duration      = 2,    -- 2 seconds — survives the test
+    lockout_duration      = 2,    -- 2 seconds - survives the test
                                   -- bracket without slowing CI
     check_pwned_passwords = true,
     pwned_endpoint        = hibp_mock,

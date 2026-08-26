@@ -1,5 +1,5 @@
 #!/bin/sh
-# e2e_compute_dev.sh — E2E tests for the WASM compute developer workflow.
+# e2e_compute_dev.sh - E2E tests for the WASM compute developer workflow.
 #
 # Tests the `hull compute new / build / test / check` lifecycle plus
 # integration into `hull build` (auto-rebuild) and `hull agent deploy`
@@ -10,7 +10,7 @@
 # without a wasm toolchain do not fail.
 #
 # Sibling to:
-#   tests/e2e_compute.sh       — runtime semantics (compute.call from Lua/JS)
+#   tests/e2e_compute.sh       - runtime semantics (compute.call from Lua/JS)
 #
 # SPDX-License-Identifier: AGPL-3.0-or-later
 
@@ -141,8 +141,8 @@ else
 fi
 
 # Build with no args builds all modules; re-running is a no-op (the
-# logic doesn't track staleness in `hull compute build` — it always
-# rebuilds — but it must still succeed).
+# logic doesn't track staleness in `hull compute build` - it always
+# rebuilds - but it must still succeed).
 if "$HULL_ABS" compute build > /tmp/build_all.log 2>&1; then
     pass "hull compute build (all) succeeds"
 else
@@ -188,7 +188,7 @@ fi
 #   1. Establish a known mtime ordering: .wasm older than .c.
 #   2. Run `hull build .` (or just `hull build` for the local app).
 #      hull build is permitted to abort partway through (missing
-#      platform archive, no entry point, etc.) — what matters is
+#      platform archive, no entry point, etc.) - what matters is
 #      that the source-rebuild step ran BEFORE any other artifact
 #      step and refreshed compute/score.wasm.
 #   3. Verify the .wasm mtime moved forward.
@@ -304,7 +304,7 @@ echo "--- hull compute refresh-header ---"
 
 # Corrupt the per-module copy and verify refresh-header restores it
 # from the embedded canonical version.
-echo "// CORRUPTED — should be overwritten by refresh-header" > compute/score/hull_compute.h
+echo "// CORRUPTED - should be overwritten by refresh-header" > compute/score/hull_compute.h
 
 if "$HULL_ABS" compute refresh-header score > /tmp/refresh.log 2>&1; then
     pass "hull compute refresh-header score succeeds"
@@ -318,7 +318,7 @@ else
     fail "hull_compute.h was not overwritten; still contains corrupted content"
 fi
 
-# Refresh-header with no name should refresh every module — scaffold a
+# Refresh-header with no name should refresh every module - scaffold a
 # second module to exercise the multi-module path.
 "$HULL_ABS" compute new other > /dev/null 2>&1 || true
 echo "// CORRUPTED" > compute/score/hull_compute.h

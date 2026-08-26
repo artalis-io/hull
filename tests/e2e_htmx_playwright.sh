@@ -34,7 +34,7 @@ LOG_DIR="${TMPDIR:-/tmp}/hull-htmx-pw-logs"
 # / migrations come off disk. Fast iteration; what `make dev` runs.
 # MODE=build: runs `hull build` on each example first, then launches
 # the resulting standalone binary. Exercises the embedded-VFS code
-# path — i.e., what end users will actually ship. Catches regressions
+# path - i.e., what end users will actually ship. Catches regressions
 # in build/embed/VFS-lookup that dev-mode can't see (e.g., a static
 # file that serves from disk in dev but didn't make it into the
 # embedded entries array).
@@ -77,22 +77,22 @@ trap cleanup EXIT INT TERM
 
 # ── Prereqs ──────────────────────────────────────────────────────
 if [ ! -x "$HULL" ]; then
-    echo "e2e_htmx_playwright: hull binary not found at $HULL — run 'make' first"
+    echo "e2e_htmx_playwright: hull binary not found at $HULL - run 'make' first"
     exit 1
 fi
 
 if ! command -v node >/dev/null 2>&1; then
-    echo "e2e_htmx_playwright: node not found — SKIPPING (browser tests need node >=18)"
+    echo "e2e_htmx_playwright: node not found - SKIPPING (browser tests need node >=18)"
     exit 0
 fi
 NODE_MAJOR=$(node -p "process.versions.node.split('.')[0]" 2>/dev/null || echo 0)
 if [ "$NODE_MAJOR" -lt 18 ]; then
-    echo "e2e_htmx_playwright: node $NODE_MAJOR < 18 — SKIPPING"
+    echo "e2e_htmx_playwright: node $NODE_MAJOR < 18 - SKIPPING"
     exit 0
 fi
 
 if ! command -v npm >/dev/null 2>&1; then
-    echo "e2e_htmx_playwright: npm not found — SKIPPING"
+    echo "e2e_htmx_playwright: npm not found - SKIPPING"
     exit 0
 fi
 
@@ -132,7 +132,7 @@ fi
 # ── Build mode: produce standalone binaries for each example ──
 # Each app gets a one-shot `hull build` into BUILD_OUT_DIR. Skips
 # entirely in dev mode. Hard-errors when MODE=build but this hull
-# was built without EMBED_PLATFORM=1 — there's no graceful path
+# was built without EMBED_PLATFORM=1 - there's no graceful path
 # (hull build literally can't proceed without the platform lib).
 if [ "$MODE" = "build" ]; then
     if ! "$HULL" doctor --json 2>/dev/null | grep -q '"hull_build":"ready"'; then
@@ -145,7 +145,7 @@ if [ "$MODE" = "build" ]; then
     echo "── Building example apps for MODE=build ──"
     # --no-verify-platform: this hull's platform lib hasn't been
     # signed (locally built), so verification would fail. Apps
-    # built this way must also be RUN with --no-verify-platform —
+    # built this way must also be RUN with --no-verify-platform -
     # launch_app passes that downstream.
     build_one() {
         # $1=name  $2=source-dir
@@ -186,7 +186,7 @@ launch_app() {
         # ("data/") relative to its CWD. Dev mode side-steps this
         # because hull resolves them relative to the app's source
         # dir. For build mode, give each app a private workdir with
-        # a writable data/ — keeps the test isolated and avoids
+        # a writable data/ - keeps the test isolated and avoids
         # touching the source tree.
         _wd="$BUILD_OUT_DIR/$_name-work"
         rm -rf "$_wd" && mkdir -p "$_wd/data"
@@ -234,7 +234,7 @@ fi
 # ── Spin up hypermedia_photos (JS) ───────────────────────────────
 # Same Hull binary, same example dir, just point at app.js instead
 # of app.lua so the QuickJS runtime gets selected. Catches Lua/JS
-# parity regressions at the browser level — the kind of thing unit
+# parity regressions at the browser level - the kind of thing unit
 # tests can't see (e.g., a widget JS contract drift between runtimes).
 echo "── hypermedia_photos[js] on :$PORT_PHOTOS_JS (MODE=$MODE) ──────"
 rm -f "$DB_PHOTOS_JS" "$DB_PHOTOS_JS-journal"

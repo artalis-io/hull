@@ -1,5 +1,5 @@
 #!/bin/sh
-# e2e_feature_wasm.sh — WASM as a composable feature: the compute-free slim
+# e2e_feature_wasm.sh - WASM as a composable feature: the compute-free slim
 # invariant + the needs_wasm two-signal gate (docs/wasm_feature.md).
 #
 # Proves:

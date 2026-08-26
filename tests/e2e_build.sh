@@ -1,14 +1,14 @@
 #!/bin/sh
-# E2E build pipeline tests — exercises hull keygen/build/verify/inspect/manifest
+# E2E build pipeline tests - exercises hull keygen/build/verify/inspect/manifest
 #
 # Tests the full build tool chain from source:
 #   1. Build hull + platform.a from source
-#   2. hull keygen — generates Ed25519 keypair
-#   3. hull manifest — extracts manifest from app source
-#   4. hull build — compiles standalone app binary (unsigned)
-#   5. hull build --sign — compiles + signs
-#   6. hull verify — checks signature
-#   7. hull inspect — displays capabilities + signature
+#   2. hull keygen - generates Ed25519 keypair
+#   3. hull manifest - extracts manifest from app source
+#   4. hull build - compiles standalone app binary (unsigned)
+#   5. hull build --sign - compiles + signs
+#   6. hull verify - checks signature
+#   7. hull inspect - displays capabilities + signature
 #   8. Built app serves HTTP correctly
 #   9. Tampered file detected by verify
 #  10. Multi-file app builds and serves correctly
@@ -55,20 +55,20 @@ pass() {
 check_contains() {
     case "$2" in
         *"$3"*) pass "$1" ;;
-        *)      fail "$1 — expected '$3' in: $2" ;;
+        *)      fail "$1 - expected '$3' in: $2" ;;
     esac
 }
 
 check_file_exists() {
-    if [ -f "$2" ]; then pass "$1"; else fail "$1 — not found: $2"; fi
+    if [ -f "$2" ]; then pass "$1"; else fail "$1 - not found: $2"; fi
 }
 
 check_file_executable() {
-    if [ -x "$2" ]; then pass "$1"; else fail "$1 — not executable: $2"; fi
+    if [ -x "$2" ]; then pass "$1"; else fail "$1 - not executable: $2"; fi
 }
 
 check_exit() {
-    if [ "$2" = "$3" ]; then pass "$1"; else fail "$1 — expected exit $2, got $3"; fi
+    if [ "$2" = "$3" ]; then pass "$1"; else fail "$1 - expected exit $2, got $3"; fi
 }
 
 wait_for_server() {
@@ -154,7 +154,7 @@ if [ -f "$WORKDIR/developer.pub" ]; then
     if [ "$PUBKEY_LEN" = "65" ]; then
         pass "pubkey length (64 hex + newline)"
     else
-        fail "pubkey length — expected 65, got $PUBKEY_LEN"
+        fail "pubkey length - expected 65, got $PUBKEY_LEN"
     fi
 fi
 if [ -f "$WORKDIR/developer.key" ]; then
@@ -162,7 +162,7 @@ if [ -f "$WORKDIR/developer.key" ]; then
     if [ "$SECKEY_LEN" = "129" ]; then
         pass "seckey length (128 hex + newline)"
     else
-        fail "seckey length — expected 129, got $SECKEY_LEN"
+        fail "seckey length - expected 129, got $SECKEY_LEN"
     fi
 fi
 
@@ -545,7 +545,7 @@ fi
 # package.sig.platform.gethull block. With a real HL_PLATFORM_PUBKEY_HEX
 # baked in, --verify-sig must refuse such an app unless the operator
 # explicitly opts out with --no-verify-platform. This test confirms the
-# strict path actually fires — without it, the v0.1.3 enforcement is
+# strict path actually fires - without it, the v0.1.3 enforcement is
 # effectively silent and provides no protection.
 
 echo ""
@@ -612,7 +612,7 @@ check_exit "hull new existing dir fails" 1 $RC
 check_exit "hull new --runtime js exits 0" 0 $RC
 check_file_exists "new app.js exists" "$WORKDIR/newapp_js/app.js"
 
-# Actually run the generated JS app — exists-check alone missed a real
+# Actually run the generated JS app - exists-check alone missed a real
 # bug (missing `import { app } from "hull:app"` in the template) caught
 # only after a downstream JS audit. Run it for one second and curl
 # /health to confirm the template actually boots a working server.
@@ -709,7 +709,7 @@ app.manifest({
 app.get("/", async (_q, r) => r.text("ok"));
 EOF
 
-# hull manifest on a JS app — should now succeed and emit JSON
+# hull manifest on a JS app - should now succeed and emit JSON
 MANIFEST_OUT=$("$HULL" manifest "$WORKDIR/jsapp" 2>&1); RC=$?
 check_exit "js manifest exits 0" 0 $RC
 check_contains "js manifest shows name"    "$MANIFEST_OUT" '"jsapp"'
@@ -722,7 +722,7 @@ check_contains "js manifest shows env"     "$MANIFEST_OUT" 'PORT'
 check_exit "js build --sign exits 0" 0 $RC
 check_file_exists "js package.sig exists" "$WORKDIR/jsapp/package.sig"
 
-# Inspect the JS app — Status should be VALID and the Capabilities
+# Inspect the JS app - Status should be VALID and the Capabilities
 # section MUST be present (the JS-manifest-extraction fix is what
 # makes this so).
 INSPECT_OUT=$("$HULL" inspect "$WORKDIR/jsapp" 2>&1); RC=$?
@@ -734,7 +734,7 @@ check_contains "js inspect shows fs.write"   "$INSPECT_OUT" "fs.write: uploads/"
 check_contains "js inspect shows env"        "$INSPECT_OUT" "env:      PORT"
 check_contains "js inspect shows hosts"      "$INSPECT_OUT" "hosts:    api.stripe.com"
 
-# Re-inspect the original Lua app (built way back in Step 6) — Status
+# Re-inspect the original Lua app (built way back in Step 6) - Status
 # should ALSO be VALID. This catches the inspect.lua payload-
 # reconstruction bug that previously printed INVALID on a genuinely
 # valid Lua signature because `modules_resolved` was missing.

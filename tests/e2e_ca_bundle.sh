@@ -59,7 +59,7 @@ assert() {
 }
 
 if [ ! -x "$HULL" ]; then
-    echo "FAIL: $HULL not found — run 'make' first"
+    echo "FAIL: $HULL not found - run 'make' first"
     exit 1
 fi
 
@@ -95,7 +95,7 @@ echo "── HTTPS over embedded bundle (real network) ──"
 
 # Skip if no network access (CI sandboxes etc.).
 if ! curl -fsSL --max-time 5 https://example.com >/dev/null 2>&1; then
-    echo "  skip no network access to https://example.com — skipping live HTTPS test"
+    echo "  skip no network access to https://example.com - skipping live HTTPS test"
     echo ""
     echo "── Summary ──"
     echo "  Passed: $PASS"
@@ -123,7 +123,7 @@ app.get("/probe", function(req, res)
         res:json({ error = "no response" })
         return
     end
-    -- We don't care about the body content — just that the TLS handshake worked.
+    -- We don't care about the body content - just that the TLS handshake worked.
     res:json({ ok = true, status = resp.status, len = #(resp.body or "") })
 end)
 EOF

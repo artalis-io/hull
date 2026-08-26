@@ -28,7 +28,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* memops_wasm[] + memops_wasm_len — xxd of tests/fixtures/compute/memops.wasm,
+/* memops_wasm[] + memops_wasm_len - xxd of tests/fixtures/compute/memops.wasm,
  * generated at build time so the embedded bytes never drift from the fixture. */
 #include "gen_memops_wasm.h"
 
@@ -40,7 +40,7 @@ static const HlEntry memops_entries[] = {
     { 0, 0, 0 }
 };
 
-/* Expected bytes [0..38] — the input-independent part of the fixture's output.
+/* Expected bytes [0..38] - the input-independent part of the fixture's output.
  * Each region is one memmove/memcpy/memset case (see tests/fixtures/compute/
  * memops.c). Kept as literals so the test independently pins the semantics:
  *   fwd overlap  memmove(a+2,a,6) on {0..7}      -> {0,1,0,1,2,3,4,5}

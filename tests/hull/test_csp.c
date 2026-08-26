@@ -1,5 +1,5 @@
 /*
- * test_csp.c — Tests for the CSP preset registry.
+ * test_csp.c - Tests for the CSP preset registry.
  *
  * Covers hl_csp_resolve (preset-name -> expanded policy; literal
  * passthrough; NULL passthrough) and hl_csp_preset_name_for (reverse

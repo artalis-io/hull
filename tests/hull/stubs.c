@@ -1,5 +1,5 @@
 /*
- * stubs.c — Stub implementations for test builds without Keel
+ * stubs.c - Stub implementations for test builds without Keel
  *
  * Provides dummy hl_js_make_request/hl_js_make_response so that
  * js_runtime.c can link without the full Keel binding layer.

@@ -1,5 +1,5 @@
 /*
- * test_vfs.c — Tests for the unified VFS module
+ * test_vfs.c - Tests for the unified VFS module
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */

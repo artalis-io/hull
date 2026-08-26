@@ -1,5 +1,5 @@
 /*
- * e2e_tui_drive.c — PTY-based test harness for TUI examples.
+ * e2e_tui_drive.c - PTY-based test harness for TUI examples.
  *
  * Spawns a child process inside a fresh PTY, sends a scripted
  * sequence of keystrokes, then waits for a marker on stdout. The
@@ -10,11 +10,11 @@
  * Usage:
  *   e2e_tui_drive <expect> <input-spec> -- <cmd> [args...]
  *
- *   <expect>       — substring that must appear in the child's stdout
+ *   <expect>       - substring that must appear in the child's stdout
  *                    AFTER the input is delivered. Sets exit 0 on
  *                    match, 1 on timeout/mismatch.
  *
- *   <input-spec>   — string with embedded escape sequences. Special
+ *   <input-spec>   - string with embedded escape sequences. Special
  *                    forms:
  *                       %d  → ESC [ B  (down arrow)
  *                       %u  → ESC [ A  (up arrow)
@@ -78,7 +78,7 @@ int main(int argc, char **argv) {
 
 /* Walk the input spec sequentially, writing bytes and sleeping as
  * specified. This is what makes the `%s N` token mean "sleep here"
- * rather than "sleep after everything else is sent" — important when
+ * rather than "sleep after everything else is sent" - important when
  * the test wants the child to make progress (async ticks etc.)
  * between key presses.
  *
@@ -135,7 +135,7 @@ static int millis_since_epoch_ms(long long *out)
 
 /* Look for the alt-screen enter sequence in the accumulated buffer.
  * Reliable marker that the child has finished termios setup and is
- * ready to accept raw keystrokes — guards against the race where
+ * ready to accept raw keystrokes - guards against the race where
  * input is delivered while stdin is still in canonical/echo mode. */
 static int saw_alt_screen(const char *buf, size_t len)
 {
@@ -176,7 +176,7 @@ static size_t drain_for(int master, char *buf, size_t cap, int total_ms)
         if (copy > cap - got - 1) copy = cap - got - 1;
         memcpy(buf + got, chunk, copy);
         got += copy;
-        /* Echo verbatim — the caller can pipe this into their own
+        /* Echo verbatim - the caller can pipe this into their own
          * assertions. */
         (void)!write(STDOUT_FILENO, chunk, (size_t)n);
     }
@@ -208,7 +208,7 @@ int main(int argc, char **argv)
     /* Phase 1: wait until the child has entered alt screen (i.e.
      * finished termios setup). We poll in short slices and look for
      * the CSI ?1049h marker. If we hit the overall deadline without
-     * seeing it, we fall through anyway — the test will likely fail
+     * seeing it, we fall through anyway - the test will likely fail
      * but we don't deadlock here. */
     char buf[64 * 1024];
     size_t total = 0;
@@ -230,7 +230,7 @@ int main(int argc, char **argv)
                 break;
             }
             if (got == 0 && total > 0) {
-                /* No alt screen but child went quiet — maybe it's
+                /* No alt screen but child went quiet - maybe it's
                  * a non-TUI program (e.g. the ENOTTY refusal path).
                  * Stop waiting. */
                 break;
@@ -277,10 +277,10 @@ int main(int argc, char **argv)
             break;
         }
 
-        /* No data this slice — check if the child has exited. */
+        /* No data this slice - check if the child has exited. */
         pid_t w = waitpid(pid, &status, WNOHANG);
         if (w == pid) break;
-        /* Still alive and quiet — keep waiting up to OVERALL deadline. */
+        /* Still alive and quiet - keep waiting up to OVERALL deadline. */
     }
 
     /* Reap if not already. */

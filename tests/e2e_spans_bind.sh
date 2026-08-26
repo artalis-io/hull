@@ -1,5 +1,5 @@
 #!/bin/sh
-# tests/e2e_spans_bind.sh — compute.call({spans=...}) parse + validation
+# tests/e2e_spans_bind.sh - compute.call({spans=...}) parse + validation
 # (mapped-spans checkpoint 3a, item C). Execution of spans is NOT wired yet
 # (item D); this asserts the BINDING contract: the spans list is parsed and
 # validated consistently in Lua + JS, malformed entries are rejected before the

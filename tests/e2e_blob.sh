@@ -1,5 +1,5 @@
 #!/bin/sh
-# e2e_blob.sh — End-to-end tests for hull/blob@1 (Lua + JS).
+# e2e_blob.sh - End-to-end tests for hull/blob@1 (Lua + JS).
 #
 # Exercises the full stack through a live `hull` binary running as a
 # CLI app (app.main). Covers:
@@ -21,7 +21,7 @@
 set -e
 
 HULL="${HULL:-build/hull}"
-# Resolve to absolute path before we cd into a tmp dir below — relative
+# Resolve to absolute path before we cd into a tmp dir below - relative
 # build/hull only works when cwd is the repo root.
 case "$HULL" in
     /*) ;;
@@ -31,7 +31,7 @@ PASS=0
 FAIL=0
 
 pass() { PASS=$((PASS + 1)); echo "  PASS: $1"; }
-fail() { FAIL=$((FAIL + 1)); echo "  FAIL: $1${2:+ — $2}"; }
+fail() { FAIL=$((FAIL + 1)); echo "  FAIL: $1${2:+ - $2}"; }
 
 contains() {
     case "$3" in
@@ -43,7 +43,7 @@ contains() {
 TMPDIR=$(mktemp -d)
 trap 'rm -rf "$TMPDIR"' EXIT
 
-# Well-known SHA-256 of "hello, blob world" — used to validate
+# Well-known SHA-256 of "hello, blob world" - used to validate
 # content-addressing across runtimes.
 EXPECTED_SHA_HELLO="41c962dd3fa37a189e98d239834a5d6a671af33275bbb846549285c78e3e8417"
 # SHA-256 of "foobarbaz"
@@ -60,7 +60,7 @@ app.manifest({
     name = "blob-e2e-lua", version = "0.0.1",
     modules = { "hull/blob@1" },
     -- Declare the parent dir, not data/blobs itself, because Linux
-    -- Landlock unveil rejects paths that don't exist yet — and
+    -- Landlock unveil rejects paths that don't exist yet - and
     -- data/blobs is exactly what blob.init is supposed to create.
     -- data/ exists implicitly under the cwd (we cd into TMPDIR which
     -- exists), so unveil succeeds; blob.init's mkdir under it is
@@ -127,7 +127,7 @@ EOF
 
 cd "$TMPDIR"
 # Pre-create the fs.write declared directory so Linux Landlock's
-# unveil(2) can pin it — Landlock rejects unveil on non-existent
+# unveil(2) can pin it - Landlock rejects unveil on non-existent
 # paths, leaving the write allowlist empty and breaking blob.init's
 # mkdir of data/blobs/. macOS Seatbelt is permissive about this so
 # the bug had been latent until we ran e2e_blob in CI for the first
@@ -141,7 +141,7 @@ cd - >/dev/null
 
 # Debug: if hull produced no matching output, dump the raw stderr+stdout
 # so we can diagnose. Test had been working on macOS but the first
-# Linux/Cosmo CI run revealed empty output — this surfaces why.
+# Linux/Cosmo CI run revealed empty output - this surfaces why.
 if [ -z "$LUA_OUT" ]; then
     echo "  [DEBUG] hull (Lua) produced no matching output. Raw:"
     printf '%s\n' "$LUA_RAW" | sed 's/^/    > /' | head -40
@@ -299,7 +299,7 @@ app.manifest({
     name = "blob-shard2", version = "0.0.1",
     modules = { "hull/blob@1" },
     -- Declare the parent dir, not data/blobs itself, because Linux
-    -- Landlock unveil rejects paths that don't exist yet — and
+    -- Landlock unveil rejects paths that don't exist yet - and
     -- data/blobs is exactly what blob.init is supposed to create.
     -- data/ exists implicitly under the cwd (we cd into TMPDIR which
     -- exists), so unveil succeeds; blob.init's mkdir under it is

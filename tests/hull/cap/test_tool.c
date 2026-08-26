@@ -1,5 +1,5 @@
 /*
- * test_tool.c — Tests for tool hardening (spawn, find_files, copy, rmdir, unveil)
+ * test_tool.c - Tests for tool hardening (spawn, find_files, copy, rmdir, unveil)
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
@@ -501,7 +501,7 @@ UTEST(tool, rmdir_path_validation)
     char *tmpdir = make_tmpdir();
     ASSERT_TRUE(tmpdir != NULL);
 
-    /* Should succeed — /tmp is unveiled for write */
+    /* Should succeed - /tmp is unveiled for write */
     ASSERT_EQ(hl_tool_rmdir(tmpdir, &ctx), 0);
 
     free(tmpdir);
@@ -572,7 +572,7 @@ UTEST(tool, unveil_enforcement_find_files)
     hl_tool_unveil_add(&ctx, "/tmp", "r");
     hl_tool_unveil_seal(&ctx);
 
-    /* Should fail — /etc is not unveiled */
+    /* Should fail - /etc is not unveiled */
     char **files = hl_tool_find_files("/etc", "*.conf", &ctx);
     ASSERT_TRUE(files == NULL);
     hl_tool_unveil_free(&ctx);

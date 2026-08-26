@@ -1,5 +1,5 @@
 /*
- * test_tui_width.c — Tests for the embedded Unicode width table.
+ * test_tui_width.c - Tests for the embedded Unicode width table.
  *
  * Validates that the table generated from `vendor/unicode/` matches
  * expected widths for a sample of well-known codepoints across:
@@ -198,7 +198,7 @@ UTEST(tui_utf8, decode_overlong_rejected)
 UTEST(tui_utf8, decode_surrogate_rejected)
 {
     uint32_t cp = 0;
-    /* U+D800 as 3-byte UTF-8 = ED A0 80 — must reject */
+    /* U+D800 as 3-byte UTF-8 = ED A0 80 - must reject */
     int n = hl_tui_utf8_decode("\xED\xA0\x80", 3, &cp);
     ASSERT_EQ(n, 3);
     ASSERT_EQ(cp, 0xFFFDu);
@@ -219,14 +219,14 @@ UTEST(tui_str_width, ascii_one_per_char)
 
 UTEST(tui_str_width, cjk_two_per_char)
 {
-    /* "中文" = U+4E2D U+6587 — two CJK chars, total 4 cells */
+    /* "中文" = U+4E2D U+6587 - two CJK chars, total 4 cells */
     const char *s = "\xE4\xB8\xAD\xE6\x96\x87";
     ASSERT_EQ(hl_tui_str_width(s, 6), 4);
 }
 
 UTEST(tui_str_width, combining_marks_dont_count)
 {
-    /* 'e' + U+0301 (combining acute) — visual "é", 1 cell */
+    /* 'e' + U+0301 (combining acute) - visual "é", 1 cell */
     const char *s = "e\xCC\x81";
     ASSERT_EQ(hl_tui_str_width(s, 3), 1);
 }

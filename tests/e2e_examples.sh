@@ -1,5 +1,5 @@
 #!/bin/sh
-# E2E tests for all example apps — start hull, verify routes via curl
+# E2E tests for all example apps - start hull, verify routes via curl
 #
 # Usage: sh tests/e2e_examples.sh
 #        RUNTIME=js sh tests/e2e_examples.sh    # test JS only
@@ -16,7 +16,7 @@ FAIL=0
 RUNTIME=${RUNTIME:-all}
 
 if [ ! -x "$HULL" ]; then
-    echo "e2e_examples: hull binary not found at $HULL — run 'make' first"
+    echo "e2e_examples: hull binary not found at $HULL - run 'make' first"
     exit 1
 fi
 
@@ -34,7 +34,7 @@ check_contains() {
     # $1 = description, $2 = response body, $3 = expected substring
     case "$2" in
         *"$3"*) pass "$1" ;;
-        *)      fail "$1 — expected '$3' in: $2" ;;
+        *)      fail "$1 - expected '$3' in: $2" ;;
     esac
 }
 
@@ -43,7 +43,7 @@ check_status() {
     if [ "$2" = "$3" ]; then
         pass "$1"
     else
-        fail "$1 — expected status $3, got $2"
+        fail "$1 - expected status $3, got $2"
     fi
 }
 
@@ -86,7 +86,7 @@ test_hello() {
     TMPDIR_HELLO=$(mktemp -d)
     start_server "$PORT" "$APP" "$TMPDIR_HELLO/data.db"
     if ! wait_for_server "$PORT"; then
-        fail "$LABEL hello — server startup"
+        fail "$LABEL hello - server startup"
         stop_server; rm -rf "$TMPDIR_HELLO"; return
     fi
 
@@ -121,7 +121,7 @@ test_rest_api() {
     TMPDIR_REST=$(mktemp -d)
     start_server "$PORT" "$APP" "$TMPDIR_REST/data.db"
     if ! wait_for_server "$PORT"; then
-        fail "$LABEL rest_api — server startup"
+        fail "$LABEL rest_api - server startup"
         stop_server; rm -rf "$TMPDIR_REST"; return
     fi
 
@@ -176,7 +176,7 @@ test_bench_db() {
     TMPDIR_BENCH=$(mktemp -d)
     start_server "$PORT" "$APP" "$TMPDIR_BENCH/data.db"
     if ! wait_for_server "$PORT"; then
-        fail "$LABEL bench_db — server startup"
+        fail "$LABEL bench_db - server startup"
         stop_server; rm -rf "$TMPDIR_BENCH"; return
     fi
 
@@ -212,7 +212,7 @@ test_auth() {
     COOKIE_JAR="$TMPDIR_AUTH/cookies.txt"
     start_server "$PORT" "$APP" "$TMPDIR_AUTH/data.db"
     if ! wait_for_server "$PORT"; then
-        fail "$LABEL auth — server startup"
+        fail "$LABEL auth - server startup"
         stop_server; rm -rf "$TMPDIR_AUTH"; return
     fi
 
@@ -288,7 +288,7 @@ test_jwt_api() {
     TMPDIR_JWT=$(mktemp -d)
     start_server "$PORT" "$APP" "$TMPDIR_JWT/data.db"
     if ! wait_for_server "$PORT"; then
-        fail "$LABEL jwt_api — server startup"
+        fail "$LABEL jwt_api - server startup"
         stop_server; rm -rf "$TMPDIR_JWT"; return
     fi
 
@@ -309,7 +309,7 @@ test_jwt_api() {
     STATUS=$(curl -s -o /dev/null -w "%{http_code}" "http://127.0.0.1:$PORT/me")
     check_status "$LABEL jwt_api GET /me no token" "$STATUS" "401"
 
-    # Login — get token
+    # Login - get token
     RESP=$(curl -s -X POST -H "Content-Type: application/json" \
            -d '{"email":"alice@test.com","password":"secret1234"}' \
            "http://127.0.0.1:$PORT/login")
@@ -352,7 +352,7 @@ test_crud_with_auth() {
     COOKIE_JAR2="$TMPDIR_CRUD/cookies2.txt"
     start_server "$PORT" "$APP" "$TMPDIR_CRUD/data.db"
     if ! wait_for_server "$PORT"; then
-        fail "$LABEL crud_with_auth — server startup"
+        fail "$LABEL crud_with_auth - server startup"
         stop_server; rm -rf "$TMPDIR_CRUD"; return
     fi
 
@@ -419,7 +419,7 @@ test_middleware() {
     TMPDIR_MW=$(mktemp -d)
     start_server "$PORT" "$APP" "$TMPDIR_MW/data.db"
     if ! wait_for_server "$PORT"; then
-        fail "$LABEL middleware — server startup"
+        fail "$LABEL middleware - server startup"
         stop_server; rm -rf "$TMPDIR_MW"; return
     fi
 
@@ -463,7 +463,7 @@ test_webhooks() {
     TMPDIR_WH=$(mktemp -d)
     start_server "$PORT" "$APP" "$TMPDIR_WH/data.db"
     if ! wait_for_server "$PORT"; then
-        fail "$LABEL webhooks — server startup"
+        fail "$LABEL webhooks - server startup"
         stop_server; rm -rf "$TMPDIR_WH"; return
     fi
 
@@ -484,7 +484,7 @@ test_webhooks() {
     RESP=$(curl -s "http://127.0.0.1:$PORT/webhooks")
     check_contains "$LABEL webhooks GET /webhooks" "$RESP" 'user.created'
 
-    # Fire an event — should deliver to the registered webhook
+    # Fire an event - should deliver to the registered webhook
     RESP=$(curl -s -X POST -H "Content-Type: application/json" \
            -d '{"event":"user.created","data":{"user_id":1}}' \
            "http://127.0.0.1:$PORT/events")
@@ -495,7 +495,7 @@ test_webhooks() {
     RESP=$(curl -s "http://127.0.0.1:$PORT/events")
     check_contains "$LABEL webhooks GET /events" "$RESP" 'user.created'
 
-    # Verify signature — send with correct signature
+    # Verify signature - send with correct signature
     # (The webhook receiver endpoint validates HMAC-SHA256 signatures)
     STATUS=$(curl -s -o /dev/null -w "%{http_code}" -X POST \
              -H "Content-Type: application/json" \
@@ -528,7 +528,7 @@ test_todo() {
     COOKIE_JAR="$TMPDIR_TODO/cookies.txt"
     start_server "$PORT" "$APP" "$TMPDIR_TODO/data.db"
     if ! wait_for_server "$PORT"; then
-        fail "$LABEL todo — server startup"
+        fail "$LABEL todo - server startup"
         stop_server; rm -rf "$TMPDIR_TODO"; return
     fi
 
@@ -631,7 +631,7 @@ test_async_http() {
     TMPDIR_ASYNC=$(mktemp -d)
     start_server "$PORT" "$APP" "$TMPDIR_ASYNC/data.db"
     if ! wait_for_server "$PORT"; then
-        fail "$LABEL async_http — server startup"
+        fail "$LABEL async_http - server startup"
         stop_server; rm -rf "$TMPDIR_ASYNC"; return
     fi
 
@@ -677,7 +677,7 @@ test_timers() {
     TMPDIR_TIMERS=$(mktemp -d)
     start_server "$PORT" "$APP" "$TMPDIR_TIMERS/data.db"
     if ! wait_for_server "$PORT"; then
-        fail "$LABEL timers — server startup"
+        fail "$LABEL timers - server startup"
         stop_server; rm -rf "$TMPDIR_TIMERS"; return
     fi
 
@@ -697,7 +697,7 @@ test_timers() {
     check_contains "$LABEL timers cancel-3 fired" "$RESP" '"cancel-3"'
 
     # Verify cancel-timer stopped: count should be exactly 3
-    # (cancel-1, cancel-2, cancel-3 — each with count 1)
+    # (cancel-1, cancel-2, cancel-3 - each with count 1)
     RESP=$(curl -s "http://127.0.0.1:$PORT/heartbeats")
     # Should NOT have cancel-4 (timer self-cancelled after 3)
     case "$RESP" in
@@ -723,7 +723,7 @@ test_compute() {
     TMPDIR_COMPUTE=$(mktemp -d)
     start_server "$PORT" "$APP" "$TMPDIR_COMPUTE/data.db"
     if ! wait_for_server "$PORT"; then
-        fail "$LABEL compute — server startup"
+        fail "$LABEL compute - server startup"
         return
     fi
 
@@ -759,7 +759,7 @@ test_chat() {
     TMPDIR_CHAT=$(mktemp -d)
     start_server "$PORT" "$APP" "$TMPDIR_CHAT/data.db"
     if ! wait_for_server "$PORT"; then
-        fail "$LABEL chat — server startup"
+        fail "$LABEL chat - server startup"
         stop_server; rm -rf "$TMPDIR_CHAT"; return
     fi
 
@@ -789,7 +789,7 @@ test_irc_chat() {
     # HTTP API tests (start server, test HTTP endpoints, stop)
     start_server "$PORT" "$APP" "$TMPDIR_IRC/http.db"
     if ! wait_for_server "$PORT"; then
-        fail "$LABEL irc_chat — server startup"
+        fail "$LABEL irc_chat - server startup"
         stop_server; rm -rf "$TMPDIR_IRC"; return
     fi
 
@@ -859,12 +859,12 @@ test_irc_chat() {
 
     stop_server
 
-    # WebSocket E2E test (fresh server — avoids kqueue FD reuse issues
+    # WebSocket E2E test (fresh server - avoids kqueue FD reuse issues
     # between prior HTTP connections and ws.connect client sockets)
     WS_PORT=$((PORT + 50))
     start_server "$WS_PORT" "$APP" "$TMPDIR_IRC/ws.db"
     if ! wait_for_server "$WS_PORT"; then
-        fail "$LABEL irc_chat — WS server startup"
+        fail "$LABEL irc_chat - WS server startup"
         stop_server; rm -rf "$TMPDIR_IRC"; return
     fi
 
@@ -890,11 +890,11 @@ test_irc_chat() {
 
     stop_server
 
-    # Federation tests (fresh server — avoids kqueue FD reuse after ws.connect)
+    # Federation tests (fresh server - avoids kqueue FD reuse after ws.connect)
     FED_PORT=$((WS_PORT + 1))
     start_server "$FED_PORT" "$APP" "$TMPDIR_IRC/fed.db"
     if ! wait_for_server "$FED_PORT"; then
-        fail "$LABEL irc_chat — FED server startup"
+        fail "$LABEL irc_chat - FED server startup"
         stop_server; rm -rf "$TMPDIR_IRC"; return
     fi
 

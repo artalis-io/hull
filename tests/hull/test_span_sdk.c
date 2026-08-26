@@ -1,5 +1,5 @@
 /*
- * test_span_sdk.c — native unit tests for the guest SDK header templates/hull_span.h
+ * test_span_sdk.c - native unit tests for the guest SDK header templates/hull_span.h
  * (mapped-spans checkpoint 3b). Exercises the natively-testable surface: the
  * locked wire decoder (hull_span_decode), name lookup (hull_span_find), and the
  * scratch-address narrowing guard (hull_span__narrow) that rejects a destination
@@ -106,7 +106,7 @@ UTEST(span_sdk, decode_version_gate)
     ASSERT_EQ(hull_span_decode(rec, 96, &s), HULL_SPAN_ERR_VERSION);
 }
 
-/* ── decode: forward-compat — a newer host (struct_size 128) with a v1 prefix
+/* ── decode: forward-compat - a newer host (struct_size 128) with a v1 prefix
  *    written (rec_len 96) decodes the v1 fields fine ────────────────────────── */
 UTEST(span_sdk, decode_forward_compat)
 {
@@ -155,7 +155,7 @@ UTEST(span_sdk, narrow_guard)
 /* ── setup argument validation: rejected BEFORE any host call. ─────────────── */
 UTEST(span_sdk, setup_rejects_null_dest_positive_cap)
 {
-    /* out == NULL with a positive capacity would write through NULL — reject,
+    /* out == NULL with a positive capacity would write through NULL - reject,
      * without issuing any host call. */
     g_hostcalls = 0;
     ASSERT_EQ(hull_span_setup((HullSpan *)0, 5), HULL_SPAN_ERR_ARG);

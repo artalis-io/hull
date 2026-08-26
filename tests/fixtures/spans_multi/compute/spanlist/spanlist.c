@@ -1,4 +1,4 @@
-/* spanlist.c — enumerate every attached mapped span in DECLARATION ORDER and
+/* spanlist.c - enumerate every attached mapped span in DECLARATION ORDER and
  * resolve a caller-supplied name, using ONLY the public hull_span.h SDK
  * (hull_span_setup + hull_span_find). Output (text):
  *   "count=<N>;order=<n0>,<n1>,...;find=<idx>"   idx = hull_span_find(name), -1 unknown

@@ -34,13 +34,13 @@ pass() {
 check_contains() {
     case "$2" in
         *"$3"*) pass "$1" ;;
-        *)      fail "$1 — expected '$3'" ;;
+        *)      fail "$1 - expected '$3'" ;;
     esac
 }
 
 check_not_contains() {
     case "$2" in
-        *"$3"*) fail "$1 — unexpected '$3'" ;;
+        *"$3"*) fail "$1 - unexpected '$3'" ;;
         *)      pass "$1" ;;
     esac
 }
@@ -49,14 +49,14 @@ check_file_exists() {
     if [ -f "$2" ]; then
         pass "$1"
     else
-        fail "$1 — file not found: $2"
+        fail "$1 - file not found: $2"
     fi
 }
 
 # ── Setup ───────────────────────────────────────────────────────────
 
 if [ ! -x "$HULL" ]; then
-    echo "hull binary not found at $HULL — run 'make' first"
+    echo "hull binary not found at $HULL - run 'make' first"
     exit 1
 fi
 
@@ -227,7 +227,7 @@ check_contains "agent: recommendations" "$AGENT_OUT" '"recommendations"'
 
 # Agent deploy on hello (no manifest)
 AGENT_HELLO=$("$HULL" agent deploy "$SRCDIR/examples/hello" 2>/dev/null)
-# hello has app.manifest({}) — present but empty
+# hello has app.manifest({}) - present but empty
 check_contains "agent hello: manifest present" "$AGENT_HELLO" '"present":true'
 
 echo ""

@@ -1,5 +1,5 @@
 /*
- * test_db_duckdb.c — DuckDB backend smoke tests (HL_ENABLE_DUCKDB only)
+ * test_db_duckdb.c - DuckDB backend smoke tests (HL_ENABLE_DUCKDB only)
  *
  * Exercises open :memory:, prepared-statement param binding, columnar chunk
  * decode to HlValue (int / text / double / bool / NULL), the dialect descriptor,
@@ -304,7 +304,7 @@ UTEST(db_duckdb, table_columns)
 
 UTEST_MAIN()
 
-#else  /* !HL_ENABLE_DUCKDB — no-op so the file is harmless in every flavor */
+#else  /* !HL_ENABLE_DUCKDB - no-op so the file is harmless in every flavor */
 
 int main(void) { return 0; }
 

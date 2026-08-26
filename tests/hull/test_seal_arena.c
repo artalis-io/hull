@@ -1,5 +1,5 @@
 /*
- * test_seal_arena.c — Tests for the boot-time sealed arena.
+ * test_seal_arena.c - Tests for the boot-time sealed arena.
  *
  * Covers:
  *   1. init / destroy lifecycle (success + failure cases)
@@ -210,7 +210,7 @@ UTEST(seal_arena, destroy_after_seal_works)
 
 /* Fork-and-segfault test. The child writes to sealed memory; the
  * parent waits and asserts the child died with SIGSEGV (or SIGBUS on
- * some platforms — kernel's choice for protection violations). If the
+ * some platforms - kernel's choice for protection violations). If the
  * mprotect didn't take effect, the child would write happily and exit
  * 0, and the test would fail. This is the only way to verify that the
  * OS protection is REAL without crashing the test runner. */

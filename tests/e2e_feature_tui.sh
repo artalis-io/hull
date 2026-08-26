@@ -86,7 +86,7 @@ echo "ok  auto-inferred tui composes + runs"
 #
 # Guards two things the Lua path can't: (1) `--with=tui` pulls libhull_feature-
 # tui-js.a (the js bridge), never the lua bridge, onto the js-only base; and (2)
-# issue #114's JS manifest-extraction leniency — a JS app that imports a feature
+# issue #114's JS manifest-extraction leniency - a JS app that imports a feature
 # module (hull:tui, whose stdlib .js rides the composed feature) must still have
 # its manifest read, so needs_http is false and the build skips http, instead of
 # the extraction failing and the fail-safe over-composing Keel + the http stack.

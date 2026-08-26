@@ -1,5 +1,5 @@
 /*
- * http_echo_server.c — Minimal Keel HTTP server that echoes request details
+ * http_echo_server.c - Minimal Keel HTTP server that echoes request details
  *
  * Used as a test fixture for E2E HTTP client tests.
  * Echoes method, path, headers, and body back as JSON.
@@ -32,7 +32,7 @@ static void echo_handler(KlRequest *req, KlResponse *res, void *ctx)
     }
 
     /* Build JSON response manually.
-     * We use a static buffer — safe because Keel is single-threaded
+     * We use a static buffer - safe because Keel is single-threaded
      * and the buffer outlives writev. */
     static char json[8192];
     int off = 0;
@@ -84,7 +84,7 @@ static void echo_handler(KlRequest *req, KlResponse *res, void *ctx)
     kl_response_json(res, 200, json, (size_t)off);
 }
 
-/* HEAD handler — same as echo but Keel handles HEAD automatically
+/* HEAD handler - same as echo but Keel handles HEAD automatically
  * (sends headers but no body). We just set the status. */
 static void head_handler(KlRequest *req, KlResponse *res, void *ctx)
 {

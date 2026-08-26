@@ -1,5 +1,5 @@
 #!/bin/sh
-# tests/e2e_tui.sh — End-to-end smoke tests for the hull.tui module.
+# tests/e2e_tui.sh - End-to-end smoke tests for the hull.tui module.
 #
 # Real interactive testing requires a PTY (see test_tui_lifecycle.c).
 # This script exercises the boring paths that don't need one:
@@ -109,13 +109,13 @@ expect_failure_with \
 # ── Interactive PTY-driven cases ──────────────────────────────────
 #
 # Requires build/e2e_tui_drive (built from tests/e2e_tui_drive.c when
-# HL_ENABLE_TUI=1). If absent — e.g. cosmo build without forkpty —
+# HL_ENABLE_TUI=1). If absent - e.g. cosmo build without forkpty -
 # we skip these instead of failing.
 
 DRIVE="${DRIVE:-build/e2e_tui_drive}"
 if [ ! -x "${DRIVE}" ]; then
     echo "--- interactive (skipped) ---"
-    echo "  (no PTY driver at ${DRIVE} — run \`make build/e2e_tui_drive\`)"
+    echo "  (no PTY driver at ${DRIVE} - run \`make build/e2e_tui_drive\`)"
 else
     echo "--- interactive picker (Lua) ---"
 
@@ -250,7 +250,7 @@ else
 
     # Down + enter should print the chosen context to stdout. After
     # entering+exiting the TUI the alt-screen leaves and the raw JSON
-    # is on stdout — we check for a known token from the context payload.
+    # is on stdout - we check for a known token from the context payload.
     OUT=$("${DRIVE}" '"task":' "%d%r" -- \
           "${HULL_BIN}" agent context --interactive 2>/dev/null)
     case "${OUT}" in
@@ -363,7 +363,7 @@ APP
             ;;
     esac
 
-    # Filter for "tui" — should narrow down to just modules with that
+    # Filter for "tui" - should narrow down to just modules with that
     # substring (hull/tui at minimum). We look for `filter="tui"` in
     # the bottom key bar; the cell-diff renderer skips re-emitting
     # unchanged prefixes ("hull/" was already on-screen pre-filter),
@@ -484,7 +484,7 @@ SQL
             ;;
     esac
 
-    # Mouse mode is opt-in via tui.run({ mouse = true }) — verify the
+    # Mouse mode is opt-in via tui.run({ mouse = true }) - verify the
     # cap layer emitted the SGR mouse enable sequences.
     case "${OUT}" in
         *"[?1000h"*"[?1006h"*)

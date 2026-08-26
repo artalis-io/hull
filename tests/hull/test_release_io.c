@@ -1,18 +1,18 @@
 /*
- * test_release_io.c — Unit tests for the shared HTTPS / manifest /
+ * test_release_io.c - Unit tests for the shared HTTPS / manifest /
  * atomic-install helpers extracted into hull/release_io.{h,c}.
  *
  * Most of `release_io` is network-bound (TLS, HTTPS GET) and covered by
  * the live e2e suite (tests/e2e_update.sh). What CAN be unit-tested:
  *
- *   - hl_release_io_platform()        — string contents per OS/arch
- *   - hl_release_io_sha256_hex()      — hash + hex encoding
- *   - hl_release_io_json_str()        — tiny JSON-string extractor
- *   - hl_release_io_find_checksum()   — manifest line lookup, with
+ *   - hl_release_io_platform()        - string contents per OS/arch
+ *   - hl_release_io_sha256_hex()      - hash + hex encoding
+ *   - hl_release_io_json_str()        - tiny JSON-string extractor
+ *   - hl_release_io_find_checksum()   - manifest line lookup, with
  *                                       particular care around the
  *                                       no-trailing-newline edge case
  *                                       (audit finding H1).
- *   - hl_release_io_atomic_write()    — temp file → fsync → rename
+ *   - hl_release_io_atomic_write()    - temp file → fsync → rename
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
@@ -199,13 +199,13 @@ UTEST(find_checksum, exact_match_no_prefix_collision) {
  * the asset name ends exactly at the end of the manifest buffer, the
  * old code dereferenced one byte past `end`. The fix reorders the OR
  * chain so the bounds check runs first. This test exercises that
- * exact shape — a buffer where the last byte of the asset name is the
+ * exact shape - a buffer where the last byte of the asset name is the
  * last byte of the buffer (no newline, no NUL). */
 UTEST(find_checksum, no_trailing_newline_last_line) {
     static const char manifest_no_nl[] =
         "0000000000000000000000000000000000000000000000000000000000000001  hull-linux-x86_64\n"
         "0000000000000000000000000000000000000000000000000000000000000002  hull-cosmo";
-    /* strlen excludes the implicit NUL — we deliberately pass the raw
+    /* strlen excludes the implicit NUL - we deliberately pass the raw
      * length so the helper sees no NUL terminator after "cosmo". */
     size_t mlen = sizeof(manifest_no_nl) - 1;
     char hex[65];
@@ -242,7 +242,7 @@ UTEST(atomic_write, creates_file_and_replaces) {
     /* Owner-read at minimum (umask may strip group/other). */
     ASSERT_NE((st.st_mode & 0400), (mode_t)0);
 
-    /* Overwrite — the rename is atomic; new file replaces old. */
+    /* Overwrite - the rename is atomic; new file replaces old. */
     const char *payload2 = "second-payload-bytes\n";
     ASSERT_EQ(hl_release_io_atomic_write(tmp, payload2, strlen(payload2), 0755), 0);
 
@@ -282,7 +282,7 @@ UTEST(atomic_write, null_args_rejected) {
 }
 
 UTEST(atomic_write, refuses_unwritable_parent) {
-    /* /this/does/not/exist has no parent — open(2) returns ENOENT. */
+    /* /this/does/not/exist has no parent - open(2) returns ENOENT. */
     ASSERT_EQ(hl_release_io_atomic_write("/this/does/not/exist/file",
                                          "x", 1, 0644), -1);
 }

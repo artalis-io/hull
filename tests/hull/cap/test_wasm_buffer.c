@@ -1,5 +1,5 @@
 /*
- * test_hull_cap_wasm_buffer.c — Tests for HlWasmBuffer zero-copy buffer
+ * test_hull_cap_wasm_buffer.c - Tests for HlWasmBuffer zero-copy buffer
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
@@ -16,7 +16,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* Pre-compiled echo.wasm (135 bytes) — copies input to output */
+/* Pre-compiled echo.wasm (135 bytes) - copies input to output */
 static const unsigned char echo_wasm[] = {
   0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x14, 0x03, 0x60,
   0x03, 0x7f, 0x7f, 0x7f, 0x01, 0x7f, 0x60, 0x04, 0x7f, 0x7f, 0x7f, 0x7f,

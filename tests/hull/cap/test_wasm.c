@@ -1,5 +1,5 @@
 /*
- * test_hull_cap_wasm.c — Tests for WASM compute capability
+ * test_hull_cap_wasm.c - Tests for WASM compute capability
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
@@ -22,7 +22,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* Pre-compiled echo.wasm (135 bytes) — copies input to output */
+/* Pre-compiled echo.wasm (135 bytes) - copies input to output */
 static const unsigned char echo_wasm[] = {
   0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x14, 0x03, 0x60,
   0x03, 0x7f, 0x7f, 0x7f, 0x01, 0x7f, 0x60, 0x04, 0x7f, 0x7f, 0x7f, 0x7f,
@@ -39,7 +39,7 @@ static const unsigned char echo_wasm[] = {
 };
 static const unsigned int echo_wasm_len = 135;
 
-/* Pre-compiled simd_dot_product_simd.wasm (906 bytes) — SIMD128 dot product.
+/* Pre-compiled simd_dot_product_simd.wasm (906 bytes) - SIMD128 dot product.
  * Uses v128 types; requires AOT or SIMD-enabled interpreter to run. */
 static const unsigned char simd_dot_wasm[] = {
   0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x0d, 0x02, 0x60,
@@ -121,7 +121,7 @@ static const unsigned char simd_dot_wasm[] = {
 };
 static const unsigned int simd_dot_wasm_len = 906;
 
-/* Pre-compiled kv_store.wasm (674 bytes) — stateful key-value store.
+/* Pre-compiled kv_store.wasm (674 bytes) - stateful key-value store.
  * Opcodes: 0x01=LOAD, 0x02=GET, 0x03=COUNT.
  * State persists in WASM globals across calls on persistent instances. */
 static const unsigned char kv_store_wasm[] = {
@@ -185,7 +185,7 @@ static const unsigned char kv_store_wasm[] = {
 };
 static const unsigned int kv_store_wasm_len = 674;
 
-/* Pre-compiled shared_read.wasm (306 bytes) — reads from shared heap via host_call */
+/* Pre-compiled shared_read.wasm (306 bytes) - reads from shared heap via host_call */
 static const unsigned char shared_read_wasm[] = {
   0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x14, 0x03, 0x60,
   0x03, 0x7f, 0x7f, 0x7f, 0x01, 0x7f, 0x60, 0x04, 0x7f, 0x7f, 0x7f, 0x7f,
@@ -216,7 +216,7 @@ static const unsigned char shared_read_wasm[] = {
 };
 static const unsigned int shared_read_wasm_len = 306;
 
-/* Pre-compiled echo64.wasm (136 bytes) — Memory64 echo module */
+/* Pre-compiled echo64.wasm (136 bytes) - Memory64 echo module */
 static const unsigned char echo64_wasm[] = {
   0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x14, 0x03, 0x60,
   0x03, 0x7f, 0x7f, 0x7f, 0x01, 0x7f, 0x60, 0x04, 0x7e, 0x7e, 0x7e, 0x7e,
@@ -386,7 +386,7 @@ UTEST(hl_cap_wasm, gas_exhaustion)
     HlVfs vfs;
     hl_vfs_init(&vfs, test_entries, NULL);
 
-    /* Set gas to 1 instruction — should fail */
+    /* Set gas to 1 instruction - should fail */
     HlWasmCallOpts opts = {0};
     opts.gas = 1;
 
@@ -454,7 +454,7 @@ UTEST(hl_cap_wasm, path_traversal_rejected)
     size_t output_len = 0;
     const char *err = NULL;
 
-    /* Slash in name — path traversal */
+    /* Slash in name - path traversal */
     int rc = hl_cap_wasm_call(&cache, "../../../etc/passwd",
                                "x", 1, &output, &output_len,
                                NULL, NULL, NULL, &vfs, NULL, NULL, &err);
@@ -677,7 +677,7 @@ UTEST(hl_cap_wasm, pool_error_no_reuse)
     HlVfs vfs;
     hl_vfs_init(&vfs, test_entries, NULL);
 
-    /* Gas-exhausted call — instance should NOT be pooled */
+    /* Gas-exhausted call - instance should NOT be pooled */
     HlWasmCallOpts bad_opts = {0};
     bad_opts.gas = 1;
 
@@ -741,7 +741,7 @@ UTEST(hl_cap_wasm, pool_size_mismatch)
     ASSERT_EQ(output_len, input_len);
     free(output);
 
-    /* Call with different heap_size = 2 MB — pool miss, fresh instance */
+    /* Call with different heap_size = 2 MB - pool miss, fresh instance */
     HlWasmCallOpts opts2 = {0};
     opts2.max_input  = 1024;
     opts2.max_output = 1024;
@@ -767,7 +767,7 @@ UTEST(hl_cap_wasm, call_uninitialized_cache)
 {
     HlWasmCache cache;
     memset(&cache, 0, sizeof(cache));
-    /* cache.initialized is 0 — not initialized */
+    /* cache.initialized is 0 - not initialized */
 
     void *output = NULL;
     size_t output_len = 0;
@@ -802,7 +802,7 @@ UTEST(hl_cap_wasm, simd_interpreter_load)
     int rc = hl_cap_wasm_load(&cache, "simd_dot", &vfs, NULL);
 
     if (rc == 0) {
-        /* Module loaded — try calling it. WAMR with SIMD enabled can
+        /* Module loaded - try calling it. WAMR with SIMD enabled can
          * load v128 modules even in interpreter mode. Call may succeed
          * (if SIMDe is available) or fail gracefully. */
         uint8_t input[4 + 4*4 + 4*4]; /* n=4, vec_a[4], vec_b[4] */
@@ -832,10 +832,10 @@ UTEST(hl_cap_wasm, simd_interpreter_load)
             /* dot(a,b) = 1+2+3+4 = 10 */
             ASSERT_TRUE(result > 9.99 && result < 10.01);
         }
-        /* If rc != 0, that's also fine — interpreter SIMD not supported */
+        /* If rc != 0, that's also fine - interpreter SIMD not supported */
         free(output);
     }
-    /* If load failed, that's fine — confirms interpreter can't load v128 */
+    /* If load failed, that's fine - confirms interpreter can't load v128 */
 
     hl_cap_wasm_destroy(&cache);
 }
@@ -963,7 +963,7 @@ UTEST(hl_cap_wasm, gas_clamping_edge_cases)
     const char *err = NULL;
     int rc;
 
-    /* gas = INT_MAX — should succeed (not clamped) */
+    /* gas = INT_MAX - should succeed (not clamped) */
     HlWasmCallOpts opts1 = {0};
     opts1.gas = INT_MAX;
     rc = hl_cap_wasm_call(&cache, "echo",
@@ -975,7 +975,7 @@ UTEST(hl_cap_wasm, gas_clamping_edge_cases)
     ASSERT_EQ(output_len, input_len);
     free(output);
 
-    /* gas = HL_WASM_MAX_GAS — should succeed (accepted as-is) */
+    /* gas = HL_WASM_MAX_GAS - should succeed (accepted as-is) */
     output = NULL;
     output_len = 0;
     err = NULL;
@@ -990,7 +990,7 @@ UTEST(hl_cap_wasm, gas_clamping_edge_cases)
     ASSERT_EQ(output_len, input_len);
     free(output);
 
-    /* gas = HL_WASM_MAX_GAS + 1 — silently clamped, echo is fast so succeeds */
+    /* gas = HL_WASM_MAX_GAS + 1 - silently clamped, echo is fast so succeeds */
     output = NULL;
     output_len = 0;
     err = NULL;
@@ -1011,7 +1011,7 @@ UTEST(hl_cap_wasm, gas_clamping_edge_cases)
 /* ── Large allocation tests ─────────────────────────────────────────── */
 
 /* Helper: generate deterministic input of given size and verify echo output.
- * Uses a simple PRNG to avoid allocating a second buffer for comparison —
+ * Uses a simple PRNG to avoid allocating a second buffer for comparison -
  * we regenerate the expected bytes and compare in chunks. */
 static uint32_t large_xorshift(uint32_t x)
 {
@@ -1108,7 +1108,7 @@ UTEST(hl_cap_wasm, large_io_32mb)
     fill_deterministic(input, io_size, 0xDEADBEEF);
 
     HlWasmCallOpts opts = {0};
-    opts.heap_size  = 128 * 1024 * 1024;  /* 128 MB — room for in + out */
+    opts.heap_size  = 128 * 1024 * 1024;  /* 128 MB - room for in + out */
     opts.max_input  = (uint32_t)io_size;
     opts.max_output = (uint32_t)io_size;
 
@@ -1148,7 +1148,7 @@ UTEST(hl_cap_wasm, large_io_128mb)
     fill_deterministic(input, io_size, 0xCAFEBABE);
 
     HlWasmCallOpts opts = {0};
-    opts.heap_size  = 512 * 1024 * 1024;  /* 512 MB — room for in + out */
+    opts.heap_size  = 512 * 1024 * 1024;  /* 512 MB - room for in + out */
     opts.max_input  = (uint32_t)io_size;
     opts.max_output = (uint32_t)io_size;
 
@@ -1174,7 +1174,7 @@ UTEST(hl_cap_wasm, large_io_128mb)
 UTEST(hl_cap_wasm, io_size_clamping)
 {
     /* Verify that max_input/max_output beyond HL_WASM_MAX_IO_SIZE
-     * gets silently clamped — the call should succeed with clamped limits. */
+     * gets silently clamped - the call should succeed with clamped limits. */
     HlWasmCache cache;
     ASSERT_EQ(hl_cap_wasm_init(&cache), 0);
 
@@ -1182,7 +1182,7 @@ UTEST(hl_cap_wasm, io_size_clamping)
     hl_vfs_init(&vfs, test_entries, NULL);
 
     HlWasmCallOpts opts = {0};
-    /* Request 512 MB I/O — exceeds HL_WASM_MAX_IO_SIZE (256 MB).
+    /* Request 512 MB I/O - exceeds HL_WASM_MAX_IO_SIZE (256 MB).
      * Should be silently clamped to 256 MB. Heap must be large enough
      * for the clamped output buffer allocation in WASM linear memory. */
     opts.max_input  = 512 * 1024 * 1024;
@@ -1210,7 +1210,7 @@ UTEST(hl_cap_wasm, io_size_clamping)
 
 UTEST(hl_cap_wasm, heap_size_clamping)
 {
-    /* Request heap > HL_WASM_MAX_HEAP — should be silently clamped. */
+    /* Request heap > HL_WASM_MAX_HEAP - should be silently clamped. */
     HlWasmCache cache;
     ASSERT_EQ(hl_cap_wasm_init(&cache), 0);
 
@@ -1218,7 +1218,7 @@ UTEST(hl_cap_wasm, heap_size_clamping)
     hl_vfs_init(&vfs, test_entries, NULL);
 
     HlWasmCallOpts opts = {0};
-    /* UINT32_MAX heap — exceeds HL_WASM_MAX_HEAP, clamped to ~4GB.
+    /* UINT32_MAX heap - exceeds HL_WASM_MAX_HEAP, clamped to ~4GB.
      * WAMR may fail to allocate 4GB, so we accept either success or
      * a graceful INTERNAL error. The point is: no crash, no truncation. */
     opts.heap_size = UINT32_MAX;
@@ -1240,7 +1240,7 @@ UTEST(hl_cap_wasm, heap_size_clamping)
         ASSERT_EQ(output_len, strlen(input));
         ASSERT_EQ(memcmp(output, input, strlen(input)), 0);
     } else {
-        /* Graceful failure — not a crash */
+        /* Graceful failure - not a crash */
         ASSERT_EQ(rc, HL_WASM_ERR_INTERNAL);
     }
 
@@ -1299,7 +1299,7 @@ UTEST(hl_cap_wasm, instance_create_destroy)
     ASSERT_EQ(pi->closed, 0);
 
     hl_cap_wasm_instance_destroy(pi);
-    /* pi is freed — don't touch it */
+    /* pi is freed - don't touch it */
 
     hl_cap_wasm_destroy(&cache);
 }
@@ -1387,7 +1387,7 @@ UTEST(hl_cap_wasm, instance_gas_recovery)
     ASSERT_TRUE(err != NULL);
     ASSERT_STREQ(err, "gas_exhausted");
 
-    /* Now with normal gas — should succeed (instance reusable) */
+    /* Now with normal gas - should succeed (instance reusable) */
     HlWasmCallOpts normal_gas = {0};
     normal_gas.gas = 10000000;
     output = NULL;
@@ -1707,7 +1707,7 @@ UTEST(hl_cap_wasm, instance_kv_store_unpooled_loses_state)
     free(output);
     free(load_msg);
 
-    /* GET via unpooled call — fresh instance, state lost */
+    /* GET via unpooled call - fresh instance, state lost */
     size_t get_len;
     uint8_t *get_msg = build_kv_get("key1", &get_len);
     output = NULL; output_len = 0; err = NULL;
@@ -1905,7 +1905,7 @@ UTEST(hl_cap_wasm, data_load_free_blocked_while_worker_holds_snapshot)
 
     while (!atomic_load(&ctx.snapshotted)) { /* wait for the snapshot */ }
 
-    /* Event loop tries to free the held segment — must be refused. */
+    /* Event loop tries to free the held segment - must be refused. */
     err = NULL;
     ASSERT_EQ(hl_cap_wasm_data_load(&cache, "shared_read", NULL,
                                     NULL, 0, NULL, &vfs, NULL, &err), -1);
@@ -1924,7 +1924,7 @@ UTEST(hl_cap_wasm, data_load_free_blocked_while_worker_holds_snapshot)
     hl_cap_wasm_destroy(&cache);
 }
 
-/* Shared heap probe removed — the root cause was using invokeNative_general.c
+/* Shared heap probe removed - the root cause was using invokeNative_general.c
  * (32-bit generic invoker) on 64-bit platforms, which mangled native function
  * arguments. Fixed by using platform-specific assembly invokers (em64_simd.s
  * on x86_64, aarch64_simd.s on aarch64). */
@@ -2105,7 +2105,7 @@ UTEST(hl_cap_wasm, shared_data_no_data)
 
     const char *err = NULL;
 
-    /* Call shared_read without loading any data — should return 0 */
+    /* Call shared_read without loading any data - should return 0 */
     size_t msg_len;
     uint8_t *msg = build_shared_read_msg(0, 0, 4, &msg_len);
     void *output = NULL;
@@ -2172,7 +2172,7 @@ UTEST(hl_cap_wasm, shared_data_concurrent_calls)
     ASSERT_EQ(hl_cap_wasm_data_load(&cache, "shared_read", "seg0",
               data, 20, NULL, &vfs, NULL, &err), 0);
 
-    /* Multiple sequential calls from same cache — simulates pool usage */
+    /* Multiple sequential calls from same cache - simulates pool usage */
     for (int i = 0; i < 10; i++) {
         size_t msg_len;
         uint8_t *msg = build_shared_read_msg(0, 0, 20, &msg_len);
@@ -2575,7 +2575,7 @@ UTEST(hl_cap_wasm, stream_gas_exhaustion)
  * The child resets SIGSEGV/SIGBUS to SIG_DFL before writing so the
  * signal propagates as termination (WIFSIGNALED).  Without the
  * reset, ASan/MSan's own SEGV handler intercepts, prints a
- * diagnostic, and _exit(1)s — making WIFSIGNALED false and the test
+ * diagnostic, and _exit(1)s - making WIFSIGNALED false and the test
  * spuriously fail.  Same pattern as test_seal_arena.c and
  * test_manifest_seal.c.
  */
@@ -2592,7 +2592,7 @@ UTEST(hl_cap_wasm, host_symbols_table_sealed_after_init)
     /* The host_call native is registered.  Its NativeSymbol slot
      * lives in cache.native_arena which is now sealed RO.  We can't
      * easily get the slot's address from outside without poking
-     * WAMR internals — so instead we write to the arena's base
+     * WAMR internals - so instead we write to the arena's base
      * directly; if the seal worked, ANY page in the arena will
      * fault on write. */
     ASSERT_TRUE(cache.native_arena != NULL);
@@ -2624,14 +2624,14 @@ UTEST(hl_cap_wasm, host_symbols_table_sealed_after_init)
 
 UTEST(hl_cap_wasm, disabled_placeholder)
 {
-    /* WASM support not compiled — test passes as no-op */
+    /* WASM support not compiled - test passes as no-op */
     ASSERT_TRUE(1);
 }
 
 #endif /* HL_ENABLE_WASM */
 
 /* Serialize log.c before any concurrent test (concurrent_load, pool_stress,
- * the snapshot-hold test) — vendored log.c is not thread-safe without it. */
+ * the snapshot-hold test) - vendored log.c is not thread-safe without it. */
 UTEST_STATE();
 int main(int argc, const char *const argv[])
 {

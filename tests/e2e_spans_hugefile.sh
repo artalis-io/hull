@@ -1,5 +1,5 @@
 #!/bin/sh
-# tests/e2e_spans_hugefile.sh — mapped-spans completion (3b). Two properties the
+# tests/e2e_spans_hugefile.sh - mapped-spans completion (3b). Two properties the
 # other span e2es do not reach, driven Lua + JS on interpreter AND AOT via the
 # public hull_span.h SDK (spanmeta plugin):
 #
@@ -118,7 +118,7 @@ if [ -n "$WAMRC" ]; then
         rt="$1"; dir="$2"; bin="$TMP/bin_$rt"
         bo="$("$HULL" build "$dir" -o "$bin" --no-verify-platform 2>&1)"
         if printf '%s' "$bo" | grep -q "platform library not embedded"; then
-            skip "$rt/aot: hull is not an embedded build (make EMBED_PLATFORM=1) — CI builds embedded"; return 2
+            skip "$rt/aot: hull is not an embedded build (make EMBED_PLATFORM=1) - CI builds embedded"; return 2
         fi
         [ -x "$bin" ] || { fail "$rt/aot: hull build produced no binary"; printf '%s\n' "$bo" | tail -8; return 1; }
         printf '%s' "$bo" | grep -q "AOT compute/spanmeta.wasm" \
@@ -128,7 +128,7 @@ if [ -n "$WAMRC" ]; then
     aot_build lua "$TMP/app"
     aot_build js  "$jsdir"
 else
-    skip "AOT: no wamrc — the CI AOT job builds wamrc so this path is exercised there"
+    skip "AOT: no wamrc - the CI AOT job builds wamrc so this path is exercised there"
 fi
 
 echo ""

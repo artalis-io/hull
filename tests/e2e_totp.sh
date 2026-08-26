@@ -47,7 +47,7 @@ HULL_PID=""
 TMPDIR_WORK=""
 
 if [ ! -x "$HULL" ]; then
-    echo "e2e_totp: hull binary not found at $HULL — run 'make' first"
+    echo "e2e_totp: hull binary not found at $HULL - run 'make' first"
     exit 1
 fi
 if ! command -v python3 >/dev/null 2>&1; then
@@ -71,7 +71,7 @@ skip() { echo "  SKIP: $1"; SKIP=$((SKIP + 1)); }
 wait_for_server() {
     _port="$1"
     for _i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
-        # Any non-error HTTP response counts as "up" — / will 404 but
+        # Any non-error HTTP response counts as "up" - / will 404 but
         # the connection succeeding is the signal we need.
         if curl -sS -o /dev/null -m 1 "http://127.0.0.1:$_port/" 2>/dev/null; then
             return 0

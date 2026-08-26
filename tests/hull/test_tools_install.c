@@ -9,18 +9,18 @@
 #endif
 
 /*
- * test_tools_install.c — Unit tests for the tool registry + path helpers.
+ * test_tools_install.c - Unit tests for the tool registry + path helpers.
  *
  * Covers the API in include/hull/tools_install.h:
  *   - hl_tools_registry() returns a NUL-terminated table with at least
  *     one entry (wamrc).
- *   - hl_tools_find() — present, absent, NULL inputs.
- *   - hl_tools_name_valid() — accepted chars, rejected escape attempts.
- *   - hl_tools_published_for() — known + unknown platforms.
- *   - hl_tools_asset_name() — composition + buffer overflow rejection.
- *   - hl_tools_install_path() — refuses traversal-bearing names.
- *   - hl_tools_dir() — creates ~/.hull/tools, idempotent.
- *   - hl_tools_lookup_path() — find an installed binary, miss when
+ *   - hl_tools_find() - present, absent, NULL inputs.
+ *   - hl_tools_name_valid() - accepted chars, rejected escape attempts.
+ *   - hl_tools_published_for() - known + unknown platforms.
+ *   - hl_tools_asset_name() - composition + buffer overflow rejection.
+ *   - hl_tools_install_path() - refuses traversal-bearing names.
+ *   - hl_tools_dir() - creates ~/.hull/tools, idempotent.
+ *   - hl_tools_lookup_path() - find an installed binary, miss when
  *     absent, prefer ~/.hull/tools/ over $PATH.
  *
  * The tests redirect HOME and PATH to a tempdir per fixture so a real
@@ -67,7 +67,7 @@ static int rm_recursive(const char *path)
      * rejects `-r` ("rm: illegal option -- r"), and a missing
      * cleanup leaves the next mkdir hitting EEXIST and the rest
      * of the suite cascading-failing. POSIX nftw works on Linux,
-     * macOS, and cosmo uniformly. Ignore ENOENT — missing-path
+     * macOS, and cosmo uniformly. Ignore ENOENT - missing-path
      * is the steady state we're trying to reach anyway. */
     if (nftw(path, rm_recursive_entry, 16, FTW_DEPTH | FTW_PHYS) != 0
         && errno != ENOENT) {
@@ -98,7 +98,7 @@ UTEST_F_SETUP(tools_fixture) {
     utest_fixture->had_path = p != NULL;
     if (p) snprintf(utest_fixture->saved_path, sizeof(utest_fixture->saved_path), "%s", p);
     /* Empty PATH so step (3) of lookup is a no-op unless the test sets
-     * its own — keeps tests hermetic. */
+     * its own - keeps tests hermetic. */
     setenv("PATH", "", 1);
 }
 
@@ -166,7 +166,7 @@ UTEST(name_valid, rejects_traversal_and_separators) {
     ASSERT_EQ(hl_tools_name_valid("foo bar"), 0);     /* space */
     ASSERT_EQ(hl_tools_name_valid("foo\nbar"), 0);    /* newline */
     ASSERT_EQ(hl_tools_name_valid("foo:bar"), 0);     /* PATH separator */
-    ASSERT_EQ(hl_tools_name_valid("foo.bar"), 0);     /* dot — would shadow ext */
+    ASSERT_EQ(hl_tools_name_valid("foo.bar"), 0);     /* dot - would shadow ext */
 }
 
 UTEST(name_valid, rejects_overlong) {
@@ -341,7 +341,7 @@ UTEST_F(tools_fixture, lookup_follows_symlink_to_blob) {
      * follows symlinks by default. This test mocks that layout
      * without going through a real network install. */
 
-    /* 1. Create the blob target — pretend `hull tools install`
+    /* 1. Create the blob target - pretend `hull tools install`
      *    put it there via hl_blob_store_put_durable + chmod 0755. */
     char blob_dir[PATH_MAX];
     snprintf(blob_dir, sizeof(blob_dir),
@@ -374,7 +374,7 @@ UTEST_F(tools_fixture, lookup_follows_symlink_to_blob) {
 
     /* 3. lookup_path finds it. access(X_OK) follows the symlink, so
      *    a 0755 blob target satisfies the check. The returned path
-     *    is the symlink path (not the resolved blob path) — exec(2)
+     *    is the symlink path (not the resolved blob path) - exec(2)
      *    callers transparently follow the link. */
     char out[PATH_MAX];
     ASSERT_EQ(hl_tools_lookup_path("wamrc", NULL, out, sizeof(out)), 0);

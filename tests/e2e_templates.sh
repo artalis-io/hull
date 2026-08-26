@@ -1,5 +1,5 @@
 #!/bin/sh
-# E2E tests for the template engine — Lua and JS runtimes
+# E2E tests for the template engine - Lua and JS runtimes
 #
 # Usage: sh tests/e2e_templates.sh
 #        RUNTIME=js sh tests/e2e_templates.sh    # test JS only
@@ -16,7 +16,7 @@ FAIL=0
 RUNTIME=${RUNTIME:-all}
 
 if [ ! -x "$HULL" ]; then
-    echo "e2e_templates: hull binary not found at $HULL — run 'make' first"
+    echo "e2e_templates: hull binary not found at $HULL - run 'make' first"
     exit 1
 fi
 
@@ -55,36 +55,36 @@ stop_server() {
     fi
 }
 
-# Check a single test route — expects JSON with "ok":true
+# Check a single test route - expects JSON with "ok":true
 check_test() {
     # $1 = label, $2 = port, $3 = path
     RESP=$(curl -s "http://127.0.0.1:$2$3")
     case "$RESP" in
         *'"ok":false'*)
-            fail "$1 — $RESP"
+            fail "$1 - $RESP"
             ;;
         *'"ok":true'*)
             pass "$1"
             ;;
         *)
-            fail "$1 — unexpected response: $RESP"
+            fail "$1 - unexpected response: $RESP"
             ;;
     esac
 }
 
-# Check a multi-result test route (returns array) — each entry must have "ok":true
+# Check a multi-result test route (returns array) - each entry must have "ok":true
 check_test_multi() {
     # $1 = label, $2 = port, $3 = path
     RESP=$(curl -s "http://127.0.0.1:$2$3")
     case "$RESP" in
         *'"ok":false'*)
-            fail "$1 — $RESP"
+            fail "$1 - $RESP"
             ;;
         *'"ok":true'*)
             pass "$1"
             ;;
         *)
-            fail "$1 — unexpected response: $RESP"
+            fail "$1 - unexpected response: $RESP"
             ;;
     esac
 }
@@ -100,7 +100,7 @@ run_template_tests() {
     TMPDIR_TPL=$(mktemp -d)
     start_server "$PORT" "$APP" "$TMPDIR_TPL/data.db"
     if ! wait_for_server "$PORT"; then
-        fail "$LABEL template — server startup"
+        fail "$LABEL template - server startup"
         stop_server; rm -rf "$TMPDIR_TPL"; return
     fi
 

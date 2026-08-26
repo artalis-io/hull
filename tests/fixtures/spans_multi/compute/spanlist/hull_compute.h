@@ -1,5 +1,5 @@
 /*
- * hull_compute.h — Hull WASM compute module ABI header
+ * hull_compute.h - Hull WASM compute module ABI header
  *
  * Freestanding header for Hull compute plugins. Provides:
  *   - Type definitions (no stdlib dependency)

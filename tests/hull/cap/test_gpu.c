@@ -1,5 +1,5 @@
 /*
- * test_hull_cap_gpu.c — Tests for GPU compute capability
+ * test_hull_cap_gpu.c - Tests for GPU compute capability
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
@@ -18,7 +18,7 @@ UTEST(hull_cap_gpu, init_destroy)
 {
     HlGpuCtx ctx;
     int rc = hl_cap_gpu_init(&ctx, &hl_gpu_backend_wgpu);
-    /* wgpu stub returns NOT_AVAILABLE — that's expected without a GPU */
+    /* wgpu stub returns NOT_AVAILABLE - that's expected without a GPU */
     ASSERT_TRUE(rc == HL_GPU_OK || rc == HL_GPU_ERR_NOT_AVAILABLE);
 
     if (rc == HL_GPU_OK)
@@ -423,7 +423,7 @@ UTEST(hull_cap_gpu, texture_null_safety)
 
 UTEST(hull_cap_gpu, disabled_placeholder)
 {
-    /* GPU disabled — this placeholder ensures the test binary compiles
+    /* GPU disabled - this placeholder ensures the test binary compiles
      * and runs successfully even without HL_ENABLE_GPU. */
     ASSERT_TRUE(1);
 }

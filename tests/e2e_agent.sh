@@ -1,8 +1,8 @@
 #!/bin/sh
-# E2E tests — hull agent subcommands
+# E2E tests - hull agent subcommands
 #
 # Tests all 7 agent subcommands: routes, db schema, db query, request,
-# status, errors, test — plus help/usage.
+# status, errors, test - plus help/usage.
 #
 # Usage: sh tests/e2e_agent.sh
 #        RUNTIME=js sh tests/e2e_agent.sh
@@ -19,7 +19,7 @@ FAIL=0
 RUNTIME=${RUNTIME:-all}
 
 if [ ! -x "$HULL" ]; then
-    echo "e2e_agent: hull binary not found at $HULL — run 'make' first"
+    echo "e2e_agent: hull binary not found at $HULL - run 'make' first"
     exit 1
 fi
 
@@ -37,13 +37,13 @@ check_contains() {
     # $1 = description, $2 = response body, $3 = expected substring
     case "$2" in
         *"$3"*) pass "$1" ;;
-        *)      fail "$1 — expected '$3' in: $2" ;;
+        *)      fail "$1 - expected '$3' in: $2" ;;
     esac
 }
 
 check_not_contains() {
     case "$2" in
-        *"$3"*) fail "$1 — unexpected '$3'" ;;
+        *"$3"*) fail "$1 - unexpected '$3'" ;;
         *)      pass "$1" ;;
     esac
 }
@@ -53,7 +53,7 @@ check_exit() {
     if [ "$2" = "$3" ]; then
         pass "$1"
     else
-        fail "$1 — expected exit $3, got $2"
+        fail "$1 - expected exit $3, got $2"
     fi
 }
 
@@ -81,7 +81,7 @@ stop_server() {
 # This is more robust than relying on RUNTIME env var, which is a build-time setting.
 EXPECTED_RT=$($HULL agent routes examples/hello 2>/dev/null | grep -o '"runtime":"[^"]*"' | head -1 | sed 's/"runtime":"//;s/"//')
 if [ -z "$EXPECTED_RT" ]; then
-    echo "e2e_agent: could not detect runtime — agent routes failed"
+    echo "e2e_agent: could not detect runtime - agent routes failed"
     exit 1
 fi
 
@@ -175,11 +175,11 @@ $HULL -p "$PORT_REQ" -d "$TMPDIR_REQ/data.db" "$HELLO_APP" >/dev/null 2>&1 &
 SERVER_PID=$!
 
 if ! wait_for_server "$PORT_REQ"; then
-    fail "request — server startup"
+    fail "request - server startup"
     stop_server
     rm -rf "$TMPDIR_REQ"
 else
-    # GET /health — verify all JSON fields
+    # GET /health - verify all JSON fields
     OUT=$($HULL agent request GET /health -p "$PORT_REQ")
     check_contains "request GET has status"      "$OUT" '"status":'
     check_contains "request GET status 200"      "$OUT" '"status":200'
@@ -225,7 +225,7 @@ $HULL -p "$PORT_STATUS" -d "$TMPDIR_STATUS/data.db" "$HELLO_APP" >/dev/null 2>&1
 SERVER_PID=$!
 
 if ! wait_for_server "$PORT_STATUS"; then
-    fail "status — server startup"
+    fail "status - server startup"
 else
     OUT=$($HULL agent status -p "$PORT_STATUS")
     check_contains "status running"            "$OUT" '"running":true'

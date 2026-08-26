@@ -52,7 +52,7 @@ static HlVfs platform_vfs;
 static void *platform_vfs_owned = NULL;
 
 /* Tests use lots of inline JS snippets that reference modules as
- * globals. Phase 2b removes globals from production — apps must
+ * globals. Phase 2b removes globals from production - apps must
  * import. This helper restores them for testing convenience by
  * evaluating a module that imports each native module and assigns to
  * globalThis. Modules that aren't available are silently skipped. */
@@ -65,7 +65,7 @@ static void install_test_js_globals(HlJS *jsp)
         "  try {\n"
         "    const mod = await import('hull:' + n);\n"
         "    globalThis[n] = mod[n] || mod.default || mod;\n"
-        "  } catch (_) { /* not available — skip */ }\n"
+        "  } catch (_) { /* not available - skip */ }\n"
         "}\n"
         /* The db module now exposes only connect/default; the test snippets
          * use db.query/exec/... directly, so expose the default connection as
@@ -94,7 +94,7 @@ static void init_js(void)
 
 /* Variant for tests that need to assert on the module gate. The
  * global-installer in init_js() runs `import 'hull:X'` for every
- * native module — that runs each module's init callback exactly once
+ * native module - that runs each module's init callback exactly once
  * with module_set = NULL (permissive). Once a module is initialized,
  * QuickJS caches it and the gate never fires again on later imports.
  * Tests that want to observe the gate must skip the installer. */
@@ -312,7 +312,7 @@ UTEST(js_runtime, no_std_module)
 
     /* Dynamic import should fail or return exception */
     if (JS_IsException(val)) {
-        /* Expected — dynamic import disabled or std not available */
+        /* Expected - dynamic import disabled or std not available */
         JSValue exc = JS_GetException(js.ctx);
         JS_FreeValue(js.ctx, exc);
     }
@@ -364,7 +364,7 @@ UTEST(js_runtime, hull_time_module)
                           JS_EVAL_TYPE_MODULE);
     if (JS_IsException(val))
         hl_js_dump_error(&js);
-    /* Module eval may return a promise or undefined — that's OK */
+    /* Module eval may return a promise or undefined - that's OK */
     JS_FreeValue(js.ctx, val);
 
     /* Run pending jobs (module initialization) */
@@ -579,7 +579,7 @@ UTEST(js_runtime, app_router_chainable)
  *
  * app.every / app.daily are conditionally installed by app.manifest
  * when the manifest's modules array contains "hull/timers@*". Without
- * the declaration the methods literally don't exist on `app` —
+ * the declaration the methods literally don't exist on `app` -
  * accessing them returns undefined, calling them throws TypeError. */
 
 UTEST(js_runtime, app_timers_absent_without_declaration)
@@ -699,7 +699,7 @@ UTEST(js_runtime, app_main_coexists_with_route_after)
     hl_js_run_jobs(&js);
 
     char *msg = eval_str("globalThis.__test_caught");
-    /* No exception expected — globalThis.__test_caught is JS null,
+    /* No exception expected - globalThis.__test_caught is JS null,
      * which eval_str stringifies to "null". */
     ASSERT_NE(msg, NULL);
     ASSERT_STREQ(msg, "null");
@@ -723,7 +723,7 @@ UTEST(js_runtime, route_coexists_with_app_main_after)
     hl_js_run_jobs(&js);
 
     char *msg = eval_str("globalThis.__test_caught");
-    /* No exception expected — globalThis.__test_caught is JS null,
+    /* No exception expected - globalThis.__test_caught is JS null,
      * which eval_str stringifies to "null". */
     ASSERT_NE(msg, NULL);
     ASSERT_STREQ(msg, "null");
@@ -1333,7 +1333,7 @@ UTEST(js_cap, db_parameterized_query)
 
 UTEST(js_cap, db_not_available_without_config)
 {
-    /* Use default init (no db) — hull:db module should not be registered */
+    /* Use default init (no db) - hull:db module should not be registered */
     init_js();
     ASSERT_TRUE(js_initialized);
 
@@ -1345,7 +1345,7 @@ UTEST(js_cap, db_not_available_without_config)
                           JS_EVAL_TYPE_MODULE);
     int is_exc = JS_IsException(val);
     if (is_exc) {
-        /* Expected — module not registered */
+        /* Expected - module not registered */
         JSValue exc = JS_GetException(js.ctx);
         JS_FreeValue(js.ctx, exc);
     }
@@ -1419,7 +1419,7 @@ UTEST(js_cap, db_namespace_no_internal_bypass)
     init_js_with_caps();
     ASSERT_TRUE(js_initialized);
 
-    /* db._exec and db._query must not exist — no bypass possible */
+    /* db._exec and db._query must not exist - no bypass possible */
     const char *code =
         "import { db as dbMod } from 'hull:db';\nconst db = dbMod.default();\n"
         "globalThis.__test_ns_nobypass = "
@@ -1549,7 +1549,7 @@ UTEST(js_cap, manifest_extract_js_no_manifest)
     init_js();
     ASSERT_TRUE(js_initialized);
 
-    /* No app.manifest() called — extraction should fail */
+    /* No app.manifest() called - extraction should fail */
     HlManifest manifest;
     int rc = hl_manifest_extract_js(js.ctx, &manifest, NULL);
     ASSERT_EQ(rc, -1);
@@ -1563,7 +1563,7 @@ UTEST(js_cap, manifest_extract_js_partial)
     init_js();
     ASSERT_TRUE(js_initialized);
 
-    /* Manifest with only env — no fs or hosts */
+    /* Manifest with only env - no fs or hosts */
     const char *code =
         "import { app } from 'hull:app';\n"
         "app.manifest({ env: ['PORT'] });\n";
@@ -1857,16 +1857,16 @@ UTEST(js_cap, crypto_hmac_sha1)
      * correctly. Pre-TOTP smoke check before the TOTP module ships.
      *
      * For the TOTP vector, the 8-byte big-endian counter is built
-     * via Uint8Array — js_get_buffer's TypedArray branch (fixed in
+     * via Uint8Array - js_get_buffer's TypedArray branch (fixed in
      * the prior commit) makes that pass cleanly through hmacSha1's
      * data argument as a string. The counter is the literal bytes
-     * 00 00 00 00 00 00 00 01 — encoded as Latin-1 string so each
+     * 00 00 00 00 00 00 00 01 - encoded as Latin-1 string so each
      * char code maps to one byte (TOTP message is short so the
      * UTF-8-vs-bytes pitfall doesn't fire; bytes are all < 0x80
      * except possibly the last position). */
     const char *code =
         "import { crypto } from 'hull:crypto';\n"
-        /* Test 1: RFC 2202 case 2 — text input, no binary pitfalls. */
+        /* Test 1: RFC 2202 case 2 - text input, no binary pitfalls. */
         "globalThis.__test_h1_rfc = crypto.hmacSha1("
         "  'what do ya want for nothing?', '4a656665');\n"
         /* Test 2: RFC 6238 TOTP counter=1, key='12345678901234567890'.
@@ -1940,7 +1940,7 @@ UTEST(js_cap, crypto_base64url_roundtrip)
  * Caught when PKCE in hull/web/middleware/oauth was sending
  * `code_verifier=W29iamVjdCBBcnJheUJ1ZmZlcl0` (== base64url of the
  * literal string "[object ArrayBuffer]") instead of the actual
- * random bytes — IdP rejected with pkce_mismatch. */
+ * random bytes - IdP rejected with pkce_mismatch. */
 UTEST(js_cap, crypto_base64url_encode_arraybuffer)
 {
     init_js_with_caps();
@@ -1953,7 +1953,7 @@ UTEST(js_cap, crypto_base64url_encode_arraybuffer)
         "const u8 = new Uint8Array([0x41, 0x42, 0x43]);\n"
         "globalThis.__test_b64_ab  = crypto.base64urlEncode(u8.buffer);\n"
         "globalThis.__test_b64_u8  = crypto.base64urlEncode(u8);\n"
-        /* High bytes — proves no UTF-8 inflation. 0xFF 0xFE 0xFD
+        /* High bytes - proves no UTF-8 inflation. 0xFF 0xFE 0xFD
          * base64url is "//79" → "__79" (url-alphabet). */
         "const hi = new Uint8Array([0xff, 0xfe, 0xfd]);\n"
         "globalThis.__test_b64_hi  = crypto.base64urlEncode(hi.buffer);\n"
@@ -2638,7 +2638,7 @@ UTEST(js_stdlib, auth_flows_token_round_trip)
     const char *code = AF_INIT_JS
         "authFlows.init(defaults());\n"
         "const A = authFlows._test.ACTIONS;\n"
-        /* Indexed access instead of array destructuring — QuickJS's
+        /* Indexed access instead of array destructuring - QuickJS's
          * js_parse_destructuring_element trips a MSan false-
          * positive that also bit qrcode.js and jwt.js earlier. */
         "function run() {\n"
@@ -3158,7 +3158,7 @@ UTEST(js_stdlib, csrf_wrong_session_rejected)
 }
 
 /* Cross-runtime wire-format fixture. The reference token below was
- * precomputed for sessionId="s1", secret="k", tsHex="1" — i.e. the
+ * precomputed for sessionId="s1", secret="k", tsHex="1" - i.e. the
  * HMAC of "s1:1" keyed by hex("k")="6b". The same fixture lives in
  * tests/hull/runtime/lua/test_lua.c; both must accept it byte-for-byte
  * or the Lua and JS sibling middlewares have drifted out of parity. */
@@ -3171,7 +3171,7 @@ UTEST(js_stdlib, csrf_cross_runtime_reference_token)
         "import { csrf } from 'hull:web:middleware:csrf';\n"
         "const ref = '1.6ae78d056ed813a207a55074947fdbeef0ae8c7850acab486cb52bae058956da';\n"
         "globalThis.__test_csrf_ref_ok = csrf.verify(ref, 's1', 'k', 4294967295) ? 1 : 0;\n"
-        /* Flip one bit of the MAC — must reject. */
+        /* Flip one bit of the MAC - must reject. */
         "const bad = '1.7ae78d056ed813a207a55074947fdbeef0ae8c7850acab486cb52bae058956da';\n"
         "globalThis.__test_csrf_ref_bad = csrf.verify(bad, 's1', 'k', 4294967295) ? 0 : 1;\n";
 
@@ -3188,7 +3188,7 @@ UTEST(js_stdlib, csrf_cross_runtime_reference_token)
     cleanup_js_caps();
 }
 
-/* ── hull:web:middleware:auth tests (smoke — modules load and expose API) */
+/* ── hull:web:middleware:auth tests (smoke - modules load and expose API) */
 
 UTEST(js_cap, crypto_hmac_sha256_verify)
 {
@@ -3924,7 +3924,7 @@ UTEST(js_runtime, import_gated_undeclared_stdlib_fails)
     hl_module_set_clear(&set);
     js.base.module_set = &set;
 
-    /* hull:validate is a .js stdlib file — gating must intercept. */
+    /* hull:validate is a .js stdlib file - gating must intercept. */
     const char *code = "import { validate } from 'hull:validate';\n";
     JSValue val = JS_Eval(js.ctx, code, strlen(code), "<test>",
                           JS_EVAL_TYPE_MODULE);
@@ -4001,7 +4001,7 @@ UTEST(js_runtime, import_gated_undeclared_native_module_fails)
      * callbacks. Undeclared imports throw ReferenceError on first use.
      *
      * Use init_js_bare() so the init callback for hull:crypto hasn't
-     * yet been triggered — the gate fires there exactly once per VM. */
+     * yet been triggered - the gate fires there exactly once per VM. */
     init_js_bare();
 
     HlResolvedModuleSet set;
@@ -4068,7 +4068,7 @@ UTEST(js_runtime, import_gated_declared_native_module_succeeds)
 #ifdef HL_ENABLE_IMAGE
 UTEST(js_runtime, import_image_is_a_real_hull_module)
 {
-    /* Phase 2c: image is no longer a global on globalThis — it must be
+    /* Phase 2c: image is no longer a global on globalThis - it must be
      * imported from hull:image like every other native module. */
     init_js_bare();
 
@@ -4100,7 +4100,7 @@ UTEST(js_runtime, import_image_is_a_real_hull_module)
  * Before May 2026 the JS test runner invoked each test body via
  * `JS_Call` and only checked `JS_IsException(ret)`. For async test
  * bodies (`async () => {...}`) JS_Call returns the Promise object
- * immediately — non-exception → silent PASS — without awaiting the
+ * immediately - non-exception → silent PASS - without awaiting the
  * body. Every async test "passed" regardless of its assertions.
  *
  * The runner is now Promise-aware: it pumps microtasks (and the
@@ -4108,7 +4108,7 @@ UTEST(js_runtime, import_image_is_a_real_hull_module)
  * fulfilled→PASS and rejected→FAIL. These tests lock that in.
  *
  * We exercise hl_js_test_run directly with a synthesized test list
- * — no router, no real HTTP. Synchronous and async, passing and
+ * - no router, no real HTTP. Synchronous and async, passing and
  * failing variants. The async-rejecting case is the one the old
  * runner got wrong; if it ever regresses, it'll trip
  * `js_test_runner.async_rejecting_test_fails` here. */
@@ -4123,7 +4123,7 @@ UTEST(js_test_runner, sync_passing_test_marked_pass)
     kl_router_init(&router, &alloc);
     hl_js_test_register(js.ctx, &router, &js);
 
-    /* Sync test that returns undefined — should PASS. */
+    /* Sync test that returns undefined - should PASS. */
     JSValue rv = JS_Eval(js.ctx, "test('sync ok', () => {})", 24,
                          "test", JS_EVAL_TYPE_GLOBAL);
     JS_FreeValue(js.ctx, rv);
@@ -4149,7 +4149,7 @@ UTEST(js_test_runner, sync_throwing_test_marked_fail)
     kl_router_init(&router, &alloc);
     hl_js_test_register(js.ctx, &router, &js);
 
-    /* Sync test that throws — should FAIL with the message. */
+    /* Sync test that throws - should FAIL with the message. */
     const char *src = "test('sync throw', () => { throw new Error('boom') })";
     JSValue rv = JS_Eval(js.ctx, src, strlen(src), "test",
                          JS_EVAL_TYPE_GLOBAL);
@@ -4177,7 +4177,7 @@ UTEST(js_test_runner, async_resolving_test_marked_pass)
     kl_router_init(&router, &alloc);
     hl_js_test_register(js.ctx, &router, &js);
 
-    /* Async test that resolves cleanly — should PASS once the
+    /* Async test that resolves cleanly - should PASS once the
      * runner awaits the returned promise. */
     const char *src = "test('async ok', async () => { return 1 })";
     JSValue rv = JS_Eval(js.ctx, src, strlen(src), "test",
@@ -4320,7 +4320,7 @@ static int jbc_count(const char *dir)
 }
 
 /* A module that comfortably clears the 256-byte minimum cache
- * threshold. Pure ES module syntax — exports a default function
+ * threshold. Pure ES module syntax - exports a default function
  * that returns a deterministic value we can assert on. */
 static const char *JBC_PROBE =
     "// pad pad pad pad pad pad pad pad pad pad pad pad pad pad pad\n"
@@ -4659,7 +4659,7 @@ UTEST(js_template_cache, name_in_key)
  * throw a TypeError naming the call and explaining the rule. */
 
 /* Pattern: a module body that calls into a binding is evaluated
- * asynchronously by QuickJS — JS_IsException on the eval value gives
+ * asynchronously by QuickJS - JS_IsException on the eval value gives
  * promise-pending, not the inner throw.  These tests use a two-step
  * dance instead:
  *   1. eval a module that stashes the `app` import on globalThis;

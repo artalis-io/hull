@@ -1,5 +1,5 @@
 #!/bin/sh
-# E2E streaming-multipart tests — exercises req:multipart() (Lua) and
+# E2E streaming-multipart tests - exercises req:multipart() (Lua) and
 # req.multipart() (JS) against real multipart/form-data uploads.
 #
 # Architecture:
@@ -11,13 +11,13 @@
 #      the JSON response matches expected byte counts / orderings.
 #
 # Each scenario exercises a different code path:
-#   - tiny single field           — synchronous fast path (no yield)
-#   - many small fields           — multi-PART_BEGIN / drain via read()
-#   - 2 MB / 5 MB binary upload   — chunks() over NEED_DATA cycles
-#   - mixed text + binary + text  — ordering across yields
-#   - empty file                  — zero-byte PART_DATA path
-#   - 10x keep-alive same conn    — no per-request leak in cont/iter
-#   - max-part-size enforcement   — parser ERROR surfaces to handler
+#   - tiny single field           - synchronous fast path (no yield)
+#   - many small fields           - multi-PART_BEGIN / drain via read()
+#   - 2 MB / 5 MB binary upload   - chunks() over NEED_DATA cycles
+#   - mixed text + binary + text  - ordering across yields
+#   - empty file                  - zero-byte PART_DATA path
+#   - 10x keep-alive same conn    - no per-request leak in cont/iter
+#   - max-part-size enforcement   - parser ERROR surfaces to handler
 #
 # Usage: sh tests/e2e_multipart.sh
 #        RUNTIME=lua sh tests/e2e_multipart.sh
@@ -35,7 +35,7 @@ RUNTIME=${RUNTIME:-all}
 SERVER_PID=""
 
 if [ ! -x "$HULL" ]; then
-    echo "e2e_multipart: hull binary not found at $HULL — run 'make' first"
+    echo "e2e_multipart: hull binary not found at $HULL - run 'make' first"
     exit 1
 fi
 
@@ -53,14 +53,14 @@ check_contains() {
     # $1 = description, $2 = response body, $3 = expected substring
     case "$2" in
         *"$3"*) pass "$1" ;;
-        *)      fail "$1 — expected '$3' in: $2" ;;
+        *)      fail "$1 - expected '$3' in: $2" ;;
     esac
 }
 
 check_not_contains() {
     # $1 = description, $2 = response body, $3 = unexpected substring
     case "$2" in
-        *"$3"*) fail "$1 — did NOT expect '$3' in: $2" ;;
+        *"$3"*) fail "$1 - did NOT expect '$3' in: $2" ;;
         *)      pass "$1" ;;
     esac
 }
@@ -97,7 +97,7 @@ trap cleanup EXIT
 TMPDIR_WORK=$(mktemp -d 2>/dev/null || mktemp -d -t hull_mp_e2e)
 
 # Payload files. /dev/urandom gives us bytes that DEFINITELY include
-# non-ASCII and non-UTF-8 sequences — this catches any UTF-8-validating
+# non-ASCII and non-UTF-8 sequences - this catches any UTF-8-validating
 # conversion that would silently mangle binary data.
 dd if=/dev/urandom of="$TMPDIR_WORK/small.bin"  bs=1     count=64    2>/dev/null
 dd if=/dev/urandom of="$TMPDIR_WORK/medium.bin" bs=1024  count=2048  2>/dev/null   # 2 MB
@@ -128,10 +128,10 @@ app.manifest({
 
 local crypto = require("hull.crypto")
 
--- /health — pre-body, so it doesn't need the multipart route's body reader.
+-- /health - pre-body, so it doesn't need the multipart route's body reader.
 app.get("/health", function(req, res) res:text("ok") end)
 
--- Default upload route — generous size cap. Hashes file parts so the
+-- Default upload route - generous size cap. Hashes file parts so the
 -- test can verify byte fidelity.
 app.post("/upload", function(req, res)
     local parts = {}
@@ -165,7 +165,7 @@ app.post("/upload", function(req, res)
     res:json({ ok = true, parts = parts })
 end, { multipart = { max_part_size = 64 * 1024 * 1024 } })
 
--- Size-capped route — anything over 1 KiB rejected mid-stream. We
+-- Size-capped route - anything over 1 KiB rejected mid-stream. We
 -- expect a 5xx (the handler raises on parser error, dispatch writes
 -- 500) and the test asserts on it.
 app.post("/upload-tiny", function(req, res)
@@ -176,7 +176,7 @@ app.post("/upload-tiny", function(req, res)
     res:json({ ok = true, count = count })
 end, { multipart = { max_part_size = 1024 } })
 
--- chunks() drain skip — user code reads PART_BEGIN but never iterates
+-- chunks() drain skip - user code reads PART_BEGIN but never iterates
 -- chunks. Iterator's auto-drain logic should still advance to the next
 -- part cleanly.
 app.post("/upload-skip", function(req, res)
@@ -188,7 +188,7 @@ app.post("/upload-skip", function(req, res)
     res:json({ ok = true, names = names })
 end, { multipart = { max_part_size = 64 * 1024 * 1024 } })
 
--- Cap-enforcement routes — handler wraps the iterator in pcall so
+-- Cap-enforcement routes - handler wraps the iterator in pcall so
 -- we get a structured 4xx response (the realistic user-code pattern
 -- for handling parser errors).
 local function run_cap_route(req, res)
@@ -205,7 +205,7 @@ local function run_cap_route(req, res)
 end
 
 -- max_parts: count cap. > N parts → TOO_MANY_PARTS. Cap fires
--- between PART_END and the next PART_BEGIN — handler is alive at
+-- between PART_END and the next PART_BEGIN - handler is alive at
 -- that point, pcall catches the error, structured 413 is flushed
 -- before Keel closes the connection.
 app.post("/upload-parts-cap", run_cap_route,
@@ -221,13 +221,13 @@ app.post("/upload-headers-cap", run_cap_route,
 -- body-reader's on_data when accumulated bytes exceed the limit.
 -- Closed end-to-end by Keel v2.2.0 streaming-async: the handler is
 -- invoked BEFORE leftover is fed, parks on NEED_DATA, then on_data
--- resumes it with HL_MP_RESUME_ERROR — pcall catches, 413 lands.
+-- resumes it with HL_MP_RESUME_ERROR - pcall catches, 413 lands.
 app.post("/upload-total-cap", run_cap_route,
     { multipart = { max_total_size = 512 } })
 
 -- Streaming-async sync-completion: handler returns 401 BEFORE
 -- iterating req:multipart(). Exercises Keel v2.2.0's H1 keep-alive
--- force-off contract — leftover body bytes are stranded, so the
+-- force-off contract - leftover body bytes are stranded, so the
 -- dispatch layer must NOT keep the connection alive. We assert the
 -- absence of "Connection: keep-alive" in the response (Keel only
 -- emits that header when keep_alive=1, so its absence is the signal
@@ -283,7 +283,7 @@ app.manifest({
     modules : ["hull/http-server@1", "hull/crypto@1"],
 });
 
-// QuickJS doesn't bundle TextDecoder — minimal ASCII decoder is enough
+// QuickJS doesn't bundle TextDecoder - minimal ASCII decoder is enough
 // for text fields the test harness sends (curl -F sends 7-bit ASCII).
 function bufToString(buf) {
     const u8 = new Uint8Array(buf);
@@ -339,7 +339,7 @@ app.post("/upload-skip", async (req, res) => {
     res.json({ ok: true, names });
 }, { multipart: { maxPartSize: 64 * 1024 * 1024 } });
 
-// Cap-enforcement routes — handler wraps the iterator in try/catch
+// Cap-enforcement routes - handler wraps the iterator in try/catch
 // so we get a structured 413 response (the realistic user-code
 // pattern for handling parser errors).
 async function runCapRoute(req, res) {
@@ -409,12 +409,12 @@ run_multipart_tests() {
     SERVER_PID=$!
 
     if ! wait_for_server "$PORT"; then
-        fail "$LABEL — Hull server startup"
+        fail "$LABEL - Hull server startup"
         stop_pid "$SERVER_PID"
         SERVER_PID=""
         return
     fi
-    pass "$LABEL — Hull server started"
+    pass "$LABEL - Hull server started"
 
     # ── Scenario 1: single small text field (sync path, no yield) ──
     RESP=$(curl -sS -X POST "http://127.0.0.1:$PORT/upload" -F "alpha=hello")
@@ -437,14 +437,14 @@ run_multipart_tests() {
     check_contains "$LABEL small bin: size 64"            "$RESP" '"size":64'
     check_contains "$LABEL small bin: hash match"         "$RESP" "\"sha256\":\"$HASH_SMALL\""
 
-    # ── Scenario 4: 2 MB binary upload — exercises NEED_DATA cycles ──
+    # ── Scenario 4: 2 MB binary upload - exercises NEED_DATA cycles ──
     RESP=$(curl -sS -X POST "http://127.0.0.1:$PORT/upload" \
         -F "f=@$TMPDIR_WORK/medium.bin")
     check_contains "$LABEL 2 MB bin: filename"            "$RESP" '"filename":"medium.bin"'
     check_contains "$LABEL 2 MB bin: size 2097152"        "$RESP" '"size":2097152'
     check_contains "$LABEL 2 MB bin: hash match"          "$RESP" "\"sha256\":\"$HASH_MEDIUM\""
 
-    # ── Scenario 5: 5 MB binary upload — heavy NEED_DATA churn ──
+    # ── Scenario 5: 5 MB binary upload - heavy NEED_DATA churn ──
     RESP=$(curl -sS -X POST "http://127.0.0.1:$PORT/upload" \
         -F "f=@$TMPDIR_WORK/large.bin")
     check_contains "$LABEL 5 MB bin: filename"            "$RESP" '"filename":"large.bin"'
@@ -484,7 +484,7 @@ run_multipart_tests() {
     if [ "$KEEPALIVE_OK" = "true" ]; then
         pass "$LABEL 10x keep-alive consecutive uploads"
     else
-        fail "$LABEL 10x keep-alive consecutive uploads — last response: $RESP"
+        fail "$LABEL 10x keep-alive consecutive uploads - last response: $RESP"
     fi
 
     # ── Scenario 9: max-part-size enforcement ──
@@ -507,7 +507,7 @@ run_multipart_tests() {
         5*)   pass "$LABEL max-part-size enforced (got $STATUS)" ;;
         4*)   pass "$LABEL max-part-size enforced (got $STATUS)" ;;
         000)  pass "$LABEL max-part-size enforced (server closed conn mid-upload)" ;;
-        *)  fail "$LABEL max-part-size enforced — expected 4xx/5xx, got $STATUS" ;;
+        *)  fail "$LABEL max-part-size enforced - expected 4xx/5xx, got $STATUS" ;;
     esac
 
     # ── Scenario 10: PART_DATA auto-drain (skip body) ──
@@ -524,7 +524,7 @@ run_multipart_tests() {
     # ── Scenario 11: max_parts enforcement ──
     # /upload-parts-cap caps at 2 parts. Four parts → the parser raises
     # TOO_MANY_PARTS on the 3rd PART_BEGIN. By that point the handler
-    # has iterated 2 parts and is alive — pcall/try-catch surfaces the
+    # has iterated 2 parts and is alive - pcall/try-catch surfaces the
     # error and the handler flushes a structured 413.
     RESP=$(curl --max-time 5 -sS -o /tmp/.mp_resp -w '%{http_code}' \
         -X POST "http://127.0.0.1:$PORT/upload-parts-cap" \
@@ -537,7 +537,7 @@ run_multipart_tests() {
     # /upload-headers-cap caps per-part headers at 128 bytes. We send a
     # short first part (under the cap) followed by a part with a very
     # long field name. The cap fires when the parser hits the SECOND
-    # part's Content-Disposition line — handler is alive, pcall catches.
+    # part's Content-Disposition line - handler is alive, pcall catches.
     # `{1..50}` brace expansion is a bashism; dash leaves it literal,
     # which makes HUGE_NAME = "name_" and the headers cap never fires.
     # `seq` is POSIX and portable across macOS + Ubuntu + Cosmo.
@@ -554,7 +554,7 @@ run_multipart_tests() {
     # field whose value alone exceeds the cap. The handler is invoked
     # BEFORE leftover is fed (streaming-async dispatch), parks on
     # NEED_DATA, then on_data resumes it with ERROR when the cap
-    # trips — pcall/try-catch catches and a structured 413 lands.
+    # trips - pcall/try-catch catches and a structured 413 lands.
     BIG_VAL=$(head -c 2048 /dev/urandom | xxd -p | tr -d '\n')
     RESP=$(curl --max-time 5 -sS -o /tmp/.mp_resp -w '%{http_code}' \
         -X POST "http://127.0.0.1:$PORT/upload-total-cap" \
@@ -566,7 +566,7 @@ run_multipart_tests() {
     # ── Scenario 13b: streaming-async sync-completion (Keel v2.2.0 H1) ──
     # /upload-sync-reject is a streaming-multipart route whose handler
     # responds 401 WITHOUT iterating req:multipart(). The body bytes
-    # are stranded — Keel's H1 fix must force keep-alive off so they
+    # are stranded - Keel's H1 fix must force keep-alive off so they
     # don't bleed into a subsequent request on the same connection.
     # Curl `-D` dumps response headers; we assert (a) status 401 and
     # (b) absence of "Connection: keep-alive" (Keel only emits that

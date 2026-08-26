@@ -1,5 +1,5 @@
 #!/bin/sh
-# tests/e2e_spans_async.sh — end-to-end async span forwarding (mapped-spans D.4).
+# tests/e2e_spans_async.sh - end-to-end async span forwarding (mapped-spans D.4).
 # Proves the whole chain for a POOLED async call: the binding deep-copies names +
 # submission-pins the buffer into the worker op, the worker attaches the span set
 # (D.2) and tears it down, and the pins release on completion. echo does not read

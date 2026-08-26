@@ -1,9 +1,9 @@
 #!/bin/sh
-# e2e_aot_cache.sh — End-to-end tests for the AOT artifact cache
+# e2e_aot_cache.sh - End-to-end tests for the AOT artifact cache
 # (~/.hull/blobs/runtime/compute-aot/) wired into `hull build`.
 #
 # Exercises the cold/warm/opt-out paths against examples/compute
-# which has 8 WASM modules. Requires `wamrc` — skips cleanly when
+# which has 8 WASM modules. Requires `wamrc` - skips cleanly when
 # absent.
 #
 # SPDX-License-Identifier: AGPL-3.0-or-later
@@ -24,7 +24,7 @@ esac
 PASS=0
 FAIL=0
 pass() { PASS=$((PASS + 1)); echo "  PASS: $1"; }
-fail() { FAIL=$((FAIL + 1)); echo "  FAIL: $1${2:+ — $2}"; }
+fail() { FAIL=$((FAIL + 1)); echo "  FAIL: $1${2:+ - $2}"; }
 
 if [ ! -x "$WAMRC" ]; then
     echo "  SKIP: wamrc not found at $WAMRC (build with: make wamrc)"
@@ -33,7 +33,7 @@ fi
 
 # Isolate the cache root so the test never reads/writes the
 # developer's real $HOME/.hull/blobs/. The runtime resolves the
-# cache via $HOME — overriding it is all we need.
+# cache via $HOME - overriding it is all we need.
 TMPHOME=$(mktemp -d)
 export HOME="$TMPHOME"
 trap 'rm -rf "$TMPHOME"' EXIT
@@ -111,7 +111,7 @@ echo "$OUT3" | grep -q "AOT cache disabled via HULL_NO_CACHE" \
     || fail "diagnostic line missing under HULL_NO_AOT_CACHE"
 
 # Counter-case: --no-cache (user intent, not env) must NOT print
-# the env-disabled diagnostic — it's the wrong message.
+# the env-disabled diagnostic - it's the wrong message.
 
 # ── 4. --no-cache CLI flag bypasses the cache ────────────────────
 wipe_cache
@@ -121,7 +121,7 @@ N4=$(count_cache)
 [ "$N4" = "0" ] && pass "--no-cache skipped writes" \
                 || fail "--no-cache write count" "got $N4, want 0"
 # Counter-case: --no-cache means opts.cache=false, so the env-var
-# diagnostic must NOT fire (would be the wrong message — the user
+# diagnostic must NOT fire (would be the wrong message - the user
 # already knows why the cache is off; they typed the flag).
 echo "$OUT4" | grep -q "AOT cache disabled via HULL_NO_CACHE" \
     && fail "--no-cache wrongly prints env-disabled diagnostic" \

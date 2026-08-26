@@ -1,9 +1,9 @@
 /*
  * hull_span.h native-vs-WASM differential test (#324 3b). Runs identical byte
- * fixtures through the SDK's pure decoders on TWO targets — natively (this TU,
+ * fixtures through the SDK's pure decoders on TWO targets - natively (this TU,
  * compiled against templates/hull_span.h) and a real wasm32 guest
  * (tests/fixtures/compute/spandiff.c, same spandiff_ops.h body) on the
- * interpreter AND AOT — and requires byte-for-byte parity. An independent
+ * interpreter AND AOT - and requires byte-for-byte parity. An independent
  * little-endian oracle additionally pins correctness so a shared decode bug
  * (identical on both targets) cannot pass on parity alone.
  *
@@ -11,7 +11,7 @@
  * patterns, and misaligned + exact-end offsets; hull_span_decode metadata
  * (valid, version/struct_size/rec_len rejection = overflow/one-past); the
  * hull_span__narrow 32-bit ABI boundary (exact UINT32_MAX accepted; a native-only
- * one-past-4GiB reject, since wasm32 cannot represent it — the #318 Memory64
+ * one-past-4GiB reject, since wasm32 cannot represent it - the #318 Memory64
  * leg); and hull_span_find name lookup.
  *
  * The guest uses only host_call-free SDK ops, so spandiff.wasm imports nothing
@@ -277,7 +277,7 @@ UTEST(hull_span_diff, native_vs_wasm_interp_aot)
       diff_case(utest_result, aot_env, aot_inst, "narrow_max32", in, 9, exp, 8); }
 
     /* narrow one-past-4GiB reject: native only. wasm32's uptr is 32-bit so the
-     * value truncates and cannot exercise the reject — the #318 Memory64 leg. */
+     * value truncates and cannot exercise the reject - the #318 Memory64 leg. */
     { in[0] = SPANDIFF_OP_NARROW; put64(in + 1, 0x100000000ull);
       uint8_t nat[OUT_CAP];
       int nl = spandiff_run((const hull_span_u8 *)in, 9, (hull_span_u8 *)nat, OUT_CAP);

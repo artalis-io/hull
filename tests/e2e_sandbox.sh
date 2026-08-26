@@ -1,20 +1,20 @@
 #!/bin/sh
-# E2E sandbox tests — verify pledge/unveil enforcement
+# E2E sandbox tests - verify pledge/unveil enforcement
 #
 # Tests:
 #   1. Hull with manifest logs "[sandbox] applied" (Linux/cosmo only)
-#   2. Hull without manifest — default-deny sandbox still applied
-#   3. Manifest without hosts — no dns promise
-#   4. JS manifest app — sandbox applied (feature parity)
-#   5. Phase 1 pledge — applied before load_app, before phase 2
+#   2. Hull without manifest - default-deny sandbox still applied
+#   3. Manifest without hosts - no dns promise
+#   4. JS manifest app - sandbox applied (feature parity)
+#   5. Phase 1 pledge - applied before load_app, before phase 2
 #   6. Kernel enforcement: pledge/unveil violations blocked (Linux only)
 #
 # Usage: sh tests/e2e_sandbox.sh
 #        make e2e-sandbox
 #
 # Environment:
-#   HULL     — path to hull binary (default: ./build/hull)
-#   BUILDDIR — build directory for pledge objects (default: ./build)
+#   HULL     - path to hull binary (default: ./build/hull)
+#   BUILDDIR - build directory for pledge objects (default: ./build)
 #
 # Returns 0 if all tests pass, 1 on failure.
 # Tests skip gracefully on platforms without kernel sandbox.
@@ -60,13 +60,13 @@ skip() {
 check_contains() {
     case "$2" in
         *"$3"*) pass "$1" ;;
-        *)      fail "$1 — expected '$3'" ;;
+        *)      fail "$1 - expected '$3'" ;;
     esac
 }
 
 check_not_contains() {
     case "$2" in
-        *"$3"*) fail "$1 — unexpected '$3'" ;;
+        *"$3"*) fail "$1 - unexpected '$3'" ;;
         *)      pass "$1" ;;
     esac
 }
@@ -93,7 +93,7 @@ stop_server() {
 # ── Preconditions ────────────────────────────────────────────────────
 
 if [ ! -x "$HULL" ]; then
-    echo "e2e_sandbox: hull binary not found at $HULL — run 'make' first"
+    echo "e2e_sandbox: hull binary not found at $HULL - run 'make' first"
     exit 1
 fi
 
@@ -122,10 +122,10 @@ if [ -f "$BUILDDIR/platform_cc" ]; then
     esac
 fi
 
-# ── Test 1: Hull with manifest app — sandbox applied ────────────────
+# ── Test 1: Hull with manifest app - sandbox applied ────────────────
 
 echo ""
-echo "=== Test 1: Hull with manifest — sandbox log ==="
+echo "=== Test 1: Hull with manifest - sandbox log ==="
 
 cat > "$WORKDIR/app.lua" << 'EOF'
 app.manifest({
@@ -175,10 +175,10 @@ else
     fail "hull did not start with manifest app"
 fi
 
-# ── Test 2: Hull without manifest — default-deny sandbox ────────────
+# ── Test 2: Hull without manifest - default-deny sandbox ────────────
 
 echo ""
-echo "=== Test 2: Hull without manifest — default-deny sandbox ==="
+echo "=== Test 2: Hull without manifest - default-deny sandbox ==="
 
 cat > "$WORKDIR/nomanifest.lua" << 'EOF'
 app.manifest({ modules = {"hull/http-server@1"} })
@@ -218,10 +218,10 @@ else
     fail "hull did not start without manifest"
 fi
 
-# ── Test 3: Manifest without hosts — no dns promise ─────────────────
+# ── Test 3: Manifest without hosts - no dns promise ─────────────────
 
 echo ""
-echo "=== Test 3: Manifest without hosts — no dns promise ==="
+echo "=== Test 3: Manifest without hosts - no dns promise ==="
 
 cat > "$WORKDIR/nohosts.lua" << 'EOF'
 app.manifest({
@@ -255,17 +255,17 @@ if wait_for_server 19882; then
             check_not_contains "no dns promise without hosts" "$LOG3" " dns"
         fi
     else
-        skip "dns promise check — no kernel sandbox on this platform"
+        skip "dns promise check - no kernel sandbox on this platform"
     fi
 else
     stop_server
     fail "hull did not start with no-hosts manifest"
 fi
 
-# ── Test 4: JS manifest app — sandbox applied ────────────────────────
+# ── Test 4: JS manifest app - sandbox applied ────────────────────────
 
 echo ""
-echo "=== Test 4: JS manifest app — sandbox log ==="
+echo "=== Test 4: JS manifest app - sandbox log ==="
 
 cat > "$WORKDIR/jsapp.js" << 'EOF'
 import { app } from 'hull:app';
@@ -315,10 +315,10 @@ else
     fail "hull did not start with JS manifest app"
 fi
 
-# ── Test 5: Phase 1 pledge — log appears before load_app ──────────────
+# ── Test 5: Phase 1 pledge - log appears before load_app ──────────────
 
 echo ""
-echo "=== Test 5: Phase 1 pledge — applied before load_app ==="
+echo "=== Test 5: Phase 1 pledge - applied before load_app ==="
 
 LOGFILE5="$WORKDIR/hull_phase1.log"
 "$HULL" -p 19884 -d "$WORKDIR/test5.db" "$WORKDIR/app.lua" >"$LOGFILE5" 2>&1 &
@@ -363,7 +363,7 @@ echo ""
 echo "=== Test 6: Kernel enforcement (sandbox violations) ==="
 
 if [ "$UNAME_S" != "Linux" ] && [ "$UNAME_S" != "Darwin" ] && [ "$UNAME_S" != "OpenBSD" ]; then
-    skip "kernel enforcement test — Linux/macOS/OpenBSD only"
+    skip "kernel enforcement test - Linux/macOS/OpenBSD only"
 elif [ ! -f "$SRCDIR/tests/sandbox_violation.c" ]; then
     fail "sandbox_violation.c not found"
 else
@@ -403,7 +403,7 @@ else
             fail "sandbox_violation.c compilation failed (macOS): $COMPILE_ERR"
         fi
     elif [ "$UNAME_S" = "OpenBSD" ]; then
-        # OpenBSD: pledge/unveil are native — no extra libs needed
+        # OpenBSD: pledge/unveil are native - no extra libs needed
         if $CC -std=c11 -O2 -o "$SANDBOX_TEST" \
                 "$SRCDIR/tests/sandbox_violation.c" 2>"$WORKDIR/compile.log"; then
             pass "sandbox_violation.c compiled (OpenBSD)"
@@ -462,9 +462,9 @@ echo ""
 echo "=== Test 7: CLI app.main writes to a TTY under the sandbox ==="
 
 if [ "$UNAME_S" != "Linux" ] || [ "${IS_COSMO:-0}" = "1" ]; then
-    skip "TTY-write regression — native Linux only"
+    skip "TTY-write regression - native Linux only"
 elif ! command -v python3 >/dev/null 2>&1; then
-    skip "TTY-write regression — python3 (pty) unavailable"
+    skip "TTY-write regression - python3 (pty) unavailable"
 else
     cat > "$WORKDIR/cli.lua" << 'EOF'
 app.manifest({ modules = {} })

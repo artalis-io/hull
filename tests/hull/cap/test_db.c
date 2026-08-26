@@ -1,5 +1,5 @@
 /*
- * test_hull_cap_db.c — Tests for shared database capability
+ * test_hull_cap_db.c - Tests for shared database capability
  *
  * Uses utest.h (from Keel vendor) for the test framework.
  * Tests run against an in-memory SQLite database.
@@ -366,7 +366,7 @@ UTEST(hl_cap_db, stmt_cache_reuse)
 {
     setup_db();
 
-    /* Execute the same SQL twice — second should hit cache */
+    /* Execute the same SQL twice - second should hit cache */
     HlValue p1[] = {
         { .type = HL_TYPE_TEXT, .s = "Alice", .len = 5 },
         { .type = HL_TYPE_INT, .i = 30 },
@@ -621,7 +621,7 @@ UTEST(hl_cap_db, udf_unregister_removes_function)
         NULL, NULL, NULL, NULL, NULL);
     ASSERT_EQ(rc, SQLITE_OK);
 
-    /* Should fail — function no longer exists */
+    /* Should fail - function no longer exists */
     QueryResult result = { .count = 0 };
     rc = hl_cap_db_query(&test_cache,
         "SELECT hull_strlen('test') AS nlen", NULL, 0,
@@ -642,7 +642,7 @@ UTEST(hl_cap_db, udf_wasm_rejects_bad_prefix)
         .nargs       = 1,
     };
     const char *err_msg = NULL;
-    /* Wrap the test sqlite3* in a transient HlDbHandle — the UDF API now
+    /* Wrap the test sqlite3* in a transient HlDbHandle - the UDF API now
      * takes HlDbHandle * so non-SQLite backends can fail-fast. */
     HlDbHandle handle = {0};
     ASSERT_EQ(hl_db_sqlite_wrap(&handle, test_db), 0);

@@ -1,5 +1,5 @@
 #!/bin/sh
-# E2E tests — start hull with each runtime, verify routes via curl
+# E2E tests - start hull with each runtime, verify routes via curl
 #
 # Usage: sh tests/e2e.sh
 #        RUNTIME=js sh tests/e2e.sh    # test JS only
@@ -16,7 +16,7 @@ FAIL=0
 RUNTIME=${RUNTIME:-all}
 
 if [ ! -x "$HULL" ]; then
-    echo "e2e: hull binary not found at $HULL — run 'make' first"
+    echo "e2e: hull binary not found at $HULL - run 'make' first"
     exit 1
 fi
 
@@ -34,7 +34,7 @@ check_contains() {
     # $1 = description, $2 = response body, $3 = expected substring
     case "$2" in
         *"$3"*) pass "$1" ;;
-        *)      fail "$1 — expected '$3' in: $2" ;;
+        *)      fail "$1 - expected '$3' in: $2" ;;
     esac
 }
 
@@ -67,7 +67,7 @@ run_tests() {
     trap "kill $SERVER_PID 2>/dev/null; rm -rf $TMPDIR" EXIT
 
     if ! wait_for_server "$PORT"; then
-        fail "$LABEL — server startup"
+        fail "$LABEL - server startup"
         kill "$SERVER_PID" 2>/dev/null || true
         rm -rf "$TMPDIR"
         trap - EXIT
@@ -84,27 +84,27 @@ run_tests() {
     RESP=$(curl -s "http://127.0.0.1:$PORT/")
     check_contains "$LABEL GET / message" "$RESP" '"message"'
 
-    # GET /visits — should contain the visit from GET /
+    # GET /visits - should contain the visit from GET /
     RESP=$(curl -s "http://127.0.0.1:$PORT/visits")
     check_contains "$LABEL GET /visits array" "$RESP" "["
 
-    # POST /echo — body should be echoed back
+    # POST /echo - body should be echoed back
     RESP=$(curl -s -X POST -H "Content-Type: text/plain" \
            -d 'hello world' "http://127.0.0.1:$PORT/echo")
     check_contains "$LABEL POST /echo body" "$RESP" '"body"'
     check_contains "$LABEL POST /echo content" "$RESP" 'hello world'
 
-    # GET /greet/:name — route param
+    # GET /greet/:name - route param
     RESP=$(curl -s "http://127.0.0.1:$PORT/greet/World")
     check_contains "$LABEL GET /greet/World greeting" "$RESP" '"Hello, World!"'
 
-    # POST /greet/:name — route param + body
+    # POST /greet/:name - route param + body
     RESP=$(curl -s -X POST -H "Content-Type: text/plain" \
            -d 'payload' "http://127.0.0.1:$PORT/greet/Hull")
     check_contains "$LABEL POST /greet/Hull greeting" "$RESP" '"Hello, Hull!"'
     check_contains "$LABEL POST /greet/Hull body" "$RESP" '"payload"'
 
-    # GET /greet/:name with query string — params + query coexist
+    # GET /greet/:name with query string - params + query coexist
     RESP=$(curl -s "http://127.0.0.1:$PORT/greet/Test?lang=en")
     check_contains "$LABEL GET /greet/Test?lang=en greeting" "$RESP" '"Hello, Test!"'
 
@@ -114,7 +114,7 @@ run_tests() {
     trap - EXIT
 }
 
-# Run for selected runtimes — use different ports to avoid conflicts
+# Run for selected runtimes - use different ports to avoid conflicts
 if [ "$RUNTIME" != "js" ]; then
     run_tests "lua" "lua"     19850 examples/hello/app.lua
 fi

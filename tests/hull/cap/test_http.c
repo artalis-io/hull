@@ -1,5 +1,5 @@
 /*
- * test_http.c — Unit tests for HTTP client capability (no network)
+ * test_http.c - Unit tests for HTTP client capability (no network)
  *
  * Tests host allowlist checking. URL parsing and response parser tests
  * are now in Keel (tests/test_url.c, tests/test_response_parser.c).

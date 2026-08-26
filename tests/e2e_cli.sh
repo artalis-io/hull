@@ -1,5 +1,5 @@
 #!/bin/sh
-# tests/e2e_cli.sh — End-to-end coverage for examples/*_cli (app.main apps).
+# tests/e2e_cli.sh - End-to-end coverage for examples/*_cli (app.main apps).
 #
 # Distinct from tests/e2e_examples.sh which exercises HTTP server apps
 # by starting them and curl'ing. CLI examples are one-shot: invoke,

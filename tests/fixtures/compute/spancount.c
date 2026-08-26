@@ -1,6 +1,6 @@
-/* spancount.c — minimal test fixture: reports the attached mapped-span count and
+/* spancount.c - minimal test fixture: reports the attached mapped-span count and
  * the first byte of span 0's window, via the RAW host_call(SPAN_INFO) ABI (no
- * hull_span.h, so it needs no freestanding memcpy — #327 is independent). Output:
+ * hull_span.h, so it needs no freestanding memcpy - #327 is independent). Output:
  * byte 0 = span count, byte 1 = window[0] (only when count > 0). Proves the sync
  * compute.call / instance:call bindings forward spans (#325).
  * SPDX-License-Identifier: AGPL-3.0-or-later */

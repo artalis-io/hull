@@ -1,4 +1,4 @@
-/* segread.c — minimal fixture: reports the loaded compute.segment count and the
+/* segread.c - minimal fixture: reports the loaded compute.segment count and the
  * first byte of segment 0, via hull_compute.h's segment host-calls (no
  * hull_span.h, memcpy-free). Segments are WAMR shared heaps, so this exercises
  * the same AOT shared-heap path as mapped spans (#326). Output: byte 0 = segment

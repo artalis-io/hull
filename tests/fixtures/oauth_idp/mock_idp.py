@@ -2,7 +2,7 @@
 # Mock OIDC IdP used by tests/e2e_oauth.sh.
 #
 # Stdlib-only Python HTTP server + openssl shell-out for RS256
-# signing. Deliberately minimal — implements just enough of the OIDC
+# signing. Deliberately minimal - implements just enough of the OIDC
 # Authorization Code + PKCE flow to exercise hull/web/middleware/oauth.
 #
 # Endpoints:
@@ -121,7 +121,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     "kid": KID,
                     "x5c": [CERT_B64],
                     # x5t and x5t#S256 are optional; some libraries
-                    # require them — include x5t#S256 for completeness.
+                    # require them - include x5t#S256 for completeness.
                     "x5t#S256": b64url(hashlib.sha256(
                         base64.b64decode(CERT_B64)).digest()),
                 }]})

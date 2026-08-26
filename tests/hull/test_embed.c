@@ -1,12 +1,12 @@
 /*
- * test_embed.c — unit tests for the libhull embedding ABI (hull/embed.h).
+ * test_embed.c - unit tests for the libhull embedding ABI (hull/embed.h).
  *
  * Covers the surface that is safe to exercise inside the shared test
  * runner: version, handle construction, policy limits, the fail-closed
  * guard, stateless crypto, identity, and NULL-safety.
  *
  * The SEALED path (hl_embed_sandbox_phase1 / hl_embed_seal) is
- * deliberately NOT tested here — hl_embed_seal applies a real, on macOS
+ * deliberately NOT tested here - hl_embed_seal applies a real, on macOS
  * irreversible, kernel sandbox to the calling process, which would
  * restrict the rest of the runner. That path is covered end-to-end by
  * the standalone `make embed-c-smoke` host (examples/embed_c), which runs
@@ -135,13 +135,13 @@ UTEST(embed, identity)
 /*
  * Death test: after hl_embed_seal(), the base_dir the capability layer
  * reads on every call must live in a read-only mapping. Fork a child,
- * seal, then write to that mapping — the child MUST die with SIGSEGV /
+ * seal, then write to that mapping - the child MUST die with SIGSEGV /
  * SIGBUS. Runs in a child because hl_embed_seal also applies the (on
  * macOS irreversible) kernel sandbox to the calling process.
  *
  * Child exit codes: 42 = sandbox unavailable in this environment (soft
  * skip), 43 = sealed-flag wrong, 44 = base_dir NULL, 0 = write did NOT
- * fault (which is a failure — the page was writable).
+ * fault (which is a failure - the page was writable).
  */
 UTEST(embed, sealed_base_dir_is_readonly)
 {
@@ -163,7 +163,7 @@ UTEST(embed, sealed_base_dir_is_readonly)
 
         /* Restore default fault handlers so the fault terminates the child
          * (WIFSIGNALED) instead of being caught by a sanitizer handler that
-         * prints and _exit(1)s — same rationale as test_seal_arena. */
+         * prints and _exit(1)s - same rationale as test_seal_arena. */
         signal(SIGSEGV, SIG_DFL);
         signal(SIGBUS,  SIG_DFL);
 

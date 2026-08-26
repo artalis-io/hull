@@ -27,12 +27,12 @@ RUNTIME=${RUNTIME:-all}
 SERVER_PID=""
 
 if [ ! -x "$HULL" ]; then
-    echo "e2e_hypermedia_photos_upload: hull binary not found at $HULL — run 'make' first"
+    echo "e2e_hypermedia_photos_upload: hull binary not found at $HULL - run 'make' first"
     exit 1
 fi
 
 pass() { PASS=$((PASS + 1)); echo "  PASS: $1"; }
-fail() { FAIL=$((FAIL + 1)); echo "  FAIL: $1${2:+ — $2}"; }
+fail() { FAIL=$((FAIL + 1)); echo "  FAIL: $1${2:+ - $2}"; }
 
 contains() {
     case "$3" in
@@ -72,7 +72,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# Real PNG header — same shape as the e2e_attachment fixture.
+# Real PNG header - same shape as the e2e_attachment fixture.
 printf '\211PNG\r\n\032\n\x00\x00\x00\x0DIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00' > "$TMPDIR_WORK/photo.png"
 PHOTO_SIZE=$(wc -c < "$TMPDIR_WORK/photo.png" | tr -d ' ')
 
@@ -104,7 +104,7 @@ run_suite() {
 
     prepare_workdir "$SUITE" "$ENTRY"
     cd "$TMPDIR_WORK/$SUITE"
-    # Direct hull invocation (NOT `hull dev`) — same pattern as
+    # Direct hull invocation (NOT `hull dev`) - same pattern as
     # tests/e2e_examples.sh. The dev watcher mode adds steps we
     # don't need + has its own brittleness; plain `hull <entry>`
     # picks the entry point, applies sandbox, and serves.
@@ -112,7 +112,7 @@ run_suite() {
     SERVER_PID=$!
     cd - >/dev/null
     if ! wait_for_server "$PORT"; then
-        fail "$SUITE — server startup"
+        fail "$SUITE - server startup"
         head -40 "$TMPDIR_WORK/server-$SUITE.log"
         stop_server
         return
@@ -121,18 +121,18 @@ run_suite() {
     COOKIE_JAR="$TMPDIR_WORK/cookies-$SUITE.txt"
     rm -f "$COOKIE_JAR"
 
-    # 1. GET / — bootstrap session cookie + CSRF token. The CSRF
+    # 1. GET / - bootstrap session cookie + CSRF token. The CSRF
     # token is rendered into the new-entry form as
     #   <input type="hidden" name="_csrf" value="...">
     HOME=$(curl -s -c "$COOKIE_JAR" "http://127.0.0.1:$PORT/")
     CSRF=$(printf '%s' "$HOME" | sed -n 's/.*name="_csrf" value="\([^"]*\)".*/\1/p' | head -1)
     if [ -z "$CSRF" ]; then
-        fail "$SUITE — couldn't extract CSRF token from /"
+        fail "$SUITE - couldn't extract CSRF token from /"
         stop_server; return
     fi
     pass "$SUITE bootstrap: cookie + CSRF token acquired"
 
-    # 2. POST /entries — create a entry. HX-Request: true tells the app
+    # 2. POST /entries - create a entry. HX-Request: true tells the app
     # to return a fragment (the new row) instead of redirecting.
     R_TODO=$(curl -s -b "$COOKIE_JAR" -c "$COOKIE_JAR" \
         -X POST "http://127.0.0.1:$PORT/entries" \
@@ -142,11 +142,11 @@ run_suite() {
     contains "$SUITE create entry" "Photo test" "$R_TODO"
     TODO_ID=$(printf '%s' "$R_TODO" | sed -n 's/.*id="entry-\([0-9]*\)".*/\1/p' | head -1)
     if [ -z "$TODO_ID" ]; then
-        fail "$SUITE — couldn't extract entry id from POST response"
+        fail "$SUITE - couldn't extract entry id from POST response"
         stop_server; return
     fi
 
-    # 3. POST /entries/:id/photos — multipart upload.
+    # 3. POST /entries/:id/photos - multipart upload.
     R_UP=$(curl -s -b "$COOKIE_JAR" \
         -X POST "http://127.0.0.1:$PORT/entries/$TODO_ID/photos" \
         -H "HX-Request: true" \
@@ -159,12 +159,12 @@ run_suite() {
     # Extract attachment id from rendered strip (`id="att-<hex>"`).
     ATT_ID=$(printf '%s' "$R_UP" | sed -n 's/.*id="att-\([0-9a-f]\{32\}\)".*/\1/p' | head -1)
     if [ -z "$ATT_ID" ]; then
-        fail "$SUITE — couldn't extract attachment id"
+        fail "$SUITE - couldn't extract attachment id"
         echo "    response: $R_UP"
         stop_server; return
     fi
 
-    # 4. GET /entries/:id/photos/:att_id — bytes round-trip.
+    # 4. GET /entries/:id/photos/:att_id - bytes round-trip.
     curl -s -b "$COOKIE_JAR" \
         -o "$TMPDIR_WORK/back-$SUITE.png" \
         "http://127.0.0.1:$PORT/entries/$TODO_ID/photos/$ATT_ID"
@@ -174,7 +174,7 @@ run_suite() {
         fail "$SUITE serve: bytes round-trip"
     fi
 
-    # 5. GET / — photo appears in the home listing.
+    # 5. GET / - photo appears in the home listing.
     HOME2=$(curl -s -b "$COOKIE_JAR" "http://127.0.0.1:$PORT/")
     contains "$SUITE listing shows attachment" "att-$ATT_ID" "$HOME2"
     contains "$SUITE listing shows filename"   "photo.png"    "$HOME2"
@@ -191,7 +191,7 @@ run_suite() {
         *)       fail "$SUITE auth gate rejects guessed id" "got $GUESS" ;;
     esac
 
-    # 6. DELETE /entries/:id/photos/:att_id — remove.
+    # 6. DELETE /entries/:id/photos/:att_id - remove.
     DEL_STATUS=$(curl -s -b "$COOKIE_JAR" -o /dev/null -w '%{http_code}' \
         -X DELETE "http://127.0.0.1:$PORT/entries/$TODO_ID/photos/$ATT_ID" \
         -H "HX-Request: true" \

@@ -1,5 +1,5 @@
 /*
- * test_release.c — Release manifest signing / verification tests
+ * test_release.c - Release manifest signing / verification tests
  *
  * Covers the API in include/hull/release.h:
  *   - hl_release_pubkey_configured() with the placeholder

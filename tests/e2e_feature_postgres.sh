@@ -1,5 +1,5 @@
 #!/bin/sh
-# e2e_feature_postgres.sh — PostgreSQL as a composable feature, end to end.
+# e2e_feature_postgres.sh - PostgreSQL as a composable feature, end to end.
 #
 # Builds a BASE hull (EMBED_PLATFORM=1, no Postgres compiled in) + the Postgres
 # feature archive, then `hull build --with=postgres` an app and boots it. Proves
@@ -9,7 +9,7 @@
 #
 # This is a BUILD-only e2e (no live server): the app connects to an unreachable
 # host and asserts the error is a CONNECTION failure, not a "needs the Postgres
-# feature" scheme rejection — i.e. the backend is registered and live. A real
+# feature" scheme rejection - i.e. the backend is registered and live. A real
 # connect + auth + query is covered by the monolithic e2e_postgres.sh job.
 #
 # The point of running this on Linux: it exercises the GNU-ld --start-group

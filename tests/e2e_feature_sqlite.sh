@@ -1,5 +1,5 @@
 #!/bin/sh
-# e2e_feature_sqlite.sh — SQLite as a composable feature (docs/sqlite_feature.md).
+# e2e_feature_sqlite.sh - SQLite as a composable feature (docs/sqlite_feature.md).
 #
 # Proves the Phase B compose end to end: a SQLite-less DB-core base
 # (HL_SQLITE_FEATURE=1: the vtable + selector + generic db.* caps + the weak
@@ -56,7 +56,7 @@ W=$(mktemp -d)
 mkdir -p "$W/app"
 printf 'local db = require("hull.db").default()\napp.manifest({ modules = { "hull/db@1" } })\napp.main(function()\n  db.exec("CREATE TABLE t(x INTEGER)")\n  db.exec("INSERT INTO t VALUES(42)")\n  local r = db.query("SELECT x FROM t")\n  return (r[1] and r[1].x == 42) and 0 or 3\nend)\n' > "$W/app/app.lua"
 
-# Phase C: AUTO-INFERENCE — no --with=sqlite. `hull build` sees the app uses db
+# Phase C: AUTO-INFERENCE - no --with=sqlite. `hull build` sees the app uses db
 # (needs_sqlite) + the base lacks SQLite, and composes libhull_feature-sqlite.a
 # on its own.
 out=$("$HULL" build --no-verify-platform "$W/app" -o "$W/app/bin" 2>&1) \
@@ -71,7 +71,7 @@ rc=0; "$W/app/bin" -d ":memory:" >/dev/null 2>&1 || rc=$?
 [ "$rc" = 0 ] || fail "auto-composed db app: db.query should return 42 (exit 0), got $rc"
 echo "ok  auto-inference: plain hull build on a SQLite-less base composes sqlite + db.query runs"
 
-# 5. Phase C.2b — the per-runtime SQLite UDF bridge (libhull_feature-sqlite-<rt>.a).
+# 5. Phase C.2b - the per-runtime SQLite UDF bridge (libhull_feature-sqlite-<rt>.a).
 # A udf-using app composes both the engine and the udf bridge; db.udf runs.
 mkdir -p "$W/udf"
 printf 'local db = require("hull.db").default()\napp.manifest({ modules = { "hull/db@1" } })\napp.main(function()\n  db.udf.register("hull_double", function(x) return x * 2 end, { deterministic = true })\n  local r = db.query("SELECT hull_double(21) AS v")\n  return (r[1] and r[1].v == 42) and 0 or 3\nend)\n' > "$W/udf/app.lua"
@@ -83,7 +83,7 @@ rc=0; "$W/udf/bin" -d ":memory:" >/dev/null 2>&1 || rc=$?
 [ "$rc" = 0 ] || fail "composed udf app: db.udf should return 42 (exit 0), got $rc"
 echo "ok  udf bridge: composed on the SQLite-less base + db.udf runs"
 
-# 6. THE PAYOFF (Phase C.2b) — a db-free app on the SQLite-less base composes
+# 6. THE PAYOFF (Phase C.2b) - a db-free app on the SQLite-less base composes
 # neither the engine nor the udf bridge, and the runtime archive is now
 # SQLite-free, so the produced binary links with ZERO sqlite3_* symbols.
 mkdir -p "$W/plain"
@@ -94,7 +94,7 @@ echo "$out" | grep -qi "sqlite" \
     && fail "db-free app should compose no SQLite feature, got: $out" || true
 if command -v nm >/dev/null 2>&1; then
     n=$(nm "$W/plain/bin" 2>/dev/null | grep -cE ' [Tt] _?sqlite3_open$' || true)
-    [ "$n" = 0 ] || fail "db-free app still carries SQLite ($n sqlite3_open) — the C.2b drop regressed"
+    [ "$n" = 0 ] || fail "db-free app still carries SQLite ($n sqlite3_open) - the C.2b drop regressed"
 fi
 rc=0; "$W/plain/bin" >/dev/null 2>&1 || rc=$?
 [ "$rc" = 0 ] || fail "db-free app should run (exit 0), got $rc"

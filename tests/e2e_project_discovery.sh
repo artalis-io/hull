@@ -1,5 +1,5 @@
 #!/bin/sh
-# E2E tests — `hull agent inspect` (standalone project source discovery)
+# E2E tests - `hull agent inspect` (standalone project source discovery)
 #
 # Usage: sh tests/e2e_project_discovery.sh
 # Requires: build/hull already built; python3 (for JSON assertions, as the oauth e2e uses).
@@ -24,11 +24,11 @@ PASS=0
 FAIL=0
 
 if [ ! -x "$HULL" ]; then
-    echo "e2e-project-discovery: hull binary not found at $HULL — run 'make' first"
+    echo "e2e-project-discovery: hull binary not found at $HULL - run 'make' first"
     exit 1
 fi
 if ! command -v python3 >/dev/null 2>&1; then
-    echo "e2e-project-discovery: python3 not found — skipping (JSON assertions need it)"
+    echo "e2e-project-discovery: python3 not found - skipping (JSON assertions need it)"
     exit 0
 fi
 

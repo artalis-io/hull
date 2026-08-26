@@ -1,5 +1,5 @@
 #!/bin/sh
-# e2e_feature_duckdb.sh — DuckDB as a composable feature, end to end.
+# e2e_feature_duckdb.sh - DuckDB as a composable feature, end to end.
 #
 # Builds a BASE hull (EMBED_PLATFORM=1, no DuckDB compiled in) + the DuckDB
 # feature archive, then `hull build --with=duckdb` an app and runs it. Proves

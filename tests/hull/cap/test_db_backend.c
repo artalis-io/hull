@@ -1,5 +1,5 @@
 /*
- * test_db_backend.c — Tests for the database backend vtable abstraction
+ * test_db_backend.c - Tests for the database backend vtable abstraction
  *
  * Exercises the HlDbBackend vtable and HlDbHandle inline wrappers
  * using the SQLite backend against an in-memory database.
@@ -142,7 +142,7 @@ UTEST(db_backend, sqlite_transaction_rollback)
     hl_db_exec(&h,
         "CREATE TABLE t (id INTEGER PRIMARY KEY)", NULL, 0);
 
-    /* Begin, insert, rollback — no rows */
+    /* Begin, insert, rollback - no rows */
     ASSERT_EQ(hl_db_begin(&h), 0);
     hl_db_exec(&h, "INSERT INTO t (id) VALUES (1)", NULL, 0);
     ASSERT_EQ(hl_db_rollback(&h), 0);
@@ -166,7 +166,7 @@ UTEST(db_backend, sqlite_transaction_commit)
     hl_db_exec(&h,
         "CREATE TABLE t (id INTEGER PRIMARY KEY)", NULL, 0);
 
-    /* Begin, insert, commit — 1 row */
+    /* Begin, insert, commit - 1 row */
     ASSERT_EQ(hl_db_begin(&h), 0);
     hl_db_exec(&h, "INSERT INTO t (id) VALUES (1)", NULL, 0);
     ASSERT_EQ(hl_db_commit(&h), 0);

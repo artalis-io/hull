@@ -8,7 +8,7 @@
 #endif
 
 /*
- * test_tar.c — Unit tests for the shared ustar core (include/hull/cap/tar.h):
+ * test_tar.c - Unit tests for the shared ustar core (include/hull/cap/tar.h):
  *   - hl_tar_parse()   pure iteration; name normalization; traversal rejection.
  *   - hl_tar_extract() trusted extraction to a directory (files, nested dirs,
  *                      exec-bit preservation, real system-tar interop).
@@ -136,7 +136,7 @@ UTEST(tar_parse, iterates_files_and_dirs_skipping_root) {
     unsigned char *buf = calloc(1, 8192);
     ASSERT_NE(buf, NULL);
     size_t off = 0;
-    tar_add_dir(buf, &off, "./");                    /* root — skipped */
+    tar_add_dir(buf, &off, "./");                    /* root - skipped */
     tar_add_file(buf, &off, "./crt1.o", "OBJ1", 4);  /* leading ./ stripped */
     tar_add_dir(buf, &off, "lib/std");
     tar_add_file(buf, &off, "lib/std/foo", "SRC", 3);

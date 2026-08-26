@@ -1,5 +1,5 @@
 #!/bin/sh
-# tests/e2e_compute_async_trap.sh — an async compute call whose worker call traps
+# tests/e2e_compute_async_trap.sh - an async compute call whose worker call traps
 # (gas exhaustion / WASM trap / internal error) must SURFACE the error to the
 # awaiting/yielded handler, not hang it or swallow it. Covers BOTH runtimes:
 #
@@ -81,7 +81,7 @@ app.get("/ok", async (req, res) => {
 });
 app.get("/trap", async (req, res) => {
     const r = await compute.async.call("echo", "hi", { gas: 1 });
-    res.json({ r: "reached" });  // unreached — must reject, not resolve
+    res.json({ r: "reached" });  // unreached - must reject, not resolve
 });
 app.get("/caught", async (req, res) => {
     let ok = true, err = "none";

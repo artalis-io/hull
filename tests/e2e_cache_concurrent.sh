@@ -1,5 +1,5 @@
 #!/bin/sh
-# e2e_cache_concurrent.sh — Stress test: N hull processes
+# e2e_cache_concurrent.sh - Stress test: N hull processes
 # hammering the same cache root concurrently. Verifies that
 # atomic-rename + content-keying + first-write-wins semantics
 # hold under parallel load.
@@ -28,9 +28,9 @@ esac
 PASS=0
 FAIL=0
 pass() { PASS=$((PASS + 1)); echo "  PASS: $1"; }
-fail() { FAIL=$((FAIL + 1)); echo "  FAIL: $1${2:+ — $2}"; }
+fail() { FAIL=$((FAIL + 1)); echo "  FAIL: $1${2:+ - $2}"; }
 
-# Hermetic HOME — never touch the developer's real cache.
+# Hermetic HOME - never touch the developer's real cache.
 TMPHOME=$(mktemp -d)
 export HOME="$TMPHOME"
 trap 'rm -rf "$TMPHOME"' EXIT
@@ -126,7 +126,7 @@ fi
 
 # ── 4. Restart all workers, every cache hit should succeed ────
 # This verifies that entries written by ANY worker are usable by
-# ALL workers — the cache is genuinely shared, not per-process.
+# ALL workers - the cache is genuinely shared, not per-process.
 echo ""
 echo "── warm-cache replay ──"
 
@@ -164,7 +164,7 @@ entries_after=$(find "$CACHE_ROOT" -mindepth 2 -maxdepth 2 -type f \
     || fail "entry count drifted" "before=$entries after=$entries_after"
 
 # ── 5. Mixed-runtime concurrency (Lua + JS at the same time) ──
-# Different cache stores, same blob_store backend — verifies the
+# Different cache stores, same blob_store backend - verifies the
 # store isolation: parallel writers to lua-bytecode and
 # js-bytecode shouldn't interfere even though they share the
 # same allocator + sha helpers.

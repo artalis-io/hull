@@ -1,5 +1,5 @@
 /*
- * test_hull_cap_env.c — Tests for shared environment variable capability
+ * test_hull_cap_env.c - Tests for shared environment variable capability
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */

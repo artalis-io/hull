@@ -1,5 +1,5 @@
 #!/bin/sh
-# E2E HTTP client tests — exercises the http module from Lua and JS
+# E2E HTTP client tests - exercises the http module from Lua and JS
 #
 # Architecture:
 #   1. Compiles and starts a Keel echo server (returns request details as JSON)
@@ -24,7 +24,7 @@ ECHO_PORT=19860
 ECHO_PID=""
 
 if [ ! -x "$HULL" ]; then
-    echo "e2e_http: hull binary not found at $HULL — run 'make' first"
+    echo "e2e_http: hull binary not found at $HULL - run 'make' first"
     exit 1
 fi
 
@@ -42,7 +42,7 @@ check_contains() {
     # $1 = description, $2 = response body, $3 = expected substring
     case "$2" in
         *"$3"*) pass "$1" ;;
-        *)      fail "$1 — expected '$3' in: $2" ;;
+        *)      fail "$1 - expected '$3' in: $2" ;;
     esac
 }
 
@@ -152,12 +152,12 @@ run_http_tests() {
     SERVER_PID=$!
 
     if ! wait_for_server "$PORT"; then
-        fail "$LABEL — Hull server startup"
+        fail "$LABEL - Hull server startup"
         stop_pid "$SERVER_PID"
         SERVER_PID=""
         return
     fi
-    pass "$LABEL — Hull server started"
+    pass "$LABEL - Hull server started"
 
     # Note: echo body is JSON-in-JSON, so inner quotes are escaped as \"
     # We use escaped patterns for method checks since they're in the nested string.

@@ -1,5 +1,5 @@
 /*
- * test_mime.c — MIME sniffer tests.
+ * test_mime.c - MIME sniffer tests.
  *
  * Covers magic-byte signatures, text-shape heuristics, UTF-8
  * plain-text fallback, and edge cases (truncation, NULs, invalid
@@ -27,7 +27,7 @@ UTEST(hl_cap_mime, png_magic_detected)
 
 UTEST(hl_cap_mime, png_full_magic_required)
 {
-    /* First 7 bytes match — but the 8th differs. Should NOT match. */
+    /* First 7 bytes match - but the 8th differs. Should NOT match. */
     static const uint8_t fake[] = {
         0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A, 0xFF,
     };
@@ -37,7 +37,7 @@ UTEST(hl_cap_mime, png_full_magic_required)
 
 UTEST(hl_cap_mime, png_truncated_returns_null)
 {
-    /* Only 4 bytes of the 8-byte magic — too short to match. */
+    /* Only 4 bytes of the 8-byte magic - too short to match. */
     static const uint8_t partial[] = {0x89, 'P', 'N', 'G'};
     const char *got = hl_cap_mime_sniff(partial, sizeof(partial));
     ASSERT_TRUE(got == NULL);
@@ -83,7 +83,7 @@ UTEST(hl_cap_mime, gif_wrong_version_no_match)
 {
     static const uint8_t bogus[] = {'G', 'I', 'F', '8', '0', 'a'};
     const char *got = hl_cap_mime_sniff(bogus, sizeof(bogus));
-    /* Not GIF — falls through to plain-text (printable ASCII) */
+    /* Not GIF - falls through to plain-text (printable ASCII) */
     ASSERT_TRUE(got == NULL || strcmp(got, "image/gif") != 0);
 }
 
@@ -100,7 +100,7 @@ UTEST(hl_cap_mime, webp_detected)
 
 UTEST(hl_cap_mime, webp_only_riff_returns_null)
 {
-    /* RIFF prefix but the type at offset 8 is "WAVE" — not WebP. */
+    /* RIFF prefix but the type at offset 8 is "WAVE" - not WebP. */
     static const uint8_t wave[] = {
         'R', 'I', 'F', 'F', 0x10, 0, 0, 0, 'W', 'A', 'V', 'E',
     };
@@ -110,7 +110,7 @@ UTEST(hl_cap_mime, webp_only_riff_returns_null)
 
 UTEST(hl_cap_mime, webp_short_buffer_returns_null)
 {
-    /* Only 11 bytes — WEBP magic requires 12. */
+    /* Only 11 bytes - WEBP magic requires 12. */
     static const uint8_t partial[] = {
         'R', 'I', 'F', 'F', 0, 0, 0, 0, 'W', 'E', 'B',
     };
@@ -128,7 +128,7 @@ UTEST(hl_cap_mime, pdf_detected)
 
 UTEST(hl_cap_mime, pdf_truncated_does_not_match_pdf)
 {
-    /* 3 of 5 PDF magic bytes — must NOT match application/pdf.
+    /* 3 of 5 PDF magic bytes - must NOT match application/pdf.
      * Falls through to the plain-text fallback (the bytes are
      * printable ASCII), which is correct. */
     static const uint8_t partial[] = {'%', 'P', 'D'};
@@ -224,7 +224,7 @@ UTEST(hl_cap_mime, plaintext_ascii)
 UTEST(hl_cap_mime, plaintext_utf8_multibyte)
 {
     /* "café" with é encoded as 2-byte UTF-8 (0xC3 0xA9) */
-    const char *txt = "caf\xC3\xA9 — résumé";
+    const char *txt = "caf\xC3\xA9 - résumé";
     ASSERT_STREQ(hl_cap_mime_sniff((const uint8_t *)txt, strlen(txt)),
                  "text/plain");
 }
@@ -245,7 +245,7 @@ UTEST(hl_cap_mime, plaintext_with_nul_returns_null)
 
 UTEST(hl_cap_mime, plaintext_invalid_utf8_returns_null)
 {
-    /* Lone continuation byte — invalid UTF-8 */
+    /* Lone continuation byte - invalid UTF-8 */
     static const uint8_t bad[] = {'a', 0x80, 'b'};
     const char *got = hl_cap_mime_sniff(bad, sizeof(bad));
     ASSERT_TRUE(got == NULL || strcmp(got, "text/plain") != 0);
@@ -253,7 +253,7 @@ UTEST(hl_cap_mime, plaintext_invalid_utf8_returns_null)
 
 UTEST(hl_cap_mime, plaintext_overlong_utf8_returns_null)
 {
-    /* Overlong 2-byte encoding of NUL (C0 80) — invalid */
+    /* Overlong 2-byte encoding of NUL (C0 80) - invalid */
     static const uint8_t bad[] = {0xC0, 0x80, 'x'};
     const char *got = hl_cap_mime_sniff(bad, sizeof(bad));
     ASSERT_TRUE(got == NULL || strcmp(got, "text/plain") != 0);
@@ -261,7 +261,7 @@ UTEST(hl_cap_mime, plaintext_overlong_utf8_returns_null)
 
 UTEST(hl_cap_mime, plaintext_surrogate_returns_null)
 {
-    /* U+D800 in UTF-8 encoding (ED A0 80) — reserved for UTF-16 surrogates */
+    /* U+D800 in UTF-8 encoding (ED A0 80) - reserved for UTF-16 surrogates */
     static const uint8_t bad[] = {'a', 0xED, 0xA0, 0x80, 'b'};
     const char *got = hl_cap_mime_sniff(bad, sizeof(bad));
     ASSERT_TRUE(got == NULL || strcmp(got, "text/plain") != 0);
@@ -306,14 +306,14 @@ UTEST(hl_cap_mime, one_byte_text_classified)
 UTEST(hl_cap_mime, one_byte_binary_returns_null)
 {
     static const uint8_t b = 0xFE;
-    /* High byte alone is an invalid UTF-8 lead — not text. */
+    /* High byte alone is an invalid UTF-8 lead - not text. */
     const char *got = hl_cap_mime_sniff(&b, 1);
     ASSERT_TRUE(got == NULL);
 }
 
 UTEST(hl_cap_mime, random_binary_returns_null)
 {
-    /* Mixed high bytes + NUL — no magic, no valid UTF-8. */
+    /* Mixed high bytes + NUL - no magic, no valid UTF-8. */
     static const uint8_t garbage[] = {
         0xFF, 0xFE, 0x00, 0x80, 0x90, 0xC0, 0xFE, 0xFF,
     };
@@ -328,7 +328,7 @@ static int read_fixture(const char *name, uint8_t **out_buf, size_t *out_len)
     snprintf(path, sizeof(path), "tests/fixtures/mime/%s", name);
     FILE *f = fopen(path, "rb");
     if (!f) {
-        /* Tests might be invoked from a different cwd — try parent. */
+        /* Tests might be invoked from a different cwd - try parent. */
         snprintf(path, sizeof(path), "../tests/fixtures/mime/%s", name);
         f = fopen(path, "rb");
     }

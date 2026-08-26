@@ -1,5 +1,5 @@
 #!/bin/sh
-# e2e_feature_image.sh — image codecs as a composable feature: the image-less
+# e2e_feature_image.sh - image codecs as a composable feature: the image-less
 # base invariant + the needs_image gate (docs/image_feature.md).
 #
 # Proves:

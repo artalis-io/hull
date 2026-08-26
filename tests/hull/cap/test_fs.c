@@ -1,5 +1,5 @@
 /*
- * test_hull_cap_fs.c — Tests for shared filesystem capability
+ * test_hull_cap_fs.c - Tests for shared filesystem capability
  *
  * Tests path validation, read, write, exists, delete operations.
  * Uses a temporary directory as the base_dir.
@@ -82,7 +82,7 @@ static void teardown_fs(void)
      * toybox rm rejects `-r` ("rm: illegal option -- r"), and
      * `system("rm -rf ...")` leaves the next test hitting EEXIST on
      * setup_fs's mkdir. nftw is POSIX and works uniformly on Linux,
-     * macOS, and cosmo. ENOENT is fine — that's the goal. */
+     * macOS, and cosmo. ENOENT is fine - that's the goal. */
     if (nftw(test_dir, teardown_rm_entry, 16, FTW_DEPTH | FTW_PHYS) != 0
         && errno != ENOENT) {
         /* Best-effort cleanup; test failures shouldn't mask the
@@ -284,7 +284,7 @@ UTEST(hl_cap_fs, mmap_basic)
 }
 
 /* Demand paging: mapping a large (2 GiB) SPARSE file as a 512 MiB window and
- * touching only a handful of pages must NOT make the file/window resident — the
+ * touching only a handful of pages must NOT make the file/window resident - the
  * whole point of zero-copy mapped spans over huge files ("opening a 50 GB file
  * must not allocate 50 GB of RAM"). Coarse per the spec (no exact RSS numbers):
  * we assert peak RSS stays FAR below the window size, with GiB-scale margin that

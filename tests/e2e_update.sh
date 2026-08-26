@@ -4,7 +4,7 @@
 # Verifies:
 #   1. --help prints usage and exits 0
 #   2. --check against the real repo (no releases yet → 404, clean error)
-#   3. --check against a stable public repo (cli/cli) — exercises full
+#   3. --check against a stable public repo (cli/cli) - exercises full
 #      HTTPS + GitHub API + JSON-parse + version-compare path using the
 #      embedded CA bundle
 #   4. Unknown flags don't crash
@@ -51,7 +51,7 @@ assert_contains() {
 }
 
 if [ ! -x "$HULL" ]; then
-    echo "FAIL: $HULL not found — run 'make' first"
+    echo "FAIL: $HULL not found - run 'make' first"
     exit 1
 fi
 
@@ -67,7 +67,7 @@ assert_contains "documents --repo" "$OUT" "--repo"
 # Skip network tests if no connectivity
 if ! curl -fsSL --max-time 5 https://api.github.com >/dev/null 2>&1; then
     echo ""
-    echo "  skip: no network access — skipping live update checks"
+    echo "  skip: no network access - skipping live update checks"
     echo ""
     echo "── Summary ──"
     echo "  Passed: $PASS"
@@ -107,7 +107,7 @@ assert_contains "checks cli/cli"     "$OUT" "checking cli/cli"
 assert_contains "shows current"      "$OUT" "current"
 assert_contains "shows latest tag"   "$OUT" "latest"
 
-# Either "update available" (most cases — different version) or
+# Either "update available" (most cases - different version) or
 # "already up to date" (if HL_VERSION happens to be the same string).
 case "$OUT" in
     *"update available"*|*"already up to date"*)

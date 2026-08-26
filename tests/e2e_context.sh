@@ -1,5 +1,5 @@
 #!/bin/sh
-# E2E tests — hull agent context subcommand
+# E2E tests - hull agent context subcommand
 #
 # Tests the context documentation retrieval for all 12 tasks and 3 levels.
 #
@@ -15,7 +15,7 @@ PASS=0
 FAIL=0
 
 if [ ! -x "$HULL" ]; then
-    echo "e2e_context: hull binary not found at $HULL — run 'make' first"
+    echo "e2e_context: hull binary not found at $HULL - run 'make' first"
     exit 1
 fi
 
@@ -32,7 +32,7 @@ pass() {
 check_contains() {
     case "$2" in
         *"$3"*) pass "$1" ;;
-        *)      fail "$1 — expected '$3' in: $(echo "$2" | head -c 200)" ;;
+        *)      fail "$1 - expected '$3' in: $(echo "$2" | head -c 200)" ;;
     esac
 }
 
@@ -40,7 +40,7 @@ check_exit() {
     if [ "$2" = "$3" ]; then
         pass "$1"
     else
-        fail "$1 — expected exit $3, got $2"
+        fail "$1 - expected exit $3, got $2"
     fi
 }
 
@@ -121,7 +121,7 @@ for task in auth db routing; do
         # Check it starts with { and ends with }
         case "$OUT" in
             \{*\}) pass "JSON valid: $task/$level" ;;
-            *)     fail "JSON invalid: $task/$level — $OUT" ;;
+            *)     fail "JSON invalid: $task/$level - $OUT" ;;
         esac
     done
 done

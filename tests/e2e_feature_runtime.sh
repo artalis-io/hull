@@ -1,5 +1,5 @@
 #!/bin/sh
-# e2e_feature_runtime.sh — runtimes as composable features: the slim invariant.
+# e2e_feature_runtime.sh - runtimes as composable features: the slim invariant.
 #
 # Proves that a produced single-runtime app does not carry the OTHER interpreter:
 #   - hull build app.lua -> a binary with ZERO QuickJS symbols
