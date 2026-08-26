@@ -1,5 +1,5 @@
 /*
- * cap/db_udf.h — SQLite user-defined function integration
+ * cap/db_udf.h - SQLite user-defined function integration
  *
  * Orthogonal bridge: connects SQLite and WASM without coupling either.
  * Script UDFs (Lua/JS callbacks) are handled in runtime bindings (mod_db.c).
@@ -45,7 +45,7 @@ typedef struct HlAllocator HlAllocator;
 
 /* Defaults */
 #define HL_UDF_DEFAULT_GAS    (100 * 1000)
-#define HL_UDF_MAX_INPUT_SIZE (8 * 1024)   /* 8 KB — sufficient for typical SQL values */
+#define HL_UDF_MAX_INPUT_SIZE (8 * 1024)   /* 8 KB - sufficient for typical SQL values */
 
 /* Registration options (for WASM UDFs) */
 typedef struct {

@@ -1,5 +1,5 @@
 /*
- * modules.c — hull:* module registry dispatcher for QuickJS
+ * modules.c - hull:* module registry dispatcher for QuickJS
  *
  * All module implementations live in mod_*.c files. This file
  * contains only the hl_js_register_modules() entry point that
@@ -14,7 +14,7 @@
 #include "hull/http_feature.h"  /* hl_js_register_http_modules (HTTP-feature seam, #114) */
 
 /* ════════════════════════════════════════════════════════════════════
- * Module registry — called by hl_js_init() to register all
+ * Module registry - called by hl_js_init() to register all
  * hull:* built-in modules.
  * ════════════════════════════════════════════════════════════════════ */
 
@@ -66,7 +66,7 @@ int hl_js_register_modules(HlJS *js)
      * below) so this core registry no longer references them. See
      * hull/http_feature.h (#114). */
 
-    /* Register hull:_template — internal bridge for hull:template stdlib */
+    /* Register hull:_template - internal bridge for hull:template stdlib */
     if (hl_js_init_template_module(js->ctx, js) != 0)
         return -1;
 
@@ -76,21 +76,21 @@ int hl_js_register_modules(HlJS *js)
             return -1;
     }
 
-    /* Register hull:fs module — always available; per-function checks
+    /* Register hull:fs module - always available; per-function checks
      * enforce that fs_cfg is set (wired from manifest after load_app). */
     if (hl_js_init_fs_module(js->ctx, js) != 0)
         return -1;
 
-    /* Register hull:blob module — always available; per-function checks
+    /* Register hull:blob module - always available; per-function checks
      * gate on the singleton created by blob.init(). */
     if (hl_js_init_blob_module(js->ctx, js) != 0)
         return -1;
 
-    /* Register hull:mime module — pure utility, always available */
+    /* Register hull:mime module - pure utility, always available */
     if (hl_js_init_mime_module(js->ctx, js) != 0)
         return -1;
 
-    /* Register hull:tar module — pure format core; extract/pack use fs cap */
+    /* Register hull:tar module - pure format core; extract/pack use fs cap */
     if (hl_js_init_tar_module(js->ctx, js) != 0)
         return -1;
 
@@ -121,7 +121,7 @@ int hl_js_register_modules(HlJS *js)
             return -1;
     }
 
-    /* TUI native module — registered by the tui feature (monolithic
+    /* TUI native module - registered by the tui feature (monolithic
      * HL_ENABLE_TUI or a composed --with=tui). Base ships a weak no-op; the
      * feature's strong override calls hl_js_init_tui_module. Gated at use time
      * by the resolver (requires the tui cap + manifest.tui). Unconditional so a

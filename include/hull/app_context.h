@@ -10,7 +10,7 @@
  * @par Lifecycle:
  *   `hl_app_context_init` → use → `hl_app_context_free`.
  *
- * Stability: Tier 3 (internal — used across commands but not part of
+ * Stability: Tier 3 (internal - used across commands but not part of
  * the v0.1.0 public surface).
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
@@ -96,7 +96,7 @@ typedef struct HlAppContext HlAppContext;
 
 /*
  * Initialize an app context: open DB, init VFS, create runtime, load app.
- * If opts->no_load is set, runtime is initialized but app is not loaded —
+ * If opts->no_load is set, runtime is initialized but app is not loaded -
  * call hl_app_context_load() separately.
  * Returns 0 on success, -1 on error.
  */
@@ -120,7 +120,7 @@ void hl_app_context_free(HlAppContext *ctx);
  * Raw SQLite handle. Returns NULL if the context has no DB (no_db mode)
  * or if the active backend isn't SQLite. The return type is declared as
  * `struct sqlite3 *` rather than the `sqlite3` typedef so that this header
- * does not need to know about SQLite — callers that want to use the result
+ * does not need to know about SQLite - callers that want to use the result
  * include <sqlite3.h> themselves. New code should prefer
  * hl_app_context_db_handle() and the HlDbBackend vtable.
  */
@@ -128,7 +128,7 @@ struct sqlite3 *hl_app_context_db(HlAppContext *ctx);
 
 /*
  * Vtable-based DB handle. Returns NULL if the context has no DB.
- * Backend-agnostic — works with SQLite today, with future backends
+ * Backend-agnostic - works with SQLite today, with future backends
  * (PostgreSQL, DuckDB) transparently.
  */
 HlDbHandle   *hl_app_context_db_handle(HlAppContext *ctx);

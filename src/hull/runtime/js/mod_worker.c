@@ -1,5 +1,5 @@
 /*
- * mod_worker.c — hull:worker module (thread pool dispatch)
+ * mod_worker.c - hull:worker module (thread pool dispatch)
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
@@ -173,7 +173,7 @@ static JSValue js_push_worker_dispatch_result(JSContext *ctx, void *driver)
     }
 }
 
-/* worker.dispatch(fn, ctx) — serialize fn + ctx, submit to thread pool */
+/* worker.dispatch(fn, ctx) - serialize fn + ctx, submit to thread pool */
 static JSValue js_worker_dispatch(JSContext *ctx, JSValueConst this_val,
                                    int argc, JSValueConst *argv)
 {

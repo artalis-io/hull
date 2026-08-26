@@ -1,5 +1,5 @@
 /*
- * mod_json.c — hull:json module (encode/decode wrappers)
+ * mod_json.c - hull:json module (encode/decode wrappers)
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */

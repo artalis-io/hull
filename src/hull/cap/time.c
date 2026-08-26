@@ -1,5 +1,5 @@
 /*
- * hull_cap_time.c — Shared time capability
+ * hull_cap_time.c - Shared time capability
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */

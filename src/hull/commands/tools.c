@@ -1,16 +1,16 @@
 /*
- * commands/tools.c — `hull tools <verb>` dispatcher.
+ * commands/tools.c - `hull tools <verb>` dispatcher.
  *
  * Sub-commands:
- *   list                       — print registry + install state
- *   list --json                — machine-readable variant (agents, doctor)
- *   install <name>             — download, verify, install one tool
- *   install --all              — install every tool published for this platform
- *   uninstall <name>           — remove an installed tool
+ *   list                       - print registry + install state
+ *   list --json                - machine-readable variant (agents, doctor)
+ *   install <name>             - download, verify, install one tool
+ *   install --all              - install every tool published for this platform
+ *   uninstall <name>           - remove an installed tool
  *
  * Trust chain mirrors `hull update` exactly:
  *   1. Fetch GitHub release metadata for the tag matching HL_VERSION
- *      (version coupling — never `latest`, so a tool can't outrun the
+ *      (version coupling - never `latest`, so a tool can't outrun the
  *      hull binary it's meant for).
  *   2. Download `hull.sha256` + `hull.sha256.sig`.
  *   3. Verify the manifest signature with `hl_release_verify_manifest_sig`.
@@ -274,7 +274,7 @@ static int install_one(const HlToolSpec *spec, const char *platform,
     /* ── Persist via hull/blob_store (CAS mode) ──────────────────────
      *
      * Tool binaries live at $HOME/.hull/blobs/tools/blobs/<XX>/<sha>
-     * — the same content-addressed layout that apps' blob stores +
+     * - the same content-addressed layout that apps' blob stores +
      * runtime caches use. We pass `expected` (the signed SHA from the
      * verified manifest) so blob_store does the SHA verification AND
      * the put_verified short-circuit for us:
@@ -288,13 +288,13 @@ static int install_one(const HlToolSpec *spec, const char *platform,
      *     we report it and abort. Same security envelope as before.
      *
      * The user-visible name (~/.hull/tools/<name>) becomes a symlink
-     * to the blob — preserves the existing PATH-style lookup
+     * to the blob - preserves the existing PATH-style lookup
      * (`hl_tools_lookup_path` uses `access(X_OK)` which follows
      * symlinks transparently) while letting multiple tool versions
      * coexist in the CAS pool and dedup against `hull update`'s
      * future use of the same store. */
 
-    /* Resolve the tools-store root via the cache registry — same
+    /* Resolve the tools-store root via the cache registry - same
      * source of truth as `hull cache list|verify`, `hull doctor`,
      * and `hull inspect`, so a layout change in one place reaches
      * all consumers. */
@@ -356,7 +356,7 @@ static int install_one(const HlToolSpec *spec, const char *platform,
 
     /* Compose the on-disk blob path so we can chmod it executable and
      * symlink to it. Routing through hl_blob_store_compose_path keeps
-     * shard-layout knowledge inside blob_store — see the helper's
+     * shard-layout knowledge inside blob_store - see the helper's
      * docstring in include/hull/blob_store.h. */
     char blob_path[PATH_MAX];
     if (hl_blob_store_compose_path(store, blob_id,
@@ -369,13 +369,13 @@ static int install_one(const HlToolSpec *spec, const char *platform,
     /* Tools need to be exec(2)-able. The blob layer writes 0644 by
      * design (apps' content blobs aren't executable); we widen
      * permissions here because we KNOW this blob is a tool. Sharing
-     * a blob across multiple tools is fine — all the symlinks point
+     * a blob across multiple tools is fine - all the symlinks point
      * at the same exec-capable file. */
     if (chmod(blob_path, 0755) != 0) {
         fprintf(stderr,
                 "hull tools: warning: chmod 0755 failed for %s: %s\n",
                 blob_path, strerror(errno));
-        /* Non-fatal — the symlink might still resolve if the blob
+        /* Non-fatal - the symlink might still resolve if the blob
          * was already executable from a prior install of the same
          * bytes. */
     }
@@ -383,7 +383,7 @@ static int install_one(const HlToolSpec *spec, const char *platform,
 
     /* Atomically (re)place the user-visible symlink at
      * ~/.hull/tools/<name> → <blob_path>. symlink(2) doesn't
-     * overwrite, so we go via a per-pid tmp + rename(2) — that gives
+     * overwrite, so we go via a per-pid tmp + rename(2) - that gives
      * us the same atomicity guarantee blob_store gives for blobs. */
     char tools_dir[PATH_MAX];
     if (hl_tools_dir(tools_dir, sizeof(tools_dir)) != 0) {
@@ -437,7 +437,7 @@ static int cmd_install(int argc, char **argv, const char *repo)
         return 2;
     }
 
-    /* Fail fast on unknown names — don't make a network round-trip for
+    /* Fail fast on unknown names - don't make a network round-trip for
      * something that's not in the registry. */
     if (!install_all && !hl_tools_find(name)) {
         fprintf(stderr,

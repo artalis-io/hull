@@ -1,5 +1,5 @@
 /*
- * ws.c — JS WebSocket server callback trampolines
+ * ws.c - JS WebSocket server callback trampolines
  *
  * Maps Keel's per-connection WebSocket callbacks (on_open/on_message/
  * on_close) to JS handler functions registered via `app.ws()`. Each
@@ -38,7 +38,7 @@ void hl_js_ws_on_open(KlWsServerConn *ws_conn, void *user_data)
         return;
 
     js->dispatch_depth++;
-    js->active_conn = NULL; /* detached — no HTTP connection */
+    js->active_conn = NULL; /* detached - no HTTP connection */
     js->active_req = NULL;
     js->active_timer = NULL;
     js->last_async_cont = NULL;
@@ -244,7 +244,7 @@ void hl_js_ws_on_close(KlWsServerConn *ws_conn, uint16_t code,
         js->dispatch_depth--;
 
         if (js->async_pending) {
-            /* Handler is suspended on an async op — the continuation captured
+            /* Handler is suspended on an async op - the continuation captured
              * the teardown hook; it runs once the handler completes. Do NOT
              * tear the conn down now while the handler still references it. */
             return;

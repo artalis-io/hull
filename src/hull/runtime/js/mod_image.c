@@ -1,5 +1,5 @@
 /*
- * mod_image.c — hull:image module (QuickJS bindings)
+ * mod_image.c - hull:image module (QuickJS bindings)
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
@@ -436,7 +436,7 @@ int hl_js_init_image_module(JSContext *ctx, HlJS *js)
 
     /* Register the HlImage JS class up-front. The class ID is shared
      * across mod_buffer (toWasm/fromWasm), so it must exist even before
-     * any import — the init callback only runs on first import. */
+     * any import - the init callback only runs on first import. */
     JS_NewClassID(&js_image_class_id);
     JS_NewClass(JS_GetRuntime(ctx), js_image_class_id, &js_image_class);
 

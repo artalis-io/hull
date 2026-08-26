@@ -1,6 +1,6 @@
 /*
- * agent/db.c — `hull agent db schema`, `hull agent db query`,
- *              `hull agent migrate status` — all DB-side introspection.
+ * agent/db.c - `hull agent db schema`, `hull agent db query`,
+ *              `hull agent migrate status` - all DB-side introspection.
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */

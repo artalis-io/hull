@@ -1,11 +1,11 @@
 /*
- * hull_cap_body.c — Body reader factory and extraction for Hull runtimes
+ * hull_cap_body.c - Body reader factory and extraction for Hull runtimes
  *
  * Wraps Keel's kl_body_reader_buffer with a 1 MB limit.
  * Both JS and Lua bindings use hl_cap_body_data() to extract
  * the buffered body after on_complete fires.
  *
- * Also provides hl_cap_multipart_factory — a streaming wrapper around
+ * Also provides hl_cap_multipart_factory - a streaming wrapper around
  * Keel's kl_body_reader_multipart that holds a parked-handler slot.
  * Used by routes registered with kl_server_route_streaming so the
  * handler can yield on NEED_DATA and be resumed by on_data callbacks.
@@ -52,7 +52,7 @@ typedef struct {
     KlBodyReader        base;
     KlAllocator        *alloc;
     KlBodyReader       *inner;       /* kl_body_reader_multipart */
-    HlMultipartResumeFn on_resume;   /* parked handler — NULL = none */
+    HlMultipartResumeFn on_resume;   /* parked handler - NULL = none */
     void               *resume_ctx;  /* opaque ctx for on_resume */
     int                 stream_ended;
     int                 errored;
@@ -79,7 +79,7 @@ static int mp_wrap_on_data(KlBodyReader *self, const char *data, size_t len)
         mp_fire_park(w, HL_MP_RESUME_ERROR);
         return rc;
     }
-    /* Resume the handler — it can pull whatever fresh events the new
+    /* Resume the handler - it can pull whatever fresh events the new
      * bytes made available. */
     mp_fire_park(w, HL_MP_RESUME_DATA);
     return 0;
@@ -147,7 +147,7 @@ int hl_cap_multipart_park(KlBodyReader *wrapper,
     if (!wrapper || wrapper->on_data != mp_wrap_on_data) return -1;
     HlMultipartWrapper *w = (HlMultipartWrapper *)wrapper;
 
-    /* If the stream is already done or errored, fire immediately —
+    /* If the stream is already done or errored, fire immediately -
      * the caller's "wait for more data" assumption can't be satisfied. */
     if (on_resume) {
         if (w->errored)      { on_resume(ctx, HL_MP_RESUME_ERROR); return 0; }

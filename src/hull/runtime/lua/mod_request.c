@@ -1,5 +1,5 @@
 /*
- * mod_request.c — Lua bindings for streaming-multipart request bodies
+ * mod_request.c - Lua bindings for streaming-multipart request bodies
  *
  * Wires `req:multipart()` for routes registered with
  *   app.post("/upload", handler, { multipart = {...} })
@@ -22,7 +22,7 @@
  * sets c->state = KL_CONN_READING_BODY, and lua_yieldk's. Bytes off the
  * socket fire mp_wrap_on_data which fires the park callback which calls
  * hl_lua_async_resume which calls lua_resume on the handler's coroutine
- * — the continuation re-enters mp_iter_drive and re-tries the parser.
+ * - the continuation re-enters mp_iter_drive and re-tries the parser.
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
@@ -59,18 +59,18 @@
  * pointers are valid only until the next mutation, which for us means
  * the next kl_multipart_next call OR the next on_data callback (which
  * fires inside our park-callback / lua_resume path). The coroutine can
- * yield between reading the meta and the chunks loop — so we always
+ * yield between reading the meta and the chunks loop - so we always
  * snapshot meta the moment PART_BEGIN fires. The copies stay valid for
  * the lifetime of one Part.
  */
 typedef struct {
     KlBodyReader *wrapper;     /* parkable wrapper (from hl_cap_multipart_factory) */
     KlBodyReader *inner;       /* inner kl_body_reader_multipart for kl_multipart_next */
-    HlLua        *lua;         /* runtime — for allocator + async-cont creation */
+    HlLua        *lua;         /* runtime - for allocator + async-cont creation */
     HlAllocator  *alloc;       /* shorthand for lua->base.alloc */
 
     int           done;        /* parser hit DONE; subsequent iter:step returns nil */
-    int           errored;     /* parser/IO error — iter:step raises */
+    int           errored;     /* parser/IO error - iter:step raises */
     int           in_part;     /* between PART_BEGIN..PART_END for the active Part */
 
     /* Snapshot of the active Part's metadata. NULL when no part is active. */
@@ -88,7 +88,7 @@ typedef struct {
     HlMpIter *iter;
     /* When the user advances the outer iter (or the chunks iter finishes),
      * this Part is "spent": further read/chunks return empty/end. We don't
-     * tear down the iter's meta-copies on spend — that happens when the
+     * tear down the iter's meta-copies on spend - that happens when the
      * NEXT PART_BEGIN snapshot overwrites them, or on iter GC. */
     int       spent;
 } HlMpPart;
@@ -157,7 +157,7 @@ static int mp_iter_copy_meta(HlMpIter *it, const KlMultipartPartMeta *meta)
 
 /* ── Yield/resume helper ────────────────────────────────────────────── */
 
-/* Forward to the existing Lua async-resume machinery — extern from async.c
+/* Forward to the existing Lua async-resume machinery - extern from async.c
  * (declared without a header so the symbol stays internal to the runtime). */
 extern HlAsyncCont *hl_lua_async_cont_create(HlLua *lua, HlAllocator *alloc,
                                               HlLuaPushResultFn push_result);
@@ -167,7 +167,7 @@ extern HlAsyncCont *hl_lua_async_cont_create(HlLua *lua, HlAllocator *alloc,
  * We own the cont (we created it via hl_lua_async_cont_create and did NOT
  * register it with an HlAsyncCtx), so we destroy it here after resume.
  * If the coroutine re-yields from within resume, hl_lua_async_resume's
- * YIELD branch does not free the cont — but a fresh cont has been created
+ * YIELD branch does not free the cont - but a fresh cont has been created
  * for the next park, so freeing this one is correct.
  */
 static void mp_park_resume(void *ctx, HlMultipartResumeReason reason)
@@ -185,7 +185,7 @@ static void mp_park_resume(void *ctx, HlMultipartResumeReason reason)
 static int mp_park_and_yield(lua_State *L, HlMpIter *it,
                               lua_KFunction kfunc, lua_KContext kctx)
 {
-    /* Streaming-multipart routes only run when a connection is bound —
+    /* Streaming-multipart routes only run when a connection is bound -
      * dispatch sets lua->active_conn before the handler is entered. If
      * it isn't set we have nothing to park against (e.g. an in-process
      * test harness call). Fail loudly rather than hang. */
@@ -224,7 +224,7 @@ static HlMpPart *check_part(lua_State *L, int idx)
     return (HlMpPart *)luaL_checkudata(L, idx, HL_MP_PART_MT);
 }
 
-/* part:read() — accumulate every PART_DATA event until PART_END, return
+/* part:read() - accumulate every PART_DATA event until PART_END, return
  * one big string. Convenience for small fields; large uploads should use
  * part:chunks() instead. */
 static int mp_part_read(lua_State *L);
@@ -321,7 +321,7 @@ static int mp_part_read_continue(lua_State *L, int status, lua_KContext ctx)
     return mp_part_read_pump(L);
 }
 
-/* part:chunks([min_bytes]) — returns a chunks iterator. min_bytes is
+/* part:chunks([min_bytes]) - returns a chunks iterator. min_bytes is
  * currently an advisory hint (accepted, ignored): each parser event is
  * surfaced as one chunk. A future slice can coalesce small events. */
 static int mp_part_chunks(lua_State *L)
@@ -372,7 +372,7 @@ static int mp_chunks_drive(lua_State *L)
                 lua_pushlstring(L, data, data_len);
                 return 1;
             }
-            /* Empty PART_DATA is unusual but harmless — loop. */
+            /* Empty PART_DATA is unusual but harmless - loop. */
             continue;
         case KL_MP_EVT_PART_END:
             it->in_part = 0;
@@ -409,7 +409,7 @@ static int mp_chunks_continue(lua_State *L, int status, lua_KContext ctx)
     return mp_chunks_drive(L);
 }
 
-/* part.<field> dispatcher — name / filename / content_type, plus the
+/* part.<field> dispatcher - name / filename / content_type, plus the
  * method names that resolve via the metatable's __index table fallback. */
 static int mp_part_index(lua_State *L)
 {
@@ -482,7 +482,7 @@ static int mp_iter_drive(lua_State *L)
             return 1;
         case KL_MP_EVT_PART_DATA:
             /* User skipped the previous part's body without iterating
-             * chunks — auto-drain. */
+             * chunks - auto-drain. */
             continue;
         case KL_MP_EVT_PART_END:
             it->in_part = 0;
@@ -512,7 +512,7 @@ static int mp_iter_continue(lua_State *L, int status, lua_KContext ctx)
     return mp_iter_drive(L);
 }
 
-/* Iter __gc — free heap-allocated meta-copy buffers. The iter struct
+/* Iter __gc - free heap-allocated meta-copy buffers. The iter struct
  * itself is freed by Lua. */
 static int mp_iter_gc(lua_State *L)
 {
@@ -559,7 +559,7 @@ static int lua_req_multipart(lua_State *L)
 /*
  * Install the `multipart` method on the request table at stack top.
  * Called from hl_lua_make_request immediately after the table is built
- * — only for routes registered with kl_server_route_streaming, where
+ * - only for routes registered with kl_server_route_streaming, where
  * req->body_reader is hl_cap_multipart_factory's wrapper.
  *
  * No-op if body_reader isn't a streaming-multipart wrapper.
@@ -568,7 +568,7 @@ void hl_lua_request_install_multipart(lua_State *L, HlLua *lua,
                                        KlBodyReader *body_reader)
 {
     if (!body_reader || !hl_cap_multipart_inner(body_reader))
-        return; /* not a streaming-multipart route — skip silently */
+        return; /* not a streaming-multipart route - skip silently */
 
     lua_pushlightuserdata(L, body_reader);
     lua_pushlightuserdata(L, lua);
@@ -584,20 +584,20 @@ void hl_lua_request_install_multipart(lua_State *L, HlLua *lua,
  */
 void hl_lua_request_register(lua_State *L)
 {
-    /* HlMpIter — only needs __gc to free meta-copy buffers. The iter
+    /* HlMpIter - only needs __gc to free meta-copy buffers. The iter
      * itself is opaque to user code (only reached via the closure). */
     luaL_newmetatable(L, HL_MP_ITER_MT);
     lua_pushcfunction(L, mp_iter_gc);
     lua_setfield(L, -2, "__gc");
     lua_pop(L, 1);
 
-    /* HlMpPart — __index dispatches name/filename/content_type/read/chunks. */
+    /* HlMpPart - __index dispatches name/filename/content_type/read/chunks. */
     luaL_newmetatable(L, HL_MP_PART_MT);
     lua_pushcfunction(L, mp_part_index);
     lua_setfield(L, -2, "__index");
     lua_pop(L, 1);
 
-    /* HlMpChunks — opaque, no methods. (The closure returned by
+    /* HlMpChunks - opaque, no methods. (The closure returned by
      * part:chunks() is what the user holds; the userdata is just for
      * upvalue + GC anchoring.) */
     luaL_newmetatable(L, HL_MP_CHUNKS_MT);

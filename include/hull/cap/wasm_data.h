@@ -1,5 +1,5 @@
 /*
- * cap/wasm_data.h — WASM shared data management
+ * cap/wasm_data.h - WASM shared data management
  *
  * Shared heap segments, chain management, and option clamping.
  * Split from wasm.h/wasm.c to keep the module manageable.

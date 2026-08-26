@@ -1,4 +1,4 @@
-/* mod_fs.c — hull.fs module + custom require() and stdlib registration
+/* mod_fs.c - hull.fs module + custom require() and stdlib registration
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
@@ -21,7 +21,7 @@
 #include <string.h>
 
 /* ════════════════════════════════════════════════════════════════════
- * hull.fs module — filesystem capabilities
+ * hull.fs module - filesystem capabilities
  *
  * fs.read(path)        -> string | nil, err  (binary-safe)
  * fs.write(path, bytes) -> true | nil, err
@@ -32,7 +32,7 @@
  * absolute paths and `..` traversal are rejected at the cap layer.
  * ════════════════════════════════════════════════════════════════════ */
 
-/* fs.read(path) — returns the whole file contents as a binary-safe
+/* fs.read(path) - returns the whole file contents as a binary-safe
  * Lua string, or (nil, err). Two-pass: first call hl_cap_fs_read
  * with buf=NULL to learn the size, then allocate + read. */
 static int lua_fs_read(lua_State *L)
@@ -78,7 +78,7 @@ static int lua_fs_read(lua_State *L)
     return 1;
 }
 
-/* fs.write(path, bytes) — writes bytes to path (binary-safe). Creates
+/* fs.write(path, bytes) - writes bytes to path (binary-safe). Creates
  * parent dirs as needed. Returns true or (nil, err). */
 static int lua_fs_write(lua_State *L)
 {
@@ -278,7 +278,7 @@ static HlMappedBuffer *check_mmap(lua_State *L, int idx)
     HlMappedBuffer **pp = luaL_checkudata(L, idx, HL_MMAP_MT);
     if (!pp || !*pp) {
         luaL_error(L, "invalid mapped buffer");
-        return NULL; /* unreachable — satisfies static analysis */
+        return NULL; /* unreachable - satisfies static analysis */
     }
     return *pp;
 }
@@ -366,26 +366,26 @@ int luaopen_hull_fs(lua_State *L)
 }
 
 /* ════════════════════════════════════════════════════════════════════
- * Custom require() — module loader with embedded + filesystem fallback
+ * Custom require() - module loader with embedded + filesystem fallback
  *
  * Replaces Lua's package.require with a minimal custom version.
  * Search order:
  *   1. Cache (registry "__hull_loaded")
  *   2. Embedded modules (registry "__hull_modules")
- *   3. Filesystem (dev mode — relative requires from app_dir)
+ *   3. Filesystem (dev mode - relative requires from app_dir)
  *   4. Error
  *
  * Module namespaces:
- *   hull.*   — Hull stdlib wrappers (e.g. require('hull.json'))
- *   vendor.* — Vendored third-party libs (e.g. require('vendor.json'))
- *   ./path   — Relative to requiring module (filesystem or embedded app)
- *   ../path  — Relative to requiring module (parent traversal)
+ *   hull.*   - Hull stdlib wrappers (e.g. require('hull.json'))
+ *   vendor.* - Vendored third-party libs (e.g. require('vendor.json'))
+ *   ./path   - Relative to requiring module (filesystem or embedded app)
+ *   ../path  - Relative to requiring module (parent traversal)
  * ════════════════════════════════════════════════════════════════════ */
 
 /* ── Path normalization helper ────────────────────────────────────── */
 
 /* normalize_path moved to src/hull/path_normalize.c so the JS module
- * loader can share the same implementation — see the path_normalize.h
+ * loader can share the same implementation - see the path_normalize.h
  * header for the contract. Local alias kept for call-site readability. */
 #define normalize_path(p)  hl_path_normalize(p)
 
@@ -419,12 +419,12 @@ static int resolve_module_path(lua_State *L, const char *name,
             memcpy(caller_dir, caller, dir_len);
             caller_dir[dir_len] = '\0';
         } else {
-            /* No slash — caller is in the root */
+            /* No slash - caller is in the root */
             caller_dir[0] = '.';
             caller_dir[1] = '\0';
         }
     } else {
-        /* No caller context — use app_dir as base */
+        /* No caller context - use app_dir as base */
         if (strlen(app_dir) >= sizeof(caller_dir)) {
             lua_pop(L, 1);
             return -1;
@@ -615,14 +615,14 @@ static int hl_lua_require(lua_State *L)
      * luaL_requiref, which populates LUA_LOADED_TABLE
      * (registry["_LOADED"][name]). The Hull-custom require() doesn't
      * normally consult that table, but for native modules it is the
-     * right answer — they are not in __hull_modules (which only holds
+     * right answer - they are not in __hull_modules (which only holds
      * VFS-embedded .lua files). The `package` global itself is
      * sandboxed out, but the registry table still backs it. */
     lua_getfield(L, LUA_REGISTRYINDEX, LUA_LOADED_TABLE);
     if (lua_istable(L, -1)) {
         lua_getfield(L, -1, name);
         if (!lua_isnil(L, -1)) {
-            /* Stack: loaded, module — cache in __hull_loaded too. */
+            /* Stack: loaded, module - cache in __hull_loaded too. */
             lua_getfield(L, LUA_REGISTRYINDEX, "__hull_loaded");
             lua_pushvalue(L, -2);
             lua_setfield(L, -2, name);
@@ -668,7 +668,7 @@ static int hl_lua_require(lua_State *L)
     }
     lua_pop(L, 2); /* pop nil + __hull_modules */
 
-    /* 5. Filesystem fallback (dev mode — relative requires) */
+    /* 5. Filesystem fallback (dev mode - relative requires) */
     if (lua && lua->app_dir &&
         (name[0] == '.' || strchr(name, '/') != NULL)) {
 
@@ -702,7 +702,7 @@ static int hl_lua_require(lua_State *L)
                     return luaL_error(L, "seek failed: %s", path);
                 }
 
-                /* Save arena position — buffer is only needed until
+                /* Save arena position - buffer is only needed until
                  * luaL_loadbuffer copies it into Lua bytecode. */
                 size_t arena_saved = lua->scratch->used;
 
@@ -742,10 +742,10 @@ static int hl_lua_require(lua_State *L)
                     return 1;
                 }
 
-                /* Compile the chunk — copies data into Lua bytecode */
+                /* Compile the chunk - copies data into Lua bytecode */
                 int load_ok = luaL_loadbuffer(L, buf, nread, path) == LUA_OK;
 
-                /* Reclaim file buffer — Lua owns the bytecode now */
+                /* Reclaim file buffer - Lua owns the bytecode now */
                 lua->scratch->used = arena_saved;
 
                 if (!load_ok)
@@ -803,7 +803,7 @@ int hl_lua_register_stdlib(HlLua *lua)
 
     /* Create __hull_modules table and populate with compiled chunks.
      * Iterates the platform VFS entries, skipping non-Lua-module
-     * entries — adding a new .lua file requires no C changes.
+     * entries - adding a new .lua file requires no C changes.
      *
      * Skip conditions:
      *   - colon in name => JS module (hull:foo) or context doc
@@ -832,7 +832,7 @@ int hl_lua_register_stdlib(HlLua *lua)
         }
     }
 
-    /* Load embedded app modules (if any — skip non-Lua entries) */
+    /* Load embedded app modules (if any - skip non-Lua entries) */
     if (lua->base.app_vfs) {
         for (size_t i = 0; i < lua->base.app_vfs->count; i++) {
             const HlEntry *e = &lua->base.app_vfs->entries[i];
@@ -843,7 +843,7 @@ int hl_lua_register_stdlib(HlLua *lua)
             if (e->name[0] != '.')
                 continue;  /* module entries start with "./" */
             if (nlen >= 5 && strcmp(e->name + nlen - 5, ".json") == 0) {
-                /* JSON data — store as raw string, decoded on first require() */
+                /* JSON data - store as raw string, decoded on first require() */
                 lua_pushlstring(L, (const char *)e->data, e->len);
             } else {
                 if (hl_lua_load_cached(L, (const char *)e->data, e->len, e->name) != LUA_OK) {
@@ -867,7 +867,7 @@ int hl_lua_register_stdlib(HlLua *lua)
      * __hull_json_internal for runtime-internal use (request-context
      * JSON decoding, embedded .json file decoding, test harness JSON
      * marshalling). User code must declare "hull/json@1" and call
-     * require("hull.json") explicitly — log and json are no longer
+     * require("hull.json") explicitly - log and json are no longer
      * intrinsic as of v0.1.0 release. The internal stash bypasses
      * the manifest gate because it's not user-callable. */
     if (lua->base.platform_vfs) {

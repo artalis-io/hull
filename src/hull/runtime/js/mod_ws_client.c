@@ -1,5 +1,5 @@
 /*
- * mod_ws_client.c — hull:web:ws-client module (outbound WebSocket connect)
+ * mod_ws_client.c - hull:web:ws-client module (outbound WebSocket connect)
  *
  * Exposes: ws.connect(url, handlers)
  *          client connection methods: send / sendBinary / close / ping
@@ -24,7 +24,7 @@
 
 #include <string.h>
 
-/* Client class id is module-internal — no other file references it. */
+/* Client class id is module-internal - no other file references it. */
 static JSClassID js_ws_client_conn_class_id;
 
 typedef struct {
@@ -84,7 +84,7 @@ static JSClassDef js_ws_client_conn_class = {
     .gc_mark = js_ws_client_conn_gc_mark,
 };
 
-/* Client conn methods — send/sendBinary/close/ping */
+/* Client conn methods - send/sendBinary/close/ping */
 
 static JSValue js_ws_client_send(JSContext *ctx, JSValueConst this_val,
                                    int argc, JSValueConst *argv)
@@ -256,13 +256,13 @@ static void js_ws_client_on_close(KlWsClientConn *ws, uint16_t code,
         JS_FreeValue(ud->ctx, ret);
     }
 
-    /* Release self-reference — allow GC */
+    /* Release self-reference - allow GC */
     if (!JS_IsUndefined(ud->self_ref)) {
         JS_FreeValue(ud->ctx, ud->self_ref);
         ud->self_ref = JS_UNDEFINED;
     }
     /* Mark closed (methods fail closed) but keep `client` non-NULL so the
-     * finalizer frees the KlWsClientConn — Keel does NOT free it on close,
+     * finalizer frees the KlWsClientConn - Keel does NOT free it on close,
      * and we must not free it here (Keel touches `ws` immediately after this
      * callback returns: `ws->state = WSC_CLOSED; wsc_close_connection(ws)`). */
     ud->closed = 1;
@@ -334,7 +334,7 @@ static JSValue js_ws_connect(JSContext *ctx, JSValueConst this_val,
 #else
     /* Without HL_ENABLE_HTTP_CLIENT the host allowlist function isn't
      * compiled in. ws.connect on a server-only build can't dial out
-     * to arbitrary hosts — fail closed. */
+     * to arbitrary hosts - fail closed. */
     JS_FreeCString(ctx, url);
     return JS_ThrowTypeError(ctx,
         "ws.connect requires HL_ENABLE_HTTP_CLIENT (build-time)");
@@ -399,7 +399,7 @@ static JSValue js_ws_connect(JSContext *ctx, JSValueConst this_val,
     JS_FreeCString(ctx, url);
 
     if (!client) {
-        /* Connection failed immediately — clean up self_ref */
+        /* Connection failed immediately - clean up self_ref */
         JS_FreeValue(ctx, ud->self_ref);
         ud->self_ref = JS_UNDEFINED;
         JS_FreeValue(ctx, obj);

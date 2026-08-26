@@ -1,10 +1,10 @@
 /*
- * obj_emit.h — compiler-free app_registry object emitter
+ * obj_emit.h - compiler-free app_registry object emitter
  *
  * Serializes hl_app_entries[] (the app's embedded-file registry) directly
  * as a relocatable object in the target's native format (ELF, Mach-O, and
- * COFF/PE are all implemented — see emit_elf / emit_macho / emit_coff), so
- * `hull build` never needs a C compiler for the data object — only a linker.
+ * COFF/PE are all implemented - see emit_elf / emit_macho / emit_coff), so
+ * `hull build` never needs a C compiler for the data object - only a linker.
  * See docs/compiler_free_build.md.
  *
  * The emitter is HOST-INDEPENDENT: a macOS host emits ELF for a Linux

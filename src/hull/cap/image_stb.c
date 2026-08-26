@@ -1,5 +1,5 @@
 /*
- * image_stb.c — stb_image codec implementations for PNG, JPEG, BMP
+ * image_stb.c - stb_image codec implementations for PNG, JPEG, BMP
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
@@ -29,7 +29,7 @@ static void write_cb(void *context, void *data, int size)
         size_t newcap = wc->cap * 2;
         if (newcap < needed) newcap = needed;
         unsigned char *p = realloc(wc->data, newcap);
-        if (!p) return; /* silent failure — stbi_write returns 0 */
+        if (!p) return; /* silent failure - stbi_write returns 0 */
         wc->data = p;
         wc->cap = newcap;
     }
@@ -52,7 +52,7 @@ static int stb_decode(const void *src, size_t src_len,
 {
     (void)alloc;
     if (src_len > (size_t)INT32_MAX)
-        return -1; /* stbi takes int len — reject oversized input */
+        return -1; /* stbi takes int len - reject oversized input */
     int iw, ih, channels_in_file;
     unsigned char *data = stbi_load_from_memory(
         (const unsigned char *)src, (int)src_len,

@@ -15,7 +15,7 @@
 #include <string.h>
 #include <sys/stat.h>
 
-/* Cache subdir names are filesystem path components — restrict to a
+/* Cache subdir names are filesystem path components - restrict to a
  * conservative charset so a misconfigured caller can't path-traverse
  * out of `$HOME/.hull/cache/`. Allowed: [A-Za-z0-9_-]+ */
 static int name_valid(const char *name)
@@ -36,7 +36,7 @@ int hl_hull_cache_dir(char *out, size_t out_sz)
 {
     if (!out || out_sz < 2) return -1;
 
-    /* HULL_CACHE_DIR override — used for per-app cache isolation in
+    /* HULL_CACHE_DIR override - used for per-app cache isolation in
      * shared / multi-tenant environments where the default
      * $HOME/.hull/blobs/runtime/ pool would expose cache content to
      * any process running under the same user. Set per-deployment
@@ -49,7 +49,7 @@ int hl_hull_cache_dir(char *out, size_t out_sz)
      * return value).
      *
      * Tools storage ($HOME/.hull/blobs/tools/) is NOT affected by
-     * this override — tools are durable signed downloads with a
+     * this override - tools are durable signed downloads with a
      * stable system home, not per-app caches. See cache_registry.c
      * for the registry-wide path-resolution rules. */
     const char *override = getenv("HULL_CACHE_DIR");
@@ -78,7 +78,7 @@ int hl_hull_cache_dir(char *out, size_t out_sz)
      * blob stores but partition under blobs/runtime/<kind>/ so
      * `hull cache list` can enumerate them in one tree walk. The
      * env-var surface (HULL_NO_CACHE etc.) keeps "cache"
-     * nomenclature — these directories ARE caches even though the
+     * nomenclature - these directories ARE caches even though the
      * disk layout is the blob shape. */
     const char *home = getenv("HOME");
     if (!home || !*home) { errno = ENOENT; return -1; }
@@ -172,7 +172,7 @@ int hl_hull_cache_disabled(const char *kind)
 
     char env_name[64];
     if (hl_hull_cache_env_name(kind, env_name, sizeof(env_name)) != 0) {
-        /* Kind name too long to fit the buffer — fail open (cache
+        /* Kind name too long to fit the buffer - fail open (cache
          * stays active). Mirrors the previous inline behaviour. */
         return 0;
     }

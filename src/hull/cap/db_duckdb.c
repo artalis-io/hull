@@ -129,7 +129,7 @@ static int duck_apply_config_security(duckdb_config config)
     /* Pin memory + threads so DuckDB does NOT auto-detect them by probing /sys
      * and /proc. Even with those paths unveiled (see sandbox.c), auto-detection
      * hits some resource that fails under the sandbox and DuckDB NULL-derefs
-     * (aborts) rather than degrading — pinning the values avoids that path
+     * (aborts) rather than degrading - pinning the values avoids that path
      * entirely. Fixed, conservative defaults; a future manifest option can make
      * them tunable (tracked in docs/duckdb_backend_design.md §3.2). */
     if (duckdb_set_config(config, "memory_limit", "2GB") != DuckDBSuccess)

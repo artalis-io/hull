@@ -88,7 +88,7 @@ typedef struct HlRuntimeVtable {
 
     /* Walk every registered route + middleware. Either callback may be
      * NULL to skip that category. Used by agent_lib::routes for
-     * introspection — folds parallel Lua/JS code paths into one. */
+     * introspection - folds parallel Lua/JS code paths into one. */
     void  (*enumerate_routes)(HlRuntime *rt, HlRouteCb cb, void *user);
     void  (*enumerate_middleware)(HlRuntime *rt, HlMiddlewareCb cb, void *user);
 
@@ -120,7 +120,7 @@ typedef struct HlRuntimeVtable {
     HlRuntimeKind kind;
 
     /* Glob pattern for test files in this runtime (e.g. "test_*.lua").
-     * Used by the shared test runner — avoids switching on rt->vt->name
+     * Used by the shared test runner - avoids switching on rt->vt->name
      * to pick the file pattern. */
     const char *test_file_pattern;
 
@@ -133,7 +133,7 @@ typedef struct HlRuntimeVtable {
      * WebSocket endpoint, or SSE endpoint. Used by serve.c to decide
      * whether to enter the server loop after app.main returns (or as
      * the primary dispatch when there's no main). 0 means "nothing
-     * for the server loop to do — just exit when main completes." */
+     * for the server loop to do - just exit when main completes." */
     int   (*has_server_handlers)(HlRuntime *rt);
 
     /* Run the registered app.main(fn) and return its exit code via
@@ -197,7 +197,7 @@ struct HlRuntime {
     int import_tracker_count;
     const char *import_tracker_names[HL_MANIFEST_MAX_MODULES];
     HlAsyncBackendPool *thread_pool; /* worker pool for async work (NULL if not created) */
-    /* HlAsyncBackend context — the event loop primitives layer. In
+    /* HlAsyncBackend context - the event loop primitives layer. In
      * server-mode builds this is a wrap around the KlServer's
      * embedded event ctx; in CLI-mode builds it's an independent
      * loop created via backend->init(). Consumers use the vtable
@@ -205,7 +205,7 @@ struct HlRuntime {
      * of touching KlServer / KlEventCtx directly. NULL means async
      * primitives are unavailable on this runtime (rare). */
     HlAsyncBackendCtx *async_ctx;
-    /* HlNetBackend context — the HTTP/connection lifecycle layer.
+    /* HlNetBackend context - the HTTP/connection lifecycle layer.
      * Borrowed from HlServerState (which owns the wrap around KlServer).
      * Consumers route connection-bound async-op suspend/complete
      * (hl_net_op_suspend / hl_net_op_complete) through this so they
@@ -233,7 +233,7 @@ struct HlRuntime {
      * to Keel and before kl_server_freeze.
      *
      * Once set, the bindings throw a structured Lua error / JS exception
-     * — "app.X() can only be called at app startup ..." — instead of
+     * - "app.X() can only be called at app startup ..." - instead of
      * silently accepting the registration and stashing it in a table
      * that no consumer reads (the underlying KlRouter is also frozen
      * post this point, so even if the binding did push, kl_router_add

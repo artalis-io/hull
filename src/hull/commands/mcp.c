@@ -1,5 +1,5 @@
 /*
- * commands/mcp.c — hull mcp serve: MCP stdio JSON-RPC 2.0 server
+ * commands/mcp.c - hull mcp serve: MCP stdio JSON-RPC 2.0 server
  *
  * Implements the Model Context Protocol for AI coding tools (Cursor,
  * Claude Code, Windsurf, OpenCode). Reads JSON-RPC requests from stdin,
@@ -555,7 +555,7 @@ static void handle_tools_call(FILE *fp, const ShJsonValue *id,
         if (warm_ctx && strcmp(dir, app_dir) == 0) {
             hl_agent_perf_ctx(warm_ctx, &agent_out);
         } else {
-            /* No warm context — load briefly and free. */
+            /* No warm context - load briefly and free. */
             HlAppContextOpts opts = { .app_dir = dir, .gate_modules = 1 };
             HlAppContext *tmp = NULL;
             if (hl_app_context_init(&tmp, &opts) == 0) {
@@ -647,7 +647,7 @@ static void handle_tools_call(FILE *fp, const ShJsonValue *id,
             hl_agent_schema_diff(dir, db, &agent_out);
 
     } else if (strcmp(tool_name, "hull_sql_named") == 0) {
-        /* `params_json` (not `params`) — the JSON-RPC outer scope already
+        /* `params_json` (not `params`) - the JSON-RPC outer scope already
          * has a `params` argument to this handler, so cppcheck flags the
          * shadow under -shadowArgument. */
         const char *name = sh_json_as_string(sh_json_get(args, "name"), NULL);
@@ -732,7 +732,7 @@ int hl_cmd_mcp(int argc, char **argv, const HlCommandEnv *env)
         if (strcmp(method, "initialize") == 0) {
             handle_initialize(stdout, id);
         } else if (strcmp(method, "notifications/initialized") == 0) {
-            /* No-op notification — no response */
+            /* No-op notification - no response */
         } else if (strcmp(method, "tools/list") == 0) {
             handle_tools_list(stdout, id);
         } else if (strcmp(method, "tools/call") == 0) {

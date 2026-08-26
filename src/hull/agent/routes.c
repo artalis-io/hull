@@ -1,5 +1,5 @@
 /*
- * agent/routes.c — `hull agent routes` introspection.
+ * agent/routes.c - `hull agent routes` introspection.
  *
  * Walks the runtime's registered routes + middleware via the
  * HlRuntimeVtable enumerate_routes / enumerate_middleware methods

@@ -1,5 +1,5 @@
 /*
- * commands/dispatch.c — Table-driven subcommand dispatcher
+ * commands/dispatch.c - Table-driven subcommand dispatcher
  *
  * Central command table + dispatch function. Adding a new subcommand
  * means adding one line to the table and one .c/.h file.
@@ -125,7 +125,7 @@ int hl_command_dispatch(int argc, char **argv)
         } else if (strcmp(argv[cmd_idx], "--json") == 0) {
             env.json_output = 1;
         } else {
-            break;  /* unknown flag — stop scanning */
+            break;  /* unknown flag - stop scanning */
         }
         cmd_idx++;
     }

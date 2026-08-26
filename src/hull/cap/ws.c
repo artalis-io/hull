@@ -1,5 +1,5 @@
 /*
- * cap/ws.c — WebSocket connection registry
+ * cap/ws.c - WebSocket connection registry
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */

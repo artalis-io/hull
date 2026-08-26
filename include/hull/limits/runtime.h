@@ -1,5 +1,5 @@
 /*
- * hull/limits/runtime.h — Lua + QuickJS runtime memory / instruction limits
+ * hull/limits/runtime.h - Lua + QuickJS runtime memory / instruction limits
  *
  * Used by runtime/lua and runtime/js and by code that constructs
  * HlLuaConfig / HlJsConfig defaults (mainly main.c).

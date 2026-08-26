@@ -1,5 +1,5 @@
 /*
- * embed.h — stable C ABI for the libhull no-runtime flavor.
+ * embed.h - stable C ABI for the libhull no-runtime flavor.
  *
  * This is the ONLY header a native host (C/Rust/Zig) needs to embed the
  * runtime-free Hull core (build/libhull.a). It exposes an opaque handle
@@ -7,7 +7,7 @@
  * hl_sandbox_* / hl_cap_* layer, so an embedder never reaches into
  * Hull's internal headers (whose layout is not stable across releases).
  *
- * Deliberately depends only on <stddef.h> / <stdint.h> — no HlManifest,
+ * Deliberately depends only on <stddef.h> / <stdint.h> - no HlManifest,
  * HlSandboxPolicy, or HlFsConfig leak across this boundary.
  *
  * Lifecycle (fail-closed): the capability calls refuse to run until the
@@ -18,7 +18,7 @@
  *     hl_embed_sandbox_phase1(e);          // optional, recommended
  *     hl_embed_allow_read(e, "data");      // build policy in C
  *     hl_embed_allow_write(e, "out");
- *     if (hl_embed_seal(e, db_path) != 0)  // apply sandbox — MUST check
+ *     if (hl_embed_seal(e, db_path) != 0)  // apply sandbox - MUST check
  *         abort();                         // fail closed on seal failure
  *     hl_embed_fs_write(e, "out/x", ...);  // capabilities now live
  *     hl_embed_free(e);
@@ -95,7 +95,7 @@ void hl_embed_allow_tui(HlEmbed *e, int enabled);
 
 /*
  * Phase-1 sandbox: pledge-only, blocks exec/proc/fork. Optional but
- * recommended — call early, before building policy, to reduce the
+ * recommended - call early, before building policy, to reduce the
  * syscall surface during host setup. Returns 0 on success, -1 on error.
  */
 int hl_embed_sandbox_phase1(HlEmbed *e);
@@ -106,7 +106,7 @@ int hl_embed_sandbox_phase1(HlEmbed *e);
  * (no database); when set, it is granted read/write.
  *
  * W^X is enforced (no runtime dynamic code). Returns 0 on success. A
- * non-zero return means the sandbox could not be applied — the host MUST
+ * non-zero return means the sandbox could not be applied - the host MUST
  * treat this as fatal and NOT proceed, because the capability layer is
  * then running without kernel enforcement. Idempotent-safe: a second
  * call after a successful seal returns -1.
@@ -140,7 +140,7 @@ int hl_embed_fs_exists(HlEmbed *e, const char *path, const char **err);
 int hl_embed_fs_delete(HlEmbed *e, const char *path, const char **err);
 
 /*
- * SHA-256 of @p data into @p out (32 bytes). Stateless — needs no handle
+ * SHA-256 of @p data into @p out (32 bytes). Stateless - needs no handle
  * and works before seal. Returns 0 on success, -1 on internal failure.
  */
 int hl_embed_sha256(const void *data, size_t len, uint8_t out[32]);

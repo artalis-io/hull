@@ -1,5 +1,5 @@
 /*
- * lua_worker_db.c — Bridge: db.* for worker Lua VMs
+ * lua_worker_db.c - Bridge: db.* for worker Lua VMs
  *
  * Registers sync db.query/exec/batch into per-worker Lua VMs using the
  * worker thread's own backend connection (HlDbBackend vtable), so the

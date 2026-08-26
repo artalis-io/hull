@@ -1,9 +1,9 @@
 /*
- * reqctx.h — Tagged per-request context for middleware->handler data passing
+ * reqctx.h - Tagged per-request context for middleware->handler data passing
  *
  * Replaces the raw void* + size_t-prefix layout on KlRequest.ctx.
  * Supports three kinds: JSON string (test dispatch), Lua registry ref,
- * and JS value ref — avoiding JSON round-trips between middleware hops.
+ * and JS value ref - avoiding JSON round-trips between middleware hops.
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */

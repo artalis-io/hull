@@ -1,5 +1,5 @@
 /*
- * linker.h — linker vtable for the compiler-free `hull build`
+ * linker.h - linker vtable for the compiler-free `hull build`
  *
  * The object emitter (obj_emit.h) removes the need to COMPILE the app's
  * data object; the link step remains. This vtable abstracts it so the

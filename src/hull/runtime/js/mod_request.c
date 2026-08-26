@@ -1,5 +1,5 @@
 /*
- * mod_request.c — JS bindings for streaming-multipart request bodies
+ * mod_request.c - JS bindings for streaming-multipart request bodies
  *
  * Mirrors src/hull/runtime/lua/mod_request.c for QuickJS. Routes that
  * declared `{ multipart: {...} }` get `req.multipart()` returning an
@@ -28,8 +28,8 @@
  *      park the cont's resume as the body wrapper's wake callback, set
  *      c->state = KL_CONN_READING_BODY so Keel keeps reading socket
  *      bytes, return the pending Promise.
- *   3. When on_data fires inside Keel's read loop, the park callback —
- *      which IS the cont's resume — runs. It re-drives the parser. If
+ *   3. When on_data fires inside Keel's read loop, the park callback -
+ *      which IS the cont's resume - runs. It re-drives the parser. If
  *      still NEED_DATA, re-parks (the cont survives). Otherwise it
  *      resolves / rejects the iter Promise, drains microtasks (which
  *      lets the for-await loop continue), checks the outer handler
@@ -59,7 +59,7 @@
 
 /* Defined in async.c. Used by mp_js_pump to transfer the outer
  * handler-Promise to whichever cont type the handler creates next
- * (could be our own HlJsMpCont or a standard HlJsAsyncCont — the
+ * (could be our own HlJsMpCont or a standard HlJsAsyncCont - the
  * dispatcher routes through the cont's set_handler_promise vtable
  * slot, so this file doesn't have to know which type). */
 extern void hl_js_async_cont_set_handler_promise(HlAsyncCont *cont,
@@ -77,7 +77,7 @@ static JSClassID hl_mp_chunks_class_id;
 /*
  * Shared parser-driver state. The iter, all Part JSValues that came out
  * of it, and any Chunks JSValues spawned off a Part all point at the
- * SAME HlJsMpIter — they're views into one in-flight parse.
+ * SAME HlJsMpIter - they're views into one in-flight parse.
  *
  * Lifetime: ref-counted. Each holder calls hl_mp_iter_ref on construction
  * and hl_mp_iter_unref on finalize. The last unref frees the meta copies
@@ -118,7 +118,7 @@ typedef struct {
  * for-await loop), and the resulting use-after-free would be silent.
  * The chunks iterator stops on `ended` (set when PART_END / DONE was
  * observed for the part it was reading) or on `!iter->in_part` (the
- * outer for-await advanced past the part — see the Part-lifetime note
+ * outer for-await advanced past the part - see the Part-lifetime note
  * in the docstring at the top of this file).
  */
 typedef struct {
@@ -131,7 +131,7 @@ typedef struct {
 /*
  * Custom continuation for the multipart pump. Implements HlAsyncCont so
  * dispatch can hl_js_async_cont_set_handler_promise on it, but the
- * resume function is our own — it pumps the parser, resolves the iter
+ * resume function is our own - it pumps the parser, resolves the iter
  * promise, runs microtasks, and handles handler-promise transitions.
  */
 typedef enum {
@@ -156,10 +156,10 @@ typedef struct HlJsMpCont {
     char         *read_buf;
     size_t        read_len;
     size_t        read_cap;
-    /* MP_MODE_CHUNKS state — the chunks iter (for ended-flag updates). */
+    /* MP_MODE_CHUNKS state - the chunks iter (for ended-flag updates). */
     HlJsMpChunks *chunks;
-    /* MP_MODE_READ state — the Part that owns this read pump (so we can
-     * mark p->spent on completion). NOT used by MP_MODE_CHUNKS — see the
+    /* MP_MODE_READ state - the Part that owns this read pump (so we can
+     * mark p->spent on completion). NOT used by MP_MODE_CHUNKS - see the
      * note on HlJsMpChunks. */
     HlJsMpPart   *part;
 } HlJsMpCont;
@@ -292,7 +292,7 @@ static JSValue make_js_chunks(JSContext *ctx, HlJsMpIter *it)
 static void mp_js_pump(HlAsyncCont *self, void *driver);
 static void mp_js_park_thunk(void *ctx, HlMultipartResumeReason reason);
 
-/* set_handler_promise vtable slot for HlJsMpCont — wired into the
+/* set_handler_promise vtable slot for HlJsMpCont - wired into the
  * cont via jc->base.set_handler_promise = mp_js_cont_set_handler_promise_impl
  * at every alloc site. The public dispatcher in async.c dispatches
  * through this slot without needing to know the concrete cont type. */
@@ -438,7 +438,7 @@ static PumpStep pump_read_step(JSContext *ctx, HlJsMpCont *jc)
     HlJsMpPart *p = jc->part;
 
     if ((p && p->spent) || !it->in_part) {
-        /* Already drained — return whatever we accumulated (likely empty). */
+        /* Already drained - return whatever we accumulated (likely empty). */
         s.ready = 1;
         s.result = JS_NewArrayBufferCopy(ctx,
             (const uint8_t *)(jc->read_buf ? jc->read_buf : ""),
@@ -472,7 +472,7 @@ static PumpStep pump_read_step(JSContext *ctx, HlJsMpCont *jc)
             it->in_part = 0;
             if (p) p->spent = 1;
             s.ready = 1;
-            /* Binary-safe — ArrayBuffer. read() on a text field can be
+            /* Binary-safe - ArrayBuffer. read() on a text field can be
              * decoded JS-side via `new TextDecoder().decode(buf)`. */
             s.result = JS_NewArrayBufferCopy(ctx,
                 (const uint8_t *)(jc->read_buf ? jc->read_buf : ""),
@@ -483,7 +483,7 @@ static PumpStep pump_read_step(JSContext *ctx, HlJsMpCont *jc)
             it->in_part = 0;
             if (p) p->spent = 1;
             s.ready = 1;
-            /* Binary-safe — ArrayBuffer. read() on a text field can be
+            /* Binary-safe - ArrayBuffer. read() on a text field can be
              * decoded JS-side via `new TextDecoder().decode(buf)`. */
             s.result = JS_NewArrayBufferCopy(ctx,
                 (const uint8_t *)(jc->read_buf ? jc->read_buf : ""),
@@ -551,7 +551,7 @@ static void mp_js_pump(HlAsyncCont *self, void *driver)
     jc->resolve = JS_UNDEFINED;
     jc->reject  = JS_UNDEFINED;
 
-    /* Drain microtasks — the for-await loop body runs here. */
+    /* Drain microtasks - the for-await loop body runs here. */
     hl_js_run_jobs(js);
 
     /* Check outer handler-Promise state */
@@ -594,10 +594,10 @@ static void mp_js_pump(HlAsyncCont *self, void *driver)
             conn->state = KL_CONN_SENDING;
         }
     } else if (!JS_IsUndefined(jc->handler_promise)) {
-        /* PENDING — handler awaited again. A new cont was created
+        /* PENDING - handler awaited again. A new cont was created
          * during the microtask drain; transfer the handler-Promise
          * via the cont's vtable (could be HlJsMpCont or the standard
-         * HlJsAsyncCont — the slot dispatches to the right setter). */
+         * HlJsAsyncCont - the slot dispatches to the right setter). */
         if (js->last_async_cont) {
             hl_js_async_cont_set_handler_promise(
                 (HlAsyncCont *)js->last_async_cont, ctx, jc->handler_promise);
@@ -651,7 +651,7 @@ static void mp_js_cont_destroy(HlAsyncCont *self)
  * c->state, and side-effect-sets js->last_async_cont so dispatch can
  * attach the outer handler Promise.
  *
- * Caller owns nothing afterwards — the cont takes ownership of resolve
+ * Caller owns nothing afterwards - the cont takes ownership of resolve
  * and reject; on failure paths the caller is responsible for freeing
  * those + the promise capability themselves before returning.
  */
@@ -720,7 +720,7 @@ static int mp_js_park(JSContext *ctx, HlJsMpIter *it, MpMode mode,
  * QuickJS doesn't expose a direct "make an already-resolved Promise"
  * primitive, so we go through Promise.resolve on the global Promise
  * constructor. Used by the synchronous fast path of iter.next() /
- * chunks.next() — when the parser already has an event queued, the
+ * chunks.next() - when the parser already has an event queued, the
  * for-await receiver doesn't need to wait. */
 static JSValue resolve_with(JSContext *ctx, JSValue value)
 {
@@ -765,7 +765,7 @@ static JSValue js_iter_next(JSContext *ctx, JSValueConst this_val,
     stage.reject          = JS_UNDEFINED;
     stage.handler_promise = JS_UNDEFINED;
     stage.conn            = it->js->active_conn;
-    stage.iter            = it; /* not refcounted — stage is stack only */
+    stage.iter            = it; /* not refcounted - stage is stack only */
     stage.mode            = MP_MODE_ITER;
 
     PumpStep s = pump_iter_step(ctx, &stage);
@@ -774,7 +774,7 @@ static JSValue js_iter_next(JSContext *ctx, JSValueConst this_val,
         return resolve_with(ctx, s.result);
     }
 
-    /* Need data — allocate the real cont + Promise + park */
+    /* Need data - allocate the real cont + Promise + park */
     JSValue resolving[2];
     JSValue promise = JS_NewPromiseCapability(ctx, resolving);
     if (JS_IsException(promise)) return JS_EXCEPTION;
@@ -798,7 +798,7 @@ static JSValue js_iter_async_iterator(JSContext *ctx, JSValueConst this_val,
     return JS_DupValue(ctx, this_val);
 }
 
-/* part.read() — returns a Promise<string> over the full part body. */
+/* part.read() - returns a Promise<string> over the full part body. */
 static JSValue js_part_read(JSContext *ctx, JSValueConst this_val,
                              int argc, JSValueConst *argv)
 {
@@ -810,7 +810,7 @@ static JSValue js_part_read(JSContext *ctx, JSValueConst this_val,
     if (p->spent || !it->in_part)
         return resolve_with(ctx, JS_NewStringLen(ctx, "", 0));
 
-    /* Allocate a real cont upfront — read() accumulates across yields,
+    /* Allocate a real cont upfront - read() accumulates across yields,
      * so the staging-on-stack trick doesn't help. */
     JSValue resolving[2];
     JSValue promise = JS_NewPromiseCapability(ctx, resolving);
@@ -857,7 +857,7 @@ static JSValue js_part_read(JSContext *ctx, JSValueConst this_val,
         return promise;
     }
 
-    /* Not ready — park */
+    /* Not ready - park */
     KlConn *conn = it->js->active_conn;
     if (!conn) {
         jc->base.destroy(&jc->base);
@@ -876,7 +876,7 @@ static JSValue js_part_read(JSContext *ctx, JSValueConst this_val,
     return promise;
 }
 
-/* chunks.next() — returns a Promise<{value, done}>. */
+/* chunks.next() - returns a Promise<{value, done}>. */
 static JSValue js_chunks_next(JSContext *ctx, JSValueConst this_val,
                                int argc, JSValueConst *argv)
 {
@@ -924,7 +924,7 @@ static JSValue js_chunks_async_iterator(JSContext *ctx, JSValueConst this_val,
 }
 
 /* part.chunks() returns a chunks-iter. Accepts an optional advisory
- * min-bytes hint (currently ignored — see Lua side comment). */
+ * min-bytes hint (currently ignored - see Lua side comment). */
 static JSValue js_part_chunks(JSContext *ctx, JSValueConst this_val,
                                int argc, JSValueConst *argv)
 {
@@ -1069,7 +1069,7 @@ void hl_js_request_install_multipart(JSContext *ctx, JSValue req_obj,
 {
     if (!body_reader || !hl_cap_multipart_inner(body_reader)) return;
 
-    /* Wrapper pointer as Int64 — QuickJS doesn't have lightuserdata. */
+    /* Wrapper pointer as Int64 - QuickJS doesn't have lightuserdata. */
     JSValue addr_val = JS_NewInt64(ctx, (int64_t)(intptr_t)body_reader);
     JSValueConst func_data[1] = { addr_val };
     JSValue fn = JS_NewCFunctionData(ctx, js_req_multipart, 0, 0, 1, func_data);
@@ -1099,7 +1099,7 @@ void hl_js_request_register(JSContext *ctx)
             JS_NewCFunction(ctx, js_iter_next, "next", 0));
         JSAtom async_iter_atom = JS_NewAtom(ctx, "Symbol.asyncIterator");
         /* QuickJS exposes Symbol.asyncIterator as a property of the
-         * Symbol global — we install both a Symbol.asyncIterator slot
+         * Symbol global - we install both a Symbol.asyncIterator slot
          * AND a string fallback for engines that don't resolve the
          * Symbol path through atoms. */
         JS_FreeAtom(ctx, async_iter_atom);

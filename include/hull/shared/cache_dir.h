@@ -4,12 +4,12 @@
  *
  * Runtime caches (Lua bytecode, compute AOT artifacts, template AST
  * compilations) live OUTSIDE the per-app sandbox manifest in a
- * shared system-wide pool — they're runtime infrastructure, not part
+ * shared system-wide pool - they're runtime infrastructure, not part
  * of the app's I/O surface (see docs/blob.md §Runtime-infrastructure
  * caches for the manifest-line rationale).
  *
  * The sandbox auto-allows the cache root via the same path it
- * auto-allows the embedded CA bundle and SQLite WAL/SHM siblings —
+ * auto-allows the embedded CA bundle and SQLite WAL/SHM siblings -
  * apps can't opt out per-app, but the global `HULL_NO_CACHE=1` env
  * var disables every consumer at runtime.
  *
@@ -25,16 +25,16 @@
  * @brief Resolve the runtime-cache root, creating all layers.
  *
  * Resolution order:
- *   1. `HULL_CACHE_DIR` env (must be absolute) — for per-app cache
+ *   1. `HULL_CACHE_DIR` env (must be absolute) - for per-app cache
  *      isolation in shared / multi-tenant deployments. Set per-
  *      service in systemd / k8s / Docker and the entire runtime
  *      cache pool lives under that path with no `$HOME` exposure.
- *   2. `$HOME/.hull/blobs/runtime/` — default shared pool.
+ *   2. `$HOME/.hull/blobs/runtime/` - default shared pool.
  *
  * Returns a path WITH trailing slash for easy concatenation.
  *
  * The name retains "cache" terminology because that's the
- * user-facing intent — the directories under this root are caches
+ * user-facing intent - the directories under this root are caches
  * even though the disk layout is now the blob shape (shared with
  * hull/blob@1 via hl_blob_store_*).
  *
@@ -68,14 +68,14 @@ int hl_hull_cache_subdir(const char *name, char *out, size_t out_sz);
  * (anything not in {"", "0", "false", "FALSE", "f*", "F*"}).
  *
  * Granular env vars are derived from each cache module's chosen
- * kind string and the registry's `env_kind` field — the canonical
+ * kind string and the registry's `env_kind` field - the canonical
  * set today is:
  *
- *   - `HULL_NO_CACHE=1`                — global kill-switch
- *   - `HULL_NO_LUA_BYTECODE_CACHE=1`   — Lua bytecode cache
- *   - `HULL_NO_JS_BYTECODE_CACHE=1`    — QuickJS bytecode cache
- *   - `HULL_NO_AOT_CACHE=1`            — WASM AOT artifacts
- *   - `HULL_NO_TEMPLATE_CACHE=1`       — template render fns
+ *   - `HULL_NO_CACHE=1`                - global kill-switch
+ *   - `HULL_NO_LUA_BYTECODE_CACHE=1`   - Lua bytecode cache
+ *   - `HULL_NO_JS_BYTECODE_CACHE=1`    - QuickJS bytecode cache
+ *   - `HULL_NO_AOT_CACHE=1`            - WASM AOT artifacts
+ *   - `HULL_NO_TEMPLATE_CACHE=1`       - template render fns
  *
  * Pass NULL for `kind` to check only the global switch. Pass the
  * per-cache kind (lowercase, e.g. `"lua_bytecode"`) to also
@@ -92,7 +92,7 @@ int hl_hull_cache_disabled(const char *kind);
  * @brief Compose the env-var name `HULL_NO_<KIND_UPPER>_CACHE` for
  *        a cache kind into @p out.
  *
- * Identical naming rule to `hl_hull_cache_disabled` — uppercases
+ * Identical naming rule to `hl_hull_cache_disabled` - uppercases
  * @p kind and wraps in `HULL_NO_<...>_CACHE`. Useful for callers
  * that need to DISPLAY the env-var name (cache list status column,
  * tool.cache_kinds() reflection, prune error messages) rather than
@@ -100,7 +100,7 @@ int hl_hull_cache_disabled(const char *kind);
  *
  * @param kind     Per-cache specifier (e.g. "lua_bytecode", "aot",
  *                 "template"). Must be non-NULL; characters must be
- *                 `[A-Za-z0-9_]+` (no validation here — caller
+ *                 `[A-Za-z0-9_]+` (no validation here - caller
  *                 owns the kind tag).
  * @param out      Caller-supplied buffer.
  * @param out_sz   Buffer size; needs ≥ `strlen("HULL_NO__CACHE") + strlen(kind) + 1`.

@@ -1,5 +1,5 @@
 /*
- * agent/test.c — `hull agent test` — runs tests with JSON output.
+ * agent/test.c - `hull agent test` - runs tests with JSON output.
  *
  * Uses the shared test_runner with a JSON writer (item I step 2).
  *

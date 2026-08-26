@@ -1,5 +1,5 @@
 /*
- * agent/schema_diff.c — `hull agent schema-diff`: compare live DB
+ * agent/schema_diff.c - `hull agent schema-diff`: compare live DB
  * schema against what the migrations would produce.
  *
  * Reports schema drift in three buckets:
@@ -55,7 +55,7 @@ static void name_list_push(NameList *l, const char *name)
         l->names = g;
         l->cap = ncap;
     }
-    /* L-1 fix: don't increment count if strdup returned NULL — otherwise
+    /* L-1 fix: don't increment count if strdup returned NULL - otherwise
      * downstream name_present / emit_list would crash on the slot. */
     char *dup = strdup(name);
     if (!dup) return;
@@ -222,7 +222,7 @@ static int schema_diff_impl(sqlite3 *db, const HlVfs *vfs, ShJsonBuf *out)
     int drift_indexes = 0;
     for (int i = 0; i < actual_indexes.count; i++) {
         /* SQLite auto-creates an index named sqlite_autoindex_* for
-         * PRIMARY KEY / UNIQUE constraints — those are not drift. */
+         * PRIMARY KEY / UNIQUE constraints - those are not drift. */
         if (strncmp(actual_indexes.names[i], "sqlite_", 7) == 0) continue;
         if (!name_present(&expected_indexes, actual_indexes.names[i])) {
             sh_json_write_string(&w, actual_indexes.names[i]);

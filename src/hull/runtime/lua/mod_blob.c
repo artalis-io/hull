@@ -1,4 +1,4 @@
-/* mod_blob.c — hull.blob bindings (content-addressed blob storage)
+/* mod_blob.c - hull.blob bindings (content-addressed blob storage)
  *
  * Public API mirrors docs/blob.md:
  *
@@ -53,7 +53,7 @@
 
 /* ── Singleton handle ────────────────────────────────────────────── */
 
-/* Stash for the HlBlob* — wrapped in a userdata so __gc frees it
+/* Stash for the HlBlob* - wrapped in a userdata so __gc frees it
  * when the runtime tears down. */
 typedef struct {
     HlBlob *b;
@@ -217,7 +217,7 @@ static int lua_blob_writer_new(lua_State *L)
     if (lua_istable(L, 1)) {
         lua_getfield(L, 1, "expected");
         if (!lua_isnil(L, -1)) expected = check_id(L, -1);
-        /* leave expected on stack — won't be popped because length-check
+        /* leave expected on stack - won't be popped because length-check
          * runs after; harmless. */
         lua_getfield(L, 1, "durable");
         durable = lua_toboolean(L, -1);
@@ -334,7 +334,7 @@ static int lua_reader_read(lua_State *L)
     }
     HlLua *lua = get_hl_lua(L);
     /* Route through the Lua memory tracker (lua->base.alloc) so the
-     * runtime's memory cap covers transient read buffers — bare
+     * runtime's memory cap covers transient read buffers - bare
      * malloc would silently bypass JS_SetMemoryLimit's Lua sibling. */
     uint8_t *buf = hl_alloc_malloc(lua->base.alloc, (size_t)cap);
     if (!buf) return luaL_error(L, "blob.reader: out of memory");
@@ -384,7 +384,7 @@ static int lua_blob_get(lua_State *L)
         return 1;
     }
     /* Empty-blob contract: (NULL, 0). lua_pushlstring accepts NULL when
-     * len is 0 and pushes an empty string — no allocation to free. */
+     * len is 0 and pushes an empty string - no allocation to free. */
     lua_pushlstring(L, (const char *)buf, len);
     if (buf) hl_alloc_free(lua->base.alloc, buf, len);
     return 1;
@@ -450,7 +450,7 @@ typedef struct {
  * snapshot array. Bare malloc/realloc/free would bypass the tracker
  * and turn a 10⁶-blob iter() into an off-tracker DoS vector. The
  * matching free in lua_iter_state_gc needs the same allocator and
- * the same capacity it was grown to — stash both on the state. */
+ * the same capacity it was grown to - stash both on the state. */
 
 typedef struct {
     HlAllocator *alloc;

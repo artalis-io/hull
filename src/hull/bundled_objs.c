@@ -1,5 +1,5 @@
 /*
- * bundled_objs.c — accessor for the xxd-embedded compiler-free build objects.
+ * bundled_objs.c - accessor for the xxd-embedded compiler-free build objects.
  *
  * The byte arrays live in the generated embedded_bundled_objs.h (produced by
  * the Makefile from templates/app_main.c + templates/app_feature_registry_*.c

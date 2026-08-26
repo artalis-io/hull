@@ -1,4 +1,4 @@
-/* mod_time.c — hull.time module: timestamps, date formatting
+/* mod_time.c - hull.time module: timestamps, date formatting
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */

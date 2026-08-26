@@ -1,5 +1,5 @@
 /*
- * commands/test.c — hull test subcommand
+ * commands/test.c - hull test subcommand
  *
  * In-process test runner: discovers test files, loads the app, wires
  * routes, executes test files with assertions. All output goes to

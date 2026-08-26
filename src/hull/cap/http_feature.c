@@ -1,5 +1,5 @@
 /*
- * http_feature.c — weak no-op defaults for the HTTP-feature seam (issue #114).
+ * http_feature.c - weak no-op defaults for the HTTP-feature seam (issue #114).
  *
  * The runtime-agnostic base always links these. A full base or a
  * composed `http` feature supplies strong overrides from

@@ -1,5 +1,5 @@
 /*
- * test_runner.h — Shared test-discovery + per-file orchestration
+ * test_runner.h - Shared test-discovery + per-file orchestration
  *
  * Used by `hull test` (commands/test.c) and `hull agent test`
  * (agent_lib.c). Each call site provides a writer; the runner handles:
@@ -23,7 +23,7 @@ typedef struct HlAppContext     HlAppContext;
 typedef struct HlTestCaseResult HlTestCaseResult;
 
 /*
- * Writer interface — call site fills in callbacks to emit output.
+ * Writer interface - call site fills in callbacks to emit output.
  * Any callback may be NULL to skip that event.
  */
 typedef struct HlTestRunnerWriter {
@@ -56,7 +56,7 @@ typedef struct HlTestRunnerWriter {
  * Returns negative on setup failure (no routes registered, no test
  * files found, etc.) and emits a load_error to the writer.
  *
- * Note: ctx must already be loaded (app code executed) — the runner
+ * Note: ctx must already be loaded (app code executed) - the runner
  * uses ctx's HlRuntime to drive route + test_global wiring.
  */
 int hl_test_runner_run(HlAppContext *ctx, const HlTestRunnerWriter *writer);

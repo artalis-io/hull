@@ -11,7 +11,7 @@
  *                     generated_code). Hashing the GENERATED code
  * (post-resolve of extends + includes by stdlib/js/hull/template.js)
  * gives automatic invalidation when any referenced template
- * changes — no dependency tracking needed.
+ * changes - no dependency tracking needed.
  *
  * Cached value = `JS_WriteObject(render_fn, JS_WRITE_OBJ_BYTECODE)`
  * for the post-eval render function. On hit we skip both the

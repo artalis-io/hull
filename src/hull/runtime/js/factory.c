@@ -1,5 +1,5 @@
 /*
- * runtime/js/factory.c — JavaScript runtime factory
+ * runtime/js/factory.c - JavaScript runtime factory
  *
  * Heap-allocates an HlJS, builds HlJSConfig from HlAppContextOpts,
  * initializes via hl_js_init, and returns the embedded HlRuntime *.
@@ -45,7 +45,7 @@ static int js_create(HlRuntime **out, const HlAppContextOpts *opts,
     }
     if (!js->base.alloc && opts->alloc) js->base.alloc = opts->alloc;
 
-    /* HlJSConfig has no sandbox toggle — QuickJS is always sandboxed
+    /* HlJSConfig has no sandbox toggle - QuickJS is always sandboxed
      * (eval removed, std/os not loaded). */
     HlJSConfig cfg = HL_JS_CONFIG_DEFAULT;
     if (opts->heap_limit > 0)

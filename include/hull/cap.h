@@ -1,5 +1,5 @@
 /*
- * cap.h — Umbrella header for all capabilities
+ * cap.h - Umbrella header for all capabilities
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */

@@ -11,7 +11,7 @@
  *
  * Wrapping that JS-side spin-up in a runtime-neutral function keeps the
  * runtime/lua/ binding layer (mod_tool.c) free of `hull/runtime/js.h`
- * — it's the only place in runtime/lua/ that would otherwise need to
+ * - it's the only place in runtime/lua/ that would otherwise need to
  * cross the sibling-runtime boundary.
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
@@ -43,7 +43,7 @@
  * @return 0 on success (including "no manifest"; check *out_json for NULL).
  *         -1 on failure (runtime init / file load / stringify error).
  *
- * Build with `HL_ENABLE_JS=0` to drop this — the JS runtime isn't
+ * Build with `HL_ENABLE_JS=0` to drop this - the JS runtime isn't
  * linked then. Callers in CLI / build-tool flavors should check the
  * macro themselves before invoking.
  */

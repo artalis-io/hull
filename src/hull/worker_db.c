@@ -1,5 +1,5 @@
 /*
- * worker_db.c — Runtime-agnostic DB worker capability
+ * worker_db.c - Runtime-agnostic DB worker capability
  *
  * Per-worker SQLite connections via pthread TLS, and KlWorkItem callbacks
  * for db.async.query/exec operations. Zero Lua/JS knowledge.
@@ -411,7 +411,7 @@ static void db_done_fn(void *ud)
 {
     HlWorkerDbOp *op = (HlWorkerDbOp *)ud;
     if (op->cancelled) {
-        /* Connection closed while work was in flight — clean up.
+        /* Connection closed while work was in flight - clean up.
          * The cont was already freed by hl_worker_db_async_cancel. */
         HlAsyncCtx *ctx = op->async_ctx;
         hl_worker_db_op_free(op);
@@ -421,7 +421,7 @@ static void db_done_fn(void *ud)
     }
     HlAsyncCtx *ctx = op->async_ctx;
     if (ctx->detached) {
-        /* No connection to revive — fire the cont directly on the
+        /* No connection to revive - fire the cont directly on the
          * event-loop thread. resume_detached owns the teardown
          * (frees driver, cont, ctx). */
         hl_async_ctx_resume_detached(ctx);
@@ -513,7 +513,7 @@ void hl_worker_db_async_cancel(KlAsyncOp *kl_op, void *user_data)
     HlAsyncCtx *ctx = (HlAsyncCtx *)user_data;
     HlWorkerDbOp *op = (HlWorkerDbOp *)ctx->driver;
 
-    /* Mark as cancelled — done_fn will handle cleanup */
+    /* Mark as cancelled - done_fn will handle cleanup */
     op->cancelled = 1;
 
     /* Cancel and destroy the runtime continuation */
@@ -522,7 +522,7 @@ void hl_worker_db_async_cancel(KlAsyncOp *kl_op, void *user_data)
         ctx->cont->destroy(ctx->cont);
         ctx->cont = NULL;
     }
-    /* Don't free ctx or op — done_fn needs them */
+    /* Don't free ctx or op - done_fn needs them */
 }
 
 #endif /* HL_ENABLE_DB */

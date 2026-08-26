@@ -1,5 +1,5 @@
 /*
- * mod_image.c — hull.image module: image decode/encode/create
+ * mod_image.c - hull.image module: image decode/encode/create
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */

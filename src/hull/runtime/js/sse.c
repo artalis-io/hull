@@ -1,5 +1,5 @@
 /*
- * sse.c — JS Server-Sent Events handler
+ * sse.c - JS Server-Sent Events handler
  *
  * Adapts Keel SSE routes (registered via `app.sse()`) to JS handler
  * functions. Begins the chunked stream, builds a stream object, and
@@ -109,7 +109,7 @@ void hl_js_sse_handler(KlRequest *req, KlResponse *res,
     } else {
         JSPromiseStateEnum state = JS_PromiseState(ctx, ret);
         if (state == JS_PROMISE_PENDING && js->last_async_cont) {
-            /* Async SSE handler — wire handler_promise on continuation */
+            /* Async SSE handler - wire handler_promise on continuation */
             extern void hl_js_async_cont_set_handler_promise(
                 HlAsyncCont *cont, JSContext *c, JSValue promise);
             hl_js_async_cont_set_handler_promise(
@@ -118,10 +118,10 @@ void hl_js_sse_handler(KlRequest *req, KlResponse *res,
             JS_FreeValue(ctx, ret);
             JS_FreeValue(ctx, js_req);
             JS_FreeValue(ctx, stream_obj);
-            /* dispatch_depth + active_conn stay set — async resume will clear */
+            /* dispatch_depth + active_conn stay set - async resume will clear */
             return;
         }
-        /* Sync completion — close stream if not already */
+        /* Sync completion - close stream if not already */
         if (!hl_js_sse_stream_is_closed(ctx, stream_obj))
             hl_js_sse_stream_force_close(ctx, stream_obj);
     }

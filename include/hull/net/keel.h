@@ -10,7 +10,7 @@
  * kl_async_suspend / kl_async_complete by hand.
  *
  * Callers outside the Keel-aware boundary should NOT include this
- * header — they go through include/hull/net_backend.h's vtable.
+ * header - they go through include/hull/net_backend.h's vtable.
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
@@ -28,7 +28,7 @@ typedef struct KlServer        KlServer;
  * backend instead of touching Keel directly.
  *
  * The returned ctx must be freed with hl_net_backend_keel_unwrap,
- * which only releases the wrapper — KlServer remains owned by the
+ * which only releases the wrapper - KlServer remains owned by the
  * caller.
  *
  * Returns NULL on allocation failure.

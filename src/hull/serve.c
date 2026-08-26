@@ -1,5 +1,5 @@
 /*
- * serve.c — Hull's full app lifecycle: load → manifest → sandbox →
+ * serve.c - Hull's full app lifecycle: load → manifest → sandbox →
  *           module resolve → migrations → server-mode dispatch (Keel
  *           event loop) or CLI-mode dispatch (app.main).
  *
@@ -12,8 +12,8 @@
  * hl_serve_wire_and_start consults rt->vt->has_main.
  *
  * Compile-time selection:
- *   -DHL_ENABLE_JS   — include QuickJS runtime
- *   -DHL_ENABLE_LUA  — include Lua runtime
+ *   -DHL_ENABLE_JS   - include QuickJS runtime
+ *   -DHL_ENABLE_LUA  - include Lua runtime
  *   Both may be defined simultaneously (default).
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
@@ -102,7 +102,7 @@
 
 /* ── JSON writer plumbing ──────────────────────────────────────────── */
 
-/* FILE* writer callback for ShJsonWriter — used by the agent-mode
+/* FILE* writer callback for ShJsonWriter - used by the agent-mode
  * .hull/last_error.json emitter below. Same shape as the helpers in
  * commands/cache.c / sbom.c / commands/doctor.c. */
 static int serve_stdio_write(void *ctx, const char *data, size_t len)
@@ -640,7 +640,7 @@ typedef struct {
     HlAllocator          alloc;
     KlAllocator          kl_alloc;
 
-    /* Core app context (VFS + DB + runtime) — replaces individual
+    /* Core app context (VFS + DB + runtime) - replaces individual
      * app_vfs, platform_vfs, db, stmt_cache, rt_storage, rt fields */
     HlAppContext        *app;
 
@@ -696,7 +696,7 @@ typedef struct {
     KlTlsConfig          client_tls_config;
     KlTlsCtx            *client_tls_ctx;
     const char           *ca_bundle_path;
-    /* CORS config — allocated INSIDE the seal arena (RO after seal)
+    /* CORS config - allocated INSIDE the seal arena (RO after seal)
      * so the origin allowlist a heap-write primitive could otherwise
      * mutate is mprotect-locked.  NULL when the manifest doesn't
      * declare a cors section. */
@@ -722,7 +722,7 @@ typedef struct {
  *
  * Each phase receives HlServerState *s and returns 0 on success, -1 on
  * error (or a positive value for special cases like help).  The phases
- * must run in the order listed — later phases depend on earlier ones.
+ * must run in the order listed - later phases depend on earlier ones.
  *
  * Ordering constraints documented at each phase.
  * ─────────────────────────────────────────────────────────────────── */
@@ -766,7 +766,7 @@ static int hl_serve_resolve_entry(HlServerState *s, const char *argv0)
 
     /* Resolve entry point to absolute path.  This ensures app_dir (derived
      * below) is also absolute, so realpath() inside the sandbox doesn't need
-     * to stat the CWD — which may be outside the sandbox's allowed paths. */
+     * to stat the CWD - which may be outside the sandbox's allowed paths. */
     if (realpath(s->entry_point, s->entry_abs) != NULL)
         s->entry_point = s->entry_abs;
 
@@ -808,7 +808,7 @@ static int hl_serve_resolve_entry(HlServerState *s, const char *argv0)
     return 0;
 }
 
-/* Phase 3 (VFS init) — now handled inside hl_app_context_init. */
+/* Phase 3 (VFS init) - now handled inside hl_app_context_init. */
 
 /* Phase 4: Validate TLS pair, detect and check runtime type.
  * Depends on: parse_args (TLS paths), resolve_entry (entry_point). */
@@ -862,7 +862,7 @@ static int hl_serve_init_logging(HlServerState *s)
     return 0;
 }
 
-/* Phase 6 (DB init) — now handled inside hl_app_context_init. */
+/* Phase 6 (DB init) - now handled inside hl_app_context_init. */
 
 /* Phase 7: Create KlServer with optional TLS.
  * Depends on: init_logging (kl_alloc), parse_args (port, bind, TLS paths). */
@@ -918,7 +918,7 @@ static void hl_serve_init_infra(HlServerState *s)
 {
     /* Wrap the server's event loop so the thread pool + later
      * consumers go through the async backend vtable. The wrap is
-     * borrowed — KlServer still owns the underlying KlEventCtx. */
+     * borrowed - KlServer still owns the underlying KlEventCtx. */
     if (!s->async_ctx)
         s->async_ctx = hl_async_backend_keel_wrap(&s->server.ev);
 
@@ -941,7 +941,7 @@ static void hl_serve_init_infra(HlServerState *s)
         s->thread_pool = NULL;
         log_warn("[hull:c] thread pool creation failed - async work unavailable");
     }
-    /* thread_pool may be NULL if creation fails — non-fatal, async work
+    /* thread_pool may be NULL if creation fails - non-fatal, async work
      * will simply be unavailable */
 
     /* Create client connection pool for HTTP keep-alive reuse */
@@ -991,7 +991,7 @@ static int hl_serve_init_app_context(HlServerState *s)
             wasm_cache_ok = 1;
         else if (wrc < 0)
             log_warn("[hull:c] WAMR init failed - compute.call() unavailable");
-        /* wrc > 0 (HL_CAP_WASM_ABSENT): WASM feature not composed — quiet. */
+        /* wrc > 0 (HL_CAP_WASM_ABSENT): WASM feature not composed - quiet. */
     }
 #endif
 
@@ -1055,7 +1055,7 @@ static int hl_serve_load_app(HlServerState *s)
 {
     const HlVfs *app_vfs = hl_app_context_app_vfs(s->app);
 
-    /* RT-01: Verify app signature BEFORE loading — malicious code never
+    /* RT-01: Verify app signature BEFORE loading - malicious code never
      * executes if verification fails. */
     if (s->cfg.verify_sig_path) {
         if (hl_verify_startup(s->cfg.verify_sig_path, s->entry_point, app_vfs,
@@ -1125,17 +1125,17 @@ static int hl_serve_load_app(HlServerState *s)
 /* Phase 11: Extract manifest, wire caps, phase-2 sandbox, CORS, routes,
  * static, agent API, run event loop, post-run cleanup.
  * Depends on: load_app (app code loaded). WASM/GPU destroy happens here
- * on the success path only — not on error gotos. */
-/* ── hl_serve_wire_and_start — orchestrates phases below ───────────────
+ * on the success path only - not on error gotos. */
+/* ── hl_serve_wire_and_start - orchestrates phases below ───────────────
  *
  * Phases (each a small static helper):
- *   1. hl_serve_wire_caps              — extract manifest, wire fs/env/http/
+ *   1. hl_serve_wire_caps              - extract manifest, wire fs/env/http/
  *                                        smtp + TLS client context + CSP
- *   2. hl_serve_apply_sandbox          — build HlSandboxPolicy, apply
- *   3. hl_serve_wire_routes            — CORS, vtable route wiring, static
+ *   2. hl_serve_apply_sandbox          - build HlSandboxPolicy, apply
+ *   3. hl_serve_wire_routes            - CORS, vtable route wiring, static
  *                                        middleware, agent diagnostic API
- *   4. hl_serve_run                    — kl_server_run event loop
- *   5. hl_serve_teardown_after_serve   — success-path resource teardown
+ *   4. hl_serve_run                    - kl_server_run event loop
+ *   5. hl_serve_teardown_after_serve   - success-path resource teardown
  *
  * Split out of a 296-line monolith as roadmap item H.
  */
@@ -1147,7 +1147,7 @@ static int hl_serve_load_app(HlServerState *s)
  * app_dir, then mapped to a directory (the path itself if it is one, else its
  * parent). Duplicates are dropped. The array + strings are allocated in the
  * (about-to-be-sealed) policy arena, so DuckDB reads RO memory that outlives
- * the process. A no-op — leaving DuckDB in full lockdown (mode A) — when no fs
+ * the process. A no-op - leaving DuckDB in full lockdown (mode A) - when no fs
  * paths are declared or the arena is exhausted (fail-closed). Must run before
  * the arena is sealed and before any DuckDB connection opens. */
 static void hl_serve_install_duckdb_fs_policy(HlServerState *s)
@@ -1220,7 +1220,7 @@ static int hl_serve_wire_caps(HlServerState *s)
      * pool could go through the backend); just lend the existing wrap
      * to the runtime so its consumers reach the loop via the vtable. */
     rt->async_ctx = s->async_ctx;
-    /* Same pattern for the net backend wrap — runtime borrows it so
+    /* Same pattern for the net backend wrap - runtime borrows it so
      * connection-bound async-op suspend/complete go through the vtable
      * instead of touching KlServer directly. */
     rt->net_ctx = s->net_ctx;
@@ -1242,7 +1242,7 @@ static int hl_serve_wire_caps(HlServerState *s)
          * write bug who tries to expand the allowlists post-boot gets
          * SIGSEGV instead of a silent capability escalation.
          *
-         * Sealing failure is FATAL — the alternative is shipping with
+         * Sealing failure is FATAL - the alternative is shipping with
          * unsealed policy, which silently weakens the hardening
          * guarantee. See docs/security.md §Sealed runtime tables. */
         if (sh_seal_arena_init(&s->seal_arena, 16 * 1024,
@@ -1272,13 +1272,13 @@ static int hl_serve_wire_caps(HlServerState *s)
             hl_db_registry_set_manifest(rt->db_registry, &s->manifest);
 #endif
 
-        /* CORS config — build it INSIDE the seal arena alongside the
+        /* CORS config - build it INSIDE the seal arena alongside the
          * manifest strings, BEFORE the mprotect.  Previously the
          * KlCorsConfig was a stack-local in hl_serve_wire_routes;
          * kl_server_use stored the pointer, which dangled the moment
          * wire_routes returned.  Allocating in the arena (a) fixes
          * the dangling-pointer UAF, and (b) means the origin allowlist
-         * is mprotect-RO for the rest of process lifetime — a heap-
+         * is mprotect-RO for the rest of process lifetime - a heap-
          * write primitive can no longer punch a new origin into it. */
         if (s->manifest.cors_set) {
             KlCorsConfig *cc = sh_seal_arena_alloc(
@@ -1360,7 +1360,7 @@ static int hl_serve_wire_caps(HlServerState *s)
          * arena exists in this branch (nothing else to seal); the
          * resolved bitset stays in the heap-resident s->module_set.
          * That's fine because the attack surface a bitset seal
-         * defends — flipping bits to admit an undeclared module —
+         * defends - flipping bits to admit an undeclared module -
          * needs a manifest with declarations to escalate FROM.
          * "intrinsics only" is already the floor. */
         char err[HL_MODULE_RESOLVER_ERR_MAX] = {0};
@@ -1380,7 +1380,7 @@ static int hl_serve_wire_caps(HlServerState *s)
      * let through during that window into rt->import_tracker_*.
      * Walking them here catches the silent-bypass case where an app
      * imports e.g. hull:db but never declares hull/db@1.  Reads
-     * only — works against either the sealed (manifest path) or
+     * only - works against either the sealed (manifest path) or
      * unsealed (no-manifest path) bitset. */
     {
         char itrack_err[256] = {0};
@@ -1392,7 +1392,7 @@ static int hl_serve_wire_caps(HlServerState *s)
     }
 
     /* Wire CSP policy to runtime.
-     * Default CSP is always active — even without app.manifest().
+     * Default CSP is always active - even without app.manifest().
      * Explicit csp="custom" overrides; csp=false disables.
      * csp="<preset>" expands at startup; unknown names pass through
      * as literal CSP strings (see hl_csp_resolve docs above). */
@@ -1405,7 +1405,7 @@ static int hl_serve_wire_caps(HlServerState *s)
     /* WASM gating. Two paths:
      *   - Modern: app declares `modules.compute = "1"` → admit.
      *   - Legacy: app declares `compute = true` (without modules block) → admit.
-     * If the modules block is present, it is authoritative — the legacy
+     * If the modules block is present, it is authoritative - the legacy
      * `compute = true` field is ignored. Otherwise fall back to legacy. */
     if (wasm_cache_ok) {
         int admit;
@@ -1450,7 +1450,7 @@ static int hl_serve_wire_caps(HlServerState *s)
     }
 
     /* Wire fs_cfg from manifest (if app declares fs.read OR fs.write
-     * paths — both blob.* and fs.mmap need the cfg). The fs.read/fs.write grants
+     * paths - both blob.* and fs.mmap need the cfg). The fs.read/fs.write grants
      * are COMPILED into the path-authorization policy (sec. 6): the
      * cap layer selects from it per op and opens under a held anchor. A no-grant
      * app leaves rt->fs_cfg NULL -> fs denied (unchanged fail-closed behavior). */
@@ -1521,7 +1521,7 @@ static int hl_serve_wire_caps(HlServerState *s)
                 log_info("[hull:c] using CA bundle: %s", s->ca_bundle_path);
                 s->client_tls_ctx = hl_tls_client_ctx_create(s->ca_bundle_path, &s->kl_alloc);
             } else {
-                /* System bundle not found — try embedded fallback */
+                /* System bundle not found - try embedded fallback */
                 const unsigned char *emb_data = NULL;
                 size_t emb_len = 0;
                 if (hl_embedded_ca_bundle(&emb_data, &emb_len) == 0) {
@@ -1558,7 +1558,7 @@ static int hl_serve_wire_caps(HlServerState *s)
         rt->http_cfg = &s->http_cfg_storage;
     }
 
-    /* Wire smtp_cfg — shares same host allowlist and TLS context as HTTP */
+    /* Wire smtp_cfg - shares same host allowlist and TLS context as HTTP */
     memset(&s->smtp_cfg_storage, 0, sizeof(s->smtp_cfg_storage));
     if (s->manifest.hosts_count > 0) {
         s->smtp_cfg_storage.allowed_hosts = s->manifest.hosts;
@@ -1656,7 +1656,7 @@ static int hl_serve_apply_sandbox(HlServerState *s)
             sandbox_policy.network_outbound = 1;
 
         /* CLI-mode apps (app.main registered) never accept inbound
-         * connections — narrow the sandbox accordingly. The runtime
+         * connections - narrow the sandbox accordingly. The runtime
          * vtable's has_main was populated in mod_app.c at app-load time,
          * so this check is purely informational here. */
         HlRuntime *rt = hl_app_context_runtime(s->app);
@@ -1690,7 +1690,7 @@ static int hl_serve_wire_routes(HlServerState *s)
     HlRuntime *rt = hl_app_context_runtime(s->app);
     const HlVfs *app_vfs = hl_app_context_app_vfs(s->app);
     if (s->cors_cfg) {
-        /* CORS config was built and sealed in hl_serve_wire_caps —
+        /* CORS config was built and sealed in hl_serve_wire_caps -
          * the pointer is mprotect-RO and outlives the server.  Earlier
          * versions stack-allocated this struct here and passed its
          * address to kl_server_use; the moment this function returned
@@ -1711,7 +1711,7 @@ static int hl_serve_wire_routes(HlServerState *s)
      * The middleware activates when the app has any static/ content
      * OR the platform VFS ships stdlib assets under static/hull/
      * (e.g. when an htmx widget module is linked in). Either trigger
-     * is enough — the lookup tries app VFS first, then stdlib VFS,
+     * is enough - the lookup tries app VFS first, then stdlib VFS,
      * then dev-mode filesystem. */
     {
         const HlVfs *platform_vfs = hl_app_context_platform_vfs(s->app);
@@ -1761,7 +1761,7 @@ static void hl_serve_run(HlServerState *s)
 /* Phase 5: tear down all resources after the event loop returns. */
 static void hl_serve_teardown_after_serve(HlServerState *s)
 {
-    /* Free thread pool BEFORE server — join workers, drain queues while
+    /* Free thread pool BEFORE server - join workers, drain queues while
      * server infrastructure (connections, event loop) is still valid. */
     if (s->thread_pool) {
         hl_async_backend()->pool_free(s->thread_pool);
@@ -1780,11 +1780,11 @@ static void hl_serve_teardown_after_serve(HlServerState *s)
         s->comp_ctx = NULL;
     }
 
-    /* Cleanup — free manifest AFTER server stops (env_cfg and
+    /* Cleanup - free manifest AFTER server stops (env_cfg and
      * http_cfg reference its strings during runtime). For a sealed
      * manifest hl_manifest_free is a no-op for strings (alloc=NULL);
      * the actual memory is released when the seal arena is destroyed
-     * MUCH later — after hl_app_context_free, after WASM/GPU caches,
+     * MUCH later - after hl_app_context_free, after WASM/GPU caches,
      * after TLS contexts. Runtime shutdown still touches the cap
      * configs (fs_cfg/http_cfg/env_cfg) which alias manifest string
      * pointers, so the mapping must remain live until every consumer
@@ -1797,7 +1797,7 @@ static void hl_serve_teardown_after_serve(HlServerState *s)
     }
 
     /* Detach the borrowed async_ctx + net_ctx pointers from the runtime
-     * before app_context_free destroys the runtime — the wraps themselves
+     * before app_context_free destroys the runtime - the wraps themselves
      * are owned by HlServerState and unwrapped further down. */
     {
         HlRuntime *rt = hl_app_context_runtime(s->app);
@@ -1808,7 +1808,7 @@ static void hl_serve_teardown_after_serve(HlServerState *s)
     }
 
     /* Free app context (runtime + DB + VFS + stmt cache).
-     * WASM/GPU static caches are external — freed separately below. */
+     * WASM/GPU static caches are external - freed separately below. */
     hl_app_context_free(s->app);
     s->app = NULL;
 
@@ -1817,21 +1817,21 @@ static void hl_serve_teardown_after_serve(HlServerState *s)
      * outlive the runtime. Closes the held anchor fds; idempotent. */
     hl_fs_policy_free(&s->fs_policy_storage);
 
-    /* Now unwrap the async-backend wrap — borrowed, doesn't destroy
+    /* Now unwrap the async-backend wrap - borrowed, doesn't destroy
      * KlServer's KlEventCtx (server's own free does that). */
     if (s->async_ctx) {
         hl_async_backend_keel_unwrap(s->async_ctx);
         s->async_ctx = NULL;
     }
 
-    /* Same for the net-backend wrap — borrowed, doesn't destroy
+    /* Same for the net-backend wrap - borrowed, doesn't destroy
      * KlServer (server's own free does that). */
     if (s->net_ctx) {
         hl_net_backend_keel_unwrap(s->net_ctx);
         s->net_ctx = NULL;
     }
 
-    /* Destroy WASM cache AFTER runtime destroy — GC finalizers
+    /* Destroy WASM cache AFTER runtime destroy - GC finalizers
      * (WasmBuffer WASM-kind and WasmInstance) need WAMR alive */
 #ifdef HL_ENABLE_WASM
     if (wasm_cache_ok)
@@ -1881,7 +1881,7 @@ static const char **hl_build_env_allowlist(const HlManifest *m)
 /* CLI-mode dispatch: instead of starting Keel, invoke app.main(ctx)
  * once and exit with its return code. Called after wire_caps +
  * apply_sandbox when the runtime reports has_main(). For Phase 1, app
- * args are empty (no positional pass-through wired in yet — covered in
+ * args are empty (no positional pass-through wired in yet - covered in
  * Phase 2 by `hull run`). */
 static int hl_serve_run_main(HlServerState *s)
 {
@@ -1921,7 +1921,7 @@ static int hl_serve_wire_and_start(HlServerState *s)
      *   2. If any server handlers (routes, middleware, timers, ws,
      *      sse) are registered, enter the HTTP serve loop until
      *      SIGINT.
-     *   3. Otherwise return — the app had nothing left to do.
+     *   3. Otherwise return - the app had nothing left to do.
      *
      * Pure CLI (main, no handlers) and pure web (handlers, no main)
      * are the special cases; init-then-serve (both registered) is
@@ -1935,14 +1935,14 @@ static int hl_serve_wire_and_start(HlServerState *s)
         s->app_main_only = !has_handlers;
         int main_rc = hl_serve_run_main(s);
         if (main_rc != 0) {
-            /* run_main returned non-zero — either an internal error
+            /* run_main returned non-zero - either an internal error
              * (-1) or main itself exited non-zero. Either way, don't
              * enter the server loop. */
             hl_serve_teardown_after_serve(s);
             return main_rc;
         }
         if (s->cli_exit_code != 0) {
-            /* main returned non-zero — short-circuit even if handlers
+            /* main returned non-zero - short-circuit even if handlers
              * are registered. Matches the shell-style "main exit code
              * wins" rule. */
             hl_serve_teardown_after_serve(s);
@@ -1950,7 +1950,7 @@ static int hl_serve_wire_and_start(HlServerState *s)
                               * outer caller reads s->cli_exit_code. */
         }
         if (!has_handlers) {
-            /* Pure CLI — main was the whole program. */
+            /* Pure CLI - main was the whole program. */
             hl_serve_teardown_after_serve(s);
             return 0;
         }
@@ -1969,13 +1969,13 @@ static int hl_serve_wire_and_start(HlServerState *s)
      * (e.g. from a request handler that mistakenly tries dynamic route
      * registration) throw a structured error instead of silently
      * dropping the request into a table no consumer reads.  Matches the
-     * router freeze below — together they make "no registration after
+     * router freeze below - together they make "no registration after
      * the serve loop starts" enforceable from both the script side
      * (clear error message) and the C side (RO route table).
      *
      * Intentionally flipped BEFORE kl_server_freeze.  If the freeze
      * itself fails (logged below, non-fatal), we WANT the flag to
-     * stay set anyway — the serve loop is about to start and no late
+     * stay set anyway - the serve loop is about to start and no late
      * registration should land regardless of whether the router seal
      * succeeded.  The two seals are independent halves of the same
      * "no late registration" invariant. */
@@ -1986,7 +1986,7 @@ static int hl_serve_wire_and_start(HlServerState *s)
 
     /* Freeze the routing tables (Keel v2.3.0+).  After this call,
      * KlRouter's route + middleware tables live in an mprotect-RO
-     * arena — a heap-write primitive that would otherwise overwrite
+     * arena - a heap-write primitive that would otherwise overwrite
      * a handler function pointer or relax a middleware gate faults
      * instead.  Failure is non-fatal here (logged) because the
      * server is still correct without the seal; the seal is a
@@ -2006,7 +2006,7 @@ static int hl_serve_wire_and_start(HlServerState *s)
 /* ── Cleanup (checks init flags before freeing) ──────────────────────
  * Called on any failure path.  Tears down resources in reverse init
  * order, checking flags to avoid double-free or use-before-init.
- * WASM/GPU are NOT destroyed here — they're only destroyed on the
+ * WASM/GPU are NOT destroyed here - they're only destroyed on the
  * success path (in hl_serve_wire_and_start, after kl_server_run). */
 static void hl_serve_cleanup(HlServerState *s)
 {
@@ -2044,7 +2044,7 @@ static void hl_serve_cleanup(HlServerState *s)
         kl_server_free(&s->server);
 
     /* Detach the borrowed async_ctx + net_ctx from the runtime before
-     * app_context_free destroys the runtime — both wraps are owned by
+     * app_context_free destroys the runtime - both wraps are owned by
      * HlServerState. */
     if (s->app) {
         HlRuntime *rt = hl_app_context_runtime(s->app);
@@ -2060,7 +2060,7 @@ static void hl_serve_cleanup(HlServerState *s)
         s->app = NULL;
     }
 
-    /* Unwrap the async-backend wrap (borrowed — does not destroy
+    /* Unwrap the async-backend wrap (borrowed - does not destroy
      * KlServer's KlEventCtx). */
     if (s->async_ctx) {
         hl_async_backend_keel_unwrap(s->async_ctx);
@@ -2135,7 +2135,7 @@ int hull_serve(int argc, char **argv)
     int wire_rc = hl_serve_wire_and_start(&s);
     int ret;
     if (s.app_main_only) {
-        /* Pure CLI (app.main only, no handlers) — main's return value
+        /* Pure CLI (app.main only, no handlers) - main's return value
          * is the process exit code. */
         ret = s.cli_exit_code;
     } else if (s.cli_exit_code != 0) {

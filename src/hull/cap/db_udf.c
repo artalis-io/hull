@@ -1,5 +1,5 @@
 /*
- * cap/db_udf.c — SQLite UDF integration with WASM compute
+ * cap/db_udf.c - SQLite UDF integration with WASM compute
  *
  * Orthogonal bridge module: connects SQLite and WASM without coupling either.
  * Registers user-defined SQL functions backed by WASM modules using the
@@ -148,7 +148,7 @@ static int unmarshal_udf_output(sqlite3_context *ctx,
 
     switch (rtype) {
     case HL_UDF_RESULT_VOID:
-        /* Aggregate step — no result yet */
+        /* Aggregate step - no result yet */
         return 0;
 
     case HL_UDF_RESULT_INTEGER:
@@ -278,7 +278,7 @@ static void wasm_step_func(sqlite3_context *ctx, int argc,
         return;
     }
 
-    /* Call instance — step result should be VOID */
+    /* Call instance - step result should be VOID */
     HlWasmCallOpts call_opts = {
         .gas = udf->gas_per_call,
         .max_input  = HL_UDF_MAX_INPUT_SIZE,

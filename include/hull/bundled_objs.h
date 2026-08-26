@@ -1,5 +1,5 @@
 /*
- * bundled_objs.h — pre-compiled objects for the compiler-free `hull build`
+ * bundled_objs.h - pre-compiled objects for the compiler-free `hull build`
  *
  * app_main.o and app_feature_registry-<rt>.o are invariant (they depend only
  * on the runtime, never on the app), so they are compiled once at Hull build

@@ -1,4 +1,4 @@
-/* mod_buffer.h — Shared declarations for per-module Lua binding files
+/* mod_buffer.h - Shared declarations for per-module Lua binding files
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
@@ -42,11 +42,11 @@ static inline void secure_zero(void *p, size_t n)
  * Extract a buffer view from a Lua value at stack index `idx`.
  * Accepts: string, MappedBuffer (HL_MMAP_MT), WasmBuffer (HL_WASM_BUF_MT).
  * Returns 1 on success (fills out->data and out->len), 0 if not a buffer type.
- * The data pointer is borrowed — valid only while the Lua value is alive.
+ * The data pointer is borrowed - valid only while the Lua value is alive.
  */
 int lua_get_buffer(lua_State *L, int idx, HlBufferView *out);
 
-/* ── Module openers — called from hl_lua_register_modules() ──────── */
+/* ── Module openers - called from hl_lua_register_modules() ──────── */
 
 int luaopen_hull_app(lua_State *L);
 /* Installs the app.router(prefix, opts) method by evaluating an

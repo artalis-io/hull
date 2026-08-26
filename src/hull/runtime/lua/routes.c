@@ -1,5 +1,5 @@
 /*
- * routes.c — Lua route + middleware + timer + WS/SSE wiring
+ * routes.c - Lua route + middleware + timer + WS/SSE wiring
  *
  * Reads the route/middleware/timer/ws/sse definition tables that
  * `app.<verb>()` builds in the Lua registry and registers them with
@@ -124,7 +124,7 @@ int hl_lua_wire_routes(HlLua *lua, KlRouter *router)
                 route->handler_id = handler_id;
                 route->multipart_config = NULL;
 
-                /* Peek def.multipart — present → streaming route. Mirror the
+                /* Peek def.multipart - present → streaming route. Mirror the
                  * server path (hl_lua_wire_routes_server) so req:multipart()
                  * resolves under `hull test`. The in-process harness pre-feeds
                  * the whole body to this factory's wrapper (hl_cap_test_dispatch),
@@ -341,7 +341,7 @@ int hl_lua_wire_routes_server(HlLua *lua, KlServer *server,
                 route->handler_id = handler_id;
                 route->multipart_config = NULL;
 
-                /* Peek def.multipart — present → streaming route. */
+                /* Peek def.multipart - present → streaming route. */
                 lua_getfield(L, -4, "multipart");
                 int is_streaming = lua_istable(L, -1);
                 if (is_streaming) {
@@ -357,7 +357,7 @@ int hl_lua_wire_routes_server(HlLua *lua, KlServer *server,
                     }
                     hl_alloc_free(lua->base.alloc, route, sizeof(HlLuaRoute));
                 } else if (is_streaming) {
-                    /* streaming-async (v2.2.0+) — handler is invoked
+                    /* streaming-async (v2.2.0+) - handler is invoked
                      * BEFORE leftover body bytes are fed via on_data.
                      * Closes the single-read leftover-cap UX gap so
                      * parser caps fire structured 4xx responses even

@@ -1,5 +1,5 @@
 /*
- * mod_app.c — hull:app module (route registration, manifest, timers)
+ * mod_app.c - hull:app module (route registration, manifest, timers)
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
@@ -24,7 +24,7 @@ static int js_app_main_registered(JSContext *ctx)
  *
  *     if (js_app_throw_if_serving(ctx, "app.use")) return JS_EXCEPTION;
  *
- * Mirrors Lua's lua_app_reject_if_serving — see that doc-comment for
+ * Mirrors Lua's lua_app_reject_if_serving - see that doc-comment for
  * the full rationale (router seal + clear-error UX instead of silent
  * drop).  NULL HlJS is the test-harness-only path: real serve setups
  * always have it wired; harnesses that drive QuickJS directly without
@@ -86,7 +86,7 @@ static JSValue js_app_route(JSContext *ctx, JSValueConst this_val,
         return JS_ThrowTypeError(ctx, "handler must be a function");
     }
 
-    /* Arg 2 is the optional opts object — must be a plain object if present. */
+    /* Arg 2 is the optional opts object - must be a plain object if present. */
     int has_opts = (argc >= 3) && !JS_IsUndefined(argv[2]) && !JS_IsNull(argv[2]);
     if (has_opts && !JS_IsObject(argv[2])) {
         JS_FreeCString(ctx, pattern);
@@ -148,7 +148,7 @@ static JSValue js_app_route(JSContext *ctx, JSValueConst this_val,
     return JS_UNDEFINED;
 }
 
-/* app.use(method, pattern, handler) — middleware registration */
+/* app.use(method, pattern, handler) - middleware registration */
 static JSValue js_app_use(JSContext *ctx, JSValueConst this_val,
                            int argc, JSValueConst *argv)
 {
@@ -209,7 +209,7 @@ static JSValue js_app_use(JSContext *ctx, JSValueConst this_val,
     return JS_UNDEFINED;
 }
 
-/* app.usePost(method, pattern, fn) — register post-body middleware */
+/* app.usePost(method, pattern, fn) - register post-body middleware */
 static JSValue js_app_use_post(JSContext *ctx, JSValueConst this_val,
                                 int argc, JSValueConst *argv)
 {
@@ -270,7 +270,7 @@ static JSValue js_app_use_post(JSContext *ctx, JSValueConst this_val,
     return JS_UNDEFINED;
 }
 
-/* app.every(interval_ms, handler) — repeating timer */
+/* app.every(interval_ms, handler) - repeating timer */
 static JSValue js_app_every(JSContext *ctx, JSValueConst this_val,
                              int argc, JSValueConst *argv)
 {
@@ -331,7 +331,7 @@ static JSValue js_app_every(JSContext *ctx, JSValueConst this_val,
     return JS_UNDEFINED;
 }
 
-/* app.daily(time_str, handler [, opts]) — daily timer at HH:MM */
+/* app.daily(time_str, handler [, opts]) - daily timer at HH:MM */
 static JSValue js_app_daily(JSContext *ctx, JSValueConst this_val,
                              int argc, JSValueConst *argv)
 {
@@ -436,7 +436,7 @@ static int32_t js_store_handler(JSContext *ctx, JSValueConst func)
     return handler_id;
 }
 
-/* app.ws(path, { onOpen, onMessage, onClose }) — WebSocket endpoint */
+/* app.ws(path, { onOpen, onMessage, onClose }) - WebSocket endpoint */
 static JSValue js_app_ws(JSContext *ctx, JSValueConst this_val,
                            int argc, JSValueConst *argv)
 {
@@ -500,7 +500,7 @@ static JSValue js_app_ws(JSContext *ctx, JSValueConst this_val,
     return JS_UNDEFINED;
 }
 
-/* app.sse(path, handler) — SSE endpoint registration */
+/* app.sse(path, handler) - SSE endpoint registration */
 static JSValue js_app_sse(JSContext *ctx, JSValueConst this_val,
                             int argc, JSValueConst *argv)
 {
@@ -545,7 +545,7 @@ static JSValue js_app_sse(JSContext *ctx, JSValueConst this_val,
     return JS_UNDEFINED;
 }
 
-/* app.manifest(obj) — declare application capabilities (one-shot) */
+/* app.manifest(obj) - declare application capabilities (one-shot) */
 /* Forward decls for the conditionally-installed timer methods. */
 static JSValue js_app_every(JSContext *ctx, JSValueConst this_val,
                              int argc, JSValueConst *argv);
@@ -746,7 +746,7 @@ static JSValue js_app_manifest(JSContext *ctx, JSValueConst this_val,
     if (argc < 1)
         return JS_ThrowTypeError(ctx, "app.manifest requires an object");
 
-    /* Reject second call — manifest is immutable once declared */
+    /* Reject second call - manifest is immutable once declared */
     JSValue global = JS_GetGlobalObject(ctx);
     JSValue existing = JS_GetPropertyStr(ctx, global, "__hull_manifest");
     int already_set = !JS_IsUndefined(existing) && !JS_IsNull(existing);
@@ -777,7 +777,7 @@ static JSValue js_app_manifest(JSContext *ctx, JSValueConst this_val,
     return JS_UNDEFINED;
 }
 
-/* app.getManifest() — retrieve the stored manifest object */
+/* app.getManifest() - retrieve the stored manifest object */
 static JSValue js_app_get_manifest(JSContext *ctx, JSValueConst this_val,
                                     int argc, JSValueConst *argv)
 {
@@ -792,13 +792,13 @@ static JSValue js_app_get_manifest(JSContext *ctx, JSValueConst this_val,
     return manifest;
 }
 
-/* app.main(fn) — register a startup hook.
+/* app.main(fn) - register a startup hook.
  *
  * Lifecycle: serve.c invokes the function once after manifest extraction
  * + sandbox + migrations, on the event loop thread. If the app also
  * registered routes / middleware / timers / WebSocket / SSE handlers,
  * the HTTP listener auto-starts after main resolves. Returning a
- * non-zero exit code from main short-circuits — the process exits with
+ * non-zero exit code from main short-circuits - the process exits with
  * that code even if routes are registered. Apps with main only and no
  * routes exit when main returns. */
 static JSValue js_app_main(JSContext *ctx, JSValueConst this_val,

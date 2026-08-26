@@ -1,9 +1,9 @@
 /*
- * gpu.c — GPU compute dispatch layer
+ * gpu.c - GPU compute dispatch layer
  *
  * Resolves device index, looks up cached pipelines/buffers,
  * and calls through the backend vtable. The backend (wgpu-native,
- * Dawn, etc.) never sees Hull types — only its own handles.
+ * Dawn, etc.) never sees Hull types - only its own handles.
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
@@ -38,7 +38,7 @@ static int resolve_device(HlGpuCtx *ctx, int device)
     return idx;
 }
 
-/* Find pipeline by name in a device (linear scan — small N) */
+/* Find pipeline by name in a device (linear scan - small N) */
 static HlGpuPipeline *find_pipeline(HlGpuDevice *dev, const char *name)
 {
     for (int i = 0; i < dev->pipeline_count; i++) {

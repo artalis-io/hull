@@ -1,10 +1,10 @@
 /*
- * src/hull/cap/tui_width.c — TUI cell-width lookup over the
+ * src/hull/cap/tui_width.c - TUI cell-width lookup over the
  * generated Unicode width table.
  *
  * The table (vendor/unicode/eaw.h) is a sorted array of
  * (lo, hi, width) ranges. Width 1 is the default and is NOT stored
- * — any codepoint not covered by an explicit range returns 1.
+ * - any codepoint not covered by an explicit range returns 1.
  *
  * Binary search; O(log n) per lookup, ~10 comparisons for the
  * ~900-range table.

@@ -1,5 +1,5 @@
 /*
- * main.c — Hull's `hull_main` entry-point dispatcher
+ * main.c - Hull's `hull_main` entry-point dispatcher
  *
  * This file is intentionally small: it owns the top-level subcommand
  * dispatch (--version, `run` alias, registered subcommands, fall-through
@@ -23,7 +23,7 @@
 
 /* Fall-through entry. With HL_ENABLE_HTTP=1 this drives serve.c
  * (which branches on app.main vs routes). With HL_ENABLE_HTTP=0 the
- * same hull_serve symbol is exported by serve_cli.c — load app,
+ * same hull_serve symbol is exported by serve_cli.c - load app,
  * invoke app.main, exit. Apps that register HTTP routes on an
  * HL_ENABLE_HTTP=0 build fail at module-resolve time (the modules
  * they need require HL_ENABLE_HTTP build cap). */
@@ -39,7 +39,7 @@ int hull_main(int argc, char **argv)
         return hl_cmd_version(1, ver_argv, &env);
     }
 
-    /* Same for -h / --help — symmetric with --version. */
+    /* Same for -h / --help - symmetric with --version. */
     if (argc >= 2 &&
         (strcmp(argv[1], "--help") == 0 || strcmp(argv[1], "-h") == 0)) {
         char *help_argv[] = { "help" };
@@ -47,7 +47,7 @@ int hull_main(int argc, char **argv)
         return hl_cmd_help(1, help_argv, &env);
     }
 
-    /* `hull run [args]` is a discoverable alias for `hull [args]` —
+    /* `hull run [args]` is a discoverable alias for `hull [args]` -
      * both go through hull_serve, which branches on whether the loaded
      * app registered app.main (CLI mode) or routes (server mode). */
     if (argc >= 2 && strcmp(argv[1], "run") == 0) {

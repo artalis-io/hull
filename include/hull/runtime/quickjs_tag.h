@@ -5,8 +5,8 @@
  *
  * `QJS_TAG` is folded into the cache key of every persisted JS
  * artifact (`js-bytecode`, `js-templates`). Any change to the
- * vendored QuickJS — a version bump, a cherry-pick that touches
- * opcode encoding, a struct-layout-altering backport — invalidates
+ * vendored QuickJS - a version bump, a cherry-pick that touches
+ * opcode encoding, a struct-layout-altering backport - invalidates
  * every cached artifact written under the old tag.
  *
  * The tag is built from `HL_QJS_VERSION`, which the Makefile injects

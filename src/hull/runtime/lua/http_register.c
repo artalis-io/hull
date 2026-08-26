@@ -1,5 +1,5 @@
 /*
- * http_register.c — strong override of the HTTP-feature seam, Lua side (#114).
+ * http_register.c - strong override of the HTTP-feature seam, Lua side (#114).
  *
  * Registers the HTTP-dependent hull.* modules (http-client, http-server, smtp,
  * ws-server, ws-client) + the sse/multipart request metatables. Extracted out

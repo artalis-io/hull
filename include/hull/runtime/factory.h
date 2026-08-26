@@ -1,5 +1,5 @@
 /*
- * runtime/factory.h — Runtime factory registration
+ * runtime/factory.h - Runtime factory registration
  *
  * Replaces the Lua-vs-JS if-ladders in app_context.c with a table-driven
  * lookup. Each runtime publishes an HlRuntimeFactory; the registry walks
@@ -18,7 +18,7 @@
 #include <stddef.h>
 #include "hull/runtime.h"
 
-/* Forward declaration — defined in include/hull/app_context.h. */
+/* Forward declaration - defined in include/hull/app_context.h. */
 typedef struct HlAppContextOpts HlAppContextOpts;
 
 /*

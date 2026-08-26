@@ -1,16 +1,16 @@
 /*
- * sandbox.c — Kernel-level sandbox enforcement
+ * sandbox.c - Kernel-level sandbox enforcement
  *
  * Applies OS-level restrictions derived from the application manifest.
  * After hl_sandbox_apply(), the process can only access the filesystem
  * paths and syscall families that the manifest declares.
  *
  * Platform implementations:
- *   OpenBSD       — native pledge() + unveil() (originated here)
- *   Cosmopolitan  — pledge() + unveil() built into cosmo libc
- *   Linux 5.13+   — jart/pledge polyfill (seccomp-bpf + landlock)
- *   macOS         — Seatbelt (sandbox_init_with_parameters)
- *   other         — no-op (C-level cap validation is the defense)
+ *   OpenBSD       - native pledge() + unveil() (originated here)
+ *   Cosmopolitan  - pledge() + unveil() built into cosmo libc
+ *   Linux 5.13+   - jart/pledge polyfill (seccomp-bpf + landlock)
+ *   macOS         - Seatbelt (sandbox_init_with_parameters)
+ *   other         - no-op (C-level cap validation is the defense)
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
@@ -45,12 +45,12 @@ _Static_assert(SANDBOX_PATH_MAX >= PATH_MAX,
  * root directory. The manifest declares paths like "data/" or
  * "uploads/", which the capability layer interprets relative to
  * app_dir (HlFsConfig.base_dir). The sandbox MUST match that
- * resolution — otherwise the seatbelt subpath rule (or unveil
+ * resolution - otherwise the seatbelt subpath rule (or unveil
  * subtree) covers a different directory than the one the app
  * actually writes to. Steps:
  *
  *   1. Validate shape: reject absolute paths and any segment
- *      containing "..". Defense-in-depth — manifest parser only
+ *      containing "..". Defense-in-depth - manifest parser only
  *      truncates.
  *   2. Concatenate app_dir + "/" + relpath into a temp buffer.
  *   3. mkdir -p so realpath() can canonicalize even when the
@@ -59,11 +59,11 @@ _Static_assert(SANDBOX_PATH_MAX >= PATH_MAX,
  *   4. realpath() the result into out_abs.
  *
  * Returns 0 on success (out_abs filled), -1 on rejection or
- * buffer overflow. On -1 the caller should log + skip — never
+ * buffer overflow. On -1 the caller should log + skip - never
  * fall back to an unresolved relative path, since unveil() and
  * seatbelt both reject those.
  *
- * Platform-agnostic — both the seatbelt SBPL build (macOS) and
+ * Platform-agnostic - both the seatbelt SBPL build (macOS) and
  * the unveil setup (Linux / OpenBSD / Cosmopolitan) call this.
  */
 static int sandbox_resolve_manifest_path(const char *app_dir,
@@ -92,7 +92,7 @@ static int sandbox_resolve_manifest_path(const char *app_dir,
     joined[adir_len] = '/';
     memcpy(joined + adir_len + 1, relpath, rel_len + 1);
 
-    /* mkdir -p — best-effort. EEXIST is harmless. */
+    /* mkdir -p - best-effort. EEXIST is harmless. */
     char buf[SANDBOX_PATH_MAX];
     size_t jlen = strlen(joined);
     if (jlen >= sizeof(buf)) return -1;
@@ -129,7 +129,7 @@ static int sb_supported(void) { return 1; }
 
 /*
  * OpenBSD: pledge() and unveil() are native system calls.
- * This is where these APIs originated — declared in <unistd.h>.
+ * This is where these APIs originated - declared in <unistd.h>.
  */
 #include <unistd.h>
 
@@ -156,11 +156,11 @@ static int sb_supported(void) { return 1; }
  * by libsystem_sandbox.dylib and used by Chrome, Firefox, and macOS
  * system services.  Declared manually via extern.
  *
- * sandbox_init is irreversible — once applied, cannot be modified.
+ * sandbox_init is irreversible - once applied, cannot be modified.
  * Phase 1 (pledge) is a no-op on macOS; phase 2 applies the full
  * Seatbelt profile.
  */
-/* sandbox.h is deprecated since macOS 10.8 — use free() for error strings.
+/* sandbox.h is deprecated since macOS 10.8 - use free() for error strings.
  * stdlib.h is included at the top of the file. */
 
 extern int sandbox_init_with_parameters(const char *profile,
@@ -168,7 +168,7 @@ extern int sandbox_init_with_parameters(const char *profile,
                                          const char **parameters,
                                          char **errorbuf);
 
-/* pledge/unveil remain as no-ops — used by tool mode and phase 1 */
+/* pledge/unveil remain as no-ops - used by tool mode and phase 1 */
 static int pledge(const char *p, const char *ep)
 {
     (void)p; (void)ep;
@@ -194,8 +194,8 @@ static int sb_supported(void) { return 1; }
  * of Hardened Runtime is treated as a fail-closed condition, because
  * the signed gethull.dev release binary always carries it.
  *
- * CS_HARD  (0x0100) — Hardened Runtime in effect (kill invalid)
- * CS_KILL  (0x0200) — kill the process on invalid signature
+ * CS_HARD  (0x0100) - Hardened Runtime in effect (kill invalid)
+ * CS_KILL  (0x0200) - kill the process on invalid signature
  */
 #define HL_CS_OPS_STATUS    0
 #define HL_CS_HARD          0x00000100
@@ -227,7 +227,7 @@ static int hl_macos_hardened_runtime_active(void)
 #define SEATBELT_MAX_PARAMS    256   /* key-value pairs + NULL terminator */
 #define SEATBELT_PATH_SIZE     4096  /* max path length for resolved paths */
 
-/* realpath(3) writes up to PATH_MAX bytes — assert our buffer is large enough */
+/* realpath(3) writes up to PATH_MAX bytes - assert our buffer is large enough */
 _Static_assert(SEATBELT_PATH_SIZE >= PATH_MAX,
                "SEATBELT_PATH_SIZE must be >= PATH_MAX");
 
@@ -288,7 +288,7 @@ static int seatbelt_build_profile(const HlSandboxPolicy *policy,
     SBPL_LIT("(version 1)\n");
     SBPL_LIT("(deny default)\n\n");
 
-    /* stat()/lstat() on any path — kernel needs this to traverse parent
+    /* stat()/lstat() on any path - kernel needs this to traverse parent
      * directories (e.g. /private, /private/var) when opening files inside
      * allowed subpaths.  Only exposes metadata, not file content. */
     SBPL_LIT("(allow file-read-metadata)\n\n");
@@ -330,7 +330,7 @@ static int seatbelt_build_profile(const HlSandboxPolicy *policy,
     /* ── SQLite database (4 file variants) ──────────────────── */
 
     if (db_path) {
-        /* Extract parent directory — SQLite needs the dir for locking/fsync,
+        /* Extract parent directory - SQLite needs the dir for locking/fsync,
          * and subpath covers the db file plus WAL/SHM/journal variants */
         snprintf(scratch->db_dir, sizeof(scratch->db_dir), "%s", db_path);
         char *slash = strrchr(scratch->db_dir, '/');
@@ -351,7 +351,7 @@ static int seatbelt_build_profile(const HlSandboxPolicy *policy,
     for (int i = 0; i < policy->fs_read_count; i++) {
         snprintf(scratch->fs_read_keys[i],
                  sizeof(scratch->fs_read_keys[i]), "FS_R_%d", i);
-        /* Resolve symlinks — Seatbelt matches real paths */
+        /* Resolve symlinks - Seatbelt matches real paths */
         const char *rpath = policy->fs_read[i];
         if (realpath(rpath, scratch->fs_read_real[i]))
             rpath = scratch->fs_read_real[i];
@@ -408,15 +408,15 @@ static int seatbelt_build_profile(const HlSandboxPolicy *policy,
      * Runtime-infrastructure caches (Lua bytecode, compute AOT,
      * template AST) live in a shared system-wide blob pool under
      * `blobs/runtime/<kind>/`, NOT in the app's manifest. The
-     * sandbox auto-allows them like the CA bundle — apps can't opt
+     * sandbox auto-allows them like the CA bundle - apps can't opt
      * out per-app, but the global HULL_NO_CACHE=1 env var disables
      * every consumer at runtime. See docs/blob.md §"Runtime-
      * infrastructure caches".
      *
      * hl_hull_cache_dir() creates the path as a side effect so the
      * subpath rule resolves to a real inode under seatbelt. If
-     * $HOME is unset (rare — happens in some CI sandboxes), the
-     * call fails and we skip the allow rule — the cache consumers
+     * $HOME is unset (rare - happens in some CI sandboxes), the
+     * call fails and we skip the allow rule - the cache consumers
      * then fail-closed on their own. */
     {
         static char cache_real[SEATBELT_PATH_SIZE];
@@ -437,7 +437,7 @@ static int seatbelt_build_profile(const HlSandboxPolicy *policy,
 
     /* Inbound + bind only if the app may accept connections (server
      * mode). CLI mode apps (app.main, no routes) get a strictly
-     * tighter profile — no network-inbound, no network-bind. The
+     * tighter profile - no network-inbound, no network-bind. The
      * `system-socket` rule is needed for any socket creation so it
      * stays whenever any network rule is wanted. */
     if (policy->network_inbound) {
@@ -521,7 +521,7 @@ static int seatbelt_build_profile(const HlSandboxPolicy *policy,
     return 0;
 }
 
-#else /* unsupported platforms — full no-op */
+#else /* unsupported platforms - full no-op */
 
 static int pledge(const char *p, const char *ep)
 {
@@ -567,7 +567,7 @@ int hl_sandbox_apply_pledge(void)
     }
 
 #ifdef __APPLE__
-    /* sandbox_init is irreversible — can't do two-phase on macOS.
+    /* sandbox_init is irreversible - can't do two-phase on macOS.
      * Phase 2 applies the full Seatbelt profile after manifest extraction.
      * C-level runtime sandboxes (Lua: os removed, JS: no std/os) prevent
      * exec during load_app(). */
@@ -579,7 +579,7 @@ int hl_sandbox_apply_pledge(void)
     __pledge_mode = 0x0001 | 0x0010; /* KILL_PROCESS | STDERR_LOGGING */
 #endif
 
-    /* Phase 1: permissive — needs to allow whatever phase 2 will allow,
+    /* Phase 1: permissive - needs to allow whatever phase 2 will allow,
      * since seccomp filters can only restrict on Linux, not widen.
      * On Linux, "netlink" is required so glibc getaddrinfo() can open
      * AF_NETLINK sockets to enumerate interfaces; "unix" is required so
@@ -610,7 +610,7 @@ int hl_sandbox_apply_pledge(void)
 
 /* ── Public API ────────────────────────────────────────────────────── */
 /* hl_tool_sandbox_init (build-tool unveil) lives in sandbox_tool.c so the
- * app-runtime sandbox links without the build machinery — see the note in
+ * app-runtime sandbox links without the build machinery - see the note in
  * that file. */
 
 int hl_sandbox_apply(const HlSandboxPolicy *policy, const char *app_dir,
@@ -631,7 +631,7 @@ int hl_sandbox_apply(const HlSandboxPolicy *policy, const char *app_dir,
      *
      * The escape hatch is `--no-sandbox`, which causes main.c to
      * skip this function entirely and log a warning. We do NOT add
-     * a second downgrade flag — there is exactly one. */
+     * a second downgrade flag - there is exactly one. */
     if (policy->wx_enforced) {
         if (policy->allow_dynamic_code) {
             log_error("[sandbox] manifest requests allow_dynamic_code=true "
@@ -662,7 +662,7 @@ int hl_sandbox_apply(const HlSandboxPolicy *policy, const char *app_dir,
      *
      * The signed gethull.dev release binary always has Hardened
      * Runtime active and is built with -DHL_RELEASE_BUILD. A locally
-     * `make`-built binary is unsigned and lacks Hardened Runtime —
+     * `make`-built binary is unsigned and lacks Hardened Runtime -
      * we degrade to a warning there so dev/test workflows continue
      * to run with the sandbox enabled. CI sets HL_RELEASE_BUILD to
      * make the missing Hardened Runtime fail-closed. */
@@ -684,7 +684,7 @@ int hl_sandbox_apply(const HlSandboxPolicy *policy, const char *app_dir,
         const char *params[SEATBELT_MAX_PARAMS];
         SeatbeltScratch scratch;
 
-        /* Resolve symlinks — Seatbelt matches against real paths.
+        /* Resolve symlinks - Seatbelt matches against real paths.
          * e.g. /tmp → /private/tmp on macOS.  Fall back to original
          * if realpath fails (path may not exist yet). */
         char real_app[SEATBELT_PATH_SIZE], real_db[SEATBELT_PATH_SIZE];
@@ -806,7 +806,7 @@ int hl_sandbox_apply(const HlSandboxPolicy *policy, const char *app_dir,
                      ca_bundle_path);
     }
 
-    /* Hull runtime cache root ($HOME/.hull/cache/) — see SBPL
+    /* Hull runtime cache root ($HOME/.hull/cache/) - see SBPL
      * counterpart above. Auto-allowed read/write/create so the
      * bytecode/AOT/template caches work without polluting the app
      * manifest. */
@@ -822,7 +822,7 @@ int hl_sandbox_apply(const HlSandboxPolicy *policy, const char *app_dir,
     /* DNS resolution: when manifest declares outbound hosts, glibc's
      * getaddrinfo() needs to read these files. The "dns" pledge promise
      * allows the syscalls; unveil controls which paths they may touch.
-     * Errors are non-fatal — the file may not exist on minimal systems. */
+     * Errors are non-fatal - the file may not exist on minimal systems. */
     if (policy->network_outbound) {
         unveil("/etc/resolv.conf",   "r");
         unveil("/etc/hosts",         "r");
@@ -833,7 +833,7 @@ int hl_sandbox_apply(const HlSandboxPolicy *policy, const char *app_dir,
         unveil("/var/run/nscd",        "r");
         /* /etc/ssl/certs is needed when CA bundle uses the system path
          * (mbedTLS doesn't read it directly, but glibc nss modules may
-         * touch /etc files generally — give the whole /etc readonly to
+         * touch /etc files generally - give the whole /etc readonly to
          * cover gai_conf, hosts.d, etc.). */
         unveil("/etc",               "r");
     }
@@ -862,7 +862,7 @@ int hl_sandbox_apply(const HlSandboxPolicy *policy, const char *app_dir,
                     log_warn("[sandbox] unveil failed for %s", node);
             }
         } else {
-            /* No device restriction — unveil all of /dev/dri */
+            /* No device restriction - unveil all of /dev/dri */
             if (unveil("/dev/dri", "rw") != 0)
                 log_warn("[sandbox] unveil failed for /dev/dri");
         }
@@ -870,7 +870,7 @@ int hl_sandbox_apply(const HlSandboxPolicy *policy, const char *app_dir,
             log_warn("[sandbox] unveil failed for /proc/self");
     }
 
-    /* Terminal UI — unveil the controlling tty so tcsetattr /
+    /* Terminal UI - unveil the controlling tty so tcsetattr /
      * TIOCGWINSZ keep working after the filesystem seal. */
     if (policy->tui) {
         if (unveil("/dev/tty", "rw") != 0)
@@ -889,12 +889,12 @@ int hl_sandbox_apply(const HlSandboxPolicy *policy, const char *app_dir,
      * Build promise string from manifest capabilities.
      *
      * Always needed:
-     *   stdio  — basic I/O on open fds, epoll/kqueue, signals
-     *   rpath  — SQLite reads, app file reads
-     *   wpath  — SQLite WAL writes
-     *   cpath  — SQLite journal/WAL creation
-     *   flock  — SQLite locking
-     *   fattr  — futimes() on owned blob-cache fds (LRU atime touch
+     *   stdio  - basic I/O on open fds, epoll/kqueue, signals
+     *   rpath  - SQLite reads, app file reads
+     *   wpath  - SQLite WAL writes
+     *   cpath  - SQLite journal/WAL creation
+     *   flock  - SQLite locking
+     *   fattr  - futimes() on owned blob-cache fds (LRU atime touch
      *            in hl_blob_store_reader_open when track_access=1).
      *            Glibc since 2.6.22 implements futimes() as utimensat(),
      *            which pledge categorises under fattr. Scope is narrow:
@@ -904,12 +904,12 @@ int hl_sandbox_apply(const HlSandboxPolicy *policy, const char *app_dir,
      *            LRU eviction policy.
      *
      * Conditional:
-     *   inet   — socket-family syscalls. Needed when the app serves
+     *   inet   - socket-family syscalls. Needed when the app serves
      *            HTTP (network_inbound) OR makes outbound requests
      *            (network_outbound). CLI-mode apps with neither drop
      *            it entirely; their kernel-visible syscall surface
      *            shrinks accordingly.
-     *   dns    — outbound HTTP name resolution (when hosts declared)
+     *   dns    - outbound HTTP name resolution (when hosts declared)
      */
     char promises[256];
     int plen = snprintf(promises, sizeof(promises),
@@ -936,8 +936,8 @@ int hl_sandbox_apply(const HlSandboxPolicy *policy, const char *app_dir,
         if (n > 0) plen += n;
     }
     /* When the app declares outbound hosts, allow DNS resolution.
-     *   dns      — UDP/IP queries to the resolver
-     *   netlink  — Linux/glibc getaddrinfo() opens AF_NETLINK to enumerate
+     *   dns      - UDP/IP queries to the resolver
+     *   netlink  - Linux/glibc getaddrinfo() opens AF_NETLINK to enumerate
      *              interfaces. Cosmo's pledge() rejects the unknown promise
      *              entirely; OpenBSD's pledge() does not have it either
      *              (its getaddrinfo reads /etc/resolv.conf directly).
@@ -954,7 +954,7 @@ int hl_sandbox_apply(const HlSandboxPolicy *policy, const char *app_dir,
         size_t remaining = sizeof(promises) - (size_t)plen;
         size_t dns_len = strlen(dns_promises);
         if (dns_len + 1 > remaining) {
-            /* Should never happen — promises[256] vs ~50 bytes total —
+            /* Should never happen - promises[256] vs ~50 bytes total -
              * but fail loud rather than silently drop dns permissions. */
             log_error("[sandbox] pledge promises buffer overflow "
                       "(need %zu, have %zu) - refusing to start with "
@@ -991,7 +991,7 @@ static int sandbox_dsn_is_network(const char *dsn)
     if (!dsn || !*dsn) return 0;
     if (dsn[0] == '$') return 1;                 /* env-ref: assume network */
     /* Case-insensitive to match the DSN backend selector (db_select.c) and
-     * serve.c's db_dsn_is_network — else an uppercase-scheme named DSN would
+     * serve.c's db_dsn_is_network - else an uppercase-scheme named DSN would
      * be classified non-network and the app SIGKILLed on connect. */
     return strncasecmp(dsn, "postgres://",   11) == 0
         || strncasecmp(dsn, "postgresql://", 13) == 0
@@ -1014,7 +1014,7 @@ static int kv_scheme_is_network(const char *s)
 /* True if the manifest declares any database connection that may dial the
  * network: a named connection with a network (or env-ref) DSN, or a
  * databases.dynamic policy admitting a network scheme. Grants network_outbound
- * for a DB-only app that has no http `hosts` — without it the kernel sandbox
+ * for a DB-only app that has no http `hosts` - without it the kernel sandbox
  * blocks the connect (pledge SIGKILL on Linux). The `-d` default DSN is not in
  * the manifest (it lives in cfg); serve.c ORs that in separately. */
 static int manifest_has_network_db(const HlManifest *m)
@@ -1049,7 +1049,7 @@ void hl_sandbox_policy_from_manifest(HlSandboxPolicy *policy,
     /* Default-deny: everything starts at zero/NULL. */
     *policy = (HlSandboxPolicy){0};
 
-    /* W^X is the platform's default posture — independent of manifest.
+    /* W^X is the platform's default posture - independent of manifest.
      * Only `--no-sandbox` disables it (by skipping hl_sandbox_apply
      * entirely in main.c). */
     policy->wx_enforced = 1;
@@ -1057,7 +1057,7 @@ void hl_sandbox_policy_from_manifest(HlSandboxPolicy *policy,
     if (!manifest)
         return;
 
-    /* Borrow array pointers — manifest must outlive the policy. */
+    /* Borrow array pointers - manifest must outlive the policy. */
     policy->fs_read         = manifest->fs_read;
     policy->fs_read_count   = manifest->fs_read_count;
     policy->fs_write        = manifest->fs_write;

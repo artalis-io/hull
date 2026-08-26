@@ -75,7 +75,7 @@ typedef struct HlWasmDataSegment {
     int      is_mmap;        /* 1 = pre_alloc'd (caller owns backing), 0 = we own */
 } HlWasmDataSegment;
 
-/* All shared data for a module — segments chained into one shared heap */
+/* All shared data for a module - segments chained into one shared heap */
 typedef struct HlWasmSharedData {
     HlWasmDataSegment segments[HL_WASM_MAX_DATA_SEGMENTS];
     int               count;            /* number of active segments */
@@ -108,7 +108,7 @@ typedef struct {
     int inflight_async;
 } HlWasmModule;
 
-/* Forward decl — the full ShSealArena type lives in sh_seal_arena.h.
+/* Forward decl - the full ShSealArena type lives in sh_seal_arena.h.
  * We embed by value to avoid a heap allocation for the per-process
  * WAMR native-symbol table. */
 struct ShSealArena;
@@ -130,7 +130,7 @@ typedef struct HlWasmCache {
 
 /* ── Call options ──────────────────────────────────────────────────── */
 
-struct HlMappedBuffer; /* fwd decl (include/hull/cap/fs.h) — avoids a heavy include */
+struct HlMappedBuffer; /* fwd decl (include/hull/cap/fs.h) - avoids a heavy include */
 
 /* One requested per-invocation mapped span (the public `spans={}` API).
  * The binding resolves each entry to a windowed
@@ -165,7 +165,7 @@ typedef struct {
 } HlWasmCallOpts;
 
 /* Clamp call options to configured maximums (CLI > manifest > defaults).
- * cfg_* fields are ceilings — 0 means "use compile-time default". */
+ * cfg_* fields are ceilings - 0 means "use compile-time default". */
 void hl_cap_wasm_clamp_opts(HlWasmCallOpts *opts,
                              uint64_t cfg_max_input, uint64_t cfg_max_output,
                              uint32_t cfg_heap, uint32_t cfg_stack, int64_t cfg_gas);
@@ -268,7 +268,7 @@ typedef struct HlWasmInstance {
 /* hl_cap_wasm_init return codes. 0 = ok; a NEGATIVE value is a genuine WAMR
  * init failure (worth warning about); the POSITIVE HL_CAP_WASM_ABSENT is
  * returned by the base weak stub when the WASM feature was not composed
- * (a compute-free app) — an expected, quiet state, not a failure. */
+ * (a compute-free app) - an expected, quiet state, not a failure. */
 #define HL_CAP_WASM_ABSENT 1
 
 /**
@@ -375,12 +375,12 @@ void hl_wasm_pool_release(HlWasmCache *cache, HlWasmModule *mod,
 /* ── Persistent instance API ───────────────────────────────────────── */
 
 /**
- * Create a persistent WASM instance. Not pooled — exclusively owned by caller.
+ * Create a persistent WASM instance. Not pooled - exclusively owned by caller.
  * Linear memory is preserved across calls. Caller must destroy when done.
  *
  * @param cache    Module cache (must be initialized)
  * @param name     Module name (e.g. "model" -> compute/model.wasm)
- * @param opts     Instance options (heap, stack, default gas) — NULL for defaults
+ * @param opts     Instance options (heap, stack, default gas) - NULL for defaults
  * @param app_vfs  App VFS for module loading
  * @param app_dir  App directory for filesystem fallback
  * @param alloc    Allocator (NULL = raw malloc)
@@ -405,7 +405,7 @@ HlWasmInstance *hl_cap_wasm_instance_create(HlWasmCache *cache,
  * @param input_len  Input length
  * @param output     Output: caller-freed buffer
  * @param output_len Output: bytes written
- * @param opts       Per-call overrides (gas, max_input, max_output) — NULL for instance defaults
+ * @param opts       Per-call overrides (gas, max_input, max_output) - NULL for instance defaults
  * @param cb_fn      Optional callback
  * @param cb_ctx     Callback context
  * @param alloc      Allocator for the output buffer (NULL = raw malloc)

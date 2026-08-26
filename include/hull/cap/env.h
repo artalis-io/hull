@@ -16,7 +16,7 @@
  * @brief Environment-capability configuration.
  *
  * The caller (typically `manifest.c` during startup) builds this
- * from the app's `env` manifest array. Both pointers are borrowed —
+ * from the app's `env` manifest array. Both pointers are borrowed -
  * the underlying strings live in the manifest's allocator.
  */
 typedef struct HlEnvConfig {
@@ -32,7 +32,7 @@ typedef struct HlEnvConfig {
  *
  * @return The variable's value (from `getenv`) if @p name is in the
  *         allowlist AND set in the process environment, otherwise
- *         NULL. Both "not allowlisted" and "not set" produce NULL —
+ *         NULL. Both "not allowlisted" and "not set" produce NULL -
  *         callers cannot distinguish these cases (and shouldn't need to;
  *         the manifest fully determines the visible env).
  */
@@ -42,7 +42,7 @@ const char *hl_cap_env_get(const HlEnvConfig *cfg, const char *name);
  * @brief Report whether @p name is in the allowlist (regardless of whether it
  *        is set in the process environment).
  *
- * Read-only introspection of the manifest allowlist — reveals membership, never
+ * Read-only introspection of the manifest allowlist - reveals membership, never
  * a value, so it grants no new authority. Lets app code distinguish
  * "not declared" from "declared but unset", which `hl_cap_env_get` folds
  * together. Used by `hull/config`'s `.env` layering to apply a file value only

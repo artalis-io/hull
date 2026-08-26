@@ -1,5 +1,5 @@
 /*
- * internal.h — private cross-file declarations for JS runtime
+ * internal.h - private cross-file declarations for JS runtime
  *
  * Shared declarations for runtime.c / dispatch.c / routes.c / timers.c /
  * ws.c / sse.c after the runtime.c god-module was split. Each of those
@@ -42,7 +42,7 @@ typedef struct HlJSTimer {
     int         in_flight;
 } HlJSTimer;
 
-/* Worker dispatch operation — runtime-specific, submitted to thread pool. */
+/* Worker dispatch operation - runtime-specific, submitted to thread pool. */
 typedef struct HlJsWorkerDispatchOp {
     HlAsyncCtx   *async_ctx;
     HlAllocator  *alloc;
@@ -130,7 +130,7 @@ int hl_js_track_alloc(HlJS *js, void ***arr, size_t *count,
  * Called from each native module's QuickJS init callback to enforce
  * the resolved module set. Returns 0 if the import is admitted
  * (permissive when no set is wired, or the name is not in the
- * registry — e.g. private bridges like hull:_template). Returns -1
+ * registry - e.g. private bridges like hull:_template). Returns -1
  * after throwing a ReferenceError when the module is registry-known
  * but absent from the app's declared modules.
  *
@@ -140,7 +140,7 @@ int hl_js_track_alloc(HlJS *js, void ***arr, size_t *count,
  *
  * Native modules ARE registered with QuickJS up front (otherwise
  * `import "hull:db"` would fail with "module not found" even when
- * declared), but their init callback — which populates exports —
+ * declared), but their init callback - which populates exports -
  * doesn't run until first import. That's the hook this gate uses.
  */
 int hl_js_check_module_declared(JSContext *ctx,
@@ -152,7 +152,7 @@ struct KlBodyReader;
 /* Register MultipartIter / MultipartPart / MultipartChunks classes
  * (once per VM, called from hl_js_register_modules). */
 void hl_js_request_register(JSContext *ctx);
-/* Install req.multipart() on the request object — no-op for non-
+/* Install req.multipart() on the request object - no-op for non-
  * streaming routes (body_reader is not a multipart wrapper). */
 void hl_js_request_install_multipart(JSContext *ctx, JSValue req_obj,
                                       struct KlBodyReader *body_reader);

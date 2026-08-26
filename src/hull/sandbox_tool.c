@@ -1,11 +1,11 @@
 /*
- * sandbox_tool.c — build-tool ("hull build") kernel sandbox.
+ * sandbox_tool.c - build-tool ("hull build") kernel sandbox.
  *
  * Split out of sandbox.c so the app-runtime sandbox (hl_sandbox_apply /
  * _apply_pledge / _policy_from_manifest) can ship without the build-tool
  * unveil machinery. `hl_tool_sandbox_init` is the only sandbox entry
  * point that references cap/tool.c's hl_tool_unveil_* helpers, which in
- * turn live next to the compiler-spawn surface — none of which belongs
+ * turn live next to the compiler-spawn surface - none of which belongs
  * in the no-runtime libhull core. Keeping it in its own translation unit
  * means libhull links the app sandbox alone, while the full hull binary
  * links both.
@@ -42,7 +42,7 @@ static int sb_supported(void) { return 1; }
 
 #elif defined(__OpenBSD__)
 
-/* pledge()/unveil() are native — declared in <unistd.h> (already included). */
+/* pledge()/unveil() are native - declared in <unistd.h> (already included). */
 static int sb_supported(void) { return 1; }
 
 #elif defined(__linux__)
@@ -53,7 +53,7 @@ static int sb_supported(void) { return 1; }
 
 #elif defined(__APPLE__)
 
-/* macOS has no pledge/unveil — no-ops. The tool-mode allowlist is still
+/* macOS has no pledge/unveil - no-ops. The tool-mode allowlist is still
  * enforced in userspace via hl_tool_unveil_check in cap/tool.c. */
 static int pledge(const char *p, const char *ep)
 {
@@ -69,7 +69,7 @@ static int unveil(const char *p, const char *perm)
 
 static int sb_supported(void) { return 1; }
 
-#else /* unsupported platforms — full no-op */
+#else /* unsupported platforms - full no-op */
 
 static int pledge(const char *p, const char *ep)
 {
@@ -118,7 +118,7 @@ int hl_tool_sandbox_init(HlToolUnveilCtx *ctx,
      * package managers commonly install toolchains here. */
     hl_tool_unveil_add(ctx, "/opt", "rx");
     /* $HOME/.cosmocc and $HOME/cosmocc: cosmocc.zip default user-install
-     * paths. Narrow — only the .cosmocc / cosmocc subtree, not all of $HOME. */
+     * paths. Narrow - only the .cosmocc / cosmocc subtree, not all of $HOME. */
     {
         const char *home = getenv("HOME");
         if (home && *home) {
@@ -143,7 +143,7 @@ int hl_tool_sandbox_init(HlToolUnveilCtx *ctx,
     if (output_dir)
         hl_tool_unveil_add(ctx, output_dir, "rwc");
 
-    /* Hull runtime cache root — `hull build` writes AOT artifacts
+    /* Hull runtime cache root - `hull build` writes AOT artifacts
      * into $HOME/.hull/cache/compute-aot/ for cross-app reuse. Same
      * auto-allow rationale as the bytecode cache (see seatbelt
      * counterpart in hl_sandbox_apply). hl_hull_cache_dir() mkdirs

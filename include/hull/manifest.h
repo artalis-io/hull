@@ -45,7 +45,7 @@ typedef struct HlAllocator HlAllocator;
 #define HL_MANIFEST_MAX_DB_SCHEMES  8
 
 /* One declared module: `modules = { crypto = "1" }` → name="crypto", api_major=1.
- * Names are stored as the app wrote them (short alias or full canonical) —
+ * Names are stored as the app wrote them (short alias or full canonical) -
  * the resolver normalizes via hl_module_registry_find_short(). */
 typedef struct HlManifestModule {
     const char *name;       /* allocator-owned copy */
@@ -172,7 +172,7 @@ typedef struct HlManifest {
      * `modules_declared = 0`; one that sets `modules = {}` has
      * `modules_declared = 1` with `modules_count = 0`.
      *
-     * Both states are valid — the resolver still seeds the intrinsic
+     * Both states are valid - the resolver still seeds the intrinsic
      * core (hull/app, hull/log, hull/json) automatically.
      */
     HlManifestModule modules[HL_MANIFEST_MAX_MODULES];
@@ -187,7 +187,7 @@ typedef struct HlManifest {
      * (`kv = { dynamic = { hosts = {...}, schemes = {...} } }`). */
     HlManifestKv kv;
 
-    /* W^X / no runtime dynamic code — opt-in escape hatches.
+    /* W^X / no runtime dynamic code - opt-in escape hatches.
      * Both default to 0 (deny). Setting either to 1 in a manifest is
      * rejected by `hl_sandbox_apply` unless the user opts out of the
      * kernel sandbox entirely via `--no-sandbox` (development only).
@@ -200,7 +200,7 @@ typedef struct HlManifest {
 
     /* 1 when this manifest's strings live in a sealed arena (see
      * hl_manifest_seal). When set, hl_manifest_free skips the per-
-     * string free walk — the arena owns the memory and is RO-mapped,
+     * string free walk - the arena owns the memory and is RO-mapped,
      * so free() would fault. */
     int         sealed;
 } HlManifest;
@@ -242,7 +242,7 @@ typedef struct ShSealArena ShSealArena;
  *
  * The manifest is the canonical example of "boot-built then read-only
  * for the rest of the process": fs/hosts/env allowlists, declared
- * modules, CSP, CORS policy — all derived from `app.manifest({...})`
+ * modules, CSP, CORS policy - all derived from `app.manifest({...})`
  * at startup, then read on every request by the capability layer.
  * After this call returns 0:
  *
@@ -261,12 +261,12 @@ typedef struct ShSealArena ShSealArena;
  *     sandbox-policy derived from it, etc.). The seal flips the
  *     arena RO; subsequent writes to anything allocated here fault.
  *   - Freeing the SOURCE manifest's strings (`hl_manifest_free(src)`)
- *     after this returns 0 — dst no longer aliases them.
+ *     after this returns 0 - dst no longer aliases them.
  *
  * `dst->alloc` is set to NULL after sealing, since the strings are
  * no longer allocator-owned. Calling `hl_manifest_free(dst)` after
  * this is therefore a no-op for the strings (which is what we want
- * — the arena owns them, lifetime is process-lifetime).
+ * - the arena owns them, lifetime is process-lifetime).
  *
  * Returns 0 on success, -1 on failure (arena out of space, NULL
  * inputs, src not present). On -1 `dst` is zero-initialized.

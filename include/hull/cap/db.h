@@ -4,7 +4,7 @@
  *
  * Mediates every database access from Lua/JS runtimes. Apps that don't
  * need SQL can be built without this whole subsystem via
- * `make HL_ENABLE_DB=0` — see CLAUDE.md "Compute-only builds".
+ * `make HL_ENABLE_DB=0` - see CLAUDE.md "Compute-only builds".
  *
  * Security invariants:
  *   - All SQL goes through parameterised binding (#hl_cap_db_query /
@@ -52,17 +52,17 @@ typedef enum {
 
 /**
  * @brief Single entry in the prepared-statement cache.
- * @internal Tier 4 — layout will change post-v0.1.0.
+ * @internal Tier 4 - layout will change post-v0.1.0.
  */
 typedef struct {
-    const char     *sql;        /**< Owned key — the SQL string the statement was prepared for. */
+    const char     *sql;        /**< Owned key - the SQL string the statement was prepared for. */
     size_t          sql_len;    /**< Byte length of `sql` (excluding NUL). */
     sqlite3_stmt   *stmt;       /**< Prepared statement; finalized by @ref hl_stmt_cache_destroy. */
 } HlStmtCacheEntry;
 
 /**
  * @brief Per-connection prepared-statement LRU cache.
- * @internal Tier 4 — treat as opaque; use the entry points below.
+ * @internal Tier 4 - treat as opaque; use the entry points below.
  */
 typedef struct HlStmtCache {
     sqlite3           *db;
@@ -76,7 +76,7 @@ typedef struct HlStmtCache {
  *
  * @param cache  Caller-owned cache struct to populate. Memory uninitialised
  *               on entry; left zero+populated on exit.
- * @param db     Live `sqlite3` handle from `sqlite3_open*`. Borrowed —
+ * @param db     Live `sqlite3` handle from `sqlite3_open*`. Borrowed -
  *               not retained on @ref hl_stmt_cache_destroy.
  * @param alloc  Allocator for any cache-internal allocations. `NULL` =
  *               raw `malloc`/`free`.
@@ -122,7 +122,7 @@ int hl_cap_db_init(sqlite3 *db);
 /**
  * @brief Flush pending writes and finalize cached statements.
  *
- * Optional — `sqlite3_close` works without it — but recommended for
+ * Optional - `sqlite3_close` works without it - but recommended for
  * clean shutdown logs.
  *
  * @param db  Handle to shut down. Caller still calls `sqlite3_close`
@@ -243,7 +243,7 @@ int hl_cap_db_rollback(sqlite3 *db);
 /**
  * @brief Roll back any stale transaction left by a crashed handler.
  *
- * Safe to call unconditionally before each request dispatch — no-op
+ * Safe to call unconditionally before each request dispatch - no-op
  * if no transaction is open.
  *
  * @param db  Connection.
@@ -264,7 +264,7 @@ void hl_cap_db_guard_stale_txn(sqlite3 *db);
  *         `_hull_*` tables.
  *
  * @note Direct callers from C (no caller-source context) MUST invoke
- *       this before any stdlib-internal SQL — the dispatch helper in
+ *       this before any stdlib-internal SQL - the dispatch helper in
  *       `cap/db.c` already does so for the public entry points.
  */
 int hl_cap_db_check_namespace(const char *sql);

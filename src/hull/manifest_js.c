@@ -1,5 +1,5 @@
 /*
- * manifest_js.c — Extract HlManifest from QuickJS globalThis.__hull_manifest
+ * manifest_js.c - Extract HlManifest from QuickJS globalThis.__hull_manifest
  *
  * Split from manifest.c as part of architectural roadmap item G.
  * Compiles to an empty translation unit when HL_ENABLE_JS is not set.
@@ -219,13 +219,13 @@ int hl_manifest_extract_js(JSContext *ctx, HlManifest *out, HlAllocator *alloc)
         out->tui = JS_ToBool(ctx, tui_val);
     JS_FreeValue(ctx, tui_val);
 
-    /* modules: ["hull/crypto@1", "hull/db@1", ...] — an array of
+    /* modules: ["hull/crypto@1", "hull/db@1", ...] - an array of
      * canonical spec strings. The local variable / imported identifier
      * is a plain JS binding (the user chooses the name); the manifest
      * only declares which canonical modules are in scope.
      *
      * For back-compat we also accept the legacy object form when the
-     * value is a non-array object (`{ crypto: "hull/crypto@1" }`) —
+     * value is a non-array object (`{ crypto: "hull/crypto@1" }`) -
      * keys are ignored as cosmetic labels.
      *
      * Presence of `modules` (array OR object, even empty) sets
@@ -439,7 +439,7 @@ int hl_manifest_extract_js(JSContext *ctx, HlManifest *out, HlAllocator *alloc)
     }
     JS_FreeValue(ctx, kv_val);
 
-    /* allowDynamicCode: true — opt-in to JIT / runtime codegen.
+    /* allowDynamicCode: true - opt-in to JIT / runtime codegen.
      * Rejected by hl_sandbox_apply unless --no-sandbox.
      * Also accept the snake_case form for parity with the Lua manifest. */
     JSValue adc_val = JS_GetPropertyStr(ctx, manifest, "allowDynamicCode");
@@ -454,7 +454,7 @@ int hl_manifest_extract_js(JSContext *ctx, HlManifest *out, HlAllocator *alloc)
         log_warn("[manifest] allowDynamicCode=true - kernel sandbox "
                  "will fail closed unless --no-sandbox is set");
 
-    /* allowDynamicLibraries: true — opt-in to dlopen() of native libs. */
+    /* allowDynamicLibraries: true - opt-in to dlopen() of native libs. */
     JSValue adl_val = JS_GetPropertyStr(ctx, manifest, "allowDynamicLibraries");
     if (JS_IsUndefined(adl_val)) {
         JS_FreeValue(ctx, adl_val);

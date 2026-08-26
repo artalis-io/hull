@@ -1,7 +1,7 @@
 /*
- * mod_tui.c — hull:tui module (terminal UI bindings).
+ * mod_tui.c - hull:tui module (terminal UI bindings).
  *
- * Mirrors src/hull/runtime/lua/mod_tui.c — same cap-layer entry
+ * Mirrors src/hull/runtime/lua/mod_tui.c - same cap-layer entry
  * points, JS naming convention (camelCase).
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
@@ -262,7 +262,7 @@ static JSValue event_to_js(JSContext *ctx, const HlTuiEvent *ev)
  *
  * Returns a Promise that resolves with an event object on key /
  * resize / mouse / etc., or with null on timeout. While the Promise
- * is pending, the JS event loop keeps running — other Promises
+ * is pending, the JS event loop keeps running - other Promises
  * (background fetches, timers, tui.async tasks) progress.
  *
  * Mirrors the Lua side's logic in src/hull/runtime/lua/mod_tui.c.
@@ -360,7 +360,7 @@ static JSValue js_tui_poll(JSContext *ctx, JSValueConst this_val,
     /* Slow path: schedule timer and return a Promise. */
     HlJS *js = JS_GetContextOpaque(ctx);
     if (!js || !js->base.async_ctx) {
-        /* No event loop — fall back to blocking. */
+        /* No event loop - fall back to blocking. */
         rc = hl_cap_tui_poll(g_ctx, timeout_ms, &ev);
         if (rc < 0) return JS_ThrowInternalError(ctx, "tui.poll failed");
         if (rc == 1) return JS_NULL;
@@ -412,7 +412,7 @@ static JSValue js_tui_poll(JSContext *ctx, JSValueConst this_val,
     return promise;
 }
 
-/* tui.pollSync(timeoutMs) — fully synchronous, blocking variant. Used
+/* tui.pollSync(timeoutMs) - fully synchronous, blocking variant. Used
  * by tui.run inside its synchronous render loop where no `await` is
  * available (and where the async poll's Promise would leak because
  * sync JS code never yields the thread for the microtask drain to
@@ -475,7 +475,7 @@ MODE_TOGGLE(kitty_kbd, hl_cap_tui_enable_kitty_kbd)
 
 /* ── Async helper ──────────────────────────────────────────────── */
 
-/* tui.async(fn) — fire-and-forget background work, used by tui.run's
+/* tui.async(fn) - fire-and-forget background work, used by tui.run's
  * event handlers. JS already has Promises for this; we just need a
  * top-level wrapper that swallows the result and routes errors to
  * stderr (so a buggy background task doesn't crash the run loop). */
@@ -487,7 +487,7 @@ static JSValue js_tui_async(JSContext *ctx, JSValueConst this_val,
         return JS_ThrowTypeError(ctx, "tui.async(fn): expected a function");
     JSValue ret = JS_Call(ctx, argv[0], JS_UNDEFINED, 0, NULL);
     /* If the function returned a Promise, we just let the engine run
-     * it — rejections will propagate to QuickJS's unhandled-rejection
+     * it - rejections will propagate to QuickJS's unhandled-rejection
      * handler, which logs to stderr. We deliberately don't await. */
     JS_FreeValue(ctx, ret);
     return JS_UNDEFINED;
@@ -500,7 +500,7 @@ static int js_tui_module_init(JSContext *ctx, JSModuleDef *m)
     /* hull:_tui is the private native bridge. The public hull:tui
      * module is the stdlib JS file that re-exports + augments these
      * primitives. Gate uses the canonical name `hull/tui` so the
-     * resolver still enforces the declaration on the bridge — bypass
+     * resolver still enforces the declaration on the bridge - bypass
      * would require requiring `hull:_tui` directly, which is private.
      * Cheaper than threading a second registry slot. */
     if (hl_js_check_module_declared(ctx, "hull/tui", "hull:_tui") != 0)

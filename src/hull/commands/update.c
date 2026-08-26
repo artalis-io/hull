@@ -1,16 +1,16 @@
 /*
- * commands/update.c — hull self-update
+ * commands/update.c - hull self-update
  *
  * Downloads the latest GitHub release for this binary's OS/arch, verifies
  * SHA-256 against hull.sha256 from the same release, and atomically
  * replaces the running binary via rename(2).
  *
- *   hull update                — install latest if newer than current
- *   hull update --check        — print "update available" / "up to date"
- *   hull update --force        — reinstall current version
- *   hull update --repo=org/name — override the GitHub repo
+ *   hull update                - install latest if newer than current
+ *   hull update --check        - print "update available" / "up to date"
+ *   hull update --force        - reinstall current version
+ *   hull update --repo=org/name - override the GitHub repo
  *
- * No external dependencies — uses keel's HTTPS client + the embedded
+ * No external dependencies - uses keel's HTTPS client + the embedded
  * Mozilla CA bundle (D4) for trust.
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
@@ -39,7 +39,7 @@
 #define HL_DEFAULT_REPO "artalis-io/hull"
 
 /* All HTTPS / manifest / atomic-write plumbing now lives in
- * hull/release_io.h — shared with `hull tools install`. */
+ * hull/release_io.h - shared with `hull tools install`. */
 
 /* ── Main handler ────────────────────────────────────────────────── */
 
@@ -165,7 +165,7 @@ int hl_cmd_update(int argc, char **argv, const HlCommandEnv *env)
      * If this build has a configured release public key (the v0.1.0
      * release shipped a non-zero HL_RELEASE_PUBKEY_HEX), download and
      * verify hull.sha256.sig. Missing signature or verification failure
-     * is a hard error — we never substitute an unverified manifest.
+     * is a hard error - we never substitute an unverified manifest.
      *
      * Pre-v0.1.0 builds that ship the all-zeros placeholder skip this
      * step with a one-time warning.
@@ -231,7 +231,7 @@ int hl_cmd_update(int argc, char **argv, const HlCommandEnv *env)
 
     /* Constant-time compare. The values are public (manifest checksum
      * + computed digest of the downloaded binary), so a timing leak
-     * doesn't reveal anything sensitive — using mbedtls_ct_memcmp for
+     * doesn't reveal anything sensitive - using mbedtls_ct_memcmp for
      * uniformity with the rest of the hash-compare codepaths. Both
      * buffers are exactly 64 hex chars + NUL; compare the 64 chars. */
     if (mbedtls_ct_memcmp(expected, actual, 64) != 0) {

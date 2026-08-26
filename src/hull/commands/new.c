@@ -1,5 +1,5 @@
 /*
- * commands/new.c — hull new subcommand
+ * commands/new.c - hull new subcommand
  *
  * Thin wrapper: launches the Lua tool VM with hull.new module.
  *

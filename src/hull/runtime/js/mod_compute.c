@@ -1,5 +1,5 @@
 /*
- * mod_compute.c — hull:compute module (WASM compute plugins)
+ * mod_compute.c - hull:compute module (WASM compute plugins)
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */

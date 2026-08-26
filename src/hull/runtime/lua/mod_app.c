@@ -1,4 +1,4 @@
-/* mod_app.c — hull.app module: route registration, middleware, timers
+/* mod_app.c - hull.app module: route registration, middleware, timers
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
@@ -35,7 +35,7 @@ static int lua_app_main_registered(lua_State *L)
  * rejects (luaL_error long-jumps).
  *
  * lua==NULL is an intentional fall-through.  The accessor only ever
- * returns NULL when there's no HlLua wired into the registry —
+ * returns NULL when there's no HlLua wired into the registry -
  * which can only happen in test harnesses that drive the Lua state
  * directly without spinning up a serve loop.  Those harnesses never
  * reach hl_serve_wire_routes, so the flag is moot anyway.  In any
@@ -78,7 +78,7 @@ static int lua_app_route(lua_State *L, const char *method)
     lua_app_reject_if_serving(L, "app.get/post/put/delete/patch/options");
     const char *pattern = luaL_checkstring(L, 1);
     luaL_checktype(L, 2, LUA_TFUNCTION);
-    /* Arg 3 is the optional opts table — type-check only if present. */
+    /* Arg 3 is the optional opts table - type-check only if present. */
     int has_opts = !lua_isnoneornil(L, 3);
     if (has_opts) luaL_checktype(L, 3, LUA_TTABLE);
 
@@ -108,7 +108,7 @@ static int lua_app_route(lua_State *L, const char *method)
     lua_pushvalue(L, 2); /* push handler function */
     lua_rawseti(L, -3, handler_id); /* routes[handler_id] = handler */
 
-    /* Store route definition in __hull_route_defs — use contiguous index
+    /* Store route definition in __hull_route_defs - use contiguous index
      * so that luaL_len always returns the correct count even when
      * middleware was registered before routes. */
     lua_Integer def_idx = (lua_Integer)luaL_len(L, -1) + 1;
@@ -145,7 +145,7 @@ static int lua_app_del(lua_State *L)     { return lua_app_route(L, "DELETE"); }
 static int lua_app_patch(lua_State *L)   { return lua_app_route(L, "PATCH"); }
 static int lua_app_options(lua_State *L) { return lua_app_route(L, "OPTIONS"); }
 
-/* app.use(method, pattern, handler) — middleware registration */
+/* app.use(method, pattern, handler) - middleware registration */
 static int lua_app_use(lua_State *L)
 {
     lua_app_reject_if_serving(L, "app.use");
@@ -191,7 +191,7 @@ static int lua_app_use(lua_State *L)
     return 0;
 }
 
-/* app.use_post(method, pattern, fn) — register post-body middleware */
+/* app.use_post(method, pattern, fn) - register post-body middleware */
 static int lua_app_use_post(lua_State *L)
 {
     lua_app_reject_if_serving(L, "app.use_post");
@@ -237,7 +237,7 @@ static int lua_app_use_post(lua_State *L)
     return 0;
 }
 
-/* app.every(interval_ms, handler) — repeating timer */
+/* app.every(interval_ms, handler) - repeating timer */
 static int lua_app_every(lua_State *L)
 {
     lua_app_reject_if_serving(L, "app.every");
@@ -285,14 +285,14 @@ static int lua_app_every(lua_State *L)
     return 0;
 }
 
-/* app.daily(time_str, handler [, opts]) — daily timer at HH:MM */
+/* app.daily(time_str, handler [, opts]) - daily timer at HH:MM */
 static int lua_app_daily(lua_State *L)
 {
     lua_app_reject_if_serving(L, "app.daily");
     const char *time_str = luaL_checkstring(L, 1);
     luaL_checktype(L, 2, LUA_TFUNCTION);
 
-    /* Parse "HH:MM" — character-level validation, no sscanf */
+    /* Parse "HH:MM" - character-level validation, no sscanf */
     if (strlen(time_str) != 5 || time_str[2] != ':' ||
         time_str[0] < '0' || time_str[0] > '9' ||
         time_str[1] < '0' || time_str[1] > '9' ||
@@ -375,7 +375,7 @@ static lua_Integer store_handler(lua_State *L, int func_idx,
     return handler_id;
 }
 
-/* ── app.ws(path, callbacks) — WebSocket endpoint registration ───── */
+/* ── app.ws(path, callbacks) - WebSocket endpoint registration ───── */
 
 static int lua_app_ws(lua_State *L)
 {
@@ -428,7 +428,7 @@ static int lua_app_ws(lua_State *L)
     return 0;
 }
 
-/* ── app.sse(path, handler) — SSE endpoint registration ────────────── */
+/* ── app.sse(path, handler) - SSE endpoint registration ────────────── */
 
 static int lua_app_sse(lua_State *L)
 {
@@ -571,7 +571,7 @@ static void install_app_http_server(lua_State *L)
     }
     lua_pop(L, 1);
 
-    /* Router is bundled with hull/http-server — install it now too. */
+    /* Router is bundled with hull/http-server - install it now too. */
     hl_lua_install_app_router(L);
 }
 
@@ -600,7 +600,7 @@ static void install_app_ws_server(lua_State *L)
     lua_pop(L, 1);
 }
 
-/* app.manifest(tbl) — declare application capabilities (one-shot).
+/* app.manifest(tbl) - declare application capabilities (one-shot).
  *
  * Conditionally decorates the `app` intrinsic with methods provided
  * by declared modules. Today: hull/timers adds app.every/app.daily.
@@ -611,7 +611,7 @@ static int lua_app_manifest(lua_State *L)
 {
     luaL_checktype(L, 1, LUA_TTABLE);
 
-    /* Reject second call — manifest is immutable once declared */
+    /* Reject second call - manifest is immutable once declared */
     lua_getfield(L, LUA_REGISTRYINDEX, "__hull_manifest");
     if (!lua_isnil(L, -1))
         return luaL_error(L, "app.manifest() can only be called once");
@@ -638,7 +638,7 @@ static int lua_app_manifest(lua_State *L)
     return 0;
 }
 
-/* app.get_manifest() — retrieve manifest table (for build tools) */
+/* app.get_manifest() - retrieve manifest table (for build tools) */
 static int lua_app_get_manifest(lua_State *L)
 {
     lua_getfield(L, LUA_REGISTRYINDEX, "__hull_manifest");
@@ -647,13 +647,13 @@ static int lua_app_get_manifest(lua_State *L)
     return 1;
 }
 
-/* app.main(fn) — register a startup hook.
+/* app.main(fn) - register a startup hook.
  *
  * Lifecycle: serve.c invokes the function once after manifest extraction
  * + sandbox + migrations, on the event loop thread. If the app also
  * registered routes / middleware / timers / WebSocket / SSE handlers,
  * the HTTP listener auto-starts after main returns nil/0. Returning a
- * non-zero exit code from main short-circuits — the process exits with
+ * non-zero exit code from main short-circuits - the process exits with
  * that code even if routes are registered. Apps with main only and no
  * routes exit when main returns. */
 static int lua_app_main(lua_State *L)
@@ -680,12 +680,12 @@ static int lua_app_main(lua_State *L)
  *   hull/timers@1      → every/daily (existing)
  *
  * Without the declaration, those methods literally don't exist on
- * `app` — accessing them yields nil (Lua) / undefined (JS) and
+ * `app` - accessing them yields nil (Lua) / undefined (JS) and
  * calling them raises a clear error.
  */
 static const luaL_Reg app_funcs[] = {
     /* every + daily are installed conditionally by lua_app_manifest
-     * when the manifest declares "hull/timers@1" — they're absent
+     * when the manifest declares "hull/timers@1" - they're absent
      * from the default app table. */
     {"main",         lua_app_main},
     {"manifest",     lua_app_manifest},
@@ -700,7 +700,7 @@ int luaopen_hull_app(lua_State *L)
 }
 
 /* ─────────────────────────────────────────────────────────────────────
- * app.router(prefix, opts) — prefix-mounted route group.
+ * app.router(prefix, opts) - prefix-mounted route group.
  *
  * Composes on top of app.get/app.post/app.use rather than duplicating
  * route registration logic in C. The Router class is pure Lua;

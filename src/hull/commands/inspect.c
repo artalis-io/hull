@@ -1,5 +1,5 @@
 /*
- * commands/inspect.c — hull inspect subcommand
+ * commands/inspect.c - hull inspect subcommand
  *
  * Thin wrapper: launches the Lua tool VM with hull.inspect module.
  *

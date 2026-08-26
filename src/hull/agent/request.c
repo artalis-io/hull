@@ -1,6 +1,6 @@
 /*
- * agent/request.c — `hull agent request`, `hull agent status`,
- *                   `hull agent errors` — dev-server-adjacent ops.
+ * agent/request.c - `hull agent request`, `hull agent status`,
+ *                   `hull agent errors` - dev-server-adjacent ops.
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
@@ -285,7 +285,7 @@ int hl_agent_errors(const char *app_dir, ShJsonBuf *out)
     }
     buf[n] = '\0';
 
-    /* Pass through raw JSON — write directly to buffer */
+    /* Pass through raw JSON - write directly to buffer */
     sh_json_buf_write(out, buf, n);
     free(buf);
     return 0;

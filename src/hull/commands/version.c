@@ -1,8 +1,8 @@
 /*
- * commands/version.c — hull version subcommand
+ * commands/version.c - hull version subcommand
  *
- *   hull version          — human-readable one-liner
- *   hull version --json   — machine-readable JSON object
+ *   hull version          - human-readable one-liner
+ *   hull version --json   - machine-readable JSON object
  *
  * HL_VERSION is injected at compile time via -DHL_VERSION="...".
  * Falls back to "dev" if the define is absent (out-of-tree builds).

@@ -1,5 +1,5 @@
 /*
- * test_runner.c — Shared test-discovery + orchestration for hull test
+ * test_runner.c - Shared test-discovery + orchestration for hull test
  *                 and hull agent test.
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
@@ -26,7 +26,7 @@ int hl_test_runner_run(HlAppContext *ctx, const HlTestRunnerWriter *writer)
     if (!rt || !rt->vt || !rt->vt->test_setup || !rt->vt->run_test_file)
         return -1;
 
-    /* Test file glob comes from the vtable — keeps the runner free of
+    /* Test file glob comes from the vtable - keeps the runner free of
      * per-runtime knowledge. */
     const char *pattern = rt->vt->test_file_pattern;
     if (!pattern) return -1;

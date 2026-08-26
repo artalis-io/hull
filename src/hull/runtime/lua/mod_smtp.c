@@ -1,4 +1,4 @@
-/* mod_smtp.c — hull.smtp module: SMTP email sending
+/* mod_smtp.c - hull.smtp module: SMTP email sending
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
@@ -30,7 +30,7 @@ static int lua_get_string_array(lua_State *L, int idx,
     if (len <= 0)
         return 0;
 
-    /* Allocate array on Lua stack (will be GC'd) — use scratch arena */
+    /* Allocate array on Lua stack (will be GC'd) - use scratch arena */
     HlLua *lua = get_hl_lua(L);
     if (!lua || !lua->scratch)
         return -1;

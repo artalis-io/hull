@@ -1,5 +1,5 @@
 /*
- * mod_buffer.h — Shared declarations for per-module JS binding files
+ * mod_buffer.h - Shared declarations for per-module JS binding files
  *
  * Provides common includes, inline helpers, the unified buffer protocol
  * declaration, and all hl_js_init_*_module function prototypes so the
@@ -29,14 +29,14 @@ int hl_js_check_module_declared(JSContext *ctx,
 
 /* ── Shared JS class IDs ─────────────────────────────────────────── */
 
-/* MappedBuffer class (fs.mmap) — used by fs, compute, gpu, buffer */
+/* MappedBuffer class (fs.mmap) - used by fs, compute, gpu, buffer */
 extern JSClassID js_mmap_class_id;
 
-/* HlImage class — used by image, buffer */
+/* HlImage class - used by image, buffer */
 extern JSClassID js_image_class_id;
 
 #ifdef HL_ENABLE_WASM
-/* WasmBuffer class — used by compute, gpu, buffer */
+/* WasmBuffer class - used by compute, gpu, buffer */
 extern JSClassID js_wasm_buf_class_id;
 #endif
 
@@ -103,7 +103,7 @@ int hl_js_init_tui_module(JSContext *ctx, HlJS *js);
 int hl_js_init_ws_server_module(JSContext *ctx, HlJS *js);
 int hl_js_init_ws_client_module(JSContext *ctx, HlJS *js);
 
-/* Server-side conn class ID (in mod_ws_server.c) — referenced by
+/* Server-side conn class ID (in mod_ws_server.c) - referenced by
  * runtime/js/ws.c (Keel callback dispatcher). The client conn class
  * is internal to mod_ws_client.c. */
 extern JSClassID js_ws_conn_class_id;

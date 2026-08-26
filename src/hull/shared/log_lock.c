@@ -1,5 +1,5 @@
 /*
- * log_lock.c — process-global lock making vendored log.c thread-safe.
+ * log_lock.c - process-global lock making vendored log.c thread-safe.
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */

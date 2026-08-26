@@ -1,8 +1,8 @@
 /*
- * lua_bindings.c — Request/Response bridge to Lua 5.4
+ * lua_bindings.c - Request/Response bridge to Lua 5.4
  *
  * Marshals Keel's KlRequest/KlResponse to Lua tables/userdata.
- * This file contains ONLY data marshaling — all enforcement logic
+ * This file contains ONLY data marshaling - all enforcement logic
  * lives in hl_cap_* functions.
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
@@ -175,7 +175,7 @@ void hl_lua_make_request(lua_State *L, KlRequest *req)
     }
     lua_setfield(L, -2, "query");
 
-    /* params — route params from Keel (e.g. :id → params.id) */
+    /* params - route params from Keel (e.g. :id → params.id) */
     lua_newtable(L);
     int n_params = kl_request_num_params(req);
     for (int i = 0; i < n_params; i++) {
@@ -224,10 +224,10 @@ void hl_lua_make_request(lua_State *L, KlRequest *req)
         }
     }
 
-    /* body — extract from buffer reader if available. For streaming-
+    /* body - extract from buffer reader if available. For streaming-
      * multipart routes the body_reader is the parkable wrapper (not a
      * buffer reader), so body is nil and req:multipart() is the only
-     * way to read bytes — installed just below. */
+     * way to read bytes - installed just below. */
     int is_multipart_stream =
         req->body_reader != NULL &&
         hl_cap_multipart_inner(req->body_reader) != NULL;
@@ -243,23 +243,23 @@ void hl_lua_make_request(lua_State *L, KlRequest *req)
     }
     lua_setfield(L, -2, "body");
 
-    /* req.multipart() — only installed for streaming-multipart routes
+    /* req.multipart() - only installed for streaming-multipart routes
      * (no-op otherwise). Defined in mod_request.c. */
     if (is_multipart_stream)
         hl_lua_request_install_multipart(L, get_hl_lua_from_L(L),
                                           req->body_reader);
 
-    /* ctx — per-request context table (middleware → handler).
+    /* ctx - per-request context table (middleware → handler).
      * If req->ctx carries a native Lua ref, retrieve it directly;
      * if it carries a JSON string (from test dispatch), parse it;
      * otherwise start with an empty table. */
     if (req->ctx) {
         HlReqCtx *rctx = (HlReqCtx *)req->ctx;
         if (rctx->kind == HL_REQCTX_LUA_REF) {
-            /* Native Lua table — retrieve directly from registry */
+            /* Native Lua table - retrieve directly from registry */
             lua_rawgeti(L, LUA_REGISTRYINDEX, rctx->lua_ref);
         } else if (rctx->kind == HL_REQCTX_JSON) {
-            /* JSON string (from test dispatch) — parse it via the
+            /* JSON string (from test dispatch) - parse it via the
              * runtime's cached decoder (no manifest gate). */
             lua_newtable(L);
             int ctx_idx = lua_absindex(L, -1);
@@ -278,7 +278,7 @@ void hl_lua_make_request(lua_State *L, KlRequest *req)
             lua_pop(L, 1); /* pop decoded table or error */
             lua_pop(L, 1); /* pop json table */
         } else {
-            lua_newtable(L); /* unknown kind — empty ctx */
+            lua_newtable(L); /* unknown kind - empty ctx */
         }
     } else {
         lua_newtable(L);

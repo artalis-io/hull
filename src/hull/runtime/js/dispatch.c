@@ -1,5 +1,5 @@
 /*
- * dispatch.c — JS request/middleware dispatch bridges
+ * dispatch.c - JS request/middleware dispatch bridges
  *
  * Bridges Keel's per-request callbacks to the JS handler/middleware
  * registry. Builds JS request/response objects, calls handlers,
@@ -93,7 +93,7 @@ int hl_js_dispatch(HlJS *js, int handler_id,
         hl_js_dump_error(js);
         result = -1;
     } else if (JS_PromiseState(js->ctx, ret) == JS_PROMISE_PENDING) {
-        /* Async handler — connection already suspended by hull.sleep
+        /* Async handler - connection already suspended by hull.sleep
          * or similar async call. Store the outer handler promise on
          * the continuation (per-connection, not global) so the resume
          * callback can check when the handler completes. */
@@ -108,7 +108,7 @@ int hl_js_dispatch(HlJS *js, int handler_id,
         js->async_pending = 1;
         result = 1; /* signal: handler suspended */
     } else if (JS_PromiseState(js->ctx, ret) == JS_PROMISE_REJECTED) {
-        /* Async handler threw before its first await — the Promise is
+        /* Async handler threw before its first await - the Promise is
          * immediately rejected (not an exception).  Log and return -1
          * so the caller writes a 500 response. */
         JSValue err = JS_PromiseResult(js->ctx, ret);
@@ -127,7 +127,7 @@ int hl_js_dispatch(HlJS *js, int handler_id,
     JS_FreeValue(js->ctx, global);
 
     if (result != 1) {
-        /* Sync path — clean up middleware ctx */
+        /* Sync path - clean up middleware ctx */
         js->active_conn = NULL;
         js->active_req = NULL;
         js->dispatch_depth--;
@@ -161,7 +161,7 @@ void hl_js_keel_handler(KlRequest *req, KlResponse *res, void *user_data)
     if (rc < 0) {
         hl_js_http_error_response(res);
     }
-    /* rc == 1: handler suspended — don't write response.
+    /* rc == 1: handler suspended - don't write response.
      * Keel checks conn->state == KL_CONN_SUSPENDED and returns. */
 }
 
@@ -201,7 +201,7 @@ int hl_js_dispatch_middleware(HlJS *js, int handler_id,
     JSValue js_req = hl_js_make_request(js->ctx, req);
     JSValue js_res = hl_js_make_response(js, res);
 
-    /* Call handler(req, res) — capture return value */
+    /* Call handler(req, res) - capture return value */
     JSValue argv[2] = { js_req, js_res };
     JSValue ret = JS_Call(js->ctx, handler, JS_UNDEFINED, 2, argv);
 
@@ -261,7 +261,7 @@ int hl_js_keel_middleware(KlRequest *req, KlResponse *res, void *user_data)
     HlJSRoute *ctx = (HlJSRoute *)user_data;
     int rc = hl_js_dispatch_middleware(ctx->js, ctx->handler_id, req, res);
     if (rc < 0) {
-        /* Middleware error — short-circuit with 500 */
+        /* Middleware error - short-circuit with 500 */
         hl_js_http_error_response(res);
         return 1; /* short-circuit */
     }

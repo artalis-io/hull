@@ -77,7 +77,7 @@ typedef void (*HlMultipartResumeFn)(void *ctx, HlMultipartResumeReason reason);
  * @param alloc      Per-request allocator.
  * @param req        Inbound request (Content-Type must be multipart/form-data).
  * @param user_data  KlMultipartConfig*; caller-owned. NULL → defaults
- *                   (all caps unlimited — set caps for adversarial input).
+ *                   (all caps unlimited - set caps for adversarial input).
  *
  * @return Body reader, or NULL on rejection (non-multipart Content-Type,
  *         missing/oversized boundary, allocation failure → 415).

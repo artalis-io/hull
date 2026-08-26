@@ -1,5 +1,5 @@
 /*
- * mod_ws_client.c — hull.web.ws-client module (outbound WebSocket connect)
+ * mod_ws_client.c - hull.web.ws-client module (outbound WebSocket connect)
  *
  * Exposes: ws.connect(url, handlers)
  *          client connection methods: conn:send / conn:send_binary / conn:close / conn:ping
@@ -205,13 +205,13 @@ static void lua_ws_client_on_close(KlWsClientConn *ws, uint16_t code,
         }
     }
 
-    /* Release self-ref — allow GC */
+    /* Release self-ref - allow GC */
     if (ud->self_ref != LUA_NOREF) {
         luaL_unref(ud->L, LUA_REGISTRYINDEX, ud->self_ref);
         ud->self_ref = LUA_NOREF;
     }
     /* Mark closed (methods fail closed) but keep `client` non-NULL so __gc
-     * frees the KlWsClientConn — Keel does NOT free it on close, and we must
+     * frees the KlWsClientConn - Keel does NOT free it on close, and we must
      * not free it here either (Keel touches `ws` immediately after this
      * callback returns: `ws->state = WSC_CLOSED; wsc_close_connection(ws)`). */
     ud->closed = 1;

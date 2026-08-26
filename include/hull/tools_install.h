@@ -82,7 +82,7 @@ const HlToolSpec *hl_tools_registry(void);
  * @brief Look up a tool by name. NULL if not registered.
  *
  * Callers should run @p name through this BEFORE constructing any
- * filesystem paths from it — the registry is the trust boundary.
+ * filesystem paths from it - the registry is the trust boundary.
  */
 const HlToolSpec *hl_tools_find(const char *name);
 
@@ -130,7 +130,7 @@ int hl_tools_dir(char *out, size_t out_sz);
  *
  * Does NOT create the directory or check whether the file exists.
  * Validates @p name against `hl_tools_name_valid()` before
- * concatenation — never construct this path from user input directly.
+ * concatenation - never construct this path from user input directly.
  *
  * @returns 0 on success, -1 on invalid name / unset HOME / overflow.
  */
@@ -141,7 +141,7 @@ int hl_tools_install_path(const char *name, char *out, size_t out_sz);
  *
  * Search order (first hit wins):
  *   1. `$HOME/.hull/tools/<name>` (canonical install location)
- *   2. `dirname(hull_exe)/<name>` — for ejected/portable installs
+ *   2. `dirname(hull_exe)/<name>` - for ejected/portable installs
  *      (skipped if @p hull_exe is NULL or has no directory component)
  *   3. `<name>` resolved via the system $PATH
  *

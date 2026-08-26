@@ -1,5 +1,5 @@
 /*
- * async/poll.c — HlAsyncBackend implementation using POSIX poll(2)
+ * async/poll.c - HlAsyncBackend implementation using POSIX poll(2)
  *                + pthreads. No external dependencies.
  *
  * The keel backend (async/keel.c) routes everything through Keel's
@@ -22,7 +22,7 @@
  *     enqueue a completion (done_fn + user) on the ctx's cross-thread
  *     completion queue and wake the event loop via the self-pipe.
  *
- *   * Any thread can call timer_add, op_complete, pool_submit, stop —
+ *   * Any thread can call timer_add, op_complete, pool_submit, stop -
  *     each takes the ctx lock and (when relevant) writes the wakeup
  *     pipe so a blocking poll() returns immediately.
  *
@@ -96,7 +96,7 @@ struct HlAsyncBackendCtx {
      * the next poll() return immediately. Drained at the top of tick. */
     int                wakeup_pipe[2];
 
-    /* Single big lock — Hull doesn't have hot enough async traffic to
+    /* Single big lock - Hull doesn't have hot enough async traffic to
      * justify striping today, and the design doc lists fine-grained
      * locking as future work. */
     pthread_mutex_t    lock;
@@ -104,12 +104,12 @@ struct HlAsyncBackendCtx {
     int                stop_flag;       /* run() / run_until() exit hint */
 
     /* Timer min-heap */
-    PollTimer        **timers;          /* heap of pointers — stable ids */
+    PollTimer        **timers;          /* heap of pointers - stable ids */
     size_t             timer_count;
     size_t             timer_cap;
     uint64_t           next_timer_id;   /* always > 0; 0 = invalid handle */
 
-    /* FD watcher table — flat array, linear scan. Typical Hull apps
+    /* FD watcher table - flat array, linear scan. Typical Hull apps
      * have at most a few thousand FDs (server has its own table). */
     PollWatcher       *watchers;
     size_t             watcher_count;
@@ -143,7 +143,7 @@ static void wakeup_write(HlAsyncBackendCtx *ctx)
 {
     if (ctx->wakeup_pipe[1] < 0) return;
     char b = 'x';
-    /* EAGAIN means the pipe already has a wakeup pending — that's fine,
+    /* EAGAIN means the pipe already has a wakeup pending - that's fine,
      * one byte is enough. Other errors are ignored: a missed wakeup
      * only delays handling by one tick. The `if (n < 0) {}` form is
      * needed (instead of a `(void)` cast) because glibc declares
@@ -196,7 +196,7 @@ static int poll_init(HlAsyncBackendCtx **out, HlAllocator *alloc)
 static void poll_free(HlAsyncBackendCtx *ctx)
 {
     if (!ctx) return;
-    /* Drop pending state — graceful shutdown is the caller's job
+    /* Drop pending state - graceful shutdown is the caller's job
      * (call stop() + drain via tick before free). */
     for (size_t i = 0; i < ctx->timer_count; i++)
         free(ctx->timers[i]);
@@ -315,7 +315,7 @@ static int poll_watcher_add(HlAsyncBackendCtx *ctx, int fd, unsigned mask,
     if (!ctx || fd < 0 || !cb) return -1;
     pthread_mutex_lock(&ctx->lock);
     if (watcher_find(ctx, fd) >= 0) {
-        /* Same fd already registered — caller should use watcher_mod
+        /* Same fd already registered - caller should use watcher_mod
          * to change mask; refuse rather than silently leak the prior
          * cb. */
         pthread_mutex_unlock(&ctx->lock);
@@ -482,7 +482,7 @@ static int poll_tick(HlAsyncBackendCtx *ctx, int timeout_ms)
 
     /* ── Step 6: dispatch ready FDs from the snapshot.
      * Walk the snapshot length (nfds - 1 entries; the wakeup pipe
-     * occupies slot 0), not the live watcher count — the table may
+     * occupies slot 0), not the live watcher count - the table may
      * have grown or shrunk while a completion ran. */
     size_t snap_n = nfds - 1;
     for (size_t i = 0; i < snap_n; i++) {
@@ -547,7 +547,7 @@ static uint64_t poll_timer_add(HlAsyncBackendCtx *ctx, uint64_t ms,
         return 0;
     }
     pthread_mutex_unlock(&ctx->lock);
-    /* Foreign-thread caller may have shrunk the wait deadline — wake
+    /* Foreign-thread caller may have shrunk the wait deadline - wake
      * poll() so it doesn't oversleep. Cheap; one byte. */
     wakeup_write(ctx);
     return t->id;
@@ -557,7 +557,7 @@ static void poll_timer_cancel(HlAsyncBackendCtx *ctx, uint64_t handle)
 {
     if (!ctx || handle == 0) return;
     pthread_mutex_lock(&ctx->lock);
-    /* Linear scan — Hull's timer count is small (low hundreds at most),
+    /* Linear scan - Hull's timer count is small (low hundreds at most),
      * and timer cancellations are rare. Switching to a side index would
      * pay for itself only at much higher counts. */
     for (size_t i = 0; i < ctx->timer_count; i++) {
@@ -577,7 +577,7 @@ static void poll_timer_cancel(HlAsyncBackendCtx *ctx, uint64_t handle)
  * so it fires on the event-loop thread (drained at the top of tick).
  *
  * Pending items at pool_free time get cancel_fn() called inline on
- * the freeing thread — matches Keel's semantics.
+ * the freeing thread - matches Keel's semantics.
  */
 
 typedef struct PollWorkItem {
@@ -723,7 +723,7 @@ static void poll_pool_free(HlAsyncBackendPool *p)
         pthread_join(p->workers[i], NULL);
 
     /* Fire cancel_fn for items that never ran. Done inline on the
-     * calling thread — Keel's pool does the same. */
+     * calling thread - Keel's pool does the same. */
     for (size_t i = 0; i < pending_n; i++) {
         if (pending[i].cancel_fn) pending[i].cancel_fn(pending[i].user);
     }
@@ -762,7 +762,7 @@ static int poll_pool_submit(HlAsyncBackendPool *p,
 /* ── Async-op suspension ───────────────────────────────────────────── */
 
 /*
- * The op state — including the live deadline-timer handle — is owned
+ * The op state - including the live deadline-timer handle - is owned
  * exclusively by the event-loop thread. Two threads need to interact
  * with it:
  *
@@ -776,7 +776,7 @@ static int poll_pool_submit(HlAsyncBackendPool *p,
  *     deadline timer.
  *
  * That marshal removes every race: there are no atomics, no locks,
- * no `resumed` flag, no fragile coordination — the only state-mutating
+ * no `resumed` flag, no fragile coordination - the only state-mutating
  * code paths both run on the same thread, in the same tick. The
  * completion queue is drained before timers in poll_tick, so when both
  * fire in the same tick the resume wins (matching keel-backend
@@ -872,7 +872,7 @@ const HlAsyncBackend hl_async_backend_poll = {
  * STRONG hl_async_backend() override (in async/keel.c) that wins whenever that
  * TU is linked. keel.c compiles into any HTTP build today; docs/keel_feature.md
  * moves it into the composed http feature so a genuinely HTTP-free app
- * links neither keel.c nor libkeel.a and this weak default stands — app.main /
+ * links neither keel.c nor libkeel.a and this weak default stands - app.main /
  * compute.async / timers then run entirely on poll.
  *
  * This is a no-op on a full base: keel.c's strong def always wins there, exactly
@@ -891,7 +891,7 @@ const HlAsyncBackend *hl_async_backend(void)
  * The real symbols live in src/hull/net/keel.c, which compiles only
  * when HL_ENABLE_HTTP_SERVER=1 (the only situation where the
  * connection-bound suspend pair is meaningfully invoked). Other
- * builds — CLI, pure compute, or even client-only HTTPS — reach the
+ * builds - CLI, pure compute, or even client-only HTTPS - reach the
  * symbols transitively (worker_db/wasm/gpu.c, cap/http_async.c, the
  * runtime async paths), but the call sites are gated by
  * `if (active_conn)` / `if (!ctx->detached)` checks that never fire

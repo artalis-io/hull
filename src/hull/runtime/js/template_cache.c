@@ -10,7 +10,7 @@
  * render closure.
  *
  * Same QJS_TAG, arch, endian, name, code key composition as the
- * JS bytecode cache (X-9) — but a separate store kind so the
+ * JS bytecode cache (X-9) - but a separate store kind so the
  * two surfaces don't share blob keys (different eval flag set:
  * GLOBAL+STRICT here, MODULE+COMPILE_ONLY there).
  *
@@ -99,7 +99,7 @@ static JSValue fresh_eval(JSContext *ctx,
 
 /* Cache-miss path: compile-only, persist the chunk, then run.
  *
- * Compile twice? No — JS_Eval with COMPILE_ONLY produces the
+ * Compile twice? No - JS_Eval with COMPILE_ONLY produces the
  * chunk, then JS_EvalFunction runs it. Same total work as the
  * direct JS_Eval the old code path did, plus the JS_WriteObject
  * + store-put. The next boot pays only the JS_ReadObject +
@@ -128,7 +128,7 @@ static JSValue compile_persist_run(JSContext *ctx,
         (void)hl_blob_store_put_keyed(store, key, bytecode, out_len);
         js_free(ctx, bytecode);
     }
-    /* JS_EvalFunction consumes `chunk` — no JS_FreeValue afterward. */
+    /* JS_EvalFunction consumes `chunk` - no JS_FreeValue afterward. */
     return JS_EvalFunction(ctx, chunk);
 }
 
@@ -157,7 +157,7 @@ JSValue hl_js_template_compile_cached(JSContext *ctx,
      * blob is the unrun chunk; we JS_EvalFunction it on hit to
      * produce the render closure.
      *
-     * The win is still substantial — parse + bytecode emission
+     * The win is still substantial - parse + bytecode emission
      * is by far the expensive part. Running the IIFE itself is
      * a single-frame function call that returns its inner
      * `function` literal. */
@@ -172,7 +172,7 @@ JSValue hl_js_template_compile_cached(JSContext *ctx,
             free(bc);
             if (!JS_IsException(chunk)) {
                 /* JS_EvalFunction takes ownership of `chunk`. On
-                 * success it returns the script's result value —
+                 * success it returns the script's result value -
                  * for our IIFE that's the render fn. */
                 JSValue rv = JS_EvalFunction(ctx, chunk);
                 if (!JS_IsException(rv)) return rv;

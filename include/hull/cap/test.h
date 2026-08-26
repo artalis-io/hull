@@ -1,7 +1,7 @@
 /*
- * cap/test.h — In-process HTTP dispatch helper for hull test
+ * cap/test.h - In-process HTTP dispatch helper for hull test
  *
- * The cap layer here is pure C — it knows nothing about Lua or JS.
+ * The cap layer here is pure C - it knows nothing about Lua or JS.
  * It exposes the shared types + dispatch primitive used by both
  * runtime test bindings (declared in hull/runtime/test.h).
  *

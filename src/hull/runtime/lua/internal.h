@@ -1,5 +1,5 @@
 /*
- * internal.h — private cross-file declarations for Lua runtime
+ * internal.h - private cross-file declarations for Lua runtime
  *
  * Shared declarations for runtime.c / dispatch.c / routes.c / timers.c /
  * ws.c / sse.c after the runtime.c god-module was split. Each of those
@@ -42,7 +42,7 @@ typedef struct HlLuaTimer {
     int         in_flight;     /* 1 = callback currently running (async) */
 } HlLuaTimer;
 
-/* Worker dispatch operation — runtime-specific, submitted to thread pool. */
+/* Worker dispatch operation - runtime-specific, submitted to thread pool. */
 typedef struct HlLuaWorkerDispatchOp {
     HlAsyncCtx   *async_ctx;
     HlAllocator  *alloc;

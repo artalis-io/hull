@@ -1,5 +1,5 @@
 /*
- * cacert.c — Embedded Mozilla CA bundle accessor
+ * cacert.c - Embedded Mozilla CA bundle accessor
  *
  * Compiled into libhull_platform.a so hull AND apps built via `hull build`
  * both inherit the embedded bundle. When HL_EMBED_CA_BUNDLE is undefined,
@@ -22,7 +22,7 @@
  * write bug who'd otherwise be able to add their own root CA.
  *
  * (We append a trailing NUL during generation, so len includes it
- * — mbedtls_x509_crt_parse requires NUL-termination for PEM.) */
+ * - mbedtls_x509_crt_parse requires NUL-termination for PEM.) */
 #endif
 
 int hl_embedded_ca_bundle(const unsigned char **data, size_t *len)

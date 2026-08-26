@@ -1,5 +1,5 @@
 /*
- * compilers.h — Canonical compiler defaults for hull build toolchain
+ * compilers.h - Canonical compiler defaults for hull build toolchain
  *
  * Single source of truth for the default compiler used by hull build,
  * hull verify, and other tool-mode commands.

@@ -1,5 +1,5 @@
 /*
- * http.c — HTTP client capability (thin wrapper over Keel)
+ * http.c - HTTP client capability (thin wrapper over Keel)
  *
  * Adds host allowlist checking and audit logging around
  * kl_client_request() from Keel's HTTP client module.
@@ -72,7 +72,7 @@ int hl_cap_http_request(const HlHttpConfig *cfg,
         .decompress        = cfg->decompress,
     };
 
-    /* Delegate to Keel — prefer redirect+pooled > redirect > pooled > plain */
+    /* Delegate to Keel - prefer redirect+pooled > redirect > pooled > plain */
     KlAllocator alloc = kl_allocator_default();
     int rc;
     if (cfg->follow_redirects) {

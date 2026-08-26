@@ -1,11 +1,11 @@
 /*
- * static.c — Static file serving middleware for Hull
+ * static.c - Static file serving middleware for Hull
  *
  * Serves files from the /static/ prefix. Build mode uses embedded entries
  * via kl_response_body_borrow (zero-copy pointer to the binary's data
  * segment); dev mode reads from the filesystem into a heap buffer and
  * uses kl_response_body_copy. The previous dev-mode implementation used
- * kl_response_file() which dispatched to sendfile(2) — on macOS that's
+ * kl_response_file() which dispatched to sendfile(2) - on macOS that's
  * classified as network-outbound by Seatbelt and broke under the
  * default-deny profile for any app without a manifest.hosts allowlist.
  *
@@ -259,7 +259,7 @@ int hl_static_middleware(KlRequest *req, KlResponse *res, void *user_data)
          * kl_response_body_copy(). The previous implementation passed
          * the fd to kl_response_file() which dispatched to sendfile(2).
          * On macOS, sendfile() to an already-accepted inbound socket
-         * is classified by Seatbelt as network-outbound — so an app
+         * is classified by Seatbelt as network-outbound - so an app
          * with no manifest.hosts (which leaves network-outbound off by
          * design) silently failed: headers went out via write() but
          * the body never appeared on the wire. read() + copy avoids

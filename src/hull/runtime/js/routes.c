@@ -1,5 +1,5 @@
 /*
- * routes.c — JS route + middleware + timer + WS/SSE wiring
+ * routes.c - JS route + middleware + timer + WS/SSE wiring
  *
  * Reads the route/middleware/timer/ws/sse definition arrays that
  * `app.<verb>()` builds on globalThis and registers them with Keel
@@ -120,7 +120,7 @@ int hl_js_wire_routes(HlJS *js, KlRouter *router)
                 route->handler_id = handler_id;
                 route->multipart_config = NULL;
 
-                /* Peek def.multipart — present → streaming route. Mirror the
+                /* Peek def.multipart - present → streaming route. Mirror the
                  * server path (hl_js_wire_routes_server) so req.multipart()
                  * resolves under `hull test`; the in-process harness pre-feeds
                  * the whole body to this factory's wrapper (hl_cap_test_dispatch). */
@@ -285,7 +285,7 @@ static KlMultipartConfig *js_build_multipart_config(HlJS *js, JSValueConst mp)
                                               sizeof(KlMultipartConfig));
     if (!cfg) return NULL;
     JSContext *ctx = js->ctx;
-    /* Accept both snake_case and camelCase for cross-runtime ergonomics —
+    /* Accept both snake_case and camelCase for cross-runtime ergonomics -
      * Lua uses snake_case in the same opt names; JS app code idiomatically
      * passes camelCase. Snake-case takes priority if both are present. */
     size_t mps = js_read_size_field(ctx, mp, "max_part_size");
@@ -374,7 +374,7 @@ int hl_js_wire_routes_server(HlJS *js, KlServer *server,
 
                 hl_js_track_route(js, route);
                 if (is_streaming) {
-                    /* streaming-async (v2.2.0+) — see Lua sibling. */
+                    /* streaming-async (v2.2.0+) - see Lua sibling. */
                     kl_server_route_streaming_async(server, method_str, pattern,
                                                      hl_js_keel_handler, route,
                                                      hl_js_multipart_factory);

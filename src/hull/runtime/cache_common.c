@@ -54,7 +54,7 @@ void hl_runtime_cache_hex_encode(const uint8_t *src, size_t src_len,
 /* One process-wide mutex serialises the lazy-open + atexit-register
  * dance across all cache kinds. The slot itself is caller-owned
  * static storage; the mutex is owned here. The fast path (store
- * already open) holds the mutex for one pointer read — concurrent
+ * already open) holds the mutex for one pointer read - concurrent
  * cache hits on the same kind cost a mutex acquire + a load + a
  * release. That's fine for a cache lookup that's already an order
  * of magnitude faster than the parse it skips.
@@ -101,7 +101,7 @@ HlBlobStore *hl_runtime_cache_singleton(const char         *kind,
     slot->store = s;
 
     /* Register the close hook exactly once per slot. Idempotent
-     * across re-opens after a reset — once atexit owns the
+     * across re-opens after a reset - once atexit owns the
      * callback we don't re-arm it. */
     if (atexit_close && !slot->atexit_registered) {
         slot->atexit_registered = 1;
@@ -121,7 +121,7 @@ void hl_runtime_cache_singleton_reset(HlRuntimeCacheSlot *slot)
         slot->store = NULL;
     }
     slot->failed = 0;
-    /* atexit_registered intentionally NOT cleared — see header
+    /* atexit_registered intentionally NOT cleared - see header
      * docstring. The atexit handler stays armed; re-opening a
      * slot must not re-register or we'd double-close on exit. */
     pthread_mutex_unlock(&g_singleton_mutex);

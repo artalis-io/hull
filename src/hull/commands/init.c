@@ -1,5 +1,5 @@
 /*
- * commands/init.c — hull init subcommand
+ * commands/init.c - hull init subcommand
  *
  * Thin wrapper: launches the Lua tool VM with hull.init module.
  * Unlike `hull new`, init works in-place and is idempotent.

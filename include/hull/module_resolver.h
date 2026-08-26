@@ -3,7 +3,7 @@
  * @brief Resolve `manifest.modules` against the canonical registry.
  *
  * Takes a parsed @ref HlManifest and produces a frozen
- * #HlResolvedModuleSet — a bitset, indexed by registry position, of
+ * #HlResolvedModuleSet - a bitset, indexed by registry position, of
  * the modules an app is allowed to import at runtime. The resolver
  * fails closed on:
  *
@@ -17,7 +17,7 @@
  *   - declaration of a module that depends on a compile-time-disabled
  *     subsystem (HL_ENABLE_DB / WASM / GPU)
  *
- * Intrinsic-core modules (those with `intrinsic = 1` in the registry —
+ * Intrinsic-core modules (those with `intrinsic = 1` in the registry -
  * `hull/app`, `hull/log`, `hull/json`) are seeded automatically; the
  * app does not need to declare them, but the resolver still adds their
  * bits to the resolved set.
@@ -28,7 +28,7 @@
  *   2. The resulting set is borrowed by the runtime gating layer
  *      (Lua/JS module loaders, WASM host_call) for fast checks via
  *      `hl_module_set_contains()`.
- *   3. The set has trivial lifetime — stack-allocated on the server
+ *   3. The set has trivial lifetime - stack-allocated on the server
  *      state. No free required.
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
@@ -51,7 +51,7 @@ typedef struct HlManifest HlManifest;
 
 /*
  * Bitset indexed by registry position. Width is HL_MODULE_BITSET_WORDS
- * uint64s (see hull/limits/core.h) — 128 bits today gives headroom over
+ * uint64s (see hull/limits/core.h) - 128 bits today gives headroom over
  * the current ~38-entry registry without forcing dynamic allocation.
  */
 typedef struct HlResolvedModuleSet {
@@ -92,7 +92,7 @@ bool hl_module_set_optional_absent_name(const HlResolvedModuleSet *set,
 /* Number of bits set. */
 int hl_module_set_count(const HlResolvedModuleSet *set);
 
-/* Reset to empty (no modules — not even intrinsics). */
+/* Reset to empty (no modules - not even intrinsics). */
 void hl_module_set_clear(HlResolvedModuleSet *set);
 
 /* ── Resolver ──────────────────────────────────────────────────────── */
@@ -105,7 +105,7 @@ void hl_module_set_clear(HlResolvedModuleSet *set);
  *
  * On error: writes a human-readable message into `errbuf` (NUL-
  * terminated; truncated to `errlen`) and returns -1. The contents of
- * `out` are unspecified after an error — discard.
+ * `out` are unspecified after an error - discard.
  *
  * On success: returns 0; `out` contains the frozen set.
  */
@@ -131,7 +131,7 @@ uint32_t hl_module_feature_cap(const char *name);
 
 /*
  * True iff `spec` requires a build-time subsystem cap (DB/WASM/GPU/HTTP/TUI)
- * that THIS binary lacks — compiled out and not composed as a feature. The JS
+ * that THIS binary lacks - compiled out and not composed as a feature. The JS
  * loader uses it to tell a build-cap-optional top-level import (return a null
  * stub, defer the decision to the resolver + import tracker) from a genuine
  * unresolvable import (throw now): a module absent for OTHER reasons (e.g. a db
@@ -188,7 +188,7 @@ const HlBuildFlavor *hl_build_flavor_auto(uint32_t needed_caps);
 /* ── Pre-manifest import tracker ───────────────────────────────────── */
 
 /*
- * Forward decl of HlRuntime — this header is shared by runtime/lua/ and
+ * Forward decl of HlRuntime - this header is shared by runtime/lua/ and
  * runtime/js/ which both build against the same HlRuntime base struct.
  */
 typedef struct HlRuntime HlRuntime;
@@ -199,11 +199,11 @@ typedef struct HlRuntime HlRuntime;
  * NULL (top-level imports before app.manifest() runs).
  *
  * Dedups against the existing tracker contents. Silently truncates at
- * HL_MANIFEST_MAX_MODULES — no app can legitimately import more
+ * HL_MANIFEST_MAX_MODULES - no app can legitimately import more
  * registry-known modules than the manifest itself can declare.
  *
  * `canonical_name` must outlive the runtime (point into the registry
- * or another static string — the tracker stores the pointer, not a copy).
+ * or another static string - the tracker stores the pointer, not a copy).
  */
 void hl_import_tracker_record(HlRuntime *rt, const char *canonical_name);
 

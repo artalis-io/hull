@@ -1,5 +1,5 @@
 /*
- * tls_transport_stub.c — weak TLS-transport defaults for a TLS-less base.
+ * tls_transport_stub.c - weak TLS-transport defaults for a TLS-less base.
  *
  * Weak, fail-closed defaults for the hl_tls_* accessors serve.c / serve_cli.c
  * call (docs/tls_feature.md, transport seam). When the strong override

@@ -1,8 +1,8 @@
 /*
- * hull_cap_wasm.c — WASM compute capability (WAMR)
+ * hull_cap_wasm.c - WASM compute capability (WAMR)
  *
  * Module cache + WAMR lifecycle + call dispatch + host_call native.
- * Compute-only: NO WASI, NO I/O — pure functions only.
+ * Compute-only: NO WASI, NO I/O - pure functions only.
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
@@ -184,7 +184,7 @@ static int32_t host_call_handler(wasm_exec_env_t exec_env,
 
         /* Callback receives input from WASM and returns a status code.
          * out_buf is provided for future use (host→guest data return)
-         * but is not currently copied back to WASM linear memory —
+         * but is not currently copied back to WASM linear memory -
          * only the integer return value is visible to the guest. */
         char out_buf[HL_WASM_CALLBACK_BUF_SIZE];
         int rc = tl_host_ctx.fn(cb_id, cb_in, cb_in_len,
@@ -290,7 +290,7 @@ static int32_t host_call_handler(wasm_exec_env_t exec_env,
  * the runtime never touches the static copy.  WAMR qsorts the
  * table in place during full_init (wasm_native.c:283), so the
  * arena starts RW, is populated, used by full_init, and only THEN
- * sealed — once sealed it's mprotect-RO for the rest of process
+ * sealed - once sealed it's mprotect-RO for the rest of process
  * lifetime, defeating any heap-write primitive against the
  * host_call dispatcher. */
 static const NativeSymbol host_symbols_template[] = {
@@ -422,7 +422,7 @@ void hl_wasm_pool_release(HlWasmCache *cache, HlWasmModule *mod,
         }
         pthread_mutex_unlock(&mod->mutex);
     }
-    /* process_fn is owned by the instance — no separate cleanup needed */
+    /* process_fn is owned by the instance - no separate cleanup needed */
     (void)process_fn_v;
     wasm_runtime_destroy_exec_env(exec_env);
     wasm_runtime_deinstantiate(inst);
@@ -438,7 +438,7 @@ int hl_cap_wasm_init(HlWasmCache *cache)
     memset(cache, 0, sizeof(*cache));
 
     /* Stage the NativeSymbol table in a seal arena.  Plain `static
-     * const` won't work — WAMR's register_natives qsorts the table
+     * const` won't work - WAMR's register_natives qsorts the table
      * in place during wasm_runtime_full_init (wasm_native.c:283),
      * which would SIGSEGV against rodata.  The arena starts RW, is
      * sorted by WAMR during init, then sealed below; subsequent
@@ -480,7 +480,7 @@ int hl_cap_wasm_init(HlWasmCache *cache)
      * fails the build if either is ever turned on. We leave
      * `init_args.running_mode` at Mode_Default (0); WAMR's auto-select
      * then decays to fast-interpreter for bytecode modules and the AOT
-     * runtime for AOT modules — the two paths Hull supports. Forcing
+     * runtime for AOT modules - the two paths Hull supports. Forcing
      * Mode_Interp here would prevent AOT modules from executing. */
     /* init_args.running_mode left as Mode_Default */
 
@@ -497,7 +497,7 @@ int hl_cap_wasm_init(HlWasmCache *cache)
         return -1;
     }
 
-    /* WAMR has now sorted host_symbols in place.  Seal the arena —
+    /* WAMR has now sorted host_symbols in place.  Seal the arena -
      * post-seal, the entire mapping is RO and any write fault. */
     if (sh_seal_arena_seal(arena) != 0) {
         log_error("[wasm] seal arena seal failed");
@@ -569,7 +569,7 @@ int hl_cap_wasm_load(HlWasmCache *cache, const char *name,
         return HL_WASM_ERR_NOT_FOUND;
     }
 
-    /* Skip early unlocked cache_find / count check — the authoritative
+    /* Skip early unlocked cache_find / count check - the authoritative
      * double-check happens under pool_mutex at the insertion point below.
      * Unlocked reads of cache->count and modules[] are data races under C11. */
 
@@ -727,7 +727,7 @@ int hl_cap_wasm_load(HlWasmCache *cache, const char *name,
     if (cache_find(cache, name)) {
         pthread_mutex_unlock(&cache->pool_mutex);
         /* WAMR ownership: wasm_runtime_load borrows buf; wasm_runtime_unload
-         * releases the module but does NOT free buf — caller retains ownership.
+         * releases the module but does NOT free buf - caller retains ownership.
          * Both unload and free are required here. */
         wasm_runtime_unload(module);
         free(buf);
@@ -1136,7 +1136,7 @@ int hl_cap_wasm_call_buf(HlWasmCache *cache, const char *name,
         goto cleanup_bufs_err;
     }
 
-    /* Free input allocation — no longer needed */
+    /* Free input allocation - no longer needed */
     tl_host_ctx = saved_ctx;   /* restores (clears) tl_host_ctx.spans before teardown */
     if (wasm_in_ptr) wasm_runtime_module_free(inst, wasm_in_ptr);
 
@@ -1248,7 +1248,7 @@ HlWasmInstance *hl_cap_wasm_instance_create(HlWasmCache *cache,
         pthread_mutex_unlock(&mod->mutex);
     }
 
-    /* Instantiate — NOT from pool, this is exclusively owned */
+    /* Instantiate - NOT from pool, this is exclusively owned */
     char error_buf[256];
     wasm_module_inst_t inst = wasm_runtime_instantiate(
         (wasm_module_t)mod->module, stack_size, heap_size,
@@ -1528,7 +1528,7 @@ static int instance_call_buf_impl(HlWasmInstance *pi,
         goto cleanup_bufs_err;
     }
 
-    /* Success — free input, create OWNED output buffer */
+    /* Success - free input, create OWNED output buffer */
     tl_host_ctx = saved_ctx;   /* restores (clears) tl_host_ctx.spans before teardown */
     if (wasm_in_ptr) wasm_runtime_module_free(inst, wasm_in_ptr);
 

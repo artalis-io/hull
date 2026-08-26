@@ -1,5 +1,5 @@
 /*
- * runtime/js/mod_test.c — JavaScript test bindings
+ * runtime/js/mod_test.c - JavaScript test bindings
  *
  * JS-specific test registration, HTTP dispatch wrappers, and assertions.
  * Uses the shared pure-C dispatch helper (cap/test.c::hl_cap_test_dispatch);
@@ -50,14 +50,14 @@ static HlJSTestState *get_js_test_state(JSContext *ctx)
  * assertions that settle in <100ms in practice. */
 #define HL_JS_TEST_DEFAULT_TIMEOUT_MS 5000
 
-/* test(desc, fn)                 — common case: default timeout
- * test(desc, opts, fn)           — opts may carry { timeout: N_ms }
+/* test(desc, fn)                 - common case: default timeout
+ * test(desc, opts, fn)           - opts may carry { timeout: N_ms }
  *
  * The body may be sync or async. Async bodies' returned promises are
  * driven to settlement by hl_js_test_run; rejected promises (which is
  * how a failing `await test.eq(...)` surfaces) mark the test as FAIL.
  * Before the runner became Promise-aware (May 2026) every async test
- * passed regardless of its assertions — see test_async_runner.c for
+ * passed regardless of its assertions - see test_async_runner.c for
  * the regression coverage. */
 static JSValue js_test_call(JSContext *ctx, JSValueConst this_val,
                             int argc, JSValueConst *argv)
@@ -70,7 +70,7 @@ static JSValue js_test_call(JSContext *ctx, JSValueConst this_val,
 
     /* Distinguish the two call shapes by inspecting argv[1]. If it's
      * callable, we're in the 2-arg form (desc, fn). Otherwise we
-     * expect (desc, opts, fn) — opts may be any object; missing fields
+     * expect (desc, opts, fn) - opts may be any object; missing fields
      * fall back to defaults. */
     JSValueConst fn_arg;
     int32_t timeout_ms = HL_JS_TEST_DEFAULT_TIMEOUT_MS;
@@ -159,7 +159,7 @@ static JSValue js_test_http(JSContext *ctx, const char *method,
         }
         JS_FreeValue(ctx, hdrs_val);
 
-        /* opts.ctx — JSON-stringify to pass through as req.ctx */
+        /* opts.ctx - JSON-stringify to pass through as req.ctx */
         JSValue ctx_val = JS_GetPropertyStr(ctx, argv[1], "ctx");
         if (JS_IsObject(ctx_val)) {
             JSValue json_val = JS_JSONStringify(ctx, ctx_val, JS_UNDEFINED, JS_UNDEFINED);
@@ -488,7 +488,7 @@ static void record_pass(FILE *out, HlTestCaseResult *results, int max_results,
  * throws). The next QuickJS API call would then misbehave. Helper
  * defensively drains and frees any pending exception so callers stay
  * on the happy path. JS_GetException returns JS_NULL when no exception
- * is set, so the unconditional drain is safe — JS_FreeValue on a
+ * is set, so the unconditional drain is safe - JS_FreeValue on a
  * NULL/undefined tagged value is a no-op in QuickJS. */
 static void clear_pending_exception(JSContext *ctx)
 {
@@ -498,12 +498,12 @@ static void clear_pending_exception(JSContext *ctx)
 
 /* Extract a human-readable error message from a JS exception value
  * (or any value coerced to a string). Caller owns the JSValue copy
- * but not the C string — buffer must outlive use. */
+ * but not the C string - buffer must outlive use. */
 static void extract_error_string(JSContext *ctx, JSValueConst err,
                                  char *buf, size_t buf_size)
 {
     /* Prefer .message; fall back to String(err). Either lookup can
-     * raise (e.g. a getter that throws) — clear any pending exception
+     * raise (e.g. a getter that throws) - clear any pending exception
      * on the failure path so we don't poison subsequent calls. */
     JSValue msg_val = JS_GetPropertyStr(ctx, err, "message");
     const char *msg = NULL;
@@ -527,7 +527,7 @@ static void extract_error_string(JSContext *ctx, JSValueConst err,
 /* QuickJS doesn't expose JS_IsPromise() in the public header. JS_PromiseState
  * returns one of three enum values for Promises and an out-of-range value for
  * everything else (in vendored QuickJS, -1 cast to the enum type). Wrapping
- * the test in a named helper makes the call site read intentionally — and
+ * the test in a named helper makes the call site read intentionally - and
  * makes the day a future QuickJS adds JS_IsPromise() a one-line swap. */
 static int hl_js_value_is_promise(JSContext *ctx, JSValueConst v)
 {
@@ -570,7 +570,7 @@ void hl_js_test_run(JSContext *ctx, int *total, int *passed, int *failed,
         int32_t timeout_ms = HL_JS_TEST_DEFAULT_TIMEOUT_MS;
         JS_ToInt32(ctx, &timeout_ms, timeout_val);
         /* js_test_call validates timeout_ms > 0 at registration time, but
-         * test_state.cases is a JS array — user test code COULD mutate
+         * test_state.cases is a JS array - user test code COULD mutate
          * the stored timeout_ms before hl_js_test_run iterates. Re-clamp
          * here so the pump loop's `timeout_ms > 0 && monotonic_ms() >=
          * deadline` guard fires reliably; otherwise a zero/negative value
@@ -585,7 +585,7 @@ void hl_js_test_run(JSContext *ctx, int *total, int *passed, int *failed,
         char err_buf[512];
 
         if (JS_IsException(ret)) {
-            /* Sync throw — captured as before. */
+            /* Sync throw - captured as before. */
             JSValue exc = JS_GetException(ctx);
             extract_error_string(ctx, exc, err_buf, sizeof(err_buf));
             JS_FreeValue(ctx, exc);
@@ -605,7 +605,7 @@ void hl_js_test_run(JSContext *ctx, int *total, int *passed, int *failed,
                  * the promise settles or the deadline expires. The
                  * combination handles both pure-assertion async tests
                  * (only microtasks needed) and tests that perform
-                 * async I/O (timer / http.fetch / compute.async — the
+                 * async I/O (timer / http.fetch / compute.async - the
                  * backend tick advances those). */
                 while ((pstate = JS_PromiseState(ctx, ret)) == JS_PROMISE_PENDING) {
                     hl_js_run_jobs(js);
@@ -614,7 +614,7 @@ void hl_js_test_run(JSContext *ctx, int *total, int *passed, int *failed,
                     if (timeout_ms > 0 && backend->monotonic_ms() >= deadline)
                         break;
                     /* If no async backend is wired and microtasks
-                     * settled nothing, we'd spin — guard by re-
+                     * settled nothing, we'd spin - guard by re-
                      * checking state after a single microtask pass
                      * and bailing if still PENDING. */
                     if (!async_ctx) {
@@ -633,7 +633,7 @@ void hl_js_test_run(JSContext *ctx, int *total, int *passed, int *failed,
                     record_fail(out, results, max_results, idx, desc, err_buf);
                     (*failed)++;
                 } else {
-                    /* Still PENDING — treat as timeout/hang. */
+                    /* Still PENDING - treat as timeout/hang. */
                     snprintf(err_buf, sizeof(err_buf),
                              "test did not settle within %d ms", timeout_ms);
                     record_fail(out, results, max_results, idx, desc, err_buf);
@@ -643,7 +643,7 @@ void hl_js_test_run(JSContext *ctx, int *total, int *passed, int *failed,
         }
         else {
             /* Sync test body that returned a primitive (undefined,
-             * boolean, etc.). Treat as PASS — matches the original
+             * boolean, etc.). Treat as PASS - matches the original
              * runner's behavior for any non-exception return. */
             record_pass(out, results, max_results, idx, desc);
             (*passed)++;

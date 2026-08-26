@@ -1,5 +1,5 @@
 /*
- * runtime/lua.h — Lua 5.4 runtime for Hull
+ * runtime/lua.h - Lua 5.4 runtime for Hull
  *
  * Manages Lua VM lifecycle: init, sandbox, module loader, and request dispatch.
  *
@@ -30,7 +30,7 @@ typedef struct HlAsyncCtx HlAsyncCtx;
 /*
  * HlLuaTimer + HlLuaWorkerDispatchOp moved to
  * src/hull/runtime/lua/internal.h as part of architectural roadmap
- * item J — they're Hull-internal op structs that no external consumer
+ * item J - they're Hull-internal op structs that no external consumer
  * references.
  */
 
@@ -52,7 +52,7 @@ typedef struct {
 /* ── Runtime context ────────────────────────────────────────────────── */
 
 /*
- * Stability: Tier 4 (internal — see docs/stability.md). All fields below
+ * Stability: Tier 4 (internal - see docs/stability.md). All fields below
  * `base` are Hull-internal implementation detail; the layout may change
  * in any release. External code must reach HlLua only via:
  *   - the lifecycle functions (hl_lua_init / _free / _load_app)
@@ -64,7 +64,7 @@ typedef struct {
  * and may move to a heap factory (hl_lua_create()) post-v0.1.0.
  */
 typedef struct HlLua {
-    HlRuntime       base;          /* vtable + shared capabilities — Tier 2 */
+    HlRuntime       base;          /* vtable + shared capabilities - Tier 2 */
 
     lua_State      *L;
 
@@ -133,7 +133,7 @@ typedef struct HlLua {
      * UDF destroy callbacks check this before calling luaL_unref. */
     int         udf_runtime_alive;
 
-    /* CLI mode (app.main) — non-NULL while main's coroutine is alive.
+    /* CLI mode (app.main) - non-NULL while main's coroutine is alive.
      * When the existing async resume machinery sees the resumed coroutine
      * == cli_main_co and the status is no longer LUA_YIELD, it knows
      * main has terminated and calls kl_server_stop on `server` so the
@@ -162,7 +162,7 @@ void hl_lua_worker_register_init(HlLuaWorkerInitFn fn);
 /*
  * HlLuaWorkerDispatchOp + the hl_lua_worker_dispatch_* functions and
  * hl_lua_worker_db_init moved to src/hull/runtime/lua/internal.h
- * as part of architectural roadmap item J — they're Hull-internal
+ * as part of architectural roadmap item J - they're Hull-internal
  * machinery, not consumed by any external code.
  */
 

@@ -1,5 +1,5 @@
 /*
- * mod_ws_server.c — hull:web:ws-server module (server-side WebSocket helpers + conn class)
+ * mod_ws_server.c - hull:web:ws-server module (server-side WebSocket helpers + conn class)
  *
  * Exposes: ws.broadcast(path, data [, binary])
  *          ws.connections(path)
@@ -42,7 +42,7 @@ typedef struct {
 JSValue hl_js_ws_push_conn(JSContext *ctx, HlWsConn *conn)
 {
     if (conn->user_data) {
-        /* Already have a JS object — return dup'd ref */
+        /* Already have a JS object - return dup'd ref */
         JSValue *stored = (JSValue *)conn->user_data;
         return JS_DupValue(ctx, *stored);
     }

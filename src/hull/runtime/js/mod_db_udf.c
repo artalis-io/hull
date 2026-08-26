@@ -1,4 +1,4 @@
-/* mod_db_udf.c — hull.db UDF bindings (SQLite user-defined functions, JS).
+/* mod_db_udf.c - hull.db UDF bindings (SQLite user-defined functions, JS).
  *
  * The per-runtime SQLite UDF bridge, split out of mod_db.c so the base runtime
  * archive (libhull_feature-js.a) carries ZERO sqlite3_* references (
@@ -32,7 +32,7 @@
 /* Context for JS scalar UDF trampoline */
 typedef struct {
     JSContext *ctx;
-    JSValue    func;  /* borrowed — prevent GC via ref counting */
+    JSValue    func;  /* borrowed - prevent GC via ref counting */
     int       *alive; /* points to HlJS.udf_runtime_alive */
 } JsScalarUdfCtx;
 

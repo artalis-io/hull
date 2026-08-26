@@ -1,5 +1,5 @@
 /*
- * commands/manifest.c — hull manifest subcommand
+ * commands/manifest.c - hull manifest subcommand
  *
  * Thin wrapper: launches the Lua tool VM with hull.manifest module.
  *

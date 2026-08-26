@@ -1,5 +1,5 @@
 /*
- * hull_cap_wasm_data.c — WASM shared data management
+ * hull_cap_wasm_data.c - WASM shared data management
  *
  * Shared heap segments, chain rebuild, option clamping, data load/unload.
  * Split from wasm.c to keep the module manageable.
@@ -25,7 +25,7 @@
 #include <sys/mman.h>
 #include <unistd.h>
 
-/* ── Module name validation (duplicated from wasm.c — small, avoids export) */
+/* ── Module name validation (duplicated from wasm.c - small, avoids export) */
 
 static int validate_module_name(const char *name)
 {
@@ -42,7 +42,7 @@ static int validate_module_name(const char *name)
     return 0;
 }
 
-/* ── Cache lookup (duplicated — small helper) ─────────────────────── */
+/* ── Cache lookup (duplicated - small helper) ─────────────────────── */
 
 static HlWasmModule *cache_find(HlWasmCache *cache, const char *name)
 {
@@ -71,7 +71,7 @@ int hl_wasm_rebuild_chain(HlWasmModule *mod)
     int is_mem64 = mod->is_memory64;
     uint64_t addr_ceil = is_mem64 ? UINT64_MAX : (uint64_t)UINT32_MAX;
 
-    /* For a single segment, no chaining needed — just create the heap */
+    /* For a single segment, no chaining needed - just create the heap */
     if (sd->count == 1) {
         if (sd->segments[0].alloc_size == 0) return -1;
         sd->segments[0].wasm_addr = addr_ceil - sd->segments[0].alloc_size + 1;
@@ -366,7 +366,7 @@ int hl_cap_wasm_data_load(HlWasmCache *cache, const char *module_name,
                 }
             }
         }
-        /* Segment not found — OK, nothing to remove */
+        /* Segment not found - OK, nothing to remove */
         pthread_mutex_unlock(&mod->mutex);
         return 0;
     }
@@ -399,7 +399,7 @@ int hl_cap_wasm_data_load(HlWasmCache *cache, const char *module_name,
     }
 
     if (slot < 0) {
-        /* New segment — check limits */
+        /* New segment - check limits */
         if (sd->count >= HL_WASM_MAX_DATA_SEGMENTS) {
             pthread_mutex_unlock(&mod->mutex);
             if (err_msg) *err_msg = err_too_many;
@@ -485,7 +485,7 @@ int hl_cap_wasm_data_load(HlWasmCache *cache, const char *module_name,
     }
 
     /* Create WAMR shared heap with pre-allocated backing.
-     * SharedHeapInitArgs.size is uint32_t — guard against overflow. */
+     * SharedHeapInitArgs.size is uint32_t - guard against overflow. */
     if (alloc_size > UINT32_MAX) {
         if (!is_mmap_backing)
             munmap(backing, alloc_size);

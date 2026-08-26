@@ -1,4 +1,4 @@
-/* mod_server.c — hull.server module: server stats
+/* mod_server.c - hull.server module: server stats
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
@@ -8,7 +8,7 @@
 #include <keel/server.h>
 
 /* ════════════════════════════════════════════════════════════════════
- * hull.server — Server stats
+ * hull.server - Server stats
  * ════════════════════════════════════════════════════════════════════ */
 
 /* server.stats() → { active_connections, max_connections, async_suspended,

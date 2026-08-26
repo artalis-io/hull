@@ -1,11 +1,11 @@
 /*
- * lua_worker.c — Per-worker Lua VMs for worker.dispatch()
+ * lua_worker.c - Per-worker Lua VMs for worker.dispatch()
  *
  * Manages TLS-keyed Lua VMs on worker threads. Each worker gets a
  * minimal Lua VM (base, string, table, math, utf8) with capabilities
  * registered via init hooks (e.g. db.* from lua/worker_db.c).
  *
- * Zero DB knowledge — capabilities are plugged in via hooks.
+ * Zero DB knowledge - capabilities are plugged in via hooks.
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
@@ -205,7 +205,7 @@ static int capture_result(lua_State *L, HlLuaWorkerDispatchOp *op)
             const char *key = lua_tostring(L, -2);
             op->result_kvs[idx].key = strdup(key);
             if (!op->result_kvs[idx].key) {
-                /* OOM on key dup: leave partial state — caller (op_free)
+                /* OOM on key dup: leave partial state - caller (op_free)
                  * will release everything we've copied so far (M-2). */
                 lua_pop(L, 2);
                 return -1;

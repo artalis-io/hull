@@ -1,9 +1,9 @@
 /*
- * async/keel.c — HlAsyncBackend implementation backed by Keel.
+ * async/keel.c - HlAsyncBackend implementation backed by Keel.
  *
  * Wraps Keel's event loop, timers, watchers, thread pool, and
  * monotonic time behind the HlAsyncBackend vtable. The async backend
- * is logically independent of any HTTP server — Keel just happens to
+ * is logically independent of any HTTP server - Keel just happens to
  * provide a convenient implementation today. Future siblings under
  * this directory: async/poll.c (libc poll for HL_ENABLE_HTTP=0
  * builds), and any libuv / io_uring backends that come
@@ -12,9 +12,9 @@
  * Notes on the op_suspend/op_complete contract:
  *
  *   Keel's KlAsyncOp is tied to a KlConn (used by HTTP request
- *   suspension). For the runtime-agnostic op_suspend path — which
+ *   suspension). For the runtime-agnostic op_suspend path - which
  *   may be called without an HTTP connection (timer callbacks,
- *   CLI mode) — this backend tracks ops itself and uses Keel's
+ *   CLI mode) - this backend tracks ops itself and uses Keel's
  *   timer system to fire on_deadline and on_resume. The actual
  *   connection-bound suspension path stays in cap/http_async.c /
  *   runtime/{lua,js}/dispatch.c, which talk to Keel directly. That
@@ -45,7 +45,7 @@ struct HlAsyncBackendCtx {
     /* The active event loop. Either points to `kel_storage` (owned
      * mode: backend->init created it) or to an external KlEventCtx
      * passed via hl_async_backend_keel_wrap (borrowed mode: the
-     * caller — typically KlServer — owns it). */
+     * caller - typically KlServer - owns it). */
     KlEventCtx   *kel;
     KlEventCtx    kel_storage;
     KlAllocator   kalloc;       /* used only in owned mode */
@@ -99,7 +99,7 @@ HlAsyncBackendCtx *hl_async_backend_keel_wrap(KlEventCtx *ev)
 void hl_async_backend_keel_unwrap(HlAsyncBackendCtx *ctx)
 {
     if (!ctx) return;
-    /* No kel_event_ctx_free here — borrowed. */
+    /* No kel_event_ctx_free here - borrowed. */
     free(ctx);
 }
 
@@ -155,7 +155,7 @@ static uint64_t keel_monotonic_ms(void) { return kl_monotonic_ms(); }
 
 /* ── Timers ────────────────────────────────────────────────────────── */
 
-/* Bridge between HlAsyncTimerFn and Keel's KlTimerFn — same signature.
+/* Bridge between HlAsyncTimerFn and Keel's KlTimerFn - same signature.
  *
  * Handle encoding: Keel returns timer IDs >= 0 (0 is a valid handle).
  * Our vtable contract reserves 0 as "invalid"; shift Keel's id by +1

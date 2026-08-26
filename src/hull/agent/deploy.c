@@ -1,5 +1,5 @@
 /*
- * agent/deploy.c — `hull agent deploy` — deployment-readiness analysis.
+ * agent/deploy.c - `hull agent deploy` - deployment-readiness analysis.
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
@@ -203,7 +203,7 @@ int hl_agent_deploy(const char *app_dir, ShJsonBuf *out)
     sh_json_write_kv_int(&w, "shaders", n_shaders);
     sh_json_write_object_end(&w);
 
-    /* Compute modules — per-module detail.
+    /* Compute modules - per-module detail.
      *
      * For every compute/<name>.wasm we report:
      *   - name             module name (filename without extension)

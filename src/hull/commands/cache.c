@@ -89,7 +89,7 @@ static int stdio_write_fn(void *ctx, const char *data, size_t len)
  * 0 is also the "no bound" sentinel for cleanup opts, so callers
  * distinguish "unset" from "invalid" via the error pointer.
  *
- * Single unit only (no "1d12h" composites) — keeps the parser
+ * Single unit only (no "1d12h" composites) - keeps the parser
  * trivial and the CLI predictable. */
 static uint64_t parse_duration(const char *s, const char **err)
 {
@@ -160,7 +160,7 @@ static uint64_t parse_size(const char *s, const char **err)
 }
 
 /* Build the HULL_NO_<KIND>_CACHE env-var name for a registry entry.
- * Returns an empty string for system stores (env_kind == NULL — no
+ * Returns an empty string for system stores (env_kind == NULL - no
  * per-cache opt-out applies). Forwarding wrapper around the
  * canonical composer in cache_dir.h. */
 static void env_var_for(const HlCacheKind *kind, char *out, size_t out_sz)
@@ -193,10 +193,10 @@ static HlBlobStore *open_kind(const HlCacheKind *kind)
 static int cache_list_text(void)
 {
     /* Status column shows the per-cache opt-out state:
-     *   ok          — cache active
-     *   off (env)   — HULL_NO_<KIND>_CACHE truthy in this process
-     *   off (all)   — HULL_NO_CACHE truthy (overrides everything)
-     *   n/a         — system store; no opt-out concept
+     *   ok          - cache active
+     *   off (env)   - HULL_NO_<KIND>_CACHE truthy in this process
+     *   off (all)   - HULL_NO_CACHE truthy (overrides everything)
+     *   n/a         - system store; no opt-out concept
      */
     int global_off = hl_hull_cache_disabled(NULL);
 
@@ -400,7 +400,7 @@ static int cmd_prune(int argc, char **argv)
         }
     }
 
-    /* Need at least one bound — pruning with no max-size and no
+    /* Need at least one bound - pruning with no max-size and no
      * max-age would be a no-op, which is confusing. Make the user
      * pass `clear` if they want to wipe everything. */
     if (max_size == 0 && max_age == 0) {
@@ -535,7 +535,7 @@ static int collect_ids(const char *id, size_t size, void *user)
 }
 
 /* Returns: removed count via out_removed, bytes freed via
- * out_bytes, blob-store rc as the return value. Renders nothing —
+ * out_bytes, blob-store rc as the return value. Renders nothing -
  * caller picks human vs JSON output shape. */
 static int clear_one(const HlCacheKind *k,
                      uint64_t *out_removed, uint64_t *out_bytes,
@@ -548,7 +548,7 @@ static int clear_one(const HlCacheKind *k,
     HlBlobStore *s = open_kind(k);
     if (!s) { *out_no_store = 1; return 0; }
 
-    /* "Clear" means "remove every entry", not "evict by policy" —
+    /* "Clear" means "remove every entry", not "evict by policy" -
      * so iter + delete rather than blob_store_cleanup. The
      * cleanup-based approach would miss files less than 1 second
      * old (max_age_sec=0 means "no age limit", and a smaller
@@ -596,7 +596,7 @@ static int cmd_clear(int argc, char **argv)
     }
 
     if (!yes) {
-        /* Use stderr even in JSON mode — refusal is a process
+        /* Use stderr even in JSON mode - refusal is a process
          * error, not a structured result. Mirrors the prune
          * behaviour for invalid flags. */
         fprintf(stderr,
@@ -674,7 +674,7 @@ static int cmd_clear(int argc, char **argv)
  *   - filename is 64 lowercase hex (already enforced by the
  *     store's iter walker, but we re-check defensively)
  *   - file is readable + non-empty (zero-byte files are the
- *     valid SHA-256("") entry only — separate check)
+ *     valid SHA-256("") entry only - separate check)
  *   - is_cas kinds: sha256(contents) == filename
  *
  * On failure:
@@ -692,7 +692,7 @@ typedef struct {
     uint64_t repaired;
 } VerifyStats;
 
-/* Iter state — passed through hl_blob_store_iter via the
+/* Iter state - passed through hl_blob_store_iter via the
  * callback's `user` pointer. `w` is non-NULL in JSON mode; the
  * writer manages comma-separation automatically so we no longer
  * need a json_first flag here. */
@@ -717,7 +717,7 @@ static int verify_read_all(const char *path,
     }
     if ((size_t)st.st_size > HL_BLOB_STORE_MAX_IN_MEMORY_BYTES) {
         /* Shared cap with `hl_blob_store_get`. A legit cache blob
-         * is orders of magnitude smaller — see the constant's
+         * is orders of magnitude smaller - see the constant's
          * docstring in include/hull/blob_store.h. */
         close(fd); return -1;
     }
@@ -750,7 +750,7 @@ static int verify_visit(const char *id, size_t size, void *user)
 
     char path[PATH_MAX];
     if (hl_blob_store_compose_path(v->store, id, path, sizeof(path)) != 0) {
-        /* Can't even compose the path — count as corrupt but no
+        /* Can't even compose the path - count as corrupt but no
          * repair possible. */
         v->stats.corrupt++;
         if (!v->w) {
@@ -788,7 +788,7 @@ static int verify_visit(const char *id, size_t size, void *user)
          * corruption lazily (the cache modules already
          * unlink+recompile on load failure).
          *
-         * A zero-byte runtime cache entry is always corrupt —
+         * A zero-byte runtime cache entry is always corrupt -
          * none of the bytecode/template caches write empty
          * blobs. Read-failure also flags. */
         struct stat st;
@@ -844,7 +844,7 @@ static int verify_one_kind(const HlCacheKind *k, int repair,
      * to something other than a directory (e.g. a regular file
      * planted there by a misconfigured deployment, or stale state
      * from a different Hull version). Treat that identically to
-     * a blob_store_open failure — emit `open_failed`, bump rc.
+     * a blob_store_open failure - emit `open_failed`, bump rc.
      * Silent skip misleads CI gates consuming `verify --json`. */
     char root[PATH_MAX];
     HlBlobStore *s = NULL;

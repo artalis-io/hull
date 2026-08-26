@@ -1,5 +1,5 @@
 /*
- * timers.c — JS background timer support
+ * timers.c - JS background timer support
  *
  * Implements `app.every()` / `app.daily()` timer callbacks. Hosts the
  * trampoline that fires from Keel's timer min-heap, drives the handler
@@ -159,7 +159,7 @@ void hl_js_timer_trampoline(void *user_data)
     JSPromiseStateEnum state = JS_PromiseState(ctx, ret);
 
     if (state == JS_PROMISE_PENDING) {
-        /* Async handler — wire handler_promise on the continuation */
+        /* Async handler - wire handler_promise on the continuation */
         if (js->last_async_cont) {
             hl_js_async_cont_set_handler_promise(
                 (HlAsyncCont *)js->last_async_cont, ctx, ret);
@@ -187,7 +187,7 @@ void hl_js_timer_trampoline(void *user_data)
         if (msg) JS_FreeCString(ctx, msg);
         JS_FreeValue(ctx, result);
     } else {
-        /* Sync return (not a promise) — check for false */
+        /* Sync return (not a promise) - check for false */
         if (JS_IsBool(ret) && JS_ToBool(ctx, ret) == 0)
             cancelled = 1;
     }

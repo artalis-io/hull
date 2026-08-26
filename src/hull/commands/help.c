@@ -1,5 +1,5 @@
 /*
- * commands/help.c — top-level `hull help` / `hull --help` usage printer.
+ * commands/help.c - top-level `hull help` / `hull --help` usage printer.
  *
  * Lists every subcommand grouped by purpose. The list mirrors the
  * dispatch table in `commands/dispatch.c`; subcommands gated by

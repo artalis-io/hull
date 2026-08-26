@@ -1,5 +1,5 @@
 /*
- * mod_fs.c — hull:fs module (filesystem capabilities, mmap)
+ * mod_fs.c - hull:fs module (filesystem capabilities, mmap)
  *
  * Note: In the original monolithic modules.c, fs was inside #ifdef HL_ENABLE_WASM
  * because it shared js_mmap_class_id with compute. Now the class ID is in
@@ -45,7 +45,7 @@ static JSValue js_mmap_get_length(JSContext *ctx, JSValueConst this_val,
     return JS_NewInt64(ctx, (int64_t)buf->len);
 }
 
-/* fs.read(path) — returns an ArrayBuffer with the whole file contents.
+/* fs.read(path) - returns an ArrayBuffer with the whole file contents.
  * Two-pass: first call hl_cap_fs_read with buf=NULL to learn the size,
  * then allocate + read. Throws on error to match Hull JS conventions
  * (callers can try/catch). */
@@ -96,7 +96,7 @@ static JSValue js_fs_read(JSContext *ctx, JSValueConst this_val,
     return ab;
 }
 
-/* fs.write(path, bytes) — accepts ArrayBuffer / TypedArray / string.
+/* fs.write(path, bytes) - accepts ArrayBuffer / TypedArray / string.
  * Throws on error; returns true on success. */
 static JSValue js_fs_write(JSContext *ctx, JSValueConst this_val,
                            int argc, JSValueConst *argv)

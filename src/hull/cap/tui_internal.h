@@ -1,5 +1,5 @@
 /*
- * src/hull/cap/tui_internal.h — Shared types between tui.c and
+ * src/hull/cap/tui_internal.h - Shared types between tui.c and
  * tui_input.c. Not part of the public API.
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
@@ -97,7 +97,7 @@ void hl_tui_parser_feed(HlTuiParser *p, const char *bytes, size_t len);
 int  hl_tui_parser_pop (HlTuiParser *p, HlTuiEvent *out);
 
 /* Commit any in-flight in-progress state as a best-effort event.
- * Called by the cap layer after an idle slice without new bytes —
+ * Called by the cap layer after an idle slice without new bytes -
  * resolves the "lone ESC vs. start of CSI" ambiguity. Today:
  *   - ESC state with no follow-up → emit a bare "escape" key event.
  * Returns 1 if a new event was queued, 0 otherwise. */

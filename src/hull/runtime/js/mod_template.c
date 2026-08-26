@@ -1,5 +1,5 @@
 /*
- * mod_template.c — hull:_template module (compile + loadRaw bridge)
+ * mod_template.c - hull:_template module (compile + loadRaw bridge)
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
@@ -14,7 +14,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* _template.compile(code, name?) — compile generated JS source to a function */
+/* _template.compile(code, name?) - compile generated JS source to a function */
 static JSValue js_template_compile(JSContext *ctx, JSValueConst this_val,
                                     int argc, JSValueConst *argv)
 {
@@ -37,7 +37,7 @@ static JSValue js_template_compile(JSContext *ctx, JSValueConst this_val,
     }
 
     /* Compile + execute the IIFE through the on-disk template
-     * cache — on hit the render function is deserialized via
+     * cache - on hit the render function is deserialized via
      * JS_ReadObject and we skip both the parse pass AND the IIFE
      * execute that creates the closure. See
      * include/hull/runtime/js_template_cache.h. */
@@ -50,7 +50,7 @@ static JSValue js_template_compile(JSContext *ctx, JSValueConst this_val,
     return result;
 }
 
-/* _template.loadRaw(name) — load raw template bytes from embedded
+/* _template.loadRaw(name) - load raw template bytes from embedded
  * entries or filesystem fallback. Returns string or null. */
 static JSValue js_template_load_raw(JSContext *ctx, JSValueConst this_val,
                                      int argc, JSValueConst *argv)
@@ -116,7 +116,7 @@ static JSValue js_template_load_raw(JSContext *ctx, JSValueConst this_val,
                          js->app_dir, name);
         if (n > 0 && (size_t)n < sizeof(path)) {
             /* Verify resolved path stays within app_dir (symlink escape check).
-             * Canonicalize app_dir too — it may be a relative path when
+             * Canonicalize app_dir too - it may be a relative path when
              * invoked as `hull test relative/path/`. */
             char resolved[PATH_MAX];
             if (realpath(path, resolved)) {

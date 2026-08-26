@@ -4,12 +4,12 @@
  *
  * All filesystem access from Lua/JS runtimes goes through these
  * functions. Three layers of defense:
- *   1. @ref hl_cap_fs_validate — path-traversal + symlink-escape check.
+ *   1. @ref hl_cap_fs_validate - path-traversal + symlink-escape check.
  *   2. Manifest allowlist (caller-supplied via #HlFsConfig).
  *   3. Kernel sandbox `unveil` (Linux/Cosmo) or Seatbelt profile (macOS),
  *      applied separately by `sandbox.c`.
  *
- * App code never sees raw paths — only `fs.read("data/log.txt")` etc.,
+ * App code never sees raw paths - only `fs.read("data/log.txt")` etc.,
  * which are validated against the manifest's declared `fs.read` /
  * `fs.write` patterns.
  *
@@ -79,7 +79,7 @@ int hl_cap_fs_validate(const HlFsConfig *cfg, const char *path,
  *
  * @return Number of bytes read on success (≥ 0), or `-1` on failure.
  *         Reads larger than `buf_size` are rejected (caller's buffer
- *         is left untouched). NUL-terminator NOT written — caller
+ *         is left untouched). NUL-terminator NOT written - caller
  *         knows the byte count from the return value.
  */
 int64_t hl_cap_fs_read(const HlFsConfig *cfg, const char *path,
@@ -394,7 +394,7 @@ HlMappedBuffer *hl_cap_fs_mmap(const HlFsConfig *cfg, const char *path,
  * @brief Unmap and free a mapped buffer. Idempotent.
  *
  * Calls `munmap(addr, len)` then frees the wrapper struct. Safe to call
- * twice — sets `closed = 1` after the first call and the second is a
+ * twice - sets `closed = 1` after the first call and the second is a
  * no-op.
  *
  * @param buf  Buffer to unmap. May be NULL (no-op).

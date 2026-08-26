@@ -1,5 +1,5 @@
 /*
- * cap/http_async.h — Non-blocking HTTP client via Keel's async client
+ * cap/http_async.h - Non-blocking HTTP client via Keel's async client
  *
  * Thin wrapper around kl_redirect_start() / kl_client_start() that adds
  * host allowlist checking, audit logging, and HlAsyncCtx integration.

@@ -1,5 +1,5 @@
 /*
- * cap/wasm_stream.h — WASM streaming I/O
+ * cap/wasm_stream.h - WASM streaming I/O
  *
  * Processes data in chunks through a WASM module using a persistent
  * instance. Input/output can be buffers, files, or callbacks.

@@ -1,5 +1,5 @@
 /*
- * agent/capabilities.c — `hull agent capabilities`: declared (manifest)
+ * agent/capabilities.c - `hull agent capabilities`: declared (manifest)
  * vs used (source-walk) capability analysis.
  *
  * Surfaces:
@@ -7,7 +7,7 @@
  *   - used-but-undeclared (will be blocked by sandbox at runtime; fix the manifest)
  *
  * The "used" set is determined by a substring scan over app source files.
- * It's a heuristic — false positives (e.g. capability names inside string
+ * It's a heuristic - false positives (e.g. capability names inside string
  * literals) are possible but rare in practice, and false negatives only
  * happen when the app accesses caps through indirect indexing
  * (`(_G or {})["http"]`). Both edge cases are also detected as
@@ -104,7 +104,7 @@ static int read_file_into(Aggregate *a, const char *path, size_t max_bytes)
     if (!buf) { fclose(f); return 0; }
     size_t got = fread(buf, 1, (size_t)n, f);
     /* L-3 fix: capture read error before fclose. A partial read shouldn't
-     * be appended — it could split a capability call's substring match
+     * be appended - it could split a capability call's substring match
      * at a boundary and yield false-negative coverage. */
     int read_err = ferror(f);
     fclose(f);

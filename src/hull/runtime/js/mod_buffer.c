@@ -1,5 +1,5 @@
 /*
- * mod_buffer.c — Unified buffer protocol + shared class ID definitions
+ * mod_buffer.c - Unified buffer protocol + shared class ID definitions
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
@@ -37,7 +37,7 @@ int js_get_buffer(JSContext *ctx, JSValueConst val,
 
     /* Probe each opaque type via JS_GetOpaque (non-throwing). The
      * throwing variant JS_GetOpaque2 sets a TypeError in the ctx on
-     * every mismatch — for a multi-type probe like this one we'd
+     * every mismatch - for a multi-type probe like this one we'd
      * leak a pending exception on every successful "second-choice"
      * match, which can later confuse callers that test JSValues
      * against exceptions. JS_GetOpaque just returns NULL on
@@ -51,7 +51,7 @@ int js_get_buffer(JSContext *ctx, JSValueConst val,
         return 1;
     }
 #ifdef HL_ENABLE_WASM
-    /* WasmBuffer — js_wasm_buf_class_id is defined in this file */
+    /* WasmBuffer - js_wasm_buf_class_id is defined in this file */
     {
         HlWasmBuffer *wb = JS_GetOpaque(val, js_wasm_buf_class_id);
         if (wb && !wb->closed) {
@@ -100,7 +100,7 @@ int js_get_buffer(JSContext *ctx, JSValueConst val,
         } else {
             /* Drain the pending exception so the string fallback
              * doesn't see it. JS_GetTypedArrayBuffer raises on a
-             * non-TypedArray which is fine here — we're probing. */
+             * non-TypedArray which is fine here - we're probing. */
             JS_FreeValue(ctx, JS_GetException(ctx));
         }
     }

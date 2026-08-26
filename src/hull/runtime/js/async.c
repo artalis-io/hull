@@ -1,5 +1,5 @@
 /*
- * js_async.c — JS async continuation + hull.sleep()
+ * js_async.c - JS async continuation + hull.sleep()
  *
  * Implements HlJsAsyncCont (the JS-specific HlAsyncCont vtable) and
  * the hull.sleep() Promise-returning C function.
@@ -26,7 +26,7 @@
 typedef JSValue (*HlJsPushResultFn)(JSContext *ctx, void *driver);
 
 typedef struct HlJsAsyncCont {
-    HlAsyncCont       base;         /* vtable — must be first member */
+    HlAsyncCont       base;         /* vtable - must be first member */
     HlJS             *js;           /* runtime instance */
     JSValue           resolve;      /* Promise resolve function */
     JSValue           reject;       /* Promise reject function */
@@ -56,13 +56,13 @@ typedef struct HlJsAsyncCont {
  * is suspended for the async HTTP response, while the server-side
  * connection for /api/slow can also suspend for hull.sleep).
  */
-/* Forward declarations for timer reschedule (defined in timers.c —
+/* Forward declarations for timer reschedule (defined in timers.c -
  * dropped under HL_ENABLE_HTTP=0; call sites are guarded). */
 #ifdef HL_ENABLE_HTTP_SERVER
 void hl_js_timer_reschedule(HlJSTimer *t);
 #endif
 
-/* Forward decl — vtable slot impl defined just below hl_js_async_resume.
+/* Forward decl - vtable slot impl defined just below hl_js_async_resume.
  * hl_js_async_resume's PENDING branch uses it as a discriminator to
  * decide whether the new cont is a standard HlJsAsyncCont (and thus
  * has a timer_ctx field to transfer). */
@@ -86,7 +86,7 @@ static void hl_js_async_resume(HlAsyncCont *self, void *driver)
     /* Settle the inner promise with the driver result.
      *
      * A push_result may signal a driver-side error two ways:
-     *   1. by THROWING — returning JS_EXCEPTION with a pending exception on ctx
+     *   1. by THROWING - returning JS_EXCEPTION with a pending exception on ctx
      *      (compute / db / gpu async: `return JS_ThrowInternalError(...)`), or
      *   2. by RETURNING an ordinary value that encodes the error
      *      (worker async resolves with `{ error: msg }`; http/tui resolve with
@@ -95,7 +95,7 @@ static void hl_js_async_resume(HlAsyncCont *self, void *driver)
      * Case 1 must reach `reject`: routing a JS_EXCEPTION through `resolve` FULFILLS
      * the promise with undefined and silently swallows the error (#319). Detect
      * the thrown case by the returned value and reject with the real exception so
-     * `await` throws — catchable by the handler, else its promise rejects and the
+     * `await` throws - catchable by the handler, else its promise rejects and the
      * REJECTED branch below writes a 500. Exactly one of resolve/reject fires. */
     if (driver && jc->push_result) {
         JSValue result = jc->push_result(ctx, driver);
@@ -114,7 +114,7 @@ static void hl_js_async_resume(HlAsyncCont *self, void *driver)
         JS_FreeValue(ctx, ret);
     }
 
-    /* Free resolve/reject — no longer needed */
+    /* Free resolve/reject - no longer needed */
     JS_FreeValue(ctx, jc->resolve);
     JS_FreeValue(ctx, jc->reject);
     jc->resolve = JS_UNDEFINED;
@@ -125,7 +125,7 @@ static void hl_js_async_resume(HlAsyncCont *self, void *driver)
     js->active_on_complete     = jc->on_complete;
     js->active_on_complete_ctx = jc->on_complete_ctx;
 
-    /* Drain microtasks — this continues the handler past the await */
+    /* Drain microtasks - this continues the handler past the await */
     hl_js_run_jobs(js);
 
     js->active_on_complete     = NULL;
@@ -135,7 +135,7 @@ static void hl_js_async_resume(HlAsyncCont *self, void *driver)
     JSPromiseStateEnum state = JS_PromiseState(ctx, jc->handler_promise);
 
     if (state == JS_PROMISE_FULFILLED) {
-        /* Handler completed — clean up */
+        /* Handler completed - clean up */
         int cancelled = 0;
         if (jc->timer_ctx) {
             JSValue result = JS_PromiseResult(ctx, jc->handler_promise);
@@ -152,7 +152,7 @@ static void hl_js_async_resume(HlAsyncCont *self, void *driver)
         js->active_conn = NULL;
         js->dispatch_depth--;
 
-        /* Handler that awaited has now completed — run any deferred-teardown
+        /* Handler that awaited has now completed - run any deferred-teardown
          * hook (e.g. ws on_close conn teardown). */
         if (jc->on_complete) {
             jc->on_complete(js, jc->on_complete_ctx);
@@ -183,7 +183,7 @@ static void hl_js_async_resume(HlAsyncCont *self, void *driver)
         (void)cancelled;
 #endif
     } else if (state == JS_PROMISE_REJECTED) {
-        /* Handler error — extract message, write 500 */
+        /* Handler error - extract message, write 500 */
         JSValue result = JS_PromiseResult(ctx, jc->handler_promise);
         const char *msg = JS_ToCString(ctx, result);
         if (conn)
@@ -225,7 +225,7 @@ static void hl_js_async_resume(HlAsyncCont *self, void *driver)
         }
 #endif
     } else {
-        /* PENDING — handler re-yielded (another async op in flight).
+        /* PENDING - handler re-yielded (another async op in flight).
          * Transfer the handler-promise to the new cont via the vtable
          * (it may be an HlJsAsyncCont OR an HlJsMpCont, different
          * layouts). Timer-ctx transfer stays direct: only HlJsAsyncCont
@@ -251,7 +251,7 @@ static void hl_js_async_resume(HlAsyncCont *self, void *driver)
 }
 
 /*
- * Cancel the JS handler — free promise refs without invoking.
+ * Cancel the JS handler - free promise refs without invoking.
  * Called when connection closes while handler is suspended.
  */
 static void hl_js_async_cancel(HlAsyncCont *self)
@@ -275,7 +275,7 @@ static void hl_js_async_cancel(HlAsyncCont *self)
 }
 
 /*
- * Destroy the cont struct. Does NOT free the promise refs — that's
+ * Destroy the cont struct. Does NOT free the promise refs - that's
  * managed by the resume/cancel functions above.
  */
 static void hl_js_async_destroy(HlAsyncCont *self)
@@ -290,7 +290,7 @@ static void hl_js_async_destroy(HlAsyncCont *self)
  * push_result: called on resume to convert driver result to JSValue.
  *              NULL for sleep (no result to push).
  */
-/* set_handler_promise vtable slot for HlJsAsyncCont — accessed via
+/* set_handler_promise vtable slot for HlJsAsyncCont - accessed via
  * the public hl_js_async_cont_set_handler_promise dispatcher (which
  * just calls cont->set_handler_promise). Each JS cont type defines
  * its own setter; the dispatcher no longer cares about the concrete
@@ -344,7 +344,7 @@ HlAsyncCont *hl_js_async_cont_create(HlJS *js,
  *
  * Called by hl_js_dispatch after detecting a PENDING handler return,
  * since the handler promise only exists after JS_Call returns. The
- * cont may be any JS cont type (HlJsAsyncCont, HlJsMpCont, …) — each
+ * cont may be any JS cont type (HlJsAsyncCont, HlJsMpCont, …) - each
  * sets its own `set_handler_promise` vtable slot in async.h's
  * HlAsyncCont, so this dispatcher is just a thin pass-through.
  */
@@ -359,7 +359,7 @@ void hl_js_async_cont_set_handler_promise(HlAsyncCont *cont,
 /* ── hull.sleep(ms) ───────────────────────────────────────────────── */
 
 /*
- * hull.sleep(ms) — return a Promise that resolves after `ms` milliseconds.
+ * hull.sleep(ms) - return a Promise that resolves after `ms` milliseconds.
  * Uses KlAsyncOp deadline (no driver, no FD). The Keel deadline sweep
  * fires hl_async_on_deadline_sleep, which calls kl_async_complete.
  */
@@ -409,8 +409,8 @@ static JSValue js_hull_sleep(JSContext *ctx, JSValueConst this_val,
         return JS_EXCEPTION;
     }
 
-    /* Create JS continuation — takes ownership of resolve/reject.
-     * No push_result — sleep has no return value. */
+    /* Create JS continuation - takes ownership of resolve/reject.
+     * No push_result - sleep has no return value. */
     HlAsyncCont *cont = hl_js_async_cont_create(js,
                                                   resolving_funcs[0],
                                                   resolving_funcs[1],

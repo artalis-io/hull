@@ -30,7 +30,7 @@
 #define JBC_STORE_KIND  "js-bytecode"
 
 /* Cache-key digest. `module_name` is in the key because QuickJS
- * embeds it in the bytecode (debug/traceback) — two different
+ * embeds it in the bytecode (debug/traceback) - two different
  * names with identical source produce different bytecode.
  * arch/endian tags via the shared helper. */
 static int compute_key(const char *module_name,
@@ -135,7 +135,7 @@ JSValue hl_js_compile_module_cached(JSContext *ctx,
                                        JS_READ_OBJ_BYTECODE);
             free(bc);
             if (!JS_IsException(rv)) return rv;
-            /* Stale / corrupt bytecode — drop the exception, evict,
+            /* Stale / corrupt bytecode - drop the exception, evict,
              * fall through to source compile + repersist. */
             JS_FreeValue(ctx, JS_GetException(ctx));
             (void)hl_blob_store_delete(store, key);
@@ -156,7 +156,7 @@ JSValue hl_js_compile_module_cached(JSContext *ctx,
                                        JS_WRITE_OBJ_BYTECODE);
     if (bytecode) {
         /* Best-effort persist. Failures (disk full, race) are
-         * silent — the compiled module function is already in
+         * silent - the compiled module function is already in
          * hand and the runtime keeps moving. */
         (void)hl_blob_store_put_keyed(store, key, bytecode, out_len);
         js_free(ctx, bytecode);

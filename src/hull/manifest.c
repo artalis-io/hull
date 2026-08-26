@@ -1,13 +1,13 @@
 /*
- * manifest.c — Shared manifest helpers + free
+ * manifest.c - Shared manifest helpers + free
  *
  * The per-runtime extractors live in sibling files:
- *   manifest_lua.c  — hl_manifest_extract_lua     (Lua registry → HlManifest)
- *   manifest_js.c   — hl_manifest_extract_js  (QuickJS globalThis → HlManifest)
+ *   manifest_lua.c  - hl_manifest_extract_lua     (Lua registry → HlManifest)
+ *   manifest_js.c   - hl_manifest_extract_js  (QuickJS globalThis → HlManifest)
  *
  * This file holds only what's runtime-free: the shared string helpers, the
  * CSP CR/LF guard, and hl_manifest_free (which knows nothing about the
- * source runtime — every owned pointer was allocated through the same
+ * source runtime - every owned pointer was allocated through the same
  * allocator regardless of extractor).
  *
  * Split as part of architectural roadmap item G.
@@ -112,7 +112,7 @@ int hl_manifest_seal(HlManifest *dst, const HlManifest *src, ShSealArena *arena)
 {
     if (!dst || !src || !arena) return -1;
     if (!src->present) {
-        /* Nothing to seal — apps without a manifest declaration get
+        /* Nothing to seal - apps without a manifest declaration get
          * a deny-default policy elsewhere. Zero dst to be safe. */
         memset(dst, 0, sizeof(*dst));
         return -1;
@@ -173,7 +173,7 @@ int hl_manifest_seal(HlManifest *dst, const HlManifest *src, ShSealArena *arena)
     return 0;
 
 fail:
-    /* Don't zero dst — partial pointers into the arena are valid reads
+    /* Don't zero dst - partial pointers into the arena are valid reads
      * (the arena is still mutable + alive); zeroing would also blow
      * away the integer fields. Caller treats -1 as "destroy the arena
      * and don't use dst". */

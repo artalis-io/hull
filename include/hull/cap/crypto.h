@@ -34,7 +34,7 @@
  *
  * SHA-256 / SHA-512 deliberately stay as direct TweetNaCl calls
  * (with hardware-accelerated SHA-256 paths on platforms that have
- * them) — they're tight, well-tested, and pure functions with no
+ * them) - they're tight, well-tested, and pure functions with no
  * keyed-secret leak surface. Moving them behind a backend vtable
  * would duplicate the hash infrastructure that HlCryptoAsymBackend's
  * RSA / ECDSA verify already maintains internally, for no observable
@@ -59,7 +59,7 @@ int hl_cap_crypto_sha256(const void *data, size_t len, uint8_t out[32]);
 /**
  * @brief Incremental SHA-256 hasher state.
  *
- * Opaque to callers — fields are public so the struct can be stack- or
+ * Opaque to callers - fields are public so the struct can be stack- or
  * userdata-allocated, but only the init/update/final functions should
  * touch them. Hashing one buffer of `N` bytes incrementally produces
  * the exact same 32-byte digest as `hl_cap_crypto_sha256(buf, N)`.
@@ -95,7 +95,7 @@ int hl_cap_crypto_sha256_update(HlSha256Ctx *ctx,
 /**
  * @brief Finalize an incremental SHA-256 and write the digest.
  *
- * The context must not be used after `_final` — call `_init` again to
+ * The context must not be used after `_final` - call `_init` again to
  * reuse it.
  *
  * @param ctx  Context to finalize.
@@ -124,7 +124,7 @@ int hl_cap_crypto_sha512(const void *data, size_t len, uint8_t out[64]);
  * drive legacy/3rd-party protocols whose wire format hardcodes
  * SHA-1 (HIBP range API, certain CSV/PDF signing standards, etc.).
  *
- * **DO NOT USE for new cryptography** — for new password hashing,
+ * **DO NOT USE for new cryptography** - for new password hashing,
  * MAC, or digest needs use `hash_password` / `hmac_sha256` /
  * `sha256` instead.
  *
@@ -206,7 +206,7 @@ typedef enum {
  *  HlCryptoAsymBackend / HlCompilerVtable / HlGpuBackendVtable.
  *
  *  Every HMAC alg (SHA1 / SHA256 / SHA512) routes through this
- *  interface — including hl_cap_crypto_hmac_sha256, which was
+ *  interface - including hl_cap_crypto_hmac_sha256, which was
  *  originally an in-tree HMAC construction over hl_cap_crypto_sha256
  *  but was migrated to the vtable on 2026-06-13 so a future backend
  *  swap covers all three algs in one drop-in (mbedTLS today; could
@@ -255,7 +255,7 @@ extern const HlCryptoHmacBackend hl_crypto_hmac_backend_portable;
  * primitive exists ONLY to implement HOTP (RFC 4226) and TOTP
  * (RFC 6238), both of which fix HMAC-SHA1 in the on-the-wire format
  * that authenticator apps (Google Authenticator, Authy, 1Password,
- * etc.) interoperate over. Do NOT use this for new MAC schemes —
+ * etc.) interoperate over. Do NOT use this for new MAC schemes -
  * use `hl_cap_crypto_hmac_sha256` instead.
  *
  * Dispatched through @ref HlCryptoHmacBackend so the impl can be
@@ -277,7 +277,7 @@ int hl_cap_crypto_hmac_sha1(const uint8_t *key, size_t key_len,
 /* ── HMAC-SHA512/256 (NaCl crypto_auth) ────────────────────────────── */
 
 /**
- * @brief NaCl `crypto_auth` — HMAC-SHA512 truncated to 256 bits.
+ * @brief NaCl `crypto_auth` - HMAC-SHA512 truncated to 256 bits.
  *
  * Slightly faster than HMAC-SHA256 on 64-bit platforms; equivalent security.
  *
@@ -564,7 +564,7 @@ int hl_cap_crypto_x509_pubkey_pem(const void *der, size_t der_len,
  *
  * @return `0` on success, `-1` on internal failure.
  *
- * @warning Nonce reuse with the same key is catastrophic — Hull does not
+ * @warning Nonce reuse with the same key is catastrophic - Hull does not
  *          generate nonces for you. Use `crypto.random(24)` per encryption.
  */
 int hl_cap_crypto_secretbox(uint8_t *out, const void *msg, size_t msg_len,
@@ -580,7 +580,7 @@ int hl_cap_crypto_secretbox(uint8_t *out, const void *msg, size_t msg_len,
  * @param key     32-byte symmetric key.
  *
  * @return `0` on valid + decrypted, `-1` on authentication failure (do NOT
- *         use @p out in that case — it may contain partial garbage).
+ *         use @p out in that case - it may contain partial garbage).
  */
 int hl_cap_crypto_secretbox_open(uint8_t *out, const void *ct, size_t ct_len,
                                  const uint8_t nonce[24], const uint8_t key[32]);
@@ -589,7 +589,7 @@ int hl_cap_crypto_secretbox_open(uint8_t *out, const void *ct, size_t ct_len,
 
 #define HL_BOX_PUBLICKEYBYTES  32 /**< Curve25519 public key (32 bytes). */
 #define HL_BOX_SECRETKEYBYTES  32 /**< Curve25519 secret key (32 bytes). */
-#define HL_BOX_NONCEBYTES      24 /**< Nonce size — same as secretbox. */
+#define HL_BOX_NONCEBYTES      24 /**< Nonce size - same as secretbox. */
 #define HL_BOX_MACBYTES        16 /**< Authenticated overhead per ciphertext. */
 
 /**

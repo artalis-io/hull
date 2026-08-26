@@ -1,13 +1,13 @@
 /*
- * agent/overview.c — `hull agent overview` — single-shot project summary.
+ * agent/overview.c - `hull agent overview` - single-shot project summary.
  *
  * Composite summary an agent dropped into an unfamiliar app dir can
  * read in one call: runtime, manifest presence, route stats, compute
  * modules + AOT readiness + wamrc state, GPU shaders, migrations,
  * declared modules, tests, build readiness.
  *
- * Intentionally cheap — no manifest parse beyond what `hl_app_context_init`
- * already does, no DB connection (skip "pending migrations" — agents
+ * Intentionally cheap - no manifest parse beyond what `hl_app_context_init`
+ * already does, no DB connection (skip "pending migrations" - agents
  * can call `hull agent migrate` for that), no shape inference (leave
  * the agent to draw conclusions from the data).
  *
@@ -196,7 +196,7 @@ int hl_agent_overview_ctx(HlAppContext *ctx, ShJsonBuf *out)
 
     sh_json_write_kv_bool(&w, "entry_present", has_lua || has_js);
 
-    /* Routes — walk via vtable callbacks. */
+    /* Routes - walk via vtable callbacks. */
     RouteStats rs = {0};
     HlRuntime *rt = hl_app_context_runtime(ctx);
     if (rt && rt->vt && rt->vt->enumerate_routes)
@@ -240,8 +240,8 @@ int hl_agent_overview_ctx(HlAppContext *ctx, ShJsonBuf *out)
     sh_json_write_kv_int(&w, "count", gpu_count);
     sh_json_write_object_end(&w);
 
-    /* Migrations — count files only. Pending count requires DB
-     * connection — agents needing that call `hull agent migrate`. */
+    /* Migrations - count files only. Pending count requires DB
+     * connection - agents needing that call `hull agent migrate`. */
     char migrations_dir[PATH_MAX];
     snprintf(migrations_dir, sizeof(migrations_dir), "%s/migrations", app_dir);
     int migrations_count = count_matching(migrations_dir, is_sql);

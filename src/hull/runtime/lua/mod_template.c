@@ -1,4 +1,4 @@
-/* mod_template.c — hull._template module: internal bridge for stdlib
+/* mod_template.c - hull._template module: internal bridge for stdlib
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
@@ -15,19 +15,19 @@
 #include <string.h>
 
 /* ════════════════════════════════════════════════════════════════════
- * hull._template module (internal — called only by stdlib hull.template)
+ * hull._template module (internal - called only by stdlib hull.template)
  *
  * _template._compile(code)    → compiled Lua function
  * _template._load_raw(name)   → raw template string or nil
  * ════════════════════════════════════════════════════════════════════ */
 
-/* _template._compile(code) — compile generated Lua source to a function.
+/* _template._compile(code) - compile generated Lua source to a function.
  *
  * Routes through hl_lua_template_compile_cached: on a cache hit the
  * dumped render function is loaded directly (no parse, no pcall);
  * on a cache miss we run the original luaL_loadbuffer + pcall pair
  * and persist the result. Cache lives at
- * $HOME/.hull/blobs/runtime/templates/ — see
+ * $HOME/.hull/blobs/runtime/templates/ - see
  * include/hull/runtime/lua_template_cache.h. */
 static int lua_template_compile(lua_State *L)
 {
@@ -41,7 +41,7 @@ static int lua_template_compile(lua_State *L)
     return 1; /* render function on stack */
 }
 
-/* _template._load_raw(name) — load raw template bytes from embedded
+/* _template._load_raw(name) - load raw template bytes from embedded
  * entries or filesystem fallback. Returns string or nil. */
 static int lua_template_load_raw(lua_State *L)
 {
@@ -68,7 +68,7 @@ static int lua_template_load_raw(lua_State *L)
      *    templates/hull/<module>/<file>.html). App-shipped templates
      *    at the same path won in step 1 above; this is the fallback
      *    for stdlib-shipped widget partials. NULL platform_vfs is
-     *    fine — happens in test contexts. */
+     *    fine - happens in test contexts. */
     if (tpl_ok && lua && lua->base.platform_vfs) {
         const HlEntry *e = hl_vfs_find(lua->base.platform_vfs, tpl_name);
         if (e) {
@@ -95,7 +95,7 @@ static int lua_template_load_raw(lua_State *L)
                          lua->app_dir, name);
         if (n > 0 && (size_t)n < sizeof(path)) {
             /* Verify resolved path stays within app_dir (symlink escape check).
-             * Canonicalize app_dir too — it may be a relative path when
+             * Canonicalize app_dir too - it may be a relative path when
              * invoked as `hull test relative/path/`. */
             char resolved[PATH_MAX];
             if (realpath(path, resolved)) {
@@ -124,7 +124,7 @@ static int lua_template_load_raw(lua_State *L)
                     return luaL_error(L, "seek failed: %s", name);
                 }
 
-                /* Use scratch arena — Lua copies the string */
+                /* Use scratch arena - Lua copies the string */
                 size_t arena_saved = lua->scratch->used;
                 char *buf = sh_arena_alloc(lua->scratch, (size_t)size);
                 if (!buf) {

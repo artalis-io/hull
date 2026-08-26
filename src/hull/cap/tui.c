@@ -1,5 +1,5 @@
 /*
- * src/hull/cap/tui.c — TUI capability: lifecycle, rendering, OSC.
+ * src/hull/cap/tui.c - TUI capability: lifecycle, rendering, OSC.
  *
  * Owns:
  *   • HlTuiCtx allocation + the process-singleton invariant.
@@ -71,7 +71,7 @@ struct HlTuiCtx {
     int in_fd;
     int out_fd;
 
-    /* Saved tty state — restored on release / atexit. */
+    /* Saved tty state - restored on release / atexit. */
     struct termios saved_termios;
     int            termios_saved;
 
@@ -172,7 +172,7 @@ static void on_sigwinch(int sig)
         g_prev_sigwinch.sa_handler != SIG_IGN) {
         if (g_prev_sigwinch.sa_flags & SA_SIGINFO) {
             /* sa_sigaction takes (int, siginfo_t*, void*); we don't
-             * have those, so skip — chaining for sigaction-style
+             * have those, so skip - chaining for sigaction-style
              * handlers is unsafe from a plain handler. */
         } else if (g_prev_sigwinch.sa_handler) {
             g_prev_sigwinch.sa_handler(sig);
@@ -183,7 +183,7 @@ static void on_sigwinch(int sig)
 static void on_fatal_signal(int sig)
 {
     /* Restore terminal, then chain to previous handler (which is
-     * typically the default action — coredump / terminate). */
+     * typically the default action - coredump / terminate). */
     hl_cap_tui_force_leave();
     struct sigaction *prev = NULL;
     switch (sig) {
@@ -236,7 +236,7 @@ static void on_sigcont(int sig)
     if (g_singleton) {
         enter_alt_screen(g_singleton);
         hl_cap_tui_invalidate(g_singleton);
-        /* Flush is the caller's job — we just mark for repaint. */
+        /* Flush is the caller's job - we just mark for repaint. */
         g_winch_pending = 1; /* re-probe size, just in case */
     }
 }
@@ -423,7 +423,7 @@ static int detect_caps(HlTuiCtx *ctx)
 }
 
 /* Issue OSC 11 query, wait up to 50ms for response, parse luminance.
- * Tolerant of no response — falls back through $COLORFGBG then a
+ * Tolerant of no response - falls back through $COLORFGBG then a
  * "dark" default. */
 static void detect_theme(HlTuiCtx *ctx)
 {
@@ -448,7 +448,7 @@ static void detect_theme(HlTuiCtx *ctx)
     }
     if (got == 0) goto fallback;
 
-    /* Find "rgb:" — accept either ":RGB:RGB:RGB" or ":RRRR/GGGG/BBBB". */
+    /* Find "rgb:" - accept either ":RGB:RGB:RGB" or ":RRRR/GGGG/BBBB". */
     const char *p = strstr(resp, "rgb:");
     if (!p) goto fallback;
     p += 4;
@@ -570,7 +570,7 @@ void hl_cap_tui_force_leave(void)
 {
     HlTuiCtx *ctx = g_singleton;
     if (!ctx) return;
-    /* No locking, no allocations — we may be in a signal handler. */
+    /* No locking, no allocations - we may be in a signal handler. */
     leave_alt_screen(ctx);
     restore_termios(ctx);
     /* Do not free; process is exiting. */
@@ -662,7 +662,7 @@ int hl_cap_tui_write(HlTuiCtx *ctx, const char *s, size_t len)
          * by the flush path, letting untrusted text (log lines, file
          * contents, error messages) inject ANSI escape sequences that
          * desync the cell-diff renderer's coordinate tracking. The
-         * cap layer is the right enforcement boundary — every caller
+         * cap layer is the right enforcement boundary - every caller
          * (Lua, JS, stdlib middleware) routes through here. We treat
          * sanitized codepoints as no-ops rather than 0xFFFD glyphs so
          * untrusted input doesn't visually pollute the UI. */
@@ -671,7 +671,7 @@ int hl_cap_tui_write(HlTuiCtx *ctx, const char *s, size_t len)
 
         int w = hl_tui_cp_width(cp);
         if (w == 0) {
-            /* Combining mark — attach to preceding cell when possible. */
+            /* Combining mark - attach to preceding cell when possible. */
             if (ctx->cursor_x > 0) {
                 HlTuiCell *c = cell_at(ctx->pending, ctx->cols,
                                        ctx->cursor_x - 1, ctx->cursor_y);
@@ -684,7 +684,7 @@ int hl_cap_tui_write(HlTuiCtx *ctx, const char *s, size_t len)
 
         if (ctx->cursor_y >= ctx->rows) break;
         if (ctx->cursor_x + w > ctx->cols) {
-            /* Don't split a wide char across the edge — wrap. */
+            /* Don't split a wide char across the edge - wrap. */
             ctx->cursor_x = 0;
             ctx->cursor_y++;
             if (ctx->cursor_y >= ctx->rows) break;
@@ -844,7 +844,7 @@ int hl_cap_tui_flush(HlTuiCtx *ctx)
 
             *s = *p;
 
-            /* Skip continuation cell — pending stores width=0 in the
+            /* Skip continuation cell - pending stores width=0 in the
              * second half, but it shouldn't generate a separate
              * write. */
             if (p->width == 2 && x + 1 < ctx->cols) {
@@ -907,7 +907,7 @@ int hl_cap_tui_drain(HlTuiCtx *ctx)
 {
     if (!ctx) { errno = EINVAL; return -1; }
     /* Non-blocking probe: poll with zero timeout. If no data, return 0
-     * — that's the "fd not readable" signal the caller uses to switch
+     * - that's the "fd not readable" signal the caller uses to switch
      * to event-loop suspension. */
     struct pollfd pfd = { .fd = ctx->in_fd, .events = POLLIN };
     int pr = poll(&pfd, 1, 0);
@@ -916,7 +916,7 @@ int hl_cap_tui_drain(HlTuiCtx *ctx)
     char buf[HL_TUI_INPUT_CHUNK];
     ssize_t n = read(ctx->in_fd, buf, sizeof buf);
     if (n < 0) { if (errno == EINTR) return 0; return -1; }
-    if (n == 0) return 0;  /* EOF — caller treats as no work */
+    if (n == 0) return 0;  /* EOF - caller treats as no work */
     hl_tui_parser_feed(&ctx->parser, buf, (size_t)n);
     return (int)n;
 }
@@ -985,7 +985,7 @@ int hl_cap_tui_poll(HlTuiCtx *ctx, int timeout_ms, HlTuiEvent *out)
         consume_winch(ctx);
         if (hl_tui_parser_pop(&ctx->parser, out) == 0) return 0;
         /* No complete event yet (partial CSI / ESC). Keep polling
-         * with a fresh idle slice — flush_idle handles the lone-ESC
+         * with a fresh idle slice - flush_idle handles the lone-ESC
          * case below. */
     }
 }

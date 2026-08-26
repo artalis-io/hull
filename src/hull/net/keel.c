@@ -1,5 +1,5 @@
 /*
- * net/keel.c — HlNetBackend implementation backed by Keel.
+ * net/keel.c - HlNetBackend implementation backed by Keel.
  *
  * Implements the connection-bound async-op pair
  * (op_suspend / op_complete), which is enough to migrate every
@@ -32,7 +32,7 @@
 
 /*
  * struct kl_wrap is what HlNetBackendCtx* actually points at. We don't
- * embed KlServer because we don't own it — serve.c already owns the
+ * embed KlServer because we don't own it - serve.c already owns the
  * server and lends us a pointer.
  */
 struct kl_wrap {
@@ -61,7 +61,7 @@ static void keel_op_complete(HlNetBackendCtx *ctx, HlSuspendOp *op)
  * The unmigrated slots are intentionally NULL. Adding a stub that
  * aborts would punish anyone who calls hl_net_backend()->server_init
  * after a build setting mismatch; the current contract is "if a slot
- * is NULL the surface isn't ready yet — keep using the direct path
+ * is NULL the surface isn't ready yet - keep using the direct path
  * for now." When a vtable method is wired in, its NULL goes away
  * here at the same time as its callers migrate.
  */
@@ -105,6 +105,6 @@ void hl_net_backend_keel_unwrap(HlNetBackendCtx *ctx)
 {
     if (!ctx) return;
     struct kl_wrap *w = (struct kl_wrap *)ctx;
-    /* w->server is borrowed — don't touch it. */
+    /* w->server is borrowed - don't touch it. */
     free(w);
 }

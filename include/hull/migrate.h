@@ -1,5 +1,5 @@
 /*
- * migrate.h — SQL migration runner
+ * migrate.h - SQL migration runner
  *
  * Convention-based migrations: discovers *.sql files from embedded
  * entries or filesystem, tracks applied migrations in _hull_migrations,

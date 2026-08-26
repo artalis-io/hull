@@ -1,5 +1,5 @@
 /*
- * commands/sign_release.c — `hull sign-release` subcommand
+ * commands/sign_release.c - `hull sign-release` subcommand
  *
  * Sign the `hull.sha256` release manifest with an Ed25519 secret key.
  * Used by the GitHub Actions release workflow; not typically invoked by

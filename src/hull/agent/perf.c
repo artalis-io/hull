@@ -1,5 +1,5 @@
 /*
- * agent/perf.c — `hull agent perf`: runtime statistics snapshot.
+ * agent/perf.c - `hull agent perf`: runtime statistics snapshot.
  *
  * Emits configuration limits + a brief feature-flag summary. For live
  * stats while a server is running, prefer the dev-server's /ready
@@ -74,7 +74,7 @@ int hl_agent_perf_ctx(HlAppContext *ctx, ShJsonBuf *out)
 #endif
     sh_json_write_object_end(&w);
 
-    /* Compile-time defaults — agent can compare against runtime override
+    /* Compile-time defaults - agent can compare against runtime override
      * flags reported in dev.json. */
     sh_json_write_key(&w, "limits");
     sh_json_write_object_start(&w);

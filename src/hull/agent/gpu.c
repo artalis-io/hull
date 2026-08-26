@@ -1,5 +1,5 @@
 /*
- * agent/gpu.c — `hull agent gpu`: list compiled WGSL shaders and
+ * agent/gpu.c - `hull agent gpu`: list compiled WGSL shaders and
  * GPU device info.
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later

@@ -34,7 +34,7 @@
 /* ── Arch / endian tags folded into the cache key ─────────────────
  *
  * The Lua precompiled chunk header already encodes these and
- * luaL_loadbuffer validates them — this is a belt-and-suspenders
+ * luaL_loadbuffer validates them - this is a belt-and-suspenders
  * early reject so we don't even open the file under a mismatched
  * $HOME (NFS / dotfile syncing across architectures). */
 
@@ -133,7 +133,7 @@ int hl_lua_load_cached(lua_State *L,
 {
     /* Fast bail: cache disabled, source too tiny to bother.
      * Kind string is "lua_bytecode" so the env-var builder
-     * produces HULL_NO_LUA_BYTECODE_CACHE — symmetric with
+     * produces HULL_NO_LUA_BYTECODE_CACHE - symmetric with
      * HULL_NO_JS_BYTECODE_CACHE on the JS side. */
     if (!src || src_len < 256 ||
         hl_hull_cache_disabled("lua_bytecode")) {
@@ -155,7 +155,7 @@ int hl_lua_load_cached(lua_State *L,
         int rc = luaL_loadbuffer(L, (const char *)bc, bc_len, chunkname);
         free(bc);  /* allocator was NULL → libc malloc */
         if (rc == LUA_OK) return LUA_OK;
-        /* Stale / corrupt entry — pop error, evict, fall through. */
+        /* Stale / corrupt entry - pop error, evict, fall through. */
         lua_pop(L, 1);
         (void)hl_blob_store_delete(store, key);
     }
@@ -164,7 +164,7 @@ int hl_lua_load_cached(lua_State *L,
     int rc = luaL_loadbuffer(L, src, src_len, chunkname);
     if (rc != LUA_OK) return rc;     /* parse error on stack */
 
-    /* lua_dump with strip=0 — keep source-name + line numbers so
+    /* lua_dump with strip=0 - keep source-name + line numbers so
      * mod_db.c::lua_is_stdlib_caller can see `ar.source` and let
      * stdlib code touch _hull_* tables. Stripping breaks the gate. */
     DumpAcc acc = { NULL, 0, 0, 0 };
@@ -174,7 +174,7 @@ int hl_lua_load_cached(lua_State *L,
         return LUA_OK;               /* keep compiled fn; skip caching */
     }
 
-    /* Best-effort persist. Failure (disk full, race) is silent —
+    /* Best-effort persist. Failure (disk full, race) is silent -
      * the compiled function is already on the stack. */
     (void)hl_blob_store_put_keyed(store, key, acc.buf, acc.len);
     free(acc.buf);

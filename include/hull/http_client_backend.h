@@ -3,13 +3,13 @@
  * @brief Pluggable HTTP client backend vtable.
  *
  * Outbound HTTP. Separate from HlNetBackend (the server side) because
- * some backends might pair them differently — Keel does both, libuv
+ * some backends might pair them differently - Keel does both, libuv
  * is async-only with no built-in HTTP, an httprb-style impl might
  * just do client. Splitting keeps the contracts narrow.
  *
  * One backend ships:
  *
- *   keel — wraps KlClient + KlClientPool + KlRedirectClient. Default
+ *   keel - wraps KlClient + KlClientPool + KlRedirectClient. Default
  *          for HL_ENABLE_HTTP=1.
  *
  * HL_ENABLE_HTTP=0 builds drop the HTTP client entirely (apps that
@@ -90,13 +90,13 @@ typedef struct HlHttpClientBackend {
                    HlAllocator *alloc);
     void   (*free)(HlHttpClientBackendCtx *ctx);
 
-    /* Synchronous request — blocks until response or error.
+    /* Synchronous request - blocks until response or error.
      * `out` is filled; caller must call response_free(). */
     int    (*request_sync)(HlHttpClientBackendCtx *ctx,
                            const HlHttpRequest *req,
                            HlHttpResponse *out);
 
-    /* Async request — non-blocking. `done(res, user)` fires on the
+    /* Async request - non-blocking. `done(res, user)` fires on the
      * event-loop thread when the request completes or errors. */
     int    (*request_async)(HlHttpClientBackendCtx *ctx,
                             const HlHttpRequest *req,
@@ -109,7 +109,7 @@ typedef struct HlHttpClientBackend {
 
     /* Some backends bake pooling into the main ctx; others expose a
      * separate pool object. If pool_create is NULL the backend
-     * doesn't pool — every request opens a fresh connection. */
+     * doesn't pool - every request opens a fresh connection. */
     int    (*pool_create)(HlHttpClientPoolCtx **out,
                           HlHttpClientBackendCtx *ctx,
                           const HlHttpClientPoolConfig *cfg);

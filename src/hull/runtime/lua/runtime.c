@@ -1,5 +1,5 @@
 /*
- * lua_runtime.c — Lua 5.4 runtime for Hull
+ * lua_runtime.c - Lua 5.4 runtime for Hull
  *
  * Initializes Lua with sandboxing: no io, no os, no loadfile/dofile/load,
  * custom allocator with memory limits, and hull.* module registration.
@@ -59,7 +59,7 @@ static void *hl_lua_alloc(void *ud, void *ptr, size_t osize, size_t nsize)
     HlLua *lua = (HlLua *)ud;
 
     if (nsize == 0) {
-        /* Free — osize is the real block size here */
+        /* Free - osize is the real block size here */
         if (lua->mem_used >= osize)
             lua->mem_used -= osize;
         else
@@ -182,7 +182,7 @@ int hl_lua_init(HlLua *lua, const HlLuaConfig *cfg)
         luaL_requiref(lua->L, LUA_COLIBNAME, luaopen_coroutine, 1);
         lua_pop(lua->L, 1);
 
-        /* Apply sandbox — remove io, os, loadfile, dofile, load */
+        /* Apply sandbox - remove io, os, loadfile, dofile, load */
         hl_lua_sandbox(lua->L);
     } else {
         /* Tool mode: safe libs + hull.tool (no raw os/io) */
@@ -310,7 +310,7 @@ int hl_lua_load_app(HlLua *lua, const char *filename)
         return -1;
     }
 
-    /* Reset scratch arena — startup module loads no longer needed */
+    /* Reset scratch arena - startup module loads no longer needed */
     sh_arena_reset(lua->scratch);
 
     return 0;
@@ -321,7 +321,7 @@ void hl_lua_free(HlLua *lua)
     if (!lua)
         return;
 
-    /* Cancel and free tracked timers — via async backend vtable. */
+    /* Cancel and free tracked timers - via async backend vtable. */
     {
         const HlAsyncBackend *be = hl_async_backend();
         for (size_t i = 0; i < lua->timer_count; i++) {
@@ -393,7 +393,7 @@ void hl_lua_free(HlLua *lua)
         lua->sse_route_cap = 0;
     }
 
-    /* Free WebSocket registry — HTTP-only; CLI builds never create one. */
+    /* Free WebSocket registry - HTTP-only; CLI builds never create one. */
 #ifdef HL_ENABLE_HTTP_SERVER
     if (lua->base.ws_registry) {
         hl_http_ws_registry_free(lua->base.ws_registry);
@@ -784,7 +784,7 @@ static int vt_lua_run_main(HlRuntime *rt, KlServer *server,
 
     /* Wrap main in a coroutine so async ops (compute.async, gpu.async,
      * http.fetch, hull.sleep) can yield via the existing infrastructure.
-     * The same machinery the HTTP dispatch uses applies here — only the
+     * The same machinery the HTTP dispatch uses applies here - only the
      * "what to do when the coroutine finally terminates" differs.
      *
      * Stack: [_] → after setup [thread] (pinned via registry ref). */
@@ -837,7 +837,7 @@ static int vt_lua_run_main(HlRuntime *rt, KlServer *server,
     int       saved_depth      = lua->dispatch_depth;
 
     lua->active_co         = co;
-    lua->active_conn       = NULL;       /* detached — no HTTP conn */
+    lua->active_conn       = NULL;       /* detached - no HTTP conn */
     lua->active_thread_ref = co_ref;
     lua->dispatch_depth    = saved_depth + 1;
 
@@ -846,7 +846,7 @@ static int vt_lua_run_main(HlRuntime *rt, KlServer *server,
     int status = lua_resume(co, L, 1, &nres);
 
     if (status == LUA_YIELD) {
-        /* Main yielded — async op in flight. Mark this coroutine so
+        /* Main yielded - async op in flight. Mark this coroutine so
          * hl_lua_async_resume knows to stop the server when it
          * eventually completes, then enter the event loop. */
         lua->cli_main_co = co;
@@ -879,7 +879,7 @@ static int vt_lua_run_main(HlRuntime *rt, KlServer *server,
     }
 
     /* `co`'s stack now holds main's return value (LUA_OK) or an error
-     * message (LUA_ERRRUN etc.) — either way, the top of the stack is
+     * message (LUA_ERRRUN etc.) - either way, the top of the stack is
      * what we read. */
     int rc;
     if (status == LUA_OK) {

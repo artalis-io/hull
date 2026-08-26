@@ -1,16 +1,16 @@
 /*
- * hull/limits.h — Umbrella for all subsystem limit headers
+ * hull/limits.h - Umbrella for all subsystem limit headers
  *
  * Constants have been split per subsystem so that touching a WASM or GPU
  * limit doesn't force a recompile of unrelated translation units. New code
  * should include the specific sub-header it needs:
  *
- *   hull/limits/core.h       — module system, HTTP body, server defaults,
+ *   hull/limits/core.h       - module system, HTTP body, server defaults,
  *                              crypto, SMTP, thread pool, worker, compression
- *   hull/limits/runtime.h    — Lua + JS runtime memory + instruction limits
+ *   hull/limits/runtime.h    - Lua + JS runtime memory + instruction limits
  *                              (transitively pulls in core.h)
- *   hull/limits/wasm.h       — WAMR / compute plugin limits
- *   hull/limits/gpu.h        — wgpu-native GPU compute limits
+ *   hull/limits/wasm.h       - WAMR / compute plugin limits
+ *   hull/limits/gpu.h        - wgpu-native GPU compute limits
  *
  * This umbrella stays for back-compat: existing consumers that include
  * "hull/limits.h" continue to see every constant.

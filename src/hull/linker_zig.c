@@ -1,5 +1,5 @@
 /*
- * linker_zig.c — `zig cc` linker backend (toolchain-free + cross-compile)
+ * linker_zig.c - `zig cc` linker backend (toolchain-free + cross-compile)
  *
  * zig bundles clang + lld + per-target crt/libc/headers for ~40 targets, so a
  * single `zig cc --target=<triple>` links for any (os, arch, abi) from any

@@ -11,9 +11,9 @@
  * compiles it into the hull binary; this accessor exposes it.
  *
  * Consumers (v0.1.3 batch):
- *   - `hull build` (C3) — passes the blob into `package.sig.platform`
+ *   - `hull build` (C3) - passes the blob into `package.sig.platform`
  *     so apps inherit the manifest + sig at build time.
- *   - `hull verify` / `--verify-sig` (C4) — validates the blob's sig
+ *   - `hull verify` / `--verify-sig` (C4) - validates the blob's sig
  *     against `HL_PLATFORM_PUBKEY_HEX` at startup.
  *
  * When `HL_EMBED_PLATFORM_SIG` is undefined at compile time (local
@@ -45,7 +45,7 @@
  * @return  0 if a real signed blob is embedded;
  *         -1 if absent (placeholder build / local dev / opt-out).
  *
- * NULL pointer args are treated as "don't fill" — pass NULL for
+ * NULL pointer args are treated as "don't fill" - pass NULL for
  * outputs you don't care about. NULL for ALL outputs is treated as
  * a presence probe.
  */

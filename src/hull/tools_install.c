@@ -1,5 +1,5 @@
 /*
- * tools_install.c — Side-loaded Hull tool registry + path helpers.
+ * tools_install.c - Side-loaded Hull tool registry + path helpers.
  *
  * This module is the trust boundary for the `hull tools install` family
  * of commands. It exposes:
@@ -13,7 +13,7 @@
  *     consumers of these tools (`cap/wasm.c` for `wamrc`,
  *     `commands/doctor.c` for status reporting).
  *
- * No HTTPS or signature verification lives here — those concerns are
+ * No HTTPS or signature verification lives here - those concerns are
  * in `release_io.{h,c}` (network I/O) and `commands/tools.c`
  * (orchestration).
  *
@@ -308,7 +308,7 @@ int hl_tools_install_path(const char *name, char *out, size_t out_sz)
 /* ── Lookup ───────────────────────────────────────────────────────── */
 
 /* `dirname()` is allowed to modify its input AND returns a static
- * buffer on some platforms — never use it. Strip the trailing path
+ * buffer on some platforms - never use it. Strip the trailing path
  * component ourselves. Returns 0 if a directory exists, -1 if the
  * input has no separator. */
 static int strip_basename(const char *path, char *out, size_t out_sz)
@@ -318,7 +318,7 @@ static int strip_basename(const char *path, char *out, size_t out_sz)
     if (!last) return -1;
     size_t len = (size_t)(last - path);
     if (len == 0) {
-        /* Path was "/foo" — directory is "/". */
+        /* Path was "/foo" - directory is "/". */
         if (out_sz < 2) return -1;
         out[0] = '/';
         out[1] = '\0';
@@ -343,7 +343,7 @@ static int find_on_path(const char *name, char *out, size_t out_sz)
         size_t seg_len = colon ? (size_t)(colon - p) : strlen(p);
 
         /* Empty segment ('::' or leading ':') means current directory
-         * — POSIX-ism; skip for safety. */
+         * - POSIX-ism; skip for safety. */
         if (seg_len > 0) {
             /* Compose "<seg>/<name>" in a stack buffer first so we
              * can `access()` it without trampling the caller's out. */

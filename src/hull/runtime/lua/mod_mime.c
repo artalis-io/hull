@@ -1,4 +1,4 @@
-/* mod_mime.c — hull.mime module: content-MIME sniffing
+/* mod_mime.c - hull.mime module: content-MIME sniffing
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
@@ -19,7 +19,7 @@
  * content; that's the signal to either reject the upload or fall
  * back to the declared MIME from the Content-Type header.
  *
- * Pure capability — no fs/network/db access. No required_caps.
+ * Pure capability - no fs/network/db access. No required_caps.
  * ════════════════════════════════════════════════════════════════════ */
 
 static int lua_mime_sniff(lua_State *L)

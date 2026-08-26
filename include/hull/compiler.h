@@ -1,5 +1,5 @@
 /*
- * compiler.h — C compiler vtable for hull build
+ * compiler.h - C compiler vtable for hull build
  *
  * Abstracts compile (.c → .o) and link (objs+libs → binary) so the
  * system cc backend + the compiler-free emit path drive hull build.

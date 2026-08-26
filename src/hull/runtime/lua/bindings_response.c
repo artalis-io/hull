@@ -1,5 +1,5 @@
 /*
- * bindings_response.c — the res:* response helpers, extracted from bindings.c.
+ * bindings_response.c - the res:* response helpers, extracted from bindings.c.
  *
  * Moved out (#114) so the core lua_rt_bindings.o holds ZERO Keel-response /
  * compress references (kl_response_*, hl_maybe_compress): those live only here,
@@ -47,7 +47,7 @@ static KlResponse *check_response(lua_State *L, int idx)
 
 /* Has a header with this name (case-insensitive) already been added to
  * the response? Used by res:html to avoid stamping Hull's default CSP
- * on top of one already set by application middleware — without this
+ * on top of one already set by application middleware - without this
  * the browser sees two Content-Security-Policy headers and enforces
  * the strict intersection, which typically blocks the page's own
  * scripts. Scans res->hdr_buf line by line; headers are appended as
@@ -93,7 +93,7 @@ static int lua_res_header(lua_State *L)
     return 1;
 }
 
-/* res:json(data, code?) — uses json.encode() from Lua stdlib */
+/* res:json(data, code?) - uses json.encode() from Lua stdlib */
 static int lua_res_json(lua_State *L)
 {
     KlResponse *res = check_response(L, 1);
@@ -107,7 +107,7 @@ static int lua_res_json(lua_State *L)
 
     /* Call json.encode(data) via the runtime's cached decoder
      * (registry stash from mod_fs.c init). Works regardless of
-     * whether the app declared hull/json — res:json() is a
+     * whether the app declared hull/json - res:json() is a
      * response helper, not a user-visible json import. */
     lua_getfield(L, LUA_REGISTRYINDEX, "__hull_json_internal");
     lua_getfield(L, -1, "encode");
@@ -141,7 +141,7 @@ static int lua_res_html(lua_State *L)
     size_t len;
     const char *html = luaL_checklstring(L, 2, &len);
     kl_response_header(res, "Content-Type", "text/html; charset=utf-8");
-    /* Skip the default CSP if middleware already wrote one — two CSP
+    /* Skip the default CSP if middleware already wrote one - two CSP
      * headers cause browsers to enforce the strict intersection
      * (typically blocking the page's own scripts). The app-supplied
      * one wins. */
@@ -169,7 +169,7 @@ static int lua_res_text(lua_State *L)
     return 0;
 }
 
-/* res:bytes(string) — binary-safe response primitive.
+/* res:bytes(string) - binary-safe response primitive.
  *
  * Unlike res:text/res:html/res:json, this does NOT set Content-Type
  * (caller's responsibility; binary content can be anything from
@@ -223,7 +223,7 @@ static const luaL_Reg response_methods[] = {
 static void ensure_response_metatable(lua_State *L)
 {
     if (luaL_newmetatable(L, HL_RESPONSE_MT)) {
-        /* First time — set up metatable */
+        /* First time - set up metatable */
         luaL_newlib(L, response_methods);
         lua_setfield(L, -2, "__index");
     }

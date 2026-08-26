@@ -1,4 +1,4 @@
-/* mod_db_udf.c — hull.db UDF bindings (SQLite user-defined functions).
+/* mod_db_udf.c - hull.db UDF bindings (SQLite user-defined functions).
  *
  * The per-runtime SQLite UDF bridge, split out of mod_db.c so the base runtime
  * archive (libhull_feature-lua.a) carries ZERO sqlite3_* references (
@@ -417,7 +417,7 @@ static int lua_db_udf_unregister(lua_State *L)
         return luaL_error(L, "db.udf.unregister: failed");
 #else
     /* Fall back to direct sqlite3 call when WASM (and the UDF cap helper)
-     * is compiled out — Lua/JS callback UDFs still work without WASM.
+     * is compiled out - Lua/JS callback UDFs still work without WASM.
      * NOTE: SQLite keys functions by (name, nargs); passing nargs = -1 removes
      * only a VARIADIC registration. A udf registered with a specific arity
      * (opts.args = N) is not removed by this path (the register arity is not

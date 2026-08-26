@@ -35,7 +35,7 @@
  * @brief Canonical arch tag for the host CPU.
  *
  * Returns one of: "x86_64", "aarch64", "i386", "arm", "riscv64",
- * "unknown". Stable string literal — safe to store. Used as a
+ * "unknown". Stable string literal - safe to store. Used as a
  * cache-key component so a key never spans architectures.
  */
 const char *hl_runtime_cache_arch_tag(void);
@@ -64,7 +64,7 @@ void hl_runtime_cache_hex_encode(const uint8_t *src, size_t src_len,
  *
  * Zero-initialised at file scope (C guarantees zero init for
  * static storage), so callers don't need an explicit initializer.
- * Fields are not part of the public API — treat as opaque.
+ * Fields are not part of the public API - treat as opaque.
  */
 typedef struct {
     HlBlobStore *store;             /* opened store, NULL until first call */
@@ -80,7 +80,7 @@ typedef struct {
  * caches it in `slot->store`, and (if @p atexit_close is non-NULL)
  * registers @p atexit_close via `atexit(3)` so the store is closed
  * cleanly at process exit. On open failure `slot->failed` is set
- * and subsequent calls short-circuit to NULL — failures aren't
+ * and subsequent calls short-circuit to NULL - failures aren't
  * re-attempted to avoid log spam on a permanent issue (HOME unset,
  * permission denied, full disk).
  *
@@ -111,7 +111,7 @@ HlBlobStore *hl_runtime_cache_singleton(const char         *kind,
  *
  * After this call `slot->store == NULL` and `slot->failed == 0`,
  * so the next `_singleton` call retries the open. The
- * `atexit_registered` flag is preserved — once registered, the
+ * `atexit_registered` flag is preserved - once registered, the
  * atexit handler stays registered for the process lifetime
  * (re-registering on a fresh open would double-fire on exit).
  *

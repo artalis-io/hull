@@ -1,4 +1,4 @@
-/* mod_tar.c — hull:tar module (QuickJS bindings)
+/* mod_tar.c - hull:tar module (QuickJS bindings)
  *
  * Parallel to the Lua binding (src/hull/runtime/lua/mod_tar.c). Thin wrappers
  * over the shared ustar core (cap/tar.h). parse/create are pure byte<->object

@@ -1,5 +1,5 @@
 /*
- * image_stub.c — weak per-runtime image-binding default (Lua).
+ * image_stub.c - weak per-runtime image-binding default (Lua).
  *
  * The image.* binding (mod_image) is a composable feature archive
  * (libhull_feature-image-lua.a, docs/image_feature.md). The pure runtime archive

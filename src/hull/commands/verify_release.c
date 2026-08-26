@@ -1,5 +1,5 @@
 /*
- * commands/verify_release.c — `hull verify-release` subcommand
+ * commands/verify_release.c - `hull verify-release` subcommand
  *
  * Verify an Ed25519 signature over a release manifest using the embedded
  * release public key (HL_RELEASE_PUBKEY_HEX) or an explicit --pubkey
@@ -110,7 +110,7 @@ int hl_cmd_verify_release(int argc, char **argv, const HlCommandEnv *env)
                 "                     Pass --pubkey <hex> to verify against a specific key.\n");
             return 1;
         }
-        /* leave pubkey = NULL — release.c resolves the embedded key */
+        /* leave pubkey = NULL - release.c resolves the embedded key */
     }
 
     /* Read manifest + signature */

@@ -1,5 +1,5 @@
 /*
- * app_context.c — Reusable application context for commands
+ * app_context.c - Reusable application context for commands
  *
  * Consolidates the VFS + DB + runtime init sequence that was
  * previously duplicated in agent_lib.c, commands/test.c, and main.c.
@@ -15,7 +15,7 @@
 #include "hull/stdlib_feature.h"
 #include "hull/vfs.h"
 
-#include "hull/cap/fs.h"          /* HlFsConfig — test/agent fs sandbox wiring
+#include "hull/cap/fs.h"          /* HlFsConfig - test/agent fs sandbox wiring
                                    * (unconditional: fs_cfg is not DB-gated) */
 #include "hull/utils/alloc.h"     /* HlAllocator + hl_alloc_init for the fs policy */
 
@@ -60,12 +60,12 @@ struct HlAppContext {
     HlRuntime     *rt;
 
     /* Owned app_dir copy backing fs_cfg_storage.base_dir (rt->fs_cfg borrows it,
-     * so it must outlive the runtime — opts->app_dir may be a caller stack). */
+     * so it must outlive the runtime - opts->app_dir may be a caller stack). */
     char          *app_dir_copy;
     /* fs capability config wired onto rt->fs_cfg when the app declares
      * fs.read/fs.write, so blob.* / fs.* / fs.mmap work under `hull test` /
      * `hull agent` the same way they do under `hull dev` (serve.c does the
-     * equivalent wiring in hl_serve_wire_caps). Only base_dir/base_len — the
+     * equivalent wiring in hl_serve_wire_caps). Only base_dir/base_len - the
      * cap layer sandboxes to base_dir + rejects traversal; the per-path
      * allowlist is the kernel sandbox, which the test harness runs without. */
     HlFsConfig     fs_cfg_storage;
@@ -73,7 +73,7 @@ struct HlAppContext {
     HlAllocator    fs_alloc;          /* owns the policy's memory (opts->alloc may be NULL) */
 
     /* Resolved module set (opt-in via opts.gate_modules). Lives here so
-     * its lifetime matches the runtime — rt->module_set borrows. */
+     * its lifetime matches the runtime - rt->module_set borrows. */
     HlResolvedModuleSet module_set;
     int                 module_set_wired;
 
@@ -116,7 +116,7 @@ static const char *discover_entry_in(const HlRuntimeFactory *const *facs,
     for (size_t i = 0; i < n; i++) {
         const HlRuntimeFactory *f = facs ? facs[i] : NULL;
         if (!f || !f->entry_extension) continue;
-        /* extension is ".lua" / ".js" — strip leading dot for detect_entry */
+        /* extension is ".lua" / ".js" - strip leading dot for detect_entry */
         const char *ext = f->entry_extension;
         if (ext[0] == '.') ext++;
         const char *e = detect_entry(app_dir, ext, entry_buf, buf_size);
@@ -151,7 +151,7 @@ static int resolve_entry_and_runtime(HlAppContext *ctx,
                                       entry_buf, buf_size, &ctx->factory);
         }
     } else {
-        /* Caller provided entry point — match factory by file extension. */
+        /* Caller provided entry point - match factory by file extension. */
         ctx->factory = hl_runtime_factory_for_filename(entry);
     }
 
@@ -273,7 +273,7 @@ int hl_app_context_init(HlAppContext **out, const HlAppContextOpts *opts)
     }
 #endif
 
-    /* Build base config bundle — wired into rt->base BEFORE init. */
+    /* Build base config bundle - wired into rt->base BEFORE init. */
     HlRuntimeBaseConfig base = {0};
 #ifdef HL_ENABLE_DB
     if (ctx->db_open) {
@@ -296,7 +296,7 @@ int hl_app_context_init(HlAppContext **out, const HlAppContextOpts *opts)
      * unexposed when there's no GPU. */
     base.gpu_ctx = opts->gpu_ctx;
 
-    /* Init runtime via the factory — table-driven, single-path. */
+    /* Init runtime via the factory - table-driven, single-path. */
     if (ctx->factory->create(&ctx->rt, opts, &base) != 0) {
         hl_app_context_free(ctx);
         return -1;
@@ -325,7 +325,7 @@ int hl_app_context_init(HlAppContext **out, const HlAppContextOpts *opts)
          * context so agent/mcp can opt in without re-implementing.
          *
          * The set lives in HlAppContext (lifetime matches the runtime).
-         * Resolver failure is fatal — caller sees init failure. */
+         * Resolver failure is fatal - caller sees init failure. */
         if (load_rc == 0 && opts->gate_modules) {
             HlManifest m = {0};
             if (ctx->rt->vt->extract_manifest(ctx->rt, &m) == 0) {

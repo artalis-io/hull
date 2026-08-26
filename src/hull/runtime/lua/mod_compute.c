@@ -1,4 +1,4 @@
-/* mod_compute.c — hull.compute module: WASM compute plugins
+/* mod_compute.c - hull.compute module: WASM compute plugins
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
@@ -24,7 +24,7 @@
 #include <stdio.h>
 
 /* ════════════════════════════════════════════════════════════════════
- * hull.compute module — WASM compute plugins
+ * hull.compute module - WASM compute plugins
  *
  * compute.call(name, input, opts?) -> output, err
  * compute.load(name) -> true, err
@@ -366,7 +366,7 @@ static int lua_compute_load(lua_State *L)
 /* ── compute.async.call ─────────────────────────────────────────────── */
 
 /* push_result callback: convert HlWorkerWasmOp result to a Lua value pushed onto
- * the resumed coroutine's stack (exactly ONE value — the shared resume delivers
+ * the resumed coroutine's stack (exactly ONE value - the shared resume delivers
  * nargs=1). This runs from hl_lua_async_resume BEFORE lua_resume, so it must NOT
  * raise: a longjmp here escapes the resume and strands the suspended connection
  * (issue #317). On a worker-side error we push a nil placeholder and defer the
@@ -395,7 +395,7 @@ static void lua_push_worker_wasm_result(lua_State *L, void *driver)
 }
 
 /* Continuation for compute.async.call / WasmInstance:async_call. Invoked when the
- * yielded coroutine is resumed — and, crucially, INSIDE lua_resume, so a raise
+ * yielded coroutine is resumed - and, crucially, INSIDE lua_resume, so a raise
  * here is a proper coroutine error (catchable by pcall, else a 500), mirroring
  * JS's promise reject. The op is passed as the yield's KContext and is still
  * alive: hl_async_ctx_resume* frees the driver only AFTER cont->resume returns.
@@ -687,7 +687,7 @@ static int lua_wasm_inst_call(lua_State *L)
     return 2;
 }
 
-/* inst:async_call(input, opts?) — dispatch to thread pool, yield */
+/* inst:async_call(input, opts?) - dispatch to thread pool, yield */
 static int lua_wasm_inst_async_call(lua_State *L)
 {
     HlLua *lua = get_hl_lua(L);
@@ -866,7 +866,7 @@ static int lua_wasm_inst_tostring(lua_State *L)
     return 1;
 }
 
-/* inst.async:call(input, opts?) — proxy that prepends the instance as arg 1.
+/* inst.async:call(input, opts?) - proxy that prepends the instance as arg 1.
  * Stack on entry: async_proxy, input, [opts]
  * We need to retrieve the instance from the proxy's upvalue. */
 static int lua_wasm_inst_async_proxy_call(lua_State *L)

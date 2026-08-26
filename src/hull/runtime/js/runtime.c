@@ -1,5 +1,5 @@
 /*
- * js_runtime.c — QuickJS runtime for Hull
+ * js_runtime.c - QuickJS runtime for Hull
  *
  * Initializes QuickJS with sandboxing: no eval, no std/os modules,
  * custom allocator, memory limits, instruction-count interrupt handler,
@@ -46,7 +46,7 @@
 
 /* ── Forward declarations ───────────────────────────────────────────── */
 
-/* Defined in js/async.c — registers hull global (sleep, etc.) */
+/* Defined in js/async.c - registers hull global (sleep, etc.) */
 extern void hl_js_add_hull_global(JSContext *ctx);
 
 /* ── Interrupt handler (gas metering) ───────────────────────────────── */
@@ -58,7 +58,7 @@ static int hl_js_interrupt_handler(JSRuntime *rt, void *opaque)
     js->instruction_count++;
     if (js->max_instructions > 0 &&
         js->instruction_count > js->max_instructions) {
-        return 1; /* interrupt — JS_Eval returns exception */
+        return 1; /* interrupt - JS_Eval returns exception */
     }
     return 0;
 }
@@ -70,8 +70,8 @@ static int hl_js_interrupt_handler(JSRuntime *rt, void *opaque)
  * (`..`) is NOT rejected here: the resolver builds the full joined
  * path and runs hl_path_normalize, which fails closed if `..` would
  * collapse past the caller's base directory. Letting safe `..` through
- * — e.g. `./../models/user.js` from `routes/users.js` resolves to
- * `models/user.js` — matches the Lua require-gate behaviour.
+ * - e.g. `./../models/user.js` from `routes/users.js` resolves to
+ * `models/user.js` - matches the Lua require-gate behaviour.
  *
  * Returns 0 if safe, -1 if absolute.
  */
@@ -93,7 +93,7 @@ static char *hl_js_module_normalize(JSContext *ctx,
     (void)base_name;
     (void)opaque;
 
-    /* Defensive NULL guard — QuickJS's module loader is documented to
+    /* Defensive NULL guard - QuickJS's module loader is documented to
      * pass non-NULL names, but a NULL slipping through would crash at
      * the strncmp below. Mirrors hl_path_normalize's NULL handling. */
     if (!name) return NULL;
@@ -132,7 +132,7 @@ static char *hl_js_module_normalize(JSContext *ctx,
              * we need to reject. Previously this code rejected any
              * `..` substring before normalizing, which broke valid
              * cross-directory imports like `./../models/user.js` from
-             * routes/users.js — a regression vs the Lua-side require
+             * routes/users.js - a regression vs the Lua-side require
              * gate which already normalized correctly. */
             if (hl_path_normalize(resolved) != 0) {
                 js_free(ctx, resolved);
@@ -161,7 +161,7 @@ int hl_js_check_module_declared(JSContext *ctx,
     if (!js) return 0;
 
     const HlModuleSpec *spec = hl_module_registry_find(canonical_name);
-    if (!spec) return 0;  /* private / not registry-known — pass through */
+    if (!spec) return 0;  /* private / not registry-known - pass through */
 
     /* module_set wired (post-manifest): gate immediately. */
     if (js->base.module_set) {
@@ -190,8 +190,8 @@ int hl_js_check_module_declared(JSContext *ctx,
 }
 
 /* Build-cap-optional module ("hull/gpu@1?") the build lacks: synthesize a stub
- * whose single conventional export — the last ':' segment, which matches the
- * native module's export name (hull:gpu -> `gpu`, hull:compute -> `compute`) —
+ * whose single conventional export - the last ':' segment, which matches the
+ * native module's export name (hull:gpu -> `gpu`, hull:compute -> `compute`) -
  * is null. So `import { gpu } from "hull:gpu"` binds null on a base binary and
  * the real object on a GPU binary, letting the app branch on it. */
 static const char *hl_js_module_last_seg(const char *module_name)
@@ -231,7 +231,7 @@ static JSModuleDef *hl_js_module_loader(JSContext *ctx,
 {
     HlJS *js = (HlJS *)opaque;
 
-    /* hull:* modules are pre-registered as native C modules — QuickJS
+    /* hull:* modules are pre-registered as native C modules - QuickJS
      * resolves them automatically. If we get here, it wasn't found as
      * a native module, so check the embedded JS stdlib registry. */
     if (strncmp(module_name, "hull:", 5) == 0) {
@@ -299,7 +299,7 @@ static JSModuleDef *hl_js_module_loader(JSContext *ctx,
          * non-GPU binary) and that reached here with no native reg + no VFS
          * entry: at top-of-file import time the module_set isn't wired yet, so
          * we can't tell if it was declared optional. Return a null-export stub
-         * and defer the decision — the resolver + import tracker run right after
+         * and defer the decision - the resolver + import tracker run right after
          * manifest extraction and still REJECT a non-optional or undeclared
          * import, while an optional one ("hull/gpu@1?") resolves to null so the
          * app can fall back. Scoped to build-cap-absent modules so a module
@@ -318,7 +318,7 @@ static JSModuleDef *hl_js_module_loader(JSContext *ctx,
             return hl_js_optional_stub(ctx, module_name);
 
         /* "hull:something" that isn't a known native and isn't in the
-         * VFS stdlib — almost always a typo. Probe the registry for a
+         * VFS stdlib - almost always a typo. Probe the registry for a
          * near match and surface "did you mean?" if anything is close. */
         {
             char short_name[64];
@@ -453,7 +453,7 @@ static JSModuleDef *hl_js_module_loader(JSContext *ctx,
      * tool-mode base). For absolute paths, fopen directly; for
      * relative, prepend app_dir. The old loader had to strip "/./"
      * here as a workaround because the normalizer left those in
-     * place — no longer needed. */
+     * place - no longer needed. */
     char path[HL_MODULE_PATH_MAX];
     int n;
     if (module_name[0] == '/') {
@@ -565,12 +565,12 @@ static void hl_js_sandbox(JSContext *ctx)
 {
     JSValue global = JS_GetGlobalObject(ctx);
 
-    /* Remove eval() — dynamic code execution risk */
+    /* Remove eval() - dynamic code execution risk */
     JSAtom eval_atom = JS_NewAtom(ctx, "eval");
     JS_DeleteProperty(ctx, global, eval_atom, 0);
     JS_FreeAtom(ctx, eval_atom);
 
-    /* Remove Function constructor — prevents new Function("...") code
+    /* Remove Function constructor - prevents new Function("...") code
      * execution.  Removing eval alone is insufficient because the
      * Function constructor can independently compile and execute
      * arbitrary code strings. */
@@ -662,7 +662,7 @@ int hl_js_init(HlJS *js, const HlJSConfig *cfg)
      * For top-level JS_Eval entry points called from C at a DEEPER
      * stack depth than JS_NewRuntime (e.g. vt_js_run_test_file, called
      * through the shared test_runner), the available JS stack shrinks
-     * by the C-frame difference — and small test scripts can spuriously
+     * by the C-frame difference - and small test scripts can spuriously
      * trip "stack overflow" because the runtime measures depth from
      * the wrong base.
      *
@@ -670,7 +670,7 @@ int hl_js_init(HlJS *js, const HlJSConfig *cfg)
      * not reached during JS_NewRuntime must call JS_UpdateStackTop(rt)
      * first to re-anchor the base. This is a no-op when the depth is
      * the same, and corrects the base when it's deeper. Module-loader
-     * sites (js_module_loader, called BY JS_Eval) must NOT reset —
+     * sites (js_module_loader, called BY JS_Eval) must NOT reset -
      * they're already inside JS execution.
      */
 
@@ -689,7 +689,7 @@ int hl_js_init(HlJS *js, const HlJSConfig *cfg)
         return -1;
     }
 
-    /* Add intrinsics — eval intrinsic is needed for JS_Eval() from C,
+    /* Add intrinsics - eval intrinsic is needed for JS_Eval() from C,
      * but we remove the JS-visible eval() global in sandbox step */
     JS_AddIntrinsicBaseObjects(js->ctx);
     JS_AddIntrinsicDate(js->ctx);
@@ -752,7 +752,7 @@ int hl_js_load_app(HlJS *js, const char *filename)
     if (!js || !js->ctx || !filename)
         return -1;
 
-    /* Re-anchor JS stack base — see the stack-top contract block in
+    /* Re-anchor JS stack base - see the stack-top contract block in
      * vt_js_init. After the runtime-factory refactor (item K) this
      * function is called from a shallower C stack than JS_NewRuntime,
      * so we update before JS_Eval to keep the check accurate. */
@@ -839,7 +839,7 @@ int hl_js_load_app(HlJS *js, const char *filename)
         return -1;
     }
 
-    /* Save arena position — buffer is only needed until
+    /* Save arena position - buffer is only needed until
      * JS_Eval copies it into QuickJS bytecode. */
     size_t arena_saved = js->scratch->used;
 
@@ -861,7 +861,7 @@ int hl_js_load_app(HlJS *js, const char *filename)
     JSValue val = JS_Eval(js->ctx, buf, nread, filename,
                           JS_EVAL_TYPE_MODULE);
 
-    /* Reclaim file buffer — QuickJS owns the bytecode now */
+    /* Reclaim file buffer - QuickJS owns the bytecode now */
     js->scratch->used = arena_saved;
 
     if (JS_IsException(val)) {
@@ -870,7 +870,7 @@ int hl_js_load_app(HlJS *js, const char *filename)
     }
     JS_FreeValue(js->ctx, val);
 
-    /* Reset scratch arena — startup module loads no longer needed */
+    /* Reset scratch arena - startup module loads no longer needed */
     sh_arena_reset(js->scratch);
 
     return 0;
@@ -915,7 +915,7 @@ void hl_js_free(HlJS *js)
     if (!js)
         return;
 
-    /* Cancel and free tracked timers — via async backend vtable. */
+    /* Cancel and free tracked timers - via async backend vtable. */
     {
         const HlAsyncBackend *be = hl_async_backend();
         for (size_t i = 0; i < js->timer_count; i++) {
@@ -994,7 +994,7 @@ void hl_js_free(HlJS *js)
         js->ws_client_cap = 0;
     }
 
-    /* Free WebSocket registry — HTTP-only; CLI builds never create one. */
+    /* Free WebSocket registry - HTTP-only; CLI builds never create one. */
 #ifdef HL_ENABLE_HTTP_SERVER
     if (js->base.ws_registry) {
         hl_http_ws_registry_free(js->base.ws_registry);
@@ -1088,7 +1088,7 @@ int hl_js_register_stdlib(HlJS *js)
     /* Embedded JS stdlib modules are loaded on-demand by the module
      * loader (hl_js_module_loader checks hl_stdlib_js_entries[] for
      * hull:* names not found as native C modules). No eager compilation
-     * needed — just verify the registry is accessible. */
+     * needed - just verify the registry is accessible. */
 
     (void)js->base.platform_vfs; /* ensure linked */
     return 0;
@@ -1212,7 +1212,7 @@ static int vt_js_test_setup(HlRuntime *rt, KlRouter *router)
 }
 #else
 /* CLI-only build stub: hull test against a CLI app needs a different
- * harness (test.run_main) — placeholder so the vtable still links. */
+ * harness (test.run_main) - placeholder so the vtable still links. */
 static int vt_js_test_setup(HlRuntime *rt, KlRouter *router)
 {
     (void)rt; (void)router;
@@ -1251,7 +1251,7 @@ static int vt_js_run_test_file(HlRuntime *rt, const char *file_path,
     src[flen] = '\0';
     fclose(f);
 
-    /* Reset stack base — see the stack-top contract block in
+    /* Reset stack base - see the stack-top contract block in
      * vt_js_init (above). The test runner adds C frames between
      * JS_NewRuntime and JS_Eval, so without this anchoring even a
      * trivial test file trips "stack overflow". */
@@ -1261,7 +1261,7 @@ static int vt_js_run_test_file(HlRuntime *rt, const char *file_path,
                              JS_EVAL_TYPE_MODULE);
     free(src);
 
-    /* JS_Eval error message — caller receives a pointer to load_err_buf,
+    /* JS_Eval error message - caller receives a pointer to load_err_buf,
      * which lives until the next vt_js_run_test_file call. Hull's test
      * runner is single-threaded; if that ever changes, this becomes
      * per-HlJS state. */
@@ -1327,7 +1327,7 @@ static JSValue js_cli_read(JSContext *ctx, JSValueConst this_val,
     int64_t nbytes = 0;
     /* keep[] lives for the whole function so `mode` remains valid
      * after the parse block exits. Previously `keep` was declared
-     * inside the parse block and `mode` was set to point into it —
+     * inside the parse block and `mode` was set to point into it -
      * technically a dangling pointer once the block went out of scope
      * (cppcheck flags as invalidLifetime). Behaviour was de-facto fine
      * because no other stack slot reused the bytes, but the lifetime
@@ -1622,7 +1622,7 @@ static int vt_js_run_main(HlRuntime *rt, KlServer *server,
         return -1;
     }
 
-    /* Drain microtasks — resolves any synchronously-resolvable Promise. */
+    /* Drain microtasks - resolves any synchronously-resolvable Promise. */
     hl_js_run_jobs(js);
 
     /* Branch on whether main returned a Promise. */
@@ -1632,7 +1632,7 @@ static int vt_js_run_main(HlRuntime *rt, KlServer *server,
     JSPromiseStateEnum st = JS_PromiseState(ctx, ret);
 
     if (st == JS_PROMISE_PENDING) {
-        /* Async main — attach C-side .then/.catch callbacks that stash
+        /* Async main - attach C-side .then/.catch callbacks that stash
          * the resolved value on the runtime and stop the server, then
          * drive the Keel event loop until they fire. */
         if (!server) {
@@ -1670,7 +1670,7 @@ static int vt_js_run_main(HlRuntime *rt, KlServer *server,
              * it's the poll backend's standalone loop. The .then
              * callbacks attached above (js_cli_main_settle) call
              * backend->stop when main's promise settles. */
-            (void)server;  /* unused — we go through the backend now */
+            (void)server;  /* unused - we go through the backend now */
             int srv_rc = (js->base.async_ctx)
                 ? hl_async_backend()->run(js->base.async_ctx)
                 : -1;

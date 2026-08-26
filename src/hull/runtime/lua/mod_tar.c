@@ -1,4 +1,4 @@
-/* mod_tar.c — hull.tar module: ustar archive parse / create / extract / pack
+/* mod_tar.c - hull.tar module: ustar archive parse / create / extract / pack
  *
  * Thin bindings over the shared C core (cap/tar.h). The format primitives
  * (parse/create) are pure byte<->table transforms and accept any buffer type

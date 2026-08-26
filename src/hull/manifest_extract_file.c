@@ -1,5 +1,5 @@
 /*
- * manifest_extract_file.c — runtime-neutral helper that spins up a
+ * manifest_extract_file.c - runtime-neutral helper that spins up a
  * transient JS runtime to read app.manifest({...}) from a `.js` file.
  *
  * See include/hull/manifest_extract_file.h for the rationale + the
@@ -17,7 +17,7 @@
 #include <string.h>
 
 /* Copy a NUL-terminated string onto the heap (malloc'd). NULL-safe.
- * Used by both the JS-enabled and JS-disabled paths below — keep it
+ * Used by both the JS-enabled and JS-disabled paths below - keep it
  * above the HL_ENABLE_JS gate. */
 static char *strdup_safe(const char *s)
 {
@@ -102,7 +102,7 @@ int hl_manifest_extract_js_from_file(const char *path,
         JS_FreeValue(ctx, global);
 
         /* Treat exception, undefined, and null all as "no manifest
-         * declared" — leave *out_json NULL and return success. */
+         * declared" - leave *out_json NULL and return success. */
         if (JS_IsException(manifest) || JS_IsUndefined(manifest) ||
             JS_IsNull(manifest)) {
             JS_FreeValue(ctx, manifest);
@@ -127,7 +127,7 @@ int hl_manifest_extract_js_from_file(const char *path,
             goto cleanup;
         }
 
-        /* Heap-copy the JSON BEFORE tearing down the JS runtime — the
+        /* Heap-copy the JSON BEFORE tearing down the JS runtime - the
          * cstring lifetime ends with JS_FreeCString. */
         copy = malloc(json_len + 1);
         if (!copy) {
@@ -153,7 +153,7 @@ cleanup:
     if (rc == 0 && copy && out_json) {
         *out_json = copy;
     } else {
-        /* Error, no-manifest, or caller doesn't want the buffer — don't leak. */
+        /* Error, no-manifest, or caller doesn't want the buffer - don't leak. */
         free(copy);
     }
     if (out_json_len) *out_json_len = json_len;

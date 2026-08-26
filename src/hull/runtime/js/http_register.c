@@ -1,5 +1,5 @@
 /*
- * http_register.c — strong override of the HTTP-feature seam, JS side (#114).
+ * http_register.c - strong override of the HTTP-feature seam, JS side (#114).
  *
  * Mirror of runtime/lua/http_register.c: registers the HTTP-dependent hull:*
  * modules (http-client, http-server, smtp, ws-server, ws-client) + the

@@ -1,5 +1,5 @@
 /*
- * fs_resolve.c — descriptor-relative, virtual-root path resolver.
+ * fs_resolve.c - descriptor-relative, virtual-root path resolver.
  *
  * See include/hull/cap/fs_resolve.h and docs/hull_fs_design.md §3/§5.
  *
@@ -50,7 +50,7 @@ static void map_errno(int e, const char **err)
  * a regular file. `openat2` rejects it (ENOTDIR for a file leaf); the manual walk,
  * left to itself, would strip the trailing slash and open "file" as a leaf (and
  * under WRITE could even create/truncate a regular file at a directory-shaped
- * path). Rejecting it here — BEFORE either implementation runs — makes both agree.
+ * path). Rejecting it here - BEFORE either implementation runs - makes both agree.
  * READ/WRITE are leaf-file modes, so a trailing slash is never valid for them;
  * directory modes (stat/list, a later checkpoint) will pre-check differently. */
 static int caller_path_ok(const char *p)
@@ -92,7 +92,7 @@ static size_t caller_component_count(const char *p)
 
 /* Test/diagnostic hook: HL_FS_FORCE_MANUAL forces the portable manual walk even on
  * Linux, so the parity tests can exercise both implementations on one platform.
- * NOT a security downgrade — both implement the same virtual-root contract. Read
+ * NOT a security downgrade - both implement the same virtual-root contract. Read
  * per call (negligible next to the resolution syscalls) so a test can toggle it at
  * runtime. Only meaningful where the openat2 fast path exists. */
 #if defined(__linux__) && !defined(__COSMOPOLITAN__)

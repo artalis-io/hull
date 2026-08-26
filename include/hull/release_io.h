@@ -6,7 +6,7 @@
  * These helpers were originally inline in `commands/update.c`. They're
  * extracted so both the self-update path and the side-loaded tools
  * path can verify against the same Ed25519-signed `hull.sha256`
- * manifest using the same trust chain — no duplication of the keel
+ * manifest using the same trust chain - no duplication of the keel
  * HTTPS + mbedTLS SHA-256 + manifest-parsing code.
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
@@ -18,7 +18,7 @@
 #include <stddef.h>
 
 /* Keel allocator + TLS types are typedefs over anonymous structs, so
- * we can't forward-declare them — pull the headers in directly. Both
+ * we can't forward-declare them - pull the headers in directly. Both
  * consumers (`commands/update.c`, `commands/tools.c`) already need
  * them, so there's no extra cost. */
 #include <keel/allocator.h>
@@ -35,7 +35,7 @@ const char *hl_release_io_platform(void);
 
 /**
  * Resolve the running binary's filesystem path (Linux: /proc/self/exe,
- * macOS: _NSGetExecutablePath, cosmo: returns -1 by design — caller is
+ * macOS: _NSGetExecutablePath, cosmo: returns -1 by design - caller is
  * expected to fall back to argv[0]).
  *
  * @returns 0 on success, -1 on failure / unsupported platform.
@@ -115,7 +115,7 @@ int hl_release_io_verify_local_asset(const char *dir, const char *asset);
 
 /**
  * Extract a flat `"key":"value"` entry from a JSON blob. Deliberately
- * tiny — sufficient for GitHub release metadata fields like
+ * tiny - sufficient for GitHub release metadata fields like
  * `tag_name`. Not a general parser.
  *
  * @returns 0 on success, -1 on missing key or buffer overflow.
@@ -125,7 +125,7 @@ int hl_release_io_json_str(const char *json, const char *key,
 
 /**
  * Hex-encode the SHA-256 of @p data into @p hex (must be at least 65
- * bytes — 64 lowercase hex chars + NUL).
+ * bytes - 64 lowercase hex chars + NUL).
  *
  * @returns 0 on success, -1 on mbedTLS error.
  */
