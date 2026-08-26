@@ -23,11 +23,14 @@ import re
 import subprocess
 import sys
 
-SCHEMA_VERSION = 1
+# v2: runner_image split into image_os (hard) + image_version (warn-only). See
+# the WARN_FIELDS note below and docs/ci_architecture_design.md Appendix D.
+SCHEMA_VERSION = 2
 
 # The reuse-identity inputs (a change to any -> a different key -> no reuse).
+# These are HARD: a mismatch REJECTS the artifact and fails the job.
 IDENTITY_FIELDS = [
-    "runner_image",        # ImageOS-ImageVersion (not just "ubuntu-24.04")
+    "image_os",            # ImageOS (e.g. "ubuntu24") - the OS family, HARD
     "arch",                # uname -m
     "cc_path", "cc_version",     # the actual CMake C compiler path + version
     "cxx_path", "cxx_version",   # the actual CMake C++ compiler path + version
@@ -37,12 +40,26 @@ IDENTITY_FIELDS = [
     "wamrc_flags",         # WAMRC_CMAKE_FLAGS
     "build_script_hash",   # sha256 of the wamrc make rule region + ci_ensure_wamrc.sh
 ]
-# Same-run provenance (proves the artifact belongs to THIS run).
+# Same-run provenance (proves the artifact belongs to THIS run). HARD.
 PROVENANCE_FIELDS = ["commit_sha", "run_id", "run_attempt", "producer_job"]
-# The artifact digest (checksum integrity).
+# Recorded for provenance and present/hollow-checked like every other field, but a
+# MISMATCH is a WARNING, not a rejection. GitHub rolls the runner ImageVersion
+# (the image build number, e.g. 20260816.277.1 -> 20260823.283.1) across its fleet
+# mid-workflow, so a producer and a consumer of the SAME run can legitimately land
+# on different image build numbers while every substantive identity input (OS
+# family, arch, compiler path+version, LLVM, WAMR rev, patches, flags, build-script
+# hash) is byte-identical. Gating on the build number rejected good artifacts and
+# turned the whole compute matrix red during rollouts. The build number is not a
+# toolchain-identity input, so it is retained as provenance and warned-on, never
+# used as a compatibility rejection.
+WARN_FIELDS = ["image_version"]
+# The artifact digest (checksum integrity). HARD.
 CHECKSUM_FIELD = "artifact_sha256"
 
-ALL_FIELDS = IDENTITY_FIELDS + PROVENANCE_FIELDS + [CHECKSUM_FIELD]
+# Every field is present- and hollow-checked (build_manifest + verify). Only
+# HARD_FIELDS are equality-GATED; WARN_FIELDS differences produce a warning.
+ALL_FIELDS = IDENTITY_FIELDS + PROVENANCE_FIELDS + WARN_FIELDS + [CHECKSUM_FIELD]
+HARD_FIELDS = IDENTITY_FIELDS + PROVENANCE_FIELDS + [CHECKSUM_FIELD]
 
 # Sentinels a probe emits when a value could not be determined. In this CI profile
 # EVERY field must be concrete: a manifest carrying any of these (or an empty
@@ -77,17 +94,23 @@ def build_manifest(fields):
 
 
 def verify(manifest, local):
-    """Return a list of problems (empty => the artifact is trusted). `manifest` is
-    the producer's recorded metadata; `local` is the consumer's freshly-recomputed
-    identity/provenance (including the sha256 of the DOWNLOADED wamrc). An unknown
-    schema, a missing field, or ANY field mismatch is a problem -> the caller fails
-    the job. Fail closed: a non-dict manifest, or a schema it does not understand,
-    is rejected outright."""
+    """Return (problems, warnings). `problems` empty => the artifact is trusted (the
+    caller exits 0, though it still prints any warnings). `manifest` is the
+    producer's recorded metadata; `local` is the consumer's freshly-recomputed
+    identity/provenance (including the sha256 of the DOWNLOADED wamrc).
+
+    A problem (REJECT) is: an unknown/absent schema, a missing field on either
+    side, a hollow local field, or a mismatch in any HARD field (identity +
+    provenance + checksum). A warning (still trusted) is a mismatch in a WARN field
+    (image_version): GitHub's runner image build number rolls across the fleet
+    mid-run, so producer/consumer can differ there with an identical toolchain.
+    Fail closed: a non-dict manifest, or a schema it does not understand, is
+    rejected outright."""
     if not isinstance(manifest, dict):
-        return ["manifest is not a JSON object"]
+        return (["manifest is not a JSON object"], [])
     if manifest.get("schema_version") != SCHEMA_VERSION:
-        return ["unknown manifest schema_version %r (expected %d)"
-                % (manifest.get("schema_version"), SCHEMA_VERSION)]
+        return (["unknown manifest schema_version %r (expected %d)"
+                 % (manifest.get("schema_version"), SCHEMA_VERSION)], [])
     problems = []
     for k in ALL_FIELDS:
         if k not in manifest:
@@ -96,14 +119,25 @@ def verify(manifest, local):
             problems.append("local missing field %s" % k)
     # The consumer's OWN identity must be fully determined; a hollow local field
     # (e.g. `cc_path=unknown` because a cold consumer verified WITHOUT first
-    # configuring the wamrc toolchain) is a verification failure, not a silent
-    # mismatch.
+    # configuring the wamrc toolchain, or an absent ImageVersion) is a verification
+    # failure, not a silent mismatch. This applies to EVERY field, WARN ones too.
     for k in _invalid_fields(local):
         problems.append("local field %s is unavailable/invalid: %r" % (k, local.get(k)))
-    for k in ALL_FIELDS:
+    # HARD equality gate: identity + provenance + checksum.
+    for k in HARD_FIELDS:
         if k in manifest and k in local and str(manifest[k]) != str(local[k]):
             problems.append("%s mismatch: manifest=%r local=%r" % (k, manifest[k], local[k]))
-    return problems
+    # WARN downgrade: image build-number drift is expected during GitHub image
+    # rollouts and is NOT a compatibility rejection (the OS family + toolchain are
+    # equality-gated above). Surface it visibly for provenance.
+    warnings = []
+    for k in WARN_FIELDS:
+        if k in manifest and k in local and str(manifest[k]) != str(local[k]):
+            warnings.append("%s differs: manifest=%r local=%r (GitHub runner image "
+                            "rolled mid-workflow; OS family + toolchain identity "
+                            "unchanged, so the artifact is still trusted)"
+                            % (k, manifest[k], local[k]))
+    return (problems, warnings)
 
 
 # -- environment probing (impure; kept thin) ---------------------------------
@@ -161,7 +195,6 @@ def gather_local(wamrc_path, producer_job, root):
     (an absent patch set, an unmatched Makefile rule, a missing script, an empty
     WAMRC_CMAKE_FLAGS, or a compiler the CMakeCache did not record)."""
     env = os.environ
-    runner_image = "%s-%s" % (env.get("ImageOS", "unknown"), env.get("ImageVersion", "unknown"))
 
     ph = hashlib.sha256()
     patches = sorted(glob.glob(os.path.join(root, "patches", "wamr", "*.patch")))
@@ -199,7 +232,8 @@ def gather_local(wamrc_path, producer_job, root):
     cxx_version = _first_line([cxx_path, "--version"]) if cxx_path not in INVALID_VALUES else None
 
     return {
-        "runner_image": runner_image,
+        "image_os": env.get("ImageOS", "unknown"),          # OS family - HARD
+        "image_version": env.get("ImageVersion", "unknown"),  # build number - WARN
         "arch": _run(["uname", "-m"]) or "unknown",
         "cc_path": cc_path, "cc_version": cc_version or "unknown",
         "cxx_path": cxx_path, "cxx_version": cxx_version or "unknown",
@@ -246,14 +280,20 @@ def main(argv):
         print("wamrc-verify: cannot read manifest (%s) -> FAIL" % e)
         return 1
     local = gather_local(args.wamrc, args.producer, root)
-    problems = verify(manifest, local)
+    problems, warnings = verify(manifest, local)
+    # Warnings print whether or not there are problems, and are visible in the CI
+    # log AND as a GitHub annotation. They never fail the job on their own.
+    for w in warnings:
+        print("::warning title=wamrc runner-image drift::%s" % w)
+        print("  WARN:", w)
     if problems:
         for p in problems:
             print("  FAIL:", p)
         print("wamrc-verify: artifact REJECTED (%d problem(s)); NOT rebuilding - failing the job."
               % len(problems))
         return 1
-    print("wamrc-verify: artifact identity + provenance + checksum verified.")
+    print("wamrc-verify: artifact identity + provenance + checksum verified%s."
+          % (" (with runner-image-version drift warnings)" if warnings else ""))
     return 0
 
 

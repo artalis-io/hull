@@ -1449,9 +1449,16 @@ inputs AND same-run provenance. The consumer recomputes/inspects every field and
 refuses the artifact on any mismatch (D.1.3).
 
 **Reuse-identity inputs** (a change to any yields a different key -> no reuse):
-1. **OS + arch + runner image** - not just `ubuntu-24.04`: the concrete runner
-   image identity AND version (`ImageOS` / `ImageVersion` from the runner
-   environment, e.g. `ubuntu24`/`<image-version>`), plus `uname -m`.
+1. **OS family + arch** - the concrete OS family (`ImageOS`, e.g. `ubuntu24`) and
+   `uname -m`. Both are HARD: a different OS family or architecture rejects the
+   artifact. The runner **image build number** (`ImageVersion`, e.g.
+   `20260816.277.1`) is recorded as provenance and present/hollow-checked, but a
+   producer/consumer difference in it is a **warning, not a rejection**: GitHub
+   rolls the image build number across its fleet mid-workflow, so a producer and a
+   consumer of the same run can legitimately land on different build numbers while
+   every substantive toolchain input below is byte-identical. Gating on the build
+   number turned the compute matrix red during image rollouts for no safety gain;
+   the OS family + toolchain are what determine wamrc equivalence.
 2. **Actual CMake compilers** - the resolved C and C++ compiler **paths** and
    **versions** that cmake used to build wamrc (from `CMakeCache.txt`
    `CMAKE_C_COMPILER` / `CMAKE_CXX_COMPILER` + each `--version`), not a generic
