@@ -1,7 +1,7 @@
 #!/bin/sh
 # e2e_build_flavor.sh - `hull build --flavor` (pure-compute as a PRESET).
 #
-# Phase 4.3 (docs/keel_feature.md): `pure-compute` is no longer a pre-built
+# (docs/keel_feature.md): `pure-compute` is no longer a pre-built
 # platform lib -- it is a build.lua PRESET on the DEFAULT composable base, which
 # drops HTTP/TLS/Keel and composes each back per app. So the flavor is a
 # validation contract (reject any HTTP/TLS app) and the size payoff comes from

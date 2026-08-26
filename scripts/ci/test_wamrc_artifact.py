@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # test_wamrc_artifact.py - fixtures for the wamrc artifact identity/provenance
-# core (Slice 5A). Proves the pure build_manifest/verify functions: a matching
+# core. Proves the pure build_manifest/verify functions: a matching
 # artifact verifies; ANY identity, provenance, checksum, arch, schema, or
 # missing-field defect is rejected (-> the consumer fails, never rebuilds).
 # Run: python3 scripts/ci/test_wamrc_artifact.py

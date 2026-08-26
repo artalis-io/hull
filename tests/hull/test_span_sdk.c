@@ -1,6 +1,6 @@
 /*
  * test_span_sdk.c - native unit tests for the guest SDK header templates/hull_span.h
- * (mapped-spans checkpoint 3b). Exercises the natively-testable surface: the
+ * (mapped-spans). Exercises the natively-testable surface: the
  * locked wire decoder (hull_span_decode), name lookup (hull_span_find), and the
  * scratch-address narrowing guard (hull_span__narrow) that rejects a destination
  * >= 4 GiB before it can be truncated into the (i32,i32,i32) host_call ABI.

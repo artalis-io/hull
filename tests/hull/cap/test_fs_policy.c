@@ -1,5 +1,5 @@
 /*
- * test_fs_policy.c - hull.fs path-authorization policy core (checkpoint 3, Slice A).
+ * test_fs_policy.c - hull.fs path-authorization policy core.
  *
  * Pure compile + select over a real fixture tree: grant parse (incl. rejections),
  * the four entry kinds (SUBTREE/EXACT/CREATE/PATTERN), deterministic most-specific
@@ -45,7 +45,7 @@ static void build_tree(void)
     mk_file("data/sub/a.csv"); mk_file("data/private/p.txt");
     mk_dir("logs"); mk_dir("logs/2026"); mk_file("logs/2026/a.txt");
     mk_link("data", "linkdir");            /* symlink -> real dir (compile-refusal case) */
-    mk_link("secret.txt", "data/link.csv");/* pattern-matching symlink (runtime-refusal, Slice B) */
+    mk_link("secret.txt", "data/link.csv");/* pattern-matching symlink (runtime-refusal) */
 }
 
 /* Compile a policy from raw grant-string arrays; grants are freed here (compile
@@ -230,7 +230,7 @@ UTEST(fs_policy, pattern_acceptance_matrix)
     ASSERT_TRUE(SEL("data/sub/a.csv").entry == NULL);      /* denied: '*' never crosses '/' */
     ASSERT_TRUE(SEL("data/a.csv/x").entry == NULL);        /* denied: pattern is terminal */
     /* a symlink NAME matching the pattern still SELECTS at this pure layer; the
-     * symlink REFUSAL is enforced when Slice B opens the residual O_NOFOLLOW. */
+     * symlink REFUSAL is enforced when the resolver opens the residual O_NOFOLLOW. */
     ASSERT_TRUE(SEL("data/link.csv").entry != NULL);
     ASSERT_STREQ("link.csv", SEL("data/link.csv").residual);
     #undef SEL

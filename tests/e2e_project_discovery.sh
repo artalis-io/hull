@@ -10,7 +10,7 @@
 # frontend capabilities are accurate; static/ browser assets are pruned while application
 # .js is honestly unsupported (never parsed as Lua) -> complete=false; a missing root is
 # an invalid+incomplete discovery; and the public JSON leaks NO generation-internal state
-# (handle / _by_source / _handles / by_id). Slice 3 also drives a live `hull dev --agent`:
+# (handle / _by_source / _handles / by_id). The inspection also drives a live `hull dev --agent`:
 # it publishes a discovery.json generation per reload (session_pid-bound), inspect serves
 # the LIVE generation, a source change bumps the generation, and a dead/stale session
 # sidecar is ignored (falls back to standalone).
@@ -50,7 +50,7 @@ sys.exit(0 if ('"$_expr"') else 1)
 }
 
 # assert_no_leaked_keys "<name>" "<json>": fail iff any generation-internal KEY appears anywhere
-# in the JSON object graph. Slice 7 amendment 4: RECURSIVE KEY inspection, never substring match
+# in the JSON object graph. RECURSIVE KEY inspection, never substring match
 # (annotation text or a path may legitimately contain a word like "handle" or "ast" as a VALUE).
 assert_no_leaked_keys() {
     _name="$1"; _json="$2"
@@ -92,7 +92,7 @@ inspect() {
 # ── JS-frontend availability is a BUILD property of $HULL; detect it and (optionally) gate ──
 # The SAME lifecycle must behave honestly whether or not the JS frontend is compiled in
 # (HL_FRONTEND_JS). We detect analyzability by asking the binary itself, then branch the
-# JS-specific assertions. Slice 7 amendment 4: a CI job pins the expectation via
+# JS-specific assertions. A CI job pins the expectation via
 # HULL_E2E_EXPECT_JS (1|0); a mismatch is a HARD FAIL so neither the full-build job nor the
 # lua-only job can silently run the wrong branch (or skip).
 PROBEDIR="$TMP/js-probe"
@@ -274,7 +274,7 @@ if [ -f "$OK/.hull/discovery.json" ]; then
 else fail "publish did not write the canonical discovery.json"; fi
 rm -rf "$OK/.hull" 2>/dev/null || true
 
-# ── Slice 3: hull dev --agent publishes generations; inspect reads the LIVE one ──
+# ── hull dev --agent publishes generations; inspect reads the LIVE one ──
 DEVAPP="$TMP/devapp"
 mkdir -p "$DEVAPP"
 cat > "$DEVAPP/app.lua" <<'EOF'
@@ -407,7 +407,7 @@ OUTM7=$("$HULL" agent inspect "$MAL" 2>/dev/null)
 assert_py "embedded NUL + trailing garbage -> standalone (byte-length validation)" "$OUTM7" \
     'd["source"]=="standalone"'
 
-# ── build-readiness (Slice 4): the analyzer runs on a REAL repository example tree ──
+# ── build-readiness the analyzer runs on a REAL repository example tree ──
 if [ -d examples/hello ]; then
     OUTE=$("$HULL" agent inspect examples/hello 2>/dev/null)
     assert_py "analyzes a real example app tree (valid, >=1 Lua source analyzed)" "$OUTE" \
@@ -415,7 +415,7 @@ if [ -d examples/hello ]; then
 fi
 
 # ════════════════════════════════════════════════════════════════════════════════════════
-# Slice 7: the FULL mixed-language lifecycle through hull dev --agent -> publish -> live read,
+# The FULL mixed-language lifecycle through hull dev --agent -> publish -> live read,
 # semantic live-vs-standalone equivalence, and the C3a source-not-executed boundary. The
 # branch is chosen by $JS_ANALYZABLE (a build property of $HULL); the CI legs pin BOTH sides.
 # ════════════════════════════════════════════════════════════════════════════════════════

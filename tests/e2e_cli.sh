@@ -119,10 +119,10 @@ JS
 run_udf_teardown "lua" "lua"
 run_udf_teardown "js"  "js"
 
-# ── fs round-trip through app.main (checkpoint 3, Slice B) ────────────────────
+# ── fs round-trip through app.main ────────────────────
 # The path-authorization policy is compiled from the manifest's fs grants and
 # wired onto the CLI runtime. A grant of "." authorizes the whole app dir, so a
-# write + read-back must round-trip (before Slice B's wiring fix the CLI denied
+# write + read-back must round-trip (before the wiring fix the CLI denied
 # every fs op). Exit 0 = round-trip OK.
 run_fs_roundtrip() {
     runtime="$1"; ext="$2"
@@ -160,7 +160,7 @@ JS
 run_fs_roundtrip "lua" "lua"
 run_fs_roundtrip "js"  "js"
 
-# ── fs.stat + fs.list parity through app.main (checkpoint 3, Slice C) ─────────
+# ── fs.stat + fs.list parity through app.main ─────────
 # Proves the Lua and JS bindings return EQUIVALENT values + error tokens for the
 # metadata (stat) and enumeration (list) surface: present -> metadata, absent ->
 # nil/null, deterministic byte-order list, and a "not_found" token on a missing

@@ -1,5 +1,5 @@
 /*
- * test_js_conformance.c - Slice 2: compile-only conformance harness.
+ * test_js_conformance.c - compile-only conformance harness.
  *
  * Every input is run through BOTH:
  *   - the Hull frontend parser (hull:source:parser, via the restricted tooling session), and

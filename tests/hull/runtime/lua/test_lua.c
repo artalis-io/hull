@@ -58,7 +58,7 @@ static HlVfs platform_vfs;
 static void *platform_vfs_owned = NULL;
 
 /* Tests use lots of inline Lua snippets that reference modules as
- * globals (`db.exec(...)`, `crypto.sha256(...)`, ...). Phase 2b removes
+ * globals (`db.exec(...)`, `crypto.sha256(...)`, ...). The runtime removes
  * those globals from production runtime - apps must `require` instead.
  * This helper restores the globals for testing convenience by trying to
  * require each known native module and assigning to `_G`. Modules that
@@ -1013,7 +1013,7 @@ UTEST(lua_runtime, require_null_module_set_is_permissive)
 
 UTEST(lua_runtime, require_resolves_native_modules)
 {
-    /* Phase 2b bridge: native C modules (luaL_requiref-registered) like
+    /* Native C modules (luaL_requiref-registered) like
      * hull.crypto must resolve via the custom require even though they
      * live in _LOADED, not __hull_modules. */
     init_lua();

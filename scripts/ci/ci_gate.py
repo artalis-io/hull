@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # ci_gate.py - the applicability-aware CI result gate (docs/ci_architecture_design.md
-# section 16). Slice 2. Consumes the GitHub `needs` context (toJSON(needs)) and
+# section 16). Consumes the GitHub `needs` context (toJSON(needs)) and
 # FAILS unless every required job succeeded.
 #
 # `if: always()` on the gate job only makes it EVALUATE; this script decides
@@ -13,7 +13,7 @@
 # A matrix job exposes ONE aggregate result to `needs`, so checking that result
 # is correct (a failed/cancelled leg makes the aggregate failure/cancelled).
 #
-# In Slice 2 no job is classifier-skipped, so the only legitimate skip is a
+# No job is classifier-skipped today, so the only legitimate skip is a
 # genuinely conditional job (e.g. the push-only `benchmark` on a PR), passed via
 # --allow-skip. When classifier-based skipping lands, the inapplicable set is
 # derived from the plan.

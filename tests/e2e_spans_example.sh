@@ -10,7 +10,7 @@
 # (A hand-rolled `wamrc` without that flag reads zeros - the #326 bug - so the
 # example deliberately does not do that.) Each standalone binary is run from its
 # app dir so fs.mmap finds the runtime data file (data.bin).
-# (mapped-spans checkpoint 3b, slice 2.)
+# (mapped-spans).
 #
 # SPDX-License-Identifier: AGPL-3.0-or-later
 set -u

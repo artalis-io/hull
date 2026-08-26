@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # wamrc_artifact.py - the wamrc producer/consumer artifact identity + provenance
-# core for Slice 5A (docs/ci_architecture_design.md Appendix D).
+# core for (docs/ci_architecture_design.md Appendix D).
 #
 # The PRODUCER builds `wamrc` once and emits a metadata manifest (identity +
 # same-run provenance + sha256). Each CONSUMER downloads the run-scoped artifact,
@@ -255,7 +255,7 @@ def _root():
 
 
 def main(argv):
-    ap = argparse.ArgumentParser(description="wamrc artifact manifest / verify (Slice 5A).")
+    ap = argparse.ArgumentParser(description="wamrc artifact manifest / verify.")
     sub = ap.add_subparsers(dest="cmd", required=True)
     mp = sub.add_parser("manifest", help="emit the producer manifest JSON to stdout.")
     mp.add_argument("--wamrc", required=True)

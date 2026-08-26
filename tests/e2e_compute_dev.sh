@@ -183,7 +183,7 @@ fi
 
 # ── hull build auto-rebuild from source ─────────────────────────────
 #
-# This is the integration point Phase A added. The flow:
+# This is the integration point the compute-dev flow added. The flow:
 #
 #   1. Establish a known mtime ordering: .wasm older than .c.
 #   2. Run `hull build .` (or just `hull build` for the local app).

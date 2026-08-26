@@ -6,7 +6,7 @@
 # + startup handshake -> parameterized db.exec / db.query -> typed row decode.
 #
 # Auth is SCRAM-SHA-256 (Phase 3, the postgres:16 default). Two transports are
-# exercised: plaintext (sslmode=disable) and TLS (Phase 3b.2: SSLRequest ->
+# exercised: plaintext (sslmode=disable) and TLS (SSLRequest ->
 # mbedTLS handshake -> SCRAM over TLS, asserted via pg_stat_ssl). Skips cleanly
 # when Docker (or, for the TLS phase, openssl) is unavailable.
 #
@@ -537,7 +537,7 @@ case "$rcout" in
     *)  echo "::error db.exec affected-row count on PG: $rcout"; exit 1 ;;
 esac
 
-# ── conn.wait_notify: low-latency LISTEN/NOTIFY (Phase 4.2) ────────────
+# ── conn.wait_notify: low-latency LISTEN/NOTIFY ────────────
 # A waiter app parks on conn.wait_notify (yielding on the db.async worker pool);
 # a SECOND connection issues pg_notify; the waiter must wake with notified=true
 # well under its timeout - proving the yielding worker-pool wait + cross-
@@ -599,7 +599,7 @@ echo "=== conn.wait_notify LISTEN/NOTIFY round trip ==="
 check_wait_notify "lua" "lua" "$LUA_WN_WAITER" "$LUA_WN_NOTIFIER"
 check_wait_notify "js"  "js"  "$JS_WN_WAITER"  "$JS_WN_NOTIFIER"
 
-# ── jobs low-latency pickup via NOTIFY (Phase 4.3) ────────────────────
+# ── jobs low-latency pickup via NOTIFY ────────────────────
 # A run_worker parked idle with a LONG poll (8s) must wake and process a job
 # enqueued by a SECOND process in WELL under that poll - proving enqueue's
 # pg_notify + run_worker's idle wait_notify. On a non-NOTIFY backend the same
@@ -705,7 +705,7 @@ end)'
 echo "=== LISTEN reconnect after a dropped connection ==="
 check_reconnect "lua" "lua" "$LUA_RC_WORKER"
 
-# ── TLS phase (Phase 3b.2) ────────────────────────────────────────────
+# ── TLS phase ────────────────────────────────────────────
 # Enable SSL on the running container with a self-signed cert, then connect
 # with sslmode=require and assert (via pg_stat_ssl) the session is encrypted.
 if ! command -v openssl >/dev/null 2>&1; then

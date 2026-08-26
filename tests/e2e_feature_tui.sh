@@ -55,7 +55,7 @@ app.main(function()
 end)
 LUA
 
-# ── tui x composed-runtime composes, links, and runs (issue #114, Phase D) ──
+# ── tui x composed-runtime composes, links, and runs (issue #114) ──
 #
 # The native base is runtime-less. The tui feature is split per-runtime: the cap
 # core (libhull_feature-tui.a) is runtime-agnostic, and each runtime bridge lives

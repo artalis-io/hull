@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# test_job_plan.py - fixtures for the job-applicability map (Slice 3b). Proves
+# test_job_plan.py - fixtures for the job-applicability map. Proves
 # run-flags + gate allow-skip for: docs-only, pure JS, pure Lua, fuzz-only, core,
 # mixed, main, force-full, unexpected skip, and missing applicability.
 # Run: python3 scripts/ci/test_job_plan.py
@@ -145,7 +145,7 @@ check("approved narrow (js) -> focused-js only, no core-common",
       job_plan.run_flags(full_plan(focused_js_frontend=True))["run_focused_js"]
       and not job_plan.run_flags(full_plan(focused_js_frontend=True))["run_core_common"])
 
-# ---- Slice 4 checkpoint 3: native narrowing ACTIVE (skipping on) -------------
+# ---- native narrowing ACTIVE (skipping on) -------------
 # An isolated native change is now NARROW: it runs the core-common floor + its
 # subsystem (+ the db-any umbrella for a db change) and SKIPS the other
 # subsystems, the broad-only web group, and the frontend groups. A native change
@@ -292,7 +292,7 @@ check("fuzz-db-wire skips on gpu-only", "fuzz-db-wire" in skips(["src/hull/cap/g
 check("fuzz-compute-span runs on compute change", "fuzz-compute-span" not in skips(["src/hull/cap/wasm.c"]))
 check("fuzz-compute-span skips on db-only", "fuzz-compute-span" in skips(["src/hull/cap/db_postgres.c"]))
 
-# Slice 5A: the wamrc producer + verify jobs are compute-grouped - they run on a
+# the wamrc producer + verify jobs are compute-grouped - they run on a
 # compute-applicable plan and skip (legitimately) only when compute is inapplicable.
 for _j in ("wamrc-x86_64", "wamrc-artifact-verify"):
     check("5A %s in compute group" % _j, job_plan.GROUP.get(_j) == "compute")

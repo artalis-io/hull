@@ -55,7 +55,7 @@ assert_contains() {
     fi
 }
 
-# hull flavor install <flavor> - since Phase 4.3, pure-compute is a build.lua
+# hull flavor install <flavor> - pure-compute is a build.lua
 # PRESET on the default composable base (which already drops HTTP/TLS/Keel and
 # composes each back per app). There is no per-flavor platform lib to fetch, so
 # `hull flavor install pure-compute` is a no-op that reports the preset and

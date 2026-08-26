@@ -1,5 +1,5 @@
 /*
- * test_js_scope.c - Slice 4: the structural scope / binding resolver (hull:source:scope),
+ * test_js_scope.c - the structural scope / binding resolver (hull:source:scope),
  * driven through hull:source:resolveScope. Asserts on the JSON { ok, bindings, refs } model.
  *
  * Covers the locked semantics (docs/js_frontend_slice4_scope.md): function-body lexical scope

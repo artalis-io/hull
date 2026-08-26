@@ -1,5 +1,5 @@
 /*
- * test_js_lexer.c - Slice 2: the byte-oriented ECMAScript lexer (hull:source:lexer),
+ * test_js_lexer.c - the byte-oriented ECMAScript lexer (hull:source:lexer),
  * driven through the restricted tooling session via hull:source:lextest.
  *
  * Covers the token contract the parser depends on: exact 1-based byte ranges, UTF-8 /
@@ -205,7 +205,7 @@ UTEST(js_lexer, comment_collection)
     EXPECT_TRUE(has(o, "\"kind\":\"line\",\"start\":1,\"stop\":8,\"raw\":\"// line\",\"text\":\" line\""));
     EXPECT_TRUE(has(o, "\"kind\":\"block\""));
     EXPECT_TRUE(has(o, "\"kind\":\"jsdoc\",\"start\":21,\"stop\":33"));   // the /** ... */ jsdoc block
-    EXPECT_TRUE(has(o, "\"text\":\"* jsdoc \""));   // raw inner content (leading * kept; Slice 3 strips it)
+    EXPECT_TRUE(has(o, "\"text\":\"* jsdoc \""));   // raw inner content (leading * kept; the frontend strips it)
     // an empty jsdoc-looking block is a plain block, not jsdoc
     free(o); o = NULL;
     o = lex_str(s, "/**/x");

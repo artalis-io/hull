@@ -20,7 +20,7 @@ on:
         type: boolean
         default: false
 
-# CI-architecture Slice 3b (docs/ci_architecture_design.md): the `classify`
+# CI-architecture (docs/ci_architecture_design.md): the `classify`
 # orchestrator emits per-group run-flags from the change plan; each expensive job
 # gates on its flag (`if: needs.classify.outputs.run_*`), and the `ci-success`
 # gate derives its allow-skip from the SAME job-applicability map
@@ -37,7 +37,7 @@ jobs:
     runs-on: ubuntu-24.04
     outputs:
       plan_json: ${{ steps.run.outputs.plan_json }}
-      # Slice 4 checkpoint 3: the monolithic run_full_matrix / run_fuzz_native
+      # the monolithic run_full_matrix / run_fuzz_native
       # flags are replaced by the core-common floor + native subsystem groups +
       # the broad-only web bucket. The set here MUST equal job_plan.GROUP_FLAG's
       # values (check_job_plan_consistency.py keeps the job `if:` conditions in
@@ -129,7 +129,7 @@ jobs:
         with:
           submodules: true
 
-      # Phase 4c: fail fast if feature.c FEATURES[] drifts from the mk/feature.mk
+      # fail fast if feature.c FEATURES[] drifts from the mk/feature.mk
       # feature registry (the single source of truth). Cheap (grep + make vars).
       # Also asserts every installable feature has a FEATURE_SPECS codegen entry (T4e).
       - name: Feature registry consistency (feature.c vs mk/feature.mk vs FEATURE_SPECS)
@@ -435,7 +435,7 @@ jobs:
         timeout-minutes: 2
         run: make hull-test-examples
 
-  # Slice 5A (docs/ci_architecture_design.md Appendix D): the wamrc PRODUCER.
+  # (docs/ci_architecture_design.md Appendix D): the wamrc PRODUCER.
   # Builds wamrc ONCE (LLVM-18 + the WAMR patch carriage), emits an identity +
   # provenance manifest, and uploads an immutable, run-scoped artifact. In this
   # ADDITIVE checkpoint the artifact is proven by the verify job below; the 8
@@ -478,7 +478,7 @@ jobs:
           retention-days: 1
           if-no-files-found: error
 
-  # Slice 5A: the verify + equivalence CONSUMER (representative). Downloads the
+  # the verify + equivalence CONSUMER (representative). Downloads the
   # producer artifact, verifies identity + provenance + checksum + arch + linkage
   # + usability (FAILS the job on any mismatch - it never rebuilds and pretends),
   # then byte-compares the artifact-wamrc .aot against a FRESH-built wamrc .aot on
@@ -649,7 +649,7 @@ jobs:
           # Precondition: guarantee THIS step's own executable wamrc rather than
           # trusting a prior step's mutable build/ state (see the helper header).
           sh tests/ci_ensure_wamrc.sh
-          # checkpoint 2: the span lifecycle + Design B window under a real AOT
+          # the span lifecycle + Design B window under a real AOT
           # instance. FAIL if the AOT case takes the wamrc-unavailable skip path.
           rm -f build/gen_ro_heap_span_aot.h
           make build/test_wasm_spans
@@ -1194,7 +1194,7 @@ jobs:
           # Precondition: guarantee THIS step's own executable wamrc rather than
           # trusting a prior step's mutable build/ state (see the helper header).
           sh tests/ci_ensure_wamrc.sh
-          # checkpoint 2: the span lifecycle + Design B window under a real AOT
+          # the span lifecycle + Design B window under a real AOT
           # instance. FAIL if the AOT case takes the wamrc-unavailable skip path.
           rm -f build/gen_ro_heap_span_aot.h
           make build/test_wasm_spans
@@ -1661,7 +1661,7 @@ jobs:
   # security fuzzers, the Lua source parser fuzzer, and the JS source parser
   # fuzzer as INDEPENDENT jobs so path-aware selection can run only the relevant
   # target. Each keeps its sanitizer instrumentation + 60s libFuzzer budget. --
-  # Slice 4: the former single `fuzz-native-security` job is split into three
+  # the former single `fuzz-native-security` job is split into three
   # atomic jobs owning a FIXED target subset each. The UNION of the three equals
   # the former 13-target set (asserted by scripts/ci/test_job_plan.py :: fuzz_union).
   # Checkpoint 3 assigns each to its subsystem group: core fuzzers -> core-common
@@ -2010,7 +2010,7 @@ jobs:
             || { echo "FAIL: produced cosmo app did not load hull.json"; exit 1; }
           echo "PASS: produced cosmo app booted with a populated runtime VFS"
 
-      # (Phase 4.3: pure-compute is a build.lua preset on the default composable
+      # (pure-compute is a build.lua preset on the default composable
       # base, not a pre-built per-flavor lib, so there is no cosmo flavor lib to
       # build here. The `--flavor` preset path is covered on native runners by
       # `make e2e-build-flavor`.)
@@ -2263,7 +2263,7 @@ jobs:
         timeout-minutes: 15
         run: sh tests/e2e_feature_mysql.sh
 
-  # Slice 7 amendment 4: the JS-less side of the project-discovery lifecycle, on its OWN clean
+  # The JS-less side of the project-discovery lifecycle, on its OWN clean
   # RUNTIME=lua build (QuickJS + the JS frontend dropped). The recipe pins HULL_E2E_EXPECT_JS=0,
   # so this job FAILS if JavaScript is somehow analyzable here - the JS-less branch can never
   # silently skip. The analyzable side is pinned (EXPECT_JS=1) in the main `build` job's step.
@@ -2534,7 +2534,7 @@ jobs:
   # `if: always()` makes it EVALUATE; scripts/ci/ci_gate.py decides pass/fail. It
   # depends on EVERY job (check_gate_completeness.py enforces that in `classify`),
   # requires each to succeed, and permits ONLY a declared-inapplicable skip - in
-  # Slice 2 that is just the push-only `benchmark` on a PR. This job is NOT yet a
+  # A push-only `benchmark` job on a PR. This job is NOT yet a
   # required status check; making it one is a separate, explicitly authorized
   # branch-protection step. --
   ci-success:

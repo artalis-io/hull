@@ -1,6 +1,6 @@
 /*
- * test_fs_authz.c - hull.fs path authorization THROUGH the cap layer (checkpoint 3,
- * Slice B). Unlike test_fs_policy.c (pure compile/select), these drive
+ * test_fs_authz.c - hull.fs path authorization THROUGH the cap layer. Unlike
+ * test_fs_policy.c (pure compile/select), these drive
  * hl_cap_fs_read / _write / _mmap with a compiled policy and verify the runtime
  * per-kind symlink enforcement, CREATE/PATTERN creation, O_TRUNC, independent
  * read/write sets, and no-grant denial - the Slice-B acceptance boundary.

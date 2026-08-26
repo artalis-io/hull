@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # test_nightly_matrix.py - PIN the nightly compat-db engine-version inventory
-# (docs/ci_architecture_design.md Appendix F). Slice 6 supports PostgreSQL 15/16
+# (docs/ci_architecture_design.md Appendix F). Supports PostgreSQL 15/16
 # and MySQL 8.0 - the versions the e2e harness can actually reach. MySQL 8.4 and
 # MariaDB are a PENDING SLOT: 8.4 removed `--default-authentication-plugin`,
 # disables mysql_native_password by default, and defaults to caching_sha2_password

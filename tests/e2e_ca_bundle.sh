@@ -1,5 +1,5 @@
 #!/bin/sh
-# E2E test for the embedded CA bundle (Phase D4).
+# E2E test for the embedded CA bundle.
 #
 # Verifies:
 #   1. `hull doctor` reports CA bundle status (system + embedded)

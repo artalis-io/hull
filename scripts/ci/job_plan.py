@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # job_plan.py - the SINGLE job-applicability map (docs/ci_architecture_design.md
-# section 16). Slice 3b. Both the ci.yml job `if:` conditions AND the ci-success
+# section 16). Both the ci.yml job `if:` conditions AND the ci-success
 # gate's allow-skip derive from THIS map, so they can never drift apart.
 #
 # Model (per the ratified 3b constraints):
@@ -31,7 +31,7 @@ import classify_changes as _classify  # noqa: E402  (the canonical plan schema)
 # Each GROUP has a run-flag emitted by the classify job; the ci.yml job `if:`
 # references exactly this flag. `always` has no flag (never skips).
 #
-# Slice 4 checkpoint 3: the monolithic `full-matrix` + `fuzz-native` groups are
+# the monolithic `full-matrix` + `fuzz-native` groups are
 # split into the always-run `core-common` floor + the native subsystem groups
 # (db-* / db-any umbrella / gpu / compute) + the broad-only `web` bucket
 # (htmx-browser, project-discovery-lua) that a native change does not touch. The
@@ -65,8 +65,8 @@ GROUP = {
     # -- core-common: the subsystem-AGNOSTIC floor. Runs for EVERY production-C /
     # native change AND every broad run (constraint 1). Includes the four-platform
     # `make test` (all unit binaries), build/link/repro/platform checks, the
-    # sanitizer + static-analysis floor, and the core security fuzzers. Slice 4
-    # checkpoint 3 assigns fuzz-core-security here (was the shared fuzz-native).
+    # sanitizer + static-analysis floor, and the core security fuzzers.
+    # fuzz-core-security is assigned here (was the shared fuzz-native).
     "build": "core-common",
     "build-pipeline": "core-common",
     "flavors": "core-common",
@@ -125,7 +125,7 @@ GROUP = {
 # POSITIVE narrow allowlist (fail closed). A plan may skip the broad matrix ONLY
 # when it is a well-formed plan dict whose TRUE flags ALL lie within
 # APPROVED_NARROW and include at least one real narrow SELECTOR (beyond the
-# always-on lint). Slice 4 checkpoint 3 EXTENDS the allowlist from the frontend
+# always-on lint). EXTENDS the allowlist from the frontend
 # classes to the native subsystem selectors. Its OWN positive set is the union of:
 #   - {lint, docs_only}
 #   - FRONTEND_SELECTORS  (the proven source-frontend/parser classes)
@@ -185,9 +185,9 @@ def applicable_groups(plan):
     return groups
 
 
-# -- Slice 4 native-subsystem groups (Appendix C.2/C.5) -----------------------
+# -- native-subsystem groups (Appendix C.2/C.5) -----------------------
 # The mapping from a plan to native subsystem groups, CONSULTED by
-# applicable_groups (checkpoint 3 - skipping is active). core-common is the
+# applicable_groups (skipping is active). core-common is the
 # always-run floor for ANY production-C / native change (constraint 1). db-any is
 # the SINGLE umbrella group whose sole member is the fuzz-db-wire job = the union
 # of the db sub-groups (Amendment 1), keyed off focused_db (set whenever any db

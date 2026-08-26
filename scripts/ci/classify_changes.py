@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 # classify_changes.py - the repository-owned, change-aware CI classifier.
 #
-# Design: docs/ci_architecture_design.md (Appendix B). Slice 1 of the ratified
+# Design: docs/ci_architecture_design.md (Appendix B). The classifier stage of the ratified
 # rollout: this emits overlapping change FACTS and a derived execution PLAN. It
 # does NOT yet gate any CI job - the workflow wiring (orchestrator + ci-success
-# gate) is Slice 2. Keeping this pure + fixture-tested (test_classify_changes.py)
+# gate) is a separate stage. Keeping this pure + fixture-tested (test_classify_changes.py)
 # lets the rules be reviewed and proven independently of GitHub Actions.
 #
 # Python 3 (not POSIX sh): POSIX `read` cannot reliably consume NUL-delimited
@@ -45,7 +45,7 @@ FACTS = [
     "wasm_changed",
     "gpu_changed",
     "native_db_changed",
-    # per-backend DB facts (Slice 4 / Appendix C): an isolated backend `.c`
+    # per-backend DB facts (Appendix C): an isolated backend `.c`
     # narrows to its own backend; a shared-DB `.c` sets ALL FOUR (fan-out).
     "db_postgres_changed",
     "db_mysql_changed",
@@ -90,7 +90,7 @@ PLAN = [
 ]
 
 
-# -- Slice 4 isolated-subsystem allowlist (Appendix C.2/C.3) -----------------
+# -- isolated-subsystem allowlist (Appendix C.2/C.3) -----------------
 # A CURATED, EXACT-PATH positive allowlist of production `.c` files whose
 # compile/link/dependency closure is confined to ONE native subsystem. A matched
 # file emits ONLY its subsystem fact(s), NOT production_core; every OTHER src/**
@@ -99,11 +99,11 @@ PLAN = [
 # to broad - it can never mis-narrow. Every path here is machine-verified to exist
 # (test_classify_changes.py :: allowlist_files_exist).
 #
-# IMPORTANT (checkpoint 2, additive/no-skip): none of the focused_* flags these
+# IMPORTANT (additive/no-skip): none of the focused_* flags these
 # facts drive are in job_plan.APPROVED_NARROW, so a plan carrying them still
 # evaluates BROAD - the classifier narrows the FACTS but NOTHING skips yet. Skip
-# activation (adding the native narrow class + regrouping the matrix) is
-# checkpoint 3.
+# activation (adding the native narrow class + regrouping the matrix) is a
+# later step.
 DB_POSTGRES_FILES = frozenset({
     "src/hull/cap/db_postgres.c", "src/hull/cap/pgwire.c", "src/hull/cap/pg_conn.c",
 })
@@ -171,12 +171,12 @@ def classify_path(path):
         # tests (docs section 7.2).
         if p.startswith("src/hull/frontend/"):
             return {"production_core_changed", "js_frontend_changed", "lua_frontend_changed"}
-        # Slice 4 isolated-subsystem allowlist (Appendix C): an EXACT match narrows
+        # isolated-subsystem allowlist (Appendix C): an EXACT match narrows
         # to its subsystem fact(s) and does NOT set production_core. A shared-DB
         # file fans out to all four backends (constraint 3). Anything NOT on the
         # allowlist stays production_core -> broad (fail closed). Because these
         # focused_* flags are not APPROVED_NARROW, the live plan is still broad
-        # (checkpoint 2: narrow the facts, skip nothing).
+        # (narrow the facts, skip nothing).
         if p in DB_POSTGRES_FILES:
             return {"native_db_changed", "db_postgres_changed"}
         if p in DB_MYSQL_FILES:
@@ -428,7 +428,7 @@ def _emit_github_output(result):
 
 
 def main(argv):
-    ap = argparse.ArgumentParser(description="Change-aware CI classifier (Slice 1).")
+    ap = argparse.ArgumentParser(description="Change-aware CI classifier.")
     ap.add_argument("--event", default="pull_request",
                     choices=["pull_request", "push_main", "schedule"],
                     help="the CI event; push_main/schedule force full_all.")

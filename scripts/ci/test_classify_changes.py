@@ -9,7 +9,7 @@
 # as delete(old)+add(new), so BOTH paths classify and the BROADER plan wins - a
 # rename can never escape into a narrower plan). The ci-success GATE cases
 # (required-job skipped, allowed-job skipped, cancellation, matrix aggregates)
-# belong to Slice 2's gate, not this classifier, and are deferred there.
+# belong to the ci-success gate, not this classifier, and are deferred there.
 #
 # SPDX-License-Identifier: AGPL-3.0-or-later
 
@@ -306,7 +306,7 @@ else:
     _fail += 1
     print("FAIL: determinism/order-independence")
 
-# ---- Slice 4 checkpoint 2: source-inventory machine-check (Appendix C.7) ----
+# ---- source-inventory machine-check (Appendix C.7) ----
 # Grounds the isolated-subsystem allowlist in the ACTUAL repository so it cannot
 # silently rot: every allowlisted path exists, maps to EXACTLY its subsystem
 # fact(s), every unlisted src/** stays broad, shared-DB fans out to all backends,
@@ -383,7 +383,7 @@ check("rename under force-full -> full_all",
       ["src/hull/cap/db_postgres.c", "src/hull/cap/db_postgres_v2.c"],
       want_true=["full_all"], force_full=True)
 
-# 6. EVERY tracked src/** file is classified correctly (Slice 4 checkpoint 3,
+# 6. EVERY tracked src/** file is classified correctly (Appendix C,
 #    constraint 4): an allowlisted file -> EXACTLY its subsystem facts; the
 #    deliberate C frontend bridge -> production_core PLUS the js/lua frontend
 #    facts; every OTHER tracked source -> a set INCLUDING production_core_changed

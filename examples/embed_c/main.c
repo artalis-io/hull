@@ -55,7 +55,7 @@ int main(void)
 
     /* ── 2. build policy in C (app_dir-relative, like a manifest) ────
      * "." is the base-root grant: read/write the whole app dir + descendants
-     * (checkpoint 3, sec. 6). Base-relative, never absolute. */
+     * (sec. 6). Base-relative, never absolute. */
     check(hl_embed_allow_read(e, ".") == 0,  "allow_read(\".\")");
     check(hl_embed_allow_write(e, ".") == 0, "allow_write(\".\")");
     hl_embed_allow_network(e, 0, 0);

@@ -1,4 +1,4 @@
-// mapped_spans - reference app for Hull mapped spans (checkpoint 3).
+// mapped_spans - reference app for Hull mapped spans .
 // Mirrors app.lua: maps a non-page-aligned window of data.bin, attaches it as
 // span "source", and calls the spanreader plugin (public hull_span.h SDK).
 //   GET /read?name=<span>[&off=<n>]

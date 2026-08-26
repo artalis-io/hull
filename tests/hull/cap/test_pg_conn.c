@@ -495,7 +495,7 @@ UTEST(pg_exec_simple, error_then_ready)
 UTEST(pg_ssl, sslmode_parse)
 {
     /* Unset / empty defaults to prefer (libpq's default): opportunistic TLS
-     * with plaintext fallback. Phase 3b.2 flipped this from disable. */
+     * with plaintext fallback. TLS negotiation flipped this from disable. */
     ASSERT_EQ(hl_pg_sslmode_parse(NULL), (int)HL_PG_SSLMODE_PREFER);
     ASSERT_EQ(hl_pg_sslmode_parse(""), (int)HL_PG_SSLMODE_PREFER);
     ASSERT_EQ(hl_pg_sslmode_parse("disable"), (int)HL_PG_SSLMODE_DISABLE);

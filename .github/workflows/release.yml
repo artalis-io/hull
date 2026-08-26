@@ -241,12 +241,12 @@ jobs:
             sha256sum \
               platforms/platform-cosmo/libhull_platform.aarch64-cosmo.a \
               | awk '{print $1"  cosmo-aarch64"}'
-            # Embedded feature archives (issue #114 + SQLite Phase C.2b/D), native
+            # Embedded feature archives (issue #114 + SQLite composed feature), native
             # arches only (cosmo composes nothing). Name column is the COMPOSED
             # asset name that build.lua records in package.sig.gethull.composed
             # and that the runtime §5c looks up: "libhull_feature-<stem>.<arch>.a".
-            # `sqlite` = the engine (Phase D), `sqlite-lua`/`sqlite-js` = the udf
-            # bridges (Phase C.2b). `tls` = the mbedTLS + crypto/transport backends
+            # `sqlite` = the engine (the engine), `sqlite-lua`/`sqlite-js` = the udf
+            # bridges. `tls` = the mbedTLS + crypto/transport backends
             # (docs/tls_feature.md, a2; one archive, no per-runtime bridge).
             # Glob the downloaded embedded archives (the FEATURE_EMBEDDED_STEMS
             # set that feature-embedded produced + uploaded) rather than a
@@ -1390,7 +1390,7 @@ jobs:
           ./hull-linux-x86_64 sbom --subject=libhull --format=json      > libhull.sbom.json
           ./hull-linux-x86_64 sbom --subject=libhull --format=cyclonedx > libhull.sbom.cdx.json
           ./hull-linux-x86_64 sbom --subject=libhull --format=spdx      > libhull.sbom.spdx.json
-          # (Phase 4.3: pure-compute became a build.lua preset on the default
+          # (pure-compute became a build.lua preset on the default
           # composable base, so there are no per-flavor platform libs to SBOM.)
           ls -la hull.sbom.* libhull.sbom.*
 
@@ -1579,7 +1579,7 @@ jobs:
             dist/libhull.sbom.cdx.json
             dist/libhull.sbom.spdx.json
           )
-          # (Phase 4.3: no per-flavor platform-lib SBOMs -- pure-compute is a
+          # (no per-flavor platform-lib SBOMs -- pure-compute is a
           # build.lua preset, not a pre-built lib.)
           if [ -f dist/hull.sha256.sig ]; then
             assets+=(dist/hull.sha256.sig)

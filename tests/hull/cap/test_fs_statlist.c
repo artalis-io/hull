@@ -1,6 +1,6 @@
 /*
  * test_fs_statlist.c - hull.fs metadata (stat) + enumeration (list) THROUGH the
- * cap layer (checkpoint 3, Slice C). Proves the Slice-C acceptance boundary:
+ * cap layer. Proves the Slice-C acceptance boundary:
  * READ-only selection; exact-grant cannot list a parent or inspect siblings;
  * write-only grants leak no metadata; PATTERN enumeration exposes only matches;
  * SUBTREE symlinks stay confined; terminal symlinks are reported as links (lstat),

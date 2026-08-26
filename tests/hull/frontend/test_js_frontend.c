@@ -1,5 +1,5 @@
 /*
- * test_js_frontend.c - Slice 5: the JS frontend adapter (hull:source:frontend_javascript),
+ * test_js_frontend.c - the JS frontend adapter (hull:source:frontend_javascript),
  * driven through the frontendAnalyze / frontendSemantics / frontendScope drivers. Asserts on the
  * normalized facts, declaration_semantics records, the scope capability, and the handle lifetime.
  *
@@ -351,7 +351,7 @@ UTEST(js_frontend, scope_capability)
 /* Bridge-private ids: unit_id/decl_id are integers; the facts carry no AST/JSValue; a fresh
  * analyze issues fresh ids. NOTE: a bare decl_id is SESSION-RELATIVE (a fresh session re-issues 1),
  * so this only proves per-session state isolation, not stale-generation (ABA) safety - the full
- * stale guarantee is the C-owned { session_token, unit_id, decl_id } tuple, tested in Slice 6. */
+ * stale guarantee is the C-owned { session_token, unit_id, decl_id } tuple, tested separately. */
 UTEST(js_frontend, handles_and_session_isolation)
 {
     HlJsSession *s = hl_js_session_create(NULL);
@@ -365,7 +365,7 @@ UTEST(js_frontend, handles_and_session_isolation)
     hl_js_session_destroy(s);
 
     /* per-session state isolation: a decl_id never issued in a fresh session is not resolvable
-     * (each session has its own module state). Full ABA stale-generation safety is Slice 6. */
+     * (each session has its own module state). Full ABA stale-generation safety is covered separately. */
     HlJsSession *b = hl_js_session_create(NULL);
     char *fresh = fe_sem(b, 1);                            /* nothing analyzed in b yet */
     EXPECT_TRUE(has(fresh, "\"error\""));

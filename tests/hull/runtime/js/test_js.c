@@ -52,7 +52,7 @@ static HlVfs platform_vfs;
 static void *platform_vfs_owned = NULL;
 
 /* Tests use lots of inline JS snippets that reference modules as
- * globals. Phase 2b removes globals from production - apps must
+ * globals. The runtime removes globals from production - apps must
  * import. This helper restores them for testing convenience by
  * evaluating a module that imports each native module and assigns to
  * globalThis. Modules that aren't available are silently skipped. */
@@ -3996,7 +3996,7 @@ UTEST(js_runtime, import_null_module_set_is_permissive)
 
 UTEST(js_runtime, import_gated_undeclared_native_module_fails)
 {
-    /* Phase 2c: native C modules (hull:crypto, hull:time, ...) now
+    /* Native C modules (hull:crypto, hull:time, ...) now
      * self-gate via hl_js_check_module_declared inside their init
      * callbacks. Undeclared imports throw ReferenceError on first use.
      *
@@ -4068,7 +4068,7 @@ UTEST(js_runtime, import_gated_declared_native_module_succeeds)
 #ifdef HL_ENABLE_IMAGE
 UTEST(js_runtime, import_image_is_a_real_hull_module)
 {
-    /* Phase 2c: image is no longer a global on globalThis - it must be
+    /* image is no longer a global on globalThis - it must be
      * imported from hull:image like every other native module. */
     init_js_bare();
 
