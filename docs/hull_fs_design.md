@@ -12,10 +12,12 @@ below, and the parity ratification record
 
 This is the dedicated design of the APPLICATION-facing `hull.fs` capability - the
 general filesystem surface an app author uses. It is a peer of, and a PREREQUISITE
-for, the BuildContext audit
-([hull_fs_buildcontext_audit.md](hull_fs_buildcontext_audit.md), PR #393):
-BuildContext is the narrower, Hull-owned plugin surface built ON the hardened
-primitives designed here - so `hull.fs` was designed first.
+for, the active BuildContext design
+([buildcontext_design.md](buildcontext_design.md)). BuildContext is the narrower,
+Hull-owned plugin surface built ON the hardened primitives designed here - so
+`hull.fs` was designed first. The earlier inventory and sequencing record remains
+in [hull_fs_buildcontext_audit.md](hull_fs_buildcontext_audit.md) as historical
+input, not as the implementation contract.
 
 Design rule carried in from `hull.path` (#392, #394): **`hull.path` manipulates
 NAMES lexically; `hull.fs` exercises AUTHORITY.** `hull.fs` is where real
@@ -463,7 +465,7 @@ the `openat2` and manual-walk paths on the same fixture tree (Linux runs BOTH to
 catch drift), and covers a swapped-component TOCTOU by construction (held-fd walk)
 with a deterministic case where testable.
 
-## 8. Relationship to BuildContext (#393)
+## 8. Relationship to BuildContext
 
 Same descriptor-relative resolver + `stat`/`list` primitives underpin both
 surfaces; this design PROVIDES them.
@@ -473,10 +475,12 @@ surfaces; this design PROVIDES them.
 | **application `hull.fs`** | app code | root confinement (`base_dir`, resolver) + path-authorization policy (`fs.read`/`fs.write` roots, §6) + kernel sandbox | read / write / mmap / stat / list |
 | **plugin `BuildContext`** | Hull-owned, handed to a plugin | declared input roots + a private staging root; NARROWER | inputs: read / stat / list (recorded + hashed); outputs: staged write + atomic publish |
 
-BuildContext.inputs reuses this design's resolver + `stat`/`list`, adds read
-RECORDING + content hashing, and drops write. BuildContext.outputs adds the
-staging + atomic-publish (`rename`/`fsync`) that app `hull.fs` deliberately does
-NOT expose (§4.3). A build plugin never receives the general `hull.fs`.
+BuildContext inputs reuse this design's resolver + `stat`/`list`, add observation
+recording + content hashing, and drop general write authority. BuildContext
+outputs use private action staging and host-owned commit; neither staging nor
+publication is exposed by application `hull.fs` (§4.3). Artifact inputs and
+constrained tools are defined by the active BuildContext design. A build plugin
+never receives the general `hull.fs`.
 
 ## 9. DECIDED: resolver-first (migrate the existing surface before building plugins)
 

@@ -95,6 +95,7 @@ specific signature, parameter list, or return value.
 | [`hull_fs_design.md`](hull_fs_design.md) | The application `hull.fs` surface. Resolver + compiled path-authorization policy + `stat`/`list` **shipped** (checkpoints 1-3); **BuildContext is checkpoint 4 (next)**. |
 | [`hull_fs_resolver_parity.md`](hull_fs_resolver_parity.md) | Checkpoint 2 ratification record: `openat2` vs the manual walk parity + the ratified depth divergence. |
 | [`hull_fs_buildcontext_audit.md`](hull_fs_buildcontext_audit.md) | The BuildContext / app-vs-plugin authority-split audit that feeds checkpoint 4. |
+| [`buildcontext_design.md`](buildcontext_design.md) | **Checkpoint 4 implementation design:** action transactions, declared inputs, immutable artifact inputs, private outputs, constrained tools, and one plugin ABI for bundled/application plugins over Lua + JS source adapters. |
 | [`h1_cleanup_inventory.md`](h1_cleanup_inventory.md) | Design-only inventory + freeze for the H1 code-housekeeping cleanup (dead code, redundancy, comment archaeology, em-dashes) that precedes BuildContext. |
 | [`h1_s1_deadcode_audit.md`](h1_s1_deadcode_audit.md) | H1 slice S1: recorded build-system + fixture reference-coverage evidence and the `cap.h` disposition. Result: retain as-is, no deletion. |
 | [`h1_s2b_hex_ownership.md`](h1_s2b_hex_ownership.md) | H1 slice S2b (design-only): exhaustive hex-caller inventory, link-closure/dependency table, and ownership recommendation for the byte->hex encoders. No code change. |
