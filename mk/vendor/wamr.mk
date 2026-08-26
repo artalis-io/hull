@@ -5,7 +5,7 @@
 # unit. WAMR-local platform conditionals (darwin/linux/cosmo) stay inline.
 # Extracted verbatim, included at the original position (CFLAGS += order held).
 
-# ── WAMR (WebAssembly Micro Runtime — compute-only) ──────────────
+# ── WAMR (WebAssembly Micro Runtime - compute-only) ──────────────
 #
 # ── WASM (WAMR) ───────────────────────────────────────────────────────
 # Optional 7th vendored C library. Provides near-native WASM execution

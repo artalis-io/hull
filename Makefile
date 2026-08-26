@@ -1,4 +1,4 @@
-# Hull — Makefile
+# Hull - Makefile
 #
 # Builds Hull with QuickJS and Lua 5.4 runtimes.
 # Vendors: QuickJS, Lua, Keel (linked as library).
@@ -148,7 +148,7 @@ LDFLAGS += -fsanitize=address,undefined
 CFLAGS += -DHL_THREAD_AFFINITY_CHECKS
 else ifdef TSAN
 # ThreadSanitizer build. Appends to the normal CFLAGS (Hull's own TUs get
-# instrumented; vendor TUs stay uninstrumented, which TSan tolerates — it
+# instrumented; vendor TUs stay uninstrumented, which TSan tolerates - it
 # just won't flag races inside vendored code). Used to validate the
 # worker-pool / shared-state paths (cap/wasm.c segments, worker_*.c).
 CFLAGS += -g -O1 -fsanitize=thread -fno-omit-frame-pointer
@@ -203,7 +203,7 @@ VENDDIR  := vendor
 # ── xxd const-qualification helpers ──────────────────────────────────
 #
 # `xxd -i` emits `unsigned char NAME[]` and `unsigned int NAME_len`
-# — both writable. Without `const` they land in `.data`; with it they
+# - both writable. Without `const` they land in `.data`; with it they
 # land in `.rodata`, which the OS protects as read-only at the page
 # level. Defense-in-depth against heap memory-write bugs that would
 # otherwise be able to rewrite embedded modules, the CA bundle, the
@@ -212,11 +212,11 @@ VENDDIR  := vendor
 #
 # Two forms, used by ~20 xxd invocations across the Makefile:
 #
-#   XXD_CONST_SEAL — in-place sed for `xxd ... > FILE` rules.
+#   XXD_CONST_SEAL - in-place sed for `xxd ... > FILE` rules.
 #     Usage: `xxd -i $< > $@ && $(XXD_CONST_SEAL) $@ && rm -f $@.bak`
 #     The .bak dance is portable across BSD + GNU sed.
 #
-#   XXD_CONST_PIPE — stdin-to-stdout sed for `xxd ... | ... > FILE`
+#   XXD_CONST_PIPE - stdin-to-stdout sed for `xxd ... | ... > FILE`
 #     pipelines (cosmo platform embedding, template embedding).
 #     Usage: `xxd -i FILE | sed 's/.../.../g' | $(XXD_CONST_PIPE) > $@`
 #
@@ -324,7 +324,7 @@ endif
 # which is only linked today when an HTTP half is on. See
 # docs/postgres_backend_design.md.
 
-# ── HTTP server / client — config flag reference ────────────────────
+# ── HTTP server / client - config flag reference ────────────────────
 #
 # Flag values are computed up top (above the Keel / mbedTLS sections
 # which gate on them); this block documents them.
@@ -349,17 +349,17 @@ endif
 # Combined effects (binary sizes are arm64 Darwin, default build):
 #
 #   server  client  result                                   binary
-#   1       1       Full HTTP — default Hull build.          ~5.0 MB
+#   1       1       Full HTTP - default Hull build.          ~5.0 MB
 #   0       1       CLI + outbound HTTPS. No server stack;   ~4.9 MB
 #                   http.fetch works, can hit https://*.
 #                   Keel + mbedTLS still linked.
 #   1       0       Inbound server, no outbound HTTP. Niche  ~5.0 MB
-#                   — server-only apps that may not make
+#                   - server-only apps that may not make
 #                   outgoing HTTP calls.
 #   0       0       Pure compute / CLI. No Keel, no mbedTLS. ~4.4 MB
 #
 # HL_ENABLE_HTTP back-compat:
-#   Setting HL_ENABLE_HTTP=0 still works — it pins both
+#   Setting HL_ENABLE_HTTP=0 still works - it pins both
 #   HL_ENABLE_HTTP_{SERVER,CLIENT} to 0. Setting HL_ENABLE_HTTP=1
 #   (the default) leaves the granular flags at their own defaults
 #   (both 1), so existing `make` invocations don't change behavior.
@@ -369,7 +369,7 @@ endif
 #   is on (Keel ships both halves; the linker dead-strips the unused
 #   side). The compile-time -DHL_ENABLE_HTTP macro stays defined in
 #   that same case, so existing source guards continue to mean "any
-#   HTTP at all" — granular guards (HL_ENABLE_HTTP_{SERVER,CLIENT})
+#   HTTP at all" - granular guards (HL_ENABLE_HTTP_{SERVER,CLIENT})
 #   are only used where the distinction matters.
 
 # SQLite vendored config -> mk/vendor/sqlite.mk
@@ -528,7 +528,7 @@ endif
 #
 # 1. QuickJS (QJS_CFLAGS): QJS registers C callbacks via
 #    JS_NewCFunctionMagic((JSCFunctionMagic *)f) where the underlying
-#    function may be 0/1/2-arg, magic, or magic+ctor — disparate
+#    function may be 0/1/2-arg, magic, or magic+ctor - disparate
 #    signatures cast through a generic prototype.  Vendor-internal
 #    pattern Hull doesn't control without patching qjs.
 #
@@ -562,7 +562,7 @@ endif
 # docs/roadmap_next.md § 9 for the full design + spike history.
 ifeq ($(HL_ENABLE_CFI),1)
   # Probe -fsanitize=cfi-icall.  Requires LTO bitcode at compile
-  # time, so probe with -flto=thin too — a compiler that accepts
+  # time, so probe with -flto=thin too - a compiler that accepts
   # cfi-icall but rejects LTO is no use here.
   HL_CFI_CFLAG := $(shell tmp="$$(mktemp 2>/dev/null || echo /tmp/hlcfiprobe$$$$.o)"; \
       printf 'int main(void){return 0;}\n' \
@@ -607,7 +607,7 @@ ifeq ($(HL_ENABLE_CFI),1)
   endif
 endif
 
-# ── HL_ENABLE_TUI — terminal UI capability (composable feature) ────
+# ── HL_ENABLE_TUI - terminal UI capability (composable feature) ────
 #
 # TUI is a composable feature (like gpu / duckdb): the base is built
 # TUI-FREE so apps that never touch the terminal link a leaner platform
@@ -635,7 +635,7 @@ ifeq ($(HL_ENABLE_TUI),1)
 CFLAGS += -DHL_ENABLE_TUI
 endif
 
-# HL_TUI_TOOLCHAIN — force-load libhull_feature-tui.a into the hull binary
+# HL_TUI_TOOLCHAIN - force-load libhull_feature-tui.a into the hull binary
 # so its --tui commands work on a TUI-free base. Only meaningful when the
 # base is TUI-free: a TUI-compiled base already carries the strong feature
 # hooks, and force-loading the archive too would double-define them. So it
@@ -649,7 +649,7 @@ else
 HL_TUI_TOOLCHAIN ?= 1
 endif
 
-# HL_TUI_LINKED — code-presence gate for the toolchain-only `--tui` command
+# HL_TUI_LINKED - code-presence gate for the toolchain-only `--tui` command
 # handling (doctor/dev/agent/modules/migrate dispatchers + the tool.dev_*
 # bindings). Defined iff the hull binary will carry TUI symbols: either a
 # TUI-compiled base, or a TUI-free base that force-loads the feature archive.
@@ -694,13 +694,13 @@ TUI_TOOLCHAIN_ARCHIVE :=
 TUI_TOOLCHAIN_LDFLAGS :=
 endif
 
-# compiler.c — always compiled (system backend + selection)
+# compiler.c - always compiled (system backend + selection)
 COMPILER_OBJ := $(BUILDDIR)/compiler.o
 $(COMPILER_OBJ): $(SRCDIR)/hull/compiler.c $(INCDIR)/hull/compiler.h | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
 
-# obj_emit.c — compiler-free app_registry object emitter (ELF/Mach-O/COFF).
-# linker_system.c — the link-only vtable (cc/ld driver). Both feed the
+# obj_emit.c - compiler-free app_registry object emitter (ELF/Mach-O/COFF).
+# linker_system.c - the link-only vtable (cc/ld driver). Both feed the
 # compiler-free `hull build` path (docs/compiler_free_build.md).
 OBJ_EMIT_OBJ      := $(BUILDDIR)/obj_emit.o
 LINKER_SYSTEM_OBJ := $(BUILDDIR)/linker_system.o
@@ -895,7 +895,7 @@ ifneq ($(HL_ENABLE_GPU),1)
       $(CAP_SRCS))
 endif
 ifeq ($(HL_ENABLE_HTTP_CLIENT),0)
-  # CLIENT-only capability sources — http.fetch sync + async + SMTP send.
+  # CLIENT-only capability sources - http.fetch sync + async + SMTP send.
   CAP_SRCS := $(filter-out \
       $(SRCDIR)/hull/cap/http.c \
       $(SRCDIR)/hull/cap/http_async.c \
@@ -903,7 +903,7 @@ ifeq ($(HL_ENABLE_HTTP_CLIENT),0)
       $(CAP_SRCS))
 endif
 ifeq ($(HL_ENABLE_HTTP_SERVER),0)
-  # SERVER-only capability sources — body reader (request bodies) +
+  # SERVER-only capability sources - body reader (request bodies) +
   # WebSocket server. cap/test.c (in-process HTTP harness) is handled
   # separately below.
   CAP_SRCS := $(filter-out \
@@ -943,7 +943,7 @@ CAP_OBJS += $(HOST_MATCH_OBJ)
 HEX_OBJ := $(BUILDDIR)/hex.o
 CAP_OBJS += $(HEX_OBJ)
 CAP_TOOL_OBJ := $(BUILDDIR)/cap_tool.o
-# cap/test.c is the in-process HTTP test harness — depends on KlRouter
+# cap/test.c is the in-process HTTP test harness - depends on KlRouter
 # and the rest of Keel's request/response machinery. Server-only.
 ifeq ($(HL_ENABLE_HTTP_SERVER),0)
 CAP_TEST_OBJ :=
@@ -972,7 +972,7 @@ ifeq ($(HL_ENABLE_HTTP_CLIENT),0)
 endif
 ifeq ($(HL_ENABLE_HTTP_SERVER),0)
   # SERVER-only JS bindings: app.ws/app.sse/app.get/etc + their backends.
-  # mod_test depends on hl_cap_test_dispatch which is in cap/test.c —
+  # mod_test depends on hl_cap_test_dispatch which is in cap/test.c -
   # both drop together (cap/test is filtered above).
   JS_RT_SRCS := $(filter-out \
       $(SRCDIR)/hull/runtime/js/mod_ws_server.c \
@@ -991,7 +991,7 @@ ifeq ($(HL_ENABLE_HTTP_SERVER),0)
       $(JS_RT_SRCS))
 endif
 ifeq ($(HL_ENABLE_TUI),0)
-  # The tui native bridge moves to libhull_feature-tui.a (composed feature) —
+  # The tui native bridge moves to libhull_feature-tui.a (composed feature) -
   # drop it from the base (which keeps only the weak feature hooks in
   # cap/tui_feature.c). Pairs with the cap/tui.c + tui_input.c filter above.
   JS_RT_SRCS := $(filter-out \
@@ -1036,7 +1036,7 @@ ifeq ($(HL_ENABLE_HTTP_SERVER),0)
       $(LUA_RT_SRCS))
 endif
 ifeq ($(HL_ENABLE_TUI),0)
-  # The tui native bridge moves to libhull_feature-tui.a (composed feature) —
+  # The tui native bridge moves to libhull_feature-tui.a (composed feature) -
   # drop it from the base, which carries only the weak feature hooks
   # (cap/tui_feature.c). Pairs with the cap/tui.c + tui_input.c filter above.
   LUA_RT_SRCS := $(filter-out \
@@ -1084,7 +1084,7 @@ CMD_OBJS := $(patsubst $(SRCDIR)/hull/commands/%.c,$(BUILDDIR)/cmd_%.o,$(CMD_SRC
 RUNTIME_CACHE_COMMON_OBJ := $(BUILDDIR)/runtime_cache_common.o
 
 # Select which runtimes to build. `RUNTIME_CACHE_COMMON_OBJ` is added
-# unconditionally — every runtime cache (Lua + JS, bytecode + template)
+# unconditionally - every runtime cache (Lua + JS, bytecode + template)
 # links against the same shared helpers, so any build that compiles
 # any runtime needs it.
 ifeq ($(RUNTIME),js)
@@ -1127,9 +1127,9 @@ SANDBOX_TOOL_OBJ := $(BUILDDIR)/sandbox_tool.o
 EMBED_OBJ        := $(BUILDDIR)/embed.o
 
 # Async backend implementations
-#   async/keel.c — wraps Keel's KlEventCtx + KlThreadPool. Compiled
+#   async/keel.c - wraps Keel's KlEventCtx + KlThreadPool. Compiled
 #                  whenever Keel is linked (either HTTP half on).
-#   async/poll.c — freestanding poll(2) + pthread impl. Always built;
+#   async/poll.c - freestanding poll(2) + pthread impl. Always built;
 #                  selected by hl_async_backend() when neither HTTP
 #                  half is compiled in.
 ASYNC_BACKEND_SRCS := $(wildcard $(SRCDIR)/hull/async/*.c)
@@ -1143,7 +1143,7 @@ endif
 ASYNC_BACKEND_OBJS := $(patsubst $(SRCDIR)/hull/async/%.c,$(BUILDDIR)/async_%.o,$(ASYNC_BACKEND_SRCS))
 
 # Net backend implementations
-#   net/keel.c — Keel-backed HlNetBackend (op_suspend / op_complete
+#   net/keel.c - Keel-backed HlNetBackend (op_suspend / op_complete
 #                pair). Server-only: the only callers are server-side
 #                connection-bound request suspension. CLIENT-only or
 #                pure-compute builds use the no-op stubs in async/poll.c.
@@ -1158,7 +1158,7 @@ ifneq ($(filter 1,$(if $(filter 0,$(HL_ENABLE_HTTP_SERVER)),1,) $(HL_KEEL_FEATUR
 endif
 NET_BACKEND_OBJS := $(patsubst $(SRCDIR)/hull/net/%.c,$(BUILDDIR)/net_%.o,$(NET_BACKEND_SRCS))
 
-# Test-specific objects (single runtime — avoids pulling Lua into JS tests
+# Test-specific objects (single runtime - avoids pulling Lua into JS tests
 # and vice versa). After roadmap item G the per-runtime extractors live in
 # their own .c files that auto-#ifdef-out, so single-runtime tests just
 # pull manifest.o (shared helpers) + the relevant extractor.
@@ -1178,18 +1178,18 @@ RELEASE_OBJ    := $(BUILDDIR)/release.o
 # inside the TU; the offline half is always needed (verify-self + the
 # platform-signature verifier), so the object is always built and linked.
 RELEASE_IO_OBJ := $(BUILDDIR)/release_io.o
-# tools_install.o is always linked — `hl_tools_lookup_path` is used by
+# tools_install.o is always linked - `hl_tools_lookup_path` is used by
 # cap/wasm.c for wamrc resolution even on HL_ENABLE_HTTP_CLIENT=0 builds.
 TOOLS_INSTALL_OBJ := $(BUILDDIR)/tools_install.o
 # Platform manifest builder + signer + verifier + per-arch extractor.
 # Pure functions; reuses release.c (sign/verify) + release_io.c
-# (find_checksum). Always built — verify path uses it on every signed
+# (find_checksum). Always built - verify path uses it on every signed
 # app, regardless of HL_ENABLE_HTTP_CLIENT.
 PLATFORM_SIG_OBJ := $(BUILDDIR)/platform_sig.o
 # Accessor for the embedded signed platform-sig blob. CI's
 # sign-platform-manifest job emits the header it includes; local
 # builds get a placeholder that signals "no embedded blob" via the
-# accessor's -1 return. NOT in PLATFORM_OBJS — apps don't need the
+# accessor's -1 return. NOT in PLATFORM_OBJS - apps don't need the
 # embedded blob (they carry their own copy in package.sig.platform);
 # only the hull binary itself reads it.
 EMBEDDED_PLATFORM_SIG_OBJ := $(BUILDDIR)/embedded_platform_sig.o
@@ -1206,7 +1206,7 @@ endif
 ifeq ($(HL_EMBED_PLATFORM_SIG),1)
 CFLAGS += -DHL_EMBED_PLATFORM_SIG
 endif
-# test_runner.c uses KlRouter to dispatch in-process test requests —
+# test_runner.c uses KlRouter to dispatch in-process test requests -
 # server-only.
 ifeq ($(HL_ENABLE_HTTP_SERVER),0)
 TEST_RUNNER_OBJ :=
@@ -1222,9 +1222,9 @@ RUNTIME_FACTORY_OBJ := $(BUILDDIR)/runtime_factory.o
 # hl_stdlib_feature_entries() has no such stub: every consumer today links a real
 # registry - the toolchain one or a produced app's emitted one.)
 RUNTIME_FACTORY_NONE_OBJ := $(BUILDDIR)/runtime_factory_none.o
-# (RUNTIME_CACHE_COMMON_OBJ is defined earlier — see the runtime
-# selection block — because RT_OBJS references it.)
-# static.c serves embedded static files via Keel response writers —
+# (RUNTIME_CACHE_COMMON_OBJ is defined earlier - see the runtime
+# selection block - because RT_OBJS references it.)
+# static.c serves embedded static files via Keel response writers -
 # server-only.
 ifeq ($(HL_ENABLE_HTTP_SERVER),0)
 STATIC_OBJ     :=
@@ -1246,7 +1246,7 @@ LOG_LOCK_OBJ   := $(BUILDDIR)/log_lock.o
 # Low-level content-addressed blob store. Shared between cap/blob.c
 # (manifest-gated app capability) and runtime infrastructure (Lua
 # bytecode cache, compute AOT cache, future template cache). Apps
-# never see this layer directly — they go through hl_cap_blob_*.
+# never see this layer directly - they go through hl_cap_blob_*.
 BLOB_STORE_OBJ := $(BUILDDIR)/blob_store.o
 # Compile-time registry of every cache kind hull manages (lua-bytecode,
 # compute-aot, templates, tools). Single source of truth for
@@ -1302,14 +1302,14 @@ TLS_TRANSPORT_STUB_OBJ := $(BUILDDIR)/tls_transport_stub.o
 CSP_OBJ        := $(BUILDDIR)/csp.o
 # Page-backed bump arena with one-way mprotect-to-RO seal. For
 # manifest-derived security policy that's boot-built then read-only
-# at runtime — the dispatch / vtable / registry tables are already
+# at runtime - the dispatch / vtable / registry tables are already
 # `static const`, so this targets the OTHER category.
 #
 # Source lives in the shared vendored utility at
 # vendor/keel/vendor/sh_seal_arena/.  We compile a Hull-local copy
 # (with Hull's CFLAGS, including sanitizers under DEBUG/MSAN) so test
 # binaries that link it AHEAD of libkeel.a get the instrumented
-# version — Keel's libkeel.a always contains its own copy too, but
+# version - Keel's libkeel.a always contains its own copy too, but
 # the linker resolves sh_seal_arena_* from Hull's object first.
 # Required for MSan: without an instrumented sh_seal_arena.o, MSan
 # can't see init writing to ShSealArena fields and flags every
@@ -1337,7 +1337,7 @@ endif
 ifeq ($(HL_ENABLE_HTTP_SERVER),0)
   # agent/test.c calls hl_test_runner_run + the in-process HTTP harness;
   # agent/request.c, agent/eval.c, agent/perf.c, agent/endpoint.c also
-  # exercise HTTP routes. All server-only — the `hull agent` subcommands
+  # exercise HTTP routes. All server-only - the `hull agent` subcommands
   # that depend on a running server (test/request/eval/perf/endpoint)
   # lose their backends.
   AGENT_LIB_SRCS := $(filter-out \
@@ -1352,7 +1352,7 @@ AGENT_LIB_OBJ  := $(patsubst $(SRCDIR)/hull/agent/%.c,$(BUILDDIR)/agent_%.o,$(AG
 # HL_ENABLE_HTTP_SERVER=0: replace serve.c (KlServer setup + routing +
 # middleware + wire_routes + the full request/response lifecycle) with
 # serve_cli.c (load + app.main + exit). agent_api (in-process HTTP
-# introspection) drops out too — it speaks HTTP to a running server.
+# introspection) drops out too - it speaks HTTP to a running server.
 ifeq ($(HL_ENABLE_HTTP_SERVER),0)
 AGENT_API_OBJ  :=
 SERVE_OBJ      := $(BUILDDIR)/serve_cli.o
@@ -1398,13 +1398,13 @@ IMAGE_WEAKSTUB_OBJ := $(BUILDDIR)/image_weakstub.o
 #
 # Two Lua source trees feed the embedded stdlib registry:
 #
-#   stdlib/lua/hull/*.lua       — user-facing modules apps may
+#   stdlib/lua/hull/*.lua       - user-facing modules apps may
 #                                 require("hull.foo"): template, jwt,
 #                                 cookie, csrf, csv, email, form, i18n,
 #                                 json, search, validate, plus
 #                                 middleware/*.
 #
-#   stdlib/cli/lua/hull/*.lua   — CLI plugins invoked only by the C
+#   stdlib/cli/lua/hull/*.lua   - CLI plugins invoked only by the C
 #                                 dispatcher (`hull build`, `hull deploy`,
 #                                 etc.) via hull_tool(); never imported
 #                                 by app code. Split out per audit A-2
@@ -1413,7 +1413,7 @@ IMAGE_WEAKSTUB_OBJ := $(BUILDDIR)/image_weakstub.o
 #
 # Both trees go through the same xxd pipeline and end up in
 # hl_stdlib_entries[]. The name-strip rule below makes
-# stdlib/cli/lua/hull/build.lua resolve as "hull.build" — same name
+# stdlib/cli/lua/hull/build.lua resolve as "hull.build" - same name
 # the C dispatcher and any cross-CLI require already use, so this is
 # a path move with no code change required.
 
@@ -1553,7 +1553,7 @@ CONTEXT_XXD_HDRS := $(CONTEXT_HDRS)
 # `/static/hull/<module>/<file>` requests resolve here automatically.
 # Convention: stdlib widgets ship assets under their own subdirectory;
 # apps may override by writing the same path under their own static/.
-# Ships no widget assets — discovery is wired and tested but
+# Ships no widget assets - discovery is wired and tested but
 # returns 0 entries until §1.5.g-1 lands.
 
 STDLIB_STATIC_FILES := $(shell find stdlib/static -type f \
@@ -1844,7 +1844,7 @@ APP_REGISTRY_C := $(BUILDDIR)/app_registry.c
 APP_REGISTRY_O := $(BUILDDIR)/app_registry.o
 
 $(APP_REGISTRY_C): $(APP_ALL_XXD_HDRS) | $(BUILDDIR)
-	@echo "/* Auto-generated unified app registry — do not edit */" > $@
+	@echo "/* Auto-generated unified app registry - do not edit */" > $@
 	@# Sort the #include emission so embedded app-file data lands in .rodata in a
 	@# deterministic order (same reproducibility rationale as stdlib_registry.c).
 	@( for hdr in $(APP_ALL_XXD_HDRS); do \
@@ -1902,7 +1902,7 @@ $(APP_REGISTRY_O): $(APP_REGISTRY_C) | $(BUILDDIR)
 APP_EXTRA_OBJS := $(APP_REGISTRY_O)
 endif
 
-# App entries default (empty array — used when no APP_DIR)
+# App entries default (empty array - used when no APP_DIR)
 $(APP_ENTRIES_DEFAULT_OBJ): $(SRCDIR)/hull/app_entries_default.c $(INCDIR)/hull/entry.h | $(BUILDDIR)
 	$(CC) -std=c11 -O2 -w -I$(INCDIR) -c -o $@ $<
 
@@ -1915,7 +1915,7 @@ INCLUDES := -I$(INCDIR) -I$(QJS_DIR) -I$(LUA_DIR) -I$(KEEL_INC) -I$(KEEL_DIR)/ve
 # Make tracks file mtimes; it doesn't notice when `-D` defines
 # change between invocations. Without this, switching between e.g.
 # `make` and `make HL_ENABLE_HTTP=0` reuses .o files compiled with
-# the wrong defines — manifests as duplicate-symbol link errors
+# the wrong defines - manifests as duplicate-symbol link errors
 # (poll.c's stubs collide with net/keel.c's real impls), wrong
 # code paths active, or stale conditional logic.
 #
@@ -1923,7 +1923,7 @@ INCLUDES := -I$(INCDIR) -I$(QJS_DIR) -I$(LUA_DIR) -I$(KEEL_INC) -I$(KEEL_DIR)/ve
 # flag that flows into CFLAGS. If it differs from the previous run,
 # delete every Hull-owned .o (and the binaries that link them) so
 # make naturally rebuilds them from source with the new flags.
-# Vendor .o files (mbedTLS, WAMR, QuickJS, Lua, SQLite) are kept —
+# Vendor .o files (mbedTLS, WAMR, QuickJS, Lua, SQLite) are kept -
 # they don't see Hull's flags, so reusing them saves real wall time.
 #
 # We considered the obvious "pattern-rule prereq" approach
@@ -1965,7 +1965,7 @@ BUILD_CONFIG_FILE := $(BUILDDIR)/.build-config
 #
 # libhull_platform.a is conditionally included: when
 # TRUST_PLATFORM_LIB=1, the .a is a pre-downloaded artifact (CI
-# release build) that we MUST NOT delete — there's no rule to
+# release build) that we MUST NOT delete - there's no rule to
 # rebuild it, deletion makes the build fail with "TRUST_PLATFORM_LIB=1
 # but .a is missing." The fingerprint check still runs and clears
 # Hull .o files; .a is just excluded from that purge.
@@ -2018,7 +2018,7 @@ all: $(BUILDDIR)/hull
 hardening:
 	@echo "Hull hardening summary ($(CC) on $(UNAME_S)/$(UNAME_M)):"
 ifdef COSMO
-	@echo "  toolchain:        cosmocc (APE) — most ELF hardening flags inapplicable"
+	@echo "  toolchain:        cosmocc (APE) - most ELF hardening flags inapplicable"
 	@echo "  stack canary:     skipped (cosmocc default)"
 	@echo "  PIE / ASLR:       skipped (APE is its own format)"
 	@echo "  RELRO+BIND_NOW:   skipped (no GNU dynamic linker)"
@@ -2054,7 +2054,7 @@ ifeq ($(HL_ENABLE_CFI),1)
 ifneq ($(HL_CFI_CFLAG),)
 	@echo "  CFI:              $(HL_CFI_CFLAG) $(HL_CFI_MODE) -fsplit-lto-unit (HL_ENABLE_CFI=1)"
 else
-	@echo "  CFI:              probe failed (HL_ENABLE_CFI=1 requested but $(CC) does not support -fsanitize=cfi-icall on this target — Linux clang ≥ 7.0 only)"
+	@echo "  CFI:              probe failed (HL_ENABLE_CFI=1 requested but $(CC) does not support -fsanitize=cfi-icall on this target - Linux clang ≥ 7.0 only)"
 endif
 else
 	@echo "  CFI:              disabled (set HL_ENABLE_CFI=1 to enable; Linux clang only)"
@@ -2068,7 +2068,7 @@ endif
 check-hardening: $(BUILDDIR)/hull
 	@scripts/check_hardening.sh $(BUILDDIR)/hull
 
-# Platform static library — everything except entry.o and build_assets.o
+# Platform static library - everything except entry.o and build_assets.o
 # Used by `hull build` to produce standalone app binaries.
 # Exports hull_main() (subcommand dispatch + server logic).
 # EMBEDDED_PLATFORM_SIG_OBJ is included in PLATFORM_OBJS because
@@ -2128,7 +2128,7 @@ PLATFORM_OBJS := $(PLATFORM_CAP_OBJS) $(CAP_TOOL_OBJ) $(CAP_TEST_OBJ) $(CMD_OBJS
 
 PLATFORM_LIB := $(BUILDDIR)/libhull_platform.a
 
-# Platform canary — embeds an integrity hash so the browser verifier can
+# Platform canary - embeds an integrity hash so the browser verifier can
 # detect whether the Hull platform is actually present in the binary.
 CANARY_C    := $(BUILDDIR)/platform_canary.c
 CANARY_OBJ  := $(BUILDDIR)/platform_canary.o
@@ -2138,16 +2138,16 @@ $(CANARY_C): $(PLATFORM_OBJS) | $(BUILDDIR)
 	@hash=$$(cat $(sort $(PLATFORM_OBJS)) | $(SHA256CMD) | cut -d' ' -f1) && \
 	echo "$$hash" > $(CANARY_HASH) && \
 	bytes=$$(echo "$$hash" | fold -w2 | awk '{printf "%s0x%s",(NR>1?",":""),$$0}') && \
-	printf '/* Auto-generated platform canary — do not edit */\n#include <stdint.h>\nconst struct { char magic[24]; uint8_t integrity[32]; } hl_platform_canary = {\n    "HULL_PLATFORM_CANARY",\n    {%s}\n};\n' "$$bytes" > $@
+	printf '/* Auto-generated platform canary - do not edit */\n#include <stdint.h>\nconst struct { char magic[24]; uint8_t integrity[32]; } hl_platform_canary = {\n    "HULL_PLATFORM_CANARY",\n    {%s}\n};\n' "$$bytes" > $@
 
 $(CANARY_OBJ): $(CANARY_C) | $(BUILDDIR)
 	$(CC) -std=c11 -O2 -w -c -o $@ $<
 
 # When TRUST_PLATFORM_LIB=1, treat $(PLATFORM_LIB) as a pre-built
-# leaf — make doesn't re-link it from source prereqs. This is the
+# leaf - make doesn't re-link it from source prereqs. This is the
 # release-time path: CI downloads the .a artifact that
 # sign-platform-manifest hashed and we MUST embed those exact bytes
-# (touch+mtime tricks aren't reliable enough — they didn't survive
+# (touch+mtime tricks aren't reliable enough - they didn't survive
 # downstream make logic across multiple attempts). TRUST_PLATFORM_LIB
 # bypasses the rebuild rule entirely; the .a must already exist on
 # disk or the build fails with a clear error.
@@ -2320,11 +2320,11 @@ include mk/features/gpu.mk
 
 # TRUST_FEATURE_LIBS=1 (release stage 3, issue #114): the embedded runtime /
 # HTTP-core / web-bindings / tui-bridge feature archives were downloaded from
-# build-platform-native — the EXACT bytes sign-platform-manifest hashed into the
+# build-platform-native - the EXACT bytes sign-platform-manifest hashed into the
 # signed platform manifest. Embed them as-is so the runtime composed-feature
 # check (signature.c §5c) matches the embedded manifest. AR_FEATURE_LIB's trust
 # branch only asserts presence; it never re-archives, so the signed bytes survive
-# into hull even if source objects recompile (harmless — they're never used).
+# into hull even if source objects recompile (harmless - they're never used).
 # Local devs / normal `make` leave it unset and build the archives from source.
 # NOTE: applies ONLY to the seven archives EMBEDDED in a native hull. The tui CORE
 # (libhull_feature-tui.a) and the --with backend features are release-domain
@@ -2503,10 +2503,10 @@ EMBEDDED_TEMPLATES_H := $(BUILDDIR)/embedded_templates.h
 EMBEDDED_PLATFORM_H := $(BUILDDIR)/embedded_platform.h
 
 ifeq ($(EMBED_PLATFORM),cosmo)
-# Multi-arch cosmo embedding — xxd both archives + metadata table
+# Multi-arch cosmo embedding - xxd both archives + metadata table
 $(EMBEDDED_PLATFORM_H): $(BUILDDIR)/libhull_platform.x86_64-cosmo.a \
                          $(BUILDDIR)/libhull_platform.aarch64-cosmo.a | $(BUILDDIR)
-	@echo "/* Auto-generated multi-arch — do not edit */" > $@
+	@echo "/* Auto-generated multi-arch - do not edit */" > $@
 	xxd -i $(BUILDDIR)/libhull_platform.x86_64-cosmo.a | \
 		sed 's/build_libhull_platform_x86_64_cosmo_a/hl_platform_x86_64_cosmo/g' | \
 		$(XXD_CONST_PIPE) >> $@
@@ -2521,7 +2521,7 @@ $(EMBEDDED_PLATFORM_H): $(BUILDDIR)/libhull_platform.x86_64-cosmo.a \
 	@echo "};" >> $@
 
 $(EMBEDDED_TEMPLATES_H): templates/app_main.c templates/entry.h | $(BUILDDIR)
-	@echo "/* Auto-generated — do not edit */" > $@
+	@echo "/* Auto-generated - do not edit */" > $@
 	@xxd -i templates/app_main.c | sed 's/templates_app_main_c/hl_embedded_app_main_c/g' | $(XXD_CONST_PIPE) >> $@
 	@xxd -i templates/entry.h | sed 's/templates_entry_h/hl_embedded_entry_h/g' | $(XXD_CONST_PIPE) >> $@
 
@@ -2551,7 +2551,7 @@ $(EMBEDDED_PLATFORM_H): $(APP_BASE_LIB) | $(BUILDDIR)
 	xxd -i $< | sed 's/build_libhull_platform[a-z_]*_a/hl_embedded_platform_a/g' | $(XXD_CONST_PIPE) > $@
 
 $(EMBEDDED_TEMPLATES_H): templates/app_main.c templates/entry.h | $(BUILDDIR)
-	@echo "/* Auto-generated — do not edit */" > $@
+	@echo "/* Auto-generated - do not edit */" > $@
 	@xxd -i templates/app_main.c | sed 's/templates_app_main_c/hl_embedded_app_main_c/g' | $(XXD_CONST_PIPE) >> $@
 	@xxd -i templates/entry.h | sed 's/templates_entry_h/hl_embedded_entry_h/g' | $(XXD_CONST_PIPE) >> $@
 
@@ -2576,13 +2576,13 @@ endif
 #
 # The object list is defined once as HULL_LINK_OBJS and referenced by BOTH the
 # prerequisite line and the link recipe (it was previously written out verbatim
-# in both — the same ~70-token list twice for one target, an easy drift point).
+# in both - the same ~70-token list twice for one target, an easy drift point).
 # Order is preserved exactly, so the produced binary is byte-identical. The
 # prereq / recipe TAILS legitimately differ (order-only feature-lib prereqs vs
 # the -l link flags), so they stay inline. (The larger cross-target sharing with
 # PLATFORM_OBJS is deliberately NOT collapsed: the shared vars are interleaved
 # with each list's distinct ones, so a shared-core extraction would REORDER the
-# link line and risk weak/strong seam resolution — see docs/build_arc_audit.md.)
+# link line and risk weak/strong seam resolution - see docs/build_arc_audit.md.)
 HULL_LINK_OBJS := $(CAP_OBJS) $(CAP_TOOL_OBJ) $(CAP_TEST_OBJ) $(CMD_OBJS) $(RT_OBJS) $(ALLOC_OBJ) $(ASYNC_OBJ) $(COMPRESS_OBJ) $(MINIZ_OBJ) $(WORKER_DB_OBJ) $(WORKER_WASM_OBJ) $(WORKER_GPU_OBJ) $(MANIFEST_OBJ) $(MODULE_OBJ) $(ASYNC_BACKEND_OBJS) $(NET_BACKEND_OBJS) $(SANDBOX_OBJ) $(SANDBOX_TOOL_OBJ) $(SIG_OBJ) $(RELEASE_OBJ) $(RELEASE_IO_OBJ) $(TOOLS_INSTALL_OBJ) $(PLATFORM_SIG_OBJ) $(EMBEDDED_PLATFORM_SIG_OBJ) $(TEST_RUNNER_OBJ) $(RUNTIME_FACTORY_OBJ) $(STATIC_OBJ) $(MIGRATE_OBJ) $(VFS_OBJ) $(PATH_NORM_OBJ) $(THREAD_AFFINITY_OBJ) $(CACHE_DIR_OBJ) $(FS_UTIL_OBJ) $(BLOB_STORE_OBJ) $(CACHE_REGISTRY_OBJ) $(CACERT_OBJ) $(TLS_CLIENT_OBJ) $(TLS_TRANSPORT_OBJ) $(TLS_TRANSPORT_STUB_OBJ) $(CSP_OBJ) $(SH_SEAL_ARENA_OBJ) $(SBOM_OBJ) $(STDLIB_FEATURE_OBJ) $(APP_CONTEXT_OBJ) $(APP_CONTEXT_RT_OBJ) $(AGENT_LIB_OBJ) $(AGENT_API_OBJ) $(TOOL_OBJ) $(BUILD_ASSET_OBJ) $(COMPILER_OBJ) $(OBJ_EMIT_OBJ) $(LINKER_SYSTEM_OBJ) $(LINKER_LLD_OBJ) $(LINKER_ZIG_OBJ) $(BUNDLED_OBJS_OBJ) $(MAIN_OBJ) $(SERVE_OBJ) $(ENTRY_OBJ) $(APP_EXTRA_OBJS) $(STDLIB_REGISTRY_O) $(STDLIB_RT_REGISTRY_OBJS) $(STDLIB_TOOLCHAIN_REGISTRY_O) $(RUNTIME_TOOLCHAIN_REGISTRY_O) $(WAMR_OBJS) $(VEND_OBJS) $(MBEDTLS_OBJS) $(SQLITE_OBJ) $(LOG_OBJ) $(LOG_LOCK_OBJ) $(SH_ARENA_OBJ) $(SH_JSON_OBJ) $(TWEETNACL_OBJ) $(STB_OBJ) $(PLEDGE_OBJS)
 
 # The JS source-frontend tooling runtime needs QuickJS -> linked into the hull binary only
@@ -2667,15 +2667,15 @@ $(WORKER_DB_OBJ): $(SRCDIR)/hull/worker_db.c | $(BUILDDIR)
 $(WORKER_WASM_OBJ): $(SRCDIR)/hull/worker_wasm.c | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) $(WAMR_CFLAGS) -c -o $@ $<
 
-# Worker GPU (runtime-agnostic GPU thread pool dispatch — base-resident,
+# Worker GPU (runtime-agnostic GPU thread pool dispatch - base-resident,
 # like worker_db/worker_wasm; the wgpu backend itself stays feature/HL_ENABLE_GPU).
 $(WORKER_GPU_OBJ): $(SRCDIR)/hull/worker_gpu.c | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
 
-# Manifest — split into shared helpers + per-runtime extractors (item G).
+# Manifest - split into shared helpers + per-runtime extractors (item G).
 # Each per-runtime .c compiles to an empty TU when its runtime is disabled,
 # so no special -D filtering is needed for the test-binary single-runtime
-# variants — those just pull in the relevant {manifest_lua.o, manifest_js.o}
+# variants - those just pull in the relevant {manifest_lua.o, manifest_js.o}
 # alongside manifest.o.
 $(BUILDDIR)/manifest.o: $(SRCDIR)/hull/manifest.c $(SRCDIR)/hull/manifest_internal.h | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
@@ -2686,7 +2686,7 @@ $(BUILDDIR)/manifest_lua.o: $(SRCDIR)/hull/manifest_lua.c $(SRCDIR)/hull/manifes
 $(BUILDDIR)/manifest_js.o: $(SRCDIR)/hull/manifest_js.c $(SRCDIR)/hull/manifest_internal.h | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
 
-# manifest_extract_file.o — runtime-neutral helper that spins up a
+# manifest_extract_file.o - runtime-neutral helper that spins up a
 # transient HlJS to read app.manifest({...}) from a .js entry point.
 # Lives outside the manifest_lua/manifest_js split because it ties the
 # JS extractor to a file-on-disk + transient-runtime workflow, not the
@@ -2694,15 +2694,15 @@ $(BUILDDIR)/manifest_js.o: $(SRCDIR)/hull/manifest_js.c $(SRCDIR)/hull/manifest_
 $(BUILDDIR)/manifest_extract_file.o: $(SRCDIR)/hull/manifest_extract_file.c $(INCDIR)/hull/manifest_extract_file.h | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
 
-# Module registry — canonical sorted table of first-party modules
+# Module registry - canonical sorted table of first-party modules
 $(MODULE_REGISTRY_OBJ): $(SRCDIR)/hull/module_registry.c | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
 
-# Module resolver — validates manifest.modules into a frozen set
+# Module resolver - validates manifest.modules into a frozen set
 $(MODULE_RESOLVER_OBJ): $(SRCDIR)/hull/module_resolver.c | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
 
-# cap/test.c (shared dispatch — no runtime deps, used by both runtimes)
+# cap/test.c (shared dispatch - no runtime deps, used by both runtimes)
 $(BUILDDIR)/cap_test_dispatch.o: $(SRCDIR)/hull/cap/test.c | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
 
@@ -2746,9 +2746,9 @@ $(PLATFORM_SIG_OBJ): $(SRCDIR)/hull/platform_sig.c $(INCDIR)/hull/platform_sig.h
 # a placeholder so the build doesn't fail. The placeholder defines
 # zero-length arrays + matching length vars; the accessor's
 # `len == 0` check (via the absent HL_EMBED_PLATFORM_SIG macro) is
-# what actually short-circuits — the symbols just have to compile.
+# what actually short-circuits - the symbols just have to compile.
 #
-# Note the lack of a SOURCE prereq — make never RErefreshes the
+# Note the lack of a SOURCE prereq - make never RErefreshes the
 # placeholder. Once generated, the file stays. CI overwrites it
 # wholesale BEFORE invoking make, so the placeholder is bypassed
 # in release builds.
@@ -2777,7 +2777,7 @@ $(EMBEDDED_PLATFORM_SIG_OBJ): $(SRCDIR)/hull/embedded_platform_sig.c $(INCDIR)/h
 $(TEST_RUNNER_OBJ): $(SRCDIR)/hull/test_runner.c | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
 
-# Runtime factory registry (table-driven runtime selection — item K)
+# Runtime factory registry (table-driven runtime selection - item K)
 $(RUNTIME_FACTORY_OBJ): $(SRCDIR)/hull/runtime/factory.c | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
 
@@ -2828,7 +2828,7 @@ $(FS_UTIL_OBJ): $(SRCDIR)/hull/shared/fs_util.c $(INCDIR)/hull/shared/fs_util.h 
 $(BLOB_STORE_OBJ): $(SRCDIR)/hull/shared/blob_store.c $(INCDIR)/hull/shared/blob_store.h | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
 
-# Cache kind registry — used by `hull cache list|prune|clear`.
+# Cache kind registry - used by `hull cache list|prune|clear`.
 $(CACHE_REGISTRY_OBJ): $(SRCDIR)/hull/shared/cache_registry.c $(INCDIR)/hull/shared/cache_registry.h | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
 
@@ -2850,7 +2850,7 @@ $(APP_CONTEXT_OBJ): $(SRCDIR)/hull/app_context.c | $(BUILDDIR)
 $(APP_CONTEXT_RT_OBJ): $(SRCDIR)/hull/app_context_runtime.c | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
 
-# Agent library (shared by CLI, MCP, HTTP endpoints) — one .o per
+# Agent library (shared by CLI, MCP, HTTP endpoints) - one .o per
 # operation, plus agent_helpers.o for write_error/open_app_db.
 # Source files live under src/hull/agent/ since roadmap item I step 3.
 $(BUILDDIR)/agent_%.o: $(SRCDIR)/hull/agent/%.c | $(BUILDDIR)
@@ -2864,32 +2864,32 @@ $(AGENT_API_OBJ): $(SRCDIR)/hull/agent_api.c | $(BUILDDIR)
 $(BUILDDIR)/tool.o: $(SRCDIR)/hull/tool.c | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
 
-# Tool orchestration — cross-layer bindings spliced onto the `tool`
+# Tool orchestration - cross-layer bindings spliced onto the `tool`
 # global after the runtime/lua thin-binding layer installs the base
 # table. Lives at src/hull/ (not runtime/lua/) so commands/, dev_state,
 # agent_lib, migrate, and module_* aren't pulled into runtime/ headers.
 $(BUILDDIR)/tool_orchestration.o: $(SRCDIR)/hull/tool_orchestration.c | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
 
-# Build assets (embedded platform lib — stub unless HL_BUILD_EMBEDDED=1).
+# Build assets (embedded platform lib - stub unless HL_BUILD_EMBEDDED=1).
 $(BUILD_ASSET_OBJ): $(SRCDIR)/hull/build_assets.c | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
 
-# Build assets stub (no-op stubs for platform archive — satisfies cap_tool.o refs)
+# Build assets stub (no-op stubs for platform archive - satisfies cap_tool.o refs)
 $(BUILD_ASSET_STUB_OBJ): $(SRCDIR)/hull/build_assets_stub.c | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
 
-# SBOM (Software Bill of Materials — self-describing vendored-deps table).
+# SBOM (Software Bill of Materials - self-describing vendored-deps table).
 # Read-only data exporter. Orthogonal to the rest of the runtime:
 # depends only on cacert.h (for embedded-blob SHA-256) and mbedTLS.
 $(BUILDDIR)/sbom.o: $(SRCDIR)/hull/sbom.c $(INCDIR)/hull/sbom.h | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
 
-# Main (hull_main dispatcher — small; no Keel dependency)
+# Main (hull_main dispatcher - small; no Keel dependency)
 $(BUILDDIR)/main.o: $(SRCDIR)/hull/main.c | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
 
-# Serve (full app lifecycle — orchestrates Keel server + runtime)
+# Serve (full app lifecycle - orchestrates Keel server + runtime)
 $(BUILDDIR)/serve.o: $(SRCDIR)/hull/serve.c | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
 # Slim produced-app entry (hl_app_run -> hull_serve); no hull CLI dispatch.
@@ -2910,11 +2910,11 @@ $(IMAGE_WEAKSTUB_OBJ): $(SRCDIR)/hull/image_weakstub.c | $(BUILDDIR)
 $(BUILDDIR)/serve_cli.o: $(SRCDIR)/hull/serve_cli.c | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
 
-# Entry (thin main → hull_main trampoline — NOT in platform .a)
+# Entry (thin main → hull_main trampoline - NOT in platform .a)
 $(ENTRY_OBJ): $(SRCDIR)/hull/entry.c | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
 
-# CA bundle accessor (always compiled — empty when HL_EMBED_CA_BUNDLE=0)
+# CA bundle accessor (always compiled - empty when HL_EMBED_CA_BUNDLE=0)
 ifeq ($(HL_EMBED_CA_BUNDLE),1)
 $(CACERT_OBJ): $(SRCDIR)/hull/cacert.c $(INCDIR)/hull/cacert.h $(EMBEDDED_CACERT_H) | $(BUILDDIR)
 else
@@ -2922,7 +2922,7 @@ $(CACERT_OBJ): $(SRCDIR)/hull/cacert.c $(INCDIR)/hull/cacert.h | $(BUILDDIR)
 endif
 	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
 
-# Sealed-arena vendored utility — Hull-local compile so sanitizer
+# Sealed-arena vendored utility - Hull-local compile so sanitizer
 # builds get an instrumented copy.  Source canonical at
 # vendor/keel/vendor/sh_seal_arena/.
 $(SH_SEAL_ARENA_OBJ): $(KEEL_DIR)/vendor/sh_seal_arena/sh_seal_arena.c $(KEEL_DIR)/vendor/sh_seal_arena/sh_seal_arena.h | $(BUILDDIR)
@@ -3281,11 +3281,11 @@ lint: lint-lua lint-js check-sdk-headers check-docs-integrity
 #   - jsdoc   (npm install -g jsdoc)
 #
 # Targets:
-#   docs-api          — build all three
-#   docs-api-c        — Doxygen → build/api/c/
-#   docs-api-lua      — LDoc    → build/api/lua/
-#   docs-api-js       — JSDoc   → build/api/js/
-#   docs-api-check    — fail if any required tool is missing
+#   docs-api          - build all three
+#   docs-api-c        - Doxygen → build/api/c/
+#   docs-api-lua      - LDoc    → build/api/lua/
+#   docs-api-js       - JSDoc   → build/api/js/
+#   docs-api-check    - fail if any required tool is missing
 
 DOXYGEN ?= doxygen
 LDOC    ?= ldoc
@@ -3352,7 +3352,7 @@ clean:
 # a header touch into the correct narrow set of .o rebuilds.
 #
 # `-include` (with the dash) silently ignores missing .d files on the
-# first build — they appear after the first compile pass.
+# first build - they appear after the first compile pass.
 #
 # Uses `find` rather than `wildcard` because WAMR objects live in
 # nested directories under $(BUILDDIR)/wamr_core/... and shell globbing

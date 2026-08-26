@@ -15,7 +15,7 @@ ifndef COSMO
   #
   #   1. Always-on, baseline-portable flags applied unconditionally.
   #   2. Probe-and-add flags that newer compilers/linkers accept but
-  #      older ones reject — see hl_have_cflag / hl_have_ldflag below.
+  #      older ones reject - see hl_have_cflag / hl_have_ldflag below.
   #   3. Skip the whole layer if HULL_DISABLE_HARDENING=1 (debug only;
   #      do not ship release binaries with this unset).
   #
@@ -24,12 +24,12 @@ ifndef COSMO
   # macOS clang "argument unused during compilation" class) to errors so
   # flags that are accepted-with-warning are correctly rejected.
   #
-  # Cosmocc is excluded from this entire block — APE format constraints
+  # Cosmocc is excluded from this entire block - APE format constraints
   # mean ELF-specific options (PIE, RELRO, CET notes) are inapplicable
   # or break the linker script.
   ifndef HULL_DISABLE_HARDENING
     # Baseline: stack canaries + PIE. PIE is the macOS default since
-    # 10.7 — passing `-pie` to clang on Darwin emits the
+    # 10.7 - passing `-pie` to clang on Darwin emits the
     # "argument unused during compilation" warning that pollutes every
     # link line. Only set the linker side where it actually matters.
     CFLAGS  += -fstack-protector-strong -fPIE
@@ -47,7 +47,7 @@ ifndef COSMO
 
     # Probe macros. Echo the flag if accepted, empty otherwise.
     # Use $(comma) inside the argument so calls like
-    # $(call hl_have_ldflag,-Wl$(comma)--as-needed) work — `$(call X,a,b)`
+    # $(call hl_have_ldflag,-Wl$(comma)--as-needed) work - `$(call X,a,b)`
     # would otherwise see two arguments split on the literal comma.
     comma := ,
     hl_have_cflag = $(shell tmp="$$(mktemp 2>/dev/null || echo /tmp/hlprobe$$$$.o)"; \
@@ -109,7 +109,7 @@ ifndef COSMO
     CFLAGS += $(HARDEN_CFLAGS)
 
     # Linker hardening. Linux-only -z options are still gated by host
-    # OS — ld64 (macOS) rejects them. Some are universal.
+    # OS - ld64 (macOS) rejects them. Some are universal.
     ifeq ($(UNAME_S),Linux)
       CFLAGS  += -D_DEFAULT_SOURCE
       LDFLAGS += -Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack
@@ -127,7 +127,7 @@ ifndef COSMO
 
   # (Earlier audit rounds added `-Wl,--build-id=none` here under the
   # wrong theory that Linux Build-ID was random. Reality: GNU ld's
-  # default `--build-id=sha1` is content-addressed — identical inputs
+  # default `--build-id=sha1` is content-addressed - identical inputs
   # produce identical Build-IDs. Keeping the default preserves the
   # Build-ID for debuggers/crash reporters without sacrificing
   # reproducibility. Same applies to macOS LC_UUID: deterministic given

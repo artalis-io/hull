@@ -5,7 +5,7 @@
 # ── Keel (external library) ─────────────────────────────────────────
 
 # Keel is included as a git submodule in vendor/keel. Dropped from the
-# link only when both HTTP halves are off — Keel ships the HTTP client
+# link only when both HTTP halves are off - Keel ships the HTTP client
 # (used by HL_ENABLE_HTTP_CLIENT=1) and the HTTP server (used by
 # HL_ENABLE_HTTP_SERVER=1) together; the linker dead-strips the half
 # that isn't referenced.

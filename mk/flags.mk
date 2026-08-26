@@ -5,7 +5,7 @@
 # so the CFLAGS += accumulation order is preserved exactly: the HL_ENABLE_* -D
 # macros and the derived HL_ENABLE_HTTP_ANY / HL_LINK_TLS gates depend on it.
 
-# ── HTTP server / client — config flags ─────────────────────────────
+# ── HTTP server / client - config flags ─────────────────────────────
 #
 # Declared here (early) because the Keel + mbedTLS sections below gate
 # on $(HL_ENABLE_HTTP_ANY). Full prose docs are repeated at line 195

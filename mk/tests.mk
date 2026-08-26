@@ -24,7 +24,7 @@ endif
 
 # Drop DB-dependent tests in pure-compute builds.
 # test_js.c and test_lua.c exercise the full orchestration surface
-# (including db.*) — they reference hl_db_backend_sqlite directly.
+# (including db.*) - they reference hl_db_backend_sqlite directly.
 # Pure-compute builds skip them; the runtime sandbox is still covered
 # by the smaller runtime-isolated tests.
 ifeq ($(HL_ENABLE_DB),0)
@@ -73,7 +73,7 @@ TEST_COMMON_LIBS := $(TEST_CAP_OBJS) $(RUNTIME_FACTORY_NONE_OBJ) $(ALLOC_OBJ) $(
 # forkpty(3) is in libutil on glibc/musl Linux (used by
 # tests/hull/cap/test_tui_lifecycle.c). macOS / BSD ship it inside
 # libSystem so no extra flag is needed. Cosmopolitan does not provide
-# libutil at all — gating on !COSMO keeps the cosmocc CI green; the
+# libutil at all - gating on !COSMO keeps the cosmocc CI green; the
 # TUI lifecycle test on cosmo already short-circuits via the
 # HL_HAVE_FORKPTY=0 path.
 ifeq ($(UNAME_S),Linux)
@@ -157,12 +157,12 @@ $(BUILDDIR)/test_mysql_conn: $(TESTDIR)/hull/cap/test_mysql_conn.c $(SRCDIR)/hul
 		$(SRCDIR)/hull/cap/mysqlwire.c $(PG_CRYPTO_OBJS) $(LDFLAGS)
 
 # TUI cap-layer tests: cap/tui.c + tui_input.c + tui_width.c are filtered out of
-# CAP_OBJS on the default (TUI-free) base — they live only in the composable
+# CAP_OBJS on the default (TUI-free) base - they live only in the composable
 # feature archive. These tests call hl_cap_tui_* directly, so link the three TUI
 # objects explicitly (built TUI-enabled via their target-specific CFLAGS above).
 # A static-pattern rule wins over the generic cap-test pattern below. On a
 # monolithic HL_ENABLE_TUI=1 build the objects are ALREADY in TEST_COMMON_LIBS
-# (via CAP_OBJS), so the extra list is empty there — a doubled object on the
+# (via CAP_OBJS), so the extra list is empty there - a doubled object on the
 # link line is a multiple-definition error under GNU ld.
 ifeq ($(HL_ENABLE_TUI),1)
 TUI_CAP_TEST_OBJS :=
@@ -372,70 +372,70 @@ $(BUILDDIR)/test_span_diff: $(BUILDDIR)/gen_spandiff_wasm.h $(BUILDDIR)/gen_span
 $(BUILDDIR)/test_parse_size: $(TESTDIR)/hull/test_parse_size.c $(TEST_COMMON_DEPS) | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< $(TEST_COMMON_LIBS)
 
-# CFI death test — verifies -fsanitize=cfi-icall traps wrong-typed
+# CFI death test - verifies -fsanitize=cfi-icall traps wrong-typed
 # indirect calls.  Self-skips on non-CFI builds via __has_feature.
 # No deps beyond libc.
 $(BUILDDIR)/test_cfi: $(TESTDIR)/hull/test_cfi.c | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< $(LDFLAGS)
 
-# CSP preset registry — tiny, no deps beyond <string.h>.
+# CSP preset registry - tiny, no deps beyond <string.h>.
 $(BUILDDIR)/test_csp: $(TESTDIR)/hull/test_csp.c $(CSP_OBJ) | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< $(CSP_OBJ)
 
 $(BUILDDIR)/test_hex: $(TESTDIR)/hull/test_hex.c $(HEX_OBJ) | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< $(HEX_OBJ)
 
-# Mapped-spans SDK header (templates/hull_span.h) — native decoder
+# Mapped-spans SDK header (templates/hull_span.h) - native decoder
 # / name-lookup / scratch-narrow tests. Freestanding header; the only extra
 # include path is -Itemplates for hull_span.h. No deps beyond libc.
 $(BUILDDIR)/test_span_sdk: $(TESTDIR)/hull/test_span_sdk.c templates/hull_span.h | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -Itemplates -o $@ $< $(LDFLAGS)
 
-# Embedding ABI — links the whole libhull.a the way a native host does,
+# Embedding ABI - links the whole libhull.a the way a native host does,
 # so this also link-tests the archive on every `make test`. Only the
 # non-sealing surface runs in-process; the sealed path is embed-c-smoke.
 $(BUILDDIR)/test_embed: $(TESTDIR)/hull/test_embed.c $(BUILDDIR)/libhull.a $(KEEL_LIB) | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< \
 		$(BUILDDIR)/libhull.a $(KEEL_LIB) $(BUILDDIR)/libhull.a $(WGPU_LIB) $(WGPU_FRAMEWORKS) -lm -lpthread
 
-# Arena lifetime helpers — mark/rewind/strdup/memdup over sh_arena.
+# Arena lifetime helpers - mark/rewind/strdup/memdup over sh_arena.
 # Needs only the alloc wrapper + the sh_arena bump allocator.
 $(BUILDDIR)/test_arena: $(TESTDIR)/hull/test_arena.c $(ALLOC_OBJ) $(SH_ARENA_OBJ) | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< $(ALLOC_OBJ) $(SH_ARENA_OBJ)
 
-# Event-loop thread-affinity assertions — needs only the helper TU + pthread.
+# Event-loop thread-affinity assertions - needs only the helper TU + pthread.
 # The death test self-skips unless HL_THREAD_AFFINITY_CHECKS is defined
 # (DEBUG / MSAN / TSAN builds).
 $(BUILDDIR)/test_thread_affinity: $(TESTDIR)/hull/test_thread_affinity.c $(THREAD_AFFINITY_OBJ) | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< $(THREAD_AFFINITY_OBJ) -lpthread
 
-# Sealed arena — POSIX-only, no deps beyond libc + mmap/mprotect.
+# Sealed arena - POSIX-only, no deps beyond libc + mmap/mprotect.
 # Links Hull's locally-instrumented copy ($(SH_SEAL_ARENA_OBJ)) ahead
 # of libkeel.a so MSan can see the init writes.
 $(BUILDDIR)/test_seal_arena: $(TESTDIR)/hull/test_seal_arena.c $(SH_SEAL_ARENA_OBJ) $(KEEL_LIB) | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< $(SH_SEAL_ARENA_OBJ) $(KEEL_LIB)
 
-# Manifest seal — exercises hl_manifest_seal end-to-end (round-trip
+# Manifest seal - exercises hl_manifest_seal end-to-end (round-trip
 # + read-after-seal + fork+SIGSEGV write-after-seal death test).
-# Links only manifest.o (the shared / runtime-free part) — manifest_lua
+# Links only manifest.o (the shared / runtime-free part) - manifest_lua
 # and manifest_js are NOT needed since the fixture builds the manifest
 # by hand, and pulling them in would force a QuickJS + Lua link.
 $(BUILDDIR)/test_manifest_seal: $(TESTDIR)/hull/test_manifest_seal.c $(BUILDDIR)/manifest.o $(ALLOC_OBJ) $(SH_ARENA_OBJ) $(SH_SEAL_ARENA_OBJ) $(LOG_OBJ) $(LOG_LOCK_OBJ) | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< $(BUILDDIR)/manifest.o $(ALLOC_OBJ) $(SH_ARENA_OBJ) $(SH_SEAL_ARENA_OBJ) $(LOG_OBJ) $(LOG_LOCK_OBJ) $(KEEL_LIB) -lpthread
 
-# JS runtime test — needs QuickJS + JS runtime objects + manifest (JS-only to avoid Lua link deps)
+# JS runtime test - needs QuickJS + JS runtime objects + manifest (JS-only to avoid Lua link deps)
 $(BUILDDIR)/test_js: $(TESTDIR)/hull/runtime/js/test_js.c $(TEST_COMMON_DEPS) $(MANIFEST_JS_OBJ) $(MODULE_OBJ) $(CAP_TEST_JS_OBJ) $(STDLIB_FEATURE_OBJ) $(APP_ENTRIES_DEFAULT_OBJ) $(STDLIB_REGISTRY_O) $(STDLIB_RT_REGISTRY_OBJS) $(STDLIB_TOOLCHAIN_REGISTRY_O) $(VFS_OBJ) $(PATH_NORM_OBJ) $(THREAD_AFFINITY_OBJ) $(CACHE_DIR_OBJ) $(FS_UTIL_OBJ) $(BLOB_STORE_OBJ) $(CACHE_REGISTRY_OBJ) $(RUNTIME_CACHE_COMMON_OBJ) $(JS_RT_OBJS) $(QJS_OBJS) | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< \
 		$(TEST_CAP_OBJS) $(CAP_TEST_JS_OBJ) $(STDLIB_FEATURE_OBJ) $(JS_RT_OBJS) $(MANIFEST_JS_OBJ) $(MODULE_OBJ) $(APP_ENTRIES_DEFAULT_OBJ) $(STDLIB_REGISTRY_O) $(STDLIB_RT_REGISTRY_OBJS) $(STDLIB_TOOLCHAIN_REGISTRY_O) $(VFS_OBJ) $(PATH_NORM_OBJ) $(THREAD_AFFINITY_OBJ) $(CACHE_DIR_OBJ) $(FS_UTIL_OBJ) $(BLOB_STORE_OBJ) $(CACHE_REGISTRY_OBJ) $(CACERT_OBJ) $(TLS_CLIENT_OBJ) $(RUNTIME_CACHE_COMMON_OBJ) $(ALLOC_OBJ) $(ASYNC_OBJ) $(ASYNC_BACKEND_OBJS) $(NET_BACKEND_OBJS) $(COMPRESS_OBJ) $(MINIZ_OBJ) $(WORKER_DB_OBJ) $(WORKER_WASM_OBJ) $(WORKER_GPU_OBJ) $(WAMR_OBJS) $(QJS_OBJS) \
 		$(KEEL_LIB) $(MBEDTLS_OBJS) $(SQLITE_OBJ) $(LOG_OBJ) $(LOG_LOCK_OBJ) $(SH_ARENA_OBJ) $(SH_JSON_OBJ) $(TWEETNACL_OBJ) $(STB_OBJ) $(WGPU_LIB) $(WGPU_FRAMEWORKS) -lm -lpthread
 
-# Lua runtime test — needs Lua + Lua runtime objects + manifest (Lua-only) + cap_tool + build_assets
+# Lua runtime test - needs Lua + Lua runtime objects + manifest (Lua-only) + cap_tool + build_assets
 $(BUILDDIR)/test_lua: $(TESTDIR)/hull/runtime/lua/test_lua.c $(TEST_COMMON_DEPS) $(CAP_TOOL_OBJ) $(CAP_TEST_LUA_OBJ) $(BUILD_ASSET_OBJ) $(BUILDDIR)/cmd_doctor.o $(BUILDDIR)/cmd_dev.o $(BUILDDIR)/compiler.o $(OBJ_EMIT_OBJ) $(LINKER_SYSTEM_OBJ) $(LINKER_LLD_OBJ) $(LINKER_ZIG_OBJ) $(BUNDLED_OBJS_OBJ) $(BUILDDIR)/tool.o $(BUILDDIR)/tool_orchestration.o $(BUILDDIR)/sandbox.o $(BUILDDIR)/sandbox_tool.o $(AGENT_LIB_OBJ) $(AGENT_API_OBJ) $(STDLIB_FEATURE_OBJ) $(APP_CONTEXT_OBJ) $(APP_CONTEXT_RT_OBJ) $(MIGRATE_OBJ) $(MANIFEST_OBJ) $(MODULE_OBJ) $(APP_ENTRIES_DEFAULT_OBJ) $(STDLIB_REGISTRY_O) $(STDLIB_RT_REGISTRY_OBJS) $(STDLIB_TOOLCHAIN_REGISTRY_O) $(VFS_OBJ) $(PATH_NORM_OBJ) $(THREAD_AFFINITY_OBJ) $(CACHE_DIR_OBJ) $(FS_UTIL_OBJ) $(BLOB_STORE_OBJ) $(CACHE_REGISTRY_OBJ) $(RUNTIME_CACHE_COMMON_OBJ) $(LUA_RT_OBJS) $(JS_RT_OBJS) $(LUA_OBJS) $(QJS_OBJS) $(RUNTIME_FACTORY_OBJ) $(RUNTIME_FACTORY_NONE_OBJ) $(STATIC_OBJ) $(TEST_RUNNER_OBJ) $(TOOLS_INSTALL_OBJ) $(PLATFORM_SIG_OBJ) $(EMBEDDED_PLATFORM_SIG_OBJ) $(RELEASE_OBJ) $(RELEASE_IO_OBJ) $(CACERT_OBJ) $(FRONTEND_JS_LINK_OBJS) $(PLEDGE_OBJS) | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< \
 		$(TEST_CAP_OBJS) $(CAP_TOOL_OBJ) $(CAP_TEST_LUA_OBJ) $(BUILD_ASSET_OBJ) $(BUILDDIR)/cmd_doctor.o $(BUILDDIR)/cmd_dev.o $(BUILDDIR)/compiler.o $(OBJ_EMIT_OBJ) $(LINKER_SYSTEM_OBJ) $(LINKER_LLD_OBJ) $(LINKER_ZIG_OBJ) $(BUNDLED_OBJS_OBJ) $(BUILDDIR)/tool.o $(BUILDDIR)/tool_orchestration.o $(BUILDDIR)/sandbox.o $(BUILDDIR)/sandbox_tool.o $(BUILDDIR)/cacert.o $(TLS_CLIENT_OBJ) $(TOOLS_INSTALL_OBJ) $(PLATFORM_SIG_OBJ) $(EMBEDDED_PLATFORM_SIG_OBJ) $(RELEASE_OBJ) $(RELEASE_IO_OBJ) $(TLS_TRANSPORT_OBJ) $(TLS_TRANSPORT_STUB_OBJ) $(AGENT_LIB_OBJ) $(AGENT_API_OBJ) $(STDLIB_FEATURE_OBJ) $(APP_CONTEXT_OBJ) $(APP_CONTEXT_RT_OBJ) $(MIGRATE_OBJ) $(LUA_RT_OBJS) $(JS_RT_OBJS) $(MANIFEST_OBJ) $(MODULE_OBJ) $(APP_ENTRIES_DEFAULT_OBJ) $(STDLIB_REGISTRY_O) $(STDLIB_RT_REGISTRY_OBJS) $(STDLIB_TOOLCHAIN_REGISTRY_O) $(VFS_OBJ) $(PATH_NORM_OBJ) $(THREAD_AFFINITY_OBJ) $(CACHE_DIR_OBJ) $(FS_UTIL_OBJ) $(BLOB_STORE_OBJ) $(CACHE_REGISTRY_OBJ) $(RUNTIME_CACHE_COMMON_OBJ) $(RUNTIME_FACTORY_OBJ) $(RUNTIME_FACTORY_NONE_OBJ) $(STATIC_OBJ) $(TEST_RUNNER_OBJ) $(ALLOC_OBJ) $(ASYNC_OBJ) $(ASYNC_BACKEND_OBJS) $(NET_BACKEND_OBJS) $(COMPRESS_OBJ) $(MINIZ_OBJ) $(WORKER_DB_OBJ) $(WORKER_WASM_OBJ) $(WORKER_GPU_OBJ) $(WAMR_OBJS) $(LUA_OBJS) $(QJS_OBJS) \
 		$(KEEL_LIB) $(MBEDTLS_OBJS) $(SQLITE_OBJ) $(LOG_OBJ) $(LOG_LOCK_OBJ) $(SH_ARENA_OBJ) $(SH_JSON_OBJ) $(TWEETNACL_OBJ) $(STB_OBJ) $(WGPU_LIB) $(WGPU_FRAMEWORKS) $(FRONTEND_JS_LINK_OBJS) $(PLEDGE_OBJS) -lm -lpthread
 
-# Tool hardening test — cap/tool.c compiled without runtime flags (self-contained C functions)
+# Tool hardening test - cap/tool.c compiled without runtime flags (self-contained C functions)
 CAP_TOOL_NONE_OBJ := $(BUILDDIR)/cap_tool_none.o
 $(CAP_TOOL_NONE_OBJ): $(SRCDIR)/hull/cap/tool.c | $(BUILDDIR)
 	$(CC) $(filter-out -DHL_ENABLE_LUA -DHL_ENABLE_JS,$(CFLAGS)) $(INCLUDES) -c -o $@ $<
@@ -455,14 +455,14 @@ $(BUILDDIR)/test_compiler: $(TESTDIR)/hull/compiler/test_compiler.c $(COMPILER_O
 		$(CAP_TOOL_NONE_OBJ) $(BUILD_ASSET_OBJ) \
 		$(BUILDDIR)/cap_audit.o $(SH_JSON_OBJ) $(SH_ARENA_OBJ) -lm
 
-# Command dispatcher test — needs full command set (symbol resolution for command table)
+# Command dispatcher test - needs full command set (symbol resolution for command table)
 $(BUILDDIR)/test_dispatch: $(TESTDIR)/hull/commands/test_dispatch.c $(CMD_OBJS) $(SERVE_OBJ) $(CAP_TOOL_OBJ) $(CAP_TEST_OBJ) $(TOOL_OBJ) $(SANDBOX_OBJ) $(SANDBOX_TOOL_OBJ) $(SIG_OBJ) $(RELEASE_OBJ) $(RELEASE_IO_OBJ) $(TOOLS_INSTALL_OBJ) $(PLATFORM_SIG_OBJ) $(EMBEDDED_PLATFORM_SIG_OBJ) $(TEST_RUNNER_OBJ) $(RUNTIME_FACTORY_OBJ) $(RUNTIME_FACTORY_NONE_OBJ) $(STATIC_OBJ) $(MIGRATE_OBJ) $(VFS_OBJ) $(PATH_NORM_OBJ) $(THREAD_AFFINITY_OBJ) $(CACHE_DIR_OBJ) $(FS_UTIL_OBJ) $(BLOB_STORE_OBJ) $(CACHE_REGISTRY_OBJ) $(CACERT_OBJ) $(TLS_CLIENT_OBJ) $(TLS_TRANSPORT_OBJ) $(TLS_TRANSPORT_STUB_OBJ) $(CSP_OBJ) $(SBOM_OBJ) $(STDLIB_FEATURE_OBJ) $(APP_CONTEXT_OBJ) $(APP_CONTEXT_RT_OBJ) $(AGENT_LIB_OBJ) $(AGENT_API_OBJ) $(TEST_COMMON_DEPS) $(RT_OBJS) $(VEND_OBJS) $(MBEDTLS_OBJS) $(MANIFEST_OBJ) $(MODULE_OBJ) $(BUILD_ASSET_OBJ) $(COMPILER_OBJ) $(OBJ_EMIT_OBJ) $(LINKER_SYSTEM_OBJ) $(LINKER_LLD_OBJ) $(LINKER_ZIG_OBJ) $(BUNDLED_OBJS_OBJ) $(APP_ENTRIES_DEFAULT_OBJ) $(STDLIB_REGISTRY_O) $(STDLIB_RT_REGISTRY_OBJS) $(STDLIB_TOOLCHAIN_REGISTRY_O) $(FRONTEND_JS_LINK_OBJS) $(PLEDGE_OBJS) | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< \
 		$(CMD_OBJS) $(SERVE_OBJ) $(CAP_TOOL_OBJ) $(CAP_TEST_OBJ) $(TOOL_OBJ) $(SANDBOX_OBJ) $(SANDBOX_TOOL_OBJ) $(SIG_OBJ) $(RELEASE_OBJ) $(RELEASE_IO_OBJ) $(TOOLS_INSTALL_OBJ) $(PLATFORM_SIG_OBJ) $(EMBEDDED_PLATFORM_SIG_OBJ) $(TEST_RUNNER_OBJ) $(RUNTIME_FACTORY_OBJ) $(RUNTIME_FACTORY_NONE_OBJ) $(STATIC_OBJ) $(MIGRATE_OBJ) $(VFS_OBJ) $(PATH_NORM_OBJ) $(THREAD_AFFINITY_OBJ) $(CACHE_DIR_OBJ) $(FS_UTIL_OBJ) $(BLOB_STORE_OBJ) $(CACHE_REGISTRY_OBJ) $(CACERT_OBJ) $(TLS_CLIENT_OBJ) $(TLS_TRANSPORT_OBJ) $(TLS_TRANSPORT_STUB_OBJ) $(CSP_OBJ) $(SBOM_OBJ) $(STDLIB_FEATURE_OBJ) $(APP_CONTEXT_OBJ) $(APP_CONTEXT_RT_OBJ) $(AGENT_LIB_OBJ) $(AGENT_API_OBJ) \
 		$(TEST_CAP_OBJS) $(RT_OBJS) $(MANIFEST_OBJ) $(MODULE_OBJ) $(BUILD_ASSET_OBJ) $(COMPILER_OBJ) $(OBJ_EMIT_OBJ) $(LINKER_SYSTEM_OBJ) $(LINKER_LLD_OBJ) $(LINKER_ZIG_OBJ) $(BUNDLED_OBJS_OBJ) $(APP_ENTRIES_DEFAULT_OBJ) $(STDLIB_REGISTRY_O) $(STDLIB_RT_REGISTRY_OBJS) $(STDLIB_TOOLCHAIN_REGISTRY_O) $(ALLOC_OBJ) $(ASYNC_OBJ) $(ASYNC_BACKEND_OBJS) $(NET_BACKEND_OBJS) $(COMPRESS_OBJ) $(MINIZ_OBJ) $(WORKER_DB_OBJ) $(WORKER_WASM_OBJ) $(WORKER_GPU_OBJ) $(WAMR_OBJS) $(VEND_OBJS) \
 		$(KEEL_LIB) $(MBEDTLS_OBJS) $(SQLITE_OBJ) $(LOG_OBJ) $(LOG_LOCK_OBJ) $(SH_ARENA_OBJ) $(SH_JSON_OBJ) $(TWEETNACL_OBJ) $(STB_OBJ) $(FRONTEND_JS_LINK_OBJS) $(PLEDGE_OBJS) $(WGPU_LIB) $(WGPU_FRAMEWORKS) -lm -lpthread
 
-# Signature verification test — needs crypto + app_entries_default + vfs.
+# Signature verification test - needs crypto + app_entries_default + vfs.
 # Override HL_PLATFORM_PUBKEY_HEX to the all-zeros placeholder for this
 # test only: the fixture's create_test_package_sig generates a fresh
 # local platform keypair on every run, so the production (gethull.dev)
@@ -484,18 +484,18 @@ $(BUILDDIR)/test_signature: $(TESTDIR)/hull/test_signature.c $(BUILDDIR)/signatu
 		$(RELEASE_OBJ) $(RELEASE_IO_OBJ) \
 		$(APP_ENTRIES_DEFAULT_OBJ) $(TEST_COMMON_LIBS)
 
-# Release manifest sign/verify test — needs release.c + crypto
+# Release manifest sign/verify test - needs release.c + crypto
 $(BUILDDIR)/test_release: $(TESTDIR)/hull/test_release.c $(RELEASE_OBJ) $(TEST_COMMON_DEPS) | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< \
 		$(RELEASE_OBJ) $(TEST_COMMON_LIBS)
 
-# Tool registry + path helpers — standalone module, no runtime deps.
+# Tool registry + path helpers - standalone module, no runtime deps.
 $(BUILDDIR)/test_tools_install: $(TESTDIR)/hull/test_tools_install.c $(TOOLS_INSTALL_OBJ) $(FS_UTIL_OBJ) | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< $(TOOLS_INSTALL_OBJ) $(FS_UTIL_OBJ)
 
 # release_io/sbom/verify_self now hash via the cap layer's self-contained
 # SHA-256 (hl_cap_crypto_sha256) instead of mbedtls_sha256, so these focused
-# test binaries must link cap/crypto.o — plus its TweetNaCl (SHA-512/ed25519)
+# test binaries must link cap/crypto.o - plus its TweetNaCl (SHA-512/ed25519)
 # dependency and the mbedTLS HMAC backend it references in HTTP builds.
 CRYPTO_TEST_OBJS := $(BUILDDIR)/cap_crypto.o $(BUILDDIR)/cap_crypto_hmac_mbedtls.o $(TWEETNACL_OBJ)
 
@@ -515,7 +515,7 @@ $(BUILDDIR)/test_verify_self: $(TESTDIR)/hull/test_verify_self.c $(RELEASE_IO_OB
 	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< $(RELEASE_IO_OBJ) $(RELEASE_OBJ) $(HEX_OBJ) $(CACERT_OBJ) $(TLS_TRANSPORT_OBJ) $(TLS_TRANSPORT_STUB_OBJ) $(CRYPTO_TEST_OBJS) $(MBEDTLS_OBJS) $(KEEL_LIB) -lm -lpthread
 endif
 
-# Platform-sig helpers — reuses release.c (sign/verify) +
+# Platform-sig helpers - reuses release.c (sign/verify) +
 # release_io.c (find_checksum), so the test pulls those plus their
 # transitive crypto deps. Available on all builds.
 ifneq ($(HL_ENABLE_HTTP_CLIENT),0)
@@ -523,35 +523,35 @@ $(BUILDDIR)/test_platform_sig: $(TESTDIR)/hull/test_platform_sig.c $(PLATFORM_SI
 	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< $(PLATFORM_SIG_OBJ) $(RELEASE_OBJ) $(RELEASE_IO_OBJ) $(TEST_COMMON_LIBS)
 endif
 
-# Static file serving test — needs static middleware + vfs + keel
+# Static file serving test - needs static middleware + vfs + keel
 $(BUILDDIR)/test_static: $(TESTDIR)/hull/test_static.c $(STATIC_OBJ) $(TEST_COMMON_DEPS) | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< \
 		$(STATIC_OBJ) $(TEST_COMMON_LIBS)
 
-# VFS test — standalone module, no runtime deps
+# VFS test - standalone module, no runtime deps
 $(BUILDDIR)/test_vfs: $(TESTDIR)/hull/test_vfs.c $(VFS_OBJ) $(PATH_NORM_OBJ) $(THREAD_AFFINITY_OBJ) $(SH_SEAL_ARENA_OBJ) | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< $(VFS_OBJ) $(PATH_NORM_OBJ) $(THREAD_AFFINITY_OBJ) $(SH_SEAL_ARENA_OBJ)
 
-# Object emitter test — standalone (obj_emit.o + utest only). Validates the
+# Object emitter test - standalone (obj_emit.o + utest only). Validates the
 # ELF/Mach-O/COFF app_registry serialization structurally; the link+run
 # round-trip lives in e2e_compiler_free.sh.
 $(BUILDDIR)/test_obj_emit: $(TESTDIR)/hull/test_obj_emit.c $(OBJ_EMIT_OBJ) | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< $(OBJ_EMIT_OBJ)
 
-# SBOM test — exercises the data table + all four format functions +
+# SBOM test - exercises the data table + all four format functions +
 # embedded-blob SHA-256 cache. Links against sbom.o + cacert.o + mbedTLS;
 # nothing else. If SBOM accidentally pulls in other Hull subsystems,
-# this link line will need to grow — that's the orthogonality canary.
+# this link line will need to grow - that's the orthogonality canary.
 $(BUILDDIR)/test_sbom: $(TESTDIR)/hull/test_sbom.c $(SBOM_OBJ) $(HEX_OBJ) $(CACERT_OBJ) $(SH_JSON_OBJ) $(SH_ARENA_OBJ) $(CRYPTO_TEST_OBJS) $(MBEDTLS_OBJS) | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< $(SBOM_OBJ) $(HEX_OBJ) $(CACERT_OBJ) $(SH_JSON_OBJ) $(SH_ARENA_OBJ) $(CRYPTO_TEST_OBJS) $(MBEDTLS_OBJS)
 
-# Path-normalize test — standalone, exercises hl_path_normalize directly
+# Path-normalize test - standalone, exercises hl_path_normalize directly
 # so a regression in the helper is caught here rather than only via the
 # runtime module loaders that consume it.
 $(BUILDDIR)/test_path_normalize: $(TESTDIR)/hull/test_path_normalize.c $(PATH_NORM_OBJ) | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< $(PATH_NORM_OBJ)
 
-# Async backend tests — exercise the HlAsyncBackend vtable.
+# Async backend tests - exercise the HlAsyncBackend vtable.
 # test_async_backend covers whichever backend hl_async_backend() returns
 # (keel on HTTP=1, poll on HTTP=0). test_async_backend_poll always
 # pins the poll backend by name, so it runs on both build flavors.
@@ -566,18 +566,18 @@ $(BUILDDIR)/test_async_backend_poll: $(TESTDIR)/hull/test_async_backend_poll.c $
 	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< \
 		$(ASYNC_BACKEND_OBJS) $(KEEL_LIB) -lm -lpthread
 
-# Module registry — standalone, only links the registry object
+# Module registry - standalone, only links the registry object
 $(BUILDDIR)/test_module_registry: $(TESTDIR)/hull/test_module_registry.c $(MODULE_REGISTRY_OBJ) | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< $(MODULE_REGISTRY_OBJ)
 
-# Module resolver — needs the registry plus the manifest types
+# Module resolver - needs the registry plus the manifest types
 # cap_gpu_feature.o / cap_tui_feature.o supply the weak hl_gpu_feature_backends /
 # hl_tui_feature_present the resolver now consults (composed-feature GPU + TUI
 # caps). Both are base-resident, so always available.
 $(BUILDDIR)/test_module_resolver: $(TESTDIR)/hull/test_module_resolver.c $(MODULE_OBJ) $(BUILDDIR)/cap_gpu_feature.o $(BUILDDIR)/cap_tui_feature.o | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< $(MODULE_OBJ) $(BUILDDIR)/cap_gpu_feature.o $(BUILDDIR)/cap_tui_feature.o
 
-# CA bundle test — links against cacert.o and mbedTLS for parse verification
+# CA bundle test - links against cacert.o and mbedTLS for parse verification
 $(BUILDDIR)/test_cacert: $(TESTDIR)/hull/test_cacert.c $(CACERT_OBJ) $(MBEDTLS_OBJS) | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< \
 		$(CACERT_OBJ) $(MBEDTLS_OBJS)
@@ -732,7 +732,7 @@ msan:
 		KEEL_COMPRESS=miniz MINIZ_DIR=$(CURDIR)/$(MINIZ_DIR)
 	$(MAKE) CC=clang MSAN=1 test
 
-# ThreadSanitizer — validate the worker-pool / shared-state paths under a
+# ThreadSanitizer - validate the worker-pool / shared-state paths under a
 # real race detector. Targeted at the suites that actually spin worker
 # threads, rather than the whole test set, to keep the signal on the
 # threading code and avoid TSan's cost on single-threaded suites:
@@ -795,7 +795,7 @@ tsan-shared-heap:
 # (libclang_rt.fuzzer_osx.a), so `make fuzz` with the default cc fails on macOS
 # with "library '...fuzzer_osx.a' not found". Use a Homebrew LLVM clang there.
 # Each harness compiles its parser sources fresh under the fuzzer
-# instrumentation — these parsers are small and self-contained, so no
+# instrumentation - these parsers are small and self-contained, so no
 # libhull_platform.a link is needed. Keel already fuzzes the HTTP /
 # multipart / websocket / response parsers in its own tree; these cover
 # Hull's own untrusted-input parsers.
@@ -1008,7 +1008,7 @@ e2e-htmx-playwright: $(BUILDDIR)/hull
 
 # Same suite, but against `hull build` standalone binaries instead
 # of `hull <app.lua>` (dev mode). Exercises the embedded-VFS code
-# path — static files, templates, migrations, stdlib widget assets
+# path - static files, templates, migrations, stdlib widget assets
 # all loaded from the binary, not the filesystem. Needs hull built
 # with EMBED_PLATFORM=1 (the make-rule below ensures it).
 e2e-htmx-playwright-build: $(BUILDDIR)/hull $(BUILDDIR)/libhull_platform.a
@@ -1275,7 +1275,7 @@ e2e-compute-dev: $(BUILDDIR)/hull
 e2e-stream-meta: $(BUILDDIR)/hull
 	sh tests/e2e_stream_meta.sh
 
-# AOT artifact cache (requires wamrc — skipped cleanly when absent).
+# AOT artifact cache (requires wamrc - skipped cleanly when absent).
 e2e-aot-cache: $(BUILDDIR)/hull
 	sh tests/e2e_aot_cache.sh
 
@@ -1284,7 +1284,7 @@ e2e-cache: $(BUILDDIR)/hull
 	sh tests/e2e_cache.sh
 
 # Concurrent-writer stress test: N hull processes hammer the same
-# cache root. Slow (~30s, spawns ~16 hull instances) — kept out of
+# cache root. Slow (~30s, spawns ~16 hull instances) - kept out of
 # the default `make e2e` runs; CI invokes explicitly.
 e2e-cache-concurrent: $(BUILDDIR)/hull
 	sh tests/e2e_cache_concurrent.sh
