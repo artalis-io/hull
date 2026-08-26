@@ -1203,7 +1203,7 @@ any product spec - fully app-agnostic.
 Hull provides structured JSON interfaces for AI coding agents via the `hull agent` command. The same interfaces work for any automation (CI scripts, service orchestrators, or human developers who prefer structured output. **Twenty-eight machine-readable subcommands** cover routes, database schema, test results, server status, HTTP responses, deployment readiness, capability analysis, request preview, one-shot eval, the analyzed project model, and more) no screen-scraping or log parsing required.
 
 ```
-# Core introspection (Phase 1–5)
+# Core introspection
 hull agent routes [app_dir]              # routes + middleware as JSON
 hull agent db schema [app_dir] [-d path] # database tables and columns
 hull agent db query "SQL" [app_dir]      # read-only SQL → rows as JSON
@@ -1215,7 +1215,7 @@ hull agent context --task=T [--level=L]  # task-relevant documentation
 hull agent migrate [app_dir] [-d path]   # migration status
 hull agent deploy [app_dir]              # deployment readiness analysis
 
-# Extended introspection (Phase 6)
+# Extended introspection
 hull agent manifest [app_dir]            # effective manifest JSON
 hull agent endpoint METHOD PATH [dir]    # request preview (no execution)
 hull agent middleware METHOD PATH [dir]  # middleware stack for path
@@ -1239,7 +1239,7 @@ hull agent sql named <qname> [--params J] [dir]  # named query from queries.json
 
 Combined with `hull dev --agent` (which writes `.hull/dev.json`, `.hull/last_error.json`, and a per-reload `.hull/discovery.json` generation as sidecar files), agents get a complete feedback loop: edit code, check for errors, run tests, inspect the database, make HTTP requests, validate manifest coverage. All structured.
 
-`hull agent inspect` surfaces Hull's **project source-discovery** model: a static, host-owned analysis of the app's Lua source (via the pure-Lua `hull.source.*` layer, without executing app code) that reports the annotated declarations - `---@` annotations attached to `local` / `local function` / `function` declarations, with exact ranges, deterministic IDs, and by-annotation indexes. It runs standalone, or serves the live generation a running `hull dev --agent` session has published. JavaScript is a reserved-but-not-yet-analyzable frontend (honestly reported, never parsed as Lua). This is the foundation a future codegen step (e.g. Query/Compute IR) consumes.
+`hull agent inspect` surfaces Hull's **project source-discovery** model: a static, host-owned analysis of the app's source (Lua via the pure-Lua `hull.source.*` layer, JavaScript via a bundled QuickJS frontend session, without executing app code) that reports the annotated declarations - annotations attached to declarations, with exact ranges, deterministic IDs, and by-annotation indexes. It runs standalone, or serves the live generation a running `hull dev --agent` session has published. JavaScript is a first-class analyzable frontend on a default build (analyzed via a bundled QuickJS frontend session with parity to Lua; reported unsupported only on a `RUNTIME=lua` build, never parsed as Lua). This is the foundation a future codegen step (e.g. Query/Compute IR) consumes.
 
 ### Agent Development Workflow
 

@@ -415,7 +415,7 @@ SQLite / FS / network / crypto
 | Module | Source | Key functions |
 |---|---|---|
 | Database | `cap/db.c`, `cap/db_sqlite.c` | `hl_cap_db_query/exec/begin/commit/rollback` |
-| Filesystem | `cap/fs.c` | `hl_cap_fs_read/write/exists/delete/validate` |
+| Filesystem | `cap/fs.c`, `cap/fs_resolve.c`, `cap/fs_policy.c` | `hl_cap_fs_read/write/mmap/stat/list` (descriptor-relative virtual-root resolver + compiled `fs.read`/`fs.write` policy; regular-file leaves only) |
 | Crypto | `cap/crypto.c` | SHA-256/512, HMAC, PBKDF2, Ed25519, NaCl secretbox/box, random |
 | HTTP client | `cap/http.c`, `cap/http_async.c` | `hl_cap_http_request` (host allowlist) |
 | Environment | `cap/env.c` | `hl_cap_env_get` (allowlist) |
@@ -679,7 +679,7 @@ app.use_post("POST", "/api/*", idempotency.middleware())
 |---|---|---|
 | `db` | Database (requires `HL_ENABLE_DB=1`) | `query`, `exec`, `batch`, `udf.register`, `async.query`, `async.exec` |
 | `http` | HTTP client | `fetch`, `get`, `post`, `async.fetch`, `async.get`, `async.post` |
-| `fs` | Filesystem (manifest allowlist) | `read`, `write`, `exists`, `delete`, `mmap`, `list_dir` |
+| `fs` | Filesystem (manifest allowlist) | `read`, `write`, `stat`, `list`, `mmap` (policy-backed; regular-file leaves only, else `not_a_regular_file`). `exists`/`delete` are not app-exposed |
 | `crypto` | Crypto primitives | `sha256`, `sha512`, `hmac_sha256`, `pbkdf2`, `ed25519_*`, `secretbox_*`, `random`, `hash_password`, `verify_password`, `base64url_*` |
 | `env` | Env vars (manifest allowlist) | `get(name)` → string or nil |
 | `time` | Time | `now`, `now_ms`, `clock`, `date`, `datetime` |
@@ -1457,7 +1457,7 @@ Tools exposed: `hull_routes`, `hull_db_schema`, `hull_db_query`, `hull_request`,
 The MCP server keeps a warm `HlAppContext` between calls so requests don't
 re-init the runtime each time.
 
-### Extended introspection subcommands (Phase 6, 2026-05-15)
+### Extended introspection subcommands
 
 Sixteen additional subcommands close common agent productivity gaps:
 
@@ -1730,7 +1730,7 @@ templates/                     Build templates (app_main.c, entry.h)
 
 ---
 
-## Agent gap analysis. Closed (Phase 6, 2026-05-15)
+## Agent gap analysis (closed)
 
 All sixteen identified gaps have been implemented. See § Extended
 introspection above for the full subcommand reference. Implementation
@@ -1753,7 +1753,7 @@ notes per command:
 | `sql named` | `src/hull/agent/sql.c` | Loads `app_dir/queries.json`, binds named params from `--params JSON`. |
 
 All buffer sizes named in `src/hull/agent/limits.h` (no magic constants).
-Total Phase 6 surface: ~1,500 lines of new C + ~150 lines of CLI glue in
+Total extended-introspection surface: ~1,500 lines of C + ~150 lines of CLI glue in
 `commands/agent.c`. CI-gated and smoke-tested against `examples/hello`.
 
 ---

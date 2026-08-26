@@ -270,7 +270,7 @@ Analyze deployment readiness. Manifest, directory structure, existing configs.
 }
 ```
 
-### Extended introspection (Phase 6, 2026-05-15; auth-stack additions v0.3.0)
+### Extended introspection
 
 Eighteen additional subcommands close the iterative-edit loop. All JSON to stdout.
 
@@ -280,12 +280,12 @@ One-shot snapshot. Composes manifest + modules + capabilities + routes + compute
 
 #### `hull agent inspect [app_dir]`
 
-The **project source-discovery** model as versioned JSON: a static analysis of the app's Lua source (parsed by the pure-Lua `hull.source.*` layer, **without executing app code**) that reports the **annotated declarations** - `---@name` annotations attached to `local` / `local function` / `function` declarations - with exact ranges, deterministic IDs, and `by_annotation` / `by_source` / `by_language` / `by_id` indexes.
+The **project source-discovery** model as versioned JSON: a static analysis of the app's source (**without executing app code**) that reports the **annotated declarations** - `---@name` (Lua) / `@name` (JS) annotations attached to `local` / `local function` / `function` (and the JS equivalents) declarations - with exact ranges, deterministic IDs, and `by_annotation` / `by_source` / `by_language` / `by_id` indexes. Lua is parsed by the pure-Lua `hull.source.*` layer; JavaScript by a bundled QuickJS frontend session.
 
 - Top-level fields: `schema_version`, `generation`, `source` (`"standalone"` | `"dev"`), `project_root`, `valid` (no source rejected/failed), `complete` (every application source had an analyzable frontend), `sources[]`, `frontends[]`, `declarations[]` (annotated-only), `diagnostics[]`, `summary`, `indexes`.
 - Runs **standalone**, or - when a live `hull dev --agent` session has published a generation - serves that live `.hull/discovery.json` generation (same schema; `source: "dev"`, `generation >= 1`).
 - Exit 0 whenever a discovery is produced (validity is data: read `valid` / `complete`); exit 2 only on a usage error (e.g. a second positional root).
-- JavaScript is a reserved-but-not-yet-analyzable frontend: an application `.js` is reported `status: "unsupported"` and sets `complete: false`, and is **never parsed as Lua**; `static/*.js` browser assets are pruned.
+- JavaScript is a first-class analyzable frontend on a default (`RUNTIME=all`) build: an application `.js` is analyzed end-to-end via the bundled QuickJS frontend, with parity to Lua (declarations, annotations, scope). It is reported `status: "unsupported"` (and sets `complete: false`) **only** on a `RUNTIME=lua` build with no JS frontend compiled in; a `.js` is never parsed as Lua, and `static/*.js` browser assets are always pruned.
 - CLI-only (not exposed via `hull mcp`). Foundation for a future codegen step (Query/Compute IR). Design: [docs/project_discovery_design.md](docs/project_discovery_design.md).
 
 ```json
@@ -692,7 +692,7 @@ Every module except the intrinsic core must be listed in `manifest.modules`. The
 | `crypto` | `local crypto = require("hull.crypto")` | `import { crypto } from "hull:crypto"` | `"hull/crypto@1"` | Hashing, signing, random |
 | `time` | `local time = require("hull.time")` | `import { time } from "hull:time"` | `"hull/time@1"` | Timestamps |
 | `env` | `local env = require("hull.env")` | `import { env } from "hull:env"` | `"hull/env@1"` | Environment vars (also needs `env` allowlist) |
-| `fs` | `local fs = require("hull.fs")` | `import { fs } from "hull:fs"` | `"hull/fs@1"` | Sandboxed FS (also needs `fs_read`/`fs_write`) |
+| `fs` | `local fs = require("hull.fs")` | `import { fs } from "hull:fs"` | `"hull/fs@1"` | Sandboxed FS: `read` / `write` / `stat` / `list` / `mmap` (policy-backed; also needs `fs_read`/`fs_write`). Leaves must be regular files (`not_a_regular_file`); `exists`/`delete` are not app-exposed |
 | `http_client` | `local http_client = require("hull.http-client")` | `import { httpClient } from "hull:http-client"` | `"hull/http-client@1"` | Outbound HTTP/HTTPS (`http.fetch` etc.); needs `hosts` allowlist |
 | `http_server` | `local http_server = require("hull.http-server")` | `import { httpServer } from "hull:http-server"` | `"hull/http-server@1"` | Decorates `app` with `get/post/use/router`; also exposes `server.stats()` |
 | `ws_server` | `local ws_server = require("hull.web.ws-server")` | `import { wsServer } from "hull:web:ws-server"` | `"hull/web/ws-server@1"` | Decorates `app.ws`; also exposes `wsServer.broadcast`, `wsServer.connections` |
@@ -887,7 +887,7 @@ Example audit output (one JSON object per line on stderr):
 {"ts":"2026-08-05T14:23:04Z","cap":"tool.spawn","cmd":"cc","exit_code":0}
 ```
 
-Every capability module is instrumented: `db.query`, `db.exec`, `fs.read`, `fs.write`, `fs.delete`, `http.request`, `env.get`, `tool.spawn`, `smtp.send`. SQL queries are truncated to 512 bytes. Passwords and secrets are never logged.
+Every capability module is instrumented: `db.query`, `db.exec`, `fs.read`, `fs.write`, `http.request`, `env.get`, `tool.spawn`, `smtp.send`. SQL queries are truncated to 512 bytes. Passwords and secrets are never logged.
 
 **Use cases for agents:**
 - **Debugging failed requests:** See exactly which DB queries ran, what files were accessed, which HTTP calls were made
