@@ -1,12 +1,11 @@
 /*
- * fs_policy.h - compiled path-authorization policy for hull.fs (checkpoint 3).
+ * fs_policy.h - compiled path-authorization policy for hull.fs.
  *
- * Checkpoint 3 of the hull.fs design (docs/hull_fs_design.md sec. 6). Separates the
+ * Part of the hull.fs design (docs/hull_fs_design.md sec. 6). Separates the
  * TWO authorities the older cap layer conflated:
  *
  *   (a) ROOT CONFINEMENT - every op stays under a root. Provided entirely by the
- *       checkpoint-1/2 descriptor resolver (fs_resolve.h, virtual-root). NO
- *       manifest input.
+ *       descriptor resolver (fs_resolve.h, virtual-root). NO manifest input.
  *   (b) PATH AUTHORIZATION - WHICH paths an app may read vs write. THIS file.
  *
  * A manifest `fs.read` / `fs.write` grant is compiled once (at cap-wiring time)
@@ -18,12 +17,12 @@
  * the kernel sandbox stays as defense-in-depth BENEATH it. An app with no grants
  * authorizes nothing (fails closed).
  *
- * Slice A was the policy CORE: parse grants, compile grants -> entries
- * (descriptor-bound), and deterministic most-specific file selection
- * (hl_fs_policy_select). Slice B wired that into hl_cap_fs read/write/mmap. Slice C
- * adds enumeration selection (hl_fs_policy_select_list) for fs.stat / fs.list; a
- * SUBTREE lists any descendant directory, a single-terminal PATTERN exposes only
- * matching names, and EXACT/CREATE are not listable directories.
+ * The policy CORE parses grants, compiles them to entries (descriptor-bound),
+ * and does deterministic most-specific file selection (hl_fs_policy_select),
+ * wired into hl_cap_fs read/write/mmap. Enumeration selection
+ * (hl_fs_policy_select_list) backs fs.stat / fs.list; a SUBTREE lists any
+ * descendant directory, a single-terminal PATTERN exposes only matching names,
+ * and EXACT/CREATE are not listable directories.
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
@@ -55,8 +54,8 @@ typedef struct HlAllocator HlAllocator;   /* Hull's tracked allocator (utils/all
  * Security correction (documented, intentional): prior Hull versions exposed the
  * WHOLE containing directory for a wildcard grant (e.g. read of `data` slash
  * `*.csv`), because only the kernel sandbox enforced the grant (which strips the
- * glob tail to the directory) and the cap layer checked no per-path pattern. From
- * checkpoint 3 the pattern is ENFORCED: `data/a.csv` is allowed, `data/a.txt` is
+ * glob tail to the directory) and the cap layer checked no per-path pattern. The
+ * pattern is now ENFORCED: `data/a.csv` is allowed, `data/a.txt` is
  * denied (component-scoped). Apps relying on the
  * old whole-directory access must widen their manifest; that reliance was
  * unintended over-authority, not a compatibility contract. docs/api/lua.md is
@@ -64,7 +63,7 @@ typedef struct HlAllocator HlAllocator;   /* Hull's tracked allocator (utils/all
 
 /*
  * The four entry kinds (sec. 6 + PATTERN). The kind fixes both the anchor and the
- * per-kind symlink rule enforced later by the resolver (Slice B):
+ * per-kind symlink rule enforced by the resolver:
  *   - SUBTREE: anchor is the granted directory. Per the approved design (sec. 6),
  *     a SUBTREE FOLLOWS in-root symlinks with virtual-root confinement, so the
  *     anchor is obtained at COMPILE by a CONTAINED-FOLLOW resolution
@@ -256,13 +255,13 @@ void hl_fs_grant_free(HlFsGrant *grant);
  * cannot be inferred from the grants).
  *
  * `base_dir` is the app root, opened via hl_fs_open_base() - the trusted root is
- * followed ONCE (checkpoint-1 semantics), NOT O_NOFOLLOW. Grants are classified by
+ * followed ONCE, NOT O_NOFOLLOW. Grants are classified by
  * a descriptor-bound walk from base_fd, never reconstructing a host path, with
  * PER-KIND symlink semantics (design sec. 6):
  *   - SUBTREE: the grant directory is resolved with a CONTAINED-FOLLOW
  *     (HL_FS_OPEN_DIR) - in-root symlinks in the grant path are followed and
  *     clamped within the root, so a symlinked grant directory still loads (this
- *     preserves the pre-checkpoint-3 behavior; the target cannot escape the root
+ *     preserves the prior symlinked-grant behavior; the target cannot escape the root
  *     and the held fd pins the inode).
  *   - EXACT / CREATE / PATTERN: the existing literal prefix is walked
  *     openat(O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC) + fstat-confirm a directory (a
@@ -351,7 +350,7 @@ HlFsSelection hl_fs_policy_select_stat(const HlFsPolicy *policy, const char *cal
                                        char *scratch, size_t scratch_len);
 
 /*
- * The result of selecting an entry to ENUMERATE a directory (fs.list, Slice C).
+ * The result of selecting an entry to ENUMERATE a directory (fs.list).
  * Distinct from hl_fs_policy_select (which selects a FILE leaf for read/write/stat):
  * listing targets a DIRECTORY, and a PATTERN grant must expose ONLY matching names.
  *

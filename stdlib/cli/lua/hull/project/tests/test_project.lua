@@ -1,5 +1,5 @@
 --
--- test_project.lua — Slice 1 tests for the project source-discovery layer.
+-- test_project.lua — tests for the project source-discovery layer.
 --
 -- Covers the Lua frontend adapter (declarations/annotations/ranges without executing
 -- app source), the frontend-neutral model (IDs, indexes, valid/complete, annotated-only
@@ -556,7 +556,7 @@ do
     ok(disc._handles ~= discB._handles, "each generation owns a distinct handle table (no cross-generation identity)")
 end
 
--- ── Slice 6: symmetric semantic-handle lifecycle through the analyzer APIs ──
+-- ── symmetric semantic-handle lifecycle through the analyzer APIs ──
 -- The JS bridge (tool.frontend_*) is MOCKED here (the real QuickJS manager is C-tested); this
 -- proves the analyzer's lease + analyze.declaration_semantics / analyze.scope / analyze.close gate
 -- Lua and JavaScript IDENTICALLY, through the public APIs (never proxy internals).

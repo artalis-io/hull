@@ -1,10 +1,10 @@
 /*
  * cap/mysql_conn.c: MySQL / MariaDB connection
  *
- * Phase 1b: the pure DSN parser only (percent-decode + bounded field split),
- * kept free of any socket / TLS / crypto dependency so the fuzzer links it
- * standalone. The handshake, auth plugins, TLS, and query protocols land in
- * later phases (added here behind transport guards, mirroring cap/pg_conn.c).
+ * The pure DSN parser (percent-decode + bounded field split) is kept free of
+ * any socket / TLS / crypto dependency so the fuzzer links it standalone; the
+ * handshake, auth plugins, TLS, and query protocols sit behind transport guards
+ * (mirroring cap/pg_conn.c).
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */

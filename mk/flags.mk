@@ -1,7 +1,7 @@
 # mk/flags.mk - HTTP / DB / composable-feature config flags.
 #
 # Extracted verbatim from the root Makefile in the build modularization
-# (docs/build_modularization.md, Phase 1). Included at the original position
+# (docs/build_modularization.md). Included at the original position
 # so the CFLAGS += accumulation order is preserved exactly: the HL_ENABLE_* -D
 # macros and the derived HL_ENABLE_HTTP_ANY / HL_LINK_TLS gates depend on it.
 
@@ -41,7 +41,7 @@ endif
 # ── Database backend flags (resolved early) ─────────────────────────
 # The granular SQLite / PostgreSQL flags are resolved here, ahead of the
 # Keel + mbedTLS sections below, because those link gates now extend to
-# PostgreSQL: its TLS transport (Phase 3b) and SCRAM auth (Phase 3a) need
+# PostgreSQL: its TLS transport and SCRAM auth need
 # Keel's KlTls and mbedTLS. The -D macros, SQLITE_OBJ gate, and the derived
 # HL_ENABLE_DB umbrella stay in the DB section further down. Back-compat:
 # HL_ENABLE_DB=0 pins both granular flags off.
@@ -57,7 +57,7 @@ HL_ENABLE_MYSQL    ?= 0
 HL_ENABLE_DUCKDB   ?= 0
 
 # HL_SQLITE_FEATURE=1 builds a SQLite-as-a-composable-feature base
-# (docs/sqlite_feature.md, Phase B): SQLite leaves the base object set (composed
+# (docs/sqlite_feature.md): SQLite leaves the base object set (composed
 # back from libhull_feature-sqlite.a) but the DB CORE stays on. It forces
 # HL_ENABLE_SQLITE off here; the umbrella below keeps HL_ENABLE_DB on so the
 # vtable + selector + generic db.* caps + weak hl_db_feature_backends remain,
@@ -78,8 +78,8 @@ endif
 # binary + a plain `make` are unaffected. Native only. Default 0.
 HL_TLS_FEATURE     ?= 0
 
-# HL_KEEL_FEATURE=1 builds a Keel-less app-build base (docs/keel_feature.md,
-# Phase 4.2b): the base uses the Keel-free serve_cli.o app-entry (weak hull_serve)
+# HL_KEEL_FEATURE=1 builds a Keel-less app-build base (docs/keel_feature.md):
+# the base uses the Keel-free serve_cli.o app-entry (weak hull_serve)
 # instead of serve.o, and drops async/keel.c (the Keel event loop), keeping only
 # the weak poll backend. serve.o + async/keel.c (the strong hull_serve +
 # hl_async_backend overrides) compose back in the whole-archived http feature on
@@ -94,11 +94,11 @@ ifeq ($(HL_KEEL_FEATURE),1)
 CFLAGS += -DHL_KEEL_FEATURE
 endif
 
-# HL_APP_BASE_SQLITELESS=1 (Phase D, docs/sqlite_feature.md): the distributed
+# HL_APP_BASE_SQLITELESS=1 (docs/sqlite_feature.md): the distributed
 # hull embeds a SQLite-LESS platform lib as the app-build base (built in a
 # HL_SQLITE_FEATURE=1 sub-build) plus the SQLite engine archive, so a stock
 # `hull build` produces SQLite-DROPPING apps (a db-free app links zero sqlite3.*;
-# a db app auto-composes the engine via the Phase C nm-probe gate). The hull
+# a db app auto-composes the engine via the nm-probe gate). The hull
 # binary ITSELF stays SQLite-full (it links SQLITE_OBJ for its own toolchain:
 # hull test / agent). Only the EMBED_PLATFORM path honours this; a plain dev
 # `make` is unaffected. Default 0 so the default distributed behaviour is

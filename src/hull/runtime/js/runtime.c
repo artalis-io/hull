@@ -1297,9 +1297,9 @@ static void vt_js_destroy(HlRuntime *rt)
 
 /* ── CLI mode (app.main) ───────────────────────────────────────────────
  *
- * Phase 1: sync stdio (calls return values directly, not Promises). Full
+ * Sync stdio: calls return values directly, not Promises. Full
  * async-inside-main (compute.async / gpu.async / http.fetch) needs Keel
- * event-loop integration in run_main_mode; deferred to Phase 1.5. The
+ * event-loop integration in run_main_mode, a planned follow-up. The
  * synchronous Promise machinery in QuickJS (Promise.resolve, microtask
  * chains) still works because we drain pending jobs after main returns. */
 

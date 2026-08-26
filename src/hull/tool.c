@@ -406,8 +406,8 @@ int hull_tool(const char *module, int argc, char **argv, const char *hull_exe)
 
     hl_lua_free(&lua);
 #ifdef HL_FRONTEND_JS
-    /* Slice 6 ownership completion: the Lua tool VM is the sole caller of the JS
-     * generation manager (hl_js_gen_open/_close via the frontend proxy). Now that
+    /* The Lua tool VM is the sole caller of the JS generation manager
+     * (hl_js_gen_open/_close via the frontend proxy). Now that
      * it is gone, tear the manager down unconditionally -- this destroys any
      * generation session left live by a defective/interrupted analysis and must
      * NOT reset the monotonic next_token. A JS-less build compiles without this. */

@@ -132,15 +132,15 @@ typedef struct HlWasmCache {
 
 struct HlMappedBuffer; /* fwd decl (include/hull/cap/fs.h) — avoids a heavy include */
 
-/* One requested per-invocation mapped span (the public `spans={}` API,
- * mapped-spans checkpoint 3). The binding resolves each entry to a windowed
+/* One requested per-invocation mapped span (the public `spans={}` API).
+ * The binding resolves each entry to a windowed
  * HlMappedBuffer and a validated name; the C layer attaches them read-only for
  * one invocation (cap/wasm_spans.c) and detaches on every exit.
  *
  * Ownership: `name`/`buf` are BORROWED. For a SYNC call the array + names may
  * live on the binding stack (valid for the whole synchronous call). For an ASYNC
  * call the binding MUST deep-copy the names and array and pin each buffer before
- * submit (mapped-spans checkpoint 3, item D) -- an async op must never retain a
+ * submit -- an async op must never retain a
  * runtime-managed (Lua/JS) name or array pointer. */
 typedef struct HlWasmSpanReq {
     const char            *name;   /* span name: 1..63 bytes, no embedded NUL,
@@ -156,7 +156,7 @@ typedef struct {
     int64_t  gas;           /* default: 10M, max: 100B instructions.
                              * WAMR's API takes int, so values > INT_MAX
                              * (~2.1B) are clamped with a log warning. */
-    /* Per-invocation mapped spans (checkpoint 3). NULL/0 => a plain call (no span
+    /* Per-invocation mapped spans. NULL/0 => a plain call (no span
      * set). Invariant: spans != NULL iff span_count > 0, and
      * 0 <= span_count <= HL_WASM_MAX_SPANS. Consumed by the C call layer in item
      * D; parsed + validated by the binding in item C. */

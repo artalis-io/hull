@@ -824,7 +824,7 @@ static const luaL_Reg db_async_funcs[] = {
 /* ── db.udf — user-defined SQL functions ─────────────────────────────── */
 /* The SQLite UDF bindings live in the composed per-runtime bridge
  * (mod_db_udf.c → libhull_feature-sqlite-lua.a) so THIS base runtime archive
- * carries no sqlite3_* references (Phase C.2, docs/sqlite_feature.md). The
+ * carries no sqlite3_* references (docs/sqlite_feature.md). The
  * bridge provides a strong hl_lua_db_attach_udf; this weak default (no udf
  * sub-object) stands in when no SQLite backend is composed. */
 __attribute__((weak)) void hl_lua_db_attach_udf(lua_State *L, HlDbHandle *h)

@@ -112,7 +112,7 @@ $(BUILDDIR)/test_respwire: $(TESTDIR)/hull/cap/test_respwire.c $(SRCDIR)/hull/ca
 
 # Valkey/Redis DSN parser test: valkey_conn.c's DSN part is self-contained (no
 # socket/TLS yet) and gated out of CAP_OBJS until HL_ENABLE_VALKEY.
-# -DHL_VALKEY_NO_TLS keeps the (Phase 1b) TLS transport out so the DSN test
+# -DHL_VALKEY_NO_TLS keeps the TLS transport out so the DSN test
 # needs no Keel/mbedTLS link, mirroring test_pg_conn's -DHL_PG_NO_TLS.
 # valkey_conn.c uses the pluggable allocator ($(ALLOC_OBJ)) + sh_arena
 # ($(SH_ARENA_OBJ)) for the connection buffer + reply arena.
@@ -136,7 +136,7 @@ $(BUILDDIR)/test_valkey_backend: $(TESTDIR)/hull/cap/test_valkey_backend.c $(SRC
 		$(TESTDIR)/hull/cap/test_valkey_backend.c $(SRCDIR)/hull/cap/valkey.c \
 		$(SRCDIR)/hull/cap/valkey_conn.c $(SRCDIR)/hull/cap/respwire.c $(ALLOC_OBJ) $(SH_ARENA_OBJ) $(LDFLAGS)
 
-# MySQL/MariaDB codec + DSN test: mysqlwire.c + mysql_conn.c (Phase 1b) are
+# MySQL/MariaDB codec + DSN test: mysqlwire.c + mysql_conn.c are
 # self-contained (no socket/TLS/crypto yet) and gated out of CAP_OBJS until
 # HL_ENABLE_MYSQL, so link them directly. Explicit rule wins over the pattern.
 # mysql_conn.c has the native_password scramble (cap/crypto -> SHA1), so link
@@ -185,39 +185,39 @@ $(BUILDDIR)/test_%: $(TESTDIR)/hull/cap/test_%.c $(TEST_COMMON_DEPS) | $(BUILDDI
 $(BUILDDIR)/test_lua_source: $(TESTDIR)/hull/source/test_lua_source.c $(LUA_OBJS) $(SH_JSON_OBJ) $(SH_ARENA_OBJ) | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -Ivendor/lua -o $@ $< $(LUA_OBJS) $(SH_JSON_OBJ) $(SH_ARENA_OBJ) -lm $(LDFLAGS)
 
-# hull.frontend JS tooling runtime (Slice 1): links the restricted QuickJS tooling session
+# hull.frontend JS tooling runtime: links the restricted QuickJS tooling session
 # + the cli-js registry + vendored QuickJS. Proves the runtime / byte transport / module
 # loading / limits / exception-conversion / lifecycle independently of any parser. Lives
 # under tests/hull/frontend/, so it needs an explicit recipe (not the cap/ pattern rule).
 $(BUILDDIR)/test_js_session: $(TESTDIR)/hull/frontend/test_js_session.c $(FRONTEND_JS_SESSION_OBJ) $(STDLIB_JS_CLI_REGISTRY_O) $(QJS_OBJS) | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -Ivendor/quickjs -o $@ $< $(FRONTEND_JS_SESSION_OBJ) $(STDLIB_JS_CLI_REGISTRY_O) $(QJS_OBJS) -lm -lpthread $(LDFLAGS)
 
-# hull.frontend JS lexer (Slice 2): same tooling-session link, drives hull:source:lexer via
+# hull.frontend JS lexer: same tooling-session link, drives hull:source:lexer via
 # the embedded hull:source:lextest driver. Explicit recipe (tests/hull/frontend/).
 $(BUILDDIR)/test_js_lexer: $(TESTDIR)/hull/frontend/test_js_lexer.c $(FRONTEND_JS_SESSION_OBJ) $(STDLIB_JS_CLI_REGISTRY_O) $(QJS_OBJS) | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -Ivendor/quickjs -o $@ $< $(FRONTEND_JS_SESSION_OBJ) $(STDLIB_JS_CLI_REGISTRY_O) $(QJS_OBJS) -lm -lpthread $(LDFLAGS)
 
-# hull.frontend JS parser (Slice 2): same tooling-session link, drives hull:source:parser via
+# hull.frontend JS parser: same tooling-session link, drives hull:source:parser via
 # the embedded hull:source:parse driver. Explicit recipe (tests/hull/frontend/).
 $(BUILDDIR)/test_js_parser: $(TESTDIR)/hull/frontend/test_js_parser.c $(FRONTEND_JS_SESSION_OBJ) $(STDLIB_JS_CLI_REGISTRY_O) $(QJS_OBJS) | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -Ivendor/quickjs -o $@ $< $(FRONTEND_JS_SESSION_OBJ) $(STDLIB_JS_CLI_REGISTRY_O) $(QJS_OBJS) -lm -lpthread $(LDFLAGS)
 
-# hull.frontend JS conformance (Slice 2): runs the corpus through the session parser AND a
+# hull.frontend JS conformance: runs the corpus through the session parser AND a
 # QuickJS compile-only oracle, so it links both the session and QuickJS. Explicit recipe.
 $(BUILDDIR)/test_js_conformance: $(TESTDIR)/hull/frontend/test_js_conformance.c $(FRONTEND_JS_SESSION_OBJ) $(STDLIB_JS_CLI_REGISTRY_O) $(QJS_OBJS) $(SH_JSON_OBJ) $(SH_ARENA_OBJ) | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -Ivendor/quickjs -o $@ $< $(FRONTEND_JS_SESSION_OBJ) $(STDLIB_JS_CLI_REGISTRY_O) $(QJS_OBJS) $(SH_JSON_OBJ) $(SH_ARENA_OBJ) -lm -lpthread $(LDFLAGS)
 
-# hull.frontend JS annotations (Slice 3): drives hull:source:parse and asserts on attached JSDoc
+# hull.frontend JS annotations: drives hull:source:parse and asserts on attached JSDoc
 # annotations. Same tooling-session link. Explicit recipe (tests/hull/frontend/).
 $(BUILDDIR)/test_js_annotations: $(TESTDIR)/hull/frontend/test_js_annotations.c $(FRONTEND_JS_SESSION_OBJ) $(STDLIB_JS_CLI_REGISTRY_O) $(QJS_OBJS) | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -Ivendor/quickjs -o $@ $< $(FRONTEND_JS_SESSION_OBJ) $(STDLIB_JS_CLI_REGISTRY_O) $(QJS_OBJS) -lm -lpthread $(LDFLAGS)
 
-# hull.frontend JS scope (Slice 4): drives hull:source:resolveScope and asserts on the binding /
+# hull.frontend JS scope: drives hull:source:resolveScope and asserts on the binding /
 # reference model. Same tooling-session link. Explicit recipe (tests/hull/frontend/).
 $(BUILDDIR)/test_js_scope: $(TESTDIR)/hull/frontend/test_js_scope.c $(FRONTEND_JS_SESSION_OBJ) $(STDLIB_JS_CLI_REGISTRY_O) $(QJS_OBJS) | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -Ivendor/quickjs -o $@ $< $(FRONTEND_JS_SESSION_OBJ) $(STDLIB_JS_CLI_REGISTRY_O) $(QJS_OBJS) -lm -lpthread $(LDFLAGS)
 
-# hull.frontend JS adapter (Slice 5): drives frontendAnalyze / frontendSemantics / frontendScope
+# hull.frontend JS adapter: drives frontendAnalyze / frontendSemantics / frontendScope
 # and asserts on the normalized facts + semantics + handle lifetime. Explicit recipe.
 $(BUILDDIR)/test_js_frontend: $(TESTDIR)/hull/frontend/test_js_frontend.c $(FRONTEND_JS_SESSION_OBJ) $(STDLIB_JS_CLI_REGISTRY_O) $(QJS_OBJS) | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -Ivendor/quickjs -o $@ $< $(FRONTEND_JS_SESSION_OBJ) $(STDLIB_JS_CLI_REGISTRY_O) $(QJS_OBJS) -lm -lpthread $(LDFLAGS)
@@ -229,10 +229,10 @@ $(BUILDDIR)/test_js_frontend: $(TESTDIR)/hull/frontend/test_js_frontend.c $(FRON
 $(BUILDDIR)/test_js_fuzz_entry: $(TESTDIR)/hull/frontend/test_js_fuzz_entry.c $(FRONTEND_JS_SESSION_OBJ) $(STDLIB_JS_CLI_TEST_REGISTRY_O) $(QJS_OBJS) | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -Ivendor/quickjs -o $@ $< $(FRONTEND_JS_SESSION_OBJ) $(STDLIB_JS_CLI_TEST_REGISTRY_O) $(QJS_OBJS) -lm -lpthread $(LDFLAGS)
 
-# hull.frontend JS generation manager (Slice 6/7): the C-owned session/token manager; links the
+# hull.frontend JS generation manager: the C-owned session/token manager; links the
 # manager + the session + registry + QuickJS. The manager SOURCE is compiled directly here with
 # -DHL_JS_GEN_TESTING (not the prebuilt non-testing obj) so the test-only introspection entries
-# (hl_js_gen_live_count / hl_js_gen_probe) are present for the Slice 7 ownership + authority proofs.
+# (hl_js_gen_live_count / hl_js_gen_probe) are present for the ownership + authority proofs.
 # Links the TEST cli-js registry (STDLIB_JS_CLI_TEST_REGISTRY_O), which includes the tests/-only
 # authority probe module; the production registry (STDLIB_JS_CLI_REGISTRY_O, in the shipped hull)
 # does not carry it.
@@ -281,7 +281,7 @@ $(BUILDDIR)/gen_gsub_aot_sw.h: $(TESTDIR)/hull/fixtures/gsub.wasm | $(BUILDDIR)
 $(BUILDDIR)/test_wasm_guarded_subrange: INCLUDES += -I$(BUILDDIR)
 $(BUILDDIR)/test_wasm_guarded_subrange: $(BUILDDIR)/gen_gsub_aot_sw.h
 
-# Mapped-span lifecycle (checkpoint 2). SW-bound AOT fixture of the same
+# Mapped-span lifecycle. SW-bound AOT fixture of the same
 # store_i32/load_i32 module the test embeds, so the span lifecycle + Design B
 # guest-window checks run under AOT too (skipped when wamrc is absent; the
 # wasm-readonly-heap-aot CI job builds wamrc and asserts the AOT case is NOT
@@ -385,7 +385,7 @@ $(BUILDDIR)/test_csp: $(TESTDIR)/hull/test_csp.c $(CSP_OBJ) | $(BUILDDIR)
 $(BUILDDIR)/test_hex: $(TESTDIR)/hull/test_hex.c $(HEX_OBJ) | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< $(HEX_OBJ)
 
-# Mapped-spans SDK header (templates/hull_span.h, checkpoint 3b) — native decoder
+# Mapped-spans SDK header (templates/hull_span.h) — native decoder
 # / name-lookup / scratch-narrow tests. Freestanding header; the only extra
 # include path is -Itemplates for hull_span.h. No deps beyond libc.
 $(BUILDDIR)/test_span_sdk: $(TESTDIR)/hull/test_span_sdk.c templates/hull_span.h | $(BUILDDIR)
@@ -826,27 +826,27 @@ fuzz/fuzz_respwire: fuzz/fuzz_respwire.c $(SRCDIR)/hull/cap/respwire.c
 	$(CC) $(FUZZ_CFLAGS) -o $@ $^
 
 # Valkey/Redis DSN parser: percent-decoding + bounded field splitting over a
-# user-supplied connection string. -DHL_VALKEY_NO_TLS keeps the (Phase 1b) TLS
+# user-supplied connection string. -DHL_VALKEY_NO_TLS keeps the TLS
 # transport out so the pure-parser fuzzer needs no Keel/mbedTLS.
 fuzz/fuzz_valkey_dsn: fuzz/fuzz_valkey_dsn.c $(SRCDIR)/hull/cap/valkey_conn.c $(SRCDIR)/hull/cap/respwire.c $(SRCDIR)/hull/utils/alloc.c $(SH_ARENA_DIR)/sh_arena.c
 	$(CC) $(FUZZ_CFLAGS) -Ivendor/keel/include -DHL_VALKEY_NO_TLS -o $@ $^
 
-# PostgreSQL wire-protocol reader: the untrusted-server parser (§1 Phase 2).
+# PostgreSQL wire-protocol reader: the untrusted-server parser (§1).
 fuzz/fuzz_pgwire: fuzz/fuzz_pgwire.c $(SRCDIR)/hull/cap/pgwire.c
 	$(CC) $(FUZZ_CFLAGS) -o $@ $^
 
-# PostgreSQL DSN parser: percent-decoding + bounded field splitting (§1 Phase 2).
+# PostgreSQL DSN parser: percent-decoding + bounded field splitting (§1).
 # HL_PG_NO_SCRAM keeps the pure-parser fuzzers free of the cap/crypto (mbedTLS)
 # dependency that SCRAM adds to pg_conn.c; HL_PG_NO_TLS does the same for the
-# Keel-backed TLS transport (Phase 3b.2).
+# Keel-backed TLS transport.
 fuzz/fuzz_pg_dsn: fuzz/fuzz_pg_dsn.c $(SRCDIR)/hull/cap/pg_conn.c $(SRCDIR)/hull/cap/pgwire.c
 	$(CC) $(FUZZ_CFLAGS) -DHL_PG_NO_SCRAM -DHL_PG_NO_TLS -o $@ $^
 
-# PostgreSQL placeholder rewriter: quote/comment-aware SQL scan (Phase 2).
+# PostgreSQL placeholder rewriter: quote/comment-aware SQL scan.
 fuzz/fuzz_pg_rewrite: fuzz/fuzz_pg_rewrite.c $(SRCDIR)/hull/cap/pg_conn.c $(SRCDIR)/hull/cap/pgwire.c
 	$(CC) $(FUZZ_CFLAGS) -DHL_PG_NO_SCRAM -DHL_PG_NO_TLS -o $@ $^
 
-# MySQL/MariaDB wire reader (cap/mysqlwire.c, §2.10 Phase 1b). Pure codec.
+# MySQL/MariaDB wire reader (cap/mysqlwire.c, §2.10). Pure codec.
 fuzz/fuzz_mysqlwire: fuzz/fuzz_mysqlwire.c $(SRCDIR)/hull/cap/mysqlwire.c
 	$(CC) $(FUZZ_CFLAGS) -o $@ $^
 
@@ -1071,7 +1071,7 @@ e2e-project-discovery:
 	HULL_E2E_EXPECT_JS=1 sh tests/e2e_project_discovery.sh
 
 .PHONY: e2e-project-discovery-lua
-# Slice 7 amendment 4: the JS-less side of the SAME lifecycle, PINNED so it can never silently
+# The JS-less side of the SAME lifecycle, PINNED so it can never silently
 # run the analyzable branch. A clean RUNTIME=lua build drops QuickJS + the JS frontend
 # (HL_FRONTEND_JS unset), so the JS frontend is honestly unavailable. This recipe does its own
 # clean rebuild into an isolated binary (guards the #365 stale-build failure class) and asserts
@@ -1192,7 +1192,7 @@ e2e-agent-api: $(BUILDDIR)/hull
 e2e-compute: $(BUILDDIR)/hull
 	sh tests/e2e_compute.sh
 
-# Windowed fs.mmap({offset,length}) binding (mapped-spans checkpoint 3a, item A).
+# Windowed fs.mmap({offset,length}) binding (mapped-spans, item A).
 .PHONY: e2e-spans-mmap
 e2e-spans-mmap: $(BUILDDIR)/hull
 	sh tests/e2e_spans_mmap.sh

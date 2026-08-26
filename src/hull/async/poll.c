@@ -7,8 +7,8 @@
  * flat FD-watcher table, a pthread-pool, and a self-pipe used to
  * wake poll() from foreign threads. Same vtable shape, no Keel link.
  *
- * Used by HL_ENABLE_HTTP=0 (CLI) builds where Keel is unlinked
- * (Phase 3d-5 wires the actual selection); the rest of Hull doesn't
+ * Used by HL_ENABLE_HTTP=0 (CLI) builds where Keel is unlinked;
+ * the rest of Hull doesn't
  * notice the swap because all access already goes through
  * hl_async_backend().
  *
@@ -871,7 +871,7 @@ const HlAsyncBackend hl_async_backend_poll = {
  * Weak default: the Keel-free poll backend. The Keel event loop provides a
  * STRONG hl_async_backend() override (in async/keel.c) that wins whenever that
  * TU is linked. keel.c compiles into any HTTP build today; docs/keel_feature.md
- * (Phase 4) moves it into the composed http feature so a genuinely HTTP-free app
+ * moves it into the composed http feature so a genuinely HTTP-free app
  * links neither keel.c nor libkeel.a and this weak default stands — app.main /
  * compute.async / timers then run entirely on poll.
  *
@@ -901,7 +901,7 @@ const HlAsyncBackend *hl_async_backend(void)
  * or on the Keel-less app-build base (HL_KEEL_FEATURE=1), where net/keel.c (the
  * strong, Keel-referencing HlNetBackend) is dropped from the base and composes
  * back in the whole-archived http feature. WEAK so that composed strong def wins
- * (docs/keel_feature.md, Phase 4.2b). The call sites are gated by `if (active_conn)`
+ * (docs/keel_feature.md). The call sites are gated by `if (active_conn)`
  * / `if (!ctx->detached)`, which never fire without a server, so returning -1 /
  * no-op here is never reached by a genuine compute app. */
 #if !defined(HL_ENABLE_HTTP_SERVER) || defined(HL_KEEL_FEATURE)

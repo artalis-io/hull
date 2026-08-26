@@ -1,7 +1,7 @@
 /*
  * fs_resolve.h — descriptor-relative, virtual-root path resolver.
  *
- * Checkpoint 1 of the hull.fs design (docs/hull_fs_design.md). Replaces the
+ * Part of the hull.fs design (docs/hull_fs_design.md). Replaces the
  * realpath->check->open TOCTOU (docs §1.4a) with a resolution that opens a path
  * under a base directory FILE DESCRIPTOR, following in-sandbox symlinks but
  * confining every resolution to that root (virtual-root, RESOLVE_IN_ROOT
@@ -9,10 +9,10 @@
  * ".." clamps at the base, nothing escapes. There is no resolve-then-open window
  * because every step is relative to a held fd (or one openat2 syscall).
  *
- * This is checkpoint 1: it is BASE_DIR-anchored (the no-granular-grants case).
- * The compiled-entry authorization policy (SUBTREE/EXACT/CREATE) lands at
- * checkpoint 3; here the root is always base_dir, preserving today's
- * authorization model (base_dir confinement + kernel sandbox).
+ * The resolver is BASE_DIR-anchored (the no-granular-grants case). The
+ * compiled-entry authorization policy (SUBTREE/EXACT/CREATE) layers separately
+ * (fs_policy.h); here the root is always base_dir, preserving the base_dir
+ * confinement + kernel sandbox authorization model.
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */

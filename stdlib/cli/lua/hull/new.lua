@@ -126,11 +126,11 @@ end)
 ]]
 
 templates.lua_cli_test = [[-- CLI tests use test.run_main to synthesize argv/stdin/env and capture
--- the exit code + stdout/stderr. Available once Phase 2 test integration
+-- the exit code + stdout/stderr. Available once CLI test integration
 -- lands; for now invoke main directly via `hull run`.
 
 test("greets the named arg", function()
-    -- Phase 2 placeholder — full CLI test harness lands separately.
+    -- Placeholder — full CLI test harness lands separately.
     test.eq(1, 1)
 end)
 ]]
@@ -161,7 +161,7 @@ app.main(async (ctx) => {
 ]]
 
 templates.js_cli_test = [[// CLI tests use test.runMain to synthesize argv/stdin/env and capture
-// the exit code + stdout/stderr. Available once Phase 2 test integration
+// the exit code + stdout/stderr. Available once CLI test integration
 // lands; for now invoke main directly via `hull run`.
 
 test("greets the named arg", () => {

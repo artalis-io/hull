@@ -21,7 +21,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
-#include "hull/cap/fs_policy.h"   /* HlFsPolicy - path-authorization policy (checkpoint 3) */
+#include "hull/cap/fs_policy.h"   /* HlFsPolicy - path-authorization policy */
 
 /* Forward declaration */
 typedef struct HlAllocator HlAllocator;
@@ -33,7 +33,7 @@ typedef struct HlAllocator HlAllocator;
  * app's working directory. All paths are validated to resolve to a
  * descendant of `base_dir`.
  *
- * `policy` is the compiled path-authorization policy (checkpoint 3, sec. 6):
+ * `policy` is the compiled path-authorization policy (sec. 6):
  * read/mmap select from its READ set, write from its WRITE set, and the op opens
  * the residual under the selected entry's held anchor fd. When `policy` is NULL
  * the fs capability is DENIED (fail closed) - the config is only wired when the
@@ -129,15 +129,15 @@ int hl_cap_fs_exists(const HlFsConfig *cfg, const char *path,
 int hl_cap_fs_delete(const HlFsConfig *cfg, const char *path,
                      const char **err_msg);
 
-/* ── Metadata (stat) + enumeration (list): checkpoint 3, Slice C ─────── */
+/* ── Metadata (stat) + enumeration (list) ─────── */
 
 /**
  * @brief Node type in a stat / list result.
  *
  * Reported via `fstatat(..., AT_SYMLINK_NOFOLLOW)` - lstat semantics. A symlink is
  * #HL_FS_NODE_SYMLINK (its OWN type, NEVER followed), so a metadata op cannot alias
- * a symlink target. Ratified metadata contract for terminal symlinks (preserving
- * checkpoint-3 Slice A): an EXACT grant CANNOT name an existing symlink (the policy
+ * a symlink target. Ratified metadata contract for terminal symlinks: an EXACT
+ * grant CANNOT name an existing symlink (the policy
  * refuses it at compile), so a reported #HL_FS_NODE_SYMLINK is only ever reached
  * through a SUBTREE/PATTERN grant, or when an authorized regular/absent target was
  * REPLACED by a symlink after compile (TOCTOU) - and even then stat/list only

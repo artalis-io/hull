@@ -1510,7 +1510,7 @@ function metrics(opts) {
         out.latency = { waitMs: percentiles(waits), runMs: percentiles(runs) };
         out.throughput = { donePerSec: doneN / window, deadPerSec: deadN / window };
     }
-    // Durable-event log health (Phase 3): total log depth + per-subscription lag
+    // Durable-event log health: total log depth + per-subscription lag
     // (positions behind the log head = max id - cursor) and failure count.
     {
         const depth = db.query("SELECT COUNT(*) AS n, MAX(id) AS mx FROM _hull_job_events");
@@ -1652,7 +1652,7 @@ async function await_(id, opts) {
     }
 }
 
-// ── Durable execution: workflow-as-code (Phase 1a) ──────────────────────────
+// ── Durable execution: workflow-as-code ──────────────────────────
 // A durable workflow is a function fn(ctx) run as a job of the reserved type
 // "__wf:<name>". Each `await ctx.step(name, fn)` memoizes its result in
 // _hull_workflow_steps; if the workflow re-runs (crash or retry re-enters it from
@@ -1803,7 +1803,7 @@ function makeCtx(job, name) {
         input: job.data,
         trace: job.trace,   // trace-context propagation (observability design)
         _comps: comps,
-        // Deterministic primitives (Phase 2): a workflow body re-runs from the top
+        // Deterministic primitives: a workflow body re-runs from the top
         // on every resume, so reading the clock / RNG directly would differ each
         // replay and break memo-key matching. These memoize via the step store, so
         // now / random / uuid return the SAME value on every replay - the supported
@@ -2048,7 +2048,7 @@ function cancel(id) {
 
 /**
  * Read-only tail of the durable event log (jobs.init{events:true}), newest first
- * - for a dashboard or ad-hoc inspection. Phase 2 adds durable subscriptions
+ * - for a dashboard or ad-hoc inspection. Durable subscriptions
  * (jobs.subscribe) with at-least-once delivery + cursors.
  * @param {object} [opts] { since: <event id>, types: ["dead", ...], limit: 100 }
  * @returns {Array} of { id, ts, type, job_id, job_type, queue, data }
@@ -2074,7 +2074,7 @@ function events(opts) {
 }
 
 /**
- * Register a durable named subscription over the event log (Phase 2). `handler`
+ * Register a durable named subscription over the event log. `handler`
  * is called once per event, in id order, AT-LEAST-ONCE (a crash between a handler
  * succeeding and the cursor advancing re-delivers it) - so handlers must be
  * idempotent. The cursor is durable (survives restarts); the handler is
@@ -2117,7 +2117,7 @@ function unsubscribe(name) {
     return jobs;
 }
 
-// Synchronous drain seam (the Phase 2 testability keystone): lease the
+// Synchronous drain seam (the testability keystone): lease the
 // subscription, deliver new events in id order, advance the cursor, release the
 // lease. No timers/sleeps - work() drives it. Returns { delivered, cursor,
 // leased }. Test seams: opts.now (clock), opts.batch, opts.commitCursor (false =
@@ -2165,7 +2165,7 @@ function eventsDrain(name, opts) {
         try { sub.handler(e); lastOk = e.id; delivered += 1; }
         catch (err) { poison = e; poisonErr = err; break; }
     }
-    // Failure accounting + poison skip (Phase 3). `failures` counts consecutive
+    // Failure accounting + poison skip. `failures` counts consecutive
     // drains stalled on the SAME frontier event; making progress resets to a fresh
     // 1. Once it reaches maxFailures (opt-in), skip the poison: advance past it and
     // record a durable `subscription_skipped` event so it can't wedge the
@@ -2223,7 +2223,7 @@ function cleanup(opts) {
     db.exec("DELETE FROM _hull_job_attempts WHERE finished_ms < ?", [(time.now() - hr) * 1000]);
     // Durable event log: retained by age, but NEVER past an unconsumed event -
     // min(cursor) across subscriptions is the safe watermark. No subscriptions ->
-    // age only (the Phase 1 behavior).
+    // age only (the base behavior).
     const mc = db.query("SELECT MIN(cursor_id) AS m FROM _hull_job_subscriptions");
     const watermark = mc[0] ? mc[0].m : null;
     if (watermark === null || watermark === undefined) {

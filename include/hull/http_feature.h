@@ -4,9 +4,8 @@
  * Mirrors the tui feature seam (cap/tui.h): a weak no-op default lives in the
  * runtime-agnostic base (src/hull/cap/http_feature.c); a strong override that
  * registers the http/ws/sse/smtp modules lives on the HTTP side of the seam
- * (src/hull/runtime/{lua,js}/http_register.c). In Phase A those overrides ride
- * the runtime archive (behavior unchanged); Phase C relocates them into the
- * composed `http` feature, so a reduced base with no HTTP composed keeps the
+ * (src/hull/runtime/{lua,js}/http_register.c). The composed `http` feature
+ * supplies those overrides; a reduced base with no HTTP composed keeps the
  * weak no-op and never pulls the web bindings.
  *
  * Params are void* so this header pulls neither lua.h nor quickjs.h into base

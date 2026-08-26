@@ -29,7 +29,7 @@
 //   regex      : pattern (between the slashes); flags; raw = full lexeme.
 //   punctuator : value = the operator text.
 //
-// Comment shape (returned separately so Slice 3 attaches JSDoc without rescanning):
+// Comment shape (returned separately so JSDoc attaches without rescanning):
 //   { kind: "line" | "block" | "jsdoc", start, stop, raw, text }
 //
 // Regex-vs-division uses an acorn-style exprAllowed state machine + a context stack for

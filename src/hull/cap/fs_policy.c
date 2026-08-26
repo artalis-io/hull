@@ -1,12 +1,8 @@
 /*
- * fs_policy.c - compiled path-authorization policy for hull.fs (checkpoint 3,
- * Slice A). Parse manifest grants, compile them into two independent
- * authorization-entry sets by a descriptor-bound walk, and select deterministically
- * by most-specific match. See include/hull/cap/fs_policy.h and
- * docs/hull_fs_design.md sec. 6.
- *
- * This slice is the policy CORE: it does NOT wire into hl_cap_fs read/write/mmap
- * (Slice B) and does NOT add stat/list (Slice C).
+ * fs_policy.c - compiled path-authorization policy for hull.fs. Parse manifest
+ * grants, compile them into two independent authorization-entry sets by a
+ * descriptor-bound walk, and select deterministically by most-specific match.
+ * See include/hull/cap/fs_policy.h and docs/hull_fs_design.md sec. 6.
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */

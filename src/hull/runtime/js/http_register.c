@@ -6,8 +6,7 @@
  * sse/multipart request classes, so the core JS module registry
  * (js_modules.o) no longer references them directly. Compiled only when an
  * HTTP half is enabled; a pure-compute base compiles this to an empty TU and
- * the base weak no-op wins. Phase A: rides the js runtime archive; Phase C
- * moves it into the composed `http` feature.
+ * the base weak no-op wins. This composes into the `http` feature.
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */

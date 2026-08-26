@@ -5,7 +5,7 @@
  * resolves a composed backend by DSN scheme (hl_kv_backend_select), opens a
  * handle, and forwards the narrow op set through the HlKvBackend vtable, adding
  * capability checks (an op the backend lacks fails with "unsupported"). This is
- * also where the Phase 2c manifest host-allowlist validation is layered in.
+ * also where the manifest host-allowlist validation is layered in.
  *
  * Ownership of returned bytes follows the HlKvBackend contract: get() returns a
  * value BORROWED into the connection buffer, valid only until the next op on the

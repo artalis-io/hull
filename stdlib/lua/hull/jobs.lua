@@ -1634,7 +1634,7 @@ function jobs.metrics(opts)
         out.latency = { wait_ms = percentiles(waits), run_ms = percentiles(runs) }
         out.throughput = { done_per_sec = done_n / window, dead_per_sec = dead_n / window }
     end
-    -- Durable-event log health (Phase 3): total log depth + per-subscription lag
+    -- Durable-event log health: total log depth + per-subscription lag
     -- (positions behind the log head = max id - cursor) and failure count, so a
     -- stuck / lagging subscriber is visible. Present only when the log has data.
     local depth = db.query("SELECT COUNT(*) AS n, MAX(id) AS mx FROM _hull_job_events")
@@ -1777,7 +1777,7 @@ function jobs.await(id, opts)
     end
 end
 
--- ── Durable execution: workflow-as-code (Phase 1a) ──────────────────────────
+-- ── Durable execution: workflow-as-code ──────────────────────────
 -- A durable workflow is a normal function fn(ctx) run as a job of the reserved
 -- type "__wf:<name>". Each ctx.step(name, fn) memoizes its result in
 -- _hull_workflow_steps; if the workflow re-runs (a crash or a retry re-enters it
@@ -1939,7 +1939,7 @@ local function make_ctx(job, name)
         return run_sleep(job.id, sleep_n, seconds)
     end
     ctx.wait_signal = function(signal_name, opts) return run_wait_signal(job.id, signal_name, opts) end
-    -- Deterministic primitives (Phase 2). A workflow body re-runs from the top on
+    -- Deterministic primitives. A workflow body re-runs from the top on
     -- every resume; reading the clock / RNG directly would return a different
     -- value each replay and break memo-key matching. These memoize their value
     -- via the step store, so ctx.now / ctx.random / ctx.uuid return the SAME
@@ -2201,7 +2201,7 @@ function jobs.cancel(id)
 end
 
 --- Read-only tail of the durable event log (jobs.init{events=true}), newest
--- first - for a dashboard or ad-hoc inspection. Phase 2 adds durable
+-- first - for a dashboard or ad-hoc inspection. Durable
 -- subscriptions (jobs.subscribe) with at-least-once delivery + cursors.
 -- @tparam[opt] table opts { since = <event id>, types = {"dead", ...}, limit = 100 }
 -- @treturn table array of { id, ts, type, job_id, job_type, queue, data }
@@ -2227,7 +2227,7 @@ function jobs.events(opts)
     return rows or {}
 end
 
---- Register a durable named subscription over the event log (Phase 2). `handler`
+--- Register a durable named subscription over the event log. `handler`
 -- is called once per event, in id order, AT-LEAST-ONCE (a crash between a handler
 -- succeeding and the cursor advancing re-delivers it) - so handlers must be
 -- idempotent, the same contract as a job handler. The cursor is durable (survives
@@ -2274,7 +2274,7 @@ function jobs.unsubscribe(name)
     return jobs
 end
 
--- Synchronous drain seam (the Phase 2 testability keystone): lease the
+-- Synchronous drain seam (the testability keystone): lease the
 -- subscription, deliver new events in id order, advance the cursor, release the
 -- lease. No timers/sleeps - jobs.work drives it. Returns { delivered, cursor,
 -- leased }. Test seams: opts.now (clock), opts.batch, opts.commit_cursor (false =
@@ -2393,7 +2393,7 @@ function jobs.cleanup(opts)
     db.exec("DELETE FROM _hull_job_attempts WHERE finished_ms < ?", { (time.now() - hr) * 1000 })
     -- Durable event log: retained by age, but NEVER past an unconsumed event -
     -- min(cursor) across subscriptions is the safe watermark. No subscriptions ->
-    -- age only (the Phase 1 behavior).
+    -- age only (the base behavior).
     local mc = db.query("SELECT MIN(cursor_id) AS m FROM _hull_job_subscriptions")
     local watermark = mc[1] and mc[1].m
     if watermark == nil then

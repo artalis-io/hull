@@ -1,8 +1,7 @@
 /*
  * net/keel.c — HlNetBackend implementation backed by Keel.
  *
- * Phase 3d-2 deferred most of the HlNetBackend surface. This first
- * landing implements only the connection-bound async-op pair
+ * Implements the connection-bound async-op pair
  * (op_suspend / op_complete), which is enough to migrate every
  * existing kl_async_suspend / kl_async_complete caller off of Keel
  * symbols. The remaining vtable slots (server lifecycle, routing,

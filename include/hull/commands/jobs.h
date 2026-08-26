@@ -4,7 +4,7 @@
  *
  * Today the only subcommand is `worker`, which runs an app as a dedicated
  * job-worker process (its `app.main` drives `jobs.run_worker`). Ops
- * subcommands (dead / retry / cleanup) land with jobs Phase 5.
+ * subcommands (dead / retry / cleanup) are planned follow-ups.
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */

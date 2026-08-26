@@ -1,5 +1,5 @@
 /*
- * frontend/js_session.c - the restricted QuickJS tooling runtime (Slice 1).
+ * frontend/js_session.c - the restricted QuickJS tooling runtime.
  * See include/hull/frontend/js_session.h + docs/javascript_source_frontend_design.md.
  *
  * The session context NEVER enables the QuickJS eval hook (JS_AddIntrinsicEval), so every
@@ -616,7 +616,7 @@ int hl_js_session_analyze(HlJsSession *s, const char *module, const char *method
     /* The boundary contract is VALIDATED JSON. JSON.stringify(undefined) (a method that
      * returns undefined / a function / a bare symbol) yields the JS value `undefined`, NOT
      * a string -- JS_ToCStringLen would then emit the bytes "undefined". Require a string
-     * and fail closed otherwise, so Slice 1 never knowingly emits non-JSON. */
+     * and fail closed otherwise, so it never knowingly emits non-JSON. */
     if (!JS_IsString(json)) {
         JS_FreeValue(ctx, json);
         return fail_indeterminate(out_json, out_len, "js.internal",

@@ -107,8 +107,8 @@ static int cli_parse_args(int argc, char **argv,
 
 /* Weak default: the Keel-free app.main runner. serve.c provides a STRONG
  * hull_serve() (the full KlServer serve loop) that wins whenever serve.o is
- * linked -- in the http feature, composed on needs_http (docs/keel_feature.md,
- * Phase 4.2). A compute app links only this weak runner and never touches Keel.
+ * linked -- in the http feature, composed on needs_http (docs/keel_feature.md).
+ * A compute app links only this weak runner and never touches Keel.
  * hull_serve is the ONLY external symbol serve.c and serve_cli.c share, so the
  * weak/strong pick is unambiguous. Byte-identical today (only one of serve.o /
  * serve_cli.o is built per config; a lone weak def resolves like a strong one). */
@@ -263,7 +263,7 @@ int hull_serve(int argc, char **argv)
     /* Wire per-capability configs from the manifest. serve.c does this in
      * `wire_caps` for the server build; in CLI mode we do the same dance inline
      * for env allowlist + http hosts/TLS below. The FS capability (fs.read/write
-     * grants -> the compiled authorization policy, checkpoint 3) is already wired
+     * grants -> the compiled authorization policy) is already wired
      * onto rt->fs_cfg by hl_app_context_load, so we do NOT overwrite it here (a
      * base_dir-only HlFsConfig would clobber the policy and deny every op). */
 
@@ -286,7 +286,7 @@ int hull_serve(int argc, char **argv)
      * which lives in libkeel.a: routing the base app.main runner through Hull's
      * own allocator (hl_alloc_kl references only the KlAllocator *type*, no kl_*
      * symbol) keeps serve_cli.o Keel-free, the prerequisite for a Keel-less base
-     * (docs/keel_feature.md, Phase 4.2). http_alloc must outlive tls_ctx; both are
+     * (docs/keel_feature.md). http_alloc must outlive tls_ctx; both are
      * function-scope and live for the whole app.main run. */
     HlAllocator http_alloc;
     hl_alloc_init(&http_alloc, 0);

@@ -1,4 +1,4 @@
-# mk/libhull.mk - libhull: the no-runtime embedding library (Phase L-1/L-2).
+# mk/libhull.mk - libhull: the no-runtime embedding library.
 #
 # libhull.a is the runtime-agnostic hardened core as a static archive for a
 # native host to embed (no Lua/JS) + the C/Rust/Zig reference embedders
@@ -8,7 +8,7 @@
 # the objects are built by the compile pattern rules below (rules are
 # position-independent). Included at the original position.
 
-# ── libhull: no-runtime embedding library (Phase L-1/L-2) ────────────
+# ── libhull: no-runtime embedding library ────────────
 # The runtime-agnostic hardened core as a static archive, for a native
 # host (C/Rust/Zig) that owns main() and drives the two-phase sandbox +
 # the capability layer (no Lua/JS runtime, no app.main lifecycle). The

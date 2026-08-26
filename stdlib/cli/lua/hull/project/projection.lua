@@ -2,7 +2,7 @@
 -- hull.project.projection — the ONE public wire-schema projection of a ProjectDiscovery.
 --
 -- Side-effect-free (requiring this module runs NO CLI): both `hull agent inspect`
--- (standalone) and, in Slice 3, `hull dev`'s discovery.json publication call M.project so
+-- (standalone) and `hull dev`'s discovery.json publication call M.project so
 -- there is a SINGLE definition of the serialized shape. It copies only named public
 -- fields and DROPS every generation-internal value -- the per-declaration opaque `handle`,
 -- the internal `_by_source` and `_handles` tables, and the `by_id` decl map (its ids are

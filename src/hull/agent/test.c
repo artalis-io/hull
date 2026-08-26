@@ -154,4 +154,4 @@ int hl_agent_test(const char *app_dir, ShJsonBuf *out)
     return rc;
 }
 
-/* ── Phase 2: hl_agent_context ─────────────────────────────────────── */
+/* ── hl_agent_context ─────────────────────────────────────── */

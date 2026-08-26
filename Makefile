@@ -289,7 +289,7 @@ endif
 # HL_ENABLE_VALKEY=1 compiles the Valkey/Redis KV backend (cap/respwire.c +
 # cap/valkey_conn.c + cap/valkey.c) INTO the base and self-registers it via the
 # strong hl_kv_feature_backends hook. Production composition is --with=valkey
-# (Phase 3); this flag is the compiled-in dev/test path. rediss:// TLS needs the
+# this flag is the compiled-in dev/test path. rediss:// TLS needs the
 # shared TLS client (HL_LINK_TLS), pulled below.
 ifeq ($(HL_ENABLE_VALKEY),1)
 CFLAGS += -DHL_ENABLE_VALKEY
@@ -301,7 +301,7 @@ endif
 # back-compat check above already read the caller's HL_ENABLE_DB=0 intent.
 #
 # Exception: HL_SQLITE_FEATURE=1 is exactly the "DB core, backend composed" case
-# (docs/sqlite_feature.md, Phase B). No backend is compiled into the base, but
+# (docs/sqlite_feature.md). No backend is compiled into the base, but
 # the umbrella stays ON so the vtable + selector + generic db.* caps + the weak
 # hl_db_feature_backends hook remain; the backend arrives from the composed
 # libhull_feature-sqlite.a. This is NOT the broken half-build the override guards
@@ -319,8 +319,8 @@ CFLAGS += -DHL_ENABLE_DB
 endif
 
 # HL_ENABLE_POSTGRES=1 links the pure-C wire client (cap/pgwire.c +
-# cap/pg_conn.c + cap/db_postgres.c). Phase 2 is plaintext (trust /
-# cleartext auth); TLS + SCRAM (Phase 3) will additionally require mbedTLS,
+# cap/pg_conn.c + cap/db_postgres.c). Plaintext (trust /
+# cleartext auth); TLS + SCRAM additionally require mbedTLS,
 # which is only linked today when an HTTP half is on. See
 # docs/postgres_backend_design.md.
 
@@ -670,7 +670,7 @@ endif
 
 ifeq ($(HL_TUI_TOOLCHAIN),1)
 # The cap core lives in libhull_feature-tui.a; the per-runtime bridges are separate
-# archives (issue #114, Phase D). Force-load the cap core + ONLY the per-runtime
+# archives (issue #114). Force-load the cap core + ONLY the per-runtime
 # bridge(s) whose VM this build actually links (the js bridge references QuickJS, so
 # a lua-only hull that omits QuickJS must NOT force-load it -- it would not link).
 # Mirrors the runtime VM selection (RUNTIME=all links both; lua/js link one).
@@ -850,7 +850,7 @@ ifneq ($(HL_ENABLE_SQLITE),1)
       $(CAP_SRCS))
 endif
 ifneq ($(HL_ENABLE_POSTGRES),1)
-  # PostgreSQL wire backend: codec + connection + (Phase 2.4) the vtable.
+  # PostgreSQL wire backend: codec + connection + the vtable.
   CAP_SRCS := $(filter-out \
       $(SRCDIR)/hull/cap/db_postgres.c \
       $(SRCDIR)/hull/cap/pg_conn.c \
@@ -1134,7 +1134,7 @@ EMBED_OBJ        := $(BUILDDIR)/embed.o
 #                  half is compiled in.
 ASYNC_BACKEND_SRCS := $(wildcard $(SRCDIR)/hull/async/*.c)
 # Drop the Keel event-loop backend (async/keel.c) from the base when HTTP is off
-# OR when building the Keel-less app-build base (HL_KEEL_FEATURE=1, Phase 4.2b):
+# OR when building the Keel-less app-build base (HL_KEEL_FEATURE=1):
 # the base keeps only the weak poll backend, and async/keel.c (the strong
 # hl_async_backend override) composes back in the whole-archived http feature.
 ifneq ($(filter 1,$(if $(filter 0,$(HL_ENABLE_HTTP_ANY)),1,) $(HL_KEEL_FEATURE)),)
@@ -1324,7 +1324,7 @@ ifeq ($(HL_ENABLE_DB),0)
 endif
 ifneq ($(HL_ENABLE_SQLITE),1)
   # SQLite-only agent introspection (raw sqlite3 API): drop from the base and
-  # ship in libhull_feature-sqlite.a (docs/sqlite_feature.md, Phase B). The base
+  # ship in libhull_feature-sqlite.a (docs/sqlite_feature.md). The base
   # keeps agent/db_stub.c's weak entry points (A.2). Covers the postgres/mysql
   # base builds too, where these compiled to empty TUs before.
   AGENT_LIB_SRCS := $(filter-out \
@@ -1360,7 +1360,7 @@ else
 AGENT_API_OBJ  := $(BUILDDIR)/agent_api.o
 SERVE_OBJ      := $(BUILDDIR)/serve.o
 endif
-# HL_KEEL_FEATURE=1 (docs/keel_feature.md, Phase 4.2b): the Keel-less app-build
+# HL_KEEL_FEATURE=1 (docs/keel_feature.md): the Keel-less app-build
 # base. Even at HTTP_SERVER=1 it uses the Keel-free serve_cli.o app-entry (weak
 # hull_serve; compiles clean under HTTP_SERVER=1 via the a1/4.1/4.2a seams)
 # instead of serve.o (the KlServer loop, strong hull_serve), which composes back
@@ -1373,18 +1373,18 @@ endif
 MAIN_OBJ       := $(BUILDDIR)/main.o
 APP_RUNNER_OBJ := $(BUILDDIR)/app_runner.o
 ENTRY_OBJ      := $(BUILDDIR)/entry.o
-# Weak no-op defaults for the per-runtime web bindings (issue #114, Phase C).
+# Weak no-op defaults for the per-runtime web bindings (issue #114).
 # The web bindings live in libhull_feature-http-<rt>.a; the runtime-less base
 # carries these weak stubs so an HTTP-free composed app links (the strong defs
 # override when the web archive is whole-archived). Compiles to an empty TU when
 # HTTP_SERVER is off (the whole body is guarded).
 HTTP_WEAKSTUB_OBJ := $(BUILDDIR)/http_weakstub.o
 
-# WASM-as-a-feature seam (docs/wasm_feature.md, Phase 0). Weak, fail-closed
+# WASM-as-a-feature seam (docs/wasm_feature.md). Weak, fail-closed
 # defaults for the eleven runtime-agnostic wasm cap symbols base objects
 # (db_udf / mod_buffer / mod_image / mod_gpu / app_context / serve) reference, so
 # a future compute-less base still links. Additive + dormant today: the strong
-# cap_wasm* defs win while WAMR is still compiled in (the base flip is Phase 1).
+# cap_wasm* defs win while WAMR is still compiled in.
 WASM_WEAKSTUB_OBJ := $(BUILDDIR)/wasm_weakstub.o
 
 # IMAGE-as-a-feature seam (docs/image_feature.md). Weak, fail-closed defaults for
@@ -1553,7 +1553,7 @@ CONTEXT_XXD_HDRS := $(CONTEXT_HDRS)
 # `/static/hull/<module>/<file>` requests resolve here automatically.
 # Convention: stdlib widgets ship assets under their own subdirectory;
 # apps may override by writing the same path under their own static/.
-# Phase 0 ships no widget assets — discovery is wired and tested but
+# Ships no widget assets — discovery is wired and tested but
 # returns 0 entries until §1.5.g-1 lands.
 
 STDLIB_STATIC_FILES := $(shell find stdlib/static -type f \
@@ -1578,7 +1578,7 @@ STDLIB_STATIC_XXD_HDRS := $(STDLIB_STATIC_HDRS)
 # entries named `templates/hull/<module>/<file>`. The template engine
 # (stdlib/lua/hull/template.lua + JS sibling) falls back to the
 # platform VFS after an app-VFS miss; app-side templates at the same
-# path win. Phase 0 ships no widget templates.
+# path win. Ships no widget templates.
 
 STDLIB_TPL_FILES := $(shell find stdlib/templates -name '*.html' \
     -not -name '.gitkeep' 2>/dev/null)
@@ -2116,7 +2116,7 @@ else
   PLATFORM_MANIFEST_OBJ  := $(BUILDDIR)/manifest.o       # runtime-agnostic
   PLATFORM_RUNTIME_EXTRA :=
   # HTTP core caps move to libhull_feature-http.a; the wasm caps move to
-  # libhull_feature-wasm.a (docs/wasm_feature.md, Phase 1); the image codec caps
+  # libhull_feature-wasm.a (docs/wasm_feature.md); the image codec caps
   # move to libhull_feature-image.a (docs/image_feature.md). All compose back at
   # `hull build`; the base keeps the weak stubs (http/wasm/image_weakstub).
   PLATFORM_CAP_OBJS      := $(filter-out $(FEATURE_HTTP_OBJS) $(FEATURE_WASM_OBJS) $(FEATURE_IMAGE_OBJS) $(FEATURE_TLS_CAP_OBJS),$(CAP_OBJS))
@@ -2190,7 +2190,7 @@ endif
 platform: $(PLATFORM_LIB)
 
 # ── Build flavors are now build.lua PRESETS, not pre-built platform libs ──
-# `pure-compute` (the only non-full flavor) became a preset in Phase 4.3
+# `pure-compute` (the only non-full flavor) is a preset
 # (docs/keel_feature.md): it builds on the DEFAULT composable base -- which drops
 # HTTP/TLS/Keel and composes each back per app -- and only validates that the app
 # declares no HTTP/TLS. A compute app on that base already links zero
@@ -2199,7 +2199,7 @@ platform: $(PLATFORM_LIB)
 # app-build bases below are the composable-base sub-builds, not user-facing
 # flavors.
 
-# ── SQLite-less app-build base (Phase D, HL_APP_BASE_SQLITELESS=1) ──────
+# ── SQLite-less app-build base (HL_APP_BASE_SQLITELESS=1) ──────
 # The platform lib the distributed hull embeds as the DEFAULT app-build base.
 # Built in a dedicated object dir at HL_SQLITE_FEATURE=1 (SQLite dropped, DB core
 # intact) so it never clobbers the main sqlite-full build or build/hull. The
@@ -2248,7 +2248,7 @@ platform-tlsless: $(TLSLESS_PLATFORM_LIB)
 		echo "FAIL: TLS-less base defines mbedtls_ssl_handshake"; exit 1; fi
 	@echo "ok  TLS-less base carries no mbedTLS (a2 base-drop verified)"
 
-# ── Keel-less app-build base (Phase 4.2b, HL_KEEL_FEATURE=1) ────────────
+# ── Keel-less app-build base (HL_KEEL_FEATURE=1) ────────────
 # The event-loop half of the composable base: serve.o (KlServer loop) +
 # async/keel.c (Keel event loop) + net/keel.c (Keel net backend) leave the base
 # object set, replaced by the Keel-free serve_cli.o entry + the weak poll backend
@@ -2353,7 +2353,7 @@ include mk/features/keel.mk
 
 # Per-runtime SQLite UDF bridges (mod_db_udf). Tiny (one object each); the sole
 # per-runtime sqlite3_* consumer, split out of mod_db so the runtime archive is
-# SQLite-free (Phase C.2b, docs/sqlite_feature.md). Embedded in hull + composed
+# SQLite-free (docs/sqlite_feature.md). Embedded in hull + composed
 # for the app's runtime whenever the app uses a udf-capable DB. Force
 # -DHL_ENABLE_SQLITE so the bridge carries the bindings even on a SQLite-less
 # feature base (HL_SQLITE_FEATURE=1), resolving sqlite3_* from the composed
@@ -2430,7 +2430,7 @@ else
                           $(IMG_FEATURE_JS)
 endif
   # HTTP + WASM + IMAGE core feature archives (runtime-agnostic), composed for
-  # every full-flavor app (docs/wasm_feature.md, Phase 1 composes wasm always).
+  # every full-flavor app (docs/wasm_feature.md; wasm always composes).
   # IMG_FEATURE_CORE is empty on an image-less base (HL_ENABLE_IMAGE=0).
   RUNTIME_FEATURE_LIBS += $(BUILDDIR)/libhull_feature-http.a $(BUILDDIR)/libhull_feature-wasm.a \
                           $(IMG_FEATURE_CORE)
@@ -2462,7 +2462,7 @@ platform-cosmo:
 	echo "cosmocc" > $(BUILDDIR)/platform_cc
 	rm -rf $(COSMO_STAGE)
 
-# (Per-flavor cosmo platform libs removed in Phase 4.3: pure-compute is a
+# (Per-flavor cosmo platform libs removed: pure-compute is a
 # build.lua preset on the default composable base, not a pre-built flavor lib.)
 
 # ── wamrc AOT compiler ──────────────────────────────────────────────
@@ -2530,7 +2530,7 @@ $(BUILD_ASSET_OBJ): $(EMBEDDED_PLATFORM_H) $(EMBEDDED_TEMPLATES_H)
 
 else ifneq ($(EMBED_PLATFORM),)
 # Single-arch embedding (existing behavior). The app-build base is the
-# sqlite-full platform lib by default; HL_APP_BASE_SQLITELESS=1 (Phase D) swaps
+# sqlite-full platform lib by default; HL_APP_BASE_SQLITELESS=1 swaps
 # in the SQLite-less sub-build so produced apps drop SQLite. Either way the hull
 # binary itself stays sqlite-full (it links its own objects, not this archive).
 # The embedded app-build base: full, or a sub-build with composable subsystems
@@ -2557,7 +2557,7 @@ $(EMBEDDED_TEMPLATES_H): templates/app_main.c templates/entry.h | $(BUILDDIR)
 
 
 
-# Embed the per-runtime tui bridges too (issue #114, Phase D). The tui cap core
+# Embed the per-runtime tui bridges too (issue #114). The tui cap core
 # stays the single installable feature asset; a full-flavor `--with=tui` app
 # composes the cap core (installed/local) + its runtime's bridge (embedded here),
 # so `hull feature install tui` still fetches one archive.
@@ -2612,12 +2612,12 @@ $(BUILDDIR)/cap_%.o: $(SRCDIR)/hull/cap/%.c | $(BUILDDIR)
 $(BUILDDIR)/cmd_%.o: $(SRCDIR)/hull/commands/%.c | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
 
-# Async backend implementations (Phase 3d-2). Future net/ + http_client/
+# Async backend implementations. Future net/ + http_client/
 # subdirs will get their own pattern rules alongside this one.
 $(BUILDDIR)/async_%.o: $(SRCDIR)/hull/async/%.c | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
 
-# Net backend implementations (Phase 3d-2 deferred slice)
+# Net backend implementations
 $(BUILDDIR)/net_%.o: $(SRCDIR)/hull/net/%.c | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
 
@@ -2896,7 +2896,7 @@ $(BUILDDIR)/serve.o: $(SRCDIR)/hull/serve.c | $(BUILDDIR)
 $(APP_RUNNER_OBJ): $(SRCDIR)/hull/app_runner.c | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
 
-# Weak no-op defaults for the per-runtime web bindings (issue #114, Phase C).
+# Weak no-op defaults for the per-runtime web bindings (issue #114).
 $(HTTP_WEAKSTUB_OBJ): $(SRCDIR)/hull/http_weakstub.c | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
 

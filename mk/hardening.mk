@@ -2,7 +2,7 @@
 #
 # The whole ifndef-COSMO hardening block: the hl_have_cflag / hl_have_ldflag
 # parse-time probes + HARDEN_CFLAGS / HARDEN_LDFLAGS applied to CFLAGS/LDFLAGS.
-# Extracted verbatim from the root Makefile (build modularization, Phase 1),
+# Extracted verbatim from the root Makefile (build modularization),
 # included at the original position so CFLAGS/LDFLAGS accumulation order holds
 # (CFLAGS := / LDFLAGS := are set just above; the block adds to them). Self-
 # contained: hl_have_* + comma are defined and used only inside this block.

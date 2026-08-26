@@ -1,5 +1,5 @@
 /*
- * hull/frontend/js_session.h - the RESTRICTED QuickJS tooling runtime (Slice 1).
+ * hull/frontend/js_session.h - the RESTRICTED QuickJS tooling runtime.
  *
  * A self-contained QuickJS runtime + context that runs ONLY trusted, bundled Hull tooling
  * JavaScript (the JS source frontend) to PARSE / ANALYZE application source passed as DATA.
@@ -22,9 +22,9 @@
  * C OWNS this runtime (creation, invocation, limits, transport validation, teardown). The
  * Lua project layer never obtains or operates it (design: docs/javascript_source_frontend_
  * design.md, ratified). The session loads bundled `hull:*` tooling modules from the cli-js
- * registry ONLY. Slice 1 proves the runtime + byte transport + module loading + the full
+ * registry ONLY. It provides the runtime + byte transport + module loading + the full
  * limit contract + exception->diagnostic conversion + lifecycle with a trivial `hull:probe`
- * entry; Slice 2+ add the real lexer/parser.
+ * entry; the real lexer/parser build on it.
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
