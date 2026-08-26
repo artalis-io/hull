@@ -18,12 +18,15 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <ftw.h>
+#include <setjmp.h>
 #include <signal.h>
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
+#include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/un.h>
 
 static char base[256];
 
@@ -576,6 +579,205 @@ UTEST(fs_resolve, parent_refuses_symlink_intermediate)
     close(pr.parent_fd);
 
     close(root); teardown();
+}
+
+/* ── special-file leaf rejection (O_NONBLOCK + regular-file type gate, §5a) ─────
+ * A terminal READ/WRITE leaf that is a FIFO, socket, character/block device, or
+ * directory is rejected with the single stable token "not_a_regular_file" and NEVER
+ * blocks the open (O_NONBLOCK). Each case runs under a watchdog (proving no hang),
+ * on BOTH the openat2 fast path and the forced-manual walk (Linux; macOS/cosmo are
+ * always manual), and asserts no fd is leaked on the failure path. */
+
+/* Lowest free fd number: a proxy for "no descriptor leaked" - stable across a
+ * failing resolve iff every fd the resolver opened was closed. */
+static int probe_lowest_fd(void)
+{
+    int fd = open("/dev/null", O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return -1;
+    close(fd);
+    return fd;
+}
+
+/* Watchdog: run hl_fs_open_at under a wall-clock alarm. If the open ever BLOCKS
+ * (a regression - a special-file leaf without O_NONBLOCK), SIGALRM fires and
+ * siglongjmps back with *hung=1 so the test fails loudly instead of hanging CI. */
+static sigjmp_buf g_wd_jmp;
+static void wd_alarm(int s) { (void)s; siglongjmp(g_wd_jmp, 1); }
+static int open_watchdog(int root, const char *rel, HlFsOpenMode mode,
+                         mode_t cm, const char **err, int *hung)
+{
+    struct sigaction sa, old;
+    memset(&sa, 0, sizeof sa); sa.sa_handler = wd_alarm;
+    sigaction(SIGALRM, &sa, &old);
+    *hung = 0;
+    int fd = -1;
+    if (sigsetjmp(g_wd_jmp, 1) == 0) {
+        alarm(5);
+        fd = hl_fs_open_at(root, rel, mode, cm, err);
+        alarm(0);
+    } else {
+        *hung = 1;
+    }
+    sigaction(SIGALRM, &old, NULL);
+    return fd;
+}
+
+/* Check that resolving `rel` in `mode` is rejected "not_a_regular_file" without
+ * blocking and without leaking an fd, on BOTH implementations. Returns NULL on
+ * success, or a static message naming the first failure (utest ASSERT_* macros
+ * only work inside a UTEST body, so a plain helper reports via a message the caller
+ * asserts on). */
+static const char *check_special_rejected(const char *rel, HlFsOpenMode mode, mode_t cm)
+{
+    for (int m = 0; m < 2; m++) {
+        if (m) setenv("HL_FS_FORCE_MANUAL", "1", 1); else unsetenv("HL_FS_FORCE_MANUAL");
+        const char *err = NULL;
+        int root = hl_fs_open_base(base, &err);
+        if (root < 0) { unsetenv("HL_FS_FORCE_MANUAL"); return "open_base failed"; }
+        int before = probe_lowest_fd();
+        int hung = 0;
+        err = NULL;
+        int fd = open_watchdog(root, rel, mode, cm, &err, &hung);
+        int after = probe_lowest_fd();
+        close(root);
+        unsetenv("HL_FS_FORCE_MANUAL");
+        if (hung) return "resolve BLOCKED on a special-file leaf (hang)";
+        if (fd != -1) { close(fd); return "expected rejection, got an open fd"; }
+        if (!err || strcmp(err, "not_a_regular_file") != 0)
+            return "wrong error token (expected not_a_regular_file)";
+        if (before != after) return "fd leaked on the failure path";
+    }
+    return NULL;
+}
+/* Surface the helper's message through a utest assertion: NULL -> "OK" == "OK". */
+#define ASSERT_REJECTED(r) do { const char *rr_ = (r); ASSERT_STREQ("OK", rr_ ? rr_ : "OK"); } while (0)
+
+#if !defined(__COSMOPOLITAN__)
+static int mkfifo_host(const char *rel)
+{ char p[512]; snprintf(p, sizeof p, "%s/%s", base, rel); unlink(p); return mkfifo(p, 0644); }
+
+UTEST(fs_resolve, read_fifo_rejected_no_hang)
+{
+    setup();
+    ASSERT_EQ(0, mkfifo_host("pipe"));                   /* no writer: O_RDONLY would block */
+    ASSERT_REJECTED(check_special_rejected("pipe", HL_FS_OPEN_READ, 0));
+    teardown();
+}
+
+UTEST(fs_resolve, write_fifo_rejected_no_hang)
+{
+    setup();
+    ASSERT_EQ(0, mkfifo_host("pipe"));                   /* no reader: O_WRONLY would block */
+    ASSERT_REJECTED(check_special_rejected("pipe", HL_FS_OPEN_WRITE, 0644));
+    teardown();
+}
+#endif /* !__COSMOPOLITAN__ */
+
+/* AF_UNIX socket special file: open() fails ENXIO (Linux) / EOPNOTSUPP (macOS),
+ * mapped to the same token as the fstat-gated types. */
+static int mksocket_host(const char *rel)
+{
+    char p[512]; snprintf(p, sizeof p, "%s/%s", base, rel);
+    int s = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (s < 0) return -1;
+    struct sockaddr_un un;
+    memset(&un, 0, sizeof un); un.sun_family = AF_UNIX;
+    snprintf(un.sun_path, sizeof un.sun_path, "%s", p);
+    unlink(p);
+    int r = bind(s, (struct sockaddr *)&un, sizeof un);  /* creates the fs node */
+    close(s);                                            /* node persists after close */
+    return r;
+}
+
+UTEST(fs_resolve, read_socket_rejected)
+{
+    setup();
+    if (mksocket_host("sk") != 0) { teardown(); return; } /* skip if unsupported */
+    ASSERT_REJECTED(check_special_rejected("sk", HL_FS_OPEN_READ, 0));
+    teardown();
+}
+
+UTEST(fs_resolve, write_socket_rejected)
+{
+    setup();
+    if (mksocket_host("sk") != 0) { teardown(); return; }
+    ASSERT_REJECTED(check_special_rejected("sk", HL_FS_OPEN_WRITE, 0644));
+    teardown();
+}
+
+/* A directory as a READ/WRITE LEAF is not a regular file -> same token. The READ
+ * case also covers the residual-"." path (reading a directory that IS the resolved
+ * root); WRITE-to-an-existing-directory-leaf surfaces EISDIR at open(). */
+UTEST(fs_resolve, read_directory_leaf_rejected)
+{
+    setup();
+    mkdirp_host("d");
+    ASSERT_REJECTED(check_special_rejected("d", HL_FS_OPEN_READ, 0));
+    teardown();
+}
+
+UTEST(fs_resolve, read_dot_directory_rejected)
+{
+    setup();
+    for (int m = 0; m < 2; m++) {
+        if (m) setenv("HL_FS_FORCE_MANUAL", "1", 1); else unsetenv("HL_FS_FORCE_MANUAL");
+        const char *err = NULL;
+        int root = hl_fs_open_base(base, &err); ASSERT_GE(root, 0);
+        int before = probe_lowest_fd(), hung = 0;
+        err = NULL;
+        int fd = open_watchdog(root, ".", HL_FS_OPEN_READ, 0, &err, &hung);
+        ASSERT_FALSE(hung);
+        ASSERT_EQ(-1, fd);
+        ASSERT_STREQ("not_a_regular_file", err);         /* reading the root dir as a file */
+        ASSERT_EQ(before, probe_lowest_fd());
+        close(root);
+    }
+    unsetenv("HL_FS_FORCE_MANUAL");
+    teardown();
+}
+
+UTEST(fs_resolve, write_directory_leaf_rejected)
+{
+    setup();
+    mkdirp_host("d");
+    ASSERT_REJECTED(check_special_rejected("d", HL_FS_OPEN_WRITE, 0644));
+    teardown();
+}
+
+/* Character device where creatable (needs privilege): the same S_ISREG gate. Skips
+ * cleanly when a device node cannot be made without privilege. */
+#if !defined(__COSMOPOLITAN__)
+UTEST(fs_resolve, read_chardev_rejected_if_creatable)
+{
+    setup();
+    char p[512]; snprintf(p, sizeof p, "%s/cdev", base);
+    if (mknod(p, S_IFCHR | 0644, 0) != 0) { teardown(); return; } /* skip w/o privilege */
+    ASSERT_REJECTED(check_special_rejected("cdev", HL_FS_OPEN_READ, 0));
+    teardown();
+}
+#endif
+
+/* Regression: a REGULAR leaf still resolves, and the returned fd has O_NONBLOCK
+ * CLEARED (ordinary blocking read/write semantics), on both implementations. */
+UTEST(fs_resolve, regular_leaf_fd_is_blocking)
+{
+    setup();
+    wfile("r.txt", "data");
+    for (int m = 0; m < 2; m++) {
+        if (m) setenv("HL_FS_FORCE_MANUAL", "1", 1); else unsetenv("HL_FS_FORCE_MANUAL");
+        const char *err = NULL;
+        int root = hl_fs_open_base(base, &err); ASSERT_GE(root, 0);
+        err = NULL;
+        int fd = hl_fs_open_at(root, "r.txt", HL_FS_OPEN_READ, 0, &err);
+        ASSERT_GE(fd, 0);
+        int fl = fcntl(fd, F_GETFL);
+        ASSERT_GE(fl, 0);
+        ASSERT_EQ(0, fl & O_NONBLOCK);                   /* cleared on the accepted fd */
+        char b[16]; ASSERT_STREQ("data", slurp(fd, b, sizeof b));
+        close(fd); close(root);
+    }
+    unsetenv("HL_FS_FORCE_MANUAL");
+    teardown();
 }
 
 UTEST_MAIN();

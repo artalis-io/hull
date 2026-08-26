@@ -44,6 +44,45 @@ static void map_errno(int e, const char **err)
     }
 }
 
+/* An open() errno from a terminal READ/WRITE leaf that means the target is a
+ * non-regular special file (or, under WRITE, a directory) rather than a transient
+ * failure: a socket special file fails ENXIO (Linux) / EOPNOTSUPP (macOS), a FIFO
+ * opened for WRITE with no reader fails ENXIO, and a directory opened O_WRONLY
+ * fails EISDIR. These collapse to the single stable "not_a_regular_file" token so
+ * every special-file / directory rejection reads identically, whether it surfaces
+ * at open() (this helper) or at the post-open type gate (finalize_regular_leaf). */
+static int leaf_type_errno(int e)
+{
+    if (e == EISDIR || e == ENXIO) return 1;
+#ifdef EOPNOTSUPP
+    if (e == EOPNOTSUPP) return 1;
+#endif
+#if defined(ENOTSUP) && (!defined(EOPNOTSUPP) || ENOTSUP != EOPNOTSUPP)
+    if (e == ENOTSUP) return 1;
+#endif
+    return 0;
+}
+
+/* Type gate for a terminal READ/WRITE LEAF: accept ONLY a regular file. A FIFO,
+ * socket, character/block device, or directory is rejected with the single stable
+ * "not_a_regular_file" token. The leaf is opened O_NONBLOCK (so a special-file leaf
+ * can never BLOCK the open - a FIFO/device open returns immediately instead of
+ * waiting on a peer); O_NONBLOCK is then cleared on the accepted regular fd so the
+ * returned descriptor has ordinary blocking read/write semantics. On rejection or
+ * fstat failure the fd is closed and -1 returned with *err set. INTENTIONAL
+ * tightening: an authorized special-file leaf is no longer readable/writable/
+ * mmap-able (docs/hull_fs_design.md §5a). Applied to READ and WRITE only; DIR keeps
+ * its own S_ISDIR contract (a directory never blocks on open). */
+static int finalize_regular_leaf(int fd, const char **err)
+{
+    struct stat st;
+    if (fstat(fd, &st) != 0) { map_errno(errno, err); close(fd); return -1; }
+    if (!S_ISREG(st.st_mode)) { *err = "not_a_regular_file"; close(fd); return -1; }
+    int fl = fcntl(fd, F_GETFL);
+    if (fl >= 0) (void)fcntl(fd, F_SETFL, fl & ~O_NONBLOCK);
+    return fd;
+}
+
 /* ── caller-path lexical pre-check (docs §3/§5) ────────────────────────────────
  * Relative, no "..", and no TRAILING slash. The trailing-slash rejection is a
  * cross-platform PARITY guard: a directory-shaped path like "file/" must not open
@@ -139,6 +178,12 @@ static int try_openat2(int root_fd, const char *relpath, int flags,
     if (errno == ENOSYS || errno == EPERM /* seccomp may block it */)
         return -2;
     if (sympol == HL_FS_SYMLINK_REFUSE && errno == ELOOP) { *err = "symlink_denied"; return -1; }
+    /* A READ leaf (no O_DIRECTORY) that is a socket special file fails ENXIO here;
+     * map it to the same token the post-open type gate uses. O_DIRECTORY opens (DIR
+     * mode) keep their ENOTDIR-> not_a_directory mapping. */
+    if (!(flags & O_DIRECTORY) && leaf_type_errno(errno)) {
+        *err = "not_a_regular_file"; return -1;
+    }
     map_errno(errno, err);
     return -1;
 }
@@ -179,12 +224,21 @@ static int resolve_manual(int root_fd, const char *relpath, HlFsOpenMode mode,
     for (;;) {
         while (*cur == '/') cur++;
         if (*cur == '\0') {
-            /* Consumed everything without a terminal leaf (path was "." etc.).
-             * READ/DIR open the current directory; WRITE has no leaf to create. */
+            /* Consumed everything without a terminal leaf: the path IS a directory
+             * (a grant root reached via residual ".", or a path that clamped to root
+             * via ".."). DIR opens it. READ resolves to a DIRECTORY, which is not a
+             * regular file, so it is type-gated exactly like a special-file leaf and
+             * rejected "not_a_regular_file" (the O_NONBLOCK is harmless on a dir but
+             * kept for one uniform finalize path). WRITE has no leaf to create. */
             if (mode == HL_FS_OPEN_READ || mode == HL_FS_OPEN_DIR) {
-                int of = O_RDONLY | O_CLOEXEC | (mode == HL_FS_OPEN_DIR ? O_DIRECTORY : 0);
+                int of = O_RDONLY | O_CLOEXEC
+                         | (mode == HL_FS_OPEN_DIR ? O_DIRECTORY : O_NONBLOCK);
                 result_fd = openat(stack[depth - 1], ".", of);
                 if (result_fd < 0) { map_errno(errno, err); goto fail; }
+                if (mode == HL_FS_OPEN_READ) {
+                    result_fd = finalize_regular_leaf(result_fd, err);
+                    if (result_fd < 0) goto fail;   /* directory -> not_a_regular_file */
+                }
                 goto done;
             }
             *err = "invalid_path";
@@ -293,13 +347,24 @@ static int resolve_manual(int root_fd, const char *relpath, HlFsOpenMode mode,
             result_fd = fd;
             goto done;
         } else {
-            /* terminal component (READ / WRITE leaf) */
+            /* terminal component (READ / WRITE leaf). O_NONBLOCK guarantees a
+             * special-file leaf (FIFO / device / socket) can never BLOCK the open;
+             * the opened fd is then type-gated to a regular file
+             * (finalize_regular_leaf). WRITE keeps O_CREAT|O_TRUNC (creation +
+             * truncate) plus the contained mkdir-p already done for interior
+             * components. A symlink leaf still returns ELOOP (O_NOFOLLOW) and is
+             * handled by the symlink policy below, unchanged. */
             int flags = (mode == HL_FS_OPEN_READ)
-                          ? (O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
-                          : (O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW | O_CLOEXEC);
+                          ? (O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)
+                          : (O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC);
             int fd = openat(stack[depth - 1], comp, flags, cmode);
-            if (fd >= 0) { result_fd = fd; goto done; }
+            if (fd >= 0) {
+                result_fd = finalize_regular_leaf(fd, err);  /* closes fd + sets *err on reject */
+                if (result_fd < 0) goto fail;                /* *err already set */
+                goto done;
+            }
             if (errno == ELOOP || errno == EMLINK) goto symlink;
+            if (leaf_type_errno(errno)) { *err = "not_a_regular_file"; goto fail; }
             map_errno(errno, err);
             goto fail;
         }
@@ -371,9 +436,19 @@ int hl_fs_open_at_ex(int root_fd, const char *relpath, HlFsOpenMode mode,
      * walk (which does the contained mkdir-p). READ and DIR take the one-call fast
      * path, unless HL_FS_FORCE_MANUAL is set (parity testing). */
     if ((mode == HL_FS_OPEN_READ || mode == HL_FS_OPEN_DIR) && !force_manual()) {
-        int of = O_RDONLY | O_CLOEXEC | (mode == HL_FS_OPEN_DIR ? O_DIRECTORY : 0);
+        /* A READ leaf opens O_NONBLOCK so a special-file target can never block the
+         * open; it is then type-gated to a regular file. DIR keeps O_DIRECTORY (its
+         * own S_ISDIR contract; a directory open never blocks). */
+        int of = O_RDONLY | O_CLOEXEC
+                 | (mode == HL_FS_OPEN_DIR ? O_DIRECTORY : O_NONBLOCK);
         int fd = try_openat2(root_fd, relpath, of, sympol, 0, &e);
-        if (fd >= 0) return fd;
+        if (fd >= 0) {
+            if (mode == HL_FS_OPEN_READ) {
+                fd = finalize_regular_leaf(fd, &e);
+                if (fd < 0) { if (err) *err = e; return -1; }
+            }
+            return fd;
+        }
         if (fd == -1) { if (err) *err = e; return -1; }
         /* fd == -2: openat2 unavailable -> manual walk */
     }

@@ -342,6 +342,40 @@ documented here rather than hidden.
 symlink targets inside app trees + this migration guidance in the release notes.
 Affected surface is narrow: only symlinks whose STORED target string is absolute.
 
+## 5a. DECIDED: a READ/WRITE/MMAP leaf must be a REGULAR file
+
+`fs.read`, `fs.write`, and `fs.mmap` resolve to a terminal FILE leaf. The resolver
+opens that leaf **non-blocking** (`O_NONBLOCK`) and then **type-gates** it: only a
+regular file is accepted. A FIFO, socket, character/block device, or directory is
+rejected with the single stable token **`not_a_regular_file`**; the `O_NONBLOCK` is
+cleared on the accepted regular fd so ordinary blocking read/write semantics are
+preserved. (`HL_FS_OPEN_DIR`, used by `list` and to resolve a `SUBTREE` grant
+anchor, keeps its own `S_ISDIR` contract and is unaffected - a directory never
+blocks on open.)
+
+**Why.** A special-file leaf is both a correctness and an availability hazard.
+`open(O_RDONLY)` on a FIFO with no writer, or `open(O_WRONLY)` on a FIFO with no
+reader, **blocks indefinitely** - on Hull that would hang the event-loop thread (a
+self-DoS), and for a build plugin's declared inputs a stray `mkfifo` in a workspace
+would hang the whole pipeline. Character devices can carry open-time side effects,
+and reading a directory as a file is meaningless. The interior components of a path
+and the `DIR`-mode terminal were already classify-before-open protected against the
+FIFO hang; this extends the same guarantee to the READ/WRITE **leaf**, which was
+the one remaining path that could block. The two implementations (Linux `openat2`
+fast path and the portable manual walk) apply identical behavior.
+
+**Intentional tightening (migration note).** An authorized special-file leaf that
+was previously readable/writable is now rejected. In practice `fs.read`/`fs.write`
+targets are regular files; an app that legitimately needs to read a FIFO/device is
+out of scope for the sandboxed filesystem capability. The token surfaces to app
+code (Lua `nil, "not_a_regular_file"` / JS throw) exactly like the other stable
+resolver tokens. Enforcement lives in `src/hull/cap/fs_resolve.c`
+(`finalize_regular_leaf` + `leaf_type_errno`); covered by the special-file suite in
+`tests/hull/cap/test_fs_resolve.c` (FIFO/socket/device/directory under READ and
+WRITE, each under a no-hang watchdog, on both implementations, with fd-leak guards)
+and the concurrent regular<->special leaf-swap case in
+`tests/hull/cap/test_fs_resolve_parity.c`.
+
 ## 6. Two authorities: root confinement vs path authorization
 
 The audit and the earlier draft conflated these; they are separate and this

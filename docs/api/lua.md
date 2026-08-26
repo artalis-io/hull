@@ -421,6 +421,13 @@ and `..` are rejected. See [Filesystem grants](#filesystem-grants).
 creates missing parents + the file and returns `true` (or `nil, err`); `mmap`
 returns a read-only `MappedBuffer` (optionally a page-aligned window).
 
+The leaf **must be a regular file.** A FIFO, socket, character/block device, or
+directory target is rejected `nil, "not_a_regular_file"` and never blocks (a
+special-file `open` cannot hang the runtime). This is a deliberate confinement of
+the sandboxed filesystem capability to ordinary files; a non-regular leaf is not
+readable/writable/mmap-able. (`fs.stat` still reports such a node as `"other"` /
+`"symlink"` - only `read`/`write`/`mmap` require a regular file.)
+
 #### `fs.stat(path)`
 
 Return a metadata table, or `nil` when the path does not exist (so `fs.stat(p) ~=

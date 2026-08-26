@@ -23,6 +23,8 @@
 #include <fcntl.h>
 #include <ftw.h>
 #include <pthread.h>
+#include <setjmp.h>
+#include <signal.h>
 #include <stdatomic.h>
 #include <stdint.h>
 #include <string.h>
@@ -381,5 +383,105 @@ UTEST(fs_resolve_parity, component_swap_race_stays_contained)
     rm_tree(g_ext_dir);
     teardown();
 }
+
+/* ── leaf regular<->special swap: containment + no-hang under concurrent flip ───
+ * A LEAF "leaf" is flipped between a regular file and a FIFO by a background thread.
+ * Resolving it READ, repeatedly, through BOTH implementations, must ALWAYS resolve
+ * to a REGULAR fd, or fail "not_a_regular_file" (the FIFO), or "not_found" (the
+ * brief unlink gap) - never BLOCK (O_NONBLOCK), never hand back a non-regular fd,
+ * never a different token - and leak no fd. This is the concurrent analogue of the
+ * single-shot special-file rejection: the regular<->special TOCTOU can never turn a
+ * regular open into a blocking / mistyped special-file open. */
+#if !defined(__COSMOPOLITAN__)
+static atomic_int g_leaf_stop;
+static char g_leaf_path[512];
+
+static void *leaf_swapper(void *arg)
+{
+    (void)arg;
+    unsigned seed = 0x5EEDu;
+    while (!atomic_load_explicit(&g_leaf_stop, memory_order_relaxed)) {
+        unlink(g_leaf_path);
+        if (lcg_next(&seed) & 1) {
+            int fd = open(g_leaf_path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+            if (fd >= 0) { ssize_t w = write(fd, "reg", 3); (void)w; close(fd); }
+        } else {
+            mkfifo(g_leaf_path, 0644);
+        }
+    }
+    return NULL;
+}
+
+/* per-call alarm watchdog: a blocked open (regression) trips SIGALRM -> siglongjmp. */
+static sigjmp_buf g_leaf_wd;
+static void leaf_wd_alarm(int s) { (void)s; siglongjmp(g_leaf_wd, 1); }
+
+UTEST(fs_resolve_parity, leaf_regular_special_swap_stays_contained)
+{
+    setup();
+    const char *err = NULL;
+    int root = hl_fs_open_base(base, &err);
+    ASSERT_GE(root, 0);
+    snprintf(g_leaf_path, sizeof g_leaf_path, "%s/leaf", base);
+
+    struct sigaction sa, old;
+    memset(&sa, 0, sizeof sa); sa.sa_handler = leaf_wd_alarm;
+    sigaction(SIGALRM, &sa, &old);
+
+    int fds_before = count_open_fds();
+    atomic_store(&g_leaf_stop, 0);
+    pthread_t th;
+    ASSERT_EQ(0, pthread_create(&th, NULL, leaf_swapper, NULL));
+
+    const int ITERS = 8000;
+    const long CAP_SEC = 60;
+    time_t start = time(NULL);
+    int reg = 0, rejected = 0, bad = 0, hung = 0, done = 0;
+    char firstbad[96] = {0};
+    for (int i = 0; i < ITERS && !done; i++) {
+        if (time(NULL) - start > CAP_SEC) break;
+        for (int manual = 0; manual < 2 && !done; manual++) {
+            const char *tok = NULL;
+            int fd = -1;
+            if (sigsetjmp(g_leaf_wd, 1) == 0) {
+                alarm(5);
+                fd = resolve_via(root, "leaf", HL_FS_OPEN_READ, manual, &tok);
+                alarm(0);
+            } else { hung = 1; done = 1; break; }
+            if (fd >= 0) {
+                struct stat st;                          /* MUST be a regular file */
+                if (fstat(fd, &st) == 0 && S_ISREG(st.st_mode)) reg++;
+                else { if (!firstbad[0]) snprintf(firstbad, sizeof firstbad,
+                            "opened a NON-regular fd (mode=%o)", (unsigned)st.st_mode);
+                       bad++; done = 1; }
+                close(fd);
+            } else if (tok && strcmp(tok, "not_a_regular_file") == 0) {
+                rejected++;                              /* the FIFO, correctly refused */
+            } else if (tok && strcmp(tok, "not_found") == 0) {
+                /* brief unlink gap - contained */
+            } else {
+                if (!firstbad[0]) snprintf(firstbad, sizeof firstbad, "tok=%.40s", tok ? tok : "?");
+                bad++; done = 1;
+            }
+        }
+    }
+    atomic_store(&g_leaf_stop, 1);
+    pthread_join(th, NULL);
+    alarm(0);
+    sigaction(SIGALRM, &old, NULL);
+
+    ASSERT_EQ_MSG(0, hung, "resolve BLOCKED on a FIFO leaf during the swap");
+    ASSERT_EQ_MSG(0, bad, firstbad);
+    ASSERT_GT(reg, 0);            /* the regular file resolved sometimes */
+    ASSERT_GT(rejected, 0);      /* the FIFO was rejected sometimes */
+
+    unlink(g_leaf_path);
+    int fds_after = count_open_fds();
+    char fdctx[64]; snprintf(fdctx, sizeof fdctx, "before=%d after=%d", fds_before, fds_after);
+    ASSERT_GE_MSG(fds_before, fds_after, fdctx);   /* no fd leaked */
+    close(root);
+    teardown();
+}
+#endif /* !__COSMOPOLITAN__ */
 
 UTEST_MAIN();
