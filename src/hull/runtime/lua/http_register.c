@@ -19,6 +19,12 @@
 
 #if defined(HL_ENABLE_HTTP_SERVER) || defined(HL_ENABLE_HTTP_CLIENT)
 
+/* Cosmo HTTP-bridge force-link anchor (0.13.1 PR#1) - see hull/http_feature.h.
+ * Co-resident with the strong hl_lua_register_http_modules so a produced cosmo
+ * app force-pulls the require-able HTTP modules over the weak http_feature.o
+ * no-op. */
+int hl_lua_http_register_anchor = 0;
+
 /* Local copy of the modules.c helper: requiref into _LOADED, drop the value so
  * the module is import-only (not a global). */
 static void register_native_module(lua_State *L, const char *name,

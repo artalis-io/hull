@@ -17,6 +17,12 @@
 
 #if defined(HL_ENABLE_HTTP_SERVER) || defined(HL_ENABLE_HTTP_CLIENT)
 
+/* Cosmo HTTP-bridge force-link anchor (0.13.1 PR#1) - see hull/http_feature.h.
+ * Co-resident with the strong hl_js_register_http_modules so a produced cosmo
+ * app force-pulls the require-able HTTP modules over the weak http_feature.o
+ * no-op. */
+int hl_js_http_register_anchor = 0;
+
 int hl_js_register_http_modules(void *js_ctx, void *hl_js)
 {
     JSContext *ctx = (JSContext *)js_ctx;

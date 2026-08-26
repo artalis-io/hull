@@ -47,6 +47,25 @@ int  hl_js_register_http_modules(void *js_ctx, void *hl_js);
 /* 1 iff an HTTP subsystem is composed (strong override present), else 0. */
 int hl_http_feature_present(void);
 
+/* Cosmo HTTP-bridge force-link anchors (0.13.1 PR#1).
+ *
+ * These are unique STRONG symbols that exist ONLY in the per-runtime HTTP bridge
+ * objects (routes.o carries hl_<rt>_http_bridge_anchor; http_register.o carries
+ * hl_<rt>_http_register_anchor), with NO weak counterpart in http_weakstub.o /
+ * http_feature.o. On the native SLIM base the bridge is whole-archived, so these
+ * are unused there. On cosmo the bridge lives as MEMBERS of the fat platform
+ * archive alongside the weak stubs; a produced cosmo app resolves serve.o's
+ * undefined hl_<rt>_wire_routes_server against the weak no-op (which returns -1
+ * and aborts serving) and never pulls the strong member. `hull build` emits a
+ * reference to the selected runtime's anchors so the linker force-pulls the
+ * strong bridge members, overriding the weak stubs. Because an anchor has no
+ * weak twin, referencing one is a hard link error if the bridge is absent
+ * (fail closed). Defined under HL_ENABLE_HTTP_SERVER in the matching TU. */
+extern int hl_lua_http_bridge_anchor;
+extern int hl_lua_http_register_anchor;
+extern int hl_js_http_bridge_anchor;
+extern int hl_js_http_register_anchor;
+
 #ifdef __cplusplus
 }
 #endif

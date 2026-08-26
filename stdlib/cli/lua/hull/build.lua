@@ -1119,8 +1119,51 @@ local function compose_features(opts, tmpdir, platform_lib, is_cosmo, compute_fi
             -- Whole-archiving the base instead is WRONG: it force-pulls the
             -- selectively-linked WASM caps whose worker symbols aren't in the
             -- base, breaking the link.
-            write_file(tmpdir .. "/app_stdlib_registry.c",
-                       fcompose.gen_app_registry_c(app_rt, { factory = false }))
+            local reg_src = fcompose.gen_app_registry_c(app_rt, { factory = false })
+            -- Cosmo HTTP-bridge force-link (0.13.1 PR#1). The per-runtime HTTP
+            -- bridge (routes.o's hl_<rt>_wire_routes_server, http_register.o's
+            -- hl_<rt>_register_http_modules) lives as MEMBERS of the fat cosmo
+            -- platform archive, alongside the weak no-op stubs (http_weakstub.o /
+            -- http_feature.o). On-demand archive resolution satisfies serve.o's
+            -- undefined hl_<rt>_wire_routes_server against the WEAK stub (which
+            -- returns -1 and aborts serving) and never pulls the strong member,
+            -- so a produced cosmo web app exits without listening. Same
+            -- weak-shadow class as the stdlib-registry override above. Fix:
+            -- reference the selected runtime's unique bridge anchors (no weak
+            -- twin) from this already-kept object so the linker force-pulls the
+            -- strong members, overriding the weak stubs. A missing bridge/anchor
+            -- is then a hard link error (fail closed). Only the SELECTED
+            -- runtime's anchors are referenced (never both; never another
+            -- serve.o or the full platform archive). Native is unaffected: it
+            -- whole-archives libhull_feature-http-<rt>.a instead.
+            -- needs_http: the same resolver signal the native branch composes
+            -- on (default true so we never under-compose serving; flipped false
+            -- for a pure app.main / compute app).
+            local needs_http = true
+            do
+                local mf = fcompose.extract_manifest(opts.app_dir)
+                if mf then
+                    local r = tool.modules_resolve(mf, opts.flavor,
+                                                   with_feature_list(opts))
+                    if r and r.ok and r.needs_http ~= nil then
+                        needs_http = r.needs_http
+                    end
+                end
+            end
+            if needs_http then
+                reg_src = reg_src .. string.format([[
+
+/* Cosmo HTTP-bridge force-link (0.13.1 PR#1) - see hull/http_feature.h. */
+extern int hl_%s_http_bridge_anchor;
+extern int hl_%s_http_register_anchor;
+__attribute__((used))
+void *const hull_cosmo_http_bridge_force[] = {
+    &hl_%s_http_bridge_anchor,
+    &hl_%s_http_register_anchor,
+};
+]], app_rt, app_rt, app_rt, app_rt)
+            end
+            write_file(tmpdir .. "/app_stdlib_registry.c", reg_src)
             if not tool.compiler.compile(tmpdir .. "/app_stdlib_registry.c",
                                          tmpdir .. "/app_stdlib_registry.o", nil) then
                 tool.stderr("hull build: compilation failed (app_stdlib_registry.c)\n")
@@ -2120,6 +2163,63 @@ int main(int argc, char **argv) { return hl_app_run(argc, argv); }
     end
 
     print("hull build: wrote " .. opts.output)
+
+    -- Post-link verification (0.13.1 PR#1, defense in depth). The force-link
+    -- anchor emitted in compose_features is the HARD guarantee (a missing bridge
+    -- fails the link). This is a belt-and-suspenders symbol check that a produced
+    -- cosmo web app got the STRONG per-runtime route wiring, not the weak no-op
+    -- stub. It can never false-fail a good build: nm on the APE output usually
+    -- can't parse it, so it prefers the x86_64 .dbg ELF sidecar, and it only
+    -- fails the build when nm DEFINITIVELY shows a weak-only wire_routes_server;
+    -- an unreadable/absent nm just skips the check.
+    if is_cosmo then
+        local vrt = fcompose.detect_app_rt(opts.app_dir)
+        local vneeds_http = false
+        if vrt then
+            local mf = fcompose.extract_manifest(opts.app_dir)
+            if mf then
+                local r = tool.modules_resolve(mf, opts.flavor,
+                                               with_feature_list(opts))
+                vneeds_http = not (r and r.ok and r.needs_http == false)
+            end
+        end
+        if vrt and vneeds_http then
+            local dbg = opts.output .. ".dbg"
+            local target = file_exists(dbg) and dbg or opts.output
+            local nm_out = tool.spawn_read({ "nm", target })
+            if nm_out and #nm_out > 0 then
+                local function sym_state(name)  -- "strong" | "weak" | "absent"
+                    local st = "absent"
+                    for line in nm_out:gmatch("[^\n]+") do
+                        local typ = line:match("^%x* ?(%a) " .. name .. "$")
+                        if typ == "T" or typ == "t" then return "strong" end
+                        if typ == "W" or typ == "w" then st = "weak" end
+                    end
+                    return st
+                end
+                local wr = "hl_" .. vrt .. "_wire_routes_server"
+                if sym_state(wr) == "weak" then
+                    tool.stderr("hull build: FATAL - produced cosmo app linked the "
+                        .. "WEAK no-op " .. wr .. " (HTTP route wiring); it would "
+                        .. "start but never serve. The HTTP bridge failed to "
+                        .. "force-link.\n")
+                    tool.rmdir(tmpdir); tool.exit(1)
+                end
+                if sym_state("hull_serve") == "weak" then
+                    tool.stderr("hull build: FATAL - produced app linked the weak "
+                        .. "hull_serve (no server loop).\n")
+                    tool.rmdir(tmpdir); tool.exit(1)
+                end
+                local other = (vrt == "lua") and "js" or "lua"
+                if sym_state("hl_" .. other .. "_wire_routes_server") == "strong" then
+                    tool.stderr("hull build: warning - the opposite-runtime HTTP "
+                        .. "bridge (hl_" .. other .. "_wire_routes_server) was also "
+                        .. "pulled into a single-runtime app\n")
+                end
+                print("hull build: verified strong " .. vrt .. " HTTP route wiring")
+            end
+        end
+    end
 
     -- Sign if requested
     if opts.sign then
