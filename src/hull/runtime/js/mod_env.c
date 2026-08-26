@@ -1,5 +1,5 @@
 /*
- * mod_env.c — hull:env module (environment variable access)
+ * mod_env.c - hull:env module (environment variable access)
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
@@ -31,7 +31,7 @@ static JSValue js_env_get(JSContext *ctx, JSValueConst this_val,
 }
 
 /* env.allowed(name) → boolean: is name in the manifest allowlist? (Membership
- * only, never a value — lets callers tell "not declared" from "declared but
+ * only, never a value - lets callers tell "not declared" from "declared but
  * unset", which env.get folds together. Used by hull/config.) */
 static JSValue js_env_allowed(JSContext *ctx, JSValueConst this_val,
                               int argc, JSValueConst *argv)

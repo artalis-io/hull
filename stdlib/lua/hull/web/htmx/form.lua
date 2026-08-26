@@ -1,4 +1,4 @@
---- HTMX form widget — server-side helpers for validation errors
+--- HTMX form widget - server-side helpers for validation errors
 --- and submit-button loading state.
 --
 -- @module hull.web.htmx.form

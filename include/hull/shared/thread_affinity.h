@@ -1,14 +1,14 @@
 /*
- * thread_affinity.h — event-loop thread-affinity assertions
+ * thread_affinity.h - event-loop thread-affinity assertions
  *
  * Several security-sensitive operations are correct ONLY because they run
  * on the single event-loop thread and never concurrently with a worker:
- *   - WASM shared-segment mutation (hl_cap_wasm_data_load) — its
+ *   - WASM shared-segment mutation (hl_cap_wasm_data_load) - its
  *     inflight_async guard is a plain int because submit/complete/check
  *     all run here.
- *   - async dispatch submit (hl_worker_{db,wasm,gpu}_submit) — where the
+ *   - async dispatch submit (hl_worker_{db,wasm,gpu}_submit) - where the
  *     in-flight accounting and the persistent-instance busy check live.
- *   - GPU shader compile (hl_cap_gpu_compile) — workers only look up
+ *   - GPU shader compile (hl_cap_gpu_compile) - workers only look up
  *     pre-compiled pipelines, never compile.
  *
  * These helpers document those invariants in code and, in debug/sanitizer
@@ -17,7 +17,7 @@
  * tripwire is a dev/CI aid, not a production fail-closed mechanism.
  *
  * Enabled when HL_THREAD_AFFINITY_CHECKS is defined (DEBUG / MSAN / TSAN
- * builds — see the Makefile). When the event-loop thread has not been
+ * builds - see the Makefile). When the event-loop thread has not been
  * marked (boot, unit tests, tool mode with no loop), the assert is a
  * no-op: there is no captured invariant to violate.
  *

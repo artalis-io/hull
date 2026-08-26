@@ -1,6 +1,6 @@
 // TOTP fixture (JS) for tests/e2e_totp.sh.
 //
-// Mirrors tests/fixtures/totp_client_lua/app.lua — same endpoints,
+// Mirrors tests/fixtures/totp_client_lua/app.lua - same endpoints,
 // same PBM inline render. See that file for the full design notes.
 
 import { app }    from "hull:app";
@@ -17,12 +17,12 @@ app.manifest({
     ],
 });
 
-// Exercise at-rest encryption. A fixed key is fine for tests — the
+// Exercise at-rest encryption. A fixed key is fine for tests - the
 // purpose here is to drive the secretbox/secretboxOpen path so the
 // JS Uint8Array input + ArrayBuffer output round-trip is covered by
 // CI. Without a key, totp.init stores plaintext (encryption=0) and
 // the bug class fixed in js_crypto_secretbox is invisible.
-// Exercise at-rest encryption. A fixed 32-byte key is fine for tests —
+// Exercise at-rest encryption. A fixed 32-byte key is fine for tests -
 // the purpose here is to drive the secretbox / secretboxOpen path so
 // the JS Uint8Array input + ArrayBuffer output round-trip is covered
 // by CI. Without a key, totp.init stores plaintext (encryption=0) and

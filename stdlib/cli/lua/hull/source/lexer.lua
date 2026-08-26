@@ -1,5 +1,5 @@
 --
--- hull.source.lexer — Lua 5.4 lexer (slice 1 of hull.source.lua).
+-- hull.source.lexer - Lua 5.4 lexer (slice 1 of hull.source.lua).
 --
 -- Pure Lua, no native deps, no dynamic compilation (never calls load()). Produces
 -- tokens and comments with EXACT half-open byte ranges { start, stop } (see

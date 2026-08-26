@@ -1,5 +1,5 @@
 /*
- * obj_emit.c — compiler-free app_registry object emitter
+ * obj_emit.c - compiler-free app_registry object emitter
  *
  * Serializes hl_app_entries[] as a relocatable object directly, so
  * `hull build` needs only a linker, not a C compiler. Host-independent:

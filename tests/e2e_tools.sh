@@ -7,7 +7,7 @@
 #   3. `tools install <unknown>` rejects unknown names without any
 #      network round-trip
 #   4. `tools install` against a tag that doesn't exist surfaces a
-#      clean error (no crash) — exercises the manifest-fetch path
+#      clean error (no crash) - exercises the manifest-fetch path
 #   5. `tools uninstall <unknown>` rejects unknown names
 #   6. `tools uninstall <missing>` is a no-op (idempotent removal)
 #   7. doctor's WASM section reflects the install state
@@ -61,7 +61,7 @@ assert_contains() {
 }
 
 if [ ! -x "$HULL" ]; then
-    echo "FAIL: $HULL not found — run 'make' first"
+    echo "FAIL: $HULL not found - run 'make' first"
     exit 1
 fi
 
@@ -110,7 +110,7 @@ assert_contains "rejects unknown name"   "$OUT" "unknown tool 'does-not-exist'"
 # Crucially: must NOT have started downloading anything.
 case "$OUT" in
     *"downloading"*|*"download"*|*"hull.sha256"*)
-        echo "  FAIL fail-fast violated — network round-trip on unknown name"
+        echo "  FAIL fail-fast violated - network round-trip on unknown name"
         echo "$OUT" | sed 's/^/    /'
         FAIL=$((FAIL + 1))
         ;;

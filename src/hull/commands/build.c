@@ -1,5 +1,5 @@
 /*
- * commands/build.c — hull build subcommand
+ * commands/build.c - hull build subcommand
  *
  * Thin wrapper: launches the Lua tool VM with hull.build module.
  *

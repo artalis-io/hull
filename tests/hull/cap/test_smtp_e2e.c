@@ -1,5 +1,5 @@
 /*
- * test_smtp_e2e.c — End-to-end SMTP tests with in-process mock server
+ * test_smtp_e2e.c - End-to-end SMTP tests with in-process mock server
  *
  * A mock SMTP server on a background thread accepts one connection,
  * speaks the SMTP protocol, and captures the conversation.  Tests
@@ -434,7 +434,7 @@ UTEST(smtp_e2e, dot_stuffing)
 
 UTEST(smtp_e2e, connection_refused)
 {
-    /* Bind to get an ephemeral port, then close — nothing listening */
+    /* Bind to get an ephemeral port, then close - nothing listening */
     int fd = socket(AF_INET, SOCK_STREAM, 0);
     ASSERT_TRUE(fd >= 0);
 
@@ -505,7 +505,7 @@ UTEST(smtp_e2e, rcpt_rejected)
 
 UTEST(smtp_e2e, host_not_allowed)
 {
-    /* Fails at allowlist check — no TCP connection made */
+    /* Fails at allowlist check - no TCP connection made */
     const char *hosts[] = { "smtp.allowed.com" };
     HlSmtpConfig cfg = {
         .allowed_hosts = hosts,

@@ -1,7 +1,7 @@
 /*
- * runtime/test.h — Runtime-layer test bindings (Lua + QuickJS)
+ * runtime/test.h - Runtime-layer test bindings (Lua + QuickJS)
  *
- * Declares the per-runtime `test` module — registration, clear, run.
+ * Declares the per-runtime `test` module - registration, clear, run.
  * Sources live in src/hull/runtime/{lua,js}/mod_test.c so the cap
  * layer stays free of runtime knowledge.
  *

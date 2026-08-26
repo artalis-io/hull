@@ -109,7 +109,7 @@ app.get("/test/nested", (_req, res) => {
     res.json(check("nested", html, "Alice,Carol,"));
 });
 
-// Test 14: filters — upper, lower, trim, length
+// Test 14: filters - upper, lower, trim, length
 app.get("/test/filters", (_req, res) => {
     const results = [];
     results.push(check("upper", template.renderString("{{ x | upper }}", { x: "hello" }), "HELLO"));
@@ -165,7 +165,7 @@ app.get("/test/if-for-else", (_req, res) => {
     res.json(results);
 });
 
-// Test 20: XSS safety — all {{ }} output is escaped
+// Test 20: XSS safety - all {{ }} output is escaped
 app.get("/test/xss", (_req, res) => {
     const html = template.renderString("{{ input }}", { input: '"><img src=x onerror=alert(1)>' });
     const safe = !html.includes("<img");

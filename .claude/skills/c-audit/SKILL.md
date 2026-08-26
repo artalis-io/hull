@@ -152,7 +152,7 @@ Hull's security model depends on the shared `hl_cap_*` layer. Verify:
 Hull defends boot-built security policy via two mechanisms (see
 [docs/security.md §4b](../../../docs/security.md)):
 
-- `.rodata` for compile-time constants (`static const` tables —
+- `.rodata` for compile-time constants (`static const` tables -
   automatic OS read-only via the linker).
 - `hl_seal_arena` (page-backed mmap RW → mprotect RO) for data that
   can't be `static const` because it's built at boot from app input
@@ -164,19 +164,19 @@ When auditing C runtime changes, look for these patterns:
 |---|---|---|
 | **Boot-built mutable security policy not sealed.** A new C-level structure that's (a) built once at boot from app input, (b) read on every request by the capability/sandbox layer, (c) influences security policy (allowlists, dispatch, trust anchors), and DOESN'T flow through `hl_seal_arena`. | Critical | Find the boot-init site; verify it calls `hl_seal_arena_alloc` / `_strdup` / `_memdup` and seals before the resolver/sandbox runs. Example pattern: `HlManifest` in `src/hull/serve.c::hl_serve_wire_caps`. |
 | **`xxd -i` generated table without `const`.** Default xxd output emits `unsigned char foo[]` (writable). Any new embedded asset (CA bundle, signed manifest, embedded key, vendored binary) that lands in writable `.data` instead of read-only `.rodata`. | High | Grep the Makefile for `xxd -i` invocations; verify each is followed by the `XXD_CONST_SEAL` (sed post-process) or `XXD_CONST_PIPE` macro defined near the top of the Makefile. |
-| **Function-pointer table not `const`.** A new dispatch vtable, registry, or callback array declared as plain `static T table[]` instead of `static const T table[]`. A writable function-pointer table in `.data` is a direct ROP/JOP pivot — a single arbitrary-write primitive turns into RCE by overwriting one slot. | Critical | Every `HlRuntimeVtable`, `HlDbBackend`, `HlAsyncBackend`, `HlNetBackend`, `HlGpuBackend`, `HlCompilerVtable`, etc. instance must be `const`-qualified. Same for `HlModuleSpec` arrays, command-dispatch tables, `luaL_Reg[]`, QuickJS `JSCFunctionListEntry[]`. The compile-time `const` lands the table in `.rodata`, which is RO-mapped by the linker — same protection level as the sealed arena, for free. |
-| **`__attribute__((constructor))` mutating dispatch state.** A new boot-time constructor that initialises a function-pointer table or capability config. Constructors run before `main`, BEFORE the sandbox/seal phases — anything they touch is implicitly trusted boot state. | High | Avoid constructors for security policy; do init explicitly in the boot phase where the order is auditable. If a constructor IS necessary (e.g. WAMR's own globals), document why and verify it only touches its own static state, never Hull's. |
+| **Function-pointer table not `const`.** A new dispatch vtable, registry, or callback array declared as plain `static T table[]` instead of `static const T table[]`. A writable function-pointer table in `.data` is a direct ROP/JOP pivot - a single arbitrary-write primitive turns into RCE by overwriting one slot. | Critical | Every `HlRuntimeVtable`, `HlDbBackend`, `HlAsyncBackend`, `HlNetBackend`, `HlGpuBackend`, `HlCompilerVtable`, etc. instance must be `const`-qualified. Same for `HlModuleSpec` arrays, command-dispatch tables, `luaL_Reg[]`, QuickJS `JSCFunctionListEntry[]`. The compile-time `const` lands the table in `.rodata`, which is RO-mapped by the linker - same protection level as the sealed arena, for free. |
+| **`__attribute__((constructor))` mutating dispatch state.** A new boot-time constructor that initialises a function-pointer table or capability config. Constructors run before `main`, BEFORE the sandbox/seal phases - anything they touch is implicitly trusted boot state. | High | Avoid constructors for security policy; do init explicitly in the boot phase where the order is auditable. If a constructor IS necessary (e.g. WAMR's own globals), document why and verify it only touches its own static state, never Hull's. |
 | **Long-lived C struct holding secret material.** Any new `struct { char key[N]; ... }` or `static uint8_t shared_secret[N]` that survives past the immediate operation. Hull's convention is Lua/JS-side `_state` tables + per-call stack-local `uint8_t key[128]` with `secure_zero` on return. | Critical | If C must cache secret material (e.g. parsed mbedTLS key context held across requests), seal it via `hl_seal_arena` or zero it on every use. Document the lifetime. |
 | **Sealing failure not fatal.** A call to `hl_seal_arena_seal` whose return code isn't checked, or where -1 is logged-and-continued. The whole point is to fail closed; shipping with unsealed policy silently weakens the hardening guarantee. | Critical | Sealing failure must propagate up the boot-error path (return -1 from the boot phase → process exits). The only acceptable test-only path is documented + gated. |
 | **Writable alias retained after seal.** A pointer to the to-be-sealed memory cached elsewhere (e.g. in a `HlRuntime` field) without being updated to the in-arena address. After sealing, the alias still points at the now-freed source. | High | Verify all consumers receive the sealed-copy pointer, not the source. The `hl_manifest_seal` pattern is to value-copy the struct, so consumers reading `&s->manifest` see the new pointers automatically. |
-| **Sealed arena destroyed before aliasing consumer.** A teardown path that calls `hl_seal_arena_destroy` before every consumer that holds aliased pointers into it (cap configs, TLS contexts, runtime tables) has been freed. The arena must be destroyed LAST in cleanup. | High | Audit both success and failure cleanup paths (`hl_serve_teardown_after_serve`, `hl_serve_cleanup`, `hl_serve_undo_caps`). The pattern is documented in `src/hull/serve.c` — destroy arena AFTER `hl_app_context_free`, WASM/GPU caches, TLS contexts. |
-| **Allocation after seal.** Code that tries to extend a sealed arena later (`hl_seal_arena_alloc` post-seal returns NULL — easy to miss in error paths if you assume alloc always succeeds). | Medium | Bump-arena alloc-after-seal is a programming bug; the call site should never reach that branch in production. Add an assertion. |
-| **Casting away `const` on a sealed/rodata table.** `T *mut = (T *)((uintptr_t)CONST_TABLE);` or similar laundering to write into a read-only mapping. Will fault at runtime (SIGSEGV/SIGBUS) but the *intent* indicates a design mistake. | High | Reject the cast. If the table genuinely needs to mutate, it shouldn't be sealed — surface the lifecycle to the audit and decide on a per-case basis. |
+| **Sealed arena destroyed before aliasing consumer.** A teardown path that calls `hl_seal_arena_destroy` before every consumer that holds aliased pointers into it (cap configs, TLS contexts, runtime tables) has been freed. The arena must be destroyed LAST in cleanup. | High | Audit both success and failure cleanup paths (`hl_serve_teardown_after_serve`, `hl_serve_cleanup`, `hl_serve_undo_caps`). The pattern is documented in `src/hull/serve.c` - destroy arena AFTER `hl_app_context_free`, WASM/GPU caches, TLS contexts. |
+| **Allocation after seal.** Code that tries to extend a sealed arena later (`hl_seal_arena_alloc` post-seal returns NULL - easy to miss in error paths if you assume alloc always succeeds). | Medium | Bump-arena alloc-after-seal is a programming bug; the call site should never reach that branch in production. Add an assertion. |
+| **Casting away `const` on a sealed/rodata table.** `T *mut = (T *)((uintptr_t)CONST_TABLE);` or similar laundering to write into a read-only mapping. Will fault at runtime (SIGSEGV/SIGBUS) but the *intent* indicates a design mistake. | High | Reject the cast. If the table genuinely needs to mutate, it shouldn't be sealed - surface the lifecycle to the audit and decide on a per-case basis. |
 
 **Cross-platform guard.** `hl_seal_arena` is POSIX (mmap/mprotect/
 sysconf). Cosmopolitan provides the POSIX shim transparently. If you
 ever add a native MSVC build, the arena needs a `#ifdef _WIN32`
-branch using `VirtualAlloc` / `VirtualProtect` — same API contract.
+branch using `VirtualAlloc` / `VirtualProtect` - same API contract.
 
 **Death tests are non-negotiable.** Any new sealed surface needs a
 fork+SIGSEGV test that writes to a sealed page from a child process
@@ -236,7 +236,7 @@ The baseline (unconditional on non-COSMO):
 -Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack  (Linux only)
 ```
 
-The probed set (added if the toolchain accepts each — older
+The probed set (added if the toolchain accepts each - older
 toolchains reject some; the probe at `hl_have_cflag` /
 `hl_have_ldflag` handles fallback cleanly):
 
@@ -260,7 +260,7 @@ Sanity checks for any audit touching the Makefile:
 - [ ] Existing `-fstack-protector-strong` / `-fPIE` / FORTIFY /
       RELRO baseline still present.
 - [ ] If a new flag is added: probe it via `hl_have_cflag` rather
-      than hard-applying — must not break older toolchains.
+      than hard-applying - must not break older toolchains.
 - [ ] `HULL_DISABLE_HARDENING=1` opt-out still works for local
       debugging (and CI's `check-hardening` step still fails on
       release if it was set).
@@ -276,16 +276,16 @@ flag these:
 | `mmap(..., PROT_WRITE \| PROT_EXEC, ...)` or `mmap(..., PROT_EXEC, ...)` followed by writes / `mprotect(... PROT_WRITE \| PROT_EXEC ...)`. | Critical | Direct W^X violation. Hull's design ban on RWX memory (no JIT, no runtime codegen) is the precondition every other hardening flag assumes. The sealed-arena pattern is RW → RO; the reverse direction has no legitimate use case. |
 | `dlopen` / `dlsym` / `dlmopen` / `dladdr` introduced in any Hull TU. | Critical | Forces lazy binding (defeats BIND_NOW), expands DT_NEEDED surface (defeats `-Wl,--as-needed` shrinkage), and gives runtime symbol resolution which is a classic ROP gadget pivot. Hull's `manifest.allow_dynamic_libraries` is the app-side opt-in; the C side should not initiate dlopen from its own code. |
 | New global function-pointer table without `static const`. | Critical | Lands in writable `.data`; one arbitrary-write primitive overwrites a slot → control-flow hijack. See §5b above. |
-| Unbounded `alloca(n)` / VLA with data-derived size. | High | Defeats `-fstack-clash-protection` by jumping the guard page in one allocation. If the size is bounded (`alloca(SMALL_CONSTANT)`) it's fine; if it's `alloca(strlen(input))` it's a stack-pivot primitive. Hull's convention is `#pragma GCC diagnostic` doesn't suppress `-Wvla` — VLAs should be replaced by `malloc` + size check. |
+| Unbounded `alloca(n)` / VLA with data-derived size. | High | Defeats `-fstack-clash-protection` by jumping the guard page in one allocation. If the size is bounded (`alloca(SMALL_CONSTANT)`) it's fine; if it's `alloca(strlen(input))` it's a stack-pivot primitive. Hull's convention is `#pragma GCC diagnostic` doesn't suppress `-Wvla` - VLAs should be replaced by `malloc` + size check. |
 | `setjmp` / `longjmp` straddling a sandbox or seal boundary. | High | Linux CET shadow stack (`SHSTK`) tracks frames; non-local jumps via standard `setjmp`/`longjmp` cooperate via glibc shims, but a custom `setjmp`-like macro or hand-rolled context switch loses the protection. If absolutely needed, use `sigsetjmp` with `savesigs=1` only when documented. |
-| Hardcoded executable address literals (`0x[0-9a-f]{6,}` that smell like a pointer). | High | Defeats ASLR — implies the code expects a known layout. Common sources: ported exploit PoCs, fixed-address mmap, hand-rolled JIT trampolines. Reject unless there's a documented platform reason (e.g. a kernel-defined vDSO address). |
+| Hardcoded executable address literals (`0x[0-9a-f]{6,}` that smell like a pointer). | High | Defeats ASLR - implies the code expects a known layout. Common sources: ported exploit PoCs, fixed-address mmap, hand-rolled JIT trampolines. Reject unless there's a documented platform reason (e.g. a kernel-defined vDSO address). |
 | `__attribute__((no_stack_protector))` on a non-leaf function. | High | Disables the canary on functions that might have a stack buffer. Only acceptable on tiny leaf helpers that demonstrably never take `&local` of a stack object. Document the reason inline. |
 | `__attribute__((interrupt))`, `__attribute__((naked))`, or custom calling conventions. | High | Bypasses `-fzero-call-used-regs` and the standard return-address tagging. No legitimate use case in Hull. |
-| Inline asm (`__asm__` / `asm volatile`) clobbering registers `-fzero-call-used-regs` would zero. | Medium | Mostly fine if it doesn't escape — but inline asm in a function that's later inlined into a security-sensitive caller can leak register state. Review the clobber list and the calling context. |
+| Inline asm (`__asm__` / `asm volatile`) clobbering registers `-fzero-call-used-regs` would zero. | Medium | Mostly fine if it doesn't escape - but inline asm in a function that's later inlined into a security-sensitive caller can leak register state. Review the clobber list and the calling context. |
 | Casting a function pointer through `void *` (e.g. via `dlsym` return, generic registry lookup) and calling without IBT/BTI marker check. | High | Defeats CET IBT / arm64 BTI: the target function must start with `endbr64` / `bti` for the indirect-branch landing to be legal. Functions reached via `dlsym` aren't compiled with CET markers by default. If Hull must call a dynamically-resolved function pointer, the resolver must verify the target's start instruction. (Status today: Hull has no dlsym; this check is forward-looking.) |
-| `__builtin_return_address(N)` for N > 0. | Medium | Walks the call stack manually — works against the frame pointer (which release builds may omit) and against the shadow stack (which intentionally hides return addresses from userspace). Almost always a sign of a hack; prefer explicit context passing. |
+| `__builtin_return_address(N)` for N > 0. | Medium | Walks the call stack manually - works against the frame pointer (which release builds may omit) and against the shadow stack (which intentionally hides return addresses from userspace). Almost always a sign of a hack; prefer explicit context passing. |
 | New vendor library imported without applying hardening CFLAGS. | Medium | New vendor TU's `CFLAGS := … -w …` clobbers the global set; gadgets in its text segment are reachable. Add hardening to that TU's CFLAGS array OR document the deferral in the per-library `_CFLAGS` block. |
-| Adding `-rdynamic` or `-Wl,-export-dynamic` to LDFLAGS. | High | Exports every symbol — makes the binary trivially introspectable for gadget search. Hull is a static executable; no symbols should be exported. |
+| Adding `-rdynamic` or `-Wl,-export-dynamic` to LDFLAGS. | High | Exports every symbol - makes the binary trivially introspectable for gadget search. Hull is a static executable; no symbols should be exported. |
 
 #### 9.3. Sanitizer / debug-mode hygiene
 
@@ -298,12 +298,12 @@ flag these:
 
 #### 9.4. Expected commands
 
-- `make debug` — ASan + UBSan + `-O0 -g -fno-omit-frame-pointer`.
-- `make msan` — MSan + UBSan (Linux clang only).
-- `make check` — clean + ASan build + test + e2e.
-- `make hardening` — print resolved hardening flag list.
-- `make check-hardening` — run post-build verifier on `build/hull`.
-- `scripts/check_hardening.sh [BINARY]` — same, on any binary.
+- `make debug` - ASan + UBSan + `-O0 -g -fno-omit-frame-pointer`.
+- `make msan` - MSan + UBSan (Linux clang only).
+- `make check` - clean + ASan build + test + e2e.
+- `make hardening` - print resolved hardening flag list.
+- `make check-hardening` - run post-build verifier on `build/hull`.
+- `scripts/check_hardening.sh [BINARY]` - same, on any binary.
 
 **Audit checklist for §9:**
 
@@ -336,12 +336,12 @@ Patterns to flag:
 
 | Issue | Severity | What to check |
 |---|---|---|
-| **Scattered request-temporary `malloc`/`free` in a security path** where an arena's lifetime would remove the manual free entirely. The danger is a `luaL_error`/longjmp or early-return path that skips the `free`. | High | Prefer arena-backed scratch (the request/scratch arena is freed wholesale regardless of how the function exits). Hull's `mod_db.c`/`mod_crypto.c`/`mod_http_client.c` already do this — new request-scoped scratch should too. |
+| **Scattered request-temporary `malloc`/`free` in a security path** where an arena's lifetime would remove the manual free entirely. The danger is a `luaL_error`/longjmp or early-return path that skips the `free`. | High | Prefer arena-backed scratch (the request/scratch arena is freed wholesale regardless of how the function exits). Hull's `mod_db.c`/`mod_crypto.c`/`mod_http_client.c` already do this - new request-scoped scratch should too. |
 | **`free()` outside allocator/arena internals in core runtime code.** | Medium | Strongly discouraged. Every `free` is a UAF/double-free surface. Confirm the object isn't arena-owned (freeing an arena sub-allocation is a bug). `shared/` and `utils/` should approach zero raw `free`. |
 | **More than one owner / more than one destroy point for an arena.** | Critical | Each arena has exactly ONE owner and ONE destroy call. Two destroys = double-free of the whole region. |
 | **Pointer retained into an arena after the arena is reset/destroyed.** | Critical | A cached pointer into request/scratch memory used after reset is a UAF. Verify no long-lived struct field aliases arena memory across a reset. The seal pattern value-copies structs precisely to avoid this. |
 | **`realloc()` that may invalidate a pointer/iterator held across the call.** | High | Every `realloc` must reassign into the owning field and NO previously-obtained element pointer or loop cursor may survive the call. Re-derive the pointer after the realloc (e.g. `row = &r->values[i]` *after* `db_result_grow`). See §10.1. |
-| **Crossing allocators** — e.g. `free()`-ing a pointer that came from a codec/library allocator, or vice versa. | High | Free with the matching allocator. Image-codec output, mbedTLS buffers, SQLite strings each have their own free contract. |
+| **Crossing allocators** - e.g. `free()`-ing a pointer that came from a codec/library allocator, or vice versa. | High | Free with the matching allocator. Image-codec output, mbedTLS buffers, SQLite strings each have their own free contract. |
 | **Missing debug poisoning after arena reset/destroy.** | Low | Under `make debug`, poison freed region so stale reads trap (sh_arena already ASan-poisons on create/reset). New arenas should match. |
 
 ### 10.1. realloc / internal-mutable-pointer hazards
@@ -381,7 +381,7 @@ Safe patterns to require: **snapshot array** (copy the elements/handles
 before the loop), **index-based iteration with explicit mutation rules**
 (append-only + re-read count), **two-phase update/delete queue** (mark in
 phase 1, apply after the loop), or **sealed immutable array** (registries
-that are `static const` — confirm they're never mutated at runtime).
+that are `static const` - confirm they're never mutated at runtime).
 Document, per container, whether mutation during iteration is allowed.
 Do not expose raw container storage if growth/realloc can occur.
 
@@ -402,11 +402,11 @@ mismatch. Apply this ONLY where it improves safety without broad churn:
 
 | When to recommend | When NOT to |
 |---|---|
-| A script-visible object that outlives a single call, can be destroyed by app code while another reference exists, and is reached by raw pointer (the classic dangling-userdata risk). | Objects already protected by an index+generation pool, a per-call stack local, a `static const` table, or a monotonic ID under a lock (Hull's CFI/typed-handle work already covers the vtables — don't re-handle those). |
-| Connection / instance / buffer registries where "destroyed by name while a handle is held" is reachable. | Boot/sealed config (immutable — no stale-handle risk). |
+| A script-visible object that outlives a single call, can be destroyed by app code while another reference exists, and is reached by raw pointer (the classic dangling-userdata risk). | Objects already protected by an index+generation pool, a per-call stack local, a `static const` table, or a monotonic ID under a lock (Hull's CFI/typed-handle work already covers the vtables - don't re-handle those). |
+| Connection / instance / buffer registries where "destroyed by name while a handle is held" is reachable. | Boot/sealed config (immutable - no stale-handle risk). |
 
 Today Hull's binding layer mostly uses the "null the userdata's opaque
-pointer on close/destroy, methods fail closed" pattern — an acceptable
+pointer on close/destroy, methods fail closed" pattern - an acceptable
 hand-rolled equivalent. Flag any binding where close/destroy frees the
 underlying struct but a *suspended/async* continuation can still resume
 against it (that's where the fail-closed null is insufficient).
@@ -418,7 +418,7 @@ against it (that's where the fail-closed null is insufficient).
 | **Sealed/boot-built security state exposed as non-`const`** after init. | High | Configuration, policy, dispatch, vtable, capability, and manifest-derived tables must be reachable only as `const` once initialized (see §5b). |
 | **API exposing a mutable internal pointer** instead of mutating through the owner. | High | Prefer `hl_x_set(owner, ...)` over handing out `&owner->field`. See §10.1. |
 | **Two live aliases to the same object with unclear ownership**, one of which may free/realloc. | High | Establish a single explicit owner; others hold a borrow (read-only) or a handle. Document ownership transfer at the boundary. |
-| **Unclear borrow-vs-owned at a binding boundary** — handing app code a long-lived object that *borrows* a buffer the app can free/GC (the `*_from_buffer` / borrowed-view → long-lived-handle constructor pattern). | Critical | The long-lived object must PIN its source (dup/ref the backing buffer, or copy). A borrow that outlives its source is a UAF. |
+| **Unclear borrow-vs-owned at a binding boundary** - handing app code a long-lived object that *borrows* a buffer the app can free/GC (the `*_from_buffer` / borrowed-view → long-lived-handle constructor pattern). | Critical | The long-lived object must PIN its source (dup/ref the backing buffer, or copy). A borrow that outlives its source is a UAF. |
 
 Recommended naming discipline in comments/types: **borrow / read-only
 view** (caller must not free; valid only for the call), **owned object**
@@ -454,7 +454,7 @@ should carry lightweight, compiled-out-in-release checks. When auditing
 new code in a security path, expect (or recommend) these:
 
 - arena owner / lifetime asserts (alloc-after-destroy, alloc-after-seal
-  both return NULL / assert — the bump arena already does)
+  both return NULL / assert - the bump arena already does)
 - ASan poisoning of freed/reset arena regions (stale read traps)
 - stale-handle detection (generation mismatch → NULL)
 - mutation-during-iteration asserts (e.g. a `dispatch_depth`/`iterating`
@@ -543,7 +543,7 @@ When `/c-audit` is invoked:
    - No new C pattern from the §9.2 defeat list landed in this
      change (RWX, dlsym, unbounded alloca, naked attribute, etc.).
    - Sanitizer builds (`make debug`, `make msan`) still build and
-     pass — if a new vendor TU was added, its `*_CFLAGS` block must
+     pass - if a new vendor TU was added, its `*_CFLAGS` block must
      inherit / re-add the sanitizer flags under `ifdef DEBUG` /
      `ifdef MSAN`.
 
@@ -609,7 +609,7 @@ When `/c-audit` is invoked:
 
 ### Lifetime / ownership / concurrency summary (§§10-14)
 For a lifetime/race-focused audit, ALSO report these dimensions explicitly
-(state "CLEAN" where there is nothing — coverage matters):
+(state "CLEAN" where there is nothing - coverage matters):
 - Risky allocation / `free` sites (by lifetime class).
 - `realloc` / iterator-invalidation risks found.
 - Raw-pointer lifetime / borrow-outlives-source risks found.
@@ -654,6 +654,6 @@ When `--fix` is specified:
 - Architectural changes
 - New W^X primitives (`mmap`/`mprotect` with `PROT_WRITE|PROT_EXEC`)
 - New `dlopen` / `dlsym` introduced in C
-- Sealed-arena destroy reordering — must trace every aliasing consumer's lifetime
-- New `__attribute__((constructor))` — needs design review of init order
-- Probe regressions: if `make hardening` reports fewer flags than before on the same toolchain, the probe macro or surrounding `ifdef` was likely broken — manual investigation
+- Sealed-arena destroy reordering - must trace every aliasing consumer's lifetime
+- New `__attribute__((constructor))` - needs design review of init order
+- Probe regressions: if `make hardening` reports fewer flags than before on the same toolchain, the probe macro or surrounding `ifdef` was likely broken - manual investigation

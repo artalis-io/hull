@@ -1,5 +1,5 @@
 /*
- * cap/tool.h — Pure-C tool capability surface
+ * cap/tool.h - Pure-C tool capability surface
  *
  * Declares the controlled-process and unveil/filesystem helpers used by
  * Hull tooling. All process execution goes through an allowlisted
@@ -7,7 +7,7 @@
  * unveiled directories.
  *
  * The Lua `tool` global is declared separately in hull/runtime/tool.h
- * (item F — cap layer is now runtime-free).
+ * (item F - cap layer is now runtime-free).
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
@@ -53,7 +53,7 @@ int hl_tool_unveil_add(HlToolUnveilCtx *ctx, const char *path, const char *perms
 void hl_tool_unveil_free(HlToolUnveilCtx *ctx);
 
 /*
- * Seal the unveil table — no more entries can be added.
+ * Seal the unveil table - no more entries can be added.
  */
 void hl_tool_unveil_seal(HlToolUnveilCtx *ctx);
 

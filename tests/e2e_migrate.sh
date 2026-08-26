@@ -1,5 +1,5 @@
 #!/bin/sh
-# E2E tests — SQL migration pipeline
+# E2E tests - SQL migration pipeline
 #
 # Usage: sh tests/e2e_migrate.sh
 # Requires: build/hull already built
@@ -13,7 +13,7 @@ PASS=0
 FAIL=0
 
 if [ ! -x "$HULL" ]; then
-    echo "e2e-migrate: hull binary not found at $HULL — run 'make' first"
+    echo "e2e-migrate: hull binary not found at $HULL - run 'make' first"
     exit 1
 fi
 
@@ -223,7 +223,7 @@ CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT NOT NULL);
 INSERT INTO users (name) VALUES ('alice');
 EOF
 
-# Start server briefly — migrations should auto-run
+# Start server briefly - migrations should auto-run
 $HULL -p 18931 -d "$TMPDIR/app5/data.db" "$TMPDIR/app5/app.lua" &
 SERVER_PID=$!
 

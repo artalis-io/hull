@@ -1,5 +1,5 @@
 /*
- * dispatch.c — Lua request/middleware dispatch bridges
+ * dispatch.c - Lua request/middleware dispatch bridges
  *
  * Bridges Keel's per-request callbacks to the Lua handler/middleware
  * registry. Creates coroutines, marshals req/res, drives the
@@ -98,7 +98,7 @@ int hl_lua_dispatch(HlLua *lua, int handler_id,
     int status = lua_resume(co, lua->L, 2, &nres);
 
     if (status == LUA_OK) {
-        /* Synchronous completion — same as lua_pcall path */
+        /* Synchronous completion - same as lua_pcall path */
         luaL_unref(lua->L, LUA_REGISTRYINDEX, thread_ref);
         lua->active_thread_ref = LUA_NOREF;
         lua->active_co = NULL;
@@ -125,11 +125,11 @@ int hl_lua_dispatch(HlLua *lua, int handler_id,
     }
 
     if (status == LUA_YIELD) {
-        /* Handler yielded — connection is suspended.
+        /* Handler yielded - connection is suspended.
          * Don't clean up coroutine ref, don't free ctx.
-         * dispatch_depth stays at 1 — decremented on async resume.
+         * dispatch_depth stays at 1 - decremented on async resume.
          * kl_async_suspend already removed client FD from event loop.
-         * Routes table stays on main state stack — cleaned up on resume. */
+         * Routes table stays on main state stack - cleaned up on resume. */
         lua_pop(lua->L, 1); /* pop routes table */
         return 1; /* signal: handler suspended */
     }
@@ -164,7 +164,7 @@ void hl_lua_keel_handler(KlRequest *req, KlResponse *res, void *user_data)
     HlLuaRoute *route = (HlLuaRoute *)user_data;
     int rc = hl_lua_dispatch(route->lua, route->handler_id, req, res);
     if (rc < 0) {
-        /* Error — write 500 response */
+        /* Error - write 500 response */
         hl_lua_http_error_response(res);
     }
     /* rc == 1 → handler suspended, conn_process checks SUSPENDED state */
@@ -211,7 +211,7 @@ int hl_lua_dispatch_middleware(HlLua *lua, int handler_id,
     lua_pushvalue(lua->L, -2); /* copy req table */
     lua_setfield(lua->L, LUA_REGISTRYINDEX, "__hull_mw_req");
 
-    /* Call handler(req, res) — expect 1 return value */
+    /* Call handler(req, res) - expect 1 return value */
     if (lua_pcall(lua->L, 2, 1, 0) != LUA_OK) {
         log_error("[hull:c] lua middleware error: %s",
                   lua_tostring(lua->L, -1));
@@ -275,7 +275,7 @@ int hl_lua_keel_middleware(KlRequest *req, KlResponse *res, void *user_data)
     HlLuaRoute *ctx = (HlLuaRoute *)user_data;
     int rc = hl_lua_dispatch_middleware(ctx->lua, ctx->handler_id, req, res);
     if (rc < 0) {
-        /* Middleware error — short-circuit with 500 */
+        /* Middleware error - short-circuit with 500 */
         hl_lua_http_error_response(res);
         return 1; /* short-circuit */
     }

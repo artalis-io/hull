@@ -1,5 +1,5 @@
 /*
- * runtime/lua/factory.c — Lua runtime factory
+ * runtime/lua/factory.c - Lua runtime factory
  *
  * Heap-allocates an HlLua, builds HlLuaConfig from HlAppContextOpts,
  * initializes via hl_lua_init, and returns the embedded HlRuntime *.
@@ -62,7 +62,7 @@ static int lua_create(HlRuntime **out, const HlAppContextOpts *opts,
         return -1;
     }
 
-    /* hl_lua_init doesn't set base.vt — wire it here. */
+    /* hl_lua_init doesn't set base.vt - wire it here. */
     lua->base.vt = &hl_lua_vtable;
     *out = &lua->base;
     return 0;

@@ -8,7 +8,7 @@
  * return identical JSON.
  *
  * Only intended for dev mode: by default the endpoints are
- * disabled — production builds should not expose `/_hull/agent/...`.
+ * disabled - production builds should not expose `/_hull/agent/...`.
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */

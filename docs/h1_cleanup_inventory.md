@@ -194,8 +194,8 @@ Order-of-magnitude by area (from the canonical command, informational):
 `src/hull` ~249 · `stdlib` ~205 · `tests` ~166 · `examples` ~142 · `include` ~124 ·
 `mk` 6 · `templates` 3 · `scripts` 2.
 
-Pure comment/prose (confirmed context, e.g. `main.c:2` `* main.c — Hull's ...`); a
-byte-safe sweep of ` — ` -> ` - ` (or rephrase) is mechanical. The project
+Pure comment/prose (confirmed context, e.g. `main.c:2` `* main.c - Hull's ...`); a
+byte-safe sweep of ` - ` -> ` - ` (or rephrase) is mechanical. The project
 convention is already "no em-dashes in code prose"; this is the one-time backlog
 cleanup that makes the forward gate (§4) enforceable.
 
@@ -231,7 +231,7 @@ comparison-contract matrix) produce a ratified sub-decision BEFORE any code move
 | **S2b** | **Hex ownership + link-closure DESIGN.** Produce the caller-by-caller dependency table (1.2a), choose the canonical home(s) - dependency-neutral primitive vs separate helpers - then ratify. No consolidation code until ratified. | design | a reviewed link-closure table + ratified home decision; zero code change in this slice. |
 | **S3** | **Comparison-contract inventory** (the 1.2b matrix): representation / fixed-vs-variable length / length-leak / secrecy per site. Consolidate ONLY genuinely-identical contracts, each with tests proving length + nullability behavior. | medium (security) | the contract matrix + per-merge tests; no over-merge of differing contracts. |
 | **S4** | Comment-archaeology sweep by area (one PR per area: cap, runtime, commands, include, tests, stdlib): remove `Phase/Slice/checkpoint` narration and bare "Added in PR #N"; **keep durable `#NNNN` provenance** (1.4). Semantic - human-reviewed, not sed. | low but broad | comments only; diff reviewed per area. |
-| **S5** | Em-dash sweep by area (mechanical ` — ` -> ` - ` / rephrase), one PR per area; then enable the §4 gates. | low but broad | comments/prose only; the canonical command (1.5) returns 0 for the area. |
+| **S5** | Em-dash sweep by area (mechanical ` - ` -> ` - ` / rephrase), one PR per area; then enable the §4 gates. | low but broad | comments/prose only; the canonical command (1.5) returns 0 for the area. |
 
 Ordering: S1 (audit) and S2a (the one safe consolidation) can go first; S2b and S3
 are DESIGN slices that gate their own consolidation; S4 -> S5 land the prose

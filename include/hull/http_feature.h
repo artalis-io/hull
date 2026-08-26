@@ -1,5 +1,5 @@
 /*
- * http_feature.h — the HTTP-as-a-composable-feature seam (issue #114).
+ * http_feature.h - the HTTP-as-a-composable-feature seam (issue #114).
  *
  * Mirrors the tui feature seam (cap/tui.h): a weak no-op default lives in the
  * runtime-agnostic base (src/hull/cap/http_feature.c); a strong override that

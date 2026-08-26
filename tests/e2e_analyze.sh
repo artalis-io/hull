@@ -1,5 +1,5 @@
 #!/bin/sh
-# E2E tests — `hull analyze` (static Lua source syntax analysis)
+# E2E tests - `hull analyze` (static Lua source syntax analysis)
 #
 # Usage: sh tests/e2e_analyze.sh
 # Requires: build/hull already built
@@ -21,7 +21,7 @@ PASS=0
 FAIL=0
 
 if [ ! -x "$HULL" ]; then
-    echo "e2e-analyze: hull binary not found at $HULL — run 'make' first"
+    echo "e2e-analyze: hull binary not found at $HULL - run 'make' first"
     exit 1
 fi
 
@@ -74,7 +74,7 @@ if [ "$lines" = "1" ] && [ "$first" = "{" ] && [ "$last" = "}" ] \
     pass "JSON stdout pure (1 line, {…}) + schema_version 2 + required keys"
 else fail "JSON purity/schema (lines=$lines first=$first last=$last)"; fi
 
-# ── Test 5: explicit target errors — missing + non-Lua (outside-root is
+# ── Test 5: explicit target errors - missing + non-Lua (outside-root is
 # covered by the symlink test 9, since canonical containment reports a
 # non-existent ../path as not_found, honestly, before any containment check) ─
 printf 'not lua\n' > "$BROKEN/note.txt"
@@ -225,7 +225,7 @@ if [ "$rc" = "2" ] && [ -z "$out" ] && grep -q "unknown lint rule" "$TMP/lr.txt"
     pass "unknown lint rule → exit 2, stderr message"
 else fail "unknown rule (rc=$rc)"; fi
 
-# ── Test 22: JSON v2 schema — lint codes + severities + summary counts ─
+# ── Test 22: JSON v2 schema - lint codes + severities + summary counts ─
 "$HULL" analyze "$LINT" --json 2>/dev/null > "$TMP/lint.json" || true
 if grep -q '"schema_version":2' "$TMP/lint.json" \
    && grep -q '"code":"lua.lint.duplicate-table-key"' "$TMP/lint.json" \

@@ -1,5 +1,5 @@
 /*
- * test_tui_lifecycle.c — PTY-driven tests for the cap layer's
+ * test_tui_lifecycle.c - PTY-driven tests for the cap layer's
  * lifecycle and rendering paths.
  *
  * Strategy:
@@ -61,7 +61,7 @@ UTEST(tui_lifecycle, acquire_without_tty_errors)
     /* When running under utest with stdin/stdout NOT a real tty
      * (typical CI environment), acquire should refuse with ENOTTY. */
     if (isatty(STDIN_FILENO) && isatty(STDOUT_FILENO)) {
-        /* Running interactively in a real terminal — this test
+        /* Running interactively in a real terminal - this test
          * doesn't apply. SKIP equivalent: just assert true. */
         ASSERT_TRUE(1);
         return;

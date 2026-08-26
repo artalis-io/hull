@@ -1,10 +1,10 @@
--- Streaming multipart uploads — Hull + Lua example
+-- Streaming multipart uploads - Hull + Lua example
 --
 -- Run: hull app.lua -p 3000
 -- Visit: http://localhost:3000/   (HTML form)
 -- Or:    curl -F "user=alice" -F "f=@README.md" http://localhost:3000/upload
 --
--- The point of this example is the streaming iterator — bytes pulled
+-- The point of this example is the streaming iterator - bytes pulled
 -- out of the socket on demand, never the whole body in memory at
 -- once. We hash + size each file part as it streams and return a
 -- JSON inventory. Persistent storage is intentionally out of scope:
@@ -61,7 +61,7 @@ app.post("/upload", function(req, res)
     for part in req:multipart() do
         if part.filename then
             -- File field: stream chunks AND hash incrementally. Bytes
-            -- never accumulate — each chunk is fed straight into the
+            -- never accumulate - each chunk is fed straight into the
             -- hasher and dropped. Memory use stays O(chunk_size) no
             -- matter how big the upload.
             local hasher = crypto.create_sha256()

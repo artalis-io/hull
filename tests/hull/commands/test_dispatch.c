@@ -1,5 +1,5 @@
 /*
- * test_dispatch.c — Tests for subcommand dispatcher
+ * test_dispatch.c - Tests for subcommand dispatcher
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */

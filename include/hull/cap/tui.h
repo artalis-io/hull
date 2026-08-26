@@ -1,5 +1,5 @@
 /*
- * include/hull/cap/tui.h — Terminal UI capability.
+ * include/hull/cap/tui.h - Terminal UI capability.
  *
  * Provides raw terminal access for full-screen interactive
  * applications: alt screen, raw mode, ANSI rendering, input event
@@ -9,7 +9,7 @@
  * driven restore.
  *
  * Process invariant: at most one HlTuiCtx is live at any time. The
- * controlling tty is a per-process resource — multiple ctxs would
+ * controlling tty is a per-process resource - multiple ctxs would
  * race on termios, signal handlers, and the alt screen. A second
  * acquire while another ctx is live returns -EBUSY.
  *
@@ -114,7 +114,7 @@ typedef enum {
 typedef struct {
     HlTuiEventKind kind;
 
-    /* HL_TUI_EV_KEY — `key` is either a single-character UTF-8
+    /* HL_TUI_EV_KEY - `key` is either a single-character UTF-8
      * sequence (printable chars; `codepoint` populated) or one of
      * the HL_TUI_KEY_* names (non-printable). Always NUL-terminated
      * and points into ctx-owned storage; valid until the next
@@ -123,21 +123,21 @@ typedef struct {
     uint32_t    codepoint;
     uint32_t    mods;        /* HL_TUI_MOD_* bitmask */
 
-    /* HL_TUI_EV_RESIZE — new dimensions. */
+    /* HL_TUI_EV_RESIZE - new dimensions. */
     int cols;
     int rows;
 
-    /* HL_TUI_EV_MOUSE — 1-indexed cell coordinates. */
+    /* HL_TUI_EV_MOUSE - 1-indexed cell coordinates. */
     int x;
     int y;
     int button;              /* HL_TUI_MOUSE_* */
 
-    /* HL_TUI_EV_PASTE — bracketed-paste payload. Valid until next
+    /* HL_TUI_EV_PASTE - bracketed-paste payload. Valid until next
      * cap call. */
     const char *text;
     size_t      text_len;
 
-    /* HL_TUI_EV_FOCUS — 1 if gained focus, 0 if lost. */
+    /* HL_TUI_EV_FOCUS - 1 if gained focus, 0 if lost. */
     int focus_in;
 } HlTuiEvent;
 
@@ -153,7 +153,7 @@ typedef struct {
  * SIGTERM / SIGQUIT / SIGWINCH / SIGTSTP / SIGCONT chain.
  *
  * Performs OSC 11 background-color query (50ms timeout) for theme
- * detection — see hl_cap_tui_theme.
+ * detection - see hl_cap_tui_theme.
  */
 int hl_cap_tui_acquire(HlTuiCtx **out);
 
@@ -162,7 +162,7 @@ int hl_cap_tui_acquire(HlTuiCtx **out);
  * is invalidated). Pass NULL for the abandoned-pointer case. */
 int hl_cap_tui_release(HlTuiCtx *ctx);
 
-/* atexit / panic handler — restores the terminal if a ctx is live,
+/* atexit / panic handler - restores the terminal if a ctx is live,
  * without freeing memory (process is exiting). Not for script use. */
 void hl_cap_tui_force_leave(void);
 
@@ -222,7 +222,7 @@ int hl_cap_tui_flush(HlTuiCtx *ctx);
  * Returns 0 with *out filled on event, 1 on timeout (with
  * out->kind == HL_TUI_EV_NONE), -1 on error.
  *
- * Resize events are delivered ahead of any queued input bytes — a
+ * Resize events are delivered ahead of any queued input bytes - a
  * pending SIGWINCH always wins. */
 int hl_cap_tui_poll(HlTuiCtx *ctx, int timeout_ms, HlTuiEvent *out);
 

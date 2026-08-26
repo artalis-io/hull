@@ -1,4 +1,4 @@
--- test_transaction.lua — Tests for hull.web.middleware.transaction
+-- test_transaction.lua - Tests for hull.web.middleware.transaction
 --
 -- Requires db, time globals (run via hull test harness).
 

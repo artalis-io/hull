@@ -1,4 +1,4 @@
--- lib/validate_user.lua — Schema validation for the User resource.
+-- lib/validate_user.lua - Schema validation for the User resource.
 --
 -- Wraps `hull.validate` with per-resource schemas so routes/users.lua
 -- can call `validate.create(body)` instead of inlining the rule table.

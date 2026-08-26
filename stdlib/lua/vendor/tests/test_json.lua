@@ -1,4 +1,4 @@
--- test_json.lua — Tests for vendored rxi/json.lua
+-- test_json.lua - Tests for vendored rxi/json.lua
 --
 -- Tests the raw vendor library in our sandbox.
 -- Run via: the C test harness (test_lua_runtime.c) loads and executes this.

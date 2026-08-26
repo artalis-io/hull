@@ -1,11 +1,11 @@
 /* App-specific styling. Demonstrates the "structural CSS + app
- * theme on top" pattern — the widgets ship structural CSS that
+ * theme on top" pattern - the widgets ship structural CSS that
  * handles layout + a11y; this file adds the visual theming.
  *
  * Concrete color values (not Pico vars) so the example is
  * self-contained and doesn't depend on a particular Pico
  * version's variable inventory. (Earlier draft used
- * --pico-color-zinc-* names that Pico doesn't actually export —
+ * --pico-color-zinc-* names that Pico doesn't actually export -
  * the result was a sea of empty `background: var(--missing)`
  * declarations, which the browser falls back to "no background"
  * and the page rendered unstyled.)
@@ -157,7 +157,7 @@ table.hull-table th {
 }
 .badge-active      { background: var(--hull-green-bg); color: var(--hull-green-fg); }
 .badge-maintenance { background: var(--hull-amber-bg); color: var(--hull-amber-fg); }
-/* grey-500 on grey-100 is ~3.4:1, below WCAG AA (4.5:1) — bumped
+/* grey-500 on grey-100 is ~3.4:1, below WCAG AA (4.5:1) - bumped
  * to grey-700 (~7.5:1) so "retired" still reads as muted but
  * passes contrast. */
 .badge-retired     { background: var(--hull-grey-200); color: var(--hull-grey-700); }

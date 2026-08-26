@@ -1,5 +1,5 @@
 /*
- * hash.c — FNV-1a 64-bit hash
+ * hash.c - FNV-1a 64-bit hash
  *
  * Input:  arbitrary bytes
  * Output: 8 bytes uint64 LE (FNV-1a hash)

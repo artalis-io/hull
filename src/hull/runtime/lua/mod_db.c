@@ -1,4 +1,4 @@
-/* mod_db.c — hull.db module: query, exec, batch, async, udf
+/* mod_db.c - hull.db module: query, exec, batch, async, udf
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
@@ -130,7 +130,7 @@ static int lua_to_hl_values(lua_State *L, int idx,
             params[i].type = HL_TYPE_NIL;
             break;
         }
-        /* Leave values on stack — they keep strings alive */
+        /* Leave values on stack - they keep strings alive */
     }
 
     *out_params = params;
@@ -143,13 +143,13 @@ static void lua_free_hl_values(lua_State *L, HlValue *params, int count)
     if (!params)
         return;
     /* Pop the values we left on the stack in lua_to_hl_values.
-     * No free() — params live in the per-request scratch arena. */
+     * No free() - params live in the per-request scratch arena. */
     if (count > 0)
         lua_pop(L, count);
 }
 
 /* Check if the immediate Lua caller is a stdlib module (chunk name starts
- * with "hull.").  User modules start with "./" — so a simple prefix check
+ * with "hull.").  User modules start with "./" - so a simple prefix check
  * is sufficient.  Returns 1 for stdlib, 0 for user code. */
 static int lua_is_stdlib_caller(lua_State *L)
 {
@@ -336,7 +336,7 @@ static int lua_db_last_id(lua_State *L)
     return 1;
 }
 
-/* db.batch(fn) — execute fn() inside a transaction (BEGIN IMMEDIATE..COMMIT) */
+/* db.batch(fn) - execute fn() inside a transaction (BEGIN IMMEDIATE..COMMIT) */
 static int lua_db_batch(lua_State *L)
 {
     HlLua *lua = get_hl_lua(L);
@@ -370,7 +370,7 @@ static int lua_db_batch(lua_State *L)
  *
  * These let stdlib modules stay DB-backend-agnostic. The actual SQL
  * for each call is constructed inside the backend (db_sqlite.c et al.)
- * — these are thin marshalling layers that turn Lua tables into the
+ * - these are thin marshalling layers that turn Lua tables into the
  * HlValue / C-string arrays the backend method expects. */
 
 /* Marshal a Lua array of strings into a C string array allocated on
@@ -601,7 +601,7 @@ static void lua_push_worker_db_result(lua_State *L, void *driver)
     HlWorkerDbOp *op = (HlWorkerDbOp *)driver;
 
     if (op->error) {
-        /* luaL_error longjmps — caller's resume completes with an error */
+        /* luaL_error longjmps - caller's resume completes with an error */
         luaL_error(L, "db.async: %s", op->error_msg);
         return; /* unreachable */
     }
@@ -620,7 +620,7 @@ static void lua_push_worker_db_result(lua_State *L, void *driver)
         return;
     }
 
-    /* HL_WORK_DB_QUERY — array of row tables */
+    /* HL_WORK_DB_QUERY - array of row tables */
     HlDbResult *r = &op->result;
     lua_createtable(L, r->nrows, 0);
 
@@ -821,7 +821,7 @@ static const luaL_Reg db_async_funcs[] = {
     {NULL, NULL}
 };
 
-/* ── db.udf — user-defined SQL functions ─────────────────────────────── */
+/* ── db.udf - user-defined SQL functions ─────────────────────────────── */
 /* The SQLite UDF bindings live in the composed per-runtime bridge
  * (mod_db_udf.c → libhull_feature-sqlite-lua.a) so THIS base runtime archive
  * carries no sqlite3_* references (docs/sqlite_feature.md). The

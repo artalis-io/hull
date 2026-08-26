@@ -1,5 +1,5 @@
 /*
- * release.c — Release artifact signature primitives
+ * release.c - Release artifact signature primitives
  *
  * Sign and verify Ed25519 signatures over the `hull.sha256` release
  * manifest. See `docs/release_signing.md` for the full design and

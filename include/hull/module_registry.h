@@ -5,7 +5,7 @@
  * Apps declare which stdlib modules they use via
  * `app.manifest({ modules = { crypto = "1", fs = "1", ... } })`.
  * The names in that table are looked up against `hl_module_registry`
- * by the resolver in `module_resolver.h` — unknown names, version
+ * by the resolver in `module_resolver.h` - unknown names, version
  * mismatches, missing capabilities, and undeclared internal deps are
  * all rejected before the guest code runs.
  *
@@ -24,7 +24,7 @@
  *   capability-bearing module cannot coexist.
  *
  * @par Intrinsic core
- *   Modules with `intrinsic = 1` are always available — no
+ *   Modules with `intrinsic = 1` are always available - no
  *   declaration needed. They are minimal infrastructure: route
  *   registration (`hull/app`), the logger (`hull/log`), and pure data
  *   codecs (`hull/json`). Every other module must be declared.
@@ -89,7 +89,7 @@ typedef struct HlModuleSpec {
 const HlModuleSpec *hl_module_registry_find(const char *name);
 
 /*
- * Look up a module by short name (e.g. "crypto") — prepends "hull/".
+ * Look up a module by short name (e.g. "crypto") - prepends "hull/".
  * Strings already containing '/' are passed through unchanged.
  * Returns NULL if not found.
  */
@@ -142,13 +142,13 @@ void hl_module_registry_format_deps(const HlModuleSpec *spec,
  * mistypes a module name.
  *
  * `input` is matched against canonical names with the leading `hull/`
- * stripped — so callers should pass either the short form (e.g.
+ * stripped - so callers should pass either the short form (e.g.
  * "cyrpto", "middleware/sesssion") or the full canonical form (the
  * `hull/` prefix is stripped automatically).
  *
  * Returns the closest match if its edit distance fits within an
  * input-length-scaled threshold (≤1 for very short names, ≤2 for
- * short, ≤3 for long). Returns NULL when nothing is close enough —
+ * short, ≤3 for long). Returns NULL when nothing is close enough -
  * callers should fall back to the plain "see `hull modules available`"
  * message in that case.
  */

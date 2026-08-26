@@ -1,5 +1,5 @@
 /*
- * runtime/js.h — QuickJS runtime for Hull
+ * runtime/js.h - QuickJS runtime for Hull
  *
  * Manages QuickJS VM lifecycle: init, sandbox, allocator integration,
  * interrupt handler, module loader, and request dispatch.
@@ -32,7 +32,7 @@ typedef struct HlAllocator HlAllocator;
 /*
  * HlJSTimer + HlJsWorkerDispatchOp moved to
  * src/hull/runtime/js/internal.h as part of architectural roadmap
- * item J — they're Hull-internal op structs that no external consumer
+ * item J - they're Hull-internal op structs that no external consumer
  * references.
  */
 
@@ -56,7 +56,7 @@ typedef struct {
 /* ── Runtime context ────────────────────────────────────────────────── */
 
 /*
- * Stability: Tier 4 (internal — see docs/stability.md). All fields below
+ * Stability: Tier 4 (internal - see docs/stability.md). All fields below
  * `base` are Hull-internal implementation detail; the layout may change
  * in any release. External code must reach HlJS only via:
  *   - the lifecycle functions (hl_js_init / _free / _load_app)
@@ -68,7 +68,7 @@ typedef struct {
  * to a heap factory (hl_js_create()) post-v0.1.0.
  */
 typedef struct HlJS {
-    HlRuntime       base;          /* vtable + shared capabilities — Tier 2 */
+    HlRuntime       base;          /* vtable + shared capabilities - Tier 2 */
 
     JSRuntime      *rt;
     JSContext      *ctx;
@@ -151,15 +151,15 @@ typedef struct HlJS {
      * UDF destroy callbacks check this before calling JS_FreeValue. */
     int             udf_runtime_alive;
 
-    /* CLI mode (app.main) — tracks main's eventual completion when it
+    /* CLI mode (app.main) - tracks main's eventual completion when it
      * returns a pending Promise. Set in vt_js_run_main; the C-side
      * .then callbacks attached to main's Promise stash the resolved
      * value here and call kl_server_stop. cli_main_value points at a
      * heap-allocated JSValue (opaque to this header to avoid pulling
-     * in quickjs.h here); owned by the runtime — freed in run_main. */
+     * in quickjs.h here); owned by the runtime - freed in run_main. */
     int             cli_main_active;     /* 1 = waiting on main's Promise */
     int             cli_main_rejected;   /* 1 = Promise rejected, 0 = fulfilled */
-    void           *cli_main_value;      /* JSValue * — borrowed in runtime.c */
+    void           *cli_main_value;      /* JSValue * - borrowed in runtime.c */
 } HlJS;
 
 /* ── Vtable ────────────────────────────────────────────────────────── */
@@ -309,7 +309,7 @@ void hl_js_worker_register_init(HlJsWorkerInitFn fn);
 /*
  * HlJsWorkerDispatchOp + the hl_js_worker_dispatch_* functions and
  * hl_js_worker_db_init moved to src/hull/runtime/js/internal.h as
- * part of architectural roadmap item J — they're Hull-internal
+ * part of architectural roadmap item J - they're Hull-internal
  * machinery, not consumed by any external code.
  */
 

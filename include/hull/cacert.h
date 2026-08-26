@@ -1,5 +1,5 @@
 /*
- * cacert.h — Embedded Mozilla CA bundle (optional)
+ * cacert.h - Embedded Mozilla CA bundle (optional)
  *
  * When HL_EMBED_CA_BUNDLE is defined at build time, hull embeds a copy
  * of Mozilla's CA bundle (as distributed by curl.se) so HTTPS works in
@@ -25,7 +25,7 @@ extern "C" {
  * mbedtls_x509_crt_parse). Returns 0 on success, -1 if no bundle is
  * embedded in this build.
  *
- *   *data  → pointer to PEM bytes (do not free — points into .rodata)
+ *   *data  → pointer to PEM bytes (do not free - points into .rodata)
  *   *len   → length INCLUDING the trailing NUL byte
  */
 int hl_embedded_ca_bundle(const unsigned char **data, size_t *len);

@@ -1,5 +1,5 @@
 /*
- * test_fs_resolve.c — descriptor-relative virtual-root resolver (checkpoint 1).
+ * test_fs_resolve.c - descriptor-relative virtual-root resolver .
  *
  * Exercises hl_fs_open_at / hl_fs_open_base against a real temp tree: READ,
  * WRITE (mkdir-p + O_TRUNC), in-base symlink follow, absolute-symlink re-root,

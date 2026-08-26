@@ -1,5 +1,5 @@
 /*
- * test_cfi.c — Control-Flow Integrity death test.
+ * test_cfi.c - Control-Flow Integrity death test.
  *
  * Verifies that when the binary is built with `-fsanitize=cfi-icall`
  * (HL_ENABLE_CFI=1), an indirect call through a wrong-typed function
@@ -8,7 +8,7 @@
  * Pattern: take the address of a function with one signature, cast
  * it through void* to a different signature, fork, call the pointer
  * in the child.  Parent asserts the child died with SIGILL or
- * SIGTRAP (the CFI trap signal varies by platform — Linux x86_64
+ * SIGTRAP (the CFI trap signal varies by platform - Linux x86_64
  * raises SIGILL via `ud2`; aarch64 raises SIGTRAP via `brk #1`).
  *
  * Skip cleanly on platforms / toolchains that don't enable CFI:
@@ -91,7 +91,7 @@ UTEST(cfi, wrong_typed_indirect_call_traps)
         signal(SIGBUS,  SIG_DFL);
         /* Wrong-typed call.  CFI MUST trap here. */
         (void)fake(0);
-        /* If we got here, CFI did NOT trap — fail the test. */
+        /* If we got here, CFI did NOT trap - fail the test. */
         _exit(0);
     }
     ASSERT_TRUE(pid > 0);
@@ -100,7 +100,7 @@ UTEST(cfi, wrong_typed_indirect_call_traps)
     pid_t w = waitpid(pid, &status, 0);
     ASSERT_EQ(pid, w);
     ASSERT_TRUE_MSG(WIFSIGNALED(status),
-        "CFI did NOT trap on wrong-typed indirect call — "
+        "CFI did NOT trap on wrong-typed indirect call - "
         "check that HL_ENABLE_CFI=1 reached this TU's compile flags");
     int sig = WTERMSIG(status);
     /* CFI traps with different signals on different platforms:

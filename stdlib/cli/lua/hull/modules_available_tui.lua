@@ -1,4 +1,4 @@
--- stdlib/lua/hull/modules_available_tui.lua — searchable module registry.
+-- stdlib/lua/hull/modules_available_tui.lua - searchable module registry.
 --
 -- Run via `hull modules available --tui`. Two-pane: scrollable list
 -- of every first-party module on the left, detail panel (deps,

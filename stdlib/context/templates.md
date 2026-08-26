@@ -16,10 +16,10 @@ const html = template.render("pages/home.html", { title: "Hello", user: { name: 
 ```
 
 **Syntax:**
-- `{{ var }}` — HTML-escaped output
-- `{{ var.path }}` — dot path lookup (nil-safe)
-- `{{{ var }}}` — raw/unescaped output
-- `{{ var | filter }}` — apply filter
+- `{{ var }}` - HTML-escaped output
+- `{{ var.path }}` - dot path lookup (nil-safe)
+- `{{{ var }}}` - raw/unescaped output
+- `{{ var | filter }}` - apply filter
 - `{% if cond %}` ... `{% elif %}` ... `{% else %}` ... `{% end %}`
 - `{% for item in list %}` ... `{% end %}`
 - `{% extends "base.html" %}` / `{% block name %}` ... `{% end %}`
@@ -29,10 +29,10 @@ const html = template.render("pages/home.html", { title: "Hello", user: { name: 
 <!-- compact -->
 ## API
 
-- **`template.render(name, data)`** — load, compile, render (cached after first call)
-- **`template.render_string(source, data)`** / `template.renderString(...)` — compile from string
-- **`template.compile(name)`** — returns compiled function for repeated rendering
-- **`template.clear_cache()`** / `template.clearCache()` — clear compiled cache
+- **`template.render(name, data)`** - load, compile, render (cached after first call)
+- **`template.render_string(source, data)`** / `template.renderString(...)` - compile from string
+- **`template.compile(name)`** - returns compiled function for repeated rendering
+- **`template.clear_cache()`** / `template.clearCache()` - clear compiled cache
 
 ## Filters
 

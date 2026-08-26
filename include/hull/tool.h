@@ -1,5 +1,5 @@
 /*
- * tool.h — Tool mode: unsandboxed Lua VM for build tools
+ * tool.h - Tool mode: unsandboxed Lua VM for build tools
  *
  * hull build/verify/inspect/manifest run Lua stdlib scripts with
  * full filesystem access (io/os available). hull keygen is pure C.
@@ -22,7 +22,7 @@ int hull_tool(const char *module, int argc, char **argv, const char *hull_exe);
 
 /*
  * Generate an Ed25519 keypair and write to files.
- * Pure C — no Lua VM needed.
+ * Pure C - no Lua VM needed.
  *
  * Returns process exit code (0 = success).
  */

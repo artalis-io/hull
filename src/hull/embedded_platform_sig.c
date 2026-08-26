@@ -1,5 +1,5 @@
 /*
- * embedded_platform_sig.c — Accessor for the embedded signed
+ * embedded_platform_sig.c - Accessor for the embedded signed
  * platform manifest blob.
  *
  * When `HL_EMBED_PLATFORM_SIG` is defined at build time (CI sets it
@@ -8,7 +8,7 @@
  * (local dev), the accessor returns -1 and the rest of the codebase
  * short-circuits the platform-sig check.
  *
- * Mirrors the cacert.c pattern exactly — generated header from xxd,
+ * Mirrors the cacert.c pattern exactly - generated header from xxd,
  * gated by a compile-time macro, expose via a stable accessor.
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later

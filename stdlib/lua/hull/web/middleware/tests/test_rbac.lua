@@ -1,4 +1,4 @@
--- test_rbac.lua — Tests for hull.web.middleware.rbac
+-- test_rbac.lua - Tests for hull.web.middleware.rbac
 --
 -- Tests role-based access control.
 -- Requires db global (run via C test harness with caps).

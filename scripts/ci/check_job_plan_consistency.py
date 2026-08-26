@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # check_job_plan_consistency.py - assert the ci.yml job `if:` conditions and the
 # ci-success gate's allow-skip derive from the SAME job-applicability map
-# (job_plan.py). Slice 3b safety guard: prevents a job's skip-condition from
+# (job_plan.py). Safety guard: prevents a job's skip-condition from
 # drifting away from what the gate believes may skip. Run in the `classify` job.
 #
 # Checks (all must hold):

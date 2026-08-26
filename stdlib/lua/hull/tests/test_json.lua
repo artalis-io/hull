@@ -1,4 +1,4 @@
--- test_json.lua — Tests for Hull JSON wrapper (hull.json)
+-- test_json.lua - Tests for Hull JSON wrapper (hull.json)
 --
 -- Tests the Hull wrapper API contract.
 -- Run via: the C test harness (test_lua_runtime.c) loads and executes this.

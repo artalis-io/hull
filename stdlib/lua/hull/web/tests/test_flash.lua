@@ -1,4 +1,4 @@
--- test_flash.lua — Tests for hull.web.flash
+-- test_flash.lua - Tests for hull.web.flash
 --
 -- Covers input validation and the HX-Trigger path. The session-backed
 -- paths (set / consume) require a live SQLite session store; they are

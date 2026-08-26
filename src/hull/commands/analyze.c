@@ -1,5 +1,5 @@
 /*
- * commands/analyze.c — hull analyze subcommand
+ * commands/analyze.c - hull analyze subcommand
  *
  * Thin wrapper: launches the Lua tool VM with the hull.source.analyze module, which
  * parses the app's Lua source via hull.source.lua and reports diagnostics (see

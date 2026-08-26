@@ -1,5 +1,5 @@
 /*
- * commands/deploy.c — hull deploy subcommand
+ * commands/deploy.c - hull deploy subcommand
  *
  * Thin wrapper: launches the Lua tool VM with hull.deploy module.
  *

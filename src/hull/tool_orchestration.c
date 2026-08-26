@@ -1,5 +1,5 @@
 /*
- * tool_orchestration.c — orchestration bindings for the `tool` global
+ * tool_orchestration.c - orchestration bindings for the `tool` global
  *
  * Split out of runtime/lua/mod_tool.c per architectural audit A-1.
  * runtime/lua/ stays a thin binding layer (spawn / mkdir / copy /
@@ -43,7 +43,7 @@
  * walk it through the resolver, and return either {ok=true, modules=...}
  * or {ok=false, error=...}. Used by `hull build` to validate the
  * manifest before signing. The fs/env/hosts arrays here are converted
- * to counts only — the resolver doesn't need the actual values. */
+ * to counts only - the resolver doesn't need the actual values. */
 static int l_tool_modules_resolve(lua_State *L)
 {
     luaL_checktype(L, 1, LUA_TTABLE);
@@ -94,7 +94,7 @@ static int l_tool_modules_resolve(lua_State *L)
     m.gpu = lua_toboolean(L, -1);
     lua_pop(L, 1);
 
-    /* modules — copy names so the resolver sees stable pointers. */
+    /* modules - copy names so the resolver sees stable pointers. */
     char *owned_names[HL_MANIFEST_MAX_MODULES] = {0};
     int owned_count = 0;
     lua_getfield(L, 1, "modules");
@@ -222,7 +222,7 @@ static int l_tool_modules_resolve(lua_State *L)
 
     /* needs_http = does the resolved set require any HTTP subsystem (server or
      * client)? Drives `hull build`'s decision to compose the http core + the
-     * per-runtime web bindings (issue #114, Phase C2). Reliable because the
+     * per-runtime web bindings (issue #114). Reliable because the
      * route/ws/sse decorations (app.get/…) only exist when an HTTP module is
      * declared, so a serving app always trips an HTTP cap here. */
     uint32_t req_caps = hl_module_set_required_caps(&set);
@@ -320,7 +320,7 @@ static int l_tool_build_flavor(lua_State *L)
     return 1;
 }
 
-/* ── tool.doctor_json() — render the `hull doctor --json` payload ── */
+/* ── tool.doctor_json() - render the `hull doctor --json` payload ── */
 
 /* Wrapping `hl_doctor_collect_json` via tmpfile() avoids
  * reimplementing the JSON payload in Lua. Consumed by
@@ -394,7 +394,7 @@ static int l_tool_agent_context(lua_State *L)
 
 extern const HlEntry hl_app_entries[];
 
-/* ── tool.migrate_status(app_dir, db_path) — applied/pending list ── */
+/* ── tool.migrate_status(app_dir, db_path) - applied/pending list ── */
 
 static int l_tool_migrate_status(lua_State *L)
 {
@@ -446,7 +446,7 @@ static int l_tool_migrate_status(lua_State *L)
 }
 #endif
 
-/* ── tool.modules_available — every first-party registry entry ──── */
+/* ── tool.modules_available - every first-party registry entry ──── */
 
 static int l_tool_modules_available(lua_State *L)
 {
@@ -504,13 +504,13 @@ static int l_tool_modules_available(lua_State *L)
     return 1;
 }
 
-/* ── tool.dev_* — hull dev --tui bindings ─────────────────────────── */
+/* ── tool.dev_* - hull dev --tui bindings ─────────────────────────── */
 
 /* All dev_* accessors consult hl_dev_state(), which is a no-op
  * (returns nil / safe defaults) when hull dev --tui isn't running.
  * That lets the stdlib's *_tui modules load cleanly in tests too.
  * The dev-state machinery (commands/dev.c) exists solely for `hull dev --tui`,
- * so it — and these bindings — need BOTH the inbound-HTTP server (hull dev) and
+ * so it - and these bindings - need BOTH the inbound-HTTP server (hull dev) and
  * the TUI subsystem. On a TUI-off build (base composing TUI as a feature) they
  * drop out together with the dev-state singleton. */
 #if defined(HL_ENABLE_HTTP_SERVER) && defined(HL_TUI_LINKED)

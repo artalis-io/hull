@@ -1,5 +1,5 @@
 #!/bin/sh
-# E2E test: `hull build --no-compiler` — the compiler-free build path.
+# E2E test: `hull build --no-compiler` - the compiler-free build path.
 #
 # Emits app_registry.o directly (obj_emit), extracts the bundled app_main.o +
 # app_feature_registry-<rt>.o, and links with no C compiler. Builds a real app

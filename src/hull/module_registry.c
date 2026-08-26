@@ -1,5 +1,5 @@
 /*
- * module_registry.c — Canonical first-party Hull module table.
+ * module_registry.c - Canonical first-party Hull module table.
  *
  * Sorted by `name` in `strcmp` order so lookups can binary-search.
  * Adding a new module: insert in sort order, then bump the sort-order
@@ -11,7 +11,7 @@
  * checks `required_caps` against those).
  *
  * v0.2.0 reorganization (§1.3): strictly-web modules moved under
- * the hull/web/ namespace — see docs/roadmap_next.md §1.3 for the
+ * the hull/web/ namespace - see docs/roadmap_next.md §1.3 for the
  * move table.
  * Modules kept flat: hull/jwt (cross-cutting), hull/http-server
  * (foundational primitive), hull/template (content-type agnostic),
@@ -34,7 +34,7 @@
  *   .required_caps = HL_MOD_CAP_*, .deps = {"hull/bar", NULL}
  *
  * Entries MUST stay sorted by `name` (strcmp). Insertions in the
- * middle of the table are intentional — keep them sorted.
+ * middle of the table are intentional - keep them sorted.
  */
 static const HlModuleSpec REGISTRY[] = {
     /* ── Intrinsic core (always present, no declaration needed) ───── */
@@ -60,7 +60,7 @@ static const HlModuleSpec REGISTRY[] = {
     {
         /* Attachment storage: content-addressed disk via hull/blob,
          * metadata + dedup-by-refcount via hull/db. Flat top-level
-         * (not under hull/web/) — the core API (store/read/metadata/
+         * (not under hull/web/) - the core API (store/read/metadata/
          * delete) is FS+DB only and works in CLI tools. The web-
          * specific auth-gated serve(req, res, id) lives in a separate
          * hull/web/attachment-serve@1 module. */
@@ -74,7 +74,7 @@ static const HlModuleSpec REGISTRY[] = {
     },
     {
         /* Content-addressed blob storage. Caller declares a fs.write
-         * path; blob.init() validates against it. No SQLite dep —
+         * path; blob.init() validates against it. No SQLite dep -
          * works under HL_ENABLE_DB=0 (compute-only builds). */
         .name = "hull/blob",
         .api_major = 1, .intrinsic = 0, .pure = 0,
@@ -112,9 +112,9 @@ static const HlModuleSpec REGISTRY[] = {
          * (base64url(payload) "." hex(hmac)). Used internally by
          * hull/web/auth-flows tokens and hull/web/middleware/oauth
          * state cookies; the pattern is intentionally pulled out
-         * so the signature framing — including the pcall around
+         * so the signature framing - including the pcall around
          * hmac_sha256_verify that turns malformed-hex into a clean
-         * "bad tag" — lives in one place. */
+         * "bad tag" - lives in one place. */
         .name = "hull/crypto/envelope",
         .api_major = 1, .intrinsic = 0, .pure = 1,
         .required_caps = 0,
@@ -133,7 +133,7 @@ static const HlModuleSpec REGISTRY[] = {
     {
         .name = "hull/email",
         .api_major = 1, .intrinsic = 0, .pure = 0,
-        /* email dispatches to either SMTP or HTTPS API providers — both
+        /* email dispatches to either SMTP or HTTPS API providers - both
          * are reachable from the same email.send() entry point, so both
          * are hard deps. Auto-pulls hull/log + hull/json for structured
          * error logging and provider payload marshaling. */
@@ -156,7 +156,7 @@ static const HlModuleSpec REGISTRY[] = {
         .required_caps = HL_MOD_CAP_GPU, .deps = {0},
     },
     {
-        /* Outbound HTTPS client — http.fetch. Renamed from
+        /* Outbound HTTPS client - http.fetch. Renamed from
          * hull/http@1 (which was misleading; it was always the
          * client). The server-side counterpart is hull/http-server@1.
          * Stays flat in v0.2.0: cross-cutting (CLI tools, batch
@@ -167,14 +167,14 @@ static const HlModuleSpec REGISTRY[] = {
         .deps = {0},
     },
     {
-        /* Inbound HTTP server — REST verbs + middleware + router.
+        /* Inbound HTTP server - REST verbs + middleware + router.
          * Declaring this module decorates the `app` intrinsic with:
          *   app.get / .post / .put / .delete / .patch / .options
          *   app.use / .use_post
          *   app.router(prefix, opts)
          * Without it, those methods don't exist on `app` at all
          * (attempt to call a nil value / not a function). Replaces
-         * the vestigial hull/server@1 module — middleware modules
+         * the vestigial hull/server@1 module - middleware modules
          * now depend on hull/http-server.
          *
          * Stays flat in v0.2.0: foundational primitive that the
@@ -216,7 +216,7 @@ static const HlModuleSpec REGISTRY[] = {
         /* json was intrinsic in early v0.1.0; demoted to declared so
          * the intrinsic core is just `app`. The runtime's response
          * helpers (res:json / res.json) keep working at the C level
-         * without requiring this declaration — apps only need to
+         * without requiring this declaration - apps only need to
          * declare it when they call json.encode/decode directly. */
         .name = "hull/json",
         .api_major = 1, .intrinsic = 0, .pure = 1,
@@ -224,7 +224,7 @@ static const HlModuleSpec REGISTRY[] = {
     },
     {
         /* JWT stays flat in v0.2.0: cross-cutting (API auth, CLI
-         * tokens, service-to-service signing — not strictly web). */
+         * tokens, service-to-service signing - not strictly web). */
         .name = "hull/jwt",
         .api_major = 1, .intrinsic = 0, .pure = 1,
         .required_caps = 0,
@@ -264,7 +264,7 @@ static const HlModuleSpec REGISTRY[] = {
     {
         /* Content-MIME sniffer. Thin binding around hl_cap_mime_sniff:
          * mime.sniff(bytes) returns the sniffed MIME string or nil.
-         * Pure — no fs/network/db access — usable in CLI tools as
+         * Pure - no fs/network/db access - usable in CLI tools as
          * well as servers. */
         .name = "hull/mime",
         .api_major = 1, .intrinsic = 0, .pure = 1,
@@ -311,13 +311,13 @@ static const HlModuleSpec REGISTRY[] = {
     {
         .name = "hull/smtp",
         .api_major = 1, .intrinsic = 0, .pure = 0,
-        /* SMTP client — outbound mail delivery. */
+        /* SMTP client - outbound mail delivery. */
         .required_caps = HL_MOD_CAP_HOSTS | HL_MOD_CAP_HTTP_CLIENT,
         .deps = {0},
     },
     {
         /* Template engine stays flat in v0.2.0: content-type
-         * agnostic. The engine itself doesn't know HTML — apps render
+         * agnostic. The engine itself doesn't know HTML - apps render
          * any text (emails, configs, codegen). */
         .name = "hull/template",
         .api_major = 1, .intrinsic = 0, .pure = 1,
@@ -329,12 +329,12 @@ static const HlModuleSpec REGISTRY[] = {
         .api_major = 1, .intrinsic = 0, .pure = 0,
         .required_caps = 0, .deps = {0},
     },
-    /* Timers — declaring this module decorates the `app` intrinsic
+    /* Timers - declaring this module decorates the `app` intrinsic
      * with `app.every(ms, fn)` and `app.daily(hhmm, fn)`. Without it
      * those methods don't exist on `app` at all (calling them raises
      * "attempt to call a nil value"). The methods grant no new
-     * authority — the handler runs in the same sandbox with the
-     * same declared caps — but the declaration makes background
+     * authority - the handler runs in the same sandbox with the
+     * same declared caps - but the declaration makes background
      * activity visible to a reviewer reading the manifest. */
     {
         .name = "hull/timers",
@@ -392,7 +392,7 @@ static const HlModuleSpec REGISTRY[] = {
         .api_major = 1, .intrinsic = 0, .pure = 0,
         .required_caps = HL_MOD_CAP_HTTP_SERVER | HL_MOD_CAP_DB,
         /* hull/crypto/envelope transitively brings hull/crypto +
-         * hull/json — both are still imported directly by the
+         * hull/json - both are still imported directly by the
          * module (hash_password, base64url, json) but the
          * resolver admits them via the dep chain so they don't
          * need re-declaration here.
@@ -400,7 +400,7 @@ static const HlModuleSpec REGISTRY[] = {
          * hull/web/pwned + hull/web/middleware/audit-log are now
          * eager top-level requires on both runtimes (Lua dropped
          * its pcall(require, ...) pattern so the transitive
-         * declaration footprint is symmetric — QuickJS can't
+         * declaration footprint is symmetric - QuickJS can't
          * dynamic-import). The check_pwned_passwords / sign_in_log
          * opts still gate whether those modules' side-effects are
          * triggered at request time. The HIBP host is gated at
@@ -417,7 +417,7 @@ static const HlModuleSpec REGISTRY[] = {
                  "hull/log", 0},
     },
     {
-        /* Runtime health probes for the auth stack. Read-only —
+        /* Runtime health probes for the auth stack. Read-only -
          * checks the shape of _hull_* tables, pwned.health() state,
          * audit-log cleanup scheduling. Apps wire auth_health.routes
          * to expose a JSON endpoint that the `hull agent auth-status`
@@ -437,8 +437,8 @@ static const HlModuleSpec REGISTRY[] = {
     },
     {
         /* One-shot user notifications across POST/redirect/GET. Two
-         * emission paths: session-backed (set/consume — needs
-         * middleware/session) and HTMX HX-Trigger (trigger — pure
+         * emission paths: session-backed (set/consume - needs
+         * middleware/session) and HTMX HX-Trigger (trigger - pure
          * header set, no session). Session is a hard dep so the
          * session-backed path always works once the module is
          * declared. */
@@ -463,7 +463,7 @@ static const HlModuleSpec REGISTRY[] = {
         .required_caps = 0, .deps = {0},
     },
     {
-        /* HTMX confirm dialog widget — server-side helper that
+        /* HTMX confirm dialog widget - server-side helper that
          * renders the attribute string the shipped client JS at
          * /static/hull/htmx/confirm/confirm.js consumes. The
          * client intercepts htmx:confirm, shows a native <dialog>
@@ -473,14 +473,14 @@ static const HlModuleSpec REGISTRY[] = {
          *
          * Pure attribute-string builder; no I/O. No runtime
          * dependencies (the json/htmx modules aren't touched
-         * server-side — the entire dialog flow is client-side). */
+         * server-side - the entire dialog flow is client-side). */
         .name = "hull/web/htmx/confirm",
         .api_major = 1, .intrinsic = 0, .pure = 1,
         .required_caps = 0,
         .deps = {"hull/web/htmx", 0},
     },
     {
-        /* HTMX form widget — server-side helpers for rendering
+        /* HTMX form widget - server-side helpers for rendering
          * field-level validation errors (consuming a hull/validate
          * result) plus shipped client JS that puts the submit
          * button into aria-busy / disabled / optional label-swap
@@ -488,7 +488,7 @@ static const HlModuleSpec REGISTRY[] = {
          *
          * Pure HTML-string builder; no I/O. Soft-coupled to
          * hull/validate at the data shape level (a field-name ->
-         * message map) but doesn't require it — helpers accept
+         * message map) but doesn't require it - helpers accept
          * the bare table and degrade cleanly when nil. */
         .name = "hull/web/htmx/form",
         .api_major = 1, .intrinsic = 0, .pure = 1,
@@ -496,7 +496,7 @@ static const HlModuleSpec REGISTRY[] = {
         .deps = {"hull/web/htmx", 0},
     },
     {
-        /* HTMX inline-edit widget — canonical click-to-edit
+        /* HTMX inline-edit widget - canonical click-to-edit
          * pattern. Two server helpers (cell + editor) emit the
          * htmx attributes for the GET→PATCH round trip. Two
          * server endpoints per editable field; pure hypermedia
@@ -513,7 +513,7 @@ static const HlModuleSpec REGISTRY[] = {
         .deps = {"hull/web/htmx", 0},
     },
     {
-        /* HTMX pagination widget — htmx-attributed nav rendered
+        /* HTMX pagination widget - htmx-attributed nav rendered
          * over the existing hull/web/pagination@1 page-math.
          * Replaces the ~30-line _pagination.html partial every
          * hypermedia app writes by hand. Pure HTML-string builder;
@@ -524,10 +524,10 @@ static const HlModuleSpec REGISTRY[] = {
         .deps = {"hull/web/htmx", "hull/web/pagination", 0},
     },
     {
-        /* HTMX search widget — server-side helpers that emit
+        /* HTMX search widget - server-side helpers that emit
          * htmx attributes for a debounced search input and the
          * a11y attributes for the results container. Pure
-         * htmx-native; no shipped client JS or CSS — the whole
+         * htmx-native; no shipped client JS or CSS - the whole
          * interaction is hx-trigger="input changed delay:..."
          * + server-rendered results swapped into the container.
          *
@@ -538,7 +538,7 @@ static const HlModuleSpec REGISTRY[] = {
         .deps = {"hull/web/htmx", 0},
     },
     {
-        /* HTMX sort widget — server-side helpers for sortable
+        /* HTMX sort widget - server-side helpers for sortable
          * column headers driven by ?sort=col[:asc|desc]. Two
          * functions: parse(req, opts) reads + allowlist-validates
          * the param; header_attrs(col, current, opts) returns the
@@ -552,7 +552,7 @@ static const HlModuleSpec REGISTRY[] = {
         .deps = {"hull/web/htmx", 0},
     },
     {
-        /* HTMX table widget — schema-driven <table> renderer that
+        /* HTMX table widget - schema-driven <table> renderer that
          * composes sort + inline-edit per column. The grid pattern
          * of every admin / data UI in one helper. Apps wire search
          * input + pagination separately. Pure HTML-string builder;
@@ -564,7 +564,7 @@ static const HlModuleSpec REGISTRY[] = {
                  "hull/web/htmx/inline-edit", 0},
     },
     {
-        /* HTMX toast widget — server-side helper that emits the
+        /* HTMX toast widget - server-side helper that emits the
          * HX-Trigger header consumed by the shipped client JS at
          * /static/hull/htmx/toast/toast.js. Structural CSS only;
          * apps style per-level appearance via [data-level] attrs.
@@ -581,7 +581,7 @@ static const HlModuleSpec REGISTRY[] = {
     /* ── Web middleware ──────────────────────────────────────────────
      * Every middleware consumes KlRequest/KlResponse and registers via
      * app.use() / app.use_post(), all of which need Keel's HTTP server.
-     * They share HL_MOD_CAP_HTTP_SERVER — apps targeting an
+     * They share HL_MOD_CAP_HTTP_SERVER - apps targeting an
      * HL_ENABLE_HTTP_SERVER=0 build can't declare any of them. */
     {
         /* Append-only sign-in / auth event log + per-device
@@ -690,7 +690,7 @@ static const HlModuleSpec REGISTRY[] = {
          * Also relies on hull/time at runtime via jwt.verify's exp
          * check but jwt itself declares hull/time, so the dep
          * transitively resolves through hull/jwt. */
-        /* hull/json is dropped from direct deps — hull/crypto/envelope
+        /* hull/json is dropped from direct deps - hull/crypto/envelope
          * (used by state_sign / state_verify) brings it transitively
          * via the resolver, freeing the slot needed for envelope
          * without losing the implicit `local json = require(...)`
@@ -780,7 +780,7 @@ static const HlModuleSpec REGISTRY[] = {
 
     /* ── Web real-time + WebSocket ──────────────────────────────────── */
     {
-        /* Server-Sent Events — declaring this decorates the `app`
+        /* Server-Sent Events - declaring this decorates the `app`
          * intrinsic with app.sse(path, handler). Server-push protocol
          * only; no client API in Hull. */
         .name = "hull/web/sse",
@@ -788,7 +788,7 @@ static const HlModuleSpec REGISTRY[] = {
         .required_caps = HL_MOD_CAP_HTTP_SERVER, .deps = {0},
     },
     {
-        /* WebSocket client — outbound ws.connect(). Requires a
+        /* WebSocket client - outbound ws.connect(). Requires a
          * non-empty hosts allowlist (capability gate enforced at
          * call time inside ws.connect). */
         .name = "hull/web/ws-client",
@@ -796,7 +796,7 @@ static const HlModuleSpec REGISTRY[] = {
         .required_caps = HL_MOD_CAP_HOSTS | HL_MOD_CAP_HTTP_SERVER, .deps = {0},
     },
     {
-        /* WebSocket server — declaring this decorates the `app`
+        /* WebSocket server - declaring this decorates the `app`
          * intrinsic with app.ws(path, handlers), and exposes
          * ws.broadcast(path, msg) and ws.connections(path) helpers
          * for managing connected clients. Split from the old
@@ -820,7 +820,7 @@ static const HlModuleSpec REGISTRY[] = {
  * hl_module_set_required_caps walks the whole registry through that set. If the
  * registry ever outgrew the bitset, indices past the width would be dropped:
  * gating fails closed (modules never admitted) but the required-caps count
- * would UNDER-count, which feeds hl_build_flavor_auto — a fail-OPEN on flavor
+ * would UNDER-count, which feeds hl_build_flavor_auto - a fail-OPEN on flavor
  * selection. Catch that at compile time instead. (C-audit 2026-07, Low-1.) */
 _Static_assert(REGISTRY_COUNT <= HL_MODULE_BITSET_WORDS * 64,
                "module registry outgrew the resolved-set bitset width; "
@@ -848,8 +848,8 @@ const HlModuleSpec *hl_module_registry_find_short(const char *short_name)
     if (!short_name) return NULL;
 
     /* Names that already start with the "hull/" canonical prefix are
-     * looked up as-is. Anything else — including names with embedded
-     * slashes like "web/middleware/session" — is treated as a short
+     * looked up as-is. Anything else - including names with embedded
+     * slashes like "web/middleware/session" - is treated as a short
      * alias inside the hull/ namespace and gets the prefix prepended.
      *
      * Once third-party vendors are supported the rule will need to be
@@ -918,7 +918,7 @@ void hl_module_registry_format_deps(const HlModuleSpec *spec,
         const char *sep = first ? "" : ", ";
         int n = snprintf(out + pos, cap - pos, "%s%s", sep, name);
         if (n < 0 || (size_t)n >= cap - pos) {
-            /* Out of room — leave whatever fit, ensure NUL. */
+            /* Out of room - leave whatever fit, ensure NUL. */
             out[cap - 1] = '\0';
             return;
         }
@@ -929,7 +929,7 @@ void hl_module_registry_format_deps(const HlModuleSpec *spec,
 
 /* ── Suggestion (Levenshtein) ───────────────────────────────────────── */
 
-/* Longest registry name today is "web/middleware/idempotency" (26 chars) —
+/* Longest registry name today is "web/middleware/idempotency" (26 chars) -
  * pad generously so future entries don't silently bust the bound. */
 #define SUGGEST_MAX_LEN 64
 
@@ -940,7 +940,7 @@ static int levenshtein(const char *a, size_t alen,
     if (alen == 0) return (int)blen;
     if (blen == 0) return (int)alen;
 
-    /* Swap so b is the shorter side — bounds the row to SUGGEST_MAX_LEN+1. */
+    /* Swap so b is the shorter side - bounds the row to SUGGEST_MAX_LEN+1. */
     if (blen > alen) {
         const char *t = a; a = b; b = t;
         size_t tl = alen; alen = blen; blen = tl;
@@ -971,7 +971,7 @@ static int levenshtein(const char *a, size_t alen,
 /* Normalize an input into a short form: strip "hull/" and "web/"
  * prefixes so the v0.2.0 namespace shift doesn't make typos of old
  * short names (e.g. "middleware/sesssion") fall out of suggestion
- * range. Lowercase nothing — registry names are all lowercase, so
+ * range. Lowercase nothing - registry names are all lowercase, so
  * we match case-sensitively. Output buffer must be SUGGEST_MAX_LEN+1
  * bytes. Returns the strlen of out, or SIZE_MAX if input is too
  * long / NULL. */
@@ -1024,7 +1024,7 @@ const HlModuleSpec *hl_module_registry_suggest(const char *input)
         if (d < best_dist) {
             best_dist = d;
             best = &REGISTRY[i];
-            if (d == 0) break;  /* exact (shouldn't happen — caller checks) */
+            if (d == 0) break;  /* exact (shouldn't happen - caller checks) */
         }
     }
 

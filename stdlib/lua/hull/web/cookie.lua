@@ -104,7 +104,7 @@ function cookie.serialize(name, value, opts)
         parts[#parts + 1] = "Max-Age=" .. tostring(opts.max_age)
     end
 
-    -- Domain — RFC 6265 attribute syntax. Accepts an optional leading "."
+    -- Domain - RFC 6265 attribute syntax. Accepts an optional leading "."
     -- (legacy subdomain-matching form, still in widespread use). Rejects
     -- length > 253, double dots, trailing dots, and any non-host characters.
     if opts.domain then

@@ -1,4 +1,4 @@
--- REST API — Hull + Lua example
+-- REST API - Hull + Lua example
 --
 -- Run: hull app.lua -p 3000
 -- CRUD API for managing tasks with i18n error messages

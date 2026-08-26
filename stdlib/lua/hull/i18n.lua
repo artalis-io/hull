@@ -126,7 +126,7 @@ end
 
 --- Translate a key in the active locale, with `${var}` interpolation.
 --
--- Supports dotted paths (`"errors.not_found"`) — nested tables in the
+-- Supports dotted paths (`"errors.not_found"`) - nested tables in the
 -- registered locale are walked.
 --
 -- @tparam string key       Translation key.

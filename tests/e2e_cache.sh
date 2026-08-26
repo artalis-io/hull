@@ -1,5 +1,5 @@
 #!/bin/sh
-# e2e_cache.sh — End-to-end tests for `hull cache list|prune|clear`
+# e2e_cache.sh - End-to-end tests for `hull cache list|prune|clear`
 # plus the HULL_CACHE_DIR per-app isolation override.
 #
 # SPDX-License-Identifier: AGPL-3.0-or-later
@@ -15,7 +15,7 @@ esac
 PASS=0
 FAIL=0
 pass() { PASS=$((PASS + 1)); echo "  PASS: $1"; }
-fail() { FAIL=$((FAIL + 1)); echo "  FAIL: $1${2:+ — $2}"; }
+fail() { FAIL=$((FAIL + 1)); echo "  FAIL: $1${2:+ - $2}"; }
 
 # Hermetic HOME so we never touch the developer's real cache pool.
 TMPHOME=$(mktemp -d)
@@ -67,7 +67,7 @@ case "$JSON" in
 esac
 
 # ── 3. Populate the bytecode cache by booting any app ──────────
-# Use the hello example — it loads the Lua stdlib which exercises the
+# Use the hello example - it loads the Lua stdlib which exercises the
 # bytecode cache. Bind to a high port + --no-sandbox so it stays
 # hermetic.
 TMPDB=$(mktemp -d)
@@ -147,7 +147,7 @@ kill -KILL $PID 2>/dev/null || true
 
 # Plant a fake "tools" file to prove default clear leaves it alone.
 # Filename must be 64 lowercase hex chars to pass blob_store's
-# validate_id — otherwise cleanup walks past it and the "default
+# validate_id - otherwise cleanup walks past it and the "default
 # clear preserves tools" check is meaningless.
 mkdir -p "$TMPHOME/.hull/blobs/tools/blobs/aa"
 FAKE_TOOL="$TMPHOME/.hull/blobs/tools/blobs/aa/aa1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcd"
@@ -421,7 +421,7 @@ OUT=$("$HULL" cache prune --max-size=104857600 --dry-run 2>&1) || RC=$?
 # ── 20. doctor surfaces a "large cache" warning past the threshold
 LARGE_HOME=$(mktemp -d)
 mkdir -p "$LARGE_HOME/.hull/blobs/runtime/lua-bytecode/blobs/aa"
-# 300 MB of zeros — comfortably past the 250 MB per-kind threshold.
+# 300 MB of zeros - comfortably past the 250 MB per-kind threshold.
 # bs=1m is a macOS-ism (Linux uses 1M); use 1024*1024 bytes for both.
 dd if=/dev/zero of="$LARGE_HOME/.hull/blobs/runtime/lua-bytecode/blobs/aa/aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899" \
     bs=1048576 count=300 >/dev/null 2>&1
@@ -556,7 +556,7 @@ rm -rf "$VERIFY_HOME"
 
 # ── 24. `verify` exits non-zero when a cache store can't be opened ──
 # Plant a regular file where the lua-bytecode cache dir is supposed
-# to be — blob_store_open's mkdir fails, hl_blob_store_open returns
+# to be - blob_store_open's mkdir fails, hl_blob_store_open returns
 # non-zero, the verify codepath records "open_failed" + bumps rc.
 # CI gates consuming `verify --json` need this so "couldn't even
 # inspect some kinds" never reads as "all clean".

@@ -83,7 +83,7 @@ function set(req, text, kind) {
         );
     }
     if (!sess.flash) sess.flash = [];
-    // Silently drop when the queue is at the cap — a handler
+    // Silently drop when the queue is at the cap - a handler
     // accumulating without consuming is buggy; growing the session
     // row to multiple KB on every render is worse than dropping.
     if (sess.flash.length >= FLASH_MAX_ENTRIES) return;

@@ -1,14 +1,14 @@
-/* memops.c — #327 fixture. Exercises the canonical header's bare
+/* memops.c - #327 fixture. Exercises the canonical header's bare
  * memcpy/memset/memmove via BOTH compiler-generated lowering (runtime-length
  * byte loops) AND direct calls, covering every tricky case the reviewer asked
  * for: memmove in both overlap directions, identical pointers, and zero length;
- * memcpy at misaligned source/destination offsets (disjoint only — memcpy keeps
+ * memcpy at misaligned source/destination offsets (disjoint only - memcpy keeps
  * the standard no-overlap contract); memset at a misaligned destination.
  *
  * The module only PERFORMS the operations and copies each result into the output
  * buffer; the harness (tests/hull/cap/test_wasm_memops.c and
  * tests/e2e_compute_memops.sh) holds the expected bytes and verifies. Nothing is
- * compared inside the module, so no memcmp/bcmp is emitted — the module stays
+ * compared inside the module, so no memcmp/bcmp is emitted - the module stays
  * self-contained (no libc/host imports at all).
  *
  * Output is 103 bytes:

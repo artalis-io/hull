@@ -1,5 +1,5 @@
 #!/bin/sh
-# tests/e2e_compute_headers.sh — `hull compute new` / `refresh-header` install and
+# tests/e2e_compute_headers.sh - `hull compute new` / `refresh-header` install and
 # refresh BOTH Hull-owned headers (hull_compute.h + hull_span.h) atomically,
 # reusing the existing embedded-string + write_file delivery (mapped-spans 3b,
 # slice 1). Covers: initial scaffolding, refresh of both, legacy one-header
@@ -86,7 +86,7 @@ else
 fi
 if [ "$(sha compute/foo/hull_compute.h)" = "$before_compute" ] \
    && [ "$(sha compute/foo/hull_span.h)" = "$before_span" ]; then
-    pass "refresh: rollback — neither header changed on failure (no mismatched pair)"
+    pass "refresh: rollback - neither header changed on failure (no mismatched pair)"
 else
     fail "refresh: rollback left a partial/mismatched update"
 fi

@@ -73,7 +73,7 @@ $(BUILDDIR)/libhull.a.sha256: $(BUILDDIR)/libhull.a
 	@echo "libhull.a sha256: $$(cat $@)"
 
 # embed-c-smoke: link the reference native host (examples/embed_c) against
-# libhull.a alone — no Lua/JS runtime linked — and run it. Proves the core
+# libhull.a alone - no Lua/JS runtime linked - and run it. Proves the core
 # archive is genuinely runtime-free: an undefined-symbol pull from either
 # runtime would fail the link here. The host drives the two-phase sandbox,
 # capability-mediated fs I/O (incl. traversal rejection), crypto, the

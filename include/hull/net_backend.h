@@ -5,16 +5,16 @@
  * The higher-level half of Hull's net interface. Owns the HTTP server
  * lifecycle (bind/listen/accept), the router, request/response model,
  * middleware chain, WebSocket and SSE endpoints, body reading. Built
- * on top of HlAsyncBackend (see hull/async_backend.h) — the net
+ * on top of HlAsyncBackend (see hull/async_backend.h) - the net
  * backend doesn't own its own event loop, it borrows the async
  * backend's.
  *
  * One backend ships:
  *
- *   keel — wraps Keel's KlServer + KlRouter + KlRequest/KlResponse +
+ *   keel - wraps Keel's KlServer + KlRouter + KlRequest/KlResponse +
  *          KlBodyReader + KlWs + KlSse. Default when HL_ENABLE_HTTP=1.
  *
- * HL_ENABLE_HTTP=0 builds have no net backend at all — `hl_net_backend()`
+ * HL_ENABLE_HTTP=0 builds have no net backend at all - `hl_net_backend()`
  * returns NULL. Hull's CLI driver (serve_cli.c) doesn't consume the
  * net interface.
  *
@@ -34,7 +34,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-/* Forward declarations — backend-opaque types. */
+/* Forward declarations - backend-opaque types. */
 typedef struct HlAllocator       HlAllocator;
 typedef struct HlAsyncBackend    HlAsyncBackend;
 typedef struct HlAsyncBackendCtx HlAsyncBackendCtx;
@@ -48,7 +48,7 @@ typedef struct HlSuspendOp       HlSuspendOp;       /* opaque async-op handle (K
 /*
  * Request handler. Called by the net backend after route matching.
  * Returns 0 on success, non-zero to indicate the response is
- * pending (async — the handler will complete it later via the
+ * pending (async - the handler will complete it later via the
  * async backend's op_complete).
  */
 typedef int (*HlRouteHandler)(HlReqHandle *req, HlResHandle *res,
@@ -64,7 +64,7 @@ typedef int (*HlMiddleware)(HlReqHandle *req, HlResHandle *res,
 /* ── HlNetServerConfig ─────────────────────────────────────────────── */
 
 typedef struct HlNetServerConfig {
-    HlAsyncBackend    *async;       /* required — event loop */
+    HlAsyncBackend    *async;       /* required - event loop */
     HlAsyncBackendCtx *async_ctx;
     HlAllocator       *alloc;        /* may be NULL → backend default */
 
@@ -74,11 +74,11 @@ typedef struct HlNetServerConfig {
     long               body_max_size;
     int                read_timeout_ms;
 
-    /* Optional: TLS handle (opaque — exact type depends on the active
+    /* Optional: TLS handle (opaque - exact type depends on the active
      * TLS backend; today it's KlTlsCtx). May be NULL for plaintext. */
     void              *tls_ctx;
 
-    /* Optional: compression handle (opaque — KlCompressCtx today). */
+    /* Optional: compression handle (opaque - KlCompressCtx today). */
     void              *compress_ctx;
 } HlNetServerConfig;
 
@@ -168,7 +168,7 @@ typedef struct HlNetBackend {
     void   (*res_status)(HlResHandle *res, int status);
     void   (*res_header)(HlResHandle *res, const char *name, const char *value);
 
-    /* Body modes — call exactly one of body_copy, body_borrow,
+    /* Body modes - call exactly one of body_copy, body_borrow,
      * file, or stream_*. body_borrow does not copy; data must outlive
      * the response. */
     void   (*res_body_copy)  (HlResHandle *res, const char *data, size_t len);

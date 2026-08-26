@@ -1,5 +1,5 @@
 /*
- * agent/helpers.c — Shared agent_lib helpers (error JSON + entry detection).
+ * agent/helpers.c - Shared agent_lib helpers (error JSON + entry detection).
  *
  * Backend-agnostic, so it stays in the base even when SQLite is composed as a
  * feature (docs/sqlite_feature.md). The SQLite app-DB opener moved to

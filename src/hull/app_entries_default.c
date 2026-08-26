@@ -1,5 +1,5 @@
 /*
- * app_entries_default.c — Default empty app entries
+ * app_entries_default.c - Default empty app entries
  *
  * Provides the sentinel-terminated empty array. When building with
  * APP_DIR or via hull build, the generated app_registry.o overrides

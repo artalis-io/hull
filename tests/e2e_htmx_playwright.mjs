@@ -1,5 +1,5 @@
 /*
- * e2e_htmx_playwright.mjs — actual browser-side checks for the
+ * e2e_htmx_playwright.mjs - actual browser-side checks for the
  * HTMX example apps. Invoked by tests/e2e_htmx_playwright.sh
  * after it has spun up the relevant hull dev server.
  *
@@ -37,7 +37,7 @@ if (!suite || !base) {
     console.error("usage: node e2e_htmx_playwright.mjs <widgets|photos> <base-url> [runtime]");
     process.exit(2);
 }
-// Runtime label is purely cosmetic for now — used in the banner +
+// Runtime label is purely cosmetic for now - used in the banner +
 // (when traces ship) the artifact filename. Default "lua" matches
 // the historical default and keeps single-arg invocations working.
 const rt = runtime || "lua";
@@ -48,7 +48,7 @@ const logs = [];
 
 function ok(msg)        { console.log("  PASS:", msg); pass++; }
 function ko(msg, extra) {
-    console.log("  FAIL:", msg + (extra ? ` — ${extra}` : ""));
+    console.log("  FAIL:", msg + (extra ? ` - ${extra}` : ""));
     fail++;
 }
 
@@ -73,14 +73,14 @@ function attachDiagnostics(page) {
         const url = r.url();
         // Favicons can fail on some headless setups; not actionable.
         if (url.startsWith("data:")) return;
-        logs.push(`[reqfailed] ${url} — ${r.failure()?.errorText || "?"}`);
+        logs.push(`[reqfailed] ${url} - ${r.failure()?.errorText || "?"}`);
     });
 }
 
 // Run @axe-core against the current page and treat the WCAG verdict
 // as a test assertion. We fail HARD on `critical` or `serious`
 // findings (broken semantics, missing labels, keyboard traps) and
-// log `moderate` / `minor` as informational — those are real
+// log `moderate` / `minor` as informational - those are real
 // concerns but more theme-dependent (e.g., Pico's color-contrast
 // choices) and shouldn't gate every CI run while a theme is in
 // flux. The full violation list always prints so debugging
@@ -101,7 +101,7 @@ async function expectA11y(page, label) {
     // Always emit the full violation table to logs so failures show
     // node selectors + help URLs without a second debugger pass.
     for (const x of v) {
-        logs.push(`[axe.${x.impact}] ${x.id} — ${x.description} (${x.helpUrl})`);
+        logs.push(`[axe.${x.impact}] ${x.id} - ${x.description} (${x.helpUrl})`);
         for (const n of x.nodes.slice(0, 3)) {
             logs.push(`  • ${n.target.join(" ")}`);
         }
@@ -140,7 +140,7 @@ async function expectCssApplied(page) {
             .filter((s) => s.rules <= 0)
             .map((s) => `${s.href} (rules=${s.rules})`)
             .join(", ");
-        ko(`stylesheet(s) loaded with no rules — ${broken || "(none — count mismatch)"}`);
+        ko(`stylesheet(s) loaded with no rules - ${broken || "(none - count mismatch)"}`);
     }
 
     // Pico applies font-family and changes h1 sizing. Both are
@@ -154,7 +154,7 @@ async function expectCssApplied(page) {
     if (font && /sans-serif|system-ui|-apple-system|Helvetica|Arial|Inter/i.test(font)) {
         ok(`body font-family is sans-serif ("${font.split(",")[0].trim()}")`);
     } else {
-        ko(`body font-family is "${font}" — looks like Pico didn't apply`);
+        ko(`body font-family is "${font}" - looks like Pico didn't apply`);
     }
 }
 
@@ -166,7 +166,7 @@ async function expectCssApplied(page) {
 // chunk, which corrupts the DOM for any subsequent widget that targeted
 // the original layout. So sort-click is tested LAST, after every other
 // widget has had its turn against a clean DOM. (Filed as a sort-widget
-// bug to address separately — the hx-swap should be the parent grid,
+// bug to address separately - the hx-swap should be the parent grid,
 // not the header itself.)
 async function runWidgets(page) {
     await page.goto(base, { waitUntil: "networkidle" });
@@ -187,7 +187,7 @@ async function runWidgets(page) {
     //   1. waitForResponse must be set up BEFORE the action that
     //      triggers the request, or you race against the response.
     //   2. htmx's `input changed delay:250ms` listens for real
-    //      `input` events per keystroke — locator.fill() can dispatch
+    //      `input` events per keystroke - locator.fill() can dispatch
     //      a single synthetic event htmx misses; keyboard.type() after
     //      focus() reliably fires the chain.
     {
@@ -219,7 +219,7 @@ async function runWidgets(page) {
         await sleep(120);
     }
 
-    // ── inline-edit widget — plain `click` works under strict CSP
+    // ── inline-edit widget - plain `click` works under strict CSP
     {
         const firstEditable = page.locator(".hull-inline-edit-view").first();
         await firstEditable.click();
@@ -234,7 +234,7 @@ async function runWidgets(page) {
         }
     }
 
-    // ── form widget — server-side validation error renders inline
+    // ── form widget - server-side validation error renders inline
     // The form fields have HTML5 `required` attribute, so a normal
     // empty submit gets blocked by the browser before htmx fires.
     // To test server-side validation, drop the `required` attrs
@@ -263,7 +263,7 @@ async function runWidgets(page) {
         }
     }
 
-    // ── form widget + toast widget — valid submit ────────────────
+    // ── form widget + toast widget - valid submit ────────────────
     const tagName = `e2e-${Date.now()}`;
     {
         const respP = page.waitForResponse(
@@ -296,7 +296,7 @@ async function runWidgets(page) {
         ko(`pagination widget: expected >=2 links, got ${pageLinks}`);
     }
 
-    // ── confirm widget — delete opens <dialog> ───────────────────
+    // ── confirm widget - delete opens <dialog> ───────────────────
     {
         const delBtn = page.locator(".del-btn").first();
         if ((await delBtn.count()) === 0) {
@@ -315,12 +315,12 @@ async function runWidgets(page) {
         }
     }
 
-    // ── sort widget — rendered attrs + activation paths ──────────
+    // ── sort widget - rendered attrs + activation paths ──────────
     // Last because earlier the widget shipped hx-swap="outerHTML"
     // on the <th>, which replaced the whole header with the grid
     // response and corrupted later locators. The swap default is
     // now innerHTML (the example app passes swap="innerHTML"
-    // explicitly), so DOM stays sane — but the ordering convention
+    // explicitly), so DOM stays sane - but the ordering convention
     // is preserved in case a future change reintroduces the issue.
     {
         const sortHeader = page.locator('th[data-sort-column="name"]').first();
@@ -345,10 +345,10 @@ async function runWidgets(page) {
     // stale ones in the dying DOM.
     await sleep(200);
 
-    // ── sort widget — keyboard activation (regression for the
+    // ── sort widget - keyboard activation (regression for the
     // strict-CSP fix). The widget puts role="button" tabindex="0"
     // on a <th>, which doesn't natively dispatch click on
-    // Enter/Space — that's sort.js's job. Two checks: Enter and
+    // Enter/Space - that's sort.js's job. Two checks: Enter and
     // Space both fire the underlying click + hx-get.
     {
         // Enter on "category" header.
@@ -362,13 +362,13 @@ async function runWidgets(page) {
         else ko("sort widget: Enter key did not fire request");
     }
 
-    // Same swap-settle reason as above — the Enter response
+    // Same swap-settle reason as above - the Enter response
     // replaces #grid contents and the status header gets rebuilt.
     await sleep(200);
 
     {
         // Space on "status" header. Also implicitly verifies that
-        // sort.js preventDefault()s the Space keydown — without it,
+        // sort.js preventDefault()s the Space keydown - without it,
         // the browser would scroll the page instead of activating
         // the header. (Playwright doesn't fail on scroll, so we
         // catch the failure mode via the missing request.)
@@ -397,7 +397,7 @@ async function runPhotos(page) {
     if (feed === 1) ok("entry feed region renders");
     else ko(`expected #entry-feed, found ${feed}`);
 
-    // CSRF + session middleware should have set up scaffolding —
+    // CSRF + session middleware should have set up scaffolding -
     // verify a session cookie was issued on first request.
     const cookies = await page.context().cookies();
     const sessionCookie = cookies.find((c) => /session|csrf/i.test(c.name));
@@ -407,7 +407,7 @@ async function runPhotos(page) {
         ko(`no session/csrf cookie set (got ${cookies.length} cookies)`);
     }
 
-    // CSP middleware emits a per-request nonce — verify the header
+    // CSP middleware emits a per-request nonce - verify the header
     // is present AND contains a nonce-* token. Regression for
     // "dropped CSP middleware in a refactor".
     const csp = (await page.request.get(base)).headers()["content-security-policy"];
@@ -504,7 +504,7 @@ const page = await ctx.newPage();
 attachDiagnostics(page);
 
 // Tracing captures every action, network request, DOM snapshot, and
-// console event. The trace is only KEPT when the suite fails — on
+// console event. The trace is only KEPT when the suite fails - on
 // success we stop without writing, since the artifacts add up fast
 // (each suite trace is ~1-3 MB). `snapshots: true` records DOM at
 // each action so the trace viewer can rewind; `screenshots: true`

@@ -1,5 +1,5 @@
 /*
- * mod_db.c — hull:db module (query, exec, batch, async, udf)
+ * mod_db.c - hull:db module (query, exec, batch, async, udf)
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
@@ -205,7 +205,7 @@ static void js_free_string_array(JSContext *ctx, const char **strs, int count)
 }
 
 /* Check if the immediate JS caller is a stdlib module (module name starts
- * with "hull:").  User modules start with "./" — so a simple prefix check
+ * with "hull:").  User modules start with "./" - so a simple prefix check
  * is sufficient.  Returns 1 for stdlib, 0 for user code.
  *
  * n_stack_levels=1 skips the C function stack frame (level 0) to reach
@@ -440,7 +440,7 @@ static JSValue js_db_last_id(JSContext *ctx, JSValueConst this_val,
     return JS_NewInt64(ctx, hl_db_last_id(js_call_handle(ctx, this_val)));
 }
 
-/* db.batch(fn) — execute fn() inside a transaction (BEGIN IMMEDIATE..COMMIT) */
+/* db.batch(fn) - execute fn() inside a transaction (BEGIN IMMEDIATE..COMMIT) */
 static JSValue js_db_batch(JSContext *ctx, JSValueConst this_val,
                             int argc, JSValueConst *argv)
 {
@@ -476,7 +476,7 @@ static JSValue js_db_batch(JSContext *ctx, JSValueConst this_val,
 
 /* ── Dialect-aware helpers (insert_if_absent / upsert / table_columns) ── */
 
-/* Shared body for db.insertIfAbsent / db.upsert — they differ only in
+/* Shared body for db.insertIfAbsent / db.upsert - they differ only in
  * which vtable method they dispatch through. */
 static JSValue js_db_dialect_write(JSContext *ctx, JSValueConst this_val,
                                     int argc, JSValueConst *argv, int is_upsert,
@@ -633,7 +633,7 @@ static JSValue js_db_quote_identifier(JSContext *ctx, JSValueConst this_val,
 /* ── db.async.query / db.async.exec ─────────────────────────────────── */
 
 /* push_result callback: convert HlWorkerDbOp result to JSValue.
- * On error, returns JS_EXCEPTION (after throwing) — the async resume
+ * On error, returns JS_EXCEPTION (after throwing) - the async resume
  * machinery rejects the awaiting Promise. Successful exec returns
  * { changes, lastId }; query returns the rows array directly. */
 static JSValue js_push_worker_db_result(JSContext *ctx, void *driver)
@@ -657,7 +657,7 @@ static JSValue js_push_worker_db_result(JSContext *ctx, void *driver)
         return obj;
     }
 
-    /* HL_WORK_DB_QUERY — array of row objects */
+    /* HL_WORK_DB_QUERY - array of row objects */
     HlDbResult *r = &op->result;
     JSValue arr = JS_NewArray(ctx);
 
@@ -911,7 +911,7 @@ static JSValue js_db_wait_notify(JSContext *ctx, JSValueConst this_val,
     return js_db_async_common(ctx, this_val, argc, argv, HL_WORK_DB_WAIT_NOTIFY);
 }
 
-/* ── db.udf — user-defined SQL functions (JS) ────────────────────────── */
+/* ── db.udf - user-defined SQL functions (JS) ────────────────────────── */
 /* The SQLite UDF bindings live in the composed per-runtime bridge
  * (mod_db_udf.c → libhull_feature-sqlite-js.a) so THIS base runtime archive
  * carries no sqlite3_* references (docs/sqlite_feature.md). The

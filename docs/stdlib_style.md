@@ -34,7 +34,7 @@ as absence.*
 
 **Throwing is not HTTP.** A thrown error propagates to the enclosing execution
 boundary. An HTTP handler *may* map an unhandled failure to a 500, but the
-stdlib itself is transport-agnostic — a CLI or a job runner is an equally valid
+stdlib itself is transport-agnostic - a CLI or a job runner is an equally valid
 boundary. Never phrase a stdlib contract in terms of HTTP status.
 
 ### Outcome categories
@@ -67,7 +67,7 @@ try { db.exec(...); } catch (e) { if (e.code === "constraint_violation") { ... }
 Codes are lower-snake, stable across releases, and documented on the throwing
 function. A bare `error("message")` is fine where no caller branches on it;
 promote to a coded error the moment one does. (Retrofitting existing throws with
-codes is incremental — add a code when a branch needs it.)
+codes is incremental - add a code when a branch needs it.)
 
 ### Lua/JS: semantic, not syntactic, equivalence
 
@@ -82,7 +82,7 @@ returns nil vs returns data" decision.
 ## 2. Naming
 
 - **snake_case in Lua, camelCase in JS**, and the mapping must be faithful and
-  total — every option/field/function present in one runtime is present in the
+  total - every option/field/function present in one runtime is present in the
   other under the case-translated name. A name in one runtime and not the other
   (or spelled differently beyond case) is a parity bug.
 - **Time is seconds, and lifetimes are `*_ttl`.** Prefer `ttl` / `<thing>_ttl`
@@ -108,13 +108,13 @@ returns nil vs returns data" decision.
   applied, so a top-level bind fails or captures the wrong connection depending
   on require order. Acquire lazily inside `init()` / the middleware factory /
   the handler.
-- **`or` defaulting differs between the runtimes — mind which value it drops.**
+- **`or` defaulting differs between the runtimes - mind which value it drops.**
   In Lua only `nil` and `false` are falsy, so `opts.x or default` keeps `0` and
   `""` (unlike JS `||`, which drops them) but silently drops a legitimate
-  `false` — a real bug for a boolean option (`opts.secure or true` can never be
+  `false` - a real bug for a boolean option (`opts.secure or true` can never be
   `false`). In JS `opts.x || default` drops `0`, `""`, AND `false`. For any
   option whose valid values include `0`/`""`/`false`, use an explicit nil check
-  — Lua `opts.x ~= nil and opts.x or default` / `if opts.x == nil then`, JS
+  - Lua `opts.x ~= nil and opts.x or default` / `if opts.x == nil then`, JS
   `opts.x !== undefined ? opts.x : default`. The same option must default
   identically in a module's `init` and its `middleware`, and across runtimes.
 - **No process-global mutable state for request-scoped concerns.** A server
@@ -141,7 +141,7 @@ appears in two modules, it moves to a shared internal module:
   `hull.web._request`, `hull.web._html`, etc. They are required by other stdlib
   modules, never declared by apps.
 - Security-relevant helpers (HTML escaping, HMAC/hex, client-IP extraction)
-  especially must live in exactly one place per runtime — a forked copy that
+  especially must live in exactly one place per runtime - a forked copy that
   drifts is a latent vulnerability (an escape helper that lost its nil-guard, a
   hex helper that UTF-8-inflates high bytes).
 - A shared helper still exists twice (Lua + JS). Guard the pair with a

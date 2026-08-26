@@ -1,5 +1,5 @@
 /*
- * macros.h — Hull project-wide utility macros.
+ * macros.h - Hull project-wide utility macros.
  *
  * Intentionally minimal: only macros that several TUs need today
  * (or are likely to next month) live here.  Per-module helpers
@@ -14,7 +14,7 @@
 /**
  * @brief Number of elements in a statically-sized array.
  *
- * Compile-time only — passing a decayed pointer silently produces
+ * Compile-time only - passing a decayed pointer silently produces
  * the wrong answer.  Prefer this over open-coded
  * `sizeof(x)/sizeof(x[0])` so a future refactor that turns the
  * array into a pointer fails to compile rather than silently

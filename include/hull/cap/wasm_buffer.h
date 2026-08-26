@@ -1,5 +1,5 @@
 /*
- * cap/wasm_buffer.h — Zero-copy buffer for WASM compute output
+ * cap/wasm_buffer.h - Zero-copy buffer for WASM compute output
  *
  * HlWasmBuffer wraps output from compute.call() without copying.
  * Three backing kinds: OWNED (malloc'd), MMAP (kernel mapping),
@@ -78,7 +78,7 @@ HlWasmBuffer *hl_wasm_buffer_create_mmap(HlMappedBuffer *mbuf,
 
 /**
  * Create a buffer that takes ownership of a malloc'd pointer.
- * Does NOT copy — the buffer will free(data) on destroy.
+ * Does NOT copy - the buffer will free(data) on destroy.
  * data must have been allocated with malloc/calloc (not HlAllocator).
  */
 HlWasmBuffer *hl_wasm_buffer_create_adopted(void *data, size_t len,

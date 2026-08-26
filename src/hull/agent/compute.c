@@ -1,5 +1,5 @@
 /*
- * agent/compute.c — `hull agent compute`: list WASM compute modules.
+ * agent/compute.c - `hull agent compute`: list WASM compute modules.
  *
  * Both files-on-disk (dev mode) and VFS entries (built binary) are
  * surfaced. For each module, reports byte size, whether an AOT-compiled
@@ -85,7 +85,7 @@ static void emit_from_vfs(ShJsonWriter *w, const HlEntry *entries)
 {
     if (!entries) return;
     /* Two passes: first collect .wasm sizes, then check for AOT. Simple
-     * O(n²) is fine here — Hull caps compute modules at a handful. */
+     * O(n²) is fine here - Hull caps compute modules at a handful. */
     for (const HlEntry *e = entries; e->name; e++) {
         char base[HL_AGENT_IDENT_MED];
         int is_aot;
@@ -286,7 +286,7 @@ int hl_agent_compute_ctx(HlAppContext *ctx, ShJsonBuf *out)
 
     /* wamrc state lets agents recommend `hull tools install wamrc`
      * when they see modules with no AOT artifacts. NULL hull_exe is
-     * fine — the lookup falls back to ~/.hull/tools and $PATH. */
+     * fine - the lookup falls back to ~/.hull/tools and $PATH. */
     emit_wamrc_state(&w, NULL);
 
     sh_json_write_object_end(&w);

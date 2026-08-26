@@ -1,5 +1,5 @@
 /*
- * build_assets_stub.c — No-op stubs for platform archive
+ * build_assets_stub.c - No-op stubs for platform archive
  *
  * The real build_assets.o contains embedded platform data and is linked
  * into the hull binary. For standalone app binaries (produced by hull

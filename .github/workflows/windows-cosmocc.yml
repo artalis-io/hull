@@ -37,7 +37,7 @@ env:
 
 jobs:
   characterize:
-    name: cosmocc on Windows — characterize
+    name: cosmocc on Windows - characterize
     runs-on: windows-latest
     steps:
       - name: hull-cosmo (a fat APE) runs on Windows
@@ -107,7 +107,7 @@ jobs:
     # run on Windows natively, like hull-cosmo. Does an APE bash (NOT Git Bash)
     # drive cosmocc on Windows? If YES, the toolchain is fully self-contained
     # (bundle cosmocc + an APE bash); if NO, you still need Git Bash / WSL.
-    name: "§0.5 — does an APE bash drive cosmocc (self-contained)?"
+    name: "§0.5 - does an APE bash drive cosmocc (self-contained)?"
     runs-on: windows-latest
     steps:
       - name: Extract cosmocc (bsdtar, symlink-preserving) + fetch the APE bash
@@ -155,7 +155,7 @@ jobs:
           elseif (Test-Path hello_c.com) { Copy-Item hello_c.com hello_ape.com -Force }
           Write-Host "any variant built: $(Test-Path hello_ape.com)"
 
-      - name: Verdict — self-contained APE toolchain on Windows?
+      - name: Verdict - self-contained APE toolchain on Windows?
         shell: pwsh
         run: |
           $built = Test-Path hello_ape.com
@@ -192,7 +192,7 @@ jobs:
     # suffice - which would let hull SKIP the fragile C:\bin write (a normal user
     # can't always write the drive root). Drive cosmocc with a shared TMPDIR and
     # NO /bin/sh planted; if it exits 0, prepare() is just "share TMPDIR".
-    name: "§0.7 — minimal recipe: TMPDIR-only, no /bin/sh plant?"
+    name: "§0.7 - minimal recipe: TMPDIR-only, no /bin/sh plant?"
     runs-on: windows-latest
     steps:
       - name: Extract cosmocc (bsdtar) + fetch busybox-w64
@@ -216,7 +216,7 @@ jobs:
           if (Test-Path C:\bin\sh.exe) { Remove-Item C:\bin\sh.exe -Force }  # ensure no stray plant
           & .\bb\busybox.exe sh -c 'export PATH="./cosmo/bin:$PATH"; export TMPDIR=C:/tmp TMP=C:/tmp TEMP=C:/tmp; cosmocc -O2 -o hello.com hello.c; echo "exit=$?"' 2>&1 | Out-String | Write-Host
 
-      - name: Verdict — is a plant-free recipe enough?
+      - name: Verdict - is a plant-free recipe enough?
         shell: pwsh
         run: |
           $built = Test-Path hello.com
@@ -251,7 +251,7 @@ jobs:
     # own sh. If busybox drives cosmocc, a stock Windows box is self-sufficient with
     # a ~1 MB extra binary (vs a ~40 MB GPLv3 MSYS runtime). If not, the diagnostics
     # say why (/bin/sh routing, applet resolution, or APE-child path translation).
-    name: "§0.6 — does busybox-w64 sh drive cosmocc (self-contained)?"
+    name: "§0.6 - does busybox-w64 sh drive cosmocc (self-contained)?"
     runs-on: windows-latest
     steps:
       - name: Extract cosmocc (bsdtar, symlink-preserving) + fetch busybox-w64
@@ -310,7 +310,7 @@ jobs:
           Write-Host "any variant built: $(Test-Path hello_bb.com)"
           foreach ($v in @("a","b","c")) { if (Test-Path "exit_$v.txt") { Write-Host "variant $v $((Get-Content "exit_$v.txt").Trim())" } }
 
-      - name: Verdict — self-contained busybox-w64 toolchain on Windows?
+      - name: Verdict - self-contained busybox-w64 toolchain on Windows?
         shell: pwsh
         run: |
           $built = Test-Path hello_bb.com
@@ -367,7 +367,7 @@ jobs:
     # build touches only ~309 MB of the 1.37 GB tree; this dumps WHAT the other
     # ~1 GB is (per-dir sizes + biggest files) so build_cosmocc_bundle.sh can trim
     # by an exact, confident keep-list instead of guessing.
-    name: "§E — inventory the cosmocc tree (trim keep-list)"
+    name: "§E - inventory the cosmocc tree (trim keep-list)"
     runs-on: ubuntu-latest
     steps:
       - name: Fetch/verify/extract cosmocc + inventory
@@ -395,7 +395,7 @@ jobs:
     # apelinks the embedded platform .a, but that .a is IN hull, not the cosmocc
     # tree; linking any symbol still opens cosmopolitan.a fully, so the big tree
     # files are captured).
-    name: "§C — trimmed cosmocc closure vs the full tree"
+    name: "§C - trimmed cosmocc closure vs the full tree"
     runs-on: ubuntu-latest
     steps:
       - name: Install strace + fetch/verify/extract cosmocc
@@ -479,7 +479,7 @@ jobs:
             echo "SUP_MB=$sup_mb"
           } >> "$GITHUB_ENV"
 
-      - name: Verdict — does a trimmed cosmocc fit under the 512 MB cap?
+      - name: Verdict - does a trimmed cosmocc fit under the 512 MB cap?
         shell: bash
         run: |
           echo "=================================================================="
@@ -513,7 +513,7 @@ jobs:
     # A-E Hull epic is not worth starting. Extract with bsdtar (tar.exe -
     # symlink-preserving, unlike Expand-Archive), reconstruct any symlinks Windows
     # dropped, then drive cosmocc via Git Bash AND cosmo's own cocmd.
-    name: "§0 — can a shell drive cosmocc on Windows?"
+    name: "§0 - can a shell drive cosmocc on Windows?"
     runs-on: windows-latest
     steps:
       - name: Download + symlink-preserving extract (bsdtar)
@@ -536,7 +536,7 @@ jobs:
         shell: pwsh
         run: '"int main(void){return 42;}" | Set-Content -NoNewline hello.c -Encoding ascii'
 
-      - name: "Probe A — Git Bash (POSIX /bin/sh) drives cosmocc"
+      - name: "Probe A - Git Bash (POSIX /bin/sh) drives cosmocc"
         id: probe_bash
         continue-on-error: true
         shell: bash
@@ -547,7 +547,7 @@ jobs:
           echo "cosmocc exit: $?"
           ls -la hello_bash.com
 
-      - name: "Probe B — cosmo cocmd drives cosmocc"
+      - name: "Probe B - cosmo cocmd drives cosmocc"
         id: probe_cocmd
         continue-on-error: true
         shell: pwsh
@@ -558,7 +558,7 @@ jobs:
           Write-Host "--- cocmd cosmocc exit: $LASTEXITCODE ---"
           if (-not (Test-Path hello_cocmd.com)) { throw "cocmd did not build" }
 
-      - name: Verdict — did a shell build (and run) the APE?
+      - name: Verdict - did a shell build (and run) the APE?
         shell: pwsh
         run: |
           $bashOK = (Test-Path hello_bash.com)

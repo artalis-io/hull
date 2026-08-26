@@ -1,5 +1,5 @@
 /*
- * test_async_backend.c — End-to-end tests for the Keel-backed
+ * test_async_backend.c - End-to-end tests for the Keel-backed
  * HlAsyncBackend impl. Exercises init/free, timers, monotonic time,
  * op_suspend/op_complete, and the run/stop loop.
  *

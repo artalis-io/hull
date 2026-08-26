@@ -1,5 +1,5 @@
 /*
- * test_js_generation.c - Slice 6: the C-owned JS frontend generation/session manager.
+ * test_js_generation.c - the C-owned JS frontend generation/session manager.
  * Proves monotonic tokens, operation-specific stale shapes, the old-token/new-session ABA case,
  * and shutdown-preserves-next_token. See docs/js_frontend_slice6_dispatcher.md.
  *
@@ -114,7 +114,7 @@ UTEST(js_generation, concurrency_cap)
 }
 
 #ifdef HL_JS_GEN_TESTING
-/* Slice 7 amendment 2, proof 1: a normal open -> analyze -> close leaves zero net sessions. */
+/* proof 1: a normal open -> analyze -> close leaves zero net sessions. */
 UTEST(js_generation, default_analysis_leaves_zero_sessions)
 {
     int base = hl_js_gen_live_count();
@@ -127,7 +127,7 @@ UTEST(js_generation, default_analysis_leaves_zero_sessions)
     EXPECT_EQ(hl_js_gen_live_count(), base);   /* the session is gone; no leak */
 }
 
-/* Slice 7 amendment 2, proofs 2 + 3: shutdown defensively reaps a retained-but-unclosed
+/* proofs 2 + 3: shutdown defensively reaps a retained-but-unclosed
  * session (live_count -> 0) AND does not reset next_token (a later open is strictly greater). */
 UTEST(js_generation, shutdown_reaps_leaked_session_and_preserves_token)
 {
@@ -141,7 +141,7 @@ UTEST(js_generation, shutdown_reaps_leaked_session_and_preserves_token)
     hl_js_gen_close(b);
 }
 
-/* Slice 7 amendment 1 (C3b): the tooling runtime has minimal authority, measured THROUGH a
+/* (C3b): the tooling runtime has minimal authority, measured THROUGH a
  * real manager session. No eval / Function / capability global leaks; a stale token still fails
  * closed, never crashes. */
 UTEST(js_generation, authority_probe_minimal)
@@ -164,7 +164,7 @@ UTEST(js_generation, authority_probe_minimal)
     free(s);
 }
 
-/* Slice 7 amendment 1 (C3b, second claim): tooling code cannot import an application module.
+/* (C3b, second claim): tooling code cannot import an application module.
  * The tooling loader must REJECT a fake application-module name with its definitive
  * "tooling entry module not found" -- and the test fails if that name ever RESOLVES (a resolved
  * module yields a DIFFERENT message, so the substring check would not match). The real probe

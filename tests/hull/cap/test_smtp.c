@@ -1,5 +1,5 @@
 /*
- * test_smtp.c — Unit tests for SMTP capability (no network)
+ * test_smtp.c - Unit tests for SMTP capability (no network)
  *
  * Tests base64 encoding, response parsing, message formatting,
  * host allowlist checking, and CRLF injection guards.

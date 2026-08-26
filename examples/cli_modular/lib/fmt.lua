@@ -1,4 +1,4 @@
--- lib/fmt.lua — Shared output-formatting helpers.
+-- lib/fmt.lua - Shared output-formatting helpers.
 --
 -- Anything reused across commands lives here. Keeping it in `lib/`
 -- (not `commands/`) means it can be required from anywhere without

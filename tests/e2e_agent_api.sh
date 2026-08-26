@@ -1,5 +1,5 @@
 #!/bin/sh
-# E2E tests — hull --agent-api (diagnostic HTTP endpoints)
+# E2E tests - hull --agent-api (diagnostic HTTP endpoints)
 #
 # Tests /_hull/agent/* endpoints when --agent-api is enabled,
 # and verifies they are absent without the flag.
@@ -18,7 +18,7 @@ FAIL=0
 RUNTIME=${RUNTIME:-all}
 
 if [ ! -x "$HULL" ]; then
-    echo "e2e_agent_api: hull binary not found at $HULL — run 'make' first"
+    echo "e2e_agent_api: hull binary not found at $HULL - run 'make' first"
     exit 1
 fi
 
@@ -35,7 +35,7 @@ pass() {
 check_contains() {
     case "$2" in
         *"$3"*) pass "$1" ;;
-        *)      fail "$1 — expected '$3' in: $(echo "$2" | head -c 200)" ;;
+        *)      fail "$1 - expected '$3' in: $(echo "$2" | head -c 200)" ;;
     esac
 }
 
@@ -77,7 +77,7 @@ $HULL -p "$PORT_API" -d "$TMPDIR_API/data.db" --agent-api "examples/hello/app.$A
 SERVER_PID=$!
 
 if ! wait_for_server "$PORT_API"; then
-    fail "agent-api — server startup"
+    fail "agent-api - server startup"
     stop_server
     rm -rf "$TMPDIR_API"
 else
@@ -118,7 +118,7 @@ $HULL -p "$PORT_NO_API" -d "$TMPDIR_NO_API/data.db" "examples/hello/app.$APP_EXT
 SERVER_PID=$!
 
 if ! wait_for_server "$PORT_NO_API"; then
-    fail "no-agent-api — server startup"
+    fail "no-agent-api - server startup"
     stop_server
     rm -rf "$TMPDIR_NO_API"
 else

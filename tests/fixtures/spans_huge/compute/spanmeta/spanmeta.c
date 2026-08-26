@@ -1,4 +1,4 @@
-/* spanmeta.c — probe hull_span_setup() capacity semantics + a 64-bit foffset +
+/* spanmeta.c - probe hull_span_setup() capacity semantics + a 64-bit foffset +
  * bounded reads on the real window, using ONLY the public hull_span.h SDK.
  * Input byte 0 = requested out_cap for hull_span_setup. Output (text):
  *   "ret=<true-count>;filled=<min(ret,cap)>;names=<n0,...>;foff0=<u64>;

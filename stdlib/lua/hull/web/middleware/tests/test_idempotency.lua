@@ -1,4 +1,4 @@
--- test_idempotency.lua — Tests for hull.web.middleware.idempotency
+-- test_idempotency.lua - Tests for hull.web.middleware.idempotency
 --
 -- Requires db, crypto, time, json globals (run via hull test harness).
 
@@ -143,7 +143,7 @@ test("concurrent request with same key returns 409", function()
     local req1 = mock_req("POST", "/api/items", '{"name":"E"}', { ["idempotency-key"] = "key-inflight-1" })
     local res1 = mock_res()
     mw(req1, res1)
-    -- Don't call respond — still in-flight
+    -- Don't call respond - still in-flight
 
     -- Second request with same key
     local req2 = mock_req("POST", "/api/items", '{"name":"E"}', { ["idempotency-key"] = "key-inflight-1" })

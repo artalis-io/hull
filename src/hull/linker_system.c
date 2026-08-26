@@ -1,5 +1,5 @@
 /*
- * linker_system.c — system linker backend + linker selection
+ * linker_system.c - system linker backend + linker selection
  *
  * Invokes cc/gcc/clang as the link driver (it resolves crt startup + libc
  * / libSystem for the host). This is the "compiler-free but not linker-free"

@@ -158,7 +158,7 @@ flavor.
 
 **WASM featurified (#118, docs/wasm_feature.md).** The WASM *interpreter* (WAMR,
 ~256 KB) was the last "kept core" candidate; it is now an embedded, auto-composed
-feature (like the runtimes / HTTP core) — the native base is compute-less and a
+feature (like the runtimes / HTTP core) - the native base is compute-less and a
 compute-free app links zero WAMR. It stays *embedded + auto-composed*, not
 `hull feature install`, because compute is a pillar and the `db.udf` coupling
 needs the two-signal `needs_wasm` gate rather than a manual `--with`. Its heavy
@@ -1156,7 +1156,7 @@ Outputs:
 
 | Feature | Status | Notes |
 |---------|--------|-------|
-| WASM compute plugins (WAMR) | **Done** | Sandboxed, gas-metered, no I/O. Sync + async + streaming + persistent instances + shared data segments + SIMD128 + AOT. (Memory64: detection + `memory64_requires_aot` + 8-cell AOT dispatch shipped via the public accessor patch 0005, CI-gated — [#318](https://github.com/artalis-io/hull/issues/318); SPAN_INFO-under-mem64 mapped spans validated, CI-gated — [#334](https://github.com/artalis-io/hull/issues/334); `hull build` of a mem64 plugin supported under the transparent shared-heap policy, CI-gated — [#336](https://github.com/artalis-io/hull/issues/336).) |
+| WASM compute plugins (WAMR) | **Done** | Sandboxed, gas-metered, no I/O. Sync + async + streaming + persistent instances + shared data segments + SIMD128 + AOT. (Memory64: detection + `memory64_requires_aot` + 8-cell AOT dispatch shipped via the public accessor patch 0005, CI-gated - [#318](https://github.com/artalis-io/hull/issues/318); SPAN_INFO-under-mem64 mapped spans validated, CI-gated - [#334](https://github.com/artalis-io/hull/issues/334); `hull build` of a mem64 plugin supported under the transparent shared-heap policy, CI-gated - [#336](https://github.com/artalis-io/hull/issues/336).) |
 | GPU compute shaders (wgpu-native) | **Done** | dispatch + pipeline + persistent buffers + textures + fire-and-forget + async + buffer copy |
 | User-defined SQL functions | **Done** | Lua/JS callbacks + WASM-backed UDFs with gas metering |
 | Image processing | **Done** | stb_image decode/encode, raw pixel buffers, GPU texture interop |
@@ -1174,7 +1174,7 @@ Outputs:
 
 ### WASM / GPU Compute. Remaining Work
 
-(Merged in from the former `roadmap_wasm_compute.md`. The shipped phases (SIMD128, memory limits, GPU/WebGPU, instance pooling, WasmBuffer protocol, persistent instances, shared data segments, GPU textures, streaming I/O, SQLite UDFs) are listed in the "Done" sections above. Memory64's Hull cap-layer dispatch (detection + `memory64_requires_aot` + 8-cell AOT dispatch) shipped via the public accessor patch 0005, CI-gated — see [#318](https://github.com/artalis-io/hull/issues/318); SPAN_INFO metadata under Memory64 (mapped spans on a 64-bit guest) is validated, CI-gated — [#334](https://github.com/artalis-io/hull/issues/334); `hull build` of a Memory64 compute plugin is supported under the transparent shared-heap policy, CI-gated — [#336](https://github.com/artalis-io/hull/issues/336).)
+(Merged in from the former `roadmap_wasm_compute.md`. The shipped phases (SIMD128, memory limits, GPU/WebGPU, instance pooling, WasmBuffer protocol, persistent instances, shared data segments, GPU textures, streaming I/O, SQLite UDFs) are listed in the "Done" sections above. Memory64's Hull cap-layer dispatch (detection + `memory64_requires_aot` + 8-cell AOT dispatch) shipped via the public accessor patch 0005, CI-gated - see [#318](https://github.com/artalis-io/hull/issues/318); SPAN_INFO metadata under Memory64 (mapped spans on a 64-bit guest) is validated, CI-gated - [#334](https://github.com/artalis-io/hull/issues/334); `hull build` of a Memory64 compute plugin is supported under the transparent shared-heap policy, CI-gated - [#336](https://github.com/artalis-io/hull/issues/336).)
 
 | Item | Status | Notes |
 |------|--------|-------|

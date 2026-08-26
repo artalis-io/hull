@@ -1,11 +1,11 @@
 /*
- * embed.c — implementation of the libhull embedding ABI (embed.h).
+ * embed.c - implementation of the libhull embedding ABI (embed.h).
  *
  * Thin wrapper over the internal sandbox + capability layer. The opaque
  * HlEmbed handle accumulates a C-built policy; hl_embed_seal() resolves
  * it into an HlSandboxPolicy, applies the kernel sandbox, and seals the
- * one datum the capability layer reads on every call — the filesystem
- * base directory (HlFsConfig.base_dir) — into a page-backed read-only
+ * one datum the capability layer reads on every call - the filesystem
+ * base directory (HlFsConfig.base_dir) - into a page-backed read-only
  * arena (sh_seal_arena). After a successful seal there is no writable
  * alias of that path left in the process, so an arbitrary-write primitive
  * cannot repoint the app's filesystem root. See docs/security.md §4b and
@@ -105,7 +105,7 @@ void hl_embed_free(HlEmbed *e)
      * arena is free - do it first. */
     hl_fs_policy_free(&e->fs_policy);
     /* Free heap-owned policy strings first, then destroy the sealed arena
-     * LAST — fs.base_dir may alias into it (c-audit §5b: arena destroyed
+     * LAST - fs.base_dir may alias into it (c-audit §5b: arena destroyed
      * after every consumer). No capability call can run during teardown. */
     embed_free_heap_policy(e);
     if (e->arena_ready) sh_seal_arena_destroy(&e->arena);
@@ -167,7 +167,7 @@ int hl_embed_sandbox_phase1(HlEmbed *e)
  * Seal the per-call base_dir into the read-only arena. On success sets
  * e->fs.base_dir to the in-arena (RO) copy and returns 0. On any failure
  * the arena is torn down and e->fs.base_dir is left pointing at the
- * original heap copy (harmless — the caller aborts the seal). Must run
+ * original heap copy (harmless - the caller aborts the seal). Must run
  * BEFORE hl_sandbox_apply so a seal failure aborts before the (on macOS
  * irreversible) kernel sandbox is applied.
  */
@@ -241,7 +241,7 @@ int hl_embed_seal(HlEmbed *e, const char *db_path)
                               NULL, NULL, NULL);
     if (rc != 0) return -1;        /* fail closed: leave state NEW */
 
-    /* 4. Success. Drop every writable alias of the policy — the sealed
+    /* 4. Success. Drop every writable alias of the policy - the sealed
      *    base_dir is the only path the cap layer will read from here on. */
     embed_free_heap_policy(e);
 
@@ -301,7 +301,7 @@ size_t hl_embed_module_count(void)
     return hl_module_registry_count();
 }
 
-/* ── Internal test accessors (embed_internal.h — NOT the stable ABI) ── */
+/* ── Internal test accessors (embed_internal.h - NOT the stable ABI) ── */
 
 const char *hl_embed_base_dir(const HlEmbed *e)
 {

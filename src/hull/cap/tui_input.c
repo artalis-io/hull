@@ -1,9 +1,9 @@
 /*
- * src/hull/cap/tui_input.c — ANSI input parser + event queue.
+ * src/hull/cap/tui_input.c - ANSI input parser + event queue.
  *
  * State machine handles: printable UTF-8 bytes, control characters,
  * CSI sequences (`\x1b[...`), SS3 sequences (`\x1bO...`), OSC
- * sequences (`\x1b]...` — currently swallowed), and bracketed paste.
+ * sequences (`\x1b]...` - currently swallowed), and bracketed paste.
  *
  * SGR mouse, Kitty keyboard protocol, and focus tracking are
  * speced-as-modes in the public header; their parser branches are
@@ -147,7 +147,7 @@ static void decode_csi_arrow(HlTuiParser *p, char final, int param)
 
 static void decode_csi_tilde(HlTuiParser *p, int param, int mod_param)
 {
-    /* CSI <n> ~  — n selects key. Optional second param = modifier. */
+    /* CSI <n> ~  - n selects key. Optional second param = modifier. */
     uint32_t mods = 0;
     if (mod_param > 1) {
         int m = mod_param - 1;
@@ -291,7 +291,7 @@ static void handle_control(HlTuiParser *p, unsigned char c)
     if (c == 0x09) { emit_key_named(p, HL_TUI_KEY_TAB, 0);       return; }
     if (c == 0x08 || c == 0x7F) { emit_key_named(p, HL_TUI_KEY_BACKSPACE, 0); return; }
     if (c == 0x1B) {
-        /* Bare ESC — likely the start of an escape sequence; the
+        /* Bare ESC - likely the start of an escape sequence; the
          * caller drives us back to the state machine. If we reach
          * here it means a lone ESC was delivered (no follow-up). */
         emit_key_named(p, HL_TUI_KEY_ESCAPE, 0);
@@ -388,7 +388,7 @@ void hl_tui_parser_feed(HlTuiParser *p, const char *bytes, size_t len)
                 if ((c & 0xE0) == 0xC0) p->utf8_need = 2;
                 else if ((c & 0xF0) == 0xE0) p->utf8_need = 3;
                 else if ((c & 0xF8) == 0xF0) p->utf8_need = 4;
-                else { /* invalid lead — drop */ break; }
+                else { /* invalid lead - drop */ break; }
                 p->utf8[0] = (char)c;
                 p->utf8_len = 1;
             } else {
@@ -419,10 +419,10 @@ void hl_tui_parser_feed(HlTuiParser *p, const char *bytes, size_t len)
                 p->state = HL_TUI_PS_OSC;
                 p->acc_len = 0;
             } else if (c == 0x1B) {
-                /* ESC ESC — emit one ESC, stay in ESC for the next. */
+                /* ESC ESC - emit one ESC, stay in ESC for the next. */
                 emit_key_named(p, HL_TUI_KEY_ESCAPE, 0);
             } else if (c < 0x20 || c == 0x7F) {
-                /* Alt+<control> — emit the control then exit. */
+                /* Alt+<control> - emit the control then exit. */
                 emit_key_named(p, HL_TUI_KEY_ESCAPE, 0);
                 handle_control(p, c);
                 p->state = HL_TUI_PS_GROUND;
@@ -448,7 +448,7 @@ void hl_tui_parser_feed(HlTuiParser *p, const char *bytes, size_t len)
                 p->acc_len = 0;
             } else if (p->acc_len < sizeof p->acc) {
                 p->acc[p->acc_len++] = (char)c;
-            } /* else: overflow — keep waiting for final */
+            } /* else: overflow - keep waiting for final */
             break;
 
         case HL_TUI_PS_SS3:
@@ -493,7 +493,7 @@ void hl_tui_parser_feed(HlTuiParser *p, const char *bytes, size_t len)
                         p->acc_len = 0;
                     }
                 } else {
-                    /* Not the end marker — fold accumulated bytes
+                    /* Not the end marker - fold accumulated bytes
                      * back into the paste buffer. */
                     for (size_t k = 0; k < p->acc_len; k++)
                         paste_append(p, p->acc[k]);

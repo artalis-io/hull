@@ -1,6 +1,6 @@
-/* spandiff.c — WASM guest for the hull_span.h native-vs-WASM differential test
+/* spandiff.c - WASM guest for the hull_span.h native-vs-WASM differential test
  * (#324 3b). Includes the canonical SDK headers and dispatches one fixture per
- * call through the shared spandiff_run (spandiff_ops.h) — the exact same body the
+ * call through the shared spandiff_run (spandiff_ops.h) - the exact same body the
  * native side runs. Uses only the pure, host_call-free SDK ops, so the module
  * imports nothing and loads in a bare WAMR harness on interpreter and AOT.
  *

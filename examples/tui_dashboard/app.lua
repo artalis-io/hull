@@ -1,4 +1,4 @@
--- TUI dashboard — Hull + Lua TUI showcase.
+-- TUI dashboard - Hull + Lua TUI showcase.
 --
 -- Demonstrates the multi-pane layout primitives:
 --   - tui.frame with single/double/round borders
@@ -46,7 +46,7 @@ app.main(function(ctx)
         rows       = 0,
     }
 
-    -- Background ticker — updates metrics every 250ms while the
+    -- Background ticker - updates metrics every 250ms while the
     -- main coroutine sits in tui.poll. Proves the dashboard isn't
     -- frozen by a blocking renderer.
     tui.async(function()

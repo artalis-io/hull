@@ -1,4 +1,4 @@
---- HTMX inline-edit widget — click-to-edit single field, pure
+--- HTMX inline-edit widget - click-to-edit single field, pure
 --- hypermedia (no client JS for the mode switch).
 --
 -- @module hull.web.htmx.inline-edit
@@ -10,7 +10,7 @@
 -- `PATCH <save_url>` and the server returns the display fragment.
 -- Cancel re-fetches the display fragment via `GET <cancel_url>`,
 -- which is typically the same as edit_url with mode=display (or
--- the parent record's URL — app-controlled).
+-- the parent record's URL - app-controlled).
 --
 -- Two server endpoints per editable field:
 --
@@ -21,7 +21,7 @@
 -- A tiny client JS (~15 LOC at /static/hull/htmx/inline-edit/
 -- inline-edit.js) handles the one thing pure htmx can't: focusing
 -- the input after the edit fragment is swapped in. Esc-to-cancel
--- is handled via `hx-trigger` on the Cancel button — no JS.
+-- is handled via `hx-trigger` on the Cancel button - no JS.
 --
 -- Setup:
 --
@@ -110,12 +110,12 @@ end
 --- the editor on click).
 --
 -- Required opts:
---   - `value`     string — current displayed value.
---   - `edit_url`  string — GET endpoint that returns the editor
+--   - `value`     string - current displayed value.
+--   - `edit_url`  string - GET endpoint that returns the editor
 --                          fragment (see `inline_edit.editor`).
 --
 -- Optional opts:
---   - `label`     string — accessible name; sets `aria-label` and
+--   - `label`     string - accessible name; sets `aria-label` and
 --                          `title` so keyboard / screen-reader
 --                          users know what activating the cell
 --                          will do. Default `"Edit"`.
@@ -147,22 +147,22 @@ end
 --- Render the edit-mode form (input + Save + Cancel buttons).
 --
 -- Required opts:
---   - `value`       string — current value to pre-fill the input.
---   - `save_url`    string — PATCH endpoint that persists the
+--   - `value`       string - current value to pre-fill the input.
+--   - `save_url`    string - PATCH endpoint that persists the
 --                            new value and returns the display
 --                            fragment.
---   - `cancel_url`  string — GET endpoint that returns the
+--   - `cancel_url`  string - GET endpoint that returns the
 --                            display fragment unchanged (used by
 --                            both the Cancel button and Esc).
 --
 -- Optional opts:
---   - `name`        string — form-field name. Default `"value"`.
+--   - `name`        string - form-field name. Default `"value"`.
 --                            Server reads `req.body[name]`.
---   - `label`       string — `aria-label` for the input.
+--   - `label`       string - `aria-label` for the input.
 --                            Default `"Edit value"`.
---   - `save_label`  string — text on the Save button.
+--   - `save_label`  string - text on the Save button.
 --                            Default `"Save"`.
---   - `cancel_label` string — text on the Cancel button.
+--   - `cancel_label` string - text on the Cancel button.
 --                            Default `"Cancel"`.
 --
 -- Submit (Enter or Save button) PATCHes save_url; the server

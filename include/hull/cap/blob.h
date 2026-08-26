@@ -6,7 +6,7 @@
  * `fs.write` validation at init time so the per-app cap layer keeps
  * the manifest-gate semantics every other `hl_cap_*` enjoys. Once
  * initialised, the cap-layer handle (`HlBlob`) IS an alias for the
- * underlying `HlBlobStore` — every other entry point is a one-line
+ * underlying `HlBlobStore` - every other entry point is a one-line
  * forwarder. Future audit / per-call permission checks would land
  * here too, not in the store.
  *
@@ -28,7 +28,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-/* Forward decl — pulled in via includes by the implementation. */
+/* Forward decl - pulled in via includes by the implementation. */
 typedef struct HlFsConfig HlFsConfig;
 typedef struct HlAllocator HlAllocator;
 
@@ -36,7 +36,7 @@ typedef struct HlAllocator HlAllocator;
 /* The cap layer's public surface predates the store/cap split.
  * Existing callers (mod_blob.c bindings, tests/hull/cap/test_blob.c,
  * the documentation, the agent JSON producers) reference `HlBlob`,
- * `HL_BLOB_ID_*`, `HL_BLOB_LRU/FIFO`, etc. — preserve those names as
+ * `HL_BLOB_ID_*`, `HL_BLOB_LRU/FIFO`, etc. - preserve those names as
  * aliases so the refactor is invisible to callers. */
 
 #define HL_BLOB_ID_HEX_LEN   HL_BLOB_STORE_ID_HEX_LEN

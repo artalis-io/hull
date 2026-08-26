@@ -1,5 +1,5 @@
 /*
- * mod_ws_server.c — hull.web.ws-server module (server-side WebSocket helpers + conn userdata)
+ * mod_ws_server.c - hull.web.ws-server module (server-side WebSocket helpers + conn userdata)
  *
  * Exposes: ws.broadcast(path, data [, binary])
  *          ws.connections(path)
@@ -43,7 +43,7 @@ typedef struct {
 void hl_lua_ws_push_conn(lua_State *L, HlWsConn *conn)
 {
     if (conn->user_data) {
-        /* Already have a userdata — push it via registry ref */
+        /* Already have a userdata - push it via registry ref */
         int ref = (int)(intptr_t)conn->user_data;
         lua_rawgeti(L, LUA_REGISTRYINDEX, ref);
         return;
@@ -178,7 +178,7 @@ static int lua_ws_conn_ping(lua_State *L)
     return 0;
 }
 
-/* conn.data — lazy-created per-connection table */
+/* conn.data - lazy-created per-connection table */
 static int lua_ws_conn_index(lua_State *L)
 {
     HlWsConnUD *ud = (HlWsConnUD *)luaL_checkudata(L, 1, HL_WS_CONN_MT);

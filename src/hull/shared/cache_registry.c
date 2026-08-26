@@ -17,9 +17,9 @@
 
 /* ── Registry ─────────────────────────────────────────────────────
  *
- * Order matters for `cache list` output — runtime caches first
+ * Order matters for `cache list` output - runtime caches first
  * (most-relevant for prune), system stores at the end. */
-/* env_kind maps to HULL_NO_<UPPER>_CACHE — see hl_hull_cache_disabled
+/* env_kind maps to HULL_NO_<UPPER>_CACHE - see hl_hull_cache_disabled
  * in cache_dir.c. Display names stay kebab-case for path / UI;
  * env-var kinds are snake_case so the SCREAMING_SNAKE result reads
  * naturally. */
@@ -67,7 +67,7 @@ int hl_cache_resolve_path(const HlCacheKind *kind, char *out, size_t out_sz)
     }
 
     /* System stores: always under $HOME/.hull/blobs/<name>/.
-     * HULL_CACHE_DIR doesn't apply — these are not per-app caches,
+     * HULL_CACHE_DIR doesn't apply - these are not per-app caches,
      * they're durable signed downloads with a stable system home. */
     const char *home = getenv("HOME");
     if (!home || !*home) { errno = ENOENT; return -1; }

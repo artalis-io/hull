@@ -13,7 +13,7 @@
  *
  * Cache root = $HOME/.hull/cache/lua-bytecode/ (auto-allowed by the
  * sandbox; see docs/blob.md §"Runtime-infrastructure caches"). The
- * cache is shared system-wide across all Hull apps — same source
+ * cache is shared system-wide across all Hull apps - same source
  * bytes produce the same .luac regardless of which app loaded it
  * first.
  *
@@ -54,7 +54,7 @@ int hl_lua_load_cached(struct lua_State *L,
  * @brief Tear down the process-wide bytecode store handle.
  *
  * Tests that redirect `$HOME` need to drop the cached store so the
- * next call resolves the new path. Not for production use — the
+ * next call resolves the new path. Not for production use - the
  * store is meant to live for the lifetime of the process.
  */
 void hl_lua_bytecode_cache_reset(void);

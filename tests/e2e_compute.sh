@@ -1,5 +1,5 @@
 #!/bin/sh
-# e2e_compute.sh — E2E tests for WASM compute capability
+# e2e_compute.sh - E2E tests for WASM compute capability
 #
 # Tests compute.call() from both Lua and JS runtimes.
 # Requires: build/hull, tests/fixtures/compute/echo.wasm
@@ -107,7 +107,7 @@ import { compute } from "hull:compute";
 
 test("compute.call echo", () => {
     const out = compute.call("echo", "hello");
-    // out is ArrayBuffer — convert to string via Uint8Array
+    // out is ArrayBuffer - convert to string via Uint8Array
     const bytes = new Uint8Array(out);
     let result = "";
     for (let i = 0; i < bytes.length; i++) result += String.fromCharCode(bytes[i]);
@@ -170,10 +170,10 @@ if kill -0 $HULL_PID 2>/dev/null; then
     if echo "$RESP" | grep -q '"result":"hello async"'; then
         pass "compute.async.call (Lua)"
     else
-        fail "compute.async.call (Lua) — response: $RESP"
+        fail "compute.async.call (Lua) - response: $RESP"
     fi
 else
-    fail "compute.async.call (Lua) — server failed to start"
+    fail "compute.async.call (Lua) - server failed to start"
     kill $HULL_PID 2>/dev/null || true
     wait $HULL_PID 2>/dev/null || true
 fi
@@ -229,7 +229,7 @@ HULL_PID=$!
 sleep 1
 
 if kill -0 $HULL_PID 2>/dev/null; then
-    # Test 1: Async should NOT block — fire slow-async, then health
+    # Test 1: Async should NOT block - fire slow-async, then health
     curl -sf "http://127.0.0.1:$PORT/slow-async" >/dev/null 2>&1 &
     SLOW_PID=$!
     sleep 0.1  # Give it time to start the async call
@@ -251,7 +251,7 @@ if kill -0 $HULL_PID 2>/dev/null; then
     kill $HULL_PID 2>/dev/null || true
     wait $HULL_PID 2>/dev/null || true
 else
-    fail "concurrency test — server failed to start"
+    fail "concurrency test - server failed to start"
 fi
 
 echo ""
@@ -581,7 +581,7 @@ test("kv_store: pooled calls lose state", function()
     local out, err = compute.call("kv_store", load_msg, { heap = 8 * 1024 * 1024 })
     assert(not err, "load err: " .. tostring(err))
 
-    -- GET via fresh pooled call — state is gone
+    -- GET via fresh pooled call - state is gone
     local out2, err2 = compute.call("kv_store", "\x02foo", { heap = 8 * 1024 * 1024 })
     assert(not err2, "get err: " .. tostring(err2))
     assert(out2 == "", "pooled call should NOT retain state, got: " .. tostring(out2))
@@ -709,7 +709,7 @@ if echo "$PROBE_OUT" | grep -qE "0 failed|tests passed$"; then
     echo "  Shared heap works on this platform"
     SHARED_HEAP_OK=1
 else
-    echo "  NOTE: WAMR shared heap not functional — skipping compute.segment tests"
+    echo "  NOTE: WAMR shared heap not functional - skipping compute.segment tests"
 fi
 
 echo ""
@@ -914,21 +914,21 @@ if kill -0 $NODB_PID 2>/dev/null; then
     if echo "$RESP" | grep -q '"ok"'; then
         pass "no-db health endpoint"
     else
-        fail "no-db health endpoint — response: $RESP"
+        fail "no-db health endpoint - response: $RESP"
     fi
 
     RESP=$(curl -sf "http://127.0.0.1:$PORT_NODB/has-db" 2>/dev/null || echo "FAIL")
     if echo "$RESP" | grep -q '"has_db":false'; then
         pass "no-db db global is nil"
     else
-        fail "no-db db global is nil — response: $RESP"
+        fail "no-db db global is nil - response: $RESP"
     fi
 
     RESP=$(curl -sf "http://127.0.0.1:$PORT_NODB/compute-only" 2>/dev/null || echo "FAIL")
     if echo "$RESP" | grep -q '"result":4'; then
         pass "no-db compute endpoint"
     else
-        fail "no-db compute endpoint — response: $RESP"
+        fail "no-db compute endpoint - response: $RESP"
     fi
 
     kill $NODB_PID 2>/dev/null; wait $NODB_PID 2>/dev/null

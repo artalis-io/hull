@@ -1,6 +1,6 @@
 name: Nightly
 
-# Slice 6 (docs/ci_architecture_design.md Appendix F): the SLOW / EXHAUSTIVE CI
+# (docs/ci_architecture_design.md Appendix F): the SLOW / EXHAUSTIVE CI
 # tier that is too costly to run per push - deep fuzzing, rare build
 # configurations, and version / compatibility drift. It is INDEPENDENT of the
 # change-aware PR workflow (ci.yml) and touches NOTHING on the required PR path.

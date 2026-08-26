@@ -5,7 +5,7 @@
 # ── PostgreSQL feature archive (composable feature: hull build --with=postgres) ──
 # Bundles the pure-C Postgres v3 wire client (cap_db_postgres.o + cap_pg_conn.o +
 # cap_pgwire.o, defining hl_db_backend_postgres) into ONE archive. Unlike DuckDB
-# there is no vendored engine — it's ~4 KB of Hull's own code, so a straight
+# there is no vendored engine - it's ~4 KB of Hull's own code, so a straight
 # bundle, no isolation. The backend references base crypto (SCRAM auth) + the
 # shared tls_client (sslmode TLS); both resolve from the platform lib at compose,
 # which build.lua wraps in --start-group because tls_client is not otherwise

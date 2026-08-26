@@ -1,5 +1,5 @@
 /*
- * wasm_stub.c — weak per-runtime compute-binding defaults (Lua).
+ * wasm_stub.c - weak per-runtime compute-binding defaults (Lua).
  *
  * The compute.* binding (mod_compute) is a composable feature archive
  * (libhull_feature-wasm-lua.a, docs/wasm_feature.md). The pure runtime archive
@@ -10,7 +10,7 @@
  * link.
  *
  * These live in the PURE RUNTIME archive (where the Lua VM is linked), not the
- * base wasm_weakstub.c, so lua_push_wasm_buffer can push a balanced nil — the
+ * base wasm_weakstub.c, so lua_push_wasm_buffer can push a balanced nil - the
  * base TU is also linked into a JS-only app, where lua_pushnil would be
  * undefined. Neither body is reached without the feature (modules.c gates the
  * compute register on wasm_cache, NULL when uncomposed; mod_gpu only pushes a
@@ -30,5 +30,5 @@ __attribute__((weak)) int luaopen_hull_compute(lua_State *L)
 __attribute__((weak)) void lua_push_wasm_buffer(lua_State *L, struct HlWasmBuffer *buf)
 {
     (void)buf;
-    lua_pushnil(L);   /* no WasmBuffer exists without the feature — balanced push */
+    lua_pushnil(L);   /* no WasmBuffer exists without the feature - balanced push */
 }

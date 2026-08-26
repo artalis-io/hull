@@ -33,7 +33,7 @@ const PER_PAGE_DEFAULT = 3;
 // helpers run once at module load and the resulting strings
 // flow into template data. These don't depend on per-request
 // state, so build them at load time. (Same shape + names as
-// `app.lua` — keep them in lockstep.)
+// `app.lua` - keep them in lockstep.)
 const DELETE_CONFIRM_ATTRS = htmxConfirm.attrs(
     "Delete this entry? (photos will be removed too)",
     { danger: true, yes: "Delete" });
@@ -199,7 +199,7 @@ app.usePost("PATCH", "/*", idempotency.middleware({
 // Percent-encode for use as a query-string value.
 // encodeURIComponent emits UTF-8 bytes (e.g. 日 → %E6%97%A5); a hand-
 // rolled `charCodeAt(0).toString(16)` loop would emit %65E5 for the
-// same input (UTF-16 code unit, invalid escape — browser then reads
+// same input (UTF-16 code unit, invalid escape - browser then reads
 // it as %65 + literal "E5"). Matches Lua's _url_encode which iterates
 // bytes via string.byte.
 function urlEncode(s) { return encodeURIComponent(s); }
@@ -232,7 +232,7 @@ function feedData(req, q) {
             [pattern, p.limit, p.offset]);
     }
     // Batch-load attachments in one join query instead of N per-row
-    // SELECTs. (JS doesn't need a `done` coercion — 0 is falsy.)
+    // SELECTs. (JS doesn't need a `done` coercion - 0 is falsy.)
     const atts = attachmentsForMany(entries.map((t) => t.id));
     for (const t of entries) t.attachments = atts.get(t.id) || [];
 
@@ -311,7 +311,7 @@ app.post("/entries", (req, res) => {
     const _id = db.query("SELECT last_insert_rowid() AS id")[0].id;
     if (htmx.is(req)) {
         // HTMX: return the full feed partial so pagination nav (which
-        // lives INSIDE #entry-feed) refreshes too — otherwise crossing
+        // lives INSIDE #entry-feed) refreshes too - otherwise crossing
         // the per_page threshold leaves stale nav from the last render.
         // The #new-entry form resets via /static/app.js, independent
         // of the response. flash.trigger fires a client-side 'flash'

@@ -1,5 +1,5 @@
 /*
- * compiler.c — System compiler backend + compiler selection
+ * compiler.c - System compiler backend + compiler selection
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */

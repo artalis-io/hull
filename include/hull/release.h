@@ -3,7 +3,7 @@
  * @brief Ed25519 signing/verification for release-artifact manifests.
  *
  * Distinct from `signature.h` (which signs built apps + platforms). This
- * module signs and verifies *release artifacts* — specifically the
+ * module signs and verifies *release artifacts* - specifically the
  * `hull.sha256` checksum manifest distributed alongside every GitHub
  * release. It is the trust root for `hull update`.
  *
@@ -56,8 +56,8 @@
 /**
  * @brief Is the embedded release pubkey real (not all-zero placeholder)?
  *
- * Callers (notably `hull update`) should skip signature verification — with
- * a visible one-time warning — when this returns 0. This lets pre-v0.1.0
+ * Callers (notably `hull update`) should skip signature verification - with
+ * a visible one-time warning - when this returns 0. This lets pre-v0.1.0
  * builds self-update without a chicken-and-egg key-bootstrap problem.
  *
  * @return 1 if #HL_RELEASE_PUBKEY_HEX is non-zero, 0 otherwise.

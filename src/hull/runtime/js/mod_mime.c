@@ -1,5 +1,5 @@
 /*
- * mod_mime.c — hull:mime module (content-MIME sniffing)
+ * mod_mime.c - hull:mime module (content-MIME sniffing)
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
@@ -14,7 +14,7 @@
  * buffer), or a string. Returns the sniffed MIME type, or null
  * if no signature matches.
  *
- * Pure capability — no fs/network/db access. */
+ * Pure capability - no fs/network/db access. */
 static JSValue js_mime_sniff(JSContext *ctx, JSValueConst this_val,
                               int argc, JSValueConst *argv)
 {

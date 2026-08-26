@@ -1,5 +1,5 @@
 /*
- * sse.c — Lua Server-Sent Events handler
+ * sse.c - Lua Server-Sent Events handler
  *
  * Adapts Keel SSE routes (registered via `app.sse()`) to Lua handler
  * coroutines. Begins the chunked stream, pushes a stream userdata,
@@ -112,7 +112,7 @@ void hl_lua_sse_handler(KlRequest *req, KlResponse *res,
     int status = lua_resume(co, lua->L, 2, &nres);
 
     if (status == LUA_OK) {
-        /* Synchronous completion — end stream if not already closed */
+        /* Synchronous completion - end stream if not already closed */
         if (!stream_ud->closed)
             kl_sse_end(&stream_ud->sse);
 
@@ -125,12 +125,12 @@ void hl_lua_sse_handler(KlRequest *req, KlResponse *res,
 
         lua_pop(lua->L, 1); /* pop routes table */
     } else if (status == LUA_YIELD) {
-        /* Handler yielded — streaming with hull.sleep() between events.
+        /* Handler yielded - streaming with hull.sleep() between events.
          * The stream will be ended when the async resume completes.
          * Routes table cleaned up on resume. */
         lua_pop(lua->L, 1); /* pop routes table */
     } else {
-        /* Error — end stream, log */
+        /* Error - end stream, log */
         const char *err = lua_tostring(co, -1);
         log_error("[hull:web:sse] handler error: %s", err ? err : "unknown");
 

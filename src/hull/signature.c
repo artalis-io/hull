@@ -1,5 +1,5 @@
 /*
- * signature.c — App signature verification (runtime)
+ * signature.c - App signature verification (runtime)
  *
  * Reads package.sig (dual-layer JSON) using sh_json arena-allocated parser,
  * verifies Ed25519 signatures for both platform and app layers, and checks
@@ -288,7 +288,7 @@ int hl_sig_verify(const HlSignature *sig, const uint8_t pubkey[32])
         sig_write_value(&w, sig->manifest_value);
 
         /* modules_resolved: array of {name, api_major, intrinsic} entries
-         * captured at build time. Optional — when absent (built with an
+         * captured at build time. Optional - when absent (built with an
          * older hull), the canonical reconstruction omits the key
          * entirely so existing signatures still verify. */
         if (sig->modules_resolved_value) {
@@ -307,8 +307,8 @@ int hl_sig_verify(const HlSignature *sig, const uint8_t pubkey[32])
              * including the gethull block, so the verifier has to
              * reconstruct byte-identical input. Walking the parsed
              * DOM (sig_write_value) preserves whatever internal
-             * shape the build wrote — arch_hashes (object), manifest
-             * (string), signature (string) — without the verifier
+             * shape the build wrote - arch_hashes (object), manifest
+             * (string), signature (string) - without the verifier
              * needing to know those names. */
             if (sig->platform.gethull_value) {
                 sh_json_write_key(&w, "gethull");
@@ -547,7 +547,7 @@ void hl_sig_free(HlSignature *sig)
     free(sig->platform.entries);
     free(sig->entries);
 
-    /* Free arena — all parsed strings and DOM nodes live here */
+    /* Free arena - all parsed strings and DOM nodes live here */
     if (sig->arena)
         sh_arena_free(sig->arena);
 
@@ -646,7 +646,7 @@ int hl_verify_startup(const char *pubkey_path, const char *entry_point,
      * platforms object with whatever key the developer chose locally.
      * We verify that signature is self-consistent (sig matches
      * platform.public_key) but no longer pin platform.public_key
-     * against HL_PLATFORM_PUBKEY_HEX — that pinning moved to §5b
+     * against HL_PLATFORM_PUBKEY_HEX - that pinning moved to §5b
      * (v0.1.3 gethull layer), which uses a signed manifest the gethull
      * release pipeline produces. Forks and self-signing devs continue
      * to work without conflicting with the upstream gethull pubkey. */
@@ -681,7 +681,7 @@ int hl_verify_startup(const char *pubkey_path, const char *entry_point,
      *      --no-verify-platform at runtime too.
      *
      * The "older" platform.{platforms,public_key,signature} layer
-     * (checked above) is independent — it's the developer-signed
+     * (checked above) is independent - it's the developer-signed
      * fork-deployable layer and remains enforceable on its own. */
     if (!no_verify_platform) {
         if (hl_platform_pubkey_is_placeholder()) {
@@ -693,7 +693,7 @@ int hl_verify_startup(const char *pubkey_path, const char *entry_point,
             static int warned_placeholder = 0;
             if (!warned_placeholder) {
                 log_warn("[sig] HL_PLATFORM_PUBKEY_HEX is the all-zeros "
-                         "placeholder — skipping gethull platform-sig check");
+                         "placeholder - skipping gethull platform-sig check");
                 warned_placeholder = 1;
             }
         } else if (!sig.platform.gethull_manifest ||
@@ -706,7 +706,7 @@ int hl_verify_startup(const char *pubkey_path, const char *entry_point,
             return -1;
         } else {
             /* Decode HL_PLATFORM_PUBKEY_HEX once here and pass it
-             * explicitly — avoids hl_platform_sig_verify decoding the
+             * explicitly - avoids hl_platform_sig_verify decoding the
              * same macro a second time when its pubkey arg is NULL. */
             uint8_t embedded_pk[32];
             if (hl_cap_crypto_hex_decode(HL_PLATFORM_PUBKEY_HEX, 64, embedded_pk, 32) != 32) {
@@ -733,7 +733,7 @@ int hl_verify_startup(const char *pubkey_path, const char *entry_point,
              * such archive was recorded under
              * package.sig.gethull.composed.platform_domain as {name, sha256},
              * alongside the SAME platform-key manifest verified in 5b. Prove
-             * every recorded hash is present in that signed manifest — so a
+             * every recorded hash is present in that signed manifest - so a
              * swapped composed archive can't ride a genuine base attestation.
              *
              * Presence-gated: the block is absent on pre-#114 apps and on cosmo

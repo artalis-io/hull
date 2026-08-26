@@ -3,8 +3,8 @@
 ## Goal
 
 Remove the **C compiler** from `hull build` entirely. Today the build
-compiles two C files per app — `app_main.c` (a fixed trampoline) and
-`app_registry.c` (pure data) — then links them against
+compiles two C files per app - `app_main.c` (a fixed trampoline) and
+`app_registry.c` (pure data) - then links them against
 `libhull_platform.a`. Neither actually needs a compiler:
 
 - `app_main.c` is app-invariant (`main()` → `hl_app_run()`), so it is
@@ -12,7 +12,7 @@ compiles two C files per app — `app_main.c` (a fixed trampoline) and
   binary.
 - `app_registry.c` is a `const HlEntry[]` array of file bytes + names,
   i.e. a **data-only object** that we **emit directly** in the target
-  object format — no codegen, just serialization.
+  object format - no codegen, just serialization.
 
 What remains on the build path is: pick the bundled `app_main.o`, emit
 `app_registry.o`, and **link**. The linker stays (see
@@ -54,7 +54,7 @@ Entry-name conventions (already implemented in `generate_app_registry`,
 kept verbatim): Lua modules `./path` (no `.lua`), JS `./path.js`, JSON
 `./path.json`, `templates/…`, `static/…`, `migrations/…`, `compute/…`
 (`.wasm` + `.aot.<arch>`), `shaders/…`, plus the app signature. The
-emitter does **not** decide names — Lua does — it only serializes.
+emitter does **not** decide names - Lua does - it only serializes.
 
 ## Architecture
 
@@ -155,7 +155,7 @@ Three genuine per-format differences to get right:
 Cosmo objects **are ELF objects**; the APE magic is entirely in the
 **link** step (cosmo `ld` + `apelink` combining two per-arch ELF
 executables). A data-only object has no code, no TLS, no special
-sections, so the ELF backend covers cosmo directly — parameterized by
+sections, so the ELF backend covers cosmo directly - parameterized by
 `(e_machine, EI_OSABI, e_flags)` to match what cosmo's linker expects.
 **No separate "APE object" backend is needed.** The two per-arch
 `app_registry.o` + `app_main.o` flow into the existing cosmo link path
@@ -188,7 +188,7 @@ release signature.
 > Optional future purification: the trampoline is a one-instruction
 > tail-call (`jmp/b hl_app_run`), so it could be **emitted** too (a tiny
 > code-object backend), removing the pre-built blobs. Bundling is the
-> pragmatic v1 — trivial, robust, no hand-written codegen.
+> pragmatic v1 - trivial, robust, no hand-written codegen.
 
 ### Second bundled object: `app_feature_registry-<rt>.o`
 
@@ -206,7 +206,7 @@ const HlRuntimeFactory *const *hl_runtime_feature_factories(size_t *count)
     { if (count) *count = 1; return (const HlRuntimeFactory *const[]){ &hl_<rt>_factory }; }
 ```
 
-These are **code**, so the data-object emitter can't produce them — but
+These are **code**, so the data-object emitter can't produce them - but
 they are **invariant per runtime** (they depend only on `rt` ∈ {lua, js},
 never on the app), so they bundle exactly like `app_main.o`, one blob per
 `(rt, format, arch)`:
@@ -227,7 +227,7 @@ genuine code. Bundling every combo is out of scope for v1, so `--no-compiler`
 covers the **common case** (no `--with`); a `--with` build still needs the
 compiler for that one file (or falls back cleanly). Cosmo's fat base already
 has both runtimes' strong hooks compiled in, so a cosmo app emits **no**
-`app_feature_registry` at all — only `app_registry.o` + `app_main`.
+`app_feature_registry` at all - only `app_registry.o` + `app_main`.
 
 ## Linker integration (`HlLinkerVtable`)
 
@@ -244,18 +244,18 @@ typedef struct {
 } HlLinkerVtable;
 ```
 
-Backends: `linker_system.c` (invoke `ld`/`cc` where present — the
+Backends: `linker_system.c` (invoke `ld`/`cc` where present - the
 compiler-free-but-not-linker-free default), and later
 `linker_lld.c` / `linker_mold.c` (embedded, extract-and-exec) for a
 fully toolchain-free box. Selection parallels `--compiler`:
 `--linker=system|lld|mold|<path>`. The linker choice is **orthogonal**
-to the emitter — the emitter's output is a standard relocatable object
+to the emitter - the emitter's output is a standard relocatable object
 any of them consume.
 
 Per-target floor the linker still needs (unchanged from any native
 build): crt startup + libc/libm/libpthread (ELF), CRT startup + import
 descriptors for `kernel32`/`ws2_32`/`ucrtbase` (PE), `libSystem` +
-ad-hoc code signature (Mach-O — `ld64.lld` emits the ad-hoc signature),
+ad-hoc code signature (Mach-O - `ld64.lld` emits the ad-hoc signature),
 cosmo crt + `ape.lds` + `apelink` (APE). These are bundle-able but out
 of scope here.
 
@@ -334,5 +334,5 @@ The whole reason to keep the linked form over an appended overlay:
   if a non-lld Mach-O linker is used, a standalone signer is required.
 - **app_main.o provenance**: the ~7 bundled objects are release
   artifacts; they must be rebuilt + re-signed when the toolchain or ABI
-  changes (rare — the trampoline is frozen).
+  changes (rare - the trampoline is frozen).
 ```

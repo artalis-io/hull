@@ -3,7 +3,7 @@
 
 Hull serves web apps from a single `app.lua` file with route
 registration via `app.get/post/put/delete/use`. Sandboxed runtime,
-in-process SQLite, hot reload, signed binary build — one command each.
+in-process SQLite, hot reload, signed binary build - one command each.
 
 **For server-rendered apps with partial-page updates (HTMX), prefer
 `hull init --profile htmx`.** It ships a complete starter app with
@@ -82,7 +82,7 @@ CREATE TABLE users (
 ```
 
 `hull dev` auto-runs migrations on startup. `db.query()` returns
-arrays of row objects. ALWAYS use `?` placeholders — string
+arrays of row objects. ALWAYS use `?` placeholders - string
 concatenation in SQL is a banned anti-pattern; use parameterized
 queries.
 
@@ -119,7 +119,7 @@ t.case("GET /users returns array", function()
 end)
 ```
 
-`hull test` runs the suite in-process — no real TCP, no real DB
+`hull test` runs the suite in-process - no real TCP, no real DB
 (uses `:memory:`). Migrations apply automatically. Tests run in
 isolation per case.
 
@@ -214,19 +214,19 @@ Each renders from the manifest. For full deploy patterns see
 
 ## What you cannot do (by design)
 
-- `require("fs")`, `require("http")`, `io.open`, `os.execute` — the
+- `require("fs")`, `require("http")`, `io.open`, `os.execute` - the
   sandbox rejects these. Use the capability layer: `fs.read`,
   `http.fetch`, etc., after declaring them in `app.manifest`.
-- Direct SQL string concatenation — use `?` parameters always.
-- Module imports outside the first-party stdlib — `manifest.modules`
+- Direct SQL string concatenation - use `?` parameters always.
+- Module imports outside the first-party stdlib - `manifest.modules`
   selects from the canonical registry (`hull modules available`).
-- `eval()` / `loadstring()` — disabled at the C level for both
+- `eval()` / `loadstring()` - disabled at the C level for both
   runtimes.
 
 ## Next steps
 
-- `hull agent context --task=auth` — session + JWT auth stack
-- `hull agent context --task=middleware` — full middleware reference
-- `hull agent context --task=templates` — template engine
-- `hull agent context --task=testing` — test patterns + fixtures
-- `hull agent context --task=deploy` — production deployment
+- `hull agent context --task=auth` - session + JWT auth stack
+- `hull agent context --task=middleware` - full middleware reference
+- `hull agent context --task=templates` - template engine
+- `hull agent context --task=testing` - test patterns + fixtures
+- `hull agent context --task=deploy` - production deployment

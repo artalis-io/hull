@@ -1,5 +1,5 @@
 /*
- * mod_crypto.c — hull:crypto module (SHA, HMAC, PBKDF2, Ed25519, box, etc.)
+ * mod_crypto.c - hull:crypto module (SHA, HMAC, PBKDF2, Ed25519, box, etc.)
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
@@ -17,7 +17,7 @@ static JSValue js_crypto_sha256(JSContext *ctx, JSValueConst this_val,
     if (argc < 1)
         return JS_ThrowTypeError(ctx, "crypto.sha256 requires (data)");
 
-    /* Accept either ArrayBuffer (binary-safe — preferred for file
+    /* Accept either ArrayBuffer (binary-safe - preferred for file
      * contents, multipart bodies, etc.) or string (UTF-8 encoded
      * via JS_ToCStringLen). Trying ArrayBuffer first means binary
      * data never round-trips through UTF-8 encoding. */
@@ -49,7 +49,7 @@ static JSValue js_crypto_sha256(JSContext *ctx, JSValueConst this_val,
  *
  * LEGACY INTEROP ONLY. SHA-1 is collision-broken; this exists for
  * third-party protocols that hardcode it (HIBP range API, etc.).
- * DO NOT use for new password hashing / MAC / digest needs — use
+ * DO NOT use for new password hashing / MAC / digest needs - use
  * crypto.sha256 / crypto.hmacSha256 / crypto.hashPassword instead.
  * Returns raw bytes (not hex) so callers can render uppercase or
  * lowercase via crypto.hexEncode(buf).toUpperCase() if needed. */
@@ -182,7 +182,7 @@ static JSValue js_crypto_verify_password(JSContext *ctx, JSValueConst this_val,
     }
 
     /* Parse "pbkdf2:iterations:salt_hex:hash_hex" manually (no scansets
-     * — Cosmopolitan libc doesn't support sscanf %[...] scansets). */
+     * - Cosmopolitan libc doesn't support sscanf %[...] scansets). */
     if (strncmp(stored, "pbkdf2:", 7) != 0) {
         JS_FreeCString(ctx, pw);
         JS_FreeCString(ctx, stored);
@@ -1012,7 +1012,7 @@ static JSValue js_crypto_hmac_sha256(JSContext *ctx, JSValueConst this_val,
 
 /* crypto.hmacSha1(data, keyHex) -> 40-char hex string.
  *
- * HOTP/TOTP compatibility only — see hl_cap_crypto_hmac_sha1 docstring.
+ * HOTP/TOTP compatibility only - see hl_cap_crypto_hmac_sha1 docstring.
  * The key is hex-encoded to match the hmacSha256 binding convention.
  */
 static JSValue js_crypto_hmac_sha1(JSContext *ctx, JSValueConst this_val,
@@ -1223,7 +1223,7 @@ static JSValue js_crypto_base64url_encode(JSContext *ctx, JSValueConst this_val,
  *
  * Returns the decoded bytes as a JS string. SAFE for text payloads
  * (JSON, ASCII). For arbitrary binary (cert DER, signatures, NaCl
- * blobs), use crypto.base64urlDecodeBytes — JS_NewStringLen UTF-8-
+ * blobs), use crypto.base64urlDecodeBytes - JS_NewStringLen UTF-8-
  * validates and replaces invalid sequences with U+FFFD, which would
  * silently corrupt binary output. */
 static JSValue js_crypto_base64url_decode(JSContext *ctx, JSValueConst this_val,
@@ -1258,7 +1258,7 @@ static JSValue js_crypto_base64url_decode(JSContext *ctx, JSValueConst this_val,
  *
  * Binary-safe variant of base64urlDecode. Callers that decode binary
  * payloads (cert DER, JWT signatures, NaCl blobs, JWKS x5c) must use
- * this — the string-returning variant loses bytes >= 0x80 via UTF-8
+ * this - the string-returning variant loses bytes >= 0x80 via UTF-8
  * validation in JS_NewStringLen. */
 static JSValue js_crypto_base64url_decode_bytes(JSContext *ctx, JSValueConst this_val,
                                                  int argc, JSValueConst *argv)
@@ -1290,7 +1290,7 @@ static JSValue js_crypto_base64url_decode_bytes(JSContext *ctx, JSValueConst thi
 
 /* crypto.hexEncode(bytes) -> lowercase hex string. Input may be
  * ArrayBuffer, TypedArray, MappedBuffer, WasmBuffer, or string
- * (treated as Latin-1 / binary-string — same as base64urlEncode). */
+ * (treated as Latin-1 / binary-string - same as base64urlEncode). */
 static JSValue js_crypto_hex_encode(JSContext *ctx, JSValueConst this_val,
                                      int argc, JSValueConst *argv)
 {
@@ -1298,7 +1298,7 @@ static JSValue js_crypto_hex_encode(JSContext *ctx, JSValueConst this_val,
     if (argc < 1)
         return JS_ThrowTypeError(ctx, "crypto.hexEncode requires (bytes)");
 
-    /* Use the unified buffer protocol — the same path
+    /* Use the unified buffer protocol - the same path
      * base64urlEncode takes. This is binary-safe for strings:
      * js_get_buffer keeps charCodes as single bytes rather than
      * UTF-8-inflating them, which JS_ToCStringLen would do. */
@@ -1387,7 +1387,7 @@ static void js_sha256_hasher_finalizer(JSRuntime *rt, JSValue val)
 {
     HlJsSha256Hasher *h = JS_GetOpaque(val, hl_js_sha256_hasher_class_id);
     if (!h) return;
-    /* Scrub any in-flight state from abandoned hashers — _final does the
+    /* Scrub any in-flight state from abandoned hashers - _final does the
      * same on the normal path. */
     if (!h->done) memset(&h->ctx, 0, sizeof(h->ctx));
     js_free_rt(rt, h);
@@ -1447,7 +1447,7 @@ static JSValue js_crypto_create_sha256(JSContext *ctx, JSValueConst this_val,
 {
     (void)this_val; (void)argc; (void)argv;
     /* js_malloc routes through QuickJS's allocator, so the runtime's
-     * configured memory cap covers Hasher instances — raw malloc would
+     * configured memory cap covers Hasher instances - raw malloc would
      * silently bypass JS_SetMemoryLimit. js_free_rt in the finalizer
      * matches the same allocator. */
     HlJsSha256Hasher *h = js_malloc(ctx, sizeof(*h));

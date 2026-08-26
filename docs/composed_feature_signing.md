@@ -1,4 +1,4 @@
-# Platform-sig over composed features — design
+# Platform-sig over composed features - design
 
 **Status:** implemented (native builds). Closes roadmap
 [roadmap_next.md §0.4](roadmap_next.md). Extends the inner platform-signature
@@ -13,7 +13,7 @@ Landed:
 - **Compose recording.** `hull build` records every composed archive into
   `package.sig.gethull.composed` (`platform_domain` = embedded runtime / HTTP
   core / web bindings / tui bridge, platform key; `release_domain` = `--with`
-  backend features, release key) — `stdlib/cli/lua/hull/build.lua`.
+  backend features, release key) - `stdlib/cli/lua/hull/build.lua`.
 - **Runtime enforcement.** `--verify-sig` §5c (`src/hull/signature.c`) verifies
   the `platform_domain` block against the embedded `HL_PLATFORM_PUBKEY_HEX`,
   fatally. Presence-gated (absent on pre-#114 apps and cosmo).
@@ -50,7 +50,7 @@ bridge (`--with=tui`), and any `--with=` feature (duckdb/gpu/postgres/mysql).
 **None of these are in the platform manifest**, so the inner-layer "provably
 gethull-built" guarantee stops at the platform lib. Authenticity is still
 anchored elsewhere (below), so this is a **defense-in-depth completion, not a
-live vulnerability** — but the second signature layer is incomplete for a
+live vulnerability** - but the second signature layer is incomplete for a
 composed binary.
 
 Where each composed archive's authenticity is anchored **today**:
@@ -80,12 +80,12 @@ externally-installed), and make a missing/mismatched attestation **fatal** under
 There is no single signed manifest that already lists everything, because there
 are two signing keys with two purposes:
 
-1. **What ships *inside* `hull`** — the platform lib AND the embedded feature
+1. **What ships *inside* `hull`** - the platform lib AND the embedded feature
    archives (runtime, http core, web bindings, tui bridges). Signed by the
    **platform key** at release (the `sign-platform-manifest` job). Today this
    manifest covers only the platform lib; this design **extends it** to also
    carry the embedded feature-archive hashes, per arch.
-2. **What is *separately installed*** — `--with` feature libs and `--flavor`
+2. **What is *separately installed*** - `--with` feature libs and `--flavor`
    platform libs. Already in the **release manifest** (`hull.sha256`, signed by
    the **release key**). Nothing new to publish; the design just **records** the
    composed entries in `package.sig`.
@@ -117,7 +117,7 @@ list, per arch, every embedded feature archive that ships in that release's
 Signed as one blob per the existing scheme; embedded in `hull` alongside the
 current platform-sig (`embedded_platform_sig.h` becomes an embedded-archive
 manifest). The bytes hashed here MUST be **byte-identical** to what
-`build_assets.c` extracts from the embedded copy — the manifest is generated from
+`build_assets.c` extracts from the embedded copy - the manifest is generated from
 the same archives the embed step consumes, so the reproducible-build chain keeps
 them in lockstep (same discipline as the platform lib today). The `--with`
 feature libs and `--flavor` libs stay covered by `hull.sha256` (unchanged).
@@ -206,18 +206,18 @@ itself wasn't altered.
 ## Cosmo
 
 The cosmo (fat APE) base compiles both runtimes + HTTP in, so it composes **no**
-embedded feature archives — its `composed.platform_domain` degenerates to the
+embedded feature archives - its `composed.platform_domain` degenerates to the
 platform lib only (dual-arch, as today). `--with` features are native-only, so
 `composed.release_domain` is empty on cosmo. No cosmo-specific work beyond the
 existing dual-arch platform-sig handling.
 
 **`app_stdlib_registry.o` (cosmo produced/ejected app) is binary-hash-covered,
-not composed-attested — by design.** A cosmo app emits a small regular object
+not composed-attested - by design.** A cosmo app emits a small regular object
 (`app_stdlib_registry.o`) filling the strong `hl_stdlib_feature_entries()` seam
 (see `docs/cosmocc_install.md` and `feature_compose.gen_app_registry_c`). It is
 **not** recorded in `package.sig.gethull.composed`, and that is the correct
 boundary: `platform_domain` attests gethull.dev-shipped **archives** against the
-platform key, and this object carries no third-party bytes — Hull's own tool VM
+platform key, and this object carries no third-party bytes - Hull's own tool VM
 generates it from the base's own `hl_stdlib_<rt>_entries`. It is the moral
 equivalent of `app_main.o` / `app_registry.o`, which are likewise covered by the
 final binary's `binary_hash` inside the developer-signed payload, not by the
@@ -229,7 +229,7 @@ emitted object to the developer signature.)
 
 **Moderate.** It reuses every existing primitive (the `hl_platform_sig_*` codec,
 `hl_release_io_verify_local_asset`, the `package.sig` gethull block, the runtime
-`--verify-sig` path) — the work is *extending* them from "one platform lib" to "N
+`--verify-sig` path) - the work is *extending* them from "one platform lib" to "N
 archives across two domains," plus the release-job manifest extension. No new
 key, no new crypto, no new trust root.
 

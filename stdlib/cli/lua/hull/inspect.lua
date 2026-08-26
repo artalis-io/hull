@@ -1,5 +1,5 @@
 --
--- hull.inspect — Inspect app signature and capabilities (dual-layer)
+-- hull.inspect - Inspect app signature and capabilities (dual-layer)
 --
 -- Usage: hull inspect [app_dir]
 --
@@ -119,7 +119,7 @@ local function main()
     -- Verify app signature
     if sig.signature and sig.public_key and sig.files then
         -- Rebuild the exact payload that build.lua signed. The key set
-        -- here MUST match build.lua's sign_app() — adding a new field
+        -- here MUST match build.lua's sign_app() - adding a new field
         -- there means adding it here too, or the verify will report
         -- INVALID on a genuinely-valid signature.
         local payload
@@ -166,22 +166,22 @@ local function main()
         if m.hosts and #m.hosts > 0 then
             print("  hosts:    " .. table.concat(m.hosts, ", "))
         end
-        -- W^X escape hatches — surface loudly so the auditor sees them.
+        -- W^X escape hatches - surface loudly so the auditor sees them.
         -- Accept both snake_case (Lua manifest) and camelCase (JS manifest).
         local adc = m.allow_dynamic_code or m.allowDynamicCode
         local adl = m.allow_dynamic_libraries or m.allowDynamicLibraries
         if adc then
-            print("  [!] allow_dynamic_code:      true  (RISKY — JIT / runtime codegen)")
+            print("  [!] allow_dynamic_code:      true  (RISKY - JIT / runtime codegen)")
         end
         if adl then
-            print("  [!] allow_dynamic_libraries: true  (RISKY — dlopen of native libs)")
+            print("  [!] allow_dynamic_libraries: true  (RISKY - dlopen of native libs)")
         end
         print("")
     end
 
     -- ── Runtime caches (disclosure) ─────────────────────────────────
     --
-    -- These paths are NOT declared in the app manifest — they're
+    -- These paths are NOT declared in the app manifest - they're
     -- infrastructure the runtime decides to memoize for speed (Lua
     -- bytecode, compute AOT, template render functions, signed tool
     -- downloads). The auditor sees them here so "what does this
@@ -189,7 +189,7 @@ local function main()
     -- manifest-disclosure property of fs.write / hosts / env.
     --
     -- Registry-driven (tool.cache_kinds() reads hl_cache_registry()
-    -- in C) — adding a new cache kind in REGISTRY[] automatically
+    -- in C) - adding a new cache kind in REGISTRY[] automatically
     -- picks up inspect disclosure here.
     if tool.cache_kinds then
         local kinds = tool.cache_kinds()
@@ -212,7 +212,7 @@ local function main()
             if override then
                 print("  HULL_CACHE_DIR override active: " .. override)
                 print("  (runtime caches re-rooted for per-app isolation;")
-                print("   `tools` is unaffected — durable signed downloads)")
+                print("   `tools` is unaffected - durable signed downloads)")
             end
             print("  manage via `hull cache list|prune|clear`,")
             print("  opt out with HULL_NO_CACHE=1")

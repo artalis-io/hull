@@ -1,5 +1,5 @@
 /*
- * Hull HTMX toast widget — client runtime.
+ * Hull HTMX toast widget - client runtime.
  *
  * Listens for `toast` events triggered by the server via the
  * HX-Trigger response header. Each event renders one item into a
@@ -98,7 +98,7 @@
 
         var span = document.createElement("span");
         span.className = "hull-toast-message";
-        // textContent — never innerHTML — keeps server-provided
+        // textContent - never innerHTML - keeps server-provided
         // strings safe from injection.
         span.textContent = message;
 

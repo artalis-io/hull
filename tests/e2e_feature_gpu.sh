@@ -1,5 +1,5 @@
 #!/bin/sh
-# e2e_feature_gpu.sh — GPU (wgpu-native) as a composable feature, end to end.
+# e2e_feature_gpu.sh - GPU (wgpu-native) as a composable feature, end to end.
 #
 # Builds a BASE hull (EMBED_PLATFORM=1, no GPU compiled in) + the GPU feature
 # archive, then `hull build --with=gpu` an app and boots it. Proves that
@@ -33,7 +33,7 @@ cp build/hull /tmp/hull_base_gpu_e2e
 echo "=== build the GPU feature archive ==="
 make feature-gpu >/dev/null
 ls -la build/libhull_feature-gpu.a
-# Symbol present? (macOS nm prefixes a leading '_', Linux doesn't — match both.)
+# Symbol present? (macOS nm prefixes a leading '_', Linux doesn't - match both.)
 nm build/libhull_feature-gpu.a 2>/dev/null | grep -qE '[ _]hl_gpu_backend_wgpu$' \
     || { echo "FAIL: feature archive lacks hl_gpu_backend_wgpu"; exit 1; }
 
@@ -99,7 +99,7 @@ echo "ok  plain app stayed GPU-free"
 
 echo "=== negative: without --with=gpu the composed binary must NOT run the gpu app ==="
 # `hull build` only WARNS on a resolver failure (it doesn't hard-fail), so a base
-# build still produces a binary — but with the base (GPU-free) platform, so the
+# build still produces a binary - but with the base (GPU-free) platform, so the
 # runtime resolver rejects hull/gpu at load and the app never prints OK.
 "$HULL" build --no-verify-platform -o "$APP/bin_base" "$APP" >/dev/null 2>&1 || true
 BASE_RUN=$("$APP/bin_base" 2>&1) || true

@@ -1,4 +1,4 @@
-# HTMX widgets — usage guide (§1.5.g tier)
+# HTMX widgets - usage guide (§1.5.g tier)
 
 > **Status: shipped.** All 8 widgets are first-party stdlib modules
 > available in any Hull binary that ships the HTTP server.
@@ -19,17 +19,17 @@ JS total across all 8 widgets, all loaded once per page.
 Draw a firm line between two things that both live under `hull/web/htmx*`:
 
 - **`hull/web/htmx` (the base module) is frontend-agnostic core.** It emits
-  *no HTML* — only the server-side htmx *protocol dialect*: detect an htmx
+  *no HTML* - only the server-side htmx *protocol dialect*: detect an htmx
   request (`HX-Request`) and set the response headers htmx interprets
   (`HX-Redirect`, `HX-Retarget`, `HX-Reswap`, `HX-Trigger`, …). It is the
-  legitimate peer of `csv` / `jwt` / `validate` — a wire-format helper that
+  legitimate peer of `csv` / `jwt` / `validate` - a wire-format helper that
   doesn't care what your frontend is.
 
 - **The 8 widgets (`hull/web/htmx/{toast,confirm,form,search,inline-edit,sort,pagination,table}`)
   are an opinionated, optional component pack.** They emit real HTML with
   hardcoded class names (`hull-table`, `hull-pagination`, …), a prescribed DOM
   structure, URL conventions (`?sort=col:asc`), and a paired client JS/CSS
-  runtime — all **inert without htmx on the page**. That makes them a
+  runtime - all **inert without htmx on the page**. That makes them a
   single-frontend-library UI kit, categorically different from the
   frontend-agnostic modules above. They are well-built (centralized escaping,
   real a11y, SQL-injection-conscious sort allowlisting) and honestly gated
@@ -49,11 +49,11 @@ of baseline framework surface.
 | [`toast`](#toast) | `show / info / success / warning / error` | ~150 LOC | structural |
 | [`confirm`](#confirm) | `attrs(question, opts?)` | ~140 LOC | structural |
 | [`form`](#form) | `errors / field_error / field_attrs` | ~75 LOC | structural |
-| [`search`](#search) | `input_attrs / results_attrs` | — | — |
+| [`search`](#search) | `input_attrs / results_attrs` | - | - |
 | [`inline-edit`](#inline-edit) | `cell(opts) / editor(opts)` | ~30 LOC | structural |
 | [`sort`](#sort) | `parse(req) / header_attrs(col, current, opts)` | ~30 LOC | structural |
-| [`pagination`](#pagination) | `nav(total, opts)` | — | — |
-| [`table`](#table) | `render(rows, schema, opts)` | — | — |
+| [`pagination`](#pagination) | `nav(total, opts)` | - | - |
+| [`table`](#table) | `render(rows, schema, opts)` | - | - |
 
 ## The handler-pre-render pattern
 
@@ -62,7 +62,7 @@ support function calls** in `{{ }}` expressions. Widget helpers run
 **server-side in the handler** and the resulting strings flow into
 the template data table. Templates splice via `{{ name | raw }}`.
 
-This is the **only** correct usage shape — examples on this page
+This is the **only** correct usage shape - examples on this page
 all follow it. If you see `{{ widget.func(...) | raw }}` in
 older docs or AI-generated code, it won't work.
 
@@ -116,7 +116,7 @@ Every app using the widget tier needs:
      "allowScriptTags":        false
    }'>
    ```
-   **This is required** — without it, the browser console reports
+   **This is required** - without it, the browser console reports
    `EvalError: Evaluating a string as JavaScript violates ... script-src`
    on the first swap that contains any `<script>` content (or whose
    trigger uses `hx-on`).
@@ -142,7 +142,7 @@ Every app using the widget tier needs:
    ship htmx itself; vendor it (see `examples/hypermedia_photos/static/vendor/`).
 
 The CSP preset `csp = "htmx"` expands to a known-good policy
-covering `script-src 'self'`, `connect-src 'self'`, etc. — what the
+covering `script-src 'self'`, `connect-src 'self'`, etc. - what the
 shipped widget JS needs. See [`docs/security.md`](security.md) §3.A
 for the full expansion.
 
@@ -259,7 +259,7 @@ Add `data-loading-label="..."` to the submit button:
 
 The shipped JS toggles `aria-busy="true"` + `disabled` during the
 request, swaps the button text to the label, and restores both on
-completion (including `htmx:responseError` — failed validations
+completion (including `htmx:responseError` - failed validations
 don't leave the button stuck).
 
 ---
@@ -267,7 +267,7 @@ don't leave the button stuck).
 ## search
 
 Debounced search input that posts to a server-rendered results
-partial. Pure htmx — no client JS shipped.
+partial. Pure htmx - no client JS shipped.
 
 ```lua
 local search = require("hull.web.htmx.search")
@@ -311,7 +311,7 @@ edit form, PATCH saves and returns display fragment. The cell is
 keyboard-activatable (Enter/Space/click); the editor input auto-
 focuses + selects after swap; Esc cancels.
 
-Three endpoints per editable field — display cell GET, edit form GET,
+Three endpoints per editable field - display cell GET, edit form GET,
 save PATCH:
 
 ```lua
@@ -345,7 +345,7 @@ app.patch("/assets/:id/name", function(req, res)
     }))
 end)
 
--- GET /assets/:id/name/view — for Esc / Cancel:
+-- GET /assets/:id/name/view - for Esc / Cancel:
 app.get("/assets/:id/name/view", ...)  -- returns ie.cell same as PATCH success
 ```
 
@@ -394,7 +394,7 @@ end)
 The emitted attrs include `tabindex="0"` (keyboard focusable),
 `aria-sort="ascending|descending|none"`, `data-sort-direction` +
 `class="hull-sort-{none|asc|desc}"` for styling, `hx-get="<url>?sort=col:dir"`
-with the toggled direction. No `role="button"` — `<th>` has the
+with the toggled direction. No `role="button"` - `<th>` has the
 implicit `columnheader` role, and screen readers read "column
 header, sorted ascending" (more informative than "button"). Plus
 `aria-sort` is only valid on `columnheader` / `rowheader`, so
@@ -403,7 +403,7 @@ header, sorted ascending" (more informative than "button"). Plus
 `opts.swap` controls `hx-swap`: when `target` wraps the table + nav
 + actions (e.g. `"#grid"`), pass `"innerHTML"`. When `target` is the
 table itself (default `"closest table"`), pass `"outerHTML"`. Omitted
-by default — htmx then uses its own default, `"innerHTML"`.
+by default - htmx then uses its own default, `"innerHTML"`.
 
 Toggle semantics: asc → desc → asc (clicking a sorted column flips;
 clicking a different column resets to asc).
@@ -496,17 +496,17 @@ end)
 ```
 
 Schema column fields:
-- `name` (required) — key in row + URL param
-- `label` — header text (default: same as `name`)
-- `sortable` — when true, header gets sort widget attrs
-- `editable` — when true, cell wraps value in `inline_edit.cell`
-- `render(value, row)` — custom cell HTML (spliced raw; app owns safety)
+- `name` (required) - key in row + URL param
+- `label` - header text (default: same as `name`)
+- `sortable` - when true, header gets sort widget attrs
+- `editable` - when true, cell wraps value in `inline_edit.cell`
+- `render(value, row)` - custom cell HTML (spliced raw; app owns safety)
 
 `opts.edit_url_for(row, col_name)` is required when any column has
 `editable=true`.
 
 Apps wire search input + pagination footer around the table
-separately using the other widgets — `table.render` owns the grid,
+separately using the other widgets - `table.render` owns the grid,
 not the page layout.
 
 ---
@@ -538,12 +538,12 @@ hand in a browser.
 
 ## Related
 
-- [`docs/htmx.md`](htmx.md) — broader htmx hypermedia profile
+- [`docs/htmx.md`](htmx.md) - broader htmx hypermedia profile
   (Pico, CSP nonces, scaffold structure)
-- [`docs/security.md`](security.md) §3.A — CSP preset table +
+- [`docs/security.md`](security.md) §3.A - CSP preset table +
   per-widget XSS notes
 - [`examples/htmx_widgets_register/`](../examples/htmx_widgets_register/)
-  — worked CRUD app, UX-test checklist
-- [`examples/hypermedia_photos/`](../examples/hypermedia_photos/) —
+  - worked CRUD app, UX-test checklist
+- [`examples/hypermedia_photos/`](../examples/hypermedia_photos/) -
   larger app with auth + multipart uploads, partially migrated to
   the widget tier

@@ -1,5 +1,5 @@
 /*
- * agent/limits.h — Named constants for the hull-agent surface.
+ * agent/limits.h - Named constants for the hull-agent surface.
  *
  * Internal to src/hull/agent/. Replaces every numeric literal that
  * would otherwise read as a magic number.
@@ -46,7 +46,7 @@
 /* Initial / max NL-offset buffers for log tailing. */
 #define HL_AGENT_NL_CAP_INITIAL       1024
 
-/* Aggregate buffer growth — initial size; doubles thereafter. */
+/* Aggregate buffer growth - initial size; doubles thereafter. */
 #define HL_AGENT_AGG_INITIAL_CAP      (64 * 1024)
 
 /* sh_arena slack: arena size = input_size * factor + slack. The slack

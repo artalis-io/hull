@@ -1,5 +1,5 @@
 #!/bin/sh
-# check_hardening.sh — post-build hardening verifier for Hull binaries.
+# check_hardening.sh - post-build hardening verifier for Hull binaries.
 #
 # Inspects an ELF (or Mach-O / APE) binary and reports which compiler/
 # linker hardening properties are present. Uses readelf / otool /
@@ -98,7 +98,7 @@ check_elf() {
     if echo "$dyn" | grep -qE 'BIND_NOW|FLAGS_1.* NOW'; then
         report pass "BIND_NOW (full RELRO)" "DT_BIND_NOW / DT_FLAGS_1 NOW set"
     else
-        report fail "BIND_NOW (full RELRO)" "missing — partial RELRO only"
+        report fail "BIND_NOW (full RELRO)" "missing - partial RELRO only"
     fi
 
     # Non-executable stack: PT_GNU_STACK with no X flag.
@@ -192,7 +192,7 @@ check_macho() {
         report fail "stack canaries"      "no __stack_chk_fail reference"
     fi
 
-    # Hardened Runtime / code signing — Apple-side runtime hardening.
+    # Hardened Runtime / code signing - Apple-side runtime hardening.
     # `codesign -dv` reports flags; we just check for its presence.
     if command -v codesign >/dev/null 2>&1; then
         cs=$(codesign -dv --verbose=1 "$BIN" 2>&1 || true)
@@ -215,13 +215,13 @@ check_macho() {
 # ── APE (Cosmopolitan) inspection ────────────────────────────────────
 check_ape() {
     # APE is a hybrid MZ/ELF/Mach-O file. Most ELF-specific hardening
-    # is inapplicable by design — Cosmopolitan has its own portable
+    # is inapplicable by design - Cosmopolitan has its own portable
     # bootloader. Report what we can and skip the rest with the reason.
-    report skip "PIE / ASLR"              "APE — portable position-independent by construction"
-    report skip "RELRO / BIND_NOW"        "APE — no GNU dynamic linker"
+    report skip "PIE / ASLR"              "APE - portable position-independent by construction"
+    report skip "RELRO / BIND_NOW"        "APE - no GNU dynamic linker"
     report skip "stack canaries"          "cosmocc disables by default"
-    report skip "_FORTIFY_SOURCE"         "APE — cosmocc does not enable"
-    report skip "CET / BTI"               "APE — runs on pre-CET CPUs by design"
+    report skip "_FORTIFY_SOURCE"         "APE - cosmocc does not enable"
+    report skip "CET / BTI"               "APE - runs on pre-CET CPUs by design"
     report skip "W^X"                     "APE bootloader handles segment mapping"
 }
 
@@ -259,7 +259,7 @@ printf -- '----------------------------------------------------------\n'
 printf 'summary: %d pass, %d fail, %d skip\n' "$PASS" "$FAIL" "$SKIP"
 
 if [ "$EXIT" -ne 0 ]; then
-    printf 'verdict: FAIL — required hardening missing\n' >&2
+    printf 'verdict: FAIL - required hardening missing\n' >&2
 else
     printf 'verdict: OK\n'
 fi

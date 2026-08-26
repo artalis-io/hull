@@ -1,6 +1,6 @@
 -- Auth-flows example: a tiny credentials-managed web app
 -- demonstrating registration, email verification, login, logout,
--- magic-link sign-in, password reset, and email change — all
+-- magic-link sign-in, password reset, and email change - all
 -- bundled by hull/web/auth-flows@1, all wired against a plain
 -- `users` table the app owns.
 --
@@ -14,14 +14,14 @@
 --
 -- Apps with a custom users schema or session shape can still
 -- override individual callbacks (opts.user_create wins over
--- opts.users.create, etc.) — see the explicit-wiring fixture at
+-- opts.users.create, etc.) - see the explicit-wiring fixture at
 -- tests/fixtures/auth_flows_lua/app.lua for that style.
 --
 -- Run: AUTH_FLOWS_SECRET=$(head -c 32 /dev/urandom | base64) \
 --      hull dev examples/auth_flows/app.lua -p 3000
 --
 -- Then visit http://localhost:3000/ for the demo nav. Outgoing
--- emails print to stderr — comment in the hull/email wiring at
+-- emails print to stderr - comment in the hull/email wiring at
 -- the bottom of this file to actually deliver them.
 
 app.manifest({
@@ -61,7 +61,7 @@ session.init()
 local templates = {
     welcome = function(ctx)
         return {
-            subject = "Welcome to the demo — verify your email",
+            subject = "Welcome to the demo - verify your email",
             text = "Hi " .. ctx.user.email .. ",\n\n"
                 .. "Click to verify: " .. ctx.verify_url .. "\n\n"
                 .. "Link expires in 24 hours.\n",
@@ -115,13 +115,13 @@ authflows.init({
     -- Round-9 HIGH-1: REQUIRED. In production, set this to your real
     -- public URL (e.g. https://app.example.com). Without it (or
     -- trusted_hosts), every magic-link / password-reset URL would be
-    -- built from req.headers.host — a hostile Host header reroutes
+    -- built from req.headers.host - a hostile Host header reroutes
     -- the click to a phishing origin and leaks the token. Local-only
     -- dev: keep this default; the env override flips it for staging /
     -- prod.
     public_origin = envget("AUTH_FLOWS_PUBLIC_ORIGIN",
         "http://localhost:8080"),
-    -- Stdout email sender — replace with hull/email for real sending.
+    -- Stdout email sender - replace with hull/email for real sending.
     -- See the commented block at the bottom of this file.
     email_send = function(to, subject, html, text)
         log.info("📧 to=" .. to .. " subject=" .. subject)

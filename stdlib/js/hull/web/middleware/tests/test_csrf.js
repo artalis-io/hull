@@ -1,4 +1,4 @@
-// test_csrf.js — Tests for hull:web:middleware:csrf
+// test_csrf.js - Tests for hull:web:middleware:csrf
 //
 // Requires crypto and time globals (run via hull test harness).
 

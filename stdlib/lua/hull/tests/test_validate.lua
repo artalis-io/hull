@@ -1,4 +1,4 @@
--- test_validate.lua — Tests for hull.validate
+-- test_validate.lua - Tests for hull.validate
 --
 -- Tests pure-function schema validation (no runtime globals needed).
 -- Run via: the C test harness (test_lua_runtime.c) loads and executes this.

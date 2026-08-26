@@ -1,5 +1,5 @@
 /*
- * hull/limits/gpu.h — GPU compute (wgpu-native) limits
+ * hull/limits/gpu.h - GPU compute (wgpu-native) limits
  *
  * Used only by cap/gpu sources, worker_gpu, runtime/{lua,js}/mod_gpu,
  * and manifest.{h,c} (for HL_GPU_MAX_DEVICES). Changes here should not

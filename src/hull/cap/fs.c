@@ -1,5 +1,5 @@
 /*
- * hull_cap_fs.c — Shared filesystem capability
+ * hull_cap_fs.c - Shared filesystem capability
  *
  * All file I/O goes through these functions with path validation.
  * Rejects "..", absolute paths, and paths outside the declared base_dir.
@@ -44,7 +44,7 @@ int hl_cap_fs_validate(const HlFsConfig *cfg, const char *path,
         return -1;
     }
 
-    /* Reject ".." components — walk the path */
+    /* Reject ".." components - walk the path */
     const char *p = path;
     while (*p) {
         /* Check for ".." at start or after "/" */
@@ -266,7 +266,7 @@ int hl_cap_fs_write(const HlFsConfig *cfg, const char *path,
     int result = -1;
 
     /* WRITE mode: the resolver creates missing parent dirs (contained mkdirat)
-     * and opens the leaf O_WRONLY|O_CREAT|O_TRUNC — same implicit-parents +
+     * and opens the leaf O_WRONLY|O_CREAT|O_TRUNC - same implicit-parents +
      * truncate behavior as the previous mkdir-p + fopen("wb"), now race-free. */
     int fd = fs_resolve_fd(cfg, path, HL_FS_OPEN_WRITE, 0644, err_msg);
     if (fd < 0)
@@ -611,7 +611,7 @@ HlMappedBuffer *hl_cap_fs_mmap(const HlFsConfig *cfg, const char *path,
 
     struct stat st;
     if (fstat(fd, &st) != 0) {
-        /* Do NOT read st here — it is uninitialized when fstat fails. */
+        /* Do NOT read st here - it is uninitialized when fstat fails. */
         close(fd);
         if (err_msg) *err_msg = "mmap_failed";
         goto audit;

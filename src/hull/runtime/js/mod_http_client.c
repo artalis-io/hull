@@ -1,5 +1,5 @@
 /*
- * mod_http.c — hull:http module (HTTP client + async fetch)
+ * mod_http.c - hull:http module (HTTP client + async fetch)
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
@@ -89,7 +89,7 @@ static JSValue js_push_http_response(JSContext *ctx, const KlClientResponse *res
     else
         JS_SetPropertyStr(ctx, obj, "body", JS_NewString(ctx, ""));
 
-    /* Headers as { "name": "value" } — lowercase names */
+    /* Headers as { "name": "value" } - lowercase names */
     JSValue headers = JS_NewObject(ctx);
     for (int i = 0; i < resp->num_headers; i++) {
         /* Lowercase header name */
@@ -275,7 +275,7 @@ static JSValue js_http_patch(JSContext *ctx, JSValueConst this_val,
                               int argc, JSValueConst *argv)
 { (void)this_val; return js_http_body_method(ctx, argc, argv, "PATCH"); }
 
-/* http.del(url, opts?) — same as http.get but DELETE */
+/* http.del(url, opts?) - same as http.get but DELETE */
 static JSValue js_http_del(JSContext *ctx, JSValueConst this_val,
                             int argc, JSValueConst *argv)
 {
@@ -333,7 +333,7 @@ static JSValue js_push_async_http_response(JSContext *ctx, void *driver)
     else
         JS_SetPropertyStr(ctx, obj, "body", JS_NewString(ctx, ""));
 
-    /* Headers as { "name": "value" } — lowercase names */
+    /* Headers as { "name": "value" } - lowercase names */
     JSValue headers = JS_NewObject(ctx);
     for (int i = 0; i < resp->num_headers; i++) {
         size_t nlen = strlen(resp->headers[i].name);
@@ -358,7 +358,7 @@ static JSValue js_push_async_http_response(JSContext *ctx, void *driver)
     return obj;
 }
 
-/* http.fetch(method, url, opts?) — async non-blocking HTTP request. */
+/* http.fetch(method, url, opts?) - async non-blocking HTTP request. */
 static JSValue js_http_fetch(JSContext *ctx, JSValueConst this_val,
                               int argc, JSValueConst *argv)
 {
@@ -439,7 +439,7 @@ static JSValue js_http_fetch(JSContext *ctx, JSValueConst this_val,
     return promise;
 }
 
-/* ── http.async.* — async HTTP convenience methods ─────────────────── */
+/* ── http.async.* - async HTTP convenience methods ─────────────────── */
 
 static JSValue js_http_async_request(JSContext *ctx, JSValueConst this_val,
                                       int argc, JSValueConst *argv)

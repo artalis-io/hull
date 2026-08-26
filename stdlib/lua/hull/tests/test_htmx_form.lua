@@ -125,7 +125,7 @@ test("field_attrs id matches field_error id even with meta name", function()
     local errors = { ['user.name'] = "required" }
     local attrs = form.field_attrs(errors, 'user.name')
     local span  = form.field_error(errors, 'user.name')
-    -- Both helpers must collapse identically — that's the contract.
+    -- Both helpers must collapse identically - that's the contract.
     assert_match(attrs, "hull-form-error-user_name")
     assert_match(span,  'id="hull-form-error-user_name"')
 end)

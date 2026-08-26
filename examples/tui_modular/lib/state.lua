@@ -1,4 +1,4 @@
--- lib/state.lua — Initial state factory and shared helpers.
+-- lib/state.lua - Initial state factory and shared helpers.
 --
 -- State is a single table threaded through every render/event call.
 -- Keep it serialisable (no closures or userdata) so it's easy to

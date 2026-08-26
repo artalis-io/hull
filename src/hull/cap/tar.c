@@ -1,5 +1,5 @@
 /*
- * cap/tar.c — ustar (.tar) parse / extract / create. See cap/tar.h.
+ * cap/tar.c - ustar (.tar) parse / extract / create. See cap/tar.h.
  *
  * A minimal read-only ustar reader plus a matching writer. Files + directories
  * only (producers dereference symlinks to copies). Nested relative paths are
@@ -111,7 +111,7 @@ static int tar_safe_linkname(const char *member, const char *ln)
         const char *slash = strchr(p, '/');
         size_t seg = slash ? (size_t)(slash - p) : strlen(p);
         if (seg == 0 || (seg == 1 && p[0] == '.')) {
-            /* "//" (empty) or "." — no depth change. */
+            /* "//" (empty) or "." - no depth change. */
         } else if (seg == 2 && p[0] == '.' && p[1] == '.') {
             if (--depth < 0) return 0;                    /* escapes the root */
         } else {

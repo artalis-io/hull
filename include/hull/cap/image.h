@@ -85,7 +85,7 @@ HlImage *hl_image_new(uint32_t w, uint32_t h, HlImageFormat fmt,
                        const void *pixels, size_t pixel_len,
                        HlAllocator *alloc);
 
-/* Create from buffer view (borrows — caller keeps source alive) */
+/* Create from buffer view (borrows - caller keeps source alive) */
 HlImage *hl_image_from_view(uint32_t w, uint32_t h, HlImageFormat fmt,
                              const void *data, size_t len,
                              HlAllocator *alloc);

@@ -1,5 +1,5 @@
 #!/bin/sh
-# tests/check_docs_integrity.sh — permanent documentation-integrity gate.
+# tests/check_docs_integrity.sh - permanent documentation-integrity gate.
 #
 # Protects the docs/ reorganization (active / invariants / historical) from
 # silent rot. Five checks, each fatal:
@@ -32,7 +32,7 @@ err() { printf '  \033[31mFAIL\033[0m %s\n' "$1"; FAIL=$((FAIL + 1)); }
 ok()  { printf '  \033[32mok\033[0m   %s\n' "$1"; }
 
 # Illustrative / synthetic docs paths used as literals in code (CI classifier
-# tests, path-normalization examples) — NOT real doc links. Keep this list tight.
+# tests, path-normalization examples) - NOT real doc links. Keep this list tight.
 is_allowlisted_ref() {
     case "$1" in
         # synthetic inputs in CI-classifier / path tests

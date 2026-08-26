@@ -1,10 +1,10 @@
--- stdlib/lua/hull/migrate_status_tui.lua — visual migration ledger.
+-- stdlib/lua/hull/migrate_status_tui.lua - visual migration ledger.
 --
 -- Invoked by `hull migrate status --tui`. Two-pane: list of every
 -- discovered migration on the left, source preview (the .sql file
 -- content) on the right. ↑/↓ to scroll, r to re-query, q to quit.
 --
--- The data comes from tool.migrate_status(app_dir, db_path) — a
+-- The data comes from tool.migrate_status(app_dir, db_path) - a
 -- direct wrapper around the C hl_migrate_status path. We read the
 -- .sql source via tool.read_file when the user focuses an entry.
 --
@@ -174,7 +174,7 @@ local function render(t)
         t:style({})
     else
         t:style({ fg = pal.warn, bold = true })
-        t:print(right_x, 4, "pending — will run on next `hull migrate`")
+        t:print(right_x, 4, "pending - will run on next `hull migrate`")
         t:style({})
     end
 

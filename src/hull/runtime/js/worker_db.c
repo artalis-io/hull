@@ -1,5 +1,5 @@
 /*
- * js_worker_db.c — Bridge: db.* for worker JS VMs
+ * js_worker_db.c - Bridge: db.* for worker JS VMs
  *
  * Registers sync db.query/exec/batch/lastId into per-worker JS VMs using
  * the worker thread's own backend connection (HlDbBackend vtable), so the

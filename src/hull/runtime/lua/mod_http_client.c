@@ -1,4 +1,4 @@
-/* mod_http.c — hull.http module: HTTP client, sync and async
+/* mod_http.c - hull.http module: HTTP client, sync and async
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
@@ -242,7 +242,7 @@ static int lua_http_post(lua_State *L)   { return lua_http_body_method(L, "POST"
 static int lua_http_put(lua_State *L)    { return lua_http_body_method(L, "PUT"); }
 static int lua_http_patch(lua_State *L)  { return lua_http_body_method(L, "PATCH"); }
 
-/* http.delete(url, opts?) — same signature as http.get */
+/* http.delete(url, opts?) - same signature as http.get */
 static int lua_http_delete(lua_State *L)
 {
     HlLua *lua = get_hl_lua(L);
@@ -298,7 +298,7 @@ static void lua_push_async_http_response(lua_State *L, void *driver)
         lua_pushstring(L, "");
     lua_setfield(L, -2, "body");
 
-    /* Headers as { ["name"] = "value" } — lowercase names */
+    /* Headers as { ["name"] = "value" } - lowercase names */
     lua_newtable(L);
     for (int i = 0; i < resp->num_headers; i++) {
         const char *name = resp->headers[i].name;
@@ -317,7 +317,7 @@ static void lua_push_async_http_response(lua_State *L, void *driver)
     lua_setfield(L, -2, "headers");
 }
 
-/* http.fetch(method, url, opts?) — async non-blocking HTTP request.
+/* http.fetch(method, url, opts?) - async non-blocking HTTP request.
  * Yields the coroutine; event loop drives socket I/O via KlWatcher.
  * Returns { status, body, headers } on resume. */
 static int lua_http_fetch(lua_State *L)
@@ -352,7 +352,7 @@ static int lua_http_fetch(lua_State *L)
         lua_pop(L, 1);
     }
 
-    /* Start the async HTTP request — checks allowlist, creates KlClient,
+    /* Start the async HTTP request - checks allowlist, creates KlClient,
      * creates HlAsyncCtx, and suspends the inbound connection */
     HlAsyncCtx *ctx = hl_async_http_start(
         lua->server, lua->active_conn, lua->base.net_ctx, lua->base.alloc,
@@ -366,20 +366,20 @@ static int lua_http_fetch(lua_State *L)
     HlAsyncCont *cont = hl_lua_async_cont_create(lua, lua->base.alloc,
                                                    lua_push_async_http_response);
     if (!cont) {
-        /* Connection was already suspended — we can't easily undo that.
+        /* Connection was already suspended - we can't easily undo that.
          * The cancel callback will clean up when the connection times out. */
         return luaL_error(L, "http.fetch: out of memory");
     }
     ctx->cont = cont;
 
-    /* Yield the coroutine — on resume, the driver result
+    /* Yield the coroutine - on resume, the driver result
      * will be pushed onto the stack by lua_push_async_http_response */
     return lua_yieldk(L, 0, 0, NULL);
 }
 
-/* ── http.async.* — async HTTP convenience methods ─────────────────── */
+/* ── http.async.* - async HTTP convenience methods ─────────────────── */
 
-/* http.async.request(method, url, opts?) — same as http.fetch */
+/* http.async.request(method, url, opts?) - same as http.fetch */
 static int lua_http_async_request(lua_State *L)
 {
     return lua_http_fetch(L);
@@ -396,11 +396,11 @@ static int lua_http_async_no_body(lua_State *L, const char *method)
 
 /* Helper for body-bearing methods (POST/PUT/PATCH).
  *
- * Caller's args are (url, body?, opts?) — body is a string (or nil),
+ * Caller's args are (url, body?, opts?) - body is a string (or nil),
  * opts is a table with `headers`. The async path delegates to
  * lua_http_fetch which takes (method, url, opts), so we must fold
  * the positional body into a synthesized opts.body BEFORE delegating.
- * Without this fold, the body silently never reaches the wire — and
+ * Without this fold, the body silently never reaches the wire - and
  * a typed `Content-Type` header still rides along, which makes the
  * bug invisible in network captures (the empty POST looks like an
  * intended ping). Mirrors js_http_async_with_body in mod_http_client.c
@@ -421,7 +421,7 @@ static int lua_http_async_with_body(lua_State *L, const char *method)
     if (has_user_opts) {
         /* Copy user-supplied opts (headers etc.) into the new table,
          * but never let user-supplied `body` override the positional
-         * one — positional wins, like the sync POST helper. */
+         * one - positional wins, like the sync POST helper. */
         lua_pushnil(L);
         while (lua_next(L, 3) != 0) {  /* opts, key, val */
             if (lua_type(L, -2) == LUA_TSTRING) {

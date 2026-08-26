@@ -1,5 +1,5 @@
 /*
- * vfs.c — Unified Virtual Filesystem implementation
+ * vfs.c - Unified Virtual Filesystem implementation
  *
  * Binary search over sorted HlEntry arrays for O(log n) exact and
  * prefix lookups. Filesystem path construction for dev-mode fallback.

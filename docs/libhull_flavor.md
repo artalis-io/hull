@@ -7,7 +7,7 @@ owns `main()` and drives the two-phase kernel sandbox and the capability
 layer itself, through the stable ABI in
 [`include/hull/embed.h`](../include/hull/embed.h).
 
-It generalizes Hull's hardening beyond the script-app model — Hull as an
+It generalizes Hull's hardening beyond the script-app model - Hull as an
 SDK, not only Hull as a runtime. This document covers the **trust
 boundary** and the **seal lifecycle**, which are the security-relevant
 parts an embedder must understand. For the build/flavor context see
@@ -24,7 +24,7 @@ Zig reference embedders) have landed. The epic is complete.
 libhull is for an **existing native codebase** that wants one of Hull's
 guarantees without adopting a scripting runtime. The sweet spot is a native
 program that must (a) run untrusted compute, or (b) enforce a capability
-boundary on its own I/O — and stay native.
+boundary on its own I/O - and stay native.
 
 Genuinely useful:
 
@@ -42,7 +42,7 @@ Genuinely useful:
   enforcement, or a declared network/filesystem allowlist. libhull adds that
   second, OS-enforced layer around the whole process.
 - **Signed-artifact / SBOM tooling.** Link the Ed25519 verification, SBOM
-  generation, and release-manifest machinery rather than reimplementing it —
+  generation, and release-manifest machinery rather than reimplementing it -
   e.g. an updater, a verifier, or an air-gapped signing utility.
 - **Regulated / air-gapped deployments.** A small, auditable, signed binary
   with a provable capability boundary and an SBOM, and no scripting runtime
@@ -50,7 +50,7 @@ Genuinely useful:
 
 Reach for something else when:
 
-- **You're writing a new app from scratch.** Use Hull's Lua/JS runtime — you
+- **You're writing a new app from scratch.** Use Hull's Lua/JS runtime - you
   get the same sandbox + capability layer with `app.manifest`, hot reload,
   the stdlib, and far less boilerplate. libhull is the "I can't rewrite in a
   script" escape hatch, not the default.
@@ -59,11 +59,11 @@ Reach for something else when:
   third-party shared library you call after seal (beyond the kernel
   boundary).
 - **You want the app framework.** No routing, middleware, sessions, or
-  `app.manifest` — libhull is the enforcement primitives, not the framework.
+  `app.manifest` - libhull is the enforcement primitives, not the framework.
 
 Trust note: the host owns `main()` and is **trusted to sequence the
 lifecycle** (phase-1 → policy → seal before any capability use). That is a
-weaker, documented contract than "Hull owns main" — a host bug *before* seal
+weaker, documented contract than "Hull owns main" - a host bug *before* seal
 is outside Hull's enforcement. See the trust boundary below.
 
 ## Building
@@ -101,14 +101,14 @@ sits on.
   early (before touching untrusted input), build the policy with the
   `hl_embed_allow_*` calls, then `hl_embed_seal()` before any capability
   use. Hull provides the primitives; the host orders them.
-- **Declare an honest policy.** There is no `app.manifest()` to parse — a
+- **Declare an honest policy.** There is no `app.manifest()` to parse - a
   native host is trusted and states its filesystem / network / GPU / TUI
   policy directly in C. A policy that grants more than the app needs
   widens the sandbox; that is the host's call, exactly as a manifest would
   be.
 - **Treat a failed seal as fatal.** `hl_embed_seal()` returns non-zero if
   either the RO policy seal or the kernel sandbox could not be applied.
-  The host **must** abort rather than proceed — running capabilities
+  The host **must** abort rather than proceed - running capabilities
   without the kernel boundary is the one outcome the design forbids.
 
 ### libhull enforces (regardless of host bugs)
@@ -120,16 +120,16 @@ sits on.
 - **The kernel sandbox.** After `hl_embed_seal()`, pledge/unveil (Linux /
   Cosmo) or Seatbelt (macOS) is in force: default-deny filesystem, network
   only if declared, `exec`/`fork` blocked.
-- **W^X.** The seal sets `wx_enforced` and declares no dynamic code — no
+- **W^X.** The seal sets `wx_enforced` and declares no dynamic code - no
   guest-controlled memory is ever executable.
 - **Read-only security policy.** The one datum the capability layer reads
-  on every call — the filesystem base directory — is sealed into a
+  on every call - the filesystem base directory - is sealed into a
   page-backed read-only mapping (see below), so an arbitrary-write
   primitive cannot repoint the app's filesystem root after seal.
 
 Everything the host can reach through the ABI is mediated. What the host
 does with its *own* code (before seal, or outside the cap layer) is
-outside Hull's enforcement — the same as any library.
+outside Hull's enforcement - the same as any library.
 
 ## The seal lifecycle (fail-closed)
 
@@ -160,8 +160,8 @@ Two properties make this fail-closed:
 
 ### Why base_dir specifically is sealed
 
-The resolved policy's path allowlists are read exactly once — by
-`hl_sandbox_apply` at seal time — and never again, so their post-seal
+The resolved policy's path allowlists are read exactly once - by
+`hl_sandbox_apply` at seal time - and never again, so their post-seal
 mutability does not affect enforcement (and libhull frees those heap
 copies right after applying the sandbox). The **base directory** is
 different: `hl_cap_fs_*` reads `HlFsConfig.base_dir` on *every* call to
@@ -192,13 +192,13 @@ the `hull` binaries and the per-flavor platform libs. This is the same
 trust chain [`hull flavor install`](build_flavors.md) uses. To verify a
 downloaded archive offline, cross-check its SHA-256 against the
 signature-verified manifest via `hl_release_io_verify_local_asset(dir,
-asset)` — it re-checks the manifest signature against the **embedded**
+asset)` - it re-checks the manifest signature against the **embedded**
 release pubkey (the trust anchor baked into the binary), then matches the
 asset's hash to the signed manifest line. `make libhull` also drops a
 `build/libhull.a.sha256` sidecar for local checks.
 
 Note the asymmetry (same as `hull build --flavor`): `libhull.a` is covered
-by the **release** signature, not the inner **platform** signature — it is
+by the **release** signature, not the inner **platform** signature - it is
 a standalone archive a foreign host links, not an embedded platform lib
 cross-checked at app-build time.
 
@@ -234,7 +234,7 @@ link.
 |---|---|---|---|
 | [`examples/embed_c`](../examples/embed_c/) | C | `#include <hull/embed.h>` | `make embed-c-smoke` |
 | [`examples/embed_rust`](../examples/embed_rust/) | Rust | an `extern "C"` block + `build.rs` link | `make embed-rust-smoke` |
-| [`examples/embed_zig`](../examples/embed_zig/) | Zig | `@cImport("hull/embed.h")` — the header directly | `make embed-zig-smoke` |
+| [`examples/embed_zig`](../examples/embed_zig/) | Zig | `@cImport("hull/embed.h")` - the header directly | `make embed-zig-smoke` |
 
 `make embed-smoke` runs all three. The Rust/Zig targets **skip cleanly**
 when `cargo`/`zig` is absent (so a plain checkout is unaffected); CI

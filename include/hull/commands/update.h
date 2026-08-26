@@ -1,6 +1,6 @@
 /**
  * @file commands/update.h
- * @brief `hull update` — self-update from the latest signed GitHub release.
+ * @brief `hull update` - self-update from the latest signed GitHub release.
  *
  * Downloads the OS/arch-matched asset from `api.github.com`, verifies its
  * SHA-256 against `hull.sha256`, verifies the Ed25519 signature over the
@@ -8,12 +8,12 @@
  * and atomically replaces the running binary via `rename(2)`.
  *
  * @par Flags:
- *   - `--check`   — print `update available` / `up to date` and exit.
- *   - `--force`   — reinstall the current version.
+ *   - `--check`   - print `update available` / `up to date` and exit.
+ *   - `--force`   - reinstall the current version.
  *   - `--channel=stable|beta`
  *   - `--repo=ORG/NAME`
  *
- * No external dependencies — HTTPS via keel's `KlRedirectClient`, SHA-256
+ * No external dependencies - HTTPS via keel's `KlRedirectClient`, SHA-256
  * via mbedTLS, Ed25519 via TweetNaCl, CA trust via the embedded Mozilla
  * bundle.
  *
@@ -25,7 +25,7 @@
 
 #include "hull/commands/dispatch.h"
 
-/** @brief Entry point — invoked by the command dispatcher. */
+/** @brief Entry point - invoked by the command dispatcher. */
 int hl_cmd_update(int argc, char **argv, const HlCommandEnv *env);
 
 #endif /* HL_CMD_UPDATE_H */

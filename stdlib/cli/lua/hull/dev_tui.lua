@@ -1,4 +1,4 @@
--- stdlib/lua/hull/dev_tui.lua — `hull dev --tui` request log + status.
+-- stdlib/lua/hull/dev_tui.lua - `hull dev --tui` request log + status.
 --
 -- Architecture
 --   The parent process (commands/dev.c) owns the child + the log

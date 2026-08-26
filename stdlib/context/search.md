@@ -27,25 +27,25 @@ search.remove("articles", 1);
 <!-- compact -->
 ## API
 
-- **`search.create_index(name, columns, opts?)`** / `search.createIndex(...)` — create FTS5 virtual table
-- **`search.index(name, id, fields)`** — insert or replace document
-- **`search.remove(name, id)`** — delete document from index
-- **`search.query(name, query, opts?)`** — full-text search, returns `[{ id, rank }]`
-  - `opts.limit` — max results (default: 20)
-  - `opts.offset` — skip results (default: 0)
-- **`search.reindex(name, source_table, opts?)`** / `search.reindex(...)` — bulk re-index from existing table
-- **`search.drop_index(name)`** / `search.dropIndex(...)` — drop FTS5 table
+- **`search.create_index(name, columns, opts?)`** / `search.createIndex(...)` - create FTS5 virtual table
+- **`search.index(name, id, fields)`** - insert or replace document
+- **`search.remove(name, id)`** - delete document from index
+- **`search.query(name, query, opts?)`** - full-text search, returns `[{ id, rank }]`
+  - `opts.limit` - max results (default: 20)
+  - `opts.offset` - skip results (default: 0)
+- **`search.reindex(name, source_table, opts?)`** / `search.reindex(...)` - bulk re-index from existing table
+- **`search.drop_index(name)`** / `search.dropIndex(...)` - drop FTS5 table
 
 ## FTS5 Query Syntax
 
 FTS5 supports standard full-text query operators:
 
-- `hello world` — match documents containing both terms
-- `hello OR world` — match either term
-- `"hello world"` — exact phrase match
-- `hello*` — prefix match
-- `NEAR(hello world, 5)` — terms within 5 tokens of each other
-- `title:hello` — match in specific column only
+- `hello world` - match documents containing both terms
+- `hello OR world` - match either term
+- `"hello world"` - exact phrase match
+- `hello*` - prefix match
+- `NEAR(hello world, 5)` - terms within 5 tokens of each other
+- `title:hello` - match in specific column only
 
 ## Keeping Index in Sync
 

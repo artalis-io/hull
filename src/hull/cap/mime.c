@@ -35,7 +35,7 @@ static const HlMimeMagic SIGNATURES[] = {
     { MAGIC_PDF,   sizeof(MAGIC_PDF),   "application/pdf" },
 };
 
-/* WebP: split magic — "RIFF" at offset 0, "WEBP" at offset 8, with a
+/* WebP: split magic - "RIFF" at offset 0, "WEBP" at offset 8, with a
  * 4-byte length field in between. Needs 12 bytes minimum to identify. */
 static int is_webp(const uint8_t *buf, size_t len)
 {
@@ -46,7 +46,7 @@ static int is_webp(const uint8_t *buf, size_t len)
 
 /* ── Text-shape heuristics ────────────────────────────────────────── */
 
-/* ASCII-only case-insensitive comparison — we don't want locale or
+/* ASCII-only case-insensitive comparison - we don't want locale or
  * UTF-8 case folding inside MIME sniffing. */
 static int ci_starts_with(const uint8_t *buf, size_t buf_len,
                             const char *prefix)
@@ -81,7 +81,7 @@ static size_t skip_whitespace(const uint8_t *buf, size_t len)
 
 /* Locate a literal substring within the first `window` bytes of `buf`,
  * case-insensitively. Returns 1 if found, 0 otherwise. Avoids
- * allocating a temporary lowercase copy — does in-place comparison. */
+ * allocating a temporary lowercase copy - does in-place comparison. */
 static int contains_ci(const uint8_t *buf, size_t len, const char *needle,
                          size_t window)
 {
@@ -150,7 +150,7 @@ static int looks_like_html(const uint8_t *buf, size_t len)
 
 /* Validate that `buf[0..min(len, 4096))` is a valid UTF-8 byte sequence
  * with no NUL byte. Truncated trailing multibyte sequences at the very
- * end of the inspected window are tolerated (treat-as-valid) — sniffing
+ * end of the inspected window are tolerated (treat-as-valid) - sniffing
  * shouldn't penalize a buffer for being too short.
  *
  * Rejects:
@@ -169,7 +169,7 @@ static int is_plain_text(const uint8_t *buf, size_t len)
     while (i < cap) {
         uint8_t b = buf[i];
 
-        if (b == 0x00) return 0;            /* NUL — never text */
+        if (b == 0x00) return 0;            /* NUL - never text */
 
         if (b < 0x80) {                     /* 1-byte ASCII */
             i++;
@@ -200,7 +200,7 @@ static int is_plain_text(const uint8_t *buf, size_t len)
         }
         if (b < min_lead || b > max_lead) return 0;
 
-        /* Tolerate truncation at the very end of the window — partial
+        /* Tolerate truncation at the very end of the window - partial
          * multibyte sequence is fine for sniffing. */
         if (i + (size_t)extra >= cap) {
             break;
@@ -230,7 +230,7 @@ const char *hl_cap_mime_sniff(const uint8_t *buf, size_t len)
 {
     if (!buf || len == 0) return NULL;
 
-    /* 1. Binary magic-byte signatures (highest priority — unambiguous). */
+    /* 1. Binary magic-byte signatures (highest priority - unambiguous). */
     for (size_t i = 0; i < sizeof(SIGNATURES) / sizeof(SIGNATURES[0]); i++) {
         if (len >= SIGNATURES[i].magic_len &&
             memcmp(buf, SIGNATURES[i].magic, SIGNATURES[i].magic_len) == 0) {
@@ -239,14 +239,14 @@ const char *hl_cap_mime_sniff(const uint8_t *buf, size_t len)
     }
     if (is_webp(buf, len)) return "image/webp";
 
-    /* 2. Text-shape heuristics. SVG before HTML — some SVGs lack the
+    /* 2. Text-shape heuristics. SVG before HTML - some SVGs lack the
      *    XML declaration and start directly with "<svg", which we must
      *    not classify as HTML by accident. */
     if (looks_like_svg(buf, len))  return "image/svg+xml";
     if (looks_like_html(buf, len)) return "text/html";
 
     /* 3. UTF-8 plain-text fallback. JSON / CSV / config files all land
-     *    here — they're valid text by construction. */
+     *    here - they're valid text by construction. */
     if (is_plain_text(buf, len)) return "text/plain";
 
     return NULL;

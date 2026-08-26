@@ -1,5 +1,5 @@
 /*
- * worker_wasm.h — Runtime-agnostic WASM worker capability
+ * worker_wasm.h - Runtime-agnostic WASM worker capability
  *
  * Offloads WASM compute.async.call to the thread pool.
  * Follows the same pattern as worker_db.h.

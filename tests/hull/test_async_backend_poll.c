@@ -1,12 +1,12 @@
 /*
- * test_async_backend_poll.c — tests for the poll(2)/pthread-backed
+ * test_async_backend_poll.c - tests for the poll(2)/pthread-backed
  * HlAsyncBackend impl. Same shape as test_async_backend.c (which
  * exercises whichever backend the runtime selects via
  * hl_async_backend()), but pins the backend to `hl_async_backend_poll`
  * by name so it runs even on HTTP=1 builds where the runtime
  * selector returns the keel backend.
  *
- * Adds two pool-specific tests that the keel suite doesn't have —
+ * Adds two pool-specific tests that the keel suite doesn't have -
  * those couldn't run there because keel's thread pool uses Keel's
  * KlServer-rooted pipe for completion delivery and the test fixture
  * doesn't wire one. The poll backend is self-contained.
@@ -21,7 +21,7 @@
 #include <stdint.h>
 #include <string.h>
 
-/* The poll backend symbol — defined in src/hull/async/poll.c, never
+/* The poll backend symbol - defined in src/hull/async/poll.c, never
  * returned by hl_async_backend() on HTTP=1 builds. */
 extern const HlAsyncBackend hl_async_backend_poll;
 
@@ -257,12 +257,12 @@ UTEST(async_backend_poll, pool_free_cancels_pending)
     ASSERT_EQ(f.be->pool_submit(pool, slow_work, NULL, cancel_cb, NULL), 0);
     ASSERT_EQ(f.be->pool_submit(pool, slow_work, NULL, cancel_cb, NULL), 0);
 
-    /* Tear down before the queue drains — pending items should hit
+    /* Tear down before the queue drains - pending items should hit
      * cancel_cb. (Worker will finish its in-flight item then exit.) */
     f.be->pool_free(pool);
 
     /* At least one of the queued items should have been cancelled
-     * (depending on timing, all 3 might be — guarantee is "not 0"). */
+     * (depending on timing, all 3 might be - guarantee is "not 0"). */
     ASSERT_TRUE(cancel_count >= 1);
 
     fixture_free(&f);

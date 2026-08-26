@@ -1,5 +1,5 @@
 /*
- * agent/db_stub.c — weak fallbacks for the SQLite-backed agent DB introspection
+ * agent/db_stub.c - weak fallbacks for the SQLite-backed agent DB introspection
  * (SQLite as a composable feature, docs/sqlite_feature.md).
  *
  * The `hull agent db|migrate|sql|schema-diff` entry points are implemented

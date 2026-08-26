@@ -1,5 +1,5 @@
 #!/bin/sh
-# tests/e2e_compute_memops.sh — freestanding libc on the REAL canonical path
+# tests/e2e_compute_memops.sh - freestanding libc on the REAL canonical path
 # (#327). A compute plugin whose clang-lowered struct copies / runtime-length
 # loops emit implicit memcpy/memset/memmove must build via `hull compute build`
 # with NO undefined `env.memcpy`-style import, and must run correctly under BOTH
@@ -14,14 +14,14 @@
 #   2. `hull compute build` compiles it; wasm-objdump asserts the module has NO
 #      undefined function imports at all (covers memcpy/memset/memmove + any
 #      accidental memcmp/bcmp/host_call).
-#   3. run under the interpreter (hull <app.lua>) — assert the byte contract.
-#   4. `hull build` (AOT) + run the standalone binary — assert aot=1 and the same
+#   3. run under the interpreter (hull <app.lua>) - assert the byte contract.
+#   4. `hull build` (AOT) + run the standalone binary - assert aot=1 and the same
 #      contract, so the fix holds under AOT too.
 #
 # Requires clang (for `hull compute build`) + an embedded hull (for `hull build`)
 # + wamrc (for AOT). wasm-objdump (wabt) gates only the import-scan sub-check;
 # the interp/AOT legs run without it (a successful load already proves there is
-# no unresolved import — WAMR fails instantiation otherwise). The CI job installs
+# no unresolved import - WAMR fails instantiation otherwise). The CI job installs
 # all of them so every leg runs non-skippably.
 #
 # SPDX-License-Identifier: AGPL-3.0-or-later
@@ -56,7 +56,7 @@ cp "$ROOT/tests/fixtures/compute/memops.c" "$APP/compute/memops/memops.c"
 build_out="$(cd "$APP" && "$HULL" compute build memops 2>&1)"
 if [ ! -f "$APP/compute/memops.wasm" ]; then
     if printf '%s' "$build_out" | grep -qiE "clang|wasm-ld|toolchain|not found|no suitable"; then
-        skip "no wasm clang toolchain — cannot build the plugin"; finish
+        skip "no wasm clang toolchain - cannot build the plugin"; finish
     fi
     fail "hull compute build produced no memops.wasm"; printf '%s\n' "$build_out" | tail -8; finish
 fi
@@ -72,7 +72,7 @@ if command -v wasm-objdump >/dev/null 2>&1; then
         fail "undefined function import(s) present: $funcimp"
     fi
 else
-    skip "wasm-objdump (wabt) not found — import scan; interp/AOT load still proves resolution"
+    skip "wasm-objdump (wabt) not found - import scan; interp/AOT load still proves resolution"
 fi
 
 # ── App that verifies the plugin's full byte contract ──
@@ -129,9 +129,9 @@ done
 BIN="$TMP/memops_bin"
 aot_build="$("$HULL" build "$APP" -o "$BIN" --no-verify-platform 2>&1)"
 if printf '%s' "$aot_build" | grep -q "platform library not embedded"; then
-    skip "hull is not an embedded build (make EMBED_PLATFORM=1) — AOT leg needs it"
+    skip "hull is not an embedded build (make EMBED_PLATFORM=1) - AOT leg needs it"
 elif [ -z "$WAMRC" ]; then
-    skip "wamrc not found — AOT leg needs it"
+    skip "wamrc not found - AOT leg needs it"
 elif [ ! -x "$BIN" ]; then
     fail "hull build produced no binary"; printf '%s\n' "$aot_build" | tail -8
 else

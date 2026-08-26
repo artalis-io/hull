@@ -1,4 +1,4 @@
-// TUI picker — Hull + JavaScript TUI example.
+// TUI picker - Hull + JavaScript TUI example.
 //
 // Mirrors examples/tui_picker/app.lua via the hull:tui module's
 // JavaScript helpers (tui.list backed by tui.run, same as Lua).

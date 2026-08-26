@@ -28,16 +28,16 @@ so on Linux a case is resolved once via openat2 and once via the manual walk and
 their outcomes are compared directly (success + the stable error token). On
 macOS/cosmo both passes are the manual walk (a self-consistency check).
 
-- **`read_battery`** — a fixture tree exercised for: a plain file, a nested file,
+- **`read_battery`** - a fixture tree exercised for: a plain file, a nested file,
   a relative symlink, an absolute symlink (re-rooted), a `..`-escaping symlink
   (clamped), a missing path (`not_found`), a self-loop (`symlink_loop`), a
   trailing-slash path (`invalid_path`), and a caller `..` (`invalid_path`). Each
   asserts the two implementations return the **identical** success content or the
   **identical** error token.
-- **`depth_boundary`** — `HL_FS_MAX_DEPTH` components is accepted (not "too deep")
+- **`depth_boundary`** - `HL_FS_MAX_DEPTH` components is accepted (not "too deep")
   and `+1` is rejected with `path_too_deep`, identically on both (the caller-path
   component count is checked before either implementation).
-- **`component_swap_race_stays_contained`** — see "Race resistance" below.
+- **`component_swap_race_stays_contained`** - see "Race resistance" below.
 
 ## Ratified divergence: symlink-expanded depth (a platform resource limit)
 
@@ -56,7 +56,7 @@ asserted explicitly by `ratified_symlink_expanded_depth` (Linux):
 **Ratification.** This is **not** claimed as exact behavioral parity. It is a
 platform-resource-limit asymmetry: the manual walk's fd-stack depth is a bounded
 resource that openat2 (a single kernel call) does not consume. Both implementations
-remain **fully contained** — neither can escape `base_dir`; the only difference is
+remain **fully contained** - neither can escape `base_dir`; the only difference is
 that the manual walk rejects a pathological deep-symlink-expansion that openat2
 accepts. The manual walk is therefore the **stricter, fail-closed** side, which is
 the safe direction. Reaching this case requires a symlink whose single target has
@@ -64,9 +64,9 @@ the safe direction. Reaching this case requires a symlink whose single target ha
 
 Two ways this could be "eliminated" instead, both rejected for checkpoint 2:
 - Post-resolution depth-check openat2 via `/proc/self/fd` readlink + component
-  count — adds a per-op `/proc` dependency + readlink cost for a pathological case,
+  count - adds a per-op `/proc` dependency + readlink cost for a pathological case,
   and is Linux-container-fragile.
-- Drop openat2 and use only the manual walk — removes the kernel-enforced
+- Drop openat2 and use only the manual walk - removes the kernel-enforced
   containment defense-in-depth and the one-call fast path the approved design
   chose.
 
@@ -83,22 +83,22 @@ iterations through **both** implementations. The invariants, asserted with enoug
 context to reproduce a failure (the swapper seed, the first failing iteration, and
 which implementation):
 
-- **no iteration ever reads the external sentinel** — a successful resolve returns
+- **no iteration ever reads the external sentinel** - a successful resolve returns
   **only** the in-base file's content (`inbase`); reading `SECRET-SENTINEL` would
   mean containment failed and the escaping symlink was followed as a raw host path;
 - a failed resolve returns **only** a known *contained* token (`not_found` /
   `not_a_directory` / `symlink_loop` / `permission` / `io_error` / `path_too_deep`
-  / `invalid_path`) — transient failures during a swap are distinguished from any
+  / `invalid_path`) - transient failures during a swap are distinguished from any
   unexpected error;
 - the loop is **bounded** (8000 iterations and a 60 s wall-clock cap);
-- **file-descriptor count is bounded** — the process's open-fd count is sampled
+- **file-descriptor count is bounded** - the process's open-fd count is sampled
   before and after and must not grow, proving the resolver leaks no descriptors
   across the run.
 
 This holds structurally: each component is opened `O_NOFOLLOW` relative to a held
 fd, so a component swapped **after** it is opened binds the already-held inode, and
 a component swapped **to a symlink before** it is opened is caught by `O_NOFOLLOW`
-and re-rooted/clamped by the virtual-root splice — never followed as a raw host
+and re-rooted/clamped by the virtual-root splice - never followed as a raw host
 path. openat2 gets the same guarantee from `RESOLVE_IN_ROOT` in-kernel. The test
 makes that structural property observable under real concurrent mutation.
 
@@ -111,7 +111,7 @@ which TSan tolerates.
 **Exercised, not dormant.** The ratified divergence probes `openat2` availability
 (`__NR_openat2`); where openat2 is present (Linux CI) the test REQUIRES the
 divergence to actually occur (openat2 succeeds while the manual walk rejects) rather
-than passing vacuously — so a regression that silently stops using openat2 fails the
+than passing vacuously - so a regression that silently stops using openat2 fails the
 assertion instead of hiding.
 
 ## Defect found and fixed by this harness

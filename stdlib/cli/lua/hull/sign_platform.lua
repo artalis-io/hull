@@ -1,5 +1,5 @@
 --
--- hull.sign_platform — Sign platform libraries
+-- hull.sign_platform - Sign platform libraries
 --
 -- Usage: hull sign-platform [--dir DIR] <key_prefix>
 --
@@ -130,10 +130,10 @@ local function main()
     -- Find platform library files.
     --
     -- Search order:
-    --   1. The dir the user passed (defaults to "build/") — preserves
+    --   1. The dir the user passed (defaults to "build/") - preserves
     --      the existing source-tree workflow where the .a is already
     --      sitting in build/ after `make platform`.
-    --   2. The embedded blob from the running hull binary — extract to
+    --   2. The embedded blob from the running hull binary - extract to
     --      a tmpdir and treat it as a second search location. End-users
     --      with a `gethull.dev/install.sh`-installed release binary
     --      land here. platform.sig is still written to the user-

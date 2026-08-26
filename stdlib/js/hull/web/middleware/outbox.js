@@ -9,7 +9,7 @@
  * `db.batch` that commits the state change; the outbox flusher then
  * delivers the row after commit with exponential backoff retries.
  *
- * Delivery is **at-least-once** — design receivers to be idempotent
+ * Delivery is **at-least-once** - design receivers to be idempotent
  * (e.g. with `hull:web:middleware:inbox`).
  *
  * **Backoff schedule:** `2^attempt * 10s`, capped at 1 hour. After
@@ -149,7 +149,7 @@ function backoffDelay(attempt) {
     // L-4: `1 << attempt` overflows / sign-flips at attempt >= 31. Default
     // maxAttempts is 5, but a user-set higher cap should still produce
     // sane backoff. Math.pow + cap on the exponent first.
-    // Phase 6 audit L-4: defensive typeof guard — non-numeric `attempt`
+    // Phase 6 audit L-4: defensive typeof guard - non-numeric `attempt`
     // (e.g. undefined from a malformed row) coerces to 0 via `| 0` which
     // is fine but worth making the intent explicit.
     if (typeof attempt !== "number" || !isFinite(attempt)) attempt = 0;
@@ -163,7 +163,7 @@ function backoffDelay(attempt) {
  * Successful deliveries are marked `delivered`. Failures bump the attempt
  * counter and reschedule; after `maxAttempts` the row is marked `failed`.
  *
- * Delivery is at-least-once — design receivers to be idempotent.
+ * Delivery is at-least-once - design receivers to be idempotent.
  *
  * @param {Object} [opts]
  * @param {number} [opts.limit=50]  Max items to process per call.
@@ -260,7 +260,7 @@ function stats() {
 /**
  * Delete delivered items older than maxAge seconds.
  *
- * L-5: NOTE — by default this only deletes `state = 'delivered'` rows.
+ * L-5: NOTE - by default this only deletes `state = 'delivered'` rows.
  * Failed deliveries (`state = 'failed'`, i.e. exceeded maxAttempts) are
  * retained indefinitely as an audit trail. Pass `opts.alsoFailed = true`
  * to delete old failed rows too (when, e.g., you've drained them via an
@@ -278,7 +278,7 @@ function cleanup(maxAge, opts) {
         // Failed rows have delivered_at = NULL (only the success
         // path at line ~190 sets it). The pre-fix predicate
         // `delivered_at <= ?` evaluates NULL for those rows in
-        // SQLite — NULL is falsy in WHERE, so failed rows were
+        // SQLite - NULL is falsy in WHERE, so failed rows were
         // never deleted. Branch the SQL: gate `delivered` on
         // delivered_at; gate `failed` on created_at (which is
         // always set).

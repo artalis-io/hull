@@ -1,4 +1,4 @@
-// commands/greet.js — Print a greeting.
+// commands/greet.js - Print a greeting.
 
 import { greeting } from "./../lib/fmt.js";
 

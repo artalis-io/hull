@@ -12,7 +12,7 @@
 # archive rule.)
 
 # libhull_feature-keel.a: the Keel EVENT LOOP as a composable feature
-# (docs/keel_feature.md, Phase 4.2b). The event-loop objects a Keel-less base
+# (docs/keel_feature.md). The event-loop objects a Keel-less base
 # (HL_KEEL_FEATURE=1) drops -- serve.o (the KlServer serve loop + strong
 # hull_serve), async_keel.o (strong hl_async_backend), net_keel.o (strong
 # hl_net_op_*), plus the server-only hull_static.o / agent_api.o / test_runner.o.
@@ -25,7 +25,7 @@ FEATURE_KEEL_OBJS := $(BUILDDIR)/serve.o $(BUILDDIR)/async_keel.o \
                      $(BUILDDIR)/agent_api.o $(BUILDDIR)/test_runner.o
 $(eval $(call define-feature-archive,keel,$(FEATURE_KEEL_OBJS)))
 
-# Keel feature archive embed (Phase 4.2b): keel is folded into the SLIM base, so
+# Keel feature archive embed: keel is folded into the SLIM base, so
 # when the app-build base is SLIM (SQLITELESS + TLSLESS both set) it is also
 # Keel-less -- embed libhull_feature-keel.a (serve.o + async_keel + net_keel +
 # the server-only static/agent/test objects) so an http app auto-composes the

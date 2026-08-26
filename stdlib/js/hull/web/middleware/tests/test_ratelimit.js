@@ -1,4 +1,4 @@
-// test_ratelimit.js — Tests for hull:web:middleware:ratelimit
+// test_ratelimit.js - Tests for hull:web:middleware:ratelimit
 //
 // Tests pure-function helpers (no runtime globals needed).
 

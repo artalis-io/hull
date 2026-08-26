@@ -1,5 +1,5 @@
 /*
- * release_io.c — shared HTTPS + manifest + atomic-install helpers.
+ * release_io.c - shared HTTPS + manifest + atomic-install helpers.
  *
  * Extracted from commands/update.c. Used by `hull update` and
  * `hull tools install` so the trust chain (release pubkey,
@@ -48,13 +48,13 @@ const char *hl_release_io_platform(void)
 #elif defined(__APPLE__) && defined(__aarch64__)
     return "darwin-arm64";
 #elif defined(__APPLE__)
-    return "cosmo"; /* no darwin-x86_64 native artifact — fall back to APE */
+    return "cosmo"; /* no darwin-x86_64 native artifact - fall back to APE */
 #elif defined(__linux__) && defined(__x86_64__)
     return "linux-x86_64";
 #elif defined(__linux__) && (defined(__aarch64__) || defined(__arm64__))
     return "linux-aarch64";
 #elif defined(__linux__)
-    return "cosmo"; /* unknown Linux arch — APE fallback */
+    return "cosmo"; /* unknown Linux arch - APE fallback */
 #else
     return "cosmo";
 #endif
@@ -91,7 +91,7 @@ int hl_release_io_self_path(char *out, size_t out_sz)
 /* The HTTPS fetch path (open_tls + get) is the only part of this TU that
  * needs Keel's HTTP client; it ships only with HL_ENABLE_HTTP_CLIENT. The
  * offline helpers below (platform, self_path, json_str, sha256_hex,
- * find_checksum, atomic_write) are always built — `hull verify-self` and the
+ * find_checksum, atomic_write) are always built - `hull verify-self` and the
  * platform-signature verifier need them regardless of the HTTP client. */
 #ifdef HL_ENABLE_HTTP_CLIENT
 
@@ -147,7 +147,7 @@ int hl_release_io_get(const char *url,
     memset(&resp, 0, sizeof(resp));
 
     /* Compose UA: caller-supplied identifier + HL_VERSION. The
-     * separator format matches RFC 7231 §5.5.3 — product/version
+     * separator format matches RFC 7231 §5.5.3 - product/version
      * tokens separated by spaces. */
     char ua_buf[128];
     snprintf(ua_buf, sizeof(ua_buf), "%s/%s",
@@ -466,14 +466,14 @@ int hl_release_io_atomic_write(const char *target_path,
         return -1;
     }
     /* close(2) can also surface deferred write errors on some
-     * filesystems (NFS, network mounts) — treat the same way. */
+     * filesystems (NFS, network mounts) - treat the same way. */
     if (close(fd) != 0) {
         fprintf(stderr, "atomic_write: close failed: %s\n", strerror(errno));
         unlink(new_path);
         return -1;
     }
 
-    /* chmod again — open(O_CREAT, mode) honours umask, which on most
+    /* chmod again - open(O_CREAT, mode) honours umask, which on most
      * systems clears the world / group bits we asked for. */
     if (chmod(new_path, (mode_t)mode) != 0) {
         fprintf(stderr, "atomic_write: chmod failed: %s\n", strerror(errno));

@@ -1,10 +1,10 @@
 #!/bin/sh
-# tests/e2e_compute_aot_shared_heap.sh — compute plugins that read a WAMR shared
+# tests/e2e_compute_aot_shared_heap.sh - compute plugins that read a WAMR shared
 # heap (a mapped SPAN or a compute.SEGMENT) must read correct nonzero bytes under
 # AOT (#326). Before the fix, `hull build`'s compute AOT omitted
 # --enable-shared-heap, so the metadata was right but the backing bytes came back
 # as zeros. This drives the REAL production path (`hull build`, which now passes
-# the flag) — not a test-only wamrc invocation — builds a standalone binary with
+# the flag) - not a test-only wamrc invocation - builds a standalone binary with
 # both AOTs embedded, runs it, and asserts the AOT was actually loaded (aot=1) and
 # the span + segment reads are correct and nonzero.
 #
@@ -55,7 +55,7 @@ end)
 EOF
 
 if [ -z "$WAMRC" ]; then
-    skip "wamrc not found — the CI AOT job builds it so this path is exercised there"
+    skip "wamrc not found - the CI AOT job builds it so this path is exercised there"
     echo ""; echo "compute-aot-shared-heap: 0 passed, 0 failed (skipped, no wamrc)"; exit 0
 fi
 
@@ -63,7 +63,7 @@ fi
 BIN="$TMP/app_bin"
 build_out="$("$HULL" build "$TMP/app" -o "$BIN" --no-verify-platform 2>&1)"
 if printf '%s' "$build_out" | grep -q "platform library not embedded"; then
-    skip "hull is not an embedded build (make EMBED_PLATFORM=1) — CI builds embedded"
+    skip "hull is not an embedded build (make EMBED_PLATFORM=1) - CI builds embedded"
     echo ""; echo "compute-aot-shared-heap: 0 passed, 0 failed (skipped, not embedded)"; exit 0
 fi
 if [ ! -x "$BIN" ]; then

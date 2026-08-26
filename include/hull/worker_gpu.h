@@ -1,5 +1,5 @@
 /*
- * worker_gpu.h — Runtime-agnostic GPU worker capability
+ * worker_gpu.h - Runtime-agnostic GPU worker capability
  *
  * Offloads gpu.async.dispatch to the thread pool.
  * Follows the same pattern as worker_wasm.h.

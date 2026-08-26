@@ -589,7 +589,7 @@ static void format_human(FILE *fp)
         const HlSbomEntry *e = &sbom_entries[i];
         if (!sbom_entry_visible(e)) continue;
         char vc[40];
-        /* Prefer a tagged version string over the raw commit SHA — it
+        /* Prefer a tagged version string over the raw commit SHA - it
          * reads better in human output. Falls back to commit if no
          * version is set, then "n/a". Matches the precedence used by
          * the CycloneDX and SPDX formatters. */
@@ -623,7 +623,7 @@ static void format_human(FILE *fp)
 
 /* ── JSON writer plumbing ──────────────────────────────────────────── */
 
-/* Generic FILE* writer for ShJsonWriter — same shape as the helper
+/* Generic FILE* writer for ShJsonWriter - same shape as the helper
  * in commands/cache.c. Could be promoted to a shared header if a
  * third caller materializes; for now keep it local. */
 static int stdio_write_fn(void *ctx, const char *data, size_t len)
@@ -666,7 +666,7 @@ static void format_json(FILE *fp)
     for (size_t i = 0; i < sbom_with_features_count; i++)
         sh_json_write_string(&w, sbom_with_features[i]);
     sh_json_write_array_end(&w);
-    /* The runtime binary hash describes the hull binary, not libhull.a — omit
+    /* The runtime binary hash describes the hull binary, not libhull.a - omit
      * it in libhull scope (the archive's own hash lives in libhull.a.sha256). */
     const char *bin_sha = sbom_scoped() ? NULL : sha256_binary();
     if (bin_sha)

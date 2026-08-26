@@ -1,7 +1,7 @@
 <!-- minimal -->
 ## Authentication
 
-**Session-based auth** — cookie sessions backed by SQLite.
+**Session-based auth** - cookie sessions backed by SQLite.
 
 ```lua
 -- Lua
@@ -25,7 +25,7 @@ auth.login(req, res, { userId: 1 });
 auth.logout(req, res);
 ```
 
-**JWT auth** — Bearer token via `Authorization` header.
+**JWT auth** - Bearer token via `Authorization` header.
 
 ```lua
 app.use("*", "/api/*", auth.jwt_middleware({ secret = "my-secret" }))
@@ -36,20 +36,20 @@ app.use("*", "/api/*", auth.jwt_middleware({ secret = "my-secret" }))
 ## Options
 
 **`auth.session_middleware(opts)`** / `auth.sessionMiddleware(opts)`
-- `cookie_name` / `cookieName` — session cookie name (default: `"hull_session"`)
-- `optional` — if `true`, continues without session instead of rejecting (default: `false`)
-- `login_path` / `loginPath` — redirect path on failure instead of 401
+- `cookie_name` / `cookieName` - session cookie name (default: `"hull_session"`)
+- `optional` - if `true`, continues without session instead of rejecting (default: `false`)
+- `login_path` / `loginPath` - redirect path on failure instead of 401
 - Sets `req.ctx.session` (data) and `req.ctx.session_id` / `req.ctx.sessionId`
 
 **`auth.jwt_middleware(opts)`** / `auth.jwtMiddleware(opts)`
-- `secret` — HMAC-SHA256 secret (required)
-- `optional` — continue without token (default: `false`)
+- `secret` - HMAC-SHA256 secret (required)
+- `optional` - continue without token (default: `false`)
 - Reads `Authorization: Bearer <token>` header
 - Sets `req.ctx.user` with decoded payload
 
-**`auth.login(req, res, user_data, opts)`** — creates session, sets `Set-Cookie`. Returns `session_id`.
+**`auth.login(req, res, user_data, opts)`** - creates session, sets `Set-Cookie`. Returns `session_id`.
 
-**`auth.logout(req, res, opts)`** — destroys session, clears cookie.
+**`auth.logout(req, res, opts)`** - destroys session, clears cookie.
 
 **Session management:**
 ```lua

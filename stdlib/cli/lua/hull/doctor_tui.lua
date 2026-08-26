@@ -1,10 +1,10 @@
--- stdlib/lua/hull/doctor_tui.lua — interactive `hull doctor`.
+-- stdlib/lua/hull/doctor_tui.lua - interactive `hull doctor`.
 --
 -- Run via `hull doctor --tui`. The C dispatcher (commands/doctor.c)
 -- routes through hull_tool when --tui is set, which launches an
 -- unsandboxed Lua VM and requires this module.
 --
--- The data is sourced from `tool.doctor_json()` (mod_tool.c) — the
+-- The data is sourced from `tool.doctor_json()` (mod_tool.c) - the
 -- exact same JSON the `hull doctor --json` command emits, parsed
 -- with hull.json.decode. We don't reimplement the C-side probes.
 --

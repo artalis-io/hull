@@ -1,7 +1,7 @@
 /**
  * @file hull:web:middleware:etag
  * @module hull:web:middleware:etag
- * @description ETag response helpers — `etag.json`, `etag.text`, `etag.html`.
+ * @description ETag response helpers - `etag.json`, `etag.text`, `etag.html`.
  *   Lua parity: `hull.web.middleware.etag`.
  *
  * Not a Keel middleware (no `(req, res) -> number` signature). Instead,

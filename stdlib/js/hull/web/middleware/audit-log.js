@@ -43,7 +43,7 @@ const _state = {
 
 function init(opts) {
     opts = opts || {};
-    // fingerprintSalt is REQUIRED — see the matching Lua docstring
+    // fingerprintSalt is REQUIRED - see the matching Lua docstring
     // for the threat model. BREAKING from round-6 hardening:
     // existing rows have unsalted fingerprints and won't match new
     // ones, so is_new_device fires for every active user on first
@@ -76,7 +76,7 @@ function init(opts) {
     // restart between scheduled fires (deploys, crashes) and
     // apps in CLI flavor (where the daily timer never fires
     // because app.main exits before 03:00) still bound their
-    // _hull_audit_log growth. Cheap — a single DELETE WHERE
+    // _hull_audit_log growth. Cheap - a single DELETE WHERE
     // event_at < cutoff over an indexed range. Guarded against
     // repeated init() calls in the same process (test fixtures,
     // hot reload) so the DB scan only runs once per startup.
@@ -105,7 +105,7 @@ function init(opts) {
         } else {
             log.warn("audit-log: app.daily not available "
                 + "(CLI flavor or hull/timers not admitted) "
-                + "— auto-cleanup runs only at init(). "
+                + "- auto-cleanup runs only at init(). "
                 + "Wire your own cron/worker for steady-state.");
         }
     }
@@ -116,7 +116,7 @@ function init(opts) {
         && !_state.cleanupOptedOut) {
         log.warn("audit-log: init({cleanup: false}) on a process "
             + "that already scheduled a daily cleanup via a prior "
-            + "init() — the timer is still wired (hull/timers has "
+            + "init() - the timer is still wired (hull/timers has "
             + "no unregister API) and will continue to fire "
             + "alongside your external cron. Restart the process "
             + "to clear the orphan timer.");
@@ -214,7 +214,7 @@ function record(userId, kind, req, opts) {
     // bound (default 365-day retention compounds the damage). 4 KB
     // is generous for the canonical { factors, sub } shape and small
     // enough that 1M rows stay under 4 GB. Drop with a log.warn on
-    // overflow rather than truncating — a truncated JSON tail is
+    // overflow rather than truncating - a truncated JSON tail is
     // unparseable.
     const META_MAX = 4096;
     let meta = opts.metadata !== undefined ? json.encode(opts.metadata) : null;

@@ -8,10 +8,10 @@
  * with two semantic differences:
  *
  *   1. The cache key is computed from the GENERATED template code,
- *      not the raw source — naturally invalidates when extends /
+ *      not the raw source - naturally invalidates when extends /
  *      include targets change.
  *   2. The cached value is the inner render function (lua_dump
- *      after pcall) — on hit we skip both the parse pass AND the
+ *      after pcall) - on hit we skip both the parse pass AND the
  *      pcall to unwrap the outer chunk.
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
@@ -148,7 +148,7 @@ int hl_lua_template_compile_cached(lua_State *L,
         int rc = luaL_loadbuffer(L, (const char *)bc, bc_len, chunkname);
         free(bc);
         if (rc == LUA_OK) return LUA_OK;
-        /* Stale / corrupt entry — pop error, evict, fall through. */
+        /* Stale / corrupt entry - pop error, evict, fall through. */
         lua_pop(L, 1);
         (void)hl_blob_store_delete(store, key);
     }

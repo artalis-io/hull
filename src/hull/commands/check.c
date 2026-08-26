@@ -1,5 +1,5 @@
 /*
- * commands/check.c — hull check: modules + test + verify in one pass
+ * commands/check.c - hull check: modules + test + verify in one pass
  *
  * Runs each step sequentially, stopping on first failure. Intended for
  * CI validation and a single command before pushing.

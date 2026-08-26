@@ -1,8 +1,8 @@
--- CORS via Manifest — Hull + Lua example
+-- CORS via Manifest - Hull + Lua example
 --
 -- Run: hull app.lua -p 3000
 -- Demonstrates CORS configuration via app.manifest() and http_server.stats() API.
--- CORS headers are handled automatically by Keel — no middleware code needed.
+-- CORS headers are handled automatically by Keel - no middleware code needed.
 
 local http_server = require("hull.http-server")
 
@@ -55,4 +55,4 @@ app.options("/api/data", function(_req, res)
     res:status(204):text("")
 end)
 
-log.info("CORS manifest example loaded — routes registered")
+log.info("CORS manifest example loaded - routes registered")

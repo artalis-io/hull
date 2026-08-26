@@ -1,5 +1,5 @@
 /*
- * hull_cap_wasm_stream.c — WASM streaming I/O
+ * hull_cap_wasm_stream.c - WASM streaming I/O
  *
  * Processes data in chunks through a WASM persistent instance.
  * See cap/wasm_stream.h for the public API.
@@ -231,7 +231,7 @@ int hl_cap_wasm_stream(HlWasmCache *cache, const char *name,
         if (is_first) flags |= HL_WASM_STREAM_FLAG_FIRST;
         if (is_last)  flags |= HL_WASM_STREAM_FLAG_LAST;
 
-        /* Set stream metadata — survives through instance_call because
+        /* Set stream metadata - survives through instance_call because
          * it only overwrites fn/ctx/shared_data, not the stream fields. */
         hl_cap_wasm_set_stream_ctx(flags, (uint32_t)ci);
 

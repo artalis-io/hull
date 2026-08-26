@@ -1,4 +1,4 @@
--- routes/users.lua — User resource.
+-- routes/users.lua - User resource.
 --
 -- Route registration only. The actual DB access lives in models/user.lua
 -- so the routes stay readable and the model can be unit-tested in
@@ -22,13 +22,13 @@ end
 local M = {}
 
 function M.register(app)
-    -- GET /users — list (paginated via ?limit=)
+    -- GET /users - list (paginated via ?limit=)
     app.get("/users", function(req, res)
         local limit = tonumber(req.query.limit) or 50
         res:json({ users = users.list({ limit = limit }) })
     end)
 
-    -- POST /users — create
+    -- POST /users - create
     app.post("/users", function(req, res)
         local body, perr = parse_json_body(req)
         if perr then res:status(400):json({ error = perr }); return end

@@ -1,5 +1,5 @@
 --
--- test_scope.lua — slice-2 tests for hull.source.scope (the lexical binding pass).
+-- test_scope.lua - slice-2 tests for hull.source.scope (the lexical binding pass).
 --
 -- Asserts ref_of resolutions (local / upvalue / global) + per-decl reads/writes/shadows
 -- over the Lua-5.4 scoping edge cases. Pure Lua; run by tests/hull/source/test_lua_source.c.

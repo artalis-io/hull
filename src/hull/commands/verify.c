@@ -1,5 +1,5 @@
 /*
- * commands/verify.c — hull verify subcommand
+ * commands/verify.c - hull verify subcommand
  *
  * Thin wrapper: launches the Lua tool VM with hull.verify module.
  *

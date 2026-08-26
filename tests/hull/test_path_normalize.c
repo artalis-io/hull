@@ -1,5 +1,5 @@
 /*
- * test_path_normalize.c — Tests for hl_path_normalize.
+ * test_path_normalize.c - Tests for hl_path_normalize.
  *
  * The function is exercised transitively by both runtime module
  * loaders (Lua require, JS import), but covering the contract
@@ -16,7 +16,7 @@
 #include <string.h>
 
 /* utest's ASSERT_* macros reference a local `utest_result` that only
- * exists inside UTEST blocks, so the helpers below are macros — they
+ * exists inside UTEST blocks, so the helpers below are macros - they
  * splice the assertions into the caller's scope where utest_result
  * is in scope. */
 #define ASSERT_NORM_OK(input, expected) do { \
@@ -80,7 +80,7 @@ UTEST(path_normalize, trailing_slash_stripped)
 
 UTEST(path_normalize, escape_past_root_rejected)
 {
-    /* The classic traversal attempt — must be refused. */
+    /* The classic traversal attempt - must be refused. */
     ASSERT_NORM_FAIL("..");
     ASSERT_NORM_FAIL("../etc/passwd");
     ASSERT_NORM_FAIL("a/../..");
@@ -123,7 +123,7 @@ UTEST(path_normalize, depth_limit_segments_128)
     *p = '\0';
     ASSERT_EQ(hl_path_normalize(ok_buf), 0);
 
-    /* 129 segments — should fail at the depth check. */
+    /* 129 segments - should fail at the depth check. */
     char overflow_buf[2048] = {0};
     p = overflow_buf;
     for (int i = 0; i < 129; i++) {

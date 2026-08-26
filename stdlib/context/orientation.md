@@ -1,7 +1,7 @@
 <!-- minimal -->
 ## Orientation for AI agents working with Hull
 
-You are working with Hull — a single-binary, capability-secure, local-first
+You are working with Hull - a single-binary, capability-secure, local-first
 runtime for Lua 5.4 and JavaScript (QuickJS). Apps are one file (`app.lua`
 or `app.js`); Hull provides routing, DB, crypto, HTTP, WASM compute, GPU
 compute, all sandboxed.
@@ -16,7 +16,7 @@ compute, all sandboxed.
 3. **`hull agent overview [app_dir]`** → one-shot project summary
    (runtime, routes, modules, tests, build readiness) when dropped into
    an unfamiliar tree.
-4. **`hull agent <verb>`** for everything else — `routes`, `modules`,
+4. **`hull agent <verb>`** for everything else - `routes`, `modules`,
    `capabilities`, `compute`, `tools`, `manifest`, etc. All JSON. Run
    `hull agent` with no args to see the catalog.
 
@@ -37,7 +37,7 @@ compute, all sandboxed.
 
 - App files MUST be `app.lua` or `app.js` at the app root.
 - Every external capability MUST be declared in `app.manifest({modules=...})`
-  — see `hull agent context --task=middleware --level=minimal`.
+  - see `hull agent context --task=middleware --level=minimal`.
 - Build with `hull build .` (auto-handles compute AOT, signature,
   embedding). Don't invoke `clang` directly.
 
@@ -47,38 +47,38 @@ compute, all sandboxed.
 Every `hull agent <verb>` returns JSON to stdout. The verbs:
 
 **App-shape introspection** (most useful for cold start):
-- `overview [app_dir]` — composite summary (runtime, routes, compute, gpu,
+- `overview [app_dir]` - composite summary (runtime, routes, compute, gpu,
   migrations, modules, tests, build_ready)
-- `routes [app_dir]` — list of registered routes + middleware
-- `modules [app_dir]` — declared first-party modules vs registry
-- `capabilities [app_dir]` — source-walk: caps USED vs caps DECLARED
-- `manifest [app_dir]` — effective manifest
-- `vfs [app_dir]` — embedded files (templates, static, migrations, etc.)
-- `compute [app_dir]` — WASM modules + AOT readiness + `wamrc` state
-- `gpu [app_dir]` — WGSL shaders + GPU availability
-- `tools` — side-loaded tool registry (wamrc, etc.) + install state
+- `routes [app_dir]` - list of registered routes + middleware
+- `modules [app_dir]` - declared first-party modules vs registry
+- `capabilities [app_dir]` - source-walk: caps USED vs caps DECLARED
+- `manifest [app_dir]` - effective manifest
+- `vfs [app_dir]` - embedded files (templates, static, migrations, etc.)
+- `compute [app_dir]` - WASM modules + AOT readiness + `wamrc` state
+- `gpu [app_dir]` - WGSL shaders + GPU availability
+- `tools` - side-loaded tool registry (wamrc, etc.) + install state
 
 **Doc lookup**:
-- `context --list` — registry of topic docs
-- `context --task=NAME [--level=L]` — fetch one
-- `context --interactive` (TUI builds only) — interactive picker
+- `context --list` - registry of topic docs
+- `context --task=NAME [--level=L]` - fetch one
+- `context --interactive` (TUI builds only) - interactive picker
 
 **Lifecycle**:
-- `status [app_dir] [-p port]` — is dev server running?
-- `errors [app_dir]` — structured errors from last reload
-- `test [app_dir]` — run tests via in-process harness
-- `migrate [app_dir]` — migration status
-- `deploy [app_dir]` — deployment readiness
+- `status [app_dir] [-p port]` - is dev server running?
+- `errors [app_dir]` - structured errors from last reload
+- `test [app_dir]` - run tests via in-process harness
+- `migrate [app_dir]` - migration status
+- `deploy [app_dir]` - deployment readiness
 
 **Targeted probes**:
-- `endpoint METHOD PATH [app_dir]` — preview which handler+middleware would
+- `endpoint METHOD PATH [app_dir]` - preview which handler+middleware would
   fire (no execution)
-- `middleware METHOD PATH [app_dir]` — just the middleware stack
-- `validate <file>` — parse + sandbox-check without running
-- `eval <code> [app_dir]` — one-shot snippet, returns JSON
-- `template <name> [data.json] [app_dir]` — render a template with data
-- `compute-call <module> <input_file> [app_dir]` — invoke a WASM module
-- `request METHOD PATH [opts]` — HTTP request to a running dev server
+- `middleware METHOD PATH [app_dir]` - just the middleware stack
+- `validate <file>` - parse + sandbox-check without running
+- `eval <code> [app_dir]` - one-shot snippet, returns JSON
+- `template <name> [data.json] [app_dir]` - render a template with data
+- `compute-call <module> <input_file> [app_dir]` - invoke a WASM module
+- `request METHOD PATH [opts]` - HTTP request to a running dev server
 
 **DB** (HL_ENABLE_DB=1):
 - `db schema [app_dir] [-d path]`, `db query "SQL" [app_dir]`
@@ -109,7 +109,7 @@ hull init myapp --profile htmx     # full details: hull agent context --task=htm
 ```
 
 For non-server apps (CLI / TUI), `app.main(fn)` replaces route registration
-— see `quickstart-cli` / `quickstart-tui`.
+- see `quickstart-cli` / `quickstart-tui`.
 
 ## The two planes
 
@@ -154,39 +154,39 @@ small context windows (Gemma 27B, Qwen 27B class):
    the minimal answer is insufficient. Reach for `full` only when
    actively debugging the topic.
 2. Cache `hull agent context --list` and `hull agent overview` results
-   for the session — they don't change between calls.
+   for the session - they don't change between calls.
 3. Prefer `hull agent endpoint METHOD PATH` over reading source to
-   understand a route — the JSON shows exactly which middleware fires
+   understand a route - the JSON shows exactly which middleware fires
    and in what order.
-4. Prefer `hull agent capabilities` over inferring caps from source —
+4. Prefer `hull agent capabilities` over inferring caps from source -
    it cross-checks USED vs DECLARED and surfaces drift.
 5. When suggesting code, run `hull agent validate <file>` after
    edits to catch parse + sandbox errors before the user sees them.
 
 ## What Hull is NOT
 
-- NOT a Node/Bun/Deno alternative — Hull's runtime is sandboxed by
+- NOT a Node/Bun/Deno alternative - Hull's runtime is sandboxed by
   design; you cannot `require("fs")` from app code, only the
   capability-mediated `fs.read/write` after manifest declaration.
-- NOT a serverless runtime — Hull binaries are long-lived processes
+- NOT a serverless runtime - Hull binaries are long-lived processes
   with sticky in-memory state (WASM pools, GPU buffers, prepared
   statements). Treat them like a daemon, not a function.
-- NOT a package manager — `manifest.modules` selects from a fixed
+- NOT a package manager - `manifest.modules` selects from a fixed
   first-party stdlib registry. There is no `npm install`.
-- NOT a build tool you compose yourself — `hull build` is one verb.
+- NOT a build tool you compose yourself - `hull build` is one verb.
   No webpack, no rollup, no bundler config.
 
 ## When to refer the user back to source
 
 If the question is about INVARIANTS (what's enforced, what's
-sandboxed, what's signed) — quote `CLAUDE.md` or `docs/security.md`
+sandboxed, what's signed) - quote `CLAUDE.md` or `docs/security.md`
 directly. If the question is about WORKFLOW (how to scaffold/build/
-test/deploy) — these context docs are sufficient and current.
+test/deploy) - these context docs are sufficient and current.
 
 ## See also
 
-- `hull agent context --list` — every topic
-- `hull --help` — the full subcommand catalog
-- `hull doctor` — what this binary can do (build readiness, embedded
+- `hull agent context --list` - every topic
+- `hull --help` - the full subcommand catalog
+- `hull doctor` - what this binary can do (build readiness, embedded
   CA bundle, wamrc presence, etc.)
-- https://gethull.dev — the project site
+- https://gethull.dev - the project site

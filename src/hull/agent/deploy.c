@@ -1,5 +1,5 @@
 /*
- * agent/deploy.c — `hull agent deploy` — deployment-readiness analysis.
+ * agent/deploy.c - `hull agent deploy` - deployment-readiness analysis.
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
@@ -203,7 +203,7 @@ int hl_agent_deploy(const char *app_dir, ShJsonBuf *out)
     sh_json_write_kv_int(&w, "shaders", n_shaders);
     sh_json_write_object_end(&w);
 
-    /* Compute modules — per-module detail.
+    /* Compute modules - per-module detail.
      *
      * For every compute/<name>.wasm we report:
      *   - name             module name (filename without extension)
@@ -306,11 +306,11 @@ int hl_agent_deploy(const char *app_dir, ShJsonBuf *out)
     sh_json_write_key(&w, "recommendations");
     sh_json_write_array_start(&w);
     if (!has_manifest)
-        sh_json_write_string(&w, "No manifest found — add app.manifest({}) for env/host declarations");
+        sh_json_write_string(&w, "No manifest found - add app.manifest({}) for env/host declarations");
     if (!has_package_sig)
-        sh_json_write_string(&w, "No signature — run hull build --sign for verified deployments");
+        sh_json_write_string(&w, "No signature - run hull build --sign for verified deployments");
     if (has_manifest && manifest.env_count == 0 && manifest.hosts_count == 0)
-        sh_json_write_string(&w, "Manifest is empty — declare env vars and hosts for better config generation");
+        sh_json_write_string(&w, "Manifest is empty - declare env vars and hosts for better config generation");
     /* Stale-source advisory: re-scan briefly to flag any modules whose .c
      * is newer than the .wasm artifact. hull build auto-rebuilds when
      * clang is available; this advisory matters most for CI machines and
@@ -343,7 +343,7 @@ int hl_agent_deploy(const char *app_dir, ShJsonBuf *out)
                 }
             }
             if (any_stale) {
-                sh_json_write_string(&w, "Compute source newer than .wasm — run `hull compute build` or rebuild (hull build auto-rebuilds when clang is available)");
+                sh_json_write_string(&w, "Compute source newer than .wasm - run `hull compute build` or rebuild (hull build auto-rebuilds when clang is available)");
             }
             for (char **fp = wasm_files; *fp; fp++) free(*fp);
             free(wasm_files);

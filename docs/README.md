@@ -6,12 +6,12 @@ the repo root: [`README.md`](../README.md), [`CLAUDE.md`](../CLAUDE.md),
 
 Docs are organized into three buckets:
 
-1. **[Active architecture](#1-active-architecture)** — the maintained references
+1. **[Active architecture](#1-active-architecture)** - the maintained references
    that describe how Hull works *today*, plus in-progress designs.
-2. **[Invariants & contracts](#2-invariants--contracts)** — the rules that must
+2. **[Invariants & contracts](#2-invariants--contracts)** - the rules that must
    hold: API stability, limits, house style, fork procedure.
 3. **[Historical archive & design records](#3-historical-archive--design-records)**
-   — completed efforts: shipped-subsystem design records (kept in-tree because
+   - completed efforts: shipped-subsystem design records (kept in-tree because
    code comments link to them as rationale) and the physically-archived audits,
    roadmaps, and concluded spikes.
 
@@ -64,7 +64,7 @@ specific signature, parameter list, or return value.
 | [`build_flavors.md`](build_flavors.md) | The subtractive flavor set (`full` → `pure-compute`), `--flavor` / `--flavor=auto`, `hull flavor install`, the two signature layers. |
 | [`libhull_flavor.md`](libhull_flavor.md) | The no-runtime `libhull.a` embedding flavor for native embedders. |
 | [`tools_install.md`](tools_install.md) | Side-loaded companion tools (`hull tools install`), the version-coupled trust chain, single-binary vs bundle assets. |
-| [`composed_feature_signing.md`](composed_feature_signing.md) | `package.sig.gethull.composed` — attesting every composed archive across the platform + release trust domains. |
+| [`composed_feature_signing.md`](composed_feature_signing.md) | `package.sig.gethull.composed` - attesting every composed archive across the platform + release trust domains. |
 | [`release_signing.md`](release_signing.md) | Three-layer signature system + the release-key flow (embedding, sign step, `hull update` verification). |
 | [`sbom.md`](sbom.md) | The SBOM subsystem (human / JSON / CycloneDX / SPDX formats). |
 | [`compiler_free_build.md`](compiler_free_build.md) | The object-emitter path: `hull build` needs only a linker (no C compiler). |
@@ -77,14 +77,14 @@ specific signature, parameter list, or return value.
 
 | Doc | What it covers |
 |---|---|
-| [`jobs.md`](jobs.md) | `hull/jobs@1` — the durable DB-backed job queue (workers, steps/timers/signals/saga, observability). |
+| [`jobs.md`](jobs.md) | `hull/jobs@1` - the durable DB-backed job queue (workers, steps/timers/signals/saga, observability). |
 | [`multipart.md`](multipart.md) | Streaming `multipart/form-data` uploads (`req:multipart()` / `req.multipart()`). |
 | [`htmx.md`](htmx.md) | The HTMX hypermedia profile + CSP preset. |
 | [`htmx_widgets.md`](htmx_widgets.md) | The shipped HTMX widget set in the stdlib. |
 | [`attachments.md`](attachments.md) | The `hull/attachment@1` module. |
 | [`blob.md`](blob.md) | The content-addressed blob store + per-app cache isolation. |
 | [`cache.md`](cache.md) | The on-disk runtime cache pool (`hull cache`), registered kinds, eviction. |
-| [`kv_cache.md`](kv_cache.md) | `hull/kv` (durable KV store) + `hull.cache` (byte cache) — backends, capability model. |
+| [`kv_cache.md`](kv_cache.md) | `hull/kv` (durable KV store) + `hull.cache` (byte cache) - backends, capability model. |
 | [`cli_mode.md`](cli_mode.md) | `app.main` CLI apps + the `HL_ENABLE_HTTP_SERVER=0` flavor. |
 | [`tui_mode.md`](tui_mode.md) | The `hull.tui` terminal-UI module (`tui.run`, cell-diff rendering). |
 
@@ -100,8 +100,9 @@ specific signature, parameter list, or return value.
 | [`h1_s2b_hex_ownership.md`](h1_s2b_hex_ownership.md) | H1 slice S2b (design-only): exhaustive hex-caller inventory, link-closure/dependency table, and ownership recommendation for the byte->hex encoders. No code change. |
 | [`h1_s3_comparison_contracts.md`](h1_s3_comparison_contracts.md) | H1 slice S3 (design-only): exhaustive comparison/constant-time contract matrix (14 security-relevant sites), threat context, equivalence classes, and per-class recommendation. Result: retain, no consolidation. |
 | [`h1_s4_milestone_inventory.md`](h1_s4_milestone_inventory.md) | H1 slice S4 closing record: whole-tree milestone-narration inventory certifying removable narration = 0 and enumerating the intentional survivors (architectural labels / audit provenance / public text) as the precise exception set for S5's gate. |
-| [`reporting_ir_design.md`](reporting_ir_design.md) | Proposed reporting IR — **deferred** (over-scoped as the immediate next feature). |
-| [`sidecar_design.md`](sidecar_design.md) | Native sidecars — design only (Phase 0), not yet scheduled. |
+| [`h1_s5_emdash_narration_gates.md`](h1_s5_emdash_narration_gates.md) | H1 slice S5 record: em-dash sweep across living first-party prose + the two self-tested gates (no-em-dash, no-milestone-narration) and their exact scope/survivor decisions. |
+| [`reporting_ir_design.md`](reporting_ir_design.md) | Proposed reporting IR - **deferred** (over-scoped as the immediate next feature). |
+| [`sidecar_design.md`](sidecar_design.md) | Native sidecars - design only (Phase 0), not yet scheduled. |
 
 ### Roadmap
 
@@ -145,7 +146,7 @@ Rules and contracts that must hold. Change these deliberately.
 ### Design records (shipped efforts, kept in-tree)
 
 These are the design-of-record for subsystems that **already shipped**. They are
-historical — the *current* behavior is the code plus the canonical doc above —
+historical - the *current* behavior is the code plus the canonical doc above -
 but they remain in `docs/` (not `archive/`) because `CLAUDE.md`, `AGENTS.md`, and
 in-source `// Full design: docs/X` comments link to them as rationale. Read them
 for *why*, not *what-is-now*.
@@ -209,13 +210,13 @@ for *why*, not *what-is-now*.
 
 ### Physically archived (`archive/`)
 
-Material with **no** inbound references from `CLAUDE.md` / `AGENTS.md` / source —
+Material with **no** inbound references from `CLAUDE.md` / `AGENTS.md` / source -
 relocated out of `docs/` proper. See [`archive/README.md`](archive/README.md) for
 the full inventory.
 
 | Group | What |
 |---|---|
-| [`archive/audits/`](archive/audits/) | Nine historical security audits (all findings closed) — the project's security history. |
+| [`archive/audits/`](archive/audits/) | Nine historical security audits (all findings closed) - the project's security history. |
 | [`archive/roadmaps/`](archive/roadmaps/) | Four fully-completed roadmaps (architecture A–L, db-vtable, wasm-improvement, v0→v1). |
 | [`archive/design_records/`](archive/design_records/) | Concluded spikes & negative results: `cachelib_spike`, `kvmem_design`, `kvmem_negative_result`, `memstore_lru_plan`, `jobs_wasm_replay_spike` (verdict: do-not-build / did-not-ship). |
 | [`archive/ASSESSMENT.md`](archive/ASSESSMENT.md) | Pre-v0.1.0 platform self-assessment snapshot. |

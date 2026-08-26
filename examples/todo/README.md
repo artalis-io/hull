@@ -44,7 +44,7 @@ make run ENTRY=app.js       # run with JS backend
 
 [Cosmopolitan](https://cosmo.zip) produces Actually Portable Executable (APE) binaries that run on Linux, macOS, Windows, and BSDs from a single file.
 
-**Prerequisite:** The full `~/cosmocc/bin` directory must be in your PATH — the build uses `x86_64-unknown-cosmo-cc` and `aarch64-unknown-cosmo-cc` directly, not just the `cosmocc` wrapper.
+**Prerequisite:** The full `~/cosmocc/bin` directory must be in your PATH - the build uses `x86_64-unknown-cosmo-cc` and `aarch64-unknown-cosmo-cc` directly, not just the `cosmocc` wrapper.
 
 ```bash
 # Install cosmocc (one-time)

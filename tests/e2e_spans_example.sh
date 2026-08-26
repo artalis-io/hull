@@ -1,16 +1,16 @@
 #!/bin/sh
-# tests/e2e_spans_example.sh — the examples/mapped_spans reference plugin, driven
+# tests/e2e_spans_example.sh - the examples/mapped_spans reference plugin, driven
 # from BOTH runtimes over a NON-page-aligned file window, on the interpreter and
 # (when wamrc is available) AOT. The plugin uses only the public hull_span.h SDK
-# (hull_span_setup / hull_span_find) — this proves that public path end to end:
+# (hull_span_setup / hull_span_find) - this proves that public path end to end:
 # a resolved bounded read, an unknown name, and an out-of-range offset.
 #
 # AOT goes through the PRODUCTION path (`hull build`), which post-#326 passes
 # wamrc --enable-shared-heap so the AOT can read the mapped span's backing bytes.
-# (A hand-rolled `wamrc` without that flag reads zeros — the #326 bug — so the
+# (A hand-rolled `wamrc` without that flag reads zeros - the #326 bug - so the
 # example deliberately does not do that.) Each standalone binary is run from its
 # app dir so fs.mmap finds the runtime data file (data.bin).
-# (mapped-spans checkpoint 3b, slice 2.)
+# (mapped-spans).
 #
 # SPDX-License-Identifier: AGPL-3.0-or-later
 set -u
@@ -93,7 +93,7 @@ if [ -n "$WAMRC" ]; then
         rt="$1"; dir="$2"; bin="$TMP/bin_$rt"
         bo="$("$HULL" build "$dir" -o "$bin" --no-verify-platform 2>&1)"
         if printf '%s' "$bo" | grep -q "platform library not embedded"; then
-            skip "$rt/aot: hull is not an embedded build (make EMBED_PLATFORM=1) — CI builds embedded"
+            skip "$rt/aot: hull is not an embedded build (make EMBED_PLATFORM=1) - CI builds embedded"
             return 2
         fi
         [ -x "$bin" ] || { fail "$rt/aot: hull build produced no binary"; printf '%s\n' "$bo" | tail -8; return 1; }
@@ -105,7 +105,7 @@ if [ -n "$WAMRC" ]; then
     aot_build lua "$TMP/app"
     aot_build js  "$jsdir"
 else
-    skip "AOT: no wamrc — the CI AOT job builds wamrc so this path is exercised there"
+    skip "AOT: no wamrc - the CI AOT job builds wamrc so this path is exercised there"
 fi
 
 echo ""

@@ -1,5 +1,5 @@
 /*
- * test_js_parser.c - Slice 2: the recursive-descent ECMAScript parser (hull:source:parser),
+ * test_js_parser.c - the recursive-descent ECMAScript parser (hull:source:parser),
  * driven through the restricted tooling session via hull:source:parse.
  *
  * The parser drives createTokenizer (never lex) and passes an explicit grammatical slash goal

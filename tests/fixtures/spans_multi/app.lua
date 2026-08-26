@@ -1,4 +1,4 @@
--- spans_multi — attach THREE named spans over data.bin and ask the spanlist
+-- spans_multi - attach THREE named spans over data.bin and ask the spanlist
 -- plugin (public hull_span.h SDK) to enumerate them in declaration order and
 -- resolve a caller-supplied name. GET /list?name=<n> ->
 --   "count=3;order=alpha,beta,gamma;find=<idx>"  (idx = -1 for an unknown name)

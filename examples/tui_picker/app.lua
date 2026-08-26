@@ -1,4 +1,4 @@
--- TUI picker — Hull + Lua TUI example
+-- TUI picker - Hull + Lua TUI example
 --
 -- Run:  hull run app.lua
 --

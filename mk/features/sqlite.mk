@@ -13,17 +13,17 @@
 # rule keeps its raw `ar rcs` for now; Phase 2 routes it through AR_FEATURE_LIB
 # (fixing the TRUST_FEATURE_LIBS bypass, review finding F5).
 
-# ── SQLite feature archive (SQLite as a composable feature, Phase B) ──
+# ── SQLite feature archive (SQLite as a composable feature) ──
 # docs/sqlite_feature.md. Bundles the vendored SQLite engine + the SQLite
 # backend + UDF bridge + the SQLite-only agent introspection into ONE archive
-# so the base can become SQLite-less (Phase B.2) and compose it back (Phase
-# B.3). Unlike postgres/mysql (installable, off-by-default, filtered out of the
+# so the base can become SQLite-less and compose it back. Unlike postgres/mysql
+# (installable, off-by-default, filtered out of the
 # base), SQLite is still in the default base today, so this target just packages
 # the same objects into the archive as the additive first step; the base-flip +
-# auto-compose land in later Phase B increments. The strong hl_db_feature_backends
+# auto-compose land as a later increment. The strong hl_db_feature_backends
 # override is generated at compose (merges with any --with backends), not baked
 # into the archive. agent/db.c references hl_agent_open_app_db + hl_agent_write_error
-# from the base today; Phase B.2 splits agent/helpers.c so the opener moves here.
+# from the base today; agent/helpers.c is split so the opener lives here.
 FEATURE_SQLITE_OBJS := $(SQLITE_OBJ) $(BUILDDIR)/cap_db.o \
                        $(BUILDDIR)/cap_db_sqlite.o \
                        $(BUILDDIR)/cap_db_udf.o $(BUILDDIR)/agent_db.o \
@@ -40,7 +40,7 @@ $(eval $(call define-feature-archive,sqlite-lua,$(BUILDDIR)/lua_rt_mod_db_udf.o)
 
 $(eval $(call define-feature-archive,sqlite-js,$(BUILDDIR)/js_mod_db_udf.o))
 
-# Embed the per-runtime SQLite UDF bridges too (Phase C.2b). The runtime archive
+# Embed the per-runtime SQLite UDF bridges too. The runtime archive
 # is SQLite-free; the default distributed hull composes the app's runtime bridge
 # back whenever the app uses a udf-capable DB, with no install.
 EMBEDDED_SQLITE_RT_H := $(BUILDDIR)/embedded_sqlite_rt.h
@@ -49,7 +49,7 @@ $(EMBEDDED_SQLITE_RT_H): $(BUILDDIR)/libhull_feature-sqlite-lua.a $(BUILDDIR)/li
 	@xxd -i $(BUILDDIR)/libhull_feature-sqlite-lua.a | sed 's/build_libhull_feature_sqlite_lua_a/hl_embedded_feature_sqlite_lua_a/g' | $(XXD_CONST_PIPE) >> $@
 	@xxd -i $(BUILDDIR)/libhull_feature-sqlite-js.a  | sed 's/build_libhull_feature_sqlite_js_a/hl_embedded_feature_sqlite_js_a/g'   | $(XXD_CONST_PIPE) >> $@
 
-# Phase D: when the app-build base is SQLite-less, embed the SQLite ENGINE
+# When the app-build base is SQLite-less, embed the SQLite ENGINE
 # archive (cap/db_sqlite + vendored sqlite3 + FTS5 + udf cap + sqlite agent) so a
 # db app auto-composes it with no `hull feature install sqlite`. Mirrors the WASM
 # core embed. Only pulled when HL_APP_BASE_SQLITELESS=1 (else the engine is

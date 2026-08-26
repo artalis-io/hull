@@ -308,7 +308,7 @@ This is the primary threat model. Hull exists to make it possible to trust apps 
 - **Prevention:** `hull.web.middleware.totp` enforces a small drift
   window (±1 step by default), uses constant-time HMAC comparison
   on every code, persists the last-used step per user, and refuses
-  any code at or below the high-water mark — so a single TOTP code
+  any code at or below the high-water mark - so a single TOTP code
   cannot be reused within its 30-second window even by the
   legitimate user. Failed attempts are counted; the auth-flows
   helper folds TOTP failures into the same lockout machinery as
@@ -360,7 +360,7 @@ This is the primary threat model. Hull exists to make it possible to trust apps 
   validated by `hull.web.attachment` (rejecting `..`, absolute
   paths, control chars, and reserved Windows names) and the
   declared Content-Type is cross-checked with `hull.mime`'s magic-
-  byte sniffer — a part claiming `image/png` whose bytes don't
+  byte sniffer - a part claiming `image/png` whose bytes don't
   start with the PNG signature is rejected before it reaches blob
   storage. Bytes are streamed straight into the content-addressed
   blob store (`hull.blob`), which keys by SHA-256, so two uploads
@@ -386,7 +386,7 @@ This is the primary threat model. Hull exists to make it possible to trust apps 
 - **Remaining risk:** The audit log lives in the same SQLite file
   as the app's other tables. Operators who need stronger non-
   repudiation should ship the events to an external WORM store
-  (e.g. via the outbox helper) — set the `external` cleanup mode
+  (e.g. via the outbox helper) - set the `external` cleanup mode
   to silence the auth-status warning.
 
 **Attack: Session fixation / brute-force session IDs**
@@ -432,7 +432,7 @@ default-src 'none'; style-src 'unsafe-inline'; img-src 'self'; form-action 'self
 | No `app.manifest()` | Default strict CSP (defense in depth) |
 | `app.manifest({})` | Default strict CSP |
 | `app.manifest({ csp = "htmx" })` | Named preset expanded at startup: `default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; form-action 'self'; frame-ancestors 'none'`. Right for htmx-driven SSR apps with stdlib JS / CSS served from `/static/`. `data:` images are allowed for inline SVG favicons + Pico-style inline icons (XSS-safe; browsers don't execute scripts inside `<img>` content). Apps needing nonce-based stricter CSP should use `hull/web/middleware/csp@1` with the htmx profile instead of this static preset. |
-| `app.manifest({ csp = "custom..." })` | Custom CSP string (unknown preset names pass through as literal policies — no risk of typos silently becoming `default-src 'none'`). |
+| `app.manifest({ csp = "custom..." })` | Custom CSP string (unknown preset names pass through as literal policies - no risk of typos silently becoming `default-src 'none'`). |
 | `app.manifest({ csp = false })` | CSP disabled (opt-out) |
 
 **Where CSP is injected:** At the C level in `lua_res_html()` and `js_res_html()`, not in application code. This means the CSP cannot be forgotten, bypassed, or misconfigured by app developers. It's structural, like parameterized SQL. Only `res:json()` and `res:text()` skip CSP (non-HTML content types are not vulnerable to script injection).
@@ -829,17 +829,17 @@ gadgets through hardened text segments to do anything useful.
 | `-fstack-protector-strong` | ✓ | ✓ | skip | Canaries on every function with a stack buffer or `&local` taken. |
 | `-fPIE` + `-pie` | ✓ | ✓ (MH_PIE) | skip | Position-independent → ASLR. |
 | `-D_FORTIFY_SOURCE=3` | ✓ | ✓ | skip | Compile-time bounds checks; runtime `*_chk` variants on `memcpy`/`strcpy`/`sprintf`/etc. |
-| `-Wl,-z,relro` + `-Wl,-z,now` | ✓ | n/a | skip | Full RELRO — GOT/PLT marked read-only after bind. |
+| `-Wl,-z,relro` + `-Wl,-z,now` | ✓ | n/a | skip | Full RELRO - GOT/PLT marked read-only after bind. |
 | `-Wl,-z,noexecstack` | ✓ | n/a | skip | PT_GNU_STACK without X. |
 | `-fstack-clash-protection` | ✓ (probed) | reject | skip | Per-frame probe; defeats stack-clash pivot. gcc 8 / clang 11+. |
-| `-fno-plt` | ✓ (probed) | ✓ (probed) | skip | Direct GOT calls — shrinks ROP gadget surface and lets RELRO+BIND_NOW eliminate writable function pointers. |
+| `-fno-plt` | ✓ (probed) | ✓ (probed) | skip | Direct GOT calls - shrinks ROP gadget surface and lets RELRO+BIND_NOW eliminate writable function pointers. |
 | `-fno-common` | ✓ (probed) | ✓ (probed) | skip | Reject tentative definitions. |
-| `-ftrivial-auto-var-init=zero` | ✓ (probed) | ✓ (probed) | skip | Zero-init stack vars — mitigates info-leak primitives. clang 8 / gcc 12+. |
-| `-fzero-call-used-regs=used-gpr` | ✓ (probed) | ✓ (probed) | skip | Zero scratch GPRs on return — defeats register-based ROP gadgets. gcc 11 / clang 15+. |
+| `-ftrivial-auto-var-init=zero` | ✓ (probed) | ✓ (probed) | skip | Zero-init stack vars - mitigates info-leak primitives. clang 8 / gcc 12+. |
+| `-fzero-call-used-regs=used-gpr` | ✓ (probed) | ✓ (probed) | skip | Zero scratch GPRs on return - defeats register-based ROP gadgets. gcc 11 / clang 15+. |
 | `-fcf-protection=full` (x86_64) | ✓ (probed) | n/a | skip | Intel CET: ENDBR for IBT + shadow-stack note. gcc 8 / clang 7+. |
 | `-mbranch-protection=standard` (arm64) | ✓ (probed) | ✓ (probed) | skip | ARMv8.3 pac-ret + BTI. clang 14 / gcc 9+. |
-| `-Wl,-z,separate-code` | ✓ (probed) | n/a | skip | Separate code/data pages — write primitive can't land in executable memory. GNU ld 2.30+. |
-| `-Wl,--as-needed` | ✓ (probed) | n/a | skip | Drop unused DT_NEEDED entries — shrinks loaded-library surface. |
+| `-Wl,-z,separate-code` | ✓ (probed) | n/a | skip | Separate code/data pages - write primitive can't land in executable memory. GNU ld 2.30+. |
+| `-Wl,--as-needed` | ✓ (probed) | n/a | skip | Drop unused DT_NEEDED entries - shrinks loaded-library surface. |
 
 "probed" means the Makefile runs a tiny compile/link test against
 `$(CC)` and only adds the flag if the toolchain accepts it cleanly
@@ -881,7 +881,7 @@ Hull hardening summary (cc on Linux/x86_64):
 `scripts/check_hardening.sh build/hull` inspects the binary and
 reports PASS/FAIL/SKIP per property. Format-aware (ELF / Mach-O /
 APE). Exits non-zero only when a *required* protection for that
-platform is missing — never for "not applicable to this format"
+platform is missing - never for "not applicable to this format"
 properties. The CI matrix runs `make check-hardening` after every
 build (Linux x2, Linux aarch64, macOS). The release workflow runs it
 on every release native target. A regression that strips a required
@@ -991,7 +991,7 @@ What an attacker still gets, even with this layer in place:
 
 `HULL_DISABLE_HARDENING=1 make` skips the entire block. Debug-only;
 release CI fails if the verifier doesn't find the required
-protections — so this flag can't accidentally ship.
+protections - so this flag can't accidentally ship.
 
 ---
 

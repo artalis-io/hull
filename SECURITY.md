@@ -12,7 +12,7 @@ the three-layer signature system) see [`docs/security.md`](docs/security.md).
 ## Supported versions
 
 Hull is pre-1.0. Security fixes are made against the **latest released version**
-and the `main` branch. Older tagged releases are not maintained — if you are on an
+and the `main` branch. Older tagged releases are not maintained - if you are on an
 older `0.x`, upgrade to the latest release rather than expecting a backport.
 
 | Version | Supported |
@@ -50,7 +50,7 @@ Please include, to the extent you can:
 - the impact you believe it has (sandbox escape, capability bypass, signature
   forgery, memory-safety defect, DoS, information disclosure, …).
 
-You do **not** need a complete exploit to report — a credible description of a
+You do **not** need a complete exploit to report - a credible description of a
 weakness is enough to start.
 
 ## What to expect
@@ -62,21 +62,21 @@ weakness is enough to start.
 | Fix + coordinated disclosure | negotiated with you; typically within **90 days**, faster for actively-exploited or critical issues |
 
 We will keep you updated as we triage and fix, tell you when a fix ships and in
-which release, and — unless you prefer to stay anonymous — credit you in the
+which release, and - unless you prefer to stay anonymous - credit you in the
 advisory and the release notes. We practice coordinated disclosure: please give
 us a reasonable window to ship a fix before any public write-up.
 
 ## Scope
 
-**In scope** — anything that breaks a security boundary Hull promises:
+**In scope** - anything that breaks a security boundary Hull promises:
 
-- **Capability escape / bypass** — reaching a resource (fs, db, network, env,
+- **Capability escape / bypass** - reaching a resource (fs, db, network, env,
   compute) not granted by the app manifest, or defeating a `hull_cap_*` check
   (path traversal / authorization bypass, SQL injection past the parameterized
   layer, host-allowlist bypass, env-allowlist bypass).
-- **Sandbox escape** — escaping the kernel sandbox (pledge/unveil/seatbelt) or
+- **Sandbox escape** - escaping the kernel sandbox (pledge/unveil/seatbelt) or
   the Lua/QuickJS interpreter sandbox (`eval`, `io`/`os`, `load*` reachability).
-- **Signature / attestation forgery** — defeating the release, platform, or app
+- **Signature / attestation forgery** - defeating the release, platform, or app
   signature layers, or the composed-feature attestation.
 - **Memory-safety defects** in the trusted C core (`src/hull/**`, the public
   headers) reachable from app input.
@@ -86,7 +86,7 @@ us a reasonable window to ship a fix before any public write-up.
 **Out of scope** (report upstream, or not a Hull vulnerability):
 
 - Bugs in vendored dependencies (WAMR, QuickJS, Lua, SQLite, mbedTLS, Keel) that
-  do not change Hull's security posture — report to that project (Keel lives at
+  do not change Hull's security posture - report to that project (Keel lives at
   [github.com/artalis-io/keel](https://github.com/artalis-io/keel)).
 - Findings that require `--no-sandbox`, `--no-ca-bundle`, or an already-compromised
   host / build machine.
@@ -95,5 +95,5 @@ us a reasonable window to ship a fix before any public write-up.
 - Vulnerabilities in example apps (`examples/`) that do not reflect a runtime
   defect.
 
-When in doubt, report it privately and let us classify — we would rather triage a
+When in doubt, report it privately and let us classify - we would rather triage a
 non-issue than miss a real one.

@@ -1,4 +1,4 @@
-/* mod_db.h — internal seam shared between mod_db.c (base runtime) and the
+/* mod_db.h - internal seam shared between mod_db.c (base runtime) and the
  * composed SQLite UDF bridge mod_db_udf.c.
  *
  * The udf bindings live in a separate per-runtime bridge so the base runtime

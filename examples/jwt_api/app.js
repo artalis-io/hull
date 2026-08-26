@@ -1,4 +1,4 @@
-// JWT API — Hull + QuickJS example
+// JWT API - Hull + QuickJS example
 //
 // Run: hull app.js -p 3000
 // Token-based auth API: register, login, protected routes using Bearer tokens
@@ -32,9 +32,9 @@ app.manifest({
 let JWT_SECRET = "change-me-in-production";
 try { const v = env.get("JWT_SECRET"); if (v) JWT_SECRET = v; } catch (_e) { /* env not ready */ }
 if (JWT_SECRET === "change-me-in-production")
-    log.warn("JWT_SECRET not set — using insecure default. Set JWT_SECRET env var in production.");
+    log.warn("JWT_SECRET not set - using insecure default. Set JWT_SECRET env var in production.");
 
-// Middleware: extract and verify JWT on every request (optional — won't block)
+// Middleware: extract and verify JWT on every request (optional - won't block)
 app.use("*", "/*", (req, _res) => {
     const authHeader = req.headers.authorization;
     if (!authHeader) return 0;
@@ -107,7 +107,7 @@ app.post("/register", (req, res) => {
     res.status(201).json({ id, email, name });
 });
 
-// Login — returns JWT token
+// Login - returns JWT token
 app.post("/login", (req, res) => {
     let body;
     try { body = JSON.parse(req.body); } catch (_e) { body = null; }
@@ -173,4 +173,4 @@ app.post("/refresh", (req, res) => {
     res.json({ token });
 });
 
-log.info("JWT API loaded — routes registered");
+log.info("JWT API loaded - routes registered");

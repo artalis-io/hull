@@ -1,14 +1,14 @@
 /*
- * agent/eval.c — `hull agent eval <code>`: run a one-shot Lua/JS snippet
+ * agent/eval.c - `hull agent eval <code>`: run a one-shot Lua/JS snippet
  * against the loaded app context and return the result as JSON.
  *
  * Dev-mode only (the agent CLI is trusted on the host). The runtime
- * sandbox + manifest still apply — the snippet cannot bypass capability
+ * sandbox + manifest still apply - the snippet cannot bypass capability
  * checks. Intended for quick inspection: "what's in this table",
  * "what does this helper return", "is this regex matching?".
  *
  * The snippet is wrapped so its return value is JSON-encoded by the
- * runtime's own json module — that way we get a faithful round-trip
+ * runtime's own json module - that way we get a faithful round-trip
  * even for tables/arrays/nested structures.
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
@@ -89,7 +89,7 @@ static int eval_lua(HlLua *lua, const char *code, ShJsonBuf *out)
         const char *jstr = lua_tolstring(L, -2, &jlen);
         sh_json_write_kv_bool(&w, "ok", true);
         sh_json_write_key(&w, "result");
-        /* result is already a JSON-encoded string — embed it raw. */
+        /* result is already a JSON-encoded string - embed it raw. */
         if (jstr && jlen > 0) {
             /* The writer streams; raw pass-through requires writing the
              * literal bytes via the writer's underlying sink. */

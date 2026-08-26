@@ -1,12 +1,12 @@
 /*
- * async.h — Runtime-agnostic async continuation layer
+ * async.h - Runtime-agnostic async continuation layer
  *
  * Bridges Keel async primitives (KlAsyncOp, KlWatcher) with Hull
  * runtime continuations (Lua coroutines, JS promises).
  *
  * HlAsyncCont is a vtable implemented per runtime. HlAsyncCtx is the
  * runtime-agnostic glue that owns a KlAsyncOp, a driver, and a cont.
- * The ctx dispatches through the vtable — it never imports Lua or JS
+ * The ctx dispatches through the vtable - it never imports Lua or JS
  * headers.
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
@@ -21,7 +21,7 @@
 typedef struct HlAllocator     HlAllocator;
 typedef struct HlNetBackendCtx HlNetBackendCtx;
 
-/* ── HlAsyncCont — runtime continuation vtable ────────────────────── */
+/* ── HlAsyncCont - runtime continuation vtable ────────────────────── */
 
 typedef struct HlAsyncCont {
     /*
@@ -36,7 +36,7 @@ typedef struct HlAsyncCont {
     void (*resume)(struct HlAsyncCont *self, void *driver);
 
     /*
-     * Cancel the handler without invoking — free runtime refs.
+     * Cancel the handler without invoking - free runtime refs.
      * Called when the connection is closed while suspended, or on
      * server shutdown.
      */
@@ -44,7 +44,7 @@ typedef struct HlAsyncCont {
 
     /*
      * Free the cont struct itself. Called after resume or cancel.
-     * Does NOT free the coroutine/promise ref — that's managed by
+     * Does NOT free the coroutine/promise ref - that's managed by
      * the runtime struct (HlLua/HlJS).
      */
     void (*destroy)(struct HlAsyncCont *self);
@@ -57,7 +57,7 @@ typedef struct HlAsyncCont {
      * newly-created cont when the handler re-yields inside microtasks.
      *
      * `ctx` is a `JSContext*`, `promise` is a `JSValue` passed by
-     * pointer (the cont implementation does the cast — keeps the
+     * pointer (the cont implementation does the cast - keeps the
      * generic vtable runtime-independent).
      *
      * NULL on Lua conts (Lua tracks handler completion directly via
@@ -65,7 +65,7 @@ typedef struct HlAsyncCont {
      *
      * Each JS cont type sets this slot to its own setter so the public
      * helper hl_js_async_cont_set_handler_promise can dispatch without
-     * caring about the concrete type — avoids the vtable-identity
+     * caring about the concrete type - avoids the vtable-identity
      * trick that used to live in async.c (which would silently
      * corrupt memory if a new cont type was added without updating
      * the dispatcher).
@@ -74,18 +74,18 @@ typedef struct HlAsyncCont {
                                   void *ctx, void *promise);
 } HlAsyncCont;
 
-/* ── HlAsyncCtx — runtime-agnostic async glue ─────────────────────── */
+/* ── HlAsyncCtx - runtime-agnostic async glue ─────────────────────── */
 
 typedef struct HlAsyncCtx {
-    KlAsyncOp    op;            /* embedded — container_of to get ctx */
+    KlAsyncOp    op;            /* embedded - container_of to get ctx */
     KlServer    *server;        /* TODO: retire once all consumers route via net_ctx */
     HlNetBackendCtx *net_ctx;   /* borrowed from rt->net_ctx */
 
-    /* Keel driver — opaque to the ctx */
+    /* Keel driver - opaque to the ctx */
     void        *driver;        /* KlHttpClient*, NULL for sleep, etc. */
     void       (*free_driver)(void *driver);
 
-    /* Runtime continuation — vtable dispatch, no runtime knowledge */
+    /* Runtime continuation - vtable dispatch, no runtime knowledge */
     HlAsyncCont *cont;          /* Lua, JS, or any future runtime */
 
     HlAllocator *alloc;

@@ -1,5 +1,5 @@
 /*
- * test_hull_cap_crypto.c — Tests for shared crypto capability
+ * test_hull_cap_crypto.c - Tests for shared crypto capability
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
@@ -124,14 +124,14 @@ UTEST(hl_cap_crypto, sha256_multi_block)
 
     char hex[65];
     hex_encode(hash, 32, hex);
-    /* SHA-256 of 1 MiB of zero bytes — well-known constant. */
+    /* SHA-256 of 1 MiB of zero bytes - well-known constant. */
     ASSERT_STREQ(hex,
         "30e14955ebf1352266dc2ff8067e68104607e750abb9d3b36582b8af909fcb58");
 }
 
 UTEST(hl_cap_crypto, sha256_null)
 {
-    /* (NULL, 0) is the well-defined "hash the empty input" case —
+    /* (NULL, 0) is the well-defined "hash the empty input" case -
      * SHA-256("") = e3b0c4...b855. (NULL, len>0) and (any, NULL out)
      * are still hard errors. */
     uint8_t hash[32];
@@ -205,7 +205,7 @@ UTEST(hl_cap_crypto, sha256_inc_chunked_equals_oneshot)
         ASSERT_EQ(memcmp(out, want, 32), 0);
     }
 
-    /* 17-byte chunks — straddles 64-byte block boundaries. */
+    /* 17-byte chunks - straddles 64-byte block boundaries. */
     {
         HlSha256Ctx ctx;
         hl_cap_crypto_sha256_init(&ctx);
@@ -354,7 +354,7 @@ UTEST(hl_cap_crypto, hmac_sha256_null_args)
  *
  * hl_crypto_hmac_backend_portable is the active HMAC backend in the
  * pure-compute flavor (mbedTLS dropped). It is always compiled, so these
- * tests cover it in every build — independently of which backend the cap
+ * tests cover it in every build - independently of which backend the cap
  * entry points dispatch through here. RFC 4231 / RFC 2202 vectors prove
  * the hand-rolled construction is correct; the cross-check proves it is
  * byte-identical to whatever backend hl_cap_crypto_hmac_* uses. */

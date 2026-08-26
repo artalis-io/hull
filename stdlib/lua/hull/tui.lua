@@ -1,4 +1,4 @@
--- stdlib/lua/hull/tui.lua — TUI helper module on top of cap-layer
+-- stdlib/lua/hull/tui.lua - TUI helper module on top of cap-layer
 -- primitives.
 --
 -- `require("hull.tui")` gives back the *native* hull.tui table
@@ -17,7 +17,7 @@
 local TUI_RUN_DEFAULT_TICK_MS = -1   -- block until event by default
 
 -- Bridge to the native bindings. The stdlib *is* the public `hull.tui`
--- module — augment the C primitives with run-loop and widget helpers.
+-- module - augment the C primitives with run-loop and widget helpers.
 local tui = require("hull._tui")
 
 -- ── Internal ───────────────────────────────────────────────────
@@ -45,7 +45,7 @@ end
 
 -- UTF-8-safe truncate: trim `s` to at most `max_cells` Lua chars
 -- WITHOUT cutting a multi-byte codepoint in half. We approximate
--- "cell width" with `utf8.len` (one count per codepoint) — wide
+-- "cell width" with `utf8.len` (one count per codepoint) - wide
 -- chars (CJK / emoji) over-count, but the result never produces
 -- a 0xFFFD glyph from a half-cut continuation byte. Returns the
 -- truncated string. Lua's utf8 lib is in the sandboxed Lua stdlib.
@@ -257,7 +257,7 @@ end
 -- Draw a single-line box at the given rect and call `fn(inner)` with
 -- a sub-context that has the inset dimensions and a `print` that
 -- maps (1,1) to the first cell inside the border. Wraps drawing
--- only — the caller still has to call `tui.flush` (or be inside a
+-- only - the caller still has to call `tui.flush` (or be inside a
 -- `tui.run` cycle which does that automatically).
 --
 -- opts = { x = 1, y = 1, w = cols, h = rows, title = nil, border = "single" }

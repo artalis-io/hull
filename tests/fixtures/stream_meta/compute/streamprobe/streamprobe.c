@@ -1,4 +1,4 @@
-/* streamprobe.c — reports the per-chunk stream metadata the host exposes via the
+/* streamprobe.c - reports the per-chunk stream metadata the host exposes via the
  * public hull_stream_* SDK helpers. Output is 3 bytes per chunk:
  *   [0] = hull_stream_is_first()   [1] = hull_stream_is_last()   [2] = hull_stream_chunk_index()
  * For an ordinary (non-stream) compute.call these are all 0 (host default).

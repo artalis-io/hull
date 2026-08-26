@@ -1,6 +1,6 @@
 /**
  * @file vfs.h
- * @brief Unified virtual filesystem — O(log n) lookup over sorted entry arrays.
+ * @brief Unified virtual filesystem - O(log n) lookup over sorted entry arrays.
  *
  * Hull embeds app and stdlib files (`templates/`, `static/`, `migrations/`,
  * `compute/`, `shaders/`, Lua/JS modules) as a single sorted `HlEntry` array
@@ -10,8 +10,8 @@
  * same call sites.
  *
  * Two instances exist on every #HlRuntime:
- *   - `platform_vfs` — stdlib (always embedded, `root_dir = NULL`).
- *   - `app_vfs` — app files (embedded in built binaries; filesystem
+ *   - `platform_vfs` - stdlib (always embedded, `root_dir = NULL`).
+ *   - `app_vfs` - app files (embedded in built binaries; filesystem
  *     fallback via `root_dir` in `hull dev`).
  *
  * @par Sort invariant:
@@ -19,12 +19,12 @@
  *   `LC_ALL=C sort` to guarantee this; @ref hl_vfs_init debug-asserts it.
  *
  * @par Naming convention (disambiguates types in the single array):
- *   - `./<name>` — Lua/JS app modules
- *   - `templates/<name>` — HTML templates
- *   - `static/<path>` — static assets
- *   - `migrations/<name>.sql` — SQL migrations
- *   - `compute/<name>.wasm` / `.aot.<arch>` — WASM plugins
- *   - `shaders/<name>.wgsl` — WGSL compute shaders
+ *   - `./<name>` - Lua/JS app modules
+ *   - `templates/<name>` - HTML templates
+ *   - `static/<path>` - static assets
+ *   - `migrations/<name>.sql` - SQL migrations
+ *   - `compute/<name>.wasm` / `.aot.<arch>` - WASM plugins
+ *   - `shaders/<name>.wgsl` - WGSL compute shaders
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */

@@ -1,5 +1,5 @@
 --
--- hull.project.model — the frontend-neutral ProjectDiscovery model + indexes + IDs.
+-- hull.project.model - the frontend-neutral ProjectDiscovery model + indexes + IDs.
 --
 -- Design: docs/project_discovery_design.md D4/D5/D6. Assembles per-source frontend facts
 -- into a normalized ProjectDiscovery: deterministic textual IDs, per-name declaration

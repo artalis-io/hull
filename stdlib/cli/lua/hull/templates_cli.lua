@@ -1,5 +1,5 @@
 --
--- hull.templates_cli — `hull new --type cli <name>` scaffolding
+-- hull.templates_cli - `hull new --type cli <name>` scaffolding
 --
 -- Modular CLI layout. app.lua's app.main is a dispatcher:
 --   `mytool greet alice`  →  commands/greet.lua's M.run(ctx)
@@ -9,7 +9,7 @@
 -- M.run(ctx) that returns the exit code. Shared helpers (output
 -- formatting, config parsing, etc.) go in lib/.
 --
--- No migrations/ by default — CLI tools rarely need a database. If
+-- No migrations/ by default - CLI tools rarely need a database. If
 -- yours does, mkdir migrations/ and add `"hull/db@1"` to the manifest.
 --
 -- SPDX-License-Identifier: AGPL-3.0-or-later
@@ -74,7 +74,7 @@ app.main(function(ctx)
             usage(ctx.stderr)
             return 1
         end
-        -- A real error inside the command file — propagate it.
+        -- A real error inside the command file - propagate it.
         error(mod, 0)
     end
 
@@ -83,7 +83,7 @@ app.main(function(ctx)
 end)
 ]]
 
-lua_files["commands/greet.lua"] = [[-- commands/greet.lua — Print a greeting.
+lua_files["commands/greet.lua"] = [[-- commands/greet.lua - Print a greeting.
 --
 -- Convention: each command file exports a single `run(ctx)` function.
 -- ctx is the same shape app.main receives: args / env / stdin / stdout
@@ -106,7 +106,7 @@ end
 return M
 ]]
 
-lua_files["commands/count.lua"] = [[-- commands/count.lua — Count items passed as arguments.
+lua_files["commands/count.lua"] = [[-- commands/count.lua - Count items passed as arguments.
 
 local M = {}
 
@@ -118,7 +118,7 @@ end
 return M
 ]]
 
-lua_files["lib/fmt.lua"] = [[-- lib/fmt.lua — Shared output-formatting helpers.
+lua_files["lib/fmt.lua"] = [[-- lib/fmt.lua - Shared output-formatting helpers.
 --
 -- Anything reused across commands lives here. Keeping it in `lib/`
 -- (not `commands/`) means it can be required from anywhere without
@@ -135,7 +135,7 @@ return M
 
 lua_files["tests/commands/test_greet.lua"] = [[-- Tests use test.run_main to synthesise argv/stdin/env and capture
 -- the exit code + stdout/stderr. As of v0.1.0 the CLI test
--- harness is still being shaped — for now invoke through `hull run`
+-- harness is still being shaped - for now invoke through `hull run`
 -- in the project root.
 
 test("greet: smoke", function()
@@ -214,7 +214,7 @@ app.main(async (ctx) => {
 });
 ]]
 
-js_files["commands/greet.js"] = [[// commands/greet.js — Print a greeting.
+js_files["commands/greet.js"] = [[// commands/greet.js - Print a greeting.
 
 import { greeting } from "./../lib/fmt.js";
 
@@ -229,7 +229,7 @@ export function run(ctx) {
 }
 ]]
 
-js_files["commands/count.js"] = [[// commands/count.js — Count items passed as arguments.
+js_files["commands/count.js"] = [[// commands/count.js - Count items passed as arguments.
 
 export function run(ctx) {
     ctx.stdout.write(String(ctx.args.length) + "\n");
@@ -237,7 +237,7 @@ export function run(ctx) {
 }
 ]]
 
-js_files["lib/fmt.js"] = [[// lib/fmt.js — Shared output-formatting helpers.
+js_files["lib/fmt.js"] = [[// lib/fmt.js - Shared output-formatting helpers.
 
 export function greeting(name) {
     return "hello " + name;

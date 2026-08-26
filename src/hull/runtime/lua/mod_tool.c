@@ -1,5 +1,5 @@
 /*
- * runtime/lua/mod_tool.c — Lua bindings for the `tool` global
+ * runtime/lua/mod_tool.c - Lua bindings for the `tool` global
  *
  * Thin Lua surface over the pure-C tool capability (src/hull/cap/tool.c):
  * spawn / spawn_read / find_files / copy / mkdir / rmdir / tmpdir /
@@ -7,9 +7,9 @@
  * loadfile / extract_platform[_cosmo] / platform_archs, plus the
  * compiler vtable exposure (tool.compiler.*).
  *
- * Orchestration entries that pull cross-layer dependencies — the
+ * Orchestration entries that pull cross-layer dependencies - the
  * resolver, doctor JSON renderer, agent JSON producers, dev-state
- * accessors, migration introspection — used to live here too. They
+ * accessors, migration introspection - used to live here too. They
  * moved to src/hull/tool_orchestration.c per architectural audit A-1
  * so this file stays a binding layer and runtime/lua/ doesn't pull
  * commands/, dev_state, agent_lib, etc. into its include set.
@@ -608,7 +608,7 @@ static int l_tool_extract_manifest_js(lua_State *L)
         free(err);
         return luaL_error(L, "%s", buf);
     }
-    free(err); /* defensive — should be NULL on success */
+    free(err); /* defensive - should be NULL on success */
 
     if (!json) {
         lua_pushnil(L);
@@ -1108,7 +1108,7 @@ static int l_tool_find_tool(lua_State *L)
  * Used by the AOT cache (build.lua → aot_cache.lua), the bytecode
  * cache (C-side), and future cache consumers. Honors the same
  * HULL_NO_CACHE / HULL_NO_<KIND>_CACHE env vars as
- * `hl_hull_cache_disabled` — but the disable check is the caller's
+ * `hl_hull_cache_disabled` - but the disable check is the caller's
  * responsibility (we just resolve the path).
  *
  * Returns nil + error string on failure (no $HOME / mkdir failed /
@@ -1212,10 +1212,10 @@ static int l_tool_cache_override(lua_State *L)
  * Each entry: { name, description, is_runtime, path, env_var,
  *               disabled }.
  *
- *   env_var   — the granular opt-out env var ("HULL_NO_<X>_CACHE")
- *               or empty string for system stores (tools — no
+ *   env_var   - the granular opt-out env var ("HULL_NO_<X>_CACHE")
+ *               or empty string for system stores (tools - no
  *               opt-out because it isn't a cache).
- *   disabled  — true if either HULL_NO_CACHE or env_var is set
+ *   disabled  - true if either HULL_NO_CACHE or env_var is set
  *               truthy in the current process.
  *
  * Single source of truth: adding a new entry to REGISTRY[] in
@@ -1268,7 +1268,7 @@ static int l_tool_cache_kinds(lua_State *L)
     return 1;
 }
 
-/* ── tool.blob_store_* — keyed CAS-style cache for tool-mode ──────
+/* ── tool.blob_store_* - keyed CAS-style cache for tool-mode ──────
  *
  * Backed by hull/blob_store in keyed mode (see
  * hl_blob_store_put_keyed). The compute AOT cache uses this from
@@ -1443,7 +1443,7 @@ static int l_tool_platform_name(lua_State *L)
  *     wired through, so it can decide whether to enforce or
  *     opt-out at app-build time.
  *   - Pass the raw bytes verbatim into package.sig.platform's new
- *     embedded fields (additive — doesn't replace today's developer-
+ *     embedded fields (additive - doesn't replace today's developer-
  *     signed JSON shape).
  */
 static int l_tool_platform_sig_get(lua_State *L)
@@ -1709,7 +1709,7 @@ static const luaL_Reg tool_funcs[] = {
     /* Orchestration entries (modules_resolve, doctor_json, agent_*,
      * dev_*, migrate_status, modules_available) are added by
      * hl_lua_tool_register_orchestration after this base table is
-     * installed — see src/hull/tool_orchestration.c. */
+     * installed - see src/hull/tool_orchestration.c. */
     { NULL, NULL }
 };
 

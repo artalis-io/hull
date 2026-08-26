@@ -1,5 +1,5 @@
 /*
- * fs_resolve.h — descriptor-relative, virtual-root path resolver.
+ * fs_resolve.h - descriptor-relative, virtual-root path resolver.
  *
  * Part of the hull.fs design (docs/hull_fs_design.md). Replaces the
  * realpath->check->open TOCTOU (docs §1.4a) with a resolution that opens a path
@@ -27,7 +27,7 @@
  * this many resolvable components is rejected ("path_too_deep") BEFORE either
  * implementation runs, so `openat2` (which has no component-count limit) and the
  * manual held-fd-stack walk (which is bounded by open-fd count) accept/reject the
- * same caller paths — a documented common limit, not platform-dependent behavior.
+ * same caller paths - a documented common limit, not platform-dependent behavior.
  * The manual walk additionally enforces the same bound on the fully-resolved path
  * (post-symlink-expansion); `openat2`'s in-kernel resolution stays within the
  * kernel's own PATH_MAX/ELOOP bounds. Kept well under RLIMIT_NOFILE so the manual

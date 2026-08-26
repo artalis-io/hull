@@ -1,4 +1,4 @@
-// Compute example — WASM compute plugins in Hull (JavaScript)
+// Compute example - WASM compute plugins in Hull (JavaScript)
 //
 // Demonstrates sync, async, buffer, and persistent instance modes.
 //

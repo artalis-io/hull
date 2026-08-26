@@ -1,6 +1,6 @@
 # Contributing to Hull
 
-Hull is dual-licensed (AGPL-3.0 + commercial — see [LICENSING.md](LICENSING.md)).
+Hull is dual-licensed (AGPL-3.0 + commercial - see [LICENSING.md](LICENSING.md)).
 That model only works if a single legal entity holds the rights to every
 line of code in the repository. So contributions to Hull come with one
 mandatory term: **the contributor assigns copyright in their contribution
@@ -71,7 +71,7 @@ apply only to commits made after the revision is published.
 ### Why copyright assignment?
 
 Hull's commercial license pays for development. The AGPL alone does not
-allow Artalis to relicense contributed code under proprietary terms —
+allow Artalis to relicense contributed code under proprietary terms -
 contributors would individually retain copyright on their changes, and
 selling a closed-source license to a customer would require permission
 from every past contributor. That's an unworkable maintenance burden.
@@ -106,7 +106,7 @@ employer step is needed.
 
 - C11. Compile with `-Wall -Wextra -Wpedantic -Wshadow -Wformat=2 -Werror`.
 - `-fstack-protector-strong` for buffer-overflow detection.
-- Vendor code (`vendor/**`) uses `-w` to suppress warnings — don't add
+- Vendor code (`vendor/**`) uses `-w` to suppress warnings - don't add
   your code there.
 - Public functions prefixed `hl_*` (capabilities: `hl_cap_*`, tools:
   `hl_tool_*`, commands: `hl_cmd_*`).
@@ -123,7 +123,7 @@ make lint       # Lua + JS lint, SDK-header + docs-integrity gates
 make cppcheck   # static analysis
 ```
 
-`make lint` includes `check-docs-integrity` — it verifies that every
+`make lint` includes `check-docs-integrity` - it verifies that every
 `docs/*.md` is catalogued in `docs/README.md`, that Markdown links resolve,
 that archived docs are not presented as active specs, and that moved historical
 paths cannot silently reappear. If you add or move a doc, update
@@ -187,7 +187,7 @@ of the commit (so we can correlate sign-offs with accounts).
 - AI-generated code submitted under sign-off **without disclosure**.
   AI-assisted code is fine, but the sign-off requires you to be able to
   certify authority and originality. If the AI surface is doing most of
-  the work, say so in the PR description — we evaluate case by case.
+  the work, say so in the PR description - we evaluate case by case.
 - Patches that are dual-licensed under a license incompatible with our
   commercial relicensing (e.g. GPLv2-only-without-"or later").
 - Contributions from contributors on a US OFAC-sanctioned list, or from

@@ -1,5 +1,5 @@
 /*
- * commands/migrate.c — hull migrate subcommand
+ * commands/migrate.c - hull migrate subcommand
  *
  * Dispatch:
  *   hull migrate [app_dir]          → run pending migrations (C)
@@ -45,7 +45,7 @@ static void migrate_usage(void)
 static int cmd_run(const char *app_dir, const char *db_path)
 {
     /* Open via the backend vtable so the handle.ctx is the proper
-     * HlDbSqliteCtx — required for hl_db_sqlite_raw / hl_migrate_run. */
+     * HlDbSqliteCtx - required for hl_db_sqlite_raw / hl_migrate_run. */
     const char *db_err = NULL;
     const HlDbBackend *be = hl_db_backend_select(db_path, &db_err);
     if (!be) {

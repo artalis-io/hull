@@ -1,9 +1,9 @@
 /*
- * spanreader.c — reference Hull compute plugin for mapped spans.
+ * spanreader.c - reference Hull compute plugin for mapped spans.
  *
  * Reads a host-mapped, read-only file window that the caller attached via
  * compute.call(name, input, { spans = { { name = "...", buffer = mapped } } }),
- * using ONLY the public hull_span.h API — no hand-written host_call and no
+ * using ONLY the public hull_span.h API - no hand-written host_call and no
  * wire-offset decoding. It discovers the attached spans with hull_span_setup(),
  * resolves a caller-supplied NAME with hull_span_find(), performs a BOUNDED read
  * of the window, and returns a deterministic text line. Unknown names and

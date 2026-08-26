@@ -3,7 +3,7 @@
 -- A minimal hull app that wires up hull/web/middleware/oauth against
 -- the mock IdP (whose URL is passed via MOCK_IDP_ISSUER). The
 -- on_login handler stuffs the verified claims into a fake session
--- and 302s to "/" — the e2e script then hits "/me" to assert the
+-- and 302s to "/" - the e2e script then hits "/me" to assert the
 -- claim shape made it through.
 
 app.manifest({
@@ -15,7 +15,7 @@ app.manifest({
         "hull/json@1",
     },
     -- Allow the mock IdP host. The manifest takes hostnames, not
-    -- ports — 127.0.0.1 covers any port.
+    -- ports - 127.0.0.1 covers any port.
     hosts = { "127.0.0.1" },
 })
 

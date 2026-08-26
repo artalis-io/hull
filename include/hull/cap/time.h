@@ -1,6 +1,6 @@
 /**
  * @file cap/time.h
- * @brief Time capability — wall clock + monotonic + ISO formatting.
+ * @brief Time capability - wall clock + monotonic + ISO formatting.
  *
  * No allowlist; all callers may read time. All values are UTC.
  *

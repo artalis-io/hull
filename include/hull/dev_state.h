@@ -1,5 +1,5 @@
 /*
- * include/hull/dev_state.h — `hull dev --tui` shared state.
+ * include/hull/dev_state.h - `hull dev --tui` shared state.
  *
  * The hull dev command owns the child process and the log ring
  * buffer; the dev_tui Lua module renders from it. Both sides poke
@@ -33,15 +33,15 @@ typedef struct {
     int    pipe_fd;            /* read end of child's stderr+stdout, or -1 */
     int    reload_count;
     int64_t last_reload_ms;    /* monotonic clock, ms since epoch */
-    int    should_quit;        /* 'q' or signal — TUI exits cleanly */
-    int    pending_reload;     /* 'r' or file change — main reloads child */
+    int    should_quit;        /* 'q' or signal - TUI exits cleanly */
+    int    pending_reload;     /* 'r' or file change - main reloads child */
 
-    /* Spawning material — kept so we can respawn after reload. */
+    /* Spawning material - kept so we can respawn after reload. */
     const char  *hull_exe;
     const char **child_argv;   /* NULL-terminated, borrowed */
     int          child_argc;
 
-    /* File watch — copied from the existing dev.c flow. */
+    /* File watch - copied from the existing dev.c flow. */
     char    app_dir[PATH_MAX];
     time_t  baseline_mtime;
 

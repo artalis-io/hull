@@ -35,7 +35,7 @@ May change between minor versions. Marked as such in CLAUDE.md / inline docs.
 - WASM shared data segments (`compute.segment`).
 - GPU textures (`gpu.texture`, `gpu.texture_read`).
 - `gpu.pipeline` output spec (Lua 1-indexed / JS 0-indexed asymmetry; may unify).
-- Memory64 WASM modules (cap-layer dispatch currently compiled out in the shipped build — [#318](https://github.com/artalis-io/hull/issues/318)).
+- Memory64 WASM modules (cap-layer dispatch currently compiled out in the shipped build - [#318](https://github.com/artalis-io/hull/issues/318)).
 - `app.every` / `app.daily`. Minimum interval, `return false` cancellation, `{localtime}` option.
 - `hull mcp` server output schema.
 - `--audit` JSON event shape.

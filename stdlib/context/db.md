@@ -29,9 +29,9 @@ db.batch(() => {
 <!-- compact -->
 ## API
 
-- **`db.query(sql, ...params)`** — returns array of row objects. Empty array if no results.
-- **`db.exec(sql, ...params)`** — executes statement, returns nothing. Use for INSERT/UPDATE/DELETE/CREATE.
-- **`db.batch(fn)`** — wraps `fn` in `BEGIN IMMEDIATE` ... `COMMIT`. Rolls back on error.
+- **`db.query(sql, ...params)`** - returns array of row objects. Empty array if no results.
+- **`db.exec(sql, ...params)`** - executes statement, returns nothing. Use for INSERT/UPDATE/DELETE/CREATE.
+- **`db.batch(fn)`** - wraps `fn` in `BEGIN IMMEDIATE` ... `COMMIT`. Rolls back on error.
 
 ## Parameter Binding
 

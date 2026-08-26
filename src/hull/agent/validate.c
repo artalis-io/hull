@@ -1,5 +1,5 @@
 /*
- * agent/validate.c — `hull agent validate <file>`: parse one Lua/JS
+ * agent/validate.c - `hull agent validate <file>`: parse one Lua/JS
  * file in isolation, emit syntax + basic sandbox-violation findings.
  *
  * Cheap iterative feedback that doesn't require restarting `hull dev`.
@@ -30,12 +30,12 @@
 /* Patterns that indicate a sandbox-violation attempt. The C runtime
  * rejects these at execution time; surfacing them at validate time
  * gives a faster signal. Each pattern is a substring match (not a
- * regex) — keep it simple.
+ * regex) - keep it simple.
  *
  * L-5 fix: named struct (`BadPattern`) shared between Lua/JS tables.
  * The previous code declared two anonymous-struct types with identical
  * layouts and cast through `(void *)` to a third anonymous-struct
- * type for iteration — strict-aliasing UB. */
+ * type for iteration - strict-aliasing UB. */
 typedef struct {
     const char *needle;
     const char *severity;
@@ -101,7 +101,7 @@ static int validate_lua(const char *path, const char *content, size_t len,
     sh_json_write_kv_string(&w, "file", path);
     sh_json_write_kv_string(&w, "runtime", "lua");
 
-    /* Pure parse — no execution. luaL_loadbuffer with no environment
+    /* Pure parse - no execution. luaL_loadbuffer with no environment
      * binding is the same path the runtime uses for app load. */
     lua_State *L = luaL_newstate();
     if (!L) {
@@ -139,7 +139,7 @@ static int validate_js(const char *path, const char *content, size_t len,
     sh_json_write_kv_string(&w, "file", path);
     sh_json_write_kv_string(&w, "runtime", "js");
 
-    /* JS_Eval with EVAL_FLAG_COMPILE_ONLY — parses but doesn't execute. */
+    /* JS_Eval with EVAL_FLAG_COMPILE_ONLY - parses but doesn't execute. */
     JSRuntime *rt = JS_NewRuntime();
     if (!rt) {
         sh_json_write_kv_bool(&w, "ok", false);

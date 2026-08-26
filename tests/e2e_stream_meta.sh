@@ -1,5 +1,5 @@
 #!/bin/sh
-# tests/e2e_stream_meta.sh — the compute stream-metadata SDK helpers
+# tests/e2e_stream_meta.sh - the compute stream-metadata SDK helpers
 # (hull_stream_is_first/is_last/chunk_index via host_call(HULL_OP_STREAM)),
 # restored to the canonical hull_compute.h. Drives the streamprobe plugin over a
 # 3-chunk compute.stream and asserts the guest sees first / middle / last +
@@ -24,7 +24,7 @@ TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
 cp -r "$ROOT/tests/fixtures/stream_meta" "$TMP/app"
 
 # Assert the fixture's hull_compute.h is byte-identical to the CANONICAL embedded
-# source (the HULL_COMPUTE_H literal in compute.lua) — independently extracted,
+# source (the HULL_COMPUTE_H literal in compute.lua) - independently extracted,
 # not compared against the copy it was made from. This is the same canonical the
 # repo-wide check enforces, verified here against the exact header the stream
 # helpers are exercised through.
@@ -83,7 +83,7 @@ if [ -n "$WAMRC" ]; then
         rt="$1"; dir="$2"; bin="$TMP/bin_$rt"
         bo="$("$HULL" build "$dir" -o "$bin" --no-verify-platform 2>&1)"
         if printf '%s' "$bo" | grep -q "platform library not embedded"; then
-            skip "$rt/aot: hull is not an embedded build (make EMBED_PLATFORM=1) — CI builds embedded"; return 2
+            skip "$rt/aot: hull is not an embedded build (make EMBED_PLATFORM=1) - CI builds embedded"; return 2
         fi
         [ -x "$bin" ] || { fail "$rt/aot: hull build produced no binary"; printf '%s\n' "$bo" | tail -8; return 1; }
         printf '%s' "$bo" | grep -q "AOT compute/streamprobe.wasm" \
@@ -93,7 +93,7 @@ if [ -n "$WAMRC" ]; then
     aot_build lua "$TMP/app"
     aot_build js  "$jsdir"
 else
-    skip "AOT: no wamrc — the CI AOT job builds wamrc so this path is exercised there"
+    skip "AOT: no wamrc - the CI AOT job builds wamrc so this path is exercised there"
 fi
 
 echo ""

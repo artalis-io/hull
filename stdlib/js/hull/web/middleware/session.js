@@ -132,7 +132,7 @@ function init(opts) {
         } else {
             log.warn("session: app.daily not available "
                 + "(CLI flavor or hull/timers not admitted) "
-                + "— auto-cleanup runs only at init(). "
+                + "- auto-cleanup runs only at init(). "
                 + "Wire your own cron/worker for steady-state.");
         }
     }
@@ -176,7 +176,7 @@ function create(data, opts) {
         ip = _request.clientIp(opts.req, trustProxy);
         ua = h["user-agent"] || null;
         // Real UAs top out around 500 chars; bots and scanners can
-        // send 100KB UAs. Cap to bound the row size — the value is
+        // send 100KB UAs. Cap to bound the row size - the value is
         // only used for the /devices listing display.
         if (typeof ua === "string" && ua.length > 512) {
             ua = ua.substring(0, 512);
@@ -206,7 +206,7 @@ function create(data, opts) {
  * Load a session by id; refresh expiry on hit (sliding TTL).
  *
  * Validates the 64-char hex shape before hitting the DB. Expired
- * sessions return `null` (and are NOT deleted — see {@link cleanup}).
+ * sessions return `null` (and are NOT deleted - see {@link cleanup}).
  *
  * @param {string} sessionId
  * @param {Object} [opts]  `{ ttl }` for the extended expiry.
@@ -254,7 +254,7 @@ function load(sessionId, opts) {
     try { decoded = json.decode(rows[0].data); }
     catch (_e) { decoded = null; }
     if (decoded == null || typeof decoded !== "object") {
-        // Corrupted session data — destroy and return null
+        // Corrupted session data - destroy and return null
         db.exec("DELETE FROM _hull_sessions WHERE id = ?", [sessionId]);
         return null;
     }
@@ -414,7 +414,7 @@ const DEFAULT_LOGIN_HANDLER_OPTS = {
  *                       Default derives `{ factors: ctx.factors }` (auth-flows)
  *                       or `{ factors: "oauth:" + ctx.provider }` (oauth)
  *                       or `{ factors: "unknown" }` (no ctx).
- *   - onNewDevice(req, res, user) — called before auditLog.record when
+ *   - onNewDevice(req, res, user) - called before auditLog.record when
  *                       auditLog.isNewDevice(userId, req) returns true.
  *                       Requires auditLog. Wrapped in try/catch so callback
  *                       bugs cannot fail the login.
@@ -451,10 +451,10 @@ function loginHandler(cookieMod, opts) {
     // onLogin's 4th arg, which makes `auditMetadata: (_,c) => c` a
     // one-keystroke leak of access_token / refresh_token / raw
     // ID-token into _hull_audit_log.metadata (where it persists for
-    // opts.retainDays — default 365). The list mirrors the Lua half
+    // opts.retainDays - default 365). The list mirrors the Lua half
     // and covers OAuth, password, and TOTP secret surfaces. If you
     // need to log claim details, pull them out by name in a custom
-    // auditMetadata — never pass the raw ctx through.
+    // auditMetadata - never pass the raw ctx through.
     const SCRUB_KEYS = new Set([
         "tokens", "token", "access_token", "refresh_token",
         "id_token", "claims",

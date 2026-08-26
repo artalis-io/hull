@@ -1,5 +1,5 @@
 /*
- * runtime/lua/mod_test.c — Lua test bindings
+ * runtime/lua/mod_test.c - Lua test bindings
  *
  * Lua-specific test registration, HTTP dispatch wrappers, and assertions.
  * Uses the shared pure-C dispatch helper (cap/test.c::hl_cap_test_dispatch);
@@ -43,11 +43,11 @@ static HlLua *get_test_lua(lua_State *L)
     return lua;
 }
 
-/* ── test(...) — register a test case ──────────────────────────────── */
+/* ── test(...) - register a test case ──────────────────────────────── */
 
 static int l_test_call(lua_State *L)
 {
-    /* Called as test("desc", fn) — first arg is the test table (self) */
+    /* Called as test("desc", fn) - first arg is the test table (self) */
     const char *desc = luaL_checkstring(L, 2);
     luaL_checktype(L, 3, LUA_TFUNCTION);
 
@@ -115,7 +115,7 @@ static int l_test_http(lua_State *L, const char *method)
         }
         lua_pop(L, 1);
 
-        /* opts.ctx — JSON-encode to pass through as req.ctx.
+        /* opts.ctx - JSON-encode to pass through as req.ctx.
          * The encoded string must remain on the Lua stack (anchored)
          * until after hl_cap_test_dispatch() returns. */
         lua_getfield(L, 2, "ctx");

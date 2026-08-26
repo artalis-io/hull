@@ -1,5 +1,5 @@
 /*
- * hull/limits/core.h — Cross-cutting limits used everywhere
+ * hull/limits/core.h - Cross-cutting limits used everywhere
  *
  * Module system, HTTP body, server defaults, crypto, SMTP, threads,
  * workers, compression. Anything not specific to a single subsystem.
@@ -23,7 +23,7 @@
                                             * for round-8's auth-flows hull/log dep
                                             * (MEDIUM-9 pcall'd audit-log warning).
                                             * Each unit costs ~16 bytes per registry
-                                            * entry — cheap. */
+                                            * entry - cheap. */
 #define HL_MODULE_BITSET_WORDS       2     /* 128 bits → registry headroom */
 #define HL_MODULE_RESOLVER_ERR_MAX   256   /* Resolver error message buffer */
 

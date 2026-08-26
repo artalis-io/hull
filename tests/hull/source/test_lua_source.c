@@ -1,5 +1,5 @@
 /*
- * test_lua_source.c — harness for the pure-Lua hull.source.lua layer.
+ * test_lua_source.c - harness for the pure-Lua hull.source.lua layer.
  *
  * The source-analysis layer is pure Lua with NO Hull C dependencies, so it is
  * tested in a VANILLA lua_State (vendored Lua 5.4, no Hull sandbox / module
@@ -9,7 +9,7 @@
  * fail to the C test runner + CI. Tests run from the repo root (see mk/tests.mk).
  *
  * The Lua 5.4 load() differential conformance corpus (later slice) belongs HERE,
- * in the harness, not in the source-analysis module — the module never calls
+ * in the harness, not in the source-analysis module - the module never calls
  * dynamic compilation.
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later

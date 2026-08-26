@@ -1,5 +1,5 @@
 /*
- * agent/internal.h — Private shared helpers for the agent surface.
+ * agent/internal.h - Private shared helpers for the agent surface.
  *
  * Not installed; internal to the agent_lib.c split (roadmap item I step 3).
  * Public agent API lives in include/hull/agent_lib.h.
@@ -11,7 +11,7 @@
 #define HL_AGENT_INTERNAL_H
 
 #include <stddef.h>
-#include <sh_json.h>  /* ShJsonBuf is a typedef of an anonymous struct — needs full include */
+#include <sh_json.h>  /* ShJsonBuf is a typedef of an anonymous struct - needs full include */
 #include "hull/agent_lib.h"
 
 struct sqlite3;

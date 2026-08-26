@@ -1,5 +1,5 @@
 /*
- * hull_cap_wasm_buffer.c — Zero-copy buffer for WASM compute output
+ * hull_cap_wasm_buffer.c - Zero-copy buffer for WASM compute output
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */

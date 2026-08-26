@@ -1,4 +1,4 @@
--- test_session.lua — Tests for hull.web.middleware.session
+-- test_session.lua - Tests for hull.web.middleware.session
 --
 -- Requires db, crypto, time, json globals (run via hull test harness).
 
@@ -27,7 +27,7 @@ end
 
 test("init creates sessions table", function()
     session.init({ ttl = 60 })
-    -- Should not error — table created
+    -- Should not error - table created
 end)
 
 -- ── create + load ────────────────────────────────────────────────────

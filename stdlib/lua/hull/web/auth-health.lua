@@ -1,4 +1,4 @@
---- hull.web.auth-health — runtime health probes for the auth stack.
+--- hull.web.auth-health - runtime health probes for the auth stack.
 --
 -- @module hull.web.auth-health
 -- @license AGPL-3.0-or-later
@@ -92,7 +92,7 @@ local function probe_audit_log(include_counts)
     -- Round-11 MEDIUM-7: prefer the tri-state cleanup_status() over
     -- the boolean is_cleanup_scheduled(). The boolean returned false
     -- for legit cleanup=false opt-outs (apps that wire cron / a
-    -- separate worker) — operator misread it as "forgot to enable".
+    -- separate worker) - operator misread it as "forgot to enable".
     -- New shape: cleanup = "scheduled" | "external" | "missing".
     -- cleanup_scheduled is kept for back-compat callers.
     local status, scheduled = nil, nil
@@ -192,7 +192,7 @@ end
 -- (overridable). Backs the `hull agent auth-status` CLI.
 --
 -- `opts.auth_check(req) -> bool` is REQUIRED. The endpoint exposes
--- session/enrollment counts and operational state — recon material
+-- session/enrollment counts and operational state - recon material
 -- if left open. Auth_check wires into the app's RBAC predicate or a
 -- token check. A 401 (no auth context) or 403 (no permission) is
 -- returned on failure. Must return the boolean `true` to admit;
@@ -212,7 +212,7 @@ function auth_health.routes(app, opts)
     if type(opts.auth_check) ~= "function" then
         error("auth_health.routes: opts.auth_check function is required. "
               .. "The endpoint exposes session/enrollment counts and "
-              .. "operational state — gate it behind your RBAC predicate "
+              .. "operational state - gate it behind your RBAC predicate "
               .. "or a token check. Pass auth_check = function(req) "
               .. "return ... end to wire the gate.")
     end
@@ -225,7 +225,7 @@ function auth_health.routes(app, opts)
         -- Round-10 MEDIUM-10: require literal `true`, not truthy.
         -- Pre-fix Lua admitted `1` / `"yes"` / any truthy; JS
         -- already required strict true. Same shared config admits
-        -- on Lua, denies on JS — cross-runtime contract drift.
+        -- on Lua, denies on JS - cross-runtime contract drift.
         -- Admitting on accidental truthy is the worse failure mode
         -- for an endpoint exposing recon material, so tighten to
         -- match JS.

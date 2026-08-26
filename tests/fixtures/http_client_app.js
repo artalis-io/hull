@@ -1,4 +1,4 @@
-// http_client_app.js — E2E test app for HTTP client capability
+// http_client_app.js - E2E test app for HTTP client capability
 //
 // Declares hosts manifest to enable the http module,
 // then exercises all HTTP methods against an echo server.
@@ -19,13 +19,13 @@ app.manifest({
 
 const ECHO_BASE = "http://127.0.0.1:19860";
 
-// GET /test/get — exercise httpClient.get()
+// GET /test/get - exercise httpClient.get()
 app.get("/test/get", (_req, res) => {
     const r = httpClient.get(`${ECHO_BASE}/echo`);
     res.json({ status: r.status, echo: r.body });
 });
 
-// GET /test/post — exercise httpClient.post()
+// GET /test/post - exercise httpClient.post()
 app.get("/test/post", (_req, res) => {
     const r = httpClient.post(`${ECHO_BASE}/echo`, "hello from js", {
         headers: { "X-Test": "js-post" }
@@ -33,31 +33,31 @@ app.get("/test/post", (_req, res) => {
     res.json({ status: r.status, echo: r.body });
 });
 
-// GET /test/put — exercise httpClient.put()
+// GET /test/put - exercise httpClient.put()
 app.get("/test/put", (_req, res) => {
     const r = httpClient.put(`${ECHO_BASE}/echo`, "put-body");
     res.json({ status: r.status, echo: r.body });
 });
 
-// GET /test/patch — exercise http.patch()
+// GET /test/patch - exercise http.patch()
 app.get("/test/patch", (_req, res) => {
     const r = httpClient.patch(`${ECHO_BASE}/echo`, "patch-body");
     res.json({ status: r.status, echo: r.body });
 });
 
-// GET /test/delete — exercise httpClient.delete()
+// GET /test/delete - exercise httpClient.delete()
 app.get("/test/delete", (_req, res) => {
     const r = httpClient.delete(`${ECHO_BASE}/echo`);
     res.json({ status: r.status, echo: r.body });
 });
 
-// GET /test/request — exercise httpClient.request() with custom method
+// GET /test/request - exercise httpClient.request() with custom method
 app.get("/test/request", (_req, res) => {
     const r = httpClient.request("OPTIONS", `${ECHO_BASE}/echo`);
     res.json({ status: r.status, echo: r.body });
 });
 
-// GET /test/headers — verify custom headers are sent
+// GET /test/headers - verify custom headers are sent
 app.get("/test/headers", (_req, res) => {
     const r = httpClient.get(`${ECHO_BASE}/echo`, {
         headers: { "X-Custom-Header": "test-value-js" }
@@ -65,7 +65,7 @@ app.get("/test/headers", (_req, res) => {
     res.json({ status: r.status, echo: r.body });
 });
 
-// GET /test/denied — verify host not in allowlist is rejected
+// GET /test/denied - verify host not in allowlist is rejected
 app.get("/test/denied", (_req, res) => {
     try {
         httpClient.get("http://evil.example.com/steal");

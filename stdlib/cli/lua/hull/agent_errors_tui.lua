@@ -1,4 +1,4 @@
--- stdlib/lua/hull/agent_errors_tui.lua — last-reload error scroller.
+-- stdlib/lua/hull/agent_errors_tui.lua - last-reload error scroller.
 --
 -- Invoked by `hull agent errors --tui`. Renders the .hull/last_error.json
 -- structured output as a scrollable list with expandable detail panes.
@@ -107,7 +107,7 @@ local function render(t, state)
         t:print(1, 3, "✓ No errors.")
         t:style({})
         t:style({ fg = 0x888888 })
-        t:print(1, 5, "(.hull/last_error.json is empty — last reload succeeded.)")
+        t:print(1, 5, "(.hull/last_error.json is empty - last reload succeeded.)")
         t:style({})
         t:style({ fg = 0x888888 })
         t:print(1, t.rows, "r:reload  q:quit")

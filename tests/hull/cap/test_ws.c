@@ -1,5 +1,5 @@
 /*
- * test_hull_cap_ws.c — Tests for WebSocket connection registry
+ * test_hull_cap_ws.c - Tests for WebSocket connection registry
  *
  * Uses utest.h for the test framework.
  * Tests the registry in isolation (no Keel server needed).
@@ -15,7 +15,7 @@
  * UD callback refs) is a thin wrapper over keel's kl_ws_client_* and
  * requires a live event loop. It is covered end-to-end by the
  * irc_chat federation tests (examples/irc_chat/tests/test_app.{lua,js}
- * — 13 federation cases), which exercise the on_open → on_message →
+ * - 13 federation cases), which exercise the on_open → on_message →
  * on_close → finalizer teardown path under both runtimes. Mocking
  * keel's WS client for a standalone C unit test was considered and
  * rejected as brittle for the value gained.
@@ -75,7 +75,7 @@ UTEST(ws_registry, broadcast_empty)
 {
     setup_reg();
 
-    /* Broadcast to path with no connections — returns 0 */
+    /* Broadcast to path with no connections - returns 0 */
     int sent = hl_ws_broadcast_text(&test_reg, "/ws", "hello", 5);
     ASSERT_EQ(0, sent);
 

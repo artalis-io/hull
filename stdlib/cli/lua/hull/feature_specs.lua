@@ -66,7 +66,7 @@ return {
     },
     -- mysql: pure-C MySQL/MariaDB wire backend in libhull_feature-mysql.a
     -- (`make feature-mysql`), one backend serving both mysql:// and
-    -- mariadb://. Identical shape to postgres — fills hl_db_feature_backends,
+    -- mariadb://. Identical shape to postgres - fills hl_db_feature_backends,
     -- references base crypto (native/caching_sha2 auth) + tls_client
     -- (sslmode), so base_group = true (--start-group at compose on GNU ld).
     mysql = {

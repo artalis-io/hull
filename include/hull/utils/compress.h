@@ -1,5 +1,5 @@
 /*
- * compress.h — Response compression helper
+ * compress.h - Response compression helper
  *
  * Checks Accept-Encoding and compresses when beneficial.
  *

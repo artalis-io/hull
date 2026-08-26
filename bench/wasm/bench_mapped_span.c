@@ -1,4 +1,4 @@
-/* bench_mapped_span.c — the mapped-span performance benchmark harness.
+/* bench_mapped_span.c - the mapped-span performance benchmark harness.
  *
  * Measures the shipped large-file mechanism: a host-mmap'd file window read by a
  * wasm32 guest via a HullSpan, vs the native-mmap baseline and the two copy-based
@@ -556,7 +556,7 @@ int main(int argc, char **argv)
 
     HlFsConfig cfg; memset(&cfg, 0, sizeof(cfg));
     cfg.base_dir = dir; cfg.base_len = strlen(dir);
-    /* checkpoint 3: mmap is policy-gated. This bench mmaps data.bin (read) under
+    /* mmap is policy-gated. This bench mmaps data.bin (read) under
      * `dir`, so grant the whole dir with a base-root "." read grant. */
     HlAllocator fs_alloc; hl_alloc_init(&fs_alloc, 0);
     HlFsPolicy fs_policy = HL_FS_POLICY_INIT;

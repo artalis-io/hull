@@ -1,5 +1,5 @@
 /*
- * test_arena.c — Tests for Hull's arena lifetime helpers.
+ * test_arena.c - Tests for Hull's arena lifetime helpers.
  *
  * Covers the scoped-scratch primitives layered on the sh_arena bump
  * allocator: hl_arena_mark / hl_arena_rewind (savepoint + rewind for
@@ -168,7 +168,7 @@ UTEST(hl_arena, reset_poisons_arena_under_asan)
          * dangling region. ASan must trap the instrumented read. */
         SHArena *a = hl_arena_create(NULL, 4096);
         volatile unsigned char *p = sh_arena_alloc(a, 64);
-        if (!p) _exit(0);          /* unexpected — fail the test */
+        if (!p) _exit(0);          /* unexpected - fail the test */
         p[0] = 0x7;                /* live: fine */
         sh_arena_reset(a);         /* re-poisons the whole buffer */
         unsigned char sink = p[0]; /* dangling read → ASan error */
@@ -180,7 +180,7 @@ UTEST(hl_arena, reset_poisons_arena_under_asan)
     ASSERT_EQ(waitpid(pid, &status, 0), pid);
     /* ASan aborts the child on the poisoned read: either a signal or a
      * non-zero exit (depending on abort_on_error). Exit 0 means the read
-     * was NOT trapped — poisoning regressed. */
+     * was NOT trapped - poisoning regressed. */
     int trapped = WIFSIGNALED(status) ||
                   (WIFEXITED(status) && WEXITSTATUS(status) != 0);
     ASSERT_TRUE(trapped);

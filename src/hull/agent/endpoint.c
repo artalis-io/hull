@@ -1,5 +1,5 @@
 /*
- * agent/endpoint.c — `hull agent endpoint METHOD PATH` and
+ * agent/endpoint.c - `hull agent endpoint METHOD PATH` and
  * `hull agent middleware METHOD PATH`.
  *
  * Both walk the runtime's enumerate_routes / enumerate_middleware
@@ -8,10 +8,10 @@
  * without actually issuing it.
  *
  * Pattern matching mirrors Keel's router (see vendor/keel/src/router.c):
- *   "*"             — match any method
- *   "/foo"          — exact path
- *   "/foo/" + "*"   — prefix match (everything under /foo/)
- *   "/users/:id"    — parameter capture (matches /users/anything-no-slash)
+ *   "*"             - match any method
+ *   "/foo"          - exact path
+ *   "/foo/" + "*"   - prefix match (everything under /foo/)
+ *   "/users/:id"    - parameter capture (matches /users/anything-no-slash)
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
@@ -56,7 +56,7 @@ static int path_matches(const char *pattern, const char *path)
             /* Skip the parameter name in the pattern */
             while (*p && *p != '/') p++;
             /* Skip the captured segment in the path. L-4 fix: require at
-             * least one byte — empty segments (e.g. /users/) should NOT
+             * least one byte - empty segments (e.g. /users/) should NOT
              * match /users/:id, matching Keel router semantics. */
             const char *r_seg_start = r;
             while (*r && *r != '/') r++;
@@ -133,7 +133,7 @@ int hl_agent_endpoint_ctx(HlAppContext *ctx, const char *method,
     sh_json_write_kv_string(&w, "method", method);
     sh_json_write_kv_string(&w, "path",   path);
 
-    /* Middleware first — they fire before the handler. */
+    /* Middleware first - they fire before the handler. */
     EndpointState ms = { .w = &w, .method = method, .path = path,
                          .include_middleware = 1 };
     sh_json_write_key(&w, "middleware");

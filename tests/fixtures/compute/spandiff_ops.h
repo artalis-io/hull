@@ -1,4 +1,4 @@
-/* spandiff_ops.h — shared op dispatcher for the hull_span.h native-vs-WASM
+/* spandiff_ops.h - shared op dispatcher for the hull_span.h native-vs-WASM
  * differential test (#324 3b). ONE body, compiled two ways: natively (against
  * templates/hull_span.h) by tests/hull/cap/test_span_diff.c, and as a wasm32
  * guest (against the scaffolded hull_span.h) by tests/fixtures/compute/spandiff.c.
@@ -9,7 +9,7 @@
  * readers, hull_span_decode / _find / _narrow). Only the pure, host_call-free
  * ops are exercised, so the guest imports nothing and runs in a bare WAMR harness.
  *
- * Wire protocol — input is [op][payload]; output is op-specific, little-endian:
+ * Wire protocol - input is [op][payload]; output is op-specific, little-endian:
  *   RD16/RD32/RD64 : [op][off][bytes...]     -> u64 value (8 bytes, zero-extended)
  *   DECODE         : [op][rec_len u16][rec..] -> i32 status (4); on 0 append
  *                    flags u32(4) base u64(8) len u64(8) foffset u64(8) name(64)
@@ -50,7 +50,7 @@ static void spandiff__wr64(hull_span_u8 *o, hull_span_u64 v)
 { for (int i = 0; i < 8; i++) o[i] = (hull_span_u8)(v >> (8 * i)); }
 
 /* Reverse bit-casts (float value -> raw bits) so a float accessor's result is
- * compared by BITS — preserving NaN/Inf/signed-zero, which value-compare would
+ * compared by BITS - preserving NaN/Inf/signed-zero, which value-compare would
  * mangle. */
 static hull_span_u32 spandiff__f32_bits(float f)
 { union { float f; hull_span_u32 u; } x; x.f = f; return x.u; }
@@ -141,7 +141,7 @@ static int spandiff_run(const hull_span_u8 *in, hull_span_u32 in_len,
         return 4;
     }
     case SPANDIFF_OP_READ: {
-        /* [op][kind][endian][off u64][len u64][window bytes...] — a 19-byte
+        /* [op][kind][endian][off u64][len u64][window bytes...] - a 19-byte
          * header. in_len must cover it fully (18 would over-read off/len by one
          * and underflow `avail = in_len - 19`). */
         if (in_len < 19 || out_max < 12) return SPANDIFF_ERR;

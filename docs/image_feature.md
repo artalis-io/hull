@@ -2,10 +2,10 @@
 
 The image codec subsystem (`hull/image`: decode/encode PNG/JPEG/BMP, raw pixel
 buffers, the `HlImage` userdata) is an **embedded, auto-composed feature** on the
-native base — the same mandatory-composition axis as the runtimes, HTTP, WASM, and
+native base - the same mandatory-composition axis as the runtimes, HTTP, WASM, and
 the SQLite udf bridge (see CLAUDE.md "Composable runtime + HTTP base"). The native
 base platform lib is **image-less**; `hull build` composes the codec back only for
-apps that declare `hull/image`. You never `hull feature install` it — the archives
+apps that declare `hull/image`. You never `hull feature install` it - the archives
 ship inside the distributed `hull` and compose automatically.
 
 This is the [Step 1 slice](roadmap.md) of the broader "flavors become feature
@@ -39,7 +39,7 @@ The engine objects are filtered out of the base and replaced by weak stubs:
   platform lib): weak `hl_image_new` / `hl_image_free`, referenced by
   `mod_gpu`'s `gpu.texture_read` (which builds an `HlImage` to return). When the
   image feature is composed the strong `cap/image.c` defs win; when not, the weak
-  no-ops satisfy the link (`gpu.texture_read` fails closed — returns nothing).
+  no-ops satisfy the link (`gpu.texture_read` fails closed - returns nothing).
 - **per-runtime** (`src/hull/runtime/{lua,js}/image_stub.c`, in the runtime
   feature archive): weak `luaopen_hull_image` (Lua) / `hl_js_init_image_module`
   (JS), referenced by `modules.c`'s unconditional registration. The strong
@@ -83,7 +83,7 @@ image codec compiled in (like the runtimes, HTTP, and WASM). The image-less base
 
 The three image archives ship inside the distributed `hull`, so they land in the
 `platform_domain` of `package.sig.gethull.composed` (platform-key attested,
-runtime §5c FATAL on tamper) — the same trust chain as the runtime/HTTP/WASM
+runtime §5c FATAL on tamper) - the same trust chain as the runtime/HTTP/WASM
 archives. `release.yml` builds + signs the `image` / `image-lua` / `image-js`
 stems into the platform manifest and embeds those exact bytes
 (`TRUST_FEATURE_LIBS=1`). See [docs/composed_feature_signing.md](composed_feature_signing.md).

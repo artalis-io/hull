@@ -1,4 +1,4 @@
-// test_transaction.js — Tests for hull:web:middleware:transaction
+// test_transaction.js - Tests for hull:web:middleware:transaction
 //
 // Requires db globals (run via hull test harness).
 

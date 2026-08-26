@@ -44,7 +44,7 @@ is freestanding (no libc dependency):
 
 | API | Purpose |
 |-----|---------|
-| `HULL_EXPORT`, `HULL_VERSION_EXPORT` | Visibility macros — required on `hull_process` + `hull_version` |
+| `HULL_EXPORT`, `HULL_VERSION_EXPORT` | Visibility macros - required on `hull_process` + `hull_version` |
 | `HULL_OK`, `HULL_ERR_OUTPUT`, `HULL_ERR_INPUT`, `HULL_ERR_INTERNAL` | Standard return codes |
 | `host_call(op, ptr, len)` | The single host import (LOG=0x01, DATA_INFO=0x02, STREAM=0x03, CALLBACK=0x10) |
 | `hull_log(msg, len)` | Wrapper around `host_call(LOG, ...)` |
@@ -135,7 +135,7 @@ looks for clang in this order:
 5. `clang` in `PATH`
 
 AOT compilation requires `wamrc` (sibling-to-hull or in PATH). Without
-`wamrc`, modules run via the fast interpreter — Hull emits a runtime
+`wamrc`, modules run via the fast interpreter - Hull emits a runtime
 warning (suppress with `HULL_QUIET_AOT=1`). `hull doctor` reports the
 full toolchain status (`wasm_enabled`, `wamrc`, `clang`, `wasm_ld`,
 `aot_ready`).
@@ -162,14 +162,14 @@ in any language work as long as they export `hull_process` and
 - **C** (`clang --target=wasm32-unknown-unknown -nostdlib`)
 - **Rust** (`wasm32-unknown-unknown` target, `#[no_mangle] extern "C"`)
 - **Zig** (`wasm32-freestanding`)
-- **TinyGo**, **AssemblyScript** — also supported
+- **TinyGo**, **AssemblyScript** - also supported
 
 `--lang=rust` scaffolding is on the roadmap.
 
 ## See also
 
-- `docs/wamr_architecture.md` — full WAMR design (ABI, gas metering,
+- `docs/wamr_architecture.md` - full WAMR design (ABI, gas metering,
   pooling, segments, streaming, AOT, Memory64)
-- `README.md#authoring-compute-modules` — user-facing developer guide
-- `examples/compute/` — eight working modules including `vector_ops`,
+- `README.md#authoring-compute-modules` - user-facing developer guide
+- `examples/compute/` - eight working modules including `vector_ops`,
   `hash`, `sort`, `text`, `scoring`, `json_extract`

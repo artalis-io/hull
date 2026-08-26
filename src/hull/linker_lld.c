@@ -1,5 +1,5 @@
 /*
- * linker_lld.c — LLVM lld linker backend (Tier A + Tier B)
+ * linker_lld.c - LLVM lld linker backend (Tier A + Tier B)
  *
  * Toolchain-free axis (docs/toolchain_free_build.md). Two modes behind one
  * HlLinkerVtable:

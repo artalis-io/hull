@@ -1,5 +1,5 @@
 /*
- * agent_api.c — Diagnostic HTTP endpoints for AI agents
+ * agent_api.c - Diagnostic HTTP endpoints for AI agents
  *
  * Registers /_hull/agent/ pre-body middleware when --agent-api is enabled.
  * Each endpoint delegates to the shared agent library (agent_lib.h).

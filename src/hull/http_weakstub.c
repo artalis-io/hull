@@ -1,5 +1,5 @@
 /*
- * http_weakstub.c — weak no-op defaults for the per-runtime HTTP web bindings
+ * http_weakstub.c - weak no-op defaults for the per-runtime HTTP web bindings
  * (issue #114).
  *
  * The per-runtime web bindings (routes / dispatch / the res:* helpers / ws /
@@ -20,7 +20,7 @@
  * guarded code paths (serve / test / timer-fire) are simply never reached.
  *
  * This mirrors cap/http_feature.c, but with the real prototypes (the base can
- * already see the runtime headers — serve.c includes them) rather than void*,
+ * already see the runtime headers - serve.c includes them) rather than void*,
  * so the definitions are ODR/LTO-clean against the strong ones. The two timer
  * structs are runtime-internal (internal.h); forward-declared here by their
  * named tag, which is type-compatible with the real HlLuaTimer / HlJSTimer.

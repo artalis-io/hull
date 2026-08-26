@@ -1,5 +1,5 @@
 /*
- * agent/context.c — `hull agent context` — task-relevant doc lookup.
+ * agent/context.c - `hull agent context` - task-relevant doc lookup.
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
@@ -112,7 +112,7 @@ int hl_agent_context(const char *task, const char *level, ShJsonBuf *out)
 
 /* Helper: scan one context doc for which level markers are present.
  * Used by hl_agent_context_list. Mirrors the marker-scan loop above
- * but only records presence — no content extraction. */
+ * but only records presence - no content extraction. */
 static void scan_levels(const char *content, size_t len,
                         int *has_min, int *has_compact, int *has_full)
 {
@@ -171,7 +171,7 @@ int hl_agent_context_list(ShJsonBuf *out)
     for (const HlEntry *e = hl_stdlib_entries; e->name; e++) {
         if (strncmp(e->name, prefix, prefix_len) != 0) continue;
         const char *task = e->name + prefix_len;
-        /* Skip if the suffix is empty (defensive — shouldn't happen
+        /* Skip if the suffix is empty (defensive - shouldn't happen
          * given the build pipeline). */
         if (!*task) continue;
 

@@ -34,7 +34,7 @@ HULL_PID=""
 TMPDIR_WORK=""
 
 if [ ! -x "$HULL" ]; then
-    echo "e2e_oauth: hull binary not found at $HULL — run 'make' first"
+    echo "e2e_oauth: hull binary not found at $HULL - run 'make' first"
     exit 1
 fi
 if ! command -v python3 >/dev/null 2>&1; then
@@ -52,7 +52,7 @@ pass() { echo "  PASS: $1"; PASS=$((PASS + 1)); }
 check_status() {
     # $1 = description, $2 = actual status, $3 = expected status
     if [ "$2" = "$3" ]; then pass "$1"
-    else fail "$1 — expected status $3, got $2"
+    else fail "$1 - expected status $3, got $2"
     fi
 }
 
@@ -60,7 +60,7 @@ check_contains() {
     # $1 = description, $2 = haystack, $3 = needle
     case "$2" in
         *"$3"*) pass "$1" ;;
-        *)      fail "$1 — expected '$3' in: $(echo "$2" | head -c 200)" ;;
+        *)      fail "$1 - expected '$3' in: $(echo "$2" | head -c 200)" ;;
     esac
 }
 
@@ -158,7 +158,7 @@ s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()
     fi
     pass "$_label: hull dev started on :$CLIENT_PORT (pid $HULL_PID)"
 
-    # 1. GET /auth/test/login — expect 302 to IdP authorize with PKCE.
+    # 1. GET /auth/test/login - expect 302 to IdP authorize with PKCE.
     COOKIES="$TMPDIR_WORK/cookies_$_label.txt"
     : > "$COOKIES"
     LOGIN_RESP=$(curl -sS -i -c "$COOKIES" \
@@ -206,7 +206,7 @@ s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()
     check_contains "$_label: /me has name"  "$ME_RESP" '"name":"Alice Example"'
     check_contains "$_label: /me records provider" "$ME_RESP" '"provider":"test"'
 
-    # 5. Negative: tampered state cookie — flip a char in the body
+    # 5. Negative: tampered state cookie - flip a char in the body
     # part of the cookie so the HMAC tag no longer matches. Should
     # get a 400 from the callback.
     TAMPER_COOKIES="$TMPDIR_WORK/cookies_tamper_$_label.txt"

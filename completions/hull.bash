@@ -1,4 +1,4 @@
-# Hull — bash completion
+# Hull - bash completion
 #
 # Install:
 #   # System-wide:
@@ -103,7 +103,7 @@ _hull() {
             ;;
 
         compute)
-            # `hull compute <subcmd>` — complete the subcommand name.
+            # `hull compute <subcmd>` - complete the subcommand name.
             if [[ ${COMP_CWORD} -eq 2 ]]; then
                 COMPREPLY=($(compgen -W "new build test check refresh-header" -- "$cur"))
                 return

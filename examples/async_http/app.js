@@ -1,4 +1,4 @@
-// Async HTTP Client — Hull + QuickJS example
+// Async HTTP Client - Hull + QuickJS example
 //
 // Run: hull app.js -p 3000 --no-sandbox
 // Test: curl localhost:3000/health
@@ -8,7 +8,7 @@
 //       curl localhost:3000/worker-dispatch
 //
 // Demonstrates hull.sleep(), httpClient.async.get(), db.async.query(),
-// and worker.dispatch() — all return Promises that pause the handler
+// and worker.dispatch() - all return Promises that pause the handler
 // while the event loop serves other connections.
 
 import { app } from "hull:app";
@@ -97,4 +97,4 @@ app.get("/worker-dispatch", async (_req, res) => {
     res.json(result);
 });
 
-log.info("Async HTTP example loaded — routes registered");
+log.info("Async HTTP example loaded - routes registered");

@@ -1,7 +1,7 @@
 /**
  * @file hull:web:htmx:search
  * @module hull:web:htmx:search
- * @description HTMX search widget — server-side helpers for a
+ * @description HTMX search widget - server-side helpers for a
  * debounced search input that posts to a server-rendered results
  * partial.
  *

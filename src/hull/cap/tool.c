@@ -1,5 +1,5 @@
 /*
- * cap/tool.c — Pure-C tool capability (controlled process + filesystem access)
+ * cap/tool.c - Pure-C tool capability (controlled process + filesystem access)
  *
  * All process execution uses fork/execvp with an allowlisted set of
  * compiler binaries. All filesystem operations validate paths against
@@ -7,7 +7,7 @@
  *
  * The Lua bindings that expose this capability as the `tool` global live
  * in src/hull/runtime/lua/mod_tool.c (moved out as part of architectural
- * roadmap item F — restores the cap-layer "no runtime knowledge" invariant).
+ * roadmap item F - restores the cap-layer "no runtime knowledge" invariant).
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */

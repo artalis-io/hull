@@ -1,5 +1,5 @@
 /*
- * cap/test.c — in-process synthetic-request harness for hull test
+ * cap/test.c - in-process synthetic-request harness for hull test
  *
  * Builds a fully-formed KlRequest from the runtime-side test bindings
  * (method, path, headers, body, opaque JSON ctx), hands it to Keel's
@@ -8,7 +8,7 @@
  * Lua/JS runtime sides can inspect.
  *
  * Routing semantics (match → pre-body middleware → post-body
- * middleware → handler) live in Keel — this file deliberately does
+ * middleware → handler) live in Keel - this file deliberately does
  * not duplicate that sequence so it cannot drift away from the
  * network-driven dispatch in vendor/keel/src/connection.c and h2.c.
  *
@@ -56,7 +56,7 @@ int hl_cap_test_dispatch(KlRouter *router, const char *method,
         query_len = strlen(query);
     }
 
-    /* Build request — params are filled in by dispatch_synthetic. */
+    /* Build request - params are filled in by dispatch_synthetic. */
     KlRequest req;
     memset(&req, 0, sizeof(req));
     req.method = method;
@@ -69,7 +69,7 @@ int hl_cap_test_dispatch(KlRouter *router, const char *method,
     req.version_minor = 1;
     req.keep_alive = 0;
 
-    /* Set headers — lowercase names to match llhttp parser behavior */
+    /* Set headers - lowercase names to match llhttp parser behavior */
     char lowered_names[KL_MAX_HEADERS][64];
     for (int i = 0; i < num_headers && i < KL_MAX_HEADERS; i++) {
         size_t nlen = strlen(header_names[i]);
@@ -171,7 +171,7 @@ int hl_cap_test_dispatch(KlRouter *router, const char *method,
 
     /* Hand the (req, res) pair to Keel. OWNERSHIP: req.ctx (if we
      * allocated one above) is freed by the runtime's HlReqCtx-kind
-     * dispatch when the handler runs — see runtime/{lua,js}/runtime.c.
+     * dispatch when the handler runs - see runtime/{lua,js}/runtime.c.
      * If the dispatch path short-circuits before the handler (e.g.
      * middleware returns non-zero, or the route doesn't match), the
      * HlReqCtx outlives this call and leaks; the runtime's per-test
@@ -185,7 +185,7 @@ int hl_cap_test_dispatch(KlRouter *router, const char *method,
     if (mp_wrapper && mp_wrapper->destroy)
         mp_wrapper->destroy(mp_wrapper);
 
-    /* Extract results — copy body and headers into hl_alloc-owned
+    /* Extract results - copy body and headers into hl_alloc-owned
      * storage before freeing the response (kl_response_free releases
      * hdr_buf, and body may live in runtime-managed memory). */
     result->status = res.status;

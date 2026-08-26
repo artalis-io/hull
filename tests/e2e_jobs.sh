@@ -1362,7 +1362,7 @@ app.main((ctx) => {
 echo "== v1.5 polish: Lua =="; check_polish "lua" "lua" "$LUA_POLISH"
 echo "== v1.5 polish: JS =="; check_polish "js" "js" "$JS_POLISH"
 
-# ── durable execution (Phase 1a): jobs.workflow / ctx.step memoization ──────
+# ── durable execution: jobs.workflow / ctx.step memoization ──────
 # A workflow fails once after steps a+b, is retried (backoff 0 => immediate), and
 # on the re-run a+b return memoized results (their fn does NOT run again - proven
 # by per-step run counters), c runs, result is correct. Unknown start is rejected.
@@ -1373,7 +1373,7 @@ check_workflow() {
     case "$out" in
         *"WF a=1 b=1 c=1 total=115 status=done steps=a,b,c unknown_reject=true"*)
             pass "$label: workflow step-memoization across a retry (run-once, resume, status/steps)" ;;
-        *) fail "$label: durable workflow (Phase 1a)" "$out" ;;
+        *) fail "$label: durable workflow" "$out" ;;
     esac
     rm -rf "$T"
 }
@@ -1420,10 +1420,10 @@ app.main(async (ctx) => {
   return 0;
 });'
 
-echo "== durable workflow (Phase 1a): Lua =="; check_workflow "lua" "lua" "$LUA_WORKFLOW"
-echo "== durable workflow (Phase 1a): JS =="; check_workflow "js" "js" "$JS_WORKFLOW"
+echo "== durable workflow: Lua =="; check_workflow "lua" "lua" "$LUA_WORKFLOW"
+echo "== durable workflow: JS =="; check_workflow "js" "js" "$JS_WORKFLOW"
 
-# ── durable execution (Phase 1b): ctx.sleep durable timer ───────────────────
+# ── durable execution: ctx.sleep durable timer ───────────────────
 # A workflow sleeps between step a and b. The first work() runs a and YIELDS (the
 # workflow goes pending with a future run_at = "sleeping"; b has NOT run). After
 # the timer elapses a second work() resumes: a is memoized, the sleep is
@@ -1435,7 +1435,7 @@ check_sleep() {
     case "$out" in
         *"SLEEP mid=pending mid_b=0 wait=yes fin=done fin_b=1 steps=a,b"*)
             pass "$label: ctx.sleep durable timer (yield -> reschedule -> resume, b gated)" ;;
-        *) fail "$label: durable timer (Phase 1b)" "$out" ;;
+        *) fail "$label: durable timer" "$out" ;;
     esac
     rm -rf "$T"
 }
@@ -1484,10 +1484,10 @@ app.main(async (ctx) => {
   return 0;
 });'
 
-echo "== durable timer (Phase 1b): Lua =="; check_sleep "lua" "lua" "$LUA_SLEEP"
-echo "== durable timer (Phase 1b): JS =="; check_sleep "js" "js" "$JS_SLEEP"
+echo "== durable timer: Lua =="; check_sleep "lua" "lua" "$LUA_SLEEP"
+echo "== durable timer: JS =="; check_sleep "js" "js" "$JS_SLEEP"
 
-# ── durable execution (Phase 1c): signals - ctx.wait_signal / jobs.signal ───
+# ── durable execution: signals - ctx.wait_signal / jobs.signal ───
 # Instance A parks on wait_signal ('waiting'); jobs.signal re-activates it
 # (waiting -> pending) and it resumes with the payload. Instance B is signalled
 # BEFORE it reaches the wait - the signal is stored and consumed when it gets
@@ -1499,7 +1499,7 @@ check_signals() {
     case "$out" in
         *"SIG mid=waiting wait=signal after=pending finA=done byA=alice finB=done byB=bob"*)
             pass "$label: signals (park->signal->resume + deliver-before-wait, no lost signal)" ;;
-        *) fail "$label: durable signals (Phase 1c)" "$out" ;;
+        *) fail "$label: durable signals" "$out" ;;
     esac
     rm -rf "$T"
 }
@@ -1558,10 +1558,10 @@ app.main(async (ctx) => {
   return 0;
 });'
 
-echo "== durable signals (Phase 1c): Lua =="; check_signals "lua" "lua" "$LUA_SIGNALS"
-echo "== durable signals (Phase 1c): JS =="; check_signals "js" "js" "$JS_SIGNALS"
+echo "== durable signals: Lua =="; check_signals "lua" "lua" "$LUA_SIGNALS"
+echo "== durable signals: JS =="; check_signals "js" "js" "$JS_SIGNALS"
 
-# ── durable execution (Phase 1d): saga compensation ─────────────────────────
+# ── durable execution: saga compensation ─────────────────────────
 # A workflow charges (a compensable step), then a later step fails terminally
 # (max_attempts=1). On dead-letter the completed steps' compensations run in
 # reverse: charge -> ship(fails) -> uncharge; the workflow ends dead.
@@ -1572,7 +1572,7 @@ check_saga() {
     case "$out" in
         *"SAGA status=dead log=charge,ship,uncharge"*)
             pass "$label: saga compensation (reverse-order rollback on terminal failure)" ;;
-        *) fail "$label: durable saga (Phase 1d)" "$out" ;;
+        *) fail "$label: durable saga" "$out" ;;
     esac
     rm -rf "$T"
 }
@@ -1611,8 +1611,8 @@ app.main(async (ctx) => {
   return 0;
 });'
 
-echo "== durable saga (Phase 1d): Lua =="; check_saga "lua" "lua" "$LUA_SAGA"
-echo "== durable saga (Phase 1d): JS =="; check_saga "js" "js" "$JS_SAGA"
+echo "== durable saga: Lua =="; check_saga "lua" "lua" "$LUA_SAGA"
+echo "== durable saga: JS =="; check_saga "js" "js" "$JS_SAGA"
 
 # ── durable execution (Phase 2): deterministic primitives (replay-stable) ────
 # ctx.now / ctx.random / ctx.uuid memoize via the step store, so a workflow that

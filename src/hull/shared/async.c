@@ -1,5 +1,5 @@
 /*
- * hull_async.c — Runtime-agnostic async glue layer
+ * hull_async.c - Runtime-agnostic async glue layer
  *
  * Implements HlAsyncCtx lifecycle and the KlAsyncOp callbacks that
  * bridge Keel primitives to Hull runtime continuations via the
@@ -24,10 +24,10 @@ static void hl_async_on_resume(KlAsyncOp *op, void *user_data)
     HlAsyncCtx *ctx = (HlAsyncCtx *)user_data;
     (void)op;
 
-    /* Resume the runtime handler — sets conn->state appropriately */
+    /* Resume the runtime handler - sets conn->state appropriately */
     ctx->cont->resume(ctx->cont, ctx->driver);
 
-    /* Clean up this async operation (always — even on re-yield,
+    /* Clean up this async operation (always - even on re-yield,
      * because a new HlAsyncCtx was created by the yielding function) */
     if (ctx->free_driver && ctx->driver)
         ctx->free_driver(ctx->driver);
@@ -58,7 +58,7 @@ static void hl_async_on_cancel(KlAsyncOp *op, void *user_data)
 HlAsyncCtx *hl_async_ctx_create(KlServer *s, HlNetBackendCtx *net_ctx,
                                 HlAllocator *alloc)
 {
-    /* Both may be NULL — detached callers don't need either field;
+    /* Both may be NULL - detached callers don't need either field;
      * the actual loop is reached via the async backend ctx that the
      * caller's runtime carries separately. */
 
@@ -70,7 +70,7 @@ HlAsyncCtx *hl_async_ctx_create(KlServer *s, HlNetBackendCtx *net_ctx,
     ctx->net_ctx = net_ctx;
     ctx->alloc = alloc;
 
-    /* Wire common callbacks — caller sets on_deadline (operation-specific) */
+    /* Wire common callbacks - caller sets on_deadline (operation-specific) */
     ctx->op.on_resume = hl_async_on_resume;
     ctx->op.on_cancel = hl_async_on_cancel;
     ctx->op.user_data = ctx;
@@ -89,7 +89,7 @@ void hl_async_on_deadline_sleep(KlAsyncOp *op, void *user_data)
     HlAsyncCtx *ctx = (HlAsyncCtx *)user_data;
     /* For sleep, deadline = "timer fired" = success. The attached
      * path routes through the net backend to revive the suspended
-     * connection. CLI builds (HTTP=0) never reach here — connection-
+     * connection. CLI builds (HTTP=0) never reach here - connection-
      * less sleeps go through the detached-mode timer path in
      * runtime/{lua,js}/async.c. */
 #ifdef HL_ENABLE_HTTP_SERVER

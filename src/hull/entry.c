@@ -1,5 +1,5 @@
 /*
- * entry.c — Thin main() trampoline for hull binary
+ * entry.c - Thin main() trampoline for hull binary
  *
  * The actual logic lives in hull_main() (main.c), which is also
  * exported from libhull_platform.a so that `hull build` can link

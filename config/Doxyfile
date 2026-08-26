@@ -2,7 +2,7 @@
 # Output: build/api/c/
 
 PROJECT_NAME           = "Hull C API"
-PROJECT_BRIEF          = "Capability-secure web runtime — public C surface"
+PROJECT_BRIEF          = "Capability-secure web runtime - public C surface"
 PROJECT_NUMBER         =
 OUTPUT_DIRECTORY       = build/api/c
 
@@ -44,7 +44,7 @@ SHOW_INCLUDE_FILES     = YES
 SHOW_NAMESPACES        = YES
 ALPHABETICAL_INDEX     = YES
 SORT_BY_SCOPE_NAME     = YES
-SORT_MEMBER_DOCS       = NO   # preserve declaration order — easier to follow
+SORT_MEMBER_DOCS       = NO   # preserve declaration order - easier to follow
 JAVADOC_AUTOBRIEF      = YES  # treat first line of /** ... */ as @brief
 MULTILINE_CPP_IS_BRIEF = NO
 
@@ -75,4 +75,4 @@ STRIP_CODE_COMMENTS    = NO
 
 # Disable noisy / unused
 HAVE_DOT               = NO
-# CLASS_DIAGRAMS removed in newer Doxygen — handled via CLASS_GRAPH=NO instead
+# CLASS_DIAGRAMS removed in newer Doxygen - handled via CLASS_GRAPH=NO instead

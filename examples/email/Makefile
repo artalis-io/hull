@@ -1,4 +1,4 @@
-# examples/email/Makefile — Build and run the email example app
+# examples/email/Makefile - Build and run the email example app
 #
 # Usage:
 #   make dev                    # dev server (Lua)
@@ -31,7 +31,7 @@ dev:
 # For cosmo:  make platform-cosmo && make EMBED_PLATFORM=cosmo
 # For native: make platform && make EMBED_PLATFORM=1
 #
-# IMPORTANT: The hull binary is a host tool — always built with the native
+# IMPORTANT: The hull binary is a host tool - always built with the native
 # compiler. CC is only forwarded to `hull build` for the app binary.
 
 ifneq (,$(findstring cosmo,$(CC)))

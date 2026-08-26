@@ -1,4 +1,4 @@
-# Hull — Lua API Reference
+# Hull - Lua API Reference
 
 Per-function reference for the Lua 5.4 stdlib (`stdlib/lua/hull/*.lua`).
 Audience: app developers writing Lua applications on Hull.
@@ -9,7 +9,7 @@ For prose / patterns see [`../../CLAUDE.md`](../../CLAUDE.md) and
 
 ## Table of contents
 
-- [Routing & handlers](#routing--handlers) — `app.*`
+- [Routing & handlers](#routing--handlers) - `app.*`
   - [Request object (`req`)](#request-object-req)
   - [Response object (`res`)](#response-object-res)
 - [Capability globals](#capability-globals)
@@ -20,7 +20,7 @@ For prose / patterns see [`../../CLAUDE.md`](../../CLAUDE.md) and
   - [`time.*`](#timetable-time)
   - [`env.*`](#envtable-env-vars-allowlist)
   - [`log.*`](#logtable-logging)
-  - WebSocket, SSE, compute, gpu, image, smtp — _coming next_
+  - WebSocket, SSE, compute, gpu, image, smtp - _coming next_
 - [Stdlib modules](#stdlib-modules)
   - [`hull.json`](#hulljson) · [`hull.web.cookie`](#hullcookie) · [`hull.jwt`](#hulljwt) · _and others coming_
 - [Middleware modules](#middleware-modules)
@@ -141,7 +141,7 @@ re-rooted or clamped, never followed out):
 | Pattern | `data/*.csv` | files whose name matches, **per component** |
 
 All grant paths are **relative to the app root** and confined to it; an absolute
-path (e.g. `/tmp/x` or `/etc/passwd`) is **rejected** at load — read/write an
+path (e.g. `/tmp/x` or `/etc/passwd`) is **rejected** at load - read/write an
 external file by placing it under the app directory (or a bind mount) instead.
 
 **Pattern rules (v1):** `*` matches zero or more bytes **within a single path
@@ -218,7 +218,7 @@ Send a JSON response. Sets `Content-Type: application/json`.
 |---------|-------|-------------|
 | `value` | `any` | Encoded via `hull.json`. Sorted keys for deterministic output. |
 
-**Returns:** nothing (terminates the response — subsequent `res:*` calls on the same response are no-ops).
+**Returns:** nothing (terminates the response - subsequent `res:*` calls on the same response are no-ops).
 
 ---
 
@@ -278,7 +278,7 @@ against the manifest's `fs.read`.
 
 ## Capability globals
 
-### `db.*` table — Database
+### `db.*` table - Database
 
 Requires `HL_ENABLE_DB=1` (default). In compute-only builds the global is
 absent.
@@ -292,7 +292,7 @@ Run a SELECT.
 | `sql`    | `string` | SQL with `?` placeholders. |
 | `params` | `table?` | Array of parameter values. `string` / `number` / `boolean` / `nil` map to SQLite TEXT/INTEGER-or-FLOAT/(INTEGER 0|1)/NULL. |
 
-**Returns:** `table[]` — array of row tables. Each row is a `{ column_name = value, ... }` table. Empty array if no rows.
+**Returns:** `table[]` - array of row tables. Each row is a `{ column_name = value, ... }` table. Empty array if no rows.
 
 **Errors:** raises a Lua error on prepare/bind/step failure. Use `pcall` to catch.
 
@@ -314,7 +314,7 @@ Run INSERT/UPDATE/DELETE/DDL.
 | `sql`    | `string` | SQL with `?` placeholders. |
 | `params` | `table?` | Parameter values (same convention as `db.query`). |
 
-**Returns:** `integer` — affected row count.
+**Returns:** `integer` - affected row count.
 
 **Errors:** raises on failure.
 
@@ -348,7 +348,7 @@ end)
 
 ROWID of the most-recently-inserted row on this connection.
 
-**Returns:** `integer` — `last_insert_rowid()`, or `0` if no INSERT has occurred.
+**Returns:** `integer` - `last_insert_rowid()`, or `0` if no INSERT has occurred.
 
 ---
 
@@ -407,7 +407,7 @@ review.)
 
 ---
 
-### `fs.*` table — Filesystem
+### `fs.*` table - Filesystem
 
 `require("hull.fs")`. Every path is relative to the app root, resolved through the
 descriptor-relative virtual-root resolver + the compiled authorization policy: an
@@ -426,7 +426,7 @@ returns a read-only `MappedBuffer` (optionally a page-aligned window).
 Return a metadata table, or `nil` when the path does not exist (so `fs.stat(p) ~=
 nil` subsumes an `exists` check). On a policy / IO error returns `nil, err`.
 **lstat semantics:** a terminal symlink is reported **as a link** (`type =
-"symlink"`), never followed — a metadata op cannot alias a symlink target.
+"symlink"`), never followed - a metadata op cannot alias a symlink target.
 
 | Field   | Type      | Description |
 |---------|-----------|-------------|
@@ -436,7 +436,7 @@ nil` subsumes an `exists` check). On a policy / IO error returns `nil, err`.
 | `mtime` | `integer` | Modification time, epoch seconds. Reproducible builds MUST NOT key on it. |
 
 Requires `fs.read` authority over `path`. A directory is statable too, including
-the app root itself — `fs.stat(".")` returns `{ type = "dir", ... }` under a
+the app root itself - `fs.stat(".")` returns `{ type = "dir", ... }` under a
 base-root (`.`) grant. A path that is authorized but does not exist (including a
 grant whose parent directory is still absent) returns `nil`, not an error.
 
@@ -444,7 +444,7 @@ grant whose parent directory is still absent) returns `nil`, not an error.
 
 Return a **deterministically ordered** array of `{ name, type, size }` (non-recursive;
 `.` and `..` omitted), or `nil, err`. **Ordering** is unsigned-byte lexicographic,
-shorter-prefix-first — identical on every platform, independent of locale and
+shorter-prefix-first - identical on every platform, independent of locale and
 `readdir` order. Each entry's `type` comes from an lstat, so a symlink child is
 reported as `"symlink"`, never followed. An empty directory yields `{}`; a missing
 directory yields `nil, "not_found"`.
@@ -474,7 +474,7 @@ Initial slice complete for:
 - `app.*` routing + `req` + `res`
 - `db.*` (full surface)
 
-The format is now concrete — please review before I batch-produce the
+The format is now concrete - please review before I batch-produce the
 rest. Remaining work:
 
 - Capability globals: `http`, `fs`, `crypto`, `time`, `env`, `log`,

@@ -1,5 +1,5 @@
 /*
- * static.h — Static file serving middleware for Hull
+ * static.h - Static file serving middleware for Hull
  *
  * Convention: files in static/ are served at /static/.
  * Dev mode reads from disk; build mode uses embedded entries.
@@ -23,7 +23,7 @@ typedef struct {
     const HlVfs *vfs;
 
     /* Platform VFS: stdlib-shipped assets (static/hull/<module>/<file>).
-     * Looked up after the app VFS miss. NULL is permitted — the
+     * Looked up after the app VFS miss. NULL is permitted - the
      * middleware just skips this step. Used to serve assets from
      * stdlib widgets (hull/web/htmx/toast etc.) without requiring
      * the app to vendor them. */

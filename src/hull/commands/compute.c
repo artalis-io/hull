@@ -1,5 +1,5 @@
 /*
- * commands/compute.c — hull compute subcommand
+ * commands/compute.c - hull compute subcommand
  *
  * Thin wrapper: launches the Lua tool VM with hull.compute module.
  *

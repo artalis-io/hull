@@ -17,9 +17,9 @@
 #   5. Wait 2s (lockout_duration), then login with correct
 #      password → ok (auto-cleared).
 #   6. Email-change: from logged-in session, request
-#      change to alice.new@... Confirm BOTH emails captured —
+#      change to alice.new@... Confirm BOTH emails captured -
 #      one to NEW with confirm link, one to OLD with revoke link.
-#      Click revoke. Then click confirm — expect 'email change
+#      Click revoke. Then click confirm - expect 'email change
 #      failed' (revoke already deleted the pending row).
 #   7. Email-change again, NEW link confirmed → expect 302
 #      and login with new email works.
@@ -45,7 +45,7 @@ HIBP_PID=""
 TMPDIR_WORK=""
 
 if [ ! -x "$HULL" ]; then
-    echo "e2e_auth_flows_hardening: hull binary not found at $HULL — run 'make' first"
+    echo "e2e_auth_flows_hardening: hull binary not found at $HULL - run 'make' first"
     exit 1
 fi
 if ! command -v python3 >/dev/null 2>&1; then
@@ -58,12 +58,12 @@ pass() { echo "  PASS: $1"; PASS=$((PASS + 1)); }
 
 check_status() {
     if [ "$2" = "$3" ]; then pass "$1"
-    else fail "$1 — expected status $3, got $2"
+    else fail "$1 - expected status $3, got $2"
     fi
 }
 check_contains() {
     case "$2" in *"$3"*) pass "$1" ;;
-                 *) fail "$1 — expected '$3' in: $(echo "$2" | head -c 200)" ;;
+                 *) fail "$1 - expected '$3' in: $(echo "$2" | head -c 200)" ;;
     esac
 }
 
@@ -96,7 +96,7 @@ trap cleanup EXIT
 
 TMPDIR_WORK=$(mktemp -d)
 
-# HIBP mock — single canned response for SHA1("password") prefix
+# HIBP mock - single canned response for SHA1("password") prefix
 # 5BAA6 with suffix 1E4C9B93F3F0682250B6CF8331B7EE68FD8.
 HIBP_PY="$TMPDIR_WORK/hibp_mock.py"
 cat >"$HIBP_PY" <<'EOF'
@@ -145,7 +145,7 @@ run_flow() {
     echo "=== Step ($_label): Start hardening fixture + e2e ==="
     rm -f "$SRCDIR/data.db" "$SRCDIR/data.db-shm" "$SRCDIR/data.db-wal"
 
-    # HIBP mock port — fixed so the fixture can hardcode it.
+    # HIBP mock port - fixed so the fixture can hardcode it.
     # (Hull's env cap isn't wired during a fixture's top-level
     # code; env.get would throw, so we can't pass a per-run port
     # through the environment.) Pick something unusual to avoid
@@ -193,7 +193,7 @@ run_flow() {
     check_contains "$_label: resend produced verify URL" \
         "$VERIFY_URL" "/auth/verify?token="
     # 2b. Resend for ALREADY-VERIFIED user (after step 3) is
-    # enumeration-safe — covered after verify.
+    # enumeration-safe - covered after verify.
 
     # 3. Verify + login.
     S=$(curl -sS -o /dev/null -w '%{http_code}' "$VERIFY_URL")
@@ -208,7 +208,7 @@ run_flow() {
     else fail "$_label: resend post-verify sent email (count=$N)"
     fi
 
-    # 4. Account lockout — 3 wrong passwords then expect 401 (round-8
+    # 4. Account lockout - 3 wrong passwords then expect 401 (round-8
     #    HIGH-4: the lockout response is no longer distinguishable
     #    from wrong-password, so an enumerator can't trip the lockout
     #    on a candidate email to confirm registration).
@@ -230,7 +230,7 @@ run_flow() {
         "$BASE/auth/login")
     check_status "$_label: correct login during lockout still 401" "$S" "401"
     # Retry-After header MUST NOT be present (it was the enumeration
-    # channel — its absence is the fix).
+    # channel - its absence is the fix).
     H=$(curl -sS -i -X POST -H 'Content-Type: application/json' \
         -d "{\"email\":\"$EMAIL\",\"password\":\"$PW\"}" \
         "$BASE/auth/login" 2>/dev/null | grep -i '^retry-after' | head -1)
@@ -266,7 +266,7 @@ run_flow() {
     # 6b. Click revoke.
     R=$(curl -sS "$REVOKE_URL")
     check_contains "$_label: revoke succeeds" "$R" "canceled"
-    # 6c. Confirm now fails — pending row deleted.
+    # 6c. Confirm now fails - pending row deleted.
     S=$(curl -sS -o /dev/null -w '%{http_code}' "$CONFIRM_URL")
     check_status "$_label: confirm post-revoke fails (400)" "$S" "400"
 
@@ -285,7 +285,7 @@ run_flow() {
         "$BASE/auth/login")
     check_contains "$_label: login with new email ok" "$R" '"ok":true'
 
-    # 8. Pwned check — try registering with "password".
+    # 8. Pwned check - try registering with "password".
     R=$(curl -sS -X POST -H 'Content-Type: application/json' \
         -d '{"email":"bob@example.test","password":"password"}' \
         "$BASE/auth/register")

@@ -61,7 +61,7 @@ Run `hull dev`. `tui.run` blocks until `on_event` returns `"quit"`
 <!-- compact -->
 ## Manifest declaration
 
-`tui = true` in `app.manifest({})` is required — without it the TUI
+`tui = true` in `app.manifest({})` is required - without it the TUI
 capability fails closed. `hull/tui@1` in `modules` makes
 `require("hull.tui")` resolvable. The terminal sandbox grants raw
 stdin + alternate screen + cursor control; nothing else changes.
@@ -70,14 +70,14 @@ stdin + alternate screen + cursor control; nothing else changes.
 
 `tui.run({draw, on_event, tick_ms, on_tick})`:
 
-- **`draw(t)`** — called on first paint and after each `t:invalidate()`.
+- **`draw(t)`** - called on first paint and after each `t:invalidate()`.
   Mutate nothing; just paint. `t.cols`, `t.rows` give terminal size;
   `t:clear()`, `t:move(x,y)`, `t:print(x,y,s)`, `t:style({bold, fg, bg,
   reverse, underline})` write content.
-- **`on_event(t, ev)`** — called for keystrokes, mouse, resize. Mutate
+- **`on_event(t, ev)`** - called for keystrokes, mouse, resize. Mutate
   state, optionally `t:invalidate()` to force a repaint, return
   `"quit"` to exit the loop.
-- **`tick_ms`** + **`on_tick(t)`** — optional periodic timer for
+- **`tick_ms`** + **`on_tick(t)`** - optional periodic timer for
   animation/refresh without a user event.
 
 Event shapes:
@@ -117,7 +117,7 @@ end)
 `tui.async(fn)` spawns a coroutine that runs concurrently with the
 TUI poll loop. Use it for tickers, background fetches, etc. The
 function captures `state` by reference; mutate it freely. No
-synchronization needed — the event loop is single-threaded.
+synchronization needed - the event loop is single-threaded.
 
 ## Iteration tip
 
@@ -160,7 +160,7 @@ tui.run({
 })
 ```
 
-Mouse mode is opt-in — it adds the `?1006h` SGR-extended-mouse
+Mouse mode is opt-in - it adds the `?1006h` SGR-extended-mouse
 escape on first event handler that filters for `type="mouse"`.
 Disable per-frame via `tui.mouse(false)` if you need a paste-friendly
 section.
@@ -178,7 +178,7 @@ t:style({
 t:style({})   -- reset everything
 ```
 
-Hull picks the best representation the terminal supports —
+Hull picks the best representation the terminal supports -
 `0x61AFEF` becomes 24-bit on iTerm/Kitty/modern xterm,
 256-color-quantized on lesser terminals, ignored on dumb terminals
 without warnings.
@@ -232,7 +232,7 @@ end,
 
 ## Testing TUI apps
 
-TUI logic is harder to unit-test than HTTP — there's no in-process
+TUI logic is harder to unit-test than HTTP - there's no in-process
 harness for keystroke sequences. Test the state mutations separately:
 
 ```lua
@@ -249,17 +249,17 @@ t.case("increment", function()
 end)
 ```
 
-Then the `on_event` handler is just dispatch — tested by inspection.
+Then the `on_event` handler is just dispatch - tested by inspection.
 
 ## Working examples in the repo
 
-- `examples/tui_dashboard/app.lua` — multi-pane layout, mouse, async
-- `examples/tui_chat/app.lua` — scrollable message list, input field
-- `examples/tui_modular/app.lua` — splitting state and rendering across files
+- `examples/tui_dashboard/app.lua` - multi-pane layout, mouse, async
+- `examples/tui_chat/app.lua` - scrollable message list, input field
+- `examples/tui_modular/app.lua` - splitting state and rendering across files
 
 ## See also
 
-- `hull agent context --task=quickstart-web` — server-side variant
-- `hull agent context --task=quickstart-cli` — pure-CLI variant
-- `include/hull/cap/tui.h` — raw capability surface (low-level)
-- `stdlib/lua/hull/tui.lua` — the helper module
+- `hull agent context --task=quickstart-web` - server-side variant
+- `hull agent context --task=quickstart-cli` - pure-CLI variant
+- `include/hull/cap/tui.h` - raw capability surface (low-level)
+- `stdlib/lua/hull/tui.lua` - the helper module

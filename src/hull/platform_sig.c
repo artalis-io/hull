@@ -1,7 +1,7 @@
 /*
- * platform_sig.c — Platform manifest builder + signer + verifier.
+ * platform_sig.c - Platform manifest builder + signer + verifier.
  *
- * Pure data — no I/O, no global state. See platform_sig.h for the
+ * Pure data - no I/O, no global state. See platform_sig.h for the
  * design rationale and v0.1.3 wire-up plan.
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
@@ -43,7 +43,7 @@ static int is_valid_hash_hex(const char *s)
 
 /* True iff @s is a plausible arch identifier: non-empty,
  * `[A-Za-z0-9_-]+`, length-bounded. Same character class as
- * tool names and asset names — keeps the manifest format
+ * tool names and asset names - keeps the manifest format
  * round-trippable without quoting. */
 /* True iff @s is a valid name-column value: a bare arch name OR an asset name
  * (issue #114). Allows [A-Za-z0-9._-] so asset names with a `.<arch>.a` suffix
@@ -95,7 +95,7 @@ int hl_platform_sig_build_manifest(const HlPlatformArchHash *entries, size_t n,
     for (size_t i = 0; i < n; i++) sorted[i] = entries[i];
     qsort(sorted, n, sizeof(sorted[0]), arch_entry_cmp);
 
-    /* Reject duplicate arch names — sorted, so dups are adjacent. */
+    /* Reject duplicate arch names - sorted, so dups are adjacent. */
     for (size_t i = 1; i < n; i++) {
         if (strcmp(sorted[i - 1].arch, sorted[i].arch) == 0) return -1;
     }
@@ -171,7 +171,7 @@ int hl_platform_sig_verify(const void *manifest, size_t manifest_len,
 
     /* When the caller doesn't supply a key, decode the embedded
      * HL_PLATFORM_PUBKEY_HEX and use it. release.h's verifier
-     * defaults to HL_RELEASE_PUBKEY_HEX in the same NULL case — we
+     * defaults to HL_RELEASE_PUBKEY_HEX in the same NULL case - we
      * substitute the platform key explicitly so the caller's intent
      * (platform vs release) is unambiguous. */
     uint8_t embedded_pk[32];

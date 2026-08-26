@@ -82,7 +82,7 @@ test("plain POST /entries sets session flash; next GET renders it", function()
     test.eq(next_get.status, 200)
     test.ok(string.find(next_get.body, "Added: plain post entry"),
             "next render should include flash message")
-    -- And the message is one-shot — a SECOND GET should not contain it.
+    -- And the message is one-shot - a SECOND GET should not contain it.
     local third_get = test.get("/", {
         middleware = true,
         headers = { ["cookie"] = cookie_hdr },

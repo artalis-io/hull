@@ -1,4 +1,4 @@
--- test_logger.lua — Tests for hull.web.middleware.logger
+-- test_logger.lua - Tests for hull.web.middleware.logger
 --
 -- Tests pure-function helpers (no runtime globals needed).
 -- Run via: the C test harness (test_lua_runtime.c) loads and executes this.

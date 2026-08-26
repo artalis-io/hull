@@ -1,9 +1,9 @@
 /*
- * tool_orchestration.h — orchestration bindings for the `tool` global
+ * tool_orchestration.h - orchestration bindings for the `tool` global
  *
  * Split out of src/hull/runtime/lua/mod_tool.c (May 2026 architectural
- * audit, finding A-1). The base `tool.*` surface — spawn, mkdir, copy,
- * read_file, etc. — is a thin Lua binding over `hl_cap_tool_*` and
+ * audit, finding A-1). The base `tool.*` surface - spawn, mkdir, copy,
+ * read_file, etc. - is a thin Lua binding over `hl_cap_tool_*` and
  * lives at runtime/lua/. The orchestration entries below pull
  * cross-layer dependencies (commands/, agent_lib, dev_state,
  * module_registry, module_resolver, migrate) that don't belong inside

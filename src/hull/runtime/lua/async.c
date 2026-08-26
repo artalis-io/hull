@@ -1,5 +1,5 @@
 /*
- * lua_async.c — Lua async continuation + hull.sleep()
+ * lua_async.c - Lua async continuation + hull.sleep()
  *
  * Implements HlLuaAsyncCont (the Lua-specific HlAsyncCont vtable) and
  * the hull.sleep() yielding C function.
@@ -26,7 +26,7 @@
 /* ── HlLuaAsyncCont ───────────────────────────────────────────────── */
 
 typedef struct HlLuaAsyncCont {
-    HlAsyncCont        base;          /* vtable — must be first member */
+    HlAsyncCont        base;          /* vtable - must be first member */
     HlLua             *lua;           /* runtime instance */
     HlAllocator       *alloc;
     HlLuaPushResultFn  push_result;   /* NULL = no result (sleep) */
@@ -56,7 +56,7 @@ typedef struct HlLuaAsyncCont {
  *   LUA_YIELD → KL_CONN_SUSPENDED (handler re-yielded, new op active)
  *   error     → KL_CONN_SENDING (500 response written)
  */
-/* Forward declarations for timer reschedule (defined in timers.c —
+/* Forward declarations for timer reschedule (defined in timers.c -
  * dropped under HL_ENABLE_HTTP=0; the corresponding call sites are
  * guarded so the symbol is never referenced in CLI builds). */
 #ifdef HL_ENABLE_HTTP_SERVER
@@ -103,7 +103,7 @@ static void hl_lua_async_resume(HlAsyncCont *self, void *driver)
             lua_isboolean(co, -1) && !lua_toboolean(co, -1))
             cancelled = 1;
 
-        /* CLI main coroutine just finished — stop the server so the
+        /* CLI main coroutine just finished - stop the server so the
          * dispatching event loop returns. Detection is set-based: only
          * one coroutine is ever stored as cli_main_co (mutually
          * exclusive with server-mode handlers + timers + ws + sse, all
@@ -118,7 +118,7 @@ static void hl_lua_async_resume(HlAsyncCont *self, void *driver)
         lua->active_conn = NULL;
         lua->dispatch_depth--;
 
-        /* Handler that yielded has now completed — run any deferred-teardown
+        /* Handler that yielded has now completed - run any deferred-teardown
          * hook (e.g. ws on_close conn teardown). */
         if (lc->on_complete) {
             lc->on_complete(lua, lc->on_complete_ctx);
@@ -126,7 +126,7 @@ static void hl_lua_async_resume(HlAsyncCont *self, void *driver)
         }
 
         if (conn) {
-            /* Attached mode — response is ready */
+            /* Attached mode - response is ready */
             if (conn->res.body_mode == KL_BODY_STREAM) {
                 conn->state = KL_CONN_CLOSED;
             } else {
@@ -138,7 +138,7 @@ static void hl_lua_async_resume(HlAsyncCont *self, void *driver)
          * Timers only exist in HTTP builds (app.every / app.daily); the
          * timer_ctx field is always NULL in CLI-only builds so the
          * branch is dead but the symbol reference would still need to
-         * link — guard it out entirely. */
+         * link - guard it out entirely. */
 #ifdef HL_ENABLE_HTTP_SERVER
         if (lc->timer_ctx) {
             HlLuaTimer *t = (HlLuaTimer *)lc->timer_ctx;
@@ -155,12 +155,12 @@ static void hl_lua_async_resume(HlAsyncCont *self, void *driver)
             hl_async_backend()->stop(lua->base.async_ctx);
         }
     } else if (status == LUA_YIELD) {
-        /* Handler yielded again — new HlAsyncCtx already set up.
+        /* Handler yielded again - new HlAsyncCtx already set up.
          * The new continuation captured the current co/conn/thread_ref.
-         * dispatch_depth stays elevated — decremented on final resume.
+         * dispatch_depth stays elevated - decremented on final resume.
          * Transfer timer_ctx to the new continuation if present. */
         if (lc->timer_ctx) {
-            /* Find the most recent continuation on the Lua state —
+            /* Find the most recent continuation on the Lua state -
              * it will have been stored via hl_lua_async_cont_create.
              * The new cont has our co/thread_ref already captured. */
         }
@@ -198,7 +198,7 @@ static void hl_lua_async_resume(HlAsyncCont *self, void *driver)
 #endif
 
         /* Timer error: clear in_flight and reschedule anyway. CLI-only
-         * builds have no timers, so this branch is dead — guard out. */
+         * builds have no timers, so this branch is dead - guard out. */
 #ifdef HL_ENABLE_HTTP_SERVER
         if (lc->timer_ctx) {
             HlLuaTimer *t = (HlLuaTimer *)lc->timer_ctx;
@@ -215,7 +215,7 @@ static void hl_lua_async_resume(HlAsyncCont *self, void *driver)
 }
 
 /*
- * Cancel the Lua handler — free the coroutine registry ref without
+ * Cancel the Lua handler - free the coroutine registry ref without
  * invoking the handler.
  */
 static void hl_lua_async_cancel(HlAsyncCont *self)
@@ -232,7 +232,7 @@ static void hl_lua_async_cancel(HlAsyncCont *self)
 }
 
 /*
- * Destroy the cont struct. Does NOT free the coroutine ref — that's
+ * Destroy the cont struct. Does NOT free the coroutine ref - that's
  * managed by the resume/cancel functions above.
  */
 static void hl_lua_async_destroy(HlAsyncCont *self)
@@ -284,7 +284,7 @@ void hl_lua_async_cont_set_timer(HlAsyncCont *cont, void *timer)
 /* ── hull.sleep(ms) ───────────────────────────────────────────────── */
 
 /*
- * hull.sleep(ms) — yield the handler for `ms` milliseconds.
+ * hull.sleep(ms) - yield the handler for `ms` milliseconds.
  * Uses KlAsyncOp deadline (no driver, no FD). The Keel deadline sweep
  * fires hl_async_on_deadline_sleep, which calls kl_async_complete.
  */
@@ -309,7 +309,7 @@ static int lua_hull_sleep(lua_State *L)
     if (!ctx)
         return luaL_error(L, "hull.sleep(): out of memory");
 
-    /* Create Lua continuation (no push_result — sleep has no return value) */
+    /* Create Lua continuation (no push_result - sleep has no return value) */
     HlAsyncCont *cont = hl_lua_async_cont_create(lua, lua->base.alloc, NULL);
     if (!cont) {
         hl_async_ctx_free(ctx);
@@ -351,7 +351,7 @@ static int lua_hull_sleep(lua_State *L)
     return lua_yieldk(L, 0, 0, NULL);
 }
 
-/* hull.async(fn) — spawn fn in a detached coroutine running on the event loop.
+/* hull.async(fn) - spawn fn in a detached coroutine running on the event loop.
  * The body may call async-yielding primitives (hull.sleep, compute.async,
  * http.fetch, db.async); those capture `lua->active_co` at suspension, so we
  * set active_co (+ dispatch bookkeeping) to the bg coroutine for its first

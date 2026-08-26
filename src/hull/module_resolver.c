@@ -1,5 +1,5 @@
 /*
- * module_resolver.c — Validate manifest.modules against the registry.
+ * module_resolver.c - Validate manifest.modules against the registry.
  *
  * Failure modes (all surface as a one-line error string in `errbuf`):
  *   - unknown module name
@@ -18,9 +18,9 @@
 
 #include "hull/module_resolver.h"
 #include "hull/manifest.h"
-#include "hull/runtime.h"  /* HlRuntime — import_tracker fields */
-#include "hull/cap/gpu.h"  /* hl_gpu_feature_backends — composed-feature GPU cap */
-#include "hull/cap/tui.h"  /* hl_tui_feature_present — composed-feature TUI cap */
+#include "hull/runtime.h"  /* HlRuntime - import_tracker fields */
+#include "hull/cap/gpu.h"  /* hl_gpu_feature_backends - composed-feature GPU cap */
+#include "hull/cap/tui.h"  /* hl_tui_feature_present - composed-feature TUI cap */
 
 #include <stdio.h>
 #include <string.h>
@@ -371,7 +371,7 @@ int hl_module_resolver_resolve_caps(const HlManifest *manifest,
              * window closes.
              *
              * Ordering note: this fires before the api_major check
-             * below — a user declaring `cookie@99` gets the rename
+             * below - a user declaring `cookie@99` gets the rename
              * hint, not a version-mismatch error. Intentional: the
              * rename is the dominant cause of name resolution failure
              * in v0.2.0; a misleading version mismatch would push the
@@ -422,13 +422,13 @@ int hl_module_resolver_resolve_caps(const HlManifest *manifest,
 
             const HlModuleSpec *guess = hl_module_registry_suggest(m->name);
             if (guess) {
-                ERR3("unknown module '%s' in app.manifest.modules — "
+                ERR3("unknown module '%s' in app.manifest.modules - "
                      "did you mean \"%s@%u\"? "
                      "(see `hull modules available` for the full list)",
                      m->name, guess->name, (unsigned)guess->api_major);
                 return -1;
             }
-            ERR1("unknown module '%s' in app.manifest.modules — "
+            ERR1("unknown module '%s' in app.manifest.modules - "
                  "see `hull modules available` for the v1 set",
                  m->name);
             return -1;
@@ -449,7 +449,7 @@ int hl_module_resolver_resolve_caps(const HlManifest *manifest,
         }
 
         /* Build-time (compile flag) caps are hard-blocked at the
-         * resolver — there's no per-call recovery once they're
+         * resolver - there's no per-call recovery once they're
          * compiled out. Manifest-side caps (fs.read/write, hosts, env)
          * are intentionally NOT checked here: the per-call cap layer
          * fails closed against an empty allowlist, and some module
@@ -519,7 +519,7 @@ int hl_module_resolver_resolve_caps(const HlManifest *manifest,
      * binary was compiled without (e.g. declaring `hull/email`
      * shouldn't smuggle hull/smtp into an HL_ENABLE_HTTP_CLIENT=0
      * build). Manifest-side caps (fs/hosts/env) stay gated at call
-     * time as before — the module gate only controls import visibility.
+     * time as before - the module gate only controls import visibility.
      *
      * Walked as a fixed-point loop so deps-of-deps get admitted.
      * Bounded by total registry size; terminates when no new bits
@@ -537,7 +537,7 @@ int hl_module_resolver_resolve_caps(const HlManifest *manifest,
                 const HlModuleSpec *dep_spec =
                     hl_module_registry_find(spec->deps[j]);
                 if (!dep_spec) {
-                    /* Registry inconsistency — programming bug. */
+                    /* Registry inconsistency - programming bug. */
                     ERR2("internal: module '%s' declares unknown dep '%s'",
                          spec->name, spec->deps[j]);
                     return -1;
@@ -545,7 +545,7 @@ int hl_module_resolver_resolve_caps(const HlManifest *manifest,
                 int dep_idx = hl_module_registry_index(dep_spec);
                 if (get_bit(out, dep_idx)) continue;  /* already in */
 
-                /* Re-check build-time gates for the dep — auto-admit
+                /* Re-check build-time gates for the dep - auto-admit
                  * must not bypass HL_ENABLE_* requirements. Same
                  * counter-based loop as Pass 1 (see comment there). */
                 uint32_t need_build = dep_spec->required_caps & build_cap_mask;
@@ -563,7 +563,7 @@ int hl_module_resolver_resolve_caps(const HlManifest *manifest,
                 if ((dep_spec->required_caps & HL_MOD_CAP_TUI)
                         && !manifest->tui) {
                     ERR2("module '%s' transitively requires '%s', which "
-                         "needs the 'tui' capability — add `tui = true` "
+                         "needs the 'tui' capability - add `tui = true` "
                          "to the manifest",
                          spec->name, dep_spec->name);
                     return -1;
@@ -585,7 +585,7 @@ void hl_import_tracker_record(HlRuntime *rt, const char *canonical_name)
     if (!rt || !canonical_name) return;
     if (rt->import_tracker_count >= HL_MANIFEST_MAX_MODULES) return;
 
-    /* Dedup against the existing list — apps commonly require/import
+    /* Dedup against the existing list - apps commonly require/import
      * the same module from multiple files, and we want each name to
      * appear at most once in the validation error. Linear scan is
      * fine; HL_MANIFEST_MAX_MODULES is small. */

@@ -1,13 +1,13 @@
-# SQLite as a composable feature — design
+# SQLite as a composable feature - design
 
 **Status:** Phase A + B + C shipped (#123–#129) and Phase C.2 (the per-runtime
-`mod_db`-udf bridge split) shipped — the runtime archives are now SQLite-free and
+`mod_db`-udf bridge split) shipped - the runtime archives are now SQLite-free and
 a db-free app on a SQLite-less base drops SQLite entirely. Phase D
 (embed-as-default) remains. Tracks the capstone of the base-subtraction axis
 (runtime #113 → HTTP #114 → WASM #118 → **DB backend**).
 **Prereq:** the DB-backend vtable (`HlDbBackend`, `cap/db_backend.h`) already
 exists and is proven by the `postgres` / `mysql` / `duckdb` features. This epic
-does for the *default* backend what those did for the optional ones — with the
+does for the *default* backend what those did for the optional ones - with the
 twist that SQLite's default-ness makes it the hardest of the four.
 
 ## Premise
@@ -16,18 +16,18 @@ At the vtable level SQLite already **is** just another backend. `HlDbBackend`
 is the abstraction; `hl_db_backend_select` (`cap/db_select.c`) picks one per
 connection by DSN scheme; the weak `hl_db_feature_backends` hook
 (`db_select.c:95`) already lets postgres/mysql/duckdb compose in from outside
-the base. So the *mechanism* to pull SQLite out of the base is already built —
+the base. So the *mechanism* to pull SQLite out of the base is already built -
 SQLite is simply hardcoded into the base `BACKENDS[]` table (`db_select.c:49`)
 and as the scheme-less default (`db_select.c` `#ifdef HL_ENABLE_SQLITE` branch)
 instead of going through the hook.
 
 ## Why do it
 
-- **Size.** `sqlite3.o` is the single biggest vendored dependency — ~700 KB–1 MB
+- **Size.** `sqlite3.o` is the single biggest vendored dependency - ~700 KB–1 MB
   native, ~2 MB in the cosmo build (bigger than WAMR's 256 KB). A Postgres-only
   app, or any compute / CLI / signing app, would drop all of it.
 - **Consistency.** It makes "every external DB engine is a feature; the base is
-  DB-vtable-only" *literally* true — the same shape the base already has for
+  DB-vtable-only" *literally* true - the same shape the base already has for
   runtimes, HTTP, and WASM. The base becomes genuinely engine-agnostic.
 - **Capstone.** It's the natural end of the base-subtraction axis. After it,
   there is nothing left to subtract (crypto + the DB vtable are the permanent
@@ -44,8 +44,8 @@ Hull has **two** feature models:
 | **Embedded auto-composed** | runtime (lua/js), http core, wasm | inside the `hull` binary | auto, from app signals; never installed |
 
 SQLite **must** follow the *embedded auto-composed* model (like the runtime and
-WASM), NOT the installable one (like postgres). Because unlike postgres — which
-is always DSN-explicit — SQLite is:
+WASM), NOT the installable one (like postgres). Because unlike postgres - which
+is always DSN-explicit - SQLite is:
 
 1. **The default.** Scheme-less DSNs, `:memory:`, and bare file paths hardcode
    SQLite (`db_select.c` scheme-less branch; `app_context.c` `:memory:`
@@ -60,7 +60,7 @@ is always DSN-explicit — SQLite is:
 If SQLite were `hull feature install`-gated, all of that would break for anyone
 who hadn't installed it. Embedded-auto-composed keeps it zero-config: the `hull`
 binary keeps SQLite (for its own test harness + the embedded default), and
-**produced app binaries drop it when they don't need it** — exactly the
+**produced app binaries drop it when they don't need it** - exactly the
 WAMR/WASM story, applied to the DB.
 
 > This revises the standing stance in `docs/roadmap.md` ("Deliberately kept
@@ -71,7 +71,7 @@ WAMR/WASM story, applied to the DB.
 
 ## The seam
 
-The DB-backend seam already exists — `hl_db_feature_backends(size_t *count)`,
+The DB-backend seam already exists - `hl_db_feature_backends(size_t *count)`,
 a weak default in `db_select.c:95` returning 0 backends, strongly overridden by
 the composed feature's generated registry. Today SQLite sits in the base
 `BACKENDS[]` array *ahead* of that hook. The move:
@@ -80,7 +80,7 @@ the composed feature's generated registry. Today SQLite sits in the base
    and the `cap/db_sqlite.c` + vendored `sqlite3.c` compile from the base.
 2. Ship them in `libhull_feature-sqlite.a`, embedded in `hull`, whose generated
    registry fills `hl_db_feature_backends` with the SQLite backend (composing
-   alongside any `--with=postgres/mysql/duckdb`, which fill the same hook — the
+   alongside any `--with=postgres/mysql/duckdb`, which fill the same hook - the
    existing collector already merges multiple feature backends).
 3. Route the **scheme-less / `:memory:` / bare-file default** through the hook
    instead of the hardcoded `&hl_db_backend_sqlite`: the default resolver asks
@@ -93,12 +93,12 @@ the composed feature's generated registry. Today SQLite sits in the base
 The `HlDbBackend` abstraction is sound; three things bypass it and are the real
 work. (Full coupling map in the epic tracker; key sites below.)
 
-### 1. Default-DSN resolution — the smallest
+### 1. Default-DSN resolution - the smallest
 `db_select.c` and `app_context.c` name `&hl_db_backend_sqlite` /
 `hl_db_sqlite_raw` directly. Route both through the hook + a
 `hl_db_backend_for_scheme("sqlite")` helper. Mechanical.
 
-### 2. Agent introspection — the hardest
+### 2. Agent introspection - the hardest
 `agent/db.c`, `agent/sql.c`, `agent/helpers.c` are ~100% raw `sqlite3_*`
 (`sqlite_master`, `PRAGMA table_info`, `sqlite3_open(":memory:")`,
 `hl_db_sqlite_wrap`/`_unwrap`). They are already `#ifdef HL_ENABLE_SQLITE`, so
@@ -106,17 +106,17 @@ they **move wholesale into `libhull_feature-sqlite.a`** behind a weak-stub seam
 in the base (mirrors `wasm_weakstub.c`): the base carries weak
 `hl_agent_db_*` stubs returning "sqlite feature not composed"; the feature's
 strong defs win when composed. `hull agent db|schema|migrate|sql` are already
-SQLite-only, so this is honest — they light up exactly when SQLite is present.
+SQLite-only, so this is honest - they light up exactly when SQLite is present.
 
-### 3. The `needs_sqlite` signal — the gate (like `needs_wasm` for #118)
+### 3. The `needs_sqlite` signal - the gate (like `needs_wasm` for #118)
 "Needs SQLite" is not a single manifest flag. A multi-signal gate at
 `hull build` time:
-- **S1** — app declares `hull/search`, or uses `db.udf` (SQLite-only caps).
-- **S2** — app ships `migrations/` **and** its default connection is SQLite
-  (scheme-less / `:memory:` / `file:` / bare path — i.e. not an explicit
+- **S1** - app declares `hull/search`, or uses `db.udf` (SQLite-only caps).
+- **S2** - app ships `migrations/` **and** its default connection is SQLite
+  (scheme-less / `:memory:` / `file:` / bare path - i.e. not an explicit
   `postgres://` / `mysql://` / `duckdb://` default).
-- **S3** — a genuine app that uses `db` with the default (SQLite) DSN.
-- **The `hull` binary keeps SQLite in-base — it is NOT toolchain-force-loaded.**
+- **S3** - a genuine app that uses `db` with the default (SQLite) DSN.
+- **The `hull` binary keeps SQLite in-base - it is NOT toolchain-force-loaded.**
   `hull test` (always `:memory:`) and the SQLite agent commands need SQLite for
   every app, and the `hull` toolchain is a build tool where a ~2 MB engine is not
   worth removing. So `hull` stays SQLite-full; only **produced app binaries** get
@@ -148,40 +148,40 @@ namespace guard), `db_dynamic.c`, the generic `db.*` caps, and `migrate.c`
 
 ## Cosmo
 
-Cosmo stays monolithic — a fat APE can't force-load a native feature archive, so
+Cosmo stays monolithic - a fat APE can't force-load a native feature archive, so
 the cosmo base compiles SQLite in (exactly as it does the runtimes / HTTP /
 WASM). `HL_ENABLE_SQLITE` stays the compile switch; the feature is the
 *distribution* unit layered on the native base.
 
 ## Phase plan (each phase independently green)
 
-- **Phase A — the seam, NO behavior change.** Route the default-DSN resolution
+- **Phase A - the seam, NO behavior change.** Route the default-DSN resolution
   and agent introspection through weak hooks; SQLite still compiles into the
   base and provides the strong overrides, so behavior is **byte-identical**.
   The de-risking refactor (like #113 Phase 1 / #118 Phase 0). Verify: full
   `make test` + e2e green; a `grep`/`nm` assertion that the default resolver no
   longer *directly* names `hl_db_backend_sqlite`.
-- **Phase B — extract `libhull_feature-sqlite.a` + prove the compose.**
+- **Phase B - extract `libhull_feature-sqlite.a` + prove the compose.**
   ✅ SHIPPED (#126 B.1+B.2, #127 B.3). B.1 built the archive (`make
-  feature-sqlite`); B.2 added `HL_SQLITE_FEATURE=1` — a SQLite-less DB-core base
+  feature-sqlite`); B.2 added `HL_SQLITE_FEATURE=1` - a SQLite-less DB-core base
   (`nm libhull_platform.a | grep sqlite3_open` → 0, DB core intact) via the
   umbrella decouple; B.3 wired the `sqlite` `FEATURE_SPECS` entry + split
   `agent/helpers.c` so `hull build --with=sqlite` composes the SQLite-less base +
   archive into an app whose `db.query` runs through the composed backend
   (`tests/e2e_feature_sqlite.sh`). The architecture is PROVEN end to end.
-- **Phase C — the `needs_sqlite` auto-compose gate.** ✅ SHIPPED (the gate).
+- **Phase C - the `needs_sqlite` auto-compose gate.** ✅ SHIPPED (the gate).
   `tool.modules_resolve` exposes `needs_sqlite` (= the app uses `HL_MOD_CAP_DB`,
   mirroring `needs_wasm`); `hull build` auto-infers `--with=sqlite` when
   `needs_sqlite` **and** the resolved base lacks the SQLite backend (probed with
   `nm`, so it's a no-op on a stock SQLite-full base and only fires on a
   `HL_SQLITE_FEATURE=1` base). A db app on a SQLite-less base composes SQLite and
   runs with no explicit `--with` (`tests/e2e_feature_sqlite.sh`). No toolchain
-  force-load — the `hull` binary keeps SQLite in-base.
-  - **Phase C.2 — the per-runtime `mod_db`-udf bridge split.** ✅ SHIPPED.
+  force-load - the `hull` binary keeps SQLite in-base.
+  - **Phase C.2 - the per-runtime `mod_db`-udf bridge split.** ✅ SHIPPED.
     `mod_db`'s SQLite UDF bindings (`sqlite3_value_*` etc., the sole per-runtime
     `sqlite3_*` consumer) used to sit inline in `mod_db.c`, so the embedded
     runtime archive `libhull_feature-<rt>.a` carried 17 undefined `sqlite3_*`
-    refs and a whole-archived runtime dragged them into EVERY app — a db-free
+    refs and a whole-archived runtime dragged them into EVERY app - a db-free
     app on a SQLite-less base could not drop SQLite (the size payoff).
     - **C.2a (refactor):** the udf region moved into a per-runtime bridge TU
       `runtime/{lua,js}/mod_db_udf.c` behind a weak `hl_{lua,js}_db_attach_udf`
@@ -206,7 +206,7 @@ WASM). `HL_ENABLE_SQLITE` stays the compile switch; the feature is the
       destroying the runtime, so `sqlite3_close`'s udf `xDestroy` frees the
       closure while the runtime is alive (WASM cache still destroyed after the
       runtime). Regression-guarded by `tests/e2e_cli.sh` (both runtimes).
-- **Phase D — embed the SQLite-less base as the default app-build target.**
+- **Phase D - embed the SQLite-less base as the default app-build target.**
   🚧 CORE landed (gated), release wiring pending.
   - **Model.** The `hull` binary stays SQLite-full (it links `SQLITE_OBJ` for its
     own toolchain: `hull test`, `hull agent db`). Only the **embedded app-build
@@ -239,7 +239,7 @@ WASM). `HL_ENABLE_SQLITE` stays the compile switch; the feature is the
     them against the signed manifest, and builds with `HL_APP_BASE_SQLITELESS=1
     HL_APP_BASE_TLSLESS=1 TRUST_PLATFORM_LIB=1 TRUST_FEATURE_LIBS=1` (the
     Makefile's `SLIM_PLATFORM_LIB` honours `TRUST_PLATFORM_LIB`, embedding the
-    exact signed bytes). No new keys — same platform-key trust chain as the
+    exact signed bytes). No new keys - same platform-key trust chain as the
     runtime/http/wasm cores. Cosmo arch entries stay full (sqlite + TLS
     in-base). The shipped `HL_PLATFORM_PUBKEY_HEX` is still the placeholder (the
     whole §5b/§5c layer is skipped at runtime), so this is future-correct; the
@@ -264,15 +264,15 @@ WASM). `HL_ENABLE_SQLITE` stays the compile switch; the feature is the
 
 - Changing the app-facing `db.*` API. Handles-only acquisition, the connection
   methods, `db.udf`, `hull/search` all stay identical.
-- Making `db.udf` / FTS5 portable across backends — they remain SQLite-only and
+- Making `db.udf` / FTS5 portable across backends - they remain SQLite-only and
   fail-closed elsewhere (that's a separate, larger piece of work).
-- Retiring `HL_ENABLE_SQLITE` — it stays the base compile switch (cosmo needs it
+- Retiring `HL_ENABLE_SQLITE` - it stays the base compile switch (cosmo needs it
   on; a native single-backend build can still set it off directly).
 
 ## Related cleanup (done)
 
 `hull/web/auth-flows` `bump_failed_login` used a raw `INSERT ... ON CONFLICT`
-(valid on SQLite/Postgres/DuckDB, **not** MySQL) — a latent portability bug on
+(valid on SQLite/Postgres/DuckDB, **not** MySQL) - a latent portability bug on
 the shared stdlib path. Rewritten to a portable atomic `CASE`-based `UPDATE` +
 guarded `INSERT` (both runtimes), so the DB-backed stdlib is one step closer to
 backend-agnostic regardless of this epic. Landed separately.

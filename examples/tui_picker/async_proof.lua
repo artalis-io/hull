@@ -1,10 +1,10 @@
--- async_proof.lua — minimal test that proves tui.poll() yields to
+-- async_proof.lua - minimal test that proves tui.poll() yields to
 -- the event loop.
 --
 -- Spins up a background coroutine via tui.async that bumps a counter
 -- every 50ms. The main coroutine sits in tui.poll(2000) waiting for
 -- a key. If tui.poll yields to the event loop (correct), the counter
--- advances while we wait — pressing any key should reveal a count
+-- advances while we wait - pressing any key should reveal a count
 -- of ~ N/50ms.
 --
 -- If tui.poll were blocking, the counter would stay at 0 because
@@ -30,7 +30,7 @@ app.main(function(ctx)
         end
     end)
 
-    -- Block waiting for a single key — at most 2 seconds.
+    -- Block waiting for a single key - at most 2 seconds.
     local key_event = nil
     tui.run({
         draw = function(t)

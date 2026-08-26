@@ -117,8 +117,8 @@ static const HlDbBackend *backend_for_scheme(const char *scheme)
 }
 
 /* Weak default: a base build has no composed feature backends. A feature build
- * (`hull build --with=<feature>`) links a generated STRONG override — a const
- * table referencing each composed feature's backend — which the linker prefers
+ * (`hull build --with=<feature>`) links a generated STRONG override - a const
+ * table referencing each composed feature's backend - which the linker prefers
  * over this. See db_backend.h + docs/features_and_flavors.md §3.2. Kept in this
  * TU (which is always linked) so the symbol always resolves; the override, being
  * a direct object rather than an archive member, displaces it. */

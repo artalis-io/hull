@@ -1,5 +1,5 @@
 /*
- * cap/types.h — Runtime-agnostic value types for capabilities
+ * cap/types.h - Runtime-agnostic value types for capabilities
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */

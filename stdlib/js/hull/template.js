@@ -40,7 +40,7 @@ const MAX_CACHE_SIZE     = 1024;
 
 // Identifiers reachable from generated code:
 //   - Must match IDENT_RE (start with letter/underscore, then letters/digits/_)
-//   - Must NOT start with `__` — those names are reserved for codegen
+//   - Must NOT start with `__` - those names are reserved for codegen
 //     helpers (`__p`, `__d`, `__e`, `__f`, `__it`). A user-template
 //     `{% for __it in items %}` would otherwise shadow the cached
 //     loop-source local and TDZ-crash at render time.
@@ -420,7 +420,7 @@ function genExpr(exprInfo, escaped, localsSet) {
                 }
                 code = "__f." + f.name + "(" + code + ", " + arg + ")";
             } else {
-                // Variable reference — validated by genDotPath
+                // Variable reference - validated by genDotPath
                 code = "__f." + f.name + "(" + code + ", " + genDotPath(arg, null, localsSet) + ")";
             }
         } else {

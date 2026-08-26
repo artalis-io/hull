@@ -1,5 +1,5 @@
 /*
- * test_hull_cap_body.c — Tests for body reader capability
+ * test_hull_cap_body.c - Tests for body reader capability
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
@@ -250,7 +250,7 @@ static void  dummy_on_error(KlBodyReader *s)    { (void)s; }
 static void  dummy_destroy(KlBodyReader *s)     { (void)s; }
 
 UTEST(hl_cap_multipart, inner_returns_NULL_for_wrong_reader_kind) {
-    /* Pass a non-multipart reader to hl_cap_multipart_inner — must
+    /* Pass a non-multipart reader to hl_cap_multipart_inner - must
      * safely return NULL via the vtable-identity check on on_data. */
     KlBodyReader fake = {
         .on_data     = dummy_on_data,
@@ -277,7 +277,7 @@ UTEST(hl_cap_multipart, park_returns_error_for_wrong_reader_kind) {
  * under MemorySanitizer: keel is built without -fsanitize=memory in
  * Hull's msan target, so reads of kl_multipart_next's return value
  * (and the keel-populated meta/data slots) are flagged as
- * use-of-uninitialized-value — MSan didn't see the writes. The
+ * use-of-uninitialized-value - MSan didn't see the writes. The
  * wrapper's forward-to-inner correctness is still verified by the
  * other tests (park_fires_on_data, park_is_single_shot, etc.) which
  * exercise the on_data/on_complete/on_error paths without

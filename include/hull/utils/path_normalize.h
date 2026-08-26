@@ -1,5 +1,5 @@
 /*
- * path_normalize.h — collapse `.` and `..` segments in a path, in place.
+ * path_normalize.h - collapse `.` and `..` segments in a path, in place.
  *
  * Originally lived in src/hull/runtime/lua/mod_fs.c. Lifted out so the
  * JS module loader can use the same logic (the loader previously

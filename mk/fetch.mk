@@ -24,7 +24,7 @@ fetch-ca-bundle:
 	@echo "Verifying SHA-256 …"
 	@cd $(CACERT_DIR) && (sha256sum -c cacert.pem.sha256 2>/dev/null \
 	    || shasum -a 256 -c cacert.pem.sha256)
-	@echo "Done — $$(grep -c '^-----BEGIN CERTIFICATE-----' $(CACERT_PEM)) certificates."
+	@echo "Done - $$(grep -c '^-----BEGIN CERTIFICATE-----' $(CACERT_PEM)) certificates."
 
 # ── Embedded pwned-password blocklist (SecLists top 10K) ─────────────
 #
@@ -52,7 +52,7 @@ fetch-pwned-blocklist:
 #
 # These files are committed under vendor/htmx/ and vendor/pico/ at
 # the pinned versions. They get embedded by the scaffold step (see
-# §1.5.a-5 — `hull init --profile htmx`) when generating a new app's
+# §1.5.a-5 - `hull init --profile htmx`) when generating a new app's
 # static/vendor/ directory. Apps own their copies after scaffolding;
 # bumping Hull's pinned versions doesn't touch existing apps.
 
@@ -83,7 +83,7 @@ fetch-htmx:
 	    exit 1; \
 	fi
 	@echo "$(HTMX_VERSION)" > $(HTMX_DIR)/VERSION
-	@echo "Done — htmx.min.js ($$(wc -c < $(HTMX_MIN_JS)) bytes)."
+	@echo "Done - htmx.min.js ($$(wc -c < $(HTMX_MIN_JS)) bytes)."
 
 .PHONY: fetch-pico
 fetch-pico:
@@ -100,7 +100,7 @@ fetch-pico:
 	    exit 1; \
 	fi
 	@echo "$(PICO_VERSION)" > $(PICO_DIR)/VERSION
-	@echo "Done — pico.classless.min.css ($$(wc -c < $(PICO_CLASSLESS_CSS)) bytes)."
+	@echo "Done - pico.classless.min.css ($$(wc -c < $(PICO_CLASSLESS_CSS)) bytes)."
 
 .PHONY: fetch-htmx-pico
 fetch-htmx-pico: fetch-htmx fetch-pico
@@ -135,7 +135,7 @@ fetch-unicode:
 	@echo "Regenerating eaw.h via gen.lua …"
 	@command -v lua >/dev/null && LUA=lua || LUA=luajit; \
 	    $$LUA $(UNICODE_DIR)/gen.lua $(UNICODE_EAW_TXT) $(UNICODE_UCD_TXT) > $(UNICODE_EAW_H)
-	@echo "Done — $$(grep -c '^    {' $(UNICODE_EAW_H)) ranges in $(UNICODE_EAW_H)."
+	@echo "Done - $$(grep -c '^    {' $(UNICODE_EAW_H)) ranges in $(UNICODE_EAW_H)."
 
 # ── Vendored-library / toolchain fetchers ───────────────────────────
 
@@ -150,7 +150,7 @@ fetch-unicode:
 # the root (all defined before this file is included).
 # ── Dependency fetching ──────────────────────────────────────────────
 
-# wgpu-native v27.0.4.0 — GPU compute backend
+# wgpu-native v27.0.4.0 - GPU compute backend
 WGPU_VERSION := v27.0.4.0
 WGPU_SHA256_macos_aarch64 := 15367c26fdbe6892db35007d39f3883593384e777360b70e6bd704cb5dedde53
 WGPU_SHA256_macos_x86_64  := 660fe9be59b555ec1d7c839e5cf8b6c71762938af61ab444a7a58dd87970dba2
@@ -168,7 +168,7 @@ WGPU_ZIP := wgpu-$(WGPU_PLATFORM)-release.zip
 WGPU_URL := https://github.com/gfx-rs/wgpu-native/releases/download/$(WGPU_VERSION)/$(WGPU_ZIP)
 WGPU_EXPECTED_SHA := $(WGPU_SHA256_$(subst -,_,$(WGPU_PLATFORM)))
 
-# DuckDB v1.5.4 — side-loaded static OLAP backend (make HL_ENABLE_DUCKDB=1).
+# DuckDB v1.5.4 - side-loaded static OLAP backend (make HL_ENABLE_DUCKDB=1).
 # Prebuilt per-platform static-libs zip (headers + libduckdb_static.a + deps +
 # default extensions). glibc Linux + macOS only; musl / windows / cosmo unsupported.
 DUCKDB_VERSION := v1.5.4
@@ -263,7 +263,7 @@ fetch-duckdb:
 		ls -lh $(VENDDIR)/duckdb/libduckdb_static.a; \
 	fi
 
-# Cosmopolitan cosmocc 4.0.2 — portable C compiler
+# Cosmopolitan cosmocc 4.0.2 - portable C compiler
 COSMOCC_VERSION := 4.0.2
 COSMOCC_SHA256 := 85b8c37a406d862e656ad4ec14be9f6ce474c1b436b9615e91a55208aced3f44
 COSMOCC_URL := https://cosmo.zip/pub/cosmocc/cosmocc-$(COSMOCC_VERSION).zip

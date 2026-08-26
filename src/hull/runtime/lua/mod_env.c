@@ -1,4 +1,4 @@
-/* mod_env.c — hull.env module: environment variable access
+/* mod_env.c - hull.env module: environment variable access
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
@@ -29,7 +29,7 @@ static int lua_env_get(lua_State *L)
 }
 
 /* env.allowed(name) → boolean: is name in the manifest allowlist?
- * (Membership only, never a value — lets callers tell "not declared" from
+ * (Membership only, never a value - lets callers tell "not declared" from
  * "declared but unset", which env.get folds together. Used by hull/config.) */
 static int lua_env_allowed(lua_State *L)
 {

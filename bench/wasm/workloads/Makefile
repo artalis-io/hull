@@ -1,4 +1,4 @@
-# bench/wasm/workloads/Makefile — Compile C workloads to WASM
+# bench/wasm/workloads/Makefile - Compile C workloads to WASM
 #
 # Produces .wasm files for the Hull WASM compute benchmark.
 # Requires clang with wasm32 target support and wasm-ld.

@@ -1,5 +1,5 @@
 /*
- * hull_span.h — Hull mapped-spans SDK (guest side)
+ * hull_span.h - Hull mapped-spans SDK (guest side)
  *
  * Freestanding, dual-target header for Hull compute plugins that attach
  * host-mapped file windows via `compute.call(..., {spans={...}})` and read them
@@ -27,7 +27,7 @@
  * natively (for the differential + unit tests). It uses the compiler's builtin
  * fixed-width type macros (no <stdint.h>, and no clash with hull_compute.h's own
  * `int32_t` typedefs) and decodes the wire record BY BYTE OFFSET (never by
- * casting linear memory to a struct — alignment/aliasing UB, and the host writes
+ * casting linear memory to a struct - alignment/aliasing UB, and the host writes
  * the same 64-bit-field layout regardless of guest pointer width).
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
@@ -114,7 +114,7 @@ static inline hull_span_u64 hull_span__rd64be(const hull_span_u8 *p)
 { hull_span_u64 v = 0; for (int i = 0; i < 8; i++) v = (v << 8) | (hull_span_u64)p[i]; return v; }
 
 /* ── Bit-cast raw bits to a float, preserving special-value patterns (NaN/Inf/
- * signed zero) exactly — no arithmetic. Union punning is well-defined in C. ──── */
+ * signed zero) exactly - no arithmetic. Union punning is well-defined in C. ──── */
 static inline float hull_span__bits_f32(hull_span_u32 b)
 { union { hull_span_u32 u; float f; } x; x.u = b; return x.f; }
 static inline double hull_span__bits_f64(hull_span_u64 b)
@@ -229,7 +229,7 @@ static inline int hull_span__narrow(hull_span_uptr p, hull_span_i32 *out)
  * Memory64 / 64-bit native) can therefore only occur on a record-fetching call,
  * never on the count-only query. Each record uses the cbSize handshake (advertise
  * our capacity in struct_size, validate the returned size covers v1). No host
- * calls happen after setup — every later access is a pure inline read. */
+ * calls happen after setup - every later access is a pure inline read. */
 static inline int hull_span_setup(HullSpan *out, int out_cap)
 {
     /* 1. Argument preconditions (checked before any host call): a negative

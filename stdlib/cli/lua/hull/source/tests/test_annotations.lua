@@ -1,5 +1,5 @@
 --
--- test_annotations.lua — slice-4 tests for the `---@` annotation layer.
+-- test_annotations.lua - slice-4 tests for the `---@` annotation layer.
 --
 -- Covers hull.source.annotations.parse_comment (the generic scanner) and the
 -- declaration-attachment run via the PUBLIC lua.parse() -> node.annotation_list /

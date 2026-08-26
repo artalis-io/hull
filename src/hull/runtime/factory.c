@@ -1,5 +1,5 @@
 /*
- * runtime/factory.c — Registry for HlRuntimeFactory
+ * runtime/factory.c - Registry for HlRuntimeFactory
  *
  * Builds a static array of factories from the per-runtime externs
  * (one for each enabled runtime), and exposes lookup functions.

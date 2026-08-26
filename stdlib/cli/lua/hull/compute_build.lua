@@ -1,5 +1,5 @@
 --
--- hull.compute_build — Shared source→WASM compilation helpers
+-- hull.compute_build - Shared source→WASM compilation helpers
 --
 -- Internal helper module used by:
 --   stdlib/cli/lua/hull/compute.lua  (hull compute build [name])

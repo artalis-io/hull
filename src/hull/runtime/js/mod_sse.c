@@ -1,5 +1,5 @@
 /*
- * mod_sse.c — SSE stream JS class (QuickJS)
+ * mod_sse.c - SSE stream JS class (QuickJS)
  *
  * Provides:
  *   - stream.event(name, data, id?)

@@ -10,7 +10,7 @@ Hull's source, so the two trees don't overlap).
 | Harness | Target | Why |
 |---|---|---|
 | `fuzz_sh_json` | `sh_json_parse` + accessors + the `a.b[2].c` path-expression parser | Parses untrusted request bodies and config; the recursive walk exercises traversal, not just parsing. |
-| `fuzz_path_normalize` | `hl_path_normalize` | Canonicalises `require()`/`import()` paths in place — a `..`-escape or OOB write is a sandbox-traversal primitive. The harness asserts the escape-prevention post-condition. |
+| `fuzz_path_normalize` | `hl_path_normalize` | Canonicalises `require()`/`import()` paths in place - a `..`-escape or OOB write is a sandbox-traversal primitive. The harness asserts the escape-prevention post-condition. |
 | `fuzz_mime_sniff` | `hl_cap_mime_sniff` | Magic-byte + shape sniffing run on the first ~4 KiB of untrusted stored upload bytes; an over-read past `len` while matching a prefix or validating UTF-8 is a crash / info-leak. ASan brackets an exact-sized buffer. |
 
 ## Build & run
@@ -40,14 +40,14 @@ A crashing input is written as `crash-<sha1>` (git-ignored). Reproduce with
 
 `corpus_<target>/` holds a small **curated seed** set checked into git.
 libFuzzer-generated entries (hash-named) and crash artifacts are
-`.gitignore`d — don't commit them; the seeds are enough to bootstrap and
+`.gitignore`d - don't commit them; the seeds are enough to bootstrap and
 keep CI deterministic.
 
 ## Adding a target
 
 1. Write `fuzz/fuzz_<name>.c` with `int LLVMFuzzerTestOneInput(const uint8_t *, size_t)`.
 2. Add a build rule + the target to `fuzz:` in the Makefile (compile the
-   parser's sources fresh under `$(FUZZ_CFLAGS)` — these parsers are small
+   parser's sources fresh under `$(FUZZ_CFLAGS)` - these parsers are small
    and self-contained, so no `libhull_platform.a` link).
 3. Add `corpus_<name>/` seeds and a CI step.
 
@@ -57,7 +57,7 @@ Two parsers that look like targets aren't cleanly fuzzable at the C level,
 so they're deliberately left out rather than wrapped in a misleading harness:
 
 - **The manifest extractor** (`manifest_extract_file.c`) spins up a transient
-  QuickJS runtime to evaluate `app.manifest({...})` — fuzzing it is fuzzing
+  QuickJS runtime to evaluate `app.manifest({...})` - fuzzing it is fuzzing
   QuickJS, which QuickJS's own corpus already covers.
 - **The template compiler** lives in `runtime/{lua,js}/mod_template.c`: the
   parser is implemented *in* Lua/JS, code-generated, and compiled by the

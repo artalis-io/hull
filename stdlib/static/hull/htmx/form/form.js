@@ -1,5 +1,5 @@
 /*
- * Hull HTMX form widget — client runtime.
+ * Hull HTMX form widget - client runtime.
  *
  * Adds an automatic loading state to the submit button of any
  * form that triggers an htmx request. While the request is in
@@ -21,7 +21,7 @@
  * Listens at the document level so a single subscription covers
  * every form on every page load. Activated by `htmx:beforeRequest`;
  * cleared by `htmx:afterRequest` (htmx fires this on both success
- * AND error — including `htmx:responseError` — so the button
+ * AND error - including `htmx:responseError` - so the button
  * always restores).
  *
  * No DOM cleanup is needed on swap: the submit button lives on
@@ -46,7 +46,7 @@
      *   1. If elt is itself a submit-shaped element, use it.
      *   2. Otherwise, if elt is (or is inside) a form, use the
      *      form's default submit button.
-     *   3. Otherwise (button outside a form, link, etc.) — return
+     *   3. Otherwise (button outside a form, link, etc.) - return
      *      null and let the busy state apply to elt itself.
      */
     function findSubmit(elt) {
@@ -70,7 +70,7 @@
 
     function setBusy(btn) {
         if (!btn) return;
-        // Already in a busy state — don't double-stash the label.
+        // Already in a busy state - don't double-stash the label.
         if (btn.getAttribute("aria-busy") === "true") return;
         btn.setAttribute("aria-busy", "true");
         // disabled prevents double-submit. We track that we set it

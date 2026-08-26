@@ -1,4 +1,4 @@
-// spans_huge — THREE repeated windows over a sparse file, each at a distinct
+// spans_huge - THREE repeated windows over a sparse file, each at a distinct
 // > 4 GiB offset, plus hull_span_setup() capacity probing, via the spanmeta
 // plugin (public SDK). GET /meta?cap=N ->
 //   "ret=<true>;filled=<f>;names=big0,big1,big2;foffs=<f0>,<f1>,<f2>;first=..;..."
@@ -11,7 +11,7 @@ app.manifest({
     fs: { read: ["huge.bin"] },
 });
 
-// 0x100000003, 0x110000005, 0x130000007 — all > 4 GiB, distinct, within 5 GiB.
+// 0x100000003, 0x110000005, 0x130000007 - all > 4 GiB, distinct, within 5 GiB.
 const OFF = [4294967299, 4563402757, 5100273671];
 
 function dec(buf) {

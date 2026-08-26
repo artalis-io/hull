@@ -51,7 +51,7 @@ explicit name. Adding lld/mold is a new backend behind this vtable + a
 
 ## Axis 1 - the linker as a Hull tool (`hull tools install lld`)
 
-> **STATUS (SHIPPED — zig; lld deferred):** `zig` is a registered installable
+> **STATUS (SHIPPED - zig; lld deferred):** `zig` is a registered installable
 > tool - `hull tools install zig` - as a **per-platform bundle** (`.is_bundle` +
 > `.bundle_per_platform`): a multi-file tree published as
 > `hull-zig-<platform>.tar` that extracts to `$HOME/.hull/tools/zig/`, driver at

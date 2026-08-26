@@ -1,5 +1,5 @@
 /*
- * test_signature.c — Tests for package.sig reading and verification
+ * test_signature.c - Tests for package.sig reading and verification
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */

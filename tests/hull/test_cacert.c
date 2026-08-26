@@ -1,5 +1,5 @@
 /*
- * test_cacert.c — Tests for the embedded CA bundle accessor.
+ * test_cacert.c - Tests for the embedded CA bundle accessor.
  *
  * When HL_EMBED_CA_BUNDLE is defined at build time, the bundle should:
  *   - be non-empty (> 100KB Mozilla bundle)
@@ -32,7 +32,7 @@ UTEST(cacert, embedded_bundle_present)
     int rc = hl_embedded_ca_bundle(&data, &len);
     ASSERT_EQ(rc, 0);
     ASSERT_NE(data, NULL);
-    /* Mozilla bundle is ~225KB — sanity-check it's at least 100KB */
+    /* Mozilla bundle is ~225KB - sanity-check it's at least 100KB */
     ASSERT_GT(len, (size_t)100000);
 }
 
@@ -52,7 +52,7 @@ UTEST(cacert, embedded_bundle_is_pem)
     size_t len = 0;
     ASSERT_EQ(hl_embedded_ca_bundle(&data, &len), 0);
 
-    /* Count "BEGIN CERTIFICATE" markers — Mozilla bundle has 100+ certs */
+    /* Count "BEGIN CERTIFICATE" markers - Mozilla bundle has 100+ certs */
     const char *needle = "-----BEGIN CERTIFICATE-----";
     size_t nlen = strlen(needle);
     int count = 0;
@@ -86,7 +86,7 @@ UTEST(cacert, parseable_by_mbedtls)
     unsigned char chain_buf[4096] = {0};
     mbedtls_x509_crt_init(chain_buf);
     int rc = mbedtls_x509_crt_parse(chain_buf, data, len);
-    /* rc > 0 means "this many certs failed to parse" — Mozilla bundle is clean,
+    /* rc > 0 means "this many certs failed to parse" - Mozilla bundle is clean,
      * but some old roots may have non-fatal warnings. rc == 0 is ideal. */
     mbedtls_x509_crt_free(chain_buf);
     ASSERT_LE(rc, 5);

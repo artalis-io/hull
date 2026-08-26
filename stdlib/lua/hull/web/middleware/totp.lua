@@ -16,14 +16,14 @@
 -- a /auth/totp-verify form, defers session creation until the code
 -- checks out, and the canonical login event is recorded by
 -- session.login_handler. There is no `pending_2fa` flag and no
--- middleware here — the auth-flows envelope path is the single way.
+-- middleware here - the auth-flows envelope path is the single way.
 --
 -- ## Security
 --
 --   * Secrets are 20 bytes (160 bits) of `crypto.random`. Stored
 --     plaintext by default; pass `encryption_key` to `init()` for
 --     at-rest NaCl-secretbox encryption (KEK lives in env / file /
---     manifest fs.read path — Hull doesn't touch key management).
+--     manifest fs.read path - Hull doesn't touch key management).
 --   * Recovery codes are PBKDF2-SHA256 hashed (matches the auth
 --     module's password hashing). Codes are returned ONCE at
 --     enrollment time; only hashes persist.
@@ -38,7 +38,7 @@
 --   * Recovery code input is canonicalized (uppercased, non-
 --     alphanumerics stripped) before hashing and before verify, so
 --     "ABCD-EFGH-IJKL", "ABCDEFGHIJKL", and "abcd efgh ijkl" all
---     compare equal — no UX trap that locks users out of their
+--     compare equal - no UX trap that locks users out of their
 --     accounts for typing the displayed code without hyphens.
 --   * `alg=SHA1` is fixed at RFC 6238's default; every mainstream
 --     authenticator app expects it.
@@ -48,19 +48,19 @@
 --     successful verify (TOTP or recovery) clears the counter.
 --     Defaults: 5 attempts / 15-minute window. Pre-round-8 the
 --     module shipped without this gate and the header pointed at a
---     `hull/web/middleware/auth_lockout` module that never existed —
+--     `hull/web/middleware/auth_lockout` module that never existed -
 --     /auth/totp-verify was effectively unlimited at the line-rate
 --     of the network. Tune via init() opts.
 --
 -- ## Local-first / offline notes
 --
---   * TOTP needs no network at verify time — authenticator app and
+--   * TOTP needs no network at verify time - authenticator app and
 --     server both derive codes from the shared secret + wall clock.
 --     Works in air-gapped + LAN-only Hull deployments.
 --   * Clock skew matters more off-cloud. `opts.window` defaults to
 --     ±1 step (~90s total tolerance); raise it for devices without
 --     NTP (RPi without RTC, etc.) or rely on recovery codes.
---   * Single-user local apps get no real security from 2FA — if you
+--   * Single-user local apps get no real security from 2FA - if you
 --     can launch the binary you can read its SQLite. The module is
 --     valuable for multi-user shared-device flavors (small office
 --     dashboards, family NAS UIs, etc.).
@@ -74,7 +74,7 @@
 --     })
 --
 --     -- App-owned enrollment + first-use confirm. auth-flows owns
---     -- the login-time /auth/totp-verify route — see the auth-flows
+--     -- the login-time /auth/totp-verify route - see the auth-flows
 --     -- docstring for the wiring.
 --     app.post("/2fa/enroll", function(req, res)
 --         local r = totp.enroll(req.ctx.session.user_id)
@@ -110,7 +110,7 @@ local _state = {
     -- Round-9 HIGH-4: per-IP lockout (in addition to per-user).
     -- Pre-round-9 an attacker with one stolen password could fire 5
     -- bad TOTP codes per victim user_id, locking arbitrary accounts
-    -- out for 15 min — and there was no IP-side gate to stop it
+    -- out for 15 min - and there was no IP-side gate to stop it
     -- (verify_with_kind takes user_id only). The per-IP lockout
     -- catches the cross-user fan-out: one IP can issue at most
     -- max_failed_attempts_per_ip verifies in lockout_duration
@@ -121,7 +121,7 @@ local _state = {
     -- /auth/totp-verify for defense in depth.
     --
     -- Round-10 HIGH-4: `trust_xff` opt-in (DEFAULT FALSE). Round-9
-    -- unconditionally honored X-Forwarded-For — trivially spoofable
+    -- unconditionally honored X-Forwarded-For - trivially spoofable
     -- on direct-exposed apps (attacker rotates the header to get a
     -- fresh bucket per request). With trust_xff = false the gate
     -- uses req.remote_addr only; the per-IP table is then keyed on
@@ -136,7 +136,7 @@ local _state = {
     -- pile up plaintext-ish secrets in the DB forever. Default
     -- 1 hour matches the natural UX timeout for "open QR code →
     -- type code into form". Confirmed rows in _hull_totp are NEVER
-    -- expired by this — they're the user's real secret.
+    -- expired by this - they're the user's real secret.
     pending_ttl         = 3600,
     -- See pending_ttl: opt-out wires up app.daily so accumulated
     -- pending rows get pruned even when the app forgets to call
@@ -314,7 +314,7 @@ local function totp_at_step(secret_bytes, step, digits)
 end
 
 -- Recovery codes: 12 chars from an unambiguous 31-char alphabet,
--- formatted as ABCD-EFGH-IJKL. ~59.5 bits of entropy per code — well
+-- formatted as ABCD-EFGH-IJKL. ~59.5 bits of entropy per code - well
 -- above brute-force feasibility at any reasonable verify rate.
 -- Alphabet skips 0/O/1/I/L (common confusables when transcribed).
 local RECOVERY_ALPHA = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"  -- 31 chars
@@ -470,7 +470,7 @@ local function decrypt_secret(blob, encrypted)
 end
 
 -- URL-encoding for the otpauth URI. Authenticator apps are strict
--- about RFC 3986 — encode anything outside the unreserved set.
+-- about RFC 3986 - encode anything outside the unreserved set.
 local function urlenc(s)
     return (s:gsub("([^A-Za-z0-9%-._~])", function(c)
         return string.format("%%%02X", string.byte(c))
@@ -535,7 +535,7 @@ end
 
 -- Lazy rekey: called after a successful verify when the stored row
 -- is on an older version than current. Re-encrypts the secret under
--- the current key and writes the new blob. Best-effort — a transient
+-- the current key and writes the new blob. Best-effort - a transient
 -- DB error here doesn't fail the verify (the user is already
 -- authenticated), but the row stays on the old version and we'll
 -- try again next verify. The condition guarding the call lives at
@@ -822,7 +822,7 @@ function totp.init(opts)
     -- Round-12 LOW-2: reset the one-shot XFF warn flag when the
     -- caller explicitly touched trust_xff. Lets a hot-reload that
     -- flipped trust_xff on/off re-arm the diagnostic. Don't reset
-    -- unconditionally — re-init() for unrelated reasons (key
+    -- unconditionally - re-init() for unrelated reasons (key
     -- rotation, schema add) shouldn't re-warn.
     if opts.trust_xff ~= nil then
         _xff_warn_done = false
@@ -866,7 +866,7 @@ function totp.init(opts)
     -- caller passed encryption_key = X (not the explicit map), the
     -- shorthand forces keys = {[1]=X}, current = 1. If the table
     -- already contains rows encrypted under a DIFFERENT key under
-    -- the same v1 prefix, this new key won't decrypt them — silent
+    -- the same v1 prefix, this new key won't decrypt them - silent
     -- data loss. Sample one row; if decrypt fails, abort with a
     -- clear message pointing at the explicit rotation API. The
     -- explicit encryption_keys path is allowed to fail decryption
@@ -882,7 +882,7 @@ function totp.init(opts)
             if not pt then
                 error("totp.init: encryption_key shorthand cannot decrypt "
                       .. "existing _hull_totp rows. This is silent data "
-                      .. "loss waiting to happen — every enrolled user "
+                      .. "loss waiting to happen - every enrolled user "
                       .. "would be locked out of 2FA. To rotate, switch "
                       .. "to the explicit `encryption_keys = {[1]=OLD, "
                       .. "[2]=NEW}, current = 2, legacy_key_version = 1` "
@@ -892,7 +892,7 @@ function totp.init(opts)
     end
 
     -- Mark initialized BEFORE the lazy-catchup block so totp.cleanup
-    -- — which guards on check_initialized — can run from inside
+    -- - which guards on check_initialized - can run from inside
     -- init's own cleanup pass. Pre-fix: the catchup pcall caught
     -- "call totp.init(...) before any other function" and the log
     -- spammed every CI run.
@@ -900,7 +900,7 @@ function totp.init(opts)
 
     -- Round-8 LOW-13: lazy catchup + auto-schedule daily cleanup.
     -- Mirrors the round-7 audit-log / session pattern. _hull_totp
-    -- (confirmed) is the user's real secret — never expired here.
+    -- (confirmed) is the user's real secret - never expired here.
     -- _hull_totp_pending stages an in-flight enroll; rows older than
     -- pending_ttl are orphans (network glitch, browser closed
     -- mid-flow) and stay in the DB indefinitely without this prune.
@@ -921,14 +921,14 @@ function totp.init(opts)
             local log = require("hull.log")
             log.warn("totp: app.daily not available "
                   .. "(CLI flavor or hull/timers not admitted) "
-                  .. "— pending-row prune runs only at init(). "
+                  .. "- pending-row prune runs only at init(). "
                   .. "Wire your own cron/worker for steady-state.")
         end
     end
 end
 
 --- Prune orphaned pending-enrollment rows older than pending_ttl
--- seconds. Confirmed _hull_totp rows are NEVER touched — those are
+-- seconds. Confirmed _hull_totp rows are NEVER touched - those are
 -- the user's real secret. Returns the number of pending rows (and
 -- their recovery-code companions) removed. Auto-scheduled daily via
 -- app.daily unless `cleanup = false` is passed to init.
@@ -939,7 +939,7 @@ function totp.cleanup()
     -- Round-9 LOW-12: pending_ttl disabled → skip pending sweep.
     -- Round-10 LOW-11: attempts tables (per-user + per-IP) are
     -- also pruned. Without this they grow unbounded on a busy auth
-    -- service — every bad attempt from a fresh IP writes a row that
+    -- service - every bad attempt from a fresh IP writes a row that
     -- never expires. Cutoff is generous (2× window) so a user who
     -- just unlocked isn't immediately wiped from the table mid-
     -- attempt.
@@ -981,11 +981,11 @@ end
 -- writes them to the PENDING slot (_hull_totp_pending +
 -- _hull_totp_pending_recovery). The user's existing CONFIRMED
 -- enrollment in _hull_totp is left intact until totp.confirm
--- succeeds — a user who loses the new codes mid-enrollment still
+-- succeeds - a user who loses the new codes mid-enrollment still
 -- has working 2FA via their prior enrollment.
 --
 -- A second enroll() before confirm() REPLACES the pending slot
--- (intentional — the new authenticator scan is what the user is
+-- (intentional - the new authenticator scan is what the user is
 -- actively trying to set up). The confirmed slot stays untouched.
 function totp.enroll(user_id)
     check_initialized()
@@ -1054,7 +1054,7 @@ function totp.confirm(user_id, code)
     -- already enrolled?" when no pending row existed and returned
     -- true without verifying any code. The bypass required a user to
     -- already be enrolled, but the name "confirm" implies code-
-    -- verified — apps that treated confirm()'s boolean as proof-of-
+    -- verified - apps that treated confirm()'s boolean as proof-of-
     -- possession (the natural reading) silently skipped the code
     -- check. Apps that just want the enrollment predicate should
     -- call totp.enrolled(user_id) instead; confirm() now strictly
@@ -1116,13 +1116,13 @@ end
 -- confirmed user. Order: TOTP first (most common path), recovery
 -- code only on TOTP miss.
 --
--- Recovery codes are single-use — verified hashes get `used_at`
+-- Recovery codes are single-use - verified hashes get `used_at`
 -- stamped, and a future verify with the same code finds the row
 -- but rejects it on the `used_at IS NULL` filter.
 --
 -- Returns a bare boolean. If the caller needs to know whether the
 -- successful path was "totp" or "recovery" (for audit metadata),
--- call `totp.verify_with_kind` instead — it returns `(ok, kind)`.
+-- call `totp.verify_with_kind` instead - it returns `(ok, kind)`.
 -- Splitting the two surfaces matches the JS API and avoids the
 -- silent porting bug where `local ok = totp.verify(...)` discarded
 -- the second return.
@@ -1133,7 +1133,7 @@ function totp.verify_with_kind(user_id, code, req)
     end
     -- Round-9 HIGH-4: per-IP gate runs BEFORE the per-user gate so a
     -- noisy IP is cut off before it can rack up per-user counters
-    -- against arbitrary victims. req is optional — apps that don't
+    -- against arbitrary victims. req is optional - apps that don't
     -- pass it keep round-8 behaviour (per-user only).
     local ip = req and extract_ip(req) or nil
     -- Round-10 HIGH-5: reverted the round-9 dummy PBKDF2. The
@@ -1141,16 +1141,16 @@ function totp.verify_with_kind(user_id, code, req)
     -- observer who'd otherwise distinguish "locked" (~µs) from
     -- "unlocked-bad-code" (~1s recovery-code walk). The leak is
     -- mostly theoretical (the attacker observing the timing is
-    -- the one who locked themselves out — they already know) and
+    -- the one who locked themselves out - they already know) and
     -- the dummy turned each locked request into ~100ms of server
     -- CPU. An attacker locked into a stuck-bucket state could spam
     -- the endpoint at 10 req/s and saturate one core for the full
-    -- lockout window at zero client cost — strictly worse than the
+    -- lockout window at zero client cost - strictly worse than the
     -- pre-round-9 baseline.
     if ip and lockout_remaining_ip(ip) > 0 then
         return false, nil
     end
-    -- Lockout check (round-8 HIGH-3). Return false silently — same
+    -- Lockout check (round-8 HIGH-3). Return false silently - same
     -- response shape as a wrong code. Apps that need the locked
     -- state for UX can call totp.lockout_remaining(user_id)
     -- explicitly.
@@ -1179,7 +1179,7 @@ function totp.verify_with_kind(user_id, code, req)
                 -- Lazy rekey: if the row's secret was decrypted under
                 -- a key version other than the current one (legacy v1
                 -- or an older v2 version after rotation), re-encrypt
-                -- it under the current key. Best-effort — the verify
+                -- it under the current key. Best-effort - the verify
                 -- itself already succeeded; a transient DB error on
                 -- the rekey path doesn't block the user.
                 if _state.current_key_version
@@ -1210,7 +1210,7 @@ function totp.verify_with_kind(user_id, code, req)
             if consumed ~= 1 then return false, nil end
             clear_failed_attempts(user_id)
             if ip then clear_failed_attempts_ip(ip) end
-            -- Same lazy rekey on the recovery-code path — the
+            -- Same lazy rekey on the recovery-code path - the
             -- decrypted secret is in hand so we might as well
             -- migrate it forward.
             if _state.current_key_version
@@ -1246,9 +1246,9 @@ end
 -- v2 rows forward, instead of waiting for every user to sign in
 -- (lazy rekey-on-verify happens automatically). Scans the full
 -- _hull_totp table once. Returns `{scanned, rekeyed, failed}`:
---   * scanned  — total rows considered.
---   * rekeyed  — rows successfully re-encrypted under current.
---   * failed   — rows that wouldn't decrypt under any known key
+--   * scanned  - total rows considered.
+--   * rekeyed  - rows successfully re-encrypted under current.
+--   * failed   - rows that wouldn't decrypt under any known key
 --                (legacy_key_version missing? key removed too soon?)
 -- Operators can decommission an old key from `encryption_keys`
 -- once `rekey()` reports `failed = 0` AND a follow-up scan reports
@@ -1282,7 +1282,7 @@ function totp.rekey()
 end
 
 --- Read-only count of _hull_totp rows grouped by stored key
--- version. Lets operators plan a rotation without writing — call
+-- version. Lets operators plan a rotation without writing - call
 -- this BEFORE rekey() to see how many users are on each version.
 -- Returns a table { [version_id] = count, ... } plus a `total`
 -- field. version=0 buckets plaintext rows and undecryptable

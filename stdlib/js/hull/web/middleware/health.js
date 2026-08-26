@@ -6,13 +6,13 @@
  *
  * `health.middleware()` intercepts `GET /health` and `GET /ready`:
  *
- *   - `/health` (liveness) — always returns `200 {status:"ok", uptime}`.
+ *   - `/health` (liveness) - always returns `200 {status:"ok", uptime}`.
  *     Verifies the process is alive; never fails.
- *   - `/ready`  (readiness) — runs the DB ping (if enabled) and every
+ *   - `/ready`  (readiness) - runs the DB ping (if enabled) and every
  *     check registered via `health.register()`. Returns `200` when all
  *     pass, otherwise `503` with a per-check breakdown.
  *
- * ES modules can't conditionally import — pass the `db` module
+ * ES modules can't conditionally import - pass the `db` module
  * explicitly via `health.setDb(dbModule)` or `opts.db`.
  *
  * @license AGPL-3.0-or-later
@@ -21,7 +21,7 @@
 import { time } from "hull:time";
 import { httpServer } from "hull:http-server";
 
-/* db module is optional — not all apps use a database. */
+/* db module is optional - not all apps use a database. */
 let _dbMod = null;
 
 const _checks = {};
@@ -158,7 +158,7 @@ function middleware(opts) {
             };
 
             // Include server stats if available. Pre-fix used `server`
-            // (an undeclared identifier — a ReferenceError the moment
+            // (an undeclared identifier - a ReferenceError the moment
             // httpServer.stats existed), so the docstring's promised stats
             // block never reached /ready responses. Mirrors the Lua fix in
             // health.lua.

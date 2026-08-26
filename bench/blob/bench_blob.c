@@ -1,5 +1,5 @@
 /*
- * bench_blob.c — Throughput + latency benchmark for hull/blob@1.
+ * bench_blob.c - Throughput + latency benchmark for hull/blob@1.
  *
  * Measures the cap-layer directly (bypasses Lua/JS binding overhead)
  * across the workload shapes that matter for the real consumers:
@@ -108,7 +108,7 @@ static void env_close(BenchEnv *e)
 }
 
 /* Fill `buf` with deterministic pseudo-random bytes that vary per
- * `seed` — so different put() calls produce distinct SHAs (idempotent
+ * `seed` - so different put() calls produce distinct SHAs (idempotent
  * put would otherwise inflate the apparent dedup rate and slash
  * iter() counts in half). xorshift32 with a non-collapsing seed
  * mixer: bare `seed | 1` would map 2k and 2k+1 to the same state. */

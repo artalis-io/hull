@@ -1,5 +1,5 @@
 /*
- * log_lock.h — make vendored log.c thread-safe.
+ * log_lock.h - make vendored log.c thread-safe.
  *
  * vendor/log.c serializes log_log() through an optional lock callback,
  * but does nothing unless one is registered. Hull logs from worker

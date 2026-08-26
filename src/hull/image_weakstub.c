@@ -1,5 +1,5 @@
 /*
- * image_weakstub.c — weak image-cap defaults for an image-less base.
+ * image_weakstub.c - weak image-cap defaults for an image-less base.
  *
  * The image codec (cap/image.c + cap/image_stb.c + vendored stb) is a composable
  * feature archive (libhull_feature-image.a, docs/image_feature.md). The base
@@ -11,7 +11,7 @@
  * app declared hull/image (needs_image -> the image feature is composed), and
  * hl_image_free(NULL) is a no-op.
  *
- * Mirrors wasm_weakstub.c (the WASM seam). Runtime-agnostic — lives in the base
+ * Mirrors wasm_weakstub.c (the WASM seam). Runtime-agnostic - lives in the base
  * platform lib, linked into both Lua-only and JS-only apps.
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later

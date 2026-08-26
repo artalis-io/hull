@@ -57,4 +57,4 @@ jobs:
             exit 1
           fi
           n=$(git log --format='%H' "${BASE}..${HEAD}" | wc -l | tr -d ' ')
-          echo "OK — all $n PR commit(s) carry a matching Signed-off-by line."
+          echo "OK - all $n PR commit(s) carry a matching Signed-off-by line."

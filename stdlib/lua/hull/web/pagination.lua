@@ -35,7 +35,7 @@ end
 -- the per_page param when it differs from the default.
 --
 -- Contract for `base`: a path + optional query string (no fragment,
--- no CRLF). Reject CRLF/NUL hard — if a caller fed user input here,
+-- no CRLF). Reject CRLF/NUL hard - if a caller fed user input here,
 -- a malformed base could land in a Location/Link header and become
 -- a response-splitting vector. The function does NOT dedupe an
 -- existing `page=` / `per_page=` in the base query string; callers
@@ -84,7 +84,7 @@ function pagination.from_query(req, opts)
     local query = (req and req.query) or {}
     -- Upper bound on page is 1e9. Without it, `?page=9007199254740992`
     -- (anywhere near 2^53) flows into `offset = (page-1) * per_page`
-    -- producing trillion-row SQL offsets — SQLite handles them in
+    -- producing trillion-row SQL offsets - SQLite handles them in
     -- O(1) before scanning, but the math is wasted and the bound
     -- should be small enough to fit in any sane integer type.
     local page = clamp(to_int(query.page, 1), 1, 1e9)

@@ -2,16 +2,16 @@
  * @file blob_store.h
  * @brief Low-level content-addressed blob store.
  *
- * Pure CAS primitive — bytes in → SHA-256-keyed ID; bytes out by ID.
+ * Pure CAS primitive - bytes in → SHA-256-keyed ID; bytes out by ID.
  * Independent of the app capability layer, the manifest, the audit
  * log, and HL_ENABLE_BLOB. Two distinct families of consumer sit on
  * top:
  *
- *   1. `hl_cap_blob_*` (cap/blob.c) — the app-facing capability:
+ *   1. `hl_cap_blob_*` (cap/blob.c) - the app-facing capability:
  *      adds manifest fs.write validation, may add audit emission and
  *      per-app permission checks. Backs the `blob.*` Lua/JS bindings.
  *
- *   2. Runtime infrastructure — Lua bytecode cache
+ *   2. Runtime infrastructure - Lua bytecode cache
  *      (runtime/lua/bytecode_cache.c), compute AOT cache
  *      (stdlib/cli/lua/hull/aot_cache.lua via tool.blob_store_*
  *      bindings), future template-AST cache. These live in the
@@ -37,7 +37,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-/* Forward decl — defined in hull/alloc.h. */
+/* Forward decl - defined in hull/alloc.h. */
 typedef struct HlAllocator HlAllocator;
 
 /** @brief SHA-256 hex string length (without NUL). */
@@ -56,7 +56,7 @@ typedef struct HlBlobStore HlBlobStore;
  *
  * `abs_root` must be an absolute filesystem path. Caller is
  * responsible for any policy validation (manifest fs.write checks,
- * sandbox unveil, etc.) — this layer does no permission gating.
+ * sandbox unveil, etc.) - this layer does no permission gating.
  *
  * Creates `<abs_root>/blobs/` and `<abs_root>/tmp/` if absent.
  * Sweeps stale `tmp/.blob-*.tmp` files older than `tmp_max_age_sec`
@@ -112,7 +112,7 @@ int hl_blob_store_put_durable(HlBlobStore *s,
  * misdesigned), so last-write-wins is safe.
  *
  * **Per-store discipline.** Don't mix CAS and keyed puts on the
- * same store — CAS callers rely on "filename IS the SHA", which
+ * same store - CAS callers rely on "filename IS the SHA", which
  * a keyed put would violate. Use a dedicated store per consumer.
  *
  * @return 0 on success; -1 on invalid key, write failure, or
@@ -186,13 +186,13 @@ int hl_blob_store_delete(HlBlobStore *s, const char *id);
  *
  * Writes `<root>/blobs/<shard>/<id>` (shard depth determined by
  * the store's open-time configuration). Does NOT touch the
- * filesystem — pure string construction. Validates @p id as a
+ * filesystem - pure string construction. Validates @p id as a
  * lowercase 64-char hex string before composing.
  *
  * Useful for callers that need direct filesystem access to a blob
  * file (e.g. `cache verify` recomputing the sha; `tools install`
  * chmod'ing the freshly-stored binary). Routing through this helper
- * keeps shard-layout knowledge inside the storage layer — the same
+ * keeps shard-layout knowledge inside the storage layer - the same
  * code that wrote the file owns the rule for naming it.
  *
  * @return 0 on success, -1 on invalid id, store, or undersized buffer.

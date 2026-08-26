@@ -1,4 +1,4 @@
-/* mod_tui.c — hull.tui module: terminal UI bindings.
+/* mod_tui.c - hull.tui module: terminal UI bindings.
  *
  * The cap layer enforces a single-ctx-per-process invariant, so the
  * binding mirrors that: one module-level ctx, acquired lazily on
@@ -37,7 +37,7 @@
  *
  * Slice should be << ESC idle: it bounds the input latency, while
  * ESC idle bounds the lone-ESC commit delay. 25/50ms is the same
- * pair the cap layer's blocking poll uses internally — matching is
+ * pair the cap layer's blocking poll uses internally - matching is
  * intentional. */
 #define HL_TUI_POLL_SLICE_MS     25
 #define HL_TUI_POLL_ESC_IDLE_MS  50
@@ -251,7 +251,7 @@ static void push_event(lua_State *L, const HlTuiEvent *ev)
 
 /* ── Async-integrated poll ─────────────────────────────────────
  *
- * tui.poll(timeout_ms) — yields the calling coroutine for up to
+ * tui.poll(timeout_ms) - yields the calling coroutine for up to
  * `timeout_ms` while the event loop continues to run timers, watchers,
  * and other coroutines. The runtime is a single-threaded cooperative
  * model: while one coroutine is suspended on tui.poll, others (e.g.
@@ -261,7 +261,7 @@ static void push_event(lua_State *L, const HlTuiEvent *ev)
  * into the parser and tries to pop an event. The timer also tracks
  * how long the parser has been idle (no new bytes), and after
  * HL_TUI_POLL_ESC_IDLE_MS of silence asks the cap layer to commit
- * any in-flight ESC as a bare-escape event — resolving the standard
+ * any in-flight ESC as a bare-escape event - resolving the standard
  * "lone ESC vs. start of CSI" ambiguity without blocking.
  */
 
@@ -379,7 +379,7 @@ static int lua_tui_poll(lua_State *L)
     lua_pop(L, 1);
 
     if (!lua || !lua->base.async_ctx) {
-        /* No event loop wired — fall back to blocking. This happens
+        /* No event loop wired - fall back to blocking. This happens
          * in test harnesses and tool VMs that don't init the async
          * backend. Behaviorally identical to the old API. */
         rc = hl_cap_tui_poll(g_ctx, timeout_ms, &ev);

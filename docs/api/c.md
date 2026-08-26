@@ -1,4 +1,4 @@
-# Hull — C Public API Reference
+# Hull - C Public API Reference
 
 Per-function reference for Hull's C public headers (`include/hull/*.h`).
 Audience: embedders, contributors, runtime authors.
@@ -9,7 +9,7 @@ For prose / patterns see [`../../CLAUDE.md`](../../CLAUDE.md) and
 
 ## Table of contents
 
-- [Capability layer](#capability-layer) — `hl_cap_*`
+- [Capability layer](#capability-layer) - `hl_cap_*`
   - [Database (`cap/db.h`)](#database-capdbh)
   - [Filesystem (`cap/fs.h`)](#filesystem-capfsh)
   - [Crypto (`cap/crypto.h`)](#crypto-capcryptoh)
@@ -17,14 +17,14 @@ For prose / patterns see [`../../CLAUDE.md`](../../CLAUDE.md) and
   - [Environment (`cap/env.h`)](#environment-capenvh)
   - [Time (`cap/time.h`)](#time-captimeh)
   - [Audit (`cap/audit.h`)](#audit-capaudith)
-  - WebSocket, WASM, GPU, Image, SMTP, Body — _coming next_
+  - WebSocket, WASM, GPU, Image, SMTP, Body - _coming next_
 - [Runtime layer](#runtime-layer)
-  - [`runtime.h`](#runtimeh) — `HlRuntime` + vtable
-  - [`runtime/factory.h`](#runtimefactoryh) — factory registry
-  - [`app_context.h`](#app_contexth) — embedder context
+  - [`runtime.h`](#runtimeh) - `HlRuntime` + vtable
+  - [`runtime/factory.h`](#runtimefactoryh) - factory registry
+  - [`app_context.h`](#app_contexth) - embedder context
 - [Manifest (`manifest.h`)](#manifest-manifesth)
 - [VFS (`vfs.h`)](#vfs-vfsh)
-- [Buffer protocol (`buffer.h`)](#buffer-bufferh) — `HlBufferView`
+- [Buffer protocol (`buffer.h`)](#buffer-bufferh) - `HlBufferView`
 - [Signature (`signature.h`, `release.h`)](#signature-signatureh-releaseh)
 - [Agent library (`agent_lib.h`, `agent_api.h`)](#agent-library)
 - [Command dispatch (`commands/*.h`)](#command-dispatch)
@@ -67,7 +67,7 @@ Initialize a prepared-statement LRU cache attached to a `sqlite3` handle.
 
 **Notes:** the cache has a fixed capacity of `HL_STMT_CACHE_SIZE = 32`
 entries. Inserting a 33rd evicts the LRU entry (with `sqlite3_finalize`).
-The cache struct is **Tier 4 — internal**; its layout will change post-v0.1.0.
+The cache struct is **Tier 4 - internal**; its layout will change post-v0.1.0.
 Always use the entry points, never field access.
 
 ---
@@ -93,7 +93,7 @@ WAL mode, foreign keys on, busy timeout, etc.
 |-------|-------------|-------------|
 | `db`  | `sqlite3 *` | Live handle from `sqlite3_open*`. |
 
-**Returns:** `int` — `0` on success, `-1` if any PRAGMA failed (handle should be closed by caller).
+**Returns:** `int` - `0` on success, `-1` if any PRAGMA failed (handle should be closed by caller).
 
 **Example:**
 
@@ -108,7 +108,7 @@ if (hl_cap_db_init(db) != 0) { sqlite3_close(db); return -1; }
 #### `hl_cap_db_shutdown(db)`
 
 Flush any pending writes and finalize cached statements before close.
-Optional — `sqlite3_close` works without it — but recommended for clean shutdown logs.
+Optional - `sqlite3_close` works without it - but recommended for clean shutdown logs.
 
 | Param | Type        | Description |
 |-------|-------------|-------------|
@@ -128,17 +128,17 @@ Run a SELECT with parameterised bindings, invoking `cb` once per row.
 | `sql`     | `const char *`      | Literal SQL with `?` placeholders. **MUST NOT** contain interpolated user input. |
 | `params`  | `const HlValue *`   | Array of `nparams` parameter values, bound to the `?` placeholders in order. May be `NULL` iff `nparams == 0`. |
 | `nparams` | `int`               | Length of `params`. |
-| `cb`      | `HlRowCallback`     | `int (*)(void *ctx, HlColumn *cols, int ncols)` — called once per row. Return non-zero to abort iteration. |
+| `cb`      | `HlRowCallback`     | `int (*)(void *ctx, HlColumn *cols, int ncols)` - called once per row. Return non-zero to abort iteration. |
 | `ctx`     | `void *`            | Opaque pointer passed back to `cb`. |
 | `alloc`   | `HlAllocator *`     | Allocator for the per-row `HlColumn` array. `NULL` = raw malloc. |
 
-**Returns:** `int` — `0` on full iteration completion, an `HL_DB_ERR_*` code on prepare/bind/step failure, or the value the callback returned to abort.
+**Returns:** `int` - `0` on full iteration completion, an `HL_DB_ERR_*` code on prepare/bind/step failure, or the value the callback returned to abort.
 
 **Errors:**
-- `HL_DB_ERR_PREPARE` — invalid SQL.
-- `HL_DB_ERR_BIND` — too many or wrong-typed params.
-- `HL_DB_ERR_EXEC` — runtime error during step.
-- `HL_DB_ERR_DENIED` — SQL references a reserved `_hull_*` table (call-stack check; stdlib bypasses this).
+- `HL_DB_ERR_PREPARE` - invalid SQL.
+- `HL_DB_ERR_BIND` - too many or wrong-typed params.
+- `HL_DB_ERR_EXEC` - runtime error during step.
+- `HL_DB_ERR_DENIED` - SQL references a reserved `_hull_*` table (call-stack check; stdlib bypasses this).
 
 **Example:**
 
@@ -167,7 +167,7 @@ Run INSERT/UPDATE/DELETE/DDL with parameterised bindings. No row callback.
 | `params`  | `const HlValue *` | Bindings (may be `NULL` iff `nparams == 0`). |
 | `nparams` | `int`             | Length of `params`. |
 
-**Returns:** `int` — number of affected rows on success (≥ 0), or `HL_DB_ERR_*` on failure.
+**Returns:** `int` - number of affected rows on success (≥ 0), or `HL_DB_ERR_*` on failure.
 
 **See also:** [`hl_cap_db_last_id`](#hl_cap_db_last_iddb).
 
@@ -181,7 +181,7 @@ Return the `ROWID` of the most-recently-inserted row on this connection.
 |-------|-------------|-------------|
 | `db`  | `sqlite3 *` | Connection. |
 
-**Returns:** `int64_t` — SQLite's `last_insert_rowid()`. `0` if no INSERT has occurred on this connection.
+**Returns:** `int64_t` - SQLite's `last_insert_rowid()`. `0` if no INSERT has occurred on this connection.
 
 ---
 
@@ -193,7 +193,7 @@ Transaction control. `begin` issues `BEGIN IMMEDIATE`; `commit` / `rollback` fin
 |-------|-------------|-------------|
 | `db`  | `sqlite3 *` | Connection. |
 
-**Returns:** `int` — `HL_DB_OK` (0) on success, `HL_DB_ERR_*` on failure.
+**Returns:** `int` - `HL_DB_OK` (0) on success, `HL_DB_ERR_*` on failure.
 
 **Notes:** nested transactions are not supported (SQLite doesn't have them). Use the stdlib `db.batch(fn)` wrapper from app code; this C-level API is for embedders.
 
@@ -202,7 +202,7 @@ Transaction control. `begin` issues `BEGIN IMMEDIATE`; `commit` / `rollback` fin
 #### `hl_cap_db_guard_stale_txn(db)`
 
 Roll back any stale transaction left by a crashed handler. Safe to call
-unconditionally before each request dispatch — no-op if no transaction is
+unconditionally before each request dispatch - no-op if no transaction is
 open.
 
 | Param | Type        | Description |
@@ -221,7 +221,7 @@ Reject SQL referencing the internal `_hull_*` namespace. Used by `hl_cap_db_quer
 |-------|----------------|-------------|
 | `sql` | `const char *` | SQL string to scan. |
 
-**Returns:** `int` — `0` if safe, `HL_DB_ERR_DENIED` if the SQL touches `_hull_*` tables.
+**Returns:** `int` - `0` if safe, `HL_DB_ERR_DENIED` if the SQL touches `_hull_*` tables.
 
 **Notes:** the actual gate uses call-stack inspection (Lua `ar.source`, JS module name) so stdlib modules transparently bypass this check via their normal `db.exec`/`db.query` calls. Direct calls from C have no caller-source so callers MUST check the namespace themselves before invoking with stdlib-internal SQL.
 
@@ -239,7 +239,7 @@ Reject a path that would escape the manifest's declared allowlist.
 | `path` | `const char *`       | Relative path to validate (no leading `/`, no `..` components). |
 | `mode` | `HlFsMode`           | `HL_FS_READ` or `HL_FS_WRITE`. |
 
-**Returns:** `int` — `0` if the path is allowed under `mode`, `-1` otherwise (with `errno` set on filesystem failures).
+**Returns:** `int` - `0` if the path is allowed under `mode`, `-1` otherwise (with `errno` set on filesystem failures).
 
 **Rejection rules:**
 - Absolute paths (starts with `/` or `\`).
@@ -263,7 +263,7 @@ Read a file's full contents into a Hull-owned buffer.
 | `out_buf`  | `char **`            | Receives a malloc'd buffer; caller must `free`. NUL-terminated. |
 | `out_len`  | `size_t *`           | Receives the byte length (excludes terminator). |
 
-**Returns:** `int` — `0` ok, `-1` on validate/open/read failure.
+**Returns:** `int` - `0` ok, `-1` on validate/open/read failure.
 
 **Capacity:** the read is capped at `HL_MODULE_MAX_SIZE` (10 MiB by default).
 
@@ -281,18 +281,18 @@ Write bytes to a file. Creates parent directories if absent. Overwrites existing
 | `data`    | `const char *`       | Bytes to write (may contain NULs). |
 | `len`     | `size_t`             | Byte count. |
 
-**Returns:** `int` — `0` ok, `-1` on failure (validate / mkdir / fopen / fwrite).
+**Returns:** `int` - `0` ok, `-1` on failure (validate / mkdir / fopen / fwrite).
 
 ---
 
-(Remaining `cap/fs.h` entries — `hl_cap_fs_exists`, `_delete`, `_mmap`, `_list_dir` — are documented in the same format. Continuing through the rest of the C surface in the next pass.)
+(Remaining `cap/fs.h` entries - `hl_cap_fs_exists`, `_delete`, `_mmap`, `_list_dir` - are documented in the same format. Continuing through the rest of the C surface in the next pass.)
 
 ---
 
 ## Status
 
 Initial slice complete for `cap/db.h` (full) and `cap/fs.h` (3 of 6
-functions). The format is now concrete — please review and confirm
+functions). The format is now concrete - please review and confirm
 before I batch-produce the rest of the C surface. The remaining work
 in this file:
 

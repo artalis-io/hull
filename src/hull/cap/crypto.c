@@ -1,5 +1,5 @@
 /*
- * hull_cap_crypto.c — Shared crypto capability
+ * hull_cap_crypto.c - Shared crypto capability
  *
  * Wraps TweetNaCl for hashing, random, key derivation, authenticated
  * encryption, and signature verification. Both Lua and JS bindings
@@ -31,7 +31,7 @@ static void hull_secure_zero(void *p, size_t n)
 
 /* ── SHA-256 ────────────────────────────────────────────────────────────
  *
- * TweetNaCl only implements SHA-512 — SHA-256 is declared in the header
+ * TweetNaCl only implements SHA-512 - SHA-256 is declared in the header
  * but not in tweetnacl.c. We keep this implementation because PBKDF2
  * and HMAC-SHA256 require SHA-256 specifically.
  */
@@ -104,7 +104,7 @@ static void sha256_transform_portable(uint32_t state[8],
  *   - ARMv8-A FEAT_SHA256 (vsha256{h,h2,su0,su1}q_u32):
  *       compiled in for __aarch64__ + __ARM_NEON. Dispatched
  *       always-on for __APPLE__ (Apple Silicon guarantees SHA2 on
- *       every shipped chip — M1+), runtime-detected via
+ *       every shipped chip - M1+), runtime-detected via
  *       getauxval(AT_HWCAP) & HWCAP_SHA2 for __linux__ /
  *       __COSMOPOLITAN__.
  *
@@ -143,7 +143,7 @@ static void sha256_transform_armv8(uint32_t state[8],
      * group composes su0+su1 to produce one fresh message vector
      * (the variable used as `wk` two rounds out), then does the
      * 4-round hash. Cleaner than interleaving su0 before the hash
-     * and su1 after — and verified-correct against the SHA-256
+     * and su1 after - and verified-correct against the SHA-256
      * known-answer test vectors. */
 
     uint32x4_t abcd = vld1q_u32(&state[0]);
@@ -183,7 +183,7 @@ static void sha256_transform_armv8(uint32_t state[8],
     abcd = vsha256hq_u32(abcd_prev, efgh, tmp);
     efgh = vsha256h2q_u32(efgh, abcd_prev, tmp);
 
-    /* Rounds 16-63 — 3 iterations of 16 rounds each. Message
+    /* Rounds 16-63 - 3 iterations of 16 rounds each. Message
      * expansion happens at the top of each 4-round group:
      *   sched_X = su1(su0(sched_X, sched_X+1), sched_X+2, sched_X+3)
      * cycling X = 0,1,2,3,0,1,2,3,... */
@@ -453,7 +453,7 @@ static void sha256_transform_shani(uint32_t state[8],
     TMP    = _mm_shuffle_epi32(STATE0, 0x1B);    /* FEBA */
     STATE1 = _mm_shuffle_epi32(STATE1, 0xB1);    /* DCHG */
     STATE0 = _mm_blend_epi16(TMP, STATE1, 0xF0); /* DCBA */
-    STATE1 = _mm_alignr_epi8(STATE1, TMP, 8);    /* HGFE — final store-order */
+    STATE1 = _mm_alignr_epi8(STATE1, TMP, 8);    /* HGFE - final store-order */
 
     _mm_storeu_si128((__m128i *) &state[0], STATE0);
     _mm_storeu_si128((__m128i *) &state[4], STATE1);
@@ -508,7 +508,7 @@ static int sha256_shani_available(void)
 
 /* Dispatch via a single static int set on first transform call.
  *
- * Why not a function pointer? Tested both — the indirect call costs
+ * Why not a function pointer? Tested both - the indirect call costs
  * ~17% on the per-block hot loop because the compiler can't inline
  * the transform body. A branch on a static int that's always-same
  * after first call costs effectively zero (branch predictor pins it
@@ -674,7 +674,7 @@ int hl_cap_crypto_random(void *buf, size_t len)
     arc4random_buf(buf, len);
     return 0;
 #elif defined(__linux__) && !defined(__COSMOPOLITAN__)
-    /* Linux: getrandom(2) — no fd, blocks until pool is seeded */
+    /* Linux: getrandom(2) - no fd, blocks until pool is seeded */
     uint8_t *p = (uint8_t *)buf;
     size_t remaining = len;
     while (remaining > 0) {
@@ -882,7 +882,7 @@ int hl_cap_crypto_hmac_sha1(const uint8_t *key, size_t key_len,
      * disturbing the cap surface or the Lua / JS bindings. Same
      * convention as HlCryptoAsymBackend.
      *
-     * NULL guards mirror hl_cap_crypto_hmac_sha256 — defense in
+     * NULL guards mirror hl_cap_crypto_hmac_sha256 - defense in
      * depth (the backend would reject too) but keeps the two
      * cap entry points symmetric. */
     if (!key || !msg || !out) return -1;
@@ -1081,12 +1081,12 @@ int hl_cap_crypto_pbkdf2(const char *password, size_t pw_len,
 {
     /* PBKDF2-HMAC-SHA256. All per-iteration HMAC calls go through
      * hl_cap_crypto_hmac_sha256 below, which now dispatches via
-     * HlCryptoHmacBackend — so a future backend swap covers PBKDF2
+     * HlCryptoHmacBackend - so a future backend swap covers PBKDF2
      * transitively without touching this function. */
     if (!password || !salt || !out || iterations < 100000 || out_len == 0)
         return -1;
 
-    /* Salt size guard — stack buffer is 68 bytes */
+    /* Salt size guard - stack buffer is 68 bytes */
     if (salt_len > 64)
         return -1;
 
@@ -1165,7 +1165,7 @@ int hl_cap_crypto_ed25519_verify(const uint8_t *msg, size_t msg_len,
 
     size_t sm_len = 64 + msg_len;
     /* Stack-allocate for small messages, heap for large.
-     * m and sm must be separate buffers — crypto_sign_open overwrites
+     * m and sm must be separate buffers - crypto_sign_open overwrites
      * m[32..63] with the pubkey, which would corrupt the signature in sm. */
     uint8_t stack_buf[4160 * 2];
     uint8_t *sm, *m;
@@ -1251,7 +1251,7 @@ int hl_cap_crypto_sha512(const void *data, size_t len, uint8_t out[64])
  * LEGACY INTEROP ONLY. SHA-1 is collision-broken; this exists strictly
  * to drive third-party protocols that hardcode it (HIBP range API and
  * similar). Hull never uses SHA-1 for password hashing, MAC, or any
- * security boundary. The function is intentionally narrow — no
+ * security boundary. The function is intentionally narrow - no
  * incremental API, no streaming variant. Add neither without an
  * audit-team-approved reason; surfacing more SHA-1 surface invites
  * misuse.
@@ -1260,7 +1260,7 @@ int hl_cap_crypto_sha512(const void *data, size_t len, uint8_t out[64])
 /* ── SHA-1 (legacy interop only) ──────────────────────────────────────
  *
  * Hand-rolled (RFC 3174) so it works in mbedtls-free builds, the same way
- * SHA-256 above is hand-rolled. SHA-1 is collision-broken — it is exposed
+ * SHA-256 above is hand-rolled. SHA-1 is collision-broken - it is exposed
  * only for legacy interop (e.g. the HIBP k-anonymity prefix in
  * hull/web/pwned) and HMAC-SHA1 (HOTP/TOTP), never as a collision-resistant
  * security primitive.
@@ -1268,7 +1268,7 @@ int hl_cap_crypto_sha512(const void *data, size_t len, uint8_t out[64])
  * Implemented in incremental (block-streaming) form, mirroring the SHA-256
  * context above, so the portable HMAC backend below can absorb the ipad/opad
  * block and the message without a heap concat. The context type stays
- * file-local — SHA-1 is legacy, so it is not added to the public header. */
+ * file-local - SHA-1 is legacy, so it is not added to the public header. */
 static uint32_t sha1_rol(uint32_t v, int n) { return (v << n) | (v >> (32 - n)); }
 
 static void sha1_block(uint32_t h[5], const uint8_t *p)
@@ -1361,7 +1361,7 @@ int hl_cap_crypto_sha1(const void *data, size_t len, uint8_t out[20])
  * cap layer (hl_crypto_hmac_active_backend, above) only in the pure-compute
  * flavor where mbedTLS is not linked; always compiled so test_crypto exercises it in
  * every build. Block size is 64 for both SHA-1 and SHA-256. The ipad/opad
- * block and the message are absorbed incrementally — no heap, any message
+ * block and the message are absorbed incrementally - no heap, any message
  * length. HMAC-SHA512 is intentionally unsupported (no streaming SHA-512 in
  * tree, and the cap layer never requests it). */
 static int hmac_sha256_portable(const uint8_t *key, size_t key_len,

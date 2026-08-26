@@ -1,8 +1,8 @@
 /*
- * hull_cap_db.c — Shared database capability
+ * hull_cap_db.c - Shared database capability
  *
  * All SQLite access goes through these functions. Both Lua and JS
- * bindings call hl_cap_db_* — neither runtime touches SQLite directly.
+ * bindings call hl_cap_db_* - neither runtime touches SQLite directly.
  * Parameterized binding is the ONLY path; no string concatenation.
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
@@ -59,14 +59,14 @@ static sqlite3_stmt *cache_get(HlStmtCache *cache, const char *sql)
         }
     }
 
-    /* Miss — prepare new statement */
+    /* Miss - prepare new statement */
     sqlite3_stmt *stmt = NULL;
     int rc = sqlite3_prepare_v2(cache->db, sql, -1, &stmt, NULL);
     if (rc != SQLITE_OK)
         return NULL;
 
     /* Evict oldest (LRU) if cache is full. NOTE: this finalize is why row
-     * callbacks must not re-enter the cache mid-iteration — see the INVARIANT
+     * callbacks must not re-enter the cache mid-iteration - see the INVARIANT
      * note at the cb() call site in the query loop below. */
     if (cache->count >= HL_STMT_CACHE_SIZE) {
         sqlite3_finalize(cache->entries[0].stmt);
@@ -102,18 +102,18 @@ int hl_cap_db_init(sqlite3 *db)
         return -1;
 
     /*
-     * Performance PRAGMAs — applied once at connection open.
+     * Performance PRAGMAs - applied once at connection open.
      *
-     * journal_mode=WAL    — Write-Ahead Logging for concurrent readers/writer.
-     * synchronous=NORMAL  — Sync WAL on checkpoint only (not every commit).
+     * journal_mode=WAL    - Write-Ahead Logging for concurrent readers/writer.
+     * synchronous=NORMAL  - Sync WAL on checkpoint only (not every commit).
      *                       Safe: WAL protects against corruption; only risk is
      *                       losing the last transaction on OS crash (not app crash).
-     * foreign_keys=ON     — Referential integrity.
-     * busy_timeout=5000   — Wait up to 5 seconds on lock contention.
-     * cache_size=-16384   — 16 MB page cache (default is 2 MB).
-     * temp_store=MEMORY   — Temp tables/indexes in memory (not temp files).
-     * mmap_size=268435456 — Memory-map up to 256 MB of the DB file for reads.
-     * wal_autocheckpoint=1000 — Checkpoint every 1000 pages (~4 MB).
+     * foreign_keys=ON     - Referential integrity.
+     * busy_timeout=5000   - Wait up to 5 seconds on lock contention.
+     * cache_size=-16384   - 16 MB page cache (default is 2 MB).
+     * temp_store=MEMORY   - Temp tables/indexes in memory (not temp files).
+     * mmap_size=268435456 - Memory-map up to 256 MB of the DB file for reads.
+     * wal_autocheckpoint=1000 - Checkpoint every 1000 pages (~4 MB).
      *                          Default is 1000; explicit for clarity.
      */
     const char *pragmas[] = {
@@ -142,10 +142,10 @@ void hl_cap_db_shutdown(sqlite3 *db)
     if (!db)
         return;
 
-    /* Run PRAGMA optimize — lets SQLite update internal statistics */
+    /* Run PRAGMA optimize - lets SQLite update internal statistics */
     sqlite3_exec(db, "PRAGMA optimize", NULL, NULL, NULL);
 
-    /* Final WAL checkpoint — merge WAL back into main DB file */
+    /* Final WAL checkpoint - merge WAL back into main DB file */
     sqlite3_wal_checkpoint_v2(db, NULL, SQLITE_CHECKPOINT_TRUNCATE,
                               NULL, NULL);
 }
@@ -281,7 +281,7 @@ int hl_cap_db_query(HlStmtCache *cache, const char *sql,
          * Populate column names AFTER the first sqlite3_step().
          *
          * sqlite3_column_name() pointers are invalidated if the statement
-         * is auto-recompiled on the first step — which happens when bound
+         * is auto-recompiled on the first step - which happens when bound
          * parameters affect the query plan (e.g. LIMIT ?).  Fetching names
          * after step guarantees the pointers remain valid until reset.
          */

@@ -4,7 +4,7 @@
  * @description Auth-gated HTTP response helper for hull:attachment.
  *   JS parity for `hull.web.attachment-serve` (Lua).
  *
- * Thin web layer over hull:attachment — takes `(req, res, id, opts)`
+ * Thin web layer over hull:attachment - takes `(req, res, id, opts)`
  * and produces an auth-gated, ETagged, Content-Disposition-bearing
  * response body. The core attachment module is intentionally HTTP-free
  * (works in CLI tools too); this is the only piece coupled to
@@ -17,7 +17,7 @@
  *     rbac) follow the same fail-closed pattern.
  *   - **Strong ETag from blob_id.** Because the underlying blob
  *     store is content-addressed by SHA-256, the blob_id IS a
- *     genuine cryptographic fingerprint of the bytes — strong
+ *     genuine cryptographic fingerprint of the bytes - strong
  *     ETags are correct here (no risk of two attachments with the
  *     same id but different bytes). We use `"<full-64-hex>"`.
  *   - **Content-Disposition (RFC 5987).** Browsers should save
@@ -145,7 +145,7 @@ function serve(req, res, id, opts) {
         return;
     }
 
-    // Strong ETag from full blob_id SHA — content-addressed dedup
+    // Strong ETag from full blob_id SHA - content-addressed dedup
     // means this is a genuine cryptographic fingerprint of the bytes.
     const etag = '"' + meta.blob_id + '"';
 

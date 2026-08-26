@@ -1,5 +1,5 @@
 /*
- * mod_log.c — hull:log module (structured logging)
+ * mod_log.c - hull:log module (structured logging)
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */

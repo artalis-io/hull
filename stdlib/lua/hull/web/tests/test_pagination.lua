@@ -1,4 +1,4 @@
--- test_pagination.lua — Tests for hull.web.pagination
+-- test_pagination.lua - Tests for hull.web.pagination
 
 local pagination = require('hull.web.pagination')
 

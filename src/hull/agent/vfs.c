@@ -1,5 +1,5 @@
 /*
- * agent/vfs.c — `hull agent vfs`: list embedded files (path → size).
+ * agent/vfs.c - `hull agent vfs`: list embedded files (path → size).
  *
  * Useful for verifying what `hull build` will embed vs what's on disk
  * (e.g. "why isn't my new template showing up after build?").

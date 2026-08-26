@@ -38,7 +38,7 @@
  * conditionally widening the feature-test surface for the whole
  * translation unit. Value verified stable across all Linux archs
  * (asm-generic/fcntl.h: 01000000 octal = 0x40000 hex). On macOS,
- * BSDs, and Cosmo there is no equivalent — define to 0 so it's a
+ * BSDs, and Cosmo there is no equivalent - define to 0 so it's a
  * no-op in the open() flags. */
 #if defined(__linux__)
 #  ifndef O_NOATIME
@@ -487,7 +487,7 @@ int hl_blob_store_put_keyed(HlBlobStore *s, const char *key,
     if (!s || validate_id(key) != 0) return -1;
     if (len > 0 && !bytes) return -1;
 
-    /* Fast-path: target already present — same key implies same
+    /* Fast-path: target already present - same key implies same
      * bytes by the cache's design contract. Skip the write. */
     if (hl_blob_store_exists(s, key) == 1) return 0;
 
@@ -591,7 +591,7 @@ int hl_blob_store_reader_open(HlBlobStore *s, const char *id, int track_access,
     /* O_NOFOLLOW: refuse to follow a symlink at the blob path.
      * Nothing in the legitimate write path ever creates a symlink
      * inside the store, so a symlink here means someone planted
-     * one — refuse to read what's at the other end. Matters on
+     * one - refuse to read what's at the other end. Matters on
      * multi-user hosts or shared HULL_CACHE_DIR mounts where the
      * cache root might be writable by an unprivileged user.
      * Symlink → ELOOP (Linux) / EMLINK (BSD) → blob_store_get
@@ -606,7 +606,7 @@ int hl_blob_store_reader_open(HlBlobStore *s, const char *id, int track_access,
      * for portability so this is a no-op elsewhere. Falls back to
      * a plain open() on EPERM (O_NOATIME requires owner-or-CAP),
      * since lacking permission to suppress atime updates isn't
-     * fatal — worst case the policy degrades to "best-effort". */
+     * fatal - worst case the policy degrades to "best-effort". */
     int open_flags = O_RDONLY | O_CLOEXEC | O_NOFOLLOW;
     if (!track_access) open_flags |= O_NOATIME;
     int fd = open(path, open_flags);
@@ -651,9 +651,9 @@ void hl_blob_store_reader_close(HlBlobStoreReader *r)
 }
 
 /* Defensive ceiling on any single blob the in-memory `_get` path
- * will materialise. Hostile or corrupted blob entries — e.g. a
+ * will materialise. Hostile or corrupted blob entries - e.g. a
  * stat that reports billions of bytes due to filesystem state
- * corruption, or a planted file in a shared HULL_CACHE_DIR —
+ * corruption, or a planted file in a shared HULL_CACHE_DIR -
  * are rejected rather than crashing the allocator. Constant lives
  * in the header (HL_BLOB_STORE_MAX_IN_MEMORY_BYTES); shared with
  * cache verify so both paths bump together. */

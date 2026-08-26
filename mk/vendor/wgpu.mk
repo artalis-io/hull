@@ -1,7 +1,7 @@
 # mk/vendor/wgpu.mk - wgpu-native GPU backend config (WGPU_LIB + the Metal/
 # Vulkan framework selection). Native-only. Extracted verbatim.
 
-# ── wgpu-native (GPU compute — optional) ─────────────────────────
+# ── wgpu-native (GPU compute - optional) ─────────────────────────
 #
 # Optional GPU compute backend. Disabled by default.
 # Enable with: make HL_ENABLE_GPU=1

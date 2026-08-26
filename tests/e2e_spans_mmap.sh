@@ -1,7 +1,7 @@
 #!/bin/sh
-# tests/e2e_spans_mmap.sh — windowed fs.mmap({offset,length}) binding
-# (mapped-spans checkpoint 3a, item A). The MappedBuffer is a zero-copy handle
-# (no script-side byte access — bytes flow to compute/gpu), so this asserts the
+# tests/e2e_spans_mmap.sh - windowed fs.mmap({offset,length}) binding
+# (mapped-spans, item A). The MappedBuffer is a zero-copy handle
+# (no script-side byte access - bytes flow to compute/gpu), so this asserts the
 # script-observable contract: the returned window's len() is the EOF-clamped
 # length, a bare path stays whole-file, and bad args fail cleanly. Window
 # byte-correctness is proven at the C level (tests/hull/cap/test_wasm_spans.c).

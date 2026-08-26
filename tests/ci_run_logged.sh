@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ci_run_logged.sh LOGFILE CMD [ARGS...]
 #
-# Nightly durable-diagnostics wrapper (Slice 6, docs/ci_architecture_design.md
+# Nightly durable-diagnostics wrapper (docs/ci_architecture_design.md
 # Appendix F). Runs CMD, captures its COMBINED stdout+stderr to LOGFILE (a
 # deterministic path), and exits with CMD's REAL exit status - so a failing
 # command still fails the job, AND the unattended nightly leaves a downloadable

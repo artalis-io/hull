@@ -1,5 +1,5 @@
 /*
- * tool.c — Tool mode: unsandboxed Lua VM for hull build tools
+ * tool.c - Tool mode: unsandboxed Lua VM for hull build tools
  *
  * Provides hull_tool() for running Lua stdlib modules with controlled
  * process/filesystem access, and hull_keygen() for Ed25519 key generation.
@@ -66,7 +66,7 @@ int hull_keygen(int argc, char **argv)
     fprintf(f, "\n");
     fclose(f);
 
-    /* Write hex-encoded secret key (mode 0600 — owner-only) */
+    /* Write hex-encoded secret key (mode 0600 - owner-only) */
     int sk_fd = open(sk_file, O_WRONLY | O_CREAT | O_TRUNC, 0600);
     if (sk_fd < 0) {
         fprintf(stderr, "hull keygen: cannot write %s\n", sk_file);
@@ -89,7 +89,7 @@ int hull_keygen(int argc, char **argv)
         p[i] = 0;
 
     printf("wrote %s (public key)\n", pk_file);
-    printf("wrote %s (secret key — keep safe!)\n", sk_file);
+    printf("wrote %s (secret key - keep safe!)\n", sk_file);
     return 0;
 }
 
@@ -103,9 +103,9 @@ int hull_keygen(int argc, char **argv)
  *   --compiler=system   (equals-separated)
  * Returns compiler name (or NULL for default).
  */
-/* Returns a function that does nothing — used as the __index of the
+/* Returns a function that does nothing - used as the __index of the
  * tool-mode stub table so chained attribute access (e.g. `db.exec(...)`)
- * doesn't fault. The returned function is reused — same closure every
+ * doesn't fault. The returned function is reused - same closure every
  * time, with `return nil` semantics. */
 static int hl_tool_noop_fn(lua_State *L) { (void)L; return 0; }
 int hl_tool_noop_index(lua_State *L)
@@ -239,7 +239,7 @@ int hull_tool(const char *module, int argc, char **argv, const char *hull_exe)
      *
      *   1. `require("hull.X")` works for every native (apps after
      *      phase 2b top-level-require their deps).
-     *   2. `crypto.X`, `db.X`, … are reachable as globals — tool .lua
+     *   2. `crypto.X`, `db.X`, … are reachable as globals - tool .lua
      *      modules are trusted hull internals shipped with hull and
      *      pre-date the import-only refactor.
      *
@@ -250,7 +250,7 @@ int hull_tool(const char *module, int argc, char **argv, const char *hull_exe)
      *       install a chain-friendly nop table into LUA_LOADED_TABLE so
      *       `local db = require("hull.db")` succeeds and `db.exec(...)`
      *       silently no-ops. Tool-mode never invokes route handlers, so
-     *       the no-op stub is safe — only top-level code runs to set
+     *       the no-op stub is safe - only top-level code runs to set
      *       the manifest.
      *
      *   (b) Promote every entry in LUA_LOADED_TABLE to a global of the
@@ -303,7 +303,7 @@ int hull_tool(const char *module, int argc, char **argv, const char *hull_exe)
         }
 
         lua_pop(L, 2);  /* pop __hull_modules + _LOADED */
-        /* Keep nop_ref alive — released when the VM is freed. */
+        /* Keep nop_ref alive - released when the VM is freed. */
     }
 
     /* (b) Promote registry-known modules in _LOADED to short-name globals
@@ -322,7 +322,7 @@ int hull_tool(const char *module, int argc, char **argv, const char *hull_exe)
             const char *cname = all[i].name;
             if (strncmp(cname, "hull/", 5) != 0) continue;
             const char *short_name = cname + 5;
-            /* Skip nested names like "middleware/session" — those are
+            /* Skip nested names like "middleware/session" - those are
              * stdlib .lua modules accessed via require, never as a
              * global (no Lua identifier could spell that). */
             if (strchr(short_name, '/')) continue;

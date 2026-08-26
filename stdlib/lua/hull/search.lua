@@ -222,7 +222,7 @@ end
 --   `{ column = N, tokens = N, before = "<b>", after = "</b>", ellipsis = "..." }`
 --   Adds a `snippet` column to each result row.
 -- @tparam[opt] table opts.highlight
---   `{ column = N, before = "<b>", after = "</b>" }` —
+--   `{ column = N, before = "<b>", after = "</b>" }` -
 --   adds a `highlight` column.
 -- @tparam[opt="rank"] string opts.order  `"rank"` or `"rowid"`.
 -- @treturn {table,...}  Array of `{id, rank, snippet?, highlight?}` rows.

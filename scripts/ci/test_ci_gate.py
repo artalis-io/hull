@@ -102,7 +102,7 @@ expect("realistic PR (benchmark skipped, rest success)",
          cosmo="success", lint="success", benchmark="skipped"),
        allow_skip=("benchmark",), should_pass=True)
 
-# -- Slice 5A: the wamrc producer/verify are compute-grouped. On a compute-
+# -- the wamrc producer/verify are compute-grouped. On a compute-
 #    applicable plan they are NOT allowed skips, so a producer failure (which
 #    skips its consumer via `needs`) and a consumer verification failure BOTH
 #    reach a RED gate; on a non-compute plan they legitimately skip. The allow-skip

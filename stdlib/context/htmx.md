@@ -140,7 +140,7 @@ Handler returns empty body; `hx-swap="delete"` removes the element.
 | `req.ctx.csrf_token` | `req.ctx.csrf_token` | snake_case in both |
 
 Templates use snake_case literals (`{{ csp_nonce }}`, `{{ csrf_token }}`)
-in BOTH runtimes — handlers pass `csp_nonce = req.ctx.csp_nonce` (Lua)
+in BOTH runtimes - handlers pass `csp_nonce = req.ctx.csp_nonce` (Lua)
 or `csp_nonce: req.ctx.csp_nonce` (JS). Same template HTML files work
 for both apps.
 
@@ -205,13 +205,13 @@ The scaffold ships dev-friendly defaults. Before deploying:
 
 ## See also
 
-- `docs/htmx.md` — long-form pattern guide with flash messages,
+- `docs/htmx.md` - long-form pattern guide with flash messages,
   empty states, `hx-swap-oob`, the security model rationale.
-- `examples/hypermedia_todo/` — the canonical scaffolded app, both
+- `examples/hypermedia_todo/` - the canonical scaffolded app, both
   runtimes, runs under `hull test`.
-- `auth` task context — for replacing the anonymous session
+- `auth` task context - for replacing the anonymous session
   bootstrap with a real login flow.
-- `templates` task context — template syntax, inheritance, filters.
-- `testing` task context — full test framework reference.
+- `templates` task context - template syntax, inheritance, filters.
+- `testing` task context - full test framework reference.
 - HTMX upstream: <https://htmx.org/docs/>.
 - Pico v2 docs: <https://picocss.com/docs/>.

@@ -1,5 +1,5 @@
 /*
- * gpu_wgpu.c — wgpu-native backend for GPU compute
+ * gpu_wgpu.c - wgpu-native backend for GPU compute
  *
  * Implements the HlGpuBackend vtable using wgpu-native v27.
  * Uses auto-layout pipelines, staging buffers for readback,
@@ -416,7 +416,7 @@ static int wgpu_compile(HlGpuDevice *dev, const char *name,
 
     (void)name;
 
-    /* Clear error flag — wgpu surfaces errors via callback, not NULL */
+    /* Clear error flag - wgpu surfaces errors via callback, not NULL */
     wgpu_last_error = 0;
 
     /* Create shader module from WGSL source (v27: WGPUShaderSourceWGSL) */
@@ -727,7 +727,7 @@ static int wgpu_dispatch(HlGpuDevice *dev, HlGpuPipeline *pipeline,
 
     {
         /* Get bind group layout lazily (deferred from compile to handle
-         * shaders with zero bindings — GetBindGroupLayout(0) panics
+         * shaders with zero bindings - GetBindGroupLayout(0) panics
          * when there are no bind groups). */
         WGPUBindGroupLayout layout = (WGPUBindGroupLayout)pipeline->bind_group_layout;
         if (!layout) {
@@ -1051,7 +1051,7 @@ static int wgpu_dispatch_pipeline(HlGpuDevice *dev,
 
     /* ── Pass 1: compute max size per named buffer across all stages ── */
     /* (Simple approach: first-create wins; names with larger sizes
-     *  declared later don't resize — users should declare max size first.
+     *  declared later don't resize - users should declare max size first.
      *  Document: declare the largest size in the earliest stage.) */
     /* Actually, per user request: use max size. Pre-scan all stages. */
     typedef struct { const char *name; size_t max_size; } SizeEntry;

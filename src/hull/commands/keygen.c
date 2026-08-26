@@ -1,7 +1,7 @@
 /*
- * commands/keygen.c — hull keygen subcommand
+ * commands/keygen.c - hull keygen subcommand
  *
- * Pure C implementation — generates Ed25519 keypair.
+ * Pure C implementation - generates Ed25519 keypair.
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */

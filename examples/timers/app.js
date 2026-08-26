@@ -1,11 +1,11 @@
-// Background Timers — Hull + QuickJS example
+// Background Timers - Hull + QuickJS example
 //
 // Run: hull app.js -p 3000
 // Test: curl localhost:3000/health
 //       curl localhost:3000/heartbeats
 //       curl localhost:3000/counter
 //
-// Demonstrates app.every() and app.daily() — background timers
+// Demonstrates app.every() and app.daily() - background timers
 // that fire on the event loop thread with full async support.
 
 import { app } from "hull:app";
@@ -64,4 +64,4 @@ app.get("/counter", (_req, res) => {
     res.json(rows);
 });
 
-log.info("Timers example loaded — background timers registered");
+log.info("Timers example loaded - background timers registered");

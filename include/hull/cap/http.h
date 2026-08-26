@@ -1,5 +1,5 @@
 /*
- * cap/http.h — HTTP client capability with host allowlist
+ * cap/http.h - HTTP client capability with host allowlist
  *
  * Thin wrapper around Keel's HTTP client (keel/client.h) that adds
  * host allowlist checking and audit logging.
@@ -15,7 +15,7 @@
 /* Forward declarations for optional modules */
 typedef struct KlClientPool KlClientPool;
 
-/* Backward-compatible typedef — Hull code uses HlHttpHeader for request headers */
+/* Backward-compatible typedef - Hull code uses HlHttpHeader for request headers */
 typedef KlClientHeader HlHttpHeader;
 
 /**
@@ -26,7 +26,7 @@ typedef struct HlHttpConfig {
     int              count;            /**< Number of allowed hosts */
     int              timeout_ms;       /**< Connect/send/recv timeout (default: 30000) */
     size_t           max_response_size;/**< Max response body bytes (default: 4 MB) */
-    KlTlsConfig     *tls;             /**< KlTlsConfig* for HTTPS — NULL = no HTTPS */
+    KlTlsConfig     *tls;             /**< KlTlsConfig* for HTTPS - NULL = no HTTPS */
     KlClientPool    *pool;             /**< Connection pool (NULL = no pooling) */
     int              follow_redirects; /**< 1 = follow 3xx redirects (default) */
     int              max_redirects;    /**< Max redirect hops (0 = Keel default 10) */

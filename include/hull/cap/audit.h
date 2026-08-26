@@ -3,7 +3,7 @@
  * @brief Capability audit logging.
  *
  * Structured JSON audit lines to stderr, gated by #hl_audit_enabled.
- * Zero overhead when disabled — the writer returned by #hl_audit_begin
+ * Zero overhead when disabled - the writer returned by #hl_audit_begin
  * carries `error=1` which makes all subsequent `sh_json_write_*` calls
  * no-ops at the inline-function level.
  *

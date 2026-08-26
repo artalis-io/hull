@@ -1,5 +1,5 @@
 /*
- * cap/db_backend.h — Database backend vtable
+ * cap/db_backend.h - Database backend vtable
  *
  * Decouples the query engine from SQLite via a pluggable vtable.
  * Enables pure compute apps (no DB), future alternative backends
@@ -159,7 +159,7 @@ typedef struct HlDbBackend {
     const char *(*errmsg)(HlDbHandle *h);
     void   (*guard_stale_txn)(HlDbHandle *h);  /* NULL = no-op */
 
-    /* Dialect-aware SQL helpers — moved into the vtable so the
+    /* Dialect-aware SQL helpers - moved into the vtable so the
      * stdlib stays DB-agnostic.
      *
      * insert_if_absent: `INSERT OR IGNORE` (SQLite) /
@@ -376,8 +376,8 @@ const HlDbBackend *hl_db_backend_select(const char *dsn, const char **err);
  * hl_db_backend_select iterates it after the base BACKENDS[].
  *
  * The base ships a WEAK default returning an empty set (a base build has no
- * feature backends). A feature build links a STRONG override — a generated
- * const registry that references each composed feature's backend — which the
+ * feature backends). A feature build links a STRONG override - a generated
+ * const registry that references each composed feature's backend - which the
  * linker prefers. The override MUST be a direct object (not an archive member)
  * so it displaces the weak default. See docs/features_and_flavors.md §3.2.
  */

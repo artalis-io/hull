@@ -1,5 +1,5 @@
 /*
- * cap/gpu_feature.c — composable-feature hook for the GPU backend.
+ * cap/gpu_feature.c - composable-feature hook for the GPU backend.
  *
  * Base-resident weak default: a base build carries no GPU backend, so this
  * returns none. A `hull build --with=gpu` build links a STRONG override (a

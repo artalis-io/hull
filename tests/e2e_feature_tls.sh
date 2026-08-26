@@ -1,5 +1,5 @@
 #!/bin/sh
-# e2e_feature_tls.sh — TLS as a composable feature (docs/tls_feature.md, a2).
+# e2e_feature_tls.sh - TLS as a composable feature (docs/tls_feature.md, a2).
 #
 # Proves the "Keel move" compose end to end: a tls-less base
 # (HL_TLS_FEATURE=1: drops mbedTLS + the crypto/tls transport backends + Keel's
@@ -79,7 +79,7 @@ w=$(nm "$W/web/bin" 2>/dev/null | grep -c "$hs" || true)
 [ "$w" -ge 1 ] || fail "auto-composed HTTPS app has no mbedTLS (should come from the archive)"
 echo "ok  auto-inference: plain hull build on a tls-less base composes tls (HTTPS app links mbedTLS)"
 
-# 5. THE PAYOFF — a tls-free CLI app on the tls-less base composes no TLS, so the
+# 5. THE PAYOFF - a tls-free CLI app on the tls-less base composes no TLS, so the
 # produced binary links with ZERO mbedTLS (the weak hl_tls_* seam fails closed;
 # release_io's signature verify still works, it just can't open an HTTPS socket).
 mkdir -p "$W/cli"
@@ -96,7 +96,7 @@ out=$("$HULL" build --no-verify-platform "$W/cli" -o "$W/cli/bin" 2>&1) \
 echo "$out" | grep -qi "composed TLS feature" \
     && fail "tls-free app should compose no TLS, got: $out" || true
 n=$(nm "$W/cli/bin" 2>/dev/null | grep -c "$hs" || true)
-[ "$n" = 0 ] || fail "tls-free app still carries mbedTLS ($n mbedtls_ssl_handshake) — the drop regressed"
+[ "$n" = 0 ] || fail "tls-free app still carries mbedTLS ($n mbedtls_ssl_handshake) - the drop regressed"
 rc=0; "$W/cli/bin" >/dev/null 2>"$W/cli.err" || rc=$?
 [ "$rc" = 0 ] || { echo "--- tls-free app stderr ---"; cat "$W/cli.err"; \
     fail "tls-free app should run (exit 0), got $rc"; }

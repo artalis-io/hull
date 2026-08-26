@@ -3,7 +3,7 @@
 
 Streaming `multipart/form-data` parser. Routes opt in via
 `{ multipart = {...} }`; handlers pull parts from an iterator. No
-`req.body` for these routes — the iterator IS the body.
+`req.body` for these routes - the iterator IS the body.
 
 ```lua
 -- Lua
@@ -35,7 +35,7 @@ app.post("/upload", async (req, res) => {
 }, { multipart: { maxPartSize: 64 * 1024 * 1024 } });
 ```
 
-No `manifest.modules` entry needed — multipart is a routing option, not
+No `manifest.modules` entry needed - multipart is a routing option, not
 a module. `hull/http-server@1` covers it.
 
 <!-- compact -->
@@ -84,21 +84,21 @@ app.post("/upload", async (req, res) => {
 }, { multipart: { maxParts: 16, maxTotalSize: 32 * 1024 * 1024 } });
 ```
 
-Works for both single-read and multi-read bodies — Keel v2.2.0
+Works for both single-read and multi-read bodies - Keel v2.2.0
 dispatches the handler BEFORE feeding leftover body bytes, so the
 handler is alive when a cap trips inside `on_data`.
 
 ## Part fields + binary safety
 
-- `part.name` — form field name (always set)
-- `part.filename` — `nil`/`null` for text fields, string for file uploads
-- `part.content_type` (Lua) / `part.contentType` (JS) — from
+- `part.name` - form field name (always set)
+- `part.filename` - `nil`/`null` for text fields, string for file uploads
+- `part.content_type` (Lua) / `part.contentType` (JS) - from
   `Content-Type` header
 
 Reads are binary-safe: Lua returns byte-clean strings (`#chunk = bytes`),
-JS returns `ArrayBuffer` (never JS strings — would UTF-8-mangle binary
+JS returns `ArrayBuffer` (never JS strings - would UTF-8-mangle binary
 input). To decode text fields in JS use `new TextDecoder().decode(buf)`
-(QuickJS doesn't bundle it — supply your own polyfill or use a manual
+(QuickJS doesn't bundle it - supply your own polyfill or use a manual
 ASCII loop for known-ASCII fields).
 
 ## Incremental SHA-256 (`crypto.create_sha256` / `crypto.createSha256`)
@@ -123,10 +123,10 @@ const sha = h.digest();
 ## Hash + size inventory (no disk persistence)
 
 The iterator returns bytes; persistent storage isn't in the stdlib
-yet (roadmap §1.5.b-4 — `hull/attachment@1`, content-addressed disk
+yet (roadmap §1.5.b-4 - `hull/attachment@1`, content-addressed disk
 storage). Until that ships, the realistic pattern is to hash + size
 each part as it streams and emit a JSON inventory. Memory stays
-O(chunk_size) regardless of upload size — `crypto.create_sha256` is
+O(chunk_size) regardless of upload size - `crypto.create_sha256` is
 the streaming digest; the bytes themselves are dropped after each
 update.
 
@@ -182,7 +182,7 @@ app.post("/upload", async (req, res) => {
                 });
             } else {
                 const buf = await part.read();
-                // Text fields are still ArrayBuffers — decode as needed.
+                // Text fields are still ArrayBuffers - decode as needed.
                 let s = "";
                 const u8 = new Uint8Array(buf);
                 for (let i = 0; i < u8.length; i++) s += String.fromCharCode(u8[i]);
@@ -261,9 +261,9 @@ side contract.
   references to `part` across iter steps.
 - **One iterator per request.** Calling `req:multipart()` /
   `req.multipart()` more than once returns iterators that share parser
-  state — the first one consumes; the rest see `DONE`.
+  state - the first one consumes; the rest see `DONE`.
 - **Auto-drain.** Not reading a part's body (no `:read()` / `.read()`,
-  no `chunks` loop) is fine — the iterator drains pending `PART_DATA`
+  no `chunks` loop) is fine - the iterator drains pending `PART_DATA`
   events before advancing to the next part.
 - **`chunks(n)` hint is advisory.** Each parser event yields one
   chunk; the `n` minimum-bytes hint isn't enforced yet (coalescing is
@@ -271,7 +271,7 @@ side contract.
 
 ## Testing
 
-Multipart routes need a live connection — in-process `hull test`
+Multipart routes need a live connection - in-process `hull test`
 dispatch raises on the first `NEED_DATA`. End-to-end coverage lives in
 `tests/e2e_multipart.sh` (run `make e2e-multipart`); patterns to copy:
 the cap-rejection scenarios use `pcall` / try-catch + assert on the
@@ -279,8 +279,8 @@ status code and the JSON error body.
 
 ## See also
 
-- `docs/multipart.md` — full architecture: parser, parking, dispatch
+- `docs/multipart.md` - full architecture: parser, parking, dispatch
   contract, Keel version trail
-- `examples/multipart_upload/` — runnable Lua + JS demo
-- `crypto.create_sha256` / `crypto.createSha256` — also useful outside
+- `examples/multipart_upload/` - runnable Lua + JS demo
+- `crypto.create_sha256` / `crypto.createSha256` - also useful outside
   multipart for any streaming digest

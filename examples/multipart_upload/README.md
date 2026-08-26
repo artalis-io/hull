@@ -1,4 +1,4 @@
-# multipart_upload — streaming file uploads
+# multipart_upload - streaming file uploads
 
 A minimal demonstration of `req:multipart()` (Lua) / `req.multipart()`
 (JS). Accepts `multipart/form-data` bodies, streams parts on demand,
@@ -48,7 +48,7 @@ Sample response:
 - Streaming file bodies via `part:chunks()` / `part.chunks()`, hashing
   on the fly with `crypto.sha256`.
 - Reading text fields via `part:read()` / `await part.read()`.
-- Per-file size cap enforced inside the handler — the parser's
+- Per-file size cap enforced inside the handler - the parser's
   `max_part_size` is the outer wall; the handler's running total is
   the inner one (so the response can be a structured 413 instead of a
   500).
@@ -56,7 +56,7 @@ Sample response:
 ## What's NOT demonstrated
 
 - **On-disk persistence.** This example holds bytes in memory long
-  enough to compute a hash and then drops them — there's intentionally
+  enough to compute a hash and then drops them - there's intentionally
   no `fs.write` call. The `hull/attachment@1` stdlib module (later
   release) wires content-addressed storage, dedup, a metadata table,
   and refcount GC on top of this iterator. See

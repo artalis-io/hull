@@ -1,7 +1,7 @@
 /*
- * test_js_session.c - Slice 1: the restricted QuickJS tooling runtime.
+ * test_js_session.c - the restricted QuickJS tooling runtime.
  *
- * Proves, independently of any parser (Slice 2): the crossing (source bytes reach the
+ * Proves, independently of any parser the crossing (source bytes reach the
  * bundled JS length-aware + NUL-safe), multi-module loading from the cli-js registry, the
  * security boundary (no application authority in the tooling VM), that dynamic code is
  * fully blocked (including prototype-reachable constructors), never-raise transport

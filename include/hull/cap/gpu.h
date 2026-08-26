@@ -241,7 +241,7 @@ typedef struct HlGpuBackend {
     int   (*init)(void **out_ctx);
     void  (*destroy)(HlGpuCtx *ctx);
 
-    /* Device enumeration — populates devices[] array */
+    /* Device enumeration - populates devices[] array */
     int   (*enumerate_devices)(HlGpuCtx *ctx,
                                HlGpuDevice *devices, int max_devices);
 

@@ -1,5 +1,5 @@
 /*
- * ws.c — Lua WebSocket server callback trampolines
+ * ws.c - Lua WebSocket server callback trampolines
  *
  * Maps Keel's per-connection WebSocket callbacks (on_open/on_message/
  * on_close) to Lua handler functions registered via `app.ws()`. Each
@@ -48,7 +48,7 @@ void hl_lua_ws_on_open(KlWsServerConn *ws_conn, void *user_data)
     int thread_ref = luaL_ref(lua->L, LUA_REGISTRYINDEX);
     lua->active_co = co;
     lua->active_thread_ref = thread_ref;
-    lua->active_conn = NULL; /* detached — no HTTP connection */
+    lua->active_conn = NULL; /* detached - no HTTP connection */
     lua->active_req = NULL;
     lua->active_timer = NULL;
 
@@ -77,7 +77,7 @@ void hl_lua_ws_on_open(KlWsServerConn *ws_conn, void *user_data)
         lua->active_co = NULL;
         lua->dispatch_depth--;
     } else if (status == LUA_YIELD) {
-        /* Handler yielded — async op in flight (detached mode).
+        /* Handler yielded - async op in flight (detached mode).
          * dispatch_depth stays elevated. */
     } else {
         const char *err = lua_tostring(co, -1);
@@ -227,7 +227,7 @@ void hl_lua_ws_on_close(KlWsServerConn *ws_conn, uint16_t code,
             lua->active_co = NULL;
             lua->dispatch_depth--;
         } else if (status == LUA_YIELD) {
-            /* Async op in flight — the continuation captured `conn`; the
+            /* Async op in flight - the continuation captured `conn`; the
              * teardown is deferred to hl_lua_async_resume's completion. Do
              * NOT invalidate/remove the conn here while the handler still
              * references it. */

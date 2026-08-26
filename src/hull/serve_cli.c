@@ -1,5 +1,5 @@
 /*
- * serve_cli.c — `hull run` driver for HL_ENABLE_HTTP_SERVER=0 builds.
+ * serve_cli.c - `hull run` driver for HL_ENABLE_HTTP_SERVER=0 builds.
  *
  * Replaces serve.c on CLI builds. The flow:
  *   1. Parse CLI args (`-d <path>`, `--no-migrate`, `--no-sandbox`,
@@ -192,7 +192,7 @@ int hull_serve(int argc, char **argv)
     HlAsyncBackendPool *pool = NULL;
     if (be->pool_create(&pool, async_ctx, 4, 64) != 0) {
         pool = NULL;
-        fprintf(stderr, "[hull:cli] thread pool init failed — async ops unavailable\n");
+        fprintf(stderr, "[hull:cli] thread pool init failed - async ops unavailable\n");
     }
 
     /* Phase 1 sandbox: block exec/proc/fork before loading user code.
@@ -206,7 +206,7 @@ int hull_serve(int argc, char **argv)
         }
     }
 
-    /* Init app context — runs migrations + loads the app. */
+    /* Init app context - runs migrations + loads the app. */
     HlAppContext *ctx = NULL;
     HlAppContextOpts opts = {
         .app_dir         = app_dir,
@@ -237,7 +237,7 @@ int hull_serve(int argc, char **argv)
     rt->async_ctx = async_ctx;
     rt->thread_pool = pool;
 
-    /* CLI mode requires app.main — server routes can't be registered
+    /* CLI mode requires app.main - server routes can't be registered
      * on HL_ENABLE_HTTP_SERVER=0 builds (the bindings are dropped). */
     if (!rt->vt->has_main || !rt->vt->has_main(rt)) {
         fprintf(stderr,
@@ -276,7 +276,7 @@ int hull_serve(int argc, char **argv)
 
 #ifdef HL_ENABLE_HTTP_CLIENT
     /* http.fetch needs allowlisted hosts + a TLS client for https://.
-     * The embedded Mozilla CA bundle is the default trust anchor —
+     * The embedded Mozilla CA bundle is the default trust anchor -
      * matches the resolution order in serve.c minus the system-store
      * probe (which adds platform-specific cruft we don't need for CLI). */
     HlHttpConfig http_cfg = {0};

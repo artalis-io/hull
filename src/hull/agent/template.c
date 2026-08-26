@@ -1,5 +1,5 @@
 /*
- * agent/template.c — `hull agent template <name> <data.json>`:
+ * agent/template.c - `hull agent template <name> <data.json>`:
  * render a template with provided JSON data and return the output.
  *
  * Useful for verifying a template renders correctly in isolation,
@@ -41,12 +41,12 @@ static int render_lua(HlLua *lua, const char *template_name,
     lua_State *L = lua->L;
     /* Push:  require("hull.template").render(name, json.decode(data_json))
      *
-     * `%q` is a Lua string.format specifier, not a C one — using it in
+     * `%q` is a Lua string.format specifier, not a C one - using it in
      * snprintf would compile under most compilers but tripped
      * -Wformat-invalid-specifier in CI's static analysis pass. Reject
      * any unsafe character in the template name up-front so we can use
      * a plain single-quoted literal in the generated Lua. Template
-     * names are filesystem paths under templates/ — alnum + dot/slash/
+     * names are filesystem paths under templates/ - alnum + dot/slash/
      * underscore/dash is plenty.
      */
     for (const char *c = template_name; *c; c++) {
@@ -104,7 +104,7 @@ static int render_js(HlJS *js, const char *template_name,
                      const char *data_json, ShJsonBuf *out)
 {
     /* Use JS_ParseJSON for the data argument and JS_NewString for the
-     * template name — both safe regardless of contents. (An earlier
+     * template name - both safe regardless of contents. (An earlier
      * snprintf-based snippet builder was dead code; removed per M-2.) */
     JSContext *ctx = js->ctx;
     JSValue tpl_arg = JS_NewString(ctx, template_name ? template_name : "");

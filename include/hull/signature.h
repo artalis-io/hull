@@ -17,7 +17,7 @@
  * `files[<name>]`.
  *
  * A third (separate) signature lives in `hull.sha256.sig` for the `hull`
- * binary itself — see `release.h` and `commands/update.h`.
+ * binary itself - see `release.h` and `commands/update.h`.
  *
  * @par Canonical payload:
  *   The signed message is the canonical-JSON serialization of
@@ -42,7 +42,7 @@ typedef struct ShJsonValue ShJsonValue;
 /* ── Hardcoded gethull.dev platform public key ────────────────────── */
 /*
  * Trust root for platform-layer signature verification (inner layer of
- * package.sig — see docs/security.md). The matching secret half lives
+ * package.sig - see docs/security.md). The matching secret half lives
  * in two places only: the maintainer's ~/.hull/keys/platform.key (with
  * offline backup) and the HULL_PLATFORM_KEY GitHub Actions secret on
  * artalis-io/hull (set when sign-platform is wired into CI). Never in
@@ -69,7 +69,7 @@ typedef struct ShJsonValue ShJsonValue;
  * Forks override this at compile time:
  *   make CFLAGS_EXTRA=-DHL_PLATFORM_PUBKEY_HEX=\"<your hex>\"
  * to pin their own platform-signing key. The all-zeros sentinel still
- * works as an "I am a dev hull without a pinned key" signal — both
+ * works as an "I am a dev hull without a pinned key" signal - both
  * `hl_verify_startup` and `tool.platform_pubkey()` treat all-zeros as
  * "no pinned key, skip the gethull layer with a one-shot warning". */
 #ifndef HL_PLATFORM_PUBKEY_HEX
@@ -122,8 +122,8 @@ typedef struct {
     /* Application layer fields */
     const char *binary_hash_hex;      /* SHA-256 of the APE binary */
     const char *trampoline_hash_hex;  /* SHA-256 of app_main.c */
-    const char *signature_hex;        /* 128 hex chars — app developer's sig */
-    const char *public_key_hex;       /* 64 hex chars — app developer's pk */
+    const char *signature_hex;        /* 128 hex chars - app developer's sig */
+    const char *public_key_hex;       /* 64 hex chars - app developer's pk */
 
     /* Parsed DOM nodes for canonical JSON reconstruction in verify */
     ShJsonValue *build_value;            /* "build" object (or NULL) */
@@ -144,7 +144,7 @@ typedef struct {
  *
  * On success, all strings in `*sig` are arena-allocated and freed by
  * @ref hl_sig_free. On failure, `*sig` is left in a partially-initialized
- * state — call @ref hl_sig_free anyway (it's safe on partial state).
+ * state - call @ref hl_sig_free anyway (it's safe on partial state).
  *
  * @return 0 on success, -1 on read/parse error.
  */
@@ -201,7 +201,7 @@ void hl_sig_free(HlSignature *sig);
  * (dev mode, derived from the entry-point path).
  *
  * @param pubkey_path        Path to developer `.pub` file (64 hex chars).
- * @param entry_point        Path to the app entry point — used to locate sig.
+ * @param entry_point        Path to the app entry point - used to locate sig.
  * @param app_vfs            App VFS for embedded entry lookup.
  * @param no_verify_platform If non-zero, skip the v0.1.3 gethull
  *                           platform-sig layer (`package.sig.platform.gethull`).

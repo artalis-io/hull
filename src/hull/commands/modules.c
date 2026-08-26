@@ -1,10 +1,10 @@
 /*
- * commands/modules.c — `hull modules` subcommand.
+ * commands/modules.c - `hull modules` subcommand.
  *
  * Three forms:
- *   hull modules list [APP_DIR]   — what an app declares (parsed via Lua tool)
- *   hull modules available        — full first-party registry
- *   hull modules explain <NAME>   — spec for one module
+ *   hull modules list [APP_DIR]   - what an app declares (parsed via Lua tool)
+ *   hull modules available        - full first-party registry
+ *   hull modules explain <NAME>   - spec for one module
  *
  * `--json` (global flag) toggles machine-readable output. The `list`
  * form delegates to a tiny Lua helper that mirrors `hull manifest`'s
@@ -163,7 +163,7 @@ static int cmd_available(int argc, char **argv, const HlCommandEnv *env)
         return 0;
     }
 
-    printf("First-party Hull module registry — %zu entries\n", total);
+    printf("First-party Hull module registry - %zu entries\n", total);
 
     /* Section grouping (v0.2.0): show the namespace shape so a user
      * eyeballing the list sees the web/ cluster as a unit. Registry
@@ -233,7 +233,7 @@ static int cmd_explain(int argc, char **argv, const HlCommandEnv *env)
 
 /* ── list ────────────────────────────────────────────────────────── */
 /*
- * `hull modules list` delegates to a Lua tool — extracting the
+ * `hull modules list` delegates to a Lua tool - extracting the
  * manifest needs the runtime to load the app's `app.lua` / `app.js`,
  * which is exactly what every other manifest-introspection command
  * already does (`hull manifest`, `hull inspect`). The Lua helper

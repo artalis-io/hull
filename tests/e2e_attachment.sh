@@ -1,5 +1,5 @@
 #!/bin/sh
-# E2E tests for hull/attachment@1 (Lua + JS) — PR 1 scope: init,
+# E2E tests for hull/attachment@1 (Lua + JS) - PR 1 scope: init,
 # store, metadata, read.
 #
 # Architecture (mirrors e2e_multipart.sh):
@@ -33,12 +33,12 @@ RUNTIME=${RUNTIME:-all}
 SERVER_PID=""
 
 if [ ! -x "$HULL" ]; then
-    echo "e2e_attachment: hull binary not found at $HULL — run 'make' first"
+    echo "e2e_attachment: hull binary not found at $HULL - run 'make' first"
     exit 1
 fi
 
 pass() { PASS=$((PASS + 1)); echo "  PASS: $1"; }
-fail() { FAIL=$((FAIL + 1)); echo "  FAIL: $1${2:+ — $2}"; }
+fail() { FAIL=$((FAIL + 1)); echo "  FAIL: $1${2:+ - $2}"; }
 
 contains() {
     # $1 = description, $2 = expected substring, $3 = haystack
@@ -94,15 +94,15 @@ hash_file() {
 IMG_SHA=$(hash_file "$TMPDIR_WORK/img.png")
 # Same exact bytes for dedup verification (different filename).
 cp "$TMPDIR_WORK/img.png" "$TMPDIR_WORK/img2.png"
-# PDF magic — used by the mime-allowlist rejection scenario.
+# PDF magic - used by the mime-allowlist rejection scenario.
 printf '%%PDF-1.4\n%%\xE2\xE3\xCF\xD3\n' > "$TMPDIR_WORK/doc.pdf"
-# 5 KiB PNG-prefixed payload — passes the multipart cap (32 KiB on
+# 5 KiB PNG-prefixed payload - passes the multipart cap (32 KiB on
 # the upload route) AND the allowlist sniff, but trips attachment's
 # 4 KiB max_size cap, so the rejection comes from attachment.store
 # (not from the multipart parser).
 { printf '\211PNG\r\n\032\n'; dd if=/dev/urandom bs=1024 count=5 2>/dev/null; } > "$TMPDIR_WORK/big.png"
 # Non-ASCII filename for the RFC 5987 Content-Disposition encoding
-# parity check — accented Latin + CJK + supplementary-plane emoji
+# parity check - accented Latin + CJK + supplementary-plane emoji
 # all in one filename so we shake out UTF-16 surrogate / UTF-8
 # encoding bugs in either runtime.
 cp "$TMPDIR_WORK/img.png" "$TMPDIR_WORK/résumé文档📄.png"
@@ -124,7 +124,7 @@ local attachment = require("hull.attachment")
 local attachment_serve = require("hull.web.attachment-serve")
 local blob = require("hull.blob")
 
--- /health — pre-body, doesn't need multipart route plumbing.
+-- /health - pre-body, doesn't need multipart route plumbing.
 app.get("/health", function(_, res) res:text("ok") end)
 
 -- Initialize storage on startup. blob.init needs the fs cap which
@@ -167,7 +167,7 @@ app.get("/attachments/:id/metadata", function(req, res)
     res:json(meta)
 end)
 
--- Round-trip verification via SHA-256 over the read() bytes — still
+-- Round-trip verification via SHA-256 over the read() bytes - still
 -- handy alongside serve() so we can verify bytes match without
 -- depending on the auth-gated path.
 local crypto = require("hull.crypto")
@@ -183,7 +183,7 @@ app.post("/attachments/:id/delete", function(req, res)
     res:json({ ok = ok })
 end)
 
--- PR 2: read_to_file — materialise to disk under the fs.write allowlist.
+-- PR 2: read_to_file - materialise to disk under the fs.write allowlist.
 app.post("/attachments/:id/dump", function(req, res)
     local n = attachment.read_to_file(req.params.id, "data/dumped.bin")
     if not n then res:status(404):json({ error = "not found" }); return end
@@ -269,7 +269,7 @@ app.get("/attachments/:id/metadata", (req, res) => {
     res.json(meta);
 });
 
-// Round-trip verification via SHA-256 over the read() bytes — still
+// Round-trip verification via SHA-256 over the read() bytes - still
 // handy alongside serve() so we can verify bytes match without
 // depending on the auth-gated path.
 app.get("/attachments/:id/sha", (req, res) => {
@@ -284,7 +284,7 @@ app.post("/attachments/:id/delete", (req, res) => {
     res.json({ ok });
 });
 
-// PR 2: readToFile — materialise to disk under the fs.write allowlist.
+// PR 2: readToFile - materialise to disk under the fs.write allowlist.
 app.post("/attachments/:id/dump", (req, res) => {
     const n = attachment.readToFile(req.params.id, "data/dumped.bin");
     if (n === null) { res.status(404); res.json({ error: "not found" }); return; }
@@ -322,7 +322,7 @@ run_suite() {
     rm -rf "$TMPDIR_WORK/data" "$TMPDIR_WORK/db.sqlite"
     cd "$TMPDIR_WORK"
     # Pre-create the fs.write declared dir so Linux Landlock's
-    # unveil(2) can pin it — Landlock rejects unveil on non-existent
+    # unveil(2) can pin it - Landlock rejects unveil on non-existent
     # paths, leaving the write allowlist empty and breaking
     # blob.init's mkdir. macOS Seatbelt is permissive about this.
     mkdir -p data
@@ -330,7 +330,7 @@ run_suite() {
     SERVER_PID=$!
     cd - >/dev/null
     if ! wait_for_server "$PORT"; then
-        fail "$SUITE — server startup"
+        fail "$SUITE - server startup"
         cat "$TMPDIR_WORK/server-$SUITE.log" | head -30
         stop_server
         return
@@ -357,7 +357,7 @@ run_suite() {
     contains "$SUITE metadata size"   "\"size\":$IMG_SIZE"        "$META"
     contains "$SUITE metadata rc=1"   '"refcount":1'              "$META"
 
-    # Read round-trip via SHA — proves attachment.read() returns the
+    # Read round-trip via SHA - proves attachment.read() returns the
     # exact original bytes without needing a binary response helper.
     SHA=$(curl -s "http://127.0.0.1:$PORT/attachments/$ID1/sha")
     contains "$SUITE read sha matches" "\"sha256\":\"$IMG_SHA\""  "$SHA"
@@ -430,7 +430,7 @@ run_suite() {
     # halves of Content-Disposition match the expected UTF-8 octet
     # encoding. The Lua sibling uses byte-wise gsub on raw UTF-8;
     # the JS sibling must encode to UTF-8 first because JS strings
-    # are UTF-16 — both should produce IDENTICAL bytes on the wire.
+    # are UTF-16 - both should produce IDENTICAL bytes on the wire.
     R_UNI=$(curl -s -X POST "http://127.0.0.1:$PORT/upload" \
         -F "file=@$TMPDIR_WORK/résumé文档📄.png")
     ID_UNI=$(printf '%s' "$R_UNI" | sed -n 's/.*"id":"\([0-9a-f]\{32\}\)".*/\1/p' | head -1)
@@ -456,7 +456,7 @@ run_suite() {
         contains "$SUITE unicode: ASCII fallback" 'filename="r__sum____________.png"' "$UNI_HDRS"
     fi
 
-    # ── PR 2: read_to_file — materialise to disk + verify SHA ───────
+    # ── PR 2: read_to_file - materialise to disk + verify SHA ───────
     DUMP=$(curl -s -X POST "http://127.0.0.1:$PORT/attachments/$ID1/dump")
     contains "$SUITE read_to_file: ok"            '"ok":true'        "$DUMP"
     contains "$SUITE read_to_file: bytes"         "\"bytes\":$IMG_SIZE" "$DUMP"

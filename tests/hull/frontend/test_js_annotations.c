@@ -1,5 +1,5 @@
 /*
- * test_js_annotations.c - Slice 3: JSDoc @tag scan + structural declaration attachment,
+ * test_js_annotations.c - JSDoc @tag scan + structural declaration attachment,
  * driven through hull:source:parse (the parser attaches during parseInternal).
  *
  * Asserts on the JSON SourceUnit: comment.annotationList (a jsdoc comment's own tags) and the

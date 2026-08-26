@@ -1,5 +1,5 @@
 /*
- * fuzz_lua_source.c — continuous libFuzzer harness for hull.source.lua.
+ * fuzz_lua_source.c - continuous libFuzzer harness for hull.source.lua.
  *
  * Feeds arbitrary bytes to lua.parse() and asserts the parser's INTRINSIC
  * invariants (design: docs/lua_source_fuzz_design.md):

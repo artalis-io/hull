@@ -1,5 +1,5 @@
 /*
- * agent/modules.c — `hull agent modules`: emit declared + intrinsic
+ * agent/modules.c - `hull agent modules`: emit declared + intrinsic
  * module set and the build's capability matrix as JSON.
  *
  * Sibling to `hull agent manifest` and `hull agent capabilities`, but
@@ -35,7 +35,7 @@ static int emit_modules_json(const HlManifest *m, ShJsonBuf *out)
     sh_json_writer_init(&w, sh_json_buf_write, out);
     sh_json_write_object_start(&w);
 
-    /* declared — verbatim from the manifest's modules table */
+    /* declared - verbatim from the manifest's modules table */
     sh_json_write_key(&w, "declared");
     sh_json_write_object_start(&w);
     if (m && m->modules_declared) {
@@ -47,7 +47,7 @@ static int emit_modules_json(const HlManifest *m, ShJsonBuf *out)
     }
     sh_json_write_object_end(&w);
 
-    /* intrinsic — registry entries always admitted regardless of manifest */
+    /* intrinsic - registry entries always admitted regardless of manifest */
     sh_json_write_key(&w, "intrinsic");
     sh_json_write_array_start(&w);
     size_t total = 0;
@@ -57,7 +57,7 @@ static int emit_modules_json(const HlManifest *m, ShJsonBuf *out)
             sh_json_write_string(&w, all[i].name);
     sh_json_write_array_end(&w);
 
-    /* build_caps — which compile-time subsystems are linked in */
+    /* build_caps - which compile-time subsystems are linked in */
     sh_json_write_key(&w, "build_caps");
     sh_json_write_object_start(&w);
 #ifdef HL_ENABLE_DB

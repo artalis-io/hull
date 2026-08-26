@@ -131,7 +131,7 @@ but static linking under LGPL §6 requires either (a) the recipient's ability to
 relink against a modified LGPL version, or (b) bundling LGPL source. Since Hull
 is AGPL-3.0 and ships full source (including `vendor/tcc/` at the pinned commit),
 both conditions are satisfied: the recipient has the source needed to rebuild
-hull against a modified TinyCC. This holds equally for the commercial license —
+hull against a modified TinyCC. This holds equally for the commercial license -
 commercial customers receive (or can pull) the same `vendor/tcc/` tree.
 
 ## Why dual-license

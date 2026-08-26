@@ -1,5 +1,5 @@
 /*
- * tls_transport.c — strong mbedTLS transport override (Keel TLS ctx setup).
+ * tls_transport.c - strong mbedTLS transport override (Keel TLS ctx setup).
  *
  * The STRONG override of the weak hl_tls_* accessors (tls_transport_stub.c). Wraps
  * Keel's kl_tls_mbedtls_* so serve.c / serve_cli.c never reference those symbols

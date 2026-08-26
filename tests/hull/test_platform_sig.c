@@ -1,8 +1,8 @@
 /*
- * test_platform_sig.c — Unit tests for the platform manifest builder,
+ * test_platform_sig.c - Unit tests for the platform manifest builder,
  * signer, verifier, and per-arch extractor.
  *
- * Pure-data exercises with synthetic hashes — no `.a` files needed,
+ * Pure-data exercises with synthetic hashes - no `.a` files needed,
  * no I/O. Covers:
  *   - hl_platform_sig_build_manifest: canonical sort, format
  *     ("<hex>  <arch>\n"), overflow rejection, duplicate-arch
@@ -51,7 +51,7 @@ UTEST(platform_sig, build_one_entry) {
 }
 
 UTEST(platform_sig, build_sorts_canonically) {
-    /* Provided in a non-sorted order — the helper sorts by arch name. */
+    /* Provided in a non-sorted order - the helper sorts by arch name. */
     HlPlatformArchHash e[] = {
         { "linux-x86_64",  HASH_LX86 },
         { "darwin-arm64",  HASH_DARM },
@@ -165,7 +165,7 @@ UTEST(platform_sig, sign_verify_roundtrip) {
     ASSERT_EQ(hl_platform_sig_build_manifest(e, 2, manifest, sizeof(manifest), &mlen), 0);
 
     /* Generate a fresh keypair (no dependency on
-     * HL_PLATFORM_PUBKEY_HEX — that's covered by a separate test). */
+     * HL_PLATFORM_PUBKEY_HEX - that's covered by a separate test). */
     uint8_t pk[32], sk[64];
     ASSERT_EQ(hl_cap_crypto_ed25519_keypair(pk, sk), 0);
 

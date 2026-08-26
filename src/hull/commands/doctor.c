@@ -1,11 +1,11 @@
 /*
- * commands/doctor.c — hull doctor subcommand
+ * commands/doctor.c - hull doctor subcommand
  *
  * Checks the local environment and reports whether hull is ready to
  * build, develop, and deploy applications.
  *
- *   hull doctor          — human-readable output
- *   hull doctor --json   — machine-readable JSON
+ *   hull doctor          - human-readable output
+ *   hull doctor --json   - machine-readable JSON
  *
  * Checks performed:
  *   1. Hull binary metadata (version, runtime, platform, build mode)
@@ -166,7 +166,7 @@ static PlatformEmbed detect_platform(void)
  * and how AOT-ready the host environment is.
  *
  * We answer four questions:
- *   1. Was the binary built with HL_ENABLE_WASM?  (yes / no — compile-time)
+ *   1. Was the binary built with HL_ENABLE_WASM?  (yes / no - compile-time)
  *   2. Was Memory64 support compiled in?           (always yes when WASM is on
  *                                                   today, kept as a flag so
  *                                                   future builds can drop it)
@@ -302,7 +302,7 @@ static void cache_stats(const HlCacheKind *kind,
     hl_blob_store_close(s);
 }
 
-/* Compact size formatter — mirrors commands/cache.c::format_size so
+/* Compact size formatter - mirrors commands/cache.c::format_size so
  * doctor and `hull cache list` report identically. */
 static void doctor_format_size(uint64_t bytes, char *out, size_t out_sz)
 {
@@ -392,7 +392,7 @@ static void print_human(FILE *f, CompilerInfo *ci, int nci,
     /* ── Compute (WASM) ── */
     fprintf(f, "Compute (WASM)  (compute/<name>.wasm modules)\n");
     if (!cmp->wasm_enabled) {
-        fprintf(f, "  runtime     \xe2\x9c\x97  HL_ENABLE_WASM=0 — compute.* unavailable\n");
+        fprintf(f, "  runtime     \xe2\x9c\x97  HL_ENABLE_WASM=0 - compute.* unavailable\n");
     } else {
         fprintf(f, "  runtime     \xe2\x9c\x93  WAMR enabled (interpreter + AOT loader linked in)\n");
 
@@ -415,14 +415,14 @@ static void print_human(FILE *f, CompilerInfo *ci, int nci,
         if (cmp->clang_path[0]) {
             fprintf(f, "  clang       \xe2\x9c\x93  %s\n", cmp->clang_path);
             if (cmp->has_brew_llvm) {
-                fprintf(f, "                (Homebrew llvm — bundles wasm-ld)\n");
+                fprintf(f, "                (Homebrew llvm - bundles wasm-ld)\n");
             } else if (cmp->has_wasm_ld) {
                 fprintf(f, "                (with wasm-ld in PATH)\n");
             } else {
-                fprintf(f, "                \xe2\x9a\xa0  wasm-ld not found — install lld\n");
+                fprintf(f, "                \xe2\x9a\xa0  wasm-ld not found - install lld\n");
             }
         } else {
-            fprintf(f, "  clang       \xe2\x9c\x97  not found — `hull compute build` cannot compile sources\n");
+            fprintf(f, "  clang       \xe2\x9c\x97  not found - `hull compute build` cannot compile sources\n");
             fprintf(f, "                hint: brew install llvm@18 (macOS) / apt install clang lld (Linux)\n");
         }
     }
@@ -447,26 +447,26 @@ static void print_human(FILE *f, CompilerInfo *ci, int nci,
 #ifdef HL_ENABLE_DB
         fprintf(f, "  HL_ENABLE_DB    \xe2\x9c\x93  hull/db, hull/middleware/{session,csrf,auth,...} importable\n");
 #else
-        fprintf(f, "  HL_ENABLE_DB    \xe2\x97\x8b  off — hull/db and DB-dependent middleware will fail to resolve\n");
+        fprintf(f, "  HL_ENABLE_DB    \xe2\x97\x8b  off - hull/db and DB-dependent middleware will fail to resolve\n");
 #endif
 #ifdef HL_ENABLE_WASM
         fprintf(f, "  HL_ENABLE_WASM  \xe2\x9c\x93  hull/compute importable\n");
 #else
-        fprintf(f, "  HL_ENABLE_WASM  \xe2\x97\x8b  off — hull/compute will fail to resolve\n");
+        fprintf(f, "  HL_ENABLE_WASM  \xe2\x97\x8b  off - hull/compute will fail to resolve\n");
 #endif
 #ifdef HL_ENABLE_GPU
         fprintf(f, "  HL_ENABLE_GPU   \xe2\x9c\x93  hull/gpu importable\n");
 #else
-        fprintf(f, "  HL_ENABLE_GPU   \xe2\x97\x8b  off — hull/gpu will fail to resolve\n");
+        fprintf(f, "  HL_ENABLE_GPU   \xe2\x97\x8b  off - hull/gpu will fail to resolve\n");
 #endif
 #ifdef HL_ENABLE_HTTP
         fprintf(f, "  HL_ENABLE_HTTP  \xe2\x9c\x93  hull/http-server, hull/http-client, hull/web/* (ws/sse/middleware) importable\n");
 #else
-        fprintf(f, "  HL_ENABLE_HTTP  \xe2\x97\x8b  off — CLI / compute-only build; hull/http-*, hull/web/ws-*, hull/web/sse, and hull/web/middleware/* will fail to resolve\n");
+        fprintf(f, "  HL_ENABLE_HTTP  \xe2\x97\x8b  off - CLI / compute-only build; hull/http-*, hull/web/ws-*, hull/web/sse, and hull/web/middleware/* will fail to resolve\n");
 #endif
         size_t total = 0;
         (void)hl_module_registry_all(&total);
-        fprintf(f, "  registry        %zu first-party modules — run `hull modules available` for the full list\n",
+        fprintf(f, "  registry        %zu first-party modules - run `hull modules available` for the full list\n",
                 total);
         fprintf(f, "\n");
     }
@@ -483,11 +483,11 @@ static void print_human(FILE *f, CompilerInfo *ci, int nci,
      * which path their caches are landing in.
      *
      * Size-bloat hints: caches are unbounded by design (correctness
-     * doesn't depend on freshness — stale entries are harmless
+     * doesn't depend on freshness - stale entries are harmless
      * orphans). But once any single kind passes 250 MB or the
      * runtime total passes 1 GB, surface a `⚠` next to the size
      * and suggest a prune. These thresholds are deliberately
-     * conservative — most dev workstations should never see them. */
+     * conservative - most dev workstations should never see them. */
     #define HL_DOCTOR_CACHE_KIND_WARN_BYTES   (250ULL * 1024 * 1024)
     #define HL_DOCTOR_CACHE_TOTAL_WARN_BYTES  (1024ULL * 1024 * 1024)
     {
@@ -539,7 +539,7 @@ static void print_human(FILE *f, CompilerInfo *ci, int nci,
         fprintf(f, "                manage via `hull cache list|prune|clear`\n");
 
         /* If anything tripped the warning, surface a concrete hint
-         * — bare "manage via" doesn't tell users what to actually
+         * - bare "manage via" doesn't tell users what to actually
          * type. */
         if (large_kinds > 0 ||
             runtime_bytes >= HL_DOCTOR_CACHE_TOTAL_WARN_BYTES) {
@@ -555,11 +555,11 @@ static void print_human(FILE *f, CompilerInfo *ci, int nci,
     /* ── Summary ── */
     fprintf(f, "hull build    ");
     if (embed == PLATFORM_NONE) {
-        fprintf(f, "not ready — platform library not embedded\n");
+        fprintf(f, "not ready - platform library not embedded\n");
         fprintf(f, "              hint: make platform && make EMBED_PLATFORM=1\n");
     } else {
         if (!any_compiler) {
-            fprintf(f, "not ready — no C compiler found\n");
+            fprintf(f, "not ready - no C compiler found\n");
             fprintf(f, "              hint: install gcc or clang\n");
         } else {
             fprintf(f, "ready\n");
@@ -656,7 +656,7 @@ static void print_json(FILE *f, CompilerInfo *ci, int nci,
         sh_json_write_object_end(&w);
     }
 
-    /* Module-subsystem capability bits — mirrors build_provided_caps()
+    /* Module-subsystem capability bits - mirrors build_provided_caps()
      * in module_resolver.c. */
     sh_json_write_key(&w, "subsystems");
     sh_json_write_object_start(&w);
@@ -682,7 +682,7 @@ static void print_json(FILE *f, CompilerInfo *ci, int nci,
 #endif
     sh_json_write_object_end(&w);
 
-    /* Cache status — same registry as `hull cache list`. */
+    /* Cache status - same registry as `hull cache list`. */
     sh_json_write_key(&w, "caches");
     sh_json_write_array_start(&w);
     for (const HlCacheKind *k = hl_cache_registry(); k->name; k++) {
@@ -730,7 +730,7 @@ void hl_doctor_collect_json(FILE *f)
     PlatformEmbed embed = detect_platform();
 
     ComputeInfo cmp;
-    /* hull_exe lookup not available here — pass NULL; only wamrc/clang
+    /* hull_exe lookup not available here - pass NULL; only wamrc/clang
      * paths near the binary are skipped, PATH lookup still works. */
     detect_compute(&cmp, NULL);
 
@@ -752,7 +752,7 @@ int hl_cmd_doctor(int argc, char **argv, const HlCommandEnv *env)
 
 #ifdef HL_TUI_LINKED
     if (tui) {
-        /* Refuse cleanly when not attached to a real terminal — the
+        /* Refuse cleanly when not attached to a real terminal - the
          * cap layer would otherwise error out mid-acquire and leave a
          * cryptic message. Surface the situation here. */
         if (!isatty(STDIN_FILENO) || !isatty(STDOUT_FILENO)) {

@@ -1,5 +1,5 @@
 #!/bin/sh
-# ci_ensure_wamrc.sh — precondition for a non-skippable AOT CI step.
+# ci_ensure_wamrc.sh - precondition for a non-skippable AOT CI step.
 #
 # Each AOT test step must have its OWN executable build/wamrc rather than
 # relying on mutable build/ state left by an earlier step. On one CI run

@@ -1,5 +1,5 @@
 /*
- * wasm_weakstub.c — weak no-op defaults for the WASM cap seam (WASM as a
+ * wasm_weakstub.c - weak no-op defaults for the WASM cap seam (WASM as a
  * composable feature, docs/wasm_feature.md).
  *
  * The plan moves WAMR + the wasm caps (cap/wasm*.c, worker_wasm.c, WAMR_OBJS)
@@ -18,7 +18,7 @@
  * whole-archived, so the linker takes its strong definitions; when it is NOT
  * composed (a genuinely compute-free app) these weak no-ops satisfy the link,
  * `compute.available()` reads false, a
- * WASM-backed `db.udf` fails closed (function UDFs are untouched — they never
+ * WASM-backed `db.udf` fails closed (function UDFs are untouched - they never
  * call these), and no `WasmBuffer` can exist (the other buffer-protocol types
  * are unaffected).
  *
@@ -32,8 +32,8 @@
  * live here: they are per-runtime and live in the pure runtime archives
  * (src/hull/runtime/{lua,js}/wasm_stub.c), so lua_push_wasm_buffer can push a
  * balanced nil and the Lua stub stays out of a JS-only app's link. Neither weak
- * body is ever REACHED on a compute-free app — modules.c gates the
- * compute-module register on wasm_cache (NULL without the feature) — they only
+ * body is ever REACHED on a compute-free app - modules.c gates the
+ * compute-module register on wasm_cache (NULL without the feature) - they only
  * satisfy the link.
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
@@ -50,7 +50,7 @@ __attribute__((weak)) int hl_cap_wasm_init(HlWasmCache *cache)
 {
     (void)cache;
     /* Positive sentinel: the feature is NOT COMPOSED (compute-free app), an
-     * expected/quiet state — distinct from a genuine WAMR init failure (<0), so
+     * expected/quiet state - distinct from a genuine WAMR init failure (<0), so
      * serve.c doesn't log a misleading "WAMR init failed" on every such app. */
     return HL_CAP_WASM_ABSENT;
 }

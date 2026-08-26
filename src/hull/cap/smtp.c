@@ -1,5 +1,5 @@
 /*
- * smtp.c — SMTP email capability implementation
+ * smtp.c - SMTP email capability implementation
  *
  * Synchronous SMTP client with STARTTLS, AUTH PLAIN, and host
  * allowlist enforcement.  Follows the same connect/TLS/timeout
@@ -511,7 +511,7 @@ int hl_cap_smtp_send(const HlSmtpConfig *cfg, const HlSmtpMessage *msg,
     char resp[HL_SMTP_RECV_BUF_SIZE];
     char cmd[HL_SMTP_SEND_BUF_SIZE];
 
-    /* Implicit TLS (port 465) — handshake before any SMTP commands */
+    /* Implicit TLS (port 465) - handshake before any SMTP commands */
     if (msg->use_tls == 2) {
         if (!tls_cfg) {
             log_warn("smtp: implicit TLS requested but no TLS config");
@@ -577,7 +577,7 @@ int hl_cap_smtp_send(const HlSmtpConfig *cfg, const HlSmtpMessage *msg,
     if (msg->username && msg->password) {
         /* Refuse to send credentials over a plaintext connection */
         if (!tls) {
-            log_warn("smtp: AUTH PLAIN requires TLS — refusing to send "
+            log_warn("smtp: AUTH PLAIN requires TLS - refusing to send "
                      "credentials in plaintext (set use_tls=1 or 2)");
             if (err_msg) *err_msg = "auth_requires_tls";
             goto cleanup;
@@ -631,7 +631,7 @@ int hl_cap_smtp_send(const HlSmtpConfig *cfg, const HlSmtpMessage *msg,
         goto cleanup;
     }
 
-    /* RCPT TO — primary recipient */
+    /* RCPT TO - primary recipient */
     snprintf(cmd, sizeof(cmd), "RCPT TO:<%s>\r\n", msg->to);
     code = smtp_send_command(fd, tls, cmd, 250, timeout_ms);
     if (code < 0) {
@@ -639,7 +639,7 @@ int hl_cap_smtp_send(const HlSmtpConfig *cfg, const HlSmtpMessage *msg,
         goto cleanup;
     }
 
-    /* RCPT TO — CC recipients */
+    /* RCPT TO - CC recipients */
     if (msg->cc) {
         for (int i = 0; i < msg->cc_count; i++) {
             snprintf(cmd, sizeof(cmd), "RCPT TO:<%s>\r\n", msg->cc[i]);

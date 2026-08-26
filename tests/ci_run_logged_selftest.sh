@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# ci_run_logged_selftest.sh - fixtures for the nightly logging wrapper (Slice 6).
+# ci_run_logged_selftest.sh - fixtures for the nightly logging wrapper.
 # Validates exit-status preservation (the load-bearing property: a failed command
 # must still fail the job) and artifact-path coverage (the promised log file is
 # created and contains the combined stdout+stderr).

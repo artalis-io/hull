@@ -1,5 +1,5 @@
 /*
- * mod_gpu.c — hull:gpu module (GPU compute via wgpu-native)
+ * mod_gpu.c - hull:gpu module (GPU compute via wgpu-native)
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
@@ -806,7 +806,7 @@ static JSValue js_push_worker_gpu_result(JSContext *ctx, void *driver)
     return JS_NewArrayBufferCopy(ctx, NULL, 0);
 }
 
-/* Async dispatch — submits GPU work to thread pool, returns Promise */
+/* Async dispatch - submits GPU work to thread pool, returns Promise */
 static JSValue js_gpu_async_dispatch(JSContext *ctx, JSValueConst this_val,
                                       int argc, JSValueConst *argv)
 {
@@ -1288,8 +1288,8 @@ static JSValue js_gpu_pipeline(JSContext *ctx, JSValueConst this_val,
     return arr;
 }
 
-/* Async pipeline — falls back to sync for now */
-/* JS async pipeline — deep-copy all stage data, submit to thread pool */
+/* Async pipeline - falls back to sync for now */
+/* JS async pipeline - deep-copy all stage data, submit to thread pool */
 static JSValue js_gpu_async_pipeline(JSContext *ctx, JSValueConst this_val,
                                       int argc, JSValueConst *argv)
 {
@@ -1358,7 +1358,7 @@ static JSValue js_gpu_async_pipeline(JSContext *ctx, JSValueConst this_val,
 
     /* Deep-copy each stage.
      *
-     * M-3: any OOM during deep-copy must abort the dispatch — previously
+     * M-3: any OOM during deep-copy must abort the dispatch - previously
      * NULL was silently stored in op->stages[s].shader and op->buffer_data[]
      * and the worker thread would crash. We set `oom` and continue parsing
      * (to keep the JS_FreeValue/JS_FreeCString pairs balanced), then bail
@@ -1547,7 +1547,7 @@ static JSValue js_gpu_async_pipeline(JSContext *ctx, JSValueConst this_val,
         JS_FreeValue(ctx, tv);
     }
 
-    /* Abort if any deep-copy hit OOM (M-3) — must happen before the op is
+    /* Abort if any deep-copy hit OOM (M-3) - must happen before the op is
      * handed off to the worker thread, otherwise the worker dereferences
      * NULL shader names / buffer data. */
     if (oom) {

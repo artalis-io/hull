@@ -1,10 +1,10 @@
 #!/bin/sh
-# tests/e2e_sync_spans.sh — the SYNCHRONOUS compute.call and instance:call
+# tests/e2e_sync_spans.sh - the SYNCHRONOUS compute.call and instance:call
 # bindings (Lua + JS) forward attached mapped spans (#325). Before the fix the
 # sync bindings parsed opts.spans then discarded it, so a plugin saw zero spans.
 #
 # Drives the memcpy-free spancount fixture (raw host_call(SPAN_INFO), no
-# hull_span.h — independent of #327): output byte 0 = attached span count,
+# hull_span.h - independent of #327): output byte 0 = attached span count,
 # byte 1 = window[0]. Over a NON-page-aligned window of a deterministic file
 # (byte[i]=i&0xff; offset 8195 => window[0] == 3), it proves:
 #   - attachment: a spans call reports count 1 and reads the correct byte (3);

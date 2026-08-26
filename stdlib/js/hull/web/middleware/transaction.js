@@ -4,7 +4,7 @@
  * @description Wrap mutation handlers in a SQLite transaction. Lua parity:
  *   `hull.web.middleware.transaction`.
  *
- * `transaction.middleware()` is a marker — it sets `req.ctx._txn = true`
+ * `transaction.middleware()` is a marker - it sets `req.ctx._txn = true`
  * so downstream code knows the handler should run under a transaction.
  * The real work happens in `transaction.run(fn)` / `transaction.attempt(fn)`
  * which call `db.batch()` (`BEGIN IMMEDIATE → fn → COMMIT`, with
@@ -42,7 +42,7 @@ function middleware(opts) {
  * Run `fn` inside `BEGIN IMMEDIATE..COMMIT`.
  *
  * On error the transaction is rolled back and the error is re-thrown.
- * SQLite doesn't support nested transactions — calling this while
+ * SQLite doesn't support nested transactions - calling this while
  * already inside a `db.batch` will error.
  *
  * @param {() => void} fn  Function whose DB writes should be atomic.

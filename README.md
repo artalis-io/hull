@@ -250,12 +250,12 @@ hull build --flavor=auto -o myapp .            # infer the minimal flavor
 
 Reach for it when you have an **existing native codebase** that needs one of Hull's guarantees but shouldn't adopt a scripting runtime to get it:
 
-- **Run untrusted compute inside a native service** — WAMR gas-metered, no-I/O WASM isolation for user-supplied transforms/scoring/UDFs, without embedding a script engine.
-- **Put a capability boundary on a native tool's own I/O** — a portable (Linux / macOS / cosmo) pledge/unveil + a declared fs / host / env allowlist, so a bug or malicious input can't reach outside what the program declared.
-- **Defense-in-depth for a Rust/Zig service** — add the kernel sandbox (seatbelt / landlock / pledge) + W^X enforcement + a filesystem/network allowlist that the language runtime alone does not give you.
-- **Signed-artifact / SBOM tooling** — link the Ed25519 verify + SBOM + release-verification machinery instead of reimplementing it.
+- **Run untrusted compute inside a native service** - WAMR gas-metered, no-I/O WASM isolation for user-supplied transforms/scoring/UDFs, without embedding a script engine.
+- **Put a capability boundary on a native tool's own I/O** - a portable (Linux / macOS / cosmo) pledge/unveil + a declared fs / host / env allowlist, so a bug or malicious input can't reach outside what the program declared.
+- **Defense-in-depth for a Rust/Zig service** - add the kernel sandbox (seatbelt / landlock / pledge) + W^X enforcement + a filesystem/network allowlist that the language runtime alone does not give you.
+- **Signed-artifact / SBOM tooling** - link the Ed25519 verify + SBOM + release-verification machinery instead of reimplementing it.
 
-Writing a **new** app from scratch? Use Hull's Lua/JS instead — same hardening, far less glue. libhull is for the case where the host must stay native and is trusted to sequence the lifecycle. `libhull.a` is release-signed per arch (native + dual-arch cosmo) with its own scoped SBOM (`hull sbom --subject=libhull`). Reference hosts in C, Rust, and Zig live under `examples/embed_{c,rust,zig}`; the trust boundary and seal lifecycle are in [docs/libhull_flavor.md](docs/libhull_flavor.md).
+Writing a **new** app from scratch? Use Hull's Lua/JS instead - same hardening, far less glue. libhull is for the case where the host must stay native and is trusted to sequence the lifecycle. `libhull.a` is release-signed per arch (native + dual-arch cosmo) with its own scoped SBOM (`hull sbom --subject=libhull`). Reference hosts in C, Rust, and Zig live under `examples/embed_{c,rust,zig}`; the trust boundary and seal lifecycle are in [docs/libhull_flavor.md](docs/libhull_flavor.md).
 
 ## Architecture
 
@@ -1198,7 +1198,7 @@ forces a Phase 1 (discovery + clarifying questions) → Phase 2 (`PLAN.md`
 for human approval) → Phase 3 (implement, tests after each step)
 workflow, and sets up a `PLATFORM_GAPS.md` log so the agent flags
 Hull-side gaps instead of coding around them. Same prompt works for
-any product spec — fully app-agnostic.
+any product spec - fully app-agnostic.
 
 Hull provides structured JSON interfaces for AI coding agents via the `hull agent` command. The same interfaces work for any automation (CI scripts, service orchestrators, or human developers who prefer structured output. **Twenty-eight machine-readable subcommands** cover routes, database schema, test results, server status, HTTP responses, deployment readiness, capability analysis, request preview, one-shot eval, the analyzed project model, and more) no screen-scraping or log parsing required.
 
@@ -1239,7 +1239,7 @@ hull agent sql named <qname> [--params J] [dir]  # named query from queries.json
 
 Combined with `hull dev --agent` (which writes `.hull/dev.json`, `.hull/last_error.json`, and a per-reload `.hull/discovery.json` generation as sidecar files), agents get a complete feedback loop: edit code, check for errors, run tests, inspect the database, make HTTP requests, validate manifest coverage. All structured.
 
-`hull agent inspect` surfaces Hull's **project source-discovery** model: a static, host-owned analysis of the app's Lua source (via the pure-Lua `hull.source.*` layer, without executing app code) that reports the annotated declarations — `---@` annotations attached to `local` / `local function` / `function` declarations, with exact ranges, deterministic IDs, and by-annotation indexes. It runs standalone, or serves the live generation a running `hull dev --agent` session has published. JavaScript is a reserved-but-not-yet-analyzable frontend (honestly reported, never parsed as Lua). This is the foundation a future codegen step (e.g. Query/Compute IR) consumes.
+`hull agent inspect` surfaces Hull's **project source-discovery** model: a static, host-owned analysis of the app's Lua source (via the pure-Lua `hull.source.*` layer, without executing app code) that reports the annotated declarations - `---@` annotations attached to `local` / `local function` / `function` declarations, with exact ranges, deterministic IDs, and by-annotation indexes. It runs standalone, or serves the live generation a running `hull dev --agent` session has published. JavaScript is a reserved-but-not-yet-analyzable frontend (honestly reported, never parsed as Lua). This is the foundation a future codegen step (e.g. Query/Compute IR) consumes.
 
 ### Agent Development Workflow
 

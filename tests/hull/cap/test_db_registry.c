@@ -1,5 +1,5 @@
 /*
- * test_db_registry.c: Named connection registry (§1 Phase 5b)
+ * test_db_registry.c: Named connection registry (§1)
  *
  * Covers lazy open + caching, manifest DSN resolution (literal and
  * { dsn_env }), the seeded "default" connection, and error paths.

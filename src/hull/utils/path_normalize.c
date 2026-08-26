@@ -1,5 +1,5 @@
 /*
- * path_normalize.c — shared normalize_path implementation.
+ * path_normalize.c - shared normalize_path implementation.
  *
  * Lifted out of runtime/lua/mod_fs.c so the JS module loader can use
  * the same logic. See path_normalize.h for the contract.

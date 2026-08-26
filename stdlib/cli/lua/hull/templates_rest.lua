@@ -1,17 +1,17 @@
 --
--- hull.templates_rest — `hull new --type rest <name>` scaffolding
+-- hull.templates_rest - `hull new --type rest <name>` scaffolding
 --
 -- Returns a table { ["relative/path"] = "content" } for the modular
 -- REST API layout. Mirrors the convention documented in CLAUDE.md
 -- §App Layout Conventions:
 --
---   app.lua           — manifest + bootstrap: requires route groups
---   routes/           — one file per resource, exports register(app)
---   middleware/       — app-specific middleware (wraps stdlib)
---   models/           — DB access functions per resource
---   lib/              — shared helpers
---   migrations/       — SQL schema migrations
---   tests/            — mirrors source tree (tests/routes/users_test.lua)
+--   app.lua           - manifest + bootstrap: requires route groups
+--   routes/           - one file per resource, exports register(app)
+--   middleware/       - app-specific middleware (wraps stdlib)
+--   models/           - DB access functions per resource
+--   lib/              - shared helpers
+--   migrations/       - SQL schema migrations
+--   tests/            - mirrors source tree (tests/routes/users_test.lua)
 --
 -- The Lua and JS surface stay in lock-step: same files, same shape,
 -- same routes. JS uses ES-module export { register } instead of
@@ -38,7 +38,7 @@ lua_files["app.lua"] = [[-- Modular REST API scaffold.
 -- runtime tracker validates this list against actual imports at load
 -- time, so missing entries surface immediately. `hull/web/middleware/session`
 -- and friends auto-pull their own deps (json, time, crypto, db) via
--- the registry's deps graph — but anything imported only by user files
+-- the registry's deps graph - but anything imported only by user files
 -- (routes/, models/, lib/) must be listed here explicitly.
 app.manifest({
     modules = {
@@ -66,7 +66,7 @@ require("./routes/users").register(app)
 log.info("rest api loaded")
 ]]
 
-lua_files["routes/health.lua"] = [[-- routes/health.lua — liveness + readiness endpoints.
+lua_files["routes/health.lua"] = [[-- routes/health.lua - liveness + readiness endpoints.
 --
 -- The health endpoint is intentionally trivial and unauthenticated:
 -- a loadbalancer or container orchestrator hits it to decide whether
@@ -85,7 +85,7 @@ end
 return M
 ]]
 
-lua_files["routes/users.lua"] = [[-- routes/users.lua — User resource.
+lua_files["routes/users.lua"] = [[-- routes/users.lua - User resource.
 --
 -- Route registration only. The actual DB access lives in models/user.lua
 -- so the routes stay readable and the model can be unit-tested in
@@ -109,13 +109,13 @@ end
 local M = {}
 
 function M.register(app)
-    -- GET /users — list (paginated via ?limit=)
+    -- GET /users - list (paginated via ?limit=)
     app.get("/users", function(req, res)
         local limit = tonumber(req.query.limit) or 50
         res:json({ users = users.list({ limit = limit }) })
     end)
 
-    -- POST /users — create
+    -- POST /users - create
     app.post("/users", function(req, res)
         local body, perr = parse_json_body(req)
         if perr then res:status(400):json({ error = perr }); return end
@@ -157,7 +157,7 @@ end
 return M
 ]]
 
-lua_files["models/user.lua"] = [[-- models/user.lua — Persistence layer for the User resource.
+lua_files["models/user.lua"] = [[-- models/user.lua - Persistence layer for the User resource.
 --
 -- One file per resource keeps SQL in one place and lets routes/users.lua
 -- stay focused on HTTP concerns. The returned table is the resource's
@@ -210,7 +210,7 @@ end
 return M
 ]]
 
-lua_files["lib/validate_user.lua"] = [[-- lib/validate_user.lua — Schema validation for the User resource.
+lua_files["lib/validate_user.lua"] = [[-- lib/validate_user.lua - Schema validation for the User resource.
 --
 -- Wraps `hull.validate` with per-resource schemas so routes/users.lua
 -- can call `validate.create(body)` instead of inlining the rule table.
@@ -230,7 +230,7 @@ end
 return M
 ]]
 
-lua_files["middleware/require_auth.lua"] = [[-- middleware/require_auth.lua — App-specific auth wrapper.
+lua_files["middleware/require_auth.lua"] = [[-- middleware/require_auth.lua - App-specific auth wrapper.
 --
 -- This is where app-specific authentication policy lives: the stdlib
 -- module `hull.web.middleware.auth` provides the session-cookie / JWT
@@ -238,7 +238,7 @@ lua_files["middleware/require_auth.lua"] = [[-- middleware/require_auth.lua — 
 -- "redirect to /login instead of 401" or "always require a verified
 -- email."
 --
--- Empty by default — uncomment and adapt when you add login.
+-- Empty by default - uncomment and adapt when you add login.
 
 -- local auth = require("hull.web.middleware.auth")
 --
@@ -346,7 +346,7 @@ registerUsers(app);
 log.info("rest api loaded");
 ]]
 
-js_files["routes/health.js"] = [[// routes/health.js — liveness + readiness endpoints.
+js_files["routes/health.js"] = [[// routes/health.js - liveness + readiness endpoints.
 
 export function register(app) {
     app.get("/health", (_req, res) => {
@@ -355,12 +355,12 @@ export function register(app) {
 }
 ]]
 
-js_files["routes/users.js"] = [[// routes/users.js — User resource.
+js_files["routes/users.js"] = [[// routes/users.js - User resource.
 
 import * as users      from "./../models/user.js";
 import * as userSchema from "./../lib/validate_user.js";
 
-// req.body is the raw request bytes, not a parsed object — Hull's JS
+// req.body is the raw request bytes, not a parsed object - Hull's JS
 // bindings expose the body as a string. Each route that consumes JSON
 // decodes it here. A real app would put this in lib/req.js and reuse
 // it across resources.
@@ -374,13 +374,13 @@ function parseJsonBody(req) {
 }
 
 export function register(app) {
-    // GET /users — list (paginated via ?limit=)
+    // GET /users - list (paginated via ?limit=)
     app.get("/users", (req, res) => {
         const limit = parseInt(req.query.limit, 10) || 50;
         res.json({ users: users.list({ limit }) });
     });
 
-    // POST /users — create
+    // POST /users - create
     app.post("/users", (req, res) => {
         const [body, perr] = parseJsonBody(req);
         if (perr) { res.status(400).json({ error: perr }); return; }
@@ -420,7 +420,7 @@ export function register(app) {
 }
 ]]
 
-js_files["models/user.js"] = [[// models/user.js — Persistence layer for the User resource.
+js_files["models/user.js"] = [[// models/user.js - Persistence layer for the User resource.
 
 import { db }     from "hull:db";
 import { crypto } from "hull:crypto";
@@ -464,7 +464,7 @@ export function deleteById(id) {
 }
 ]]
 
-js_files["lib/validate_user.js"] = [[// lib/validate_user.js — Schema validation for the User resource.
+js_files["lib/validate_user.js"] = [[// lib/validate_user.js - Schema validation for the User resource.
 
 import { validate } from "hull:validate";
 
@@ -476,9 +476,9 @@ export function create(body) {
 }
 ]]
 
-js_files["middleware/require_auth.js"] = [[// middleware/require_auth.js — App-specific auth wrapper.
+js_files["middleware/require_auth.js"] = [[// middleware/require_auth.js - App-specific auth wrapper.
 //
-// Empty by default — uncomment and adapt when you add login.
+// Empty by default - uncomment and adapt when you add login.
 
 // import { auth } from "hull:web:middleware:auth";
 //

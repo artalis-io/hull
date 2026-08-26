@@ -1,5 +1,5 @@
 #!/bin/sh
-# Release smoke test — run MANUALLY after `gh release create` succeeds.
+# Release smoke test - run MANUALLY after `gh release create` succeeds.
 #
 # This is the only test that exercises the live install-from-GitHub
 # path end-to-end. It downloads `wamrc` from the just-published
@@ -9,7 +9,7 @@
 #
 # Why not in CI? Because the asset doesn't exist until `gh release
 # create` finishes, and the install codepath uses HL_VERSION to pick
-# the tag — so CI can't test against itself before publishing. Once
+# the tag - so CI can't test against itself before publishing. Once
 # the release is up, this is the one-line confirmation that the
 # whole pipeline (release.yml → tools/install → trust chain →
 # atomic install) works.
@@ -55,7 +55,7 @@ assert_contains() {
     fi
 }
 
-# hull flavor install <flavor> — since Phase 4.3, pure-compute is a build.lua
+# hull flavor install <flavor> - pure-compute is a build.lua
 # PRESET on the default composable base (which already drops HTTP/TLS/Keel and
 # composes each back per app). There is no per-flavor platform lib to fetch, so
 # `hull flavor install pure-compute` is a no-op that reports the preset and
@@ -78,7 +78,7 @@ smoke_platform_install() {
     rm -rf "$PLAT_HOME"
 }
 
-# hull feature install <name> — LIVE fetch + verify of the published composable
+# hull feature install <name> - LIVE fetch + verify of the published composable
 # feature archive (libhull_feature-<name>-<arch>.a). Native-only (DuckDB is not
 # built for cosmo). Uses an isolated HOME so a real ~/.hull/feature is untouched.
 smoke_feature_install() {
@@ -114,7 +114,7 @@ smoke_feature_install() {
 }
 
 if ! command -v "$HULL" >/dev/null 2>&1; then
-    echo "release_smoke: '$HULL' not found on PATH — install hull first"
+    echo "release_smoke: '$HULL' not found on PATH - install hull first"
     exit 1
 fi
 
@@ -124,7 +124,7 @@ PLATFORM=$("$HULL" doctor --json 2>&1 | grep -o '"platform":"[^"]*"' | head -1)
 echo "  $VERSION"
 echo "  $PLATFORM"
 
-# wamrc isn't published for cosmo — skip the install bit on a cosmo
+# wamrc isn't published for cosmo - skip the install bit on a cosmo
 # binary and just verify the registry reports it correctly.
 #
 # Detect cosmo from the doctor platform field ("platform":"cosmo"), NOT the
@@ -136,7 +136,7 @@ echo "  $PLATFORM"
 case "$PLATFORM" in
     *cosmo*)
         echo ""
-        echo "── cosmo binary — wamrc install is unsupported by design ──"
+        echo "── cosmo binary - wamrc install is unsupported by design ──"
         # Capture `agent tools` into a DEDICATED var: smoke_platform_install
         # (called below) reassigns the global $OUT, so the cosmocc assert must
         # not read $OUT after it. All three registry asserts share this snapshot.
@@ -183,7 +183,7 @@ assert_contains "lists wamrc"          "$OUT" "wamrc"
 # test), uninstall first so we exercise the install path.
 if echo "$OUT" | grep -q '\[installed\]'; then
     echo ""
-    echo "── wamrc already installed — removing to exercise install ──"
+    echo "── wamrc already installed - removing to exercise install ──"
     "$HULL" tools uninstall wamrc >/dev/null 2>&1 || true
 fi
 
@@ -259,7 +259,7 @@ if [ "$(uname -s)" = "Linux" ]; then
     assert "floor dir removed"             [ ! -d "$FLOOR_DIR" ]
 fi
 
-# musl platform archive SET (audit #4c) — the counterpart of the floor: Hull's
+# musl platform archive SET (audit #4c) - the counterpart of the floor: Hull's
 # own archives (libhull_platform.a + slim + every libhull_feature-*.a) built
 # against musl, for `hull build --target=<arch>-linux-musl`. A data-only .tar
 # bundle like the floor, but a CROSS-target asset published for ALL native
@@ -361,7 +361,7 @@ if [ "$RC" -ne 0 ]; then
     # failure per se, but the rest of the test can't run.
     if echo "$OUT" | grep -q "no embedded platform manifest"; then
         echo "  ok  sign chain works; this hull has no embedded signed manifest"
-        echo "      (placeholder build — release binaries should have one)"
+        echo "      (placeholder build - release binaries should have one)"
         PASS=$((PASS + 1))
     else
         echo "  FAIL hull build --sign exited $RC"

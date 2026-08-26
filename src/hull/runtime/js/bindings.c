@@ -1,8 +1,8 @@
 /*
- * js_bindings.c — Request/Response bridge to QuickJS
+ * js_bindings.c - Request/Response bridge to QuickJS
  *
  * Marshals Keel's KlRequest/KlResponse to JS objects and back.
- * This file contains ONLY data marshaling — all enforcement logic
+ * This file contains ONLY data marshaling - all enforcement logic
  * lives in hl_cap_* functions.
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
@@ -34,7 +34,7 @@ _Static_assert(sizeof(JSValue) <= sizeof(((HlReqCtx *)0)->js_val_bytes),
 
 /* ── Request object ─────────────────────────────────────────────────── */
 
-/* req.header(name) — case-insensitive header lookup.
+/* req.header(name) - case-insensitive header lookup.
  * Since headers are already stored lowercase, this lowercases the
  * input name and looks it up in req.headers. */
 static JSValue js_req_header(JSContext *ctx, JSValueConst this_val,
@@ -44,7 +44,7 @@ static JSValue js_req_header(JSContext *ctx, JSValueConst this_val,
     const char *name = JS_ToCString(ctx, argv[0]);
     if (!name) return JS_UNDEFINED;
 
-    /* Lowercase the lookup key — reject names that exceed buffer */
+    /* Lowercase the lookup key - reject names that exceed buffer */
     size_t len = strlen(name);
     char lower[256];
     if (len >= sizeof(lower)) {
@@ -195,7 +195,7 @@ JSValue hl_js_make_request(JSContext *ctx, KlRequest *req)
     }
     JS_SetPropertyStr(ctx, obj, "query", query_obj);
 
-    /* params — route params from Keel (e.g. :id → params.id) */
+    /* params - route params from Keel (e.g. :id → params.id) */
     JSValue params_obj = JS_NewObject(ctx);
     int n_params = kl_request_num_params(req);
     for (int i = 0; i < n_params; i++) {
@@ -240,7 +240,7 @@ JSValue hl_js_make_request(JSContext *ctx, KlRequest *req)
             JS_SetPropertyStr(ctx, obj, "remote_addr", JS_NewString(ctx, peer));
     }
 
-    /* body — extract from buffer reader if available. Streaming-multipart
+    /* body - extract from buffer reader if available. Streaming-multipart
      * routes have a wrapper reader (not a KlBufReader), so body = null
      * and the handler iterates via req.multipart() (installed below). */
     int is_multipart_stream =
@@ -258,24 +258,24 @@ JSValue hl_js_make_request(JSContext *ctx, KlRequest *req)
         JS_SetPropertyStr(ctx, obj, "body", JS_NULL);
     }
 
-    /* req.multipart() — only installed for streaming-multipart routes.
+    /* req.multipart() - only installed for streaming-multipart routes.
      * Defined in mod_request.c. */
     if (is_multipart_stream)
         hl_js_request_install_multipart(ctx, obj, req->body_reader);
 
-    /* ctx — per-request context object (middleware → handler).
+    /* ctx - per-request context object (middleware → handler).
      * If req->ctx carries a native JS ref, retrieve it directly;
      * if it carries a JSON string (from test dispatch), parse it;
      * otherwise start with an empty object. */
     if (req->ctx) {
         HlReqCtx *rctx = (HlReqCtx *)req->ctx;
         if (rctx->kind == HL_REQCTX_JS_VAL) {
-            /* Native JS object — reconstruct JSValue from stored bytes */
+            /* Native JS object - reconstruct JSValue from stored bytes */
             JSValue val;
             memcpy(&val, rctx->js_val_bytes, sizeof(val));
             JS_SetPropertyStr(ctx, obj, "ctx", JS_DupValue(ctx, val));
         } else if (rctx->kind == HL_REQCTX_JSON) {
-            /* JSON string (from test dispatch) — parse it */
+            /* JSON string (from test dispatch) - parse it */
             JSValue parsed = JS_ParseJSON(ctx, rctx->json.data,
                                           rctx->json.len, "<ctx>");
             if (JS_IsException(parsed)) {
@@ -291,7 +291,7 @@ JSValue hl_js_make_request(JSContext *ctx, KlRequest *req)
         JS_SetPropertyStr(ctx, obj, "ctx", JS_NewObject(ctx));
     }
 
-    /* req.header(name) — convenience method for case-insensitive lookup */
+    /* req.header(name) - convenience method for case-insensitive lookup */
     JS_SetPropertyStr(ctx, obj, "header",
                       JS_NewCFunction(ctx, js_req_header, "header", 1));
 

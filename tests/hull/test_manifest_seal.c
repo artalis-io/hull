@@ -1,5 +1,5 @@
 /*
- * test_manifest_seal.c — Round-trip tests for hl_manifest_seal.
+ * test_manifest_seal.c - Round-trip tests for hl_manifest_seal.
  *
  * Builds a representative HlManifest by hand (without invoking the
  * Lua/JS extractors), seals it into an arena, and verifies:
@@ -197,7 +197,7 @@ UTEST(manifest_seal, write_to_sealed_string_faults)
 
     /* Fork: child tries to overwrite a sealed string (e.g. expand
      * fs_write from "data/" to "/etc/" via byte-write). Parent
-     * confirms the child died with SIGSEGV/SIGBUS — which is the
+     * confirms the child died with SIGSEGV/SIGBUS - which is the
      * actual evidence that an attacker's memory-write bug would be
      * caught by the OS rather than silently rewriting the
      * allowlist. */
@@ -273,7 +273,7 @@ UTEST(manifest_seal, oom_returns_error)
     HlManifest src;
     build_fixture(&src, &alloc);
 
-    /* Tiny arena — won't fit all the strings. */
+    /* Tiny arena - won't fit all the strings. */
     ShSealArena arena;
     ASSERT_EQ(0, sh_seal_arena_init(&arena, 16, NULL));
     /* Arena init rounds to one page (4096), so even 16-byte request
@@ -297,7 +297,7 @@ UTEST(manifest_seal, oom_returns_error)
  * mirrors that pattern at the unit level: build a fixture, allocate a
  * bitset in the arena, seal, then fork+SIGSEGV-test that a write into
  * the bitset (which would otherwise admit an undeclared module) is
- * caught by the OS.  The actual resolver isn't exercised here — this
+ * caught by the OS.  The actual resolver isn't exercised here - this
  * is purely a "OS mprotect is what's keeping bits in place" check. */
 
 UTEST(manifest_seal, write_to_sealed_module_set_faults)
@@ -315,7 +315,7 @@ UTEST(manifest_seal, write_to_sealed_module_set_faults)
     ASSERT_TRUE(sealed != NULL);
     ASSERT_EQ(0, sh_seal_arena_seal(&arena));
 
-    /* Reads still work post-seal — sanity. */
+    /* Reads still work post-seal - sanity. */
     ASSERT_EQ(sealed->bits[0], (uint64_t)0x00FF00FFu);
     ASSERT_EQ(sealed->bits[1], (uint64_t)0xAA55AA55u);
 
@@ -323,7 +323,7 @@ UTEST(manifest_seal, write_to_sealed_module_set_faults)
     if (pid == 0) {
         signal(SIGSEGV, SIG_DFL);
         signal(SIGBUS,  SIG_DFL);
-        /* Try to flip a bit to admit an undeclared module — the
+        /* Try to flip a bit to admit an undeclared module - the
          * exact gadget an attacker would use after landing a heap-
          * write inside the bitset's storage.  Sealing turns the
          * write into a fault. */

@@ -26,7 +26,7 @@
  *  - `csp.strict()`. No inline-style escape.
  *
  * Apps needing fully custom directives should build their own
- * `Content-Security-Policy` header in a middleware — the two
+ * `Content-Security-Policy` header in a middleware - the two
  * presets cover the common cases.
  *
  * @license AGPL-3.0-or-later

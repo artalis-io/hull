@@ -1,5 +1,5 @@
 /*
- * commands/sign_platform.c — hull sign-platform subcommand
+ * commands/sign_platform.c - hull sign-platform subcommand
  *
  * Thin wrapper: launches the Lua tool VM with hull.sign_platform module.
  *

@@ -1,5 +1,5 @@
 /*
- * commands/jobs.c — hull jobs subcommand
+ * commands/jobs.c - hull jobs subcommand
  *
  * Dispatch:
  *   hull jobs worker [entry|dir] [-d DSN] [args...]

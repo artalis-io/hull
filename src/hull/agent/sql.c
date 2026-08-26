@@ -1,5 +1,5 @@
 /*
- * agent/sql.c — `hull agent sql named <name>`: run a pre-defined query
+ * agent/sql.c - `hull agent sql named <name>`: run a pre-defined query
  * from app_dir/queries.json. Safer than `hull agent db query "..."`
  * because the agent can only invoke named queries the developer has
  * explicitly published.

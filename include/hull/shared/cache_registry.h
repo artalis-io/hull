@@ -45,7 +45,7 @@ typedef struct {
 
     /** Kind string to pass to `hl_hull_cache_disabled()` for the
      *  per-cache opt-out. The function uppercases the string and
-     *  builds `HULL_NO_<env_kind_upper>_CACHE` — e.g.
+     *  builds `HULL_NO_<env_kind_upper>_CACHE` - e.g.
      *  `"lua_bytecode"` → `HULL_NO_LUA_BYTECODE_CACHE`. NULL =
      *  no opt-out (system stores like `tools` aren't caches, so
      *  there's nothing to skip).
@@ -55,12 +55,12 @@ typedef struct {
      *  the SCREAMING_SNAKE convention. */
     const char *env_kind;
 
-    /** 1 = content-addressed (filename IS sha256(contents) — apps'
+    /** 1 = content-addressed (filename IS sha256(contents) - apps'
      *      blobs and `tools` belong here). `hull cache verify` can
      *      recompute the sha for each entry and compare to its
      *      filename to detect corruption.
      *  0 = caller-keyed (filename is a sha derived from inputs that
-     *      doesn't equal sha256(contents) — runtime caches belong
+     *      doesn't equal sha256(contents) - runtime caches belong
      *      here). `hull cache verify` falls back to structural
      *      checks only (filename shape, readability). */
     int is_cas;

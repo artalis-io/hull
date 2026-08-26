@@ -1,10 +1,10 @@
 /*
- * worker_gpu.c — GPU compute worker for thread pool dispatch
+ * worker_gpu.c - GPU compute worker for thread pool dispatch
  *
  * Follows the same three-callback pattern as worker_wasm.c:
- *   work_fn  — runs on worker thread (delegates to hl_cap_gpu_dispatch)
- *   done_fn  — runs on event loop (resume or cleanup if cancelled)
- *   cancel_fn — cleanup for items that never ran
+ *   work_fn  - runs on worker thread (delegates to hl_cap_gpu_dispatch)
+ *   done_fn  - runs on event loop (resume or cleanup if cancelled)
+ *   cancel_fn - cleanup for items that never ran
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */

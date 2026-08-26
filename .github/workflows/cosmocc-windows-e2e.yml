@@ -99,7 +99,7 @@ jobs:
           path: hull-cosmocc.tar
 
   windows-e2e:
-    name: Windows — install bundle + hull build an APE
+    name: Windows - install bundle + hull build an APE
     runs-on: windows-latest
     needs: [build-cosmo-hull, build-bundle]
     steps:
@@ -184,7 +184,7 @@ jobs:
           Write-Host $out
           Write-Host "--- build exit: $LASTEXITCODE ---"
 
-      - name: Verdict — did hull build produce a runnable APE on Windows?
+      - name: Verdict - did hull build produce a runnable APE on Windows?
         shell: pwsh
         run: |
           $built = Test-Path app.exe

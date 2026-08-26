@@ -1,7 +1,7 @@
--- CRUD with Auth — Hull + Lua example
+-- CRUD with Auth - Hull + Lua example
 --
 -- Run: hull app.lua -p 3000
--- Tasks API with session-based auth — each user only sees their own tasks
+-- Tasks API with session-based auth - each user only sees their own tasks
 
 local crypto   = require("hull.crypto")
 local db       = require("hull.db").default()
@@ -29,7 +29,7 @@ app.manifest({
 -- Initialize sessions
 session.init({ ttl = 3600 })
 
--- Load session on every request (optional — won't block unauthenticated)
+-- Load session on every request (optional - won't block unauthenticated)
 app.use("*", "/*", auth.session_middleware({ optional = true }))
 
 -- Helper: require session or respond 401
@@ -229,4 +229,4 @@ app.delete("/tasks/:id", function(req, res)
     res:json({ ok = true })
 end)
 
-log.info("CRUD with Auth loaded — routes registered")
+log.info("CRUD with Auth loaded - routes registered")

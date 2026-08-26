@@ -1,9 +1,9 @@
 /*
- * audit.c — Capability audit logging
+ * audit.c - Capability audit logging
  *
  * Streams structured JSON lines to stderr via ShJsonWriter.
  * When hl_audit_enabled == 0, hl_audit_begin returns a writer with
- * error=1 — all subsequent writes become no-ops.  Zero overhead.
+ * error=1 - all subsequent writes become no-ops.  Zero overhead.
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
@@ -43,7 +43,7 @@ ShJsonWriter hl_audit_begin(const char *cap)
     ShJsonWriter w;
 
     if (!hl_audit_enabled) {
-        /* Return a writer with error=1 — all writes become no-ops */
+        /* Return a writer with error=1 - all writes become no-ops */
         sh_json_writer_init(&w, audit_buf_write, NULL);
         w.error = 1;
         return w;
@@ -54,7 +54,7 @@ ShJsonWriter hl_audit_begin(const char *cap)
     sh_json_write_object_start(&w);
 
     /* Timestamp: ISO 8601 UTC. L4: gmtime_r can fail (e.g. very large
-     * negative time_t on platforms that don't normalize) — in that case
+     * negative time_t on platforms that don't normalize) - in that case
      * `tm` is undefined and strftime would print garbage. */
     {
         time_t now = time(NULL);

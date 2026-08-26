@@ -1,11 +1,11 @@
-// IRC Chat — Encrypted WebSocket chat with channels (JavaScript)
+// IRC Chat - Encrypted WebSocket chat with channels (JavaScript)
 //
 // Run: hull app.js -p 3000
 //
 // E2E encryption: messages are encrypted with per-channel symmetric keys
 // using crypto.secretbox (XSalsa20-Poly1305). Channel keys are distributed
 // to members encrypted with crypto.box (Curve25519+XSalsa20+Poly1305).
-// The server relays encrypted ciphertext — it never sees plaintext messages.
+// The server relays encrypted ciphertext - it never sees plaintext messages.
 //
 // See app.lua header for full endpoint + WebSocket protocol documentation.
 
@@ -479,7 +479,7 @@ app.ws("/ws", {
         }
 
         if (!conn.data.authenticated)
-            return wsError(conn, "not authenticated — send login first");
+            return wsError(conn, "not authenticated - send login first");
 
         if (msg.type === "join") {
             if (!msg.channel)
@@ -1008,7 +1008,7 @@ app.get("/e2e-test", async (req, res) => {
         }
     }
 
-    // Step 6: DM test — Alice sends DM to Bob
+    // Step 6: DM test - Alice sends DM to Bob
     if (aliceReady && bobReady) {
         aliceWs.send(JSON.stringify({
             type: "dm", to: "bob_e2e",
@@ -1599,7 +1599,7 @@ function cleanupExpired() {
 if (RETENTION.channelTtl > 0 || RETENTION.dmTtl > 0
     || RETENTION.fileTtl > 0 || RETENTION.maxFileStorage > 0) {
     app.every(RETENTION.cleanupInterval, cleanupExpired);
-    log.info(`retention cleanup enabled — channelTtl=${RETENTION.channelTtl}s dmTtl=${RETENTION.dmTtl}s fileTtl=${RETENTION.fileTtl}s maxFileStorage=${RETENTION.maxFileStorage}B`);
+    log.info(`retention cleanup enabled - channelTtl=${RETENTION.channelTtl}s dmTtl=${RETENTION.dmTtl}s fileTtl=${RETENTION.fileTtl}s maxFileStorage=${RETENTION.maxFileStorage}B`);
 }
 
-log.info("IRC Chat app loaded — routes registered");
+log.info("IRC Chat app loaded - routes registered");

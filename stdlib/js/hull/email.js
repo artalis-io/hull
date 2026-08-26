@@ -6,17 +6,17 @@
  *
  * Wraps four delivery backends behind one `email.send(opts)` call:
  *
- *   - `"smtp"`     — direct SMTP via the C `smtp.send` binding.
- *   - `"postmark"` — Postmark HTTPS API.
- *   - `"sendgrid"` — SendGrid HTTPS API.
- *   - `"resend"`   — Resend HTTPS API.
+ *   - `"smtp"`     - direct SMTP via the C `smtp.send` binding.
+ *   - `"postmark"` - Postmark HTTPS API.
+ *   - `"sendgrid"` - SendGrid HTTPS API.
+ *   - `"resend"`   - Resend HTTPS API.
  *
  * API providers use `httpClient.async.post` so they cooperate with the event
  * loop. SMTP uses the C `smtp.send` cap (mbedTLS + embedded Mozilla CA
  * bundle).
  *
  * Errors: `email.send` follows the stdlib error convention
- * (docs/stdlib_style.md section 1) — a failure to send THROWS an `Error` with a
+ * (docs/stdlib_style.md section 1) - a failure to send THROWS an `Error` with a
  * stable `.code`; success resolves to `true`. Callers that branch use
  * try/catch:
  *

@@ -1,8 +1,8 @@
 --
--- hull.source.diagnostic — language-neutral structured diagnostic.
+-- hull.source.diagnostic - language-neutral structured diagnostic.
 --
 -- THE shared diagnostic shape for the whole source-analysis layer (Lua now, JS
--- later, and eventually `hull analyze`). Never printed — diagnostics are data,
+-- later, and eventually `hull analyze`). Never printed - diagnostics are data,
 -- returned in unit.diagnostics. A parse() API-misuse / internal-failure error is
 -- also diagnostic-shaped (returned as the second value with unit == nil).
 --

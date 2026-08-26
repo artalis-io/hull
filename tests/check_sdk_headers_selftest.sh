@@ -1,5 +1,5 @@
 #!/bin/sh
-# tests/check_sdk_headers_selftest.sh — deterministic self-test proving
+# tests/check_sdk_headers_selftest.sh - deterministic self-test proving
 # check_sdk_headers.sh is not a no-op: it PASSES on the clean tree, FAILS with a
 # non-zero exit AND the EXACT drifting path when a maintained copy is perturbed,
 # and recovers after the perturbation is reverted.
@@ -20,18 +20,18 @@ BACKUP="$(mktemp)"
 
 fail() { echo "SELFTEST FAIL: $1"; exit 1; }
 
-# Until the victim is confirmed clean, the trap only removes the temp backup — it
+# Until the victim is confirmed clean, the trap only removes the temp backup - it
 # must NOT write the victim (that could clobber a user's uncommitted edit).
 trap 'rm -f "$BACKUP"' EXIT INT TERM
 
-# Snapshot the victim's HEAD bytes into the backup (git show reads objects only —
+# Snapshot the victim's HEAD bytes into the backup (git show reads objects only -
 # no index write, safe under read-only Git metadata) and reject a dirty victim so
 # we never overwrite pre-existing staged/unstaged changes.
 git show "HEAD:$VICTIM" > "$BACKUP" 2>/dev/null || fail "cannot read $VICTIM at HEAD"
 cmp -s "$VICTIM" "$BACKUP" || fail "$VICTIM has uncommitted changes vs HEAD; aborting (no changes made)"
 
 # Victim is clean: arm the filesystem restore-on-exit (cp, index-independent),
-# and report — never suppress — a restoration failure.
+# and report - never suppress - a restoration failure.
 trap 'cp "$BACKUP" "$VICTIM" 2>/dev/null || echo "SELFTEST ERROR: final restore of $VICTIM failed"; rm -f "$BACKUP"' EXIT INT TERM
 
 # 1. clean tree passes

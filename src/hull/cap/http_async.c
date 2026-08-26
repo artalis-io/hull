@@ -1,5 +1,5 @@
 /*
- * http_async.c — Non-blocking HTTP client (thin wrapper over Keel)
+ * http_async.c - Non-blocking HTTP client (thin wrapper over Keel)
  *
  * Checks host allowlist and audits, then delegates to kl_redirect_start()
  * (or kl_client_start() if redirects disabled) for async I/O. On completion,
@@ -206,7 +206,7 @@ HlAsyncCtx *hl_async_http_start(KlServer *server, KlConn *conn,
     ctx->op.deadline_ms = hl_async_backend()->monotonic_ms() + (uint64_t)timeout_ms;
     ctx->op.on_deadline = on_http_deadline;
 
-    /* Start Keel async client — prefer redirect+pooled path */
+    /* Start Keel async client - prefer redirect+pooled path */
     if (http_cfg->follow_redirects) {
         KlRedirectConfig redir = { .max_redirects = http_cfg->max_redirects };
 

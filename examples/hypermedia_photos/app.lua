@@ -46,7 +46,7 @@ app.manifest({
         "hull/log@1",
         -- Photo attachments (§1.5.b-5). fs / mime are transitive
         -- (used by blob + attachment internally), not imported here.
-        -- http-server is intrinsic via app.get/post/... — never put
+        -- http-server is intrinsic via app.get/post/... - never put
         -- it in modules.
         "hull/attachment@1",
         "hull/web/attachment-serve@1",
@@ -79,7 +79,7 @@ session.init({ ttl = 86400 })
 
 -- Idempotency-key cache (creates _hull_idempotency_keys on first run).
 -- Only kicks in when the client sends an `Idempotency-Key: <uuid>` header
--- — without it, requests pass through normally. HTMX doesn't send the
+-- - without it, requests pass through normally. HTMX doesn't send the
 -- header by default; opt in with `hx-headers='{"Idempotency-Key":"..."}'`
 -- on the form. See docs/htmx.md § Idempotency for the client recipe.
 idempotency.init({ ttl = 86400 })
@@ -347,7 +347,7 @@ app.post("/entries", function(req, res)
             -- Pre-rendered widget strings: aria-invalid +
             -- aria-describedby on the input, plus the inline
             -- <span> error. Both are empty strings on the
-            -- success path where errors is nil/empty — see the
+            -- success path where errors is nil/empty - see the
             -- initial-page render below.
             title_attrs = htmx_form.field_attrs(errors, "title"),
             title_error = htmx_form.field_error(errors, "title"),
@@ -360,7 +360,7 @@ app.post("/entries", function(req, res)
 
     if htmx.is(req) then
         -- HTMX: return the full feed partial so pagination nav (which
-        -- lives INSIDE #entry-feed) refreshes too — otherwise crossing
+        -- lives INSIDE #entry-feed) refreshes too - otherwise crossing
         -- the per_page threshold leaves stale nav from the last render.
         -- The #new-entry form resets via /static/app.js, independent
         -- of the response. flash.trigger fires a client-side 'flash'
@@ -381,7 +381,7 @@ app.post("/entries", function(req, res)
 end)
 
 -- Paginated search. Hit by the search input's hx-get (debounced
--- keyup) AND by the pagination nav's hx-get links — both target
+-- keyup) AND by the pagination nav's hx-get links - both target
 -- the same #entry-feed wrapper so a single response shape (the
 -- _entry_feed.html partial = ul + nav) refreshes BOTH the row list
 -- AND the page links in one swap. Plain (non-HTMX) navigation falls
@@ -518,7 +518,7 @@ local function _owns_attachment(entry_id, attachment_id)
     return rows and #rows > 0
 end
 
--- POST /entries/:id/photos — file-input upload via multipart/form-data.
+-- POST /entries/:id/photos - file-input upload via multipart/form-data.
 app.post("/entries/:id/photos", function(req, res)
     local entry_id = _valid_id(req.params.id)
     if not entry_id then res:status(404); return end
@@ -565,7 +565,7 @@ app.post("/entries/:id/photos", function(req, res)
     end
 end, { multipart = { max_part_size = 8 * 1024 * 1024 } })
 
--- GET /entries/:id/photos/:att_id — auth-gated serve. The default-deny
+-- GET /entries/:id/photos/:att_id - auth-gated serve. The default-deny
 -- of attachment-serve is overridden here with our own _owns_attachment
 -- check (which also gates against malicious cross-entry ID guessing).
 app.get("/entries/:id/photos/:att_id", function(req, res)
@@ -579,7 +579,7 @@ app.get("/entries/:id/photos/:att_id", function(req, res)
     })
 end)
 
--- DELETE /entries/:id/photos/:att_id — drop the join row + decrement
+-- DELETE /entries/:id/photos/:att_id - drop the join row + decrement
 -- the attachment refcount. The on-disk blob unlinks automatically
 -- when refcount hits 0 (no other entries reference the same content).
 app.delete("/entries/:id/photos/:att_id", function(req, res)

@@ -1,4 +1,4 @@
-/* mod_gpu.c — hull.gpu module: GPU compute via wgpu-native
+/* mod_gpu.c - hull.gpu module: GPU compute via wgpu-native
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
@@ -28,7 +28,7 @@ static int lua_parse_texture_descs(lua_State *L, int tbl_idx,
 #include <stdio.h>
 
 /* ════════════════════════════════════════════════════════════════════
- * hull.gpu module — GPU compute (wgpu-native)
+ * hull.gpu module - GPU compute (wgpu-native)
  *
  * gpu.available() -> boolean
  * gpu.devices() -> { {id=0, name="..."}, ... }
@@ -714,7 +714,7 @@ static void lua_push_worker_gpu_result(lua_State *L, void *driver)
     }
 }
 
-/* Async dispatch — submits GPU work to thread pool */
+/* Async dispatch - submits GPU work to thread pool */
 static int l_gpu_async_dispatch(lua_State *L)
 {
     HlLua *lua = get_hl_lua(L);
@@ -1142,7 +1142,7 @@ static int l_gpu_pipeline(lua_State *L)
     return 1;
 }
 
-/* Async pipeline — submits to thread pool */
+/* Async pipeline - submits to thread pool */
 static void lua_push_worker_gpu_pipeline_result(lua_State *L, void *driver)
 {
     HlWorkerGpuOp *op = (HlWorkerGpuOp *)driver;

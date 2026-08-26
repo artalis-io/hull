@@ -77,7 +77,7 @@ if gpu.available() then
         log.error("shader compile failed: " .. err)
     end
 else
-    log.warn("GPU not available — search endpoints will return errors")
+    log.warn("GPU not available - search endpoints will return errors")
 end
 
 -- Index state

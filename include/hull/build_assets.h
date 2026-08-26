@@ -1,5 +1,5 @@
 /*
- * build_assets.h — Embedded platform library for hull build
+ * build_assets.h - Embedded platform library for hull build
  *
  * The hull binary carries a pre-compiled libhull_platform.a inside
  * itself. hull build extracts this to a temp dir, then links app code

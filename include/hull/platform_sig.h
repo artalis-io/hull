@@ -16,12 +16,12 @@
  *
  * Why a separate module from `release.h` / `release_io.h`:
  *   - `release.{h,c}` owns the release-side trust chain (hull.sha256,
- *     HL_RELEASE_PUBKEY_HEX) — DIFFERENT key, DIFFERENT manifest.
+ *     HL_RELEASE_PUBKEY_HEX) - DIFFERENT key, DIFFERENT manifest.
  *   - `release_io.{h,c}` owns the I/O + crypto primitives that BOTH
  *     trust chains share (HTTPS GET, SHA-256 hex, manifest-line
  *     lookup, atomic write). This module reuses them.
- *   - Platform-specific concerns — per-arch sort, arch-name iteration,
- *     pinning against `HL_PLATFORM_PUBKEY_HEX` — live here.
+ *   - Platform-specific concerns - per-arch sort, arch-name iteration,
+ *     pinning against `HL_PLATFORM_PUBKEY_HEX` - live here.
  *
  * v0.1.3 wire-up:
  *   - Build-time (release.yml): `sign-platform-manifest` job invokes
@@ -35,7 +35,7 @@
  *     `hl_platform_sig_verify()` validates `package.sig.platform`'s
  *     embedded manifest + signature against `HL_PLATFORM_PUBKEY_HEX`.
  *
- * Pure data — no I/O, no global state. Safe to call from CI tools,
+ * Pure data - no I/O, no global state. Safe to call from CI tools,
  * `hull build`, runtime verifier, or unit tests.
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
@@ -51,7 +51,7 @@
  * @brief One arch entry: { name, SHA-256-hex }.
  *
  * Arch names are stable strings matching `hl_release_io_platform()`
- * output plus the cosmo variants — `"linux-x86_64"`,
+ * output plus the cosmo variants - `"linux-x86_64"`,
  * `"linux-aarch64"`, `"darwin-arm64"`, `"cosmo-x86_64"`,
  * `"cosmo-aarch64"`. Hash strings MUST be 64 lowercase hex chars.
  */
@@ -82,7 +82,7 @@ int hl_platform_sig_build_manifest(const HlPlatformArchHash *entries, size_t n,
 /**
  * @brief Sign a manifest blob with the platform Ed25519 secret key.
  *
- * Thin wrapper over `hl_release_sign_manifest()` — they use the same
+ * Thin wrapper over `hl_release_sign_manifest()` - they use the same
  * underlying Ed25519 implementation. Distinct API name so the caller's
  * intent (platform vs release) is explicit at the call site.
  *
@@ -130,7 +130,7 @@ int hl_platform_sig_verify(const void *manifest, size_t manifest_len,
  * hex, surrounding whitespace, etc.).
  *
  * @return 1 if the embedded pubkey decodes to 32 zero bytes;
- *         0 otherwise (real key, or unparseable macro — both treated
+ *         0 otherwise (real key, or unparseable macro - both treated
  *         as "not placeholder" so the verifier runs and fails
  *         loudly rather than silently skipping).
  */
@@ -139,7 +139,7 @@ int hl_platform_pubkey_is_placeholder(void);
 /**
  * @brief Extract the SHA-256 hex for a specific arch from the manifest.
  *
- * Thin wrapper over `hl_release_io_find_checksum()` — the manifest
+ * Thin wrapper over `hl_release_io_find_checksum()` - the manifest
  * format is identical. Lookup is O(n) over manifest lines, but n is
  * the arch count (≤ 16) so this is cheap.
  *

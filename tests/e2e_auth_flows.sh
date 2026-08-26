@@ -47,7 +47,7 @@ HULL_PID=""
 TMPDIR_WORK=""
 
 if [ ! -x "$HULL" ]; then
-    echo "e2e_auth_flows: hull binary not found at $HULL — run 'make' first"
+    echo "e2e_auth_flows: hull binary not found at $HULL - run 'make' first"
     exit 1
 fi
 if ! command -v python3 >/dev/null 2>&1; then
@@ -61,13 +61,13 @@ pass() { echo "  PASS: $1"; PASS=$((PASS + 1)); }
 check_status() {
     # $1 = label, $2 = actual, $3 = expected
     if [ "$2" = "$3" ]; then pass "$1"
-    else fail "$1 — expected status $3, got $2"
+    else fail "$1 - expected status $3, got $2"
     fi
 }
 
 check_contains() {
     case "$2" in *"$3"*) pass "$1" ;;
-                 *) fail "$1 — expected '$3' in: $(echo "$2" | head -c 200)" ;;
+                 *) fail "$1 - expected '$3' in: $(echo "$2" | head -c 200)" ;;
     esac
 }
 

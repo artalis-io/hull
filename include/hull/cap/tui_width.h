@@ -1,5 +1,5 @@
 /*
- * include/hull/cap/tui_width.h — TUI cell-width lookup.
+ * include/hull/cap/tui_width.h - TUI cell-width lookup.
  *
  * Returns the number of terminal cells a Unicode codepoint occupies.
  * Backed by an embedded table generated from Unicode 16.0.0 data
@@ -32,7 +32,7 @@ int hl_tui_cp_width(uint32_t cp);
 /* Convenience: walk a UTF-8 string and return the total display
  * width in cells. Invalid UTF-8 sequences contribute width 0 (the
  * byte is skipped). Combining marks attach to the preceding
- * character — they don't add to width but are accounted for in the
+ * character - they don't add to width but are accounted for in the
  * advance. */
 int hl_tui_str_width(const char *s, size_t len);
 

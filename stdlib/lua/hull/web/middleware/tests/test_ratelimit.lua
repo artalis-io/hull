@@ -1,4 +1,4 @@
--- test_ratelimit.lua — Tests for hull.web.middleware.ratelimit
+-- test_ratelimit.lua - Tests for hull.web.middleware.ratelimit
 --
 -- Tests pure-function helpers (no runtime globals needed).
 -- Run via: the C test harness (test_lua_runtime.c) loads and executes this.

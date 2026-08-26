@@ -1,6 +1,6 @@
 /*
  * fuzz_span_sdk.c: libFuzzer harness for the guest-side mapped-span SDK math
- * (templates/hull_span.h) — the ATTACKER-CONTROLLED surface a WASM plugin runs on
+ * (templates/hull_span.h) - the ATTACKER-CONTROLLED surface a WASM plugin runs on
  * the span metadata + window contents. Every input here (record bytes, rec_len,
  * read offsets, scratch pointer) is treated as adversarial. Exercises, under
  * ASan+UBSan:
@@ -42,7 +42,7 @@ static uint64_t rd_u64(const uint8_t *p)
 int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
 {
     /* (1) decode: [u32 rec_len][record bytes...]. rec_len is fuzzer-chosen but
-     * clamped to the bytes we actually hold — decode trusts rec_len as the count
+     * clamped to the bytes we actually hold - decode trusts rec_len as the count
      * of valid bytes by contract, so feeding a larger value would test the caller
      * contract, not the decoder. */
     HullSpan sp;

@@ -1,4 +1,4 @@
---- HTMX pagination widget — htmx-attributed nav over the
+--- HTMX pagination widget - htmx-attributed nav over the
 --- existing hull/web/pagination@1 page-math.
 --
 -- @module hull.web.htmx.pagination
@@ -91,7 +91,7 @@ end
 --                                             Default 2.
 -- @tparam[opt] string   opts.target           hx-target for nav links.
 --                                             Default "body" (forces
---                                             full re-render — callers
+--                                             full re-render - callers
 --                                             usually want a content
 --                                             container).
 -- @tparam[opt] bool     opts.push_url         Default true.

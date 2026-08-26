@@ -9,7 +9,7 @@
 -- runtime tracker validates this list against actual imports at load
 -- time, so missing entries surface immediately. `hull/web/middleware/session`
 -- and friends auto-pull their own deps (json, time, crypto, db) via
--- the registry's deps graph — but anything imported only by user files
+-- the registry's deps graph - but anything imported only by user files
 -- (routes/, models/, lib/) must be listed here explicitly.
 app.manifest({
     modules = {

@@ -1,5 +1,5 @@
 /*
- * thread_affinity.c — event-loop thread-affinity assertions
+ * thread_affinity.c - event-loop thread-affinity assertions
  *
  * Only meaningful under HL_THREAD_AFFINITY_CHECKS (debug/sanitizer
  * builds); compiles to an empty TU otherwise (the header provides

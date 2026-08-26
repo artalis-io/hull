@@ -139,7 +139,7 @@ const B64_DEC = (() => {
 // Decode a single base64 char via the lookup table, guarding the
 // `s.charCodeAt(i) > 255` case explicitly. B64_DEC is Int8Array(256);
 // indexing past 255 returns undefined, and `(undef | x) < 0` is
-// false because undef coerces to 0 — so without this guard a token
+// false because undef coerces to 0 - so without this guard a token
 // containing a non-ASCII char would silently zero-pad and produce
 // garbage bytes (rejected at the crypto layer, but masked as a
 // generic sig failure).

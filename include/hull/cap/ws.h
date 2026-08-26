@@ -3,7 +3,7 @@
  * @brief WebSocket connection registry.
  *
  * Tracks per-endpoint WebSocket connections to support broadcast and
- * `ws.connections(path)` counting. Runtime-agnostic — used by both Lua
+ * `ws.connections(path)` counting. Runtime-agnostic - used by both Lua
  * (`hull.ws`) and JS (`hull:ws`).
  *
  * Server endpoints are registered via `app.ws(path, callbacks)`; client

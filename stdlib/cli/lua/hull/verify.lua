@@ -1,10 +1,10 @@
 --
--- hull.verify — Verify app signature (dual-layer + v0.1.3 gethull)
+-- hull.verify - Verify app signature (dual-layer + v0.1.3 gethull)
 --
 -- Usage: hull verify [options] [app_dir]
 --   --platform-key <file|url>   Per-app platform key (the v0.1.2 platforms
 --                               object is signed by the app developer here,
---                               not by gethull.dev — distinct from the
+--                               not by gethull.dev - distinct from the
 --                               gethull layer below)
 --   --developer-key <file|url>  Developer public key for the app layer
 --   --gethull-key <file|url>    Cross-check: the file's pubkey must match
@@ -22,17 +22,17 @@
 --                               with its own key.
 --
 -- Verification layers, in order:
---   1. gethull layer (v0.1.3): package.sig.platform.gethull — the signed
+--   1. gethull layer (v0.1.3): package.sig.platform.gethull - the signed
 --      libhull_platform.a manifest carried forward from the hull binary
 --      that ran `hull build`. Pubkey is the build-time-pinned
 --      HL_PLATFORM_PUBKEY_HEX (queried via tool.platform_pubkey()).
 --   2. app's per-build platform layer (v0.1.2): package.sig.platform.{
---      platforms, public_key, signature} — the JSON object the developer
+--      platforms, public_key, signature} - the JSON object the developer
 --      signed alongside their app.
---   3. app layer: package.sig.{files, signature, public_key} — Ed25519
+--   3. app layer: package.sig.{files, signature, public_key} - Ed25519
 --      over the canonical-JSON payload of {binary_hash, build, files,
 --      manifest, platform, trampoline_hash[, modules_resolved]}.
---   4. file hashes — each path in files{} re-hashed and compared.
+--   4. file hashes - each path in files{} re-hashed and compared.
 --
 -- SPDX-License-Identifier: AGPL-3.0-or-later
 --
@@ -148,7 +148,7 @@ local function main()
     -- This whole block is no-op when:
     --   * --no-verify-platform is set, or
     --   * this verify hull was built with the all-zeros placeholder
-    --     pubkey (dev hulls / forks without their own pinned key) —
+    --     pubkey (dev hulls / forks without their own pinned key) -
     --     we cannot validate anyway, and apps built by such a hull
     --     legitimately have no gethull block.
     --
@@ -167,18 +167,18 @@ local function main()
         print("gethull layer: SKIPPED (--no-verify-platform)")
     elseif not verify_pubkey_hex then
         print("gethull layer: SKIPPED (this hull has no pinned platform " ..
-            "pubkey — placeholder build)")
+            "pubkey - placeholder build)")
     elseif sig.platform and sig.platform.gethull and
            sig.platform.gethull.manifest and sig.platform.gethull.signature then
         -- Optional cross-check: --gethull-key
         if opts.gethull_key then
             local expected_hex = read_key(opts.gethull_key)
             if not expected_hex then
-                tool.stderr("gethull layer: FAILED — could not read " ..
+                tool.stderr("gethull layer: FAILED - could not read " ..
                     "--gethull-key file " .. opts.gethull_key .. "\n")
                 issues = issues + 1
             elseif expected_hex ~= verify_pubkey_hex then
-                tool.stderr("gethull layer: FAILED — --gethull-key does " ..
+                tool.stderr("gethull layer: FAILED - --gethull-key does " ..
                     "not match this hull's embedded HL_PLATFORM_PUBKEY_HEX\n")
                 tool.stderr("  expected: " .. expected_hex:sub(1, 16) .. "...\n")
                 tool.stderr("  embedded: " .. verify_pubkey_hex:sub(1, 16) .. "...\n")
@@ -194,13 +194,13 @@ local function main()
         if gethull_ok then
             print("gethull layer: VALID (signed by gethull.dev)")
         else
-            tool.stderr("gethull layer: FAILED — signature invalid\n")
+            tool.stderr("gethull layer: FAILED - signature invalid\n")
             tool.stderr("  the embedded libhull_platform.a does not " ..
                 "match what gethull.dev signed at release time\n")
             issues = issues + 1
         end
     elseif not is_legacy then
-        tool.stderr("gethull layer: MISSING — package.sig has no " ..
+        tool.stderr("gethull layer: MISSING - package.sig has no " ..
             "platform.gethull block\n")
         tool.stderr("  hint: rebuild with a hull v0.1.3+ that has " ..
             "platform-sig wired through, or pass --no-verify-platform\n")
@@ -211,7 +211,7 @@ local function main()
     -- The developer's `hull sign-platform` step produced this block
     -- with their own platform key. We verify the signature is
     -- self-consistent (covers the platforms object with the embedded
-    -- pubkey) but do NOT pin against any upstream key — that pinning
+    -- pubkey) but do NOT pin against any upstream key - that pinning
     -- moved to the v0.1.3 gethull layer above, which uses a signed
     -- manifest from the gethull release pipeline. --platform-key is
     -- still honored as an explicit override for forks that want to
@@ -221,7 +221,7 @@ local function main()
         if platform_key_hex and platform_key_hex ~=
                 GETHULL_DEV_PLATFORM_KEY_PLACEHOLDER and
                 sig.platform.public_key ~= platform_key_hex then
-            tool.stderr("Platform layer: WARNING — key does not match " ..
+            tool.stderr("Platform layer: WARNING - key does not match " ..
                 "--platform-key (expected " .. platform_key_hex:sub(1, 16) ..
                 "..., got " .. sig.platform.public_key:sub(1, 16) .. "...)\n")
             issues = issues + 1
@@ -233,7 +233,7 @@ local function main()
         if plat_ok then
             print("Platform layer: VALID (self-consistent)")
         else
-            tool.stderr("Platform layer: FAILED — signature invalid\n")
+            tool.stderr("Platform layer: FAILED - signature invalid\n")
             issues = issues + 1
         end
 
@@ -256,7 +256,7 @@ local function main()
     local dev_key_hex = read_key(opts.developer_key)
     if dev_key_hex then
         if sig.public_key ~= dev_key_hex then
-            tool.stderr("App layer: WARNING — developer key mismatch\n")
+            tool.stderr("App layer: WARNING - developer key mismatch\n")
             issues = issues + 1
         end
     end
@@ -289,7 +289,7 @@ local function main()
 
     local ok = crypto.ed25519_verify(payload, sig.signature, sig.public_key)
     if not ok then
-        tool.stderr("App layer: FAILED — signature is invalid\n")
+        tool.stderr("App layer: FAILED - signature is invalid\n")
         tool.exit(1)
     end
 
@@ -344,13 +344,13 @@ local function main()
     end
 
     if issues > 0 then
-        tool.stderr("hull verify: FAILED — " .. issues .. " issue(s) found\n")
+        tool.stderr("hull verify: FAILED - " .. issues .. " issue(s) found\n")
         tool.exit(1)
     end
 
     print("App layer: VALID")
     print("")
-    print("hull verify: OK — all checks passed")
+    print("hull verify: OK - all checks passed")
 end
 
 -- The tool dispatcher (src/hull/tool.c) invokes the returned main() only when

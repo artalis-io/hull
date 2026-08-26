@@ -1,5 +1,5 @@
 /*
- * bindings_response.c — the res.* response helpers, extracted from bindings.c.
+ * bindings_response.c - the res.* response helpers, extracted from bindings.c.
  *
  * Moved out (#114) so the core js_bindings.o holds ZERO Keel-response / compress
  * references (kl_response_*, hl_maybe_compress): those live only here, on the
@@ -56,7 +56,7 @@ static KlResponse *get_response(JSContext *ctx, JSValueConst this_val)
 
 /* Has a header with this name (case-insensitive) already been added to
  * the response? Used by js_res_html to avoid stamping Hull's default
- * CSP on top of one already set by application middleware — without
+ * CSP on top of one already set by application middleware - without
  * this the browser sees two Content-Security-Policy headers and
  * enforces the strict intersection, which typically blocks the page's
  * own scripts. Scans res->hdr_buf line by line; headers are appended
@@ -174,7 +174,7 @@ static JSValue js_res_html(JSContext *ctx, JSValueConst this_val,
         size_t html_len = strlen(html);
         HlJS *js_rt = (HlJS *)JS_GetContextOpaque(ctx);
         kl_response_header(res, "Content-Type", "text/html; charset=utf-8");
-        /* Skip the default CSP if middleware already wrote one — two
+        /* Skip the default CSP if middleware already wrote one - two
          * CSP headers cause browsers to enforce the strict intersection
          * (typically blocking the page's own scripts). The app-supplied
          * one wins. */
@@ -213,10 +213,10 @@ static JSValue js_res_text(JSContext *ctx, JSValueConst this_val,
     return JS_UNDEFINED;
 }
 
-/* res.bytes(buf) — binary-safe response primitive.
+/* res.bytes(buf) - binary-safe response primitive.
  *
  * Accepts an ArrayBuffer, TypedArray, or string. Does NOT set
- * Content-Type (caller's responsibility — binary content can be
+ * Content-Type (caller's responsibility - binary content can be
  * anything) and does NOT route through hl_maybe_compress (avoids
  * gzipping already-compressed payloads + keeps the response bytes
  * identical to a downstream SHA / ETag check). The body is copied

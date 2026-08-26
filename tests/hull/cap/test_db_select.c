@@ -1,5 +1,5 @@
 /*
- * test_db_select.c — DSN-scheme backend routing (hl_db_backend_select)
+ * test_db_select.c - DSN-scheme backend routing (hl_db_backend_select)
  *
  * Flag-aware: asserts the routing for whatever backends this build compiled,
  * plus the reserved-but-uncompiled and unknown-scheme error paths (which are

@@ -1,10 +1,10 @@
 /*
- * worker_wasm.c — WASM compute worker for thread pool dispatch
+ * worker_wasm.c - WASM compute worker for thread pool dispatch
  *
  * Follows the same three-callback pattern as worker_db.c:
- *   work_fn  — runs on worker thread (delegates to hl_cap_wasm_call[_buf])
- *   done_fn  — runs on event loop (resume or cleanup if cancelled)
- *   cancel_fn — cleanup for items that never ran
+ *   work_fn  - runs on worker thread (delegates to hl_cap_wasm_call[_buf])
+ *   done_fn  - runs on event loop (resume or cleanup if cancelled)
+ *   cancel_fn - cleanup for items that never ran
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
@@ -143,7 +143,7 @@ int hl_worker_wasm_submit(HlAsyncBackendPool *pool, HlWorkerWasmOp *op)
     if (!pool || !op) return -1;
 
     /* Async submit (and the inflight_async accounting below) is
-     * event-loop-only — done/cancel clear the counter on the same thread. */
+     * event-loop-only - done/cancel clear the counter on the same thread. */
     hl_assert_on_event_loop("hl_worker_wasm_submit (compute.async)");
 
     /* Reserve an in-flight slot on the target module BEFORE the worker can

@@ -1,5 +1,5 @@
 /*
- * test_module_resolver.c — Tests for HlResolvedModuleSet + resolver
+ * test_module_resolver.c - Tests for HlResolvedModuleSet + resolver
  *
  * Validates the manifest-to-set pipeline:
  *   - Intrinsics auto-seeded even with no manifest
@@ -312,7 +312,7 @@ UTEST(module_resolver, http_client_without_hosts_admitted)
     HlManifest m;
     clear_manifest(&m);
     add_module(&m, "http-client", 1);
-    /* no hosts — resolver still admits the module */
+    /* no hosts - resolver still admits the module */
 
     HlResolvedModuleSet s = {0};
     char err[256] = {0};
@@ -581,7 +581,7 @@ UTEST(module_resolver, null_errbuf_does_not_crash)
     add_module(&m, "nonexistent", 1);
 
     HlResolvedModuleSet s = {0};
-    /* Pass NULL/0 — resolver must still report -1 without segfaulting. */
+    /* Pass NULL/0 - resolver must still report -1 without segfaulting. */
     ASSERT_EQ(hl_module_resolver_resolve(&m, &s, NULL, 0), -1);
 }
 

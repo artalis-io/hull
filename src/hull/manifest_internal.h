@@ -1,5 +1,5 @@
 /*
- * manifest_internal.h — Private helpers shared between manifest.c and
+ * manifest_internal.h - Private helpers shared between manifest.c and
  *                       the per-runtime extractors (manifest_lua.c / _js.c).
  *
  * Not installed; internal to the manifest split (roadmap item G).

@@ -21,7 +21,7 @@ app.manifest({
 // Register a custom health check
 health.register("app_ready", () => true);
 
-// Pass db module to health (optional — only needed if app has a database)
+// Pass db module to health (optional - only needed if app has a database)
 health.setDb(db);
 
 // Register health middleware on all GET paths

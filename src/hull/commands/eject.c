@@ -1,5 +1,5 @@
 /*
- * commands/eject.c — hull eject subcommand
+ * commands/eject.c - hull eject subcommand
  *
  * Thin wrapper: launches the Lua tool VM with hull.eject module.
  *

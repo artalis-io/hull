@@ -1,8 +1,8 @@
 /*
- * agent/tools.c — `hull agent tools`: machine-readable side-loaded
+ * agent/tools.c - `hull agent tools`: machine-readable side-loaded
  * tool registry + install state.
  *
- * Generic over the registry — adding a new tool to
+ * Generic over the registry - adding a new tool to
  * src/hull/tools_install.c automatically surfaces it here. The
  * per-subsystem panels (`hull agent compute` for wamrc, future
  * `hull agent gpu` for wgpu-native) report the same tool by name
@@ -22,7 +22,7 @@
 #include <string.h>
 #include <sys/stat.h>
 
-/* Platform identifier — kept independent of release_io.c so this file
+/* Platform identifier - kept independent of release_io.c so this file
  * compiles even on HL_ENABLE_HTTP_CLIENT=0 builds where the registry
  * is still useful for read-only lookup. */
 static const char *agent_tools_platform(void)
@@ -63,7 +63,7 @@ int hl_agent_tools(ShJsonBuf *out)
         sh_json_write_kv_bool(&w, "available_for_platform", available != 0);
 
         /* installed: is there an executable at the canonical install
-         * location? We don't fall back to PATH here — the install
+         * location? We don't fall back to PATH here - the install
          * state is specifically about hull-managed installs. */
         char path[HL_AGENT_PATH_MAX];
         int has_path = hl_tools_install_path(t->name, path, sizeof(path)) == 0;

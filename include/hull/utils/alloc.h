@@ -1,5 +1,5 @@
 /*
- * hull_alloc.h — Unified tracking allocator for Hull
+ * hull_alloc.h - Unified tracking allocator for Hull
  *
  * Wraps malloc/realloc/free with byte-level accounting.
  * Optionally enforces a hard process-level memory cap.
@@ -51,7 +51,7 @@ void  hl_alloc_free(HlAllocator *a, void *ptr, size_t size);
  * and a deep-copied owned string in another). When this code owns the
  * bytes, freeing them is correct; the cast to mutable goes through
  * uintptr_t so -Wcast-qual stays clean. The const here is a typing
- * artifact, not an immutability guarantee — never use these on a pointer
+ * artifact, not an immutability guarantee - never use these on a pointer
  * into sealed / .rodata memory. */
 static inline void hl_free_const(const void *p)
 {
@@ -65,7 +65,7 @@ static inline void hl_alloc_free_const(HlAllocator *a, const void *p, size_t siz
 /* Return a KlAllocator vtable routing through this tracker. */
 KlAllocator hl_alloc_kl(HlAllocator *a);
 
-/* Arena wrappers — track backing buffer on the allocator.
+/* Arena wrappers - track backing buffer on the allocator.
  * If 'a' is NULL, equivalent to sh_arena_create/sh_arena_free. */
 SHArena *hl_arena_create(HlAllocator *a, size_t capacity);
 void     hl_arena_free(HlAllocator *a, SHArena *arena);

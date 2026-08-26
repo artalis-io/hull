@@ -1,5 +1,5 @@
 /*
- * compress.c — Response compression helper
+ * compress.c - Response compression helper
  *
  * Checks Accept-Encoding and uses Keel's compression vtable to
  * compress response bodies when beneficial.
@@ -26,7 +26,7 @@ void hl_maybe_compress(KlRequest *req, KlResponse *res,
 {
     if (cfg && len >= HL_COMPRESS_MIN_SIZE && accepts_gzip(req)) {
         if (kl_response_body_compress(res, cfg, data, len) == 0)
-            return; /* success — body + Content-Encoding set */
+            return; /* success - body + Content-Encoding set */
     }
 
     /* Fallback: uncompressed */

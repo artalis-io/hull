@@ -43,10 +43,10 @@ hull agent test     # JSON output for AI agents
 <!-- compact -->
 ## Test HTTP Methods
 
-- **`test.get(path, opts?)`** — GET request
-- **`test.post(path, body?, opts?)`** — POST with JSON body
-- **`test.put(path, body?, opts?)`** — PUT with JSON body
-- **`test.delete(path, opts?)`** — DELETE request
+- **`test.get(path, opts?)`** - GET request
+- **`test.post(path, body?, opts?)`** - POST with JSON body
+- **`test.put(path, body?, opts?)`** - PUT with JSON body
+- **`test.delete(path, opts?)`** - DELETE request
 
 `opts` can include `headers` table for custom headers:
 ```lua
@@ -55,15 +55,15 @@ local res = test.get("/api/data", { headers = { ["Authorization"] = "Bearer " ..
 
 ## Response Object
 
-- `res.status` — HTTP status code (number)
-- `res.body` — parsed response body (table for JSON, string otherwise)
-- `res.headers` — response headers table
+- `res.status` - HTTP status code (number)
+- `res.body` - parsed response body (table for JSON, string otherwise)
+- `res.headers` - response headers table
 
 ## Assertions
 
-- **`test.eq(actual, expected)`** — assert equality
-- **`test.ok(value)`** — assert truthy
-- **`test.err(fn, pattern?)`** — assert function throws (optional message pattern)
+- **`test.eq(actual, expected)`** - assert equality
+- **`test.ok(value)`** - assert truthy
+- **`test.err(fn, pattern?)`** - assert function throws (optional message pattern)
 
 ## Database in Tests
 

@@ -1,4 +1,4 @@
--- Webhooks — Hull + Lua example
+-- Webhooks - Hull + Lua example
 --
 -- Run: hull app.lua -p 3000
 -- Webhook delivery and receipt with HMAC-SHA256 signatures
@@ -120,7 +120,7 @@ app.delete("/webhooks/:id", function(req, res)
     res:json({ ok = true })
 end)
 
--- Fire an event — atomically inserts event + enqueues deliveries via outbox
+-- Fire an event - atomically inserts event + enqueues deliveries via outbox
 app.post("/events", function(req, res)
     local decode_ok, body = pcall(json.decode, req.body)
     if not decode_ok or not body then
@@ -264,4 +264,4 @@ app.post("/webhooks/receive", function(req, res)
     res:json({ received = true, event = event_name })
 end)
 
-log.info("Webhooks example loaded — routes registered (outbox + inbox + idempotency)")
+log.info("Webhooks example loaded - routes registered (outbox + inbox + idempotency)")

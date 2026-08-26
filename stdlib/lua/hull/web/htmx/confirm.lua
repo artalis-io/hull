@@ -1,4 +1,4 @@
---- HTMX confirm dialog — server-side helper.
+--- HTMX confirm dialog - server-side helper.
 --
 -- @module hull.web.htmx.confirm
 -- @license AGPL-3.0-or-later
@@ -10,8 +10,8 @@
 -- This module provides one helper: `confirm.attrs(question, opts?)`.
 -- It returns a pre-formatted, HTML-attribute-escaped string suitable
 -- for splicing into a template via `{{ ... | raw }}`. Server has
--- nothing functional to do at request time — the dialog flow is
--- entirely client-side — but apps still declare the module in their
+-- nothing functional to do at request time - the dialog flow is
+-- entirely client-side - but apps still declare the module in their
 -- manifest for audit visibility.
 --
 -- Setup:
@@ -58,18 +58,18 @@ local attr_escape = require("hull.web.htmx").escape
 --
 -- Optional opts:
 --
---   - `yes`     string — custom label for the confirm button.
+--   - `yes`     string - custom label for the confirm button.
 --                       Default "Confirm".
---   - `no`      string — custom label for the cancel button.
+--   - `no`      string - custom label for the cancel button.
 --                       Default "Cancel".
---   - `danger`  bool  — when true, emits `data-confirm-danger="true"`
+--   - `danger`  bool  - when true, emits `data-confirm-danger="true"`
 --                       so CSS can style the confirm button as
 --                       destructive (red, etc.). Apps wire this
 --                       via `dialog#hull-confirm
 --                       .hull-confirm-yes[data-danger="true"]`.
---   - `title`   string — optional heading shown above the question.
+--   - `title`   string - optional heading shown above the question.
 --
--- All values are HTML-attribute-escaped — caller may pass user-
+-- All values are HTML-attribute-escaped - caller may pass user-
 -- supplied text safely.
 --
 -- @tparam string question  The yes/no prompt.

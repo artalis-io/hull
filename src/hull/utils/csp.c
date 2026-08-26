@@ -1,5 +1,5 @@
 /*
- * csp.c — Content-Security-Policy preset registry.
+ * csp.c - Content-Security-Policy preset registry.
  *
  * The default policy (HL_DEFAULT_CSP, exposed for callers in csp.h)
  * is the deny-by-default baseline applied to every HTML response
@@ -8,7 +8,7 @@
  * `app.manifest({ csp = "<name>" })`; hl_csp_resolve() expands the
  * name to a concrete header value once at startup.
  *
- * Unknown preset names pass through as literal CSP strings — this
+ * Unknown preset names pass through as literal CSP strings - this
  * is deliberate, so an app that writes `csp = "default-src 'self';
  * ..."` keeps working. Typo-as-preset-name silently becoming
  * `default-src 'none'` would be a bad failure mode.
@@ -25,17 +25,17 @@
 
 #include <string.h>
 
-/* "htmx" preset — htmx-driven SSR apps with stdlib JS / CSS served
+/* "htmx" preset - htmx-driven SSR apps with stdlib JS / CSS served
  * from /static/. Allows:
  *   - same-origin scripts (htmx itself + any widget JS shipped
  *     from stdlib/static/hull/...);
  *   - inline styles (Pico classless concession);
- *   - same-origin XHR (htmx's bread and butter — without
+ *   - same-origin XHR (htmx's bread and butter - without
  *     connect-src 'self' every htmx request is blocked by
  *     default-src 'none');
  *   - `data:` images (inline SVG favicons + Pico/Lucide-style
  *     inline icons are a de-facto standard for hypermedia apps;
- *     `data:` for images is XSS-safe — browsers don't interpret
+ *     `data:` for images is XSS-safe - browsers don't interpret
  *     SVG inside <img> as scriptable).
  *
  * Apps that want stricter nonce-based CSP should use the

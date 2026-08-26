@@ -1,5 +1,5 @@
 --
--- hull.project.analyze — the host-owned, frontend-neutral project analyzer.
+-- hull.project.analyze - the host-owned, frontend-neutral project analyzer.
 --
 -- The SINGLE canonical implementation of project source discovery (design:
 -- docs/project_discovery_design.md D1). Statically inspects an app's source tree WITHOUT

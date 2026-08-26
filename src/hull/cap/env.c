@@ -1,5 +1,5 @@
 /*
- * hull_cap_env.c — Shared environment variable capability
+ * hull_cap_env.c - Shared environment variable capability
  *
  * Access is gated by an allowlist. Only env vars explicitly declared
  * by the application can be read.
@@ -34,7 +34,7 @@ const char *hl_cap_env_get(const HlEnvConfig *cfg, const char *name)
         }
     }
 
-    /* Not in allowlist — denied */
+    /* Not in allowlist - denied */
     ShJsonWriter w = hl_audit_begin("env.get");
     sh_json_write_kv_string(&w, "name", name);
     sh_json_write_kv_string(&w, "result", "denied");

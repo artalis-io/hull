@@ -1,4 +1,4 @@
-// lib/validate_user.js — Schema validation for the User resource.
+// lib/validate_user.js - Schema validation for the User resource.
 
 import { validate } from "hull:validate";
 

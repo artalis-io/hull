@@ -1,5 +1,5 @@
 /*
- * test_hull_cap_image.c — Tests for image capability
+ * test_hull_cap_image.c - Tests for image capability
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
@@ -116,7 +116,7 @@ UTEST(hull_cap_image, from_view)
     ASSERT_EQ(2u, img->width);
     ASSERT_EQ(1u, img->height);
     ASSERT_EQ(0, img->owned);
-    /* Borrowed pointer — same address */
+    /* Borrowed pointer - same address */
     ASSERT_EQ(pixels, (uint8_t *)img->pixels);
 
     hl_image_free(img);  /* should NOT free pixels */
@@ -237,7 +237,7 @@ UTEST(hull_cap_image, decode_empty)
 
 UTEST(hull_cap_image, encode_unsupported_format)
 {
-    /* R32F cannot be encoded — only RGBA8 and R8 */
+    /* R32F cannot be encoded - only RGBA8 and R8 */
     float pixels[4] = { 1.0f, 0.5f, 0.25f, 0.0f };
     HlImage *img = hl_image_new(2, 2, HL_IMAGE_R32F,
                                  pixels, sizeof(pixels), NULL);

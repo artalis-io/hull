@@ -1,5 +1,5 @@
 /*
- * commands/agent.c — hull agent: AI-native development tooling (CLI wrapper)
+ * commands/agent.c - hull agent: AI-native development tooling (CLI wrapper)
  *
  * Thin CLI dispatcher that parses arguments and delegates to the
  * transport-agnostic agent library (agent_lib.c). All JSON generation
@@ -7,16 +7,16 @@
  * writing the result to stdout.
  *
  * Subcommands:
- *   hull agent routes [app_dir]            — list registered routes
- *   hull agent db schema [app_dir]         — introspect DB schema
- *   hull agent db query "SQL" [app_dir]    — run read-only query
- *   hull agent request METHOD PATH [opts]  — HTTP request to dev server
- *   hull agent status                      — dev server status
- *   hull agent auth-status [--path PATH]   — auth-stack health probe
+ *   hull agent routes [app_dir]            - list registered routes
+ *   hull agent db schema [app_dir]         - introspect DB schema
+ *   hull agent db query "SQL" [app_dir]    - run read-only query
+ *   hull agent request METHOD PATH [opts]  - HTTP request to dev server
+ *   hull agent status                      - dev server status
+ *   hull agent auth-status [--path PATH]   - auth-stack health probe
  *                                            (proxies hull/web/auth-health)
- *   hull agent errors                      — structured errors from last reload
- *   hull agent test [app_dir]              — run tests
- *   hull agent context --task=T --level=L  — task-relevant documentation
+ *   hull agent errors                      - structured errors from last reload
+ *   hull agent test [app_dir]              - run tests
+ *   hull agent context --task=T --level=L  - task-relevant documentation
  *
  * All output is JSON to stdout. Errors go to stderr.
  *
@@ -143,7 +143,7 @@ static int cmd_request(int argc, char **argv)
 
     for (int i = 2; i < argc; i++) {
         if (strcmp(argv[i], "-p") == 0 && i + 1 < argc) {
-            /* L2: strict port parse — silent strtol(s, NULL, 10) lets
+            /* L2: strict port parse - silent strtol(s, NULL, 10) lets
              * "abc" become 0 and the request would fail downstream with
              * a confusing error. */
             char *e;
@@ -304,7 +304,7 @@ static int cmd_context(int argc, char **argv, const HlCommandEnv *env)
             task = argv[i];
     }
 
-    /* --list short-circuits everything else — it enumerates the
+    /* --list short-circuits everything else - it enumerates the
      * embedded context: registry so cold-start agents discover the
      * task set without scraping. */
     if (list_mode) {
@@ -390,7 +390,7 @@ static int cmd_migrate(int argc, char **argv)
 static HlAppContext *open_warm_ctx(const char *app_dir)
 {
     /* Agent commands that run app code (eval, request, scaffold)
-     * inherit the app's declared module surface — same gate the server
+     * inherit the app's declared module surface - same gate the server
      * applies. Read-only introspection (manifest, routes, schema, ...)
      * never triggers require/import so the gate is a no-op there. */
     HlAppContextOpts opts = { .app_dir = app_dir, .gate_modules = 1 };
@@ -451,7 +451,7 @@ static int cmd_capabilities(int argc, char **argv)
 
 static int cmd_tools_sub(int argc, char **argv)
 {
-    /* No app context needed — the registry + install state are
+    /* No app context needed - the registry + install state are
      * host-level concerns independent of any particular app. */
     (void)argc; (void)argv;
     ShJsonBuf out;
@@ -932,7 +932,7 @@ int hl_cmd_agent(int argc, char **argv, const HlCommandEnv *env)
     if (strcmp(sub, "perf") == 0)         return cmd_perf(sub_argc, sub_argv);
     if (strcmp(sub, "template") == 0)     return cmd_template(sub_argc, sub_argv);
     if (strcmp(sub, "compute-call") == 0) return cmd_compute_call(sub_argc, sub_argv);
-    /* Tool registry + install state — independent of HL_ENABLE_HTTP_CLIENT.
+    /* Tool registry + install state - independent of HL_ENABLE_HTTP_CLIENT.
      * Agents on CLI-flavor builds can still see the registry; the install
      * command itself is the only thing gated by HTTP_CLIENT. */
     if (strcmp(sub, "tools") == 0)        return cmd_tools_sub(sub_argc, sub_argv);
@@ -943,9 +943,9 @@ int hl_cmd_agent(int argc, char **argv, const HlCommandEnv *env)
         if (env && env->hull_exe) hl_sbom_set_binary_path(env->hull_exe);
         return hl_sbom_format(HL_SBOM_JSON, stdout) == 0 ? 0 : 1;
     }
-    /* Composite project summary — one call to orient an agent. */
+    /* Composite project summary - one call to orient an agent. */
     if (strcmp(sub, "overview") == 0)     return cmd_overview(sub_argc, sub_argv);
-    /* Project source discovery — the canonical analyzed project model (annotated
+    /* Project source discovery - the canonical analyzed project model (annotated
      * declarations) as versioned JSON. A live dev session's published generation is
      * streamed directly (D9); otherwise the tool VM analyzes (standalone / publish). */
     if (strcmp(sub, "inspect") == 0)

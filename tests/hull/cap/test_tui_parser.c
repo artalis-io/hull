@@ -1,5 +1,5 @@
 /*
- * test_tui_parser.c — ANSI input parser tests.
+ * test_tui_parser.c - ANSI input parser tests.
  *
  * Drives hl_tui_parser_feed / _pop directly (no PTY, no acquire) and
  * asserts on the decoded event stream. Covers:
@@ -124,7 +124,7 @@ UTEST(tui_parser, flush_idle_does_not_commit_partial_csi)
 {
     HlTuiParser p; hl_tui_parser_init(&p);
     /* Partial CSI ("\x1b[" with no final byte). flush_idle should
-     * NOT synthesize anything — CSI sequences are bounded by their
+     * NOT synthesize anything - CSI sequences are bounded by their
      * final byte; the kernel hasn't sent it yet but we still wait. */
     hl_tui_parser_feed(&p, "\x1b[", 2);
     ASSERT_EQ(hl_tui_parser_flush_idle(&p), 0);
@@ -307,7 +307,7 @@ UTEST(tui_parser, sgr_mouse_left_click)
 {
     HlTuiParser p; hl_tui_parser_init(&p);
     HlTuiEvent ev = {0};
-    /* CSI < 0 ; 5 ; 10 M  — left button at col 5 row 10 */
+    /* CSI < 0 ; 5 ; 10 M  - left button at col 5 row 10 */
     ASSERT_EQ(FEED_POP(&p, "\x1b[<0;5;10M", &ev), 0);
     ASSERT_EQ((int)ev.kind, (int)HL_TUI_EV_MOUSE);
     ASSERT_EQ(ev.x, 5);
@@ -415,7 +415,7 @@ UTEST(tui_parser, alt_letter)
 UTEST(tui_parser, resize_jumps_to_front)
 {
     HlTuiParser p; hl_tui_parser_init(&p);
-    /* Queue a key event, then push a resize — resize should pop first. */
+    /* Queue a key event, then push a resize - resize should pop first. */
     hl_tui_parser_feed(&p, "a", 1);
     hl_tui_parser_push_resize(&p, 80, 24);
     HlTuiEvent ev = {0};
@@ -436,7 +436,7 @@ UTEST(tui_parser, unknown_csi_dropped)
 {
     HlTuiParser p; hl_tui_parser_init(&p);
     HlTuiEvent ev = {0};
-    /* Unknown CSI sequence — parser shouldn't crash; nothing is
+    /* Unknown CSI sequence - parser shouldn't crash; nothing is
      * emitted. Following keystroke should still work. */
     hl_tui_parser_feed(&p, "\x1b[99;99;99X", 11);
     ASSERT_EQ(hl_tui_parser_pop(&p, &ev), 1);  /* empty */

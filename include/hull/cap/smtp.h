@@ -1,9 +1,9 @@
 /**
  * @file cap/smtp.h
- * @brief SMTP email capability — outbound send with STARTTLS / TLS.
+ * @brief SMTP email capability - outbound send with STARTTLS / TLS.
  *
  * #HlSmtpConfig holds runtime configuration (host allowlist, timeout,
- * TLS context) — typically set once at startup from the app manifest.
+ * TLS context) - typically set once at startup from the app manifest.
  *
  * #HlSmtpMessage carries per-send parameters: connection details (host,
  * port, credentials, TLS mode) and the RFC 5322 envelope (from, to, cc,
@@ -21,7 +21,7 @@ typedef struct HlSmtpConfig {
     const char **allowed_hosts;   /* Host allowlist (case-insensitive) */
     int          host_count;      /* Number of entries in allowed_hosts */
     int          timeout_ms;      /* Connect/send/recv timeout (0 = default) */
-    void        *tls;             /* KlTlsConfig* — opaque to callers */
+    void        *tls;             /* KlTlsConfig* - opaque to callers */
 } HlSmtpConfig;
 
 /* ── Per-message envelope + connection params ────────────────────── */

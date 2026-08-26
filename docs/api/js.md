@@ -1,4 +1,4 @@
-# Hull — JavaScript API Reference
+# Hull - JavaScript API Reference
 
 Per-function reference for the JS stdlib (`stdlib/js/hull/*.js`).
 Audience: app developers writing JavaScript applications on Hull.
@@ -13,13 +13,13 @@ and `max_rows`, `includeHeaders` and `include_headers`).
 
 ## Table of contents
 
-- [Routing & handlers](#routing--handlers) — `app.*`
+- [Routing & handlers](#routing--handlers) - `app.*`
   - [Request object (`req`)](#request-object-req)
   - [Response object (`res`)](#response-object-res)
-- [Capability imports](#capability-imports) — `import { db, http, … } from "hull:…"`
+- [Capability imports](#capability-imports) - `import { db, http, … } from "hull:…"`
   - [`db`](#db-database)
   - [`http`](#http-outbound-http-client)
-  - WebSocket, SSE, compute, gpu, image, smtp, crypto, time, env — _coming next_
+  - WebSocket, SSE, compute, gpu, image, smtp, crypto, time, env - _coming next_
 - [Stdlib modules](#stdlib-modules)
 - [Middleware modules](#middleware-modules)
 
@@ -65,7 +65,7 @@ Register pre-body middleware. Same semantics as Lua.
 ### `app.usePost(method, pattern, mw)`
 
 Register post-body middleware. Same shape as `app.use`. **Note the
-camelCase** — `app.usePost`, not `app.use_post`.
+camelCase** - `app.usePost`, not `app.use_post`.
 
 ---
 
@@ -180,7 +180,7 @@ import { log } from "hull:log";
 Modules are loaded on first import; subsequent imports return the same
 binding.
 
-### `db` — Database
+### `db` - Database
 
 Requires `HL_ENABLE_DB=1`. The import fails to resolve in compute-only
 builds.
@@ -194,7 +194,7 @@ Run a SELECT.
 | `sql`    | `string`        | SQL with `?` placeholders. |
 | `params` | `any[]?`        | Array of parameter values. `string` / `number` / `boolean` / `null` / `ArrayBuffer` map to SQLite TEXT/INTEGER-or-FLOAT/(0|1 integer)/NULL/BLOB. |
 
-**Returns:** `object[]` — array of row objects. Each row is `{ column_name: value, ... }`. Empty array if no rows.
+**Returns:** `object[]` - array of row objects. Each row is `{ column_name: value, ... }`. Empty array if no rows.
 
 **Throws:** on prepare/bind/step failure.
 
@@ -216,7 +216,7 @@ Run INSERT/UPDATE/DELETE/DDL.
 | `sql`    | `string` | SQL with `?` placeholders. |
 | `params` | `any[]?` | Parameter values. |
 
-**Returns:** `number` — affected row count.
+**Returns:** `number` - affected row count.
 
 **Throws:** on failure.
 
@@ -238,13 +238,13 @@ Run `fn` inside a `BEGIN IMMEDIATE ... COMMIT` transaction.
 
 #### `db.lastId()`
 
-| Returns | `number` — last `ROWID` from an INSERT on this connection, or `0`. |
+| Returns | `number` - last `ROWID` from an INSERT on this connection, or `0`. |
 
 ---
 
 #### `db.async.query(sql, params?)` / `db.async.exec(sql, params?)`
 
-Async variants — return `Promise<object[]>` / `Promise<number>` and yield
+Async variants - return `Promise<object[]>` / `Promise<number>` and yield
 to the event loop. Other requests are served while these wait.
 
 **Example:**
@@ -280,4 +280,4 @@ Initial slice covers `app.*` routing, `req`/`res`, `db` (full surface).
 Remaining work parallels the Lua doc. Estimate: ~200 functions total.
 ~25 documented after this slice.
 
-The format is now concrete — please review before I batch-produce the rest.
+The format is now concrete - please review before I batch-produce the rest.

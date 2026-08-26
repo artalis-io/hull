@@ -1,4 +1,4 @@
-/* mod_worker.c — hull.worker module: thread pool dispatch
+/* mod_worker.c - hull.worker module: thread pool dispatch
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
@@ -16,7 +16,7 @@
 /* ════════════════════════════════════════════════════════════════════
  * hull.worker module
  *
- * worker.dispatch(fn, ctx) — dispatch fn to a worker thread
+ * worker.dispatch(fn, ctx) - dispatch fn to a worker thread
  * ════════════════════════════════════════════════════════════════════ */
 
 /* Deep-copy a Lua table (string keys only, flat) to an HlKV array.
@@ -192,7 +192,7 @@ static void lua_push_worker_dispatch_result(lua_State *L, void *driver)
     }
 }
 
-/* worker.dispatch(fn, ctx) — serialize fn + ctx, submit to thread pool */
+/* worker.dispatch(fn, ctx) - serialize fn + ctx, submit to thread pool */
 static int lua_worker_dispatch(lua_State *L)
 {
     HlLua *lua = get_hl_lua(L);

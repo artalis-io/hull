@@ -47,7 +47,7 @@ app.main(function(ctx)
 end)
 ```
 
-`json` is a Hull intrinsic — no `manifest.modules` entry needed.
+`json` is a Hull intrinsic - no `manifest.modules` entry needed.
 
 <!-- compact -->
 ## The CLI build flavor
@@ -90,7 +90,7 @@ app.main(function(ctx)
     if err then return 1 end
     log.info("got " .. #res.body .. " bytes")
 
-    -- WASM compute, GPU dispatch, hull.sleep — all valid here
+    -- WASM compute, GPU dispatch, hull.sleep - all valid here
     local out = compute.async.call("transform", res.body)
     log.info(out.result)
     return 0
@@ -138,7 +138,7 @@ end)
 <!-- full -->
 ## Argv parsing
 
-Hull doesn't ship an argparse module — keep it minimal:
+Hull doesn't ship an argparse module - keep it minimal:
 
 ```lua
 app.main(function(ctx)
@@ -245,8 +245,8 @@ Tools ship as one signed binary. Users install with `cp` or
 
 ## See also
 
-- `hull agent context --task=quickstart-web` — server-side variant
-- `hull agent context --task=quickstart-tui` — terminal UI variant
-- `hull agent context --task=build` — build options + cross-compile
-- `hull agent context --task=compute` — WASM modules for heavy lifting
-- `docs/cli_mode.md` — when to drop HTTP entirely (HL_ENABLE_HTTP_SERVER=0)
+- `hull agent context --task=quickstart-web` - server-side variant
+- `hull agent context --task=quickstart-tui` - terminal UI variant
+- `hull agent context --task=build` - build options + cross-compile
+- `hull agent context --task=compute` - WASM modules for heavy lifting
+- `docs/cli_mode.md` - when to drop HTTP entirely (HL_ENABLE_HTTP_SERVER=0)

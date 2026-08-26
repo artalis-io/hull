@@ -8,7 +8,7 @@
  *
  * Two-tier check:
  *   1. Embedded local blocklist (SecLists top 10K, ~80KB, binary-
- *      searched in-process). A hit short-circuits — no network
+ *      searched in-process). A hit short-circuits - no network
  *      round-trip needed. Safe for air-gapped deployments.
  *   2. HIBP range API. Fail-open on outage, with a once-per-process
  *      warn so the operator sees the gap.
@@ -35,7 +35,7 @@ const _health = {
 let _warnedFailopen = false;
 
 // SHA-1 of the password, uppercase hex (HIBP wire format). Delegates
-// to crypto.sha1 — a legacy-interop primitive surfaced specifically
+// to crypto.sha1 - a legacy-interop primitive surfaced specifically
 // for protocols like HIBP that hardcode SHA-1. Do NOT use SHA-1
 // for any new cryptographic purpose.
 function sha1Hex(msg) {

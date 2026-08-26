@@ -8,7 +8,7 @@
  * world so other consumers don't have to know about KlServer at all.
  *
  * Callers outside the Keel-aware boundary should NOT include this
- * header — they go through include/hull/async_backend.h's vtable.
+ * header - they go through include/hull/async_backend.h's vtable.
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
@@ -22,11 +22,11 @@ typedef struct KlEventCtx        KlEventCtx;
 /**
  * Wrap an existing KlEventCtx into an HlAsyncBackendCtx that doesn't
  * own the underlying loop. Use this when the loop is owned by a
- * KlServer and you want vtable consumers to share it — instead of
+ * KlServer and you want vtable consumers to share it - instead of
  * calling backend->init() which would create a fresh loop.
  *
  * The returned ctx must be freed with hl_async_backend_keel_unwrap,
- * which only releases the wrapper — the underlying KlEventCtx
+ * which only releases the wrapper - the underlying KlEventCtx
  * remains owned by the caller (typically KlServer).
  *
  * Returns NULL on allocation failure.

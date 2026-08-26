@@ -1,5 +1,5 @@
 --
--- hull.manifest — Extract and display app manifest as JSON
+-- hull.manifest - Extract and display app manifest as JSON
 --
 -- Usage: hull manifest [app_dir]
 --

@@ -4,8 +4,8 @@
  *
  * Cap functions that accept "bytes as input" should not branch on the
  * runtime-side container type (string vs `ArrayBuffer` vs `WasmBuffer` vs
- * `MappedBuffer`). Instead, they consume an #HlBufferView — a non-owning
- * `(ptr, len)` pair — produced by runtime helpers:
+ * `MappedBuffer`). Instead, they consume an #HlBufferView - a non-owning
+ * `(ptr, len)` pair - produced by runtime helpers:
  *   - `lua_get_buffer(L, idx, &view)`
  *   - `js_get_buffer(ctx, val, &view, &str, &needs_free)`
  *

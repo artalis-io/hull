@@ -27,7 +27,7 @@ app.manifest({
 if gpu.available() then
     gpu.load("invert")
 else
-    log.warn("GPU not available — texture endpoints will return errors")
+    log.warn("GPU not available - texture endpoints will return errors")
 end
 
 -- Create a 4x4 RGBA8 gradient test image programmatically

@@ -1,4 +1,4 @@
-# Memory64 cap-layer dispatch — decision record (#318)
+# Memory64 cap-layer dispatch - decision record (#318)
 
 **Status:** IMPLEMENTED (#318, PR #335). D4.1–D4.3 landed; D4.4 + the `hull build`
 mem64 path deferred to #334. Scope: activate Hull's already-written
@@ -14,7 +14,7 @@ block (~L697) reads `mem->is_memory64` off the internal `WASMMemoryInstance` via
 `../interpreter/wasm_runtime.h`, and `WASM_ENABLE_MEMORY64` is defined only for the
 vendored WAMR objects, never for Hull TUs. So `mod->is_memory64` is always 0.
 
-## D1 (LOCKED) — public accessor, not internal header
+## D1 (LOCKED) - public accessor, not internal header
 
 Rejected: adding `-DWASM_ENABLE_MEMORY64=1` + WAMR internal include dirs to `cap/wasm.c`.
 `WASMMemoryInstance`'s layout is config-dependent (`DefPointer` padding under JIT, etc.),
@@ -36,7 +36,7 @@ wasm_runtime_memory_is_memory64(const wasm_memory_inst_t memory_inst);
   the sibling public getters `wasm_memory_get_shared` / `_get_cur_page_count`).
 - **wasm32 module** → `false`. The `is_memory64` field exists unconditionally in
   `WASMMemoryInstance` (not under any `#if`) and is 0 for wasm32, so the accessor is
-  well-defined and linkable **regardless of whether WAMR was built with Memory64** —
+  well-defined and linkable **regardless of whether WAMR was built with Memory64** -
   it just always returns `false` in a hypothetical non-Memory64 WAMR build.
 - **Memory64 module** → `true`.
 - Total function, no allocation, no lock; a pure field read behind the ABI.
@@ -62,7 +62,7 @@ if (mem && wasm_runtime_memory_is_memory64(mem))                    /* public (0
 
 `mod->is_memory64` then drives the existing plain-C paths unchanged.
 
-## D2 (LOCKED) — patch ordering + checksum maintenance
+## D2 (LOCKED) - patch ordering + checksum maintenance
 
 - `patches/wamr/0005-memory64-public-accessor.patch`, applied **after** 0004.
 - Touches exactly two files: `core/iwasm/include/wasm_export.h` (declaration) and
@@ -75,13 +75,13 @@ if (mem && wasm_runtime_memory_is_memory64(mem))                    /* public (0
   exactly those two files. `--dry-run` (the CI gate) must stay green.
 - Base commit pin (`c3a78cd…`) is unchanged; 0005 is additive.
 
-## D3 (LOCKED) — fixture + wamrc requirement
+## D3 (LOCKED) - fixture + wamrc requirement
 
 - Fixture: the committed `(memory i64)` module `tests/fixtures/compute/echo64.wasm`
   (echoes input to output) exporting `hull_process` with the `(i64,i64,i64,i64)->i32`
   ABI and `hull_version`.
 - **Memory64 requires AOT** (fast interp cannot load it), so the fixture is embedded as
-  an `.aot`. **There is NO `--enable-memory64` flag** in the vendored `wamrc` — it
+  an `.aot`. **There is NO `--enable-memory64` flag** in the vendored `wamrc` - it
   **auto-detects** Memory64 from the module's `(memory i64)` type (passing the flag
   prints usage and fails). A dedicated `GEN_MEM64_AOT` macro (`mk/tests.mk`) drives
   the build `wamrc` with just `--opt-level=3 --bounds-checks=1` and surfaces its
@@ -89,23 +89,23 @@ if (mem && wasm_runtime_memory_is_memory64(mem))                    /* public (0
   because it uses no shared heap (leaner codegen). **CORRECTION (#336):** an earlier
   draft here claimed a heap-less `--enable-shared-heap` mem64 AOT *segfaults*; #336's
   controlled isolation experiment disproved that on Hull's 64-bit targets (x86_64 +
-  aarch64) — it was an unisolated #318 mis-attribution. WAMR's `aot_runtime.c:2134`
+  aarch64) - it was an unisolated #318 mis-attribution. WAMR's `aot_runtime.c:2134`
   sets the safe `UINT64_MAX` sentinel on 64-bit targets by design; the real bug is
   32-bit-target-only, which Hull never AOT-targets. See `docs/memory64_build_design.md`.
 - The `.wasm` is retained only to prove the interp-rejection leg (D4.2).
 
-## D4 (LOCKED) — non-skippable CI legs
+## D4 (LOCKED) - non-skippable CI legs
 
 Each mirrors the existing span "must NOT skip" gate in `.github/workflows/ci.yml`
 (fail the job if the wamrc-unavailable skip path is taken):
 
-1. **Detection** — load the Memory64 module as the **interpreter** `echo64.wasm`
+1. **Detection** - load the Memory64 module as the **interpreter** `echo64.wasm`
    (detection reads the flag at load, no AOT needed) → `is_memory64 == 1`; load a
    wasm32 module → `is_memory64 == 0` (through the same accessor). Runs unconditionally
    (no wamrc dependency); only legs 3–4 need the AOT fixture.
-2. **AOT enforcement** — present a Memory64 module to the interpreter path →
+2. **AOT enforcement** - present a Memory64 module to the interpreter path →
    `memory64_requires_aot`, clean rejection, no dispatch.
-3. **8-cell dispatch + readback** — call `hull_process` on the Memory64 AOT fixture with
+3. **8-cell dispatch + readback** - call `hull_process` on the Memory64 AOT fixture with
    a known input; assert the output bytes. This is the first real exercise of the
    `(i64,i64,i64,i64)` marshalling (argv[0..7]) and the return readback.
 4. **Memory64 SPAN_INFO** (the deferred mapped-spans 3a leg, #313). Two distinct
@@ -116,9 +116,9 @@ Each mirrors the existing span "must NOT skip" gate in `.github/workflows/ci.yml
      destination (`0xfffffff0`) → `-1` with the invocation un-poisoned. A scratch
      destination genuinely above `UINT32_MAX` is **unrepresentable** under the fixed
      `(i32,i32,i32)->i32` host_call ABI and is therefore a **PERMANENT NON-GOAL**,
-     not a deferral — it can only change if that host_call ABI changes.
+     not a deferral - it can only change if that host_call ABI changes.
    - **Returned span `base`** (the window's guest address, in the record): **64-bit.**
-     Under Memory64 it must be exercised **above `UINT32_MAX`** — a span whose window
+     Under Memory64 it must be exercised **above `UINT32_MAX`** - a span whose window
      sits in the high 64-bit space, read back correctly through the record's 64-bit
      `base`.
 
@@ -126,7 +126,7 @@ Each mirrors the existing span "must NOT skip" gate in `.github/workflows/ci.yml
    landed here in #318; D4.4 landed in #334). #334 added a hand-authored `(memory i64)`
    span-reading fixture (`spanread64`) and the CI-gated `memory64_span_readback` test:
    a span window placed above `UINT32_MAX` is read back through the record's 64-bit
-   `base` under mem64 AOT — confirming WAMR's guarded-subrange RO shared-heap
+   `base` under mem64 AOT - confirming WAMR's guarded-subrange RO shared-heap
    addressing is memory64-correct under AOT. The scratch-below-4-GiB vs 64-bit-`base`
    distinction was carried verbatim into #334. The `hull build` AOT path for a
    Memory64 compute *plugin* (`build.lua`'s bogus `--enable-memory64` + the
@@ -139,7 +139,7 @@ Convert `test_wasm.c::memory64_detection` and `memory64_rejects_interpreter` fro
 their `#if WASM_ENABLE_MEMORY64` `#else` (disabled) form to the live assertions above;
 the `#if` gate disappears (detection no longer depends on the macro in the test TU).
 
-## D5 (LOCKED) — wasm32 regression + docs
+## D5 (LOCKED) - wasm32 regression + docs
 
 - **wasm32 unchanged:** the whole existing WASM suite stays green (a wasm32 module takes
   the byte-for-byte same `is_memory64 == 0` path). Add one explicit assertion that a
@@ -147,15 +147,15 @@ the `#if` gate disappears (detection no longer depends on the macro in the test 
   regression is caught, not just inferred.
 - **Docs:** once landed, correct the statements that Memory64 "ships" /
   "dispatches the correct calling convention" and remove the "compiled out" caveat in:
-  `CLAUDE.md` (WASM section — currently carries the #318 caveat), `docs/wamr_architecture.md`,
+  `CLAUDE.md` (WASM section - currently carries the #318 caveat), `docs/wamr_architecture.md`,
   and `docs/roadmap.md` ("Done"). Point them at this record.
 
 ## Non-goals
 
-- **Above-`UINT32_MAX` metadata-scratch destination — PERMANENT.** The host_call
+- **Above-`UINT32_MAX` metadata-scratch destination - PERMANENT.** The host_call
   `ptr` arg is `i32`; such a destination is unrepresentable and stays a non-goal
   unless the `(i32,i32,i32)->i32` host_call ABI itself changes. (Distinct from the
-  returned span `base`, which is 64-bit and IS exercised above `UINT32_MAX` — D4.4.)
+  returned span `base`, which is 64-bit and IS exercised above `UINT32_MAX` - D4.4.)
 - Interp Memory64 (WAMR does not support it).
 - Any change to the wasm32 path.
 - Broad Memory64 feature surface beyond the `hull_process` compute ABI already written.

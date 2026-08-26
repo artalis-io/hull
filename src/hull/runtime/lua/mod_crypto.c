@@ -1,4 +1,4 @@
-/* mod_crypto.c — hull.crypto module: hashing, encryption, signatures
+/* mod_crypto.c - hull.crypto module: hashing, encryption, signatures
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
@@ -47,7 +47,7 @@ static int lua_crypto_sha256(lua_State *L)
  *
  * LEGACY INTEROP ONLY. SHA-1 is collision-broken; this exists for
  * third-party protocols that hardcode it (HIBP range API, etc.).
- * DO NOT use for new password hashing / MAC / digest needs — use
+ * DO NOT use for new password hashing / MAC / digest needs - use
  * crypto.sha256 / crypto.hmac_sha256 / crypto.hash_password instead.
  * Returns raw bytes (not hex) so callers can render uppercase or
  * lowercase as needed: `crypto.hex_encode(crypto.sha1(s)):upper()`. */
@@ -138,7 +138,7 @@ static int lua_crypto_verify_password(lua_State *L)
     const char *stored = luaL_checkstring(L, 2);
 
     /* Parse "pbkdf2:iterations:salt_hex:hash_hex" manually (no scansets
-     * — Cosmopolitan libc doesn't support sscanf %[...] scansets). */
+     * - Cosmopolitan libc doesn't support sscanf %[...] scansets). */
     if (strncmp(stored, "pbkdf2:", 7) != 0) {
         lua_pushboolean(L, 0);
         return 1;
@@ -741,7 +741,7 @@ static int lua_crypto_hmac_sha256(lua_State *L)
 
 /* crypto.hmac_sha1(data, key_hex) → 40-char hex string.
  *
- * HOTP/TOTP compatibility only — see hl_cap_crypto_hmac_sha1 docstring.
+ * HOTP/TOTP compatibility only - see hl_cap_crypto_hmac_sha1 docstring.
  * The key is hex-encoded to match the hmac_sha256 binding convention;
  * binary keys go through bytes_to_hex at the call site.
  */
@@ -998,7 +998,7 @@ static int lua_sha256_hasher_digest(lua_State *L)
 static int lua_sha256_hasher_gc(lua_State *L)
 {
     HlLuaSha256Hasher *h = check_hasher(L, 1);
-    /* If digest() wasn't called, scrub the in-flight state — it may
+    /* If digest() wasn't called, scrub the in-flight state - it may
      * contain partial input bytes. _final zeros the ctx on success;
      * do the same here for the abandoned-without-final path. */
     if (!h->done) memset(&h->ctx, 0, sizeof(h->ctx));

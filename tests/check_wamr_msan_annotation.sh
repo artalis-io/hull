@@ -1,5 +1,5 @@
 #!/bin/sh
-# check_wamr_msan_annotation.sh — permanent fixture for WAMR patch 0006.
+# check_wamr_msan_annotation.sh - permanent fixture for WAMR patch 0006.
 #
 # Patch 0006 annotates a MemorySanitizer SHADOW-GAP false positive at the
 # boundary between intentionally-uninstrumented WAMR and MSan's always-on strcmp
@@ -36,7 +36,7 @@ sh scripts/wamr_apply_patches.sh >/dev/null 2>&1 || fail "wamr patch apply faile
 [ -f "$SRC" ] || fail "staged WAMR source missing: $SRC"
 
 # The compile recipe is "... -c -o <OBJ> <SRC>", so the object is followed by the
-# source path (not end-of-line) — match "-o <OBJ> " space-delimited, not anchored.
+# source path (not end-of-line) - match "-o <OBJ> " space-delimited, not anchored.
 cmd_for() { make CC="$CC" "$@" -Bn "$OBJ" 2>/dev/null | grep -F -- " -o $OBJ " | tail -1; }
 
 # 1 + 2. MSAN build: -DHL_MSAN present, -fsanitize=memory absent.
@@ -45,7 +45,7 @@ msan_cmd=$(cmd_for MSAN=1)
 echo "$msan_cmd" | grep -q -- '-DHL_MSAN' \
     || fail "MSAN WAMR compile of wasm_native.o lacks -DHL_MSAN (annotation would compile out)"
 echo "$msan_cmd" | grep -q -- '-fsanitize=memory' \
-    && fail "WAMR wasm_native.o is -fsanitize=memory-instrumented under MSAN — policy changed; re-assess the annotation"
+    && fail "WAMR wasm_native.o is -fsanitize=memory-instrumented under MSAN - policy changed; re-assess the annotation"
 
 # 3. Normal build: no -DHL_MSAN in the command, no __msan_unpoison in the object.
 norm_cmd=$(cmd_for)

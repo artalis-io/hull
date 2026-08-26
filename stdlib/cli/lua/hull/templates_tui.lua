@@ -1,5 +1,5 @@
 --
--- hull.templates_tui — `hull new --type tui <name>` scaffolding
+-- hull.templates_tui - `hull new --type tui <name>` scaffolding
 --
 -- Modular TUI layout. app.lua holds the immediate-mode event loop
 -- (via `tui.run({ draw, on_event })`) and a single `state` table.
@@ -7,7 +7,7 @@
 -- and `handle_event(state, ev)` (returns mutation or exit token).
 -- Routing between views is just `state.view = "X"`.
 --
--- Lua-only — Hull's `hull.tui` module is Lua-only today. If a JS TUI
+-- Lua-only - Hull's `hull.tui` module is Lua-only today. If a JS TUI
 -- ever lands, drop in a parallel js_files table here and remove the
 -- runtime check in M.files().
 --
@@ -36,7 +36,7 @@ local tui    = require("hull.tui")
 local state0 = require("./lib/state")
 
 local function load_view(name)
-    -- pcall'd so a typo doesn't crash mid-render — fall back to the
+    -- pcall'd so a typo doesn't crash mid-render - fall back to the
     -- menu so the user has somewhere to go.
     local ok, mod = pcall(require, "./views/" .. name)
     if not ok then return require("./views/menu") end
@@ -64,7 +64,7 @@ app.main(function(_ctx)
 end)
 ]]
 
-lua_files["lib/state.lua"] = [[-- lib/state.lua — Initial state factory and shared helpers.
+lua_files["lib/state.lua"] = [[-- lib/state.lua - Initial state factory and shared helpers.
 --
 -- State is a single table threaded through every render/event call.
 -- Keep it serialisable (no closures or userdata) so it's easy to
@@ -83,7 +83,7 @@ end
 return M
 ]]
 
-lua_files["views/menu.lua"] = [[-- views/menu.lua — Top-level menu.
+lua_files["views/menu.lua"] = [[-- views/menu.lua - Top-level menu.
 --
 -- Convention: each view exports render(ctx, state) and
 -- handle_event(state, ev). render is a function of state (no side
@@ -137,7 +137,7 @@ end
 return M
 ]]
 
-lua_files["views/detail.lua"] = [[-- views/detail.lua — Detail view shown when a menu item is picked.
+lua_files["views/detail.lua"] = [[-- views/detail.lua - Detail view shown when a menu item is picked.
 --
 -- Esc / q / Backspace returns to the menu (state.view = "menu").
 

@@ -1,5 +1,5 @@
 --
--- hull.project.projection — the ONE public wire-schema projection of a ProjectDiscovery.
+-- hull.project.projection - the ONE public wire-schema projection of a ProjectDiscovery.
 --
 -- Side-effect-free (requiring this module runs NO CLI): both `hull agent inspect`
 -- (standalone) and `hull dev`'s discovery.json publication call M.project so

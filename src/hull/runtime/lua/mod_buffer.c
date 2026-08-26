@@ -1,4 +1,4 @@
-/* mod_buffer.c — Unified buffer protocol implementation (Lua)
+/* mod_buffer.c - Unified buffer protocol implementation (Lua)
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */

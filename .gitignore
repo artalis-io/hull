@@ -62,3 +62,7 @@ crash-*
 leak-*
 timeout-*
 oom-*
+
+# Python bytecode cache (never track)
+__pycache__/
+*.pyc

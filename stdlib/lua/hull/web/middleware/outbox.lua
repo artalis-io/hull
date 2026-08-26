@@ -5,7 +5,7 @@
 -- `db.batch` that commits the state change; the outbox flusher then
 -- delivers the row after commit with exponential backoff retries.
 --
--- Delivery is **at-least-once** — a crash between deliver-and-mark can
+-- Delivery is **at-least-once** - a crash between deliver-and-mark can
 -- re-deliver an item. Design receivers to be idempotent (e.g. with
 -- `hull.web.middleware.inbox`).
 --
@@ -46,7 +46,7 @@ local _max_attempts = 5
 
 --- Initialize the `_hull_outbox` table.
 --
--- Idempotent — safe to call on every boot.
+-- Idempotent - safe to call on every boot.
 --
 -- @function outbox.init
 -- @tparam[opt] table opts
@@ -179,7 +179,7 @@ end
 -- @tparam[opt] table opts
 -- @tparam[opt=50] number opts.limit  Max items to process per call.
 -- @treturn table  `{ delivered = N, failed = N, retried = N }`.
--- @note Delivery is at-least-once — design receivers to be idempotent.
+-- @note Delivery is at-least-once - design receivers to be idempotent.
 function outbox.flush(opts)
     opts = opts or {}
     local limit = opts.limit or 50

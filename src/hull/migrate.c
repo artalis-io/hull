@@ -1,5 +1,5 @@
 /*
- * migrate.c — SQL migration runner
+ * migrate.c - SQL migration runner
  *
  * Discovers .sql files from embedded entries or filesystem,
  * tracks applied migrations in _hull_migrations table,

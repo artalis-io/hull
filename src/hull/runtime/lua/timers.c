@@ -1,5 +1,5 @@
 /*
- * timers.c — Lua background timer support
+ * timers.c - Lua background timer support
  *
  * Implements `app.every()` / `app.daily()` timer callbacks. Hosts the
  * trampoline that fires from Keel's timer min-heap, drives the handler
@@ -159,11 +159,11 @@ void hl_lua_timer_trampoline(void *user_data)
         /* Handler yielded (async op in flight).
          * The continuation was created by the yielding function and
          * already has timer_ctx wired (via lua->active_timer).
-         * dispatch_depth stays at 1 — decremented on async resume.
+         * dispatch_depth stays at 1 - decremented on async resume.
          * When async completes, hl_lua_async_resume will clear
          * in_flight and reschedule. Nothing to do here. */
     } else {
-        /* Error — log, reschedule anyway */
+        /* Error - log, reschedule anyway */
         const char *err = lua_tostring(co, -1);
         log_error("[hull:timer] %s", err ? err : "unknown error");
         luaL_unref(lua->L, LUA_REGISTRYINDEX, thread_ref);

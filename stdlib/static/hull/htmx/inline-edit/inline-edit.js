@@ -1,5 +1,5 @@
 /*
- * Hull HTMX inline-edit widget — client runtime.
+ * Hull HTMX inline-edit widget - client runtime.
  *
  * Single responsibility: focus + text-select the input when an
  * edit form swaps into the DOM. The HTML `autofocus` attribute

@@ -1,5 +1,5 @@
 /*
- * agent/logs.c — `hull agent logs`: read the last N lines from
+ * agent/logs.c - `hull agent logs`: read the last N lines from
  * app_dir/.hull/dev.log if it exists. Falls back to empty array.
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later

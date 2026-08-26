@@ -1,13 +1,13 @@
-// bench_db — SQLite performance benchmark endpoints
+// bench_db - SQLite performance benchmark endpoints
 //
 // Run: hull app.js -p 3000
 //
 // Workloads:
-//   GET  /read        — read-heavy: SELECT 20 rows by indexed column
-//   POST /write       — write-heavy: INSERT single row
-//   POST /write-batch — write-heavy: INSERT 10 rows in one request
-//   GET  /mixed       — mixed: 1 INSERT + 1 SELECT (20 rows)
-//   GET  /health      — baseline (no DB)
+//   GET  /read        - read-heavy: SELECT 20 rows by indexed column
+//   POST /write       - write-heavy: INSERT single row
+//   POST /write-batch - write-heavy: INSERT 10 rows in one request
+//   GET  /mixed       - mixed: 1 INSERT + 1 SELECT (20 rows)
+//   GET  /health      - baseline (no DB)
 
 import { app } from "hull:app";
 import { db as dbModule } from "hull:db";
@@ -35,25 +35,25 @@ if (count[0].n < 1000) {
     });
 }
 
-// GET /health — no DB baseline
+// GET /health - no DB baseline
 app.get("/health", (_req, res) => {
     res.json({ status: "ok" });
 });
 
-// GET /read — read-heavy: SELECT 20 most recent events
+// GET /read - read-heavy: SELECT 20 most recent events
 app.get("/read", (_req, res) => {
     const rows = db.query("SELECT id, kind, payload, ts FROM events ORDER BY ts DESC LIMIT 20");
     res.json(rows);
 });
 
-// POST /write — write-heavy: single INSERT per request
+// POST /write - write-heavy: single INSERT per request
 app.post("/write", (_req, res) => {
     const n = db.exec("INSERT INTO events (kind, payload, ts) VALUES (?, ?, ?)",
                       ["bench", "data", time.now()]);
     res.json({ inserted: n });
 });
 
-// POST /write-batch — 10 INSERTs in a single transaction
+// POST /write-batch - 10 INSERTs in a single transaction
 app.post("/write-batch", (_req, res) => {
     db.batch(() => {
         for (let i = 1; i <= 10; i++) {
@@ -64,7 +64,7 @@ app.post("/write-batch", (_req, res) => {
     res.json({ inserted: 10 });
 });
 
-// GET /mixed — 1 write + 1 read per request
+// GET /mixed - 1 write + 1 read per request
 app.get("/mixed", (_req, res) => {
     db.exec("INSERT INTO events (kind, payload, ts) VALUES (?, ?, ?)",
             ["mixed", "data", time.now()]);
@@ -72,4 +72,4 @@ app.get("/mixed", (_req, res) => {
     res.json(rows);
 });
 
-log.info("bench_db loaded — endpoints: /health /read /write /mixed");
+log.info("bench_db loaded - endpoints: /health /read /write /mixed");

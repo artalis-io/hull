@@ -1,7 +1,7 @@
 /**
  * @file hull:web:htmx:form
  * @module hull:web:htmx:form
- * @description HTMX form widget — server-side helpers for
+ * @description HTMX form widget - server-side helpers for
  * validation errors and submit-button loading state.
  *
  * Three helpers, all consuming an `errors` object (field-name →

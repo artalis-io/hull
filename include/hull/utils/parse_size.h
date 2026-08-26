@@ -1,5 +1,5 @@
 /*
- * parse_size.h — Human-readable size string parser
+ * parse_size.h - Human-readable size string parser
  *
  * Parses strings like "128m", "512k", "1g" into byte counts.
  * Plain numbers are treated as bytes. Returns -1 on error.

@@ -1,5 +1,5 @@
 --
--- hull.source.analyze — `hull analyze`: static SYNTAX analysis of an app's Lua source.
+-- hull.source.analyze - `hull analyze`: static SYNTAX analysis of an app's Lua source.
 --
 -- The first production consumer of hull.source.lua. Parses every .lua file in an app
 -- (or explicit files) WITHOUT running or building it, and reports diagnostics with

@@ -1,9 +1,9 @@
 /*
- * modules.c — hull.* module registry (Lua)
+ * modules.c - hull.* module registry (Lua)
  *
  * Registers every first-party hull.* module into `_LOADED` so the
  * custom `require()` in mod_fs.c can resolve them. Only intrinsic
- * modules — `app`, `log`, and the `hull` namespace — get installed
+ * modules - `app`, `log`, and the `hull` namespace - get installed
  * as Lua globals; everything else is import-only. The custom
  * require's gate (mod_fs.c) then rejects undeclared names per the
  * resolved module set.
@@ -28,7 +28,7 @@ static void register_native_module(lua_State *L, const char *name,
 }
 
 /* ════════════════════════════════════════════════════════════════════
- * Module registry — called by hl_lua_init() to register all
+ * Module registry - called by hl_lua_init() to register all
  * hull.* built-in modules.
  * ════════════════════════════════════════════════════════════════════ */
 
@@ -41,7 +41,7 @@ int hl_lua_register_modules(HlLua *lua)
 
     /* ── Intrinsic globals (always present) ────────────────────────── */
 
-    /* hull.app — the bootstrap intrinsic. Only `app.manifest`,
+    /* hull.app - the bootstrap intrinsic. Only `app.manifest`,
      * `app.main`, and `app.get_manifest` are present by default; all
      * other methods (get/post/use/router/ws/sse/every/daily) are
      * decorated onto `app` by lua_app_manifest based on the modules
@@ -50,15 +50,15 @@ int hl_lua_register_modules(HlLua *lua)
     luaL_requiref(L, "hull.app", luaopen_hull_app, 0);
     lua_setglobal(L, "app");
 
-    /* hull.log — pre-register so `require("hull.log")` resolves
+    /* hull.log - pre-register so `require("hull.log")` resolves
      * via LUA_LOADED_TABLE without a disk hit. As of v0.1.0
      * release, hull/log is a DECLARED module (no longer intrinsic):
      * apps that use it must put "hull/log@1" in manifest.modules.
-     * No lua_setglobal — `log` is not a runtime global anymore. */
+     * No lua_setglobal - `log` is not a runtime global anymore. */
     luaL_requiref(L, "hull.log", luaopen_hull_log, 0);
     lua_pop(L, 1); /* drop the module table left on the stack */
 
-    /* hull global (hull.sleep, hull.gather, etc.) — runtime primitives. */
+    /* hull global (hull.sleep, hull.gather, etc.) - runtime primitives. */
     luaL_requiref(L, "hull.hull", luaopen_hull_hull, 0);
     lua_setglobal(L, "hull");
 
@@ -103,7 +103,7 @@ int hl_lua_register_modules(HlLua *lua)
     register_native_module(L, "hull.image",  luaopen_hull_image);
 #endif
 
-    /* Internal bridge used by the hull.template stdlib — name starts
+    /* Internal bridge used by the hull.template stdlib - name starts
      * with underscore so it's not exposed as a first-party module via
      * the registry. */
     register_native_module(L, "hull._template", luaopen_hull_template_bridge);
@@ -121,7 +121,7 @@ int hl_lua_register_modules(HlLua *lua)
     if (lua->base.gpu_ctx)
         register_native_module(L, "hull.gpu", luaopen_hull_gpu);
 
-    /* TUI native bridge — registered by the tui feature (a monolithic
+    /* TUI native bridge - registered by the tui feature (a monolithic
      * HL_ENABLE_TUI build or a composed --with=tui). The base ships a weak
      * no-op; the feature's strong override registers hull._tui (the underscore
      * bridge that stdlib/lua/hull/tui.lua layers tui.run/list/confirm on top

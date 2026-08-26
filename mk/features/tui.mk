@@ -38,8 +38,8 @@ feature-tui: $(BUILDDIR)/libhull_feature-tui.a
 $(BUILDDIR)/cap_tui.o $(BUILDDIR)/cap_tui_input.o $(BUILDDIR)/cap_tui_width.o \
 $(BUILDDIR)/lua_rt_mod_tui.o $(BUILDDIR)/js_mod_tui.o: CFLAGS += -DHL_ENABLE_TUI
 
-# libhull_feature-tui.a is the runtime-AGNOSTIC cap core only (issue #114,
-# Phase D). The per-runtime bridges (lua_rt_mod_tui.o / js_mod_tui.o) whole-
+# libhull_feature-tui.a is the runtime-AGNOSTIC cap core only (issue #114).
+# The per-runtime bridges (lua_rt_mod_tui.o / js_mod_tui.o) whole-
 # archive would pull BOTH runtimes' bridges, and the non-composed runtime's
 # bridge references runtime symbols the runtime-less base lacks -> undefined at
 # link. So each bridge is its own archive (libhull_feature-tui-<rt>.a), and a
@@ -54,7 +54,7 @@ $(BUILDDIR)/libhull_feature-tui.a: $(BUILDDIR)/cap_tui.o $(BUILDDIR)/cap_tui_inp
 	            $(BUILDDIR)/cap_tui_width.o
 	@echo "built $@ ($$(du -h $@ | cut -f1))"
 
-# Per-runtime tui bridge archives (issue #114, Phase D). Tiny (one object each);
+# Per-runtime tui bridge archives (issue #114). Tiny (one object each);
 # embedded in hull + composed for the app's runtime alongside the cap core.
 $(eval $(call define-feature-archive,tui-lua,$(BUILDDIR)/lua_rt_mod_tui.o))
 

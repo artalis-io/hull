@@ -1,5 +1,5 @@
 /*
- * agent/manifest.c — `hull agent manifest`: emit the effective manifest
+ * agent/manifest.c - `hull agent manifest`: emit the effective manifest
  * as JSON after extraction + normalisation.
  *
  * Different from `hull manifest` which prints a content hash. This is the
@@ -52,7 +52,7 @@ static void count_mw_cb(void *user, const char *method, const char *pattern,
 
 /* Detect dispatch mode from what the app registered. Mutually
  * exclusive at registration time (mod_app.c gates), so seeing both
- * `main` and any HTTP-side registration is impossible — the loader
+ * `main` and any HTTP-side registration is impossible - the loader
  * would have errored. The "unknown" branch fires for apps that
  * register nothing (e.g. just declared a manifest). */
 static const char *detect_mode(HlRuntime *rt,
@@ -86,7 +86,7 @@ static int emit_manifest_json(const HlManifest *m, ShJsonBuf *out,
     if (runtime_name)
         sh_json_write_kv_string(&w, "runtime", runtime_name);
 
-    /* Dispatch mode — derived from what the app registered. Useful
+    /* Dispatch mode - derived from what the app registered. Useful
      * for tooling that wants to know whether to introspect routes or
      * run main without parsing source. */
     if (mode)
@@ -155,7 +155,7 @@ static int emit_manifest_json(const HlManifest *m, ShJsonBuf *out,
     if (m->compute)
         sh_json_write_kv_bool(&w, "compute", true);
 
-    /* modules — first-party stdlib declarations */
+    /* modules - first-party stdlib declarations */
     if (m->modules_declared) {
         sh_json_write_key(&w, "modules");
         sh_json_write_object_start(&w);
@@ -195,7 +195,7 @@ int hl_agent_manifest_ctx(HlAppContext *ctx, ShJsonBuf *out)
 #endif
 
     if (rc != 0) {
-        /* No manifest declared — still emit an empty manifest object so
+        /* No manifest declared - still emit an empty manifest object so
          * the agent gets predictable JSON shape. */
     }
 

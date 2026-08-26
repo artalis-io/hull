@@ -1,5 +1,5 @@
 --
--- hull.source.lint — the lint rule registry + engine for `hull analyze` v2.
+-- hull.source.lint - the lint rule registry + engine for `hull analyze` v2.
 --
 -- Each rule is a small declarative record; check(unit, emit) walks the AST / comments
 -- (via hull.source.lua) and calls emit{ range, message } per finding. The engine tags

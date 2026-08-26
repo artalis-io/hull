@@ -1,5 +1,5 @@
 --
--- test_lint.lua — slice-1 tests for hull.source.lint (the structural rule engine).
+-- test_lint.lua - slice-1 tests for hull.source.lint (the structural rule engine).
 --
 -- Each rule: a positive case that MUST fire and a negative that must NOT. Plus the
 -- engine (selection, registry). Pure Lua; run by tests/hull/source/test_lua_source.c.

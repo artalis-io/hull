@@ -12,7 +12,7 @@
  *                     generated_code). Because the key hashes the
  * GENERATED code (post-resolve of inheritance + includes), any
  * change to the source template OR to any extends/include target
- * naturally invalidates the entry — no dependency tracking needed.
+ * naturally invalidates the entry - no dependency tracking needed.
  *
  * In dev mode, the runtime calls hull.template.clear_cache() on
  * reload to drop the in-process function table; the on-disk store
@@ -40,7 +40,7 @@ struct lua_State;
  *   luaL_loadbuffer(L, code, len, chunkname);
  *   lua_pcall(L, 0, 1, 0);   // returns inner render function
  *
- * but skips both the parse AND the pcall on a cache hit — the
+ * but skips both the parse AND the pcall on a cache hit - the
  * dumped inner function loads back directly.
  *
  * @param L          Lua state.

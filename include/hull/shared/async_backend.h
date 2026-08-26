@@ -4,16 +4,16 @@
  *
  * The lower-level half of Hull's net interface. Owns: the event loop,
  * monotonic time, timers, FD watchers, the thread pool, and async-op
- * suspension. Used by every capability that touches async — hull.sleep,
+ * suspension. Used by every capability that touches async - hull.sleep,
  * compute.async, gpu.async, db.async, http.fetch, request handlers.
  *
  * Two backends ship by default:
  *
- *   keel — wraps the vendored Keel library (kl_async_*, kl_timer_*,
+ *   keel - wraps the vendored Keel library (kl_async_*, kl_timer_*,
  *          KlThreadPool, KlEventCtx). Default for HL_ENABLE_HTTP=1
  *          builds; same primitives that back the HTTP server.
  *
- *   poll — minimal poll(2) + pthread + software-timer-heap impl.
+ *   poll - minimal poll(2) + pthread + software-timer-heap impl.
  *          Used by HL_ENABLE_HTTP=0 (CLI) builds where Keel is
  *          unlinked. ~600-800 lines, no external deps.
  *
@@ -43,7 +43,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-/* Forward declarations — backend-opaque types. */
+/* Forward declarations - backend-opaque types. */
 typedef struct HlAllocator        HlAllocator;
 typedef struct HlAsyncBackendCtx  HlAsyncBackendCtx;  /* event-loop instance */
 typedef struct HlAsyncBackendPool HlAsyncBackendPool; /* thread pool */
@@ -51,18 +51,18 @@ typedef struct HlAsyncBackendPool HlAsyncBackendPool; /* thread pool */
 /* ── HlAsyncOp ──────────────────────────────────────────────────────
  *
  * A pending async operation. Callers embed this struct in their own
- * context (HlAsyncCtx already does — see hull/async.h). The backend
+ * context (HlAsyncCtx already does - see hull/async.h). The backend
  * tracks it via three callbacks set by the caller before suspend:
  *
- *   on_resume   — fires on the event-loop thread when complete().
+ *   on_resume   - fires on the event-loop thread when complete().
  *                 The caller's code resumes its coroutine/promise here.
  *
- *   on_deadline — fires on the event-loop thread when deadline_ms
+ *   on_deadline - fires on the event-loop thread when deadline_ms
  *                 monotonic time is reached. Used by hull.sleep
  *                 (success) and by HTTP timeouts (failure). NULL
  *                 disables the deadline.
  *
- *   on_cancel   — fires if the connection (HTTP) dies while suspended
+ *   on_cancel   - fires if the connection (HTTP) dies while suspended
  *                 or the backend tears down. Caller frees any pending
  *                 state. NULL = nothing to undo.
  *
@@ -93,16 +93,16 @@ struct HlAsyncOp {
  * Runs on the event-loop thread. */
 typedef void (*HlAsyncWatcherFn)(int fd, unsigned ready, void *user);
 
-/* Timer callback — runs on the event-loop thread when the deadline
+/* Timer callback - runs on the event-loop thread when the deadline
  * fires. The handle returned by timer_add is invalidated. */
 typedef void (*HlAsyncTimerFn)(void *user);
 
 /* Thread-pool work callbacks. All three may be NULL.
  *
- *   work_fn   — runs on a worker thread; blocking I/O is OK here.
- *   done_fn   — runs on the event-loop thread after work_fn returns.
+ *   work_fn   - runs on a worker thread; blocking I/O is OK here.
+ *   done_fn   - runs on the event-loop thread after work_fn returns.
  *               Safe to call backend->op_complete from here.
- *   cancel_fn — runs on the event-loop thread if the item is drained
+ *   cancel_fn - runs on the event-loop thread if the item is drained
  *               by pool_free without ever executing work_fn.
  */
 typedef void (*HlAsyncWorkFn)(void *user);
@@ -147,7 +147,7 @@ typedef struct HlAsyncBackend {
 
     /* ── Time ────────────────────────────────────────────────────── */
 
-    /* Monotonic clock in milliseconds. Backend-agnostic — same value
+    /* Monotonic clock in milliseconds. Backend-agnostic - same value
      * across backends so deadlines are comparable. */
     uint64_t (*monotonic_ms)(void);
 
@@ -204,19 +204,19 @@ typedef struct HlAsyncBackend {
      * elapses before complete() is called; fires op->on_cancel if
      * the backend tears down. Returns 0 on success, -1 on error.
      *
-     * The caller owns the op struct — backend stores no copy. */
+     * The caller owns the op struct - backend stores no copy. */
     int    (*op_suspend)(HlAsyncBackendCtx *ctx, HlAsyncOp *op);
 
     /* Resume an in-flight op. Schedules op->on_resume to fire on the
      * event-loop thread. Safe to call from any thread (notably from
-     * a pool worker's done_fn — though done_fn already runs on the
+     * a pool worker's done_fn - though done_fn already runs on the
      * event-loop thread, this works regardless). */
     void   (*op_complete)(HlAsyncBackendCtx *ctx, HlAsyncOp *op);
 } HlAsyncBackend;
 
 /* ── Backend getter ────────────────────────────────────────────────── */
 
-/* Returns the compiled-in async backend. Never NULL — every Hull
+/* Returns the compiled-in async backend. Never NULL - every Hull
  * build links exactly one async backend.
  *
  *   HL_ENABLE_HTTP=1 → keel (default)

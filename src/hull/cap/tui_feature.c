@@ -1,5 +1,5 @@
 /*
- * cap/tui_feature.c — composable-feature presence hook for the TUI subsystem.
+ * cap/tui_feature.c - composable-feature presence hook for the TUI subsystem.
  *
  * Base-resident weak default: a base build carries no TUI cap layer, so this
  * returns 0 (not present). A `hull build --with=tui` build links a STRONG

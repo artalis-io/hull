@@ -83,7 +83,7 @@ test("show coerces null message to empty string", () => {
 });
 
 test("shorthand opts override level if provided", () => {
-    // toast.success(res, msg, { level: "error" }) — shorthand wins.
+    // toast.success(res, msg, { level: "error" }) - shorthand wins.
     const res = mockRes();
     toast.success(res, "x", { level: "error" });
     assertEq(decoded(res).toast.level, "success");

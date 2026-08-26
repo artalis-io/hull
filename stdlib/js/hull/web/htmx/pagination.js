@@ -1,7 +1,7 @@
 /**
  * @file hull:web:htmx:pagination
  * @module hull:web:htmx:pagination
- * @description HTMX pagination widget — htmx-attributed nav over
+ * @description HTMX pagination widget - htmx-attributed nav over
  * the existing hull:web:pagination page-math.
  *
  * Eliminates the ~30-line pagination partial every hypermedia
@@ -54,7 +54,7 @@ function nav(total, opts) {
     const pushUrl = opts.pushUrl !== false;
 
     // Delegate page-math. The base render() consumes snake_case
-    // opts (per_page, base_url, default_per_page) — map them in.
+    // opts (per_page, base_url, default_per_page) - map them in.
     const p = basePagination.render(total, {
         page:             opts.page,
         per_page:         opts.perPage,

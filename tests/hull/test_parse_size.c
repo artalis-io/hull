@@ -1,5 +1,5 @@
 /*
- * test_parse_size.c — Tests for hl_parse_size()
+ * test_parse_size.c - Tests for hl_parse_size()
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */

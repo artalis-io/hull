@@ -1,5 +1,5 @@
 #!/bin/sh
-# ci_wamrc_consume.sh - the SINGLE shared reliance-flip consumer helper (Slice 5A).
+# ci_wamrc_consume.sh - the SINGLE shared reliance-flip consumer helper.
 #
 # Every x86_64 AOT consumer calls this INSTEAD of building wamrc from source. It
 # performs an INDEPENDENT COLD verification of the run-scoped wamrc artifact and

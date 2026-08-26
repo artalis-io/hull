@@ -1,5 +1,5 @@
 /*
- * agent/db_open.c — SQLite app-DB opener for agent introspection.
+ * agent/db_open.c - SQLite app-DB opener for agent introspection.
  *
  * Split out of agent/helpers.c so it moves into libhull_feature-sqlite.a with
  * the rest of the SQLite agent code (SQLite as a composable feature,

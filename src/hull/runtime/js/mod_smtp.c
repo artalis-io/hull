@@ -1,5 +1,5 @@
 /*
- * mod_smtp.c — hull:smtp module (email sending)
+ * mod_smtp.c - hull:smtp module (email sending)
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */

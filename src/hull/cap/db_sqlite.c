@@ -1,5 +1,5 @@
 /*
- * cap/db_sqlite.c — SQLite backend for the database vtable
+ * cap/db_sqlite.c - SQLite backend for the database vtable
  *
  * Wraps existing hl_cap_db_* functions into the HlDbBackend vtable.
  * Statement cache, init/shutdown, and all SQLite-specific operations
@@ -172,7 +172,7 @@ static size_t sqlite_estimate_sql_size(const char *table,
     return strlen(table) + fixed + cols_part + conflict_part + update_part;
 }
 
-/* Append helper — bounded snprintf into an offset cursor. Returns
+/* Append helper - bounded snprintf into an offset cursor. Returns
  * remaining capacity (or -1 on overflow). */
 static int sqlite_append(char *buf, size_t cap, size_t *off, const char *fmt, ...)
 {
@@ -193,7 +193,7 @@ static int sqlite_insert_if_absent(HlDbHandle *h, const char *table,
                                     const HlValue *values, int n_cols)
 {
     if (!table || n_cols < 1 || !cols || !values) return -1;
-    /* conflict_cols may be NULL/0 — in that case we emit
+    /* conflict_cols may be NULL/0 - in that case we emit
      * "INSERT OR IGNORE" without an explicit conflict target,
      * which SQLite treats as "any constraint violation". */
     HlDbSqliteCtx *s = (HlDbSqliteCtx *)h->ctx;
@@ -257,7 +257,7 @@ static int sqlite_upsert(HlDbHandle *h, const char *table,
             goto done;
     }
     if (sqlite_append(buf, cap, &off, ") DO UPDATE SET ") < 0) goto done;
-    /* Skip conflict cols on the update side — they're the keys. */
+    /* Skip conflict cols on the update side - they're the keys. */
     int first = 1;
     for (int i = 0; i < n_cols; i++) {
         int is_conflict = 0;
@@ -273,7 +273,7 @@ static int sqlite_upsert(HlDbHandle *h, const char *table,
         first = 0;
     }
     if (first) {
-        /* All columns are conflict columns — degenerate "INSERT
+        /* All columns are conflict columns - degenerate "INSERT
          * OR IGNORE" semantics. Emit DO NOTHING. */
         off -= strlen(" DO UPDATE SET ");
         if (sqlite_append(buf, cap, &off, " DO NOTHING") < 0) goto done;
@@ -393,7 +393,7 @@ int hl_db_sqlite_wrap(HlDbHandle *out, sqlite3 *db)
     if (!out || !db) return -1;
     HlDbSqliteCtx *s = calloc(1, sizeof(*s));
     if (!s) return -1;
-    s->db    = db;       /* borrowed — caller owns lifetime */
+    s->db    = db;       /* borrowed - caller owns lifetime */
     s->alloc = NULL;
     hl_stmt_cache_init(&s->cache, db, NULL);
     out->backend = &hl_db_backend_sqlite;
@@ -406,7 +406,7 @@ void hl_db_sqlite_unwrap(HlDbHandle *h)
     if (!h || h->backend != &hl_db_backend_sqlite || !h->ctx) return;
     HlDbSqliteCtx *s = (HlDbSqliteCtx *)h->ctx;
     hl_stmt_cache_destroy(&s->cache);
-    /* NOTE: s->db is borrowed — do NOT sqlite3_close it here. */
+    /* NOTE: s->db is borrowed - do NOT sqlite3_close it here. */
     free(s);
     h->ctx = NULL;
 }

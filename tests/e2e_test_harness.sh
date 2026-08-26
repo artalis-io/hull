@@ -1,5 +1,5 @@
 #!/bin/sh
-# e2e_test_harness.sh — the in-process `hull test` harness exposes the same
+# e2e_test_harness.sh - the in-process `hull test` harness exposes the same
 # fs sandbox as `hull dev`, and supports streaming multipart bodies.
 #
 # Regression guard for the nexogen asset-tracker PLATFORM_GAPS 2026-07-13
@@ -27,7 +27,7 @@ esac
 PASS=0
 FAIL=0
 pass() { PASS=$((PASS + 1)); echo "  PASS: $1"; }
-fail() { FAIL=$((FAIL + 1)); echo "  FAIL: $1${2:+ — $2}"; }
+fail() { FAIL=$((FAIL + 1)); echo "  FAIL: $1${2:+ - $2}"; }
 
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT

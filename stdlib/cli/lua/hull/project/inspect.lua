@@ -1,5 +1,5 @@
 --
--- hull.project.inspect — `hull agent inspect [app_dir]`: standalone project discovery.
+-- hull.project.inspect - `hull agent inspect [app_dir]`: standalone project discovery.
 --
 -- design: docs/project_discovery_design.md D8/D9/D11. Invokes the ONE canonical
 -- analyzer (hull.project.analyze) on the app tree and emits the shared public JSON

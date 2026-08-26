@@ -1,6 +1,6 @@
 /*
  * Hull-tree C-level test for the internal per-invocation mapped-span attachment
- * lifecycle (mapped-spans cut 1, checkpoint 2 -- cap/wasm_spans.c). Exercised
+ * lifecycle (mapped-spans -- cap/wasm_spans.c). Exercised
  * through Hull's own WAMR build. NO public spans API / metadata / SDK / bindings
  * are involved (held for review); this drives the internal HlWasmSpanSet directly.
  *
@@ -65,7 +65,7 @@ static void setup(void)
     cfg.base_dir = test_dir;
     cfg.base_len = strlen(test_dir);
 
-    /* checkpoint 3: fs read/write/mmap are policy-gated. These tests write files
+    /* fs read/write/mmap are policy-gated. These tests write files
      * under test_dir then mmap them, so grant the whole dir (base-root ".") in
      * BOTH the read and write sets. */
     hl_alloc_init(&cfg_alloc, 0);

@@ -2,10 +2,10 @@
 --
 -- Wraps four delivery backends behind one `email.send(opts)` call:
 --
---   - `"smtp"`     — direct SMTP via the C `smtp.send` binding.
---   - `"postmark"` — Postmark HTTPS API.
---   - `"sendgrid"` — SendGrid HTTPS API.
---   - `"resend"`   — Resend HTTPS API.
+--   - `"smtp"`     - direct SMTP via the C `smtp.send` binding.
+--   - `"postmark"` - Postmark HTTPS API.
+--   - `"sendgrid"` - SendGrid HTTPS API.
+--   - `"resend"`   - Resend HTTPS API.
 --
 -- API providers use `http_client.async.post` so they cooperate with the event
 -- loop. SMTP delivery goes through the C `smtp.send()` cap which handles

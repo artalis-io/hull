@@ -1,5 +1,5 @@
 #!/bin/sh
-# tests/e2e_persistent_async.sh — persistent-instance async baseline (issue #316).
+# tests/e2e_persistent_async.sh - persistent-instance async baseline (issue #316).
 # Before the fix, inst.async:call self-rejected: the binding set pi->busy=1 to
 # reserve the instance, then the worker called instance_call_buf which rejected on
 # busy. The fix routes the worker through the *_async entries that bypass the busy

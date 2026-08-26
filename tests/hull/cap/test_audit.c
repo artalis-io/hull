@@ -1,5 +1,5 @@
 /*
- * test_audit.c — Tests for capability audit logging
+ * test_audit.c - Tests for capability audit logging
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */

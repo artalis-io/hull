@@ -1,4 +1,4 @@
---- HTMX sort widget — server-side helpers for sortable column
+--- HTMX sort widget - server-side helpers for sortable column
 --- headers driven by `?sort=col[:asc|desc]`.
 --
 -- @module hull.web.htmx.sort
@@ -86,7 +86,7 @@
 --   - /static/hull/htmx/sort/sort.js   -- keyboard activation
 --                                         (Enter / Space -> click).
 --                                         Required for accessibility
---                                         under csp = "htmx" — the
+--                                         under csp = "htmx" - the
 --                                         older hx-trigger filter
 --                                         `keyup[key=='Enter']`
 --                                         needed Function() eval,
@@ -194,7 +194,7 @@ local ARIA_SORT = { asc = "ascending", desc = "descending", none = "none" }
 --- Render htmx attrs + classes for a single column header.
 --
 -- @tparam string column   This column's name (URL + data attrs).
--- @tparam ?table current  Output of sort.parse — what's currently sorted.
+-- @tparam ?table current  Output of sort.parse - what's currently sorted.
 -- @tparam table opts
 -- @tparam string  opts.url       Base URL (no query); the helper
 --                                appends ?sort=col[:dir].
@@ -209,7 +209,7 @@ local ARIA_SORT = { asc = "ascending", desc = "descending", none = "none" }
 --                                   is the table itself (the
 --                                   default `closest table`), pass
 --                                   `"outerHTML"`. Omitted by
---                                   default — htmx falls back to
+--                                   default - htmx falls back to
 --                                   its own default, `innerHTML`.
 -- @tparam[opt] bool opts.push_url   Emit hx-push-url="true".
 --                                   Default true (sorted URLs are

@@ -1,11 +1,11 @@
 /*
- * js_worker.c — Per-worker JS VMs for worker.dispatch()
+ * js_worker.c - Per-worker JS VMs for worker.dispatch()
  *
  * Manages TLS-keyed QuickJS VMs on worker threads. Each worker gets a
  * minimal JS VM with capabilities registered via init hooks
  * (e.g. db.* from js/worker_db.c).
  *
- * Zero DB knowledge — capabilities are plugged in via hooks.
+ * Zero DB knowledge - capabilities are plugged in via hooks.
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */

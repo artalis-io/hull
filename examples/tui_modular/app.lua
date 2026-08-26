@@ -16,7 +16,7 @@ local tui    = require("hull.tui")
 local state0 = require("./lib/state")
 
 local function load_view(name)
-    -- pcall'd so a typo doesn't crash mid-render — fall back to the
+    -- pcall'd so a typo doesn't crash mid-render - fall back to the
     -- menu so the user has somewhere to go.
     local ok, mod = pcall(require, "./views/" .. name)
     if not ok then return require("./views/menu") end

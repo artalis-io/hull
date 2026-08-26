@@ -1,5 +1,5 @@
 /*
- * hull_alloc.c — Unified tracking allocator implementation
+ * hull_alloc.c - Unified tracking allocator implementation
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
@@ -150,7 +150,7 @@ void hl_arena_free(HlAllocator *a, SHArena *arena)
  * hand-rolled `saved = arena->used; ...; arena->used = saved` idiom into a
  * named, bounds-checked API so a REQUEST arena can host nested SCRATCH
  * scopes without a second arena. Allocations made after the mark become
- * invalid once rewound — do not retain pointers past the rewind.
+ * invalid once rewound - do not retain pointers past the rewind.
  */
 size_t hl_arena_mark(const SHArena *arena)
 {

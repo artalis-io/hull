@@ -1,10 +1,10 @@
 /*
- * commands/dev.c — hull dev: hot-reload development server
+ * commands/dev.c - hull dev: hot-reload development server
  *
  * Forks a child process running the hull server, monitors app files
  * for changes (by polling max mtime), and restarts on change.
  *
- * Pure C — no Lua VM needed.
+ * Pure C - no Lua VM needed.
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
@@ -212,7 +212,7 @@ static const char *dev_detect_entry(void)
 /* The whole dev-state machinery exists solely for `hull dev --tui`: the
  * singleton is only ever initialized by run_dev_tui, and its sole consumers are
  * the tool.dev_* bindings that back the dev_tui Lua tool. So the entire block is
- * TUI-only — the tool.dev_* bindings in tool_orchestration.c carry the matching
+ * TUI-only - the tool.dev_* bindings in tool_orchestration.c carry the matching
  * HL_TUI_LINKED gate. HL_TUI_LINKED is set when the hull binary carries TUI
  * symbols, i.e. a TUI-compiled base OR a TUI-free base that force-loads the
  * feature archive (the default native toolchain). On a fully TUI-less build it's
@@ -252,7 +252,7 @@ int hl_dev_state_drain(HlDevState *s)
         char buf[1024];
         ssize_t n = read(s->pipe_fd, buf, sizeof buf);
         if (n < 0) { if (errno == EINTR) continue; return -1; }
-        if (n == 0) break;        /* EOF — child closed */
+        if (n == 0) break;        /* EOF - child closed */
         total += (int)n;
 
         /* Walk the buffer, splitting on '\n'. */
@@ -279,7 +279,7 @@ int hl_dev_state_drain(HlDevState *s)
             }
             start = i + 1;
         }
-        /* Anything past the last '\n' is a partial line — buffer it. */
+        /* Anything past the last '\n' is a partial line - buffer it. */
         if (start < (size_t)n) {
             size_t plen = (size_t)n - start;
             size_t room = sizeof s->partial - s->partial_len;
@@ -302,7 +302,7 @@ int hl_dev_state_check_file_change(HlDevState *s)
     return 0;
 }
 
-/* monotonic_ms — bypass the async backend (the tool VM has none).
+/* monotonic_ms - bypass the async backend (the tool VM has none).
  * Wall-clock would work too; we use CLOCK_MONOTONIC for sanity. */
 static int64_t dev_now_ms(void)
 {
@@ -335,7 +335,7 @@ int hl_dev_state_reload(HlDevState *s)
     int pfd_for_child = -1;
     /* We need to recreate the write end. The original write end was
      * closed in the parent right after fork; here we recreate it by
-     * dup()'ing the read fd's pair — but we don't have it stashed.
+     * dup()'ing the read fd's pair - but we don't have it stashed.
      * Easier: open a fresh pipe and replace pipe_fd. The cost is
      * losing whatever was in transit, which is fine right after kill. */
     int new_pipe[2];
@@ -412,7 +412,7 @@ static int run_dev_tui(int argc, char **argv,
     }
     g_dev_state_inited = 1;
 
-    /* First child spawn — uses the reload path so the pipe + bookkeeping
+    /* First child spawn - uses the reload path so the pipe + bookkeeping
      * land in one place. */
     if (hl_dev_state_reload(&g_dev_state) != 0) {
         fprintf(stderr, "hull dev --tui: failed to spawn child\n");

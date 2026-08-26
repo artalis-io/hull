@@ -112,7 +112,7 @@ app.manifest = {
 ## Build Flags
 
 The compiled binary supports runtime flags:
-- `--audit` — enable capability audit logging (JSON to stderr)
-- `--no-sandbox` — disable kernel sandbox (debugging only)
-- `--no-migrate` — skip automatic migration on startup
-- `--max-instructions N` — override per-request instruction limit
+- `--audit` - enable capability audit logging (JSON to stderr)
+- `--no-sandbox` - disable kernel sandbox (debugging only)
+- `--no-migrate` - skip automatic migration on startup
+- `--max-instructions N` - override per-request instruction limit

@@ -1,5 +1,5 @@
 /*
- * worker_db.h — Runtime-agnostic DB worker capability
+ * worker_db.h - Runtime-agnostic DB worker capability
  *
  * Manages per-worker database connections (thread-local) and provides
  * HlWorkerDbOp for offloading db.async.query/exec to the thread pool.

@@ -1,4 +1,4 @@
--- Middleware — Hull + Lua example
+-- Middleware - Hull + Lua example
 --
 -- Run: hull app.lua -p 3000
 -- Demonstrates middleware chaining: request ID, logging, rate limiting, CORS
@@ -57,7 +57,7 @@ app.use("*", "/api/*", cors.middleware({
 }))
 
 -- OPTIONS route for CORS preflight (router requires a route to exist
--- so middleware can run — the CORS middleware above handles the response)
+-- so middleware can run - the CORS middleware above handles the response)
 app.options("/api/items", function(_req, res)
     res:status(204):text("")
 end)
@@ -68,7 +68,7 @@ app.get("/health", function(_req, res)
     res:json({ status = "ok" })
 end)
 
--- Public route (no rate limit — only /api/* is rate limited)
+-- Public route (no rate limit - only /api/* is rate limited)
 app.get("/", function(req, res)
     res:json({
         message = "Middleware example",
@@ -113,4 +113,4 @@ app.get("/api/stats", function(_req, res)
     end
 end)
 
-log.info("Middleware example loaded — routes registered")
+log.info("Middleware example loaded - routes registered")

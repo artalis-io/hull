@@ -1,11 +1,11 @@
--- bench_db — SQLite performance benchmark endpoints
+-- bench_db - SQLite performance benchmark endpoints
 --
 -- Workloads:
---   GET  /read        — read-heavy: SELECT 20 rows by indexed column
---   POST /write       — write-heavy: INSERT single row
---   POST /write-batch — write-heavy: INSERT 10 rows in one request
---   GET  /mixed       — mixed: 1 INSERT + 1 SELECT (20 rows)
---   GET  /health      — baseline (no DB)
+--   GET  /read        - read-heavy: SELECT 20 rows by indexed column
+--   POST /write       - write-heavy: INSERT single row
+--   POST /write-batch - write-heavy: INSERT 10 rows in one request
+--   GET  /mixed       - mixed: 1 INSERT + 1 SELECT (20 rows)
+--   GET  /health      - baseline (no DB)
 
 local db   = require("hull.db").default()
 local time = require("hull.time")
@@ -29,25 +29,25 @@ if count[1].n < 1000 then
     end
 end
 
--- GET /health — no DB baseline
+-- GET /health - no DB baseline
 app.get("/health", function(_req, res)
     res:json({ status = "ok" })
 end)
 
--- GET /read — read-heavy: SELECT 20 most recent events
+-- GET /read - read-heavy: SELECT 20 most recent events
 app.get("/read", function(_req, res)
     local rows = db.query("SELECT id, kind, payload, ts FROM events ORDER BY ts DESC LIMIT 20")
     res:json(rows)
 end)
 
--- POST /write — write-heavy: single INSERT per request
+-- POST /write - write-heavy: single INSERT per request
 app.post("/write", function(_req, res)
     local n = db.exec("INSERT INTO events (kind, payload, ts) VALUES (?, ?, ?)",
                       {"bench", "data", time.now()})
     res:json({ inserted = n })
 end)
 
--- POST /write-batch — 10 INSERTs in a single transaction
+-- POST /write-batch - 10 INSERTs in a single transaction
 app.post("/write-batch", function(_req, res)
     db.batch(function()
         for i = 1, 10 do
@@ -58,7 +58,7 @@ app.post("/write-batch", function(_req, res)
     res:json({ inserted = 10 })
 end)
 
--- GET /mixed — 1 write + 1 read per request
+-- GET /mixed - 1 write + 1 read per request
 app.get("/mixed", function(_req, res)
     db.exec("INSERT INTO events (kind, payload, ts) VALUES (?, ?, ?)",
             {"mixed", "data", time.now()})
@@ -66,4 +66,4 @@ app.get("/mixed", function(_req, res)
     res:json(rows)
 end)
 
-log.info("bench_db loaded — endpoints: /health /read /write /mixed")
+log.info("bench_db loaded - endpoints: /health /read /write /mixed")

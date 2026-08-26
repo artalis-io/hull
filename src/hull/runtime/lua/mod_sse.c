@@ -1,5 +1,5 @@
 /*
- * mod_sse.c — SSE stream userdata for Lua
+ * mod_sse.c - SSE stream userdata for Lua
  *
  * Provides:
  *   - stream:event(name, data [, id])

@@ -1,5 +1,5 @@
 #!/bin/sh
-# Phase 4c (docs/build_modularization.md): fail if the installable-feature
+# (docs/build_modularization.md): fail if the installable-feature
 # registry in src/hull/commands/feature.c FEATURES[] drifts from the single
 # source of truth in mk/feature.mk. Adding/removing a --with feature must be
 # one edit; this catches the case where feature.c and the Makefile disagree.

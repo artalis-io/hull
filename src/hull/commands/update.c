@@ -1,16 +1,16 @@
 /*
- * commands/update.c — hull self-update
+ * commands/update.c - hull self-update
  *
  * Downloads the latest GitHub release for this binary's OS/arch, verifies
  * SHA-256 against hull.sha256 from the same release, and atomically
  * replaces the running binary via rename(2).
  *
- *   hull update                — install latest if newer than current
- *   hull update --check        — print "update available" / "up to date"
- *   hull update --force        — reinstall current version
- *   hull update --repo=org/name — override the GitHub repo
+ *   hull update                - install latest if newer than current
+ *   hull update --check        - print "update available" / "up to date"
+ *   hull update --force        - reinstall current version
+ *   hull update --repo=org/name - override the GitHub repo
  *
- * No external dependencies — uses keel's HTTPS client + the embedded
+ * No external dependencies - uses keel's HTTPS client + the embedded
  * Mozilla CA bundle (D4) for trust.
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
@@ -39,7 +39,7 @@
 #define HL_DEFAULT_REPO "artalis-io/hull"
 
 /* All HTTPS / manifest / atomic-write plumbing now lives in
- * hull/release_io.h — shared with `hull tools install`. */
+ * hull/release_io.h - shared with `hull tools install`. */
 
 /* ── Main handler ────────────────────────────────────────────────── */
 
@@ -75,7 +75,7 @@ int hl_cmd_update(int argc, char **argv, const HlCommandEnv *env)
     KlAllocator alloc = kl_allocator_default();
     KlTlsCtx *tls = hl_release_io_open_tls(&alloc);
     if (!tls) {
-        fprintf(stderr, "hull update: no CA bundle available — cannot verify HTTPS\n");
+        fprintf(stderr, "hull update: no CA bundle available - cannot verify HTTPS\n");
         return 1;
     }
 
@@ -165,7 +165,7 @@ int hl_cmd_update(int argc, char **argv, const HlCommandEnv *env)
      * If this build has a configured release public key (the v0.1.0
      * release shipped a non-zero HL_RELEASE_PUBKEY_HEX), download and
      * verify hull.sha256.sig. Missing signature or verification failure
-     * is a hard error — we never substitute an unverified manifest.
+     * is a hard error - we never substitute an unverified manifest.
      *
      * Pre-v0.1.0 builds that ship the all-zeros placeholder skip this
      * step with a one-time warning.
@@ -182,7 +182,7 @@ int hl_cmd_update(int argc, char **argv, const HlCommandEnv *env)
                               "hull-update") != 0) {
             fprintf(stderr,
                 "hull update: failed to download release signature (hull.sha256.sig)\n"
-                "             — this release is not signed; refusing to install\n");
+                "             - this release is not signed; refusing to install\n");
             kl_free(&alloc, binary, binary_len);
             kl_free(&alloc, manifest, manifest_len);
             kl_tls_mbedtls_ctx_destroy(tls);
@@ -195,7 +195,7 @@ int hl_cmd_update(int argc, char **argv, const HlCommandEnv *env)
         if (sig_rc != 0) {
             fprintf(stderr,
                 "hull update: release signature verification FAILED\n"
-                "             — manifest does not match the embedded release public key\n");
+                "             - manifest does not match the embedded release public key\n");
             kl_free(&alloc, binary, binary_len);
             kl_free(&alloc, manifest, manifest_len);
             kl_tls_mbedtls_ctx_destroy(tls);
@@ -204,7 +204,7 @@ int hl_cmd_update(int argc, char **argv, const HlCommandEnv *env)
         fprintf(stdout, "hull update: release signature verified\n");
     } else {
         fprintf(stderr,
-            "hull update: WARNING — this hull build has no embedded release public key,\n"
+            "hull update: WARNING - this hull build has no embedded release public key,\n"
             "             skipping Ed25519 signature check (SHA-256 only).\n");
     }
 
@@ -231,7 +231,7 @@ int hl_cmd_update(int argc, char **argv, const HlCommandEnv *env)
 
     /* Constant-time compare. The values are public (manifest checksum
      * + computed digest of the downloaded binary), so a timing leak
-     * doesn't reveal anything sensitive — using mbedtls_ct_memcmp for
+     * doesn't reveal anything sensitive - using mbedtls_ct_memcmp for
      * uniformity with the rest of the hash-compare codepaths. Both
      * buffers are exactly 64 hex chars + NUL; compare the 64 chars. */
     if (mbedtls_ct_memcmp(expected, actual, 64) != 0) {

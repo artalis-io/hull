@@ -1,5 +1,5 @@
 /*
- * manifest_lua.c — Extract HlManifest from Lua registry __hull_manifest
+ * manifest_lua.c - Extract HlManifest from Lua registry __hull_manifest
  *
  * Split from manifest.c as part of architectural roadmap item G.
  * Compiles to an empty translation unit when HL_ENABLE_LUA is not set.
@@ -195,14 +195,14 @@ int hl_manifest_extract_lua(lua_State *L, HlManifest *out, HlAllocator *alloc)
      * Strict format: key is the module name (short alias or full
      * canonical), value is a version-string parsed as the API major.
      * Other shapes (array, boolean, number) are rejected silently here
-     * and surface as resolver errors later. The presence of the key —
-     * even with an empty table — sets `modules_declared = 1`. */
+     * and surface as resolver errors later. The presence of the key -
+     * even with an empty table - sets `modules_declared = 1`. */
     lua_getfield(L, manifest_idx, "modules");
     if (lua_istable(L, -1)) {
         int modules_idx = lua_gettop(L);
         out->modules_declared = 1;
 
-        /* Syntax: `modules = { "<vendor>/<name>@<major>", ... }` — a
+        /* Syntax: `modules = { "<vendor>/<name>@<major>", ... }` - a
          * Lua sequence of canonical spec strings. The local-variable
          * name in `require()` is the user-facing alias (a plain Lua
          * convention); the manifest only declares which canonical
@@ -210,7 +210,7 @@ int hl_manifest_extract_lua(lua_State *L, HlManifest *out, HlAllocator *alloc)
          *
          * We iterate as a sequence first (the supported form). For
          * back-compat we also accept the legacy table-keyed form
-         * `{ crypto = "hull/crypto@1" }` if the sequence is empty —
+         * `{ crypto = "hull/crypto@1" }` if the sequence is empty -
          * keys are then ignored as cosmetic labels. */
         lua_Integer seq_len = luaL_len(L, modules_idx);
         if (seq_len > 0) {
@@ -231,7 +231,7 @@ int hl_manifest_extract_lua(lua_State *L, HlManifest *out, HlAllocator *alloc)
                     int optional = (speclen > 0 && spec[speclen - 1] == '?');
                     const char *at   = strchr(spec, '@');
                     if (!at || at == spec) {
-                        log_warn("[manifest] modules[%lld] = %s — expected "
+                        log_warn("[manifest] modules[%lld] = %s - expected "
                                  "\"vendor/name@version\", ignored",
                                  (long long)i, spec);
                     } else {
@@ -241,7 +241,7 @@ int hl_manifest_extract_lua(lua_State *L, HlManifest *out, HlAllocator *alloc)
                                      (optional && end[0] == '?' && end[1] == '\0');
                         if (end == at + 1 || !end_ok ||
                             v < 1 || v > 255) {
-                            log_warn("[manifest] modules[%lld] = %s — "
+                            log_warn("[manifest] modules[%lld] = %s - "
                                      "invalid major version, ignored",
                                      (long long)i, spec);
                         } else {
@@ -283,7 +283,7 @@ int hl_manifest_extract_lua(lua_State *L, HlManifest *out, HlAllocator *alloc)
                     int optional = (speclen > 0 && spec[speclen - 1] == '?');
                     const char *at    = strchr(spec, '@');
                     if (!at || at == spec) {
-                        log_warn("[manifest] modules.%s = %s — expected "
+                        log_warn("[manifest] modules.%s = %s - expected "
                                  "\"vendor/name@version\", ignored",
                                  alias, spec);
                     } else {
@@ -293,7 +293,7 @@ int hl_manifest_extract_lua(lua_State *L, HlManifest *out, HlAllocator *alloc)
                                      (optional && end[0] == '?' && end[1] == '\0');
                         if (end == at + 1 || !end_ok ||
                             v < 1 || v > 255) {
-                            log_warn("[manifest] modules.%s = %s — invalid "
+                            log_warn("[manifest] modules.%s = %s - invalid "
                                      "major version, ignored", alias, spec);
                         } else {
                             size_t nlen = (size_t)(at - spec);
@@ -408,22 +408,22 @@ int hl_manifest_extract_lua(lua_State *L, HlManifest *out, HlAllocator *alloc)
     }
     lua_pop(L, 1); /* pop kv */
 
-    /* allow_dynamic_code = true — opt-in to JIT / runtime codegen.
+    /* allow_dynamic_code = true - opt-in to JIT / runtime codegen.
      * Rejected by hl_sandbox_apply unless --no-sandbox. */
     lua_getfield(L, manifest_idx, "allow_dynamic_code");
     out->allow_dynamic_code = lua_toboolean(L, -1);
     lua_pop(L, 1);
     if (out->allow_dynamic_code)
-        log_warn("[manifest] allow_dynamic_code=true — kernel sandbox "
+        log_warn("[manifest] allow_dynamic_code=true - kernel sandbox "
                  "will fail closed unless --no-sandbox is set");
 
-    /* allow_dynamic_libraries = true — opt-in to dlopen() of native libs.
+    /* allow_dynamic_libraries = true - opt-in to dlopen() of native libs.
      * Rejected by hl_sandbox_apply unless --no-sandbox. */
     lua_getfield(L, manifest_idx, "allow_dynamic_libraries");
     out->allow_dynamic_libraries = lua_toboolean(L, -1);
     lua_pop(L, 1);
     if (out->allow_dynamic_libraries)
-        log_warn("[manifest] allow_dynamic_libraries=true — kernel sandbox "
+        log_warn("[manifest] allow_dynamic_libraries=true - kernel sandbox "
                  "will fail closed unless --no-sandbox is set");
 
     lua_pop(L, 1); /* pop manifest table */

@@ -1,7 +1,7 @@
 /**
  * @file hull:web:htmx:toast
  * @module hull:web:htmx:toast
- * @description HTMX toast widget — server-side helper.
+ * @description HTMX toast widget - server-side helper.
  *
  * Sends transient flash messages to the client via the standard
  * HX-Trigger header. The shipped client JS at

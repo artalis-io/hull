@@ -1,5 +1,5 @@
 /*
- * test_fs_resolve_parity.c — checkpoint 2: prove the two resolver implementations
+ * test_fs_resolve_parity.c - prove the two resolver implementations
  * (openat2 fast path + the portable manual held-fd-stack walk) implement the SAME
  * virtual-root contract, and that resolution is race-resistant.
  *

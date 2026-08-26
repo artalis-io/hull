@@ -1,5 +1,5 @@
 /*
- * hull/limits/wasm.h — WASM compute plugin limits (WAMR)
+ * hull/limits/wasm.h - WASM compute plugin limits (WAMR)
  *
  * Used only by cap/wasm sources, worker_wasm, runtime/{lua,js}/mod_compute,
  * and any other consumer of HlWasmConfig. Changes here should not force

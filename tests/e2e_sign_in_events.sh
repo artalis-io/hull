@@ -11,7 +11,7 @@
 #      sighting). /_new_devices reflects the alert.
 #   3. Login from "browser B" (different UA + IP). Expect 2 devices,
 #      2 login events, second new-device alert.
-#   4. Re-login from "browser A" — same fingerprint, no new alert,
+#   4. Re-login from "browser A" - same fingerprint, no new alert,
 #      still 2 devices total.
 #   5. Email-change flow generates an email_changed event in the
 #      audit log; login from "browser A" after the change is also
@@ -26,7 +26,7 @@
 #      password_reset_completed event.
 #
 # Two virtual "browsers" are simulated by varying the User-Agent
-# header (Chrome on macOS vs Firefox on Linux) — distinct enough
+# header (Chrome on macOS vs Firefox on Linux) - distinct enough
 # that audit-log's family+OS fingerprint treats them as different
 # devices.
 #
@@ -54,9 +54,9 @@ fi
 fail() { echo "  FAIL: $1"; FAIL=$((FAIL + 1)); }
 pass() { echo "  PASS: $1"; PASS=$((PASS + 1)); }
 
-check_status()   { [ "$2" = "$3" ] && pass "$1" || fail "$1 — expected status $3, got $2"; }
-check_contains() { case "$2" in *"$3"*) pass "$1" ;; *) fail "$1 — expected '$3' in: $(echo "$2" | head -c 200)" ;; esac }
-check_eq()       { [ "$2" = "$3" ] && pass "$1" || fail "$1 — expected $3, got $2"; }
+check_status()   { [ "$2" = "$3" ] && pass "$1" || fail "$1 - expected status $3, got $2"; }
+check_contains() { case "$2" in *"$3"*) pass "$1" ;; *) fail "$1 - expected '$3' in: $(echo "$2" | head -c 200)" ;; esac }
+check_eq()       { [ "$2" = "$3" ] && pass "$1" || fail "$1 - expected $3, got $2"; }
 
 wait_for_server() {
     for _i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
@@ -193,7 +193,7 @@ run_flow() {
     SES=$(count_sessions "$COOKIES_A" "$UA_A" "$IP_A" "$BASE")
     check_eq "$_label: 2 active sessions for user" "$SES" "2"
 
-    # 4. Re-login from A — same fingerprint, no new alert.
+    # 4. Re-login from A - same fingerprint, no new alert.
     R=$(curl -sS -c "$COOKIES_A" \
         -H "User-Agent: $UA_A" -H "X-Forwarded-For: $IP_A" \
         -X POST -H 'Content-Type: application/json' \

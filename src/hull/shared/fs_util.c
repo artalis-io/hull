@@ -1,5 +1,5 @@
 /*
- * fs_util.c — shared directory-creation helpers (see fs_util.h).
+ * fs_util.c - shared directory-creation helpers (see fs_util.h).
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */

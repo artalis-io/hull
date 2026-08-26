@@ -1,8 +1,8 @@
 /*
- * embed_internal.h — internal accessors for the embedding ABI.
+ * embed_internal.h - internal accessors for the embedding ABI.
  *
  * NOT part of the stable ABI (hull/embed.h). These exist only so Hull's
- * own tests can inspect an HlEmbed handle — in particular so the
+ * own tests can inspect an HlEmbed handle - in particular so the
  * fork+SIGSEGV death test can reach the sealed base_dir mapping and prove
  * it is read-only. External embedders must not rely on these symbols.
  *
