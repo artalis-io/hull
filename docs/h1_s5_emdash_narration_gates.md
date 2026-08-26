@@ -57,31 +57,45 @@ and asserts the gate returns clean.
 
 Keeps H1/S4 durable by matching development-milestone narration SHAPES - `Phase
 <letter>`, `Phase N.N`, `Phase Nd-`, `Slice N`, `checkpoint N`; deliberately NEVER
-a bare `Phase <N>` - and failing on any hit that is not an exact reviewed
-survivor.
+a bare `Phase <N>` - and failing on any hit that is not a reviewed survivor.
 
-- **Scope** = the surface S4 reviewed: `src/ include/ stdlib/ Makefile mk/
-  templates/`. `tests/`, `examples/`, and `docs/` are intentionally NOT covered:
-  S4 did not review their design-phase labels, and docs legitimately narrate
-  design history. This is a documented boundary, not a broad exclusion.
-- **Survivors** (from [h1_s4_milestone_inventory.md](h1_s4_milestone_inventory.md))
-  do not trip it: the architectural `Phase 1:`..`Phase 11:` (serve.c) and `Phase
-  1/2` (sandbox) pipeline labels are bare `Phase <N>` and match no shape; audit
-  provenance (`Phase 6 audit ...`) is bare and additionally semantically excluded
-  (any line mentioning `audit`); the jobs.js/lua public-doc changelog is bare. The
-  ONE dotted-shape survivor - sbom.c's public CLI help `Since Phase 4.3` - is the
-  single exact-location allowlist entry.
+**Scope** = every tracked file MINUS the classes below. There is **no
+directory-wide exclusion**: all first-party CODE / BUILD / CI-config / SCRIPT /
+TEST / EXAMPLE comment prose is governed (S5 expanded the census into `tests/`,
+`examples/`, `.github/`, and `scripts/` and recast the reducible narration S4's
+narrower census had missed). Each excluded class is an exact path or a semantic
+file-class, documented with **why it cannot contain the governed prose**:
 
-The self-test proves the gate bites on each of the five shapes, and does NOT bite
-an `audit` line or a bare `Phase 7:` pipeline label.
+| Excluded class | Kind | Why it cannot hold the governed prose |
+|----------------|------|---------------------------------------|
+| `vendor/**` | scope | third-party; not our comment prose to govern |
+| `*.md` markdown | semantic | prose DOCUMENTS whose SUBJECT is the design incl. its phased history (`Phase 4.3 removed X` is content, not comment clutter). Still governed by `check-no-emdash`; the milestone rule is code-comment-specific. **Self-tested**: a shape in a `.c` bites, the same in a `.md` does not. |
+| `*.wat *.wasm *.aot` | semantic | compute fixtures / binary artifacts - behavior data, not design-comment prose |
+| the gate + its self-test | exact | contain the shapes as their definition / test data (circular) |
 
-## 3. Also fixed here
+Additional exceptions, both narrow: `audit`-bearing lines are a **semantic**
+exception (audit / security provenance always preserved), and the one dotted-shape
+survivor - `sbom.c`'s public CLI help `Since Phase 4.3` - is an **exact-location**
+allowlist entry. The bare architectural pipeline labels (`serve.c` `Phase
+1:`..`Phase 11:`, `sandbox` `Phase 1/2`) and the jobs.js/lua public-doc changelog
+are bare `Phase <N>` and match no shape.
 
-S4's milestone census used `mk/*.mk`, which does not match the nested
-`mk/features/*.mk`; those build-config comments (feature-composition `Phase
-A/B/C/D`, keel `Phase 4.2b`, runtime `Phase 3b/3c`) and one missed `Phase C2` in
-`src/hull/tool_orchestration.c` were recast to present tense so the new gate is
-clean on its full scope.
+The self-test proves the gate bites on each of the five shapes AND on planted
+`tests/` narration (expanded scope), and does NOT bite an `audit` line, a bare
+`Phase 7:` pipeline label, or milestone narration inside a `.md` document
+(semantic exclusion).
+
+## 3. Reducible narration recast (S4 census gaps + expanded scope)
+
+S4's milestone census under-reached: `mk/*.mk` did not match nested
+`mk/features/*.mk`, and `tests/` / `.github/` / `scripts/` were never covered. S5
+recast the reducible narration in all of them to present tense: the
+feature-composition build comments (`mk/features/*`, `tool_orchestration.c`), the
+CI-architecture slice/checkpoint labels in `.github/workflows/*` and
+`scripts/ci/*`, the durable-execution / frontend / fs test-section labels in
+`tests/`, and the two `examples/` compute apps - keeping every doc reference,
+`issue #114`, and `§`/Appendix cross-ref. The em-dash gate governs markdown; the
+milestone gate does not, so design records keep documenting their phases.
 
 ## 4. Proof
 
@@ -89,5 +103,36 @@ clean on its full scope.
   (remaining em-dashes are all in vendor / docs-archive / .wat-.wasm / LICENSE).
 - `make lint` exits 0 with both new gates reporting OK.
 - Both self-tests pass (bite + clean).
-- Full build byte-identical class + unit tests 91/91 pass (no behavior change from
-  the Area-A string rephrases).
+- Unit tests **91/91 pass** and the full build succeeds.
+
+### 4.1 Binary impact (honest accounting)
+
+The produced `hull` binary is **NOT byte-identical** across S5. Measured on the
+same host/toolchain, pre-S5 base (`#415` tip) vs S5 tip:
+
+| Metric | Result |
+|--------|--------|
+| File SIZE | identical, 7601128 bytes (a coincidence, not evidence of equality) |
+| Executable SHA-256 | **differs**: base `8f2b27c4750db4afe67d49b4ba4012b16246e4aa31a06359324173a741cf9c07` vs S5 `b979263d67931ff6bab8432599479b0320f4331541d78e53cd05e4f1c029a5e9` |
+| `cmp -l` differing byte positions | ~3.08M (dominated by cascading offset shifts, below) |
+
+Two intended change classes enter the binary; neither is "zero behavior change":
+
+1. **322 compiled diagnostic-output strings** (Area A) - `hull doctor` / `deploy`
+   / `cache verify` / compute / smtp / wasm / `verify` advisory text - changed
+   em-dash -> hyphen. This is an **intended, behavior-preserving change to
+   human-readable diagnostic wording**: the messages are advisory (not a parsed
+   protocol / stable output contract), the meaning is unchanged, and the unit +
+   e2e output tests pass (no golden asserted an em-dash; goldens that echo swept
+   source stay in sync). It is classified as an intentional API-semantics-
+   preserving wording change, backed by tests - not as no-op.
+2. **Embedded stdlib source** - the Lua/JS stdlib is carried VERBATIM (comments
+   included) in the platform VFS embedded in the binary, so the Area-C stdlib
+   comment rephrases change those embedded bytes. Because em-dash (3 bytes) ->
+   hyphen (1 byte) shortens each line, every subsequent byte in an embedded file
+   shifts, which is why `cmp -l` reports millions of differing positions from a
+   few hundred edits. The **executed stdlib behavior is unchanged** (Lua/JS
+   ignore comments); only the embedded source text differs.
+
+So: file size collides by coincidence, the executable hash legitimately differs,
+and the differences are the two intended, test-backed classes above.
