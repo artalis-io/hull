@@ -222,7 +222,7 @@ static int l_tool_modules_resolve(lua_State *L)
 
     /* needs_http = does the resolved set require any HTTP subsystem (server or
      * client)? Drives `hull build`'s decision to compose the http core + the
-     * per-runtime web bindings (issue #114, Phase C2). Reliable because the
+     * per-runtime web bindings (issue #114). Reliable because the
      * route/ws/sse decorations (app.get/…) only exist when an HTTP module is
      * declared, so a serving app always trips an HTTP cap here. */
     uint32_t req_caps = hl_module_set_required_caps(&set);

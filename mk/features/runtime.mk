@@ -14,9 +14,9 @@
 # libhull_feature-lua.a / -js.a: a runtime as a composable feature archive.
 # Bundles the runtime objects, its vendored VM, its manifest extractor, and its
 # stdlib VFS array (hl_stdlib_<rt>_entries). The tui bridge (mod_tui) is excluded
-# - it belongs to libhull_feature-tui.a. Phase 3c builds these additively (base
-# still dual, objects already compiled); Phase 3b flips the base runtime-less and
-# force-loads them into hull. Whole-archive at compose (no single anchor symbol).
+# - it belongs to libhull_feature-tui.a. These build additively (base still dual,
+# objects already compiled); the base is runtime-less and force-loads them into
+# hull. Whole-archive at compose (no single anchor symbol).
 # Exclude the tui bridge (-> libhull_feature-tui.a) and the Lua tool VM bindings
 # (lua_rt_mod_tool.o: tool.extract_manifest_js etc., toolchain-only; whole-
 # archiving the runtime must not force-load them - they pull the JS manifest
