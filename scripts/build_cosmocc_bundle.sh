@@ -147,6 +147,18 @@ find "$work/tree" -path '*/lib/*' -type f \( \
         -name 'ape*' \) >> "$keep"
 sort -u "$keep" -o "$keep"
 
+# Keep every symlink's TARGET so the trace-closure trim never leaves a DANGLING
+# link. hl_tar_extract fails closed on a dangling link (a non-admin Windows box
+# materializes links from their target instead of creating a symlink), so a
+# bundle with a dangling arch-cc -> cosmocc stub would be unextractable there.
+# Resolve each link (following chains) to its real file and add it to the keep
+# set BEFORE the deletion below. Symlinks themselves are never deleted.
+find "$work/tree" -type l | while IFS= read -r link; do
+    tgt=$(realpath -m "$link" 2>/dev/null) || continue
+    case "$tgt" in "$work/tree"/*) [ -f "$tgt" ] && printf '%s\n' "$tgt" ;; esac
+done >> "$keep"
+sort -u "$keep" -o "$keep"
+
 # Delete every regular file NOT in the keep set (symlinks + dirs untouched),
 # then prune the directories left empty.
 find "$work/tree" -type f | sort -u > "$work/all.txt"
@@ -160,6 +172,17 @@ for v in dbg optlinux tiny; do
 done
 find "$work/tree" -depth -type d -empty -delete 2>/dev/null || true
 rm -rf "$probe"
+
+# Belt-and-suspenders: no dangling symlink may survive the trim. The extractor
+# rejects one (fail closed), so a dangling link here would ship an unextractable
+# bundle to non-admin Windows users. Fail the build with the offenders listed.
+dangling=$(find "$work/tree" -type l ! -exec test -e {} \; -print 2>/dev/null || true)
+if [ -n "$dangling" ]; then
+    echo "build_cosmocc_bundle: FATAL - dangling symlink(s) after trim (would be" >&2
+    echo "  unextractable on a non-admin Windows box):" >&2
+    printf '  %s\n' $dangling | sed "s#$work/tree/##" >&2
+    exit 1
+fi
 
 after=$(du -sm "$work/tree" | cut -f1)
 echo "build_cosmocc_bundle: trimmed ${before} MB -> ${after} MB"

@@ -268,11 +268,19 @@ static int extract_symlink_cb(const HlTarEntry *e, void *vctx)
 
     if (extract_make_parents(path) != 0) return -1;
     (void)unlink(path);                          /* idempotent re-extract */
-    if (symlink(e->linkname, path) == 0) return 0;
 
-    /* Fallback where symlinks are unavailable (e.g. Windows without the
-     * privilege): copy the target file. The target is relative to the link's
-     * OWN directory; pass 1 already wrote it, so it is on disk. */
+    /* A real symlink is best where the platform allows it. HL_TAR_NO_SYMLINK
+     * skips the attempt so the Windows non-admin fallback (below) can be
+     * exercised on any host - the CI runners are elevated with Developer Mode
+     * on, where symlink() would otherwise succeed and hide the fallback. */
+    if (!getenv("HL_TAR_NO_SYMLINK") && symlink(e->linkname, path) == 0)
+        return 0;
+
+    /* Symlinks unavailable (Windows without SeCreateSymbolicLinkPrivilege and
+     * Developer Mode off). Materialize the link from its target. The target is
+     * the linkname resolved against the link's OWN directory; pass 1 already
+     * wrote it, and tar_safe_linkname confined it to the extraction root at
+     * parse time. */
     char target[PATH_MAX];
     char *last = strrchr(path, '/');
     int tn = last
@@ -280,6 +288,23 @@ static int extract_symlink_cb(const HlTarEntry *e, void *vctx)
                    (int)(last - path), path, e->linkname)
         : snprintf(target, sizeof(target), "%s/%s", c->dest, e->linkname);
     if (tn < 0 || (size_t)tn >= sizeof(target)) return -1;
+
+    /* The materialized source MUST be an existing REGULAR file inside the
+     * extraction root. A missing target is a DANGLING link in the (trimmed)
+     * bundle: FAIL rather than silently produce an incomplete toolchain. A
+     * non-regular target (directory / device / fifo) is likewise refused.
+     * (Containment is already guaranteed by tar_safe_linkname; this adds the
+     * verified-regular-target requirement.) */
+    struct stat st;
+    if (stat(target, &st) != 0 || !S_ISREG(st.st_mode))
+        return -1;
+
+    /* Prefer a hardlink for archive links: no data copy, and no privilege on
+     * Windows (CreateHardLink works for a non-elevated user). Fall back to a
+     * byte copy across filesystems or where hardlinks are unavailable. */
+    if (link(target, path) == 0)
+        return 0;
+    (void)unlink(path);   /* a failed link() may have left a stub */
     return extract_copy(target, path, e->mode ? e->mode : 0755);
 }
 
