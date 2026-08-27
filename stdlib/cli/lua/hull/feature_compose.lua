@@ -57,9 +57,21 @@ function M.extract_manifest(app_dir)
         -- top-level require failed with "module not found" and the manifest was
         -- silently lost. tool.set_app_dir is a no-op on a build that lacks it.
         if tool.set_app_dir then tool.set_app_dir(app_dir) end
+        -- Does the app INTEND a manifest? A failure to capture one is only a
+        -- real (fatal) extraction failure when the app declares app.manifest -
+        -- then we lost authoritative composition info and must not silently fall
+        -- back to defaults. A genuinely manifest-less app (app.get-only, or an
+        -- app.main CLI) whose top-level merely errors in the limited extraction
+        -- VM is NOT a composition failure: it builds with the safe defaults and
+        -- its own runtime error surfaces when it runs (prior behavior; the
+        -- e2e_build null-app case relies on this).
+        local intends_manifest =
+            (tool.read_file(lua_entry) or ""):find("app%.manifest%s*%(") ~= nil
         local chunk, load_err = tool.loadfile(lua_entry)
         if not chunk then
-            err = "could not load app.lua: " .. tostring(load_err)
+            if intends_manifest then
+                err = "could not load app.lua: " .. tostring(load_err)
+            end
         else
             local ok, run_err = pcall(chunk)
             -- Capture whatever app.manifest() declared, even if the chunk later
@@ -68,20 +80,24 @@ function M.extract_manifest(app_dir)
             -- entry - register(app), subfile top-level code that touches a
             -- capability the tool VM lacks - can legitimately throw during
             -- extraction without invalidating an already-declared manifest. Only
-            -- a failure that prevents DETERMINING the manifest (syntax error,
-            -- an unresolved require, or an error BEFORE app.manifest ran) is a
-            -- real extraction failure. This matches the JS side, which captures
-            -- the manifest at the app.manifest() call and tolerates a later
-            -- throw. (Aligns Lua/JS; avoids falsely failing a valid app.)
+            -- a failure that prevents DETERMINING an INTENDED manifest (syntax
+            -- error, an unresolved require, or an error BEFORE app.manifest ran)
+            -- is a real extraction failure. This matches the JS side, which
+            -- captures the manifest at the app.manifest() call and tolerates a
+            -- later throw. (Aligns Lua/JS; avoids falsely failing a valid app.)
             manifest = app.get_manifest()
-            if not ok and not manifest then
+            if not ok and not manifest and intends_manifest then
                 err = tostring(run_err)
             end
         end
     elseif file_exists(js_entry) then
+        local intends_manifest =
+            (tool.read_file(js_entry) or ""):find("app%.manifest%s*%(") ~= nil
         local ok, js_json_or_err = pcall(tool.extract_manifest_js, js_entry)
         if not ok then
-            err = tostring(js_json_or_err)
+            -- Same rule as the Lua branch: a load/import failure is fatal only
+            -- when the app declares app.manifest (intended composition info).
+            if intends_manifest then err = tostring(js_json_or_err) end
         elseif js_json_or_err then
             local decoded, decode_err = json.decode(js_json_or_err)
             if decoded then
