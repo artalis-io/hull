@@ -222,6 +222,75 @@ static JSModuleDef *hl_js_optional_stub(JSContext *ctx, const char *module_name)
     return m;
 }
 
+/* Manifest-extraction lenient stub (issue #114 / #426). Distinct from the
+ * optional-module stub above: that one exports a null the app deliberately
+ * branches on (`if (gpu) ...`), so it MUST stay null. This one stands in for a
+ * feature-module stdlib file that isn't in the transient extractor's base VFS
+ * (e.g. hull:db when SQLite rides a composed feature). Such a stdlib module may
+ * do capability work at import time - hull:attachment.js does
+ * `const db = dbModule.default();` at top level - which would throw against a
+ * null export and abort extraction (now fatal since #426's rejected-eval check).
+ * Export a PERMISSIVE self-returning callable proxy instead: every property read
+ * and every call yields the proxy again and never throws, so the stdlib module's
+ * top-level runs, app.manifest() is reached, and the authoritative manifest is
+ * captured. Bound only to feature-module imports during extraction, never to the
+ * manifest object itself, so it cannot corrupt the captured manifest. Symbol keys
+ * and `then` resolve to undefined so the value is not mistaken for a thenable or
+ * an iterable during extraction. Scoped to js->manifest_extract_lenient - never a
+ * real app load. */
+static int hl_js_lenient_stub_init(JSContext *ctx, JSModuleDef *m)
+{
+    static const char SRC[] =
+        "(function(){var x;var e=function(){return '';};"
+        "var h={get:function(t,p){"
+        "if(p===Symbol.toPrimitive)return e;"
+        "if(typeof p==='symbol')return undefined;"
+        "if(p==='then')return undefined;"
+        "if(p==='toString'||p==='valueOf')return e;"
+        "return x;},"
+        "apply:function(){return x;},"
+        "construct:function(){return x;}};"
+        "x=new Proxy(function(){},h);return x;})()";
+    JSValue permissive = JS_Eval(ctx, SRC, sizeof(SRC) - 1,
+                                 "<hull-lenient-stub>", JS_EVAL_TYPE_GLOBAL);
+    if (JS_IsException(permissive)) {
+        JS_FreeValue(ctx, permissive);
+        permissive = JS_NULL;   /* degrade to the old null export, never abort */
+    }
+
+    JSAtom nm = JS_GetModuleName(ctx, m);
+    const char *mn = JS_AtomToCString(ctx, nm);
+    JS_FreeAtom(ctx, nm);
+    if (!mn) {
+        JS_FreeValue(ctx, permissive);
+        return 0;
+    }
+    const char *seg = hl_js_module_last_seg(mn);
+    /* Set both the conventional last-segment export and `default`, so a named
+     * `import { db } from` and a `import db from` both bind the permissive value.
+     * JS_SetModuleExport consumes one reference per call - dup for the second. */
+    int seg_is_default = (strcmp(seg, "default") == 0);
+    if (seg_is_default) {
+        JS_SetModuleExport(ctx, m, "default", permissive);
+    } else {
+        JS_SetModuleExport(ctx, m, seg, JS_DupValue(ctx, permissive));
+        JS_SetModuleExport(ctx, m, "default", permissive);
+    }
+    JS_FreeCString(ctx, mn);
+    return 0;
+}
+
+static JSModuleDef *hl_js_lenient_stub(JSContext *ctx, const char *module_name)
+{
+    JSModuleDef *m = JS_NewCModule(ctx, module_name, hl_js_lenient_stub_init);
+    if (!m) return NULL;
+    const char *seg = hl_js_module_last_seg(module_name);
+    JS_AddModuleExport(ctx, m, seg);
+    if (strcmp(seg, "default") != 0)
+        JS_AddModuleExport(ctx, m, "default");
+    return m;
+}
+
 /*
  * Module loader. Handles:
  * 1. hull:* prefix → built-in modules (registered at init time)
@@ -317,7 +386,7 @@ static JSModuleDef *hl_js_module_loader(JSContext *ctx,
          * captured. Never set on a real app load, so undeclared imports there
          * still throw below. */
         if (js->manifest_extract_lenient)
-            return hl_js_optional_stub(ctx, module_name);
+            return hl_js_lenient_stub(ctx, module_name);
 
         /* "hull:something" that isn't a known native and isn't in the
          * VFS stdlib - almost always a typo. Probe the registry for a
