@@ -87,13 +87,11 @@ int hl_manifest_extract_js_from_file(const char *path,
     char  *copy     = NULL;
     size_t json_len = 0;
 
-    if (hl_js_load_app(js, path) != 0) {
-        if (out_err) *out_err = strdup_safe(
-            "failed to load app (syntax error, throw at top-level, "
-            "or unresolved import?)");
-        rc = -1;
-        goto cleanup;
-    }
+    /* Run the app; a top-level throw / rejected import now fails the load
+     * (hl_js_load_app observes the rejected module eval promise). Do NOT bail
+     * on that yet: app.manifest() runs synchronously before any throw, so the
+     * authoritative manifest may already be captured. */
+    int load_rc = hl_js_load_app(js, path);
 
     {
         JSContext *ctx = js->ctx;
@@ -101,12 +99,24 @@ int hl_manifest_extract_js_from_file(const char *path,
         JSValue manifest = JS_GetPropertyStr(ctx, global, "__hull_manifest");
         JS_FreeValue(ctx, global);
 
-        /* Treat exception, undefined, and null all as "no manifest
-         * declared" - leave *out_json NULL and return success. */
-        if (JS_IsException(manifest) || JS_IsUndefined(manifest) ||
-            JS_IsNull(manifest)) {
+        int have_manifest = !(JS_IsException(manifest) ||
+                              JS_IsUndefined(manifest) || JS_IsNull(manifest));
+
+        /* Capture-then-tolerate, parity with the Lua extractor: if app.manifest
+         * was called we HAVE the authoritative composition info and use it even
+         * though the module later threw. If NO manifest was captured, a load
+         * FAILURE (throw/unresolved import BEFORE app.manifest) is a real
+         * extraction failure - fatal, since extraction drives composition; a
+         * SUCCESSFUL run with no app.manifest() is a valid manifest-less app. */
+        if (!have_manifest) {
             JS_FreeValue(ctx, manifest);
-            goto cleanup;   /* rc stays 0, copy stays NULL */
+            if (load_rc != 0) {
+                if (out_err) *out_err = strdup_safe(
+                    "failed to load app (syntax error, throw at top-level, "
+                    "or unresolved import?)");
+                rc = -1;
+            }
+            goto cleanup;   /* rc stays 0 for a valid manifest-less app */
         }
 
         JSValue json = JS_JSONStringify(ctx, manifest, JS_UNDEFINED, JS_UNDEFINED);

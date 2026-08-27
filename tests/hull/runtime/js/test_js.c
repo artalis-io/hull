@@ -4776,4 +4776,90 @@ UTEST(js_runtime, app_get_allowed_before_registration_closed)
     cleanup_js();
 }
 
+/* ── Manifest-extraction loader-liveness / death tests ──
+ *
+ * These exercise hl_js_load_app on the EXTRACTION path (manifest_extract_lenient
+ * = 1, the mode `hull build`/`tool.extract_manifest_js` run in). They prove the
+ * loader TERMINATES and FAILS CLOSED against adversarial module evaluation - a
+ * runaway microtask, a never-resolving top-level await - and that the permissive
+ * lenient stub cannot wedge the loader by being mistaken for a thenable. A test
+ * merely RETURNING proves the bounded drain terminated (a regression to the
+ * unbounded drain would hang the whole suite). Run under `make debug` (ASan),
+ * these also assert balanced cleanup on every fail-closed path. */
+static int run_lenient_load(const char *src)
+{
+    char path[] = "/tmp/hull_js_liveXXXXXX";
+    int fd = mkstemp(path);
+    if (fd < 0) return -999;
+    size_t n = strlen(src);
+    ssize_t w = write(fd, src, n);
+    close(fd);
+    if (w != (ssize_t)n) { unlink(path); return -998; }
+
+    /* Bare init (no install_test_js_globals): matches the transient extractor's
+     * minimal global graph. hull:app still resolves via native-module
+     * registration in hl_js_init. The full-globals harness carries a larger
+     * object graph that independently trips QuickJS's teardown GC on a
+     * runtime that ran a microtask runaway. */
+    init_js_bare();
+    int rc = -997;
+    if (js_initialized) {
+        js.manifest_extract_lenient = 1;     /* the build/extraction mode */
+        rc = hl_js_load_app(&js, path);
+        js.manifest_extract_lenient = 0;
+    }
+    cleanup_js();
+    unlink(path);
+    return rc;
+}
+
+/* A never-resolving top-level await leaves the module-eval promise PENDING with
+ * no pending jobs. The extractor must fail closed, not silently treat a
+ * half-evaluated module as a clean load. */
+UTEST(js_extract_liveness, never_settling_await_is_fatal)
+{
+    const char *src =
+        "import { app } from 'hull:app';\n"
+        "await new Promise(() => {});\n"          /* never settles */
+        "app.manifest({ modules: [] });\n";       /* unreachable */
+    ASSERT_EQ(run_lenient_load(src), -1);
+}
+
+/* The endlessly-requeued-microtask case (a runaway that never settles) is
+ * covered end to end by tests/e2e_modular_resolution.sh, which asserts a real
+ * `hull build` of such an app TERMINATES (a wall-clock guard fails a hang) and
+ * fails closed with no binary. It is intentionally NOT a unit test here: any
+ * app that runs a microtask runaway and is then torn down trips a PRE-EXISTING
+ * QuickJS teardown-GC double-free on the churned promise graph (orthogonal to
+ * loader liveness - it fires even with zero jobs drained). A fresh single-shot
+ * `hull build` process is robustly stable against it (0/60 under load), but the
+ * shared multi-test unit-harness process is not, so pinning it here would be
+ * flaky. The bounded-drain + PENDING-fail path it would exercise is the same one
+ * never_settling_await_is_fatal already pins deterministically. */
+
+/* The permissive lenient stub (a missing hull:* under extraction) must be
+ * non-thenable: awaiting it settles immediately, so the module completes and the
+ * load succeeds. If the stub were a thenable that returned itself, `await` would
+ * assimilate it forever and the module would never settle - caught here as a -1
+ * (or, without the bounded drain, a hang). Expecting 0 pins the invariant. */
+UTEST(js_extract_liveness, lenient_stub_proxy_is_non_thenable)
+{
+    const char *src =
+        "import { app } from 'hull:app';\n"
+        "import zzz from 'hull:zzz_feature_absent';\n"  /* → lenient stub proxy */
+        "const _ = await zzz;\n"                         /* must not hang */
+        "app.manifest({ modules: [] });\n";
+    ASSERT_EQ(run_lenient_load(src), 0);
+}
+
+/* Control: a well-formed extraction load succeeds - the liveness guards do not
+ * false-positive a normal app. */
+UTEST(js_extract_liveness, valid_lenient_load_succeeds)
+{
+    const char *src =
+        "import { app } from 'hull:app';\n"
+        "app.manifest({ modules: [] });\n";
+    ASSERT_EQ(run_lenient_load(src), 0);
+}
+
 UTEST_MAIN();

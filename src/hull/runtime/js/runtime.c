@@ -222,6 +222,75 @@ static JSModuleDef *hl_js_optional_stub(JSContext *ctx, const char *module_name)
     return m;
 }
 
+/* Manifest-extraction lenient stub (issue #114 / #426). Distinct from the
+ * optional-module stub above: that one exports a null the app deliberately
+ * branches on (`if (gpu) ...`), so it MUST stay null. This one stands in for a
+ * feature-module stdlib file that isn't in the transient extractor's base VFS
+ * (e.g. hull:db when SQLite rides a composed feature). Such a stdlib module may
+ * do capability work at import time - hull:attachment.js does
+ * `const db = dbModule.default();` at top level - which would throw against a
+ * null export and abort extraction (now fatal since #426's rejected-eval check).
+ * Export a PERMISSIVE self-returning callable proxy instead: every property read
+ * and every call yields the proxy again and never throws, so the stdlib module's
+ * top-level runs, app.manifest() is reached, and the authoritative manifest is
+ * captured. Bound only to feature-module imports during extraction, never to the
+ * manifest object itself, so it cannot corrupt the captured manifest. Symbol keys
+ * and `then` resolve to undefined so the value is not mistaken for a thenable or
+ * an iterable during extraction. Scoped to js->manifest_extract_lenient - never a
+ * real app load. */
+static int hl_js_lenient_stub_init(JSContext *ctx, JSModuleDef *m)
+{
+    static const char SRC[] =
+        "(function(){var x;var e=function(){return '';};"
+        "var h={get:function(t,p){"
+        "if(p===Symbol.toPrimitive)return e;"
+        "if(typeof p==='symbol')return undefined;"
+        "if(p==='then')return undefined;"
+        "if(p==='toString'||p==='valueOf')return e;"
+        "return x;},"
+        "apply:function(){return x;},"
+        "construct:function(){return x;}};"
+        "x=new Proxy(function(){},h);return x;})()";
+    JSValue permissive = JS_Eval(ctx, SRC, sizeof(SRC) - 1,
+                                 "<hull-lenient-stub>", JS_EVAL_TYPE_GLOBAL);
+    if (JS_IsException(permissive)) {
+        JS_FreeValue(ctx, permissive);
+        permissive = JS_NULL;   /* degrade to the old null export, never abort */
+    }
+
+    JSAtom nm = JS_GetModuleName(ctx, m);
+    const char *mn = JS_AtomToCString(ctx, nm);
+    JS_FreeAtom(ctx, nm);
+    if (!mn) {
+        JS_FreeValue(ctx, permissive);
+        return 0;
+    }
+    const char *seg = hl_js_module_last_seg(mn);
+    /* Set both the conventional last-segment export and `default`, so a named
+     * `import { db } from` and a `import db from` both bind the permissive value.
+     * JS_SetModuleExport consumes one reference per call - dup for the second. */
+    int seg_is_default = (strcmp(seg, "default") == 0);
+    if (seg_is_default) {
+        JS_SetModuleExport(ctx, m, "default", permissive);
+    } else {
+        JS_SetModuleExport(ctx, m, seg, JS_DupValue(ctx, permissive));
+        JS_SetModuleExport(ctx, m, "default", permissive);
+    }
+    JS_FreeCString(ctx, mn);
+    return 0;
+}
+
+static JSModuleDef *hl_js_lenient_stub(JSContext *ctx, const char *module_name)
+{
+    JSModuleDef *m = JS_NewCModule(ctx, module_name, hl_js_lenient_stub_init);
+    if (!m) return NULL;
+    const char *seg = hl_js_module_last_seg(module_name);
+    JS_AddModuleExport(ctx, m, seg);
+    if (strcmp(seg, "default") != 0)
+        JS_AddModuleExport(ctx, m, "default");
+    return m;
+}
+
 /*
  * Module loader. Handles:
  * 1. hull:* prefix → built-in modules (registered at init time)
@@ -317,7 +386,7 @@ static JSModuleDef *hl_js_module_loader(JSContext *ctx,
          * captured. Never set on a real app load, so undeclared imports there
          * still throw below. */
         if (js->manifest_extract_lenient)
-            return hl_js_optional_stub(ctx, module_name);
+            return hl_js_lenient_stub(ctx, module_name);
 
         /* "hull:something" that isn't a known native and isn't in the
          * VFS stdlib - almost always a typo. Probe the registry for a
@@ -775,6 +844,100 @@ int hl_js_init(HlJS *js, const HlJSConfig *cfg)
     return 0;
 }
 
+/* Upper bound on module-evaluation jobs drained during manifest EXTRACTION.
+ * The extractor runs untrusted app + stdlib top-levels only to read
+ * app.manifest(); an adversarial or buggy app can schedule an unbounded
+ * microtask chain (e.g. a self-requeuing queueMicrotask, or Promise
+ * assimilation of a pathological thenable) that would spin the job drain
+ * forever and wedge `hull build`. The drain STOPS as soon as the module
+ * promise settles, so a legitimate app (which settles in a handful of jobs)
+ * never approaches this cap; it bounds only a genuine runaway that never
+ * settles. Kept modest so a runaway churns few promises before we bail - a
+ * large churn of short-lived promises stresses QuickJS's teardown GC. */
+#define HL_JS_EXTRACT_MAX_SETTLE_JOBS 65536u
+
+/* Settle an ES-module evaluation started with JS_EVAL_TYPE_MODULE |
+ * JS_EVAL_FLAG_ASYNC: `val` is the module's evaluation PROMISE. A module's
+ * top-level runs synchronously up to the first await, so app.manifest()/route
+ * registration have already executed - but a top-level throw (or a rejected /
+ * failed import) does NOT surface as a JS_Eval exception; it merely rejects this
+ * promise. Drain the job queue so the evaluation completes, then a REJECTED
+ * promise is a real load failure surfaced synchronously - parity with a
+ * compile-time exception and with the Lua loader (whose top-level errors are
+ * caught by pcall). Consumes `val`. Returns 0 on success, -1 on failure.
+ *
+ * During manifest extraction (js->manifest_extract_lenient) the drain is BOUNDED
+ * and a still-PENDING promise is ALSO a failure: an untrusted app must never be
+ * able to hang the builder with a runaway microtask or a never-resolving
+ * top-level await, and a half-evaluated (never-settled) module must never
+ * masquerade as a clean load that drives a build. Real app load keeps the
+ * unbounded drain and only fails on a REJECTED promise (its author owns any
+ * hang; there is no build to wedge), so runtime behavior is unchanged. */
+static int hl_js_settle_module(HlJS *js, JSValue val)
+{
+    if (JS_IsException(val)) {          /* synchronous compile / link error */
+        hl_js_dump_error(js);
+        return -1;
+    }
+
+    if (js->manifest_extract_lenient) {
+        JSContext *ctx1;
+        unsigned drained = 0;
+        int job_err = 0;
+        /* Drain jobs until the module promise SETTLES, the queue empties, a job
+         * throws, or the bound is hit. Checking the promise each iteration lets
+         * a legitimate module stop the instant its top-level completes - it
+         * never churns toward the cap - so the cap constrains only a runaway
+         * that never settles. */
+        while (drained < HL_JS_EXTRACT_MAX_SETTLE_JOBS) {
+            if (JS_IsObject(val) &&
+                JS_PromiseState(js->ctx, val) != JS_PROMISE_PENDING)
+                break;                              /* module settled - done */
+            int ret = JS_ExecutePendingJob(js->rt, &ctx1);
+            if (ret < 0) { job_err = 1; break; }    /* a job threw */
+            if (ret == 0) break;                    /* queue drained */
+            drained++;
+        }
+
+        int rc = 0;
+        if (job_err) {
+            hl_js_dump_error(js);
+            rc = -1;
+        } else if (JS_IsObject(val)) {
+            int st = JS_PromiseState(js->ctx, val);
+            if (st == JS_PROMISE_REJECTED) {
+                JSValue reason = JS_PromiseResult(js->ctx, val);
+                JS_Throw(js->ctx, reason);
+                hl_js_dump_error(js);
+                rc = -1;
+            } else if (st == JS_PROMISE_PENDING) {
+                /* Never settled: an unresolved top-level await or a microtask
+                 * chain that outran the job budget. Fail closed - a hung
+                 * extractor must not be mistaken for a successful load. */
+                log_error("[hull:c] module evaluation did not settle during "
+                          "manifest extraction (unresolved top-level await or "
+                          "runaway microtask)");
+                rc = -1;
+            }
+        }
+
+        JS_FreeValue(js->ctx, val);
+        return rc;
+    }
+
+    hl_js_run_jobs(js);                 /* run the deferred module evaluation */
+    int rc = 0;
+    if (JS_IsObject(val) &&
+        JS_PromiseState(js->ctx, val) == JS_PROMISE_REJECTED) {
+        JSValue reason = JS_PromiseResult(js->ctx, val);
+        JS_Throw(js->ctx, reason);      /* re-arm so dump_error prints it */
+        hl_js_dump_error(js);
+        rc = -1;
+    }
+    JS_FreeValue(js->ctx, val);
+    return rc;
+}
+
 int hl_js_load_app(HlJS *js, const char *filename)
 {
     if (!js || !js->ctx || !filename)
@@ -831,14 +994,11 @@ int hl_js_load_app(HlJS *js, const char *filename)
                 buf[e->len] = '\0';
 
                 JSValue val = JS_Eval(js->ctx, buf, e->len, filename,
-                                      JS_EVAL_TYPE_MODULE);
+                                      JS_EVAL_TYPE_MODULE | JS_EVAL_FLAG_ASYNC);
                 js->scratch->used = arena_saved;
 
-                if (JS_IsException(val)) {
-                    hl_js_dump_error(js);
+                if (hl_js_settle_module(js, val) != 0)
                     return -1;
-                }
-                JS_FreeValue(js->ctx, val);
                 sh_arena_reset(js->scratch);
                 return 0;
             }
@@ -885,18 +1045,17 @@ int hl_js_load_app(HlJS *js, const char *filename)
     }
     buf[nread] = '\0';
 
-    /* Evaluate as ES module */
+    /* Evaluate as ES module. ASYNC so a deferred top-level throw / rejected
+     * import is observable as a rejected eval promise (see hl_js_settle_module),
+     * not silently swallowed. */
     JSValue val = JS_Eval(js->ctx, buf, nread, filename,
-                          JS_EVAL_TYPE_MODULE);
+                          JS_EVAL_TYPE_MODULE | JS_EVAL_FLAG_ASYNC);
 
     /* Reclaim file buffer - QuickJS owns the bytecode now */
     js->scratch->used = arena_saved;
 
-    if (JS_IsException(val)) {
-        hl_js_dump_error(js);
+    if (hl_js_settle_module(js, val) != 0)
         return -1;
-    }
-    JS_FreeValue(js->ctx, val);
 
     /* Reset scratch arena - startup module loads no longer needed */
     sh_arena_reset(js->scratch);

@@ -159,6 +159,95 @@ LUA
 [ -f "$lateok/out" ] || fail "late-throw app produced no binary"
 pass "manifest-then-error app still builds (manifest is authoritative)"
 
+# ── JS extraction fatality PARITY with Lua ──
+# A JS module top-level throw is deferred (rejected eval promise); the extractor
+# must still treat it as a real failure. Pre-manifest throw -> fatal (no binary);
+# manifest-then-throw -> builds (the synchronously-captured manifest is used).
+jpre="$WORK/js_pre"; mkdir -p "$jpre"
+cat > "$jpre/app.js" <<'JS'
+import { app } from "hull:app";
+throw new Error("pre-manifest boom");
+app.manifest({ modules: [] });
+JS
+if "$HULL" build "$jpre" -o "$jpre/out" --no-verify-platform >/dev/null 2>&1; then
+    fail "JS pre-manifest throw should fail extraction (parity with Lua)"
+fi
+[ -f "$jpre/out" ] && fail "JS pre-manifest throw produced a binary"
+pass "JS pre-manifest throw is fatal (no binary)"
+
+jpost="$WORK/js_post"; mkdir -p "$jpost"
+cat > "$jpost/app.js" <<'JS'
+import { app } from "hull:app";
+app.manifest({ modules: [] });
+throw new Error("post-manifest boom");
+JS
+"$HULL" build "$jpost" -o "$jpost/out" --no-verify-platform >/dev/null 2>&1 || \
+    fail "JS manifest-then-throw should still build (capture-then-tolerate)"
+[ -f "$jpost/out" ] || fail "JS manifest-then-throw produced no binary"
+pass "JS manifest-then-throw still builds (manifest is authoritative)"
+
+# ── JS extraction loader-liveness (adversarial termination) ──
+# The extractor runs untrusted app top-levels only to read app.manifest(). It
+# must always TERMINATE and fail closed against a runaway microtask or a
+# never-resolving top-level await - never hang `hull build`. Each build runs
+# under a hard wall-clock guard: a timeout is a FAIL (the bounded drain / pending
+# check regressed to a hang), not a pass.
+#
+# build_guarded DIR SECONDS -> sets BG_TIMEDOUT (1 if killed) and BG_RC.
+build_guarded() {
+    d="$1"; secs="$2"
+    "$HULL" build "$d" -o "$d/out" --no-verify-platform >/dev/null 2>&1 &
+    bp=$!
+    n=0
+    while kill -0 "$bp" 2>/dev/null; do
+        n=$((n + 1))
+        if [ "$n" -ge "$secs" ]; then
+            kill -9 "$bp" 2>/dev/null || true
+            wait "$bp" 2>/dev/null || true
+            BG_TIMEDOUT=1; BG_RC=137; return 0
+        fi
+        sleep 1
+    done
+    BG_TIMEDOUT=0
+    if wait "$bp"; then BG_RC=0; else BG_RC=$?; fi
+}
+
+# (a) Never-resolving top-level await BEFORE app.manifest -> no manifest, module
+#     never settles -> fatal extraction, no binary. Must not hang.
+jawait="$WORK/js_await"; mkdir -p "$jawait"
+cat > "$jawait/app.js" <<'JS'
+import { app } from "hull:app";
+await new Promise(() => {});          // never settles
+app.manifest({ modules: [] });         // unreachable
+JS
+build_guarded "$jawait" 60
+[ "$BG_TIMEDOUT" = 0 ] || fail "never-settling top-level await HUNG the extractor (bounded/pending guard regressed)"
+[ "$BG_RC" -ne 0 ] || fail "never-settling top-level await should fail extraction"
+[ -f "$jawait/out" ] && fail "never-settling top-level await produced a binary"
+pass "JS never-settling top-level await is fatal, terminates (no binary)"
+
+# (b) Endlessly requeued microtask + top-level await -> bounded drain must
+#     terminate; still-pending module -> fatal, no binary. Must not hang. The
+#     rescheduler is GLOBAL-rooted rather than a module-local self-referential
+#     closure: the latter forms a garbage cycle that trips a pre-existing QuickJS
+#     teardown-GC double-free (orthogonal to loader liveness), which would make
+#     this build flaky. The global-rooted form is a genuine endless-microtask
+#     queue exercising the same bounded-drain + PENDING-fail path.
+jspin="$WORK/js_spin"; mkdir -p "$jspin"
+cat > "$jspin/app.js" <<'JS'
+import { app } from "hull:app";
+const p = new Promise(() => {});                 // never resolves
+globalThis.__spin = function(){ Promise.resolve().then(globalThis.__spin); };
+globalThis.__spin();                              // endlessly requeues a microtask
+await p;
+app.manifest({ modules: [] });                    // unreachable
+JS
+build_guarded "$jspin" 60
+[ "$BG_TIMEDOUT" = 0 ] || fail "runaway microtask HUNG the extractor (bounded drain regressed)"
+[ "$BG_RC" -ne 0 ] || fail "runaway microtask should fail extraction"
+[ -f "$jspin/out" ] && fail "runaway microtask produced a binary"
+pass "JS runaway microtask terminates + is fatal (no binary)"
+
 # ── Security boundary 1: module loading is symlink-contained to the app root ──
 # In-root symlinks resolve; a symlink whose target escapes the root cannot read
 # the host object (the descriptor-relative virtual-root resolver clamps it),
