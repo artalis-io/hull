@@ -1,0 +1,79 @@
+name: Release acceptance (Windows, read-only)
+
+# The Windows stage of the release-acceptance run (docs/release_acceptance.md):
+# the real Windows behavior that cannot be proven on other hosts - a genuinely
+# non-admin, Developer-Mode-off environment, a real self-update via the
+# maintainer-prepopulated staging mirror, and an ACL-induced mid-swap rollback.
+#
+# READ-ONLY with respect to releases: it downloads the previous release's Windows
+# APE and drives `hull update --repo=<staging>` against the maintainer-populated
+# staging repos. It never creates, modifies, or deletes a tag, release, or asset.
+#
+# All the logic lives in checked-in PowerShell (tests/acceptance/windows/*.ps1);
+# this workflow only wires inputs and uploads the evidence report. Every
+# prerequisite is fail-closed: the run fails unless the child token is proven
+# non-admin, Developer Mode is disabled, control symlink creation is denied, and
+# the ACL test reaches the mid-swap install failure (not an earlier stage).
+
+on:
+  workflow_dispatch:
+    inputs:
+      official_repo:
+        description: Official repository (for the previous-release APE)
+        required: true
+        default: artalis-io/hull
+      prev_tag:
+        description: Previous release tag (the starting APE)
+        required: true
+        default: v0.13.0
+      prev_version:
+        description: Version string the previous APE reports
+        required: true
+        default: 0.13.0
+      staging_rc_repo:
+        description: Staging repo whose latest mirrors the RC (ORG/NAME)
+        required: true
+      expect_version:
+        description: Version string the candidate must report after update
+        required: true
+        default: 0.14.0-rc1
+      staging_prev_repo:
+        description: Staging repo whose latest mirrors the previous release (optional; blank = skip downgrade)
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+jobs:
+  windows-acceptance:
+    name: Windows acceptance (non-admin, self-update, ACL rollback)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+
+      - name: Run Windows acceptance as a standard user
+        shell: pwsh
+        run: |
+          Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force
+          $ev = Join-Path $env:RUNNER_TEMP 'windows-acceptance-evidence.md'
+          & tests/acceptance/windows/run.ps1 `
+            -OfficialRepo '${{ inputs.official_repo }}' `
+            -PrevTag '${{ inputs.prev_tag }}' `
+            -PrevVersion '${{ inputs.prev_version }}' `
+            -RcRepo '${{ inputs.staging_rc_repo }}' `
+            -ExpectVersion '${{ inputs.expect_version }}' `
+            -PrevRepo '${{ inputs.staging_prev_repo }}' `
+            -Evidence $ev `
+            -WorkDir (Join-Path $env:RUNNER_TEMP 'wacc')
+          $code = $LASTEXITCODE
+          Get-Content $ev | ForEach-Object { Write-Host $_ }
+          Copy-Item $ev "$env:GITHUB_STEP_SUMMARY" -Force
+          if ($code -ne 0) { throw "Windows acceptance FAILED (see evidence report)" }
+
+      - name: Upload evidence report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        with:
+          name: windows-acceptance-evidence
+          path: ${{ runner.temp }}/windows-acceptance-evidence.md
