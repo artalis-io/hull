@@ -775,6 +775,34 @@ int hl_js_init(HlJS *js, const HlJSConfig *cfg)
     return 0;
 }
 
+/* Settle an ES-module evaluation started with JS_EVAL_TYPE_MODULE |
+ * JS_EVAL_FLAG_ASYNC: `val` is the module's evaluation PROMISE. A module's
+ * top-level runs synchronously up to the first await, so app.manifest()/route
+ * registration have already executed - but a top-level throw (or a rejected /
+ * failed import) does NOT surface as a JS_Eval exception; it merely rejects this
+ * promise. Drain the job queue so the evaluation completes, then a REJECTED
+ * promise is a real load failure surfaced synchronously - parity with a
+ * compile-time exception and with the Lua loader (whose top-level errors are
+ * caught by pcall). Consumes `val`. Returns 0 on success, -1 on failure. */
+static int hl_js_settle_module(HlJS *js, JSValue val)
+{
+    if (JS_IsException(val)) {          /* synchronous compile / link error */
+        hl_js_dump_error(js);
+        return -1;
+    }
+    hl_js_run_jobs(js);                 /* run the deferred module evaluation */
+    int rc = 0;
+    if (JS_IsObject(val) &&
+        JS_PromiseState(js->ctx, val) == JS_PROMISE_REJECTED) {
+        JSValue reason = JS_PromiseResult(js->ctx, val);
+        JS_Throw(js->ctx, reason);      /* re-arm so dump_error prints it */
+        hl_js_dump_error(js);
+        rc = -1;
+    }
+    JS_FreeValue(js->ctx, val);
+    return rc;
+}
+
 int hl_js_load_app(HlJS *js, const char *filename)
 {
     if (!js || !js->ctx || !filename)
@@ -831,14 +859,11 @@ int hl_js_load_app(HlJS *js, const char *filename)
                 buf[e->len] = '\0';
 
                 JSValue val = JS_Eval(js->ctx, buf, e->len, filename,
-                                      JS_EVAL_TYPE_MODULE);
+                                      JS_EVAL_TYPE_MODULE | JS_EVAL_FLAG_ASYNC);
                 js->scratch->used = arena_saved;
 
-                if (JS_IsException(val)) {
-                    hl_js_dump_error(js);
+                if (hl_js_settle_module(js, val) != 0)
                     return -1;
-                }
-                JS_FreeValue(js->ctx, val);
                 sh_arena_reset(js->scratch);
                 return 0;
             }
@@ -885,18 +910,17 @@ int hl_js_load_app(HlJS *js, const char *filename)
     }
     buf[nread] = '\0';
 
-    /* Evaluate as ES module */
+    /* Evaluate as ES module. ASYNC so a deferred top-level throw / rejected
+     * import is observable as a rejected eval promise (see hl_js_settle_module),
+     * not silently swallowed. */
     JSValue val = JS_Eval(js->ctx, buf, nread, filename,
-                          JS_EVAL_TYPE_MODULE);
+                          JS_EVAL_TYPE_MODULE | JS_EVAL_FLAG_ASYNC);
 
     /* Reclaim file buffer - QuickJS owns the bytecode now */
     js->scratch->used = arena_saved;
 
-    if (JS_IsException(val)) {
-        hl_js_dump_error(js);
+    if (hl_js_settle_module(js, val) != 0)
         return -1;
-    }
-    JS_FreeValue(js->ctx, val);
 
     /* Reset scratch arena - startup module loads no longer needed */
     sh_arena_reset(js->scratch);

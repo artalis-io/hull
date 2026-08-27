@@ -159,6 +159,33 @@ LUA
 [ -f "$lateok/out" ] || fail "late-throw app produced no binary"
 pass "manifest-then-error app still builds (manifest is authoritative)"
 
+# ── JS extraction fatality PARITY with Lua ──
+# A JS module top-level throw is deferred (rejected eval promise); the extractor
+# must still treat it as a real failure. Pre-manifest throw -> fatal (no binary);
+# manifest-then-throw -> builds (the synchronously-captured manifest is used).
+jpre="$WORK/js_pre"; mkdir -p "$jpre"
+cat > "$jpre/app.js" <<'JS'
+import { app } from "hull:app";
+throw new Error("pre-manifest boom");
+app.manifest({ modules: [] });
+JS
+if "$HULL" build "$jpre" -o "$jpre/out" --no-verify-platform >/dev/null 2>&1; then
+    fail "JS pre-manifest throw should fail extraction (parity with Lua)"
+fi
+[ -f "$jpre/out" ] && fail "JS pre-manifest throw produced a binary"
+pass "JS pre-manifest throw is fatal (no binary)"
+
+jpost="$WORK/js_post"; mkdir -p "$jpost"
+cat > "$jpost/app.js" <<'JS'
+import { app } from "hull:app";
+app.manifest({ modules: [] });
+throw new Error("post-manifest boom");
+JS
+"$HULL" build "$jpost" -o "$jpost/out" --no-verify-platform >/dev/null 2>&1 || \
+    fail "JS manifest-then-throw should still build (capture-then-tolerate)"
+[ -f "$jpost/out" ] || fail "JS manifest-then-throw produced no binary"
+pass "JS manifest-then-throw still builds (manifest is authoritative)"
+
 # ── Security boundary 1: module loading is symlink-contained to the app root ──
 # In-root symlinks resolve; a symlink whose target escapes the root cannot read
 # the host object (the descriptor-relative virtual-root resolver clamps it),
