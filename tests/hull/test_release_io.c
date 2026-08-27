@@ -287,4 +287,145 @@ UTEST(atomic_write, refuses_unwritable_parent) {
                                          "x", 1, 0644), -1);
 }
 
+/* ── self_replace: self-update-safe replace incl. Windows deferred swap ── */
+
+static int seed(const char *path, const char *s)
+{
+    FILE *f = fopen(path, "w");
+    if (!f) return -1;
+    fputs(s, f);
+    return fclose(f);
+}
+
+static int first_bytes(const char *path, char *buf, size_t n)
+{
+    FILE *f = fopen(path, "rb");
+    if (!f) return -1;
+    size_t r = fread(buf, 1, n - 1, f);
+    buf[r] = '\0';
+    fclose(f);
+    return 0;
+}
+
+/* 1 if a `.new` or `.old` sidecar was left behind next to @p tmp. */
+static int has_sidecars(const char *tmp)
+{
+    char side[PATH_MAX];
+    snprintf(side, sizeof(side), "%s.new", tmp);
+    if (access(side, F_OK) == 0) return 1;
+    snprintf(side, sizeof(side), "%s.old", tmp);
+    if (access(side, F_OK) == 0) return 1;
+    return 0;
+}
+
+UTEST(self_replace, atomic_path_replaces) {
+    char tmp[PATH_MAX];
+    snprintf(tmp, sizeof(tmp), "/tmp/hull-sr-%d", getpid());
+    unlink(tmp);
+    ASSERT_EQ(seed(tmp, "OLD-BINARY"), 0);
+
+    const char *nw = "NEW-BINARY-BYTES";
+    ASSERT_EQ(hl_release_io_self_replace(tmp, nw, strlen(nw), 0755), 0);
+
+    char buf[64];
+    ASSERT_EQ(first_bytes(tmp, buf, sizeof(buf)), 0);
+    ASSERT_STREQ(buf, nw);
+    ASSERT_EQ(has_sidecars(tmp), 0);
+    unlink(tmp);
+}
+
+UTEST(self_replace, deferred_swap_replaces) {
+    char tmp[PATH_MAX];
+    snprintf(tmp, sizeof(tmp), "/tmp/hull-sr-def-%d", getpid());
+    unlink(tmp);
+    ASSERT_EQ(seed(tmp, "OLD"), 0);
+
+    /* Force the Windows-style deferred swap on POSIX. */
+    setenv("HULL_FORCE_DEFERRED_SWAP", "1", 1);
+    const char *nw = "NEW-VIA-DEFERRED-SWAP";
+    int rc = hl_release_io_self_replace(tmp, nw, strlen(nw), 0755);
+    unsetenv("HULL_FORCE_DEFERRED_SWAP");
+
+    ASSERT_EQ(rc, 0);
+    char buf[64];
+    ASSERT_EQ(first_bytes(tmp, buf, sizeof(buf)), 0);
+    ASSERT_STREQ(buf, nw);
+    /* On POSIX the aside copy unlinks immediately; no sidecars remain. */
+    ASSERT_EQ(has_sidecars(tmp), 0);
+    unlink(tmp);
+}
+
+UTEST(self_replace, deferred_swap_rolls_back_on_failure) {
+    char tmp[PATH_MAX];
+    snprintf(tmp, sizeof(tmp), "/tmp/hull-sr-rb-%d", getpid());
+    unlink(tmp);
+    ASSERT_EQ(seed(tmp, "ORIGINAL-BINARY"), 0);
+
+    /* Force the deferred swap AND simulate the install step failing mid-swap:
+     * the original must be rolled back from the aside copy. */
+    setenv("HULL_FORCE_DEFERRED_SWAP", "1", 1);
+    setenv("HULL_TEST_SWAP_FAIL", "1", 1);
+    int rc = hl_release_io_self_replace(tmp, "SHOULD-NOT-LAND", 15, 0755);
+    unsetenv("HULL_TEST_SWAP_FAIL");
+    unsetenv("HULL_FORCE_DEFERRED_SWAP");
+
+    ASSERT_EQ(rc, -1);
+    /* Original intact - a failed update never leaves hull missing. */
+    char buf[64];
+    ASSERT_EQ(first_bytes(tmp, buf, sizeof(buf)), 0);
+    ASSERT_STREQ(buf, "ORIGINAL-BINARY");
+    ASSERT_EQ(has_sidecars(tmp), 0);
+    unlink(tmp);
+}
+
+UTEST(self_replace, path_with_spaces) {
+    /* A running hull at a path with spaces (the reporter's Windows scenario). */
+    char dir[PATH_MAX];
+    snprintf(dir, sizeof(dir), "/tmp/hull sr dir-%d", getpid());
+    mkdir(dir, 0755);
+    char tmp[PATH_MAX];
+    snprintf(tmp, sizeof(tmp), "%s/my hull.exe", dir);
+    unlink(tmp);
+    ASSERT_EQ(seed(tmp, "OLD"), 0);
+
+    setenv("HULL_FORCE_DEFERRED_SWAP", "1", 1);
+    const char *nw = "NEW-WITH-SPACES";
+    int rc = hl_release_io_self_replace(tmp, nw, strlen(nw), 0755);
+    unsetenv("HULL_FORCE_DEFERRED_SWAP");
+
+    ASSERT_EQ(rc, 0);
+    char buf[64];
+    ASSERT_EQ(first_bytes(tmp, buf, sizeof(buf)), 0);
+    ASSERT_STREQ(buf, nw);
+    ASSERT_EQ(has_sidecars(tmp), 0);
+    unlink(tmp);
+    rmdir(dir);
+}
+
+UTEST(self_replace, cleanup_removes_stale_old) {
+    /* cleanup resolves the running binary (this test exe) and removes its
+     * `<self>.old`. Plant one next to the test exe and assert it's swept. */
+    char self[PATH_MAX];
+    if (hl_release_io_self_path(self, sizeof(self)) != 0)
+        return;   /* no self-path on this platform (cosmo) - skip */
+    char oldp[PATH_MAX + 8];
+    snprintf(oldp, sizeof(oldp), "%s.old", self);
+    if (seed(oldp, "leftover") != 0)
+        return;   /* dir not writable - skip rather than fail spuriously */
+    ASSERT_EQ(access(oldp, F_OK), 0);
+
+    setenv("HULL_FORCE_DEFERRED_SWAP", "1", 1);   /* enable the sweep on POSIX */
+    hl_release_io_cleanup_stale_self(NULL);
+    unsetenv("HULL_FORCE_DEFERRED_SWAP");
+
+    ASSERT_EQ(access(oldp, F_OK), -1);            /* .old swept */
+    ASSERT_EQ(access(self, F_OK), 0);             /* self untouched */
+}
+
+UTEST(self_replace, null_args_rejected) {
+    ASSERT_EQ(hl_release_io_self_replace(NULL, "x", 1, 0755), -1);
+    ASSERT_EQ(hl_release_io_self_replace("/tmp/x", NULL, 4, 0755), -1);
+    hl_release_io_cleanup_stale_self(NULL);   /* must not crash */
+}
+
 UTEST_MAIN()
