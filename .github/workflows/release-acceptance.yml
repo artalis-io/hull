@@ -1,9 +1,10 @@
 name: Release acceptance (automated, read-only)
 
-# Phase 3a of the release-acceptance run (docs/release_acceptance.md). Verifies a
-# published release candidate and the maintainer-prepopulated staging mirror(s)
-# WITHOUT mutating any release, and produces an acceptance report the Windows
-# job (Phase 3b) consumes. This workflow NEVER creates, modifies, or deletes a
+# The automated, read-only stage of the release-acceptance run
+# (docs/release_acceptance.md). Verifies a published release candidate and the
+# maintainer-prepopulated staging mirror(s) WITHOUT mutating any release, and
+# produces an acceptance report the Windows acceptance job consumes. This
+# workflow NEVER creates, modifies, or deletes a
 # tag, release, or asset, and never alters "latest": it only reads and verifies.
 #
 # Prerequisite (a manual, auditable maintainer step - NOT done here):
@@ -194,7 +195,7 @@ jobs:
         run: |
           {
             echo
-            echo "_Automated read-only phase complete. Windows acceptance (Phase 3b)"
+            echo "_Automated read-only stage complete. The Windows acceptance job"
             echo "runs against \`${{ inputs.staging_rc_repo }}\` (upgrade) and the previous"
             echo "staging repo (downgrade)._"
           } >> acceptance-report.md

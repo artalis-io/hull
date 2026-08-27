@@ -3,10 +3,10 @@
 The acceptance run gates a release candidate before it is promoted to a final
 release. It has two phases, each a checked-in CI workflow:
 
-- **Phase 3a - automated, read-only** (`.github/workflows/release-acceptance.yml`):
+- **Automated, read-only stage** (`.github/workflows/release-acceptance.yml`):
   verifies the published RC and the maintainer-prepopulated staging mirror(s),
   and produces an acceptance report. It never mutates a release.
-- **Phase 3b - Windows acceptance** (a `windows-latest` job, added separately):
+- **Windows acceptance stage** (a `windows-latest` job, added separately):
   runs the real Windows behavior that cannot be proven on other hosts -
   non-admin cosmocc install, a real self-update, and ACL-induced rollback.
 
@@ -43,7 +43,7 @@ stable `/releases/latest` without mutating release state during the run:
 
 ## Fail-closed verification
 
-Phase 3a fails unless **all** hold (per repo checked):
+The automated read-only stage fails unless **all** hold (per repo checked):
 
 - every mirrored asset exists;
 - each staging asset's SHA-256 **exactly** matches the official asset;
@@ -57,7 +57,7 @@ It also validates the SBOM (well-formed, core components present) and reports th
 delta vs the previous release, runs the `install.sh` dry-run and the signed-tool
 release smoke, and confirms the RC commit's reproducible-build checks are green.
 
-## Running Phase 3a
+## Running the automated read-only stage
 
 ```
 gh workflow run "Release acceptance (automated, read-only)" \
