@@ -32,17 +32,10 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 
-/* ── Helper: retrieve HlLua from Lua registry ────────────────────── */
-/* Non-static: shared with bindings_response.c (declared in internal.h). */
-
-HlLua *get_hl_lua_from_L(lua_State *L)
-{
-    lua_getfield(L, LUA_REGISTRYINDEX, "__hull_lua");
-    HlLua *hlua = lua_isuserdata(L, -1)
-                  ? (HlLua *)lua_touserdata(L, -1) : NULL;
-    lua_pop(L, 1);
-    return hlua;
-}
+/* get_hl_lua_from_L moved to runtime.c (always linked): it is a general
+ * lua_State -> HlLua accessor with no HTTP dependency, and mod_tool.c (built in
+ * every flavor, including pure-compute) now references it, so it must not live
+ * in these HTTP-gated web bindings. Declared in internal.h. */
 
 /* ── Request object ─────────────────────────────────────────────────── */
 

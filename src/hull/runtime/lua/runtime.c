@@ -141,6 +141,20 @@ static int hl_lua_print(lua_State *L)
 
 /* ── Public API ─────────────────────────────────────────────────────── */
 
+/* General lua_State -> HlLua accessor (registry "__hull_lua", set in
+ * hl_lua_init below). Lives here - always linked in every flavor - because
+ * consumers outside the HTTP web bindings (mod_tool.c's tool.set_app_dir) need
+ * it; it previously sat in the HTTP-gated bindings.c and broke the pure-compute
+ * link. Declared in internal.h. */
+HlLua *get_hl_lua_from_L(lua_State *L)
+{
+    lua_getfield(L, LUA_REGISTRYINDEX, "__hull_lua");
+    HlLua *hlua = lua_isuserdata(L, -1)
+                  ? (HlLua *)lua_touserdata(L, -1) : NULL;
+    lua_pop(L, 1);
+    return hlua;
+}
+
 int hl_lua_init(HlLua *lua, const HlLuaConfig *cfg)
 {
     if (!lua || !cfg)
