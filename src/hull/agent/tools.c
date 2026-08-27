@@ -64,16 +64,17 @@ int hl_agent_tools(ShJsonBuf *out)
 
         /* installed: is there an executable at the canonical install
          * location? We don't fall back to PATH here - the install
-         * state is specifically about hull-managed installs. */
-        char path[HL_AGENT_PATH_MAX];
-        int has_path = hl_tools_install_path(t->name, path, sizeof(path)) == 0;
-        struct stat st;
-        int installed = has_path && stat(path, &st) == 0 && S_ISREG(st.st_mode);
-
-        sh_json_write_kv_bool(&w, "installed", installed != 0);
-        if (installed) {
-            sh_json_write_kv_string(&w, "path", path);
-            sh_json_write_kv_int(&w, "size_bytes", (int64_t)st.st_size);
+         * state is specifically about hull-managed installs. Via the shared
+         * hl_tools_status so a BUNDLE tool (cosmocc/zig/musl-floor, which
+         * install as a DIRECTORY, not a single regular file) is detected and
+         * sized correctly - the old S_ISREG-only check reported every bundle as
+         * not-installed with size 0. */
+        HlToolStatus ts;
+        hl_tools_status(t->name, NULL, &ts);
+        sh_json_write_kv_bool(&w, "installed", ts.managed != 0);
+        if (ts.managed) {
+            sh_json_write_kv_string(&w, "path", ts.install_path);
+            sh_json_write_kv_int(&w, "size_bytes", (int64_t)ts.size_bytes);
         } else {
             sh_json_write_kv_null(&w, "path");
         }
@@ -86,11 +87,11 @@ int hl_agent_tools(ShJsonBuf *out)
 
         /* Concrete action for the agent: install / refresh / build
          * from source, depending on state and availability. */
-        if (!installed && available) {
+        if (!ts.managed && available) {
             char hint[128];
             snprintf(hint, sizeof(hint), "hull tools install %s", t->name);
             sh_json_write_kv_string(&w, "install_hint", hint);
-        } else if (!installed && !available) {
+        } else if (!ts.managed && !available) {
             sh_json_write_kv_string(&w, "install_hint",
                 "no signed binary published for this platform");
         }

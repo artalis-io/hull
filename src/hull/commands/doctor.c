@@ -130,13 +130,24 @@ static int find_in_path(const char *name, char *out, size_t out_sz)
     return 0;
 }
 
-static void discover_compilers(CompilerInfo *ci, int count)
+static void discover_compilers(CompilerInfo *ci, int count, const char *hull_exe)
 {
     for (int i = 0; i < count; i++)
         ci[i].path[0] = '\0';
 
-    for (int i = 0; i < count; i++)
+    for (int i = 0; i < count; i++) {
         find_in_path(ci[i].name, ci[i].path, sizeof(ci[i].path));
+        /* cosmocc is a hull-managed TOOL, not typically on PATH: `hull tools
+         * install cosmocc` extracts it to ~/.hull/tools/cosmocc/bin/cosmocc,
+         * which is what `hull build` resolves via the compiler driver. Consult
+         * the same shared resolver so doctor agrees with build (a PATH-only
+         * probe would report a hull-installed cosmocc as missing). */
+        if (!ci[i].path[0] && strcmp(ci[i].name, "cosmocc") == 0) {
+            HlToolStatus cs;
+            if (hl_tools_status("cosmocc", hull_exe, &cs) == 0 && cs.resolved)
+                snprintf(ci[i].path, sizeof(ci[i].path), "%s", cs.path);
+        }
+    }
 }
 
 /* ── Platform embedding detection ──────────────────────────────── */
@@ -191,28 +202,6 @@ typedef struct {
     int   gpu_enabled;           /* HL_ENABLE_GPU */
 } ComputeInfo;
 
-/* Look for wamrc next to the running hull binary as well as in PATH.
- * Many devs run `make wamrc` which produces build/wamrc next to build/hull. */
-static int find_sibling_executable(const char *self_path, const char *name,
-                                   char *out, size_t out_sz)
-{
-    if (!self_path || !name || !out || out_sz == 0) return 0;
-    /* Strip the basename from self_path. */
-    char dir[PATH_MAX];
-    snprintf(dir, sizeof(dir), "%s", self_path);
-    char *slash = strrchr(dir, '/');
-    if (!slash) return 0;
-    *slash = '\0';
-    char candidate[PATH_MAX];
-    int n = snprintf(candidate, sizeof(candidate), "%s/%s", dir, name);
-    if (n <= 0 || (size_t)n >= sizeof(candidate)) return 0;
-    if (access(candidate, X_OK) == 0) {
-        snprintf(out, out_sz, "%s", candidate);
-        return 1;
-    }
-    return 0;
-}
-
 static void detect_compute(ComputeInfo *info, const char *self_path)
 {
     memset(info, 0, sizeof(*info));
@@ -229,30 +218,18 @@ static void detect_compute(ComputeInfo *info, const char *self_path)
     info->gpu_enabled = 0;
 #endif
 
-    /* wamrc: consult the shared `hl_tools_lookup_path` so we follow the
-     * same order as the build system (~/.hull/tools first, then
-     * dirname(hull), then PATH). Fall back to the historical
-     * sibling-to-hull / PATH probes if the canonical helper returns
-     * nothing, so `./build/wamrc` is still discoverable in source-tree
-     * development. */
-    if (hl_tools_lookup_path("wamrc", self_path,
-                             info->wamrc_path, sizeof(info->wamrc_path)) != 0) {
-        if (!find_sibling_executable(self_path, "wamrc",
-                                     info->wamrc_path,
-                                     sizeof(info->wamrc_path)))
-            find_in_path("wamrc", info->wamrc_path, sizeof(info->wamrc_path));
-    }
-    /* Flag whether the discovered binary is under ~/.hull/tools so the
-     * renderer can produce the right hint. */
-    if (info->wamrc_path[0]) {
-        const char *home = getenv("HOME");
-        if (home && *home) {
-            char prefix[PATH_MAX];
-            int pn = snprintf(prefix, sizeof(prefix), "%s/.hull/tools/", home);
-            if (pn > 0 && (size_t)pn < sizeof(prefix) &&
-                strncmp(info->wamrc_path, prefix, (size_t)pn) == 0) {
-                info->wamrc_managed = 1;
-            }
+    /* wamrc: the shared `hl_tools_status` (built on `hl_tools_lookup_path`) is
+     * the SINGLE resolver `hull tools list` / `hull agent tools` / `hull build`
+     * also use - same order (~/.hull/tools → beside hull → PATH), same
+     * managed-install classification. The `dirname(hull)/wamrc` step covers the
+     * source-tree `./build/wamrc` (it sits beside `./build/hull`); the PATH step
+     * covers a system install. */
+    {
+        HlToolStatus ws;
+        hl_tools_status("wamrc", self_path, &ws);
+        if (ws.resolved) {
+            snprintf(info->wamrc_path, sizeof(info->wamrc_path), "%s", ws.path);
+            info->wamrc_managed = ws.managed;
         }
     }
 
@@ -720,7 +697,7 @@ void hl_doctor_collect_json(FILE *f)
         { "clang",   {0} },
         { "cosmocc", {0} },
     };
-    discover_compilers(ci, MAX_COMPILERS);
+    discover_compilers(ci, MAX_COMPILERS, NULL);
 
     int any_compiler = 0;
     for (int i = 0; i < MAX_COMPILERS; i++) {
@@ -730,8 +707,8 @@ void hl_doctor_collect_json(FILE *f)
     PlatformEmbed embed = detect_platform();
 
     ComputeInfo cmp;
-    /* hull_exe lookup not available here - pass NULL; only wamrc/clang
-     * paths near the binary are skipped, PATH lookup still works. */
+    /* hull_exe lookup not available here - pass NULL; the sibling-to-hull
+     * probe is skipped, but ~/.hull/tools + PATH resolution still work. */
     detect_compute(&cmp, NULL);
 
     print_json(f, ci, MAX_COMPILERS, embed, any_compiler, &cmp);
@@ -779,7 +756,7 @@ int hl_cmd_doctor(int argc, char **argv, const HlCommandEnv *env)
         { "clang",   {0} },
         { "cosmocc", {0} },
     };
-    discover_compilers(ci, MAX_COMPILERS);
+    discover_compilers(ci, MAX_COMPILERS, env->hull_exe);
 
     int any_compiler = 0;
     for (int i = 0; i < MAX_COMPILERS; i++) {

@@ -97,44 +97,30 @@ static int stdio_write_fn(void *ctx, const char *data, size_t len)
     return fwrite(data, 1, len, fp) == len ? 0 : -1;
 }
 
-/* Returns 1 if a tool is installed at $HOME/.hull/tools/<name>. The
- * out_path / out_size args are optional and filled when given. */
-static int tool_installed(const char *name, char *out_path, size_t out_path_sz,
-                          size_t *out_size)
+/* Human label for a non-managed resolved source, for the text listing. */
+static const char *tool_source_label(HlToolSource src)
 {
-    char path[PATH_MAX];
-    if (hl_tools_install_path(name, path, sizeof(path)) != 0) return 0;
-    struct stat st;
-    if (stat(path, &st) != 0) return 0;
-
-    const HlToolSpec *spec = hl_tools_find(name);
-    if (spec && spec->is_bundle) {
-        /* A bundle installs as a DIRECTORY; consider it present when the dir
-         * exists and holds its bundle_entry sentinel (crt1.o for the floor, the
-         * zig/lld executable for a toolchain - a complete extraction). */
-        if (!S_ISDIR(st.st_mode) || !spec->bundle_entry) return 0;
-        char sentinel[PATH_MAX];
-        int n = snprintf(sentinel, sizeof(sentinel), "%s/%s", path,
-                         spec->bundle_entry);
-        struct stat cs;
-        if (n < 0 || (size_t)n >= sizeof(sentinel) ||
-            stat(sentinel, &cs) != 0 || !S_ISREG(cs.st_mode))
-            return 0;
-        if (out_path && out_path_sz > 0) snprintf(out_path, out_path_sz, "%s", path);
-        if (out_size) *out_size = 0;
-        return 1;
+    switch (src) {
+        case HL_TOOL_SRC_SIBLING: return "beside hull";
+        case HL_TOOL_SRC_PATH:    return "on PATH";
+        default:                  return "";
     }
+}
 
-    if (!S_ISREG(st.st_mode)) return 0;
-    if (out_path && out_path_sz > 0)
-        snprintf(out_path, out_path_sz, "%s", path);
-    if (out_size) *out_size = (size_t)st.st_size;
-    return 1;
+/* Machine label for the JSON `source` field. */
+static const char *tool_source_json(HlToolSource src)
+{
+    switch (src) {
+        case HL_TOOL_SRC_MANAGED: return "managed";
+        case HL_TOOL_SRC_SIBLING: return "sibling";
+        case HL_TOOL_SRC_PATH:    return "path";
+        default:                  return "none";
+    }
 }
 
 /* ── `hull tools list` ───────────────────────────────────────────── */
 
-static int print_list_text(const char *platform)
+static int print_list_text(const char *platform, const char *hull_exe)
 {
     const char *version = HL_VERSION;
     if (version[0] == 'v') version++;
@@ -145,17 +131,21 @@ static int print_list_text(const char *platform)
     for (const HlToolSpec *t = hl_tools_registry(); t->name; t++) {
         any = 1;
         int published = hl_tools_published_for(t, platform);
-        char inst_path[PATH_MAX];
-        size_t inst_size = 0;
-        int installed = tool_installed(t->name,
-                                       inst_path, sizeof(inst_path),
-                                       &inst_size);
+        HlToolStatus st;
+        hl_tools_status(t->name, hull_exe, &st);
 
-        if (installed) {
+        if (st.managed) {
+            /* Managed install (uninstallable). Accurate size, recursive for a
+             * bundle directory. */
             char sz_buf[32];
-            format_size(inst_size, sz_buf, sizeof(sz_buf));
+            format_size((size_t)st.size_bytes, sz_buf, sizeof(sz_buf));
             fprintf(stdout, "  %-10s [installed]  %s at %s\n",
-                    t->name, sz_buf, inst_path);
+                    t->name, sz_buf, st.install_path);
+        } else if (st.resolved) {
+            /* Usable but not hull-managed (a system/sibling install) - the same
+             * binary doctor + `hull build` resolve. */
+            fprintf(stdout, "  %-10s [found %s]  %s\n",
+                    t->name, tool_source_label(st.source), st.path);
         } else if (published) {
             fprintf(stdout, "  %-10s [available]  hint: `hull tools install %s`\n",
                     t->name, t->name);
@@ -172,7 +162,7 @@ static int print_list_text(const char *platform)
     return 0;
 }
 
-static int print_list_json(const char *platform)
+static int print_list_json(const char *platform, const char *hull_exe)
 {
     const char *version = HL_VERSION;
     if (version[0] == 'v') version++;
@@ -193,16 +183,18 @@ static int print_list_json(const char *platform)
         int published = hl_tools_published_for(t, platform);
         sh_json_write_kv_bool(&w, "available", published != 0);
 
-        char inst_path[PATH_MAX];
-        size_t inst_size = 0;
-        int installed = tool_installed(t->name,
-                                       inst_path, sizeof(inst_path),
-                                       &inst_size);
-        sh_json_write_kv_bool(&w, "installed", installed != 0);
-        if (installed) {
-            sh_json_write_kv_string(&w, "path",       inst_path);
-            sh_json_write_kv_int   (&w, "size_bytes", (int64_t)inst_size);
-        }
+        HlToolStatus st;
+        hl_tools_status(t->name, hull_exe, &st);
+        /* `installed` = hull-managed (what `uninstall` acts on); `resolved` =
+         * usable as an executable anywhere doctor/build would look. */
+        sh_json_write_kv_bool  (&w, "installed", st.managed != 0);
+        sh_json_write_kv_bool  (&w, "resolved",  st.resolved != 0);
+        sh_json_write_kv_string(&w, "source",    tool_source_json(st.source));
+        if (st.managed || st.resolved)
+            sh_json_write_kv_string(&w, "path",
+                                    st.resolved ? st.path : st.install_path);
+        if (st.managed)
+            sh_json_write_kv_int(&w, "size_bytes", (int64_t)st.size_bytes);
         if (published) {
             char asset[128];
             hl_tools_asset_name(t, platform, asset, sizeof(asset));
@@ -224,19 +216,35 @@ static int print_list_json(const char *platform)
  *   hl_release_io_fetch_verified_manifest(repo, tag, alloc, tls,
  *                                         "hull-tools", &manifest, &len). */
 
+/* Explain why a tool can't be installed on this platform, with a tool-specific
+ * next step. Shared by the pre-flight check (before any network round-trip) and
+ * install_one's defensive re-check. */
+static void print_unpublished(const HlToolSpec *spec, const char *platform)
+{
+    fprintf(stderr,
+            "hull tools: no %s binary published for %s on this hull release.\n",
+            spec->name, platform);
+    if (strcmp(platform, "cosmo") == 0 && strcmp(spec->name, "wamrc") == 0) {
+        fprintf(stderr,
+                "             cosmo users build wamrc from source: `make wamrc`.\n");
+    }
+    if (strcmp(spec->name, "cosmocc") == 0 && strcmp(platform, "cosmo") != 0) {
+        fprintf(stderr,
+                "             cosmocc is the toolchain for cosmo/APE app builds "
+                "(e.g. on Windows).\n"
+                "             Install it from the cosmo `hull` (the APE download); "
+                "a native hull\n"
+                "             builds with cc/gcc/clang and does not use it.\n");
+    }
+}
+
 static int install_one(const HlToolSpec *spec, const char *platform,
                        const char *repo, const char *tag,
                        KlAllocator *alloc, KlTlsCtx *tls,
                        const char *manifest, size_t manifest_len)
 {
     if (!hl_tools_published_for(spec, platform)) {
-        fprintf(stderr,
-                "hull tools: no %s binary published for %s on this hull release.\n",
-                spec->name, platform);
-        if (strcmp(platform, "cosmo") == 0 && strcmp(spec->name, "wamrc") == 0) {
-            fprintf(stderr,
-                    "             cosmo users build wamrc from source: `make wamrc`.\n");
-        }
+        print_unpublished(spec, platform);
         return -1;
     }
 
@@ -439,7 +447,8 @@ static int cmd_install(int argc, char **argv, const char *repo)
 
     /* Fail fast on unknown names - don't make a network round-trip for
      * something that's not in the registry. */
-    if (!install_all && !hl_tools_find(name)) {
+    const HlToolSpec *named = install_all ? NULL : hl_tools_find(name);
+    if (!install_all && !named) {
         fprintf(stderr,
                 "hull tools: unknown tool '%s'. Run `hull tools list` for the registry.\n",
                 name);
@@ -447,6 +456,15 @@ static int cmd_install(int argc, char **argv, const char *repo)
     }
 
     const char *platform = hl_release_io_platform();
+
+    /* Fail fast on a tool that isn't published for THIS platform too - and
+     * surface the tool-specific hint (e.g. cosmocc is cosmo-only) BEFORE the
+     * network round-trip / TLS setup, so the guidance shows even when the
+     * manifest fetch would fail. */
+    if (named && !hl_tools_published_for(named, platform)) {
+        print_unpublished(named, platform);
+        return 1;
+    }
 
     /* Set up TLS once for all installs in this invocation. */
     KlAllocator alloc = kl_allocator_default();
@@ -608,7 +626,7 @@ static void usage(void)
 
 int hl_cmd_tools(int argc, char **argv, const HlCommandEnv *env)
 {
-    (void)env;
+    const char *hull_exe = env ? env->hull_exe : NULL;
     if (argc < 2) {
         usage();
         return 2;
@@ -632,7 +650,8 @@ int hl_cmd_tools(int argc, char **argv, const HlCommandEnv *env)
             if (strcmp(argv[i], "--json") == 0) json = 1;
         }
         const char *platform = hl_release_io_platform();
-        return json ? print_list_json(platform) : print_list_text(platform);
+        return json ? print_list_json(platform, hull_exe)
+                    : print_list_text(platform, hull_exe);
     }
 
     if (strcmp(verb, "install") == 0) {
