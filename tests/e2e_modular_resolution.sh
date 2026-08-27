@@ -159,4 +159,68 @@ LUA
 [ -f "$lateok/out" ] || fail "late-throw app produced no binary"
 pass "manifest-then-error app still builds (manifest is authoritative)"
 
+# ── Security boundary 1: module loading is symlink-contained to the app root ──
+# In-root symlinks resolve; a symlink whose target escapes the root cannot read
+# the host object (the descriptor-relative virtual-root resolver clamps it),
+# identically in dev and in a built binary. Not realpath->check->open (no TOCTOU).
+sl="$WORK/symlink"; mkdir -p "$sl/real"
+echo 'return { v = "inroot" }' > "$sl/real/mod.lua"
+ln -s real "$sl/link"                               # in-root symlink
+ext=$(cd "$(mktemp -d)" && pwd -P); echo 'return { v = "ESCAPED" }' > "$ext/secret.lua"
+ln -s "$ext" "$sl/esc"                              # symlink escaping the root
+cat > "$sl/app.lua" <<'LUA'
+local inroot = require("./link/mod")
+local ok, m  = pcall(require, "./esc/secret")
+app.manifest({ modules = { "hull/http-server@1" } })
+app.get("/in",  function(req, res) res:text(inroot.v) end)
+app.get("/esc", function(req, res) res:text((ok and m.v) or "BLOCKED") end)
+LUA
+PORT=$((PORT + 1))
+"$HULL" "$sl/app.lua" -p "$PORT" >/dev/null 2>&1 &
+SRV=$!; sleep 1.2
+inroot=$(get "$PORT" /in); escd=$(get "$PORT" /esc)
+kill "$SRV" 2>/dev/null || true; wait "$SRV" 2>/dev/null || true; SRV=""
+[ "$inroot" = "inroot" ] || fail "in-root symlink did not resolve (dev, got '$inroot')"
+[ "$escd" = "BLOCKED" ]  || fail "external symlink escaped the app root (dev, got '$escd')"
+pass "in-root symlink resolves; external symlink escape blocked (dev)"
+
+# Built binaries load modules from the embedded VFS (no runtime fopen of a host
+# path); the security assertion that carries is that a symlink whose target
+# escapes the root does not surface a host object - build discovery must not
+# embed it, and the runtime must not read it. (In-root symlink RESOLUTION in a
+# built binary is a separate build-time file-discovery property.) Use a
+# dedicated app with ONLY the escaping symlink so an unrelated require can't
+# break app load first.
+slb="$WORK/symlink_built"; mkdir -p "$slb"
+ln -s "$ext" "$slb/esc"
+cat > "$slb/app.lua" <<'LUA'
+local ok, m = pcall(require, "./esc/secret")
+app.manifest({ modules = { "hull/http-server@1" } })
+app.get("/esc", function(req, res) res:text((ok and m.v) or "BLOCKED") end)
+LUA
+"$HULL" build "$slb" -o "$slb/out" --no-verify-platform >/dev/null 2>&1 || fail "symlink app build failed"
+PORT=$((PORT + 1))
+"$slb/out" -p "$PORT" >/dev/null 2>&1 &
+SRV=$!; sleep 1.2
+escd=$(get "$PORT" /esc)
+kill "$SRV" 2>/dev/null || true; wait "$SRV" 2>/dev/null || true; SRV=""
+[ "$escd" = "BLOCKED" ] || fail "external symlink surfaced a host object in a built binary (got '$escd')"
+pass "external symlink escape stays blocked in a built binary"
+
+# ── Security boundary 2: no dynamic-code authority in the extraction window ──
+# App code executed to read the manifest must not compile/run new code. load()
+# is removed for extraction, so an app that calls it before app.manifest cannot
+# complete extraction -> fatal build, no binary (a control without load builds).
+dyn="$WORK/dyncode"; mkdir -p "$dyn"
+cat > "$dyn/app.lua" <<'LUA'
+local f = load("return 1")
+f()
+app.manifest({ modules = {} })
+LUA
+if "$HULL" build "$dyn" -o "$dyn/out" --no-verify-platform >/dev/null 2>&1; then
+    fail "load() during extraction should fail closed (dynamic code must be removed)"
+fi
+[ -f "$dyn/out" ] && fail "dynamic-code app produced a binary"
+pass "dynamic-code (load) is unavailable during extraction (fatal, no binary)"
+
 echo "e2e_modular_resolution: ALL PASS"

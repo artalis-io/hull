@@ -73,7 +73,20 @@ function M.extract_manifest(app_dir)
                 err = "could not load app.lua: " .. tostring(load_err)
             end
         else
+            -- Remove dynamic-code authority from the extraction window: app code
+            -- executed to read the manifest must not compile or run new code
+            -- (parity with the runtime sandbox, which strips these). The tool VM
+            -- is not otherwise locked down (cfg.sandbox=0), so save the loaders,
+            -- nil them for the pcall, and restore the tool VM's own environment
+            -- afterwards on EVERY path (success / error / OOM). require() does not
+            -- use these (it goes through hl_lua_require), so a valid app's
+            -- extraction is unaffected.
+            local sv_load, sv_loadfile = _G.load, _G.loadfile
+            local sv_dofile, sv_loadstr = _G.dofile, _G.loadstring
+            _G.load, _G.loadfile, _G.dofile, _G.loadstring = nil, nil, nil, nil
             local ok, run_err = pcall(chunk)
+            _G.load, _G.loadfile = sv_load, sv_loadfile
+            _G.dofile, _G.loadstring = sv_dofile, sv_loadstr
             -- Capture whatever app.manifest() declared, even if the chunk later
             -- errors: the manifest is authoritative for composition (it lists
             -- every module any file imports), and executing the rest of the

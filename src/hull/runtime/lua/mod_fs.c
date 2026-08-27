@@ -6,6 +6,7 @@
 #include "mod_buffer.h"
 #include "hull/utils/alloc.h"
 #include "hull/cap/fs.h"
+#include "hull/cap/fs_resolve.h"  /* descriptor-relative virtual-root module read */
 #include "hull/limits/core.h"
 #include "hull/module_registry.h"
 #include "hull/module_resolver.h"
@@ -19,6 +20,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>  /* close */
 
 /* ════════════════════════════════════════════════════════════════════
  * hull.fs module - filesystem capabilities
@@ -778,8 +780,36 @@ static int hl_lua_require(lua_State *L)
             }
             lua_pop(L, 2); /* pop nil + __hull_loaded */
 
-            /* Read file from disk */
-            FILE *f = fopen(path, "rb");
+            /* Read the module through the descriptor-relative virtual-root
+             * resolver instead of reopening a reconstructed host path (which
+             * would follow a module symlink out of the app root, and reintroduce
+             * a resolve->check->open TOCTOU). Open the app root as a directory
+             * fd and resolve the app-relative module path beneath it with
+             * contained-follow semantics: an in-root symlink is followed, a
+             * symlink whose target is absolute or escapes the root is clamped to
+             * the root (re-rooted), so it can never read a host object outside
+             * the app. `path` is the app root + the normalized (no-"..")
+             * relative module path; derive that relative tail. */
+            const char *root_dir = lua->app_dir;
+            const char *relpath = path;
+            if (!(root_dir[0] == '.' && root_dir[1] == '\0')) {
+                size_t adl = strlen(root_dir);
+                while (adl > 0 && root_dir[adl - 1] == '/') adl--;
+                relpath = path + adl;
+                while (*relpath == '/') relpath++;
+            }
+            FILE *f = NULL;
+            const char *fserr = NULL;
+            int root_fd = hl_fs_open_base(root_dir, &fserr);
+            if (root_fd >= 0) {
+                int mfd = hl_fs_open_at(root_fd, relpath, HL_FS_OPEN_READ,
+                                        0, &fserr);
+                close(root_fd);
+                if (mfd >= 0) {
+                    f = fdopen(mfd, "rb");
+                    if (!f) close(mfd);
+                }
+            }
             if (f) {
                 if (fseek(f, 0, SEEK_END) != 0) {
                     fclose(f);

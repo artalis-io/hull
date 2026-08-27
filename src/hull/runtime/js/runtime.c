@@ -32,6 +32,8 @@
 #include <keel/websocket_server.h>
 
 #include "hull/cap/ws.h"
+#include "hull/cap/fs_resolve.h"  /* descriptor-relative virtual-root module read */
+#include <unistd.h>               /* close */
 
 #include <sh_arena.h>
 
@@ -459,28 +461,41 @@ static JSModuleDef *hl_js_module_loader(JSContext *ctx,
         return NULL;
     }
 
-    /* Build filesystem path. After the normalizer collapses `.` / `..`
-     * segments, module_name is either an absolute path (when the base
-     * module was loaded from an absolute filesystem path, dev mode) or
-     * a clean app-relative path (when joining against an embedded /
-     * tool-mode base). For absolute paths, fopen directly; for
-     * relative, prepend app_dir. The old loader had to strip "/./"
-     * here as a workaround because the normalizer left those in
-     * place - no longer needed. */
-    char path[HL_MODULE_PATH_MAX];
-    int n;
+    /* Read the module through the descriptor-relative virtual-root resolver
+     * rather than reopening a reconstructed host path (which follows a module
+     * symlink out of the app root and reintroduces a resolve->check->open
+     * TOCTOU). After the normalizer collapses `.`/`..`, module_name is either an
+     * absolute host path (dev, base loaded from an absolute path) or a clean
+     * app-relative path. Derive the app-relative tail: an absolute name MUST be
+     * under the app root (else refuse); a relative name is used as-is. Then open
+     * the app root fd and resolve beneath it with contained-follow semantics, so
+     * an in-root symlink is followed but one escaping the root is clamped and can
+     * never read a host object outside the app. Mirrors the Lua loader. */
+    const char *relpath = module_name;
     if (module_name[0] == '/') {
-        n = snprintf(path, sizeof(path), "%s", module_name);
-    } else {
-        n = snprintf(path, sizeof(path), "%s/%s", js->app_dir, module_name);
-    }
-    if (n < 0 || (size_t)n >= sizeof(path)) {
-        JS_ThrowReferenceError(ctx, "module path too long: %s", module_name);
-        return NULL;
+        size_t adl = strlen(js->app_dir);
+        while (adl > 0 && js->app_dir[adl - 1] == '/') adl--;
+        if (strncmp(module_name, js->app_dir, adl) == 0 &&
+            (module_name[adl] == '/' || module_name[adl] == '\0')) {
+            relpath = module_name + adl;
+            while (*relpath == '/') relpath++;
+        } else {
+            JS_ThrowReferenceError(ctx, "module not found: %s", module_name);
+            return NULL;
+        }
     }
 
-    /* Read file */
-    FILE *f = fopen(path, "rb");
+    FILE *f = NULL;
+    const char *fserr = NULL;
+    int root_fd = hl_fs_open_base(js->app_dir, &fserr);
+    if (root_fd >= 0) {
+        int mfd = hl_fs_open_at(root_fd, relpath, HL_FS_OPEN_READ, 0, &fserr);
+        close(root_fd);
+        if (mfd >= 0) {
+            f = fdopen(mfd, "rb");
+            if (!f) close(mfd);
+        }
+    }
     if (!f) {
         JS_ThrowReferenceError(ctx, "module not found: %s", module_name);
         return NULL;
