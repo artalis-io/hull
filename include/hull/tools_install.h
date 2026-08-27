@@ -26,6 +26,11 @@
 #define HL_TOOLS_INSTALL_H
 
 #include <stddef.h>
+#include <limits.h>
+
+#ifndef PATH_MAX
+#define PATH_MAX 4096
+#endif
 
 /* Maximum tool-name length. Tool names are short identifiers and never
  * paths, so a generous cap is fine. Anything longer is rejected by
@@ -156,5 +161,63 @@ int hl_tools_lookup_path(const char *name, const char *hull_exe,
 
 /* Bundle extraction now lives in the shared tar core: include hull/cap/tar.h
  * and call hl_tar_extract(). */
+
+/**
+ * @brief Where a resolved tool was found.
+ */
+typedef enum {
+    HL_TOOL_SRC_NONE = 0,   /**< not resolvable as an executable anywhere */
+    HL_TOOL_SRC_MANAGED,    /**< under $HOME/.hull/tools (via `hull tools install`) */
+    HL_TOOL_SRC_SIBLING,    /**< next to the running hull binary (ejected/portable) */
+    HL_TOOL_SRC_PATH        /**< on the system $PATH */
+} HlToolSource;
+
+/**
+ * @brief Unified install + resolution status for one registered tool.
+ *
+ * The SINGLE source of truth shared by `hull tools list`, `hull agent
+ * tools`, and `hull doctor` (and consistent with `hull build`, which
+ * resolves via `hl_tools_lookup_path` directly), so all surfaces agree on
+ * whether a tool is a hull-managed install, whether/where it resolves as an
+ * executable, and how large a managed install is.
+ *
+ * `managed` and `resolved` are RELATED but DISTINCT: a data-only bundle (the
+ * libc-musl floor) can be `managed` (installed under ~/.hull/tools with its
+ * sentinel present) yet not `resolved` (its sentinel isn't an executable). A
+ * system tool on $PATH is `resolved` (source PATH) but not `managed`.
+ */
+typedef struct {
+    int                managed;       /**< a valid install exists under ~/.hull/tools */
+    int                resolved;      /**< hl_tools_lookup_path found an executable */
+    HlToolSource       source;        /**< where the executable resolved from */
+    char               path[PATH_MAX];        /**< resolved executable, "" if !resolved */
+    char               install_path[PATH_MAX];/**< ~/.hull/tools/<name>, "" if unknown */
+    unsigned long long size_bytes;    /**< managed install size (recursive for a bundle
+                                           directory, stat for a single file); 0 if
+                                           not managed / unknown */
+} HlToolStatus;
+
+/**
+ * @brief Recursively sum the on-disk byte size of a file or directory tree.
+ *
+ * Uses lstat and does not follow symlinks into other trees, so the result is
+ * an extracted bundle's real footprint. Returns 0 on a missing path or error.
+ * Recursion depth is bounded by the tree's real nesting.
+ */
+unsigned long long hl_tools_dir_size(const char *path);
+
+/**
+ * @brief Fill @p out with the unified status of @p name.
+ *
+ * Runs the managed-install check (works for single-binary AND bundle tools)
+ * and the canonical executable resolver (`hl_tools_lookup_path`, so PATH and
+ * sibling installs are seen, matching doctor/build), and computes an accurate
+ * managed-install size. @p hull_exe is the running hull path (for the sibling
+ * probe) or NULL.
+ *
+ * @returns 0 on success (state is carried in @p out), -1 on a NULL/invalid
+ *          argument or an unregistered name.
+ */
+int hl_tools_status(const char *name, const char *hull_exe, HlToolStatus *out);
 
 #endif /* HL_TOOLS_INSTALL_H */

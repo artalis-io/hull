@@ -536,4 +536,137 @@ UTEST(tools_cosmocc, asset_name_is_arch_free_tar) {
                                   "linux-x86_64", asset, sizeof(asset)), -1);
 }
 
+/* Write a file of `n` bytes (mkdir -p its parent), 0644 (non-exec) unless
+ * `exec`. Returns 0 on success. */
+static int write_data(const char *path, size_t n, int exec)
+{
+    if (touch_exec(path) != 0) return -1;   /* reuse its mkdir -p + create */
+    FILE *f = fopen(path, "w");
+    if (!f) return -1;
+    for (size_t i = 0; i < n; i++) fputc('x', f);
+    fclose(f);
+    return chmod(path, exec ? 0755 : 0644);
+}
+
+/* ── hl_tools_dir_size ──────────────────────────────────────────── */
+
+UTEST_F(tools_fixture, dir_size_of_regular_file) {
+    char p[PATH_MAX];
+    snprintf(p, sizeof(p), "%s/f", utest_fixture->tmpdir);
+    ASSERT_EQ(write_data(p, 1234, 0), 0);
+    ASSERT_EQ(hl_tools_dir_size(p), 1234ULL);
+}
+
+UTEST_F(tools_fixture, dir_size_recurses) {
+    char base[PATH_MAX];
+    snprintf(base, sizeof(base), "%s/tree", utest_fixture->tmpdir);
+    char p[PATH_MAX];
+    snprintf(p, sizeof(p), "%s/a", base);         ASSERT_EQ(write_data(p, 100, 0), 0);
+    snprintf(p, sizeof(p), "%s/sub/b", base);     ASSERT_EQ(write_data(p, 200, 0), 0);
+    snprintf(p, sizeof(p), "%s/sub/c/d", base);   ASSERT_EQ(write_data(p, 300, 1), 0);
+    ASSERT_EQ(hl_tools_dir_size(base), 600ULL);
+}
+
+UTEST_F(tools_fixture, dir_size_missing_is_zero) {
+    char p[PATH_MAX];
+    snprintf(p, sizeof(p), "%s/nope", utest_fixture->tmpdir);
+    ASSERT_EQ(hl_tools_dir_size(p), 0ULL);
+}
+
+/* ── hl_tools_status ────────────────────────────────────────────── */
+
+UTEST_F(tools_fixture, status_none_when_absent) {
+    HlToolStatus st;
+    ASSERT_EQ(hl_tools_status("wamrc", NULL, &st), 0);
+    ASSERT_FALSE(st.managed);
+    ASSERT_FALSE(st.resolved);
+    ASSERT_EQ(st.source, HL_TOOL_SRC_NONE);
+    ASSERT_EQ(st.size_bytes, 0ULL);
+}
+
+UTEST_F(tools_fixture, status_unknown_tool_errors) {
+    HlToolStatus st;
+    ASSERT_EQ(hl_tools_status("definitely-not-a-tool", NULL, &st), -1);
+}
+
+UTEST_F(tools_fixture, status_managed_single_binary) {
+    /* A single-binary managed install: ~/.hull/tools/wamrc, sized by stat. */
+    char dir[PATH_MAX];
+    ASSERT_EQ(hl_tools_dir(dir, sizeof(dir)), 0);
+    char target[PATH_MAX];
+    snprintf(target, sizeof(target), "%swamrc", dir);
+    ASSERT_EQ(write_data(target, 4096, 1), 0);
+
+    HlToolStatus st;
+    ASSERT_EQ(hl_tools_status("wamrc", NULL, &st), 0);
+    ASSERT_TRUE(st.managed);
+    ASSERT_TRUE(st.resolved);
+    ASSERT_EQ(st.source, HL_TOOL_SRC_MANAGED);
+    ASSERT_STREQ(st.path, target);
+    ASSERT_EQ(st.size_bytes, 4096ULL);
+}
+
+UTEST_F(tools_fixture, status_managed_executable_bundle) {
+    /* cosmocc is a bundle (bundle_entry "bin/cosmocc", executable): managed via
+     * the sentinel, resolved to the entry, sized RECURSIVELY over the dir. */
+    char dir[PATH_MAX];
+    ASSERT_EQ(hl_tools_dir(dir, sizeof(dir)), 0);
+    char entry[PATH_MAX], extra[PATH_MAX], root[PATH_MAX];
+    snprintf(root,  sizeof(root),  "%scosmocc", dir);
+    snprintf(entry, sizeof(entry), "%scosmocc/bin/cosmocc", dir);
+    snprintf(extra, sizeof(extra), "%scosmocc/lib/x.a", dir);
+    ASSERT_EQ(write_data(entry, 3000, 1), 0);
+    ASSERT_EQ(write_data(extra, 2000, 0), 0);
+
+    HlToolStatus st;
+    ASSERT_EQ(hl_tools_status("cosmocc", NULL, &st), 0);
+    ASSERT_TRUE(st.managed);
+    ASSERT_TRUE(st.resolved);
+    ASSERT_EQ(st.source, HL_TOOL_SRC_MANAGED);
+    ASSERT_STREQ(st.path, entry);
+    ASSERT_STREQ(st.install_path, root);
+    ASSERT_EQ(st.size_bytes, 5000ULL);   /* the old S_ISREG check reported 0 */
+}
+
+UTEST_F(tools_fixture, status_managed_data_only_bundle) {
+    /* A data-only floor bundle: its bundle_entry (libhull_platform.a) is NOT
+     * executable, so hl_tools_lookup_path's bundle-entry probe misses; but its
+     * install DIRECTORY is searchable (X_OK on a dir), so the resolver returns
+     * the dir - the documented behavior build.lua relies on. So it is `managed`
+     * (installed, accurately sized) and `resolved` to its directory (source
+     * MANAGED), never to an executable. `installed`-based surfaces (list, agent)
+     * key off `managed`, which is what matters here. */
+    char dir[PATH_MAX];
+    ASSERT_EQ(hl_tools_dir(dir, sizeof(dir)), 0);
+    char root[PATH_MAX], sentinel[PATH_MAX];
+    snprintf(root,     sizeof(root),     "%splatform-musl-x86_64", dir);
+    snprintf(sentinel, sizeof(sentinel), "%s/libhull_platform.a", root);
+    ASSERT_EQ(write_data(sentinel, 8192, 0), 0);
+
+    HlToolStatus st;
+    ASSERT_EQ(hl_tools_status("platform-musl-x86_64", NULL, &st), 0);
+    ASSERT_TRUE(st.managed);
+    ASSERT_EQ(st.source, HL_TOOL_SRC_MANAGED);
+    ASSERT_STREQ(st.path, root);         /* the searchable install dir */
+    ASSERT_EQ(st.size_bytes, 8192ULL);
+}
+
+UTEST_F(tools_fixture, status_sibling_source) {
+    /* No managed install; a wamrc beside the hull binary resolves as SIBLING. */
+    char hull_dir[PATH_MAX], hull_path[PATH_MAX], tool_path[PATH_MAX];
+    snprintf(hull_dir,  sizeof(hull_dir),  "%s/bin", utest_fixture->tmpdir);
+    ASSERT_EQ(mkdir(hull_dir, 0755), 0);
+    snprintf(hull_path, sizeof(hull_path), "%s/hull",  hull_dir);
+    snprintf(tool_path, sizeof(tool_path), "%s/wamrc", hull_dir);
+    ASSERT_EQ(touch_exec(hull_path), 0);
+    ASSERT_EQ(touch_exec(tool_path), 0);
+
+    HlToolStatus st;
+    ASSERT_EQ(hl_tools_status("wamrc", hull_path, &st), 0);
+    ASSERT_FALSE(st.managed);
+    ASSERT_TRUE(st.resolved);
+    ASSERT_EQ(st.source, HL_TOOL_SRC_SIBLING);
+    ASSERT_STREQ(st.path, tool_path);
+}
+
 UTEST_MAIN()

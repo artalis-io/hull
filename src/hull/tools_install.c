@@ -23,6 +23,7 @@
 #include "hull/tools_install.h"
 #include "hull/shared/fs_util.h"
 
+#include <dirent.h>
 #include <errno.h>
 #include <limits.h>
 #include <stdio.h>
@@ -428,4 +429,91 @@ int hl_tools_lookup_path(const char *name, const char *hull_exe,
     }
 
     return -1;
+}
+
+/* ── Unified status (parity across tools-list / agent-tools / doctor) ──── */
+
+unsigned long long hl_tools_dir_size(const char *path)
+{
+    struct stat st;
+    if (!path || lstat(path, &st) != 0) return 0;
+    if (S_ISREG(st.st_mode)) return (unsigned long long)st.st_size;
+    if (!S_ISDIR(st.st_mode)) return 0;   /* symlink / special: don't follow */
+
+    DIR *d = opendir(path);
+    if (!d) return 0;
+    unsigned long long total = 0;
+    struct dirent *e;
+    while ((e = readdir(d)) != NULL) {
+        if (strcmp(e->d_name, ".") == 0 || strcmp(e->d_name, "..") == 0) continue;
+        char child[PATH_MAX];
+        int n = snprintf(child, sizeof(child), "%s/%s", path, e->d_name);
+        if (n < 0 || (size_t)n >= sizeof(child)) continue;
+        total += hl_tools_dir_size(child);
+    }
+    closedir(d);
+    return total;
+}
+
+int hl_tools_status(const char *name, const char *hull_exe, HlToolStatus *out)
+{
+    if (!name || !out) return -1;
+    memset(out, 0, sizeof(*out));
+    const HlToolSpec *spec = hl_tools_find(name);
+    if (!spec) return -1;
+
+    /* Managed-install check - works for a single-binary tool (a symlink to the
+     * CAS blob, stat() follows it -> regular file) AND a bundle (a directory
+     * whose bundle_entry sentinel is present). This is the "installed via
+     * `hull tools install`, uninstallable" concept, independent of executable
+     * resolution below (a data-only floor is managed but not resolvable). */
+    if (hl_tools_install_path(name, out->install_path,
+                              sizeof(out->install_path)) == 0) {
+        struct stat st;
+        if (stat(out->install_path, &st) == 0) {
+            if (spec->is_bundle) {
+                if (S_ISDIR(st.st_mode) && spec->bundle_entry) {
+                    char sentinel[PATH_MAX];
+                    int n = snprintf(sentinel, sizeof(sentinel), "%s/%s",
+                                     out->install_path, spec->bundle_entry);
+                    struct stat cs;
+                    if (n > 0 && (size_t)n < sizeof(sentinel) &&
+                        stat(sentinel, &cs) == 0 && S_ISREG(cs.st_mode)) {
+                        out->managed    = 1;
+                        out->size_bytes = hl_tools_dir_size(out->install_path);
+                    }
+                }
+            } else if (S_ISREG(st.st_mode)) {
+                out->managed    = 1;
+                out->size_bytes = (unsigned long long)st.st_size;
+            }
+        }
+    }
+
+    /* Executable resolution - the SAME order doctor + build use. Classify the
+     * source so callers can distinguish a hull-managed install from a
+     * sibling/PATH one. Managed installs are probed first by the resolver, so a
+     * present managed executable always classifies as MANAGED. */
+    if (hl_tools_lookup_path(name, hull_exe, out->path, sizeof(out->path)) == 0) {
+        out->resolved = 1;
+        size_t ilen = strlen(out->install_path);
+        if (ilen && strncmp(out->path, out->install_path, ilen) == 0 &&
+            (out->path[ilen] == '\0' || out->path[ilen] == '/')) {
+            out->source = HL_TOOL_SRC_MANAGED;
+        } else if (hull_exe && *hull_exe) {
+            char dir[PATH_MAX];
+            char sib[PATH_MAX];
+            int n;
+            if (strip_basename(hull_exe, dir, sizeof(dir)) == 0 &&
+                (n = snprintf(sib, sizeof(sib), "%s/%s", dir, name)) > 0 &&
+                (size_t)n < sizeof(sib) && strcmp(out->path, sib) == 0) {
+                out->source = HL_TOOL_SRC_SIBLING;
+            } else {
+                out->source = HL_TOOL_SRC_PATH;
+            }
+        } else {
+            out->source = HL_TOOL_SRC_PATH;
+        }
+    }
+    return 0;
 }
