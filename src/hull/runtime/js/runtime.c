@@ -844,6 +844,18 @@ int hl_js_init(HlJS *js, const HlJSConfig *cfg)
     return 0;
 }
 
+/* Upper bound on module-evaluation jobs drained during manifest EXTRACTION.
+ * The extractor runs untrusted app + stdlib top-levels only to read
+ * app.manifest(); an adversarial or buggy app can schedule an unbounded
+ * microtask chain (e.g. a self-requeuing queueMicrotask, or Promise
+ * assimilation of a pathological thenable) that would spin the job drain
+ * forever and wedge `hull build`. The drain STOPS as soon as the module
+ * promise settles, so a legitimate app (which settles in a handful of jobs)
+ * never approaches this cap; it bounds only a genuine runaway that never
+ * settles. Kept modest so a runaway churns few promises before we bail - a
+ * large churn of short-lived promises stresses QuickJS's teardown GC. */
+#define HL_JS_EXTRACT_MAX_SETTLE_JOBS 65536u
+
 /* Settle an ES-module evaluation started with JS_EVAL_TYPE_MODULE |
  * JS_EVAL_FLAG_ASYNC: `val` is the module's evaluation PROMISE. A module's
  * top-level runs synchronously up to the first await, so app.manifest()/route
@@ -852,13 +864,67 @@ int hl_js_init(HlJS *js, const HlJSConfig *cfg)
  * promise. Drain the job queue so the evaluation completes, then a REJECTED
  * promise is a real load failure surfaced synchronously - parity with a
  * compile-time exception and with the Lua loader (whose top-level errors are
- * caught by pcall). Consumes `val`. Returns 0 on success, -1 on failure. */
+ * caught by pcall). Consumes `val`. Returns 0 on success, -1 on failure.
+ *
+ * During manifest extraction (js->manifest_extract_lenient) the drain is BOUNDED
+ * and a still-PENDING promise is ALSO a failure: an untrusted app must never be
+ * able to hang the builder with a runaway microtask or a never-resolving
+ * top-level await, and a half-evaluated (never-settled) module must never
+ * masquerade as a clean load that drives a build. Real app load keeps the
+ * unbounded drain and only fails on a REJECTED promise (its author owns any
+ * hang; there is no build to wedge), so runtime behavior is unchanged. */
 static int hl_js_settle_module(HlJS *js, JSValue val)
 {
     if (JS_IsException(val)) {          /* synchronous compile / link error */
         hl_js_dump_error(js);
         return -1;
     }
+
+    if (js->manifest_extract_lenient) {
+        JSContext *ctx1;
+        unsigned drained = 0;
+        int job_err = 0;
+        /* Drain jobs until the module promise SETTLES, the queue empties, a job
+         * throws, or the bound is hit. Checking the promise each iteration lets
+         * a legitimate module stop the instant its top-level completes - it
+         * never churns toward the cap - so the cap constrains only a runaway
+         * that never settles. */
+        while (drained < HL_JS_EXTRACT_MAX_SETTLE_JOBS) {
+            if (JS_IsObject(val) &&
+                JS_PromiseState(js->ctx, val) != JS_PROMISE_PENDING)
+                break;                              /* module settled - done */
+            int ret = JS_ExecutePendingJob(js->rt, &ctx1);
+            if (ret < 0) { job_err = 1; break; }    /* a job threw */
+            if (ret == 0) break;                    /* queue drained */
+            drained++;
+        }
+
+        int rc = 0;
+        if (job_err) {
+            hl_js_dump_error(js);
+            rc = -1;
+        } else if (JS_IsObject(val)) {
+            int st = JS_PromiseState(js->ctx, val);
+            if (st == JS_PROMISE_REJECTED) {
+                JSValue reason = JS_PromiseResult(js->ctx, val);
+                JS_Throw(js->ctx, reason);
+                hl_js_dump_error(js);
+                rc = -1;
+            } else if (st == JS_PROMISE_PENDING) {
+                /* Never settled: an unresolved top-level await or a microtask
+                 * chain that outran the job budget. Fail closed - a hung
+                 * extractor must not be mistaken for a successful load. */
+                log_error("[hull:c] module evaluation did not settle during "
+                          "manifest extraction (unresolved top-level await or "
+                          "runaway microtask)");
+                rc = -1;
+            }
+        }
+
+        JS_FreeValue(js->ctx, val);
+        return rc;
+    }
+
     hl_js_run_jobs(js);                 /* run the deferred module evaluation */
     int rc = 0;
     if (JS_IsObject(val) &&
