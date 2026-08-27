@@ -295,6 +295,12 @@ static KlBodyReader *hl_lua_multipart_factory(KlAllocator *alloc,
     return hl_cap_multipart_factory(alloc, req, route->multipart_config);
 }
 
+/* Cosmo HTTP-bridge force-link anchor (0.13.1 PR#1) - see hull/http_feature.h.
+ * A unique strong symbol with no weak twin, co-resident in this object with the
+ * strong hl_lua_wire_routes_server below; a produced cosmo app references it to
+ * force-pull this member over the weak http_weakstub.o stub. */
+int hl_lua_http_bridge_anchor = 0;
+
 int hl_lua_wire_routes_server(HlLua *lua, KlServer *server,
                                void *(*alloc_fn)(size_t))
 {

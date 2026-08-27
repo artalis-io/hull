@@ -319,6 +319,12 @@ static KlBodyReader *hl_js_multipart_factory(KlAllocator *alloc,
     return hl_cap_multipart_factory(alloc, req, route->multipart_config);
 }
 
+/* Cosmo HTTP-bridge force-link anchor (0.13.1 PR#1) - see hull/http_feature.h.
+ * Unique strong symbol, co-resident with the strong hl_js_wire_routes_server;
+ * a produced cosmo app references it to force-pull this member over the weak
+ * http_weakstub.o stub. */
+int hl_js_http_bridge_anchor = 0;
+
 int hl_js_wire_routes_server(HlJS *js, KlServer *server,
                               void *(*alloc_fn)(size_t))
 {

@@ -212,3 +212,70 @@ jobs:
           Write-Host "above for where the cosmocc reroute broke (resolve / compile /"
           Write-Host "apelink)."
           exit 1
+
+      # 0.13.1 PR#1 acceptance: the app.main control above proves BUILD + EXIT,
+      # but the field failure was a produced HTTP app that BUILDS + RUNS yet
+      # never serves (the fat cosmo platform archive's weak http_weakstub.o
+      # shadowed the strong per-runtime hl_<rt>_wire_routes_server, so serve
+      # aborted on the -1 no-op). This step builds two-line Lua + JS /ping apps
+      # with the SAME branch cosmo hull + bundled cosmocc and asserts each
+      # actually answers 'pong' - the coverage the app.main-only control missed.
+      - name: hull build HTTP apps -> APE and assert they SERVE (PR#1)
+        shell: pwsh
+        run: |
+          $fail = 0
+          function Build-And-Serve($dir, $ext, $src, [string]$bin, [int]$port) {
+            New-Item -ItemType Directory -Force -Path $dir | Out-Null
+            Set-Content -NoNewline "$dir\app.$ext" -Value $src -Encoding ascii
+            $bout = .\hull-cosmo.exe build $dir -o $bin --no-verify-platform 2>&1 | Out-String
+            Write-Host $bout
+            if (-not (Test-Path $bin)) { Write-Host "FAIL $dir did not build"; $script:fail = 1; return }
+            $p = Start-Process -FilePath ".\$bin" -ArgumentList @('-p', "$port") -PassThru `
+                     -RedirectStandardOutput "$dir.out" -RedirectStandardError "$dir.err" -WindowStyle Hidden
+            $resp = ''
+            for ($i = 0; $i -lt 20; $i++) {
+              Start-Sleep -Milliseconds 400
+              try { $resp = (Invoke-WebRequest "http://127.0.0.1:$port/ping" -UseBasicParsing -TimeoutSec 3).Content; break } catch {}
+              if ($p.HasExited) { break }
+            }
+            if (-not $p.HasExited) { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue }
+            if ($resp -eq 'pong') { Write-Host "PASS $dir served pong" }
+            else { Write-Host "FAIL $dir did not serve (resp='$resp'); stderr:"; Get-Content "$dir.err" -ErrorAction SilentlyContinue | Write-Host; $script:fail = 1 }
+          }
+          $lua = "app.manifest({ modules = { `"hull/http-server@1`" } })`napp.get(`"/ping`", function(req, res) res:text(`"pong`") end)"
+          $js  = "import { app } from `"hull:app`";`napp.manifest({ modules: [`"hull/http-server@1`"] });`napp.get(`"/ping`", (req, res) => res.text(`"pong`"));"
+          Build-And-Serve "httplua" "lua" $lua "lua_windows.com" 39310
+          Build-And-Serve "httpjs"  "js"  $js  "js_windows.com"  39311
+          # Stage the produced APEs (+ the app.main control) for the macOS
+          # second-host portability leg.
+          New-Item -ItemType Directory -Force -Path apes | Out-Null
+          Copy-Item lua_windows.com apes\ -Force
+          Copy-Item js_windows.com  apes\ -Force
+          if (Test-Path app.exe) { Copy-Item app.exe apes\main_windows.com -Force }
+          if ($fail -ne 0) { Write-Host "PR#1 ACCEPTANCE FAIL: a produced cosmo HTTP app did not serve"; exit 1 }
+          Write-Host "PR#1 ACCEPTANCE PASS: produced cosmo Lua+JS HTTP apps serve pong on Windows"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        if: always()
+        with:
+          name: cosmo-http-apes
+          path: apes/*.com
+          if-no-files-found: warn
+          retention-days: 7
+
+  macos-serve:
+    name: macOS - second-host portability (produced APEs serve)
+    runs-on: macos-latest
+    needs: [windows-e2e]
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: cosmo-http-apes
+          path: apes
+      # The Windows-produced cosmo APEs must serve on a second, independent APE
+      # host too (proves the fix is a portable produced-binary property, not a
+      # Windows-run quirk). download-artifact strips the exec bit; the script
+      # chmods before running.
+      - name: Run produced APEs on macOS and assert serve
+        run: APES_DIR=apes sh tests/cosmo_http_serve_run.sh
