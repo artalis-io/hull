@@ -503,8 +503,13 @@ CRYPTO_TEST_OBJS := $(BUILDDIR)/cap_crypto.o $(BUILDDIR)/cap_crypto_hmac_mbedtls
 # atomic write). Skipped on HL_ENABLE_HTTP_CLIENT=0 builds where the
 # helper module isn't compiled in.
 ifneq ($(HL_ENABLE_HTTP_CLIENT),0)
-$(BUILDDIR)/test_release_io: $(TESTDIR)/hull/test_release_io.c $(RELEASE_IO_OBJ) $(RELEASE_OBJ) $(HEX_OBJ) $(CACERT_OBJ) $(TLS_TRANSPORT_OBJ) $(TLS_TRANSPORT_STUB_OBJ) $(CRYPTO_TEST_OBJS) $(MBEDTLS_OBJS) $(KEEL_LIB) | $(BUILDDIR)
-	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< $(RELEASE_IO_OBJ) $(RELEASE_OBJ) $(HEX_OBJ) $(CACERT_OBJ) $(TLS_TRANSPORT_OBJ) $(TLS_TRANSPORT_STUB_OBJ) $(CRYPTO_TEST_OBJS) $(MBEDTLS_OBJS) $(KEEL_LIB) -lm -lpthread
+# release_io.c is COMPILED here (not linked as $(RELEASE_IO_OBJ)) with
+# -DHL_RELEASE_IO_TEST_HOOKS so the self-update fault-injection hooks
+# (HULL_FORCE_DEFERRED_SWAP / HULL_TEST_SWAP_FAIL) exist ONLY in this test
+# binary - they are compiled out of the production object that hull links.
+# Mirrors test_pg_conn's -DHL_PG_NO_TLS source-compile pattern.
+$(BUILDDIR)/test_release_io: $(TESTDIR)/hull/test_release_io.c $(SRCDIR)/hull/release_io.c $(RELEASE_OBJ) $(HEX_OBJ) $(CACERT_OBJ) $(TLS_TRANSPORT_OBJ) $(TLS_TRANSPORT_STUB_OBJ) $(CRYPTO_TEST_OBJS) $(MBEDTLS_OBJS) $(KEEL_LIB) | $(BUILDDIR)
+	$(CC) $(CFLAGS) -DHL_RELEASE_IO_TEST_HOOKS $(INCLUDES) -I$(VENDDIR) -o $@ $< $(SRCDIR)/hull/release_io.c $(RELEASE_OBJ) $(HEX_OBJ) $(CACERT_OBJ) $(TLS_TRANSPORT_OBJ) $(TLS_TRANSPORT_STUB_OBJ) $(CRYPTO_TEST_OBJS) $(MBEDTLS_OBJS) $(KEEL_LIB) -lm -lpthread
 endif
 
 # Verify-self helpers test. Reuses release_io.{c,h} for asset-name,
