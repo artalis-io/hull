@@ -391,6 +391,103 @@ UTEST_F(tar_fixture, extract_symlink_in_root_dotdot_ok) {
     free(buf);
 }
 
+/* Windows non-admin (no SeCreateSymbolicLinkPrivilege, Developer Mode off):
+ * symlink() fails, so an archive link is materialized from its target - PREFER
+ * a hardlink (no data copy, no privilege), never left as a symlink. Forced with
+ * HL_TAR_NO_SYMLINK so the fallback runs on this POSIX host too. This is the
+ * cosmocc arch-cc -> cosmocc case on a locked-down Windows box. */
+UTEST_F(tar_fixture, extract_symlink_fallback_prefers_hardlink) {
+    setenv("HL_TAR_NO_SYMLINK", "1", 1);
+    unsigned char *buf = calloc(1, 8192);
+    ASSERT_NE(buf, NULL);
+    size_t off = 0;
+    tar_add_file(buf, &off, "bin/cosmocc", "DRIVER-BYTES", 12);
+    tar_add_symlink(buf, &off, "bin/x86_64-cc", "cosmocc");  /* same-dir target */
+    off += 512;
+
+    char dest[PATH_MAX];
+    snprintf(dest, sizeof(dest), "%s/cc", utest_fixture->tmpdir);
+    ASSERT_EQ(hl_tar_extract(buf, off, dest), 0);
+
+    char p[PATH_MAX], tp[PATH_MAX], rd[64];
+    snprintf(p, sizeof(p), "%s/bin/x86_64-cc", dest);
+    snprintf(tp, sizeof(tp), "%s/bin/cosmocc", dest);
+
+    /* NOT a symlink - a materialized regular file resolving to target bytes. */
+    struct stat st, ts;
+    ASSERT_EQ(lstat(p, &st), 0);
+    ASSERT_FALSE(S_ISLNK(st.st_mode));
+    ASSERT_TRUE(S_ISREG(st.st_mode));
+    FILE *f = fopen(p, "rb"); ASSERT_NE(f, NULL);
+    size_t n = fread(rd, 1, sizeof(rd), f); fclose(f);
+    ASSERT_EQ(n, (size_t)12);
+    ASSERT_EQ(memcmp(rd, "DRIVER-BYTES", 12), 0);
+
+    /* Preferred a HARDLINK: same inode as the target (a copy would differ). */
+    ASSERT_EQ(stat(tp, &ts), 0);
+    ASSERT_EQ(st.st_ino, ts.st_ino);
+
+    unsetenv("HL_TAR_NO_SYMLINK");
+    free(buf);
+}
+
+/* A DANGLING archive link (target absent from the trimmed bundle) must FAIL the
+ * non-admin fallback rather than silently producing an incomplete toolchain. */
+UTEST_F(tar_fixture, extract_symlink_dangling_fails_in_fallback) {
+    setenv("HL_TAR_NO_SYMLINK", "1", 1);
+    unsigned char *buf = calloc(1, 8192);
+    ASSERT_NE(buf, NULL);
+    size_t off = 0;
+    tar_add_symlink(buf, &off, "bin/x86_64-cc", "cosmocc"); /* no bin/cosmocc */
+    off += 512;
+
+    char dest[PATH_MAX];
+    snprintf(dest, sizeof(dest), "%s/cc", utest_fixture->tmpdir);
+    ASSERT_EQ(hl_tar_extract(buf, off, dest), -1);   /* dangling -> fail closed */
+
+    unsetenv("HL_TAR_NO_SYMLINK");
+    free(buf);
+}
+
+/* Deferred (fixpoint) resolution: a link whose TARGET IS ANOTHER LINK
+ * materialized later this run must still resolve in the non-admin fallback,
+ * regardless of archive order. arch2 -> arch1 -> cosmocc, with arch2 emitted
+ * BEFORE arch1 (target-after-link), forces the retry loop: round 1 defers arch2
+ * (arch1 not on disk yet) and materializes arch1 from cosmocc; round 2
+ * materializes arch2 from the now-regular arch1. Proves ordering cannot break
+ * the fallback. */
+UTEST_F(tar_fixture, extract_symlink_chain_target_after_link_resolves) {
+    setenv("HL_TAR_NO_SYMLINK", "1", 1);
+    unsigned char *buf = calloc(1, 8192);
+    ASSERT_NE(buf, NULL);
+    size_t off = 0;
+    tar_add_file(buf, &off, "bin/cosmocc", "DRIVER-BYTES", 12);
+    tar_add_symlink(buf, &off, "bin/arch2", "arch1");   /* link BEFORE its target */
+    tar_add_symlink(buf, &off, "bin/arch1", "cosmocc"); /* arch2's target, later */
+    off += 512;
+
+    char dest[PATH_MAX];
+    snprintf(dest, sizeof(dest), "%s/cc", utest_fixture->tmpdir);
+    ASSERT_EQ(hl_tar_extract(buf, off, dest), 0);
+
+    /* BOTH links resolve to the driver bytes despite the reversed order, and
+     * both are materialized regular files (not symlinks). */
+    for (int k = 0; k < 2; k++) {
+        char p[PATH_MAX], rd[64];
+        snprintf(p, sizeof(p), "%s/bin/%s", dest, k ? "arch1" : "arch2");
+        struct stat st;
+        ASSERT_EQ(lstat(p, &st), 0);
+        ASSERT_TRUE(S_ISREG(st.st_mode));
+        FILE *f = fopen(p, "rb"); ASSERT_NE(f, NULL);
+        size_t n = fread(rd, 1, sizeof(rd), f); fclose(f);
+        ASSERT_EQ(n, (size_t)12);
+        ASSERT_EQ(memcmp(rd, "DRIVER-BYTES", 12), 0);
+    }
+
+    unsetenv("HL_TAR_NO_SYMLINK");
+    free(buf);
+}
+
 /* A symlink whose target is absolute or escapes via ".." is rejected (a
  * malformed archive), so it can never become a write-through primitive. */
 UTEST_F(tar_fixture, extract_rejects_unsafe_symlink_target) {

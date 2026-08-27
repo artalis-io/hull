@@ -259,28 +259,92 @@ static int extract_copy(const char *src, const char *dst, unsigned mode)
     return rc;
 }
 
-static int extract_symlink_cb(const HlTarEntry *e, void *vctx)
+/* A collected symlink member. The parser's linkname is a transient stack
+ * buffer, so name + linkname are copied for the deferred-resolution passes. */
+struct sym_ent { char *name; char *linkname; unsigned mode; int done; };
+struct sym_collect { struct sym_ent *v; size_t n, cap; int oom; };
+
+static char *dup_str(const char *s)
 {
-    struct extract_ctx *c = (struct extract_ctx *)vctx;
+    size_t n = strlen(s) + 1;
+    char *p = (char *)malloc(n);
+    if (p) memcpy(p, s, n);
+    return p;
+}
+
+static int collect_symlink_cb(const HlTarEntry *e, void *vctx)
+{
+    struct sym_collect *s = (struct sym_collect *)vctx;
+    if (s->n == s->cap) {
+        size_t nc = s->cap ? s->cap * 2 : 16;
+        struct sym_ent *nv = (struct sym_ent *)realloc(s->v, nc * sizeof *nv);
+        if (!nv) { s->oom = 1; return -1; }
+        s->v = nv; s->cap = nc;
+    }
+    struct sym_ent *se = &s->v[s->n];
+    se->name = dup_str(e->name);
+    se->linkname = dup_str(e->linkname);
+    se->mode = e->mode;
+    se->done = 0;
+    if (!se->name || !se->linkname) { s->oom = 1; return -1; }
+    s->n++;
+    return 0;
+}
+
+static void sym_collect_free(struct sym_collect *s)
+{
+    for (size_t i = 0; i < s->n; i++) { free(s->v[i].name); free(s->v[i].linkname); }
+    free(s->v);
+}
+
+/* Materialize one collected link under @p dest. Returns 0 = done, 1 = DEFERRED
+ * (target not yet on disk - retry after other links materialize), -1 = hard
+ * error. */
+static int materialize_link(const char *dest, struct sym_ent *se)
+{
     char path[PATH_MAX];
-    int pn = snprintf(path, sizeof(path), "%s/%s", c->dest, e->name);
+    int pn = snprintf(path, sizeof(path), "%s/%s", dest, se->name);
     if (pn < 0 || (size_t)pn >= sizeof(path)) return -1;
 
     if (extract_make_parents(path) != 0) return -1;
     (void)unlink(path);                          /* idempotent re-extract */
-    if (symlink(e->linkname, path) == 0) return 0;
 
-    /* Fallback where symlinks are unavailable (e.g. Windows without the
-     * privilege): copy the target file. The target is relative to the link's
-     * OWN directory; pass 1 already wrote it, so it is on disk. */
+    /* A real symlink is best where the platform allows it (and needs no target
+     * on disk). HL_TAR_NO_SYMLINK skips it so the Windows non-admin fallback is
+     * exercised on any host - the CI runners are elevated with Developer Mode
+     * on, where symlink() would otherwise succeed and hide the fallback. */
+    if (!getenv("HL_TAR_NO_SYMLINK") && symlink(se->linkname, path) == 0)
+        return 0;
+
+    /* Symlinks unavailable (Windows without SeCreateSymbolicLinkPrivilege and
+     * Developer Mode off). Materialize the link from its target. The target is
+     * the linkname resolved against the link's OWN directory; tar_safe_linkname
+     * confined it to the extraction root at parse time. */
     char target[PATH_MAX];
     char *last = strrchr(path, '/');
     int tn = last
         ? snprintf(target, sizeof(target), "%.*s/%s",
-                   (int)(last - path), path, e->linkname)
-        : snprintf(target, sizeof(target), "%s/%s", c->dest, e->linkname);
+                   (int)(last - path), path, se->linkname)
+        : snprintf(target, sizeof(target), "%s/%s", dest, se->linkname);
     if (tn < 0 || (size_t)tn >= sizeof(target)) return -1;
-    return extract_copy(target, path, e->mode ? e->mode : 0755);
+
+    /* Target must be an existing REGULAR file. If it is MISSING it may be
+     * another link this run materializes later (a symlink -> symlink chain, in
+     * any archive order): DEFER rather than fail, so the retry loop resolves it.
+     * A non-regular target (dir / device / fifo) is refused outright. */
+    struct stat st;
+    if (stat(target, &st) != 0)
+        return 1;                                /* deferred */
+    if (!S_ISREG(st.st_mode))
+        return -1;
+
+    /* Prefer a hardlink for archive links: no data copy, and no privilege on
+     * Windows (CreateHardLink works for a non-elevated user). Fall back to a
+     * byte copy across filesystems or where hardlinks are unavailable. */
+    if (link(target, path) == 0)
+        return 0;
+    (void)unlink(path);   /* a failed link() may have left a stub */
+    return extract_copy(target, path, se->mode ? se->mode : 0755);
 }
 
 int hl_tar_extract(const unsigned char *tar, size_t tar_len, const char *dest_dir)
@@ -291,11 +355,36 @@ int hl_tar_extract(const unsigned char *tar, size_t tar_len, const char *dest_di
      * ~/.hull/tools/<name>/ before anything else created ~/.hull/tools. */
     if (hl_mkdir_p(dest_dir, 0755) != 0) return -1;
     struct extract_ctx c = { dest_dir };
-    /* Two passes: files + dirs first, THEN symlinks, so a link's target is
-     * already on disk for the copy-fallback (and symlink ordering is moot). */
+    /* Pass 1: files + dirs, so every REGULAR-file link target is on disk. */
     int rc = tar_iter(tar, tar_len, extract_file_cb, &c, 1, 0);
     if (rc) return rc;
-    return tar_iter(tar, tar_len, extract_symlink_cb, &c, 0, 1);
+
+    /* Pass 2: symlinks. In the materialize-from-target fallback a link's target
+     * may itself be a link created later this run, so resolution is order-
+     * dependent. Collect all links and resolve to a FIXPOINT: repeat while any
+     * link resolves; a link whose target is still missing DEFERS to the next
+     * round. Only after a round makes NO progress do the survivors (a genuinely
+     * dangling target, or a cycle) FAIL closed. (Where real symlinks work the
+     * first round creates them all - no target needed - so the loop is one
+     * pass.) */
+    struct sym_collect sc = { 0 };
+    rc = tar_iter(tar, tar_len, collect_symlink_cb, &sc, 0, 1);
+    if (rc || sc.oom) { sym_collect_free(&sc); return -1; }
+
+    size_t remaining = sc.n;
+    int progress = 1;
+    while (remaining > 0 && progress) {
+        progress = 0;
+        for (size_t i = 0; i < sc.n; i++) {
+            if (sc.v[i].done) continue;
+            int r = materialize_link(dest_dir, &sc.v[i]);
+            if (r == 0) { sc.v[i].done = 1; remaining--; progress = 1; }
+            else if (r < 0) { sym_collect_free(&sc); return -1; }
+            /* r == 1: deferred - retry next round. */
+        }
+    }
+    sym_collect_free(&sc);
+    return remaining == 0 ? 0 : -1;   /* survivors = dangling / cycle -> closed */
 }
 
 /* ── Creation ──────────────────────────────────────────────────────── */
