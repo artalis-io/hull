@@ -1141,7 +1141,13 @@ local function compose_features(opts, tmpdir, platform_lib, is_cosmo, compute_fi
             -- for a pure app.main / compute app).
             local needs_http = true
             do
-                local mf = fcompose.extract_manifest(opts.app_dir)
+                -- Extraction drives needs_http (which HTTP bridge to force-link),
+                -- i.e. it CONTROLS composition; a genuine failure is fatal.
+                local mf = fcompose.extract_manifest_or_fatal(opts.app_dir,
+                    "hull build",
+                    function(msg)
+                        tool.stderr(msg); tool.rmdir(tmpdir); tool.exit(1)
+                    end)
                 if mf then
                     local r = tool.modules_resolve(mf, opts.flavor,
                                                    with_feature_list(opts))

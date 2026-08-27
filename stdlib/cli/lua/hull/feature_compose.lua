@@ -36,39 +36,82 @@ local function file_exists(p) return tool.file_exists(p) end
 -- @param app_dir string
 -- @return table|nil  The captured manifest, or nil if extraction failed.
 local _manifest_cache = {}
+-- Returns (manifest, err). `err` is a non-nil string ONLY on a genuine
+-- extraction FAILURE (entry fails to load/parse, throws at top level, or an
+-- import/require does not resolve). A successful run with no app.manifest() call
+-- returns (nil, nil) - a valid manifest-less app, NOT an error. Callers that let
+-- extraction CONTROL COMPOSITION must treat a non-nil err as fatal (see
+-- extract_manifest_or_fatal); read-only callers may ignore it. Does not print;
+-- the caller owns the (command-correct) diagnostic.
 function M.extract_manifest(app_dir)
     local cached = _manifest_cache[app_dir]
-    if cached ~= nil then return cached.manifest end
-    local manifest = nil
+    if cached ~= nil then return cached.manifest, cached.err end
+    local manifest, err = nil, nil
     local lua_entry = app_dir .. "/app.lua"
     local js_entry  = app_dir .. "/app.js"
     if file_exists(lua_entry) then
-        local chunk = tool.loadfile(lua_entry)
-        if chunk then
-            local ok, err = pcall(chunk)
-            if ok then
-                manifest = app.get_manifest()
-            else
-                tool.stderr("hull: warning: Lua manifest extraction failed: "
-                            .. tostring(err) .. "\n")
+        -- Give the tool VM the app root so the entry's relative local requires
+        -- (require("./routes/users") and their nested ./../models/user) resolve
+        -- through the SAME requiring-module-relative + ./.. collapse + app-root
+        -- containment path the runtime uses. Without this a modular app's
+        -- top-level require failed with "module not found" and the manifest was
+        -- silently lost. tool.set_app_dir is a no-op on a build that lacks it.
+        if tool.set_app_dir then tool.set_app_dir(app_dir) end
+        local chunk, load_err = tool.loadfile(lua_entry)
+        if not chunk then
+            err = "could not load app.lua: " .. tostring(load_err)
+        else
+            local ok, run_err = pcall(chunk)
+            -- Capture whatever app.manifest() declared, even if the chunk later
+            -- errors: the manifest is authoritative for composition (it lists
+            -- every module any file imports), and executing the rest of the
+            -- entry - register(app), subfile top-level code that touches a
+            -- capability the tool VM lacks - can legitimately throw during
+            -- extraction without invalidating an already-declared manifest. Only
+            -- a failure that prevents DETERMINING the manifest (syntax error,
+            -- an unresolved require, or an error BEFORE app.manifest ran) is a
+            -- real extraction failure. This matches the JS side, which captures
+            -- the manifest at the app.manifest() call and tolerates a later
+            -- throw. (Aligns Lua/JS; avoids falsely failing a valid app.)
+            manifest = app.get_manifest()
+            if not ok and not manifest then
+                err = tostring(run_err)
             end
         end
     elseif file_exists(js_entry) then
         local ok, js_json_or_err = pcall(tool.extract_manifest_js, js_entry)
         if not ok then
-            tool.stderr("hull: warning: JS manifest extraction failed: "
-                        .. tostring(js_json_or_err) .. "\n")
+            err = tostring(js_json_or_err)
         elseif js_json_or_err then
             local decoded, decode_err = json.decode(js_json_or_err)
             if decoded then
                 manifest = decoded
             else
-                tool.stderr("hull: warning: JS manifest JSON decode failed: "
-                            .. tostring(decode_err) .. "\n")
+                err = "manifest JSON decode failed: " .. tostring(decode_err)
             end
         end
     end
-    _manifest_cache[app_dir] = { manifest = manifest }
+    _manifest_cache[app_dir] = { manifest = manifest, err = err }
+    return manifest, err
+end
+
+-- Extract the manifest for a code path where extraction CONTROLS COMPOSITION
+-- (the resolved manifest decides which subsystems are linked). A genuine
+-- extraction failure here cannot be a warning: proceeding would silently
+-- under- or mis-compose the produced binary. Emits a command-correct fatal
+-- diagnostic and calls on_fail (which is expected not to return). Returns the
+-- manifest (possibly nil for a valid manifest-less app) when extraction
+-- succeeded.
+--
+-- @param app_dir string
+-- @param cmd     string    command label for the message (e.g. "hull build")
+-- @param on_fail function  fatal handler (msg) -> does not return
+function M.extract_manifest_or_fatal(app_dir, cmd, on_fail)
+    local manifest, err = M.extract_manifest(app_dir)
+    if err then
+        on_fail(cmd .. ": manifest extraction failed - it controls feature "
+            .. "composition, so the build cannot continue.\n  " .. err .. "\n")
+    end
     return manifest
 end
 
@@ -468,7 +511,10 @@ function M.plan_mandatory(ctx)
     local needs_wasm = (ctx.compute_count or 0) > 0
     local needs_sqlite, needs_image, needs_tls = false, false, false
     do
-        local mf = M.extract_manifest(ctx.app_dir)
+        -- Extraction drives every needs-gate below, i.e. it CONTROLS
+        -- composition; a genuine failure is fatal (never under-compose).
+        local mf = M.extract_manifest_or_fatal(ctx.app_dir, "hull build",
+                                                ctx.on_fail)
         if mf then
             local r = tool.modules_resolve(mf, ctx.flavor, ctx.with_list)
             if r.ok then

@@ -1169,6 +1169,14 @@ e2e-csrf-cookie-fallback: $(BUILDDIR)/hull
 e2e-validate-parity: $(BUILDDIR)/hull
 	sh tests/e2e_validate_parity.sh
 
+# Modular local-module resolution parity (0.13.1 PR#2): one resolution rule
+# across dev-run + manifest-extraction/build; Lua+JS; escape fail-closed; a
+# composition-controlling extraction failure is fatal. Needs an embedded hull
+# (hull build), so the CI e2e job runs it after `make EMBED_PLATFORM=1`.
+.PHONY: e2e-modular-resolution
+e2e-modular-resolution: $(BUILDDIR)/hull
+	sh tests/e2e_modular_resolution.sh
+
 .PHONY: e2e-path-parity
 e2e-path-parity: $(BUILDDIR)/hull
 	sh tests/e2e_path_parity.sh
