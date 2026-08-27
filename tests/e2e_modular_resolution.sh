@@ -223,4 +223,41 @@ fi
 [ -f "$dyn/out" ] && fail "dynamic-code app produced a binary"
 pass "dynamic-code (load) is unavailable during extraction (fatal, no binary)"
 
+# ── Dynamic code cannot be RECOVERED via an approved/preloaded import ──
+# Importing a permitted helper must not restore any Lua loader; using any of
+# load/loadfile/loadstring/dofile after the import still fails closed (fatal
+# extraction, no binary).
+lrec="$WORK/dyn_recover_lua"; mkdir -p "$lrec"
+echo 'return { x = 1 }' > "$lrec/helper.lua"
+cat > "$lrec/app.lua" <<'LUA'
+local helper = require("./helper")          -- approved local-module import
+;(load or loadfile or loadstring or dofile)("return 1")  -- nil after removal -> error
+app.manifest({ modules = { "hull/http-server@1" } })
+LUA
+if "$HULL" build "$lrec" -o "$lrec/out" --no-verify-platform >/dev/null 2>&1; then
+    fail "a Lua loader was recoverable after an approved import"
+fi
+[ -f "$lrec/out" ] && fail "Lua dyncode-recover app produced a binary"
+pass "Lua load/loadfile/loadstring/dofile stay removed after importing a helper"
+
+# JS: importing a permitted helper must not restore eval/Function. QuickJS
+# module top-level throws are DEFERRED (promise), so observe SYNCHRONOUSLY via
+# the captured manifest env rather than via a fatal throw: after the import, the
+# probe records whether eval/Function are callable, and extraction must show both
+# REMOVED.
+jrec="$WORK/dyn_recover_js"; mkdir -p "$jrec"
+echo 'export function helper() { return 1; }' > "$jrec/helper.js"
+cat > "$jrec/app.js" <<'JS'
+import { app } from "hull:app";
+import { helper } from "./helper.js";       // approved local-module import
+const fn = (typeof Function === "function") ? "FN_RECOVERED" : "FN_REMOVED";
+const ev = (typeof eval === "function")     ? "EVAL_RECOVERED" : "EVAL_REMOVED";
+app.manifest({ modules: [], env: [fn, ev] });
+JS
+jout=$("$HULL" manifest "$jrec" 2>&1 || true)   # manifest JSON is emitted on stderr
+echo "$jout" | grep -q 'FN_REMOVED'   || fail "JS Function was recoverable after an approved import ($jout)"
+echo "$jout" | grep -q 'EVAL_REMOVED' || fail "JS eval was recoverable after an approved import ($jout)"
+echo "$jout" | grep -q 'RECOVERED'    && fail "JS dynamic code was recovered after an approved import ($jout)"
+pass "JS eval/Function stay removed after importing a helper"
+
 echo "e2e_modular_resolution: ALL PASS"
