@@ -1,0 +1,211 @@
+name: Release acceptance (automated, read-only)
+
+# The automated, read-only stage of the release-acceptance run
+# (docs/release_acceptance.md). Verifies a published release candidate and the
+# maintainer-prepopulated staging mirror(s) WITHOUT mutating any release, and
+# produces an acceptance report the Windows acceptance job consumes. This
+# workflow NEVER creates, modifies, or deletes a
+# tag, release, or asset, and never alters "latest": it only reads and verifies.
+#
+# Prerequisite (a manual, auditable maintainer step - NOT done here):
+#   - Publish v0.14.0-rc1 as an official prerelease on the main repo.
+#   - Mirror the exact signed RC assets into <staging_rc_repo> as ITS latest
+#     NON-prerelease (so `hull update --repo=<staging_rc_repo>` selects them).
+#   - For downgrade: mirror the signed v0.13.0 assets into <staging_prev_repo>
+#     as its latest non-prerelease.
+#   - Remove the staging releases after final promotion (also manual).
+
+on:
+  workflow_dispatch:
+    inputs:
+      rc_tag:
+        description: RC tag on the official repo (e.g. v0.14.0-rc1)
+        required: true
+        default: v0.14.0-rc1
+      expect_version:
+        description: Version string the RC binary must report
+        required: true
+        default: 0.14.0-rc1
+      official_repo:
+        description: Official repository
+        required: true
+        default: artalis-io/hull
+      staging_rc_repo:
+        description: Staging repo whose latest mirrors the RC (ORG/NAME)
+        required: true
+      prev_tag:
+        description: Previous release tag (for downgrade), on the official repo
+        required: true
+        default: v0.13.0
+      staging_prev_repo:
+        description: Staging repo whose latest mirrors the previous release (optional; blank = skip downgrade)
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+jobs:
+  automated-acceptance:
+    name: Verify RC + staging (read-only) + produce report
+    runs-on: ubuntu-24.04
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+
+      - name: Extract the source-controlled release pubkey
+        id: pubkey
+        run: |
+          hex=$(python3 - <<'PY'
+          import re
+          s = open('include/hull/release.h').read()
+          m = re.search(r'define\s+HL_RELEASE_PUBKEY_HEX(.*?)(?=\n#|\n\n|\Z)', s, re.S)
+          h = ''.join(re.findall(r'"([0-9a-fA-F]*)"', m.group(1))) if m else ''
+          print(h if len(h) == 64 else '')
+          PY
+          )
+          echo "hex=$hex" >> "$GITHUB_OUTPUT"
+          if [ -n "$hex" ]; then echo "source release pubkey extracted"; else echo "using the candidate's embedded key (source pubkey not a 64-hex literal)"; fi
+
+      - name: Acceptance report - header
+        run: |
+          {
+            echo "# Release acceptance report (automated, read-only)"
+            echo
+            echo "- Official repo: \`${{ inputs.official_repo }}\`"
+            echo "- RC tag: \`${{ inputs.rc_tag }}\` (expect version \`${{ inputs.expect_version }}\`)"
+            echo "- Staging RC repo: \`${{ inputs.staging_rc_repo }}\`"
+            echo "- Prev tag: \`${{ inputs.prev_tag }}\`; staging prev repo: \`${{ inputs.staging_prev_repo || '(skipped)' }}\`"
+            echo "- Commit: \`${{ github.sha }}\`  Run: ${{ github.run_id }}"
+            echo
+            echo "| check | result |"
+            echo "| --- | --- |"
+          } > acceptance-report.md
+
+      - name: Verify official RC assets (signature, hashes, version)
+        run: |
+          sh tests/acceptance/verify_release_assets.sh \
+            "${{ inputs.official_repo }}" "${{ inputs.rc_tag }}" \
+            "${{ inputs.expect_version }}" "$PWD/rc-official" \
+            "${{ steps.pubkey.outputs.hex }}"
+          echo "| Official RC assets (sig + SHA-256 + version) | PASS |" >> acceptance-report.md
+
+      - name: Verify official previous-release assets
+        run: |
+          # Strip a leading 'v' for the version-string check.
+          prev_ver="${{ inputs.prev_tag }}"; prev_ver="${prev_ver#v}"
+          sh tests/acceptance/verify_release_assets.sh \
+            "${{ inputs.official_repo }}" "${{ inputs.prev_tag }}" \
+            "$prev_ver" "$PWD/prev-official" \
+            "${{ steps.pubkey.outputs.hex }}"
+          echo "| Official previous release ($prev_ver) assets | PASS |" >> acceptance-report.md
+
+      - name: Verify staging RC mirrors the official RC exactly
+        run: |
+          sh tests/acceptance/verify_staging_equivalence.sh \
+            "${{ inputs.staging_rc_repo }}" "$PWD/rc-official" \
+            "${{ inputs.expect_version }}" "$PWD/rc-staging" \
+            "${{ steps.pubkey.outputs.hex }}"
+          echo "| Staging RC /releases/latest mirrors official RC | PASS |" >> acceptance-report.md
+
+      - name: Verify staging previous mirrors the official previous (downgrade)
+        if: inputs.staging_prev_repo != ''
+        run: |
+          prev_ver="${{ inputs.prev_tag }}"; prev_ver="${prev_ver#v}"
+          sh tests/acceptance/verify_staging_equivalence.sh \
+            "${{ inputs.staging_prev_repo }}" "$PWD/prev-official" \
+            "$prev_ver" "$PWD/prev-staging" \
+            "${{ steps.pubkey.outputs.hex }}"
+          echo "| Staging previous /releases/latest mirrors official previous | PASS |" >> acceptance-report.md
+
+      - name: SBOM validation + delta vs previous
+        run: |
+          rc=./rc-official/hull-linux-x86_64
+          prev=./prev-official/hull-linux-x86_64
+          "$rc"   sbom --format=json > rc.sbom.json
+          "$prev" sbom --format=json > prev.sbom.json
+          # Well-formed + non-empty + carries the expected vendored components.
+          python3 - <<'PY'
+          import json,sys
+          rc=json.load(open('rc.sbom.json')); prev=json.load(open('prev.sbom.json'))
+          def names(s):
+              items = s if isinstance(s,list) else s.get('components', s.get('packages', []))
+              out=set()
+              for c in items:
+                  n=c.get('name') or c.get('packageName')
+                  if n: out.add(n)
+              return out
+          rcn, prevn = names(rc), names(prev)
+          assert rcn, 'RC SBOM has no components'
+          for core in ('keel','quickjs','lua','sqlite','mbedtls','wamr'):
+              assert any(core in x.lower() for x in rcn), f'RC SBOM missing {core}'
+          added=sorted(rcn-prevn); removed=sorted(prevn-rcn)
+          open('sbom-delta.txt','w').write(
+              'added: '+(', '.join(added) or '(none)')+'\n'+
+              'removed: '+(', '.join(removed) or '(none)')+'\n')
+          print('SBOM ok; added',added,'removed',removed)
+          PY
+          {
+            echo "| SBOM well-formed + core components present | PASS |"
+            echo
+            echo '### SBOM delta (RC vs previous)'
+            echo '```'
+            cat sbom-delta.txt
+            echo '```'
+          } >> acceptance-report.md
+
+      - name: install.sh dry-run + completions
+        run: |
+          sh tests/e2e_install.sh
+          echo "| install.sh dry-run (platform/flavor/prefix) + completions | PASS |" >> acceptance-report.md
+
+      - name: Release smoke (install a signed tool from the RC, read-only)
+        run: |
+          # release_smoke.sh installs a signed tool from the RC release into a
+          # throwaway HOME, exercises it, and uninstalls - it never touches a
+          # release. Pinned to the RC via the candidate binary's HL_VERSION.
+          export HOME="$RUNNER_TEMP/smoke-home"; mkdir -p "$HOME"
+          HULL="$PWD/rc-official/hull-linux-x86_64" sh tests/release_smoke.sh
+          echo "| Release smoke (signed tool install from RC) | PASS |" >> acceptance-report.md
+
+      - name: Reproducible-build confirmation on the RC commit
+        run: |
+          # Read-only: assert the RC tag's commit has passing reproducible-build
+          # check runs (the per-commit Reproducible build jobs already gate bit
+          # reproducibility; we confirm they are green on the tagged commit).
+          sha=$(gh api "repos/${{ inputs.official_repo }}/git/refs/tags/${{ inputs.rc_tag }}" \
+                  --jq '.object.sha')
+          # tags may be annotated; deref to the commit
+          typ=$(gh api "repos/${{ inputs.official_repo }}/git/tags/$sha" --jq '.object.sha' 2>/dev/null || echo "")
+          [ -n "$typ" ] && sha="$typ"
+          runs=$(gh api "repos/${{ inputs.official_repo }}/commits/$sha/check-runs" --paginate \
+                   --jq '.check_runs[] | select(.name|test("Reproducible build")) | .name+"="+(.conclusion//"pending")')
+          echo "$runs"
+          if [ -z "$runs" ]; then
+            echo "FAIL: no reproducible-build check runs found on $sha"; exit 1
+          fi
+          if echo "$runs" | grep -vq '=success$'; then
+            echo "FAIL: a reproducible-build check is not green on the RC commit"; exit 1
+          fi
+          echo "| Reproducible-build checks green on RC commit | PASS |" >> acceptance-report.md
+
+      - name: Acceptance report - footer
+        if: always()
+        run: |
+          {
+            echo
+            echo "_Automated read-only stage complete. The Windows acceptance job"
+            echo "runs against \`${{ inputs.staging_rc_repo }}\` (upgrade) and the previous"
+            echo "staging repo (downgrade)._"
+          } >> acceptance-report.md
+          echo '--- report ---'; cat acceptance-report.md
+
+      - name: Upload acceptance report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        with:
+          name: acceptance-report-automated
+          path: |
+            acceptance-report.md
+            sbom-delta.txt

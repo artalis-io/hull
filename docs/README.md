@@ -66,6 +66,7 @@ specific signature, parameter list, or return value.
 | [`tools_install.md`](tools_install.md) | Side-loaded companion tools (`hull tools install`), the version-coupled trust chain, single-binary vs bundle assets. |
 | [`composed_feature_signing.md`](composed_feature_signing.md) | `package.sig.gethull.composed` - attesting every composed archive across the platform + release trust domains. |
 | [`release_signing.md`](release_signing.md) | Three-layer signature system + the release-key flow (embedding, sign step, `hull update` verification). |
+| [`release_acceptance.md`](release_acceptance.md) | The pre-promotion acceptance run: the read-only fail-closed verification workflow, the maintainer-prepopulated staging-repo model for testing `hull update`, and the Windows acceptance stage. |
 | [`sbom.md`](sbom.md) | The SBOM subsystem (human / JSON / CycloneDX / SPDX formats). |
 | [`compiler_free_build.md`](compiler_free_build.md) | The object-emitter path: `hull build` needs only a linker (no C compiler). |
 | [`toolchain_free_build.md`](toolchain_free_build.md) | Linker-as-tool + cross-compilation (`--linker=zig`), the musl static-link floors. |
