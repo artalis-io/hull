@@ -449,6 +449,45 @@ UTEST_F(tar_fixture, extract_symlink_dangling_fails_in_fallback) {
     free(buf);
 }
 
+/* Deferred (fixpoint) resolution: a link whose TARGET IS ANOTHER LINK
+ * materialized later this run must still resolve in the non-admin fallback,
+ * regardless of archive order. arch2 -> arch1 -> cosmocc, with arch2 emitted
+ * BEFORE arch1 (target-after-link), forces the retry loop: round 1 defers arch2
+ * (arch1 not on disk yet) and materializes arch1 from cosmocc; round 2
+ * materializes arch2 from the now-regular arch1. Proves ordering cannot break
+ * the fallback. */
+UTEST_F(tar_fixture, extract_symlink_chain_target_after_link_resolves) {
+    setenv("HL_TAR_NO_SYMLINK", "1", 1);
+    unsigned char *buf = calloc(1, 8192);
+    ASSERT_NE(buf, NULL);
+    size_t off = 0;
+    tar_add_file(buf, &off, "bin/cosmocc", "DRIVER-BYTES", 12);
+    tar_add_symlink(buf, &off, "bin/arch2", "arch1");   /* link BEFORE its target */
+    tar_add_symlink(buf, &off, "bin/arch1", "cosmocc"); /* arch2's target, later */
+    off += 512;
+
+    char dest[PATH_MAX];
+    snprintf(dest, sizeof(dest), "%s/cc", utest_fixture->tmpdir);
+    ASSERT_EQ(hl_tar_extract(buf, off, dest), 0);
+
+    /* BOTH links resolve to the driver bytes despite the reversed order, and
+     * both are materialized regular files (not symlinks). */
+    for (int k = 0; k < 2; k++) {
+        char p[PATH_MAX], rd[64];
+        snprintf(p, sizeof(p), "%s/bin/%s", dest, k ? "arch1" : "arch2");
+        struct stat st;
+        ASSERT_EQ(lstat(p, &st), 0);
+        ASSERT_TRUE(S_ISREG(st.st_mode));
+        FILE *f = fopen(p, "rb"); ASSERT_NE(f, NULL);
+        size_t n = fread(rd, 1, sizeof(rd), f); fclose(f);
+        ASSERT_EQ(n, (size_t)12);
+        ASSERT_EQ(memcmp(rd, "DRIVER-BYTES", 12), 0);
+    }
+
+    unsetenv("HL_TAR_NO_SYMLINK");
+    free(buf);
+}
+
 /* A symlink whose target is absolute or escapes via ".." is rejected (a
  * malformed archive), so it can never become a write-through primitive. */
 UTEST_F(tar_fixture, extract_rejects_unsafe_symlink_target) {
