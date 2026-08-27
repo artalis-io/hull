@@ -66,3 +66,10 @@ oom-*
 # Python bytecode cache (never track)
 __pycache__/
 *.pyc
+
+# Local scratch/evidence dirs (never commit)
+_ev*/
+_evb/
+_sec/
+_scratch*/
+_dbg*/
