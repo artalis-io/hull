@@ -511,9 +511,17 @@ int hl_release_io_self_replace(const char *self_path,
 
     if (write_new_file(new_path, data, len, mode) != 0) return -1;
 
-    /* Fast path: on POSIX, rename over the running exe is atomic and works.
-     * HULL_FORCE_DEFERRED_SWAP forces the fallback for tests. */
-    if (!getenv("HULL_FORCE_DEFERRED_SWAP")) {
+    /* Fast path: on POSIX, rename over the running exe is atomic and works; on
+     * Windows a locked running exe makes it fail and we fall through to the
+     * deferred swap. A test-only build (HL_RELEASE_IO_TEST_HOOKS) can force the
+     * deferred path on POSIX via HULL_FORCE_DEFERRED_SWAP - the env read is
+     * compiled out of production so the hook cannot ship. */
+#ifdef HL_RELEASE_IO_TEST_HOOKS
+    int force_deferred = (getenv("HULL_FORCE_DEFERRED_SWAP") != NULL);
+#else
+    const int force_deferred = 0;
+#endif
+    if (!force_deferred) {
         if (rename(new_path, self_path) == 0)
             return 0;
         /* The atomic rename failed - most likely the running exe is locked
@@ -532,10 +540,15 @@ int hl_release_io_self_replace(const char *self_path,
         return -1;
     }
 
-    /* A test hook to exercise the rollback branch below without a real
-     * mid-swap crash: pretend the install step failed. */
+    /* Install the new binary at the now-freed path. A test-only build can
+     * simulate a mid-swap install failure (to exercise the rollback below)
+     * via HULL_TEST_SWAP_FAIL; the hook is compiled out of production. */
+#ifdef HL_RELEASE_IO_TEST_HOOKS
     int install_ok = getenv("HULL_TEST_SWAP_FAIL")
                        ? 0 : (rename(new_path, self_path) == 0);
+#else
+    int install_ok = (rename(new_path, self_path) == 0);
+#endif
     if (!install_ok) {
         /* ROLLBACK: restore the original from the aside copy so a failed
          * update never leaves hull missing. */
@@ -563,9 +576,13 @@ void hl_release_io_cleanup_stale_self(const char *argv0)
 #if !defined(__COSMOPOLITAN__)
     /* A deferred swap only happens where the atomic rename fails (a running
      * .exe on Windows - i.e. a cosmo host). On a native build no `<self>.old`
-     * is ever created, so this startup sweep is pure waste; skip it unless a
-     * test forces the deferred path. */
+     * is ever created, so this startup sweep is pure waste and is skipped. A
+     * test-only build runs it when the deferred path is forced. */
+#  ifdef HL_RELEASE_IO_TEST_HOOKS
     if (!getenv("HULL_FORCE_DEFERRED_SWAP")) return;
+#  else
+    return;
+#  endif
 #endif
     char self[PATH_MAX];
     if (hl_release_io_self_path(self, sizeof(self)) != 0) {
