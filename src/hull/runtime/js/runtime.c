@@ -363,6 +363,19 @@ static JSModuleDef *hl_js_module_loader(JSContext *ctx,
         if (!e && lookup != module_name)
             e = hl_vfs_find(js->base.app_vfs, module_name);
 
+        /* A nested relative import that needed `..` collapse normalizes to a
+         * bare app-relative name ("lib/auth.js" imported via "./../lib/auth.js"
+         * from "routes/users.js"), but embedded entries are keyed with the
+         * canonical "./" prefix ("./lib/auth.js"). Try the "./"-prefixed form so
+         * a BUILT modular app resolves nested imports the same way dev does.
+         * Mirrors the Lua embedded-VFS key resolution in mod_fs.c. */
+        char dot_key[HL_MODULE_PATH_MAX];
+        if (!e && module_name[0] != '/' && module_name[0] != '.') {
+            int dk = snprintf(dot_key, sizeof(dot_key), "./%s", module_name);
+            if (dk > 0 && (size_t)dk < sizeof(dot_key))
+                e = hl_vfs_find(js->base.app_vfs, dot_key);
+        }
+
         if (e && e->name[0] == '.') {
             /* Check it's a JS/JSON entry (not Lua-only) */
             size_t elen = strlen(e->name);

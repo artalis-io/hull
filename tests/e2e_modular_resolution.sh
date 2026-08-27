@@ -97,6 +97,23 @@ run_lang() {
         fail "$lang build: extraction failed on a valid modular app"
     [ -f "$app/out" ] || fail "$lang build produced no binary"
     pass "$lang manifest extraction resolves the modular chain"
+
+    # 3. the BUILT binary RUNS (not merely builds): the embedded-VFS resolver
+    #    must resolve the same nested relative chain (routes -> ./../lib ->
+    #    ./../models) the dev filesystem path does.
+    PORT=$((PORT + 1))
+    "$app/out" -p "$PORT" >/dev/null 2>&1 &
+    SRV=$!
+    i=0; body=""
+    while [ $i -lt 25 ]; do
+        sleep 0.3
+        body=$(get "$PORT" /who); [ "$body" = "alice" ] && break
+        kill -0 "$SRV" 2>/dev/null || break
+        i=$((i + 1))
+    done
+    kill "$SRV" 2>/dev/null || true; wait "$SRV" 2>/dev/null || true; SRV=""
+    [ "$body" = "alice" ] || fail "$lang BUILT binary did not resolve the modular chain at runtime (/who='$body')"
+    pass "$lang built binary RUNS the nested modular app"
 }
 
 run_lang lua app.lua mk_lua

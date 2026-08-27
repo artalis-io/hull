@@ -474,6 +474,58 @@ static int resolve_module_path(lua_State *L, const char *name,
     return 0;
 }
 
+/*
+ * Resolve a RELATIVE require ("./x", "../x") to its canonical embedded-VFS key:
+ * the name joined to the requiring module's directory (__hull_current_module)
+ * with `.`/`..` collapsed, no extension - e.g. "./../models/user" required from
+ * "./routes/users" resolves to "./models/user". This is the SAME normalization
+ * the filesystem fallback (resolve_module_path) applies, so a nested relative
+ * require resolves in a BUILT binary (modules embedded in __hull_modules under
+ * their canonical keys) exactly as it does in dev (modules on disk). Without it
+ * the VFS lookup used the literal name and missed on any require needing `..`
+ * collapse, so a built modular app failed at runtime with "module not found".
+ * A non-relative name is copied through unchanged. Returns 0 on success (out
+ * set), -1 on error (too long, or `..` escaping the app root - fail closed).
+ */
+static int resolve_module_key(lua_State *L, const char *name,
+                              char *out, size_t out_size)
+{
+    if (name[0] != '.') {
+        if (strlen(name) >= out_size) return -1;
+        memcpy(out, name, strlen(name) + 1);
+        return 0;
+    }
+
+    lua_getfield(L, LUA_REGISTRYINDEX, "__hull_current_module");
+    const char *caller = lua_tostring(L, -1);
+    char caller_dir[HL_MODULE_PATH_MAX];
+    if (caller) {
+        const char *last_slash = strrchr(caller, '/');
+        if (last_slash) {
+            size_t dir_len = (size_t)(last_slash - caller);
+            if (dir_len >= sizeof(caller_dir)) { lua_pop(L, 1); return -1; }
+            memcpy(caller_dir, caller, dir_len);
+            caller_dir[dir_len] = '\0';
+        } else {
+            caller_dir[0] = '.'; caller_dir[1] = '\0';
+        }
+    } else {
+        caller_dir[0] = '.'; caller_dir[1] = '\0';
+    }
+    lua_pop(L, 1); /* pop __hull_current_module */
+
+    char joined[HL_MODULE_PATH_MAX];
+    int n = snprintf(joined, sizeof(joined), "%s/%s", caller_dir, name);
+    if (n < 0 || (size_t)n >= sizeof(joined)) return -1;
+    if (normalize_path(joined) != 0) return -1; /* escapes root -> fail closed */
+    /* Embedded module keys are app-root-relative with a leading "./"
+     * (e.g. "./routes/users"); normalize_path drops the "." segments, so re-add
+     * the prefix to match the __hull_modules keys exactly. */
+    int m = snprintf(out, out_size, "./%s", joined);
+    if (m < 0 || (size_t)m >= out_size) return -1;
+    return 0;
+}
+
 /* ── Execute and cache a loaded module chunk ──────────────────────── */
 
 /*
@@ -634,9 +686,42 @@ static int hl_lua_require(lua_State *L)
     }
     lua_pop(L, 1); /* pop _LOADED */
 
-    /* 4. Look up in embedded modules table (registry "__hull_modules") */
+    /* 4. Look up in embedded modules table (registry "__hull_modules").
+     *
+     * Embedded modules are keyed by their canonical app-root-relative path. A
+     * relative require must be resolved against the requiring module FIRST (the
+     * same normalization the filesystem fallback applies) so a nested
+     * `require("./../models/user")` from "./routes/users" looks up the
+     * canonical "./models/user" key, not the literal string. `mkey` holds the
+     * resolved key for a relative name (falls back to the literal on error, so
+     * a `..`-escaping name simply misses and fails closed). */
+    char mkey[HL_MODULE_PATH_MAX];
+    const char *vkey = name;
+    if (name[0] == '.' && resolve_module_key(L, name, mkey, sizeof(mkey)) == 0)
+        vkey = mkey;
+
+    /* Canonical-key cache: the module may already be loaded under its canonical
+     * key from a DIFFERENT literal require string (the top-of-function cache is
+     * keyed by the literal name). Check here so a repeated relative require
+     * returns the SAME instance and does not re-execute - matching normal
+     * runtime loading and keeping require cycles well-behaved. */
+    if (vkey != name) {
+        lua_getfield(L, LUA_REGISTRYINDEX, "__hull_loaded");
+        lua_getfield(L, -1, vkey);
+        if (!lua_isnil(L, -1)) {
+            /* also cache under the literal name for a faster next hit */
+            lua_getfield(L, LUA_REGISTRYINDEX, "__hull_loaded");
+            lua_pushvalue(L, -2);
+            lua_setfield(L, -2, name);
+            lua_pop(L, 1);            /* pop __hull_loaded (2nd) */
+            lua_remove(L, -2);         /* remove __hull_loaded (1st) */
+            return 1;                  /* cached module on top */
+        }
+        lua_pop(L, 2); /* pop nil + __hull_loaded */
+    }
+
     lua_getfield(L, LUA_REGISTRYINDEX, "__hull_modules");
-    lua_getfield(L, -1, name);
+    lua_getfield(L, -1, vkey);
     if (!lua_isnil(L, -1)) {
         lua_remove(L, -2); /* remove __hull_modules table */
 
@@ -645,9 +730,9 @@ static int hl_lua_require(lua_State *L)
          * the decode works even when the app doesn't declare
          * hull/json@1 (the user wrote `require("./locales/en.json")`,
          * which is data loading, not stdlib use). */
-        size_t nlen = strlen(name);
-        if (name[0] == '.' && name[1] == '/' &&
-            nlen >= 5 && strcmp(name + nlen - 5, ".json") == 0) {
+        size_t nlen = strlen(vkey);
+        if (vkey[0] == '.' && vkey[1] == '/' &&
+            nlen >= 5 && strcmp(vkey + nlen - 5, ".json") == 0) {
             lua_getfield(L, LUA_REGISTRYINDEX, "__hull_json_internal");
             lua_getfield(L, -1, "decode");
             lua_remove(L, -2); /* remove json table */
@@ -656,15 +741,23 @@ static int hl_lua_require(lua_State *L)
             if (lua_pcall(L, 1, 1, 0) != LUA_OK)
                 return lua_error(L);
 
-            /* Cache in __hull_loaded */
+            /* Cache in __hull_loaded under BOTH the canonical key and the
+             * literal require string, so a later identical require hits the
+             * top-of-function cache (which is keyed by the literal name). */
             lua_getfield(L, LUA_REGISTRYINDEX, "__hull_loaded");
             lua_pushvalue(L, -2);
-            lua_setfield(L, -2, name);
+            lua_setfield(L, -2, vkey);
+            if (vkey != name) {
+                lua_pushvalue(L, -2);
+                lua_setfield(L, -2, name);
+            }
             lua_pop(L, 1); /* pop __hull_loaded */
             return 1;
         }
 
-        return execute_and_cache_module(L, name);
+        /* Execute under the CANONICAL key so this module's own relative
+         * requires resolve against its true app-root-relative path. */
+        return execute_and_cache_module(L, vkey);
     }
     lua_pop(L, 2); /* pop nil + __hull_modules */
 
