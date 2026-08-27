@@ -59,6 +59,8 @@
 
 #include "lua.h"
 #include "lauxlib.h"
+#include "internal.h"          /* get_hl_lua_from_L, HlLua (tool.set_app_dir) */
+#include "hull/utils/alloc.h"  /* hl_alloc_malloc / hl_alloc_free_const */
 
 /* Registry key for the unveil context pointer */
 #define TOOL_UNVEIL_KEY "__hull_tool_unveil"
@@ -564,6 +566,38 @@ static int l_tool_stdout(lua_State *L)
     const char *msg = luaL_checklstring(L, 1, &len);
     fwrite(msg, 1, len, stdout);
     fflush(stdout);
+    return 0;
+}
+
+/* ── tool.set_app_dir(dir) ─────────────────────────────────────────────
+ *
+ * Set the tool VM's module-resolution root (lua->app_dir) so manifest
+ * extraction resolves an app's relative local modules the SAME way the runtime
+ * does: a modular app's top-level require("./routes/users") (and its nested
+ * ./../models/user) only reaches the filesystem-fallback resolver in
+ * hl_lua_require when lua->app_dir is set, which then applies requiring-module-
+ * relative resolution + canonical ./.. collapse + app-root containment. The
+ * extraction code knows the real app directory; parse_app_dir() (used for the
+ * sandbox unveil) returns the first positional - the SUBCOMMAND, e.g. "build" -
+ * so it is not a reliable module root. Idempotent: frees any prior root first.
+ */
+static int l_tool_set_app_dir(lua_State *L)
+{
+    const char *dir = luaL_checkstring(L, 1);
+    HlLua *lua = get_hl_lua_from_L(L);
+    if (!lua) return 0;
+    if (lua->app_dir) {
+        hl_alloc_free_const(lua->base.alloc, lua->app_dir, lua->app_dir_size);
+        lua->app_dir = NULL;
+        lua->app_dir_size = 0;
+    }
+    size_t n = strlen(dir) + 1;
+    char *copy = hl_alloc_malloc(lua->base.alloc, n);  /* NULL alloc -> malloc */
+    if (copy) {
+        memcpy(copy, dir, n);
+        lua->app_dir = copy;
+        lua->app_dir_size = n;
+    }
     return 0;
 }
 
@@ -1690,6 +1724,7 @@ static const luaL_Reg tool_funcs[] = {
     { "stderr",                 l_tool_stderr },
     { "stdout",                 l_tool_stdout },
     { "loadfile",               l_tool_loadfile },
+    { "set_app_dir",            l_tool_set_app_dir },
     { "extract_manifest_js",    l_tool_extract_manifest_js },
     { "extract_platform",       l_tool_extract_platform },
     { "extract_feature_runtime", l_tool_extract_feature_runtime },

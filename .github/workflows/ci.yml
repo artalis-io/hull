@@ -834,6 +834,18 @@ jobs:
           # (EMBED_PLATFORM is not in the config sentinel), and the e2e needs it.
           make EMBED_PLATFORM=1
 
+      - name: Modular local-module resolution E2E (0.13.1 PR#2, must NOT skip)
+        timeout-minutes: 4
+        run: |
+          set -o pipefail
+          # Run the script DIRECTLY (not `make e2e-modular-resolution`): any bare
+          # `make` here trips the config sentinel and clobbers the embedded hull.
+          sh tests/e2e_modular_resolution.sh 2>&1 | tee modres.log
+          rc=${PIPESTATUS[0]}
+          [ "$rc" -eq 0 ] || { echo "::error::modular resolution e2e failed (rc=$rc)"; exit "$rc"; }
+          grep -q "e2e_modular_resolution: ALL PASS" modres.log \
+            || { echo "::error::modular resolution e2e did not reach ALL PASS"; exit 1; }
+
       - name: Compute AOT shared-heap E2E (spans + segments, must NOT skip)
         timeout-minutes: 12
         run: |
