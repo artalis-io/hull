@@ -8,6 +8,77 @@ release-artifact layout).
 
 ## [Unreleased]
 
+## [0.14.0] - 2026-08-27
+
+Windows stabilization. A produced Cosmopolitan APE web app now serves on Windows
+(and every host); manifest extraction gains project-rooted local-module
+resolution with hardened security; `hull update` self-replaces safely on a
+locked Windows executable; and the tool-resolution surfaces (`doctor` /
+`tools list` / `agent tools`) agree. Several fixes are security-relevant.
+
+### Added
+
+- **Unified tool resolution.** `hull tools list`, `hull agent tools`, and
+  `hull doctor` now report tool install/resolution through one shared resolver,
+  so they agree on whether a tool is a hull-managed install, where it resolves
+  (managed / beside hull / on `PATH`), and its accurate on-disk size - recursive
+  for a directory bundle. (#428)
+
+### Changed
+
+- **Produced Cosmopolitan APE web apps serve on Windows (and every host).** A
+  `hull build` of a cosmo web app previously linked the strong server entry but
+  a *weak* route-wiring stub, so the app started and exited without listening.
+  The per-runtime HTTP bridge is now force-anchored at compose, with a post-link
+  verification. (#422)
+- **`hull tools list` / `hull agent tools`** now surface a system/`PATH`- or
+  sibling-resolved tool (not only `~/.hull/tools`) and report accurate bundle
+  sizes; the prior behavior reported every directory-bundle tool (cosmocc, zig,
+  the musl floors) as not-installed with size 0. (#428)
+- **`hull tools install cosmocc`** on a native hull now fails fast (before any
+  network round-trip) with a clear message that cosmocc is the cosmo/APE
+  toolchain for Windows app builds, installed from the cosmo `hull`. (#428)
+
+### Fixed
+
+- **One project-rooted local-module resolution rule** across dev, test, manifest
+  extraction, and built binaries (Lua + JS): a nested `require`/`import` resolves
+  relative to the requiring module and fails closed on escape past the app root.
+  A manifest-extraction failure that controls feature composition is now fatal
+  rather than silently building with defaults. (#423)
+- **Non-admin Windows cosmocc extraction.** Archive links prefer a validated
+  hardlink (Windows can't create symlinks without elevation / Developer Mode),
+  copying only from a verified regular target inside the extraction root; the
+  trimmed bundle's producer fails on any dangling member, so an incomplete
+  toolchain is never shipped. (#425)
+- **JS manifest extraction is fatal on a deferred top-level throw or failed
+  import** (parity with Lua), via a bounded, fail-closed settle so a runaway
+  microtask or a never-resolving top-level await can neither hang the build nor
+  silently mis-compose it. A permissive, non-thenable lenient stub lets a
+  feature-module import during extraction still reach `app.manifest()`. (#426)
+- **`hull update` on Windows.** A running `.exe` can't be overwritten in place,
+  so self-update now falls back to a deferred rename-aside swap (`<self>.old`)
+  with rollback on failure and a next-startup sweep of the aside copy; the POSIX
+  atomic-rename path is unchanged. (#429)
+
+### Security
+
+- **Module loading is descriptor-relative and symlink-contained to the app
+  root** - the shared virtual-root resolver (`openat2` / `RESOLVE_IN_ROOT` with a
+  held-fd userspace fallback), replacing a realpath-then-open check: no TOCTOU,
+  and a module symlink cannot escape the app root. (#423)
+- **Dynamic code evaluation is removed from the manifest-extraction window** -
+  `load` / `loadfile` / `loadstring` / `dofile` (Lua) and `eval` / `Function`
+  (JS) are unavailable while extracting a manifest and cannot be recovered after
+  importing an approved helper. (#423)
+
+### Known issues
+
+- A `hull build` of an app that schedules a self-referential-closure infinite
+  microtask can intermittently abort in QuickJS's teardown GC (no binary is
+  produced; loader liveness and the manifest outcome are unaffected). Tracked in
+  #427; the preferred fix is subprocess-isolated extraction, post-0.14.0.
+
 ## [0.13.0] - 2026-08-08
 
 Stdlib maturation: five new plumbing modules, a house style guide that codifies
