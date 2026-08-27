@@ -427,6 +427,52 @@ int hl_release_io_find_checksum(const char *manifest, size_t mlen,
 
 /* ── Atomic write ────────────────────────────────────────────────── */
 
+/* Write @p data to @p new_path (O_CREAT|O_TRUNC, @p mode), fsync, close, and
+ * re-chmod (umask defeats the open mode). Unlinks @p new_path on any failure.
+ * Shared by atomic_write and self_replace. Returns 0 on success, -1 on failure. */
+static int write_new_file(const char *new_path, const void *data, size_t len,
+                          int mode)
+{
+    int fd = open(new_path, O_WRONLY | O_CREAT | O_TRUNC, mode);
+    if (fd < 0) {
+        fprintf(stderr, "release_io: cannot create %s: %s\n",
+                new_path, strerror(errno));
+        return -1;
+    }
+    const unsigned char *p = (const unsigned char *)data;
+    size_t written = 0;
+    while (written < len) {
+        ssize_t w = write(fd, p + written, len - written);
+        if (w <= 0) {
+            fprintf(stderr, "release_io: write failed: %s\n", strerror(errno));
+            close(fd);
+            unlink(new_path);
+            return -1;
+        }
+        written += (size_t)w;
+    }
+    /* fsync before rename so a power-loss doesn't leave a half-written
+     * executable behind. ENOSPC and EIO are the realistic failures. */
+    if (fsync(fd) != 0) {
+        fprintf(stderr, "release_io: fsync failed: %s\n", strerror(errno));
+        close(fd);
+        unlink(new_path);
+        return -1;
+    }
+    /* close(2) can also surface deferred write errors (NFS, network mounts). */
+    if (close(fd) != 0) {
+        fprintf(stderr, "release_io: close failed: %s\n", strerror(errno));
+        unlink(new_path);
+        return -1;
+    }
+    if (chmod(new_path, (mode_t)mode) != 0) {
+        fprintf(stderr, "release_io: chmod failed: %s\n", strerror(errno));
+        unlink(new_path);
+        return -1;
+    }
+    return 0;
+}
+
 int hl_release_io_atomic_write(const char *target_path,
                                const void *data, size_t len,
                                int mode)
@@ -437,49 +483,7 @@ int hl_release_io_atomic_write(const char *target_path,
     int n = snprintf(new_path, sizeof(new_path), "%s.new", target_path);
     if (n < 0 || (size_t)n >= sizeof(new_path)) return -1;
 
-    int fd = open(new_path, O_WRONLY | O_CREAT | O_TRUNC, mode);
-    if (fd < 0) {
-        fprintf(stderr, "atomic_write: cannot create %s: %s\n",
-                new_path, strerror(errno));
-        return -1;
-    }
-    const unsigned char *p = (const unsigned char *)data;
-    size_t written = 0;
-    while (written < len) {
-        ssize_t w = write(fd, p + written, len - written);
-        if (w <= 0) {
-            fprintf(stderr, "atomic_write: write failed: %s\n",
-                    strerror(errno));
-            close(fd);
-            unlink(new_path);
-            return -1;
-        }
-        written += (size_t)w;
-    }
-    /* fsync before rename so a power-loss doesn't leave a half-written
-     * executable behind. ENOSPC and EIO are the realistic failures;
-     * either way, abort rather than rename a partially-flushed file. */
-    if (fsync(fd) != 0) {
-        fprintf(stderr, "atomic_write: fsync failed: %s\n", strerror(errno));
-        close(fd);
-        unlink(new_path);
-        return -1;
-    }
-    /* close(2) can also surface deferred write errors on some
-     * filesystems (NFS, network mounts) - treat the same way. */
-    if (close(fd) != 0) {
-        fprintf(stderr, "atomic_write: close failed: %s\n", strerror(errno));
-        unlink(new_path);
-        return -1;
-    }
-
-    /* chmod again - open(O_CREAT, mode) honours umask, which on most
-     * systems clears the world / group bits we asked for. */
-    if (chmod(new_path, (mode_t)mode) != 0) {
-        fprintf(stderr, "atomic_write: chmod failed: %s\n", strerror(errno));
-        unlink(new_path);
-        return -1;
-    }
+    if (write_new_file(new_path, data, len, mode) != 0) return -1;
 
     if (rename(new_path, target_path) != 0) {
         fprintf(stderr, "atomic_write: rename %s -> %s failed: %s\n",
@@ -488,4 +492,94 @@ int hl_release_io_atomic_write(const char *target_path,
         return -1;
     }
     return 0;
+}
+
+/* ── Self-update-safe replace (Windows deferred swap) ────────────────── */
+
+int hl_release_io_self_replace(const char *self_path,
+                               const void *data, size_t len,
+                               int mode)
+{
+    if (!self_path || (!data && len > 0)) return -1;
+
+    char new_path[PATH_MAX + 8];
+    char old_path[PATH_MAX + 8];
+    int n = snprintf(new_path, sizeof(new_path), "%s.new", self_path);
+    if (n < 0 || (size_t)n >= sizeof(new_path)) return -1;
+    n = snprintf(old_path, sizeof(old_path), "%s.old", self_path);
+    if (n < 0 || (size_t)n >= sizeof(old_path)) return -1;
+
+    if (write_new_file(new_path, data, len, mode) != 0) return -1;
+
+    /* Fast path: on POSIX, rename over the running exe is atomic and works.
+     * HULL_FORCE_DEFERRED_SWAP forces the fallback for tests. */
+    if (!getenv("HULL_FORCE_DEFERRED_SWAP")) {
+        if (rename(new_path, self_path) == 0)
+            return 0;
+        /* The atomic rename failed - most likely the running exe is locked
+         * (Windows). Fall through to the deferred swap rather than abort. */
+    }
+
+    /* Deferred swap. Move the running binary aside (allowed while running,
+     * even on Windows), install the new one, then best-effort remove the old
+     * (it stays locked until this process exits; cleaned up on next startup). */
+    (void)unlink(old_path);                          /* clear any stale .old */
+    if (rename(self_path, old_path) != 0) {
+        fprintf(stderr,
+                "self_replace: cannot move %s aside: %s (update aborted, "
+                "binary intact)\n", self_path, strerror(errno));
+        (void)unlink(new_path);
+        return -1;
+    }
+
+    /* A test hook to exercise the rollback branch below without a real
+     * mid-swap crash: pretend the install step failed. */
+    int install_ok = getenv("HULL_TEST_SWAP_FAIL")
+                       ? 0 : (rename(new_path, self_path) == 0);
+    if (!install_ok) {
+        /* ROLLBACK: restore the original from the aside copy so a failed
+         * update never leaves hull missing. */
+        if (rename(old_path, self_path) != 0) {
+            fprintf(stderr,
+                    "self_replace: CRITICAL: install failed AND rollback "
+                    "failed; your hull binary is at %s\n", old_path);
+        } else {
+            fprintf(stderr,
+                    "self_replace: install failed; rolled back to the "
+                    "previous binary\n");
+        }
+        (void)unlink(new_path);
+        return -1;
+    }
+
+    /* Success. The old binary lingers as <self>.old until this process exits
+     * (Windows keeps it locked); the next hull startup sweeps it. */
+    (void)unlink(old_path);
+    return 0;
+}
+
+void hl_release_io_cleanup_stale_self(const char *argv0)
+{
+#if !defined(__COSMOPOLITAN__)
+    /* A deferred swap only happens where the atomic rename fails (a running
+     * .exe on Windows - i.e. a cosmo host). On a native build no `<self>.old`
+     * is ever created, so this startup sweep is pure waste; skip it unless a
+     * test forces the deferred path. */
+    if (!getenv("HULL_FORCE_DEFERRED_SWAP")) return;
+#endif
+    char self[PATH_MAX];
+    if (hl_release_io_self_path(self, sizeof(self)) != 0) {
+        if (!argv0 || !*argv0) return;
+        char *resolved = realpath(argv0, NULL);
+        if (resolved) {
+            snprintf(self, sizeof(self), "%s", resolved);
+            free(resolved);
+        } else {
+            snprintf(self, sizeof(self), "%s", argv0);
+        }
+    }
+    char old_path[PATH_MAX + 8];
+    int n = snprintf(old_path, sizeof(old_path), "%s.old", self);
+    if (n > 0 && (size_t)n < sizeof(old_path))
+        (void)unlink(old_path);   /* best-effort; absent in the common case */
 }

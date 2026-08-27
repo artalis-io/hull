@@ -263,7 +263,9 @@ int hl_cmd_update(int argc, char **argv, const HlCommandEnv *env)
         }
     }
 
-    if (hl_release_io_atomic_write(self_path, binary, binary_len, 0755) != 0) {
+    /* Self-replace: atomic rename on POSIX; deferred rename-aside swap with
+     * rollback on Windows, where a running .exe can't be overwritten in place. */
+    if (hl_release_io_self_replace(self_path, binary, binary_len, 0755) != 0) {
         kl_free(&alloc, binary, binary_len);
         return 1;
     }

@@ -17,6 +17,7 @@
 #include "hull/commands/dispatch.h"
 #include "hull/commands/version.h"
 #include "hull/commands/help.h"
+#include "hull/release_io.h"
 #include "hull/serve.h"
 
 #include <string.h>
@@ -30,6 +31,12 @@
 
 int hull_main(int argc, char **argv)
 {
+    /* Sweep a leftover `<self>.old` from a prior deferred-swap self-update
+     * (Windows keeps the old exe locked until its process exits, so it's this
+     * next startup that can finally remove it). Best-effort; a no-op on native
+     * builds. */
+    hl_release_io_cleanup_stale_self(argc > 0 ? argv[0] : NULL);
+
     /* Handle -v / --version before subcommand dispatch so that
      * `hull --version` and `hull -v` work as conventional global flags. */
     if (argc >= 2 &&

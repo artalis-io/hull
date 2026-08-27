@@ -154,4 +154,37 @@ int hl_release_io_atomic_write(const char *target_path,
                                const void *data, size_t len,
                                int mode);
 
+/**
+ * Replace the RUNNING hull binary at @p self_path with @p data - a
+ * self-update-safe variant of hl_release_io_atomic_write.
+ *
+ * On POSIX, `rename(2)`-ing a new file over the running executable works, so
+ * this takes the atomic path: write `<self>.new`, then rename over @p self_path.
+ *
+ * On Windows a running `.exe` is locked and cannot be overwritten/renamed-over,
+ * so when the atomic rename fails this falls back to a DEFERRED SWAP: move the
+ * running exe aside to `<self>.old` (allowed while running), rename `<self>.new`
+ * into place, then best-effort delete `<self>.old` (which stays locked until the
+ * old process exits, so it is cleaned up on the next startup - see
+ * hl_release_io_cleanup_stale_self). On any failure during the swap the original
+ * is ROLLED BACK from `<self>.old`, so a failed update never leaves hull missing.
+ *
+ * No OS detection: the atomic path is tried first and the deferred swap is used
+ * only when it fails. Setting `HULL_FORCE_DEFERRED_SWAP` forces the deferred
+ * path (for tests on POSIX).
+ *
+ * @returns 0 on success, -1 on failure (self_path left intact / restored).
+ */
+int hl_release_io_self_replace(const char *self_path,
+                               const void *data, size_t len,
+                               int mode);
+
+/**
+ * Best-effort removal of a leftover `<self>.old` from a prior deferred-swap
+ * self-update (see hl_release_io_self_replace). Safe to call on every startup:
+ * it resolves the running binary (hl_release_io_self_path, else @p argv0) and
+ * unlinks `<self>.old` if present. A no-op when nothing was left behind.
+ */
+void hl_release_io_cleanup_stale_self(const char *argv0);
+
 #endif /* HL_RELEASE_IO_H */
