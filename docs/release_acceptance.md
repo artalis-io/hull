@@ -6,9 +6,19 @@ release. It has two phases, each a checked-in CI workflow:
 - **Automated, read-only stage** (`.github/workflows/release-acceptance.yml`):
   verifies the published RC and the maintainer-prepopulated staging mirror(s),
   and produces an acceptance report. It never mutates a release.
-- **Windows acceptance stage** (a `windows-latest` job, added separately):
-  runs the real Windows behavior that cannot be proven on other hosts -
-  non-admin cosmocc install, a real self-update, and ACL-induced rollback.
+- **Windows acceptance stage** (`.github/workflows/release-acceptance-windows.yml`,
+  logic in `tests/acceptance/windows/*.ps1`): runs the real Windows behavior that
+  cannot be proven on other hosts, all as a freshly-created standard (non-admin)
+  user with Developer Mode disabled. Fail-closed unless the child token is proven
+  non-admin, Developer Mode is off, and control symlink creation is denied
+  (`preconditions.ps1`). Then: a real self-update of the previous APE to the
+  candidate via the RC staging repo (`self_update.ps1`); an ACL-induced mid-swap
+  **rollback** proven to reach the install-step failure, not an earlier stage
+  (`rollback_acl.ps1`); and `extras.ps1` - a spaces-path self-update, non-admin
+  `hull tools install cosmocc`, a Lua and a JS `/ping` build+serve, a nested
+  local-module build+serve, and doctor / tools-list / agent-tools agreement.
+  Optional downgrade via the previous staging repo (`downgrade.ps1`). It is
+  read-only with respect to releases.
 
 Both phases must pass before the final tag is created.
 
@@ -68,7 +78,20 @@ gh workflow run "Release acceptance (automated, read-only)" \
 ```
 
 The run uploads `acceptance-report-automated` (a Markdown report + SBOM delta)
-for review and for the Windows phase to reference.
+for review and for the Windows stage to reference.
+
+## Running the Windows stage
+
+```
+gh workflow run "Release acceptance (Windows, read-only)" \
+  -f staging_rc_repo=<org>/<staging-rc> \
+  -f staging_prev_repo=<org>/<staging-prev> \
+  -f expect_version=0.14.0-rc1
+```
+
+It uploads `windows-acceptance-evidence` (per-check evidence: the non-admin
+token proof, Developer-Mode state, the denied symlink, the self-update residue
+sweep, and the ACL rollback reaching the mid-swap install failure).
 
 ## Promotion
 
