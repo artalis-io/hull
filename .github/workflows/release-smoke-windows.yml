@@ -1,0 +1,72 @@
+name: Release smoke (Windows artifact, read-only)
+
+# Minimal smoke of a PUBLISHED release's Windows artifact (hull-cosmo). It
+# downloads the artifact from the official release, verifies its signature,
+# checksum, and reported version BEFORE execution, then - under a freshly-created
+# standard (non-admin) user with Developer Mode disabled - installs cosmocc and
+# builds + serves a Lua and a JS /ping app, requiring pong.
+#
+# READ-ONLY: downloads from the official release only. It never updates, rolls
+# back, mutates staging, creates/modifies/deletes a release or asset, or alters
+# "latest". All logic lives in checked-in PowerShell (tests/acceptance/windows/
+# run-smoke.ps1 + smoke.ps1, reusing preconditions.ps1). The release_tag +
+# expect_version inputs are REQUIRED with no default, so the smoke never silently
+# targets "latest".
+
+on:
+  workflow_dispatch:
+    inputs:
+      official_repo:
+        description: Repo hosting the release (download source)
+        required: true
+        default: artalis-io/hull
+      release_tag:
+        description: Release tag to smoke (REQUIRED; no silent latest)
+        required: true
+      expect_version:
+        description: Version string the artifact must report (REQUIRED)
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  windows-smoke:
+    name: Windows artifact smoke (non-admin, verify + cosmocc + /ping)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+
+      - name: Extract the source-controlled release pubkey
+        id: pk
+        shell: pwsh
+        run: |
+          $line = Select-String -Path include/hull/release.h -Pattern '[0-9a-fA-F]{64}' | Select-Object -First 1
+          $hex  = [regex]::Match($line.Line, '[0-9a-fA-F]{64}').Value
+          if (-not $hex) { throw "could not extract the release pubkey from include/hull/release.h" }
+          "pubkey=$hex" >> $env:GITHUB_OUTPUT
+
+      - name: Smoke the published artifact as a standard user
+        shell: pwsh
+        run: |
+          Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force
+          $wd = Join-Path $env:RUNNER_TEMP 'wsmoke'
+          $ev = Join-Path $wd 'windows-smoke-evidence.md'
+          & tests/acceptance/windows/run-smoke.ps1 `
+            -OfficialRepo '${{ inputs.official_repo }}' `
+            -ReleaseTag '${{ inputs.release_tag }}' `
+            -ExpectVersion '${{ inputs.expect_version }}' `
+            -Pubkey '${{ steps.pk.outputs.pubkey }}' `
+            -Evidence $ev `
+            -WorkDir $wd
+          $code = $LASTEXITCODE
+          Get-Content $ev | ForEach-Object { Write-Host $_ }
+          Copy-Item $ev "$env:GITHUB_STEP_SUMMARY" -Force
+          if ($code -ne 0) { throw "Windows artifact smoke FAILED (see evidence report)" }
+
+      - name: Upload evidence report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        with:
+          name: windows-smoke-evidence
+          path: ${{ runner.temp }}/wsmoke/windows-smoke-evidence.md
