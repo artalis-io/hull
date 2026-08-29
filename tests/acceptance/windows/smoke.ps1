@@ -85,8 +85,14 @@ function Build-Retry([string]$dir, [string]$outCom) {
 Note "## Published artifact smoke (as $(whoami))"
 
 # --- 1. checksum BEFORE executing the binary -------------------------------
+# Compute the digest via .NET (no cmdlet/module dependency) so the security-
+# critical pre-execution checksum is robust across PowerShell hosts.
 $want = ((Get-Content $Manifest | Where-Object { $_ -match '\shull-cosmo$' } | Select-Object -First 1) -replace '\s.*','').ToLower()
-$got  = (Get-FileHash $Hull -Algorithm SHA256).Hash.ToLower()
+$fsHash = [System.IO.File]::OpenRead($Hull)
+try {
+    $sha256 = [System.Security.Cryptography.SHA256]::Create()
+    $got = ([System.BitConverter]::ToString($sha256.ComputeHash($fsHash)) -replace '-','').ToLower()
+} finally { $fsHash.Dispose() }
 Note ("- checksum want={0} got={1}" -f $want, $got)
 if ($want -and ($want -eq $got)) { Note "- OK: checksum matches hull.sha256 (verified before execution)" }
 else { Fail "checksum mismatch (or hull-cosmo absent from hull.sha256)" }
@@ -95,9 +101,14 @@ else { Fail "checksum mismatch (or hull-cosmo absent from hull.sha256)" }
 $sa = @('verify-release', $Manifest, $Sig)
 if ($Pubkey) { $sa += @('--pubkey', $Pubkey) }
 $so = Cap { & $Hull @sa }; $sr = $LASTEXITCODE
-Note (($so | Out-String) -replace '(?m)^','    ')
-if ($sr -eq 0) { Note ("- OK: signature verified" + $(if ($Pubkey) { " (source release pubkey)" } else { " (embedded key)" })) }
-else { Fail "hull.sha256.sig did not verify" }
+$sigText = ($so | Out-String)
+Note ($sigText -replace '(?m)^','    ')
+# Require the positive success output, not just the exit code: if the binary
+# failed to START (e.g. a permission/extension error) $LASTEXITCODE would be
+# stale, so match the explicit "verify-release: OK" line to avoid a false pass.
+if ($sr -eq 0 -and $sigText -match 'verify-release:\s*OK') {
+    Note ("- OK: signature verified" + $(if ($Pubkey) { " (source release pubkey)" } else { " (embedded key)" }))
+} else { Fail "hull.sha256.sig did not verify (or hull failed to run)" }
 
 # --- 3. version ------------------------------------------------------------
 $ver = (Cap { & $Hull version } | Select-Object -First 1)
