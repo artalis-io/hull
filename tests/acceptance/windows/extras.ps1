@@ -35,13 +35,27 @@ $script:fail = 0
 $work = Join-Path $env:TEMP ("hull-accept-" + [guid]::NewGuid())
 New-Item -ItemType Directory -Path $work | Out-Null
 
-# Serve a built APE and curl a path; returns the response body (or '').
-function Serve-And-Get([string]$exe, [string]$appPath, [int]$port, [string]$route) {
-    $p = Start-Process -FilePath $exe -ArgumentList @($appPath, '-p', "$port") -PassThru -WindowStyle Hidden
+# Serve a BUILT standalone APE and curl a path; returns the response body (or
+# ''). A built binary IS the app, so it is run directly as `<exe> -p <port>` -
+# passing an app path would hand the app a spurious positional arg. On failure to
+# get a response, the app's stdout/stderr are dumped into the evidence so a
+# genuine serve failure is diagnosable rather than a silent empty body.
+function Serve-And-Get([string]$exe, [int]$port, [string]$route) {
+    $so = Join-Path $work ("serve-$port.out.log")
+    $se = Join-Path $work ("serve-$port.err.log")
+    $p = Start-Process -FilePath $exe -ArgumentList @('-p', "$port") -PassThru `
+                       -WindowStyle Hidden -RedirectStandardOutput $so -RedirectStandardError $se
     try {
-        for ($i = 0; $i -lt 40; $i++) {
+        for ($i = 0; $i -lt 60; $i++) {
             Start-Sleep -Milliseconds 250
             try { return (Invoke-RestMethod -Uri "http://127.0.0.1:$port$route" -TimeoutSec 2) } catch {}
+            if ($p.HasExited) { break }   # the app died; stop waiting
+        }
+        Note ("- serve diagnostics for port {0} (exe exited={1}, code={2}):" -f $port, $p.HasExited, $p.ExitCode)
+        foreach ($f in @($so, $se)) {
+            if ((Test-Path $f) -and (Get-Item $f).Length -gt 0) {
+                Get-Content $f | Select-Object -First 20 | ForEach-Object { Note ("    [serve] " + $_) }
+            }
         }
         return ''
     } finally { $p | Stop-Process -Force -ErrorAction SilentlyContinue }
@@ -86,7 +100,7 @@ foreach ($case in @(@{ext='lua';src=$lua;port=39701}, @{ext='js';src=$js;port=39
     Set-Content -Path (Join-Path $adir ("app." + $case.ext)) -Value $case.src
     $bout = Cap { & $Hull build $adir -o (Join-Path $adir 'out.com') }; $rc = $LASTEXITCODE
     if ($rc -ne 0) { Note (($bout | Out-String) -replace '(?m)^','    '); Fail ("hull build failed for the " + $case.ext + " /ping app"); continue }
-    $body = Serve-And-Get (Join-Path $adir 'out.com') (Join-Path $adir 'out.com') $case.port '/ping'
+    $body = Serve-And-Get (Join-Path $adir 'out.com') $case.port '/ping'
     if ("$body".Trim() -eq 'pong') { Note ("- OK: " + $case.ext + " /ping served pong") }
     else { Fail ($case.ext + " /ping did not serve pong (got '" + $body + "')") }
 }
@@ -113,7 +127,7 @@ return { who = function() return "nested-ok" end }
 $nb = Cap { & $Hull build $nd -o (Join-Path $nd 'out.com') }; $rc = $LASTEXITCODE
 if ($rc -ne 0) { Note (($nb | Out-String) -replace '(?m)^','    '); Fail "nested-module app build failed" }
 else {
-    $body = Serve-And-Get (Join-Path $nd 'out.com') (Join-Path $nd 'out.com') 39703 '/who'
+    $body = Serve-And-Get (Join-Path $nd 'out.com') 39703 '/who'
     if ("$body".Trim() -eq 'nested-ok') { Note "- OK: built nested-module app resolved ./routes -> ./../lib and served" }
     else { Fail "nested-module built app did not serve the deep-resolved value (got '$body')" }
 }
