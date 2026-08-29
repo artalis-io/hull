@@ -44,12 +44,25 @@ stable `/releases/latest` without mutating release state during the run:
    tag-triggered release workflow builds + signs + publishes the four binaries,
    `hull.sha256`, and `hull.sha256.sig`).
 2. Mirror the **exact** signed RC assets, unchanged, into `<staging_rc_repo>` as
-   its latest **non-prerelease**.
-3. Mirror the exact signed `v0.13.0` assets into `<staging_prev_repo>` as its
-   latest non-prerelease.
-4. The acceptance workflows are **read-only**: they never create, modify, or
-   delete a tag, release, or asset, and never alter "latest". Removing the
-   staging releases after final promotion is likewise a manual maintainer step.
+   its latest **non-prerelease**; mirror the exact signed `v0.13.0` assets into
+   `<staging_prev_repo>` likewise. The checked-in helper does this with your own
+   `gh` auth (no persistent cross-repo token), verifying the official assets
+   before mirroring and refusing to clobber an existing staging release:
+
+   ```
+   tests/acceptance/populate_staging.sh artalis-io/hull v0.14.0-rc1 \
+       artalis-io/hull-release-rc-staging   0.14.0-rc1
+   tests/acceptance/populate_staging.sh artalis-io/hull v0.13.0 \
+       artalis-io/hull-release-prev-staging 0.13.0
+   ```
+
+   Both staging repositories must be **public** so unauthenticated
+   `hull update --repo=` works, matching the real end-user path.
+3. The acceptance workflows are **read-only**: they never create, modify, or
+   delete a tag, release, or asset, and never alter "latest". `populate_staging.sh`
+   is the single deliberately-mutating step and is run by the maintainer, not
+   CI. Removing the staging releases after final promotion is likewise a manual
+   maintainer step (`gh release delete <tag> --repo <staging> --cleanup-tag`).
 
 ## Fail-closed verification
 
