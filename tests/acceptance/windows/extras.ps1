@@ -12,13 +12,12 @@
   exits non-zero.
 
   Usage:
-    extras.ps1 -Hull <candidate-exe> -PrevHull <prev-exe> -RcRepo <org/staging-rc> \
+    extras.ps1 -Hull <candidate-exe> -RcRepo <org/staging-rc> \
                -ExpectVersion 0.14.0-rc1 -Evidence <file>
 #>
 [CmdletBinding()]
 param(
     [Parameter(Mandatory=$true)][string]$Hull,
-    [Parameter(Mandatory=$true)][string]$PrevHull,
     [Parameter(Mandatory=$true)][string]$RcRepo,
     [Parameter(Mandatory=$true)][string]$ExpectVersion,
     [Parameter(Mandatory=$true)][string]$Evidence
@@ -44,17 +43,20 @@ function Serve-And-Get([string]$exe, [string]$appPath, [int]$port, [string]$rout
 }
 
 # --- 1. self-update from a path with spaces ---------------------------------
-Note "## Self-update from a path with spaces"
+# Force-reinstall the RC over the CANDIDATE placed in a spaces path: exercises
+# the real deferred rename-aside swap (running .exe) with spaces in every path.
+Note "## Self-update from a path with spaces (candidate deferred swap)"
 $spaceDir = Join-Path $work 'hull test dir with spaces'
 New-Item -ItemType Directory -Path $spaceDir | Out-Null
 $spaceHull = Join-Path $spaceDir 'my hull.com'
-Copy-Item $PrevHull $spaceHull
-$sc = & $spaceHull update --repo $RcRepo 2>&1; $rc = $LASTEXITCODE
+Copy-Item $Hull $spaceHull
+$sc = & $spaceHull update --force --repo $RcRepo 2>&1; $rc = $LASTEXITCODE
 Note (($sc | Out-String) -replace '(?m)^','    ')
 if ($rc -ne 0) { Fail "self-update from a spaces path returned non-zero" }
 $sv = (& $spaceHull version 2>&1 | Select-Object -First 1)
 if ($sv -notmatch [regex]::Escape($ExpectVersion)) { Fail "spaces-path candidate is not $ExpectVersion (got '$sv')" }
-else { Note "- OK: updated to '$sv' from a spaces path" }
+elseif (Test-Path "$spaceHull.new") { Fail "spaces-path <self>.new residue after a successful update" }
+else { Note "- OK: updated to '$sv' from a spaces path via the deferred swap" }
 
 # --- 2. non-admin cosmocc install -------------------------------------------
 Note "## Non-admin cosmocc install"

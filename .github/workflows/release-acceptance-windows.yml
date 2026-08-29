@@ -30,6 +30,10 @@ on:
         description: Version string the previous APE reports
         required: true
         default: 0.13.0
+      rc_tag:
+        description: Candidate release tag (the APE under test)
+        required: true
+        default: v0.14.0-rc1
       staging_rc_repo:
         description: Staging repo whose latest mirrors the RC (ORG/NAME)
         required: true
@@ -63,6 +67,7 @@ jobs:
           $ev = Join-Path $wd 'windows-acceptance-evidence.md'
           & tests/acceptance/windows/run.ps1 `
             -OfficialRepo '${{ inputs.official_repo }}' `
+            -RcTag '${{ inputs.rc_tag }}' `
             -PrevTag '${{ inputs.prev_tag }}' `
             -PrevVersion '${{ inputs.prev_version }}' `
             -RcRepo '${{ inputs.staging_rc_repo }}' `

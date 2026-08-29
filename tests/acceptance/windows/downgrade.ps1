@@ -1,25 +1,26 @@
 <#
-  downgrade.ps1 - prove a real Windows DOWNGRADE via a staging repo, run AS the
-  standard user. `hull update` only reads /releases/latest and only advances by
-  default, so downgrade uses `--force` against a staging repo whose latest
-  mirrors the PREVIOUS signed release.
+  downgrade.ps1 - the running CANDIDATE downgrades to the PREVIOUS release,
+  proving target-version independence of the (fixed) updater. Run AS the standard
+  user. `hull update` only advances by default, so downgrade uses `--force`
+  against a staging repo whose latest mirrors the previous signed release.
 
-  Starts from a fresh previous-release APE, updates UP to the candidate (via the
-  RC staging repo), then FORCE-updates back DOWN to the previous release (via the
-  previous staging repo). Fail-closed assertions:
-    - the up-update reports the candidate version;
-    - the forced down-update returns success and reports the previous version;
-    - no <self>.new residue; <self>.old is swept on the next startup.
+  Fail-closed assertions:
+    - the forced down-update returns success;
+    - the installed previous binary RUNS and reports the previous version.
 
-  Usage: downgrade.ps1 -Hull <exe> -RcRepo <org/staging-rc> -PrevRepo <org/staging-prev> \
-                       -RcVersion 0.14.0-rc1 -PrevVersion 0.13.0 -Evidence <file>
+  Expected pre-fix limitation (recorded, NOT failed): the candidate's deferred
+  swap installs the previous binary and leaves <self>.old (the aside candidate,
+  which was locked while the updating process ran). The NEXT startup would
+  normally sweep it - but the newly-installed PREVIOUS binary predates the
+  startup sweeper, so <self>.old persists. We verify the previous binary runs,
+  then clean the residue explicitly and record this as expected.
+
+  Usage: downgrade.ps1 -Hull <candidate-exe> -PrevRepo <org/staging-prev> -PrevVersion 0.13.0 -Evidence <file>
 #>
 [CmdletBinding()]
 param(
     [Parameter(Mandatory=$true)][string]$Hull,
-    [Parameter(Mandatory=$true)][string]$RcRepo,
     [Parameter(Mandatory=$true)][string]$PrevRepo,
-    [Parameter(Mandatory=$true)][string]$RcVersion,
     [Parameter(Mandatory=$true)][string]$PrevVersion,
     [Parameter(Mandatory=$true)][string]$Evidence
 )
@@ -30,25 +31,29 @@ function Fail($m) { Note ("  FAIL: {0}" -f $m); $script:fail = 1 }
 $script:fail = 0
 $new = "$Hull.new"; $old = "$Hull.old"
 
-Note "## Downgrade (staging-repo based)"
-# Up to the candidate first.
-& $Hull update --repo $RcRepo *> $null
-$up = (& $Hull version 2>&1 | Select-Object -First 1)
-Note ("- after up-update: {0}" -f $up)
-if ($up -notmatch [regex]::Escape($RcVersion)) { Fail "up-update did not reach $RcVersion"; }
-
-# Forced downgrade to the previous release.
-$out = & $Hull update --force --repo $PrevRepo 2>&1; $code = $LASTEXITCODE
+Note "## Downgrade: candidate -> previous (staging, forced)"
+$out = & $Hull update --force --repo $PrevRepo 2>&1
+$code = $LASTEXITCODE
 Note (($out | Out-String) -replace '(?m)^','    ')
+Note ("- exit code: {0}" -f $code)
 if ($code -ne 0) { Fail "forced downgrade returned non-zero" }
+
 $down = (& $Hull version 2>&1 | Select-Object -First 1)
-Note ("- after forced down-update: {0}" -f $down)
-if ($down -notmatch [regex]::Escape($PrevVersion)) { Fail "downgrade did not reach $PrevVersion" }
+Note ("- installed version now runs as: {0}" -f $down)
+if ($down -notmatch [regex]::Escape($PrevVersion)) { Fail "downgrade did not install a runnable $PrevVersion" }
 
 if (Test-Path $new) { Fail "<self>.new residue after downgrade" }
-& $Hull version *> $null
-if (Test-Path $old) { Fail "<self>.old not swept after downgrade" }
+
+# Expected pre-fix limitation: the installed previous binary has no startup
+# sweeper, so <self>.old is NOT auto-cleaned. Record it and clean explicitly.
+if (Test-Path $old) {
+    Note ("- expected pre-fix limitation: <self>.old remains ({0} has no startup sweeper); cleaning explicitly" -f $PrevVersion)
+    Remove-Item $old -Force -ErrorAction SilentlyContinue
+    if (Test-Path $old) { Note "  (note: explicit cleanup could not remove it either)" }
+} else {
+    Note "- no <self>.old residue"
+}
 
 if ($script:fail -ne 0) { Note "DOWNGRADE: FAIL"; exit 1 }
-Note "DOWNGRADE: OK ($RcVersion -> $PrevVersion via forced staging update)"
+Note "DOWNGRADE: OK (candidate installed a runnable $PrevVersion; .old residue is an expected pre-fix limitation)"
 exit 0

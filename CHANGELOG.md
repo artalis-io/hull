@@ -16,6 +16,19 @@ resolution with hardened security; `hull update` self-replaces safely on a
 locked Windows executable; and the tool-resolution surfaces (`doctor` /
 `tools list` / `agent tools`) agree. Several fixes are security-relevant.
 
+### Upgrade notes (Windows)
+
+- **One-time manual step to reach 0.14.0 on Windows.** The Windows self-update
+  fix ships *in* 0.14.0, so a 0.13.0 binary cannot install it: 0.13.0's updater
+  tries to overwrite the running `.exe` in place, which Windows refuses, and it
+  fails with an `atomic_write: rename ... failed` error, leaving the old binary
+  intact. To move from 0.13.0 to 0.14.0 on Windows, **download `hull-cosmo` from
+  the 0.14.0 release and replace your `hull` executable manually while Hull is
+  not running** (close any running instance first). From 0.14.0 onward `hull
+  update` self-updates normally on Windows via the deferred rename-aside swap.
+  macOS and Linux are unaffected (their atomic-rename self-update already
+  works). (#429)
+
 ### Added
 
 - **Unified tool resolution.** `hull tools list`, `hull agent tools`, and
