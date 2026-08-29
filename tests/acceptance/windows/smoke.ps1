@@ -101,9 +101,14 @@ else { Fail "checksum mismatch (or hull-cosmo absent from hull.sha256)" }
 $sa = @('verify-release', $Manifest, $Sig)
 if ($Pubkey) { $sa += @('--pubkey', $Pubkey) }
 $so = Cap { & $Hull @sa }; $sr = $LASTEXITCODE
-Note (($so | Out-String) -replace '(?m)^','    ')
-if ($sr -eq 0) { Note ("- OK: signature verified" + $(if ($Pubkey) { " (source release pubkey)" } else { " (embedded key)" })) }
-else { Fail "hull.sha256.sig did not verify" }
+$sigText = ($so | Out-String)
+Note ($sigText -replace '(?m)^','    ')
+# Require the positive success output, not just the exit code: if the binary
+# failed to START (e.g. a permission/extension error) $LASTEXITCODE would be
+# stale, so match the explicit "verify-release: OK" line to avoid a false pass.
+if ($sr -eq 0 -and $sigText -match 'verify-release:\s*OK') {
+    Note ("- OK: signature verified" + $(if ($Pubkey) { " (source release pubkey)" } else { " (embedded key)" }))
+} else { Fail "hull.sha256.sig did not verify (or hull failed to run)" }
 
 # --- 3. version ------------------------------------------------------------
 $ver = (Cap { & $Hull version } | Select-Object -First 1)

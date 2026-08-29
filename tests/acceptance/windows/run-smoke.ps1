@@ -39,7 +39,9 @@ if (-not $ExpectVersion) { Note 'FATAL: -ExpectVersion is required'; exit 2 }
 Note ("- repo={0} tag={1} expect={2}" -f $OfficialRepo, $ReleaseTag, $ExpectVersion)
 
 # ── Download the published artifact + manifest + signature (official only) ────
-$exe = Join-Path $WorkDir 'hull-cosmo'
+# Save the APE with a .com extension: Windows will not execute a PE/APE that has
+# no recognized executable extension (the download asset is named "hull-cosmo").
+$exe = Join-Path $WorkDir 'hull.com'
 $man = Join-Path $WorkDir 'hull.sha256'
 $sig = Join-Path $WorkDir 'hull.sha256.sig'
 $base = "https://github.com/$OfficialRepo/releases/download/$ReleaseTag"
