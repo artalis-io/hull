@@ -53,9 +53,14 @@ New-Item -Path $devKey -Force | Out-Null
 Set-ItemProperty -Path $devKey -Name AllowDevelopmentWithoutDevLicense -Value 0 -Type DWord
 Note "- Developer Mode disabled (AllowDevelopmentWithoutDevLicense=0)"
 
-# ── Make WorkDir + the scripts readable/executable by the user ───────────────
+# ── Make WorkDir + the scripts readable/executable by the user, and the
+#    evidence file writable (the phases run AS the user and append to it) ──────
 & icacls $WorkDir /grant "${user}:(OI)(CI)M" | Out-Null
 & icacls $here    /grant "${user}:(OI)(CI)RX" | Out-Null
+# The evidence file already exists (the parent wrote the header); grant the user
+# Modify on the file itself. Keep it inside WorkDir so the user can traverse to
+# it (the caller passes an evidence path under WorkDir).
+& icacls $Evidence /grant "${user}:M" | Out-Null
 
 # ── Download the previous release's Windows APE (read-only) ──────────────────
 $prevExe = Join-Path $WorkDir 'hull-prev.com'
@@ -71,11 +76,33 @@ $aclHull = Join-Path $aclDir 'hull.com'; Copy-Item $prevExe $aclHull
 & icacls $suDir  /grant "${user}:(OI)(CI)M" | Out-Null
 & icacls $aclDir /grant "${user}:(OI)(CI)M" | Out-Null
 
+# A writable HOME for the standard user's phases: a runas session has no loaded
+# profile, so hull's ~/.hull (update, tools install, doctor) needs an explicit,
+# user-writable home. Set it in this parent env so the child processes inherit
+# it (Start-Process passes the caller's environment).
+$homeDir = Join-Path $WorkDir 'home'
+New-Item -ItemType Directory -Path $homeDir -Force | Out-Null
+& icacls $homeDir /grant "${user}:(OI)(CI)M" | Out-Null
+$env:HOME        = $homeDir
+$env:USERPROFILE = $homeDir
+Note ("- HOME for phases: {0}" -f $homeDir)
+
 # ── Run a phase AS the standard user; return its exit code ───────────────────
+# Redirects the child's console output to a log and folds it into the evidence,
+# so a phase is diagnosable even if the child cannot append evidence itself.
 function Invoke-AsUser([string]$script, [string[]]$phaseArgs) {
+    $base = [IO.Path]::GetFileNameWithoutExtension($script)
+    $out  = Join-Path $WorkDir ("phase-$base.out.log")
+    $err  = Join-Path $WorkDir ("phase-$base.err.log")
     $a = @('-NoProfile','-ExecutionPolicy','Bypass','-File', (Join-Path $here $script)) + $phaseArgs
     $p = Start-Process -FilePath 'powershell.exe' -Credential $cred -ArgumentList $a `
-                       -WorkingDirectory $WorkDir -Wait -PassThru
+                       -WorkingDirectory $WorkDir -Wait -PassThru `
+                       -RedirectStandardOutput $out -RedirectStandardError $err
+    foreach ($f in @($out, $err)) {
+        if ((Test-Path $f) -and (Get-Item $f).Length -gt 0) {
+            Get-Content $f | ForEach-Object { Note ("    [child] " + $_) }
+        }
+    }
     return $p.ExitCode
 }
 

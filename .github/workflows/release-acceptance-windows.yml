@@ -56,7 +56,11 @@ jobs:
         shell: pwsh
         run: |
           Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force
-          $ev = Join-Path $env:RUNNER_TEMP 'windows-acceptance-evidence.md'
+          # Keep the evidence file INSIDE the workdir: the phases run as a
+          # standard user who is granted access to the workdir, so it can append
+          # its per-check evidence there.
+          $wd = Join-Path $env:RUNNER_TEMP 'wacc'
+          $ev = Join-Path $wd 'windows-acceptance-evidence.md'
           & tests/acceptance/windows/run.ps1 `
             -OfficialRepo '${{ inputs.official_repo }}' `
             -PrevTag '${{ inputs.prev_tag }}' `
@@ -65,7 +69,7 @@ jobs:
             -ExpectVersion '${{ inputs.expect_version }}' `
             -PrevRepo '${{ inputs.staging_prev_repo }}' `
             -Evidence $ev `
-            -WorkDir (Join-Path $env:RUNNER_TEMP 'wacc')
+            -WorkDir $wd
           $code = $LASTEXITCODE
           Get-Content $ev | ForEach-Object { Write-Host $_ }
           Copy-Item $ev "$env:GITHUB_STEP_SUMMARY" -Force
@@ -76,4 +80,4 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
         with:
           name: windows-acceptance-evidence
-          path: ${{ runner.temp }}/windows-acceptance-evidence.md
+          path: ${{ runner.temp }}/wacc/windows-acceptance-evidence.md
