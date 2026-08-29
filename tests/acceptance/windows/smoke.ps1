@@ -85,8 +85,14 @@ function Build-Retry([string]$dir, [string]$outCom) {
 Note "## Published artifact smoke (as $(whoami))"
 
 # --- 1. checksum BEFORE executing the binary -------------------------------
+# Compute the digest via .NET (no cmdlet/module dependency) so the security-
+# critical pre-execution checksum is robust across PowerShell hosts.
 $want = ((Get-Content $Manifest | Where-Object { $_ -match '\shull-cosmo$' } | Select-Object -First 1) -replace '\s.*','').ToLower()
-$got  = (Get-FileHash $Hull -Algorithm SHA256).Hash.ToLower()
+$fsHash = [System.IO.File]::OpenRead($Hull)
+try {
+    $sha256 = [System.Security.Cryptography.SHA256]::Create()
+    $got = ([System.BitConverter]::ToString($sha256.ComputeHash($fsHash)) -replace '-','').ToLower()
+} finally { $fsHash.Dispose() }
 Note ("- checksum want={0} got={1}" -f $want, $got)
 if ($want -and ($want -eq $got)) { Note "- OK: checksum matches hull.sha256 (verified before execution)" }
 else { Fail "checksum mismatch (or hull-cosmo absent from hull.sha256)" }

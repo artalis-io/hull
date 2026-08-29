@@ -79,12 +79,20 @@ $env:TEMP = $tmpDir;  $env:TMP = $tmpDir
 $env:APPDATA = $appData; $env:LOCALAPPDATA = $localApp
 Note ("- child env: HOME/TEMP/APPDATA under {0}" -f $WorkDir)
 
+# Launch the child phases under pwsh (PowerShell 7, the workflow's own shell)
+# rather than powershell.exe (Windows PowerShell 5.1). A runas child inherits the
+# pwsh-7 parent's $PSModulePath, under which the WinPS 5.1 host cannot resolve its
+# Microsoft.PowerShell.Utility cmdlets (Get-FileHash / Select-Object / ...); using
+# the same pwsh binary the parent runs keeps every cmdlet available.
+$childExe = Join-Path $PSHOME 'pwsh.exe'
+if (-not (Test-Path $childExe)) { $childExe = 'pwsh' }
+
 # ── Run a phase AS the standard user; fold its output into the evidence ───────
 function Invoke-AsUser([string]$script, [string[]]$phaseArgs) {
     $b = [IO.Path]::GetFileNameWithoutExtension($script)
     $o = Join-Path $WorkDir ("phase-$b.out.log"); $e = Join-Path $WorkDir ("phase-$b.err.log")
     $a = @('-NoProfile','-ExecutionPolicy','Bypass','-File', (Join-Path $here $script)) + $phaseArgs
-    $p = Start-Process -FilePath 'powershell.exe' -Credential $cred -ArgumentList $a `
+    $p = Start-Process -FilePath $childExe -Credential $cred -ArgumentList $a `
                        -WorkingDirectory $WorkDir -Wait -PassThru `
                        -RedirectStandardOutput $o -RedirectStandardError $e
     foreach ($f in @($o, $e)) {
