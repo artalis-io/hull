@@ -61,6 +61,33 @@ function Serve-And-Get([string]$exe, [int]$port, [string]$route) {
     } finally { $p | Stop-Process -Force -ErrorAction SilentlyContinue }
 }
 
+# `hull build` on Windows drives cosmocc (a dual-arch APE link). cosmocc's own
+# process spawning is intermittently flaky under repeated heavy use on Windows
+# (posix_spawn EBADF / ERROR_KERNEL_APC inside collect2), and can leave a locked
+# fatcosmocc temp that trips the next build. Retry a spawn-flake link failure a
+# couple of times, cleaning the cosmocc temp before each attempt. A NON-flake
+# failure (a genuine Hull compose/resolve error) is returned on the first try so
+# a real regression is never masked. Returns @{ rc; out; tries }.
+function Build-Retry([string]$dir, [string]$outCom) {
+    # Spawn-specific signatures only. NOT `collect2:`/`linking failed` alone -
+    # those also mark a genuine link regression, which must fail on the first try.
+    $flake   = 'posix_spawn|ERROR_KERNEL_APC|Bad file number|cannot execute'
+    $hometmp = Join-Path $env:HOME '.hull\tmp'
+    $out = $null; $rc = 1
+    for ($t = 1; $t -le 3; $t++) {
+        Get-ChildItem -Path $hometmp -Filter 'fatcosmocc*' -ErrorAction SilentlyContinue |
+            Remove-Item -Force -ErrorAction SilentlyContinue
+        $out = Cap { & $Hull build $dir -o $outCom }
+        $rc  = $LASTEXITCODE
+        if ($rc -eq 0) { return @{ rc = 0; out = $out; tries = $t } }
+        if (($out | Out-String) -notmatch $flake) { return @{ rc = $rc; out = $out; tries = $t } }
+        Note ("- build attempt {0} hit a cosmocc spawn flake; cleaning temp and retrying" -f $t)
+        Remove-Item $outCom -Force -ErrorAction SilentlyContinue
+        Start-Sleep -Seconds 3
+    }
+    return @{ rc = $rc; out = $out; tries = 3 }
+}
+
 # --- 1. self-update from a path with spaces ---------------------------------
 # Force-reinstall the RC over the CANDIDATE placed in a spaces path: exercises
 # the real deferred rename-aside swap (running .exe) with spaces in every path.
@@ -98,8 +125,8 @@ foreach ($case in @(@{ext='lua';src=$lua;port=39701}, @{ext='js';src=$js;port=39
     $adir = Join-Path $work ("ping-" + $case.ext)
     New-Item -ItemType Directory -Path $adir | Out-Null
     Set-Content -Path (Join-Path $adir ("app." + $case.ext)) -Value $case.src
-    $bout = Cap { & $Hull build $adir -o (Join-Path $adir 'out.com') }; $rc = $LASTEXITCODE
-    if ($rc -ne 0) { Note (($bout | Out-String) -replace '(?m)^','    '); Fail ("hull build failed for the " + $case.ext + " /ping app"); continue }
+    $r = Build-Retry $adir (Join-Path $adir 'out.com')
+    if ($r.rc -ne 0) { Note (($r.out | Out-String) -replace '(?m)^','    '); Fail ("hull build failed for the " + $case.ext + " /ping app after " + $r.tries + " attempt(s)"); continue }
     $body = Serve-And-Get (Join-Path $adir 'out.com') $case.port '/ping'
     if ("$body".Trim() -eq 'pong') { Note ("- OK: " + $case.ext + " /ping served pong") }
     else { Fail ($case.ext + " /ping did not serve pong (got '" + $body + "')") }
@@ -124,8 +151,8 @@ return M
 Set-Content (Join-Path $nd 'lib\auth.lua') @'
 return { who = function() return "nested-ok" end }
 '@
-$nb = Cap { & $Hull build $nd -o (Join-Path $nd 'out.com') }; $rc = $LASTEXITCODE
-if ($rc -ne 0) { Note (($nb | Out-String) -replace '(?m)^','    '); Fail "nested-module app build failed" }
+$r = Build-Retry $nd (Join-Path $nd 'out.com')
+if ($r.rc -ne 0) { Note (($r.out | Out-String) -replace '(?m)^','    '); Fail ("nested-module app build failed after " + $r.tries + " attempt(s)") }
 else {
     $body = Serve-And-Get (Join-Path $nd 'out.com') 39703 '/who'
     if ("$body".Trim() -eq 'nested-ok') { Note "- OK: built nested-module app resolved ./routes -> ./../lib and served" }
