@@ -49,21 +49,30 @@ try {
 Note ("- Developer Mode (AllowDevelopmentWithoutDevLicense): {0}" -f $dev)
 if ($dev -ne 0) { Note "  FAIL: Developer Mode is enabled"; $fail = 1 }
 
-# 3. Symlink creation DENIED --------------------------------------------------
+# 3. Symlink creation DENIED (specifically - not a target/dir write failure) --
+# First prove the target + directory ARE writable (write the target file); only
+# THEN attempt the symlink, so a failure is unambiguously the missing
+# SeCreateSymbolicLinkPrivilege (no elevation / Developer Mode), not an
+# unwritable path.
 $tmp    = Join-Path $env:TEMP ("hull-symcheck-{0}" -f ([guid]::NewGuid()))
 $target = Join-Path $env:TEMP ("hull-symtarget-{0}.txt" -f ([guid]::NewGuid()))
-Set-Content -Path $target -Value 'x'
-$symDenied = $false
-try {
-    New-Item -ItemType SymbolicLink -Path $tmp -Target $target -ErrorAction Stop | Out-Null
-    Note "- control symlink creation: SUCCEEDED (unexpected)"
-    Remove-Item $tmp -Force -ErrorAction SilentlyContinue
-} catch {
-    $symDenied = $true
-    Note ("- control symlink creation: DENIED as expected ({0})" -f $_.Exception.Message)
+$targetWritable = $false
+try { Set-Content -Path $target -Value 'x' -ErrorAction Stop; $targetWritable = $true }
+catch { Note ("  FAIL(harness): symlink target/dir is not writable ({0}) - cannot isolate the symlink-privilege check" -f $_.Exception.Message); $fail = 1 }
+if ($targetWritable) {
+    Note "- symlink target is writable (so a symlink failure is privilege-specific)"
+    $symDenied = $false
+    try {
+        New-Item -ItemType SymbolicLink -Path $tmp -Target $target -ErrorAction Stop | Out-Null
+        Note "- control symlink creation: SUCCEEDED (unexpected - env is not restricted)"
+        Remove-Item $tmp -Force -ErrorAction SilentlyContinue
+    } catch {
+        $symDenied = $true
+        Note ("- control symlink creation: DENIED as expected ({0})" -f $_.Exception.Message)
+    }
+    if (-not $symDenied) { Note "  FAIL: symlink creation was allowed - environment is not restricted"; $fail = 1 }
+    Remove-Item $target -Force -ErrorAction SilentlyContinue
 }
-Remove-Item $target -Force -ErrorAction SilentlyContinue
-if (-not $symDenied) { Note "  FAIL: symlink creation was allowed - environment is not restricted"; $fail = 1 }
 
 if ($fail -ne 0) { Note "PRECONDITIONS: FAIL"; exit 1 }
 Note "PRECONDITIONS: OK (non-admin, Dev-Mode off, symlink denied)"

@@ -11,14 +11,27 @@ release. It has two phases, each a checked-in CI workflow:
   cannot be proven on other hosts, all as a freshly-created standard (non-admin)
   user with Developer Mode disabled. Fail-closed unless the child token is proven
   non-admin, Developer Mode is off, and control symlink creation is denied
-  (`preconditions.ps1`). Then: a real self-update of the previous APE to the
-  candidate via the RC staging repo (`self_update.ps1`); an ACL-induced mid-swap
-  **rollback** proven to reach the install-step failure, not an earlier stage
-  (`rollback_acl.ps1`); and `extras.ps1` - a spaces-path self-update, non-admin
-  `hull tools install cosmocc`, a Lua and a JS `/ping` build+serve, a nested
-  local-module build+serve, and doctor / tools-list / agent-tools agreement.
-  Optional downgrade via the previous staging repo (`downgrade.ps1`). It is
-  read-only with respect to releases.
+  (`preconditions.ps1`). It proves the honest before/after self-update contract:
+
+  - the **previous** APE (`v0.13.0`, which predates the deferred-swap fix) MUST
+    FAIL to self-update on Windows, at the atomic-rename of the running binary
+    (`old_update_fails.ps1`) - the exact bug the release fixes;
+  - the **candidate** MUST self-update successfully via the deferred rename-aside
+    swap, force-reinstalling the RC over itself through the RC staging repo
+    (`self_update.ps1`);
+  - an ACL-induced mid-swap **rollback**, run from the candidate, proven to reach
+    the install-step failure (not an earlier stage) and cleanly restore the
+    candidate (`rollback_acl.ps1`);
+  - `extras.ps1` - a spaces-path self-update from the candidate, non-admin
+    `hull tools install cosmocc`, a Lua and a JS `/ping` build+serve, a nested
+    local-module build+serve, and doctor / tools-list / agent-tools agreement;
+  - an optional **downgrade** from the candidate to the previous release via the
+    previous staging repo (`downgrade.ps1`), proving target-version independence
+    of the fixed updater. The installed `v0.13.0` lacks the startup sweeper, so
+    the `<self>.old` residue is a recorded, expected pre-fix limitation and is
+    cleaned explicitly rather than claimed as auto-swept.
+
+  The whole stage is read-only with respect to releases.
 
 Both phases must pass before the final tag is created.
 

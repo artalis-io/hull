@@ -12,13 +12,12 @@
   exits non-zero.
 
   Usage:
-    extras.ps1 -Hull <candidate-exe> -PrevHull <prev-exe> -RcRepo <org/staging-rc> \
+    extras.ps1 -Hull <candidate-exe> -RcRepo <org/staging-rc> \
                -ExpectVersion 0.14.0-rc1 -Evidence <file>
 #>
 [CmdletBinding()]
 param(
     [Parameter(Mandatory=$true)][string]$Hull,
-    [Parameter(Mandatory=$true)][string]$PrevHull,
     [Parameter(Mandatory=$true)][string]$RcRepo,
     [Parameter(Mandatory=$true)][string]$ExpectVersion,
     [Parameter(Mandatory=$true)][string]$Evidence
@@ -27,38 +26,87 @@ param(
 $ErrorActionPreference = 'Stop'
 function Note($m) { Add-Content -Path $Evidence -Value $m; Write-Host $m }
 function Fail($m) { Note ("  FAIL: {0}" -f $m); $script:fail = 1 }
+# hull writes progress to stdout and logs/errors to stderr (e.g. `hull build`
+# emits an INFO sandbox line to stderr); under -EA Stop a 2>&1 merge of native
+# stderr becomes a terminating error. Capture through a helper that locally
+# relaxes the preference and merges both streams.
+function Cap([scriptblock]$sb) { $ErrorActionPreference = 'Continue'; & $sb 2>&1 }
 $script:fail = 0
 $work = Join-Path $env:TEMP ("hull-accept-" + [guid]::NewGuid())
 New-Item -ItemType Directory -Path $work | Out-Null
 
-# Serve a built APE and curl a path; returns the response body (or '').
-function Serve-And-Get([string]$exe, [string]$appPath, [int]$port, [string]$route) {
-    $p = Start-Process -FilePath $exe -ArgumentList @($appPath, '-p', "$port") -PassThru -WindowStyle Hidden
+# Serve a BUILT standalone APE and curl a path; returns the response body (or
+# ''). A built binary IS the app, so it is run directly as `<exe> -p <port>` -
+# passing an app path would hand the app a spurious positional arg. On failure to
+# get a response, the app's stdout/stderr are dumped into the evidence so a
+# genuine serve failure is diagnosable rather than a silent empty body.
+function Serve-And-Get([string]$exe, [int]$port, [string]$route) {
+    $so = Join-Path $work ("serve-$port.out.log")
+    $se = Join-Path $work ("serve-$port.err.log")
+    $p = Start-Process -FilePath $exe -ArgumentList @('-p', "$port") -PassThru `
+                       -WindowStyle Hidden -RedirectStandardOutput $so -RedirectStandardError $se
     try {
-        for ($i = 0; $i -lt 40; $i++) {
+        for ($i = 0; $i -lt 60; $i++) {
             Start-Sleep -Milliseconds 250
             try { return (Invoke-RestMethod -Uri "http://127.0.0.1:$port$route" -TimeoutSec 2) } catch {}
+            if ($p.HasExited) { break }   # the app died; stop waiting
+        }
+        Note ("- serve diagnostics for port {0} (exe exited={1}, code={2}):" -f $port, $p.HasExited, $p.ExitCode)
+        foreach ($f in @($so, $se)) {
+            if ((Test-Path $f) -and (Get-Item $f).Length -gt 0) {
+                Get-Content $f | Select-Object -First 20 | ForEach-Object { Note ("    [serve] " + $_) }
+            }
         }
         return ''
     } finally { $p | Stop-Process -Force -ErrorAction SilentlyContinue }
 }
 
+# `hull build` on Windows drives cosmocc (a dual-arch APE link). cosmocc's own
+# process spawning is intermittently flaky under repeated heavy use on Windows
+# (posix_spawn EBADF / ERROR_KERNEL_APC inside collect2), and can leave a locked
+# fatcosmocc temp that trips the next build. Retry a spawn-flake link failure a
+# couple of times, cleaning the cosmocc temp before each attempt. A NON-flake
+# failure (a genuine Hull compose/resolve error) is returned on the first try so
+# a real regression is never masked. Returns @{ rc; out; tries }.
+function Build-Retry([string]$dir, [string]$outCom) {
+    # Spawn-specific signatures only. NOT `collect2:`/`linking failed` alone -
+    # those also mark a genuine link regression, which must fail on the first try.
+    $flake   = 'posix_spawn|ERROR_KERNEL_APC|Bad file number|cannot execute'
+    $hometmp = Join-Path $env:HOME '.hull\tmp'
+    $out = $null; $rc = 1
+    for ($t = 1; $t -le 3; $t++) {
+        Get-ChildItem -Path $hometmp -Filter 'fatcosmocc*' -ErrorAction SilentlyContinue |
+            Remove-Item -Force -ErrorAction SilentlyContinue
+        $out = Cap { & $Hull build $dir -o $outCom }
+        $rc  = $LASTEXITCODE
+        if ($rc -eq 0) { return @{ rc = 0; out = $out; tries = $t } }
+        if (($out | Out-String) -notmatch $flake) { return @{ rc = $rc; out = $out; tries = $t } }
+        Note ("- build attempt {0} hit a cosmocc spawn flake; cleaning temp and retrying" -f $t)
+        Remove-Item $outCom -Force -ErrorAction SilentlyContinue
+        Start-Sleep -Seconds 3
+    }
+    return @{ rc = $rc; out = $out; tries = 3 }
+}
+
 # --- 1. self-update from a path with spaces ---------------------------------
-Note "## Self-update from a path with spaces"
+# Force-reinstall the RC over the CANDIDATE placed in a spaces path: exercises
+# the real deferred rename-aside swap (running .exe) with spaces in every path.
+Note "## Self-update from a path with spaces (candidate deferred swap)"
 $spaceDir = Join-Path $work 'hull test dir with spaces'
 New-Item -ItemType Directory -Path $spaceDir | Out-Null
 $spaceHull = Join-Path $spaceDir 'my hull.com'
-Copy-Item $PrevHull $spaceHull
-$sc = & $spaceHull update --repo $RcRepo 2>&1; $rc = $LASTEXITCODE
+Copy-Item $Hull $spaceHull
+$sc = Cap { & $spaceHull update --force --repo $RcRepo }; $rc = $LASTEXITCODE
 Note (($sc | Out-String) -replace '(?m)^','    ')
 if ($rc -ne 0) { Fail "self-update from a spaces path returned non-zero" }
-$sv = (& $spaceHull version 2>&1 | Select-Object -First 1)
+$sv = (Cap { & $spaceHull version } | Select-Object -First 1)
 if ($sv -notmatch [regex]::Escape($ExpectVersion)) { Fail "spaces-path candidate is not $ExpectVersion (got '$sv')" }
-else { Note "- OK: updated to '$sv' from a spaces path" }
+elseif (Test-Path "$spaceHull.new") { Fail "spaces-path <self>.new residue after a successful update" }
+else { Note "- OK: updated to '$sv' from a spaces path via the deferred swap" }
 
 # --- 2. non-admin cosmocc install -------------------------------------------
 Note "## Non-admin cosmocc install"
-$ci = & $Hull tools install cosmocc 2>&1; $rc = $LASTEXITCODE
+$ci = Cap { & $Hull tools install cosmocc }; $rc = $LASTEXITCODE
 Note (($ci | Out-String) -replace '(?m)^','    ')
 if ($rc -ne 0) { Fail "hull tools install cosmocc returned non-zero (non-admin)" } else { Note "- OK: cosmocc installed non-admin" }
 
@@ -77,9 +125,9 @@ foreach ($case in @(@{ext='lua';src=$lua;port=39701}, @{ext='js';src=$js;port=39
     $adir = Join-Path $work ("ping-" + $case.ext)
     New-Item -ItemType Directory -Path $adir | Out-Null
     Set-Content -Path (Join-Path $adir ("app." + $case.ext)) -Value $case.src
-    $bout = & $Hull build $adir -o (Join-Path $adir 'out.com') 2>&1; $rc = $LASTEXITCODE
-    if ($rc -ne 0) { Note (($bout | Out-String) -replace '(?m)^','    '); Fail ("hull build failed for the " + $case.ext + " /ping app"); continue }
-    $body = Serve-And-Get (Join-Path $adir 'out.com') (Join-Path $adir 'out.com') $case.port '/ping'
+    $r = Build-Retry $adir (Join-Path $adir 'out.com')
+    if ($r.rc -ne 0) { Note (($r.out | Out-String) -replace '(?m)^','    '); Fail ("hull build failed for the " + $case.ext + " /ping app after " + $r.tries + " attempt(s)"); continue }
+    $body = Serve-And-Get (Join-Path $adir 'out.com') $case.port '/ping'
     if ("$body".Trim() -eq 'pong') { Note ("- OK: " + $case.ext + " /ping served pong") }
     else { Fail ($case.ext + " /ping did not serve pong (got '" + $body + "')") }
 }
@@ -103,19 +151,30 @@ return M
 Set-Content (Join-Path $nd 'lib\auth.lua') @'
 return { who = function() return "nested-ok" end }
 '@
-$nb = & $Hull build $nd -o (Join-Path $nd 'out.com') 2>&1; $rc = $LASTEXITCODE
-if ($rc -ne 0) { Note (($nb | Out-String) -replace '(?m)^','    '); Fail "nested-module app build failed" }
+$r = Build-Retry $nd (Join-Path $nd 'out.com')
+if ($r.rc -ne 0) { Note (($r.out | Out-String) -replace '(?m)^','    '); Fail ("nested-module app build failed after " + $r.tries + " attempt(s)") }
 else {
-    $body = Serve-And-Get (Join-Path $nd 'out.com') (Join-Path $nd 'out.com') 39703 '/who'
+    $body = Serve-And-Get (Join-Path $nd 'out.com') 39703 '/who'
     if ("$body".Trim() -eq 'nested-ok') { Note "- OK: built nested-module app resolved ./routes -> ./../lib and served" }
     else { Fail "nested-module built app did not serve the deep-resolved value (got '$body')" }
 }
 
 # --- 5. doctor / tools list / agent tools agree on cosmocc -------------------
+# stdout-only capture (stderr discarded so it can't corrupt the JSON), parsed
+# defensively so empty/invalid output is a clean Fail, not an -EA Stop throw.
+function AsJson([string[]]$cmd) {
+    $ErrorActionPreference = 'Continue'
+    $raw = (& $Hull @cmd 2>$null | Out-String)
+    if ([string]::IsNullOrWhiteSpace($raw)) { return $null }
+    try { return ($raw | ConvertFrom-Json) } catch { return $null }
+}
 Note "## doctor / tools list / agent tools agree on cosmocc"
-$doc = (& $Hull doctor --json 2>$null | ConvertFrom-Json)
-$tl  = (& $Hull tools list --json 2>$null | ConvertFrom-Json)
-$at  = (& $Hull agent tools 2>$null | ConvertFrom-Json)
+$doc = AsJson @('doctor','--json')
+$tl  = AsJson @('tools','list','--json')
+$at  = AsJson @('agent','tools')
+if (-not $doc) { Fail 'hull doctor --json produced no parseable JSON' }
+if (-not $tl)  { Fail 'hull tools list --json produced no parseable JSON' }
+if (-not $at)  { Fail 'hull agent tools produced no parseable JSON' }
 $docCosmocc = ($doc.compilers | Where-Object { $_.name -eq 'cosmocc' }).path
 $tlCosmocc  = ($tl.tools     | Where-Object { $_.name -eq 'cosmocc' })
 $atCosmocc  = ($at.tools     | Where-Object { $_.name -eq 'cosmocc' })
