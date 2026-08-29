@@ -129,7 +129,20 @@ Note "`n--- PHASE: candidate self-update (force-reinstall RC) MUST SUCCEED ---"
 if ((Invoke-AsUser 'self_update.ps1' @('-Hull',$candHull,'-Repo',$RcRepo,'-ExpectVersion',$ExpectVersion,'-Evidence',$Evidence)) -ne 0) { $rc = 1 }
 
 Note "`n--- PHASE: candidate rollback via real ACL ---"
+# ACL setup runs HERE (as the owner/admin): the standard user lacks WRITE_DAC on
+# these runner-admin-owned files, and $env:USERNAME in the child is the inherited
+# parent name, so the deny must be applied by the orchestrator against the real
+# standard-user principal. Freeze the exe's ACEs so the deny cannot propagate
+# onto it (it must stay renamable to <self>.old), then deny the STANDARD USER
+# DELETE on any newly-created file (<self>.new) via an inherit-only ACE.
+$aclDir   = Split-Path -Parent $aclHull
+$fullUser = "$env:COMPUTERNAME\$user"
+& icacls $aclHull /inheritance:d | Out-Null
+& icacls $aclHull /grant "${fullUser}:(M)" | Out-Null
+& icacls $aclDir  /deny  "${fullUser}:(OI)(IO)(DE)" | Out-Null
+Note ("- ACL: froze {0} ACEs; denied {1} DELETE on new files in {2}" -f $aclHull, $fullUser, $aclDir)
 if ((Invoke-AsUser 'rollback_acl.ps1' @('-Hull',$aclHull,'-Repo',$RcRepo,'-RcVersion',$ExpectVersion,'-Evidence',$Evidence)) -ne 0) { $rc = 1 }
+& icacls $aclDir /remove:d "${fullUser}" | Out-Null   # lift the deny for cleanup
 
 Note "`n--- PHASE: extras (spaces / cosmocc / ping / nested / doctor) ---"
 if ((Invoke-AsUser 'extras.ps1' @('-Hull',$exHull,'-RcRepo',$RcRepo,'-ExpectVersion',$ExpectVersion,'-Evidence',$Evidence)) -ne 0) { $rc = 1 }

@@ -28,17 +28,21 @@ param(
 $ErrorActionPreference = 'Stop'
 function Note($m) { Add-Content -Path $Evidence -Value $m; Write-Host $m }
 function Fail($m) { Note ("  FAIL: {0}" -f $m); $script:fail = 1 }
+# hull writes progress to stdout and errors/logs to stderr; under -EA Stop a
+# 2>&1 merge of native stderr becomes a terminating error. Capture through a
+# helper that locally relaxes the preference and merges both streams.
+function Cap([scriptblock]$sb) { $ErrorActionPreference = 'Continue'; & $sb 2>&1 }
 $script:fail = 0
 $new = "$Hull.new"; $old = "$Hull.old"
 
 Note "## Downgrade: candidate -> previous (staging, forced)"
-$out = & $Hull update --force --repo $PrevRepo 2>&1
+$out = Cap { & $Hull update --force --repo $PrevRepo }
 $code = $LASTEXITCODE
 Note (($out | Out-String) -replace '(?m)^','    ')
 Note ("- exit code: {0}" -f $code)
 if ($code -ne 0) { Fail "forced downgrade returned non-zero" }
 
-$down = (& $Hull version 2>&1 | Select-Object -First 1)
+$down = (Cap { & $Hull version } | Select-Object -First 1)
 Note ("- installed version now runs as: {0}" -f $down)
 if ($down -notmatch [regex]::Escape($PrevVersion)) { Fail "downgrade did not install a runnable $PrevVersion" }
 

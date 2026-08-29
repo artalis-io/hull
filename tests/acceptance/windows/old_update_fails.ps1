@@ -24,13 +24,19 @@ param(
 $ErrorActionPreference = 'Stop'
 function Note($m) { Add-Content -Path $Evidence -Value $m; Write-Host $m }
 function Fail($m) { Note ("  FAIL: {0}" -f $m); $script:fail = 1 }
+# hull writes progress to stdout and errors/logs to stderr; under -EA Stop a
+# 2>&1 merge of native stderr becomes a terminating error. The 0.13.0 failure we
+# assert here IS printed to stderr, so capture through a helper that locally
+# relaxes the preference and merges both streams (else the script would die
+# before it can assert the expected failure).
+function Cap([scriptblock]$sb) { $ErrorActionPreference = 'Continue'; & $sb 2>&1 }
 $script:fail = 0
 
 Note "## Old v0.13.0 self-update MUST FAIL (pre-fix Windows bug)"
-$pre = (& $Hull version 2>&1 | Select-Object -First 1)
+$pre = (Cap { & $Hull version } | Select-Object -First 1)
 Note ("- pre-update version: {0}" -f $pre)
 
-$out  = & $Hull update --repo $Repo 2>&1
+$out  = Cap { & $Hull update --repo $Repo }
 $code = $LASTEXITCODE
 $text = ($out | Out-String)
 Note (($text) -replace '(?m)^','    ')
@@ -45,7 +51,7 @@ if ($text -match 'atomic_write: rename.*failed') {
 if ($text -match 'rolled back|self_replace') { Fail "the old binary appears to have the deferred-swap code (unexpected)" }
 
 # Original untouched.
-$post = (& $Hull version 2>&1 | Select-Object -First 1)
+$post = (Cap { & $Hull version } | Select-Object -First 1)
 Note ("- post-attempt version: {0}" -f $post)
 if ($post -notmatch [regex]::Escape($PrevVersion)) { Fail "old binary changed / not $PrevVersion after the failed update" }
 

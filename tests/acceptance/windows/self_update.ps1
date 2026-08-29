@@ -24,27 +24,31 @@ param(
 $ErrorActionPreference = 'Stop'
 function Note($m) { Add-Content -Path $Evidence -Value $m; Write-Host $m }
 function Fail($m) { Note ("  FAIL: {0}" -f $m); $script:fail = 1 }
+# hull writes progress to stdout and errors/logs to stderr; under -EA Stop a
+# 2>&1 merge of native stderr becomes a terminating error. Capture through a
+# helper that locally relaxes the preference and merges both streams.
+function Cap([scriptblock]$sb) { $ErrorActionPreference = 'Continue'; & $sb 2>&1 }
 $script:fail = 0
 $new = "$Hull.new"; $old = "$Hull.old"
 
 Note "## Candidate self-update via the deferred swap (force-reinstall RC)"
-$pre = (& $Hull version 2>&1 | Select-Object -First 1)
+$pre = (Cap { & $Hull version } | Select-Object -First 1)
 Note ("- pre-update version: {0}" -f $pre)
 if ($pre -notmatch [regex]::Escape($ExpectVersion)) { Fail "candidate does not report $ExpectVersion pre-update" }
 
-$out  = & $Hull update --force --repo $Repo 2>&1
+$out  = Cap { & $Hull update --force --repo $Repo }
 $code = $LASTEXITCODE
 Note (($out | Out-String) -replace '(?m)^','    ')
 Note ("- exit code: {0}" -f $code)
-if ($code -ne 0) { Fail "candidate `hull update --force` returned non-zero" }
+if ($code -ne 0) { Fail "candidate ``hull update --force`` returned non-zero" }
 
-$post = (& $Hull version 2>&1 | Select-Object -First 1)
+$post = (Cap { & $Hull version } | Select-Object -First 1)
 Note ("- post-update version: {0}" -f $post)
 if ($post -notmatch [regex]::Escape($ExpectVersion)) { Fail "post-update version is not $ExpectVersion" }
 
 if (Test-Path $new) { Fail "<self>.new residue remains after a successful update" }
 if (Test-Path $old) {
-    & $Hull version *> $null   # next startup: the sweeper (present in the candidate) removes .old
+    Cap { & $Hull version } | Out-Null   # next startup: the sweeper (present in the candidate) removes .old
     if (Test-Path $old) { Fail "<self>.old was not swept on the next startup" }
     else { Note "- <self>.old swept on the next startup (candidate sweeper)" }
 } else {
