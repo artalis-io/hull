@@ -173,12 +173,21 @@ try {
     Invoke-HullCommitInstall $tsrc $tdest $tdir '9.9.9' $true
     Check ((ReadTrim $tdest) -eq 'NEWTXN') "successful commit installs the new binary"
     Check (Test-HullMarkerValid (Read-HullMarker $tdir) $tdir) "successful commit writes a valid marker"
-    Check (@(Get-ChildItem $tdir -Filter '.hull-*' -Force -ErrorAction SilentlyContinue).Count -eq 0) "no staging/backup residue after commit"
+    Check (@(Get-ChildItem -LiteralPath $tdir -Force -ErrorAction SilentlyContinue | Where-Object { $_.Name -like '.hull-stage-*' -or $_.Name -like '.hull-backup-*' }).Count -eq 0) "no staging/backup residue after commit"
 
     # --- verifier detection (tri-state, bounded) ------------------------------
     Note "## verifier detection (tri-state, bounded)"
+    # Compile a real fake hull.exe with the Framework C# compiler (Add-Type
+    # -OutputType ConsoleApplication is Windows-PowerShell-5.1-only, so csc.exe is
+    # used directly for parity with PowerShell 7). System.Diagnostics.Process
+    # needs a real PE, not a .cmd shim.
     $fakeExe = Join-Path $work 'fakehull.exe'
-    Add-Type -TypeDefinition $script:FakeSrc -OutputAssembly $fakeExe -OutputType ConsoleApplication
+    $csFile = Join-Path $work 'fakehull.cs'; Set-Content -LiteralPath $csFile -Value $script:FakeSrc -Encoding ASCII
+    $csc = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
+    if (-not (Test-Path -LiteralPath $csc)) { $csc = Join-Path $env:WINDIR 'Microsoft.NET\Framework\v4.0.30319\csc.exe' }
+    Check (Test-Path -LiteralPath $csc) "found a C# compiler for the test fake"
+    & $csc /nologo "/out:$fakeExe" /target:exe "$csFile" *> (Join-Path $work 'csc.log')
+    Check (Test-Path -LiteralPath $fakeExe) "compiled the fake hull.exe"
     $sigFile = Join-Path $work 'sig.bin'; WriteBytes $sigFile 'SIG'
     $missingSig = Join-Path $work 'nope.sig'
 
