@@ -48,6 +48,7 @@ $id = [Security.Principal.WindowsIdentity]::GetCurrent()
 $elevated = ((whoami /groups) -match 'S-1-16-12288')
 $level = if ($elevated) { 'High (elevated)' } else { 'Medium (non-elevated)' }
 Note ("- account: {0}; integrity: {1}; per-user portable install, no elevation requested" -f $id.Name, $level)
+Note "- Winget install/invoke/uninstall requests no elevation and stays non-elevated WHERE POSSIBLE; on this image the only Winget-capable account is the runner (a fresh standard user cannot execute Winget at all), which the GitHub image runs elevated. That integrity is a runner-image property, not a Hull requirement."
 
 $cmd = Get-Command winget -ErrorAction SilentlyContinue
 if (-not $cmd) { Fail "winget alias not on PATH for the runner account"; Note "WINGET: FAIL"; exit 1 }
@@ -69,11 +70,17 @@ Note "- enabled LocalManifestFiles (needed only to install from a LOCAL manifest
 $v = Invoke-Native $winget @('validate', '--manifest', $ManifestDir)
 Note (($v.Out) -replace '(?m)^', '    ')
 if ($v.Code -eq 0 -or $v.Out -match 'Manifest validation succeeded') { Note "- OK: winget validate succeeded" } else { Fail "winget validate failed (code $($v.Code))" }
+Note "- NOTE: this schema validation runs under the runner account; it is NOT presented as non-admin evidence (Scoop is the fresh-standard-user proof)."
 
 # 2. install the portable (downloads the pinned asset + verifies the SHA-256)
 $i = Invoke-Native $winget (@('install', '--manifest', $ManifestDir) + $common)
 Note (($i.Out) -replace '(?m)^', '    ')
 if ($i.Code -ne 0) { Fail "winget install returned $($i.Code)" }
+# Enforce hash verification explicitly: winget fails a mismatch, but we also
+# assert the "verified installer hash" evidence so the gate cannot pass silently
+# without it.
+if ($i.Out -match 'verified installer hash') { Note "- OK: winget verified the installer SHA-256 (hash verification enforced)" }
+else { Fail "winget install did not report installer-hash verification" }
 
 # 3. invoke the hull alias directly (the Links dir may postdate this session PATH)
 $alias = Join-Path $env:LOCALAPPDATA 'Microsoft\WinGet\Links\hull.exe'

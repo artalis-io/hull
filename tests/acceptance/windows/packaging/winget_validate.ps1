@@ -41,9 +41,9 @@ else {
     if (-not $winget) { $cmd = Get-Command winget -ErrorAction SilentlyContinue; if ($cmd) { $winget = $cmd.Source } }
 }
 if (-not $winget) {
-    Note "- BOUNDARY: a fresh standard user cannot resolve winget.exe (App Installer not visible to the user)"
-    Note "- validation runs under the runner account instead (winget_test.ps1); Scoop is the non-admin proof"
-    Note "WINGET-PROBE: standard user cannot run winget (documented boundary; non-gating)"
+    Note "- BOUNDARY (expected): the fresh standard-user probe fails ONLY because Winget/App Installer cannot execute in this unprovisioned runas profile (App Installer is not even visible to the user to resolve)."
+    Note "- This is the Winget/App Installer provisioning model, NOT a Hull defect and NOT an install failure. Schema validation runs under the runner account (winget_test.ps1) and is not non-admin evidence; Scoop is the actual fresh-standard-user install proof."
+    Note "WINGET-PROBE: OK (expected standard-user boundary recorded; non-gating)"
     exit 0
 }
 Note ("- winget.exe: {0}" -f $winget)
@@ -52,14 +52,14 @@ try {
     $v = Invoke-Native $winget @('validate', '--manifest', $ManifestDir)
     Note (($v.Out) -replace '(?m)^', '    ')
     if ($v.Code -eq 0 -or $v.Out -match 'Manifest validation succeeded') {
-        Note "- NOTE: a standard user was able to run winget validate on this image"
+        Note "- NOTE: a standard user was unexpectedly able to run winget validate on this image (recorded for information; the validation gate still runs under the runner)"
     } else {
-        Note ("- BOUNDARY: winget ran but validate did not succeed as a standard user (code {0})" -f $v.Code)
+        Note ("- BOUNDARY (expected): winget could not validate as a standard user (code {0}) - the unprovisioned runas profile" -f $v.Code)
     }
 } catch {
-    Note ("- BOUNDARY: a fresh standard user cannot execute winget.exe on this image: {0}" -f $_.Exception.Message)
-    Note "- (expected: WindowsApps binary is ACL-locked / no package identity without a profile)"
+    Note ("- BOUNDARY (expected): the fresh standard-user probe fails ONLY because Winget/App Installer cannot execute in this unprovisioned runas profile: {0}" -f $_.Exception.Message)
+    Note "- (the WindowsApps binary is ACL-locked and there is no package identity / execution alias without a loaded profile). NOT a Hull defect and NOT an install failure."
 }
-Note "- validation gate + install/invoke/uninstall run under the runner (winget_test.ps1); Scoop is the non-admin proof"
-Note "WINGET-PROBE: OK (standard-user boundary recorded; non-gating)"
+Note "- Schema validation + install/invoke/uninstall run under the runner (winget_test.ps1) and are NOT presented as non-admin evidence; Scoop is the actual fresh-standard-user install proof."
+Note "WINGET-PROBE: OK (expected standard-user boundary recorded; non-gating)"
 exit 0
