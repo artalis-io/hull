@@ -96,5 +96,5 @@ elseif (Test-Path -LiteralPath $alias) { Fail "hull alias remained after uninsta
 else { Note "- OK: winget uninstall removed the hull alias" }
 
 if ($script:fail -ne 0) { Note "WINGET: FAIL"; exit 1 }
-Note "WINGET: OK (validate + install + invoke + uninstall, runner/non-elevated)"
+Note "WINGET: OK (validate + install + invoke + uninstall, runner account; integrity recorded above)"
 exit 0
