@@ -114,40 +114,57 @@ channel is an independent authenticity proof.
 | **SLSA provenance** | Build provenance (source commit, builder identity) attesting how the artifact was produced. | Supply-chain provenance, not a user-facing execution-trust signal. |
 | **Authenticode (possible, Slice E)** | OS-level "this executable is signed by X", and, only with an EV certificate or accrued reputation, reduced SmartScreen friction. | Not an integrity proof of Hull's content, and a self-signed cert yields no SmartScreen reputation. Feasibility on an APE is unproven (see 6). |
 
-Consequences the installer must honor:
+Consequences the installer must honor (ratified):
 
 - SHA-256 verification against the exact `hull.sha256` entry is mandatory and
-  fail-closed on missing / duplicate / malformed / mismatched entries.
+  fail-closed on missing / duplicate / malformed / mismatched entries. A
+  same-channel SHA-256 protects against corruption and a mismatched asset, not
+  against a compromised release channel.
 - The installer never treats a newly-downloaded executable as its own root of
-  trust. On an UPGRADE, if a safe pre-existing `hull` can independently verify
-  `hull.sha256.sig`, that is used as an ADDITIONAL check. On a first install
-  there is no in-band independent root: the guarantees are HTTPS + GitHub + the
-  mandatory SHA-256, and the docs point the user at the out-of-band Ed25519 and
-  Sigstore/Rekor verification for stronger assurance.
-- No novel cryptography in PowerShell: SHA-256 uses the .NET
+  trust. No novel cryptography in PowerShell: SHA-256 uses the .NET
   `System.Security.Cryptography` primitives; Ed25519 / Sigstore verification is
-  delegated to `hull verify-release` (a trusted hull) and to `cosign`, never
-  re-implemented in the script.
+  delegated to `hull verify-release` (a pre-existing trusted hull) and to
+  `cosign`, never re-implemented in the script.
+- **Upgrade path (three explicit outcomes, no silent downgrade):**
+  - a pre-existing `hull` that supports `verify-release` is invoked to check
+    `hull.sha256.sig` BEFORE replacement, and its verification SUCCEEDS -> proceed;
+  - the verifier is present and its verification FAILS (bad signature, or the
+    invocation itself errors) -> ABORT the install; never fall back to
+    checksum-only after a failed verifier invocation;
+  - the pre-existing `hull` is older and lacks `verify-release` -> proceed, but
+    CLEARLY REPORT that the install is under bootstrap trust (GitHub HTTPS plus a
+    matched SHA-256), not an Ed25519-verified upgrade.
+- On a first install there is no in-band independent root: the guarantees are
+  HTTPS + GitHub + the mandatory SHA-256 (bootstrap trust), and the docs point
+  the user at the out-of-band Ed25519 (`hull verify-release`) and Sigstore/Rekor
+  verification for stronger assurance.
 
-## 3. Install directory + PATH convention (proposed, to be frozen at review)
+## 3. Install directory + PATH convention (frozen)
 
-- **Install directory:** `%LOCALAPPDATA%\Programs\Hull\` with the binary as
-  `hull.com`. This is the Windows per-user convention (writable without admin,
+- **Install directory (frozen):** `%LOCALAPPDATA%\Programs\Hull\` with the binary
+  as `hull.com`. This is the Windows per-user convention (writable without admin,
   Control-Panel-trackable), mirrors the POSIX `~/.local/bin` intent, and is
   consistent with how Winget portable and Scoop place per-user tools. The binary
-  is `hull.com` so `hull` resolves via `PATHEXT`.
-  - Alternatives considered: `%USERPROFILE%\.hull\bin` (consistent with Hull's
-    existing `~/.hull` state dir for tools/blobs/feature/platform, but a hidden
-    dot-dir is less Windows-idiomatic and Hull keeps state, not binaries, under
-    `~/.hull`); `%USERPROFILE%\.local\bin` (exact POSIX mirror, non-idiomatic on
-    Windows). Recommendation: `%LOCALAPPDATA%\Programs\Hull`; `-Prefix` overrides.
-- **PATH:** add the install directory to the CURRENT USER's PATH only, via
-  `HKCU\Environment` (never machine-wide `HKLM`, never elevation). Insertion is
-  idempotent with exact component matching (split on `;`, compare
-  case-insensitively, add only if absent), never truncates or reorders existing
-  entries, and broadcasts `WM_SETTINGCHANGE` so new shells pick it up.
-  `-NoPath` skips this. Paths containing spaces are handled by never quoting into
-  a single component and by exact-component comparison.
+  is `hull.com` so `hull` resolves via `PATHEXT`. `-Prefix` overrides it.
+  - Alternatives considered and rejected: `%USERPROFILE%\.hull\bin` (Hull keeps
+    state, not binaries, under `~/.hull`, and a hidden dot-dir is less
+    Windows-idiomatic); `%USERPROFILE%\.local\bin` (exact POSIX mirror,
+    non-idiomatic on Windows).
+- **PATH (frozen).** Add ONLY the install directory to the CURRENT USER's
+  `HKCU\Environment\Path`. The mutation must:
+  - compare PATH components case-insensitively using normalized separators and
+    normalized trailing separators, and add the directory only if absent
+    (idempotent);
+  - preserve unrecognized entries and expandable values (`%VAR%`) verbatim, and
+    never reorder or truncate existing entries;
+  - preserve the registry value type where practical (an existing
+    `REG_EXPAND_SZ` stays `REG_EXPAND_SZ`; do not flatten expandable values);
+  - never read, write, or rewrite the machine PATH (`HKLM`), and never elevate;
+  - broadcast the environment-change notification (`WM_SETTINGCHANGE`, `Environment`)
+    only after a successful mutation, so new shells pick it up;
+  - make NO PATH change during `-DryRun` or when `-NoPath` is supplied.
+  - Paths containing spaces are handled by exact-component comparison and by never
+    quoting the directory into a single component.
 
 ## 4. `install.ps1` CLI contract (proposed, frozen at review)
 
@@ -169,10 +186,15 @@ Parameters:
 | `-Force` | Overwrite an existing install (subject to the overwrite rule). | off |
 | `-DryRun` | Print the plan; perform no writes (no download-to-final, no PATH edit). | off |
 | `-NoPath` | Do not modify user PATH. | off |
-| `-Uninstall` | Remove the installed binary + the user-PATH entry this installer added; leave `~/.hull` state unless a future `-Purge` is designed. | off |
+| `-Uninstall` | Remove the installer-managed Hull executable + the exact PATH component this installer added; retain all `~/.hull` state. | off |
 
 Frozen behavior:
 
+- The upstream repository is FIXED to `artalis-io/hull`. The public installer
+  exposes NO arbitrary repository override (unlike `install.sh`'s `HULL_REPO`).
+- Validate `-Version` against a strict release-tag grammar (for example
+  `^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$`) BEFORE constructing any URL, and
+  reject anything else. `latest` resolves to the newest stable release.
 - Resolve the requested official GitHub release; reject drafts and prereleases
   when resolving "latest".
 - Download only the official `hull-cosmo` asset plus `hull.sha256` (+
@@ -194,6 +216,23 @@ Frozen behavior:
 - PATH edit is user-scoped, exact, idempotent, never truncating (section 3).
 - Print concise next steps + verification commands, and state the v0.13.0 ->
   v0.14.0 one-time manual-replacement note.
+
+`-Uninstall` behavior (frozen). No `-Purge` is added in this initiative; `~/.hull`
+state, downloaded tools, caches, and application data are always retained.
+
+- Remove only the known installer-managed Hull executable (`<prefix>\hull.com`).
+- Remove the install directory only when it is empty after the executable is
+  gone; never recursively delete an arbitrary custom `-Prefix`.
+- Remove only the exact PATH component the installer manages (the resolved
+  prefix), using the same case-insensitive normalized-separator comparison as
+  insertion; leave every other PATH entry untouched.
+- Be idempotent (uninstalling when nothing is installed is a clean no-op).
+- Report that Hull state under `~/.hull` was retained and how to remove it
+  manually.
+- `-Uninstall` is mutually exclusive with the installation-only parameters
+  (`-Version`, `-Force`, `-NoPath`); only `-Prefix` (to locate the managed
+  install) and `-DryRun` compose with it. Combining it with an installation-only
+  parameter is a usage error.
 
 Installer-specific tests (read-only w.r.t. GitHub releases), run on a non-admin,
 Developer-Mode-off Windows runner under both Windows PowerShell 5.1 and
@@ -217,16 +256,24 @@ external index/bucket without explicit authorization.
   `%LOCALAPPDATA%\Microsoft\WinGet`, alias on PATH via `%LOCALAPPDATA%\Microsoft\WinGet\Links`).
   Manifest pins `InstallerUrl` (immutable release URL) + `InstallerSha256`, sets
   a `Commands` / `PortableCommandAlias` of `hull`, and declares architecture
-  honestly. Open item for Slice D: the fat APE is genuinely multi-arch, so decide
-  between a `neutral` architecture entry vs. duplicate x64/arm64 entries pointing
-  at the same URL, and confirm Winget saves/aliases the extension-less asset as a
-  runnable `hull.exe`. Validate with `wingetcreate` / `winget validate`.
+  honestly. **Architecture stays evidence-gated:** `Architecture: neutral` is
+  preferred because the fat APE carries both x86_64 and aarch64, but this is NOT
+  frozen until a real Winget install proves client compatibility (the fallback is
+  duplicate x64/arm64 entries pointing at the same URL). **Do not claim** the
+  extension-less `hull-cosmo` automatically becomes a runnable `hull.exe`; Slice D
+  must test the actual portable-package alias/rename behavior. If Winget cannot
+  reliably rename or shim the extension-less asset, the clean future solution is
+  an ADDITIONAL immutable Windows-named release asset (for example
+  `hull-windows.com`) produced and signed during a FUTURE release, never a
+  packaging-time byte mutation of the published `hull-cosmo`. Validate with
+  `wingetcreate` / `winget validate`.
 - **Scoop:** a JSON manifest with `"url": "<immutable>/hull-cosmo#/hull.com"`
   (the `#/` rename saves the extension-less APE as `hull.com` so it runs),
   `"hash": "<sha256>"`, and `"bin": [["hull.com", "hull"]]` for the `hull` shim.
-  No `persist` (Hull keeps mutable state under `~/.hull`, not the install dir).
-  `autoupdate` only with a hash-checked url/hash template. No external bucket is
-  created or mutated without authorization.
+  This shape is appropriate subject to real Scoop install/invoke/uninstall tests
+  in Slice D. No `persist` (Hull keeps mutable state under `~/.hull`, not the
+  install dir). `autoupdate` only with a hash-checked url/hash template. No
+  external bucket is created or mutated without authorization.
 
 ## 6. Authenticode feasibility (experiment plan; GO/NO-GO/DEFER in Slice E)
 
@@ -276,16 +323,32 @@ cert, no CI secret):
 7. Compare operationally and financially: EV certificate vs. Azure Trusted
    Signing vs. no Authenticode (rely on SHA-256 + Ed25519 + Sigstore + docs).
 
-Deliverable: a GO / NO-GO / DEFER recommendation. No production signing is added
-until certificate custody, CI authorization, ordering, provenance, and a
-reproducibility policy are separately approved.
+Deliverable: a GO / NO-GO / DEFER recommendation. **DEFER or NO-GO is the
+expected outcome** unless the experiments prove ALL of the following:
+
+1. Windows recognizes the signature.
+2. Windows, Linux, and macOS all still execute the same signed APE.
+3. APE architecture selection remains valid.
+4. ZIP / APE structure remains valid.
+5. The signing order integrates cleanly with Hull's SHA-256, Ed25519, Sigstore,
+   and SLSA.
+6. Reproducibility claims can be amended honestly (the byte-for-byte
+   reproducibility policy is reconciled with whatever Authenticode does).
+7. The chosen certificate provides meaningful SmartScreen value (a self-signed
+   cert does not qualify).
+
+Authenticode production signing is NOT added in Slice B, and no production
+signing is added anywhere until certificate custody, CI authorization, ordering,
+provenance, and a reproducibility policy are separately approved.
 
 ## 7. Slice plan and review gates
 
 - **Slice A (this record):** audit + frozen trust model + install dir/PATH +
   `install.ps1` contract + Winget/Scoop shape + Authenticode experiment plan.
   Stop for review before any implementation.
-- **Slice B:** `install.ps1` + installer-specific Windows tests. Stop for review.
+- **Slice B:** `install.ps1` + installer-specific Windows tests only. It does NOT
+  begin Winget, Scoop, or Authenticode execution, and adds no production signing.
+  Stop for review.
 - **Slice C:** installation-only docs/website delivery (README Windows quick
   start, agent/install/security docs, the v0.13.0->v0.14.0 note, verification
   instructions). Do not edit `install.sh` merely to create a diff. Stop for
