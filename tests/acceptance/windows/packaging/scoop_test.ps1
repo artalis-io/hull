@@ -24,12 +24,13 @@ Note "## Scoop package (as $(whoami))"
 $env:SCOOP = Join-Path $env:USERPROFILE 'scoop'
 [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
 
-# Install Scoop non-interactively (per-user; no admin).
+# Install Scoop non-interactively (per-user; no admin). Run the installer
+# scriptblock with an explicit -ScoopDir (omitting -RunAsAdmin = a user install).
 $sout = Cap {
-    $installer = (New-Object Net.WebClient).DownloadString('https://get.scoop.sh')
-    Invoke-Expression "& { $installer } -RunAsAdmin:$false"
+    $installer = Invoke-RestMethod -Uri 'https://get.scoop.sh' -UseBasicParsing
+    & ([scriptblock]::Create($installer)) -ScoopDir $env:SCOOP
 }
-Note (($sout | Out-String) -split "`n" | Select-Object -First 8 | ForEach-Object { "    $_" }) 2>$null
+Note (($sout | Out-String) -replace '(?m)^', '    ')
 
 $scoopShim = Join-Path $env:SCOOP 'shims\scoop.ps1'
 $scoop = Join-Path $env:SCOOP 'shims\scoop.cmd'

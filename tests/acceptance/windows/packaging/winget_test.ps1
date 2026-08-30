@@ -28,8 +28,18 @@ catch { Note ("- App Installer register note: {0}" -f $_.Exception.Message) }
 $winget = $null
 $cmd = Get-Command winget -ErrorAction SilentlyContinue
 if ($cmd) { $winget = $cmd.Source }
-elseif (Test-Path "$env:LOCALAPPDATA\Microsoft\WindowsApps\winget.exe") { $winget = "$env:LOCALAPPDATA\Microsoft\WindowsApps\winget.exe" }
-if (-not $winget) { Fail "winget is not available for this user"; Note "WINGET: FAIL"; exit 1 }
+if (-not $winget) {
+    $pkg = Get-AppxPackage -Name Microsoft.DesktopAppInstaller -ErrorAction SilentlyContinue
+    Note ("- DesktopAppInstaller: version={0} loc={1}" -f $pkg.Version, $pkg.InstallLocation)
+    if ($pkg -and $pkg.InstallLocation) {
+        foreach ($n in @('winget.exe', 'AppInstallerCLI.exe')) {
+            $c = Join-Path $pkg.InstallLocation $n
+            if (Test-Path -LiteralPath $c) { $winget = $c; break }
+        }
+    }
+}
+if (-not $winget -and (Test-Path "$env:LOCALAPPDATA\Microsoft\WindowsApps\winget.exe")) { $winget = "$env:LOCALAPPDATA\Microsoft\WindowsApps\winget.exe" }
+if (-not $winget) { Fail "winget is not available for this user (App Installer MSIX not reachable in a runas session)"; Note "WINGET: FAIL"; exit 1 }
 Note ("- winget: {0} ({1})" -f $winget, (Cap { & $winget --version } | Select-Object -First 1))
 
 $common = @('--accept-source-agreements', '--accept-package-agreements', '--disable-interactivity')
