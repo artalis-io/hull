@@ -264,9 +264,11 @@ try {
     Note "## marker schema + prefix + type validation"
     $mdir = Join-Path $work 'marker'; New-Item -ItemType Directory -Path $mdir -Force | Out-Null
     $mk = Get-HullMarkerPath $mdir
-    Write-HullMarker $mdir '1.0.0' $true 'C:\x'
+    Write-HullMarker $mdir '1.0.0' $true $mdir
     Check (Test-HullMarkerValid (Read-HullMarker $mdir) $mdir) "a well-formed marker at its prefix is valid"
     Check (-not (Test-HullMarkerValid (Read-HullMarker $mdir) (Join-Path $work 'other'))) "marker rejected for a different prefix"
+    Set-Content -LiteralPath $mk -Encoding ASCII -Value (@{ installer = 'install.ps1'; schema = 1; prefix = $mdir; version = '1'; pathAdded = $true; pathEntry = 'C:\somewhere\else' } | ConvertTo-Json)
+    Check (-not (Test-HullMarkerValid (Read-HullMarker $mdir) $mdir)) "pathAdded=true with a pathEntry not bound to the prefix rejected"
     Set-Content -LiteralPath $mk -Encoding ASCII -Value (@{ installer = 'someone-else'; schema = 1; prefix = $mdir; version = '1'; pathAdded = $false; pathEntry = '' } | ConvertTo-Json)
     Check (-not (Test-HullMarkerValid (Read-HullMarker $mdir) $mdir)) "foreign installer id rejected"
     Set-Content -LiteralPath $mk -Encoding ASCII -Value (@{ installer = 'install.ps1'; prefix = $mdir; version = '1'; pathAdded = $false; pathEntry = '' } | ConvertTo-Json)
@@ -281,6 +283,51 @@ try {
     Check (-not (Test-HullMarkerValid (Read-HullMarker $mdir) $mdir)) "non-boolean pathAdded rejected"
     Set-Content -LiteralPath $mk -Encoding ASCII -Value (@{ installer = 'install.ps1'; schema = 1; prefix = $mdir; version = '1'; pathAdded = $true; pathEntry = '' } | ConvertTo-Json)
     Check (-not (Test-HullMarkerValid (Read-HullMarker $mdir) $mdir)) "pathAdded=true with an empty pathEntry rejected"
+
+    # --- atomic marker replace: a blocked replace retains the OLD marker ------
+    Note "## atomic marker replace failure retains the old marker"
+    $amdir = Join-Path $work 'atomicmarker'; New-Item -ItemType Directory -Path $amdir -Force | Out-Null
+    $amdest = Join-Path $amdir 'hull.com'; WriteBytes $amdest 'OLDAM'
+    Write-HullMarker $amdir '0.13.0' $true $amdir
+    $oldAmBytes = [System.IO.File]::ReadAllBytes((Get-HullMarkerPath $amdir))
+    $amsrc = Join-Path $work 'amsrc'; WriteBytes $amsrc 'NEWAM'
+    $fsAm = [System.IO.File]::Open((Get-HullMarkerPath $amdir), [System.IO.FileMode]::Open, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None)
+    try {
+        Throws { Invoke-HullCommitInstall $amsrc $amdest $amdir '0.14.0' $true } "commit fails when the marker cannot be atomically replaced"
+    } finally { $fsAm.Close(); $fsAm.Dispose() }
+    Check ((ReadTrim $amdest) -eq 'OLDAM') "binary rolled back when marker replacement fails"
+    Check (BytesEqual ([System.IO.File]::ReadAllBytes((Get-HullMarkerPath $amdir))) $oldAmBytes) "the OLD marker is retained (never deleted) when replacement fails"
+
+    # --- same-version re-affirmation is transactional -------------------------
+    Note "## same-version re-affirmation transaction"
+    $rfdir = Join-Path $work 'reaffirm'; New-Item -ItemType Directory -Path $rfdir -Force | Out-Null
+    WriteBytes (Join-Path $rfdir 'hull.com') 'RFBIN'
+    Write-HullMarker $rfdir '1.0.0' $false ''
+    $rfSnap = Get-HullUserPathRaw
+    try {
+        Throws { Invoke-HullReaffirm $rfdir '1.0.0' $false -FailMarker } "re-affirmation marker failure throws"
+        Check (-not (Test-HullPathContains (Get-HullUserPathRaw).Value $rfdir)) "re-affirmation marker failure undid the PATH add"
+    } finally { Set-HullUserPathRaw $rfSnap.Value $rfSnap.Kind }
+
+    # --- a critical binary rollback still restores PATH + marker ---------------
+    Note "## critical binary rollback still restores metadata"
+    $cbdir = Join-Path $work 'critbin'; New-Item -ItemType Directory -Path $cbdir -Force | Out-Null
+    $cbdest = Join-Path $cbdir 'hull.com'; WriteBytes $cbdest 'OLDCB'
+    Write-HullMarker $cbdir '0.13.0' $true $cbdir
+    $cbMarker = [System.IO.File]::ReadAllBytes((Get-HullMarkerPath $cbdir))
+    $cbSnap = Get-HullUserPathRaw
+    try {
+        Set-HullUserPathRaw ($cbSnap.Value.TrimEnd(';') + ';' + $cbdir + ';C:\Odd Path\') $cbSnap.Kind
+        $cbPrior = Get-HullUserPathRaw
+        $cbsrc = Join-Path $work 'cbsrc'; WriteBytes $cbsrc 'NEWCB'
+        $critCB = $null
+        try { Invoke-HullCommitInstall $cbsrc $cbdest $cbdir '0.14.0' $false -FailMarker -SimulateUndoFailure } catch { $critCB = $_.Exception.Message }
+        Check ($critCB -match 'CRITICAL') "a failed binary rollback surfaces a combined CRITICAL"
+        $cbNow = Get-HullUserPathRaw
+        Check (($cbNow.Value -ceq $cbPrior.Value) -and ($cbNow.Kind -eq $cbPrior.Kind)) "PATH restored despite the critical binary rollback"
+        Check (BytesEqual ([System.IO.File]::ReadAllBytes((Get-HullMarkerPath $cbdir))) $cbMarker) "marker restored despite the critical binary rollback"
+        Get-ChildItem -LiteralPath $cbdir -Filter '.hull-backup-*' -Force -ErrorAction SilentlyContinue | ForEach-Object { Remove-Item -LiteralPath $_.FullName -Force -ErrorAction SilentlyContinue }
+    } finally { Set-HullUserPathRaw $cbSnap.Value $cbSnap.Kind }
 
     # --- no-adoption + uninstall ownership gate -------------------------------
     Note "## no-adoption + uninstall ownership gate"

@@ -284,17 +284,46 @@ function Resolve-HullPrefix([string]$Requested) {
 # ── Ownership marker (validated schema + prefix + recorded raw PATH entry) ────
 function Get-HullMarkerPath([string]$PrefixDir) { return (Join-Path $PrefixDir $script:HullMarkerName) }
 
+function Import-HullMoveFileEx {
+    if (-not ('HullNative.Fs' -as [type])) {
+        Add-Type -Namespace HullNative -Name Fs -MemberDefinition @'
+[System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError = true, CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
+public static extern bool MoveFileEx(string lpExistingFileName, string lpNewFileName, uint dwFlags);
+'@ -ErrorAction SilentlyContinue
+    }
+}
+
+function Move-HullFileAtomicReplace([string]$Src, [string]$Dst) {
+    # True atomic same-volume replace via MoveFileEx(REPLACE_EXISTING|WRITE_THROUGH):
+    # on the same volume the destination is never in a "no file" state. Retries a
+    # few times for a transient scanner lock; every attempt is itself atomic.
+    Import-HullMoveFileEx
+    $flags = 0x1 -bor 0x8   # MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH
+    for ($i = 0; $i -lt 5; $i++) {
+        if ([HullNative.Fs]::MoveFileEx($Src, $Dst, $flags)) { return $true }
+        Start-Sleep -Milliseconds 100
+    }
+    return $false
+}
+
 function Write-HullMarkerAtomic([string]$PrefixDir, [byte[]]$Bytes) {
-    # Write a unique temp in the same directory, then rename it into place. Uses
-    # remove-then-rename (robust across NTFS/AV; File.Replace can throw when a
-    # scanner briefly holds the destination).
+    # Write a unique temp in the same directory, then atomically rename it into
+    # place. For a first marker a plain same-directory move suffices; to REPLACE
+    # an existing marker use MoveFileEx so the marker is never absent. If the
+    # atomic replace is blocked, throw (retain the old marker) - never fall back
+    # to a non-atomic delete-then-move.
     New-Item -ItemType Directory -Path $PrefixDir -Force | Out-Null
     $final = Get-HullMarkerPath $PrefixDir
     $tmp = Join-Path $PrefixDir (".hull-marker-" + [guid]::NewGuid().ToString('N'))
     [System.IO.File]::WriteAllBytes($tmp, $Bytes)
     try {
-        if (Test-Path -LiteralPath $final) { Remove-Item -LiteralPath $final -Force }
-        [System.IO.File]::Move($tmp, $final)
+        if (Test-Path -LiteralPath $final) {
+            if (-not (Move-HullFileAtomicReplace $tmp $final)) {
+                throw "could not atomically replace the marker at $final (it is retained unchanged)"
+            }
+        } else {
+            [System.IO.File]::Move($tmp, $final)
+        }
     } catch { Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue; throw }
 }
 
@@ -336,7 +365,13 @@ function Test-HullMarkerValid($Rec, [string]$PrefixDir) {
     if (-not $schemaOk) { return $false }
     if ($Rec.pathAdded -isnot [bool]) { return $false }
     if ([string]::IsNullOrEmpty([string]$Rec.prefix)) { return $false }
-    if (($Rec.pathAdded -eq $true) -and [string]::IsNullOrEmpty([string]$Rec.pathEntry)) { return $false }
+    if ($Rec.pathAdded -eq $true) {
+        # An owned PATH entry must be nonempty AND bind to the recorded prefix, so
+        # a valid-looking marker can never authorize removing an unrelated PATH
+        # component.
+        if ([string]::IsNullOrEmpty([string]$Rec.pathEntry)) { return $false }
+        if ((ConvertTo-HullPathKey ([string]$Rec.pathEntry)) -ne (ConvertTo-HullPathKey ([string]$Rec.prefix))) { return $false }
+    }
     if ((ConvertTo-HullPathKey ([string]$Rec.prefix)) -ne (ConvertTo-HullPathKey $PrefixDir)) { return $false }
     return $true
 }
@@ -431,11 +466,40 @@ function Invoke-HullCommitInstall([string]$Src, [string]$Dest, [string]$PrefixDi
         Complete-HullBinarySwap $swap
     } catch {
         $err = $_
-        # Restore the binary FIRST (the anchor: a runnable hull), then the PATH
-        # and marker to their exact prior state.
-        Undo-HullBinarySwap $swap -SimulateRestoreFailure:$SimulateUndoFailure -SimulateRemoveFailure:$SimulateUndoRemoveFailure
-        Restore-HullUserPathExact $pathSnap
-        Restore-HullMarkerExact $PrefixDir $prevMarkerBytes
+        # Attempt ALL of binary + PATH + marker restoration even if one throws, so
+        # a failed binary rollback never skips metadata rollback. Collect every
+        # rollback failure and report a combined CRITICAL.
+        $rollbackErrors = @()
+        try { Undo-HullBinarySwap $swap -SimulateRestoreFailure:$SimulateUndoFailure -SimulateRemoveFailure:$SimulateUndoRemoveFailure }
+        catch { $rollbackErrors += "binary: $($_.Exception.Message)" }
+        try { Restore-HullUserPathExact $pathSnap }
+        catch { $rollbackErrors += "PATH: $($_.Exception.Message)" }
+        try { Restore-HullMarkerExact $PrefixDir $prevMarkerBytes }
+        catch { $rollbackErrors += "marker: $($_.Exception.Message)" }
+        if ($rollbackErrors.Count -gt 0) {
+            throw ("CRITICAL: install failed and rollback was incomplete (" + ($rollbackErrors -join '; ') + "); original error: $($err.Exception.Message)")
+        }
+        throw $err
+    }
+}
+
+function Invoke-HullReaffirm([string]$PrefixDir, [string]$Ver, [bool]$NoPath, [switch]$FailMarker) {
+    # Re-affirm a managed same-version install: ensure PATH + refresh the marker
+    # as ONE transaction. If the marker refresh fails, undo the PATH add and
+    # restore the prior marker so a partial PATH mutation never survives.
+    $markerPath = Get-HullMarkerPath $PrefixDir
+    $prevMarkerBytes = $null
+    if (Test-Path -LiteralPath $markerPath) { $prevMarkerBytes = [System.IO.File]::ReadAllBytes($markerPath) }
+    $pathSnap = Get-HullUserPathRaw
+    try {
+        $addedEntry = $null
+        if (-not $NoPath) { $addedEntry = Add-HullToUserPath $PrefixDir $false }
+        if ($FailMarker) { throw "simulated marker write failure (test)" }
+        Set-HullOwnershipMarker $PrefixDir $Ver $addedEntry
+    } catch {
+        $err = $_
+        try { Restore-HullUserPathExact $pathSnap } catch { }
+        try { Restore-HullMarkerExact $PrefixDir $prevMarkerBytes } catch { }
         throw $err
     }
 }
@@ -468,9 +532,7 @@ function Invoke-HullInstall {
     if ((Test-Path -LiteralPath $dest) -and -not $Force) {
         if ($installedVer -eq $wantVer) {
             if (Test-HullManagedHere $prefixDir) {
-                $added = $null
-                if (-not $NoPath) { $added = Add-HullToUserPath $prefixDir $false }
-                Set-HullOwnershipMarker $prefixDir $installedVer $added
+                Invoke-HullReaffirm $prefixDir $installedVer $NoPath
                 Write-HullInfo "hull $installedVer already installed and managed at $dest"
             } else {
                 Write-HullInfo "hull $installedVer is already present at $dest but was not installed by install.ps1; not adopting it. Use -Force to replace it with a managed install."
