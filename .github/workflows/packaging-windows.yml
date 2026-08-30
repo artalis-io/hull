@@ -1,0 +1,66 @@
+name: Packaging (Windows Winget + Scoop)
+
+# Repository-owned Windows package metadata: a fail-closed generator drift check
+# (the committed Winget/Scoop manifests must match the release tag + its
+# hull-cosmo hash) and a non-admin install/invoke/uninstall test of both package
+# forms. Read-only with respect to releases; it never submits to
+# microsoft/winget-pkgs or any Scoop bucket.
+
+on:
+  pull_request:
+    paths:
+      - packaging/windows/**
+      - tests/acceptance/windows/packaging/**
+      - tests/acceptance/windows/preconditions.ps1
+      - .github/workflows/packaging-windows.yml
+  push:
+    branches: [main]
+    paths:
+      - packaging/windows/**
+      - tests/acceptance/windows/packaging/**
+      - .github/workflows/packaging-windows.yml
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Release tag the committed metadata is pinned to
+        required: true
+        default: v0.14.0
+
+permissions:
+  contents: read
+
+jobs:
+  generator-check:
+    name: Generator drift check (committed metadata matches the release)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+      - name: Regenerate + diff against the committed manifests
+        run: |
+          tag='${{ github.event.inputs.release_tag }}'
+          [ -n "$tag" ] || tag=v0.14.0
+          sh packaging/windows/generate.sh --tag "$tag" --check
+
+  windows-packaging:
+    name: Winget + Scoop (non-admin install / invoke / uninstall)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+      - name: Run packaging tests as a standard user
+        shell: pwsh
+        run: |
+          Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force
+          $wd = Join-Path $env:RUNNER_TEMP 'packaging'
+          $ev = Join-Path $wd 'windows-packaging-evidence.md'
+          & tests/acceptance/windows/packaging/run-packaging-tests.ps1 `
+            -RepoRoot (Get-Location).Path -Evidence $ev -WorkDir $wd
+          $code = $LASTEXITCODE
+          Get-Content $ev | ForEach-Object { Write-Host $_ }
+          Copy-Item $ev "$env:GITHUB_STEP_SUMMARY" -Force
+          if ($code -ne 0) { throw "Windows packaging tests FAILED (see evidence report)" }
+      - name: Upload evidence report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        with:
+          name: windows-packaging-evidence
+          path: ${{ runner.temp }}/packaging/windows-packaging-evidence.md
