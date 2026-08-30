@@ -28,7 +28,9 @@ directory to your user `PATH`. Open a new terminal and run `hull doctor`.
 
 - Resolves the latest official stable release from `artalis-io/hull` (drafts and
   prereleases are never selected for "latest").
-- Downloads only the official `hull-cosmo` asset and the `hull.sha256` manifest.
+- Downloads only the official `hull-cosmo` asset and the `hull.sha256` manifest
+  (an upgrade with a signature-capable existing Hull also downloads
+  `hull.sha256.sig` for the Ed25519 check below).
 - Verifies the artifact's SHA-256 against the exact manifest entry BEFORE
   installing (a mismatch, or a missing / duplicate entry, aborts).
 - Installs `hull.com` atomically (a failed install never destroys a previous
@@ -55,29 +57,50 @@ supported, and paths containing spaces work.
 
 A checksum downloaded from the same channel proves integrity, not authenticity:
 it confirms the bytes match the manifest, but a compromised release channel could
-change both together. Hull's independent authenticity root is its **Ed25519
-release signature** (`hull.sha256.sig`), whose public key is embedded in Hull
-itself and is not hosted on GitHub.
+change both together. Hull's authenticity root is its **Ed25519 release
+signature** (`hull.sha256.sig`). Its public key is source-controlled in
+`include/hull/release.h` and embedded in every Hull binary, so a Hull you already
+trust can verify a new release WITHOUT fetching a key from the current release
+channel. That continuity, not the key being secret or off-GitHub, is what makes
+the signature meaningful.
 
 - **First install** proceeds under bootstrap trust: HTTPS + GitHub plus the
-  mandatory SHA-256 check. Verify further out of band (below).
+  mandatory SHA-256 check.
 - **Upgrades** are stronger: if the Hull you already trust supports
-  `verify-release`, the installer runs that signature check before replacing the
-  binary, and a signature failure (or an ambiguous / timed-out verifier) aborts
-  the upgrade rather than silently downgrading to checksum-only.
+  `verify-release`, the installer runs that Ed25519 check before replacing the
+  binary and aborts on a signature failure (or an ambiguous / timed-out
+  verifier), rather than silently downgrading to checksum-only.
 
-Verify a release yourself, out of band:
+### Verifying the signature
 
-```powershell
-# Ed25519 release signature (against Hull's embedded release key):
-hull verify-release hull.sha256 hull.sha256.sig
+The value of `hull verify-release` depends on WHICH Hull runs it:
 
-# Sigstore keyless signature + Rekor transparency log (no gethull-managed key):
-cosign verify-blob hull.sha256 --certificate hull.sha256.cosign.pem --signature hull.sha256.cosign.sig
+- **A pre-existing, already-trusted Hull** verifying a new release gives
+  **continuity**: the new assets are signed by the same key your trusted Hull
+  already carries, independent of the candidate release's own binary. This is the
+  upgrade check the installer performs automatically.
 
-# SLSA build provenance for a specific asset:
-gh attestation verify hull-cosmo --repo artalis-io/hull
-```
+  ```powershell
+  # run with a Hull you already trust, NOT the one you just downloaded:
+  hull verify-release hull.sha256 hull.sha256.sig
+  ```
+
+- **The freshly downloaded Hull** verifying its own release with its own embedded
+  key is **consistency evidence, not independent authentication**: a tampered
+  release could ship a matching key and signature together. Treat a pass as
+  "internally consistent", not "authenticated".
+
+- **Independent first-install checks** do not rely on the candidate binary at
+  all. Use Sigstore/Rekor, GitHub attestation, or compare the release public-key
+  fingerprint through a separately trusted channel:
+
+  ```powershell
+  # Sigstore keyless signature + Rekor transparency log (no gethull-managed key):
+  cosign verify-blob hull.sha256 --certificate hull.sha256.cosign.pem --signature hull.sha256.cosign.sig
+
+  # SLSA build provenance for a specific asset:
+  gh attestation verify hull-cosmo --repo artalis-io/hull
+  ```
 
 See [`security.md`](security.md) for the full signature-verification chain.
 
