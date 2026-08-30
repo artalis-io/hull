@@ -483,10 +483,11 @@ function Invoke-HullCommitInstall([string]$Src, [string]$Dest, [string]$PrefixDi
     }
 }
 
-function Invoke-HullReaffirm([string]$PrefixDir, [string]$Ver, [bool]$NoPath, [switch]$FailMarker) {
+function Invoke-HullReaffirm([string]$PrefixDir, [string]$Ver, [bool]$NoPath, [switch]$FailMarker, [switch]$SimulateRestoreFailure) {
     # Re-affirm a managed same-version install: ensure PATH + refresh the marker
-    # as ONE transaction. If the marker refresh fails, undo the PATH add and
-    # restore the prior marker so a partial PATH mutation never survives.
+    # as ONE transaction. If the marker refresh fails, restore PATH + marker to
+    # their exact prior state. Rollback attempts are INDEPENDENT and failures are
+    # collected into a combined CRITICAL (fail loudly - never a silent discard).
     $markerPath = Get-HullMarkerPath $PrefixDir
     $prevMarkerBytes = $null
     if (Test-Path -LiteralPath $markerPath) { $prevMarkerBytes = [System.IO.File]::ReadAllBytes($markerPath) }
@@ -498,8 +499,18 @@ function Invoke-HullReaffirm([string]$PrefixDir, [string]$Ver, [bool]$NoPath, [s
         Set-HullOwnershipMarker $PrefixDir $Ver $addedEntry
     } catch {
         $err = $_
-        try { Restore-HullUserPathExact $pathSnap } catch { }
-        try { Restore-HullMarkerExact $PrefixDir $prevMarkerBytes } catch { }
+        $rollbackErrors = @()
+        try {
+            if ($SimulateRestoreFailure) { throw "simulated PATH restore failure (test)" }
+            Restore-HullUserPathExact $pathSnap
+        } catch { $rollbackErrors += "PATH: $($_.Exception.Message)" }
+        try {
+            if ($SimulateRestoreFailure) { throw "simulated marker restore failure (test)" }
+            Restore-HullMarkerExact $PrefixDir $prevMarkerBytes
+        } catch { $rollbackErrors += "marker: $($_.Exception.Message)" }
+        if ($rollbackErrors.Count -gt 0) {
+            throw ("CRITICAL: re-affirmation failed and rollback was incomplete (" + ($rollbackErrors -join '; ') + "); original error: $($err.Exception.Message)")
+        }
         throw $err
     }
 }

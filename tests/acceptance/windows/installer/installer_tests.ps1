@@ -309,6 +309,18 @@ try {
         Check (-not (Test-HullPathContains (Get-HullUserPathRaw).Value $rfdir)) "re-affirmation marker failure undid the PATH add"
     } finally { Set-HullUserPathRaw $rfSnap.Value $rfSnap.Kind }
 
+    # re-affirmation rollback failure must fail loudly (combined CRITICAL)
+    $rf2dir = Join-Path $work 'reaffirm2'; New-Item -ItemType Directory -Path $rf2dir -Force | Out-Null
+    WriteBytes (Join-Path $rf2dir 'hull.com') 'RF2'
+    Write-HullMarker $rf2dir '1.0.0' $false ''
+    $rf2Snap = Get-HullUserPathRaw
+    try {
+        $critRf = $null
+        try { Invoke-HullReaffirm $rf2dir '2.0.0' $false -FailMarker -SimulateRestoreFailure } catch { $critRf = $_.Exception.Message }
+        Check ($critRf -match 'CRITICAL') "re-affirmation rollback failure surfaces a combined CRITICAL"
+        Check (($critRf -match 'PATH:') -and ($critRf -match 'marker:')) "the combined CRITICAL identifies the unrestored PATH and marker state"
+    } finally { Set-HullUserPathRaw $rf2Snap.Value $rf2Snap.Kind }
+
     # --- a critical binary rollback still restores PATH + marker ---------------
     Note "## critical binary rollback still restores metadata"
     $cbdir = Join-Path $work 'critbin'; New-Item -ItemType Directory -Path $cbdir -Force | Out-Null
