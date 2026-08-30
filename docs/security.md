@@ -40,6 +40,18 @@ other two intact.
 | **Any time (v0.1.6)** | **Independent verify** | **`cosign verify-blob hull.sha256 --certificate hull.sha256.cosign.pem --signature hull.sha256.cosign.sig`** | **Sigstore Fulcio CA + GitHub OIDC + Rekor transparency log entry. No gethull-managed key in the chain** |
 | **Any time (v0.1.6)** | **Per-binary provenance** | **`gh attestation verify hull-linux-x86_64 --repo artalis-io/hull`** | **GitHub Actions OIDC + Sigstore Fulcio + SLSA build-provenance attestation** |
 
+**Installer trust posture.** Both `install.sh` (POSIX) and `install.ps1`
+(Windows) verify the downloaded asset's SHA-256 against the release manifest
+before installing, over HTTPS. A same-channel SHA-256 proves integrity, not
+authenticity: the channel-independent root is the Ed25519 release signature
+(`hull.sha256.sig`, `hull verify-release`), and the two trust roots above
+(Sigstore/Rekor, SLSA). A first install runs under bootstrap trust (HTTPS +
+matched SHA-256); the Windows installer additionally runs the Ed25519 check via a
+pre-existing trusted `hull` on an upgrade, aborting on failure rather than
+downgrading to checksum-only. See
+[Installing Hull on Windows](windows_install.md) and
+[`windows_install_design.md`](windows_install_design.md).
+
 **Auth-stack audit convergence (v0.3.0).** Beyond the trust roots,
 the v0.3.0 web/auth surface (`auth-flows`, `session`, `audit-log`,
 `auth-health`, `totp`, `oauth`, `pwned`) went through **13 rounds
