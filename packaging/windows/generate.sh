@@ -50,15 +50,18 @@ while [ $# -gt 0 ]; do
 done
 
 [ -n "$TAG" ] || die "--tag is required (e.g. --tag v0.14.0)"
-case "$TAG" in
-    v[0-9]*.[0-9]*.[0-9]*) : ;;
-    *) die "invalid --tag '$TAG' (expected vX.Y.Z)" ;;
-esac
+# Strict, full-string vX.Y.Z (digits only, exactly three dotted numeric fields).
+# grep -qE with ^...$ rejects any trailing or injection-shaped characters that a
+# permissive shell glob would accept.
+printf '%s' "$TAG" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+$' \
+    || die "invalid --tag '$TAG' (expected strict vX.Y.Z, digits only)"
 VERSION=${TAG#v}
 
 # ── Resolve hull.sha256 ──────────────────────────────────────────────────────
 manifest_tmp=""
-cleanup() { [ -n "$manifest_tmp" ] && rm -f "$manifest_tmp"; }
+# NB: return 0 so a false test does not leak as the script's exit status when the
+# cleanup runs from the EXIT trap (the emit path has no explicit exit).
+cleanup() { if [ -n "$manifest_tmp" ]; then rm -f "$manifest_tmp"; fi; return 0; }
 trap cleanup EXIT INT TERM
 
 if [ -n "$SHA_FILE" ]; then
@@ -78,11 +81,18 @@ else
     [ -s "$MANIFEST" ] || die "downloaded hull.sha256 is empty (does $TAG exist?)"
 fi
 
-# Exactly one hull-cosmo entry, 64-hex.
-matches=$(grep -E '^[0-9a-fA-F]{64}  hull-cosmo$' "$MANIFEST" || true)
-count=$(printf '%s\n' "$matches" | grep -c . || true)
-[ "$count" -eq 1 ] || die "expected exactly one hull-cosmo entry in hull.sha256, found $count"
-SHA_LOWER=$(printf '%s\n' "$matches" | awk '{print $1}' | tr 'A-F' 'a-f')
+# Count EVERY entry whose asset field is hull-cosmo (valid OR malformed): a
+# hull.sha256 line is "<hash>  <name>", so match on the final field regardless of
+# the hash. Require exactly one, so a valid entry PLUS a malformed duplicate that
+# also names hull-cosmo still fails closed.
+named=$(awk '$NF=="hull-cosmo"{c++} END{print c+0}' "$MANIFEST")
+[ "$named" -eq 1 ] || die "expected exactly one hull-cosmo entry in hull.sha256, found $named"
+# Now validate that single entry's COMPLETE shape: 64-hex hash, two spaces, exact
+# name, nothing else. A non-hex or wrong-length hash fails here.
+line=$(awk '$NF=="hull-cosmo"{print; exit}' "$MANIFEST")
+printf '%s' "$line" | grep -qE '^[0-9a-fA-F]{64}  hull-cosmo$' \
+    || die "malformed hull-cosmo entry (expected '<64-hex>  hull-cosmo'): $line"
+SHA_LOWER=$(printf '%s' "$line" | awk '{print $1}' | tr 'A-F' 'a-f')
 SHA_UPPER=$(printf '%s' "$SHA_LOWER" | tr 'a-f' 'A-F')
 
 # ── Emit ─────────────────────────────────────────────────────────────────────
@@ -122,3 +132,4 @@ fi
 
 emit_into "$OUT"
 echo "generate.sh: wrote Winget + Scoop metadata for $TAG (hull-cosmo $SHA_LOWER)"
+exit 0

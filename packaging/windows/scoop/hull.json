@@ -14,7 +14,7 @@
         "url": "https://github.com/artalis-io/hull/releases/download/v$version/hull-cosmo#/hull.com",
         "hash": {
             "url": "https://github.com/artalis-io/hull/releases/download/v$version/hull.sha256",
-            "regex": "(?<hash>[a-fA-F0-9]{64})\\s+hull-cosmo"
+            "regex": "(?m)^(?<hash>[a-fA-F0-9]{64})\\s+hull-cosmo$"
         }
     }
 }

@@ -9,7 +9,8 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)][string]$ScoopManifest,
-    [Parameter(Mandatory = $true)][string]$Evidence
+    [Parameter(Mandatory = $true)][string]$Evidence,
+    [Parameter(Mandatory = $true)][string]$ExpectVersion
 )
 
 $ErrorActionPreference = 'Stop'
@@ -48,7 +49,9 @@ if (-not (Test-Path -LiteralPath $hullShim)) { $hullShim = Join-Path $env:SCOOP 
 if (Test-Path -LiteralPath $hullShim) {
     $ver = (Cap { & $hullShim version } | Select-Object -First 1)
     Note ("- hull (scoop shim) version: {0}" -f $ver)
-    if ($ver -match '[0-9]+\.[0-9]+\.[0-9]+') { Note "- OK: scoop-installed hull runs" } else { Fail "scoop-installed hull did not report a version" }
+    $m = [regex]::Match([string]$ver, '([0-9]+\.[0-9]+\.[0-9]+)')
+    if ($m.Success -and $m.Groups[1].Value -eq $ExpectVersion) { Note ("- OK: scoop-installed hull is exactly {0}" -f $ExpectVersion) }
+    else { Fail ("scoop-installed hull version mismatch: expected {0}, got '{1}'" -f $ExpectVersion, $ver) }
 } else { Fail "scoop did not create a hull shim" }
 
 # Uninstall.

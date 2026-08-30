@@ -67,17 +67,15 @@ package index/bucket).
   2. **Schema validation (`winget validate`) runs under the runner account and is
      not presented as non-admin evidence** (Scoop is the fresh-standard-user
      proof, per the point above).
-  3. **Full Winget install / invoke / uninstall remains non-elevated where
-     possible, with hash verification enforced.** Hull's install requests no
-     elevation and is per-user portable scope; on this image the only
-     Winget-capable account is the runner (a fresh standard user cannot execute
-     Winget at all), which the GitHub image runs **elevated / High** - a
-     runner-image property recorded in the evidence, not a Hull requirement and
-     not described as a true non-admin account. The install asserts winget's
-     `verified installer hash` explicitly (a mismatch also fails winget itself).
-     Installing from a *local, uncommitted* manifest additionally needs the
-     `LocalManifestFiles` admin setting (a test-harness detail; a published Winget
-     package needs no such setting).
+  3. **Full Winget install / invoke / uninstall runs in the runner context, with
+     hash verification enforced.** The install asserts winget's `verified
+     installer hash` explicitly (a mismatch also fails winget itself) and asserts
+     the exact version declared by the generated manifest. The runner account's
+     integrity is **measured and reported** in the evidence (whatever it is;
+     a runner-image property, not a Hull requirement, and the account is not
+     described as a true non-admin account). Installing from a *local, uncommitted*
+     manifest additionally needs the `LocalManifestFiles` admin setting (a
+     test-harness detail; a published Winget package needs no such setting).
 
 The whole job fails unless the generator drift-check, the Winget manifest
 validation + hash-verified install + invocation + uninstall (runner), and the

@@ -1,7 +1,7 @@
 <#
   run-packaging-tests.ps1 - orchestrates the Winget + Scoop package tests.
 
-  Runs as the runner's own account. Two integrity contexts, by design:
+  Runs as the runner's own account. Two contexts, by design:
 
   * Fresh STANDARD (non-admin) user, Developer Mode off - the real
     non-admin proof. Drives: preconditions, a Winget standard-user boundary PROBE
@@ -10,17 +10,14 @@
     (`hull version`) / uninstall. Scoop is per-user by design, so it is the
     complete fresh-standard-user package proof.
 
-  * Runner account - drives the Winget validate + install / invoke / uninstall
-    (the Winget gate). Winget's
-    per-user App Installer MSIX is not provisionable for a freshly-created
-    standard user in a runas session on the GitHub image (no loaded profile /
-    package identity), so the install path is exercised where App Installer has a
-    valid identity. Hull's winget install is per-user portable scope and requests
-    no elevation. The runner account's actual integrity level (the GitHub image
-    runs it elevated / High) is recorded in the evidence: a runner-image property,
-    NOT evidence that Hull needs administrator privileges. The runner account is
-    in the Administrators group, so it is NOT characterized as a true non-admin
-    account.
+  * Runner context - drives the Winget validate + install / invoke / uninstall
+    (the Winget gate). Winget's per-user App Installer MSIX is not provisionable
+    for a freshly-created standard user in a runas session on the GitHub image (no
+    loaded profile / package identity), so the install path is exercised where App
+    Installer has a valid identity. The runner account's integrity is measured and
+    reported in the evidence (a runner-image property, NOT evidence that Hull needs
+    administrator privileges). The runner account is in the Administrators group,
+    so it is NOT characterized as a true non-admin account.
 
   Read-only w.r.t. GitHub releases (downloads the official hull-cosmo; never
   submits to or mutates a package index / bucket).
@@ -103,8 +100,9 @@ function Invoke-AsUser([string]$script, [string[]]$phaseArgs, [string]$label) {
     return $code
 }
 
-# Run a staged script AS the runner (Medium integrity), in a child pwsh with the
-# real env, so it isolates `exit` from this orchestrator.
+# Run a staged script in the RUNNER context, in a child pwsh with the real env,
+# so it isolates `exit` from this orchestrator. (The runner's integrity is
+# measured and reported by the phase itself, not assumed here.)
 function Invoke-AsRunner([string]$script, [string[]]$phaseArgs, [string]$label) {
     $o = Join-Path $WorkDir ("phase-$label.out.log"); $e = Join-Path $WorkDir ("phase-$label.err.log")
     $a = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', (Join-Path $WorkDir $script)) + $phaseArgs
@@ -119,6 +117,13 @@ function Invoke-AsRunner([string]$script, [string[]]$phaseArgs, [string]$label) 
 $wingetManifest = Join-Path $WorkDir 'packaging\winget'
 $scoopManifest  = Join-Path $WorkDir 'packaging\scoop\hull.json'
 $rc = 0
+
+# The exact version both package forms must resolve to, taken from the generated
+# manifest (single source). The invocation tests assert this exactly, so an old
+# or unrelated Hull on the box cannot satisfy the gate.
+$expectVersion = (Get-Content -LiteralPath $scoopManifest -Raw | ConvertFrom-Json).version
+if (-not $expectVersion) { Note "FATAL: could not read version from $scoopManifest"; exit 1 }
+Note ("- expected hull version (from generated manifest): {0}" -f $expectVersion)
 
 # Resolve winget.exe here (the orchestrator can see the DesktopAppInstaller
 # package; a freshly-created standard user cannot) and pass the raw binary path
@@ -144,10 +149,10 @@ if ((Invoke-AsUser 'winget_validate.ps1' @('-ManifestDir', $wingetManifest, '-Ev
 Remove-Item Env:HULL_WINGET_EXE -ErrorAction SilentlyContinue
 
 Note "`n--- PHASE: Scoop install / invoke / uninstall (fresh standard user) ---"
-if ((Invoke-AsUser 'scoop_test.ps1' @('-ScoopManifest', $scoopManifest, '-Evidence', $Evidence) 'scoop') -ne 0) { $rc = 1 }
+if ((Invoke-AsUser 'scoop_test.ps1' @('-ScoopManifest', $scoopManifest, '-Evidence', $Evidence, '-ExpectVersion', $expectVersion) 'scoop') -ne 0) { $rc = 1 }
 
-Note "`n--- PHASE: Winget install / invoke / uninstall (runner, non-elevated) ---"
-if ((Invoke-AsRunner 'winget_test.ps1' @('-ManifestDir', $wingetManifest, '-Evidence', $Evidence) 'winget') -ne 0) { $rc = 1 }
+Note "`n--- PHASE: Winget install / invoke / uninstall (runner context) ---"
+if ((Invoke-AsRunner 'winget_test.ps1' @('-ManifestDir', $wingetManifest, '-Evidence', $Evidence, '-ExpectVersion', $expectVersion) 'winget') -ne 0) { $rc = 1 }
 
 Remove-LocalUser -Name $user -ErrorAction SilentlyContinue
 Note ("`n## RESULT: {0}" -f ($(if ($rc -eq 0) { 'ALL PACKAGING TESTS PASSED' } else { 'FAILURE' })))

@@ -4,14 +4,12 @@
 
   Boundary (see packaging/windows/README.md): winget's per-user App Installer
   MSIX is not provisionable for a freshly-created standard user in a runas
-  session on the GitHub image, so this phase runs under the RUNNER's own account,
-  which has valid App Installer package identity. Hull's winget install is
-  per-user portable scope and requests no elevation. The runner account's actual
-  integrity level (the GitHub image runs it elevated / High) is recorded in the
-  evidence: that is a runner-image property, NOT a Hull requirement, and NOT
-  evidence Hull needs administrator privileges. The fully non-admin proof is the
-  Scoop phase. This account is in the Administrators group, so it is not
-  characterized as a true non-admin account.
+  session on the GitHub image, so this phase runs in the RUNNER context, which
+  has valid App Installer package identity. The runner account's integrity is
+  measured and reported in the evidence (a runner-image property, NOT a Hull
+  requirement and NOT evidence Hull needs administrator privileges). The fully
+  non-admin proof is the Scoop phase. This account is in the Administrators group,
+  so it is not characterized as a true non-admin account.
 
   The manifest URL is the immutable official release asset; read-only w.r.t.
   releases; nothing is submitted to any index.
@@ -21,7 +19,8 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)][string]$ManifestDir,
-    [Parameter(Mandatory = $true)][string]$Evidence
+    [Parameter(Mandatory = $true)][string]$Evidence,
+    [Parameter(Mandatory = $true)][string]$ExpectVersion
 )
 
 $ErrorActionPreference = 'Stop'
@@ -40,15 +39,15 @@ function Invoke-Native([string]$Exe, [string[]]$CmdArgs, [int]$TimeoutSec = 600)
 }
 $script:fail = 0
 
-Note "## Winget portable install / invoke / uninstall (runner account)"
+Note "## Winget portable install / invoke / uninstall (runner context)"
 $id = [Security.Principal.WindowsIdentity]::GetCurrent()
-# Record the observed integrity honestly (GitHub runners are non-elevated /
-# Medium by default). The install is per-user portable scope; no elevation is
-# requested. This is not characterized as a true non-admin account.
+# Measure and report the runner's integrity level (whichever it is); do not claim
+# a level. This account is in the Administrators group, so it is not a true
+# non-admin account. The fresh-standard-user proof is the Scoop phase.
 $elevated = ((whoami /groups) -match 'S-1-16-12288')
-$level = if ($elevated) { 'High (elevated)' } else { 'Medium (non-elevated)' }
-Note ("- account: {0}; integrity: {1}; per-user portable install, no elevation requested" -f $id.Name, $level)
-Note "- Winget install/invoke/uninstall requests no elevation and stays non-elevated WHERE POSSIBLE; on this image the only Winget-capable account is the runner (a fresh standard user cannot execute Winget at all), which the GitHub image runs elevated. That integrity is a runner-image property, not a Hull requirement."
+$level = if ($elevated) { 'High (elevated)' } else { 'Medium (not elevated)' }
+Note ("- account: {0}; integrity measured: {1}" -f $id.Name, $level)
+Note "- runner context; the integrity above is measured and reported (a runner-image property, not a Hull requirement). Winget-capable accounts have App Installer package identity, which a fresh standard user lacks."
 
 $cmd = Get-Command winget -ErrorAction SilentlyContinue
 if (-not $cmd) { Fail "winget alias not on PATH for the runner account"; Note "WINGET: FAIL"; exit 1 }
@@ -89,7 +88,9 @@ if (Test-Path -LiteralPath $alias) {
     $ver = (Invoke-Native $alias @('version')).Out
     $ver1 = ($ver -split "`n" | Where-Object { $_ -match '\S' } | Select-Object -First 1)
     Note ("- hull (winget alias) version: {0}" -f $ver1)
-    if ($ver1 -match '[0-9]+\.[0-9]+\.[0-9]+') { Note "- OK: winget-installed hull runs" } else { Fail "winget-installed hull did not report a version" }
+    $m = [regex]::Match($ver1, '([0-9]+\.[0-9]+\.[0-9]+)')
+    if ($m.Success -and $m.Groups[1].Value -eq $ExpectVersion) { Note ("- OK: winget-installed hull is exactly {0}" -f $ExpectVersion) }
+    else { Fail ("winget-installed hull version mismatch: expected {0}, got '{1}'" -f $ExpectVersion, $ver1) }
 } else { Fail "winget did not create a hull alias in the Links dir" }
 
 # 4. uninstall via the same LOCAL manifest (symmetric with install --manifest).

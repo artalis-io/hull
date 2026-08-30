@@ -3,12 +3,12 @@ name: Packaging (Windows Winget + Scoop)
 # Repository-owned Windows package metadata: a fail-closed generator drift check
 # (the committed Winget/Scoop manifests must match the release tag + its
 # hull-cosmo hash) and package-form tests. Scoop is exercised install / invoke /
-# uninstall as a fresh standard (non-admin) user; Winget is manifest-validated as
-# that standard user and install / invoke / uninstall under the runner's own
-# account (its per-user MSIX is not provisionable for a runas standard user; the
-# runner's integrity is recorded in the evidence - see packaging/windows/
-# README.md). Read-only with respect to releases; it never submits to
-# microsoft/winget-pkgs or any Scoop bucket.
+# uninstall as a fresh standard (non-admin) user. Winget's per-user MSIX is not
+# provisionable for a runas standard user, so a fresh standard user runs only a
+# non-gating boundary probe; Winget validate + install / invoke / uninstall run in
+# the runner context, whose integrity is measured and reported in the evidence
+# (see packaging/windows/README.md). Read-only with respect to releases; it never
+# submits to microsoft/winget-pkgs or any Scoop bucket.
 
 on:
   pull_request:
@@ -40,13 +40,19 @@ jobs:
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
       - name: Regenerate + diff against the committed manifests
+        # Pass the workflow input through the environment (never interpolate
+        # ${{ }} into the shell text, where a quote in the value would be parsed
+        # by the shell before generate.sh validates it).
+        env:
+          RELEASE_TAG: ${{ github.event.inputs.release_tag }}
         run: |
-          tag='${{ github.event.inputs.release_tag }}'
-          [ -n "$tag" ] || tag=v0.14.0
+          tag="${RELEASE_TAG:-v0.14.0}"
           sh packaging/windows/generate.sh --tag "$tag" --check
+      - name: Generator fail-closed + strict-tag tests
+        run: sh tests/acceptance/windows/packaging/generate_tests.sh
 
   windows-packaging:
-    name: Winget + Scoop (Scoop non-admin; Winget validate + runner install)
+    name: Winget + Scoop (Scoop non-admin; Winget runner gate + standard-user probe)
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
