@@ -40,6 +40,14 @@ The installer detects your OS/arch, downloads a native binary (or the universal 
 
 Environment knobs: `HULL_VERSION=v0.1.0` (specific tag), `HULL_FLAVOR=cosmo` (force universal APE), `HULL_FORCE=1` (overwrite existing), `HULL_DRY_RUN=1` (preview only).
 
+On **Windows** (PowerShell, no admin or Developer Mode needed):
+
+```powershell
+irm https://gethull.dev/install.ps1 | iex
+```
+
+This installs `hull.com` to `%LOCALAPPDATA%\Programs\Hull` and adds it to your user `PATH`. See [Installing Hull on Windows](docs/windows_install.md) for options (`-Version` / `-Prefix` / `-Force` / `-DryRun` / `-NoPath` / `-Uninstall`), verification, and the one-time v0.13.0 -> v0.14.0 manual upgrade.
+
 Or build from source:
 
 ```bash

@@ -93,6 +93,18 @@ release, verifies the SHA-256 from `hull.sha256`, and installs to
 Shell completions live in [`completions/`](../completions/) (bash, zsh, fish).
 Source the matching file from your rc.
 
+On **Windows** (PowerShell, no admin or Developer Mode):
+
+```powershell
+irm https://gethull.dev/install.ps1 | iex
+```
+
+`install.ps1` resolves the latest official release, verifies the `hull-cosmo`
+SHA-256 against `hull.sha256` before installing, and installs `hull.com` to
+`%LOCALAPPDATA%\Programs\Hull` on the user `PATH`. Parameters: `-Version`,
+`-Prefix`, `-Force`, `-DryRun`, `-NoPath`, `-Uninstall`. See
+[Installing Hull on Windows](windows_install.md).
+
 ### Source build (developer)
 
 ```bash

@@ -17,8 +17,10 @@ BUILD_DIR := build
 STATIC_FILES := index.html verify.html mark.svg og-card.svg og-card.png
 # Dereferenced symlinks to canonical repo-root files: install.sh plus its
 # minisign signature + public key, so `curl gethull.dev/install.sh{,.minisig}`
-# and the offline "verify the installer" path both work.
-SYMLINKED    := install.sh install.sh.minisig minisign.pub
+# and the offline "verify the installer" path both work; and install.ps1 so
+# `irm https://gethull.dev/install.ps1 | iex` serves the current Windows
+# installer.
+SYMLINKED    := install.sh install.sh.minisig minisign.pub install.ps1
 # Subdirs: vendored third-party assets (Tailwind, Lucide) and fonts.
 # Self-hosted so the "no third-party CDN" claim holds for the site too.
 SUBDIRS      := vendor fonts
