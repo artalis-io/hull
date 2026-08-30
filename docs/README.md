@@ -68,6 +68,7 @@ specific signature, parameter list, or return value.
 | [`release_signing.md`](release_signing.md) | Three-layer signature system + the release-key flow (embedding, sign step, `hull update` verification). |
 | [`release_acceptance.md`](release_acceptance.md) | The pre-promotion acceptance run: the read-only fail-closed verification workflow, the maintainer-prepopulated staging-repo model for testing `hull update`, and the Windows acceptance stage. |
 | [`release_acceptance_v0.14.0.md`](release_acceptance_v0.14.0.md) | Durable v0.14.0 acceptance record: release tag/commit, published binary SHA-256s, environment assertions, and each smoke result (self-contained after the Actions artifacts expire). |
+| [`windows_install_design.md`](windows_install_design.md) | Windows-native install/upgrade/verify/remove UX design: the explicit trust model, the user-local install dir + PATH convention, the `install.ps1` CLI contract, Winget/Scoop shape, and the Authenticode-on-APE experiment plan. |
 | [`sbom.md`](sbom.md) | The SBOM subsystem (human / JSON / CycloneDX / SPDX formats). |
 | [`compiler_free_build.md`](compiler_free_build.md) | The object-emitter path: `hull build` needs only a linker (no C compiler). |
 | [`toolchain_free_build.md`](toolchain_free_build.md) | Linker-as-tool + cross-compilation (`--linker=zig`), the musl static-link floors. |
