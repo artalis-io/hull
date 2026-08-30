@@ -97,6 +97,11 @@ try {
     Check (Test-HullPathContains 'C:\a;C:\b\' 'C:\b') "matches ignoring a trailing separator"
     Check (Test-HullPathContains 'C:\A' 'c:\a') "matches case-insensitively"
     Check (-not (Test-HullPathContains 'C:\a;C:\b' 'C:\c')) "does not match an absent dir"
+    Check (Test-HullPathContains 'C:/a;C:/b' 'C:\b') "matches across / and \ separators"
+    Check (Test-HullPathContains '"C:\a";C:\b' 'C:\a') "matches ignoring surrounding quotes"
+    $env:HULL_ITEST_VAR = 'C:\itest\dir'
+    Check (Test-HullPathContains '%HULL_ITEST_VAR%' 'C:\itest\dir') "matches an expanded %VAR% against its expansion"
+    Remove-Item Env:\HULL_ITEST_VAR -ErrorAction SilentlyContinue
 
     # --- rollback: a failed install leaves the previous binary runnable -------
     Note "## atomic install rollback"
@@ -105,15 +110,77 @@ try {
     $rsrc = Join-Path $work 'newbin'
     [System.IO.File]::WriteAllBytes($rsrc, [System.Text.Encoding]::ASCII.GetBytes('NEWBINARY'))
     [System.IO.File]::WriteAllBytes($rdest, [System.Text.Encoding]::ASCII.GetBytes('PREVIOUS'))
+    # pre-existing sidecars at the OLD predictable names must NOT be clobbered
+    $occNew = "$rdest.new"; $occBak = "$rdest.bak"
+    [System.IO.File]::WriteAllBytes($occNew, [System.Text.Encoding]::ASCII.GetBytes('KEEPNEW'))
+    [System.IO.File]::WriteAllBytes($occBak, [System.Text.Encoding]::ASCII.GetBytes('KEEPBAK'))
+
     Throws { Install-HullAtomicMove $rsrc $rdest -SimulateFailure } "simulated failed install throws"
-    Check (Test-Path -LiteralPath $rdest) "previous binary still present after rollback"
+    Check (Test-Path -LiteralPath $rdest) "previous binary present after rollback"
     Check (((Get-Content -LiteralPath $rdest -Raw).Trim()) -eq 'PREVIOUS') "previous binary content intact (runnable)"
-    Check (-not (Test-Path -LiteralPath "$rdest.new")) "staged .new cleaned up on failure"
-    Check (-not (Test-Path -LiteralPath "$rdest.bak")) "backup .bak consumed by rollback"
-    # success path replaces atomically and leaves no residue
+    Check (((Get-Content -LiteralPath $occNew -Raw).Trim()) -eq 'KEEPNEW') "pre-existing .new sidecar untouched"
+    Check (((Get-Content -LiteralPath $occBak -Raw).Trim()) -eq 'KEEPBAK') "pre-existing .bak sidecar untouched"
+    Check (@(Get-ChildItem -LiteralPath $rdir -Filter '.hull-*' -Force -ErrorAction SilentlyContinue).Count -eq 0) "no unique staging/backup residue after rollback"
+
+    # forced restoration failure -> a distinct CRITICAL error naming the backup,
+    # and the previous binary is preserved in that backup.
+    $critMsg = $null
+    try { Install-HullAtomicMove $rsrc $rdest -SimulateFailure -SimulateRestoreFailure } catch { $critMsg = $_.Exception.Message }
+    Check ($critMsg -match 'CRITICAL') "restore failure raises a distinct CRITICAL error"
+    Check ($critMsg -match '\.hull-backup-') "critical error names the preserved backup path"
+    $bak = @(Get-ChildItem -LiteralPath $rdir -Filter '.hull-backup-*' -Force -ErrorAction SilentlyContinue)
+    Check (($bak.Count -ge 1) -and (((Get-Content -LiteralPath $bak[0].FullName -Raw).Trim()) -eq 'PREVIOUS')) "previous binary preserved in the backup on restore failure"
+    $bak | ForEach-Object { Remove-Item -LiteralPath $_.FullName -Force -ErrorAction SilentlyContinue }
+    if (-not (Test-Path -LiteralPath $rdest)) { [System.IO.File]::WriteAllBytes($rdest, [System.Text.Encoding]::ASCII.GetBytes('PREVIOUS')) }
+
+    # success path replaces and leaves no unique residue
     Install-HullAtomicMove $rsrc $rdest
     Check (((Get-Content -LiteralPath $rdest -Raw).Trim()) -eq 'NEWBINARY') "successful install replaces the binary"
-    Check (-not (Test-Path -LiteralPath "$rdest.new") -and -not (Test-Path -LiteralPath "$rdest.bak")) "no staging residue after success"
+    Check (@(Get-ChildItem -LiteralPath $rdir -Filter '.hull-*' -Force -ErrorAction SilentlyContinue).Count -eq 0) "no staging residue after a successful install"
+
+    # --- upgrade signature outcomes (strict, fixtures) ------------------------
+    Note "## upgrade signature outcomes"
+    $fdir = Join-Path $work 'fake'; New-Item -ItemType Directory -Path $fdir -Force | Out-Null
+    $okHull  = Join-Path $fdir 'hull-ok.cmd'
+    $badHull = Join-Path $fdir 'hull-bad.cmd'
+    $oldHull = Join-Path $fdir 'hull-old.cmd'
+    Set-Content -LiteralPath $okHull -Encoding ASCII -Value @(
+        '@echo off',
+        'if "%1"=="verify-release" (',
+        '  if "%2"=="--help" ( echo usage: hull verify-release ^<manifest^> ^<signature^> & exit /b 0 )',
+        '  exit /b 0',
+        ')',
+        'exit /b 1')
+    Set-Content -LiteralPath $badHull -Encoding ASCII -Value @(
+        '@echo off',
+        'if "%1"=="verify-release" (',
+        '  if "%2"=="--help" ( echo usage: hull verify-release ^<manifest^> ^<signature^> & exit /b 0 )',
+        '  exit /b 1',
+        ')',
+        'exit /b 1')
+    Set-Content -LiteralPath $oldHull -Encoding ASCII -Value @('@echo off', 'echo unknown command 1>&2', 'exit /b 1')
+    $sigFile = Join-Path $work 'sig.bin'; [System.IO.File]::WriteAllBytes($sigFile, [System.Text.Encoding]::ASCII.GetBytes('SIG'))
+    $missingSig = Join-Path $work 'nope.sig'
+
+    Check (-not (Test-HullVerifierCapable (Join-Path $work 'does-not-exist.com'))) "absent existing hull -> bootstrap (not verifier-capable)"
+    Check (-not (Test-HullVerifierCapable $oldHull)) "existing hull lacking verify-release -> bootstrap"
+    Check (Test-HullVerifierCapable $okHull) "a verify-release-capable hull is detected"
+    Check (Test-HullVerifierCapable $badHull) "capability is independent of a later verify verdict"
+    $vok = $true; try { Assert-HullSignature $okHull $man $sigFile } catch { $vok = $false }
+    Check $vok "verifier present + valid signature proceeds"
+    Throws { Assert-HullSignature $badHull $man $sigFile } "verifier present + invalid signature aborts"
+    Throws { Assert-HullSignature $okHull $man $missingSig } "verifier present + missing/undownloaded signature aborts"
+
+    # --- uninstall ownership gate (unit) --------------------------------------
+    Note "## uninstall ownership gate"
+    $udir = Join-Path $work 'unmanaged'; New-Item -ItemType Directory -Path $udir -Force | Out-Null
+    $ubin = Join-Path $udir 'hull.com'
+    [System.IO.File]::WriteAllBytes($ubin, [System.Text.Encoding]::ASCII.GetBytes('NOTOURS'))
+    Invoke-HullUninstall -Prefix $udir -DryRun:$false | Out-Null
+    Check (Test-Path -LiteralPath $ubin) "uninstall refuses to remove an unmanaged hull.com (no ownership marker)"
+    Write-HullMarker $udir '0.0.0' $false
+    Invoke-HullUninstall -Prefix $udir -DryRun:$false | Out-Null
+    Check (-not (Test-Path -LiteralPath $ubin)) "uninstall removes a managed hull.com (marker present, pathAdded=false leaves PATH alone)"
 
     # --- user PATH add/remove (idempotent, exact, non-corrupting) -------------
     Note "## user PATH add/remove (HKCU, snapshot/restore)"
@@ -142,10 +209,14 @@ try {
     if ($IncludeNetwork) {
         Note "## network end-to-end (official release, read-only)"
 
-        # dry-run writes nothing
+        # dry-run: resolves metadata but writes nothing (no prefix, no temp dir)
         $dpre = Join-Path $work 'dry\Hull'
+        $tempBefore = @(Get-ChildItem -LiteralPath $env:TEMP -Filter 'hull-install-*' -Directory -Force -ErrorAction SilentlyContinue).Count
         [void](Invoke-Install @('-Version', 'v0.14.0', '-Prefix', $dpre, '-NoPath', '-DryRun') (Join-Path $work 'dry.log'))
-        Check (-not (Test-Path -LiteralPath (Join-Path $dpre 'hull.com'))) "dry-run performed no install"
+        $tempAfter = @(Get-ChildItem -LiteralPath $env:TEMP -Filter 'hull-install-*' -Directory -Force -ErrorAction SilentlyContinue).Count
+        Check (-not (Test-Path -LiteralPath $dpre)) "dry-run did not create the prefix"
+        Check (-not (Test-Path -LiteralPath (Join-Path $dpre 'hull.com'))) "dry-run installed nothing"
+        Check ($tempAfter -le $tempBefore) "dry-run created no hull-install temp dir"
 
         # default (latest) install into a spaces path, no PATH change
         $spre = Join-Path $work 'with space\Hull'
@@ -154,6 +225,8 @@ try {
         Check ($rc -eq 0 -and (Test-Path -LiteralPath $sbin)) "latest install created hull.com in a spaces path"
         $sv = (& $sbin version 2>$null | Select-Object -First 1)
         Check ($sv -match '[0-9]+\.[0-9]+\.[0-9]+') "installed hull runs and reports a version ($sv)"
+        Check ((Get-HullArtifactVersion $sbin 20) -match '[0-9]+\.[0-9]+\.[0-9]+') "bounded artifact version reader parses the real binary"
+        Check (Test-Path -LiteralPath (Join-Path $spre '.hull-install.json')) "install wrote an ownership marker"
 
         # same-version reinstall without -Force is a clean no-op (not an error)
         $rc = Invoke-Install @('-Prefix', $spre, '-NoPath') (Join-Path $work 'inst-again.log')
