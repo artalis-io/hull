@@ -29,6 +29,12 @@ function Throws([scriptblock]$sb, [string]$m) {
 }
 function WriteBytes([string]$p, [string]$s) { [System.IO.File]::WriteAllBytes($p, [System.Text.Encoding]::ASCII.GetBytes($s)) }
 function ReadTrim([string]$p) { return ((Get-Content -LiteralPath $p -Raw).Trim()) }
+function BytesEqual([byte[]]$a, [byte[]]$b) {
+    if ($null -eq $a -or $null -eq $b) { return $false }
+    if ($a.Length -ne $b.Length) { return $false }
+    for ($i = 0; $i -lt $a.Length; $i++) { if ($a[$i] -ne $b[$i]) { return $false } }
+    return $true
+}
 
 Note ("## installer_tests under PowerShell $($PSVersionTable.PSVersion) (as $(whoami))")
 
@@ -120,22 +126,28 @@ try {
     Check (Test-HullPathContains '%HULL_ITEST_VAR%' 'C:\itest\dir') "matches an expanded %VAR% against its expansion"
     Remove-Item Env:\HULL_ITEST_VAR -ErrorAction SilentlyContinue
 
-    # --- user PATH add + exact one-entry removal (HKCU, snapshot/restore) ------
-    Note "## user PATH add + one-entry removal"
+    # --- user PATH add (normalized dedup) + EXACT-raw removal ownership -------
+    Note "## user PATH add + exact-raw removal"
     $snap = Get-HullUserPathRaw
     try {
         $ptest = Join-Path $work 'pathdir'
         Check ((Add-HullToUserPath $ptest $false) -eq $ptest) "add returns the exact raw entry"
         Check (Test-HullPathContains (Get-HullUserPathRaw).Value $ptest) "dir is present after add"
-        Check ($null -eq (Add-HullToUserPath $ptest $false)) "second add is idempotent (returns null)"
-        # inject a user-owned EQUIVALENT (trailing slash); removal must drop ONLY one
-        $cur = Get-HullUserPathRaw; Set-HullUserPathRaw ($cur.Value.TrimEnd(';') + ';' + $ptest + '\') $cur.Kind
-        $before = @(((Get-HullUserPathRaw).Value -split ';') | Where-Object { (ConvertTo-HullPathKey $_) -eq (ConvertTo-HullPathKey $ptest) }).Count
-        Check ($before -eq 2) "two equivalent entries present before removal"
-        Check (Remove-HullPathEntry $ptest $false) "removes one entry"
-        $after = @(((Get-HullUserPathRaw).Value -split ';') | Where-Object { (ConvertTo-HullPathKey $_) -eq (ConvertTo-HullPathKey $ptest) }).Count
-        Check ($after -eq 1) "exactly one equivalent entry removed, the other preserved"
-        [void](Remove-HullPathEntry ($ptest + '\') $false)
+        Check ($null -eq (Add-HullToUserPath $ptest $false)) "second add is idempotent (normalized dedup returns null)"
+        # The user manually removes the installer's raw entry and later adds an
+        # EQUIVALENT differently-spelled entry (trailing slash). Uninstall's exact
+        # removal must NOT delete the user's replacement.
+        $cur = Get-HullUserPathRaw
+        $withoutOurs = (($cur.Value -split ';') | Where-Object { $_ -ne '' -and -not [string]::Equals($_, $ptest, [System.StringComparison]::Ordinal) })
+        $userSpelling = $ptest + '\'
+        Set-HullUserPathRaw ([string]::Join(';', (@($withoutOurs) + @($userSpelling)))) $cur.Kind
+        Check (-not (Remove-HullPathEntryExact $ptest $false)) "exact removal of the installer entry is a no-op when only a differently-spelled user entry exists"
+        Check (((Get-HullUserPathRaw).Value -split ';') -ccontains $userSpelling) "the user's differently-spelled equivalent is preserved"
+        # Re-add ours alongside the user's, then exact-remove ONLY ours.
+        $cur = Get-HullUserPathRaw; Set-HullUserPathRaw ($cur.Value.TrimEnd(';') + ';' + $ptest) $cur.Kind
+        Check (Remove-HullPathEntryExact $ptest $false) "exact removal removes the installer's own raw entry"
+        $parts = (Get-HullUserPathRaw).Value -split ';'
+        Check (($parts -ccontains $userSpelling) -and (-not ($parts -ccontains $ptest))) "only the installer's raw entry was removed; the user's stayed"
         Check ((Get-HullUserPathRaw).Kind -eq $snap.Kind) "registry value kind preserved"
     } finally { Set-HullUserPathRaw $snap.Value $snap.Kind }
 
@@ -175,6 +187,42 @@ try {
     Check (Test-HullMarkerValid (Read-HullMarker $tdir) $tdir) "successful commit writes a valid marker"
     Check (@(Get-ChildItem -LiteralPath $tdir -Force -ErrorAction SilentlyContinue | Where-Object { $_.Name -like '.hull-stage-*' -or $_.Name -like '.hull-backup-*' }).Count -eq 0) "no staging/backup residue after commit"
 
+    # --- UPGRADE rollback preserves the EXACT prior marker + PATH -------------
+    Note "## upgrade rollback preserves the exact prior marker + PATH"
+    $updir = Join-Path $work 'upgrade'; New-Item -ItemType Directory -Path $updir -Force | Out-Null
+    $updest = Join-Path $updir 'hull.com'; WriteBytes $updest 'OLDBIN'
+    Write-HullMarker $updir '0.13.0' $true $updir     # a valid prior managed marker (pathAdded, pathEntry=$updir)
+    $priorMarkerBytes = [System.IO.File]::ReadAllBytes((Get-HullMarkerPath $updir))
+    $snapU = Get-HullUserPathRaw
+    try {
+        # a nontrivial prior PATH containing the managed entry + odd formatting
+        Set-HullUserPathRaw ($snapU.Value.TrimEnd(';') + ';' + $updir + ';C:\Weird Dir\;%TEMP%') $snapU.Kind
+        $priorPath = Get-HullUserPathRaw
+        $upsrc = Join-Path $work 'upsrc'; WriteBytes $upsrc 'NEWBIN'
+        Throws { Invoke-HullCommitInstall $upsrc $updest $updir '0.14.0' $false -FailMarker } "upgrade marker failure throws"
+        Check ((ReadTrim $updest) -eq 'OLDBIN') "upgrade rollback restores the previous binary"
+        Check (BytesEqual ([System.IO.File]::ReadAllBytes((Get-HullMarkerPath $updir))) $priorMarkerBytes) "upgrade rollback preserves the prior marker BYTE-FOR-BYTE"
+        $nowPath = Get-HullUserPathRaw
+        Check (($nowPath.Value -ceq $priorPath.Value) -and ($nowPath.Kind -eq $priorPath.Kind)) "upgrade rollback restores the exact prior PATH value + kind"
+    } finally { Set-HullUserPathRaw $snapU.Value $snapU.Kind }
+
+    # --- rollback proof: a REAL (locked) removal failure preserves the backup -
+    Note "## rollback proof: real locked-binary removal failure"
+    $ldir = Join-Path $work 'lock'; New-Item -ItemType Directory -Path $ldir -Force | Out-Null
+    $ldest = Join-Path $ldir 'hull.com'; WriteBytes $ldest 'OLDLOCK'
+    $lsrc = Join-Path $work 'locksrc'; WriteBytes $lsrc 'NEWLOCK'
+    $lswap = Start-HullBinarySwap $lsrc $ldest       # $ldest now = NEWLOCK, backup = OLDLOCK
+    $fsLock = [System.IO.File]::Open($ldest, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::None)
+    try {
+        $critL = $null
+        try { Undo-HullBinarySwap $lswap } catch { $critL = $_.Exception.Message }
+        Check ($critL -match 'CRITICAL') "a locked (undeletable) new binary makes rollback raise CRITICAL"
+        Check (Test-Path -LiteralPath $lswap.Backup) "the backup is preserved when the new binary cannot be removed"
+        Check ((ReadTrim $lswap.Backup) -eq 'OLDLOCK') "the preserved backup still holds the previous binary bytes"
+    } finally { $fsLock.Close(); $fsLock.Dispose() }
+    Remove-Item -LiteralPath $ldest -Force -ErrorAction SilentlyContinue
+    if ($lswap.Backup) { Remove-Item -LiteralPath $lswap.Backup -Force -ErrorAction SilentlyContinue }
+
     # --- verifier detection (tri-state, bounded) ------------------------------
     Note "## verifier detection (tri-state, bounded)"
     # Compile a real fake hull.exe with the Framework C# compiler (Add-Type
@@ -212,18 +260,27 @@ try {
     Remove-Item Env:\HULL_FAKE_MODE -ErrorAction SilentlyContinue
     Remove-Item Env:\HULL_FAKE_VERSION -ErrorAction SilentlyContinue
 
-    # --- marker schema + prefix validation ------------------------------------
-    Note "## marker schema + prefix validation"
+    # --- marker schema + prefix + type validation (fail closed) ---------------
+    Note "## marker schema + prefix + type validation"
     $mdir = Join-Path $work 'marker'; New-Item -ItemType Directory -Path $mdir -Force | Out-Null
+    $mk = Get-HullMarkerPath $mdir
     Write-HullMarker $mdir '1.0.0' $true 'C:\x'
     Check (Test-HullMarkerValid (Read-HullMarker $mdir) $mdir) "a well-formed marker at its prefix is valid"
     Check (-not (Test-HullMarkerValid (Read-HullMarker $mdir) (Join-Path $work 'other'))) "marker rejected for a different prefix"
-    Set-Content -LiteralPath (Get-HullMarkerPath $mdir) -Encoding ASCII -Value (@{ installer = 'someone-else'; schema = 1; prefix = $mdir; version = '1'; pathAdded = $false } | ConvertTo-Json)
-    Check (-not (Test-HullMarkerValid (Read-HullMarker $mdir) $mdir)) "marker with a foreign installer id rejected"
-    Set-Content -LiteralPath (Get-HullMarkerPath $mdir) -Encoding ASCII -Value (@{ installer = 'install.ps1'; prefix = $mdir } | ConvertTo-Json)
-    Check (-not (Test-HullMarkerValid (Read-HullMarker $mdir) $mdir)) "marker missing required fields rejected"
-    Set-Content -LiteralPath (Get-HullMarkerPath $mdir) -Encoding ASCII -Value (@{ installer = 'install.ps1'; schema = 999; prefix = $mdir; version = '1'; pathAdded = $false } | ConvertTo-Json)
-    Check (-not (Test-HullMarkerValid (Read-HullMarker $mdir) $mdir)) "marker with an unknown schema rejected"
+    Set-Content -LiteralPath $mk -Encoding ASCII -Value (@{ installer = 'someone-else'; schema = 1; prefix = $mdir; version = '1'; pathAdded = $false; pathEntry = '' } | ConvertTo-Json)
+    Check (-not (Test-HullMarkerValid (Read-HullMarker $mdir) $mdir)) "foreign installer id rejected"
+    Set-Content -LiteralPath $mk -Encoding ASCII -Value (@{ installer = 'install.ps1'; prefix = $mdir; version = '1'; pathAdded = $false; pathEntry = '' } | ConvertTo-Json)
+    Check (-not (Test-HullMarkerValid (Read-HullMarker $mdir) $mdir)) "missing required field (schema) rejected"
+    Set-Content -LiteralPath $mk -Encoding ASCII -Value (@{ installer = 'install.ps1'; schema = 1; prefix = $mdir; version = '1'; pathAdded = $false } | ConvertTo-Json)
+    Check (-not (Test-HullMarkerValid (Read-HullMarker $mdir) $mdir)) "missing pathEntry field rejected"
+    Set-Content -LiteralPath $mk -Encoding ASCII -Value (@{ installer = 'install.ps1'; schema = 999; prefix = $mdir; version = '1'; pathAdded = $false; pathEntry = '' } | ConvertTo-Json)
+    Check (-not (Test-HullMarkerValid (Read-HullMarker $mdir) $mdir)) "unknown schema rejected"
+    Set-Content -LiteralPath $mk -Encoding ASCII -Value (@{ installer = 'install.ps1'; schema = 'abc'; prefix = $mdir; version = '1'; pathAdded = $false; pathEntry = '' } | ConvertTo-Json)
+    Check (-not (Test-HullMarkerValid (Read-HullMarker $mdir) $mdir)) "non-numeric schema rejected (fail closed, no conversion error escapes)"
+    Set-Content -LiteralPath $mk -Encoding ASCII -Value (@{ installer = 'install.ps1'; schema = 1; prefix = $mdir; version = '1'; pathAdded = 'yes'; pathEntry = 'x' } | ConvertTo-Json)
+    Check (-not (Test-HullMarkerValid (Read-HullMarker $mdir) $mdir)) "non-boolean pathAdded rejected"
+    Set-Content -LiteralPath $mk -Encoding ASCII -Value (@{ installer = 'install.ps1'; schema = 1; prefix = $mdir; version = '1'; pathAdded = $true; pathEntry = '' } | ConvertTo-Json)
+    Check (-not (Test-HullMarkerValid (Read-HullMarker $mdir) $mdir)) "pathAdded=true with an empty pathEntry rejected"
 
     # --- no-adoption + uninstall ownership gate -------------------------------
     Note "## no-adoption + uninstall ownership gate"

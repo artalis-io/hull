@@ -16,9 +16,7 @@
     authenticate itself. On an upgrade, if a pre-existing Hull can verify the
     release signature, its check runs before replacement and a FAILURE or an
     ambiguous/timed-out probe aborts the install (never a silent downgrade to
-    checksum-only). A first install proceeds under bootstrap trust (GitHub HTTPS
-    + a matched SHA-256); verify further out-of-band with 'hull verify-release'
-    and Sigstore/Rekor.
+    checksum-only). A first install proceeds under bootstrap trust.
 
 .EXAMPLE
     irm https://gethull.dev/install.ps1 | iex
@@ -35,7 +33,6 @@ param(
     [Parameter(ParameterSetName = 'Install')]
     [string]$Version = 'latest',
 
-    # -Prefix and -DryRun compose with both install and uninstall.
     [string]$Prefix,
 
     [Parameter(ParameterSetName = 'Install')]
@@ -50,29 +47,25 @@ param(
     [switch]$Uninstall
 )
 
-# The upstream repository is FIXED. The public installer exposes no override.
-$script:HullRepo    = 'artalis-io/hull'
-$script:HullAsset   = 'hull-cosmo'
-$script:HullBinName = 'hull.com'
+$script:HullRepo       = 'artalis-io/hull'
+$script:HullAsset      = 'hull-cosmo'
+$script:HullBinName    = 'hull.com'
 $script:HullMarkerName = '.hull-install.json'
 $script:HullMarkerSchema = 1
 $script:VersionTagPattern = '^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$'
 
-# ── Output helpers (never log secrets, proxy creds, or temp URLs) ─────────────
 function Write-HullInfo([string]$m) { Write-Host "hull: $m" }
 function Write-HullWarn([string]$m) { Write-Host "hull: warning: $m" -ForegroundColor Yellow }
 function Write-HullErr ([string]$m) { Write-Host "hull: error: $m" -ForegroundColor Red }
 
 function Set-HullTls {
-    # Windows PowerShell 5.1 defaults to TLS 1.0/1.1; add >= 1.2 without dropping
-    # PowerShell 7's negotiated set.
     try {
         [Net.ServicePointManager]::SecurityProtocol =
             [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
     } catch { }
 }
 
-# ── Bounded native execution (works on both PS 5.1 and 7; no hangs) ──────────
+# ── Bounded native execution (PS 5.1 + 7; no hangs) ──────────────────────────
 function ConvertTo-HullArgString([string[]]$Arguments) {
     $parts = @()
     foreach ($a in $Arguments) {
@@ -82,9 +75,6 @@ function ConvertTo-HullArgString([string[]]$Arguments) {
 }
 
 function Invoke-HullBounded([string]$Exe, [string[]]$Arguments, [int]$TimeoutSec = 20) {
-    # Returns @{ Code; Out; TimedOut }. Uses System.Diagnostics.Process (so it
-    # works under Windows PowerShell 5.1, whose Start-Process/ArgumentList mangles
-    # spaces) with a hard timeout and async pipe reads (no deadlock, no hang).
     $psi = New-Object System.Diagnostics.ProcessStartInfo
     $psi.FileName = $Exe
     $psi.Arguments = ConvertTo-HullArgString $Arguments
@@ -111,12 +101,9 @@ function Test-HullVersionTag([string]$Tag) { return ($Tag -match $script:Version
 
 function Resolve-HullTag([string]$Requested) {
     if ($Requested -and $Requested -ne 'latest') {
-        if (-not (Test-HullVersionTag $Requested)) {
-            throw "invalid -Version '$Requested' (expected a release tag like v0.14.0)"
-        }
+        if (-not (Test-HullVersionTag $Requested)) { throw "invalid -Version '$Requested' (expected a release tag like v0.14.0)" }
         return $Requested
     }
-    # /releases/latest already excludes drafts and prereleases.
     $api = "https://api.github.com/repos/$($script:HullRepo)/releases/latest"
     $resp = Invoke-RestMethod -Uri $api -Headers @{ 'Accept' = 'application/vnd.github+json'; 'User-Agent' = 'hull-install.ps1' } -UseBasicParsing
     if ($resp.draft -eq $true -or $resp.prerelease -eq $true) { throw "latest resolved to a draft/prerelease ($($resp.tag_name)); refusing" }
@@ -143,12 +130,16 @@ function Get-HullFileSha256([string]$Path) {
     } finally { $fs.Dispose() }
 }
 
+function Test-HullFileMatches([string]$Path, [string]$Hash, [long]$Size) {
+    if (-not (Test-Path -LiteralPath $Path)) { return $false }
+    if ((Get-Item -LiteralPath $Path).Length -ne $Size) { return $false }
+    return ((Get-HullFileSha256 $Path) -eq $Hash)
+}
+
 function Get-HullManifestHash([string]$ManifestPath, [string]$AssetName) {
     $matched = @()
     foreach ($ln in (Get-Content -LiteralPath $ManifestPath)) {
-        if ($ln -match '^([0-9a-fA-F]{64})\s\s(.+)$') {
-            if ($Matches[2] -ceq $AssetName) { $matched += $Matches[1].ToLower() }
-        }
+        if ($ln -match '^([0-9a-fA-F]{64})\s\s(.+)$') { if ($Matches[2] -ceq $AssetName) { $matched += $Matches[1].ToLower() } }
     }
     if ($matched.Count -eq 0) { throw "no checksum entry for '$AssetName' in hull.sha256" }
     if ($matched.Count -gt 1) { throw "duplicate checksum entries for '$AssetName' in hull.sha256" }
@@ -162,18 +153,11 @@ function Test-HullChecksum([string]$Path, [string]$Expected) {
 }
 
 # ── Verifier detection (tri-state, bounded) + signature assertion ────────────
-# States: 'none' (no existing hull), 'capable' (can verify signatures),
-# 'absent' (a real hull that genuinely lacks verify-release), 'ambiguous'
-# (exists but the probe failed / timed out / was unrecognizable). Only 'none'
-# and 'absent' permit bootstrap trust; 'ambiguous' MUST abort - it is never
-# treated as "verifier absent".
 function Get-HullVerifierState([string]$ExistingHull, [int]$TimeoutSec = 20) {
     if (-not $ExistingHull -or -not (Test-Path -LiteralPath $ExistingHull)) { return 'none' }
     $a = Invoke-HullBounded $ExistingHull @('verify-release', '--help') $TimeoutSec
     if ($a.TimedOut) { return 'ambiguous' }
     if ($a.Code -eq 0 -and $a.Out -match 'verify-release') { return 'capable' }
-    # Not obviously capable: consult the top-level command inventory to tell a
-    # genuine "command absent" apart from an ambiguous/failed probe.
     $b = Invoke-HullBounded $ExistingHull @('help') $TimeoutSec
     if ($b.TimedOut) { return 'ambiguous' }
     if ($b.Code -eq 0) {
@@ -184,12 +168,8 @@ function Get-HullVerifierState([string]$ExistingHull, [int]$TimeoutSec = 20) {
 }
 
 function Assert-HullSignature([string]$ExistingHull, [string]$ManifestPath, [string]$SigPath) {
-    # Precondition: the caller established $ExistingHull is 'capable'. Any failure
-    # here throws (abort); there is no bootstrap fallback.
     $sigItem = Get-Item -LiteralPath $SigPath -ErrorAction SilentlyContinue
-    if (-not $sigItem -or $sigItem.Length -eq 0) {
-        throw "release signature (hull.sha256.sig) is missing or empty; aborting (the existing hull can verify signatures, so a signature is required)"
-    }
+    if (-not $sigItem -or $sigItem.Length -eq 0) { throw "release signature (hull.sha256.sig) is missing or empty; aborting" }
     $r = Invoke-HullBounded $ExistingHull @('verify-release', $ManifestPath, $SigPath) 30
     if ($r.TimedOut) { throw "release signature verification timed out; aborting" }
     if ($r.Code -ne 0) { throw "release signature did not verify; aborting (output: $($r.Out.Trim()))" }
@@ -202,7 +182,7 @@ function Get-HullArtifactVersion([string]$ExePath, [int]$TimeoutSec = 20) {
     return $null
 }
 
-# ── User PATH (HKCU only; idempotent; type-preserving; exact-entry ownership) ─
+# ── User PATH (HKCU only; type-preserving; normalized dedup, exact removal) ───
 function Get-HullUserPathRaw {
     $key = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment', $false)
     if ($null -eq $key) { return @{ Value = ''; Kind = [Microsoft.Win32.RegistryValueKind]::ExpandString } }
@@ -215,9 +195,6 @@ function Get-HullUserPathRaw {
 }
 
 function ConvertTo-HullPathKey([string]$Component) {
-    # Comparison key only (the raw component is preserved on write): strip quotes
-    # + whitespace, expand %VAR%, unify separators, drop trailing separators,
-    # lowercase.
     $c = $Component.Trim().Trim('"')
     $c = [System.Environment]::ExpandEnvironmentVariables($c)
     $c = $c -replace '/', '\'
@@ -240,6 +217,15 @@ function Set-HullUserPathRaw([string]$Value, $Kind) {
     try { $key.SetValue('Path', $Value, $Kind) } finally { $key.Close() }
 }
 
+function Restore-HullUserPathExact($Snap) {
+    # Restore the EXACT raw value + registry kind, and prove it took.
+    Set-HullUserPathRaw $Snap.Value $Snap.Kind
+    $now = Get-HullUserPathRaw
+    if (($now.Value -cne $Snap.Value) -or ($now.Kind -ne $Snap.Kind)) {
+        throw "CRITICAL: could not restore the user PATH to its prior value/kind during rollback"
+    }
+}
+
 function Send-HullEnvBroadcast {
     if (-not ('HullNative.Win32' -as [type])) {
         Add-Type -Namespace HullNative -Name Win32 -MemberDefinition @'
@@ -254,8 +240,8 @@ public static extern System.IntPtr SendMessageTimeout(System.IntPtr hWnd, uint M
 }
 
 function Add-HullToUserPath([string]$Dir, [bool]$DryRun) {
-    # Returns the exact raw component it added (for ownership recording), or $null
-    # if nothing was added.
+    # Normalized dedup PREVENTS adding an equivalent duplicate. Returns the exact
+    # raw component added (recorded for ownership), or $null if nothing added.
     $cur = Get-HullUserPathRaw
     if (Test-HullPathContains $cur.Value $Dir) { Write-HullInfo "PATH already contains $Dir"; return $null }
     if ($DryRun) { Write-HullInfo "[dry-run] would add $Dir to user PATH"; return $null }
@@ -266,17 +252,17 @@ function Add-HullToUserPath([string]$Dir, [bool]$DryRun) {
     return $Dir
 }
 
-function Remove-HullPathEntry([string]$RawEntry, [bool]$DryRun) {
-    # Remove exactly ONE occurrence matching the recorded entry's normalized key;
-    # preserve all other entries (including any equivalent the user added).
+function Remove-HullPathEntryExact([string]$RawEntry, [bool]$DryRun) {
+    # Ownership at removal is proven by EXACT raw equality (ordinal), so a
+    # differently-spelled equivalent that the user added is never deleted. Removes
+    # at most one occurrence.
     if ([string]::IsNullOrEmpty($RawEntry)) { return $false }
     $cur = Get-HullUserPathRaw
-    $wantKey = ConvertTo-HullPathKey $RawEntry
     $kept = New-Object System.Collections.Generic.List[string]
     $removed = $false
     foreach ($c in ($cur.Value -split ';')) {
         if ($c -eq '') { continue }
-        if (-not $removed -and (ConvertTo-HullPathKey $c) -eq $wantKey) { $removed = $true; continue }
+        if (-not $removed -and [string]::Equals($c, $RawEntry, [System.StringComparison]::Ordinal)) { $removed = $true; continue }
         $kept.Add($c)
     }
     if (-not $removed) { return $false }
@@ -295,19 +281,24 @@ function Resolve-HullPrefix([string]$Requested) {
     return (Join-Path $localApp 'Programs\Hull')
 }
 
-# ── Installer ownership marker (validated schema + recorded prefix + entry) ───
+# ── Ownership marker (validated schema + prefix + recorded raw PATH entry) ────
 function Get-HullMarkerPath([string]$PrefixDir) { return (Join-Path $PrefixDir $script:HullMarkerName) }
 
+function Write-HullMarkerAtomic([string]$PrefixDir, [byte[]]$Bytes) {
+    # Unique temp in the same directory, then an atomic replace/rename.
+    New-Item -ItemType Directory -Path $PrefixDir -Force | Out-Null
+    $final = Get-HullMarkerPath $PrefixDir
+    $tmp = Join-Path $PrefixDir (".hull-marker-" + [guid]::NewGuid().ToString('N'))
+    [System.IO.File]::WriteAllBytes($tmp, $Bytes)
+    try {
+        if (Test-Path -LiteralPath $final) { [System.IO.File]::Replace($tmp, $final, $null) }
+        else { [System.IO.File]::Move($tmp, $final) }
+    } catch { Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue; throw }
+}
+
 function Write-HullMarker([string]$PrefixDir, [string]$Ver, [bool]$PathAdded, [string]$PathEntry) {
-    $rec = [ordered]@{
-        installer = 'install.ps1'
-        schema    = $script:HullMarkerSchema
-        prefix    = $PrefixDir
-        version   = $Ver
-        pathAdded = $PathAdded
-        pathEntry = $PathEntry
-    }
-    Set-Content -LiteralPath (Get-HullMarkerPath $PrefixDir) -Value ($rec | ConvertTo-Json) -Encoding ASCII
+    $rec = [ordered]@{ installer = 'install.ps1'; schema = $script:HullMarkerSchema; prefix = $PrefixDir; version = $Ver; pathAdded = $PathAdded; pathEntry = $PathEntry }
+    Write-HullMarkerAtomic $PrefixDir ([System.Text.Encoding]::ASCII.GetBytes(($rec | ConvertTo-Json)))
 }
 
 function Read-HullMarker([string]$PrefixDir) {
@@ -316,39 +307,63 @@ function Read-HullMarker([string]$PrefixDir) {
     try { return (Get-Content -LiteralPath $m -Raw | ConvertFrom-Json) } catch { return $null }
 }
 
+function Restore-HullMarkerExact([string]$PrefixDir, [byte[]]$PrevBytes) {
+    $final = Get-HullMarkerPath $PrefixDir
+    if ($null -eq $PrevBytes) {
+        if (Test-Path -LiteralPath $final) { Remove-Item -LiteralPath $final -Force }
+        if (Test-Path -LiteralPath $final) { throw "CRITICAL: could not remove a stray marker during rollback" }
+    } else {
+        Write-HullMarkerAtomic $PrefixDir $PrevBytes
+    }
+}
+
 function Test-HullMarkerValid($Rec, [string]$PrefixDir) {
-    # A marker is ours only if it parses, carries our identity + schema + required
-    # fields, and its recorded prefix is equivalent to the current prefix.
+    # Ours only if it parses, carries our identity + schema + ALL required fields
+    # with the right types, its recorded prefix is equivalent, and (when
+    # pathAdded) it records a nonempty raw entry. Fail closed on malformed values.
     if ($null -eq $Rec) { return $false }
     $names = @($Rec.PSObject.Properties.Name)
-    foreach ($f in @('installer', 'schema', 'prefix', 'version', 'pathAdded')) {
-        if ($names -notcontains $f) { return $false }
-    }
+    foreach ($f in @('installer', 'schema', 'prefix', 'version', 'pathAdded', 'pathEntry')) { if ($names -notcontains $f) { return $false } }
     if ($Rec.installer -ne 'install.ps1') { return $false }
-    if ([int]$Rec.schema -ne $script:HullMarkerSchema) { return $false }
+    $schemaOk = $false; try { $schemaOk = ([int]$Rec.schema -eq $script:HullMarkerSchema) } catch { $schemaOk = $false }
+    if (-not $schemaOk) { return $false }
+    if ($Rec.pathAdded -isnot [bool]) { return $false }
+    if ([string]::IsNullOrEmpty([string]$Rec.prefix)) { return $false }
+    if (($Rec.pathAdded -eq $true) -and [string]::IsNullOrEmpty([string]$Rec.pathEntry)) { return $false }
     if ((ConvertTo-HullPathKey ([string]$Rec.prefix)) -ne (ConvertTo-HullPathKey $PrefixDir)) { return $false }
     return $true
 }
 
-function Test-HullManagedHere([string]$PrefixDir) {
-    return (Test-HullMarkerValid (Read-HullMarker $PrefixDir) $PrefixDir)
-}
+function Test-HullManagedHere([string]$PrefixDir) { return (Test-HullMarkerValid (Read-HullMarker $PrefixDir) $PrefixDir) }
 
 function Set-HullOwnershipMarker([string]$PrefixDir, [string]$Ver, [string]$AddedEntry) {
-    # pathEntry is sticky: once THIS installer added a PATH entry, keep the exact
-    # recorded entry across re-installs so uninstall still removes what we added.
+    # pathEntry is sticky: keep the exact recorded installer-added entry across
+    # re-installs so uninstall removes exactly what we added.
     $prev = Read-HullMarker $PrefixDir
     $pathEntry = $AddedEntry
     if (-not $pathEntry -and (Test-HullMarkerValid $prev $PrefixDir) -and $prev.pathAdded) { $pathEntry = [string]$prev.pathEntry }
     Write-HullMarker $PrefixDir $Ver ([bool]$pathEntry) $pathEntry
 }
 
-# ── Binary swap as part of a binary+PATH+marker transaction ──────────────────
-function Start-HullBinarySwap([string]$Src, [string]$Dest, [switch]$SimulateFailure, [switch]$SimulateRestoreFailure) {
-    # Stage under a unique name, back up any existing binary under a unique name,
-    # move the new one into place. Returns @{ Backup; HadPrev } and KEEPS the
-    # backup (the transaction commits/undoes it later). If the swap itself fails,
-    # it restores + proves, raising a distinct CRITICAL error on restore failure.
+# ── Binary swap + transaction (binary + PATH + marker, all-or-nothing) ───────
+function Restore-HullPrevBinary([string]$Dest, [string]$Backup, [string]$PrevHash, [long]$PrevSize, [switch]$SimulateRestoreFailure, [switch]$SimulateRemoveFailure) {
+    # Remove whatever occupies $Dest (the new/staged binary). A failure here is
+    # CRITICAL - NEVER SilentlyContinue, and NEVER assume "the file exists" means
+    # "the old binary is restored".
+    if (Test-Path -LiteralPath $Dest) {
+        if ($SimulateRemoveFailure) { throw "CRITICAL: could not remove the new binary during rollback; your previous hull is preserved at $Backup" }
+        try { Remove-Item -LiteralPath $Dest -Force } catch { throw "CRITICAL: could not remove the new binary during rollback ($($_.Exception.Message)); your previous hull is preserved at $Backup" }
+    }
+    if (-not $SimulateRestoreFailure) { try { Move-Item -LiteralPath $Backup -Destination $Dest -Force } catch { } }
+    # PROVE the restored binary is byte-identical to the recorded previous one
+    # BEFORE deleting the backup.
+    if (-not (Test-HullFileMatches $Dest $PrevHash $PrevSize)) {
+        throw "CRITICAL: install failed AND rollback could not restore the previous hull; it is preserved at $Backup"
+    }
+    Remove-Item -LiteralPath $Backup -Force -ErrorAction SilentlyContinue
+}
+
+function Start-HullBinarySwap([string]$Src, [string]$Dest, [switch]$SimulateFailure) {
     $dir = Split-Path -Parent $Dest
     New-Item -ItemType Directory -Path $dir -Force | Out-Null
     $staged = Join-Path $dir (".hull-stage-" + [guid]::NewGuid().ToString('N'))
@@ -356,6 +371,8 @@ function Start-HullBinarySwap([string]$Src, [string]$Dest, [switch]$SimulateFail
     if ((Test-Path -LiteralPath $staged) -or (Test-Path -LiteralPath $backup)) { throw "sidecar path collision under $dir" }
     Copy-Item -LiteralPath $Src -Destination $staged -Force
     $hadPrev = Test-Path -LiteralPath $Dest
+    $prevHash = $null; $prevSize = [long]0
+    if ($hadPrev) { $prevHash = Get-HullFileSha256 $Dest; $prevSize = (Get-Item -LiteralPath $Dest).Length }
     try {
         if ($hadPrev) { Move-Item -LiteralPath $Dest -Destination $backup -Force }
         if ($SimulateFailure) { throw "simulated install failure (test)" }
@@ -363,18 +380,10 @@ function Start-HullBinarySwap([string]$Src, [string]$Dest, [switch]$SimulateFail
     } catch {
         $err = $_
         Remove-Item -LiteralPath $staged -Force -ErrorAction SilentlyContinue
-        if ($hadPrev) {
-            if (-not $SimulateRestoreFailure -and -not (Test-Path -LiteralPath $Dest)) {
-                Move-Item -LiteralPath $backup -Destination $Dest -Force -ErrorAction SilentlyContinue
-            }
-            if (-not (Test-Path -LiteralPath $Dest)) {
-                throw "CRITICAL: install failed AND rollback failed; your previous hull is preserved at $backup"
-            }
-            Remove-Item -LiteralPath $backup -Force -ErrorAction SilentlyContinue
-        }
+        if ($hadPrev) { Restore-HullPrevBinary $Dest $backup $prevHash $prevSize }
         throw $err
     }
-    return @{ Backup = $(if ($hadPrev) { $backup } else { $null }); HadPrev = $hadPrev }
+    return @{ Backup = $(if ($hadPrev) { $backup } else { $null }); HadPrev = $hadPrev; PrevHash = $prevHash; PrevSize = $prevSize; Dest = $Dest }
 }
 
 function Complete-HullBinarySwap($Swap) {
@@ -383,28 +392,29 @@ function Complete-HullBinarySwap($Swap) {
     }
 }
 
-function Undo-HullBinarySwap($Swap, [string]$Dest, [switch]$SimulateRestoreFailure) {
-    # Restore the prior binary after a LATER-phase (PATH/marker) failure.
-    if (-not $Swap.HadPrev) { Remove-Item -LiteralPath $Dest -Force -ErrorAction SilentlyContinue; return }
-    if (-not $Swap.Backup -or -not (Test-Path -LiteralPath $Swap.Backup)) {
-        throw "CRITICAL: cannot restore the previous hull (backup missing); the new binary is at $Dest"
+function Undo-HullBinarySwap($Swap, [switch]$SimulateRestoreFailure, [switch]$SimulateRemoveFailure) {
+    if (-not $Swap.HadPrev) {
+        if (Test-Path -LiteralPath $Swap.Dest) {
+            try { Remove-Item -LiteralPath $Swap.Dest -Force } catch { throw "CRITICAL: could not remove the newly-installed hull during rollback: $($Swap.Dest)" }
+        }
+        return
     }
-    Remove-Item -LiteralPath $Dest -Force -ErrorAction SilentlyContinue
-    if (-not $SimulateRestoreFailure) { Move-Item -LiteralPath $Swap.Backup -Destination $Dest -Force -ErrorAction SilentlyContinue }
-    if (-not (Test-Path -LiteralPath $Dest)) {
-        throw "CRITICAL: install failed AND rollback failed; your previous hull is preserved at $($Swap.Backup)"
-    }
-    Remove-Item -LiteralPath $Swap.Backup -Force -ErrorAction SilentlyContinue
+    Restore-HullPrevBinary $Swap.Dest $Swap.Backup $Swap.PrevHash $Swap.PrevSize -SimulateRestoreFailure:$SimulateRestoreFailure -SimulateRemoveFailure:$SimulateRemoveFailure
 }
 
 function Invoke-HullCommitInstall([string]$Src, [string]$Dest, [string]$PrefixDir, [string]$Ver, [bool]$NoPath,
-    [switch]$SimulateSwapFailure, [switch]$SimulateUndoFailure, [switch]$FailPath, [switch]$FailMarker) {
-    # ONE transaction: swap the binary, add PATH, write the marker. If ANY step
-    # fails, undo the PATH we added, remove any partial marker, and restore the
-    # previous binary (all-or-nothing).
+    [switch]$SimulateSwapFailure, [switch]$SimulateUndoFailure, [switch]$SimulateUndoRemoveFailure, [switch]$FailPath, [switch]$FailMarker) {
+
+    # Snapshot the EXACT prior marker bytes (or absence) and raw PATH value+kind
+    # BEFORE any mutation, so a later-phase failure restores them exactly.
+    $markerPath = Get-HullMarkerPath $PrefixDir
+    $prevMarkerBytes = $null
+    if (Test-Path -LiteralPath $markerPath) { $prevMarkerBytes = [System.IO.File]::ReadAllBytes($markerPath) }
+    $pathSnap = Get-HullUserPathRaw
+
     $swap = Start-HullBinarySwap $Src $Dest -SimulateFailure:$SimulateSwapFailure
-    $addedEntry = $null
     try {
+        $addedEntry = $null
         if (-not $NoPath) {
             if ($FailPath) { throw "simulated PATH failure (test)" }
             $addedEntry = Add-HullToUserPath $PrefixDir $false
@@ -414,9 +424,9 @@ function Invoke-HullCommitInstall([string]$Src, [string]$Dest, [string]$PrefixDi
         Complete-HullBinarySwap $swap
     } catch {
         $err = $_
-        if ($addedEntry) { [void](Remove-HullPathEntry $addedEntry $false) }
-        Remove-Item -LiteralPath (Get-HullMarkerPath $PrefixDir) -Force -ErrorAction SilentlyContinue
-        Undo-HullBinarySwap $swap $Dest -SimulateRestoreFailure:$SimulateUndoFailure
+        Restore-HullUserPathExact $pathSnap
+        Restore-HullMarkerExact $PrefixDir $prevMarkerBytes
+        Undo-HullBinarySwap $swap -SimulateRestoreFailure:$SimulateUndoFailure -SimulateRemoveFailure:$SimulateUndoRemoveFailure
         throw $err
     }
 }
@@ -427,7 +437,7 @@ function Invoke-HullInstall {
     $ErrorActionPreference = 'Stop'
 
     Set-HullTls
-    $tag = Resolve-HullTag $Version           # metadata resolution is allowed in dry-run
+    $tag = Resolve-HullTag $Version
     $urls = Get-HullAssetUrls $tag
     $prefixDir = Resolve-HullPrefix $Prefix
     $dest = Join-Path $prefixDir $script:HullBinName
@@ -437,7 +447,6 @@ function Invoke-HullInstall {
     Write-HullInfo "version: $tag"
     Write-HullInfo "prefix:  $prefixDir"
 
-    # DRY-RUN: resolve metadata + print the plan; touch NO disk.
     if ($DryRun) {
         Write-HullWarn "dry-run: no files, downloads, or PATH changes will be made"
         Write-HullInfo "[dry-run] would download $($script:HullAsset) for $tag and verify its SHA-256"
@@ -446,7 +455,6 @@ function Invoke-HullInstall {
         return
     }
 
-    # Same-version / overwrite rule (do not ADOPT an unmanaged same-version binary).
     $installedVer = Get-HullArtifactVersion $dest
     if ((Test-Path -LiteralPath $dest) -and -not $Force) {
         if ($installedVer -eq $wantVer) {
@@ -466,7 +474,6 @@ function Invoke-HullInstall {
     $tmp = Join-Path ([System.IO.Path]::GetTempPath()) ("hull-install-" + [guid]::NewGuid())
     New-Item -ItemType Directory -Path $tmp -Force | Out-Null
     try {
-        # Stage the download AS hull.com so it is runnable for the candidate check.
         $asset = Join-Path $tmp $script:HullBinName
         $man   = Join-Path $tmp 'hull.sha256'
         $sig   = Join-Path $tmp 'hull.sha256.sig'
@@ -474,22 +481,16 @@ function Invoke-HullInstall {
         Write-HullInfo "downloading $($script:HullAsset)"
         Get-HullFile $urls.Asset $asset
         Get-HullFile $urls.Manifest $man
-        if (-not (Test-Path -LiteralPath $asset) -or (Get-Item $asset).Length -eq 0) {
-            throw "download produced an empty file; release may not exist at $tag"
-        }
+        if (-not (Test-Path -LiteralPath $asset) -or (Get-Item $asset).Length -eq 0) { throw "download produced an empty file; release may not exist at $tag" }
 
-        # 1. checksum against the exact manifest entry for hull-cosmo.
         $actual = Test-HullChecksum $asset (Get-HullManifestHash $man $script:HullAsset)
         Write-HullInfo "checksum verified ($actual)"
 
-        # 2. upgrade signature (tri-state, bounded). 'capable' => signature
-        #    mandatory (download failure / missing / invalid / timeout all abort).
-        #    'absent' => bootstrap. 'ambiguous' => abort (never a silent downgrade).
         if (Test-Path -LiteralPath $dest) {
             switch (Get-HullVerifierState $dest) {
                 'capable' {
-                    Get-HullFile $urls.Sig $sig            # download failure THROWS -> abort
-                    Assert-HullSignature $dest $man $sig   # missing / invalid / timeout THROWS -> abort
+                    Get-HullFile $urls.Sig $sig
+                    Assert-HullSignature $dest $man $sig
                     Write-HullInfo "existing hull verified the release signature"
                 }
                 'absent' { Write-HullWarn "existing hull lacks 'verify-release'; proceeding under bootstrap trust (GitHub HTTPS + matched SHA-256)" }
@@ -499,16 +500,10 @@ function Invoke-HullInstall {
             Write-HullWarn "first install: bootstrap trust (GitHub HTTPS + matched SHA-256). Verify further with 'hull verify-release' and Sigstore/Rekor."
         }
 
-        # 3. candidate-version check (after checksum, before replacement): the
-        #    verified artifact must report the requested version or abort WITHOUT
-        #    touching the existing installation.
         $candVer = Get-HullArtifactVersion $asset
-        if ($candVer -ne $wantVer) {
-            throw "downloaded artifact reports version '$candVer', expected '$wantVer'; aborting without changing the existing installation"
-        }
+        if ($candVer -ne $wantVer) { throw "downloaded artifact reports version '$candVer', expected '$wantVer'; aborting without changing the existing installation" }
         Write-HullInfo "artifact version check: $candVer"
 
-        # 4. transactional commit: binary + PATH + marker (all-or-nothing).
         Invoke-HullCommitInstall $asset $dest $prefixDir $wantVer $NoPath
         Write-HullInfo "installed hull: $dest"
 
@@ -534,9 +529,6 @@ function Invoke-HullUninstall {
     $dest = Join-Path $prefixDir $script:HullBinName
     $rec = Read-HullMarker $prefixDir
 
-    # Ownership gate: act ONLY on a valid marker whose recorded prefix matches.
-    # This prevents `-Uninstall -Prefix <arbitrary>` from deleting an unrelated
-    # hull.com and prevents touching a PATH entry the installer did not add.
     if (-not (Test-HullMarkerValid $rec $prefixDir)) {
         Write-HullInfo "no valid install.ps1 ownership record at $prefixDir; refusing to remove anything not installed by install.ps1"
         return
@@ -545,11 +537,9 @@ function Invoke-HullUninstall {
     if (Test-Path -LiteralPath $dest) {
         if ($DryRun) { Write-HullInfo "[dry-run] would remove $dest" }
         else { Remove-Item -LiteralPath $dest -Force; Write-HullInfo "removed $dest" }
-    } else {
-        Write-HullInfo "no hull found at $dest"
-    }
+    } else { Write-HullInfo "no hull found at $dest" }
 
-    if ($rec.pathAdded -and $rec.pathEntry) { [void](Remove-HullPathEntry ([string]$rec.pathEntry) $DryRun) }
+    if ($rec.pathAdded -and $rec.pathEntry) { [void](Remove-HullPathEntryExact ([string]$rec.pathEntry) $DryRun) }
     else { Write-HullInfo "user PATH not modified (installer did not add an entry)" }
 
     if (-not $DryRun) {
@@ -571,20 +561,14 @@ function Invoke-HullInstallerMain {
     Write-Host "Hull installer (Windows)" -ForegroundColor Cyan
     Write-Host ""
     try {
-        if ($Uninstall) {
-            Invoke-HullUninstall -Prefix $Prefix -DryRun:$DryRun.IsPresent
-        } else {
-            Invoke-HullInstall -Version $Version -Prefix $Prefix -Force:$Force.IsPresent -DryRun:$DryRun.IsPresent -NoPath:$NoPath.IsPresent
-        }
+        if ($Uninstall) { Invoke-HullUninstall -Prefix $Prefix -DryRun:$DryRun.IsPresent }
+        else { Invoke-HullInstall -Version $Version -Prefix $Prefix -Force:$Force.IsPresent -DryRun:$DryRun.IsPresent -NoPath:$NoPath.IsPresent }
     } catch {
         Write-HullErr $_.Exception.Message
         exit 1
     }
 }
 
-# Dot-sourcing (`. .\install.ps1`) defines the functions WITHOUT running main, so
-# the Pester-free tests can exercise them with local fixtures. Normal execution
-# and `irm | iex` run main.
-if ($MyInvocation.InvocationName -ne '.') {
-    Invoke-HullInstallerMain
-}
+# Dot-sourcing defines the functions WITHOUT running main (for the tests). Normal
+# execution and `irm | iex` run main.
+if ($MyInvocation.InvocationName -ne '.') { Invoke-HullInstallerMain }
