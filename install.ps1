@@ -285,14 +285,16 @@ function Resolve-HullPrefix([string]$Requested) {
 function Get-HullMarkerPath([string]$PrefixDir) { return (Join-Path $PrefixDir $script:HullMarkerName) }
 
 function Write-HullMarkerAtomic([string]$PrefixDir, [byte[]]$Bytes) {
-    # Unique temp in the same directory, then an atomic replace/rename.
+    # Write a unique temp in the same directory, then rename it into place. Uses
+    # remove-then-rename (robust across NTFS/AV; File.Replace can throw when a
+    # scanner briefly holds the destination).
     New-Item -ItemType Directory -Path $PrefixDir -Force | Out-Null
     $final = Get-HullMarkerPath $PrefixDir
     $tmp = Join-Path $PrefixDir (".hull-marker-" + [guid]::NewGuid().ToString('N'))
     [System.IO.File]::WriteAllBytes($tmp, $Bytes)
     try {
-        if (Test-Path -LiteralPath $final) { [System.IO.File]::Replace($tmp, $final, $null) }
-        else { [System.IO.File]::Move($tmp, $final) }
+        if (Test-Path -LiteralPath $final) { Remove-Item -LiteralPath $final -Force }
+        [System.IO.File]::Move($tmp, $final)
     } catch { Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue; throw }
 }
 
@@ -312,9 +314,14 @@ function Restore-HullMarkerExact([string]$PrefixDir, [byte[]]$PrevBytes) {
     if ($null -eq $PrevBytes) {
         if (Test-Path -LiteralPath $final) { Remove-Item -LiteralPath $final -Force }
         if (Test-Path -LiteralPath $final) { throw "CRITICAL: could not remove a stray marker during rollback" }
-    } else {
-        Write-HullMarkerAtomic $PrefixDir $PrevBytes
+        return
     }
+    # If the marker on disk already matches the prior bytes, no rewrite is needed.
+    $cur = $null
+    if (Test-Path -LiteralPath $final) { try { $cur = [System.IO.File]::ReadAllBytes($final) } catch { } }
+    $same = ($null -ne $cur) -and ($cur.Length -eq $PrevBytes.Length)
+    if ($same) { for ($i = 0; $i -lt $cur.Length; $i++) { if ($cur[$i] -ne $PrevBytes[$i]) { $same = $false; break } } }
+    if (-not $same) { Write-HullMarkerAtomic $PrefixDir $PrevBytes }
 }
 
 function Test-HullMarkerValid($Rec, [string]$PrefixDir) {
@@ -424,9 +431,11 @@ function Invoke-HullCommitInstall([string]$Src, [string]$Dest, [string]$PrefixDi
         Complete-HullBinarySwap $swap
     } catch {
         $err = $_
+        # Restore the binary FIRST (the anchor: a runnable hull), then the PATH
+        # and marker to their exact prior state.
+        Undo-HullBinarySwap $swap -SimulateRestoreFailure:$SimulateUndoFailure -SimulateRemoveFailure:$SimulateUndoRemoveFailure
         Restore-HullUserPathExact $pathSnap
         Restore-HullMarkerExact $PrefixDir $prevMarkerBytes
-        Undo-HullBinarySwap $swap -SimulateRestoreFailure:$SimulateUndoFailure -SimulateRemoveFailure:$SimulateUndoRemoveFailure
         throw $err
     }
 }
