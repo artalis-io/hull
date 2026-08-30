@@ -46,11 +46,32 @@ packaging/windows/generate.sh --tag v0.14.0 --check
 
 ## Testing
 
-`tests/acceptance/windows/packaging/` installs, invokes (`hull version`), and
-uninstalls both package forms as a standard (non-admin) user with Developer Mode
-disabled, driven by `.github/workflows/packaging-windows.yml`. It is read-only
-with respect to releases (it downloads the official `hull-cosmo`; it never
-submits or mutates a package index/bucket).
+`tests/acceptance/windows/packaging/` exercises both package forms, driven by
+`.github/workflows/packaging-windows.yml`. It is read-only with respect to
+releases (it downloads the official `hull-cosmo`; it never submits or mutates a
+package index/bucket).
+
+- **Scoop** - installed, invoked (`hull version`), and uninstalled as a
+  freshly-created **standard (non-admin)** user with Developer Mode disabled.
+  Scoop is per-user by design, so this is the complete fresh-standard-user
+  package proof.
+- **Winget** - the manifest is **validated** (`winget validate`) as that same
+  standard user, and the **install / invoke / uninstall** run under the runner's
+  own **non-elevated (Medium integrity)** account.
+
+  Winget boundary (precise): Winget's per-user App Installer MSIX is not
+  provisionable for a freshly-created standard user in a `runas` session on the
+  GitHub image (no loaded profile, so no package identity / execution alias), so
+  CI does not prove a Winget *install* under a newly-created standard-user
+  profile. The install path is exercised where App Installer has a valid
+  identity - the runner account, non-elevated. The Winget install is per-user and
+  non-elevated; this is a runner/profile limitation, **not** evidence that Hull
+  requires administrator privileges (Scoop demonstrates the fully non-admin
+  path). The runner account is in the Administrators group, so it is not a true
+  non-admin account and is not described as one.
+
+The whole job fails unless generator drift-check, manifest validation, hash
+verification, install, invocation, and uninstall all succeed.
 
 ## Publishing (separate, authorized step - not done here)
 
