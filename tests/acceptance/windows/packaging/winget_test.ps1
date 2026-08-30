@@ -85,8 +85,9 @@ if (Test-Path -LiteralPath $alias) {
     if ($ver1 -match '[0-9]+\.[0-9]+\.[0-9]+') { Note "- OK: winget-installed hull runs" } else { Fail "winget-installed hull did not report a version" }
 } else { Fail "winget did not create a hull alias in the Links dir" }
 
-# 4. uninstall
-$u = Invoke-Native $winget @('uninstall', 'Artalis.Hull', '--disable-interactivity')
+# 4. uninstall (--accept-source-agreements: uninstall queries all sources incl.
+# msstore, whose agreement would otherwise cancel under --disable-interactivity)
+$u = Invoke-Native $winget @('uninstall', 'Artalis.Hull', '--accept-source-agreements', '--disable-interactivity')
 Note (($u.Out) -replace '(?m)^', '    ')
 if ($u.Code -ne 0) { Fail "winget uninstall returned $($u.Code)" }
 elseif (Test-Path -LiteralPath $alias) { Fail "hull alias remained after uninstall" }

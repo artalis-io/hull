@@ -55,26 +55,32 @@ package index/bucket).
   freshly-created **standard (non-admin)** user with Developer Mode disabled.
   Scoop is per-user by design, so this is the complete fresh-standard-user
   package proof.
-- **Winget** - the manifest is **validated** (`winget validate`) as that same
-  standard user (the elevated orchestrator resolves `winget.exe` and hands the
-  path down, since a fresh standard user cannot see the package to resolve it),
-  and the **install / invoke / uninstall** run under the runner's own account.
+- **Winget** - `validate` + **install / invoke / uninstall** run under the
+  runner's own account (the Winget gate). A separate, non-gating **standard-user
+  boundary probe** records that a freshly-created standard user cannot run winget
+  at all on the image.
 
-  Winget boundary (precise): Winget's per-user App Installer MSIX is not
-  provisionable for a freshly-created standard user in a `runas` session on the
-  GitHub image (no loaded profile, so no package identity / execution alias), so
-  CI does not prove a Winget *install* under a newly-created standard-user
-  profile. The install path is exercised where App Installer has a valid
-  identity - the runner account. Hull's Winget install is per-user portable scope
-  and requests no elevation; the runner account's actual integrity (the GitHub
-  image runs it **elevated / High**) is recorded in the evidence and is a
-  runner-image property, **not** evidence that Hull requires administrator
-  privileges (Scoop demonstrates the fully non-admin path). The runner account is
-  in the Administrators group, so it is not a true non-admin account and is not
-  described as one.
+  Winget boundary (precise, evidence-backed): on the GitHub image a freshly-
+  created standard user in a `runas` session **cannot execute winget at all** - it
+  has no App Installer package identity / execution alias without a loaded
+  profile, and the raw package binary under `Program Files\WindowsApps\...` is
+  ACL-locked (`Access is denied`). So CI does not - and cannot - prove any Winget
+  operation under a newly-created standard-user profile; the standard-user step is
+  a non-gating probe that documents this. All real Winget operations (validate,
+  install, invoke, uninstall) run where App Installer has a valid identity - the
+  runner account. Hull's Winget install is per-user portable scope and requests no
+  elevation; the runner account's actual integrity (the GitHub image runs it
+  **elevated / High**) is recorded in the evidence and is a runner-image property,
+  **not** evidence that Hull requires administrator privileges (Scoop demonstrates
+  the fully non-admin path). The runner account is in the Administrators group, so
+  it is not a true non-admin account and is not described as one. Installing from
+  a *local, uncommitted* manifest additionally needs the `LocalManifestFiles`
+  admin setting (a test-harness detail; a published Winget package needs no such
+  setting).
 
-The whole job fails unless generator drift-check, manifest validation, hash
-verification, install, invocation, and uninstall all succeed.
+The whole job fails unless the generator drift-check, the Winget manifest
+validation + hash-verified install + invocation + uninstall (runner), and the
+Scoop non-admin install + invocation + uninstall all succeed.
 
 ## Publishing (separate, authorized step - not done here)
 

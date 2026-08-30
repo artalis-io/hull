@@ -4,11 +4,14 @@
   Runs as the runner's own account. Two integrity contexts, by design:
 
   * Fresh STANDARD (non-admin) user, Developer Mode off - the real
-    non-admin proof. Drives: preconditions, Winget manifest VALIDATION, and the
-    full Scoop install / invoke (`hull version`) / uninstall. Scoop is per-user
-    by design, so it is the complete fresh-standard-user package proof.
+    non-admin proof. Drives: preconditions, a Winget standard-user boundary PROBE
+    (non-gating - a fresh standard user cannot execute winget at all on this
+    image; recorded, not asserted), and the full Scoop install / invoke
+    (`hull version`) / uninstall. Scoop is per-user by design, so it is the
+    complete fresh-standard-user package proof.
 
-  * Runner account - drives the Winget install / invoke / uninstall. Winget's
+  * Runner account - drives the Winget validate + install / invoke / uninstall
+    (the Winget gate). Winget's
     per-user App Installer MSIX is not provisionable for a freshly-created
     standard user in a runas session on the GitHub image (no loaded profile /
     package identity), so the install path is exercised where App Installer has a
@@ -133,11 +136,11 @@ Note ("- resolved winget.exe for the validate phase: {0}" -f ($(if ($wingetExe) 
 Note "`n--- PHASE: preconditions (fresh standard user, Dev-Mode off) ---"
 if ((Invoke-AsUser 'preconditions.ps1' @('-Evidence', $Evidence) 'precond') -ne 0) { $rc = 1 }
 
-Note "`n--- PHASE: Winget manifest validation (fresh standard user) ---"
+Note "`n--- PHASE: Winget standard-user boundary probe (non-gating) ---"
 # Pass the space-containing winget.exe path via env (Start-Process -ArgumentList
 # would split it on the space); the standard-user child inherits it.
 $env:HULL_WINGET_EXE = $wingetExe
-if ((Invoke-AsUser 'winget_validate.ps1' @('-ManifestDir', $wingetManifest, '-Evidence', $Evidence) 'wgvalidate') -ne 0) { $rc = 1 }
+if ((Invoke-AsUser 'winget_validate.ps1' @('-ManifestDir', $wingetManifest, '-Evidence', $Evidence) 'wgprobe') -ne 0) { $rc = 1 }
 Remove-Item Env:HULL_WINGET_EXE -ErrorAction SilentlyContinue
 
 Note "`n--- PHASE: Scoop install / invoke / uninstall (fresh standard user) ---"
