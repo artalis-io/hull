@@ -1,0 +1,108 @@
+<#
+  winget_test.ps1 - Winget portable install / invoke (`hull version`) / uninstall
+  from the LOCAL manifest.
+
+  Boundary (see packaging/windows/README.md): winget's per-user App Installer
+  MSIX is not provisionable for a freshly-created standard user in a runas
+  session on the GitHub image, so this phase runs in the RUNNER context, which
+  has valid App Installer package identity. The runner account's integrity is
+  measured and reported in the evidence (a runner-image property, NOT a Hull
+  requirement and NOT evidence Hull needs administrator privileges). The fully
+  non-admin proof is the Scoop phase. This account is in the Administrators group,
+  so it is not characterized as a true non-admin account.
+
+  The manifest URL is the immutable official release asset; read-only w.r.t.
+  releases; nothing is submitted to any index.
+
+  Usage: winget_test.ps1 -ManifestDir <dir> -Evidence <file>
+#>
+[CmdletBinding()]
+param(
+    [Parameter(Mandatory = $true)][string]$ManifestDir,
+    [Parameter(Mandatory = $true)][string]$Evidence,
+    [Parameter(Mandatory = $true)][string]$ExpectVersion
+)
+
+$ErrorActionPreference = 'Stop'
+function Note($m) { Add-Content -Path $Evidence -Value $m; Write-Host $m }
+function Fail($m) { Note ("  FAIL: {0}" -f $m); $script:fail = 1 }
+# Run a native command with file-redirected stdio + a timeout. Avoids the PS7
+# `& native 2>&1` "StandardOutputEncoding is only supported when standard output
+# is redirected" error.
+function Invoke-Native([string]$Exe, [string[]]$CmdArgs, [int]$TimeoutSec = 600) {
+    $o = [System.IO.Path]::GetTempFileName(); $e = [System.IO.Path]::GetTempFileName()
+    try {
+        $p = Start-Process -FilePath $Exe -ArgumentList $CmdArgs -NoNewWindow -PassThru -RedirectStandardOutput $o -RedirectStandardError $e
+        if (-not $p.WaitForExit($TimeoutSec * 1000)) { try { $p.Kill() } catch { }; return @{ Code = $null; Out = ''; TimedOut = $true } }
+        return @{ Code = $p.ExitCode; Out = ((Get-Content -LiteralPath $o -Raw -EA SilentlyContinue) + "`n" + (Get-Content -LiteralPath $e -Raw -EA SilentlyContinue)); TimedOut = $false }
+    } finally { Remove-Item -LiteralPath $o, $e -Force -EA SilentlyContinue }
+}
+$script:fail = 0
+
+Note "## Winget portable install / invoke / uninstall (runner context)"
+$id = [Security.Principal.WindowsIdentity]::GetCurrent()
+# Measure and report the runner's integrity level (whichever it is); do not claim
+# a level. This account is in the Administrators group, so it is not a true
+# non-admin account. The fresh-standard-user proof is the Scoop phase.
+$elevated = ((whoami /groups) -match 'S-1-16-12288')
+$level = if ($elevated) { 'High (elevated)' } else { 'Medium (not elevated)' }
+Note ("- account: {0}; integrity measured: {1}" -f $id.Name, $level)
+Note "- runner context; the integrity above is measured and reported (a runner-image property, not a Hull requirement). Winget-capable accounts have App Installer package identity, which a fresh standard user lacks."
+
+$cmd = Get-Command winget -ErrorAction SilentlyContinue
+if (-not $cmd) { Fail "winget alias not on PATH for the runner account"; Note "WINGET: FAIL"; exit 1 }
+$winget = $cmd.Source
+Note ("- winget: {0}" -f ((Invoke-Native $winget @('--version')).Out.Trim()))
+
+$common = @('--accept-source-agreements', '--accept-package-agreements', '--disable-interactivity')
+
+# Installing from a LOCAL manifest requires the LocalManifestFiles experimental
+# feature, which an administrator enables. The runner account is elevated, so we
+# enable it for the test harness. This is a test-harness action (installing from
+# an uncommitted local manifest), NOT a Hull runtime requirement - a published
+# winget package installs with no such setting.
+$en = Invoke-Native $winget @('settings', '--enable', 'LocalManifestFiles')
+Note (($en.Out) -replace '(?m)^', '    ')
+Note "- enabled LocalManifestFiles (needed only to install from a LOCAL manifest)"
+
+# 1. validate (again, in the runner context)
+$v = Invoke-Native $winget @('validate', '--manifest', $ManifestDir)
+Note (($v.Out) -replace '(?m)^', '    ')
+if ($v.Code -eq 0 -or $v.Out -match 'Manifest validation succeeded') { Note "- OK: winget validate succeeded" } else { Fail "winget validate failed (code $($v.Code))" }
+Note "- NOTE: this schema validation runs under the runner account; it is NOT presented as non-admin evidence (Scoop is the fresh-standard-user proof)."
+
+# 2. install the portable (downloads the pinned asset + verifies the SHA-256)
+$i = Invoke-Native $winget (@('install', '--manifest', $ManifestDir) + $common)
+Note (($i.Out) -replace '(?m)^', '    ')
+if ($i.Code -ne 0) { Fail "winget install returned $($i.Code)" }
+# Enforce hash verification explicitly: winget fails a mismatch, but we also
+# assert the "verified installer hash" evidence so the gate cannot pass silently
+# without it.
+if ($i.Out -match 'verified installer hash') { Note "- OK: winget verified the installer SHA-256 (hash verification enforced)" }
+else { Fail "winget install did not report installer-hash verification" }
+
+# 3. invoke the hull alias directly (the Links dir may postdate this session PATH)
+$alias = Join-Path $env:LOCALAPPDATA 'Microsoft\WinGet\Links\hull.exe'
+if (-not (Test-Path -LiteralPath $alias)) { $alias = Join-Path $env:LOCALAPPDATA 'Microsoft\WinGet\Links\hull.cmd' }
+if (Test-Path -LiteralPath $alias) {
+    $ver = (Invoke-Native $alias @('version')).Out
+    $ver1 = ($ver -split "`n" | Where-Object { $_ -match '\S' } | Select-Object -First 1)
+    Note ("- hull (winget alias) version: {0}" -f $ver1)
+    $m = [regex]::Match($ver1, '([0-9]+\.[0-9]+\.[0-9]+)')
+    if ($m.Success -and $m.Groups[1].Value -eq $ExpectVersion) { Note ("- OK: winget-installed hull is exactly {0}" -f $ExpectVersion) }
+    else { Fail ("winget-installed hull version mismatch: expected {0}, got '{1}'" -f $ExpectVersion, $ver1) }
+} else { Fail "winget did not create a hull alias in the Links dir" }
+
+# 4. uninstall via the same LOCAL manifest (symmetric with install --manifest).
+# A portable installed from a local manifest is not correlated to a source Id, so
+# `uninstall --id` / `list --id` return "No installed package found"; uninstalling
+# by the manifest removes it directly (needs LocalManifestFiles, enabled above).
+$u = Invoke-Native $winget @('uninstall', '--manifest', $ManifestDir, '--accept-source-agreements', '--disable-interactivity')
+Note (($u.Out) -replace '(?m)^', '    ')
+if ($u.Code -ne 0) { Fail "winget uninstall returned $($u.Code)" }
+elseif (Test-Path -LiteralPath $alias) { Fail "hull alias remained after uninstall" }
+else { Note "- OK: winget uninstall removed the hull alias" }
+
+if ($script:fail -ne 0) { Note "WINGET: FAIL"; exit 1 }
+Note "WINGET: OK (validate + install + invoke + uninstall, runner account; integrity recorded above)"
+exit 0
