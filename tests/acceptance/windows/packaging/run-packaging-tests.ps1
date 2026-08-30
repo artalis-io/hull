@@ -8,14 +8,16 @@
     full Scoop install / invoke (`hull version`) / uninstall. Scoop is per-user
     by design, so it is the complete fresh-standard-user package proof.
 
-  * Runner account, NON-ELEVATED (Medium integrity) - drives the Winget
-    install / invoke / uninstall. Winget's per-user App Installer MSIX is not
-    provisionable for a freshly-created standard user in a runas session on the
-    GitHub image (no loaded profile / package identity), so the install path is
-    exercised where App Installer has a valid identity. This is a runner/profile
-    limitation and NOT evidence that Hull needs administrator privileges; the
-    install is per-user and non-elevated. The runner account is in the
-    Administrators group, so it is NOT characterized as a true non-admin account.
+  * Runner account - drives the Winget install / invoke / uninstall. Winget's
+    per-user App Installer MSIX is not provisionable for a freshly-created
+    standard user in a runas session on the GitHub image (no loaded profile /
+    package identity), so the install path is exercised where App Installer has a
+    valid identity. Hull's winget install is per-user portable scope and requests
+    no elevation. The runner account's actual integrity level (the GitHub image
+    runs it elevated / High) is recorded in the evidence: a runner-image property,
+    NOT evidence that Hull needs administrator privileges. The runner account is
+    in the Administrators group, so it is NOT characterized as a true non-admin
+    account.
 
   Read-only w.r.t. GitHub releases (downloads the official hull-cosmo; never
   submits to or mutates a package index / bucket).
@@ -115,11 +117,24 @@ $wingetManifest = Join-Path $WorkDir 'packaging\winget'
 $scoopManifest  = Join-Path $WorkDir 'packaging\scoop\hull.json'
 $rc = 0
 
+# Resolve winget.exe here (the orchestrator can see the DesktopAppInstaller
+# package; a freshly-created standard user cannot) and pass the raw binary path
+# to the standard-user validate phase.
+$wingetExe = ''
+$pkg = Get-AppxPackage -Name Microsoft.DesktopAppInstaller -EA SilentlyContinue | Select-Object -First 1
+if ($pkg) {
+    foreach ($n in @('winget.exe', 'AppInstallerCLI.exe')) {
+        $cand = Join-Path $pkg.InstallLocation $n
+        if (Test-Path -LiteralPath $cand) { $wingetExe = $cand; break }
+    }
+}
+Note ("- resolved winget.exe for the validate phase: {0}" -f ($(if ($wingetExe) { $wingetExe } else { '(none)' })))
+
 Note "`n--- PHASE: preconditions (fresh standard user, Dev-Mode off) ---"
 if ((Invoke-AsUser 'preconditions.ps1' @('-Evidence', $Evidence) 'precond') -ne 0) { $rc = 1 }
 
 Note "`n--- PHASE: Winget manifest validation (fresh standard user) ---"
-if ((Invoke-AsUser 'winget_validate.ps1' @('-ManifestDir', $wingetManifest, '-Evidence', $Evidence) 'wgvalidate') -ne 0) { $rc = 1 }
+if ((Invoke-AsUser 'winget_validate.ps1' @('-ManifestDir', $wingetManifest, '-Evidence', $Evidence, '-WingetExe', $wingetExe) 'wgvalidate') -ne 0) { $rc = 1 }
 
 Note "`n--- PHASE: Scoop install / invoke / uninstall (fresh standard user) ---"
 if ((Invoke-AsUser 'scoop_test.ps1' @('-ScoopManifest', $scoopManifest, '-Evidence', $Evidence) 'scoop') -ne 0) { $rc = 1 }

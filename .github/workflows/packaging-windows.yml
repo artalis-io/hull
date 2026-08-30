@@ -5,9 +5,10 @@ name: Packaging (Windows Winget + Scoop)
 # hull-cosmo hash) and package-form tests. Scoop is exercised install / invoke /
 # uninstall as a fresh standard (non-admin) user; Winget is manifest-validated as
 # that standard user and install / invoke / uninstall under the runner's own
-# non-elevated account (its per-user MSIX is not provisionable for a runas
-# standard user - see packaging/windows/README.md). Read-only with respect to
-# releases; it never submits to microsoft/winget-pkgs or any Scoop bucket.
+# account (its per-user MSIX is not provisionable for a runas standard user; the
+# runner's integrity is recorded in the evidence - see packaging/windows/
+# README.md). Read-only with respect to releases; it never submits to
+# microsoft/winget-pkgs or any Scoop bucket.
 
 on:
   pull_request:
@@ -45,7 +46,7 @@ jobs:
           sh packaging/windows/generate.sh --tag "$tag" --check
 
   windows-packaging:
-    name: Winget + Scoop (Scoop non-admin; Winget validate + non-elevated install)
+    name: Winget + Scoop (Scoop non-admin; Winget validate + runner install)
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4

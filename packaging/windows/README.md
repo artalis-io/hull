@@ -56,19 +56,22 @@ package index/bucket).
   Scoop is per-user by design, so this is the complete fresh-standard-user
   package proof.
 - **Winget** - the manifest is **validated** (`winget validate`) as that same
-  standard user, and the **install / invoke / uninstall** run under the runner's
-  own **non-elevated (Medium integrity)** account.
+  standard user (the elevated orchestrator resolves `winget.exe` and hands the
+  path down, since a fresh standard user cannot see the package to resolve it),
+  and the **install / invoke / uninstall** run under the runner's own account.
 
   Winget boundary (precise): Winget's per-user App Installer MSIX is not
   provisionable for a freshly-created standard user in a `runas` session on the
   GitHub image (no loaded profile, so no package identity / execution alias), so
   CI does not prove a Winget *install* under a newly-created standard-user
   profile. The install path is exercised where App Installer has a valid
-  identity - the runner account, non-elevated. The Winget install is per-user and
-  non-elevated; this is a runner/profile limitation, **not** evidence that Hull
-  requires administrator privileges (Scoop demonstrates the fully non-admin
-  path). The runner account is in the Administrators group, so it is not a true
-  non-admin account and is not described as one.
+  identity - the runner account. Hull's Winget install is per-user portable scope
+  and requests no elevation; the runner account's actual integrity (the GitHub
+  image runs it **elevated / High**) is recorded in the evidence and is a
+  runner-image property, **not** evidence that Hull requires administrator
+  privileges (Scoop demonstrates the fully non-admin path). The runner account is
+  in the Administrators group, so it is not a true non-admin account and is not
+  described as one.
 
 The whole job fails unless generator drift-check, manifest validation, hash
 verification, install, invocation, and uninstall all succeed.

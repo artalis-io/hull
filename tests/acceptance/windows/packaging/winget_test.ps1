@@ -4,12 +4,14 @@
 
   Boundary (see packaging/windows/README.md): winget's per-user App Installer
   MSIX is not provisionable for a freshly-created standard user in a runas
-  session on the GitHub image, so this phase runs under the RUNNER's own,
-  NON-ELEVATED (Medium integrity) account, which has valid App Installer package
-  identity. The install is per-user and non-elevated; this is a runner/profile
-  limitation and NOT evidence that Hull needs administrator privileges. The
-  fresh-standard-user proof is provided by the Scoop phase. This account is in the
-  Administrators group, so it is not characterized as a true non-admin account.
+  session on the GitHub image, so this phase runs under the RUNNER's own account,
+  which has valid App Installer package identity. Hull's winget install is
+  per-user portable scope and requests no elevation. The runner account's actual
+  integrity level (the GitHub image runs it elevated / High) is recorded in the
+  evidence: that is a runner-image property, NOT a Hull requirement, and NOT
+  evidence Hull needs administrator privileges. The fully non-admin proof is the
+  Scoop phase. This account is in the Administrators group, so it is not
+  characterized as a true non-admin account.
 
   The manifest URL is the immutable official release asset; read-only w.r.t.
   releases; nothing is submitted to any index.
@@ -28,10 +30,10 @@ function Fail($m) { Note ("  FAIL: {0}" -f $m); $script:fail = 1 }
 # Run a native command with file-redirected stdio + a timeout. Avoids the PS7
 # `& native 2>&1` "StandardOutputEncoding is only supported when standard output
 # is redirected" error.
-function Invoke-Native([string]$Exe, [string[]]$Args, [int]$TimeoutSec = 600) {
+function Invoke-Native([string]$Exe, [string[]]$CmdArgs, [int]$TimeoutSec = 600) {
     $o = [System.IO.Path]::GetTempFileName(); $e = [System.IO.Path]::GetTempFileName()
     try {
-        $p = Start-Process -FilePath $Exe -ArgumentList $Args -NoNewWindow -PassThru -RedirectStandardOutput $o -RedirectStandardError $e
+        $p = Start-Process -FilePath $Exe -ArgumentList $CmdArgs -NoNewWindow -PassThru -RedirectStandardOutput $o -RedirectStandardError $e
         if (-not $p.WaitForExit($TimeoutSec * 1000)) { try { $p.Kill() } catch { }; return @{ Code = $null; Out = ''; TimedOut = $true } }
         return @{ Code = $p.ExitCode; Out = ((Get-Content -LiteralPath $o -Raw -EA SilentlyContinue) + "`n" + (Get-Content -LiteralPath $e -Raw -EA SilentlyContinue)); TimedOut = $false }
     } finally { Remove-Item -LiteralPath $o, $e -Force -EA SilentlyContinue }

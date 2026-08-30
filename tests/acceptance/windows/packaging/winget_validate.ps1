@@ -10,7 +10,10 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)][string]$ManifestDir,
-    [Parameter(Mandatory = $true)][string]$Evidence
+    [Parameter(Mandatory = $true)][string]$Evidence,
+    # Path to winget.exe, resolved by the elevated orchestrator (a freshly-created
+    # standard user cannot see the DesktopAppInstaller package to resolve it).
+    [string]$WingetExe = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -18,10 +21,10 @@ function Note($m) { Add-Content -Path $Evidence -Value $m; Write-Host $m }
 function Fail($m) { Note ("  FAIL: {0}" -f $m); $script:fail = 1 }
 # File-redirected native invocation (avoids the PS7 `& native 2>&1`
 # "StandardOutputEncoding" error for a packaged binary run outside its alias).
-function Invoke-Native([string]$Exe, [string[]]$Args, [int]$TimeoutSec = 300) {
+function Invoke-Native([string]$Exe, [string[]]$CmdArgs, [int]$TimeoutSec = 300) {
     $o = [System.IO.Path]::GetTempFileName(); $e = [System.IO.Path]::GetTempFileName()
     try {
-        $p = Start-Process -FilePath $Exe -ArgumentList $Args -NoNewWindow -PassThru -RedirectStandardOutput $o -RedirectStandardError $e
+        $p = Start-Process -FilePath $Exe -ArgumentList $CmdArgs -NoNewWindow -PassThru -RedirectStandardOutput $o -RedirectStandardError $e
         if (-not $p.WaitForExit($TimeoutSec * 1000)) { try { $p.Kill() } catch { }; return @{ Code = $null; Out = ''; TimedOut = $true } }
         return @{ Code = $p.ExitCode; Out = ((Get-Content -LiteralPath $o -Raw -EA SilentlyContinue) + "`n" + (Get-Content -LiteralPath $e -Raw -EA SilentlyContinue)); TimedOut = $false }
     } finally { Remove-Item -LiteralPath $o, $e -Force -EA SilentlyContinue }
@@ -30,19 +33,22 @@ $script:fail = 0
 
 Note "## Winget manifest validation (as $(whoami), a true standard user)"
 
-# Register App Installer for this user so winget.exe is present, then resolve the
-# raw package binary (a standard user has no `winget` alias on PATH).
-try { Get-AppxPackage -Name Microsoft.DesktopAppInstaller | ForEach-Object { Add-AppxPackage -DisableDevelopmentMode -Register (Join-Path $_.InstallLocation 'AppXManifest.xml') -EA SilentlyContinue } } catch { }
-$pkg = Get-AppxPackage -Name Microsoft.DesktopAppInstaller | Select-Object -First 1
+# Resolve winget.exe. A freshly-created standard user cannot see the
+# DesktopAppInstaller package, so the elevated orchestrator resolves the raw
+# package binary and passes it in; the standard user then executes it directly.
 $winget = $null
-if ($pkg) {
-    foreach ($n in @('winget.exe', 'AppInstallerCLI.exe')) {
-        $cand = Join-Path $pkg.InstallLocation $n
-        if (Test-Path -LiteralPath $cand) { $winget = $cand; break }
+if ($WingetExe -and (Test-Path -LiteralPath $WingetExe)) { $winget = $WingetExe }
+else {
+    $pkg = Get-AppxPackage -Name Microsoft.DesktopAppInstaller -EA SilentlyContinue | Select-Object -First 1
+    if ($pkg) {
+        foreach ($n in @('winget.exe', 'AppInstallerCLI.exe')) {
+            $cand = Join-Path $pkg.InstallLocation $n
+            if (Test-Path -LiteralPath $cand) { $winget = $cand; break }
+        }
     }
+    if (-not $winget) { $cmd = Get-Command winget -ErrorAction SilentlyContinue; if ($cmd) { $winget = $cmd.Source } }
 }
-if (-not $winget) { $cmd = Get-Command winget -ErrorAction SilentlyContinue; if ($cmd) { $winget = $cmd.Source } }
-if (-not $winget) { Fail "winget.exe not resolvable for the standard user"; Note "WINGET-VALIDATE: FAIL"; exit 1 }
+if (-not $winget) { Fail "winget.exe not resolvable for the standard user (orchestrator passed none)"; Note "WINGET-VALIDATE: FAIL"; exit 1 }
 Note ("- winget.exe: {0}" -f $winget)
 
 $v = Invoke-Native $winget @('validate', '--manifest', $ManifestDir)
