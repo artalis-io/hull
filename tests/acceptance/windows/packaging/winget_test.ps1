@@ -56,6 +56,15 @@ Note ("- winget: {0}" -f ((Invoke-Native $winget @('--version')).Out.Trim()))
 
 $common = @('--accept-source-agreements', '--accept-package-agreements', '--disable-interactivity')
 
+# Installing from a LOCAL manifest requires the LocalManifestFiles experimental
+# feature, which an administrator enables. The runner account is elevated, so we
+# enable it for the test harness. This is a test-harness action (installing from
+# an uncommitted local manifest), NOT a Hull runtime requirement - a published
+# winget package installs with no such setting.
+$en = Invoke-Native $winget @('settings', '--enable', 'LocalManifestFiles')
+Note (($en.Out) -replace '(?m)^', '    ')
+Note "- enabled LocalManifestFiles (needed only to install from a LOCAL manifest)"
+
 # 1. validate (again, in the runner context)
 $v = Invoke-Native $winget @('validate', '--manifest', $ManifestDir)
 Note (($v.Out) -replace '(?m)^', '    ')

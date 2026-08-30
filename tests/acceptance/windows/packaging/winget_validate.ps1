@@ -10,11 +10,13 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)][string]$ManifestDir,
-    [Parameter(Mandatory = $true)][string]$Evidence,
-    # Path to winget.exe, resolved by the elevated orchestrator (a freshly-created
-    # standard user cannot see the DesktopAppInstaller package to resolve it).
-    [string]$WingetExe = ''
+    [Parameter(Mandatory = $true)][string]$Evidence
 )
+# Path to winget.exe, resolved by the elevated orchestrator (a freshly-created
+# standard user cannot see the DesktopAppInstaller package to resolve it). Passed
+# via env, not a positional arg, because the path contains a space (Program
+# Files) that Start-Process -ArgumentList would split.
+$WingetExe = $env:HULL_WINGET_EXE
 
 $ErrorActionPreference = 'Stop'
 function Note($m) { Add-Content -Path $Evidence -Value $m; Write-Host $m }

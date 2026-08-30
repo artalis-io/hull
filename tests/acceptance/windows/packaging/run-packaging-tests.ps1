@@ -134,7 +134,11 @@ Note "`n--- PHASE: preconditions (fresh standard user, Dev-Mode off) ---"
 if ((Invoke-AsUser 'preconditions.ps1' @('-Evidence', $Evidence) 'precond') -ne 0) { $rc = 1 }
 
 Note "`n--- PHASE: Winget manifest validation (fresh standard user) ---"
-if ((Invoke-AsUser 'winget_validate.ps1' @('-ManifestDir', $wingetManifest, '-Evidence', $Evidence, '-WingetExe', $wingetExe) 'wgvalidate') -ne 0) { $rc = 1 }
+# Pass the space-containing winget.exe path via env (Start-Process -ArgumentList
+# would split it on the space); the standard-user child inherits it.
+$env:HULL_WINGET_EXE = $wingetExe
+if ((Invoke-AsUser 'winget_validate.ps1' @('-ManifestDir', $wingetManifest, '-Evidence', $Evidence) 'wgvalidate') -ne 0) { $rc = 1 }
+Remove-Item Env:HULL_WINGET_EXE -ErrorAction SilentlyContinue
 
 Note "`n--- PHASE: Scoop install / invoke / uninstall (fresh standard user) ---"
 if ((Invoke-AsUser 'scoop_test.ps1' @('-ScoopManifest', $scoopManifest, '-Evidence', $Evidence) 'scoop') -ne 0) { $rc = 1 }
