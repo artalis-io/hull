@@ -85,12 +85,11 @@ if (Test-Path -LiteralPath $alias) {
     if ($ver1 -match '[0-9]+\.[0-9]+\.[0-9]+') { Note "- OK: winget-installed hull runs" } else { Fail "winget-installed hull did not report a version" }
 } else { Fail "winget did not create a hull alias in the Links dir" }
 
-# 4. uninstall. Diagnostic first: show how the portable is tracked, then remove
-# it by exact id. --accept-source-agreements: uninstall queries all sources incl.
-# msstore, whose agreement would otherwise cancel under --disable-interactivity.
-$ls = Invoke-Native $winget @('list', '--id', 'Artalis.Hull', '--exact', '--accept-source-agreements', '--disable-interactivity')
-Note (($ls.Out) -replace '(?m)^', '    list> ')
-$u = Invoke-Native $winget @('uninstall', '--id', 'Artalis.Hull', '--exact', '--accept-source-agreements', '--disable-interactivity')
+# 4. uninstall via the same LOCAL manifest (symmetric with install --manifest).
+# A portable installed from a local manifest is not correlated to a source Id, so
+# `uninstall --id` / `list --id` return "No installed package found"; uninstalling
+# by the manifest removes it directly (needs LocalManifestFiles, enabled above).
+$u = Invoke-Native $winget @('uninstall', '--manifest', $ManifestDir, '--disable-interactivity')
 Note (($u.Out) -replace '(?m)^', '    ')
 if ($u.Code -ne 0) { Fail "winget uninstall returned $($u.Code)" }
 elseif (Test-Path -LiteralPath $alias) { Fail "hull alias remained after uninstall" }
