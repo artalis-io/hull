@@ -1,0 +1,57 @@
+name: Installer (Windows, non-admin)
+
+# Installer-specific Windows tests for install.ps1. Runs the test suite as a
+# freshly-created standard (non-admin) user with Developer Mode disabled, under
+# BOTH Windows PowerShell 5.1 and PowerShell 7. Read-only with respect to GitHub
+# releases (downloads the official release only; never publishes or mutates a
+# release, asset, tag, or latest). All logic is checked-in PowerShell.
+#
+# This is the installer's own gate; broad permanent Windows product CI is a
+# separate initiative.
+
+on:
+  pull_request:
+    paths:
+      - install.ps1
+      - tests/acceptance/windows/installer/**
+      - tests/acceptance/windows/preconditions.ps1
+      - .github/workflows/installer-windows.yml
+  push:
+    branches: [main]
+    paths:
+      - install.ps1
+      - tests/acceptance/windows/installer/**
+      - .github/workflows/installer-windows.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  installer:
+    name: install.ps1 (non-admin, PS 5.1 + 7)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+
+      - name: Run installer tests as a standard user
+        shell: pwsh
+        run: |
+          Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force
+          $wd = Join-Path $env:RUNNER_TEMP 'installer'
+          $ev = Join-Path $wd 'windows-installer-evidence.md'
+          & tests/acceptance/windows/installer/run-installer-tests.ps1 `
+            -RepoRoot (Get-Location).Path `
+            -Evidence $ev `
+            -WorkDir $wd
+          $code = $LASTEXITCODE
+          Get-Content $ev | ForEach-Object { Write-Host $_ }
+          Copy-Item $ev "$env:GITHUB_STEP_SUMMARY" -Force
+          if ($code -ne 0) { throw "Windows installer tests FAILED (see evidence report)" }
+
+      - name: Upload evidence report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        with:
+          name: windows-installer-evidence
+          path: ${{ runner.temp }}/installer/windows-installer-evidence.md
