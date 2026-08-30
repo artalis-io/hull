@@ -89,7 +89,7 @@ if (Test-Path -LiteralPath $alias) {
 # A portable installed from a local manifest is not correlated to a source Id, so
 # `uninstall --id` / `list --id` return "No installed package found"; uninstalling
 # by the manifest removes it directly (needs LocalManifestFiles, enabled above).
-$u = Invoke-Native $winget @('uninstall', '--manifest', $ManifestDir, '--disable-interactivity')
+$u = Invoke-Native $winget @('uninstall', '--manifest', $ManifestDir, '--accept-source-agreements', '--disable-interactivity')
 Note (($u.Out) -replace '(?m)^', '    ')
 if ($u.Code -ne 0) { Fail "winget uninstall returned $($u.Code)" }
 elseif (Test-Path -LiteralPath $alias) { Fail "hull alias remained after uninstall" }
