@@ -1221,6 +1221,78 @@ recommended one).
 
 ---
 
+## 4e. Two hardening layers lost in the Keel v2.8.0 -> v3 crossing
+
+Hull historically leaned on two defence-in-depth layers that Keel
+provided at the HTTP-server boundary. Both were **removed by Keel
+v2.8.0**, and Hull inherited the loss when it jumped from a pre-2.8.0
+pin (v2.7.1) straight to v3.0.0. Each was a redundant mprotect-based
+mitigation layered on top of Hull's primary enforcement (the
+`hl_cap_*` capability layer, the kernel sandbox, the §4b sealed
+manifest, and §4c binary hardening), and that primary enforcement is
+unchanged. They are documented here so the reduction is explicit
+rather than silent, and so a future Hull-side re-implementation has a
+recorded starting point.
+
+### Request sealing (`KEEL_SEAL_REQUEST`)
+
+Pre-2.8.0 Keel could snapshot the parsed `KlRequest` into an
+mprotect-read-only page for the duration of handler dispatch, so a
+memory-corruption bug in a handler could not rewrite the method,
+path, or header set out from under code that had already read them.
+Keel v2.8.0 made `KlHttpConn` / `KlHttpRequest` opaque-by-accessor and
+dropped the sealed-snapshot machinery (the `sh_seal_arena` it used is
+no longer vendored by Keel; Hull now vendors its own copy under
+`vendor/sh_seal_arena/` because Hull's `hl_seal_arena`, the §4b
+manifest/VFS sealer, depends on it).
+
+What the loss does **not** weaken: the sealed manifest capability
+grants. `hl_cap_fs_validate` / `hl_cap_http_request` / `hl_cap_env_get`
+check the argument they are actually handed against the §4b sealed
+`fs` / `hosts` / `env` allowlists, so a corrupted request cannot widen
+a capability grant. The allowlists live in the sealed manifest, not
+the request, and the check is on the final argument regardless of
+where it came from.
+
+What the loss **does** weaken, narrowly: application-level decisions
+that read request data. Authentication, authorization, routing, and
+middleware logic branch on the method, path, headers, and cookies. A
+memory-corruption primitive that rewrites the parsed request *in place*
+between the point one of those checks reads it and the point a later
+stage re-reads it could, in principle, slip a request past an auth or
+routing decision. That specific in-place-rewrite window is exactly
+what the removed seal closed; it is a real (if narrow) reduction in
+defence-in-depth against such a primitive. It is not a new way to
+escalate a capability grant, and it requires an independent
+memory-corruption bug to exploit.
+
+A Hull-side re-implementation is possible via the same `hl_seal_arena`
+used for the manifest: value-copy the parsed request into a sealed
+arena at dispatch entry, hand handlers the sealed copy, destroy the
+arena after the response is sent. Tracked as a future enhancement; not
+scheduled.
+
+### Router freeze (`kl_server_freeze`)
+
+Pre-2.8.0 Keel could mprotect the compiled route table read-only once
+registration closed, so the dispatch vtable (a prime ROP/JOP pivot,
+see §4b) could not be overwritten at runtime. Keel v2.8.0 removed the
+public `kl_server_freeze` entry point along with the same opacity
+refactor. Hull still closes registration (`registration_closed = 1`
+in `serve.c`), so no new route can be added after boot, but the table
+is no longer mprotect-sealed.
+
+Residual exposure is bounded by §4b and §4c: Hull's own dispatch and
+capability vtables (`HlRuntimeVtable`, `HlDbBackend`, the command
+table, `luaL_Reg[]` arrays) are `static const` and land in `.rodata`,
+which the linker maps read-only at the same protection level for free.
+Only Keel's *internal* route table lost its explicit freeze. A
+Hull-side equivalent would seal the route table through `hl_seal_arena`
+after `registration_closed`; tracked with the request-seal re-impl
+above.
+
+---
+
 ## 5. What the Manifest Tells You
 
 The manifest is the app's **declared behavior contract**:

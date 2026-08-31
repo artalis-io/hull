@@ -27,8 +27,16 @@ typedef struct HlAsyncCont {
     /*
      * Resume the handler after the async operation completes.
      * For Lua: lua_resume(co, ...). For JS: resolve promise + run jobs.
-     * Must set conn->state to KL_CONN_SENDING (completed),
-     * KL_CONN_SUSPENDED (re-yield), or KL_CONN_CLOSED (error/stream).
+     *
+     * Keel 3.x owns the send: resume runs inside kl_async_complete, which
+     * drives the send (incl. would-block) after this returns. So resume only
+     * FINALIZES the response - it does NOT drive the connection state machine:
+     *   - completed (buffered): build the response on kl_http_conn_response(conn)
+     *     and return; Keel sends it.
+     *   - error: kl_http_conn_response(conn) + build a 5xx; Keel sends it.
+     *   - stream end: kl_http_response_end_stream(kl_http_conn_response(conn)).
+     *   - re-yield: the yielding path re-suspends (kl_async_suspend); the current
+     *     complete then no-ops. resume writes nothing extra.
      *
      * `driver` is the Keel driver result (NULL for sleep, KlHttpClient*
      * for HTTP, etc.).
@@ -78,7 +86,7 @@ typedef struct HlAsyncCont {
 
 typedef struct HlAsyncCtx {
     KlAsyncOp    op;            /* embedded - container_of to get ctx */
-    KlServer    *server;        /* TODO: retire once all consumers route via net_ctx */
+    KlHttpServer    *server;        /* TODO: retire once all consumers route via net_ctx */
     HlNetBackendCtx *net_ctx;   /* borrowed from rt->net_ctx */
 
     /* Keel driver - opaque to the ctx */
@@ -103,7 +111,7 @@ typedef struct HlAsyncCtx {
  * NULL only for connectionless / detached callers; suspend-based
  * paths must pass a real backend ctx.
  */
-HlAsyncCtx *hl_async_ctx_create(KlServer *s, HlNetBackendCtx *net_ctx,
+HlAsyncCtx *hl_async_ctx_create(KlHttpServer *s, HlNetBackendCtx *net_ctx,
                                 HlAllocator *alloc);
 
 /*

@@ -57,8 +57,8 @@ static int js_app_throw_if_serving(JSContext *ctx, const char *call)
  *     iterate parts via req.multipart() (see §1.5.b-2 iterator
  *     bindings). All caps are numbers; 0 or missing = unlimited.
  *     The whole opts.multipart subobject is stashed on the route def
- *     and re-read in routes.c (which allocates the KlMultipartConfig
- *     and registers the route via kl_server_route_streaming).
+ *     and re-read in routes.c (which allocates the KlHttpMultipartConfig
+ *     and registers the route via kl_http_server_route_streaming).
  */
 static JSValue js_app_route(JSContext *ctx, JSValueConst this_val,
                              int argc, JSValueConst *argv, int magic)
@@ -128,7 +128,7 @@ static JSValue js_app_route(JSContext *ctx, JSValueConst this_val,
 
     /* Stash opts.multipart (if a plain object) verbatim on the def.
      * routes.c reads the integer caps off this sub-object when
-     * materializing the KlMultipartConfig. */
+     * materializing the KlHttpMultipartConfig. */
     if (has_opts) {
         JSValue mp = JS_GetPropertyStr(ctx, argv[2], "multipart");
         if (JS_IsObject(mp) && !JS_IsFunction(ctx, mp) && !JS_IsArray(ctx, mp)) {

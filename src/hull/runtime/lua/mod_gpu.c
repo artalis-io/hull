@@ -21,7 +21,7 @@ static int lua_parse_texture_descs(lua_State *L, int tbl_idx,
 #include "hull/utils/alloc.h"
 #endif
 
-#include <keel/server.h>
+#include <keel/http_server.h>
 
 #include <stdlib.h>
 #include <string.h>

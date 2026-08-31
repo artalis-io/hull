@@ -37,7 +37,7 @@ typedef struct HlAsyncBackendCtx  HlAsyncBackendCtx;
 typedef struct HlAsyncBackendPool HlAsyncBackendPool;
 typedef struct HlNetBackendCtx    HlNetBackendCtx;
 typedef struct HlTestCaseResult HlTestCaseResult;
-typedef struct KlRouter KlRouter;
+typedef struct KlHttpRouter KlHttpRouter;
 typedef struct HlFsConfig HlFsConfig;
 typedef struct HlEnvConfig HlEnvConfig;
 typedef struct HlHttpConfig HlHttpConfig;
@@ -50,7 +50,7 @@ typedef struct HlGpuCtx HlGpuCtx;
 typedef struct HlDbHandle HlDbHandle;
 typedef struct HlDbRegistry HlDbRegistry;
 typedef struct HlWsRegistry HlWsRegistry;
-typedef struct KlServer KlServer;
+typedef struct KlHttpServer KlHttpServer;
 typedef struct HlRuntime HlRuntime;
 
 /*
@@ -82,7 +82,7 @@ typedef enum {
 typedef struct HlRuntimeVtable {
     int   (*init)(HlRuntime *rt, const void *config);
     int   (*load_app)(HlRuntime *rt, const char *filename);
-    int   (*wire_routes_server)(HlRuntime *rt, KlServer *server,
+    int   (*wire_routes_server)(HlRuntime *rt, KlHttpServer *server,
                                 void *(*alloc_fn)(size_t));
     int   (*extract_manifest)(HlRuntime *rt, HlManifest *out);
 
@@ -96,7 +96,7 @@ typedef struct HlRuntimeVtable {
      * Called once per runtime by the shared test runner before any
      * test files load. Returns 0 on success, -1 if no app routes
      * were registered (caller should report "no routes"). */
-    int   (*test_setup)(HlRuntime *rt, KlRouter *router);
+    int   (*test_setup)(HlRuntime *rt, KlHttpRouter *router);
 
     /* Run a single test file end-to-end:
      *   1. clear test cases left over from a previous file
@@ -153,7 +153,7 @@ typedef struct HlRuntimeVtable {
      * Returns 0 on success, -1 if main was not registered, or if the
      * function threw / failed to coerce a return value. On failure,
      * exit_code_out is set to 1. */
-    int   (*run_main)(HlRuntime *rt, KlServer *server,
+    int   (*run_main)(HlRuntime *rt, KlHttpServer *server,
                       int argc, char **argv,
                       const char *const *env_allowlist,
                       int *exit_code_out);
@@ -198,15 +198,15 @@ struct HlRuntime {
     const char *import_tracker_names[HL_MANIFEST_MAX_MODULES];
     HlAsyncBackendPool *thread_pool; /* worker pool for async work (NULL if not created) */
     /* HlAsyncBackend context - the event loop primitives layer. In
-     * server-mode builds this is a wrap around the KlServer's
+     * server-mode builds this is a wrap around the KlHttpServer's
      * embedded event ctx; in CLI-mode builds it's an independent
      * loop created via backend->init(). Consumers use the vtable
      * (hl_async_backend()->timer_add(rt->async_ctx, ...)) instead
-     * of touching KlServer / KlEventCtx directly. NULL means async
+     * of touching KlHttpServer / KlEventCtx directly. NULL means async
      * primitives are unavailable on this runtime (rare). */
     HlAsyncBackendCtx *async_ctx;
     /* HlNetBackend context - the HTTP/connection lifecycle layer.
-     * Borrowed from HlServerState (which owns the wrap around KlServer).
+     * Borrowed from HlServerState (which owns the wrap around KlHttpServer).
      * Consumers route connection-bound async-op suspend/complete
      * (hl_net_op_suspend / hl_net_op_complete) through this so they
      * don't need to know about Keel directly. NULL in CLI-mode builds
@@ -230,13 +230,13 @@ struct HlRuntime {
     /* Phase gate for the `app.X` registration bindings (app.get / use /
      * use_post / ws / sse / every / daily).  Set to 1 by serve.c
      * (hl_serve_wire_routes) after the route registry has been flushed
-     * to Keel and before kl_server_freeze.
+     * to Keel and before kl_http_server_freeze.
      *
      * Once set, the bindings throw a structured Lua error / JS exception
      * - "app.X() can only be called at app startup ..." - instead of
      * silently accepting the registration and stashing it in a table
-     * that no consumer reads (the underlying KlRouter is also frozen
-     * post this point, so even if the binding did push, kl_router_add
+     * that no consumer reads (the underlying KlHttpRouter is also frozen
+     * post this point, so even if the binding did push, kl_http_router_add
      * would return -1).
      *
      * Top-level app code, manifest extraction, and app.main(fn) all run

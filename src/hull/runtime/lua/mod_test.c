@@ -16,7 +16,7 @@
 #include "hull/runtime/lua.h"
 #include "hull/utils/alloc.h"
 
-#include <keel/request.h>
+#include <keel/http_request.h>
 
 #include "lua.h"
 #include "lauxlib.h"
@@ -27,10 +27,10 @@
 #define TEST_ROUTER_KEY   "__hull_test_router"
 #define TEST_CASES_KEY    "__hull_test_cases"
 
-static KlRouter *get_test_router(lua_State *L)
+static KlHttpRouter *get_test_router(lua_State *L)
 {
     lua_getfield(L, LUA_REGISTRYINDEX, TEST_ROUTER_KEY);
-    KlRouter *r = (KlRouter *)lua_touserdata(L, -1);
+    KlHttpRouter *r = (KlHttpRouter *)lua_touserdata(L, -1);
     lua_pop(L, 1);
     return r;
 }
@@ -72,7 +72,7 @@ static int l_test_call(lua_State *L)
 static int l_test_http(lua_State *L, const char *method)
 {
     const char *path = luaL_checkstring(L, 1);
-    KlRouter *router = get_test_router(L);
+    KlHttpRouter *router = get_test_router(L);
     HlLua *lua = get_test_lua(L);
 
     if (!router || !lua) {
@@ -315,7 +315,7 @@ static const luaL_Reg test_methods[] = {
     { NULL, NULL }
 };
 
-void hl_lua_test_register(lua_State *L, KlRouter *router, HlLua *lua)
+void hl_lua_test_register(lua_State *L, KlHttpRouter *router, HlLua *lua)
 {
     /* Store router and lua context in registry */
     lua_pushlightuserdata(L, router);

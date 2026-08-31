@@ -24,7 +24,8 @@ static void hl_async_on_resume(KlAsyncOp *op, void *user_data)
     HlAsyncCtx *ctx = (HlAsyncCtx *)user_data;
     (void)op;
 
-    /* Resume the runtime handler - sets conn->state appropriately */
+    /* Resume the runtime handler - it finalizes the response; Keel 3.x drives
+     * the send itself after this returns (see HlAsyncCont.resume). */
     ctx->cont->resume(ctx->cont, ctx->driver);
 
     /* Clean up this async operation (always - even on re-yield,
@@ -55,7 +56,7 @@ static void hl_async_on_cancel(KlAsyncOp *op, void *user_data)
 
 /* ── Public API ───────────────────────────────────────────────────── */
 
-HlAsyncCtx *hl_async_ctx_create(KlServer *s, HlNetBackendCtx *net_ctx,
+HlAsyncCtx *hl_async_ctx_create(KlHttpServer *s, HlNetBackendCtx *net_ctx,
                                 HlAllocator *alloc)
 {
     /* Both may be NULL - detached callers don't need either field;

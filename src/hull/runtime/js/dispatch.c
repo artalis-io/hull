@@ -26,8 +26,8 @@
 #include <string.h>
 
 /* Forward declarations from bindings.c */
-JSValue hl_js_make_request(JSContext *ctx, KlRequest *req);
-JSValue hl_js_make_response(HlJS *js, KlResponse *res);
+JSValue hl_js_make_request(JSContext *ctx, KlHttpRequest *req);
+JSValue hl_js_make_response(HlJS *js, KlHttpResponse *res);
 
 /* From async.c */
 extern void hl_js_async_cont_set_handler_promise(HlAsyncCont *cont,
@@ -37,7 +37,7 @@ extern void hl_js_async_cont_set_handler_promise(HlAsyncCont *cont,
 /* ── Request dispatch ───────────────────────────────────────────────── */
 
 int hl_js_dispatch(HlJS *js, int handler_id,
-                     KlRequest *req, KlResponse *res)
+                     KlHttpRequest *req, KlHttpResponse *res)
 {
     if (!js || !js->ctx || !req || !res)
         return -1;
@@ -53,7 +53,7 @@ int hl_js_dispatch(HlJS *js, int handler_id,
     hl_js_reset_request(js);
 
     /* Set per-request async context (for hull.sleep / http.get access) */
-    js->active_conn = kl_request_conn(req);
+    js->active_conn = kl_http_request_conn(req);
     js->active_req = req;
     js->last_async_cont = NULL;
 
@@ -154,7 +154,7 @@ int hl_js_dispatch(HlJS *js, int handler_id,
     return result;
 }
 
-void hl_js_keel_handler(KlRequest *req, KlResponse *res, void *user_data)
+void hl_js_keel_handler(KlHttpRequest *req, KlHttpResponse *res, void *user_data)
 {
     HlJSRoute *route = (HlJSRoute *)user_data;
     int rc = hl_js_dispatch(route->js, route->handler_id, req, res);
@@ -162,13 +162,13 @@ void hl_js_keel_handler(KlRequest *req, KlResponse *res, void *user_data)
         hl_js_http_error_response(res);
     }
     /* rc == 1: handler suspended - don't write response.
-     * Keel checks conn->state == KL_CONN_SUSPENDED and returns. */
+     * Keel checks conn->state == KL_HTTP_CONN_SUSPENDED and returns. */
 }
 
 /* ── Middleware dispatch ────────────────────────────────────────────── */
 
 int hl_js_dispatch_middleware(HlJS *js, int handler_id,
-                              KlRequest *req, KlResponse *res)
+                              KlHttpRequest *req, KlHttpResponse *res)
 {
     if (!js || !js->ctx || !req || !res)
         return -1;
@@ -256,7 +256,7 @@ int hl_js_dispatch_middleware(HlJS *js, int handler_id,
     return result;
 }
 
-int hl_js_keel_middleware(KlRequest *req, KlResponse *res, void *user_data)
+int hl_js_keel_middleware(KlHttpRequest *req, KlHttpResponse *res, void *user_data)
 {
     HlJSRoute *ctx = (HlJSRoute *)user_data;
     int rc = hl_js_dispatch_middleware(ctx->js, ctx->handler_id, req, res);

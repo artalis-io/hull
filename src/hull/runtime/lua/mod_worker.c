@@ -8,7 +8,7 @@
 #include "hull/shared/async.h"
 #include "hull/net_backend.h"
 
-#include <keel/server.h>
+#include <keel/http_server.h>
 
 #include <stdlib.h>
 #include <string.h>

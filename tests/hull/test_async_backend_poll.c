@@ -8,7 +8,7 @@
  *
  * Adds two pool-specific tests that the keel suite doesn't have -
  * those couldn't run there because keel's thread pool uses Keel's
- * KlServer-rooted pipe for completion delivery and the test fixture
+ * KlHttpServer-rooted pipe for completion delivery and the test fixture
  * doesn't wire one. The poll backend is self-contained.
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later

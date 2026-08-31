@@ -70,8 +70,8 @@ static int lua_app_reject_if_serving(lua_State *L, const char *call)
  *     iterate parts via req:multipart() (see §1.5.b-2 iterator
  *     bindings). All caps are integers; 0 or missing = unlimited.
  *     The whole opts.multipart subtable is stashed on the route def
- *     and re-read in routes.c (which allocates the KlMultipartConfig
- *     and registers the route via kl_server_route_streaming).
+ *     and re-read in routes.c (which allocates the KlHttpMultipartConfig
+ *     and registers the route via kl_http_server_route_streaming).
  */
 static int lua_app_route(lua_State *L, const char *method)
 {
@@ -122,7 +122,7 @@ static int lua_app_route(lua_State *L, const char *method)
 
     /* Stash opts.multipart (if a table) verbatim on the def. routes.c
      * reads the integer caps off this subtable when materializing the
-     * KlMultipartConfig. */
+     * KlHttpMultipartConfig. */
     if (has_opts) {
         lua_getfield(L, 3, "multipart");
         if (lua_istable(L, -1)) {

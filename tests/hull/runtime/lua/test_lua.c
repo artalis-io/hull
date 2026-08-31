@@ -103,7 +103,7 @@ static void cleanup_lua(void)
 }
 
 /* Free HlReqCtx stored on req->ctx by middleware dispatch */
-static void free_lua_req_ctx(KlRequest *req)
+static void free_lua_req_ctx(KlHttpRequest *req)
 {
     if (!req->ctx) return;
     HlReqCtx *rctx = (HlReqCtx *)req->ctx;
@@ -1941,8 +1941,8 @@ UTEST(lua_middleware, dispatch_return_zero_continues)
     lua_pop(lua_rt.L, 3);
 
     /* Dispatch with stub request/response */
-    KlRequest req = {0};
-    KlResponse res = {0};
+    KlHttpRequest req = {0};
+    KlHttpResponse res = {0};
     int result = hl_lua_dispatch_middleware(&lua_rt, handler_id, &req, &res);
     ASSERT_EQ(result, 0);
 
@@ -1965,8 +1965,8 @@ UTEST(lua_middleware, dispatch_return_nonzero_short_circuits)
     int handler_id = (int)lua_tointeger(lua_rt.L, -1);
     lua_pop(lua_rt.L, 3);
 
-    KlRequest req = {0};
-    KlResponse res = {0};
+    KlHttpRequest req = {0};
+    KlHttpResponse res = {0};
     int result = hl_lua_dispatch_middleware(&lua_rt, handler_id, &req, &res);
     ASSERT_EQ(result, 1);
 
@@ -1998,14 +1998,14 @@ UTEST(lua_middleware, wiring_to_server)
         "app.use('GET', '/api/*', function(req, res) return 0 end)\n");
     ASSERT_EQ(rc, LUA_OK);
 
-    /* Create a minimal KlServer to wire into */
-    KlServer server;
-    KlConfig cfg = {
+    /* Create a minimal KlHttpServer to wire into */
+    KlHttpServer server;
+    KlHttpServerConfig cfg = {
         .port = 0,
         .max_connections = 1,
         .alloc = NULL,
     };
-    kl_server_init(&server, &cfg);
+    kl_http_server_init(&server, &cfg);
 
     wiring_alloc_count_lua = 0;
     rc = hl_lua_wire_routes_server(&lua_rt, &server, tracking_alloc_lua);
@@ -2018,7 +2018,7 @@ UTEST(lua_middleware, wiring_to_server)
     for (int i = 0; i < wiring_alloc_count_lua; i++)
         free(wiring_allocs_lua[i]);
 
-    kl_server_free(&server);
+    kl_http_server_free(&server);
     cleanup_lua();
 }
 

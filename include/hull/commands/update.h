@@ -13,7 +13,7 @@
  *   - `--channel=stable|beta`
  *   - `--repo=ORG/NAME`
  *
- * No external dependencies - HTTPS via keel's `KlRedirectClient`, SHA-256
+ * No external dependencies - HTTPS via keel's `KlHttpRedirectClient`, SHA-256
  * via mbedTLS, Ed25519 via TweetNaCl, CA trust via the embedded Mozilla
  * bundle.
  *

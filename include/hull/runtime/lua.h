@@ -17,11 +17,11 @@
 
 /* Forward declarations */
 typedef struct lua_State lua_State;
-typedef struct KlRequest KlRequest;
-typedef struct KlResponse KlResponse;
-typedef struct KlRouter KlRouter;
-typedef struct KlServer KlServer;
-typedef struct KlConn KlConn;
+typedef struct KlHttpRequest KlHttpRequest;
+typedef struct KlHttpResponse KlHttpResponse;
+typedef struct KlHttpRouter KlHttpRouter;
+typedef struct KlHttpServer KlHttpServer;
+typedef struct KlHttpConn KlHttpConn;
 typedef struct KlAsyncOp KlAsyncOp;
 typedef struct SHArena SHArena;
 typedef struct HlToolUnveilCtx HlToolUnveilCtx;
@@ -112,9 +112,9 @@ typedef struct HlLua {
     int         dispatch_depth;
 
     /* Per-request async state (set during dispatch, cleared after) */
-    KlServer   *server;             /* set once during wire_routes_server */
-    KlConn     *active_conn;        /* current connection (per dispatch) */
-    KlRequest  *active_req;         /* current request (for compression check) */
+    KlHttpServer   *server;             /* set once during wire_routes_server */
+    KlHttpConn     *active_conn;        /* current connection (per dispatch) */
+    KlHttpRequest  *active_req;         /* current request (for compression check) */
     int         active_thread_ref;  /* registry ref to coroutine (LUA_NOREF = none) */
     lua_State  *active_co;          /* coroutine state (NULL = none) */
 
@@ -136,7 +136,7 @@ typedef struct HlLua {
     /* CLI mode (app.main) - non-NULL while main's coroutine is alive.
      * When the existing async resume machinery sees the resumed coroutine
      * == cli_main_co and the status is no longer LUA_YIELD, it knows
-     * main has terminated and calls kl_server_stop on `server` so the
+     * main has terminated and calls kl_http_server_stop on `server` so the
      * event loop returns. */
     lua_State  *cli_main_co;
 } HlLua;
@@ -193,12 +193,12 @@ int hl_lua_load_app(HlLua *lua, const char *filename);
  *
  * `handler_id` is the 1-based route index registered during app loading.
  * Creates Lua request/response objects, calls the handler, and
- * marshals the response back to KlResponse.
+ * marshals the response back to KlHttpResponse.
  *
  * Returns 0 on success, -1 on error.
  */
 int hl_lua_dispatch(HlLua *lua, int handler_id,
-                       KlRequest *req, KlResponse *res);
+                       KlHttpRequest *req, KlHttpResponse *res);
 
 /*
  * Destroy the Lua runtime and free all resources.
@@ -232,12 +232,12 @@ void hl_lua_dump_error(HlLua *lua);
 /*
  * Push a Lua table representing the HTTP request onto the stack.
  */
-void hl_lua_make_request(lua_State *L, KlRequest *req);
+void hl_lua_make_request(lua_State *L, KlHttpRequest *req);
 
 /*
  * Push a Lua userdata representing the HTTP response onto the stack.
  */
-void hl_lua_make_response(lua_State *L, KlResponse *res);
+void hl_lua_make_response(lua_State *L, KlHttpResponse *res);
 
 /* ── Route wiring ──────────────────────────────────────────────────── */
 
@@ -247,39 +247,39 @@ void hl_lua_make_response(lua_State *L, KlResponse *res);
  * multipart_config is set when the route was registered with
  *   app.post("/upload", handler, { multipart = {...} })
  * Non-NULL flags this as a streaming route: routes.c uses
- * kl_server_route_streaming_async + the multipart factory shim
- * instead of the regular kl_server_route + buffer factory. Stored as void* so
+ * kl_http_server_route_streaming_async + the multipart factory shim
+ * instead of the regular kl_http_server_route + buffer factory. Stored as void* so
  * this public header doesn't pull in keel's body_reader_multipart.h
- * (the actual type is `KlMultipartConfig *`); freed alongside the
+ * (the actual type is `KlHttpMultipartConfig *`); freed alongside the
  * route in hl_lua_free.
  */
 typedef struct {
     HlLua *lua;
     int    handler_id;
-    void  *multipart_config;  /* (KlMultipartConfig *), NULL = not streaming */
+    void  *multipart_config;  /* (KlHttpMultipartConfig *), NULL = not streaming */
 } HlLuaRoute;
 
 /*
  * Keel handler bridge: dispatches a request to the Lua handler.
  */
-void hl_lua_keel_handler(KlRequest *req, KlResponse *res, void *user_data);
+void hl_lua_keel_handler(KlHttpRequest *req, KlHttpResponse *res, void *user_data);
 
 /*
- * Wire Lua routes from __hull_route_defs into a KlRouter.
+ * Wire Lua routes from __hull_route_defs into a KlHttpRouter.
  * Allocates HlLuaRoute structs using malloc (caller must track).
  *
  * `alloc_fn` is called to allocate per-route context. Pass NULL to use malloc.
  *
  * Returns 0 on success, -1 on error.
  */
-int hl_lua_wire_routes(HlLua *lua, KlRouter *router);
+int hl_lua_wire_routes(HlLua *lua, KlHttpRouter *router);
 
 /*
- * Wire Lua routes into a KlServer (with body reader factory).
+ * Wire Lua routes into a KlHttpServer (with body reader factory).
  * `alloc_fn` allocates per-route context (pass NULL to use malloc).
  * Returns 0 on success, -1 on error.
  */
-int hl_lua_wire_routes_server(HlLua *lua, KlServer *server,
+int hl_lua_wire_routes_server(HlLua *lua, KlHttpServer *server,
                                void *(*alloc_fn)(size_t));
 
 /*
@@ -287,12 +287,12 @@ int hl_lua_wire_routes_server(HlLua *lua, KlServer *server,
  * Returns 0 (continue), positive (short-circuit), or -1 (error).
  */
 int hl_lua_dispatch_middleware(HlLua *lua, int handler_id,
-                               KlRequest *req, KlResponse *res);
+                               KlHttpRequest *req, KlHttpResponse *res);
 
 /*
  * Keel middleware bridge: dispatches a request to the Lua middleware.
  * Returns 0 (continue) or non-zero (short-circuit).
  */
-int hl_lua_keel_middleware(KlRequest *req, KlResponse *res, void *user_data);
+int hl_lua_keel_middleware(KlHttpRequest *req, KlHttpResponse *res, void *user_data);
 
 #endif /* HL_RUNTIME_LUA_H */

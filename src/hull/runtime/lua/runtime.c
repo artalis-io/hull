@@ -29,7 +29,7 @@
 #include "lauxlib.h"
 
 #include <keel/keel.h>
-#include <keel/body_reader_multipart.h>
+#include <keel/http_body_reader_multipart.h>
 #include <keel/websocket_server.h>
 
 #include <sh_arena.h>
@@ -359,7 +359,7 @@ void hl_lua_free(HlLua *lua)
         HlLuaRoute *r = (HlLuaRoute *)lua->routes[i];
         if (r && r->multipart_config) {
             hl_alloc_free(lua->base.alloc, r->multipart_config,
-                          sizeof(KlMultipartConfig));
+                          sizeof(KlHttpMultipartConfig));
         }
         hl_alloc_free(lua->base.alloc, r, sizeof(HlLuaRoute));
     }
@@ -465,14 +465,14 @@ static int vt_lua_load_app(HlRuntime *rt, const char *filename)
 }
 
 #ifdef HL_ENABLE_HTTP_SERVER
-static int vt_lua_wire_routes_server(HlRuntime *rt, KlServer *server,
+static int vt_lua_wire_routes_server(HlRuntime *rt, KlHttpServer *server,
                                       void *(*alloc_fn)(size_t))
 {
     return hl_lua_wire_routes_server((HlLua *)rt, server, alloc_fn);
 }
 #else
 /* CLI-only build placeholder (see vt_js equivalent). */
-static int vt_lua_wire_routes_server(HlRuntime *rt, KlServer *server,
+static int vt_lua_wire_routes_server(HlRuntime *rt, KlHttpServer *server,
                                       void *(*alloc_fn)(size_t))
 {
     (void)rt; (void)server; (void)alloc_fn;
@@ -542,7 +542,7 @@ static void vt_lua_enumerate_middleware(HlRuntime *rt, HlMiddlewareCb cb, void *
 }
 
 #ifdef HL_ENABLE_HTTP_SERVER
-static int vt_lua_test_setup(HlRuntime *rt, KlRouter *router)
+static int vt_lua_test_setup(HlRuntime *rt, KlHttpRouter *router)
 {
     HlLua *lua = (HlLua *)rt;
     if (hl_lua_wire_routes(lua, router) != 0)
@@ -551,7 +551,7 @@ static int vt_lua_test_setup(HlRuntime *rt, KlRouter *router)
     return 0;
 }
 #else
-static int vt_lua_test_setup(HlRuntime *rt, KlRouter *router)
+static int vt_lua_test_setup(HlRuntime *rt, KlHttpRouter *router)
 {
     (void)rt; (void)router;
     return -1;
@@ -781,7 +781,7 @@ static int lua_coerce_exit_code(lua_State *co)
     return 1;
 }
 
-static int vt_lua_run_main(HlRuntime *rt, KlServer *server,
+static int vt_lua_run_main(HlRuntime *rt, KlHttpServer *server,
                             int argc, char **argv,
                             const char *const *env_allowlist,
                             int *exit_code_out)
@@ -846,7 +846,7 @@ static int vt_lua_run_main(HlRuntime *rt, KlServer *server,
 
     /* Set active state so async ops see the right coroutine/conn. */
     lua_State *saved_co       = lua->active_co;
-    KlConn   *saved_conn      = lua->active_conn;
+    KlHttpConn   *saved_conn      = lua->active_conn;
     int       saved_thread_ref = lua->active_thread_ref;
     int       saved_depth      = lua->dispatch_depth;
 
@@ -877,7 +877,7 @@ static int vt_lua_run_main(HlRuntime *rt, KlServer *server,
         }
 
         /* Drive the event loop via the async backend vtable. On HTTP=1
-         * builds this is a wrap around KlServer's KlEventCtx (same loop
+         * builds this is a wrap around KlHttpServer's KlEventCtx (same loop
          * the HTTP server uses); on HTTP=0 it's the poll backend's
          * standalone loop. hl_lua_async_resume calls backend->stop when
          * main terminates, which returns us here. */

@@ -10,18 +10,18 @@
 #include "hull/agent_api.h"
 #include "hull/agent_lib.h"
 
-#include <keel/server.h>
-#include <keel/request.h>
-#include <keel/response.h>
+#include <keel/http_server.h>
+#include <keel/http_request.h>
+#include <keel/http_response.h>
 
 #include <string.h>
 
 /* ── Middleware handler ─────────────────────────────────────────────── */
 
-static int agent_api_middleware(KlRequest *req, KlResponse *res, void *user_data)
+static int agent_api_middleware(KlHttpRequest *req, KlHttpResponse *res, void *user_data)
 {
     HlAgentApiCtx *ctx = (HlAgentApiCtx *)user_data;
-    const char *path = kl_request_path(req);
+    const char *path = req->path;
 
     /* Strip /_hull/agent/ prefix */
     static const char prefix[] = "/_hull/agent/";
@@ -52,19 +52,19 @@ static int agent_api_middleware(KlRequest *req, KlResponse *res, void *user_data
         return 0; /* not our endpoint, continue */
     }
 
-    kl_response_status(res, 200);
-    kl_response_header(res, "Content-Type", "application/json");
+    kl_http_response_status(res, 200);
+    kl_http_response_header(res, "Content-Type", "application/json");
     if (out.buf)
-        kl_response_body_copy(res, out.buf, out.len);
+        kl_http_response_body_copy(res, out.buf, out.len);
     sh_json_buf_free(&out);
     return 1; /* short-circuit */
 }
 
 /* ── Public API ────────────────────────────────────────────────────── */
 
-int hl_agent_api_register(KlServer *server, HlAgentApiCtx *ctx)
+int hl_agent_api_register(KlHttpServer *server, HlAgentApiCtx *ctx)
 {
-    kl_server_use(server, "GET", "/_hull/agent/*",
+    kl_http_server_use(server, "GET", "/_hull/agent/*",
                   agent_api_middleware, ctx);
     return 0;
 }

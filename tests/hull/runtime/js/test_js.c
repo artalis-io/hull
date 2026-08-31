@@ -120,7 +120,7 @@ static void cleanup_js(void)
 }
 
 /* Free HlReqCtx stored on req->ctx by middleware dispatch */
-static void free_req_ctx(KlRequest *req)
+static void free_req_ctx(KlHttpRequest *req)
 {
     if (!req->ctx) return;
     HlReqCtx *rctx = (HlReqCtx *)req->ctx;
@@ -1686,8 +1686,8 @@ UTEST(js_middleware, dispatch_return_zero_continues)
 
     int handler_id = eval_int("globalThis.__hull_middleware[0].handler_id");
 
-    KlRequest req = {0};
-    KlResponse res = {0};
+    KlHttpRequest req = {0};
+    KlHttpResponse res = {0};
     int result = hl_js_dispatch_middleware(&js, handler_id, &req, &res);
     ASSERT_EQ(result, 0);
 
@@ -1714,8 +1714,8 @@ UTEST(js_middleware, dispatch_return_nonzero_short_circuits)
 
     int handler_id = eval_int("globalThis.__hull_middleware[0].handler_id");
 
-    KlRequest req = {0};
-    KlResponse res = {0};
+    KlHttpRequest req = {0};
+    KlHttpResponse res = {0};
     int result = hl_js_dispatch_middleware(&js, handler_id, &req, &res);
     ASSERT_EQ(result, 1);
 
@@ -1754,13 +1754,13 @@ UTEST(js_middleware, wiring_to_server)
     JS_FreeValue(js.ctx, val);
     hl_js_run_jobs(&js);
 
-    KlServer server;
-    KlConfig cfg = {
+    KlHttpServer server;
+    KlHttpServerConfig cfg = {
         .port = 0,
         .max_connections = 1,
         .alloc = NULL,
     };
-    kl_server_init(&server, &cfg);
+    kl_http_server_init(&server, &cfg);
 
     wiring_alloc_count_js = 0;
     int rc = hl_js_wire_routes_server(&js, &server, tracking_alloc_js);
@@ -1773,7 +1773,7 @@ UTEST(js_middleware, wiring_to_server)
     for (int i = 0; i < wiring_alloc_count_js; i++)
         free(wiring_allocs_js[i]);
 
-    kl_server_free(&server);
+    kl_http_server_free(&server);
     cleanup_js();
 }
 
@@ -4118,9 +4118,9 @@ UTEST(js_runtime, import_image_is_a_real_hull_module)
 UTEST(js_test_runner, sync_passing_test_marked_pass)
 {
     init_js();
-    KlRouter router;
+    KlHttpRouter router;
     KlAllocator alloc = kl_allocator_default();
-    kl_router_init(&router, &alloc);
+    kl_http_router_init(&router, &alloc);
     hl_js_test_register(js.ctx, &router, &js);
 
     /* Sync test that returns undefined - should PASS. */
@@ -4137,16 +4137,16 @@ UTEST(js_test_runner, sync_passing_test_marked_pass)
     ASSERT_EQ(failed, 0);
     ASSERT_TRUE(results[0].passed);
 
-    kl_router_free(&router);
+    kl_http_router_free(&router);
     cleanup_js();
 }
 
 UTEST(js_test_runner, sync_throwing_test_marked_fail)
 {
     init_js();
-    KlRouter router;
+    KlHttpRouter router;
     KlAllocator alloc = kl_allocator_default();
-    kl_router_init(&router, &alloc);
+    kl_http_router_init(&router, &alloc);
     hl_js_test_register(js.ctx, &router, &js);
 
     /* Sync test that throws - should FAIL with the message. */
@@ -4165,16 +4165,16 @@ UTEST(js_test_runner, sync_throwing_test_marked_fail)
     ASSERT_FALSE(results[0].passed);
     ASSERT_NE(strstr(results[0].error, "boom"), NULL);
 
-    kl_router_free(&router);
+    kl_http_router_free(&router);
     cleanup_js();
 }
 
 UTEST(js_test_runner, async_resolving_test_marked_pass)
 {
     init_js();
-    KlRouter router;
+    KlHttpRouter router;
     KlAllocator alloc = kl_allocator_default();
-    kl_router_init(&router, &alloc);
+    kl_http_router_init(&router, &alloc);
     hl_js_test_register(js.ctx, &router, &js);
 
     /* Async test that resolves cleanly - should PASS once the
@@ -4193,7 +4193,7 @@ UTEST(js_test_runner, async_resolving_test_marked_pass)
     ASSERT_EQ(failed, 0);
     ASSERT_TRUE(results[0].passed);
 
-    kl_router_free(&router);
+    kl_http_router_free(&router);
     cleanup_js();
 }
 
@@ -4203,9 +4203,9 @@ UTEST(js_test_runner, async_rejecting_test_fails)
      * because JS_Call returned the (rejecting) Promise as a
      * non-exception value and the runner never awaited it. */
     init_js();
-    KlRouter router;
+    KlHttpRouter router;
     KlAllocator alloc = kl_allocator_default();
-    kl_router_init(&router, &alloc);
+    kl_http_router_init(&router, &alloc);
     hl_js_test_register(js.ctx, &router, &js);
 
     const char *src =
@@ -4224,7 +4224,7 @@ UTEST(js_test_runner, async_rejecting_test_fails)
     ASSERT_FALSE(results[0].passed);
     ASSERT_NE(strstr(results[0].error, "assert failed"), NULL);
 
-    kl_router_free(&router);
+    kl_http_router_free(&router);
     cleanup_js();
 }
 
@@ -4234,9 +4234,9 @@ UTEST(js_test_runner, mixed_results_in_one_file)
      * must aggregate totals correctly and not let one async failure
      * mask later results. */
     init_js();
-    KlRouter router;
+    KlHttpRouter router;
     KlAllocator alloc = kl_allocator_default();
-    kl_router_init(&router, &alloc);
+    kl_http_router_init(&router, &alloc);
     hl_js_test_register(js.ctx, &router, &js);
 
     const char *src =
@@ -4262,7 +4262,7 @@ UTEST(js_test_runner, mixed_results_in_one_file)
     ASSERT_NE(strstr(results[1].error, "sync"),  NULL);
     ASSERT_NE(strstr(results[3].error, "async"), NULL);
 
-    kl_router_free(&router);
+    kl_http_router_free(&router);
     cleanup_js();
 }
 

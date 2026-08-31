@@ -1,7 +1,7 @@
 /*
  * cap/http.h - HTTP client capability with host allowlist
  *
- * Thin wrapper around Keel's HTTP client (keel/client.h) that adds
+ * Thin wrapper around Keel's HTTP client (keel/http_client.h) that adds
  * host allowlist checking and audit logging.
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
@@ -10,13 +10,13 @@
 #ifndef HL_CAP_HTTP_H
 #define HL_CAP_HTTP_H
 
-#include <keel/client.h>
+#include <keel/http_client.h>
 
 /* Forward declarations for optional modules */
-typedef struct KlClientPool KlClientPool;
+typedef struct KlHttpClientPool KlHttpClientPool;
 
 /* Backward-compatible typedef - Hull code uses HlHttpHeader for request headers */
-typedef KlClientHeader HlHttpHeader;
+typedef KlHttpClientHeader HlHttpHeader;
 
 /**
  * @brief HTTP client configuration.
@@ -27,7 +27,7 @@ typedef struct HlHttpConfig {
     int              timeout_ms;       /**< Connect/send/recv timeout (default: 30000) */
     size_t           max_response_size;/**< Max response body bytes (default: 4 MB) */
     KlTlsConfig     *tls;             /**< KlTlsConfig* for HTTPS - NULL = no HTTPS */
-    KlClientPool    *pool;             /**< Connection pool (NULL = no pooling) */
+    KlHttpClientPool    *pool;             /**< Connection pool (NULL = no pooling) */
     int              follow_redirects; /**< 1 = follow 3xx redirects (default) */
     int              max_redirects;    /**< Max redirect hops (0 = Keel default 10) */
     KlDecompressConfig *decompress;    /**< Response decompression (NULL = disabled) */
@@ -36,7 +36,7 @@ typedef struct HlHttpConfig {
 /**
  * @brief Perform a synchronous HTTP request.
  *
- * Checks host allowlist, audits, then delegates to kl_client_request().
+ * Checks host allowlist, audits, then delegates to kl_http_client_request().
  * Blocks until the response is received, an error occurs, or timeout.
  *
  * @param cfg      HTTP client configuration (host allowlist, timeouts, TLS).
@@ -46,14 +46,14 @@ typedef struct HlHttpConfig {
  * @param num_headers Number of request headers.
  * @param body     Request body (may be NULL).
  * @param body_len Request body length.
- * @param resp     Output: populated on success. Caller must call kl_client_response_free().
+ * @param resp     Output: populated on success. Caller must call kl_http_client_response_free().
  * @return 0 on success, -1 on error.
  */
 int hl_cap_http_request(const HlHttpConfig *cfg,
                         const char *method, const char *url,
                         const HlHttpHeader *headers, int num_headers,
                         const char *body, size_t body_len,
-                        KlClientResponse *resp);
+                        KlHttpClientResponse *resp);
 
 /* ── Internal helpers (exposed for unit testing) ─────────────────── */
 

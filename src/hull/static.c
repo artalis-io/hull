@@ -2,10 +2,10 @@
  * static.c - Static file serving middleware for Hull
  *
  * Serves files from the /static/ prefix. Build mode uses embedded entries
- * via kl_response_body_borrow (zero-copy pointer to the binary's data
+ * via kl_http_response_body_borrow (zero-copy pointer to the binary's data
  * segment); dev mode reads from the filesystem into a heap buffer and
- * uses kl_response_body_copy. The previous dev-mode implementation used
- * kl_response_file() which dispatched to sendfile(2) - on macOS that's
+ * uses kl_http_response_body_copy. The previous dev-mode implementation used
+ * kl_http_response_file() which dispatched to sendfile(2) - on macOS that's
  * classified as network-outbound by Seatbelt and broke under the
  * default-deny profile for any app without a manifest.hosts allowlist.
  *
@@ -14,8 +14,8 @@
 
 #include "hull/static.h"
 
-#include <keel/request.h>
-#include <keel/response.h>
+#include <keel/http_request.h>
+#include <keel/http_response.h>
 
 #include <fcntl.h>
 #include <stdio.h>
@@ -127,10 +127,10 @@ static int format_etag_file(char *buf, size_t cap, time_t mtime, off_t size)
                     (unsigned long)mtime, (unsigned long long)size);
 }
 
-static int etag_matches(const KlRequest *req, const char *etag, size_t etag_len)
+static int etag_matches(const KlHttpRequest *req, const char *etag, size_t etag_len)
 {
     size_t inm_len = 0;
-    const char *inm = kl_request_header_len(req, "If-None-Match", &inm_len);
+    const char *inm = kl_http_request_header_len(req, "If-None-Match", &inm_len);
     if (!inm || inm_len != etag_len)
         return 0;
     return memcmp(inm, etag, etag_len) == 0;
@@ -138,7 +138,7 @@ static int etag_matches(const KlRequest *req, const char *etag, size_t etag_len)
 
 /* ── Middleware entry point ────────────────────────────────────────── */
 
-int hl_static_middleware(KlRequest *req, KlResponse *res, void *user_data)
+int hl_static_middleware(KlHttpRequest *req, KlHttpResponse *res, void *user_data)
 {
     const HlStaticCtx *ctx = (const HlStaticCtx *)user_data;
 
@@ -146,16 +146,16 @@ int hl_static_middleware(KlRequest *req, KlResponse *res, void *user_data)
      * GET-registered middleware (per RFC 7230 §4.3.2); Keel itself
      * drops the response body on HEAD so we can respond identically
      * to a GET without special-casing here. */
-    const char *m = kl_request_method(req);
-    size_t      mlen = kl_request_method_len(req);
+    const char *m = req->method;
+    size_t      mlen = req->method_len;
     int is_get  = mlen == 3 && memcmp(m, "GET",  3) == 0;
     int is_head = mlen == 4 && memcmp(m, "HEAD", 4) == 0;
     if (!is_get && !is_head)
         return 0;
 
     /* Must start with /static/ (8 chars minimum + at least 1 char filename) */
-    const char *path = kl_request_path(req);
-    size_t      plen = kl_request_path_len(req);
+    const char *path = req->path;
+    size_t      plen = req->path_len;
     if (plen < 9 || memcmp(path, "/static/", 8) != 0)
         return 0;
 
@@ -183,18 +183,18 @@ int hl_static_middleware(KlRequest *req, KlResponse *res, void *user_data)
         char etag[64];
         int elen = format_etag_embedded(etag, sizeof(etag), e->len);
         if (elen > 0 && etag_matches(req, etag, (size_t)elen)) {
-            kl_response_status(res, 304);
-            kl_response_header(res, "ETag", etag);
-            kl_response_body_borrow(res, NULL, 0);
+            kl_http_response_status(res, 304);
+            kl_http_response_header(res, "ETag", etag);
+            kl_http_response_body_borrow(res, NULL, 0);
             return 1;
         }
 
-        kl_response_status(res, 200);
-        kl_response_header(res, "Content-Type", mime);
-        kl_response_header(res, "Cache-Control", "public, max-age=86400");
+        kl_http_response_status(res, 200);
+        kl_http_response_header(res, "Content-Type", mime);
+        kl_http_response_header(res, "Cache-Control", "public, max-age=86400");
         if (elen > 0)
-            kl_response_header(res, "ETag", etag);
-        kl_response_body_borrow(res, (const char *)e->data, e->len);
+            kl_http_response_header(res, "ETag", etag);
+        kl_http_response_body_borrow(res, (const char *)e->data, e->len);
         return 1;
     }
 
@@ -209,20 +209,20 @@ int hl_static_middleware(KlRequest *req, KlResponse *res, void *user_data)
             char etag[64];
             int elen = format_etag_embedded(etag, sizeof(etag), se->len);
             if (elen > 0 && etag_matches(req, etag, (size_t)elen)) {
-                kl_response_status(res, 304);
-                kl_response_header(res, "ETag", etag);
-                kl_response_body_borrow(res, NULL, 0);
+                kl_http_response_status(res, 304);
+                kl_http_response_header(res, "ETag", etag);
+                kl_http_response_body_borrow(res, NULL, 0);
                 return 1;
             }
 
-            kl_response_status(res, 200);
-            kl_response_header(res, "Content-Type", mime);
+            kl_http_response_status(res, 200);
+            kl_http_response_header(res, "Content-Type", mime);
             /* Stdlib assets are version-pinned by the hull binary's
              * identity; aggressive caching is safe. */
-            kl_response_header(res, "Cache-Control", "public, max-age=86400");
+            kl_http_response_header(res, "Cache-Control", "public, max-age=86400");
             if (elen > 0)
-                kl_response_header(res, "ETag", etag);
-            kl_response_body_borrow(res, (const char *)se->data, se->len);
+                kl_http_response_header(res, "ETag", etag);
+            kl_http_response_body_borrow(res, (const char *)se->data, se->len);
             return 1;
         }
     }
@@ -249,22 +249,22 @@ int hl_static_middleware(KlRequest *req, KlResponse *res, void *user_data)
         int elen = format_etag_file(etag, sizeof(etag), st.st_mtime, st.st_size);
         if (elen > 0 && etag_matches(req, etag, (size_t)elen)) {
             close(fd);
-            kl_response_status(res, 304);
-            kl_response_header(res, "ETag", etag);
-            kl_response_body_borrow(res, NULL, 0);
+            kl_http_response_status(res, 304);
+            kl_http_response_header(res, "ETag", etag);
+            kl_http_response_body_borrow(res, NULL, 0);
             return 1;
         }
 
         /* Read the file into a heap buffer and hand it to Keel via
-         * kl_response_body_copy(). The previous implementation passed
-         * the fd to kl_response_file() which dispatched to sendfile(2).
+         * kl_http_response_body_copy(). The previous implementation passed
+         * the fd to kl_http_response_file() which dispatched to sendfile(2).
          * On macOS, sendfile() to an already-accepted inbound socket
          * is classified by Seatbelt as network-outbound - so an app
          * with no manifest.hosts (which leaves network-outbound off by
          * design) silently failed: headers went out via write() but
          * the body never appeared on the wire. read() + copy avoids
          * the sendfile classification entirely. Production builds use
-         * the embedded VFS via kl_response_body_borrow() above, so
+         * the embedded VFS via kl_http_response_body_borrow() above, so
          * this cost is dev-mode only. */
         if (st.st_size <= 0 || st.st_size > HL_STATIC_DEV_MAX_BYTES) {
             close(fd);
@@ -285,12 +285,12 @@ int hl_static_middleware(KlRequest *req, KlResponse *res, void *user_data)
         close(fd);
         if (got != st.st_size) { free(buf); return 0; }
 
-        kl_response_status(res, 200);
-        kl_response_header(res, "Content-Type", mime);
-        kl_response_header(res, "Cache-Control", "no-cache");
+        kl_http_response_status(res, 200);
+        kl_http_response_header(res, "Content-Type", mime);
+        kl_http_response_header(res, "Cache-Control", "no-cache");
         if (elen > 0)
-            kl_response_header(res, "ETag", etag);
-        kl_response_body_copy(res, buf, (size_t)st.st_size);
+            kl_http_response_header(res, "ETag", etag);
+        kl_http_response_body_copy(res, buf, (size_t)st.st_size);
         free(buf);  /* Keel made its own copy */
         return 1;
     }

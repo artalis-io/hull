@@ -16,7 +16,7 @@
 #ifndef HL_AGENT_API_H
 #define HL_AGENT_API_H
 
-#include <keel/server.h>
+#include <keel/http_server.h>
 
 /* Context passed to the middleware */
 typedef struct {
@@ -28,6 +28,6 @@ typedef struct {
  * Register /_hull/agent/ routes on the server.
  * Call from main.c when --agent-api flag is set.
  */
-int hl_agent_api_register(KlServer *server, HlAgentApiCtx *ctx);
+int hl_agent_api_register(KlHttpServer *server, HlAgentApiCtx *ctx);
 
 #endif /* HL_AGENT_API_H */

@@ -19,11 +19,11 @@
 /* Forward declarations */
 typedef struct JSRuntime JSRuntime;
 typedef struct JSContext JSContext;
-typedef struct KlRequest KlRequest;
-typedef struct KlResponse KlResponse;
-typedef struct KlRouter KlRouter;
-typedef struct KlServer KlServer;
-typedef struct KlConn KlConn;
+typedef struct KlHttpRequest KlHttpRequest;
+typedef struct KlHttpResponse KlHttpResponse;
+typedef struct KlHttpRouter KlHttpRouter;
+typedef struct KlHttpServer KlHttpServer;
+typedef struct KlHttpConn KlHttpConn;
 typedef struct KlAsyncOp KlAsyncOp;
 typedef struct SHArena SHArena;
 typedef struct HlAsyncCtx HlAsyncCtx;
@@ -130,9 +130,9 @@ typedef struct HlJS {
     int             dispatch_depth;
 
     /* Per-request async state (set during dispatch, cleared after) */
-    KlServer       *server;          /* set once during wire_routes_server */
-    KlConn         *active_conn;     /* current connection (per dispatch) */
-    KlRequest      *active_req;      /* current request (for compression check) */
+    KlHttpServer       *server;          /* set once during wire_routes_server */
+    KlHttpConn         *active_conn;     /* current connection (per dispatch) */
+    KlHttpRequest      *active_req;      /* current request (for compression check) */
     int             async_pending;   /* 1 = handler returned pending Promise */
     void           *last_async_cont; /* last-created HlJsAsyncCont (for handler_promise wiring) */
 
@@ -154,7 +154,7 @@ typedef struct HlJS {
     /* CLI mode (app.main) - tracks main's eventual completion when it
      * returns a pending Promise. Set in vt_js_run_main; the C-side
      * .then callbacks attached to main's Promise stash the resolved
-     * value here and call kl_server_stop. cli_main_value points at a
+     * value here and call kl_http_server_stop. cli_main_value points at a
      * heap-allocated JSValue (opaque to this header to avoid pulling
      * in quickjs.h here); owned by the runtime - freed in run_main. */
     int             cli_main_active;     /* 1 = waiting on main's Promise */
@@ -191,12 +191,12 @@ int hl_js_load_app(HlJS *js, const char *filename);
  *
  * `handler_id` is the route index registered during app loading.
  * Creates JS request/response objects, calls the handler, and
- * marshals the response back to KlResponse.
+ * marshals the response back to KlHttpResponse.
  *
  * Returns 0 on success, -1 on error.
  */
 int hl_js_dispatch(HlJS *js, int handler_id,
-                     KlRequest *req, KlResponse *res);
+                     KlHttpRequest *req, KlHttpResponse *res);
 
 /*
  * Run pending microtasks / jobs (e.g. from app.spawn()).
@@ -253,35 +253,35 @@ void hl_js_dump_error(HlJS *js);
  * multipart_config is set when the route was registered with
  *   app.post("/upload", handler, { multipart: {...} })
  * Non-NULL flags this as a streaming route: routes.c uses
- * kl_server_route_streaming_async + the multipart factory shim
- * instead of the regular kl_server_route + buffer factory. Stored as void* so
+ * kl_http_server_route_streaming_async + the multipart factory shim
+ * instead of the regular kl_http_server_route + buffer factory. Stored as void* so
  * this public header doesn't pull in keel's body_reader_multipart.h
- * (the actual type is `KlMultipartConfig *`); freed alongside the
+ * (the actual type is `KlHttpMultipartConfig *`); freed alongside the
  * route in hl_js_free.
  */
 typedef struct {
     HlJS *js;
     int   handler_id;
-    void *multipart_config;  /* (KlMultipartConfig *), NULL = not streaming */
+    void *multipart_config;  /* (KlHttpMultipartConfig *), NULL = not streaming */
 } HlJSRoute;
 
 /*
  * Keel handler bridge: dispatches a request to the JS handler.
  */
-void hl_js_keel_handler(KlRequest *req, KlResponse *res, void *user_data);
+void hl_js_keel_handler(KlHttpRequest *req, KlHttpResponse *res, void *user_data);
 
 /*
- * Wire JS routes from __hull_route_defs into a KlRouter.
+ * Wire JS routes from __hull_route_defs into a KlHttpRouter.
  * Returns 0 on success, -1 on error.
  */
-int hl_js_wire_routes(HlJS *js, KlRouter *router);
+int hl_js_wire_routes(HlJS *js, KlHttpRouter *router);
 
 /*
- * Wire JS routes into a KlServer (with body reader factory).
+ * Wire JS routes into a KlHttpServer (with body reader factory).
  * `alloc_fn` allocates per-route context (pass NULL to use malloc).
  * Returns 0 on success, -1 on error.
  */
-int hl_js_wire_routes_server(HlJS *js, KlServer *server,
+int hl_js_wire_routes_server(HlJS *js, KlHttpServer *server,
                               void *(*alloc_fn)(size_t));
 
 /*
@@ -289,13 +289,13 @@ int hl_js_wire_routes_server(HlJS *js, KlServer *server,
  * Returns 0 (continue), positive (short-circuit), or -1 (error).
  */
 int hl_js_dispatch_middleware(HlJS *js, int handler_id,
-                              KlRequest *req, KlResponse *res);
+                              KlHttpRequest *req, KlHttpResponse *res);
 
 /*
  * Keel middleware bridge: dispatches a request to the JS middleware.
  * Returns 0 (continue) or non-zero (short-circuit).
  */
-int hl_js_keel_middleware(KlRequest *req, KlResponse *res, void *user_data);
+int hl_js_keel_middleware(KlHttpRequest *req, KlHttpResponse *res, void *user_data);
 
 /* ── Worker dispatch ────────────────────────────────────────────────── */
 

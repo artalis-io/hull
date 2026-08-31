@@ -4,7 +4,7 @@
  *
  * `hull_serve` orchestrates the full app load → manifest extract →
  * sandbox → module-resolve → migrations → dispatch sequence. Whether
- * dispatch ends in `kl_server_run` (server mode) or `run_main` (CLI
+ * dispatch ends in `kl_http_server_run` (server mode) or `run_main` (CLI
  * mode) is decided after manifest extraction based on whether the
  * loaded app registered `app.main` or HTTP routes.
  *

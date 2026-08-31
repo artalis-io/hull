@@ -3,7 +3,7 @@
  *
  * Reads the route/middleware/timer/ws/sse definition arrays that
  * `app.<verb>()` builds on globalThis and registers them with Keel
- * (KlRouter or KlServer). Also hosts the tracked-allocation helpers
+ * (KlHttpRouter or KlHttpServer). Also hosts the tracked-allocation helpers
  * used by every wire step so we can free per-route contexts on
  * shutdown without leaking.
  *
@@ -18,7 +18,7 @@
 #include "hull/cap/ws.h"
 
 #include <keel/keel.h>
-#include <keel/body_reader_multipart.h>
+#include <keel/http_body_reader_multipart.h>
 #include <keel/websocket_server.h>
 
 #include "log.h"
@@ -74,12 +74,12 @@ int hl_js_track_alloc(HlJS *js, void ***arr, size_t *count,
 
 /* Defined below; forward-declared so the router (test-harness) wiring can
  * register streaming-multipart routes the same way the server wiring does. */
-static KlMultipartConfig *js_build_multipart_config(HlJS *js, JSValueConst mp);
-static KlBodyReader *hl_js_multipart_factory(KlAllocator *alloc,
-                                             const KlRequest *req,
+static KlHttpMultipartConfig *js_build_multipart_config(HlJS *js, JSValueConst mp);
+static KlHttpBodyReader *hl_js_multipart_factory(KlAllocator *alloc,
+                                             const KlHttpRequest *req,
                                              void *user_data);
 
-int hl_js_wire_routes(HlJS *js, KlRouter *router)
+int hl_js_wire_routes(HlJS *js, KlHttpRouter *router)
 {
     JSContext *ctx = js->ctx;
     JSValue global = JS_GetGlobalObject(ctx);
@@ -135,11 +135,11 @@ int hl_js_wire_routes(HlJS *js, KlRouter *router)
 
                 hl_js_track_route(js, route);
                 if (is_streaming) {
-                    kl_router_add_streaming_async(router, method_str, pattern,
+                    kl_http_router_add_streaming_async(router, method_str, pattern,
                                                   hl_js_keel_handler, route,
                                                   hl_js_multipart_factory);
                 } else {
-                    kl_router_add(router, method_str, pattern,
+                    kl_http_router_add(router, method_str, pattern,
                                   hl_js_keel_handler, route, NULL);
                 }
             }
@@ -184,7 +184,7 @@ int hl_js_wire_routes(HlJS *js, KlRouter *router)
                     r->handler_id = hid;
                     r->multipart_config = NULL;
                     hl_js_track_route(js, r);
-                    kl_router_use(router, m, p, hl_js_keel_middleware, r);
+                    kl_http_router_use(router, m, p, hl_js_keel_middleware, r);
                 }
             }
 
@@ -226,7 +226,7 @@ int hl_js_wire_routes(HlJS *js, KlRouter *router)
                     r->handler_id = hid;
                     r->multipart_config = NULL;
                     hl_js_track_route(js, r);
-                    kl_router_use_post(router, m, p, hl_js_keel_middleware, r);
+                    kl_http_router_use_post(router, m, p, hl_js_keel_middleware, r);
                 }
             }
 
@@ -277,12 +277,12 @@ static int js_read_int_field(JSContext *ctx, JSValueConst obj,
     return out;
 }
 
-/* Allocate KlMultipartConfig from JS subobject; caller frees with
- * hl_alloc_free(...,sizeof(KlMultipartConfig)). */
-static KlMultipartConfig *js_build_multipart_config(HlJS *js, JSValueConst mp)
+/* Allocate KlHttpMultipartConfig from JS subobject; caller frees with
+ * hl_alloc_free(...,sizeof(KlHttpMultipartConfig)). */
+static KlHttpMultipartConfig *js_build_multipart_config(HlJS *js, JSValueConst mp)
 {
-    KlMultipartConfig *cfg = hl_alloc_malloc(js->base.alloc,
-                                              sizeof(KlMultipartConfig));
+    KlHttpMultipartConfig *cfg = hl_alloc_malloc(js->base.alloc,
+                                              sizeof(KlHttpMultipartConfig));
     if (!cfg) return NULL;
     JSContext *ctx = js->ctx;
     /* Accept both snake_case and camelCase for cross-runtime ergonomics -
@@ -308,11 +308,11 @@ static KlMultipartConfig *js_build_multipart_config(HlJS *js, JSValueConst mp)
 
 /* Streaming-multipart factory shim: routes the request through
  * hl_cap_multipart_factory (the parkable wrapper around Keel's
- * kl_body_reader_multipart) so the JS iterator can hl_cap_multipart_park
+ * kl_http_body_reader_multipart) so the JS iterator can hl_cap_multipart_park
  * on NEED_DATA. The wrapper forwards our per-route config to the inner
  * Keel reader. */
-static KlBodyReader *hl_js_multipart_factory(KlAllocator *alloc,
-                                              const KlRequest *req,
+static KlHttpBodyReader *hl_js_multipart_factory(KlAllocator *alloc,
+                                              const KlHttpRequest *req,
                                               void *user_data)
 {
     HlJSRoute *route = (HlJSRoute *)user_data;
@@ -325,7 +325,7 @@ static KlBodyReader *hl_js_multipart_factory(KlAllocator *alloc,
  * http_weakstub.o stub. */
 int hl_js_http_bridge_anchor = 0;
 
-int hl_js_wire_routes_server(HlJS *js, KlServer *server,
+int hl_js_wire_routes_server(HlJS *js, KlHttpServer *server,
                               void *(*alloc_fn)(size_t))
 {
     (void)alloc_fn; /* routes always use Hull allocator */
@@ -381,11 +381,11 @@ int hl_js_wire_routes_server(HlJS *js, KlServer *server,
                 hl_js_track_route(js, route);
                 if (is_streaming) {
                     /* streaming-async (v2.2.0+) - see Lua sibling. */
-                    kl_server_route_streaming_async(server, method_str, pattern,
+                    kl_http_server_route_streaming_async(server, method_str, pattern,
                                                      hl_js_keel_handler, route,
                                                      hl_js_multipart_factory);
                 } else {
-                    kl_server_route(server, method_str, pattern,
+                    kl_http_server_route(server, method_str, pattern,
                                     hl_js_keel_handler, route,
                                     hl_cap_body_factory);
                 }
@@ -433,7 +433,7 @@ int hl_js_wire_routes_server(HlJS *js, KlServer *server,
                     mw_ctx->handler_id = handler_id;
                     mw_ctx->multipart_config = NULL;
                     hl_js_track_route(js, mw_ctx);
-                    kl_server_use(server, method_str, pattern,
+                    kl_http_server_use(server, method_str, pattern,
                                   hl_js_keel_middleware, mw_ctx);
                 }
             }
@@ -478,7 +478,7 @@ int hl_js_wire_routes_server(HlJS *js, KlServer *server,
                     mw_ctx->handler_id = handler_id;
                     mw_ctx->multipart_config = NULL;
                     hl_js_track_route(js, mw_ctx);
-                    kl_server_use_post(server, method_str, pattern,
+                    kl_http_server_use_post(server, method_str, pattern,
                                        hl_js_keel_middleware, mw_ctx);
                 }
             }
@@ -648,7 +648,7 @@ int hl_js_wire_routes_server(HlJS *js, KlServer *server,
                             hl_js_track_alloc(js, &js->ws_cfgs,
                                                &js->ws_cfg_count,
                                                &js->ws_cfg_cap, ws_cfg);
-                            kl_server_ws(server, path, ws_cfg);
+                            kl_http_server_ws_upgrade(server, path, ws_cfg);
                         }
                     }
                 }
@@ -695,7 +695,7 @@ int hl_js_wire_routes_server(HlJS *js, KlServer *server,
                         hl_alloc_free(js->base.alloc, sse_route,
                                       sizeof(HlJSSseRoute));
                     } else {
-                        kl_server_route(server, "GET", path,
+                        kl_http_server_route(server, "GET", path,
                                         hl_js_sse_handler, sse_route, NULL);
                     }
                 }

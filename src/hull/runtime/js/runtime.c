@@ -28,7 +28,7 @@
 #include "hull/runtime/test.h"
 
 #include <keel/keel.h>
-#include <keel/body_reader_multipart.h>
+#include <keel/http_body_reader_multipart.h>
 #include <keel/websocket_server.h>
 
 #include "hull/cap/ws.h"
@@ -1126,7 +1126,7 @@ void hl_js_free(HlJS *js)
         HlJSRoute *r = (HlJSRoute *)js->routes[i];
         if (r && r->multipart_config) {
             hl_alloc_free(js->base.alloc, r->multipart_config,
-                          sizeof(KlMultipartConfig));
+                          sizeof(KlHttpMultipartConfig));
         }
         hl_alloc_free(js->base.alloc, r, sizeof(HlJSRoute));
     }
@@ -1294,7 +1294,7 @@ static int vt_js_load_app(HlRuntime *rt, const char *filename)
 }
 
 #ifdef HL_ENABLE_HTTP_SERVER
-static int vt_js_wire_routes_server(HlRuntime *rt, KlServer *server,
+static int vt_js_wire_routes_server(HlRuntime *rt, KlHttpServer *server,
                                      void *(*alloc_fn)(size_t))
 {
     return hl_js_wire_routes_server((HlJS *)rt, server, alloc_fn);
@@ -1303,7 +1303,7 @@ static int vt_js_wire_routes_server(HlRuntime *rt, KlServer *server,
 /* CLI-only build: the vtable still has the slot for layout
  * compatibility, but it should never be invoked (serve.c, the only
  * caller, doesn't get compiled in). */
-static int vt_js_wire_routes_server(HlRuntime *rt, KlServer *server,
+static int vt_js_wire_routes_server(HlRuntime *rt, KlHttpServer *server,
                                      void *(*alloc_fn)(size_t))
 {
     (void)rt; (void)server; (void)alloc_fn;
@@ -1389,7 +1389,7 @@ static void vt_js_enumerate_middleware(HlRuntime *rt, HlMiddlewareCb cb, void *u
 }
 
 #ifdef HL_ENABLE_HTTP_SERVER
-static int vt_js_test_setup(HlRuntime *rt, KlRouter *router)
+static int vt_js_test_setup(HlRuntime *rt, KlHttpRouter *router)
 {
     HlJS *js = (HlJS *)rt;
     if (hl_js_wire_routes(js, router) != 0)
@@ -1400,7 +1400,7 @@ static int vt_js_test_setup(HlRuntime *rt, KlRouter *router)
 #else
 /* CLI-only build stub: hull test against a CLI app needs a different
  * harness (test.run_main) - placeholder so the vtable still links. */
-static int vt_js_test_setup(HlRuntime *rt, KlRouter *router)
+static int vt_js_test_setup(HlRuntime *rt, KlHttpRouter *router)
 {
     (void)rt; (void)router;
     return -1;
@@ -1652,7 +1652,7 @@ static JSValue js_cli_main_settle(JSContext *ctx, JSValueConst this_val,
     js->cli_main_active   = 0;
 
     /* Tell the backend's event loop to exit so vt_js_run_main returns.
-     * Works for both keel (kl_server_stop equivalent through the
+     * Works for both keel (kl_http_server_stop equivalent through the
      * wrapped event ctx) and the poll backend. */
     if (js->base.async_ctx)
         hl_async_backend()->stop(js->base.async_ctx);
@@ -1719,7 +1719,7 @@ static int coerce_js_exit_code(JSContext *ctx, JSValue v)
     return 1;
 }
 
-static int vt_js_run_main(HlRuntime *rt, KlServer *server,
+static int vt_js_run_main(HlRuntime *rt, KlHttpServer *server,
                            int argc, char **argv,
                            const char *const *env_allowlist,
                            int *exit_code_out)
@@ -1853,7 +1853,7 @@ static int vt_js_run_main(HlRuntime *rt, KlServer *server,
 
         if (js->cli_main_active) {
             /* Drive the event loop via the async backend. On HTTP=1
-             * this is a wrap around KlServer's KlEventCtx; on HTTP=0
+             * this is a wrap around KlHttpServer's KlEventCtx; on HTTP=0
              * it's the poll backend's standalone loop. The .then
              * callbacks attached above (js_cli_main_settle) call
              * backend->stop when main's promise settles. */

@@ -1,7 +1,7 @@
 /*
  * js_bindings.c - Request/Response bridge to QuickJS
  *
- * Marshals Keel's KlRequest/KlResponse to JS objects and back.
+ * Marshals Keel's KlHttpRequest/KlHttpResponse to JS objects and back.
  * This file contains ONLY data marshaling - all enforcement logic
  * lives in hl_cap_* functions.
  *
@@ -20,10 +20,11 @@
 _Static_assert(sizeof(JSValue) <= sizeof(((HlReqCtx *)0)->js_val_bytes),
                "JSValue too large for HlReqCtx.js_val_bytes");
 
-#include <keel/request.h>
-#include <keel/response.h>
-#include <keel/router.h>
-#include <keel/connection.h>  /* KlConn.fd for the peer address */
+#include <keel/http_request.h>
+#include <keel/http_response.h>
+#include <keel/http_router.h>
+#include <keel/http_connection.h>  /* kl_http_conn_peer_addr */
+#include <keel/sockaddr.h>         /* KlSockAddr, kl_sockaddr_format_ip */
 
 #include <stdlib.h>
 #include <string.h>
@@ -114,50 +115,45 @@ static size_t hl_query_decode_inplace(char *s, size_t len)
 /* Numeric client IP from the connection's peer address, "" on failure.
  * Sibling copy in src/hull/runtime/lua/bindings.c (request_peer_ip). See there
  * for the rationale; best-effort, absent when unavailable. */
-static void hl_request_peer_ip_js(KlRequest *req, char *buf, size_t buflen)
+static void hl_request_peer_ip_js(KlHttpRequest *req, char *buf, size_t buflen)
 {
     buf[0] = '\0';
-    KlConn *conn = kl_request_conn(req);
-    if (!conn || conn->fd < 0) return;
-    struct sockaddr_storage ss;
-    socklen_t slen = sizeof ss;
-    if (getpeername(conn->fd, (struct sockaddr *)&ss, &slen) != 0) return;
-    if (ss.ss_family == AF_INET) {
-        struct sockaddr_in *s4 = (struct sockaddr_in *)&ss;
-        inet_ntop(AF_INET, &s4->sin_addr, buf, (socklen_t)buflen);
-    } else if (ss.ss_family == AF_INET6) {
-        struct sockaddr_in6 *s6 = (struct sockaddr_in6 *)&ss;
-        inet_ntop(AF_INET6, &s6->sin6_addr, buf, (socklen_t)buflen);
-    }
+    KlHttpConn *conn = kl_http_request_conn(req);
+    if (!conn) return;
+    /* KlHttpConn is opaque in Keel 3.x; peer address via the accessor + IP-only
+     * format (matches the previous getpeername path). NULL when unavailable. */
+    const KlSockAddr *pa = kl_http_conn_peer_addr(conn);
+    if (!pa) return;
+    kl_sockaddr_format_ip(pa, buf, buflen);
 }
 
-JSValue hl_js_make_request(JSContext *ctx, KlRequest *req)
+JSValue hl_js_make_request(JSContext *ctx, KlHttpRequest *req)
 {
     JSValue obj = JS_NewObject(ctx);
 
-    /* method (Keel stores as string).  All reads via kl_request_*
+    /* method (Keel stores as string).  All reads via kl_http_request_*
      * accessors so they route through req->sealed (mprotect-RO) when
      * KEEL_SEAL_REQUEST=1 is in the Keel build, or fall back to direct
-     * fields otherwise.  See vendor/keel/include/keel/request.h. */
-    const char *m = kl_request_method(req);
+     * fields otherwise.  See vendor/keel/include/keel/http_request.h. */
+    const char *m = req->method;
     if (m)
         JS_SetPropertyStr(ctx, obj, "method",
-                          JS_NewStringLen(ctx, m, kl_request_method_len(req)));
+                          JS_NewStringLen(ctx, m, req->method_len));
     else
         JS_SetPropertyStr(ctx, obj, "method", JS_NewString(ctx, "GET"));
 
     /* path */
-    const char *p = kl_request_path(req);
+    const char *p = req->path;
     if (p)
         JS_SetPropertyStr(ctx, obj, "path",
-                          JS_NewStringLen(ctx, p, kl_request_path_len(req)));
+                          JS_NewStringLen(ctx, p, req->path_len));
     else
         JS_SetPropertyStr(ctx, obj, "path", JS_NewString(ctx, "/"));
 
     /* query string → object */
     JSValue query_obj = JS_NewObject(ctx);
-    const char *q = kl_request_query(req);
-    size_t q_len = kl_request_query_len(req);
+    const char *q = req->query;
+    size_t q_len = req->query_len;
     if (q && q_len > 0) {
         /* Parse query string: key=val&key2=val2 */
         char qbuf[HL_QUERY_BUF_SIZE];
@@ -197,9 +193,9 @@ JSValue hl_js_make_request(JSContext *ctx, KlRequest *req)
 
     /* params - route params from Keel (e.g. :id → params.id) */
     JSValue params_obj = JS_NewObject(ctx);
-    int n_params = kl_request_num_params(req);
+    int n_params = req->num_params;
     for (int i = 0; i < n_params; i++) {
-        KlParam param = kl_request_param_at(req, i);
+        KlHttpParam param = req->params[i];
         char name[HL_PARAM_NAME_MAX];
         size_t nlen = param.name_len < HL_PARAM_NAME_MAX - 1
                       ? param.name_len : HL_PARAM_NAME_MAX - 1;
@@ -212,20 +208,22 @@ JSValue hl_js_make_request(JSContext *ctx, KlRequest *req)
 
     /* headers → object (names lowercased for case-insensitive lookup) */
     JSValue headers_obj = JS_NewObject(ctx);
-    int n_headers = kl_request_num_headers(req);
+    int n_headers = req->num_headers;
     for (int i = 0; i < n_headers; i++) {
-        KlHeader hdr = kl_request_header_at(req, i);
-        if (hdr.name && hdr.value) {
+        /* KlHttpRequest is a concrete struct in Keel 3.x; headers[] is read
+         * directly (the sealed-request accessor layer was removed in Keel
+         * v2.8.0). See docs/security.md § 4e. */
+        if (req->headers[i].name && req->headers[i].value) {
             char name_buf[256];
-            size_t nlen = hdr.name_len;
+            size_t nlen = req->headers[i].name_len;
             if (nlen >= sizeof(name_buf)) continue; /* skip oversized names */
             for (size_t j = 0; j < nlen; j++) {
-                unsigned char c = (unsigned char)hdr.name[j];
+                unsigned char c = (unsigned char)req->headers[i].name[j];
                 name_buf[j] = (c >= 'A' && c <= 'Z') ? (char)(c + 32) : (char)c;
             }
             name_buf[nlen] = '\0';
             JS_SetPropertyStr(ctx, headers_obj, name_buf,
-                              JS_NewStringLen(ctx, hdr.value, hdr.value_len));
+                              JS_NewStringLen(ctx, req->headers[i].value, req->headers[i].value_len));
         }
     }
     JS_SetPropertyStr(ctx, obj, "headers", headers_obj);
@@ -241,7 +239,7 @@ JSValue hl_js_make_request(JSContext *ctx, KlRequest *req)
     }
 
     /* body - extract from buffer reader if available. Streaming-multipart
-     * routes have a wrapper reader (not a KlBufReader), so body = null
+     * routes have a wrapper reader (not a KlHttpBufReader), so body = null
      * and the handler iterates via req.multipart() (installed below). */
     int is_multipart_stream =
         req->body_reader != NULL &&

@@ -20,7 +20,7 @@
 /* Forward declarations */
 typedef struct lua_State lua_State;
 typedef struct JSContext JSContext;
-typedef struct KlRouter  KlRouter;
+typedef struct KlHttpRouter  KlHttpRouter;
 typedef struct HlLua     HlLua;
 typedef struct HlJS      HlJS;
 
@@ -33,7 +33,7 @@ typedef struct HlJS      HlJS;
  * test is a callable table (via __call metamethod) for registering tests,
  * and also has methods: get, post, put, delete, patch, eq, ok, err.
  */
-void hl_lua_test_register(lua_State *L, KlRouter *router, HlLua *lua);
+void hl_lua_test_register(lua_State *L, KlHttpRouter *router, HlLua *lua);
 
 /*
  * Clear registered test cases (between files).
@@ -54,7 +54,7 @@ void hl_lua_test_run(lua_State *L, int *total, int *passed, int *failed,
 
 #ifdef HL_ENABLE_JS
 
-void hl_js_test_register(JSContext *ctx, KlRouter *router, HlJS *js);
+void hl_js_test_register(JSContext *ctx, KlHttpRouter *router, HlJS *js);
 void hl_js_test_free(JSContext *ctx);
 void hl_js_test_clear(JSContext *ctx);
 void hl_js_test_run(JSContext *ctx, int *total, int *passed, int *failed,

@@ -1,7 +1,7 @@
 /*
  * lua_bindings.c - Request/Response bridge to Lua 5.4
  *
- * Marshals Keel's KlRequest/KlResponse to Lua tables/userdata.
+ * Marshals Keel's KlHttpRequest/KlHttpResponse to Lua tables/userdata.
  * This file contains ONLY data marshaling - all enforcement logic
  * lives in hl_cap_* functions.
  *
@@ -19,10 +19,11 @@
 #include "lualib.h"
 #include "lauxlib.h"
 
-#include <keel/request.h>
-#include <keel/response.h>
-#include <keel/router.h>
-#include <keel/connection.h>  /* KlConn.fd for the peer address */
+#include <keel/http_request.h>
+#include <keel/http_response.h>
+#include <keel/http_router.h>
+#include <keel/http_connection.h>  /* kl_http_conn_peer_addr */
+#include <keel/sockaddr.h>         /* KlSockAddr, kl_sockaddr_format_ip */
 
 #include <stdint.h>
 #include <stdlib.h>
@@ -88,50 +89,47 @@ static size_t hl_query_decode_inplace(char *s, size_t len)
  * Best-effort: getpeername fails on an already-closed connection or the
  * in-process test harness (no socket), in which case remote_addr is absent
  * and stdlib callers fall back per their own policy (per-user, "_anon"). */
-static void request_peer_ip(KlRequest *req, char *buf, size_t buflen)
+static void request_peer_ip(KlHttpRequest *req, char *buf, size_t buflen)
 {
     buf[0] = '\0';
-    KlConn *conn = kl_request_conn(req);
-    if (!conn || conn->fd < 0) return;
-    struct sockaddr_storage ss;
-    socklen_t slen = sizeof ss;
-    if (getpeername(conn->fd, (struct sockaddr *)&ss, &slen) != 0) return;
-    if (ss.ss_family == AF_INET) {
-        struct sockaddr_in *s4 = (struct sockaddr_in *)&ss;
-        inet_ntop(AF_INET, &s4->sin_addr, buf, (socklen_t)buflen);
-    } else if (ss.ss_family == AF_INET6) {
-        struct sockaddr_in6 *s6 = (struct sockaddr_in6 *)&ss;
-        inet_ntop(AF_INET6, &s6->sin6_addr, buf, (socklen_t)buflen);
-    }
+    KlHttpConn *conn = kl_http_request_conn(req);
+    if (!conn) return;
+    /* KlHttpConn is opaque in Keel 3.x; the peer address comes from the
+     * accessor (backend-owned socket handle, KlSockAddr address ABI) and is
+     * formatted IP-only (no port), matching the previous getpeername path.
+     * NULL when unavailable (already-closed conn / in-process test harness). */
+    const KlSockAddr *pa = kl_http_conn_peer_addr(conn);
+    if (!pa) return;
+    kl_sockaddr_format_ip(pa, buf, buflen);
 }
 
-void hl_lua_make_request(lua_State *L, KlRequest *req)
+void hl_lua_make_request(lua_State *L, KlHttpRequest *req)
 {
     lua_newtable(L);
 
-    /* method (Keel stores as string).  All reads via kl_request_*
+    /* method (Keel stores as string).  All reads via kl_http_request_*
      * accessors so they route through req->sealed (mprotect-RO) when
      * KEEL_SEAL_REQUEST=1 is in the Keel build, or fall back to direct
-     * fields otherwise.  See vendor/keel/include/keel/request.h. */
-    const char *m = kl_request_method(req);
+     * fields otherwise.  See vendor/keel/include/keel/http_request.h. */
+    const char *m = req->method;
     if (m)
-        lua_pushlstring(L, m, kl_request_method_len(req));
+        lua_pushlstring(L, m, req->method_len);
     else
         lua_pushstring(L, "GET");
     lua_setfield(L, -2, "method");
 
     /* path */
-    const char *p = kl_request_path(req);
+    const char *p = req->path;
     if (p)
-        lua_pushlstring(L, p, kl_request_path_len(req));
+        lua_pushlstring(L, p, req->path_len);
     else
         lua_pushstring(L, "/");
     lua_setfield(L, -2, "path");
 
     /* query string → table */
     lua_newtable(L);
-    const char *q = kl_request_query(req);
-    size_t q_len = kl_request_query_len(req);
+    const char *q = req->query;
+    size_t q_len = req->query_len;
     if (q && q_len > 0) {
         char qbuf[HL_QUERY_BUF_SIZE];
         size_t qlen = q_len < sizeof(qbuf) - 1
@@ -170,9 +168,9 @@ void hl_lua_make_request(lua_State *L, KlRequest *req)
 
     /* params - route params from Keel (e.g. :id → params.id) */
     lua_newtable(L);
-    int n_params = kl_request_num_params(req);
+    int n_params = req->num_params;
     for (int i = 0; i < n_params; i++) {
-        KlParam param = kl_request_param_at(req, i);
+        KlHttpParam param = req->params[i];
         char name[HL_PARAM_NAME_MAX];
         size_t nlen = param.name_len < HL_PARAM_NAME_MAX - 1
                       ? param.name_len : HL_PARAM_NAME_MAX - 1;
@@ -186,19 +184,21 @@ void hl_lua_make_request(lua_State *L, KlRequest *req)
     /* headers → table (names lowercased for case-insensitive lookup) */
     lua_newtable(L);
     lua_checkstack(L, 3); /* key + value + table */
-    int n_headers = kl_request_num_headers(req);
+    int n_headers = req->num_headers;
     for (int i = 0; i < n_headers; i++) {
-        KlHeader hdr = kl_request_header_at(req, i);
-        if (hdr.name && hdr.value) {
+        /* KlHttpRequest is a concrete struct in Keel 3.x; headers[] is read
+         * directly (the sealed-request accessor layer was removed in Keel
+         * v2.8.0). See docs/security.md § 4e. */
+        if (req->headers[i].name && req->headers[i].value) {
             char hdr_name[256];
-            size_t nlen = hdr.name_len;
+            size_t nlen = req->headers[i].name_len;
             if (nlen >= sizeof(hdr_name)) continue; /* skip oversized */
             for (size_t j = 0; j < nlen; j++) {
-                unsigned char c = (unsigned char)hdr.name[j];
+                unsigned char c = (unsigned char)req->headers[i].name[j];
                 hdr_name[j] = (c >= 'A' && c <= 'Z') ? (char)(c + 32) : (char)c;
             }
             lua_pushlstring(L, hdr_name, nlen);
-            lua_pushlstring(L, hdr.value, hdr.value_len);
+            lua_pushlstring(L, req->headers[i].value, req->headers[i].value_len);
             lua_settable(L, -3);
         }
     }

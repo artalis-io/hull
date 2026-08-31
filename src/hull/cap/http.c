@@ -2,7 +2,7 @@
  * http.c - HTTP client capability (thin wrapper over Keel)
  *
  * Adds host allowlist checking and audit logging around
- * kl_client_request() from Keel's HTTP client module.
+ * kl_http_client_request() from Keel's HTTP client module.
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
@@ -12,9 +12,9 @@
 #include "hull/host_match.h"
 
 #include <keel/allocator.h>
-#include <keel/client_pool.h>
+#include <keel/http_client_pool.h>
 #include <keel/error.h>
-#include <keel/redirect.h>
+#include <keel/http_redirect.h>
 #include <keel/url.h>
 
 #include <string.h>
@@ -42,7 +42,7 @@ int hl_cap_http_request(const HlHttpConfig *cfg,
                         const char *method, const char *url,
                         const HlHttpHeader *headers, int num_headers,
                         const char *body, size_t body_len,
-                        KlClientResponse *resp)
+                        KlHttpClientResponse *resp)
 {
     if (!cfg || !method || !url || !resp)
         return -1;
@@ -64,8 +64,8 @@ int hl_cap_http_request(const HlHttpConfig *cfg,
         return -1;
     }
 
-    /* Construct KlClientConfig from HlHttpConfig */
-    KlClientConfig kl_cfg = {
+    /* Construct KlHttpClientConfig from HlHttpConfig */
+    KlHttpClientConfig kl_cfg = {
         .timeout_ms        = cfg->timeout_ms,
         .max_response_size = cfg->max_response_size,
         .tls               = cfg->tls,
@@ -76,23 +76,23 @@ int hl_cap_http_request(const HlHttpConfig *cfg,
     KlAllocator alloc = kl_allocator_default();
     int rc;
     if (cfg->follow_redirects) {
-        KlRedirectConfig redir = { .max_redirects = cfg->max_redirects };
+        KlHttpRedirectConfig redir = { .max_redirects = cfg->max_redirects };
         if (cfg->pool)
-            rc = kl_redirect_request_pooled(cfg->pool, &alloc, &kl_cfg, &redir,
+            rc = kl_http_redirect_request_pooled(cfg->pool, &alloc, &kl_cfg, &redir,
                                              method, url,
-                                             (const KlClientHeader *)headers,
+                                             (const KlHttpClientHeader *)headers,
                                              num_headers, body, body_len, resp);
         else
-            rc = kl_redirect_request(&alloc, &kl_cfg, &redir, method, url,
-                                      (const KlClientHeader *)headers,
+            rc = kl_http_redirect_request(&alloc, &kl_cfg, &redir, method, url,
+                                      (const KlHttpClientHeader *)headers,
                                       num_headers, body, body_len, resp);
     } else if (cfg->pool) {
-        rc = kl_client_request_pooled(cfg->pool, &alloc, &kl_cfg, method, url,
-                                       (const KlClientHeader *)headers,
+        rc = kl_http_client_request_pooled(cfg->pool, &alloc, &kl_cfg, method, url,
+                                       (const KlHttpClientHeader *)headers,
                                        num_headers, body, body_len, resp);
     } else {
-        rc = kl_client_request(&alloc, &kl_cfg, method, url,
-                                (const KlClientHeader *)headers, num_headers,
+        rc = kl_http_client_request(&alloc, &kl_cfg, method, url,
+                                (const KlHttpClientHeader *)headers, num_headers,
                                 body, body_len, resp);
     }
 

@@ -16,10 +16,10 @@
  *       end
  *   end
  *
- * The iterator drives Keel's kl_multipart_next() against the parkable
+ * The iterator drives Keel's kl_http_multipart_next() against the parkable
  * wrapper (see hl_cap_multipart_factory in cap/body.c). When the parser
  * reports NEED_DATA the iterator parks a resume callback on the wrapper,
- * sets c->state = KL_CONN_READING_BODY, and lua_yieldk's. Bytes off the
+ * sets c->state = KL_HTTP_CONN_READING_BODY, and lua_yieldk's. Bytes off the
  * socket fire mp_wrap_on_data which fires the park callback which calls
  * hl_lua_async_resume which calls lua_resume on the handler's coroutine
  * - the continuation re-enters mp_iter_drive and re-tries the parser.
@@ -33,9 +33,9 @@
 #include "hull/shared/async.h"
 #include "hull/cap/body.h"
 
-#include <keel/body_reader.h>
-#include <keel/body_reader_multipart.h>
-#include <keel/connection.h>
+#include <keel/http_body_reader.h>
+#include <keel/http_body_reader_multipart.h>
+#include <keel/http_connection.h>
 
 #include "lua.h"
 #include "lualib.h"
@@ -55,17 +55,17 @@
 /* Iterator state. Lifetime owned by Lua GC (it's a userdata).
  *
  * Holds heap-allocated COPIES of the current part's metadata strings:
- * kl_multipart_next() docs say the borrowed name/filename/content_type
+ * kl_http_multipart_next() docs say the borrowed name/filename/content_type
  * pointers are valid only until the next mutation, which for us means
- * the next kl_multipart_next call OR the next on_data callback (which
+ * the next kl_http_multipart_next call OR the next on_data callback (which
  * fires inside our park-callback / lua_resume path). The coroutine can
  * yield between reading the meta and the chunks loop - so we always
  * snapshot meta the moment PART_BEGIN fires. The copies stay valid for
  * the lifetime of one Part.
  */
 typedef struct {
-    KlBodyReader *wrapper;     /* parkable wrapper (from hl_cap_multipart_factory) */
-    KlBodyReader *inner;       /* inner kl_body_reader_multipart for kl_multipart_next */
+    KlHttpBodyReader *wrapper;     /* parkable wrapper (from hl_cap_multipart_factory) */
+    KlHttpBodyReader *inner;       /* inner kl_http_body_reader_multipart for kl_http_multipart_next */
     HlLua        *lua;         /* runtime - for allocator + async-cont creation */
     HlAllocator  *alloc;       /* shorthand for lua->base.alloc */
 
@@ -131,7 +131,7 @@ static void mp_iter_clear_meta(HlMpIter *it)
 
 /* Snapshot the borrowed meta into iter-owned heap buffers. On allocation
  * failure, leaves iter->errored set and returns -1 (caller raises). */
-static int mp_iter_copy_meta(HlMpIter *it, const KlMultipartPartMeta *meta)
+static int mp_iter_copy_meta(HlMpIter *it, const KlHttpMultipartPartMeta *meta)
 {
     mp_iter_clear_meta(it);
     if (meta->name && meta->name_len > 0) {
@@ -189,7 +189,7 @@ static int mp_park_and_yield(lua_State *L, HlMpIter *it,
      * dispatch sets lua->active_conn before the handler is entered. If
      * it isn't set we have nothing to park against (e.g. an in-process
      * test harness call). Fail loudly rather than hang. */
-    KlConn *conn = it->lua->active_conn;
+    KlHttpConn *conn = it->lua->active_conn;
     if (!conn)
         return luaL_error(L,
             "req:multipart(): no active connection - streaming routes "
@@ -208,11 +208,11 @@ static int mp_park_and_yield(lua_State *L, HlMpIter *it,
         return luaL_error(L, "req:multipart(): body reader is not multipart");
     }
 
-    /* Tell Keel to keep reading socket bytes. v2.1.1's streaming dispatch
-     * checks this state on return from the handler; without it Keel would
-     * either suspend the connection (no FD progress) or pump the body to
-     * completion before re-entering the handler. */
-    conn->state = KL_CONN_READING_BODY;
+    /* Keel 3.x streaming-async: park and keep reading the request body; Keel
+     * re-enters via the body reader's on_data. Replaces the pre-3.0 internal
+     * conn->state = KL_HTTP_CONN_READING_BODY; kl_http_request_await_body is the
+     * public "park, keep reading" call added in 3.0.0-rc.2. */
+    kl_http_request_await_body(it->lua->active_req);
 
     return lua_yieldk(L, 0, kctx, kfunc);
 }
@@ -267,28 +267,28 @@ static int mp_part_read_pump(lua_State *L)
             return 1;
         }
 
-        KlMultipartPartMeta meta;
+        KlHttpMultipartPartMeta meta;
         const char *data = NULL;
         size_t data_len = 0;
-        KlMultipartEvent ev = kl_multipart_next(it->inner, &meta,
+        KlHttpMultipartEvent ev = kl_http_multipart_next(it->inner, &meta,
                                                   &data, &data_len);
         switch (ev) {
-        case KL_MP_EVT_PART_DATA:
+        case KL_HTTP_MP_EVT_PART_DATA:
             if (data && data_len > 0)
                 luaL_addlstring(&b, data, data_len);
             continue;
-        case KL_MP_EVT_PART_END:
+        case KL_HTTP_MP_EVT_PART_END:
             it->in_part = 0;
             p->spent = 1;
             luaL_pushresult(&b);
             return 1;
-        case KL_MP_EVT_NEED_DATA:
+        case KL_HTTP_MP_EVT_NEED_DATA:
             /* Stash the partial as a Lua string at the stack top so the
              * continuation can re-prepend it. luaL_Buffer is C-stack
              * scoped and would lose its contents across the yield. */
             luaL_pushresult(&b);
             return mp_park_and_yield(L, it, mp_part_read_continue, 0);
-        case KL_MP_EVT_DONE:
+        case KL_HTTP_MP_EVT_DONE:
             /* DONE mid-part is unexpected (the parser should emit
              * PART_END first), but treat it as end-of-part anyway. */
             it->in_part = 0;
@@ -296,11 +296,11 @@ static int mp_part_read_pump(lua_State *L)
             p->spent = 1;
             luaL_pushresult(&b);
             return 1;
-        case KL_MP_EVT_ERROR:
+        case KL_HTTP_MP_EVT_ERROR:
             it->errored = 1;
             return luaL_error(L, "req:multipart(): parser error (code %d)",
-                              (int)kl_multipart_last_error(it->inner));
-        case KL_MP_EVT_PART_BEGIN:
+                              (int)kl_http_multipart_last_error(it->inner));
+        case KL_HTTP_MP_EVT_PART_BEGIN:
         default:
             it->errored = 1;
             return luaL_error(L,
@@ -361,39 +361,39 @@ static int mp_chunks_drive(lua_State *L)
         if (it->errored)
             return luaL_error(L, "req:multipart(): parser error");
 
-        KlMultipartPartMeta meta;
+        KlHttpMultipartPartMeta meta;
         const char *data = NULL;
         size_t data_len = 0;
-        KlMultipartEvent ev = kl_multipart_next(it->inner, &meta,
+        KlHttpMultipartEvent ev = kl_http_multipart_next(it->inner, &meta,
                                                   &data, &data_len);
         switch (ev) {
-        case KL_MP_EVT_PART_DATA:
+        case KL_HTTP_MP_EVT_PART_DATA:
             if (data && data_len > 0) {
                 lua_pushlstring(L, data, data_len);
                 return 1;
             }
             /* Empty PART_DATA is unusual but harmless - loop. */
             continue;
-        case KL_MP_EVT_PART_END:
+        case KL_HTTP_MP_EVT_PART_END:
             it->in_part = 0;
             p->spent = 1;
             c->ended = 1;
             lua_pushnil(L);
             return 1;
-        case KL_MP_EVT_NEED_DATA:
+        case KL_HTTP_MP_EVT_NEED_DATA:
             return mp_park_and_yield(L, it, mp_chunks_continue, 0);
-        case KL_MP_EVT_DONE:
+        case KL_HTTP_MP_EVT_DONE:
             it->in_part = 0;
             it->done = 1;
             p->spent = 1;
             c->ended = 1;
             lua_pushnil(L);
             return 1;
-        case KL_MP_EVT_ERROR:
+        case KL_HTTP_MP_EVT_ERROR:
             it->errored = 1;
             return luaL_error(L, "req:multipart(): parser error (code %d)",
-                              (int)kl_multipart_last_error(it->inner));
-        case KL_MP_EVT_PART_BEGIN:
+                              (int)kl_http_multipart_last_error(it->inner));
+        case KL_HTTP_MP_EVT_PART_BEGIN:
         default:
             it->errored = 1;
             return luaL_error(L,
@@ -460,13 +460,13 @@ static int mp_iter_drive(lua_State *L)
         return luaL_error(L, "req:multipart(): parser error");
 
     for (;;) {
-        KlMultipartPartMeta meta;
+        KlHttpMultipartPartMeta meta;
         const char *data = NULL;
         size_t data_len = 0;
-        KlMultipartEvent ev = kl_multipart_next(it->inner, &meta,
+        KlHttpMultipartEvent ev = kl_http_multipart_next(it->inner, &meta,
                                                   &data, &data_len);
         switch (ev) {
-        case KL_MP_EVT_PART_BEGIN:
+        case KL_HTTP_MP_EVT_PART_BEGIN:
             if (mp_iter_copy_meta(it, &meta) != 0)
                 return luaL_error(L,
                     "req:multipart(): out of memory copying part metadata");
@@ -480,24 +480,24 @@ static int mp_iter_drive(lua_State *L)
             lua_pushvalue(L, lua_upvalueindex(1));
             lua_setiuservalue(L, -2, 1);
             return 1;
-        case KL_MP_EVT_PART_DATA:
+        case KL_HTTP_MP_EVT_PART_DATA:
             /* User skipped the previous part's body without iterating
              * chunks - auto-drain. */
             continue;
-        case KL_MP_EVT_PART_END:
+        case KL_HTTP_MP_EVT_PART_END:
             it->in_part = 0;
             continue;
-        case KL_MP_EVT_DONE:
+        case KL_HTTP_MP_EVT_DONE:
             it->done = 1;
             it->in_part = 0;
             lua_pushnil(L);
             return 1;
-        case KL_MP_EVT_NEED_DATA:
+        case KL_HTTP_MP_EVT_NEED_DATA:
             return mp_park_and_yield(L, it, mp_iter_continue, 0);
-        case KL_MP_EVT_ERROR:
+        case KL_HTTP_MP_EVT_ERROR:
             it->errored = 1;
             return luaL_error(L, "req:multipart(): parser error (code %d)",
-                              (int)kl_multipart_last_error(it->inner));
+                              (int)kl_http_multipart_last_error(it->inner));
         default:
             it->errored = 1;
             return luaL_error(L,
@@ -522,13 +522,13 @@ static int mp_iter_gc(lua_State *L)
 }
 
 /* req:multipart() entry point. Captured upvalues:
- *   1 = lightuserdata: KlBodyReader * (the wrapper)
+ *   1 = lightuserdata: KlHttpBodyReader * (the wrapper)
  *   2 = lightuserdata: HlLua *
  */
 static int lua_req_multipart(lua_State *L)
 {
-    KlBodyReader *wrapper =
-        (KlBodyReader *)lua_touserdata(L, lua_upvalueindex(1));
+    KlHttpBodyReader *wrapper =
+        (KlHttpBodyReader *)lua_touserdata(L, lua_upvalueindex(1));
     HlLua *lua =
         (HlLua *)lua_touserdata(L, lua_upvalueindex(2));
 
@@ -536,7 +536,7 @@ static int lua_req_multipart(lua_State *L)
         return luaL_error(L,
             "req:multipart(): no body reader (not a streaming-multipart route?)");
 
-    KlBodyReader *inner = hl_cap_multipart_inner(wrapper);
+    KlHttpBodyReader *inner = hl_cap_multipart_inner(wrapper);
     if (!inner)
         return luaL_error(L,
             "req:multipart(): body reader is not a streaming-multipart wrapper");
@@ -559,13 +559,13 @@ static int lua_req_multipart(lua_State *L)
 /*
  * Install the `multipart` method on the request table at stack top.
  * Called from hl_lua_make_request immediately after the table is built
- * - only for routes registered with kl_server_route_streaming, where
+ * - only for routes registered with kl_http_server_route_streaming, where
  * req->body_reader is hl_cap_multipart_factory's wrapper.
  *
  * No-op if body_reader isn't a streaming-multipart wrapper.
  */
 void hl_lua_request_install_multipart(lua_State *L, HlLua *lua,
-                                       KlBodyReader *body_reader)
+                                       KlHttpBodyReader *body_reader)
 {
     if (!body_reader || !hl_cap_multipart_inner(body_reader))
         return; /* not a streaming-multipart route - skip silently */

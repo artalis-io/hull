@@ -19,7 +19,7 @@
 
 /* Forward declarations */
 typedef struct HlAsyncCtx HlAsyncCtx;
-typedef struct KlServer KlServer;
+typedef struct KlHttpServer KlHttpServer;
 typedef struct HlAsyncBackendPool HlAsyncBackendPool;
 typedef struct KlAsyncOp KlAsyncOp;
 
@@ -27,7 +27,7 @@ typedef struct KlAsyncOp KlAsyncOp;
 
 typedef struct HlWorkerGpuOp {
     HlAsyncCtx    *async_ctx;
-    KlServer      *server;
+    KlHttpServer      *server;
 
     /* Input */
     HlGpuCtx      *gpu_ctx;          /* GPU context (borrowed) */

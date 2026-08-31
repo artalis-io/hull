@@ -12,7 +12,7 @@
 #include "hull/runtime.h"
 
 #include <keel/allocator.h>
-#include <keel/router.h>
+#include <keel/http_router.h>
 
 #include <stdlib.h>
 #include <string.h>
@@ -31,15 +31,15 @@ int hl_test_runner_run(HlAppContext *ctx, const HlTestRunnerWriter *writer)
     const char *pattern = rt->vt->test_file_pattern;
     if (!pattern) return -1;
 
-    /* Standalone KlRouter so tests can dispatch HTTP in-process. */
+    /* Standalone KlHttpRouter so tests can dispatch HTTP in-process. */
     KlAllocator alloc = kl_allocator_default();
-    KlRouter router;
-    kl_router_init(&router, &alloc);
+    KlHttpRouter router;
+    kl_http_router_init(&router, &alloc);
 
     if (rt->vt->test_setup(rt, &router) != 0) {
         if (writer && writer->on_file_load_error)
             writer->on_file_load_error(writer->user, "no routes registered");
-        kl_router_free(&router);
+        kl_http_router_free(&router);
         return -1;
     }
 
@@ -48,7 +48,7 @@ int hl_test_runner_run(HlAppContext *ctx, const HlTestRunnerWriter *writer)
         if (writer && writer->on_file_load_error)
             writer->on_file_load_error(writer->user, "no test files found");
         if (test_files) free(test_files);
-        kl_router_free(&router);
+        kl_http_router_free(&router);
         return -1;
     }
 
@@ -94,6 +94,6 @@ int hl_test_runner_run(HlAppContext *ctx, const HlTestRunnerWriter *writer)
     if (writer && writer->on_summary)
         writer->on_summary(writer->user, grand_total, grand_passed, grand_failed);
 
-    kl_router_free(&router);
+    kl_http_router_free(&router);
     return grand_failed;
 }

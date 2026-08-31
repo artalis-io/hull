@@ -4,7 +4,7 @@
  *
  * Mirror of include/hull/async/keel.h, one layer up: functions that
  * don't fit the generic HlNetBackend vtable because they expose Keel
- * types directly. Used by serve.c to wrap an existing KlServer into
+ * types directly. Used by serve.c to wrap an existing KlHttpServer into
  * an HlNetBackendCtx, so other consumers can route async-op
  * suspend/complete through the vtable instead of calling
  * kl_async_suspend / kl_async_complete by hand.
@@ -19,25 +19,25 @@
 #define HL_NET_KEEL_H
 
 typedef struct HlNetBackendCtx HlNetBackendCtx;
-typedef struct KlServer        KlServer;
+typedef struct KlHttpServer        KlHttpServer;
 
 /**
- * Wrap an existing KlServer into an HlNetBackendCtx that doesn't own
+ * Wrap an existing KlHttpServer into an HlNetBackendCtx that doesn't own
  * the underlying server. Use this in server-mode (HTTP=1) so vtable
  * consumers can route async-op suspend/complete through the net
  * backend instead of touching Keel directly.
  *
  * The returned ctx must be freed with hl_net_backend_keel_unwrap,
- * which only releases the wrapper - KlServer remains owned by the
+ * which only releases the wrapper - KlHttpServer remains owned by the
  * caller.
  *
  * Returns NULL on allocation failure.
  */
-HlNetBackendCtx *hl_net_backend_keel_wrap(KlServer *server);
+HlNetBackendCtx *hl_net_backend_keel_wrap(KlHttpServer *server);
 
 /**
  * Free a wrapper returned by hl_net_backend_keel_wrap. Does NOT
- * destroy the wrapped KlServer.
+ * destroy the wrapped KlHttpServer.
  */
 void hl_net_backend_keel_unwrap(HlNetBackendCtx *ctx);
 

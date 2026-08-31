@@ -21,7 +21,7 @@
 #include "lauxlib.h"
 
 #include <keel/keel.h>
-#include <keel/sse.h>
+#include <keel/http_sse.h>
 
 #include <sh_arena.h>
 
@@ -29,7 +29,7 @@
 
 #include <limits.h>
 
-void hl_lua_sse_handler(KlRequest *req, KlResponse *res,
+void hl_lua_sse_handler(KlHttpRequest *req, KlHttpResponse *res,
                                  void *user_data)
 {
     HlLuaSseRoute *route = (HlLuaSseRoute *)user_data;
@@ -52,7 +52,7 @@ void hl_lua_sse_handler(KlRequest *req, KlResponse *res,
     sh_arena_reset(lua->scratch);
 
     /* Set per-request async context */
-    lua->active_conn = kl_request_conn(req);
+    lua->active_conn = kl_http_request_conn(req);
     lua->active_req = req;
 
     /* Get handler function */
@@ -84,7 +84,7 @@ void hl_lua_sse_handler(KlRequest *req, KlResponse *res,
     /* Build request object */
     hl_lua_make_request(co, req);
 
-    /* Create SSE stream userdata (calls kl_sse_begin) */
+    /* Create SSE stream userdata (calls kl_http_sse_begin) */
     struct HlSseStreamUD *stream_ud = hl_lua_sse_push_stream(co, res);
     if (!stream_ud) {
         luaL_unref(lua->L, LUA_REGISTRYINDEX, thread_ref);
@@ -92,9 +92,9 @@ void hl_lua_sse_handler(KlRequest *req, KlResponse *res,
         lua->active_conn = NULL;
         lua->active_req = NULL;
         lua->dispatch_depth--;
-        kl_response_status(res, 500);
-        kl_response_header(res, "Content-Type", "text/plain");
-        kl_response_body_borrow(res, "SSE init failed", 15);
+        kl_http_response_status(res, 500);
+        kl_http_response_header(res, "Content-Type", "text/plain");
+        kl_http_response_body_borrow(res, "SSE init failed", 15);
         return;
     }
 
@@ -114,7 +114,7 @@ void hl_lua_sse_handler(KlRequest *req, KlResponse *res,
     if (status == LUA_OK) {
         /* Synchronous completion - end stream if not already closed */
         if (!stream_ud->closed)
-            kl_sse_end(&stream_ud->sse);
+            kl_http_sse_end(&stream_ud->sse);
 
         luaL_unref(lua->L, LUA_REGISTRYINDEX, thread_ref);
         lua->active_thread_ref = LUA_NOREF;
@@ -135,7 +135,7 @@ void hl_lua_sse_handler(KlRequest *req, KlResponse *res,
         log_error("[hull:web:sse] handler error: %s", err ? err : "unknown");
 
         if (!stream_ud->closed)
-            kl_sse_end(&stream_ud->sse);
+            kl_http_sse_end(&stream_ud->sse);
 
         luaL_unref(lua->L, LUA_REGISTRYINDEX, thread_ref);
         lua->active_thread_ref = LUA_NOREF;

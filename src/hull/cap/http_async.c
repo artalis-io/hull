@@ -1,8 +1,8 @@
 /*
  * http_async.c - Non-blocking HTTP client (thin wrapper over Keel)
  *
- * Checks host allowlist and audits, then delegates to kl_redirect_start()
- * (or kl_client_start() if redirects disabled) for async I/O. On completion,
+ * Checks host allowlist and audits, then delegates to kl_http_redirect_start()
+ * (or kl_http_client_start() if redirects disabled) for async I/O. On completion,
  * bridges back to Hull's HlAsyncCtx/HlAsyncCont layer.
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
@@ -15,9 +15,9 @@
 #include "hull/net_backend.h"
 
 #include <keel/allocator.h>
-#include <keel/client_pool.h>
-#include <keel/redirect.h>
-#include <keel/server.h>
+#include <keel/http_client_pool.h>
+#include <keel/http_redirect.h>
+#include <keel/http_server.h>
 #include <keel/url.h>
 
 #include <stdint.h>
@@ -26,11 +26,11 @@
 #include "log.h"
 
 /* ── Tagged pointer convention ───────────────────────────────────── *
- * LSB=1 marks a KlRedirectClient*; LSB=0 marks a KlClient*.
+ * LSB=1 marks a KlHttpRedirectClient*; LSB=0 marks a KlHttpClient*.
  * Same technique Keel uses for watcher vs connection dispatch.      */
 
 #define TAG_REDIRECT(p) ((void *)((uintptr_t)(p) | 1))
-#define UNTAG_REDIRECT(p) ((KlRedirectClient *)((uintptr_t)(p) & ~(uintptr_t)1))
+#define UNTAG_REDIRECT(p) ((KlHttpRedirectClient *)((uintptr_t)(p) & ~(uintptr_t)1))
 #define IS_REDIRECT(p) ((uintptr_t)(p) & 1)
 
 /* ── Static default allocator (outlives all async clients) ────────── */
@@ -53,9 +53,9 @@ static void free_redirect_client(void *driver)
 {
     if (!driver)
         return;
-    KlRedirectClient *rc = UNTAG_REDIRECT(driver);
-    kl_redirect_cancel(rc);
-    kl_redirect_free(rc);
+    KlHttpRedirectClient *rc = UNTAG_REDIRECT(driver);
+    kl_http_redirect_cancel(rc);
+    kl_http_redirect_free(rc);
 }
 
 /* ── Driver cleanup (plain client, no redirects) ─────────────────── */
@@ -64,30 +64,30 @@ static void free_keel_client(void *driver)
 {
     if (!driver)
         return;
-    KlClient *client = driver;
-    kl_client_cancel(client);
-    kl_client_free(client);
+    KlHttpClient *client = driver;
+    kl_http_client_cancel(client);
+    kl_http_client_free(client);
 }
 
-/* ── KlRedirectClient on_done callback ───────────────────────────── */
+/* ── KlHttpRedirectClient on_done callback ───────────────────────────── */
 
-static void on_redirect_done(KlRedirectClient *rc, void *user_data)
+static void on_redirect_done(KlHttpRedirectClient *rc, void *user_data)
 {
     HlAsyncCtx *ctx = user_data;
 
-    if (kl_redirect_error(rc) == 0) {
+    if (kl_http_redirect_error(rc) == 0) {
         ctx->driver = TAG_REDIRECT(rc);
 
-        const KlClientResponse *resp = kl_redirect_response(rc);
+        const KlHttpClientResponse *resp = kl_http_redirect_response(rc);
         ShJsonWriter w = hl_audit_begin("http.fetch");
         if (resp)
             sh_json_write_kv_int(&w, "status", resp->status);
         sh_json_write_kv_int(&w, "result", 0);
         hl_audit_end(&w);
     } else {
-        KlError err = kl_redirect_last_error(rc);
+        KlError err = kl_http_redirect_last_error(rc);
         ctx->driver = NULL;
-        kl_redirect_free(rc);
+        kl_http_redirect_free(rc);
 
         ShJsonWriter w = hl_audit_begin("http.fetch");
         sh_json_write_kv_string(&w, "error", kl_strerror(err));
@@ -101,25 +101,25 @@ static void on_redirect_done(KlRedirectClient *rc, void *user_data)
         hl_net_op_complete(ctx->net_ctx, (HlSuspendOp *)&ctx->op);
 }
 
-/* ── KlClient on_done callback (no-redirect path) ───────────────── */
+/* ── KlHttpClient on_done callback (no-redirect path) ───────────────── */
 
-static void on_keel_client_done(KlClient *client, void *user_data)
+static void on_keel_client_done(KlHttpClient *client, void *user_data)
 {
     HlAsyncCtx *ctx = user_data;
 
-    if (kl_client_error(client) == 0) {
+    if (kl_http_client_error(client) == 0) {
         ctx->driver = client;
 
-        const KlClientResponse *resp = kl_client_response(client);
+        const KlHttpClientResponse *resp = kl_http_client_response(client);
         ShJsonWriter w = hl_audit_begin("http.fetch");
         if (resp)
             sh_json_write_kv_int(&w, "status", resp->status);
         sh_json_write_kv_int(&w, "result", 0);
         hl_audit_end(&w);
     } else {
-        KlError err = kl_client_last_error(client);
+        KlError err = kl_http_client_last_error(client);
         ctx->driver = NULL;
-        kl_client_free(client);
+        kl_http_client_free(client);
 
         ShJsonWriter w = hl_audit_begin("http.fetch");
         sh_json_write_kv_string(&w, "error", kl_strerror(err));
@@ -155,7 +155,7 @@ static void on_http_deadline(KlAsyncOp *op, void *user_data)
 
 /* ── Public API ──────────────────────────────────────────────────── */
 
-HlAsyncCtx *hl_async_http_start(KlServer *server, KlConn *conn,
+HlAsyncCtx *hl_async_http_start(KlHttpServer *server, KlHttpConn *conn,
                                   HlNetBackendCtx *net_ctx,
                                   HlAllocator *alloc,
                                   HlHttpConfig *http_cfg,
@@ -182,14 +182,21 @@ HlAsyncCtx *hl_async_http_start(KlServer *server, KlConn *conn,
     }
 
     int timeout_ms = http_cfg->timeout_ms > 0 ? http_cfg->timeout_ms
-                                                : KL_CLIENT_DEFAULT_TIMEOUT_MS;
+                                                : KL_HTTP_CLIENT_DEFAULT_TIMEOUT_MS;
 
-    /* Construct KlClientConfig */
-    KlClientConfig kl_cfg = {
+    /* Construct KlHttpClientConfig */
+    KlHttpClientConfig kl_cfg = {
         .timeout_ms        = http_cfg->timeout_ms,
         .max_response_size = http_cfg->max_response_size,
         .tls               = http_cfg->tls,
         .decompress        = http_cfg->decompress,
+        /* Force blocking getaddrinfo for the async client (preserves /etc/hosts
+         * + search domains and goes through the OS resolver the kernel sandbox
+         * permits via its network-outbound grant). Keel v3 defaults system_dns=0
+         * to a built-in async DNS resolver, which fails under Hull's sandbox
+         * (it reads resolv.conf / sends UDP directly). This restores the pre-v3
+         * async-client resolution behavior; the sync client is always blocking. */
+        .system_dns        = 1,
     };
 
     /* HTTPS requires TLS; plain HTTP must not use TLS */
@@ -208,22 +215,22 @@ HlAsyncCtx *hl_async_http_start(KlServer *server, KlConn *conn,
 
     /* Start Keel async client - prefer redirect+pooled path */
     if (http_cfg->follow_redirects) {
-        KlRedirectConfig redir = { .max_redirects = http_cfg->max_redirects };
+        KlHttpRedirectConfig redir = { .max_redirects = http_cfg->max_redirects };
 
         ctx->free_driver = free_redirect_client;
 
-        KlRedirectClient *rc;
+        KlHttpRedirectClient *rc;
         if (http_cfg->pool)
-            rc = kl_redirect_start_pooled(
+            rc = kl_http_redirect_start_pooled(
                 http_cfg->pool, &server->ev, get_kl_alloc(), &kl_cfg, &redir,
                 method, url,
-                (const KlClientHeader *)headers, num_headers,
+                (const KlHttpClientHeader *)headers, num_headers,
                 body, body_len, on_redirect_done, ctx);
         else
-            rc = kl_redirect_start(
+            rc = kl_http_redirect_start(
                 &server->ev, get_kl_alloc(), &kl_cfg, &redir,
                 method, url,
-                (const KlClientHeader *)headers, num_headers,
+                (const KlHttpClientHeader *)headers, num_headers,
                 body, body_len, on_redirect_done, ctx);
 
         if (!rc) {
@@ -234,18 +241,18 @@ HlAsyncCtx *hl_async_http_start(KlServer *server, KlConn *conn,
     } else {
         ctx->free_driver = free_keel_client;
 
-        KlClient *kl_client;
+        KlHttpClient *kl_client;
         if (http_cfg->pool)
-            kl_client = kl_client_start_pooled(
+            kl_client = kl_http_client_start_pooled(
                 http_cfg->pool, &server->ev, get_kl_alloc(), &kl_cfg,
                 method, url,
-                (const KlClientHeader *)headers, num_headers,
+                (const KlHttpClientHeader *)headers, num_headers,
                 body, body_len, on_keel_client_done, ctx);
         else
-            kl_client = kl_client_start(
+            kl_client = kl_http_client_start(
                 &server->ev, get_kl_alloc(), &kl_cfg,
                 method, url,
-                (const KlClientHeader *)headers, num_headers,
+                (const KlHttpClientHeader *)headers, num_headers,
                 body, body_len, on_keel_client_done, ctx);
 
         if (!kl_client) {
@@ -275,11 +282,11 @@ HlAsyncCtx *hl_async_http_start(KlServer *server, KlConn *conn,
 
 /* ── Response extraction (tagged pointer dispatch) ───────────────── */
 
-const KlClientResponse *hl_http_async_response(void *driver)
+const KlHttpClientResponse *hl_http_async_response(void *driver)
 {
     if (!driver)
         return NULL;
     if (IS_REDIRECT(driver))
-        return kl_redirect_response(UNTAG_REDIRECT(driver));
-    return kl_client_response((KlClient *)driver);
+        return kl_http_redirect_response(UNTAG_REDIRECT(driver));
+    return kl_http_client_response((KlHttpClient *)driver);
 }

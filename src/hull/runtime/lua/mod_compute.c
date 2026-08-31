@@ -17,7 +17,7 @@
 #include "hull/worker_wasm.h"
 #include "hull/vfs.h"
 
-#include <keel/server.h>
+#include <keel/http_server.h>
 
 #include <stdlib.h>
 #include <string.h>

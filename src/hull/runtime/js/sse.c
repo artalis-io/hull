@@ -19,16 +19,16 @@
 #include "mod_buffer.h"
 
 #include <keel/keel.h>
-#include <keel/sse.h>
+#include <keel/http_sse.h>
 
 #include <sh_arena.h>
 
 #include "log.h"
 
 /* Forward declarations from bindings.c */
-JSValue hl_js_make_request(JSContext *ctx, KlRequest *req);
+JSValue hl_js_make_request(JSContext *ctx, KlHttpRequest *req);
 
-void hl_js_sse_handler(KlRequest *req, KlResponse *res,
+void hl_js_sse_handler(KlHttpRequest *req, KlHttpResponse *res,
                                 void *user_data)
 {
     HlJSSseRoute *route = (HlJSSseRoute *)user_data;
@@ -47,7 +47,7 @@ void hl_js_sse_handler(KlRequest *req, KlResponse *res,
     js->instruction_count = 0;
 
     /* Set per-request async context */
-    js->active_conn = kl_request_conn(req);
+    js->active_conn = kl_http_request_conn(req);
     js->active_req = req;
     js->last_async_cont = NULL;
     js->async_pending = 0;
@@ -80,7 +80,7 @@ void hl_js_sse_handler(KlRequest *req, KlResponse *res,
     /* Build request object */
     JSValue js_req = hl_js_make_request(ctx, req);
 
-    /* Create SSE stream object (calls kl_sse_begin) */
+    /* Create SSE stream object (calls kl_http_sse_begin) */
     JSValue stream_obj = hl_js_sse_create_stream(ctx, res);
     if (JS_IsException(stream_obj)) {
         JS_FreeValue(ctx, handler);
@@ -88,9 +88,9 @@ void hl_js_sse_handler(KlRequest *req, KlResponse *res,
         js->active_conn = NULL;
         js->active_req = NULL;
         js->dispatch_depth--;
-        kl_response_status(res, 500);
-        kl_response_header(res, "Content-Type", "text/plain");
-        kl_response_body_borrow(res, "SSE init failed", 15);
+        kl_http_response_status(res, 500);
+        kl_http_response_header(res, "Content-Type", "text/plain");
+        kl_http_response_body_borrow(res, "SSE init failed", 15);
         return;
     }
 

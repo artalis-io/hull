@@ -18,14 +18,14 @@
  * Build a JSON echo response containing method, path, selected headers,
  * and body (if any).
  */
-static void echo_handler(KlRequest *req, KlResponse *res, void *ctx)
+static void echo_handler(KlHttpRequest *req, KlHttpResponse *res, void *ctx)
 {
     (void)ctx;
 
     /* Get body from buffer reader (if present) */
     const char *body_data = NULL;
     size_t body_len = 0;
-    KlBufReader *br = (KlBufReader *)req->body_reader;
+    KlHttpBufReader *br = (KlHttpBufReader *)req->body_reader;
     if (br && br->len > 0) {
         body_data = br->data;
         body_len = br->len;
@@ -39,24 +39,26 @@ static void echo_handler(KlRequest *req, KlResponse *res, void *ctx)
 
     off += snprintf(json + off, sizeof(json) - (size_t)off,
                     "{\"method\":\"%.*s\",\"path\":\"%.*s\"",
-                    (int)kl_request_method_len(req), kl_request_method(req),
-                    (int)kl_request_path_len(req), kl_request_path(req));
+                    (int)req->method_len, req->method,
+                    (int)req->path_len, req->path);
 
     /* Echo selected headers as "headers" object */
     off += snprintf(json + off, sizeof(json) - (size_t)off, ",\"headers\":{");
     int first = 1;
-    int n_headers = kl_request_num_headers(req);
+    int n_headers = req->num_headers;
     for (int i = 0; i < n_headers; i++) {
-        KlHeader hdr = kl_request_header_at(req, i);
+        /* Keel 3.x: KlHttpRequest is concrete; read headers[] directly. */
+        const char *h_name = req->headers[i].name;
+        size_t h_name_len = req->headers[i].name_len;
         /* Skip internal headers (Host, Connection, Content-Length) for cleaner output */
-        if (hdr.name_len == 4 &&
-            strncasecmp(hdr.name, "Host", 4) == 0)
+        if (h_name_len == 4 &&
+            strncasecmp(h_name, "Host", 4) == 0)
             continue;
-        if (hdr.name_len == 10 &&
-            strncasecmp(hdr.name, "Connection", 10) == 0)
+        if (h_name_len == 10 &&
+            strncasecmp(h_name, "Connection", 10) == 0)
             continue;
-        if (hdr.name_len == 14 &&
-            strncasecmp(hdr.name, "Content-Length", 14) == 0)
+        if (h_name_len == 14 &&
+            strncasecmp(h_name, "Content-Length", 14) == 0)
             continue;
 
         if (!first)
@@ -65,8 +67,8 @@ static void echo_handler(KlRequest *req, KlResponse *res, void *ctx)
 
         off += snprintf(json + off, sizeof(json) - (size_t)off,
                         "\"%.*s\":\"%.*s\"",
-                        (int)hdr.name_len, hdr.name,
-                        (int)hdr.value_len, hdr.value);
+                        (int)h_name_len, h_name,
+                        (int)req->headers[i].value_len, req->headers[i].value);
     }
     off += snprintf(json + off, sizeof(json) - (size_t)off, "}");
 
@@ -81,18 +83,18 @@ static void echo_handler(KlRequest *req, KlResponse *res, void *ctx)
     if (off < 0 || (size_t)off >= sizeof(json))
         off = 0;
 
-    kl_response_json(res, 200, json, (size_t)off);
+    kl_http_response_json(res, 200, json, (size_t)off);
 }
 
 /* HEAD handler - same as echo but Keel handles HEAD automatically
  * (sends headers but no body). We just set the status. */
-static void head_handler(KlRequest *req, KlResponse *res, void *ctx)
+static void head_handler(KlHttpRequest *req, KlHttpResponse *res, void *ctx)
 {
     (void)req; (void)ctx;
-    kl_response_status(res, 200);
-    kl_response_header(res, "Content-Type", "application/json");
-    kl_response_header(res, "X-Echo-Method", "HEAD");
-    kl_response_body_borrow(res, "{}", 2);
+    kl_http_response_status(res, 200);
+    kl_http_response_header(res, "Content-Type", "application/json");
+    kl_http_response_header(res, "X-Echo-Method", "HEAD");
+    kl_http_response_body_borrow(res, "{}", 2);
 }
 
 int main(int argc, char **argv)
@@ -109,28 +111,28 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    KlServer s;
-    KlConfig cfg = {.port = (int)port, .bind_addr = "127.0.0.1"};
-    if (kl_server_init(&s, &cfg) < 0)
+    KlHttpServer s;
+    KlHttpServerConfig cfg = {.port = (int)port, .bind_addr = "127.0.0.1"};
+    if (kl_http_server_init(&s, &cfg) < 0)
         return 1;
 
     /* Register echo handlers for all standard HTTP methods */
-    kl_server_route(&s, "GET",     "/echo", echo_handler, NULL, NULL);
-    kl_server_route(&s, "POST",    "/echo", echo_handler, NULL, kl_body_reader_buffer);
-    kl_server_route(&s, "PUT",     "/echo", echo_handler, NULL, kl_body_reader_buffer);
-    kl_server_route(&s, "PATCH",   "/echo", echo_handler, NULL, kl_body_reader_buffer);
-    kl_server_route(&s, "DELETE",  "/echo", echo_handler, NULL, NULL);
-    kl_server_route(&s, "HEAD",    "/echo", head_handler, NULL, NULL);
-    kl_server_route(&s, "OPTIONS", "/echo", echo_handler, NULL, NULL);
+    kl_http_server_route(&s, "GET",     "/echo", echo_handler, NULL, NULL);
+    kl_http_server_route(&s, "POST",    "/echo", echo_handler, NULL, kl_http_body_reader_buffer);
+    kl_http_server_route(&s, "PUT",     "/echo", echo_handler, NULL, kl_http_body_reader_buffer);
+    kl_http_server_route(&s, "PATCH",   "/echo", echo_handler, NULL, kl_http_body_reader_buffer);
+    kl_http_server_route(&s, "DELETE",  "/echo", echo_handler, NULL, NULL);
+    kl_http_server_route(&s, "HEAD",    "/echo", head_handler, NULL, NULL);
+    kl_http_server_route(&s, "OPTIONS", "/echo", echo_handler, NULL, NULL);
 
     /* Health check for readiness probe */
-    kl_server_route(&s, "GET", "/health", echo_handler, NULL, NULL);
+    kl_http_server_route(&s, "GET", "/health", echo_handler, NULL, NULL);
 
     /* Print "READY" to stderr so the test script knows we're listening */
     fprintf(stderr, "echo server listening on 127.0.0.1:%ld\n", port);
     fflush(stderr);
 
-    kl_server_run(&s);
-    kl_server_free(&s);
+    kl_http_server_run(&s);
+    kl_http_server_free(&s);
     return 0;
 }

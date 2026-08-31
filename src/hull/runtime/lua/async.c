@@ -32,7 +32,8 @@ typedef struct HlLuaAsyncCont {
     HlLuaPushResultFn  push_result;   /* NULL = no result (sleep) */
     lua_State         *co;            /* coroutine to resume */
     int                thread_ref;    /* registry ref for coroutine */
-    KlConn            *conn;          /* connection to resume (NULL = detached) */
+    KlHttpConn            *conn;          /* connection to resume (NULL = detached) */
+    KlHttpRequest         *req;           /* request (for kl_http_request_send_response) */
     void              *timer_ctx;     /* HlLuaTimer* if running in a timer callback */
     /* Generic "handler finally completed" hook. Lets a dispatch site defer
      * teardown that must not run while the handler is still suspended (e.g.
@@ -51,10 +52,12 @@ typedef struct HlLuaAsyncCont {
  * is suspended for the async HTTP response, while the server-side
  * connection for /api/slow can also suspend for hull.sleep).
  *
- * Sets conn->state based on the result:
- *   LUA_OK    → KL_CONN_SENDING (handler completed)
- *   LUA_YIELD → KL_CONN_SUSPENDED (handler re-yielded, new op active)
- *   error     → KL_CONN_SENDING (500 response written)
+ * Under Keel v3 this only FINALIZES the response; it does NOT drive the
+ * connection state machine (Keel owns the send after on_resume; see
+ * include/hull/shared/async.h). Per result:
+ *   LUA_OK    → build the response, kl_async_complete lets Keel send it
+ *   LUA_YIELD → handler re-yielded; a new op is active, conn stays suspended
+ *   error     → build a 500, kl_async_complete lets Keel send it
  */
 /* Forward declarations for timer reschedule (defined in timers.c -
  * dropped under HL_ENABLE_HTTP=0; the corresponding call sites are
@@ -68,7 +71,7 @@ static void hl_lua_async_resume(HlAsyncCont *self, void *driver)
     HlLuaAsyncCont *lc = (HlLuaAsyncCont *)self;
     HlLua *lua = lc->lua;
     lua_State *co = lc->co;
-    KlConn *conn = lc->conn;
+    KlHttpConn *conn = lc->conn;
 
     if (!co) return;
 
@@ -76,6 +79,7 @@ static void hl_lua_async_resume(HlAsyncCont *self, void *driver)
      * (e.g., another http.async.get) can find the active connection */
     lua->active_co = co;
     lua->active_conn = conn;
+    lua->active_req = lc->req;
     lua->active_thread_ref = lc->thread_ref;
     /* Re-arm the deferred-teardown hook so a further yield inside the handler
      * carries it onto the next continuation. */
@@ -125,14 +129,15 @@ static void hl_lua_async_resume(HlAsyncCont *self, void *driver)
             lc->on_complete = NULL;
         }
 
-        if (conn) {
-            /* Attached mode - response is ready */
-            if (conn->res.body_mode == KL_BODY_STREAM) {
-                conn->state = KL_CONN_CLOSED;
-            } else {
-                conn->state = KL_CONN_SENDING;
-            }
-        }
+        /* Attached mode - finalize + send the resumed handler's response entirely
+         * behind the HTTP-feature seam, so this base-runtime object holds NO Keel
+         * refs (a compute app composes no HTTP and must link zero Keel). The seam
+         * ends a streamed body and transitions the conn to SENDING - needed both
+         * on the poll backend (kl_async_complete alone does not drive a resumed
+         * handler's send) and on the streaming-async multipart route resumed from
+         * the body reader's on_data. */
+        if (conn)
+            hl_lua_http_resume_send(conn, lc->req);
 
         /* Timer async completion: clear in_flight and reschedule.
          * Timers only exist in HTTP builds (app.every / app.daily); the
@@ -191,10 +196,8 @@ static void hl_lua_async_resume(HlAsyncCont *self, void *driver)
         }
 
 #ifdef HL_ENABLE_HTTP_SERVER
-        if (conn) {
-            hl_lua_http_error_response(&conn->res);
-            conn->state = KL_CONN_SENDING;
-        }
+        if (conn)
+            hl_lua_http_resume_error(conn, lc->req);  /* 500 + send, behind the seam */
 #endif
 
         /* Timer error: clear in_flight and reschedule anyway. CLI-only
@@ -264,6 +267,7 @@ HlAsyncCont *hl_lua_async_cont_create(HlLua *lua, HlAllocator *alloc,
     lc->co         = lua->active_co;
     lc->thread_ref = lua->active_thread_ref;
     lc->conn       = lua->active_conn;
+    lc->req        = lua->active_req;
     lc->timer_ctx  = lua->active_timer;  /* inherit timer ctx if in timer callback */
     lc->on_complete     = lua->active_on_complete;     /* deferred-teardown hook */
     lc->on_complete_ctx = lua->active_on_complete_ctx;
@@ -301,8 +305,8 @@ static int lua_hull_sleep(lua_State *L)
     if (!lua || !lua->base.async_ctx)
         return luaL_error(L, "hull.sleep() requires an active event loop");
 
-    KlServer *server = lua->server;
-    KlConn *conn = lua->active_conn;
+    KlHttpServer *server = lua->server;
+    KlHttpConn *conn = lua->active_conn;
 
     /* Create async ctx */
     HlAsyncCtx *ctx = hl_async_ctx_create(server, lua->base.net_ctx, lua->base.alloc);
@@ -332,7 +336,7 @@ static int lua_hull_sleep(lua_State *L)
         }
     } else {
         /* Detached mode: schedule via the async backend vtable. The
-         * underlying loop is the same one KlServer drives (wrapped in
+         * underlying loop is the same one KlHttpServer drives (wrapped in
          * wire_caps), so the timer fires alongside HTTP work. */
         ctx->driver = NULL;
         ctx->free_driver = NULL;
@@ -379,7 +383,7 @@ int lua_hull_async(lua_State *L)
 
     lua_State *saved_co         = lua->active_co;
     int        saved_thread_ref = lua->active_thread_ref;
-    KlConn    *saved_conn       = lua->active_conn;
+    KlHttpConn    *saved_conn       = lua->active_conn;
 
     lua->active_co         = co;
     lua->active_thread_ref = co_ref;

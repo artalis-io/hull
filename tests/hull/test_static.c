@@ -9,8 +9,8 @@
 #include "hull/vfs.h"
 
 #include <keel/allocator.h>
-#include <keel/request.h>
-#include <keel/response.h>
+#include <keel/http_request.h>
+#include <keel/http_response.h>
 #include <string.h>
 
 /* ── MIME type detection ──────────────────────────────────────────── */
@@ -89,9 +89,9 @@ UTEST(static_serve, mime_case_insensitive)
 
 /* ── Path traversal rejection ─────────────────────────────────────── */
 
-static KlRequest make_request(const char *method, const char *path)
+static KlHttpRequest make_request(const char *method, const char *path)
 {
-    KlRequest req;
+    KlHttpRequest req;
     memset(&req, 0, sizeof(req));
     req.method = method;
     req.method_len = strlen(method);
@@ -111,8 +111,8 @@ UTEST(static_serve, path_traversal_dotdot)
     hl_vfs_init(&vfs, entries, NULL);
     HlStaticCtx ctx = { .vfs = &vfs };
 
-    KlRequest req = make_request("GET", "/static/../etc/passwd");
-    KlResponse res;
+    KlHttpRequest req = make_request("GET", "/static/../etc/passwd");
+    KlHttpResponse res;
     memset(&res, 0, sizeof(res));
 
     int rc = hl_static_middleware(&req, &res, &ctx);
@@ -130,8 +130,8 @@ UTEST(static_serve, path_traversal_middle)
     hl_vfs_init(&vfs, entries, NULL);
     HlStaticCtx ctx = { .vfs = &vfs };
 
-    KlRequest req = make_request("GET", "/static/sub/../secret.txt");
-    KlResponse res;
+    KlHttpRequest req = make_request("GET", "/static/sub/../secret.txt");
+    KlHttpResponse res;
     memset(&res, 0, sizeof(res));
 
     int rc = hl_static_middleware(&req, &res, &ctx);
@@ -154,19 +154,19 @@ UTEST(static_serve, embedded_found)
     KlAllocator alloc = kl_allocator_default();
     HlStaticCtx ctx = { .vfs = &vfs };
 
-    KlRequest req = make_request("GET", "/static/style.css");
-    KlResponse res;
+    KlHttpRequest req = make_request("GET", "/static/style.css");
+    KlHttpResponse res;
     memset(&res, 0, sizeof(res));
-    kl_response_init(&res, &alloc);
+    kl_http_response_init(&res, &alloc);
 
     int rc = hl_static_middleware(&req, &res, &ctx);
     ASSERT_EQ(1, rc);
     ASSERT_EQ(200, res.status);
-    ASSERT_EQ((int)KL_BODY_BUFFER, (int)res.body_mode);
+    ASSERT_EQ((int)KL_HTTP_BODY_BUFFER, (int)res.body_mode);
     ASSERT_EQ(sizeof(css_data) - 1, res.body_len);
     ASSERT_EQ(0, memcmp(res.body, "body { color: red; }", res.body_len));
 
-    kl_response_free(&res);
+    kl_http_response_free(&res);
 }
 
 UTEST(static_serve, embedded_not_found)
@@ -183,15 +183,15 @@ UTEST(static_serve, embedded_not_found)
     KlAllocator alloc = kl_allocator_default();
     HlStaticCtx ctx = { .vfs = &vfs };
 
-    KlRequest req = make_request("GET", "/static/missing.css");
-    KlResponse res;
+    KlHttpRequest req = make_request("GET", "/static/missing.css");
+    KlHttpResponse res;
     memset(&res, 0, sizeof(res));
-    kl_response_init(&res, &alloc);
+    kl_http_response_init(&res, &alloc);
 
     int rc = hl_static_middleware(&req, &res, &ctx);
     ASSERT_EQ(0, rc);
 
-    kl_response_free(&res);
+    kl_http_response_free(&res);
 }
 
 UTEST(static_serve, non_static_path)
@@ -201,8 +201,8 @@ UTEST(static_serve, non_static_path)
     hl_vfs_init(&vfs, empty, NULL);
     HlStaticCtx ctx = { .vfs = &vfs };
 
-    KlRequest req = make_request("GET", "/api/users");
-    KlResponse res;
+    KlHttpRequest req = make_request("GET", "/api/users");
+    KlHttpResponse res;
     memset(&res, 0, sizeof(res));
 
     int rc = hl_static_middleware(&req, &res, &ctx);
@@ -220,8 +220,8 @@ UTEST(static_serve, post_method_skipped)
     hl_vfs_init(&vfs, entries, NULL);
     HlStaticCtx ctx = { .vfs = &vfs };
 
-    KlRequest req = make_request("POST", "/static/style.css");
-    KlResponse res;
+    KlHttpRequest req = make_request("POST", "/static/style.css");
+    KlHttpResponse res;
     memset(&res, 0, sizeof(res));
 
     int rc = hl_static_middleware(&req, &res, &ctx);
@@ -248,16 +248,16 @@ UTEST(static_serve, head_serves_same_as_get)
     KlAllocator alloc = kl_allocator_default();
     HlStaticCtx ctx = { .vfs = &vfs };
 
-    KlRequest req = make_request("HEAD", "/static/style.css");
-    KlResponse res;
+    KlHttpRequest req = make_request("HEAD", "/static/style.css");
+    KlHttpResponse res;
     memset(&res, 0, sizeof(res));
-    kl_response_init(&res, &alloc);
+    kl_http_response_init(&res, &alloc);
 
     int rc = hl_static_middleware(&req, &res, &ctx);
     ASSERT_EQ(1, rc);
     ASSERT_EQ(200, res.status);
 
-    kl_response_free(&res);
+    kl_http_response_free(&res);
 }
 
 /* ── Platform VFS fallback (stdlib-shipped widget assets) ─────────── */
@@ -279,10 +279,10 @@ UTEST(static_serve, stdlib_fallback_hit)
     KlAllocator alloc = kl_allocator_default();
     HlStaticCtx ctx = { .vfs = &app_vfs, .stdlib_vfs = &stdlib_vfs };
 
-    KlRequest req = make_request("GET", "/static/hull/htmx/toast/toast.css");
-    KlResponse res;
+    KlHttpRequest req = make_request("GET", "/static/hull/htmx/toast/toast.css");
+    KlHttpResponse res;
     memset(&res, 0, sizeof(res));
-    kl_response_init(&res, &alloc);
+    kl_http_response_init(&res, &alloc);
 
     int rc = hl_static_middleware(&req, &res, &ctx);
     ASSERT_EQ(1, rc);
@@ -290,7 +290,7 @@ UTEST(static_serve, stdlib_fallback_hit)
     ASSERT_EQ(sizeof(css) - 1, res.body_len);
     ASSERT_EQ(0, memcmp(res.body, css, res.body_len));
 
-    kl_response_free(&res);
+    kl_http_response_free(&res);
 }
 
 UTEST(static_serve, app_shadows_stdlib)
@@ -313,10 +313,10 @@ UTEST(static_serve, app_shadows_stdlib)
     KlAllocator alloc = kl_allocator_default();
     HlStaticCtx ctx = { .vfs = &app_vfs, .stdlib_vfs = &stdlib_vfs };
 
-    KlRequest req = make_request("GET", "/static/hull/htmx/toast/toast.css");
-    KlResponse res;
+    KlHttpRequest req = make_request("GET", "/static/hull/htmx/toast/toast.css");
+    KlHttpResponse res;
     memset(&res, 0, sizeof(res));
-    kl_response_init(&res, &alloc);
+    kl_http_response_init(&res, &alloc);
 
     int rc = hl_static_middleware(&req, &res, &ctx);
     ASSERT_EQ(1, rc);
@@ -324,7 +324,7 @@ UTEST(static_serve, app_shadows_stdlib)
     ASSERT_EQ(sizeof(app_css) - 1, res.body_len);
     ASSERT_EQ(0, memcmp(res.body, app_css, res.body_len));
 
-    kl_response_free(&res);
+    kl_http_response_free(&res);
 }
 
 UTEST(static_serve, stdlib_miss_returns_zero)
@@ -343,8 +343,8 @@ UTEST(static_serve, stdlib_miss_returns_zero)
 
     HlStaticCtx ctx = { .vfs = &app_vfs, .stdlib_vfs = &stdlib_vfs };
 
-    KlRequest req = make_request("GET", "/static/hull/htmx/missing.css");
-    KlResponse res;
+    KlHttpRequest req = make_request("GET", "/static/hull/htmx/missing.css");
+    KlHttpResponse res;
     memset(&res, 0, sizeof(res));
 
     int rc = hl_static_middleware(&req, &res, &ctx);
@@ -366,17 +366,17 @@ UTEST(static_serve, stdlib_vfs_null_is_safe)
     KlAllocator alloc = kl_allocator_default();
     HlStaticCtx ctx = { .vfs = &vfs, .stdlib_vfs = NULL };
 
-    KlRequest req = make_request("GET", "/static/style.css");
-    KlResponse res;
+    KlHttpRequest req = make_request("GET", "/static/style.css");
+    KlHttpResponse res;
     memset(&res, 0, sizeof(res));
-    kl_response_init(&res, &alloc);
+    kl_http_response_init(&res, &alloc);
 
     int rc = hl_static_middleware(&req, &res, &ctx);
     ASSERT_EQ(1, rc);
     ASSERT_EQ(200, res.status);
     ASSERT_EQ(sizeof(css) - 1, res.body_len);
 
-    kl_response_free(&res);
+    kl_http_response_free(&res);
 }
 
 UTEST_MAIN()

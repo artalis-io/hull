@@ -11,7 +11,7 @@
 
 #include "mod_buffer.h"
 
-#include <keel/sse.h>
+#include <keel/http_sse.h>
 
 #include <string.h>
 
@@ -22,7 +22,7 @@ JSClassID js_sse_stream_class_id;
 /* ── SSE stream opaque ─────────────────────────────────────────────── */
 
 typedef struct {
-    KlSse    sse;
+    KlHttpSse    sse;
     int      closed;
 } HlJSSseStreamUD;
 
@@ -54,7 +54,7 @@ static JSValue js_sse_event(JSContext *ctx, JSValueConst this_val,
     if (argc >= 3 && !JS_IsUndefined(argv[2]) && !JS_IsNull(argv[2]))
         id = JS_ToCString(ctx, argv[2]);
 
-    int rc = kl_sse_event(&ud->sse, event_name, data, data_len, id);
+    int rc = kl_http_sse_event(&ud->sse, event_name, data, data_len, id);
 
     if (event_name) JS_FreeCString(ctx, event_name);
     JS_FreeCString(ctx, data);
@@ -78,7 +78,7 @@ static JSValue js_sse_comment(JSContext *ctx, JSValueConst this_val,
     const char *text = JS_ToCStringLen(ctx, &len, argv[0]);
     if (!text) return JS_EXCEPTION;
 
-    int rc = kl_sse_comment(&ud->sse, text, len);
+    int rc = kl_http_sse_comment(&ud->sse, text, len);
     JS_FreeCString(ctx, text);
 
     if (rc < 0)
@@ -95,7 +95,7 @@ static JSValue js_sse_close(JSContext *ctx, JSValueConst this_val,
     if (!ud || ud->closed)
         return JS_UNDEFINED;
 
-    kl_sse_end(&ud->sse);
+    kl_http_sse_end(&ud->sse);
     ud->closed = 1;
     return JS_UNDEFINED;
 }
@@ -136,9 +136,9 @@ void hl_js_sse_register_class(JSContext *ctx)
     JS_SetClassProto(ctx, js_sse_stream_class_id, proto);
 }
 
-/* Create and return an SSE stream JS object. Calls kl_sse_begin.
+/* Create and return an SSE stream JS object. Calls kl_http_sse_begin.
  * Returns JS_EXCEPTION on error. */
-JSValue hl_js_sse_create_stream(JSContext *ctx, KlResponse *res)
+JSValue hl_js_sse_create_stream(JSContext *ctx, KlHttpResponse *res)
 {
     JSValue obj = JS_NewObjectClass(ctx, (int)js_sse_stream_class_id);
     if (JS_IsException(obj))
@@ -151,7 +151,7 @@ JSValue hl_js_sse_create_stream(JSContext *ctx, KlResponse *res)
     }
     ud->closed = 0;
 
-    if (kl_sse_begin(res, &ud->sse) < 0) {
+    if (kl_http_sse_begin(res, &ud->sse) < 0) {
         js_free(ctx, ud);
         JS_FreeValue(ctx, obj);
         return JS_EXCEPTION;
@@ -177,7 +177,7 @@ void hl_js_sse_stream_force_close(JSContext *ctx, JSValueConst val)
     HlJSSseStreamUD *ud = (HlJSSseStreamUD *)JS_GetOpaque(val,
                                                              js_sse_stream_class_id);
     if (ud && !ud->closed) {
-        kl_sse_end(&ud->sse);
+        kl_http_sse_end(&ud->sse);
         ud->closed = 1;
     }
 }

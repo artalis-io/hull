@@ -4,8 +4,8 @@
  *
  * Functions that don't fit the generic HlAsyncBackend vtable because
  * they expose Keel types. Used by serve.c (which already speaks Keel)
- * to wire the existing KlServer event loop into the vtable-aware
- * world so other consumers don't have to know about KlServer at all.
+ * to wire the existing KlHttpServer event loop into the vtable-aware
+ * world so other consumers don't have to know about KlHttpServer at all.
  *
  * Callers outside the Keel-aware boundary should NOT include this
  * header - they go through include/hull/async_backend.h's vtable.
@@ -22,12 +22,12 @@ typedef struct KlEventCtx        KlEventCtx;
 /**
  * Wrap an existing KlEventCtx into an HlAsyncBackendCtx that doesn't
  * own the underlying loop. Use this when the loop is owned by a
- * KlServer and you want vtable consumers to share it - instead of
+ * KlHttpServer and you want vtable consumers to share it - instead of
  * calling backend->init() which would create a fresh loop.
  *
  * The returned ctx must be freed with hl_async_backend_keel_unwrap,
  * which only releases the wrapper - the underlying KlEventCtx
- * remains owned by the caller (typically KlServer).
+ * remains owned by the caller (typically KlHttpServer).
  *
  * Returns NULL on allocation failure.
  */

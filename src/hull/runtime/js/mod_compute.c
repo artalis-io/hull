@@ -18,7 +18,7 @@
 #include "hull/net_backend.h"
 #include "hull/utils/alloc.h"
 
-#include <keel/server.h>
+#include <keel/http_server.h>
 #include <stdatomic.h>
 
 /* ── WasmBuffer JS class ──────────────────────────────────────────── */

@@ -32,7 +32,7 @@ static int lua_sse_event(lua_State *L)
     const char *data = luaL_checklstring(L, 3, &data_len);
     const char *id = luaL_optstring(L, 4, NULL);
 
-    int rc = kl_sse_event(&ud->sse, event_name, data, data_len, id);
+    int rc = kl_http_sse_event(&ud->sse, event_name, data, data_len, id);
     if (rc < 0)
         return luaL_error(L, "SSE write failed");
 
@@ -48,7 +48,7 @@ static int lua_sse_comment(lua_State *L)
     size_t len;
     const char *text = luaL_checklstring(L, 2, &len);
 
-    int rc = kl_sse_comment(&ud->sse, text, len);
+    int rc = kl_http_sse_comment(&ud->sse, text, len);
     if (rc < 0)
         return luaL_error(L, "SSE write failed");
 
@@ -61,7 +61,7 @@ static int lua_sse_close(lua_State *L)
     if (ud->closed)
         return 0;
 
-    kl_sse_end(&ud->sse);
+    kl_http_sse_end(&ud->sse);
     ud->closed = 1;
     return 0;
 }
@@ -82,14 +82,14 @@ void hl_lua_sse_register_mt(lua_State *L)
     lua_pop(L, 1); /* pop metatable */
 }
 
-/* Create and push an SSE stream userdata. Calls kl_sse_begin.
+/* Create and push an SSE stream userdata. Calls kl_http_sse_begin.
  * Returns pointer to the userdata, or NULL on error. */
-struct HlSseStreamUD *hl_lua_sse_push_stream(lua_State *L, KlResponse *res)
+struct HlSseStreamUD *hl_lua_sse_push_stream(lua_State *L, KlHttpResponse *res)
 {
     HlSseStreamUD *ud = (HlSseStreamUD *)lua_newuserdata(L, sizeof(HlSseStreamUD));
     ud->closed = 0;
 
-    if (kl_sse_begin(res, &ud->sse) < 0) {
+    if (kl_http_sse_begin(res, &ud->sse) < 0) {
         lua_pop(L, 1);
         return NULL;
     }
