@@ -22,6 +22,7 @@
 #include "hull/cap/db_backend.h"   /* hl_db_feature_backends: detect a composed DuckDB feature */
 #endif
 
+#include <errno.h>
 #include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -145,6 +146,26 @@ static int sb_supported(void) { return 1; }
 extern int pledge(const char *promises, const char *execpromises);
 extern int unveil(const char *path, const char *permissions);
 extern int __pledge_mode;
+extern int landlock_create_ruleset(const void *attr, size_t size,
+                                    unsigned int flags);
+
+/* LANDLOCK_CREATE_RULESET_VERSION has been stable since Landlock's first ABI.
+ * Declare the value locally so Hull still builds with old libc kernel headers. */
+#define HL_LANDLOCK_CREATE_RULESET_VERSION 1u
+
+static int linux_landlock_abi(void)
+{
+    static int probed;
+    static int abi;
+    if (!probed) {
+        int saved_errno = errno;
+        abi = landlock_create_ruleset(NULL, 0,
+                                      HL_LANDLOCK_CREATE_RULESET_VERSION);
+        errno = saved_errno;
+        probed = 1;
+    }
+    return abi;
+}
 
 static int sb_supported(void) { return 1; }
 
@@ -576,6 +597,11 @@ int hl_sandbox_apply_pledge(void)
 #endif
 
 #ifdef __linux__
+    if (linux_landlock_abi() < 1) {
+        log_warn("[sandbox] Landlock unavailable in this Linux kernel; "
+                 "phase 1 will apply seccomp only. Phase 2 will fail closed "
+                 "unless --allow-degraded-sandbox is set");
+    }
     __pledge_mode = 0x0001 | 0x0010; /* KILL_PROCESS | STDERR_LOGGING */
 #endif
 
@@ -656,6 +682,22 @@ int hl_sandbox_apply(const HlSandboxPolicy *policy, const char *app_dir,
         log_info("[sandbox] kernel sandbox not available on this platform");
         return 0;
     }
+
+#ifdef __linux__
+    int landlock_abi = linux_landlock_abi();
+    if (landlock_abi < 1 && !policy->allow_degraded) {
+        log_error("[sandbox] Landlock filesystem confinement is unavailable "
+                  "in this Linux kernel - refusing to report a full sandbox. "
+                  "Enable CONFIG_SECURITY_LANDLOCK, or explicitly use "
+                  "--allow-degraded-sandbox for seccomp + Hull capability "
+                  "enforcement");
+        return -1;
+    }
+    if (landlock_abi < 1) {
+        log_warn("[sandbox] DEGRADED: Landlock unavailable; filesystem paths "
+                 "are enforced by Hull's capability layer, not by the kernel");
+    }
+#endif
 
 #ifdef __APPLE__
     /* ── macOS: Hardened Runtime check (release-only fail-closed) ─
@@ -973,8 +1015,16 @@ int hl_sandbox_apply(const HlSandboxPolicy *policy, const char *app_dir,
         return -1;
     }
 
-    log_info("[sandbox] applied (unveil: %d read, %d write; pledge: %s)",
-             policy->fs_read_count, policy->fs_write_count, promises);
+#if defined(__linux__)
+    if (landlock_abi < 1) {
+        log_warn("[sandbox] applied DEGRADED (filesystem: capability layer; "
+                 "syscalls: seccomp pledge: %s)", promises);
+    } else
+#endif
+    {
+        log_info("[sandbox] applied (unveil: %d read, %d write; pledge: %s)",
+                 policy->fs_read_count, policy->fs_write_count, promises);
+    }
 
     return 0;
 }
@@ -1086,4 +1136,5 @@ void hl_sandbox_policy_from_manifest(HlSandboxPolicy *policy,
      * (deny). `hl_sandbox_apply` enforces the W^X conflict check. */
     policy->allow_dynamic_code      = manifest->allow_dynamic_code;
     policy->allow_dynamic_libraries = manifest->allow_dynamic_libraries;
+    policy->allow_degraded = 0;
 }

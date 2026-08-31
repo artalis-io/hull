@@ -263,6 +263,9 @@ static void usage(const char *prog)
             "  --workers N          Thread pool worker count (default: 4)\n"
             "  --queue-capacity N   Thread pool queue capacity (default: 64)\n"
             "  --no-compress        Disable response compression\n"
+            "  --allow-degraded-sandbox\n"
+            "                       Allow seccomp + capability enforcement when Linux\n"
+            "                       Landlock filesystem confinement is unavailable\n"
             "  --no-sandbox         Disable kernel sandbox (dev/debug only)\n"
             "\n"
             "WASM compute options:\n"
@@ -337,6 +340,7 @@ typedef struct {
     int log_level;
     int no_migrate;
     int no_sandbox;
+    int allow_degraded_sandbox;
     int no_db;
     int no_compress;
     int no_verify_platform;  /* skip gethull platform-sig check on --verify-sig */
@@ -429,6 +433,8 @@ static int hl_parse_serve_args(int argc, char **argv, HlServeConfig *cfg)
             cfg->no_migrate = 1;
         } else if (strcmp(argv[i], "--no-sandbox") == 0) {
             cfg->no_sandbox = 1;
+        } else if (strcmp(argv[i], "--allow-degraded-sandbox") == 0) {
+            cfg->allow_degraded_sandbox = 1;
         } else if (strcmp(argv[i], "--no-verify-platform") == 0) {
             cfg->no_verify_platform = 1;
         } else if (strcmp(argv[i], "--no-db") == 0) {
@@ -1647,6 +1653,7 @@ static int hl_serve_apply_sandbox(HlServerState *s)
     if (!s->cfg.no_sandbox) {
         HlSandboxPolicy sandbox_policy;
         hl_sandbox_policy_from_manifest(&sandbox_policy, &s->manifest);
+        sandbox_policy.allow_degraded = s->cfg.allow_degraded_sandbox;
 
         /* The `-d` default DSN lives in cfg, not the manifest, so
          * hl_sandbox_policy_from_manifest can't see it. A `-d postgres://...`

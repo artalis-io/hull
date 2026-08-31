@@ -340,6 +340,9 @@ Grouped by purpose. Run `hull <cmd> --help` for full per-command flags.
 --tls-cert / --tls-key   TLS certs
 --no-migrate         Skip auto-run migrations
 --no-sandbox         Disable kernel sandbox (debug)
+--allow-degraded-sandbox
+                     Linux only: explicitly allow seccomp + Hull capability
+                     enforcement when the kernel has no Landlock support
 --audit              Enable capability audit JSON logging
 --max-instructions N Override instruction limit (default 100m)
 --max-connections N  Max concurrent connections (default 256)

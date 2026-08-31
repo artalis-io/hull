@@ -428,6 +428,15 @@ int sys_unveil_linux(const char *path, const char *permissions) {
 int unveil(const char *path, const char *permissions) {
   int e, rc;
   e = errno;
+  /* The ABI probe runs in a constructor.  Do not rely on its errno still
+   * being current when unveil() is called later: unrelated startup work may
+   * have changed errno.  Hull probes and reports this degraded state itself;
+   * the compatibility function must consistently retain its documented
+   * no-op behavior on kernels built without Landlock. */
+  if (landlock_abi_version < 1) {
+    errno = e;
+    return 0;
+  }
   /*if (IsGenuineBlink()) {
     rc = 0;  // blink doesn't support landlock
   } else if (IsLinux()) {*/

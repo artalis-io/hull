@@ -72,6 +72,7 @@ static const char **build_env_allowlist(const HlManifest *m)
 static int cli_parse_args(int argc, char **argv,
                           int *out_app_argc, char ***out_app_argv,
                           int *out_no_migrate, int *out_no_sandbox,
+                          int *out_allow_degraded_sandbox,
                           const char **out_db_path)
 {
     int entry_idx = -1;
@@ -79,6 +80,7 @@ static int cli_parse_args(int argc, char **argv,
     *out_app_argv = NULL;
     *out_no_migrate = 0;
     *out_no_sandbox = 0;
+    *out_allow_degraded_sandbox = 0;
     *out_db_path = NULL;
 
     for (int i = 1; i < argc; i++) {
@@ -93,6 +95,10 @@ static int cli_parse_args(int argc, char **argv,
         }
         if (strcmp(argv[i], "--no-sandbox") == 0) {
             *out_no_sandbox = 1;
+            continue;
+        }
+        if (strcmp(argv[i], "--allow-degraded-sandbox") == 0) {
+            *out_allow_degraded_sandbox = 1;
             continue;
         }
         if (strcmp(argv[i], "-d") == 0 && i + 1 < argc) {
@@ -117,11 +123,12 @@ int hull_serve(int argc, char **argv)
 {
     int app_argc = 0;
     char **app_argv = NULL;
-    int no_migrate = 0, no_sandbox = 0;
+    int no_migrate = 0, no_sandbox = 0, allow_degraded_sandbox = 0;
     const char *db_path = NULL;
 
     int entry_idx = cli_parse_args(argc, argv, &app_argc, &app_argv,
-                                    &no_migrate, &no_sandbox, &db_path);
+                                    &no_migrate, &no_sandbox,
+                                    &allow_degraded_sandbox, &db_path);
     if (!db_path) db_path = getenv("HULL_DB");
 
     /* Resolve the entry point. A `hull build` binary embeds its app and is run
@@ -318,6 +325,7 @@ int hull_serve(int argc, char **argv)
     if (!no_sandbox) {
         HlSandboxPolicy sandbox_policy;
         hl_sandbox_policy_from_manifest(&sandbox_policy, &manifest);
+        sandbox_policy.allow_degraded = allow_degraded_sandbox;
         /* CLI mode → no inbound network. */
         sandbox_policy.network_inbound = 0;
 
