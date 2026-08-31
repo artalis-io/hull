@@ -14,7 +14,7 @@
 
 #include "hull/tls_transport.h"
 
-#include <keel/tls_mbedtls.h>   /* kl_tls_mbedtls_*, KL_MTLS_NONE */
+#include <keel_tls_mbedtls.h>   /* kl_tls_mbedtls_*, KL_MTLS_NONE */
 
 KlTlsCtx *hl_tls_server_ctx_create(const char *cert_path, const char *key_path,
                                    KlAllocator *alloc)

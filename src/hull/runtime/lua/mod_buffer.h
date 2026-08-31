@@ -88,15 +88,15 @@ int luaopen_hull_tui(lua_State *L);
 struct HlWsConn;
 
 /* SSE stream userdata (used by runtime.c for stream lifecycle) */
-#include <keel/sse.h>
+#include <keel/http_sse.h>
 struct HlSseStreamUD {
-    KlSse    sse;     /* Keel SSE context */
+    KlHttpSse    sse;     /* Keel SSE context */
     int      closed;  /* 1 after close */
 };
 
 /* SSE stream helpers (defined in lua/mod_sse.c) */
 void hl_lua_sse_register_mt(lua_State *L);
-struct HlSseStreamUD *hl_lua_sse_push_stream(lua_State *L, KlResponse *res);
+struct HlSseStreamUD *hl_lua_sse_push_stream(lua_State *L, KlHttpResponse *res);
 
 /* hull.ws module (defined in lua/mod_ws.c) */
 int luaopen_hull_ws_server(lua_State *L);

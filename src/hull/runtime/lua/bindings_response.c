@@ -2,14 +2,14 @@
  * bindings_response.c - the res:* response helpers, extracted from bindings.c.
  *
  * Moved out (#114) so the core lua_rt_bindings.o holds ZERO Keel-response /
- * compress references (kl_response_*, hl_maybe_compress): those live only here,
+ * compress references (kl_http_response_*, hl_maybe_compress): those live only here,
  * on the HTTP side of the seam, composed into the `http` feature alongside
  * http_register.c.
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
 
-#include "hull/runtime/lua.h"     /* HlLua, KlResponse, hl_lua_make_response */
+#include "hull/runtime/lua.h"     /* HlLua, KlHttpResponse, hl_lua_make_response */
 #include "hull/utils/compress.h"  /* hl_maybe_compress */
 #include "hull/http_feature.h"    /* hl_lua_http_error_response (seam strong) */
 #include "internal.h"             /* get_hl_lua_from_L (shared with bindings.c) */
@@ -18,7 +18,9 @@
 #include "lualib.h"
 #include "lauxlib.h"
 
-#include <keel/response.h>
+#include <keel/http_response.h>
+#include <keel/http_connection.h>  /* kl_http_conn_response (finalize seam) */
+#include <keel/http_request.h>     /* kl_http_request_send_response (finalize seam) */
 
 #include <string.h>
 #include <strings.h>  /* strncasecmp */
@@ -39,9 +41,9 @@
  *   res:redirect(url, code) → HTTP redirect
  */
 
-static KlResponse *check_response(lua_State *L, int idx)
+static KlHttpResponse *check_response(lua_State *L, int idx)
 {
-    KlResponse **pp = (KlResponse **)luaL_checkudata(L, idx, HL_RESPONSE_MT);
+    KlHttpResponse **pp = (KlHttpResponse **)luaL_checkudata(L, idx, HL_RESPONSE_MT);
     return *pp;
 }
 
@@ -51,8 +53,8 @@ static KlResponse *check_response(lua_State *L, int idx)
  * the browser sees two Content-Security-Policy headers and enforces
  * the strict intersection, which typically blocks the page's own
  * scripts. Scans res->hdr_buf line by line; headers are appended as
- * "Name: value\r\n" by kl_response_header. */
-static int hl_response_has_header(KlResponse *res, const char *name)
+ * "Name: value\r\n" by kl_http_response_header. */
+static int hl_response_has_header(KlHttpResponse *res, const char *name)
 {
     if (!res || !res->hdr_buf || !name) return 0;
     size_t name_len = strlen(name);
@@ -75,9 +77,9 @@ static int hl_response_has_header(KlResponse *res, const char *name)
 /* res:status(code) */
 static int lua_res_status(lua_State *L)
 {
-    KlResponse *res = check_response(L, 1);
+    KlHttpResponse *res = check_response(L, 1);
     int code = (int)luaL_checkinteger(L, 2);
-    kl_response_status(res, code);
+    kl_http_response_status(res, code);
     lua_pushvalue(L, 1); /* chainable */
     return 1;
 }
@@ -85,10 +87,10 @@ static int lua_res_status(lua_State *L)
 /* res:header(name, value) */
 static int lua_res_header(lua_State *L)
 {
-    KlResponse *res = check_response(L, 1);
+    KlHttpResponse *res = check_response(L, 1);
     const char *name = luaL_checkstring(L, 2);
     const char *value = luaL_checkstring(L, 3);
-    kl_response_header(res, name, value);
+    kl_http_response_header(res, name, value);
     lua_pushvalue(L, 1); /* chainable */
     return 1;
 }
@@ -96,13 +98,13 @@ static int lua_res_header(lua_State *L)
 /* res:json(data, code?) - uses json.encode() from Lua stdlib */
 static int lua_res_json(lua_State *L)
 {
-    KlResponse *res = check_response(L, 1);
+    KlHttpResponse *res = check_response(L, 1);
     HlLua *hlua = get_hl_lua_from_L(L);
 
     /* Optional status code */
     if (lua_gettop(L) >= 3) {
         int code = (int)luaL_checkinteger(L, 3);
-        kl_response_status(res, code);
+        kl_http_response_status(res, code);
     }
 
     /* Call json.encode(data) via the runtime's cached decoder
@@ -123,7 +125,7 @@ static int lua_res_json(lua_State *L)
         lua_pop(L, 2);
         return luaL_error(L, "res:json - json.encode did not return a string");
     }
-    kl_response_header(res, "Content-Type", "application/json");
+    kl_http_response_header(res, "Content-Type", "application/json");
     hl_maybe_compress(hlua ? hlua->active_req : NULL, res,
                       hlua ? hlua->base.compress : NULL,
                       json_str, json_len);
@@ -136,18 +138,18 @@ static int lua_res_json(lua_State *L)
 /* res:html(string) */
 static int lua_res_html(lua_State *L)
 {
-    KlResponse *res = check_response(L, 1);
+    KlHttpResponse *res = check_response(L, 1);
     HlLua *hlua = get_hl_lua_from_L(L);
     size_t len;
     const char *html = luaL_checklstring(L, 2, &len);
-    kl_response_header(res, "Content-Type", "text/html; charset=utf-8");
+    kl_http_response_header(res, "Content-Type", "text/html; charset=utf-8");
     /* Skip the default CSP if middleware already wrote one - two CSP
      * headers cause browsers to enforce the strict intersection
      * (typically blocking the page's own scripts). The app-supplied
      * one wins. */
     if (hlua && hlua->base.csp_policy &&
         !hl_response_has_header(res, "Content-Security-Policy"))
-        kl_response_header(res, "Content-Security-Policy",
+        kl_http_response_header(res, "Content-Security-Policy",
                            hlua->base.csp_policy);
     hl_maybe_compress(hlua ? hlua->active_req : NULL, res,
                       hlua ? hlua->base.compress : NULL,
@@ -158,11 +160,11 @@ static int lua_res_html(lua_State *L)
 /* res:text(string) */
 static int lua_res_text(lua_State *L)
 {
-    KlResponse *res = check_response(L, 1);
+    KlHttpResponse *res = check_response(L, 1);
     HlLua *hlua = get_hl_lua_from_L(L);
     size_t len;
     const char *text = luaL_checklstring(L, 2, &len);
-    kl_response_header(res, "Content-Type", "text/plain; charset=utf-8");
+    kl_http_response_header(res, "Content-Type", "text/plain; charset=utf-8");
     hl_maybe_compress(hlua ? hlua->active_req : NULL, res,
                       hlua ? hlua->base.compress : NULL,
                       text, len);
@@ -179,15 +181,15 @@ static int lua_res_text(lua_State *L)
  * any ETag computed on the response bytes).
  *
  * The body is copied into a response-owned buffer via
- * kl_response_body_copy, so the Lua string can be GC'd safely. Lua
+ * kl_http_response_body_copy, so the Lua string can be GC'd safely. Lua
  * strings are binary-safe (#str gives the byte count), so this is
  * a true bytes API. */
 static int lua_res_bytes(lua_State *L)
 {
-    KlResponse *res = check_response(L, 1);
+    KlHttpResponse *res = check_response(L, 1);
     size_t len;
     const char *bytes = luaL_checklstring(L, 2, &len);
-    if (kl_response_body_copy(res, bytes, len) != 0)
+    if (kl_http_response_body_copy(res, bytes, len) != 0)
         return luaL_error(L, "res:bytes: out of memory");
     return 0;
 }
@@ -195,15 +197,15 @@ static int lua_res_bytes(lua_State *L)
 /* res:redirect(url, code?) */
 static int lua_res_redirect(lua_State *L)
 {
-    KlResponse *res = check_response(L, 1);
+    KlHttpResponse *res = check_response(L, 1);
     const char *url = luaL_checkstring(L, 2);
     int code = 302;
     if (lua_gettop(L) >= 3)
         code = (int)luaL_checkinteger(L, 3);
 
-    kl_response_status(res, code);
-    kl_response_header(res, "Location", url);
-    kl_response_body_borrow(res, "", 0);
+    kl_http_response_status(res, code);
+    kl_http_response_header(res, "Location", url);
+    kl_http_response_body_borrow(res, "", 0);
     return 0;
 }
 
@@ -232,21 +234,39 @@ static void ensure_response_metatable(lua_State *L)
 
 /* ── Public: create Lua response userdata ───────────────────────────── */
 
-void hl_lua_make_response(lua_State *L, KlResponse *res)
+void hl_lua_make_response(lua_State *L, KlHttpResponse *res)
 {
     ensure_response_metatable(L);
 
-    KlResponse **pp = (KlResponse **)lua_newuserdata(L, sizeof(KlResponse *));
+    KlHttpResponse **pp = (KlHttpResponse **)lua_newuserdata(L, sizeof(KlHttpResponse *));
     *pp = res;
     luaL_setmetatable(L, HL_RESPONSE_MT);
 }
 
 /* ── HTTP-feature seam: 500-error response ──────────────────────────── */
 /* Strong override for the Lua runtime. Extracted from lua/dispatch.c +
- * lua/async.c so those core objects hold no kl_response_* refs. */
-void hl_lua_http_error_response(struct KlResponse *res)
+ * lua/async.c so those core objects hold no kl_http_response_* refs. */
+void hl_lua_http_error_response(struct KlHttpResponse *res)
 {
-    kl_response_status(res, 500);
-    kl_response_header(res, "Content-Type", "text/plain");
-    kl_response_body_borrow(res, "Internal Server Error", 21);
+    kl_http_response_status(res, 500);
+    kl_http_response_header(res, "Content-Type", "text/plain");
+    kl_http_response_body_borrow(res, "Internal Server Error", 21);
+}
+
+/* Strong overrides: finalize + send a resumed request's response. Keeps ALL
+ * kl_http_* refs (incl. kl_http_request_send_response from the heavy
+ * http_server_core object) out of the base runtime's lua_rt_async.o; see
+ * include/hull/http_feature.h. */
+void hl_lua_http_resume_send(struct KlHttpConn *conn, struct KlHttpRequest *req)
+{
+    KlHttpResponse *res = kl_http_conn_response(conn);
+    if (res && res->body_mode == KL_HTTP_BODY_STREAM)
+        kl_http_response_end_stream(res);
+    kl_http_request_send_response(req);
+}
+
+void hl_lua_http_resume_error(struct KlHttpConn *conn, struct KlHttpRequest *req)
+{
+    hl_lua_http_error_response(kl_http_conn_response(conn));
+    kl_http_request_send_response(req);
 }

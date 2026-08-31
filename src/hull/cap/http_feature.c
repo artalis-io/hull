@@ -29,14 +29,34 @@ __attribute__((weak)) int hl_http_feature_present(void)
     return 0;
 }
 
-__attribute__((weak)) void hl_lua_http_error_response(struct KlResponse *res)
+__attribute__((weak)) void hl_lua_http_error_response(struct KlHttpResponse *res)
 {
     (void)res;
 }
 
-__attribute__((weak)) void hl_js_http_error_response(struct KlResponse *res)
+__attribute__((weak)) void hl_js_http_error_response(struct KlHttpResponse *res)
 {
     (void)res;
+}
+
+__attribute__((weak)) void hl_lua_http_resume_send(struct KlHttpConn *conn, struct KlHttpRequest *req)
+{
+    (void)conn; (void)req;
+}
+
+__attribute__((weak)) void hl_js_http_resume_send(struct KlHttpConn *conn, struct KlHttpRequest *req)
+{
+    (void)conn; (void)req;
+}
+
+__attribute__((weak)) void hl_lua_http_resume_error(struct KlHttpConn *conn, struct KlHttpRequest *req)
+{
+    (void)conn; (void)req;
+}
+
+__attribute__((weak)) void hl_js_http_resume_error(struct KlHttpConn *conn, struct KlHttpRequest *req)
+{
+    (void)conn; (void)req;
 }
 
 __attribute__((weak)) void hl_http_ws_registry_free(void *ws_registry)

@@ -11,7 +11,7 @@
  *
  * Notes on the op_suspend/op_complete contract:
  *
- *   Keel's KlAsyncOp is tied to a KlConn (used by HTTP request
+ *   Keel's KlAsyncOp is tied to a KlHttpConn (used by HTTP request
  *   suspension). For the runtime-agnostic op_suspend path - which
  *   may be called without an HTTP connection (timer callbacks,
  *   CLI mode) - this backend tracks ops itself and uses Keel's
@@ -31,7 +31,8 @@
 #include <keel/event_ctx.h>
 #include <keel/timer.h>
 #include <keel/thread_pool.h>
-#include <keel/connection.h>   /* kl_monotonic_ms */
+#include <keel/clock.h>             /* kl_monotonic_ms (moved here in Keel 3.x) */
+#include <keel/http_connection.h>
 #include <keel/allocator.h>
 
 #include <stdio.h>
@@ -45,7 +46,7 @@ struct HlAsyncBackendCtx {
     /* The active event loop. Either points to `kel_storage` (owned
      * mode: backend->init created it) or to an external KlEventCtx
      * passed via hl_async_backend_keel_wrap (borrowed mode: the
-     * caller - typically KlServer - owns it). */
+     * caller - typically KlHttpServer - owns it). */
     KlEventCtx   *kel;
     KlEventCtx    kel_storage;
     KlAllocator   kalloc;       /* used only in owned mode */
@@ -85,7 +86,7 @@ static void keel_free(HlAsyncBackendCtx *ctx)
 }
 
 /* Borrowed-mode constructor: wrap an existing KlEventCtx so vtable
- * consumers share it with whoever owns the loop (typically KlServer). */
+ * consumers share it with whoever owns the loop (typically KlHttpServer). */
 HlAsyncBackendCtx *hl_async_backend_keel_wrap(KlEventCtx *ev)
 {
     if (!ev) return NULL;
@@ -254,7 +255,7 @@ static int keel_pool_submit(HlAsyncBackendPool *p,
     return kl_thread_pool_submit(p->kpool, &item);
 }
 
-/* ── Async-op suspension (backend-tracked, no KlConn) ─────────────── */
+/* ── Async-op suspension (backend-tracked, no KlHttpConn) ─────────────── */
 
 /* Each suspended op gets a Keel timer that fires the deadline. The
  * timer handle lives in _backend_state so op_complete can cancel it

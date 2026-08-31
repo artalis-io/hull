@@ -17,7 +17,7 @@
 #include "hull/utils/alloc.h"
 #include "hull/shared/async_backend.h"
 
-#include <keel/request.h>
+#include <keel/http_request.h>
 
 #include "quickjs.h"
 
@@ -26,7 +26,7 @@
 /* JS test state stored as opaque pointer on globalThis.__hull_test_state */
 
 typedef struct {
-    KlRouter *router;
+    KlHttpRouter *router;
     HlJS *js;
     JSValue cases; /* Array of { desc: string, fn: function } */
 } HlJSTestState;
@@ -394,7 +394,7 @@ static JSValue js_test_err(JSContext *ctx, JSValueConst this_val,
     return JS_UNDEFINED;
 }
 
-void hl_js_test_register(JSContext *ctx, KlRouter *router, HlJS *js)
+void hl_js_test_register(JSContext *ctx, KlHttpRouter *router, HlJS *js)
 {
     HlJSTestState *state = js_malloc(ctx, sizeof(HlJSTestState));
     if (!state) return;

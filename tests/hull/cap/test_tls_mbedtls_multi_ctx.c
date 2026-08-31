@@ -22,7 +22,7 @@
 
 #include "utest.h"
 #include <keel/tls.h>
-#include <keel/tls_mbedtls.h>
+#include <keel_tls_mbedtls.h>
 #include <keel/allocator.h>
 
 UTEST(tls_multi_ctx, two_clients_destroyed_lifo)

@@ -44,7 +44,7 @@
 #ifdef HL_ENABLE_HTTP_CLIENT
 #include "hull/cap/http.h"
 #include "hull/cacert.h"
-#include <keel/client.h>
+#include <keel/http_client.h>
 #include "hull/tls_transport.h"
 #endif
 
@@ -106,7 +106,7 @@ static int cli_parse_args(int argc, char **argv,
 }
 
 /* Weak default: the Keel-free app.main runner. serve.c provides a STRONG
- * hull_serve() (the full KlServer serve loop) that wins whenever serve.o is
+ * hull_serve() (the full KlHttpServer serve loop) that wins whenever serve.o is
  * linked -- in the http feature, composed on needs_http (docs/keel_feature.md).
  * A compute app links only this weak runner and never touches Keel.
  * hull_serve is the ONLY external symbol serve.c and serve_cli.c share, so the
@@ -297,8 +297,8 @@ int hull_serve(int argc, char **argv)
     if (manifest.hosts_count > 0) {
         http_cfg.allowed_hosts     = manifest.hosts;
         http_cfg.count             = manifest.hosts_count;
-        http_cfg.timeout_ms        = KL_CLIENT_DEFAULT_TIMEOUT_MS;
-        http_cfg.max_response_size = KL_CLIENT_DEFAULT_MAX_RESP;
+        http_cfg.timeout_ms        = KL_HTTP_CLIENT_DEFAULT_TIMEOUT_MS;
+        http_cfg.max_response_size = KL_HTTP_CLIENT_DEFAULT_MAX_RESP;
         http_cfg.follow_redirects  = 1;
 
         const unsigned char *emb_data = NULL;

@@ -25,7 +25,7 @@
 typedef struct HlAsyncCtx HlAsyncCtx;
 typedef struct HlAllocator HlAllocator;
 typedef struct HlAsyncBackendPool HlAsyncBackendPool;
-typedef struct KlServer KlServer;
+typedef struct KlHttpServer KlHttpServer;
 typedef struct KlAsyncOp KlAsyncOp;
 
 /* ── Per-worker DB context (thread-local, lazy init) ───────────────── */
@@ -103,7 +103,7 @@ typedef struct HlWorkerDbOp {
     HlWorkerDbKind kind;
     HlAsyncCtx    *async_ctx;
     HlAllocator   *alloc;
-    KlServer      *server;
+    KlHttpServer      *server;
 
     /* Input (deep-copied, owned) */
     char          *sql;

@@ -8,7 +8,7 @@
 #include "hull/cap/http_async.h"
 #include "hull/shared/async.h"
 
-#include <keel/server.h>
+#include <keel/http_server.h>
 
 #include <sh_arena.h>
 #include <stdlib.h>
@@ -80,7 +80,7 @@ static int lua_parse_http_headers(lua_State *L, int idx,
 }
 
 /* Push HTTP response as Lua table: { status, body, headers } */
-static void lua_push_http_response(lua_State *L, const KlClientResponse *resp)
+static void lua_push_http_response(lua_State *L, const KlHttpClientResponse *resp)
 {
     lua_newtable(L);
 
@@ -150,7 +150,7 @@ static int lua_http_request(lua_State *L)
         lua_pop(L, 1);
     }
 
-    KlClientResponse resp = {0}; /* zero-init: resp.error is read on the rc!=0
+    KlHttpClientResponse resp = {0}; /* zero-init: resp.error is read on the rc!=0
                                   * path; don't depend on the cap layer's
                                   * internal memset ordering. */
     int rc = hl_cap_http_request(lua->base.http_cfg, method, url,
@@ -160,7 +160,7 @@ static int lua_http_request(lua_State *L)
                           kl_strerror(resp.error));
 
     lua_push_http_response(L, &resp);
-    kl_client_response_free(&resp);
+    kl_http_client_response_free(&resp);
     return 1;
 }
 
@@ -185,7 +185,7 @@ static int lua_http_get(lua_State *L)
         lua_pop(L, 1);
     }
 
-    KlClientResponse resp = {0}; /* zero-init: resp.error is read on the rc!=0
+    KlHttpClientResponse resp = {0}; /* zero-init: resp.error is read on the rc!=0
                                   * path; don't depend on the cap layer's
                                   * internal memset ordering. */
     int rc = hl_cap_http_request(lua->base.http_cfg, "GET", url,
@@ -194,7 +194,7 @@ static int lua_http_get(lua_State *L)
         return luaL_error(L, "http.get failed: %s", kl_strerror(resp.error));
 
     lua_push_http_response(L, &resp);
-    kl_client_response_free(&resp);
+    kl_http_client_response_free(&resp);
     return 1;
 }
 
@@ -224,7 +224,7 @@ static int lua_http_body_method(lua_State *L, const char *method)
         lua_pop(L, 1);
     }
 
-    KlClientResponse resp = {0}; /* zero-init: resp.error is read on the rc!=0
+    KlHttpClientResponse resp = {0}; /* zero-init: resp.error is read on the rc!=0
                                   * path; don't depend on the cap layer's
                                   * internal memset ordering. */
     int rc = hl_cap_http_request(lua->base.http_cfg, method, url,
@@ -234,7 +234,7 @@ static int lua_http_body_method(lua_State *L, const char *method)
                           kl_strerror(resp.error));
 
     lua_push_http_response(L, &resp);
-    kl_client_response_free(&resp);
+    kl_http_client_response_free(&resp);
     return 1;
 }
 
@@ -263,7 +263,7 @@ static int lua_http_delete(lua_State *L)
         lua_pop(L, 1);
     }
 
-    KlClientResponse resp = {0}; /* zero-init: resp.error is read on the rc!=0
+    KlHttpClientResponse resp = {0}; /* zero-init: resp.error is read on the rc!=0
                                   * path; don't depend on the cap layer's
                                   * internal memset ordering. */
     int rc = hl_cap_http_request(lua->base.http_cfg, "DELETE", url,
@@ -273,7 +273,7 @@ static int lua_http_delete(lua_State *L)
                           kl_strerror(resp.error));
 
     lua_push_http_response(L, &resp);
-    kl_client_response_free(&resp);
+    kl_http_client_response_free(&resp);
     return 1;
 }
 
@@ -281,7 +281,7 @@ static int lua_http_delete(lua_State *L)
 
 static void lua_push_async_http_response(lua_State *L, void *driver)
 {
-    const KlClientResponse *resp = hl_http_async_response(driver);
+    const KlHttpClientResponse *resp = hl_http_async_response(driver);
     if (!resp) {
         lua_pushnil(L);
         return;
@@ -352,7 +352,7 @@ static int lua_http_fetch(lua_State *L)
         lua_pop(L, 1);
     }
 
-    /* Start the async HTTP request - checks allowlist, creates KlClient,
+    /* Start the async HTTP request - checks allowlist, creates KlHttpClient,
      * creates HlAsyncCtx, and suspends the inbound connection */
     HlAsyncCtx *ctx = hl_async_http_start(
         lua->server, lua->active_conn, lua->base.net_ctx, lua->base.alloc,

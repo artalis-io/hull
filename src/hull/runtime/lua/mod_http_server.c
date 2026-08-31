@@ -5,7 +5,7 @@
 
 #include "mod_buffer.h"
 
-#include <keel/server.h>
+#include <keel/http_server.h>
 
 /* ════════════════════════════════════════════════════════════════════
  * hull.server - Server stats
@@ -21,8 +21,8 @@ static int lua_server_stats(lua_State *L)
     if (!lua || !lua->server)
         return luaL_error(L, "server.stats: server not available");
 
-    KlServerStats stats;
-    kl_server_stats(lua->server, &stats);
+    KlHttpServerStats stats;
+    kl_http_server_stats(lua->server, &stats);
 
     lua_newtable(L);
     lua_pushinteger(L, stats.active_connections);

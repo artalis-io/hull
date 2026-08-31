@@ -23,7 +23,7 @@
 /* Forward declarations to keep internal.h small. */
 typedef struct HlAsyncCtx     HlAsyncCtx;
 typedef struct HlAllocator    HlAllocator;
-typedef struct KlServer       KlServer;
+typedef struct KlHttpServer       KlHttpServer;
 typedef struct KlAsyncOp      KlAsyncOp;
 typedef struct HlAsyncBackendPool HlAsyncBackendPool;
 
@@ -46,7 +46,7 @@ typedef struct HlJSTimer {
 typedef struct HlJsWorkerDispatchOp {
     HlAsyncCtx   *async_ctx;
     HlAllocator  *alloc;
-    KlServer     *server;
+    KlHttpServer     *server;
 
     /* Input (deep-copied, owned) */
     char         *fn_source;
@@ -112,9 +112,9 @@ void hl_js_ws_on_close(struct KlWsServerConn *ws_conn, uint16_t code,
                        const char *reason, size_t reason_len,
                        void *user_data);
 
-/* ── Promoted: defined in sse.c, used in routes.c (kl_server_route for
+/* ── Promoted: defined in sse.c, used in routes.c (kl_http_server_route for
  * SSE endpoints during wire_routes_server). */
-void hl_js_sse_handler(struct KlRequest *req, struct KlResponse *res,
+void hl_js_sse_handler(struct KlHttpRequest *req, struct KlHttpResponse *res,
                        void *user_data);
 
 /* ── Promoted: defined in routes.c, used by sibling files when they
@@ -148,13 +148,13 @@ int hl_js_check_module_declared(JSContext *ctx,
                                  const char *runtime_name);
 
 /* ── Defined in mod_request.c, called from bindings.c + modules.c. */
-struct KlBodyReader;
+struct KlHttpBodyReader;
 /* Register MultipartIter / MultipartPart / MultipartChunks classes
  * (once per VM, called from hl_js_register_modules). */
 void hl_js_request_register(JSContext *ctx);
 /* Install req.multipart() on the request object - no-op for non-
  * streaming routes (body_reader is not a multipart wrapper). */
 void hl_js_request_install_multipart(JSContext *ctx, JSValue req_obj,
-                                      struct KlBodyReader *body_reader);
+                                      struct KlHttpBodyReader *body_reader);
 
 #endif /* HL_RUNTIME_JS_INTERNAL_H */

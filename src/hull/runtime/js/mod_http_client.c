@@ -10,7 +10,7 @@
 #include "hull/shared/async.h"
 #include "hull/utils/alloc.h"
 
-#include <keel/server.h>
+#include <keel/http_server.h>
 
 /* Parse JS headers object { name: value } into HlHttpHeader array.
  * Returns count. Caller must free with js_free_http_headers(). */
@@ -78,7 +78,7 @@ static void js_free_http_headers(JSContext *ctx, HlHttpHeader *hdrs, int count)
 }
 
 /* Push HTTP response as JS object: { status, body, headers } */
-static JSValue js_push_http_response(JSContext *ctx, const KlClientResponse *resp)
+static JSValue js_push_http_response(JSContext *ctx, const KlHttpClientResponse *resp)
 {
     JSValue obj = JS_NewObject(ctx);
     JS_SetPropertyStr(ctx, obj, "status", JS_NewInt32(ctx, resp->status));
@@ -153,7 +153,7 @@ static JSValue js_http_request(JSContext *ctx, JSValueConst this_val,
         JS_FreeValue(ctx, hdrs_val);
     }
 
-    KlClientResponse resp = {0}; /* zero-init: resp.error is read on the rc!=0
+    KlHttpClientResponse resp = {0}; /* zero-init: resp.error is read on the rc!=0
                                   * path; don't depend on the cap layer's
                                   * internal memset ordering. */
     int rc = hl_cap_http_request(js->base.http_cfg, method, url,
@@ -170,7 +170,7 @@ static JSValue js_http_request(JSContext *ctx, JSValueConst this_val,
                                       kl_strerror(resp.error));
 
     JSValue result = js_push_http_response(ctx, &resp);
-    kl_client_response_free(&resp);
+    kl_http_client_response_free(&resp);
     return result;
 }
 
@@ -198,7 +198,7 @@ static JSValue js_http_get(JSContext *ctx, JSValueConst this_val,
         JS_FreeValue(ctx, hdrs_val);
     }
 
-    KlClientResponse resp = {0}; /* zero-init: resp.error is read on the rc!=0
+    KlHttpClientResponse resp = {0}; /* zero-init: resp.error is read on the rc!=0
                                   * path; don't depend on the cap layer's
                                   * internal memset ordering. */
     int rc = hl_cap_http_request(js->base.http_cfg, "GET", url,
@@ -211,7 +211,7 @@ static JSValue js_http_get(JSContext *ctx, JSValueConst this_val,
                                       kl_strerror(resp.error));
 
     JSValue result = js_push_http_response(ctx, &resp);
-    kl_client_response_free(&resp);
+    kl_http_client_response_free(&resp);
     return result;
 }
 
@@ -244,7 +244,7 @@ static JSValue js_http_body_method(JSContext *ctx, int argc, JSValueConst *argv,
         JS_FreeValue(ctx, hdrs_val);
     }
 
-    KlClientResponse resp = {0}; /* zero-init: resp.error is read on the rc!=0
+    KlHttpClientResponse resp = {0}; /* zero-init: resp.error is read on the rc!=0
                                   * path; don't depend on the cap layer's
                                   * internal memset ordering. */
     int rc = hl_cap_http_request(js->base.http_cfg, method_name, url,
@@ -259,7 +259,7 @@ static JSValue js_http_body_method(JSContext *ctx, int argc, JSValueConst *argv,
                                       method_name, kl_strerror(resp.error));
 
     JSValue result = js_push_http_response(ctx, &resp);
-    kl_client_response_free(&resp);
+    kl_http_client_response_free(&resp);
     return result;
 }
 
@@ -299,7 +299,7 @@ static JSValue js_http_del(JSContext *ctx, JSValueConst this_val,
         JS_FreeValue(ctx, hdrs_val);
     }
 
-    KlClientResponse resp = {0}; /* zero-init: resp.error is read on the rc!=0
+    KlHttpClientResponse resp = {0}; /* zero-init: resp.error is read on the rc!=0
                                   * path; don't depend on the cap layer's
                                   * internal memset ordering. */
     int rc = hl_cap_http_request(js->base.http_cfg, "DELETE", url,
@@ -312,7 +312,7 @@ static JSValue js_http_del(JSContext *ctx, JSValueConst this_val,
                                       kl_strerror(resp.error));
 
     JSValue result = js_push_http_response(ctx, &resp);
-    kl_client_response_free(&resp);
+    kl_http_client_response_free(&resp);
     return result;
 }
 
@@ -320,7 +320,7 @@ static JSValue js_http_del(JSContext *ctx, JSValueConst this_val,
 
 static JSValue js_push_async_http_response(JSContext *ctx, void *driver)
 {
-    const KlClientResponse *resp = hl_http_async_response(driver);
+    const KlHttpClientResponse *resp = hl_http_async_response(driver);
     if (!resp)
         return JS_UNDEFINED;
 

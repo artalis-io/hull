@@ -10,8 +10,8 @@
  *
  * The keel backend treats its opaque vtable types as type-punning
  * facades:
- *   HlNetBackendCtx*   → struct kl_wrap (holds KlServer + ownership flag)
- *   HlReqHandle*       → KlConn*
+ *   HlNetBackendCtx*   → struct kl_wrap (holds KlHttpServer + ownership flag)
+ *   HlReqHandle*       → KlHttpConn*
  *   HlSuspendOp*       → KlAsyncOp*
  *
  * Consumers never see those casts; they just pass the opaque
@@ -23,7 +23,7 @@
 #include "hull/net_backend.h"
 #include "hull/net/keel.h"
 #include "keel/async.h"
-#include "keel/server.h"
+#include "keel/http_server.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -32,11 +32,11 @@
 
 /*
  * struct kl_wrap is what HlNetBackendCtx* actually points at. We don't
- * embed KlServer because we don't own it - serve.c already owns the
+ * embed KlHttpServer because we don't own it - serve.c already owns the
  * server and lends us a pointer.
  */
 struct kl_wrap {
-    KlServer *server;     /* borrowed; never freed here */
+    KlHttpServer *server;     /* borrowed; never freed here */
 };
 
 /* ── Vtable methods ────────────────────────────────────────────────── */
@@ -45,7 +45,7 @@ static int keel_op_suspend(HlNetBackendCtx *ctx, HlReqHandle *req, HlSuspendOp *
 {
     if (!ctx || !req || !op) return -1;
     struct kl_wrap *w = (struct kl_wrap *)ctx;
-    return kl_async_suspend(w->server, (KlConn *)req, (KlAsyncOp *)op);
+    return kl_async_suspend(w->server, (KlHttpConn *)req, (KlAsyncOp *)op);
 }
 
 static void keel_op_complete(HlNetBackendCtx *ctx, HlSuspendOp *op)
@@ -90,7 +90,7 @@ void hl_net_op_complete(HlNetBackendCtx *ctx, HlSuspendOp *op)
 
 /* ── Wrap / unwrap ─────────────────────────────────────────────────── */
 
-HlNetBackendCtx *hl_net_backend_keel_wrap(KlServer *server)
+HlNetBackendCtx *hl_net_backend_keel_wrap(KlHttpServer *server)
 {
     if (!server) return NULL;
 

@@ -9,7 +9,7 @@
  *
  * One backend ships:
  *
- *   keel - wraps KlClient + KlClientPool + KlRedirectClient. Default
+ *   keel - wraps KlHttpClient + KlHttpClientPool + KlHttpRedirectClient. Default
  *          for HL_ENABLE_HTTP=1.
  *
  * HL_ENABLE_HTTP=0 builds drop the HTTP client entirely (apps that

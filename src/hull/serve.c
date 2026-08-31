@@ -55,9 +55,9 @@
 #include "hull/cap/http.h"
 #include "hull/cap/smtp.h"
 
-#include <keel/client_pool.h>
-#include <keel/compress_miniz.h>
-#include <keel/decompress_miniz.h>
+#include <keel/http_client_pool.h>
+#include <compress_miniz.h>
+#include <decompress_miniz.h>
 #include "hull/vfs.h"
 
 #include "hull/tls_transport.h"
@@ -77,7 +77,7 @@
 #endif
 #include "hull/cap/gpu.h"
 
-#include <keel/cors.h>
+#include <keel/http_cors.h>
 #include <keel/keel.h>
 #include <keel/thread_pool.h>
 
@@ -147,7 +147,7 @@ static int hl_parse_log_level(const char *s) {
     return -1;
 }
 
-/* Bridge: routes Keel KlLogFn through rxi/log.c with [keel] prefix.
+/* Bridge: routes Keel KlHttpServerLogFn through rxi/log.c with [keel] prefix.
  * `fmt` comes from Keel's logging callback API; see the comment on
  * hl_log_callback above. */
 static void hl_keel_log_bridge(int level, const char *fmt, va_list ap,
@@ -645,7 +645,7 @@ typedef struct {
     HlAppContext        *app;
 
     /* Server + TLS */
-    KlServer             server;
+    KlHttpServer             server;
     KlTlsConfig          server_tls_config;
     KlTlsCtx            *server_tls_ctx;
 
@@ -654,7 +654,7 @@ typedef struct {
      * runtime via rt->async_ctx, unwrapped in cleanup. */
     HlAsyncBackendCtx   *async_ctx;
 
-    /* HlNetBackend wrap around the KlServer. Created in init_server
+    /* HlNetBackend wrap around the KlHttpServer. Created in init_server
      * (server must exist first), lent to rt->net_ctx in wire_caps,
      * unwrapped in teardown. Lets vtable consumers route async-op
      * suspend/complete through the backend instead of touching
@@ -663,7 +663,7 @@ typedef struct {
 
     /* Infrastructure (thread pool, client pool, compression) */
     HlAsyncBackendPool  *thread_pool;
-    KlClientPool         client_pool;
+    KlHttpClientPool         client_pool;
     int                  cpool_ok;
     KlCompressCtx       *comp_ctx;
     KlCompressConfig     compress_cfg;
@@ -700,13 +700,13 @@ typedef struct {
      * so the origin allowlist a heap-write primitive could otherwise
      * mutate is mprotect-locked.  NULL when the manifest doesn't
      * declare a cors section. */
-    KlCorsConfig        *cors_cfg;
+    KlHttpCorsConfig        *cors_cfg;
 
     /* Agent API context */
     HlAgentApiCtx        agent_api_ctx;
 
     /* Init flags for cleanup ordering */
-    int                  server_init;  /* kl_server_init succeeded */
+    int                  server_init;  /* kl_http_server_init succeeded */
     int                  app_loaded;   /* rt->vt->load_app() succeeded */
     int                  manifest_extracted; /* extract_manifest called */
 
@@ -864,11 +864,11 @@ static int hl_serve_init_logging(HlServerState *s)
 
 /* Phase 6 (DB init) - now handled inside hl_app_context_init. */
 
-/* Phase 7: Create KlServer with optional TLS.
+/* Phase 7: Create KlHttpServer with optional TLS.
  * Depends on: init_logging (kl_alloc), parse_args (port, bind, TLS paths). */
 static int hl_serve_init_server(HlServerState *s)
 {
-    KlConfig config = {
+    KlHttpServerConfig config = {
         .port = s->cfg.port,
         .bind_addr = s->cfg.bind_addr,
         .max_connections = s->cfg.max_connections > 0 ? s->cfg.max_connections : HL_DEFAULT_MAX_CONN,
@@ -898,7 +898,7 @@ static int hl_serve_init_server(HlServerState *s)
         config.tls = &s->server_tls_config;
     }
 
-    if (kl_server_init(&s->server, &config) != 0) {
+    if (kl_http_server_init(&s->server, &config) != 0) {
         log_error("[hull:c] server init failed: %s",
                   kl_strerror(s->server.last_error));
         if (s->server_tls_ctx) {
@@ -918,7 +918,7 @@ static void hl_serve_init_infra(HlServerState *s)
 {
     /* Wrap the server's event loop so the thread pool + later
      * consumers go through the async backend vtable. The wrap is
-     * borrowed - KlServer still owns the underlying KlEventCtx. */
+     * borrowed - KlHttpServer still owns the underlying KlEventCtx. */
     if (!s->async_ctx)
         s->async_ctx = hl_async_backend_keel_wrap(&s->server.ev);
 
@@ -945,7 +945,7 @@ static void hl_serve_init_infra(HlServerState *s)
      * will simply be unavailable */
 
     /* Create client connection pool for HTTP keep-alive reuse */
-    s->cpool_ok = kl_cpool_init(&s->client_pool, NULL, &s->kl_alloc, &s->server.ev);
+    s->cpool_ok = kl_http_client_pool_init(&s->client_pool, NULL, &s->kl_alloc, &s->server.ev);
     if (s->cpool_ok != 0)
         log_warn("[hull:c] client pool creation failed - connection reuse disabled");
 
@@ -963,7 +963,7 @@ static void hl_serve_init_infra(HlServerState *s)
                 (void (*)(KlCompressCtx *))kl_compress_miniz_ctx_destroy;
             /* Note: config is local to init_server, but compress_cfg is used
              * by the runtime for client-side decompression.  The server's
-             * KlConfig.compress is only read during kl_server_init, which has
+             * KlHttpServerConfig.compress is only read during kl_http_server_init, which has
              * already returned.  We wire rt->compress below instead. */
 
             s->decompress_cfg.ctx = s->comp_ctx;
@@ -1134,7 +1134,7 @@ static int hl_serve_load_app(HlServerState *s)
  *   2. hl_serve_apply_sandbox          - build HlSandboxPolicy, apply
  *   3. hl_serve_wire_routes            - CORS, vtable route wiring, static
  *                                        middleware, agent diagnostic API
- *   4. hl_serve_run                    - kl_server_run event loop
+ *   4. hl_serve_run                    - kl_http_server_run event loop
  *   5. hl_serve_teardown_after_serve   - success-path resource teardown
  *
  * Split out of a 296-line monolith as roadmap item H.
@@ -1222,7 +1222,7 @@ static int hl_serve_wire_caps(HlServerState *s)
     rt->async_ctx = s->async_ctx;
     /* Same pattern for the net backend wrap - runtime borrows it so
      * connection-bound async-op suspend/complete go through the vtable
-     * instead of touching KlServer directly. */
+     * instead of touching KlHttpServer directly. */
     rt->net_ctx = s->net_ctx;
 
     /* Extract manifest and configure capabilities */
@@ -1274,23 +1274,23 @@ static int hl_serve_wire_caps(HlServerState *s)
 
         /* CORS config - build it INSIDE the seal arena alongside the
          * manifest strings, BEFORE the mprotect.  Previously the
-         * KlCorsConfig was a stack-local in hl_serve_wire_routes;
-         * kl_server_use stored the pointer, which dangled the moment
+         * KlHttpCorsConfig was a stack-local in hl_serve_wire_routes;
+         * kl_http_server_use stored the pointer, which dangled the moment
          * wire_routes returned.  Allocating in the arena (a) fixes
          * the dangling-pointer UAF, and (b) means the origin allowlist
          * is mprotect-RO for the rest of process lifetime - a heap-
          * write primitive can no longer punch a new origin into it. */
         if (s->manifest.cors_set) {
-            KlCorsConfig *cc = sh_seal_arena_alloc(
-                &s->seal_arena, sizeof(*cc), _Alignof(KlCorsConfig));
+            KlHttpCorsConfig *cc = sh_seal_arena_alloc(
+                &s->seal_arena, sizeof(*cc), _Alignof(KlHttpCorsConfig));
             if (!cc) {
                 log_error("[hull:c] seal arena alloc(cors) failed");
                 sh_seal_arena_destroy(&s->seal_arena);
                 return -1;
             }
-            kl_cors_init(cc);
+            kl_http_cors_init(cc);
             for (int i = 0; i < s->manifest.cors_origin_count; i++)
-                kl_cors_add_origin(cc, s->manifest.cors_origins[i]);
+                kl_http_cors_add_origin(cc, s->manifest.cors_origins[i]);
             /* The cors_methods/cors_headers strings already live in
              * the seal arena (sealed manifest pointers); cc just
              * aliases them. */
@@ -1494,8 +1494,8 @@ static int hl_serve_wire_caps(HlServerState *s)
     if (s->manifest.hosts_count > 0) {
         s->http_cfg_storage.allowed_hosts     = s->manifest.hosts;
         s->http_cfg_storage.count             = s->manifest.hosts_count;
-        s->http_cfg_storage.timeout_ms        = KL_CLIENT_DEFAULT_TIMEOUT_MS;
-        s->http_cfg_storage.max_response_size = KL_CLIENT_DEFAULT_MAX_RESP;
+        s->http_cfg_storage.timeout_ms        = KL_HTTP_CLIENT_DEFAULT_TIMEOUT_MS;
+        s->http_cfg_storage.max_response_size = KL_HTTP_CLIENT_DEFAULT_MAX_RESP;
 
         /* Set up TLS client for HTTPS support.
          *
@@ -1693,10 +1693,10 @@ static int hl_serve_wire_routes(HlServerState *s)
         /* CORS config was built and sealed in hl_serve_wire_caps -
          * the pointer is mprotect-RO and outlives the server.  Earlier
          * versions stack-allocated this struct here and passed its
-         * address to kl_server_use; the moment this function returned
+         * address to kl_http_server_use; the moment this function returned
          * the pointer dangled (Keel later dereferenced into whatever
          * the stack had been reused for). */
-        kl_server_use(&s->server, "*", "/*", kl_cors_middleware, s->cors_cfg);
+        kl_http_server_use(&s->server, "*", "/*", kl_http_cors_middleware, s->cors_cfg);
         log_info("[hull:c] CORS enabled (%d origin(s), sealed)",
                  s->manifest.cors_origin_count);
     }
@@ -1729,7 +1729,7 @@ static int hl_serve_wire_routes(HlServerState *s)
             HlStaticCtx *sctx = track_route_alloc(sizeof(HlStaticCtx));
             sctx->vfs = hl_app_context_app_vfs(s->app);
             sctx->stdlib_vfs = has_stdlib_static ? platform_vfs : NULL;
-            kl_server_use(&s->server, "GET", "/static/*",
+            kl_http_server_use(&s->server, "GET", "/static/*",
                           hl_static_middleware, sctx);
         }
     }
@@ -1751,7 +1751,7 @@ static void hl_serve_run(HlServerState *s)
              s->cfg.bind_addr, s->cfg.port, rt->vt->name);
 
     /* Enter event loop */
-    if (kl_server_run(&s->server) < 0)
+    if (kl_http_server_run(&s->server) < 0)
         log_error("[hull:c] server exited with error: %s",
                   kl_strerror(s->server.last_error));
 
@@ -1770,7 +1770,7 @@ static void hl_serve_teardown_after_serve(HlServerState *s)
 
     /* Free client connection pool (closes idle connections) */
     if (s->cpool_ok == 0) {
-        kl_cpool_free(&s->client_pool);
+        kl_http_client_pool_free(&s->client_pool);
         s->cpool_ok = -1; /* mark freed */
     }
 
@@ -1818,14 +1818,14 @@ static void hl_serve_teardown_after_serve(HlServerState *s)
     hl_fs_policy_free(&s->fs_policy_storage);
 
     /* Now unwrap the async-backend wrap - borrowed, doesn't destroy
-     * KlServer's KlEventCtx (server's own free does that). */
+     * KlHttpServer's KlEventCtx (server's own free does that). */
     if (s->async_ctx) {
         hl_async_backend_keel_unwrap(s->async_ctx);
         s->async_ctx = NULL;
     }
 
     /* Same for the net-backend wrap - borrowed, doesn't destroy
-     * KlServer (server's own free does that). */
+     * KlHttpServer (server's own free does that). */
     if (s->net_ctx) {
         hl_net_backend_keel_unwrap(s->net_ctx);
         s->net_ctx = NULL;
@@ -1968,34 +1968,20 @@ static int hl_serve_wire_and_start(HlServerState *s)
      * sse / every / daily).  From here on, calls into those bindings
      * (e.g. from a request handler that mistakenly tries dynamic route
      * registration) throw a structured error instead of silently
-     * dropping the request into a table no consumer reads.  Matches the
-     * router freeze below - together they make "no registration after
-     * the serve loop starts" enforceable from both the script side
-     * (clear error message) and the C side (RO route table).
+     * dropping the request into a table no consumer reads.  This is the
+     * script-side half of "no registration after the serve loop starts".
      *
-     * Intentionally flipped BEFORE kl_server_freeze.  If the freeze
-     * itself fails (logged below, non-fatal), we WANT the flag to
-     * stay set anyway - the serve loop is about to start and no late
-     * registration should land regardless of whether the router seal
-     * succeeded.  The two seals are independent halves of the same
-     * "no late registration" invariant. */
+     * NOTE: the C-side half - the mprotect-RO router freeze
+     * (kl_server_freeze; routing + middleware tables sealed read-only so a
+     * heap-write primitive can't overwrite a handler pointer or relax a
+     * middleware gate) - was a Keel v2.3.0-v2.7.1 hardening that Keel
+     * REMOVED in v2.8.0 (the F2 connection/router opacity work); Keel 3.x
+     * ships no server/router freeze. The routing tables are still correct
+     * but are no longer mprotect-RO. See docs/security.md § 4e; a Hull-side
+     * re-seal (via hl_seal_arena) is a possible future follow-up. */
     {
         HlRuntime *rt_close = hl_app_context_runtime(s->app);
         if (rt_close) rt_close->registration_closed = 1;
-    }
-
-    /* Freeze the routing tables (Keel v2.3.0+).  After this call,
-     * KlRouter's route + middleware tables live in an mprotect-RO
-     * arena - a heap-write primitive that would otherwise overwrite
-     * a handler function pointer or relax a middleware gate faults
-     * instead.  Failure is non-fatal here (logged) because the
-     * server is still correct without the seal; the seal is a
-     * hardening measure, not a correctness one. */
-    if (kl_server_freeze(&s->server) != 0) {
-        log_warn("[hull:c] kl_server_freeze failed - server unfrozen "
-                 "(routing tables remain writable, hardening reduced)");
-    } else {
-        log_debug("[hull:c] router frozen (RO routing tables)");
     }
 
     hl_serve_run(s);
@@ -2007,7 +1993,7 @@ static int hl_serve_wire_and_start(HlServerState *s)
  * Called on any failure path.  Tears down resources in reverse init
  * order, checking flags to avoid double-free or use-before-init.
  * WASM/GPU are NOT destroyed here - they're only destroyed on the
- * success path (in hl_serve_wire_and_start, after kl_server_run). */
+ * success path (in hl_serve_wire_and_start, after kl_http_server_run). */
 static void hl_serve_cleanup(HlServerState *s)
 {
     /* Free manifest if extracted but wire_and_start didn't finish.
@@ -2026,7 +2012,7 @@ static void hl_serve_cleanup(HlServerState *s)
 
     /* Free client connection pool */
     if (s->cpool_ok == 0)
-        kl_cpool_free(&s->client_pool);
+        kl_http_client_pool_free(&s->client_pool);
 
     /* Free compression context */
     if (s->comp_ctx)
@@ -2041,7 +2027,7 @@ static void hl_serve_cleanup(HlServerState *s)
         hl_tls_ctx_destroy(s->server_tls_ctx);
 
     if (s->server_init)
-        kl_server_free(&s->server);
+        kl_http_server_free(&s->server);
 
     /* Detach the borrowed async_ctx + net_ctx from the runtime before
      * app_context_free destroys the runtime - both wraps are owned by
@@ -2061,7 +2047,7 @@ static void hl_serve_cleanup(HlServerState *s)
     }
 
     /* Unwrap the async-backend wrap (borrowed - does not destroy
-     * KlServer's KlEventCtx). */
+     * KlHttpServer's KlEventCtx). */
     if (s->async_ctx) {
         hl_async_backend_keel_unwrap(s->async_ctx);
         s->async_ctx = NULL;

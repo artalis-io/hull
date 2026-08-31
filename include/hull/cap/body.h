@@ -13,22 +13,22 @@
 #define HL_CAP_BODY_H
 
 #include <stddef.h>
-#include <keel/body_reader.h>
+#include <keel/http_body_reader.h>
 
 /**
  * @brief Body-reader factory function.
  *
- * Called by Keel for each request. Returns a `KlBodyReader` configured
+ * Called by Keel for each request. Returns a `KlHttpBodyReader` configured
  * with Hull's max-body-size policy (default 1 MiB, override via
  * `--body-max-size`).
  *
  * @param alloc      Keel's per-request allocator. Pass-through.
  * @param req        Inbound request (read-only).
- * @param user_data  Opaque pointer registered with `kl_server_set_body_factory`.
+ * @param user_data  Opaque pointer registered with `kl_http_server_set_body_factory`.
  *
- * @return A configured `KlBodyReader`. The caller (Keel) owns its lifetime.
+ * @return A configured `KlHttpBodyReader`. The caller (Keel) owns its lifetime.
  */
-KlBodyReader *hl_cap_body_factory(KlAllocator *alloc, const KlRequest *req,
+KlHttpBodyReader *hl_cap_body_factory(KlAllocator *alloc, const KlHttpRequest *req,
                                   void *user_data);
 
 /**
@@ -40,7 +40,7 @@ KlBodyReader *hl_cap_body_factory(KlAllocator *alloc, const KlRequest *req,
  *
  * @return Byte count. `0` if no body was sent.
  */
-size_t hl_cap_body_data(const KlBodyReader *reader, const char **out_data);
+size_t hl_cap_body_data(const KlHttpBodyReader *reader, const char **out_data);
 
 /* ── Streaming multipart body reader ──────────────────────────────── */
 
@@ -64,10 +64,10 @@ typedef void (*HlMultipartResumeFn)(void *ctx, HlMultipartResumeReason reason);
 /**
  * @brief Streaming-multipart body-reader factory.
  *
- * Use with kl_server_route_streaming when the route's handler will
- * drive kl_multipart_next() (via req:multipart() or req.multipart()).
+ * Use with kl_http_server_route_streaming when the route's handler will
+ * drive kl_http_multipart_next() (via req:multipart() or req.multipart()).
  *
- * The returned reader wraps Keel's kl_body_reader_multipart with a
+ * The returned reader wraps Keel's kl_http_body_reader_multipart with a
  * Hull-owned slot for a "parked handler" callback. When the handler
  * yields on NEED_DATA, it registers its resume callback via
  * hl_cap_multipart_park(); subsequent on_data / on_complete / on_error
@@ -76,26 +76,26 @@ typedef void (*HlMultipartResumeFn)(void *ctx, HlMultipartResumeReason reason);
  *
  * @param alloc      Per-request allocator.
  * @param req        Inbound request (Content-Type must be multipart/form-data).
- * @param user_data  KlMultipartConfig*; caller-owned. NULL → defaults
+ * @param user_data  KlHttpMultipartConfig*; caller-owned. NULL → defaults
  *                   (all caps unlimited - set caps for adversarial input).
  *
  * @return Body reader, or NULL on rejection (non-multipart Content-Type,
  *         missing/oversized boundary, allocation failure → 415).
  */
-KlBodyReader *hl_cap_multipart_factory(KlAllocator *alloc,
-                                       const KlRequest *req,
+KlHttpBodyReader *hl_cap_multipart_factory(KlAllocator *alloc,
+                                       const KlHttpRequest *req,
                                        void *user_data);
 
 /**
- * @brief Get the inner Keel multipart reader for kl_multipart_next.
+ * @brief Get the inner Keel multipart reader for kl_http_multipart_next.
  *
  * The wrapper holds the parked-handler slot but delegates parsing to
- * Keel's kl_body_reader_multipart. Pass this pointer to kl_multipart_next.
+ * Keel's kl_http_body_reader_multipart. Pass this pointer to kl_http_multipart_next.
  *
  * @param wrapper  Body reader returned by hl_cap_multipart_factory.
- * @return Inner KlBodyReader*, or NULL if wrapper is not a multipart wrapper.
+ * @return Inner KlHttpBodyReader*, or NULL if wrapper is not a multipart wrapper.
  */
-KlBodyReader *hl_cap_multipart_inner(KlBodyReader *wrapper);
+KlHttpBodyReader *hl_cap_multipart_inner(KlHttpBodyReader *wrapper);
 
 /**
  * @brief Register a callback to fire on the next data/complete/error event.
@@ -112,7 +112,7 @@ KlBodyReader *hl_cap_multipart_inner(KlBodyReader *wrapper);
  * @param ctx      Opaque caller context passed to on_resume.
  * @return 0 on success, -1 if wrapper is not a multipart wrapper.
  */
-int hl_cap_multipart_park(KlBodyReader *wrapper,
+int hl_cap_multipart_park(KlHttpBodyReader *wrapper,
                           HlMultipartResumeFn on_resume,
                           void *ctx);
 

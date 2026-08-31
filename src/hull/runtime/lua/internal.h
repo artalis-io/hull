@@ -23,7 +23,7 @@
 /* Forward declarations to keep internal.h small. */
 typedef struct HlAsyncCtx     HlAsyncCtx;
 typedef struct HlAllocator    HlAllocator;
-typedef struct KlServer       KlServer;
+typedef struct KlHttpServer       KlHttpServer;
 typedef struct KlAsyncOp      KlAsyncOp;
 typedef struct HlAsyncBackendPool HlAsyncBackendPool;
 
@@ -46,7 +46,7 @@ typedef struct HlLuaTimer {
 typedef struct HlLuaWorkerDispatchOp {
     HlAsyncCtx   *async_ctx;
     HlAllocator  *alloc;
-    KlServer     *server;
+    KlHttpServer     *server;
 
     /* Input (deep-copied, owned) */
     uint8_t      *bytecode;
@@ -134,9 +134,9 @@ void hl_lua_ws_on_close(struct KlWsServerConn *ws_conn, uint16_t code,
                         const char *reason, size_t reason_len,
                         void *user_data);
 
-/* ── Promoted: defined in sse.c, used in routes.c (kl_server_route for
+/* ── Promoted: defined in sse.c, used in routes.c (kl_http_server_route for
  * SSE endpoints during wire_routes_server). */
-void hl_lua_sse_handler(struct KlRequest *req, struct KlResponse *res,
+void hl_lua_sse_handler(struct KlHttpRequest *req, struct KlHttpResponse *res,
                         void *user_data);
 
 /* ── Promoted: defined in routes.c, used elsewhere if route/alloc tracking
@@ -151,13 +151,13 @@ int hl_lua_track_alloc(HlLua *lua, void ***arr, size_t *count,
 HlLua *get_hl_lua_from_L(lua_State *L);
 
 /* ── Defined in mod_request.c, called from bindings.c + modules.c. */
-struct KlBodyReader;
+struct KlHttpBodyReader;
 /* Register HlMpIter / HlMpPart / HlMpChunks metatables (once per VM). */
 void hl_lua_request_register(lua_State *L);
 /* Install `req.multipart` closure on the request table at -1 when the
- * route was registered with kl_server_route_streaming. No-op for
+ * route was registered with kl_http_server_route_streaming. No-op for
  * non-streaming routes (body_reader is not a multipart wrapper). */
 void hl_lua_request_install_multipart(lua_State *L, HlLua *lua,
-                                       struct KlBodyReader *body_reader);
+                                       struct KlHttpBodyReader *body_reader);
 
 #endif /* HL_RUNTIME_LUA_INTERNAL_H */

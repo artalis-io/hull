@@ -5,7 +5,7 @@
  */
 
 #include "mod_buffer.h"
-#include <keel/server.h>
+#include <keel/http_server.h>
 
 /* server.stats() -> { activeConnections, maxConnections, asyncSuspended,
  *                     listenPaused } */
@@ -20,8 +20,8 @@ static JSValue js_server_stats(JSContext *ctx, JSValueConst this_val,
     if (!js || !js->server)
         return JS_ThrowInternalError(ctx, "server.stats: server not available");
 
-    KlServerStats stats;
-    kl_server_stats(js->server, &stats);
+    KlHttpServerStats stats;
+    kl_http_server_stats(js->server, &stats);
 
     JSValue obj = JS_NewObject(ctx);
     JS_SetPropertyStr(ctx, obj, "activeConnections",

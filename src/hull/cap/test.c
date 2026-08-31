@@ -1,9 +1,9 @@
 /*
  * cap/test.c - in-process synthetic-request harness for hull test
  *
- * Builds a fully-formed KlRequest from the runtime-side test bindings
+ * Builds a fully-formed KlHttpRequest from the runtime-side test bindings
  * (method, path, headers, body, opaque JSON ctx), hands it to Keel's
- * router pipeline via `kl_router_dispatch_synthetic`, and copies the
+ * router pipeline via `kl_http_router_dispatch_synthetic`, and copies the
  * resulting status / body / headers into an HlTestResult that the
  * Lua/JS runtime sides can inspect.
  *
@@ -19,11 +19,11 @@
 
 #include "hull/cap/test.h"
 
-#include <keel/router.h>
-#include <keel/request.h>
-#include <keel/response.h>
+#include <keel/http_router.h>
+#include <keel/http_request.h>
+#include <keel/http_response.h>
 #include <keel/allocator.h>
-#include <keel/body_reader.h>
+#include <keel/http_body_reader.h>
 
 #include "hull/utils/alloc.h"
 #include "hull/reqctx.h"
@@ -33,7 +33,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-int hl_cap_test_dispatch(KlRouter *router, const char *method,
+int hl_cap_test_dispatch(KlHttpRouter *router, const char *method,
                          const char *path, const char *body_data,
                          size_t body_len, const char **header_names,
                          const char **header_values, int num_headers,
@@ -57,7 +57,7 @@ int hl_cap_test_dispatch(KlRouter *router, const char *method,
     }
 
     /* Build request - params are filled in by dispatch_synthetic. */
-    KlRequest req;
+    KlHttpRequest req;
     memset(&req, 0, sizeof(req));
     req.method = method;
     req.method_len = strlen(method);
@@ -90,7 +90,7 @@ int hl_cap_test_dispatch(KlRouter *router, const char *method,
 
     /* Body reader. Two shapes:
      *
-     *  - A streaming-multipart route (registered via kl_server_route_streaming*)
+     *  - A streaming-multipart route (registered via kl_http_server_route_streaming*)
      *    needs the parkable multipart wrapper (hl_cap_multipart_factory) as
      *    req.body_reader so req:multipart() / req.multipart() resolve. Unlike a
      *    live socket, the synthetic harness has the WHOLE body up front, so we
@@ -101,22 +101,22 @@ int hl_cap_test_dispatch(KlRouter *router, const char *method,
      *    never parks / yields and no live connection is required. Previously
      *    req:multipart() raised "no active connection" in-process.
      *
-     *  - Any other route uses the plain KlBufReader (hl_cap_body_data reads it).
+     *  - Any other route uses the plain KlHttpBufReader (hl_cap_body_data reads it).
      *
      * mp_wrapper is destroyed after dispatch (the handler consumed the parts
      * synchronously during dispatch, so the parsed state is no longer needed).
      */
-    KlBufReader fake_buf;
+    KlHttpBufReader fake_buf;
     memset(&fake_buf, 0, sizeof(fake_buf));
-    KlBodyReader *mp_wrapper = NULL;
+    KlHttpBodyReader *mp_wrapper = NULL;
     if (body_data && body_len > 0) {
-        KlRoute *matched = NULL;
+        KlHttpRoute *matched = NULL;
         int nparams = 0;
-        (void)kl_router_match(router, method, req.method_len,
+        (void)kl_http_router_match(router, method, req.method_len,
                               req.path, req.path_len,
                               &matched, req.params, &nparams);
         if (matched && matched->streaming_handler && matched->body_reader) {
-            KlBodyReader *w = matched->body_reader(&alloc, &req,
+            KlHttpBodyReader *w = matched->body_reader(&alloc, &req,
                                                    matched->user_data);
             if (w) {
                 /* Feed the whole body in one on_data, then complete the stream.
@@ -165,8 +165,8 @@ int hl_cap_test_dispatch(KlRouter *router, const char *method,
      * pipeline. dispatch_synthetic encapsulates the match → pre-body
      * mw → post-body mw → handler sequence so this file no longer
      * needs to mirror Keel internals. */
-    KlResponse res;
-    if (kl_response_init(&res, &alloc) != 0) return -1;
+    KlHttpResponse res;
+    if (kl_http_response_init(&res, &alloc) != 0) return -1;
     res.conn_fd = -1; /* no actual connection */
 
     /* Hand the (req, res) pair to Keel. OWNERSHIP: req.ctx (if we
@@ -178,7 +178,7 @@ int hl_cap_test_dispatch(KlRouter *router, const char *method,
      * arena reclaims it when the test finishes. We discard the return
      * value because the caller inspects res->status / res->body
      * directly, not the dispatch verdict. */
-    (void)kl_router_dispatch_synthetic(router, &req, &res, run_middleware);
+    (void)kl_http_router_dispatch_synthetic(router, &req, &res, run_middleware);
 
     /* The handler consumed the multipart parts synchronously during dispatch;
      * tear the wrapper (and its inner reader + buffered parts) down now. */
@@ -186,7 +186,7 @@ int hl_cap_test_dispatch(KlRouter *router, const char *method,
         mp_wrapper->destroy(mp_wrapper);
 
     /* Extract results - copy body and headers into hl_alloc-owned
-     * storage before freeing the response (kl_response_free releases
+     * storage before freeing the response (kl_http_response_free releases
      * hdr_buf, and body may live in runtime-managed memory). */
     result->status = res.status;
     result->body = res.body;
@@ -195,7 +195,7 @@ int hl_cap_test_dispatch(KlRouter *router, const char *method,
     result->hdr_len = res.hdr_len;
 
     /* Copy body / headers into hl_alloc-owned storage before
-     * kl_response_free runs. On allocation failure we explicitly NULL
+     * kl_http_response_free runs. On allocation failure we explicitly NULL
      * the result pointer (and zero the matching length) so the caller
      * can never dereference Keel-managed memory that's about to be
      * freed two lines below. Callers already null-check body/hdr_buf
@@ -225,6 +225,6 @@ int hl_cap_test_dispatch(KlRouter *router, const char *method,
         }
     }
 
-    kl_response_free(&res);
+    kl_http_response_free(&res);
     return 0;
 }

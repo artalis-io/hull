@@ -23,33 +23,17 @@ endif
 MINIZ_DIR  := $(VENDDIR)/miniz
 
 ifneq ($(KEEL_LIB),)
-# Per-request sealed request snapshot (Keel v2.7.0+).  Defends parsed
-# request fields (method, path, headers, route params, content_length,
-# chunked, version) against in-process memory corruption that lands
-# on the request struct.  Bytes are copied into a per-connection
-# sh_seal_arena between routing and the first user-code dispatch,
-# then mprotect(PROT_READ).  Per-request overhead: ~3-15us (one
-# struct copy + per-header bytes copy + two mprotect calls).
-# Negligible on real Hull workloads (DB / template / JSON dominates);
-# visible on Keel microbenches.  See vendor/keel/include/keel/request.h
-# and docs/security.md § 4e.
-#
-# Default ON in Hull.  Opt out with KEEL_DISABLE_SEAL_REQUEST=1
-# for benchmarking or to debug a regression that bisects to the seal.
-KEEL_SEAL_REQUEST_FLAG := $(if $(KEEL_DISABLE_SEAL_REQUEST),,-DKEEL_SEAL_REQUEST=1)
-
-# Hull's own TUs include keel/request.h and call the inline accessors
-# (kl_request_method, kl_request_header_at, ...).  The flag changes
-# struct KlRequest's layout (adds the `sealed` pointer) and the accessor
-# bodies, so Hull MUST be compiled with the SAME define as libkeel.a or
-# the offsets diverge and the accessors dereference a never-set field ->
-# segfault.  Keep this in lockstep with KEEL_EXTRA_CFLAGS below.
-CFLAGS += $(KEEL_SEAL_REQUEST_FLAG)
+# NOTE: the per-request sealed-request snapshot (mprotect-RO, -DKEEL_SEAL_REQUEST)
+# was a Keel v2.3.1-v2.7.1 feature that Keel REMOVED in v2.8.0; Keel 3.x reads
+# KlHttpRequest fields directly (concrete struct) and no longer vendors
+# sh_seal_arena. Hull therefore no longer passes KEEL_SEAL_REQUEST. See
+# docs/security.md § 4e for the security-posture note and the possible
+# Hull-side re-implementation (via hl_seal_arena) as a future follow-up.
 
 $(KEEL_LIB): $(MBEDTLS_OBJS)
 	$(MAKE) -C $(KEEL_DIR) CC=$(CC) AR=$(AR) \
-		KEEL_TLS=mbedtls MBEDTLS_CONFIG_FILE=hull_config.h \
+		KEEL_TLS=mbedtls MBEDTLS_DIR=$(abspath $(MBEDTLS_DIR)) MBEDTLS_CONFIG_FILE=hull_config.h \
 		KEEL_COMPRESS=miniz MINIZ_DIR=$(CURDIR)/$(MINIZ_DIR) \
-		KEEL_EXTRA_CFLAGS="$(HL_LTO_CFLAG) $(if $(HL_CFI_CFLAG),$(HL_CFI_CFLAG) $(HL_CFI_MODE) -fsplit-lto-unit) $(KEEL_SEAL_REQUEST_FLAG)" \
+		KEEL_EXTRA_CFLAGS="$(HL_LTO_CFLAG) $(if $(HL_CFI_CFLAG),$(HL_CFI_CFLAG) $(HL_CFI_MODE) -fsplit-lto-unit)" \
 		KEEL_EXTRA_LDFLAGS="$(HL_LTO_CFLAG) $(if $(HL_CFI_CFLAG),$(HL_CFI_CFLAG) -fsplit-lto-unit)"
 endif

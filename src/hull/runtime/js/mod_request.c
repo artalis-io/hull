@@ -20,13 +20,13 @@
  *
  * Lifecycle of one iter.next() (or chunks.next() / part.read()) call:
  *
- *   1. Drive kl_multipart_next() against the parkable wrapper. If the
+ *   1. Drive kl_http_multipart_next() against the parkable wrapper. If the
  *      parser emits a synchronous event (PART_BEGIN / PART_DATA /
  *      PART_END / DONE / ERROR), build the {value, done} object and
  *      return a resolved (or rejected) Promise immediately.
  *   2. On NEED_DATA, allocate a custom HlJsMpCont, stash resolve/reject,
  *      park the cont's resume as the body wrapper's wake callback, set
- *      c->state = KL_CONN_READING_BODY so Keel keeps reading socket
+ *      c->state = KL_HTTP_CONN_READING_BODY so Keel keeps reading socket
  *      bytes, return the pending Promise.
  *   3. When on_data fires inside Keel's read loop, the park callback -
  *      which IS the cont's resume - runs. It re-drives the parser. If
@@ -45,10 +45,10 @@
 #include "hull/shared/async.h"
 #include "hull/cap/body.h"
 
-#include <keel/body_reader.h>
-#include <keel/body_reader_multipart.h>
-#include <keel/connection.h>
-#include <keel/request.h>
+#include <keel/http_body_reader.h>
+#include <keel/http_body_reader_multipart.h>
+#include <keel/http_connection.h>
+#include <keel/http_request.h>
 
 #include "quickjs.h"
 
@@ -81,13 +81,13 @@ static JSClassID hl_mp_chunks_class_id;
  *
  * Lifetime: ref-counted. Each holder calls hl_mp_iter_ref on construction
  * and hl_mp_iter_unref on finalize. The last unref frees the meta copies
- * and the struct itself. The wrapper (KlBodyReader) is owned by Keel and
+ * and the struct itself. The wrapper (KlHttpBodyReader) is owned by Keel and
  * outlives all of this.
  */
 typedef struct HlJsMpIter {
     int           refs;        /* iter object + each live Part + each live Chunks */
-    KlBodyReader *wrapper;
-    KlBodyReader *inner;
+    KlHttpBodyReader *wrapper;
+    KlHttpBodyReader *inner;
     HlJS         *js;
     HlAllocator  *alloc;
 
@@ -96,7 +96,7 @@ typedef struct HlJsMpIter {
     int           in_part;     /* between PART_BEGIN..PART_END for the active part */
 
     /* Snapshot of the active Part's metadata. The borrowed pointers
-     * returned by kl_multipart_next() are valid only until the next
+     * returned by kl_http_multipart_next() are valid only until the next
      * mutation, so we copy bytes on PART_BEGIN. Cleared+rewritten on
      * each subsequent PART_BEGIN. */
     char         *name;          size_t name_len;
@@ -147,7 +147,8 @@ typedef struct HlJsMpCont {
     JSValue       resolve;        /* of the iter.next/chunks.next/read Promise */
     JSValue       reject;
     JSValue       handler_promise;/* the OUTER (handler) Promise, set by dispatch */
-    KlConn       *conn;
+    KlHttpConn       *conn;
+    KlHttpRequest    *req;        /* for kl_http_request_send_response at completion */
     HlJsMpIter   *iter;           /* not owned; ref-bumped at construction */
     MpMode        mode;
     /* MP_MODE_READ accumulator: grows as PART_DATA events arrive across
@@ -189,7 +190,7 @@ static void hl_mp_iter_unref(HlJsMpIter *it)
     hl_alloc_free(it->alloc, it, sizeof(*it));
 }
 
-static int hl_mp_iter_copy_meta(HlJsMpIter *it, const KlMultipartPartMeta *meta)
+static int hl_mp_iter_copy_meta(HlJsMpIter *it, const KlHttpMultipartPartMeta *meta)
 {
     hl_mp_iter_clear_meta(it);
     if (meta->name && meta->name_len > 0) {
@@ -332,13 +333,13 @@ static PumpStep pump_iter_step(JSContext *ctx, HlJsMpCont *jc)
             return s;
         }
 
-        KlMultipartPartMeta meta;
+        KlHttpMultipartPartMeta meta;
         const char *data = NULL;
         size_t data_len = 0;
-        KlMultipartEvent ev = kl_multipart_next(it->inner, &meta,
+        KlHttpMultipartEvent ev = kl_http_multipart_next(it->inner, &meta,
                                                   &data, &data_len);
         switch (ev) {
-        case KL_MP_EVT_PART_BEGIN:
+        case KL_HTTP_MP_EVT_PART_BEGIN:
             if (hl_mp_iter_copy_meta(it, &meta) != 0) {
                 s.ready = 1;
                 s.error = make_mp_error(ctx, "multipart: out of memory");
@@ -348,19 +349,19 @@ static PumpStep pump_iter_step(JSContext *ctx, HlJsMpCont *jc)
             s.ready = 1;
             s.result = make_iter_result(ctx, make_js_part(ctx, it), 0);
             return s;
-        case KL_MP_EVT_PART_DATA:
-        case KL_MP_EVT_PART_END:
-            it->in_part = (ev == KL_MP_EVT_PART_DATA) ? 1 : 0;
+        case KL_HTTP_MP_EVT_PART_DATA:
+        case KL_HTTP_MP_EVT_PART_END:
+            it->in_part = (ev == KL_HTTP_MP_EVT_PART_DATA) ? 1 : 0;
             continue; /* auto-drain when user didn't iterate chunks */
-        case KL_MP_EVT_DONE:
+        case KL_HTTP_MP_EVT_DONE:
             it->done = 1;
             it->in_part = 0;
             s.ready = 1;
             s.result = make_iter_result(ctx, JS_UNDEFINED, 1);
             return s;
-        case KL_MP_EVT_NEED_DATA:
+        case KL_HTTP_MP_EVT_NEED_DATA:
             return s; /* ready stays 0 */
-        case KL_MP_EVT_ERROR:
+        case KL_HTTP_MP_EVT_ERROR:
         default:
             it->errored = 1;
             s.ready = 1;
@@ -389,13 +390,13 @@ static PumpStep pump_chunks_step(JSContext *ctx, HlJsMpCont *jc)
             return s;
         }
 
-        KlMultipartPartMeta meta;
+        KlHttpMultipartPartMeta meta;
         const char *data = NULL;
         size_t data_len = 0;
-        KlMultipartEvent ev = kl_multipart_next(it->inner, &meta,
+        KlHttpMultipartEvent ev = kl_http_multipart_next(it->inner, &meta,
                                                   &data, &data_len);
         switch (ev) {
-        case KL_MP_EVT_PART_DATA:
+        case KL_HTTP_MP_EVT_PART_DATA:
             if (data && data_len > 0) {
                 /* Binary-safe: ArrayBuffer, not JS_NewStringLen (which
                  * validates UTF-8 and silently mangles binary data). */
@@ -406,22 +407,22 @@ static PumpStep pump_chunks_step(JSContext *ctx, HlJsMpCont *jc)
                 return s;
             }
             continue;
-        case KL_MP_EVT_PART_END:
+        case KL_HTTP_MP_EVT_PART_END:
             it->in_part = 0;
             c->ended = 1;
             s.ready = 1;
             s.result = make_iter_result(ctx, JS_UNDEFINED, 1);
             return s;
-        case KL_MP_EVT_DONE:
+        case KL_HTTP_MP_EVT_DONE:
             it->done = 1;
             it->in_part = 0;
             c->ended = 1;
             s.ready = 1;
             s.result = make_iter_result(ctx, JS_UNDEFINED, 1);
             return s;
-        case KL_MP_EVT_NEED_DATA:
+        case KL_HTTP_MP_EVT_NEED_DATA:
             return s;
-        case KL_MP_EVT_ERROR:
+        case KL_HTTP_MP_EVT_ERROR:
         default:
             it->errored = 1;
             s.ready = 1;
@@ -453,13 +454,13 @@ static PumpStep pump_read_step(JSContext *ctx, HlJsMpCont *jc)
             return s;
         }
 
-        KlMultipartPartMeta meta;
+        KlHttpMultipartPartMeta meta;
         const char *data = NULL;
         size_t data_len = 0;
-        KlMultipartEvent ev = kl_multipart_next(it->inner, &meta,
+        KlHttpMultipartEvent ev = kl_http_multipart_next(it->inner, &meta,
                                                   &data, &data_len);
         switch (ev) {
-        case KL_MP_EVT_PART_DATA:
+        case KL_HTTP_MP_EVT_PART_DATA:
             if (data && data_len > 0) {
                 if (read_buf_append(jc, data, data_len) != 0) {
                     s.ready = 1;
@@ -468,7 +469,7 @@ static PumpStep pump_read_step(JSContext *ctx, HlJsMpCont *jc)
                 }
             }
             continue;
-        case KL_MP_EVT_PART_END:
+        case KL_HTTP_MP_EVT_PART_END:
             it->in_part = 0;
             if (p) p->spent = 1;
             s.ready = 1;
@@ -478,7 +479,7 @@ static PumpStep pump_read_step(JSContext *ctx, HlJsMpCont *jc)
                 (const uint8_t *)(jc->read_buf ? jc->read_buf : ""),
                 jc->read_len);
             return s;
-        case KL_MP_EVT_DONE:
+        case KL_HTTP_MP_EVT_DONE:
             it->done = 1;
             it->in_part = 0;
             if (p) p->spent = 1;
@@ -489,9 +490,9 @@ static PumpStep pump_read_step(JSContext *ctx, HlJsMpCont *jc)
                 (const uint8_t *)(jc->read_buf ? jc->read_buf : ""),
                 jc->read_len);
             return s;
-        case KL_MP_EVT_NEED_DATA:
+        case KL_HTTP_MP_EVT_NEED_DATA:
             return s;
-        case KL_MP_EVT_ERROR:
+        case KL_HTTP_MP_EVT_ERROR:
         default:
             it->errored = 1;
             s.ready = 1;
@@ -513,7 +514,7 @@ static void mp_js_pump(HlAsyncCont *self, void *driver)
     HlJsMpCont *jc = (HlJsMpCont *)self;
     HlJS *js = jc->js;
     JSContext *ctx = js->ctx;
-    KlConn *conn = jc->conn;
+    KlHttpConn *conn = jc->conn;
 
     /* Restore per-request context (in case a nested op inspects it) */
     js->active_conn = conn;
@@ -567,10 +568,15 @@ static void mp_js_pump(HlAsyncCont *self, void *driver)
         js->active_conn = NULL;
         js->dispatch_depth--;
         if (conn) {
-            if (conn->res.body_mode == KL_BODY_STREAM)
-                conn->state = KL_CONN_CLOSED;
-            else
-                conn->state = KL_CONN_SENDING;
+            /* This resume runs from the multipart body reader's on_data (not
+             * kl_async_complete), so Hull drives the send: build on
+             * kl_http_conn_response(conn), end any stream, then
+             * kl_http_request_send_response transitions the streaming-async conn
+             * to sending (Keel's write path flushes it). */
+            KlHttpResponse *res = kl_http_conn_response(conn);
+            if (res && res->body_mode == KL_HTTP_BODY_STREAM)
+                kl_http_response_end_stream(res);
+            kl_http_request_send_response(jc->req);
         }
     } else if (state == JS_PROMISE_REJECTED) {
         JSValue err = JS_PromiseResult(ctx, jc->handler_promise);
@@ -588,10 +594,11 @@ static void mp_js_pump(HlAsyncCont *self, void *driver)
         js->active_conn = NULL;
         js->dispatch_depth--;
         if (conn) {
-            kl_response_status(&conn->res, 500);
-            kl_response_header(&conn->res, "Content-Type", "text/plain");
-            kl_response_body_borrow(&conn->res, "Internal Server Error", 21);
-            conn->state = KL_CONN_SENDING;
+            KlHttpResponse *res = kl_http_conn_response(conn);
+            kl_http_response_status(res, 500);
+            kl_http_response_header(res, "Content-Type", "text/plain");
+            kl_http_response_body_borrow(res, "Internal Server Error", 21);
+            kl_http_request_send_response(jc->req);
         }
     } else if (!JS_IsUndefined(jc->handler_promise)) {
         /* PENDING - handler awaited again. A new cont was created
@@ -660,7 +667,7 @@ static int mp_js_park(JSContext *ctx, HlJsMpIter *it, MpMode mode,
                        JSValue resolve, JSValue reject)
 {
     HlJS *js = it->js;
-    KlConn *conn = js->active_conn;
+    KlHttpConn *conn = js->active_conn;
     if (!conn) {
         /* Streaming routes only work behind a live connection. */
         return -1;
@@ -679,6 +686,7 @@ static int mp_js_park(JSContext *ctx, HlJsMpIter *it, MpMode mode,
     jc->reject          = reject;
     jc->handler_promise = JS_UNDEFINED;
     jc->conn            = conn;
+    jc->req             = js->active_req;
     jc->iter            = hl_mp_iter_ref(it);
     jc->mode            = mode;
     jc->read_buf        = NULL;
@@ -695,9 +703,11 @@ static int mp_js_park(JSContext *ctx, HlJsMpIter *it, MpMode mode,
         return -1;
     }
 
-    /* Tell Keel to keep reading socket bytes (the v2.1.1 streaming
-     * dispatch keystone). */
-    conn->state = KL_CONN_READING_BODY;
+    /* Keel 3.x streaming-async: park and keep reading the request body; Keel
+     * re-enters via the body reader's on_data. Replaces the pre-3.0 internal
+     * conn->state = KL_HTTP_CONN_READING_BODY (kl_http_request_await_body is the
+     * public "park, keep reading" call added in 3.0.0-rc.2). */
+    kl_http_request_await_body(it->js->active_req);
     (void)ctx;
     return 0;
 }
@@ -834,6 +844,7 @@ static JSValue js_part_read(JSContext *ctx, JSValueConst this_val,
     jc->reject          = resolving[1];
     jc->handler_promise = JS_UNDEFINED;
     jc->conn            = it->js->active_conn;
+    jc->req             = it->js->active_req;
     jc->iter            = hl_mp_iter_ref(it);
     jc->mode            = MP_MODE_READ;
     jc->part            = p;
@@ -858,7 +869,7 @@ static JSValue js_part_read(JSContext *ctx, JSValueConst this_val,
     }
 
     /* Not ready - park */
-    KlConn *conn = it->js->active_conn;
+    KlHttpConn *conn = it->js->active_conn;
     if (!conn) {
         jc->base.destroy(&jc->base);
         JS_FreeValue(ctx, promise);
@@ -872,7 +883,10 @@ static JSValue js_part_read(JSContext *ctx, JSValueConst this_val,
         return JS_ThrowInternalError(ctx,
             "req.multipart(): body reader is not multipart");
     }
-    conn->state = KL_CONN_READING_BODY;
+    /* Keel 3.x streaming-async: park and keep reading the request body; Keel
+     * re-enters via the body reader's on_data (public kl_http_request_await_body,
+     * added in 3.0.0-rc.2, replaces the pre-3.0 internal conn->state write). */
+    kl_http_request_await_body(it->js->active_req);
     return promise;
 }
 
@@ -1009,7 +1023,7 @@ static JSClassDef js_chunks_class = { "MultipartChunks", .finalizer = js_chunks_
 
 /*
  * Closure invariants: upvalue 0 = pointer (as a number JSValue) to the
- * KlBodyReader wrapper. QuickJS doesn't expose lightuserdata; we pack
+ * KlHttpBodyReader wrapper. QuickJS doesn't expose lightuserdata; we pack
  * the pointer as an Int64 the same way the existing bindings do for the
  * handful of other native-state-bearing closures.
  */
@@ -1025,12 +1039,12 @@ static JSValue js_req_multipart(JSContext *ctx, JSValueConst this_val,
         return JS_ThrowInternalError(ctx,
             "req.multipart(): missing body-reader address");
 
-    KlBodyReader *wrapper = (KlBodyReader *)(uintptr_t)wrapper_addr;
+    KlHttpBodyReader *wrapper = (KlHttpBodyReader *)(uintptr_t)wrapper_addr;
     if (!wrapper)
         return JS_ThrowInternalError(ctx,
             "req.multipart(): no body reader");
 
-    KlBodyReader *inner = hl_cap_multipart_inner(wrapper);
+    KlHttpBodyReader *inner = hl_cap_multipart_inner(wrapper);
     if (!inner)
         return JS_ThrowInternalError(ctx,
             "req.multipart(): body reader is not a streaming-multipart wrapper");
@@ -1062,10 +1076,10 @@ static JSValue js_req_multipart(JSContext *ctx, JSValueConst this_val,
 /*
  * Install req.multipart on the given JS request object. Called from
  * hl_js_make_request only when the body_reader is a multipart wrapper
- * (i.e. the route was registered via kl_server_route_streaming).
+ * (i.e. the route was registered via kl_http_server_route_streaming).
  */
 void hl_js_request_install_multipart(JSContext *ctx, JSValue req_obj,
-                                      KlBodyReader *body_reader)
+                                      KlHttpBodyReader *body_reader)
 {
     if (!body_reader || !hl_cap_multipart_inner(body_reader)) return;
 

@@ -2,7 +2,7 @@
  * bindings_response.c - the res.* response helpers, extracted from bindings.c.
  *
  * Moved out (#114) so the core js_bindings.o holds ZERO Keel-response / compress
- * references (kl_response_*, hl_maybe_compress): those live only here, on the
+ * references (kl_http_response_*, hl_maybe_compress): those live only here, on the
  * HTTP side of the seam, composed into the `http` feature alongside
  * http_register.c.
  * Sibling of the Lua bindings_response.c.
@@ -10,13 +10,15 @@
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
 
-#include "hull/runtime/js.h"      /* HlJS, KlResponse, hl_js_make_response */
+#include "hull/runtime/js.h"      /* HlJS, KlHttpResponse, hl_js_make_response */
 #include "hull/utils/compress.h"  /* hl_maybe_compress */
 #include "hull/http_feature.h"    /* hl_js_http_error_response (seam strong) */
 #include "mod_buffer.h"           /* js_get_buffer + HlBufferView (res.bytes) */
 #include "quickjs.h"
 
-#include <keel/response.h>
+#include <keel/http_response.h>
+#include <keel/http_connection.h>  /* kl_http_conn_response (finalize seam) */
+#include <keel/http_request.h>     /* kl_http_request_send_response (finalize seam) */
 
 #include <string.h>
 #include <strings.h>  /* strncasecmp */
@@ -25,7 +27,7 @@
 
 /*
  * Response is a JS object with C function methods that write to
- * KlResponse. The KlResponse pointer is stored as opaque data.
+ * KlHttpResponse. The KlHttpResponse pointer is stored as opaque data.
  *
  * Methods:
  *   res.status(code)        → set status (chainable)
@@ -40,7 +42,7 @@ static void hl_response_finalizer(JSRuntime *rt, JSValue val)
 {
     (void)rt;
     (void)val;
-    /* KlResponse is owned by the connection pool, not by JS */
+    /* KlHttpResponse is owned by the connection pool, not by JS */
 }
 
 static JSClassDef hl_response_class = {
@@ -48,10 +50,10 @@ static JSClassDef hl_response_class = {
     .finalizer = hl_response_finalizer,
 };
 
-static KlResponse *get_response(JSContext *ctx, JSValueConst this_val)
+static KlHttpResponse *get_response(JSContext *ctx, JSValueConst this_val)
 {
     HlJS *js = (HlJS *)JS_GetContextOpaque(ctx);
-    return (KlResponse *)JS_GetOpaque(this_val, (JSClassID)js->response_class_id);
+    return (KlHttpResponse *)JS_GetOpaque(this_val, (JSClassID)js->response_class_id);
 }
 
 /* Has a header with this name (case-insensitive) already been added to
@@ -60,9 +62,9 @@ static KlResponse *get_response(JSContext *ctx, JSValueConst this_val)
  * this the browser sees two Content-Security-Policy headers and
  * enforces the strict intersection, which typically blocks the page's
  * own scripts. Scans res->hdr_buf line by line; headers are appended
- * as "Name: value\r\n" by kl_response_header. Sibling of Lua's
+ * as "Name: value\r\n" by kl_http_response_header. Sibling of Lua's
  * hl_response_has_header in src/hull/runtime/lua/bindings.c. */
-static int hl_response_has_header(KlResponse *res, const char *name)
+static int hl_response_has_header(KlHttpResponse *res, const char *name)
 {
     if (!res || !res->hdr_buf || !name) return 0;
     size_t name_len = strlen(name);
@@ -86,7 +88,7 @@ static int hl_response_has_header(KlResponse *res, const char *name)
 static JSValue js_res_status(JSContext *ctx, JSValueConst this_val,
                               int argc, JSValueConst *argv)
 {
-    KlResponse *res = get_response(ctx, this_val);
+    KlHttpResponse *res = get_response(ctx, this_val);
     if (!res || argc < 1)
         return JS_EXCEPTION;
 
@@ -94,7 +96,7 @@ static JSValue js_res_status(JSContext *ctx, JSValueConst this_val,
     if (JS_ToInt32(ctx, &code, argv[0]))
         return JS_EXCEPTION;
 
-    kl_response_status(res, code);
+    kl_http_response_status(res, code);
     return JS_DupValue(ctx, this_val); /* chainable */
 }
 
@@ -102,7 +104,7 @@ static JSValue js_res_status(JSContext *ctx, JSValueConst this_val,
 static JSValue js_res_header(JSContext *ctx, JSValueConst this_val,
                               int argc, JSValueConst *argv)
 {
-    KlResponse *res = get_response(ctx, this_val);
+    KlHttpResponse *res = get_response(ctx, this_val);
     if (!res || argc < 2)
         return JS_EXCEPTION;
 
@@ -110,7 +112,7 @@ static JSValue js_res_header(JSContext *ctx, JSValueConst this_val,
     const char *value = JS_ToCString(ctx, argv[1]);
 
     if (name && value)
-        kl_response_header(res, name, value);
+        kl_http_response_header(res, name, value);
 
     if (value) JS_FreeCString(ctx, value);
     if (name) JS_FreeCString(ctx, name);
@@ -122,7 +124,7 @@ static JSValue js_res_header(JSContext *ctx, JSValueConst this_val,
 static JSValue js_res_json(JSContext *ctx, JSValueConst this_val,
                             int argc, JSValueConst *argv)
 {
-    KlResponse *res = get_response(ctx, this_val);
+    KlHttpResponse *res = get_response(ctx, this_val);
     if (!res || argc < 1)
         return JS_EXCEPTION;
 
@@ -130,7 +132,7 @@ static JSValue js_res_json(JSContext *ctx, JSValueConst this_val,
     if (argc >= 2) {
         int32_t code;
         if (!JS_ToInt32(ctx, &code, argv[1]))
-            kl_response_status(res, code);
+            kl_http_response_status(res, code);
     }
 
     /* JSON.stringify the data */
@@ -145,7 +147,7 @@ static JSValue js_res_json(JSContext *ctx, JSValueConst this_val,
         if (json_str) {
             size_t json_len = strlen(json_str);
             HlJS *js_rt = (HlJS *)JS_GetContextOpaque(ctx);
-            kl_response_header(res, "Content-Type", "application/json");
+            kl_http_response_header(res, "Content-Type", "application/json");
             hl_maybe_compress(js_rt ? js_rt->active_req : NULL, res,
                               js_rt ? js_rt->base.compress : NULL,
                               json_str, json_len);
@@ -165,7 +167,7 @@ static JSValue js_res_json(JSContext *ctx, JSValueConst this_val,
 static JSValue js_res_html(JSContext *ctx, JSValueConst this_val,
                             int argc, JSValueConst *argv)
 {
-    KlResponse *res = get_response(ctx, this_val);
+    KlHttpResponse *res = get_response(ctx, this_val);
     if (!res || argc < 1)
         return JS_EXCEPTION;
 
@@ -173,14 +175,14 @@ static JSValue js_res_html(JSContext *ctx, JSValueConst this_val,
     if (html) {
         size_t html_len = strlen(html);
         HlJS *js_rt = (HlJS *)JS_GetContextOpaque(ctx);
-        kl_response_header(res, "Content-Type", "text/html; charset=utf-8");
+        kl_http_response_header(res, "Content-Type", "text/html; charset=utf-8");
         /* Skip the default CSP if middleware already wrote one - two
          * CSP headers cause browsers to enforce the strict intersection
          * (typically blocking the page's own scripts). The app-supplied
          * one wins. */
         if (js_rt && js_rt->base.csp_policy &&
             !hl_response_has_header(res, "Content-Security-Policy"))
-            kl_response_header(res, "Content-Security-Policy",
+            kl_http_response_header(res, "Content-Security-Policy",
                                js_rt->base.csp_policy);
         hl_maybe_compress(js_rt ? js_rt->active_req : NULL, res,
                           js_rt ? js_rt->base.compress : NULL,
@@ -195,7 +197,7 @@ static JSValue js_res_html(JSContext *ctx, JSValueConst this_val,
 static JSValue js_res_text(JSContext *ctx, JSValueConst this_val,
                             int argc, JSValueConst *argv)
 {
-    KlResponse *res = get_response(ctx, this_val);
+    KlHttpResponse *res = get_response(ctx, this_val);
     if (!res || argc < 1)
         return JS_EXCEPTION;
 
@@ -203,7 +205,7 @@ static JSValue js_res_text(JSContext *ctx, JSValueConst this_val,
     if (text) {
         size_t text_len = strlen(text);
         HlJS *js_rt = (HlJS *)JS_GetContextOpaque(ctx);
-        kl_response_header(res, "Content-Type", "text/plain; charset=utf-8");
+        kl_http_response_header(res, "Content-Type", "text/plain; charset=utf-8");
         hl_maybe_compress(js_rt ? js_rt->active_req : NULL, res,
                           js_rt ? js_rt->base.compress : NULL,
                           text, text_len);
@@ -224,7 +226,7 @@ static JSValue js_res_text(JSContext *ctx, JSValueConst this_val,
 static JSValue js_res_bytes(JSContext *ctx, JSValueConst this_val,
                              int argc, JSValueConst *argv)
 {
-    KlResponse *res = get_response(ctx, this_val);
+    KlHttpResponse *res = get_response(ctx, this_val);
     if (!res || argc < 1)
         return JS_EXCEPTION;
 
@@ -235,7 +237,7 @@ static JSValue js_res_bytes(JSContext *ctx, JSValueConst this_val,
         return JS_ThrowTypeError(ctx,
             "res.bytes: expected ArrayBuffer, TypedArray, or string");
 
-    int rc = kl_response_body_copy(res, (const char *)view.data, view.len);
+    int rc = kl_http_response_body_copy(res, (const char *)view.data, view.len);
     if (needs_free && str) JS_FreeCString(ctx, str);
     if (rc != 0)
         return JS_ThrowInternalError(ctx, "res.bytes: out of memory");
@@ -246,7 +248,7 @@ static JSValue js_res_bytes(JSContext *ctx, JSValueConst this_val,
 static JSValue js_res_redirect(JSContext *ctx, JSValueConst this_val,
                                 int argc, JSValueConst *argv)
 {
-    KlResponse *res = get_response(ctx, this_val);
+    KlHttpResponse *res = get_response(ctx, this_val);
     if (!res || argc < 1)
         return JS_EXCEPTION;
 
@@ -256,9 +258,9 @@ static JSValue js_res_redirect(JSContext *ctx, JSValueConst this_val,
 
     const char *url = JS_ToCString(ctx, argv[0]);
     if (url) {
-        kl_response_status(res, code);
-        kl_response_header(res, "Location", url);
-        kl_response_body_borrow(res, "", 0);
+        kl_http_response_status(res, code);
+        kl_http_response_header(res, "Location", url);
+        kl_http_response_body_borrow(res, "", 0);
         JS_FreeCString(ctx, url);
     }
 
@@ -305,7 +307,7 @@ static int hl_js_ensure_response_class(HlJS *js)
 
 /* ── Public: create JS request/response objects ─────────────────────── */
 
-JSValue hl_js_make_response(HlJS *js, KlResponse *res)
+JSValue hl_js_make_response(HlJS *js, KlHttpResponse *res)
 {
     if (hl_js_ensure_response_class(js) != 0)
         return JS_ThrowInternalError(js->ctx, "failed to register Response class");
@@ -317,10 +319,28 @@ JSValue hl_js_make_response(HlJS *js, KlResponse *res)
 
 /* ── HTTP-feature seam: 500-error response ──────────────────────────── */
 /* Strong override for the JS runtime. Extracted from js/dispatch.c +
- * js/async.c so those core objects hold no kl_response_* refs. */
-void hl_js_http_error_response(struct KlResponse *res)
+ * js/async.c so those core objects hold no kl_http_response_* refs. */
+void hl_js_http_error_response(struct KlHttpResponse *res)
 {
-    kl_response_status(res, 500);
-    kl_response_header(res, "Content-Type", "text/plain");
-    kl_response_body_borrow(res, "Internal Server Error", 21);
+    kl_http_response_status(res, 500);
+    kl_http_response_header(res, "Content-Type", "text/plain");
+    kl_http_response_body_borrow(res, "Internal Server Error", 21);
+}
+
+/* Strong overrides: finalize + send a resumed request's response. Keeps ALL
+ * kl_http_* refs (incl. kl_http_request_send_response from the heavy
+ * http_server_core object) out of the base runtime's js_async.o; see
+ * include/hull/http_feature.h. */
+void hl_js_http_resume_send(struct KlHttpConn *conn, struct KlHttpRequest *req)
+{
+    KlHttpResponse *res = kl_http_conn_response(conn);
+    if (res && res->body_mode == KL_HTTP_BODY_STREAM)
+        kl_http_response_end_stream(res);
+    kl_http_request_send_response(req);
+}
+
+void hl_js_http_resume_error(struct KlHttpConn *conn, struct KlHttpRequest *req)
+{
+    hl_js_http_error_response(kl_http_conn_response(conn));
+    kl_http_request_send_response(req);
 }

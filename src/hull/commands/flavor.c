@@ -27,7 +27,7 @@
 #include "asset_checksum.h"         /* private installer helper (sibling, not public) */
 
 #include <keel/allocator.h>
-#include <keel/tls_mbedtls.h>
+#include <keel_tls_mbedtls.h>
 
 #include <errno.h>
 #include <limits.h>

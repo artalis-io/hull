@@ -14,7 +14,7 @@
 #include <stddef.h>
 
 /* Forward declarations */
-typedef struct KlRouter KlRouter;
+typedef struct KlHttpRouter KlHttpRouter;
 typedef struct HlAllocator HlAllocator;
 
 /* ── Test result collection ─────────────────────────────────────────── */
@@ -37,10 +37,10 @@ typedef struct {
 } HlTestResult;
 
 /*
- * Build a KlRequest on the stack, match a route, dispatch the handler,
+ * Build a KlHttpRequest on the stack, match a route, dispatch the handler,
  * and return response info. Used by both Lua and JS bindings.
  */
-int hl_cap_test_dispatch(KlRouter *router, const char *method,
+int hl_cap_test_dispatch(KlHttpRouter *router, const char *method,
                          const char *path, const char *body_data,
                          size_t body_len, const char **header_names,
                          const char **header_values, int num_headers,

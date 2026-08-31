@@ -19,7 +19,7 @@
 #include "log.h"
 #include "keel/thread_pool.h"
 #include "keel/async.h"
-#include "keel/server.h"
+#include "keel/http_server.h"
 
 #include <stdlib.h>
 #include <string.h>

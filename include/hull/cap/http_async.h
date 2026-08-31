@@ -1,7 +1,7 @@
 /*
  * cap/http_async.h - Non-blocking HTTP client via Keel's async client
  *
- * Thin wrapper around kl_redirect_start() / kl_client_start() that adds
+ * Thin wrapper around kl_http_redirect_start() / kl_http_client_start() that adds
  * host allowlist checking, audit logging, and HlAsyncCtx integration.
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
@@ -13,12 +13,12 @@
 #include "hull/cap/http.h"
 #include "hull/shared/async.h"
 
-#include <keel/client.h>
+#include <keel/http_client.h>
 
 /* Forward declarations */
 typedef struct HlAllocator      HlAllocator;
 typedef struct HlNetBackendCtx  HlNetBackendCtx;
-typedef struct KlClientResponse KlClientResponse;
+typedef struct KlHttpClientResponse KlHttpClientResponse;
 
 /*
  * Start an async HTTP request. Checks allowlist, creates async client
@@ -30,7 +30,7 @@ typedef struct KlClientResponse KlClientResponse;
  *
  * On failure, returns NULL (conn NOT suspended).
  */
-HlAsyncCtx *hl_async_http_start(KlServer *server, KlConn *conn,
+HlAsyncCtx *hl_async_http_start(KlHttpServer *server, KlHttpConn *conn,
                                   HlNetBackendCtx *net_ctx,
                                   HlAllocator *alloc,
                                   HlHttpConfig *http_cfg,
@@ -43,6 +43,6 @@ HlAsyncCtx *hl_async_http_start(KlServer *server, KlConn *conn,
  * Handles both redirect (tagged LSB=1) and plain client drivers.
  * Returns NULL if driver is NULL.
  */
-const KlClientResponse *hl_http_async_response(void *driver);
+const KlHttpClientResponse *hl_http_async_response(void *driver);
 
 #endif /* HL_CAP_HTTP_ASYNC_H */

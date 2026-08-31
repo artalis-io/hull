@@ -11,8 +11,8 @@
  *
  * One backend ships:
  *
- *   keel - wraps Keel's KlServer + KlRouter + KlRequest/KlResponse +
- *          KlBodyReader + KlWs + KlSse. Default when HL_ENABLE_HTTP=1.
+ *   keel - wraps Keel's KlHttpServer + KlHttpRouter + KlHttpRequest/KlHttpResponse +
+ *          KlHttpBodyReader + KlWs + KlHttpSse. Default when HL_ENABLE_HTTP=1.
  *
  * HL_ENABLE_HTTP=0 builds have no net backend at all - `hl_net_backend()`
  * returns NULL. Hull's CLI driver (serve_cli.c) doesn't consume the
@@ -20,7 +20,7 @@
  *
  * The vtable defines opaque HlReqHandle / HlResHandle types and
  * accessor methods so consumers (runtime/{lua,js}/dispatch.c +
- * bindings.c) never see Keel's KlRequest/KlResponse directly. This
+ * bindings.c) never see Keel's KlHttpRequest/KlHttpResponse directly. This
  * doubles the migration footprint vs. wrapping the existing types
  * but cleans up a long-standing leakage and pays back for any future
  * backend.

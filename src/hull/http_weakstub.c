@@ -38,25 +38,25 @@
  * win) and in cosmo (its in-base strong defs win). */
 
 #ifdef HL_ENABLE_LUA
-#include "hull/runtime/lua.h"    /* HlLua, KlServer, KlRouter, lua_State + wire protos */
+#include "hull/runtime/lua.h"    /* HlLua, KlHttpServer, KlHttpRouter, lua_State + wire protos */
 #include "hull/runtime/test.h"   /* HlTestCaseResult + test protos */
 
 struct HlLuaTimer;
 
-__attribute__((weak)) int hl_lua_wire_routes(HlLua *lua, KlRouter *router)
+__attribute__((weak)) int hl_lua_wire_routes(HlLua *lua, KlHttpRouter *router)
 {
     (void)lua; (void)router;
     return -1;
 }
 
-__attribute__((weak)) int hl_lua_wire_routes_server(HlLua *lua, KlServer *server,
+__attribute__((weak)) int hl_lua_wire_routes_server(HlLua *lua, KlHttpServer *server,
                                                     void *(*alloc_fn)(size_t))
 {
     (void)lua; (void)server; (void)alloc_fn;
     return -1;
 }
 
-__attribute__((weak)) void hl_lua_test_register(lua_State *L, KlRouter *router,
+__attribute__((weak)) void hl_lua_test_register(lua_State *L, KlHttpRouter *router,
                                                 HlLua *lua)
 {
     (void)L; (void)router; (void)lua;
@@ -82,25 +82,25 @@ __attribute__((weak)) void hl_lua_timer_reschedule(struct HlLuaTimer *t)
 #endif /* HL_ENABLE_LUA */
 
 #ifdef HL_ENABLE_JS
-#include "hull/runtime/js.h"     /* HlJS, JSContext, KlServer, KlRouter + wire protos */
+#include "hull/runtime/js.h"     /* HlJS, JSContext, KlHttpServer, KlHttpRouter + wire protos */
 #include "hull/runtime/test.h"   /* HlTestCaseResult + test protos */
 
 struct HlJSTimer;
 
-__attribute__((weak)) int hl_js_wire_routes(HlJS *js, KlRouter *router)
+__attribute__((weak)) int hl_js_wire_routes(HlJS *js, KlHttpRouter *router)
 {
     (void)js; (void)router;
     return -1;
 }
 
-__attribute__((weak)) int hl_js_wire_routes_server(HlJS *js, KlServer *server,
+__attribute__((weak)) int hl_js_wire_routes_server(HlJS *js, KlHttpServer *server,
                                                    void *(*alloc_fn)(size_t))
 {
     (void)js; (void)server; (void)alloc_fn;
     return -1;
 }
 
-__attribute__((weak)) void hl_js_test_register(JSContext *ctx, KlRouter *router,
+__attribute__((weak)) void hl_js_test_register(JSContext *ctx, KlHttpRouter *router,
                                                HlJS *js)
 {
     (void)ctx; (void)router; (void)js;

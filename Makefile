@@ -1305,12 +1305,12 @@ CSP_OBJ        := $(BUILDDIR)/csp.o
 # at runtime - the dispatch / vtable / registry tables are already
 # `static const`, so this targets the OTHER category.
 #
-# Source lives in the shared vendored utility at
-# vendor/keel/vendor/sh_seal_arena/.  We compile a Hull-local copy
-# (with Hull's CFLAGS, including sanitizers under DEBUG/MSAN) so test
-# binaries that link it AHEAD of libkeel.a get the instrumented
-# version - Keel's libkeel.a always contains its own copy too, but
-# the linker resolves sh_seal_arena_* from Hull's object first.
+# Source lives in Hull's own vendored copy at vendor/sh_seal_arena/
+# (extracted from Keel v2.7.1; Keel v3 no longer ships it). We compile
+# it with Hull's CFLAGS (including sanitizers under DEBUG/MSAN). Keel v3
+# provides no sh_seal_arena_* symbols, so this object is the ONLY
+# definition -- it is linked into the hull binary, the platform archive
+# (so composed `hull build` apps resolve it), and test binaries.
 # Required for MSan: without an instrumented sh_seal_arena.o, MSan
 # can't see init writing to ShSealArena fields and flags every
 # post-init read as use-of-uninitialized-value.
@@ -1908,7 +1908,7 @@ $(APP_ENTRIES_DEFAULT_OBJ): $(SRCDIR)/hull/app_entries_default.c $(INCDIR)/hull/
 
 # ── Include paths ───────────────────────────────────────────────────
 
-INCLUDES := -I$(INCDIR) -I$(QJS_DIR) -I$(LUA_DIR) -I$(KEEL_INC) -I$(KEEL_DIR)/vendor/llhttp -I$(KEEL_DIR)/vendor/sh_seal_arena -I$(MBEDTLS_DIR)/include -I$(SQLITE_DIR) -I$(LOG_DIR) -I$(SH_ARENA_DIR) -I$(SH_JSON_DIR) -I$(TWEETNACL_DIR) -I$(STB_DIR) -I$(VENDDIR) -I$(BUILDDIR) $(WAMR_INC)
+INCLUDES := -I$(INCDIR) -I$(QJS_DIR) -I$(LUA_DIR) -I$(KEEL_INC) -I$(KEEL_DIR)/integrations/tls/mbedtls -I$(KEEL_DIR)/integrations/codec/miniz -I$(KEEL_DIR)/vendor/llhttp -I$(VENDDIR)/sh_seal_arena -I$(MBEDTLS_DIR)/include -I$(SQLITE_DIR) -I$(LOG_DIR) -I$(SH_ARENA_DIR) -I$(SH_JSON_DIR) -I$(TWEETNACL_DIR) -I$(STB_DIR) -I$(VENDDIR) -I$(BUILDDIR) $(WAMR_INC)
 
 # ── Build-flag fingerprint (force-rebuild on flag change) ───────────
 #
@@ -2159,19 +2159,17 @@ $(PLATFORM_LIB): | $(BUILDDIR)
 	@test -f $@ || (echo "ERROR: TRUST_PLATFORM_LIB=1 but $@ is missing"; exit 1)
 	@echo "$@: trusting pre-built artifact (TRUST_PLATFORM_LIB=1)"
 else
-# When both HTTP halves are off, KEEL_LIB is empty and the keel-merge below is
-# skipped. But the platform objects still reference sh_seal_arena (Hull's
-# manifest seal / sealed runtime tables), which normally arrives bundled inside
-# the merged keel archive. Add Hull's own instrumented sh_seal_arena.o directly
-# in that case so the no-keel (pure-compute) platform archive is self-contained.
-ifeq ($(KEEL_LIB),)
-PLATFORM_NOKEEL_OBJS := $(SH_SEAL_ARENA_OBJ)
-else
-PLATFORM_NOKEEL_OBJS :=
-endif
-$(PLATFORM_LIB): $(PLATFORM_OBJS) $(CANARY_OBJ) $(PLATFORM_NOKEEL_OBJS) $(KEEL_LIB) | $(BUILDDIR)
+# The platform objects reference sh_seal_arena (Hull's manifest seal / sealed
+# runtime tables; vfs.o -- which IS in this archive -- calls it). Pre-Keel-v3,
+# that symbol arrived bundled inside the merged keel archive, so it only needed
+# adding here in the no-keel (pure-compute) case. Keel v3 no longer ships
+# sh_seal_arena (Hull vendors its own under vendor/sh_seal_arena/), so add
+# Hull's own instrumented sh_seal_arena.o UNCONDITIONALLY -- a composed app
+# (hull build) links only this archive and must resolve the symbol from it.
+PLATFORM_SEAL_ARENA_OBJ := $(SH_SEAL_ARENA_OBJ)
+$(PLATFORM_LIB): $(PLATFORM_OBJS) $(CANARY_OBJ) $(PLATFORM_SEAL_ARENA_OBJ) $(KEEL_LIB) | $(BUILDDIR)
 	@rm -f $@
-	$(AR) rcs $@ $(PLATFORM_OBJS) $(CANARY_OBJ) $(PLATFORM_NOKEEL_OBJS)
+	$(AR) rcs $@ $(PLATFORM_OBJS) $(CANARY_OBJ) $(PLATFORM_SEAL_ARENA_OBJ)
 	@# Merge keel objects into the platform archive. KEEL_LIB is empty when
 	@# both HTTP halves are off (pure-compute flavor), in which case there is
 	@# nothing to merge -- skip rather than `ar x` the empty path (a dir).
@@ -2923,9 +2921,9 @@ endif
 	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
 
 # Sealed-arena vendored utility - Hull-local compile so sanitizer
-# builds get an instrumented copy.  Source canonical at
-# vendor/keel/vendor/sh_seal_arena/.
-$(SH_SEAL_ARENA_OBJ): $(KEEL_DIR)/vendor/sh_seal_arena/sh_seal_arena.c $(KEEL_DIR)/vendor/sh_seal_arena/sh_seal_arena.h | $(BUILDDIR)
+# builds get an instrumented copy.  Source at vendor/sh_seal_arena/
+# (Hull's own copy, extracted from Keel v2.7.1; Keel v3 dropped it).
+$(SH_SEAL_ARENA_OBJ): $(VENDDIR)/sh_seal_arena/sh_seal_arena.c $(VENDDIR)/sh_seal_arena/sh_seal_arena.h | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
 
 # Content-Security-Policy preset registry.

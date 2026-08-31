@@ -12,8 +12,8 @@
 
 #include "hull/vfs.h"
 
-#include <keel/request.h>
-#include <keel/response.h>
+#include <keel/http_request.h>
+#include <keel/http_response.h>
 #include <stddef.h>
 
 typedef struct {
@@ -37,7 +37,7 @@ typedef struct {
  * on disk), writes the response and returns 1 (short-circuit).
  * Otherwise returns 0 (continue to next middleware/handler).
  */
-int hl_static_middleware(KlRequest *req, KlResponse *res, void *user_data);
+int hl_static_middleware(KlHttpRequest *req, KlHttpResponse *res, void *user_data);
 
 /**
  * @brief Return MIME type string for a file path based on extension.

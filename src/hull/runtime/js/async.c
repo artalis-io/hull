@@ -32,7 +32,8 @@ typedef struct HlJsAsyncCont {
     JSValue           reject;       /* Promise reject function */
     HlAllocator      *alloc;
     HlJsPushResultFn  push_result;  /* NULL = no result (sleep) */
-    KlConn           *conn;         /* connection to resume (NULL = detached) */
+    KlHttpConn           *conn;         /* connection to resume (NULL = detached) */
+    KlHttpRequest    *req;          /* request for kl_http_request_send_response (transition to SENDING) */
     JSValue           handler_promise; /* outer handler promise */
     void             *timer_ctx;    /* HlJSTimer* if running in a timer callback */
     /* Generic "handler finally completed" hook (subsystem-agnostic). Lets a
@@ -45,10 +46,12 @@ typedef struct HlJsAsyncCont {
 
 /*
  * Resume the JS handler by resolving the inner promise and draining
- * microtasks. Then check the outer handler promise state:
- *   FULFILLED → KL_CONN_SENDING (handler completed)
- *   PENDING   → KL_CONN_SUSPENDED (handler re-yielded, new op active)
- *   REJECTED  → KL_CONN_SENDING (500 response written)
+ * microtasks. Then check the outer handler promise state. Under Keel v3
+ * this only FINALIZES the response; Keel owns the send after on_resume
+ * (see include/hull/shared/async.h). Per promise state:
+ *   FULFILLED → build the response, kl_async_complete lets Keel send it
+ *   PENDING   → handler re-yielded; a new op is active, conn stays suspended
+ *   REJECTED  → build a 500, kl_async_complete lets Keel send it
  *
  * The connection and handler promise are stored per-continuation
  * rather than in the HlJS singleton.  This allows multiple connections
@@ -74,14 +77,17 @@ static void hl_js_async_resume(HlAsyncCont *self, void *driver)
 {
     HlJsAsyncCont *jc = (HlJsAsyncCont *)self;
     HlJS *js = jc->js;
-    KlConn *conn = jc->conn;
+    KlHttpConn *conn = jc->conn;
     JSContext *ctx = js->ctx;
 
     if (!ctx) return;
 
     /* Restore per-request context so C functions called during resume
-     * (e.g., another http.async.get) can find the active connection */
+     * (e.g., another http.async.get) can find the active connection and
+     * request (a re-yield's new cont captures js->active_req; response
+     * compression reads it). Mirrors the Lua path. */
     js->active_conn = conn;
+    js->active_req  = jc->req;
 
     /* Settle the inner promise with the driver result.
      *
@@ -160,13 +166,13 @@ static void hl_js_async_resume(HlAsyncCont *self, void *driver)
         }
 
 #ifdef HL_ENABLE_HTTP_SERVER
-        if (conn) {
-            if (conn->res.body_mode == KL_BODY_STREAM) {
-                conn->state = KL_CONN_CLOSED;
-            } else {
-                conn->state = KL_CONN_SENDING;
-            }
-        }
+        /* Finalize + send the resumed handler's response entirely behind the
+         * HTTP-feature seam, so this base-runtime object holds NO Keel refs
+         * (a compute app composes no HTTP and must link zero Keel). The seam
+         * ends a streamed body and transitions the conn to SENDING (required on
+         * the poll backend). Mirrors the Lua path (runtime/lua/async.c). */
+        if (conn)
+            hl_js_http_resume_send(conn, jc->req);
 #endif
 
         /* Timer async completion: clear in_flight and reschedule.
@@ -209,10 +215,8 @@ static void hl_js_async_resume(HlAsyncCont *self, void *driver)
         }
 
 #ifdef HL_ENABLE_HTTP_SERVER
-        if (conn) {
-            hl_js_http_error_response(&conn->res);
-            conn->state = KL_CONN_SENDING;
-        }
+        if (conn)
+            hl_js_http_resume_error(conn, jc->req);  /* 500 + send, behind the seam */
 #endif
 
         /* Timer error: clear in_flight and reschedule anyway. CLI
@@ -328,6 +332,7 @@ HlAsyncCont *hl_js_async_cont_create(HlJS *js,
      * suspended concurrently without clobbering each other.
      * handler_promise is set later by dispatch (two-step wiring). */
     jc->conn            = js->active_conn;
+    jc->req             = js->active_req;
     jc->handler_promise = JS_UNDEFINED;
     jc->timer_ctx       = js->active_timer;  /* inherit timer ctx if in timer callback */
     jc->on_complete     = js->active_on_complete;     /* deferred-teardown hook */
@@ -393,8 +398,8 @@ static JSValue js_hull_sleep(JSContext *ctx, JSValueConst this_val,
         return JS_ThrowInternalError(ctx,
             "hull.sleep() requires an active event loop");
 
-    KlServer *server = js->server;
-    KlConn *conn = js->active_conn;
+    KlHttpServer *server = js->server;
+    KlHttpConn *conn = js->active_conn;
 
     /* Create async ctx */
     HlAsyncCtx *actx = hl_async_ctx_create(server, js->base.net_ctx, js->base.alloc);
@@ -443,7 +448,7 @@ static JSValue js_hull_sleep(JSContext *ctx, JSValueConst this_val,
         }
     } else {
         /* Detached mode: schedule via the async backend vtable. The
-         * underlying loop is the same one KlServer drives (wrapped in
+         * underlying loop is the same one KlHttpServer drives (wrapped in
          * serve.c::wire_caps), so the timer fires alongside HTTP work. */
         actx->detached = 1;
 

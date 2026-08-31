@@ -14,8 +14,8 @@
 #include "hull/release.h"   /* hl_release_verify_manifest_sig / pubkey_configured */
 
 #include <keel/allocator.h>
-#include <keel/client.h>
-#include <keel/redirect.h>
+#include <keel/http_client.h>
+#include <keel/http_redirect.h>
 #include "hull/tls_transport.h"
 #include <keel/tls.h>
 
@@ -132,7 +132,7 @@ int hl_release_io_get(const char *url,
 
     KlTlsConfig tls_cfg = {0};
     hl_tls_config_wire(&tls_cfg, tls);
-    KlClientConfig cfg = {
+    KlHttpClientConfig cfg = {
         .timeout_ms        = 30000,
         /* 512 MB: a released binary / feature lib is small, but a multi-file
          * TOOL BUNDLE can be large - the `zig` toolchain is ~330 MB (a 168 MB
@@ -142,8 +142,8 @@ int hl_release_io_get(const char *url,
         .max_response_size = 512 * 1024 * 1024,
         .tls               = &tls_cfg,
     };
-    KlRedirectConfig redir = { .max_redirects = 10 };
-    KlClientResponse resp;
+    KlHttpRedirectConfig redir = { .max_redirects = 10 };
+    KlHttpClientResponse resp;
     memset(&resp, 0, sizeof(resp));
 
     /* Compose UA: caller-supplied identifier + HL_VERSION. The
@@ -153,26 +153,26 @@ int hl_release_io_get(const char *url,
     snprintf(ua_buf, sizeof(ua_buf), "%s/%s",
              user_agent ? user_agent : "hull", HL_VERSION);
 
-    KlClientHeader hdr = { .name = "User-Agent", .value = ua_buf };
+    KlHttpClientHeader hdr = { .name = "User-Agent", .value = ua_buf };
 
-    int rc = kl_redirect_request(alloc, &cfg, &redir, "GET", url,
+    int rc = kl_http_redirect_request(alloc, &cfg, &redir, "GET", url,
                                   &hdr, 1, NULL, 0, &resp);
     if (rc != 0) {
-        kl_client_response_free(&resp);
+        kl_http_client_response_free(&resp);
         return -1;
     }
     if (resp.status < 200 || resp.status >= 300) {
         fprintf(stderr, "%s: %s returned HTTP %d\n",
                 user_agent ? user_agent : "hull", url, resp.status);
-        kl_client_response_free(&resp);
+        kl_http_client_response_free(&resp);
         return -1;
     }
-    /* Steal the body buffer so kl_client_response_free doesn't drop it. */
+    /* Steal the body buffer so kl_http_client_response_free doesn't drop it. */
     *out_len = resp.body_len;
     *out_body = (char *)resp.body;
     resp.body = NULL;
     resp.body_len = 0;
-    kl_client_response_free(&resp);
+    kl_http_client_response_free(&resp);
     return 0;
 }
 

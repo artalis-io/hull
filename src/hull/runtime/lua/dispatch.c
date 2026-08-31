@@ -31,7 +31,7 @@
 #include <string.h>
 
 int hl_lua_dispatch(HlLua *lua, int handler_id,
-                       KlRequest *req, KlResponse *res)
+                       KlHttpRequest *req, KlHttpResponse *res)
 {
     if (!lua || !lua->L || !req || !res)
         return -1;
@@ -53,7 +53,7 @@ int hl_lua_dispatch(HlLua *lua, int handler_id,
     sh_arena_reset(lua->scratch);
 
     /* Set per-request async context (for hull.sleep / http.get access) */
-    lua->active_conn = kl_request_conn(req);
+    lua->active_conn = kl_http_request_conn(req);
     lua->active_req = req;
 
     /* Get the handler function from the route registry */
@@ -159,7 +159,7 @@ int hl_lua_dispatch(HlLua *lua, int handler_id,
     return -1;
 }
 
-void hl_lua_keel_handler(KlRequest *req, KlResponse *res, void *user_data)
+void hl_lua_keel_handler(KlHttpRequest *req, KlHttpResponse *res, void *user_data)
 {
     HlLuaRoute *route = (HlLuaRoute *)user_data;
     int rc = hl_lua_dispatch(route->lua, route->handler_id, req, res);
@@ -173,7 +173,7 @@ void hl_lua_keel_handler(KlRequest *req, KlResponse *res, void *user_data)
 /* ── Middleware dispatch ────────────────────────────────────────────── */
 
 int hl_lua_dispatch_middleware(HlLua *lua, int handler_id,
-                               KlRequest *req, KlResponse *res)
+                               KlHttpRequest *req, KlHttpResponse *res)
 {
     if (!lua || !lua->L || !req || !res)
         return -1;
@@ -270,7 +270,7 @@ int hl_lua_dispatch_middleware(HlLua *lua, int handler_id,
     return result;
 }
 
-int hl_lua_keel_middleware(KlRequest *req, KlResponse *res, void *user_data)
+int hl_lua_keel_middleware(KlHttpRequest *req, KlHttpResponse *res, void *user_data)
 {
     HlLuaRoute *ctx = (HlLuaRoute *)user_data;
     int rc = hl_lua_dispatch_middleware(ctx->lua, ctx->handler_id, req, res);

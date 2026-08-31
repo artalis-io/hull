@@ -20,7 +20,7 @@ static int js_parse_texture_descs(JSContext *ctx, JSValueConst arr,
                                    const char **tracked_strs, int *str_count,
                                    int str_max);
 
-#include <keel/server.h>
+#include <keel/http_server.h>
 #include <stdio.h>
 #include <stdatomic.h>
 

@@ -1,13 +1,13 @@
 /*
  * hull_cap_body.c - Body reader factory and extraction for Hull runtimes
  *
- * Wraps Keel's kl_body_reader_buffer with a 1 MB limit.
+ * Wraps Keel's kl_http_body_reader_buffer with a 1 MB limit.
  * Both JS and Lua bindings use hl_cap_body_data() to extract
  * the buffered body after on_complete fires.
  *
  * Also provides hl_cap_multipart_factory - a streaming wrapper around
- * Keel's kl_body_reader_multipart that holds a parked-handler slot.
- * Used by routes registered with kl_server_route_streaming so the
+ * Keel's kl_http_body_reader_multipart that holds a parked-handler slot.
+ * Used by routes registered with kl_http_server_route_streaming so the
  * handler can yield on NEED_DATA and be resumed by on_data callbacks.
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
@@ -15,19 +15,19 @@
 
 #include "hull/cap/body.h"
 #include "hull/limits/core.h"
-#include <keel/body_reader_multipart.h>
+#include <keel/http_body_reader_multipart.h>
 #include <stddef.h>
 #include <string.h>
 
-KlBodyReader *hl_cap_body_factory(KlAllocator *alloc, const KlRequest *req,
+KlHttpBodyReader *hl_cap_body_factory(KlAllocator *alloc, const KlHttpRequest *req,
                                   void *user_data)
 {
     (void)user_data;
-    return kl_body_reader_buffer(alloc, req,
+    return kl_http_body_reader_buffer(alloc, req,
                                  (void *)(size_t)HL_BODY_MAX_SIZE);
 }
 
-size_t hl_cap_body_data(const KlBodyReader *reader, const char **out_data)
+size_t hl_cap_body_data(const KlHttpBodyReader *reader, const char **out_data)
 {
     if (!out_data)
         return 0;
@@ -35,7 +35,7 @@ size_t hl_cap_body_data(const KlBodyReader *reader, const char **out_data)
         *out_data = NULL;
         return 0;
     }
-    const KlBufReader *br = (const KlBufReader *)reader;
+    const KlHttpBufReader *br = (const KlHttpBufReader *)reader;
     *out_data = br->data;
     return br->len;
 }
@@ -44,14 +44,14 @@ size_t hl_cap_body_data(const KlBodyReader *reader, const char **out_data)
 
 /*
  * Wrapper struct: holds the inner Keel multipart reader plus a
- * single-shot parked-handler callback. The wrapper IS a KlBodyReader
+ * single-shot parked-handler callback. The wrapper IS a KlHttpBodyReader
  * (so Keel can pump on_data into it); the inner reader is owned by
  * the wrapper and freed on destroy.
  */
 typedef struct {
-    KlBodyReader        base;
+    KlHttpBodyReader        base;
     KlAllocator        *alloc;
-    KlBodyReader       *inner;       /* kl_body_reader_multipart */
+    KlHttpBodyReader       *inner;       /* kl_http_body_reader_multipart */
     HlMultipartResumeFn on_resume;   /* parked handler - NULL = none */
     void               *resume_ctx;  /* opaque ctx for on_resume */
     int                 stream_ended;
@@ -70,7 +70,7 @@ static void mp_fire_park(HlMultipartWrapper *w, HlMultipartResumeReason reason)
     fn(ctx, reason);
 }
 
-static int mp_wrap_on_data(KlBodyReader *self, const char *data, size_t len)
+static int mp_wrap_on_data(KlHttpBodyReader *self, const char *data, size_t len)
 {
     HlMultipartWrapper *w = (HlMultipartWrapper *)self;
     int rc = w->inner->on_data(w->inner, data, len);
@@ -85,7 +85,7 @@ static int mp_wrap_on_data(KlBodyReader *self, const char *data, size_t len)
     return 0;
 }
 
-static void mp_wrap_on_complete(KlBodyReader *self)
+static void mp_wrap_on_complete(KlHttpBodyReader *self)
 {
     HlMultipartWrapper *w = (HlMultipartWrapper *)self;
     w->inner->on_complete(w->inner);
@@ -93,7 +93,7 @@ static void mp_wrap_on_complete(KlBodyReader *self)
     mp_fire_park(w, HL_MP_RESUME_DONE);
 }
 
-static void mp_wrap_on_error(KlBodyReader *self)
+static void mp_wrap_on_error(KlHttpBodyReader *self)
 {
     HlMultipartWrapper *w = (HlMultipartWrapper *)self;
     w->inner->on_error(w->inner);
@@ -101,20 +101,20 @@ static void mp_wrap_on_error(KlBodyReader *self)
     mp_fire_park(w, HL_MP_RESUME_ERROR);
 }
 
-static void mp_wrap_destroy(KlBodyReader *self)
+static void mp_wrap_destroy(KlHttpBodyReader *self)
 {
     HlMultipartWrapper *w = (HlMultipartWrapper *)self;
     if (w->inner) w->inner->destroy(w->inner);
     kl_free(w->alloc, w, sizeof(*w));
 }
 
-KlBodyReader *hl_cap_multipart_factory(KlAllocator *alloc,
-                                       const KlRequest *req,
+KlHttpBodyReader *hl_cap_multipart_factory(KlAllocator *alloc,
+                                       const KlHttpRequest *req,
                                        void *user_data)
 {
     if (!alloc || !req) return NULL;
 
-    KlBodyReader *inner = kl_body_reader_multipart(alloc, req, user_data);
+    KlHttpBodyReader *inner = kl_http_body_reader_multipart(alloc, req, user_data);
     if (!inner) return NULL;
 
     HlMultipartWrapper *w = kl_malloc(alloc, sizeof(*w));
@@ -134,13 +134,13 @@ KlBodyReader *hl_cap_multipart_factory(KlAllocator *alloc,
     return &w->base;
 }
 
-KlBodyReader *hl_cap_multipart_inner(KlBodyReader *wrapper)
+KlHttpBodyReader *hl_cap_multipart_inner(KlHttpBodyReader *wrapper)
 {
     if (!wrapper || wrapper->on_data != mp_wrap_on_data) return NULL;
     return ((HlMultipartWrapper *)wrapper)->inner;
 }
 
-int hl_cap_multipart_park(KlBodyReader *wrapper,
+int hl_cap_multipart_park(KlHttpBodyReader *wrapper,
                           HlMultipartResumeFn on_resume,
                           void *ctx)
 {

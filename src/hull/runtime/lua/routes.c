@@ -3,7 +3,7 @@
  *
  * Reads the route/middleware/timer/ws/sse definition tables that
  * `app.<verb>()` builds in the Lua registry and registers them with
- * Keel (KlRouter or KlServer). Also hosts the tracked-allocation
+ * Keel (KlHttpRouter or KlHttpServer). Also hosts the tracked-allocation
  * helpers used by every wire step so we can free per-route contexts
  * on shutdown without leaking.
  *
@@ -22,7 +22,7 @@
 #include "lauxlib.h"
 
 #include <keel/keel.h>
-#include <keel/body_reader_multipart.h>
+#include <keel/http_body_reader_multipart.h>
 #include <keel/websocket_server.h>
 
 #include "log.h"
@@ -78,12 +78,12 @@ int hl_lua_track_alloc(HlLua *lua, void ***arr, size_t *count,
 
 /* Defined below; forward-declared so the router (test-harness) wiring can
  * register streaming-multipart routes the same way the server wiring does. */
-static KlMultipartConfig *lua_build_multipart_config(HlLua *lua);
-static KlBodyReader *hl_lua_multipart_factory(KlAllocator *alloc,
-                                              const KlRequest *req,
+static KlHttpMultipartConfig *lua_build_multipart_config(HlLua *lua);
+static KlHttpBodyReader *hl_lua_multipart_factory(KlAllocator *alloc,
+                                              const KlHttpRequest *req,
                                               void *user_data);
 
-int hl_lua_wire_routes(HlLua *lua, KlRouter *router)
+int hl_lua_wire_routes(HlLua *lua, KlHttpRouter *router)
 {
     lua_State *L = lua->L;
 
@@ -140,14 +140,14 @@ int hl_lua_wire_routes(HlLua *lua, KlRouter *router)
                 if (hl_lua_track_route(lua, route) != 0) {
                     if (route->multipart_config)
                         hl_alloc_free(lua->base.alloc, route->multipart_config,
-                                      sizeof(KlMultipartConfig));
+                                      sizeof(KlHttpMultipartConfig));
                     hl_alloc_free(lua->base.alloc, route, sizeof(HlLuaRoute));
                 } else if (is_streaming) {
-                    kl_router_add_streaming_async(router, method_str, pattern,
+                    kl_http_router_add_streaming_async(router, method_str, pattern,
                                                   hl_lua_keel_handler, route,
                                                   hl_lua_multipart_factory);
                 } else {
-                    kl_router_add(router, method_str, pattern,
+                    kl_http_router_add(router, method_str, pattern,
                                   hl_lua_keel_handler, route, NULL);
                 }
             }
@@ -185,7 +185,7 @@ int hl_lua_wire_routes(HlLua *lua, KlRouter *router)
                     if (hl_lua_track_route(lua, ctx) != 0)
                         hl_alloc_free(lua->base.alloc, ctx, sizeof(HlLuaRoute));
                     else
-                        kl_router_use(router, mw_method, mw_pattern,
+                        kl_http_router_use(router, mw_method, mw_pattern,
                                       hl_lua_keel_middleware, ctx);
                 }
             }
@@ -222,7 +222,7 @@ int hl_lua_wire_routes(HlLua *lua, KlRouter *router)
                     if (hl_lua_track_route(lua, ctx) != 0)
                         hl_alloc_free(lua->base.alloc, ctx, sizeof(HlLuaRoute));
                     else
-                        kl_router_use_post(router, mw_method, mw_pattern,
+                        kl_http_router_use_post(router, mw_method, mw_pattern,
                                            hl_lua_keel_middleware, ctx);
                 }
             }
@@ -266,13 +266,13 @@ static int lua_read_int_field(lua_State *L, const char *key)
     return v;
 }
 
-/* Build a heap-allocated KlMultipartConfig from a Lua subtable at -1.
- * Caller frees with hl_alloc_free(...,sizeof(KlMultipartConfig)).
+/* Build a heap-allocated KlHttpMultipartConfig from a Lua subtable at -1.
+ * Caller frees with hl_alloc_free(...,sizeof(KlHttpMultipartConfig)).
  * Returns NULL on allocation failure. */
-static KlMultipartConfig *lua_build_multipart_config(HlLua *lua)
+static KlHttpMultipartConfig *lua_build_multipart_config(HlLua *lua)
 {
-    KlMultipartConfig *cfg = hl_alloc_malloc(lua->base.alloc,
-                                              sizeof(KlMultipartConfig));
+    KlHttpMultipartConfig *cfg = hl_alloc_malloc(lua->base.alloc,
+                                              sizeof(KlHttpMultipartConfig));
     if (!cfg) return NULL;
     cfg->max_part_size    = lua_read_size_field(lua->L, "max_part_size");
     cfg->max_total_size   = lua_read_size_field(lua->L, "max_total_size");
@@ -284,11 +284,11 @@ static KlMultipartConfig *lua_build_multipart_config(HlLua *lua)
 
 /* Body factory shim for streaming-multipart routes: routes the request
  * through hl_cap_multipart_factory (the parkable wrapper around Keel's
- * kl_body_reader_multipart) so the Lua iterator can hl_cap_multipart_park
+ * kl_http_body_reader_multipart) so the Lua iterator can hl_cap_multipart_park
  * on NEED_DATA. The wrapper forwards our per-route config to the inner
  * Keel reader. */
-static KlBodyReader *hl_lua_multipart_factory(KlAllocator *alloc,
-                                               const KlRequest *req,
+static KlHttpBodyReader *hl_lua_multipart_factory(KlAllocator *alloc,
+                                               const KlHttpRequest *req,
                                                void *user_data)
 {
     HlLuaRoute *route = (HlLuaRoute *)user_data;
@@ -301,7 +301,7 @@ static KlBodyReader *hl_lua_multipart_factory(KlAllocator *alloc,
  * force-pull this member over the weak http_weakstub.o stub. */
 int hl_lua_http_bridge_anchor = 0;
 
-int hl_lua_wire_routes_server(HlLua *lua, KlServer *server,
+int hl_lua_wire_routes_server(HlLua *lua, KlHttpServer *server,
                                void *(*alloc_fn)(size_t))
 {
     (void)alloc_fn; /* routes always use Hull allocator */
@@ -359,7 +359,7 @@ int hl_lua_wire_routes_server(HlLua *lua, KlServer *server,
                 if (hl_lua_track_route(lua, route) != 0) {
                     if (route->multipart_config) {
                         hl_alloc_free(lua->base.alloc, route->multipart_config,
-                                      sizeof(KlMultipartConfig));
+                                      sizeof(KlHttpMultipartConfig));
                     }
                     hl_alloc_free(lua->base.alloc, route, sizeof(HlLuaRoute));
                 } else if (is_streaming) {
@@ -368,11 +368,11 @@ int hl_lua_wire_routes_server(HlLua *lua, KlServer *server,
                      * Closes the single-read leftover-cap UX gap so
                      * parser caps fire structured 4xx responses even
                      * when the body fits in the first kernel read. */
-                    kl_server_route_streaming_async(server, method_str, pattern,
+                    kl_http_server_route_streaming_async(server, method_str, pattern,
                                                      hl_lua_keel_handler, route,
                                                      hl_lua_multipart_factory);
                 } else {
-                    kl_server_route(server, method_str, pattern,
+                    kl_http_server_route(server, method_str, pattern,
                                     hl_lua_keel_handler, route,
                                     hl_cap_body_factory);
                 }
@@ -414,7 +414,7 @@ int hl_lua_wire_routes_server(HlLua *lua, KlServer *server,
                     if (hl_lua_track_route(lua, ctx) != 0) {
                         hl_alloc_free(lua->base.alloc, ctx, sizeof(HlLuaRoute));
                     } else {
-                        kl_server_use(server, method_str, pattern,
+                        kl_http_server_use(server, method_str, pattern,
                                       hl_lua_keel_middleware, ctx);
                     }
                 }
@@ -455,7 +455,7 @@ int hl_lua_wire_routes_server(HlLua *lua, KlServer *server,
                     if (hl_lua_track_route(lua, ctx) != 0) {
                         hl_alloc_free(lua->base.alloc, ctx, sizeof(HlLuaRoute));
                     } else {
-                        kl_server_use_post(server, method_str, pattern,
+                        kl_http_server_use_post(server, method_str, pattern,
                                            hl_lua_keel_middleware, ctx);
                     }
                 }
@@ -613,7 +613,7 @@ int hl_lua_wire_routes_server(HlLua *lua, KlServer *server,
                             hl_lua_track_alloc(lua, &lua->ws_cfgs,
                                                &lua->ws_cfg_count,
                                                &lua->ws_cfg_cap, ws_cfg);
-                            kl_server_ws(server, path, ws_cfg);
+                            kl_http_server_ws_upgrade(server, path, ws_cfg);
                         }
                     }
                 }
@@ -654,7 +654,7 @@ int hl_lua_wire_routes_server(HlLua *lua, KlServer *server,
                         hl_alloc_free(lua->base.alloc, sse_route,
                                       sizeof(HlLuaSseRoute));
                     } else {
-                        kl_server_route(server, "GET", path,
+                        kl_http_server_route(server, "GET", path,
                                         hl_lua_sse_handler, sse_route, NULL);
                     }
                 }

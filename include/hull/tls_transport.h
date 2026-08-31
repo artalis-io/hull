@@ -3,7 +3,7 @@
  * @brief Composed-feature seam for Keel's mbedTLS transport (TLS server/client ctx).
  *
  * Part of "TLS as a composable feature" (docs/tls_feature.md), the transport
- * half. serve.c / serve_cli.c set up KlServer + http.fetch + SMTP TLS by calling
+ * half. serve.c / serve_cli.c set up KlHttpServer + http.fetch + SMTP TLS by calling
  * Keel's `kl_tls_mbedtls_*` directly, which pulls Keel's `tls_mbedtls.o` (and
  * mbedTLS) into the base. Routing those calls through these weak accessors lets a
  * future TLS-less base emit no `kl_tls_*` reference (serving HTTP-only) while a

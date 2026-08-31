@@ -579,7 +579,7 @@ static const HlModuleSpec REGISTRY[] = {
     },
 
     /* ── Web middleware ──────────────────────────────────────────────
-     * Every middleware consumes KlRequest/KlResponse and registers via
+     * Every middleware consumes KlHttpRequest/KlHttpResponse and registers via
      * app.use() / app.use_post(), all of which need Keel's HTTP server.
      * They share HL_MOD_CAP_HTTP_SERVER - apps targeting an
      * HL_ENABLE_HTTP_SERVER=0 build can't declare any of them. */

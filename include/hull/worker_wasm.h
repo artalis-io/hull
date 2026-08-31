@@ -24,7 +24,7 @@
 typedef struct HlAsyncCtx HlAsyncCtx;
 typedef struct HlAllocator HlAllocator;
 struct HlVfs;
-typedef struct KlServer KlServer;
+typedef struct KlHttpServer KlHttpServer;
 typedef struct HlAsyncBackendPool HlAsyncBackendPool;
 typedef struct KlAsyncOp KlAsyncOp;
 
@@ -32,7 +32,7 @@ typedef struct KlAsyncOp KlAsyncOp;
 
 typedef struct HlWorkerWasmOp {
     HlAsyncCtx    *async_ctx;
-    KlServer      *server;
+    KlHttpServer      *server;
 
     /* Input (deep-copied, owned by this struct) */
     void          *wasm_cache;    /* HlWasmCache* for pool operations */

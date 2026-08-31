@@ -40,7 +40,7 @@
 #include "sh_json.h"
 
 #include <keel/allocator.h>
-#include <keel/tls_mbedtls.h>
+#include <keel_tls_mbedtls.h>
 
 #include <dirent.h>
 #include <errno.h>
