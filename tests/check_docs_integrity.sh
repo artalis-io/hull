@@ -6,7 +6,8 @@
 #
 #   1. CATALOG      every top-level docs/*.md is catalogued in docs/README.md
 #   2. LINKS        every relative Markdown link (in docs/** + the root
-#                   README/CONTRIBUTING/SECURITY) resolves to an existing file
+#                   README/CONTRIBUTING/SECURITY/CLAUDE/AGENTS/BOOTSTRAP)
+#                   resolves to an existing file
 #   3. ARCHIVE      every file under docs/archive/ is inventoried by
 #                   docs/archive/README.md (archived docs are classified as
 #                   historical, never floating as pseudo-active specs)
@@ -83,7 +84,8 @@ check_catalog() {
 check_links() {
     before=$FAIL
     files=$( { ls docs/*.md 2>/dev/null; find docs -name 'README.md';
-               printf '%s\n' README.md CONTRIBUTING.md SECURITY.md; } | sort -u)
+               printf '%s\n' README.md CONTRIBUTING.md SECURITY.md \
+                             CLAUDE.md AGENTS.md BOOTSTRAP.md; } | sort -u)
     printf '%s\n' "$files" | while IFS= read -r src; do
         [ -f "$src" ] || continue
         dir=$(dirname "$src")

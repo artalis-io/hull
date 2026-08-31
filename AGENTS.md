@@ -899,12 +899,12 @@ Every capability module is instrumented: `db.query`, `db.exec`, `fs.read`, `fs.w
 
 ```bash
 # Print hull version
-hull version              # hull 0.10.0
-hull version --json       # {"version":"0.10.0","runtime":"lua+js","platform":"darwin-arm64","build":"release"}
+hull version              # hull 0.14.0
+hull version --json       # {"version":"0.14.0","runtime":"lua+js","platform":"darwin-arm64","build":"release"}
 
 # Check environment readiness (linker/compiler available, platform embedded)
 hull doctor               # human-readable report; exits 0 if hull build is ready
-hull doctor --json        # {"version":"0.10.0","platform_embedded":"multi-arch","hull_build":"ready",...}
+hull doctor --json        # {"version":"0.14.0","platform_embedded":"multi-arch","hull_build":"ready",...}
 
 # Self-update (verifies SHA-256, atomic replace via rename)
 hull update               # download + verify + install latest stable release

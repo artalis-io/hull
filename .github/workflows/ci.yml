@@ -2369,6 +2369,12 @@ jobs:
       - name: No-new-milestone-narration self-test (negative)
         run: make check-no-milestone-narration-selftest
 
+      - name: Site-consistency gate (version + install tabs)
+        run: make check-site-consistency
+
+      - name: Site-consistency self-test (negative)
+        run: make check-site-consistency-selftest
+
   htmx-browser:
     needs: [classify]
     if: needs.classify.outputs.run_web == 'true'
