@@ -25,8 +25,11 @@ curl -fsSL https://gethull.dev/install.sh | sh
 ```
 
 This installs to `~/.local/bin/hull` (or `/usr/local/bin/hull` if root).
-The install script detects OS/arch, verifies the SHA-256, and verifies
-the Ed25519 release signature against the embedded public key. No
+The install script detects OS/arch and verifies the **SHA-256 checksum**
+of each binary against the release manifest as it downloads (checksum
+verification only). To independently verify the **Ed25519 release
+signature** (embedded public key), run `hull verify-release` after
+install, or verify the installer itself offline with `minisign`. No
 sudo prompt unless the prefix needs it. Pin a specific version with
 `HULL_VERSION=v0.14.0 curl ... | sh`.
 

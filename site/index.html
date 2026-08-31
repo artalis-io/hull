@@ -531,37 +531,37 @@
 
         <div class="lg:col-span-8">
           <div class="code-block code-tabs">
-            <div class="code-tabs-bar" role="tablist" aria-label="Install by platform">
-              <button class="tab-btn tab-active" data-tab="linux" role="tab" aria-selected="true">Linux</button>
-              <button class="tab-btn" data-tab="macos" role="tab" aria-selected="false">macOS</button>
-              <button class="tab-btn" data-tab="windows" role="tab" aria-selected="false">Windows</button>
+            <div class="code-tabs-bar" role="tablist" aria-label="Install Hull by platform">
+              <button class="tab-btn tab-active" id="install-tab-linux" data-tab="linux" role="tab" aria-selected="true" aria-controls="install-panel-linux" tabindex="0">Linux</button>
+              <button class="tab-btn" id="install-tab-macos" data-tab="macos" role="tab" aria-selected="false" aria-controls="install-panel-macos" tabindex="-1">macOS</button>
+              <button class="tab-btn" id="install-tab-windows" data-tab="windows" role="tab" aria-selected="false" aria-controls="install-panel-windows" tabindex="-1">Windows</button>
               <span class="ml-auto self-center pr-3 text-[10px] text-mute-500 uppercase tracking-wide">install</span>
             </div>
-<pre class="code-tab-panel" data-tab-panel="linux"><span class="tk-com"># Install over TLS. install.sh is minisign-signed (verify it below);</span>
-<span class="tk-com"># it SHA-256-checks each binary against the manifest as it downloads.</span>
+<pre class="code-tab-panel" id="install-panel-linux" role="tabpanel" aria-labelledby="install-tab-linux" tabindex="0" data-tab-panel="linux"><span class="tk-com"># Install over TLS. install.sh SHA-256-checks each binary against the</span>
+<span class="tk-com"># release manifest as it downloads. Verify the installer/signature below.</span>
 $ curl -fsSL <span class="tk-str">https://gethull.dev/install.sh</span> | sh
 hull installed to ~/.local/bin/hull  (<span data-hull-version>v0.14.0</span>)
 </pre>
-<pre class="code-tab-panel hidden" data-tab-panel="macos"><span class="tk-com"># Same signed installer; it auto-detects macOS arm64 (or the universal</span>
+<pre class="code-tab-panel hidden" id="install-panel-macos" role="tabpanel" aria-labelledby="install-tab-macos" tabindex="0" data-tab-panel="macos"><span class="tk-com"># Same signed installer; it auto-detects macOS arm64 (or the universal</span>
 <span class="tk-com"># Cosmopolitan APE fallback) and SHA-256-checks each binary it downloads.</span>
 $ curl -fsSL <span class="tk-str">https://gethull.dev/install.sh</span> | sh
 hull installed to ~/.local/bin/hull  (<span data-hull-version>v0.14.0</span>)
 </pre>
-<pre class="code-tab-panel hidden" data-tab-panel="windows"><span class="tk-com"># PowerShell, no admin or Developer Mode needed. Installs hull.com and</span>
+<pre class="code-tab-panel hidden" id="install-panel-windows" role="tabpanel" aria-labelledby="install-tab-windows" tabindex="0" data-tab-panel="windows"><span class="tk-com"># PowerShell, no admin or Developer Mode needed. Installs hull.com and</span>
 <span class="tk-com"># adds it to your user PATH; SHA-256-checked against the manifest.</span>
 PS&gt; <span class="tk-fn">irm</span> <span class="tk-str">https://gethull.dev/install.ps1</span> | <span class="tk-fn">iex</span>
 hull installed to %LOCALAPPDATA%\Programs\Hull\hull.com  (<span data-hull-version>v0.14.0</span>)
 </pre>
           </div>
-          <div class="code-block mt-3">
-            <header>
-              <i data-lucide="shield-check" class="w-3.5 h-3.5"></i>
-              <span>verify</span>
-              <span class="ml-auto text-[10px] text-mute-500">copy &amp; paste</span>
-            </header>
-<pre><span class="tk-com"># Don't trust gethull.dev? Verify the installer offline first</span>
-<span class="tk-com"># (minisign, no Hull needed). Cross-check the key below against</span>
-<span class="tk-com"># github.com/artalis-io/hull/blob/main/minisign.pub.</span>
+          <div class="code-block code-tabs mt-3">
+            <div class="code-tabs-bar" role="tablist" aria-label="Verify Hull by platform">
+              <button class="tab-btn tab-active" id="verify-tab-linux" data-tab="vlinux" role="tab" aria-selected="true" aria-controls="verify-panel-linux" tabindex="0">Linux</button>
+              <button class="tab-btn" id="verify-tab-macos" data-tab="vmacos" role="tab" aria-selected="false" aria-controls="verify-panel-macos" tabindex="-1">macOS</button>
+              <button class="tab-btn" id="verify-tab-windows" data-tab="vwindows" role="tab" aria-selected="false" aria-controls="verify-panel-windows" tabindex="-1">Windows</button>
+              <span class="ml-auto self-center pr-3 text-[10px] text-mute-500 uppercase tracking-wide">verify</span>
+            </div>
+<pre class="code-tab-panel" id="verify-panel-linux" role="tabpanel" aria-labelledby="verify-tab-linux" tabindex="0" data-tab-panel="vlinux"><span class="tk-com"># Don't trust gethull.dev? Verify the installer offline first (minisign,</span>
+<span class="tk-com"># no Hull needed). Cross-check the key at github.com/artalis-io/hull.</span>
 $ <span class="tk-kw">URL</span>=https://gethull.dev
 $ curl -fsSLO $URL/install.sh $URL/install.sh.minisig
 $ minisign -Vm install.sh -P <span class="tk-str">RWRqvc6NndheWcLIi3vsL+xoZfZw2j7fybSZ3rHJIOTHA2O3rrr6hD8h</span>
@@ -569,14 +569,34 @@ $ minisign -Vm install.sh -P <span class="tk-str">RWRqvc6NndheWcLIi3vsL+xoZfZw2j
 $ sh install.sh
 
 <span class="tk-com"># Then verify the release signature (Ed25519, embedded pubkey).</span>
-<span class="tk-com"># Works on any OS; on Windows run it in PowerShell after install.</span>
 $ <span class="tk-kw">REL</span>=https://github.com/artalis-io/hull/releases/latest/download
 $ curl -fsSLO $REL/hull.sha256 $REL/hull.sha256.sig
 $ hull verify-release hull.sha256 hull.sha256.sig
 <span class="tk-acc">ok</span>. Signature valid
+</pre>
+<pre class="code-tab-panel hidden" id="verify-panel-macos" role="tabpanel" aria-labelledby="verify-tab-macos" tabindex="0" data-tab-panel="vmacos"><span class="tk-com"># Same as Linux: verify the installer offline with minisign (no Hull</span>
+<span class="tk-com"># needed), cross-checking the key at github.com/artalis-io/hull.</span>
+$ <span class="tk-kw">URL</span>=https://gethull.dev
+$ curl -fsSLO $URL/install.sh $URL/install.sh.minisig
+$ minisign -Vm install.sh -P <span class="tk-str">RWRqvc6NndheWcLIi3vsL+xoZfZw2j7fybSZ3rHJIOTHA2O3rrr6hD8h</span>
+<span class="tk-acc">Signature and comment signature verified</span>
+$ sh install.sh
 
-$ hull doctor
-hull <span data-hull-version>v0.14.0</span>  &middot;  ca-bundle: embedded  &middot;  platform: embedded  &middot;  cc: ok
+<span class="tk-com"># Then verify the release signature (Ed25519, embedded pubkey).</span>
+$ <span class="tk-kw">REL</span>=https://github.com/artalis-io/hull/releases/latest/download
+$ curl -fsSLO $REL/hull.sha256 $REL/hull.sha256.sig
+$ hull verify-release hull.sha256 hull.sha256.sig
+<span class="tk-acc">ok</span>. Signature valid
+</pre>
+<pre class="code-tab-panel hidden" id="verify-panel-windows" role="tabpanel" aria-labelledby="verify-tab-windows" tabindex="0" data-tab-panel="vwindows"><span class="tk-com"># PowerShell. Verify the Ed25519 release signature after install</span>
+<span class="tk-com"># (embedded pubkey). No minisign needed.</span>
+PS&gt; <span class="tk-kw">$REL</span> = <span class="tk-str">"https://github.com/artalis-io/hull/releases/latest/download"</span>
+PS&gt; <span class="tk-fn">iwr</span> <span class="tk-str">"$REL/hull.sha256"</span> -OutFile hull.sha256
+PS&gt; <span class="tk-fn">iwr</span> <span class="tk-str">"$REL/hull.sha256.sig"</span> -OutFile hull.sha256.sig
+PS&gt; hull verify-release hull.sha256 hull.sha256.sig
+<span class="tk-acc">ok</span>. Signature valid
+
+<span class="tk-com"># Or verify in the browser, no Hull needed: gethull.dev/verify.html</span>
 </pre>
           </div>
           <p class="mt-3 text-[11px] text-mute-400 leading-relaxed">
@@ -2027,23 +2047,42 @@ $ hull agent routes my-tool
     // framework, no hydration.
     if (window.lucide) { lucide.createIcons(); }
 
-    // Tabbed code blocks. Each .code-tabs container has its own bar
-    // of [data-tab] buttons and [data-tab-panel] panes; switching is
-    // scoped to the container so multiple tabbed blocks coexist.
+    // Tabbed code blocks. Each .code-tabs container has its own bar of
+    // [data-tab] buttons and [data-tab-panel] panes; switching is scoped to the
+    // container so multiple tabbed blocks coexist. Follows the ARIA tabs pattern
+    // with automatic activation: roving tabindex (active tab is the only tab
+    // stop) plus Left/Right/Up/Down/Home/End to move + activate.
     document.querySelectorAll('.code-tabs').forEach((container) => {
-        const buttons = container.querySelectorAll('.tab-btn');
+        const buttons = Array.from(container.querySelectorAll('.tab-btn'));
         const panels  = container.querySelectorAll('.code-tab-panel');
-        buttons.forEach((btn) => {
-            btn.addEventListener('click', () => {
-                const target = btn.dataset.tab;
-                buttons.forEach((b) => {
-                    const active = b.dataset.tab === target;
-                    b.classList.toggle('tab-active', active);
-                    b.setAttribute('aria-selected', active ? 'true' : 'false');
-                });
-                panels.forEach((p) => {
-                    p.classList.toggle('hidden', p.dataset.tabPanel !== target);
-                });
+        if (!buttons.length) return;
+
+        const activate = (btn, focus) => {
+            const target = btn.dataset.tab;
+            buttons.forEach((b) => {
+                const active = b.dataset.tab === target;
+                b.classList.toggle('tab-active', active);
+                b.setAttribute('aria-selected', active ? 'true' : 'false');
+                b.tabIndex = active ? 0 : -1;   // roving tabindex
+            });
+            panels.forEach((p) => {
+                p.classList.toggle('hidden', p.dataset.tabPanel !== target);
+            });
+            if (focus) btn.focus();
+        };
+
+        // Initialise the roving tabindex from the initial active tab.
+        buttons.forEach((b) => { b.tabIndex = b.classList.contains('tab-active') ? 0 : -1; });
+
+        buttons.forEach((btn, i) => {
+            btn.addEventListener('click', () => activate(btn, false));
+            btn.addEventListener('keydown', (e) => {
+                let j = null;
+                if (e.key === 'ArrowRight' || e.key === 'ArrowDown') j = (i + 1) % buttons.length;
+                else if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') j = (i - 1 + buttons.length) % buttons.length;
+                else if (e.key === 'Home') j = 0;
+                else if (e.key === 'End') j = buttons.length - 1;
+                if (j !== null) { e.preventDefault(); activate(buttons[j], true); }
             });
         });
     });
