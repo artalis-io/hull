@@ -518,6 +518,14 @@ Trust chain: Customer → You (platform builder) → App developer. gethull.dev 
 | W^X / dynamic code | seccomp-bpf denies `mmap` and `mprotect` adding `PROT_EXEC`; `memfd_create` returns ENOSYS; `execve`/`execveat`/`ptrace`/`process_vm_*` are not in any granted promise group | SIGKILL or ENOSYS |
 | Mode | `__pledge_mode = KILL_PROCESS \| STDERR_LOGGING` | Process killed + diagnostic to stderr |
 
+Hull probes the Landlock ABI before loading application code. If the kernel was
+built without Landlock, startup fails closed instead of silently treating the
+vendored `unveil()` compatibility no-op as filesystem confinement. Operators on
+such kernels may pass `--allow-degraded-sandbox` to retain seccomp, W^X, and the
+C capability layer while explicitly accepting that filesystem paths lack the
+second, kernel-enforced Landlock boundary. This is safer than `--no-sandbox`,
+but it is not equivalent to the full Linux sandbox and is logged as degraded.
+
 **Allowed pledge promises:** `stdio inet rpath wpath cpath flock dns` (dns only if hosts declared). Notably absent: `prot_exec`, `exec`, `proc`. These grant the very syscalls Hull's W^X policy forbids.
 
 **CVE classes prevented:**

@@ -94,6 +94,12 @@ typedef struct HlSandboxPolicy {
     int wx_enforced;
     int allow_dynamic_code;
     int allow_dynamic_libraries;
+
+    /* Linux only: permit the seccomp + capability-layer fallback when the
+     * running kernel has no Landlock filesystem LSM.  This is deliberately
+     * operator policy rather than a manifest capability: application code
+     * must not be able to downgrade its own kernel confinement. */
+    int allow_degraded;
 } HlSandboxPolicy;
 
 /*
