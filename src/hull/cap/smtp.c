@@ -379,38 +379,20 @@ cleanup:
 
 /* ── Public API ──────────────────────────────────────────────────── */
 
-int hl_cap_smtp_send(const HlSmtpConfig *cfg, const HlSmtpMessage *msg,
-                     const char **err_msg)
+/* Execute-phase: runs the SMTP conversation to terminal and reports a stable
+ * outcome in *out, emitting NO audit and touching NO runtime objects, so it is
+ * safe on a worker thread. Authorization + audit + result construction are done
+ * by hl_cap_smtp_send (the completion phase in model 2). */
+int hl_smtp_execute(const HlSmtpMessage *msg, void *tls_cfg, int timeout_ms,
+                    HlSmtpResult *out)
 {
-    if (!cfg || !msg) {
-        if (err_msg) *err_msg = "invalid_args";
-        return -1;
-    }
-
-    /* Validate message fields */
-    if (smtp_validate_message(msg) != 0) {
-        if (err_msg) *err_msg = "validation_failed";
-        return -1;
-    }
-
-    /* Check host allowlist */
-    if (hl_smtp_check_host(cfg, msg->host) != 0) {
-        log_warn("smtp: host '%s' not in allowlist", msg->host);
-        if (err_msg) *err_msg = "host_not_allowed";
-        ShJsonWriter w = hl_audit_begin("smtp.send");
-        sh_json_write_kv_string(&w, "host", msg->host);
-        sh_json_write_kv_string(&w, "from", msg->from);
-        sh_json_write_kv_string(&w, "to", msg->to);
-        sh_json_write_kv_string(&w, "result", "denied");
-        hl_audit_end(&w);
-        return -1;
-    }
-
-    int timeout_ms = cfg->timeout_ms > 0 ? cfg->timeout_ms
-                                         : HL_SMTP_DEFAULT_TIMEOUT_MS;
-
-    /* TLS config (for STARTTLS or implicit TLS) */
-    void *tls_cfg = cfg->tls;   /* opaque KlTlsConfig *, passed to the helper */
+    out->rc = -1;
+    out->token = NULL;
+    out->teardown_leaked = 0;
+    /* The interior conversation writes its stable token through `err_msg`; alias
+     * it onto out->token so the body below stays byte-identical to the prior
+     * in-place send. */
+    const char **err_msg = &out->token;
 
     /* Declared before the connect + before the `cleanup` label so the
      * connect-failure path can route through the one cleanup + audit block. */
@@ -593,34 +575,73 @@ int hl_cap_smtp_send(const HlSmtpConfig *cfg, const HlSmtpMessage *msg,
     ret = 0;
 
 cleanup:
-    /* t is NULL on the connect-failure path (shutdown/free are NULL-safe); any
-     * connect-path teardown leak is already captured in teardown_leaked.
-     * Attempt a graceful close (close_notify + drain) ONLY on success, where the
-     * queue is already empty and the peer is alive so it completes instantly. On
-     * a failure path the send already aborted, so skip straight to the abortive
-     * free rather than trying to drain a possibly-stalled queue. */
+    /* Confirmed teardown (the fail-closed detachment discipline), on whatever
+     * thread runs the execute-phase (the worker in model 2). t is NULL on the
+     * connect-failure
+     * path (shutdown/free are NULL-safe). Graceful close only on success; a
+     * failed send goes straight to the abortive free. A -1 from free means the
+     * op/stream would not detach, so the transport was intentionally leaked
+     * rather than freed into a use-after-free; report it in the result. */
     if (ret == 0)
         hl_smtp_transport_shutdown(t);
-    /* Observe teardown: a -1 from free means the connect op or stream would not
-     * detach, so the transport was intentionally leaked (fd + event ctx +
-     * memory) rather than freed into a use-after-free. OR it with any
-     * connect-path leak and surface it at the capability boundary (log + audit)
-     * so it is not silently dropped. It does not change the send result. */
     teardown_leaked = teardown_leaked || (hl_smtp_transport_free(t) != 0);
     if (teardown_leaked)
         log_error("smtp: transport teardown failed (op/stream would not "
                   "detach); leaked transport resources for host '%s'", msg->host);
 
+    out->rc = ret;
+    out->teardown_leaked = teardown_leaked;
+    return ret;
+}
+
+int hl_cap_smtp_send(const HlSmtpConfig *cfg, const HlSmtpMessage *msg,
+                     const char **err_msg)
+{
+    if (!cfg || !msg) {
+        if (err_msg) *err_msg = "invalid_args";
+        return -1;
+    }
+
+    /* Phase 1 (event-loop side in model 2): validate + authorize BEFORE any
+     * resolve or socket work. Authorization is against the declared hostname
+     * and never crosses to a worker. */
+    if (smtp_validate_message(msg) != 0) {
+        if (err_msg) *err_msg = "validation_failed";
+        return -1;
+    }
+    if (hl_smtp_check_host(cfg, msg->host) != 0) {
+        log_warn("smtp: host '%s' not in allowlist", msg->host);
+        if (err_msg) *err_msg = "host_not_allowed";
+        ShJsonWriter w = hl_audit_begin("smtp.send");
+        sh_json_write_kv_string(&w, "host", msg->host);
+        sh_json_write_kv_string(&w, "from", msg->from);
+        sh_json_write_kv_string(&w, "to", msg->to);
+        sh_json_write_kv_string(&w, "result", "denied");
+        hl_audit_end(&w);
+        return -1;
+    }
+
+    int timeout_ms = cfg->timeout_ms > 0 ? cfg->timeout_ms
+                                         : HL_SMTP_DEFAULT_TIMEOUT_MS;
+
+    /* Execute-phase: inline on the calling thread here (the sync / no-loop
+     * path; the SMTP worker runs the same function in model 2). No audit. */
+    HlSmtpResult r;
+    hl_smtp_execute(msg, cfg->tls, timeout_ms, &r);
+    if (err_msg && r.token)
+        *err_msg = r.token;
+
+    /* Completion phase (event-loop side in model 2): the single audit record. */
     {
         ShJsonWriter w = hl_audit_begin("smtp.send");
         sh_json_write_kv_string(&w, "host", msg->host);
         sh_json_write_kv_string(&w, "from", msg->from);
         sh_json_write_kv_string(&w, "to", msg->to);
         sh_json_write_kv_string(&w, "subject", msg->subject);
-        sh_json_write_kv_int(&w, "result", ret);
-        if (teardown_leaked)
+        sh_json_write_kv_int(&w, "result", r.rc);
+        if (r.teardown_leaked)
             sh_json_write_kv_string(&w, "teardown", "leaked");
         hl_audit_end(&w);
     }
-    return ret;
+    return r.rc;
 }
