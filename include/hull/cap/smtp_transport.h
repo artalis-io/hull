@@ -53,9 +53,15 @@ typedef struct HlSmtpTransport HlSmtpTransport;
  *
  * Returns a transport handle on success, or NULL on resolve / connect / deadline
  * failure (the caller maps NULL to "connect_failed").
+ *
+ * @p out_teardown_leaked (optional, may be NULL) is set to 1 if a failed connect
+ * had to intentionally leak transport storage because its KlConnectOp would not
+ * reach confirmed detachment (see hl_smtp_transport_free): this is the most
+ * plausible non-detach site, so the outcome is exposed here rather than lost, and
+ * the capability layer records it in the audit. Set to 0 on every other path.
  */
 HlSmtpTransport *hl_smtp_transport_connect(const char *host, int port,
-                                           int timeout_ms);
+                                           int timeout_ms, int *out_teardown_leaked);
 
 /**
  * Implicit-TLS (SMTPS) handshake BEFORE any application bytes are read.

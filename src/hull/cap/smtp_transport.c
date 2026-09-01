@@ -139,6 +139,10 @@ static KlAllocator *persistent_tls_alloc(void)
  * address while an earlier attempt is still in flight (the Happy Eyeballs
  * stagger). ~250 ms is the RFC-recommended default. */
 #define SMTP_CONNECT_ATTEMPT_DELAY_MS  250
+/* Max wait for a GRACEFUL close (drain + close_notify) before hl_smtp_transport_
+ * free's abortive cancel takes over; a healthy close completes near-instantly, a
+ * dead/stalled peer must not block the synchronous caller for the op timeout. */
+#define SMTP_CLOSE_GRACE_MS            2000
 
 typedef struct {
     char   buf[SMTP_MAX_REPLY + SMTP_MAX_LINE];  /* accumulator (+1 line of slack) */
@@ -913,8 +917,11 @@ static int done_connect_detached(HlSmtpTransport *t)
  * Public API.
  * ────────────────────────────────────────────────────────────────────────── */
 
-HlSmtpTransport *hl_smtp_transport_connect(const char *host, int port, int timeout_ms)
+HlSmtpTransport *hl_smtp_transport_connect(const char *host, int port,
+                                           int timeout_ms, int *out_teardown_leaked)
 {
+    if (out_teardown_leaked)
+        *out_teardown_leaked = 0;
     if (!host || port < 1 || port > 65535)
         return NULL;
     (void)socket_provider();   /* one-time init of g_sp */
@@ -955,7 +962,11 @@ HlSmtpTransport *hl_smtp_transport_connect(const char *host, int port, int timeo
 
     if (pump_until(t, done_connect, timeout_ms) != 0 ||
         t->connect_result != KL_CONNECT_SUCCESS || !t->stream_up) {
-        hl_smtp_transport_free(t);
+        /* This is the most plausible non-detaching-op site (a connect that never
+         * completed). Propagate the teardown outcome so hl_cap_smtp_send can
+         * record "teardown":"leaked" in the audit rather than losing it. */
+        if (hl_smtp_transport_free(t) != 0 && out_teardown_leaked)
+            *out_teardown_leaked = 1;
         return NULL;
     }
     return t;
@@ -1124,8 +1135,14 @@ void hl_smtp_transport_shutdown(HlSmtpTransport *t)
         return;
     t->close_begun = 1;
     kl_stream_close_begin(&t->stream);
-    /* Drive to confirmed detachment (best-effort; bounded). */
-    pump_until(t, done_detached, HL_SMTP_DEFAULT_TIMEOUT_MS);
+    /* Drive to confirmed detachment, but only for a SHORT grace, not the full
+     * operation timeout: a graceful close drains queued output + sends
+     * close_notify, which on a healthy peer completes almost immediately. If the
+     * peer is gone or stalled with an undrained queue (e.g. after a failed
+     * write), a graceful drain can never complete, so cap the wait and let
+     * hl_smtp_transport_free's ABORTIVE cancel finish teardown fast rather than
+     * blocking the synchronous caller for the whole operation timeout. */
+    pump_until(t, done_detached, SMTP_CLOSE_GRACE_MS);
 }
 
 int hl_smtp_transport_free(HlSmtpTransport *t)
@@ -1134,10 +1151,21 @@ int hl_smtp_transport_free(HlSmtpTransport *t)
         return 0;
 
     /* If a stream was brought up but not gracefully closed, cancel it and pump
-     * to confirmed detachment so every op/watcher/fd retires exactly once. */
+     * to confirmed detachment so every op/watcher/fd retires exactly once. Apply
+     * the same fail-closed rule as the connect op below: if the stream does NOT
+     * reach confirmed detachment (t->closed, via tp_stream_on_close) within the
+     * bound, live stream recv/send callbacks may still reference this storage, so
+     * we must NOT destroy TLS / close the fd / free the event ctx and `t`. Leak
+     * the storage intentionally and report it, rather than free into a
+     * use-after-free. */
     if (t->stream_up && !t->closed) {
         kl_stream_cancel(&t->stream);
         pump_until(t, done_detached, HL_SMTP_DEFAULT_TIMEOUT_MS);
+        if (!t->closed) {
+            log_error("smtp: stream did not detach within the bound; leaking "
+                      "transport storage rather than freeing a live stream");
+            return -1;
+        }
     }
 
     /* Fix 2: the connect op owns any racing descriptors + the delay/deadline

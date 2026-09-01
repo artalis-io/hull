@@ -412,18 +412,24 @@ int hl_cap_smtp_send(const HlSmtpConfig *cfg, const HlSmtpMessage *msg,
     /* TLS config (for STARTTLS or implicit TLS) */
     void *tls_cfg = cfg->tls;   /* opaque KlTlsConfig *, passed to the helper */
 
+    /* Declared before the connect + before the `cleanup` label so the
+     * connect-failure path can route through the one cleanup + audit block. */
+    int  ret = -1;
+    int  teardown_leaked = 0;
+    char resp[HL_SMTP_RECV_BUF_SIZE];
+    char cmd[HL_SMTP_SEND_BUF_SIZE];
+    (void)resp; (void)cmd;   /* used only past a successful connect */
+
     /* Connect to SMTP server (resolve + Happy-Eyeballs connect over the
-     * Keel-primitive transport; NULL == resolve / connect / deadline failure). */
-    HlSmtpTransport *t = hl_smtp_transport_connect(msg->host, msg->port, timeout_ms);
+     * Keel-primitive transport; NULL == resolve / connect / deadline failure).
+     * out_teardown_leaked surfaces a connect-path teardown leak into the audit. */
+    HlSmtpTransport *t = hl_smtp_transport_connect(msg->host, msg->port,
+                                                   timeout_ms, &teardown_leaked);
     if (!t) {
         log_warn("smtp: connect to %s:%d failed", msg->host, msg->port);
         if (err_msg) *err_msg = "connect_failed";
-        return -1;
+        goto cleanup;   /* unified cleanup + audit (t is NULL, all NULL-safe) */
     }
-
-    int ret = -1;
-    char resp[HL_SMTP_RECV_BUF_SIZE];
-    char cmd[HL_SMTP_SEND_BUF_SIZE];
 
     /* Implicit TLS (port 465) - handshake before any SMTP commands */
     if (msg->use_tls == 2) {
@@ -587,15 +593,22 @@ int hl_cap_smtp_send(const HlSmtpConfig *cfg, const HlSmtpMessage *msg,
     ret = 0;
 
 cleanup:
-    hl_smtp_transport_shutdown(t);   /* best-effort close_notify + graceful close */
-    /* Observe teardown: a -1 means the connect op would not detach so the
-     * transport was intentionally leaked (fd + event ctx + memory) rather than
-     * freed into a use-after-free. Surface it at the capability boundary (log +
-     * audit) so it is not silently dropped. It does not change the send result,
-     * which is already determined. */
-    int teardown_leaked = (hl_smtp_transport_free(t) != 0);
+    /* t is NULL on the connect-failure path (shutdown/free are NULL-safe); any
+     * connect-path teardown leak is already captured in teardown_leaked.
+     * Attempt a graceful close (close_notify + drain) ONLY on success, where the
+     * queue is already empty and the peer is alive so it completes instantly. On
+     * a failure path the send already aborted, so skip straight to the abortive
+     * free rather than trying to drain a possibly-stalled queue. */
+    if (ret == 0)
+        hl_smtp_transport_shutdown(t);
+    /* Observe teardown: a -1 from free means the connect op or stream would not
+     * detach, so the transport was intentionally leaked (fd + event ctx +
+     * memory) rather than freed into a use-after-free. OR it with any
+     * connect-path leak and surface it at the capability boundary (log + audit)
+     * so it is not silently dropped. It does not change the send result. */
+    teardown_leaked = teardown_leaked || (hl_smtp_transport_free(t) != 0);
     if (teardown_leaked)
-        log_error("smtp: transport teardown failed (connect op would not "
+        log_error("smtp: transport teardown failed (op/stream would not "
                   "detach); leaked transport resources for host '%s'", msg->host);
 
     {

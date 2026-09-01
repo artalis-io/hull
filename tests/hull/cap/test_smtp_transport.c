@@ -558,7 +558,7 @@ static void chunked_delivery_case(int *utest_result, size_t payload)
     MockPeer m;
     ASSERT_EQ(mp_start(&m, mp_sink_thread), 0);
 
-    HlSmtpTransport *t = hl_smtp_transport_connect("127.0.0.1", m.port, 10000);
+    HlSmtpTransport *t = hl_smtp_transport_connect("127.0.0.1", m.port, 10000, NULL);
     ASSERT_TRUE(t != NULL);
 
     /* Consume the 220 greeting the sink sends. */
@@ -602,7 +602,7 @@ UTEST(smtp_write, backpressure_drains)
     ASSERT_EQ(mp_start(&m, mp_sink_thread), 0);
     m.slow_reader = 1;
 
-    HlSmtpTransport *t = hl_smtp_transport_connect("127.0.0.1", m.port, 10000);
+    HlSmtpTransport *t = hl_smtp_transport_connect("127.0.0.1", m.port, 10000, NULL);
     ASSERT_TRUE(t != NULL);
     char resp[HL_SMTP_RECV_BUF_SIZE];
     ASSERT_EQ(hl_smtp_transport_read_reply(t, resp, (int)sizeof resp, 10000), 220);
@@ -620,6 +620,62 @@ UTEST(smtp_write, backpressure_drains)
     ASSERT_EQ(m.total_read, payload);
 }
 
+/* A peer that greets 220 and then STALLS: it never reads again, so the client's
+ * OS send buffer + KlStream write queue fill and stay full for the whole write.
+ * It sleeps well past the client's write deadline, then closes. Used to prove
+ * the shared absolute write deadline (blocker 3): one large multi-chunk write
+ * must fail within ONE bounded timeout, not roughly one timeout per chunk drain. */
+static void *mp_stall_thread(void *arg)
+{
+    MockPeer *m = arg;
+    int c = accept(m->listen_fd, NULL, NULL);
+    if (c < 0) return NULL;
+    m->accepted = 1;
+    if (m->greet)
+        mp_send(c, "220 stall ESMTP\r\n");
+    /* Do NOT read: the client's writes back up. Outlast the client's write
+     * deadline (below), then close. */
+    usleep(1500 * 1000);
+    close(c);
+    return NULL;
+}
+
+/* Blocker 3 regression: with a peer that never drains, a 10 MiB write (~40
+ * chunks of 256 KiB) must fail within ONE ~timeout_ms deadline shared across all
+ * chunk drains and retries - NOT ~one timeout per drain. With the pre-fix code
+ * (a fresh budget per pump_until) this would take up to N x timeout_ms; the
+ * shared absolute deadline keeps it near a single timeout. We set a 500 ms
+ * timeout and assert the write returns -1 in well under 2 s (the pre-fix path
+ * would need up to ~20 s). */
+UTEST(smtp_write, write_deadline_is_one_absolute_bound)
+{
+    MockPeer m;
+    ASSERT_EQ(mp_start(&m, mp_stall_thread), 0);
+
+    HlSmtpTransport *t = hl_smtp_transport_connect("127.0.0.1", m.port, 10000, NULL);
+    ASSERT_TRUE(t != NULL);
+    char resp[HL_SMTP_RECV_BUF_SIZE];
+    ASSERT_EQ(hl_smtp_transport_read_reply(t, resp, (int)sizeof resp, 10000), 220);
+
+    size_t payload = (size_t)HL_SMTP_MAX_MSG_SIZE;   /* 10 MiB: ~40 x 256 KiB chunks */
+    char *buf = malloc(payload);
+    ASSERT_TRUE(buf != NULL);
+    memset(buf, 'S', payload);
+
+    const int write_timeout = 500;   /* ms */
+    uint64_t start = kl_monotonic_ms();
+    int rc = hl_smtp_transport_write(t, buf, payload, write_timeout);
+    uint64_t elapsed = kl_monotonic_ms() - start;
+
+    ASSERT_EQ(rc, -1);                      /* the stalled peer never drains */
+    ASSERT_TRUE(elapsed < 2000);            /* ONE deadline, not ~40 x 500 ms */
+
+    hl_smtp_transport_shutdown(t);
+    hl_smtp_transport_free(t);
+    free(buf);
+    mp_join(&m);
+}
+
 /* Drive a mock STARTTLS peer to the point just after the client consumed the
  * STARTTLS 220 reply, yielding a connected transport (via *out) ready for
  * starttls(). Set extra_junk to have the peer coalesce plaintext junk after the
@@ -634,7 +690,7 @@ static void drive_to_starttls(int *utest_result, MockPeer *m, int extra_junk,
     m->extra_after_220 = extra_junk;
     ASSERT_EQ_MSG(mp_spawn(m, mp_starttls_junk_thread), 0, "mp_spawn");
 
-    HlSmtpTransport *t = hl_smtp_transport_connect("127.0.0.1", m->port, 10000);
+    HlSmtpTransport *t = hl_smtp_transport_connect("127.0.0.1", m->port, 10000, NULL);
     ASSERT_TRUE_MSG(t != NULL, "connect");
 
     char resp[HL_SMTP_RECV_BUF_SIZE];
@@ -760,7 +816,7 @@ UTEST(smtp_starttls, failing_set_hostname_rejected)
 UTEST(smtp_connect, blackhole_timeout_detaches)
 {
     /* 192.0.2.1 is reserved and unrouteable; the connect will not complete. */
-    HlSmtpTransport *t = hl_smtp_transport_connect("192.0.2.1", 25, 600);
+    HlSmtpTransport *t = hl_smtp_transport_connect("192.0.2.1", 25, 600, NULL);
     /* Bounded failure: NULL (connect / deadline). hl_smtp_transport_connect
      * cancels + waits for detachment internally before freeing, so a clean
      * return here already proves detachment did not hang. */
