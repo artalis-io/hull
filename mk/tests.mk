@@ -183,6 +183,16 @@ $(BUILDDIR)/test_smtp_op: $(TESTDIR)/hull/cap/test_smtp_op.c \
     $(SRCDIR)/hull/cap/smtp_op.c $(SMTP_OP_TEST_DEPS) | $(BUILDDIR)
 	$(CC) $(CFLAGS) -DHL_SMTP_TEST_HOOKS $(INCLUDES) -I$(VENDDIR) -o $@ $< $(SMTP_OP_TEST_LIBS) $(LDFLAGS)
 
+# SMTP worker-op ownership core: direct-includes src/hull/cap/smtp_worker.c under
+# -DHL_SMTP_TEST_HOOKS to drive the free-observer seam + the injectable execute.
+# cap_smtp_worker.o is excluded from this test's link (direct-included). It still
+# links cap_smtp_op.o for hl_smtp_op_* used to build inputs.
+SMTP_WORKER_TEST_LIBS := $(filter-out $(BUILDDIR)/cap_smtp_worker.o,$(TEST_COMMON_LIBS))
+SMTP_WORKER_TEST_DEPS := $(filter-out $(BUILDDIR)/cap_smtp_worker.o,$(TEST_COMMON_DEPS))
+$(BUILDDIR)/test_smtp_worker: $(TESTDIR)/hull/cap/test_smtp_worker.c \
+    $(SRCDIR)/hull/cap/smtp_worker.c $(SMTP_WORKER_TEST_DEPS) | $(BUILDDIR)
+	$(CC) $(CFLAGS) -DHL_SMTP_TEST_HOOKS $(INCLUDES) -I$(VENDDIR) -o $@ $< $(SMTP_WORKER_TEST_LIBS) $(LDFLAGS)
+
 # TUI cap-layer tests: cap/tui.c + tui_input.c + tui_width.c are filtered out of
 # CAP_OBJS on the default (TUI-free) base - they live only in the composable
 # feature archive. These tests call hl_cap_tui_* directly, so link the three TUI
@@ -799,7 +809,7 @@ msan:
 #     shared memory is the atomic stop flag; the concurrency is filesystem-level
 #     (mkdir/symlink/unlink vs openat resolution), which TSan tolerates. Proves
 #     the resolver's containment holds under a real thread race.
-TSAN_TESTS := test_wasm test_async_backend test_async_backend_poll test_fs_resolve_parity
+TSAN_TESTS := test_wasm test_async_backend test_async_backend_poll test_fs_resolve_parity test_smtp_worker
 tsan:
 	$(MAKE) clean
 	$(MAKE) TSAN=1 $(addprefix $(BUILDDIR)/,$(TSAN_TESTS))
