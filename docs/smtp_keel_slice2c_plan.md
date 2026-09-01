@@ -2,139 +2,102 @@
 
 Status: PLAN ONLY. No implementation until this PR is approved.
 Branch: `feat/smtp-keel-slice-2c` off `main` @ 76bc29bf (Slice 2b merged).
-Revision: v3 (freezes fallback, the op state machine, scheduling-failure tokens,
-TLS trust-material ownership, the SMTP cap, and shutdown ordering).
+Revision: v4 (freezes all five architectural-gate items: cap formula, deadline
+relationship, audit schema, verified backend-shutdown ownership, and the exact
+zero-Keel link seam).
 
-## 0. Scope (fixed by review)
+## 0. Scope and frozen invariants
 
-Four workstreams, nothing else:
+Four workstreams: (1) runtime/worker scheduling; (2) off-thread resolution; (3)
+the post-resolution operation deadline; (4) deterministic coverage for the four
+deferred behaviors. The reviewed Slice 2b protocol, TLS, parser, teardown, and
+audit contracts are preserved UNCHANGED except the runtime API shape (section 2)
+and the audit/execution split (section 4). PostgreSQL / MySQL are later
+consumers. Native-Windows IOCP is a non-goal; "Windows" is the Cosmopolitan APE
+(poll).
 
-1. runtime/worker scheduling (move SMTP execution off the event-loop thread);
-2. off-thread name resolution;
-3. the post-resolution operation deadline (section 8);
-4. deterministic coverage for the four deferred behaviors.
-
-The reviewed SMTP protocol, TLS, parser, teardown, and audit contracts from
-Slice 2b are preserved UNCHANGED except the runtime API shape (section 2) and the
-audit/execution split (section 4). PostgreSQL / MySQL are later independent
-consumers. Native-Windows IOCP stays a non-goal; "Windows" is the shipped
-Cosmopolitan APE (readiness/poll).
-
-FROZEN PUBLIC ERROR MAPPING: existing user-visible strings are preserved
-verbatim. Cancellation, deadline, and every scheduling failure map to EXISTING
-tokens (sections 2, 8, 9); their distinctions live only in structured audit
-metadata. No Keel string is ever leaked as a user-visible token.
+FROZEN: existing user-visible error strings are preserved verbatim; cancellation,
+deadline, and scheduling failures all map to `connect_failed`, with distinctions
+ONLY in structured audit metadata (section 3). No Keel string is ever leaked.
 
 ## 1. Today vs target
 
-Today (model 1): `hl_cap_smtp_send` runs synchronously on the calling thread
-(the event-loop thread in a handler), authorizes and writes audit inline, drives
-a private `KlEventCtx` to terminal, returns 0/-1. Resolution is a blocking
-`getaddrinfo` on that thread. A slow peer blocks the whole loop.
+Model 1 today: `hl_cap_smtp_send` runs synchronously on the calling thread
+(the event-loop thread in a handler), authorizes + audits inline, drives a
+private `KlEventCtx` to terminal, returns 0/-1; `getaddrinfo` blocks that thread.
+Model 2 target (design section 6): transport execution runs on a bounded worker;
+the event loop suspends the runtime and resumes on the worker's published
+terminal; the private `KlEventCtx` is pumped on the worker.
 
-Target (model 2, design section 6): transport execution runs on a bounded worker
-thread; the event loop suspends the runtime and resumes on the worker's
-published terminal result; the private `KlEventCtx` is pumped on the worker.
+## 2. Public API contract and FROZEN fallback
 
-## 2. Public API contract and FROZEN fallback (correction 1)
-
-Surfaces differ by runtime, one result shape (`{ ok }` / `{ ok, error }`):
-
-- `hl_cap_smtp_send()` (C): SYNCHRONOUS, current signature + 0/-1. Direct-C /
+- `hl_cap_smtp_send()` (C): SYNCHRONOUS, current signature + 0/-1; direct-C /
   unit-test entry and the no-loop executor.
 - Lua `smtp.send(msg)`: yields when submitted; returns the same table on resume.
-- JS `smtp.send(msg)`: ALWAYS returns a `Promise` resolving to that object,
-  including immediately-resolved failures (validation, admission). It rejects
-  only on a programming error (bad argument type), never on an SMTP failure.
+- JS `smtp.send(msg)`: ALWAYS returns a `Promise` resolving to `{ ok, error }`,
+  including immediately-resolved validation/admission failures; rejects only on a
+  programming error (bad argument type), never on an SMTP failure.
 
-FROZEN fallback rule (a synchronous fall-back from an ACTIVE server event loop is
-forbidden, since it recreates the original loop-blocking defect):
+FROZEN fallback (never fall back to synchronous execution from an ACTIVE server
+event loop; that reintroduces the loop-blocking defect):
+- No active event loop (`app.main` CLI, in-process test harness): synchronous
+  model-1 on the calling thread. Lua returns the table; JS returns an
+  already-resolved Promise. This is the ONLY synchronous path.
+- Active event loop: attempt admission (section 9). Admitted -> SUBMIT (Lua
+  yields; JS pending Promise). Not admitted -> return an existing failure token
+  WITHOUT running on the loop thread (Lua failure table; JS immediately-resolved
+  Promise carrying it).
 
-- No active event loop (a `app.main` CLI run, the in-process test harness):
-  synchronous model-1 execution on the calling thread. Lua returns the table; JS
-  returns an already-resolved Promise carrying it. This is the ONLY synchronous
-  path.
-- Active event loop: attempt admission (section 9). If admitted, SUBMIT to a
-  worker (Lua yields; JS returns a pending Promise). If NOT admitted (no pool /
-  pool cannot accept / SMTP cap reached / queue full), return an EXISTING failure
-  token WITHOUT running on the loop thread (Lua returns the failure table; JS
-  returns an immediately-resolved Promise carrying it). Never run the operation
-  synchronously on the loop thread.
+Consumers updated in lockstep: `email.lua`, `email.js` (JS must `await`), the
+SMTP examples, `e2e_smtp` / `test_smtp_e2e` fixtures, and the docs. No public
+`smtp.async.send`.
 
-Consumers updated in lockstep: `stdlib/.../email.lua` and `email.js` (JS must
-`await`), the SMTP examples, `e2e_smtp` / `test_smtp_e2e` fixtures, and the docs.
-A `smtp.async.send` public API is OUT of scope.
+## 3. FROZEN audit schema (item 3)
 
-## 3. Operation-input ownership (correction 2, 7)
+Public error stays `connect_failed`. Distinctions live only in stable, readable
+audit fields, EMITTED ONLY WHEN APPLICABLE, pinned by tests asserting exact JSON:
 
-The bindings borrow Lua/QuickJS storage; after suspension the worker must not
-reference any of it. `HlSmtpOp` deep-copies and solely owns, at submit time on
-the event-loop thread: `host`, `port`, `use_tls`; credentials (`username`,
-`password`); `from`, `to`, `reply_to`, `subject`, `body`, `content_type`; every
-`cc` element as an owned vector of owned strings; and the run-time config values
-(timeout). (No `bcc`: the current `HlSmtpMessage` has only `cc` / `cc_count`; a
-BCC field is not in scope.)
+- `"schedule"`: `"pool_unavailable"` | `"cap_reached"` | `"queue_full"` |
+  `"suspend_failed"` (present only on a scheduling failure; section 9).
+- `"terminal"`: `"cancelled"` | `"post_resolution_deadline"` (present only when
+  the op ended by cancellation or by the section 8 deadline).
+- `"teardown"`: `"leaked"` (preserved from Slice 2b; present only on a
+  non-detaching teardown).
 
-Scrubbing/free on EVERY exit path (submission failure, queued-cancel,
-running-cancel, success, each worker failure): credentials and the copied body
-are volatile-memset scrubbed before free (extends Slice 2b's `smtp_secure_zero`
-from stack buffers to the owned heap copies); all owned storage is freed exactly
-once by the owning side per the section 6 refcount.
+A normal success/failure emits none of these three. The exact field names and
+enum values above are frozen; only these metadata fields may be added.
 
-## 4. Prepare/authorize vs worker execution split (correction 3-of-v2)
-
-The worker never touches audit writers or runtime objects. `hl_cap_smtp_send` is
-decomposed into three phases with a hard thread boundary:
+## 4. Prepare/authorize vs worker execution split
 
 ```
 EVENT LOOP (submit):  parse -> validate -> authorize host (declared hostname,
                       existing exact/glob/CIDR policy) -> deep-copy into HlSmtpOp
                       -> admission (section 9) -> submit
-WORKER (execute):     resolve -> [cancel check] -> connect (Happy Eyeballs) ->
-                      optional TLS -> SMTP -> confirmed teardown (detach ACKs) ->
-                      write a stable terminal payload   (NO audit, NO runtime
-                      objects, NO shared TLS context)
-EVENT LOOP (complete): emit audit (metadata + stable result + internal
-                      cancel/deadline/scheduling distinction) -> build runtime
-                      result (Lua table / resolve JS promise) -> resume/reject
+WORKER (execute):     resolve -> [post-DNS cancel check] -> connect (Happy
+                      Eyeballs) -> optional TLS -> SMTP -> confirmed teardown
+                      (detach ACKs) -> publish stable terminal payload
+                      (NO audit, NO runtime objects, NO shared TLS context)
+EVENT LOOP (complete): emit audit (section 3) -> build runtime result -> resume
 ```
 
-Authorization is entirely on the submit side against the declared hostname; an
-unauthorized host never crosses the boundary and the worker does NOT
-re-authorize. The crossing payload carries only a stable token (an existing
-user-visible string) plus internal audit fields; no borrowed pointers, no Keel
-objects, no fd. The same execute-phase function serves both the worker and the
-no-loop inline path; the caller does audit + result construction in both.
+Authorization is entirely on the submit side; the worker does NOT re-authorize.
+The crossing payload carries only a stable token + the section-3 metadata; no
+borrowed pointers, no Keel objects, no fd. The same execute-phase function serves
+the worker and the no-loop inline path; the caller does audit + result in both.
 
 ## 5. Worker ownership and two-phase teardown
 
-One `HlSmtpOp` owns the `HlSmtpTransport` (connect op, stream, TLS session,
-timers, write queue, reply accumulator) and the private `KlEventCtx` for its
-whole lifetime; nothing on the event loop dereferences transport storage. The
-private `KlEventCtx` is created and destroyed on the worker.
+One `HlSmtpOp` owns the `HlSmtpTransport` + the private `KlEventCtx` for its whole
+lifetime; nothing on the event loop dereferences transport storage. Two-phase
+teardown: a cancel REQUEST is a signal, never a synchronous free; the runtime
+releases suspension ONLY after the worker publishes a terminal; transport-owned
+resolver result, timers, stream, and TLS session remain alive until detach/close
+ACKs (`kl_connect_op_is_detached`; `t->closed` via `tp_stream_on_close`; timers
+cancelled; TLS destroyed after stream detach); the abortive
+cancel-then-pump-to-detachment runs ON THE WORKER; fail-closed leaks + reports
+`teardown:leaked` rather than freeing into a UAF.
 
-Two-phase teardown (cancellation REQUEST vs confirmed DETACHMENT):
-- a cancel REQUEST is a signal, never a synchronous free;
-- the runtime releases its suspension/completion state ONLY after the worker
-  publishes a terminal;
-- transport-owned resolver result, timers, stream, and TLS session remain alive
-  until their detach/close ACKs complete (connect op `kl_connect_op_is_detached`;
-  stream `t->closed` via `tp_stream_on_close`; timers cancelled; TLS destroyed
-  only after stream detach); the abortive cancel-then-pump-to-detachment runs ON
-  THE WORKER;
-- fail-closed: if detachment is not confirmed within the bound, storage is
-  intentionally leaked and reported (`teardown_leaked` -> audit), never freed
-  into a use-after-free.
-
-Ordering: cancel request -> worker observes -> worker abortive-detaches ->
-detach/close ACKs -> worker frees transport storage -> worker publishes terminal
--> event loop emits audit + resumes -> runtime releases suspension.
-
-## 6. One linearizable op state machine (correction 2)
-
-A separate `cancel_requested` flag plus an independent state CAS cannot guarantee
-"cancel-set-first is honored," so Slice 2c uses ONE atomic state; cancellation
-and the RUNNING->COMPLETING transition CONTEND ON THE SAME atomic:
+## 6. One linearizable op state machine
 
 ```
 QUEUED ---> RUNNING ---> COMPLETING ---> DONE
@@ -142,241 +105,243 @@ QUEUED ---> RUNNING ---> COMPLETING ---> DONE
     \--------> CANCEL_REQUESTED --------/
 ```
 
-- `_Atomic(int) state`, initialized `QUEUED`. All moves are CAS.
-- Worker dequeue: CAS `QUEUED -> RUNNING`. If that fails because the state is
-  `CANCEL_REQUESTED` (a cancel beat the dequeue), the worker takes the
-  cancelled-teardown path.
-- Cancel: CAS `QUEUED -> CANCEL_REQUESTED` or `RUNNING -> CANCEL_REQUESTED`. If
-  the CAS fails because the state is already `COMPLETING`/`DONE`, cancel is a
-  no-op (the worker won).
-- Normal finish: CAS `RUNNING -> COMPLETING`. If that fails because the state is
-  `CANCEL_REQUESTED` (cancel won), the worker honors the cancel and takes the
-  cancelled-teardown path. This CAS out of `RUNNING` (to `COMPLETING` or losing
-  to `CANCEL_REQUESTED`) is the LINEARIZATION POINT: exactly one of
-  complete/cancel wins.
-- Memory ordering: the worker writes the terminal payload, then performs the
-  state transition to publish it with `memory_order_release`; the completing/
-  resuming side reads state with `memory_order_acquire`, so the payload is
-  fully visible before it is consumed. `DONE` is set after the payload is
-  published; the resume/audit side only ever observes a published payload.
-- Refcount = 2 at submit (one runtime-side ref held while suspended, one
-  worker-side ref while owning the op). The worker frees transport-derived
-  storage after detachment ACKs, then drops its ref. The LAST ref to drop frees
-  the op shell + the copied inputs (section 3) and the cross-boundary payload;
-  which side is last is decided by the refcount, never freed by both.
+Single `_Atomic(int) state`, all moves by CAS. Worker dequeue: CAS
+`QUEUED->RUNNING` (fail if `CANCEL_REQUESTED` -> cancelled-teardown). Cancel: CAS
+`QUEUED->CANCEL_REQUESTED` or `RUNNING->CANCEL_REQUESTED` (no-op if already
+`COMPLETING`/`DONE`). Normal finish: CAS `RUNNING->COMPLETING` (if it loses to
+`CANCEL_REQUESTED`, honor the cancel). The CAS out of `RUNNING` is the
+LINEARIZATION POINT: exactly one of complete/cancel wins. Memory ordering: the
+worker writes the terminal payload, then publishes it with the state transition
+under `memory_order_release`; the resume/complete side reads state with
+`memory_order_acquire`, so the payload is fully visible before use; `DONE` is
+observed only after a published payload. Refcount = 2 at submit (runtime-side +
+worker-side); the worker frees transport storage after detachment then drops its
+ref; the LAST ref frees the op shell + copied inputs + cross-boundary payload.
 
-Cases:
-- Queued-but-not-started cancel: `QUEUED -> CANCEL_REQUESTED`; the worker on
-  dequeue takes cancelled-teardown with NO transport opened (nothing to detach),
-  drops its ref.
-- Running cancel: `RUNNING -> CANCEL_REQUESTED`; the worker observes it at
-  defined safe points (between stage pumps and inside the pump predicate),
-  abortive-detaches to ACKs, publishes the cancelled terminal, drops its ref;
-  the runtime ref drops only at resume.
-- Completion racing cancel: resolved by the single CAS out of `RUNNING`.
-- Pool shutdown: `kl_thread_pool_free` runs the cancel_fn for never-started
-  (`QUEUED`) items (-> queued-cancel) and JOINS running threads; see section 10.
-- Submit ok but runtime-suspension setup then failed: CAS toward
-  `CANCEL_REQUESTED`, drop the runtime ref immediately, mark "no runtime to
-  resume"; the worker still runs to terminal + detachment and self-frees via the
-  refcount; the complete-side resume is guarded by runtime liveness and is a
-  no-op (audit still emitted). No resume-after-free.
+## 7. Resolver-result lifetime + post-DNS cancel check
 
-## 7. Resolver-result lifetime + post-DNS cancel check (correction 2, 5, 7)
+`getaddrinfo` runs on the worker; its result (or copied sockaddrs) is op-owned,
+outlives every connect attempt (incl. the staggered second), freed only after
+connect-op detachment, on the worker, never while an attempt fd is armed; no
+resolver result/sockaddr/index crosses to the event loop; no `KlResolver` is
+retained. IMMEDIATELY after `getaddrinfo` returns and BEFORE opening a socket,
+the worker checks for `CANCEL_REQUESTED` and, if set, goes to cancelled-teardown
+without connecting. A cancel arriving DURING the blocking `getaddrinfo` cannot
+interrupt it (section 8); this post-DNS check is the earliest honest cancel point.
 
-- `getaddrinfo` runs on the worker; its result (or the copied sockaddrs) is
-  op-owned, lives on the worker, and outlives every connect attempt including the
-  staggered second; freed only after connect-op detachment, on the worker, never
-  while an attempt fd is armed. No resolver result/sockaddr/index crosses to the
-  event loop. No `KlResolver` object is retained.
-- IMMEDIATELY after `getaddrinfo` returns, and BEFORE opening any socket, the
-  worker checks the op state for `CANCEL_REQUESTED` and, if set, transitions to
-  cancelled-teardown without connecting. (A cancel that arrives DURING the
-  blocking `getaddrinfo` cannot interrupt it; see section 8. This post-DNS check
-  is the earliest honest cancellation point.)
+## 8. FROZEN deadline relationship (item 2)
 
-## 8. Post-resolution operation deadline: honest (correction 5)
+`getaddrinfo` cannot be interrupted (Keel's cancellable async resolver needs
+`resolv.conf` + direct UDP the sandbox forbids, the reason `http_async` forces
+`system_dns`), so the ceiling is POST-RESOLUTION, not a hard total. Frozen:
 
-A blocking `getaddrinfo` cannot be interrupted, and Keel's cancellable async
-resolver needs `resolv.conf` + direct UDP that Hull's sandbox forbids (the reason
-`http_async` forces `system_dns`). So DNS is NOT bounded by the ceiling.
+```
+Dop    = monotonic_now_after_resolution + configured_timeout
+Dstage = min(Dop, monotonic_now + stage_budget)
+```
 
-Decision (honest naming): Slice 2c introduces a POST-RESOLUTION operation
-deadline, computed AFTER resolution returns (`kl_monotonic_ms() + budget`) and
-threaded to every subsequent stage pump via `pump_until_abs` as the min-bounding
-ceiling (per-stage budgets remain sub-bounds). Naming, docs, the audit field, and
-tests all say "post-resolution operation deadline"; nothing claims to bound DNS.
-On expiry it issues a cancel request (not a hard stage-kill) and tears down via
-confirmed detachment. Public token on deadline: `connect_failed` (frozen), with
-the deadline distinction in audit metadata.
+- Every post-resolution stage pumps against `Dstage` (via `pump_until_abs`), so
+  no stage or retry can extend `Dop`.
+- The connect-deadline timer receives `Dop - now`, NEVER a fresh full timeout.
+- Graceful close is additionally bounded by `min(Dop, now + SMTP_CLOSE_GRACE_MS)`.
+- On `Dop` expiry: issue a cancel request (not a stage hard-kill); public token
+  `connect_failed`; audit `terminal:post_resolution_deadline`.
+- DNS is explicitly outside the ceiling; naming/docs/audit say "post-resolution."
+  A blocking `getaddrinfo` may occupy a worker after a cancel until the OS
+  resolver returns (bounded by `resolv.conf` timeout x attempts); the SMTP cap
+  (section 9) mitigates pool occupancy. A bounded sandbox-safe resolver is a
+  separate future item.
 
-Pool-capacity consequence: a blocking `getaddrinfo` can occupy a worker after a
-cancel request until the OS resolver returns (bounded in practice by
-`resolv.conf` timeout x attempts). This is acknowledged; the mitigation is the
-SMTP cap (section 9). A bounded sandbox-compatible resolver is a separate future
-item.
+## 9. FROZEN SMTP cap, admission, and fairness (item 1)
 
-## 9. Pool admission, the SMTP cap, and fairness (correction 6-of-v2, 5)
+`kl_thread_pool_submit` returns -1 when the shared queue (default 64) is full;
+the pool is shared with db.async / gpu.async / compute.
 
-`kl_thread_pool_submit` returns -1 when the shared queue (default capacity 64) is
-full; the pool is shared with db.async / gpu.async / compute.
+Frozen cap formula, over W = worker count known at serve wiring:
 
-- Worker count: the async pool does not expose its size at run time, so the SMTP
-  cap is COMPUTED AT SERVE WIRING, where the pool size is known, and stored as a
-  constant `smtp_max_inflight = floor(pool_size * FRACTION)` (FRACTION a
-  compile-time constant, default 1/2). SMTP maintains its OWN atomic counter of
-  QUEUED-plus-RUNNING SMTP jobs (incremented at admission, decremented at
-  terminal), NOT a query of active workers.
+```
+W <= 1: async SMTP admission DISABLED
+W >= 2: smtp_max_inflight = max(1, floor(W / 2))
+```
+
+- The async pool does not expose W at run time, so `smtp_max_inflight` is
+  COMPUTED AT WIRING (W is known there) and stored as a constant. SMTP maintains
+  its OWN atomic counter of QUEUED-plus-RUNNING SMTP jobs (incremented at
+  admission, decremented at terminal), NOT a query of active workers. This
+  guarantees at least `W - floor(W/2) >= 1` workers always remain OUTSIDE SMTP
+  admission for db/compute (W>=2), and a W<=1 pool admits no async SMTP at all
+  (no false headroom claim).
 - Admission (active loop): admit iff `counter < smtp_max_inflight` AND
-  `kl_thread_pool_submit` succeeds. Otherwise it is a scheduling failure.
-- One-worker (or tiny) pool: `floor(1 * 1/2) = 0`, so `smtp_max_inflight == 0`
-  DISABLES asynchronous SMTP admission entirely. Under an active loop that means
-  SMTP always takes the scheduling-failure path (below); we do NOT pretend
-  DB/compute headroom exists, and we do NOT block the loop. (No-loop runs are
-  unaffected: they use the synchronous path, section 2.)
-- FROZEN scheduling-failure token: all four scheduling failures return the
-  existing public token `connect_failed`, with the distinction ONLY in audit
-  metadata:
-  - pool unavailable (no pool on an active loop) -> `connect_failed`
-    (meta: `sched=pool_unavailable`);
-  - SMTP admission cap reached -> `connect_failed` (meta: `sched=cap_reached`);
-  - shared queue full (`kl_thread_pool_submit` == -1) -> `connect_failed`
-    (meta: `sched=queue_full`);
-  - suspension setup failure -> `connect_failed` (meta: `sched=suspend_failed`).
-- Queued-job cancellation: the section 6 `QUEUED -> CANCEL_REQUESTED` path.
-- Saturation test: flood the pool with concurrent slow SMTP operations (delayed
-  peers) and assert a `db.async` (or compute) op still completes within a bounded
-  window, proving SMTP cannot indefinitely starve other subsystems.
+  `kl_thread_pool_submit` succeeds; else a scheduling failure.
+- FROZEN scheduling-failure mapping (public token `connect_failed`, section-3
+  metadata): pool unavailable -> `schedule:pool_unavailable`; cap reached ->
+  `schedule:cap_reached`; queue full -> `schedule:queue_full`; suspension setup
+  failed -> `schedule:suspend_failed`.
+- Queued-job cancellation via the section 6 `QUEUED->CANCEL_REQUESTED` path.
+- Tests: parameterize the cap over W in {1,2,3,4,5,8}, asserting
+  `smtp_max_inflight` = {disabled,1,1,2,2,4} and that at least one worker remains
+  outside SMTP admission for W>=2. A SATURATION test floods slow SMTP (delayed
+  peers) up to the cap and proves a db.async / compute op still completes within
+  a bounded window.
 
-## 10. Shutdown and runtime ownership ordering (correction 6)
+## 10. VERIFIED backend-shutdown ownership (item 4)
 
-Explicit shutdown order (server stop / runtime teardown):
+Investigated both backends (not assumed):
 
-```
-1. stop accepting NEW SMTP submissions
-2. request cancellation of all in-flight SMTP ops (section 6)
-3. drain queued + running SMTP jobs to a terminal state (join; running ops run
-   to detachment ACKs on their worker before their thread exits)
-4. deliver-or-DISCARD completion callbacks under a defined rule (below)
-5. release continuations / runtime state
-6. destroy the per-worker-thread TLS contexts (section 3.TLS)
-7. destroy the pool, then the server-retained CA buffer, then the persistent
-   allocator
-```
+- Keel (`src/hull/async/keel.c` -> `kl_thread_pool_free`, vendor/keel
+  `thread_pool.c:240`): signals shutdown, JOINS workers, removes the wakeup
+  watcher, then DRAINS the done queue calling `done_fn` for every completed item,
+  then drains the work queue calling `cancel_fn` for never-started items. So on
+  Keel, `done_fn` for work finishing during shutdown DOES fire at free.
+- Poll (`src/hull/async/poll.c` -> `poll_pool_free:702`): signals shutdown,
+  snapshots + clears QUEUED items, JOINS workers, then fires `cancel_fn` for the
+  never-started items. It does NOT drain the completion queue, so a `done_fn`
+  enqueued by work finishing during shutdown is DROPPED (same as the explicit
+  OOM-drop at `poll.c:618`).
+- Neither backend's `free()` fires `on_cancel` for a still-suspended op
+  ("graceful shutdown is the caller's job"). So SMTP MUST drive its own
+  cancellation of in-flight ops BEFORE pool/backend free; `on_cancel`-on-free is
+  not a safety net.
 
-Completion-delivery rule: a completion normally resumes the runtime on the event
-loop. `kl_thread_pool_free` "drains the queue, joins threads, removes the
-watcher, and frees"; it runs `cancel_fn` for items that NEVER STARTED, but it is
-NOT assumed to deliver already-finished done-callbacks after the server loop has
-stopped. Therefore any terminal that becomes ready after the loop stops is
-DISCARDED for resume purposes: the worker/last-ref still frees all storage
-(transport on the worker; shell + inputs + payload via the refcount), and audit
-is best-effort (skipped if the audit sink is already torn down). No resume ever
-targets a released runtime. The exact backend guarantee here (queued done-
-callback delivery vs discard after loop stop) is a MUST-VERIFY item at
-implementation time against both async backends; the plan assumes discard and
-does not rely on post-stop delivery.
+Design consequence: `done_fn` is RESUME-ONLY and may be dropped (poll shutdown);
+it NEVER owns a free or a ref-drop. `work_fn` (worker) always runs to completion
+because `pool_free` joins, and it owns transport teardown + storage free + the
+worker-ref drop on BOTH backends. The runtime-side ref is dropped by exactly one
+of {`on_resume`, per-request cancel, the server-shutdown SMTP cancel sweep},
+arbitrated by the refcount; the shutdown sweep GUARANTEES it during teardown
+since `free()` will not.
 
-Ordering invariants: per-worker TLS contexts are destroyed only AFTER all
-running SMTP jobs have joined (step 3), and the CA buffer + allocator are freed
-only AFTER the per-worker contexts are destroyed (step 6 before 7), because a
-KlTlsCtx dereferences both at destroy.
+Ownership table (who owns queued/running/notified items at shutdown):
 
-## 11. TLS trust-material ownership (correction 4)
+| Case | Keel | Poll | Owner / cleanup |
+|---|---|---|---|
+| Shutdown starts before work runs (QUEUED) | `cancel_fn` fires at free | `cancel_fn` fires at free | `cancel_fn` (loop thread) transitions `->CANCEL_REQUESTED`, no transport opened, drops the worker ref; runtime ref dropped by the shutdown sweep; last ref frees shell |
+| Work completes while loop stopping (RUNNING, finishes in join) | `done_fn` drained at free | `done_fn` DROPPED | `work_fn` (worker, always runs) tore down transport + freed storage + dropped worker ref; runtime ref dropped by the shutdown sweep (not relied on `done_fn`); resume is best-effort |
+| Completion notification queued but never dispatched | n/a (drained) | DROPPED | identical to the running case: storage already freed by `work_fn`; no free lives in `done_fn`; no leak |
 
-A worker cannot build a private context from the shared `KlTlsConfig` alone (that
-only points at the unsafe shared `KlTlsCtx`; `MBEDTLS_THREADING` is off, so the
-shared context's RNG/`ssl_config` are not safe for concurrent use). Concrete
-ownership:
+Shutdown order (frozen): (1) stop new SMTP submissions; (2) request-cancel all
+in-flight SMTP ops; (3) drain queued+running to terminal (join; running ops reach
+detachment ACKs on their worker); (4) deliver-or-discard completions per the
+table (resume is best-effort, never targets a released runtime); (5) release
+continuations/runtime state; (6) destroy per-worker TLS contexts; (7) destroy the
+pool, then the CA buffer, then the persistent allocator. Invariant: per-worker
+TLS contexts are destroyed only after (3); the CA buffer + allocator only after
+(6), because a `KlTlsCtx` dereferences both at destroy.
 
-- At serve wiring, BEFORE sandbox activation, resolve the effective CA material
-  into an IMMUTABLE server-retained buffer: the embedded Mozilla bundle is
-  already a static in-binary buffer (`hl_embedded_ca_bundle`); a `--ca-bundle`
-  FILE is read ONCE into a server-owned buffer here (so no CA file is re-read
-  after the sandbox seals the filesystem).
-- Each WORKER THREAD lazily builds and caches (pthread TLS, `worker_db` pattern)
-  its OWN `KlTlsCtx` from that buffer via `hl_tls_client_ctx_create_from_buf` /
-  `kl_tls_mbedtls_client_ctx_create_from_buf`. No shared context, no RNG race, no
-  lock, no file read on the worker.
-- The CA buffer stays alive until the worker pool is fully drained. Per-worker
-  contexts are destroyed before the CA buffer + allocator are freed (section 10
-  ordering).
-- The event-loop-thread synchronous fallback (section 2) keeps using the existing
-  single-threaded shared context (safe, one thread).
+Backend-parity TEST REQUIREMENT: the shutdown-with-op-in-flight suite runs under
+BOTH backends (keel and poll) and asserts, in all three cases, no leak / no UAF /
+exactly-once free / exactly-once runtime-ref drop, DESPITE the documented
+`done_fn`-dispatch divergence. (Aligning poll to drain `done_fn` at free for
+strict parity is noted as an optional backend follow-up; the SMTP design is
+correct without it.)
 
-## 12. Deterministic coverage for the four deferred behaviors (correction 7)
+## 11. TLS trust-material ownership
 
-Each test BITES (round-4 discipline: fails on the reverted code, proven by an
-explicit revert), via injected/observable seams and bounded watchdogs, never OS
-timing or resolver ordering. A test-only `HL_SMTP_TEST_HOOKS` seam provides an
-injected deterministic address list (bypassing the OS resolver) and
-attempt-observation (address index per attempt; connect pending/failed/
-succeeded; which timer fired).
+`MBEDTLS_THREADING` is OFF, so the shared `KlTlsCtx` (RNG/`ssl_config`) is not
+concurrency-safe. At serve wiring, BEFORE sandbox activation, resolve the CA
+material into an IMMUTABLE server-retained buffer: the embedded Mozilla bundle is
+already a static in-binary buffer (`hl_embedded_ca_bundle`); a `--ca-bundle` FILE
+is read ONCE into a server-owned buffer here (no CA file re-read after the
+sandbox seals the fs). Each WORKER THREAD lazily builds and caches (pthread TLS,
+`worker_db` pattern) its OWN `KlTlsCtx` from that buffer via
+`hl_tls_client_ctx_create_from_buf` / `kl_tls_mbedtls_client_ctx_create_from_buf`
+(no shared context, no RNG race, no lock, no file read on the worker). The CA
+buffer stays alive until the pool is drained; per-worker contexts are destroyed
+before the CA buffer + allocator (section 10 order). The no-loop synchronous
+fallback keeps the existing single-threaded shared context.
 
-1. Happy Eyeballs stagger: inject a two-address list whose FIRST address stays
-   in connect-PENDING (not immediately refused) so the stagger timer fires and
-   the SECOND address wins; assert via the observation seam that the staggered
-   second attempt connected within the stagger window and the injected set
-   outlived the race. Revert proof: forcing sequential attempts (no stagger)
-   changes the observed winner/timing.
-2. Connect-deadline timer: use a provider/attempt seam that keeps CONNECT
-   genuinely PENDING (never completes) with the post-resolution OPERATION
-   deadline set LARGE, so the connect-deadline timer is the only one that can
-   fire; assert via the observation seam that the CONNECT timer fired. The mirror
-   case (an accepted-TCP peer that withholds its greeting, with the connect
-   deadline set large) proves the OPERATION deadline fired. The two deadlines are
-   isolated per test so each proves which timer fired. Revert proof: removing the
-   respective arm hangs past the watchdog.
+## 12. Exact zero-Keel link seam (item 5)
+
+The seam is the async-backend selector `hl_async_backend()`:
+- WEAK stub / default: `const HlAsyncBackend hl_async_backend_poll` and the WEAK
+  `hl_async_backend()` in `src/hull/async/poll.c` (0 `kl_` references,
+  self-contained pthreads). This is what a Keel-less base links.
+- STRONG anchor: `const HlAsyncBackend hl_async_backend_keel` + the STRONG
+  `hl_async_backend()` override in `src/hull/async/keel.c` (22 `kl_` references;
+  the SOLE referencer of `kl_thread_pool_*` / `libkeel.a`). Composed via the Keel
+  feature archive `libhull_feature-keel.a` (the `HL_KEEL_FEATURE` axis), pulled
+  only when the app needs HTTP/Keel.
+- Runtime submit/resume glue: the new SMTP worker glue (a `worker_smtp.o`,
+  mirroring `worker_db.o`) references ONLY the `HlAsyncBackend` vtable via
+  `hl_async_backend()` (`pool_submit`, `op_suspend`, `op_complete`), NEVER
+  `kl_thread_pool_*` or any `kl_` symbol directly. So it resolves against
+  whichever backend is linked: the weak poll default in a compute base, the
+  strong keel anchor in an HTTP base.
+
+Why compute-only linking cannot pull Keel: (a) SMTP is an HTTP-client-family
+feature; a compute-only app declares no `hull/smtp` / `hull/email`, so the smtp
+objects + `worker_smtp.o` are not linked at all; (b) even when linked, the glue's
+only async dependency is `hl_async_backend()`, whose weak default is the Keel-free
+poll backend, so the strong keel anchor (the sole `kl_thread_pool` referencer) is
+never pulled. TEST: keep the existing zero-Keel `nm` assertion on a compute app
+(`nm app | grep kl_thread_pool` -> empty), PLUS a NEGATIVE test that asserts
+`worker_smtp.o` has no undefined `kl_` symbols (`nm -u worker_smtp.o | grep '
+kl_'` -> empty); a deliberate variant that calls `kl_thread_pool_submit` directly
+(bypassing the vtable/anchor) MUST make that assertion fail, proving the guard
+bites.
+
+## 13. Deterministic coverage for the four deferred behaviors
+
+Each test BITES (fails on the reverted code, proven by an explicit revert), via
+an `HL_SMTP_TEST_HOOKS` seam providing an injected deterministic address list
+(bypassing the OS resolver) and attempt-observation (address index per attempt;
+connect pending/failed/succeeded; which timer fired), plus bounded watchdogs.
+
+1. Happy Eyeballs stagger: inject a two-address list whose FIRST address stays in
+   connect-PENDING (not immediately refused), so the stagger timer fires and the
+   SECOND wins; assert via the seam that the staggered second connected within
+   the window and the injected set outlived the race. Revert proof: forcing
+   sequential attempts changes the observed winner/timing.
+2. Connect-deadline vs operation-deadline, ISOLATED: (a) keep CONNECT genuinely
+   PENDING with `Dop` set LARGE -> only the connect timer can fire; assert the
+   CONNECT timer fired. (b) an accepted-TCP peer that withholds its greeting with
+   the connect deadline LARGE -> only `Dop` can fire; assert
+   `terminal:post_resolution_deadline`. Each proves which timer fired. Revert
+   proof: removing the respective arm hangs past the watchdog.
 3. Live TLS-failure branches: a real in-process mbedTLS peer (ported from the
-   Slice 2a spike, not a mock vtable) for hostname mismatch, unknown CA,
-   handshake timeout, and rejected STARTTLS; assert fail-closed with the correct
-   existing token, credentials never sent, no plaintext downgrade. Revert proof:
-   each verify/no-downgrade check, reverted, flips an asserted outcome.
-4. Cancellation / teardown with an op in flight (sections 5, 6): tear down the
-   runtime/request while a worker op is live at each stage (queued, resolving,
-   racing connect, read, write, TLS handshake, DATA, graceful close). Assert:
-   suspension released only after terminal published; storage detached exactly
-   once; no UAF/double-free; fd/timer/TLS retire once; a non-detaching case
-   reports `teardown_leaked`. Cancellation-DURING-RESOLUTION asserts the REAL
-   behavior (blocking `getaddrinfo` is not interruptible): the cancel is
-   recorded, the worker stays occupied until `getaddrinfo` returns, THEN the
-   post-DNS cancel check (section 7) transitions to cancelled-teardown before any
-   socket opens. The test does not pretend resolve cancels instantly.
+   Slice 2a spike, not a mock vtable): hostname mismatch, unknown CA, handshake
+   timeout, rejected STARTTLS; assert fail-closed with the correct existing
+   token, credentials never sent, no plaintext downgrade. Revert proof: each
+   verify/no-downgrade check, reverted, flips an asserted outcome.
+4. Cancellation / teardown with an op in flight (sections 5, 6, 10): tear down
+   the runtime/request while a worker op is live at each stage (queued, resolving,
+   racing connect, read, write, TLS handshake, DATA, graceful close), under BOTH
+   backends. Assert: suspension released only after terminal published; storage
+   detached exactly once; no UAF/double-free; fd/timer/TLS retire once; a
+   non-detaching case reports `teardown:leaked`. Cancellation-DURING-RESOLUTION
+   asserts the REAL behavior (blocking `getaddrinfo` not interruptible): the
+   cancel is recorded, the worker stays occupied until `getaddrinfo` returns, THEN
+   the post-DNS check (section 7) goes to cancelled-teardown before any socket.
 
 Sanitizer / backend matrix (realistic): ASan+UBSan on Linux and macOS; MSan on
 Linux/clang only (Keel instrumented, Slice 2b); TSan on Linux for the worker-pool
-+ saturation paths; fd-leak + failure-injection where those suites run. Backends:
-epoll (Linux), kqueue (macOS), poll (Cosmo APE); the APE runs no sanitizers.
++ saturation + shutdown-parity paths; fd-leak + failure-injection where those
+suites run. Backends: epoll (Linux), kqueue (macOS), poll (Cosmo APE); the APE
+runs no sanitizers.
 
-## 13. Preserved contracts (must not change)
+## 14. Preserved contracts (must not change)
 
 Protocol (sequencing, incremental reply parser with exact terminators +
 whole-response bound, dot handling, CRLF-injection rejection); TLS (implicit +
-in-place STARTTLS, CA + hostname verify, no-downgrade, ClientHello
-socket-handoff invariant, persistent-allocator-outlives-KlTls invariant);
-teardown (fail-closed confirmed detachment, now on the worker); audit (metadata +
-stable result only, never credentials or bodies; cancel/deadline/scheduling
-distinctions are internal structured metadata); error tokens (every existing
-user-visible string at its existing site; Keel errors mapped at the boundary).
+in-place STARTTLS, CA + hostname verify, no-downgrade, ClientHello socket-handoff
+invariant, persistent-allocator-outlives-KlTls invariant); teardown (fail-closed
+confirmed detachment, on the worker); audit (metadata + stable result only, never
+credentials or bodies; section-3 fields internal); error tokens (every existing
+user-visible string at its site; Keel errors mapped at the boundary).
 
-## 14. Acceptance (maps to design section 10)
+## 15. Acceptance and residual implementation-review items
 
-Done when: all Slice 2b tests stay green; the four deferred behaviors bite;
-Lua/JS result-shape parity + server-stays-responsive-during-a-delayed-peer +
-teardown-with-op-in-flight pass; the saturation test proves no cross-subsystem
-starvation; the sanitizer/backend matrix (section 12) is clean; native +
-composed + all-flavor builds pass and an SMTP-free compute app links zero
-unwanted subsystems; and the exact-head cross-platform matrix is fully green.
-Stop for full acceptance review before any follow-on.
+Acceptance (design section 10): all Slice 2b tests green; the four deferred
+behaviors bite; Lua/JS parity + server-responsive-during-a-delayed-peer +
+teardown-with-op-in-flight (both backends) pass; the cap parameterization +
+saturation test pass; the zero-Keel `nm` + negative seam test pass; the
+sanitizer/backend matrix (section 13) is clean; native + composed + all-flavor
+builds pass and an SMTP-free compute app links zero unwanted subsystems; and the
+exact-head cross-platform matrix is fully green. Stop for full acceptance review.
 
-## 15. Open decisions for implementation review
-
-- The exact SMTP-cap FRACTION and the per-stage-vs-post-resolution budget
-  relationship (locked by tests).
-- The precise internal audit-metadata schema for the cancel / deadline /
-  scheduling distinctions (public strings stay frozen; only metadata gains
-  fields).
-- VERIFY the async backends' post-loop-stop completion behavior (section 10)
-  and confirm the discard assumption holds for both.
-- Confirm no Keel symbol leaks into a compute-only base through the new glue
-  (section 10/`nm` in `e2e_build_flavor`).
+The five gate items are now frozen (sections 3, 8, 9, 10, 11, 12). The only
+residual, converted into a test-gated implementation requirement rather than a
+guess: VERIFY at implementation time that the section-10 backend-shutdown
+ownership table holds under both backends exactly as documented, via the
+backend-parity test; if a backend's real behavior differs from this record, fix
+the code or the record before merging, do not weaken the test.

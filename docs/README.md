@@ -109,6 +109,7 @@ specific signature, parameter list, or return value.
 | [`reporting_ir_design.md`](reporting_ir_design.md) | Proposed reporting IR - **deferred** (over-scoped as the immediate next feature). |
 | [`sidecar_design.md`](sidecar_design.md) | Native sidecars - design only (Phase 0), not yet scheduled. |
 | [`smtp_keel_client_design.md`](smtp_keel_client_design.md) | Design-only transition of Hull SMTP from direct POSIX/blocking transport to an SMTP-owned composition of public Keel v3 primitives, preserving Hull policy and protocol ownership. |
+| [`smtp_keel_slice2c_plan.md`](smtp_keel_slice2c_plan.md) | Plan-only architectural gate for SMTP Slice 2c: moving the transport onto a bounded worker (model 2), with frozen decisions for worker ownership, the linearizable op state machine, the post-resolution deadline, the SMTP pool cap, verified backend-shutdown ownership, TLS trust-material ownership, and the zero-Keel link seam. |
 
 ### Roadmap
 
