@@ -1,6 +1,6 @@
 /*
  * test_smtp_transport.c - Focused tests for the SMTP-over-Keel-v3 transport
- * and the AUTH-scrub helper (Slice 2b blockers).
+ * and the AUTH-scrub helper (transport review blockers).
  *
  * These exercise the specific fixes the pre-existing green suites do NOT:
  *
@@ -32,8 +32,11 @@
 
 #include "hull/cap/smtp.h"
 
+#include <errno.h>
 #include <netinet/in.h>
+#include <poll.h>
 #include <pthread.h>
+#include <signal.h>
 #include <string.h>
 #include <unistd.h>
 #include <sys/socket.h>
@@ -620,37 +623,76 @@ UTEST(smtp_write, backpressure_drains)
     ASSERT_EQ(m.total_read, payload);
 }
 
-/* A peer that greets 220 and then STALLS: it never reads again, so the client's
- * OS send buffer + KlStream write queue fill and stay full for the whole write.
- * It sleeps well past the client's write deadline, then closes. Used to prove
- * the shared absolute write deadline (blocker 3): one large multi-chunk write
- * must fail within ONE bounded timeout, not roughly one timeout per chunk drain. */
-static void *mp_stall_thread(void *arg)
+/* A THROTTLED-DRAIN peer: greet 220, then read forever but at a fixed, slow
+ * byte rate (sleep MP_THROTTLE_SLEEP_US after every MP_THROTTLE_QUANTUM bytes,
+ * independent of per-read size, so the rate is deterministic regardless of
+ * socket buffering). It reads until EOF, so the CLIENT decides when the peer
+ * goes away (by closing its fd), not a timer.
+ *
+ * This is what makes the deadline regression BITE. A fully-stalled ("never
+ * drain") peer does NOT distinguish the fix from the bug: the pre-fix code
+ * (a fresh timeout_ms budget minted per pump_until) still returns -1 after the
+ * FIRST budget expires, exactly like the fixed single-absolute-deadline code.
+ * A peer that drains slowly-but-steadily separates them: each ~256 KiB chunk
+ * drains inside one fresh budget, so the PRE-FIX code keeps resetting the budget
+ * and DELIVERS the whole payload (returns 0) after N x per-chunk time; the FIXED
+ * code trips its one absolute deadline mid-write and returns -1 at ~one budget. */
+#define MP_THROTTLE_QUANTUM   (64 * 1024)   /* bytes per sleep slice */
+#define MP_THROTTLE_SLEEP_US  (30 * 1000)   /* 30 ms => ~2.1 MB/s ceiling */
+static void *mp_slow_drain_thread(void *arg)
 {
     MockPeer *m = arg;
     int c = accept(m->listen_fd, NULL, NULL);
     if (c < 0) return NULL;
     m->accepted = 1;
     if (m->greet)
-        mp_send(c, "220 stall ESMTP\r\n");
-    /* Do NOT read: the client's writes back up. Outlast the client's write
-     * deadline (below), then close. */
-    usleep(1500 * 1000);
+        mp_send(c, "220 throttle ESMTP\r\n");
+
+    char buf[65536];
+    size_t since_sleep = 0;
+    for (;;) {
+        ssize_t n = read(c, buf, sizeof buf);
+        if (n <= 0) break;                  /* client closed => EOF => done */
+        m->total_read += (size_t)n;
+        since_sleep += (size_t)n;
+        /* usleep never sleeps LESS than requested, so the rate is bounded above
+         * by QUANTUM / SLEEP regardless of read granularity or loopback speed. */
+        while (since_sleep >= MP_THROTTLE_QUANTUM) {
+            usleep(MP_THROTTLE_SLEEP_US);
+            since_sleep -= MP_THROTTLE_QUANTUM;
+        }
+    }
     close(c);
     return NULL;
 }
 
-/* Blocker 3 regression: with a peer that never drains, a 10 MiB write (~40
- * chunks of 256 KiB) must fail within ONE ~timeout_ms deadline shared across all
- * chunk drains and retries - NOT ~one timeout per drain. With the pre-fix code
- * (a fresh budget per pump_until) this would take up to N x timeout_ms; the
- * shared absolute deadline keeps it near a single timeout. We set a 500 ms
- * timeout and assert the write returns -1 in well under 2 s (the pre-fix path
- * would need up to ~20 s). */
+/* Process-level watchdog: a genuine future hang in the write path must FAIL CI
+ * (process terminates non-zero) rather than hang forever. The pre-fix code does
+ * not hang (it delivers the payload over many budgets), so the rc + elapsed
+ * assertions below are the real discriminator; this SIGALRM is a finite backstop
+ * against a different, hanging regression. Set well above any legitimate run. */
+static void deadline_watchdog_fired(int sig)
+{
+    (void)sig;
+    static const char msg[] =
+        "FATAL: write_deadline_is_one_absolute_bound watchdog fired - "
+        "hl_smtp_transport_write did not return within the watchdog window\n";
+    ssize_t w = write(STDERR_FILENO, msg, sizeof msg - 1);
+    (void)w;
+    _exit(99);
+}
+
+/* Blocker 3 regression (genuinely biting): a 10 MiB write (~40 x 256 KiB chunks)
+ * through a peer throttled to ~2 MB/s cannot complete inside a single 500 ms
+ * budget, so it MUST fail with rc == -1 at ~one budget. The pre-fix per-pump
+ * budget would instead reset the deadline on each ~120 ms chunk drain and
+ * SUCCEED (rc == 0) after ~5 s. Both the return code (-1 vs 0) and the elapsed
+ * time (~0.5 s vs ~5 s) separate the fixed code from the reverted code; the
+ * SIGALRM backstop bounds any hanging future regression. */
 UTEST(smtp_write, write_deadline_is_one_absolute_bound)
 {
     MockPeer m;
-    ASSERT_EQ(mp_start(&m, mp_stall_thread), 0);
+    ASSERT_EQ(mp_start(&m, mp_slow_drain_thread), 0);
 
     HlSmtpTransport *t = hl_smtp_transport_connect("127.0.0.1", m.port, 10000, NULL);
     ASSERT_TRUE(t != NULL);
@@ -662,16 +704,30 @@ UTEST(smtp_write, write_deadline_is_one_absolute_bound)
     ASSERT_TRUE(buf != NULL);
     memset(buf, 'S', payload);
 
-    const int write_timeout = 500;   /* ms */
+    const int write_timeout = 500;      /* ms: the ONE absolute budget */
+    const unsigned watchdog_sec = 30;   /* finite backstop for a hanging regression */
+
+    /* Arm the watchdog around the single write() only. */
+    void (*prev)(int) = signal(SIGALRM, deadline_watchdog_fired);
+    alarm(watchdog_sec);
+
     uint64_t start = kl_monotonic_ms();
     int rc = hl_smtp_transport_write(t, buf, payload, write_timeout);
     uint64_t elapsed = kl_monotonic_ms() - start;
 
-    ASSERT_EQ(rc, -1);                      /* the stalled peer never drains */
-    ASSERT_TRUE(elapsed < 2000);            /* ONE deadline, not ~40 x 500 ms */
+    alarm(0);                           /* disarm: the write returned */
+    signal(SIGALRM, prev);
 
-    hl_smtp_transport_shutdown(t);
-    hl_smtp_transport_free(t);
+    /* Fixed: fails at ONE absolute deadline. Reverted: would deliver all 10 MiB
+     * (rc == 0) over ~5 s of reset budgets. Assert BOTH facets. */
+    ASSERT_EQ(rc, -1);
+    ASSERT_TRUE(elapsed < 2000);        /* ~one 500 ms budget, not ~5 s of them */
+
+    /* Failure path: go straight to abortive free() (the production path a failed
+     * write takes); do NOT hl_smtp_transport_shutdown() - a graceful drain of an
+     * undrainable queue is not what a failed write does. free() closing the fd
+     * gives the peer EOF, so its read loop ends and the thread joins. */
+    ASSERT_EQ(hl_smtp_transport_free(t), 0);
     free(buf);
     mp_join(&m);
 }

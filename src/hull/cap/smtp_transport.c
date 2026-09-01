@@ -866,10 +866,10 @@ static const KlConnectOpHooks SMTP_CONNECT_HOOKS = {
  * is (ctx, max_events, timeout_ms) - max_events 64, timeout step_ms.
  *
  * This bounds ONE stage. The hard TOTAL-operation deadline ceiling (question 1
- * in the design record) is deferred to Slice 2c; only per-stage monotonic
- * deadlines land now. NOTE: getaddrinfo runs blocking on the calling thread
+ * in the design record) is a deferred follow-up; only per-stage monotonic
+ * deadlines land here. NOTE: getaddrinfo runs blocking on the calling thread
  * (see resolve_addrs); this per-stage deadline does NOT bound DNS resolution -
- * Slice 2c must move resolution off the calling thread.
+ * moving resolution off the calling thread is that same deferred follow-up.
  * ────────────────────────────────────────────────────────────────────────── */
 
 typedef int (*DonePred)(HlSmtpTransport *t);
@@ -1066,7 +1066,7 @@ int hl_smtp_transport_write(HlSmtpTransport *t, const void *data, size_t len,
      * chunk drain + WOULD_BLOCK retry pumps against the SAME `deadline`, so a
      * slow peer cannot stretch one 10 MiB DATA write across N x timeout_ms
      * (each pump_until would otherwise mint a fresh budget). The hard
-     * total-OPERATION ceiling across all stages is still a Slice 2c item. */
+     * total-OPERATION ceiling across all stages is a deferred follow-up. */
     int budget = timeout_ms > 0 ? timeout_ms : HL_SMTP_DEFAULT_TIMEOUT_MS;
     uint64_t deadline = kl_monotonic_ms() + (uint64_t)budget;
 

@@ -11,7 +11,7 @@
  * attachment, close) is owned by cap/smtp_transport.c, which composes Keel v3's
  * public primitives (KlConnectOp + KlStream + KlTls) on a private, operation-
  * local event context that this synchronous entry point pumps to a terminal
- * state (docs/smtp_keel_client_design.md; Slice 2b). No raw socket, fcntl,
+ * state (docs/smtp_keel_client_design.md). No raw socket, fcntl,
  * poll, getaddrinfo, read, write, or descriptor-close logic lives in this file.
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later

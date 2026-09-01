@@ -16,8 +16,8 @@
  *
  * Scheduling model (design section 6, model 1): the compatibility wrapper drives
  * a PRIVATE, operation-local KlEventCtx that the synchronous entry points pump to
- * a terminal state. No server event context is entered recursively; the worker
- * boundary is Slice 2c and out of scope here.
+ * a terminal state. No server event context is entered recursively; moving the
+ * blocking work onto worker threads is a deferred follow-up, out of scope here.
  *
  * The incremental SMTP reply parser lives here, co-located with the byte source:
  * the KlStream deliver callback does NOT map 1:1 to SMTP lines, so partial bytes
@@ -87,8 +87,8 @@ int hl_smtp_transport_implicit_tls(HlSmtpTransport *t, const char *host,
  * no upgrade) if any bytes are buffered past the 220 (a STARTTLS-injection
  * attempt). On the empty-buffer path it pauses the plaintext read side and hands
  * the socket to the TLS session BEFORE any further plaintext read can consume
- * ClientHello bytes (Slice 2b invariant 2), then drives the handshake to
- * completion.
+ * ClientHello bytes (the STARTTLS socket-handoff invariant), then drives the
+ * handshake to completion.
  *
  * @p tls_cfg / @p host as in hl_smtp_transport_implicit_tls.
  *
