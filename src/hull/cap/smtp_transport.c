@@ -56,6 +56,8 @@
  * OS resolver the kernel-sandbox network-outbound grant permits - the same
  * reason cap/http_async.c forces system_dns for the async HTTP client. */
 #include <netdb.h>
+#include <sys/socket.h>   /* AF_UNSPEC / AF_INET / AF_INET6 (cosmo needs it explicit) */
+#include <netinet/in.h>   /* struct sockaddr_in / sockaddr_in6 for the resolver */
 
 #include <errno.h>
 #include <pthread.h>
@@ -308,10 +310,8 @@ struct HlSmtpTransport {
     int           close_begun;
     int           closed;        /* on_close fired */
 
-    /* TLS (live). */
-    KlTlsCtx     *tls_ctx;       /* owned when we created via cfg->ctx_destroy? No:
-                                  * caller-owned ctx (cfg->ctx); we only own the
-                                  * per-session KlTls. Left NULL. */
+    /* TLS (live). The KlTlsCtx is caller-owned (cfg->ctx); this transport owns
+     * only the per-session KlTls, so no ctx pointer is retained here. */
     KlTls        *tls;
     int           tls_up;        /* verified session active */
     int           tls_handshaking;
