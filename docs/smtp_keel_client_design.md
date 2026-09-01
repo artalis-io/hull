@@ -107,8 +107,10 @@ primitives:
   have drained sufficiently.
 - One overall operation deadline plus explicit per-stage rearming if Keel
   exposes it. Hull must not recreate unbounded `poll` loops around the stream.
-- Readiness and completion backends, including epoll, kqueue, poll, IOCP, and
-  Cosmopolitan's selected backend.
+- The required event backends are the readiness backends Hull ships on: epoll
+  (Linux), kqueue (macOS/BSD), and poll, including Windows via the Cosmopolitan
+  APE (which selects poll). Native-Windows completion (IOCP) is out of scope
+  (see section 11 non-goals).
 
 ### 4.3 TLS upgrade
 
@@ -250,14 +252,51 @@ Keel error string.
 - Build a Hull-local SMTP transport adapter from `KlConnectOp`, `KlStream`, the
   public resolver/event/timer/socket-provider APIs, and `KlTls`.
 - Add no combined Keel client facade.
-- Prove POSIX readiness, Cosmopolitan poll, and Windows completion behavior.
+- Prove the shipped readiness backends: Linux epoll, macOS kqueue, and poll
+  (including the Cosmopolitan APE build, which selects poll). Native-Windows
+  completion (IOCP) is NOT required by Slice 2a (section 11 non-goals).
 - Prove connect cancellation, deadline, partial I/O, backpressure, TLS upgrade,
   graceful close, and confirmed detachment.
 - Keep the spike separate from the production SMTP path.
 
 Stop for API and ownership review. If the adapter requires HTTP-private
 headers, identify the exact missing primitive and expose only that narrow seam
-in Keel before continuing.
+in Keel before continuing. Slice 2a is closed only once the functional
+properties are demonstrated AND the cross-platform gate has authoritative Linux
+epoll and Cosmopolitan APE/poll executions (in addition to the local macOS
+kqueue and poll runs).
+
+#### Slice 2a closure evidence
+
+Slice 2a is CLOSED. The evidence:
+
+- The proof is a disposable, review-only spike (never merged): PR #447, head
+  commit `9259c949055f7b13aeeb27228ef1e61c70cc0b60`. It lives entirely under
+  `spike/`; PR #447 is closed without merging once this record lands.
+- It composes only public Keel primitives (`KlConnectOp`, `KlStream`, the
+  resolver / event / timer / socket-provider public APIs, and `KlTls`) through
+  public headers, with a public-header compile gate (no `vendor/keel/src`
+  header, no private `kl_sock_*` consumer wrapper, no HTTP client). No combined
+  facade. No production source and no Keel API or seam were changed.
+- Functional properties demonstrated live, ASan-clean: connect (multi-address
+  Happy Eyeballs surviving a first-address failure, real `kl_dns_resolver`
+  resolve, an actually-fired overall deadline, cancellation during resolve and
+  during a racing connect); byte stream (fragmented/coalesced reads; write
+  backpressure via a writable watcher that flushes the queue); TLS (in-place
+  STARTTLS and implicit TLS through `KlStream`, certificate and hostname
+  verification, hostname-mismatch and unknown-CA rejected with no plaintext
+  fallback, STARTTLS buffer boundary preserved); exactly-once terminal and
+  detachment; explicit descriptor-closure assertions.
+- Cross-platform gate, all readiness backends Hull ships, same adapter code:
+  kqueue (macOS, local) and poll (local); Linux epoll and poll and Cosmopolitan
+  APE poll in CI run `33500197232` (workflow "SMTP spike (Slice 2a
+  cross-platform)"), both jobs green: `OVERALL PASS (epoll + poll, plain +
+  ASan)` and `OVERALL PASS (Cosmopolitan APE, poll readiness)`. Native-Windows
+  IOCP is a non-goal (section 11).
+- Two implementation findings surfaced by the spike are carried into Slice 2b as
+  invariants (see Slice 2b below): the `KlAllocator` storage must outlive every
+  `KlTls` / `KlTlsCtx`, and STARTTLS must transfer socket ownership to TLS
+  before any plaintext read can consume ClientHello bytes.
 
 ### Slice 2b: Hull internal SMTP machine
 
@@ -267,6 +306,15 @@ in Keel before continuing.
 - Route it through the reviewed Hull-local primitive adapter.
 - Delete direct socket, `fcntl`, `poll`, `getaddrinfo`, `read`, `write`, and
   descriptor-close logic from `cap/smtp.c`.
+- Invariant (from the Slice 2a spike): the `KlAllocator` storage handed to
+  `KlTls` / `KlTlsCtx` must outlive every TLS object. Both capture the allocator
+  by pointer and dereference it at destroy, so a stack-local allocator dangles;
+  use a persistent allocator (as `src/hull/shared/tls_client.c` already does).
+- Invariant (from the Slice 2a spike): STARTTLS must transfer socket ownership
+  to the TLS session before any plaintext read can consume ClientHello bytes. A
+  plaintext read that pulls the ClientHello into an application buffer steals it
+  from the TLS backend and deadlocks the handshake; hand the socket to TLS at
+  the STARTTLS boundary (pause plaintext reads first).
 
 Stop for protocol/security review.
 
@@ -304,7 +352,9 @@ The final SMTP transition requires all existing tests plus these cases:
 - Lua/JavaScript result parity, server responsiveness during a delayed SMTP
   peer, and teardown with an SMTP operation in flight;
 - ASan, MSan, TSan, fd-leak, and failure-injection coverage;
-- Linux, macOS, Windows, and Cosmopolitan APE execution;
+- Linux (epoll), macOS (kqueue), and poll execution, where "Windows" means the
+  shipped Cosmopolitan APE artifact (which selects poll), not a native-Windows
+  IOCP build (see section 11 non-goals);
 - native/composed builds, all flavors, and proof that SMTP-free compute apps
   link no SMTP client transport, Keel event loop, or mbedTLS.
 
@@ -323,6 +373,17 @@ The final SMTP transition requires all existing tests plus these cases:
 - SMTP transport work precedes PostgreSQL and MySQL adoption.
 - External API expansion, SMTP feature expansion, and pooling are separate
   decisions.
+
+### Non-goals
+
+- Native-Windows IOCP support is a non-goal of this transition. Hull ships no
+  native-Windows runtime today; its Windows artifact is the Cosmopolitan APE,
+  which selects Keel's poll (readiness) backend. The SMTP adapter targets the
+  shipped readiness backends only (epoll, kqueue, poll). If Hull ever ships a
+  native-Windows (IOCP/completion) runtime, adding SMTP support there requires a
+  separately designed public completion-submission path in Keel (submit and
+  dispatch reads/writes/connects), designed and reviewed on its own; it is not
+  implied or unblocked by this record.
 
 ## 12. Open review questions
 
