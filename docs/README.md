@@ -108,6 +108,7 @@ specific signature, parameter list, or return value.
 | [`h1_s5_emdash_narration_gates.md`](h1_s5_emdash_narration_gates.md) | H1 slice S5 record: em-dash sweep across living first-party prose + the two self-tested gates (no-em-dash, no-milestone-narration) and their exact scope/survivor decisions. |
 | [`reporting_ir_design.md`](reporting_ir_design.md) | Proposed reporting IR - **deferred** (over-scoped as the immediate next feature). |
 | [`sidecar_design.md`](sidecar_design.md) | Native sidecars - design only (Phase 0), not yet scheduled. |
+| [`smtp_keel_client_design.md`](smtp_keel_client_design.md) | Design-only transition of Hull SMTP from direct POSIX/blocking transport to an SMTP-owned composition of public Keel v3 primitives, preserving Hull policy and protocol ownership. |
 
 ### Roadmap
 
