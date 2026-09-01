@@ -52,11 +52,12 @@ typedef int (*HlSmtpExecFn)(const HlSmtpMessage *msg, int timeout_ms,
                             HlSmtpCancelPollFn poll, void *poll_user,
                             void *exec_user);
 
-/* Fired once when the worker publishes a terminal, to KICK the runtime resume
- * (e.g. schedule the event-loop on_resume). Resume-only: it must not release the
- * lease, free anything, or drop a ref, and it may be dropped by the poll backend
- * at shutdown. Fires on completion, cancellation, and discard. */
-typedef void (*HlSmtpDoneFn)(HlSmtpWorkerOp *wop, void *done_user);
+/* Note on the resume hop: the worker NEVER kicks the runtime resume itself.
+ * work_fn runs to terminal and returns; the pool then independently invokes the
+ * pool-level done callback (registered by the submit layer at pool_submit),
+ * which calls hl_net_op_complete() and nothing else. That backend-dispatch
+ * boundary is what makes fast-completion-before-suspend safe, so no done
+ * callback lives in this unit. */
 
 /* Worker-side terminal hook, fired once on the worker thread right after
  * terminal publication (and, on the run path, confirmed teardown) and BEFORE
@@ -69,8 +70,7 @@ typedef void (*HlSmtpTerminalFn)(HlSmtpWorkerOp *wop, void *user);
  * ref, one runtime ref), state = QUEUED. Returns NULL on OOM (inputs untouched,
  * the caller still owns them to free). */
 HlSmtpWorkerOp *hl_smtp_wop_create(HlSmtpOp *inputs,
-                                   HlSmtpExecFn execute, void *exec_user,
-                                   HlSmtpDoneFn done, void *done_user);
+                                   HlSmtpExecFn execute, void *exec_user);
 
 /* Set the worker-side terminal hook (see HlSmtpTerminalFn). Must be called
  * before the op is submitted (single-threaded window; no race with the worker). */
@@ -78,14 +78,17 @@ void hl_smtp_wop_set_on_terminal(HlSmtpWorkerOp *w,
                                  HlSmtpTerminalFn fn, void *user);
 
 /* Worker thread entry (the pool work_fn): dequeue (QUEUED -> RUNNING), run the
- * execute-phase, publish the terminal (release), fire @p done, and drop the
- * WORKER ref. Honors a cancel requested before or during the run (publishes a
- * cancelled terminal instead). Exactly one of run/discard is called per op. */
+ * execute-phase, publish the terminal (release), fire the terminal hook, drop
+ * the WORKER ref, and return. Honors a cancel requested before or during the run
+ * (publishes a cancelled terminal instead). Does NOT invoke any resume: the pool
+ * dispatches its own done callback after this returns. Exactly one of
+ * run/discard is called per op. */
 void hl_smtp_wop_run(HlSmtpWorkerOp *wop);
 
 /* Pool cancel_fn for an op that never started (QUEUED at pool shutdown): publish
- * a cancelled terminal, fire @p done, and drop the WORKER ref. No transport is
- * opened. Exactly one of run/discard is called per op. */
+ * a cancelled terminal, fire the terminal hook, and drop the WORKER ref. No
+ * transport is opened and no done callback is assumed. Exactly one of
+ * run/discard is called per op. */
 void hl_smtp_wop_discard(HlSmtpWorkerOp *wop);
 
 /* Request cancellation (runtime/request teardown or a deadline). CAS
@@ -96,7 +99,7 @@ int hl_smtp_wop_request_cancel(HlSmtpWorkerOp *wop);
 
 /* Mark the continuation non-resumable (a per-request cancel, or a suspension
  * setup that failed after submit). The runtime ref is RETAINED until terminal;
- * @p done still fires at completion but must not resume a released runtime. */
+ * the pool's later done callback must then not resume a released runtime. */
 void hl_smtp_wop_mark_unresumable(HlSmtpWorkerOp *wop);
 
 /* Query whether the continuation was marked non-resumable (for the done_fn). */

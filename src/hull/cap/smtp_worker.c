@@ -32,8 +32,6 @@ struct HlSmtpWorkerOp {
 
     HlSmtpExecFn     execute;
     void            *exec_user;
-    HlSmtpDoneFn     done;
-    void            *done_user;
     HlSmtpTerminalFn on_terminal;   /* worker-side lease release; set before submit */
     void            *on_terminal_user;
 
@@ -67,18 +65,15 @@ static void wop_publish_and_done(HlSmtpWorkerOp *w, int cancelled,
     atomic_store_explicit(&w->state, HL_SMTP_ST_DONE, memory_order_release);
 
     /* Worker-side terminal hook (lease release), after terminal publication and
-     * BEFORE done_fn + the worker-ref drop. Runs on completion, cancel, and
-     * discard; done_fn is resume-only and may be dropped, so lease ownership
-     * lives here on the worker side. */
+     * BEFORE the worker-ref drop. Runs on completion, cancel, and discard; this
+     * is where the admission lease is released, because the pool's later done
+     * callback is resume-only and may be dropped. */
     if (w->on_terminal)
         w->on_terminal(w, w->on_terminal_user);
 
-    /* KICK the runtime resume (resume-only; no lease/free/ref-drop, and may be
-     * dropped by the poll backend at shutdown). */
-    if (w->done)
-        w->done(w, w->done_user);
-
-    /* Drop the WORKER ref, last thing the worker touches on this op. */
+    /* Drop the WORKER ref, last thing the worker touches on this op. The pool
+     * independently enqueues/invokes its own done callback after work_fn
+     * returns; the worker NEVER kicks the runtime resume itself. */
     wop_unref(w);
 }
 
@@ -108,8 +103,7 @@ static int wop_poll_cancel(void *user)
 /* ── public API ──────────────────────────────────────────────────────── */
 
 HlSmtpWorkerOp *hl_smtp_wop_create(HlSmtpOp *inputs,
-                                   HlSmtpExecFn execute, void *exec_user,
-                                   HlSmtpDoneFn done, void *done_user)
+                                   HlSmtpExecFn execute, void *exec_user)
 {
     if (!inputs || !execute)
         return NULL;
@@ -122,8 +116,6 @@ HlSmtpWorkerOp *hl_smtp_wop_create(HlSmtpOp *inputs,
     w->inputs    = inputs;
     w->execute   = execute;
     w->exec_user = exec_user;
-    w->done      = done;
-    w->done_user = done_user;
     hl_smtp_op_message(inputs, &w->msg_view);
     return w;
 }
