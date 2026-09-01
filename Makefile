@@ -899,7 +899,8 @@ ifeq ($(HL_ENABLE_HTTP_CLIENT),0)
   CAP_SRCS := $(filter-out \
       $(SRCDIR)/hull/cap/http.c \
       $(SRCDIR)/hull/cap/http_async.c \
-      $(SRCDIR)/hull/cap/smtp.c, \
+      $(SRCDIR)/hull/cap/smtp.c \
+      $(SRCDIR)/hull/cap/smtp_transport.c, \
       $(CAP_SRCS))
 endif
 ifeq ($(HL_ENABLE_HTTP_SERVER),0)

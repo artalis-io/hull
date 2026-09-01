@@ -156,6 +156,23 @@ $(BUILDDIR)/test_mysql_conn: $(TESTDIR)/hull/cap/test_mysql_conn.c $(SRCDIR)/hul
 		$(TESTDIR)/hull/cap/test_mysql_conn.c $(SRCDIR)/hull/cap/mysql_conn.c \
 		$(SRCDIR)/hull/cap/mysqlwire.c $(PG_CRYPTO_OBJS) $(LDFLAGS)
 
+# SMTP transport test: includes src/hull/cap/smtp.c + smtp_transport.c DIRECTLY
+# (to unit-test their static helpers: the incremental reply parser, the AUTH
+# scrub, the chunked write path). So cap_smtp.o + cap_smtp_transport.o must be
+# EXCLUDED from the common link, else the direct-included definitions collide
+# (mirrors test_pg_conn's direct-source pattern). Everything else (Keel, mbedTLS,
+# the rest of the cap layer) comes from TEST_COMMON_LIBS. The two sources are
+# prerequisites so a change to either rebuilds the test.
+SMTP_TP_TEST_LIBS := $(filter-out $(BUILDDIR)/cap_smtp.o $(BUILDDIR)/cap_smtp_transport.o,$(TEST_COMMON_LIBS))
+SMTP_TP_TEST_DEPS := $(filter-out $(BUILDDIR)/cap_smtp.o $(BUILDDIR)/cap_smtp_transport.o,$(TEST_COMMON_DEPS))
+# -DHL_SMTP_TEST_HOOKS compiles in the gated AUTH-scrub test seam in smtp.c
+# (the smtp_test_auth_send / smtp_test_auth_probe function pointers). It is set
+# ONLY here, on this test's compile line, so the normal build never sees it and
+# the seam is absent + zero-overhead in the shipped binary.
+$(BUILDDIR)/test_smtp_transport: $(TESTDIR)/hull/cap/test_smtp_transport.c \
+    $(SRCDIR)/hull/cap/smtp.c $(SRCDIR)/hull/cap/smtp_transport.c $(SMTP_TP_TEST_DEPS) | $(BUILDDIR)
+	$(CC) $(CFLAGS) -DHL_SMTP_TEST_HOOKS $(INCLUDES) -I$(VENDDIR) -o $@ $< $(SMTP_TP_TEST_LIBS) $(LDFLAGS)
+
 # TUI cap-layer tests: cap/tui.c + tui_input.c + tui_width.c are filtered out of
 # CAP_OBJS on the default (TUI-free) base - they live only in the composable
 # feature archive. These tests call hl_cap_tui_* directly, so link the three TUI
@@ -732,7 +749,23 @@ endif
 msan:
 	$(MAKE) clean
 	$(MAKE) -C $(KEEL_DIR) clean
-	$(MAKE) -C $(KEEL_DIR) CC=clang \
+	# Build Keel (and its compiled vendored components, e.g. llhttp) WITH the
+	# same MSan instrumentation Hull applies to every read-path TU it compiles
+	# itself (mbedTLS / QuickJS / Lua / SQLite / sh_arena / ...). Keel v3 is now a
+	# central Hull transport substrate - the server event loop AND the socket
+	# provider the SMTP/HTTP clients drive - so leaving libkeel.a uninstrumented
+	# blinds MSan to Keel's socket/TLS/stream code and yields boundary false
+	# positives (a store to a getsockopt operand in uninstrumented code reads as
+	# poisoned). MSan has no suppressions for use-of-uninitialized-value, so the
+	# only correct fix is to instrument Keel, not to hide the report. The
+	# sanitizer rides on CC so BOTH Keel's own TUs and its vendored llhttp are
+	# instrumented (the compile rules are `$(CC) $(CFLAGS)` / `$(CC)
+	# $(VENDOR_CFLAGS)`); Keel -> mbedTLS is then instrumented -> instrumented
+	# (Hull compiles the mbedTLS objects under MSan below). WAMR stays the sole
+	# uninstrumented substrate (handled via HL_MSAN); Keel does not call it. The
+	# MSan runtime itself is linked by Hull's final test link.
+	$(MAKE) -C $(KEEL_DIR) \
+		CC="clang -g -fsanitize=memory,undefined -fno-omit-frame-pointer" \
 		KEEL_TLS=mbedtls MBEDTLS_DIR=$(abspath $(MBEDTLS_DIR)) MBEDTLS_CONFIG_FILE=hull_config.h \
 		KEEL_COMPRESS=miniz MINIZ_DIR=$(CURDIR)/$(MINIZ_DIR)
 	$(MAKE) CC=clang MSAN=1 test

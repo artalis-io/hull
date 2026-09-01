@@ -1,35 +1,48 @@
 /*
  * smtp.c - SMTP email capability implementation
  *
- * Synchronous SMTP client with STARTTLS, AUTH PLAIN, and host
- * allowlist enforcement.  Follows the same connect/TLS/timeout
- * patterns as http.c.
+ * Synchronous SMTP client with STARTTLS, AUTH PLAIN, and host allowlist
+ * enforcement. Hull owns SMTP policy and protocol here: host authorization,
+ * message validation, the reply-driven conversation, EHLO / STARTTLS /
+ * AUTH PLAIN / envelope commands, message formatting + dot-stuffing, the stable
+ * error tokens, and audit records.
+ *
+ * The BYTE TRANSPORT (name resolution, connect, ordered reads/writes, TLS
+ * attachment, close) is owned by cap/smtp_transport.c, which composes Keel v3's
+ * public primitives (KlConnectOp + KlStream + KlTls) on a private, operation-
+ * local event context that this synchronous entry point pumps to a terminal
+ * state (docs/smtp_keel_client_design.md). No raw socket, fcntl,
+ * poll, getaddrinfo, read, write, or descriptor-close logic lives in this file.
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
 
 #include "hull/cap/smtp.h"
+#include "hull/cap/smtp_transport.h"
 #include "hull/cap/audit.h"
 #include "hull/host_match.h"
 #include "hull/limits/core.h"
-#include "hull/shared/tls_client.h"
 
 #include <keel/allocator.h>
 
-#include <errno.h>
-#include <fcntl.h>
-#include <netdb.h>
-#include <poll.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
 #include <time.h>
-#include <unistd.h>
-#include <sys/socket.h>
-#include <sys/types.h>
 
 #include "log.h"
+
+/* ── Credential scrubbing ────────────────────────────────────────────
+ * hull_secure_zero is static-in-crypto.c, so keep a local volatile-memset
+ * loop here for scrubbing AUTH material off the stack. `volatile` on the
+ * pointer stops the compiler from eliding the write as a dead store. */
+static void smtp_secure_zero(void *p, size_t n)
+{
+    volatile unsigned char *q = (volatile unsigned char *)p;
+    while (n--)
+        *q++ = 0;
+}
 
 /* ── CRLF injection guard ────────────────────────────────────────── */
 
@@ -100,171 +113,8 @@ int hl_smtp_check_host(const HlSmtpConfig *cfg, const char *host)
            ? 0 : -1;
 }
 
-/* ── I/O abstraction (plain or TLS) ──────────────────────────────── */
-
-static ssize_t io_write(int fd, HlTlsClient *tls, const void *buf, size_t len)
-{
-    if (tls)
-        return hl_tls_client_write(fd, tls, buf, len);
-    ssize_t r;
-    do { r = write(fd, buf, len); } while (r < 0 && errno == EINTR);
-    return r;
-}
-
-static ssize_t io_read(int fd, HlTlsClient *tls, void *buf, size_t len)
-{
-    if (tls)
-        return hl_tls_client_read(fd, tls, buf, len);
-    ssize_t r;
-    do { r = read(fd, buf, len); } while (r < 0 && errno == EINTR);
-    return r;
-}
-
-/* ── Connect with timeout (replicates http.c pattern) ────────────── */
-
-static int smtp_connect(const char *host, int port, int timeout_ms)
-{
-    char port_str[8];
-    snprintf(port_str, sizeof(port_str), "%d", port);
-
-    struct addrinfo hints = {0};
-    hints.ai_family = AF_UNSPEC;
-    hints.ai_socktype = SOCK_STREAM;
-
-    struct addrinfo *res = NULL;
-    int rc = getaddrinfo(host, port_str, &hints, &res);
-    if (rc != 0 || !res)
-        return -1;
-
-    int fd = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
-    if (fd < 0) {
-        freeaddrinfo(res);
-        return -1;
-    }
-
-#ifdef SO_NOSIGPIPE
-    {
-        int on = 1;
-        setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &on, sizeof(on));
-    }
-#endif
-
-    /* Set non-blocking for connect timeout */
-    int flags = fcntl(fd, F_GETFL, 0);
-    if (flags < 0) {
-        close(fd);
-        freeaddrinfo(res);
-        return -1;
-    }
-    if (fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0) {
-        close(fd);
-        freeaddrinfo(res);
-        return -1;
-    }
-
-    rc = connect(fd, res->ai_addr, res->ai_addrlen);
-    freeaddrinfo(res);
-
-    if (rc < 0 && errno != EINPROGRESS) {
-        close(fd);
-        return -1;
-    }
-
-    if (rc < 0) {
-        struct pollfd pfd = { .fd = fd, .events = POLLOUT };
-        rc = poll(&pfd, 1, timeout_ms);
-        if (rc <= 0) {
-            close(fd);
-            return -1;
-        }
-
-        int err = 0;
-        socklen_t errlen = sizeof(err);
-        getsockopt(fd, SOL_SOCKET, SO_ERROR, &err, &errlen);
-        if (err != 0) {
-            close(fd);
-            return -1;
-        }
-    }
-
-    /* Restore blocking mode */
-    fcntl(fd, F_SETFL, flags);
-
-    return fd;
-}
-
-/* ── SMTP protocol helpers ───────────────────────────────────────── */
-/* TLS handshake (STARTTLS / implicit) is delegated to the shared
- * hl_tls_client_handshake_cfg helper (src/hull/shared/tls_client.c), which
- * runs the same poll-based blocking loop PostgreSQL uses. */
-
-/**
- * Read an SMTP response line.  Reads until \r\n or buffer full.
- * Returns number of bytes read, or -1 on error/timeout.
- */
-static int smtp_read_line(int fd, HlTlsClient *tls, char *buf, int size,
-                          int timeout_ms)
-{
-    int pos = 0;
-    while (pos < size - 1) {
-        struct pollfd pfd = { .fd = fd, .events = POLLIN };
-        int pr = poll(&pfd, 1, timeout_ms);
-        if (pr <= 0)
-            return -1;
-
-        ssize_t n = io_read(fd, tls, buf + pos, 1);
-        if (n <= 0)
-            return -1;
-        pos++;
-
-        /* Check for \r\n termination */
-        if (pos >= 2 && buf[pos-2] == '\r' && buf[pos-1] == '\n') {
-            buf[pos] = '\0';
-            return pos;
-        }
-    }
-
-    return -1;  /* line too long */
-}
-
-/**
- * Read a complete SMTP response (may be multi-line).
- * Multi-line responses have "250-" continuation lines and end with "250 ".
- * Returns the 3-digit code, or -1 on error.
- */
-static int smtp_read_response(int fd, HlTlsClient *tls, char *buf, int size,
-                              int timeout_ms)
-{
-    int code = -1;
-    int total = 0;
-
-    for (;;) {
-        char line[HL_SMTP_RECV_BUF_SIZE];
-        int n = smtp_read_line(fd, tls, line, (int)sizeof(line), timeout_ms);
-        if (n < 0)
-            return -1;
-
-        /* Parse 3-digit code */
-        int line_code = hl_smtp_parse_response(line, n);
-        if (line_code < 0)
-            return -1;
-
-        if (code < 0)
-            code = line_code;
-
-        /* Copy to output buffer if there's space */
-        if (total + n < size) {
-            memcpy(buf + total, line, (size_t)n);
-            total += n;
-        }
-
-        /* Check if this is the final line (no '-' after code) */
-        if (n >= 4 && line[3] != '-') {
-            buf[total < size ? total : size - 1] = '\0';
-            return code;
-        }
-    }
-}
+/* ── SMTP reply-code parser (also used by the incremental parser in the
+ * transport, cap/smtp_transport.c) ───────────────────────────────── */
 
 int hl_smtp_parse_response(const char *line, int len)
 {
@@ -280,61 +130,28 @@ int hl_smtp_parse_response(const char *line, int len)
     return (line[0] - '0') * 100 + (line[1] - '0') * 10 + (line[2] - '0');
 }
 
+/* ── Command / response helpers over the Keel-primitive transport ─── */
+
 /**
- * Send an SMTP command and read the response.
- * Returns the response code, or -1 on error.
+ * Write @p cmd, then read one reply and check @p expected_code.
+ * Returns the response code, or -1 on write / read / mismatch (mirrors the
+ * former smtp_send_command semantics exactly).
  */
-static int smtp_send_command(int fd, HlTlsClient *tls, const char *cmd,
-                             int expected_code, int timeout_ms)
+static int smtp_command(HlSmtpTransport *t, const char *cmd,
+                        int expected_code, int timeout_ms)
 {
-    size_t len = strlen(cmd);
+    if (hl_smtp_transport_write(t, cmd, strlen(cmd), timeout_ms) != 0)
+        return -1;
 
-    /* Send command (may need multiple writes) */
-    size_t sent = 0;
-    while (sent < len) {
-        struct pollfd pfd = { .fd = fd, .events = POLLOUT };
-        int pr = poll(&pfd, 1, timeout_ms);
-        if (pr <= 0)
-            return -1;
-
-        ssize_t w = io_write(fd, tls, cmd + sent, len - sent);
-        if (w <= 0)
-            return -1;
-        sent += (size_t)w;
-    }
-
-    /* Read response */
     char resp[HL_SMTP_RECV_BUF_SIZE];
-    int code = smtp_read_response(fd, tls, resp, (int)sizeof(resp), timeout_ms);
+    int code = hl_smtp_transport_read_reply(t, resp, (int)sizeof(resp), timeout_ms);
 
     if (expected_code > 0 && code != expected_code) {
         log_warn("smtp: expected %d, got %d for command '%.20s'",
                  expected_code, code, cmd);
         return -1;
     }
-
     return code;
-}
-
-/**
- * Send raw data without reading a response.
- */
-static int smtp_send_raw(int fd, HlTlsClient *tls, const char *data, size_t len,
-                         int timeout_ms)
-{
-    size_t sent = 0;
-    while (sent < len) {
-        struct pollfd pfd = { .fd = fd, .events = POLLOUT };
-        int pr = poll(&pfd, 1, timeout_ms);
-        if (pr <= 0)
-            return -1;
-
-        ssize_t w = io_write(fd, tls, data + sent, len - sent);
-        if (w <= 0)
-            return -1;
-        sent += (size_t)w;
-    }
-    return 0;
 }
 
 /* ── RFC 5322 message formatting ─────────────────────────────────── */
@@ -442,10 +259,12 @@ static int smtp_validate_message(const HlSmtpMessage *msg)
         !msg->subject || !msg->body)
         return -1;
 
-    /* CRLF injection guard on all header-injectable fields */
+    /* CRLF injection guard on all header-injectable fields. content_type is
+     * optional but flows into the Content-Type MIME header, so it must be
+     * checked too (has_crlf treats NULL as clean). */
     if (has_crlf(msg->host) || has_crlf(msg->from) ||
         has_crlf(msg->to) || has_crlf(msg->subject) ||
-        has_crlf(msg->reply_to))
+        has_crlf(msg->reply_to) || has_crlf(msg->content_type))
         return -1;
 
     /* Check CC recipients for CRLF */
@@ -461,6 +280,101 @@ static int smtp_validate_message(const HlSmtpMessage *msg)
         return -1;
 
     return 0;
+}
+
+#ifdef HL_SMTP_TEST_HOOKS
+/* ── Test-only seam (compiled in ONLY under -DHL_SMTP_TEST_HOOKS) ─────
+ * Absent and zero-overhead in production: the whole block is preprocessed out
+ * of the normal build. The unit test sets these hooks to capture the built
+ * AUTH PLAIN command (proving the live secret was present) and to assert the
+ * scrub cleanup ran with every secret buffer zeroed on BOTH the success and
+ * failure exits of smtp_do_auth_plain, without needing a live SMTP server.
+ *
+ * smtp_test_auth_send, when non-NULL, REPLACES the smtp_command() call inside
+ * smtp_do_auth_plain (it receives the constructed command + expected code and
+ * returns a reply code). smtp_test_auth_probe, when non-NULL, is called at the
+ * very end of cleanup, AFTER the three smtp_secure_zero calls, with the three
+ * buffers so the test can assert they are fully zeroed. */
+int  (*smtp_test_auth_send)(HlSmtpTransport *t, const char *cmd,
+                            int expected, int timeout);
+void (*smtp_test_auth_probe)(const unsigned char *plain, size_t pn,
+                             const char *b64, size_t bn,
+                             const char *cmd, size_t cn);
+#endif
+
+/* ── AUTH PLAIN (credential-scrubbing helper) ────────────────────────
+ * Build base64(\0user\0pass), issue "AUTH PLAIN <b64>\r\n", and check the 235
+ * reply. All secret-bearing stack buffers (the raw AUTH PLAIN bytes, the base64
+ * text, AND the command line) are scrubbed on EVERY exit via one cleanup path.
+ * @p username / @p password are borrowed (caller-owned) and never scrubbed.
+ * Returns 0 on success, -1 on any failure; on failure *err_msg is set to a
+ * stable token. */
+static int smtp_do_auth_plain(HlSmtpTransport *t, const char *username,
+                              const char *password, int timeout_ms,
+                              const char **err_msg)
+{
+    int ret = -1;
+    unsigned char plain[1026];
+    char          b64[1400];
+    char          cmd[HL_SMTP_SEND_BUF_SIZE];
+
+    /* AUTH PLAIN: base64(\0username\0password) */
+    size_t ulen = strlen(username);
+    size_t plen = strlen(password);
+    size_t plain_len = 1 + ulen + 1 + plen;
+
+    if (plain_len > 1024) {
+        log_warn("smtp: AUTH PLAIN credentials too long");
+        if (err_msg) *err_msg = "auth_credentials_too_long";
+        goto cleanup;
+    }
+
+    plain[0] = '\0';
+    memcpy(plain + 1, username, ulen);
+    plain[1 + ulen] = '\0';
+    memcpy(plain + 2 + ulen, password, plen);
+
+    int b64_len = hl_smtp_base64_encode(plain, (int)plain_len,
+                                        b64, (int)sizeof(b64));
+    if (b64_len < 0) {
+        log_warn("smtp: AUTH PLAIN base64 encode failed");
+        if (err_msg) *err_msg = "auth_encode_failed";
+        goto cleanup;
+    }
+
+    int n = snprintf(cmd, sizeof(cmd), "AUTH PLAIN %s\r\n", b64);
+    if (n < 0 || (size_t)n >= sizeof(cmd)) {
+        log_warn("smtp: AUTH PLAIN credentials too large for send buffer");
+        if (err_msg) *err_msg = "auth_encode_failed";
+        goto cleanup;
+    }
+
+    int code;
+#ifdef HL_SMTP_TEST_HOOKS
+    if (smtp_test_auth_send)
+        code = smtp_test_auth_send(t, cmd, 235, timeout_ms);
+    else
+#endif
+    code = smtp_command(t, cmd, 235, timeout_ms);
+    if (code < 0) {
+        log_warn("smtp: AUTH PLAIN failed");
+        if (err_msg) *err_msg = "auth_failed";
+        goto cleanup;
+    }
+
+    ret = 0;
+
+cleanup:
+    /* Scrub every secret-bearing buffer on success AND on each failure path. */
+    smtp_secure_zero(plain, sizeof plain);
+    smtp_secure_zero(b64,   sizeof b64);
+    smtp_secure_zero(cmd,   sizeof cmd);
+#ifdef HL_SMTP_TEST_HOOKS
+    if (smtp_test_auth_probe)
+        smtp_test_auth_probe(plain, sizeof plain, b64, sizeof b64,
+                             cmd, sizeof cmd);
+#endif
+    return ret;
 }
 
 /* ── Public API ──────────────────────────────────────────────────── */
@@ -498,18 +412,24 @@ int hl_cap_smtp_send(const HlSmtpConfig *cfg, const HlSmtpMessage *msg,
     /* TLS config (for STARTTLS or implicit TLS) */
     void *tls_cfg = cfg->tls;   /* opaque KlTlsConfig *, passed to the helper */
 
-    /* Connect to SMTP server */
-    int fd = smtp_connect(msg->host, msg->port, timeout_ms);
-    if (fd < 0) {
-        log_warn("smtp: connect to %s:%d failed", msg->host, msg->port);
-        if (err_msg) *err_msg = "connect_failed";
-        return -1;
-    }
-
-    HlTlsClient *tls = NULL;
-    int ret = -1;
+    /* Declared before the connect + before the `cleanup` label so the
+     * connect-failure path can route through the one cleanup + audit block. */
+    int  ret = -1;
+    int  teardown_leaked = 0;
     char resp[HL_SMTP_RECV_BUF_SIZE];
     char cmd[HL_SMTP_SEND_BUF_SIZE];
+    (void)resp; (void)cmd;   /* used only past a successful connect */
+
+    /* Connect to SMTP server (resolve + Happy-Eyeballs connect over the
+     * Keel-primitive transport; NULL == resolve / connect / deadline failure).
+     * out_teardown_leaked surfaces a connect-path teardown leak into the audit. */
+    HlSmtpTransport *t = hl_smtp_transport_connect(msg->host, msg->port,
+                                                   timeout_ms, &teardown_leaked);
+    if (!t) {
+        log_warn("smtp: connect to %s:%d failed", msg->host, msg->port);
+        if (err_msg) *err_msg = "connect_failed";
+        goto cleanup;   /* unified cleanup + audit (t is NULL, all NULL-safe) */
+    }
 
     /* Implicit TLS (port 465) - handshake before any SMTP commands */
     if (msg->use_tls == 2) {
@@ -518,8 +438,7 @@ int hl_cap_smtp_send(const HlSmtpConfig *cfg, const HlSmtpMessage *msg,
             if (err_msg) *err_msg = "tls_config_missing";
             goto cleanup;
         }
-        tls = hl_tls_client_handshake_cfg(fd, msg->host, tls_cfg, timeout_ms);
-        if (!tls) {
+        if (hl_smtp_transport_implicit_tls(t, msg->host, tls_cfg, timeout_ms) != 0) {
             log_warn("smtp: implicit TLS handshake failed");
             if (err_msg) *err_msg = "tls_handshake_failed";
             goto cleanup;
@@ -527,7 +446,7 @@ int hl_cap_smtp_send(const HlSmtpConfig *cfg, const HlSmtpMessage *msg,
     }
 
     /* Read 220 greeting */
-    int code = smtp_read_response(fd, tls, resp, (int)sizeof(resp), timeout_ms);
+    int code = hl_smtp_transport_read_reply(t, resp, (int)sizeof(resp), timeout_ms);
     if (code != 220) {
         log_warn("smtp: expected 220 greeting, got %d", code);
         if (err_msg) *err_msg = "greeting_failed";
@@ -536,29 +455,29 @@ int hl_cap_smtp_send(const HlSmtpConfig *cfg, const HlSmtpMessage *msg,
 
     /* EHLO */
     snprintf(cmd, sizeof(cmd), "EHLO localhost\r\n");
-    code = smtp_send_command(fd, tls, cmd, 250, timeout_ms);
+    code = smtp_command(t, cmd, 250, timeout_ms);
     if (code < 0) {
         if (err_msg) *err_msg = "ehlo_failed";
         goto cleanup;
     }
 
     /* STARTTLS (if requested and not already implicit TLS) */
-    if (msg->use_tls == 1 && !tls) {
+    if (msg->use_tls == 1 && !hl_smtp_transport_tls_active(t)) {
         if (!tls_cfg) {
             log_warn("smtp: STARTTLS requested but no TLS config");
             if (err_msg) *err_msg = "tls_config_missing";
             goto cleanup;
         }
 
-        code = smtp_send_command(fd, tls, "STARTTLS\r\n", 220, timeout_ms);
+        code = smtp_command(t, "STARTTLS\r\n", 220, timeout_ms);
         if (code < 0) {
             log_warn("smtp: STARTTLS rejected");
             if (err_msg) *err_msg = "starttls_rejected";
             goto cleanup;
         }
 
-        tls = hl_tls_client_handshake_cfg(fd, msg->host, tls_cfg, timeout_ms);
-        if (!tls) {
+        /* In-place upgrade. NO plaintext fallback on failure. */
+        if (hl_smtp_transport_starttls(t, msg->host, tls_cfg, timeout_ms) != 0) {
             log_warn("smtp: STARTTLS handshake failed");
             if (err_msg) *err_msg = "tls_handshake_failed";
             goto cleanup;
@@ -566,7 +485,7 @@ int hl_cap_smtp_send(const HlSmtpConfig *cfg, const HlSmtpMessage *msg,
 
         /* Re-EHLO after TLS upgrade */
         snprintf(cmd, sizeof(cmd), "EHLO localhost\r\n");
-        code = smtp_send_command(fd, tls, cmd, 250, timeout_ms);
+        code = smtp_command(t, cmd, 250, timeout_ms);
         if (code < 0) {
             if (err_msg) *err_msg = "ehlo_failed";
             goto cleanup;
@@ -576,56 +495,25 @@ int hl_cap_smtp_send(const HlSmtpConfig *cfg, const HlSmtpMessage *msg,
     /* AUTH PLAIN (if credentials provided) */
     if (msg->username && msg->password) {
         /* Refuse to send credentials over a plaintext connection */
-        if (!tls) {
+        if (!hl_smtp_transport_tls_active(t)) {
             log_warn("smtp: AUTH PLAIN requires TLS - refusing to send "
                      "credentials in plaintext (set use_tls=1 or 2)");
             if (err_msg) *err_msg = "auth_requires_tls";
             goto cleanup;
         }
 
-        /* AUTH PLAIN: base64(\0username\0password) */
-        size_t ulen = strlen(msg->username);
-        size_t plen = strlen(msg->password);
-        size_t plain_len = 1 + ulen + 1 + plen;
-
-        if (plain_len > 1024) {
-            log_warn("smtp: AUTH PLAIN credentials too long");
-            if (err_msg) *err_msg = "auth_credentials_too_long";
-            goto cleanup;
-        }
-
-        unsigned char plain[1026];
-        plain[0] = '\0';
-        memcpy(plain + 1, msg->username, ulen);
-        plain[1 + ulen] = '\0';
-        memcpy(plain + 2 + ulen, msg->password, plen);
-
-        char b64[1400];
-        int b64_len = hl_smtp_base64_encode(plain, (int)plain_len,
-                                            b64, (int)sizeof(b64));
-        if (b64_len < 0) {
-            log_warn("smtp: AUTH PLAIN base64 encode failed");
-            if (err_msg) *err_msg = "auth_encode_failed";
-            goto cleanup;
-        }
-
-        int n = snprintf(cmd, sizeof(cmd), "AUTH PLAIN %s\r\n", b64);
-        if (n < 0 || (size_t)n >= sizeof(cmd)) {
-            log_warn("smtp: AUTH PLAIN credentials too large for send buffer");
-            if (err_msg) *err_msg = "auth_encode_failed";
-            goto cleanup;
-        }
-        code = smtp_send_command(fd, tls, cmd, 235, timeout_ms);
-        if (code < 0) {
-            log_warn("smtp: AUTH PLAIN failed");
-            if (err_msg) *err_msg = "auth_failed";
+        /* AUTH PLAIN construction + send + credential scrub live in one helper
+         * with a single cleanup exit (fix 9): the raw AUTH bytes, the base64
+         * text, and the command line are all scrubbed on every path. */
+        if (smtp_do_auth_plain(t, msg->username, msg->password,
+                               timeout_ms, err_msg) != 0) {
             goto cleanup;
         }
     }
 
     /* MAIL FROM */
     snprintf(cmd, sizeof(cmd), "MAIL FROM:<%s>\r\n", msg->from);
-    code = smtp_send_command(fd, tls, cmd, 250, timeout_ms);
+    code = smtp_command(t, cmd, 250, timeout_ms);
     if (code < 0) {
         if (err_msg) *err_msg = "mail_from_failed";
         goto cleanup;
@@ -633,7 +521,7 @@ int hl_cap_smtp_send(const HlSmtpConfig *cfg, const HlSmtpMessage *msg,
 
     /* RCPT TO - primary recipient */
     snprintf(cmd, sizeof(cmd), "RCPT TO:<%s>\r\n", msg->to);
-    code = smtp_send_command(fd, tls, cmd, 250, timeout_ms);
+    code = smtp_command(t, cmd, 250, timeout_ms);
     if (code < 0) {
         if (err_msg) *err_msg = "rcpt_to_failed";
         goto cleanup;
@@ -643,7 +531,7 @@ int hl_cap_smtp_send(const HlSmtpConfig *cfg, const HlSmtpMessage *msg,
     if (msg->cc) {
         for (int i = 0; i < msg->cc_count; i++) {
             snprintf(cmd, sizeof(cmd), "RCPT TO:<%s>\r\n", msg->cc[i]);
-            code = smtp_send_command(fd, tls, cmd, 250, timeout_ms);
+            code = smtp_command(t, cmd, 250, timeout_ms);
             if (code < 0) {
                 if (err_msg) *err_msg = "rcpt_to_failed";
                 goto cleanup;
@@ -652,7 +540,7 @@ int hl_cap_smtp_send(const HlSmtpConfig *cfg, const HlSmtpMessage *msg,
     }
 
     /* DATA */
-    code = smtp_send_command(fd, tls, "DATA\r\n", 354, timeout_ms);
+    code = smtp_command(t, "DATA\r\n", 354, timeout_ms);
     if (code < 0) {
         if (err_msg) *err_msg = "data_failed";
         goto cleanup;
@@ -683,7 +571,7 @@ int hl_cap_smtp_send(const HlSmtpConfig *cfg, const HlSmtpMessage *msg,
         }
 
         /* Send formatted message */
-        if (smtp_send_raw(fd, tls, msg_buf, (size_t)msg_len, timeout_ms) != 0) {
+        if (hl_smtp_transport_write(t, msg_buf, (size_t)msg_len, timeout_ms) != 0) {
             kl_free(&alloc, msg_buf, msg_size);
             if (err_msg) *err_msg = "send_failed";
             goto cleanup;
@@ -693,23 +581,35 @@ int hl_cap_smtp_send(const HlSmtpConfig *cfg, const HlSmtpMessage *msg,
     }
 
     /* End DATA with \r\n.\r\n */
-    code = smtp_send_command(fd, tls, ".\r\n", 250, timeout_ms);
+    code = smtp_command(t, ".\r\n", 250, timeout_ms);
     if (code < 0) {
         if (err_msg) *err_msg = "data_end_failed";
         goto cleanup;
     }
 
     /* QUIT */
-    smtp_send_command(fd, tls, "QUIT\r\n", 221, timeout_ms);
+    smtp_command(t, "QUIT\r\n", 221, timeout_ms);
 
     ret = 0;
 
 cleanup:
-    if (tls) {
-        hl_tls_client_shutdown(fd, tls);   /* best-effort close_notify */
-        hl_tls_client_free(tls);
-    }
-    close(fd);
+    /* t is NULL on the connect-failure path (shutdown/free are NULL-safe); any
+     * connect-path teardown leak is already captured in teardown_leaked.
+     * Attempt a graceful close (close_notify + drain) ONLY on success, where the
+     * queue is already empty and the peer is alive so it completes instantly. On
+     * a failure path the send already aborted, so skip straight to the abortive
+     * free rather than trying to drain a possibly-stalled queue. */
+    if (ret == 0)
+        hl_smtp_transport_shutdown(t);
+    /* Observe teardown: a -1 from free means the connect op or stream would not
+     * detach, so the transport was intentionally leaked (fd + event ctx +
+     * memory) rather than freed into a use-after-free. OR it with any
+     * connect-path leak and surface it at the capability boundary (log + audit)
+     * so it is not silently dropped. It does not change the send result. */
+    teardown_leaked = teardown_leaked || (hl_smtp_transport_free(t) != 0);
+    if (teardown_leaked)
+        log_error("smtp: transport teardown failed (op/stream would not "
+                  "detach); leaked transport resources for host '%s'", msg->host);
 
     {
         ShJsonWriter w = hl_audit_begin("smtp.send");
@@ -718,6 +618,8 @@ cleanup:
         sh_json_write_kv_string(&w, "to", msg->to);
         sh_json_write_kv_string(&w, "subject", msg->subject);
         sh_json_write_kv_int(&w, "result", ret);
+        if (teardown_leaked)
+            sh_json_write_kv_string(&w, "teardown", "leaked");
         hl_audit_end(&w);
     }
     return ret;
