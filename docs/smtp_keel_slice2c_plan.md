@@ -90,7 +90,11 @@ the worker and the no-loop inline path; the caller does audit + result in both.
 One `HlSmtpOp` owns the `HlSmtpTransport` + the private `KlEventCtx` for its whole
 lifetime; nothing on the event loop dereferences transport storage. Two-phase
 teardown: a cancel REQUEST is a signal, never a synchronous free; the runtime
-releases suspension ONLY after the worker publishes a terminal; transport-owned
+releases suspension ONLY after the worker publishes a terminal. A per-request
+cancel marks the continuation NON-RESUMABLE but RETAINS its runtime-side
+ownership/ref until terminal publication (or the post-`pool_free()` shutdown
+sweep, section 10); it must never release the last runtime-side ownership before
+the worker publishes terminal. Transport-owned
 resolver result, timers, stream, and TLS session remain alive until detach/close
 ACKs (`kl_connect_op_is_detached`; `t->closed` via `tp_stream_on_close`; timers
 cancelled; TLS destroyed after stream detach); the abortive
@@ -206,10 +210,14 @@ Investigated both backends (not assumed):
 Design consequence: `done_fn` is RESUME-ONLY and may be dropped (poll shutdown);
 it NEVER owns a free or a ref-drop. `work_fn` (worker) always runs to completion
 because `pool_free` joins, and it owns transport teardown + storage free + the
-worker-ref drop on BOTH backends. The runtime-side ref is dropped by exactly one
-of {`on_resume`, per-request cancel, the server-shutdown SMTP cancel sweep},
-arbitrated by the refcount; the shutdown sweep GUARANTEES it during teardown
-since `free()` will not.
+worker-ref drop on BOTH backends. The runtime-side ref (the FROZEN contract,
+section 5) is released ONLY at or after terminal publication: by `on_resume` on
+the normal path, or by the post-`pool_free()` shutdown sweep during teardown
+(guaranteed, since `free()` will not fire `on_cancel`). A per-request cancel does
+NOT drop the runtime ref; it marks the continuation NON-RESUMABLE (so a later
+`on_resume` becomes a no-op that then drops the ref) but retains ownership until
+terminal. No path releases the last runtime-side ownership before the worker
+publishes terminal.
 
 Ownership table (who owns queued/running/notified items at shutdown):
 
@@ -219,14 +227,30 @@ Ownership table (who owns queued/running/notified items at shutdown):
 | Work completes while loop stopping (RUNNING, finishes in join) | `done_fn` drained at free | `done_fn` DROPPED | `work_fn` (worker, always runs) tore down transport + freed storage + dropped worker ref; runtime ref dropped by the shutdown sweep (not relied on `done_fn`); resume is best-effort |
 | Completion notification queued but never dispatched | n/a (drained) | DROPPED | identical to the running case: storage already freed by `work_fn`; no free lives in `done_fn`; no leak |
 
-Shutdown order (frozen): (1) stop new SMTP submissions; (2) request-cancel all
-in-flight SMTP ops; (3) drain queued+running to terminal (join; running ops reach
-detachment ACKs on their worker); (4) deliver-or-discard completions per the
-table (resume is best-effort, never targets a released runtime); (5) release
-continuations/runtime state; (6) destroy per-worker TLS contexts; (7) destroy the
-pool, then the CA buffer, then the persistent allocator. Invariant: per-worker
-TLS contexts are destroyed only after (3); the CA buffer + allocator only after
-(6), because a `KlTlsCtx` dereferences both at destroy.
+Shutdown order (frozen), built around the real primitive - `pool_free()` is a
+single call that signals shutdown, joins workers, dispatches/drops completions
+per the table, runs `cancel_fn` for queued work, and destroys the pool (there is
+no separate "join now, destroy later" step):
+
+```
+1. stop new SMTP submissions
+2. mark shutdown + request SMTP cancellation of all in-flight ops
+3. pool_free()   (backend-specific join / completion / cancel, per the table)
+4. after it returns, verify every SMTP WORKER ref is gone (all work_fn ran to
+   terminal + detachment during the join)
+5. release the retained runtime refs / continuations (the shutdown sweep, since
+   resume was best-effort and never targets a released runtime)
+6. free the CA material and the server allocator
+```
+
+Allocator lifetime: the per-worker pthread-TLS `KlTlsCtx` destructors run AS
+WORKERS EXIT during step 3 (`pool_free()`'s join), and a `KlTlsCtx` needs its
+ALLOCATOR at destruction, so the allocator MUST stay alive THROUGH `pool_free()`
+and is freed only in step 6. A `KlTlsCtx` does NOT dereference the original CA
+buffer at destroy (mbedTLS parsed/copied the certificates into the context at
+creation); the CA buffer must merely outlive any worker that could still CREATE a
+context, i.e. through `pool_free()`, and freeing it in step 6 is a reasonable
+server-lifetime policy, not a destroy-time dependency.
 
 Backend-parity TEST REQUIREMENT: the shutdown-with-op-in-flight suite runs under
 BOTH backends (keel and poll) and asserts, in all three cases, no leak / no UAF /
@@ -245,40 +269,51 @@ is read ONCE into a server-owned buffer here (no CA file re-read after the
 sandbox seals the fs). Each WORKER THREAD lazily builds and caches (pthread TLS,
 `worker_db` pattern) its OWN `KlTlsCtx` from that buffer via
 `hl_tls_client_ctx_create_from_buf` / `kl_tls_mbedtls_client_ctx_create_from_buf`
-(no shared context, no RNG race, no lock, no file read on the worker). The CA
-buffer stays alive until the pool is drained; per-worker contexts are destroyed
-before the CA buffer + allocator (section 10 order). The no-loop synchronous
-fallback keeps the existing single-threaded shared context.
+(no shared context, no RNG race, no lock, no file read on the worker). The
+per-worker contexts are destroyed by their pthread-TLS destructors as workers
+exit during `pool_free()`, and the CA buffer + allocator are freed only after it
+returns (section 10 handles the lifetime + ordering; the allocator, not the CA
+buffer, is the destroy-time dependency). The no-loop synchronous fallback keeps
+the existing single-threaded shared context.
 
 ## 12. Exact zero-Keel link seam (item 5)
 
-The seam is the async-backend selector `hl_async_backend()`:
-- WEAK stub / default: `const HlAsyncBackend hl_async_backend_poll` and the WEAK
+There are TWO distinct seams; the SMTP glue uses both and references neither Keel
+symbol directly.
+
+Seam A - worker EXECUTION (the thread pool), via `hl_async_backend()`:
+- WEAK default: `const HlAsyncBackend hl_async_backend_poll` + the WEAK
   `hl_async_backend()` in `src/hull/async/poll.c` (0 `kl_` references,
-  self-contained pthreads). This is what a Keel-less base links.
+  self-contained pthreads); what a Keel-less base links.
 - STRONG anchor: `const HlAsyncBackend hl_async_backend_keel` + the STRONG
   `hl_async_backend()` override in `src/hull/async/keel.c` (22 `kl_` references;
-  the SOLE referencer of `kl_thread_pool_*` / `libkeel.a`). Composed via the Keel
-  feature archive `libhull_feature-keel.a` (the `HL_KEEL_FEATURE` axis), pulled
-  only when the app needs HTTP/Keel.
-- Runtime submit/resume glue: the new SMTP worker glue (a `worker_smtp.o`,
-  mirroring `worker_db.o`) references ONLY the `HlAsyncBackend` vtable via
-  `hl_async_backend()` (`pool_submit`, `op_suspend`, `op_complete`), NEVER
-  `kl_thread_pool_*` or any `kl_` symbol directly. So it resolves against
-  whichever backend is linked: the weak poll default in a compute base, the
-  strong keel anchor in an HTTP base.
+  the SOLE referencer of `kl_thread_pool_*` / `libkeel.a`), composed via
+  `libhull_feature-keel.a` (the `HL_KEEL_FEATURE` axis), pulled only for
+  HTTP/Keel apps. The SMTP glue calls only `hl_async_backend()->pool_submit`.
+
+Seam B - active-request SUSPENSION/RESUMPTION, via `hl_net_op_*` (NOT the
+`HlAsyncBackend` vtable): connection-bound suspend/resume follows the existing
+db/compute pattern through `hl_net_op_suspend()` / `hl_net_op_complete()` on an
+`HlAsyncCtx` bound to the request's `net_ctx` (exactly as `mod_db.c:787` does for
+`db.async`). These are weak stubs (Keel-free, in the base) versus the strong
+`src/hull/net/keel.c`. The SMTP runtime binding suspends/resumes through these,
+never through `HlAsyncBackend::op_suspend`.
+
+So the SMTP submit/execute glue (`worker_smtp.o`, mirroring `worker_db.o`)
+references ONLY `hl_async_backend()` (seam A) and the binding references
+`hl_net_op_suspend` / `hl_net_op_complete` (seam B) - NEVER `kl_thread_pool_*` or
+any `kl_` symbol directly.
 
 Why compute-only linking cannot pull Keel: (a) SMTP is an HTTP-client-family
 feature; a compute-only app declares no `hull/smtp` / `hull/email`, so the smtp
-objects + `worker_smtp.o` are not linked at all; (b) even when linked, the glue's
-only async dependency is `hl_async_backend()`, whose weak default is the Keel-free
-poll backend, so the strong keel anchor (the sole `kl_thread_pool` referencer) is
-never pulled. TEST: keep the existing zero-Keel `nm` assertion on a compute app
-(`nm app | grep kl_thread_pool` -> empty), PLUS a NEGATIVE test that asserts
-`worker_smtp.o` has no undefined `kl_` symbols (`nm -u worker_smtp.o | grep '
-kl_'` -> empty); a deliberate variant that calls `kl_thread_pool_submit` directly
-(bypassing the vtable/anchor) MUST make that assertion fail, proving the guard
-bites.
+objects + `worker_smtp.o` are not linked at all; (b) even when linked, both seams'
+weak defaults are Keel-free (poll backend, `hl_net_op_*` stubs), so the strong
+keel anchors are never pulled. TEST: keep the existing zero-Keel `nm` assertion on
+a compute app (`nm app | grep kl_thread_pool` -> empty), PLUS a NEGATIVE test that
+`worker_smtp.o` has NO undefined `kl_` symbols (`nm -u worker_smtp.o | grep '
+kl_'` -> empty) while PERMITTING the two `hl_net_op_*` symbols; a deliberate
+variant that calls `kl_thread_pool_submit` directly (bypassing seam A) MUST make
+that assertion fail, proving the guard bites.
 
 ## 13. Deterministic coverage for the four deferred behaviors
 
