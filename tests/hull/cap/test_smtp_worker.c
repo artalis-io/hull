@@ -35,12 +35,27 @@ static int          g_free_before_done; /* 1 if a free was seen before done fire
 static int          g_exec_calls;
 static HlSmtpResult g_terminal;       /* captured inside done_fn (before free) */
 static int          g_terminal_valid;
+static int          g_term_calls;     /* on_terminal hook invocations */
+static int          g_term_state;     /* state observed inside on_terminal */
+static int          g_term_before_free;   /* on_terminal fired before any free */
+static int          g_term_before_done;   /* on_terminal fired before done_fn */
 
 static void obs_reset(void)
 {
     g_freed = 0; g_last_freed = NULL; g_done_calls = 0; g_done_state = -1;
     g_free_before_done = 0; g_exec_calls = 0;
     memset(&g_terminal, 0, sizeof g_terminal); g_terminal_valid = 0;
+    g_term_calls = 0; g_term_state = -1; g_term_before_free = 0; g_term_before_done = 0;
+}
+
+/* Worker-side terminal hook (stands in for the admission-lease release). */
+static void on_term(HlSmtpWorkerOp *w, void *user)
+{
+    (void)user;
+    g_term_calls++;
+    g_term_state = (int)hl_smtp_wop_state(w);   /* must be DONE */
+    if (g_freed == 0)      g_term_before_free = 1;
+    if (g_done_calls == 0) g_term_before_done = 1;
 }
 
 static void on_freed(void *w)
@@ -243,6 +258,38 @@ UTEST(smtp_worker, early_runtime_release_shell_survives_until_publish)
 
     hl_smtp_wop_run(w);                            /* worker publishes then drops its ref */
     ASSERT_EQ(g_free_before_done, 0);
+    ASSERT_EQ(g_freed, 1);
+    smtp_wop_test_freed = 0;
+}
+
+UTEST(smtp_worker, on_terminal_fires_once_before_done_and_free)
+{
+    /* Completion path. */
+    obs_reset();
+    smtp_wop_test_freed = on_freed;
+    HlSmtpWorkerOp *w = hl_smtp_wop_create(make_inputs(), exec_success, NULL,
+                                           done_no_resume, NULL);
+    hl_smtp_wop_set_on_terminal(w, on_term, NULL);
+    hl_smtp_wop_run(w);
+    ASSERT_EQ(g_term_calls, 1);
+    ASSERT_EQ(g_term_state, HL_SMTP_ST_DONE);      /* fires after terminal publication */
+    ASSERT_EQ(g_term_before_free, 1);               /* before any free */
+    ASSERT_EQ(g_term_before_done, 1);               /* before done_fn */
+    ASSERT_EQ(g_freed, 0);                           /* runtime ref still held */
+    hl_smtp_wop_runtime_release(w);
+    ASSERT_EQ(g_freed, 1);
+
+    /* Discard (queued cancel_fn, never ran) also fires it exactly once. */
+    obs_reset();
+    smtp_wop_test_freed = on_freed;
+    HlSmtpWorkerOp *w2 = hl_smtp_wop_create(make_inputs(), exec_success, NULL,
+                                            done_no_resume, NULL);
+    hl_smtp_wop_set_on_terminal(w2, on_term, NULL);
+    hl_smtp_wop_discard(w2);
+    ASSERT_EQ(g_term_calls, 1);
+    ASSERT_EQ(g_term_state, HL_SMTP_ST_DONE);
+    ASSERT_EQ(g_term_before_free, 1);
+    hl_smtp_wop_runtime_release(w2);
     ASSERT_EQ(g_freed, 1);
     smtp_wop_test_freed = 0;
 }

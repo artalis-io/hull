@@ -30,10 +30,12 @@ struct HlSmtpWorkerOp {
     HlSmtpOp     *inputs;      /* owned; freed with the shell at refcount 0 */
     HlSmtpMessage msg_view;    /* borrowed view over inputs (built once) */
 
-    HlSmtpExecFn  execute;
-    void         *exec_user;
-    HlSmtpDoneFn  done;
-    void         *done_user;
+    HlSmtpExecFn     execute;
+    void            *exec_user;
+    HlSmtpDoneFn     done;
+    void            *done_user;
+    HlSmtpTerminalFn on_terminal;   /* worker-side lease release; set before submit */
+    void            *on_terminal_user;
 
     HlSmtpResult  result;      /* published under the DONE release store */
     int           cancelled;   /* set with result before the release store */
@@ -64,10 +66,15 @@ static void wop_publish_and_done(HlSmtpWorkerOp *w, int cancelled,
      * observes DONE, so a consumer that sees DONE sees the full payload. */
     atomic_store_explicit(&w->state, HL_SMTP_ST_DONE, memory_order_release);
 
-    /* Hand the terminal to the runtime side (resume, or a no-op release if the
-     * continuation was marked non-resumable). Never called for a discarded op
-     * that had no runtime interest - but done stays set; the callback checks
-     * resumability itself. */
+    /* Worker-side terminal hook (lease release), after terminal publication and
+     * BEFORE done_fn + the worker-ref drop. Runs on completion, cancel, and
+     * discard; done_fn is resume-only and may be dropped, so lease ownership
+     * lives here on the worker side. */
+    if (w->on_terminal)
+        w->on_terminal(w, w->on_terminal_user);
+
+    /* KICK the runtime resume (resume-only; no lease/free/ref-drop, and may be
+     * dropped by the poll backend at shutdown). */
     if (w->done)
         w->done(w, w->done_user);
 
@@ -119,6 +126,12 @@ HlSmtpWorkerOp *hl_smtp_wop_create(HlSmtpOp *inputs,
     w->done_user = done_user;
     hl_smtp_op_message(inputs, &w->msg_view);
     return w;
+}
+
+void hl_smtp_wop_set_on_terminal(HlSmtpWorkerOp *w, HlSmtpTerminalFn fn, void *user)
+{
+    w->on_terminal      = fn;
+    w->on_terminal_user = user;
 }
 
 void hl_smtp_wop_run(HlSmtpWorkerOp *w)

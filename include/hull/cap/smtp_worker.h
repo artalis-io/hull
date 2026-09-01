@@ -52,10 +52,18 @@ typedef int (*HlSmtpExecFn)(const HlSmtpMessage *msg, int timeout_ms,
                             HlSmtpCancelPollFn poll, void *poll_user,
                             void *exec_user);
 
-/* Fired once on the event-loop side when the worker publishes a terminal, to
- * hand the result to the runtime (resume, or - if marked non-resumable - just
- * release the runtime ref). Never called for a discarded (never-run) op. */
+/* Fired once when the worker publishes a terminal, to KICK the runtime resume
+ * (e.g. schedule the event-loop on_resume). Resume-only: it must not release the
+ * lease, free anything, or drop a ref, and it may be dropped by the poll backend
+ * at shutdown. Fires on completion, cancellation, and discard. */
 typedef void (*HlSmtpDoneFn)(HlSmtpWorkerOp *wop, void *done_user);
+
+/* Worker-side terminal hook, fired once on the worker thread right after
+ * terminal publication (and, on the run path, confirmed teardown) and BEFORE
+ * done_fn and the worker-ref drop. This is where the admission lease is
+ * released: done_fn is resume-only and may be dropped, so lease ownership lives
+ * on the worker side. Keeps this unit admission-agnostic (a plain callback). */
+typedef void (*HlSmtpTerminalFn)(HlSmtpWorkerOp *wop, void *user);
 
 /* Create a worker op that takes ownership of @p inputs. refcount = 2 (one worker
  * ref, one runtime ref), state = QUEUED. Returns NULL on OOM (inputs untouched,
@@ -63,6 +71,11 @@ typedef void (*HlSmtpDoneFn)(HlSmtpWorkerOp *wop, void *done_user);
 HlSmtpWorkerOp *hl_smtp_wop_create(HlSmtpOp *inputs,
                                    HlSmtpExecFn execute, void *exec_user,
                                    HlSmtpDoneFn done, void *done_user);
+
+/* Set the worker-side terminal hook (see HlSmtpTerminalFn). Must be called
+ * before the op is submitted (single-threaded window; no race with the worker). */
+void hl_smtp_wop_set_on_terminal(HlSmtpWorkerOp *w,
+                                 HlSmtpTerminalFn fn, void *user);
 
 /* Worker thread entry (the pool work_fn): dequeue (QUEUED -> RUNNING), run the
  * execute-phase, publish the terminal (release), fire @p done, and drop the
