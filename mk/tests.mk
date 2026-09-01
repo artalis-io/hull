@@ -752,7 +752,13 @@ msan:
 	$(MAKE) -C $(KEEL_DIR) CC=clang \
 		KEEL_TLS=mbedtls MBEDTLS_DIR=$(abspath $(MBEDTLS_DIR)) MBEDTLS_CONFIG_FILE=hull_config.h \
 		KEEL_COMPRESS=miniz MINIZ_DIR=$(CURDIR)/$(MINIZ_DIR)
-	$(MAKE) CC=clang MSAN=1 test
+	# libkeel.a is built above WITHOUT MSan (like WAMR); the suppressions file
+	# scopes out the one provable false positive that leaves - the getsockopt
+	# SO_ERROR check in Keel's uninstrumented socket provider. See the file's
+	# header. The env var is inherited by each ./build/test_* the `test` recipe
+	# runs.
+	MSAN_OPTIONS=suppressions=$(abspath tests/msan_suppressions.txt) \
+		$(MAKE) CC=clang MSAN=1 test
 
 # ThreadSanitizer - validate the worker-pool / shared-state paths under a
 # real race detector. Targeted at the suites that actually spin worker

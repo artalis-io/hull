@@ -1,0 +1,28 @@
+# MemorySanitizer suppressions for `make msan`.
+#
+# The msan target builds the Keel submodule (libkeel.a) with its own Makefile
+# and WITHOUT MSan instrumentation - the same deliberate stance Hull takes for
+# WAMR (see mk/vendor/wamr.mk / HL_MSAN). Hull instruments every read-path TU it
+# compiles itself (mbedTLS, QuickJS, Lua, SQLite, sh_arena, tweetnacl, stb, ...),
+# but Keel is compiled externally, so its stores are not shadow-tracked.
+#
+# Keel's POSIX socket provider checks a completed non-blocking connect with
+#   kl_sockdef_get_so_error(): int err = 0; socklen_t len = sizeof(err);
+#                              getsockopt(fd, SOL_SOCKET, SO_ERROR, &err, &len);
+# That code is correct - both `err` and the `len` in/out length are initialized.
+# But because the store to `len` happens in uninstrumented Keel, MSan's
+# getsockopt interceptor sees the length operand as poisoned and reports a
+# use-of-uninitialized-value inside psx_get_so_error. It is a provable false
+# positive at the uninstrumented-library boundary, not a Hull defect.
+#
+# Hull's SMTP transport (src/hull/cap/smtp_transport.c) is the first `make test`
+# suite to drive a real non-blocking connect through Keel's socket provider under
+# MSan (the pre-Slice-2b raw-socket SMTP did the getsockopt in instrumented Hull
+# code, so it never crossed this boundary). Scope the suppression to that one
+# interceptor call site; it masks no Hull-side uninitialized read.
+#
+# (The alternative - instrument all of libkeel under MSan via the CC trick - is
+# correct too but has a far larger blast radius across every suite that links
+# Keel; this suppression is the surgical, coverage-preserving choice.)
+interceptor_via_fun:psx_get_so_error
+interceptor_via_fun:kl_sockdef_get_so_error
