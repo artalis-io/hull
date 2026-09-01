@@ -519,21 +519,29 @@ static int tp_tls_begin_handshake(HlSmtpTransport *t, const char *host, void *tl
     t->tls = cfg->factory(cfg->ctx, persistent_tls_alloc());
     if (!t->tls)
         return -1;
-    /* Fix 7: validate the returned vtable right after the factory. An invalid
-     * vtable (a backend missing a required op) must abort, not be driven. */
+    /* Validate the returned vtable right after the factory. An invalid vtable
+     * (a backend missing a required op) must abort, not be driven. A NULL
+     * `destroy` is one reason kl_tls_vtable_valid fails, so the destroy call on
+     * THIS path must be NULL-checked (Keel's contract requires it): calling a
+     * NULL destroy on a malformed vtable would crash during rejection. */
     if (!kl_tls_vtable_valid(t->tls)) {
-        t->tls->destroy(t->tls);
+        if (t->tls->destroy)
+            t->tls->destroy(t->tls);
         t->tls = NULL;
         return -1;
     }
-    /* Fix 7: set_hostname is required for SNI + certificate/hostname
-     * verification; a failure to set it must abort (never handshake without the
-     * expected identity, which would defeat verify-full). */
-    if (host && host[0] && t->tls->set_hostname &&
-        t->tls->set_hostname(t->tls, host) != 0) {
-        t->tls->destroy(t->tls);
-        t->tls = NULL;
-        return -1;
+    /* set_hostname is REQUIRED for SNI + certificate/hostname verification: for a
+     * non-empty SMTP host, require BOTH that the hook exists AND that it
+     * succeeds. Proceeding without it (an absent hook) would handshake without
+     * the expected identity and defeat verify-full. (Past the vtable check
+     * destroy is non-NULL, but keep the guard for consistency.) */
+    if (host && host[0]) {
+        if (!t->tls->set_hostname || t->tls->set_hostname(t->tls, host) != 0) {
+            if (t->tls->destroy)
+                t->tls->destroy(t->tls);
+            t->tls = NULL;
+            return -1;
+        }
     }
 
     t->tls_handshaking = 1;
@@ -862,19 +870,25 @@ static const KlConnectOpHooks SMTP_CONNECT_HOOKS = {
 
 typedef int (*DonePred)(HlSmtpTransport *t);
 
-static int pump_until(HlSmtpTransport *t, DonePred done, int timeout_ms)
+/* Pump until done() or the ABSOLUTE monotonic instant `deadline_ms` passes. */
+static int pump_until_abs(HlSmtpTransport *t, DonePred done, uint64_t deadline_ms)
 {
     const int step_ms = 50;
-    int budget = timeout_ms > 0 ? timeout_ms : HL_SMTP_DEFAULT_TIMEOUT_MS;
-    uint64_t deadline = kl_monotonic_ms() + (uint64_t)budget;
     while (!done(t)) {
         int rc = kl_event_ctx_run(&t->ev, 64, step_ms);
         if (rc < 0)
             return -1;
-        if (kl_monotonic_ms() >= deadline && !done(t))
+        if (kl_monotonic_ms() >= deadline_ms && !done(t))
             return -1;   /* deadline: caller maps to its per-stage token */
     }
     return 0;
+}
+
+/* One stage bounded by a fresh `timeout_ms` budget. */
+static int pump_until(HlSmtpTransport *t, DonePred done, int timeout_ms)
+{
+    int budget = timeout_ms > 0 ? timeout_ms : HL_SMTP_DEFAULT_TIMEOUT_MS;
+    return pump_until_abs(t, done, kl_monotonic_ms() + (uint64_t)budget);
 }
 
 /* Predicates. */
@@ -1035,15 +1049,24 @@ int hl_smtp_transport_write(HlSmtpTransport *t, const void *data, size_t len,
      * write returns KL_STREAM_TOO_LARGE. So admit the payload in
      * SMTP_WRITE_CHUNK pieces, draining pending bytes between chunks so total
      * queued memory stays bounded (never the whole 10 MiB message). External
-     * contract unchanged: 0 iff every byte is sent, -1 on error/timeout. */
+     * contract unchanged: 0 iff every byte is sent, -1 on error/timeout.
+     *
+     * Round-2 fix: the WHOLE write stage shares ONE absolute deadline. Every
+     * chunk drain + WOULD_BLOCK retry pumps against the SAME `deadline`, so a
+     * slow peer cannot stretch one 10 MiB DATA write across N x timeout_ms
+     * (each pump_until would otherwise mint a fresh budget). The hard
+     * total-OPERATION ceiling across all stages is still a Slice 2c item. */
+    int budget = timeout_ms > 0 ? timeout_ms : HL_SMTP_DEFAULT_TIMEOUT_MS;
+    uint64_t deadline = kl_monotonic_ms() + (uint64_t)budget;
+
     const char *p = (const char *)data;
     size_t remaining = len;
     while (remaining > 0) {
         /* Drain what is already queued before admitting the next chunk, so the
          * queue has room and bounded memory is held at any instant. A dead peer
-         * trips the per-stage deadline in pump_until. */
+         * trips the shared write-stage deadline. */
         if (kl_stream_write_pending(&t->stream) > 0) {
-            if (pump_until(t, done_write, timeout_ms) != 0)
+            if (pump_until_abs(t, done_write, deadline) != 0)
                 return -1;
             if (t->write_error || t->read_eof)
                 return -1;
@@ -1052,7 +1075,7 @@ int hl_smtp_transport_write(HlSmtpTransport *t, const void *data, size_t len,
         KlStreamWriteStatus st = kl_stream_write(&t->stream, p, chunk);
         if (st == KL_STREAM_WOULD_BLOCK) {
             /* No room right now: drain, then retry this same chunk. */
-            if (pump_until(t, done_write, timeout_ms) != 0)
+            if (pump_until_abs(t, done_write, deadline) != 0)
                 return -1;
             if (t->write_error || t->read_eof)
                 return -1;
@@ -1064,8 +1087,9 @@ int hl_smtp_transport_write(HlSmtpTransport *t, const void *data, size_t len,
         remaining -= chunk;
     }
 
-    /* Final drain: every admitted byte must physically leave the queue. */
-    if (pump_until(t, done_write, timeout_ms) != 0)
+    /* Final drain: every admitted byte must physically leave the queue, still
+     * bounded by the one shared write-stage deadline. */
+    if (pump_until_abs(t, done_write, deadline) != 0)
         return -1;
     if (t->write_error || kl_stream_write_pending(&t->stream) != 0)
         return -1;
@@ -1104,10 +1128,10 @@ void hl_smtp_transport_shutdown(HlSmtpTransport *t)
     pump_until(t, done_detached, HL_SMTP_DEFAULT_TIMEOUT_MS);
 }
 
-void hl_smtp_transport_free(HlSmtpTransport *t)
+int hl_smtp_transport_free(HlSmtpTransport *t)
 {
     if (!t)
-        return;
+        return 0;
 
     /* If a stream was brought up but not gracefully closed, cancel it and pump
      * to confirmed detachment so every op/watcher/fd retires exactly once. */
@@ -1130,7 +1154,9 @@ void hl_smtp_transport_free(HlSmtpTransport *t)
             !kl_connect_op_is_detached(&t->connect_op)) {
             log_error("smtp: connect op did not detach within the bound; "
                       "leaking transport storage rather than freeing a live op");
-            return;   /* fail loud: do NOT free storage the op still references */
+            /* Observable to the caller: storage is intentionally leaked (the op
+             * still references it) rather than freed into a use-after-free. */
+            return -1;
         }
     }
 
@@ -1175,4 +1201,5 @@ void hl_smtp_transport_free(HlSmtpTransport *t)
     if (t->ev_ready)
         kl_event_ctx_free(&t->ev);
     free(t);
+    return 0;
 }

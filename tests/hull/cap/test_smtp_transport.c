@@ -39,6 +39,88 @@
 #include <sys/socket.h>
 #include <arpa/inet.h>
 
+#include <keel/tls.h>   /* KlTls / KlTlsConfig: mock the TLS session seam */
+
+/* ════════════════════════════════════════════════════════════════════
+ * Mock KlTls infrastructure (for the STARTTLS vtable-rejection tests).
+ *
+ * mock_tls_factory returns g_mock_tls (a KlTls with a configurable vtable) and
+ * bumps g_mock_tls_factory_calls, so a test can prove starttls() aborted BEFORE
+ * ever reaching the factory (the buffered-bytes boundary) versus reaching it and
+ * rejecting a malformed vtable / a bad set_hostname. The required ops are trivial
+ * stubs. Three knobs, reset at the top of each test that uses them:
+ *   g_mock_destroy_null      - when set, the vtable's destroy is NULL (INVALID
+ *                              vtable: kl_tls_vtable_valid fails), so the reject
+ *                              path must NULL-check destroy or crash.
+ *   g_mock_set_hostname_mode - 0: a working set_hostname returning 0;
+ *                              1: set_hostname absent (NULL hook);
+ *                              2: set_hostname present but returns -1.
+ *   g_mock_handshake_result  - the KlTlsResult the mock handshake returns
+ *                              (defaults to KL_TLS_OK).
+ * ════════════════════════════════════════════════════════════════════ */
+
+static int         g_mock_tls_factory_calls;
+static int         g_mock_destroy_null;
+static int         g_mock_set_hostname_mode;
+static KlTlsResult g_mock_handshake_result;
+
+static KlTlsResult mock_tls_handshake(KlTls *self, KlSocketHandle fd)
+{ (void)self; (void)fd; return g_mock_handshake_result; }
+static kl_ssize_t mock_tls_read(KlTls *self, KlSocketHandle fd, void *b, size_t n)
+{ (void)self; (void)fd; (void)b; (void)n; return 0; }
+static kl_ssize_t mock_tls_write(KlTls *self, KlSocketHandle fd, const void *b, size_t n)
+{ (void)self; (void)fd; (void)b; (void)n; return 0; }
+static KlTlsResult mock_tls_shutdown(KlTls *self, KlSocketHandle fd)
+{ (void)self; (void)fd; return KL_TLS_OK; }
+static size_t mock_tls_pending(KlTls *self) { (void)self; return 0; }
+static void mock_tls_reset(KlTls *self) { (void)self; }
+static void mock_tls_destroy(KlTls *self) { (void)self; }
+static int mock_tls_set_hostname(KlTls *self, const char *host)
+{ (void)self; (void)host; return 0; }
+static int mock_tls_set_hostname_fail(KlTls *self, const char *host)
+{ (void)self; (void)host; return -1; }
+
+static KlTls g_mock_tls;
+
+/* Build g_mock_tls's vtable from the current knobs and return it. */
+static KlTls *mock_tls_factory(KlTlsCtx *ctx, KlAllocator *alloc)
+{
+    (void)ctx; (void)alloc;
+    g_mock_tls_factory_calls++;
+    memset(&g_mock_tls, 0, sizeof g_mock_tls);
+    g_mock_tls.handshake = mock_tls_handshake;
+    g_mock_tls.read      = mock_tls_read;
+    g_mock_tls.write     = mock_tls_write;
+    g_mock_tls.shutdown  = mock_tls_shutdown;
+    g_mock_tls.pending   = mock_tls_pending;
+    g_mock_tls.reset     = mock_tls_reset;
+    g_mock_tls.destroy   = g_mock_destroy_null ? NULL : mock_tls_destroy;
+    if (g_mock_set_hostname_mode == 0)
+        g_mock_tls.set_hostname = mock_tls_set_hostname;
+    else if (g_mock_set_hostname_mode == 2)
+        g_mock_tls.set_hostname = mock_tls_set_hostname_fail;
+    else
+        g_mock_tls.set_hostname = NULL;   /* mode 1: absent */
+    return &g_mock_tls;
+}
+
+/* A non-NULL dummy ctx pointer: the mock factory never dereferences it. */
+static int g_mock_tls_ctx_dummy;
+static KlTlsConfig g_mock_tls_cfg = {
+    .ctx     = (KlTlsCtx *)&g_mock_tls_ctx_dummy,
+    .factory = mock_tls_factory,
+};
+
+/* Reset every mock-TLS knob to its default. Called at the top of each test that
+ * touches the mock (utest has no shared fixture teardown here). */
+static void mock_tls_reset_globals(void)
+{
+    g_mock_tls_factory_calls = 0;
+    g_mock_destroy_null      = 0;
+    g_mock_set_hostname_mode = 0;
+    g_mock_handshake_result  = KL_TLS_OK;
+}
+
 /* ════════════════════════════════════════════════════════════════════
  * Part 1: incremental reply parser (fix 5)
  * ════════════════════════════════════════════════════════════════════ */
@@ -198,53 +280,140 @@ UTEST(smtp_parser, lf_without_cr_rejected)
 /* ════════════════════════════════════════════════════════════════════
  * Part 2: AUTH PLAIN credential scrubbing (fix 9)
  *
- * smtp_do_auth_plain builds/sends over a live transport, which a unit test
- * cannot supply. So we assert the scrub CONTRACT directly on the same buffer
- * shapes the helper uses: after smtp_secure_zero over a buffer that held
- * credentials, no plaintext credential byte survives.
+ * These exercise the REAL smtp_do_auth_plain success AND failure exits via the
+ * gated test seam (-DHL_SMTP_TEST_HOOKS): smtp_test_auth_send REPLACES the live
+ * smtp_command() so no server is needed, and captures the built command to
+ * prove the live secret was present; smtp_test_auth_probe fires at the very end
+ * of cleanup (after the three smtp_secure_zero calls) to prove BOTH exits reach
+ * cleanup and every secret buffer is zeroed.
  * ════════════════════════════════════════════════════════════════════ */
 
-UTEST(smtp_scrub, secure_zero_clears_buffer)
+/* Captured by the send hook; asserted by the test. */
+static char   g_auth_cmd_capture[HL_SMTP_SEND_BUF_SIZE];
+static size_t g_auth_cmd_capture_len;
+static int    g_auth_send_calls;
+static int    g_auth_send_return;      /* code the send hook returns */
+
+/* Probe state: set by the probe hook, asserted by the test. */
+static int    g_auth_probe_fired;
+static int    g_auth_probe_all_zero;   /* 1 iff all three buffers were fully 0 */
+
+static int auth_send_hook(HlSmtpTransport *t, const char *cmd,
+                          int expected, int timeout)
+{
+    (void)t; (void)expected; (void)timeout;   /* transport is a passthrough dummy */
+    g_auth_send_calls++;
+    size_t n = strlen(cmd);
+    if (n >= sizeof g_auth_cmd_capture) n = sizeof g_auth_cmd_capture - 1;
+    memcpy(g_auth_cmd_capture, cmd, n);
+    g_auth_cmd_capture[n] = '\0';
+    g_auth_cmd_capture_len = n;
+    return g_auth_send_return;
+}
+
+static void auth_probe_hook(const unsigned char *plain, size_t pn,
+                            const char *b64, size_t bn,
+                            const char *cmd, size_t cn)
+{
+    g_auth_probe_fired = 1;
+    int all_zero = 1;
+    for (size_t i = 0; i < pn; i++) if (plain[i] != 0) { all_zero = 0; break; }
+    if (all_zero) for (size_t i = 0; i < bn; i++) if ((unsigned char)b64[i] != 0) { all_zero = 0; break; }
+    if (all_zero) for (size_t i = 0; i < cn; i++) if ((unsigned char)cmd[i] != 0) { all_zero = 0; break; }
+    g_auth_probe_all_zero = all_zero;
+}
+
+/* Compute the base64 the helper builds for (\0user\0pass), so the test can
+ * assert the constructed command carried the live secret. */
+static void expected_auth_b64(const char *user, const char *pass,
+                              char *out, size_t out_size)
 {
     unsigned char plain[1026];
-    char          b64[1400];
-    char          cmd[HL_SMTP_SEND_BUF_SIZE];
-
-    const char *user = "alice@example.com";
-    const char *pass = "s3cr3t-p@ssw0rd";
-
-    /* Reproduce the helper's construction, then base64 + command. */
     size_t ulen = strlen(user), plen = strlen(pass);
     plain[0] = '\0';
     memcpy(plain + 1, user, ulen);
     plain[1 + ulen] = '\0';
     memcpy(plain + 2 + ulen, pass, plen);
     size_t plain_len = 1 + ulen + 1 + plen;
+    hl_smtp_base64_encode(plain, (int)plain_len, out, (int)out_size);
+}
 
-    int b64_len = hl_smtp_base64_encode(plain, (int)plain_len, b64, (int)sizeof b64);
-    ASSERT_GT(b64_len, 0);
-    int n = snprintf(cmd, sizeof cmd, "AUTH PLAIN %s\r\n", b64);
-    ASSERT_GT(n, 0);
+/* Success path: send hook returns 235; smtp_do_auth_plain returns 0, and the
+ * probe sees all three secret buffers zeroed after cleanup. The captured
+ * command contains "AUTH PLAIN <b64>" with the correct base64 of \0user\0pass
+ * (proving construction + that the live secret was present at send time). */
+UTEST(smtp_scrub, auth_plain_success_scrubs)
+{
+    g_auth_cmd_capture[0] = '\0';
+    g_auth_cmd_capture_len = 0;
+    g_auth_send_calls = 0;
+    g_auth_send_return = 235;
+    g_auth_probe_fired = 0;
+    g_auth_probe_all_zero = 0;
 
-    /* Sanity: the password IS present before scrub (in the raw plain buffer). */
-    int found_before = 0;
-    for (size_t i = 0; i + plen <= sizeof plain; i++)
-        if (memcmp(plain + i, pass, plen) == 0) { found_before = 1; break; }
-    ASSERT_TRUE(found_before);
+    smtp_test_auth_send  = auth_send_hook;
+    smtp_test_auth_probe = auth_probe_hook;
 
-    /* Scrub every secret-bearing buffer exactly as the helper's cleanup does. */
-    smtp_secure_zero(plain, sizeof plain);
-    smtp_secure_zero(b64,   sizeof b64);
-    smtp_secure_zero(cmd,   sizeof cmd);
+    const char *user = "alice@example.com";
+    const char *pass = "s3cr3t-p@ssw0rd";
+    char expected_b64[1400];
+    expected_auth_b64(user, pass, expected_b64, sizeof expected_b64);
+    char expected_cmd[HL_SMTP_SEND_BUF_SIZE];
+    snprintf(expected_cmd, sizeof expected_cmd, "AUTH PLAIN %s", expected_b64);
 
-    /* No plaintext password survives in any buffer. */
-    for (size_t i = 0; i + plen <= sizeof plain; i++)
-        ASSERT_NE(memcmp(plain + i, pass, plen), 0);
-    /* base64 buffer: fully zeroed. */
-    for (size_t i = 0; i < sizeof b64; i++)
-        ASSERT_EQ((unsigned char)b64[i], 0);
-    for (size_t i = 0; i < sizeof cmd; i++)
-        ASSERT_EQ((unsigned char)cmd[i], 0);
+    const char *err = NULL;
+    int rc = smtp_do_auth_plain(NULL, user, pass, 5000, &err);
+    ASSERT_EQ(rc, 0);
+
+    /* The command the helper built + handed to the send hook carried the live
+     * secret (correct base64 of \0user\0pass). */
+    ASSERT_EQ(g_auth_send_calls, 1);
+    ASSERT_TRUE(strstr(g_auth_cmd_capture, expected_cmd) != NULL);
+
+    /* Cleanup ran and scrubbed every secret buffer. */
+    ASSERT_TRUE(g_auth_probe_fired);
+    ASSERT_TRUE(g_auth_probe_all_zero);
+
+    smtp_test_auth_send  = NULL;
+    smtp_test_auth_probe = NULL;
+}
+
+/* Failure path: send hook returns -1; smtp_do_auth_plain returns -1 with
+ * err == "auth_failed", and the probe still sees all three buffers zeroed
+ * (the failure exit reaches the same cleanup). */
+UTEST(smtp_scrub, auth_plain_failure_scrubs)
+{
+    g_auth_cmd_capture[0] = '\0';
+    g_auth_cmd_capture_len = 0;
+    g_auth_send_calls = 0;
+    g_auth_send_return = -1;
+    g_auth_probe_fired = 0;
+    g_auth_probe_all_zero = 0;
+
+    smtp_test_auth_send  = auth_send_hook;
+    smtp_test_auth_probe = auth_probe_hook;
+
+    const char *user = "bob@example.com";
+    const char *pass = "hunter2-secret";
+    char expected_b64[1400];
+    expected_auth_b64(user, pass, expected_b64, sizeof expected_b64);
+
+    const char *err = NULL;
+    int rc = smtp_do_auth_plain(NULL, user, pass, 5000, &err);
+    ASSERT_EQ(rc, -1);
+    ASSERT_TRUE(err != NULL);
+    ASSERT_STREQ(err, "auth_failed");
+
+    /* The secret was present in the built command before the failing send. */
+    ASSERT_EQ(g_auth_send_calls, 1);
+    ASSERT_TRUE(strstr(g_auth_cmd_capture, expected_b64) != NULL);
+
+    /* The failure exit still reaches cleanup and scrubs. */
+    ASSERT_TRUE(g_auth_probe_fired);
+    ASSERT_TRUE(g_auth_probe_all_zero);
+
+    smtp_test_auth_send  = NULL;
+    smtp_test_auth_probe = NULL;
 }
 
 /* ════════════════════════════════════════════════════════════════════
@@ -300,10 +469,13 @@ static void *mp_sink_thread(void *arg)
     return NULL;
 }
 
-/* STARTTLS buffer-abort peer: greet 220, expect EHLO (reply 250), expect
- * STARTTLS and reply "220 go\r\n" IMMEDIATELY FOLLOWED by junk plaintext bytes
- * in the same write, so the client's plaintext accumulator holds bytes past the
- * 220 when starttls() is called. */
+/* STARTTLS peer: greet 220, expect EHLO (reply 250), expect STARTTLS and reply
+ * "220 go\r\n". When m->extra_after_220 is set, the 220 is IMMEDIATELY FOLLOWED
+ * by junk plaintext bytes in the SAME write, so the client's plaintext
+ * accumulator holds bytes past the 220 when starttls() is called (the
+ * buffer-abort test). When clear, only the bare "220 go\r\n" is sent, so the
+ * accumulator is EMPTY after the client consumes the 220 (the clean-STARTTLS
+ * path the vtable/set_hostname rejection tests need). */
 static void *mp_starttls_junk_thread(void *arg)
 {
     MockPeer *m = arg;
@@ -320,15 +492,22 @@ static void *mp_starttls_junk_thread(void *arg)
     /* read STARTTLS */
     n = read(c, line, sizeof line - 1);
     (void)n;
-    /* 220 + junk in one write: the junk lands in the plaintext buffer. */
-    mp_send(c, "220 go\r\nEVIL-INJECTED-PLAINTEXT\r\n");
+    if (m->extra_after_220)
+        /* 220 + junk in one write: the junk lands in the plaintext buffer. */
+        mp_send(c, "220 go\r\nEVIL-INJECTED-PLAINTEXT\r\n");
+    else
+        /* bare 220: the accumulator is empty after the client reads it. */
+        mp_send(c, "220 go\r\n");
     /* Keep the socket open a moment so the client reads the coalesced bytes. */
     usleep(100 * 1000);
     close(c);
     return NULL;
 }
 
-static int mp_start(MockPeer *m, void *(*fn)(void *))
+/* Zero the peer, bind a loopback listener, and record its port - WITHOUT
+ * spawning the accept thread yet, so a caller can set behavior knobs (e.g.
+ * extra_after_220) before mp_spawn starts the thread that reads them. */
+static int mp_setup(MockPeer *m)
 {
     memset(m, 0, sizeof *m);
     m->greet = 1;
@@ -347,7 +526,19 @@ static int mp_start(MockPeer *m, void *(*fn)(void *))
     if (getsockname(m->listen_fd, (struct sockaddr *)&sa, &sl) < 0) return -1;
     m->port = ntohs(sa.sin_port);
     if (listen(m->listen_fd, 1) < 0) return -1;
+    return 0;
+}
+
+static int mp_spawn(MockPeer *m, void *(*fn)(void *))
+{
     return pthread_create(&m->tid, NULL, fn, m) == 0 ? 0 : -1;
+}
+
+/* Setup + spawn in one call (for peers that need no pre-spawn configuration). */
+static int mp_start(MockPeer *m, void *(*fn)(void *))
+{
+    if (mp_setup(m) != 0) return -1;
+    return mp_spawn(m, fn);
 }
 
 static void mp_join(MockPeer *m)
@@ -429,35 +620,134 @@ UTEST(smtp_write, backpressure_drains)
     ASSERT_EQ(m.total_read, payload);
 }
 
-/* STARTTLS with unexpected buffered plaintext past the 220 must abort
- * fail-closed (fix 6): hl_smtp_transport_starttls returns -1 and does NOT
- * upgrade. We drive the plaintext EHLO + STARTTLS ourselves so the accumulator
- * holds the injected junk when starttls() is called. tls_cfg is NULL, but the
- * buffer check must fire BEFORE any TLS work, so the -1 is the buffer abort. */
-UTEST(smtp_starttls, unexpected_buffered_bytes_aborts)
+/* Drive a mock STARTTLS peer to the point just after the client consumed the
+ * STARTTLS 220 reply, yielding a connected transport (via *out) ready for
+ * starttls(). Set extra_junk to have the peer coalesce plaintext junk after the
+ * 220 (so the accumulator is non-empty), or clear for a bare 220 (empty
+ * accumulator). Void so the utest ASSERT_* macros (which `return;` on failure)
+ * work here, mirroring chunked_delivery_case. On any failure *out is NULL. */
+static void drive_to_starttls(int *utest_result, MockPeer *m, int extra_junk,
+                              HlSmtpTransport **out)
 {
-    MockPeer m;
-    ASSERT_EQ(mp_start(&m, mp_starttls_junk_thread), 0);
+    *out = NULL;
+    ASSERT_EQ_MSG(mp_setup(m), 0, "mp_setup");
+    m->extra_after_220 = extra_junk;
+    ASSERT_EQ_MSG(mp_spawn(m, mp_starttls_junk_thread), 0, "mp_spawn");
 
-    HlSmtpTransport *t = hl_smtp_transport_connect("127.0.0.1", m.port, 10000);
-    ASSERT_TRUE(t != NULL);
+    HlSmtpTransport *t = hl_smtp_transport_connect("127.0.0.1", m->port, 10000);
+    ASSERT_TRUE_MSG(t != NULL, "connect");
 
     char resp[HL_SMTP_RECV_BUF_SIZE];
-    ASSERT_EQ(hl_smtp_transport_read_reply(t, resp, (int)sizeof resp, 10000), 220);
-    /* EHLO */
-    ASSERT_EQ(hl_smtp_transport_write(t, "EHLO localhost\r\n", 16, 10000), 0);
-    ASSERT_EQ(hl_smtp_transport_read_reply(t, resp, (int)sizeof resp, 10000), 250);
-    /* STARTTLS command + its 220 reply. The peer coalesces junk after the 220,
-     * so after read_reply returns 220 the accumulator holds the junk line. */
-    ASSERT_EQ(hl_smtp_transport_write(t, "STARTTLS\r\n", 10, 10000), 0);
-    ASSERT_EQ(hl_smtp_transport_read_reply(t, resp, (int)sizeof resp, 10000), 220);
+    ASSERT_EQ_MSG(hl_smtp_transport_read_reply(t, resp, (int)sizeof resp, 10000),
+                  220, "greeting");
+    ASSERT_EQ_MSG(hl_smtp_transport_write(t, "EHLO localhost\r\n", 16, 10000),
+                  0, "EHLO write");
+    ASSERT_EQ_MSG(hl_smtp_transport_read_reply(t, resp, (int)sizeof resp, 10000),
+                  250, "EHLO reply");
+    ASSERT_EQ_MSG(hl_smtp_transport_write(t, "STARTTLS\r\n", 10, 10000),
+                  0, "STARTTLS write");
+    ASSERT_EQ_MSG(hl_smtp_transport_read_reply(t, resp, (int)sizeof resp, 10000),
+                  220, "STARTTLS reply");
+    *out = t;
+}
 
-    /* Give the coalesced junk a moment to be delivered into the accumulator. */
-    /* (read_reply already pumped; a second short read pass is harmless.) */
+/* STARTTLS with unexpected buffered plaintext past the 220 must abort
+ * fail-closed (fix 6): hl_smtp_transport_starttls returns -1 and does NOT
+ * upgrade. Round-2: prove it is the BUFFER boundary (not a NULL cfg) that
+ * aborts. The peer coalesces junk after the 220, so the accumulator is
+ * non-empty when starttls() is called with a VALID mock cfg; the abort must
+ * fire BEFORE the factory, so g_mock_tls_factory_calls stays 0. */
+UTEST(smtp_starttls, unexpected_buffered_bytes_aborts)
+{
+    mock_tls_reset_globals();
 
-    /* Now the upgrade must fail closed because of the buffered bytes. */
-    int rc = hl_smtp_transport_starttls(t, "127.0.0.1", NULL, 5000);
+    MockPeer m;
+    HlSmtpTransport *t;
+    drive_to_starttls(utest_result, &m, /*extra_junk=*/1, &t);
+    if (!t) return;
+
+    /* The coalesced junk landed in the plaintext accumulator. */
+    ASSERT_NE(t->acc.len, (size_t)0);
+
+    /* Upgrade with a VALID mock cfg: the buffered-bytes check must abort BEFORE
+     * ever reaching the factory / handshake, distinguishing the buffer-boundary
+     * abort from a NULL-cfg abort. */
+    g_mock_tls_factory_calls = 0;
+    int rc = hl_smtp_transport_starttls(t, "127.0.0.1", &g_mock_tls_cfg, 5000);
     ASSERT_EQ(rc, -1);
+    ASSERT_EQ(g_mock_tls_factory_calls, 0);          /* aborted before TLS work */
+    ASSERT_EQ(hl_smtp_transport_tls_active(t), 0);
+
+    hl_smtp_transport_free(t);
+    mp_join(&m);
+}
+
+/* A malformed KlTls vtable (destroy is NULL) returned by the factory must be
+ * rejected without crashing (blocker 1): the reject path NULL-checks destroy.
+ * Clean peer (bare 220, empty accumulator) so the buffer check passes and the
+ * factory IS reached. */
+UTEST(smtp_starttls, malformed_vtable_rejected_no_crash)
+{
+    mock_tls_reset_globals();
+    g_mock_destroy_null = 1;   /* factory returns a KlTls whose destroy is NULL */
+
+    MockPeer m;
+    HlSmtpTransport *t;
+    drive_to_starttls(utest_result, &m, /*extra_junk=*/0, &t);
+    if (!t) return;
+
+    ASSERT_EQ(t->acc.len, (size_t)0);   /* empty: buffer check passes */
+
+    int rc = hl_smtp_transport_starttls(t, "127.0.0.1", &g_mock_tls_cfg, 5000);
+    ASSERT_EQ(rc, -1);                          /* invalid vtable rejected */
+    ASSERT_EQ(g_mock_tls_factory_calls, 1);     /* factory WAS reached */
+    ASSERT_EQ(hl_smtp_transport_tls_active(t), 0);
+
+    hl_smtp_transport_free(t);
+    mp_join(&m);
+}
+
+/* A non-empty host REQUIRES set_hostname to exist: an absent hook must reject
+ * (blocker 2), else the handshake would run without the expected identity and
+ * defeat verify-full. Clean peer + empty accumulator. */
+UTEST(smtp_starttls, missing_set_hostname_rejected)
+{
+    mock_tls_reset_globals();
+    g_mock_set_hostname_mode = 1;   /* set_hostname absent (NULL hook) */
+
+    MockPeer m;
+    HlSmtpTransport *t;
+    drive_to_starttls(utest_result, &m, /*extra_junk=*/0, &t);
+    if (!t) return;
+
+    ASSERT_EQ(t->acc.len, (size_t)0);
+
+    int rc = hl_smtp_transport_starttls(t, "127.0.0.1", &g_mock_tls_cfg, 5000);
+    ASSERT_EQ(rc, -1);
+    ASSERT_EQ(g_mock_tls_factory_calls, 1);     /* reached the factory */
+    ASSERT_EQ(hl_smtp_transport_tls_active(t), 0);
+
+    hl_smtp_transport_free(t);
+    mp_join(&m);
+}
+
+/* A non-empty host also REQUIRES set_hostname to SUCCEED: a hook that returns
+ * -1 must reject (blocker 2). Clean peer + empty accumulator. */
+UTEST(smtp_starttls, failing_set_hostname_rejected)
+{
+    mock_tls_reset_globals();
+    g_mock_set_hostname_mode = 2;   /* set_hostname present but returns -1 */
+
+    MockPeer m;
+    HlSmtpTransport *t;
+    drive_to_starttls(utest_result, &m, /*extra_junk=*/0, &t);
+    if (!t) return;
+
+    ASSERT_EQ(t->acc.len, (size_t)0);
+
+    int rc = hl_smtp_transport_starttls(t, "127.0.0.1", &g_mock_tls_cfg, 5000);
+    ASSERT_EQ(rc, -1);
+    ASSERT_EQ(g_mock_tls_factory_calls, 1);     /* reached the factory */
     ASSERT_EQ(hl_smtp_transport_tls_active(t), 0);
 
     hl_smtp_transport_free(t);

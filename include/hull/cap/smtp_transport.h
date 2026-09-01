@@ -126,7 +126,14 @@ void hl_smtp_transport_shutdown(HlSmtpTransport *t);
 /**
  * Free the transport. Retires every socket, timer, watcher, TLS object, stream,
  * and the private event context exactly once (safe after or without shutdown).
+ *
+ * Returns 0 on a complete free. Returns -1 in the one unrecoverable case where a
+ * started KlConnectOp will NOT reach confirmed detachment within the bound: the
+ * op still references the embedded storage, so freeing it would be a
+ * use-after-free; the transport is INTENTIONALLY leaked instead (an fd + event
+ * ctx + memory), and the failure is reported so the caller can observe it rather
+ * than being silently dropped. A NULL argument returns 0 (nothing to free).
  */
-void hl_smtp_transport_free(HlSmtpTransport *t);
+int hl_smtp_transport_free(HlSmtpTransport *t);
 
 #endif /* HL_CAP_SMTP_TRANSPORT_H */

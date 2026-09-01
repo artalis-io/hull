@@ -165,9 +165,13 @@ $(BUILDDIR)/test_mysql_conn: $(TESTDIR)/hull/cap/test_mysql_conn.c $(SRCDIR)/hul
 # prerequisites so a change to either rebuilds the test.
 SMTP_TP_TEST_LIBS := $(filter-out $(BUILDDIR)/cap_smtp.o $(BUILDDIR)/cap_smtp_transport.o,$(TEST_COMMON_LIBS))
 SMTP_TP_TEST_DEPS := $(filter-out $(BUILDDIR)/cap_smtp.o $(BUILDDIR)/cap_smtp_transport.o,$(TEST_COMMON_DEPS))
+# -DHL_SMTP_TEST_HOOKS compiles in the gated AUTH-scrub test seam in smtp.c
+# (the smtp_test_auth_send / smtp_test_auth_probe function pointers). It is set
+# ONLY here, on this test's compile line, so the normal build never sees it and
+# the seam is absent + zero-overhead in the shipped binary.
 $(BUILDDIR)/test_smtp_transport: $(TESTDIR)/hull/cap/test_smtp_transport.c \
     $(SRCDIR)/hull/cap/smtp.c $(SRCDIR)/hull/cap/smtp_transport.c $(SMTP_TP_TEST_DEPS) | $(BUILDDIR)
-	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< $(SMTP_TP_TEST_LIBS) $(LDFLAGS)
+	$(CC) $(CFLAGS) -DHL_SMTP_TEST_HOOKS $(INCLUDES) -I$(VENDDIR) -o $@ $< $(SMTP_TP_TEST_LIBS) $(LDFLAGS)
 
 # TUI cap-layer tests: cap/tui.c + tui_input.c + tui_width.c are filtered out of
 # CAP_OBJS on the default (TUI-free) base - they live only in the composable

@@ -282,6 +282,26 @@ static int smtp_validate_message(const HlSmtpMessage *msg)
     return 0;
 }
 
+#ifdef HL_SMTP_TEST_HOOKS
+/* ── Test-only seam (compiled in ONLY under -DHL_SMTP_TEST_HOOKS) ─────
+ * Absent and zero-overhead in production: the whole block is preprocessed out
+ * of the normal build. The unit test sets these hooks to capture the built
+ * AUTH PLAIN command (proving the live secret was present) and to assert the
+ * scrub cleanup ran with every secret buffer zeroed on BOTH the success and
+ * failure exits of smtp_do_auth_plain, without needing a live SMTP server.
+ *
+ * smtp_test_auth_send, when non-NULL, REPLACES the smtp_command() call inside
+ * smtp_do_auth_plain (it receives the constructed command + expected code and
+ * returns a reply code). smtp_test_auth_probe, when non-NULL, is called at the
+ * very end of cleanup, AFTER the three smtp_secure_zero calls, with the three
+ * buffers so the test can assert they are fully zeroed. */
+int  (*smtp_test_auth_send)(HlSmtpTransport *t, const char *cmd,
+                            int expected, int timeout);
+void (*smtp_test_auth_probe)(const unsigned char *plain, size_t pn,
+                             const char *b64, size_t bn,
+                             const char *cmd, size_t cn);
+#endif
+
 /* ── AUTH PLAIN (credential-scrubbing helper) ────────────────────────
  * Build base64(\0user\0pass), issue "AUTH PLAIN <b64>\r\n", and check the 235
  * reply. All secret-bearing stack buffers (the raw AUTH PLAIN bytes, the base64
@@ -329,7 +349,13 @@ static int smtp_do_auth_plain(HlSmtpTransport *t, const char *username,
         goto cleanup;
     }
 
-    int code = smtp_command(t, cmd, 235, timeout_ms);
+    int code;
+#ifdef HL_SMTP_TEST_HOOKS
+    if (smtp_test_auth_send)
+        code = smtp_test_auth_send(t, cmd, 235, timeout_ms);
+    else
+#endif
+    code = smtp_command(t, cmd, 235, timeout_ms);
     if (code < 0) {
         log_warn("smtp: AUTH PLAIN failed");
         if (err_msg) *err_msg = "auth_failed";
@@ -343,6 +369,11 @@ cleanup:
     smtp_secure_zero(plain, sizeof plain);
     smtp_secure_zero(b64,   sizeof b64);
     smtp_secure_zero(cmd,   sizeof cmd);
+#ifdef HL_SMTP_TEST_HOOKS
+    if (smtp_test_auth_probe)
+        smtp_test_auth_probe(plain, sizeof plain, b64, sizeof b64,
+                             cmd, sizeof cmd);
+#endif
     return ret;
 }
 
@@ -557,7 +588,15 @@ int hl_cap_smtp_send(const HlSmtpConfig *cfg, const HlSmtpMessage *msg,
 
 cleanup:
     hl_smtp_transport_shutdown(t);   /* best-effort close_notify + graceful close */
-    hl_smtp_transport_free(t);
+    /* Observe teardown: a -1 means the connect op would not detach so the
+     * transport was intentionally leaked (fd + event ctx + memory) rather than
+     * freed into a use-after-free. Surface it at the capability boundary (log +
+     * audit) so it is not silently dropped. It does not change the send result,
+     * which is already determined. */
+    int teardown_leaked = (hl_smtp_transport_free(t) != 0);
+    if (teardown_leaked)
+        log_error("smtp: transport teardown failed (connect op would not "
+                  "detach); leaked transport resources for host '%s'", msg->host);
 
     {
         ShJsonWriter w = hl_audit_begin("smtp.send");
@@ -566,6 +605,8 @@ cleanup:
         sh_json_write_kv_string(&w, "to", msg->to);
         sh_json_write_kv_string(&w, "subject", msg->subject);
         sh_json_write_kv_int(&w, "result", ret);
+        if (teardown_leaked)
+            sh_json_write_kv_string(&w, "teardown", "leaked");
         hl_audit_end(&w);
     }
     return ret;
