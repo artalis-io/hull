@@ -11,6 +11,21 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* Allocation seam. In the shipped binary op_alloc/op_release are plain libc
+ * calls (zero overhead). Under HL_SMTP_TEST_HOOKS (set only on the unit test's
+ * compile line, via the direct-source include) they route through settable
+ * function pointers so a test can inject a deterministic fail-after-N and
+ * interpose free to prove OOM-path cleanup + scrub-before-release. */
+#ifdef HL_SMTP_TEST_HOOKS
+static void *(*smtp_op_test_alloc)(size_t) = 0;   /* 0 => libc malloc */
+static void  (*smtp_op_test_free)(void *)  = 0;   /* 0 => libc free */
+static void *op_alloc(size_t n)  { return smtp_op_test_alloc ? smtp_op_test_alloc(n) : malloc(n); }
+static void  op_release(void *p) { if (smtp_op_test_free) smtp_op_test_free(p); else free(p); }
+#else
+#define op_alloc(n)   malloc(n)
+#define op_release(p) free(p)
+#endif
+
 /* Volatile-memset scrub, mirroring smtp.c's smtp_secure_zero (static per file):
  * the store is through a volatile pointer so the compiler cannot elide it. */
 static void smtp_op_secure_zero(void *p, size_t n)
@@ -28,7 +43,7 @@ static char *dup_str(const char *s)
     if (!s)
         return NULL;
     size_t n = strlen(s);
-    char *c = malloc(n + 1);
+    char *c = op_alloc(n + 1);
     if (!c)
         return NULL;
     memcpy(c, s, n + 1);
@@ -47,21 +62,21 @@ static void op_destroy(HlSmtpOp *op)
         smtp_op_secure_zero(op->password, strlen(op->password));
     if (op->body)
         smtp_op_secure_zero(op->body, strlen(op->body));
-    free(op->username);
-    free(op->password);
-    free(op->body);
-    free(op->host);
-    free(op->from);
-    free(op->to);
-    free(op->reply_to);
-    free(op->subject);
-    free(op->content_type);
+    op_release(op->username);
+    op_release(op->password);
+    op_release(op->body);
+    op_release(op->host);
+    op_release(op->from);
+    op_release(op->to);
+    op_release(op->reply_to);
+    op_release(op->subject);
+    op_release(op->content_type);
     if (op->cc) {
         for (int i = 0; i < op->cc_count; i++)
-            free(op->cc[i]);   /* free(NULL) is safe for unfilled slots */
-        free(op->cc);
+            op_release(op->cc[i]);   /* op_release(NULL) is safe for unfilled slots */
+        op_release(op->cc);
     }
-    free(op);
+    op_release(op);
 }
 
 void hl_smtp_op_free(HlSmtpOp *op)
@@ -74,9 +89,10 @@ HlSmtpOp *hl_smtp_op_create(const HlSmtpMessage *msg, int timeout_ms)
     if (!msg)
         return NULL;
 
-    HlSmtpOp *op = calloc(1, sizeof *op);
+    HlSmtpOp *op = op_alloc(sizeof *op);
     if (!op)
         return NULL;
+    memset(op, 0, sizeof *op);
 
     op->port       = msg->port;
     op->use_tls    = msg->use_tls;
@@ -101,11 +117,12 @@ HlSmtpOp *hl_smtp_op_create(const HlSmtpMessage *msg, int timeout_ms)
 #undef CP
 
     if (msg->cc && msg->cc_count > 0) {
-        op->cc = calloc((size_t)msg->cc_count, sizeof(char *));
+        op->cc = op_alloc((size_t)msg->cc_count * sizeof(char *));
         if (!op->cc)
             goto oom;
+        memset(op->cc, 0, (size_t)msg->cc_count * sizeof(char *));
         /* Set the count BEFORE filling so op_destroy frees every slot (NULL
-         * slots are free(NULL)-safe) if a mid-vector copy OOMs. */
+         * slots are op_release(NULL)-safe) if a mid-vector copy OOMs. */
         op->cc_count = msg->cc_count;
         for (int i = 0; i < msg->cc_count; i++) {
             if (msg->cc[i]) {

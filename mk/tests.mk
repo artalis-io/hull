@@ -173,6 +173,16 @@ $(BUILDDIR)/test_smtp_transport: $(TESTDIR)/hull/cap/test_smtp_transport.c \
     $(SRCDIR)/hull/cap/smtp.c $(SRCDIR)/hull/cap/smtp_transport.c $(SMTP_TP_TEST_DEPS) | $(BUILDDIR)
 	$(CC) $(CFLAGS) -DHL_SMTP_TEST_HOOKS $(INCLUDES) -I$(VENDDIR) -o $@ $< $(SMTP_TP_TEST_LIBS) $(LDFLAGS)
 
+# SMTP op test: direct-includes src/hull/cap/smtp_op.c under -DHL_SMTP_TEST_HOOKS
+# to drive its allocation seam (the deterministic fail-after-N sweep + scrub
+# interposer). cap_smtp_op.o is EXCLUDED from this test's link so the
+# direct-included definitions do not collide (mirrors test_smtp_transport).
+SMTP_OP_TEST_LIBS := $(filter-out $(BUILDDIR)/cap_smtp_op.o,$(TEST_COMMON_LIBS))
+SMTP_OP_TEST_DEPS := $(filter-out $(BUILDDIR)/cap_smtp_op.o,$(TEST_COMMON_DEPS))
+$(BUILDDIR)/test_smtp_op: $(TESTDIR)/hull/cap/test_smtp_op.c \
+    $(SRCDIR)/hull/cap/smtp_op.c $(SMTP_OP_TEST_DEPS) | $(BUILDDIR)
+	$(CC) $(CFLAGS) -DHL_SMTP_TEST_HOOKS $(INCLUDES) -I$(VENDDIR) -o $@ $< $(SMTP_OP_TEST_LIBS) $(LDFLAGS)
+
 # TUI cap-layer tests: cap/tui.c + tui_input.c + tui_width.c are filtered out of
 # CAP_OBJS on the default (TUI-free) base - they live only in the composable
 # feature archive. These tests call hl_cap_tui_* directly, so link the three TUI
