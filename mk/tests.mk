@@ -749,16 +749,26 @@ endif
 msan:
 	$(MAKE) clean
 	$(MAKE) -C $(KEEL_DIR) clean
-	$(MAKE) -C $(KEEL_DIR) CC=clang \
+	# Build Keel (and its compiled vendored components, e.g. llhttp) WITH the
+	# same MSan instrumentation Hull applies to every read-path TU it compiles
+	# itself (mbedTLS / QuickJS / Lua / SQLite / sh_arena / ...). Keel v3 is now a
+	# central Hull transport substrate - the server event loop AND the socket
+	# provider the SMTP/HTTP clients drive - so leaving libkeel.a uninstrumented
+	# blinds MSan to Keel's socket/TLS/stream code and yields boundary false
+	# positives (a store to a getsockopt operand in uninstrumented code reads as
+	# poisoned). MSan has no suppressions for use-of-uninitialized-value, so the
+	# only correct fix is to instrument Keel, not to hide the report. The
+	# sanitizer rides on CC so BOTH Keel's own TUs and its vendored llhttp are
+	# instrumented (the compile rules are `$(CC) $(CFLAGS)` / `$(CC)
+	# $(VENDOR_CFLAGS)`); Keel -> mbedTLS is then instrumented -> instrumented
+	# (Hull compiles the mbedTLS objects under MSan below). WAMR stays the sole
+	# uninstrumented substrate (handled via HL_MSAN); Keel does not call it. The
+	# MSan runtime itself is linked by Hull's final test link.
+	$(MAKE) -C $(KEEL_DIR) \
+		CC="clang -g -fsanitize=memory,undefined -fno-omit-frame-pointer" \
 		KEEL_TLS=mbedtls MBEDTLS_DIR=$(abspath $(MBEDTLS_DIR)) MBEDTLS_CONFIG_FILE=hull_config.h \
 		KEEL_COMPRESS=miniz MINIZ_DIR=$(CURDIR)/$(MINIZ_DIR)
-	# libkeel.a is built above WITHOUT MSan (like WAMR); the suppressions file
-	# scopes out the one provable false positive that leaves - the getsockopt
-	# SO_ERROR check in Keel's uninstrumented socket provider. See the file's
-	# header. The env var is inherited by each ./build/test_* the `test` recipe
-	# runs.
-	MSAN_OPTIONS=suppressions=$(abspath tests/msan_suppressions.txt) \
-		$(MAKE) CC=clang MSAN=1 test
+	$(MAKE) CC=clang MSAN=1 test
 
 # ThreadSanitizer - validate the worker-pool / shared-state paths under a
 # real race detector. Targeted at the suites that actually spin worker
