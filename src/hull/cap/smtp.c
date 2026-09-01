@@ -33,6 +33,17 @@
 
 #include "log.h"
 
+/* ── Credential scrubbing ────────────────────────────────────────────
+ * hull_secure_zero is static-in-crypto.c, so keep a local volatile-memset
+ * loop here for scrubbing AUTH material off the stack. `volatile` on the
+ * pointer stops the compiler from eliding the write as a dead store. */
+static void smtp_secure_zero(void *p, size_t n)
+{
+    volatile unsigned char *q = (volatile unsigned char *)p;
+    while (n--)
+        *q++ = 0;
+}
+
 /* ── CRLF injection guard ────────────────────────────────────────── */
 
 static int has_crlf(const char *s)
@@ -248,10 +259,12 @@ static int smtp_validate_message(const HlSmtpMessage *msg)
         !msg->subject || !msg->body)
         return -1;
 
-    /* CRLF injection guard on all header-injectable fields */
+    /* CRLF injection guard on all header-injectable fields. content_type is
+     * optional but flows into the Content-Type MIME header, so it must be
+     * checked too (has_crlf treats NULL as clean). */
     if (has_crlf(msg->host) || has_crlf(msg->from) ||
         has_crlf(msg->to) || has_crlf(msg->subject) ||
-        has_crlf(msg->reply_to))
+        has_crlf(msg->reply_to) || has_crlf(msg->content_type))
         return -1;
 
     /* Check CC recipients for CRLF */
@@ -267,6 +280,70 @@ static int smtp_validate_message(const HlSmtpMessage *msg)
         return -1;
 
     return 0;
+}
+
+/* ── AUTH PLAIN (credential-scrubbing helper) ────────────────────────
+ * Build base64(\0user\0pass), issue "AUTH PLAIN <b64>\r\n", and check the 235
+ * reply. All secret-bearing stack buffers (the raw AUTH PLAIN bytes, the base64
+ * text, AND the command line) are scrubbed on EVERY exit via one cleanup path.
+ * @p username / @p password are borrowed (caller-owned) and never scrubbed.
+ * Returns 0 on success, -1 on any failure; on failure *err_msg is set to a
+ * stable token. */
+static int smtp_do_auth_plain(HlSmtpTransport *t, const char *username,
+                              const char *password, int timeout_ms,
+                              const char **err_msg)
+{
+    int ret = -1;
+    unsigned char plain[1026];
+    char          b64[1400];
+    char          cmd[HL_SMTP_SEND_BUF_SIZE];
+
+    /* AUTH PLAIN: base64(\0username\0password) */
+    size_t ulen = strlen(username);
+    size_t plen = strlen(password);
+    size_t plain_len = 1 + ulen + 1 + plen;
+
+    if (plain_len > 1024) {
+        log_warn("smtp: AUTH PLAIN credentials too long");
+        if (err_msg) *err_msg = "auth_credentials_too_long";
+        goto cleanup;
+    }
+
+    plain[0] = '\0';
+    memcpy(plain + 1, username, ulen);
+    plain[1 + ulen] = '\0';
+    memcpy(plain + 2 + ulen, password, plen);
+
+    int b64_len = hl_smtp_base64_encode(plain, (int)plain_len,
+                                        b64, (int)sizeof(b64));
+    if (b64_len < 0) {
+        log_warn("smtp: AUTH PLAIN base64 encode failed");
+        if (err_msg) *err_msg = "auth_encode_failed";
+        goto cleanup;
+    }
+
+    int n = snprintf(cmd, sizeof(cmd), "AUTH PLAIN %s\r\n", b64);
+    if (n < 0 || (size_t)n >= sizeof(cmd)) {
+        log_warn("smtp: AUTH PLAIN credentials too large for send buffer");
+        if (err_msg) *err_msg = "auth_encode_failed";
+        goto cleanup;
+    }
+
+    int code = smtp_command(t, cmd, 235, timeout_ms);
+    if (code < 0) {
+        log_warn("smtp: AUTH PLAIN failed");
+        if (err_msg) *err_msg = "auth_failed";
+        goto cleanup;
+    }
+
+    ret = 0;
+
+cleanup:
+    /* Scrub every secret-bearing buffer on success AND on each failure path. */
+    smtp_secure_zero(plain, sizeof plain);
+    smtp_secure_zero(b64,   sizeof b64);
+    smtp_secure_zero(cmd,   sizeof cmd);
+    return ret;
 }
 
 /* ── Public API ──────────────────────────────────────────────────── */
@@ -388,42 +465,11 @@ int hl_cap_smtp_send(const HlSmtpConfig *cfg, const HlSmtpMessage *msg,
             goto cleanup;
         }
 
-        /* AUTH PLAIN: base64(\0username\0password) */
-        size_t ulen = strlen(msg->username);
-        size_t plen = strlen(msg->password);
-        size_t plain_len = 1 + ulen + 1 + plen;
-
-        if (plain_len > 1024) {
-            log_warn("smtp: AUTH PLAIN credentials too long");
-            if (err_msg) *err_msg = "auth_credentials_too_long";
-            goto cleanup;
-        }
-
-        unsigned char plain[1026];
-        plain[0] = '\0';
-        memcpy(plain + 1, msg->username, ulen);
-        plain[1 + ulen] = '\0';
-        memcpy(plain + 2 + ulen, msg->password, plen);
-
-        char b64[1400];
-        int b64_len = hl_smtp_base64_encode(plain, (int)plain_len,
-                                            b64, (int)sizeof(b64));
-        if (b64_len < 0) {
-            log_warn("smtp: AUTH PLAIN base64 encode failed");
-            if (err_msg) *err_msg = "auth_encode_failed";
-            goto cleanup;
-        }
-
-        int n = snprintf(cmd, sizeof(cmd), "AUTH PLAIN %s\r\n", b64);
-        if (n < 0 || (size_t)n >= sizeof(cmd)) {
-            log_warn("smtp: AUTH PLAIN credentials too large for send buffer");
-            if (err_msg) *err_msg = "auth_encode_failed";
-            goto cleanup;
-        }
-        code = smtp_command(t, cmd, 235, timeout_ms);
-        if (code < 0) {
-            log_warn("smtp: AUTH PLAIN failed");
-            if (err_msg) *err_msg = "auth_failed";
+        /* AUTH PLAIN construction + send + credential scrub live in one helper
+         * with a single cleanup exit (fix 9): the raw AUTH bytes, the base64
+         * text, and the command line are all scrubbed on every path. */
+        if (smtp_do_auth_plain(t, msg->username, msg->password,
+                               timeout_ms, err_msg) != 0) {
             goto cleanup;
         }
     }

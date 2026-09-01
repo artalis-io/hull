@@ -75,11 +75,14 @@ int hl_smtp_transport_implicit_tls(HlSmtpTransport *t, const char *host,
 /**
  * In-place STARTTLS upgrade on the live plaintext connection.
  *
- * Preconditions the caller guarantees: it has sent "STARTTLS\r\n", read the 220
- * reply, and holds no buffered plaintext past that reply. This pauses the
- * plaintext read side and hands the socket to the TLS session BEFORE any further
- * plaintext read can consume ClientHello bytes (Slice 2b invariant 2), then
- * drives the handshake to completion.
+ * Preconditions the caller guarantees: it has sent "STARTTLS\r\n" and read the
+ * 220 reply. This does NOT trust that precondition for the buffer: it REQUIRES
+ * the plaintext read accumulator to be empty and ABORTS fail-closed (returns -1,
+ * no upgrade) if any bytes are buffered past the 220 (a STARTTLS-injection
+ * attempt). On the empty-buffer path it pauses the plaintext read side and hands
+ * the socket to the TLS session BEFORE any further plaintext read can consume
+ * ClientHello bytes (Slice 2b invariant 2), then drives the handshake to
+ * completion.
  *
  * @p tls_cfg / @p host as in hl_smtp_transport_implicit_tls.
  *

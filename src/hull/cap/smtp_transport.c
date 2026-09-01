@@ -47,6 +47,7 @@
 #include <keel/tls.h>
 #include <keel/error.h>
 #include <keel/allocator.h>
+#include <keel/clock.h>   /* kl_monotonic_ms: monotonic per-stage deadlines */
 #include <keel_tls_mbedtls.h>
 
 /* Resolution is a sandbox-compatible BLOCKING getaddrinfo, kept out of
@@ -124,6 +125,21 @@ static KlAllocator *persistent_tls_alloc(void)
 #define SMTP_MAX_LINE     HL_SMTP_RECV_BUF_SIZE   /* 1024: one reply line cap */
 #define SMTP_MAX_REPLY    8192                     /* whole multiline response cap */
 
+/* Bounded chunked write admission (fix: message-size regression). The KlStream
+ * write queue is fixed at SMTP_WRITE_QUEUE_BYTES; a formatted message may be up
+ * to HL_SMTP_MAX_MSG_SIZE (10 MiB), and kl_stream_write is atomic (a single
+ * write larger than the queue returns KL_STREAM_TOO_LARGE). So the write path
+ * admits the payload in SMTP_WRITE_CHUNK-sized pieces, draining the queue
+ * between chunks, keeping total queued memory bounded (never enlarging the queue
+ * to 10 MiB). */
+#define SMTP_WRITE_QUEUE_BYTES  (4 * 1024 * 1024)   /* KlStream write-queue size */
+#define SMTP_WRITE_CHUNK        (256 * 1024)        /* per-admission chunk */
+
+/* RFC 8305 Connection Attempt Delay: how long to wait before starting the next
+ * address while an earlier attempt is still in flight (the Happy Eyeballs
+ * stagger). ~250 ms is the RFC-recommended default. */
+#define SMTP_CONNECT_ATTEMPT_DELAY_MS  250
+
 typedef struct {
     char   buf[SMTP_MAX_REPLY + SMTP_MAX_LINE];  /* accumulator (+1 line of slack) */
     size_t len;
@@ -176,6 +192,13 @@ static int reply_acc_take(SmtpReplyAcc *a, char *out, int out_size)
         if (line_len < 2 || a->buf[scan + line_len - 2] != '\r')
             return -1;   /* not CRLF-terminated */
 
+        /* Whole-response bound BEFORE accepting THIS line (including the
+         * terminal one): a reply must never exceed SMTP_MAX_REPLY on ANY line.
+         * (The old code only bounded continuation lines, so a terminal reply
+         * could grow past the cap.) */
+        if (scan + line_len > SMTP_MAX_REPLY)
+            return -1;
+
         int line_code = hl_smtp_parse_response(a->buf + scan, (int)line_len);
         if (line_code < 0)
             return -1;
@@ -186,11 +209,25 @@ static int reply_acc_take(SmtpReplyAcc *a, char *out, int out_size)
             return -1;   /* continuation code must match (RFC 5321) */
         }
 
-        /* Continuation ('-' after the code) vs terminating (' ' or bare). */
-        int is_continuation = (line_len >= 4 && a->buf[scan + 3] == '-');
+        /* The 4th char decides continuation vs termination and must be EXACTLY:
+         *   NNN-       -> continuation
+         *   NNN<space> -> termination
+         *   NNN\r\n    -> termination (a bare 3-digit line; line_len == 5)
+         * Any other 4th char (e.g. "250X...") is malformed: fail closed. */
+        int is_continuation;
+        if (line_len == 5) {
+            /* Exactly "NNN\r\n": a bare code line terminates. */
+            is_continuation = 0;
+        } else {
+            char sep = a->buf[scan + 3];
+            if (sep == '-')
+                is_continuation = 1;
+            else if (sep == ' ')
+                is_continuation = 0;
+            else
+                return -1;   /* malformed 4th character */
+        }
         scan += line_len;
-
-        if (a->len - (scan - line_len) == 0) { /* defensive: cannot happen */ }
 
         if (!is_continuation) {
             /* Complete reply: copy [0, scan) into out, drop it from the front. */
@@ -206,10 +243,6 @@ static int reply_acc_take(SmtpReplyAcc *a, char *out, int out_size)
             a->buf[a->len] = '\0';
             return code;
         }
-
-        /* Guard the whole-response bound while gathering continuations. */
-        if (scan > SMTP_MAX_REPLY)
-            return -1;
     }
 }
 
@@ -231,8 +264,10 @@ struct HlSmtpTransport {
     KlAllocator   alloc;         /* op-local write-queue allocator (loop lifetime) */
 
     KlConnectOp   connect_op;    /* embedded (connect_op_detail.h: storage only) */
+    int           connect_started;  /* 1 once kl_connect_op_start succeeded */
     KlStream      stream;        /* embedded (stream_detail.h: storage only) */
     int           stream_up;     /* 1 once the stream was brought up */
+    int           write_q_inited;/* 1 once kl_stream_write_init succeeded (fix 8) */
 
     /* Resolution: a system-resolved address list KlConnectOp races. */
     KlSockAddr    addrs[KL_CONNECT_MAX_ADDRS];
@@ -253,6 +288,9 @@ struct HlSmtpTransport {
     int64_t       deadline_timer;
     uint64_t      deadline_ms;
     int           deadline_fired;
+
+    /* RFC 8305 Connection Attempt Delay timer (the Happy Eyeballs stagger). */
+    int64_t       delay_timer;
 
     /* Read side: stable KlStream buffer + the incremental reply accumulator. */
     char          read_buf[4096];
@@ -444,8 +482,13 @@ static int tp_stream_bringup(HlSmtpTransport *t)
 {
     if (kl_stream_init(&t->stream, t->read_buf, sizeof t->read_buf) != 0)
         return -1;
-    if (kl_stream_write_init(&t->stream, &t->alloc, 4 * 1024 * 1024) != 0)
+    /* Fix 8: record the write-queue init INDEPENDENTLY of stream_up. If a later
+     * facet init fails below, stream_up stays 0 but the write queue is already
+     * allocated; teardown frees it iff write_q_inited (never leaks a partial
+     * bring-up). */
+    if (kl_stream_write_init(&t->stream, &t->alloc, SMTP_WRITE_QUEUE_BYTES) != 0)
         return -1;
+    t->write_q_inited = 1;
     if (kl_stream_set_writer(&t->stream, tp_stream_write, t) != 0)
         return -1;
     if (kl_stream_read_init(&t->stream, /*completion_mode=*/0,
@@ -476,8 +519,22 @@ static int tp_tls_begin_handshake(HlSmtpTransport *t, const char *host, void *tl
     t->tls = cfg->factory(cfg->ctx, persistent_tls_alloc());
     if (!t->tls)
         return -1;
-    if (host && host[0] && t->tls->set_hostname)
-        t->tls->set_hostname(t->tls, host);
+    /* Fix 7: validate the returned vtable right after the factory. An invalid
+     * vtable (a backend missing a required op) must abort, not be driven. */
+    if (!kl_tls_vtable_valid(t->tls)) {
+        t->tls->destroy(t->tls);
+        t->tls = NULL;
+        return -1;
+    }
+    /* Fix 7: set_hostname is required for SNI + certificate/hostname
+     * verification; a failure to set it must abort (never handshake without the
+     * expected identity, which would defeat verify-full). */
+    if (host && host[0] && t->tls->set_hostname &&
+        t->tls->set_hostname(t->tls, host) != 0) {
+        t->tls->destroy(t->tls);
+        t->tls = NULL;
+        return -1;
+    }
 
     t->tls_handshaking = 1;
     t->tls_done = 0;
@@ -512,15 +569,18 @@ static void tp_tls_drive_handshake(HlSmtpTransport *t)
         }
         t->tls_up = 1;
         /* Hand the fd back to the stream read watcher (now via tls->read/write)
-         * and resume the raw read side. */
+         * and resume the raw read side. Fix 7: if EITHER the watcher re-arm OR
+         * the stream resume fails, the stream is not reattached - do NOT report
+         * TLS success; fail closed with an abortive close. */
         t->stream_ws.armed = 0;
         t->stream_ws.mask  = 0;
-        if (stream_watch_set(t, KL_EVENT_READ) != 0) {
+        if (stream_watch_set(t, KL_EVENT_READ) != 0 ||
+            kl_stream_resume(&t->stream) != 0) {
             t->tls_up = 0;
             t->tls_failed = 1;
+            kl_stream_cancel(&t->stream);
             return;
         }
-        kl_stream_resume(&t->stream);
         return;
     }
     if (r == KL_TLS_ERROR) {
@@ -701,6 +761,36 @@ static void co_on_deadline_fired(void *user_data)
     t->deadline_fired = 1;
     kl_connect_op_on_deadline(&t->connect_op, (int)KL_ERR_TIMEOUT);
 }
+
+/* ── RFC 8305 Connection Attempt Delay (Happy Eyeballs stagger) ─────────────
+ * arm_delay schedules a ~250 ms timer while an attempt is in flight; on fire it
+ * tells the connect op to start the NEXT address (racing), rather than waiting
+ * for the earlier attempt to fail (sequential fallback). cancel_delay retires
+ * the timer synchronously (required by the KlConnectOp contract when arm_delay
+ * is set). */
+static void co_on_delay_fired(void *user_data)
+{
+    HlSmtpTransport *t = user_data;
+    t->delay_timer = -1;
+    kl_connect_op_on_delay(&t->connect_op);
+}
+static int co_arm_delay(void *ctx)
+{
+    HlSmtpTransport *t = ctx;
+    t->delay_timer = kl_timer_add(&t->ev, SMTP_CONNECT_ATTEMPT_DELAY_MS,
+                                  co_on_delay_fired, t);
+    if (t->delay_timer < 0)
+        return -1;   /* arm failed: the machine fast-starts the next address */
+    return 0;
+}
+static void co_cancel_delay(void *ctx)
+{
+    HlSmtpTransport *t = ctx;
+    if (t->delay_timer >= 0) {
+        kl_timer_cancel(&t->ev, t->delay_timer);
+        t->delay_timer = -1;
+    }
+}
 static int co_arm_deadline(void *ctx, int *out_err)
 {
     HlSmtpTransport *t = ctx;
@@ -745,8 +835,8 @@ static const KlConnectOpHooks SMTP_CONNECT_HOOKS = {
     .start_attempt   = co_start_attempt,
     .cancel_attempt  = co_cancel_attempt,
     .dispose_fd      = co_dispose_fd,
-    .arm_delay       = NULL,
-    .cancel_delay    = NULL,
+    .arm_delay       = co_arm_delay,
+    .cancel_delay    = co_cancel_delay,
     .arm_deadline    = co_arm_deadline,
     .cancel_deadline = co_cancel_deadline,
     .on_done         = co_on_done,
@@ -754,10 +844,20 @@ static const KlConnectOpHooks SMTP_CONNECT_HOOKS = {
 };
 
 /* ────────────────────────────────────────────────────────────────────────────
- * Event-loop pump. Runs the private KlEventCtx until @p done() or the tick
- * bound is hit. The tick bound derives from the deadline so a dead peer cannot
- * hang the synchronous caller. Each kl_event_ctx_run waits up to `step_ms` for
- * readiness, so `maxticks` * step_ms >= timeout budget.
+ * Event-loop pump. Runs the private KlEventCtx until @p done() or the per-stage
+ * deadline elapses so a dead peer cannot hang the synchronous caller.
+ *
+ * The deadline is a MONOTONIC ABSOLUTE instant (kl_monotonic_ms() + budget),
+ * NOT an accumulation of assumed tick durations: kl_event_ctx_run may return
+ * early (readiness arrived) or late (a timer fired), so summing step_ms would
+ * drift. Each kl_event_ctx_run waits up to step_ms for readiness; the signature
+ * is (ctx, max_events, timeout_ms) - max_events 64, timeout step_ms.
+ *
+ * This bounds ONE stage. The hard TOTAL-operation deadline ceiling (question 1
+ * in the design record) is deferred to Slice 2c; only per-stage monotonic
+ * deadlines land now. NOTE: getaddrinfo runs blocking on the calling thread
+ * (see resolve_addrs); this per-stage deadline does NOT bound DNS resolution -
+ * Slice 2c must move resolution off the calling thread.
  * ────────────────────────────────────────────────────────────────────────── */
 
 typedef int (*DonePred)(HlSmtpTransport *t);
@@ -766,13 +866,12 @@ static int pump_until(HlSmtpTransport *t, DonePred done, int timeout_ms)
 {
     const int step_ms = 50;
     int budget = timeout_ms > 0 ? timeout_ms : HL_SMTP_DEFAULT_TIMEOUT_MS;
-    int elapsed = 0;
+    uint64_t deadline = kl_monotonic_ms() + (uint64_t)budget;
     while (!done(t)) {
-        int rc = kl_event_ctx_run(&t->ev, step_ms, 64);
+        int rc = kl_event_ctx_run(&t->ev, 64, step_ms);
         if (rc < 0)
             return -1;
-        elapsed += step_ms;
-        if (elapsed >= budget && !done(t))
+        if (kl_monotonic_ms() >= deadline && !done(t))
             return -1;   /* deadline: caller maps to its per-stage token */
     }
     return 0;
@@ -793,6 +892,8 @@ static int done_write(HlSmtpTransport *t)
 { return kl_stream_write_pending(&t->stream) == 0 || t->write_error || t->read_eof; }
 static int done_tls(HlSmtpTransport *t)      { return t->tls_done; }
 static int done_detached(HlSmtpTransport *t) { return t->closed; }
+static int done_connect_detached(HlSmtpTransport *t)
+{ return kl_connect_op_is_detached(&t->connect_op); }
 
 /* ────────────────────────────────────────────────────────────────────────────
  * Public API.
@@ -810,6 +911,7 @@ HlSmtpTransport *hl_smtp_transport_connect(const char *host, int port, int timeo
     t->alloc = kl_allocator_default();
     t->fd = KL_INVALID_SOCKET;
     t->deadline_timer = -1;
+    t->delay_timer = -1;
     t->deadline_ms = (uint64_t)(timeout_ms > 0 ? timeout_ms : HL_SMTP_DEFAULT_TIMEOUT_MS);
     t->connect_result = KL_CONNECT_CANCELLED;
     for (int i = 0; i < KL_CONNECT_MAX_ADDRS; i++)
@@ -825,11 +927,17 @@ HlSmtpTransport *hl_smtp_transport_connect(const char *host, int port, int timeo
     /* Sandbox-compatible blocking system resolve, inline before start. */
     t->naddrs = resolve_addrs(t, host, port);
 
-    if (kl_connect_op_init(&t->connect_op, &SMTP_CONNECT_HOOKS, t) != 0 ||
-        kl_connect_op_start(&t->connect_op) != 0) {
+    if (kl_connect_op_init(&t->connect_op, &SMTP_CONNECT_HOOKS, t) != 0) {
         hl_smtp_transport_free(t);
         return NULL;
     }
+    if (kl_connect_op_start(&t->connect_op) != 0) {
+        hl_smtp_transport_free(t);
+        return NULL;
+    }
+    /* Fix 2: the op is now live; teardown must cancel it and confirm detachment
+     * before releasing its embedded storage. */
+    t->connect_started = 1;
 
     if (pump_until(t, done_connect, timeout_ms) != 0 ||
         t->connect_result != KL_CONNECT_SUCCESS || !t->stream_up) {
@@ -837,6 +945,29 @@ HlSmtpTransport *hl_smtp_transport_connect(const char *host, int port, int timeo
         return NULL;
     }
     return t;
+}
+
+/* Fail-closed cleanup when a TLS handshake never completed (begin failed, or the
+ * pump timed out mid-handshake). Fix 7: explicitly remove the dedicated
+ * handshake watcher BEFORE destroying the KlTls and closing the fd, then abort
+ * the stream. Fix 6: NO plaintext fallback / NO kl_stream_resume - the stream is
+ * cancelled (abortive close), never resumed in plaintext. */
+static void tp_tls_abort(HlSmtpTransport *t)
+{
+    if (t->hs_watch_armed) {
+        kl_watcher_del(&t->ev, t->fd);
+        t->hs_watch_armed = 0;
+        t->stream_ws.armed = 0;
+        t->stream_ws.mask  = 0;
+    }
+    if (t->tls) {
+        t->tls->destroy(t->tls);
+        t->tls = NULL;
+    }
+    t->tls_up = 0;
+    t->tls_handshaking = 0;
+    t->tls_failed = 1;
+    kl_stream_cancel(&t->stream);   /* fail closed; no plaintext continuation */
 }
 
 int hl_smtp_transport_implicit_tls(HlSmtpTransport *t, const char *host,
@@ -847,11 +978,13 @@ int hl_smtp_transport_implicit_tls(HlSmtpTransport *t, const char *host,
     /* Pause the raw read side; the handshake owns the fd (no app bytes yet). */
     kl_stream_pause(&t->stream);
     if (tp_tls_begin_handshake(t, host, tls_cfg) != 0) {
-        kl_stream_resume(&t->stream);
+        tp_tls_abort(t);
         return -1;
     }
-    if (pump_until(t, done_tls, timeout_ms) != 0 || t->tls_failed || !t->tls_up)
+    if (pump_until(t, done_tls, timeout_ms) != 0 || t->tls_failed || !t->tls_up) {
+        tp_tls_abort(t);
         return -1;
+    }
     return 0;
 }
 
@@ -860,16 +993,27 @@ int hl_smtp_transport_starttls(HlSmtpTransport *t, const char *host,
 {
     if (!t || !t->stream_up || t->tls_up)
         return -1;
-    /* INVARIANT 2: pause plaintext reads FIRST, before handing the fd to TLS,
-     * so no plaintext read can consume ClientHello bytes. The caller guarantees
-     * no plaintext is buffered past the STARTTLS 220 reply. */
-    kl_stream_pause(&t->stream);
-    if (tp_tls_begin_handshake(t, host, tls_cfg) != 0) {
-        kl_stream_resume(&t->stream);
+    /* Fix 6: the caller has consumed the STARTTLS 220 reply; require the
+     * plaintext accumulator to be EMPTY. Any buffered bytes past the 220 are a
+     * STARTTLS-injection attempt (a MITM prepending plaintext to the ciphertext
+     * boundary) - abort fail-closed and do NOT upgrade. Do not rely on the
+     * caller's stated precondition. */
+    if (t->acc.len != 0 || t->acc.overflow) {
+        kl_stream_cancel(&t->stream);
+        t->tls_failed = 1;
         return -1;
     }
-    if (pump_until(t, done_tls, timeout_ms) != 0 || t->tls_failed || !t->tls_up)
+    /* INVARIANT 2: pause plaintext reads FIRST, before handing the fd to TLS,
+     * so no plaintext read can consume ClientHello bytes. */
+    kl_stream_pause(&t->stream);
+    if (tp_tls_begin_handshake(t, host, tls_cfg) != 0) {
+        tp_tls_abort(t);
         return -1;
+    }
+    if (pump_until(t, done_tls, timeout_ms) != 0 || t->tls_failed || !t->tls_up) {
+        tp_tls_abort(t);
+        return -1;
+    }
     return 0;
 }
 
@@ -885,9 +1029,42 @@ int hl_smtp_transport_write(HlSmtpTransport *t, const void *data, size_t len,
         return -1;
     if (len == 0)
         return 0;
-    KlStreamWriteStatus st = kl_stream_write(&t->stream, (const char *)data, len);
-    if (st != KL_STREAM_ACCEPTED)
-        return -1;
+
+    /* Fix 1: BOUNDED CHUNKED ADMISSION with ordered drain. kl_stream_write is
+     * atomic and the write queue is SMTP_WRITE_QUEUE_BYTES; a single >queue
+     * write returns KL_STREAM_TOO_LARGE. So admit the payload in
+     * SMTP_WRITE_CHUNK pieces, draining pending bytes between chunks so total
+     * queued memory stays bounded (never the whole 10 MiB message). External
+     * contract unchanged: 0 iff every byte is sent, -1 on error/timeout. */
+    const char *p = (const char *)data;
+    size_t remaining = len;
+    while (remaining > 0) {
+        /* Drain what is already queued before admitting the next chunk, so the
+         * queue has room and bounded memory is held at any instant. A dead peer
+         * trips the per-stage deadline in pump_until. */
+        if (kl_stream_write_pending(&t->stream) > 0) {
+            if (pump_until(t, done_write, timeout_ms) != 0)
+                return -1;
+            if (t->write_error || t->read_eof)
+                return -1;
+        }
+        size_t chunk = remaining < SMTP_WRITE_CHUNK ? remaining : SMTP_WRITE_CHUNK;
+        KlStreamWriteStatus st = kl_stream_write(&t->stream, p, chunk);
+        if (st == KL_STREAM_WOULD_BLOCK) {
+            /* No room right now: drain, then retry this same chunk. */
+            if (pump_until(t, done_write, timeout_ms) != 0)
+                return -1;
+            if (t->write_error || t->read_eof)
+                return -1;
+            continue;
+        }
+        if (st != KL_STREAM_ACCEPTED)
+            return -1;   /* TOO_LARGE (chunk <= queue, so never), CLOSED, ERROR */
+        p += chunk;
+        remaining -= chunk;
+    }
+
+    /* Final drain: every admitted byte must physically leave the queue. */
     if (pump_until(t, done_write, timeout_ms) != 0)
         return -1;
     if (t->write_error || kl_stream_write_pending(&t->stream) != 0)
@@ -939,6 +1116,24 @@ void hl_smtp_transport_free(HlSmtpTransport *t)
         pump_until(t, done_detached, HL_SMTP_DEFAULT_TIMEOUT_MS);
     }
 
+    /* Fix 2: the connect op owns any racing descriptors + the delay/deadline
+     * timers. If it was started and has NOT yet reached confirmed detachment
+     * (connect failed/cancelled mid-race, or the stream never came up), we may
+     * NOT free its embedded storage or the event ctx until it detaches: cancel
+     * it (retiring every racing fd via its cancel_attempt/dispose_fd hooks and
+     * both timers via cancel_delay/cancel_deadline), then pump to detachment.
+     * Fail LOUDLY if it will not detach within the bound rather than silently
+     * freeing storage a live op still references. */
+    if (t->connect_started && !kl_connect_op_is_detached(&t->connect_op)) {
+        kl_connect_op_cancel(&t->connect_op);
+        if (pump_until(t, done_connect_detached, HL_SMTP_DEFAULT_TIMEOUT_MS) != 0 ||
+            !kl_connect_op_is_detached(&t->connect_op)) {
+            log_error("smtp: connect op did not detach within the bound; "
+                      "leaking transport storage rather than freeing a live op");
+            return;   /* fail loud: do NOT free storage the op still references */
+        }
+    }
+
     /* on_close (tp_stream_on_close) frees TLS + fd. Belt-and-suspenders for
      * paths where the stream never came up (e.g. connect failure): retire any
      * TLS + fd + watchers directly. */
@@ -952,7 +1147,10 @@ void hl_smtp_transport_free(HlSmtpTransport *t)
         sp_close(t->fd);
         t->fd = KL_INVALID_SOCKET;
     }
-    /* Any still-racing attempt fds (connect never completed cleanly). */
+    /* Last-resort fallback: the connect op's cancel path already retires racing
+     * attempt fds via cancel_attempt/dispose_fd, so this normally finds none.
+     * It closes any fd that somehow escaped (never-started op, a hook that could
+     * not route ownership). */
     for (int i = 0; i < KL_CONNECT_MAX_ADDRS; i++) {
         if (kl_handle_valid(t->attempt_fd[i])) {
             if (t->conn_ws[i].armed)
@@ -961,11 +1159,18 @@ void hl_smtp_transport_free(HlSmtpTransport *t)
             t->attempt_fd[i] = KL_INVALID_SOCKET;
         }
     }
+    if (t->delay_timer >= 0) {
+        kl_timer_cancel(&t->ev, t->delay_timer);
+        t->delay_timer = -1;
+    }
     if (t->deadline_timer >= 0) {
         kl_timer_cancel(&t->ev, t->deadline_timer);
         t->deadline_timer = -1;
     }
-    if (t->stream_up)
+    /* Fix 8: free the write queue whenever it was initialized, independent of
+     * whether the full stream bring-up completed (a partial bring-up leaves
+     * write_q_inited=1, stream_up=0). */
+    if (t->write_q_inited)
         kl_stream_write_free(&t->stream);
     if (t->ev_ready)
         kl_event_ctx_free(&t->ev);

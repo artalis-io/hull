@@ -156,6 +156,19 @@ $(BUILDDIR)/test_mysql_conn: $(TESTDIR)/hull/cap/test_mysql_conn.c $(SRCDIR)/hul
 		$(TESTDIR)/hull/cap/test_mysql_conn.c $(SRCDIR)/hull/cap/mysql_conn.c \
 		$(SRCDIR)/hull/cap/mysqlwire.c $(PG_CRYPTO_OBJS) $(LDFLAGS)
 
+# SMTP transport test: includes src/hull/cap/smtp.c + smtp_transport.c DIRECTLY
+# (to unit-test their static helpers: the incremental reply parser, the AUTH
+# scrub, the chunked write path). So cap_smtp.o + cap_smtp_transport.o must be
+# EXCLUDED from the common link, else the direct-included definitions collide
+# (mirrors test_pg_conn's direct-source pattern). Everything else (Keel, mbedTLS,
+# the rest of the cap layer) comes from TEST_COMMON_LIBS. The two sources are
+# prerequisites so a change to either rebuilds the test.
+SMTP_TP_TEST_LIBS := $(filter-out $(BUILDDIR)/cap_smtp.o $(BUILDDIR)/cap_smtp_transport.o,$(TEST_COMMON_LIBS))
+SMTP_TP_TEST_DEPS := $(filter-out $(BUILDDIR)/cap_smtp.o $(BUILDDIR)/cap_smtp_transport.o,$(TEST_COMMON_DEPS))
+$(BUILDDIR)/test_smtp_transport: $(TESTDIR)/hull/cap/test_smtp_transport.c \
+    $(SRCDIR)/hull/cap/smtp.c $(SRCDIR)/hull/cap/smtp_transport.c $(SMTP_TP_TEST_DEPS) | $(BUILDDIR)
+	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< $(SMTP_TP_TEST_LIBS) $(LDFLAGS)
+
 # TUI cap-layer tests: cap/tui.c + tui_input.c + tui_width.c are filtered out of
 # CAP_OBJS on the default (TUI-free) base - they live only in the composable
 # feature archive. These tests call hl_cap_tui_* directly, so link the three TUI
