@@ -1,0 +1,51 @@
+name: SMTP spike (Slice 2a cross-platform)
+
+# Authoritative Linux-epoll and Cosmopolitan-APE/poll executions of the throwaway
+# SMTP-to-Keel-v3 feasibility spike (spike/). Closes Slice 2a's requirement that
+# the SAME readiness adapter run on the platforms the single macOS dev host can't
+# exercise. Scoped to the spike branch; does NOT build the whole hull binary, and
+# uses plain ubuntu-latest runners (not the repo's reproducible container) to
+# avoid the snapshot-mirror dependency.
+
+on:
+  push:
+    branches: ['spike/smtp-keel-slice-2a']
+  workflow_dispatch: {}
+
+jobs:
+  linux-epoll:
+    name: Linux epoll (+ poll, plain + ASan)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          submodules: true
+
+      - name: Install toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential clang openssl
+
+      - name: Run SMTP spike (default backend = epoll on Linux)
+        run: sh spike/build.sh
+
+  cosmo-ape:
+    name: Cosmopolitan APE (poll readiness)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          submodules: true
+
+      - name: Install cosmocc
+        run: |
+          COSMOCC_DIR=/opt/cosmo make fetch-cosmocc
+          echo "/opt/cosmo/bin" >> $GITHUB_PATH
+
+      - name: Install openssl
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y openssl
+
+      - name: Run SMTP spike as a Cosmopolitan APE (poll)
+        run: sh spike/build.sh --cosmo
