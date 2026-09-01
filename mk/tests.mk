@@ -193,6 +193,16 @@ $(BUILDDIR)/test_smtp_worker: $(TESTDIR)/hull/cap/test_smtp_worker.c \
     $(SRCDIR)/hull/cap/smtp_worker.c $(SMTP_WORKER_TEST_DEPS) | $(BUILDDIR)
 	$(CC) $(CFLAGS) -DHL_SMTP_TEST_HOOKS $(INCLUDES) -I$(VENDDIR) -o $@ $< $(SMTP_WORKER_TEST_LIBS) $(LDFLAGS)
 
+# SMTP per-worker TLS-context cache: direct-includes src/hull/cap/smtp_tls.c
+# under -DHL_SMTP_TEST_HOOKS to substitute fake ctx create/destroy and exercise
+# the cache keying / lazy creation / destruction / failure paths without live
+# mbedTLS. cap_smtp_tls.o is excluded from this test's link.
+SMTP_TLS_TEST_LIBS := $(filter-out $(BUILDDIR)/cap_smtp_tls.o,$(TEST_COMMON_LIBS))
+SMTP_TLS_TEST_DEPS := $(filter-out $(BUILDDIR)/cap_smtp_tls.o,$(TEST_COMMON_DEPS))
+$(BUILDDIR)/test_smtp_tls: $(TESTDIR)/hull/cap/test_smtp_tls.c \
+    $(SRCDIR)/hull/cap/smtp_tls.c $(SMTP_TLS_TEST_DEPS) | $(BUILDDIR)
+	$(CC) $(CFLAGS) -DHL_SMTP_TEST_HOOKS $(INCLUDES) -I$(VENDDIR) -o $@ $< $(SMTP_TLS_TEST_LIBS) $(LDFLAGS)
+
 # TUI cap-layer tests: cap/tui.c + tui_input.c + tui_width.c are filtered out of
 # CAP_OBJS on the default (TUI-free) base - they live only in the composable
 # feature archive. These tests call hl_cap_tui_* directly, so link the three TUI
