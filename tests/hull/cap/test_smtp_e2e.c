@@ -303,16 +303,6 @@ UTEST(smtp_e2e, plain_send)
 static long elapsed_ms(struct timespec *a, struct timespec *b)
 { return (b->tv_sec - a->tv_sec) * 1000 + (b->tv_nsec - a->tv_nsec) / 1000000; }
 
-/* Cancel poll for the deadline-vs-cancel race: returns true once the elapsed time
- * reaches Dop, so cancellation and Dop cross at the SAME pump check. */
-static struct timespec g_cancel_start;
-static int cancel_when_dop_would_fire(void *user)
-{
-    long dop_ms = (long)(intptr_t)user;
-    struct timespec now; clock_gettime(CLOCK_MONOTONIC, &now);
-    return elapsed_ms(&g_cancel_start, &now) >= dop_ms;
-}
-
 /* FROZEN post-resolution operation deadline (Dop, section 8), GREETING stage: a
  * peer accepts the connection (post-resolution) but withholds its 220 greeting, so
  * the greeting read runs until Dop. Public token stays connect_failed;
@@ -345,65 +335,14 @@ UTEST(smtp_e2e, post_resolution_deadline_greeting_stage)
     mock_smtp_stop(&m);
 }
 
-/* Dop on the PENDING-CONNECT phase: a non-routable address (RFC 5737 TEST-NET-1)
- * leaves the connect pending until Dop. The connect fails and the transport is
- * FREED, yet deadline_expired must survive via out_dop_expired (blocker #1).
- * REVERT PROOF: drop the connect-phase propagation and deadline_expired is 0 even
- * though the operation clock fired. On a host that fast-rejects the address
- * (no default route), the connect never reaches Dop - detected as elapsed << Dop -
- * and the Dop assertion is skipped (the interesting path was not exercised). */
-UTEST(smtp_e2e, post_resolution_deadline_pending_connect)
-{
-    HlSmtpMessage msg = {
-        .host = "192.0.2.1", .port = 25, .use_tls = 0,   /* TEST-NET-1, blackholed */
-        .from = "s@example.com", .to = "r@example.com",
-        .subject = "hi", .body = "b", .content_type = "text/plain",
-    };
-
-    struct timespec t0, t1;
-    clock_gettime(CLOCK_MONOTONIC, &t0);
-    HlSmtpResult r;
-    hl_smtp_execute(&msg, NULL, 400, NULL, NULL, &r);   /* Dop = 400ms */
-    clock_gettime(CLOCK_MONOTONIC, &t1);
-    long dt = elapsed_ms(&t0, &t1);
-
-    ASSERT_EQ(r.rc, -1);
-    ASSERT_STREQ(r.token, "connect_failed");
-    if (dt >= 250) {
-        /* The connect was genuinely pending and hit Dop. */
-        ASSERT_EQ(r.deadline_expired, 1);        /* survives connect-path teardown */
-        ASSERT_TRUE(dt < 2000);
-    }
-    /* else: environment fast-rejected TEST-NET-1; Dop path not exercised - skip. */
-}
-
-/* Dop OVERRIDES a raced cancellation (frozen precedence): the cancel poll fires at
- * the same instant Dop expires. The classification order (Dop before cancel) must
- * tag terminal:post_resolution_deadline, never terminal:cancelled.
- * REVERT PROOF: check cancel before Dop and deadline_expired is 0 here. */
-UTEST(smtp_e2e, post_resolution_deadline_beats_cancel)
-{
-    MockSmtp m;
-    ASSERT_EQ(0, mock_smtp_start(&m));
-    m.withhold_greeting = 1;
-
-    HlSmtpMessage msg = {
-        .host = "127.0.0.1", .port = m.port, .use_tls = 0,
-        .from = "s@example.com", .to = "r@example.com",
-        .subject = "hi", .body = "b", .content_type = "text/plain",
-    };
-
-    clock_gettime(CLOCK_MONOTONIC, &g_cancel_start);
-    HlSmtpResult r;
-    /* Dop = 300ms; the cancel poll also flips true at ~300ms, so both fire at the
-     * same pump check. Dop wins per section 8. */
-    hl_smtp_execute(&msg, NULL, 300, cancel_when_dop_would_fire,
-                    (void *)(intptr_t)300, &r);
-
-    ASSERT_EQ(r.rc, -1);
-    ASSERT_EQ(r.deadline_expired, 1);            /* Dop wins the race; revert -> 0 */
-    mock_smtp_stop(&m);
-}
+/* The pending-connect Dop and the deadline-versus-cancel precedence are covered
+ * deterministically (injected resolver + fault-injection socket provider, no
+ * environmental skip) in tests/hull/cap/test_smtp_transport.c:
+ *   - pending_connect_dop_expires_deterministically
+ *   - precedence_dop_beats_cancel_at_one_checkpoint / _live_pump
+ * The earlier TEST-NET-1 blackhole probe (environment-skippable) and the
+ * before-DNS cancel-window race were superseded by those and removed. The
+ * greeting-stage Dop above stays as the live end-to-end variant. */
 
 /* ── 2. AUTH PLAIN rejected without TLS ──────────────────────────── */
 
