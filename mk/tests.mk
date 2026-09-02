@@ -1291,6 +1291,14 @@ e2e-agent-api: $(BUILDDIR)/hull
 e2e-compute: $(BUILDDIR)/hull
 	sh tests/e2e_compute.sh
 
+# Model-2 async SMTP (Lua binding) end to end: async completion + registry-empty,
+# prompt post-resolution cancellation, cap-zero immediacy, exact audit metadata,
+# and a clean shutdown with an op in flight. Set HULL_DEBUG_BIN to a `make debug`
+# hull to also run the shutdown leg under ASan.
+.PHONY: e2e-smtp
+e2e-smtp: $(BUILDDIR)/hull
+	sh tests/e2e_smtp.sh
+
 # Windowed fs.mmap({offset,length}) binding (mapped-spans, item A).
 .PHONY: e2e-spans-mmap
 e2e-spans-mmap: $(BUILDDIR)/hull
