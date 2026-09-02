@@ -4866,8 +4866,16 @@ UTEST(js_extract_liveness, valid_lenient_load_succeeds)
 
 /* ── db.async submit-failure: the shared last_async_cont ownership fix ──────
  * Forces the ACTUAL JS db.async binding down its pool-submit-failure path via a
- * real, saturated poll pool (queue-saturation - no compiled-in production hook,
- * so there is nothing to strip from shipped objects). The binding creates a
+ * real, saturated thread pool (queue-saturation - no compiled-in production hook,
+ * so there is nothing to strip from shipped objects). The pool is created through
+ * the ACTIVE async backend (hl_async_backend() - keel when Keel is composed, as in
+ * this test binary; poll on a Keel-free base) so its concrete type MATCHES what the
+ * db.async binding submits through. Using a fixed poll pool here while the binding
+ * submits via the active (keel) backend is a type confusion: keel_pool_submit reads
+ * a poll pool's bytes as `p->kpool` and locks a garbage mutex -> deadlock. Both
+ * backends' submit fail-fast (return -1 when the bounded queue is full), so a
+ * matched-backend saturated pool yields the deterministic submit failure with no
+ * blocking. The binding creates a
  * Promise + continuation and registers it as js->last_async_cont, then the submit
  * fails; the failure cleanup MUST destroy the continuation AND clear
  * last_async_cont so a later dispatch cannot attach a handler promise to freed
@@ -4880,8 +4888,6 @@ UTEST(js_extract_liveness, valid_lenient_load_succeeds)
  * REVERT PROOF: drop `js->last_async_cont = NULL;` from mod_db.c's submit-failure
  * path and the last_async_cont assertion below flips (it stays the dangling freed
  * pointer), and ASan trips on the later use. */
-extern const HlAsyncBackend hl_async_backend_poll;
-
 static atomic_int g_dbsat_release;
 static atomic_int g_dbsat_running;
 static void dbsat_block(void *u) { (void)u; atomic_fetch_add(&g_dbsat_running, 1);
@@ -4893,20 +4899,24 @@ UTEST(js_db_async, submit_failure_clears_last_async_cont)
     init_js_with_caps();
     ASSERT_TRUE(js_initialized);
 
+    /* The pool MUST be the active backend's concrete type, because the db.async
+     * binding submits through hl_async_backend() (keel here). A poll pool passed to
+     * keel_pool_submit is a type confusion -> garbage p->kpool -> deadlock. */
+    const HlAsyncBackend *be = hl_async_backend();
     HlAsyncBackendCtx  *actx = NULL;
-    ASSERT_EQ(hl_async_backend_poll.init(&actx, NULL), 0);
+    ASSERT_EQ(be->init(&actx, NULL), 0);
     HlAsyncBackendPool *pool = NULL;
-    ASSERT_EQ(hl_async_backend_poll.pool_create(&pool, actx, 1, 1), 0);   /* 1 worker, queue 1 */
+    ASSERT_EQ(be->pool_create(&pool, actx, 1, 1), 0);   /* 1 worker, queue 1 */
     js.base.thread_pool = pool;
     js.base.async_ctx   = actx;
 
     /* Saturate: one job occupies the worker, one fills the queue -> the next
-     * submit (the db.async op) is rejected. */
+     * submit (the db.async op) is rejected fail-fast (-1). */
     atomic_store(&g_dbsat_release, 0);
     atomic_store(&g_dbsat_running, 0);
-    ASSERT_EQ(hl_async_backend_poll.pool_submit(pool, dbsat_block, dbsat_noop, dbsat_noop, NULL), 0);
+    ASSERT_EQ(be->pool_submit(pool, dbsat_block, dbsat_noop, dbsat_noop, NULL), 0);
     while (atomic_load(&g_dbsat_running) < 1) usleep(500);   /* worker busy */
-    ASSERT_EQ(hl_async_backend_poll.pool_submit(pool, dbsat_block, dbsat_noop, dbsat_noop, NULL), 0); /* queue full */
+    ASSERT_EQ(be->pool_submit(pool, dbsat_block, dbsat_noop, dbsat_noop, NULL), 0); /* queue full */
 
     js.last_async_cont = NULL;   /* baseline: nothing registered before the call */
 
@@ -4930,8 +4940,8 @@ UTEST(js_db_async, submit_failure_clears_last_async_cont)
 
     /* Release the saturating jobs and tear down. */
     atomic_store(&g_dbsat_release, 1);
-    hl_async_backend_poll.pool_free(pool);
-    hl_async_backend_poll.free(actx);
+    be->pool_free(pool);
+    be->free(actx);
     js.base.thread_pool = NULL;
     js.base.async_ctx   = NULL;
     cleanup_js_caps();
